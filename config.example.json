@@ -1,0 +1,7 @@
+{
+  "web_port": 8080,
+  "web_token": "change-me-to-a-secure-token",
+  "max_workers": 0,
+  "drain_timeout_hours": 24,
+  "tags": []
+}

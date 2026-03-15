@@ -1,0 +1,28 @@
+# local configuration
+config.json
+
+# runtime database
+forward.db
+forward.db-shm
+forward.db-wal
+
+# build artifacts
+forward
+forward.exe
+forward-linux-amd64
+forward-linux-arm64
+dist/
+
+# logs and coverage
+*.log
+coverage.out
+
+# editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
