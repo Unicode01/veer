@@ -40,6 +40,7 @@
 - 支持规则 / 站点 / 范围映射流量统计
 - 支持标签、排序、搜索、分页
 - 通过 Bearer Token 保护管理 API
+- 仓库内附带 WHMCS 插件，支持规则管理、80/443 共享建站和 HAProxy 规则导入脚本
 
 ## 平台说明
 
@@ -251,6 +252,30 @@ ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 
 这轮已经通过 [.gitignore](./.gitignore) 预设好了。
 
+## WHMCS 插件
+
+仓库内附带一个可单独部署的 WHMCS addon 插件，源码位于：
+
+```text
+plugins/whmcs/forward/
+```
+
+插件目录包含以下内容：
+
+- `forward.php`：WHMCS addon 主入口
+- `templates/`：客户区模板
+- `assets/`：客户区样式资源
+- `lang/`：语言文件
+- `import_haproxy.py`：HAProxy 规则导入脚本
+
+这个目录是仓库内的源码位置，不是 WHMCS 最终运行路径。部署到 WHMCS 时，应把整个目录放到：
+
+```text
+modules/addons/forward/
+```
+
+也就是说，最终目录名仍然必须是 `forward`，因为插件运行时模块名、客户区路由和资源路径都按 `forward` 解析。
+
 ## 项目结构
 
 ```text
@@ -265,6 +290,9 @@ ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 ├─ config.go                配置加载
 ├─ release.sh               交叉编译脚本
 ├─ deploy.sh                Debian 部署脚本
+├─ plugins/
+│  └─ whmcs/
+│     └─ forward/           WHMCS addon 插件源码
 └─ web/                     内置前端资源
 ```
 

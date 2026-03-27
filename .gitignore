@@ -12,6 +12,10 @@ forward.exe
 forward-linux-amd64
 forward-linux-arm64
 dist/
+!plugins/
+!plugins/whmcs/
+!plugins/whmcs/forward/
+!plugins/whmcs/forward/**
 
 # logs and coverage
 *.log
