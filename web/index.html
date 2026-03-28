@@ -199,17 +199,26 @@
 
             <section class="rule-list">
                 <h2 data-i18n="rule.list.title">Forwarding Rules</h2>
-                <div class="table-toolbar">
+                <div class="table-toolbar table-toolbar-rules">
                     <div class="table-toolbar-main">
-                        <input type="search" id="rulesSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="rulesTable" data-i18n-placeholder="search.rules.placeholder" placeholder="Search rules, IPs, ports, tags...">
-                        <p id="rulesFilterMeta" class="table-meta"></p>
+                        <input type="search" id="rulesSearchInput" class="table-search table-search-prominent" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="rulesTable" data-i18n-placeholder="search.rules.placeholder" placeholder="Search rules, IPs, ports, tags...">
+                        <div class="table-meta-row">
+                            <p id="rulesFilterMeta" class="table-meta"></p>
+                            <span id="rulesSelectionMeta" class="selection-meta" hidden></span>
+                        </div>
                     </div>
-                    <button type="button" id="clearRulesFilter" class="mini-btn" hidden data-i18n="filter.clear">Clear Filter</button>
+                    <div class="table-toolbar-actions">
+                        <button type="button" id="batchDeleteRulesBtn" class="mini-btn mini-btn-danger" disabled data-i18n="rule.batch.delete">Batch Delete</button>
+                        <button type="button" id="clearRulesFilter" class="mini-btn" hidden data-i18n="filter.reset">Reset View</button>
+                    </div>
                 </div>
                 <div class="table-scroll">
                     <table id="rulesTable">
                         <thead>
                             <tr>
+                                <th class="table-select-column">
+                                    <input type="checkbox" id="rulesSelectAll" class="table-select-all" aria-label="Select all visible rules">
+                                </th>
                                 <th class="sortable" data-table="rules" data-sort="id">ID</th>
                                 <th class="sortable" data-table="rules" data-sort="remark" data-i18n="form.remark">Remark</th>
                                 <th class="sortable" data-table="rules" data-sort="tag" data-i18n="form.tag">Tag</th>

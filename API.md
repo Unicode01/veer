@@ -174,6 +174,19 @@ curl -H "Authorization: Bearer your-token-here" \
 
 `GET /api/rules`
 
+支持按查询参数过滤，常用参数：
+
+- `id` / `ids`：按规则 ID 过滤，支持逗号分隔
+- `tag` / `tags`：按标签过滤，支持逗号分隔
+- `protocol` / `protocols`：按协议过滤，支持 `tcp`、`udp`、`tcp+udp`
+- `enabled`：按启用状态过滤，支持 `true` / `false`
+- `transparent`：按透明转发开关过滤，支持 `true` / `false`
+- `status` / `statuses`：按运行状态过滤，支持 `running`、`stopped`、`error`
+- `in_interface` / `out_interface`：按入/出接口精确过滤
+- `in_ip` / `out_ip`：按入/出 IP 精确过滤
+- `in_port` / `out_port`：按入/出端口精确过滤
+- `q`：按 `id`、备注、标签、接口、IP、端口、协议、状态做模糊匹配
+
 响应示例：
 
 ```json
@@ -257,6 +270,135 @@ curl -H "Authorization: Bearer your-token-here" \
 ```json
 {
   "status": "deleted"
+}
+```
+
+#### 3.6 校验规则批量操作
+
+`POST /api/rules/validate`
+
+请求体与批量接口一致，用于在真正写入前做字段校验、接口存在性校验和监听冲突检查。
+
+请求体示例：
+
+```json
+{
+  "create": [
+    {
+      "in_interface": "eth0",
+      "in_ip": "203.0.113.10",
+      "in_port": 2222,
+      "out_interface": "vmbr0",
+      "out_ip": "192.168.100.10",
+      "out_port": 22,
+      "protocol": "tcp",
+      "remark": "vm-a ssh",
+      "tag": "vm"
+    }
+  ],
+  "update": [],
+  "delete_ids": [],
+  "set_enabled": []
+}
+```
+
+响应示例：
+
+```json
+{
+  "valid": true,
+  "create": [
+    {
+      "id": 0,
+      "in_interface": "eth0",
+      "in_ip": "203.0.113.10",
+      "in_port": 2222,
+      "out_interface": "vmbr0",
+      "out_ip": "192.168.100.10",
+      "out_port": 22,
+      "protocol": "tcp",
+      "remark": "vm-a ssh",
+      "tag": "vm",
+      "enabled": true,
+      "transparent": false
+    }
+  ]
+}
+```
+
+校验失败时会返回：
+
+- `valid = false`
+- `error`：首条错误摘要，方便脚本直接展示
+- `issues`：逐项错误明细，包含 `scope`、`index`、`field`、`message`
+
+#### 3.7 批量写入规则
+
+`POST /api/rules/batch`
+
+请求体字段：
+
+- `create`：批量创建规则
+- `update`：批量更新规则
+- `delete_ids`：批量删除规则 ID
+- `set_enabled`：批量设置启用状态，元素格式为 `{ "id": 1, "enabled": true }`
+
+批量接口会在一个事务内执行，并只触发一次 worker 重分布。
+
+请求体示例：
+
+```json
+{
+  "create": [
+    {
+      "in_interface": "eth0",
+      "in_ip": "203.0.113.10",
+      "in_port": 2222,
+      "out_interface": "vmbr0",
+      "out_ip": "192.168.100.10",
+      "out_port": 22,
+      "protocol": "tcp",
+      "remark": "vm-a ssh",
+      "tag": "vm"
+    }
+  ],
+  "update": [
+    {
+      "id": 2,
+      "in_interface": "eth0",
+      "in_ip": "203.0.113.10",
+      "in_port": 8080,
+      "out_interface": "vmbr0",
+      "out_ip": "192.168.100.20",
+      "out_port": 80,
+      "protocol": "tcp",
+      "remark": "vm-b web",
+      "tag": "vm"
+    }
+  ],
+  "delete_ids": [3],
+  "set_enabled": [
+    {
+      "id": 4,
+      "enabled": false
+    }
+  ]
+}
+```
+
+成功响应示例：
+
+```json
+{
+  "created": [],
+  "updated": [],
+  "deleted_ids": [3],
+  "set_enabled": [
+    {
+      "id": 4,
+      "enabled": false
+    }
+  ]
 }
 ```
 

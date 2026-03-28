@@ -303,6 +303,24 @@ th.sortable.tag-filtered {
     animation: spin 0.7s linear infinite;
 }
 
+.mini-btn-danger {
+    border-color: var(--danger-border);
+    background: var(--danger-bg);
+    color: var(--danger-text);
+}
+
+.mini-btn-danger:hover,
+.mini-btn-danger:focus {
+    border-color: var(--danger-text);
+    background: var(--danger-bg);
+    color: var(--danger-text);
+}
+
+.mini-btn-danger.is-busy::before {
+    border-color: rgba(220, 38, 38, 0.18);
+    border-top-color: var(--danger-text);
+}
+
 #confirmSubmitBtn.is-danger {
     background: #dc2626;
     border-color: #dc2626;

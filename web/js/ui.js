@@ -21,7 +21,10 @@
     overviewRunningValue: app.$('overviewRunningValue'),
     refreshNowBtn: app.$('refreshNowBtn'),
     rulesFilterMeta: app.$('rulesFilterMeta'),
+    rulesSelectionMeta: app.$('rulesSelectionMeta'),
     rulesSearchInput: app.$('rulesSearchInput'),
+    rulesSelectAll: app.$('rulesSelectAll'),
+    batchDeleteRulesBtn: app.$('batchDeleteRulesBtn'),
     clearRulesFilter: app.$('clearRulesFilter'),
     sitesFilterMeta: app.$('sitesFilterMeta'),
     sitesSearchInput: app.$('sitesSearchInput'),
@@ -69,6 +72,9 @@
     app.state[table].searchQuery = app.state[table].searchQuery || '';
     app.state[table].page = Math.max(1, parseInt(app.state[table].page, 10) || 1);
     app.state[table].pageSize = Math.max(1, parseInt(app.state[table].pageSize, 10) || ((table.indexOf('Stats') >= 0) ? 20 : 10));
+    if (table === 'rules' && !(app.state.rules.selectedIds instanceof Set)) {
+      app.state.rules.selectedIds = new Set(app.state.rules.selectedIds || []);
+    }
   });
 
   app.notify = function notify(type, message, timeout) {
@@ -201,6 +207,41 @@
   app.hasActiveFilters = function hasActiveFilters(state) {
     if (!state) return false;
     return !!((state.filterTag || '').trim() || (state.searchQuery || '').trim());
+  };
+
+  app.getDefaultPageSize = function getDefaultPageSize(table) {
+    const config = app.paginationConfig[table];
+    if (config && Array.isArray(config.pageSizes) && config.pageSizes.length > 0) return config.pageSizes[0];
+    const state = app.state[table];
+    return state && state.pageSize ? state.pageSize : 10;
+  };
+
+  app.hasTableViewChanges = function hasTableViewChanges(table) {
+    const state = app.state[table];
+    if (!state) return false;
+    const hasSelection = state.selectedIds instanceof Set && state.selectedIds.size > 0;
+    return app.hasActiveFilters(state) ||
+      !!state.sortKey ||
+      state.page !== 1 ||
+      state.pageSize !== app.getDefaultPageSize(table) ||
+      hasSelection;
+  };
+
+  app.resetTableView = function resetTableView(table) {
+    const state = app.state[table];
+    if (!state) return;
+
+    if (Object.prototype.hasOwnProperty.call(state, 'filterTag')) state.filterTag = '';
+    state.searchQuery = '';
+    state.sortKey = '';
+    state.sortAsc = true;
+    state.page = 1;
+    state.pageSize = app.getDefaultPageSize(table);
+
+    if (state.selectedIds instanceof Set) state.selectedIds.clear();
+
+    const input = app.el[table + 'SearchInput'];
+    if (input) input.value = '';
   };
 
   app.updateEmptyState = function updateEmptyState(container, options) {
@@ -397,8 +438,8 @@
         : app.t('filter.summary.all', { count: total });
     }
     if (target.clear) {
-      target.clear.hidden = !filtered;
-      target.clear.textContent = app.t('filter.clear');
+      target.clear.hidden = !app.hasTableViewChanges(table);
+      target.clear.textContent = app.t('filter.reset');
     }
   };
 
@@ -556,11 +597,7 @@
   ].forEach((entry) => {
     if (!entry.button) return;
     entry.button.addEventListener('click', () => {
-      app.state[entry.table].filterTag = '';
-      app.state[entry.table].searchQuery = '';
-      app.state[entry.table].page = 1;
-      const input = app.el[entry.table + 'SearchInput'];
-      if (input) input.value = '';
+      app.resetTableView(entry.table);
       entry.render();
     });
   });

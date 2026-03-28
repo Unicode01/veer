@@ -66,7 +66,7 @@
     interfaces: [],
     tags: [],
     state: {
-      rules: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
+      rules: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10, selectedIds: new Set(), batchDeleting: false },
       sites: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
       ranges: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
       workers: { data: [], sortKey: '', sortAsc: true, masterHash: '', page: 1, pageSize: 10 },
@@ -219,7 +219,10 @@
     }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: resp.statusText }));
-      throw new Error(err.error || resp.statusText);
+      const error = new Error(err.error || resp.statusText);
+      error.payload = err;
+      error.status = resp.status;
+      throw error;
     }
     return resp.json();
   };

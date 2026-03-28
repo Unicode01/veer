@@ -115,6 +115,10 @@ select {
     font: inherit;
 }
 
+[hidden] {
+    display: none !important;
+}
+
 :focus-visible {
     outline: 3px solid var(--focus-ring);
     outline-offset: 2px;

@@ -104,6 +104,21 @@
   bindSearchInput(app.el.rangesSearchInput, 'ranges', () => app.renderRangesTable());
   bindSearchInput(app.el.workersSearchInput, 'workers', () => app.renderWorkersTable());
 
+  if (app.el.batchDeleteRulesBtn) {
+    app.el.batchDeleteRulesBtn.addEventListener('click', () => app.deleteSelectedRules());
+  }
+
+  if (app.el.rulesSelectAll) {
+    app.el.rulesSelectAll.addEventListener('change', () => {
+      const pageItems = app.paginateList(app.state.rules, app.getFilteredRules()).items;
+      pageItems.forEach((rule) => {
+        if (app.isRowPending('rule', rule.id)) return;
+        app.setRuleSelected(rule.id, app.el.rulesSelectAll.checked);
+      });
+      app.renderRulesTable();
+    });
+  }
+
   if (app.el.refreshNowBtn) {
     app.el.refreshNowBtn.addEventListener('click', () => {
       app.refreshDashboard({
@@ -194,6 +209,13 @@
       includeStats: app.state.activeTab === 'rule-stats'
     });
     app.startPolling();
+  });
+
+  document.addEventListener('change', (e) => {
+    const ruleSelect = e.target.closest('.rule-select-checkbox[data-id]');
+    if (!ruleSelect) return;
+    app.setRuleSelected(parseInt(ruleSelect.dataset.id, 10), ruleSelect.checked);
+    app.renderRulesTable();
   });
 
   document.addEventListener('click', (e) => {
@@ -319,9 +341,6 @@
       return;
     }
 
-    const warning = app.updateRuleTransparentWarning();
-    if (!(await app.confirmTransparentWarning(warning))) return;
-
     const editing = parseInt(app.el.editRuleId.value || '0', 10);
     await app.withFormBusy(
       'rule',
@@ -330,18 +349,56 @@
       app.t('common.saving'),
       async () => {
         try {
+          const payload = Object.assign({}, rule);
+          if (editing > 0) payload.id = editing;
+
+          const validatedRule = await app.validateRuleDraft(payload, editing > 0);
+          if (!validatedRule) return;
+
           if (editing > 0) {
-            rule.id = editing;
-            await app.apiCall('PUT', '/api/rules', rule);
+            const warning = app.updateRuleTransparentWarning();
+            if (!(await app.confirmTransparentWarning(warning))) return;
+
+            await app.apiCall('PUT', '/api/rules', {
+              id: editing,
+              in_interface: validatedRule.in_interface,
+              in_ip: validatedRule.in_ip,
+              in_port: validatedRule.in_port,
+              out_interface: validatedRule.out_interface,
+              out_ip: validatedRule.out_ip,
+              out_port: validatedRule.out_port,
+              protocol: validatedRule.protocol,
+              remark: validatedRule.remark || '',
+              tag: validatedRule.tag || '',
+              transparent: !!validatedRule.transparent
+            });
             app.notify('success', app.t('toast.saved', { item: app.t('noun.rule') }));
           } else {
-            await app.apiCall('POST', '/api/rules', rule);
+            const warning = app.updateRuleTransparentWarning();
+            if (!(await app.confirmTransparentWarning(warning))) return;
+
+            await app.apiCall('POST', '/api/rules', {
+              in_interface: validatedRule.in_interface,
+              in_ip: validatedRule.in_ip,
+              in_port: validatedRule.in_port,
+              out_interface: validatedRule.out_interface,
+              out_ip: validatedRule.out_ip,
+              out_port: validatedRule.out_port,
+              protocol: validatedRule.protocol,
+              remark: validatedRule.remark || '',
+              tag: validatedRule.tag || '',
+              transparent: !!validatedRule.transparent
+            });
             app.notify('success', app.t('toast.created', { item: app.t('noun.rule') }));
           }
           app.exitRuleEditMode();
-          app.loadRules();
+          await app.loadRules();
         } catch (err) {
           if (err.message !== 'unauthorized') {
+            if (err.payload && Array.isArray(err.payload.issues) && err.payload.issues.length > 0) {
+              app.applyRuleValidationIssues(err.payload.issues);
+              return;
+            }
             app.notify('error', app.t('errors.actionFailed', {
               action: app.t(editing > 0 ? 'action.update' : 'action.add'),
               message: err.message

@@ -11,6 +11,12 @@ import (
 
 const ruleColumns = `id, in_interface, in_ip, in_port, out_interface, out_ip, out_port, protocol, remark, tag, enabled, transparent`
 
+type sqlRuleStore interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
 func scanRule(sc interface{ Scan(...interface{}) error }) (Rule, error) {
 	var r Rule
 	var enabled, transparent int
@@ -138,7 +144,7 @@ func getTableColumns(db *sql.DB, table string) (map[string]bool, error) {
 	return cols, rows.Err()
 }
 
-func dbAddRule(db *sql.DB, r *Rule) (int64, error) {
+func dbAddRule(db sqlRuleStore, r *Rule) (int64, error) {
 	res, err := db.Exec(
 		`INSERT INTO rules (in_interface, in_ip, in_port, out_interface, out_ip, out_port, protocol, remark, tag, enabled, transparent)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -150,7 +156,7 @@ func dbAddRule(db *sql.DB, r *Rule) (int64, error) {
 	return res.LastInsertId()
 }
 
-func dbUpdateRule(db *sql.DB, r *Rule) error {
+func dbUpdateRule(db sqlRuleStore, r *Rule) error {
 	_, err := db.Exec(
 		`UPDATE rules SET in_interface=?, in_ip=?, in_port=?, out_interface=?, out_ip=?, out_port=?, protocol=?, remark=?, tag=?, enabled=?, transparent=? WHERE id=?`,
 		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent), r.ID,
@@ -158,12 +164,12 @@ func dbUpdateRule(db *sql.DB, r *Rule) error {
 	return err
 }
 
-func dbDeleteRule(db *sql.DB, id int64) error {
+func dbDeleteRule(db sqlRuleStore, id int64) error {
 	_, err := db.Exec(`DELETE FROM rules WHERE id = ?`, id)
 	return err
 }
 
-func dbGetRules(db *sql.DB) ([]Rule, error) {
+func dbGetRules(db sqlRuleStore) ([]Rule, error) {
 	rows, err := db.Query(`SELECT ` + ruleColumns + ` FROM rules`)
 	if err != nil {
 		return nil, err
@@ -181,7 +187,7 @@ func dbGetRules(db *sql.DB) ([]Rule, error) {
 	return rules, rows.Err()
 }
 
-func dbGetRule(db *sql.DB, id int64) (*Rule, error) {
+func dbGetRule(db sqlRuleStore, id int64) (*Rule, error) {
 	r, err := scanRule(db.QueryRow(`SELECT `+ruleColumns+` FROM rules WHERE id = ?`, id))
 	if err != nil {
 		return nil, err
@@ -316,7 +322,7 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-func dbSetRuleEnabled(db *sql.DB, id int64, enabled bool) error {
+func dbSetRuleEnabled(db sqlRuleStore, id int64, enabled bool) error {
 	_, err := db.Exec(`UPDATE rules SET enabled=? WHERE id=?`, boolToInt(enabled), id)
 	return err
 }

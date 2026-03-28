@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -16,6 +17,74 @@ import (
 
 //go:embed web
 var webFS embed.FS
+
+type ruleSetEnabledRequest struct {
+	ID      int64 `json:"id"`
+	Enabled bool  `json:"enabled"`
+}
+
+type ruleBatchRequest struct {
+	Create     []Rule                  `json:"create"`
+	Update     []Rule                  `json:"update"`
+	DeleteIDs  []int64                 `json:"delete_ids"`
+	SetEnabled []ruleSetEnabledRequest `json:"set_enabled"`
+}
+
+type ruleBatchResponse struct {
+	Created    []Rule                  `json:"created,omitempty"`
+	Updated    []Rule                  `json:"updated,omitempty"`
+	DeletedIDs []int64                 `json:"deleted_ids,omitempty"`
+	SetEnabled []ruleSetEnabledRequest `json:"set_enabled,omitempty"`
+}
+
+type ruleValidationIssue struct {
+	Scope   string `json:"scope"`
+	Index   int    `json:"index,omitempty"`
+	ID      int64  `json:"id,omitempty"`
+	Field   string `json:"field,omitempty"`
+	Message string `json:"message"`
+}
+
+type ruleValidateResponse struct {
+	Valid      bool                    `json:"valid"`
+	Error      string                  `json:"error,omitempty"`
+	Create     []Rule                  `json:"create,omitempty"`
+	Update     []Rule                  `json:"update,omitempty"`
+	DeleteIDs  []int64                 `json:"delete_ids,omitempty"`
+	SetEnabled []ruleSetEnabledRequest `json:"set_enabled,omitempty"`
+	Issues     []ruleValidationIssue   `json:"issues,omitempty"`
+}
+
+type ruleFilter struct {
+	IDs          map[int64]struct{}
+	Tags         map[string]struct{}
+	Protocols    map[string]struct{}
+	Statuses     map[string]struct{}
+	Enabled      *bool
+	Transparent  *bool
+	InInterface  string
+	OutInterface string
+	InIP         string
+	OutIP        string
+	InPort       int
+	OutPort      int
+	Query        string
+}
+
+type preparedRuleBatch struct {
+	Create     []Rule
+	Update     []Rule
+	DeleteIDs  []int64
+	SetEnabled []ruleSetEnabledRequest
+}
+
+type projectedRuleState struct {
+	Rule         Rule
+	ContentScope string
+	ContentIndex int
+	EnableScope  string
+	EnableIndex  int
+}
 
 func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 	mux := http.NewServeMux()
@@ -34,6 +103,20 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 			tags = []string{}
 		}
 		writeJSON(w, http.StatusOK, tags)
+	}))
+	mux.HandleFunc("/api/rules/validate", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleValidateRules(w, r, db)
+	}))
+	mux.HandleFunc("/api/rules/batch", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleBatchRules(w, r, db, pm)
 	}))
 	mux.HandleFunc("/api/rules", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -171,41 +254,702 @@ func handleInterfaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	filters, err := parseRuleFilter(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
 	rules, err := dbGetRules(db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
+	runningRules, failedRules := collectRuleRuntimeStatus(pm)
 	var statuses []RuleStatus
-	pm.mu.Lock()
-	runningRules := make(map[int64]bool)
-	failedRules := make(map[int64]bool)
-	for _, wi := range pm.ruleWorkers {
-		if wi.running {
-			for _, r := range wi.rules {
-				if wi.failedRules != nil && wi.failedRules[r.ID] {
-					failedRules[r.ID] = true
-					continue
-				}
-				runningRules[r.ID] = true
-			}
-		}
-	}
-	pm.mu.Unlock()
 	for _, rule := range rules {
-		status := "stopped"
-		if failedRules[rule.ID] {
-			status = "error"
-		} else if runningRules[rule.ID] {
-			status = "running"
+		item := RuleStatus{Rule: rule, Status: ruleRuntimeStatus(rule, runningRules, failedRules)}
+		if matchesRuleFilter(item, filters) {
+			statuses = append(statuses, item)
 		}
-		statuses = append(statuses, RuleStatus{Rule: rule, Status: status})
 	}
 	if statuses == nil {
 		statuses = []RuleStatus{}
 	}
 	writeJSON(w, http.StatusOK, statuses)
+}
+
+func collectRuleRuntimeStatus(pm *ProcessManager) (map[int64]bool, map[int64]bool) {
+	runningRules := make(map[int64]bool)
+	failedRules := make(map[int64]bool)
+	pm.mu.Lock()
+	for _, wi := range pm.ruleWorkers {
+		if !wi.running {
+			continue
+		}
+		for _, r := range wi.rules {
+			if wi.failedRules != nil && wi.failedRules[r.ID] {
+				failedRules[r.ID] = true
+				continue
+			}
+			runningRules[r.ID] = true
+		}
+	}
+	pm.mu.Unlock()
+	return runningRules, failedRules
+}
+
+func ruleRuntimeStatus(rule Rule, runningRules, failedRules map[int64]bool) string {
+	if failedRules[rule.ID] {
+		return "error"
+	}
+	if runningRules[rule.ID] {
+		return "running"
+	}
+	return "stopped"
+}
+
+func parseRuleFilter(r *http.Request) (ruleFilter, error) {
+	query := r.URL.Query()
+	filters := ruleFilter{
+		InInterface:  strings.TrimSpace(query.Get("in_interface")),
+		OutInterface: strings.TrimSpace(query.Get("out_interface")),
+		InIP:         strings.TrimSpace(query.Get("in_ip")),
+		OutIP:        strings.TrimSpace(query.Get("out_ip")),
+		Query:        strings.ToLower(strings.TrimSpace(query.Get("q"))),
+	}
+
+	var err error
+	filters.IDs, err = parseInt64SetQuery(query.Get("id"), query.Get("ids"))
+	if err != nil {
+		return filters, fmt.Errorf("invalid id filter: %w", err)
+	}
+	filters.Tags = mergeStringSets(parseCSVSet(query.Get("tag"), false), parseCSVSet(query.Get("tags"), false))
+	filters.Protocols = mergeStringSets(parseCSVSet(query.Get("protocol"), true), parseCSVSet(query.Get("protocols"), true))
+	if err := validateCSVValues(filters.Protocols, map[string]struct{}{"tcp": {}, "udp": {}, "tcp+udp": {}}, "protocol"); err != nil {
+		return filters, err
+	}
+	filters.Statuses = mergeStringSets(parseCSVSet(query.Get("status"), true), parseCSVSet(query.Get("statuses"), true))
+	if err := validateCSVValues(filters.Statuses, map[string]struct{}{"running": {}, "stopped": {}, "error": {}}, "status"); err != nil {
+		return filters, err
+	}
+	filters.Enabled, err = parseOptionalBoolQuery(query.Get("enabled"))
+	if err != nil {
+		return filters, fmt.Errorf("invalid enabled filter: %w", err)
+	}
+	filters.Transparent, err = parseOptionalBoolQuery(query.Get("transparent"))
+	if err != nil {
+		return filters, fmt.Errorf("invalid transparent filter: %w", err)
+	}
+	if v := strings.TrimSpace(query.Get("in_port")); v != "" {
+		filters.InPort, err = parsePortValue(v)
+		if err != nil {
+			return filters, fmt.Errorf("invalid in_port filter: %w", err)
+		}
+	}
+	if v := strings.TrimSpace(query.Get("out_port")); v != "" {
+		filters.OutPort, err = parsePortValue(v)
+		if err != nil {
+			return filters, fmt.Errorf("invalid out_port filter: %w", err)
+		}
+	}
+	return filters, nil
+}
+
+func parseInt64SetQuery(values ...string) (map[int64]struct{}, error) {
+	result := make(map[int64]struct{})
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			id, err := strconv.ParseInt(part, 10, 64)
+			if err != nil || id <= 0 {
+				return nil, fmt.Errorf("invalid value %q", part)
+			}
+			result[id] = struct{}{}
+		}
+	}
+	if len(result) == 0 {
+		return nil, nil
+	}
+	return result, nil
+}
+
+func parseCSVSet(value string, lower bool) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if lower {
+			part = strings.ToLower(part)
+		}
+		result[part] = struct{}{}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func mergeStringSets(a, b map[string]struct{}) map[string]struct{} {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	for item := range b {
+		a[item] = struct{}{}
+	}
+	return a
+}
+
+func validateCSVValues(values map[string]struct{}, allowed map[string]struct{}, name string) error {
+	for value := range values {
+		if _, ok := allowed[value]; !ok {
+			return fmt.Errorf("invalid %s value %q", name, value)
+		}
+	}
+	return nil
+}
+
+func parseOptionalBoolQuery(value string) (*bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return nil, nil
+	case "1", "true", "yes", "on":
+		v := true
+		return &v, nil
+	case "0", "false", "no", "off":
+		v := false
+		return &v, nil
+	default:
+		return nil, fmt.Errorf("invalid value %q", value)
+	}
+}
+
+func parsePortValue(value string) (int, error) {
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("must be between 1 and 65535")
+	}
+	return port, nil
+}
+
+func matchesRuleFilter(rule RuleStatus, filters ruleFilter) bool {
+	if len(filters.IDs) > 0 {
+		if _, ok := filters.IDs[rule.ID]; !ok {
+			return false
+		}
+	}
+	if len(filters.Tags) > 0 {
+		if _, ok := filters.Tags[rule.Tag]; !ok {
+			return false
+		}
+	}
+	if len(filters.Protocols) > 0 {
+		if _, ok := filters.Protocols[strings.ToLower(rule.Protocol)]; !ok {
+			return false
+		}
+	}
+	if len(filters.Statuses) > 0 {
+		if _, ok := filters.Statuses[strings.ToLower(rule.Status)]; !ok {
+			return false
+		}
+	}
+	if filters.Enabled != nil && rule.Enabled != *filters.Enabled {
+		return false
+	}
+	if filters.Transparent != nil && rule.Transparent != *filters.Transparent {
+		return false
+	}
+	if filters.InInterface != "" && rule.InInterface != filters.InInterface {
+		return false
+	}
+	if filters.OutInterface != "" && rule.OutInterface != filters.OutInterface {
+		return false
+	}
+	if filters.InIP != "" && rule.InIP != filters.InIP {
+		return false
+	}
+	if filters.OutIP != "" && rule.OutIP != filters.OutIP {
+		return false
+	}
+	if filters.InPort > 0 && rule.InPort != filters.InPort {
+		return false
+	}
+	if filters.OutPort > 0 && rule.OutPort != filters.OutPort {
+		return false
+	}
+	if filters.Query != "" && !matchesRuleSearchQuery(rule, filters.Query) {
+		return false
+	}
+	return true
+}
+
+func matchesRuleSearchQuery(rule RuleStatus, query string) bool {
+	values := []string{
+		strconv.FormatInt(rule.ID, 10),
+		rule.Remark,
+		rule.Tag,
+		rule.InInterface,
+		rule.InIP,
+		strconv.Itoa(rule.InPort),
+		rule.OutInterface,
+		rule.OutIP,
+		strconv.Itoa(rule.OutPort),
+		rule.Protocol,
+		rule.Status,
+	}
+	for _, value := range values {
+		if strings.Contains(strings.ToLower(value), query) {
+			return true
+		}
+	}
+	return false
+}
+
+func handleValidateRules(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	var req ruleBatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	prepared, issues, err := prepareRuleBatch(db, req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	resp := ruleValidateResponse{
+		Valid:      len(issues) == 0,
+		Error:      summarizeRuleIssues(issues),
+		Create:     prepared.Create,
+		Update:     prepared.Update,
+		DeleteIDs:  prepared.DeleteIDs,
+		SetEnabled: prepared.SetEnabled,
+		Issues:     issues,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func handleBatchRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	var req ruleBatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	prepared, issues, err := prepareRuleBatch(db, req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(issues) > 0 {
+		writeJSON(w, http.StatusBadRequest, ruleValidateResponse{
+			Valid:      false,
+			Error:      summarizeRuleIssues(issues),
+			Create:     prepared.Create,
+			Update:     prepared.Update,
+			DeleteIDs:  prepared.DeleteIDs,
+			SetEnabled: prepared.SetEnabled,
+			Issues:     issues,
+		})
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var resp ruleBatchResponse
+	for _, rule := range prepared.Create {
+		item := rule
+		id, err := dbAddRule(tx, &item)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		item.ID = id
+		resp.Created = append(resp.Created, item)
+	}
+	for _, rule := range prepared.Update {
+		item := rule
+		if err := dbUpdateRule(tx, &item); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		resp.Updated = append(resp.Updated, item)
+	}
+	for _, id := range prepared.DeleteIDs {
+		if err := dbDeleteRule(tx, id); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		resp.DeletedIDs = append(resp.DeletedIDs, id)
+	}
+	for _, change := range prepared.SetEnabled {
+		if err := dbSetRuleEnabled(tx, change.ID, change.Enabled); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		resp.SetEnabled = append(resp.SetEnabled, change)
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	pm.redistributeWorkers()
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func prepareRuleBatch(db sqlRuleStore, req ruleBatchRequest) (preparedRuleBatch, []ruleValidationIssue, error) {
+	var prepared preparedRuleBatch
+	if len(req.Create) == 0 && len(req.Update) == 0 && len(req.DeleteIDs) == 0 && len(req.SetEnabled) == 0 {
+		return prepared, []ruleValidationIssue{{
+			Scope:   "request",
+			Message: "at least one batch operation is required",
+		}}, nil
+	}
+
+	knownIfaces, err := loadInterfaceSet()
+	if err != nil {
+		return prepared, nil, err
+	}
+	existingRules, err := dbGetRules(db)
+	if err != nil {
+		return prepared, nil, err
+	}
+
+	existingByID := make(map[int64]Rule, len(existingRules))
+	projected := make(map[int64]projectedRuleState, len(existingRules))
+	for _, rule := range existingRules {
+		existingByID[rule.ID] = rule
+		projected[rule.ID] = projectedRuleState{
+			Rule:         rule,
+			ContentScope: "existing",
+			ContentIndex: -1,
+			EnableScope:  "existing",
+			EnableIndex:  -1,
+		}
+	}
+
+	var issues []ruleValidationIssue
+	deleteSet := make(map[int64]struct{})
+	for _, id := range req.DeleteIDs {
+		if id <= 0 {
+			issues = appendRuleIssue(issues, "delete_ids", 0, id, "id", "must be greater than 0")
+			continue
+		}
+		if _, seen := deleteSet[id]; seen {
+			continue
+		}
+		deleteSet[id] = struct{}{}
+		if _, ok := projected[id]; ok {
+			prepared.DeleteIDs = append(prepared.DeleteIDs, id)
+			delete(projected, id)
+		}
+	}
+
+	updateSeen := make(map[int64]struct{})
+	for i, raw := range req.Update {
+		index := i + 1
+		rule, ruleIssues := normalizeAndValidateRule(raw, "update", index, true, knownIfaces)
+		issues = append(issues, ruleIssues...)
+		if len(ruleIssues) > 0 {
+			continue
+		}
+		if _, seen := updateSeen[rule.ID]; seen {
+			issues = appendRuleIssue(issues, "update", index, rule.ID, "id", "duplicate rule id in update list")
+			continue
+		}
+		updateSeen[rule.ID] = struct{}{}
+		if _, deleting := deleteSet[rule.ID]; deleting {
+			issues = appendRuleIssue(issues, "update", index, rule.ID, "id", "cannot update a rule scheduled for deletion")
+			continue
+		}
+		existing, ok := existingByID[rule.ID]
+		if !ok {
+			issues = appendRuleIssue(issues, "update", index, rule.ID, "id", "rule not found")
+			continue
+		}
+		rule.Enabled = existing.Enabled
+		prepared.Update = append(prepared.Update, rule)
+		projected[rule.ID] = projectedRuleState{
+			Rule:         rule,
+			ContentScope: "update",
+			ContentIndex: index,
+			EnableScope:  "update",
+			EnableIndex:  index,
+		}
+	}
+
+	setEnabledSeen := make(map[int64]struct{})
+	for i, change := range req.SetEnabled {
+		index := i + 1
+		if change.ID <= 0 {
+			issues = appendRuleIssue(issues, "set_enabled", index, change.ID, "id", "must be greater than 0")
+			continue
+		}
+		if _, seen := setEnabledSeen[change.ID]; seen {
+			issues = appendRuleIssue(issues, "set_enabled", index, change.ID, "id", "duplicate rule id in set_enabled list")
+			continue
+		}
+		setEnabledSeen[change.ID] = struct{}{}
+		if _, deleting := deleteSet[change.ID]; deleting {
+			issues = appendRuleIssue(issues, "set_enabled", index, change.ID, "id", "cannot change enabled state for a rule scheduled for deletion")
+			continue
+		}
+		state, ok := projected[change.ID]
+		if !ok {
+			issues = appendRuleIssue(issues, "set_enabled", index, change.ID, "id", "rule not found")
+			continue
+		}
+		state.Rule.Enabled = change.Enabled
+		state.EnableScope = "set_enabled"
+		state.EnableIndex = index
+		projected[change.ID] = state
+		prepared.SetEnabled = append(prepared.SetEnabled, change)
+	}
+
+	for i, raw := range req.Create {
+		index := i + 1
+		rule, ruleIssues := normalizeAndValidateRule(raw, "create", index, false, knownIfaces)
+		issues = append(issues, ruleIssues...)
+		if len(ruleIssues) > 0 {
+			continue
+		}
+		rule.ID = 0
+		rule.Enabled = true
+		prepared.Create = append(prepared.Create, rule)
+	}
+
+	var conflictStates []projectedRuleState
+	for _, state := range projected {
+		if state.Rule.Enabled {
+			conflictStates = append(conflictStates, state)
+		}
+	}
+	for i, rule := range prepared.Create {
+		if !rule.Enabled {
+			continue
+		}
+		conflictStates = append(conflictStates, projectedRuleState{
+			Rule:         rule,
+			ContentScope: "create",
+			ContentIndex: i + 1,
+			EnableScope:  "create",
+			EnableIndex:  i + 1,
+		})
+	}
+	issues = append(issues, detectRuleConflicts(conflictStates)...)
+
+	sort.Slice(prepared.DeleteIDs, func(i, j int) bool { return prepared.DeleteIDs[i] < prepared.DeleteIDs[j] })
+	return prepared, issues, nil
+}
+
+func loadInterfaceSet() (map[string]struct{}, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]struct{}, len(ifaces))
+	for _, iface := range ifaces {
+		result[iface.Name] = struct{}{}
+	}
+	return result, nil
+}
+
+func normalizeAndValidateRule(rule Rule, scope string, index int, requireID bool, knownIfaces map[string]struct{}) (Rule, []ruleValidationIssue) {
+	rule.InInterface = strings.TrimSpace(rule.InInterface)
+	rule.InIP = strings.TrimSpace(rule.InIP)
+	rule.OutInterface = strings.TrimSpace(rule.OutInterface)
+	rule.OutIP = strings.TrimSpace(rule.OutIP)
+	rule.Protocol = strings.ToLower(strings.TrimSpace(rule.Protocol))
+	rule.Remark = strings.TrimSpace(rule.Remark)
+	rule.Tag = strings.TrimSpace(rule.Tag)
+	if rule.Protocol == "" {
+		rule.Protocol = "tcp"
+	}
+
+	var issues []ruleValidationIssue
+	if requireID {
+		if rule.ID <= 0 {
+			issues = appendRuleIssue(issues, scope, index, rule.ID, "id", "is required")
+		}
+	} else if rule.ID != 0 {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "id", "must be omitted when creating a rule")
+	}
+
+	if rule.InIP == "" {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "in_ip", "is required")
+	} else if ip := net.ParseIP(rule.InIP); ip == nil || ip.To4() == nil {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "in_ip", "must be a valid IPv4 address")
+	}
+	if rule.OutIP == "" {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_ip", "is required")
+	} else if ip := net.ParseIP(rule.OutIP); ip == nil || ip.To4() == nil {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_ip", "must be a valid IPv4 address")
+	}
+	if rule.InPort < 1 || rule.InPort > 65535 {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "in_port", "must be between 1 and 65535")
+	}
+	if rule.OutPort < 1 || rule.OutPort > 65535 {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_port", "must be between 1 and 65535")
+	}
+	if rule.Protocol != "tcp" && rule.Protocol != "udp" && rule.Protocol != "tcp+udp" {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "protocol", "must be tcp, udp, or tcp+udp")
+	}
+	if rule.InInterface != "" {
+		if _, ok := knownIfaces[rule.InInterface]; !ok {
+			issues = appendRuleIssue(issues, scope, index, rule.ID, "in_interface", "interface does not exist on this host")
+		}
+	}
+	if rule.OutInterface != "" {
+		if _, ok := knownIfaces[rule.OutInterface]; !ok {
+			issues = appendRuleIssue(issues, scope, index, rule.ID, "out_interface", "interface does not exist on this host")
+		}
+	}
+	return rule, issues
+}
+
+func appendRuleIssue(issues []ruleValidationIssue, scope string, index int, id int64, field, message string) []ruleValidationIssue {
+	return append(issues, ruleValidationIssue{
+		Scope:   scope,
+		Index:   index,
+		ID:      id,
+		Field:   field,
+		Message: message,
+	})
+}
+
+func detectRuleConflicts(states []projectedRuleState) []ruleValidationIssue {
+	byPort := make(map[int][]projectedRuleState)
+	for _, state := range states {
+		byPort[state.Rule.InPort] = append(byPort[state.Rule.InPort], state)
+	}
+
+	var issues []ruleValidationIssue
+	for _, group := range byPort {
+		for i := 0; i < len(group); i++ {
+			for j := i + 1; j < len(group); j++ {
+				if !rulesConflict(group[i].Rule, group[j].Rule) {
+					continue
+				}
+				issues = appendRuleConflictIssue(issues, group[i], group[j])
+				issues = appendRuleConflictIssue(issues, group[j], group[i])
+			}
+		}
+	}
+	return issues
+}
+
+func rulesConflict(a, b Rule) bool {
+	if !ruleProtocolsOverlap(a.Protocol, b.Protocol) {
+		return false
+	}
+	if !ruleInterfacesOverlap(a.InInterface, b.InInterface) {
+		return false
+	}
+	if !ruleIPsOverlap(a.InIP, b.InIP) {
+		return false
+	}
+	return a.InPort == b.InPort
+}
+
+func ruleProtocolsOverlap(a, b string) bool {
+	return ruleProtocolMask(a)&ruleProtocolMask(b) != 0
+}
+
+func ruleProtocolMask(protocol string) int {
+	switch protocol {
+	case "tcp":
+		return 1
+	case "udp":
+		return 2
+	case "tcp+udp":
+		return 3
+	default:
+		return 0
+	}
+}
+
+func ruleInterfacesOverlap(a, b string) bool {
+	return a == "" || b == "" || a == b
+}
+
+func ruleIPsOverlap(a, b string) bool {
+	return a == "0.0.0.0" || b == "0.0.0.0" || a == b
+}
+
+func appendRuleConflictIssue(issues []ruleValidationIssue, current, other projectedRuleState) []ruleValidationIssue {
+	scope, index, id := ruleConflictIssueTarget(current)
+	if scope == "" {
+		return issues
+	}
+	return appendRuleIssue(issues, scope, index, id, "in_port", fmt.Sprintf("listener conflicts with %s", describeRuleConflict(other)))
+}
+
+func ruleConflictIssueTarget(state projectedRuleState) (string, int, int64) {
+	switch state.ContentScope {
+	case "create", "update":
+		return state.ContentScope, state.ContentIndex, state.Rule.ID
+	case "existing":
+		if state.EnableScope == "set_enabled" {
+			return "set_enabled", state.EnableIndex, state.Rule.ID
+		}
+	}
+	return "", 0, 0
+}
+
+func describeRuleConflict(state projectedRuleState) string {
+	iface := state.Rule.InInterface
+	if iface == "" {
+		iface = "*"
+	}
+	switch state.ContentScope {
+	case "create":
+		return fmt.Sprintf("create[%d] %s %s:%d [%s]", state.ContentIndex, iface, state.Rule.InIP, state.Rule.InPort, strings.ToUpper(state.Rule.Protocol))
+	default:
+		return fmt.Sprintf("rule #%d %s %s:%d [%s]", state.Rule.ID, iface, state.Rule.InIP, state.Rule.InPort, strings.ToUpper(state.Rule.Protocol))
+	}
+}
+
+func summarizeRuleIssues(issues []ruleValidationIssue) string {
+	if len(issues) == 0 {
+		return ""
+	}
+	issue := issues[0]
+	prefix := issue.Scope
+	if issue.Index > 0 {
+		prefix = fmt.Sprintf("%s[%d]", issue.Scope, issue.Index)
+	} else if issue.ID > 0 {
+		prefix = fmt.Sprintf("%s#%d", issue.Scope, issue.ID)
+	}
+	if issue.Field != "" {
+		return fmt.Sprintf("%s %s: %s", prefix, issue.Field, issue.Message)
+	}
+	return fmt.Sprintf("%s: %s", prefix, issue.Message)
+}
+
+func hasRuleNotFoundIssue(issues []ruleValidationIssue) bool {
+	for _, issue := range issues {
+		if issue.Field == "id" && issue.Message == "rule not found" {
+			return true
+		}
+	}
+	return false
 }
 
 func handleAddRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
@@ -215,19 +959,22 @@ func handleAddRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Proce
 		return
 	}
 
-	if rule.InIP == "" || rule.InPort == 0 || rule.OutIP == "" || rule.OutPort == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "in_ip, in_port, out_ip, out_port are required"})
+	prepared, issues, err := prepareRuleBatch(db, ruleBatchRequest{Create: []Rule{rule}})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if rule.Protocol == "" {
-		rule.Protocol = "tcp"
-	}
-	if rule.Protocol != "tcp" && rule.Protocol != "udp" && rule.Protocol != "tcp+udp" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "protocol must be tcp, udp, or tcp+udp"})
+	if len(issues) > 0 || len(prepared.Create) == 0 {
+		writeJSON(w, http.StatusBadRequest, ruleValidateResponse{
+			Valid:  false,
+			Error:  summarizeRuleIssues(issues),
+			Create: prepared.Create,
+			Issues: issues,
+		})
 		return
 	}
 
-	rule.Enabled = true
+	rule = prepared.Create[0]
 	id, err := dbAddRule(db, &rule)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -247,28 +994,26 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		return
 	}
 
-	if rule.ID == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id is required"})
-		return
-	}
-	if rule.InIP == "" || rule.InPort == 0 || rule.OutIP == "" || rule.OutPort == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "in_ip, in_port, out_ip, out_port are required"})
-		return
-	}
-	if rule.Protocol == "" {
-		rule.Protocol = "tcp"
-	}
-	if rule.Protocol != "tcp" && rule.Protocol != "udp" && rule.Protocol != "tcp+udp" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "protocol must be tcp, udp, or tcp+udp"})
-		return
-	}
-
-	existing, err := dbGetRule(db, rule.ID)
+	prepared, issues, err := prepareRuleBatch(db, ruleBatchRequest{Update: []Rule{rule}})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	rule.Enabled = existing.Enabled
+	if len(issues) > 0 || len(prepared.Update) == 0 {
+		status := http.StatusBadRequest
+		if hasRuleNotFoundIssue(issues) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, ruleValidateResponse{
+			Valid:  false,
+			Error:  summarizeRuleIssues(issues),
+			Update: prepared.Update,
+			Issues: issues,
+		})
+		return
+	}
+
+	rule = prepared.Update[0]
 
 	if err := dbUpdateRule(db, &rule); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -293,6 +1038,10 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	}
 	rule, err := dbGetRule(db, id)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
