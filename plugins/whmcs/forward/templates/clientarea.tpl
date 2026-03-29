@@ -42,7 +42,7 @@
                             <span class="forward-card__eyebrow">目标服务</span>
                             <h3 class="forward-card__title">选择服务 IP</h3>
                         </div>
-                        <span class="forward-chip">入口 {$server_ip|escape:'html'}</span>
+                        <span class="forward-chip">入口 {$server_ip_summary|escape:'html'}</span>
                     </div>
 
                     <div class="form-group">
@@ -53,15 +53,15 @@
                                 <optgroup label="{$productName|escape:'html'}">
                                     {foreach $serviceGroup as $service}
                                         {foreach $service.ips as $ip}
-                                            <option value="{$ip|escape:'html'}" data-product="{$service.product_name|escape:'html'}">
-                                                {$service.product_name|escape:'html'} - {$ip|escape:'html'}
+                                            <option value="{$ip|escape:'html'}" data-product="{$service.product_name|escape:'html'}" data-service-id="{$service.service_id|escape:'html'}" data-server-id="{$service.server_id|escape:'html'}" data-server-label="{$service.server_label|escape:'html'}" data-listen-ips="{$service.listen_ips_csv|escape:'html'}">
+                                                {$service.product_name|escape:'html'} - {$ip|escape:'html'} ({$service.server_label|escape:'html'})
                                             </option>
                                         {/foreach}
                                     {/foreach}
                                 </optgroup>
                             {/foreach}
                         </select>
-                        <p class="help-block forward-help" id="forwardServiceHelp">请选择目标服务 IP。</p>
+                        <p class="help-block forward-help" id="forwardServiceHelp">请选择目标服务 IP，入口 IP 会按宿主机自动限制。</p>
                     </div>
 
                     <div class="forward-selection">
@@ -70,12 +70,16 @@
                             <strong class="forward-selection__value" id="forwardSelectedTarget">未选择</strong>
                         </div>
                         <div>
+                            <span class="forward-selection__label">可用入口 IP</span>
+                            <strong class="forward-selection__value" id="forwardSelectedListenIps">{$server_ip_summary|escape:'html'}</strong>
+                        </div>
+                        <div>
                             <span class="forward-selection__label">规则预览</span>
                             <code class="forward-selection__route" id="forwardRulePreview">{$server_ip|escape:'html'}:入口端口 -> 目标IP:目标端口</code>
                         </div>
                         <div>
                             <span class="forward-selection__label">站点预览</span>
-                            <code class="forward-selection__route" id="forwardSitePreview">域名 -> 目标IP:80 / 443</code>
+                            <code class="forward-selection__route" id="forwardSitePreview">{$server_ip|escape:'html'}:80/443 -> 目标IP</code>
                         </div>
                         <div class="forward-actionbar" style="margin-top:0;">
                             <button type="button" class="btn btn-default btn-xs forward-copy-btn" data-copy-target="#forwardRulePreview">复制规则预览</button>
@@ -88,7 +92,7 @@
                         <button type="button" class="btn btn-primary forward-btn" id="forwardOpenAddRuleBtn" {if !$can_add_more}disabled{/if}>添加端口规则</button>
                         <button type="button" class="btn btn-primary forward-btn" id="forwardOpenAddSiteBtn" {if !$can_add_more_sites}disabled{/if}>添加共享站点</button>
                     </div>
-                    <p class="forward-inline-tip">说明：共享站点统一监听 {$server_ip|escape:'html'}:80/443，域名必须唯一。</p>
+                    <p class="forward-inline-tip">说明：入口 IP 会按宿主机自动限制，共享站点域名必须唯一。</p>
                 </div>
 
                 <div class="forward-card">
@@ -150,6 +154,9 @@
                                             {if $rule.product_name}
                                                 <div class="forward-rule-meta">产品：{$rule.product_name|escape:'html'}</div>
                                             {/if}
+                                            {if $rule.server_label}
+                                                <div class="forward-rule-meta">宿主机：{$rule.server_label|escape:'html'}</div>
+                                            {/if}
                                             {if $rule.description}
                                                 <div class="forward-rule-desc">{$rule.description|escape:'html'}</div>
                                             {/if}
@@ -177,6 +184,10 @@
                                                     class="btn btn-xs btn-warning forward-edit-rule-btn"
                                                     data-id="{$rule.id|escape:'html'}"
                                                     data-rule-name="{$rule.rule_name|escape:'html'}"
+                                                    data-product="{$rule.product_name|escape:'html'}"
+                                                    data-service-id="{$rule.service_id|escape:'html'}"
+                                                    data-server-id="{$rule.server_id|escape:'html'}"
+                                                    data-in-ip="{$rule.in_ip|escape:'html'}"
                                                     data-out-ip="{$rule.out_ip|escape:'html'}"
                                                     data-out-port="{$rule.out_port|escape:'html'}"
                                                     data-in-port="{$rule.in_port|escape:'html'}"
@@ -219,6 +230,9 @@
                                     <tr>
                                         <td>
                                             <div class="forward-rule-name">{$site.domain|escape:'html'}</div>
+                                            {if $site.server_label}
+                                                <div class="forward-rule-meta">宿主机：{$site.server_label|escape:'html'}</div>
+                                            {/if}
                                             {if $site.description}
                                                 <div class="forward-rule-desc">{$site.description|escape:'html'}</div>
                                             {/if}
@@ -233,8 +247,8 @@
                                         </td>
                                         <td>
                                             <div class="forward-entry">
-                                                <span class="forward-code">{$server_ip|escape:'html'}:80/443</span>
-                                                <button type="button" class="btn btn-xs btn-default forward-copy-btn" data-copy="{$server_ip|escape:'html'}:80/443">复制</button>
+                                                <span class="forward-code">{$site.listen_ip|escape:'html'}:80/443</span>
+                                                <button type="button" class="btn btn-xs btn-default forward-copy-btn" data-copy="{$site.listen_ip|escape:'html'}:80/443">复制</button>
                                             </div>
                                         </td>
                                         <td>
@@ -248,6 +262,10 @@
                                                     class="btn btn-xs btn-warning forward-edit-site-btn"
                                                     data-id="{$site.id|escape:'html'}"
                                                     data-domain="{$site.domain|escape:'html'}"
+                                                    data-product="{$site.product_name|escape:'html'}"
+                                                    data-service-id="{$site.service_id|escape:'html'}"
+                                                    data-server-id="{$site.server_id|escape:'html'}"
+                                                    data-listen-ip="{$site.listen_ip|escape:'html'}"
                                                     data-backend-ip="{$site.backend_ip|escape:'html'}"
                                                     data-http-port="{$site.backend_http_port|escape:'html'}"
                                                     data-https-port="{$site.backend_https_port|escape:'html'}"
@@ -274,6 +292,8 @@
                         <form id="forwardRuleAddForm">
                             <input type="hidden" name="csrf_token" value="{$csrf_token|escape:'html'}">
                             <input type="hidden" name="product_name" id="forward_rule_add_product_name">
+                            <input type="hidden" name="service_id" id="forward_rule_add_service_id">
+                            <input type="hidden" name="server_id" id="forward_rule_add_server_id">
                             <div class="modal-header forward-modal__header">
                                 <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
                                 <h4 class="modal-title">添加规则</h4>
@@ -286,6 +306,10 @@
                                 <div class="form-group">
                                     <label for="forward_rule_add_ip">目标 IP</label>
                                     <input class="form-control forward-control" id="forward_rule_add_ip" name="internal_ip" readonly required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="forward_rule_add_listen_ip">入口 IP</label>
+                                    <select class="form-control forward-control" id="forward_rule_add_listen_ip" name="listen_ip" required></select>
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-6">
@@ -329,6 +353,8 @@
                         <form id="forwardRuleEditForm">
                             <input type="hidden" name="csrf_token" value="{$csrf_token|escape:'html'}">
                             <input type="hidden" name="rule_id" id="forward_rule_edit_id">
+                            <input type="hidden" name="service_id" id="forward_rule_edit_service_id">
+                            <input type="hidden" name="server_id" id="forward_rule_edit_server_id">
                             <div class="modal-header forward-modal__header">
                                 <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
                                 <h4 class="modal-title">编辑规则</h4>
@@ -341,6 +367,10 @@
                                 <div class="form-group">
                                     <label for="forward_rule_edit_ip">目标 IP</label>
                                     <input class="form-control forward-control" id="forward_rule_edit_ip" name="internal_ip" readonly required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="forward_rule_edit_listen_ip">入口 IP</label>
+                                    <select class="form-control forward-control" id="forward_rule_edit_listen_ip" name="listen_ip" required></select>
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-6">
@@ -384,6 +414,8 @@
                         <form id="forwardSiteAddForm">
                             <input type="hidden" name="csrf_token" value="{$csrf_token|escape:'html'}">
                             <input type="hidden" name="product_name" id="forward_site_add_product_name">
+                            <input type="hidden" name="service_id" id="forward_site_add_service_id">
+                            <input type="hidden" name="server_id" id="forward_site_add_server_id">
                             <div class="modal-header forward-modal__header">
                                 <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
                                 <h4 class="modal-title">添加共享站点</h4>
@@ -396,6 +428,10 @@
                                 <div class="form-group">
                                     <label for="forward_site_add_ip">目标 IP</label>
                                     <input class="form-control forward-control" id="forward_site_add_ip" name="backend_ip" readonly required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="forward_site_add_listen_ip">入口 IP</label>
+                                    <select class="form-control forward-control" id="forward_site_add_listen_ip" name="listen_ip" required></select>
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-6">
@@ -431,6 +467,8 @@
                         <form id="forwardSiteEditForm">
                             <input type="hidden" name="csrf_token" value="{$csrf_token|escape:'html'}">
                             <input type="hidden" name="site_id" id="forward_site_edit_id">
+                            <input type="hidden" name="service_id" id="forward_site_edit_service_id">
+                            <input type="hidden" name="server_id" id="forward_site_edit_server_id">
                             <div class="modal-header forward-modal__header">
                                 <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
                                 <h4 class="modal-title">编辑共享站点</h4>
@@ -443,6 +481,10 @@
                                 <div class="form-group">
                                     <label for="forward_site_edit_ip">目标 IP</label>
                                     <input class="form-control forward-control" id="forward_site_edit_ip" name="backend_ip" readonly required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="forward_site_edit_listen_ip">入口 IP</label>
+                                    <select class="form-control forward-control" id="forward_site_edit_listen_ip" name="listen_ip" required></select>
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-6">
@@ -480,11 +522,125 @@
 (function ($) {
     var csrfToken = '{$csrf_token|escape:'javascript'}';
     var serverIpText = '{$server_ip|escape:'javascript'}';
+    var serverIpSummaryText = '{$server_ip_summary|escape:'javascript'}';
     var domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$/i;
     var noticeTimer = null;
 
     function selectedService() {
         return $('#forwardServiceSelect option:selected');
+    }
+
+    function parseListenIps(value) {
+        if (!value) {
+            return [];
+        }
+        return String(value)
+            .split(',')
+            .map(function (item) { return $.trim(item); })
+            .filter(function (item, index, list) {
+                return item && list.indexOf(item) === index;
+            });
+    }
+
+    function formatListenIps(ips) {
+        return ips.length ? ips.join(', ') : '未配置';
+    }
+
+    function normalizeServerId(value) {
+        var parsed = parseInt(value, 10);
+        return isNaN(parsed) ? 0 : parsed;
+    }
+
+    function normalizeServiceId(value) {
+        var parsed = parseInt(value, 10);
+        return isNaN(parsed) ? 0 : parsed;
+    }
+
+    function findServiceOption(ip, product, serverId, serviceId) {
+        var normalizedProduct = $.trim(String(product || ''));
+        var normalizedServerId = normalizeServerId(serverId);
+        var normalizedServiceId = normalizeServiceId(serviceId);
+        var $options = $('#forwardServiceSelect option').filter(function () {
+            return $(this).val() === ip;
+        });
+        var $matched;
+
+        if (!$options.length) {
+            return $();
+        }
+
+        if (normalizedServiceId > 0) {
+            $matched = $options.filter(function () {
+                return normalizeServiceId($(this).data('service-id')) === normalizedServiceId;
+            }).first();
+            return $matched.length ? $matched : $();
+        }
+
+        if (normalizedServerId > 0) {
+            $matched = $options.filter(function () {
+                return normalizeServerId($(this).data('server-id')) === normalizedServerId;
+            }).first();
+            return $matched.length ? $matched : $();
+        }
+
+        if (normalizedProduct) {
+            $matched = $options.filter(function () {
+                return $.trim(String($(this).data('product') || '')) === normalizedProduct;
+            });
+            if ($matched.length === 1) {
+                return $matched.first();
+            }
+            if ($matched.length > 1) {
+                return $();
+            }
+        }
+
+        return $options.length === 1 ? $options.first() : $();
+    }
+
+    function listenIpsForServiceIp(ip, product, serverId, serviceId) {
+        var option = findServiceOption(ip, product, serverId, serviceId);
+        if (!option.length) {
+            return [];
+        }
+        return parseListenIps(option.data('listen-ips') || '');
+    }
+
+    function ensureSelectOption($select, value) {
+        if (!value) {
+            return;
+        }
+        if ($select.find('option[value="' + value.replace(/"/g, '\\"') + '"]').length) {
+            return;
+        }
+        $('<option></option>').val(value).text(value + ' (当前值)').appendTo($select);
+    }
+
+    function populateListenIpSelect($select, ips, selectedValue) {
+        var selected = selectedValue || '';
+        $select.empty();
+        if (!ips.length && selected) {
+            ips = [selected];
+        }
+        if (!ips.length) {
+            $('<option></option>').val('').text('当前服务未配置入口 IP').appendTo($select);
+            $select.prop('disabled', true);
+            return;
+        }
+        $.each(ips, function (_, ip) {
+            $('<option></option>').val(ip).text(ip).appendTo($select);
+        });
+        ensureSelectOption($select, selected);
+        $select.prop('disabled', false);
+        $select.val(selected && $select.find('option[value="' + selected.replace(/"/g, '\\"') + '"]').length ? selected : ips[0]);
+    }
+
+    function syncTopPreview() {
+        var targetIp = $('#forward_rule_add_ip').val() || $('#forward_site_add_ip').val() || selectedService().val() || '目标IP';
+        var ruleListenIp = $('#forward_rule_add_listen_ip').val() || serverIpText;
+        var siteListenIp = $('#forward_site_add_listen_ip').val() || ruleListenIp;
+        $('#forwardRulePreview').text(ruleListenIp + ':入口端口 -> ' + targetIp + ':目标端口');
+        $('#forwardSitePreview').text(siteListenIp + ':80/443 -> ' + targetIp);
     }
 
     function showNotice(type, message) {
@@ -514,21 +670,35 @@
         var selected = selectedService();
         var ip = selected.val() || '';
         var product = selected.data('product') || '';
-        var selectedText = ip ? (product ? product + ' / ' + ip : ip) : '未选择';
+        var serviceId = normalizeServiceId(selected.data('service-id'));
+        var serverId = normalizeServerId(selected.data('server-id'));
+        var serverLabel = $.trim(String(selected.data('server-label') || ''));
+        var listenIps = parseListenIps(selected.data('listen-ips') || '');
+        var selectedText = ip ? $.grep([product, ip, serverLabel], function (item) { return item; }).join(' / ') : '未选择';
         $('#forwardSelectedTarget').text(selectedText);
-        $('#forwardServiceHelp').text(ip ? ('已选择目标 IP: ' + ip + '，入口地址固定 ' + serverIpText) : '请选择目标服务 IP。');
-        $('#forwardRulePreview').text(serverIpText + ':入口端口 -> ' + (ip || '目标IP') + ':目标端口');
-        $('#forwardSitePreview').text('域名 -> ' + (ip || '目标IP') + ':80 / 443');
+        $('#forwardSelectedListenIps').text(ip ? formatListenIps(listenIps) : serverIpSummaryText);
+        $('#forwardServiceHelp').text(ip ? ('已选择目标 IP: ' + ip + (serverLabel ? '（' + serverLabel + '）' : '') + '，可用入口 IP: ' + formatListenIps(listenIps)) : '请选择目标服务 IP，入口 IP 会按宿主机自动限制。');
         $('#forward_rule_add_ip').val(ip);
         $('#forward_rule_add_product_name').val(product);
+        $('#forward_rule_add_service_id').val(serviceId);
+        $('#forward_rule_add_server_id').val(serverId);
         $('#forward_site_add_ip').val(ip);
         $('#forward_site_add_product_name').val(product);
+        $('#forward_site_add_service_id').val(serviceId);
+        $('#forward_site_add_server_id').val(serverId);
+        populateListenIpSelect($('#forward_rule_add_listen_ip'), listenIps);
+        populateListenIpSelect($('#forward_site_add_listen_ip'), listenIps);
+        syncTopPreview();
     }
 
     function requireServiceSelected() {
         syncSelectedService();
         if (!$('#forward_rule_add_ip').val()) {
             showNotice('warning', '请先选择目标服务 IP。');
+            return false;
+        }
+        if (!$('#forward_rule_add_listen_ip').val()) {
+            showNotice('warning', '当前服务所属宿主机未配置入口 IP。');
             return false;
         }
         return true;
@@ -590,6 +760,7 @@
     }
 
     $('#forwardServiceSelect').on('change', syncSelectedService);
+    $('#forward_rule_add_listen_ip, #forward_site_add_listen_ip').on('change', syncTopPreview);
 
     $('#forwardOpenAddRuleBtn').on('click', function () {
         if (!requireServiceSelected()) {
@@ -762,9 +933,16 @@
     });
 
     $('.forward-edit-rule-btn').on('click', function () {
+        var outIp = $(this).data('out-ip');
+        var product = $(this).data('product');
+        var serviceId = normalizeServiceId($(this).data('service-id'));
+        var serverId = normalizeServerId($(this).data('server-id'));
+        populateListenIpSelect($('#forward_rule_edit_listen_ip'), listenIpsForServiceIp(outIp, product, serverId, serviceId), $(this).data('in-ip'));
         $('#forward_rule_edit_id').val($(this).data('id'));
+        $('#forward_rule_edit_service_id').val(serviceId);
+        $('#forward_rule_edit_server_id').val(serverId);
         $('#forward_rule_edit_name').val($(this).data('rule-name'));
-        $('#forward_rule_edit_ip').val($(this).data('out-ip'));
+        $('#forward_rule_edit_ip').val(outIp);
         $('#forward_rule_edit_out_port').val($(this).data('out-port'));
         $('#forward_rule_edit_in_port').val($(this).data('in-port'));
         $('#forward_rule_edit_protocol').val($(this).data('protocol'));
@@ -773,9 +951,16 @@
     });
 
     $('.forward-edit-site-btn').on('click', function () {
+        var backendIp = $(this).data('backend-ip');
+        var product = $(this).data('product');
+        var serviceId = normalizeServiceId($(this).data('service-id'));
+        var serverId = normalizeServerId($(this).data('server-id'));
+        populateListenIpSelect($('#forward_site_edit_listen_ip'), listenIpsForServiceIp(backendIp, product, serverId, serviceId), $(this).data('listen-ip'));
         $('#forward_site_edit_id').val($(this).data('id'));
+        $('#forward_site_edit_service_id').val(serviceId);
+        $('#forward_site_edit_server_id').val(serverId);
         $('#forward_site_edit_domain').val($(this).data('domain'));
-        $('#forward_site_edit_ip').val($(this).data('backend-ip'));
+        $('#forward_site_edit_ip').val(backendIp);
         $('#forward_site_edit_http').val($(this).data('http-port'));
         $('#forward_site_edit_https').val($(this).data('https-port'));
         $('#forward_site_edit_desc').val($(this).data('description'));

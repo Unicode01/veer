@@ -21,11 +21,18 @@ function forward_config()
         'language' => 'chinese',
         'fields' => [
             'server_ip' => [
-                'FriendlyName' => '入口 IP',
+                'FriendlyName' => '默认入口 IP',
                 'Type' => 'text',
-                'Size' => '25',
-                'Description' => 'forward 规则的 in_ip，通常填写公网 IP；也可以填写 0.0.0.0',
+                'Size' => '50',
+                'Description' => '全局默认入口 IP，支持多个 IPv4，用逗号/空格/换行分隔；未命中宿主机映射时使用',
                 'Default' => '0.0.0.0',
+            ],
+            'server_ip_server_map' => [
+                'FriendlyName' => '按宿主机映射入口 IP',
+                'Type' => 'textarea',
+                'Rows' => '5',
+                'Description' => "按 WHMCS serverID 指定入口 IP，每行一条，格式如 3=203.0.113.10,203.0.113.11；客户区会按所选服务所属宿主机限制可用入口 IP",
+                'Default' => '',
             ],
             'api_endpoint' => [
                 'FriendlyName' => 'API 地址',
@@ -128,6 +135,8 @@ function forward_activate()
                 $table->unsignedBigInteger('forward_rule_id')->nullable()->unique();
                 $table->integer('user_id')->default(0);
                 $table->string('product_name', 100)->nullable();
+                $table->integer('server_id')->default(0);
+                $table->integer('service_id')->default(0);
                 $table->string('rule_name', 100);
                 $table->string('in_interface', 100)->default('');
                 $table->string('in_ip', 45)->default('0.0.0.0');
@@ -150,7 +159,9 @@ function forward_activate()
                 'forward_rule_id' => function ($table) { $table->unsignedBigInteger('forward_rule_id')->nullable()->unique()->after('id'); },
                 'user_id' => function ($table) { $table->integer('user_id')->default(0)->after('forward_rule_id'); },
                 'product_name' => function ($table) { $table->string('product_name', 100)->nullable()->after('user_id'); },
-                'rule_name' => function ($table) { $table->string('rule_name', 100)->default('')->after('product_name'); },
+                'server_id' => function ($table) { $table->integer('server_id')->default(0)->after('product_name'); },
+                'service_id' => function ($table) { $table->integer('service_id')->default(0)->after('server_id'); },
+                'rule_name' => function ($table) { $table->string('rule_name', 100)->default('')->after('service_id'); },
                 'in_interface' => function ($table) { $table->string('in_interface', 100)->default('')->after('rule_name'); },
                 'in_ip' => function ($table) { $table->string('in_ip', 45)->default('0.0.0.0')->after('in_interface'); },
                 'in_port' => function ($table) { $table->integer('in_port')->default(0)->after('in_ip'); },
@@ -178,6 +189,8 @@ function forward_activate()
                 $table->unsignedBigInteger('forward_site_id')->nullable()->unique();
                 $table->integer('user_id')->default(0);
                 $table->string('product_name', 100)->nullable();
+                $table->integer('server_id')->default(0);
+                $table->integer('service_id')->default(0);
                 $table->string('domain', 253);
                 $table->string('listen_interface', 100)->default('');
                 $table->string('listen_ip', 45)->default('0.0.0.0');
@@ -199,7 +212,9 @@ function forward_activate()
                 'forward_site_id' => function ($table) { $table->unsignedBigInteger('forward_site_id')->nullable()->unique()->after('id'); },
                 'user_id' => function ($table) { $table->integer('user_id')->default(0)->after('forward_site_id'); },
                 'product_name' => function ($table) { $table->string('product_name', 100)->nullable()->after('user_id'); },
-                'domain' => function ($table) { $table->string('domain', 253)->default('')->after('product_name'); },
+                'server_id' => function ($table) { $table->integer('server_id')->default(0)->after('product_name'); },
+                'service_id' => function ($table) { $table->integer('service_id')->default(0)->after('server_id'); },
+                'domain' => function ($table) { $table->string('domain', 253)->default('')->after('service_id'); },
                 'listen_interface' => function ($table) { $table->string('listen_interface', 100)->default('')->after('domain'); },
                 'listen_ip' => function ($table) { $table->string('listen_ip', 45)->default('0.0.0.0')->after('listen_interface'); },
                 'backend_ip' => function ($table) { $table->string('backend_ip', 45)->default('')->after('listen_ip'); },
@@ -241,6 +256,105 @@ function forward_get_module_settings()
         forward_log('get_module_settings_error', [], $e->getMessage());
         return [];
     }
+}
+
+function forward_get_server_details_map()
+{
+    static $map = null;
+    if ($map !== null) {
+        return $map;
+    }
+
+    $map = [];
+    try {
+        $rows = Capsule::table('tblservers')
+            ->select('id', 'name', 'hostname')
+            ->get();
+        foreach ($rows as $row) {
+            $map[(int) $row->id] = [
+                'name' => trim((string) ($row->name ?? '')),
+                'hostname' => trim((string) ($row->hostname ?? '')),
+            ];
+        }
+    } catch (Exception $e) {
+        forward_log('get_server_details_map_error', [], $e->getMessage());
+    }
+
+    return $map;
+}
+
+function forward_format_server_label($serverId, $serverName = '', $serverHostname = '')
+{
+    $serverId = (int) $serverId;
+    $serverName = trim((string) $serverName);
+    $serverHostname = trim((string) $serverHostname);
+
+    if ($serverName !== '') {
+        return $serverHostname !== '' ? ($serverName . ' (' . $serverHostname . ')') : $serverName;
+    }
+    if ($serverHostname !== '') {
+        return $serverHostname;
+    }
+    if ($serverId > 0) {
+        return '宿主机 #' . $serverId;
+    }
+
+    return '未分配宿主机';
+}
+
+function forward_get_server_label($serverId)
+{
+    $serverId = (int) $serverId;
+    if ($serverId <= 0) {
+        return forward_format_server_label(0);
+    }
+
+    $map = forward_get_server_details_map();
+    $server = $map[$serverId] ?? ['name' => '', 'hostname' => ''];
+    return forward_format_server_label($serverId, $server['name'], $server['hostname']);
+}
+
+function forward_has_legacy_server_ip_product_map(array $settings)
+{
+    return trim((string) ($settings['server_ip_server_map'] ?? '')) === ''
+        && trim((string) ($settings['server_ip_product_map'] ?? '')) !== '';
+}
+
+function forward_ensure_runtime_schema()
+{
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+
+    try {
+        if (Capsule::schema()->hasTable('mod_forward_rules') && !Capsule::schema()->hasColumn('mod_forward_rules', 'server_id')) {
+            Capsule::schema()->table('mod_forward_rules', function ($table) {
+                $table->integer('server_id')->default(0)->after('product_name');
+            });
+        }
+        if (Capsule::schema()->hasTable('mod_forward_rules') && !Capsule::schema()->hasColumn('mod_forward_rules', 'service_id')) {
+            Capsule::schema()->table('mod_forward_rules', function ($table) {
+                $table->integer('service_id')->default(0)->after('server_id');
+            });
+        }
+
+        if (Capsule::schema()->hasTable('mod_forward_sites') && !Capsule::schema()->hasColumn('mod_forward_sites', 'server_id')) {
+            Capsule::schema()->table('mod_forward_sites', function ($table) {
+                $table->integer('server_id')->default(0)->after('product_name');
+            });
+        }
+        if (Capsule::schema()->hasTable('mod_forward_sites') && !Capsule::schema()->hasColumn('mod_forward_sites', 'service_id')) {
+            Capsule::schema()->table('mod_forward_sites', function ($table) {
+                $table->integer('service_id')->default(0)->after('server_id');
+            });
+        }
+    } catch (Exception $e) {
+        forward_log('ensure_runtime_schema_error', [], $e->getMessage());
+    }
+
+    forward_backfill_local_service_bindings();
 }
 
 function forward_log($action, $request = null, $response = null, $processed = '')
@@ -358,20 +472,115 @@ function forward_parse_allowed_client_ips($value)
     return array_values(array_unique($ips));
 }
 
+function forward_parse_server_ips($value)
+{
+    $raw = preg_split('/[\s,]+/', (string) $value, -1, PREG_SPLIT_NO_EMPTY);
+    $ips = [];
+    foreach ($raw as $item) {
+        $ip = trim((string) $item);
+        if (forward_is_valid_ipv4($ip)) {
+            $ips[] = $ip;
+        }
+    }
+    return array_values(array_unique($ips));
+}
+
+function forward_parse_server_ip_server_map($value)
+{
+    $lines = preg_split('/\r\n|\r|\n/', (string) $value);
+    $map = [];
+    foreach ($lines as $line) {
+        $line = trim((string) $line);
+        if ($line === '' || strpos($line, '#') === 0) {
+            continue;
+        }
+        if (!preg_match('/^(\d+)\s*[:=]\s*(.+)$/', $line, $matches)) {
+            continue;
+        }
+
+        $serverId = (int) $matches[1];
+        $ips = forward_parse_server_ips($matches[2]);
+        if ($serverId > 0 && !empty($ips)) {
+            $map[$serverId] = $ips;
+        }
+    }
+    return $map;
+}
+
+function forward_get_allowed_server_ips(array $settings, $serverId = 0)
+{
+    $serverId = (int) $serverId;
+    $defaultIps = forward_parse_server_ips($settings['server_ip'] ?? '');
+    $mappedIps = forward_parse_server_ip_server_map($settings['server_ip_server_map'] ?? '');
+
+    if ($serverId > 0 && !empty($mappedIps[$serverId])) {
+        return $mappedIps[$serverId];
+    }
+    if (!empty($mappedIps)) {
+        return [];
+    }
+
+    return !empty($defaultIps) ? $defaultIps : [];
+}
+
+function forward_get_all_server_ips(array $settings)
+{
+    $all = forward_parse_server_ips($settings['server_ip'] ?? '');
+    $mappedIps = forward_parse_server_ip_server_map($settings['server_ip_server_map'] ?? '');
+    foreach ($mappedIps as $ips) {
+        $all = array_merge($all, $ips);
+    }
+    $all = array_values(array_unique($all));
+    return !empty($all) ? $all : ['0.0.0.0'];
+}
+
+function forward_pick_listen_ip($value, array $allowedIps)
+{
+    $listenIp = trim((string) $value);
+    if ($listenIp === '') {
+        return $allowedIps[0] ?? '';
+    }
+    return in_array($listenIp, $allowedIps, true) ? $listenIp : '';
+}
+
+function forward_format_ip_list(array $ips)
+{
+    return implode(', ', array_values(array_unique($ips)));
+}
+
+function forward_attach_service_listen_ips(array $services, array $settings)
+{
+    $result = [];
+    foreach ($services as $service) {
+        $listenIps = forward_get_allowed_server_ips($settings, (int) ($service['server_id'] ?? 0));
+        if (empty($listenIps)) {
+            continue;
+        }
+        $service['listen_ips'] = $listenIps;
+        $service['listen_ips_csv'] = implode(',', $listenIps);
+        $result[] = $service;
+    }
+    return $result;
+}
+
 function forward_get_user_services($userId, array $allowedProductIds = [], array $allowedClientIps = [])
 {
     try {
         $query = Capsule::table('tblhosting')
             ->join('tblproducts', 'tblhosting.packageid', '=', 'tblproducts.id')
+            ->leftJoin('tblservers', 'tblhosting.server', '=', 'tblservers.id')
             ->where('tblhosting.userid', (int) $userId)
             ->whereIn('tblhosting.domainstatus', ['Active', 'Suspended'])
             ->select(
                 'tblhosting.id as service_id',
+                'tblhosting.server as server_id',
                 'tblhosting.packageid as product_id',
                 'tblhosting.dedicatedip',
                 'tblhosting.assignedips',
                 'tblproducts.name as product_name',
-                'tblproducts.gid as product_group_id'
+                'tblproducts.gid as product_group_id',
+                'tblservers.name as server_name',
+                'tblservers.hostname as server_hostname'
             );
 
         if (!empty($allowedProductIds)) {
@@ -400,6 +609,8 @@ function forward_get_user_services($userId, array $allowedProductIds = [], array
             }
             $services[] = [
                 'service_id' => (int) $row->service_id,
+                'server_id' => (int) $row->server_id,
+                'server_label' => forward_format_server_label($row->server_id, $row->server_name ?? '', $row->server_hostname ?? ''),
                 'product_id' => (int) $row->product_id,
                 'product_group_id' => (int) $row->product_group_id,
                 'product_name' => $row->product_name,
@@ -435,14 +646,124 @@ function forward_count_service_ips(array $services)
     return $count;
 }
 
-function forward_find_service_for_ip(array $services, $ip)
+function forward_find_service_for_ip(array $services, $ip, $serviceId = 0, $serverId = 0, $productName = '')
 {
+    $ip = trim((string) $ip);
+    $serviceId = (int) $serviceId;
+    $serverId = (int) $serverId;
+    $productName = trim((string) $productName);
+    $matches = [];
+    $productMatches = [];
+
     foreach ($services as $service) {
-        if (in_array($ip, $service['ips'], true)) {
+        if (!in_array($ip, $service['ips'], true)) {
+            continue;
+        }
+
+        $matches[] = $service;
+
+        if ($serviceId > 0 && (int) ($service['service_id'] ?? 0) === $serviceId) {
             return $service;
         }
+
+        if ($serverId > 0 && (int) ($service['server_id'] ?? 0) === $serverId) {
+            return $service;
+        }
+
+        $serviceProductName = trim((string) ($service['product_name'] ?? ''));
+        if ($productName !== '' && $serviceProductName === $productName) {
+            $productMatches[] = $service;
+        }
     }
-    return null;
+
+    if ($serviceId > 0) {
+        return null;
+    }
+
+    if ($serverId > 0) {
+        return null;
+    }
+
+    if (count($productMatches) === 1) {
+        return $productMatches[0];
+    }
+
+    if ($productName !== '' && count($productMatches) > 1) {
+        return null;
+    }
+
+    return count($matches) === 1 ? $matches[0] : null;
+}
+
+function forward_backfill_local_service_bindings()
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+
+    try {
+        $targets = [
+            ['table' => 'mod_forward_rules', 'ip_column' => 'out_ip'],
+            ['table' => 'mod_forward_sites', 'ip_column' => 'backend_ip'],
+        ];
+        $serviceCache = [];
+
+        foreach ($targets as $target) {
+            if (!Capsule::schema()->hasTable($target['table'])) {
+                continue;
+            }
+
+            $rows = Capsule::table($target['table'])
+                ->where('user_id', '>', 0)
+                ->where(function ($query) {
+                    $query->where('service_id', 0)
+                        ->orWhere('server_id', 0);
+                })
+                ->select('id', 'user_id', 'product_name', 'service_id', 'server_id', $target['ip_column'] . ' as binding_ip')
+                ->get();
+
+            foreach ($rows as $row) {
+                $userId = (int) $row->user_id;
+                if (!isset($serviceCache[$userId])) {
+                    $serviceCache[$userId] = forward_get_user_services($userId);
+                }
+
+                $service = forward_find_service_for_ip(
+                    $serviceCache[$userId],
+                    (string) ($row->binding_ip ?? ''),
+                    (int) ($row->service_id ?? 0),
+                    (int) ($row->server_id ?? 0),
+                    (string) ($row->product_name ?? '')
+                );
+                if ($service === null) {
+                    continue;
+                }
+
+                $updates = [];
+                if ((int) ($row->service_id ?? 0) !== (int) ($service['service_id'] ?? 0)) {
+                    $updates['service_id'] = (int) ($service['service_id'] ?? 0);
+                }
+                if ((int) ($row->server_id ?? 0) !== (int) ($service['server_id'] ?? 0)) {
+                    $updates['server_id'] = (int) ($service['server_id'] ?? 0);
+                }
+                if (trim((string) ($row->product_name ?? '')) !== trim((string) ($service['product_name'] ?? ''))) {
+                    $updates['product_name'] = trim((string) ($service['product_name'] ?? '')) !== ''
+                        ? (string) $service['product_name']
+                        : null;
+                }
+
+                if (!empty($updates)) {
+                    Capsule::table($target['table'])
+                        ->where('id', (int) $row->id)
+                        ->update($updates);
+                }
+            }
+        }
+    } catch (Exception $e) {
+        forward_log('backfill_local_service_bindings_error', [], $e->getMessage());
+    }
 }
 
 function forward_call_api($path, $method = 'GET', array $payload = null)
@@ -583,6 +904,9 @@ function forward_get_local_rules($userId = null)
             'forward_rule_id' => $row->forward_rule_id ? (int) $row->forward_rule_id : 0,
             'user_id' => (int) $row->user_id,
             'product_name' => $row->product_name ?: '',
+            'server_id' => (int) ($row->server_id ?? 0),
+            'service_id' => (int) ($row->service_id ?? 0),
+            'server_label' => forward_get_server_label($row->server_id ?? 0),
             'rule_name' => $row->rule_name,
             'in_interface' => $row->in_interface ?: '',
             'in_ip' => $row->in_ip,
@@ -656,6 +980,9 @@ function forward_get_local_rule($ruleId, $userId = null)
         'forward_rule_id' => $row->forward_rule_id ? (int) $row->forward_rule_id : 0,
         'user_id' => (int) $row->user_id,
         'product_name' => $row->product_name ?: '',
+        'server_id' => (int) ($row->server_id ?? 0),
+        'service_id' => (int) ($row->service_id ?? 0),
+        'server_label' => forward_get_server_label($row->server_id ?? 0),
         'rule_name' => $row->rule_name,
         'in_interface' => $row->in_interface ?: '',
         'in_ip' => $row->in_ip,
@@ -673,14 +1000,15 @@ function forward_get_local_rule($ruleId, $userId = null)
     ];
 }
 
-function forward_validate_rule_input(array $data, array $settings, $isClient = false, $excludeLocalRuleId = 0, $excludeRemoteRuleId = 0)
+function forward_validate_rule_input(array $data, array $settings, $isClient = false, $excludeLocalRuleId = 0, $excludeRemoteRuleId = 0, array $allowedListenIps = null)
 {
-    $listenIp = trim((string) ($settings['server_ip'] ?? '0.0.0.0'));
-    if ($listenIp === '') {
-        $listenIp = '0.0.0.0';
+    $listenIps = $allowedListenIps !== null ? array_values(array_unique($allowedListenIps)) : forward_get_all_server_ips($settings);
+    if (empty($listenIps)) {
+        return ['success' => false, 'message' => '当前服务未配置可用的入口 IP'];
     }
-    if (!forward_is_valid_ipv4($listenIp)) {
-        return ['success' => false, 'message' => '模块配置中的入口 IP 不是有效的 IPv4 地址'];
+    $listenIp = forward_pick_listen_ip($data['listen_ip'] ?? $data['in_ip'] ?? '', $listenIps);
+    if ($listenIp === '') {
+        return ['success' => false, 'message' => '入口 IP 不在当前服务允许范围内'];
     }
 
     $ruleName = trim((string) ($data['rule_name'] ?? ''));
@@ -749,6 +1077,7 @@ function forward_validate_rule_input(array $data, array $settings, $isClient = f
             'rule_name' => $ruleName,
             'in_interface' => trim((string) ($settings['in_interface'] ?? '')),
             'in_ip' => $listenIp,
+            'listen_ips' => $listenIps,
             'in_port' => $inPort,
             'out_interface' => trim((string) ($settings['out_interface'] ?? '')),
             'out_ip' => $outIp,
@@ -765,7 +1094,29 @@ function forward_validate_rule_input(array $data, array $settings, $isClient = f
 function forward_create_rule(array $data, $userId = 0, $isClient = false)
 {
     $settings = forward_get_module_settings();
-    $validated = forward_validate_rule_input($data, $settings, $isClient);
+    $service = null;
+    $allowedListenIps = null;
+    if ($isClient) {
+        $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
+        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
+        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
+        $service = forward_find_service_for_ip(
+            $services,
+            trim((string) ($data['internal_ip'] ?? $data['out_ip'] ?? '')),
+            (int) ($data['service_id'] ?? 0),
+            (int) ($data['server_id'] ?? 0),
+            (string) ($data['product_name'] ?? '')
+        );
+        if ($service === null) {
+            return ['success' => false, 'message' => '目标 IP 不属于当前用户可用的服务'];
+        }
+        $allowedListenIps = forward_get_allowed_server_ips($settings, (int) ($service['server_id'] ?? 0));
+        if (empty($allowedListenIps)) {
+            return ['success' => false, 'message' => '该服务所属宿主机未配置入口 IP'];
+        }
+    }
+
+    $validated = forward_validate_rule_input($data, $settings, $isClient, 0, 0, $allowedListenIps);
     if (!$validated['success']) {
         return $validated;
     }
@@ -781,13 +1132,6 @@ function forward_create_rule(array $data, $userId = 0, $isClient = false)
             }
         }
 
-        $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
-        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
-        $service = forward_find_service_for_ip($services, $rule['out_ip']);
-        if ($service === null) {
-            return ['success' => false, 'message' => '目标 IP 不属于当前用户可用的服务'];
-        }
         $rule['product_name'] = $service['product_name'];
     }
 
@@ -814,6 +1158,8 @@ function forward_create_rule(array $data, $userId = 0, $isClient = false)
         'forward_rule_id' => $remoteId > 0 ? $remoteId : null,
         'user_id' => (int) $userId,
         'product_name' => $rule['product_name'] ?: null,
+        'server_id' => is_array($service) ? (int) ($service['server_id'] ?? 0) : 0,
+        'service_id' => is_array($service) ? (int) ($service['service_id'] ?? 0) : 0,
         'rule_name' => $rule['rule_name'],
         'in_interface' => $rule['in_interface'],
         'in_ip' => $rule['in_ip'],
@@ -854,12 +1200,36 @@ function forward_update_rule(array $data, $userId = null)
     }
 
     $settings = forward_get_module_settings();
+    $service = null;
+    $allowedListenIps = null;
+    if ($userId !== null) {
+        $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
+        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
+        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
+        $existingServiceId = (int) ($existing->service_id ?? 0);
+        $existingServerId = (int) ($existing->server_id ?? 0);
+        $service = forward_find_service_for_ip(
+            $services,
+            trim((string) ($data['internal_ip'] ?? $data['out_ip'] ?? '')),
+            $existingServiceId > 0 ? $existingServiceId : (int) ($data['service_id'] ?? 0),
+            $existingServerId > 0 ? $existingServerId : (int) ($data['server_id'] ?? 0),
+            (string) ($existing->product_name ?? '')
+        );
+        if ($service === null) {
+            return ['success' => false, 'message' => '目标 IP 不属于当前用户可用的服务'];
+        }
+        $allowedListenIps = forward_get_allowed_server_ips($settings, (int) ($service['server_id'] ?? 0));
+        if (empty($allowedListenIps)) {
+            return ['success' => false, 'message' => '该服务所属宿主机未配置入口 IP'];
+        }
+    }
     $validated = forward_validate_rule_input(
         $data,
         $settings,
         $userId !== null,
         $ruleId,
-        (int) ($existing->forward_rule_id ?? 0)
+        (int) ($existing->forward_rule_id ?? 0),
+        $allowedListenIps
     );
     if (!$validated['success']) {
         return $validated;
@@ -867,13 +1237,6 @@ function forward_update_rule(array $data, $userId = null)
 
     $rule = $validated['data'];
     if ($userId !== null) {
-        $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
-        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
-        $service = forward_find_service_for_ip($services, $rule['out_ip']);
-        if ($service === null) {
-            return ['success' => false, 'message' => '目标 IP 不属于当前用户可用的服务'];
-        }
         $rule['product_name'] = $service['product_name'];
     }
 
@@ -911,6 +1274,12 @@ function forward_update_rule(array $data, $userId = null)
         ->update([
             'forward_rule_id' => $remoteId > 0 ? $remoteId : null,
             'product_name' => $rule['product_name'] ?: null,
+            'server_id' => $userId !== null
+                ? (is_array($service) ? (int) ($service['server_id'] ?? 0) : 0)
+                : (int) ($data['server_id'] ?? $existing->server_id ?? 0),
+            'service_id' => $userId !== null
+                ? (is_array($service) ? (int) ($service['service_id'] ?? 0) : 0)
+                : (int) ($data['service_id'] ?? $existing->service_id ?? 0),
             'rule_name' => $rule['rule_name'],
             'in_interface' => $rule['in_interface'],
             'in_ip' => $rule['in_ip'],
@@ -1046,6 +1415,9 @@ function forward_get_local_sites($userId = null)
             'forward_site_id' => $row->forward_site_id ? (int) $row->forward_site_id : 0,
             'user_id' => (int) $row->user_id,
             'product_name' => $row->product_name ?: '',
+            'server_id' => (int) ($row->server_id ?? 0),
+            'service_id' => (int) ($row->service_id ?? 0),
+            'server_label' => forward_get_server_label($row->server_id ?? 0),
             'domain' => $row->domain,
             'listen_interface' => $row->listen_interface ?: '',
             'listen_ip' => $row->listen_ip,
@@ -1095,6 +1467,9 @@ function forward_get_local_site($siteId, $userId = null)
         'forward_site_id' => $row->forward_site_id ? (int) $row->forward_site_id : 0,
         'user_id' => (int) $row->user_id,
         'product_name' => $row->product_name ?: '',
+        'server_id' => (int) ($row->server_id ?? 0),
+        'service_id' => (int) ($row->service_id ?? 0),
+        'server_label' => forward_get_server_label($row->server_id ?? 0),
         'domain' => $row->domain,
         'listen_interface' => $row->listen_interface ?: '',
         'listen_ip' => $row->listen_ip,
@@ -1125,14 +1500,15 @@ function forward_has_remote_site_conflict($domain, $excludeRemoteSiteId = 0)
     return false;
 }
 
-function forward_validate_site_input(array $data, array $settings, $excludeLocalSiteId = 0, $excludeRemoteSiteId = 0)
+function forward_validate_site_input(array $data, array $settings, $excludeLocalSiteId = 0, $excludeRemoteSiteId = 0, array $allowedListenIps = null)
 {
-    $listenIp = trim((string) ($settings['server_ip'] ?? '0.0.0.0'));
-    if ($listenIp === '') {
-        $listenIp = '0.0.0.0';
+    $listenIps = $allowedListenIps !== null ? array_values(array_unique($allowedListenIps)) : forward_get_all_server_ips($settings);
+    if (empty($listenIps)) {
+        return ['success' => false, 'message' => '当前服务未配置可用的入口 IP'];
     }
-    if (!forward_is_valid_ipv4($listenIp)) {
-        return ['success' => false, 'message' => '模块配置中的入口 IP 不是有效的 IPv4 地址'];
+    $listenIp = forward_pick_listen_ip($data['listen_ip'] ?? '', $listenIps);
+    if ($listenIp === '') {
+        return ['success' => false, 'message' => '入口 IP 不在当前服务允许范围内'];
     }
 
     $domain = forward_normalize_domain($data['domain'] ?? '');
@@ -1186,6 +1562,7 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
             'domain' => $domain,
             'listen_interface' => trim((string) ($settings['in_interface'] ?? '')),
             'listen_ip' => $listenIp,
+            'listen_ips' => $listenIps,
             'backend_ip' => $backendIp,
             'backend_http_port' => $backendHttpPort,
             'backend_https_port' => $backendHttpsPort,
@@ -1200,7 +1577,29 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
 function forward_create_site(array $data, $userId = 0, $isClient = false)
 {
     $settings = forward_get_module_settings();
-    $validated = forward_validate_site_input($data, $settings);
+    $service = null;
+    $allowedListenIps = null;
+    if ($isClient) {
+        $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
+        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
+        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
+        $service = forward_find_service_for_ip(
+            $services,
+            trim((string) ($data['backend_ip'] ?? $data['internal_ip'] ?? '')),
+            (int) ($data['service_id'] ?? 0),
+            (int) ($data['server_id'] ?? 0),
+            (string) ($data['product_name'] ?? '')
+        );
+        if ($service === null) {
+            return ['success' => false, 'message' => '目标 IP 不属于当前用户可用的服务'];
+        }
+        $allowedListenIps = forward_get_allowed_server_ips($settings, (int) ($service['server_id'] ?? 0));
+        if (empty($allowedListenIps)) {
+            return ['success' => false, 'message' => '该服务所属宿主机未配置入口 IP'];
+        }
+    }
+
+    $validated = forward_validate_site_input($data, $settings, 0, 0, $allowedListenIps);
     if (!$validated['success']) {
         return $validated;
     }
@@ -1216,13 +1615,6 @@ function forward_create_site(array $data, $userId = 0, $isClient = false)
             }
         }
 
-        $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
-        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
-        $service = forward_find_service_for_ip($services, $site['backend_ip']);
-        if ($service === null) {
-            return ['success' => false, 'message' => '目标 IP 不属于当前用户可用的服务'];
-        }
         $site['product_name'] = $service['product_name'];
     }
 
@@ -1247,6 +1639,8 @@ function forward_create_site(array $data, $userId = 0, $isClient = false)
         'forward_site_id' => $remoteId > 0 ? $remoteId : null,
         'user_id' => (int) $userId,
         'product_name' => $site['product_name'] ?: null,
+        'server_id' => is_array($service) ? (int) ($service['server_id'] ?? 0) : 0,
+        'service_id' => is_array($service) ? (int) ($service['service_id'] ?? 0) : 0,
         'domain' => $site['domain'],
         'listen_interface' => $site['listen_interface'],
         'listen_ip' => $site['listen_ip'],
@@ -1285,11 +1679,35 @@ function forward_update_site(array $data, $userId = null)
     }
 
     $settings = forward_get_module_settings();
+    $service = null;
+    $allowedListenIps = null;
+    if ($userId !== null) {
+        $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
+        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
+        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
+        $existingServiceId = (int) ($existing->service_id ?? 0);
+        $existingServerId = (int) ($existing->server_id ?? 0);
+        $service = forward_find_service_for_ip(
+            $services,
+            trim((string) ($data['backend_ip'] ?? $data['internal_ip'] ?? '')),
+            $existingServiceId > 0 ? $existingServiceId : (int) ($data['service_id'] ?? 0),
+            $existingServerId > 0 ? $existingServerId : (int) ($data['server_id'] ?? 0),
+            (string) ($existing->product_name ?? '')
+        );
+        if ($service === null) {
+            return ['success' => false, 'message' => '目标 IP 不属于当前用户可用的服务'];
+        }
+        $allowedListenIps = forward_get_allowed_server_ips($settings, (int) ($service['server_id'] ?? 0));
+        if (empty($allowedListenIps)) {
+            return ['success' => false, 'message' => '该服务所属宿主机未配置入口 IP'];
+        }
+    }
     $validated = forward_validate_site_input(
         $data,
         $settings,
         $siteId,
-        (int) ($existing->forward_site_id ?? 0)
+        (int) ($existing->forward_site_id ?? 0),
+        $allowedListenIps
     );
     if (!$validated['success']) {
         return $validated;
@@ -1297,13 +1715,6 @@ function forward_update_site(array $data, $userId = null)
 
     $site = $validated['data'];
     if ($userId !== null) {
-        $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
-        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
-        $service = forward_find_service_for_ip($services, $site['backend_ip']);
-        if ($service === null) {
-            return ['success' => false, 'message' => '目标 IP 不属于当前用户可用的服务'];
-        }
         $site['product_name'] = $service['product_name'];
     }
 
@@ -1339,6 +1750,12 @@ function forward_update_site(array $data, $userId = null)
         ->update([
             'forward_site_id' => $remoteId > 0 ? $remoteId : null,
             'product_name' => $site['product_name'] ?: null,
+            'server_id' => $userId !== null
+                ? (is_array($service) ? (int) ($service['server_id'] ?? 0) : 0)
+                : (int) ($data['server_id'] ?? $existing->server_id ?? 0),
+            'service_id' => $userId !== null
+                ? (is_array($service) ? (int) ($service['service_id'] ?? 0) : 0)
+                : (int) ($data['service_id'] ?? $existing->service_id ?? 0),
             'domain' => $site['domain'],
             'listen_interface' => $site['listen_interface'],
             'listen_ip' => $site['listen_ip'],
@@ -1428,6 +1845,8 @@ function forward_json_response(array $payload)
 
 function forward_handle_admin_ajax()
 {
+    forward_ensure_runtime_schema();
+
     if ($_SERVER['REQUEST_METHOD'] !== 'POST' || empty($_POST['action'])) {
         return;
     }
@@ -1469,6 +1888,8 @@ function forward_handle_admin_ajax()
 
 function forward_handle_client_ajax()
 {
+    forward_ensure_runtime_schema();
+
     if ($_SERVER['REQUEST_METHOD'] !== 'POST' || empty($_POST['action'])) {
         return;
     }
@@ -1539,6 +1960,8 @@ function forward_protocol_select_html(array $protocols)
 
 function forward_output($vars)
 {
+    forward_ensure_runtime_schema();
+
     forward_handle_admin_ajax();
 
     $settings = forward_get_module_settings();
@@ -1566,13 +1989,22 @@ function forward_output($vars)
     $inactiveRuleCount = count($rules) - $activeRuleCount;
     $inactiveSiteCount = count($sites) - $activeSiteCount;
     $protocolSelect = forward_protocol_select_html(forward_protocol_options($settings['allowed_protocols'] ?? 'tcp+udp'));
-    $serverIp = htmlspecialchars((string) ($settings['server_ip'] ?? '0.0.0.0'), ENT_QUOTES, 'UTF-8');
+    $allServerIps = forward_get_all_server_ips($settings);
+    $serverIp = htmlspecialchars(forward_format_ip_list($allServerIps), ENT_QUOTES, 'UTF-8');
+    $serverIpOptionsHtml = '';
+    foreach ($allServerIps as $ip) {
+        $escapedIp = htmlspecialchars($ip, ENT_QUOTES, 'UTF-8');
+        $serverIpOptionsHtml .= '<option value="' . $escapedIp . '">' . $escapedIp . '</option>';
+    }
     $apiEndpoint = htmlspecialchars((string) ($settings['api_endpoint'] ?? ''), ENT_QUOTES, 'UTF-8');
     $defaultTag = htmlspecialchars((string) ($settings['default_tag'] ?? ''), ENT_QUOTES, 'UTF-8');
     $inInterface = htmlspecialchars((string) ($settings['in_interface'] ?? ''), ENT_QUOTES, 'UTF-8');
     $outInterface = htmlspecialchars((string) ($settings['out_interface'] ?? ''), ENT_QUOTES, 'UTF-8');
     $csrfToken = htmlspecialchars(forward_get_csrf_token(), ENT_QUOTES, 'UTF-8');
     $csrfTokenJs = json_encode(forward_get_csrf_token(), JSON_UNESCAPED_UNICODE);
+    $legacyServerMapNotice = forward_has_legacy_server_ip_product_map($settings)
+        ? '检测到旧版按产品映射入口 IP 配置，它已不再参与宿主机匹配。请将 server_ip_product_map 手动迁移到新的 server_ip_server_map。'
+        : '';
 
     echo <<<HTML
 <style>
@@ -1775,11 +2207,14 @@ HTML;
     echo '</div>';
     echo '</div>';
     echo '<div class="forward-admin__summary">';
-    echo '<div class="forward-admin__summary-card"><span>固定入口 IP</span><code>' . $serverIp . '</code></div>';
+    echo '<div class="forward-admin__summary-card"><span>入口 IP 池</span><code>' . $serverIp . '</code></div>';
     echo '<div class="forward-admin__summary-card"><span>API 地址</span><strong>' . ($apiEndpoint !== '' ? $apiEndpoint : '-') . '</strong></div>';
     echo '<div class="forward-admin__summary-card"><span>默认标签</span><strong>' . ($defaultTag !== '' ? $defaultTag : '-') . '</strong></div>';
     echo '<div class="forward-admin__summary-card"><span>接口绑定</span><strong>入 ' . ($inInterface !== '' ? $inInterface : '-') . ' / 出 ' . ($outInterface !== '' ? $outInterface : '-') . '</strong></div>';
     echo '</div>';
+    if ($legacyServerMapNotice !== '') {
+        echo '<div class="alert alert-warning" style="border-radius:14px;margin-bottom:18px;">' . htmlspecialchars($legacyServerMapNotice, ENT_QUOTES, 'UTF-8') . '</div>';
+    }
 
     echo '<div class="panel panel-default">';
     echo '<div class="panel-heading"><div class="row">';
@@ -1794,7 +2229,7 @@ HTML;
             $ruleJson = htmlspecialchars(json_encode($rule, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8');
             echo '<tr>';
             echo '<td>' . (int) $rule['id'] . '</td>';
-            echo '<td>' . htmlspecialchars($rule['rule_name'], ENT_QUOTES, 'UTF-8') . '</td>';
+            echo '<td><strong>' . htmlspecialchars($rule['rule_name'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($rule['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($rule['in_ip'] . ':' . $rule['in_port'], ENT_QUOTES, 'UTF-8') . '</td>';
             echo '<td>' . htmlspecialchars($rule['out_ip'] . ':' . $rule['out_port'], ENT_QUOTES, 'UTF-8') . '</td>';
             echo '<td><span class="label label-info">' . htmlspecialchars($rule['protocol'], ENT_QUOTES, 'UTF-8') . '</span></td>';
@@ -1815,15 +2250,18 @@ HTML;
     echo '<form id="forwardAdminRuleForm"><div class="modal-header"><button type="button" class="close" data-dismiss="modal"><span>&times;</span></button><h4 class="modal-title" id="forwardAdminRuleModalTitle">添加规则</h4></div>';
     echo '<div class="modal-body">';
     echo '<input type="hidden" name="rule_id" id="forward_admin_rule_id" value="">';
+    echo '<input type="hidden" name="service_id" id="forward_admin_rule_service_id" value="0">';
+    echo '<input type="hidden" name="server_id" id="forward_admin_rule_server_id" value="0">';
     echo '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">';
     echo '<div class="form-group"><label for="forward_admin_rule_name">规则名称</label><input type="text" class="form-control" name="rule_name" id="forward_admin_rule_name" required></div>';
+    echo '<div class="form-group"><label for="forward_admin_listen_ip">入口 IP</label><select class="form-control" name="listen_ip" id="forward_admin_listen_ip" required>' . $serverIpOptionsHtml . '</select></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_internal_ip">目标 IP</label><input type="text" class="form-control" name="internal_ip" id="forward_admin_internal_ip" required></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_internal_port">目标端口</label><input type="number" class="form-control" name="internal_port" id="forward_admin_internal_port" min="1" max="65535" required></div></div></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_external_port">入口端口</label><input type="number" class="form-control" name="external_port" id="forward_admin_external_port" min="1" max="65535" required></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_protocol">协议</label><select class="form-control" name="protocol" id="forward_admin_protocol" required>' . $protocolSelect . '</select></div></div></div>';
     echo '<div class="form-group"><label for="forward_admin_product_name">产品名称</label><input type="text" class="form-control" name="product_name" id="forward_admin_product_name"></div>';
     echo '<div class="form-group"><label for="forward_admin_description">描述</label><textarea class="form-control" name="description" id="forward_admin_description" rows="3"></textarea></div>';
-    echo '<div class="alert alert-info" style="margin-bottom:0;">规则会写入 forward 的 <code>/api/rules</code>，入口 IP 固定使用模块配置中的 <strong>' . $serverIp . '</strong>。</div>';
+    echo '<div class="alert alert-info" style="margin-bottom:0;">规则会写入 forward 的 <code>/api/rules</code>，入口 IP 可从当前配置的 IP 池中选择。</div>';
     echo '</div><div class="modal-footer"><button type="button" class="btn btn-default" data-dismiss="modal">取消</button><button type="submit" class="btn btn-primary">保存</button></div></form>';
     echo '</div></div></div>';
 
@@ -1842,7 +2280,7 @@ HTML;
             $backendHttps = (int) $site['backend_https_port'] > 0 ? ('HTTPS:' . (int) $site['backend_https_port']) : 'HTTPS:关闭';
             echo '<tr>';
             echo '<td>' . (int) $site['id'] . '</td>';
-            echo '<td><strong>' . htmlspecialchars($site['domain'], ENT_QUOTES, 'UTF-8') . '</strong></td>';
+            echo '<td><strong>' . htmlspecialchars($site['domain'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($site['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($site['listen_ip'], ENT_QUOTES, 'UTF-8') . ':80/443</td>';
             echo '<td>' . htmlspecialchars($site['backend_ip'], ENT_QUOTES, 'UTF-8') . ' <small>(' . htmlspecialchars($backendHttp . '，' . $backendHttps, ENT_QUOTES, 'UTF-8') . ')</small></td>';
             echo '<td>' . htmlspecialchars($site['tag'] ?: '-', ENT_QUOTES, 'UTF-8') . '</td>';
@@ -1862,14 +2300,17 @@ HTML;
     echo '<form id="forwardAdminSiteForm"><div class="modal-header"><button type="button" class="close" data-dismiss="modal"><span>&times;</span></button><h4 class="modal-title" id="forwardAdminSiteModalTitle">添加共享站点</h4></div>';
     echo '<div class="modal-body">';
     echo '<input type="hidden" name="site_id" id="forward_admin_site_id" value="">';
+    echo '<input type="hidden" name="service_id" id="forward_admin_site_service_id" value="0">';
+    echo '<input type="hidden" name="server_id" id="forward_admin_site_server_id" value="0">';
     echo '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">';
     echo '<div class="form-group"><label for="forward_admin_site_domain">域名</label><input type="text" class="form-control" name="domain" id="forward_admin_site_domain" placeholder="例如 app.example.com" required></div>';
+    echo '<div class="form-group"><label for="forward_admin_site_listen_ip">入口 IP</label><select class="form-control" name="listen_ip" id="forward_admin_site_listen_ip" required>' . $serverIpOptionsHtml . '</select></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_backend_ip">后端 IP</label><input type="text" class="form-control" name="backend_ip" id="forward_admin_site_backend_ip" required></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_product_name">产品名称</label><input type="text" class="form-control" name="product_name" id="forward_admin_site_product_name"></div></div></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_http_port">HTTP 端口</label><input type="number" class="form-control" name="backend_http_port" id="forward_admin_site_http_port" min="0" max="65535" value="80"></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_https_port">HTTPS 端口</label><input type="number" class="form-control" name="backend_https_port" id="forward_admin_site_https_port" min="0" max="65535" value="443"></div></div></div>';
     echo '<div class="form-group"><label for="forward_admin_site_description">描述</label><textarea class="form-control" name="description" id="forward_admin_site_description" rows="3"></textarea></div>';
-    echo '<div class="alert alert-info" style="margin-bottom:0;">站点会写入 forward 的 <code>/api/sites</code>，统一监听 <strong>' . $serverIp . ':80/443</strong>，域名必须唯一。</div>';
+    echo '<div class="alert alert-info" style="margin-bottom:0;">站点会写入 forward 的 <code>/api/sites</code>，入口 IP 可从当前配置的 IP 池中选择，域名必须唯一。</div>';
     echo '</div><div class="modal-footer"><button type="button" class="btn btn-default" data-dismiss="modal">取消</button><button type="submit" class="btn btn-primary">保存</button></div></form>';
     echo '</div></div></div>';
 
@@ -1878,18 +2319,34 @@ HTML;
 (function ($) {
   var csrfToken = {$csrfTokenJs};
 
+  function ensureSelectOption($select, value) {
+    if (!value) {
+      return;
+    }
+    if ($select.find('option[value="' + value.replace(/"/g, '\\"') + '"]').length) {
+      return;
+    }
+    $('<option></option>').val(value).text(value + ' (当前值)').appendTo($select);
+  }
+
   function resetForm() {
     $('#forwardAdminRuleForm')[0].reset();
     $('#forward_admin_rule_id').val('');
+    $('#forward_admin_rule_service_id').val('0');
+    $('#forward_admin_rule_server_id').val('0');
     $('#forwardAdminRuleModalTitle').text('添加规则');
+    $('#forward_admin_listen_ip').prop('selectedIndex', 0);
   }
 
   function resetSiteForm() {
     $('#forwardAdminSiteForm')[0].reset();
     $('#forward_admin_site_id').val('');
+    $('#forward_admin_site_service_id').val('0');
+    $('#forward_admin_site_server_id').val('0');
     $('#forward_admin_site_http_port').val('80');
     $('#forward_admin_site_https_port').val('443');
     $('#forwardAdminSiteModalTitle').text('添加共享站点');
+    $('#forward_admin_site_listen_ip').prop('selectedIndex', 0);
   }
 
   $('#forwardAddRuleBtn').on('click', function () {
@@ -1907,7 +2364,11 @@ HTML;
     resetForm();
     $('#forwardAdminRuleModalTitle').text('编辑规则');
     $('#forward_admin_rule_id').val(rule.id || '');
+    $('#forward_admin_rule_service_id').val(rule.service_id || 0);
+    $('#forward_admin_rule_server_id').val(rule.server_id || 0);
     $('#forward_admin_rule_name').val(rule.rule_name || '');
+    ensureSelectOption($('#forward_admin_listen_ip'), rule.in_ip || '');
+    $('#forward_admin_listen_ip').val(rule.in_ip || '');
     $('#forward_admin_internal_ip').val(rule.out_ip || '');
     $('#forward_admin_internal_port').val(rule.out_port || '');
     $('#forward_admin_external_port').val(rule.in_port || '');
@@ -1922,7 +2383,11 @@ HTML;
     resetSiteForm();
     $('#forwardAdminSiteModalTitle').text('编辑共享站点');
     $('#forward_admin_site_id').val(site.id || '');
+    $('#forward_admin_site_service_id').val(site.service_id || 0);
+    $('#forward_admin_site_server_id').val(site.server_id || 0);
     $('#forward_admin_site_domain').val(site.domain || '');
+    ensureSelectOption($('#forward_admin_site_listen_ip'), site.listen_ip || '');
+    $('#forward_admin_site_listen_ip').val(site.listen_ip || '');
     $('#forward_admin_site_backend_ip').val(site.backend_ip || '');
     $('#forward_admin_site_http_port').val(site.backend_http_port || 0);
     $('#forward_admin_site_https_port').val(site.backend_https_port || 0);
@@ -2034,6 +2499,8 @@ HTML;
 
 function forward_clientarea($vars)
 {
+    forward_ensure_runtime_schema();
+
     forward_handle_client_ajax();
 
     $settings = forward_get_module_settings();
@@ -2056,6 +2523,7 @@ function forward_clientarea($vars)
     $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? ($vars['allowed_product_ids'] ?? ''));
     $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? ($vars['allowed_client_ips'] ?? ''));
     $services = $clientId > 0 ? forward_get_user_services($clientId, $allowedProducts, $allowedClientIps) : [];
+    $services = forward_attach_service_listen_ips($services, $settings);
     $hasAccess = $clientId > 0 && !empty($services);
     $rules = $clientId > 0 ? forward_get_local_rules($clientId) : [];
     $sites = $clientId > 0 ? forward_get_local_sites($clientId) : [];
@@ -2074,6 +2542,7 @@ function forward_clientarea($vars)
     $protocols = forward_protocol_options($settings['allowed_protocols'] ?? ($vars['allowed_protocols'] ?? 'tcp+udp'));
     $maxRules = max(0, (int) ($settings['max_rules_per_user'] ?? ($vars['max_rules_per_user'] ?? 10)));
     $maxSites = max(0, (int) ($settings['max_sites_per_user'] ?? ($vars['max_sites_per_user'] ?? 5)));
+    $allServerIps = forward_get_all_server_ips($settings);
 
     if ($clientId > 0 && !$hasAccess) {
         return [
@@ -2116,7 +2585,9 @@ function forward_clientarea($vars)
             'can_add_more_sites' => $maxSites === 0 || count($sites) < $maxSites,
             'service_ip_count' => forward_count_service_ips($services),
             'allowed_protocols' => $protocols,
-            'server_ip' => $settings['server_ip'] ?? ($vars['server_ip'] ?? '0.0.0.0'),
+            'server_ip' => $allServerIps[0] ?? '0.0.0.0',
+            'server_ip_summary' => forward_format_ip_list($allServerIps),
+            'server_ips' => $allServerIps,
         ],
     ];
 }
