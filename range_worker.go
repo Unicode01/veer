@@ -511,7 +511,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 				srcUDP := srcAddr.(*net.UDPAddr)
 				outConn, err = dialTransparentUDP(srcUDP.IP, pr.OutInterface, targetAddr)
 			} else {
-				outConn, err = net.DialUDP("udp", nil, targetAddr)
+				outConn, err = dialOutboundUDP(targetAddr, pr.OutInterface)
 			}
 			if err != nil {
 				mu.Unlock()

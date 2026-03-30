@@ -95,6 +95,7 @@
   app.renderRangesTable = function renderRangesTable() {
     const el = app.el;
     const st = app.state.ranges;
+    app.closeDropdowns();
     let filteredList = st.data.slice();
     if (st.filterTag) filteredList = filteredList.filter((range) => range.tag === st.filterTag);
     if (st.searchQuery) {

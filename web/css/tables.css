@@ -218,6 +218,7 @@ tr.row-pending td {
 }
 
 #rulesTable td:nth-child(11),
+#rulesTable td:nth-child(12),
 #rangesTable td:nth-child(10),
 #rulesTable td:nth-child(13),
 #sitesTable td:nth-child(9),
@@ -284,6 +285,12 @@ tr.row-pending td {
     background: var(--info-bg);
     color: var(--info-text);
     border-color: var(--info-border);
+}
+
+.worker-type-kernel {
+    background: var(--primary-soft);
+    color: var(--primary);
+    border-color: var(--primary);
 }
 
 .worker-type-range {

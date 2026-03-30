@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const ruleColumns = `id, in_interface, in_ip, in_port, out_interface, out_ip, out_port, protocol, remark, tag, enabled, transparent`
+const ruleColumns = `id, in_interface, in_ip, in_port, out_interface, out_ip, out_port, protocol, remark, tag, enabled, transparent, engine_preference`
 
 type sqlRuleStore interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
@@ -19,10 +19,12 @@ type sqlRuleStore interface {
 
 func scanRule(sc interface{ Scan(...interface{}) error }) (Rule, error) {
 	var r Rule
+	var enginePreference string
 	var enabled, transparent int
-	err := sc.Scan(&r.ID, &r.InInterface, &r.InIP, &r.InPort, &r.OutInterface, &r.OutIP, &r.OutPort, &r.Protocol, &r.Remark, &r.Tag, &enabled, &transparent)
+	err := sc.Scan(&r.ID, &r.InInterface, &r.InIP, &r.InPort, &r.OutInterface, &r.OutIP, &r.OutPort, &r.Protocol, &r.Remark, &r.Tag, &enabled, &transparent, &enginePreference)
 	r.Enabled = enabled != 0
 	r.Transparent = transparent != 0
+	r.EnginePreference = ruleEngineAuto
 	return r, err
 }
 
@@ -42,6 +44,7 @@ var schema = map[string][][2]string{
 		{"tag", "TEXT NOT NULL DEFAULT ''"},
 		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
 		{"transparent", "INTEGER NOT NULL DEFAULT 0"},
+		{"engine_preference", "TEXT NOT NULL DEFAULT 'auto'"},
 	},
 	"sites": {
 		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
@@ -146,9 +149,9 @@ func getTableColumns(db *sql.DB, table string) (map[string]bool, error) {
 
 func dbAddRule(db sqlRuleStore, r *Rule) (int64, error) {
 	res, err := db.Exec(
-		`INSERT INTO rules (in_interface, in_ip, in_port, out_interface, out_ip, out_port, protocol, remark, tag, enabled, transparent)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent),
+		`INSERT INTO rules (in_interface, in_ip, in_port, out_interface, out_ip, out_port, protocol, remark, tag, enabled, transparent, engine_preference)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent), ruleEngineAuto,
 	)
 	if err != nil {
 		return 0, err
@@ -158,8 +161,8 @@ func dbAddRule(db sqlRuleStore, r *Rule) (int64, error) {
 
 func dbUpdateRule(db sqlRuleStore, r *Rule) error {
 	_, err := db.Exec(
-		`UPDATE rules SET in_interface=?, in_ip=?, in_port=?, out_interface=?, out_ip=?, out_port=?, protocol=?, remark=?, tag=?, enabled=?, transparent=? WHERE id=?`,
-		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent), r.ID,
+		`UPDATE rules SET in_interface=?, in_ip=?, in_port=?, out_interface=?, out_ip=?, out_port=?, protocol=?, remark=?, tag=?, enabled=?, transparent=?, engine_preference=? WHERE id=?`,
+		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent), ruleEngineAuto, r.ID,
 	)
 	return err
 }

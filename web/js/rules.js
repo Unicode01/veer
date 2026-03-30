@@ -111,7 +111,30 @@
       return 2;
     }
     if (key === 'transparent') return rule.transparent ? 1 : 0;
+    if (key === 'effective_engine') return rule.effective_engine || 'userspace';
     return rule[key];
+  };
+
+  app.getRuleEngineInfo = function getRuleEngineInfo(rule) {
+    const effective = (rule.effective_engine || 'userspace').toLowerCase();
+    const badgeClass = effective === 'kernel' ? 'badge-kernel' : 'badge-userspace';
+    let hintKey = '';
+    if (rule.fallback_reason) hintKey = 'rule.engine.hint.fallback';
+    else if (effective === 'kernel') hintKey = 'rule.engine.hint.kernelActive';
+    else if (!rule.kernel_eligible) hintKey = 'rule.engine.hint.userspaceOnly';
+
+    const titleParts = [
+      app.t('rule.engine.effectiveLabel') + ': ' + app.t('rule.engine.effective.' + effective)
+    ];
+    if (rule.fallback_reason) titleParts.push(rule.fallback_reason);
+    else if (rule.kernel_reason) titleParts.push(rule.kernel_reason);
+
+    return {
+      badgeClass: badgeClass,
+      badgeText: app.t('rule.engine.effective.' + effective),
+      hintText: hintKey ? app.t(hintKey) : '',
+      title: titleParts.join('\n')
+    };
   };
 
   app.getFilteredRules = function getFilteredRules() {
@@ -203,6 +226,7 @@
       'must be a valid IPv4 address': app.t('validation.ipv4'),
       'must be between 1 and 65535': app.t('validation.portRange'),
       'must be tcp, udp, or tcp+udp': app.t('validation.protocol'),
+      'must be auto, userspace, or kernel': app.t('validation.enginePreference'),
       'interface does not exist on this host': app.t('validation.interfaceMissing'),
       'rule not found': app.t('validation.ruleNotFound')
     };
@@ -254,6 +278,11 @@
   app.renderRulesTable = function renderRulesTable() {
     const el = app.el;
     const st = app.state.rules;
+    app.closeDropdowns();
+    if (st.sortKey === 'effective_engine') {
+      st.sortKey = '';
+      st.sortAsc = true;
+    }
     const filteredList = app.getFilteredRules();
     const pageInfo = app.paginateList(st, filteredList);
     const list = pageInfo.items;

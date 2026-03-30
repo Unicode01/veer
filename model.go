@@ -1,18 +1,19 @@
 package main
 
 type Rule struct {
-	ID           int64  `json:"id"`
-	InInterface  string `json:"in_interface"`
-	InIP         string `json:"in_ip"`
-	InPort       int    `json:"in_port"`
-	OutInterface string `json:"out_interface"`
-	OutIP        string `json:"out_ip"`
-	OutPort      int    `json:"out_port"`
-	Protocol     string `json:"protocol"`
-	Remark       string `json:"remark"`
-	Tag          string `json:"tag"`
-	Enabled      bool   `json:"enabled"`
-	Transparent  bool   `json:"transparent"`
+	ID               int64  `json:"id"`
+	InInterface      string `json:"in_interface"`
+	InIP             string `json:"in_ip"`
+	InPort           int    `json:"in_port"`
+	OutInterface     string `json:"out_interface"`
+	OutIP            string `json:"out_ip"`
+	OutPort          int    `json:"out_port"`
+	Protocol         string `json:"protocol"`
+	Remark           string `json:"remark"`
+	Tag              string `json:"tag"`
+	Enabled          bool   `json:"enabled"`
+	Transparent      bool   `json:"transparent"`
+	EnginePreference string `json:"engine_preference"`
 }
 
 type Site struct {
@@ -45,24 +46,24 @@ type PortRange struct {
 }
 
 type IPCMessage struct {
-	Type           string            `json:"type"`
-	RuleID         int64             `json:"rule_id,omitempty"`
-	WorkerIndex    int               `json:"worker_index,omitempty"`
-	Rule           *Rule             `json:"rule,omitempty"`
-	Rules          []Rule            `json:"rules,omitempty"`
-	Sites          []Site            `json:"sites,omitempty"`
-	PortRange      *PortRange        `json:"port_range,omitempty"`
-	PortRanges     []PortRange       `json:"port_ranges,omitempty"`
-	Status         string            `json:"status,omitempty"`
-	Error          string            `json:"error,omitempty"`
-	FailedRuleIDs   []int64           `json:"failed_rule_ids,omitempty"`
-	FailedRangeIDs  []int64           `json:"failed_range_ids,omitempty"`
-	ActiveRuleIDs   []int64           `json:"active_rule_ids,omitempty"`
-	ActiveRangeIDs  []int64           `json:"active_range_ids,omitempty"`
+	Type           string             `json:"type"`
+	RuleID         int64              `json:"rule_id,omitempty"`
+	WorkerIndex    int                `json:"worker_index,omitempty"`
+	Rule           *Rule              `json:"rule,omitempty"`
+	Rules          []Rule             `json:"rules,omitempty"`
+	Sites          []Site             `json:"sites,omitempty"`
+	PortRange      *PortRange         `json:"port_range,omitempty"`
+	PortRanges     []PortRange        `json:"port_ranges,omitempty"`
+	Status         string             `json:"status,omitempty"`
+	Error          string             `json:"error,omitempty"`
+	FailedRuleIDs  []int64            `json:"failed_rule_ids,omitempty"`
+	FailedRangeIDs []int64            `json:"failed_range_ids,omitempty"`
+	ActiveRuleIDs  []int64            `json:"active_rule_ids,omitempty"`
+	ActiveRangeIDs []int64            `json:"active_range_ids,omitempty"`
 	Stats          []RuleStatsReport  `json:"stats,omitempty"`
 	RangeStats     []RangeStatsReport `json:"range_stats,omitempty"`
 	SiteStats      []SiteStatsReport  `json:"site_stats,omitempty"`
-	BinaryHash     string            `json:"binary_hash,omitempty"`
+	BinaryHash     string             `json:"binary_hash,omitempty"`
 }
 
 type InterfaceInfo struct {
@@ -72,7 +73,11 @@ type InterfaceInfo struct {
 
 type RuleStatus struct {
 	Rule
-	Status string `json:"status"`
+	Status          string `json:"status"`
+	EffectiveEngine string `json:"effective_engine"`
+	KernelEligible  bool   `json:"kernel_eligible"`
+	KernelReason    string `json:"kernel_reason,omitempty"`
+	FallbackReason  string `json:"fallback_reason,omitempty"`
 }
 
 type SiteStatus struct {
@@ -82,7 +87,11 @@ type SiteStatus struct {
 
 type PortRangeStatus struct {
 	PortRange
-	Status string `json:"status"`
+	Status          string `json:"status"`
+	EffectiveEngine string `json:"effective_engine"`
+	KernelEligible  bool   `json:"kernel_eligible"`
+	KernelReason    string `json:"kernel_reason,omitempty"`
+	FallbackReason  string `json:"fallback_reason,omitempty"`
 }
 
 type WorkerView struct {

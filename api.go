@@ -269,7 +269,7 @@ func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 	runningRules, failedRules := collectRuleRuntimeStatus(pm)
 	var statuses []RuleStatus
 	for _, rule := range rules {
-		item := RuleStatus{Rule: rule, Status: ruleRuntimeStatus(rule, runningRules, failedRules)}
+		item := pm.buildRuleStatus(rule, ruleRuntimeStatus(rule, runningRules, failedRules))
 		if matchesRuleFilter(item, filters) {
 			statuses = append(statuses, item)
 		}
@@ -284,6 +284,9 @@ func collectRuleRuntimeStatus(pm *ProcessManager) (map[int64]bool, map[int64]boo
 	runningRules := make(map[int64]bool)
 	failedRules := make(map[int64]bool)
 	pm.mu.Lock()
+	for id := range pm.kernelRules {
+		runningRules[id] = true
+	}
 	for _, wi := range pm.ruleWorkers {
 		if !wi.running {
 			continue
@@ -505,6 +508,10 @@ func matchesRuleSearchQuery(rule RuleStatus, query string) bool {
 		strconv.Itoa(rule.OutPort),
 		rule.Protocol,
 		rule.Status,
+		rule.EnginePreference,
+		rule.EffectiveEngine,
+		rule.KernelReason,
+		rule.FallbackReason,
 	}
 	for _, value := range values {
 		if strings.Contains(strings.ToLower(value), query) {
@@ -779,6 +786,7 @@ func normalizeAndValidateRule(rule Rule, scope string, index int, requireID bool
 	rule.Protocol = strings.ToLower(strings.TrimSpace(rule.Protocol))
 	rule.Remark = strings.TrimSpace(rule.Remark)
 	rule.Tag = strings.TrimSpace(rule.Tag)
+	rule.EnginePreference = ruleEngineAuto
 	if rule.Protocol == "" {
 		rule.Protocol = "tcp"
 	}
@@ -1237,6 +1245,9 @@ func handleListRanges(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	pm.mu.Lock()
 	runningRanges := make(map[int64]bool)
 	failedRanges := make(map[int64]bool)
+	for id := range pm.kernelRanges {
+		runningRanges[id] = true
+	}
 	for _, wi := range pm.rangeWorkers {
 		if wi.running {
 			for _, pr := range wi.ranges {
@@ -1256,7 +1267,7 @@ func handleListRanges(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		} else if runningRanges[pr.ID] {
 			status = "running"
 		}
-		statuses = append(statuses, PortRangeStatus{PortRange: pr, Status: status})
+		statuses = append(statuses, pm.buildRangeStatus(pr, status))
 	}
 	if statuses == nil {
 		statuses = []PortRangeStatus{}
@@ -1279,6 +1290,17 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	}
 	if pageSize > 1000 {
 		pageSize = 1000
+	}
+
+	allRules, err := dbGetRules(db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	allRanges, err := dbGetRanges(db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
 	}
 
 	enabledSites := 0
@@ -1306,7 +1328,17 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	}
 
 	var snaps []workerSnap
+	kernelRuleIDs := make(map[int64]bool)
+	kernelRangeIDs := make(map[int64]bool)
+	kernelBinaryHash := ""
 	pm.mu.Lock()
+	for id := range pm.kernelRules {
+		kernelRuleIDs[id] = true
+	}
+	for id := range pm.kernelRanges {
+		kernelRangeIDs[id] = true
+	}
+	kernelBinaryHash = pm.binaryHash
 	ruleOwner := make(map[int64]int)
 	rangeOwner := make(map[int64]int)
 	for idx, wi := range pm.ruleWorkers {
@@ -1480,6 +1512,45 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	}
 	pm.mu.Unlock()
 
+	if len(kernelRuleIDs) > 0 {
+		kernelRules := make([]Rule, 0, len(kernelRuleIDs))
+		for _, rule := range allRules {
+			if !rule.Enabled || !kernelRuleIDs[rule.ID] {
+				continue
+			}
+			kernelRules = append(kernelRules, rule)
+		}
+		if len(kernelRules) > 0 {
+			sort.Slice(kernelRules, func(i, j int) bool { return kernelRules[i].ID < kernelRules[j].ID })
+			snaps = append(snaps, workerSnap{
+				kind:       "kernel",
+				index:      0,
+				running:    true,
+				binaryHash: kernelBinaryHash,
+				rules:      kernelRules,
+			})
+		}
+	}
+	if len(kernelRangeIDs) > 0 {
+		kernelRanges := make([]PortRange, 0, len(kernelRangeIDs))
+		for _, pr := range allRanges {
+			if !pr.Enabled || !kernelRangeIDs[pr.ID] {
+				continue
+			}
+			kernelRanges = append(kernelRanges, pr)
+		}
+		if len(kernelRanges) > 0 {
+			sort.Slice(kernelRanges, func(i, j int) bool { return kernelRanges[i].ID < kernelRanges[j].ID })
+			snaps = append(snaps, workerSnap{
+				kind:       "kernel",
+				index:      1,
+				running:    true,
+				binaryHash: kernelBinaryHash,
+				ranges:     kernelRanges,
+			})
+		}
+	}
+
 	workers := make([]WorkerView, 0, len(snaps))
 	for _, s := range snaps {
 		view := WorkerView{
@@ -1497,6 +1568,18 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		}
 
 		switch s.kind {
+		case "kernel":
+			if len(s.rules) > 0 {
+				view.RuleCount = len(s.rules)
+				for _, r := range s.rules {
+					view.Rules = append(view.Rules, pm.buildRuleStatus(r, "running"))
+				}
+			} else {
+				view.RangeCount = len(s.ranges)
+				for _, pr := range s.ranges {
+					view.Ranges = append(view.Ranges, pm.buildRangeStatus(pr, "running"))
+				}
+			}
 		case "rule":
 			view.RuleCount = len(s.rules)
 			for _, r := range s.rules {
@@ -1510,7 +1593,7 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 				} else if s.draining && s.activeRuleIDs[r.ID] {
 					status = "running"
 				}
-				view.Rules = append(view.Rules, RuleStatus{Rule: r, Status: status})
+				view.Rules = append(view.Rules, pm.buildRuleStatus(r, status))
 			}
 			if view.Status == "stopped" && len(s.rules) > 0 && len(s.failedRules) == len(s.rules) {
 				view.Status = "error"
@@ -1528,7 +1611,7 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 				} else if s.draining && s.activeRangeIDs[pr.ID] {
 					status = "running"
 				}
-				view.Ranges = append(view.Ranges, PortRangeStatus{PortRange: pr, Status: status})
+				view.Ranges = append(view.Ranges, pm.buildRangeStatus(pr, status))
 			}
 			if view.Status == "stopped" && len(s.ranges) > 0 && len(s.failedRanges) == len(s.ranges) {
 				view.Status = "error"
@@ -1540,7 +1623,7 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		workers = append(workers, view)
 	}
 
-	kindOrder := map[string]int{"rule": 0, "range": 1, "shared": 2}
+	kindOrder := map[string]int{"kernel": 0, "rule": 1, "range": 2, "shared": 3}
 	sort.Slice(workers, func(i, j int) bool {
 		ki := kindOrder[workers[i].Kind]
 		kj := kindOrder[workers[j].Kind]

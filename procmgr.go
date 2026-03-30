@@ -80,6 +80,11 @@ type ProcessManager struct {
 	listener        net.Listener
 	binaryHash      string
 	ready           bool
+	rulePlans       map[int64]ruleDataplanePlan
+	rangePlans      map[int64]rangeDataplanePlan
+	kernelRuntime   kernelRuleRuntime
+	kernelRules     map[int64]bool
+	kernelRanges    map[int64]bool
 }
 
 func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessManager, error) {
@@ -97,13 +102,27 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 
 	pm := &ProcessManager{
-		ruleWorkers:  make(map[int]*WorkerInfo),
-		rangeWorkers: make(map[int]*WorkerInfo),
-		db:           db,
-		cfg:          cfg,
-		sockPath:     sockPath,
-		listener:     ln,
-		binaryHash:   binaryHash,
+		ruleWorkers:   make(map[int]*WorkerInfo),
+		rangeWorkers:  make(map[int]*WorkerInfo),
+		db:            db,
+		cfg:           cfg,
+		sockPath:      sockPath,
+		listener:      ln,
+		binaryHash:    binaryHash,
+		rulePlans:     make(map[int64]ruleDataplanePlan),
+		rangePlans:    make(map[int64]rangeDataplanePlan),
+		kernelRuntime: newKernelRuleRuntime(),
+		kernelRules:   make(map[int64]bool),
+		kernelRanges:  make(map[int64]bool),
+	}
+
+	if pm.kernelRuntime != nil {
+		available, reason := pm.kernelRuntime.Available()
+		if available {
+			log.Printf("kernel dataplane ready (default_engine=%s): %s", cfg.DefaultEngine, reason)
+		} else {
+			log.Printf("kernel dataplane unavailable (default_engine=%s): %s", cfg.DefaultEngine, reason)
+		}
 	}
 
 	go pm.monitorLoop()
@@ -397,9 +416,74 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load ranges: %v", err)
 		return
 	}
+
+	planner := newRuleDataplanePlanner(pm.kernelRuntime, pm.cfg.DefaultEngine)
+	candidates, rulePlans, rangePlans := buildKernelCandidateRules(rules, ranges, planner)
+	applyKernelOwnerConstraints(candidates, rulePlans, rangePlans)
+
+	activeKernelCandidates := filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
+	if pm.kernelRuntime != nil {
+		for {
+			results, err := pm.kernelRuntime.Reconcile(kernelCandidateRules(activeKernelCandidates))
+			if len(activeKernelCandidates) == 0 {
+				break
+			}
+
+			ownerFailures := collectKernelOwnerFailures(activeKernelCandidates, results, err)
+			if len(ownerFailures) == 0 {
+				break
+			}
+			for owner, reason := range ownerFailures {
+				applyKernelOwnerFallback(owner, reason, rulePlans, rangePlans)
+			}
+			activeKernelCandidates = filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
+		}
+	}
+
+	logRuleDataplanePlans(rules, rulePlans, pm.cfg.DefaultEngine)
+	logRangeDataplanePlans(ranges, rangePlans, pm.cfg.DefaultEngine)
+	log.Printf(
+		"kernel dataplane planner summary: default_engine=%s enabled_rules=%d enabled_ranges=%d kernel_target_rules=%d kernel_target_ranges=%d kernel_target_entries=%d",
+		pm.cfg.DefaultEngine,
+		countEnabledRules(rules),
+		countEnabledRanges(ranges),
+		countKernelRulePlans(rules, rulePlans),
+		countKernelRangePlans(ranges, rangePlans),
+		len(filterActiveKernelCandidates(candidates, rulePlans, rangePlans)),
+	)
+
+	kernelAppliedRules := make(map[int64]bool)
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+		if plan, ok := rulePlans[rule.ID]; ok && plan.EffectiveEngine == ruleEngineKernel {
+			kernelAppliedRules[rule.ID] = true
+		}
+	}
+	kernelAppliedRanges := make(map[int64]bool)
+	for _, pr := range ranges {
+		if !pr.Enabled {
+			continue
+		}
+		if plan, ok := rangePlans[pr.ID]; ok && plan.EffectiveEngine == ruleEngineKernel {
+			kernelAppliedRanges[pr.ID] = true
+		}
+	}
+
+	pm.mu.Lock()
+	pm.rulePlans = rulePlans
+	pm.rangePlans = rangePlans
+	pm.kernelRules = kernelAppliedRules
+	pm.kernelRanges = kernelAppliedRanges
+	pm.mu.Unlock()
+
 	var enabledRules []Rule
 	for _, r := range rules {
 		if r.Enabled {
+			if plan, ok := rulePlans[r.ID]; ok && plan.EffectiveEngine == ruleEngineKernel {
+				continue
+			}
 			enabledRules = append(enabledRules, r)
 		}
 	}
@@ -407,6 +491,9 @@ func (pm *ProcessManager) redistributeWorkers() {
 	var enabledRanges []PortRange
 	for _, r := range ranges {
 		if r.Enabled {
+			if plan, ok := rangePlans[r.ID]; ok && plan.EffectiveEngine == ruleEngineKernel {
+				continue
+			}
 			enabledRanges = append(enabledRanges, r)
 		}
 	}
@@ -449,6 +536,481 @@ func (pm *ProcessManager) redistributeWorkers() {
 
 	pm.applyRuleAssignments(ruleAssignments)
 	pm.applyRangeAssignments(rangeAssignments)
+}
+
+func countEnabledRules(rules []Rule) int {
+	count := 0
+	for _, rule := range rules {
+		if rule.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
+func countEnabledRanges(ranges []PortRange) int {
+	count := 0
+	for _, pr := range ranges {
+		if pr.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
+type kernelCandidateOwner struct {
+	kind string
+	id   int64
+}
+
+type kernelCandidateRule struct {
+	owner kernelCandidateOwner
+	rule  Rule
+}
+
+func kernelProtocolVariants(protocol string) []string {
+	switch protocol {
+	case "tcp":
+		return []string{"tcp"}
+	case "udp":
+		return []string{"udp"}
+	case "tcp+udp":
+		return []string{"tcp", "udp"}
+	default:
+		return nil
+	}
+}
+
+func allocateSyntheticKernelRuleID(nextID *int64, used map[int64]struct{}) (int64, error) {
+	limit := int64(^uint32(0))
+	for {
+		if *nextID <= 0 {
+			*nextID = 1
+		}
+		if *nextID > limit {
+			return 0, fmt.Errorf("kernel dataplane synthetic rule ids exhausted uint32 range")
+		}
+		id := *nextID
+		*nextID++
+		if _, exists := used[id]; exists {
+			continue
+		}
+		used[id] = struct{}{}
+		return id, nil
+	}
+}
+
+func aggregateKernelOwnerPlan(preferred string, entryPlans []ruleDataplanePlan) ruleDataplanePlan {
+	plan := ruleDataplanePlan{
+		PreferredEngine: preferred,
+		EffectiveEngine: ruleEngineUserspace,
+	}
+	if len(entryPlans) == 0 {
+		return plan
+	}
+
+	allKernel := true
+	allEligible := true
+	for _, item := range entryPlans {
+		if !item.KernelEligible {
+			allEligible = false
+			if plan.KernelReason == "" {
+				plan.KernelReason = item.KernelReason
+			}
+		}
+		if item.EffectiveEngine != ruleEngineKernel {
+			allKernel = false
+			if plan.FallbackReason == "" && item.FallbackReason != "" {
+				plan.FallbackReason = item.FallbackReason
+			}
+		}
+	}
+	plan.KernelEligible = allEligible
+	if allKernel {
+		plan.EffectiveEngine = ruleEngineKernel
+	}
+	return plan
+}
+
+func kernelRulesCapacityReason(currentEntries int, neededEntries int) string {
+	if neededEntries > kernelRulesMapLimit {
+		return fmt.Sprintf("kernel rules map capacity %d is lower than requested entries %d", kernelRulesMapLimit, neededEntries)
+	}
+	if currentEntries >= kernelRulesMapLimit {
+		return fmt.Sprintf("kernel rules map capacity %d is already exhausted", kernelRulesMapLimit)
+	}
+	return fmt.Sprintf(
+		"kernel rules map capacity %d would be exceeded by reserving %d more entries (currently reserved %d)",
+		kernelRulesMapLimit,
+		neededEntries,
+		currentEntries,
+	)
+}
+
+func sampleKernelRangePlan(pr PortRange, variants []string, planner *ruleDataplanePlanner, preferred string) rangeDataplanePlan {
+	entryPlans := make([]ruleDataplanePlan, 0, len(variants))
+	for _, proto := range variants {
+		entryPlans = append(entryPlans, planner.Plan(Rule{
+			ID:               1,
+			InInterface:      pr.InInterface,
+			InIP:             pr.InIP,
+			InPort:           pr.StartPort,
+			OutInterface:     pr.OutInterface,
+			OutIP:            pr.OutIP,
+			OutPort:          pr.OutStartPort,
+			Protocol:         proto,
+			Remark:           pr.Remark,
+			Tag:              pr.Tag,
+			Enabled:          pr.Enabled,
+			Transparent:      pr.Transparent,
+			EnginePreference: ruleEngineAuto,
+		}))
+	}
+	return aggregateKernelOwnerPlan(preferred, entryPlans)
+}
+
+func applyKernelOwnerFallback(owner kernelCandidateOwner, reason string, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
+	if owner.kind == workerKindRule {
+		plan := rulePlans[owner.id]
+		plan.EffectiveEngine = ruleEngineUserspace
+		if plan.FallbackReason == "" {
+			plan.FallbackReason = reason
+		}
+		rulePlans[owner.id] = plan
+		return
+	}
+
+	plan := rangePlans[owner.id]
+	plan.EffectiveEngine = ruleEngineUserspace
+	if plan.FallbackReason == "" {
+		plan.FallbackReason = reason
+	}
+	rangePlans[owner.id] = plan
+}
+
+func kernelOwnerEffectiveEngine(owner kernelCandidateOwner, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) string {
+	if owner.kind == workerKindRule {
+		return rulePlans[owner.id].EffectiveEngine
+	}
+	return rangePlans[owner.id].EffectiveEngine
+}
+
+func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDataplanePlanner) ([]kernelCandidateRule, map[int64]ruleDataplanePlan, map[int64]rangeDataplanePlan) {
+	rulePlans := make(map[int64]ruleDataplanePlan, len(rules))
+	rangePlans := make(map[int64]rangeDataplanePlan, len(ranges))
+
+	maxRuleID := int64(0)
+	usedIDs := make(map[int64]struct{}, len(rules))
+	for _, rule := range rules {
+		if rule.ID > maxRuleID {
+			maxRuleID = rule.ID
+		}
+		if rule.ID > 0 {
+			usedIDs[rule.ID] = struct{}{}
+		}
+	}
+	nextSyntheticID := maxRuleID + 1
+
+	candidates := make([]kernelCandidateRule, 0)
+	reservedKernelEntries := 0
+
+	for _, rule := range rules {
+		owner := kernelCandidateOwner{kind: workerKindRule, id: rule.ID}
+		variants := kernelProtocolVariants(rule.Protocol)
+		if len(variants) == 0 {
+			plan := planner.Plan(rule)
+			rulePlans[rule.ID] = plan
+			continue
+		}
+
+		entryPlans := make([]ruleDataplanePlan, 0, len(variants))
+		entryCandidates := make([]kernelCandidateRule, 0, len(variants))
+		for idx, proto := range variants {
+			item := rule
+			item.Protocol = proto
+			if idx > 0 {
+				id, err := allocateSyntheticKernelRuleID(&nextSyntheticID, usedIDs)
+				if err != nil {
+					entryPlans = append(entryPlans, ruleDataplanePlan{
+						PreferredEngine: planner.resolvePreferredEngine(rule.EnginePreference),
+						EffectiveEngine: ruleEngineUserspace,
+						FallbackReason:  err.Error(),
+					})
+					continue
+				}
+				item.ID = id
+			}
+			entryPlans = append(entryPlans, planner.Plan(item))
+			entryCandidates = append(entryCandidates, kernelCandidateRule{owner: owner, rule: item})
+		}
+
+		plan := aggregateKernelOwnerPlan(planner.resolvePreferredEngine(rule.EnginePreference), entryPlans)
+		if rule.Enabled && plan.EffectiveEngine == ruleEngineKernel {
+			neededEntries := len(entryCandidates)
+			if reservedKernelEntries+neededEntries > kernelRulesMapLimit {
+				plan.EffectiveEngine = ruleEngineUserspace
+				if plan.FallbackReason == "" {
+					plan.FallbackReason = kernelRulesCapacityReason(reservedKernelEntries, neededEntries)
+				}
+			} else {
+				candidates = append(candidates, entryCandidates...)
+				reservedKernelEntries += neededEntries
+			}
+		}
+		rulePlans[rule.ID] = plan
+	}
+
+	rangePreferred := planner.resolvePreferredEngine("")
+	for _, pr := range ranges {
+		owner := kernelCandidateOwner{kind: workerKindRange, id: pr.ID}
+		variants := kernelProtocolVariants(pr.Protocol)
+		if len(variants) == 0 {
+			rangePlans[pr.ID] = rangeDataplanePlan{
+				PreferredEngine: rangePreferred,
+				EffectiveEngine: ruleEngineUserspace,
+				FallbackReason:  "kernel dataplane currently supports only transparent single-protocol TCP/UDP rules",
+			}
+			continue
+		}
+
+		totalEntries := (pr.EndPort - pr.StartPort + 1) * len(variants)
+		if pr.Enabled && reservedKernelEntries+totalEntries > kernelRulesMapLimit {
+			plan := sampleKernelRangePlan(pr, variants, planner, rangePreferred)
+			if plan.EffectiveEngine == ruleEngineKernel {
+				plan.EffectiveEngine = ruleEngineUserspace
+				if plan.FallbackReason == "" {
+					plan.FallbackReason = kernelRulesCapacityReason(reservedKernelEntries, totalEntries)
+				}
+			}
+			rangePlans[pr.ID] = plan
+			continue
+		}
+		entryPlans := make([]ruleDataplanePlan, 0, totalEntries)
+		entryCandidates := make([]kernelCandidateRule, 0, totalEntries)
+		allExpanded := true
+		for port := pr.StartPort; port <= pr.EndPort; port++ {
+			outPort := pr.OutStartPort + (port - pr.StartPort)
+			for _, proto := range variants {
+				id, err := allocateSyntheticKernelRuleID(&nextSyntheticID, usedIDs)
+				if err != nil {
+					entryPlans = append(entryPlans, ruleDataplanePlan{
+						PreferredEngine: rangePreferred,
+						EffectiveEngine: ruleEngineUserspace,
+						FallbackReason:  err.Error(),
+					})
+					allExpanded = false
+					continue
+				}
+
+				item := Rule{
+					ID:               id,
+					InInterface:      pr.InInterface,
+					InIP:             pr.InIP,
+					InPort:           port,
+					OutInterface:     pr.OutInterface,
+					OutIP:            pr.OutIP,
+					OutPort:          outPort,
+					Protocol:         proto,
+					Remark:           pr.Remark,
+					Tag:              pr.Tag,
+					Enabled:          pr.Enabled,
+					Transparent:      pr.Transparent,
+					EnginePreference: ruleEngineAuto,
+				}
+				entryPlans = append(entryPlans, planner.Plan(item))
+				entryCandidates = append(entryCandidates, kernelCandidateRule{owner: owner, rule: item})
+			}
+		}
+
+		plan := aggregateKernelOwnerPlan(rangePreferred, entryPlans)
+		if !allExpanded && plan.FallbackReason == "" {
+			plan.FallbackReason = "kernel dataplane synthetic rule expansion failed"
+		}
+		rangePlans[pr.ID] = plan
+		if pr.Enabled && plan.EffectiveEngine == ruleEngineKernel {
+			candidates = append(candidates, entryCandidates...)
+			reservedKernelEntries += len(entryCandidates)
+		}
+	}
+
+	return candidates, rulePlans, rangePlans
+}
+
+func applyKernelOwnerConstraints(candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
+	type backendKey struct {
+		OutIP    string
+		OutPort  int
+		Protocol string
+	}
+
+	grouped := make(map[backendKey]map[kernelCandidateOwner]struct{})
+	for _, candidate := range candidates {
+		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans) != ruleEngineKernel {
+			continue
+		}
+		key := backendKey{
+			OutIP:    candidate.rule.OutIP,
+			OutPort:  candidate.rule.OutPort,
+			Protocol: candidate.rule.Protocol,
+		}
+		if grouped[key] == nil {
+			grouped[key] = make(map[kernelCandidateOwner]struct{})
+		}
+		grouped[key][candidate.owner] = struct{}{}
+	}
+
+	for _, owners := range grouped {
+		if len(owners) < 2 {
+			continue
+		}
+		for owner := range owners {
+			applyKernelOwnerFallback(owner, "kernel dataplane requires a unique backend endpoint per active protocol binding", rulePlans, rangePlans)
+		}
+	}
+}
+
+func filterActiveKernelCandidates(candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelCandidateRule {
+	out := make([]kernelCandidateRule, 0, len(candidates))
+	for _, candidate := range candidates {
+		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans) == ruleEngineKernel {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func kernelCandidateRules(candidates []kernelCandidateRule) []Rule {
+	out := make([]Rule, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, candidate.rule)
+	}
+	return out
+}
+
+func collectKernelOwnerFailures(candidates []kernelCandidateRule, results map[int64]kernelRuleApplyResult, err error) map[kernelCandidateOwner]string {
+	failures := make(map[kernelCandidateOwner]string)
+	if err != nil {
+		for _, candidate := range candidates {
+			if _, exists := failures[candidate.owner]; !exists {
+				failures[candidate.owner] = err.Error()
+			}
+		}
+		return failures
+	}
+
+	for _, candidate := range candidates {
+		result, ok := results[candidate.rule.ID]
+		if ok && result.Running {
+			continue
+		}
+
+		reason := "kernel dataplane did not report a running state"
+		if ok && result.Error != "" {
+			reason = result.Error
+		}
+		if _, exists := failures[candidate.owner]; !exists {
+			failures[candidate.owner] = reason
+		}
+	}
+	return failures
+}
+
+func countKernelRulePlans(rules []Rule, plans map[int64]ruleDataplanePlan) int {
+	count := 0
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+		if plan, ok := plans[rule.ID]; ok && plan.EffectiveEngine == ruleEngineKernel {
+			count++
+		}
+	}
+	return count
+}
+
+func countKernelRangePlans(ranges []PortRange, plans map[int64]rangeDataplanePlan) int {
+	count := 0
+	for _, pr := range ranges {
+		if !pr.Enabled {
+			continue
+		}
+		if plan, ok := plans[pr.ID]; ok && plan.EffectiveEngine == ruleEngineKernel {
+			count++
+		}
+	}
+	return count
+}
+
+func logRangeDataplanePlans(ranges []PortRange, plans map[int64]rangeDataplanePlan, defaultEngine string) {
+	if len(ranges) == 0 || len(plans) == 0 {
+		return
+	}
+
+	ordered := make([]PortRange, 0, len(ranges))
+	for _, pr := range ranges {
+		if pr.Enabled {
+			ordered = append(ordered, pr)
+		}
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+
+	for _, pr := range ordered {
+		plan, ok := plans[pr.ID]
+		if !ok {
+			continue
+		}
+		shouldLog := plan.EffectiveEngine == ruleEngineKernel || plan.KernelEligible || plan.KernelReason != "" || plan.FallbackReason != ""
+		if !shouldLog {
+			continue
+		}
+
+		if plan.EffectiveEngine == ruleEngineKernel {
+			log.Printf("kernel dataplane range plan: range=%d preferred=%s effective=%s eligible=%t reason=%q in=%s:%d-%d out=%s:%d transparent=%t",
+				pr.ID, plan.PreferredEngine, plan.EffectiveEngine, plan.KernelEligible, plan.KernelReason,
+				pr.InIP, pr.StartPort, pr.EndPort, pr.OutIP, pr.OutStartPort, pr.Transparent)
+			continue
+		}
+
+		log.Printf("kernel dataplane range fallback: range=%d default_engine=%s preferred=%s effective=%s eligible=%t kernel_reason=%q fallback=%q in=%s:%d-%d out=%s:%d transparent=%t",
+			pr.ID, defaultEngine, plan.PreferredEngine, plan.EffectiveEngine, plan.KernelEligible, plan.KernelReason, plan.FallbackReason,
+			pr.InIP, pr.StartPort, pr.EndPort, pr.OutIP, pr.OutStartPort, pr.Transparent)
+	}
+}
+
+func logRuleDataplanePlans(rules []Rule, plans map[int64]ruleDataplanePlan, defaultEngine string) {
+	if len(rules) == 0 || len(plans) == 0 {
+		return
+	}
+
+	ordered := make([]Rule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Enabled {
+			ordered = append(ordered, rule)
+		}
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+
+	for _, rule := range ordered {
+		plan, ok := plans[rule.ID]
+		if !ok {
+			continue
+		}
+		shouldLog := plan.EffectiveEngine == ruleEngineKernel || plan.KernelEligible || plan.KernelReason != "" || plan.FallbackReason != ""
+		if !shouldLog {
+			continue
+		}
+
+		if plan.EffectiveEngine == ruleEngineKernel {
+			log.Printf("kernel dataplane plan: rule=%d preferred=%s effective=%s eligible=%t reason=%q in=%s:%d out=%s:%d transparent=%t",
+				rule.ID, plan.PreferredEngine, plan.EffectiveEngine, plan.KernelEligible, plan.KernelReason,
+				rule.InIP, rule.InPort, rule.OutIP, rule.OutPort, rule.Transparent)
+			continue
+		}
+
+		log.Printf("kernel dataplane fallback: rule=%d default_engine=%s preferred=%s effective=%s eligible=%t kernel_reason=%q fallback=%q in=%s:%d out=%s:%d transparent=%t",
+			rule.ID, defaultEngine, plan.PreferredEngine, plan.EffectiveEngine, plan.KernelEligible, plan.KernelReason, plan.FallbackReason,
+			rule.InIP, rule.InPort, rule.OutIP, rule.OutPort, rule.Transparent)
+	}
 }
 
 func computeWorkerCounts(total int) (int, int) {
@@ -615,6 +1177,49 @@ func rangesEqual(a, b []PortRange) bool {
 		}
 	}
 	return true
+}
+
+func (pm *ProcessManager) buildRuleStatus(rule Rule, status string) RuleStatus {
+	item := RuleStatus{
+		Rule:            rule,
+		Status:          status,
+		EffectiveEngine: ruleEngineUserspace,
+	}
+	item.Rule.EnginePreference = normalizeRuleEnginePreference(item.Rule.EnginePreference)
+
+	pm.mu.Lock()
+	plan, ok := pm.rulePlans[rule.ID]
+	pm.mu.Unlock()
+	if !ok {
+		return item
+	}
+
+	item.EffectiveEngine = plan.EffectiveEngine
+	item.KernelEligible = plan.KernelEligible
+	item.KernelReason = plan.KernelReason
+	item.FallbackReason = plan.FallbackReason
+	return item
+}
+
+func (pm *ProcessManager) buildRangeStatus(pr PortRange, status string) PortRangeStatus {
+	item := PortRangeStatus{
+		PortRange:       pr,
+		Status:          status,
+		EffectiveEngine: ruleEngineUserspace,
+	}
+
+	pm.mu.Lock()
+	plan, ok := pm.rangePlans[pr.ID]
+	pm.mu.Unlock()
+	if !ok {
+		return item
+	}
+
+	item.EffectiveEngine = plan.EffectiveEngine
+	item.KernelEligible = plan.KernelEligible
+	item.KernelReason = plan.KernelReason
+	item.FallbackReason = plan.FallbackReason
+	return item
 }
 
 func (pm *ProcessManager) startRuleWorker(workerIndex int) error {
@@ -1165,6 +1770,12 @@ func (pm *ProcessManager) updateTransparentRouting(enabledRules []Rule, enabledR
 }
 
 func (pm *ProcessManager) stopAll() {
+	if pm.kernelRuntime != nil {
+		if err := pm.kernelRuntime.Close(); err != nil {
+			log.Printf("stop kernel runtime: %v", err)
+		}
+	}
+
 	pm.listener.Close()
 
 	// Close IPC connections without sending stop - workers will reconnect

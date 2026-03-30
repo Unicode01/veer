@@ -3,12 +3,14 @@
   if (!app) return;
 
   app.workerTypeLabel = function workerTypeLabel(kind) {
+    if (kind === 'kernel') return app.t('workers.kind.kernel');
     if (kind === 'rule') return app.t('workers.kind.rule');
     if (kind === 'range') return app.t('workers.kind.range');
     return app.t('workers.kind.shared');
   };
 
   app.workerCount = function workerCount(worker) {
+    if (worker.kind === 'kernel') return worker.rule_count || worker.range_count || 0;
     if (worker.kind === 'rule') return worker.rule_count || 0;
     if (worker.kind === 'range') return worker.range_count || 0;
     return worker.site_count || 0;
@@ -25,15 +27,17 @@
       app.workerCount(worker)
     ];
 
-    if (worker.kind === 'rule') {
+    if ((worker.kind === 'kernel' || worker.kind === 'rule') && (worker.rules || []).length > 0) {
       (worker.rules || []).forEach((rule) => {
-        values.push(rule.id, rule.remark, rule.in_ip, rule.in_port, rule.out_ip, rule.out_port, rule.protocol, rule.tag);
+        values.push(rule.id, rule.remark, rule.in_ip, rule.in_port, rule.out_ip, rule.out_port, rule.protocol, rule.tag, rule.effective_engine, rule.kernel_reason, rule.fallback_reason);
       });
-    } else if (worker.kind === 'range') {
+    }
+    if ((worker.kind === 'kernel' || worker.kind === 'range') && (worker.ranges || []).length > 0) {
       (worker.ranges || []).forEach((range) => {
-        values.push(range.id, range.remark, range.in_ip, range.start_port, range.end_port, range.out_ip, range.out_start_port, range.protocol, range.tag);
+        values.push(range.id, range.remark, range.in_ip, range.start_port, range.end_port, range.out_ip, range.out_start_port, range.protocol, range.tag, range.effective_engine, range.kernel_reason, range.fallback_reason);
       });
-    } else {
+    }
+    if (worker.kind === 'shared') {
       values.push(worker.site_count, app.t('workers.sharedSites', { count: app.workerCount(worker) }));
     }
 
@@ -41,8 +45,8 @@
   };
 
   app.workerSortValue = function workerSortValue(worker, key) {
-    if (key === 'kind') return worker.kind === 'rule' ? 0 : (worker.kind === 'range' ? 1 : 2);
-    if (key === 'index') return worker.kind === 'shared' ? -1 : worker.index;
+    if (key === 'kind') return worker.kind === 'kernel' ? 0 : (worker.kind === 'rule' ? 1 : (worker.kind === 'range' ? 2 : 3));
+    if (key === 'index') return worker.kind === 'shared' || worker.kind === 'kernel' ? -1 : worker.index;
     if (key === 'status') return worker.status === 'running' ? 0 : (worker.status === 'draining' ? 1 : (worker.status === 'error' ? 2 : 3));
     if (key === 'binary_hash') return worker.binary_hash || '';
     if (key === 'count') return app.workerCount(worker);
@@ -54,11 +58,19 @@
     let html = '<div class="worker-detail-list">';
     rules.forEach((rule) => {
       const info = app.statusInfo(rule.status, rule.enabled);
+      const engine = typeof app.getRuleEngineInfo === 'function'
+        ? app.getRuleEngineInfo(rule)
+        : {
+            badgeClass: (rule.effective_engine || 'userspace') === 'kernel' ? 'badge-kernel' : 'badge-userspace',
+            badgeText: (rule.effective_engine || 'userspace'),
+            title: rule.fallback_reason || rule.kernel_reason || ''
+          };
       const remark = rule.remark ? '<span class="worker-meta">(' + app.esc(rule.remark) + ')</span>' : '';
       html += '<div class="worker-detail-row">' +
         '<span class="badge badge-' + info.badge + '">' + info.text + '</span>' +
         '<span class="worker-route">#' + rule.id + ' ' + app.esc(rule.in_ip) + ':' + rule.in_port + ' -> ' + app.esc(rule.out_ip) + ':' + rule.out_port + '</span>' +
         '<span class="worker-proto">' + app.esc(String(rule.protocol || '').toUpperCase()) + '</span>' +
+        '<span class="badge ' + engine.badgeClass + '" title="' + app.esc(engine.title || '') + '">' + app.esc(engine.badgeText) + '</span>' +
         remark +
         '</div>';
     });
@@ -71,12 +83,20 @@
     let html = '<div class="worker-detail-list">';
     ranges.forEach((range) => {
       const info = app.statusInfo(range.status, range.enabled);
+      const engine = typeof app.getRuleEngineInfo === 'function'
+        ? app.getRuleEngineInfo(range)
+        : {
+            badgeClass: (range.effective_engine || 'userspace') === 'kernel' ? 'badge-kernel' : 'badge-userspace',
+            badgeText: (range.effective_engine || 'userspace'),
+            title: range.fallback_reason || range.kernel_reason || ''
+          };
       const outEnd = range.out_start_port + (range.end_port - range.start_port);
       const remark = range.remark ? '<span class="worker-meta">(' + app.esc(range.remark) + ')</span>' : '';
       html += '<div class="worker-detail-row">' +
         '<span class="badge badge-' + info.badge + '">' + info.text + '</span>' +
         '<span class="worker-route">#' + range.id + ' ' + app.esc(range.in_ip) + ':' + range.start_port + '-' + range.end_port + ' -> ' + app.esc(range.out_ip) + ':' + range.out_start_port + '-' + outEnd + '</span>' +
         '<span class="worker-proto">' + app.esc(String(range.protocol || '').toUpperCase()) + '</span>' +
+        '<span class="badge ' + engine.badgeClass + '" title="' + app.esc(engine.title || '') + '">' + app.esc(engine.badgeText) + '</span>' +
         remark +
         '</div>';
     });
@@ -120,19 +140,21 @@
       const countText = worker.kind === 'shared'
         ? app.t('workers.count.sites', { count: count })
         : app.t('workers.count.entries', { count: count });
-      const detail = worker.kind === 'rule'
-        ? app.renderRuleDetails(worker.rules)
-        : (worker.kind === 'range'
-          ? app.renderRangeDetails(worker.ranges)
-          : ('<div class="worker-detail-list"><div class="worker-detail-row"><span class="worker-meta">' + app.t('workers.sharedSites', { count: count }) + '</span></div></div>'));
-      const typeClass = worker.kind === 'rule' ? 'worker-type-rule' : (worker.kind === 'range' ? 'worker-type-range' : 'worker-type-shared');
+      const detail = worker.kind === 'shared'
+        ? ('<div class="worker-detail-list"><div class="worker-detail-row"><span class="worker-meta">' + app.t('workers.sharedSites', { count: count }) + '</span></div></div>')
+        : ((worker.rules || []).length > 0
+          ? app.renderRuleDetails(worker.rules)
+          : app.renderRangeDetails(worker.ranges));
+      const typeClass = worker.kind === 'kernel'
+        ? 'worker-type-kernel'
+        : (worker.kind === 'rule' ? 'worker-type-rule' : (worker.kind === 'range' ? 'worker-type-range' : 'worker-type-shared'));
       const workerHash = worker.binary_hash || '';
       const hashClass = !workerHash ? '' : (workerHash === masterHash ? 'hash-match' : 'hash-outdated');
       const hashShort = workerHash ? workerHash.substring(0, 8) : app.t('common.dash');
 
       tr.innerHTML =
         '<td><span class="worker-type ' + typeClass + '">' + app.workerTypeLabel(worker.kind) + '</span></td>' +
-        '<td>' + (worker.kind === 'shared' ? app.emptyCellHTML() : worker.index) + '</td>' +
+        '<td>' + (worker.kind === 'shared' || worker.kind === 'kernel' ? app.emptyCellHTML() : worker.index) + '</td>' +
         '<td><span class="badge badge-' + info.badge + '">' + info.text + '</span></td>' +
         '<td><span class="worker-hash ' + hashClass + '" title="' + app.esc(workerHash) + '">' + app.esc(hashShort) + '</span></td>' +
         '<td>' + countText + '</td>' +

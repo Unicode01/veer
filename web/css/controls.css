@@ -42,6 +42,18 @@
     border-color: var(--info-border);
 }
 
+.badge-userspace {
+    background: var(--neutral-bg);
+    color: var(--neutral-text);
+    border-color: var(--neutral-border);
+}
+
+.badge-kernel {
+    background: var(--info-bg);
+    color: var(--info-text);
+    border-color: var(--info-border);
+}
+
 /* Worker binary hash */
 .worker-hash {
     display: inline-flex;
@@ -132,17 +144,18 @@
 
 .action-dropdown-menu {
     display: none;
-    position: absolute;
-    right: 0;
-    top: 100%;
-    margin-top: 6px;
+    position: fixed;
+    left: 0;
+    top: 0;
     min-width: 120px;
     padding: 6px 0;
     background: var(--surface-solid);
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: var(--shadow-soft);
-    z-index: 100;
+    z-index: 2000;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .action-dropdown.open .action-dropdown-menu {

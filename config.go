@@ -10,6 +10,7 @@ type Config struct {
 	WebToken          string   `json:"web_token"`
 	MaxWorkers        int      `json:"max_workers"`
 	DrainTimeoutHours int      `json:"drain_timeout_hours"`
+	DefaultEngine     string   `json:"default_engine"`
 	Tags              []string `json:"tags"`
 }
 
@@ -30,6 +31,10 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.DrainTimeoutHours == 0 {
 		cfg.DrainTimeoutHours = 24
+	}
+	cfg.DefaultEngine = normalizeRuleEnginePreference(cfg.DefaultEngine)
+	if !isValidRuleEnginePreference(cfg.DefaultEngine) {
+		cfg.DefaultEngine = ruleEngineAuto
 	}
 	return &cfg, nil
 }

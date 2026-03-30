@@ -116,8 +116,8 @@ ProtectSystem=strict
 ReadWritePaths=${INSTALL_DIR} /tmp
 PrivateTmp=true
 
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON
 
 StandardOutput=journal
 StandardError=journal
@@ -125,6 +125,7 @@ SyslogIdentifier=${SERVICE_NAME}
 
 LimitNOFILE=65535
 LimitNPROC=4096
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target

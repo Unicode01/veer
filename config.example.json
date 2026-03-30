@@ -3,5 +3,6 @@
   "web_token": "change-me-to-a-secure-token",
   "max_workers": 0,
   "drain_timeout_hours": 24,
+  "default_engine": "auto",
   "tags": []
 }

@@ -144,6 +144,9 @@ protocol       = tcp+udp
   - `CAP_NET_BIND_SERVICE`
   - `CAP_NET_RAW`
   - `CAP_NET_ADMIN`
+- 若需要 tc eBPF 内核转发，还需要
+  - `CAP_BPF`
+  - `CAP_PERFMON`（较新的内核上通常需要；缺失时 verifier 可能把程序按 `!root` 路径拒绝）
 
 项目自带的 [deploy.sh](./deploy.sh) 已处理 Debian 系统上的常见权限与 systemd 配置。
 
@@ -187,6 +190,7 @@ http://127.0.0.1:8080
   "web_token": "change-me-to-a-secure-token",
   "max_workers": 0,
   "drain_timeout_hours": 24,
+  "default_engine": "auto",
   "tags": []
 }
 ```
@@ -197,6 +201,7 @@ http://127.0.0.1:8080
 - `web_token`：管理 API 和前端登录使用的 Bearer Token
 - `max_workers`：最大 Worker 数量；小于等于 `0` 时按 CPU 核数自动计算，内部最少保留 3 个 Worker 槽位
 - `drain_timeout_hours`：旧 Worker 进入 draining 状态后的最长保留时长，默认 `24`
+- `default_engine`：默认转发引擎，可选 `auto`、`userspace`、`kernel`
 - `tags`：可选标签列表，会在前端表单中作为下拉项出现
 
 ## 构建
@@ -212,6 +217,9 @@ go build -o forward .
 ```bash
 ./release.sh
 ```
+
+`release.sh` 会先用 `clang` 编译 `ebpf/forward-tc-bpf.o`，再把它 embed 进最终二进制，因此构建机需要可用的 `clang` 和 Linux 内核头文件。
+在 Debian / Ubuntu 上，通常至少需要安装 `clang` 和 `linux-libc-dev`。
 
 只构建指定架构：
 

@@ -56,6 +56,8 @@
   app.state.confirmFocusReturn = null;
   app.state.activeRequests = app.state.activeRequests || 0;
   app.state.pageVisible = typeof app.state.pageVisible === 'boolean' ? app.state.pageVisible : !document.hidden;
+  app.state.activeDropdown = app.state.activeDropdown || null;
+  app.state.dropdownPositionScheduled = false;
 
   app.paginationConfig = {
     rules: { container: app.el.rulesPagination, pageSizes: [10, 20, 50], render: () => app.renderRulesTable() },
@@ -95,12 +97,82 @@
     }, lifespan);
   };
 
+  app.positionDropdown = function positionDropdown(dropdown) {
+    if (!dropdown) return;
+
+    const trigger = dropdown.querySelector('.action-dropdown-trigger');
+    const menu = dropdown.querySelector('.action-dropdown-menu');
+    if (!trigger || !menu) return;
+
+    const triggerRect = trigger.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const gutter = 8;
+    const offset = 6;
+
+    menu.style.minWidth = Math.max(120, Math.ceil(triggerRect.width)) + 'px';
+    menu.style.maxHeight = Math.max(120, viewportHeight - gutter * 2) + 'px';
+
+    const menuRect = menu.getBoundingClientRect();
+    let left = triggerRect.right - menuRect.width;
+    let top = triggerRect.bottom + offset;
+
+    if (left + menuRect.width > viewportWidth - gutter) left = viewportWidth - gutter - menuRect.width;
+    if (left < gutter) left = gutter;
+
+    if (top + menuRect.height > viewportHeight - gutter) {
+      const aboveTop = triggerRect.top - menuRect.height - offset;
+      if (aboveTop >= gutter) top = aboveTop;
+      else top = Math.max(gutter, viewportHeight - gutter - menuRect.height);
+    }
+
+    menu.style.left = Math.round(left) + 'px';
+    menu.style.top = Math.round(top) + 'px';
+  };
+
+  app.scheduleDropdownPosition = function scheduleDropdownPosition() {
+    if (!app.state.activeDropdown || app.state.dropdownPositionScheduled) return;
+    app.state.dropdownPositionScheduled = true;
+    requestAnimationFrame(() => {
+      app.state.dropdownPositionScheduled = false;
+      if (!app.state.activeDropdown) return;
+      const dropdown = app.state.activeDropdown.dropdown;
+      if (!dropdown || !dropdown.isConnected) {
+        app.closeDropdowns();
+        return;
+      }
+      app.positionDropdown(dropdown);
+    });
+  };
+
+  app.openDropdown = function openDropdown(dropdown) {
+    if (!dropdown) return;
+
+    const trigger = dropdown.querySelector('.action-dropdown-trigger');
+    if (!trigger || trigger.disabled) return;
+
+    app.closeDropdowns();
+    dropdown.classList.add('open');
+    trigger.setAttribute('aria-expanded', 'true');
+    app.state.activeDropdown = { dropdown: dropdown, trigger: trigger };
+    app.positionDropdown(dropdown);
+  };
+
   app.closeDropdowns = function closeDropdowns() {
     document.querySelectorAll('.action-dropdown.open').forEach((dropdown) => {
       dropdown.classList.remove('open');
       const trigger = dropdown.querySelector('.action-dropdown-trigger');
+      const menu = dropdown.querySelector('.action-dropdown-menu');
       if (trigger) trigger.setAttribute('aria-expanded', 'false');
+      if (menu) {
+        menu.style.left = '';
+        menu.style.top = '';
+        menu.style.minWidth = '';
+        menu.style.maxHeight = '';
+      }
     });
+    app.state.activeDropdown = null;
+    app.state.dropdownPositionScheduled = false;
   };
 
   app.openConfirmModal = function openConfirmModal(options) {
@@ -660,6 +732,9 @@
     if (!pageButton || pageButton.disabled) return;
     app.goToPage(pageButton.dataset.table, pageButton.dataset.page);
   });
+
+  window.addEventListener('resize', app.scheduleDropdownPosition);
+  document.addEventListener('scroll', app.scheduleDropdownPosition, true);
 
   app.apiCall = (function wrapApiCall(original) {
     return async function apiCall(method, path, body) {

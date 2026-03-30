@@ -224,25 +224,13 @@
       e.stopPropagation();
       const dropdown = trigger.closest('.action-dropdown');
       const wasOpen = dropdown.classList.contains('open');
-      app.closeDropdowns();
-      if (!wasOpen) {
-        dropdown.classList.add('open');
-        trigger.setAttribute('aria-expanded', 'true');
-      }
+      if (wasOpen) app.closeDropdowns();
+      else app.openDropdown(dropdown);
       return;
     }
 
     const menuItem = e.target.closest('.action-dropdown-menu button');
-    if (menuItem) {
-      const dropdown = menuItem.closest('.action-dropdown');
-      if (dropdown) {
-        dropdown.classList.remove('open');
-        const triggerButton = dropdown.querySelector('.action-dropdown-trigger');
-        if (triggerButton) triggerButton.setAttribute('aria-expanded', 'false');
-      }
-    } else {
-      app.closeDropdowns();
-    }
+    app.closeDropdowns();
 
     const th = e.target.closest('th.sortable');
     if (th) {

@@ -12,6 +12,7 @@
 #   forward-linux-arm64
 #
 # 部署: 将 forward-linux-<arch> + deploy.sh 一起传到服务器执行即可
+# 注意: eBPF tc 对象会先在本地编译并 embed 进 Go 二进制，部署时无需额外携带 .o 文件
 #
 set -euo pipefail
 
@@ -25,11 +26,23 @@ ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
 fail() { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EBPF_DIR="${PROJECT_DIR}/ebpf"
+EBPF_SRC="${EBPF_DIR}/forward-tc-bpf.c"
+EBPF_OBJ="${EBPF_DIR}/forward-tc-bpf.o"
+EBPF_INC="${EBPF_DIR}/include"
+BPF_CLANG="${BPF_CLANG:-clang}"
+BPF_EXTRA_CFLAGS="${BPF_EXTRA_CFLAGS:-}"
+BPF_OLEVEL="${BPF_OLEVEL:-1}"
 
 if ! command -v go &>/dev/null; then
     fail "未找到 go 命令，请先安装 Go >= 1.21"
 fi
 ok "Go: $(go version)"
+
+if ! command -v "${BPF_CLANG}" &>/dev/null; then
+    fail "未找到 clang，无法编译 ebpf/forward-tc-bpf.o"
+fi
+ok "Clang: $("${BPF_CLANG}" --version | head -n 1)"
 
 # ---------- 目标架构 ----------
 TARGETS=()
@@ -49,6 +62,66 @@ cd "$PROJECT_DIR"
 
 info "下载依赖..."
 go mod download
+
+[[ -f "${EBPF_SRC}" ]] || fail "eBPF 源文件未找到: ${EBPF_SRC}"
+
+find_multiarch_include() {
+    local candidate=""
+
+    if command -v dpkg-architecture &>/dev/null; then
+        candidate="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+        if [[ -n "${candidate}" && -d "/usr/include/${candidate}" ]]; then
+            echo "/usr/include/${candidate}"
+            return 0
+        fi
+    fi
+
+    if command -v gcc &>/dev/null; then
+        candidate="$(gcc -print-multiarch 2>/dev/null || true)"
+        if [[ -n "${candidate}" && -d "/usr/include/${candidate}" ]]; then
+            echo "/usr/include/${candidate}"
+            return 0
+        fi
+    fi
+
+    if [[ -d "/usr/include/$(uname -m)-linux-gnu" ]]; then
+        echo "/usr/include/$(uname -m)-linux-gnu"
+        return 0
+    fi
+
+    return 1
+}
+
+BPF_CFLAGS=(
+    "-O${BPF_OLEVEL}"
+    -g
+    -target bpf
+    -I"${EBPF_INC}"
+)
+
+if MULTIARCH_INC="$(find_multiarch_include)"; then
+    BPF_CFLAGS+=(-I"${MULTIARCH_INC}")
+    info "检测到多架构头文件目录: ${MULTIARCH_INC}"
+else
+    info "未检测到多架构头文件目录，若编译报 asm/*.h 缺失，请安装 linux-libc-dev 或设置 BPF_EXTRA_CFLAGS"
+fi
+
+if [[ -n "${BPF_EXTRA_CFLAGS}" ]]; then
+    # shellcheck disable=SC2206
+    EXTRA_FLAGS=( ${BPF_EXTRA_CFLAGS} )
+    BPF_CFLAGS+=("${EXTRA_FLAGS[@]}")
+fi
+
+info "eBPF clang 优化级别: -O${BPF_OLEVEL}"
+info "编译 tc eBPF 对象..."
+if ! "${BPF_CLANG}" "${BPF_CFLAGS[@]}" -c "${EBPF_SRC}" -o "${EBPF_OBJ}"; then
+    fail "eBPF 编译失败；Debian/Ubuntu 通常需要 linux-libc-dev，必要时可通过 BPF_EXTRA_CFLAGS 追加头文件路径"
+fi
+
+if command -v llvm-strip &>/dev/null; then
+    llvm-strip -g "${EBPF_OBJ}" || true
+fi
+ok "eBPF => ${EBPF_OBJ}"
 
 # ---------- 编译 ----------
 for ARCH in "${TARGETS[@]}"; do

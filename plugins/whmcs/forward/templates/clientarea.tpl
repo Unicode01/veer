@@ -321,7 +321,8 @@
                                     <div class="col-sm-6">
                                         <div class="form-group">
                                             <label for="forward_rule_add_in_port">入口端口</label>
-                                            <input type="number" class="form-control forward-control" id="forward_rule_add_in_port" name="external_port" min="10000" max="65535" required>
+                                            <input type="number" class="form-control forward-control" id="forward_rule_add_in_port" name="external_port" min="{$client_port_min|escape:'html'}" max="{$client_port_max|escape:'html'}" required>
+                                            <p class="help-block forward-help">允许范围：{$client_port_range_text|escape:'html'}</p>
                                         </div>
                                     </div>
                                 </div>
@@ -382,7 +383,8 @@
                                     <div class="col-sm-6">
                                         <div class="form-group">
                                             <label for="forward_rule_edit_in_port">入口端口</label>
-                                            <input type="number" class="form-control forward-control" id="forward_rule_edit_in_port" name="external_port" min="10000" max="65535" required>
+                                            <input type="number" class="form-control forward-control" id="forward_rule_edit_in_port" name="external_port" min="{$client_port_min|escape:'html'}" max="{$client_port_max|escape:'html'}" required>
+                                            <p class="help-block forward-help">允许范围：{$client_port_range_text|escape:'html'}</p>
                                         </div>
                                     </div>
                                 </div>
@@ -523,6 +525,9 @@
     var csrfToken = '{$csrf_token|escape:'javascript'}';
     var serverIpText = '{$server_ip|escape:'javascript'}';
     var serverIpSummaryText = '{$server_ip_summary|escape:'javascript'}';
+    var clientPortMin = {$client_port_min|intval};
+    var clientPortMax = {$client_port_max|intval};
+    var clientPortRangeText = '{$client_port_range_text|escape:'javascript'}';
     var domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$/i;
     var noticeTimer = null;
 
@@ -734,6 +739,24 @@
         return true;
     }
 
+    function validateRuleForm($form) {
+        var $listenPort = $form.find('input[name="external_port"]');
+        var listenPort = parseInt($listenPort.val(), 10);
+        if (isNaN(listenPort) || listenPort < clientPortMin || listenPort > clientPortMax) {
+            showNotice('warning', '入口端口必须在 ' + clientPortRangeText + ' 之间。');
+            $listenPort.focus();
+            return false;
+        }
+        return true;
+    }
+
+    function randomPortInRange(min, max) {
+        if (max <= min) {
+            return min;
+        }
+        return min + Math.floor(Math.random() * (max - min + 1));
+    }
+
     function postAction(payload, loadingText, successText, errorText) {
         $.ajax({
             url: window.location.href,
@@ -779,7 +802,7 @@
         syncSelectedService();
         $('#forward_rule_add_name').val('SSH-' + Math.random().toString(36).slice(2, 6));
         $('#forward_rule_add_out_port').val('22');
-        $('#forward_rule_add_in_port').val(String(Math.floor(10000 + Math.random() * 55535)));
+        $('#forward_rule_add_in_port').val(String(randomPortInRange(clientPortMin, clientPortMax)));
         $('#forward_rule_add_protocol').val('tcp');
         $('#forward_rule_add_desc').val('快速创建的 SSH 转发规则');
         $('#forwardRuleAddModal').modal('show');
@@ -800,6 +823,9 @@
         var $form = $(this);
         var formData = $form.serializeArray();
         e.preventDefault();
+        if (!validateRuleForm($form)) {
+            return;
+        }
         formData.push({name: 'action', value: 'add_rule'});
         $.ajax({
             url: window.location.href,
@@ -832,6 +858,9 @@
         var $form = $(this);
         var formData = $form.serializeArray();
         e.preventDefault();
+        if (!validateRuleForm($form)) {
+            return;
+        }
         formData.push({name: 'action', value: 'edit_rule'});
         $.ajax({
             url: window.location.href,

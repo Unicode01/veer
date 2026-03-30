@@ -616,7 +616,7 @@ func serveUDP(ctx context.Context, pc net.PacketConn, rule *Rule, st *ruleStats)
 				srcUDP := srcAddr.(*net.UDPAddr)
 				outConn, err = dialTransparentUDP(srcUDP.IP, rule.OutInterface, targetAddr)
 			} else {
-				outConn, err = net.DialUDP("udp", nil, targetAddr)
+				outConn, err = dialOutboundUDP(targetAddr, rule.OutInterface)
 			}
 			if err != nil {
 				mu.Unlock()

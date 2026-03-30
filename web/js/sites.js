@@ -89,6 +89,7 @@
   app.renderSitesTable = function renderSitesTable() {
     const el = app.el;
     const st = app.state.sites;
+    app.closeDropdowns();
     let filteredList = st.data.slice();
     if (st.filterTag) filteredList = filteredList.filter((site) => site.tag === st.filterTag);
     if (st.searchQuery) {

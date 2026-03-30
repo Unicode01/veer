@@ -1,0 +1,29 @@
+#ifndef __FORWARD_BPF_HELPERS_H
+#define __FORWARD_BPF_HELPERS_H
+
+#include <linux/bpf.h>
+
+#define SEC(name) __attribute__((section(name), used))
+#ifndef __always_inline
+#define __always_inline inline __attribute__((always_inline))
+#endif
+
+struct bpf_map_def {
+	unsigned int type;
+	unsigned int key_size;
+	unsigned int value_size;
+	unsigned int max_entries;
+	unsigned int map_flags;
+};
+
+static void *(*const bpf_map_lookup_elem)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
+static long (*const bpf_map_update_elem)(void *map, const void *key, const void *value, __u64 flags) = (void *)BPF_FUNC_map_update_elem;
+static long (*const bpf_map_delete_elem)(void *map, const void *key) = (void *)BPF_FUNC_map_delete_elem;
+static long (*const bpf_skb_load_bytes)(struct __sk_buff *skb, __u32 offset, void *to, __u32 len) = (void *)BPF_FUNC_skb_load_bytes;
+static long (*const bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const void *from, __u32 len, __u64 flags) = (void *)BPF_FUNC_skb_store_bytes;
+static long (*const bpf_l3_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to, __u64 size) = (void *)BPF_FUNC_l3_csum_replace;
+static long (*const bpf_l4_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to, __u64 flags) = (void *)BPF_FUNC_l4_csum_replace;
+static long (*const bpf_redirect_neigh)(__u32 ifindex, void *params, int plen, __u64 flags) = (void *)BPF_FUNC_redirect_neigh;
+static __u64 (*const bpf_ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
+
+#endif
