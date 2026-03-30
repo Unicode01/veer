@@ -30,11 +30,14 @@ const (
 	kernelReplyFilterHandle   = 20
 	kernelVerifierLogSize     = 4 * 1024 * 1024
 	kernelTCPClosingGraceNS   = 15 * 1000000000
+	kernelTCPUnrepliedTimeout = 30 * 1000000000
+	kernelTCPFlowIdleTimeout  = 10 * 60 * 1000000000
 	kernelUDPFlowIdleTimeout  = 300 * 1000000000
 )
 
 const (
 	kernelFlowFlagFrontClosing = 0x1
+	kernelFlowFlagReplySeen    = 0x2
 )
 
 //go:embed ebpf/forward-tc-bpf.o
@@ -67,12 +70,13 @@ type tcFlowKeyV4 struct {
 }
 
 type tcFlowValueV4 struct {
-	RuleID     uint32
-	FrontAddr  uint32
-	InIfIndex  uint32
-	FrontPort  uint16
-	Flags      uint16
-	LastSeenNS uint64
+	RuleID           uint32
+	FrontAddr        uint32
+	InIfIndex        uint32
+	FrontPort        uint16
+	Flags            uint16
+	LastSeenNS       uint64
+	FrontCloseSeenNS uint64
 }
 
 type kernelAttachment struct {
@@ -338,6 +342,7 @@ func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, erro
 	iter := flowsMap.Iterate()
 	var key tcFlowKeyV4
 	var value tcFlowValueV4
+	var staleKeys []tcFlowKeyV4
 	for iter.Next(&key, &value) {
 		if value.RuleID == 0 {
 			continue
@@ -350,13 +355,34 @@ func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, erro
 			}
 			if haveNow {
 				if nowNS < value.LastSeenNS || (nowNS-value.LastSeenNS) > kernelUDPFlowIdleTimeout {
+					staleKeys = append(staleKeys, key)
 					continue
 				}
 			}
 			counts.UDPNatEntries++
 		} else {
-			if value.Flags&kernelFlowFlagFrontClosing != 0 && value.LastSeenNS != 0 && haveNow {
-				if nowNS >= value.LastSeenNS && (nowNS-value.LastSeenNS) > kernelTCPClosingGraceNS {
+			if haveNow && value.LastSeenNS != 0 {
+				if nowNS < value.LastSeenNS {
+					staleKeys = append(staleKeys, key)
+					continue
+				}
+				ageNS := nowNS - value.LastSeenNS
+				if value.Flags&kernelFlowFlagReplySeen == 0 {
+					if ageNS > kernelTCPUnrepliedTimeout {
+						staleKeys = append(staleKeys, key)
+					}
+					continue
+				}
+				if value.Flags&kernelFlowFlagFrontClosing != 0 {
+					closeSeenNS := value.FrontCloseSeenNS
+					if closeSeenNS == 0 {
+						closeSeenNS = value.LastSeenNS
+					}
+					if nowNS >= closeSeenNS && (nowNS-closeSeenNS) > kernelTCPClosingGraceNS {
+						staleKeys = append(staleKeys, key)
+						continue
+					}
+				} else if ageNS > kernelTCPFlowIdleTimeout {
 					continue
 				}
 			}
@@ -367,6 +393,19 @@ func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, erro
 
 	if err := iter.Err(); err != nil {
 		return emptyKernelRuleStatsSnapshot(), fmt.Errorf("iterate kernel flows map: %w", err)
+	}
+	for _, staleKey := range staleKeys {
+		if err := flowsMap.Delete(staleKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			log.Printf("kernel dataplane stats cleanup: delete stale flow failed: proto=%d ifindex=%d src=%d dst=%d sport=%d dport=%d err=%v",
+				staleKey.Proto,
+				staleKey.IfIndex,
+				staleKey.SrcAddr,
+				staleKey.DstAddr,
+				staleKey.SrcPort,
+				staleKey.DstPort,
+				err,
+			)
+		}
 	}
 
 	return snapshot, nil

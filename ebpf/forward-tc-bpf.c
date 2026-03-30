@@ -44,6 +44,7 @@ struct flow_value_v4 {
 	__u16 front_port;
 	__u16 flags;
 	__u64 last_seen_ns;
+	__u64 front_close_seen_ns;
 };
 
 struct forward_vlan_hdr {
@@ -71,6 +72,9 @@ struct packet_ctx {
 
 #define FORWARD_IPV4_FRAG_MASK 0x3fff
 #define FORWARD_FLOW_FLAG_FRONT_CLOSING 0x1
+#define FORWARD_FLOW_FLAG_REPLY_SEEN 0x2
+#define FORWARD_TCP_FLOW_REFRESH_NS (30ULL * 1000000000ULL)
+#define FORWARD_UDP_FLOW_REFRESH_NS (1ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_IDLE_NS (300ULL * 1000000000ULL)
 
 struct bpf_map_def SEC("maps") rules_v4 = {
@@ -277,6 +281,9 @@ int forward_ingress(struct __sk_buff *skb)
 	struct rule_value_v4 *rule;
 	struct flow_key_v4 flow_key = {};
 	struct flow_value_v4 flow_value = {};
+	struct flow_value_v4 *existing_flow;
+	__u64 now = 0;
+	int update_flow = 0;
 
 	if (parse_ipv4_l4(skb, &ctx) < 0)
 		return TC_ACT_OK;
@@ -292,15 +299,53 @@ int forward_ingress(struct __sk_buff *skb)
 	flow_key.dst_port = ctx.src_port;
 	flow_key.proto = ctx.proto;
 
-	flow_value.rule_id = rule->rule_id;
-	flow_value.front_addr = bpf_ntohl(ctx.dst_addr);
-	flow_value.front_port = ctx.dst_port;
-	flow_value.in_ifindex = skb->ifindex;
-	flow_value.flags = ctx.closing ? FORWARD_FLOW_FLAG_FRONT_CLOSING : 0;
-	flow_value.last_seen_ns = bpf_ktime_get_ns();
+	existing_flow = bpf_map_lookup_elem(&flows_v4, &flow_key);
+	if (!existing_flow) {
+		now = bpf_ktime_get_ns();
+		flow_value.rule_id = rule->rule_id;
+		flow_value.front_addr = bpf_ntohl(ctx.dst_addr);
+		flow_value.front_port = ctx.dst_port;
+		flow_value.in_ifindex = skb->ifindex;
+		if (ctx.closing) {
+			flow_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+			flow_value.front_close_seen_ns = now;
+		}
+		flow_value.last_seen_ns = now;
+		update_flow = 1;
+	} else if (ctx.proto == IPPROTO_UDP) {
+		now = bpf_ktime_get_ns();
+		if (existing_flow->last_seen_ns == 0 || now < existing_flow->last_seen_ns || (now - existing_flow->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
+			flow_value.rule_id = rule->rule_id;
+			flow_value.front_addr = bpf_ntohl(ctx.dst_addr);
+			flow_value.front_port = ctx.dst_port;
+			flow_value.in_ifindex = skb->ifindex;
+			flow_value.last_seen_ns = now;
+			update_flow = 1;
+		} else if ((now - existing_flow->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
+			flow_value = *existing_flow;
+			flow_value.last_seen_ns = now;
+			update_flow = 1;
+		}
+	} else {
+		now = bpf_ktime_get_ns();
+		if (ctx.closing) {
+			flow_value = *existing_flow;
+			flow_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+			if (flow_value.front_close_seen_ns == 0)
+				flow_value.front_close_seen_ns = now;
+			flow_value.last_seen_ns = now;
+			update_flow = 1;
+		} else if (existing_flow->last_seen_ns == 0 || now < existing_flow->last_seen_ns || (now - existing_flow->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
+			flow_value = *existing_flow;
+			flow_value.last_seen_ns = now;
+			update_flow = 1;
+		}
+	}
 
-	if (bpf_map_update_elem(&flows_v4, &flow_key, &flow_value, BPF_ANY) < 0)
-		return TC_ACT_SHOT;
+	if (update_flow) {
+		if (bpf_map_update_elem(&flows_v4, &flow_key, &flow_value, BPF_ANY) < 0)
+			return TC_ACT_SHOT;
+	}
 
 	if (rewrite_l4_dnat(skb, &ctx, rule->backend_addr, rule->backend_port) < 0)
 		return TC_ACT_SHOT;
@@ -314,7 +359,10 @@ int reply_ingress(struct __sk_buff *skb)
 	struct packet_ctx ctx = {};
 	struct flow_key_v4 flow_key = {};
 	struct flow_value_v4 *flow;
+	struct flow_value_v4 flow_value = {};
 	int closing = 0;
+	__u64 now = 0;
+	int update_flow = 0;
 
 	if (parse_ipv4_l4(skb, &ctx) < 0)
 		return TC_ACT_OK;
@@ -329,33 +377,44 @@ int reply_ingress(struct __sk_buff *skb)
 	flow = bpf_map_lookup_elem(&flows_v4, &flow_key);
 	if (!flow)
 		return TC_ACT_OK;
+	flow_value = *flow;
 
 	if (ctx.proto == IPPROTO_UDP) {
-		__u64 now = bpf_ktime_get_ns();
-		struct flow_value_v4 refreshed;
-
-		if (flow->last_seen_ns == 0 || now < flow->last_seen_ns || (now - flow->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
+		now = bpf_ktime_get_ns();
+		if (flow_value.last_seen_ns == 0 || now < flow_value.last_seen_ns || (now - flow_value.last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
 			bpf_map_delete_elem(&flows_v4, &flow_key);
 			return TC_ACT_OK;
 		}
+		if ((now - flow_value.last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
+			flow_value.last_seen_ns = now;
+			update_flow = 1;
+		}
+	} else {
+		now = bpf_ktime_get_ns();
+		if ((flow_value.flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
+			flow_value.flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
+			flow_value.last_seen_ns = now;
+			if (!ctx.closing)
+				update_flow = 1;
+		} else if (!ctx.closing && (flow_value.last_seen_ns == 0 || now < flow_value.last_seen_ns || (now - flow_value.last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+			flow_value.last_seen_ns = now;
+			update_flow = 1;
+		}
+	}
 
-		refreshed = *flow;
-		refreshed.last_seen_ns = now;
-		if (bpf_map_update_elem(&flows_v4, &flow_key, &refreshed, BPF_ANY) < 0)
-			return TC_ACT_SHOT;
-		flow = bpf_map_lookup_elem(&flows_v4, &flow_key);
-		if (!flow)
+	if (update_flow) {
+		if (bpf_map_update_elem(&flows_v4, &flow_key, &flow_value, BPF_ANY) < 0)
 			return TC_ACT_SHOT;
 	}
 
 	closing = ctx.closing;
-	if (rewrite_l4_snat(skb, &ctx, flow->front_addr, flow->front_port) < 0)
+	if (rewrite_l4_snat(skb, &ctx, flow_value.front_addr, flow_value.front_port) < 0)
 		return TC_ACT_SHOT;
 
 	if (closing)
 		bpf_map_delete_elem(&flows_v4, &flow_key);
 
-	return redirect_ifindex(flow->in_ifindex);
+	return redirect_ifindex(flow_value.in_ifindex);
 }
 
 char _license[] SEC("license") = "GPL";
