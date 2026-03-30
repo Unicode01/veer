@@ -68,23 +68,24 @@ func nextRuleRetryDelay(retryCount int) time.Duration {
 }
 
 type ProcessManager struct {
-	ruleWorkers     map[int]*WorkerInfo
-	rangeWorkers    map[int]*WorkerInfo
-	sharedProxy     *WorkerInfo
-	drainingWorkers []*WorkerInfo
-	mu              sync.Mutex
-	redistributeMu  sync.Mutex // serializes redistributeWorkers calls
-	db              *sql.DB
-	cfg             *Config
-	sockPath        string
-	listener        net.Listener
-	binaryHash      string
-	ready           bool
-	rulePlans       map[int64]ruleDataplanePlan
-	rangePlans      map[int64]rangeDataplanePlan
-	kernelRuntime   kernelRuleRuntime
-	kernelRules     map[int64]bool
-	kernelRanges    map[int64]bool
+	ruleWorkers      map[int]*WorkerInfo
+	rangeWorkers     map[int]*WorkerInfo
+	sharedProxy      *WorkerInfo
+	drainingWorkers  []*WorkerInfo
+	mu               sync.Mutex
+	redistributeMu   sync.Mutex // serializes redistributeWorkers calls
+	db               *sql.DB
+	cfg              *Config
+	sockPath         string
+	listener         net.Listener
+	binaryHash       string
+	ready            bool
+	rulePlans        map[int64]ruleDataplanePlan
+	rangePlans       map[int64]rangeDataplanePlan
+	kernelRuntime    kernelRuleRuntime
+	kernelRules      map[int64]bool
+	kernelRanges     map[int64]bool
+	kernelFlowOwners map[uint32]kernelCandidateOwner
 }
 
 func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessManager, error) {
@@ -102,18 +103,19 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 
 	pm := &ProcessManager{
-		ruleWorkers:   make(map[int]*WorkerInfo),
-		rangeWorkers:  make(map[int]*WorkerInfo),
-		db:            db,
-		cfg:           cfg,
-		sockPath:      sockPath,
-		listener:      ln,
-		binaryHash:    binaryHash,
-		rulePlans:     make(map[int64]ruleDataplanePlan),
-		rangePlans:    make(map[int64]rangeDataplanePlan),
-		kernelRuntime: newKernelRuleRuntime(),
-		kernelRules:   make(map[int64]bool),
-		kernelRanges:  make(map[int64]bool),
+		ruleWorkers:      make(map[int]*WorkerInfo),
+		rangeWorkers:     make(map[int]*WorkerInfo),
+		db:               db,
+		cfg:              cfg,
+		sockPath:         sockPath,
+		listener:         ln,
+		binaryHash:       binaryHash,
+		rulePlans:        make(map[int64]ruleDataplanePlan),
+		rangePlans:       make(map[int64]rangeDataplanePlan),
+		kernelRuntime:    newKernelRuleRuntime(),
+		kernelRules:      make(map[int64]bool),
+		kernelRanges:     make(map[int64]bool),
+		kernelFlowOwners: make(map[uint32]kernelCandidateOwner),
 	}
 
 	if pm.kernelRuntime != nil {
@@ -442,6 +444,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 
 	logRuleDataplanePlans(rules, rulePlans, pm.cfg.DefaultEngine)
 	logRangeDataplanePlans(ranges, rangePlans, pm.cfg.DefaultEngine)
+	activeKernelCandidates = filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
 	log.Printf(
 		"kernel dataplane planner summary: default_engine=%s enabled_rules=%d enabled_ranges=%d kernel_target_rules=%d kernel_target_ranges=%d kernel_target_entries=%d",
 		pm.cfg.DefaultEngine,
@@ -449,7 +452,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		countEnabledRanges(ranges),
 		countKernelRulePlans(rules, rulePlans),
 		countKernelRangePlans(ranges, rangePlans),
-		len(filterActiveKernelCandidates(candidates, rulePlans, rangePlans)),
+		len(activeKernelCandidates),
 	)
 
 	kernelAppliedRules := make(map[int64]bool)
@@ -470,12 +473,20 @@ func (pm *ProcessManager) redistributeWorkers() {
 			kernelAppliedRanges[pr.ID] = true
 		}
 	}
+	kernelFlowOwners := make(map[uint32]kernelCandidateOwner, len(activeKernelCandidates))
+	for _, candidate := range activeKernelCandidates {
+		if candidate.rule.ID <= 0 || candidate.rule.ID > int64(^uint32(0)) {
+			continue
+		}
+		kernelFlowOwners[uint32(candidate.rule.ID)] = candidate.owner
+	}
 
 	pm.mu.Lock()
 	pm.rulePlans = rulePlans
 	pm.rangePlans = rangePlans
 	pm.kernelRules = kernelAppliedRules
 	pm.kernelRanges = kernelAppliedRanges
+	pm.kernelFlowOwners = kernelFlowOwners
 	pm.mu.Unlock()
 
 	var enabledRules []Rule
@@ -1686,6 +1697,23 @@ func (pm *ProcessManager) collectRuleStats() map[int64]RuleStatsReport {
 		}
 	}
 	pm.mu.Unlock()
+
+	kernelRuleStats, _ := pm.collectKernelStats()
+	for id, s := range kernelRuleStats {
+		if existing, ok := result[id]; ok {
+			existing.ActiveConns += s.ActiveConns
+			existing.TotalConns += s.TotalConns
+			existing.RejectedConns += s.RejectedConns
+			existing.BytesIn += s.BytesIn
+			existing.BytesOut += s.BytesOut
+			existing.SpeedIn += s.SpeedIn
+			existing.SpeedOut += s.SpeedOut
+			existing.NatTableSize += s.NatTableSize
+			result[id] = existing
+		} else {
+			result[id] = s
+		}
+	}
 	return result
 }
 
@@ -1715,7 +1743,75 @@ func (pm *ProcessManager) collectRangeStats() map[int64]RangeStatsReport {
 		}
 	}
 	pm.mu.Unlock()
+
+	_, kernelRangeStats := pm.collectKernelStats()
+	for id, s := range kernelRangeStats {
+		if existing, ok := result[id]; ok {
+			existing.ActiveConns += s.ActiveConns
+			existing.TotalConns += s.TotalConns
+			existing.RejectedConns += s.RejectedConns
+			existing.BytesIn += s.BytesIn
+			existing.BytesOut += s.BytesOut
+			existing.SpeedIn += s.SpeedIn
+			existing.SpeedOut += s.SpeedOut
+			existing.NatTableSize += s.NatTableSize
+			result[id] = existing
+		} else {
+			result[id] = s
+		}
+	}
 	return result
+}
+
+func (pm *ProcessManager) collectKernelStats() (map[int64]RuleStatsReport, map[int64]RangeStatsReport) {
+	ruleStats := make(map[int64]RuleStatsReport)
+	rangeStats := make(map[int64]RangeStatsReport)
+	if pm.kernelRuntime == nil {
+		return ruleStats, rangeStats
+	}
+
+	pm.mu.Lock()
+	ownerIndex := make(map[uint32]kernelCandidateOwner, len(pm.kernelFlowOwners))
+	for id, owner := range pm.kernelFlowOwners {
+		ownerIndex[id] = owner
+	}
+	for id := range pm.kernelRules {
+		ruleStats[id] = RuleStatsReport{RuleID: id}
+	}
+	for id := range pm.kernelRanges {
+		rangeStats[id] = RangeStatsReport{RangeID: id}
+	}
+	pm.mu.Unlock()
+
+	snapshot, err := pm.kernelRuntime.SnapshotStats()
+	if err != nil {
+		log.Printf("kernel dataplane stats snapshot failed: %v", err)
+		return ruleStats, rangeStats
+	}
+
+	for kernelRuleID, counts := range snapshot.ByRuleID {
+		owner, ok := ownerIndex[kernelRuleID]
+		if !ok {
+			continue
+		}
+		if owner.kind == workerKindRule {
+			item := ruleStats[owner.id]
+			item.RuleID = owner.id
+			item.ActiveConns += counts.TCPActiveConns
+			item.NatTableSize += int(counts.UDPNatEntries)
+			ruleStats[owner.id] = item
+			continue
+		}
+		if owner.kind == workerKindRange {
+			item := rangeStats[owner.id]
+			item.RangeID = owner.id
+			item.ActiveConns += counts.TCPActiveConns
+			item.NatTableSize += int(counts.UDPNatEntries)
+			rangeStats[owner.id] = item
+		}
+	}
+
+	return ruleStats, rangeStats
 }
 
 func (pm *ProcessManager) collectSiteStats() []SiteStatsReport {

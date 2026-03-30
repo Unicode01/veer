@@ -42,7 +42,7 @@ struct flow_value_v4 {
 	__u32 front_addr;
 	__u32 in_ifindex;
 	__u16 front_port;
-	__u16 pad;
+	__u16 flags;
 	__u64 last_seen_ns;
 };
 
@@ -70,6 +70,7 @@ struct packet_ctx {
 };
 
 #define FORWARD_IPV4_FRAG_MASK 0x3fff
+#define FORWARD_FLOW_FLAG_FRONT_CLOSING 0x1
 #define FORWARD_UDP_FLOW_IDLE_NS (300ULL * 1000000000ULL)
 
 struct bpf_map_def SEC("maps") rules_v4 = {
@@ -295,6 +296,7 @@ int forward_ingress(struct __sk_buff *skb)
 	flow_value.front_addr = bpf_ntohl(ctx.dst_addr);
 	flow_value.front_port = ctx.dst_port;
 	flow_value.in_ifindex = skb->ifindex;
+	flow_value.flags = ctx.closing ? FORWARD_FLOW_FLAG_FRONT_CLOSING : 0;
 	flow_value.last_seen_ns = bpf_ktime_get_ns();
 
 	if (bpf_map_update_elem(&flows_v4, &flow_key, &flow_value, BPF_ANY) < 0)

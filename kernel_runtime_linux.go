@@ -29,6 +29,12 @@ const (
 	kernelForwardFilterHandle = 10
 	kernelReplyFilterHandle   = 20
 	kernelVerifierLogSize     = 4 * 1024 * 1024
+	kernelTCPClosingGraceNS   = 15 * 1000000000
+	kernelUDPFlowIdleTimeout  = 300 * 1000000000
+)
+
+const (
+	kernelFlowFlagFrontClosing = 0x1
 )
 
 //go:embed ebpf/forward-tc-bpf.o
@@ -48,6 +54,25 @@ type tcRuleValueV4 struct {
 	BackendPort uint16
 	Pad         uint16
 	OutIfIndex  uint32
+}
+
+type tcFlowKeyV4 struct {
+	IfIndex uint32
+	SrcAddr uint32
+	DstAddr uint32
+	SrcPort uint16
+	DstPort uint16
+	Proto   uint8
+	Pad     [3]uint8
+}
+
+type tcFlowValueV4 struct {
+	RuleID     uint32
+	FrontAddr  uint32
+	InIfIndex  uint32
+	FrontPort  uint16
+	Flags      uint16
+	LastSeenNS uint64
 }
 
 type kernelAttachment struct {
@@ -293,6 +318,58 @@ func (rt *linuxKernelRuleRuntime) ensureMemlock() error {
 		rt.memlockErr = rlimit.RemoveMemlock()
 	})
 	return rt.memlockErr
+}
+
+func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	snapshot := emptyKernelRuleStatsSnapshot()
+	if rt.coll == nil || rt.coll.Maps == nil {
+		return snapshot, nil
+	}
+
+	flowsMap := rt.coll.Maps[kernelFlowsMapName]
+	if flowsMap == nil {
+		return snapshot, nil
+	}
+
+	nowNS, haveNow := kernelMonotonicNowNS()
+	iter := flowsMap.Iterate()
+	var key tcFlowKeyV4
+	var value tcFlowValueV4
+	for iter.Next(&key, &value) {
+		if value.RuleID == 0 {
+			continue
+		}
+
+		counts := snapshot.ByRuleID[value.RuleID]
+		if key.Proto == unix.IPPROTO_UDP {
+			if value.LastSeenNS == 0 {
+				continue
+			}
+			if haveNow {
+				if nowNS < value.LastSeenNS || (nowNS-value.LastSeenNS) > kernelUDPFlowIdleTimeout {
+					continue
+				}
+			}
+			counts.UDPNatEntries++
+		} else {
+			if value.Flags&kernelFlowFlagFrontClosing != 0 && value.LastSeenNS != 0 && haveNow {
+				if nowNS >= value.LastSeenNS && (nowNS-value.LastSeenNS) > kernelTCPClosingGraceNS {
+					continue
+				}
+			}
+			counts.TCPActiveConns++
+		}
+		snapshot.ByRuleID[value.RuleID] = counts
+	}
+
+	if err := iter.Err(); err != nil {
+		return emptyKernelRuleStatsSnapshot(), fmt.Errorf("iterate kernel flows map: %w", err)
+	}
+
+	return snapshot, nil
 }
 
 func kernelCollectionLoadError(err error, memlockErr error) string {
@@ -712,6 +789,14 @@ func kernelAttachmentExists(key kernelAttachmentKey) bool {
 		}
 	}
 	return false
+}
+
+func kernelMonotonicNowNS() (uint64, bool) {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0, false
+	}
+	return uint64(ts.Sec)*1000000000 + uint64(ts.Nsec), true
 }
 
 func kernelRuleProtocol(protocol string) uint8 {

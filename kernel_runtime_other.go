@@ -22,6 +22,10 @@ func (rt unavailableKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernel
 	return results, nil
 }
 
+func (rt unavailableKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error) {
+	return emptyKernelRuleStatsSnapshot(), nil
+}
+
 func (rt unavailableKernelRuleRuntime) Close() error {
 	return nil
 }
