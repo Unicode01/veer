@@ -36,11 +36,13 @@
 - 内置 Web UI，无需额外前端构建步骤
 - SQLite 持久化，默认生成 `forward.db`
 - 支持规则、站点、范围映射三类转发模型
+- Linux 下支持 XDP / TC eBPF 内核转发，并按配置自动回退到用户态
 - 支持 Worker 自动分配、重分布和 draining 退出
 - 支持规则 / 站点 / 范围映射流量统计
+- 支持按需刷新当前连接数，避免每轮刷新都遍历连接表
 - 支持标签、排序、搜索、分页
 - 通过 Bearer Token 保护管理 API
-- 仓库内附带 WHMCS 插件，支持规则管理、80/443 共享建站和 HAProxy 规则导入脚本
+- 仓库内附带 WHMCS 插件，支持多宿主机入口映射、规则管理、80/443 共享建站和 HAProxy 规则导入脚本
 
 ## 平台说明
 
@@ -166,6 +168,11 @@ Copy-Item config.example.json config.json
 
 2. 修改 `config.json`，至少把 `web_token` 改成一个真实的随机值。
 
+注意：
+
+- `web_token` 不能为空
+- 程序会拒绝使用示例占位值 `change-me-to-a-secure-token` 启动
+
 3. 直接运行：
 
 ```bash
@@ -193,6 +200,8 @@ http://127.0.0.1:8080
   "default_engine": "auto",
   "kernel_engine_order": ["xdp", "tc"],
   "kernel_rules_map_limit": 0,
+  "kernel_flows_map_limit": 0,
+  "kernel_nat_ports_map_limit": 0,
   "experimental_features": {
     "bridge_xdp": false,
     "kernel_traffic_stats": false
@@ -210,6 +219,8 @@ http://127.0.0.1:8080
 - `default_engine`：默认转发引擎，可选 `auto`、`userspace`、`kernel`
 - `kernel_engine_order`：Linux 内核态引擎尝试顺序，默认 `["xdp", "tc"]`；当前会自动跳过不可用引擎并回退
 - `kernel_rules_map_limit`：内核 `rules_v4/stats_v4` map 容量；`0` 或省略时按当前 kernel entries 自适应扩容，默认从 `16384` 起按 2 倍增长到 `262144`；设置为正数时使用固定上限
+- `kernel_flows_map_limit`：内核 `flows_v4` 连接跟踪表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
+- `kernel_nat_ports_map_limit`：内核 `nat_ports_v4` 端口保留表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
 - `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp`、`kernel_traffic_stats` 这类高风险、兼容性或性能权衡仍在收敛中的能力会通过这里单独放开
 - `tags`：可选标签列表，会在前端表单中作为下拉项出现
 
@@ -228,6 +239,35 @@ http://127.0.0.1:8080
 - 只有代码中显式接入检查的实验项才会生效；未接入的键会被保留但不会影响当前行为
 - `bridge_xdp` 已接入第一版实验实现，默认仍为关闭；当前主要面向透明 XDP 场景，依赖 bridge 邻居/FDB 解析，解析失败或接口不兼容时会自动回退
 - `kernel_traffic_stats` 用于给内核态规则补充 `bytes/speed` 统计；它会在 TC/XDP 转发路径上增加按包计数，默认关闭，只建议在确实需要观察内核态流量时启用
+
+## 内核引擎与回退链
+
+`forward` 当前的引擎选择逻辑是：
+
+- `default_engine = userspace`：全部走用户态 Worker
+- `default_engine = kernel`：优先要求进入内核态；不满足条件时仍会安全回退到用户态
+- `default_engine = auto`：先尝试内核态，再自动回退到用户态
+- Linux 下内核态会按 `kernel_engine_order` 依次尝试，例如默认先 `xdp`，再 `tc`
+
+当前想进入内核态，通常至少需要满足：
+
+- 规则协议必须是单协议 `tcp` 或 `udp`，不能是同一条规则里的 `tcp+udp`
+- 必须显式指定 `in_interface` 和 `out_interface`
+- 必须有明确的后端 IPv4 地址
+- `in_ip` 需要是有效 IPv4；`0.0.0.0` 可以接受，但仍要求显式入接口
+- 非透传的 full-NAT 场景下，出接口上需要有可用 IPv4，或者显式指定 `out_source_ip`
+- `transparent=true` 和固定 `out_source_ip` 互斥
+
+当前两条内核链路的定位大致是：
+
+- `XDP`：优先级更高，路径更短，但当前主要覆盖透明、单协议、接口条件较理想的规则；桥接出口相关能力仍主要通过 `bridge_xdp` 实验开关控制
+- `TC`：覆盖面更广，是当前更通用、更稳妥的内核转发后备路径；很多 XDP 无法接入的规则最终会回落到 TC
+
+补充说明：
+
+- 端口范围映射进入内核态时，会展开成逐端口的 kernel entries，因此大范围映射需要关注 `kernel_rules_map_limit`
+- 默认不会强行抖动现有内核会话；运行时更倾向保留活跃映射并在条件允许时原地更新
+- `kernel_traffic_stats` 默认关闭，不打开时不会额外在内核路径上维护速率/流量统计
 
 ## 构建
 
@@ -308,6 +348,24 @@ modules/addons/forward/
 ```
 
 也就是说，最终目录名仍然必须是 `forward`，因为插件运行时模块名、客户区路由和资源路径都按 `forward` 解析。
+
+当前这套 WHMCS 插件已经按“多宿主机、多 forward 端点”场景做了收敛，重点能力包括：
+
+- 支持按 `serverID` 映射入口 IP 池：`server_ip_server_map`
+- 支持按 `serverID` 映射不同的 forward API / Token：`api_server_map`
+- 客户区可按产品与服务 IP 自动收敛可用入口 IP，避免跨宿主机误配
+- 管理员可以限制客户区允许的产品、客户端目标 IP、协议和端口范围
+- 管理员可以单独控制客户区是否允许编辑以下字段：
+  - 规则：`listen_ip`、`protocol`、`description`
+  - 站点：`listen_ip`、`backend_http_port` / `backend_https_port`、`description`
+- `transparent`、`out_source_ip`、`backend_source_ip`、接口字段和默认标签属于管理员侧控制项，客户区不会直接放开
+
+如果你是在多母鸡环境下给 VM 做 NAT / 端口转发，推荐至少配置：
+
+- `server_ip_server_map`
+- `api_server_map`
+- `client_min_port` / `client_max_port`
+- 需要的话再收紧 `client_rule_edit_*` 与 `client_site_edit_*`
 
 ## 项目结构
 

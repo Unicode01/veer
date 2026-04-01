@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -227,19 +228,36 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 
 	addr := fmt.Sprintf(":%d", cfg.WebPort)
 	log.Printf("web server listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, securityHeadersMiddleware(mux)); err != nil {
 		log.Fatalf("http server: %v", err)
 	}
 }
 
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func authMiddleware(cfg *Config, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("Authorization")
-		token = strings.TrimPrefix(token, "Bearer ")
-		if token != cfg.WebToken {
+		expected := strings.TrimSpace(cfg.WebToken)
+		fields := strings.Fields(strings.TrimSpace(r.Header.Get("Authorization")))
+		token := ""
+		if len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") {
+			token = fields[1]
+		}
+		if expected == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		next(w, r)
 	}

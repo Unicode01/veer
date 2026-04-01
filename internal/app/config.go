@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -10,6 +11,7 @@ import (
 const (
 	experimentalFeatureBridgeXDP     = "bridge_xdp"
 	experimentalFeatureKernelTraffic = "kernel_traffic_stats"
+	insecureDefaultWebToken          = "change-me-to-a-secure-token"
 )
 
 type Config struct {
@@ -37,6 +39,13 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.WebPort == 0 {
 		cfg.WebPort = 8080
+	}
+	cfg.WebToken = strings.TrimSpace(cfg.WebToken)
+	if cfg.WebToken == "" {
+		return nil, fmt.Errorf("web_token must not be empty")
+	}
+	if cfg.WebToken == insecureDefaultWebToken {
+		return nil, fmt.Errorf("web_token must not use the example placeholder value")
 	}
 	if cfg.MaxWorkers < 0 {
 		cfg.MaxWorkers = 0
