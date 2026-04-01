@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -452,9 +451,14 @@ func (sp *sharedProxyEngine) handleHTTPConn(ctx context.Context, src net.Conn) {
 		headerBuf.WriteString("\r\n")
 	}
 	headerBuf.WriteString("\r\n")
-	n, _ := dst.Write(headerBuf.Bytes())
-	if ss != nil && n > 0 {
-		atomic.AddInt64(&ss.bytesIn, int64(n))
+	if err := writeAllCounting(dst, headerBuf.Bytes(), func() *int64 {
+		if ss == nil {
+			return nil
+		}
+		return &ss.bytesIn
+	}()); err != nil {
+		log.Printf("shared proxy http write buffered headers %s -> %s: %v", host, backend, err)
+		return
 	}
 
 	// Bridge remaining data
@@ -463,10 +467,7 @@ func (sp *sharedProxyEngine) handleHTTPConn(ctx context.Context, src net.Conn) {
 		inCounter = &ss.bytesIn
 		outCounter = &ss.bytesOut
 	}
-	done := make(chan struct{}, 2)
-	go func() { io.Copy(countingWriter{w: dst, count: inCounter}, br); done <- struct{}{} }()
-	go func() { io.Copy(countingWriter{w: src, count: outCounter}, dst); done <- struct{}{} }()
-	<-done
+	proxyTCPBidirectional(dst, src, br, inCounter, outCounter)
 }
 
 func (sp *sharedProxyEngine) handleHTTPSConn(ctx context.Context, src net.Conn) {
@@ -546,10 +547,7 @@ func (sp *sharedProxyEngine) handleHTTPSConn(ctx context.Context, src net.Conn) 
 		inCounter = &ss.bytesIn
 		outCounter = &ss.bytesOut
 	}
-	done := make(chan struct{}, 2)
-	go func() { io.Copy(countingWriter{w: dst, count: inCounter}, br); done <- struct{}{} }()
-	go func() { io.Copy(countingWriter{w: src, count: outCounter}, dst); done <- struct{}{} }()
-	<-done
+	proxyTCPBidirectional(dst, src, br, inCounter, outCounter)
 }
 
 // extractSNI parses a TLS ClientHello to extract the SNI server name.

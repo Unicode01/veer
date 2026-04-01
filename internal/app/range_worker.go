@@ -659,6 +659,14 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 		entry.lastActive = now
 		mu.Unlock()
 
-		entry.conn.Write(buf[:n])
+		if _, err := entry.conn.Write(buf[:n]); err != nil {
+			if st != nil {
+				atomic.AddInt64(&st.rejectedConns, 1)
+			}
+			log.Printf("range %d: udp backend write port %d: %v", pr.ID, port, err)
+			mu.Lock()
+			removeEntryLocked(key)
+			mu.Unlock()
+		}
 	}
 }

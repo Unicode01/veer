@@ -122,6 +122,54 @@ func (cw countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func writeAllCounting(w io.Writer, data []byte, count *int64) error {
+	for len(data) > 0 {
+		n, err := countingWriter{w: w, count: count}.Write(data)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func closeWriteIfPossible(conn net.Conn) {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if conn == nil {
+		return
+	}
+	if cw, ok := conn.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+}
+
+func proxyTCPBidirectional(dst net.Conn, src net.Conn, srcReader io.Reader, inCounter *int64, outCounter *int64) {
+	if srcReader == nil {
+		srcReader = src
+	}
+	done := make(chan struct{}, 2)
+
+	go func() {
+		_, _ = io.Copy(countingWriter{w: dst, count: inCounter}, srcReader)
+		closeWriteIfPossible(dst)
+		done <- struct{}{}
+	}()
+
+	go func() {
+		_, _ = io.Copy(countingWriter{w: src, count: outCounter}, dst)
+		closeWriteIfPossible(src)
+		done <- struct{}{}
+	}()
+
+	<-done
+	<-done
+}
+
 type ruleBinding struct {
 	rule     Rule
 	stats    *ruleStats
@@ -726,22 +774,7 @@ func handleTCPConn(ctx context.Context, src net.Conn, target, outIface, outSourc
 		outCounter = &st.bytesOut
 	}
 
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(countingWriter{w: dst, count: inCounter}, src)
-		if tc, ok := dst.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(countingWriter{w: src, count: outCounter}, dst)
-		if tc, ok := src.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-	<-done
+	proxyTCPBidirectional(dst, src, src, inCounter, outCounter)
 }
 
 func listenUDP(ctx context.Context, rule *Rule) (*net.UDPConn, error) {
@@ -912,6 +945,14 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 		entry.lastActive = now
 		mu.Unlock()
 
-		entry.conn.Write(buf[:n])
+		if _, err := entry.conn.Write(buf[:n]); err != nil {
+			if st != nil {
+				atomic.AddInt64(&st.rejectedConns, 1)
+			}
+			log.Printf("rule %d: udp backend write: %v", rule.ID, err)
+			mu.Lock()
+			removeEntryLocked(key)
+			mu.Unlock()
+		}
 	}
 }
