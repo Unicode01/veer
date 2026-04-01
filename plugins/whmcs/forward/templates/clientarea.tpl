@@ -166,6 +166,15 @@
                                             <div class="forward-badges" style="margin-top:8px;">
                                                 <span class="forward-badge forward-badge--protocol">{$rule.protocol|upper|escape:'html'}</span>
                                             </div>
+                                            <div class="forward-rule-meta">
+                                                {if $rule.transparent}
+                                                    源地址：透传
+                                                {elseif $rule.out_source_ip}
+                                                    回源 IP：{$rule.out_source_ip|escape:'html'}
+                                                {else}
+                                                    回源 IP：自动
+                                                {/if}
+                                            </div>
                                         </td>
                                         <td>
                                             <div class="forward-entry">
@@ -244,6 +253,15 @@
                                                 /
                                                 HTTPS:{if $site.backend_https_port > 0}{$site.backend_https_port|escape:'html'}{else}关{/if}
                                             </div>
+                                            <div class="forward-rule-meta">
+                                                {if $site.transparent}
+                                                    源地址：透传
+                                                {elseif $site.backend_source_ip}
+                                                    回源 IP：{$site.backend_source_ip|escape:'html'}
+                                                {else}
+                                                    回源 IP：自动
+                                                {/if}
+                                            </div>
                                         </td>
                                         <td>
                                             <div class="forward-entry">
@@ -309,7 +327,13 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="forward_rule_add_listen_ip">入口 IP</label>
-                                    <select class="form-control forward-control" id="forward_rule_add_listen_ip" name="listen_ip" required></select>
+                                    {if !$client_rule_can_edit_listen_ip}
+                                        <input type="hidden" id="forward_rule_add_listen_ip_hidden" name="listen_ip" data-mirror-for="forward_rule_add_listen_ip">
+                                    {/if}
+                                    <select class="form-control forward-control" id="forward_rule_add_listen_ip" name="listen_ip" required {if !$client_rule_can_edit_listen_ip}data-locked="1" disabled{/if}></select>
+                                    {if !$client_rule_can_edit_listen_ip}
+                                        <p class="help-block forward-help">入口 IP 由管理员策略锁定，会按当前宿主机自动选择。</p>
+                                    {/if}
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-6">
@@ -328,15 +352,24 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="forward_rule_add_protocol">协议</label>
-                                    <select class="form-control forward-control" id="forward_rule_add_protocol" name="protocol">
+                                    {if !$client_rule_can_edit_protocol}
+                                        <input type="hidden" id="forward_rule_add_protocol_hidden" name="protocol" value="{$client_rule_default_protocol|escape:'html'}" data-mirror-for="forward_rule_add_protocol">
+                                    {/if}
+                                    <select class="form-control forward-control" id="forward_rule_add_protocol" name="protocol" {if !$client_rule_can_edit_protocol}data-locked="1" disabled{/if}>
                                         {foreach $allowed_protocols as $protocol}
-                                            <option value="{$protocol|escape:'html'}">{$protocol|upper|escape:'html'}</option>
+                                            <option value="{$protocol|escape:'html'}" {if $protocol == $client_rule_default_protocol}selected{/if}>{$protocol|upper|escape:'html'}</option>
                                         {/foreach}
                                     </select>
+                                    {if !$client_rule_can_edit_protocol}
+                                        <p class="help-block forward-help">协议由管理员策略锁定。</p>
+                                    {/if}
                                 </div>
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label for="forward_rule_add_desc">描述</label>
-                                    <textarea class="form-control forward-control" id="forward_rule_add_desc" name="description" rows="3" maxlength="2000"></textarea>
+                                    <textarea class="form-control forward-control" id="forward_rule_add_desc" name="description" rows="3" maxlength="2000" {if !$client_rule_can_edit_description}readonly{/if}></textarea>
+                                    {if !$client_rule_can_edit_description}
+                                        <p class="help-block forward-help">描述由管理员策略锁定。</p>
+                                    {/if}
                                 </div>
                             </div>
                             <div class="modal-footer forward-modal__footer">
@@ -371,7 +404,13 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="forward_rule_edit_listen_ip">入口 IP</label>
-                                    <select class="form-control forward-control" id="forward_rule_edit_listen_ip" name="listen_ip" required></select>
+                                    {if !$client_rule_can_edit_listen_ip}
+                                        <input type="hidden" id="forward_rule_edit_listen_ip_hidden" name="listen_ip" data-mirror-for="forward_rule_edit_listen_ip">
+                                    {/if}
+                                    <select class="form-control forward-control" id="forward_rule_edit_listen_ip" name="listen_ip" required {if !$client_rule_can_edit_listen_ip}data-locked="1" disabled{/if}></select>
+                                    {if !$client_rule_can_edit_listen_ip}
+                                        <p class="help-block forward-help">入口 IP 由管理员策略锁定，会按当前宿主机自动选择。</p>
+                                    {/if}
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-6">
@@ -390,15 +429,24 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="forward_rule_edit_protocol">协议</label>
-                                    <select class="form-control forward-control" id="forward_rule_edit_protocol" name="protocol">
+                                    {if !$client_rule_can_edit_protocol}
+                                        <input type="hidden" id="forward_rule_edit_protocol_hidden" name="protocol" value="{$client_rule_default_protocol|escape:'html'}" data-mirror-for="forward_rule_edit_protocol">
+                                    {/if}
+                                    <select class="form-control forward-control" id="forward_rule_edit_protocol" name="protocol" {if !$client_rule_can_edit_protocol}data-locked="1" disabled{/if}>
                                         {foreach $allowed_protocols as $protocol}
-                                            <option value="{$protocol|escape:'html'}">{$protocol|upper|escape:'html'}</option>
+                                            <option value="{$protocol|escape:'html'}" {if $protocol == $client_rule_default_protocol}selected{/if}>{$protocol|upper|escape:'html'}</option>
                                         {/foreach}
                                     </select>
+                                    {if !$client_rule_can_edit_protocol}
+                                        <p class="help-block forward-help">协议由管理员策略锁定。</p>
+                                    {/if}
                                 </div>
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label for="forward_rule_edit_desc">描述</label>
-                                    <textarea class="form-control forward-control" id="forward_rule_edit_desc" name="description" rows="3" maxlength="2000"></textarea>
+                                    <textarea class="form-control forward-control" id="forward_rule_edit_desc" name="description" rows="3" maxlength="2000" {if !$client_rule_can_edit_description}readonly{/if}></textarea>
+                                    {if !$client_rule_can_edit_description}
+                                        <p class="help-block forward-help">描述由管理员策略锁定。</p>
+                                    {/if}
                                 </div>
                             </div>
                             <div class="modal-footer forward-modal__footer">
@@ -433,25 +481,37 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="forward_site_add_listen_ip">入口 IP</label>
-                                    <select class="form-control forward-control" id="forward_site_add_listen_ip" name="listen_ip" required></select>
+                                    {if !$client_site_can_edit_listen_ip}
+                                        <input type="hidden" id="forward_site_add_listen_ip_hidden" name="listen_ip" data-mirror-for="forward_site_add_listen_ip">
+                                    {/if}
+                                    <select class="form-control forward-control" id="forward_site_add_listen_ip" name="listen_ip" required {if !$client_site_can_edit_listen_ip}data-locked="1" disabled{/if}></select>
+                                    {if !$client_site_can_edit_listen_ip}
+                                        <p class="help-block forward-help">入口 IP 由管理员策略锁定，会按当前宿主机自动选择。</p>
+                                    {/if}
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-6">
                                         <div class="form-group">
                                             <label for="forward_site_add_http">HTTP 端口</label>
-                                            <input type="number" class="form-control forward-control" id="forward_site_add_http" name="backend_http_port" min="0" max="65535" value="80">
+                                            <input type="number" class="form-control forward-control" id="forward_site_add_http" name="backend_http_port" min="0" max="65535" value="80" {if !$client_site_can_edit_backend_ports}readonly{/if}>
                                         </div>
                                     </div>
                                     <div class="col-sm-6">
                                         <div class="form-group">
                                             <label for="forward_site_add_https">HTTPS 端口</label>
-                                            <input type="number" class="form-control forward-control" id="forward_site_add_https" name="backend_https_port" min="0" max="65535" value="443">
+                                            <input type="number" class="form-control forward-control" id="forward_site_add_https" name="backend_https_port" min="0" max="65535" value="443" {if !$client_site_can_edit_backend_ports}readonly{/if}>
                                         </div>
                                     </div>
                                 </div>
+                                {if !$client_site_can_edit_backend_ports}
+                                    <p class="help-block forward-help">后端端口由管理员策略锁定，新增站点默认使用 80/443。</p>
+                                {/if}
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label for="forward_site_add_desc">描述</label>
-                                    <textarea class="form-control forward-control" id="forward_site_add_desc" name="description" rows="3" maxlength="2000"></textarea>
+                                    <textarea class="form-control forward-control" id="forward_site_add_desc" name="description" rows="3" maxlength="2000" {if !$client_site_can_edit_description}readonly{/if}></textarea>
+                                    {if !$client_site_can_edit_description}
+                                        <p class="help-block forward-help">描述由管理员策略锁定。</p>
+                                    {/if}
                                 </div>
                             </div>
                             <div class="modal-footer forward-modal__footer">
@@ -486,25 +546,37 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="forward_site_edit_listen_ip">入口 IP</label>
-                                    <select class="form-control forward-control" id="forward_site_edit_listen_ip" name="listen_ip" required></select>
+                                    {if !$client_site_can_edit_listen_ip}
+                                        <input type="hidden" id="forward_site_edit_listen_ip_hidden" name="listen_ip" data-mirror-for="forward_site_edit_listen_ip">
+                                    {/if}
+                                    <select class="form-control forward-control" id="forward_site_edit_listen_ip" name="listen_ip" required {if !$client_site_can_edit_listen_ip}data-locked="1" disabled{/if}></select>
+                                    {if !$client_site_can_edit_listen_ip}
+                                        <p class="help-block forward-help">入口 IP 由管理员策略锁定，会按当前宿主机自动选择。</p>
+                                    {/if}
                                 </div>
                                 <div class="row">
                                     <div class="col-sm-6">
                                         <div class="form-group">
                                             <label for="forward_site_edit_http">HTTP 端口</label>
-                                            <input type="number" class="form-control forward-control" id="forward_site_edit_http" name="backend_http_port" min="0" max="65535">
+                                            <input type="number" class="form-control forward-control" id="forward_site_edit_http" name="backend_http_port" min="0" max="65535" {if !$client_site_can_edit_backend_ports}readonly{/if}>
                                         </div>
                                     </div>
                                     <div class="col-sm-6">
                                         <div class="form-group">
                                             <label for="forward_site_edit_https">HTTPS 端口</label>
-                                            <input type="number" class="form-control forward-control" id="forward_site_edit_https" name="backend_https_port" min="0" max="65535">
+                                            <input type="number" class="form-control forward-control" id="forward_site_edit_https" name="backend_https_port" min="0" max="65535" {if !$client_site_can_edit_backend_ports}readonly{/if}>
                                         </div>
                                     </div>
                                 </div>
+                                {if !$client_site_can_edit_backend_ports}
+                                    <p class="help-block forward-help">后端端口由管理员策略锁定，会保留当前值。</p>
+                                {/if}
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label for="forward_site_edit_desc">描述</label>
-                                    <textarea class="form-control forward-control" id="forward_site_edit_desc" name="description" rows="3" maxlength="2000"></textarea>
+                                    <textarea class="form-control forward-control" id="forward_site_edit_desc" name="description" rows="3" maxlength="2000" {if !$client_site_can_edit_description}readonly{/if}></textarea>
+                                    {if !$client_site_can_edit_description}
+                                        <p class="help-block forward-help">描述由管理员策略锁定。</p>
+                                    {/if}
                                 </div>
                             </div>
                             <div class="modal-footer forward-modal__footer">
@@ -621,8 +693,17 @@
         $('<option></option>').val(value).text(value + ' (当前值)').appendTo($select);
     }
 
+    function syncMirrorField($field) {
+        var fieldId = $field.attr('id');
+        if (!fieldId) {
+            return;
+        }
+        $('[data-mirror-for="' + fieldId + '"]').val($field.val() || '');
+    }
+
     function populateListenIpSelect($select, ips, selectedValue) {
         var selected = selectedValue || '';
+        var locked = !!$select.data('locked');
         $select.empty();
         if (!ips.length && selected) {
             ips = [selected];
@@ -630,14 +711,16 @@
         if (!ips.length) {
             $('<option></option>').val('').text('当前服务未配置入口 IP').appendTo($select);
             $select.prop('disabled', true);
+            syncMirrorField($select);
             return;
         }
         $.each(ips, function (_, ip) {
             $('<option></option>').val(ip).text(ip).appendTo($select);
         });
         ensureSelectOption($select, selected);
-        $select.prop('disabled', false);
+        $select.prop('disabled', locked);
         $select.val(selected && $select.find('option[value="' + selected.replace(/"/g, '\\"') + '"]').length ? selected : ips[0]);
+        syncMirrorField($select);
     }
 
     function syncTopPreview() {
@@ -668,6 +751,9 @@
             $submit.data('default-text', $.trim($submit.text()));
         }
         $form.find('input, select, textarea, button').prop('disabled', submitting);
+        if (!submitting) {
+            $form.find('[data-locked="1"]').prop('disabled', true);
+        }
         $submit.text(submitting ? '保存中...' : $submit.data('default-text'));
     }
 
@@ -783,6 +869,9 @@
     }
 
     $('#forwardServiceSelect').on('change', syncSelectedService);
+    $('#forward_rule_add_listen_ip, #forward_rule_edit_listen_ip, #forward_site_add_listen_ip, #forward_site_edit_listen_ip, #forward_rule_add_protocol, #forward_rule_edit_protocol').on('change', function () {
+        syncMirrorField($(this));
+    });
     $('#forward_rule_add_listen_ip, #forward_site_add_listen_ip').on('change', syncTopPreview);
 
     $('#forwardOpenAddRuleBtn').on('click', function () {
@@ -791,6 +880,7 @@
         }
         $('#forwardRuleAddForm')[0].reset();
         syncSelectedService();
+        syncMirrorField($('#forward_rule_add_protocol'));
         $('#forwardRuleAddModal').modal('show');
     });
 
@@ -803,8 +893,13 @@
         $('#forward_rule_add_name').val('SSH-' + Math.random().toString(36).slice(2, 6));
         $('#forward_rule_add_out_port').val('22');
         $('#forward_rule_add_in_port').val(String(randomPortInRange(clientPortMin, clientPortMax)));
-        $('#forward_rule_add_protocol').val('tcp');
-        $('#forward_rule_add_desc').val('快速创建的 SSH 转发规则');
+        if (!$('#forward_rule_add_protocol').data('locked')) {
+            $('#forward_rule_add_protocol').val('tcp');
+        }
+        syncMirrorField($('#forward_rule_add_protocol'));
+        if (!$('#forward_rule_add_desc').prop('readonly')) {
+            $('#forward_rule_add_desc').val('快速创建的 SSH 转发规则');
+        }
         $('#forwardRuleAddModal').modal('show');
     });
 
@@ -975,6 +1070,7 @@
         $('#forward_rule_edit_out_port').val($(this).data('out-port'));
         $('#forward_rule_edit_in_port').val($(this).data('in-port'));
         $('#forward_rule_edit_protocol').val($(this).data('protocol'));
+        syncMirrorField($('#forward_rule_edit_protocol'));
         $('#forward_rule_edit_desc').val($(this).data('description'));
         $('#forwardRuleEditModal').modal('show');
     });
