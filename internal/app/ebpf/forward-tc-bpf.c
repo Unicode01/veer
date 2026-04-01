@@ -75,6 +75,14 @@ struct rule_stats_value_v4 {
 	__u64 bytes_out;
 };
 
+struct redirect_target_v4 {
+	__u32 ifindex;
+	__u32 src_addr;
+	__u32 dst_addr;
+	__u16 src_port;
+	__u16 dst_port;
+};
+
 struct forward_vlan_hdr {
 	__be16 h_vlan_TCI;
 	__be16 h_vlan_encapsulated_proto;
@@ -126,6 +134,9 @@ struct packet_ctx {
 #define FORWARD_NAT_PORT_RANGE (FORWARD_NAT_PORT_MAX - FORWARD_NAT_PORT_MIN + 1U)
 #define FORWARD_NAT_PORT_PROBE_WINDOW 64
 #define FORWARD_NAT_PORT_PROBE_ROUNDS 3
+#if FORWARD_NAT_PORT_PROBE_ROUNDS > 3
+#error FORWARD_NAT_PORT_PROBE_ROUNDS above 3 requires extending reserve_nat_port()
+#endif
 
 #if FORWARD_ENABLE_TRAFFIC_STATS
 #define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0x40
@@ -351,23 +362,23 @@ static __always_inline int rewrite_l4_snat(struct __sk_buff *skb, const struct p
 	return 0;
 }
 
-static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 ifindex, __u32 src_addr, __u32 dst_addr, __u16 src_port, __u16 dst_port)
+static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct redirect_target_v4 *target)
 {
 	struct bpf_fib_lookup fib = {};
 	long act;
 
-	if (!ifindex)
+	if (!target->ifindex)
 		return TC_ACT_SHOT;
 
 	fib.family = AF_INET;
 	fib.tos = ctx->tos;
 	fib.l4_protocol = ctx->proto;
-	fib.sport = bpf_htons(src_port);
-	fib.dport = bpf_htons(dst_port);
+	fib.sport = bpf_htons(target->src_port);
+	fib.dport = bpf_htons(target->dst_port);
 	fib.tot_len = ctx->tot_len;
-	fib.ipv4_src = bpf_htonl(src_addr);
-	fib.ipv4_dst = bpf_htonl(dst_addr);
-	fib.ifindex = ifindex;
+	fib.ipv4_src = bpf_htonl(target->src_addr);
+	fib.ipv4_dst = bpf_htonl(target->dst_addr);
+	fib.ifindex = target->ifindex;
 
 	act = bpf_fib_lookup(skb, &fib, sizeof(fib), BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
 	if (act == BPF_FIB_LKUP_RET_SUCCESS) {
@@ -375,12 +386,12 @@ static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct 
 			return TC_ACT_SHOT;
 		if (bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_source), fib.smac, ETH_ALEN, 0) < 0)
 			return TC_ACT_SHOT;
-		act = bpf_redirect(fib.ifindex ? fib.ifindex : ifindex, 0);
+		act = bpf_redirect(fib.ifindex ? fib.ifindex : target->ifindex, 0);
 		if (act == TC_ACT_REDIRECT)
 			return (int)act;
 	}
 
-	act = bpf_redirect_neigh(ifindex, 0, 0, 0);
+	act = bpf_redirect_neigh(target->ifindex, 0, 0, 0);
 	if (act == TC_ACT_REDIRECT)
 		return (int)act;
 	return TC_ACT_SHOT;
@@ -510,21 +521,28 @@ static __always_inline int reserve_nat_port(const struct rule_value_v4 *rule, co
 	};
 	__u32 seed = fullnat_seed(rule, ctx);
 	__u32 round_seed = seed;
-	int round;
 
 	nat_key->ifindex = rule->out_ifindex;
 	nat_key->nat_addr = rule->nat_addr;
 	nat_key->proto = ctx->proto;
 	nat_key->pad = 0;
 
-#pragma clang loop unroll(full)
-	for (round = 0; round < FORWARD_NAT_PORT_PROBE_ROUNDS; round++) {
-		__u32 stride = 977U + ((__u32)round * 624U);
-		if (reserve_nat_port_window(round_seed, stride, nat_key, &nat_value, nat_port) == 0)
-			return 0;
-		round_seed ^= 0x9e3779b9U + ((__u32)round * 0x85ebca6bU);
-		round_seed = (round_seed << 13) | (round_seed >> 19);
-	}
+	if (reserve_nat_port_window(round_seed, 977U, nat_key, &nat_value, nat_port) == 0)
+		return 0;
+	round_seed ^= 0x9e3779b9U;
+	round_seed = (round_seed << 13) | (round_seed >> 19);
+
+	if (FORWARD_NAT_PORT_PROBE_ROUNDS <= 1)
+		return -1;
+	if (reserve_nat_port_window(round_seed, 1601U, nat_key, &nat_value, nat_port) == 0)
+		return 0;
+	round_seed ^= 0x23c2a438U;
+	round_seed = (round_seed << 13) | (round_seed >> 19);
+
+	if (FORWARD_NAT_PORT_PROBE_ROUNDS <= 2)
+		return -1;
+	if (reserve_nat_port_window(round_seed, 2225U, nat_key, &nat_value, nat_port) == 0)
+		return 0;
 
 	return -1;
 }
@@ -626,24 +644,17 @@ static __always_inline void delete_fullnat_state(const struct flow_key_v4 *reply
 	bpf_map_delete_elem(&nat_ports_v4, &nat_key);
 }
 
-static __always_inline void init_fullnat_front_value(struct flow_value_v4 *front_value, const struct rule_value_v4 *rule, struct __sk_buff *skb, const struct packet_ctx *ctx, __u16 nat_port, __u64 now)
+static __always_inline void init_fullnat_front_value(struct flow_value_v4 *front_value, const struct rule_value_v4 *rule, const struct packet_ctx *ctx, __u32 in_ifindex, __u16 nat_port)
 {
 	front_value->rule_id = rule->rule_id;
 	front_value->front_addr = bpf_ntohl(ctx->dst_addr);
 	front_value->client_addr = bpf_ntohl(ctx->src_addr);
 	front_value->nat_addr = rule->nat_addr;
-	front_value->in_ifindex = skb->ifindex;
+	front_value->in_ifindex = in_ifindex;
 	front_value->front_port = ctx->dst_port;
 	front_value->client_port = ctx->src_port;
 	front_value->nat_port = nat_port;
 	front_value->flags = FORWARD_FLOW_FLAG_FULL_NAT | FORWARD_FLOW_FLAG_FRONT_ENTRY;
-	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
-		front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
-	if (ctx->closing) {
-		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-		front_value->front_close_seen_ns = now;
-	}
-	front_value->last_seen_ns = now;
 }
 
 static __always_inline void init_fullnat_reply_value(struct flow_value_v4 *reply_value, const struct flow_value_v4 *front_value, __u64 now)
@@ -658,6 +669,7 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 {
 	struct flow_key_v4 flow_key = {};
 	struct flow_value_v4 flow_value = {};
+	struct redirect_target_v4 redirect = {};
 	struct flow_value_v4 *existing_flow;
 	__u64 now = 0;
 	int update_flow = 0;
@@ -746,7 +758,12 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 
 	if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_L2) != 0)
 		return redirect_bridge_ifindex(skb, rule);
-	return redirect_ifindex(skb, ctx, rule->out_ifindex, bpf_ntohl(ctx->src_addr), rule->backend_addr, ctx->src_port, rule->backend_port);
+	redirect.ifindex = rule->out_ifindex;
+	redirect.src_addr = bpf_ntohl(ctx->src_addr);
+	redirect.dst_addr = rule->backend_addr;
+	redirect.src_port = ctx->src_port;
+	redirect.dst_port = rule->backend_port;
+	return redirect_ifindex(skb, ctx, &redirect);
 }
 
 static __always_inline int handle_fullnat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
@@ -756,6 +773,7 @@ static __always_inline int handle_fullnat_forward(struct __sk_buff *skb, const s
 	struct nat_port_key_v4 nat_key = {};
 	struct flow_value_v4 front_value = {};
 	struct flow_value_v4 reply_value = {};
+	struct redirect_target_v4 redirect = {};
 	struct flow_value_v4 *front_flow;
 	struct flow_value_v4 *reply_flow;
 	struct nat_port_value_v4 nat_value = {};
@@ -797,7 +815,14 @@ static __always_inline int handle_fullnat_forward(struct __sk_buff *skb, const s
 		if (reserve_nat_port(rule, ctx, &nat_key, &nat_port) < 0)
 			return TC_ACT_SHOT;
 
-		init_fullnat_front_value(&front_value, rule, skb, ctx, nat_port, now);
+		init_fullnat_front_value(&front_value, rule, ctx, skb->ifindex, nat_port);
+		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+			front_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
+		if (ctx->closing) {
+			front_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+			front_value.front_close_seen_ns = now;
+		}
+		front_value.last_seen_ns = now;
 		if (bpf_map_update_elem(&flows_v4, &front_key, &front_value, BPF_NOEXIST) < 0) {
 			bpf_map_delete_elem(&nat_ports_v4, &nat_key);
 
@@ -881,12 +906,18 @@ static __always_inline int handle_fullnat_forward(struct __sk_buff *skb, const s
 
 	if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_L2) != 0)
 		return redirect_bridge_ifindex(skb, rule);
-	return redirect_ifindex(skb, ctx, rule->out_ifindex, front_value.nat_addr, rule->backend_addr, front_value.nat_port, rule->backend_port);
+	redirect.ifindex = rule->out_ifindex;
+	redirect.src_addr = front_value.nat_addr;
+	redirect.dst_addr = rule->backend_addr;
+	redirect.src_port = front_value.nat_port;
+	redirect.dst_port = rule->backend_port;
+	return redirect_ifindex(skb, ctx, &redirect);
 }
 
 static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *flow_key, const struct flow_value_v4 *flow)
 {
 	struct flow_value_v4 flow_value = *flow;
+	struct redirect_target_v4 redirect = {};
 	__u64 now = 0;
 	int update_flow = 0;
 	int closing;
@@ -939,7 +970,12 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 		bpf_map_delete_elem(&flows_v4, flow_key);
 	}
 
-	return redirect_ifindex(skb, ctx, flow_value.in_ifindex, flow_value.front_addr, bpf_ntohl(ctx->dst_addr), flow_value.front_port, ctx->dst_port);
+	redirect.ifindex = flow_value.in_ifindex;
+	redirect.src_addr = flow_value.front_addr;
+	redirect.dst_addr = bpf_ntohl(ctx->dst_addr);
+	redirect.src_port = flow_value.front_port;
+	redirect.dst_port = ctx->dst_port;
+	return redirect_ifindex(skb, ctx, &redirect);
 }
 
 static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *reply_key, const struct flow_value_v4 *flow)
@@ -947,6 +983,7 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 	struct flow_key_v4 front_key = {};
 	struct flow_value_v4 reply_value = *flow;
 	struct flow_value_v4 front_value = {};
+	struct redirect_target_v4 redirect = {};
 	struct flow_value_v4 *front_flow;
 	__u64 now = bpf_ktime_get_ns();
 	int update_front = 0;
@@ -1023,7 +1060,12 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 	if (ctx->closing)
 		delete_fullnat_state(reply_key, &reply_value, ctx->proto);
 
-	return redirect_ifindex(skb, ctx, reply_value.in_ifindex, reply_value.front_addr, reply_value.client_addr, reply_value.front_port, reply_value.client_port);
+	redirect.ifindex = reply_value.in_ifindex;
+	redirect.src_addr = reply_value.front_addr;
+	redirect.dst_addr = reply_value.client_addr;
+	redirect.src_port = reply_value.front_port;
+	redirect.dst_port = reply_value.client_port;
+	return redirect_ifindex(skb, ctx, &redirect);
 }
 
 SEC("classifier/forward_ingress")

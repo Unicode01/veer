@@ -45,7 +45,3 @@ func TestLogKernelLineSetOnceKeepsSeenLines(t *testing.T) {
 		t.Fatal("logKernelLineSetOnce() lost previously seen line")
 	}
 }
-
-type errString string
-
-func (e errString) Error() string { return string(e) }

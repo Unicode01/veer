@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,8 @@ const (
 	kernelUserspaceWarmupPoll    = 100 * time.Millisecond
 )
 
+const forwardKernelMaintenanceIntervalEnv = "FORWARD_KERNEL_MAINTENANCE_INTERVAL_MS"
+
 func nextRuleRetryDelay(retryCount int) time.Duration {
 	if retryCount <= 1 {
 		return ruleRetryBaseDelay
@@ -75,38 +78,51 @@ func nextRuleRetryDelay(retryCount int) time.Duration {
 	return delay
 }
 
+func configuredKernelMaintenanceInterval() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(forwardKernelMaintenanceIntervalEnv))
+	if raw == "" {
+		return kernelMaintenanceInterval
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		return kernelMaintenanceInterval
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 type ProcessManager struct {
-	ruleWorkers         map[int]*WorkerInfo
-	rangeWorkers        map[int]*WorkerInfo
-	sharedProxy         *WorkerInfo
-	drainingWorkers     []*WorkerInfo
-	mu                  sync.Mutex
-	redistributeMu      sync.Mutex // serializes redistributeWorkers calls
-	db                  *sql.DB
-	cfg                 *Config
-	sockPath            string
-	listener            net.Listener
-	binaryHash          string
-	ready               bool
-	rulePlans           map[int64]ruleDataplanePlan
-	rangePlans          map[int64]rangeDataplanePlan
-	kernelRuntime       kernelRuleRuntime
-	kernelRules         map[int64]bool
-	kernelRanges        map[int64]bool
-	kernelRuleEngines   map[int64]string
-	kernelRangeEngines  map[int64]string
-	kernelFlowOwners    map[uint32]kernelCandidateOwner
-	kernelRuleStats     map[int64]RuleStatsReport
-	kernelRangeStats    map[int64]RangeStatsReport
-	kernelStatsAt       time.Time
-	kernelStatsDemandAt time.Time
-	kernelMaintenanceAt time.Time
-	kernelRetryAt       time.Time
-	kernelRetryLogAt    time.Time
-	lastRulePlanLog     map[int64]string
-	lastRangePlanLog    map[int64]string
-	lastPlannerSummary  string
-	lastKernelRetryLog  string
+	ruleWorkers            map[int]*WorkerInfo
+	rangeWorkers           map[int]*WorkerInfo
+	sharedProxy            *WorkerInfo
+	drainingWorkers        []*WorkerInfo
+	mu                     sync.Mutex
+	redistributeMu         sync.Mutex // serializes redistributeWorkers calls
+	db                     *sql.DB
+	cfg                    *Config
+	sockPath               string
+	listener               net.Listener
+	binaryHash             string
+	ready                  bool
+	rulePlans              map[int64]ruleDataplanePlan
+	rangePlans             map[int64]rangeDataplanePlan
+	kernelRuntime          kernelRuleRuntime
+	kernelRules            map[int64]bool
+	kernelRanges           map[int64]bool
+	kernelRuleEngines      map[int64]string
+	kernelRangeEngines     map[int64]string
+	kernelFlowOwners       map[uint32]kernelCandidateOwner
+	kernelRuleStats        map[int64]RuleStatsReport
+	kernelRangeStats       map[int64]RangeStatsReport
+	kernelStatsAt          time.Time
+	kernelStatsDemandAt    time.Time
+	kernelMaintenanceAt    time.Time
+	kernelMaintenanceEvery time.Duration
+	kernelRetryAt          time.Time
+	kernelRetryLogAt       time.Time
+	lastRulePlanLog        map[int64]string
+	lastRangePlanLog       map[int64]string
+	lastPlannerSummary     string
+	lastKernelRetryLog     string
 }
 
 func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessManager, error) {
@@ -124,25 +140,26 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 
 	pm := &ProcessManager{
-		ruleWorkers:        make(map[int]*WorkerInfo),
-		rangeWorkers:       make(map[int]*WorkerInfo),
-		db:                 db,
-		cfg:                cfg,
-		sockPath:           sockPath,
-		listener:           ln,
-		binaryHash:         binaryHash,
-		rulePlans:          make(map[int64]ruleDataplanePlan),
-		rangePlans:         make(map[int64]rangeDataplanePlan),
-		kernelRuntime:      newKernelRuleRuntime(cfg),
-		kernelRules:        make(map[int64]bool),
-		kernelRanges:       make(map[int64]bool),
-		kernelRuleEngines:  make(map[int64]string),
-		kernelRangeEngines: make(map[int64]string),
-		kernelFlowOwners:   make(map[uint32]kernelCandidateOwner),
-		kernelRuleStats:    make(map[int64]RuleStatsReport),
-		kernelRangeStats:   make(map[int64]RangeStatsReport),
-		lastRulePlanLog:    make(map[int64]string),
-		lastRangePlanLog:   make(map[int64]string),
+		ruleWorkers:            make(map[int]*WorkerInfo),
+		rangeWorkers:           make(map[int]*WorkerInfo),
+		db:                     db,
+		cfg:                    cfg,
+		sockPath:               sockPath,
+		listener:               ln,
+		binaryHash:             binaryHash,
+		rulePlans:              make(map[int64]ruleDataplanePlan),
+		rangePlans:             make(map[int64]rangeDataplanePlan),
+		kernelRuntime:          newKernelRuleRuntime(cfg),
+		kernelRules:            make(map[int64]bool),
+		kernelRanges:           make(map[int64]bool),
+		kernelRuleEngines:      make(map[int64]string),
+		kernelRangeEngines:     make(map[int64]string),
+		kernelFlowOwners:       make(map[uint32]kernelCandidateOwner),
+		kernelRuleStats:        make(map[int64]RuleStatsReport),
+		kernelRangeStats:       make(map[int64]RangeStatsReport),
+		lastRulePlanLog:        make(map[int64]string),
+		lastRangePlanLog:       make(map[int64]string),
+		kernelMaintenanceEvery: configuredKernelMaintenanceInterval(),
 	}
 
 	if pm.kernelRuntime != nil {
@@ -2617,7 +2634,7 @@ func (pm *ProcessManager) monitorLoop() {
 		if pm.shouldRefreshKernelStatsLocked(now) {
 			refreshKernelStats = true
 		}
-		if pm.kernelRuntime != nil && (pm.kernelMaintenanceAt.IsZero() || now.Sub(pm.kernelMaintenanceAt) >= kernelMaintenanceInterval) {
+		if pm.kernelRuntime != nil && (pm.kernelMaintenanceAt.IsZero() || now.Sub(pm.kernelMaintenanceAt) >= pm.kernelMaintenanceEvery) {
 			runKernelMaintenance = true
 			pm.kernelMaintenanceAt = now
 		}

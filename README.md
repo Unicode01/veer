@@ -269,6 +269,68 @@ http://127.0.0.1:8080
 - 默认不会强行抖动现有内核会话；运行时更倾向保留活跃映射并在条件允许时原地更新
 - `kernel_traffic_stats` 默认关闭，不打开时不会额外在内核路径上维护速率/流量统计
 
+## 性能测试说明
+
+仓库内附带 Linux-only dataplane benchmark，主要用于做两类评估：
+
+- `pps` 评估：更关注小包包速率、连接规模和 `userspace / tc / xdp` 的相对差异
+- `throughput` 评估：更关注大流量 TCP 吞吐，更接近日常 `iperf3` 使用方式
+
+需要注意：
+
+- 基准测试默认使用 `netns + veth` 拓扑，不等于真实物理网卡线速
+- 关闭 offload 的结果更适合看软件路径和小包 `pps`
+- 保留 offload 的结果更适合看大流 TCP 吞吐
+- `XDP` 在部分 offload / 设备组合下仍可能无法加载，因此当前吞吐结论主要基于 `userspace` 与 `tc`
+
+### 小包 PPS 参考
+
+测试口径：
+
+- UDP steady
+- `64B` payload
+- `8192` 总连接
+- `16` 活跃连接
+- `FORWARD_PERF_DISABLE_OFFLOADS=1`
+- `FORWARD_PERF_BACKEND_WORKERS=8`
+
+参考结果：
+
+| Engine | Payload PPS | Payload Throughput |
+| --- | ---: | ---: |
+| TC | `~119.5k pps` | `~7.30 MiB/s` |
+| XDP | `~122.1k pps` | `~7.45 MiB/s` |
+
+这一组更适合说明：在当前软件拓扑下，小包场景里 `XDP` 相对 `TC` 仍有小幅优势，但绝对值会明显受到 benchmark 拓扑、helper 与 offload 策略影响。
+
+### 大流吞吐参考
+
+测试口径：
+
+- TCP 单向上传流
+- `FORWARD_PERF_TCP_MODE=upload`
+- `1` 连接 / `1` 并发
+- `2 GiB` per connection
+- `128 KiB` chunk
+- `FORWARD_PERF_DISABLE_OFFLOADS=0`
+
+参考结果：
+
+| Engine | Scenario | Payload Throughput |
+| --- | --- | ---: |
+| Userspace | `1 stream` | `~1288 MiB/s` |
+| TC | `1 stream` | `~2651 MiB/s` |
+| TC | `16 streams` | `~5223-5442 MiB/s` |
+
+说明：
+
+- 这一组已经更接近常规 `iperf3` 单向吞吐测试
+- `Userspace` 在该实验模型下已经达到约 `10.8 Gbps` 量级
+- `TC` 在 `veth` / 内存路径下可以高于真实 `10G NIC` 线速，这更像软件路径上限，不应直接等价为真实物理网卡吞吐
+- 在同机 `netns + veth` 基准里，`32 streams` 及以上的 TCP upload 结果会开始明显受到本机 socket / softirq / veth 竞争影响；这类结果更像测试拓扑的极限，不建议直接作为真实部署下的 `TC` 聚合吞吐结论
+- 因此更推荐把 `1 stream` 视为单流能力，把 `4-16 streams` 视为较有参考价值的聚合吞吐区间
+- 如果目标是接近线上网卡表现，建议重点参考 `payload_mib_per_sec`，不要把实验环境下的 `wire` 估算值直接当作物理链路线速
+
 ## 构建
 
 本地构建：

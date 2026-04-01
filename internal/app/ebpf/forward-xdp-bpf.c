@@ -66,6 +66,14 @@ struct rule_stats_value_v4 {
 	__u64 bytes_out;
 };
 
+struct redirect_target_v4 {
+	__u32 ifindex;
+	__u32 src_addr;
+	__u32 dst_addr;
+	__u16 src_port;
+	__u16 dst_port;
+};
+
 struct forward_vlan_hdr {
 	__be16 h_vlan_TCI;
 	__be16 h_vlan_encapsulated_proto;
@@ -101,6 +109,7 @@ struct packet_ctx {
 #define FORWARD_FLOW_FLAG_COUNTED 0x20
 #define FORWARD_RULE_FLAG_BRIDGE_L2 0x2
 #define FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2 0x4
+#define FORWARD_RULE_FLAG_PREPARED_L2 0x10
 #define FORWARD_TCP_FLOW_REFRESH_NS (30ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_REFRESH_NS (1ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_IDLE_NS (300ULL * 1000000000ULL)
@@ -150,18 +159,18 @@ static __always_inline __u16 csum_fold_helper(__u32 csum)
 	return ~csum;
 }
 
-static __always_inline void csum_replace2(__sum16 *check, __be16 old, __be16 new)
+static __always_inline __sum16 csum_replace2_val(__sum16 check, __be16 old, __be16 new)
 {
-	__u32 csum = (~(__u32)(*check)) & 0xffff;
+	__u32 csum = (~(__u32)check) & 0xffff;
 	csum += (~(__u32)old) & 0xffff;
 	csum += (__u32)new;
-	*check = csum_fold_helper(csum);
+	return csum_fold_helper(csum);
 }
 
-static __always_inline void csum_replace4(__sum16 *check, __be32 old, __be32 new)
+static __always_inline __sum16 csum_replace4_val(__sum16 check, __be32 old, __be32 new)
 {
-	csum_replace2(check, (__be16)(old >> 16), (__be16)(new >> 16));
-	csum_replace2(check, (__be16)old, (__be16)new);
+	check = csum_replace2_val(check, (__be16)(old >> 16), (__be16)(new >> 16));
+	return csum_replace2_val(check, (__be16)old, (__be16)new);
 }
 
 static __always_inline int parse_ipv4_l4(struct xdp_md *xdp, struct packet_ctx *ctx)
@@ -267,43 +276,61 @@ static __always_inline int rewrite_l4_dnat(struct xdp_md *xdp, const struct pack
 {
 	void *data = (void *)(long)xdp->data;
 	void *data_end = (void *)(long)xdp->data_end;
-	struct iphdr *iph = data + ctx->l3_off;
+	struct ethhdr *eth = data;
+	struct forward_vlan_hdr *vh;
+	struct iphdr *iph;
 	__be32 old_addr = bpf_htonl(ctx->dst_addr);
 	__be32 new_addr = bpf_htonl(new_addr_host);
 	__be16 old_port = bpf_htons(ctx->dst_port);
 	__be16 new_port = bpf_htons(new_port_host);
 
+	if ((void *)(eth + 1) > data_end)
+		return -1;
+	if (eth->h_proto == bpf_htons(ETH_P_8021Q) || eth->h_proto == bpf_htons(ETH_P_8021AD)) {
+		vh = (void *)(eth + 1);
+		if ((void *)(vh + 1) > data_end)
+			return -1;
+		iph = (void *)(vh + 1);
+	} else {
+		iph = (void *)(eth + 1);
+	}
 	if ((void *)(iph + 1) > data_end)
+		return -1;
+	if (iph->version != 4 || iph->ihl != 5)
 		return -1;
 
 	if (old_addr != new_addr) {
-		csum_replace4(&iph->check, old_addr, new_addr);
+		iph->check = csum_replace4_val(iph->check, old_addr, new_addr);
 		iph->daddr = new_addr;
 	}
 
 	if (ctx->proto == IPPROTO_TCP) {
-		struct tcphdr *tcph = data + ctx->l4_off;
+		struct tcphdr *tcph = (void *)(iph + 1);
 		if ((void *)(tcph + 1) > data_end)
 			return -1;
+		if (tcph->doff < 5)
+			return -1;
+		if ((void *)tcph + ((__u32)tcph->doff << 2) > data_end)
+			return -1;
 		if (ctx->has_l4_checksum && old_addr != new_addr)
-			csum_replace4(&tcph->check, old_addr, new_addr);
+			tcph->check = csum_replace4_val(tcph->check, old_addr, new_addr);
 		if (old_port != new_port) {
 			if (ctx->has_l4_checksum)
-				csum_replace2(&tcph->check, old_port, new_port);
+				tcph->check = csum_replace2_val(tcph->check, old_port, new_port);
 			tcph->dest = new_port;
 		}
 		return 0;
 	}
 
 	{
-		struct udphdr *udph = data + ctx->l4_off;
+		struct udphdr *udph = (void *)(iph + 1);
 		if ((void *)(udph + 1) > data_end)
 			return -1;
 		if (ctx->has_l4_checksum && old_addr != new_addr)
-			csum_replace4(&udph->check, old_addr, new_addr);
+			udph->check = csum_replace4_val(udph->check, old_addr, new_addr);
 		if (old_port != new_port) {
 			if (ctx->has_l4_checksum)
-				csum_replace2(&udph->check, old_port, new_port);
+				udph->check = csum_replace2_val(udph->check, old_port, new_port);
 			udph->dest = new_port;
 		}
 		if (ctx->has_l4_checksum && udph->check == 0)
@@ -316,43 +343,61 @@ static __always_inline int rewrite_l4_snat(struct xdp_md *xdp, const struct pack
 {
 	void *data = (void *)(long)xdp->data;
 	void *data_end = (void *)(long)xdp->data_end;
-	struct iphdr *iph = data + ctx->l3_off;
+	struct ethhdr *eth = data;
+	struct forward_vlan_hdr *vh;
+	struct iphdr *iph;
 	__be32 old_addr = bpf_htonl(ctx->src_addr);
 	__be32 new_addr = bpf_htonl(new_addr_host);
 	__be16 old_port = bpf_htons(ctx->src_port);
 	__be16 new_port = bpf_htons(new_port_host);
 
+	if ((void *)(eth + 1) > data_end)
+		return -1;
+	if (eth->h_proto == bpf_htons(ETH_P_8021Q) || eth->h_proto == bpf_htons(ETH_P_8021AD)) {
+		vh = (void *)(eth + 1);
+		if ((void *)(vh + 1) > data_end)
+			return -1;
+		iph = (void *)(vh + 1);
+	} else {
+		iph = (void *)(eth + 1);
+	}
 	if ((void *)(iph + 1) > data_end)
+		return -1;
+	if (iph->version != 4 || iph->ihl != 5)
 		return -1;
 
 	if (old_addr != new_addr) {
-		csum_replace4(&iph->check, old_addr, new_addr);
+		iph->check = csum_replace4_val(iph->check, old_addr, new_addr);
 		iph->saddr = new_addr;
 	}
 
 	if (ctx->proto == IPPROTO_TCP) {
-		struct tcphdr *tcph = data + ctx->l4_off;
+		struct tcphdr *tcph = (void *)(iph + 1);
 		if ((void *)(tcph + 1) > data_end)
 			return -1;
+		if (tcph->doff < 5)
+			return -1;
+		if ((void *)tcph + ((__u32)tcph->doff << 2) > data_end)
+			return -1;
 		if (ctx->has_l4_checksum && old_addr != new_addr)
-			csum_replace4(&tcph->check, old_addr, new_addr);
+			tcph->check = csum_replace4_val(tcph->check, old_addr, new_addr);
 		if (old_port != new_port) {
 			if (ctx->has_l4_checksum)
-				csum_replace2(&tcph->check, old_port, new_port);
+				tcph->check = csum_replace2_val(tcph->check, old_port, new_port);
 			tcph->source = new_port;
 		}
 		return 0;
 	}
 
 	{
-		struct udphdr *udph = data + ctx->l4_off;
+		struct udphdr *udph = (void *)(iph + 1);
 		if ((void *)(udph + 1) > data_end)
 			return -1;
 		if (ctx->has_l4_checksum && old_addr != new_addr)
-			csum_replace4(&udph->check, old_addr, new_addr);
+			udph->check = csum_replace4_val(udph->check, old_addr, new_addr);
 		if (old_port != new_port) {
 			if (ctx->has_l4_checksum)
-				csum_replace2(&udph->check, old_port, new_port);
+				udph->check = csum_replace2_val(udph->check, old_port, new_port);
 			udph->source = new_port;
 		}
 		if (ctx->has_l4_checksum && udph->check == 0)
@@ -361,7 +406,7 @@ static __always_inline int rewrite_l4_snat(struct xdp_md *xdp, const struct pack
 	}
 }
 
-static __always_inline int prepare_redirect_v4(struct xdp_md *xdp, const struct packet_ctx *ctx, __u32 out_ifindex, __u32 new_src_addr, __u32 new_dst_addr, __u16 new_src_port, __u16 new_dst_port)
+static __always_inline int prepare_redirect_v4(struct xdp_md *xdp, const struct packet_ctx *ctx, const struct redirect_target_v4 *target)
 {
 	void *data = (void *)(long)xdp->data;
 	void *data_end = (void *)(long)xdp->data_end;
@@ -375,12 +420,12 @@ static __always_inline int prepare_redirect_v4(struct xdp_md *xdp, const struct 
 	fib.family = AF_INET;
 	fib.tos = ctx->tos;
 	fib.l4_protocol = ctx->proto;
-	fib.sport = bpf_htons(new_src_port);
-	fib.dport = bpf_htons(new_dst_port);
+	fib.sport = bpf_htons(target->src_port);
+	fib.dport = bpf_htons(target->dst_port);
 	fib.tot_len = ctx->tot_len;
-	fib.ipv4_src = bpf_htonl(new_src_addr);
-	fib.ipv4_dst = bpf_htonl(new_dst_addr);
-	fib.ifindex = out_ifindex;
+	fib.ipv4_src = bpf_htonl(target->src_addr);
+	fib.ipv4_dst = bpf_htonl(target->dst_addr);
+	fib.ifindex = target->ifindex;
 
 	rc = bpf_fib_lookup(xdp, &fib, sizeof(fib), BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
 	if (rc != BPF_FIB_LKUP_RET_SUCCESS)
@@ -452,14 +497,34 @@ static __always_inline int prepare_flow_reply_redirect_v4(struct xdp_md *xdp, co
 		return (int)flow_value->in_ifindex;
 	}
 
-	return prepare_redirect_v4(xdp, ctx, flow_value->in_ifindex, flow_value->front_addr, ctx->dst_addr, flow_value->front_port, ctx->dst_port);
+	{
+		struct redirect_target_v4 target = {
+			.ifindex = flow_value->in_ifindex,
+			.src_addr = flow_value->front_addr,
+			.dst_addr = ctx->dst_addr,
+			.src_port = flow_value->front_port,
+			.dst_port = ctx->dst_port,
+		};
+
+		return prepare_redirect_v4(xdp, ctx, &target);
+	}
 }
 
 static __always_inline int prepare_rule_redirect_v4(struct xdp_md *xdp, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
 {
-	if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_L2) != 0)
+	if ((rule->flags & (FORWARD_RULE_FLAG_BRIDGE_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0)
 		return prepare_bridge_redirect_v4(xdp, rule);
-	return prepare_redirect_v4(xdp, ctx, rule->out_ifindex, ctx->src_addr, rule->backend_addr, ctx->src_port, rule->backend_port);
+	{
+		struct redirect_target_v4 target = {
+			.ifindex = rule->out_ifindex,
+			.src_addr = ctx->src_addr,
+			.dst_addr = rule->backend_addr,
+			.src_port = ctx->src_port,
+			.dst_port = rule->backend_port,
+		};
+
+		return prepare_redirect_v4(xdp, ctx, &target);
+	}
 }
 
 static __always_inline struct rule_stats_value_v4 *lookup_rule_stats(__u32 rule_id)
@@ -648,7 +713,7 @@ int forward_xdp(struct xdp_md *xdp)
 		}
 		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 			flow_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
-		if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2) != 0) {
+		if ((rule->flags & (FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0) {
 			flow_value.flags |= FORWARD_FLOW_FLAG_BRIDGE_INGRESS_L2;
 			store_bridge_ingress_macs(&flow_value, eth);
 		}
@@ -674,7 +739,7 @@ int forward_xdp(struct xdp_md *xdp)
 			}
 			if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 				flow_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
-			if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2) != 0) {
+			if ((rule->flags & (FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0) {
 				flow_value.flags |= FORWARD_FLOW_FLAG_BRIDGE_INGRESS_L2;
 				store_bridge_ingress_macs(&flow_value, eth);
 			}

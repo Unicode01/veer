@@ -25,6 +25,7 @@ const (
 	xdpRuleFlagBridgeL2        = 0x2
 	xdpRuleFlagBridgeIngressL2 = 0x4
 	xdpRuleFlagTrafficStats    = 0x8
+	xdpRuleFlagPreparedL2      = 0x10
 )
 
 type xdpPrepareOptions struct {
@@ -598,7 +599,7 @@ func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Prog
 	}
 
 	var errs []string
-	for _, flags := range xdpAttachOrder(ifindex, oldAttachments) {
+	for _, flags := range xdpAttachOrder(link, oldAttachments) {
 		if err := netlink.LinkSetXdpFdWithFlags(link, prog.FD(), flags); err == nil {
 			return xdpAttachment{ifindex: ifindex, flags: flags}, nil
 		} else {
@@ -692,8 +693,15 @@ func collectXDPInterfaces(prepared []preparedXDPKernelRule) []int {
 	return out
 }
 
-func xdpAttachOrder(ifindex int, oldAttachments []xdpAttachment) []int {
+func xdpAttachOrder(link netlink.Link, oldAttachments []xdpAttachment) []int {
 	preferred := []int{nl.XDP_FLAGS_DRV_MODE, nl.XDP_FLAGS_SKB_MODE}
+	if link != nil && strings.EqualFold(strings.TrimSpace(link.Type()), "veth") {
+		preferred = []int{nl.XDP_FLAGS_SKB_MODE, nl.XDP_FLAGS_DRV_MODE}
+	}
+	if link == nil || link.Attrs() == nil {
+		return preferred
+	}
+	ifindex := link.Attrs().Index
 	for _, att := range oldAttachments {
 		if att.ifindex != ifindex {
 			continue
@@ -915,10 +923,21 @@ func prepareXDPKernelRule(rule Rule, opts xdpPrepareOptions) ([]preparedXDPKerne
 	outIfIndex := 0
 
 	if xdpLinkTypeAllowed(outLink.Type()) {
-		if err := validateXDPDirectTarget(outLink, rule); err != nil {
-			return nil, err
-		}
 		outIfIndex = outLink.Attrs().Index
+		if xdpPreparedL2LinkTypeAllowed(outLink.Type()) {
+			target, err := resolveXDPDirectTarget(outLink, rule)
+			if err != nil {
+				return nil, err
+			}
+			outIfIndex = target.outIfIndex
+			value.Flags |= xdpRuleFlagPreparedL2
+			value.SrcMAC = target.srcMAC
+			value.DstMAC = target.dstMAC
+		} else {
+			if err := validateXDPDirectTarget(outLink, rule); err != nil {
+				return nil, err
+			}
+		}
 	} else {
 		target, err := resolveXDPBridgeTarget(outLink, rule, opts)
 		if err != nil {
@@ -969,6 +988,10 @@ func xdpLinkTypeAllowed(linkType string) bool {
 	default:
 		return false
 	}
+}
+
+func xdpPreparedL2LinkTypeAllowed(linkType string) bool {
+	return strings.EqualFold(strings.TrimSpace(linkType), "veth")
 }
 
 func clonePreparedXDPKernelRules(src []preparedXDPKernelRule) []preparedXDPKernelRule {
@@ -1024,16 +1047,17 @@ func sortPreparedXDPKernelRules(items []preparedXDPKernelRule) {
 func snapshotPreparedXDPBridgeEntries(prepared []preparedXDPKernelRule) map[string]struct{} {
 	lines := make(map[string]struct{})
 	for _, item := range prepared {
-		if item.value.Flags&(xdpRuleFlagBridgeL2|xdpRuleFlagBridgeIngressL2) == 0 {
+		if item.value.Flags&(xdpRuleFlagBridgeL2|xdpRuleFlagBridgeIngressL2|xdpRuleFlagPreparedL2) == 0 {
 			continue
 		}
 		line := fmt.Sprintf(
-			"xdp dataplane %s bridge plan: in_if=%s out_if=%s ingress_bridge=%t egress_bridge=%t backend=%s:%d src_mac=%s dst_mac=%s",
+			"xdp dataplane %s l2 plan: in_if=%s out_if=%s ingress_bridge=%t egress_bridge=%t prepared_l2=%t backend=%s:%d src_mac=%s dst_mac=%s",
 			kernelRuleLogLabel(item.rule),
 			xdpInterfaceLabel(item.inIfIndex),
 			xdpInterfaceLabel(item.outIfIndex),
 			(item.value.Flags&xdpRuleFlagBridgeIngressL2) != 0,
 			(item.value.Flags&xdpRuleFlagBridgeL2) != 0,
+			(item.value.Flags&xdpRuleFlagPreparedL2) != 0,
 			net.IPv4(
 				byte(item.value.BackendAddr>>24),
 				byte(item.value.BackendAddr>>16),
