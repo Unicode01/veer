@@ -149,6 +149,8 @@ func (rt *orderedKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, er
 			current.TCPActiveConns += stats.TCPActiveConns
 			current.UDPNatEntries += stats.UDPNatEntries
 			current.TotalConns += stats.TotalConns
+			current.BytesIn += stats.BytesIn
+			current.BytesOut += stats.BytesOut
 			out.ByRuleID[ruleID] = current
 		}
 	}

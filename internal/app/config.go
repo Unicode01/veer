@@ -7,7 +7,10 @@ import (
 	"strings"
 )
 
-const experimentalFeatureBridgeXDP = "bridge_xdp"
+const (
+	experimentalFeatureBridgeXDP     = "bridge_xdp"
+	experimentalFeatureKernelTraffic = "kernel_traffic_stats"
+)
 
 type Config struct {
 	WebPort             int             `json:"web_port"`

@@ -24,10 +24,12 @@ const kernelXDPProgramName = "forward_xdp"
 const (
 	xdpRuleFlagBridgeL2        = 0x2
 	xdpRuleFlagBridgeIngressL2 = 0x4
+	xdpRuleFlagTrafficStats    = 0x8
 )
 
 type xdpPrepareOptions struct {
-	enableBridge bool
+	enableBridge       bool
+	enableTrafficStats bool
 }
 
 type xdpRuleValueV4 struct {
@@ -51,6 +53,9 @@ type preparedXDPKernelRule struct {
 
 //go:embed ebpf/forward-xdp-bpf.o
 var embeddedForwardXDPObject []byte
+
+//go:embed ebpf/forward-xdp-bpf-stats.o
+var embeddedForwardXDPStatsObject []byte
 
 type xdpAttachment struct {
 	ifindex int
@@ -87,6 +92,9 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureBridgeXDP) {
 		opts.enableBridge = true
 	}
+	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic) {
+		opts.enableTrafficStats = true
+	}
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
@@ -101,7 +109,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 
 func (rt *xdpKernelRuleRuntime) Available() (bool, string) {
 	rt.availableOnce.Do(func() {
-		spec, err := loadEmbeddedXDPCollectionSpec()
+		spec, err := loadEmbeddedXDPCollectionSpec(rt.prepareOptions.enableTrafficStats)
 		if err != nil {
 			rt.available = false
 			rt.availableReason = err.Error()
@@ -124,6 +132,9 @@ func (rt *xdpKernelRuleRuntime) Available() (bool, string) {
 		rt.availableReason = "embedded xdp eBPF object available"
 		if rt.prepareOptions.enableBridge {
 			rt.availableReason += "; bridge_xdp experimental path enabled"
+		}
+		if rt.prepareOptions.enableTrafficStats {
+			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
 		}
 	})
 	return rt.available, rt.availableReason
@@ -171,7 +182,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 		return results, nil
 	}
 
-	spec, err := loadEmbeddedXDPCollectionSpec()
+	spec, err := loadEmbeddedXDPCollectionSpec(rt.prepareOptions.enableTrafficStats)
 	if err != nil {
 		msg := err.Error()
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -620,11 +631,17 @@ func (rt *xdpKernelRuleRuntime) deleteStaleAttachmentsLocked(oldAttachments, new
 	}
 }
 
-func loadEmbeddedXDPCollectionSpec() (*ebpf.CollectionSpec, error) {
-	if len(embeddedForwardXDPObject) == 0 {
-		return nil, fmt.Errorf("embedded xdp eBPF object is empty; build internal/app/ebpf/forward-xdp-bpf.o before compiling")
+func loadEmbeddedXDPCollectionSpec(enableTrafficStats bool) (*ebpf.CollectionSpec, error) {
+	objectBytes := embeddedForwardXDPObject
+	objectName := "internal/app/ebpf/forward-xdp-bpf.o"
+	if enableTrafficStats {
+		objectBytes = embeddedForwardXDPStatsObject
+		objectName = "internal/app/ebpf/forward-xdp-bpf-stats.o"
 	}
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(embeddedForwardXDPObject))
+	if len(objectBytes) == 0 {
+		return nil, fmt.Errorf("embedded xdp eBPF object is empty; build %s before compiling", objectName)
+	}
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(objectBytes))
 	if err != nil {
 		return nil, fmt.Errorf("load embedded xdp eBPF object: %w", err)
 	}
@@ -891,6 +908,9 @@ func prepareXDPKernelRule(rule Rule, opts xdpPrepareOptions) ([]preparedXDPKerne
 		RuleID:      uint32(rule.ID),
 		BackendAddr: outAddr,
 		BackendPort: uint16(rule.OutPort),
+	}
+	if opts.enableTrafficStats {
+		value.Flags |= xdpRuleFlagTrafficStats
 	}
 	outIfIndex := 0
 

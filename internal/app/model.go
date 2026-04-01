@@ -122,6 +122,21 @@ type WorkerListResponse struct {
 	Workers    []WorkerView `json:"workers"`
 }
 
+type RuleStatsListItem struct {
+	RuleStatsReport
+	Remark       string `json:"remark"`
+	CurrentConns int64  `json:"-"`
+}
+
+type RuleStatsListResponse struct {
+	Page     int                 `json:"page"`
+	PageSize int                 `json:"page_size"`
+	Total    int                 `json:"total"`
+	SortKey  string              `json:"sort_key,omitempty"`
+	SortAsc  bool                `json:"sort_asc"`
+	Items    []RuleStatsListItem `json:"items"`
+}
+
 type RuleStatsReport struct {
 	RuleID        int64 `json:"rule_id"`
 	ActiveConns   int64 `json:"active_conns"`
@@ -154,6 +169,21 @@ type RangeStatsReport struct {
 type RangeCurrentConnsReport struct {
 	RangeID      int64 `json:"range_id"`
 	CurrentConns int64 `json:"current_conns"`
+}
+
+type RangeStatsListItem struct {
+	RangeStatsReport
+	Remark       string `json:"remark"`
+	CurrentConns int64  `json:"-"`
+}
+
+type RangeStatsListResponse struct {
+	Page     int                  `json:"page"`
+	PageSize int                  `json:"page_size"`
+	Total    int                  `json:"total"`
+	SortKey  string               `json:"sort_key,omitempty"`
+	SortAsc  bool                 `json:"sort_asc"`
+	Items    []RangeStatsListItem `json:"items"`
 }
 
 type SiteStatsReport struct {

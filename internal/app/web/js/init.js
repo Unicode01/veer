@@ -252,9 +252,9 @@
         else if (table === 'sites') app.renderSitesTable();
         else if (table === 'ranges') app.renderRangesTable();
         else if (table === 'workers') app.renderWorkersTable();
-        else if (table === 'ruleStats') app.renderRuleStatsTable();
+        else if (table === 'ruleStats') app.loadRuleStats();
         else if (table === 'siteStats') app.renderSiteStatsTable();
-        else if (table === 'rangeStats') app.renderRangeStatsTable();
+        else if (table === 'rangeStats') app.loadRangeStats();
       }
       return;
     }

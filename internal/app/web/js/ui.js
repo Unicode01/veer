@@ -64,9 +64,19 @@
     sites: { container: app.el.sitesPagination, pageSizes: [10, 20, 50], render: () => app.renderSitesTable() },
     ranges: { container: app.el.rangesPagination, pageSizes: [10, 20, 50], render: () => app.renderRangesTable() },
     workers: { container: app.el.workersPagination, pageSizes: [10, 20, 50], render: () => app.renderWorkersTable() },
-    ruleStats: { container: app.el.ruleStatsPagination, pageSizes: [20, 50, 100], render: () => app.renderRuleStatsTable() },
+    ruleStats: {
+      container: app.el.ruleStatsPagination,
+      pageSizes: [20, 50, 100],
+      render: () => app.renderRuleStatsTable(),
+      reload: () => app.loadRuleStats()
+    },
     siteStats: { container: app.el.siteStatsPagination, pageSizes: [20, 50, 100], render: () => app.renderSiteStatsTable() },
-    rangeStats: { container: app.el.rangeStatsPagination, pageSizes: [20, 50, 100], render: () => app.renderRangeStatsTable() }
+    rangeStats: {
+      container: app.el.rangeStatsPagination,
+      pageSizes: [20, 50, 100],
+      render: () => app.renderRangeStatsTable(),
+      reload: () => app.loadRangeStats()
+    }
   };
 
   ['rules', 'sites', 'ranges', 'workers', 'ruleStats', 'siteStats', 'rangeStats'].forEach((table) => {
@@ -477,6 +487,10 @@
     const state = app.state[table];
     if (!config || !state || typeof config.render !== 'function') return;
     state.page = Math.max(1, parseInt(page, 10) || 1);
+    if (typeof config.reload === 'function') {
+      config.reload();
+      return;
+    }
     config.render();
   };
 
@@ -486,6 +500,10 @@
     if (!config || !state || typeof config.render !== 'function') return;
     state.pageSize = Math.max(1, parseInt(pageSize, 10) || state.pageSize || 10);
     state.page = 1;
+    if (typeof config.reload === 'function') {
+      config.reload();
+      return;
+    }
     config.render();
   };
 

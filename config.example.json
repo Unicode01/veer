@@ -9,7 +9,8 @@
   "kernel_flows_map_limit": 0,
   "kernel_nat_ports_map_limit": 0,
   "experimental_features": {
-    "bridge_xdp": false
+    "bridge_xdp": false,
+    "kernel_traffic_stats": false
   },
   "tags": []
 }

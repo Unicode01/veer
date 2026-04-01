@@ -48,12 +48,16 @@ const (
 )
 
 const (
-	kernelRuleFlagFullNAT  = 0x1
-	kernelRuleFlagBridgeL2 = 0x2
+	kernelRuleFlagFullNAT      = 0x1
+	kernelRuleFlagBridgeL2     = 0x2
+	kernelRuleFlagTrafficStats = 0x4
 )
 
 //go:embed ebpf/forward-tc-bpf.o
 var embeddedForwardTCObject []byte
+
+//go:embed ebpf/forward-tc-bpf-stats.o
+var embeddedForwardTCStatsObject []byte
 
 type tcRuleKeyV4 struct {
 	IfIndex uint32
@@ -174,16 +178,18 @@ type cachedKernelPath struct {
 }
 
 type kernelPrepareContext struct {
-	links     map[string]cachedKernelLink
-	snatAddrs map[string]cachedKernelSNAT
-	outPaths  map[string]cachedKernelPath
+	enableTrafficStats bool
+	links              map[string]cachedKernelLink
+	snatAddrs          map[string]cachedKernelSNAT
+	outPaths           map[string]cachedKernelPath
 }
 
-func newKernelPrepareContext() *kernelPrepareContext {
+func newKernelPrepareContext(enableTrafficStats bool) *kernelPrepareContext {
 	return &kernelPrepareContext{
-		links:     make(map[string]cachedKernelLink),
-		snatAddrs: make(map[string]cachedKernelSNAT),
-		outPaths:  make(map[string]cachedKernelPath),
+		enableTrafficStats: enableTrafficStats,
+		links:              make(map[string]cachedKernelLink),
+		snatAddrs:          make(map[string]cachedKernelSNAT),
+		outPaths:           make(map[string]cachedKernelPath),
 	}
 }
 
@@ -241,41 +247,45 @@ func (ctx *kernelPrepareContext) resolveOutboundPath(outLink netlink.Link, rule 
 }
 
 type linuxKernelRuleRuntime struct {
-	mu               sync.Mutex
-	availableOnce    sync.Once
-	available        bool
-	availableReason  string
-	rulesMapLimit    int
-	flowsMapLimit    int
-	natMapLimit      int
-	rulesMapCapacity int
-	flowsMapCapacity int
-	natMapCapacity   int
-	memlockOnce      sync.Once
-	memlockErr       error
-	coll             *ebpf.Collection
-	attachments      []kernelAttachment
-	preparedRules    []preparedKernelRule
-	lastSkipLog      map[string]struct{}
-	stateLog         kernelStateLogger
-	statsCorrection  map[uint32]kernelRuleStats
-	flowPruneState   kernelFlowPruneState
+	mu                 sync.Mutex
+	availableOnce      sync.Once
+	available          bool
+	availableReason    string
+	rulesMapLimit      int
+	flowsMapLimit      int
+	natMapLimit        int
+	rulesMapCapacity   int
+	flowsMapCapacity   int
+	natMapCapacity     int
+	memlockOnce        sync.Once
+	memlockErr         error
+	coll               *ebpf.Collection
+	attachments        []kernelAttachment
+	preparedRules      []preparedKernelRule
+	lastSkipLog        map[string]struct{}
+	stateLog           kernelStateLogger
+	statsCorrection    map[uint32]kernelRuleStats
+	flowPruneState     kernelFlowPruneState
+	enableTrafficStats bool
 }
 
 func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	rulesLimit := 0
 	flowsLimit := 0
 	natLimit := 0
+	enableTrafficStats := false
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
 		natLimit = cfg.KernelNATMapLimit
+		enableTrafficStats = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
 	}
 	return &linuxKernelRuleRuntime{
-		rulesMapLimit:   rulesLimit,
-		flowsMapLimit:   flowsLimit,
-		natMapLimit:     natLimit,
-		statsCorrection: make(map[uint32]kernelRuleStats),
+		rulesMapLimit:      rulesLimit,
+		flowsMapLimit:      flowsLimit,
+		natMapLimit:        natLimit,
+		statsCorrection:    make(map[uint32]kernelRuleStats),
+		enableTrafficStats: enableTrafficStats,
 	}
 }
 
@@ -288,7 +298,7 @@ func newKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 
 func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
 	rt.availableOnce.Do(func() {
-		spec, err := loadEmbeddedKernelCollectionSpec()
+		spec, err := loadEmbeddedKernelCollectionSpec(rt.enableTrafficStats)
 		if err != nil {
 			rt.available = false
 			rt.availableReason = err.Error()
@@ -309,6 +319,9 @@ func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
 		}
 		rt.available = true
 		rt.availableReason = "embedded tc eBPF object available"
+		if rt.enableTrafficStats {
+			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
+		}
 	})
 	return rt.available, rt.availableReason
 }
@@ -326,7 +339,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		return results, nil
 	}
 
-	prepared, forwardIfRules, replyIfRules, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil)
+	prepared, forwardIfRules, replyIfRules, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats)
 	rt.lastSkipLog = logKernelLineSetOnce(rt.lastSkipLog, skipLines)
 	for id, result := range prepareResults {
 		results[id] = result
@@ -361,7 +374,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		}
 	}
 
-	spec, err := loadEmbeddedKernelCollectionSpec()
+	spec, err := loadEmbeddedKernelCollectionSpec(rt.enableTrafficStats)
 	if err != nil {
 		msg := err.Error()
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -1207,11 +1220,17 @@ func ensureClsactQdisc(ifindex int) error {
 	return netlink.QdiscReplace(qdisc)
 }
 
-func loadEmbeddedKernelCollectionSpec() (*ebpf.CollectionSpec, error) {
-	if len(embeddedForwardTCObject) == 0 {
-		return nil, fmt.Errorf("embedded tc eBPF object is empty; build internal/app/ebpf/forward-tc-bpf.o before compiling")
+func loadEmbeddedKernelCollectionSpec(enableTrafficStats bool) (*ebpf.CollectionSpec, error) {
+	objectBytes := embeddedForwardTCObject
+	objectName := "internal/app/ebpf/forward-tc-bpf.o"
+	if enableTrafficStats {
+		objectBytes = embeddedForwardTCStatsObject
+		objectName = "internal/app/ebpf/forward-tc-bpf-stats.o"
 	}
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(embeddedForwardTCObject))
+	if len(objectBytes) == 0 {
+		return nil, fmt.Errorf("embedded tc eBPF object is empty; build %s before compiling", objectName)
+	}
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(objectBytes))
 	if err != nil {
 		return nil, fmt.Errorf("load embedded tc eBPF object: %w", err)
 	}
@@ -1298,6 +1317,9 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 		}
 		path.flags |= kernelRuleFlagFullNAT
 	}
+	if ctx != nil && ctx.enableTrafficStats {
+		path.flags |= kernelRuleFlagTrafficStats
+	}
 
 	prepared := make([]preparedKernelRule, 0, len(inLinks))
 	for _, currentInLink := range inLinks {
@@ -1332,13 +1354,13 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 	return prepared, nil
 }
 
-func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[int64]kernelRuleApplyResult, map[string]struct{}) {
+func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[int64]kernelRuleApplyResult, map[string]struct{}) {
 	prepared := make([]preparedKernelRule, 0, len(rules))
 	forwardIfRules := make(map[int][]int64)
 	replyIfRules := make(map[int][]int64)
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	skipLogger := newKernelSkipLogger("kernel")
-	prepareCtx := newKernelPrepareContext()
+	prepareCtx := newKernelPrepareContext(enableTrafficStats)
 	previousByRuleID := groupPreparedKernelRulesByRuleID(previous)
 
 	for _, rule := range rules {

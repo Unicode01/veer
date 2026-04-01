@@ -28,6 +28,8 @@ type kernelStatsValueV4 struct {
 	TotalConns     uint64
 	TCPActiveConns uint64
 	UDPNatEntries  uint64
+	BytesIn        uint64
+	BytesOut       uint64
 }
 
 type kernelFlowPruneState struct {
@@ -124,6 +126,8 @@ func applyKernelStatsCorrections(dst map[uint32]kernelRuleStats, corrections map
 		current.TCPActiveConns = clampKernelStatDelta(current.TCPActiveConns, delta.TCPActiveConns)
 		current.UDPNatEntries = clampKernelStatDelta(current.UDPNatEntries, delta.UDPNatEntries)
 		current.TotalConns = clampKernelStatDelta(current.TotalConns, delta.TotalConns)
+		current.BytesIn = clampKernelStatDelta(current.BytesIn, delta.BytesIn)
+		current.BytesOut = clampKernelStatDelta(current.BytesOut, delta.BytesOut)
 		dst[ruleID] = current
 	}
 }
@@ -145,6 +149,8 @@ func mergeKernelStatsCorrections(dst map[uint32]kernelRuleStats, delta map[uint3
 		current.TCPActiveConns += item.TCPActiveConns
 		current.UDPNatEntries += item.UDPNatEntries
 		current.TotalConns += item.TotalConns
+		current.BytesIn += item.BytesIn
+		current.BytesOut += item.BytesOut
 		dst[ruleID] = current
 	}
 }
@@ -225,6 +231,8 @@ func kernelRuleStatsFromValue(value kernelStatsValueV4) kernelRuleStats {
 		TCPActiveConns: int64(value.TCPActiveConns),
 		UDPNatEntries:  int64(value.UDPNatEntries),
 		TotalConns:     int64(value.TotalConns),
+		BytesIn:        int64(value.BytesIn),
+		BytesOut:       int64(value.BytesOut),
 	}
 }
 
@@ -253,6 +261,8 @@ func aggregateKernelPerCPUStats(values []kernelStatsValueV4) kernelStatsValueV4 
 		out.TotalConns += value.TotalConns
 		out.TCPActiveConns += value.TCPActiveConns
 		out.UDPNatEntries += value.UDPNatEntries
+		out.BytesIn += value.BytesIn
+		out.BytesOut += value.BytesOut
 	}
 	return out
 }

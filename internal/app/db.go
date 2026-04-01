@@ -201,6 +201,38 @@ func dbGetRule(db sqlRuleStore, id int64) (*Rule, error) {
 	return &r, nil
 }
 
+func dbGetRuleMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]Rule, error) {
+	if len(ids) == 0 {
+		return map[int64]Rule{}, nil
+	}
+
+	args := make([]interface{}, 0, len(ids))
+	holders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+		holders = append(holders, "?")
+	}
+
+	rows, err := db.Query(
+		`SELECT id, protocol, remark FROM rules WHERE id IN (`+strings.Join(holders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]Rule, len(ids))
+	for rows.Next() {
+		var item Rule
+		if err := rows.Scan(&item.ID, &item.Protocol, &item.Remark); err != nil {
+			return nil, err
+		}
+		result[item.ID] = item
+	}
+	return result, rows.Err()
+}
+
 func dbAddSite(db sqlRuleStore, s *Site) (int64, error) {
 	res, err := db.Exec(
 		`INSERT INTO sites (domain, listen_ip, listen_iface, backend_ip, backend_source_ip, backend_http, backend_https, tag, enabled, transparent)
@@ -319,6 +351,38 @@ func dbGetRange(db sqlRuleStore, id int64) (*PortRange, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+func dbGetRangeMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]PortRange, error) {
+	if len(ids) == 0 {
+		return map[int64]PortRange{}, nil
+	}
+
+	args := make([]interface{}, 0, len(ids))
+	holders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+		holders = append(holders, "?")
+	}
+
+	rows, err := db.Query(
+		`SELECT id, protocol, remark FROM ranges WHERE id IN (`+strings.Join(holders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]PortRange, len(ids))
+	for rows.Next() {
+		var item PortRange
+		if err := rows.Scan(&item.ID, &item.Protocol, &item.Remark); err != nil {
+			return nil, err
+		}
+		result[item.ID] = item
+	}
+	return result, rows.Err()
 }
 
 func boolToInt(b bool) int {

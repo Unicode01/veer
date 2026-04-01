@@ -50,6 +50,7 @@ const (
 	ruleRetryBaseDelay           = 1 * time.Second
 	ruleRetryMaxDelay            = 1 * time.Minute
 	kernelStatsRefreshInterval   = 5 * time.Second
+	kernelStatsDemandWindow      = 15 * time.Second
 	kernelMaintenanceInterval    = 10 * time.Second
 	kernelFallbackRetryInterval  = 30 * time.Second
 	kernelFallbackRetryLogEvery  = 10 * time.Minute
@@ -98,6 +99,7 @@ type ProcessManager struct {
 	kernelRuleStats     map[int64]RuleStatsReport
 	kernelRangeStats    map[int64]RangeStatsReport
 	kernelStatsAt       time.Time
+	kernelStatsDemandAt time.Time
 	kernelMaintenanceAt time.Time
 	kernelRetryAt       time.Time
 	kernelRetryLogAt    time.Time
@@ -2375,6 +2377,68 @@ func (pm *ProcessManager) buildEmptyKernelStatsLocked() (map[int64]RuleStatsRepo
 	return ruleStats, rangeStats
 }
 
+func (pm *ProcessManager) markKernelStatsDemand() {
+	pm.mu.Lock()
+	pm.kernelStatsDemandAt = time.Now()
+	pm.mu.Unlock()
+}
+
+func (pm *ProcessManager) shouldRefreshKernelStatsLocked(now time.Time) bool {
+	if pm.kernelRuntime == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if len(pm.kernelRules) == 0 && len(pm.kernelRanges) == 0 {
+		return false
+	}
+	if pm.kernelStatsDemandAt.IsZero() || now.Sub(pm.kernelStatsDemandAt) > kernelStatsDemandWindow {
+		return false
+	}
+	return pm.kernelStatsAt.IsZero() || now.Sub(pm.kernelStatsAt) >= kernelStatsRefreshInterval
+}
+
+func (pm *ProcessManager) refreshKernelStatsCacheIfNeeded() {
+	pm.mu.Lock()
+	shouldRefresh := pm.shouldRefreshKernelStatsLocked(time.Now())
+	pm.mu.Unlock()
+	if shouldRefresh {
+		pm.refreshKernelStatsCache()
+	}
+}
+
+func kernelTrafficSpeed(nextBytes int64, prevBytes int64, elapsed time.Duration) int64 {
+	if elapsed <= 0 || nextBytes <= prevBytes {
+		return 0
+	}
+	return int64((float64(nextBytes-prevBytes) * float64(time.Second)) / float64(elapsed))
+}
+
+func applyKernelRuleTrafficSpeeds(dst map[int64]RuleStatsReport, prev map[int64]RuleStatsReport, elapsed time.Duration) {
+	if elapsed <= 0 {
+		return
+	}
+	for id, current := range dst {
+		previous := prev[id]
+		current.SpeedIn = kernelTrafficSpeed(current.BytesIn, previous.BytesIn, elapsed)
+		current.SpeedOut = kernelTrafficSpeed(current.BytesOut, previous.BytesOut, elapsed)
+		dst[id] = current
+	}
+}
+
+func applyKernelRangeTrafficSpeeds(dst map[int64]RangeStatsReport, prev map[int64]RangeStatsReport, elapsed time.Duration) {
+	if elapsed <= 0 {
+		return
+	}
+	for id, current := range dst {
+		previous := prev[id]
+		current.SpeedIn = kernelTrafficSpeed(current.BytesIn, previous.BytesIn, elapsed)
+		current.SpeedOut = kernelTrafficSpeed(current.BytesOut, previous.BytesOut, elapsed)
+		dst[id] = current
+	}
+}
+
 func (pm *ProcessManager) refreshKernelStatsCache() {
 	if pm.kernelRuntime == nil {
 		pm.mu.Lock()
@@ -2390,6 +2454,10 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 	for id, owner := range pm.kernelFlowOwners {
 		ownerIndex[id] = owner
 	}
+	prevRuleStats := cloneRuleStatsReports(pm.kernelRuleStats)
+	prevRangeStats := cloneRangeStatsReports(pm.kernelRangeStats)
+	prevStatsAt := pm.kernelStatsAt
+	trafficStatsEnabled := pm.cfg != nil && pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
 	ruleStats, rangeStats := pm.buildEmptyKernelStatsLocked()
 	pm.mu.Unlock()
 
@@ -2410,6 +2478,10 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 			item.ActiveConns += counts.TCPActiveConns
 			item.TotalConns += counts.TotalConns
 			item.NatTableSize += int(counts.UDPNatEntries)
+			if trafficStatsEnabled {
+				item.BytesIn += counts.BytesIn
+				item.BytesOut += counts.BytesOut
+			}
 			ruleStats[owner.id] = item
 			continue
 		}
@@ -2419,14 +2491,25 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 			item.ActiveConns += counts.TCPActiveConns
 			item.TotalConns += counts.TotalConns
 			item.NatTableSize += int(counts.UDPNatEntries)
+			if trafficStatsEnabled {
+				item.BytesIn += counts.BytesIn
+				item.BytesOut += counts.BytesOut
+			}
 			rangeStats[owner.id] = item
 		}
+	}
+
+	now := time.Now()
+	if trafficStatsEnabled && !prevStatsAt.IsZero() {
+		elapsed := now.Sub(prevStatsAt)
+		applyKernelRuleTrafficSpeeds(ruleStats, prevRuleStats, elapsed)
+		applyKernelRangeTrafficSpeeds(rangeStats, prevRangeStats, elapsed)
 	}
 
 	pm.mu.Lock()
 	pm.kernelRuleStats = ruleStats
 	pm.kernelRangeStats = rangeStats
-	pm.kernelStatsAt = time.Now()
+	pm.kernelStatsAt = now
 	pm.mu.Unlock()
 }
 
@@ -2531,7 +2614,7 @@ func (pm *ProcessManager) monitorLoop() {
 		now := time.Now()
 
 		pm.mu.Lock()
-		if pm.kernelRuntime != nil && (pm.kernelStatsAt.IsZero() || now.Sub(pm.kernelStatsAt) >= kernelStatsRefreshInterval) {
+		if pm.shouldRefreshKernelStatsLocked(now) {
 			refreshKernelStats = true
 		}
 		if pm.kernelRuntime != nil && (pm.kernelMaintenanceAt.IsZero() || now.Sub(pm.kernelMaintenanceAt) >= kernelMaintenanceInterval) {

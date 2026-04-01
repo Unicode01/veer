@@ -194,7 +194,8 @@ http://127.0.0.1:8080
   "kernel_engine_order": ["xdp", "tc"],
   "kernel_rules_map_limit": 0,
   "experimental_features": {
-    "bridge_xdp": false
+    "bridge_xdp": false,
+    "kernel_traffic_stats": false
   },
   "tags": []
 }
@@ -209,14 +210,15 @@ http://127.0.0.1:8080
 - `default_engine`：默认转发引擎，可选 `auto`、`userspace`、`kernel`
 - `kernel_engine_order`：Linux 内核态引擎尝试顺序，默认 `["xdp", "tc"]`；当前会自动跳过不可用引擎并回退
 - `kernel_rules_map_limit`：内核 `rules_v4/stats_v4` map 容量；`0` 或省略时按当前 kernel entries 自适应扩容，默认从 `16384` 起按 2 倍增长到 `262144`；设置为正数时使用固定上限
-- `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp` 这类高风险、兼容性仍在收敛中的能力会通过这里单独放开
+- `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp`、`kernel_traffic_stats` 这类高风险、兼容性或性能权衡仍在收敛中的能力会通过这里单独放开
 - `tags`：可选标签列表，会在前端表单中作为下拉项出现
 
 示例：
 
 ```json
 "experimental_features": {
-  "bridge_xdp": true
+  "bridge_xdp": true,
+  "kernel_traffic_stats": true
 }
 ```
 
@@ -225,6 +227,7 @@ http://127.0.0.1:8080
 - 键名会按小写、`-` 转 `_` 归一化，例如 `bridge-xdp` 会被视为 `bridge_xdp`
 - 只有代码中显式接入检查的实验项才会生效；未接入的键会被保留但不会影响当前行为
 - `bridge_xdp` 已接入第一版实验实现，默认仍为关闭；当前主要面向透明 XDP 场景，依赖 bridge 邻居/FDB 解析，解析失败或接口不兼容时会自动回退
+- `kernel_traffic_stats` 用于给内核态规则补充 `bytes/speed` 统计；它会在 TC/XDP 转发路径上增加按包计数，默认关闭，只建议在确实需要观察内核态流量时启用
 
 ## 构建
 

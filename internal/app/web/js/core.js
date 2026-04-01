@@ -77,9 +77,9 @@
       sites: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
       ranges: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
       workers: { data: [], sortKey: '', sortAsc: true, masterHash: '', page: 1, pageSize: 10 },
-      ruleStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20 },
+      ruleStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20, total: 0 },
       siteStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20 },
-      rangeStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20 },
+      rangeStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20, total: 0 },
       currentConnsSnapshot: {
         loaded: false,
         rules: {},

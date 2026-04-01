@@ -36,18 +36,15 @@
     });
   }
 
-  function ruleMetaSource() {
-    if (app.state.rules && Array.isArray(app.state.rules.data) && app.state.rules.data.length > 0) {
-      return Promise.resolve(app.state.rules.data);
+  function buildStatsQuery(state) {
+    const params = new URLSearchParams();
+    params.set('page', String(state.page || 1));
+    params.set('page_size', String(state.pageSize || 20));
+    if (state.sortKey) {
+      params.set('sort_key', state.sortKey);
+      params.set('sort_asc', state.sortAsc === false ? 'false' : 'true');
     }
-    return app.apiCall('GET', '/api/rules');
-  }
-
-  function rangeMetaSource() {
-    if (app.state.ranges && Array.isArray(app.state.ranges.data) && app.state.ranges.data.length > 0) {
-      return Promise.resolve(app.state.ranges.data);
-    }
-    return app.apiCall('GET', '/api/ranges');
+    return params.toString();
   }
 
   function rebuildCurrentConns(kind, rows, idKey) {
@@ -83,13 +80,13 @@
   app.renderRuleStatsTable = function renderRuleStatsTable() {
     const el = app.el;
     const st = app.state.ruleStats;
-    const sortedList = app.sortByState(st.data, st, statSortValue);
-    const list = app.paginateList(st, sortedList).items;
+    const list = Array.isArray(st.data) ? st.data : [];
+    const total = typeof st.total === 'number' ? st.total : list.length;
     app.clearNode(el.ruleStatsBody);
     app.updateSortIndicators('ruleStatsTable', st);
-    app.renderPagination('ruleStats', sortedList.length);
+    app.renderPagination('ruleStats', total);
 
-    if (!sortedList.length) {
+    if (!list.length) {
       el.noRuleStats.style.display = 'block';
       app.toggleTableVisibility('ruleStatsTable', false);
       return;
@@ -150,13 +147,13 @@
   app.renderRangeStatsTable = function renderRangeStatsTable() {
     const el = app.el;
     const st = app.state.rangeStats;
-    const sortedList = app.sortByState(st.data, st, statSortValue);
-    const list = app.paginateList(st, sortedList).items;
+    const list = Array.isArray(st.data) ? st.data : [];
+    const total = typeof st.total === 'number' ? st.total : list.length;
     app.clearNode(el.rangeStatsBody);
     app.updateSortIndicators('rangeStatsTable', st);
-    app.renderPagination('rangeStats', sortedList.length);
+    app.renderPagination('rangeStats', total);
 
-    if (!sortedList.length) {
+    if (!list.length) {
       el.noRangeStats.style.display = 'block';
       app.toggleTableVisibility('rangeStatsTable', false);
       return;
@@ -183,20 +180,16 @@
 
   app.loadRuleStats = async function loadRuleStats() {
     try {
-      const [stats, rules] = await Promise.all([
-        app.apiCall('GET', '/api/rules/stats'),
-        ruleMetaSource()
-      ]);
-      const ruleMap = {};
-      (rules || []).forEach((rule) => {
-        ruleMap[rule.id] = rule;
-      });
+      const st = app.state.ruleStats;
+      const payload = await app.apiCall('GET', '/api/rules/stats?' + buildStatsQuery(st));
 
-      app.state.ruleStats.data = (stats || []).map((s) => {
-        const rule = ruleMap[s.rule_id];
+      st.page = payload && payload.page ? payload.page : st.page;
+      st.pageSize = payload && payload.page_size ? payload.page_size : st.pageSize;
+      st.total = payload && typeof payload.total === 'number' ? payload.total : 0;
+      st.data = ((payload && payload.items) || []).map((s) => {
         return {
           rule_id: s.rule_id,
-          remark: rule && rule.remark ? rule.remark : '',
+          remark: s.remark || '',
           current_conns: getCurrentConnValue('rules', s.rule_id),
           total_conns: s.total_conns || 0,
           rejected_conns: s.rejected_conns || 0,
@@ -234,20 +227,16 @@
 
   app.loadRangeStats = async function loadRangeStats() {
     try {
-      const [stats, ranges] = await Promise.all([
-        app.apiCall('GET', '/api/ranges/stats'),
-        rangeMetaSource()
-      ]);
-      const rangeMap = {};
-      (ranges || []).forEach((range) => {
-        rangeMap[range.id] = range;
-      });
+      const st = app.state.rangeStats;
+      const payload = await app.apiCall('GET', '/api/ranges/stats?' + buildStatsQuery(st));
 
-      app.state.rangeStats.data = (stats || []).map((s) => {
-        const range = rangeMap[s.range_id];
+      st.page = payload && payload.page ? payload.page : st.page;
+      st.pageSize = payload && payload.page_size ? payload.page_size : st.pageSize;
+      st.total = payload && typeof payload.total === 'number' ? payload.total : 0;
+      st.data = ((payload && payload.items) || []).map((s) => {
         return {
           range_id: s.range_id,
-          remark: range && range.remark ? range.remark : '',
+          remark: s.remark || '',
           current_conns: getCurrentConnValue('ranges', s.range_id),
           total_conns: s.total_conns || 0,
           rejected_conns: s.rejected_conns || 0,

@@ -10,6 +10,8 @@ type kernelRuleStats struct {
 	TCPActiveConns int64
 	UDPNatEntries  int64
 	TotalConns     int64
+	BytesIn        int64
+	BytesOut       int64
 }
 
 type kernelRuleStatsSnapshot struct {

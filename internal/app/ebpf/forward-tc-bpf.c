@@ -71,12 +71,18 @@ struct rule_stats_value_v4 {
 	__u64 total_conns;
 	__u64 tcp_active_conns;
 	__u64 udp_nat_entries;
+	__u64 bytes_in;
+	__u64 bytes_out;
 };
 
 struct forward_vlan_hdr {
 	__be16 h_vlan_TCI;
 	__be16 h_vlan_encapsulated_proto;
 };
+
+#ifndef FORWARD_ENABLE_TRAFFIC_STATS
+#define FORWARD_ENABLE_TRAFFIC_STATS 0
+#endif
 
 struct packet_ctx {
 	__be32 src_addr;
@@ -95,6 +101,9 @@ struct packet_ctx {
 	int l4_dst_off;
 	__u64 l4_addr_csum_flags;
 	__u64 l4_port_csum_flags;
+#if FORWARD_ENABLE_TRAFFIC_STATS
+	__u16 payload_len;
+#endif
 };
 
 #ifndef AF_INET
@@ -117,6 +126,22 @@ struct packet_ctx {
 #define FORWARD_NAT_PORT_RANGE (FORWARD_NAT_PORT_MAX - FORWARD_NAT_PORT_MIN + 1U)
 #define FORWARD_NAT_PORT_PROBE_WINDOW 64
 #define FORWARD_NAT_PORT_PROBE_ROUNDS 3
+
+#if FORWARD_ENABLE_TRAFFIC_STATS
+#define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0x40
+#define FORWARD_RULE_FLAG_TRAFFIC_STATS 0x4
+#define FORWARD_RULE_TRAFFIC_ENABLED(rule) (((rule)->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) (((flow)->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_SET_PAYLOAD_LEN(ctx, value) ((ctx)->payload_len = (__u16)(value))
+#define FORWARD_GET_PAYLOAD_LEN(ctx) ((__u64)(ctx)->payload_len)
+#else
+#define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0
+#define FORWARD_RULE_FLAG_TRAFFIC_STATS 0
+#define FORWARD_RULE_TRAFFIC_ENABLED(rule) 0
+#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) 0
+#define FORWARD_SET_PAYLOAD_LEN(ctx, value) do { (void)(ctx); (void)(value); } while (0)
+#define FORWARD_GET_PAYLOAD_LEN(ctx) 0ULL
+#endif
 
 struct bpf_map_def SEC("maps") rules_v4 = {
 	.type = BPF_MAP_TYPE_HASH,
@@ -213,10 +238,17 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		tcph = (void *)(iph + 1);
 		if ((void *)(tcph + 1) > data_end)
 			return -1;
+		if (tcph->doff < 5)
+			return -1;
+		if ((void *)tcph + ((__u32)tcph->doff << 2) > data_end)
+			return -1;
 		ctx->src_port = bpf_ntohs(tcph->source);
 		ctx->dst_port = bpf_ntohs(tcph->dest);
 		ctx->has_l4_checksum = 1;
 		ctx->closing = tcph->fin || tcph->rst;
+		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
+		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
+			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | sizeof(__be32);
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct tcphdr, check));
@@ -226,10 +258,13 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		udph = (void *)(iph + 1);
 		if ((void *)(udph + 1) > data_end)
 			return -1;
+		if (bpf_ntohs(udph->len) < sizeof(*udph))
+			return -1;
 		ctx->src_port = bpf_ntohs(udph->source);
 		ctx->dst_port = bpf_ntohs(udph->dest);
 		ctx->has_l4_checksum = udph->check != 0;
 		ctx->closing = 0;
+		FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(__be32);
 		ctx->l4_port_csum_flags = BPF_F_MARK_MANGLED_0 | sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct udphdr, check));
@@ -549,6 +584,29 @@ static __always_inline void drop_rule_udp_nat(__u32 rule_id)
 		stats->udp_nat_entries -= 1;
 }
 
+static __always_inline void add_rule_traffic_bytes(__u32 rule_id, __u64 bytes_in, __u64 bytes_out)
+{
+#if !FORWARD_ENABLE_TRAFFIC_STATS
+	(void)rule_id;
+	(void)bytes_in;
+	(void)bytes_out;
+	return;
+#else
+	struct rule_stats_value_v4 *stats;
+
+	if (bytes_in == 0 && bytes_out == 0)
+		return;
+
+	stats = lookup_rule_stats(rule_id);
+	if (!stats)
+		return;
+	if (bytes_in != 0)
+		stats->bytes_in += bytes_in;
+	if (bytes_out != 0)
+		stats->bytes_out += bytes_out;
+#endif
+}
+
 static __always_inline void delete_fullnat_state(const struct flow_key_v4 *reply_key, const struct flow_value_v4 *reply_value, __u8 proto)
 {
 	struct flow_key_v4 front_key = {};
@@ -579,6 +637,8 @@ static __always_inline void init_fullnat_front_value(struct flow_value_v4 *front
 	front_value->client_port = ctx->src_port;
 	front_value->nat_port = nat_port;
 	front_value->flags = FORWARD_FLOW_FLAG_FULL_NAT | FORWARD_FLOW_FLAG_FRONT_ENTRY;
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 	if (ctx->closing) {
 		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
 		front_value->front_close_seen_ns = now;
@@ -618,6 +678,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 		flow_value.front_addr = bpf_ntohl(ctx->dst_addr);
 		flow_value.front_port = ctx->dst_port;
 		flow_value.in_ifindex = skb->ifindex;
+		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+			flow_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 		if (ctx->proto == IPPROTO_UDP) {
 			flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
 			count_udp_now = 1;
@@ -636,6 +698,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 			flow_value.front_addr = bpf_ntohl(ctx->dst_addr);
 			flow_value.front_port = ctx->dst_port;
 			flow_value.in_ifindex = skb->ifindex;
+			if (FORWARD_FLOW_TRAFFIC_ENABLED(existing_flow) || FORWARD_RULE_TRAFFIC_ENABLED(rule))
+				flow_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 			if ((existing_flow->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
 				flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
 			} else {
@@ -674,6 +738,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 		bump_rule_total_conns(rule->rule_id);
 	if (count_udp_now)
 		bump_rule_udp_nat(rule->rule_id);
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 
 	if (rewrite_l4_dnat(skb, ctx, rule->backend_addr, rule->backend_port) < 0)
 		return TC_ACT_SHOT;
@@ -805,6 +871,8 @@ static __always_inline int handle_fullnat_forward(struct __sk_buff *skb, const s
 		bump_rule_total_conns(rule->rule_id);
 	if (count_udp_now)
 		bump_rule_udp_nat(rule->rule_id);
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 
 	if (rewrite_l4_snat(skb, ctx, front_value.nat_addr, front_value.nat_port) < 0)
 		return TC_ACT_SHOT;
@@ -858,6 +926,8 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 	}
 	if (count_tcp_now)
 		bump_rule_tcp_active(flow_value.rule_id);
+	if (FORWARD_FLOW_TRAFFIC_ENABLED(&flow_value))
+		add_rule_traffic_bytes(flow_value.rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
 
 	closing = ctx->closing;
 	if (rewrite_l4_snat(skb, ctx, flow_value.front_addr, flow_value.front_port) < 0)
@@ -942,6 +1012,8 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 	}
 	if (count_tcp_now)
 		bump_rule_tcp_active(reply_value.rule_id);
+	if (FORWARD_FLOW_TRAFFIC_ENABLED(&reply_value))
+		add_rule_traffic_bytes(reply_value.rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
 
 	if (rewrite_l4_snat(skb, ctx, reply_value.front_addr, reply_value.front_port) < 0)
 		return TC_ACT_SHOT;

@@ -62,12 +62,18 @@ struct rule_stats_value_v4 {
 	__u64 total_conns;
 	__u64 tcp_active_conns;
 	__u64 udp_nat_entries;
+	__u64 bytes_in;
+	__u64 bytes_out;
 };
 
 struct forward_vlan_hdr {
 	__be16 h_vlan_TCI;
 	__be16 h_vlan_encapsulated_proto;
 };
+
+#ifndef FORWARD_ENABLE_TRAFFIC_STATS
+#define FORWARD_ENABLE_TRAFFIC_STATS 0
+#endif
 
 struct packet_ctx {
 	__u32 src_addr;
@@ -81,6 +87,9 @@ struct packet_ctx {
 	__u16 tot_len;
 	__u16 l3_off;
 	__u16 l4_off;
+#if FORWARD_ENABLE_TRAFFIC_STATS
+	__u16 payload_len;
+#endif
 };
 
 #define FORWARD_IPV4_FRAG_MASK 0x3fff
@@ -96,6 +105,22 @@ struct packet_ctx {
 #define FORWARD_UDP_FLOW_REFRESH_NS (1ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_IDLE_NS (300ULL * 1000000000ULL)
 #define FORWARD_CSUM_MANGLED_0 ((__sum16)0xffff)
+
+#if FORWARD_ENABLE_TRAFFIC_STATS
+#define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0x40
+#define FORWARD_RULE_FLAG_TRAFFIC_STATS 0x8
+#define FORWARD_RULE_TRAFFIC_ENABLED(rule) (((rule)->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) (((flow)->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_SET_PAYLOAD_LEN(ctx, value) ((ctx)->payload_len = (__u16)(value))
+#define FORWARD_GET_PAYLOAD_LEN(ctx) ((__u64)(ctx)->payload_len)
+#else
+#define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0
+#define FORWARD_RULE_FLAG_TRAFFIC_STATS 0
+#define FORWARD_RULE_TRAFFIC_ENABLED(rule) 0
+#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) 0
+#define FORWARD_SET_PAYLOAD_LEN(ctx, value) do { (void)(ctx); (void)(value); } while (0)
+#define FORWARD_GET_PAYLOAD_LEN(ctx) 0ULL
+#endif
 
 struct bpf_map_def SEC("maps") rules_v4 = {
 	.type = BPF_MAP_TYPE_HASH,
@@ -193,20 +218,30 @@ static __always_inline int parse_ipv4_l4(struct xdp_md *xdp, struct packet_ctx *
 		tcph = (void *)iph + sizeof(*iph);
 		if ((void *)(tcph + 1) > data_end)
 			return -1;
+		if (tcph->doff < 5)
+			return -1;
+		if ((void *)tcph + ((__u32)tcph->doff << 2) > data_end)
+			return -1;
 		ctx->src_port = bpf_ntohs(tcph->source);
 		ctx->dst_port = bpf_ntohs(tcph->dest);
 		ctx->has_l4_checksum = 1;
 		ctx->closing = tcph->fin || tcph->rst;
+		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
+		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
+			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
 		return 0;
 	}
 
 	udph = (void *)iph + sizeof(*iph);
 	if ((void *)(udph + 1) > data_end)
 		return -1;
+	if (bpf_ntohs(udph->len) < sizeof(*udph))
+		return -1;
 	ctx->src_port = bpf_ntohs(udph->source);
 	ctx->dst_port = bpf_ntohs(udph->dest);
 	ctx->has_l4_checksum = udph->check != 0;
 	ctx->closing = 0;
+	FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
 	return 0;
 }
 
@@ -482,6 +517,29 @@ static __always_inline void drop_rule_udp_nat(__u32 rule_id)
 		stats->udp_nat_entries -= 1;
 }
 
+static __always_inline void add_rule_traffic_bytes(__u32 rule_id, __u64 bytes_in, __u64 bytes_out)
+{
+#if !FORWARD_ENABLE_TRAFFIC_STATS
+	(void)rule_id;
+	(void)bytes_in;
+	(void)bytes_out;
+	return;
+#else
+	struct rule_stats_value_v4 *stats;
+
+	if (bytes_in == 0 && bytes_out == 0)
+		return;
+
+	stats = lookup_rule_stats(rule_id);
+	if (!stats)
+		return;
+	if (bytes_in != 0)
+		stats->bytes_in += bytes_in;
+	if (bytes_out != 0)
+		stats->bytes_out += bytes_out;
+#endif
+}
+
 SEC("xdp")
 int forward_xdp(struct xdp_md *xdp)
 {
@@ -550,6 +608,8 @@ int forward_xdp(struct xdp_md *xdp)
 		}
 		if (count_tcp_now)
 			bump_rule_tcp_active(flow_value.rule_id);
+		if (FORWARD_FLOW_TRAFFIC_ENABLED(&flow_value))
+			add_rule_traffic_bytes(flow_value.rule_id, 0, FORWARD_GET_PAYLOAD_LEN(&ctx));
 
 		redirect_ifindex = prepare_flow_reply_redirect_v4(xdp, &ctx, &flow_value);
 		if (redirect_ifindex <= 0)
@@ -586,6 +646,8 @@ int forward_xdp(struct xdp_md *xdp)
 			flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
 			count_udp_now = 1;
 		}
+		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+			flow_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 		if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2) != 0) {
 			flow_value.flags |= FORWARD_FLOW_FLAG_BRIDGE_INGRESS_L2;
 			store_bridge_ingress_macs(&flow_value, eth);
@@ -610,6 +672,8 @@ int forward_xdp(struct xdp_md *xdp)
 				flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
 				count_udp_now = 1;
 			}
+			if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+				flow_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 			if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2) != 0) {
 				flow_value.flags |= FORWARD_FLOW_FLAG_BRIDGE_INGRESS_L2;
 				store_bridge_ingress_macs(&flow_value, eth);
@@ -646,6 +710,8 @@ int forward_xdp(struct xdp_md *xdp)
 		bump_rule_total_conns(rule->rule_id);
 	if (count_udp_now)
 		bump_rule_udp_nat(rule->rule_id);
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(&ctx), 0);
 
 	redirect_ifindex = prepare_rule_redirect_v4(xdp, &ctx, rule);
 	if (redirect_ifindex <= 0)

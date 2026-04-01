@@ -87,6 +87,15 @@ type projectedRuleState struct {
 	EnableIndex  int
 }
 
+type statsListQuery struct {
+	Page     int
+	PageSize int
+	SortKey  string
+	SortAsc  bool
+}
+
+const maxStatsPageSize = 500
+
 func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 	mux := http.NewServeMux()
 
@@ -192,14 +201,14 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		handleListRuleStats(w, r, pm)
+		handleListRuleStats(w, r, db, pm)
 	}))
 	mux.HandleFunc("/api/ranges/stats", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		handleListRangeStats(w, r, pm)
+		handleListRangeStats(w, r, db, pm)
 	}))
 	mux.HandleFunc("/api/sites/stats", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -2094,24 +2103,342 @@ func handleDeleteRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func handleListRuleStats(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
-	statsMap := pm.collectRuleStats()
-	result := make([]RuleStatsReport, 0, len(statsMap))
-	for _, s := range statsMap {
-		result = append(result, s)
+func parseStatsListQuery(r *http.Request, allowedSortKeys map[string]struct{}) (statsListQuery, error) {
+	query := statsListQuery{
+		Page:     1,
+		PageSize: 20,
+		SortAsc:  true,
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].RuleID < result[j].RuleID })
-	writeJSON(w, http.StatusOK, result)
+
+	values := r.URL.Query()
+	if v := strings.TrimSpace(values.Get("page")); v != "" {
+		page, err := strconv.Atoi(v)
+		if err != nil || page <= 0 {
+			return query, fmt.Errorf("invalid page")
+		}
+		query.Page = page
+	}
+	if v := strings.TrimSpace(values.Get("page_size")); v != "" {
+		pageSize, err := strconv.Atoi(v)
+		if err != nil || pageSize <= 0 {
+			return query, fmt.Errorf("invalid page_size")
+		}
+		if pageSize > maxStatsPageSize {
+			pageSize = maxStatsPageSize
+		}
+		query.PageSize = pageSize
+	}
+	query.SortKey = strings.TrimSpace(values.Get("sort_key"))
+	if query.SortKey != "" {
+		if _, ok := allowedSortKeys[query.SortKey]; !ok {
+			return query, fmt.Errorf("invalid sort_key")
+		}
+	}
+	if v := strings.TrimSpace(values.Get("sort_asc")); v != "" {
+		sortAsc, err := parseOptionalBoolQuery(v)
+		if err != nil {
+			return query, fmt.Errorf("invalid sort_asc")
+		}
+		if sortAsc != nil {
+			query.SortAsc = *sortAsc
+		}
+	}
+	return query, nil
 }
 
-func handleListRangeStats(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
-	statsMap := pm.collectRangeStats()
-	result := make([]RangeStatsReport, 0, len(statsMap))
-	for _, s := range statsMap {
-		result = append(result, s)
+func paginateRuleStatsItems(items []RuleStatsListItem, query statsListQuery) RuleStatsListResponse {
+	total := len(items)
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].RangeID < result[j].RangeID })
-	writeJSON(w, http.StatusOK, result)
+	totalPages := 1
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	page := query.Page
+	if page > totalPages {
+		page = totalPages
+	}
+	if page < 1 {
+		page = 1
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	resp := RuleStatsListResponse{
+		Page:     page,
+		PageSize: pageSize,
+		Total:    total,
+		SortKey:  query.SortKey,
+		SortAsc:  query.SortAsc,
+		Items:    make([]RuleStatsListItem, 0, end-start),
+	}
+	if start < end {
+		resp.Items = append(resp.Items, items[start:end]...)
+	}
+	return resp
+}
+
+func paginateRangeStatsItems(items []RangeStatsListItem, query statsListQuery) RangeStatsListResponse {
+	total := len(items)
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	totalPages := 1
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	page := query.Page
+	if page > totalPages {
+		page = totalPages
+	}
+	if page < 1 {
+		page = 1
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	resp := RangeStatsListResponse{
+		Page:     page,
+		PageSize: pageSize,
+		Total:    total,
+		SortKey:  query.SortKey,
+		SortAsc:  query.SortAsc,
+		Items:    make([]RangeStatsListItem, 0, end-start),
+	}
+	if start < end {
+		resp.Items = append(resp.Items, items[start:end]...)
+	}
+	return resp
+}
+
+func ruleStatsPageIDs(items []RuleStatsListItem) []int64 {
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.RuleID)
+	}
+	return ids
+}
+
+func rangeStatsPageIDs(items []RangeStatsListItem) []int64 {
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.RangeID)
+	}
+	return ids
+}
+
+func ruleStatsLess(a, b RuleStatsListItem, sortKey string, sortAsc bool) bool {
+	compare := 0
+	switch sortKey {
+	case "remark":
+		compare = strings.Compare(strings.ToLower(a.Remark), strings.ToLower(b.Remark))
+	case "current_conns":
+		compare = compareInt64(a.CurrentConns, b.CurrentConns)
+	case "total_conns":
+		compare = compareInt64(a.TotalConns, b.TotalConns)
+	case "rejected_conns":
+		compare = compareInt64(a.RejectedConns, b.RejectedConns)
+	case "speed_in":
+		compare = compareInt64(a.SpeedIn, b.SpeedIn)
+	case "speed_out":
+		compare = compareInt64(a.SpeedOut, b.SpeedOut)
+	case "bytes_in":
+		compare = compareInt64(a.BytesIn, b.BytesIn)
+	case "bytes_out":
+		compare = compareInt64(a.BytesOut, b.BytesOut)
+	default:
+		compare = compareInt64(a.RuleID, b.RuleID)
+	}
+	if compare == 0 {
+		compare = compareInt64(a.RuleID, b.RuleID)
+	}
+	if sortAsc {
+		return compare < 0
+	}
+	return compare > 0
+}
+
+func rangeStatsLess(a, b RangeStatsListItem, sortKey string, sortAsc bool) bool {
+	compare := 0
+	switch sortKey {
+	case "remark":
+		compare = strings.Compare(strings.ToLower(a.Remark), strings.ToLower(b.Remark))
+	case "current_conns":
+		compare = compareInt64(a.CurrentConns, b.CurrentConns)
+	case "total_conns":
+		compare = compareInt64(a.TotalConns, b.TotalConns)
+	case "rejected_conns":
+		compare = compareInt64(a.RejectedConns, b.RejectedConns)
+	case "speed_in":
+		compare = compareInt64(a.SpeedIn, b.SpeedIn)
+	case "speed_out":
+		compare = compareInt64(a.SpeedOut, b.SpeedOut)
+	case "bytes_in":
+		compare = compareInt64(a.BytesIn, b.BytesIn)
+	case "bytes_out":
+		compare = compareInt64(a.BytesOut, b.BytesOut)
+	default:
+		compare = compareInt64(a.RangeID, b.RangeID)
+	}
+	if compare == 0 {
+		compare = compareInt64(a.RangeID, b.RangeID)
+	}
+	if sortAsc {
+		return compare < 0
+	}
+	return compare > 0
+}
+
+func compareInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func handleListRuleStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	query, err := parseStatsListQuery(r, map[string]struct{}{
+		"rule_id":        {},
+		"remark":         {},
+		"current_conns":  {},
+		"total_conns":    {},
+		"rejected_conns": {},
+		"speed_in":       {},
+		"speed_out":      {},
+		"bytes_in":       {},
+		"bytes_out":      {},
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	pm.markKernelStatsDemand()
+	pm.refreshKernelStatsCacheIfNeeded()
+	statsMap := pm.collectRuleStats()
+	if len(statsMap) == 0 {
+		writeJSON(w, http.StatusOK, paginateRuleStatsItems(nil, query))
+		return
+	}
+
+	result := make([]RuleStatsListItem, 0, len(statsMap))
+	for _, s := range statsMap {
+		result = append(result, RuleStatsListItem{RuleStatsReport: s})
+	}
+
+	needsAllMeta := query.SortKey == "remark" || query.SortKey == "current_conns"
+	if needsAllMeta {
+		ruleMeta, err := dbGetRuleMetaByIDs(db, ruleStatsPageIDs(result))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for i := range result {
+			meta := ruleMeta[result[i].RuleID]
+			result[i].Remark = meta.Remark
+			result[i].CurrentConns = currentConnCountForProtocol(meta.Protocol, result[i].ActiveConns, int64(result[i].NatTableSize))
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return ruleStatsLess(result[i], result[j], query.SortKey, query.SortAsc)
+	})
+
+	resp := paginateRuleStatsItems(result, query)
+	if !needsAllMeta && len(resp.Items) > 0 {
+		ruleMeta, err := dbGetRuleMetaByIDs(db, ruleStatsPageIDs(resp.Items))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for i := range resp.Items {
+			meta := ruleMeta[resp.Items[i].RuleID]
+			resp.Items[i].Remark = meta.Remark
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func handleListRangeStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	query, err := parseStatsListQuery(r, map[string]struct{}{
+		"range_id":       {},
+		"remark":         {},
+		"current_conns":  {},
+		"total_conns":    {},
+		"rejected_conns": {},
+		"speed_in":       {},
+		"speed_out":      {},
+		"bytes_in":       {},
+		"bytes_out":      {},
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	pm.markKernelStatsDemand()
+	pm.refreshKernelStatsCacheIfNeeded()
+	statsMap := pm.collectRangeStats()
+	if len(statsMap) == 0 {
+		writeJSON(w, http.StatusOK, paginateRangeStatsItems(nil, query))
+		return
+	}
+
+	result := make([]RangeStatsListItem, 0, len(statsMap))
+	for _, s := range statsMap {
+		result = append(result, RangeStatsListItem{RangeStatsReport: s})
+	}
+
+	needsAllMeta := query.SortKey == "remark" || query.SortKey == "current_conns"
+	if needsAllMeta {
+		rangeMeta, err := dbGetRangeMetaByIDs(db, rangeStatsPageIDs(result))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for i := range result {
+			meta := rangeMeta[result[i].RangeID]
+			result[i].Remark = meta.Remark
+			result[i].CurrentConns = currentConnCountForProtocol(meta.Protocol, result[i].ActiveConns, int64(result[i].NatTableSize))
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return rangeStatsLess(result[i], result[j], query.SortKey, query.SortAsc)
+	})
+
+	resp := paginateRangeStatsItems(result, query)
+	if !needsAllMeta && len(resp.Items) > 0 {
+		rangeMeta, err := dbGetRangeMetaByIDs(db, rangeStatsPageIDs(resp.Items))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for i := range resp.Items {
+			meta := rangeMeta[resp.Items[i].RangeID]
+			resp.Items[i].Remark = meta.Remark
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func handleListSiteStats(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {

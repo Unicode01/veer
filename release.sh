@@ -12,7 +12,7 @@
 #   forward-linux-arm64
 #
 # 部署: 将 forward-linux-<arch> + deploy.sh 一起传到服务器执行即可
-# 注意: eBPF tc 对象会先在本地编译并 embed 进 Go 二进制，部署时无需额外携带 .o 文件
+# 注意: eBPF tc/xdp 对象会先在本地编译并 embed 进 Go 二进制，部署时无需额外携带 .o 文件
 #
 set -euo pipefail
 
@@ -30,8 +30,10 @@ EBPF_DIR="${PROJECT_DIR}/internal/app/ebpf"
 EBPF_INC="${EBPF_DIR}/include"
 EBPF_TC_SRC="${EBPF_DIR}/forward-tc-bpf.c"
 EBPF_TC_OBJ="${EBPF_DIR}/forward-tc-bpf.o"
+EBPF_TC_STATS_OBJ="${EBPF_DIR}/forward-tc-bpf-stats.o"
 EBPF_XDP_SRC="${EBPF_DIR}/forward-xdp-bpf.c"
 EBPF_XDP_OBJ="${EBPF_DIR}/forward-xdp-bpf.o"
+EBPF_XDP_STATS_OBJ="${EBPF_DIR}/forward-xdp-bpf-stats.o"
 BPF_CLANG="${BPF_CLANG:-clang}"
 BPF_EXTRA_CFLAGS="${BPF_EXTRA_CFLAGS:-}"
 BPF_OLEVEL="${BPF_OLEVEL:-1}"
@@ -42,7 +44,7 @@ fi
 ok "Go: $(go version)"
 
 if ! command -v "${BPF_CLANG}" &>/dev/null; then
-    fail "未找到 clang，无法编译 internal/app/ebpf/forward-{tc,xdp}-bpf.o"
+    fail "未找到 clang，无法编译 internal/app/ebpf/forward-{tc,xdp}-bpf{,-stats}.o"
 fi
 ok "Clang: $("${BPF_CLANG}" --version | head -n 1)"
 
@@ -120,8 +122,9 @@ compile_bpf_object() {
     local src="$1"
     local obj="$2"
     local label="$3"
+    shift 3
     info "编译 ${label} eBPF 对象..."
-    if ! "${BPF_CLANG}" "${BPF_CFLAGS[@]}" -c "${src}" -o "${obj}"; then
+    if ! "${BPF_CLANG}" "${BPF_CFLAGS[@]}" "$@" -c "${src}" -o "${obj}"; then
         fail "eBPF 编译失败；Debian/Ubuntu 通常需要 linux-libc-dev，必要时可通过 BPF_EXTRA_CFLAGS 追加头文件路径"
     fi
     if command -v llvm-strip &>/dev/null; then
@@ -131,7 +134,9 @@ compile_bpf_object() {
 }
 
 compile_bpf_object "${EBPF_TC_SRC}" "${EBPF_TC_OBJ}" "tc"
+compile_bpf_object "${EBPF_TC_SRC}" "${EBPF_TC_STATS_OBJ}" "tc-stats" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_OBJ}" "xdp"
+compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_STATS_OBJ}" "xdp-stats" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 
 # ---------- 编译 ----------
 for ARCH in "${TARGETS[@]}"; do
