@@ -63,16 +63,16 @@
   |
 宿主机
   ├─ eth0              公网接口
-  └─ vmbr0             虚拟机网桥，192.168.100.1/24
-       ├─ VM-A         192.168.100.10   Web / SSH
-       └─ VM-B         192.168.100.20   Game / UDP
+  └─ vmbr0             虚拟机网桥，198.51.100.1/24
+       ├─ VM-A         198.51.100.10   Web / SSH
+       └─ VM-B         198.51.100.20   Game / UDP
 ```
 
 在这个场景下，`forward` 的典型用法通常是：
 
 - 用 `eth0` 作为入口接口，接公网访问
 - 用 `vmbr0` 作为出口接口，把流量转给虚拟机
-- 让虚拟机默认网关指向宿主机桥地址，例如 `192.168.100.1`
+- 让虚拟机默认网关指向宿主机桥地址，例如 `198.51.100.1`
 
 对应到本项目里，可以这样配置：
 
@@ -85,7 +85,7 @@ in_interface  = eth0
 in_ip         = 203.0.113.10
 in_port       = 2222
 out_interface = vmbr0
-out_ip        = 192.168.100.10
+out_ip        = 198.51.100.10
 out_port      = 22
 protocol      = tcp
 ```
@@ -98,7 +98,7 @@ protocol      = tcp
 domain            = app.example.com
 listen_interface  = eth0
 listen_ip         = 203.0.113.10
-backend_ip        = 192.168.100.10
+backend_ip        = 198.51.100.10
 backend_http_port = 80
 backend_https_port= 443
 ```
@@ -115,7 +115,7 @@ in_ip          = 203.0.113.10
 start_port     = 30000
 end_port       = 30100
 out_interface  = vmbr0
-out_ip         = 192.168.100.20
+out_ip         = 198.51.100.20
 out_start_port = 30000
 protocol       = tcp+udp
 ```
@@ -131,7 +131,7 @@ protocol       = tcp+udp
 也就是说，在上面的例子里，`VM-A` / `VM-B` 的默认网关通常应该是：
 
 ```text
-192.168.100.1
+198.51.100.1
 ```
 
 如果你只是做普通 DNAT/端口映射，不要求后端虚拟机看到真实客户端源地址，那么可以不启用透传，配置会更宽松。
@@ -191,6 +191,11 @@ http://127.0.0.1:8080
   "max_workers": 0,
   "drain_timeout_hours": 24,
   "default_engine": "auto",
+  "kernel_engine_order": ["xdp", "tc"],
+  "kernel_rules_map_limit": 0,
+  "experimental_features": {
+    "bridge_xdp": false
+  },
   "tags": []
 }
 ```
@@ -202,7 +207,24 @@ http://127.0.0.1:8080
 - `max_workers`：最大 Worker 数量；小于等于 `0` 时按 CPU 核数自动计算，内部最少保留 3 个 Worker 槽位
 - `drain_timeout_hours`：旧 Worker 进入 draining 状态后的最长保留时长，默认 `24`
 - `default_engine`：默认转发引擎，可选 `auto`、`userspace`、`kernel`
+- `kernel_engine_order`：Linux 内核态引擎尝试顺序，默认 `["xdp", "tc"]`；当前会自动跳过不可用引擎并回退
+- `kernel_rules_map_limit`：内核 `rules_v4/stats_v4` map 容量；`0` 或省略时按当前 kernel entries 自适应扩容，默认从 `16384` 起按 2 倍增长到 `262144`；设置为正数时使用固定上限
+- `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp` 这类高风险、兼容性仍在收敛中的能力会通过这里单独放开
 - `tags`：可选标签列表，会在前端表单中作为下拉项出现
+
+示例：
+
+```json
+"experimental_features": {
+  "bridge_xdp": true
+}
+```
+
+说明：
+
+- 键名会按小写、`-` 转 `_` 归一化，例如 `bridge-xdp` 会被视为 `bridge_xdp`
+- 只有代码中显式接入检查的实验项才会生效；未接入的键会被保留但不会影响当前行为
+- `bridge_xdp` 已接入第一版实验实现，默认仍为关闭；当前主要面向透明 XDP 场景，依赖 bridge 邻居/FDB 解析，解析失败或接口不兼容时会自动回退
 
 ## 构建
 
@@ -218,7 +240,7 @@ go build -o forward .
 ./release.sh
 ```
 
-`release.sh` 会先用 `clang` 编译 `ebpf/forward-tc-bpf.o`，再把它 embed 进最终二进制，因此构建机需要可用的 `clang` 和 Linux 内核头文件。
+`release.sh` 会先用 `clang` 编译 `internal/app/ebpf/forward-tc-bpf.o` 和 `internal/app/ebpf/forward-xdp-bpf.o`，再把它们 embed 进最终二进制，因此构建机需要可用的 `clang` 和 Linux 内核头文件。
 在 Debian / Ubuntu 上，通常至少需要安装 `clang` 和 `linux-libc-dev`。
 
 只构建指定架构：
@@ -288,20 +310,26 @@ modules/addons/forward/
 
 ```text
 .
-├─ main.go                  程序入口
-├─ api.go                   Web UI 与管理 API
-├─ procmgr.go               Worker 调度与 draining 管理
-├─ worker.go                端口转发 Worker
-├─ range_worker.go          范围映射 Worker
-├─ shared_proxy.go          共享建站代理
-├─ db.go                    SQLite 初始化与迁移
-├─ config.go                配置加载
+├─ main.go                  精简入口
+├─ internal/
+│  └─ app/
+│     ├─ run.go             主程序启动流程
+│     ├─ api.go             Web UI 与管理 API
+│     ├─ procmgr.go         Worker 调度与 draining 管理
+│     ├─ worker.go          端口转发 Worker
+│     ├─ range_worker.go    范围映射 Worker
+│     ├─ shared_proxy.go    共享建站代理
+│     ├─ db.go              SQLite 初始化与迁移
+│     ├─ config.go          配置加载
+│     ├─ dataplane.go       用户态 / 内核态引擎规划
+│     ├─ kernel_runtime*.go 内核态运行时
+│     ├─ ebpf/              eBPF 源码与编译产物
+│     └─ web/               内置前端资源
 ├─ release.sh               交叉编译脚本
 ├─ deploy.sh                Debian 部署脚本
 ├─ plugins/
 │  └─ whmcs/
 │     └─ forward/           WHMCS addon 插件源码
-└─ web/                     内置前端资源
 ```
 
 ## 安全建议

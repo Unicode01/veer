@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title data-i18n="app.title">NAT Forward Manager</title>
+    <script>
+        (function () {
+            var locale = localStorage.getItem('forward_locale');
+            if (locale === 'zh-CN' || locale === 'en-US') {
+                document.documentElement.lang = locale;
+            }
+
+            var theme = localStorage.getItem('forward_theme') || 'system';
+            var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            var resolved = theme === 'light' || theme === 'dark' ? theme : (prefersDark ? 'dark' : 'light');
+            document.documentElement.dataset.theme = resolved;
+            document.documentElement.style.colorScheme = resolved;
+        })();
+    </script>
+    <link rel="stylesheet" href="style.css?v=20260401-4">
+</head>
+<body>
+    <div id="tokenModal" class="modal">
+        <div class="modal-content">
+            <h2 data-i18n="auth.title">Authentication</h2>
+            <p data-i18n="auth.description">Enter your API token to continue.</p>
+            <input type="password" id="tokenInput" data-i18n-placeholder="auth.tokenPlaceholder" placeholder="Enter token" spellcheck="false" autocapitalize="off" autocomplete="current-password">
+            <button id="tokenSubmit" data-i18n="auth.confirm">Continue</button>
+        </div>
+    </div>
+
+    <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+
+    <div id="confirmModal" class="modal confirm-modal" aria-hidden="true">
+        <div class="modal-content confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+            <h2 id="confirmTitle">Confirm</h2>
+            <p id="confirmMessage">Are you sure?</p>
+            <div class="confirm-actions">
+                <button type="button" id="confirmCancelBtn" class="btn-cancel">Cancel</button>
+                <button type="button" id="confirmSubmitBtn">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="app" class="app-shell" style="display:none;">
+        <header>
+            <div class="header-inner">
+                <div class="header-title">
+                    <h1>
+                        <span data-i18n="app.title">NAT Forward Manager</span>
+                        <span id="masterVersion" class="master-version"></span>
+                    </h1>
+                </div>
+
+                <div class="header-actions">
+                    <label class="toolbar-field">
+                        <span data-i18n="toolbar.language">Language</span>
+                        <select id="localeSelect" class="toolbar-select">
+                            <option value="zh-CN" data-i18n="locale.zh-CN">Chinese</option>
+                            <option value="en-US" data-i18n="locale.en-US">English</option>
+                        </select>
+                    </label>
+
+                    <label class="toolbar-field">
+                        <span data-i18n="toolbar.theme">Theme</span>
+                        <select id="themeSelect" class="toolbar-select">
+                            <option value="system" data-i18n="theme.system">System</option>
+                            <option value="light" data-i18n="theme.light">Light</option>
+                            <option value="dark" data-i18n="theme.dark">Dark</option>
+                        </select>
+                    </label>
+
+                    <button id="logoutBtn" class="ghost-btn" data-i18n="auth.logout" data-i18n-title="auth.logout">Logout</button>
+                </div>
+            </div>
+        </header>
+
+        <div class="tabs" role="tablist" aria-label="Main navigation">
+            <button id="tab-rules-button" class="tab active" data-tab="rules" data-i18n="tab.rules" role="tab" aria-selected="true" aria-controls="tab-rules" tabindex="0">Port Forwarding</button>
+            <button id="tab-sites-button" class="tab" data-tab="sites" data-i18n="tab.sites" role="tab" aria-selected="false" aria-controls="tab-sites" tabindex="-1">Sites (80/443)</button>
+            <button id="tab-ranges-button" class="tab" data-tab="ranges" data-i18n="tab.ranges" role="tab" aria-selected="false" aria-controls="tab-ranges" tabindex="-1">Range Mapping</button>
+            <button id="tab-workers-button" class="tab" data-tab="workers" data-i18n="tab.workers" role="tab" aria-selected="false" aria-controls="tab-workers" tabindex="-1">Worker Status</button>
+            <button id="tab-rule-stats-button" class="tab" data-tab="rule-stats" data-i18n="tab.stats" role="tab" aria-selected="false" aria-controls="tab-rule-stats" tabindex="-1">Traffic Stats</button>
+        </div>
+
+        <section class="overview-panel">
+            <div class="overview-header">
+                <div>
+                    <p class="section-kicker" data-i18n="overview.kicker">Live Overview</p>
+                    <h2 data-i18n="overview.title">Overview</h2>
+                    <p class="section-desc" data-i18n="overview.desc">Quickly scan totals, running items, and the latest refresh time.</p>
+                </div>
+                <div class="overview-meta">
+                    <span class="overview-meta-item" data-i18n="overview.autoRefresh">Auto refresh every 5 seconds</span>
+                    <span class="overview-meta-item" id="lastSyncLabel" data-i18n="overview.awaitingSync">Waiting for first sync</span>
+                    <button type="button" id="refreshNowBtn" class="mini-btn" data-i18n="common.refresh">Refresh</button>
+                </div>
+            </div>
+            <div class="overview-grid">
+                <article class="overview-card accent-rules">
+                    <p class="overview-label" data-i18n="overview.rules">Rules</p>
+                    <p class="overview-value" id="overviewRulesValue">0</p>
+                </article>
+                <article class="overview-card accent-sites">
+                    <p class="overview-label" data-i18n="overview.sites">Sites</p>
+                    <p class="overview-value" id="overviewSitesValue">0</p>
+                </article>
+                <article class="overview-card accent-ranges">
+                    <p class="overview-label" data-i18n="overview.ranges">Ranges</p>
+                    <p class="overview-value" id="overviewRangesValue">0</p>
+                </article>
+                <article class="overview-card accent-workers">
+                    <p class="overview-label" data-i18n="overview.workers">Workers</p>
+                    <p class="overview-value" id="overviewWorkersValue">0</p>
+                </article>
+                <article class="overview-card accent-running">
+                    <p class="overview-label" data-i18n="overview.running">Running</p>
+                    <p class="overview-value" id="overviewRunningValue">0</p>
+                </article>
+            </div>
+        </section>
+
+        <div id="tab-rules" class="tab-content active" role="tabpanel" aria-labelledby="tab-rules-button">
+            <section class="add-rule">
+                <h2 id="ruleFormTitle" data-i18n="rule.form.title.add">Add Rule</h2>
+                <form id="ruleForm">
+                    <input type="hidden" id="editRuleId" value="">
+                    <div class="form-row">
+                        <div class="form-group" style="flex:2">
+                            <label data-i18n="form.remark">Remark</label>
+                            <input type="text" id="ruleRemark" data-i18n-placeholder="rule.form.remark.placeholder" placeholder="Optional, e.g. Web server forwarding" spellcheck="false">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.tag">Tag</label>
+                            <select id="ruleTag">
+                                <option value="" data-i18n="common.unspecified">Unspecified</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.protocol">Protocol</label>
+                            <select id="protocol">
+                                <option value="tcp">TCP</option>
+                                <option value="udp">UDP</option>
+                                <option value="tcp+udp">TCP+UDP</option>
+                            </select>
+                        </div>
+                        <div class="form-group form-group-checkbox">
+                            <label>
+                                <input type="checkbox" id="ruleTransparent">
+                                <span data-i18n="form.transparent">Transparent Source IP</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="ruleTransparentWarning" class="transparent-warning"></div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="form.inInterface">Inbound Interface</label>
+                            <select id="inInterface">
+                                <option value="" data-i18n="common.unspecified">Unspecified</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.inIP">Inbound IP</label>
+                            <select id="inIP">
+                                <option value="" data-i18n="common.selectInterfaceFirst">Select interface first</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.inPort">Inbound Port</label>
+                            <input type="number" id="inPort" min="1" max="65535" inputmode="numeric" required>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="form.outInterface">Outbound Interface</label>
+                            <select id="outInterface">
+                                <option value="" data-i18n="common.unspecified">Unspecified</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.outIP">Outbound IP</label>
+                            <input type="text" id="outIP" placeholder="198.51.100.2" spellcheck="false" autocapitalize="off" inputmode="decimal" required>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.outSourceIP">Fixed Source IP</label>
+                            <input type="text" id="ruleOutSourceIP" list="ruleOutSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="decimal">
+                            <datalist id="ruleOutSourceIPOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.outPort">Outbound Port</label>
+                            <input type="number" id="outPort" min="1" max="65535" inputmode="numeric" required>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-actions">
+                            <button type="submit" id="ruleSubmitBtn" data-i18n="rule.form.submit.add">Add Rule</button>
+                            <button type="button" id="ruleCancelBtn" class="btn-cancel" style="display:none" data-i18n="common.cancelEdit">Cancel</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="rule.list.title">Forwarding Rules</h2>
+                <div class="table-toolbar table-toolbar-rules">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="rulesSearchInput" class="table-search table-search-prominent" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="rulesTable" data-i18n-placeholder="search.rules.placeholder" placeholder="Search rules, IPs, ports, tags...">
+                        <div class="table-meta-row">
+                            <p id="rulesFilterMeta" class="table-meta"></p>
+                            <span id="rulesSelectionMeta" class="selection-meta" hidden></span>
+                        </div>
+                    </div>
+                    <div class="table-toolbar-actions">
+                        <button type="button" id="batchDeleteRulesBtn" class="mini-btn mini-btn-danger" disabled data-i18n="rule.batch.delete">Batch Delete</button>
+                        <button type="button" id="clearRulesFilter" class="mini-btn" hidden data-i18n="filter.reset">Reset View</button>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table id="rulesTable">
+                        <thead>
+                            <tr>
+                                <th class="table-select-column">
+                                    <input type="checkbox" id="rulesSelectAll" class="table-select-all" aria-label="Select all visible rules">
+                                </th>
+                                <th class="sortable" data-table="rules" data-sort="id">ID</th>
+                                <th class="sortable" data-table="rules" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th class="sortable" data-table="rules" data-sort="tag" data-i18n="form.tag">Tag</th>
+                                <th class="sortable" data-table="rules" data-sort="in_interface" data-i18n="form.inInterface">Inbound Interface</th>
+                                <th class="sortable" data-table="rules" data-sort="in_ip" data-i18n="form.inIP">Inbound IP</th>
+                                <th class="sortable" data-table="rules" data-sort="in_port" data-i18n="form.inPort">Inbound Port</th>
+                                <th class="sortable" data-table="rules" data-sort="out_interface" data-i18n="form.outInterface">Outbound Interface</th>
+                                <th class="sortable" data-table="rules" data-sort="out_ip" data-i18n="form.outIP">Outbound IP</th>
+                                <th class="sortable" data-table="rules" data-sort="out_port" data-i18n="form.outPort">Outbound Port</th>
+                                <th class="sortable" data-table="rules" data-sort="protocol" data-i18n="form.protocol">Protocol</th>
+                                <th class="sortable" data-table="rules" data-sort="transparent" data-i18n="form.transparentShort">Transparent</th>
+                                <th class="sortable" data-table="rules" data-sort="status" data-i18n="common.status">Status</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rulesBody"></tbody>
+                    </table>
+                </div>
+                <div id="rulesPagination" class="table-pagination" hidden></div>
+                <div id="noRules" class="empty-hint">
+                    <p class="empty-title" data-i18n="rule.list.empty">No forwarding rules yet.</p>
+                    <button type="button" id="emptyAddRuleBtn" class="mini-btn" data-i18n="empty.action.rule">Create First Rule</button>
+                </div>
+            </section>
+        </div>
+
+        <div id="tab-sites" class="tab-content" role="tabpanel" aria-labelledby="tab-sites-button">
+            <section class="add-rule">
+                <h2 id="siteFormTitle" data-i18n="site.form.title.add">Add Site</h2>
+                <p class="section-desc" data-i18n="site.form.desc">Share ports 80/443 across multiple domains and route by HTTP Host or TLS SNI.</p>
+                <form id="siteForm">
+                    <input type="hidden" id="editSiteId" value="">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="site.form.domain">Domain</label>
+                            <input type="text" id="siteDomain" placeholder="example.com" spellcheck="false" autocapitalize="off" autocomplete="off" required>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.tag">Tag</label>
+                            <select id="siteTag">
+                                <option value="" data-i18n="common.unspecified">Unspecified</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="site.form.listenInterface">Listen Interface</label>
+                            <select id="siteListenIface">
+                                <option value="" data-i18n="common.unspecified">Unspecified</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="site.form.listenIP">Listen IP</label>
+                            <select id="siteListenIP">
+                                <option value="0.0.0.0" data-i18n="common.allAddresses">0.0.0.0 (All)</option>
+                            </select>
+                        </div>
+                        <div class="form-group form-group-checkbox">
+                            <label>
+                                <input type="checkbox" id="siteTransparent">
+                                <span data-i18n="form.transparent">Transparent Source IP</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="siteTransparentWarning" class="transparent-warning"></div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="site.form.backendIP">Backend IP</label>
+                            <input type="text" id="siteBackendIP" placeholder="192.168.1.100" spellcheck="false" autocapitalize="off" inputmode="decimal" required>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="site.form.backendSourceIP">Backend Source IP</label>
+                            <input type="text" id="siteBackendSourceIP" list="siteBackendSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="decimal">
+                            <datalist id="siteBackendSourceIPOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="site.form.backendHTTP">Backend HTTP Port</label>
+                            <input type="number" id="siteBackendHTTP" min="0" max="65535" inputmode="numeric" data-i18n-placeholder="site.form.backendHTTP.placeholder" placeholder="80 (0 disables)">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="site.form.backendHTTPS">Backend HTTPS Port</label>
+                            <input type="number" id="siteBackendHTTPS" min="0" max="65535" inputmode="numeric" data-i18n-placeholder="site.form.backendHTTPS.placeholder" placeholder="443 (0 disables)">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-actions">
+                            <button type="submit" id="siteSubmitBtn" data-i18n="site.form.submit.add">Add Site</button>
+                            <button type="button" id="siteCancelBtn" class="btn-cancel" style="display:none" data-i18n="common.cancelEdit">Cancel</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="site.list.title">Sites</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="sitesSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="sitesTable" data-i18n-placeholder="search.sites.placeholder" placeholder="Search domains, IPs, tags...">
+                        <p id="sitesFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="clearSitesFilter" class="mini-btn" hidden data-i18n="filter.clear">Clear Filter</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="sitesTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="sites" data-sort="id">ID</th>
+                                <th class="sortable" data-table="sites" data-sort="domain" data-i18n="site.form.domain">Domain</th>
+                                <th class="sortable" data-table="sites" data-sort="tag" data-i18n="form.tag">Tag</th>
+                                <th class="sortable" data-table="sites" data-sort="listen_ip" data-i18n="site.form.listenIP">Listen IP</th>
+                                <th class="sortable" data-table="sites" data-sort="backend_ip" data-i18n="site.form.backendIP">Backend IP</th>
+                                <th class="sortable" data-table="sites" data-sort="backend_http_port" data-i18n="site.list.httpPort">HTTP Port</th>
+                                <th class="sortable" data-table="sites" data-sort="backend_https_port" data-i18n="site.list.httpsPort">HTTPS Port</th>
+                                <th class="sortable" data-table="sites" data-sort="transparent" data-i18n="form.transparentShort">Transparent</th>
+                                <th class="sortable" data-table="sites" data-sort="status" data-i18n="common.status">Status</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sitesBody"></tbody>
+                    </table>
+                </div>
+                <div id="sitesPagination" class="table-pagination" hidden></div>
+                <div id="noSites" class="empty-hint">
+                    <p class="empty-title" data-i18n="site.list.empty">No sites yet.</p>
+                    <button type="button" id="emptyAddSiteBtn" class="mini-btn" data-i18n="empty.action.site">Create First Site</button>
+                </div>
+            </section>
+        </div>
+
+        <div id="tab-ranges" class="tab-content" role="tabpanel" aria-labelledby="tab-ranges-button">
+            <section class="add-rule">
+                <h2 id="rangeFormTitle" data-i18n="range.form.title.add">Add Range Mapping</h2>
+                <p class="section-desc" data-i18n="range.form.desc">Map a local port range such as 10000-20000 one-to-one to the target host.</p>
+                <form id="rangeForm">
+                    <input type="hidden" id="editRangeId" value="">
+                    <div class="form-row">
+                        <div class="form-group" style="flex:2">
+                            <label data-i18n="form.remark">Remark</label>
+                            <input type="text" id="rangeRemark" data-i18n-placeholder="range.form.remark.placeholder" placeholder="Optional, e.g. game server ports" spellcheck="false">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.tag">Tag</label>
+                            <select id="rangeTag">
+                                <option value="" data-i18n="common.unspecified">Unspecified</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.protocol">Protocol</label>
+                            <select id="rangeProtocol">
+                                <option value="tcp">TCP</option>
+                                <option value="udp">UDP</option>
+                                <option value="tcp+udp">TCP+UDP</option>
+                            </select>
+                        </div>
+                        <div class="form-group form-group-checkbox">
+                            <label>
+                                <input type="checkbox" id="rangeTransparent">
+                                <span data-i18n="form.transparent">Transparent Source IP</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="rangeTransparentWarning" class="transparent-warning"></div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="form.inInterface">Inbound Interface</label>
+                            <select id="rangeInInterface">
+                                <option value="" data-i18n="common.unspecified">Unspecified</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.inIP">Inbound IP</label>
+                            <select id="rangeInIP">
+                                <option value="" data-i18n="common.selectInterfaceFirst">Select interface first</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="range.form.startPort">Start Port</label>
+                            <input type="number" id="rangeStartPort" min="1" max="65535" inputmode="numeric" required>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="range.form.endPort">End Port</label>
+                            <input type="number" id="rangeEndPort" min="1" max="65535" inputmode="numeric" required>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="form.outInterface">Outbound Interface</label>
+                            <select id="rangeOutInterface">
+                                <option value="" data-i18n="common.unspecified">Unspecified</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="range.form.targetIP">Target IP</label>
+                            <input type="text" id="rangeOutIP" placeholder="198.51.100.2" spellcheck="false" autocapitalize="off" inputmode="decimal" required>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.outSourceIP">Fixed Source IP</label>
+                            <input type="text" id="rangeOutSourceIP" list="rangeOutSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="decimal">
+                            <datalist id="rangeOutSourceIPOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="range.form.targetStartPort">Target Start Port</label>
+                            <input type="number" id="rangeOutStartPort" min="1" max="65535" inputmode="numeric" data-i18n-placeholder="range.form.targetStartPort.placeholder" placeholder="Blank = same as inbound">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-actions">
+                            <button type="submit" id="rangeSubmitBtn" data-i18n="range.form.submit.add">Add Mapping</button>
+                            <button type="button" id="rangeCancelBtn" class="btn-cancel" style="display:none" data-i18n="common.cancelEdit">Cancel</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="range.list.title">Range Mappings</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="rangesSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="rangesTable" data-i18n-placeholder="search.ranges.placeholder" placeholder="Search remarks, IPs, ports, tags...">
+                        <p id="rangesFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="clearRangesFilter" class="mini-btn" hidden data-i18n="filter.clear">Clear Filter</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="rangesTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="ranges" data-sort="id">ID</th>
+                                <th class="sortable" data-table="ranges" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th class="sortable" data-table="ranges" data-sort="tag" data-i18n="form.tag">Tag</th>
+                                <th class="sortable" data-table="ranges" data-sort="in_interface" data-i18n="form.inInterface">Inbound Interface</th>
+                                <th class="sortable" data-table="ranges" data-sort="in_ip" data-i18n="form.inIP">Inbound IP</th>
+                                <th class="sortable" data-table="ranges" data-sort="start_port" data-i18n="range.list.inboundRange">Inbound Port Range</th>
+                                <th class="sortable" data-table="ranges" data-sort="out_interface" data-i18n="form.outInterface">Outbound Interface</th>
+                                <th class="sortable" data-table="ranges" data-sort="out_ip" data-i18n="range.form.targetIP">Target IP</th>
+                                <th class="sortable" data-table="ranges" data-sort="out_start_port" data-i18n="range.list.outboundRange">Outbound Port Range</th>
+                                <th class="sortable" data-table="ranges" data-sort="protocol" data-i18n="form.protocol">Protocol</th>
+                                <th class="sortable" data-table="ranges" data-sort="transparent" data-i18n="form.transparentShort">Transparent</th>
+                                <th class="sortable" data-table="ranges" data-sort="status" data-i18n="common.status">Status</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rangesBody"></tbody>
+                    </table>
+                </div>
+                <div id="rangesPagination" class="table-pagination" hidden></div>
+                <div id="noRanges" class="empty-hint">
+                    <p class="empty-title" data-i18n="range.list.empty">No range mappings yet.</p>
+                    <button type="button" id="emptyAddRangeBtn" class="mini-btn" data-i18n="empty.action.range">Create First Mapping</button>
+                </div>
+            </section>
+        </div>
+
+        <div id="tab-workers" class="tab-content" role="tabpanel" aria-labelledby="tab-workers-button">
+            <section class="rule-list">
+                <h2 data-i18n="workers.title">Worker Status</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="workersSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="workersTable" data-i18n-placeholder="search.workers.placeholder" placeholder="Search worker type, hash, route...">
+                        <p id="workersFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="refreshWorkersBtn" class="mini-btn" data-i18n="workers.refresh">Refresh Workers</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="workersTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="workers" data-sort="kind" data-i18n="workers.kind">Type</th>
+                                <th class="sortable" data-table="workers" data-sort="index">#</th>
+                                <th class="sortable" data-table="workers" data-sort="status" data-i18n="common.status">Status</th>
+                                <th class="sortable" data-table="workers" data-sort="binary_hash" data-i18n="workers.version">Version</th>
+                                <th class="sortable" data-table="workers" data-sort="count" data-i18n="workers.count">Count</th>
+                                <th data-i18n="workers.details">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="workersBody"></tbody>
+                    </table>
+                </div>
+                <div id="workersPagination" class="table-pagination" hidden></div>
+                <div id="noWorkers" class="empty-hint">
+                    <p class="empty-title" data-i18n="workers.empty">No workers yet.</p>
+                    <button type="button" id="emptyRefreshWorkersBtn" class="mini-btn" data-i18n="workers.refresh">Refresh Workers</button>
+                </div>
+            </section>
+        </div>
+
+        <div id="tab-rule-stats" class="tab-content" role="tabpanel" aria-labelledby="tab-rule-stats-button">
+            <section class="rule-list">
+                <div class="section-heading-row">
+                    <h2 data-i18n="stats.rules.title">Rule Traffic Stats</h2>
+                    <button type="button" class="mini-btn refresh-current-conns-btn" data-i18n="stats.refreshCurrentConns">获取当前连接数</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="ruleStatsTable" class="stats-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="ruleStats" data-sort="rule_id">ID</th>
+                                <th class="sortable" data-table="ruleStats" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th class="sortable" data-table="ruleStats" data-sort="current_conns" data-i18n="stats.currentConns">Connections</th>
+                                <th class="sortable" data-table="ruleStats" data-sort="total_conns" data-i18n="stats.totalConns">Total Connections</th>
+                                <th class="sortable" data-table="ruleStats" data-sort="rejected_conns" data-i18n="stats.rejectedConns">Rejected Connections</th>
+                                <th class="sortable" data-table="ruleStats" data-sort="speed_in" data-i18n="stats.speedIn">Ingress Speed</th>
+                                <th class="sortable" data-table="ruleStats" data-sort="speed_out" data-i18n="stats.speedOut">Egress Speed</th>
+                                <th class="sortable" data-table="ruleStats" data-sort="bytes_in" data-i18n="stats.bytesIn">Ingress Total</th>
+                                <th class="sortable" data-table="ruleStats" data-sort="bytes_out" data-i18n="stats.bytesOut">Egress Total</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ruleStatsBody"></tbody>
+                    </table>
+                </div>
+                <div id="ruleStatsPagination" class="table-pagination" hidden></div>
+                <p id="noRuleStats" class="empty-hint" data-i18n="stats.rules.empty">No rule statistics yet.</p>
+            </section>
+
+            <section class="rule-list">
+                <div class="section-heading-row">
+                    <h2 data-i18n="stats.sites.title">Site Traffic Stats</h2>
+                    <button type="button" class="mini-btn refresh-current-conns-btn" data-i18n="stats.refreshCurrentConns">获取当前连接数</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="siteStatsTable" class="stats-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="siteStats" data-sort="site_id">ID</th>
+                                <th class="sortable" data-table="siteStats" data-sort="domain" data-i18n="site.form.domain">Domain</th>
+                                <th class="sortable" data-table="siteStats" data-sort="current_conns" data-i18n="stats.currentConns">Connections</th>
+                                <th class="sortable" data-table="siteStats" data-sort="total_conns" data-i18n="stats.totalConns">Total Connections</th>
+                                <th class="sortable" data-table="siteStats" data-sort="speed_in" data-i18n="stats.speedIn">Ingress Speed</th>
+                                <th class="sortable" data-table="siteStats" data-sort="speed_out" data-i18n="stats.speedOut">Egress Speed</th>
+                                <th class="sortable" data-table="siteStats" data-sort="bytes_in" data-i18n="stats.bytesIn">Ingress Total</th>
+                                <th class="sortable" data-table="siteStats" data-sort="bytes_out" data-i18n="stats.bytesOut">Egress Total</th>
+                            </tr>
+                        </thead>
+                        <tbody id="siteStatsBody"></tbody>
+                    </table>
+                </div>
+                <div id="siteStatsPagination" class="table-pagination" hidden></div>
+                <p id="noSiteStats" class="empty-hint" data-i18n="stats.sites.empty">No site statistics yet.</p>
+            </section>
+
+            <section class="rule-list">
+                <div class="section-heading-row">
+                    <h2 data-i18n="stats.ranges.title">Range Traffic Stats</h2>
+                    <button type="button" class="mini-btn refresh-current-conns-btn" data-i18n="stats.refreshCurrentConns">获取当前连接数</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="rangeStatsTable" class="stats-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="rangeStats" data-sort="range_id">ID</th>
+                                <th class="sortable" data-table="rangeStats" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th class="sortable" data-table="rangeStats" data-sort="current_conns" data-i18n="stats.currentConns">Connections</th>
+                                <th class="sortable" data-table="rangeStats" data-sort="total_conns" data-i18n="stats.totalConns">Total Connections</th>
+                                <th class="sortable" data-table="rangeStats" data-sort="rejected_conns" data-i18n="stats.rejectedConns">Rejected Connections</th>
+                                <th class="sortable" data-table="rangeStats" data-sort="speed_in" data-i18n="stats.speedIn">Ingress Speed</th>
+                                <th class="sortable" data-table="rangeStats" data-sort="speed_out" data-i18n="stats.speedOut">Egress Speed</th>
+                                <th class="sortable" data-table="rangeStats" data-sort="bytes_in" data-i18n="stats.bytesIn">Ingress Total</th>
+                                <th class="sortable" data-table="rangeStats" data-sort="bytes_out" data-i18n="stats.bytesOut">Egress Total</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rangeStatsBody"></tbody>
+                    </table>
+                </div>
+                <div id="rangeStatsPagination" class="table-pagination" hidden></div>
+                <p id="noRangeStats" class="empty-hint" data-i18n="stats.ranges.empty">No range statistics yet.</p>
+            </section>
+        </div>
+    </div>
+
+    <script defer src="js/core.js?v=20260401-5"></script>
+    <script defer src="js/i18n.js?v=20260401-5"></script>
+    <script defer src="js/ui.js?v=20260401-5"></script>
+    <script defer src="js/rules.js?v=20260401-5"></script>
+    <script defer src="js/sites.js?v=20260401-5"></script>
+    <script defer src="js/ranges.js?v=20260401-5"></script>
+    <script defer src="js/workers.js?v=20260401-5"></script>
+    <script defer src="js/stats.js?v=20260401-5"></script>
+    <script defer src="js/init.js?v=20260401-5"></script>
+</body>
+</html>

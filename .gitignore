@@ -11,7 +11,7 @@ forward
 forward.exe
 forward-linux-amd64
 forward-linux-arm64
-ebpf/*.o
+internal/app/ebpf/*.o
 dist/
 !plugins/
 !plugins/whmcs/

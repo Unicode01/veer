@@ -78,7 +78,7 @@ curl -H "Authorization: Bearer your-token-here" \
   "in_ip": "203.0.113.10",
   "in_port": 2222,
   "out_interface": "vmbr0",
-  "out_ip": "192.168.100.10",
+  "out_ip": "198.51.100.10",
   "out_port": 22,
   "protocol": "tcp",
   "remark": "vm-a ssh",
@@ -96,7 +96,7 @@ curl -H "Authorization: Bearer your-token-here" \
   "domain": "app.example.com",
   "listen_ip": "203.0.113.10",
   "listen_interface": "eth0",
-  "backend_ip": "192.168.100.10",
+  "backend_ip": "198.51.100.10",
   "backend_http_port": 80,
   "backend_https_port": 443,
   "tag": "vm",
@@ -115,7 +115,7 @@ curl -H "Authorization: Bearer your-token-here" \
   "start_port": 30000,
   "end_port": 30100,
   "out_interface": "vmbr0",
-  "out_ip": "192.168.100.20",
+  "out_ip": "198.51.100.20",
   "out_start_port": 30000,
   "protocol": "tcp+udp",
   "remark": "vm-b game",
@@ -153,7 +153,7 @@ curl -H "Authorization: Bearer your-token-here" \
   },
   {
     "name": "vmbr0",
-    "addrs": ["192.168.100.1"]
+    "addrs": ["198.51.100.1"]
   }
 ]
 ```
@@ -197,7 +197,7 @@ curl -H "Authorization: Bearer your-token-here" \
     "in_ip": "203.0.113.10",
     "in_port": 2222,
     "out_interface": "vmbr0",
-    "out_ip": "192.168.100.10",
+    "out_ip": "198.51.100.10",
     "out_port": 22,
     "protocol": "tcp",
     "remark": "vm-a ssh",
@@ -221,7 +221,7 @@ curl -H "Authorization: Bearer your-token-here" \
   "in_ip": "203.0.113.10",
   "in_port": 2222,
   "out_interface": "vmbr0",
-  "out_ip": "192.168.100.10",
+  "out_ip": "198.51.100.10",
   "out_port": 22,
   "protocol": "tcp",
   "remark": "vm-a ssh",
@@ -289,7 +289,7 @@ curl -H "Authorization: Bearer your-token-here" \
       "in_ip": "203.0.113.10",
       "in_port": 2222,
       "out_interface": "vmbr0",
-      "out_ip": "192.168.100.10",
+      "out_ip": "198.51.100.10",
       "out_port": 22,
       "protocol": "tcp",
       "remark": "vm-a ssh",
@@ -314,7 +314,7 @@ curl -H "Authorization: Bearer your-token-here" \
       "in_ip": "203.0.113.10",
       "in_port": 2222,
       "out_interface": "vmbr0",
-      "out_ip": "192.168.100.10",
+      "out_ip": "198.51.100.10",
       "out_port": 22,
       "protocol": "tcp",
       "remark": "vm-a ssh",
@@ -355,7 +355,7 @@ curl -H "Authorization: Bearer your-token-here" \
       "in_ip": "203.0.113.10",
       "in_port": 2222,
       "out_interface": "vmbr0",
-      "out_ip": "192.168.100.10",
+      "out_ip": "198.51.100.10",
       "out_port": 22,
       "protocol": "tcp",
       "remark": "vm-a ssh",
@@ -369,7 +369,7 @@ curl -H "Authorization: Bearer your-token-here" \
       "in_ip": "203.0.113.10",
       "in_port": 8080,
       "out_interface": "vmbr0",
-      "out_ip": "192.168.100.20",
+      "out_ip": "198.51.100.20",
       "out_port": 80,
       "protocol": "tcp",
       "remark": "vm-b web",
@@ -421,7 +421,7 @@ curl -H "Authorization: Bearer your-token-here" \
   "domain": "app.example.com",
   "listen_ip": "203.0.113.10",
   "listen_interface": "eth0",
-  "backend_ip": "192.168.100.10",
+  "backend_ip": "198.51.100.10",
   "backend_http_port": 80,
   "backend_https_port": 443,
   "tag": "vm",
@@ -488,7 +488,7 @@ curl -H "Authorization: Bearer your-token-here" \
   "start_port": 30000,
   "end_port": 30100,
   "out_interface": "vmbr0",
-  "out_ip": "192.168.100.20",
+  "out_ip": "198.51.100.20",
   "out_start_port": 30000,
   "protocol": "tcp+udp",
   "remark": "vm-b game",
@@ -626,7 +626,7 @@ curl -H "Authorization: Bearer your-token-here" \
 ### 场景 1：创建虚拟机后自动开通 SSH 转发
 
 1. 云管平台 / 虚拟化平台创建 VM
-2. 获取 VM 内网 IP，例如 `192.168.100.10`
+2. 获取 VM 内网 IP，例如 `198.51.100.10`
 3. 调用 `POST /api/rules`
 4. 记录返回的 `id`
 5. 后续如需停用，调用 `POST /api/rules/toggle?id=<id>`
@@ -663,7 +663,7 @@ curl -X POST "http://127.0.0.1:8080/api/rules" \
     "in_ip": "203.0.113.10",
     "in_port": 2222,
     "out_interface": "vmbr0",
-    "out_ip": "192.168.100.10",
+    "out_ip": "198.51.100.10",
     "out_port": 22,
     "protocol": "tcp",
     "remark": "vm-a ssh",
