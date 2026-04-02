@@ -19,7 +19,7 @@
             document.documentElement.style.colorScheme = resolved;
         })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20260401-4">
+    <link rel="stylesheet" href="style.css?v=20260402-1">
 </head>
 <body>
     <div id="tokenModal" class="modal">
@@ -511,6 +511,36 @@
         <div id="tab-rule-stats" class="tab-content" role="tabpanel" aria-labelledby="tab-rule-stats-button">
             <section class="rule-list">
                 <div class="section-heading-row">
+                    <div>
+                        <h2 data-i18n="kernel.runtime.title">Kernel Runtime</h2>
+                        <p class="section-desc" data-i18n="kernel.runtime.desc">Debug the current TC/XDP dataplane state, attachment health, and transient fallbacks.</p>
+                    </div>
+                </div>
+                <div id="kernelRuntimeSummary" class="kernel-runtime-summary"></div>
+                <div class="table-scroll">
+                    <table id="kernelRuntimeTable" class="stats-table kernel-runtime-table">
+                        <thead>
+                            <tr>
+                                <th data-i18n="kernel.engine.name">Engine</th>
+                                <th data-i18n="kernel.engine.available">Availability</th>
+                                <th data-i18n="kernel.engine.loaded">Program</th>
+                                <th data-i18n="kernel.engine.entries">Entries</th>
+                                <th data-i18n="kernel.engine.attachments">Attachments</th>
+                                <th data-i18n="kernel.engine.attachHealthy">Attachment Health</th>
+                                <th data-i18n="kernel.engine.maps">Map Usage</th>
+                                <th data-i18n="kernel.engine.reconcile">Last Reconcile</th>
+                                <th data-i18n="kernel.engine.traffic">Traffic Stats</th>
+                                <th data-i18n="kernel.engine.details">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="kernelRuntimeBody"></tbody>
+                    </table>
+                </div>
+                <p id="noKernelRuntime" class="empty-hint" data-i18n="kernel.runtime.empty">No kernel engine runtime details are available right now.</p>
+            </section>
+
+            <section class="rule-list">
+                <div class="section-heading-row">
                     <h2 data-i18n="stats.rules.title">Rule Traffic Stats</h2>
                     <button type="button" class="mini-btn refresh-current-conns-btn" data-i18n="stats.refreshCurrentConns">获取当前连接数</button>
                 </div>
@@ -591,14 +621,14 @@
         </div>
     </div>
 
-    <script defer src="js/core.js?v=20260401-6"></script>
-    <script defer src="js/i18n.js?v=20260401-6"></script>
-    <script defer src="js/ui.js?v=20260401-6"></script>
-    <script defer src="js/rules.js?v=20260401-6"></script>
-    <script defer src="js/sites.js?v=20260401-6"></script>
-    <script defer src="js/ranges.js?v=20260401-6"></script>
-    <script defer src="js/workers.js?v=20260401-6"></script>
-    <script defer src="js/stats.js?v=20260401-6"></script>
-    <script defer src="js/init.js?v=20260401-6"></script>
+    <script defer src="js/core.js?v=20260402-1"></script>
+    <script defer src="js/i18n.js?v=20260402-1"></script>
+    <script defer src="js/ui.js?v=20260402-1"></script>
+    <script defer src="js/rules.js?v=20260402-1"></script>
+    <script defer src="js/sites.js?v=20260402-1"></script>
+    <script defer src="js/ranges.js?v=20260402-1"></script>
+    <script defer src="js/workers.js?v=20260402-1"></script>
+    <script defer src="js/stats.js?v=20260402-1"></script>
+    <script defer src="js/init.js?v=20260402-1"></script>
 </body>
 </html>

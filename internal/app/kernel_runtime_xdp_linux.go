@@ -64,26 +64,28 @@ type xdpAttachment struct {
 }
 
 type xdpKernelRuleRuntime struct {
-	mu               sync.Mutex
-	availableOnce    sync.Once
-	available        bool
-	availableReason  string
-	rulesMapLimit    int
-	flowsMapLimit    int
-	rulesMapCapacity int
-	flowsMapCapacity int
-	memlockOnce      sync.Once
-	memlockErr       error
-	coll             *ebpf.Collection
-	attachments      []xdpAttachment
-	preparedRules    []preparedXDPKernelRule
-	programID        uint32
-	prepareOptions   xdpPrepareOptions
-	lastSkipLog      map[string]struct{}
-	lastBridgeLog    map[string]struct{}
-	stateLog         kernelStateLogger
-	statsCorrection  map[uint32]kernelRuleStats
-	flowPruneState   kernelFlowPruneState
+	mu                sync.Mutex
+	availableOnce     sync.Once
+	available         bool
+	availableReason   string
+	rulesMapLimit     int
+	flowsMapLimit     int
+	rulesMapCapacity  int
+	flowsMapCapacity  int
+	memlockOnce       sync.Once
+	memlockErr        error
+	coll              *ebpf.Collection
+	attachments       []xdpAttachment
+	preparedRules     []preparedXDPKernelRule
+	programID         uint32
+	prepareOptions    xdpPrepareOptions
+	lastSkipLog       map[string]struct{}
+	lastBridgeLog     map[string]struct{}
+	lastReconcileMode string
+	stateLog          kernelStateLogger
+	statsCorrection   map[uint32]kernelRuleStats
+	flowPruneState    kernelFlowPruneState
+	runtimeMapCounts  kernelRuntimeMapCountSnapshot
 }
 
 func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
@@ -173,6 +175,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 
 	requiredIfIndices := collectXDPInterfaces(prepared)
 	if rt.samePreparedRulesLocked(prepared, requiredIfIndices) {
+		rt.lastReconcileMode = "steady"
 		rt.stateLog.Logf("xdp dataplane reconcile: entry set unchanged, keeping %d active kernel entry(s)", len(prepared))
 		for _, rule := range rules {
 			if current, ok := results[rule.ID]; ok && current.Error != "" {
@@ -388,6 +391,8 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
 	rt.flowPruneState.reset()
+	rt.lastReconcileMode = "rebuild"
+	rt.invalidateRuntimeMapCountCacheLocked()
 	return results, nil
 }
 
@@ -413,6 +418,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		return err
 	}
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
+	rt.invalidateRuntimeMapCountCacheLocked()
 	return nil
 }
 
@@ -445,8 +451,10 @@ func (rt *xdpKernelRuleRuntime) cleanupLocked() {
 	rt.programID = 0
 	rt.rulesMapCapacity = 0
 	rt.flowsMapCapacity = 0
+	rt.lastReconcileMode = ""
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.invalidateRuntimeMapCountCacheLocked()
 	if rt.coll != nil {
 		rt.coll.Close()
 		rt.coll = nil
@@ -537,6 +545,8 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
 		rt.flowsMapCapacity = int(flowsMap.MaxEntries())
 	}
+	rt.lastReconcileMode = "cleared"
+	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.stateLog.Logf("xdp dataplane reconcile: drained active rules, preserving flows for existing connections")
 	return nil
 }
@@ -574,22 +584,7 @@ func (rt *xdpKernelRuleRuntime) samePreparedRulesLocked(next []preparedXDPKernel
 }
 
 func (rt *xdpKernelRuleRuntime) attachmentsHealthyLocked(requiredIfIndices []int) bool {
-	if len(requiredIfIndices) > len(rt.attachments) {
-		return false
-	}
-	required := make(map[int]struct{}, len(requiredIfIndices))
-	for _, ifindex := range requiredIfIndices {
-		required[ifindex] = struct{}{}
-	}
-	for _, att := range rt.attachments {
-		if _, ok := required[att.ifindex]; !ok {
-			return false
-		}
-		if !xdpAttachmentExists(att, rt.programID) {
-			return false
-		}
-	}
-	return true
+	return xdpAttachmentsHealthy(requiredIfIndices, rt.attachments, rt.programID)
 }
 
 func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Program, oldAttachments []xdpAttachment) (xdpAttachment, error) {

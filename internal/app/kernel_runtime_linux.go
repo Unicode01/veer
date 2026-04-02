@@ -263,9 +263,11 @@ type linuxKernelRuleRuntime struct {
 	attachments        []kernelAttachment
 	preparedRules      []preparedKernelRule
 	lastSkipLog        map[string]struct{}
+	lastReconcileMode  string
 	stateLog           kernelStateLogger
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPruneState     kernelFlowPruneState
+	runtimeMapCounts   kernelRuntimeMapCountSnapshot
 	enableTrafficStats bool
 }
 
@@ -355,6 +357,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		return results, nil
 	}
 	if rt.samePreparedRulesLocked(prepared, forwardIfRules, replyIfRules) {
+		rt.lastReconcileMode = "steady"
 		rt.stateLog.Logf("kernel dataplane reconcile: entry set unchanged, keeping %d active kernel entry(s)", len(prepared))
 		for _, rule := range rules {
 			if current, ok := results[rule.ID]; ok && current.Error != "" {
@@ -624,6 +627,8 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	rt.flowsMapCapacity = actualCapacities.Flows
 	rt.natMapCapacity = actualCapacities.NATPorts
 	rt.flowPruneState.reset()
+	rt.lastReconcileMode = "rebuild"
+	rt.invalidateRuntimeMapCountCacheLocked()
 	return results, nil
 }
 
@@ -650,6 +655,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		return err
 	}
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
+	rt.invalidateRuntimeMapCountCacheLocked()
 	return nil
 }
 
@@ -782,8 +788,10 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.rulesMapCapacity = 0
 	rt.flowsMapCapacity = 0
 	rt.natMapCapacity = 0
+	rt.lastReconcileMode = ""
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.invalidateRuntimeMapCountCacheLocked()
 	if rt.coll != nil {
 		rt.coll.Close()
 		rt.coll = nil
@@ -1039,6 +1047,8 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.rulesMapCapacity = capacities.Rules
 	rt.flowsMapCapacity = capacities.Flows
 	rt.natMapCapacity = capacities.NATPorts
+	rt.lastReconcileMode = "cleared"
+	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.stateLog.Logf("kernel dataplane reconcile: drained active rules, preserving flows for existing connections")
 	return nil
 }
@@ -1118,6 +1128,8 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	rt.flowsMapCapacity = actualCapacities.Flows
 	rt.natMapCapacity = actualCapacities.NATPorts
 	rt.flowPruneState.reset()
+	rt.lastReconcileMode = "in_place"
+	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.stateLog.Logf(
 		"kernel dataplane reconcile: updated %d active kernel entry(s) in-place (upsert=%d delete=%d attach=%d detach=%d preserve=%d)",
 		len(prepared),
@@ -1471,32 +1483,7 @@ func sortPreparedKernelRules(items []preparedKernelRule) {
 }
 
 func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(forwardIfRules map[int][]int64, replyIfRules map[int][]int64) bool {
-	expected := make([]kernelAttachmentKey, 0, len(forwardIfRules)+len(replyIfRules))
-	for ifindex := range forwardIfRules {
-		expected = append(expected, kernelAttachmentKey{
-			linkIndex: ifindex,
-			parent:    netlink.HANDLE_MIN_INGRESS,
-			priority:  kernelForwardFilterPrio,
-			handle:    netlink.MakeHandle(0, kernelForwardFilterHandle),
-		})
-	}
-	for ifindex := range replyIfRules {
-		expected = append(expected, kernelAttachmentKey{
-			linkIndex: ifindex,
-			parent:    netlink.HANDLE_MIN_INGRESS,
-			priority:  kernelReplyFilterPrio,
-			handle:    netlink.MakeHandle(0, kernelReplyFilterHandle),
-		})
-	}
-	if len(expected) > len(rt.attachments) {
-		return false
-	}
-	for _, key := range expected {
-		if !kernelAttachmentExists(key) {
-			return false
-		}
-	}
-	return true
+	return kernelAttachmentsHealthy(forwardIfRules, replyIfRules, rt.attachments)
 }
 
 func kernelAttachmentExists(key kernelAttachmentKey) bool {

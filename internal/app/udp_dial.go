@@ -55,5 +55,22 @@ func dialOutboundUDP(targetAddr *net.UDPAddr, outIface, sourceIP string) (*net.U
 	if err != nil {
 		return nil, err
 	}
-	return conn.(*net.UDPConn), nil
+	udpConn := conn.(*net.UDPConn)
+	_ = configureUDPConnBuffers(udpConn)
+	return udpConn, nil
+}
+
+func configureUDPConnBuffers(conn *net.UDPConn) error {
+	if conn == nil {
+		return nil
+	}
+
+	var firstErr error
+	if err := conn.SetReadBuffer(udpSocketBufferSize); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := conn.SetWriteBuffer(udpSocketBufferSize); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }

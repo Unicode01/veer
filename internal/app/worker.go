@@ -136,6 +136,65 @@ func writeAllCounting(w io.Writer, data []byte, count *int64) error {
 	return nil
 }
 
+type countingConn struct {
+	net.Conn
+	count *int64
+}
+
+func (cc countingConn) Write(p []byte) (int, error) {
+	n, err := cc.Conn.Write(p)
+	if cc.count != nil && n > 0 {
+		atomic.AddInt64(cc.count, int64(n))
+	}
+	return n, err
+}
+
+func (cc countingConn) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := cc.Conn.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(r)
+		if cc.count != nil && n > 0 {
+			atomic.AddInt64(cc.count, n)
+		}
+		return n, err
+	}
+
+	buf := getTCPProxyBuffer()
+	defer putTCPProxyBuffer(buf)
+	return copyCountingBuffer(cc.Conn, r, buf, cc.count)
+}
+
+func copyCountingBuffer(dst io.Writer, src io.Reader, buf []byte, count *int64) (int64, error) {
+	var written int64
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			remaining := buf[:nr]
+			for len(remaining) > 0 {
+				nw, ew := dst.Write(remaining)
+				if nw > 0 {
+					if count != nil {
+						atomic.AddInt64(count, int64(nw))
+					}
+					written += int64(nw)
+					remaining = remaining[nw:]
+				}
+				if ew != nil {
+					return written, ew
+				}
+				if nw <= 0 {
+					return written, io.ErrShortWrite
+				}
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				return written, nil
+			}
+			return written, er
+		}
+	}
+}
+
 func closeWriteIfPossible(conn net.Conn) {
 	type closeWriter interface {
 		CloseWrite() error
@@ -155,13 +214,13 @@ func proxyTCPBidirectional(dst net.Conn, src net.Conn, srcReader io.Reader, inCo
 	done := make(chan struct{}, 2)
 
 	go func() {
-		_, _ = io.Copy(countingWriter{w: dst, count: inCounter}, srcReader)
+		_, _ = io.Copy(countingConn{Conn: dst, count: inCounter}, srcReader)
 		closeWriteIfPossible(dst)
 		done <- struct{}{}
 	}()
 
 	go func() {
-		_, _ = io.Copy(countingWriter{w: src, count: outCounter}, dst)
+		_, _ = io.Copy(countingConn{Conn: src, count: outCounter}, dst)
 		closeWriteIfPossible(src)
 		done <- struct{}{}
 	}()
@@ -279,6 +338,18 @@ func snapshotRuleStatsMap(statsMap map[int64]*ruleStats) map[int64]*ruleStats {
 		out[id] = st
 	}
 	return out
+}
+
+func ruleStatsMapHasActivity(statsMap map[int64]*ruleStats) bool {
+	for _, st := range statsMap {
+		if st == nil {
+			continue
+		}
+		if atomic.LoadInt64(&st.activeConns) > 0 || atomic.LoadInt64(&st.natTableSize) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func buildRuleConfigMap(rules []Rule) map[int64]Rule {
@@ -454,27 +525,36 @@ func runWorker(workerIndex int, sockPath string) {
 	}
 
 	go func() {
-		speedTicker := time.NewTicker(1 * time.Second)
-		sendTicker := time.NewTicker(2 * time.Second)
-		defer speedTicker.Stop()
-		defer sendTicker.Stop()
+		speedTimer := time.NewTimer(workerStatsIdleUpdateInterval)
+		sendTimer := time.NewTimer(workerStatsIdleSendInterval)
+		defer stopTimer(speedTimer)
+		defer stopTimer(sendTimer)
 		for {
 			select {
-			case <-speedTicker.C:
+			case <-speedTimer.C:
 				stateMu.Lock()
 				statsSnapshot := snapshotRuleStatsMap(currentStats)
+				active := ruleStatsMapHasActivity(currentStats)
 				stateMu.Unlock()
 				for _, st := range statsSnapshot {
 					st.updateSpeed()
 				}
-			case <-sendTicker.C:
+				speedTimer.Reset(statsUpdateInterval(active))
+			case <-sendTimer.C:
 				stateMu.Lock()
 				statsSnapshot := snapshotRuleStatsMap(currentStats)
+				active := ruleStatsMapHasActivity(currentStats)
 				stateMu.Unlock()
-				reports := buildRuleStatsReports(statsSnapshot)
-				if len(reports) > 0 {
-					sendStats(reports)
+				connMu.Lock()
+				hasIPC := ipcConn != nil
+				connMu.Unlock()
+				if hasIPC {
+					reports := buildRuleStatsReports(statsSnapshot)
+					if len(reports) > 0 {
+						sendStats(reports)
+					}
 				}
+				sendTimer.Reset(statsSendInterval(active))
 			}
 		}
 	}()
@@ -797,6 +877,7 @@ func listenUDP(ctx context.Context, rule *Rule) (*net.UDPConn, error) {
 		udpConn.Close()
 		return nil, fmt.Errorf("udp listen %s enable packet info: %w", addr, err)
 	}
+	_ = configureUDPConnBuffers(udpConn)
 	return udpConn, nil
 }
 
@@ -813,7 +894,9 @@ func dialTransparentUDP(localIP net.IP, outIface string, targetAddr *net.UDPAddr
 	if err != nil {
 		return nil, err
 	}
-	return conn.(*net.UDPConn), nil
+	udpConn := conn.(*net.UDPConn)
+	_ = configureUDPConnBuffers(udpConn)
+	return udpConn, nil
 }
 
 func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) error {
@@ -855,7 +938,7 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 		return err
 	}
 
-	buf := make([]byte, 65535)
+	buf := make([]byte, udpPacketBufferSize)
 	oobBuf := make([]byte, udpReplyPacketInfoBufferSize())
 	for {
 		n, srcAddr, replyInfo, err := readUDPWithReplyInfo(pc, buf, oobBuf)
@@ -891,6 +974,11 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 		key := udpReplyKey(srcAddr, replyInfo)
 		mu.Lock()
 		entry, exists := natTable[key]
+		if exists {
+			entry.lastActive = now
+		}
+		mu.Unlock()
+
 		if !exists {
 			var outConn *net.UDPConn
 			if rule.Transparent {
@@ -899,51 +987,63 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 				outConn, err = dialOutboundUDP(targetAddr, rule.OutInterface, rule.OutSourceIP)
 			}
 			if err != nil {
-				mu.Unlock()
 				if st != nil {
 					atomic.AddInt64(&st.rejectedConns, 1)
 				}
 				log.Printf("udp dial: %v", err)
 				continue
 			}
-			entry = &natEntry{conn: outConn, lastActive: now}
-			natTable[key] = entry
-			if st != nil {
-				atomic.AddInt64(&st.totalConns, 1)
-				atomic.AddInt64(&st.natTableSize, 1)
-			}
 
-			go func(src *net.UDPAddr, reply udpReplyInfo, out *net.UDPConn, natKey string) {
-				retBuf := make([]byte, 65535)
-				for {
-					out.SetReadDeadline(time.Now().Add(udpNatIdleTimeout))
-					rn, err := out.Read(retBuf)
-					if err != nil {
-						mu.Lock()
-						removeEntryLocked(natKey)
-						mu.Unlock()
-						return
-					}
-					if st != nil && rn > 0 {
-						atomic.AddInt64(&st.bytesOut, int64(rn))
-					}
-					if _, err := writeUDPWithReplyInfo(pc, retBuf[:rn], src, reply); err != nil {
-						log.Printf("rule %d: udp reply write: %v", rule.ID, err)
-						mu.Lock()
-						removeEntryLocked(natKey)
-						mu.Unlock()
-						return
-					}
-					mu.Lock()
-					if e, ok := natTable[natKey]; ok {
-						e.lastActive = time.Now()
-					}
-					mu.Unlock()
+			inserted := false
+			mu.Lock()
+			entry, exists = natTable[key]
+			if exists {
+				entry.lastActive = now
+			} else {
+				entry = &natEntry{conn: outConn, lastActive: now}
+				natTable[key] = entry
+				inserted = true
+				if st != nil {
+					atomic.AddInt64(&st.totalConns, 1)
+					atomic.AddInt64(&st.natTableSize, 1)
 				}
-			}(srcAddr, replyInfo, outConn, key)
+			}
+			mu.Unlock()
+
+			if inserted {
+				go func(src *net.UDPAddr, reply udpReplyInfo, out *net.UDPConn, natKey string) {
+					retBuf := getUDPPacketBuffer()
+					defer putUDPPacketBuffer(retBuf)
+					for {
+						out.SetReadDeadline(time.Now().Add(udpNatIdleTimeout))
+						rn, err := out.Read(retBuf)
+						if err != nil {
+							mu.Lock()
+							removeEntryLocked(natKey)
+							mu.Unlock()
+							return
+						}
+						if st != nil && rn > 0 {
+							atomic.AddInt64(&st.bytesOut, int64(rn))
+						}
+						if _, err := writeUDPWithReplyInfo(pc, retBuf[:rn], src, reply); err != nil {
+							log.Printf("rule %d: udp reply write: %v", rule.ID, err)
+							mu.Lock()
+							removeEntryLocked(natKey)
+							mu.Unlock()
+							return
+						}
+						mu.Lock()
+						if e, ok := natTable[natKey]; ok {
+							e.lastActive = time.Now()
+						}
+						mu.Unlock()
+					}
+				}(srcAddr, replyInfo, outConn, key)
+			} else {
+				outConn.Close()
+			}
 		}
-		entry.lastActive = now
-		mu.Unlock()
 
 		if _, err := entry.conn.Write(buf[:n]); err != nil {
 			if st != nil {

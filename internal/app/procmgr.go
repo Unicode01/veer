@@ -50,8 +50,10 @@ const (
 
 	ruleRetryBaseDelay           = 1 * time.Second
 	ruleRetryMaxDelay            = 1 * time.Minute
+	redistributeRetryDelay       = 250 * time.Millisecond
 	kernelStatsRefreshInterval   = 5 * time.Second
 	kernelStatsDemandWindow      = 15 * time.Second
+	kernelStatsSnapshotShareTTL  = 1 * time.Second
 	kernelMaintenanceInterval    = 10 * time.Second
 	kernelFallbackRetryInterval  = 30 * time.Second
 	kernelFallbackRetryLogEvery  = 10 * time.Minute
@@ -113,12 +115,17 @@ type ProcessManager struct {
 	kernelFlowOwners       map[uint32]kernelCandidateOwner
 	kernelRuleStats        map[int64]RuleStatsReport
 	kernelRangeStats       map[int64]RangeStatsReport
+	kernelStatsSnapshot    kernelRuleStatsSnapshot
 	kernelStatsAt          time.Time
+	kernelStatsSnapshotAt  time.Time
 	kernelStatsDemandAt    time.Time
 	kernelMaintenanceAt    time.Time
 	kernelMaintenanceEvery time.Duration
 	kernelRetryAt          time.Time
 	kernelRetryLogAt       time.Time
+	redistributeWake       chan struct{}
+	redistributePending    bool
+	redistributeDueAt      time.Time
 	lastRulePlanLog        map[int64]string
 	lastRangePlanLog       map[int64]string
 	lastPlannerSummary     string
@@ -157,6 +164,8 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		kernelFlowOwners:       make(map[uint32]kernelCandidateOwner),
 		kernelRuleStats:        make(map[int64]RuleStatsReport),
 		kernelRangeStats:       make(map[int64]RangeStatsReport),
+		kernelStatsSnapshot:    emptyKernelRuleStatsSnapshot(),
+		redistributeWake:       make(chan struct{}, 1),
 		lastRulePlanLog:        make(map[int64]string),
 		lastRangePlanLog:       make(map[int64]string),
 		kernelMaintenanceEvery: configuredKernelMaintenanceInterval(),
@@ -172,6 +181,7 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 
 	go pm.monitorLoop()
+	go pm.redistributeLoop()
 
 	return pm, nil
 }
@@ -543,7 +553,9 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.kernelRangeEngines = kernelAppliedRangeEngines
 	pm.kernelFlowOwners = kernelFlowOwners
 	pm.kernelRuleStats, pm.kernelRangeStats = pm.buildEmptyKernelStatsLocked()
+	pm.kernelStatsSnapshot = emptyKernelRuleStatsSnapshot()
 	pm.kernelStatsAt = time.Time{}
+	pm.kernelStatsSnapshotAt = time.Time{}
 	pm.mu.Unlock()
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
@@ -557,6 +569,88 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.applyRangeAssignments(rangeAssignments)
 	if pm.kernelRuntime != nil {
 		pm.refreshKernelStatsCache()
+	}
+}
+
+func (pm *ProcessManager) requestRedistributeWorkers(delay time.Duration) {
+	if pm == nil {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	dueAt := time.Now().Add(delay)
+
+	pm.mu.Lock()
+	if !pm.redistributePending || dueAt.Before(pm.redistributeDueAt) {
+		pm.redistributeDueAt = dueAt
+	}
+	pm.redistributePending = true
+	wake := pm.redistributeWake
+	pm.mu.Unlock()
+
+	if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (pm *ProcessManager) redistributeLoop() {
+	var timer *time.Timer
+	for {
+		pm.mu.Lock()
+		pending := pm.redistributePending
+		dueAt := pm.redistributeDueAt
+		wake := pm.redistributeWake
+		pm.mu.Unlock()
+
+		if !pending {
+			if timer != nil {
+				stopTimer(timer)
+				timer = nil
+			}
+			if wake == nil {
+				return
+			}
+			if _, ok := <-wake; !ok {
+				return
+			}
+			continue
+		}
+
+		if wait := time.Until(dueAt); wait > 0 {
+			if timer == nil {
+				timer = time.NewTimer(wait)
+			} else {
+				resetTimer(timer, wait)
+			}
+			select {
+			case _, ok := <-wake:
+				if !ok {
+					stopTimer(timer)
+					return
+				}
+				continue
+			case <-timer.C:
+			}
+		}
+
+		pm.mu.Lock()
+		if !pm.redistributePending {
+			pm.mu.Unlock()
+			continue
+		}
+		if !pm.redistributeDueAt.IsZero() && time.Now().Before(pm.redistributeDueAt) {
+			pm.mu.Unlock()
+			continue
+		}
+		pm.redistributePending = false
+		pm.redistributeDueAt = time.Time{}
+		pm.mu.Unlock()
+
+		pm.redistributeWorkers()
 	}
 }
 
@@ -2239,7 +2333,8 @@ func (pm *ProcessManager) collectCurrentConns(ruleProtocols map[int64]string, ra
 		return ruleResult, rangeResult, siteResult, nil
 	}
 
-	snapshot, err := runtime.SnapshotStats()
+	_ = runtime
+	snapshot, _, err := pm.snapshotKernelStatsShared(time.Time{})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -2425,6 +2520,43 @@ func (pm *ProcessManager) refreshKernelStatsCacheIfNeeded() {
 	}
 }
 
+func (pm *ProcessManager) snapshotKernelStatsShared(now time.Time) (kernelRuleStatsSnapshot, time.Time, error) {
+	if pm == nil {
+		if now.IsZero() {
+			now = time.Now()
+		}
+		return emptyKernelRuleStatsSnapshot(), now, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	pm.mu.Lock()
+	if pm.kernelRuntime == nil {
+		pm.mu.Unlock()
+		return emptyKernelRuleStatsSnapshot(), now, nil
+	}
+	if !pm.kernelStatsSnapshotAt.IsZero() && now.Sub(pm.kernelStatsSnapshotAt) < kernelStatsSnapshotShareTTL {
+		snapshot := pm.kernelStatsSnapshot
+		sampledAt := pm.kernelStatsSnapshotAt
+		pm.mu.Unlock()
+		return snapshot, sampledAt, nil
+	}
+	runtime := pm.kernelRuntime
+	pm.mu.Unlock()
+
+	snapshot, err := runtime.SnapshotStats()
+	if err != nil {
+		return emptyKernelRuleStatsSnapshot(), now, err
+	}
+
+	pm.mu.Lock()
+	pm.kernelStatsSnapshot = snapshot
+	pm.kernelStatsSnapshotAt = now
+	pm.mu.Unlock()
+	return snapshot, now, nil
+}
+
 func kernelTrafficSpeed(nextBytes int64, prevBytes int64, elapsed time.Duration) int64 {
 	if elapsed <= 0 || nextBytes <= prevBytes {
 		return 0
@@ -2461,7 +2593,9 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 		pm.mu.Lock()
 		pm.kernelRuleStats = make(map[int64]RuleStatsReport)
 		pm.kernelRangeStats = make(map[int64]RangeStatsReport)
+		pm.kernelStatsSnapshot = emptyKernelRuleStatsSnapshot()
 		pm.kernelStatsAt = time.Now()
+		pm.kernelStatsSnapshotAt = time.Time{}
 		pm.mu.Unlock()
 		return
 	}
@@ -2478,7 +2612,7 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 	ruleStats, rangeStats := pm.buildEmptyKernelStatsLocked()
 	pm.mu.Unlock()
 
-	snapshot, err := pm.kernelRuntime.SnapshotStats()
+	snapshot, sampledAt, err := pm.snapshotKernelStatsShared(time.Time{})
 	if err != nil {
 		log.Printf("kernel dataplane stats snapshot failed: %v", err)
 		return
@@ -2516,7 +2650,7 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 		}
 	}
 
-	now := time.Now()
+	now := sampledAt
 	if trafficStatsEnabled && !prevStatsAt.IsZero() {
 		elapsed := now.Sub(prevStatsAt)
 		applyKernelRuleTrafficSpeeds(ruleStats, prevRuleStats, elapsed)
@@ -2763,7 +2897,7 @@ func (pm *ProcessManager) monitorLoop() {
 			log.Print(retryKernelLogLine)
 		}
 		if retryKernelFallbacks {
-			pm.redistributeWorkers()
+			pm.requestRedistributeWorkers(redistributeRetryDelay)
 		}
 
 		for _, idx := range restartRuleIdx {

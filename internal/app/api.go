@@ -197,6 +197,13 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 		}
 		handleListWorkers(w, r, db, pm)
 	}))
+	mux.HandleFunc("/api/kernel/runtime", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleKernelRuntime(w, r, pm)
+	}))
 	mux.HandleFunc("/api/rules/stats", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1976,6 +1983,10 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		Workers:    out,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func handleKernelRuntime(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
+	writeJSON(w, http.StatusOK, pm.snapshotKernelRuntime())
 }
 
 func handleAddRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {

@@ -77,22 +77,33 @@ func runSharedProxy(sockPath string) {
 
 	// Periodic stats reporting
 	go func() {
-		speedTicker := time.NewTicker(1 * time.Second)
-		sendTicker := time.NewTicker(2 * time.Second)
-		defer speedTicker.Stop()
-		defer sendTicker.Stop()
+		speedTimer := time.NewTimer(workerStatsIdleUpdateInterval)
+		sendTimer := time.NewTimer(workerStatsIdleSendInterval)
+		defer stopTimer(speedTimer)
+		defer stopTimer(sendTimer)
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-speedTicker.C:
+			case <-speedTimer.C:
 				sp.mu.RLock()
+				active := siteStatsMapHasActivity(sp.domainStats)
 				for _, ss := range sp.domainStats {
 					ss.updateSpeed()
 				}
 				sp.mu.RUnlock()
-			case <-sendTicker.C:
-				sendSiteStats()
+				speedTimer.Reset(statsUpdateInterval(active))
+			case <-sendTimer.C:
+				sp.mu.RLock()
+				active := siteStatsMapHasActivity(sp.domainStats)
+				sp.mu.RUnlock()
+				connMu.Lock()
+				hasIPC := ipcConn != nil
+				connMu.Unlock()
+				if hasIPC {
+					sendSiteStats()
+				}
+				sendTimer.Reset(statsSendInterval(active))
 			}
 		}
 	}()
@@ -214,6 +225,15 @@ func (ss *siteStats) updateSpeed() {
 	ss.lastBytesOut = curOut
 	atomic.StoreInt64(&ss.speedIn, sIn)
 	atomic.StoreInt64(&ss.speedOut, sOut)
+}
+
+func siteStatsMapHasActivity(statsMap map[string]*siteStats) bool {
+	for _, ss := range statsMap {
+		if ss != nil && atomic.LoadInt64(&ss.activeConns) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 type sharedProxyEngine struct {

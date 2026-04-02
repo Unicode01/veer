@@ -8,7 +8,7 @@ const (
 )
 
 func defaultKernelEngineOrder() []string {
-	return []string{kernelEngineXDP, kernelEngineTC}
+	return []string{kernelEngineTC}
 }
 
 func normalizeKernelEngineOrder(values []string) []string {

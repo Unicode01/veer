@@ -26,6 +26,7 @@ td {
 .table-scroll {
     overflow-x: auto;
     border-radius: 8px;
+    max-width: 100%;
 }
 
 .table-toolbar {
@@ -262,6 +263,362 @@ tr.row-pending td {
     border-color: var(--success-border);
 }
 
+.kernel-runtime-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin: 0 0 14px;
+    align-items: start;
+}
+
+.kernel-runtime-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-muted);
+}
+
+.kernel-runtime-label {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.kernel-runtime-value {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    min-height: 0;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--text);
+}
+
+.kernel-runtime-sub {
+    margin-top: 0;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-soft);
+}
+
+.kernel-runtime-note {
+    grid-column: 1 / -1;
+    margin-top: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--warning-border);
+    border-radius: 10px;
+    background: var(--warning-bg);
+    color: var(--warning-text);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.kernel-runtime-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.kernel-runtime-table th,
+.kernel-runtime-table td {
+    text-align: left;
+}
+
+.kernel-runtime-table td {
+    vertical-align: top;
+}
+
+.kernel-runtime-maps {
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.kernel-runtime-maps {
+    min-width: 0;
+}
+
+.kernel-runtime-map-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+}
+
+.kernel-runtime-map-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 24px;
+    padding: 0 8px;
+    max-width: 100%;
+    font: inherit;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-muted);
+    color: var(--text);
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.kernel-runtime-map-badge:hover,
+.kernel-runtime-map-badge:focus {
+    border-color: var(--primary);
+}
+
+.kernel-runtime-map-badge.is-empty {
+    background: var(--neutral-bg);
+    border-color: var(--neutral-border);
+    color: var(--neutral-text);
+}
+
+.kernel-runtime-map-badge.is-low {
+    background: var(--success-bg);
+    border-color: var(--success-border);
+    color: var(--success-text);
+}
+
+.kernel-runtime-map-badge.is-medium {
+    background: var(--warning-bg);
+    border-color: var(--warning-border);
+    color: var(--warning-text);
+}
+
+.kernel-runtime-map-badge.is-high {
+    background: var(--danger-bg);
+    border-color: var(--danger-border);
+    color: var(--danger-text);
+}
+
+.kernel-runtime-map-badge-label {
+    font-size: 12px;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.kernel-runtime-map-badge-value {
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+}
+
+.kernel-runtime-tooltip-title {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.kernel-runtime-tooltip-primary {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.4;
+}
+
+.kernel-runtime-tooltip-meta {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+.kernel-runtime-detail-cell {
+    white-space: nowrap;
+    overflow: visible;
+}
+
+.kernel-runtime-detail-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-muted);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.kernel-runtime-detail-trigger:hover,
+.kernel-runtime-detail-trigger:focus {
+    border-color: var(--primary);
+    background: var(--primary-soft);
+    color: var(--primary);
+}
+
+.kernel-runtime-floating-tooltip {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 2200;
+    max-width: min(360px, calc(100vw - 24px));
+    padding: 10px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    background: var(--surface-solid);
+    box-shadow: var(--shadow-soft);
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(4px);
+    transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s ease;
+}
+
+.kernel-runtime-floating-tooltip.is-visible {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+#kernelRuntimeTable,
+#ruleStatsTable,
+#siteStatsTable,
+#rangeStatsTable {
+    width: 100%;
+}
+
+@media (min-width: 961px) {
+    #kernelRuntimeTable {
+        table-layout: fixed;
+    }
+
+    #kernelRuntimeTable th,
+    #kernelRuntimeTable td,
+    #ruleStatsTable th,
+    #ruleStatsTable td,
+    #siteStatsTable th,
+    #siteStatsTable td,
+    #rangeStatsTable th,
+    #rangeStatsTable td {
+        max-width: 0;
+    }
+
+    #kernelRuntimeTable th,
+    #ruleStatsTable th,
+    #siteStatsTable th,
+    #rangeStatsTable th {
+        white-space: normal;
+        line-height: 1.35;
+    }
+
+    #kernelRuntimeTable td,
+    #ruleStatsTable td,
+    #siteStatsTable td,
+    #rangeStatsTable td {
+        line-height: 1.4;
+    }
+
+    #kernelRuntimeTable th,
+    #kernelRuntimeTable td {
+        padding: 11px 12px;
+    }
+
+    #kernelRuntimeTable th:nth-child(1),
+    #kernelRuntimeTable td:nth-child(1) {
+        width: 80px;
+    }
+
+    #kernelRuntimeTable th:nth-child(2),
+    #kernelRuntimeTable td:nth-child(2),
+    #kernelRuntimeTable th:nth-child(3),
+    #kernelRuntimeTable td:nth-child(3),
+    #kernelRuntimeTable th:nth-child(4),
+    #kernelRuntimeTable td:nth-child(4),
+    #kernelRuntimeTable th:nth-child(5),
+    #kernelRuntimeTable td:nth-child(5),
+    #kernelRuntimeTable th:nth-child(8),
+    #kernelRuntimeTable td:nth-child(8),
+    #kernelRuntimeTable th:nth-child(9),
+    #kernelRuntimeTable td:nth-child(9) {
+        width: 96px;
+    }
+
+    #kernelRuntimeTable th:nth-child(6),
+    #kernelRuntimeTable td:nth-child(6) {
+        width: 118px;
+    }
+
+    #kernelRuntimeTable th:nth-child(7),
+    #kernelRuntimeTable td:nth-child(7) {
+        width: 28%;
+    }
+
+    #kernelRuntimeTable th:nth-child(10),
+    #kernelRuntimeTable td:nth-child(10) {
+        width: 92px;
+    }
+
+    #ruleStatsTable th,
+    #ruleStatsTable td,
+    #siteStatsTable th,
+    #siteStatsTable td,
+    #rangeStatsTable th,
+    #rangeStatsTable td {
+        padding: 10px 12px;
+        max-width: none;
+    }
+
+    #ruleStatsTable th:nth-child(1),
+    #ruleStatsTable td:nth-child(1),
+    #siteStatsTable th:nth-child(1),
+    #siteStatsTable td:nth-child(1),
+    #rangeStatsTable th:nth-child(1),
+    #rangeStatsTable td:nth-child(1) {
+        width: 1%;
+        white-space: nowrap;
+    }
+
+    #ruleStatsTable th:nth-child(2),
+    #ruleStatsTable td:nth-child(2),
+    #siteStatsTable th:nth-child(2),
+    #siteStatsTable td:nth-child(2),
+    #rangeStatsTable th:nth-child(2),
+    #rangeStatsTable td:nth-child(2) {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    #ruleStatsTable th:nth-child(n+3),
+    #siteStatsTable th:nth-child(n+3),
+    #rangeStatsTable th:nth-child(n+3) {
+        width: 1%;
+        white-space: nowrap;
+    }
+
+    #ruleStatsTable td:nth-child(n+3),
+    #siteStatsTable td:nth-child(n+3),
+    #rangeStatsTable td:nth-child(n+3) {
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+    }
+}
+
 .stat-muted,
 .cell-empty,
 .worker-empty {
@@ -494,5 +851,19 @@ tr.row-pending td {
 
     .table-pagination-actions {
         justify-content: space-between;
+    }
+
+    .kernel-runtime-summary {
+        grid-template-columns: 1fr;
+    }
+
+    .kernel-runtime-card {
+        padding: 10px 12px;
+    }
+}
+
+@media (min-width: 961px) {
+    .kernel-runtime-summary {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
     }
 }

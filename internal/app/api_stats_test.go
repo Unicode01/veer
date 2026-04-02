@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -83,5 +84,76 @@ func TestHandleListRangeStatsRejectsInvalidSortKey(t *testing.T) {
 	handleListRangeStats(w, req, db, pm)
 	if w.Code != 400 {
 		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleKernelRuntimeIncludesFallbackSummary(t *testing.T) {
+	pm := &ProcessManager{
+		cfg: &Config{
+			DefaultEngine:     ruleEngineAuto,
+			KernelEngineOrder: []string{kernelEngineTC},
+			Experimental: map[string]bool{
+				experimentalFeatureKernelTraffic: true,
+			},
+		},
+		kernelRules:  map[int64]bool{101: true},
+		kernelRanges: map[int64]bool{202: true},
+		rulePlans: map[int64]ruleDataplanePlan{
+			1: {
+				KernelEligible:  true,
+				EffectiveEngine: ruleEngineUserspace,
+				FallbackReason:  `xdp: skip; tc: resolve outbound path on "vmbr1": no forwarding database entry matched the backend MAC`,
+			},
+			2: {
+				KernelEligible:  true,
+				EffectiveEngine: ruleEngineUserspace,
+				FallbackReason:  `xdp: skip; tc: verifier rejected program`,
+			},
+		},
+		rangePlans: map[int64]rangeDataplanePlan{
+			3: {
+				KernelEligible:  true,
+				EffectiveEngine: ruleEngineUserspace,
+				FallbackReason:  `xdp: xdp dataplane requires a learned IPv4 neighbor entry for 192.0.2.10 on "eno1"; tc: skipped`,
+			},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/kernel/runtime", nil)
+	w := httptest.NewRecorder()
+
+	handleKernelRuntime(w, req, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp KernelRuntimeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+
+	if resp.DefaultEngine != ruleEngineAuto {
+		t.Fatalf("default engine = %q, want %q", resp.DefaultEngine, ruleEngineAuto)
+	}
+	if !reflect.DeepEqual(resp.ConfiguredOrder, []string{kernelEngineTC}) {
+		t.Fatalf("configured order = %v, want %v", resp.ConfiguredOrder, []string{kernelEngineTC})
+	}
+	if !resp.TrafficStats {
+		t.Fatal("traffic_stats = false, want true")
+	}
+	if resp.ActiveRuleCount != 1 || resp.ActiveRangeCount != 1 {
+		t.Fatalf("active counts = rules:%d ranges:%d, want 1/1", resp.ActiveRuleCount, resp.ActiveRangeCount)
+	}
+	if resp.KernelFallbackRuleCount != 2 || resp.KernelFallbackRangeCount != 1 {
+		t.Fatalf("fallback counts = rules:%d ranges:%d, want 2/1", resp.KernelFallbackRuleCount, resp.KernelFallbackRangeCount)
+	}
+	if resp.TransientFallbackRuleCount != 1 || resp.TransientFallbackRangeCount != 1 {
+		t.Fatalf("transient fallback counts = rules:%d ranges:%d, want 1/1", resp.TransientFallbackRuleCount, resp.TransientFallbackRangeCount)
+	}
+	if !resp.RetryPending {
+		t.Fatal("retry_pending = false, want true")
+	}
+	if resp.TransientFallbackSummary == "" {
+		t.Fatal("transient_fallback_summary = empty, want non-empty")
 	}
 }

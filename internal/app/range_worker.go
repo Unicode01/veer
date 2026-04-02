@@ -218,27 +218,36 @@ func runRangeWorker(workerIndex int, sockPath string) {
 	}
 
 	go func() {
-		speedTicker := time.NewTicker(1 * time.Second)
-		sendTicker := time.NewTicker(2 * time.Second)
-		defer speedTicker.Stop()
-		defer sendTicker.Stop()
+		speedTimer := time.NewTimer(workerStatsIdleUpdateInterval)
+		sendTimer := time.NewTimer(workerStatsIdleSendInterval)
+		defer stopTimer(speedTimer)
+		defer stopTimer(sendTimer)
 		for {
 			select {
-			case <-speedTicker.C:
+			case <-speedTimer.C:
 				stateMu.Lock()
 				statsSnapshot := snapshotRuleStatsMap(currentStats)
+				active := ruleStatsMapHasActivity(currentStats)
 				stateMu.Unlock()
 				for _, st := range statsSnapshot {
 					st.updateSpeed()
 				}
-			case <-sendTicker.C:
+				speedTimer.Reset(statsUpdateInterval(active))
+			case <-sendTimer.C:
 				stateMu.Lock()
 				statsSnapshot := snapshotRuleStatsMap(currentStats)
+				active := ruleStatsMapHasActivity(currentStats)
 				stateMu.Unlock()
-				reports := buildRangeStatsReports(statsSnapshot)
-				if len(reports) > 0 {
-					sendStats(reports)
+				connMu.Lock()
+				hasIPC := ipcConn != nil
+				connMu.Unlock()
+				if hasIPC {
+					reports := buildRangeStatsReports(statsSnapshot)
+					if len(reports) > 0 {
+						sendStats(reports)
+					}
 				}
+				sendTimer.Reset(statsSendInterval(active))
 			}
 		}
 	}()
@@ -517,6 +526,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 		bindCh <- err
 		return
 	}
+	_ = configureUDPConnBuffers(udpConn)
 	if !closeSet.Add(udpConn) {
 		bindCh <- context.Canceled
 		return
@@ -566,7 +576,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 		return
 	}
 
-	buf := make([]byte, 65535)
+	buf := make([]byte, udpPacketBufferSize)
 	oobBuf := make([]byte, udpReplyPacketInfoBufferSize())
 	for {
 		n, srcAddr, replyInfo, err := readUDPWithReplyInfo(udpConn, buf, oobBuf)
@@ -605,6 +615,11 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 		key := udpReplyKey(srcAddr, replyInfo)
 		mu.Lock()
 		entry, exists := natTable[key]
+		if exists {
+			entry.lastActive = now
+		}
+		mu.Unlock()
+
 		if !exists {
 			var outConn *net.UDPConn
 			if pr.Transparent {
@@ -613,51 +628,63 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 				outConn, err = dialOutboundUDP(targetAddr, pr.OutInterface, pr.OutSourceIP)
 			}
 			if err != nil {
-				mu.Unlock()
 				if st != nil {
 					atomic.AddInt64(&st.rejectedConns, 1)
 				}
 				log.Printf("range %d: udp dial port %d: %v", pr.ID, port, err)
 				continue
 			}
-			entry = &natEntry{conn: outConn, lastActive: now}
-			natTable[key] = entry
-			if st != nil {
-				atomic.AddInt64(&st.totalConns, 1)
-				atomic.AddInt64(&st.natTableSize, 1)
-			}
 
-			go func(src *net.UDPAddr, reply udpReplyInfo, out *net.UDPConn, natKey string) {
-				retBuf := make([]byte, 65535)
-				for {
-					out.SetReadDeadline(time.Now().Add(udpNatIdleTimeout))
-					rn, err := out.Read(retBuf)
-					if err != nil {
-						mu.Lock()
-						removeEntryLocked(natKey)
-						mu.Unlock()
-						return
-					}
-					if st != nil && rn > 0 {
-						atomic.AddInt64(&st.bytesOut, int64(rn))
-					}
-					if _, err := writeUDPWithReplyInfo(udpConn, retBuf[:rn], src, reply); err != nil {
-						log.Printf("range %d: udp reply write port %d: %v", pr.ID, port, err)
-						mu.Lock()
-						removeEntryLocked(natKey)
-						mu.Unlock()
-						return
-					}
-					mu.Lock()
-					if e, ok := natTable[natKey]; ok {
-						e.lastActive = time.Now()
-					}
-					mu.Unlock()
+			inserted := false
+			mu.Lock()
+			entry, exists = natTable[key]
+			if exists {
+				entry.lastActive = now
+			} else {
+				entry = &natEntry{conn: outConn, lastActive: now}
+				natTable[key] = entry
+				inserted = true
+				if st != nil {
+					atomic.AddInt64(&st.totalConns, 1)
+					atomic.AddInt64(&st.natTableSize, 1)
 				}
-			}(srcAddr, replyInfo, outConn, key)
+			}
+			mu.Unlock()
+
+			if inserted {
+				go func(src *net.UDPAddr, reply udpReplyInfo, out *net.UDPConn, natKey string) {
+					retBuf := getUDPPacketBuffer()
+					defer putUDPPacketBuffer(retBuf)
+					for {
+						out.SetReadDeadline(time.Now().Add(udpNatIdleTimeout))
+						rn, err := out.Read(retBuf)
+						if err != nil {
+							mu.Lock()
+							removeEntryLocked(natKey)
+							mu.Unlock()
+							return
+						}
+						if st != nil && rn > 0 {
+							atomic.AddInt64(&st.bytesOut, int64(rn))
+						}
+						if _, err := writeUDPWithReplyInfo(udpConn, retBuf[:rn], src, reply); err != nil {
+							log.Printf("range %d: udp reply write port %d: %v", pr.ID, port, err)
+							mu.Lock()
+							removeEntryLocked(natKey)
+							mu.Unlock()
+							return
+						}
+						mu.Lock()
+						if e, ok := natTable[natKey]; ok {
+							e.lastActive = time.Now()
+						}
+						mu.Unlock()
+					}
+				}(srcAddr, replyInfo, outConn, key)
+			} else {
+				outConn.Close()
+			}
 		}
-		entry.lastActive = now
-		mu.Unlock()
 
 		if _, err := entry.conn.Write(buf[:n]); err != nil {
 			if st != nil {

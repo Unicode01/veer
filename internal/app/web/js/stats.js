@@ -53,6 +53,288 @@
     }));
   }
 
+  function kernelStatePill(flag, trueKey, falseKey) {
+    return app.createNode('span', {
+      className: flag ? 'stat-pill active' : 'stat-pill',
+      text: app.t(flag ? trueKey : falseKey)
+    });
+  }
+
+  function kernelEngineBadge(name) {
+    const normalized = String(name || '').toLowerCase();
+    const badgeClass = normalized === 'xdp' ? 'badge-xdp' : normalized === 'tc' ? 'badge-tc' : 'badge-kernel';
+    return app.createBadgeNode(badgeClass, normalized || app.t('common.dash'));
+  }
+
+  function kernelDefaultEngineBadge(name) {
+    const normalized = String(name || '').toLowerCase();
+    switch (normalized) {
+      case 'kernel':
+        return app.createBadgeNode('badge-kernel', app.t('rule.engine.preference.kernel'));
+      case 'userspace':
+        return app.createBadgeNode('badge-userspace', app.t('rule.engine.preference.userspace'));
+      default:
+        return app.createBadgeNode('badge-disabled', app.t('rule.engine.preference.auto'));
+    }
+  }
+
+  function kernelRuntimeModeLabel(value) {
+    switch (value) {
+      case 'steady':
+      case 'in_place':
+      case 'rebuild':
+      case 'cleared':
+        return app.t('kernel.mode.' + value);
+      default:
+        return app.t('kernel.mode.unknown');
+    }
+  }
+
+  function kernelRuntimeMapPercent(entries, capacity) {
+    if (!(capacity > 0)) return 0;
+    return (entries / capacity) * 100;
+  }
+
+  function formatKernelRuntimePercent(percent) {
+    if (percent >= 99.95) return '100%';
+    const rounded = Math.round(percent * 10) / 10;
+    if (Math.abs(rounded - Math.round(rounded)) < 0.05) {
+      return String(Math.round(rounded)) + '%';
+    }
+    return rounded.toFixed(1) + '%';
+  }
+
+  function kernelRuntimeMapLevel(percent, capacity) {
+    if (!(capacity > 0)) return 'empty';
+    if (percent >= 80) return 'high';
+    if (percent >= 50) return 'medium';
+    return 'low';
+  }
+
+  function kernelRuntimeMapTooltipContent(item, percentText) {
+    return [
+      app.createNode('span', {
+        className: 'kernel-runtime-tooltip-title',
+        text: item.label
+      }),
+      app.createNode('span', {
+        className: 'kernel-runtime-tooltip-primary',
+        text: percentText
+      }),
+      app.createNode('span', {
+        className: 'kernel-runtime-tooltip-meta',
+        text: String(item.entries) + ' / ' + String(item.capacity)
+      })
+    ];
+  }
+
+  function bindKernelRuntimeTooltip(trigger, contentFactory) {
+    trigger.addEventListener('mouseenter', () => showKernelRuntimeTooltip(trigger, contentFactory(), false));
+    trigger.addEventListener('mouseleave', () => {
+      if (kernelRuntimeTooltipTrigger === trigger && !kernelRuntimeTooltipPinned) {
+        hideKernelRuntimeTooltip();
+      }
+    });
+    trigger.addEventListener('focus', () => showKernelRuntimeTooltip(trigger, contentFactory(), false));
+    trigger.addEventListener('blur', () => {
+      if (kernelRuntimeTooltipTrigger === trigger && !kernelRuntimeTooltipPinned) {
+        hideKernelRuntimeTooltip();
+      }
+    });
+    trigger.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (kernelRuntimeTooltipTrigger === trigger && kernelRuntimeTooltipPinned) {
+        hideKernelRuntimeTooltip();
+        return;
+      }
+      showKernelRuntimeTooltip(trigger, contentFactory(), true);
+    });
+  }
+
+  function kernelRuntimeMapsNode(engine) {
+    ensureKernelRuntimeTooltip();
+
+    const items = [
+      {
+        label: app.t('kernel.maps.rules'),
+        entries: engine.rules_map_entries || 0,
+        capacity: engine.rules_map_capacity || 0
+      },
+      {
+        label: app.t('kernel.maps.flows'),
+        entries: engine.flows_map_entries || 0,
+        capacity: engine.flows_map_capacity || 0
+      }
+    ];
+
+    if ((engine.nat_map_entries || 0) > 0 || (engine.nat_map_capacity || 0) > 0) {
+      items.push({
+        label: app.t('kernel.maps.nat'),
+        entries: engine.nat_map_entries || 0,
+        capacity: engine.nat_map_capacity || 0
+      });
+    }
+
+    const list = app.createNode('div', { className: 'kernel-runtime-map-list' });
+    items.forEach((item) => {
+      const percent = kernelRuntimeMapPercent(item.entries, item.capacity);
+      const percentText = formatKernelRuntimePercent(percent);
+      const badge = app.createNode('button', {
+        className: 'kernel-runtime-map-badge is-' + kernelRuntimeMapLevel(percent, item.capacity),
+        attrs: {
+          type: 'button',
+          'aria-describedby': 'kernelRuntimeFloatingTooltip',
+          'aria-expanded': 'false',
+          'aria-label': item.label + ' ' + percentText + ' (' + String(item.entries) + '/' + String(item.capacity) + ')'
+        },
+        children: [
+          app.createNode('span', {
+            className: 'kernel-runtime-map-badge-label',
+            text: item.label
+          }),
+          app.createNode('span', {
+            className: 'kernel-runtime-map-badge-value',
+            text: percentText
+          })
+        ]
+      });
+      bindKernelRuntimeTooltip(badge, () => kernelRuntimeMapTooltipContent(item, percentText));
+      list.appendChild(badge);
+    });
+    return list;
+  }
+
+  function kernelRuntimeSummaryCard(labelKey, value, subtext) {
+    const card = app.createNode('article', { className: 'kernel-runtime-card' });
+    card.appendChild(app.createNode('div', {
+      className: 'kernel-runtime-label',
+      text: app.t(labelKey)
+    }));
+
+    const valueNode = app.createNode('div', { className: 'kernel-runtime-value' });
+    app.appendNodeContent(valueNode, value);
+    card.appendChild(valueNode);
+
+    if (subtext) {
+      card.appendChild(app.createNode('div', {
+        className: 'kernel-runtime-sub',
+        text: subtext
+      }));
+    }
+    return card;
+  }
+
+  let kernelRuntimeTooltip = null;
+  let kernelRuntimeTooltipTrigger = null;
+  let kernelRuntimeTooltipPinned = false;
+
+  function ensureKernelRuntimeTooltip() {
+    if (kernelRuntimeTooltip) return kernelRuntimeTooltip;
+
+    kernelRuntimeTooltip = app.createNode('div', {
+      className: 'kernel-runtime-floating-tooltip',
+      attrs: {
+        id: 'kernelRuntimeFloatingTooltip',
+        role: 'tooltip',
+        hidden: true
+      }
+    });
+    document.body.appendChild(kernelRuntimeTooltip);
+
+    window.addEventListener('resize', hideKernelRuntimeTooltip);
+    document.addEventListener('scroll', hideKernelRuntimeTooltip, true);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideKernelRuntimeTooltip();
+    });
+    document.addEventListener('click', (e) => {
+      if (!kernelRuntimeTooltipTrigger) return;
+      if (kernelRuntimeTooltipTrigger.contains(e.target)) return;
+      hideKernelRuntimeTooltip();
+    });
+    document.addEventListener('focusin', (e) => {
+      if (!kernelRuntimeTooltipTrigger) return;
+      if (kernelRuntimeTooltipTrigger.contains(e.target)) return;
+      hideKernelRuntimeTooltip();
+    });
+
+    return kernelRuntimeTooltip;
+  }
+
+  function positionKernelRuntimeTooltip() {
+    if (!kernelRuntimeTooltip || !kernelRuntimeTooltipTrigger || kernelRuntimeTooltip.hidden) return;
+
+    const margin = 12;
+    const offset = 8;
+    const triggerRect = kernelRuntimeTooltipTrigger.getBoundingClientRect();
+
+    kernelRuntimeTooltip.style.left = '0px';
+    kernelRuntimeTooltip.style.top = '0px';
+
+    const tipRect = kernelRuntimeTooltip.getBoundingClientRect();
+    let left = triggerRect.left + ((triggerRect.width - tipRect.width) / 2);
+    left = Math.min(Math.max(left, margin), Math.max(margin, window.innerWidth - tipRect.width - margin));
+
+    let top = triggerRect.bottom + offset;
+    if (top + tipRect.height > window.innerHeight - margin) {
+      const aboveTop = triggerRect.top - tipRect.height - offset;
+      top = aboveTop >= margin ? aboveTop : Math.max(margin, window.innerHeight - tipRect.height - margin);
+    }
+
+    kernelRuntimeTooltip.style.left = Math.round(left) + 'px';
+    kernelRuntimeTooltip.style.top = Math.round(top) + 'px';
+  }
+
+  function hideKernelRuntimeTooltip() {
+    if (kernelRuntimeTooltipTrigger) {
+      kernelRuntimeTooltipTrigger.setAttribute('aria-expanded', 'false');
+    }
+    kernelRuntimeTooltipTrigger = null;
+    kernelRuntimeTooltipPinned = false;
+
+    if (!kernelRuntimeTooltip) return;
+    kernelRuntimeTooltip.classList.remove('is-visible');
+    kernelRuntimeTooltip.hidden = true;
+    app.clearNode(kernelRuntimeTooltip);
+  }
+
+  function showKernelRuntimeTooltip(trigger, content, pinned) {
+    const tooltip = ensureKernelRuntimeTooltip();
+    if (kernelRuntimeTooltipTrigger && kernelRuntimeTooltipTrigger !== trigger) {
+      kernelRuntimeTooltipTrigger.setAttribute('aria-expanded', 'false');
+    }
+
+    kernelRuntimeTooltipTrigger = trigger;
+    kernelRuntimeTooltipPinned = !!pinned;
+    app.clearNode(tooltip);
+    app.appendNodeContent(tooltip, content);
+    tooltip.hidden = false;
+    tooltip.classList.add('is-visible');
+    trigger.setAttribute('aria-expanded', 'true');
+    positionKernelRuntimeTooltip();
+  }
+
+  function kernelRuntimeDetailNode(detail) {
+    const text = String(detail || '').trim();
+    if (!text) return app.emptyCellNode('stat-muted');
+    ensureKernelRuntimeTooltip();
+
+    const button = app.createNode('button', {
+      className: 'kernel-runtime-detail-trigger',
+      text: app.t('kernel.engine.details'),
+      attrs: {
+        type: 'button',
+        'aria-label': text,
+        'aria-describedby': 'kernelRuntimeFloatingTooltip',
+        'aria-expanded': 'false'
+      }
+    });
+
+    bindKernelRuntimeTooltip(button, () => text);
+
+    return button;
+  }
+
   function applyCurrentConnsSnapshot(payload) {
     const next = {
       loaded: true,
@@ -76,6 +358,101 @@
     app.state.siteStats.data = rebuildCurrentConns('sites', app.state.siteStats.data, 'site_id');
     app.state.rangeStats.data = rebuildCurrentConns('ranges', app.state.rangeStats.data, 'range_id');
   }
+
+  app.renderKernelRuntime = function renderKernelRuntime() {
+    const el = app.el;
+    const data = app.state.kernelRuntime.data;
+    hideKernelRuntimeTooltip();
+    app.clearNode(el.kernelRuntimeSummary);
+    app.clearNode(el.kernelRuntimeBody);
+
+    if (!data) {
+      el.noKernelRuntime.style.display = 'block';
+      app.toggleTableVisibility('kernelRuntimeTable', false);
+      return;
+    }
+
+    const orderNode = app.createNode('div', { className: 'kernel-runtime-inline' });
+    const configuredOrder = Array.isArray(data.configured_order) ? data.configured_order : [];
+    if (configuredOrder.length) {
+      configuredOrder.forEach((name) => orderNode.appendChild(kernelEngineBadge(name)));
+    } else {
+      orderNode.appendChild(app.emptyCellNode('stat-muted'));
+    }
+
+    const summaryFragment = document.createDocumentFragment();
+    summaryFragment.appendChild(kernelRuntimeSummaryCard(
+      'kernel.summary.status',
+      kernelStatePill(!!data.available, 'kernel.available.yes', 'kernel.available.no'),
+      data.available ? '' : (data.available_reason || app.t('common.unavailable'))
+    ));
+    summaryFragment.appendChild(kernelRuntimeSummaryCard(
+      'kernel.summary.defaultEngine',
+      kernelDefaultEngineBadge(data.default_engine)
+    ));
+    summaryFragment.appendChild(kernelRuntimeSummaryCard('kernel.summary.configuredOrder', orderNode));
+    summaryFragment.appendChild(kernelRuntimeSummaryCard(
+      'kernel.summary.activeKernel',
+      app.t('kernel.summary.activeKernelValue', {
+        rules: data.active_rule_count || 0,
+        ranges: data.active_range_count || 0
+      })
+    ));
+    summaryFragment.appendChild(kernelRuntimeSummaryCard(
+      'kernel.summary.fallbacks',
+      app.t('kernel.summary.fallbacksValue', {
+        rules: data.kernel_fallback_rule_count || 0,
+        ranges: data.kernel_fallback_range_count || 0
+      }),
+      app.t('kernel.summary.transientFallbacksValue', {
+        rules: data.transient_fallback_rule_count || 0,
+        ranges: data.transient_fallback_range_count || 0
+      })
+    ));
+    summaryFragment.appendChild(kernelRuntimeSummaryCard(
+      'kernel.summary.trafficStats',
+      kernelStatePill(!!data.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled'),
+      app.t(data.retry_pending ? 'kernel.retry.pending' : 'kernel.retry.idle')
+    ));
+    el.kernelRuntimeSummary.appendChild(summaryFragment);
+
+    if (data.transient_fallback_summary) {
+      el.kernelRuntimeSummary.appendChild(app.createNode('div', {
+        className: 'kernel-runtime-note',
+        text: data.transient_fallback_summary
+      }));
+    }
+
+    const engines = Array.isArray(data.engines) ? data.engines : [];
+    if (!engines.length) {
+      el.noKernelRuntime.style.display = 'block';
+      app.toggleTableVisibility('kernelRuntimeTable', false);
+      return;
+    }
+
+    el.noKernelRuntime.style.display = 'none';
+    app.toggleTableVisibility('kernelRuntimeTable', true);
+
+    const fragment = document.createDocumentFragment();
+    engines.forEach((engine) => {
+      const tr = document.createElement('tr');
+      tr.appendChild(app.createCell(kernelEngineBadge(engine.name), 'stat-mono'));
+      tr.appendChild(app.createCell(kernelStatePill(!!engine.available, 'kernel.available.yes', 'kernel.available.no')));
+      tr.appendChild(app.createCell(kernelStatePill(!!engine.loaded, 'kernel.loaded.yes', 'kernel.loaded.no')));
+      tr.appendChild(app.createCell(String(engine.active_entries || 0), 'stat-mono'));
+      tr.appendChild(app.createCell(String(engine.attachments || 0), 'stat-mono'));
+      tr.appendChild(app.createCell(kernelStatePill(!!engine.attachments_healthy, 'kernel.attachments.healthy', 'kernel.attachments.degraded')));
+      tr.appendChild(app.createCell(kernelRuntimeMapsNode(engine), 'kernel-runtime-maps'));
+      tr.appendChild(app.createCell(kernelRuntimeModeLabel(engine.last_reconcile_mode)));
+      tr.appendChild(app.createCell(kernelStatePill(!!engine.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled')));
+      tr.appendChild(app.createCell(
+        kernelRuntimeDetailNode(engine.available_reason || engine.attachment_summary),
+        'kernel-runtime-detail-cell'
+      ));
+      fragment.appendChild(tr);
+    });
+    el.kernelRuntimeBody.appendChild(fragment);
+  };
 
   app.renderRuleStatsTable = function renderRuleStatsTable() {
     const el = app.el;
@@ -178,6 +555,15 @@
     el.rangeStatsBody.appendChild(fragment);
   };
 
+  app.loadKernelRuntime = async function loadKernelRuntime() {
+    try {
+      app.state.kernelRuntime.data = await app.apiCall('GET', '/api/kernel/runtime');
+      app.renderKernelRuntime();
+    } catch (e) {
+      if (e.message !== 'unauthorized') console.error('load kernel runtime:', e);
+    }
+  };
+
   app.loadRuleStats = async function loadRuleStats() {
     try {
       const st = app.state.ruleStats;
@@ -266,6 +652,6 @@
   };
 
   app.loadAllStats = async function loadAllStats() {
-    await Promise.all([app.loadRuleStats(), app.loadSiteStats(), app.loadRangeStats()]);
+    await Promise.all([app.loadKernelRuntime(), app.loadRuleStats(), app.loadSiteStats(), app.loadRangeStats()]);
   };
 })();

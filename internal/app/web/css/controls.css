@@ -228,8 +228,6 @@
 th.sortable {
     cursor: pointer;
     user-select: none;
-    position: relative;
-    padding-right: 20px;
 }
 
 th.sortable:hover {
@@ -238,10 +236,9 @@ th.sortable:hover {
 
 th.sortable::after {
     content: "\2195";
-    position: absolute;
-    right: 5px;
-    top: 50%;
-    transform: translateY(-50%);
+    display: inline-block;
+    margin-left: 6px;
+    vertical-align: middle;
     font-size: 10px;
     color: var(--text-soft);
 }

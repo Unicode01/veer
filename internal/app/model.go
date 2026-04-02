@@ -207,3 +207,39 @@ type CurrentConnsResponse struct {
 	Ranges []RangeCurrentConnsReport `json:"ranges"`
 	Sites  []SiteCurrentConnsReport  `json:"sites"`
 }
+
+type KernelEngineRuntimeView struct {
+	Name               string `json:"name"`
+	Available          bool   `json:"available"`
+	AvailableReason    string `json:"available_reason,omitempty"`
+	Loaded             bool   `json:"loaded"`
+	ActiveEntries      int    `json:"active_entries"`
+	Attachments        int    `json:"attachments"`
+	AttachmentsHealthy bool   `json:"attachments_healthy"`
+	AttachmentSummary  string `json:"attachment_summary,omitempty"`
+	RulesMapEntries    int    `json:"rules_map_entries"`
+	RulesMapCapacity   int    `json:"rules_map_capacity"`
+	FlowsMapEntries    int    `json:"flows_map_entries"`
+	FlowsMapCapacity   int    `json:"flows_map_capacity"`
+	NATMapEntries      int    `json:"nat_map_entries,omitempty"`
+	NATMapCapacity     int    `json:"nat_map_capacity,omitempty"`
+	LastReconcileMode  string `json:"last_reconcile_mode,omitempty"`
+	TrafficStats       bool   `json:"traffic_stats"`
+}
+
+type KernelRuntimeResponse struct {
+	Available                   bool                    `json:"available"`
+	AvailableReason             string                  `json:"available_reason,omitempty"`
+	DefaultEngine               string                  `json:"default_engine"`
+	ConfiguredOrder             []string                `json:"configured_order"`
+	TrafficStats                bool                    `json:"traffic_stats"`
+	ActiveRuleCount             int                     `json:"active_rule_count"`
+	ActiveRangeCount            int                     `json:"active_range_count"`
+	KernelFallbackRuleCount     int                     `json:"kernel_fallback_rule_count"`
+	KernelFallbackRangeCount    int                     `json:"kernel_fallback_range_count"`
+	TransientFallbackRuleCount  int                     `json:"transient_fallback_rule_count"`
+	TransientFallbackRangeCount int                     `json:"transient_fallback_range_count"`
+	TransientFallbackSummary    string                  `json:"transient_fallback_summary,omitempty"`
+	RetryPending                bool                    `json:"retry_pending"`
+	Engines                     []KernelEngineRuntimeView `json:"engines"`
+}

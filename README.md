@@ -198,7 +198,7 @@ http://127.0.0.1:8080
   "max_workers": 0,
   "drain_timeout_hours": 24,
   "default_engine": "auto",
-  "kernel_engine_order": ["xdp", "tc"],
+  "kernel_engine_order": ["tc"],
   "kernel_rules_map_limit": 0,
   "kernel_flows_map_limit": 0,
   "kernel_nat_ports_map_limit": 0,
@@ -217,7 +217,7 @@ http://127.0.0.1:8080
 - `max_workers`：最大 Worker 数量；小于等于 `0` 时按 CPU 核数自动计算，内部最少保留 3 个 Worker 槽位
 - `drain_timeout_hours`：旧 Worker 进入 draining 状态后的最长保留时长，默认 `24`
 - `default_engine`：默认转发引擎，可选 `auto`、`userspace`、`kernel`
-- `kernel_engine_order`：Linux 内核态引擎尝试顺序，默认 `["xdp", "tc"]`；当前会自动跳过不可用引擎并回退
+- `kernel_engine_order`：Linux 内核态引擎尝试顺序，默认 `["tc"]`；当前会自动跳过不可用引擎并回退。如果想显式试验 XDP，再配置成 `["xdp", "tc"]`
 - `kernel_rules_map_limit`：内核 `rules_v4/stats_v4` map 容量；`0` 或省略时按当前 kernel entries 自适应扩容，默认从 `16384` 起按 2 倍增长到 `262144`；设置为正数时使用固定上限
 - `kernel_flows_map_limit`：内核 `flows_v4` 连接跟踪表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
 - `kernel_nat_ports_map_limit`：内核 `nat_ports_v4` 端口保留表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
@@ -247,7 +247,7 @@ http://127.0.0.1:8080
 - `default_engine = userspace`：全部走用户态 Worker
 - `default_engine = kernel`：优先要求进入内核态；不满足条件时仍会安全回退到用户态
 - `default_engine = auto`：先尝试内核态，再自动回退到用户态
-- Linux 下内核态会按 `kernel_engine_order` 依次尝试，例如默认先 `xdp`，再 `tc`
+- Linux 下内核态会按 `kernel_engine_order` 依次尝试；默认只走 `tc`，如果显式配置 `["xdp", "tc"]` 才会优先尝试 XDP
 
 当前想进入内核态，通常至少需要满足：
 
@@ -269,6 +269,12 @@ http://127.0.0.1:8080
 - 默认不会强行抖动现有内核会话；运行时更倾向保留活跃映射并在条件允许时原地更新
 - `kernel_traffic_stats` 默认关闭，不打开时不会额外在内核路径上维护速率/流量统计
 
+### 内核态运行时观测
+
+- 统计页新增 `Kernel Runtime` 面板，会展示当前内核态总状态、内核承载规则/范围数量、回退计数、待重试状态，以及每个内核引擎的 map 占用、附加点和最近一次 reconcile 方式
+- 同时提供 `GET /api/kernel/runtime` 调试接口，便于脚本或外部面板直接读取这些运行时信息
+- 这套观测主要面向调试和联调，不打算作为当前版本的生产告警接口
+
 ## 性能测试说明
 
 仓库内附带 Linux-only dataplane benchmark，主要用于做两类评估：
@@ -282,6 +288,7 @@ http://127.0.0.1:8080
 - 关闭 offload 的结果更适合看软件路径和小包 `pps`
 - 保留 offload 的结果更适合看大流 TCP 吞吐
 - `XDP` 在部分 offload / 设备组合下仍可能无法加载，因此当前吞吐结论主要基于 `userspace` 与 `tc`
+- 当前 benchmark 主要用于调试环境下比较 dataplane 路径差异，不作为生产容量承诺
 
 ### 小包 PPS 参考
 
@@ -309,26 +316,28 @@ http://127.0.0.1:8080
 
 - TCP 单向上传流
 - `FORWARD_PERF_TCP_MODE=upload`
-- `1` 连接 / `1` 并发
-- `2 GiB` per connection
+- `16` 连接 / `16` 并发
+- `512 MiB` per connection
 - `128 KiB` chunk
 - `FORWARD_PERF_DISABLE_OFFLOADS=0`
+- `go test -count=3`
 
 参考结果：
 
 | Engine | Scenario | Payload Throughput |
 | --- | --- | ---: |
-| Userspace | `1 stream` | `~1288 MiB/s` |
-| TC | `1 stream` | `~2651 MiB/s` |
-| TC | `16 streams` | `~5223-5442 MiB/s` |
+| Userspace | `16 streams` | `~3076-3444 MiB/s` |
+| TC | `16 streams` | `~4947-4969 MiB/s` |
 
 说明：
 
-- 这一组已经更接近常规 `iperf3` 单向吞吐测试
-- `Userspace` 在该实验模型下已经达到约 `10.8 Gbps` 量级
+- 这一组已经更接近常规 `iperf3` 风格的大流 TCP 单向吞吐测试
+- `Userspace` 在该实验模型下大致处于 `~25.8-28.9 Gbps` 区间，3 次复测均值约 `3248 MiB/s`
+- `TC` 在该实验模型下大致处于 `~41.5-41.7 Gbps` 区间，3 次复测均值约 `4956 MiB/s`
+- 同口径下 `TC` 相比 `Userspace` 提升约 `52%`
 - `TC` 在 `veth` / 内存路径下可以高于真实 `10G NIC` 线速，这更像软件路径上限，不应直接等价为真实物理网卡吞吐
 - 在同机 `netns + veth` 基准里，`32 streams` 及以上的 TCP upload 结果会开始明显受到本机 socket / softirq / veth 竞争影响；这类结果更像测试拓扑的极限，不建议直接作为真实部署下的 `TC` 聚合吞吐结论
-- 因此更推荐把 `1 stream` 视为单流能力，把 `4-16 streams` 视为较有参考价值的聚合吞吐区间
+- 因此更推荐把 `4-16 streams` 视为较有参考价值的聚合吞吐区间
 - 如果目标是接近线上网卡表现，建议重点参考 `payload_mib_per_sec`，不要把实验环境下的 `wire` 估算值直接当作物理链路线速
 
 ## 构建
