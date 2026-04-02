@@ -337,6 +337,11 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	defer rt.mu.Unlock()
 
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
+	if rt.coll == nil && !kernelHotRestartStateExists(kernelEngineTC) {
+		if err := cleanupOrphanTCKernelRuntimeState(); err != nil {
+			log.Printf("kernel dataplane startup cleanup: tc orphan cleanup failed: %v", err)
+		}
+	}
 	if len(rules) == 0 {
 		if err := rt.clearActiveRulesLockedPreserveFlows(); err != nil {
 			rt.cleanupLocked()
@@ -437,6 +442,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	mapReplacements := map[string]*ebpf.Map(nil)
 	actualCapacities := desiredCapacities
 	var oldStatsMap *ebpf.Map
+	var hotRestartState *kernelHotRestartMapState
 	if rt.coll != nil && rt.coll.Maps != nil {
 		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
 			if mapReplacements == nil {
@@ -484,10 +490,65 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 				)
 			}
 		}
+	} else if state, err := loadTCKernelHotRestartState(desiredCapacities); err != nil {
+		log.Printf("kernel dataplane hot restart: load tc state failed, cleaning stale hot restart state: %v", err)
+		if cleanupErr := cleanupStaleTCKernelHotRestartState(); cleanupErr != nil {
+			log.Printf("kernel dataplane hot restart: cleanup stale tc state failed, discarding pinned state only: %v", cleanupErr)
+			clearKernelHotRestartState(kernelEngineTC)
+		}
+	} else if state != nil {
+		hotRestartState = state
+		if len(state.replacements) > 0 {
+			mapReplacements = state.replacements
+		}
+		oldStatsMap = state.oldStatsMap
+		actualCapacities = state.actualCapacities
+		if actualCapacities.Flows < desiredCapacities.Flows {
+			log.Printf(
+				"kernel dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
+				kernelFlowsMapName,
+				actualCapacities.Flows,
+				desiredCapacities.Flows,
+			)
+		}
+		if actualCapacities.NATPorts < desiredCapacities.NATPorts {
+			log.Printf(
+				"kernel dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
+				kernelNatPortsMapName,
+				actualCapacities.NATPorts,
+				desiredCapacities.NATPorts,
+			)
+		}
+		if oldStatsMap != nil {
+			log.Printf(
+				"kernel dataplane hot restart: recreating %s map with capacity=%d (pinned=%d too small)",
+				kernelStatsMapName,
+				desiredCapacities.Rules,
+				oldStatsMap.MaxEntries(),
+			)
+		}
+		log.Printf(
+			"kernel dataplane hot restart: adopting pinned tc maps=%s from %s",
+			strings.Join(state.replacementMapNames(), ","),
+			kernelHotRestartEngineDir(kernelEngineTC),
+		)
 	}
 	if len(mapReplacements) > 0 {
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(mapReplacements))
 	} else {
+		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
+	}
+	if err != nil && hotRestartState != nil {
+		log.Printf("kernel dataplane hot restart: adopt tc state failed, retrying with fresh maps: %v", err)
+		hotRestartState.close()
+		hotRestartState = nil
+		mapReplacements = nil
+		oldStatsMap = nil
+		actualCapacities = desiredCapacities
+		if cleanupErr := cleanupStaleTCKernelHotRestartState(); cleanupErr != nil {
+			log.Printf("kernel dataplane hot restart: cleanup stale tc state failed, discarding pinned state only: %v", cleanupErr)
+			clearKernelHotRestartState(kernelEngineTC)
+		}
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
 	}
 	if err != nil {
@@ -522,6 +583,10 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		if err := copyKernelStatsMap(coll.Maps[kernelStatsMapName], oldStatsMap); err != nil {
 			log.Printf("kernel dataplane reconcile: copy %s contents failed: %v", kernelStatsMapName, err)
 			rt.statsCorrection = make(map[uint32]kernelRuleStats)
+		}
+		if hotRestartState != nil {
+			_ = oldStatsMap.Close()
+			hotRestartState.oldStatsMap = nil
 		}
 	}
 
@@ -634,6 +699,12 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	rt.lastReconcileMode = "rebuild"
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed: %v", err)
+	}
+	if hotRestartState != nil {
+		clearKernelHotRestartState(kernelEngineTC)
+	}
 	return results, nil
 }
 
@@ -779,8 +850,55 @@ func formatKernelRlimit(v uint64) string {
 func (rt *linuxKernelRuleRuntime) Close() error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.prepareHotRestartLocked() {
+		return nil
+	}
 	rt.cleanupLocked()
 	return nil
+}
+
+func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
+	if !kernelHotRestartRequested() {
+		return false
+	}
+	if rt.coll == nil || rt.coll.Maps == nil || len(rt.attachments) == 0 {
+		return false
+	}
+	if err := pinKernelHotRestartMaps(kernelEngineTC, map[string]*ebpf.Map{
+		kernelFlowsMapName:    rt.coll.Maps[kernelFlowsMapName],
+		kernelNatPortsMapName: rt.coll.Maps[kernelNatPortsMapName],
+		kernelStatsMapName:    rt.coll.Maps[kernelStatsMapName],
+	}); err != nil {
+		log.Printf("kernel dataplane hot restart: preserve tc maps failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
+	if err := writeKernelHotRestartMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+		clearKernelHotRestartState(kernelEngineTC)
+		log.Printf("kernel dataplane hot restart: write tc metadata failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
+	log.Printf(
+		"kernel dataplane hot restart: preserved tc session state at %s, leaving %d attachment(s) active for successor",
+		kernelHotRestartEngineDir(kernelEngineTC),
+		len(rt.attachments),
+	)
+	rt.attachments = nil
+	rt.preparedRules = nil
+	rt.rulesMapCapacity = 0
+	rt.flowsMapCapacity = 0
+	rt.natMapCapacity = 0
+	rt.lastReconcileMode = ""
+	rt.statsCorrection = make(map[uint32]kernelRuleStats)
+	rt.flowPruneState = kernelFlowPruneState{}
+	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
+	if rt.coll != nil {
+		rt.coll.Close()
+		rt.coll = nil
+	}
+	return true
 }
 
 func (rt *linuxKernelRuleRuntime) cleanupLocked() {
@@ -789,6 +907,7 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 			_ = netlink.FilterDel(rt.attachments[i].filter)
 		}
 	}
+	clearKernelRuntimeMetadata(kernelEngineTC)
 	rt.attachments = nil
 	rt.preparedRules = nil
 	rt.rulesMapCapacity = 0
@@ -1034,6 +1153,14 @@ func (rt *linuxKernelRuleRuntime) canReconcileInPlaceLocked(desired kernelMapCap
 
 func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if rt.coll == nil || rt.coll.Maps == nil {
+		if !kernelHotRestartStateExists(kernelEngineTC) {
+			if err := cleanupOrphanTCKernelRuntimeState(); err != nil {
+				return fmt.Errorf("cleanup tc orphan runtime state: %w", err)
+			}
+		}
+		if err := cleanupStaleTCKernelHotRestartState(); err != nil {
+			return fmt.Errorf("cleanup stale tc hot restart state: %w", err)
+		}
 		rt.cleanupLocked()
 		return nil
 	}
@@ -1055,6 +1182,11 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.lastReconcileMode = "cleared"
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	if len(rt.attachments) > 0 {
+		if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+			log.Printf("kernel dataplane runtime metadata: refresh tc runtime metadata failed after rule drain: %v", err)
+		}
+	}
 	rt.stateLog.Logf("kernel dataplane reconcile: drained active rules, preserving flows for existing connections")
 	return nil
 }
@@ -1142,6 +1274,9 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	rt.lastReconcileMode = "in_place"
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed after in-place update: %v", err)
+	}
 	rt.stateLog.Logf(
 		"kernel dataplane reconcile: updated %d active kernel entry(s) in-place (upsert=%d delete=%d attach=%d detach=%d preserve=%d)",
 		len(prepared),

@@ -152,6 +152,11 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	defer rt.mu.Unlock()
 
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
+	if rt.coll == nil && !kernelHotRestartStateExists(kernelEngineXDP) {
+		if err := cleanupOrphanXDPKernelRuntimeState(); err != nil {
+			log.Printf("xdp dataplane startup cleanup: xdp orphan cleanup failed: %v", err)
+		}
+	}
 	if len(rules) == 0 {
 		if err := rt.clearActiveRulesLockedPreserveFlows(); err != nil {
 			rt.cleanupLocked()
@@ -245,6 +250,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	flowMapReplacement := map[string]*ebpf.Map(nil)
 	actualCapacities := desiredCapacities
 	var oldStatsMap *ebpf.Map
+	var hotRestartState *kernelHotRestartMapState
 	if rt.coll != nil && rt.coll.Maps != nil {
 		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
 			if flowMapReplacement == nil {
@@ -277,10 +283,57 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 				)
 			}
 		}
+	} else if state, err := loadXDPKernelHotRestartState(desiredCapacities); err != nil {
+		log.Printf("xdp dataplane hot restart: load xdp state failed, cleaning stale hot restart state: %v", err)
+		if cleanupErr := cleanupStaleXDPKernelHotRestartState(); cleanupErr != nil {
+			log.Printf("xdp dataplane hot restart: cleanup stale xdp state failed, discarding pinned state only: %v", cleanupErr)
+			clearKernelHotRestartState(kernelEngineXDP)
+		}
+	} else if state != nil {
+		hotRestartState = state
+		if len(state.replacements) > 0 {
+			flowMapReplacement = state.replacements
+		}
+		oldStatsMap = state.oldStatsMap
+		actualCapacities = state.actualCapacities
+		if actualCapacities.Flows < desiredCapacities.Flows {
+			log.Printf(
+				"xdp dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
+				kernelFlowsMapName,
+				actualCapacities.Flows,
+				desiredCapacities.Flows,
+			)
+		}
+		if oldStatsMap != nil {
+			log.Printf(
+				"xdp dataplane hot restart: recreating %s map with capacity=%d (pinned=%d too small)",
+				kernelStatsMapName,
+				desiredCapacities.Rules,
+				oldStatsMap.MaxEntries(),
+			)
+		}
+		log.Printf(
+			"xdp dataplane hot restart: adopting pinned xdp maps=%s from %s",
+			strings.Join(state.replacementMapNames(), ","),
+			kernelHotRestartEngineDir(kernelEngineXDP),
+		)
 	}
 	if len(flowMapReplacement) > 0 {
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(flowMapReplacement))
 	} else {
+		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
+	}
+	if err != nil && hotRestartState != nil {
+		log.Printf("xdp dataplane hot restart: adopt xdp state failed, retrying with fresh maps: %v", err)
+		hotRestartState.close()
+		hotRestartState = nil
+		flowMapReplacement = nil
+		oldStatsMap = nil
+		actualCapacities = desiredCapacities
+		if cleanupErr := cleanupStaleXDPKernelHotRestartState(); cleanupErr != nil {
+			log.Printf("xdp dataplane hot restart: cleanup stale xdp state failed, discarding pinned state only: %v", cleanupErr)
+			clearKernelHotRestartState(kernelEngineXDP)
+		}
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
 	}
 	if err != nil {
@@ -315,6 +368,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 		if err := copyKernelStatsMap(coll.Maps[kernelStatsMapName], oldStatsMap); err != nil {
 			log.Printf("xdp dataplane reconcile: copy %s contents failed: %v", kernelStatsMapName, err)
 			rt.statsCorrection = make(map[uint32]kernelRuleStats)
+		}
+		if hotRestartState != nil {
+			_ = oldStatsMap.Close()
+			hotRestartState.oldStatsMap = nil
 		}
 	}
 
@@ -398,6 +455,12 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	rt.lastReconcileMode = "rebuild"
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments)); err != nil {
+		log.Printf("xdp dataplane runtime metadata: write xdp runtime metadata failed: %v", err)
+	}
+	if hotRestartState != nil {
+		clearKernelHotRestartState(kernelEngineXDP)
+	}
 	return results, nil
 }
 
@@ -442,8 +505,54 @@ func (rt *xdpKernelRuleRuntime) SnapshotAssignments() map[int64]string {
 func (rt *xdpKernelRuleRuntime) Close() error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.prepareHotRestartLocked() {
+		return nil
+	}
 	rt.cleanupLocked()
 	return nil
+}
+
+func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
+	if !kernelHotRestartRequested() {
+		return false
+	}
+	if rt.coll == nil || rt.coll.Maps == nil || len(rt.attachments) == 0 {
+		return false
+	}
+	if err := pinKernelHotRestartMaps(kernelEngineXDP, map[string]*ebpf.Map{
+		kernelFlowsMapName: rt.coll.Maps[kernelFlowsMapName],
+		kernelStatsMapName: rt.coll.Maps[kernelStatsMapName],
+	}); err != nil {
+		log.Printf("xdp dataplane hot restart: preserve xdp maps failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
+	if err := writeKernelHotRestartMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments)); err != nil {
+		clearKernelHotRestartState(kernelEngineXDP)
+		log.Printf("xdp dataplane hot restart: write xdp metadata failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
+	log.Printf(
+		"xdp dataplane hot restart: preserved xdp session state at %s, leaving %d attachment(s) active for successor",
+		kernelHotRestartEngineDir(kernelEngineXDP),
+		len(rt.attachments),
+	)
+	rt.attachments = nil
+	rt.preparedRules = nil
+	rt.programID = 0
+	rt.rulesMapCapacity = 0
+	rt.flowsMapCapacity = 0
+	rt.lastReconcileMode = ""
+	rt.statsCorrection = make(map[uint32]kernelRuleStats)
+	rt.flowPruneState = kernelFlowPruneState{}
+	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
+	if rt.coll != nil {
+		rt.coll.Close()
+		rt.coll = nil
+	}
+	return true
 }
 
 func (rt *xdpKernelRuleRuntime) cleanupLocked() {
@@ -452,6 +561,7 @@ func (rt *xdpKernelRuleRuntime) cleanupLocked() {
 			log.Printf("xdp dataplane cleanup: detach ifindex=%d mode=%s failed: %v", rt.attachments[i].ifindex, xdpAttachFlagsLabel(rt.attachments[i].flags), err)
 		}
 	}
+	clearKernelRuntimeMetadata(kernelEngineXDP)
 	rt.attachments = nil
 	rt.preparedRules = nil
 	rt.programID = 0
@@ -530,6 +640,14 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 
 func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if rt.coll == nil || rt.coll.Maps == nil {
+		if !kernelHotRestartStateExists(kernelEngineXDP) {
+			if err := cleanupOrphanXDPKernelRuntimeState(); err != nil {
+				return fmt.Errorf("cleanup xdp orphan runtime state: %w", err)
+			}
+		}
+		if err := cleanupStaleXDPKernelHotRestartState(); err != nil {
+			return fmt.Errorf("cleanup stale xdp hot restart state: %w", err)
+		}
 		rt.cleanupLocked()
 		return nil
 	}
@@ -553,6 +671,11 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.lastReconcileMode = "cleared"
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	if len(rt.attachments) > 0 {
+		if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments)); err != nil {
+			log.Printf("xdp dataplane runtime metadata: refresh xdp runtime metadata failed after rule drain: %v", err)
+		}
+	}
 	rt.stateLog.Logf("xdp dataplane reconcile: drained active rules, preserving flows for existing connections")
 	return nil
 }

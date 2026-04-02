@@ -37,6 +37,9 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/forward}"
 SERVICE_NAME="forward"
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_TOKEN="${WEB_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
+BPF_STATE_DIR="${FORWARD_BPF_STATE_DIR:-/sys/fs/bpf/forward}"
+RUNTIME_STATE_DIR="${FORWARD_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}"
+HOT_RESTART_MARKER="${INSTALL_DIR}/.hot-restart-kernel"
 
 # ---------- 按架构查找二进制 ----------
 ARCH="$(uname -m)"
@@ -68,7 +71,7 @@ ok "找到二进制: $(basename "$BINARY_PATH") (${FILE_SIZE}) [${ARCH}]"
 IS_UPDATE=false
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     IS_UPDATE=true
-    info "检测到正在运行的服务，将热更新二进制文件（worker 不中断）"
+    info "检测到正在运行的服务，将热更新二进制文件（worker 与 kernel session 尽量不中断）"
 fi
 
 # ---------- 部署文件 ----------
@@ -94,6 +97,16 @@ fi
 
 ok "文件部署完成"
 
+# ---------- bpffs / 热更新状态目录 ----------
+info "准备 bpffs 热更新状态目录..."
+mkdir -p /sys/fs/bpf
+if ! mountpoint -q /sys/fs/bpf; then
+    mount -t bpf bpf /sys/fs/bpf
+fi
+mkdir -p "$BPF_STATE_DIR"
+mkdir -p "$RUNTIME_STATE_DIR"
+ok "bpffs 状态目录已就绪: ${BPF_STATE_DIR}"
+
 # ---------- systemd 服务 ----------
 info "配置 systemd 服务..."
 
@@ -106,6 +119,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
+Environment=FORWARD_HOT_RESTART_MARKER=${HOT_RESTART_MARKER}
+Environment=FORWARD_BPF_STATE_DIR=${BPF_STATE_DIR}
+Environment=FORWARD_RUNTIME_STATE_DIR=${RUNTIME_STATE_DIR}
 ExecStart=${INSTALL_DIR}/forward --config ${INSTALL_DIR}/config.json
 Restart=always
 RestartSec=3
@@ -113,7 +129,7 @@ KillMode=process
 
 NoNewPrivileges=false
 ProtectSystem=strict
-ReadWritePaths=${INSTALL_DIR} /tmp
+ReadWritePaths=${INSTALL_DIR} /tmp /sys/fs/bpf
 PrivateTmp=true
 
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON
@@ -135,8 +151,14 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 
 if $IS_UPDATE; then
-    systemctl restart "$SERVICE_NAME"
-    ok "服务已重启（worker 保持运行并自动重连）"
+    : > "$HOT_RESTART_MARKER"
+    if systemctl restart "$SERVICE_NAME"; then
+        rm -f "$HOT_RESTART_MARKER"
+        ok "服务已热重启（worker 自动重连，kernel flow/NAT 表尝试跨进程接力）"
+    else
+        warn "热重启失败，已保留标记文件与 bpffs 状态，修复后可再次执行部署"
+        exit 1
+    fi
 else
     systemctl start "$SERVICE_NAME"
 fi
