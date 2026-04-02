@@ -24,6 +24,11 @@ func TestIsTransientKernelFallbackReason(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "table pressure",
+			reason: `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+			want:   false,
+		},
+		{
 			name:   "non transient tc verifier failure",
 			reason: `xdp: xdp dataplane currently supports only transparent rules; tc: create kernel collection: verifier rejected program`,
 			want:   false,
@@ -61,5 +66,14 @@ func TestHasTransientKernelFallbacksLocked(t *testing.T) {
 	}
 	if pm.hasTransientKernelFallbacksLocked() {
 		t.Fatal("hasTransientKernelFallbacksLocked() = true, want false")
+	}
+
+	pm.rulePlans[1] = ruleDataplanePlan{
+		KernelEligible:  true,
+		EffectiveEngine: ruleEngineUserspace,
+		FallbackReason:  `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+	}
+	if pm.hasTransientKernelFallbacksLocked() {
+		t.Fatal("hasTransientKernelFallbacksLocked() = true for pressure fallback, want false")
 	}
 }

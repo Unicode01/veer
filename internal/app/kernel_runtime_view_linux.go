@@ -153,23 +153,39 @@ func snapshotKernelEngineRuntimeView(name string, rt kernelRuleRuntime) KernelEn
 	}
 }
 
+func applyKernelRuntimePressureView(view *KernelEngineRuntimeView, pressure kernelRuntimePressureState) {
+	if view == nil || !pressure.level.active() {
+		return
+	}
+	view.PressureActive = true
+	view.PressureLevel = string(pressure.level)
+	view.PressureReason = pressure.reason
+}
+
 func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	now := time.Now()
 	rt.mu.Lock()
+	available, reason := rt.currentAvailabilityLocked(now)
+	pressure := rt.pressureState
+	actualCapacities := rt.currentMapCapacitiesLocked()
+	degraded := tcKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit)
 
 	view := KernelEngineRuntimeView{
 		Name:              kernelEngineTC,
-		Available:         rt.available,
-		AvailableReason:   rt.availableReason,
+		Available:         available,
+		AvailableReason:   reason,
+		Degraded:          degraded.active,
+		DegradedReason:    degraded.reason,
 		Loaded:            rt.coll != nil,
 		ActiveEntries:     len(rt.preparedRules),
 		Attachments:       len(rt.attachments),
-		RulesMapCapacity:  rt.rulesMapCapacity,
-		FlowsMapCapacity:  rt.flowsMapCapacity,
-		NATMapCapacity:    rt.natMapCapacity,
+		RulesMapCapacity:  actualCapacities.Rules,
+		FlowsMapCapacity:  actualCapacities.Flows,
+		NATMapCapacity:    actualCapacities.NATPorts,
 		LastReconcileMode: rt.lastReconcileMode,
 		TrafficStats:      rt.enableTrafficStats,
 	}
+	applyKernelRuntimePressureView(&view, pressure)
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	mapRefs := kernelRuntimeMapRefsFromCollection(rt.coll)
@@ -194,19 +210,26 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	now := time.Now()
 	rt.mu.Lock()
+	available, reason := rt.currentAvailabilityLocked(now)
+	pressure := rt.pressureState
+	actualCapacities := rt.currentMapCapacitiesLocked()
+	degraded := xdpKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, rt.rulesMapLimit, rt.flowsMapLimit)
 
 	view := KernelEngineRuntimeView{
 		Name:              kernelEngineXDP,
-		Available:         rt.available,
-		AvailableReason:   rt.availableReason,
+		Available:         available,
+		AvailableReason:   reason,
+		Degraded:          degraded.active,
+		DegradedReason:    degraded.reason,
 		Loaded:            rt.coll != nil,
 		ActiveEntries:     len(rt.preparedRules),
 		Attachments:       len(rt.attachments),
-		RulesMapCapacity:  rt.rulesMapCapacity,
-		FlowsMapCapacity:  rt.flowsMapCapacity,
+		RulesMapCapacity:  actualCapacities.Rules,
+		FlowsMapCapacity:  actualCapacities.Flows,
 		LastReconcileMode: rt.lastReconcileMode,
 		TrafficStats:      rt.prepareOptions.enableTrafficStats,
 	}
+	applyKernelRuntimePressureView(&view, pressure)
 	preparedRules := append([]preparedXDPKernelRule(nil), rt.preparedRules...)
 	attachments := append([]xdpAttachment(nil), rt.attachments...)
 	programID := rt.programID
@@ -303,6 +326,55 @@ func kernelAttachmentProgramLabel(handle uint32, priority uint16) string {
 	default:
 		return fmt.Sprintf("handle=%d", handle)
 	}
+}
+
+type kernelAttachmentLookupGroup struct {
+	linkIndex int
+	parent    uint32
+}
+
+func kernelAttachmentPresence(keys []kernelAttachmentKey) map[kernelAttachmentKey]bool {
+	present := make(map[kernelAttachmentKey]bool, len(keys))
+	if len(keys) == 0 {
+		return present
+	}
+
+	grouped := make(map[kernelAttachmentLookupGroup]map[kernelAttachmentKey]struct{})
+	for _, key := range keys {
+		group := kernelAttachmentLookupGroup{linkIndex: key.linkIndex, parent: key.parent}
+		if grouped[group] == nil {
+			grouped[group] = make(map[kernelAttachmentKey]struct{})
+		}
+		grouped[group][key] = struct{}{}
+	}
+
+	for group, expected := range grouped {
+		link, err := netlink.LinkByIndex(group.linkIndex)
+		if err != nil {
+			continue
+		}
+		filters, err := netlink.FilterList(link, group.parent)
+		if err != nil {
+			continue
+		}
+		for _, filter := range filters {
+			attrs := filter.Attrs()
+			if attrs == nil {
+				continue
+			}
+			key := kernelAttachmentKey{
+				linkIndex: attrs.LinkIndex,
+				parent:    attrs.Parent,
+				priority:  attrs.Priority,
+				handle:    attrs.Handle,
+			}
+			if _, ok := expected[key]; ok {
+				present[key] = true
+			}
+		}
+	}
+
+	return present
 }
 
 func countTCRuleMapEntries(m *ebpf.Map) (int, error) {
@@ -441,8 +513,9 @@ func kernelAttachmentsHealthy(forwardIfRules map[int][]int64, replyIfRules map[i
 	if len(expected) > len(attachments) {
 		return false
 	}
+	present := kernelAttachmentPresence(expected)
 	for _, key := range expected {
-		if !kernelAttachmentExists(key) {
+		if !present[key] {
 			return false
 		}
 	}

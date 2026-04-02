@@ -212,6 +212,11 @@ type KernelEngineRuntimeView struct {
 	Name               string `json:"name"`
 	Available          bool   `json:"available"`
 	AvailableReason    string `json:"available_reason,omitempty"`
+	PressureActive     bool   `json:"pressure_active"`
+	PressureLevel      string `json:"pressure_level,omitempty"`
+	PressureReason     string `json:"pressure_reason,omitempty"`
+	Degraded           bool   `json:"degraded"`
+	DegradedReason     string `json:"degraded_reason,omitempty"`
 	Loaded             bool   `json:"loaded"`
 	ActiveEntries      int    `json:"active_entries"`
 	Attachments        int    `json:"attachments"`
@@ -228,18 +233,18 @@ type KernelEngineRuntimeView struct {
 }
 
 type KernelRuntimeResponse struct {
-	Available                   bool                    `json:"available"`
-	AvailableReason             string                  `json:"available_reason,omitempty"`
-	DefaultEngine               string                  `json:"default_engine"`
-	ConfiguredOrder             []string                `json:"configured_order"`
-	TrafficStats                bool                    `json:"traffic_stats"`
-	ActiveRuleCount             int                     `json:"active_rule_count"`
-	ActiveRangeCount            int                     `json:"active_range_count"`
-	KernelFallbackRuleCount     int                     `json:"kernel_fallback_rule_count"`
-	KernelFallbackRangeCount    int                     `json:"kernel_fallback_range_count"`
-	TransientFallbackRuleCount  int                     `json:"transient_fallback_rule_count"`
-	TransientFallbackRangeCount int                     `json:"transient_fallback_range_count"`
-	TransientFallbackSummary    string                  `json:"transient_fallback_summary,omitempty"`
-	RetryPending                bool                    `json:"retry_pending"`
+	Available                   bool                      `json:"available"`
+	AvailableReason             string                    `json:"available_reason,omitempty"`
+	DefaultEngine               string                    `json:"default_engine"`
+	ConfiguredOrder             []string                  `json:"configured_order"`
+	TrafficStats                bool                      `json:"traffic_stats"`
+	ActiveRuleCount             int                       `json:"active_rule_count"`
+	ActiveRangeCount            int                       `json:"active_range_count"`
+	KernelFallbackRuleCount     int                       `json:"kernel_fallback_rule_count"`
+	KernelFallbackRangeCount    int                       `json:"kernel_fallback_range_count"`
+	TransientFallbackRuleCount  int                       `json:"transient_fallback_rule_count"`
+	TransientFallbackRangeCount int                       `json:"transient_fallback_range_count"`
+	TransientFallbackSummary    string                    `json:"transient_fallback_summary,omitempty"`
+	RetryPending                bool                      `json:"retry_pending"`
 	Engines                     []KernelEngineRuntimeView `json:"engines"`
 }

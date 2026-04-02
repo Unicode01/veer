@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
@@ -83,6 +84,7 @@ type xdpKernelRuleRuntime struct {
 	lastBridgeLog     map[string]struct{}
 	lastReconcileMode string
 	stateLog          kernelStateLogger
+	pressureState     kernelRuntimePressureState
 	statsCorrection   map[uint32]kernelRuleStats
 	flowPruneState    kernelFlowPruneState
 	runtimeMapCounts  kernelRuntimeMapCountSnapshot
@@ -140,7 +142,9 @@ func (rt *xdpKernelRuleRuntime) Available() (bool, string) {
 			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
 		}
 	})
-	return rt.available, rt.availableReason
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.currentAvailabilityLocked(time.Now())
 }
 
 func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
@@ -393,6 +397,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	rt.flowPruneState.reset()
 	rt.lastReconcileMode = "rebuild"
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	return results, nil
 }
 
@@ -419,6 +424,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	}
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	return nil
 }
 
@@ -455,6 +461,7 @@ func (rt *xdpKernelRuleRuntime) cleanupLocked() {
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	if rt.coll != nil {
 		rt.coll.Close()
 		rt.coll = nil
@@ -495,17 +502,14 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 		return retained, nil
 	}
 
-	desiredByID := make(map[int64]Rule, len(rules))
-	for _, rule := range rules {
-		desiredByID[rule.ID] = rule
-	}
+	desiredByKey := indexKernelRulesByMatchKey(rules)
 
 	kept := make([]preparedXDPKernelRule, 0, len(rt.preparedRules))
 	for _, item := range rt.preparedRules {
-		desired, ok := desiredByID[item.rule.ID]
-		if ok && sameKernelRuleDataplaneConfig(desired, item.rule) {
+		desired, ok := matchDesiredKernelRule(desiredByKey, item.rule)
+		if ok {
 			kept = append(kept, item)
-			retained[item.rule.ID] = struct{}{}
+			retained[desired.ID] = struct{}{}
 			continue
 		}
 		if err := deleteKernelMapEntry(rulesMap, item.key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -520,6 +524,7 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 		rt.flowsMapCapacity = int(flowsMap.MaxEntries())
 	}
 	rt.flowPruneState.reset()
+	rt.invalidatePressureStateLocked()
 	return retained, nil
 }
 
@@ -547,6 +552,7 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	}
 	rt.lastReconcileMode = "cleared"
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	rt.stateLog.Logf("xdp dataplane reconcile: drained active rules, preserving flows for existing connections")
 	return nil
 }
@@ -824,7 +830,7 @@ func prepareXDPKernelRules(rules []Rule, opts xdpPrepareOptions, previous []prep
 	replyIfRules := make(map[int][]int64)
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	skipLogger := newKernelSkipLogger("xdp")
-	previousByRuleID := groupPreparedXDPKernelRulesByRuleID(previous)
+	previousByKey := groupPreparedXDPKernelRulesByMatchKey(previous)
 
 	for _, rule := range rules {
 		if !rule.Transparent {
@@ -835,7 +841,7 @@ func prepareXDPKernelRules(rules []Rule, opts xdpPrepareOptions, previous []prep
 		}
 		items, err := prepareXDPKernelRule(rule, opts)
 		if err != nil {
-			if reused, ok := reusablePreparedXDPKernelRules(rule, err, previousByRuleID, allowTransientReuse); ok {
+			if reused, ok := reusablePreparedXDPKernelRules(rule, err, previousByKey, allowTransientReuse); ok {
 				prepared = append(prepared, reused...)
 				for _, item := range reused {
 					forwardIfRules[item.inIfIndex] = append(forwardIfRules[item.inIfIndex], rule.ID)
@@ -858,22 +864,22 @@ func prepareXDPKernelRules(rules []Rule, opts xdpPrepareOptions, previous []prep
 	return prepared, forwardIfRules, replyIfRules, results, skipLogger.Snapshot()
 }
 
-func groupPreparedXDPKernelRulesByRuleID(items []preparedXDPKernelRule) map[int64][]preparedXDPKernelRule {
+func groupPreparedXDPKernelRulesByMatchKey(items []preparedXDPKernelRule) map[kernelRuleMatchKey][]preparedXDPKernelRule {
 	if len(items) == 0 {
 		return nil
 	}
-	grouped := make(map[int64][]preparedXDPKernelRule)
+	grouped := make(map[kernelRuleMatchKey][]preparedXDPKernelRule)
 	for _, item := range items {
-		grouped[item.rule.ID] = append(grouped[item.rule.ID], item)
+		grouped[kernelRuleMatchKeyFor(item.rule)] = append(grouped[kernelRuleMatchKeyFor(item.rule)], item)
 	}
 	return grouped
 }
 
-func reusablePreparedXDPKernelRules(rule Rule, err error, previousByRuleID map[int64][]preparedXDPKernelRule, allowTransientReuse bool) ([]preparedXDPKernelRule, bool) {
-	if len(previousByRuleID) == 0 || err == nil {
+func reusablePreparedXDPKernelRules(rule Rule, err error, previousByKey map[kernelRuleMatchKey][]preparedXDPKernelRule, allowTransientReuse bool) ([]preparedXDPKernelRule, bool) {
+	if len(previousByKey) == 0 || err == nil {
 		return nil, false
 	}
-	items := previousByRuleID[rule.ID]
+	items := previousByKey[kernelRuleMatchKeyFor(rule)]
 	if len(items) == 0 || !shouldReuseKernelRuleAfterPrepareFailure(rule, items[0].rule, err.Error(), allowTransientReuse) {
 		return nil, false
 	}

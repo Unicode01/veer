@@ -123,6 +123,7 @@ type ProcessManager struct {
 	kernelMaintenanceEvery time.Duration
 	kernelRetryAt          time.Time
 	kernelRetryLogAt       time.Time
+	kernelPressureSnapshot kernelRuntimePressureSnapshot
 	redistributeWake       chan struct{}
 	redistributePending    bool
 	redistributeDueAt      time.Time
@@ -478,9 +479,21 @@ func (pm *ProcessManager) redistributeWorkers() {
 	if pm.cfg != nil {
 		configuredKernelRulesMapLimit = pm.cfg.KernelRulesMapLimit
 	}
+	kernelPressure := snapshotKernelRuntimePressure(pm.kernelRuntime)
+	previousKernelRules := make(map[int64]bool)
+	previousKernelRanges := make(map[int64]bool)
+	pm.mu.Lock()
+	for id, ok := range pm.kernelRules {
+		previousKernelRules[id] = ok
+	}
+	for id, ok := range pm.kernelRanges {
+		previousKernelRanges[id] = ok
+	}
+	pm.mu.Unlock()
 	candidates, rulePlans, rangePlans := buildKernelCandidateRules(rules, ranges, planner, configuredKernelRulesMapLimit)
 	applyKernelOwnerConstraints(candidates, rulePlans, rangePlans)
-	pm.prewarmKernelToUserspaceHandoffs(rules, ranges, rulePlans, rangePlans)
+	applyKernelPressurePolicy(kernelPressure, candidates, previousKernelRules, previousKernelRanges, rulePlans, rangePlans)
+	candidates = pm.prewarmKernelToUserspaceHandoffs(rules, ranges, candidates, rulePlans, rangePlans)
 
 	activeKernelCandidates := filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
 	if pm.kernelRuntime != nil {
@@ -796,6 +809,123 @@ func applyKernelOwnerFallback(owner kernelCandidateOwner, reason string, rulePla
 		plan.FallbackReason = reason
 	}
 	rangePlans[owner.id] = plan
+}
+
+type kernelPressureOwnerInfo struct {
+	owner    kernelCandidateOwner
+	previous bool
+	entries  int
+}
+
+func applyKernelPressurePolicy(snapshot kernelRuntimePressureSnapshot, candidates []kernelCandidateRule, previousKernelRules map[int64]bool, previousKernelRanges map[int64]bool, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
+	level := snapshot.level()
+	if !level.active() {
+		return
+	}
+
+	owners := collectKernelPressureOwners(candidates, previousKernelRules, previousKernelRanges, rulePlans, rangePlans)
+	if len(owners) == 0 {
+		return
+	}
+
+	reason := strings.TrimSpace(snapshot.Reason)
+	if reason == "" {
+		reason = "kernel dataplane pressure"
+	}
+
+	switch level {
+	case kernelRuntimePressureLevelHold:
+		for _, item := range owners {
+			if item.previous {
+				continue
+			}
+			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans)
+		}
+	case kernelRuntimePressureLevelShed:
+		targetFallbackEntries := kernelPressureShedTargetEntries(owners)
+		fallbackEntries := 0
+		previousOwners := make([]kernelPressureOwnerInfo, 0, len(owners))
+		for _, item := range owners {
+			if item.previous {
+				previousOwners = append(previousOwners, item)
+				continue
+			}
+			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans)
+			fallbackEntries += item.entries
+		}
+		remainingPrevious := len(previousOwners)
+		mustKeepPrevious := 0
+		if remainingPrevious > 0 {
+			mustKeepPrevious = 1
+		}
+		for idx := len(previousOwners) - 1; idx >= 0 && fallbackEntries < targetFallbackEntries; idx-- {
+			if remainingPrevious <= mustKeepPrevious {
+				break
+			}
+			item := previousOwners[idx]
+			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans)
+			fallbackEntries += item.entries
+			remainingPrevious--
+		}
+	case kernelRuntimePressureLevelFull:
+		for _, item := range owners {
+			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans)
+		}
+	}
+}
+
+func collectKernelPressureOwners(candidates []kernelCandidateRule, previousKernelRules map[int64]bool, previousKernelRanges map[int64]bool, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelPressureOwnerInfo {
+	byOwner := make(map[kernelCandidateOwner]*kernelPressureOwnerInfo, len(candidates))
+	for _, candidate := range candidates {
+		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans) != ruleEngineKernel {
+			continue
+		}
+		item := byOwner[candidate.owner]
+		if item == nil {
+			item = &kernelPressureOwnerInfo{
+				owner:    candidate.owner,
+				previous: isPreviousKernelOwner(candidate.owner, previousKernelRules, previousKernelRanges),
+			}
+			byOwner[candidate.owner] = item
+		}
+		item.entries++
+	}
+	owners := make([]kernelPressureOwnerInfo, 0, len(byOwner))
+	for _, item := range byOwner {
+		owners = append(owners, *item)
+	}
+	sort.Slice(owners, func(i, j int) bool {
+		if owners[i].owner.kind != owners[j].owner.kind {
+			return owners[i].owner.kind < owners[j].owner.kind
+		}
+		return owners[i].owner.id < owners[j].owner.id
+	})
+	return owners
+}
+
+func isPreviousKernelOwner(owner kernelCandidateOwner, previousKernelRules map[int64]bool, previousKernelRanges map[int64]bool) bool {
+	if owner.kind == workerKindRule {
+		return previousKernelRules[owner.id]
+	}
+	return previousKernelRanges[owner.id]
+}
+
+func kernelPressureShedTargetEntries(owners []kernelPressureOwnerInfo) int {
+	totalEntries := 0
+	for _, item := range owners {
+		totalEntries += item.entries
+	}
+	if totalEntries <= 1 {
+		return totalEntries
+	}
+	fallbackEntries := totalEntries / kernelRuntimePressureShedFallbackDivisor
+	if fallbackEntries < 1 {
+		return 1
+	}
+	if fallbackEntries >= totalEntries {
+		return totalEntries - 1
+	}
+	return fallbackEntries
 }
 
 func kernelOwnerEffectiveEngine(owner kernelCandidateOwner, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) string {
@@ -1420,7 +1550,7 @@ func (pm *ProcessManager) waitForUserspaceWorkers(ruleIndexes []int, rangeIndexe
 			if wi == nil || len(wi.rules) == 0 {
 				continue
 			}
-			if !wi.running && !wi.errored {
+			if !wi.running {
 				ready = false
 				break
 			}
@@ -1431,7 +1561,7 @@ func (pm *ProcessManager) waitForUserspaceWorkers(ruleIndexes []int, rangeIndexe
 				if wi == nil || len(wi.ranges) == 0 {
 					continue
 				}
-				if !wi.running && !wi.errored {
+				if !wi.running {
 					ready = false
 					break
 				}
@@ -1449,9 +1579,9 @@ func (pm *ProcessManager) waitForUserspaceWorkers(ruleIndexes []int, rangeIndexe
 	}
 }
 
-func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges []PortRange, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
+func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges []PortRange, candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelCandidateRule {
 	if pm.kernelRuntime == nil || pm.cfg == nil {
-		return
+		return candidates
 	}
 
 	pm.mu.Lock()
@@ -1468,14 +1598,14 @@ func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges 
 	transitionRuleIDs := collectKernelToUserspaceRuleIDs(rules, previousKernelRules, rulePlans)
 	transitionRangeIDs := collectKernelToUserspaceRangeIDs(ranges, previousKernelRanges, rangePlans)
 	if len(transitionRuleIDs) == 0 && len(transitionRangeIDs) == 0 {
-		return
+		return candidates
 	}
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
 	ruleWorkerIndexes := collectRuleWorkerIndexesForIDs(ruleAssignments, transitionRuleIDs)
 	rangeWorkerIndexes := collectRangeWorkerIndexesForIDs(rangeAssignments, transitionRangeIDs)
 	if len(ruleWorkerIndexes) == 0 && len(rangeWorkerIndexes) == 0 {
-		return
+		return candidates
 	}
 
 	pm.updateTransparentRouting(enabledRules, enabledRanges)
@@ -1483,9 +1613,113 @@ func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges 
 	pm.applyRangeAssignments(rangeAssignments)
 	if pm.waitForUserspaceWorkers(ruleWorkerIndexes, rangeWorkerIndexes, kernelUserspaceWarmupTimeout) {
 		log.Printf("kernel to userspace handoff warmup complete: rule_workers=%d range_workers=%d", len(ruleWorkerIndexes), len(rangeWorkerIndexes))
-		return
+		return candidates
 	}
-	log.Printf("kernel to userspace handoff warmup timed out: rule_workers=%d range_workers=%d", len(ruleWorkerIndexes), len(rangeWorkerIndexes))
+	candidates, preservedRules, preservedRanges, remainingRules, remainingRanges := preserveKernelOwnersOnWarmupTimeout(pm.kernelRuntime, rules, ranges, candidates, transitionRuleIDs, transitionRangeIDs, rulePlans, rangePlans)
+	log.Printf(
+		"kernel to userspace handoff warmup timed out: rule_workers=%d range_workers=%d preserved_rules=%d preserved_ranges=%d remaining_userspace_rules=%d remaining_userspace_ranges=%d",
+		len(ruleWorkerIndexes),
+		len(rangeWorkerIndexes),
+		preservedRules,
+		preservedRanges,
+		remainingRules,
+		remainingRanges,
+	)
+	return candidates
+}
+
+func preserveKernelOwnersOnWarmupTimeout(runtime kernelRuleRuntime, rules []Rule, ranges []PortRange, candidates []kernelCandidateRule, transitionRuleIDs map[int64]struct{}, transitionRangeIDs map[int64]struct{}, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) ([]kernelCandidateRule, int, int, int, int) {
+	retainer, ok := runtime.(kernelHandoffRetentionRuntime)
+	if !ok || retainer == nil {
+		return candidates, 0, 0, len(transitionRuleIDs), len(transitionRangeIDs)
+	}
+
+	ruleByID := make(map[int64]Rule, len(rules))
+	for _, rule := range rules {
+		ruleByID[rule.ID] = rule
+	}
+	rangeByID := make(map[int64]PortRange, len(ranges))
+	for _, pr := range ranges {
+		rangeByID[pr.ID] = pr
+	}
+
+	existingCandidateRuleIDs := make(map[int64]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		existingCandidateRuleIDs[candidate.rule.ID] = struct{}{}
+	}
+
+	preservedRules := 0
+	remainingRules := 0
+	for id := range transitionRuleIDs {
+		plan, ok := rulePlans[id]
+		if !ok || plan.EffectiveEngine == ruleEngineKernel {
+			continue
+		}
+		rule, exists := ruleByID[id]
+		if !exists {
+			remainingRules++
+			continue
+		}
+		retainedCandidates, retainable := retainer.retainedKernelRuleCandidates(rule)
+		if !retainable || !canAppendRetainedKernelCandidates(existingCandidateRuleIDs, retainedCandidates) {
+			remainingRules++
+			continue
+		}
+		plan.EffectiveEngine = ruleEngineKernel
+		plan.FallbackReason = ""
+		rulePlans[id] = plan
+		candidates = appendRetainedKernelCandidates(candidates, existingCandidateRuleIDs, kernelCandidateOwner{kind: workerKindRule, id: id}, retainedCandidates)
+		preservedRules++
+	}
+
+	preservedRanges := 0
+	remainingRanges := 0
+	for id := range transitionRangeIDs {
+		plan, ok := rangePlans[id]
+		if !ok || plan.EffectiveEngine == ruleEngineKernel {
+			continue
+		}
+		pr, exists := rangeByID[id]
+		if !exists {
+			remainingRanges++
+			continue
+		}
+		retainedCandidates, retainable := retainer.retainedKernelRangeCandidates(pr)
+		if !retainable || !canAppendRetainedKernelCandidates(existingCandidateRuleIDs, retainedCandidates) {
+			remainingRanges++
+			continue
+		}
+		plan.EffectiveEngine = ruleEngineKernel
+		plan.FallbackReason = ""
+		rangePlans[id] = plan
+		candidates = appendRetainedKernelCandidates(candidates, existingCandidateRuleIDs, kernelCandidateOwner{kind: workerKindRange, id: id}, retainedCandidates)
+		preservedRanges++
+	}
+
+	return candidates, preservedRules, preservedRanges, remainingRules, remainingRanges
+}
+
+func appendRetainedKernelCandidates(candidates []kernelCandidateRule, existing map[int64]struct{}, owner kernelCandidateOwner, retained []Rule) []kernelCandidateRule {
+	for _, rule := range retained {
+		existing[rule.ID] = struct{}{}
+		candidates = append(candidates, kernelCandidateRule{
+			owner: owner,
+			rule:  rule,
+		})
+	}
+	return candidates
+}
+
+func canAppendRetainedKernelCandidates(existing map[int64]struct{}, retained []Rule) bool {
+	if len(retained) == 0 {
+		return false
+	}
+	for _, rule := range retained {
+		if _, ok := existing[rule.ID]; ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (pm *ProcessManager) applyRuleAssignments(assignments [][]Rule) {
@@ -2388,6 +2622,14 @@ func isTransientKernelFallbackReason(reason string) bool {
 		strings.Contains(text, "no forwarding database entry matched the backend mac")
 }
 
+func isPressureTriggeredKernelFallbackReason(reason string) bool {
+	text := strings.ToLower(strings.TrimSpace(reason))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "kernel dataplane pressure")
+}
+
 func normalizeTransientKernelFallbackReason(reason string) string {
 	text := strings.ToLower(strings.TrimSpace(reason))
 	switch {
@@ -2397,6 +2639,8 @@ func normalizeTransientKernelFallbackReason(reason string) string {
 		return "neighbor_missing"
 	case strings.Contains(text, "no forwarding database entry matched the backend mac"):
 		return "fdb_missing"
+	case strings.Contains(text, "kernel dataplane pressure"):
+		return "table_pressure"
 	default:
 		if text == "" {
 			return "unknown"
@@ -2419,6 +2663,26 @@ func (pm *ProcessManager) hasTransientKernelFallbacksLocked() bool {
 			continue
 		}
 		if isTransientKernelFallbackReason(plan.FallbackReason) {
+			return true
+		}
+	}
+	return false
+}
+
+func (pm *ProcessManager) hasPressureTriggeredKernelFallbacksLocked() bool {
+	for _, plan := range pm.rulePlans {
+		if plan.EffectiveEngine == ruleEngineKernel || !plan.KernelEligible {
+			continue
+		}
+		if isPressureTriggeredKernelFallbackReason(plan.FallbackReason) {
+			return true
+		}
+	}
+	for _, plan := range pm.rangePlans {
+		if plan.EffectiveEngine == ruleEngineKernel || !plan.KernelEligible {
+			continue
+		}
+		if isPressureTriggeredKernelFallbackReason(plan.FallbackReason) {
 			return true
 		}
 	}
@@ -2762,9 +3026,14 @@ func (pm *ProcessManager) monitorLoop() {
 		runKernelMaintenance := false
 		retryKernelFallbacks := false
 		retryKernelLogLine := ""
+		recoverPressureFallbacks := false
+		pressureRecoveryLogLine := ""
+		var kernelPressurePrev kernelRuntimePressureSnapshot
+		hasPressureFallbacks := false
 		now := time.Now()
 
 		pm.mu.Lock()
+		runtime := pm.kernelRuntime
 		if pm.shouldRefreshKernelStatsLocked(now) {
 			refreshKernelStats = true
 		}
@@ -2774,6 +3043,8 @@ func (pm *ProcessManager) monitorLoop() {
 		}
 		if pm.kernelRuntime != nil {
 			transientSummary := pm.summarizeTransientKernelFallbacksLocked()
+			hasPressureFallbacks = pm.hasPressureTriggeredKernelFallbacksLocked()
+			kernelPressurePrev = pm.kernelPressureSnapshot
 			if transientSummary == "" {
 				pm.takeKernelRetryLogLineLocked("", now)
 			} else if pm.kernelRetryAt.IsZero() || now.Sub(pm.kernelRetryAt) >= kernelFallbackRetryInterval {
@@ -2890,14 +3161,35 @@ func (pm *ProcessManager) monitorLoop() {
 				log.Printf("kernel dataplane maintenance failed: %v", err)
 			}
 		}
+		kernelPressureCurrent := snapshotKernelRuntimePressure(runtime)
+		pm.mu.Lock()
+		pm.kernelPressureSnapshot = kernelPressureCurrent
+		pm.mu.Unlock()
+		if needsRedistribute, _ := kernelRuntimeNeedsRedistributeSnapshot(kernelPressureCurrent); needsRedistribute {
+			pm.requestRedistributeWorkers(0)
+		}
+		if hasPressureFallbacks && kernelRuntimePressureCleared(kernelPressurePrev, kernelPressureCurrent) {
+			engine := strings.TrimSpace(kernelPressurePrev.Engine)
+			if engine == "" {
+				engine = "kernel"
+			}
+			recoverPressureFallbacks = true
+			pressureRecoveryLogLine = fmt.Sprintf("kernel dataplane retry: %s pressure cleared, re-evaluating table pressure fallbacks", engine)
+		}
 		if refreshKernelStats {
 			pm.refreshKernelStatsCache()
 		}
 		if retryKernelLogLine != "" {
 			log.Print(retryKernelLogLine)
 		}
+		if pressureRecoveryLogLine != "" {
+			log.Print(pressureRecoveryLogLine)
+		}
 		if retryKernelFallbacks {
 			pm.requestRedistributeWorkers(redistributeRetryDelay)
+		}
+		if recoverPressureFallbacks {
+			pm.requestRedistributeWorkers(0)
 		}
 
 		for _, idx := range restartRuleIdx {

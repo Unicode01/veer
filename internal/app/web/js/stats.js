@@ -90,6 +90,72 @@
     }
   }
 
+  function kernelRuntimePressureLevel(engine) {
+    const level = String(engine && engine.pressure_level || '').toLowerCase().trim();
+    if (level) return level;
+    return engine && engine.pressure_active ? 'hold' : 'none';
+  }
+
+  function kernelRuntimePressureRank(level) {
+    switch (level) {
+      case 'hold':
+        return 1;
+      case 'shed':
+        return 2;
+      case 'full':
+        return 3;
+      default:
+        return 0;
+    }
+  }
+
+  function kernelRuntimePressureBadge(level, reason) {
+    let badgeClass = 'badge-disabled';
+    switch (level) {
+      case 'hold':
+        badgeClass = 'badge-kernel';
+        break;
+      case 'shed':
+        badgeClass = 'badge-error';
+        break;
+      case 'full':
+        badgeClass = 'badge-stopped';
+        break;
+      default:
+        badgeClass = 'badge-disabled';
+        break;
+    }
+    return app.createBadgeNode(badgeClass, app.t('kernel.pressure.' + level), reason || '');
+  }
+
+  function kernelRuntimePressureSummary(engines) {
+    const active = (engines || []).filter((engine) => !!engine && !!engine.pressure_active);
+    if (!active.length) {
+      return {
+        level: 'none',
+        subtext: app.t('kernel.pressure.noneHint')
+      };
+    }
+
+    let highestLevel = 'none';
+    active.forEach((engine) => {
+      const level = kernelRuntimePressureLevel(engine);
+      if (kernelRuntimePressureRank(level) > kernelRuntimePressureRank(highestLevel)) {
+        highestLevel = level;
+      }
+    });
+
+    const subtext = active.map((engine) => {
+      const label = String(engine.name || app.t('common.dash')).toUpperCase();
+      return label + ' ' + app.t('kernel.pressure.' + kernelRuntimePressureLevel(engine));
+    }).join('; ');
+
+    return {
+      level: highestLevel,
+      subtext
+    };
+  }
+
   function kernelRuntimeMapPercent(entries, capacity) {
     if (!(capacity > 0)) return 0;
     return (entries / capacity) * 100;
@@ -225,6 +291,33 @@
     return card;
   }
 
+  function kernelRuntimeDetailText(engine) {
+    if (!engine) return '';
+    const parts = [];
+    [
+      engine.pressure_reason,
+      engine.degraded_reason,
+      engine.available_reason,
+      engine.attachment_summary
+    ].forEach((item) => {
+      const text = String(item || '').trim();
+      if (!text) return;
+      if (parts.indexOf(text) >= 0) return;
+      parts.push(text);
+    });
+    return parts.join(' | ');
+  }
+
+  function kernelRuntimeDegradedSummaryText(engines) {
+    const degraded = (engines || []).filter((engine) => !!engine.degraded);
+    if (!degraded.length) return '';
+    return degraded.map((engine) => {
+      const label = String(engine.name || app.t('common.dash')).toUpperCase();
+      const detail = kernelRuntimeDetailText(engine) || app.t('kernel.summary.degradedValue', { engine: label });
+      return label + ': ' + detail;
+    }).join('; ');
+  }
+
   let kernelRuntimeTooltip = null;
   let kernelRuntimeTooltipTrigger = null;
   let kernelRuntimeTooltipPinned = false;
@@ -314,14 +407,14 @@
     positionKernelRuntimeTooltip();
   }
 
-  function kernelRuntimeDetailNode(detail) {
+  function kernelRuntimeDetailNode(detail, degraded) {
     const text = String(detail || '').trim();
     if (!text) return app.emptyCellNode('stat-muted');
     ensureKernelRuntimeTooltip();
 
     const button = app.createNode('button', {
-      className: 'kernel-runtime-detail-trigger',
-      text: app.t('kernel.engine.details'),
+      className: 'kernel-runtime-detail-trigger' + (degraded ? ' is-warning' : ''),
+      text: app.t(degraded ? 'kernel.degraded.yes' : 'kernel.engine.details'),
       attrs: {
         type: 'button',
         'aria-label': text,
@@ -374,6 +467,8 @@
 
     const orderNode = app.createNode('div', { className: 'kernel-runtime-inline' });
     const configuredOrder = Array.isArray(data.configured_order) ? data.configured_order : [];
+    const engines = Array.isArray(data.engines) ? data.engines : [];
+    const pressureSummary = kernelRuntimePressureSummary(engines);
     if (configuredOrder.length) {
       configuredOrder.forEach((name) => orderNode.appendChild(kernelEngineBadge(name)));
     } else {
@@ -399,6 +494,11 @@
       })
     ));
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
+      'kernel.summary.pressure',
+      kernelRuntimePressureBadge(pressureSummary.level),
+      pressureSummary.subtext
+    ));
+    summaryFragment.appendChild(kernelRuntimeSummaryCard(
       'kernel.summary.fallbacks',
       app.t('kernel.summary.fallbacksValue', {
         rules: data.kernel_fallback_rule_count || 0,
@@ -422,8 +522,14 @@
         text: data.transient_fallback_summary
       }));
     }
+    const degradedSummary = kernelRuntimeDegradedSummaryText(engines);
+    if (degradedSummary) {
+      el.kernelRuntimeSummary.appendChild(app.createNode('div', {
+        className: 'kernel-runtime-note',
+        text: app.t('kernel.summary.degraded') + ': ' + degradedSummary
+      }));
+    }
 
-    const engines = Array.isArray(data.engines) ? data.engines : [];
     if (!engines.length) {
       el.noKernelRuntime.style.display = 'block';
       app.toggleTableVisibility('kernelRuntimeTable', false);
@@ -436,8 +542,10 @@
     const fragment = document.createDocumentFragment();
     engines.forEach((engine) => {
       const tr = document.createElement('tr');
+      const pressureLevel = kernelRuntimePressureLevel(engine);
       tr.appendChild(app.createCell(kernelEngineBadge(engine.name), 'stat-mono'));
       tr.appendChild(app.createCell(kernelStatePill(!!engine.available, 'kernel.available.yes', 'kernel.available.no')));
+      tr.appendChild(app.createCell(kernelRuntimePressureBadge(pressureLevel, engine.pressure_reason || '')));
       tr.appendChild(app.createCell(kernelStatePill(!!engine.loaded, 'kernel.loaded.yes', 'kernel.loaded.no')));
       tr.appendChild(app.createCell(String(engine.active_entries || 0), 'stat-mono'));
       tr.appendChild(app.createCell(String(engine.attachments || 0), 'stat-mono'));
@@ -446,7 +554,7 @@
       tr.appendChild(app.createCell(kernelRuntimeModeLabel(engine.last_reconcile_mode)));
       tr.appendChild(app.createCell(kernelStatePill(!!engine.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled')));
       tr.appendChild(app.createCell(
-        kernelRuntimeDetailNode(engine.available_reason || engine.attachment_summary),
+        kernelRuntimeDetailNode(kernelRuntimeDetailText(engine), !!engine.degraded || !!engine.pressure_active),
         'kernel-runtime-detail-cell'
       ));
       fragment.appendChild(tr);

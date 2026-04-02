@@ -25,6 +25,10 @@ func TestSameKernelRuleDataplaneConfig(t *testing.T) {
 	if !sameKernelRuleDataplaneConfig(base, same) {
 		t.Fatal("sameKernelRuleDataplaneConfig() = false, want true when only remark/tag changed")
 	}
+	same.ID = 202
+	if !sameKernelRuleDataplaneConfig(base, same) {
+		t.Fatal("sameKernelRuleDataplaneConfig() = false, want true when only synthetic id changed")
+	}
 
 	diff := base
 	diff.OutSourceIP = "198.51.100.11"
@@ -33,21 +37,56 @@ func TestSameKernelRuleDataplaneConfig(t *testing.T) {
 	}
 }
 
+func TestSameKernelRuleOwnerDataplaneConfig(t *testing.T) {
+	base := Rule{
+		ID:               1001,
+		InInterface:      "vmbr0",
+		InIP:             "198.51.100.10",
+		InPort:           20022,
+		OutInterface:     "vmbr1",
+		OutIP:            "192.0.2.6",
+		OutPort:          22,
+		Protocol:         "tcp",
+		Transparent:      true,
+		kernelLogKind:    workerKindRange,
+		kernelLogOwnerID: 88,
+	}
+
+	same := base
+	same.ID = 1002
+	if !sameKernelRuleOwnerDataplaneConfig(base, same) {
+		t.Fatal("sameKernelRuleOwnerDataplaneConfig() = false, want true when only synthetic id changed")
+	}
+
+	diffOwner := same
+	diffOwner.kernelLogOwnerID = 89
+	if sameKernelRuleOwnerDataplaneConfig(base, diffOwner) {
+		t.Fatal("sameKernelRuleOwnerDataplaneConfig() = true, want false when owner changed")
+	}
+}
+
 func TestShouldReuseKernelRuleAfterPrepareFailure(t *testing.T) {
 	rule := Rule{
-		ID:           7,
-		InInterface:  "vmbr0",
-		InIP:         "198.51.100.10",
-		InPort:       20022,
-		OutInterface: "vmbr1",
-		OutIP:        "192.0.2.6",
-		OutPort:      22,
-		Protocol:     "tcp",
-		Transparent:  true,
+		ID:               7,
+		InInterface:      "vmbr0",
+		InIP:             "198.51.100.10",
+		InPort:           20022,
+		OutInterface:     "vmbr1",
+		OutIP:            "192.0.2.6",
+		OutPort:          22,
+		Protocol:         "tcp",
+		Transparent:      true,
+		kernelLogKind:    workerKindRange,
+		kernelLogOwnerID: 55,
 	}
 
 	if !shouldReuseKernelRuleAfterPrepareFailure(rule, rule, `resolve outbound path on "vmbr1": no forwarding database entry matched the backend MAC`, true) {
 		t.Fatal("shouldReuseKernelRuleAfterPrepareFailure() = false, want true for transient failure with unchanged rule")
+	}
+	syntheticShift := rule
+	syntheticShift.ID = 7001
+	if !shouldReuseKernelRuleAfterPrepareFailure(rule, syntheticShift, `resolve outbound path on "vmbr1": no forwarding database entry matched the backend MAC`, true) {
+		t.Fatal("shouldReuseKernelRuleAfterPrepareFailure() = false, want true when only synthetic id changed")
 	}
 	if shouldReuseKernelRuleAfterPrepareFailure(rule, rule, `create kernel collection: verifier rejected program`, true) {
 		t.Fatal("shouldReuseKernelRuleAfterPrepareFailure() = true, want false for non-transient failure")
@@ -59,6 +98,32 @@ func TestShouldReuseKernelRuleAfterPrepareFailure(t *testing.T) {
 	}
 	if shouldReuseKernelRuleAfterPrepareFailure(rule, rule, `resolve outbound path on "vmbr1": no forwarding database entry matched the backend MAC`, false) {
 		t.Fatal("shouldReuseKernelRuleAfterPrepareFailure() = true, want false when transient reuse is disabled")
+	}
+}
+
+func TestMatchDesiredKernelRuleAllowsSyntheticIDDrift(t *testing.T) {
+	current := Rule{
+		ID:               1001,
+		InInterface:      "vmbr0",
+		InIP:             "198.51.100.10",
+		InPort:           20022,
+		OutInterface:     "vmbr1",
+		OutIP:            "192.0.2.6",
+		OutPort:          22,
+		Protocol:         "tcp",
+		Transparent:      true,
+		kernelLogKind:    workerKindRange,
+		kernelLogOwnerID: 55,
+	}
+	desired := current
+	desired.ID = 2001
+
+	matched, ok := matchDesiredKernelRule(indexKernelRulesByMatchKey([]Rule{desired}), current)
+	if !ok {
+		t.Fatal("matchDesiredKernelRule() = false, want true when only synthetic id changed")
+	}
+	if matched.ID != desired.ID {
+		t.Fatalf("matchDesiredKernelRule() id = %d, want %d", matched.ID, desired.ID)
 	}
 }
 

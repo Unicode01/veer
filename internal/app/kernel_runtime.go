@@ -30,3 +30,8 @@ type kernelRuleRuntime interface {
 	SnapshotAssignments() map[int64]string
 	Close() error
 }
+
+type kernelHandoffRetentionRuntime interface {
+	retainedKernelRuleCandidates(rule Rule) ([]Rule, bool)
+	retainedKernelRangeCandidates(pr PortRange) ([]Rule, bool)
+}

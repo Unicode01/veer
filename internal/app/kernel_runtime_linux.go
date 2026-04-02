@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
@@ -265,6 +266,7 @@ type linuxKernelRuleRuntime struct {
 	lastSkipLog        map[string]struct{}
 	lastReconcileMode  string
 	stateLog           kernelStateLogger
+	pressureState      kernelRuntimePressureState
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPruneState     kernelFlowPruneState
 	runtimeMapCounts   kernelRuntimeMapCountSnapshot
@@ -325,7 +327,9 @@ func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
 			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
 		}
 	})
-	return rt.available, rt.availableReason
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.currentAvailabilityLocked(time.Now())
 }
 
 func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
@@ -629,6 +633,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	rt.flowPruneState.reset()
 	rt.lastReconcileMode = "rebuild"
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	return results, nil
 }
 
@@ -656,6 +661,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	}
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	return nil
 }
 
@@ -792,6 +798,7 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	if rt.coll != nil {
 		rt.coll.Close()
 		rt.coll = nil
@@ -832,17 +839,14 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 		return retained, nil
 	}
 
-	desiredByID := make(map[int64]Rule, len(rules))
-	for _, rule := range rules {
-		desiredByID[rule.ID] = rule
-	}
+	desiredByKey := indexKernelRulesByMatchKey(rules)
 
 	kept := make([]preparedKernelRule, 0, len(rt.preparedRules))
 	for _, item := range rt.preparedRules {
-		desired, ok := desiredByID[item.rule.ID]
-		if ok && sameKernelRuleDataplaneConfig(desired, item.rule) {
+		desired, ok := matchDesiredKernelRule(desiredByKey, item.rule)
+		if ok {
 			kept = append(kept, item)
-			retained[item.rule.ID] = struct{}{}
+			retained[desired.ID] = struct{}{}
 			continue
 		}
 		if err := deleteKernelMapEntry(rulesMap, item.key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -855,6 +859,7 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 	rt.flowsMapCapacity = capacities.Flows
 	rt.natMapCapacity = capacities.NATPorts
 	rt.flowPruneState.reset()
+	rt.invalidatePressureStateLocked()
 	return retained, nil
 }
 
@@ -1049,6 +1054,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.natMapCapacity = capacities.NATPorts
 	rt.lastReconcileMode = "cleared"
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	rt.stateLog.Logf("kernel dataplane reconcile: drained active rules, preserving flows for existing connections")
 	return nil
 }
@@ -1068,6 +1074,11 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		}
 		currentAttachments[kernelAttachmentKeyForFilter(att.filter)] = att
 	}
+	plannedKeys := make([]kernelAttachmentKey, 0, len(plans))
+	for _, plan := range plans {
+		plannedKeys = append(plannedKeys, plan.key)
+	}
+	existingAttachments := kernelAttachmentPresence(plannedKeys)
 
 	newAttachments := make([]kernelAttachment, 0, len(plans))
 	createdAttachments := make([]kernelAttachment, 0, len(plans))
@@ -1075,7 +1086,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	replyReady := make(map[int]bool, len(replyIfRules))
 
 	for _, plan := range plans {
-		if current, ok := currentAttachments[plan.key]; ok && kernelAttachmentExists(plan.key) {
+		if current, ok := currentAttachments[plan.key]; ok && existingAttachments[plan.key] {
 			newAttachments = append(newAttachments, current)
 		} else {
 			if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
@@ -1130,6 +1141,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	rt.flowPruneState.reset()
 	rt.lastReconcileMode = "in_place"
 	rt.invalidateRuntimeMapCountCacheLocked()
+	rt.invalidatePressureStateLocked()
 	rt.stateLog.Logf(
 		"kernel dataplane reconcile: updated %d active kernel entry(s) in-place (upsert=%d delete=%d attach=%d detach=%d preserve=%d)",
 		len(prepared),
@@ -1373,12 +1385,12 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	skipLogger := newKernelSkipLogger("kernel")
 	prepareCtx := newKernelPrepareContext(enableTrafficStats)
-	previousByRuleID := groupPreparedKernelRulesByRuleID(previous)
+	previousByKey := groupPreparedKernelRulesByMatchKey(previous)
 
 	for _, rule := range rules {
 		items, err := prepareKernelRule(prepareCtx, rule)
 		if err != nil {
-			if reused, ok := reusablePreparedKernelRules(rule, err, previousByRuleID, allowTransientReuse); ok {
+			if reused, ok := reusablePreparedKernelRules(rule, err, previousByKey, allowTransientReuse); ok {
 				prepared = append(prepared, reused...)
 				for _, item := range reused {
 					forwardIfRules[item.inIfIndex] = append(forwardIfRules[item.inIfIndex], rule.ID)
@@ -1401,22 +1413,22 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 	return prepared, forwardIfRules, replyIfRules, results, skipLogger.Snapshot()
 }
 
-func groupPreparedKernelRulesByRuleID(items []preparedKernelRule) map[int64][]preparedKernelRule {
+func groupPreparedKernelRulesByMatchKey(items []preparedKernelRule) map[kernelRuleMatchKey][]preparedKernelRule {
 	if len(items) == 0 {
 		return nil
 	}
-	grouped := make(map[int64][]preparedKernelRule)
+	grouped := make(map[kernelRuleMatchKey][]preparedKernelRule)
 	for _, item := range items {
-		grouped[item.rule.ID] = append(grouped[item.rule.ID], item)
+		grouped[kernelRuleMatchKeyFor(item.rule)] = append(grouped[kernelRuleMatchKeyFor(item.rule)], item)
 	}
 	return grouped
 }
 
-func reusablePreparedKernelRules(rule Rule, err error, previousByRuleID map[int64][]preparedKernelRule, allowTransientReuse bool) ([]preparedKernelRule, bool) {
-	if len(previousByRuleID) == 0 || err == nil {
+func reusablePreparedKernelRules(rule Rule, err error, previousByKey map[kernelRuleMatchKey][]preparedKernelRule, allowTransientReuse bool) ([]preparedKernelRule, bool) {
+	if len(previousByKey) == 0 || err == nil {
 		return nil, false
 	}
-	items := previousByRuleID[rule.ID]
+	items := previousByKey[kernelRuleMatchKeyFor(rule)]
 	if len(items) == 0 || !shouldReuseKernelRuleAfterPrepareFailure(rule, items[0].rule, err.Error(), allowTransientReuse) {
 		return nil, false
 	}
@@ -1487,24 +1499,7 @@ func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(forwardIfRules map[in
 }
 
 func kernelAttachmentExists(key kernelAttachmentKey) bool {
-	link, err := netlink.LinkByIndex(key.linkIndex)
-	if err != nil {
-		return false
-	}
-	filters, err := netlink.FilterList(link, key.parent)
-	if err != nil {
-		return false
-	}
-	for _, filter := range filters {
-		attrs := filter.Attrs()
-		if attrs == nil {
-			continue
-		}
-		if attrs.LinkIndex == key.linkIndex && attrs.Parent == key.parent && attrs.Priority == key.priority && attrs.Handle == key.handle {
-			return true
-		}
-	}
-	return false
+	return kernelAttachmentPresence([]kernelAttachmentKey{key})[key]
 }
 
 func updateKernelMapEntries[K any, V any](m *ebpf.Map, keys []K, values []V) error {

@@ -157,3 +157,42 @@ func TestHandleKernelRuntimeIncludesFallbackSummary(t *testing.T) {
 		t.Fatal("transient_fallback_summary = empty, want non-empty")
 	}
 }
+
+func TestHandleKernelRuntimePressureFallbackDoesNotSetRetryPending(t *testing.T) {
+	pm := &ProcessManager{
+		cfg: &Config{
+			DefaultEngine:     ruleEngineAuto,
+			KernelEngineOrder: []string{kernelEngineTC},
+		},
+		rulePlans: map[int64]ruleDataplanePlan{
+			1: {
+				KernelEligible:  true,
+				EffectiveEngine: ruleEngineUserspace,
+				FallbackReason:  `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+			},
+		},
+		rangePlans: map[int64]rangeDataplanePlan{},
+	}
+
+	req := httptest.NewRequest("GET", "/api/kernel/runtime", nil)
+	w := httptest.NewRecorder()
+
+	handleKernelRuntime(w, req, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp KernelRuntimeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if resp.TransientFallbackRuleCount != 0 || resp.TransientFallbackRangeCount != 0 {
+		t.Fatalf("transient fallback counts = rules:%d ranges:%d, want 0/0 for pressure-only fallback", resp.TransientFallbackRuleCount, resp.TransientFallbackRangeCount)
+	}
+	if resp.TransientFallbackSummary != "" {
+		t.Fatalf("transient_fallback_summary = %q, want empty for pressure-only fallback", resp.TransientFallbackSummary)
+	}
+	if resp.RetryPending {
+		t.Fatal("retry_pending = true, want false for pressure-only fallback")
+	}
+}

@@ -265,8 +265,8 @@ tr.row-pending td {
 
 .kernel-runtime-summary {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
     margin: 0 0 14px;
     align-items: start;
 }
@@ -466,6 +466,19 @@ tr.row-pending td {
     color: var(--primary);
 }
 
+.kernel-runtime-detail-trigger.is-warning {
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+    color: var(--warning-text);
+}
+
+.kernel-runtime-detail-trigger.is-warning:hover,
+.kernel-runtime-detail-trigger.is-warning:focus {
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+    color: var(--warning-text);
+}
+
 .kernel-runtime-floating-tooltip {
     position: fixed;
     left: 0;
@@ -552,25 +565,27 @@ tr.row-pending td {
     #kernelRuntimeTable td:nth-child(4),
     #kernelRuntimeTable th:nth-child(5),
     #kernelRuntimeTable td:nth-child(5),
-    #kernelRuntimeTable th:nth-child(8),
-    #kernelRuntimeTable td:nth-child(8),
-    #kernelRuntimeTable th:nth-child(9),
-    #kernelRuntimeTable td:nth-child(9) {
-        width: 96px;
-    }
-
     #kernelRuntimeTable th:nth-child(6),
-    #kernelRuntimeTable td:nth-child(6) {
-        width: 118px;
+    #kernelRuntimeTable td:nth-child(6),
+    #kernelRuntimeTable th:nth-child(9),
+    #kernelRuntimeTable td:nth-child(9),
+    #kernelRuntimeTable th:nth-child(10),
+    #kernelRuntimeTable td:nth-child(10) {
+        width: 96px;
     }
 
     #kernelRuntimeTable th:nth-child(7),
     #kernelRuntimeTable td:nth-child(7) {
+        width: 118px;
+    }
+
+    #kernelRuntimeTable th:nth-child(8),
+    #kernelRuntimeTable td:nth-child(8) {
         width: 28%;
     }
 
-    #kernelRuntimeTable th:nth-child(10),
-    #kernelRuntimeTable td:nth-child(10) {
+    #kernelRuntimeTable th:nth-child(11),
+    #kernelRuntimeTable td:nth-child(11) {
         width: 92px;
     }
 
@@ -864,6 +879,12 @@ tr.row-pending td {
 
 @media (min-width: 961px) {
     .kernel-runtime-summary {
-        grid-template-columns: repeat(6, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1440px) {
+    .kernel-runtime-summary {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
     }
 }
