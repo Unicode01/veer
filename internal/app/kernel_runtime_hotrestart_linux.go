@@ -450,9 +450,14 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 		state.close()
 		return nil, nil
 	}
-	if !haveFlows || !haveNAT {
+	if !haveFlows || !haveNAT || state.oldStatsMap == nil && state.replacements[kernelStatsMapName] == nil {
 		state.close()
-		return nil, fmt.Errorf("incomplete pinned tc state: flows=%t nat=%t", haveFlows, haveNAT)
+		return nil, fmt.Errorf(
+			"incomplete pinned tc state: flows=%t nat=%t stats=%t",
+			haveFlows,
+			haveNAT,
+			state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil,
+		)
 	}
 	return state, nil
 }
@@ -495,9 +500,13 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestar
 		state.close()
 		return nil, nil
 	}
-	if !haveFlows {
+	if !haveFlows || state.oldStatsMap == nil && state.replacements[kernelStatsMapName] == nil {
 		state.close()
-		return nil, fmt.Errorf("incomplete pinned xdp state: flows=false")
+		return nil, fmt.Errorf(
+			"incomplete pinned xdp state: flows=%t stats=%t",
+			haveFlows,
+			state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil,
+		)
 	}
 	return state, nil
 }

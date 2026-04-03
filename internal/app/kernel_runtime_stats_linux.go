@@ -166,6 +166,36 @@ func cloneKernelStatsCorrections(src map[uint32]kernelRuleStats) map[uint32]kern
 	return dst
 }
 
+func snapshotKernelStatsValues(statsMap *ebpf.Map) (map[uint32]kernelStatsValueV4, error) {
+	out := make(map[uint32]kernelStatsValueV4)
+	if statsMap == nil {
+		return out, nil
+	}
+
+	iter := statsMap.Iterate()
+	if kernelMapHasPerCPUValue(statsMap.Type()) {
+		possibleCPUs, err := kernelPossibleCPUCount()
+		if err != nil {
+			return nil, fmt.Errorf("resolve possible cpu count for kernel stats snapshot: %w", err)
+		}
+		var ruleID uint32
+		values := make([]kernelStatsValueV4, possibleCPUs)
+		for iter.Next(&ruleID, values) {
+			out[ruleID] = aggregateKernelPerCPUStats(values)
+		}
+	} else {
+		var ruleID uint32
+		var value kernelStatsValueV4
+		for iter.Next(&ruleID, &value) {
+			out[ruleID] = value
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("iterate kernel stats map: %w", err)
+	}
+	return out, nil
+}
+
 func copyKernelStatsMap(dst *ebpf.Map, src *ebpf.Map) error {
 	if dst == nil || src == nil {
 		return nil
@@ -224,6 +254,87 @@ func copyKernelStatsMap(dst *ebpf.Map, src *ebpf.Map) error {
 		return fmt.Errorf("iterate source kernel stats map: %w", err)
 	}
 	return nil
+}
+
+func snapshotKernelLiveCountsFromFlows(flowsMap *ebpf.Map) (map[uint32]kernelStatsValueV4, error) {
+	out := make(map[uint32]kernelStatsValueV4)
+	if flowsMap == nil {
+		return out, nil
+	}
+
+	iter := flowsMap.Iterate()
+	var key tcFlowKeyV4
+	var value tcFlowValueV4
+	for iter.Next(&key, &value) {
+		if !kernelFlowCountsTowardLiveGauge(value) {
+			continue
+		}
+		item := out[value.RuleID]
+		if key.Proto == unix.IPPROTO_UDP {
+			item.UDPNatEntries++
+		} else {
+			item.TCPActiveConns++
+		}
+		out[value.RuleID] = item
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("iterate kernel flows map for live counts: %w", err)
+	}
+	return out, nil
+}
+
+func kernelFlowCountsTowardLiveGauge(value tcFlowValueV4) bool {
+	if value.RuleID == 0 {
+		return false
+	}
+	if value.Flags&kernelFlowFlagCounted == 0 {
+		return false
+	}
+	if value.Flags&kernelFlowFlagFullNAT != 0 && value.Flags&kernelFlowFlagFrontEntry != 0 {
+		return false
+	}
+	return true
+}
+
+func kernelLiveStatsCorrection(observed map[uint32]kernelStatsValueV4, live map[uint32]kernelStatsValueV4) map[uint32]kernelRuleStats {
+	if len(observed) == 0 && len(live) == 0 {
+		return map[uint32]kernelRuleStats{}
+	}
+
+	ids := make(map[uint32]struct{}, len(observed)+len(live))
+	for ruleID := range observed {
+		ids[ruleID] = struct{}{}
+	}
+	for ruleID := range live {
+		ids[ruleID] = struct{}{}
+	}
+
+	out := make(map[uint32]kernelRuleStats)
+	for ruleID := range ids {
+		observedItem := observed[ruleID]
+		liveItem := live[ruleID]
+		delta := kernelRuleStats{
+			TCPActiveConns: int64(liveItem.TCPActiveConns) - int64(observedItem.TCPActiveConns),
+			UDPNatEntries:  int64(liveItem.UDPNatEntries) - int64(observedItem.UDPNatEntries),
+		}
+		if delta.TCPActiveConns == 0 && delta.UDPNatEntries == 0 {
+			continue
+		}
+		out[ruleID] = delta
+	}
+	return out
+}
+
+func reconcileKernelStatsCorrectionFromMaps(statsMap *ebpf.Map, flowsMap *ebpf.Map) (map[uint32]kernelRuleStats, error) {
+	observed, err := snapshotKernelStatsValues(statsMap)
+	if err != nil {
+		return nil, err
+	}
+	live, err := snapshotKernelLiveCountsFromFlows(flowsMap)
+	if err != nil {
+		return nil, err
+	}
+	return kernelLiveStatsCorrection(observed, live), nil
 }
 
 func kernelRuleStatsFromValue(value kernelStatsValueV4) kernelRuleStats {

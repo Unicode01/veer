@@ -251,6 +251,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	actualCapacities := desiredCapacities
 	var oldStatsMap *ebpf.Map
 	var hotRestartState *kernelHotRestartMapState
+	hotRestartStatsCorrection := map[uint32]kernelRuleStats{}
 	if rt.coll != nil && rt.coll.Maps != nil {
 		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
 			if flowMapReplacement == nil {
@@ -374,6 +375,13 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 			hotRestartState.oldStatsMap = nil
 		}
 	}
+	if hotRestartState != nil {
+		if correction, err := reconcileKernelStatsCorrectionFromMaps(coll.Maps[kernelStatsMapName], coll.Maps[kernelFlowsMapName]); err != nil {
+			log.Printf("xdp dataplane hot restart: reconcile xdp stats against flows failed: %v", err)
+		} else {
+			hotRestartStatsCorrection = correction
+		}
+	}
 
 	keys := make([]tcRuleKeyV4, 0, len(prepared))
 	values := make([]xdpRuleValueV4, 0, len(prepared))
@@ -455,6 +463,9 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	rt.lastReconcileMode = "rebuild"
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	if hotRestartState != nil {
+		rt.statsCorrection = hotRestartStatsCorrection
+	}
 	if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments)); err != nil {
 		log.Printf("xdp dataplane runtime metadata: write xdp runtime metadata failed: %v", err)
 	}

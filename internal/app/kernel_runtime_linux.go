@@ -443,6 +443,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	actualCapacities := desiredCapacities
 	var oldStatsMap *ebpf.Map
 	var hotRestartState *kernelHotRestartMapState
+	hotRestartStatsCorrection := map[uint32]kernelRuleStats{}
 	if rt.coll != nil && rt.coll.Maps != nil {
 		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
 			if mapReplacements == nil {
@@ -589,6 +590,13 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 			hotRestartState.oldStatsMap = nil
 		}
 	}
+	if hotRestartState != nil {
+		if correction, err := reconcileKernelStatsCorrectionFromMaps(coll.Maps[kernelStatsMapName], coll.Maps[kernelFlowsMapName]); err != nil {
+			log.Printf("kernel dataplane hot restart: reconcile tc stats against flows failed: %v", err)
+		} else {
+			hotRestartStatsCorrection = correction
+		}
+	}
 
 	keys := make([]tcRuleKeyV4, 0, len(prepared))
 	values := make([]tcRuleValueV4, 0, len(prepared))
@@ -699,6 +707,9 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	rt.lastReconcileMode = "rebuild"
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	if hotRestartState != nil {
+		rt.statsCorrection = hotRestartStatsCorrection
+	}
 	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed: %v", err)
 	}

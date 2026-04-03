@@ -40,6 +40,18 @@ WEB_TOKEN="${WEB_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' 
 BPF_STATE_DIR="${FORWARD_BPF_STATE_DIR:-/sys/fs/bpf/forward}"
 RUNTIME_STATE_DIR="${FORWARD_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}"
 HOT_RESTART_MARKER="${INSTALL_DIR}/.hot-restart-kernel"
+PRESERVE_HOT_RESTART_MARKER=0
+
+cleanup_hot_restart_marker() {
+    if [[ "${PRESERVE_HOT_RESTART_MARKER}" == "1" ]]; then
+        return
+    fi
+    if [[ -n "${HOT_RESTART_MARKER:-}" ]]; then
+        rm -f "${HOT_RESTART_MARKER}"
+    fi
+}
+
+trap cleanup_hot_restart_marker EXIT
 
 # ---------- 按架构查找二进制 ----------
 ARCH="$(uname -m)"
@@ -129,7 +141,11 @@ KillMode=process
 
 NoNewPrivileges=false
 ProtectSystem=strict
-ReadWritePaths=${INSTALL_DIR} /tmp /sys/fs/bpf
+ReadWritePaths=${INSTALL_DIR}
+ReadWritePaths=${RUNTIME_STATE_DIR}
+ReadWritePaths=/tmp
+ReadWritePaths=/sys/fs/bpf
+ReadWritePaths=${BPF_STATE_DIR}
 PrivateTmp=true
 
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON
@@ -156,6 +172,7 @@ if $IS_UPDATE; then
         rm -f "$HOT_RESTART_MARKER"
         ok "服务已热重启（worker 自动重连，kernel flow/NAT 表尝试跨进程接力）"
     else
+        PRESERVE_HOT_RESTART_MARKER=1
         warn "热重启失败，已保留标记文件与 bpffs 状态，修复后可再次执行部署"
         exit 1
     fi
