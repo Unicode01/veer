@@ -64,7 +64,10 @@
       else if (type === 'site') app.loadSites();
       else if (type === 'range') app.loadRanges();
     } catch (e) {
-      if (e.message !== 'unauthorized') app.notify('error', app.t('errors.operationFailed', { message: e.message }));
+      if (e.message !== 'unauthorized') {
+        const message = app.getValidationIssueMessage(e.payload, ['toggle', 'set_enabled']) || app.translateValidationMessage(e.message);
+        app.notify('error', app.t('errors.operationFailed', { message: message }));
+      }
     } finally {
       app.setRowPending(type, id, false);
       rerenderByType(type);
@@ -331,7 +334,7 @@
     let valid = true;
     if (!app.validateRequiredField(app.el.inIP)) valid = false;
     if (!app.validatePortField(app.$('inPort'))) valid = false;
-    if (!app.validateIPv4Field(app.$('outIP'))) valid = false;
+    if (!app.validateIPField(app.$('outIP'))) valid = false;
     if (!app.validatePortField(app.$('outPort'))) valid = false;
     if (!valid || !rule.in_ip || !rule.in_port || !rule.out_ip || !rule.out_port) {
       app.notify('error', app.t('validation.reviewErrors'));
@@ -437,7 +440,7 @@
 
     let valid = true;
     if (!app.validateRequiredField(app.$('siteDomain'))) valid = false;
-    if (!app.validateIPv4Field(app.$('siteBackendIP'))) valid = false;
+    if (!app.validateIPField(app.$('siteBackendIP'))) valid = false;
     if (!app.validateOptionalPortField(app.$('siteBackendHTTP'), true)) valid = false;
     if (!app.validateOptionalPortField(app.$('siteBackendHTTPS'), true)) valid = false;
     if (!valid || !site.domain || !site.backend_ip) {
@@ -469,6 +472,10 @@
           app.loadSites();
         } catch (err) {
           if (err.message !== 'unauthorized') {
+            if (err.payload && Array.isArray(err.payload.issues) && err.payload.issues.length > 0) {
+              app.applySiteValidationIssues(err.payload.issues);
+              return;
+            }
             app.notify('error', app.t('errors.actionFailed', {
               action: app.t(editing > 0 ? 'action.update' : 'action.add'),
               message: err.message
@@ -492,7 +499,7 @@
     if (!app.validateRequiredField(app.el.rangeInIP)) valid = false;
     if (!app.validatePortField(app.$('rangeStartPort'))) valid = false;
     if (!app.validatePortField(app.$('rangeEndPort'))) valid = false;
-    if (!app.validateIPv4Field(app.$('rangeOutIP'))) valid = false;
+    if (!app.validateIPField(app.$('rangeOutIP'))) valid = false;
     if (!app.validateOptionalPortField(app.$('rangeOutStartPort'))) valid = false;
     if (!valid || !inIPVal || !startPort || !endPort || !outIP) {
       app.notify('error', app.t('validation.reviewErrors'));
@@ -544,6 +551,10 @@
           app.loadRanges();
         } catch (err) {
           if (err.message !== 'unauthorized') {
+            if (err.payload && Array.isArray(err.payload.issues) && err.payload.issues.length > 0) {
+              app.applyRangeValidationIssues(err.payload.issues);
+              return;
+            }
             app.notify('error', app.t('errors.actionFailed', {
               action: app.t(editing > 0 ? 'action.update' : 'action.add'),
               message: err.message

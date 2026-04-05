@@ -786,7 +786,7 @@ func listenTCP(ctx context.Context, rule *Rule) (net.Listener, error) {
 		lc.Control = ctrl
 	}
 	addr := net.JoinHostPort(rule.InIP, strconv.Itoa(rule.InPort))
-	ln, err := lc.Listen(ctx, "tcp", addr)
+	ln, err := lc.Listen(ctx, tcpListenNetworkForIP(rule.InIP), addr)
 	if err != nil {
 		return nil, fmt.Errorf("tcp listen %s: %w", addr, err)
 	}
@@ -864,7 +864,7 @@ func listenUDP(ctx context.Context, rule *Rule) (*net.UDPConn, error) {
 		lc.Control = ctrl
 	}
 	addr := net.JoinHostPort(rule.InIP, strconv.Itoa(rule.InPort))
-	pc, err := lc.ListenPacket(ctx, "udp", addr)
+	pc, err := lc.ListenPacket(ctx, udpListenNetworkForIP(rule.InIP), addr)
 	if err != nil {
 		return nil, fmt.Errorf("udp listen %s: %w", addr, err)
 	}

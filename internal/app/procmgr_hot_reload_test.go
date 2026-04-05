@@ -70,6 +70,32 @@ func TestRangesEqualIgnoresMetadataOnlyChanges(t *testing.T) {
 	}
 }
 
+func TestRuleAssignmentSlicesEqualIgnoresTrailingEmptySlots(t *testing.T) {
+	assignments := [][]Rule{
+		{{ID: 11, InInterface: "vmbr0", InIP: "198.51.100.10", InPort: 20022, OutInterface: "vmbr1", OutIP: "192.0.2.6", OutPort: 22, Protocol: "tcp"}},
+		nil,
+	}
+	same := [][]Rule{
+		{{ID: 11, InInterface: "vmbr0", InIP: "198.51.100.10", InPort: 20022, OutInterface: "vmbr1", OutIP: "192.0.2.6", OutPort: 22, Protocol: "tcp"}},
+	}
+	if !ruleAssignmentSlicesEqual(assignments, same) {
+		t.Fatal("ruleAssignmentSlicesEqual() = false, want true when only trailing empty slots differ")
+	}
+}
+
+func TestRangeAssignmentSlicesEqualIgnoresTrailingEmptySlots(t *testing.T) {
+	assignments := [][]PortRange{
+		{{ID: 21, InInterface: "vmbr0", InIP: "198.51.100.10", StartPort: 10000, EndPort: 10010, OutInterface: "vmbr1", OutIP: "192.0.2.6", OutStartPort: 20000, Protocol: "tcp"}},
+		nil,
+	}
+	same := [][]PortRange{
+		{{ID: 21, InInterface: "vmbr0", InIP: "198.51.100.10", StartPort: 10000, EndPort: 10010, OutInterface: "vmbr1", OutIP: "192.0.2.6", OutStartPort: 20000, Protocol: "tcp"}},
+	}
+	if !rangeAssignmentSlicesEqual(assignments, same) {
+		t.Fatal("rangeAssignmentSlicesEqual() = false, want true when only trailing empty slots differ")
+	}
+}
+
 func TestBuildUserspaceAssignmentsKeepsExistingRuleSlotsStable(t *testing.T) {
 	rules := []Rule{
 		{ID: 10, Enabled: true},

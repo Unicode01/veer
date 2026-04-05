@@ -238,14 +238,37 @@
     return map[field] || null;
   };
 
-  app.translateRuleValidationMessage = function translateRuleValidationMessage(message) {
+  app.normalizeValidationMessage = function normalizeValidationMessage(message) {
     const text = String(message || '').trim();
+    const prefixes = [
+      'listen_interface ',
+      'listen_ip ',
+      'backend_ip ',
+      'backend_source_ip ',
+      'in_interface ',
+      'in_ip ',
+      'out_interface ',
+      'out_ip ',
+      'out_source_ip '
+    ];
+    for (const prefix of prefixes) {
+      if (text.indexOf(prefix) === 0) return text.slice(prefix.length);
+    }
+    return text;
+  };
+
+  app.translateValidationMessage = function translateValidationMessage(message) {
+    const text = app.normalizeValidationMessage(message);
     if (!text) return app.t('validation.reviewErrors');
 
     const known = {
+      'invalid id': app.t('validation.invalidID'),
       'is required': app.t('validation.required'),
       'must be greater than 0': app.t('validation.positiveId'),
+      'must be omitted when creating a rule': app.t('validation.ruleCreateIDOmit'),
+      'must be a valid IP address': app.t('validation.ip'),
       'must be a valid IPv4 address': app.t('validation.ipv4'),
+      'must be a specific non-loopback IP address': app.t('validation.sourceIPSpecific'),
       'must be a specific non-loopback IPv4 address': app.t('validation.sourceIPSpecific'),
       'must be omitted when transparent mode is enabled': app.t('validation.sourceIPTransparent'),
       'must be between 1 and 65535': app.t('validation.portRange'),
@@ -254,13 +277,81 @@
       'interface does not exist on this host': app.t('validation.interfaceMissing'),
       'must be assigned to the selected outbound interface': app.t('validation.sourceIPOutboundInterface'),
       'must be assigned to a local interface': app.t('validation.sourceIPLocal'),
-      'rule not found': app.t('validation.ruleNotFound')
+      'must match outbound IP address family': app.t('validation.sourceIPOutboundFamily'),
+      'must match backend_ip address family': app.t('validation.sourceIPBackendFamily'),
+      'must match out_ip address family': app.t('validation.sourceIPTargetFamily'),
+      'transparent mode currently supports only IPv4 rules': app.t('validation.transparentIPv4Only'),
+      'fixed source IP currently supports only IPv4 userspace forwarding': app.t('validation.sourceIPIPv4Only'),
+      'duplicate rule id in update list': app.t('validation.ruleDuplicateUpdate'),
+      'cannot update a rule scheduled for deletion': app.t('validation.ruleDeletePendingUpdate'),
+      'duplicate rule id in set_enabled list': app.t('validation.ruleDuplicateToggle'),
+      'cannot change enabled state for a rule scheduled for deletion': app.t('validation.ruleDeletePendingToggle'),
+      'at least one batch operation is required': app.t('validation.ruleBatchRequired'),
+      'rule not found': app.t('validation.ruleNotFound'),
+      'site not found': app.t('validation.siteNotFound'),
+      'range not found': app.t('validation.rangeNotFound'),
+      'domain and backend_ip are required': app.t('validation.siteRequired'),
+      'at least one of backend_http_port or backend_https_port is required': app.t('validation.sitePortsRequired'),
+      'in_ip, start_port, end_port, out_ip are required': app.t('validation.rangeRequired'),
+      'start_port must be <= end_port': app.t('validation.rangeOrder')
     };
     if (known[text]) return known[text];
     if (text.indexOf('listener conflicts with ') === 0) {
       return app.t('validation.listenerConflict', { detail: text.slice('listener conflicts with '.length) });
     }
+    if (text.indexOf('HTTP route conflicts with ') === 0 || text.indexOf('HTTPS route conflicts with ') === 0) {
+      return app.t('validation.routeConflict', { detail: text });
+    }
     return text;
+  };
+
+  app.translateRuleValidationMessage = app.translateValidationMessage;
+
+  app.getValidationIssueMessage = function getValidationIssueMessage(payload, scopes) {
+    const messages = app.getValidationIssueMessages(payload, scopes, 1);
+    return messages.length ? messages[0] : '';
+  };
+
+  app.getValidationIssueMessages = function getValidationIssueMessages(payload, scopes, maxItems) {
+    const issues = payload && Array.isArray(payload.issues) ? payload.issues : [];
+    if (!issues.length) return [];
+    const allowedScopes = Array.isArray(scopes) && scopes.length ? scopes : null;
+    let relevant = allowedScopes
+      ? issues.filter((issue) => issue && allowedScopes.indexOf(issue.scope) >= 0)
+      : issues;
+    if (!relevant.length && allowedScopes) relevant = issues;
+    if (!relevant.length) return [];
+
+    const limit = maxItems > 0 ? maxItems : 0;
+    const messages = [];
+    const seen = Object.create(null);
+    relevant.forEach((issue) => {
+      if (limit > 0 && messages.length >= limit) return;
+      const translated = app.translateValidationMessage(issue && issue.message);
+      if (!translated || seen[translated]) return;
+      seen[translated] = true;
+      messages.push(translated);
+    });
+    return messages;
+  };
+
+  app.getValidationIssueSummary = function getValidationIssueSummary(payload, scopes, maxItems) {
+    const issues = payload && Array.isArray(payload.issues) ? payload.issues : [];
+    if (!issues.length) return '';
+
+    const limit = maxItems > 0 ? maxItems : 3;
+    const messages = app.getValidationIssueMessages(payload, scopes, limit);
+    if (!messages.length) return '';
+
+    const joiner = app.t('validation.issueJoiner');
+    const totalMessages = app.getValidationIssueMessages(payload, scopes, 0);
+    const hiddenCount = Math.max(0, totalMessages.length - messages.length);
+    const summary = messages.join(joiner);
+    if (hiddenCount <= 0) return summary;
+    return app.t('validation.issueSummaryMore', {
+      messages: summary,
+      count: hiddenCount
+    });
   };
 
   app.applyRuleValidationIssues = function applyRuleValidationIssues(issues) {
@@ -276,12 +367,12 @@
       if (!input) return;
       if (!firstInvalid) firstInvalid = input;
       if (!input.hasAttribute('aria-invalid')) {
-        app.setFieldError(input, app.translateRuleValidationMessage(issue.message));
+        app.setFieldError(input, app.translateValidationMessage(issue.message));
       }
     });
 
     if (firstInvalid && typeof firstInvalid.focus === 'function') firstInvalid.focus();
-    app.notify('error', app.translateRuleValidationMessage(relevant[0].message));
+    app.notify('error', app.getValidationIssueSummary({ issues: relevant }, null, 3) || app.translateValidationMessage(relevant[0].message));
   };
 
   app.validateRuleDraft = async function validateRuleDraft(rule, editing) {
@@ -443,7 +534,10 @@
       app.notify('success', app.t('toast.deleted', { item: app.t('noun.rule') }));
       await app.loadRules();
     } catch (e) {
-      if (e.message !== 'unauthorized') app.notify('error', app.t('errors.deleteFailed', { message: e.message }));
+      if (e.message !== 'unauthorized') {
+        const message = app.getValidationIssueMessage(e.payload, ['delete']) || app.translateValidationMessage(e.message);
+        app.notify('error', app.t('errors.deleteFailed', { message: message }));
+      }
     } finally {
       app.setRowPending('rule', id, false);
       app.renderRulesTable();
@@ -484,7 +578,10 @@
       app.notify('success', app.t('rule.batch.delete.success', { count: targetIds.length }));
       await app.loadRules();
     } catch (e) {
-      if (e.message !== 'unauthorized') app.notify('error', app.t('errors.deleteFailed', { message: e.message }));
+      if (e.message !== 'unauthorized') {
+        const message = app.getValidationIssueSummary(e.payload, ['delete', 'delete_ids'], 3) || app.translateValidationMessage(e.message);
+        app.notify('error', app.t('errors.deleteFailed', { message: message }));
+      }
     } finally {
       st.batchDeleting = false;
       targetIds.forEach((id) => app.setRowPending('rule', id, false));

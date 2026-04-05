@@ -56,6 +56,11 @@ type ruleValidateResponse struct {
 	Issues     []ruleValidationIssue   `json:"issues,omitempty"`
 }
 
+type validationErrorResponse struct {
+	Error  string                `json:"error,omitempty"`
+	Issues []ruleValidationIssue `json:"issues,omitempty"`
+}
+
 type ruleFilter struct {
 	IDs          map[int64]struct{}
 	Tags         map[string]struct{}
@@ -289,10 +294,24 @@ func handleInterfaces(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		info := InterfaceInfo{Name: iface.Name}
+		seen := make(map[string]struct{})
 		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-				info.Addrs = append(info.Addrs, ipnet.IP.String())
+			var ip net.IP
+			switch item := addr.(type) {
+			case *net.IPNet:
+				ip = item.IP
+			case *net.IPAddr:
+				ip = item.IP
 			}
+			if !isVisibleInterfaceIP(ip) {
+				continue
+			}
+			text := canonicalIPLiteral(ip)
+			if _, ok := seen[text]; ok {
+				continue
+			}
+			seen[text] = struct{}{}
+			info.Addrs = append(info.Addrs, text)
 		}
 		if len(info.Addrs) > 0 {
 			sort.Strings(info.Addrs)
@@ -843,26 +862,22 @@ func loadHostValidationData() (map[string]struct{}, hostInterfaceAddrs, error) {
 	return knownIfaces, hostAddrs, nil
 }
 
-func normalizeOptionalIPv4(value string) (string, error) {
+func normalizeOptionalSpecificIP(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", nil
 	}
-	ip := net.ParseIP(value)
+	ip := parseIPLiteral(value)
 	if ip == nil {
-		return "", fmt.Errorf("must be a valid IPv4 address")
+		return "", fmt.Errorf("must be a valid IP address")
 	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return "", fmt.Errorf("must be a valid IPv4 address")
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		return "", fmt.Errorf("must be a specific non-loopback IP address")
 	}
-	if ip4.IsLoopback() || ip4.IsUnspecified() {
-		return "", fmt.Errorf("must be a specific non-loopback IPv4 address")
-	}
-	return ip4.String(), nil
+	return canonicalIPLiteral(ip), nil
 }
 
-func hostHasIPv4(hostAddrs hostInterfaceAddrs, ifaceName, ip string) bool {
+func hostHasIP(hostAddrs hostInterfaceAddrs, ifaceName, ip string) bool {
 	if ip == "" {
 		return false
 	}
@@ -882,17 +897,17 @@ func hostHasIPv4(hostAddrs hostInterfaceAddrs, ifaceName, ip string) bool {
 	return false
 }
 
-func validateLocalSourceIPv4(sourceIP, outInterface string, hostAddrs hostInterfaceAddrs) string {
+func validateLocalSourceIP(sourceIP, outInterface string, hostAddrs hostInterfaceAddrs) string {
 	if sourceIP == "" {
 		return ""
 	}
 	if outInterface != "" {
-		if hostHasIPv4(hostAddrs, outInterface, sourceIP) {
+		if hostHasIP(hostAddrs, outInterface, sourceIP) {
 			return ""
 		}
 		return "must be assigned to the selected outbound interface"
 	}
-	if hostHasIPv4(hostAddrs, "", sourceIP) {
+	if hostHasIP(hostAddrs, "", sourceIP) {
 		return ""
 	}
 	return "must be assigned to a local interface"
@@ -921,17 +936,25 @@ func normalizeAndValidateRule(rule Rule, scope string, index int, requireID bool
 		issues = appendRuleIssue(issues, scope, index, rule.ID, "id", "must be omitted when creating a rule")
 	}
 
+	inFamily := ""
 	if rule.InIP == "" {
 		issues = appendRuleIssue(issues, scope, index, rule.ID, "in_ip", "is required")
-	} else if ip := net.ParseIP(rule.InIP); ip == nil || ip.To4() == nil {
-		issues = appendRuleIssue(issues, scope, index, rule.ID, "in_ip", "must be a valid IPv4 address")
+	} else if normalized, err := normalizeIPLiteral(rule.InIP); err != nil {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "in_ip", err.Error())
+	} else {
+		rule.InIP = normalized
+		inFamily = ipLiteralFamily(rule.InIP)
 	}
+	outFamily := ""
 	if rule.OutIP == "" {
 		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_ip", "is required")
-	} else if ip := net.ParseIP(rule.OutIP); ip == nil || ip.To4() == nil {
-		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_ip", "must be a valid IPv4 address")
+	} else if normalized, err := normalizeIPLiteral(rule.OutIP); err != nil {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_ip", err.Error())
+	} else {
+		rule.OutIP = normalized
+		outFamily = ipLiteralFamily(rule.OutIP)
 	}
-	if normalized, err := normalizeOptionalIPv4(rule.OutSourceIP); err != nil {
+	if normalized, err := normalizeOptionalSpecificIP(rule.OutSourceIP); err != nil {
 		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_source_ip", err.Error())
 	} else {
 		rule.OutSourceIP = normalized
@@ -957,11 +980,21 @@ func normalizeAndValidateRule(rule Rule, scope string, index int, requireID bool
 			outIfaceValid = false
 		}
 	}
+	pureIPv4 := ipLiteralPairIsPureIPv4(rule.InIP, rule.OutIP)
+	if inFamily != "" && outFamily != "" {
+		if rule.Transparent && !pureIPv4 {
+			issues = appendRuleIssue(issues, scope, index, rule.ID, "transparent", "transparent mode currently supports only IPv4 rules")
+		}
+	}
 	if rule.Transparent && rule.OutSourceIP != "" {
 		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_source_ip", "must be omitted when transparent mode is enabled")
-	} else if rule.OutSourceIP != "" && outIfaceValid {
-		if msg := validateLocalSourceIPv4(rule.OutSourceIP, rule.OutInterface, hostAddrs); msg != "" {
-			issues = appendRuleIssue(issues, scope, index, rule.ID, "out_source_ip", msg)
+	} else if rule.OutSourceIP != "" {
+		if outFamily != "" && ipLiteralFamily(rule.OutSourceIP) != outFamily {
+			issues = appendRuleIssue(issues, scope, index, rule.ID, "out_source_ip", "must match outbound IP address family")
+		} else if outIfaceValid {
+			if msg := validateLocalSourceIP(rule.OutSourceIP, rule.OutInterface, hostAddrs); msg != "" {
+				issues = appendRuleIssue(issues, scope, index, rule.ID, "out_source_ip", msg)
+			}
 		}
 	}
 	return rule, issues
@@ -992,22 +1025,36 @@ func normalizeAndValidateSite(site Site, requireID bool, knownIfaces map[string]
 			return site, "listen_interface does not exist on this host"
 		}
 	}
-	if ip := net.ParseIP(site.ListenIP); ip == nil || ip.To4() == nil {
-		return site, "listen_ip must be a valid IPv4 address"
+	if normalized, err := normalizeIPLiteral(site.ListenIP); err != nil {
+		return site, "listen_ip " + err.Error()
+	} else {
+		site.ListenIP = normalized
 	}
-	if ip := net.ParseIP(site.BackendIP); ip == nil || ip.To4() == nil {
-		return site, "backend_ip must be a valid IPv4 address"
+	if normalized, err := normalizeIPLiteral(site.BackendIP); err != nil {
+		return site, "backend_ip " + err.Error()
+	} else {
+		site.BackendIP = normalized
 	}
-	normalizedSourceIP, err := normalizeOptionalIPv4(site.BackendSourceIP)
+	normalizedSourceIP, err := normalizeOptionalSpecificIP(site.BackendSourceIP)
 	if err != nil {
 		return site, "backend_source_ip " + err.Error()
 	}
 	site.BackendSourceIP = normalizedSourceIP
+	pureIPv4 := ipLiteralPairIsPureIPv4(site.ListenIP, site.BackendIP)
+	backendFamily := ipLiteralFamily(site.BackendIP)
+	if site.Transparent && !pureIPv4 {
+		return site, "transparent mode currently supports only IPv4 rules"
+	}
 	if site.Transparent && site.BackendSourceIP != "" {
 		return site, "backend_source_ip must be omitted when transparent mode is enabled"
 	}
-	if msg := validateLocalSourceIPv4(site.BackendSourceIP, "", hostAddrs); msg != "" {
-		return site, "backend_source_ip " + msg
+	if site.BackendSourceIP != "" {
+		if backendFamily != "" && ipLiteralFamily(site.BackendSourceIP) != backendFamily {
+			return site, "backend_source_ip must match backend_ip address family"
+		}
+		if msg := validateLocalSourceIP(site.BackendSourceIP, "", hostAddrs); msg != "" {
+			return site, "backend_source_ip " + msg
+		}
 	}
 	return site, ""
 }
@@ -1040,11 +1087,15 @@ func normalizeAndValidateRange(pr PortRange, requireID bool, knownIfaces map[str
 	if pr.Protocol != "tcp" && pr.Protocol != "udp" && pr.Protocol != "tcp+udp" {
 		return pr, "protocol must be tcp, udp, or tcp+udp"
 	}
-	if ip := net.ParseIP(pr.InIP); ip == nil || ip.To4() == nil {
-		return pr, "in_ip must be a valid IPv4 address"
+	if normalized, err := normalizeIPLiteral(pr.InIP); err != nil {
+		return pr, "in_ip " + err.Error()
+	} else {
+		pr.InIP = normalized
 	}
-	if ip := net.ParseIP(pr.OutIP); ip == nil || ip.To4() == nil {
-		return pr, "out_ip must be a valid IPv4 address"
+	if normalized, err := normalizeIPLiteral(pr.OutIP); err != nil {
+		return pr, "out_ip " + err.Error()
+	} else {
+		pr.OutIP = normalized
 	}
 	if pr.StartPort < 1 || pr.StartPort > 65535 || pr.EndPort < 1 || pr.EndPort > 65535 || pr.OutStartPort < 1 || pr.OutStartPort > 65535 {
 		return pr, "ports must be between 1 and 65535"
@@ -1061,17 +1112,27 @@ func normalizeAndValidateRange(pr PortRange, requireID bool, knownIfaces map[str
 			return pr, "out_interface does not exist on this host"
 		}
 	}
-	normalizedSourceIP, err := normalizeOptionalIPv4(pr.OutSourceIP)
+	normalizedSourceIP, err := normalizeOptionalSpecificIP(pr.OutSourceIP)
 	if err != nil {
 		return pr, "out_source_ip " + err.Error()
 	}
 	pr.OutSourceIP = normalizedSourceIP
+	pureIPv4 := ipLiteralPairIsPureIPv4(pr.InIP, pr.OutIP)
+	outFamily := ipLiteralFamily(pr.OutIP)
+	if pr.Transparent && !pureIPv4 {
+		return pr, "transparent mode currently supports only IPv4 rules"
+	}
 	if pr.Transparent && pr.OutSourceIP != "" {
 		return pr, "out_source_ip must be omitted when transparent mode is enabled"
 	}
-	if pr.OutSourceIP != "" && outIfaceValid {
-		if msg := validateLocalSourceIPv4(pr.OutSourceIP, pr.OutInterface, hostAddrs); msg != "" {
-			return pr, "out_source_ip " + msg
+	if pr.OutSourceIP != "" {
+		if outFamily != "" && ipLiteralFamily(pr.OutSourceIP) != outFamily {
+			return pr, "out_source_ip must match out_ip address family"
+		}
+		if outIfaceValid {
+			if msg := validateLocalSourceIP(pr.OutSourceIP, pr.OutInterface, hostAddrs); msg != "" {
+				return pr, "out_source_ip " + msg
+			}
 		}
 	}
 	return pr, ""
@@ -1143,7 +1204,12 @@ func ruleInterfacesOverlap(a, b string) bool {
 }
 
 func ruleIPsOverlap(a, b string) bool {
-	return a == "0.0.0.0" || b == "0.0.0.0" || a == b
+	aFamily := ipLiteralFamily(a)
+	bFamily := ipLiteralFamily(b)
+	if aFamily == "" || bFamily == "" || aFamily != bFamily {
+		return false
+	}
+	return ipLiteralIsWildcard(a) || ipLiteralIsWildcard(b) || a == b
 }
 
 func appendRuleConflictIssue(issues []ruleValidationIssue, current, other projectedRuleState) []ruleValidationIssue {
@@ -1194,6 +1260,22 @@ func summarizeRuleIssues(issues []ruleValidationIssue) string {
 		return fmt.Sprintf("%s %s: %s", prefix, issue.Field, issue.Message)
 	}
 	return fmt.Sprintf("%s: %s", prefix, issue.Message)
+}
+
+func writeValidationIssueResponse(w http.ResponseWriter, status int, issues []ruleValidationIssue) {
+	writeJSON(w, status, validationErrorResponse{
+		Error:  summarizeRuleIssues(issues),
+		Issues: issues,
+	})
+}
+
+func singleValidationIssue(scope string, id int64, field, message string) []ruleValidationIssue {
+	return []ruleValidationIssue{{
+		Scope:   scope,
+		ID:      id,
+		Field:   field,
+		Message: message,
+	}}
 }
 
 func hasRuleNotFoundIssue(issues []ruleValidationIssue) bool {
@@ -1308,7 +1390,7 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	idStr := r.URL.Query().Get("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("toggle", 0, "id", "invalid id"))
 		return
 	}
 
@@ -1322,7 +1404,7 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	rule, err := dbGetRule(tx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
+			writeValidationIssueResponse(w, http.StatusNotFound, singleValidationIssue("toggle", id, "id", "rule not found"))
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -1365,11 +1447,30 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	idStr := r.URL.Query().Get("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("delete", 0, "id", "invalid id"))
 		return
 	}
 
-	if err := dbDeleteRule(db, id); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := dbGetRule(tx, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeValidationIssueResponse(w, http.StatusNotFound, singleValidationIssue("delete", id, "id", "rule not found"))
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := dbDeleteRule(tx, id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1388,11 +1489,22 @@ func handleListSites(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 	var statuses []SiteStatus
 	pm.mu.Lock()
 	proxyRunning := pm.sharedProxy != nil && pm.sharedProxy.running
+	proxyErrored := pm.sharedProxy != nil && pm.sharedProxy.errored
+	failedSiteIDs := make(map[int64]bool)
+	if pm.sharedProxy != nil {
+		for id := range pm.sharedProxy.failedSites {
+			failedSiteIDs[id] = true
+		}
+	}
 	pm.mu.Unlock()
 	for _, site := range sites {
 		status := "stopped"
-		if site.Enabled && proxyRunning {
+		if site.Enabled && failedSiteIDs[site.ID] {
+			status = "error"
+		} else if site.Enabled && proxyRunning {
 			status = "running"
+		} else if site.Enabled && proxyErrored && len(failedSiteIDs) == 0 {
+			status = "error"
 		}
 		statuses = append(statuses, SiteStatus{Site: site, Status: status})
 	}
@@ -1422,7 +1534,7 @@ func handleAddSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Proce
 		return
 	}
 	if len(issues) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": summarizeRuleIssues(issues)})
+		writeValidationIssueResponse(w, http.StatusBadRequest, issues)
 		return
 	}
 
@@ -1465,7 +1577,7 @@ func handleUpdateSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		if hasValidationMessage(issues, "site not found") {
 			status = http.StatusNotFound
 		}
-		writeJSON(w, status, map[string]string{"error": summarizeRuleIssues(issues)})
+		writeValidationIssueResponse(w, status, issues)
 		return
 	}
 
@@ -1489,7 +1601,7 @@ func handleToggleSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	idStr := r.URL.Query().Get("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("toggle", 0, "id", "invalid id"))
 		return
 	}
 
@@ -1510,7 +1622,7 @@ func handleToggleSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		if hasValidationMessage(issues, "site not found") {
 			status = http.StatusNotFound
 		}
-		writeJSON(w, status, map[string]string{"error": summarizeRuleIssues(issues)})
+		writeValidationIssueResponse(w, status, issues)
 		return
 	}
 	if err := dbSetSiteEnabled(tx, id, site.Enabled); err != nil {
@@ -1529,11 +1641,30 @@ func handleDeleteSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	idStr := r.URL.Query().Get("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("delete", 0, "id", "invalid id"))
 		return
 	}
 
-	if err := dbDeleteSite(db, id); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := dbGetSite(tx, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeValidationIssueResponse(w, http.StatusNotFound, singleValidationIssue("delete", id, "id", "site not found"))
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := dbDeleteSite(tx, id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2009,7 +2140,7 @@ func handleAddRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Proc
 		return
 	}
 	if len(issues) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": summarizeRuleIssues(issues)})
+		writeValidationIssueResponse(w, http.StatusBadRequest, issues)
 		return
 	}
 
@@ -2053,7 +2184,7 @@ func handleUpdateRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		if hasValidationMessage(issues, "range not found") {
 			status = http.StatusNotFound
 		}
-		writeJSON(w, status, map[string]string{"error": summarizeRuleIssues(issues)})
+		writeValidationIssueResponse(w, status, issues)
 		return
 	}
 
@@ -2079,7 +2210,7 @@ func handleToggleRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	idStr := r.URL.Query().Get("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("toggle", 0, "id", "invalid id"))
 		return
 	}
 
@@ -2100,7 +2231,7 @@ func handleToggleRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		if hasValidationMessage(issues, "range not found") {
 			status = http.StatusNotFound
 		}
-		writeJSON(w, status, map[string]string{"error": summarizeRuleIssues(issues)})
+		writeValidationIssueResponse(w, status, issues)
 		return
 	}
 	if err := dbSetRangeEnabled(tx, id, pr.Enabled); err != nil {
@@ -2119,11 +2250,30 @@ func handleDeleteRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	idStr := r.URL.Query().Get("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("delete", 0, "id", "invalid id"))
 		return
 	}
 
-	if err := dbDeleteRange(db, id); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := dbGetRange(tx, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeValidationIssueResponse(w, http.StatusNotFound, singleValidationIssue("delete", id, "id", "range not found"))
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := dbDeleteRange(tx, id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

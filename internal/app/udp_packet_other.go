@@ -14,7 +14,7 @@ func udpReplyPacketInfoBufferSize() int {
 
 func readUDPWithReplyInfo(conn *net.UDPConn, payload []byte, _ []byte) (int, *net.UDPAddr, udpReplyInfo, error) {
 	n, src, err := conn.ReadFromUDP(payload)
-	return n, src, udpReplyInfo{sourceIP: udpListenerLocalIPv4(conn)}, err
+	return n, src, udpReplyInfo{sourceIP: udpListenerLocalIP(conn)}, err
 }
 
 func writeUDPWithReplyInfo(conn *net.UDPConn, payload []byte, dst *net.UDPAddr, _ udpReplyInfo) (int, error) {

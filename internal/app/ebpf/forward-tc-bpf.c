@@ -75,6 +75,21 @@ struct rule_stats_value_v4 {
 	__u64 bytes_out;
 };
 
+struct kernel_diag_value_v4 {
+	__u64 fib_non_success;
+	__u64 redirect_neigh_used;
+	__u64 redirect_drop;
+	__u64 nat_reserve_fail;
+	__u64 nat_self_heal_insert;
+	__u64 flow_update_fail;
+	__u64 nat_update_fail;
+	__u64 rewrite_fail;
+	__u64 nat_probe_round2_used;
+	__u64 nat_probe_round3_used;
+	__u64 reply_flow_recreated;
+	__u64 tcp_close_delete;
+};
+
 struct redirect_target_v4 {
 	__u32 ifindex;
 	__u32 src_addr;
@@ -180,6 +195,13 @@ struct bpf_map_def SEC("maps") stats_v4 = {
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct rule_stats_value_v4),
 	.max_entries = 16384,
+};
+
+struct bpf_map_def SEC("maps") diag_v4 = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct kernel_diag_value_v4),
+	.max_entries = 1,
 };
 
 static __always_inline int update_l4_addr_checksum(struct __sk_buff *skb, const struct packet_ctx *ctx, int check_off, __be32 old_addr, __be32 new_addr)

@@ -14,6 +14,10 @@ func (rt unavailableKernelRuleRuntime) Available() (bool, string) {
 	return false, rt.reason
 }
 
+func (rt unavailableKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
+	return false, rt.reason
+}
+
 func (rt unavailableKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	for _, rule := range rules {

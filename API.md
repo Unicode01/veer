@@ -97,7 +97,7 @@ curl -H "Authorization: Bearer your-token-here" \
 
 字段补充：
 
-- `out_source_ip`：非透传 full-NAT 时可选，强制指定回源 / SNAT 使用的宿主机 IPv4
+- `out_source_ip`：非透传 full-NAT 时可选，强制指定回源 / SNAT 使用的宿主机本地源 IP，地址族必须与 `out_ip` 一致
 - `engine_preference`：规则级引擎偏好，可选 `auto`、`userspace`、`kernel`
 
 ### RuleStatus
@@ -156,7 +156,7 @@ curl -H "Authorization: Bearer your-token-here" \
 
 字段补充：
 
-- `backend_source_ip`：非透传时可选，指定共享站点代理访问后端时使用的本地源 IPv4
+- `backend_source_ip`：非透传时可选，指定共享站点代理访问后端时使用的本地源 IP，地址族必须与 `backend_ip` 一致
 
 ### SiteStatus
 
@@ -237,7 +237,7 @@ curl -H "Authorization: Bearer your-token-here" \
 
 `GET /api/interfaces`
 
-返回当前主机上存在 IPv4 地址的接口列表。多网卡、VLAN 子接口、同卡多地址都会反映在这里。
+返回当前主机上存在可见 IP 地址的接口列表，包含 IPv4 / IPv6。多网卡、VLAN 子接口、同卡多地址都会反映在这里。
 
 响应示例：
 
@@ -245,14 +245,19 @@ curl -H "Authorization: Bearer your-token-here" \
 [
   {
     "name": "eth0",
-    "addrs": ["203.0.113.10"]
+    "addrs": ["203.0.113.10", "2001:db8::10"]
   },
   {
     "name": "vmbr0",
-    "addrs": ["198.51.100.1"]
+    "addrs": ["198.51.100.1", "2001:db8:100::1"]
   }
 ]
 ```
+
+地址族补充：
+
+- 用户态规则、共享站点代理和范围映射支持 IPv4 / IPv6
+- `transparent = true` 以及当前内核态接入条件仍按纯 IPv4 限制
 
 ### 2. 获取标签列表
 
@@ -342,6 +347,7 @@ curl -H "Authorization: Bearer your-token-here" \
 - 省略 `engine_preference` 时默认 `auto`
 - 创建后默认 `enabled = true`
 - `transparent = true` 时必须省略 `out_source_ip`
+- IPv6 规则会保留在用户态；`transparent` 和内核态接入条件仍限纯 IPv4
 
 #### 3.3 更新规则
 
@@ -554,6 +560,7 @@ curl -H "Authorization: Bearer your-token-here" \
 - `listen_ip` 为空时默认 `0.0.0.0`
 - `transparent = true` 时必须省略 `backend_source_ip`
 - 创建后默认 `enabled = true`
+- IPv6 站点监听 / 后端走普通共享代理路径；`transparent` 仍限纯 IPv4
 
 #### 4.3 更新站点
 
@@ -626,6 +633,7 @@ curl -H "Authorization: Bearer your-token-here" \
 - `out_start_port = 0` 时自动等于 `start_port`
 - `transparent = true` 时必须省略 `out_source_ip`
 - 创建后默认 `enabled = true`
+- IPv6 范围映射会保留在用户态；`transparent` 仍限纯 IPv4
 
 #### 5.3 更新范围映射
 
@@ -924,7 +932,7 @@ curl "http://127.0.0.1:8080/api/stats/current-conns" \
 - 写接口成功后，不要立刻假设 worker 已完全切换完成，建议随后查询状态接口确认
 - 如果你依赖真实客户端源地址，启用 `transparent` 前要先保证回程路由正确
 - 如果你只是做普通端口映射，优先不要启用 `transparent`
-- 非透传 full-NAT 且宿主机出口接口存在多个 IPv4 时，建议显式传 `out_source_ip` / `backend_source_ip`
+- 非透传 full-NAT 且宿主机出口接口存在多个与目标同地址族的本地地址时，建议显式传 `out_source_ip` / `backend_source_ip`
 
 ## 与前端行为的差异
 

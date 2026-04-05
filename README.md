@@ -36,7 +36,9 @@
 - 内置 Web UI，无需额外前端构建步骤
 - SQLite 持久化，默认生成 `forward.db`
 - 支持规则、站点、范围映射三类转发模型
+- 用户态规则 / 范围映射已支持 IPv4 / IPv6 的 TCP、UDP 转发；共享站点代理的非透传监听 / 回源也支持 IPv6
 - Linux 下支持 XDP / TC eBPF 内核转发，并按配置自动回退到用户态
+- 透明模式与当前内核数据面仍按 IPv4 路径工作，IPv6 会保留在用户态转发链路
 - 支持 Worker 自动分配、重分布和 draining 退出
 - 支持规则 / 站点 / 范围映射流量统计
 - 支持按需刷新当前连接数，避免每轮刷新都遍历连接表
@@ -52,7 +54,7 @@
 - 非 Linux 平台可以编译，但透明转发和按接口绑定会降级或不可用
 - 多网卡场景支持按入接口 / 出接口绑定
 - VLAN 子接口会按普通 Linux 网卡名处理，例如 `eth0.100`
-- 同一网卡上的多个 IPv4 地址会在前端作为可选监听地址列出
+- 同一网卡上的多个 IPv4 / IPv6 地址会在前端作为可选监听地址列出
 
 ## 典型虚拟机场景示例
 
@@ -204,7 +206,9 @@ http://127.0.0.1:8080
   "kernel_nat_ports_map_limit": 0,
   "experimental_features": {
     "bridge_xdp": false,
-    "kernel_traffic_stats": false
+    "kernel_traffic_stats": false,
+    "kernel_tc_diag": false,
+    "kernel_tc_diag_verbose": false
   },
   "tags": []
 }
@@ -221,7 +225,7 @@ http://127.0.0.1:8080
 - `kernel_rules_map_limit`：内核 `rules_v4/stats_v4` map 容量；`0` 或省略时按当前 kernel entries 自适应扩容，默认从 `16384` 起按 2 倍增长到 `262144`；设置为正数时使用固定上限
 - `kernel_flows_map_limit`：内核 `flows_v4` 连接跟踪表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
 - `kernel_nat_ports_map_limit`：内核 `nat_ports_v4` 端口保留表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
-- `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp`、`kernel_traffic_stats` 这类高风险、兼容性或性能权衡仍在收敛中的能力会通过这里单独放开
+- `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp`、`kernel_traffic_stats`、`kernel_tc_diag` 这类高风险、兼容性或性能权衡仍在收敛中的能力会通过这里单独放开
 - `tags`：可选标签列表，会在前端表单中作为下拉项出现
 
 示例：
@@ -229,7 +233,9 @@ http://127.0.0.1:8080
 ```json
 "experimental_features": {
   "bridge_xdp": true,
-  "kernel_traffic_stats": true
+  "kernel_traffic_stats": true,
+  "kernel_tc_diag": true,
+  "kernel_tc_diag_verbose": false
 }
 ```
 
@@ -239,6 +245,8 @@ http://127.0.0.1:8080
 - 只有代码中显式接入检查的实验项才会生效；未接入的键会被保留但不会影响当前行为
 - `bridge_xdp` 已接入第一版实验实现，默认仍为关闭；当前主要面向透明 XDP 场景，依赖 bridge 邻居/FDB 解析，解析失败或接口不兼容时会自动回退
 - `kernel_traffic_stats` 用于给内核态规则补充 `bytes/speed` 统计；它会在 TC/XDP 转发路径上增加按包计数，默认关闭，只建议在确实需要观察内核态流量时启用
+- `kernel_tc_diag` 用于开启 TC 内核态的低频诊断计数与观测增强；默认关闭，后续只把可能影响转发热路径的诊断项挂在这里
+- `kernel_tc_diag_verbose` 用于开启更重的 TC 排障诊断；它隐含启用 `kernel_tc_diag`，默认关闭，只建议短时压测或专项排障时使用
 
 ## 内核引擎与回退链
 
@@ -248,6 +256,12 @@ http://127.0.0.1:8080
 - `default_engine = kernel`：优先要求进入内核态；不满足条件时仍会安全回退到用户态
 - `default_engine = auto`：先尝试内核态，再自动回退到用户态
 - Linux 下内核态会按 `kernel_engine_order` 依次尝试；默认只走 `tc`，如果显式配置 `["xdp", "tc"]` 才会优先尝试 XDP
+
+地址族补充：
+
+- 纯用户态目前已支持 IPv4 / IPv6 的 TCP / UDP 单端口与端口范围转发
+- 共享站点代理在非透传模式下可使用 IPv4 / IPv6 的 `listen_ip`、`backend_ip` 和 `backend_source_ip`
+- 透明模式与当前内核态接入条件仍按纯 IPv4 校验；IPv6 不会进入透明 / eBPF 数据面
 
 当前想进入内核态，通常至少需要满足：
 
@@ -279,7 +293,7 @@ http://127.0.0.1:8080
 
 ### 内核态运行时观测
 
-- 统计页新增 `Kernel Runtime` 面板，会展示当前内核态总状态、内核承载规则/范围数量、回退计数、待重试状态，以及每个内核引擎的 map 占用、附加点和最近一次 reconcile 方式
+- 统计页新增 `Kernel Runtime` 面板，会展示当前内核态总状态、内核承载规则/范围数量、回退计数、待重试状态，以及每个内核引擎的 map 占用、附加点、压力/降级持续时间、最近一次 maintenance/prune 信息和最近一次 reconcile 方式
 - 同时提供 `GET /api/kernel/runtime` 调试接口，便于脚本或外部面板直接读取这些运行时信息
 - 这套观测主要面向调试和联调，不打算作为当前版本的生产告警接口
 

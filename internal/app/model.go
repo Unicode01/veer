@@ -1,5 +1,7 @@
 package app
 
+import "time"
+
 type Rule struct {
 	ID               int64  `json:"id"`
 	InInterface      string `json:"in_interface"`
@@ -64,6 +66,7 @@ type IPCMessage struct {
 	Error          string             `json:"error,omitempty"`
 	FailedRuleIDs  []int64            `json:"failed_rule_ids,omitempty"`
 	FailedRangeIDs []int64            `json:"failed_range_ids,omitempty"`
+	FailedSiteIDs  []int64            `json:"failed_site_ids,omitempty"`
 	ActiveRuleIDs  []int64            `json:"active_rule_ids,omitempty"`
 	ActiveRangeIDs []int64            `json:"active_range_ids,omitempty"`
 	Stats          []RuleStatsReport  `json:"stats,omitempty"`
@@ -209,42 +212,111 @@ type CurrentConnsResponse struct {
 }
 
 type KernelEngineRuntimeView struct {
-	Name               string `json:"name"`
-	Available          bool   `json:"available"`
-	AvailableReason    string `json:"available_reason,omitempty"`
-	PressureActive     bool   `json:"pressure_active"`
-	PressureLevel      string `json:"pressure_level,omitempty"`
-	PressureReason     string `json:"pressure_reason,omitempty"`
-	Degraded           bool   `json:"degraded"`
-	DegradedReason     string `json:"degraded_reason,omitempty"`
-	Loaded             bool   `json:"loaded"`
-	ActiveEntries      int    `json:"active_entries"`
-	Attachments        int    `json:"attachments"`
-	AttachmentsHealthy bool   `json:"attachments_healthy"`
-	AttachmentSummary  string `json:"attachment_summary,omitempty"`
-	RulesMapEntries    int    `json:"rules_map_entries"`
-	RulesMapCapacity   int    `json:"rules_map_capacity"`
-	FlowsMapEntries    int    `json:"flows_map_entries"`
-	FlowsMapCapacity   int    `json:"flows_map_capacity"`
-	NATMapEntries      int    `json:"nat_map_entries,omitempty"`
-	NATMapCapacity     int    `json:"nat_map_capacity,omitempty"`
-	LastReconcileMode  string `json:"last_reconcile_mode,omitempty"`
-	TrafficStats       bool   `json:"traffic_stats"`
+	Name                       string    `json:"name"`
+	Available                  bool      `json:"available"`
+	AvailableReason            string    `json:"available_reason,omitempty"`
+	PressureActive             bool      `json:"pressure_active"`
+	PressureLevel              string    `json:"pressure_level,omitempty"`
+	PressureReason             string    `json:"pressure_reason,omitempty"`
+	PressureSince              time.Time `json:"pressure_since,omitempty"`
+	Degraded                   bool      `json:"degraded"`
+	DegradedReason             string    `json:"degraded_reason,omitempty"`
+	DegradedSince              time.Time `json:"degraded_since,omitempty"`
+	Loaded                     bool      `json:"loaded"`
+	ActiveEntries              int       `json:"active_entries"`
+	Attachments                int       `json:"attachments"`
+	AttachmentsHealthy         bool      `json:"attachments_healthy"`
+	AttachmentSummary          string    `json:"attachment_summary,omitempty"`
+	AttachmentsUnhealthyCount  int       `json:"attachments_unhealthy_count,omitempty"`
+	LastAttachmentsUnhealthyAt time.Time `json:"last_attachments_unhealthy_at,omitempty"`
+	RulesMapEntries            int       `json:"rules_map_entries"`
+	RulesMapCapacity           int       `json:"rules_map_capacity"`
+	FlowsMapEntries            int       `json:"flows_map_entries"`
+	FlowsMapCapacity           int       `json:"flows_map_capacity"`
+	NATMapEntries              int       `json:"nat_map_entries,omitempty"`
+	NATMapCapacity             int       `json:"nat_map_capacity,omitempty"`
+	LastReconcileMode          string    `json:"last_reconcile_mode,omitempty"`
+	TrafficStats               bool      `json:"traffic_stats"`
+	Diagnostics                bool      `json:"diagnostics"`
+	DiagnosticsVerbose         bool      `json:"diagnostics_verbose"`
+	DiagFIBNonSuccess          uint64    `json:"diag_fib_non_success,omitempty"`
+	DiagRedirectNeighUsed      uint64    `json:"diag_redirect_neigh_used,omitempty"`
+	DiagRedirectDrop           uint64    `json:"diag_redirect_drop,omitempty"`
+	DiagNATReserveFail         uint64    `json:"diag_nat_reserve_fail,omitempty"`
+	DiagNATSelfHealInsert      uint64    `json:"diag_nat_self_heal_insert,omitempty"`
+	DiagFlowUpdateFail         uint64    `json:"diag_flow_update_fail,omitempty"`
+	DiagNATUpdateFail          uint64    `json:"diag_nat_update_fail,omitempty"`
+	DiagRewriteFail            uint64    `json:"diag_rewrite_fail,omitempty"`
+	DiagNATProbeRound2Used     uint64    `json:"diag_nat_probe_round2_used,omitempty"`
+	DiagNATProbeRound3Used     uint64    `json:"diag_nat_probe_round3_used,omitempty"`
+	DiagReplyFlowRecreated     uint64    `json:"diag_reply_flow_recreated,omitempty"`
+	DiagTCPCloseDelete         uint64    `json:"diag_tcp_close_delete,omitempty"`
+	DiagSnapshotError          string    `json:"diag_snapshot_error,omitempty"`
+	LastMaintainAt             time.Time `json:"last_maintain_at,omitempty"`
+	LastMaintainMs             int64     `json:"last_maintain_ms,omitempty"`
+	LastMaintainError          string    `json:"last_maintain_error,omitempty"`
+	LastPruneBudget            int       `json:"last_prune_budget,omitempty"`
+	LastPruneScanned           int       `json:"last_prune_scanned,omitempty"`
+	LastPruneDeleted           int       `json:"last_prune_deleted,omitempty"`
 }
 
 type KernelRuntimeResponse struct {
-	Available                   bool                      `json:"available"`
-	AvailableReason             string                    `json:"available_reason,omitempty"`
-	DefaultEngine               string                    `json:"default_engine"`
-	ConfiguredOrder             []string                  `json:"configured_order"`
-	TrafficStats                bool                      `json:"traffic_stats"`
-	ActiveRuleCount             int                       `json:"active_rule_count"`
-	ActiveRangeCount            int                       `json:"active_range_count"`
-	KernelFallbackRuleCount     int                       `json:"kernel_fallback_rule_count"`
-	KernelFallbackRangeCount    int                       `json:"kernel_fallback_range_count"`
-	TransientFallbackRuleCount  int                       `json:"transient_fallback_rule_count"`
-	TransientFallbackRangeCount int                       `json:"transient_fallback_range_count"`
-	TransientFallbackSummary    string                    `json:"transient_fallback_summary,omitempty"`
-	RetryPending                bool                      `json:"retry_pending"`
-	Engines                     []KernelEngineRuntimeView `json:"engines"`
+	Available                                      bool                      `json:"available"`
+	AvailableReason                                string                    `json:"available_reason,omitempty"`
+	DefaultEngine                                  string                    `json:"default_engine"`
+	ConfiguredOrder                                []string                  `json:"configured_order"`
+	TrafficStats                                   bool                      `json:"traffic_stats"`
+	TCDiagnostics                                  bool                      `json:"tc_diagnostics"`
+	TCDiagnosticsVerbose                           bool                      `json:"tc_diagnostics_verbose"`
+	ActiveRuleCount                                int                       `json:"active_rule_count"`
+	ActiveRangeCount                               int                       `json:"active_range_count"`
+	KernelFallbackRuleCount                        int                       `json:"kernel_fallback_rule_count"`
+	KernelFallbackRangeCount                       int                       `json:"kernel_fallback_range_count"`
+	TransientFallbackRuleCount                     int                       `json:"transient_fallback_rule_count"`
+	TransientFallbackRangeCount                    int                       `json:"transient_fallback_range_count"`
+	TransientFallbackSummary                       string                    `json:"transient_fallback_summary,omitempty"`
+	RetryPending                                   bool                      `json:"retry_pending"`
+	KernelRetryCount                               int                       `json:"kernel_retry_count"`
+	LastKernelRetryAt                              time.Time                 `json:"last_kernel_retry_at,omitempty"`
+	LastKernelRetryReason                          string                    `json:"last_kernel_retry_reason,omitempty"`
+	KernelIncrementalRetryCount                    int                       `json:"kernel_incremental_retry_count"`
+	KernelIncrementalRetryFallbackCount            int                       `json:"kernel_incremental_retry_fallback_count"`
+	CooldownRuleOwnerCount                         int                       `json:"cooldown_rule_owner_count"`
+	CooldownRangeOwnerCount                        int                       `json:"cooldown_range_owner_count"`
+	CooldownSummary                                string                    `json:"cooldown_summary,omitempty"`
+	CooldownNextExpiryAt                           time.Time                 `json:"cooldown_next_expiry_at,omitempty"`
+	CooldownClearAt                                time.Time                 `json:"cooldown_clear_at,omitempty"`
+	LastKernelIncrementalRetryAt                   time.Time                 `json:"last_kernel_incremental_retry_at,omitempty"`
+	LastKernelIncrementalRetryResult               string                    `json:"last_kernel_incremental_retry_result,omitempty"`
+	LastKernelIncrementalRetryMatchedRuleOwners    int                       `json:"last_kernel_incremental_retry_matched_rule_owners"`
+	LastKernelIncrementalRetryMatchedRangeOwners   int                       `json:"last_kernel_incremental_retry_matched_range_owners"`
+	LastKernelIncrementalRetryAttemptedRuleOwners  int                       `json:"last_kernel_incremental_retry_attempted_rule_owners"`
+	LastKernelIncrementalRetryAttemptedRangeOwners int                       `json:"last_kernel_incremental_retry_attempted_range_owners"`
+	LastKernelIncrementalRetryRetainedRuleOwners   int                       `json:"last_kernel_incremental_retry_retained_rule_owners"`
+	LastKernelIncrementalRetryRetainedRangeOwners  int                       `json:"last_kernel_incremental_retry_retained_range_owners"`
+	LastKernelIncrementalRetryRecoveredRuleOwners  int                       `json:"last_kernel_incremental_retry_recovered_rule_owners"`
+	LastKernelIncrementalRetryRecoveredRangeOwners int                       `json:"last_kernel_incremental_retry_recovered_range_owners"`
+	LastKernelIncrementalRetryCooldownRuleOwners   int                       `json:"last_kernel_incremental_retry_cooldown_rule_owners"`
+	LastKernelIncrementalRetryCooldownRangeOwners  int                       `json:"last_kernel_incremental_retry_cooldown_range_owners"`
+	LastKernelIncrementalRetryCooldownSummary      string                    `json:"last_kernel_incremental_retry_cooldown_summary,omitempty"`
+	LastKernelIncrementalRetryCooldownScope        string                    `json:"last_kernel_incremental_retry_cooldown_scope,omitempty"`
+	LastKernelIncrementalRetryBackoffRuleOwners    int                       `json:"last_kernel_incremental_retry_backoff_rule_owners"`
+	LastKernelIncrementalRetryBackoffRangeOwners   int                       `json:"last_kernel_incremental_retry_backoff_range_owners"`
+	LastKernelIncrementalRetryBackoffSummary       string                    `json:"last_kernel_incremental_retry_backoff_summary,omitempty"`
+	LastKernelIncrementalRetryBackoffScope         string                    `json:"last_kernel_incremental_retry_backoff_scope,omitempty"`
+	LastKernelIncrementalRetryBackoffMaxFailures   int                       `json:"last_kernel_incremental_retry_backoff_max_failures"`
+	LastKernelIncrementalRetryBackoffMaxDelayMs    int64                     `json:"last_kernel_incremental_retry_backoff_max_delay_ms,omitempty"`
+	KernelNetlinkRecoverPending                    bool                      `json:"kernel_netlink_recover_pending"`
+	KernelNetlinkRecoverSource                     string                    `json:"kernel_netlink_recover_source,omitempty"`
+	KernelNetlinkRecoverSummary                    string                    `json:"kernel_netlink_recover_summary,omitempty"`
+	KernelNetlinkRecoverRequestedAt                time.Time                 `json:"kernel_netlink_recover_requested_at,omitempty"`
+	KernelNetlinkRecoverTriggerSummary             string                    `json:"kernel_netlink_recover_trigger_summary,omitempty"`
+	LastKernelAttachmentIssue                      string                    `json:"last_kernel_attachment_issue,omitempty"`
+	LastKernelAttachmentHealAt                     time.Time                 `json:"last_kernel_attachment_heal_at,omitempty"`
+	LastKernelAttachmentHealSummary                string                    `json:"last_kernel_attachment_heal_summary,omitempty"`
+	LastKernelAttachmentHealError                  string                    `json:"last_kernel_attachment_heal_error,omitempty"`
+	LastStatsSnapshotAt                            time.Time                 `json:"last_stats_snapshot_at,omitempty"`
+	LastStatsSnapshotMs                            int64                     `json:"last_stats_snapshot_ms,omitempty"`
+	LastStatsSnapshotError                         string                    `json:"last_stats_snapshot_error,omitempty"`
+	Engines                                        []KernelEngineRuntimeView `json:"engines"`
 }

@@ -52,11 +52,14 @@ func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 		resp.DefaultEngine = pm.cfg.DefaultEngine
 		resp.ConfiguredOrder = normalizeKernelEngineOrder(pm.cfg.KernelEngineOrder)
 		resp.TrafficStats = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
+		resp.TCDiagnosticsVerbose = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
+		resp.TCDiagnostics = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag) || resp.TCDiagnosticsVerbose
 	}
 	if pm.kernelRuntime != nil {
 		resp.Available, resp.AvailableReason = pm.kernelRuntime.Available()
 	}
 
+	now := time.Now()
 	pm.mu.Lock()
 	resp.ActiveRuleCount = len(pm.kernelRules)
 	resp.ActiveRangeCount = len(pm.kernelRanges)
@@ -64,6 +67,46 @@ func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 	resp.KernelFallbackRangeCount, resp.TransientFallbackRangeCount = countRangePlanFallbacks(pm.rangePlans)
 	resp.TransientFallbackSummary = pm.summarizeTransientKernelFallbacksLocked()
 	resp.RetryPending = strings.TrimSpace(resp.TransientFallbackSummary) != ""
+	resp.KernelRetryCount = pm.kernelRetryCount
+	resp.LastKernelRetryAt = pm.lastKernelRetryAt
+	resp.LastKernelRetryReason = pm.lastKernelRetryReason
+	resp.KernelIncrementalRetryCount = pm.kernelIncrementalRetryCount
+	resp.KernelIncrementalRetryFallbackCount = pm.kernelIncrementalRetryFallbackCount
+	resp.CooldownRuleOwnerCount, resp.CooldownRangeOwnerCount = countActiveKernelNetlinkOwnerRetryCooldowns(pm.kernelNetlinkOwnerRetryCooldownUntil, now)
+	resp.CooldownSummary = summarizeActiveKernelNetlinkOwnerRetryCooldowns(pm.kernelNetlinkOwnerRetryCooldownUntil, now)
+	resp.CooldownNextExpiryAt, resp.CooldownClearAt = activeKernelNetlinkOwnerRetryCooldownWindow(pm.kernelNetlinkOwnerRetryCooldownUntil, now)
+	resp.LastKernelIncrementalRetryAt = pm.lastKernelIncrementalRetryAt
+	resp.LastKernelIncrementalRetryResult = pm.lastKernelIncrementalRetryResult
+	resp.LastKernelIncrementalRetryMatchedRuleOwners = pm.lastKernelIncrementalRetryMatchedRuleOwners
+	resp.LastKernelIncrementalRetryMatchedRangeOwners = pm.lastKernelIncrementalRetryMatchedRangeOwners
+	resp.LastKernelIncrementalRetryAttemptedRuleOwners = pm.lastKernelIncrementalRetryAttemptedRuleOwners
+	resp.LastKernelIncrementalRetryAttemptedRangeOwners = pm.lastKernelIncrementalRetryAttemptedRangeOwners
+	resp.LastKernelIncrementalRetryRetainedRuleOwners = pm.lastKernelIncrementalRetryRetainedRuleOwners
+	resp.LastKernelIncrementalRetryRetainedRangeOwners = pm.lastKernelIncrementalRetryRetainedRangeOwners
+	resp.LastKernelIncrementalRetryRecoveredRuleOwners = pm.lastKernelIncrementalRetryRecoveredRuleOwners
+	resp.LastKernelIncrementalRetryRecoveredRangeOwners = pm.lastKernelIncrementalRetryRecoveredRangeOwners
+	resp.LastKernelIncrementalRetryCooldownRuleOwners = pm.lastKernelIncrementalRetryCooldownRuleOwners
+	resp.LastKernelIncrementalRetryCooldownRangeOwners = pm.lastKernelIncrementalRetryCooldownRangeOwners
+	resp.LastKernelIncrementalRetryCooldownSummary = pm.lastKernelIncrementalRetryCooldownSummary
+	resp.LastKernelIncrementalRetryCooldownScope = pm.lastKernelIncrementalRetryCooldownScope
+	resp.LastKernelIncrementalRetryBackoffRuleOwners = pm.lastKernelIncrementalRetryBackoffRuleOwners
+	resp.LastKernelIncrementalRetryBackoffRangeOwners = pm.lastKernelIncrementalRetryBackoffRangeOwners
+	resp.LastKernelIncrementalRetryBackoffSummary = pm.lastKernelIncrementalRetryBackoffSummary
+	resp.LastKernelIncrementalRetryBackoffScope = pm.lastKernelIncrementalRetryBackoffScope
+	resp.LastKernelIncrementalRetryBackoffMaxFailures = pm.lastKernelIncrementalRetryBackoffMaxFailures
+	resp.LastKernelIncrementalRetryBackoffMaxDelayMs = pm.lastKernelIncrementalRetryBackoffMaxDelay.Milliseconds()
+	resp.KernelNetlinkRecoverPending = pm.kernelNetlinkRecoverPending
+	resp.KernelNetlinkRecoverSource = pm.kernelNetlinkRecoverSource
+	resp.KernelNetlinkRecoverSummary = pm.kernelNetlinkRecoverSummary
+	resp.KernelNetlinkRecoverRequestedAt = pm.kernelNetlinkRecoverRequestedAt
+	resp.KernelNetlinkRecoverTriggerSummary = summarizeKernelNetlinkRecoveryTrigger(pm.kernelNetlinkRecoverTrigger)
+	resp.LastKernelAttachmentIssue = pm.lastKernelAttachmentIssue
+	resp.LastKernelAttachmentHealAt = pm.kernelAttachmentHealAt
+	resp.LastKernelAttachmentHealSummary = pm.lastKernelAttachmentHealSummary
+	resp.LastKernelAttachmentHealError = pm.lastKernelAttachmentHealError
+	resp.LastStatsSnapshotAt = pm.kernelStatsSnapshotAt
+	resp.LastStatsSnapshotMs = pm.kernelStatsLastDuration.Milliseconds()
+	resp.LastStatsSnapshotError = pm.kernelStatsLastError
 	pm.mu.Unlock()
 
 	resp.Engines = snapshotKernelRuntimeEngines(pm.kernelRuntime)
@@ -168,34 +211,50 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 	available, reason := rt.currentAvailabilityLocked(now)
 	pressure := rt.pressureState
 	actualCapacities := rt.currentMapCapacitiesLocked()
-	degraded := tcKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit)
+	degraded := tcKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit, rt.degradedSource)
+	rt.observability.updateDegraded(degraded.active, now)
+	obs := rt.observability.snapshot()
 
 	view := KernelEngineRuntimeView{
-		Name:              kernelEngineTC,
-		Available:         available,
-		AvailableReason:   reason,
-		Degraded:          degraded.active,
-		DegradedReason:    degraded.reason,
-		Loaded:            rt.coll != nil,
-		ActiveEntries:     len(rt.preparedRules),
-		Attachments:       len(rt.attachments),
-		RulesMapCapacity:  actualCapacities.Rules,
-		FlowsMapCapacity:  actualCapacities.Flows,
-		NATMapCapacity:    actualCapacities.NATPorts,
-		LastReconcileMode: rt.lastReconcileMode,
-		TrafficStats:      rt.enableTrafficStats,
+		Name:               kernelEngineTC,
+		Available:          available,
+		AvailableReason:    reason,
+		Degraded:           degraded.active,
+		DegradedReason:     degraded.reason,
+		Loaded:             rt.coll != nil,
+		ActiveEntries:      len(rt.preparedRules),
+		Attachments:        len(rt.attachments),
+		RulesMapCapacity:   actualCapacities.Rules,
+		FlowsMapCapacity:   actualCapacities.Flows,
+		NATMapCapacity:     actualCapacities.NATPorts,
+		LastReconcileMode:  rt.lastReconcileMode,
+		TrafficStats:       rt.enableTrafficStats,
+		Diagnostics:        rt.enableDiagnostics,
+		DiagnosticsVerbose: rt.enableDiagVerbose,
 	}
 	applyKernelRuntimePressureView(&view, pressure)
+	applyKernelRuntimeObservabilityView(&view, obs)
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
-	mapRefs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	forwardProgramID := 0
+	replyProgramID := 0
+	coll := rt.coll
+	if coll != nil {
+		forwardProgramID = int(kernelProgramID(coll.Programs[kernelForwardProgramName]))
+		replyProgramID = int(kernelProgramID(coll.Programs[kernelReplyProgramName]))
+	}
+	mapRefs := kernelRuntimeMapRefsFromCollection(coll)
 	cachedCounts := rt.runtimeMapCounts
 	rt.mu.Unlock()
 
 	view.Attachments = len(attachments)
 	view.AttachmentSummary = describeKernelAttachments(attachments)
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(preparedRules)
-	view.AttachmentsHealthy = len(preparedRules) == 0 || kernelAttachmentsHealthy(forwardIfRules, replyIfRules, attachments)
+	view.AttachmentsHealthy = len(preparedRules) == 0 || kernelAttachmentsHealthy(forwardIfRules, replyIfRules, attachments, forwardProgramID, replyProgramID)
+	rt.mu.Lock()
+	rt.observability.observeAttachmentsHealthy(view.AttachmentsHealthy, now)
+	applyKernelRuntimeObservabilityView(&view, rt.observability.snapshot())
+	rt.mu.Unlock()
 
 	counts := cachedCounts
 	if !counts.fresh(now) {
@@ -203,6 +262,9 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 		rt.updateRuntimeMapCountCache(mapRefs, counts)
 	}
 	applyKernelRuntimeMapCounts(&view, counts, true)
+	if coll != nil {
+		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiag(coll))
+	}
 
 	return view
 }
@@ -213,7 +275,9 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	available, reason := rt.currentAvailabilityLocked(now)
 	pressure := rt.pressureState
 	actualCapacities := rt.currentMapCapacitiesLocked()
-	degraded := xdpKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, rt.rulesMapLimit, rt.flowsMapLimit)
+	degraded := xdpKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, rt.rulesMapLimit, rt.flowsMapLimit, rt.degradedSource)
+	rt.observability.updateDegraded(degraded.active, now)
+	obs := rt.observability.snapshot()
 
 	view := KernelEngineRuntimeView{
 		Name:              kernelEngineXDP,
@@ -230,6 +294,7 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 		TrafficStats:      rt.prepareOptions.enableTrafficStats,
 	}
 	applyKernelRuntimePressureView(&view, pressure)
+	applyKernelRuntimeObservabilityView(&view, obs)
 	preparedRules := append([]preparedXDPKernelRule(nil), rt.preparedRules...)
 	attachments := append([]xdpAttachment(nil), rt.attachments...)
 	programID := rt.programID
@@ -241,6 +306,10 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	view.AttachmentSummary = describeXDPAttachments(attachments)
 	requiredIfIndices := collectXDPInterfaces(preparedRules)
 	view.AttachmentsHealthy = len(preparedRules) == 0 || xdpAttachmentsHealthy(requiredIfIndices, attachments, programID)
+	rt.mu.Lock()
+	rt.observability.observeAttachmentsHealthy(view.AttachmentsHealthy, now)
+	applyKernelRuntimeObservabilityView(&view, rt.observability.snapshot())
+	rt.mu.Unlock()
 
 	counts := cachedCounts
 	if !counts.fresh(now) {
@@ -333,10 +402,91 @@ type kernelAttachmentLookupGroup struct {
 	parent    uint32
 }
 
-func kernelAttachmentPresence(keys []kernelAttachmentKey) map[kernelAttachmentKey]bool {
-	present := make(map[kernelAttachmentKey]bool, len(keys))
+type kernelAttachmentExpectation struct {
+	key       kernelAttachmentKey
+	name      string
+	programID int
+}
+
+type kernelAttachmentObservation struct {
+	present      bool
+	isBPF        bool
+	name         string
+	programID    int
+	directAction bool
+}
+
+func expectedKernelAttachmentIdentity(name string, prog *ebpf.Program) kernelAttachmentExpectation {
+	return kernelAttachmentExpectation{
+		name:      name,
+		programID: int(kernelProgramID(prog)),
+	}
+}
+
+func kernelAttachmentExpectationForPlan(plan kernelAttachmentPlan) kernelAttachmentExpectation {
+	item := expectedKernelAttachmentIdentity(plan.name, plan.prog)
+	item.key = plan.key
+	return item
+}
+
+func expectedKernelAttachments(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProgramID int, replyProgramID int) []kernelAttachmentExpectation {
+	expected := make([]kernelAttachmentExpectation, 0, len(forwardIfRules)+len(replyIfRules))
+	for ifindex := range forwardIfRules {
+		expected = append(expected, kernelAttachmentExpectation{
+			key: kernelAttachmentKey{
+				linkIndex: ifindex,
+				parent:    netlink.HANDLE_MIN_INGRESS,
+				priority:  kernelForwardFilterPrio,
+				handle:    netlink.MakeHandle(0, kernelForwardFilterHandle),
+			},
+			name:      kernelForwardProgramName,
+			programID: forwardProgramID,
+		})
+	}
+	for ifindex := range replyIfRules {
+		expected = append(expected, kernelAttachmentExpectation{
+			key: kernelAttachmentKey{
+				linkIndex: ifindex,
+				parent:    netlink.HANDLE_MIN_INGRESS,
+				priority:  kernelReplyFilterPrio,
+				handle:    netlink.MakeHandle(0, kernelReplyFilterHandle),
+			},
+			name:      kernelReplyProgramName,
+			programID: replyProgramID,
+		})
+	}
+	return expected
+}
+
+func kernelAttachmentObservationMatchesExpectation(observed kernelAttachmentObservation, expected kernelAttachmentExpectation) bool {
+	if !observed.present || !observed.isBPF || !observed.directAction {
+		return false
+	}
+	if expected.programID > 0 && observed.programID > 0 && observed.programID != expected.programID {
+		return false
+	}
+	if strings.TrimSpace(expected.name) != "" && strings.TrimSpace(observed.name) != "" && observed.name != expected.name {
+		return false
+	}
+	return true
+}
+
+func kernelExpectedAttachmentsHealthy(expected []kernelAttachmentExpectation, attachmentCount int, observed map[kernelAttachmentKey]kernelAttachmentObservation) bool {
+	if len(expected) > attachmentCount {
+		return false
+	}
+	for _, item := range expected {
+		if !kernelAttachmentObservationMatchesExpectation(observed[item.key], item) {
+			return false
+		}
+	}
+	return true
+}
+
+func kernelAttachmentObservations(keys []kernelAttachmentKey) map[kernelAttachmentKey]kernelAttachmentObservation {
+	observed := make(map[kernelAttachmentKey]kernelAttachmentObservation, len(keys))
 	if len(keys) == 0 {
-		return present
+		return observed
 	}
 
 	grouped := make(map[kernelAttachmentLookupGroup]map[kernelAttachmentKey]struct{})
@@ -368,12 +518,30 @@ func kernelAttachmentPresence(keys []kernelAttachmentKey) map[kernelAttachmentKe
 				priority:  attrs.Priority,
 				handle:    attrs.Handle,
 			}
-			if _, ok := expected[key]; ok {
-				present[key] = true
+			if _, ok := expected[key]; !ok {
+				continue
 			}
+			item := kernelAttachmentObservation{present: true}
+			if bpf, ok := filter.(*netlink.BpfFilter); ok && bpf != nil {
+				item.isBPF = true
+				item.name = strings.TrimSpace(bpf.Name)
+				item.programID = bpf.Id
+				item.directAction = bpf.DirectAction
+			}
+			observed[key] = item
 		}
 	}
 
+	return observed
+}
+
+func kernelAttachmentPresence(keys []kernelAttachmentKey) map[kernelAttachmentKey]bool {
+	present := make(map[kernelAttachmentKey]bool, len(keys))
+	for key, item := range kernelAttachmentObservations(keys) {
+		if item.present {
+			present[key] = true
+		}
+	}
 	return present
 }
 
@@ -492,34 +660,13 @@ func applyKernelRuntimeMapCounts(view *KernelEngineRuntimeView, counts kernelRun
 	}
 }
 
-func kernelAttachmentsHealthy(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, attachments []kernelAttachment) bool {
-	expected := make([]kernelAttachmentKey, 0, len(forwardIfRules)+len(replyIfRules))
-	for ifindex := range forwardIfRules {
-		expected = append(expected, kernelAttachmentKey{
-			linkIndex: ifindex,
-			parent:    netlink.HANDLE_MIN_INGRESS,
-			priority:  kernelForwardFilterPrio,
-			handle:    netlink.MakeHandle(0, kernelForwardFilterHandle),
-		})
+func kernelAttachmentsHealthy(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, attachments []kernelAttachment, forwardProgramID int, replyProgramID int) bool {
+	expected := expectedKernelAttachments(forwardIfRules, replyIfRules, forwardProgramID, replyProgramID)
+	keys := make([]kernelAttachmentKey, 0, len(expected))
+	for _, item := range expected {
+		keys = append(keys, item.key)
 	}
-	for ifindex := range replyIfRules {
-		expected = append(expected, kernelAttachmentKey{
-			linkIndex: ifindex,
-			parent:    netlink.HANDLE_MIN_INGRESS,
-			priority:  kernelReplyFilterPrio,
-			handle:    netlink.MakeHandle(0, kernelReplyFilterHandle),
-		})
-	}
-	if len(expected) > len(attachments) {
-		return false
-	}
-	present := kernelAttachmentPresence(expected)
-	for _, key := range expected {
-		if !present[key] {
-			return false
-		}
-	}
-	return true
+	return kernelExpectedAttachmentsHealthy(expected, len(attachments), kernelAttachmentObservations(keys))
 }
 
 func xdpAttachmentsHealthy(requiredIfIndices []int, attachments []xdpAttachment, programID uint32) bool {

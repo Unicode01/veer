@@ -9,9 +9,11 @@ import (
 )
 
 const (
-	experimentalFeatureBridgeXDP     = "bridge_xdp"
-	experimentalFeatureKernelTraffic = "kernel_traffic_stats"
-	insecureDefaultWebToken          = "change-me-to-a-secure-token"
+	experimentalFeatureBridgeXDP           = "bridge_xdp"
+	experimentalFeatureKernelTraffic       = "kernel_traffic_stats"
+	experimentalFeatureKernelTCDiag        = "kernel_tc_diag"
+	experimentalFeatureKernelTCDiagVerbose = "kernel_tc_diag_verbose"
+	insecureDefaultWebToken                = "change-me-to-a-secure-token"
 )
 
 type Config struct {

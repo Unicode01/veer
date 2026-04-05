@@ -31,7 +31,15 @@ type kernelRuleRuntime interface {
 	Close() error
 }
 
+type kernelRuleSupportRuntime interface {
+	SupportsRule(rule Rule) (bool, string)
+}
+
 type kernelHandoffRetentionRuntime interface {
 	retainedKernelRuleCandidates(rule Rule) ([]Rule, bool)
 	retainedKernelRangeCandidates(pr PortRange) ([]Rule, bool)
+}
+
+type kernelRetainedAssignmentRuntime interface {
+	ReconcileRetainingAssignments(retainedByEngine map[string][]Rule, newRules []Rule) (map[int64]kernelRuleApplyResult, error)
 }

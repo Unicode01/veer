@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,8 +53,13 @@ func runSharedProxy(sockPath string) {
 		c.Write(data)
 	}
 
-	sendStatus := func(status, errMsg string) {
-		sendIPC(IPCMessage{Type: "status", Status: status, Error: errMsg})
+	sendStatus := func(status, errMsg string, failedSiteIDs []int64) {
+		sendIPC(IPCMessage{
+			Type:          "status",
+			Status:        status,
+			Error:         errMsg,
+			FailedSiteIDs: failedSiteIDs,
+		})
 	}
 
 	sendSiteStats := func() {
@@ -164,12 +170,22 @@ func runSharedProxy(sockPath string) {
 				}
 				if atomic.LoadInt32(&pendingUpgrade) != 0 {
 					log.Println("shared proxy: pending upgrade, ignoring config update")
-					sendStatus("draining", "")
+					sendStatus("draining", "", nil)
 					continue
 				}
 				log.Printf("shared proxy: updating %d sites", len(msg.Sites))
-				sp.applySites(ctx, msg.Sites)
-				sendStatus("running", "")
+				result := sp.applySites(ctx, msg.Sites)
+				if len(result.failedSiteIDs) > 0 {
+					status := "running"
+					if result.activeListenerCount == 0 {
+						status = "error"
+					}
+					sendStatus(status, result.summary(), result.failedSiteIDs)
+				} else if len(msg.Sites) == 0 {
+					sendStatus("idle", "", nil)
+				} else {
+					sendStatus("running", "", nil)
+				}
 			case "stop":
 				log.Println("shared proxy: received stop")
 				cancel()
@@ -236,6 +252,25 @@ func siteStatsMapHasActivity(statsMap map[string]*siteStats) bool {
 	return false
 }
 
+type sharedProxyApplyResult struct {
+	failedSiteIDs       []int64
+	failedListeners     []string
+	activeListenerCount int
+}
+
+func (r sharedProxyApplyResult) summary() string {
+	if len(r.failedListeners) == 0 {
+		if len(r.failedSiteIDs) == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%d site listener(s) unavailable", len(r.failedSiteIDs))
+	}
+	if len(r.failedListeners) == 1 {
+		return "listener unavailable: " + r.failedListeners[0]
+	}
+	return fmt.Sprintf("%d listeners unavailable: %s", len(r.failedListeners), strings.Join(r.failedListeners, ", "))
+}
+
 type sharedProxyEngine struct {
 	mu                sync.RWMutex
 	httpRoutes        map[string]string // domain -> ip:port
@@ -247,7 +282,7 @@ type sharedProxyEngine struct {
 	domainTransparent map[string]bool       // domain -> transparent flag
 }
 
-func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site) {
+func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site) sharedProxyApplyResult {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
@@ -255,11 +290,20 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 	newHTTP := make(map[string]string)
 	newHTTPS := make(map[string]string)
 	neededListeners := make(map[string]managedListener)
+	listenerSiteIDs := make(map[string]map[int64]struct{})
 
 	newSiteID := make(map[string]int64)
 	newStats := make(map[string]*siteStats)
 	newSourceIP := make(map[string]string)
 	newTransparent := make(map[string]bool)
+	addListenerSiteID := func(key string, siteID int64) {
+		ids := listenerSiteIDs[key]
+		if ids == nil {
+			ids = make(map[int64]struct{})
+			listenerSiteIDs[key] = ids
+		}
+		ids[siteID] = struct{}{}
+	}
 
 	for _, s := range sites {
 		domain := strings.ToLower(s.Domain)
@@ -274,12 +318,16 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 		if s.BackendHTTP > 0 {
 			newHTTP[domain] = net.JoinHostPort(s.BackendIP, fmt.Sprintf("%d", s.BackendHTTP))
 			addr := net.JoinHostPort(s.ListenIP, "80")
-			neededListeners[listenerKey(s.ListenIface, addr)] = managedListener{iface: s.ListenIface, addr: addr}
+			key := listenerKey(s.ListenIface, addr)
+			neededListeners[key] = managedListener{iface: s.ListenIface, addr: addr}
+			addListenerSiteID(key, s.ID)
 		}
 		if s.BackendHTTPS > 0 {
 			newHTTPS[domain] = net.JoinHostPort(s.BackendIP, fmt.Sprintf("%d", s.BackendHTTPS))
 			addr := net.JoinHostPort(s.ListenIP, "443")
-			neededListeners[listenerKey(s.ListenIface, addr)] = managedListener{iface: s.ListenIface, addr: addr}
+			key := listenerKey(s.ListenIface, addr)
+			neededListeners[key] = managedListener{iface: s.ListenIface, addr: addr}
+			addListenerSiteID(key, s.ID)
 		}
 	}
 
@@ -289,6 +337,9 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 	sp.domainStats = newStats
 	sp.domainSourceIP = newSourceIP
 	sp.domainTransparent = newTransparent
+
+	failedSiteIDs := make(map[int64]struct{})
+	var failedListeners []string
 
 	// Stop unneeded listeners
 	for key, ml := range sp.listeners {
@@ -313,12 +364,15 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 		if ctrl := controlBindToDevice(spec.iface); ctrl != nil {
 			lc.Control = ctrl
 		}
-		ln, err := lc.Listen(parentCtx, "tcp", spec.addr)
+		ln, err := lc.Listen(parentCtx, tcpListenNetworkForAddr(spec.addr), spec.addr)
 		if err != nil {
+			for siteID := range listenerSiteIDs[key] {
+				failedSiteIDs[siteID] = struct{}{}
+			}
 			if spec.iface != "" {
-				log.Printf("shared proxy: listen %s on %s: %v", spec.addr, spec.iface, err)
+				failedListeners = append(failedListeners, fmt.Sprintf("%s via %s", spec.addr, spec.iface))
 			} else {
-				log.Printf("shared proxy: listen %s: %v", spec.addr, err)
+				failedListeners = append(failedListeners, spec.addr)
 			}
 			continue
 		}
@@ -336,6 +390,13 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 		} else {
 			log.Printf("shared proxy: listening on %s", spec.addr)
 		}
+	}
+
+	sort.Strings(failedListeners)
+	return sharedProxyApplyResult{
+		failedSiteIDs:       sortedInt64SetKeys(failedSiteIDs),
+		failedListeners:     failedListeners,
+		activeListenerCount: len(sp.listeners),
 	}
 }
 

@@ -6,32 +6,31 @@ import (
 	"strings"
 )
 
-func resolveDialSourceIPv4(sourceIP string) (net.IP, error) {
+func resolveDialSourceIP(sourceIP string) (net.IP, error) {
 	sourceIP = strings.TrimSpace(sourceIP)
 	if sourceIP == "" {
 		return nil, nil
 	}
-	ip := net.ParseIP(sourceIP)
+	ip := parseIPLiteral(sourceIP)
 	if ip == nil {
-		return nil, fmt.Errorf("invalid outbound source IPv4 %q", sourceIP)
+		return nil, fmt.Errorf("invalid outbound source IP %q", sourceIP)
 	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return nil, fmt.Errorf("invalid outbound source IPv4 %q", sourceIP)
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4, nil
 	}
-	return ip4, nil
+	return ip, nil
 }
 
 func configureOutboundTCPDialer(dialer *net.Dialer, outIface, sourceIP string) error {
 	if dialer == nil {
 		return nil
 	}
-	ip4, err := resolveDialSourceIPv4(sourceIP)
+	sourceAddr, err := resolveDialSourceIP(sourceIP)
 	if err != nil {
 		return err
 	}
-	if ip4 != nil {
-		dialer.LocalAddr = &net.TCPAddr{IP: ip4, Port: 0}
+	if sourceAddr != nil {
+		dialer.LocalAddr = &net.TCPAddr{IP: sourceAddr, Port: 0}
 	}
 	dialer.Control = controlBindToDevice(outIface)
 	return nil
@@ -47,8 +46,8 @@ func dialOutboundUDP(targetAddr *net.UDPAddr, outIface, sourceIP string) (*net.U
 	}
 
 	network := "udp"
-	if targetAddr != nil && targetAddr.IP != nil && targetAddr.IP.To4() != nil {
-		network = "udp4"
+	if targetAddr != nil {
+		network = udpNetworkForIP(targetAddr.IP)
 	}
 
 	conn, err := dialer.Dial(network, targetAddr.String())

@@ -181,11 +181,11 @@
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.outIP">Outbound IP</label>
-                            <input type="text" id="outIP" placeholder="198.51.100.2" spellcheck="false" autocapitalize="off" inputmode="decimal" required>
+                            <input type="text" id="outIP" placeholder="198.51.100.2 / 2001:db8::2" spellcheck="false" autocapitalize="off" inputmode="text" required>
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.outSourceIP">Fixed Source IP</label>
-                            <input type="text" id="ruleOutSourceIP" list="ruleOutSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="decimal">
+                            <input type="text" id="ruleOutSourceIP" list="ruleOutSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="text">
                             <datalist id="ruleOutSourceIPOptions"></datalist>
                         </div>
                         <div class="form-group">
@@ -276,7 +276,8 @@
                         <div class="form-group">
                             <label data-i18n="site.form.listenIP">Listen IP</label>
                             <select id="siteListenIP">
-                                <option value="0.0.0.0" data-i18n="common.allAddresses">0.0.0.0 (All)</option>
+                                <option value="0.0.0.0" data-i18n="common.allIPv4Addresses">0.0.0.0 (All IPv4)</option>
+                                <option value="::" data-i18n="common.allIPv6Addresses">:: (All IPv6)</option>
                             </select>
                         </div>
                         <div class="form-group form-group-checkbox">
@@ -290,11 +291,11 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label data-i18n="site.form.backendIP">Backend IP</label>
-                            <input type="text" id="siteBackendIP" placeholder="192.168.1.100" spellcheck="false" autocapitalize="off" inputmode="decimal" required>
+                            <input type="text" id="siteBackendIP" placeholder="192.168.1.100 / 2001:db8::100" spellcheck="false" autocapitalize="off" inputmode="text" required>
                         </div>
                         <div class="form-group">
                             <label data-i18n="site.form.backendSourceIP">Backend Source IP</label>
-                            <input type="text" id="siteBackendSourceIP" list="siteBackendSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="decimal">
+                            <input type="text" id="siteBackendSourceIP" list="siteBackendSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="text">
                             <datalist id="siteBackendSourceIPOptions"></datalist>
                         </div>
                         <div class="form-group">
@@ -415,11 +416,11 @@
                         </div>
                         <div class="form-group">
                             <label data-i18n="range.form.targetIP">Target IP</label>
-                            <input type="text" id="rangeOutIP" placeholder="198.51.100.2" spellcheck="false" autocapitalize="off" inputmode="decimal" required>
+                            <input type="text" id="rangeOutIP" placeholder="198.51.100.2 / 2001:db8::2" spellcheck="false" autocapitalize="off" inputmode="text" required>
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.outSourceIP">Fixed Source IP</label>
-                            <input type="text" id="rangeOutSourceIP" list="rangeOutSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="decimal">
+                            <input type="text" id="rangeOutSourceIP" list="rangeOutSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="text">
                             <datalist id="rangeOutSourceIPOptions"></datalist>
                         </div>
                         <div class="form-group">
@@ -623,13 +624,13 @@
     </div>
 
     <script defer src="js/core.js?v=20260402-1"></script>
-    <script defer src="js/i18n.js?v=20260402-1"></script>
+    <script defer src="js/i18n.js?v=20260405-1"></script>
     <script defer src="js/ui.js?v=20260402-1"></script>
     <script defer src="js/rules.js?v=20260402-1"></script>
     <script defer src="js/sites.js?v=20260402-1"></script>
     <script defer src="js/ranges.js?v=20260402-1"></script>
     <script defer src="js/workers.js?v=20260402-1"></script>
-    <script defer src="js/stats.js?v=20260402-1"></script>
+    <script defer src="js/stats.js?v=20260405-3"></script>
     <script defer src="js/init.js?v=20260402-1"></script>
 </body>
 </html>

@@ -27,6 +27,7 @@ const (
 	kernelFlowsMapName        = "flows_v4"
 	kernelNatPortsMapName     = "nat_ports_v4"
 	kernelStatsMapName        = "stats_v4"
+	kernelDiagMapName         = "diag_v4"
 	kernelReplyFilterPrio     = 10
 	kernelForwardFilterPrio   = 20
 	kernelForwardFilterHandle = 10
@@ -265,12 +266,17 @@ type linuxKernelRuleRuntime struct {
 	preparedRules      []preparedKernelRule
 	lastSkipLog        map[string]struct{}
 	lastReconcileMode  string
+	degradedSource     string
 	stateLog           kernelStateLogger
 	pressureState      kernelRuntimePressureState
+	observability      kernelRuntimeObservabilityState
+	maintenanceState   kernelAdaptiveMaintenanceState
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPruneState     kernelFlowPruneState
 	runtimeMapCounts   kernelRuntimeMapCountSnapshot
 	enableTrafficStats bool
+	enableDiagnostics  bool
+	enableDiagVerbose  bool
 }
 
 func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
@@ -278,11 +284,18 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	flowsLimit := 0
 	natLimit := 0
 	enableTrafficStats := false
+	enableDiagnostics := false
+	enableDiagVerbose := false
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
 		natLimit = cfg.KernelNATMapLimit
 		enableTrafficStats = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
+		enableDiagnostics = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag)
+		enableDiagVerbose = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
+	}
+	if enableDiagVerbose {
+		enableDiagnostics = true
 	}
 	return &linuxKernelRuleRuntime{
 		rulesMapLimit:      rulesLimit,
@@ -290,6 +303,8 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		natMapLimit:        natLimit,
 		statsCorrection:    make(map[uint32]kernelRuleStats),
 		enableTrafficStats: enableTrafficStats,
+		enableDiagnostics:  enableDiagnostics,
+		enableDiagVerbose:  enableDiagVerbose,
 	}
 }
 
@@ -326,10 +341,24 @@ func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
 		if rt.enableTrafficStats {
 			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
 		}
+		if rt.enableDiagnostics {
+			rt.availableReason += "; kernel_tc_diag experimental path enabled"
+		}
+		if rt.enableDiagVerbose {
+			rt.availableReason += "; kernel_tc_diag_verbose experimental path enabled"
+		}
 	})
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return rt.currentAvailabilityLocked(time.Now())
+}
+
+func (rt *linuxKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
+	_, err := prepareKernelRule(newKernelPrepareContext(rt.enableTrafficStats), rule)
+	if err != nil {
+		return false, err.Error()
+	}
+	return true, ""
 }
 
 func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
@@ -378,7 +407,13 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	}
 
 	desiredCapacities := desiredKernelMapCapacities(rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit, len(prepared), true)
-	if rt.canReconcileInPlaceLocked(desiredCapacities) {
+	preferFreshMapGrowth := rt.shouldPreferFreshMapGrowthLocked(desiredCapacities)
+	if preferFreshMapGrowth {
+		log.Printf(
+			"kernel dataplane reconcile: flows/nat maps are idle and below desired capacity, rebuilding tc collection to clear degraded state",
+		)
+	}
+	if rt.canReconcileInPlaceLocked(desiredCapacities) && !preferFreshMapGrowth {
 		if err := rt.reconcileInPlaceLocked(prepared, forwardIfRules, replyIfRules, results); err == nil {
 			return results, nil
 		} else {
@@ -703,8 +738,16 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
 	rt.natMapCapacity = actualCapacities.NATPorts
+	if hotRestartState != nil && kernelRuntimeNeedsMapGrowth(actualCapacities, desiredCapacities, true) {
+		rt.degradedSource = kernelRuntimeDegradedSourceHotRestart
+	} else if kernelRuntimeNeedsMapGrowth(actualCapacities, desiredCapacities, true) {
+		rt.degradedSource = kernelRuntimeDegradedSourceLivePreserve
+	} else {
+		rt.degradedSource = kernelRuntimeDegradedSourceNone
+	}
 	rt.flowPruneState.reset()
 	rt.lastReconcileMode = "rebuild"
+	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if hotRestartState != nil {
@@ -737,11 +780,44 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	corrections, err := pruneStaleKernelFlowsInCollection(rt.coll, &rt.flowPruneState, rt.flowMaintenanceBudgetLocked())
+	startedAt := time.Now()
+	corrections, pruneMetrics, err := pruneStaleKernelFlowsInCollection(rt.coll, &rt.flowPruneState, rt.flowMaintenanceBudgetLocked())
+	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
 	if err != nil {
 		return err
 	}
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
+	pressureActive := rt.pressureState.active
+	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
+	if runFull {
+		fullSuccess := true
+		driftDetected := false
+		if rt.coll != nil && rt.coll.Maps != nil {
+			live, usedNAT, liveErr := snapshotKernelLiveStateFromFlows(rt.coll.Maps[kernelRulesMapName], rt.coll.Maps[kernelFlowsMapName], true)
+			if liveErr != nil {
+				fullSuccess = false
+				log.Printf("kernel dataplane maintenance: snapshot live tc flow state failed: %v", liveErr)
+			} else {
+				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(rt.coll.Maps[kernelStatsMapName], live)
+				if correctionErr != nil {
+					fullSuccess = false
+					log.Printf("kernel dataplane maintenance: reconcile tc stats correction failed: %v", correctionErr)
+				} else {
+					driftDetected = !kernelStatsCorrectionsEqual(rt.statsCorrection, exact)
+					syncKernelLiveStatsCorrections(rt.statsCorrection, exact)
+				}
+				deleted, natErr := pruneOrphanKernelNATReservations(rt.coll.Maps[kernelNatPortsMapName], usedNAT)
+				if natErr != nil {
+					fullSuccess = false
+					log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
+				} else if deleted > 0 {
+					driftDetected = true
+					log.Printf("kernel dataplane maintenance: pruned %d orphan tc nat reservation(s)", deleted)
+				}
+			}
+		}
+		rt.maintenanceState.observeFull(pressureActive, fullSuccess, driftDetected)
+	}
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	return nil
@@ -901,8 +977,10 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.flowsMapCapacity = 0
 	rt.natMapCapacity = 0
 	rt.lastReconcileMode = ""
+	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if rt.coll != nil {
@@ -925,8 +1003,10 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.flowsMapCapacity = 0
 	rt.natMapCapacity = 0
 	rt.lastReconcileMode = ""
+	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if rt.coll != nil {
@@ -989,6 +1069,7 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 	rt.flowsMapCapacity = capacities.Flows
 	rt.natMapCapacity = capacities.NATPorts
 	rt.flowPruneState.reset()
+	rt.maintenanceState.requestFull()
 	rt.invalidatePressureStateLocked()
 	return retained, nil
 }
@@ -1191,6 +1272,8 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.flowsMapCapacity = capacities.Flows
 	rt.natMapCapacity = capacities.NATPorts
 	rt.lastReconcileMode = "cleared"
+	rt.degradedSource = kernelRuntimeDegradedSourceNone
+	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {
@@ -1218,10 +1301,12 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		currentAttachments[kernelAttachmentKeyForFilter(att.filter)] = att
 	}
 	plannedKeys := make([]kernelAttachmentKey, 0, len(plans))
+	expectedAttachments := make(map[kernelAttachmentKey]kernelAttachmentExpectation, len(plans))
 	for _, plan := range plans {
 		plannedKeys = append(plannedKeys, plan.key)
+		expectedAttachments[plan.key] = kernelAttachmentExpectationForPlan(plan)
 	}
-	existingAttachments := kernelAttachmentPresence(plannedKeys)
+	observedAttachments := kernelAttachmentObservations(plannedKeys)
 
 	newAttachments := make([]kernelAttachment, 0, len(plans))
 	createdAttachments := make([]kernelAttachment, 0, len(plans))
@@ -1229,7 +1314,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	replyReady := make(map[int]bool, len(replyIfRules))
 
 	for _, plan := range plans {
-		if current, ok := currentAttachments[plan.key]; ok && existingAttachments[plan.key] {
+		if current, ok := currentAttachments[plan.key]; ok && kernelAttachmentObservationMatchesExpectation(observedAttachments[plan.key], expectedAttachments[plan.key]) {
 			newAttachments = append(newAttachments, current)
 		} else {
 			if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
@@ -1281,8 +1366,14 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
 	rt.natMapCapacity = actualCapacities.NATPorts
+	if kernelRuntimeNeedsMapGrowth(actualCapacities, desiredKernelMapCapacities(rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit, len(prepared), true), true) {
+		rt.degradedSource = kernelRuntimeDegradedSourceLivePreserve
+	} else {
+		rt.degradedSource = kernelRuntimeDegradedSourceNone
+	}
 	rt.flowPruneState.reset()
 	rt.lastReconcileMode = "in_place"
+	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
@@ -1641,7 +1732,18 @@ func sortPreparedKernelRules(items []preparedKernelRule) {
 }
 
 func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(forwardIfRules map[int][]int64, replyIfRules map[int][]int64) bool {
-	return kernelAttachmentsHealthy(forwardIfRules, replyIfRules, rt.attachments)
+	if rt.coll == nil {
+		return false
+	}
+	forwardProg := rt.coll.Programs[kernelForwardProgramName]
+	replyProg := rt.coll.Programs[kernelReplyProgramName]
+	return kernelAttachmentsHealthy(
+		forwardIfRules,
+		replyIfRules,
+		rt.attachments,
+		int(kernelProgramID(forwardProg)),
+		int(kernelProgramID(replyProg)),
+	)
 }
 
 func kernelAttachmentExists(key kernelAttachmentKey) bool {

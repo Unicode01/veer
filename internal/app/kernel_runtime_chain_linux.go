@@ -46,6 +46,33 @@ func (rt *orderedKernelRuleRuntime) Available() (bool, string) {
 	return rt.selectLocked()
 }
 
+func (rt *orderedKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
+	rt.mu.Lock()
+	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	rt.mu.Unlock()
+
+	reasons := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		supporter, ok := entry.rt.(kernelRuleSupportRuntime)
+		if !ok || supporter == nil {
+			continue
+		}
+		supported, reason := supporter.SupportsRule(rule)
+		if supported {
+			return true, ""
+		}
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			reason = "rule was not accepted by the engine"
+		}
+		reasons = append(reasons, fmt.Sprintf("%s: %s", entry.name, reason))
+	}
+	if len(reasons) == 0 {
+		return false, "kernel dataplane could not evaluate rule eligibility"
+	}
+	return false, strings.Join(reasons, "; ")
+}
+
 func (rt *orderedKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -87,15 +114,7 @@ func (rt *orderedKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRul
 				continue
 			}
 
-			reason := ""
-			switch {
-			case ok && result.Error != "":
-				reason = result.Error
-			case err != nil:
-				reason = err.Error()
-			default:
-				reason = "rule was not accepted by the engine"
-			}
+			reason := kernelRuntimeReconcileFailureReason(ok, result, err)
 			failuresByRule[rule.ID] = append(failuresByRule[rule.ID], fmt.Sprintf("%s: %s", entry.name, reason))
 			nextPending = append(nextPending, rule)
 		}
@@ -117,6 +136,107 @@ func (rt *orderedKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRul
 			rt.cleanupUnassignedLocked(assignedEntries)
 			return results, nil
 		}
+	}
+
+	rt.assignmentLog.Retain(assignedLogKeys)
+	rt.engineFallbackLog.Retain(fallbackLogKeys)
+	rt.cleanupUnassignedLocked(assignedEntries)
+
+	for _, rule := range pending {
+		failures := failuresByRule[rule.ID]
+		reason := "no kernel dataplane engines accepted the rule"
+		if len(failures) > 0 {
+			reason = strings.Join(failures, "; ")
+		}
+		results[rule.ID] = kernelRuleApplyResult{Error: reason}
+	}
+	return results, nil
+}
+
+func (rt *orderedKernelRuleRuntime) ReconcileRetainingAssignments(retainedByEngine map[string][]Rule, newRules []Rule) (map[int64]kernelRuleApplyResult, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	results := make(map[int64]kernelRuleApplyResult, len(newRules))
+	failuresByRule := make(map[int64][]string, len(newRules))
+	pending := append([]Rule(nil), newRules...)
+	assignedEntries := make(map[string]bool, len(rt.entries))
+	assignedLogKeys := make(map[string]struct{}, len(rt.entries))
+	fallbackLogKeys := make(map[string]struct{}, len(rt.entries))
+
+	for _, entry := range rt.entries {
+		fixed := cloneRuleSlice(retainedByEngine[entry.name])
+		if len(fixed) > 0 {
+			assignedEntries[entry.name] = true
+			assignedLogKeys[entry.name] = struct{}{}
+		}
+
+		available, reason := entry.rt.Available()
+		if !available {
+			if len(fixed) > 0 {
+				if strings.TrimSpace(reason) == "" {
+					reason = "unavailable"
+				}
+				return nil, fmt.Errorf("retained %s kernel assignments became unavailable: %s", entry.name, reason)
+			}
+			if reason == "" {
+				reason = "unavailable"
+			}
+			for _, rule := range pending {
+				failuresByRule[rule.ID] = append(failuresByRule[rule.ID], fmt.Sprintf("%s unavailable: %s", entry.name, reason))
+			}
+			if _, err := entry.rt.Reconcile(nil); err != nil {
+				log.Printf("kernel dataplane engine cleanup after unavailable (%s): %v", entry.name, err)
+			}
+			continue
+		}
+
+		request := make([]Rule, 0, len(fixed)+len(pending))
+		request = append(request, fixed...)
+		request = append(request, pending...)
+		if len(request) == 0 {
+			continue
+		}
+
+		engineResults, err := entry.rt.Reconcile(request)
+		runningCount := 0
+
+		for _, rule := range fixed {
+			result, ok := engineResults[rule.ID]
+			if ok && result.Running {
+				runningCount++
+				continue
+			}
+			return nil, fmt.Errorf("retained %s kernel rule %d could not be preserved: %s", entry.name, rule.ID, kernelRuntimeReconcileFailureReason(ok, result, err))
+		}
+
+		nextPending := make([]Rule, 0, len(pending))
+		for _, rule := range pending {
+			result, ok := engineResults[rule.ID]
+			if ok && result.Running {
+				if result.Engine == "" {
+					result.Engine = entry.name
+				}
+				results[rule.ID] = result
+				runningCount++
+				continue
+			}
+
+			reason := kernelRuntimeReconcileFailureReason(ok, result, err)
+			failuresByRule[rule.ID] = append(failuresByRule[rule.ID], fmt.Sprintf("%s: %s", entry.name, reason))
+			nextPending = append(nextPending, rule)
+		}
+
+		if runningCount > 0 {
+			assignedEntries[entry.name] = true
+			assignedLogKeys[entry.name] = struct{}{}
+			rt.assignmentLog.Logf(entry.name, "kernel dataplane engine assigned: %s entries=%d", entry.name, runningCount)
+		}
+		if err != nil {
+			fallbackLogKeys[entry.name] = struct{}{}
+			rt.engineFallbackLog.Logf(entry.name, "kernel dataplane engine fallback: %s reconcile failed: %v", entry.name, err)
+		}
+		pending = nextPending
 	}
 
 	rt.assignmentLog.Retain(assignedLogKeys)
@@ -230,6 +350,17 @@ func (rt *orderedKernelRuleRuntime) selectLocked() (bool, string) {
 	return false, "no kernel dataplane engines available: " + strings.Join(failures, "; ")
 }
 
+func kernelRuntimeReconcileFailureReason(ok bool, result kernelRuleApplyResult, err error) string {
+	switch {
+	case ok && result.Error != "":
+		return result.Error
+	case err != nil:
+		return err.Error()
+	default:
+		return "rule was not accepted by the engine"
+	}
+}
+
 func kernelRuntimeFailureResults(rules []Rule, reason string) map[int64]kernelRuleApplyResult {
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	for _, rule := range rules {
@@ -243,6 +374,10 @@ type staticUnavailableKernelRuleRuntime struct {
 }
 
 func (rt staticUnavailableKernelRuleRuntime) Available() (bool, string) {
+	return false, rt.reason
+}
+
+func (rt staticUnavailableKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
 	return false, rt.reason
 }
 

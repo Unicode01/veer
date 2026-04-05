@@ -84,6 +84,63 @@
     app.updateRangeTransparentWarning();
   };
 
+  app.getRangeFieldInputs = function getRangeFieldInputs(issue) {
+    const msg = String((issue && issue.message) || '').trim();
+    const field = String((issue && issue.field) || '').trim();
+    const map = {
+      id: app.el.editRangeId,
+      in_interface: app.el.rangeInInterface,
+      in_ip: app.el.rangeInIP,
+      start_port: app.$('rangeStartPort'),
+      end_port: app.$('rangeEndPort'),
+      out_interface: app.el.rangeOutInterface,
+      out_ip: app.$('rangeOutIP'),
+      out_source_ip: app.el.rangeOutSourceIP,
+      out_start_port: app.$('rangeOutStartPort'),
+      protocol: app.$('rangeProtocol'),
+      transparent: app.$('rangeTransparent'),
+      tag: app.$('rangeTag')
+    };
+    if (map[field]) return [map[field]];
+    if (msg === 'in_ip, start_port, end_port, out_ip are required') {
+      return [app.el.rangeInIP, app.$('rangeStartPort'), app.$('rangeEndPort'), app.$('rangeOutIP')];
+    }
+    if (msg === 'start_port must be <= end_port') return [app.$('rangeStartPort'), app.$('rangeEndPort')];
+    if (msg === 'transparent mode currently supports only IPv4 rules') return [app.$('rangeTransparent')];
+    if (msg.indexOf('in_interface ') === 0) return [app.el.rangeInInterface];
+    if (msg.indexOf('in_ip ') === 0) return [app.el.rangeInIP];
+    if (msg.indexOf('out_interface ') === 0) return [app.el.rangeOutInterface];
+    if (msg.indexOf('out_ip ') === 0) return [app.$('rangeOutIP')];
+    if (msg.indexOf('out_source_ip ') === 0) return [app.el.rangeOutSourceIP];
+    if (msg.indexOf('listener conflicts with ') === 0) return [app.$('rangeStartPort')];
+    return [];
+  };
+
+  app.applyRangeValidationIssues = function applyRangeValidationIssues(issues) {
+    const relevant = (issues || []).filter((issue) => issue && (issue.scope === 'create' || issue.scope === 'update'));
+    if (!relevant.length) {
+      app.notify('error', app.t('validation.reviewErrors'));
+      return;
+    }
+
+    let firstInvalid = null;
+    relevant.forEach((issue) => {
+      const inputs = app.getRangeFieldInputs(issue);
+      if (!inputs.length) return;
+      const translated = app.translateValidationMessage(issue.message);
+      inputs.forEach((input) => {
+        if (!input) return;
+        if (!firstInvalid) firstInvalid = input;
+        if (!input.hasAttribute('aria-invalid')) {
+          app.setFieldError(input, translated);
+        }
+      });
+    });
+
+    if (firstInvalid && typeof firstInvalid.focus === 'function') firstInvalid.focus();
+    app.notify('error', app.getValidationIssueSummary({ issues: relevant }, null, 3) || app.translateValidationMessage(relevant[0].message));
+  };
+
   app.getRangeSortValue = function getRangeSortValue(range, key) {
     if (key === 'status') {
       if (!range.enabled) return 3;
@@ -239,7 +296,10 @@
       app.notify('success', app.t('toast.deleted', { item: app.t('noun.range') }));
       app.loadRanges();
     } catch (e) {
-      if (e.message !== 'unauthorized') app.notify('error', app.t('errors.deleteFailed', { message: e.message }));
+      if (e.message !== 'unauthorized') {
+        const message = app.getValidationIssueMessage(e.payload, ['delete']) || app.translateValidationMessage(e.message);
+        app.notify('error', app.t('errors.deleteFailed', { message: message }));
+      }
     } finally {
       app.setRowPending('range', id, false);
       app.renderRangesTable();

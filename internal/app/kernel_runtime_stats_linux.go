@@ -83,14 +83,14 @@ func snapshotKernelStatsFromCollection(coll *ebpf.Collection, corrections map[ui
 	return snapshot, nil
 }
 
-func pruneStaleKernelFlowsInCollection(coll *ebpf.Collection, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, error) {
+func pruneStaleKernelFlowsInCollection(coll *ebpf.Collection, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	if coll == nil || coll.Maps == nil {
-		return map[uint32]kernelRuleStats{}, nil
+		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
 	}
 
 	flowsMap := coll.Maps[kernelFlowsMapName]
 	if flowsMap == nil {
-		return map[uint32]kernelRuleStats{}, nil
+		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
 	}
 
 	rulesMap := coll.Maps[kernelRulesMapName]
@@ -99,22 +99,23 @@ func pruneStaleKernelFlowsInCollection(coll *ebpf.Collection, state *kernelFlowP
 	if budget <= 0 {
 		budget = kernelFlowMaintenanceBudgetMin
 	}
+	metrics := kernelFlowPruneMetrics{Budget: budget}
 	if state == nil {
-		return pruneStaleKernelFlowsFullInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow)
+		return pruneStaleKernelFlowsFullInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, metrics)
 	}
 	if !state.batchSupportKnown || state.batchSupported {
-		corrections, err := pruneStaleKernelFlowsBatch(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, budget)
+		corrections, pruneMetrics, err := pruneStaleKernelFlowsBatch(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, metrics)
 		if err == nil {
 			state.batchSupportKnown = true
 			state.batchSupported = true
-			return corrections, nil
+			return corrections, pruneMetrics, nil
 		}
 		state.reset()
 		state.batchSupportKnown = true
 		state.batchSupported = false
 		log.Printf("kernel dataplane maintenance: batch flow scan unavailable, falling back to full scan: %v", err)
 	}
-	return pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, budget)
+	return pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, metrics)
 }
 
 func applyKernelStatsCorrections(dst map[uint32]kernelRuleStats, corrections map[uint32]kernelRuleStats) {
@@ -257,9 +258,21 @@ func copyKernelStatsMap(dst *ebpf.Map, src *ebpf.Map) error {
 }
 
 func snapshotKernelLiveCountsFromFlows(flowsMap *ebpf.Map) (map[uint32]kernelStatsValueV4, error) {
+	live, _, err := snapshotKernelLiveStateFromFlows(nil, flowsMap, false)
+	if err != nil {
+		return nil, err
+	}
+	return live, nil
+}
+
+func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, includeNAT bool) (map[uint32]kernelStatsValueV4, map[tcNATPortKeyV4]struct{}, error) {
 	out := make(map[uint32]kernelStatsValueV4)
+	var usedNAT map[tcNATPortKeyV4]struct{}
+	if includeNAT {
+		usedNAT = make(map[tcNATPortKeyV4]struct{})
+	}
 	if flowsMap == nil {
-		return out, nil
+		return out, usedNAT, nil
 	}
 
 	iter := flowsMap.Iterate()
@@ -276,11 +289,39 @@ func snapshotKernelLiveCountsFromFlows(flowsMap *ebpf.Map) (map[uint32]kernelSta
 			item.TCPActiveConns++
 		}
 		out[value.RuleID] = item
+		if includeNAT {
+			if natKey, ok := kernelUsedNATReservationKey(rulesMap, key, value); ok {
+				usedNAT[natKey] = struct{}{}
+			}
+		}
 	}
 	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("iterate kernel flows map for live counts: %w", err)
+		return nil, nil, fmt.Errorf("iterate kernel flows map for live counts: %w", err)
 	}
-	return out, nil
+	return out, usedNAT, nil
+}
+
+func kernelUsedNATReservationKey(rulesMap *ebpf.Map, key tcFlowKeyV4, value tcFlowValueV4) (tcNATPortKeyV4, bool) {
+	if value.Flags&kernelFlowFlagFullNAT == 0 || value.NATAddr == 0 || value.NATPort == 0 {
+		return tcNATPortKeyV4{}, false
+	}
+
+	natKey := tcNATPortKeyV4{
+		NATAddr: value.NATAddr,
+		NATPort: value.NATPort,
+		Proto:   key.Proto,
+	}
+	if value.Flags&kernelFlowFlagFrontEntry == 0 {
+		natKey.IfIndex = key.IfIndex
+		return natKey, true
+	}
+
+	ruleValue, ok := lookupRuleValueForFrontFlow(rulesMap, key)
+	if !ok || ruleValue.OutIfIndex == 0 {
+		return tcNATPortKeyV4{}, false
+	}
+	natKey.IfIndex = ruleValue.OutIfIndex
+	return natKey, true
 }
 
 func kernelFlowCountsTowardLiveGauge(value tcFlowValueV4) bool {
@@ -326,15 +367,89 @@ func kernelLiveStatsCorrection(observed map[uint32]kernelStatsValueV4, live map[
 }
 
 func reconcileKernelStatsCorrectionFromMaps(statsMap *ebpf.Map, flowsMap *ebpf.Map) (map[uint32]kernelRuleStats, error) {
+	live, _, err := snapshotKernelLiveStateFromFlows(nil, flowsMap, false)
+	if err != nil {
+		return nil, err
+	}
+	return reconcileKernelStatsCorrectionFromSnapshot(statsMap, live)
+}
+
+func reconcileKernelStatsCorrectionFromSnapshot(statsMap *ebpf.Map, live map[uint32]kernelStatsValueV4) (map[uint32]kernelRuleStats, error) {
 	observed, err := snapshotKernelStatsValues(statsMap)
 	if err != nil {
 		return nil, err
 	}
-	live, err := snapshotKernelLiveCountsFromFlows(flowsMap)
-	if err != nil {
-		return nil, err
-	}
 	return kernelLiveStatsCorrection(observed, live), nil
+}
+
+func syncKernelLiveStatsCorrections(dst map[uint32]kernelRuleStats, exact map[uint32]kernelRuleStats) {
+	if dst == nil {
+		return
+	}
+
+	ids := make(map[uint32]struct{}, len(dst)+len(exact))
+	for ruleID, current := range dst {
+		if current.TCPActiveConns == 0 && current.UDPNatEntries == 0 {
+			continue
+		}
+		ids[ruleID] = struct{}{}
+	}
+	for ruleID := range exact {
+		ids[ruleID] = struct{}{}
+	}
+
+	for ruleID := range ids {
+		current := dst[ruleID]
+		next := exact[ruleID]
+		current.TCPActiveConns = next.TCPActiveConns
+		current.UDPNatEntries = next.UDPNatEntries
+		if current == (kernelRuleStats{}) {
+			delete(dst, ruleID)
+			continue
+		}
+		dst[ruleID] = current
+	}
+}
+
+func kernelStatsCorrectionsEqual(a map[uint32]kernelRuleStats, b map[uint32]kernelRuleStats) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for ruleID, value := range a {
+		if b[ruleID] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func pruneOrphanKernelNATReservations(natPortsMap *ebpf.Map, used map[tcNATPortKeyV4]struct{}) (int, error) {
+	if natPortsMap == nil {
+		return 0, nil
+	}
+
+	iter := natPortsMap.Iterate()
+	var staleKeys []tcNATPortKeyV4
+	var key tcNATPortKeyV4
+	var value uint32
+	for iter.Next(&key, &value) {
+		if _, ok := used[key]; ok {
+			continue
+		}
+		staleKeys = append(staleKeys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("iterate kernel nat map: %w", err)
+	}
+
+	deleted := 0
+	for _, item := range staleKeys {
+		if err := natPortsMap.Delete(item); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return deleted, fmt.Errorf("delete orphan nat reservation: %w", err)
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 func kernelRuleStatsFromValue(value kernelStatsValueV4) kernelRuleStats {
@@ -423,20 +538,20 @@ func (state *kernelFlowPruneState) ensureBuffers(size int) ([]tcFlowKeyV4, []tcF
 	return state.keys, state.values
 }
 
-func pruneStaleKernelFlowsBatch(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, error) {
+func pruneStaleKernelFlowsBatch(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	corrections := make(map[uint32]kernelRuleStats)
-	remaining := budget
+	remaining := metrics.Budget
 
 	for remaining > 0 {
 		size := min(remaining, kernelFlowMaintenanceBatchSize)
 		keys, values := state.ensureBuffers(size)
 		n, err := flowsMap.BatchLookup(&state.batchCursor, keys, values, nil)
 		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil, err
+			return nil, metrics, err
 		}
 		if n == 0 {
 			state.batchCursor = ebpf.MapBatchCursor{}
-			return corrections, nil
+			return corrections, metrics, nil
 		}
 
 		for i := 0; i < n; i++ {
@@ -444,22 +559,24 @@ func pruneStaleKernelFlowsBatch(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS
 			if value.RuleID == 0 {
 				continue
 			}
+			metrics.Scanned++
 			if kernelFlowShouldDelete(keys[i], value, nowNS, haveNow) {
 				deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, staleKernelFlow{key: keys[i], value: value}, corrections)
+				metrics.Deleted++
 			}
 		}
 
 		remaining -= n
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			state.batchCursor = ebpf.MapBatchCursor{}
-			return corrections, nil
+			return corrections, metrics, nil
 		}
 	}
 
-	return corrections, nil
+	return corrections, metrics, nil
 }
 
-func pruneStaleKernelFlowsFullInCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool) (map[uint32]kernelRuleStats, error) {
+func pruneStaleKernelFlowsFullInCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	iter := flowsMap.Iterate()
 	var key tcFlowKeyV4
 	var value tcFlowValueV4
@@ -470,27 +587,29 @@ func pruneStaleKernelFlowsFullInCollection(rulesMap, flowsMap, natPortsMap *ebpf
 		if value.RuleID == 0 {
 			continue
 		}
+		metrics.Scanned++
 		if kernelFlowShouldDelete(key, value, nowNS, haveNow) {
 			staleFlows = append(staleFlows, staleKernelFlow{key: key, value: value})
 		}
 	}
 
 	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("iterate kernel flows map: %w", err)
+		return nil, metrics, fmt.Errorf("iterate kernel flows map: %w", err)
 	}
 
 	for _, stale := range staleFlows {
 		deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, stale, corrections)
+		metrics.Deleted++
 	}
-	return corrections, nil
+	return corrections, metrics, nil
 }
 
-func pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, error) {
+func pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	if state == nil {
-		return pruneStaleKernelFlowsFullInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow)
+		return pruneStaleKernelFlowsFullInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, metrics)
 	}
-	if budget <= 0 {
-		budget = kernelFlowMaintenanceBudgetMin
+	if metrics.Budget <= 0 {
+		metrics.Budget = kernelFlowMaintenanceBudgetMin
 	}
 
 	corrections := make(map[uint32]kernelRuleStats)
@@ -502,19 +621,19 @@ func pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMa
 			if errors.Is(err, ebpf.ErrKeyNotExist) {
 				state.fullCursorValid = false
 				state.fullCursor = tcFlowKeyV4{}
-				return corrections, nil
+				return corrections, metrics, nil
 			}
-			return nil, fmt.Errorf("iterate kernel flows map: %w", err)
+			return nil, metrics, fmt.Errorf("iterate kernel flows map: %w", err)
 		}
 	}
 
-	for scanned := 0; scanned < budget; {
+	for scanned := 0; scanned < metrics.Budget; {
 		var next tcFlowKeyV4
 		nextValid := false
 		if err := flowsMap.NextKey(current, &next); err == nil {
 			nextValid = true
 		} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil, fmt.Errorf("iterate kernel flows map: %w", err)
+			return nil, metrics, fmt.Errorf("iterate kernel flows map: %w", err)
 		}
 
 		var value tcFlowValueV4
@@ -523,32 +642,36 @@ func pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMa
 				if !nextValid {
 					state.fullCursorValid = false
 					state.fullCursor = tcFlowKeyV4{}
-					return corrections, nil
+					return corrections, metrics, nil
 				}
 				current = next
 				state.fullCursor = current
 				state.fullCursorValid = true
 				continue
 			}
-			return nil, fmt.Errorf("lookup kernel flow during fallback scan: %w", err)
+			return nil, metrics, fmt.Errorf("lookup kernel flow during fallback scan: %w", err)
 		}
 
-		if value.RuleID != 0 && kernelFlowShouldDelete(current, value, nowNS, haveNow) {
-			deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, staleKernelFlow{key: current, value: value}, corrections)
+		if value.RuleID != 0 {
+			metrics.Scanned++
+			if kernelFlowShouldDelete(current, value, nowNS, haveNow) {
+				deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, staleKernelFlow{key: current, value: value}, corrections)
+				metrics.Deleted++
+			}
 		}
 		scanned++
 
 		if !nextValid {
 			state.fullCursorValid = false
 			state.fullCursor = tcFlowKeyV4{}
-			return corrections, nil
+			return corrections, metrics, nil
 		}
 		current = next
 		state.fullCursor = current
 		state.fullCursorValid = true
 	}
 
-	return corrections, nil
+	return corrections, metrics, nil
 }
 
 func kernelFlowShouldDelete(key tcFlowKeyV4, value tcFlowValueV4, nowNS uint64, haveNow bool) bool {

@@ -30,11 +30,17 @@ func loadHostInterfaceAddrs() (hostInterfaceAddrs, error) {
 
 		ipSet := make(map[string]struct{})
 		for _, addr := range addrs {
-			ipnet, ok := addr.(*net.IPNet)
-			if !ok || ipnet.IP == nil || ipnet.IP.To4() == nil {
+			var ip net.IP
+			switch item := addr.(type) {
+			case *net.IPNet:
+				ip = item.IP
+			case *net.IPAddr:
+				ip = item.IP
+			}
+			if !isVisibleInterfaceIP(ip) {
 				continue
 			}
-			ipSet[ipnet.IP.String()] = struct{}{}
+			ipSet[canonicalIPLiteral(ip)] = struct{}{}
 		}
 		result[iface.Name] = ipSet
 	}
@@ -69,12 +75,37 @@ type tcEBPFRuleDataplane struct {
 	reason    string
 }
 
+type kernelRuntimeRuleDataplane struct {
+	supporter kernelRuleSupportRuntime
+	fallback  ruleDataplane
+	available bool
+	reason    string
+}
+
 func (dp tcEBPFRuleDataplane) Name() string {
 	return ruleEngineKernel
 }
 
 func (dp tcEBPFRuleDataplane) Available() (bool, string) {
 	return dp.available, dp.reason
+}
+
+func (dp kernelRuntimeRuleDataplane) Name() string {
+	return ruleEngineKernel
+}
+
+func (dp kernelRuntimeRuleDataplane) Available() (bool, string) {
+	return dp.available, dp.reason
+}
+
+func (dp kernelRuntimeRuleDataplane) SupportsRule(rule Rule) (bool, string) {
+	if dp.supporter != nil {
+		return dp.supporter.SupportsRule(rule)
+	}
+	if dp.fallback != nil {
+		return dp.fallback.SupportsRule(rule)
+	}
+	return false, "kernel dataplane could not evaluate rule eligibility"
 }
 
 func (dp tcEBPFRuleDataplane) SupportsRule(rule Rule) (bool, string) {
@@ -148,14 +179,22 @@ func (dp tcEBPFRuleDataplane) SupportsRule(rule Rule) (bool, string) {
 }
 
 type ruleDataplanePlan struct {
-	PreferredEngine string
-	EffectiveEngine string
-	KernelEligible  bool
-	KernelReason    string
-	FallbackReason  string
+	PreferredEngine   string
+	EffectiveEngine   string
+	KernelEligible    bool
+	KernelReason      string
+	FallbackReason    string
+	TransientFallback kernelTransientFallbackMetadata
 }
 
 type rangeDataplanePlan = ruleDataplanePlan
+
+type kernelTransientFallbackMetadata struct {
+	ReasonClass  string
+	OutInterface string
+	BackendIP    string
+	BackendMAC   string
+}
 
 type ruleDataplanePlanner struct {
 	userspace     ruleDataplane
@@ -175,15 +214,26 @@ func newRuleDataplanePlanner(kernelRuntime kernelRuleRuntime, defaultEngine stri
 		available, reason = kernelRuntime.Available()
 	}
 
+	fallbackKernel := tcEBPFRuleDataplane{
+		hostAddrs: hostAddrs,
+		hostErr:   hostErr,
+		available: available,
+		reason:    reason,
+	}
+	kernel := ruleDataplane(fallbackKernel)
+	if supporter, ok := kernelRuntime.(kernelRuleSupportRuntime); ok && supporter != nil {
+		kernel = kernelRuntimeRuleDataplane{
+			supporter: supporter,
+			fallback:  fallbackKernel,
+			available: available,
+			reason:    reason,
+		}
+	}
+
 	return &ruleDataplanePlanner{
 		userspace:     userspaceRuleDataplane{},
 		defaultEngine: normalizeRuleEnginePreference(defaultEngine),
-		kernel: tcEBPFRuleDataplane{
-			hostAddrs: hostAddrs,
-			hostErr:   hostErr,
-			available: available,
-			reason:    reason,
-		},
+		kernel:        kernel,
 	}
 }
 
@@ -194,7 +244,11 @@ func (p *ruleDataplanePlanner) Plan(rule Rule) ruleDataplanePlan {
 		EffectiveEngine: ruleEngineUserspace,
 	}
 
-	kernelEligible, kernelReason := p.kernel.SupportsRule(rule)
+	kernelReason := kernelRuleFamilyFallbackReason(rule)
+	kernelEligible := false
+	if kernelReason == "" {
+		kernelEligible, kernelReason = p.kernel.SupportsRule(rule)
+	}
 	kernelAvailable, kernelUnavailableReason := p.kernel.Available()
 	plan.KernelEligible = kernelEligible
 	plan.KernelReason = kernelReason
@@ -219,8 +273,67 @@ func (p *ruleDataplanePlanner) Plan(rule Rule) ruleDataplanePlan {
 			plan.FallbackReason = kernelUnavailableReason
 		}
 	}
+	plan.TransientFallback = kernelTransientFallbackMetadataForRule(rule, plan.FallbackReason)
 
 	return plan
+}
+
+func kernelRuleFamilyFallbackReason(rule Rule) string {
+	if ipLiteralPairIsMixedFamily(rule.InIP, rule.OutIP) {
+		return "kernel dataplane does not support mixed IPv4/IPv6 forwarding"
+	}
+	if ipLiteralUsesIPv6(rule.InIP, rule.OutIP) {
+		return "kernel dataplane currently supports only IPv4 rules"
+	}
+	return ""
+}
+
+func kernelTransientFallbackMetadataForRule(rule Rule, reason string) kernelTransientFallbackMetadata {
+	reasonClass := normalizeTransientKernelFallbackReason(reason)
+	switch reasonClass {
+	case "neighbor_missing", "fdb_missing":
+		metadata := kernelTransientFallbackMetadata{
+			ReasonClass:  reasonClass,
+			OutInterface: normalizeKernelTransientFallbackInterface(rule.OutInterface),
+			BackendIP:    normalizeKernelTransientFallbackBackendIP(rule.OutIP),
+		}
+		if reasonClass == "fdb_missing" {
+			metadata.BackendMAC = resolveKernelTransientFallbackBackendMAC(rule, reasonClass)
+		}
+		return metadata
+	default:
+		return kernelTransientFallbackMetadata{}
+	}
+}
+
+func normalizeKernelTransientFallbackInterface(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func normalizeKernelTransientFallbackBackendIP(value string) string {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return ""
+	}
+	if ip := net.ParseIP(text); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4.String()
+		}
+		return ip.String()
+	}
+	return text
+}
+
+func normalizeKernelTransientFallbackBackendMAC(value string) string {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return ""
+	}
+	hw, err := net.ParseMAC(text)
+	if err != nil || len(hw) < 6 {
+		return ""
+	}
+	return strings.ToLower(hw.String())
 }
 
 func (p *ruleDataplanePlanner) resolvePreferredEngine(rulePreference string) string {

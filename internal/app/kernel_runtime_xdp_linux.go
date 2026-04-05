@@ -83,8 +83,11 @@ type xdpKernelRuleRuntime struct {
 	lastSkipLog       map[string]struct{}
 	lastBridgeLog     map[string]struct{}
 	lastReconcileMode string
+	degradedSource    string
 	stateLog          kernelStateLogger
 	pressureState     kernelRuntimePressureState
+	observability     kernelRuntimeObservabilityState
+	maintenanceState  kernelAdaptiveMaintenanceState
 	statsCorrection   map[uint32]kernelRuleStats
 	flowPruneState    kernelFlowPruneState
 	runtimeMapCounts  kernelRuntimeMapCountSnapshot
@@ -145,6 +148,14 @@ func (rt *xdpKernelRuleRuntime) Available() (bool, string) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return rt.currentAvailabilityLocked(time.Now())
+}
+
+func (rt *xdpKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
+	_, err := prepareXDPKernelRule(rule, rt.prepareOptions)
+	if err != nil {
+		return false, err.Error()
+	}
+	return true, ""
 }
 
 func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
@@ -230,6 +241,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 		}
 		return results, nil
 	}
+	preferFreshMapGrowth := rt.shouldPreferFreshMapGrowthLocked(desiredCapacities)
+	if preferFreshMapGrowth {
+		log.Printf("xdp dataplane reconcile: flow maps are idle and below desired capacity, rebuilding xdp collection to clear degraded state")
+	}
 
 	memlockErr := rt.ensureMemlock()
 	if memlockErr != nil {
@@ -254,18 +269,20 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	hotRestartStatsCorrection := map[uint32]kernelRuleStats{}
 	if rt.coll != nil && rt.coll.Maps != nil {
 		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-			if flowMapReplacement == nil {
-				flowMapReplacement = make(map[string]*ebpf.Map, 2)
-			}
-			flowMapReplacement[kernelFlowsMapName] = flowsMap
-			actualCapacities.Flows = int(flowsMap.MaxEntries())
-			if actualCapacities.Flows < desiredCapacities.Flows {
-				log.Printf(
-					"xdp dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
-					kernelFlowsMapName,
-					actualCapacities.Flows,
-					desiredCapacities.Flows,
-				)
+			if !preferFreshMapGrowth {
+				if flowMapReplacement == nil {
+					flowMapReplacement = make(map[string]*ebpf.Map, 2)
+				}
+				flowMapReplacement[kernelFlowsMapName] = flowsMap
+				actualCapacities.Flows = int(flowsMap.MaxEntries())
+				if actualCapacities.Flows < desiredCapacities.Flows {
+					log.Printf(
+						"xdp dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
+						kernelFlowsMapName,
+						actualCapacities.Flows,
+						desiredCapacities.Flows,
+					)
+				}
 			}
 		}
 		if statsMap := rt.coll.Maps[kernelStatsMapName]; statsMap != nil {
@@ -459,8 +476,16 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	rt.programID = programID
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
+	if hotRestartState != nil && kernelRuntimeNeedsMapGrowth(actualCapacities, desiredCapacities, false) {
+		rt.degradedSource = kernelRuntimeDegradedSourceHotRestart
+	} else if kernelRuntimeNeedsMapGrowth(actualCapacities, desiredCapacities, false) {
+		rt.degradedSource = kernelRuntimeDegradedSourceLivePreserve
+	} else {
+		rt.degradedSource = kernelRuntimeDegradedSourceNone
+	}
 	rt.flowPruneState.reset()
 	rt.lastReconcileMode = "rebuild"
+	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if hotRestartState != nil {
@@ -492,11 +517,36 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	corrections, err := pruneStaleKernelFlowsInCollection(rt.coll, &rt.flowPruneState, rt.flowMaintenanceBudgetLocked())
+	startedAt := time.Now()
+	corrections, pruneMetrics, err := pruneStaleKernelFlowsInCollection(rt.coll, &rt.flowPruneState, rt.flowMaintenanceBudgetLocked())
+	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
 	if err != nil {
 		return err
 	}
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
+	pressureActive := rt.pressureState.active
+	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
+	if runFull {
+		fullSuccess := true
+		driftDetected := false
+		if rt.coll != nil && rt.coll.Maps != nil {
+			live, _, liveErr := snapshotKernelLiveStateFromFlows(nil, rt.coll.Maps[kernelFlowsMapName], false)
+			if liveErr != nil {
+				fullSuccess = false
+				log.Printf("xdp dataplane maintenance: snapshot live xdp flow state failed: %v", liveErr)
+			} else {
+				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(rt.coll.Maps[kernelStatsMapName], live)
+				if correctionErr != nil {
+					fullSuccess = false
+					log.Printf("xdp dataplane maintenance: reconcile xdp stats correction failed: %v", correctionErr)
+				} else {
+					driftDetected = !kernelStatsCorrectionsEqual(rt.statsCorrection, exact)
+					syncKernelLiveStatsCorrections(rt.statsCorrection, exact)
+				}
+			}
+		}
+		rt.maintenanceState.observeFull(pressureActive, fullSuccess, driftDetected)
+	}
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	return nil
@@ -555,8 +605,10 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.rulesMapCapacity = 0
 	rt.flowsMapCapacity = 0
 	rt.lastReconcileMode = ""
+	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if rt.coll != nil {
@@ -579,8 +631,10 @@ func (rt *xdpKernelRuleRuntime) cleanupLocked() {
 	rt.rulesMapCapacity = 0
 	rt.flowsMapCapacity = 0
 	rt.lastReconcileMode = ""
+	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if rt.coll != nil {
@@ -645,6 +699,7 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 		rt.flowsMapCapacity = int(flowsMap.MaxEntries())
 	}
 	rt.flowPruneState.reset()
+	rt.maintenanceState.requestFull()
 	rt.invalidatePressureStateLocked()
 	return retained, nil
 }
@@ -680,6 +735,8 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 		rt.flowsMapCapacity = int(flowsMap.MaxEntries())
 	}
 	rt.lastReconcileMode = "cleared"
+	rt.degradedSource = kernelRuntimeDegradedSourceNone
+	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {

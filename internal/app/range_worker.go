@@ -467,7 +467,7 @@ func runRangeTCPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 	}
 
 	addr := net.JoinHostPort(pr.InIP, strconv.Itoa(port))
-	ln, err := lc.Listen(ctx, "tcp", addr)
+	ln, err := lc.Listen(ctx, tcpListenNetworkForIP(pr.InIP), addr)
 	if err != nil {
 		err = fmt.Errorf("tcp listen %s: %w", addr, err)
 		log.Printf("range %d: %v", pr.ID, err)
@@ -504,7 +504,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 	}
 
 	addr := net.JoinHostPort(pr.InIP, strconv.Itoa(port))
-	pc, err := lc.ListenPacket(ctx, "udp", addr)
+	pc, err := lc.ListenPacket(ctx, udpListenNetworkForIP(pr.InIP), addr)
 	if err != nil {
 		err = fmt.Errorf("udp listen %s: %w", addr, err)
 		log.Printf("range %d: %v", pr.ID, err)

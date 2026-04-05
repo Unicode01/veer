@@ -688,16 +688,18 @@
     return false;
   };
 
-  app.validateIPv4Field = function validateIPv4Field(input) {
+  app.validateIPField = function validateIPField(input) {
     if (!input) return true;
     const value = input.value == null ? '' : String(input.value).trim();
-    if (app.parseIPv4(value)) {
+    if (app.isValidIP(value)) {
       app.clearFieldError(input);
       return true;
     }
-    app.setFieldError(input, app.t('validation.ipv4'));
+    app.setFieldError(input, app.t('validation.ip'));
     return false;
   };
+
+  app.validateIPv4Field = app.validateIPField;
 
   app.validatePortField = function validatePortField(input, allowZero) {
     if (!input) return true;

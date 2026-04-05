@@ -2,7 +2,18 @@
 
 package app
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+func snapshotKernelRuntimeEngines(rt kernelRuleRuntime) []KernelEngineRuntimeView {
+	return nil
+}
+
+func kernelRuntimeIdleDegradedRebuildReason(view KernelEngineRuntimeView) string {
+	return ""
+}
 
 func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
@@ -19,7 +30,10 @@ func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 		resp.DefaultEngine = pm.cfg.DefaultEngine
 		resp.ConfiguredOrder = normalizeKernelEngineOrder(pm.cfg.KernelEngineOrder)
 		resp.TrafficStats = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
+		resp.TCDiagnosticsVerbose = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
+		resp.TCDiagnostics = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag) || resp.TCDiagnosticsVerbose
 	}
+	now := time.Now()
 	pm.mu.Lock()
 	resp.ActiveRuleCount = len(pm.kernelRules)
 	resp.ActiveRangeCount = len(pm.kernelRanges)
@@ -27,6 +41,46 @@ func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 	resp.KernelFallbackRangeCount, resp.TransientFallbackRangeCount = countRangePlanFallbacks(pm.rangePlans)
 	resp.TransientFallbackSummary = summarizeTransientKernelFallbacks(pm.rulePlans, pm.rangePlans)
 	resp.RetryPending = strings.TrimSpace(resp.TransientFallbackSummary) != ""
+	resp.KernelRetryCount = pm.kernelRetryCount
+	resp.LastKernelRetryAt = pm.lastKernelRetryAt
+	resp.LastKernelRetryReason = pm.lastKernelRetryReason
+	resp.KernelIncrementalRetryCount = pm.kernelIncrementalRetryCount
+	resp.KernelIncrementalRetryFallbackCount = pm.kernelIncrementalRetryFallbackCount
+	resp.CooldownRuleOwnerCount, resp.CooldownRangeOwnerCount = countActiveKernelNetlinkOwnerRetryCooldowns(pm.kernelNetlinkOwnerRetryCooldownUntil, now)
+	resp.CooldownSummary = summarizeActiveKernelNetlinkOwnerRetryCooldowns(pm.kernelNetlinkOwnerRetryCooldownUntil, now)
+	resp.CooldownNextExpiryAt, resp.CooldownClearAt = activeKernelNetlinkOwnerRetryCooldownWindow(pm.kernelNetlinkOwnerRetryCooldownUntil, now)
+	resp.LastKernelIncrementalRetryAt = pm.lastKernelIncrementalRetryAt
+	resp.LastKernelIncrementalRetryResult = pm.lastKernelIncrementalRetryResult
+	resp.LastKernelIncrementalRetryMatchedRuleOwners = pm.lastKernelIncrementalRetryMatchedRuleOwners
+	resp.LastKernelIncrementalRetryMatchedRangeOwners = pm.lastKernelIncrementalRetryMatchedRangeOwners
+	resp.LastKernelIncrementalRetryAttemptedRuleOwners = pm.lastKernelIncrementalRetryAttemptedRuleOwners
+	resp.LastKernelIncrementalRetryAttemptedRangeOwners = pm.lastKernelIncrementalRetryAttemptedRangeOwners
+	resp.LastKernelIncrementalRetryRetainedRuleOwners = pm.lastKernelIncrementalRetryRetainedRuleOwners
+	resp.LastKernelIncrementalRetryRetainedRangeOwners = pm.lastKernelIncrementalRetryRetainedRangeOwners
+	resp.LastKernelIncrementalRetryRecoveredRuleOwners = pm.lastKernelIncrementalRetryRecoveredRuleOwners
+	resp.LastKernelIncrementalRetryRecoveredRangeOwners = pm.lastKernelIncrementalRetryRecoveredRangeOwners
+	resp.LastKernelIncrementalRetryCooldownRuleOwners = pm.lastKernelIncrementalRetryCooldownRuleOwners
+	resp.LastKernelIncrementalRetryCooldownRangeOwners = pm.lastKernelIncrementalRetryCooldownRangeOwners
+	resp.LastKernelIncrementalRetryCooldownSummary = pm.lastKernelIncrementalRetryCooldownSummary
+	resp.LastKernelIncrementalRetryCooldownScope = pm.lastKernelIncrementalRetryCooldownScope
+	resp.LastKernelIncrementalRetryBackoffRuleOwners = pm.lastKernelIncrementalRetryBackoffRuleOwners
+	resp.LastKernelIncrementalRetryBackoffRangeOwners = pm.lastKernelIncrementalRetryBackoffRangeOwners
+	resp.LastKernelIncrementalRetryBackoffSummary = pm.lastKernelIncrementalRetryBackoffSummary
+	resp.LastKernelIncrementalRetryBackoffScope = pm.lastKernelIncrementalRetryBackoffScope
+	resp.LastKernelIncrementalRetryBackoffMaxFailures = pm.lastKernelIncrementalRetryBackoffMaxFailures
+	resp.LastKernelIncrementalRetryBackoffMaxDelayMs = pm.lastKernelIncrementalRetryBackoffMaxDelay.Milliseconds()
+	resp.KernelNetlinkRecoverPending = pm.kernelNetlinkRecoverPending
+	resp.KernelNetlinkRecoverSource = pm.kernelNetlinkRecoverSource
+	resp.KernelNetlinkRecoverSummary = pm.kernelNetlinkRecoverSummary
+	resp.KernelNetlinkRecoverRequestedAt = pm.kernelNetlinkRecoverRequestedAt
+	resp.KernelNetlinkRecoverTriggerSummary = summarizeKernelNetlinkRecoveryTrigger(pm.kernelNetlinkRecoverTrigger)
+	resp.LastKernelAttachmentIssue = pm.lastKernelAttachmentIssue
+	resp.LastKernelAttachmentHealAt = pm.kernelAttachmentHealAt
+	resp.LastKernelAttachmentHealSummary = pm.lastKernelAttachmentHealSummary
+	resp.LastKernelAttachmentHealError = pm.lastKernelAttachmentHealError
+	resp.LastStatsSnapshotAt = pm.kernelStatsSnapshotAt
+	resp.LastStatsSnapshotMs = pm.kernelStatsLastDuration.Milliseconds()
+	resp.LastStatsSnapshotError = pm.kernelStatsLastError
 	pm.mu.Unlock()
 	return resp
 }

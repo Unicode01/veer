@@ -25,6 +25,7 @@ type WorkerInfo struct {
 	ranges         []PortRange
 	failedRules    map[int64]bool
 	failedRanges   map[int64]bool
+	failedSites    map[int64]bool
 	ruleStats      map[int64]RuleStatsReport
 	rangeStats     map[int64]RangeStatsReport
 	siteStatsMap   []SiteStatsReport
@@ -35,10 +36,14 @@ type WorkerInfo struct {
 	draining       bool
 	activeRuleIDs  []int64
 	activeRangeIDs []int64
-	ruleRetryCount int
-	ruleNextRetry  time.Time
+	retryCount     int
+	nextRetry      time.Time
 	binaryHash     string
 	lastStart      time.Time
+	lastMessageAt  time.Time
+	lastIssueAt    time.Time
+	lastIssueText  string
+	staleRecoverAt time.Time
 	writeMu        sync.Mutex
 	waitCh         chan struct{} // closed when process exits
 }
@@ -48,36 +53,103 @@ const (
 	workerKindRange  = "range"
 	workerKindShared = "shared"
 
-	ruleRetryBaseDelay           = 1 * time.Second
-	ruleRetryMaxDelay            = 1 * time.Minute
-	redistributeRetryDelay       = 250 * time.Millisecond
-	kernelStatsRefreshInterval   = 5 * time.Second
-	kernelStatsDemandWindow      = 15 * time.Second
-	kernelStatsSnapshotShareTTL  = 1 * time.Second
-	kernelMaintenanceInterval    = 10 * time.Second
-	kernelFallbackRetryInterval  = 30 * time.Second
-	kernelFallbackRetryLogEvery  = 10 * time.Minute
-	kernelUserspaceWarmupTimeout = 5 * time.Second
-	kernelUserspaceWarmupPoll    = 100 * time.Millisecond
+	workerRetryBaseDelay               = 1 * time.Second
+	workerRetryMaxDelay                = 1 * time.Minute
+	workerIssueLogEvery                = 10 * time.Minute
+	workerControlStaleTimeout          = 30 * time.Second
+	workerControlStaleRecoverEvery     = 30 * time.Second
+	kernelDegradedRebuildCooldown      = 30 * time.Second
+	redistributeRetryDelay             = 250 * time.Millisecond
+	kernelStatsRefreshInterval         = 5 * time.Second
+	kernelStatsDemandWindow            = 15 * time.Second
+	kernelStatsSnapshotShareTTL        = 1 * time.Second
+	kernelMaintenanceInterval          = 10 * time.Second
+	kernelFallbackRetryInterval        = 30 * time.Second
+	kernelFallbackRetryLogEvery        = 10 * time.Minute
+	kernelAttachmentCheckEvery         = 15 * time.Second
+	kernelAttachmentHealBackoff        = 30 * time.Second
+	kernelNetlinkRetryDebounce         = 3 * time.Second
+	kernelNetlinkOwnerRetryCooldown    = 6 * time.Second
+	kernelNetlinkOwnerRetryCooldownMax = 30 * time.Second
+	kernelUserspaceWarmupTimeout       = 5 * time.Second
+	kernelUserspaceWarmupPoll          = 100 * time.Millisecond
 )
 
 const forwardKernelMaintenanceIntervalEnv = "FORWARD_KERNEL_MAINTENANCE_INTERVAL_MS"
 
-func nextRuleRetryDelay(retryCount int) time.Duration {
+func nextWorkerRetryDelay(retryCount int) time.Duration {
 	if retryCount <= 1 {
-		return ruleRetryBaseDelay
+		return workerRetryBaseDelay
 	}
-	delay := ruleRetryBaseDelay
+	delay := workerRetryBaseDelay
 	for i := 1; i < retryCount; i++ {
-		if delay >= ruleRetryMaxDelay {
-			return ruleRetryMaxDelay
+		if delay >= workerRetryMaxDelay {
+			return workerRetryMaxDelay
 		}
 		delay *= 2
 	}
-	if delay > ruleRetryMaxDelay {
-		return ruleRetryMaxDelay
+	if delay > workerRetryMaxDelay {
+		return workerRetryMaxDelay
 	}
 	return delay
+}
+
+func resetWorkerRetryState(wi *WorkerInfo) {
+	if wi == nil {
+		return
+	}
+	wi.errored = false
+	wi.retryCount = 0
+	wi.nextRetry = time.Time{}
+	wi.lastIssueAt = time.Time{}
+	wi.lastIssueText = ""
+}
+
+func noteWorkerMessage(wi *WorkerInfo, now time.Time) {
+	if wi == nil {
+		return
+	}
+	wi.lastMessageAt = now
+	wi.staleRecoverAt = time.Time{}
+}
+
+func scheduleWorkerRetry(wi *WorkerInfo, now time.Time) {
+	if wi == nil {
+		return
+	}
+	wi.errored = true
+	wi.retryCount++
+	wi.nextRetry = now.Add(nextWorkerRetryDelay(wi.retryCount))
+}
+
+func shouldLogWorkerIssue(wi *WorkerInfo, issue string, now time.Time) bool {
+	if wi == nil {
+		return false
+	}
+	issue = strings.TrimSpace(issue)
+	if issue == "" {
+		issue = "unknown issue"
+	}
+	if wi.lastIssueText != issue || wi.lastIssueAt.IsZero() || now.Sub(wi.lastIssueAt) >= workerIssueLogEvery {
+		wi.lastIssueText = issue
+		wi.lastIssueAt = now
+		return true
+	}
+	return false
+}
+
+func shouldRecoverStaleWorkerControl(wi *WorkerInfo, now time.Time) bool {
+	if wi == nil || wi.conn == nil || wi.draining || wi.lastMessageAt.IsZero() {
+		return false
+	}
+	if now.Sub(wi.lastMessageAt) < workerControlStaleTimeout {
+		return false
+	}
+	if !wi.staleRecoverAt.IsZero() && now.Sub(wi.staleRecoverAt) < workerControlStaleRecoverEvery {
+		return false
+	}
+	wi.staleRecoverAt = now
+	return true
 }
 
 func configuredKernelMaintenanceInterval() time.Duration {
@@ -93,44 +165,88 @@ func configuredKernelMaintenanceInterval() time.Duration {
 }
 
 type ProcessManager struct {
-	ruleWorkers            map[int]*WorkerInfo
-	rangeWorkers           map[int]*WorkerInfo
-	sharedProxy            *WorkerInfo
-	drainingWorkers        []*WorkerInfo
-	mu                     sync.Mutex
-	redistributeMu         sync.Mutex // serializes redistributeWorkers calls
-	db                     *sql.DB
-	cfg                    *Config
-	sockPath               string
-	listener               net.Listener
-	binaryHash             string
-	ready                  bool
-	rulePlans              map[int64]ruleDataplanePlan
-	rangePlans             map[int64]rangeDataplanePlan
-	kernelRuntime          kernelRuleRuntime
-	kernelRules            map[int64]bool
-	kernelRanges           map[int64]bool
-	kernelRuleEngines      map[int64]string
-	kernelRangeEngines     map[int64]string
-	kernelFlowOwners       map[uint32]kernelCandidateOwner
-	kernelRuleStats        map[int64]RuleStatsReport
-	kernelRangeStats       map[int64]RangeStatsReport
-	kernelStatsSnapshot    kernelRuleStatsSnapshot
-	kernelStatsAt          time.Time
-	kernelStatsSnapshotAt  time.Time
-	kernelStatsDemandAt    time.Time
-	kernelMaintenanceAt    time.Time
-	kernelMaintenanceEvery time.Duration
-	kernelRetryAt          time.Time
-	kernelRetryLogAt       time.Time
-	kernelPressureSnapshot kernelRuntimePressureSnapshot
-	redistributeWake       chan struct{}
-	redistributePending    bool
-	redistributeDueAt      time.Time
-	lastRulePlanLog        map[int64]string
-	lastRangePlanLog       map[int64]string
-	lastPlannerSummary     string
-	lastKernelRetryLog     string
+	ruleWorkers                                    map[int]*WorkerInfo
+	rangeWorkers                                   map[int]*WorkerInfo
+	sharedProxy                                    *WorkerInfo
+	drainingWorkers                                []*WorkerInfo
+	mu                                             sync.Mutex
+	redistributeMu                                 sync.Mutex // serializes redistributeWorkers calls
+	db                                             *sql.DB
+	cfg                                            *Config
+	sockPath                                       string
+	listener                                       net.Listener
+	binaryHash                                     string
+	ready                                          bool
+	rulePlans                                      map[int64]ruleDataplanePlan
+	rangePlans                                     map[int64]rangeDataplanePlan
+	kernelRuntime                                  kernelRuleRuntime
+	kernelRules                                    map[int64]bool
+	kernelRanges                                   map[int64]bool
+	kernelRuleEngines                              map[int64]string
+	kernelRangeEngines                             map[int64]string
+	kernelFlowOwners                               map[uint32]kernelCandidateOwner
+	kernelRuleStats                                map[int64]RuleStatsReport
+	kernelRangeStats                               map[int64]RangeStatsReport
+	kernelStatsSnapshot                            kernelRuleStatsSnapshot
+	kernelStatsAt                                  time.Time
+	kernelStatsSnapshotAt                          time.Time
+	kernelStatsLastDuration                        time.Duration
+	kernelStatsLastError                           string
+	kernelStatsDemandAt                            time.Time
+	kernelMaintenanceAt                            time.Time
+	kernelMaintenanceEvery                         time.Duration
+	kernelAttachmentCheckAt                        time.Time
+	kernelAttachmentHealAt                         time.Time
+	kernelDegradedHealAt                           time.Time
+	kernelNetlinkRetryAt                           time.Time
+	kernelRetryAt                                  time.Time
+	kernelRetryLogAt                               time.Time
+	kernelRetryCount                               int
+	lastKernelRetryAt                              time.Time
+	lastKernelRetryReason                          string
+	kernelIncrementalRetryCount                    int
+	kernelIncrementalRetryFallbackCount            int
+	lastKernelIncrementalRetryAt                   time.Time
+	lastKernelIncrementalRetryResult               string
+	lastKernelIncrementalRetryMatchedRuleOwners    int
+	lastKernelIncrementalRetryMatchedRangeOwners   int
+	lastKernelIncrementalRetryAttemptedRuleOwners  int
+	lastKernelIncrementalRetryAttemptedRangeOwners int
+	lastKernelIncrementalRetryRetainedRuleOwners   int
+	lastKernelIncrementalRetryRetainedRangeOwners  int
+	lastKernelIncrementalRetryRecoveredRuleOwners  int
+	lastKernelIncrementalRetryRecoveredRangeOwners int
+	lastKernelIncrementalRetryCooldownRuleOwners   int
+	lastKernelIncrementalRetryCooldownRangeOwners  int
+	lastKernelIncrementalRetryCooldownSummary      string
+	lastKernelIncrementalRetryCooldownScope        string
+	lastKernelIncrementalRetryBackoffRuleOwners    int
+	lastKernelIncrementalRetryBackoffRangeOwners   int
+	lastKernelIncrementalRetryBackoffSummary       string
+	lastKernelIncrementalRetryBackoffScope         string
+	lastKernelIncrementalRetryBackoffMaxFailures   int
+	lastKernelIncrementalRetryBackoffMaxDelay      time.Duration
+	lastKernelAttachmentIssue                      string
+	lastKernelAttachmentHealSummary                string
+	lastKernelAttachmentHealError                  string
+	kernelNetlinkStop                              chan struct{}
+	kernelNetlinkRecoverWake                       chan struct{}
+	kernelNetlinkRecoverPending                    bool
+	kernelNetlinkRecoverSource                     string
+	kernelNetlinkRecoverSummary                    string
+	kernelNetlinkRecoverTrigger                    kernelNetlinkRecoveryTrigger
+	kernelNetlinkRecoverRequestedAt                time.Time
+	kernelNetlinkLinkStates                        map[int]kernelNetlinkLinkSnapshot
+	kernelNetlinkOwnerRetryCooldownUntil           map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState
+	kernelNetlinkOwnerRetryFailures                map[kernelCandidateOwner]int
+	kernelPressureSnapshot                         kernelRuntimePressureSnapshot
+	redistributeWake                               chan struct{}
+	redistributePending                            bool
+	redistributeDueAt                              time.Time
+	lastRulePlanLog                                map[int64]string
+	lastRangePlanLog                               map[int64]string
+	lastPlannerSummary                             string
+	lastKernelRetryLog                             string
 }
 
 func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessManager, error) {
@@ -148,28 +264,30 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 
 	pm := &ProcessManager{
-		ruleWorkers:            make(map[int]*WorkerInfo),
-		rangeWorkers:           make(map[int]*WorkerInfo),
-		db:                     db,
-		cfg:                    cfg,
-		sockPath:               sockPath,
-		listener:               ln,
-		binaryHash:             binaryHash,
-		rulePlans:              make(map[int64]ruleDataplanePlan),
-		rangePlans:             make(map[int64]rangeDataplanePlan),
-		kernelRuntime:          newKernelRuleRuntime(cfg),
-		kernelRules:            make(map[int64]bool),
-		kernelRanges:           make(map[int64]bool),
-		kernelRuleEngines:      make(map[int64]string),
-		kernelRangeEngines:     make(map[int64]string),
-		kernelFlowOwners:       make(map[uint32]kernelCandidateOwner),
-		kernelRuleStats:        make(map[int64]RuleStatsReport),
-		kernelRangeStats:       make(map[int64]RangeStatsReport),
-		kernelStatsSnapshot:    emptyKernelRuleStatsSnapshot(),
-		redistributeWake:       make(chan struct{}, 1),
-		lastRulePlanLog:        make(map[int64]string),
-		lastRangePlanLog:       make(map[int64]string),
-		kernelMaintenanceEvery: configuredKernelMaintenanceInterval(),
+		ruleWorkers:                          make(map[int]*WorkerInfo),
+		rangeWorkers:                         make(map[int]*WorkerInfo),
+		db:                                   db,
+		cfg:                                  cfg,
+		sockPath:                             sockPath,
+		listener:                             ln,
+		binaryHash:                           binaryHash,
+		rulePlans:                            make(map[int64]ruleDataplanePlan),
+		rangePlans:                           make(map[int64]rangeDataplanePlan),
+		kernelRuntime:                        newKernelRuleRuntime(cfg),
+		kernelRules:                          make(map[int64]bool),
+		kernelRanges:                         make(map[int64]bool),
+		kernelRuleEngines:                    make(map[int64]string),
+		kernelRangeEngines:                   make(map[int64]string),
+		kernelFlowOwners:                     make(map[uint32]kernelCandidateOwner),
+		kernelRuleStats:                      make(map[int64]RuleStatsReport),
+		kernelRangeStats:                     make(map[int64]RangeStatsReport),
+		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
+		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
+		kernelStatsSnapshot:                  emptyKernelRuleStatsSnapshot(),
+		redistributeWake:                     make(chan struct{}, 1),
+		lastRulePlanLog:                      make(map[int64]string),
+		lastRangePlanLog:                     make(map[int64]string),
+		kernelMaintenanceEvery:               configuredKernelMaintenanceInterval(),
 	}
 
 	if pm.kernelRuntime != nil {
@@ -183,6 +301,7 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 
 	go pm.monitorLoop()
 	go pm.redistributeLoop()
+	pm.startKernelNetlinkMonitor()
 
 	return pm, nil
 }
@@ -238,9 +357,8 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 	}
 	wi.conn = conn
 	wi.running = false
-	wi.errored = false
-	wi.ruleRetryCount = 0
-	wi.ruleNextRetry = time.Time{}
+	resetWorkerRetryState(wi)
+	noteWorkerMessage(wi, time.Now())
 	wi.binaryHash = workerHash
 	rules := append([]Rule(nil), wi.rules...)
 	binHash := pm.binaryHash
@@ -260,7 +378,9 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 		}
 		if status.Type == "status" {
 			startNewWorker := false
+			logIssue := false
 			pm.mu.Lock()
+			now := time.Now()
 			if status.Status == "draining" && target == wi {
 				// Move to draining list, free up the worker slot
 				// Deep-copy ruleStats so draining and new worker have independent maps
@@ -279,7 +399,8 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 					ruleStats:     copiedStats,
 					process:       wi.process,
 					waitCh:        wi.waitCh,
-					lastStart:     time.Now(),
+					lastStart:     now,
+					lastMessageAt: now,
 				}
 				pm.drainingWorkers = append(pm.drainingWorkers, dw)
 				wi.conn = nil
@@ -295,19 +416,18 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 				target.running = status.Status == "running"
 				target.draining = status.Status == "draining"
 				target.activeRuleIDs = append([]int64(nil), status.ActiveRuleIDs...)
+				noteWorkerMessage(target, now)
 				if status.Status == "error" {
-					target.errored = true
+					logIssue = shouldLogWorkerIssue(target, status.Error, now)
 					if target == wi {
-						target.ruleRetryCount++
-						target.ruleNextRetry = time.Now().Add(nextRuleRetryDelay(target.ruleRetryCount))
+						scheduleWorkerRetry(target, now)
+					} else {
+						target.errored = true
 					}
 				} else {
-					target.errored = false
+					resetWorkerRetryState(target)
 					if target == wi {
-						target.ruleNextRetry = time.Time{}
-						if status.Status == "running" || status.Status == "idle" {
-							target.ruleRetryCount = 0
-						}
+						target.errored = false
 					}
 				}
 				target.failedRules = make(map[int64]bool)
@@ -322,7 +442,7 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 					log.Printf("start replacement rule worker[%d]: %v", workerIndex, err)
 				}
 			}
-			if status.Status == "error" {
+			if status.Status == "error" && logIssue {
 				log.Printf("worker[%d] error: %s", workerIndex, status.Error)
 			}
 		} else if status.Type == "stats" {
@@ -330,6 +450,7 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 			if target.ruleStats == nil {
 				target.ruleStats = make(map[int64]RuleStatsReport)
 			}
+			noteWorkerMessage(target, time.Now())
 			for _, s := range status.Stats {
 				target.ruleStats[s.RuleID] = s
 			}
@@ -374,7 +495,9 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 	if proxy != nil {
 		proxy.conn = conn
 		proxy.running = false
-		proxy.errored = false
+		proxy.failedSites = make(map[int64]bool)
+		resetWorkerRetryState(proxy)
+		noteWorkerMessage(proxy, time.Now())
 		proxy.binaryHash = workerHash
 	}
 	pm.mu.Unlock()
@@ -395,20 +518,24 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 		}
 		if status.Type == "status" {
 			startNewProxy := false
+			logIssue := false
+			issueText := ""
 			pm.mu.Lock()
+			now := time.Now()
 			if status.Status == "draining" && target == proxy {
 				// Copy siteStatsMap so draining and new proxy have independent slices
 				copiedStats := make([]SiteStatsReport, len(proxy.siteStatsMap))
 				copy(copiedStats, proxy.siteStatsMap)
 				dw := &WorkerInfo{
-					kind:         workerKindShared,
-					conn:         conn,
-					draining:     true,
-					binaryHash:   workerHash,
-					siteStatsMap: copiedStats,
-					process:      proxy.process,
-					waitCh:       proxy.waitCh,
-					lastStart:    time.Now(),
+					kind:          workerKindShared,
+					conn:          conn,
+					draining:      true,
+					binaryHash:    workerHash,
+					siteStatsMap:  copiedStats,
+					process:       proxy.process,
+					waitCh:        proxy.waitCh,
+					lastStart:     now,
+					lastMessageAt: now,
 				}
 				pm.drainingWorkers = append(pm.drainingWorkers, dw)
 				proxy.conn = nil
@@ -423,8 +550,25 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 			} else {
 				target.running = status.Status == "running"
 				target.draining = status.Status == "draining"
-				if status.Status == "error" {
-					target.errored = true
+				target.failedSites = make(map[int64]bool)
+				for _, id := range status.FailedSiteIDs {
+					target.failedSites[id] = true
+				}
+				noteWorkerMessage(target, now)
+				issueText = strings.TrimSpace(status.Error)
+				issueActive := status.Status == "error" || len(status.FailedSiteIDs) > 0
+				if issueActive {
+					if issueText == "" {
+						issueText = fmt.Sprintf("%d site listener(s) unavailable", len(target.failedSites))
+					}
+					logIssue = shouldLogWorkerIssue(target, issueText, now)
+					if target == proxy {
+						scheduleWorkerRetry(target, now)
+					} else {
+						target.errored = true
+					}
+				} else {
+					resetWorkerRetryState(target)
 				}
 			}
 			pm.mu.Unlock()
@@ -432,12 +576,13 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 				log.Println("shared proxy: starting replacement proxy")
 				pm.startSharedProxy()
 			}
-			if status.Status == "error" {
-				log.Printf("shared proxy error: %s", status.Error)
+			if logIssue {
+				log.Printf("shared proxy issue: %s", issueText)
 			}
 		} else if status.Type == "site_stats" {
 			pm.mu.Lock()
 			target.siteStatsMap = status.SiteStats
+			noteWorkerMessage(target, time.Now())
 			pm.mu.Unlock()
 		}
 	}
@@ -507,8 +652,9 @@ func (pm *ProcessManager) redistributeWorkers() {
 			if len(ownerFailures) == 0 {
 				break
 			}
+			ownerMetadata := collectKernelOwnerFallbackMetadata(activeKernelCandidates, ownerFailures)
 			for owner, reason := range ownerFailures {
-				applyKernelOwnerFallback(owner, reason, rulePlans, rangePlans)
+				applyKernelOwnerFallbackWithMetadata(owner, reason, ownerMetadata[owner], rulePlans, rangePlans)
 			}
 			activeKernelCandidates = filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
 		}
@@ -569,6 +715,8 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.kernelStatsSnapshot = emptyKernelRuleStatsSnapshot()
 	pm.kernelStatsAt = time.Time{}
 	pm.kernelStatsSnapshotAt = time.Time{}
+	pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(pm.kernelNetlinkOwnerRetryCooldownUntil, time.Now(), rulePlans, rangePlans)
+	pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(pm.kernelNetlinkOwnerRetryFailures, rulePlans, rangePlans)
 	pm.mu.Unlock()
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
@@ -759,6 +907,7 @@ func aggregateKernelOwnerPlan(preferred string, entryPlans []ruleDataplanePlan) 
 			allKernel = false
 			if plan.FallbackReason == "" && item.FallbackReason != "" {
 				plan.FallbackReason = item.FallbackReason
+				plan.TransientFallback = item.TransientFallback
 			}
 		}
 	}
@@ -793,11 +942,16 @@ func sampleKernelRangePlan(pr PortRange, variants []string, planner *ruleDatapla
 }
 
 func applyKernelOwnerFallback(owner kernelCandidateOwner, reason string, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
+	applyKernelOwnerFallbackWithMetadata(owner, reason, kernelTransientFallbackMetadata{}, rulePlans, rangePlans)
+}
+
+func applyKernelOwnerFallbackWithMetadata(owner kernelCandidateOwner, reason string, metadata kernelTransientFallbackMetadata, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
 	if owner.kind == workerKindRule {
 		plan := rulePlans[owner.id]
 		plan.EffectiveEngine = ruleEngineUserspace
 		if plan.FallbackReason == "" {
 			plan.FallbackReason = reason
+			plan.TransientFallback = metadata
 		}
 		rulePlans[owner.id] = plan
 		return
@@ -807,6 +961,7 @@ func applyKernelOwnerFallback(owner kernelCandidateOwner, reason string, rulePla
 	plan.EffectiveEngine = ruleEngineUserspace
 	if plan.FallbackReason == "" {
 		plan.FallbackReason = reason
+		plan.TransientFallback = metadata
 	}
 	rangePlans[owner.id] = plan
 }
@@ -1201,6 +1356,39 @@ func collectKernelOwnerFailures(candidates []kernelCandidateRule, results map[in
 		failures[owner] = strings.Join(reasons, "; ")
 	}
 	return failures
+}
+
+func collectKernelOwnerFallbackMetadata(candidates []kernelCandidateRule, reasons map[kernelCandidateOwner]string) map[kernelCandidateOwner]kernelTransientFallbackMetadata {
+	if len(candidates) == 0 || len(reasons) == 0 {
+		return nil
+	}
+	ownerRules := make(map[kernelCandidateOwner]Rule, len(reasons))
+	for _, candidate := range candidates {
+		if _, ok := reasons[candidate.owner]; !ok {
+			continue
+		}
+		if _, exists := ownerRules[candidate.owner]; exists {
+			continue
+		}
+		ownerRules[candidate.owner] = candidate.rule
+	}
+	if len(ownerRules) == 0 {
+		return nil
+	}
+
+	out := make(map[kernelCandidateOwner]kernelTransientFallbackMetadata, len(ownerRules))
+	for owner, reason := range reasons {
+		rule, ok := ownerRules[owner]
+		if !ok {
+			continue
+		}
+		metadata := kernelTransientFallbackMetadataForRule(rule, reason)
+		if metadata.ReasonClass == "" {
+			continue
+		}
+		out[owner] = metadata
+	}
+	return out
 }
 
 func countKernelRulePlans(rules []Rule, plans map[int64]ruleDataplanePlan) int {
@@ -1767,9 +1955,7 @@ func (pm *ProcessManager) applyRuleAssignments(assignments [][]Rule) {
 			wi.failedRules = make(map[int64]bool)
 			wi.ruleStats = retainRuleStatsReports(existingStats, rules)
 			wi.running = false
-			wi.errored = false
-			wi.ruleRetryCount = 0
-			wi.ruleNextRetry = time.Time{}
+			resetWorkerRetryState(wi)
 			toUpdate = append(toUpdate, wi)
 		}
 		if wi.process == nil && wi.conn == nil {
@@ -1835,7 +2021,7 @@ func (pm *ProcessManager) applyRangeAssignments(assignments [][]PortRange) {
 			wi.failedRanges = make(map[int64]bool)
 			wi.rangeStats = retainRangeStatsReports(existingStats, ranges)
 			wi.running = false
-			wi.errored = false
+			resetWorkerRetryState(wi)
 			toUpdate = append(toUpdate, wi)
 		}
 		if wi.process == nil && wi.conn == nil {
@@ -1869,6 +2055,20 @@ func rulesEqual(a, b []Rule) bool {
 	return true
 }
 
+func ruleAssignmentSlicesEqual(a, b [][]Rule) bool {
+	a = trimTrailingEmptyRuleAssignments(a)
+	b = trimTrailingEmptyRuleAssignments(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !rulesEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func rangesEqual(a, b []PortRange) bool {
 	if len(a) != len(b) {
 		return false
@@ -1879,6 +2079,36 @@ func rangesEqual(a, b []PortRange) bool {
 		}
 	}
 	return true
+}
+
+func rangeAssignmentSlicesEqual(a, b [][]PortRange) bool {
+	a = trimTrailingEmptyRangeAssignments(a)
+	b = trimTrailingEmptyRangeAssignments(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !rangesEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func trimTrailingEmptyRuleAssignments(assignments [][]Rule) [][]Rule {
+	end := len(assignments)
+	for end > 0 && len(assignments[end-1]) == 0 {
+		end--
+	}
+	return assignments[:end]
+}
+
+func trimTrailingEmptyRangeAssignments(assignments [][]PortRange) [][]PortRange {
+	end := len(assignments)
+	for end > 0 && len(assignments[end-1]) == 0 {
+		end--
+	}
+	return assignments[:end]
 }
 
 func sameUserspaceRuleConfig(a, b Rule) bool {
@@ -2001,9 +2231,7 @@ func (pm *ProcessManager) startRuleWorker(workerIndex int) error {
 	wi.process = cmd.Process
 	wi.waitCh = waitCh
 	wi.running = false
-	wi.errored = false
-	wi.ruleRetryCount = 0
-	wi.ruleNextRetry = time.Time{}
+	resetWorkerRetryState(wi)
 	wi.lastStart = time.Now()
 	pm.mu.Unlock()
 
@@ -2046,7 +2274,8 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 	}
 	wi.conn = conn
 	wi.running = false
-	wi.errored = false
+	resetWorkerRetryState(wi)
+	noteWorkerMessage(wi, time.Now())
 	wi.binaryHash = workerHash
 	ranges := append([]PortRange(nil), wi.ranges...)
 	binHash := pm.binaryHash
@@ -2065,7 +2294,9 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 		}
 		if status.Type == "status" {
 			startNewWorker := false
+			logIssue := false
 			pm.mu.Lock()
+			now := time.Now()
 			if status.Status == "draining" && target == wi {
 				// Deep-copy rangeStats so draining and new worker have independent maps
 				copiedStats := make(map[int64]RangeStatsReport, len(wi.rangeStats))
@@ -2083,7 +2314,8 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 					rangeStats:     copiedStats,
 					process:        wi.process,
 					waitCh:         wi.waitCh,
-					lastStart:      time.Now(),
+					lastStart:      now,
+					lastMessageAt:  now,
 				}
 				pm.drainingWorkers = append(pm.drainingWorkers, dw)
 				wi.conn = nil
@@ -2099,8 +2331,16 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 				target.running = status.Status == "running"
 				target.draining = status.Status == "draining"
 				target.activeRangeIDs = append([]int64(nil), status.ActiveRangeIDs...)
+				noteWorkerMessage(target, now)
 				if status.Status == "error" {
-					target.errored = true
+					logIssue = shouldLogWorkerIssue(target, status.Error, now)
+					if target == wi {
+						scheduleWorkerRetry(target, now)
+					} else {
+						target.errored = true
+					}
+				} else {
+					resetWorkerRetryState(target)
 				}
 				target.failedRanges = make(map[int64]bool)
 				for _, id := range status.FailedRangeIDs {
@@ -2114,7 +2354,7 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 					log.Printf("start replacement range worker[%d]: %v", workerIndex, err)
 				}
 			}
-			if status.Status == "error" {
+			if status.Status == "error" && logIssue {
 				log.Printf("range worker[%d] error: %s", workerIndex, status.Error)
 			}
 		} else if status.Type == "range_stats" {
@@ -2122,6 +2362,7 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 			if target.rangeStats == nil {
 				target.rangeStats = make(map[int64]RangeStatsReport)
 			}
+			noteWorkerMessage(target, time.Now())
 			for _, s := range status.RangeStats {
 				target.rangeStats[s.RangeID] = s
 			}
@@ -2175,7 +2416,7 @@ func (pm *ProcessManager) startRangeWorker(workerIndex int) error {
 	wi.process = cmd.Process
 	wi.waitCh = waitCh
 	wi.running = false
-	wi.errored = false
+	resetWorkerRetryState(wi)
 	wi.lastStart = time.Now()
 	pm.mu.Unlock()
 
@@ -2305,13 +2546,14 @@ func (pm *ProcessManager) startSharedProxy() {
 	waitCh := make(chan struct{})
 	pm.mu.Lock()
 	pm.sharedProxy = &WorkerInfo{
-		kind:      workerKindShared,
-		process:   cmd.Process,
-		waitCh:    waitCh,
-		running:   false,
-		errored:   false,
-		lastStart: time.Now(),
+		kind:        workerKindShared,
+		process:     cmd.Process,
+		waitCh:      waitCh,
+		running:     false,
+		failedSites: make(map[int64]bool),
+		lastStart:   time.Now(),
 	}
+	resetWorkerRetryState(pm.sharedProxy)
 	pm.mu.Unlock()
 
 	go func() {
@@ -2364,7 +2606,11 @@ func (pm *ProcessManager) updateSharedProxy() {
 	if proxy == nil {
 		// Create slot; monitorLoop will start process if no worker reconnects
 		pm.mu.Lock()
-		pm.sharedProxy = &WorkerInfo{kind: workerKindShared, lastStart: time.Now()}
+		pm.sharedProxy = &WorkerInfo{
+			kind:        workerKindShared,
+			failedSites: make(map[int64]bool),
+			lastStart:   time.Now(),
+		}
 		pm.mu.Unlock()
 		return
 	}
@@ -2809,14 +3055,22 @@ func (pm *ProcessManager) snapshotKernelStatsShared(now time.Time) (kernelRuleSt
 	runtime := pm.kernelRuntime
 	pm.mu.Unlock()
 
+	startedAt := time.Now()
 	snapshot, err := runtime.SnapshotStats()
+	duration := time.Since(startedAt)
 	if err != nil {
+		pm.mu.Lock()
+		pm.kernelStatsLastDuration = duration
+		pm.kernelStatsLastError = err.Error()
+		pm.mu.Unlock()
 		return emptyKernelRuleStatsSnapshot(), now, err
 	}
 
 	pm.mu.Lock()
 	pm.kernelStatsSnapshot = snapshot
 	pm.kernelStatsSnapshotAt = now
+	pm.kernelStatsLastDuration = duration
+	pm.kernelStatsLastError = ""
 	pm.mu.Unlock()
 	return snapshot, now, nil
 }
@@ -2860,6 +3114,8 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 		pm.kernelStatsSnapshot = emptyKernelRuleStatsSnapshot()
 		pm.kernelStatsAt = time.Now()
 		pm.kernelStatsSnapshotAt = time.Time{}
+		pm.kernelStatsLastDuration = 0
+		pm.kernelStatsLastError = ""
 		pm.mu.Unlock()
 		return
 	}
@@ -2878,6 +3134,9 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 
 	snapshot, sampledAt, err := pm.snapshotKernelStatsShared(time.Time{})
 	if err != nil {
+		pm.mu.Lock()
+		pm.kernelStatsLastError = err.Error()
+		pm.mu.Unlock()
 		log.Printf("kernel dataplane stats snapshot failed: %v", err)
 		return
 	}
@@ -2980,6 +3239,7 @@ func (pm *ProcessManager) updateTransparentRouting(enabledRules []Rule, enabledR
 }
 
 func (pm *ProcessManager) stopAll() {
+	pm.stopKernelNetlinkMonitor()
 	if pm.kernelRuntime != nil {
 		if err := pm.kernelRuntime.Close(); err != nil {
 			log.Printf("stop kernel runtime: %v", err)
@@ -3013,21 +3273,40 @@ func (pm *ProcessManager) monitorLoop() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		type ruleRetryTask struct {
+		type workerRetryTask struct {
 			index        int
 			failureCount int
 		}
+		type staleControlTask struct {
+			kind          string
+			index         int
+			conn          net.Conn
+			lastMessageAt time.Time
+			logIssue      bool
+		}
 		var restartRuleIdx []int
-		var retryRuleConfig []ruleRetryTask
+		var retryRuleConfig []workerRetryTask
 		var restartRangeIdx []int
+		var retryRangeConfig []workerRetryTask
+		var retrySharedProxy bool
+		sharedProxyFailureCount := 0
+		var staleControls []staleControlTask
 		var stopDraining []*WorkerInfo
 		proxyDead := false
 		refreshKernelStats := false
 		runKernelMaintenance := false
+		checkKernelAttachments := false
+		checkKernelDegradedIdleRebuild := false
 		retryKernelFallbacks := false
 		retryKernelLogLine := ""
 		recoverPressureFallbacks := false
 		pressureRecoveryLogLine := ""
+		kernelAttachmentIssue := ""
+		kernelAttachmentRecovered := ""
+		attemptKernelAttachmentHeal := false
+		kernelAttachmentHealSummary := ""
+		kernelAttachmentHealError := ""
+		kernelDegradedIdleRebuildReason := ""
 		var kernelPressurePrev kernelRuntimePressureSnapshot
 		hasPressureFallbacks := false
 		now := time.Now()
@@ -3041,6 +3320,13 @@ func (pm *ProcessManager) monitorLoop() {
 			runKernelMaintenance = true
 			pm.kernelMaintenanceAt = now
 		}
+		if pm.kernelRuntime != nil && (pm.kernelAttachmentCheckAt.IsZero() || now.Sub(pm.kernelAttachmentCheckAt) >= kernelAttachmentCheckEvery) {
+			checkKernelAttachments = true
+			pm.kernelAttachmentCheckAt = now
+		}
+		if pm.kernelRuntime != nil && (pm.kernelDegradedHealAt.IsZero() || now.Sub(pm.kernelDegradedHealAt) >= kernelDegradedRebuildCooldown) {
+			checkKernelDegradedIdleRebuild = true
+		}
 		if pm.kernelRuntime != nil {
 			transientSummary := pm.summarizeTransientKernelFallbacksLocked()
 			hasPressureFallbacks = pm.hasPressureTriggeredKernelFallbacksLocked()
@@ -3050,6 +3336,9 @@ func (pm *ProcessManager) monitorLoop() {
 			} else if pm.kernelRetryAt.IsZero() || now.Sub(pm.kernelRetryAt) >= kernelFallbackRetryInterval {
 				retryKernelFallbacks = true
 				pm.kernelRetryAt = now
+				pm.kernelRetryCount++
+				pm.lastKernelRetryAt = now
+				pm.lastKernelRetryReason = transientSummary
 				retryKernelLogLine = pm.takeKernelRetryLogLineLocked(transientSummary, now)
 			}
 		}
@@ -3057,16 +3346,28 @@ func (pm *ProcessManager) monitorLoop() {
 			if len(wi.rules) == 0 {
 				continue
 			}
+			if shouldRecoverStaleWorkerControl(wi, now) {
+				staleControls = append(staleControls, staleControlTask{
+					kind:          workerKindRule,
+					index:         idx,
+					conn:          wi.conn,
+					lastMessageAt: wi.lastMessageAt,
+					logIssue:      shouldLogWorkerIssue(wi, "stale control connection", now),
+				})
+				wi.conn = nil
+				wi.running = false
+				continue
+			}
 			if wi.errored {
-				if wi.ruleNextRetry.IsZero() {
-					wi.ruleNextRetry = now.Add(nextRuleRetryDelay(wi.ruleRetryCount + 1))
+				if wi.nextRetry.IsZero() {
+					wi.nextRetry = now.Add(nextWorkerRetryDelay(wi.retryCount + 1))
 				}
-				if !now.Before(wi.ruleNextRetry) {
-					wi.ruleNextRetry = now.Add(nextRuleRetryDelay(wi.ruleRetryCount + 1))
+				if !now.Before(wi.nextRetry) {
+					wi.nextRetry = now.Add(nextWorkerRetryDelay(wi.retryCount + 1))
 					if wi.conn != nil {
-						retryRuleConfig = append(retryRuleConfig, ruleRetryTask{
+						retryRuleConfig = append(retryRuleConfig, workerRetryTask{
 							index:        idx,
-							failureCount: wi.ruleRetryCount,
+							failureCount: wi.retryCount,
 						})
 					} else if wi.process == nil {
 						restartRuleIdx = append(restartRuleIdx, idx)
@@ -3081,15 +3382,72 @@ func (pm *ProcessManager) monitorLoop() {
 			}
 		}
 		for idx, wi := range pm.rangeWorkers {
-			if wi.process == nil && wi.conn == nil && !wi.errored && len(wi.ranges) > 0 {
+			if len(wi.ranges) == 0 {
+				continue
+			}
+			if shouldRecoverStaleWorkerControl(wi, now) {
+				staleControls = append(staleControls, staleControlTask{
+					kind:          workerKindRange,
+					index:         idx,
+					conn:          wi.conn,
+					lastMessageAt: wi.lastMessageAt,
+					logIssue:      shouldLogWorkerIssue(wi, "stale control connection", now),
+				})
+				wi.conn = nil
+				wi.running = false
+				continue
+			}
+			if wi.errored {
+				if wi.nextRetry.IsZero() {
+					wi.nextRetry = now.Add(nextWorkerRetryDelay(wi.retryCount + 1))
+				}
+				if !now.Before(wi.nextRetry) {
+					wi.nextRetry = now.Add(nextWorkerRetryDelay(wi.retryCount + 1))
+					if wi.conn != nil {
+						retryRangeConfig = append(retryRangeConfig, workerRetryTask{
+							index:        idx,
+							failureCount: wi.retryCount,
+						})
+					} else if wi.process == nil {
+						restartRangeIdx = append(restartRangeIdx, idx)
+					}
+				}
+				continue
+			}
+			if wi.process == nil && wi.conn == nil {
 				if now.Sub(wi.lastStart) > 3*time.Second {
 					restartRangeIdx = append(restartRangeIdx, idx)
 				}
 			}
 		}
-		if pm.sharedProxy != nil && pm.sharedProxy.process == nil && pm.sharedProxy.conn == nil && !pm.sharedProxy.errored {
-			if now.Sub(pm.sharedProxy.lastStart) > 3*time.Second {
-				proxyDead = true
+		if pm.sharedProxy != nil {
+			if shouldRecoverStaleWorkerControl(pm.sharedProxy, now) {
+				staleControls = append(staleControls, staleControlTask{
+					kind:          workerKindShared,
+					index:         0,
+					conn:          pm.sharedProxy.conn,
+					lastMessageAt: pm.sharedProxy.lastMessageAt,
+					logIssue:      shouldLogWorkerIssue(pm.sharedProxy, "stale control connection", now),
+				})
+				pm.sharedProxy.conn = nil
+				pm.sharedProxy.running = false
+			} else if pm.sharedProxy.errored {
+				if pm.sharedProxy.nextRetry.IsZero() {
+					pm.sharedProxy.nextRetry = now.Add(nextWorkerRetryDelay(pm.sharedProxy.retryCount + 1))
+				}
+				if !now.Before(pm.sharedProxy.nextRetry) {
+					pm.sharedProxy.nextRetry = now.Add(nextWorkerRetryDelay(pm.sharedProxy.retryCount + 1))
+					if pm.sharedProxy.conn != nil {
+						retrySharedProxy = true
+						sharedProxyFailureCount = pm.sharedProxy.retryCount
+					} else if pm.sharedProxy.process == nil {
+						proxyDead = true
+					}
+				}
+			} else if pm.sharedProxy.process == nil && pm.sharedProxy.conn == nil {
+				if now.Sub(pm.sharedProxy.lastStart) > 3*time.Second {
+					proxyDead = true
+				}
 			}
 		}
 		if len(pm.drainingWorkers) > 0 {
@@ -3161,6 +3519,59 @@ func (pm *ProcessManager) monitorLoop() {
 				log.Printf("kernel dataplane maintenance failed: %v", err)
 			}
 		}
+		if checkKernelAttachments && runtime != nil {
+			kernelAttachmentIssue = summarizeUnhealthyKernelAttachments(snapshotKernelAttachmentHealth(runtime))
+			pm.mu.Lock()
+			pm.lastKernelAttachmentIssue, kernelAttachmentRecovered, attemptKernelAttachmentHeal, pm.kernelAttachmentHealAt =
+				nextKernelAttachmentHealState(pm.lastKernelAttachmentIssue, pm.kernelAttachmentHealAt, now, kernelAttachmentIssue)
+			pm.mu.Unlock()
+		}
+		if attemptKernelAttachmentHeal && runtime != nil {
+			healResults, healErr := healKernelAttachments(runtime)
+			if healErr != nil {
+				kernelAttachmentHealError = healErr.Error()
+				pm.mu.Lock()
+				pm.lastKernelAttachmentHealSummary = ""
+				pm.lastKernelAttachmentHealError = kernelAttachmentHealError
+				pm.mu.Unlock()
+				log.Printf("kernel dataplane self-heal: targeted attachment repair failed (%s): %v", kernelAttachmentIssue, healErr)
+				pm.requestRedistributeWorkers(0)
+			} else {
+				rawKernelAttachmentHealSummary := summarizeKernelAttachmentHealResults(healResults)
+				postHealIssue := summarizeUnhealthyKernelAttachments(snapshotKernelAttachmentHealth(runtime))
+				kernelAttachmentHealSummary = kernelAttachmentHealOutcomeSummary(rawKernelAttachmentHealSummary, postHealIssue)
+				pm.mu.Lock()
+				pm.lastKernelAttachmentIssue = postHealIssue
+				pm.lastKernelAttachmentHealSummary = kernelAttachmentHealSummary
+				pm.lastKernelAttachmentHealError = ""
+				pm.mu.Unlock()
+				if strings.TrimSpace(postHealIssue) == "" {
+					if strings.TrimSpace(rawKernelAttachmentHealSummary) != "" {
+						log.Printf("kernel dataplane self-heal: repaired attachments: %s", rawKernelAttachmentHealSummary)
+					} else {
+						log.Printf("kernel dataplane self-heal: attachment issue cleared without a full redistribute")
+					}
+				} else {
+					if strings.TrimSpace(rawKernelAttachmentHealSummary) != "" {
+						log.Printf("kernel dataplane self-heal: partial repair applied (%s), remaining issue: %s", rawKernelAttachmentHealSummary, postHealIssue)
+					} else {
+						log.Printf("kernel dataplane self-heal: targeted repair could not clear attachment issue (%s), re-evaluating kernel assignments", postHealIssue)
+					}
+					pm.requestRedistributeWorkers(0)
+				}
+			}
+		}
+		if checkKernelDegradedIdleRebuild && runtime != nil {
+			for _, engine := range snapshotKernelRuntimeEngines(runtime) {
+				if reason := kernelRuntimeIdleDegradedRebuildReason(engine); reason != "" {
+					kernelDegradedIdleRebuildReason = reason
+					pm.mu.Lock()
+					pm.kernelDegradedHealAt = now
+					pm.mu.Unlock()
+					break
+				}
+			}
+		}
 		kernelPressureCurrent := snapshotKernelRuntimePressure(runtime)
 		pm.mu.Lock()
 		pm.kernelPressureSnapshot = kernelPressureCurrent
@@ -3185,13 +3596,36 @@ func (pm *ProcessManager) monitorLoop() {
 		if pressureRecoveryLogLine != "" {
 			log.Print(pressureRecoveryLogLine)
 		}
+		if kernelAttachmentRecovered != "" {
+			log.Printf("kernel dataplane attachments recovered: %s", kernelAttachmentRecovered)
+		}
 		if retryKernelFallbacks {
 			pm.requestRedistributeWorkers(redistributeRetryDelay)
 		}
 		if recoverPressureFallbacks {
 			pm.requestRedistributeWorkers(0)
 		}
+		if kernelDegradedIdleRebuildReason != "" {
+			log.Printf("kernel dataplane self-heal: %s; rebuilding kernel dataplane now", kernelDegradedIdleRebuildReason)
+			pm.requestRedistributeWorkers(0)
+		}
 
+		for _, task := range staleControls {
+			if task.conn != nil {
+				if task.logIssue {
+					age := time.Since(task.lastMessageAt).Round(time.Second)
+					switch task.kind {
+					case workerKindRule:
+						log.Printf("worker[%d]: stale control connection after %v, forcing reconnect", task.index, age)
+					case workerKindRange:
+						log.Printf("range worker[%d]: stale control connection after %v, forcing reconnect", task.index, age)
+					case workerKindShared:
+						log.Printf("shared proxy: stale control connection after %v, forcing reconnect", age)
+					}
+				}
+				task.conn.Close()
+			}
+		}
 		for _, idx := range restartRuleIdx {
 			log.Printf("restarting rule worker[%d]", idx)
 			if err := pm.startRuleWorker(idx); err != nil {
@@ -3214,22 +3648,42 @@ func (pm *ProcessManager) monitorLoop() {
 			log.Printf("retrying rule worker[%d] config (failure_count=%d)", task.index, task.failureCount)
 			pm.sendRuleConfig(wi)
 		}
+		for _, task := range retryRangeConfig {
+			pm.mu.Lock()
+			wi := pm.rangeWorkers[task.index]
+			pm.mu.Unlock()
+			if wi == nil || wi.conn == nil || len(wi.ranges) == 0 {
+				continue
+			}
+			log.Printf("retrying range worker[%d] config (failure_count=%d)", task.index, task.failureCount)
+			pm.sendRangeConfig(wi)
+		}
 		for _, dw := range stopDraining {
 			log.Printf("stopping stale draining %s worker[%d]", dw.kind, dw.workerIndex)
 			killWorkerInfo(dw)
 		}
 
-		if proxyDead {
+		if retrySharedProxy || proxyDead {
 			sites, err := dbGetSites(pm.db)
 			if err == nil {
 				hasEnabled := false
+				var enabledSites []Site
 				for _, s := range sites {
 					if s.Enabled {
 						hasEnabled = true
-						break
+						enabledSites = append(enabledSites, s)
 					}
 				}
-				if hasEnabled {
+				if retrySharedProxy {
+					pm.mu.Lock()
+					proxy := pm.sharedProxy
+					pm.mu.Unlock()
+					if proxy != nil && proxy.conn != nil && len(enabledSites) > 0 {
+						log.Printf("retrying shared proxy config (failure_count=%d)", sharedProxyFailureCount)
+						pm.sendSitesConfig(proxy, enabledSites)
+					}
+				}
+				if proxyDead && hasEnabled {
 					log.Println("restarting shared proxy")
 					pm.startSharedProxy()
 				}

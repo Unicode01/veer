@@ -114,3 +114,57 @@ func TestOrderedKernelRuleRuntimeSelectsTCWhenXDPUnavailable(t *testing.T) {
 		t.Fatalf("Available() reason = %q", reason)
 	}
 }
+
+func TestOrderedKernelRuleRuntimeReconcileRetainingAssignmentsKeepsPinnedOwnersOffHigherPriorityEngine(t *testing.T) {
+	xdp := &mockKernelRuntime{
+		available: true,
+		reconcileResult: map[int64]kernelRuleApplyResult{
+			2: {Error: "xdp neighbor missing"},
+		},
+	}
+	tc := &mockKernelRuntime{
+		available: true,
+		reconcileResult: map[int64]kernelRuleApplyResult{
+			1: {Running: true, Engine: kernelEngineTC},
+			2: {Running: true, Engine: kernelEngineTC},
+		},
+		assignments: map[int64]string{
+			1: kernelEngineTC,
+			2: kernelEngineTC,
+		},
+	}
+	rt := &orderedKernelRuleRuntime{
+		entries: []orderedKernelRuntimeEntry{
+			{name: kernelEngineXDP, rt: xdp},
+			{name: kernelEngineTC, rt: tc},
+		},
+	}
+
+	results, err := rt.ReconcileRetainingAssignments(
+		map[string][]Rule{
+			kernelEngineTC: {
+				{ID: 1},
+			},
+		},
+		[]Rule{{ID: 2}},
+	)
+	if err != nil {
+		t.Fatalf("ReconcileRetainingAssignments() error = %v", err)
+	}
+	if len(xdp.reconcileCalls) != 1 || len(xdp.reconcileCalls[0]) != 1 || xdp.reconcileCalls[0][0].ID != 2 {
+		t.Fatalf("xdp reconcile calls = %#v, want only retry rule 2", xdp.reconcileCalls)
+	}
+	if len(tc.reconcileCalls) != 1 || len(tc.reconcileCalls[0]) != 2 {
+		t.Fatalf("tc reconcile calls = %#v, want one call with retained rule 1 and retry rule 2", tc.reconcileCalls)
+	}
+	if tc.reconcileCalls[0][0].ID != 1 || tc.reconcileCalls[0][1].ID != 2 {
+		t.Fatalf("tc reconcile call = %#v, want retained rule 1 before retry rule 2", tc.reconcileCalls[0])
+	}
+	result, ok := results[2]
+	if !ok || !result.Running || result.Engine != kernelEngineTC {
+		t.Fatalf("retry rule result = %+v, want running tc", result)
+	}
+	if _, ok := results[1]; ok {
+		t.Fatalf("retained rule unexpectedly reported as a new result: %+v", results[1])
+	}
+}

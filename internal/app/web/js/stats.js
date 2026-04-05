@@ -283,12 +283,76 @@
     card.appendChild(valueNode);
 
     if (subtext) {
-      card.appendChild(app.createNode('div', {
-        className: 'kernel-runtime-sub',
-        text: subtext
-      }));
+      const subNode = app.createNode('div', { className: 'kernel-runtime-sub' });
+      app.appendNodeContent(subNode, subtext);
+      card.appendChild(subNode);
     }
     return card;
+  }
+
+  function kernelRuntimeSummaryInline(content) {
+    return app.createNode('div', {
+      className: 'kernel-runtime-inline',
+      children: content
+    });
+  }
+
+  function kernelRuntimeTimestampLabel(timestamp) {
+    if (!timestamp) return '';
+    return app.formatClock(timestamp);
+  }
+
+  function kernelRuntimeDurationLabel(milliseconds) {
+    const value = Number(milliseconds || 0);
+    if (!(value > 0)) return '';
+    if (value < 1000) return String(Math.round(value)) + 'ms';
+    const seconds = value / 1000;
+    if (Math.abs(seconds - Math.round(seconds)) < 0.05) {
+      return String(Math.round(seconds)) + 's';
+    }
+    return (Math.round(seconds * 10) / 10).toFixed(1) + 's';
+  }
+
+  function kernelRuntimeCooldownWindowLabel(nextExpiry, clearAt) {
+    const next = kernelRuntimeTimestampLabel(nextExpiry);
+    const clear = kernelRuntimeTimestampLabel(clearAt);
+    if (!next && !clear) return '';
+    if (!clear || next === clear) {
+      return app.t('kernel.summary.activeCooldownClearValue', {
+        clear: clear || next
+      });
+    }
+    return app.t('kernel.summary.activeCooldownWindowValue', {
+      next: next,
+      clear: clear
+    });
+  }
+
+  function kernelRuntimeSummaryNote(labelKey, timestamp, detail) {
+    const text = String(detail || '').trim();
+    if (!text) return null;
+
+    const parts = [app.t(labelKey)];
+    const clock = kernelRuntimeTimestampLabel(timestamp);
+    if (clock) parts.push(clock);
+    parts.push(text);
+
+    return app.createNode('div', {
+      className: 'kernel-runtime-note',
+      text: parts.join(' · ')
+    });
+  }
+
+  function kernelRuntimeNetlinkRecoveryDetail(data) {
+    if (!data || !data.kernel_netlink_recover_pending) return '';
+    const parts = [];
+    const source = String(data.kernel_netlink_recover_source || '').trim();
+    const summary = String(data.kernel_netlink_recover_summary || '').trim();
+    const triggerSummary = String(data.kernel_netlink_recover_trigger_summary || '').trim();
+    if (source) parts.push('source=' + source);
+    if (triggerSummary) parts.push('scope=' + triggerSummary);
+    if (summary) parts.push(summary);
+    return parts.join(' | ');
   }
 
   function kernelRuntimeDetailText(engine) {
@@ -305,6 +369,63 @@
       if (parts.indexOf(text) >= 0) return;
       parts.push(text);
     });
+    if (engine.last_maintain_ms || engine.last_maintain_error) {
+      const maintainParts = [];
+      if (engine.last_maintain_ms) maintainParts.push(String(engine.last_maintain_ms) + 'ms');
+      if (engine.last_maintain_at) maintainParts.push('@' + app.formatClock(engine.last_maintain_at));
+      if (engine.last_prune_budget || engine.last_prune_scanned || engine.last_prune_deleted) {
+        maintainParts.push('prune=' + String(engine.last_prune_scanned || 0) + '/' + String(engine.last_prune_deleted || 0) + '/' + String(engine.last_prune_budget || 0));
+      }
+      if (engine.last_maintain_error) maintainParts.push('err=' + String(engine.last_maintain_error));
+      parts.push('maintain ' + maintainParts.join(' '));
+    }
+    if (engine.pressure_since) {
+      parts.push('pressure_since=' + app.formatClock(engine.pressure_since));
+    }
+    if (engine.degraded_since) {
+      parts.push('degraded_since=' + app.formatClock(engine.degraded_since));
+    }
+    if (engine.attachments_unhealthy_count) {
+      let text = 'attachments_unhealthy=' + String(engine.attachments_unhealthy_count);
+      if (engine.last_attachments_unhealthy_at) {
+        text += ' last=' + app.formatClock(engine.last_attachments_unhealthy_at);
+      }
+      parts.push(text);
+    }
+    if (engine.diagnostics || engine.diagnostics_verbose) {
+      parts.push('diag=' + (engine.diagnostics_verbose ? 'verbose' : 'on'));
+    }
+    const diagParts = [];
+    [
+      ['fib', engine.diag_fib_non_success],
+      ['drop', engine.diag_redirect_drop],
+      ['nat_fail', engine.diag_nat_reserve_fail],
+      ['recreate', engine.diag_reply_flow_recreated]
+    ].forEach(([label, value]) => {
+      if (!value) return;
+      diagParts.push(label + '=' + String(value));
+    });
+    if (engine.diagnostics_verbose) {
+      [
+        ['neigh', engine.diag_redirect_neigh_used],
+        ['self_heal', engine.diag_nat_self_heal_insert],
+        ['flow_fail', engine.diag_flow_update_fail],
+        ['nat_update_fail', engine.diag_nat_update_fail],
+        ['rewrite_fail', engine.diag_rewrite_fail],
+        ['probe2', engine.diag_nat_probe_round2_used],
+        ['probe3', engine.diag_nat_probe_round3_used],
+        ['tcp_close_del', engine.diag_tcp_close_delete]
+      ].forEach(([label, value]) => {
+        if (!value) return;
+        diagParts.push(label + '=' + String(value));
+      });
+    }
+    if (diagParts.length) {
+      parts.push('diag_counts ' + diagParts.join(' '));
+    }
+    if (engine.diag_snapshot_error) {
+      parts.push('diag_err=' + String(engine.diag_snapshot_error));
+    }
     return parts.join(' | ');
   }
 
@@ -465,54 +586,147 @@
       return;
     }
 
-    const orderNode = app.createNode('div', { className: 'kernel-runtime-inline' });
     const configuredOrder = Array.isArray(data.configured_order) ? data.configured_order : [];
     const engines = Array.isArray(data.engines) ? data.engines : [];
     const pressureSummary = kernelRuntimePressureSummary(engines);
-    if (configuredOrder.length) {
-      configuredOrder.forEach((name) => orderNode.appendChild(kernelEngineBadge(name)));
-    } else {
-      orderNode.appendChild(app.emptyCellNode('stat-muted'));
-    }
+    const configuredOrderNodes = configuredOrder.length
+      ? configuredOrder.map((name) => kernelEngineBadge(name))
+      : [app.emptyCellNode('stat-muted')];
 
     const summaryFragment = document.createDocumentFragment();
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
       'kernel.summary.status',
-      kernelStatePill(!!data.available, 'kernel.available.yes', 'kernel.available.no'),
-      data.available ? '' : (data.available_reason || app.t('common.unavailable'))
+      kernelRuntimeSummaryInline([
+        kernelStatePill(!!data.available, 'kernel.available.yes', 'kernel.available.no'),
+        kernelDefaultEngineBadge(data.default_engine)
+      ]),
+      [
+        kernelRuntimeSummaryInline([
+          app.createNode('span', {
+            text: app.t('kernel.summary.configuredOrder') + ':'
+          }),
+          configuredOrderNodes
+        ]),
+        !data.available && (data.available_reason || app.t('common.unavailable'))
+          ? app.createNode('div', {
+              text: data.available_reason || app.t('common.unavailable')
+            })
+          : null
+      ]
     ));
-    summaryFragment.appendChild(kernelRuntimeSummaryCard(
-      'kernel.summary.defaultEngine',
-      kernelDefaultEngineBadge(data.default_engine)
-    ));
-    summaryFragment.appendChild(kernelRuntimeSummaryCard('kernel.summary.configuredOrder', orderNode));
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
       'kernel.summary.activeKernel',
       app.t('kernel.summary.activeKernelValue', {
         rules: data.active_rule_count || 0,
         ranges: data.active_range_count || 0
-      })
+      }),
+      kernelRuntimeSummaryInline([
+        kernelStatePill(!!data.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled'),
+        app.createNode('span', {
+          text: app.t(data.retry_pending ? 'kernel.retry.pending' : 'kernel.retry.idle')
+        })
+      ])
     ));
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
       'kernel.summary.pressure',
       kernelRuntimePressureBadge(pressureSummary.level),
-      pressureSummary.subtext
+      [
+        app.createNode('div', {
+          text: pressureSummary.subtext
+        }),
+        app.createNode('div', {
+          text: app.t('kernel.summary.fallbacksValue', {
+            rules: data.kernel_fallback_rule_count || 0,
+            ranges: data.kernel_fallback_range_count || 0
+          })
+        }),
+        app.createNode('div', {
+          text: app.t('kernel.summary.transientFallbacksValue', {
+            rules: data.transient_fallback_rule_count || 0,
+            ranges: data.transient_fallback_range_count || 0
+          })
+        })
+      ]
     ));
-    summaryFragment.appendChild(kernelRuntimeSummaryCard(
-      'kernel.summary.fallbacks',
-      app.t('kernel.summary.fallbacksValue', {
-        rules: data.kernel_fallback_rule_count || 0,
-        ranges: data.kernel_fallback_range_count || 0
+    const retryDetails = [
+      app.createNode('div', {
+        text: app.t('kernel.summary.incrementalMatchedValue', {
+          rules: data.last_kernel_incremental_retry_matched_rule_owners || 0,
+          ranges: data.last_kernel_incremental_retry_matched_range_owners || 0
+        })
       }),
-      app.t('kernel.summary.transientFallbacksValue', {
-        rules: data.transient_fallback_rule_count || 0,
-        ranges: data.transient_fallback_range_count || 0
+      app.createNode('div', {
+        text: app.t('kernel.summary.incrementalAttemptedValue', {
+          rules: data.last_kernel_incremental_retry_attempted_rule_owners || 0,
+          ranges: data.last_kernel_incremental_retry_attempted_range_owners || 0
+        })
+      }),
+      app.createNode('div', {
+        text: app.t('kernel.summary.incrementalRecoveredValue', {
+          rules: data.last_kernel_incremental_retry_recovered_rule_owners || 0,
+          ranges: data.last_kernel_incremental_retry_recovered_range_owners || 0
+        })
+      }),
+      app.createNode('div', {
+        text: app.t('kernel.summary.incrementalRetainedValue', {
+          rules: data.last_kernel_incremental_retry_retained_rule_owners || 0,
+          ranges: data.last_kernel_incremental_retry_retained_range_owners || 0
+        })
+      }),
+      app.createNode('div', {
+        text: app.t('kernel.summary.retryFallbackValue', {
+          count: data.kernel_incremental_retry_fallback_count || 0
+        }) + (kernelRuntimeTimestampLabel(data.last_kernel_incremental_retry_at) ? (' @ ' + kernelRuntimeTimestampLabel(data.last_kernel_incremental_retry_at)) : '')
       })
-    ));
+    ];
+    if ((data.last_kernel_incremental_retry_cooldown_rule_owners || 0) > 0 || (data.last_kernel_incremental_retry_cooldown_range_owners || 0) > 0) {
+      retryDetails.push(app.createNode('div', {
+        text: app.t('kernel.summary.incrementalCooldownValue', {
+          rules: data.last_kernel_incremental_retry_cooldown_rule_owners || 0,
+          ranges: data.last_kernel_incremental_retry_cooldown_range_owners || 0
+        }) +
+          (data.last_kernel_incremental_retry_cooldown_summary ? (' | ' + data.last_kernel_incremental_retry_cooldown_summary) : '') +
+          (data.last_kernel_incremental_retry_cooldown_scope ? (' | ' + data.last_kernel_incremental_retry_cooldown_scope) : '')
+      }));
+    }
+    if ((data.last_kernel_incremental_retry_backoff_rule_owners || 0) > 0 || (data.last_kernel_incremental_retry_backoff_range_owners || 0) > 0) {
+      const backoffDuration = kernelRuntimeDurationLabel(data.last_kernel_incremental_retry_backoff_max_delay_ms);
+      let text = app.t('kernel.summary.incrementalBackoffValue', {
+        rules: data.last_kernel_incremental_retry_backoff_rule_owners || 0,
+        ranges: data.last_kernel_incremental_retry_backoff_range_owners || 0
+      });
+      if (data.last_kernel_incremental_retry_backoff_summary) {
+        text += ' | ' + data.last_kernel_incremental_retry_backoff_summary;
+      }
+      if (data.last_kernel_incremental_retry_backoff_scope) {
+        text += ' | ' + data.last_kernel_incremental_retry_backoff_scope;
+      }
+      if (data.last_kernel_incremental_retry_backoff_max_failures) {
+        text += ' | max_failures=' + String(data.last_kernel_incremental_retry_backoff_max_failures);
+      }
+      if (backoffDuration) {
+        text += ' | max_delay=' + backoffDuration;
+      }
+      retryDetails.push(app.createNode('div', { text: text }));
+    }
+    if ((data.cooldown_rule_owner_count || 0) > 0 || (data.cooldown_range_owner_count || 0) > 0) {
+      const cooldownWindow = kernelRuntimeCooldownWindowLabel(data.cooldown_next_expiry_at, data.cooldown_clear_at);
+      retryDetails.push(app.createNode('div', {
+        text: app.t('kernel.summary.activeCooldownValue', {
+          rules: data.cooldown_rule_owner_count || 0,
+          ranges: data.cooldown_range_owner_count || 0
+        }) +
+          (data.cooldown_summary ? (' | ' + data.cooldown_summary) : '') +
+          (cooldownWindow ? (' | ' + cooldownWindow) : '')
+      }));
+    }
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
-      'kernel.summary.trafficStats',
-      kernelStatePill(!!data.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled'),
-      app.t(data.retry_pending ? 'kernel.retry.pending' : 'kernel.retry.idle')
+      'kernel.summary.retry',
+      app.t('kernel.summary.retryValue', {
+        full: data.kernel_retry_count || 0,
+        incremental: data.kernel_incremental_retry_count || 0
+      }),
+      retryDetails
     ));
     el.kernelRuntimeSummary.appendChild(summaryFragment);
 
@@ -521,6 +735,42 @@
         className: 'kernel-runtime-note',
         text: data.transient_fallback_summary
       }));
+    }
+    const lastRetryNote = kernelRuntimeSummaryNote('kernel.note.lastRetry', data.last_kernel_retry_at, data.last_kernel_retry_reason);
+    if (lastRetryNote) {
+      el.kernelRuntimeSummary.appendChild(lastRetryNote);
+    }
+    const lastIncrementalRetryNote = kernelRuntimeSummaryNote('kernel.note.lastIncrementalRetry', data.last_kernel_incremental_retry_at, data.last_kernel_incremental_retry_result);
+    if (lastIncrementalRetryNote) {
+      el.kernelRuntimeSummary.appendChild(lastIncrementalRetryNote);
+    }
+    const pendingNetlinkRecoveryNote = kernelRuntimeSummaryNote(
+      'kernel.note.pendingNetlinkRecovery',
+      data.kernel_netlink_recover_requested_at,
+      kernelRuntimeNetlinkRecoveryDetail(data)
+    );
+    if (pendingNetlinkRecoveryNote) {
+      el.kernelRuntimeSummary.appendChild(pendingNetlinkRecoveryNote);
+    }
+    const attachmentIssueNote = kernelRuntimeSummaryNote('kernel.note.attachmentIssue', '', data.last_kernel_attachment_issue);
+    if (attachmentIssueNote) {
+      el.kernelRuntimeSummary.appendChild(attachmentIssueNote);
+    }
+    const attachmentHealErrorNote = kernelRuntimeSummaryNote(
+      'kernel.note.lastAttachmentHealError',
+      data.last_kernel_attachment_heal_at,
+      data.last_kernel_attachment_heal_error
+    );
+    if (attachmentHealErrorNote) {
+      el.kernelRuntimeSummary.appendChild(attachmentHealErrorNote);
+    }
+    const attachmentHealNote = kernelRuntimeSummaryNote(
+      'kernel.note.lastAttachmentHeal',
+      data.last_kernel_attachment_heal_at,
+      data.last_kernel_attachment_heal_summary
+    );
+    if (attachmentHealNote) {
+      el.kernelRuntimeSummary.appendChild(attachmentHealNote);
     }
     const degradedSummary = kernelRuntimeDegradedSummaryText(engines);
     if (degradedSummary) {

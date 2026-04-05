@@ -128,6 +128,29 @@
     return parts;
   };
 
+  app.isValidIPv6 = function isValidIPv6(ip) {
+    const text = (ip || '').trim();
+    if (!text || text.indexOf(':') < 0 || text.indexOf('%') >= 0) return false;
+    try {
+      new URL('http://[' + text + ']/');
+      return true;
+    } catch (err) {
+      return false;
+    }
+  };
+
+  app.isValidIP = function isValidIP(ip) {
+    const text = (ip || '').trim();
+    return !!app.parseIPv4(text) || app.isValidIPv6(text);
+  };
+
+  app.ipFamily = function ipFamily(ip) {
+    const text = (ip || '').trim();
+    if (app.parseIPv4(text)) return 'ipv4';
+    if (app.isValidIPv6(text)) return 'ipv6';
+    return '';
+  };
+
   app.isPublicIPv4 = function isPublicIPv4(ip) {
     const p = app.parseIPv4(ip);
     if (!p) return false;

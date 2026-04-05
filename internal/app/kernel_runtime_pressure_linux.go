@@ -117,6 +117,7 @@ func (rt *orderedKernelRuleRuntime) pressureSnapshot() kernelRuntimePressureSnap
 func (rt *linuxKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRuntimePressureState {
 	if !rt.available || rt.coll == nil || rt.coll.Maps == nil {
 		rt.pressureState = kernelRuntimePressureState{}
+		rt.observability.updatePressure(false, now)
 		return rt.pressureState
 	}
 	if !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
@@ -133,12 +134,14 @@ func (rt *linuxKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRun
 	next.sampledAt = now
 	logKernelRuntimePressureTransition(kernelEngineTC, rt.pressureState, next)
 	rt.pressureState = next
+	rt.observability.updatePressure(next.active, now)
 	return rt.pressureState
 }
 
 func (rt *xdpKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRuntimePressureState {
 	if !rt.available || rt.coll == nil || rt.coll.Maps == nil {
 		rt.pressureState = kernelRuntimePressureState{}
+		rt.observability.updatePressure(false, now)
 		return rt.pressureState
 	}
 	if !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
@@ -160,6 +163,7 @@ func (rt *xdpKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRunti
 	next.sampledAt = now
 	logKernelRuntimePressureTransition(kernelEngineXDP, rt.pressureState, next)
 	rt.pressureState = next
+	rt.observability.updatePressure(next.active, now)
 	return rt.pressureState
 }
 

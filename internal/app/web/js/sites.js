@@ -78,6 +78,58 @@
     app.updateSiteTransparentWarning();
   };
 
+  app.getSiteFieldInputs = function getSiteFieldInputs(issue) {
+    const msg = String((issue && issue.message) || '').trim();
+    const field = String((issue && issue.field) || '').trim();
+    const map = {
+      id: app.el.editSiteId,
+      domain: app.$('siteDomain'),
+      listen_interface: app.el.siteListenIface,
+      listen_ip: app.el.siteListenIP,
+      backend_ip: app.$('siteBackendIP'),
+      backend_source_ip: app.el.siteBackendSourceIP,
+      backend_http_port: app.$('siteBackendHTTP'),
+      backend_https_port: app.$('siteBackendHTTPS'),
+      transparent: app.$('siteTransparent'),
+      tag: app.$('siteTag')
+    };
+    if (map[field]) return [map[field]];
+    if (msg === 'domain and backend_ip are required') return [app.$('siteDomain'), app.$('siteBackendIP')];
+    if (msg === 'at least one of backend_http_port or backend_https_port is required') return [app.$('siteBackendHTTP'), app.$('siteBackendHTTPS')];
+    if (msg === 'transparent mode currently supports only IPv4 rules') return [app.$('siteTransparent')];
+    if (msg.indexOf('listen_interface ') === 0) return [app.el.siteListenIface];
+    if (msg.indexOf('listen_ip ') === 0) return [app.el.siteListenIP];
+    if (msg.indexOf('backend_ip ') === 0) return [app.$('siteBackendIP')];
+    if (msg.indexOf('backend_source_ip ') === 0) return [app.el.siteBackendSourceIP];
+    if (msg.indexOf('HTTP route conflicts with ') === 0 || msg.indexOf('HTTPS route conflicts with ') === 0) return [app.$('siteDomain')];
+    return [];
+  };
+
+  app.applySiteValidationIssues = function applySiteValidationIssues(issues) {
+    const relevant = (issues || []).filter((issue) => issue && (issue.scope === 'create' || issue.scope === 'update'));
+    if (!relevant.length) {
+      app.notify('error', app.t('validation.reviewErrors'));
+      return;
+    }
+
+    let firstInvalid = null;
+    relevant.forEach((issue) => {
+      const inputs = app.getSiteFieldInputs(issue);
+      if (!inputs.length) return;
+      const translated = app.translateValidationMessage(issue.message);
+      inputs.forEach((input) => {
+        if (!input) return;
+        if (!firstInvalid) firstInvalid = input;
+        if (!input.hasAttribute('aria-invalid')) {
+          app.setFieldError(input, translated);
+        }
+      });
+    });
+
+    if (firstInvalid && typeof firstInvalid.focus === 'function') firstInvalid.focus();
+    app.notify('error', app.getValidationIssueSummary({ issues: relevant }, null, 3) || app.translateValidationMessage(relevant[0].message));
+  };
+
   app.getSiteSortValue = function getSiteSortValue(site, key) {
     if (key === 'status') {
       if (!site.enabled) return 3;
@@ -215,7 +267,10 @@
       app.notify('success', app.t('toast.deleted', { item: app.t('noun.site') }));
       app.loadSites();
     } catch (e) {
-      if (e.message !== 'unauthorized') app.notify('error', app.t('errors.deleteFailed', { message: e.message }));
+      if (e.message !== 'unauthorized') {
+        const message = app.getValidationIssueMessage(e.payload, ['delete']) || app.translateValidationMessage(e.message);
+        app.notify('error', app.t('errors.deleteFailed', { message: message }));
+      }
     } finally {
       app.setRowPending('site', id, false);
       app.renderSitesTable();

@@ -1,0 +1,678 @@
+package app
+
+import (
+	"fmt"
+	"log"
+	"sort"
+	"strings"
+	"time"
+)
+
+type kernelNetlinkRecoveryTrigger struct {
+	interfaceNames         map[string]struct{}
+	linkIndexes            map[int]struct{}
+	linkNeighborInterfaces map[string]struct{}
+	linkNeighborIndexes    map[int]struct{}
+	linkFDBInterfaces      map[string]struct{}
+	linkFDBIndexes         map[int]struct{}
+	backendIPs             map[string]struct{}
+	backendMACs            map[string]struct{}
+	sources                map[string]struct{}
+}
+
+type kernelNetlinkLinkSnapshot struct {
+	Name        string
+	LinkType    string
+	MasterIndex int
+	AdminUp     bool
+	LowerUp     bool
+	OperState   string
+}
+
+func newKernelNetlinkRecoveryTrigger(source string) kernelNetlinkRecoveryTrigger {
+	var trigger kernelNetlinkRecoveryTrigger
+	trigger.addSource(source)
+	return trigger
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addSource(source string) {
+	if trigger == nil {
+		return
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return
+	}
+	if trigger.sources == nil {
+		trigger.sources = make(map[string]struct{})
+	}
+	trigger.sources[source] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addInterfaceName(name string) {
+	if trigger == nil {
+		return
+	}
+	name = normalizeKernelTransientFallbackInterface(name)
+	if name == "" {
+		return
+	}
+	if trigger.interfaceNames == nil {
+		trigger.interfaceNames = make(map[string]struct{})
+	}
+	trigger.interfaceNames[name] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addLinkIndex(index int) {
+	if trigger == nil || index <= 0 {
+		return
+	}
+	if trigger.linkIndexes == nil {
+		trigger.linkIndexes = make(map[int]struct{})
+	}
+	trigger.linkIndexes[index] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addLinkNeighborInterface(name string) {
+	if trigger == nil {
+		return
+	}
+	name = normalizeKernelTransientFallbackInterface(name)
+	if name == "" {
+		return
+	}
+	if trigger.linkNeighborInterfaces == nil {
+		trigger.linkNeighborInterfaces = make(map[string]struct{})
+	}
+	trigger.linkNeighborInterfaces[name] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addLinkNeighborIndex(index int) {
+	if trigger == nil || index <= 0 {
+		return
+	}
+	if trigger.linkNeighborIndexes == nil {
+		trigger.linkNeighborIndexes = make(map[int]struct{})
+	}
+	trigger.linkNeighborIndexes[index] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addLinkFDBInterface(name string) {
+	if trigger == nil {
+		return
+	}
+	name = normalizeKernelTransientFallbackInterface(name)
+	if name == "" {
+		return
+	}
+	if trigger.linkFDBInterfaces == nil {
+		trigger.linkFDBInterfaces = make(map[string]struct{})
+	}
+	trigger.linkFDBInterfaces[name] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addLinkFDBIndex(index int) {
+	if trigger == nil || index <= 0 {
+		return
+	}
+	if trigger.linkFDBIndexes == nil {
+		trigger.linkFDBIndexes = make(map[int]struct{})
+	}
+	trigger.linkFDBIndexes[index] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addBackendIP(value string) {
+	if trigger == nil {
+		return
+	}
+	ip := normalizeKernelTransientFallbackBackendIP(value)
+	if ip == "" {
+		return
+	}
+	if trigger.backendIPs == nil {
+		trigger.backendIPs = make(map[string]struct{})
+	}
+	trigger.backendIPs[ip] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) addBackendMAC(value string) {
+	if trigger == nil {
+		return
+	}
+	mac := normalizeKernelTransientFallbackBackendMAC(value)
+	if mac == "" {
+		return
+	}
+	if trigger.backendMACs == nil {
+		trigger.backendMACs = make(map[string]struct{})
+	}
+	trigger.backendMACs[mac] = struct{}{}
+}
+
+func (trigger *kernelNetlinkRecoveryTrigger) merge(other kernelNetlinkRecoveryTrigger) {
+	if trigger == nil {
+		return
+	}
+	for name := range other.interfaceNames {
+		trigger.addInterfaceName(name)
+	}
+	for index := range other.linkIndexes {
+		trigger.addLinkIndex(index)
+	}
+	for name := range other.linkNeighborInterfaces {
+		trigger.addLinkNeighborInterface(name)
+	}
+	for index := range other.linkNeighborIndexes {
+		trigger.addLinkNeighborIndex(index)
+	}
+	for name := range other.linkFDBInterfaces {
+		trigger.addLinkFDBInterface(name)
+	}
+	for index := range other.linkFDBIndexes {
+		trigger.addLinkFDBIndex(index)
+	}
+	for ip := range other.backendIPs {
+		trigger.addBackendIP(ip)
+	}
+	for mac := range other.backendMACs {
+		trigger.addBackendMAC(mac)
+	}
+	for source := range other.sources {
+		trigger.addSource(source)
+	}
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) clone() kernelNetlinkRecoveryTrigger {
+	var out kernelNetlinkRecoveryTrigger
+	out.merge(trigger)
+	return out
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) hasSource(source string) bool {
+	if len(trigger.sources) == 0 {
+		return false
+	}
+	_, ok := trigger.sources[strings.TrimSpace(source)]
+	return ok
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) hasInterfaceHints() bool {
+	return len(trigger.interfaceNames) > 0 || len(trigger.linkIndexes) > 0
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) matchesOutInterface(name string) bool {
+	if !trigger.hasInterfaceHints() {
+		return true
+	}
+	name = normalizeKernelTransientFallbackInterface(name)
+	if name == "" {
+		return true
+	}
+	_, ok := trigger.interfaceNames[name]
+	return ok
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) hasLinkNeighborHints() bool {
+	return len(trigger.linkNeighborInterfaces) > 0 || len(trigger.linkNeighborIndexes) > 0
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) matchesLinkNeighborInterface(name string) bool {
+	if !trigger.hasLinkNeighborHints() {
+		return trigger.matchesOutInterface(name)
+	}
+	name = normalizeKernelTransientFallbackInterface(name)
+	if name == "" {
+		return true
+	}
+	_, ok := trigger.linkNeighborInterfaces[name]
+	return ok
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) hasLinkFDBHints() bool {
+	return len(trigger.linkFDBInterfaces) > 0 || len(trigger.linkFDBIndexes) > 0
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) matchesLinkFDBInterface(name string) bool {
+	if !trigger.hasLinkFDBHints() {
+		return trigger.matchesOutInterface(name)
+	}
+	name = normalizeKernelTransientFallbackInterface(name)
+	if name == "" {
+		return true
+	}
+	_, ok := trigger.linkFDBInterfaces[name]
+	return ok
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) matchesBackendIP(ip string) bool {
+	if len(trigger.backendIPs) == 0 {
+		return true
+	}
+	ip = normalizeKernelTransientFallbackBackendIP(ip)
+	if ip == "" {
+		return true
+	}
+	_, ok := trigger.backendIPs[ip]
+	return ok
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) hasBackendMACHints() bool {
+	return len(trigger.backendMACs) > 0
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) matchesBackendMAC(mac string) bool {
+	if len(trigger.backendMACs) == 0 {
+		return true
+	}
+	mac = normalizeKernelTransientFallbackBackendMAC(mac)
+	if mac == "" {
+		return false
+	}
+	_, ok := trigger.backendMACs[mac]
+	return ok
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) matchesPlan(plan ruleDataplanePlan) bool {
+	if !isNetlinkTriggeredKernelFallbackPlan(plan) {
+		return false
+	}
+	reasonClass := strings.TrimSpace(plan.TransientFallback.ReasonClass)
+	if reasonClass == "" {
+		reasonClass = normalizeTransientKernelFallbackReason(plan.FallbackReason)
+	}
+	if trigger.hasSource("netlink") {
+		return true
+	}
+	if trigger.hasSource("link") && reasonClass == "neighbor_missing" {
+		return trigger.matchesLinkNeighborInterface(plan.TransientFallback.OutInterface)
+	}
+	if trigger.hasSource("link") && reasonClass == "fdb_missing" {
+		return trigger.matchesLinkFDBInterface(plan.TransientFallback.OutInterface)
+	}
+	if trigger.hasSource("neighbor") && reasonClass == "neighbor_missing" {
+		return trigger.matchesOutInterface(plan.TransientFallback.OutInterface) &&
+			trigger.matchesBackendIP(plan.TransientFallback.BackendIP)
+	}
+	if trigger.hasSource("fdb") && reasonClass == "fdb_missing" {
+		return trigger.matchesOutInterface(plan.TransientFallback.OutInterface) &&
+			trigger.matchesBackendMAC(plan.TransientFallback.BackendMAC)
+	}
+	return len(trigger.sources) == 0
+}
+
+func kernelNetlinkLinkSnapshotChanged(prev kernelNetlinkLinkSnapshot, next kernelNetlinkLinkSnapshot) bool {
+	return prev.Name != next.Name ||
+		prev.LinkType != next.LinkType ||
+		prev.MasterIndex != next.MasterIndex ||
+		prev.AdminUp != next.AdminUp ||
+		prev.LowerUp != next.LowerUp ||
+		prev.OperState != next.OperState
+}
+
+func applyKernelNetlinkLinkStateUpdate(states map[int]kernelNetlinkLinkSnapshot, index int, snapshot kernelNetlinkLinkSnapshot, deleted bool) bool {
+	if index <= 0 {
+		return true
+	}
+	if states == nil {
+		return true
+	}
+	prev, hadPrev := states[index]
+	if deleted {
+		delete(states, index)
+		return true
+	}
+	states[index] = snapshot
+	if !hadPrev {
+		return true
+	}
+	return kernelNetlinkLinkSnapshotChanged(prev, snapshot)
+}
+
+func isNetlinkTriggeredKernelFallbackReason(reason string) bool {
+	switch normalizeTransientKernelFallbackReason(reason) {
+	case "neighbor_missing", "fdb_missing":
+		return true
+	default:
+		return false
+	}
+}
+
+func (pm *ProcessManager) summarizeNetlinkTriggeredKernelFallbacksLocked() string {
+	ruleCount := 0
+	rangeCount := 0
+	reasonCounts := make(map[string]int)
+
+	for _, plan := range pm.rulePlans {
+		if plan.EffectiveEngine == ruleEngineKernel || !plan.KernelEligible {
+			continue
+		}
+		if !isNetlinkTriggeredKernelFallbackReason(plan.FallbackReason) {
+			continue
+		}
+		ruleCount++
+		reasonCounts[normalizeTransientKernelFallbackReason(plan.FallbackReason)]++
+	}
+	for _, plan := range pm.rangePlans {
+		if plan.EffectiveEngine == ruleEngineKernel || !plan.KernelEligible {
+			continue
+		}
+		if !isNetlinkTriggeredKernelFallbackReason(plan.FallbackReason) {
+			continue
+		}
+		rangeCount++
+		reasonCounts[normalizeTransientKernelFallbackReason(plan.FallbackReason)]++
+	}
+	if ruleCount == 0 && rangeCount == 0 {
+		return ""
+	}
+
+	reasons := make([]string, 0, len(reasonCounts))
+	for reason, count := range reasonCounts {
+		reasons = append(reasons, fmt.Sprintf("%s=%d", reason, count))
+	}
+	sort.Strings(reasons)
+	return fmt.Sprintf("rules=%d ranges=%d reasons=%s", ruleCount, rangeCount, strings.Join(reasons, ","))
+}
+
+func nextKernelNetlinkRetryState(lastRetryAt time.Time, now time.Time, summary string) (bool, time.Time) {
+	if strings.TrimSpace(summary) == "" {
+		return false, lastRetryAt
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if lastRetryAt.IsZero() || now.Sub(lastRetryAt) >= kernelNetlinkRetryDebounce {
+		return true, now
+	}
+	return false, lastRetryAt
+}
+
+func mergeKernelNetlinkRecoverySources(existing string, next string) string {
+	existing = strings.TrimSpace(existing)
+	next = strings.TrimSpace(next)
+	if existing == "" {
+		return next
+	}
+	if next == "" || existing == next {
+		return existing
+	}
+	for _, part := range strings.Split(existing, ",") {
+		if strings.TrimSpace(part) == next {
+			return existing
+		}
+	}
+	return existing + "," + next
+}
+
+func summarizeKernelNetlinkRecoveryStringHints(label string, values map[string]struct{}) string {
+	if len(values) == 0 {
+		return ""
+	}
+	items := make([]string, 0, len(values))
+	for value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		items = append(items, value)
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	sort.Strings(items)
+	if len(items) > 3 {
+		items = append(items[:3], fmt.Sprintf("+%d", len(items)-3))
+	}
+	return fmt.Sprintf("%s=%s", label, strings.Join(items, ","))
+}
+
+func summarizeKernelNetlinkRecoveryIndexHints(label string, values map[int]struct{}) string {
+	if len(values) == 0 {
+		return ""
+	}
+	items := make([]int, 0, len(values))
+	for value := range values {
+		if value <= 0 {
+			continue
+		}
+		items = append(items, value)
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	sort.Ints(items)
+	labels := make([]string, 0, min(len(items), 4))
+	limit := len(items)
+	if limit > 3 {
+		limit = 3
+	}
+	for _, value := range items[:limit] {
+		labels = append(labels, fmt.Sprintf("%d", value))
+	}
+	if len(items) > limit {
+		labels = append(labels, fmt.Sprintf("+%d", len(items)-limit))
+	}
+	return fmt.Sprintf("%s=%s", label, strings.Join(labels, ","))
+}
+
+func summarizeKernelNetlinkRecoveryTrigger(trigger kernelNetlinkRecoveryTrigger) string {
+	parts := make([]string, 0, 8)
+	for _, part := range []string{
+		summarizeKernelNetlinkRecoveryStringHints("if", trigger.interfaceNames),
+		summarizeKernelNetlinkRecoveryIndexHints("ifindex", trigger.linkIndexes),
+		summarizeKernelNetlinkRecoveryStringHints("neigh_if", trigger.linkNeighborInterfaces),
+		summarizeKernelNetlinkRecoveryIndexHints("neigh_ifindex", trigger.linkNeighborIndexes),
+		summarizeKernelNetlinkRecoveryStringHints("fdb_if", trigger.linkFDBInterfaces),
+		summarizeKernelNetlinkRecoveryIndexHints("fdb_ifindex", trigger.linkFDBIndexes),
+		summarizeKernelNetlinkRecoveryStringHints("backend_ip", trigger.backendIPs),
+		summarizeKernelNetlinkRecoveryStringHints("backend_mac", trigger.backendMACs),
+	} {
+		if part == "" {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (pm *ProcessManager) queueKernelNetlinkRecoveryLocked(source string, summary string, trigger kernelNetlinkRecoveryTrigger, requestedAt time.Time) chan struct{} {
+	if pm == nil || pm.kernelNetlinkRecoverWake == nil {
+		return nil
+	}
+	pm.kernelNetlinkRecoverPending = true
+	pm.kernelNetlinkRecoverSource = mergeKernelNetlinkRecoverySources(pm.kernelNetlinkRecoverSource, source)
+	pm.kernelNetlinkRecoverTrigger.merge(trigger)
+	if trimmedSummary := strings.TrimSpace(summary); trimmedSummary != "" {
+		pm.kernelNetlinkRecoverSummary = trimmedSummary
+	}
+	if pm.kernelNetlinkRecoverRequestedAt.IsZero() || (!requestedAt.IsZero() && requestedAt.Before(pm.kernelNetlinkRecoverRequestedAt)) {
+		pm.kernelNetlinkRecoverRequestedAt = requestedAt
+	}
+	return pm.kernelNetlinkRecoverWake
+}
+
+func (pm *ProcessManager) takePendingKernelNetlinkRecovery() (source string, summary string, trigger kernelNetlinkRecoveryTrigger, requestedAt time.Time, ok bool) {
+	if pm == nil {
+		return "", "", kernelNetlinkRecoveryTrigger{}, time.Time{}, false
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if !pm.kernelNetlinkRecoverPending {
+		return "", "", kernelNetlinkRecoveryTrigger{}, time.Time{}, false
+	}
+	source = strings.TrimSpace(pm.kernelNetlinkRecoverSource)
+	summary = strings.TrimSpace(pm.kernelNetlinkRecoverSummary)
+	trigger = pm.kernelNetlinkRecoverTrigger.clone()
+	requestedAt = pm.kernelNetlinkRecoverRequestedAt
+	pm.kernelNetlinkRecoverPending = false
+	pm.kernelNetlinkRecoverSource = ""
+	pm.kernelNetlinkRecoverSummary = ""
+	pm.kernelNetlinkRecoverTrigger = kernelNetlinkRecoveryTrigger{}
+	pm.kernelNetlinkRecoverRequestedAt = time.Time{}
+	return source, summary, trigger, requestedAt, true
+}
+
+func (pm *ProcessManager) runKernelNetlinkRecoveryLoop(stop <-chan struct{}, wake <-chan struct{}) {
+	if pm == nil || wake == nil {
+		return
+	}
+	for {
+		select {
+		case <-stop:
+			return
+		case _, ok := <-wake:
+			if !ok {
+				return
+			}
+		}
+
+		for {
+			source, summary, trigger, requestedAt, ok := pm.takePendingKernelNetlinkRecovery()
+			if !ok {
+				break
+			}
+			pm.runKernelNetlinkRecovery(source, summary, trigger, requestedAt)
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+	}
+}
+
+func (pm *ProcessManager) runKernelNetlinkRecovery(source string, summary string, trigger kernelNetlinkRecoveryTrigger, requestedAt time.Time) {
+	if pm == nil {
+		return
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "netlink"
+	}
+	summary = strings.TrimSpace(summary)
+
+	result := pm.retryNetlinkTriggeredKernelFallbackOwnersForTrigger(trigger)
+	pm.observeKernelIncrementalRetry(requestedAt, result)
+
+	summarySuffix := ""
+	if summary != "" {
+		summarySuffix = fmt.Sprintf(" (%s)", summary)
+	}
+	if result.handled {
+		if result.detail != "" && shouldLogKernelNetlinkRecoveryResult(result) {
+			log.Printf("kernel dataplane retry: %s change observed, %s%s", source, result.detail, summarySuffix)
+		}
+		return
+	}
+	if result.detail != "" {
+		log.Printf("kernel dataplane retry: %s change observed, incremental recovery unavailable: %s; falling back to full re-evaluation%s", source, result.detail, summarySuffix)
+	} else {
+		log.Printf("kernel dataplane retry: %s change observed, incremental recovery unavailable; falling back to full re-evaluation%s", source, summarySuffix)
+	}
+	pm.requestRedistributeWorkers(0)
+}
+
+func shouldLogKernelNetlinkRecoveryResult(result kernelIncrementalRetryResult) bool {
+	if !result.handled {
+		return true
+	}
+	if result.backoffRuleOwners > 0 || result.backoffRangeOwners > 0 {
+		return true
+	}
+	if result.cooldownRuleOwners > 0 || result.cooldownRangeOwners > 0 {
+		return true
+	}
+	return result.recoveredRuleOwners == 0 && result.recoveredRangeOwners == 0
+}
+
+func (pm *ProcessManager) handleKernelNetlinkRecoveryEvent(source string) {
+	pm.handleKernelNetlinkRecoveryTrigger(newKernelNetlinkRecoveryTrigger(source))
+}
+
+func (pm *ProcessManager) handleKernelNetlinkRecoveryTrigger(trigger kernelNetlinkRecoveryTrigger) {
+	if pm == nil {
+		return
+	}
+
+	now := time.Now()
+	summary := ""
+	shouldRetry := false
+	var wake chan struct{}
+	source := triggerSourceLabel(trigger)
+
+	pm.mu.Lock()
+	pm.kernelAttachmentCheckAt = time.Time{}
+	if pm.kernelRuntime != nil {
+		summary = pm.summarizeNetlinkTriggeredKernelFallbacksLocked()
+		shouldRetry, pm.kernelNetlinkRetryAt = nextKernelNetlinkRetryState(pm.kernelNetlinkRetryAt, now, summary)
+		if shouldRetry {
+			pm.kernelRetryAt = now
+			pm.kernelRetryCount++
+			pm.lastKernelRetryAt = now
+			pm.lastKernelRetryReason = summary
+			wake = pm.queueKernelNetlinkRecoveryLocked(source, summary, trigger, now)
+		}
+	}
+	pm.mu.Unlock()
+
+	if shouldRetry {
+		if wake != nil {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+			return
+		}
+		pm.runKernelNetlinkRecovery(source, summary, trigger, now)
+	}
+}
+
+func triggerSourceLabel(trigger kernelNetlinkRecoveryTrigger) string {
+	if len(trigger.sources) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(trigger.sources))
+	for source := range trigger.sources {
+		parts = append(parts, source)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+func (pm *ProcessManager) observeKernelIncrementalRetry(now time.Time, result kernelIncrementalRetryResult) {
+	if pm == nil || !result.attempted {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	pm.mu.Lock()
+	pm.kernelIncrementalRetryCount++
+	pm.lastKernelIncrementalRetryAt = now
+	pm.lastKernelIncrementalRetryResult = result.detail
+	pm.lastKernelIncrementalRetryMatchedRuleOwners = result.matchedRuleOwners
+	pm.lastKernelIncrementalRetryMatchedRangeOwners = result.matchedRangeOwners
+	pm.lastKernelIncrementalRetryAttemptedRuleOwners = result.attemptedRuleOwners
+	pm.lastKernelIncrementalRetryAttemptedRangeOwners = result.attemptedRangeOwners
+	pm.lastKernelIncrementalRetryRetainedRuleOwners = result.retainedRuleOwners
+	pm.lastKernelIncrementalRetryRetainedRangeOwners = result.retainedRangeOwners
+	pm.lastKernelIncrementalRetryRecoveredRuleOwners = result.recoveredRuleOwners
+	pm.lastKernelIncrementalRetryRecoveredRangeOwners = result.recoveredRangeOwners
+	pm.lastKernelIncrementalRetryCooldownRuleOwners = result.cooldownRuleOwners
+	pm.lastKernelIncrementalRetryCooldownRangeOwners = result.cooldownRangeOwners
+	pm.lastKernelIncrementalRetryCooldownSummary = result.cooldownSummary
+	pm.lastKernelIncrementalRetryCooldownScope = result.cooldownScope
+	pm.lastKernelIncrementalRetryBackoffRuleOwners = result.backoffRuleOwners
+	pm.lastKernelIncrementalRetryBackoffRangeOwners = result.backoffRangeOwners
+	pm.lastKernelIncrementalRetryBackoffSummary = result.backoffSummary
+	pm.lastKernelIncrementalRetryBackoffScope = result.backoffScope
+	pm.lastKernelIncrementalRetryBackoffMaxFailures = result.backoffMaxFailures
+	pm.lastKernelIncrementalRetryBackoffMaxDelay = result.backoffMaxDuration
+	if !result.handled {
+		pm.kernelIncrementalRetryFallbackCount++
+	}
+	pm.mu.Unlock()
+}
