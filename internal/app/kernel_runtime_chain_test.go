@@ -50,6 +50,28 @@ func (m *mockKernelRuntime) Close() error {
 	return nil
 }
 
+func assertReconcileCallPrefix(t *testing.T, got [][]Rule, want ...[]int64) {
+	t.Helper()
+	if len(got) < len(want) {
+		t.Fatalf("reconcile calls = %#v, want at least %d call(s)", got, len(want))
+	}
+	for i, wantIDs := range want {
+		if len(got[i]) != len(wantIDs) {
+			t.Fatalf("reconcile calls[%d] = %#v, want %d rule(s)", i, got[i], len(wantIDs))
+		}
+		for j, wantID := range wantIDs {
+			if got[i][j].ID != wantID {
+				t.Fatalf("reconcile calls[%d][%d] = %+v, want rule %d", i, j, got[i][j], wantID)
+			}
+		}
+	}
+	for i := len(want); i < len(got); i++ {
+		if len(got[i]) != 0 {
+			t.Fatalf("reconcile calls[%d] = %#v, want only optional empty cleanup calls after primary requests", i, got[i])
+		}
+	}
+}
+
 func TestOrderedKernelRuleRuntimeFallsBackToTC(t *testing.T) {
 	xdp := &mockKernelRuntime{
 		available: true,
@@ -82,12 +104,8 @@ func TestOrderedKernelRuleRuntimeFallsBackToTC(t *testing.T) {
 	if !result.Running || result.Engine != kernelEngineTC {
 		t.Fatalf("result = %+v, want running tc", result)
 	}
-	if len(xdp.reconcileCalls) != 1 || len(xdp.reconcileCalls[0]) != 1 {
-		t.Fatalf("xdp reconcile calls = %#v, want one call with one rule", xdp.reconcileCalls)
-	}
-	if len(tc.reconcileCalls) != 1 || len(tc.reconcileCalls[0]) != 1 {
-		t.Fatalf("tc reconcile calls = %#v, want one call with one rule", tc.reconcileCalls)
-	}
+	assertReconcileCallPrefix(t, xdp.reconcileCalls, []int64{1})
+	assertReconcileCallPrefix(t, tc.reconcileCalls, []int64{1})
 }
 
 func TestOrderedKernelRuleRuntimeSelectsTCWhenXDPUnavailable(t *testing.T) {
@@ -151,15 +169,8 @@ func TestOrderedKernelRuleRuntimeReconcileRetainingAssignmentsKeepsPinnedOwnersO
 	if err != nil {
 		t.Fatalf("ReconcileRetainingAssignments() error = %v", err)
 	}
-	if len(xdp.reconcileCalls) != 1 || len(xdp.reconcileCalls[0]) != 1 || xdp.reconcileCalls[0][0].ID != 2 {
-		t.Fatalf("xdp reconcile calls = %#v, want only retry rule 2", xdp.reconcileCalls)
-	}
-	if len(tc.reconcileCalls) != 1 || len(tc.reconcileCalls[0]) != 2 {
-		t.Fatalf("tc reconcile calls = %#v, want one call with retained rule 1 and retry rule 2", tc.reconcileCalls)
-	}
-	if tc.reconcileCalls[0][0].ID != 1 || tc.reconcileCalls[0][1].ID != 2 {
-		t.Fatalf("tc reconcile call = %#v, want retained rule 1 before retry rule 2", tc.reconcileCalls[0])
-	}
+	assertReconcileCallPrefix(t, xdp.reconcileCalls, []int64{2})
+	assertReconcileCallPrefix(t, tc.reconcileCalls, []int64{1, 2})
 	result, ok := results[2]
 	if !ok || !result.Running || result.Engine != kernelEngineTC {
 		t.Fatalf("retry rule result = %+v, want running tc", result)
