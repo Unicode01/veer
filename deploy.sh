@@ -4,6 +4,7 @@
 #
 # 用法: 将 forward-linux-<arch> 与本脚本放在同一目录，然后:
 #   chmod +x deploy.sh && sudo ./deploy.sh
+#   chmod +x deploy.sh && sudo ./deploy.sh --no-inherit-stats
 #
 # 脚本会自动匹配当前系统架构查找二进制文件:
 #   x86_64  => forward-linux-amd64
@@ -27,6 +28,35 @@ ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 
+usage() {
+    cat <<'EOF'
+用法:
+  sudo ./deploy.sh [--no-inherit-stats]
+
+可选参数:
+  --no-inherit-stats   热更新时不继承内核 stats_v4 统计表，流量统计从 0 重新累计，
+                       但 flow / nat 等其它热更新状态仍尽量继承
+  -h, --help           显示帮助
+EOF
+}
+
+SKIP_HOT_RESTART_STATS=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-inherit-stats)
+            SKIP_HOT_RESTART_STATS=1
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            fail "未知参数: $1（可用: --no-inherit-stats）"
+            ;;
+    esac
+    shift
+done
+
 if [[ $EUID -ne 0 ]]; then
     fail "请使用 root 权限运行: sudo $0"
 fi
@@ -40,6 +70,7 @@ WEB_TOKEN="${WEB_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' 
 BPF_STATE_DIR="${FORWARD_BPF_STATE_DIR:-/sys/fs/bpf/forward}"
 RUNTIME_STATE_DIR="${FORWARD_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}"
 HOT_RESTART_MARKER="${INSTALL_DIR}/.hot-restart-kernel"
+HOT_RESTART_SKIP_STATS_MARKER="${HOT_RESTART_MARKER}.skip-stats"
 PRESERVE_HOT_RESTART_MARKER=0
 
 cleanup_hot_restart_marker() {
@@ -48,6 +79,9 @@ cleanup_hot_restart_marker() {
     fi
     if [[ -n "${HOT_RESTART_MARKER:-}" ]]; then
         rm -f "${HOT_RESTART_MARKER}"
+    fi
+    if [[ -n "${HOT_RESTART_SKIP_STATS_MARKER:-}" ]]; then
+        rm -f "${HOT_RESTART_SKIP_STATS_MARKER}"
     fi
 }
 
@@ -168,8 +202,15 @@ systemctl enable "$SERVICE_NAME"
 
 if $IS_UPDATE; then
     : > "$HOT_RESTART_MARKER"
+    if [[ "${SKIP_HOT_RESTART_STATS}" == "1" ]]; then
+        : > "$HOT_RESTART_SKIP_STATS_MARKER"
+        info "本次热更新将跳过继承内核 stats_v4 统计表，流量统计会重新累计"
+    else
+        rm -f "$HOT_RESTART_SKIP_STATS_MARKER"
+    fi
     if systemctl restart "$SERVICE_NAME"; then
         rm -f "$HOT_RESTART_MARKER"
+        rm -f "$HOT_RESTART_SKIP_STATS_MARKER"
         ok "服务已热重启（worker 自动重连，kernel flow/NAT 表尝试跨进程接力）"
     else
         PRESERVE_HOT_RESTART_MARKER=1
@@ -177,6 +218,7 @@ if $IS_UPDATE; then
         exit 1
     fi
 else
+    rm -f "$HOT_RESTART_SKIP_STATS_MARKER"
     systemctl start "$SERVICE_NAME"
 fi
 

@@ -580,10 +580,15 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 	if rt.coll == nil || rt.coll.Maps == nil || len(rt.attachments) == 0 {
 		return false
 	}
-	if err := pinKernelHotRestartMaps(kernelEngineXDP, map[string]*ebpf.Map{
+	maps := map[string]*ebpf.Map{
 		kernelFlowsMapName: rt.coll.Maps[kernelFlowsMapName],
-		kernelStatsMapName: rt.coll.Maps[kernelStatsMapName],
-	}); err != nil {
+	}
+	if kernelHotRestartSkipStatsRequested() {
+		log.Printf("xdp dataplane hot restart: preserving flow map without %s as requested", kernelStatsMapName)
+	} else {
+		maps[kernelStatsMapName] = rt.coll.Maps[kernelStatsMapName]
+	}
+	if err := pinKernelHotRestartMaps(kernelEngineXDP, maps); err != nil {
 		log.Printf("xdp dataplane hot restart: preserve xdp maps failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
 		return true

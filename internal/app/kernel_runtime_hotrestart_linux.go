@@ -5,6 +5,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +22,7 @@ const (
 	forwardBPFStateDirEnv      = "FORWARD_BPF_STATE_DIR"
 	forwardRuntimeStateDirEnv  = "FORWARD_RUNTIME_STATE_DIR"
 	defaultForwardBPFStateDir  = "/sys/fs/bpf/forward"
+	hotRestartSkipStatsSuffix  = ".skip-stats"
 )
 
 type kernelHotRestartMapState struct {
@@ -88,6 +90,23 @@ func kernelHotRestartMarkerPath() string {
 
 func kernelHotRestartRequested() bool {
 	path := kernelHotRestartMarkerPath()
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func kernelHotRestartSkipStatsMarkerPath() string {
+	path := kernelHotRestartMarkerPath()
+	if path == "" {
+		return ""
+	}
+	return path + hotRestartSkipStatsSuffix
+}
+
+func kernelHotRestartSkipStatsRequested() bool {
+	path := kernelHotRestartSkipStatsMarkerPath()
 	if path == "" {
 		return false
 	}
@@ -407,6 +426,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 	loadedAny := false
 	haveFlows := false
 	haveNAT := false
+	skipStats := kernelHotRestartSkipStatsRequested()
 
 	flowsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelFlowsMapName))
 	if err != nil {
@@ -432,32 +452,43 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 		state.actualCapacities.NATPorts = int(natMap.MaxEntries())
 	}
 
-	statsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelStatsMapName))
-	if err != nil {
-		state.close()
-		return nil, fmt.Errorf("load pinned tc stats map: %w", err)
-	}
-	if ok {
-		loadedAny = true
-		if kernelMapReusableWithCapacity(statsMap, desired.Rules) {
-			state.replacements[kernelStatsMapName] = statsMap
-		} else {
-			state.oldStatsMap = statsMap
+	if !skipStats {
+		statsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelStatsMapName))
+		if err != nil {
+			state.close()
+			return nil, fmt.Errorf("load pinned tc stats map: %w", err)
 		}
+		if ok {
+			loadedAny = true
+			if kernelMapReusableWithCapacity(statsMap, desired.Rules) {
+				state.replacements[kernelStatsMapName] = statsMap
+			} else {
+				state.oldStatsMap = statsMap
+			}
+		}
+	} else if _, err := os.Stat(kernelHotRestartPinPath(kernelEngineTC, kernelStatsMapName)); err == nil {
+		loadedAny = true
+	} else if !os.IsNotExist(err) {
+		state.close()
+		return nil, fmt.Errorf("stat pinned tc stats map: %w", err)
 	}
 
 	if !loadedAny {
 		state.close()
 		return nil, nil
 	}
-	if !haveFlows || !haveNAT || state.oldStatsMap == nil && state.replacements[kernelStatsMapName] == nil {
+	haveStats := skipStats || state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil
+	if !haveFlows || !haveNAT || !haveStats {
 		state.close()
 		return nil, fmt.Errorf(
 			"incomplete pinned tc state: flows=%t nat=%t stats=%t",
 			haveFlows,
 			haveNAT,
-			state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil,
+			haveStats,
 		)
+	}
+	if skipStats {
+		log.Printf("kernel dataplane hot restart: skipping preserved %s map for tc; counters will rebuild from live flow state", kernelStatsMapName)
 	}
 	return state, nil
 }
@@ -469,6 +500,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestar
 	}
 	loadedAny := false
 	haveFlows := false
+	skipStats := kernelHotRestartSkipStatsRequested()
 
 	flowsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelFlowsMapName))
 	if err != nil {
@@ -482,31 +514,42 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestar
 		state.actualCapacities.Flows = int(flowsMap.MaxEntries())
 	}
 
-	statsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelStatsMapName))
-	if err != nil {
-		state.close()
-		return nil, fmt.Errorf("load pinned xdp stats map: %w", err)
-	}
-	if ok {
-		loadedAny = true
-		if kernelMapReusableWithCapacity(statsMap, desired.Rules) {
-			state.replacements[kernelStatsMapName] = statsMap
-		} else {
-			state.oldStatsMap = statsMap
+	if !skipStats {
+		statsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelStatsMapName))
+		if err != nil {
+			state.close()
+			return nil, fmt.Errorf("load pinned xdp stats map: %w", err)
 		}
+		if ok {
+			loadedAny = true
+			if kernelMapReusableWithCapacity(statsMap, desired.Rules) {
+				state.replacements[kernelStatsMapName] = statsMap
+			} else {
+				state.oldStatsMap = statsMap
+			}
+		}
+	} else if _, err := os.Stat(kernelHotRestartPinPath(kernelEngineXDP, kernelStatsMapName)); err == nil {
+		loadedAny = true
+	} else if !os.IsNotExist(err) {
+		state.close()
+		return nil, fmt.Errorf("stat pinned xdp stats map: %w", err)
 	}
 
 	if !loadedAny {
 		state.close()
 		return nil, nil
 	}
-	if !haveFlows || state.oldStatsMap == nil && state.replacements[kernelStatsMapName] == nil {
+	haveStats := skipStats || state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil
+	if !haveFlows || !haveStats {
 		state.close()
 		return nil, fmt.Errorf(
 			"incomplete pinned xdp state: flows=%t stats=%t",
 			haveFlows,
-			state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil,
+			haveStats,
 		)
+	}
+	if skipStats {
+		log.Printf("xdp dataplane hot restart: skipping preserved %s map; counters will rebuild from live flow state", kernelStatsMapName)
 	}
 	return state, nil
 }

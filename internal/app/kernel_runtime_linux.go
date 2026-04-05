@@ -951,11 +951,16 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	if rt.coll == nil || rt.coll.Maps == nil || len(rt.attachments) == 0 {
 		return false
 	}
-	if err := pinKernelHotRestartMaps(kernelEngineTC, map[string]*ebpf.Map{
+	maps := map[string]*ebpf.Map{
 		kernelFlowsMapName:    rt.coll.Maps[kernelFlowsMapName],
 		kernelNatPortsMapName: rt.coll.Maps[kernelNatPortsMapName],
-		kernelStatsMapName:    rt.coll.Maps[kernelStatsMapName],
-	}); err != nil {
+	}
+	if kernelHotRestartSkipStatsRequested() {
+		log.Printf("kernel dataplane hot restart: preserving tc flow/nat maps without %s as requested", kernelStatsMapName)
+	} else {
+		maps[kernelStatsMapName] = rt.coll.Maps[kernelStatsMapName]
+	}
+	if err := pinKernelHotRestartMaps(kernelEngineTC, maps); err != nil {
 		log.Printf("kernel dataplane hot restart: preserve tc maps failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
 		return true
