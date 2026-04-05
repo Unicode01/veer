@@ -75,11 +75,11 @@
                         </div>
                         <div>
                             <span class="forward-selection__label">规则预览</span>
-                            <code class="forward-selection__route" id="forwardRulePreview">{$server_ip|escape:'html'}:入口端口 -> 目标IP:目标端口</code>
+                            <code class="forward-selection__route" id="forwardRulePreview">{$server_ip_endpoint|escape:'html'}:入口端口 -> 目标IP:目标端口</code>
                         </div>
                         <div>
                             <span class="forward-selection__label">站点预览</span>
-                            <code class="forward-selection__route" id="forwardSitePreview">{$server_ip|escape:'html'}:80/443 -> 目标IP</code>
+                            <code class="forward-selection__route" id="forwardSitePreview">{$server_ip_endpoint|escape:'html'}:80/443 -> 目标IP</code>
                         </div>
                         <div class="forward-actionbar" style="margin-top:0;">
                             <button type="button" class="btn btn-default btn-xs forward-copy-btn" data-copy-target="#forwardRulePreview">复制规则预览</button>
@@ -162,7 +162,7 @@
                                             {/if}
                                         </td>
                                         <td>
-                                            <div class="forward-code">{$rule.out_ip|escape:'html'}:{$rule.out_port|escape:'html'}</div>
+                                            <div class="forward-code">{$rule.out_endpoint|escape:'html'}</div>
                                             <div class="forward-badges" style="margin-top:8px;">
                                                 <span class="forward-badge forward-badge--protocol">{$rule.protocol|upper|escape:'html'}</span>
                                             </div>
@@ -178,8 +178,8 @@
                                         </td>
                                         <td>
                                             <div class="forward-entry">
-                                                <span class="forward-code">{$rule.in_ip|escape:'html'}:{$rule.in_port|escape:'html'}</span>
-                                                <button type="button" class="btn btn-xs btn-default forward-copy-btn" data-copy="{$rule.in_ip|escape:'html'}:{$rule.in_port|escape:'html'}">复制</button>
+                                                <span class="forward-code">{$rule.in_endpoint|escape:'html'}</span>
+                                                <button type="button" class="btn btn-xs btn-default forward-copy-btn" data-copy="{$rule.in_endpoint|escape:'html'}">复制</button>
                                             </div>
                                         </td>
                                         <td>
@@ -265,8 +265,8 @@
                                         </td>
                                         <td>
                                             <div class="forward-entry">
-                                                <span class="forward-code">{$site.listen_ip|escape:'html'}:80/443</span>
-                                                <button type="button" class="btn btn-xs btn-default forward-copy-btn" data-copy="{$site.listen_ip|escape:'html'}:80/443">复制</button>
+                                                <span class="forward-code">{$site.listen_endpoint|escape:'html'}</span>
+                                                <button type="button" class="btn btn-xs btn-default forward-copy-btn" data-copy="{$site.listen_endpoint|escape:'html'}">复制</button>
                                             </div>
                                         </td>
                                         <td>
@@ -623,6 +623,20 @@
         return ips.length ? ips.join(', ') : '未配置';
     }
 
+    function formatEndpointIP(ip) {
+        var value = $.trim(String(ip || ''));
+        if (!value) {
+            return '';
+        }
+        return value.indexOf(':') !== -1 ? ('[' + value + ']') : value;
+    }
+
+    function formatEndpoint(ip, suffix) {
+        var endpoint = formatEndpointIP(ip);
+        var normalizedSuffix = $.trim(String(suffix || ''));
+        return normalizedSuffix ? (endpoint + ':' + normalizedSuffix) : endpoint;
+    }
+
     function normalizeServerId(value) {
         var parsed = parseInt(value, 10);
         return isNaN(parsed) ? 0 : parsed;
@@ -727,8 +741,8 @@
         var targetIp = $('#forward_rule_add_ip').val() || $('#forward_site_add_ip').val() || selectedService().val() || '目标IP';
         var ruleListenIp = $('#forward_rule_add_listen_ip').val() || serverIpText;
         var siteListenIp = $('#forward_site_add_listen_ip').val() || ruleListenIp;
-        $('#forwardRulePreview').text(ruleListenIp + ':入口端口 -> ' + targetIp + ':目标端口');
-        $('#forwardSitePreview').text(siteListenIp + ':80/443 -> ' + targetIp);
+        $('#forwardRulePreview').text(formatEndpoint(ruleListenIp, '入口端口') + ' -> ' + formatEndpoint(targetIp, '目标端口'));
+        $('#forwardSitePreview').text(formatEndpoint(siteListenIp, '80/443') + ' -> ' + targetIp);
     }
 
     function showNotice(type, message) {

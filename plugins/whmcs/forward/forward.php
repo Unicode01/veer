@@ -24,14 +24,14 @@ function forward_config()
                 'FriendlyName' => '默认入口 IP',
                 'Type' => 'text',
                 'Size' => '50',
-                'Description' => '全局默认入口 IP，支持多个 IPv4，用逗号/空格/换行分隔；未命中宿主机映射时使用',
+                'Description' => '全局默认入口 IP，支持多个 IP（IPv4/IPv6），用逗号/空格/换行分隔；未命中宿主机映射时使用',
                 'Default' => '0.0.0.0',
             ],
             'server_ip_server_map' => [
                 'FriendlyName' => '按宿主机映射入口 IP',
                 'Type' => 'textarea',
                 'Rows' => '5',
-                'Description' => "按 WHMCS serverID 指定入口 IP，每行一条，格式如 3=203.0.113.10,203.0.113.11；客户区会按所选服务所属宿主机限制可用入口 IP",
+                'Description' => "按 WHMCS serverID 指定入口 IP，每行一条，格式如 3=203.0.113.10,2001:db8::10；客户区会按所选服务所属宿主机限制可用入口 IP",
                 'Default' => '',
             ],
             'api_endpoint' => [
@@ -190,7 +190,7 @@ function forward_config()
                 'FriendlyName' => '客户区可选 IP 白名单',
                 'Type' => 'textarea',
                 'Rows' => '4',
-                'Description' => '多个 IPv4 用逗号/空格/换行分隔；留空则不限制（仍受产品 IP 约束）',
+                'Description' => '多个 IP（IPv4/IPv6）用逗号/空格/换行分隔；留空则不限制（仍受产品 IP 约束）',
                 'Default' => '',
             ],
         ],
@@ -514,8 +514,8 @@ function forward_collect_api_targets(array $settings, array $serverIds)
 
 function forward_infer_server_id_from_listen_ip(array $settings, $listenIp)
 {
-    $listenIp = trim((string) $listenIp);
-    if ($listenIp === '' || $listenIp === '0.0.0.0') {
+    $listenIp = forward_normalize_ip_literal($listenIp);
+    if ($listenIp === '' || forward_ip_is_wildcard($listenIp)) {
         return 0;
     }
 
@@ -750,7 +750,66 @@ function forward_protocol_conflicts($protocol)
 
 function forward_is_valid_ipv4($ip)
 {
-    return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false;
+    return forward_ip_family($ip) === 'ipv4';
+}
+
+function forward_normalize_ip_literal($ip)
+{
+    $value = trim((string) $ip);
+    if ($value === '') {
+        return '';
+    }
+
+    $packed = @inet_pton($value);
+    if ($packed === false) {
+        return '';
+    }
+
+    $normalized = @inet_ntop($packed);
+    return is_string($normalized) ? $normalized : '';
+}
+
+function forward_is_valid_ip($ip)
+{
+    return forward_normalize_ip_literal($ip) !== '';
+}
+
+function forward_ip_family($ip)
+{
+    $normalized = forward_normalize_ip_literal($ip);
+    if ($normalized === '') {
+        return '';
+    }
+
+    return filter_var($normalized, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false ? 'ipv4' : 'ipv6';
+}
+
+function forward_normalize_ip_list($value)
+{
+    $raw = preg_split('/[\s,]+/', (string) $value, -1, PREG_SPLIT_NO_EMPTY);
+    $ips = [];
+    foreach ($raw as $item) {
+        $normalized = forward_normalize_ip_literal($item);
+        if ($normalized !== '') {
+            $ips[$normalized] = $normalized;
+        }
+    }
+    return array_values($ips);
+}
+
+function forward_normalize_optional_ip($ip)
+{
+    $value = trim((string) $ip);
+    if ($value === '') {
+        return ['success' => true, 'value' => ''];
+    }
+
+    $normalized = forward_normalize_ip_literal($value);
+    if ($normalized === '') {
+        return ['success' => false, 'message' => '必须是有效的 IP 地址'];
+    }
+
+    return ['success' => true, 'value' => $normalized];
 }
 
 function forward_normalize_optional_ipv4($ip)
@@ -759,20 +818,62 @@ function forward_normalize_optional_ipv4($ip)
     if ($value === '') {
         return ['success' => true, 'value' => ''];
     }
-    if (!forward_is_valid_ipv4($value)) {
+
+    $normalized = forward_normalize_ip_literal($value);
+    if ($normalized === '' || forward_ip_family($normalized) !== 'ipv4') {
         return ['success' => false, 'message' => '必须是有效的 IPv4 地址'];
     }
-    return ['success' => true, 'value' => $value];
+
+    return ['success' => true, 'value' => $normalized];
+}
+
+function forward_ip_is_wildcard($ip)
+{
+    $normalized = forward_normalize_ip_literal($ip);
+    return $normalized === '0.0.0.0' || $normalized === '::';
+}
+
+function forward_ip_pair_is_pure_ipv4($leftIp, $rightIp)
+{
+    return forward_ip_family($leftIp) === 'ipv4' && forward_ip_family($rightIp) === 'ipv4';
+}
+
+function forward_find_matching_ip($value, array $allowedIps)
+{
+    $normalized = forward_normalize_ip_literal($value);
+    if ($normalized === '') {
+        return '';
+    }
+
+    foreach ($allowedIps as $ip) {
+        $candidate = forward_normalize_ip_literal($ip);
+        if ($candidate !== '' && $candidate === $normalized) {
+            return $candidate;
+        }
+    }
+
+    return '';
 }
 
 function forward_ips_conflict($leftIp, $rightIp)
 {
-    $left = trim((string) $leftIp);
-    $right = trim((string) $rightIp);
+    $left = forward_normalize_ip_literal($leftIp);
+    $right = forward_normalize_ip_literal($rightIp);
     if ($left === '' || $right === '') {
         return false;
     }
-    return $left === $right || $left === '0.0.0.0' || $right === '0.0.0.0';
+
+    if ($left === $right) {
+        return true;
+    }
+
+    $leftFamily = forward_ip_family($left);
+    $rightFamily = forward_ip_family($right);
+    if ($leftFamily === '' || $leftFamily !== $rightFamily) {
+        return false;
+    }
+
+    return forward_ip_is_wildcard($left) || forward_ip_is_wildcard($right);
 }
 
 function forward_parse_allowed_product_ids($value)
@@ -790,28 +891,12 @@ function forward_parse_allowed_product_ids($value)
 
 function forward_parse_allowed_client_ips($value)
 {
-    $raw = preg_split('/[\s,]+/', (string) $value, -1, PREG_SPLIT_NO_EMPTY);
-    $ips = [];
-    foreach ($raw as $item) {
-        $ip = trim((string) $item);
-        if (forward_is_valid_ipv4($ip)) {
-            $ips[] = $ip;
-        }
-    }
-    return array_values(array_unique($ips));
+    return forward_normalize_ip_list($value);
 }
 
 function forward_parse_server_ips($value)
 {
-    $raw = preg_split('/[\s,]+/', (string) $value, -1, PREG_SPLIT_NO_EMPTY);
-    $ips = [];
-    foreach ($raw as $item) {
-        $ip = trim((string) $item);
-        if (forward_is_valid_ipv4($ip)) {
-            $ips[] = $ip;
-        }
-    }
-    return array_values(array_unique($ips));
+    return forward_normalize_ip_list($value);
 }
 
 function forward_parse_server_ip_server_map($value)
@@ -991,7 +1076,7 @@ function forward_pick_listen_ip($value, array $allowedIps)
     if ($listenIp === '') {
         return $allowedIps[0] ?? '';
     }
-    return in_array($listenIp, $allowedIps, true) ? $listenIp : '';
+    return forward_find_matching_ip($listenIp, $allowedIps);
 }
 
 function forward_client_permissions(array $settings)
@@ -1024,15 +1109,48 @@ function forward_client_default_rule_protocol(array $settings)
 function forward_client_locked_listen_ip($currentValue, array $allowedIps)
 {
     $current = trim((string) $currentValue);
-    if ($current !== '' && in_array($current, $allowedIps, true)) {
-        return $current;
+    if ($current !== '') {
+        $matched = forward_find_matching_ip($current, $allowedIps);
+        if ($matched !== '') {
+            return $matched;
+        }
     }
     return '';
 }
 
 function forward_format_ip_list(array $ips)
 {
-    return implode(', ', array_values(array_unique($ips)));
+    $normalized = [];
+    foreach ($ips as $ip) {
+        $value = forward_normalize_ip_literal($ip);
+        if ($value !== '') {
+            $normalized[$value] = $value;
+        }
+    }
+    return implode(', ', array_values($normalized));
+}
+
+function forward_format_ip_for_endpoint($ip)
+{
+    $value = trim((string) $ip);
+    $normalized = forward_normalize_ip_literal($value);
+    if ($normalized !== '') {
+        $value = $normalized;
+    }
+
+    return forward_ip_family($value) === 'ipv6' ? ('[' . $value . ']') : $value;
+}
+
+function forward_format_endpoint_suffix($ip, $suffix = '')
+{
+    $endpoint = forward_format_ip_for_endpoint($ip);
+    $suffix = trim((string) $suffix);
+    return $suffix === '' ? $endpoint : ($endpoint . ':' . $suffix);
+}
+
+function forward_format_endpoint($ip, $port)
+{
+    return forward_format_endpoint_suffix($ip, (string) $port);
 }
 
 function forward_attach_service_listen_ips(array $services, array $settings)
@@ -1092,7 +1210,7 @@ function forward_get_user_services($userId, array $allowedProductIds = [], array
                     $ips[] = trim($part);
                 }
             }
-            $ips = array_values(array_unique(array_filter($ips, 'forward_is_valid_ipv4')));
+            $ips = forward_normalize_ip_list(implode(' ', $ips));
             if (!empty($allowedClientIps)) {
                 $ips = array_values(array_intersect($ips, $allowedClientIps));
             }
@@ -1140,7 +1258,7 @@ function forward_count_service_ips(array $services)
 
 function forward_find_service_for_ip(array $services, $ip, $serviceId = 0, $serverId = 0, $productName = '')
 {
-    $ip = trim((string) $ip);
+    $ip = forward_normalize_ip_literal($ip);
     $serviceId = (int) $serviceId;
     $serverId = (int) $serverId;
     $productName = trim((string) $productName);
@@ -1410,13 +1528,114 @@ function forward_call_api($path, $method = 'GET', array $payload = null, $server
     return forward_call_api_target($target, $path, $method, $payload);
 }
 
-function forward_get_remote_resource_maps(array $targets, $path)
+function forward_execute_db_write($logAction, callable $callback)
 {
-    $maps = [];
+    try {
+        $result = $callback();
+        if ($result === false) {
+            return ['success' => false, 'message' => '数据库操作未完成'];
+        }
+        return ['success' => true, 'result' => $result];
+    } catch (Throwable $e) {
+        forward_log($logAction, [], $e->getMessage());
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+function forward_is_api_not_found_message($message)
+{
+    $message = strtolower(trim((string) $message));
+    if ($message === '') {
+        return false;
+    }
+
+    return strpos($message, 'not found') !== false || strpos($message, '不存在') !== false;
+}
+
+function forward_remote_toggle_resource($path, $id, $serverId, $currentEnabled = null)
+{
+    $id = (int) $id;
+    if ($id <= 0) {
+        return ['success' => false, 'message' => '无效的远端资源 ID'];
+    }
+
+    $api = forward_call_api($path . '?id=' . urlencode((string) $id), 'POST', null, $serverId);
+    if (!$api['success']) {
+        return ['success' => false, 'message' => $api['message']];
+    }
+
+    $data = is_array($api['data'] ?? null) ? $api['data'] : [];
+    $enabled = array_key_exists('enabled', $data)
+        ? (bool) $data['enabled']
+        : ($currentEnabled === null ? null : !$currentEnabled);
+
+    return ['success' => true, 'enabled' => $enabled];
+}
+
+function forward_remote_delete_resource($path, $id, $serverId)
+{
+    $id = (int) $id;
+    if ($id <= 0) {
+        return ['success' => true, 'state' => 'missing'];
+    }
+
+    $api = forward_call_api($path . '?id=' . urlencode((string) $id), 'DELETE', null, $serverId);
+    if (!$api['success']) {
+        if (forward_is_api_not_found_message($api['message'] ?? '')) {
+            return ['success' => true, 'state' => 'missing'];
+        }
+        return ['success' => false, 'message' => $api['message']];
+    }
+
+    return ['success' => true, 'state' => 'deleted'];
+}
+
+function forward_best_effort_remote_delete_resource($path, $id, $serverId)
+{
+    $result = forward_remote_delete_resource($path, $id, $serverId);
+    return !empty($result['success']);
+}
+
+function forward_remote_create_resource($path, $togglePath, array $payload, $serverId, $enabled = true)
+{
+    $api = forward_call_api($path, 'POST', $payload, $serverId);
+    if (!$api['success']) {
+        return ['success' => false, 'message' => $api['message']];
+    }
+
+    $data = is_array($api['data'] ?? null) ? $api['data'] : [];
+    $remoteId = (int) ($data['id'] ?? 0);
+    if ($remoteId <= 0) {
+        return ['success' => false, 'message' => '后端返回了无效的资源 ID'];
+    }
+
+    if (!$enabled) {
+        $toggle = forward_remote_toggle_resource($togglePath, $remoteId, $serverId, true);
+        if (!$toggle['success']) {
+            forward_best_effort_remote_delete_resource($path, $remoteId, $serverId);
+            return ['success' => false, 'message' => '后端创建成功，但保持禁用状态失败：' . $toggle['message']];
+        }
+        if ($toggle['enabled'] !== false) {
+            forward_best_effort_remote_delete_resource($path, $remoteId, $serverId);
+            return ['success' => false, 'message' => '后端创建成功，但未能保持禁用状态'];
+        }
+    }
+
+    return ['success' => true, 'id' => $remoteId];
+}
+
+function forward_get_remote_resource_snapshot(array $targets, $path)
+{
+    $snapshot = ['maps' => [], 'errors' => []];
     foreach ($targets as $key => $target) {
+        $snapshot['maps'][$key] = [];
+        $snapshot['errors'][$key] = '';
+
         $result = forward_call_api_target($target, $path, 'GET');
         if (!$result['success'] || !is_array($result['data'])) {
-            $maps[$key] = [];
+            $snapshot['errors'][$key] = !$result['success']
+                ? (string) ($result['message'] ?? '远端返回异常')
+                : '远端返回了无效的资源列表';
             continue;
         }
 
@@ -1426,14 +1645,28 @@ function forward_get_remote_resource_maps(array $targets, $path)
                 $map[(int) $item['id']] = $item;
             }
         }
-        $maps[$key] = $map;
+        $snapshot['maps'][$key] = $map;
     }
-    return $maps;
+
+    return $snapshot;
 }
 
-function forward_status_meta(array $remote = null, $localStatus = 'active')
+function forward_get_remote_resource_maps(array $targets, $path)
 {
+    $snapshot = forward_get_remote_resource_snapshot($targets, $path);
+    return $snapshot['maps'];
+}
+
+function forward_status_meta(array $remote = null, $localStatus = 'active', $remoteError = '', $expectsRemote = false)
+{
+    if ($remoteError !== '') {
+        return ['text' => '远端异常', 'class' => 'warning'];
+    }
+
     if ($remote === null) {
+        if ($expectsRemote) {
+            return ['text' => '远端缺失', 'class' => 'danger'];
+        }
         if ($localStatus === 'inactive') {
             return ['text' => '已禁用', 'class' => 'default'];
         }
@@ -1458,9 +1691,86 @@ function forward_status_meta(array $remote = null, $localStatus = 'active')
     }
 }
 
+function forward_build_rule_payload_from_rule(array $rule, $remoteId = 0)
+{
+    $payload = [
+        'in_interface' => $rule['in_interface'],
+        'in_ip' => $rule['in_ip'],
+        'in_port' => $rule['in_port'],
+        'out_interface' => $rule['out_interface'],
+        'out_ip' => $rule['out_ip'],
+        'out_source_ip' => $rule['out_source_ip'],
+        'out_port' => $rule['out_port'],
+        'protocol' => $rule['protocol'],
+        'remark' => $rule['rule_name'],
+        'tag' => $rule['tag'],
+        'transparent' => $rule['transparent'],
+    ];
+    if ((int) $remoteId > 0) {
+        $payload['id'] = (int) $remoteId;
+    }
+    return $payload;
+}
+
+function forward_build_rule_payload_from_record($record, $remoteId = null)
+{
+    return forward_build_rule_payload_from_rule([
+        'in_interface' => forward_data_get($record, 'in_interface', ''),
+        'in_ip' => forward_data_get($record, 'in_ip', ''),
+        'in_port' => (int) forward_data_get($record, 'in_port', 0),
+        'out_interface' => forward_data_get($record, 'out_interface', ''),
+        'out_ip' => forward_data_get($record, 'out_ip', ''),
+        'out_source_ip' => forward_data_get($record, 'out_source_ip', ''),
+        'out_port' => (int) forward_data_get($record, 'out_port', 0),
+        'protocol' => forward_data_get($record, 'protocol', ''),
+        'rule_name' => forward_data_get($record, 'rule_name', ''),
+        'tag' => forward_data_get($record, 'tag', ''),
+        'transparent' => (bool) forward_data_get($record, 'transparent', false),
+    ], $remoteId === null ? forward_get_rule_remote_id($record) : $remoteId);
+}
+
+function forward_build_site_payload_from_site(array $site, $remoteId = 0)
+{
+    $payload = [
+        'domain' => $site['domain'],
+        'listen_interface' => $site['listen_interface'],
+        'listen_ip' => $site['listen_ip'],
+        'backend_ip' => $site['backend_ip'],
+        'backend_source_ip' => $site['backend_source_ip'],
+        'backend_http_port' => $site['backend_http_port'],
+        'backend_https_port' => $site['backend_https_port'],
+        'tag' => $site['tag'],
+        'transparent' => $site['transparent'],
+    ];
+    if ((int) $remoteId > 0) {
+        $payload['id'] = (int) $remoteId;
+    }
+    return $payload;
+}
+
+function forward_build_site_payload_from_record($record, $remoteId = null)
+{
+    return forward_build_site_payload_from_site([
+        'domain' => forward_data_get($record, 'domain', ''),
+        'listen_interface' => forward_data_get($record, 'listen_interface', ''),
+        'listen_ip' => forward_data_get($record, 'listen_ip', ''),
+        'backend_ip' => forward_data_get($record, 'backend_ip', ''),
+        'backend_source_ip' => forward_data_get($record, 'backend_source_ip', ''),
+        'backend_http_port' => (int) forward_data_get($record, 'backend_http_port', 0),
+        'backend_https_port' => (int) forward_data_get($record, 'backend_https_port', 0),
+        'tag' => forward_data_get($record, 'tag', ''),
+        'transparent' => (bool) forward_data_get($record, 'transparent', false),
+    ], $remoteId === null ? forward_get_site_remote_id($record) : $remoteId);
+}
+
 function forward_get_remote_rule_maps(array $settings, array $serverIds)
 {
     return forward_get_remote_resource_maps(forward_collect_api_targets($settings, $serverIds), '/api/rules');
+}
+
+function forward_get_remote_rule_snapshot(array $settings, array $serverIds)
+{
+    return forward_get_remote_resource_snapshot(forward_collect_api_targets($settings, $serverIds), '/api/rules');
 }
 
 function forward_get_local_rules($userId = null)
@@ -1476,22 +1786,31 @@ function forward_get_local_rules($userId = null)
     foreach ($rows as $row) {
         $serverIds[] = forward_resolve_record_server_id($row, $settings, 'in_ip');
     }
-    $remoteMaps = forward_get_remote_rule_maps($settings, $serverIds);
+    $remoteSnapshot = forward_get_remote_rule_snapshot($settings, $serverIds);
+    $remoteMaps = $remoteSnapshot['maps'];
+    $remoteErrors = $remoteSnapshot['errors'];
     $result = [];
 
     foreach ($rows as $row) {
         $resolvedServerId = forward_resolve_record_server_id($row, $settings, 'in_ip');
         $target = forward_get_api_target($settings, $resolvedServerId);
         $remoteId = forward_get_rule_remote_id($row);
+        $remoteKey = $target['key'] ?? '';
+        $remoteError = '';
+        if (forward_api_target_enabled($target)) {
+            $remoteError = (string) ($remoteErrors[$remoteKey] ?? '');
+        } elseif ($remoteId > 0) {
+            $remoteError = '当前宿主机未配置 Forward 端点';
+        }
         $remote = null;
         if (
             $remoteId > 0
             && forward_api_target_enabled($target)
-            && isset($remoteMaps[$target['key']][$remoteId])
+            && isset($remoteMaps[$remoteKey][$remoteId])
         ) {
-            $remote = $remoteMaps[$target['key']][$remoteId];
+            $remote = $remoteMaps[$remoteKey][$remoteId];
         }
-        $statusMeta = forward_status_meta($remote, $row->status);
+        $statusMeta = forward_status_meta($remote, $row->status, $remoteError, $remoteId > 0);
         $result[] = [
             'id' => (int) $row->id,
             'forward_rule_id' => $remoteId,
@@ -1505,9 +1824,11 @@ function forward_get_local_rules($userId = null)
             'in_interface' => $row->in_interface ?: '',
             'in_ip' => $row->in_ip,
             'in_port' => (int) $row->in_port,
+            'in_endpoint' => forward_format_endpoint($row->in_ip, (int) $row->in_port),
             'out_interface' => $row->out_interface ?: '',
             'out_ip' => $row->out_ip,
             'out_port' => (int) $row->out_port,
+            'out_endpoint' => forward_format_endpoint($row->out_ip, (int) $row->out_port),
             'out_source_ip' => $row->out_source_ip ?: '',
             'protocol' => $row->protocol,
             'tag' => $row->tag ?: '',
@@ -1517,6 +1838,7 @@ function forward_get_local_rules($userId = null)
             'created_at' => $row->created_at,
             'updated_at' => $row->updated_at,
             'remote_status' => $remote['status'] ?? '',
+            'remote_error' => $remoteError,
             'enabled' => isset($remote['enabled']) ? (bool) $remote['enabled'] : ($row->status === 'active'),
             'status_text' => $statusMeta['text'],
             'status_class' => $statusMeta['class'],
@@ -1574,11 +1896,20 @@ function forward_get_local_rule($ruleId, $userId = null)
     $resolvedServerId = forward_resolve_record_server_id($row, $settings, 'in_ip');
     $target = forward_get_api_target($settings, $resolvedServerId);
     $remoteId = forward_get_rule_remote_id($row);
-    $remoteMaps = forward_get_remote_rule_maps($settings, [$resolvedServerId]);
-    $remote = ($remoteId > 0 && forward_api_target_enabled($target) && isset($remoteMaps[$target['key']][$remoteId]))
-        ? $remoteMaps[$target['key']][$remoteId]
+    $remoteSnapshot = forward_get_remote_rule_snapshot($settings, [$resolvedServerId]);
+    $remoteMaps = $remoteSnapshot['maps'];
+    $remoteErrors = $remoteSnapshot['errors'];
+    $remoteKey = $target['key'] ?? '';
+    $remoteError = '';
+    if (forward_api_target_enabled($target)) {
+        $remoteError = (string) ($remoteErrors[$remoteKey] ?? '');
+    } elseif ($remoteId > 0) {
+        $remoteError = '当前宿主机未配置 Forward 端点';
+    }
+    $remote = ($remoteId > 0 && forward_api_target_enabled($target) && isset($remoteMaps[$remoteKey][$remoteId]))
+        ? $remoteMaps[$remoteKey][$remoteId]
         : null;
-    $statusMeta = forward_status_meta($remote, $row->status);
+    $statusMeta = forward_status_meta($remote, $row->status, $remoteError, $remoteId > 0);
 
     return [
         'id' => (int) $row->id,
@@ -1593,15 +1924,18 @@ function forward_get_local_rule($ruleId, $userId = null)
         'in_interface' => $row->in_interface ?: '',
         'in_ip' => $row->in_ip,
         'in_port' => (int) $row->in_port,
+        'in_endpoint' => forward_format_endpoint($row->in_ip, (int) $row->in_port),
         'out_interface' => $row->out_interface ?: '',
         'out_ip' => $row->out_ip,
         'out_port' => (int) $row->out_port,
+        'out_endpoint' => forward_format_endpoint($row->out_ip, (int) $row->out_port),
         'out_source_ip' => $row->out_source_ip ?: '',
         'protocol' => $row->protocol,
         'tag' => $row->tag ?: '',
         'transparent' => (bool) $row->transparent,
         'status' => $row->status,
         'description' => $row->description ?: '',
+        'remote_error' => $remoteError,
         'status_text' => $statusMeta['text'],
         'status_class' => $statusMeta['class'],
     ];
@@ -1633,9 +1967,9 @@ function forward_validate_rule_input(array $data, array $settings, $isClient = f
         return ['success' => false, 'message' => '规则名称不能超过 100 个字符'];
     }
 
-    $outIp = trim((string) ($data['internal_ip'] ?? $data['out_ip'] ?? ''));
-    if (!forward_is_valid_ipv4($outIp)) {
-        return ['success' => false, 'message' => '目标 IP 必须是有效的 IPv4 地址'];
+    $outIp = forward_normalize_ip_literal($data['internal_ip'] ?? $data['out_ip'] ?? '');
+    if ($outIp === '') {
+        return ['success' => false, 'message' => '目标 IP 必须是有效的 IP 地址'];
     }
 
     $outPort = (int) ($data['internal_port'] ?? $data['out_port'] ?? 0);
@@ -1656,27 +1990,33 @@ function forward_validate_rule_input(array $data, array $settings, $isClient = f
     }
 
     $transparent = forward_resolve_checkbox_value($data, 'transparent', !empty($defaults['transparent']));
-    $normalizedSourceIP = forward_normalize_optional_ipv4($data['out_source_ip'] ?? ($defaults['out_source_ip'] ?? ''));
+    $normalizedSourceIP = forward_normalize_optional_ip($data['out_source_ip'] ?? ($defaults['out_source_ip'] ?? ''));
     if (!$normalizedSourceIP['success']) {
         return ['success' => false, 'message' => '回源 IP ' . $normalizedSourceIP['message']];
     }
     $outSourceIP = $transparent ? '' : $normalizedSourceIP['value'];
+
+    if ($transparent && !forward_ip_pair_is_pure_ipv4($listenIp, $outIp)) {
+        return ['success' => false, 'message' => '透传当前仅支持 IPv4 入口与目标 IP 组合'];
+    }
+    if ($outSourceIP !== '' && forward_ip_family($outSourceIP) !== forward_ip_family($outIp)) {
+        return ['success' => false, 'message' => '回源 IP 必须与目标 IP 地址族一致'];
+    }
 
     $conflictQuery = Capsule::table('mod_forward_rules')
         ->where('server_id', (int) $targetServerId)
         ->where('in_port', $inPort)
         ->whereIn('protocol', forward_protocol_conflicts($protocol));
 
-    if ($listenIp !== '0.0.0.0') {
-        $conflictQuery->whereIn('in_ip', [$listenIp, '0.0.0.0']);
-    }
-
     if ($excludeLocalRuleId > 0) {
         $conflictQuery->where('id', '!=', (int) $excludeLocalRuleId);
     }
 
-    if ($conflictQuery->first()) {
-        return ['success' => false, 'message' => '该入口端口已在模块中被占用'];
+    $localConflicts = $conflictQuery->select('in_ip')->get();
+    foreach ($localConflicts as $conflict) {
+        if (forward_ips_conflict($listenIp, $conflict->in_ip ?? '')) {
+            return ['success' => false, 'message' => '该入口端口已在模块中被占用'];
+        }
     }
 
     if (forward_has_remote_conflict($listenIp, $inPort, $protocol, $excludeRemoteRuleId, $targetServerId)) {
@@ -1787,49 +2127,44 @@ function forward_create_rule(array $data, $userId = 0, $isClient = false)
         $rule['product_name'] = $service['product_name'];
     }
 
-    $payload = [
-        'in_interface' => $rule['in_interface'],
-        'in_ip' => $rule['in_ip'],
-        'in_port' => $rule['in_port'],
-        'out_interface' => $rule['out_interface'],
-        'out_ip' => $rule['out_ip'],
-        'out_port' => $rule['out_port'],
-        'out_source_ip' => $rule['out_source_ip'],
-        'protocol' => $rule['protocol'],
-        'remark' => $rule['rule_name'],
-        'tag' => $rule['tag'],
-        'transparent' => $rule['transparent'],
-    ];
-
-    $api = forward_call_api('/api/rules', 'POST', $payload, $targetServerId);
-    if (!$api['success']) {
-        return ['success' => false, 'message' => '后端创建规则失败：' . $api['message']];
+    $payload = forward_build_rule_payload_from_rule($rule);
+    $remoteCreate = forward_remote_create_resource('/api/rules', '/api/rules/toggle', $payload, $targetServerId, true);
+    if (!$remoteCreate['success']) {
+        return ['success' => false, 'message' => '后端创建规则失败：' . $remoteCreate['message']];
     }
 
-    $remoteId = (int) ($api['data']['id'] ?? 0);
-    Capsule::table('mod_forward_rules')->insert([
-        'forward_rule_id' => null,
-        'remote_rule_id' => $remoteId > 0 ? $remoteId : null,
-        'user_id' => (int) $userId,
-        'product_name' => $rule['product_name'] ?: null,
-        'server_id' => is_array($service) ? (int) ($service['server_id'] ?? 0) : $targetServerId,
-        'service_id' => is_array($service) ? (int) ($service['service_id'] ?? 0) : 0,
-        'rule_name' => $rule['rule_name'],
-        'in_interface' => $rule['in_interface'],
-        'in_ip' => $rule['in_ip'],
-        'in_port' => $rule['in_port'],
-        'out_interface' => $rule['out_interface'],
-        'out_ip' => $rule['out_ip'],
-        'out_port' => $rule['out_port'],
-        'out_source_ip' => $rule['out_source_ip'],
-        'protocol' => $rule['protocol'],
-        'tag' => $rule['tag'],
-        'transparent' => $rule['transparent'] ? 1 : 0,
-        'status' => 'active',
-        'description' => $rule['description'],
-        'created_at' => date('Y-m-d H:i:s'),
-        'updated_at' => date('Y-m-d H:i:s'),
-    ]);
+    $remoteId = (int) ($remoteCreate['id'] ?? 0);
+    $insert = forward_execute_db_write('create_rule_local_insert_error', function () use ($rule, $remoteId, $userId, $service, $targetServerId) {
+        return Capsule::table('mod_forward_rules')->insert([
+            'forward_rule_id' => null,
+            'remote_rule_id' => $remoteId > 0 ? $remoteId : null,
+            'user_id' => (int) $userId,
+            'product_name' => $rule['product_name'] ?: null,
+            'server_id' => is_array($service) ? (int) ($service['server_id'] ?? 0) : $targetServerId,
+            'service_id' => is_array($service) ? (int) ($service['service_id'] ?? 0) : 0,
+            'rule_name' => $rule['rule_name'],
+            'in_interface' => $rule['in_interface'],
+            'in_ip' => $rule['in_ip'],
+            'in_port' => $rule['in_port'],
+            'out_interface' => $rule['out_interface'],
+            'out_ip' => $rule['out_ip'],
+            'out_port' => $rule['out_port'],
+            'out_source_ip' => $rule['out_source_ip'],
+            'protocol' => $rule['protocol'],
+            'tag' => $rule['tag'],
+            'transparent' => $rule['transparent'] ? 1 : 0,
+            'status' => 'active',
+            'description' => $rule['description'],
+            'created_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+    });
+    if (!$insert['success']) {
+        $rolledBack = forward_best_effort_remote_delete_resource('/api/rules', $remoteId, $targetServerId);
+        $message = '本地写入规则失败：' . $insert['message'];
+        $message .= $rolledBack ? '；已回滚远端规则' : '；远端回滚失败，请手动删除已创建的远端规则';
+        return ['success' => false, 'message' => $message];
+    }
 
     return ['success' => true, 'message' => '规则创建成功'];
 }
@@ -1930,8 +2265,19 @@ function forward_update_rule(array $data, $userId = null)
         $rule['product_name'] = $service['product_name'];
     }
 
-    $payload = [
-        'id' => $existingRemoteId,
+    $sameRemote = $existingRemoteId > 0 && $targetServerId === $existingServerId;
+    $desiredEnabled = $existing->status !== 'inactive';
+    $updateValues = [
+        'forward_rule_id' => null,
+        'remote_rule_id' => null,
+        'product_name' => $rule['product_name'] ?: null,
+        'server_id' => $userId !== null
+            ? (is_array($service) ? (int) ($service['server_id'] ?? 0) : 0)
+            : $targetServerId,
+        'service_id' => $userId !== null
+            ? (is_array($service) ? (int) ($service['service_id'] ?? 0) : 0)
+            : (int) ($data['service_id'] ?? $existing->service_id ?? 0),
+        'rule_name' => $rule['rule_name'],
         'in_interface' => $rule['in_interface'],
         'in_ip' => $rule['in_ip'],
         'in_port' => $rule['in_port'],
@@ -1940,65 +2286,96 @@ function forward_update_rule(array $data, $userId = null)
         'out_port' => $rule['out_port'],
         'out_source_ip' => $rule['out_source_ip'],
         'protocol' => $rule['protocol'],
-        'remark' => $rule['rule_name'],
         'tag' => $rule['tag'],
-        'transparent' => $rule['transparent'],
+        'transparent' => $rule['transparent'] ? 1 : 0,
+        'description' => $rule['description'],
+        'updated_at' => date('Y-m-d H:i:s'),
+    ];
+    $restoreValues = [
+        'forward_rule_id' => forward_data_get($existing, 'forward_rule_id') ?: null,
+        'remote_rule_id' => $existingRemoteId > 0 ? $existingRemoteId : null,
+        'product_name' => $existing->product_name ?: null,
+        'server_id' => (int) ($existing->server_id ?? 0),
+        'service_id' => (int) ($existing->service_id ?? 0),
+        'rule_name' => $existing->rule_name,
+        'in_interface' => $existing->in_interface ?: '',
+        'in_ip' => $existing->in_ip,
+        'in_port' => (int) $existing->in_port,
+        'out_interface' => $existing->out_interface ?: '',
+        'out_ip' => $existing->out_ip,
+        'out_port' => (int) $existing->out_port,
+        'out_source_ip' => $existing->out_source_ip ?: '',
+        'protocol' => $existing->protocol,
+        'tag' => $existing->tag ?: '',
+        'transparent' => !empty($existing->transparent) ? 1 : 0,
+        'status' => $existing->status ?: 'active',
+        'description' => $existing->description ?: '',
+        'updated_at' => date('Y-m-d H:i:s'),
     ];
 
-    if ($existingRemoteId > 0 && $targetServerId === $existingServerId) {
+    if ($sameRemote) {
+        $payload = forward_build_rule_payload_from_rule($rule, $existingRemoteId);
         $api = forward_call_api('/api/rules', 'PUT', $payload, $targetServerId);
-    } else {
-        unset($payload['id']);
-        $api = forward_call_api('/api/rules', 'POST', $payload, $targetServerId);
+        if (!$api['success'] && !forward_is_api_not_found_message($api['message'] ?? '')) {
+            return ['success' => false, 'message' => '后端更新规则失败：' . $api['message']];
+        }
+        if (!empty($api['success'])) {
+            $updateValues['remote_rule_id'] = $existingRemoteId > 0 ? $existingRemoteId : null;
+            $dbUpdate = forward_execute_db_write('update_rule_local_update_error', function () use ($ruleId, $updateValues) {
+                return Capsule::table('mod_forward_rules')->where('id', $ruleId)->update($updateValues);
+            });
+            if (!$dbUpdate['success']) {
+                $restoreApi = forward_call_api('/api/rules', 'PUT', forward_build_rule_payload_from_record($existing), $existingServerId);
+                $message = '本地更新规则失败：' . $dbUpdate['message'];
+                $message .= !empty($restoreApi['success'])
+                    ? '；已回滚远端规则'
+                    : '；远端回滚失败：' . ($restoreApi['message'] ?? '未知错误');
+                return ['success' => false, 'message' => $message];
+            }
+
+            return ['success' => true, 'message' => '规则更新成功'];
+        }
+
+        $sameRemote = false;
     }
 
-    if (!$api['success']) {
-        return ['success' => false, 'message' => '后端更新规则失败：' . $api['message']];
+    $newRemote = forward_remote_create_resource(
+        '/api/rules',
+        '/api/rules/toggle',
+        forward_build_rule_payload_from_rule($rule),
+        $targetServerId,
+        $desiredEnabled
+    );
+    if (!$newRemote['success']) {
+        return ['success' => false, 'message' => '后端更新规则失败：' . $newRemote['message']];
     }
 
-    $remoteId = ($existingRemoteId > 0 && $targetServerId === $existingServerId)
-        ? $existingRemoteId
-        : (int) ($api['data']['id'] ?? 0);
+    $remoteId = (int) ($newRemote['id'] ?? 0);
+    $updateValues['remote_rule_id'] = $remoteId > 0 ? $remoteId : null;
+    $dbUpdate = forward_execute_db_write('update_rule_local_update_error', function () use ($ruleId, $updateValues) {
+        return Capsule::table('mod_forward_rules')->where('id', $ruleId)->update($updateValues);
+    });
+    if (!$dbUpdate['success']) {
+        $rolledBack = forward_best_effort_remote_delete_resource('/api/rules', $remoteId, $targetServerId);
+        $message = '本地更新规则失败：' . $dbUpdate['message'];
+        $message .= $rolledBack ? '；已回滚新建的远端规则' : '；新建的远端规则回滚失败，请手动清理';
+        return ['success' => false, 'message' => $message];
+    }
 
     if ($existingRemoteId > 0 && $targetServerId !== $existingServerId) {
-        $cleanup = forward_call_api('/api/rules?id=' . urlencode((string) $existingRemoteId), 'DELETE', null, $existingServerId);
+        $cleanup = forward_remote_delete_resource('/api/rules', $existingRemoteId, $existingServerId);
         if (!$cleanup['success']) {
-            $message = strtolower((string) $cleanup['message']);
-            if (strpos($message, 'not found') === false && strpos($message, '不存在') === false) {
-                if ($remoteId > 0) {
-                    forward_call_api('/api/rules?id=' . urlencode((string) $remoteId), 'DELETE', null, $targetServerId);
-                }
-                return ['success' => false, 'message' => '规则已在新 Forward 端创建，但旧 Forward 端删除失败：' . $cleanup['message']];
-            }
+            $restoreLocal = forward_execute_db_write('update_rule_local_restore_error', function () use ($ruleId, $restoreValues) {
+                return Capsule::table('mod_forward_rules')->where('id', $ruleId)->update($restoreValues);
+            });
+            $rolledBackRemote = forward_best_effort_remote_delete_resource('/api/rules', $remoteId, $targetServerId);
+
+            $message = '旧 Forward 端删除规则失败：' . $cleanup['message'];
+            $message .= $restoreLocal['success'] ? '；已回滚本地记录' : '；本地回滚失败：' . $restoreLocal['message'];
+            $message .= $rolledBackRemote ? '，并已清理新 Forward 端规则' : '，但新 Forward 端规则清理失败，请手动核对';
+            return ['success' => false, 'message' => $message];
         }
     }
-
-    Capsule::table('mod_forward_rules')
-        ->where('id', $ruleId)
-        ->update([
-            'forward_rule_id' => null,
-            'remote_rule_id' => $remoteId > 0 ? $remoteId : null,
-            'product_name' => $rule['product_name'] ?: null,
-            'server_id' => $userId !== null
-                ? (is_array($service) ? (int) ($service['server_id'] ?? 0) : 0)
-                : $targetServerId,
-            'service_id' => $userId !== null
-                ? (is_array($service) ? (int) ($service['service_id'] ?? 0) : 0)
-                : (int) ($data['service_id'] ?? $existing->service_id ?? 0),
-            'rule_name' => $rule['rule_name'],
-            'in_interface' => $rule['in_interface'],
-            'in_ip' => $rule['in_ip'],
-            'in_port' => $rule['in_port'],
-            'out_interface' => $rule['out_interface'],
-            'out_ip' => $rule['out_ip'],
-            'out_port' => $rule['out_port'],
-            'out_source_ip' => $rule['out_source_ip'],
-            'protocol' => $rule['protocol'],
-            'tag' => $rule['tag'],
-            'transparent' => $rule['transparent'] ? 1 : 0,
-            'description' => $rule['description'],
-            'updated_at' => date('Y-m-d H:i:s'),
-        ]);
 
     return ['success' => true, 'message' => '规则更新成功'];
 }
@@ -2018,26 +2395,34 @@ function forward_toggle_rule($ruleId, $userId = null)
     $serverId = forward_resolve_record_server_id($existing, $settings, 'in_ip');
     $remoteId = forward_get_rule_remote_id($existing);
     $enabled = $existing->status !== 'inactive';
+    $currentEnabled = $enabled;
     if ($remoteId > 0) {
-        $api = forward_call_api('/api/rules/toggle?id=' . urlencode((string) $remoteId), 'POST', null, $serverId);
-        if (!$api['success']) {
-            return ['success' => false, 'message' => '后端切换规则状态失败：' . $api['message']];
+        $toggle = forward_remote_toggle_resource('/api/rules/toggle', $remoteId, $serverId, $currentEnabled);
+        if (!$toggle['success']) {
+            return ['success' => false, 'message' => '后端切换规则状态失败：' . $toggle['message']];
         }
-        if (isset($api['data']['enabled'])) {
-            $enabled = (bool) $api['data']['enabled'];
-        } else {
-            $enabled = !$enabled;
-        }
+        $enabled = $toggle['enabled'] === null ? !$currentEnabled : (bool) $toggle['enabled'];
     } else {
         $enabled = !$enabled;
     }
 
-    Capsule::table('mod_forward_rules')
-        ->where('id', (int) $ruleId)
-        ->update([
+    $dbUpdate = forward_execute_db_write('toggle_rule_local_update_error', function () use ($ruleId, $enabled) {
+        return Capsule::table('mod_forward_rules')
+            ->where('id', (int) $ruleId)
+            ->update([
             'status' => $enabled ? 'active' : 'inactive',
             'updated_at' => date('Y-m-d H:i:s'),
-        ]);
+            ]);
+    });
+    if (!$dbUpdate['success']) {
+        if ($remoteId > 0) {
+            $rollback = forward_remote_toggle_resource('/api/rules/toggle', $remoteId, $serverId, $enabled);
+            $message = '本地切换规则状态失败：' . $dbUpdate['message'];
+            $message .= $rollback['success'] ? '；已回滚远端状态' : '；远端状态回滚失败：' . $rollback['message'];
+            return ['success' => false, 'message' => $message];
+        }
+        return ['success' => false, 'message' => '本地切换规则状态失败：' . $dbUpdate['message']];
+    }
 
     return [
         'success' => true,
@@ -2060,17 +2445,48 @@ function forward_delete_rule($ruleId, $userId = null)
     $settings = forward_get_module_settings();
     $serverId = forward_resolve_record_server_id($existing, $settings, 'in_ip');
     $remoteId = forward_get_rule_remote_id($existing);
+    $remoteDelete = ['success' => true, 'state' => 'missing'];
     if ($remoteId > 0) {
-        $api = forward_call_api('/api/rules?id=' . urlencode((string) $remoteId), 'DELETE', null, $serverId);
-        if (!$api['success']) {
-            $message = strtolower((string) $api['message']);
-            if (strpos($message, 'not found') === false && strpos($message, '不存在') === false) {
-                return ['success' => false, 'message' => '后端删除规则失败：' . $api['message']];
-            }
+        $remoteDelete = forward_remote_delete_resource('/api/rules', $remoteId, $serverId);
+        if (!$remoteDelete['success']) {
+            return ['success' => false, 'message' => '后端删除规则失败：' . $remoteDelete['message']];
         }
     }
 
-    Capsule::table('mod_forward_rules')->where('id', (int) $ruleId)->delete();
+    $dbDelete = forward_execute_db_write('delete_rule_local_error', function () use ($ruleId) {
+        return Capsule::table('mod_forward_rules')->where('id', (int) $ruleId)->delete();
+    });
+    if (!$dbDelete['success']) {
+        $message = '本地删除规则失败：' . $dbDelete['message'];
+        if (($remoteDelete['state'] ?? '') === 'deleted') {
+            $recreate = forward_remote_create_resource(
+                '/api/rules',
+                '/api/rules/toggle',
+                forward_build_rule_payload_from_record($existing, 0),
+                $serverId,
+                $existing->status !== 'inactive'
+            );
+            if ($recreate['success']) {
+                $newRemoteId = (int) ($recreate['id'] ?? 0);
+                $repair = forward_execute_db_write('delete_rule_local_rebind_error', function () use ($ruleId, $newRemoteId) {
+                    return Capsule::table('mod_forward_rules')
+                        ->where('id', (int) $ruleId)
+                        ->update([
+                            'forward_rule_id' => null,
+                            'remote_rule_id' => $newRemoteId > 0 ? $newRemoteId : null,
+                            'updated_at' => date('Y-m-d H:i:s'),
+                        ]);
+                });
+                $message .= $repair['success']
+                    ? '；已重建远端规则以保持一致'
+                    : '；已重建远端规则，但本地回写新的远端 ID 失败：' . $repair['message'];
+            } else {
+                $message .= '；远端规则已删除，但重建失败：' . $recreate['message'];
+            }
+        }
+        return ['success' => false, 'message' => $message];
+    }
+
     return ['success' => true, 'message' => '规则删除成功'];
 }
 
@@ -2094,6 +2510,11 @@ function forward_get_remote_site_maps(array $settings, array $serverIds)
     return forward_get_remote_resource_maps(forward_collect_api_targets($settings, $serverIds), '/api/sites');
 }
 
+function forward_get_remote_site_snapshot(array $settings, array $serverIds)
+{
+    return forward_get_remote_resource_snapshot(forward_collect_api_targets($settings, $serverIds), '/api/sites');
+}
+
 function forward_get_local_sites($userId = null)
 {
     $settings = forward_get_module_settings();
@@ -2107,22 +2528,31 @@ function forward_get_local_sites($userId = null)
     foreach ($rows as $row) {
         $serverIds[] = forward_resolve_record_server_id($row, $settings, 'listen_ip');
     }
-    $remoteMaps = forward_get_remote_site_maps($settings, $serverIds);
+    $remoteSnapshot = forward_get_remote_site_snapshot($settings, $serverIds);
+    $remoteMaps = $remoteSnapshot['maps'];
+    $remoteErrors = $remoteSnapshot['errors'];
     $result = [];
 
     foreach ($rows as $row) {
         $resolvedServerId = forward_resolve_record_server_id($row, $settings, 'listen_ip');
         $target = forward_get_api_target($settings, $resolvedServerId);
         $remoteId = forward_get_site_remote_id($row);
+        $remoteKey = $target['key'] ?? '';
+        $remoteError = '';
+        if (forward_api_target_enabled($target)) {
+            $remoteError = (string) ($remoteErrors[$remoteKey] ?? '');
+        } elseif ($remoteId > 0) {
+            $remoteError = '当前宿主机未配置 Forward 端点';
+        }
         $remote = null;
         if (
             $remoteId > 0
             && forward_api_target_enabled($target)
-            && isset($remoteMaps[$target['key']][$remoteId])
+            && isset($remoteMaps[$remoteKey][$remoteId])
         ) {
-            $remote = $remoteMaps[$target['key']][$remoteId];
+            $remote = $remoteMaps[$remoteKey][$remoteId];
         }
-        $statusMeta = forward_status_meta($remote, $row->status);
+        $statusMeta = forward_status_meta($remote, $row->status, $remoteError, $remoteId > 0);
         $result[] = [
             'id' => (int) $row->id,
             'forward_site_id' => $remoteId,
@@ -2135,6 +2565,7 @@ function forward_get_local_sites($userId = null)
             'domain' => $row->domain,
             'listen_interface' => $row->listen_interface ?: '',
             'listen_ip' => $row->listen_ip,
+            'listen_endpoint' => forward_format_endpoint_suffix($row->listen_ip, '80/443'),
             'backend_ip' => $row->backend_ip,
             'backend_source_ip' => $row->backend_source_ip ?: '',
             'backend_http_port' => (int) $row->backend_http_port,
@@ -2146,6 +2577,7 @@ function forward_get_local_sites($userId = null)
             'created_at' => $row->created_at,
             'updated_at' => $row->updated_at,
             'remote_status' => $remote['status'] ?? '',
+            'remote_error' => $remoteError,
             'enabled' => isset($remote['enabled']) ? (bool) $remote['enabled'] : ($row->status === 'active'),
             'status_text' => $statusMeta['text'],
             'status_class' => $statusMeta['class'],
@@ -2175,11 +2607,20 @@ function forward_get_local_site($siteId, $userId = null)
     $resolvedServerId = forward_resolve_record_server_id($row, $settings, 'listen_ip');
     $target = forward_get_api_target($settings, $resolvedServerId);
     $remoteId = forward_get_site_remote_id($row);
-    $remoteMaps = forward_get_remote_site_maps($settings, [$resolvedServerId]);
-    $remote = ($remoteId > 0 && forward_api_target_enabled($target) && isset($remoteMaps[$target['key']][$remoteId]))
-        ? $remoteMaps[$target['key']][$remoteId]
+    $remoteSnapshot = forward_get_remote_site_snapshot($settings, [$resolvedServerId]);
+    $remoteMaps = $remoteSnapshot['maps'];
+    $remoteErrors = $remoteSnapshot['errors'];
+    $remoteKey = $target['key'] ?? '';
+    $remoteError = '';
+    if (forward_api_target_enabled($target)) {
+        $remoteError = (string) ($remoteErrors[$remoteKey] ?? '');
+    } elseif ($remoteId > 0) {
+        $remoteError = '当前宿主机未配置 Forward 端点';
+    }
+    $remote = ($remoteId > 0 && forward_api_target_enabled($target) && isset($remoteMaps[$remoteKey][$remoteId]))
+        ? $remoteMaps[$remoteKey][$remoteId]
         : null;
-    $statusMeta = forward_status_meta($remote, $row->status);
+    $statusMeta = forward_status_meta($remote, $row->status, $remoteError, $remoteId > 0);
 
     return [
         'id' => (int) $row->id,
@@ -2193,6 +2634,7 @@ function forward_get_local_site($siteId, $userId = null)
         'domain' => $row->domain,
         'listen_interface' => $row->listen_interface ?: '',
         'listen_ip' => $row->listen_ip,
+        'listen_endpoint' => forward_format_endpoint_suffix($row->listen_ip, '80/443'),
         'backend_ip' => $row->backend_ip,
         'backend_source_ip' => $row->backend_source_ip ?: '',
         'backend_http_port' => (int) $row->backend_http_port,
@@ -2201,6 +2643,7 @@ function forward_get_local_site($siteId, $userId = null)
         'transparent' => (bool) $row->transparent,
         'status' => $row->status,
         'description' => $row->description ?: '',
+        'remote_error' => $remoteError,
         'status_text' => $statusMeta['text'],
         'status_class' => $statusMeta['class'],
     ];
@@ -2249,9 +2692,9 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
         return ['success' => false, 'message' => '域名格式无效，请填写标准域名或 punycode'];
     }
 
-    $backendIp = trim((string) ($data['backend_ip'] ?? $data['internal_ip'] ?? ''));
-    if (!forward_is_valid_ipv4($backendIp)) {
-        return ['success' => false, 'message' => '目标 IP 必须是有效的 IPv4 地址'];
+    $backendIp = forward_normalize_ip_literal($data['backend_ip'] ?? $data['internal_ip'] ?? '');
+    if ($backendIp === '') {
+        return ['success' => false, 'message' => '目标 IP 必须是有效的 IP 地址'];
     }
 
     $backendHttpPort = (int) ($data['backend_http_port'] ?? 80);
@@ -2268,11 +2711,18 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
     }
 
     $transparent = forward_resolve_checkbox_value($data, 'transparent', !empty($defaults['transparent']));
-    $normalizedSourceIP = forward_normalize_optional_ipv4($data['backend_source_ip'] ?? ($defaults['backend_source_ip'] ?? ''));
+    $normalizedSourceIP = forward_normalize_optional_ip($data['backend_source_ip'] ?? ($defaults['backend_source_ip'] ?? ''));
     if (!$normalizedSourceIP['success']) {
         return ['success' => false, 'message' => '回源 IP ' . $normalizedSourceIP['message']];
     }
     $backendSourceIP = $transparent ? '' : $normalizedSourceIP['value'];
+
+    if ($transparent && !forward_ip_pair_is_pure_ipv4($listenIp, $backendIp)) {
+        return ['success' => false, 'message' => '透传当前仅支持 IPv4 入口与目标 IP 组合'];
+    }
+    if ($backendSourceIP !== '' && forward_ip_family($backendSourceIP) !== forward_ip_family($backendIp)) {
+        return ['success' => false, 'message' => '回源 IP 必须与目标 IP 地址族一致'];
+    }
 
     $productName = trim((string) ($data['product_name'] ?? ''));
     if (forward_strlen($productName) > 100) {
@@ -2390,45 +2840,42 @@ function forward_create_site(array $data, $userId = 0, $isClient = false)
         $site['product_name'] = $service['product_name'];
     }
 
-    $payload = [
-        'domain' => $site['domain'],
-        'listen_interface' => $site['listen_interface'],
-        'listen_ip' => $site['listen_ip'],
-        'backend_ip' => $site['backend_ip'],
-        'backend_source_ip' => $site['backend_source_ip'],
-        'backend_http_port' => $site['backend_http_port'],
-        'backend_https_port' => $site['backend_https_port'],
-        'tag' => $site['tag'],
-        'transparent' => $site['transparent'],
-    ];
-
-    $api = forward_call_api('/api/sites', 'POST', $payload, $targetServerId);
-    if (!$api['success']) {
-        return ['success' => false, 'message' => '后端创建站点失败：' . $api['message']];
+    $payload = forward_build_site_payload_from_site($site);
+    $remoteCreate = forward_remote_create_resource('/api/sites', '/api/sites/toggle', $payload, $targetServerId, true);
+    if (!$remoteCreate['success']) {
+        return ['success' => false, 'message' => '后端创建站点失败：' . $remoteCreate['message']];
     }
 
-    $remoteId = (int) ($api['data']['id'] ?? 0);
-    Capsule::table('mod_forward_sites')->insert([
-        'forward_site_id' => null,
-        'remote_site_id' => $remoteId > 0 ? $remoteId : null,
-        'user_id' => (int) $userId,
-        'product_name' => $site['product_name'] ?: null,
-        'server_id' => is_array($service) ? (int) ($service['server_id'] ?? 0) : $targetServerId,
-        'service_id' => is_array($service) ? (int) ($service['service_id'] ?? 0) : 0,
-        'domain' => $site['domain'],
-        'listen_interface' => $site['listen_interface'],
-        'listen_ip' => $site['listen_ip'],
-        'backend_ip' => $site['backend_ip'],
-        'backend_source_ip' => $site['backend_source_ip'],
-        'backend_http_port' => $site['backend_http_port'],
-        'backend_https_port' => $site['backend_https_port'],
-        'tag' => $site['tag'],
-        'transparent' => $site['transparent'] ? 1 : 0,
-        'status' => 'active',
-        'description' => $site['description'],
-        'created_at' => date('Y-m-d H:i:s'),
-        'updated_at' => date('Y-m-d H:i:s'),
-    ]);
+    $remoteId = (int) ($remoteCreate['id'] ?? 0);
+    $insert = forward_execute_db_write('create_site_local_insert_error', function () use ($site, $remoteId, $userId, $service, $targetServerId) {
+        return Capsule::table('mod_forward_sites')->insert([
+            'forward_site_id' => null,
+            'remote_site_id' => $remoteId > 0 ? $remoteId : null,
+            'user_id' => (int) $userId,
+            'product_name' => $site['product_name'] ?: null,
+            'server_id' => is_array($service) ? (int) ($service['server_id'] ?? 0) : $targetServerId,
+            'service_id' => is_array($service) ? (int) ($service['service_id'] ?? 0) : 0,
+            'domain' => $site['domain'],
+            'listen_interface' => $site['listen_interface'],
+            'listen_ip' => $site['listen_ip'],
+            'backend_ip' => $site['backend_ip'],
+            'backend_source_ip' => $site['backend_source_ip'],
+            'backend_http_port' => $site['backend_http_port'],
+            'backend_https_port' => $site['backend_https_port'],
+            'tag' => $site['tag'],
+            'transparent' => $site['transparent'] ? 1 : 0,
+            'status' => 'active',
+            'description' => $site['description'],
+            'created_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+    });
+    if (!$insert['success']) {
+        $rolledBack = forward_best_effort_remote_delete_resource('/api/sites', $remoteId, $targetServerId);
+        $message = '本地写入站点失败：' . $insert['message'];
+        $message .= $rolledBack ? '；已回滚远端站点' : '；远端回滚失败，请手动删除已创建的远端站点';
+        return ['success' => false, 'message' => $message];
+    }
 
     return ['success' => true, 'message' => '共享站点创建成功'];
 }
@@ -2529,8 +2976,18 @@ function forward_update_site(array $data, $userId = null)
         $site['product_name'] = $service['product_name'];
     }
 
-    $payload = [
-        'id' => $existingRemoteId,
+    $sameRemote = $existingRemoteId > 0 && $targetServerId === $existingServerId;
+    $desiredEnabled = $existing->status !== 'inactive';
+    $updateValues = [
+        'forward_site_id' => null,
+        'remote_site_id' => null,
+        'product_name' => $site['product_name'] ?: null,
+        'server_id' => $userId !== null
+            ? (is_array($service) ? (int) ($service['server_id'] ?? 0) : 0)
+            : $targetServerId,
+        'service_id' => $userId !== null
+            ? (is_array($service) ? (int) ($service['service_id'] ?? 0) : 0)
+            : (int) ($data['service_id'] ?? $existing->service_id ?? 0),
         'domain' => $site['domain'],
         'listen_interface' => $site['listen_interface'],
         'listen_ip' => $site['listen_ip'],
@@ -2539,61 +2996,93 @@ function forward_update_site(array $data, $userId = null)
         'backend_http_port' => $site['backend_http_port'],
         'backend_https_port' => $site['backend_https_port'],
         'tag' => $site['tag'],
-        'transparent' => $site['transparent'],
+        'transparent' => $site['transparent'] ? 1 : 0,
+        'description' => $site['description'],
+        'updated_at' => date('Y-m-d H:i:s'),
+    ];
+    $restoreValues = [
+        'forward_site_id' => forward_data_get($existing, 'forward_site_id') ?: null,
+        'remote_site_id' => $existingRemoteId > 0 ? $existingRemoteId : null,
+        'product_name' => $existing->product_name ?: null,
+        'server_id' => (int) ($existing->server_id ?? 0),
+        'service_id' => (int) ($existing->service_id ?? 0),
+        'domain' => $existing->domain,
+        'listen_interface' => $existing->listen_interface ?: '',
+        'listen_ip' => $existing->listen_ip,
+        'backend_ip' => $existing->backend_ip,
+        'backend_source_ip' => $existing->backend_source_ip ?: '',
+        'backend_http_port' => (int) $existing->backend_http_port,
+        'backend_https_port' => (int) $existing->backend_https_port,
+        'tag' => $existing->tag ?: '',
+        'transparent' => !empty($existing->transparent) ? 1 : 0,
+        'status' => $existing->status ?: 'active',
+        'description' => $existing->description ?: '',
+        'updated_at' => date('Y-m-d H:i:s'),
     ];
 
-    if ($existingRemoteId > 0 && $targetServerId === $existingServerId) {
+    if ($sameRemote) {
+        $payload = forward_build_site_payload_from_site($site, $existingRemoteId);
         $api = forward_call_api('/api/sites', 'PUT', $payload, $targetServerId);
-    } else {
-        unset($payload['id']);
-        $api = forward_call_api('/api/sites', 'POST', $payload, $targetServerId);
+        if (!$api['success'] && !forward_is_api_not_found_message($api['message'] ?? '')) {
+            return ['success' => false, 'message' => '后端更新站点失败：' . $api['message']];
+        }
+        if (!empty($api['success'])) {
+            $updateValues['remote_site_id'] = $existingRemoteId > 0 ? $existingRemoteId : null;
+            $dbUpdate = forward_execute_db_write('update_site_local_update_error', function () use ($siteId, $updateValues) {
+                return Capsule::table('mod_forward_sites')->where('id', $siteId)->update($updateValues);
+            });
+            if (!$dbUpdate['success']) {
+                $restoreApi = forward_call_api('/api/sites', 'PUT', forward_build_site_payload_from_record($existing), $existingServerId);
+                $message = '本地更新站点失败：' . $dbUpdate['message'];
+                $message .= !empty($restoreApi['success'])
+                    ? '；已回滚远端站点'
+                    : '；远端回滚失败：' . ($restoreApi['message'] ?? '未知错误');
+                return ['success' => false, 'message' => $message];
+            }
+
+            return ['success' => true, 'message' => '共享站点更新成功'];
+        }
+
+        $sameRemote = false;
     }
 
-    if (!$api['success']) {
-        return ['success' => false, 'message' => '后端更新站点失败：' . $api['message']];
+    $newRemote = forward_remote_create_resource(
+        '/api/sites',
+        '/api/sites/toggle',
+        forward_build_site_payload_from_site($site),
+        $targetServerId,
+        $desiredEnabled
+    );
+    if (!$newRemote['success']) {
+        return ['success' => false, 'message' => '后端更新站点失败：' . $newRemote['message']];
     }
 
-    $remoteId = ($existingRemoteId > 0 && $targetServerId === $existingServerId)
-        ? $existingRemoteId
-        : (int) ($api['data']['id'] ?? 0);
+    $remoteId = (int) ($newRemote['id'] ?? 0);
+    $updateValues['remote_site_id'] = $remoteId > 0 ? $remoteId : null;
+    $dbUpdate = forward_execute_db_write('update_site_local_update_error', function () use ($siteId, $updateValues) {
+        return Capsule::table('mod_forward_sites')->where('id', $siteId)->update($updateValues);
+    });
+    if (!$dbUpdate['success']) {
+        $rolledBack = forward_best_effort_remote_delete_resource('/api/sites', $remoteId, $targetServerId);
+        $message = '本地更新站点失败：' . $dbUpdate['message'];
+        $message .= $rolledBack ? '；已回滚新建的远端站点' : '；新建的远端站点回滚失败，请手动清理';
+        return ['success' => false, 'message' => $message];
+    }
 
     if ($existingRemoteId > 0 && $targetServerId !== $existingServerId) {
-        $cleanup = forward_call_api('/api/sites?id=' . urlencode((string) $existingRemoteId), 'DELETE', null, $existingServerId);
+        $cleanup = forward_remote_delete_resource('/api/sites', $existingRemoteId, $existingServerId);
         if (!$cleanup['success']) {
-            $message = strtolower((string) $cleanup['message']);
-            if (strpos($message, 'not found') === false && strpos($message, '不存在') === false && strpos($message, 'site not found') === false) {
-                if ($remoteId > 0) {
-                    forward_call_api('/api/sites?id=' . urlencode((string) $remoteId), 'DELETE', null, $targetServerId);
-                }
-                return ['success' => false, 'message' => '站点已在新 Forward 端创建，但旧 Forward 端删除失败：' . $cleanup['message']];
-            }
+            $restoreLocal = forward_execute_db_write('update_site_local_restore_error', function () use ($siteId, $restoreValues) {
+                return Capsule::table('mod_forward_sites')->where('id', $siteId)->update($restoreValues);
+            });
+            $rolledBackRemote = forward_best_effort_remote_delete_resource('/api/sites', $remoteId, $targetServerId);
+
+            $message = '旧 Forward 端删除站点失败：' . $cleanup['message'];
+            $message .= $restoreLocal['success'] ? '；已回滚本地记录' : '；本地回滚失败：' . $restoreLocal['message'];
+            $message .= $rolledBackRemote ? '，并已清理新 Forward 端站点' : '，但新 Forward 端站点清理失败，请手动核对';
+            return ['success' => false, 'message' => $message];
         }
     }
-
-    Capsule::table('mod_forward_sites')
-        ->where('id', $siteId)
-        ->update([
-            'forward_site_id' => null,
-            'remote_site_id' => $remoteId > 0 ? $remoteId : null,
-            'product_name' => $site['product_name'] ?: null,
-            'server_id' => $userId !== null
-                ? (is_array($service) ? (int) ($service['server_id'] ?? 0) : 0)
-                : $targetServerId,
-            'service_id' => $userId !== null
-                ? (is_array($service) ? (int) ($service['service_id'] ?? 0) : 0)
-                : (int) ($data['service_id'] ?? $existing->service_id ?? 0),
-            'domain' => $site['domain'],
-            'listen_interface' => $site['listen_interface'],
-            'listen_ip' => $site['listen_ip'],
-            'backend_ip' => $site['backend_ip'],
-            'backend_source_ip' => $site['backend_source_ip'],
-            'backend_http_port' => $site['backend_http_port'],
-            'backend_https_port' => $site['backend_https_port'],
-            'tag' => $site['tag'],
-            'transparent' => $site['transparent'] ? 1 : 0,
-            'description' => $site['description'],
-            'updated_at' => date('Y-m-d H:i:s'),
-        ]);
 
     return ['success' => true, 'message' => '共享站点更新成功'];
 }
@@ -2613,26 +3102,34 @@ function forward_toggle_site($siteId, $userId = null)
     $serverId = forward_resolve_record_server_id($existing, $settings, 'listen_ip');
     $remoteId = forward_get_site_remote_id($existing);
     $enabled = $existing->status !== 'inactive';
+    $currentEnabled = $enabled;
     if ($remoteId > 0) {
-        $api = forward_call_api('/api/sites/toggle?id=' . urlencode((string) $remoteId), 'POST', null, $serverId);
-        if (!$api['success']) {
-            return ['success' => false, 'message' => '后端切换站点状态失败：' . $api['message']];
+        $toggle = forward_remote_toggle_resource('/api/sites/toggle', $remoteId, $serverId, $currentEnabled);
+        if (!$toggle['success']) {
+            return ['success' => false, 'message' => '后端切换站点状态失败：' . $toggle['message']];
         }
-        if (isset($api['data']['enabled'])) {
-            $enabled = (bool) $api['data']['enabled'];
-        } else {
-            $enabled = !$enabled;
-        }
+        $enabled = $toggle['enabled'] === null ? !$currentEnabled : (bool) $toggle['enabled'];
     } else {
         $enabled = !$enabled;
     }
 
-    Capsule::table('mod_forward_sites')
-        ->where('id', (int) $siteId)
-        ->update([
+    $dbUpdate = forward_execute_db_write('toggle_site_local_update_error', function () use ($siteId, $enabled) {
+        return Capsule::table('mod_forward_sites')
+            ->where('id', (int) $siteId)
+            ->update([
             'status' => $enabled ? 'active' : 'inactive',
             'updated_at' => date('Y-m-d H:i:s'),
-        ]);
+            ]);
+    });
+    if (!$dbUpdate['success']) {
+        if ($remoteId > 0) {
+            $rollback = forward_remote_toggle_resource('/api/sites/toggle', $remoteId, $serverId, $enabled);
+            $message = '本地切换站点状态失败：' . $dbUpdate['message'];
+            $message .= $rollback['success'] ? '；已回滚远端状态' : '；远端状态回滚失败：' . $rollback['message'];
+            return ['success' => false, 'message' => $message];
+        }
+        return ['success' => false, 'message' => '本地切换站点状态失败：' . $dbUpdate['message']];
+    }
 
     return [
         'success' => true,
@@ -2655,17 +3152,48 @@ function forward_delete_site($siteId, $userId = null)
     $settings = forward_get_module_settings();
     $serverId = forward_resolve_record_server_id($existing, $settings, 'listen_ip');
     $remoteId = forward_get_site_remote_id($existing);
+    $remoteDelete = ['success' => true, 'state' => 'missing'];
     if ($remoteId > 0) {
-        $api = forward_call_api('/api/sites?id=' . urlencode((string) $remoteId), 'DELETE', null, $serverId);
-        if (!$api['success']) {
-            $message = strtolower((string) $api['message']);
-            if (strpos($message, 'not found') === false && strpos($message, '不存在') === false && strpos($message, 'site not found') === false) {
-                return ['success' => false, 'message' => '后端删除站点失败：' . $api['message']];
-            }
+        $remoteDelete = forward_remote_delete_resource('/api/sites', $remoteId, $serverId);
+        if (!$remoteDelete['success']) {
+            return ['success' => false, 'message' => '后端删除站点失败：' . $remoteDelete['message']];
         }
     }
 
-    Capsule::table('mod_forward_sites')->where('id', (int) $siteId)->delete();
+    $dbDelete = forward_execute_db_write('delete_site_local_error', function () use ($siteId) {
+        return Capsule::table('mod_forward_sites')->where('id', (int) $siteId)->delete();
+    });
+    if (!$dbDelete['success']) {
+        $message = '本地删除站点失败：' . $dbDelete['message'];
+        if (($remoteDelete['state'] ?? '') === 'deleted') {
+            $recreate = forward_remote_create_resource(
+                '/api/sites',
+                '/api/sites/toggle',
+                forward_build_site_payload_from_record($existing, 0),
+                $serverId,
+                $existing->status !== 'inactive'
+            );
+            if ($recreate['success']) {
+                $newRemoteId = (int) ($recreate['id'] ?? 0);
+                $repair = forward_execute_db_write('delete_site_local_rebind_error', function () use ($siteId, $newRemoteId) {
+                    return Capsule::table('mod_forward_sites')
+                        ->where('id', (int) $siteId)
+                        ->update([
+                            'forward_site_id' => null,
+                            'remote_site_id' => $newRemoteId > 0 ? $newRemoteId : null,
+                            'updated_at' => date('Y-m-d H:i:s'),
+                        ]);
+                });
+                $message .= $repair['success']
+                    ? '；已重建远端站点以保持一致'
+                    : '；已重建远端站点，但本地回写新的远端 ID 失败：' . $repair['message'];
+            } else {
+                $message .= '；远端站点已删除，但重建失败：' . $recreate['message'];
+            }
+        }
+        return ['success' => false, 'message' => $message];
+    }
+
     return ['success' => true, 'message' => '共享站点删除成功'];
 }
 
@@ -3070,8 +3598,8 @@ HTML;
             echo '<tr>';
             echo '<td>' . (int) $rule['id'] . '</td>';
             echo '<td><strong>' . htmlspecialchars($rule['rule_name'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($rule['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
-            echo '<td>' . htmlspecialchars($rule['in_ip'] . ':' . $rule['in_port'], ENT_QUOTES, 'UTF-8') . '</td>';
-            echo '<td>' . htmlspecialchars($rule['out_ip'] . ':' . $rule['out_port'], ENT_QUOTES, 'UTF-8') . '<br><small>' . htmlspecialchars($ruleSourceMeta, ENT_QUOTES, 'UTF-8') . '</small></td>';
+            echo '<td>' . htmlspecialchars($rule['in_endpoint'], ENT_QUOTES, 'UTF-8') . '</td>';
+            echo '<td>' . htmlspecialchars($rule['out_endpoint'], ENT_QUOTES, 'UTF-8') . '<br><small>' . htmlspecialchars($ruleSourceMeta, ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td><span class="label label-info">' . htmlspecialchars($rule['protocol'], ENT_QUOTES, 'UTF-8') . '</span></td>';
             echo '<td>' . htmlspecialchars($rule['tag'] ?: '-', ENT_QUOTES, 'UTF-8') . '</td>';
             echo '<td><span class="label label-' . htmlspecialchars($rule['status_class'], ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($rule['status_text'], ENT_QUOTES, 'UTF-8') . '</span></td>';
@@ -3099,8 +3627,8 @@ HTML;
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_internal_port">目标端口</label><input type="number" class="form-control" name="internal_port" id="forward_admin_internal_port" min="1" max="65535" required></div></div></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_external_port">入口端口</label><input type="number" class="form-control" name="external_port" id="forward_admin_external_port" min="' . (int) $adminListenPortRange['min'] . '" max="' . (int) $adminListenPortRange['max'] . '" required><p class="help-block">允许范围：' . $adminListenPortRangeText . '</p></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_protocol">协议</label><select class="form-control" name="protocol" id="forward_admin_protocol" required>' . $protocolSelect . '</select></div></div></div>';
-    echo '<div class="form-group"><input type="hidden" name="transparent" value="0"><label class="checkbox-inline"><input type="checkbox" name="transparent" id="forward_admin_rule_transparent" value="1"> 透传客户端源 IP</label><p class="help-block">开启后保留客户端真实源地址；关闭后可选填回源 IP。</p></div>';
-    echo '<div class="form-group" id="forward_admin_rule_source_wrap"><label for="forward_admin_rule_out_source_ip">回源 IP</label><input type="text" class="form-control" name="out_source_ip" id="forward_admin_rule_out_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Forward 宿主机上的本地 IPv4。</p></div>';
+    echo '<div class="form-group"><input type="hidden" name="transparent" value="0"><label class="checkbox-inline"><input type="checkbox" name="transparent" id="forward_admin_rule_transparent" value="1"> 透传客户端源 IP</label><p class="help-block">开启后保留客户端真实源地址；当前仅支持 IPv4 入口与目标 IP 组合，关闭后可选填回源 IP。</p></div>';
+    echo '<div class="form-group" id="forward_admin_rule_source_wrap"><label for="forward_admin_rule_out_source_ip">回源 IP</label><input type="text" class="form-control" name="out_source_ip" id="forward_admin_rule_out_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Forward 宿主机上的本地 IP，且与目标 IP 地址族一致。</p></div>';
     echo '<div class="form-group"><label for="forward_admin_product_name">产品名称</label><input type="text" class="form-control" name="product_name" id="forward_admin_product_name"></div>';
     echo '<div class="form-group"><label for="forward_admin_description">描述</label><textarea class="form-control" name="description" id="forward_admin_description" rows="3"></textarea></div>';
     echo '<div class="alert alert-info" style="margin-bottom:0;">规则会写入 forward 的 <code>/api/rules</code>；多宿主机场景请先明确宿主机，再从该宿主机的入口 IP 池中选择。当前后台入口端口范围：<strong>' . $adminListenPortRangeText . '</strong>。</div>';
@@ -3126,7 +3654,7 @@ HTML;
             echo '<tr>';
             echo '<td>' . (int) $site['id'] . '</td>';
             echo '<td><strong>' . htmlspecialchars($site['domain'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($site['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
-            echo '<td>' . htmlspecialchars($site['listen_ip'], ENT_QUOTES, 'UTF-8') . ':80/443</td>';
+            echo '<td>' . htmlspecialchars($site['listen_endpoint'], ENT_QUOTES, 'UTF-8') . '</td>';
             echo '<td>' . htmlspecialchars($site['backend_ip'], ENT_QUOTES, 'UTF-8') . ' <small>(' . htmlspecialchars($backendHttp . '，' . $backendHttps, ENT_QUOTES, 'UTF-8') . ')</small><br><small>' . htmlspecialchars($siteSourceMeta, ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($site['tag'] ?: '-', ENT_QUOTES, 'UTF-8') . '</td>';
             echo '<td><span class="label label-' . htmlspecialchars($site['status_class'], ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($site['status_text'], ENT_QUOTES, 'UTF-8') . '</span></td>';
@@ -3154,8 +3682,8 @@ HTML;
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_product_name">产品名称</label><input type="text" class="form-control" name="product_name" id="forward_admin_site_product_name"></div></div></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_http_port">HTTP 端口</label><input type="number" class="form-control" name="backend_http_port" id="forward_admin_site_http_port" min="0" max="65535" value="80"></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_https_port">HTTPS 端口</label><input type="number" class="form-control" name="backend_https_port" id="forward_admin_site_https_port" min="0" max="65535" value="443"></div></div></div>';
-    echo '<div class="form-group"><input type="hidden" name="transparent" value="0"><label class="checkbox-inline"><input type="checkbox" name="transparent" id="forward_admin_site_transparent" value="1"> 透传客户端源 IP</label><p class="help-block">开启后保留访客真实源地址；关闭后可选填回源 IP。</p></div>';
-    echo '<div class="form-group" id="forward_admin_site_source_wrap"><label for="forward_admin_site_backend_source_ip">回源 IP</label><input type="text" class="form-control" name="backend_source_ip" id="forward_admin_site_backend_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Forward 宿主机上的本地 IPv4。</p></div>';
+    echo '<div class="form-group"><input type="hidden" name="transparent" value="0"><label class="checkbox-inline"><input type="checkbox" name="transparent" id="forward_admin_site_transparent" value="1"> 透传客户端源 IP</label><p class="help-block">开启后保留访客真实源地址；当前仅支持 IPv4 入口与目标 IP 组合，关闭后可选填回源 IP。</p></div>';
+    echo '<div class="form-group" id="forward_admin_site_source_wrap"><label for="forward_admin_site_backend_source_ip">回源 IP</label><input type="text" class="form-control" name="backend_source_ip" id="forward_admin_site_backend_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Forward 宿主机上的本地 IP，且与目标 IP 地址族一致。</p></div>';
     echo '<div class="form-group"><label for="forward_admin_site_description">描述</label><textarea class="form-control" name="description" id="forward_admin_site_description" rows="3"></textarea></div>';
     echo '<div class="alert alert-info" style="margin-bottom:0;">站点会写入 forward 的 <code>/api/sites</code>；多宿主机场景请先明确宿主机，再从该宿主机的入口 IP 池中选择，域名仍需唯一。</div>';
     echo '</div><div class="modal-footer"><button type="button" class="btn btn-default" data-dismiss="modal">取消</button><button type="submit" class="btn btn-primary">保存</button></div></form>';
@@ -3171,26 +3699,6 @@ HTML;
   function normalizeServerId(value) {
     var parsed = parseInt(value, 10);
     return isNaN(parsed) ? 0 : parsed;
-  }
-
-  function isValidIPv4(value) {
-    var parts = $.trim(String(value || '')).split('.');
-    var i;
-    if (parts.length !== 4) {
-      return false;
-    }
-    for (i = 0; i < parts.length; i++) {
-      if (!/^\d+$/.test(parts[i])) {
-        return false;
-      }
-      if (parts[i].length > 1 && parts[i].charAt(0) === '0') {
-        return false;
-      }
-      if (parseInt(parts[i], 10) < 0 || parseInt(parts[i], 10) > 255) {
-        return false;
-      }
-    }
-    return true;
   }
 
   function syncAdminTransparentSource(toggleSelector, sourceSelector, wrapSelector, sourceValue) {
@@ -3440,14 +3948,6 @@ HTML;
 
   $('#forwardAdminRuleForm').on('submit', function (e) {
     e.preventDefault();
-    if (!$('#forward_admin_rule_transparent').is(':checked')) {
-      var ruleSourceIP = $.trim($('#forward_admin_rule_out_source_ip').val());
-      if (ruleSourceIP && !isValidIPv4(ruleSourceIP)) {
-        alert('回源 IP 必须是有效的 IPv4 地址');
-        $('#forward_admin_rule_out_source_ip').focus();
-        return;
-      }
-    }
     var formData = $(this).serializeArray();
     formData.push({name: 'action', value: $('#forward_admin_rule_id').val() ? 'edit_rule' : 'add_rule'});
     $.ajax({
@@ -3468,14 +3968,6 @@ HTML;
 
   $('#forwardAdminSiteForm').on('submit', function (e) {
     e.preventDefault();
-    if (!$('#forward_admin_site_transparent').is(':checked')) {
-      var siteSourceIP = $.trim($('#forward_admin_site_backend_source_ip').val());
-      if (siteSourceIP && !isValidIPv4(siteSourceIP)) {
-        alert('回源 IP 必须是有效的 IPv4 地址');
-        $('#forward_admin_site_backend_source_ip').focus();
-        return;
-      }
-    }
     var formData = $(this).serializeArray();
     formData.push({name: 'action', value: $('#forward_admin_site_id').val() ? 'edit_site' : 'add_site'});
     $.ajax({
@@ -3602,6 +4094,7 @@ function forward_clientarea($vars)
             'client_site_can_edit_backend_ports' => !empty($clientPermissions['site']['backend_ports']),
             'client_site_can_edit_description' => !empty($clientPermissions['site']['description']),
             'server_ip' => $allServerIps[0] ?? '0.0.0.0',
+            'server_ip_endpoint' => forward_format_ip_for_endpoint($allServerIps[0] ?? '0.0.0.0'),
             'server_ip_summary' => forward_format_ip_list($allServerIps),
             'server_ips' => $allServerIps,
             'client_port_min' => (int) $clientListenPortRange['min'],
