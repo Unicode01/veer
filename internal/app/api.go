@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -186,6 +185,20 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	}))
+	mux.HandleFunc("/api/egress-nats", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListEgressNATs(w, r, db, pm)
+		case http.MethodPost:
+			handleAddEgressNAT(w, r, db, pm)
+		case http.MethodPut:
+			handleUpdateEgressNAT(w, r, db, pm)
+		case http.MethodDelete:
+			handleDeleteEgressNAT(w, r, db, pm)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
 	mux.HandleFunc("/api/rules/toggle", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		handleToggleRule(w, r, db, pm)
 	}))
@@ -194,6 +207,9 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 	}))
 	mux.HandleFunc("/api/ranges/toggle", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		handleToggleRange(w, r, db, pm)
+	}))
+	mux.HandleFunc("/api/egress-nats/toggle", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleToggleEgressNAT(w, r, db, pm)
 	}))
 	mux.HandleFunc("/api/workers", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -222,6 +238,13 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 			return
 		}
 		handleListRangeStats(w, r, db, pm)
+	}))
+	mux.HandleFunc("/api/egress-nats/stats", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleListEgressNATStats(w, r, db, pm)
 	}))
 	mux.HandleFunc("/api/sites/stats", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -281,47 +304,12 @@ func handleInterfaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ifaces, err := net.Interfaces()
+	ifaces, err := loadInterfaceInfos()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
-	var result []InterfaceInfo
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		info := InterfaceInfo{Name: iface.Name}
-		seen := make(map[string]struct{})
-		for _, addr := range addrs {
-			var ip net.IP
-			switch item := addr.(type) {
-			case *net.IPNet:
-				ip = item.IP
-			case *net.IPAddr:
-				ip = item.IP
-			}
-			if !isVisibleInterfaceIP(ip) {
-				continue
-			}
-			text := canonicalIPLiteral(ip)
-			if _, ok := seen[text]; ok {
-				continue
-			}
-			seen[text] = struct{}{}
-			info.Addrs = append(info.Addrs, text)
-		}
-		if len(info.Addrs) > 0 {
-			sort.Strings(info.Addrs)
-			result = append(result, info)
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Name < result[j].Name
-	})
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, ifaces)
 }
 
 func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
@@ -922,7 +910,7 @@ func normalizeAndValidateRule(rule Rule, scope string, index int, requireID bool
 	rule.Protocol = strings.ToLower(strings.TrimSpace(rule.Protocol))
 	rule.Remark = strings.TrimSpace(rule.Remark)
 	rule.Tag = strings.TrimSpace(rule.Tag)
-	rule.EnginePreference = ruleEngineAuto
+	rule.EnginePreference = normalizeRuleEnginePreference(rule.EnginePreference)
 	if rule.Protocol == "" {
 		rule.Protocol = "tcp"
 	}
@@ -967,6 +955,9 @@ func normalizeAndValidateRule(rule Rule, scope string, index int, requireID bool
 	}
 	if rule.Protocol != "tcp" && rule.Protocol != "udp" && rule.Protocol != "tcp+udp" {
 		issues = appendRuleIssue(issues, scope, index, rule.ID, "protocol", "must be tcp, udp, or tcp+udp")
+	}
+	if !isValidRuleEnginePreference(rule.EnginePreference) {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "engine_preference", "must be auto, userspace, or kernel")
 	}
 	if rule.InInterface != "" {
 		if _, ok := knownIfaces[rule.InInterface]; !ok {
@@ -1187,16 +1178,7 @@ func ruleProtocolsOverlap(a, b string) bool {
 }
 
 func ruleProtocolMask(protocol string) int {
-	switch protocol {
-	case "tcp":
-		return 1
-	case "udp":
-		return 2
-	case "tcp+udp":
-		return 3
-	default:
-		return 0
-	}
+	return protocolMaskFromString(protocol)
 }
 
 func ruleInterfacesOverlap(a, b string) bool {
@@ -1721,6 +1703,36 @@ func handleListRanges(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	writeJSON(w, http.StatusOK, statuses)
 }
 
+func handleListEgressNATs(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	items, err := dbGetEgressNATs(db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	items = normalizeEgressNATItemsWithCurrentInterfaces(items)
+
+	statuses := make([]EgressNATStatus, 0, len(items))
+	for _, item := range items {
+		status := "stopped"
+		if pm != nil {
+			status = pm.egressNATRuntimeStatus(item.ID, item.Enabled)
+		}
+		if pm != nil {
+			statuses = append(statuses, pm.buildEgressNATStatus(item, status))
+			continue
+		}
+		statuses = append(statuses, EgressNATStatus{
+			EgressNAT:       item,
+			Status:          status,
+			EffectiveEngine: ruleEngineKernel,
+		})
+	}
+	if statuses == nil {
+		statuses = []EgressNATStatus{}
+	}
+	writeJSON(w, http.StatusOK, statuses)
+}
+
 func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	page := 1
 	pageSize := 0
@@ -1748,6 +1760,12 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	allEgressNATs, err := dbGetEgressNATs(db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	allEgressNATs = normalizeEgressNATItemsWithCurrentInterfaces(allEgressNATs)
 
 	enabledSites := 0
 	if sites, err := dbGetSites(db); err == nil {
@@ -2069,7 +2087,43 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		workers = append(workers, view)
 	}
 
-	kindOrder := map[string]int{"kernel": 0, "rule": 1, "range": 2, "shared": 3}
+	enabledEgressNATs := make([]EgressNATStatus, 0, len(allEgressNATs))
+	for _, item := range allEgressNATs {
+		if !item.Enabled {
+			continue
+		}
+		enabledEgressNATs = append(enabledEgressNATs, pm.buildEgressNATStatus(item, pm.egressNATRuntimeStatus(item.ID, item.Enabled)))
+	}
+	if len(enabledEgressNATs) > 0 {
+		sort.Slice(enabledEgressNATs, func(i, j int) bool { return enabledEgressNATs[i].ID < enabledEgressNATs[j].ID })
+
+		status := "stopped"
+		hasError := false
+		for _, item := range enabledEgressNATs {
+			if item.Status == "running" {
+				status = "running"
+				hasError = false
+				break
+			}
+			if item.Status == "error" {
+				hasError = true
+			}
+		}
+		if status != "running" && hasError {
+			status = "error"
+		}
+
+		workers = append(workers, WorkerView{
+			Kind:           workerKindEgressNAT,
+			Index:          0,
+			Status:         status,
+			BinaryHash:     kernelBinaryHash,
+			EgressNATCount: len(enabledEgressNATs),
+			EgressNATs:     enabledEgressNATs,
+		})
+	}
+
+	kindOrder := map[string]int{"kernel": 0, "rule": 1, "range": 2, workerKindEgressNAT: 3, "shared": 4}
 	sort.Slice(workers, func(i, j int) bool {
 		ki := kindOrder[workers[i].Kind]
 		kj := kindOrder[workers[j].Kind]
@@ -2282,6 +2336,167 @@ func handleDeleteRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+func handleAddEgressNAT(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	var item EgressNAT
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	item, issues, err := prepareEgressNATCreate(tx, item)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(issues) > 0 {
+		writeValidationIssueResponse(w, http.StatusBadRequest, issues)
+		return
+	}
+
+	id, err := dbAddEgressNAT(tx, &item)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	item.ID = id
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	pm.redistributeWorkers()
+	writeJSON(w, http.StatusOK, item)
+}
+
+func handleUpdateEgressNAT(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	var item EgressNAT
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	item, issues, err := prepareEgressNATUpdate(tx, item)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(issues) > 0 {
+		status := http.StatusBadRequest
+		if hasValidationMessage(issues, "egress nat not found") {
+			status = http.StatusNotFound
+		}
+		writeValidationIssueResponse(w, status, issues)
+		return
+	}
+
+	if err := dbUpdateEgressNAT(tx, &item); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	pm.redistributeWorkers()
+	writeJSON(w, http.StatusOK, item)
+}
+
+func handleToggleEgressNAT(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	idStr := r.URL.Query().Get("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("toggle", 0, "id", "invalid id"))
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	item, issues, err := prepareEgressNATToggle(tx, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(issues) > 0 {
+		status := http.StatusBadRequest
+		if hasValidationMessage(issues, "egress nat not found") {
+			status = http.StatusNotFound
+		}
+		writeValidationIssueResponse(w, status, issues)
+		return
+	}
+	if err := dbSetEgressNATEnabled(tx, id, item.Enabled); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	pm.redistributeWorkers()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"id": id, "enabled": item.Enabled})
+}
+
+func handleDeleteEgressNAT(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	idStr := r.URL.Query().Get("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("delete", 0, "id", "invalid id"))
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := dbGetEgressNAT(tx, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeValidationIssueResponse(w, http.StatusNotFound, singleValidationIssue("delete", id, "id", "egress nat not found"))
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := dbDeleteEgressNAT(tx, id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	pm.redistributeWorkers()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 func parseStatsListQuery(r *http.Request, allowedSortKeys map[string]struct{}) (statsListQuery, error) {
 	query := statsListQuery{
 		Page:     1,
@@ -2405,6 +2620,46 @@ func paginateRangeStatsItems(items []RangeStatsListItem, query statsListQuery) R
 	return resp
 }
 
+func paginateEgressNATStatsItems(items []EgressNATStatsListItem, query statsListQuery) EgressNATStatsListResponse {
+	total := len(items)
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	totalPages := 1
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	page := query.Page
+	if page > totalPages {
+		page = totalPages
+	}
+	if page < 1 {
+		page = 1
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	resp := EgressNATStatsListResponse{
+		Page:     page,
+		PageSize: pageSize,
+		Total:    total,
+		SortKey:  query.SortKey,
+		SortAsc:  query.SortAsc,
+		Items:    make([]EgressNATStatsListItem, 0, end-start),
+	}
+	if start < end {
+		resp.Items = append(resp.Items, items[start:end]...)
+	}
+	return resp
+}
+
 func ruleStatsPageIDs(items []RuleStatsListItem) []int64 {
 	ids := make([]int64, 0, len(items))
 	for _, item := range items {
@@ -2476,6 +2731,45 @@ func rangeStatsLess(a, b RangeStatsListItem, sortKey string, sortAsc bool) bool 
 	}
 	if compare == 0 {
 		compare = compareInt64(a.RangeID, b.RangeID)
+	}
+	if sortAsc {
+		return compare < 0
+	}
+	return compare > 0
+}
+
+func egressNATStatsLess(a, b EgressNATStatsListItem, sortKey string, sortAsc bool) bool {
+	compare := 0
+	switch sortKey {
+	case "parent_interface":
+		compare = strings.Compare(strings.ToLower(a.ParentInterface), strings.ToLower(b.ParentInterface))
+	case "child_interface":
+		compare = strings.Compare(strings.ToLower(a.ChildInterface), strings.ToLower(b.ChildInterface))
+	case "out_interface":
+		compare = strings.Compare(strings.ToLower(a.OutInterface), strings.ToLower(b.OutInterface))
+	case "out_source_ip":
+		compare = strings.Compare(strings.ToLower(a.OutSourceIP), strings.ToLower(b.OutSourceIP))
+	case "protocol":
+		compare = strings.Compare(strings.ToLower(a.Protocol), strings.ToLower(b.Protocol))
+	case "nat_type":
+		compare = strings.Compare(strings.ToLower(a.NATType), strings.ToLower(b.NATType))
+	case "current_conns":
+		compare = compareInt64(a.CurrentConns, b.CurrentConns)
+	case "total_conns":
+		compare = compareInt64(a.TotalConns, b.TotalConns)
+	case "speed_in":
+		compare = compareInt64(a.SpeedIn, b.SpeedIn)
+	case "speed_out":
+		compare = compareInt64(a.SpeedOut, b.SpeedOut)
+	case "bytes_in":
+		compare = compareInt64(a.BytesIn, b.BytesIn)
+	case "bytes_out":
+		compare = compareInt64(a.BytesOut, b.BytesOut)
+	default:
+		compare = compareInt64(a.EgressNATID, b.EgressNATID)
+	}
+	if compare == 0 {
+		compare = compareInt64(a.EgressNATID, b.EgressNATID)
 	}
 	if sortAsc {
 		return compare < 0
@@ -2620,6 +2914,68 @@ func handleListRangeStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func handleListEgressNATStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	query, err := parseStatsListQuery(r, map[string]struct{}{
+		"egress_nat_id":    {},
+		"parent_interface": {},
+		"child_interface":  {},
+		"out_interface":    {},
+		"out_source_ip":    {},
+		"protocol":         {},
+		"nat_type":         {},
+		"current_conns":    {},
+		"total_conns":      {},
+		"speed_in":         {},
+		"speed_out":        {},
+		"bytes_in":         {},
+		"bytes_out":        {},
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	pm.markKernelStatsDemand()
+	pm.refreshKernelStatsCacheIfNeeded()
+	statsMap := pm.collectEgressNATStats()
+	if len(statsMap) == 0 {
+		writeJSON(w, http.StatusOK, paginateEgressNATStatsItems(nil, query))
+		return
+	}
+
+	items, err := dbGetEgressNATs(db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	items = normalizeEgressNATItemsWithCurrentInterfaces(items)
+	metaByID := make(map[int64]EgressNAT, len(items))
+	for _, item := range items {
+		metaByID[item.ID] = item
+	}
+
+	result := make([]EgressNATStatsListItem, 0, len(statsMap))
+	for _, s := range statsMap {
+		meta := metaByID[s.EgressNATID]
+		result = append(result, EgressNATStatsListItem{
+			EgressNATStatsReport: s,
+			ParentInterface:      meta.ParentInterface,
+			ChildInterface:       meta.ChildInterface,
+			OutInterface:         meta.OutInterface,
+			OutSourceIP:          meta.OutSourceIP,
+			Protocol:             meta.Protocol,
+			NATType:              meta.NATType,
+			CurrentConns:         currentConnCountForProtocol(meta.Protocol, s.ActiveConns, int64(s.NatTableSize)),
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return egressNATStatsLess(result[i], result[j], query.SortKey, query.SortAsc)
+	})
+
+	writeJSON(w, http.StatusOK, paginateEgressNATStatsItems(result, query))
+}
+
 func handleListSiteStats(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
 	stats := pm.collectSiteStats()
 	if stats == nil {
@@ -2640,6 +2996,11 @@ func handleListCurrentConns(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	egressNATs, err := dbGetEgressNATs(db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
 	ruleProtocols := make(map[int64]string, len(rules))
 	for _, rule := range rules {
@@ -2649,17 +3010,22 @@ func handleListCurrentConns(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 	for _, pr := range ranges {
 		rangeProtocols[pr.ID] = pr.Protocol
 	}
+	egressNATProtocols := make(map[int64]string, len(egressNATs))
+	for _, item := range egressNATs {
+		egressNATProtocols[item.ID] = item.Protocol
+	}
 
-	ruleCounts, rangeCounts, siteCounts, err := pm.collectCurrentConns(ruleProtocols, rangeProtocols)
+	ruleCounts, rangeCounts, siteCounts, egressNATCounts, err := pm.collectCurrentConns(ruleProtocols, rangeProtocols, egressNATProtocols)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	resp := CurrentConnsResponse{
-		Rules:  make([]RuleCurrentConnsReport, 0, len(ruleCounts)),
-		Ranges: make([]RangeCurrentConnsReport, 0, len(rangeCounts)),
-		Sites:  make([]SiteCurrentConnsReport, 0, len(siteCounts)),
+		Rules:      make([]RuleCurrentConnsReport, 0, len(ruleCounts)),
+		Ranges:     make([]RangeCurrentConnsReport, 0, len(rangeCounts)),
+		Sites:      make([]SiteCurrentConnsReport, 0, len(siteCounts)),
+		EgressNATs: make([]EgressNATCurrentConnsReport, 0, len(egressNATCounts)),
 	}
 	for id, current := range ruleCounts {
 		resp.Rules = append(resp.Rules, RuleCurrentConnsReport{RuleID: id, CurrentConns: current})
@@ -2670,9 +3036,13 @@ func handleListCurrentConns(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 	for id, current := range siteCounts {
 		resp.Sites = append(resp.Sites, SiteCurrentConnsReport{SiteID: id, CurrentConns: current})
 	}
+	for id, current := range egressNATCounts {
+		resp.EgressNATs = append(resp.EgressNATs, EgressNATCurrentConnsReport{EgressNATID: id, CurrentConns: current})
+	}
 
 	sort.Slice(resp.Rules, func(i, j int) bool { return resp.Rules[i].RuleID < resp.Rules[j].RuleID })
 	sort.Slice(resp.Ranges, func(i, j int) bool { return resp.Ranges[i].RangeID < resp.Ranges[j].RangeID })
 	sort.Slice(resp.Sites, func(i, j int) bool { return resp.Sites[i].SiteID < resp.Sites[j].SiteID })
+	sort.Slice(resp.EgressNATs, func(i, j int) bool { return resp.EgressNATs[i].EgressNATID < resp.EgressNATs[j].EgressNATID })
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -68,6 +68,37 @@ func TestNormalizeAndValidateRuleAllowsIPv6UDP(t *testing.T) {
 	}
 }
 
+func TestNormalizeAndValidateRulePreservesEnginePreference(t *testing.T) {
+	rule, issues := normalizeAndValidateRule(Rule{
+		InIP:             "0.0.0.0",
+		InPort:           8080,
+		OutIP:            "192.0.2.10",
+		OutPort:          80,
+		Protocol:         "tcp",
+		EnginePreference: ruleEngineUserspace,
+	}, "create", 1, false, map[string]struct{}{}, hostInterfaceAddrs{})
+	if len(issues) != 0 {
+		t.Fatalf("normalizeAndValidateRule() issues = %#v, want none", issues)
+	}
+	if rule.EnginePreference != ruleEngineUserspace {
+		t.Fatalf("EnginePreference = %q, want %q", rule.EnginePreference, ruleEngineUserspace)
+	}
+}
+
+func TestNormalizeAndValidateRuleRejectsInvalidEnginePreference(t *testing.T) {
+	_, issues := normalizeAndValidateRule(Rule{
+		InIP:             "0.0.0.0",
+		InPort:           8080,
+		OutIP:            "192.0.2.10",
+		OutPort:          80,
+		Protocol:         "tcp",
+		EnginePreference: "invalid",
+	}, "create", 1, false, map[string]struct{}{}, hostInterfaceAddrs{})
+	if !hasValidationMessage(issues, "must be auto, userspace, or kernel") {
+		t.Fatalf("normalizeAndValidateRule() issues = %#v, want engine_preference rejection", issues)
+	}
+}
+
 func TestNormalizeAndValidateSiteAllowsIPv6ListenAndBackend(t *testing.T) {
 	site, errText := normalizeAndValidateSite(Site{
 		Domain:      "example.com",
@@ -258,7 +289,7 @@ func TestPrepareRuleBatchAllowsSeparateIPv4AndIPv6Listeners(t *testing.T) {
 	}
 }
 
-func TestRuleDataplanePlannerFallsBackForIPv6AndMixedFamily(t *testing.T) {
+func TestRuleDataplanePlannerHandlesIPv6KernelEligibility(t *testing.T) {
 	planner := newRuleDataplanePlanner(stubKernelSupportRuntime{
 		available: true,
 		supported: true,
@@ -267,10 +298,12 @@ func TestRuleDataplanePlannerFallsBackForIPv6AndMixedFamily(t *testing.T) {
 	tests := []struct {
 		name       string
 		rule       Rule
+		wantKernel bool
+		wantEngine string
 		wantReason string
 	}{
 		{
-			name: "ipv6 only",
+			name: "ipv6 fullnat",
 			rule: Rule{
 				ID:               1,
 				InInterface:      "eno1",
@@ -282,21 +315,42 @@ func TestRuleDataplanePlannerFallsBackForIPv6AndMixedFamily(t *testing.T) {
 				Protocol:         "tcp",
 				EnginePreference: ruleEngineKernel,
 			},
-			wantReason: "kernel dataplane currently supports only IPv4 rules",
+			wantKernel: true,
+			wantEngine: ruleEngineKernel,
 		},
 		{
-			name: "mixed family",
+			name: "transparent ipv6",
 			rule: Rule{
 				ID:               2,
 				InInterface:      "eno1",
 				InIP:             "::",
 				InPort:           8081,
 				OutInterface:     "eno2",
+				OutIP:            "2001:db8::20",
+				OutPort:          80,
+				Protocol:         "tcp",
+				Transparent:      true,
+				EnginePreference: ruleEngineKernel,
+			},
+			wantKernel: false,
+			wantEngine: ruleEngineUserspace,
+			wantReason: "kernel dataplane currently does not support transparent IPv6 rules",
+		},
+		{
+			name: "mixed family",
+			rule: Rule{
+				ID:               3,
+				InInterface:      "eno1",
+				InIP:             "::",
+				InPort:           8082,
+				OutInterface:     "eno2",
 				OutIP:            "192.0.2.20",
 				OutPort:          80,
 				Protocol:         "tcp",
 				EnginePreference: ruleEngineKernel,
 			},
+			wantKernel: false,
+			wantEngine: ruleEngineUserspace,
 			wantReason: "kernel dataplane does not support mixed IPv4/IPv6 forwarding",
 		},
 	}
@@ -304,14 +358,14 @@ func TestRuleDataplanePlannerFallsBackForIPv6AndMixedFamily(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := planner.Plan(tc.rule)
-			if plan.KernelEligible {
-				t.Fatal("KernelEligible = true, want false")
+			if plan.KernelEligible != tc.wantKernel {
+				t.Fatalf("KernelEligible = %t, want %t", plan.KernelEligible, tc.wantKernel)
 			}
 			if plan.KernelReason != tc.wantReason {
 				t.Fatalf("KernelReason = %q, want %q", plan.KernelReason, tc.wantReason)
 			}
-			if plan.EffectiveEngine != ruleEngineUserspace {
-				t.Fatalf("EffectiveEngine = %q, want %q", plan.EffectiveEngine, ruleEngineUserspace)
+			if plan.EffectiveEngine != tc.wantEngine {
+				t.Fatalf("EffectiveEngine = %q, want %q", plan.EffectiveEngine, tc.wantEngine)
 			}
 			if plan.FallbackReason != tc.wantReason {
 				t.Fatalf("FallbackReason = %q, want %q", plan.FallbackReason, tc.wantReason)

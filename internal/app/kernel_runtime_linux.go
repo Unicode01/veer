@@ -21,24 +21,34 @@ import (
 )
 
 const (
-	kernelForwardProgramName  = "forward_ingress"
-	kernelReplyProgramName    = "reply_ingress"
-	kernelRulesMapName        = "rules_v4"
-	kernelFlowsMapName        = "flows_v4"
-	kernelNatPortsMapName     = "nat_ports_v4"
-	kernelStatsMapName        = "stats_v4"
-	kernelDiagMapName         = "diag_v4"
-	kernelReplyFilterPrio     = 10
-	kernelForwardFilterPrio   = 20
-	kernelForwardFilterHandle = 10
-	kernelReplyFilterHandle   = 20
-	kernelVerifierLogSize     = 4 * 1024 * 1024
-	kernelTCPClosingGraceNS   = 15 * 1000000000
-	kernelTCPUnrepliedTimeout = 30 * 1000000000
-	kernelTCPFlowIdleTimeout  = 10 * 60 * 1000000000
-	kernelUDPFlowIdleTimeout  = 300 * 1000000000
-	kernelNATPortMin          = 20000
-	kernelNATPortMax          = 60999
+	kernelForwardProgramName        = "forward_ingress"
+	kernelReplyProgramName          = "reply_ingress"
+	kernelForwardProgramNameV6      = "forward_ingress_v6"
+	kernelReplyProgramNameV6        = "reply_ingress_v6"
+	kernelRulesMapName              = kernelRulesMapNameV4
+	kernelFlowsMapName              = kernelFlowsMapNameV4
+	kernelNatPortsMapName           = kernelNatPortsMapNameV4
+	kernelIfParentMapName           = "if_parent_v4"
+	kernelLocalIPv4MapName          = "local_ipv4s_v4"
+	kernelEgressWildcardFastMapName = "egress_wildcard_fast_v4"
+	kernelNATConfigMapName          = "nat_config_v4"
+	kernelStatsMapName              = "stats_v4"
+	kernelDiagMapName               = "diag_v4"
+	kernelOccupancyMapName          = "occupancy_v4"
+	kernelReplyFilterPrio           = 10
+	kernelReplyFilterPrioV6         = 11
+	kernelForwardFilterPrio         = 20
+	kernelForwardFilterPrioV6       = 21
+	kernelForwardFilterHandle       = 10
+	kernelForwardFilterHandleV6     = 11
+	kernelReplyFilterHandle         = 20
+	kernelReplyFilterHandleV6       = 21
+	kernelVerifierLogSize           = 4 * 1024 * 1024
+	kernelTCPClosingGraceNS         = 15 * 1000000000
+	kernelTCPUnrepliedTimeout       = 30 * 1000000000
+	kernelTCPFlowIdleTimeout        = 10 * 60 * 1000000000
+	kernelICMPFlowIdleTimeout       = 30 * 1000000000
+	kernelUDPFlowIdleTimeout        = 300 * 1000000000
 )
 
 const (
@@ -46,13 +56,18 @@ const (
 	kernelFlowFlagReplySeen    = 0x2
 	kernelFlowFlagFullNAT      = 0x4
 	kernelFlowFlagFrontEntry   = 0x8
+	kernelFlowFlagEgressNAT    = 0x10
 	kernelFlowFlagCounted      = 0x20
+	kernelFlowFlagFullCone     = 0x80
 )
 
 const (
 	kernelRuleFlagFullNAT      = 0x1
 	kernelRuleFlagBridgeL2     = 0x2
 	kernelRuleFlagTrafficStats = 0x4
+	kernelRuleFlagEgressNAT    = 0x8
+	kernelRuleFlagPassthrough  = 0x10
+	kernelRuleFlagFullCone     = 0x20
 )
 
 //go:embed ebpf/forward-tc-bpf.o
@@ -113,6 +128,15 @@ type tcNATPortKeyV4 struct {
 	Pad     uint8
 }
 
+type tcNATConfigValueV4 struct {
+	PortMin uint32
+	PortMax uint32
+	Pad0    uint32
+	Pad1    uint32
+}
+
+type tcEgressWildcardKeyV4 = tcRuleKeyV4
+
 type kernelAttachment struct {
 	filter *netlink.BpfFilter
 }
@@ -140,6 +164,40 @@ type kernelRuleMapSnapshot struct {
 	exists bool
 }
 
+type kernelRuleMapEntryV6 struct {
+	key   tcRuleKeyV6
+	value tcRuleValueV6
+}
+
+type kernelRuleMapDiffV6 struct {
+	upserts []kernelRuleMapEntryV6
+	deletes []tcRuleKeyV6
+}
+
+type kernelRuleMapSnapshotV6 struct {
+	key    tcRuleKeyV6
+	value  tcRuleValueV6
+	exists bool
+}
+
+type kernelDualStackRuleMapDiff struct {
+	v4 kernelRuleMapDiff
+	v6 kernelRuleMapDiffV6
+}
+
+type kernelCollectionPieces struct {
+	forwardProg   *ebpf.Program
+	replyProg     *ebpf.Program
+	forwardProgV6 *ebpf.Program
+	replyProgV6   *ebpf.Program
+	rulesV4       *ebpf.Map
+	rulesV6       *ebpf.Map
+	flowsV4       *ebpf.Map
+	flowsV6       *ebpf.Map
+	natV4         *ebpf.Map
+	natV6         *ebpf.Map
+}
+
 type kernelAttachmentPlan struct {
 	key         kernelAttachmentKey
 	ifindex     int
@@ -150,11 +208,19 @@ type kernelAttachmentPlan struct {
 }
 
 type preparedKernelRule struct {
-	rule       Rule
-	inIfIndex  int
-	outIfIndex int
-	key        tcRuleKeyV4
-	value      tcRuleValueV4
+	rule           Rule
+	inIfIndex      int
+	outIfIndex     int
+	replyIfIndexes []int
+	replyIfParents []kernelIfParentMapping
+	spec           kernelPreparedRuleSpec
+	key            tcRuleKeyV4
+	value          tcRuleValueV4
+}
+
+type kernelIfParentMapping struct {
+	ifindex       int
+	parentIfIndex int
 }
 
 type preparedKernelPath struct {
@@ -174,6 +240,11 @@ type cachedKernelSNAT struct {
 	err  error
 }
 
+type cachedKernelSNATIP struct {
+	addr net.IP
+	err  error
+}
+
 type cachedKernelPath struct {
 	path preparedKernelPath
 	err  error
@@ -183,6 +254,7 @@ type kernelPrepareContext struct {
 	enableTrafficStats bool
 	links              map[string]cachedKernelLink
 	snatAddrs          map[string]cachedKernelSNAT
+	snatIPs            map[string]cachedKernelSNATIP
 	outPaths           map[string]cachedKernelPath
 }
 
@@ -191,6 +263,7 @@ func newKernelPrepareContext(enableTrafficStats bool) *kernelPrepareContext {
 		enableTrafficStats: enableTrafficStats,
 		links:              make(map[string]cachedKernelLink),
 		snatAddrs:          make(map[string]cachedKernelSNAT),
+		snatIPs:            make(map[string]cachedKernelSNATIP),
 		outPaths:           make(map[string]cachedKernelPath),
 	}
 }
@@ -222,6 +295,46 @@ func (ctx *kernelPrepareContext) resolveSNATIPv4(link netlink.Link, backendIP st
 		ctx.snatAddrs[key] = cachedKernelSNAT{addr: addr, err: err}
 	}
 	return addr, err
+}
+
+func (ctx *kernelPrepareContext) resolveEgressSNATIPv4(link netlink.Link, preferredIP string) (uint32, error) {
+	if link == nil || link.Attrs() == nil {
+		return 0, fmt.Errorf("invalid outbound interface")
+	}
+	key := fmt.Sprintf("egress|%d|%s", link.Attrs().Index, strings.TrimSpace(preferredIP))
+	if ctx != nil {
+		if item, ok := ctx.snatAddrs[key]; ok {
+			return item.addr, item.err
+		}
+	}
+	addr, err := resolveKernelEgressSNATIPv4(link, preferredIP)
+	if ctx != nil {
+		ctx.snatAddrs[key] = cachedKernelSNAT{addr: addr, err: err}
+	}
+	return addr, err
+}
+
+func (ctx *kernelPrepareContext) resolveSNATIPv6(link netlink.Link, backendIP string, preferredIP string) (net.IP, error) {
+	if link == nil || link.Attrs() == nil {
+		return nil, fmt.Errorf("invalid outbound interface")
+	}
+	key := fmt.Sprintf("v6|%d|%s|%s", link.Attrs().Index, strings.TrimSpace(backendIP), strings.TrimSpace(preferredIP))
+	if ctx != nil {
+		if item, ok := ctx.snatIPs[key]; ok {
+			if item.addr == nil {
+				return nil, item.err
+			}
+			return append(net.IP(nil), item.addr...), item.err
+		}
+	}
+	addr, err := resolveKernelSNATIPv6(link, backendIP, preferredIP)
+	if ctx != nil {
+		ctx.snatIPs[key] = cachedKernelSNATIP{addr: append(net.IP(nil), addr...), err: err}
+	}
+	if addr == nil {
+		return nil, err
+	}
+	return append(net.IP(nil), addr...), err
 }
 
 func (ctx *kernelPrepareContext) resolveOutboundPath(outLink netlink.Link, rule Rule) (preparedKernelPath, error) {
@@ -256,6 +369,8 @@ type linuxKernelRuleRuntime struct {
 	rulesMapLimit      int
 	flowsMapLimit      int
 	natMapLimit        int
+	natPortMin         int
+	natPortMax         int
 	rulesMapCapacity   int
 	flowsMapCapacity   int
 	natMapCapacity     int
@@ -283,6 +398,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	rulesLimit := 0
 	flowsLimit := 0
 	natLimit := 0
+	natPortMin, natPortMax := effectiveKernelNATPortRange(0, 0)
 	enableTrafficStats := false
 	enableDiagnostics := false
 	enableDiagVerbose := false
@@ -290,6 +406,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
 		natLimit = cfg.KernelNATMapLimit
+		natPortMin, natPortMax = effectiveKernelNATPortRange(cfg.KernelNATPortMin, cfg.KernelNATPortMax)
 		enableTrafficStats = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
 		enableDiagnostics = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag)
 		enableDiagVerbose = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
@@ -301,6 +418,8 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		rulesMapLimit:      rulesLimit,
 		flowsMapLimit:      flowsLimit,
 		natMapLimit:        natLimit,
+		natPortMin:         natPortMin,
+		natPortMax:         natPortMax,
 		statsCorrection:    make(map[uint32]kernelRuleStats),
 		enableTrafficStats: enableTrafficStats,
 		enableDiagnostics:  enableDiagnostics,
@@ -354,18 +473,36 @@ func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
 }
 
 func (rt *linuxKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
-	_, err := prepareKernelRule(newKernelPrepareContext(rt.enableTrafficStats), rule)
+	prepared, err := prepareKernelRule(newKernelPrepareContext(rt.enableTrafficStats), rule)
 	if err != nil {
 		return false, err.Error()
+	}
+	if kernelPreparedRulesIncludeIPv6(prepared) {
+		spec, specErr := loadEmbeddedKernelCollectionSpec(rt.enableTrafficStats)
+		if specErr != nil {
+			return false, specErr.Error()
+		}
+		if validateErr := validateKernelCollectionSpec(spec); validateErr != nil {
+			return false, validateErr.Error()
+		}
+		if !kernelCollectionSpecSupportsIPv6(spec) {
+			return false, "kernel dataplane embedded object is missing IPv6 tc maps; rebuild the tc eBPF object"
+		}
 	}
 	return true, ""
 }
 
-func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
+func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	results := make(map[int64]kernelRuleApplyResult, len(rules))
+	reconcileStartedAt := time.Now()
+	reconcileMetrics := kernelReconcileMetrics{RequestEntries: len(rules)}
+	defer func() {
+		rt.observability.recordReconcile(reconcileStartedAt, time.Since(reconcileStartedAt), reconcileMetrics, reconcileErr, results)
+	}()
+
+	results = make(map[int64]kernelRuleApplyResult, len(rules))
 	if rt.coll == nil && !kernelHotRestartStateExists(kernelEngineTC) {
 		if err := cleanupOrphanTCKernelRuntimeState(); err != nil {
 			log.Printf("kernel dataplane startup cleanup: tc orphan cleanup failed: %v", err)
@@ -379,7 +516,10 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		return results, nil
 	}
 
-	prepared, forwardIfRules, replyIfRules, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats)
+	prepareStartedAt := time.Now()
+	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats)
+	reconcileMetrics.PrepareDuration = time.Since(prepareStartedAt)
+	reconcileMetrics.PreparedEntries = len(prepared)
 	rt.lastSkipLog = logKernelLineSetOnce(rt.lastSkipLog, skipLines)
 	for id, result := range prepareResults {
 		results[id] = result
@@ -394,8 +534,32 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		}
 		return results, nil
 	}
-	if rt.samePreparedRulesLocked(prepared, forwardIfRules, replyIfRules) {
+
+	samePrepared := rt.samePreparedRulesLocked(prepared, forwardIfRules, replyIfRules)
+	desiredEgressWildcardFast := buildKernelEgressWildcardFastMap(prepared)
+	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
+	if localIPv4Err != nil && !samePrepared {
+		msg := fmt.Sprintf("build kernel egress nat local IPv4 inventory: %v", localIPv4Err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("kernel dataplane reconcile: %s", msg)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if samePrepared {
+		if err := syncKernelEgressWildcardFastMap(rt.coll.Maps[kernelEgressWildcardFastMapName], desiredEgressWildcardFast); err != nil {
+			log.Printf("kernel dataplane reconcile: refresh egress wildcard fast map failed: %v", err)
+		}
+		if localIPv4Err != nil {
+			log.Printf("kernel dataplane reconcile: keep current local IPv4 bypass inventory after refresh failure: %v", localIPv4Err)
+		} else if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], desiredLocalIPv4s); err != nil {
+			log.Printf("kernel dataplane reconcile: refresh local IPv4 bypass inventory failed: %v", err)
+		}
 		rt.lastReconcileMode = "steady"
+		reconcileMetrics.AppliedEntries = len(prepared)
 		rt.stateLog.Logf("kernel dataplane reconcile: entry set unchanged, keeping %d active kernel entry(s)", len(prepared))
 		for _, rule := range rules {
 			if current, ok := results[rule.ID]; ok && current.Error != "" {
@@ -406,7 +570,23 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		return results, nil
 	}
 
-	desiredCapacities := desiredKernelMapCapacities(rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit, len(prepared), true)
+	rulesMapLimit, flowsMapLimit, natMapLimit := tcKernelRuntimeConfiguredMapLimits(
+		rt.rulesMapLimit,
+		rt.flowsMapLimit,
+		rt.natMapLimit,
+		preparedKernelRulesNeedEgressNATAutoMapFloors(prepared),
+	)
+	currentCounts := rt.currentRuntimeMapCountsLocked(time.Now())
+	desiredCapacities := desiredKernelMapCapacitiesWithOccupancy(
+		rulesMapLimit,
+		flowsMapLimit,
+		natMapLimit,
+		len(prepared),
+		currentCounts,
+		true,
+		normalizeKernelFlowsMapLimit(rt.flowsMapLimit) == 0,
+		normalizeKernelNATMapLimit(rt.natMapLimit) == 0,
+	)
 	preferFreshMapGrowth := rt.shouldPreferFreshMapGrowthLocked(desiredCapacities)
 	if preferFreshMapGrowth {
 		log.Printf(
@@ -414,7 +594,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		)
 	}
 	if rt.canReconcileInPlaceLocked(desiredCapacities) && !preferFreshMapGrowth {
-		if err := rt.reconcileInPlaceLocked(prepared, forwardIfRules, replyIfRules, results); err == nil {
+		if err := rt.reconcileInPlaceLocked(prepared, forwardIfRules, replyIfRules, parentIfMap, desiredEgressWildcardFast, desiredLocalIPv4s, results, &reconcileMetrics); err == nil {
 			return results, nil
 		} else {
 			log.Printf("kernel dataplane reconcile: in-place update unavailable, falling back to collection rebuild: %v", err)
@@ -444,7 +624,28 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		}
 		return results, nil
 	}
-	desiredCapacities, err = applyKernelMapCapacities(spec, rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit, len(prepared), true)
+	if kernelPreparedRulesIncludeIPv6(prepared) && !kernelCollectionSpecSupportsIPv6(spec) {
+		msg := "kernel dataplane embedded object is missing IPv6 tc maps; rebuild the tc eBPF object"
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("kernel dataplane reconcile: object validation failed: %s", msg)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	desiredCapacities, err = applyKernelMapCapacitiesWithOccupancy(
+		spec,
+		rulesMapLimit,
+		flowsMapLimit,
+		natMapLimit,
+		len(prepared),
+		currentCounts,
+		true,
+		normalizeKernelFlowsMapLimit(rt.flowsMapLimit) == 0,
+		normalizeKernelNATMapLimit(rt.natMapLimit) == 0,
+	)
 	if err != nil {
 		msg := err.Error()
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -480,12 +681,23 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	var hotRestartState *kernelHotRestartMapState
 	hotRestartStatsCorrection := map[uint32]kernelRuleStats{}
 	if rt.coll != nil && rt.coll.Maps != nil {
+		preservedFlowsCapacity := 0
 		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
 			if mapReplacements == nil {
-				mapReplacements = make(map[string]*ebpf.Map, 3)
+				mapReplacements = make(map[string]*ebpf.Map, 5)
 			}
 			mapReplacements[kernelFlowsMapName] = flowsMap
-			actualCapacities.Flows = int(flowsMap.MaxEntries())
+			preservedFlowsCapacity += int(flowsMap.MaxEntries())
+		}
+		if flowsMap := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMap != nil {
+			if mapReplacements == nil {
+				mapReplacements = make(map[string]*ebpf.Map, 5)
+			}
+			mapReplacements[kernelFlowsMapNameV6] = flowsMap
+			preservedFlowsCapacity += int(flowsMap.MaxEntries())
+		}
+		if preservedFlowsCapacity > 0 {
+			actualCapacities.Flows = preservedFlowsCapacity
 			if actualCapacities.Flows < desiredCapacities.Flows {
 				log.Printf(
 					"kernel dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
@@ -495,12 +707,23 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 				)
 			}
 		}
+		preservedNATCapacity := 0
 		if natPortsMap := rt.coll.Maps[kernelNatPortsMapName]; natPortsMap != nil {
 			if mapReplacements == nil {
-				mapReplacements = make(map[string]*ebpf.Map, 3)
+				mapReplacements = make(map[string]*ebpf.Map, 5)
 			}
 			mapReplacements[kernelNatPortsMapName] = natPortsMap
-			actualCapacities.NATPorts = int(natPortsMap.MaxEntries())
+			preservedNATCapacity += int(natPortsMap.MaxEntries())
+		}
+		if natPortsMap := rt.coll.Maps[kernelNatPortsMapNameV6]; natPortsMap != nil {
+			if mapReplacements == nil {
+				mapReplacements = make(map[string]*ebpf.Map, 5)
+			}
+			mapReplacements[kernelNatPortsMapNameV6] = natPortsMap
+			preservedNATCapacity += int(natPortsMap.MaxEntries())
+		}
+		if preservedNATCapacity > 0 {
+			actualCapacities.NATPorts = preservedNATCapacity
 			if actualCapacities.NATPorts < desiredCapacities.NATPorts {
 				log.Printf(
 					"kernel dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
@@ -513,7 +736,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		if statsMap := rt.coll.Maps[kernelStatsMapName]; statsMap != nil {
 			if kernelMapReusableWithCapacity(statsMap, desiredCapacities.Rules) {
 				if mapReplacements == nil {
-					mapReplacements = make(map[string]*ebpf.Map, 3)
+					mapReplacements = make(map[string]*ebpf.Map, 5)
 				}
 				mapReplacements[kernelStatsMapName] = statsMap
 			} else {
@@ -602,7 +825,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		return results, nil
 	}
 
-	forwardProg, replyProg, rulesMap, err := lookupKernelCollectionPieces(coll)
+	pieces, err := lookupKernelCollectionPieces(coll)
 	if err != nil {
 		coll.Close()
 		msg := err.Error()
@@ -615,6 +838,14 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		}
 		return results, nil
 	}
+	forwardProg := pieces.forwardProg
+	replyProg := pieces.replyProg
+	var forwardProgV6 *ebpf.Program
+	var replyProgV6 *ebpf.Program
+	if kernelPreparedRulesIncludeIPv6(prepared) {
+		forwardProgV6 = pieces.forwardProgV6
+		replyProgV6 = pieces.replyProgV6
+	}
 	if oldStatsMap != nil {
 		if err := copyKernelStatsMap(coll.Maps[kernelStatsMapName], oldStatsMap); err != nil {
 			log.Printf("kernel dataplane reconcile: copy %s contents failed: %v", kernelStatsMapName, err)
@@ -626,26 +857,71 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		}
 	}
 	if hotRestartState != nil {
-		if correction, err := reconcileKernelStatsCorrectionFromMaps(coll.Maps[kernelStatsMapName], coll.Maps[kernelFlowsMapName]); err != nil {
+		if correction, err := reconcileKernelStatsCorrectionFromRuntimeMaps(coll.Maps[kernelStatsMapName], kernelRuntimeMapRefsFromCollection(coll)); err != nil {
 			log.Printf("kernel dataplane hot restart: reconcile tc stats against flows failed: %v", err)
 		} else {
 			hotRestartStatsCorrection = correction
 		}
 	}
-
-	keys := make([]tcRuleKeyV4, 0, len(prepared))
-	values := make([]tcRuleValueV4, 0, len(prepared))
-	for _, item := range prepared {
-		keys = append(keys, item.key)
-		values = append(values, item.value)
+	if err := syncKernelOccupancyMapFromCollectionExact(coll, true); err != nil {
+		log.Printf("kernel dataplane reconcile: sync tc occupancy counters failed before attach: %v", err)
 	}
-	if err := updateKernelMapEntries(rulesMap, keys, values); err != nil {
+	if err := syncKernelNATConfigMap(coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax); err != nil {
 		coll.Close()
-		msg := fmt.Sprintf("update kernel rule map: %v", err)
+		msg := fmt.Sprintf("sync kernel nat config map: %v", err)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
 			return results, nil
 		}
-		log.Printf("kernel dataplane rule map bulk update failed: %v", err)
+		log.Printf("kernel dataplane nat config map sync failed: %v", err)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+
+	if err := syncPreparedKernelRuleMaps(pieces, prepared); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("sync kernel rule maps: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("kernel dataplane rule map sync failed: %v", err)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if err := syncKernelEgressWildcardFastMap(coll.Maps[kernelEgressWildcardFastMapName], desiredEgressWildcardFast); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("sync kernel egress wildcard fast map: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("kernel dataplane egress wildcard fast map sync failed: %v", err)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if err := syncKernelIfParentMap(coll.Maps[kernelIfParentMapName], parentIfMap); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("sync kernel reply parent map: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("kernel dataplane reply parent map sync failed: %v", err)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if err := syncKernelLocalIPv4Map(coll.Maps[kernelLocalIPv4MapName], desiredLocalIPv4s); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("sync kernel local IPv4 bypass map: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("kernel dataplane local IPv4 bypass map sync failed: %v", err)
 		for _, rule := range rules {
 			results[rule.ID] = kernelRuleApplyResult{Error: msg}
 		}
@@ -655,38 +931,40 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	oldAttachments := append([]kernelAttachment(nil), rt.attachments...)
 	forwardReady := make(map[int]bool)
 	replyReady := make(map[int]bool)
-	newAttachments := make([]kernelAttachment, 0, len(forwardIfRules)+len(replyIfRules))
+	attachmentPlans := desiredKernelAttachmentPlansDualStack(forwardIfRules, replyIfRules, forwardProg, replyProg, forwardProgV6, replyProgV6)
+	newAttachments := make([]kernelAttachment, 0, len(attachmentPlans))
 	attachFailure := ""
+	attachStartedAt := time.Now()
 
-	for ifindex, ruleIDs := range forwardIfRules {
-		if err := rt.attachProgramLocked(&newAttachments, ifindex, kernelForwardFilterPrio, kernelForwardFilterHandle, kernelForwardProgramName, forwardProg); err != nil {
-			log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", kernelForwardProgramName, ifindex, ruleIDs, err)
+	for _, plan := range attachmentPlans {
+		ruleIDs := forwardIfRules[plan.ifindex]
+		if plan.name == kernelReplyProgramName || plan.name == kernelReplyProgramNameV6 {
+			ruleIDs = replyIfRules[plan.ifindex]
+		}
+		if err := rt.attachProgramLocked(&newAttachments, plan.ifindex, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+			log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", plan.name, plan.ifindex, ruleIDs, err)
+			label := "forward"
+			switch plan.name {
+			case kernelReplyProgramName, kernelReplyProgramNameV6:
+				label = "reply"
+			}
 			for _, id := range ruleIDs {
-				results[id] = kernelRuleApplyResult{Error: fmt.Sprintf("attach forward program on ifindex %d: %v", ifindex, err)}
+				results[id] = kernelRuleApplyResult{Error: fmt.Sprintf("attach %s program on ifindex %d: %v", label, plan.ifindex, err)}
 			}
 			if attachFailure == "" {
-				attachFailure = fmt.Sprintf("attach forward program on ifindex %d: %v", ifindex, err)
+				attachFailure = fmt.Sprintf("attach %s program on ifindex %d: %v", label, plan.ifindex, err)
 			}
 			break
 		}
-		forwardReady[ifindex] = true
-	}
-
-	if attachFailure == "" {
-		for ifindex, ruleIDs := range replyIfRules {
-			if err := rt.attachProgramLocked(&newAttachments, ifindex, kernelReplyFilterPrio, kernelReplyFilterHandle, kernelReplyProgramName, replyProg); err != nil {
-				log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", kernelReplyProgramName, ifindex, ruleIDs, err)
-				for _, id := range ruleIDs {
-					results[id] = kernelRuleApplyResult{Error: fmt.Sprintf("attach reply program on ifindex %d: %v", ifindex, err)}
-				}
-				if attachFailure == "" {
-					attachFailure = fmt.Sprintf("attach reply program on ifindex %d: %v", ifindex, err)
-				}
-				break
-			}
-			replyReady[ifindex] = true
+		switch plan.name {
+		case kernelForwardProgramName, kernelForwardProgramNameV6:
+			forwardReady[plan.ifindex] = true
+		case kernelReplyProgramName, kernelReplyProgramNameV6:
+			replyReady[plan.ifindex] = true
 		}
 	}
+	reconcileMetrics.AttachDuration = time.Since(attachStartedAt)
+	reconcileMetrics.Attaches = len(newAttachments)
 
 	if attachFailure != "" {
 		rt.discardAttachmentsLocked(newAttachments)
@@ -727,7 +1005,27 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 		return results, nil
 	}
 
+	flowPurgeIDs := collectPreparedKernelRuleFlowPurgeIDs(rt.preparedRules, prepared)
+	purgeCorrections := map[uint32]kernelRuleStats{}
+	purgedFlows := 0
+	if len(flowPurgeIDs) > 0 {
+		flowPurgeStartedAt := time.Now()
+		purgeCorrections, purgedFlows, err = purgeKernelFlowsForRuleIDs(coll.Maps[kernelRulesMapName], coll.Maps[kernelFlowsMapName], coll.Maps[kernelNatPortsMapName], flowPurgeIDs)
+		reconcileMetrics.FlowPurgeDuration = time.Since(flowPurgeStartedAt)
+		if err != nil {
+			log.Printf("kernel dataplane reconcile: purge stale tc flow state after rebuild failed: %v", err)
+			purgeCorrections = map[uint32]kernelRuleStats{}
+			purgedFlows = 0
+		} else if syncErr := syncKernelOccupancyMapFromCollectionExact(coll, true); syncErr != nil {
+			log.Printf("kernel dataplane reconcile: resync tc occupancy counters after rebuild purge failed: %v", syncErr)
+		}
+	}
+	reconcileMetrics.AppliedEntries = len(prepared)
+	reconcileMetrics.Upserts = len(prepared)
+	reconcileMetrics.FlowPurgeDeleted = purgedFlows
+
 	rt.stateLog.Logf("kernel dataplane reconcile: applied %d/%d kernel entry(s)", len(prepared), len(rules))
+	reconcileMetrics.Detaches = kernelAttachmentDeleteCount(oldAttachments, newAttachments)
 	rt.deleteStaleAttachmentsLocked(oldAttachments, newAttachments)
 	if rt.coll != nil {
 		rt.coll.Close()
@@ -752,6 +1050,10 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	rt.invalidatePressureStateLocked()
 	if hotRestartState != nil {
 		rt.statsCorrection = hotRestartStatsCorrection
+	}
+	if purgedFlows > 0 {
+		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
+		log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed kernel rule id(s)", purgedFlows, len(flowPurgeIDs))
 	}
 	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed: %v", err)
@@ -793,12 +1095,13 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		fullSuccess := true
 		driftDetected := false
 		if rt.coll != nil && rt.coll.Maps != nil {
-			live, usedNAT, liveErr := snapshotKernelLiveStateFromFlows(rt.coll.Maps[kernelRulesMapName], rt.coll.Maps[kernelFlowsMapName], true)
+			refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+			live, liveErr := snapshotKernelLiveStateFromRuntimeMapRefs(refs, true)
 			if liveErr != nil {
 				fullSuccess = false
 				log.Printf("kernel dataplane maintenance: snapshot live tc flow state failed: %v", liveErr)
 			} else {
-				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(rt.coll.Maps[kernelStatsMapName], live)
+				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(rt.coll.Maps[kernelStatsMapName], live.ByRuleID)
 				if correctionErr != nil {
 					fullSuccess = false
 					log.Printf("kernel dataplane maintenance: reconcile tc stats correction failed: %v", correctionErr)
@@ -806,13 +1109,23 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					driftDetected = !kernelStatsCorrectionsEqual(rt.statsCorrection, exact)
 					syncKernelLiveStatsCorrections(rt.statsCorrection, exact)
 				}
-				deleted, natErr := pruneOrphanKernelNATReservations(rt.coll.Maps[kernelNatPortsMapName], usedNAT)
+				deleted, natErr := pruneOrphanKernelNATReservations(rt.coll.Maps[kernelNatPortsMapName], live.UsedNAT)
 				if natErr != nil {
 					fullSuccess = false
 					log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
 				} else if deleted > 0 {
 					driftDetected = true
 					log.Printf("kernel dataplane maintenance: pruned %d orphan tc nat reservation(s)", deleted)
+				}
+				if fullSuccess {
+					natEntries, countErr := countKernelRuntimeNATEntriesExact(refs)
+					if countErr != nil {
+						fullSuccess = false
+						log.Printf("kernel dataplane maintenance: count exact tc nat occupancy failed: %v", countErr)
+					} else if syncErr := syncKernelOccupancyMapForCollection(rt.coll, live.FlowEntries, natEntries); syncErr != nil {
+						fullSuccess = false
+						log.Printf("kernel dataplane maintenance: sync tc occupancy counters failed: %v", syncErr)
+					}
 				}
 			}
 		}
@@ -955,6 +1268,12 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		kernelFlowsMapName:    rt.coll.Maps[kernelFlowsMapName],
 		kernelNatPortsMapName: rt.coll.Maps[kernelNatPortsMapName],
 	}
+	if rt.coll.Maps[kernelFlowsMapNameV6] != nil {
+		maps[kernelFlowsMapNameV6] = rt.coll.Maps[kernelFlowsMapNameV6]
+	}
+	if rt.coll.Maps[kernelNatPortsMapNameV6] != nil {
+		maps[kernelNatPortsMapNameV6] = rt.coll.Maps[kernelNatPortsMapNameV6]
+	}
 	if kernelHotRestartSkipStatsRequested() {
 		log.Printf("kernel dataplane hot restart: preserving tc flow/nat maps without %s as requested", kernelStatsMapName)
 	} else {
@@ -1049,9 +1368,9 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 	if rt.coll == nil || rt.coll.Maps == nil || len(rt.preparedRules) == 0 {
 		return retained, nil
 	}
-	rulesMap := rt.coll.Maps[kernelRulesMapName]
-	if rulesMap == nil {
-		return retained, nil
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		return nil, err
 	}
 
 	desiredByKey := indexKernelRulesByMatchKey(rules)
@@ -1064,7 +1383,7 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 			retained[desired.ID] = struct{}{}
 			continue
 		}
-		if err := deleteKernelMapEntry(rulesMap, item.key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		if err := deletePreparedKernelRuleMapEntry(pieces, item); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return nil, fmt.Errorf("delete stale preserved kernel rule %d: %w", item.rule.ID, err)
 		}
 	}
@@ -1080,10 +1399,8 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 }
 
 func (rt *linuxKernelRuleRuntime) flowMaintenanceBudgetLocked() int {
-	if rt.coll != nil && rt.coll.Maps != nil {
-		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-			return kernelFlowMaintenanceBudgetForCapacity(int(flowsMap.MaxEntries()))
-		}
+	if capacities := rt.currentMapCapacitiesLocked(); capacities.Flows > 0 {
+		return kernelFlowMaintenanceBudgetForCapacity(capacities.Flows)
 	}
 	return kernelFlowMaintenanceBudgetForCapacity(rt.flowsMapCapacity)
 }
@@ -1098,7 +1415,11 @@ func kernelAttachmentKeyForFilter(filter *netlink.BpfFilter) kernelAttachmentKey
 }
 
 func desiredKernelAttachmentPlans(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProg *ebpf.Program, replyProg *ebpf.Program) []kernelAttachmentPlan {
-	plans := make([]kernelAttachmentPlan, 0, len(forwardIfRules)+len(replyIfRules))
+	return desiredKernelAttachmentPlansDualStack(forwardIfRules, replyIfRules, forwardProg, replyProg, nil, nil)
+}
+
+func desiredKernelAttachmentPlansDualStack(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProg *ebpf.Program, replyProg *ebpf.Program, forwardProgV6 *ebpf.Program, replyProgV6 *ebpf.Program) []kernelAttachmentPlan {
+	plans := make([]kernelAttachmentPlan, 0, (len(forwardIfRules)+len(replyIfRules))*2)
 	for ifindex := range forwardIfRules {
 		plans = append(plans, kernelAttachmentPlan{
 			key: kernelAttachmentKey{
@@ -1113,6 +1434,21 @@ func desiredKernelAttachmentPlans(forwardIfRules map[int][]int64, replyIfRules m
 			name:        kernelForwardProgramName,
 			prog:        forwardProg,
 		})
+		if forwardProgV6 != nil {
+			plans = append(plans, kernelAttachmentPlan{
+				key: kernelAttachmentKey{
+					linkIndex: ifindex,
+					parent:    netlink.HANDLE_MIN_INGRESS,
+					priority:  kernelForwardFilterPrioV6,
+					handle:    netlink.MakeHandle(0, kernelForwardFilterHandleV6),
+				},
+				ifindex:     ifindex,
+				priority:    kernelForwardFilterPrioV6,
+				handleMinor: kernelForwardFilterHandleV6,
+				name:        kernelForwardProgramNameV6,
+				prog:        forwardProgV6,
+			})
+		}
 	}
 	for ifindex := range replyIfRules {
 		plans = append(plans, kernelAttachmentPlan{
@@ -1128,6 +1464,21 @@ func desiredKernelAttachmentPlans(forwardIfRules map[int][]int64, replyIfRules m
 			name:        kernelReplyProgramName,
 			prog:        replyProg,
 		})
+		if replyProgV6 != nil {
+			plans = append(plans, kernelAttachmentPlan{
+				key: kernelAttachmentKey{
+					linkIndex: ifindex,
+					parent:    netlink.HANDLE_MIN_INGRESS,
+					priority:  kernelReplyFilterPrioV6,
+					handle:    netlink.MakeHandle(0, kernelReplyFilterHandleV6),
+				},
+				ifindex:     ifindex,
+				priority:    kernelReplyFilterPrioV6,
+				handleMinor: kernelReplyFilterHandleV6,
+				name:        kernelReplyProgramNameV6,
+				prog:        replyProgV6,
+			})
+		}
 	}
 	sort.Slice(plans, func(i, j int) bool {
 		if plans[i].ifindex != plans[j].ifindex {
@@ -1141,39 +1492,297 @@ func desiredKernelAttachmentPlans(forwardIfRules map[int][]int64, replyIfRules m
 	return plans
 }
 
-func diffPreparedKernelRules(oldItems []preparedKernelRule, nextItems []preparedKernelRule) kernelRuleMapDiff {
-	if len(oldItems) == 0 && len(nextItems) == 0 {
-		return kernelRuleMapDiff{}
+func diffPreparedKernelRules(oldItems []preparedKernelRule, nextItems []preparedKernelRule) (kernelDualStackRuleMapDiff, error) {
+	v4, err := diffPreparedKernelRulesV4(oldItems, nextItems)
+	if err != nil {
+		return kernelDualStackRuleMapDiff{}, err
 	}
+	v6, err := diffPreparedKernelRulesV6(oldItems, nextItems)
+	if err != nil {
+		return kernelDualStackRuleMapDiff{}, err
+	}
+	return kernelDualStackRuleMapDiff{v4: v4, v6: v6}, nil
+}
 
-	oldByKey := make(map[tcRuleKeyV4]tcRuleValueV4, len(oldItems))
-	nextByKey := make(map[tcRuleKeyV4]tcRuleValueV4, len(nextItems))
-	for _, item := range oldItems {
-		oldByKey[item.key] = item.value
+func diffPreparedKernelRulesV4(oldItems []preparedKernelRule, nextItems []preparedKernelRule) (kernelRuleMapDiff, error) {
+	oldByKey := make(map[tcRuleKeyV4]tcRuleValueV4)
+	nextByKey := make(map[tcRuleKeyV4]tcRuleValueV4)
+	filteredOld := filterPreparedKernelRules(oldItems, func(item preparedKernelRule) bool {
+		return kernelPreparedRuleFamily(item) == ipFamilyIPv4
+	})
+	filteredNext := filterPreparedKernelRules(nextItems, func(item preparedKernelRule) bool {
+		return kernelPreparedRuleFamily(item) == ipFamilyIPv4
+	})
+	for _, item := range filteredOld {
+		key, value, err := encodePreparedKernelRuleV4(item)
+		if err != nil {
+			return kernelRuleMapDiff{}, fmt.Errorf("encode IPv4 prepared kernel rule %d for diff: %w", item.rule.ID, err)
+		}
+		oldByKey[key] = value
 	}
-	for _, item := range nextItems {
-		nextByKey[item.key] = item.value
+	for _, item := range filteredNext {
+		key, value, err := encodePreparedKernelRuleV4(item)
+		if err != nil {
+			return kernelRuleMapDiff{}, fmt.Errorf("encode IPv4 prepared kernel rule %d for diff: %w", item.rule.ID, err)
+		}
+		nextByKey[key] = value
 	}
 
 	diff := kernelRuleMapDiff{
-		upserts: make([]kernelRuleMapEntry, 0),
-		deletes: make([]tcRuleKeyV4, 0),
+		upserts: make([]kernelRuleMapEntry, 0, len(filteredNext)),
+		deletes: make([]tcRuleKeyV4, 0, len(filteredOld)),
 	}
-	for _, item := range nextItems {
-		oldValue, ok := oldByKey[item.key]
-		if ok && oldValue == item.value {
+	for _, item := range filteredNext {
+		key, value, err := encodePreparedKernelRuleV4(item)
+		if err != nil {
+			return kernelRuleMapDiff{}, fmt.Errorf("encode IPv4 prepared kernel rule %d for diff: %w", item.rule.ID, err)
+		}
+		oldValue, ok := oldByKey[key]
+		if ok && oldValue == value {
 			continue
 		}
-		diff.upserts = append(diff.upserts, kernelRuleMapEntry{key: item.key, value: item.value})
-		delete(oldByKey, item.key)
+		diff.upserts = append(diff.upserts, kernelRuleMapEntry{key: key, value: value})
+		delete(oldByKey, key)
 	}
-	for _, item := range oldItems {
-		if _, ok := nextByKey[item.key]; ok {
+	for _, item := range filteredOld {
+		key, _, err := encodePreparedKernelRuleV4(item)
+		if err != nil {
+			return kernelRuleMapDiff{}, fmt.Errorf("encode IPv4 prepared kernel rule %d for diff: %w", item.rule.ID, err)
+		}
+		if _, ok := nextByKey[key]; ok {
 			continue
 		}
-		diff.deletes = append(diff.deletes, item.key)
+		diff.deletes = append(diff.deletes, key)
 	}
-	return diff
+	return diff, nil
+}
+
+func diffPreparedKernelRulesV6(oldItems []preparedKernelRule, nextItems []preparedKernelRule) (kernelRuleMapDiffV6, error) {
+	oldByKey := make(map[tcRuleKeyV6]tcRuleValueV6)
+	nextByKey := make(map[tcRuleKeyV6]tcRuleValueV6)
+	filteredOld := filterPreparedKernelRules(oldItems, func(item preparedKernelRule) bool {
+		return kernelPreparedRuleFamily(item) == ipFamilyIPv6
+	})
+	filteredNext := filterPreparedKernelRules(nextItems, func(item preparedKernelRule) bool {
+		return kernelPreparedRuleFamily(item) == ipFamilyIPv6
+	})
+	for _, item := range filteredOld {
+		key, value, err := encodePreparedKernelRuleV6(item)
+		if err != nil {
+			return kernelRuleMapDiffV6{}, fmt.Errorf("encode IPv6 prepared kernel rule %d for diff: %w", item.rule.ID, err)
+		}
+		oldByKey[key] = value
+	}
+	for _, item := range filteredNext {
+		key, value, err := encodePreparedKernelRuleV6(item)
+		if err != nil {
+			return kernelRuleMapDiffV6{}, fmt.Errorf("encode IPv6 prepared kernel rule %d for diff: %w", item.rule.ID, err)
+		}
+		nextByKey[key] = value
+	}
+
+	diff := kernelRuleMapDiffV6{
+		upserts: make([]kernelRuleMapEntryV6, 0, len(filteredNext)),
+		deletes: make([]tcRuleKeyV6, 0, len(filteredOld)),
+	}
+	for _, item := range filteredNext {
+		key, value, err := encodePreparedKernelRuleV6(item)
+		if err != nil {
+			return kernelRuleMapDiffV6{}, fmt.Errorf("encode IPv6 prepared kernel rule %d for diff: %w", item.rule.ID, err)
+		}
+		oldValue, ok := oldByKey[key]
+		if ok && oldValue == value {
+			continue
+		}
+		diff.upserts = append(diff.upserts, kernelRuleMapEntryV6{key: key, value: value})
+		delete(oldByKey, key)
+	}
+	for _, item := range filteredOld {
+		key, _, err := encodePreparedKernelRuleV6(item)
+		if err != nil {
+			return kernelRuleMapDiffV6{}, fmt.Errorf("encode IPv6 prepared kernel rule %d for diff: %w", item.rule.ID, err)
+		}
+		if _, ok := nextByKey[key]; ok {
+			continue
+		}
+		diff.deletes = append(diff.deletes, key)
+	}
+	return diff, nil
+}
+
+func kernelDualStackRuleMapDiffUpsertCount(diff kernelDualStackRuleMapDiff) int {
+	return len(diff.v4.upserts) + len(diff.v6.upserts)
+}
+
+func kernelDualStackRuleMapDiffDeleteCount(diff kernelDualStackRuleMapDiff) int {
+	return len(diff.v4.deletes) + len(diff.v6.deletes)
+}
+
+func collectPreparedKernelRuleFlowPurgeIDs(oldItems []preparedKernelRule, nextItems []preparedKernelRule) map[uint32]struct{} {
+	if len(oldItems) == 0 {
+		return nil
+	}
+
+	oldByKey := indexPreparedKernelRulesByMatchKey(oldItems)
+	nextByKey := indexPreparedKernelRulesByMatchKey(nextItems)
+
+	var purgeIDs map[uint32]struct{}
+	for key, oldGroup := range oldByKey {
+		if preparedKernelRuleGroupsEqualBy(oldGroup, nextByKey[key], samePreparedKernelRuleDataplaneIgnoringRuleID) {
+			continue
+		}
+		for _, item := range oldGroup {
+			if item.rule.ID <= 0 || item.rule.ID > int64(^uint32(0)) {
+				continue
+			}
+			if purgeIDs == nil {
+				purgeIDs = make(map[uint32]struct{})
+			}
+			purgeIDs[uint32(item.rule.ID)] = struct{}{}
+		}
+	}
+	return purgeIDs
+}
+
+func preparedKernelRulesNeedAttachmentReset(oldItems []preparedKernelRule, nextItems []preparedKernelRule) bool {
+	return !preparedKernelRuleSetsEqualByMatchKey(
+		filterPreparedKernelRules(oldItems, isPreparedKernelEgressRule),
+		filterPreparedKernelRules(nextItems, isPreparedKernelEgressRule),
+		samePreparedKernelRuleDataplaneIgnoringRuleID,
+	)
+}
+
+func indexPreparedKernelRulesByMatchKey(items []preparedKernelRule) map[kernelRuleMatchKey][]preparedKernelRule {
+	if len(items) == 0 {
+		return nil
+	}
+	index := make(map[kernelRuleMatchKey][]preparedKernelRule)
+	for _, item := range items {
+		index[kernelRuleMatchKeyFor(item.rule)] = append(index[kernelRuleMatchKeyFor(item.rule)], item)
+	}
+	return index
+}
+
+func filterPreparedKernelRules(items []preparedKernelRule, keep func(preparedKernelRule) bool) []preparedKernelRule {
+	if len(items) == 0 {
+		return nil
+	}
+	filtered := make([]preparedKernelRule, 0, len(items))
+	for _, item := range items {
+		if keep != nil && !keep(item) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func isPreparedKernelEgressRule(item preparedKernelRule) bool {
+	return isKernelEgressNATRule(item.rule) || isKernelEgressNATPassthroughRule(item.rule)
+}
+
+func preparedKernelRuleSetsEqualByMatchKey(oldItems []preparedKernelRule, nextItems []preparedKernelRule, equal func(preparedKernelRule, preparedKernelRule) bool) bool {
+	oldByKey := indexPreparedKernelRulesByMatchKey(oldItems)
+	nextByKey := indexPreparedKernelRulesByMatchKey(nextItems)
+	if len(oldByKey) != len(nextByKey) {
+		return false
+	}
+	for key, oldGroup := range oldByKey {
+		if !preparedKernelRuleGroupsEqualBy(oldGroup, nextByKey[key], equal) {
+			return false
+		}
+	}
+	return true
+}
+
+func preparedKernelRuleGroupsEqual(a []preparedKernelRule, b []preparedKernelRule) bool {
+	return preparedKernelRuleGroupsEqualBy(a, b, samePreparedKernelRuleDataplane)
+}
+
+func preparedKernelRuleGroupsEqualBy(a []preparedKernelRule, b []preparedKernelRule, equal func(preparedKernelRule, preparedKernelRule) bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	if equal == nil {
+		equal = samePreparedKernelRuleDataplane
+	}
+
+	used := make([]bool, len(b))
+	for _, oldItem := range a {
+		matched := false
+		for idx, nextItem := range b {
+			if used[idx] {
+				continue
+			}
+			if !equal(oldItem, nextItem) {
+				continue
+			}
+			used[idx] = true
+			matched = true
+			break
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func purgeKernelFlowsForRuleIDs(rulesMap, flowsMap, natPortsMap *ebpf.Map, ruleIDs map[uint32]struct{}) (map[uint32]kernelRuleStats, int, error) {
+	corrections := make(map[uint32]kernelRuleStats)
+	if flowsMap == nil || len(ruleIDs) == 0 {
+		return corrections, 0, nil
+	}
+
+	iter := flowsMap.Iterate()
+	stale := make([]staleKernelFlow, 0)
+	var key tcFlowKeyV4
+	var value tcFlowValueV4
+	for iter.Next(&key, &value) {
+		if _, ok := ruleIDs[value.RuleID]; !ok {
+			continue
+		}
+		stale = append(stale, staleKernelFlow{key: key, value: value})
+	}
+	if err := iter.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate kernel flows map for targeted purge: %w", err)
+	}
+
+	for _, item := range stale {
+		deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, item, corrections)
+	}
+	return corrections, len(stale), nil
+}
+
+func purgeAllKernelConnectionState(rulesMap, flowsMap, natPortsMap *ebpf.Map) (map[uint32]kernelRuleStats, int, int, error) {
+	corrections := make(map[uint32]kernelRuleStats)
+	if flowsMap == nil {
+		deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
+		return corrections, 0, deletedNAT, err
+	}
+
+	iter := flowsMap.Iterate()
+	stale := make([]staleKernelFlow, 0)
+	var key tcFlowKeyV4
+	var value tcFlowValueV4
+	for iter.Next(&key, &value) {
+		stale = append(stale, staleKernelFlow{key: key, value: value})
+	}
+	if err := iter.Err(); err != nil {
+		return nil, 0, 0, fmt.Errorf("iterate kernel flows map for full purge: %w", err)
+	}
+
+	for _, item := range stale {
+		deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, item, corrections)
+	}
+	deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
+	if err != nil {
+		return nil, len(stale), 0, err
+	}
+	return corrections, len(stale), deletedNAT, nil
 }
 
 func (rt *linuxKernelRuleRuntime) currentMapCapacitiesLocked() kernelMapCapacities {
@@ -1185,14 +1794,15 @@ func (rt *linuxKernelRuleRuntime) currentMapCapacitiesLocked() kernelMapCapaciti
 	if rt.coll == nil || rt.coll.Maps == nil {
 		return capacities
 	}
-	if rulesMap := rt.coll.Maps[kernelRulesMapName]; rulesMap != nil {
-		capacities.Rules = int(rulesMap.MaxEntries())
+	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	if rulesCapacity := kernelRuntimeRuleMapCapacity(refs); rulesCapacity > 0 {
+		capacities.Rules = rulesCapacity
 	}
-	if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-		capacities.Flows = int(flowsMap.MaxEntries())
+	if flowsCapacity := kernelRuntimeFlowMapCapacity(refs); flowsCapacity > 0 {
+		capacities.Flows = flowsCapacity
 	}
-	if natPortsMap := rt.coll.Maps[kernelNatPortsMapName]; natPortsMap != nil {
-		capacities.NATPorts = int(natPortsMap.MaxEntries())
+	if natCapacity := kernelRuntimeNATMapCapacity(refs); natCapacity > 0 {
+		capacities.NATPorts = natCapacity
 	}
 	return capacities
 }
@@ -1232,11 +1842,17 @@ func (rt *linuxKernelRuleRuntime) canReconcileInPlaceLocked(desired kernelMapCap
 	if rt.coll.Programs[kernelForwardProgramName] == nil || rt.coll.Programs[kernelReplyProgramName] == nil {
 		return false
 	}
+	if kernelPreparedRulesIncludeIPv6(rt.preparedRules) {
+		if rt.coll.Programs[kernelForwardProgramNameV6] == nil || rt.coll.Programs[kernelReplyProgramNameV6] == nil {
+			return false
+		}
+	}
 	rulesMap := rt.coll.Maps[kernelRulesMapName]
 	flowsMap := rt.coll.Maps[kernelFlowsMapName]
 	natPortsMap := rt.coll.Maps[kernelNatPortsMapName]
+	egressWildcardFastMap := rt.coll.Maps[kernelEgressWildcardFastMapName]
 	statsMap := rt.coll.Maps[kernelStatsMapName]
-	if rulesMap == nil || flowsMap == nil || natPortsMap == nil || statsMap == nil {
+	if rulesMap == nil || flowsMap == nil || natPortsMap == nil || egressWildcardFastMap == nil || statsMap == nil {
 		return false
 	}
 	if !kernelMapReusableWithCapacity(rulesMap, desired.Rules) {
@@ -1261,15 +1877,20 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 		rt.cleanupLocked()
 		return nil
 	}
-	rulesMap := rt.coll.Maps[kernelRulesMapName]
-	if rulesMap == nil {
-		rt.cleanupLocked()
-		return nil
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		return err
 	}
 	for _, item := range rt.preparedRules {
-		if err := deleteKernelMapEntry(rulesMap, item.key); err != nil {
+		if err := deletePreparedKernelRuleMapEntry(pieces, item); err != nil {
 			return fmt.Errorf("clear kernel rule key during drain: %w", err)
 		}
+	}
+	if err := syncKernelEgressWildcardFastMap(rt.coll.Maps[kernelEgressWildcardFastMapName], nil); err != nil {
+		return fmt.Errorf("clear kernel egress wildcard fast map during drain: %w", err)
+	}
+	if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
+		return fmt.Errorf("clear kernel local IPv4 bypass map during drain: %w", err)
 	}
 	capacities := rt.currentMapCapacitiesLocked()
 	rt.preparedRules = nil
@@ -1290,14 +1911,27 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	return nil
 }
 
-func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, forwardIfRules map[int][]int64, replyIfRules map[int][]int64, results map[int64]kernelRuleApplyResult) error {
-	forwardProg, replyProg, rulesMap, err := lookupKernelCollectionPieces(rt.coll)
+func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, forwardIfRules map[int][]int64, replyIfRules map[int][]int64, parentIfMap map[uint32]uint32, egressWildcardFast map[tcEgressWildcardKeyV4]uint8, localIPv4s map[uint32]uint8, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
+	flowPurgeIDs := collectPreparedKernelRuleFlowPurgeIDs(rt.preparedRules, prepared)
+	attachmentReset := preparedKernelRulesNeedAttachmentReset(rt.preparedRules, prepared)
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
 	if err != nil {
 		return err
 	}
+	forwardProg := pieces.forwardProg
+	replyProg := pieces.replyProg
+	var forwardProgV6 *ebpf.Program
+	var replyProgV6 *ebpf.Program
+	if kernelPreparedRulesIncludeIPv6(prepared) {
+		forwardProgV6 = pieces.forwardProgV6
+		replyProgV6 = pieces.replyProgV6
+	}
 
-	diff := diffPreparedKernelRules(rt.preparedRules, prepared)
-	plans := desiredKernelAttachmentPlans(forwardIfRules, replyIfRules, forwardProg, replyProg)
+	diff, err := diffPreparedKernelRules(rt.preparedRules, prepared)
+	if err != nil {
+		return err
+	}
+	plans := desiredKernelAttachmentPlansDualStack(forwardIfRules, replyIfRules, forwardProg, replyProg, forwardProgV6, replyProgV6)
 	currentAttachments := make(map[kernelAttachmentKey]kernelAttachment, len(rt.attachments))
 	for _, att := range rt.attachments {
 		if att.filter == nil {
@@ -1317,6 +1951,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	createdAttachments := make([]kernelAttachment, 0, len(plans))
 	forwardReady := make(map[int]bool, len(forwardIfRules))
 	replyReady := make(map[int]bool, len(replyIfRules))
+	attachStartedAt := time.Now()
 
 	for _, plan := range plans {
 		if current, ok := currentAttachments[plan.key]; ok && kernelAttachmentObservationMatchesExpectation(observedAttachments[plan.key], expectedAttachments[plan.key]) {
@@ -1329,20 +1964,58 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 			newAttachments = append(newAttachments, createdAttachments[len(createdAttachments)-1])
 		}
 		switch plan.name {
-		case kernelForwardProgramName:
+		case kernelForwardProgramName, kernelForwardProgramNameV6:
 			forwardReady[plan.ifindex] = true
-		case kernelReplyProgramName:
+		case kernelReplyProgramName, kernelReplyProgramNameV6:
 			replyReady[plan.ifindex] = true
 		}
 	}
+	attachDuration := time.Since(attachStartedAt)
 
-	if err := applyKernelRuleMapDiff(rulesMap, diff); err != nil {
+	if len(localIPv4s) > 0 {
+		if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], localIPv4s); err != nil {
+			rt.discardAttachmentsLocked(createdAttachments)
+			return fmt.Errorf("sync kernel local IPv4 bypass map: %w", err)
+		}
+	}
+	conservativeFast := intersectKernelEgressWildcardFastMaps(buildKernelEgressWildcardFastMap(rt.preparedRules), egressWildcardFast)
+	if err := syncKernelEgressWildcardFastMap(rt.coll.Maps[kernelEgressWildcardFastMapName], conservativeFast); err != nil {
+		rt.discardAttachmentsLocked(createdAttachments)
+		return fmt.Errorf("sync kernel egress wildcard fast map: %w", err)
+	}
+	if err := syncKernelNATConfigMap(rt.coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax); err != nil {
+		rt.discardAttachmentsLocked(createdAttachments)
+		return fmt.Errorf("sync kernel nat config map: %w", err)
+	}
+	if err := applyKernelDualStackRuleMapDiff(pieces, diff); err != nil {
 		rt.discardAttachmentsLocked(createdAttachments)
 		return err
+	}
+	if err := syncKernelIfParentMap(rt.coll.Maps[kernelIfParentMapName], parentIfMap); err != nil {
+		rt.discardAttachmentsLocked(createdAttachments)
+		return fmt.Errorf("sync kernel reply parent map: %w", err)
+	}
+	if err := syncKernelEgressWildcardFastMap(rt.coll.Maps[kernelEgressWildcardFastMapName], egressWildcardFast); err != nil {
+		rt.discardAttachmentsLocked(createdAttachments)
+		return fmt.Errorf("sync kernel egress wildcard fast map: %w", err)
+	}
+	if len(localIPv4s) == 0 {
+		if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
+			rt.discardAttachmentsLocked(createdAttachments)
+			return fmt.Errorf("sync kernel local IPv4 bypass map: %w", err)
+		}
 	}
 
 	oldAttachments := append([]kernelAttachment(nil), rt.attachments...)
 	mergedAttachments := mergeKernelAttachments(oldAttachments, newAttachments)
+	finalAttachments := mergedAttachments
+	detachedAttachments := 0
+	preservedAttachments := len(mergedAttachments) - len(newAttachments)
+	if attachmentReset {
+		finalAttachments = append([]kernelAttachment(nil), newAttachments...)
+		detachedAttachments = kernelAttachmentDeleteCount(oldAttachments, newAttachments)
+		preservedAttachments = 0
+	}
 
 	runningAny := false
 	for _, item := range prepared {
@@ -1366,12 +2039,29 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	}
 
 	actualCapacities := rt.currentMapCapacitiesLocked()
-	rt.attachments = mergedAttachments
+	rt.attachments = finalAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
 	rt.natMapCapacity = actualCapacities.NATPorts
-	if kernelRuntimeNeedsMapGrowth(actualCapacities, desiredKernelMapCapacities(rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit, len(prepared), true), true) {
+	_, flowsMapLimit, natMapLimit := tcKernelRuntimeConfiguredMapLimits(
+		rt.rulesMapLimit,
+		rt.flowsMapLimit,
+		rt.natMapLimit,
+		preparedKernelRulesNeedEgressNATAutoMapFloors(prepared),
+	)
+	currentCounts := rt.currentRuntimeMapCountsLocked(time.Now())
+	desiredCapacities := desiredKernelMapCapacitiesWithOccupancy(
+		rt.rulesMapLimit,
+		flowsMapLimit,
+		natMapLimit,
+		len(prepared),
+		currentCounts,
+		true,
+		normalizeKernelFlowsMapLimit(rt.flowsMapLimit) == 0,
+		normalizeKernelNATMapLimit(rt.natMapLimit) == 0,
+	)
+	if kernelRuntimeNeedsMapGrowth(actualCapacities, desiredCapacities, true) {
 		rt.degradedSource = kernelRuntimeDegradedSourceLivePreserve
 	} else {
 		rt.degradedSource = kernelRuntimeDegradedSourceNone
@@ -1381,17 +2071,49 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	flowPurgeDeleted := 0
+	flowPurgeDuration := time.Duration(0)
+	if len(flowPurgeIDs) > 0 {
+		flowPurgeStartedAt := time.Now()
+		corrections, deleted, purgeErr := purgeKernelFlowsForRuleIDs(rt.coll.Maps[kernelRulesMapName], rt.coll.Maps[kernelFlowsMapName], rt.coll.Maps[kernelNatPortsMapName], flowPurgeIDs)
+		flowPurgeDuration = time.Since(flowPurgeStartedAt)
+		if purgeErr != nil {
+			log.Printf("kernel dataplane reconcile: purge stale tc flow state after in-place update failed: %v", purgeErr)
+		} else if deleted > 0 {
+			flowPurgeDeleted = deleted
+			mergeKernelStatsCorrections(rt.statsCorrection, corrections)
+			log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed kernel rule id(s)", deleted, len(flowPurgeIDs))
+			if syncErr := syncKernelOccupancyMapFromCollectionExact(rt.coll, true); syncErr != nil {
+				log.Printf("kernel dataplane reconcile: resync tc occupancy counters after in-place purge failed: %v", syncErr)
+			}
+		}
+	}
+	if metrics != nil {
+		metrics.AppliedEntries = len(prepared)
+		metrics.Upserts = kernelDualStackRuleMapDiffUpsertCount(diff)
+		metrics.Deletes = kernelDualStackRuleMapDiffDeleteCount(diff)
+		metrics.Attaches = len(createdAttachments)
+		metrics.Detaches = detachedAttachments
+		metrics.Preserved = preservedAttachments
+		metrics.FlowPurgeDeleted = flowPurgeDeleted
+		metrics.AttachDuration = attachDuration
+		metrics.FlowPurgeDuration = flowPurgeDuration
+	}
 	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed after in-place update: %v", err)
+	}
+	if attachmentReset && detachedAttachments > 0 {
+		rt.deleteStaleAttachmentsLocked(oldAttachments, newAttachments)
+		log.Printf("kernel dataplane reconcile: detached %d stale tc attachment(s) after egress attachment reset", detachedAttachments)
 	}
 	rt.stateLog.Logf(
 		"kernel dataplane reconcile: updated %d active kernel entry(s) in-place (upsert=%d delete=%d attach=%d detach=%d preserve=%d)",
 		len(prepared),
-		len(diff.upserts),
-		len(diff.deletes),
+		kernelDualStackRuleMapDiffUpsertCount(diff),
+		kernelDualStackRuleMapDiffDeleteCount(diff),
 		len(createdAttachments),
-		0,
-		len(mergedAttachments)-len(newAttachments),
+		detachedAttachments,
+		preservedAttachments,
 	)
 	return nil
 }
@@ -1503,6 +2225,37 @@ func loadEmbeddedKernelCollectionSpec(enableTrafficStats bool) (*ebpf.Collection
 	return spec, nil
 }
 
+func kernelCollectionSpecSupportsIPv6(spec *ebpf.CollectionSpec) bool {
+	if spec == nil || spec.Maps == nil {
+		return false
+	}
+	return spec.Maps[kernelRulesMapNameV6] != nil &&
+		spec.Maps[kernelFlowsMapNameV6] != nil &&
+		spec.Maps[kernelNatPortsMapNameV6] != nil
+}
+
+func kernelPreparedRulesIncludeIPv6(items []preparedKernelRule) bool {
+	for _, item := range items {
+		if kernelPreparedRuleFamily(item) == ipFamilyIPv6 {
+			return true
+		}
+	}
+	return false
+}
+
+func kernelAttachmentProgramsForPreparedRules(coll *ebpf.Collection, prepared []preparedKernelRule) (forwardProg, replyProg, forwardProgV6, replyProgV6 *ebpf.Program) {
+	if coll == nil {
+		return nil, nil, nil, nil
+	}
+	forwardProg = coll.Programs[kernelForwardProgramName]
+	replyProg = coll.Programs[kernelReplyProgramName]
+	if kernelPreparedRulesIncludeIPv6(prepared) {
+		forwardProgV6 = coll.Programs[kernelForwardProgramNameV6]
+		replyProgV6 = coll.Programs[kernelReplyProgramNameV6]
+	}
+	return forwardProg, replyProg, forwardProgV6, replyProgV6
+}
+
 func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 	if spec == nil {
 		return fmt.Errorf("embedded tc eBPF object is missing")
@@ -1522,21 +2275,76 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 	if _, ok := spec.Maps[kernelNatPortsMapName]; !ok {
 		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelNatPortsMapName)
 	}
+	if _, ok := spec.Maps[kernelIfParentMapName]; !ok {
+		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelIfParentMapName)
+	}
+	if _, ok := spec.Maps[kernelLocalIPv4MapName]; !ok {
+		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelLocalIPv4MapName)
+	}
+	if _, ok := spec.Maps[kernelEgressWildcardFastMapName]; !ok {
+		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelEgressWildcardFastMapName)
+	}
+	if _, ok := spec.Maps[kernelNATConfigMapName]; !ok {
+		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelNATConfigMapName)
+	}
 	if _, ok := spec.Maps[kernelStatsMapName]; !ok {
 		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelStatsMapName)
+	}
+	if _, ok := spec.Maps[kernelOccupancyMapName]; !ok {
+		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelOccupancyMapName)
+	}
+	hasRulesV6 := spec.Maps[kernelRulesMapNameV6] != nil
+	hasFlowsV6 := spec.Maps[kernelFlowsMapNameV6] != nil
+	hasNATV6 := spec.Maps[kernelNatPortsMapNameV6] != nil
+	if hasRulesV6 || hasFlowsV6 || hasNATV6 {
+		if !hasRulesV6 {
+			return fmt.Errorf("embedded tc eBPF object has incomplete IPv6 map set: missing map %q", kernelRulesMapNameV6)
+		}
+		if !hasFlowsV6 {
+			return fmt.Errorf("embedded tc eBPF object has incomplete IPv6 map set: missing map %q", kernelFlowsMapNameV6)
+		}
+		if !hasNATV6 {
+			return fmt.Errorf("embedded tc eBPF object has incomplete IPv6 map set: missing map %q", kernelNatPortsMapNameV6)
+		}
+		if _, ok := spec.Programs[kernelForwardProgramNameV6]; !ok {
+			return fmt.Errorf("embedded tc eBPF object is missing program %q", kernelForwardProgramNameV6)
+		}
+		if _, ok := spec.Programs[kernelReplyProgramNameV6]; !ok {
+			return fmt.Errorf("embedded tc eBPF object is missing program %q", kernelReplyProgramNameV6)
+		}
 	}
 	return nil
 }
 
-func lookupKernelCollectionPieces(coll *ebpf.Collection) (*ebpf.Program, *ebpf.Program, *ebpf.Map, error) {
-	forwardProg := coll.Programs[kernelForwardProgramName]
-	replyProg := coll.Programs[kernelReplyProgramName]
-	rulesMap := coll.Maps[kernelRulesMapName]
-	flowsMap := coll.Maps[kernelFlowsMapName]
-	if forwardProg == nil || replyProg == nil || rulesMap == nil || flowsMap == nil {
-		return nil, nil, nil, fmt.Errorf("kernel object is missing required programs or maps")
+func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces, error) {
+	if coll == nil {
+		return kernelCollectionPieces{}, fmt.Errorf("kernel object is missing")
 	}
-	return forwardProg, replyProg, rulesMap, nil
+	pieces := kernelCollectionPieces{
+		forwardProg:   coll.Programs[kernelForwardProgramName],
+		replyProg:     coll.Programs[kernelReplyProgramName],
+		forwardProgV6: coll.Programs[kernelForwardProgramNameV6],
+		replyProgV6:   coll.Programs[kernelReplyProgramNameV6],
+		rulesV4:       coll.Maps[kernelRulesMapNameV4],
+		rulesV6:       coll.Maps[kernelRulesMapNameV6],
+		flowsV4:       coll.Maps[kernelFlowsMapNameV4],
+		flowsV6:       coll.Maps[kernelFlowsMapNameV6],
+		natV4:         coll.Maps[kernelNatPortsMapNameV4],
+		natV6:         coll.Maps[kernelNatPortsMapNameV6],
+	}
+	if pieces.forwardProg == nil || pieces.replyProg == nil || pieces.rulesV4 == nil || pieces.flowsV4 == nil || pieces.natV4 == nil {
+		return kernelCollectionPieces{}, fmt.Errorf("kernel object is missing required programs or maps")
+	}
+	hasAnyV6 := pieces.rulesV6 != nil || pieces.flowsV6 != nil || pieces.natV6 != nil
+	if hasAnyV6 {
+		if pieces.rulesV6 == nil || pieces.flowsV6 == nil || pieces.natV6 == nil {
+			return kernelCollectionPieces{}, fmt.Errorf("kernel object has incomplete IPv6 map set")
+		}
+		if pieces.forwardProgV6 == nil || pieces.replyProgV6 == nil {
+			return kernelCollectionPieces{}, fmt.Errorf("kernel object has incomplete IPv6 program set")
+		}
+	}
+	return pieces, nil
 }
 
 func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRule, error) {
@@ -1552,19 +2360,46 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) {
 		return nil, fmt.Errorf("kernel dataplane requires a rule id in uint32 range")
 	}
-	if !kernelProtocolSupported(rule.Protocol) {
+	if isKernelEgressNATPassthroughRule(rule) || isKernelEgressNATRule(rule) {
+		if !kernelEgressProtocolSupported(rule.Protocol) {
+			return nil, fmt.Errorf("kernel dataplane currently supports only single-protocol TCP/UDP/ICMP egress nat rules")
+		}
+	} else if !kernelProtocolSupported(rule.Protocol) {
 		return nil, fmt.Errorf("kernel dataplane currently supports only single-protocol TCP/UDP rules")
 	}
-
-	inAddr, err := parseKernelInboundIPv4Uint32(rule.InIP)
-	if err != nil {
-		return nil, fmt.Errorf("parse inbound ip %q: %w", rule.InIP, err)
+	if isKernelEgressNATPassthroughRule(rule) {
+		return prepareKernelEgressNATPassthroughRule(ctx, rule, inLink, outLink)
 	}
-	outAddr, err := parseIPv4Uint32(rule.OutIP)
-	if err != nil {
-		return nil, fmt.Errorf("parse outbound ip %q: %w", rule.OutIP, err)
+	if isKernelEgressNATRule(rule) {
+		return prepareKernelEgressNATRule(ctx, rule, inLink, outLink)
 	}
 
+	spec, err := buildKernelPreparedForwardRuleSpec(rule, func(family string) (net.IP, error) {
+		if rule.Transparent {
+			return nil, nil
+		}
+		if family == ipFamilyIPv6 {
+			natIP, resolveErr := ctx.resolveSNATIPv6(outLink, rule.OutIP, rule.OutSourceIP)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("resolve outbound nat ip on %q: %w", rule.OutInterface, resolveErr)
+			}
+			return natIP, nil
+		}
+		natAddr, resolveErr := ctx.resolveSNATIPv4(outLink, rule.OutIP, rule.OutSourceIP)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve outbound nat ip on %q: %w", rule.OutInterface, resolveErr)
+		}
+		ip := net.IPv4(
+			byte(natAddr>>24),
+			byte(natAddr>>16),
+			byte(natAddr>>8),
+			byte(natAddr),
+		)
+		return ip, nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	inLinks, err := resolveTCInboundLinks(inLink)
 	if err != nil {
 		return nil, fmt.Errorf("resolve inbound kernel interfaces for %q: %w", rule.InInterface, err)
@@ -1574,13 +2409,12 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound path on %q: %w", rule.OutInterface, err)
 	}
+	replyIfIndexes, replyIfParents, err := resolveTCReplyAttachments(outLink, path.outIfIndex)
+	if err != nil {
+		return nil, fmt.Errorf("resolve reply interfaces on %q: %w", rule.OutInterface, err)
+	}
 
-	natAddr := uint32(0)
 	if !rule.Transparent {
-		natAddr, err = ctx.resolveSNATIPv4(outLink, rule.OutIP, rule.OutSourceIP)
-		if err != nil {
-			return nil, fmt.Errorf("resolve outbound nat ip on %q: %w", rule.OutInterface, err)
-		}
 		path.flags |= kernelRuleFlagFullNAT
 	}
 	if ctx != nil && ctx.enableTrafficStats {
@@ -1588,29 +2422,165 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 	}
 
 	prepared := make([]preparedKernelRule, 0, len(inLinks))
+	switch spec.Family {
+	case ipFamilyIPv6:
+		for _, currentInLink := range inLinks {
+			if currentInLink == nil || currentInLink.Attrs() == nil {
+				continue
+			}
+			itemReplyIfParents := append([]kernelIfParentMapping(nil), replyIfParents...)
+			if mapping, ok := resolveTCBridgeParentMapping(currentInLink); ok {
+				itemReplyIfParents = append(itemReplyIfParents, mapping)
+			}
+			prepared = append(prepared, preparedKernelRule{
+				rule:           rule,
+				inIfIndex:      currentInLink.Attrs().Index,
+				outIfIndex:     path.outIfIndex,
+				replyIfIndexes: replyIfIndexes,
+				replyIfParents: itemReplyIfParents,
+				spec:           spec,
+				key: tcRuleKeyV4{
+					IfIndex: uint32(currentInLink.Attrs().Index),
+					DstPort: uint16(rule.InPort),
+					Proto:   kernelRuleProtocol(rule.Protocol),
+				},
+				value: tcRuleValueV4{
+					RuleID:      uint32(rule.ID),
+					BackendPort: uint16(rule.OutPort),
+					Flags:       path.flags,
+					OutIfIndex:  uint32(path.outIfIndex),
+					SrcMAC:      path.srcMAC,
+					DstMAC:      path.dstMAC,
+				},
+			})
+		}
+	default:
+		inAddr, convErr := spec.DstAddr.ipv4Uint32()
+		if convErr != nil {
+			return nil, fmt.Errorf("prepare inbound IPv4 address: %w", convErr)
+		}
+		outAddr, convErr := spec.BackendAddr.ipv4Uint32()
+		if convErr != nil {
+			return nil, fmt.Errorf("prepare outbound IPv4 address: %w", convErr)
+		}
+		natAddr := uint32(0)
+		if !rule.Transparent {
+			natAddr, convErr = spec.NATAddr.ipv4Uint32()
+			if convErr != nil {
+				return nil, fmt.Errorf("prepare outbound nat IPv4 address: %w", convErr)
+			}
+		}
+		for _, currentInLink := range inLinks {
+			if currentInLink == nil || currentInLink.Attrs() == nil {
+				continue
+			}
+			itemReplyIfParents := append([]kernelIfParentMapping(nil), replyIfParents...)
+			if mapping, ok := resolveTCBridgeParentMapping(currentInLink); ok {
+				itemReplyIfParents = append(itemReplyIfParents, mapping)
+			}
+			prepared = append(prepared, preparedKernelRule{
+				rule:           rule,
+				inIfIndex:      currentInLink.Attrs().Index,
+				outIfIndex:     path.outIfIndex,
+				replyIfIndexes: replyIfIndexes,
+				replyIfParents: itemReplyIfParents,
+				spec:           spec,
+				key: tcRuleKeyV4{
+					IfIndex: uint32(currentInLink.Attrs().Index),
+					DstAddr: inAddr,
+					DstPort: uint16(rule.InPort),
+					Proto:   kernelRuleProtocol(rule.Protocol),
+				},
+				value: tcRuleValueV4{
+					RuleID:      uint32(rule.ID),
+					BackendAddr: outAddr,
+					BackendPort: uint16(rule.OutPort),
+					Flags:       path.flags,
+					OutIfIndex:  uint32(path.outIfIndex),
+					NATAddr:     natAddr,
+					SrcMAC:      path.srcMAC,
+					DstMAC:      path.dstMAC,
+				},
+			})
+		}
+	}
+	if len(prepared) == 0 {
+		return nil, fmt.Errorf("kernel dataplane bridge ingress expansion produced no attachable member interfaces")
+	}
+	return prepared, nil
+}
+
+func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink netlink.Link, outLink netlink.Link) ([]preparedKernelRule, error) {
+	inAddr, err := parseKernelInboundIPv4Uint32(rule.InIP)
+	if err != nil {
+		return nil, fmt.Errorf("parse inbound ip %q: %w", rule.InIP, err)
+	}
+	if inAddr != 0 {
+		return nil, fmt.Errorf("egress nat takeover requires wildcard inbound IPv4 0.0.0.0")
+	}
+	if rule.InPort != 0 || rule.OutPort != 0 {
+		return nil, fmt.Errorf("egress nat takeover requires wildcard inbound port/identifier matching")
+	}
+	if rule.Transparent {
+		return nil, fmt.Errorf("egress nat takeover does not support transparent mode")
+	}
+	if outLink == nil || outLink.Attrs() == nil || outLink.Attrs().Index <= 0 {
+		return nil, fmt.Errorf("resolve outbound interface %q: invalid link", rule.OutInterface)
+	}
+
+	inLinks, err := resolveTCInboundLinks(inLink)
+	if err != nil {
+		return nil, fmt.Errorf("resolve inbound kernel interfaces for %q: %w", rule.InInterface, err)
+	}
+	natAddr, err := ctx.resolveEgressSNATIPv4(outLink, rule.OutSourceIP)
+	if err != nil {
+		return nil, fmt.Errorf("resolve outbound nat ip on %q: %w", rule.OutInterface, err)
+	}
+	replyIfIndexes, replyIfParents, err := resolveTCReplyAttachments(outLink, outLink.Attrs().Index)
+	if err != nil {
+		return nil, fmt.Errorf("resolve reply interfaces on %q: %w", rule.OutInterface, err)
+	}
+
+	flags := uint16(kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT)
+	if normalizeEgressNATType(rule.kernelNATType) == egressNATTypeFullCone {
+		flags |= kernelRuleFlagFullCone
+	}
+	if ctx != nil && ctx.enableTrafficStats {
+		flags |= kernelRuleFlagTrafficStats
+	}
+
+	prepared := make([]preparedKernelRule, 0, len(inLinks))
 	for _, currentInLink := range inLinks {
 		if currentInLink == nil || currentInLink.Attrs() == nil {
 			continue
 		}
+		itemReplyIfParents := append([]kernelIfParentMapping(nil), replyIfParents...)
+		if mapping, ok := resolveTCBridgeParentMapping(currentInLink); ok {
+			itemReplyIfParents = append(itemReplyIfParents, mapping)
+		}
 		prepared = append(prepared, preparedKernelRule{
-			rule:       rule,
-			inIfIndex:  currentInLink.Attrs().Index,
-			outIfIndex: path.outIfIndex,
+			rule:           rule,
+			inIfIndex:      currentInLink.Attrs().Index,
+			outIfIndex:     outLink.Attrs().Index,
+			replyIfIndexes: replyIfIndexes,
+			replyIfParents: itemReplyIfParents,
+			spec: kernelPreparedRuleSpec{
+				Family:  ipFamilyIPv4,
+				NATAddr: kernelPreparedAddrFromIPv4Uint32(natAddr),
+			},
 			key: tcRuleKeyV4{
 				IfIndex: uint32(currentInLink.Attrs().Index),
-				DstAddr: inAddr,
-				DstPort: uint16(rule.InPort),
+				DstAddr: 0,
+				DstPort: 0,
 				Proto:   kernelRuleProtocol(rule.Protocol),
 			},
 			value: tcRuleValueV4{
 				RuleID:      uint32(rule.ID),
-				BackendAddr: outAddr,
-				BackendPort: uint16(rule.OutPort),
-				Flags:       path.flags,
-				OutIfIndex:  uint32(path.outIfIndex),
+				BackendAddr: 0,
+				BackendPort: 0,
+				Flags:       flags,
+				OutIfIndex:  uint32(outLink.Attrs().Index),
 				NATAddr:     natAddr,
-				SrcMAC:      path.srcMAC,
-				DstMAC:      path.dstMAC,
 			},
 		})
 	}
@@ -1620,10 +2590,64 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 	return prepared, nil
 }
 
-func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[int64]kernelRuleApplyResult, map[string]struct{}) {
+func prepareKernelEgressNATPassthroughRule(ctx *kernelPrepareContext, rule Rule, inLink netlink.Link, outLink netlink.Link) ([]preparedKernelRule, error) {
+	inAddr, err := parseKernelInboundIPv4Uint32(rule.InIP)
+	if err != nil {
+		return nil, fmt.Errorf("parse inbound ip %q: %w", rule.InIP, err)
+	}
+	if inAddr == 0 {
+		return nil, fmt.Errorf("egress nat passthrough guard requires a specific inbound IPv4 address")
+	}
+	if rule.InPort != 0 || rule.OutPort != 0 {
+		return nil, fmt.Errorf("egress nat passthrough guard requires wildcard inbound port/identifier matching")
+	}
+	if rule.Transparent {
+		return nil, fmt.Errorf("egress nat passthrough guard does not support transparent mode")
+	}
+	if inLink == nil || inLink.Attrs() == nil || inLink.Attrs().Index <= 0 {
+		return nil, fmt.Errorf("resolve inbound interface %q: invalid link", rule.InInterface)
+	}
+	if outLink == nil || outLink.Attrs() == nil || outLink.Attrs().Index <= 0 {
+		return nil, fmt.Errorf("resolve outbound interface %q: invalid link", rule.OutInterface)
+	}
+	replyIfIndexes, replyIfParents, err := resolveTCReplyAttachments(outLink, outLink.Attrs().Index)
+	if err != nil {
+		return nil, fmt.Errorf("resolve reply interfaces on %q: %w", rule.OutInterface, err)
+	}
+	itemReplyIfParents := append([]kernelIfParentMapping(nil), replyIfParents...)
+	if mapping, ok := resolveTCBridgeParentMapping(inLink); ok {
+		itemReplyIfParents = append(itemReplyIfParents, mapping)
+	}
+
+	return []preparedKernelRule{{
+		rule:           rule,
+		inIfIndex:      inLink.Attrs().Index,
+		outIfIndex:     outLink.Attrs().Index,
+		replyIfIndexes: replyIfIndexes,
+		replyIfParents: itemReplyIfParents,
+		spec: kernelPreparedRuleSpec{
+			Family:  ipFamilyIPv4,
+			DstAddr: kernelPreparedAddrFromIPv4Uint32(inAddr),
+		},
+		key: tcRuleKeyV4{
+			IfIndex: uint32(inLink.Attrs().Index),
+			DstAddr: inAddr,
+			DstPort: 0,
+			Proto:   kernelRuleProtocol(rule.Protocol),
+		},
+		value: tcRuleValueV4{
+			RuleID:     uint32(rule.ID),
+			Flags:      kernelRuleFlagPassthrough,
+			OutIfIndex: uint32(outLink.Attrs().Index),
+		},
+	}}, nil
+}
+
+func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
 	prepared := make([]preparedKernelRule, 0, len(rules))
 	forwardIfRules := make(map[int][]int64)
 	replyIfRules := make(map[int][]int64)
+	parentIfMap := make(map[uint32]uint32)
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	skipLogger := newKernelSkipLogger("kernel")
 	prepareCtx := newKernelPrepareContext(enableTrafficStats)
@@ -1636,7 +2660,7 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 				prepared = append(prepared, reused...)
 				for _, item := range reused {
 					forwardIfRules[item.inIfIndex] = append(forwardIfRules[item.inIfIndex], rule.ID)
-					replyIfRules[item.outIfIndex] = append(replyIfRules[item.outIfIndex], rule.ID)
+					recordPreparedKernelReplyTargets(replyIfRules, parentIfMap, item, rule.ID)
 				}
 				continue
 			}
@@ -1647,12 +2671,31 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 		prepared = append(prepared, items...)
 		for _, item := range items {
 			forwardIfRules[item.inIfIndex] = append(forwardIfRules[item.inIfIndex], rule.ID)
-			replyIfRules[item.outIfIndex] = append(replyIfRules[item.outIfIndex], rule.ID)
+			recordPreparedKernelReplyTargets(replyIfRules, parentIfMap, item, rule.ID)
 		}
 	}
 
 	sortPreparedKernelRules(prepared)
-	return prepared, forwardIfRules, replyIfRules, results, skipLogger.Snapshot()
+	return prepared, forwardIfRules, replyIfRules, parentIfMap, results, skipLogger.Snapshot()
+}
+
+func recordPreparedKernelReplyTargets(replyIfRules map[int][]int64, parentIfMap map[uint32]uint32, item preparedKernelRule, ruleID int64) {
+	replyIfIndexes := item.replyIfIndexes
+	if len(replyIfIndexes) == 0 && item.outIfIndex > 0 {
+		replyIfIndexes = []int{item.outIfIndex}
+	}
+	for _, ifindex := range replyIfIndexes {
+		if ifindex <= 0 {
+			continue
+		}
+		replyIfRules[ifindex] = append(replyIfRules[ifindex], ruleID)
+	}
+	for _, mapping := range item.replyIfParents {
+		if mapping.ifindex <= 0 || mapping.parentIfIndex <= 0 {
+			continue
+		}
+		parentIfMap[uint32(mapping.ifindex)] = uint32(mapping.parentIfIndex)
+	}
 }
 
 func groupPreparedKernelRulesByMatchKey(items []preparedKernelRule) map[kernelRuleMatchKey][]preparedKernelRule {
@@ -1697,7 +2740,15 @@ func clonePreparedKernelRules(src []preparedKernelRule) []preparedKernelRule {
 		return nil
 	}
 	dst := make([]preparedKernelRule, len(src))
-	copy(dst, src)
+	for i := range src {
+		dst[i] = src[i]
+		if len(src[i].replyIfIndexes) > 0 {
+			dst[i].replyIfIndexes = append([]int(nil), src[i].replyIfIndexes...)
+		}
+		if len(src[i].replyIfParents) > 0 {
+			dst[i].replyIfParents = append([]kernelIfParentMapping(nil), src[i].replyIfParents...)
+		}
+	}
 	return dst
 }
 
@@ -1708,8 +2759,11 @@ func sortPreparedKernelRules(items []preparedKernelRule) {
 		if a.key.IfIndex != b.key.IfIndex {
 			return a.key.IfIndex < b.key.IfIndex
 		}
-		if a.key.DstAddr != b.key.DstAddr {
-			return a.key.DstAddr < b.key.DstAddr
+		if aFamily, bFamily := kernelPreparedRuleFamily(a), kernelPreparedRuleFamily(b); aFamily != bFamily {
+			return aFamily < bFamily
+		}
+		if cmp := compareKernelPreparedAddr(a.spec.DstAddr, b.spec.DstAddr); cmp != 0 {
+			return cmp < 0
 		}
 		if a.key.DstPort != b.key.DstPort {
 			return a.key.DstPort < b.key.DstPort
@@ -1717,8 +2771,8 @@ func sortPreparedKernelRules(items []preparedKernelRule) {
 		if a.key.Proto != b.key.Proto {
 			return a.key.Proto < b.key.Proto
 		}
-		if a.value.BackendAddr != b.value.BackendAddr {
-			return a.value.BackendAddr < b.value.BackendAddr
+		if cmp := compareKernelPreparedAddr(a.spec.BackendAddr, b.spec.BackendAddr); cmp != 0 {
+			return cmp < 0
 		}
 		if a.value.BackendPort != b.value.BackendPort {
 			return a.value.BackendPort < b.value.BackendPort
@@ -1729,25 +2783,96 @@ func sortPreparedKernelRules(items []preparedKernelRule) {
 		if a.value.OutIfIndex != b.value.OutIfIndex {
 			return a.value.OutIfIndex < b.value.OutIfIndex
 		}
-		if a.value.NATAddr != b.value.NATAddr {
-			return a.value.NATAddr < b.value.NATAddr
+		if cmp := compareKernelPreparedAddr(a.spec.NATAddr, b.spec.NATAddr); cmp != 0 {
+			return cmp < 0
 		}
 		return a.rule.ID < b.rule.ID
 	})
+}
+
+func kernelEgressWildcardMapKey(ifindex uint32, proto uint8) tcEgressWildcardKeyV4 {
+	return tcEgressWildcardKeyV4{
+		IfIndex: ifindex,
+		DstAddr: 0,
+		DstPort: 0,
+		Proto:   proto,
+	}
+}
+
+func buildKernelEgressWildcardFastMap(prepared []preparedKernelRule) map[tcEgressWildcardKeyV4]uint8 {
+	if len(prepared) == 0 {
+		return map[tcEgressWildcardKeyV4]uint8{}
+	}
+
+	type wildcardState struct {
+		hasEgress            bool
+		hasCompetingWildcard bool
+		hasPartial           bool
+	}
+
+	states := make(map[tcEgressWildcardKeyV4]wildcardState)
+	for _, item := range prepared {
+		if kernelPreparedRuleFamily(item) != ipFamilyIPv4 {
+			continue
+		}
+		key := kernelEgressWildcardMapKey(item.key.IfIndex, item.key.Proto)
+		state := states[key]
+		fullWildcard := item.key.DstAddr == 0 && item.key.DstPort == 0
+		if fullWildcard && item.value.Flags&kernelRuleFlagEgressNAT != 0 {
+			if state.hasEgress {
+				state.hasCompetingWildcard = true
+			} else {
+				state.hasEgress = true
+			}
+			states[key] = state
+			continue
+		}
+		if fullWildcard {
+			state.hasCompetingWildcard = true
+		} else if item.key.DstAddr == 0 || item.key.DstPort == 0 {
+			state.hasPartial = true
+		}
+		states[key] = state
+	}
+
+	fast := make(map[tcEgressWildcardKeyV4]uint8)
+	for key, state := range states {
+		if !state.hasEgress || state.hasCompetingWildcard {
+			continue
+		}
+		if !state.hasPartial {
+			fast[key] = 1
+		}
+	}
+	return fast
+}
+
+func intersectKernelEgressWildcardFastMaps(current, desired map[tcEgressWildcardKeyV4]uint8) map[tcEgressWildcardKeyV4]uint8 {
+	if len(current) == 0 || len(desired) == 0 {
+		return map[tcEgressWildcardKeyV4]uint8{}
+	}
+	out := make(map[tcEgressWildcardKeyV4]uint8)
+	for key, currentValue := range current {
+		if desiredValue, ok := desired[key]; ok && desiredValue == currentValue {
+			out[key] = currentValue
+		}
+	}
+	return out
 }
 
 func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(forwardIfRules map[int][]int64, replyIfRules map[int][]int64) bool {
 	if rt.coll == nil {
 		return false
 	}
-	forwardProg := rt.coll.Programs[kernelForwardProgramName]
-	replyProg := rt.coll.Programs[kernelReplyProgramName]
+	forwardProg, replyProg, forwardProgV6, replyProgV6 := kernelAttachmentProgramsForPreparedRules(rt.coll, rt.preparedRules)
 	return kernelAttachmentsHealthy(
 		forwardIfRules,
 		replyIfRules,
 		rt.attachments,
-		int(kernelProgramID(forwardProg)),
-		int(kernelProgramID(replyProg)),
+		forwardProg,
+		replyProg,
+		forwardProgV6,
+		replyProgV6,
 	)
 }
 
@@ -1778,6 +2903,192 @@ func updateKernelMapEntries[K any, V any](m *ebpf.Map, keys []K, values []V) err
 		}
 	}
 	return nil
+}
+
+func syncKernelIfParentMap(m *ebpf.Map, desired map[uint32]uint32) error {
+	if m == nil {
+		return fmt.Errorf("kernel reply parent map is nil")
+	}
+	if desired == nil {
+		desired = make(map[uint32]uint32)
+	}
+
+	existing := make(map[uint32]uint32)
+	iter := m.Iterate()
+	var key uint32
+	var value uint32
+	for iter.Next(&key, &value) {
+		existing[key] = value
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate kernel reply parent map: %w", err)
+	}
+
+	for child, parent := range desired {
+		if current, ok := existing[child]; ok && current == parent {
+			delete(existing, child)
+			continue
+		}
+		if err := m.Put(child, parent); err != nil {
+			return fmt.Errorf("update reply parent map entry %d->%d: %w", child, parent, err)
+		}
+		delete(existing, child)
+	}
+	for child := range existing {
+		if err := m.Delete(child); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete stale reply parent map entry %d: %w", child, err)
+		}
+	}
+	return nil
+}
+
+func syncKernelLocalIPv4Map(m *ebpf.Map, desired map[uint32]uint8) error {
+	if m == nil {
+		return fmt.Errorf("kernel local IPv4 map is nil")
+	}
+	if desired == nil {
+		desired = make(map[uint32]uint8)
+	}
+
+	existing := make(map[uint32]uint8)
+	iter := m.Iterate()
+	var key uint32
+	var value uint8
+	for iter.Next(&key, &value) {
+		existing[key] = value
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate kernel local IPv4 map: %w", err)
+	}
+
+	for addr, present := range desired {
+		if current, ok := existing[addr]; ok && current == present {
+			delete(existing, addr)
+			continue
+		}
+		if err := m.Put(addr, present); err != nil {
+			return fmt.Errorf("update local IPv4 map entry %d: %w", addr, err)
+		}
+		delete(existing, addr)
+	}
+	for addr := range existing {
+		if err := m.Delete(addr); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete stale local IPv4 map entry %d: %w", addr, err)
+		}
+	}
+	return nil
+}
+
+func syncKernelEgressWildcardFastMap(m *ebpf.Map, desired map[tcEgressWildcardKeyV4]uint8) error {
+	if m == nil {
+		return fmt.Errorf("kernel egress wildcard fast map is nil")
+	}
+	if desired == nil {
+		desired = make(map[tcEgressWildcardKeyV4]uint8)
+	}
+
+	existing := make(map[tcEgressWildcardKeyV4]uint8)
+	iter := m.Iterate()
+	var key tcEgressWildcardKeyV4
+	var value uint8
+	for iter.Next(&key, &value) {
+		existing[key] = value
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate kernel egress wildcard fast map: %w", err)
+	}
+
+	for matchKey, present := range desired {
+		if current, ok := existing[matchKey]; ok && current == present {
+			delete(existing, matchKey)
+			continue
+		}
+		if err := m.Put(matchKey, present); err != nil {
+			return fmt.Errorf("update egress wildcard fast map entry %+v: %w", matchKey, err)
+		}
+		delete(existing, matchKey)
+	}
+	for matchKey := range existing {
+		if err := m.Delete(matchKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete stale egress wildcard fast map entry %+v: %w", matchKey, err)
+		}
+	}
+	return nil
+}
+
+type preparedKernelRuleBatches struct {
+	v4Keys   []tcRuleKeyV4
+	v4Values []tcRuleValueV4
+	v6Keys   []tcRuleKeyV6
+	v6Values []tcRuleValueV6
+}
+
+func buildPreparedKernelRuleBatches(prepared []preparedKernelRule) (preparedKernelRuleBatches, error) {
+	batches := preparedKernelRuleBatches{
+		v4Keys:   make([]tcRuleKeyV4, 0, len(prepared)),
+		v4Values: make([]tcRuleValueV4, 0, len(prepared)),
+		v6Keys:   make([]tcRuleKeyV6, 0, len(prepared)),
+		v6Values: make([]tcRuleValueV6, 0, len(prepared)),
+	}
+	for _, item := range prepared {
+		switch kernelPreparedRuleFamily(item) {
+		case ipFamilyIPv6:
+			key, value, err := encodePreparedKernelRuleV6(item)
+			if err != nil {
+				return preparedKernelRuleBatches{}, fmt.Errorf("encode IPv6 prepared kernel rule %d: %w", item.rule.ID, err)
+			}
+			batches.v6Keys = append(batches.v6Keys, key)
+			batches.v6Values = append(batches.v6Values, value)
+		default:
+			key, value, err := encodePreparedKernelRuleV4(item)
+			if err != nil {
+				return preparedKernelRuleBatches{}, fmt.Errorf("encode IPv4 prepared kernel rule %d: %w", item.rule.ID, err)
+			}
+			batches.v4Keys = append(batches.v4Keys, key)
+			batches.v4Values = append(batches.v4Values, value)
+		}
+	}
+	return batches, nil
+}
+
+func syncPreparedKernelRuleMaps(pieces kernelCollectionPieces, prepared []preparedKernelRule) error {
+	batches, err := buildPreparedKernelRuleBatches(prepared)
+	if err != nil {
+		return err
+	}
+	if err := updateKernelMapEntries(pieces.rulesV4, batches.v4Keys, batches.v4Values); err != nil {
+		return fmt.Errorf("update IPv4 kernel rule map: %w", err)
+	}
+	if len(batches.v6Keys) == 0 {
+		return nil
+	}
+	if pieces.rulesV6 == nil {
+		return fmt.Errorf("kernel object is missing IPv6 rules map")
+	}
+	if err := updateKernelMapEntries(pieces.rulesV6, batches.v6Keys, batches.v6Values); err != nil {
+		return fmt.Errorf("update IPv6 kernel rule map: %w", err)
+	}
+	return nil
+}
+
+func deletePreparedKernelRuleMapEntry(pieces kernelCollectionPieces, item preparedKernelRule) error {
+	switch kernelPreparedRuleFamily(item) {
+	case ipFamilyIPv6:
+		if pieces.rulesV6 == nil {
+			return fmt.Errorf("kernel object is missing IPv6 rules map")
+		}
+		key, _, err := encodePreparedKernelRuleV6(item)
+		if err != nil {
+			return fmt.Errorf("encode IPv6 prepared kernel rule %d for delete: %w", item.rule.ID, err)
+		}
+		return deleteKernelMapEntry(pieces.rulesV6, key)
+	default:
+		key, _, err := encodePreparedKernelRuleV4(item)
+		if err != nil {
+			return fmt.Errorf("encode IPv4 prepared kernel rule %d for delete: %w", item.rule.ID, err)
+		}
+		return deleteKernelMapEntry(pieces.rulesV4, key)
+	}
 }
 
 func applyKernelRuleMapDiff(m *ebpf.Map, diff kernelRuleMapDiff) error {
@@ -1849,6 +3160,85 @@ func applyKernelRuleMapDiff(m *ebpf.Map, diff kernelRuleMapDiff) error {
 	return nil
 }
 
+func applyKernelRuleMapDiffV6(m *ebpf.Map, diff kernelRuleMapDiffV6) error {
+	if len(diff.upserts) == 0 && len(diff.deletes) == 0 {
+		return nil
+	}
+	if m == nil {
+		return fmt.Errorf("kernel IPv6 rule map is nil")
+	}
+
+	snapshots := make([]kernelRuleMapSnapshotV6, 0, len(diff.upserts)+len(diff.deletes))
+	seen := make(map[tcRuleKeyV6]struct{}, len(diff.upserts)+len(diff.deletes))
+	snapshotKey := func(key tcRuleKeyV6) error {
+		if _, ok := seen[key]; ok {
+			return nil
+		}
+		seen[key] = struct{}{}
+		var value tcRuleValueV6
+		err := m.Lookup(key, &value)
+		if err == nil {
+			snapshots = append(snapshots, kernelRuleMapSnapshotV6{
+				key:    key,
+				value:  value,
+				exists: true,
+			})
+			return nil
+		}
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			snapshots = append(snapshots, kernelRuleMapSnapshotV6{key: key})
+			return nil
+		}
+		return fmt.Errorf("lookup IPv6 rule key before in-place update: %w", err)
+	}
+
+	for _, item := range diff.upserts {
+		if err := snapshotKey(item.key); err != nil {
+			return err
+		}
+	}
+	for _, key := range diff.deletes {
+		if err := snapshotKey(key); err != nil {
+			return err
+		}
+	}
+
+	rollback := func() {
+		for i := len(snapshots) - 1; i >= 0; i-- {
+			item := snapshots[i]
+			if item.exists {
+				_ = m.Put(item.key, item.value)
+				continue
+			}
+			_ = deleteKernelMapEntry(m, item.key)
+		}
+	}
+
+	for _, item := range diff.upserts {
+		if err := m.Put(item.key, item.value); err != nil {
+			rollback()
+			return fmt.Errorf("upsert IPv6 kernel rule key during in-place update: %w", err)
+		}
+	}
+	for _, key := range diff.deletes {
+		if err := deleteKernelMapEntry(m, key); err != nil {
+			rollback()
+			return fmt.Errorf("delete stale IPv6 kernel rule key during in-place update: %w", err)
+		}
+	}
+	return nil
+}
+
+func applyKernelDualStackRuleMapDiff(pieces kernelCollectionPieces, diff kernelDualStackRuleMapDiff) error {
+	if err := applyKernelRuleMapDiff(pieces.rulesV4, diff.v4); err != nil {
+		return err
+	}
+	if err := applyKernelRuleMapDiffV6(pieces.rulesV6, diff.v6); err != nil {
+		return err
+	}
+	return nil
+}
+
 func deleteKernelMapEntry[K any](m *ebpf.Map, key K) error {
 	if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return err
@@ -1881,8 +3271,19 @@ func kernelRuleProtocol(protocol string) uint8 {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "udp":
 		return unix.IPPROTO_UDP
+	case "icmp":
+		return unix.IPPROTO_ICMP
 	default:
 		return unix.IPPROTO_TCP
+	}
+}
+
+func kernelEgressProtocolSupported(protocol string) bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "tcp", "udp", "icmp":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1896,30 +3297,22 @@ func kernelProtocolSupported(protocol string) bool {
 }
 
 func parseIPv4Uint32(text string) (uint32, error) {
-	ip := net.ParseIP(text)
-	if ip == nil {
-		return 0, fmt.Errorf("invalid IPv4 address")
+	ip, err := parseKernelExplicitIP(text, ipFamilyIPv4)
+	if err != nil {
+		return 0, err
 	}
-	ip = ip.To4()
-	if ip == nil || ip.String() == "0.0.0.0" {
-		return 0, fmt.Errorf("must be an explicit IPv4 address")
-	}
-	return ipv4ToUint32(text), nil
+	return ipv4BytesToUint32(ip), nil
 }
 
 func parseKernelInboundIPv4Uint32(text string) (uint32, error) {
-	ip := net.ParseIP(text)
-	if ip == nil {
-		return 0, fmt.Errorf("invalid IPv4 address")
+	ip, wildcard, err := parseKernelInboundIP(text, ipFamilyIPv4)
+	if err != nil {
+		return 0, err
 	}
-	ip = ip.To4()
-	if ip == nil {
-		return 0, fmt.Errorf("invalid IPv4 address")
-	}
-	if ip.String() == "0.0.0.0" {
+	if wildcard {
 		return 0, nil
 	}
-	return ipv4ToUint32(text), nil
+	return ipv4BytesToUint32(ip), nil
 }
 
 func resolveKernelSNATIPv4(link netlink.Link, backendIP string, preferredIP string) (uint32, error) {
@@ -1928,12 +3321,11 @@ func resolveKernelSNATIPv4(link netlink.Link, backendIP string, preferredIP stri
 	}
 
 	if preferredIP = strings.TrimSpace(preferredIP); preferredIP != "" {
-		ip := net.ParseIP(preferredIP)
-		if ip == nil {
-			return 0, fmt.Errorf("invalid IPv4 address %q", preferredIP)
-		}
-		ip4 := ip.To4()
-		if ip4 == nil {
+		ip4, err := parseKernelExplicitIP(preferredIP, ipFamilyIPv4)
+		if err != nil {
+			if strings.Contains(err.Error(), "must be an explicit IPv4 address") {
+				return 0, fmt.Errorf("preferred source IPv4 %q must be a specific non-loopback address", preferredIP)
+			}
 			return 0, fmt.Errorf("invalid IPv4 address %q", preferredIP)
 		}
 		if ip4.IsLoopback() || ip4.IsUnspecified() {
@@ -1968,36 +3360,127 @@ func resolveKernelSNATIPv4(link netlink.Link, backendIP string, preferredIP stri
 		return 0, err
 	}
 
-	usable := make([]net.IP, 0, len(addrs))
-	linkLocal := make([]net.IP, 0, len(addrs))
+	allAddrs := make([]net.IP, 0, len(addrs))
 	for _, addr := range addrs {
-		if addr.IP == nil {
-			continue
-		}
-		ip4 := addr.IP.To4()
-		if ip4 == nil || ip4.IsLoopback() {
-			continue
-		}
-		if ip4.IsLinkLocalUnicast() {
-			linkLocal = append(linkLocal, ip4)
-			continue
-		}
-		usable = append(usable, ip4)
+		allAddrs = append(allAddrs, addr.IP)
+	}
+	usable, linkLocal := splitKernelUsableSourceIPs(allAddrs, ipFamilyIPv4)
+	selected, err := selectKernelAutoSourceIP(link.Attrs().Name, ipFamilyIPv4, usable, linkLocal)
+	if err != nil {
+		return 0, err
+	}
+	return ipv4BytesToUint32(selected), nil
+}
+
+func resolveKernelEgressSNATIPv4(link netlink.Link, preferredIP string) (uint32, error) {
+	if link == nil || link.Attrs() == nil {
+		return 0, fmt.Errorf("invalid outbound interface")
+	}
+	if strings.TrimSpace(preferredIP) != "" {
+		return resolveKernelSNATIPv4(link, "0.0.0.0", preferredIP)
 	}
 
-	if len(usable) == 1 {
-		return ipv4BytesToUint32(usable[0]), nil
+	addrs, err := netlink.AddrList(link, unix.AF_INET)
+	if err != nil {
+		return 0, err
 	}
-	if len(usable) > 1 {
-		return 0, fmt.Errorf("auto outbound source IPv4 on %q is ambiguous (%d IPv4 addresses assigned); set out_source_ip explicitly", link.Attrs().Name, len(usable))
+
+	allAddrs := make([]net.IP, 0, len(addrs))
+	for _, addr := range addrs {
+		allAddrs = append(allAddrs, addr.IP)
 	}
-	if len(linkLocal) == 1 {
-		return ipv4BytesToUint32(linkLocal[0]), nil
+	usable, linkLocal := splitKernelUsableSourceIPs(allAddrs, ipFamilyIPv4)
+	selected, err := selectKernelAutoSourceIP(link.Attrs().Name, ipFamilyIPv4, usable, linkLocal)
+	if err != nil {
+		return 0, err
 	}
-	if len(linkLocal) > 1 {
-		return 0, fmt.Errorf("auto outbound source IPv4 on %q is ambiguous (%d link-local IPv4 addresses assigned); set out_source_ip explicitly", link.Attrs().Name, len(linkLocal))
+	return ipv4BytesToUint32(selected), nil
+}
+
+func resolveKernelSNATIPv6(link netlink.Link, backendIP string, preferredIP string) (net.IP, error) {
+	if link == nil || link.Attrs() == nil {
+		return nil, fmt.Errorf("invalid outbound interface")
 	}
-	return 0, fmt.Errorf("no IPv4 address is assigned")
+
+	if preferredIP = strings.TrimSpace(preferredIP); preferredIP != "" {
+		ip6, err := parseKernelExplicitIP(preferredIP, ipFamilyIPv6)
+		if err != nil {
+			if strings.Contains(err.Error(), "must be an explicit IPv6 address") {
+				return nil, fmt.Errorf("preferred source IPv6 %q must be a specific non-loopback address", preferredIP)
+			}
+			return nil, fmt.Errorf("invalid IPv6 address %q", preferredIP)
+		}
+		if ip6.IsLoopback() || ip6.IsUnspecified() {
+			return nil, fmt.Errorf("preferred source IPv6 %q must be a specific non-loopback address", preferredIP)
+		}
+		addrs, err := netlink.AddrList(link, unix.AF_INET6)
+		if err != nil {
+			return nil, err
+		}
+		for _, addr := range addrs {
+			if current := normalizeKernelFamilyIP(addr.IP, ipFamilyIPv6); current != nil && current.Equal(ip6) {
+				return append(net.IP(nil), ip6...), nil
+			}
+		}
+		return nil, fmt.Errorf("preferred source IPv6 %q is not assigned", preferredIP)
+	}
+
+	backendIPv6, err := parseKernelExplicitIP(backendIP, ipFamilyIPv6)
+	if err != nil {
+		return nil, fmt.Errorf("invalid backend IPv6 address %q", backendIP)
+	}
+
+	if routeSource, err := resolveKernelRouteSourceIPv6(link, backendIPv6); err == nil {
+		return append(net.IP(nil), routeSource...), nil
+	}
+
+	addrs, err := netlink.AddrList(link, unix.AF_INET6)
+	if err != nil {
+		return nil, err
+	}
+
+	allAddrs := make([]net.IP, 0, len(addrs))
+	for _, addr := range addrs {
+		allAddrs = append(allAddrs, addr.IP)
+	}
+	usable, linkLocal := splitKernelUsableSourceIPs(allAddrs, ipFamilyIPv6)
+	selected, err := selectKernelAutoSourceIP(link.Attrs().Name, ipFamilyIPv6, usable, linkLocal)
+	if err != nil {
+		return nil, err
+	}
+	return append(net.IP(nil), selected...), nil
+}
+
+func resolveKernelRouteSourceIPv6(link netlink.Link, backendIP net.IP) (net.IP, error) {
+	if link == nil || link.Attrs() == nil {
+		return nil, fmt.Errorf("invalid outbound interface")
+	}
+	if backendIP = normalizeKernelFamilyIP(backendIP, ipFamilyIPv6); backendIP == nil {
+		return nil, fmt.Errorf("invalid backend IPv6 address")
+	}
+
+	routes, err := netlink.RouteGetWithOptions(backendIP, &netlink.RouteGetOptions{
+		OifIndex: link.Attrs().Index,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("no matching route")
+	}
+
+	for _, route := range routes {
+		if route.LinkIndex != 0 && route.LinkIndex != link.Attrs().Index {
+			continue
+		}
+		src := normalizeKernelFamilyIP(route.Src, ipFamilyIPv6)
+		if src == nil || src.IsLoopback() || src.IsUnspecified() {
+			continue
+		}
+		return append(net.IP(nil), src...), nil
+	}
+
+	return nil, fmt.Errorf("route lookup returned no usable source IPv6")
 }
 
 func resolveKernelRouteSourceIPv4(link netlink.Link, backendIP net.IP) (net.IP, error) {

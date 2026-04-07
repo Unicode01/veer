@@ -25,7 +25,7 @@ func TestIsTransientKernelFallbackReason(t *testing.T) {
 		},
 		{
 			name:   "table pressure",
-			reason: `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+			reason: `kernel dataplane pressure: flows 242000/262144 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
 			want:   false,
 		},
 		{
@@ -71,7 +71,7 @@ func TestHasTransientKernelFallbacksLocked(t *testing.T) {
 	pm.rulePlans[1] = ruleDataplanePlan{
 		KernelEligible:  true,
 		EffectiveEngine: ruleEngineUserspace,
-		FallbackReason:  `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+		FallbackReason:  `kernel dataplane pressure: flows 242000/262144 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
 	}
 	if pm.hasTransientKernelFallbacksLocked() {
 		t.Fatal("hasTransientKernelFallbacksLocked() = true for pressure fallback, want false")

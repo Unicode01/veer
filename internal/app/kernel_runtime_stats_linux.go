@@ -28,6 +28,7 @@ type kernelStatsValueV4 struct {
 	TotalConns     uint64
 	TCPActiveConns uint64
 	UDPNatEntries  uint64
+	ICMPNatEntries uint64
 	BytesIn        uint64
 	BytesOut       uint64
 }
@@ -126,6 +127,7 @@ func applyKernelStatsCorrections(dst map[uint32]kernelRuleStats, corrections map
 		current := dst[ruleID]
 		current.TCPActiveConns = clampKernelStatDelta(current.TCPActiveConns, delta.TCPActiveConns)
 		current.UDPNatEntries = clampKernelStatDelta(current.UDPNatEntries, delta.UDPNatEntries)
+		current.ICMPNatEntries = clampKernelStatDelta(current.ICMPNatEntries, delta.ICMPNatEntries)
 		current.TotalConns = clampKernelStatDelta(current.TotalConns, delta.TotalConns)
 		current.BytesIn = clampKernelStatDelta(current.BytesIn, delta.BytesIn)
 		current.BytesOut = clampKernelStatDelta(current.BytesOut, delta.BytesOut)
@@ -149,6 +151,7 @@ func mergeKernelStatsCorrections(dst map[uint32]kernelRuleStats, delta map[uint3
 		current := dst[ruleID]
 		current.TCPActiveConns += item.TCPActiveConns
 		current.UDPNatEntries += item.UDPNatEntries
+		current.ICMPNatEntries += item.ICMPNatEntries
 		current.TotalConns += item.TotalConns
 		current.BytesIn += item.BytesIn
 		current.BytesOut += item.BytesOut
@@ -258,47 +261,121 @@ func copyKernelStatsMap(dst *ebpf.Map, src *ebpf.Map) error {
 }
 
 func snapshotKernelLiveCountsFromFlows(flowsMap *ebpf.Map) (map[uint32]kernelStatsValueV4, error) {
-	live, _, err := snapshotKernelLiveStateFromFlows(nil, flowsMap, false)
+	live, err := snapshotKernelLiveStateFromFlows(nil, flowsMap, false)
 	if err != nil {
 		return nil, err
 	}
-	return live, nil
+	return live.ByRuleID, nil
 }
 
-func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, includeNAT bool) (map[uint32]kernelStatsValueV4, map[tcNATPortKeyV4]struct{}, error) {
-	out := make(map[uint32]kernelStatsValueV4)
-	var usedNAT map[tcNATPortKeyV4]struct{}
-	if includeNAT {
-		usedNAT = make(map[tcNATPortKeyV4]struct{})
+func mergeKernelLiveStateSnapshot(dst *kernelFlowLiveStateSnapshot, src kernelFlowLiveStateSnapshot) {
+	if dst == nil {
+		return
 	}
+	dst.FlowEntries += src.FlowEntries
+	for ruleID, value := range src.ByRuleID {
+		current := dst.ByRuleID[ruleID]
+		current.TotalConns += value.TotalConns
+		current.TCPActiveConns += value.TCPActiveConns
+		current.UDPNatEntries += value.UDPNatEntries
+		current.ICMPNatEntries += value.ICMPNatEntries
+		current.BytesIn += value.BytesIn
+		current.BytesOut += value.BytesOut
+		dst.ByRuleID[ruleID] = current
+	}
+	if dst.UsedNAT == nil || len(src.UsedNAT) == 0 {
+		return
+	}
+	for natKey := range src.UsedNAT {
+		dst.UsedNAT[natKey] = struct{}{}
+	}
+}
+
+func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includeNAT bool) (kernelFlowLiveStateSnapshot, error) {
+	out := newKernelFlowLiveStateSnapshot(includeNAT)
+	if refs.flowsV4 != nil {
+		live, err := snapshotKernelLiveStateFromFlows(refs.rulesV4, refs.flowsV4, includeNAT)
+		if err != nil {
+			return kernelFlowLiveStateSnapshot{}, err
+		}
+		mergeKernelLiveStateSnapshot(&out, live)
+	}
+	if refs.flowsV6 != nil {
+		// IPv6 TC support is still being phased in. The live snapshot aggregates IPv6
+		// flow counts here, while UsedNAT remains IPv4-only for orphan NAT pruning.
+		// Runtime occupancy sync uses exact NAT map counts instead of this set.
+		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsV6)
+		if err != nil {
+			return kernelFlowLiveStateSnapshot{}, err
+		}
+		mergeKernelLiveStateSnapshot(&out, live)
+	}
+	return out, nil
+}
+
+func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, includeNAT bool) (kernelFlowLiveStateSnapshot, error) {
+	out := newKernelFlowLiveStateSnapshot(includeNAT)
 	if flowsMap == nil {
-		return out, usedNAT, nil
+		return out, nil
 	}
 
 	iter := flowsMap.Iterate()
 	var key tcFlowKeyV4
 	var value tcFlowValueV4
 	for iter.Next(&key, &value) {
+		out.FlowEntries++
 		if !kernelFlowCountsTowardLiveGauge(value) {
 			continue
 		}
-		item := out[value.RuleID]
-		if key.Proto == unix.IPPROTO_UDP {
+		item := out.ByRuleID[value.RuleID]
+		if kernelFlowUsesUDPAccounting(key.Proto) {
 			item.UDPNatEntries++
+		} else if kernelFlowUsesICMPAccounting(key.Proto) {
+			item.ICMPNatEntries++
 		} else {
 			item.TCPActiveConns++
 		}
-		out[value.RuleID] = item
+		out.ByRuleID[value.RuleID] = item
 		if includeNAT {
 			if natKey, ok := kernelUsedNATReservationKey(rulesMap, key, value); ok {
-				usedNAT[natKey] = struct{}{}
+				out.UsedNAT[natKey] = struct{}{}
 			}
 		}
 	}
 	if err := iter.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate kernel flows map for live counts: %w", err)
+		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate kernel flows map for live counts: %w", err)
 	}
-	return out, usedNAT, nil
+	return out, nil
+}
+
+func snapshotKernelLiveStateFromFlowsV6(flowsMap *ebpf.Map) (kernelFlowLiveStateSnapshot, error) {
+	out := newKernelFlowLiveStateSnapshot(false)
+	if flowsMap == nil {
+		return out, nil
+	}
+
+	iter := flowsMap.Iterate()
+	var key tcFlowKeyV6
+	var value tcFlowValueV6
+	for iter.Next(&key, &value) {
+		out.FlowEntries++
+		if !kernelFlowCountsTowardLiveGaugeV6(value) {
+			continue
+		}
+		item := out.ByRuleID[value.RuleID]
+		if kernelFlowUsesUDPAccounting(key.Proto) {
+			item.UDPNatEntries++
+		} else if kernelFlowUsesICMPAccounting(key.Proto) {
+			item.ICMPNatEntries++
+		} else {
+			item.TCPActiveConns++
+		}
+		out.ByRuleID[value.RuleID] = item
+	}
+	if err := iter.Err(); err != nil {
+		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate kernel ipv6 flows map for live counts: %w", err)
+	}
+	return out, nil
 }
 
 func kernelUsedNATReservationKey(rulesMap *ebpf.Map, key tcFlowKeyV4, value tcFlowValueV4) (tcNATPortKeyV4, bool) {
@@ -337,6 +414,38 @@ func kernelFlowCountsTowardLiveGauge(value tcFlowValueV4) bool {
 	return true
 }
 
+func kernelFlowCountsTowardLiveGaugeV6(value tcFlowValueV6) bool {
+	if value.RuleID == 0 {
+		return false
+	}
+	if value.Flags&kernelFlowFlagCounted == 0 {
+		return false
+	}
+	if value.Flags&kernelFlowFlagFullNAT != 0 && value.Flags&kernelFlowFlagFrontEntry != 0 {
+		return false
+	}
+	return true
+}
+
+func kernelFlowUsesDatagramAccounting(proto uint8) bool {
+	return proto == unix.IPPROTO_UDP || proto == unix.IPPROTO_ICMP
+}
+
+func kernelFlowUsesUDPAccounting(proto uint8) bool {
+	return proto == unix.IPPROTO_UDP
+}
+
+func kernelFlowUsesICMPAccounting(proto uint8) bool {
+	return proto == unix.IPPROTO_ICMP
+}
+
+func kernelDatagramFlowIdleTimeout(proto uint8) uint64 {
+	if proto == unix.IPPROTO_ICMP {
+		return kernelICMPFlowIdleTimeout
+	}
+	return kernelUDPFlowIdleTimeout
+}
+
 func kernelLiveStatsCorrection(observed map[uint32]kernelStatsValueV4, live map[uint32]kernelStatsValueV4) map[uint32]kernelRuleStats {
 	if len(observed) == 0 && len(live) == 0 {
 		return map[uint32]kernelRuleStats{}
@@ -357,8 +466,9 @@ func kernelLiveStatsCorrection(observed map[uint32]kernelStatsValueV4, live map[
 		delta := kernelRuleStats{
 			TCPActiveConns: int64(liveItem.TCPActiveConns) - int64(observedItem.TCPActiveConns),
 			UDPNatEntries:  int64(liveItem.UDPNatEntries) - int64(observedItem.UDPNatEntries),
+			ICMPNatEntries: int64(liveItem.ICMPNatEntries) - int64(observedItem.ICMPNatEntries),
 		}
-		if delta.TCPActiveConns == 0 && delta.UDPNatEntries == 0 {
+		if delta.TCPActiveConns == 0 && delta.UDPNatEntries == 0 && delta.ICMPNatEntries == 0 {
 			continue
 		}
 		out[ruleID] = delta
@@ -367,11 +477,19 @@ func kernelLiveStatsCorrection(observed map[uint32]kernelStatsValueV4, live map[
 }
 
 func reconcileKernelStatsCorrectionFromMaps(statsMap *ebpf.Map, flowsMap *ebpf.Map) (map[uint32]kernelRuleStats, error) {
-	live, _, err := snapshotKernelLiveStateFromFlows(nil, flowsMap, false)
+	live, err := snapshotKernelLiveStateFromFlows(nil, flowsMap, false)
 	if err != nil {
 		return nil, err
 	}
-	return reconcileKernelStatsCorrectionFromSnapshot(statsMap, live)
+	return reconcileKernelStatsCorrectionFromSnapshot(statsMap, live.ByRuleID)
+}
+
+func reconcileKernelStatsCorrectionFromRuntimeMaps(statsMap *ebpf.Map, refs kernelRuntimeMapRefs) (map[uint32]kernelRuleStats, error) {
+	live, err := snapshotKernelLiveStateFromRuntimeMapRefs(refs, false)
+	if err != nil {
+		return nil, err
+	}
+	return reconcileKernelStatsCorrectionFromSnapshot(statsMap, live.ByRuleID)
 }
 
 func reconcileKernelStatsCorrectionFromSnapshot(statsMap *ebpf.Map, live map[uint32]kernelStatsValueV4) (map[uint32]kernelRuleStats, error) {
@@ -389,7 +507,7 @@ func syncKernelLiveStatsCorrections(dst map[uint32]kernelRuleStats, exact map[ui
 
 	ids := make(map[uint32]struct{}, len(dst)+len(exact))
 	for ruleID, current := range dst {
-		if current.TCPActiveConns == 0 && current.UDPNatEntries == 0 {
+		if current.TCPActiveConns == 0 && current.UDPNatEntries == 0 && current.ICMPNatEntries == 0 {
 			continue
 		}
 		ids[ruleID] = struct{}{}
@@ -403,6 +521,7 @@ func syncKernelLiveStatsCorrections(dst map[uint32]kernelRuleStats, exact map[ui
 		next := exact[ruleID]
 		current.TCPActiveConns = next.TCPActiveConns
 		current.UDPNatEntries = next.UDPNatEntries
+		current.ICMPNatEntries = next.ICMPNatEntries
 		if current == (kernelRuleStats{}) {
 			delete(dst, ruleID)
 			continue
@@ -456,6 +575,7 @@ func kernelRuleStatsFromValue(value kernelStatsValueV4) kernelRuleStats {
 	return kernelRuleStats{
 		TCPActiveConns: int64(value.TCPActiveConns),
 		UDPNatEntries:  int64(value.UDPNatEntries),
+		ICMPNatEntries: int64(value.ICMPNatEntries),
 		TotalConns:     int64(value.TotalConns),
 		BytesIn:        int64(value.BytesIn),
 		BytesOut:       int64(value.BytesOut),
@@ -487,6 +607,7 @@ func aggregateKernelPerCPUStats(values []kernelStatsValueV4) kernelStatsValueV4 
 		out.TotalConns += value.TotalConns
 		out.TCPActiveConns += value.TCPActiveConns
 		out.UDPNatEntries += value.UDPNatEntries
+		out.ICMPNatEntries += value.ICMPNatEntries
 		out.BytesIn += value.BytesIn
 		out.BytesOut += value.BytesOut
 	}
@@ -689,8 +810,8 @@ func kernelFlowShouldDelete(key tcFlowKeyV4, value tcFlowValueV4, nowNS uint64, 
 	}
 
 	ageNS := nowNS - value.LastSeenNS
-	if key.Proto == unix.IPPROTO_UDP {
-		return ageNS > kernelUDPFlowIdleTimeout
+	if kernelFlowUsesDatagramAccounting(key.Proto) {
+		return ageNS > kernelDatagramFlowIdleTimeout(key.Proto)
 	}
 
 	if value.Flags&kernelFlowFlagReplySeen == 0 {
@@ -709,8 +830,10 @@ func kernelFlowShouldDelete(key tcFlowKeyV4, value tcFlowValueV4, nowNS uint64, 
 func deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap *ebpf.Map, stale staleKernelFlow, corrections map[uint32]kernelRuleStats) {
 	if stale.value.Flags&kernelFlowFlagCounted != 0 {
 		item := corrections[stale.value.RuleID]
-		if stale.key.Proto == unix.IPPROTO_UDP {
+		if kernelFlowUsesUDPAccounting(stale.key.Proto) {
 			item.UDPNatEntries--
+		} else if kernelFlowUsesICMPAccounting(stale.key.Proto) {
+			item.ICMPNatEntries--
 		} else {
 			item.TCPActiveConns--
 		}
@@ -775,6 +898,10 @@ func deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap *ebpf.Map, stale stal
 		DstPort: stale.value.NATPort,
 		Proto:   stale.key.Proto,
 	}
+	if stale.value.Flags&kernelFlowFlagEgressNAT != 0 {
+		replyKey.SrcAddr = stale.value.FrontAddr
+		replyKey.SrcPort = stale.value.FrontPort
+	}
 	if err := flowsMap.Delete(replyKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		log.Printf("kernel dataplane maintenance: delete stale reply flow failed: proto=%d ifindex=%d src=%d dst=%d sport=%d dport=%d err=%v",
 			replyKey.Proto,
@@ -811,6 +938,10 @@ func lookupRuleValueForFrontFlow(rulesMap *ebpf.Map, frontKey tcFlowKeyV4) (tcRu
 	}
 
 	ruleKey.DstAddr = 0
+	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
+		return ruleValue, true
+	}
+	ruleKey.DstPort = 0
 	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
 		return ruleValue, true
 	}

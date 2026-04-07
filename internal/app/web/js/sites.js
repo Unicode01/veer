@@ -2,6 +2,21 @@
   const app = window.ForwardApp;
   if (!app) return;
 
+  app.refreshSiteInterfaceSelectors = function refreshSiteInterfaceSelectors() {
+    const el = app.el;
+    app.populateInterfacePicker(el.siteListenIface, el.siteListenIfacePicker, el.siteListenIfaceOptions, {
+      preserveSelected: true
+    });
+    app.populateSiteListenIP(el.siteListenIface, el.siteListenIP, el.siteListenIP.value);
+  };
+
+  app.refreshSiteBackendSourceIPOptions = function refreshSiteBackendSourceIPOptions(selected) {
+    const family = typeof app.ipFamily === 'function' ? app.ipFamily(app.$('siteBackendIP').value) : '';
+    app.populateSourceIPSelect(null, app.el.siteBackendSourceIP, selected == null ? app.el.siteBackendSourceIP.value : selected, true, {
+      family: family
+    });
+  };
+
   app.syncSiteFormState = function syncSiteFormState() {
     const el = app.el;
     const formState = app.state.forms.site;
@@ -41,10 +56,11 @@
 
     app.$('siteDomain').value = site.domain;
     app.populateTagSelect(app.$('siteTag'), site.tag);
-    app.populateInterfaceSelect(el.siteListenIface, site.listen_interface);
-    app.populateSiteListenIP(el.siteListenIface, el.siteListenIP, site.listen_ip);
+    el.siteListenIface.value = site.listen_interface || '';
+    el.siteListenIP.value = site.listen_ip || '';
+    app.refreshSiteInterfaceSelectors();
     app.$('siteBackendIP').value = site.backend_ip;
-    app.populateSourceIPSelect(null, el.siteBackendSourceIP, site.backend_source_ip, true);
+    app.refreshSiteBackendSourceIPOptions(site.backend_source_ip);
     app.$('siteBackendHTTP').value = site.backend_http_port || '';
     app.$('siteBackendHTTPS').value = site.backend_https_port || '';
     app.$('siteTransparent').checked = !!site.transparent;
@@ -60,10 +76,11 @@
 
     app.$('siteDomain').value = site.domain;
     app.populateTagSelect(app.$('siteTag'), site.tag);
-    app.populateInterfaceSelect(el.siteListenIface, site.listen_interface);
-    app.populateSiteListenIP(el.siteListenIface, el.siteListenIP, site.listen_ip);
+    el.siteListenIface.value = site.listen_interface || '';
+    el.siteListenIP.value = site.listen_ip || '';
+    app.refreshSiteInterfaceSelectors();
     app.$('siteBackendIP').value = site.backend_ip;
-    app.populateSourceIPSelect(null, el.siteBackendSourceIP, site.backend_source_ip, true);
+    app.refreshSiteBackendSourceIPOptions(site.backend_source_ip);
     app.$('siteBackendHTTP').value = site.backend_http_port || '';
     app.$('siteBackendHTTPS').value = site.backend_https_port || '';
     app.$('siteTransparent').checked = !!site.transparent;
@@ -74,7 +91,8 @@
   app.exitSiteEditMode = function exitSiteEditMode() {
     app.setSiteFormAdd();
     app.el.siteForm.reset();
-    app.populateSourceIPSelect(null, app.el.siteBackendSourceIP, '', false);
+    app.refreshSiteInterfaceSelectors();
+    app.refreshSiteBackendSourceIPOptions('');
     app.updateSiteTransparentWarning();
   };
 
@@ -84,7 +102,7 @@
     const map = {
       id: app.el.editSiteId,
       domain: app.$('siteDomain'),
-      listen_interface: app.el.siteListenIface,
+      listen_interface: app.el.siteListenIfacePicker || app.el.siteListenIface,
       listen_ip: app.el.siteListenIP,
       backend_ip: app.$('siteBackendIP'),
       backend_source_ip: app.el.siteBackendSourceIP,
@@ -97,7 +115,7 @@
     if (msg === 'domain and backend_ip are required') return [app.$('siteDomain'), app.$('siteBackendIP')];
     if (msg === 'at least one of backend_http_port or backend_https_port is required') return [app.$('siteBackendHTTP'), app.$('siteBackendHTTPS')];
     if (msg === 'transparent mode currently supports only IPv4 rules') return [app.$('siteTransparent')];
-    if (msg.indexOf('listen_interface ') === 0) return [app.el.siteListenIface];
+    if (msg.indexOf('listen_interface ') === 0) return [app.el.siteListenIfacePicker || app.el.siteListenIface];
     if (msg.indexOf('listen_ip ') === 0) return [app.el.siteListenIP];
     if (msg.indexOf('backend_ip ') === 0) return [app.$('siteBackendIP')];
     if (msg.indexOf('backend_source_ip ') === 0) return [app.el.siteBackendSourceIP];
@@ -244,6 +262,7 @@
       app.state.sites.data = await app.apiCall('GET', '/api/sites');
       app.markDataFresh();
       app.renderSitesTable();
+      if (typeof app.renderSiteStatsTable === 'function') app.renderSiteStatsTable();
     } catch (e) {
       if (e.message !== 'unauthorized') console.error('load sites:', e);
     }

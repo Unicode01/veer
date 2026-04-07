@@ -23,6 +23,7 @@
       'tab.rules': '端口转发',
       'tab.sites': '建站配置 (80/443)',
       'tab.ranges': '范围映射',
+      'tab.egressNATs': '出向 NAT',
       'tab.workers': 'Worker 状态',
       'tab.stats': '流量统计',
       'form.remark': '备注',
@@ -38,11 +39,18 @@
       'form.outIP': '出 IP',
       'form.outSourceIP': '固定出站源 IP',
       'form.outPort': '出端口',
+      'interface.picker.placeholder': '搜索或选择接口...',
+      'interface.search.placeholder': '筛选接口...',
+      'interface.search.noResults': '没有匹配的接口',
       'common.unspecified': '不指定',
       'common.selectInterfaceFirst': '请先选择接口',
       'common.allAddresses': '0.0.0.0 (所有)',
       'common.allIPv4Addresses': '0.0.0.0 (所有 IPv4)',
       'common.allIPv6Addresses': ':: (所有 IPv6)',
+      'common.familyLabel': '地址族',
+      'common.family.ipv4': 'IPv4',
+      'common.family.ipv6': 'IPv6',
+      'common.family.mixed': '混合',
       'common.status': '状态',
       'common.actions': '操作',
       'common.cancel': '取消',
@@ -125,6 +133,25 @@
       'range.list.outboundRange': '出端口范围',
       'range.list.empty': '暂无范围映射',
       'range.delete.confirm': '确认删除范围映射 #{{id}} 吗？',
+      'egressNAT.form.title.add': '添加出向 NAT 接管',
+      'egressNAT.form.title.edit': '编辑出向 NAT 接管 #{{id}}',
+      'egressNAT.form.desc': '接管指定父接口下全部可接管子接口，或直接接管单个子接口的 IPv4 TCP/UDP/ICMP 出向流量，并在 TC 中使用指定出口接口、源 IP 和 NAT 类型做出向改写。',
+      'egressNAT.form.parentInterface': '父接口',
+      'egressNAT.form.childInterface': '子接口',
+      'egressNAT.form.childInterfaceAll': '全部可接管子接口',
+      'egressNAT.form.interfaceSearchPlaceholder': '筛选接口...',
+      'egressNAT.form.protocolPlaceholder': '选择协议',
+      'egressNAT.form.natType': 'NAT 类型',
+      'egressNAT.form.outInterfaceHintAuto': '已自动推荐更像上行出口的接口：{{name}}。你仍然可以手动改成其他出口。',
+      'egressNAT.natType.symmetric': 'Symmetric',
+      'egressNAT.natType.fullCone': 'Full Cone',
+      'egressNAT.scope.allChildren': '全部可接管子接口',
+      'egressNAT.scope.self': '当前接口',
+      'egressNAT.form.submit.add': '添加接管',
+      'egressNAT.form.submit.edit': '保存修改',
+      'egressNAT.list.title': '出向 NAT 接管列表',
+      'egressNAT.list.empty': '暂无出向 NAT 接管',
+      'egressNAT.delete.confirm': '确认删除出向 NAT 接管 #{{id}} 吗？',
       'workers.title': 'Worker 状态',
       'workers.kind': '类型',
       'workers.version': '版本',
@@ -134,9 +161,11 @@
       'workers.kind.rule': '普通映射',
       'workers.kind.kernel': '内核转发',
       'workers.kind.range': '范围映射',
+      'workers.kind.egress_nat': '出向 NAT',
       'workers.kind.shared': '共享建站',
       'workers.emptyRules': '无规则',
       'workers.emptyRanges': '无范围',
+      'workers.emptyEgressNATs': '无出向 NAT',
       'workers.count.sites': '{{count}} 个站点',
       'workers.count.entries': '{{count}} 条',
       'workers.sharedSites': '共享站点：{{count}}',
@@ -172,10 +201,12 @@
       'search.rules.placeholder': '搜索规则、IP、端口、标签...',
       'search.sites.placeholder': '搜索域名、IP、标签...',
       'search.ranges.placeholder': '搜索备注、IP、端口、标签...',
+      'search.egressNATs.placeholder': '搜索父接口、子接口、出口、源 IP...',
       'search.workers.placeholder': '搜索类型、哈希、路由...',
       'empty.action.rule': '创建第一条规则',
       'empty.action.site': '创建第一个站点',
       'empty.action.range': '创建第一条映射',
+      'empty.action.egressNAT': '创建第一条接管',
       'confirm.warningTitle': '确认操作',
       'confirm.deleteTitle': '确认删除',
       'confirm.logoutTitle': '退出登录',
@@ -205,6 +236,14 @@
       'kernel.summary.activeCooldownValue': '当前 cooldown：规则 {{rules}} / 范围 {{ranges}}',
       'kernel.summary.activeCooldownWindowValue': '下一次释放 {{next}} / 全部释放 {{clear}}',
       'kernel.summary.activeCooldownClearValue': '全部释放 {{clear}}',
+      'kernel.summary.mapProfile': '启动 Map 档位',
+      'kernel.summary.mapProfileValue.default': '默认',
+      'kernel.summary.mapProfileValue.small': '小内存',
+      'kernel.summary.mapProfileValue.medium': '中内存',
+      'kernel.summary.mapProfileValue.large': '大内存',
+      'kernel.summary.mapProfileValue.custom': '自定义',
+      'kernel.summary.mapProfileMemoryUnknown': 'RAM 未知',
+      'kernel.summary.mapProfileDetail': 'RAM {{memory}} · flows 基线 {{flows}} · nat 基线 {{nat}} · egress NAT floor {{egress}}',
       'kernel.summary.degraded': '内核引擎降级',
       'kernel.summary.degradedValue': '{{engine}} 处于需重启恢复的降级状态',
       'kernel.summary.trafficStats': '内核流量统计',
@@ -243,6 +282,7 @@
       'kernel.engine.entries': '当前条目',
       'kernel.engine.attachments': '附加点',
       'kernel.engine.attachHealthy': '附加健康',
+      'kernel.engine.families': '协议族',
       'kernel.engine.maps': 'Map 占用',
       'kernel.engine.reconcile': '最近同步',
       'kernel.engine.traffic': '流量统计',
@@ -250,10 +290,33 @@
       'kernel.maps.rules': 'rules',
       'kernel.maps.flows': 'flows',
       'kernel.maps.nat': 'nat',
+      'kernel.maps.ipv4': 'IPv4',
+      'kernel.maps.ipv6': 'IPv6',
+      'kernel.maps.ipv4Short': 'v4',
+      'kernel.maps.ipv6Short': 'v6',
+      'kernel.maps.tooltip.profile': '档位',
+      'kernel.maps.tooltip.mode': '模式',
+      'kernel.maps.tooltip.base': '基线',
+      'kernel.maps.tooltip.decision': '决策',
+      'kernel.maps.tooltip.mode.adaptive': '自适应',
+      'kernel.maps.tooltip.mode.fixed': '固定',
+      'kernel.maps.tooltip.decision.base': '使用启动基线 {{base}}',
+      'kernel.maps.tooltip.decision.expanded': '从基线 {{base}} 扩到 {{current}}',
+      'kernel.maps.tooltip.decision.retained': '保留较小 live map {{current}}（目标基线 {{base}}）',
+      'kernel.maps.tooltip.decision.fixed': '使用显式配置 {{limit}}',
+      'kernel.maps.tooltip.decision.current': '当前容量 {{current}}',
+      'runtimeReason.kernelMixedFamily': '内核态暂不支持 IPv4/IPv6 混合转发。',
+      'runtimeReason.kernelTransparentIPv6': '内核态当前不支持 IPv6 透传规则。',
       'stats.rules.title': '规则流量统计',
       'stats.sites.title': '建站流量统计',
       'stats.ranges.title': '范围映射流量统计',
+      'stats.egressNATs.title': '出向 NAT 流量统计',
+      'stats.egressNATs.empty': '暂无出向 NAT 统计数据',
       'stats.currentConns': '连接数',
+      'stats.target': '目标',
+      'stats.route.in': '入',
+      'stats.route.out': '出',
+      'stats.route.listen': '监听',
       'stats.refreshCurrentConns': '获取当前连接数',
       'stats.currentConnsManual': '当前连接数按需获取',
       'stats.totalConns': '总连接数',
@@ -266,6 +329,7 @@
       'stats.sites.empty': '暂无建站统计数据',
       'stats.ranges.empty': '暂无范围映射统计数据',
       'transparent.info.invalid': '透传依赖后端使用明确的 IPv4 地址，并且回包必须重新经过本机。',
+      'transparent.info.ipv6Unavailable': '透明传输当前仅支持 IPv4 目标；IPv6 目标请关闭透传。',
       'transparent.warning.public': '检测到目标是公网 IP。如果 {{target}} 的默认网关不经过本机（例如上级直接路由到 VM），透传通常会失败。',
       'transparent.warning.publicBridge': '检测到目标是公网 IP，且出接口像桥接接口。如果 {{target}} 的默认网关不经过本机（例如本机只做网桥），透传通常会失败。',
       'transparent.info.enabled': '透传已开启。请确认 {{target}} 的默认网关或策略路由指向本机，否则回包不会回到本机。',
@@ -285,6 +349,7 @@
       'noun.rule': '规则',
       'noun.site': '站点',
       'noun.range': '范围映射',
+      'noun.egressNAT': '出向 NAT 接管',
       'toast.created': '{{item}}已创建。',
       'toast.saved': '{{item}}已保存。',
       'toast.deleted': '{{item}}已删除。',
@@ -300,6 +365,7 @@
       'validation.ruleCreateIDOmit': '新增规则时不能携带 ID。',
       'validation.portRange': '端口必须在 1 到 65535 之间。',
       'validation.protocol': '协议只能是 tcp、udp 或 tcp+udp。',
+      'validation.egressNATProtocol': '请至少选择一个协议（tcp、udp、icmp）。',
       'validation.enginePreference': '引擎只能是 auto、userspace 或 kernel。',
       'validation.interfaceMissing': '接口在当前主机上不存在。',
       'validation.sourceIPTransparent': '透传开启时不能固定源 IP。',
@@ -327,7 +393,17 @@
       'validation.sitePortsRequired': 'HTTP 端口和 HTTPS 端口至少填写一个。',
       'validation.siteRequired': '请填写域名和后端 IP。',
       'validation.rangeRequired': '请填写完整的 IP 和端口范围。',
-      'validation.rangeOrder': '起始端口不能大于结束端口。'
+      'validation.rangeOrder': '起始端口不能大于结束端口。',
+      'validation.egressNATRequired': '请选择父接口和出口接口。',
+      'validation.egressNATNotFound': '出向 NAT 接管不存在或已被删除。',
+      'validation.egressNATCreateIDOmit': '创建出向 NAT 接管时不能携带 ID。',
+      'validation.egressNATChildConflict': '所选接管范围已被出向 NAT 接管 #{{id}} 占用。',
+      'validation.egressNATNoChildren': '所选父接口下当前没有可接管的子接口。',
+      'validation.egressNATNatType': 'NAT 类型必须是 symmetric 或 full_cone。',
+      'validation.egressNATSingleTargetOutConflict': '单接口接管模式下，父接口不能与出口接口相同。',
+      'validation.childInterfaceDifferent': '子接口不能与出口接口相同。',
+      'validation.childParentMismatch': '子接口不属于所选父接口。',
+      'validation.sourceIPEgressIPv4Only': '出向 NAT 的固定源 IP 当前仅支持 IPv4。'
     },
     'en-US': {
       'app.title': 'NAT Forward Manager',
@@ -347,6 +423,7 @@
       'tab.rules': 'Port Forwarding',
       'tab.sites': 'Sites (80/443)',
       'tab.ranges': 'Range Mapping',
+      'tab.egressNATs': 'Egress NAT',
       'tab.workers': 'Worker Status',
       'tab.stats': 'Traffic Stats',
       'form.remark': 'Remark',
@@ -362,11 +439,18 @@
       'form.outIP': 'Outbound IP',
       'form.outSourceIP': 'Fixed Source IP',
       'form.outPort': 'Outbound Port',
+      'interface.picker.placeholder': 'Search or select interface...',
+      'interface.search.placeholder': 'Filter interfaces...',
+      'interface.search.noResults': 'No matching interfaces',
       'common.unspecified': 'Unspecified',
       'common.selectInterfaceFirst': 'Select interface first',
       'common.allAddresses': '0.0.0.0 (All)',
       'common.allIPv4Addresses': '0.0.0.0 (All IPv4)',
       'common.allIPv6Addresses': ':: (All IPv6)',
+      'common.familyLabel': 'Address Family',
+      'common.family.ipv4': 'IPv4',
+      'common.family.ipv6': 'IPv6',
+      'common.family.mixed': 'Mixed',
       'common.status': 'Status',
       'common.actions': 'Actions',
       'common.cancel': 'Cancel',
@@ -449,6 +533,25 @@
       'range.list.outboundRange': 'Outbound Port Range',
       'range.list.empty': 'No range mappings yet.',
       'range.delete.confirm': 'Delete range mapping #{{id}}?',
+      'egressNAT.form.title.add': 'Add Egress NAT Takeover',
+      'egressNAT.form.title.edit': 'Edit Egress NAT Takeover #{{id}}',
+      'egressNAT.form.desc': 'Take over IPv4 TCP/UDP/ICMP egress traffic from all eligible child interfaces under a parent scope, or from one selected child interface directly, and apply TC egress rewriting with the selected uplink, source IP, and NAT type.',
+      'egressNAT.form.parentInterface': 'Parent Interface',
+      'egressNAT.form.childInterface': 'Child Interface',
+      'egressNAT.form.childInterfaceAll': 'All Eligible Child Interfaces',
+      'egressNAT.form.interfaceSearchPlaceholder': 'Filter interfaces...',
+      'egressNAT.form.protocolPlaceholder': 'Select protocols',
+      'egressNAT.form.natType': 'NAT Type',
+      'egressNAT.form.outInterfaceHintAuto': 'Auto-selected a likely uplink interface: {{name}}. You can still change it manually.',
+      'egressNAT.natType.symmetric': 'Symmetric',
+      'egressNAT.natType.fullCone': 'Full Cone',
+      'egressNAT.scope.allChildren': 'All Eligible Child Interfaces',
+      'egressNAT.scope.self': 'Selected Interface',
+      'egressNAT.form.submit.add': 'Add Takeover',
+      'egressNAT.form.submit.edit': 'Save Changes',
+      'egressNAT.list.title': 'Egress NAT Takeover',
+      'egressNAT.list.empty': 'No egress NAT takeovers yet.',
+      'egressNAT.delete.confirm': 'Delete egress NAT takeover #{{id}}?',
       'workers.title': 'Worker Status',
       'workers.kind': 'Type',
       'workers.version': 'Version',
@@ -458,9 +561,11 @@
       'workers.kind.rule': 'Direct Mapping',
       'workers.kind.kernel': 'Kernel Dataplane',
       'workers.kind.range': 'Range Mapping',
+      'workers.kind.egress_nat': 'Egress NAT',
       'workers.kind.shared': 'Shared Sites',
       'workers.emptyRules': 'No rules',
       'workers.emptyRanges': 'No ranges',
+      'workers.emptyEgressNATs': 'No egress NAT entries',
       'workers.count.sites': '{{count}} sites',
       'workers.count.entries': '{{count}} entries',
       'workers.sharedSites': 'Shared sites: {{count}}',
@@ -496,10 +601,12 @@
       'search.rules.placeholder': 'Search rules, IPs, ports, tags...',
       'search.sites.placeholder': 'Search domains, IPs, tags...',
       'search.ranges.placeholder': 'Search remarks, IPs, ports, tags...',
+      'search.egressNATs.placeholder': 'Search parent, child, uplink, source IP...',
       'search.workers.placeholder': 'Search type, hash, route...',
       'empty.action.rule': 'Create First Rule',
       'empty.action.site': 'Create First Site',
       'empty.action.range': 'Create First Mapping',
+      'empty.action.egressNAT': 'Create First Takeover',
       'confirm.warningTitle': 'Confirm Action',
       'confirm.deleteTitle': 'Confirm Deletion',
       'confirm.logoutTitle': 'Sign Out',
@@ -529,6 +636,14 @@
       'kernel.summary.activeCooldownValue': 'Active cooldown: rules {{rules}} / ranges {{ranges}}',
       'kernel.summary.activeCooldownWindowValue': 'Next release {{next}} / clear {{clear}}',
       'kernel.summary.activeCooldownClearValue': 'Clear {{clear}}',
+      'kernel.summary.mapProfile': 'Startup map profile',
+      'kernel.summary.mapProfileValue.default': 'Default',
+      'kernel.summary.mapProfileValue.small': 'Small memory',
+      'kernel.summary.mapProfileValue.medium': 'Medium memory',
+      'kernel.summary.mapProfileValue.large': 'Large memory',
+      'kernel.summary.mapProfileValue.custom': 'Custom',
+      'kernel.summary.mapProfileMemoryUnknown': 'RAM unknown',
+      'kernel.summary.mapProfileDetail': 'RAM {{memory}} · flows base {{flows}} · nat base {{nat}} · egress NAT floor {{egress}}',
       'kernel.summary.degraded': 'Kernel Engine Degraded',
       'kernel.summary.degradedValue': '{{engine}} is running in degraded-until-restart mode',
       'kernel.summary.trafficStats': 'Kernel Traffic Stats',
@@ -567,6 +682,7 @@
       'kernel.engine.entries': 'Entries',
       'kernel.engine.attachments': 'Attachments',
       'kernel.engine.attachHealthy': 'Attachment Health',
+      'kernel.engine.families': 'Families',
       'kernel.engine.maps': 'Map Usage',
       'kernel.engine.reconcile': 'Last Reconcile',
       'kernel.engine.traffic': 'Traffic Stats',
@@ -574,10 +690,33 @@
       'kernel.maps.rules': 'rules',
       'kernel.maps.flows': 'flows',
       'kernel.maps.nat': 'nat',
+      'kernel.maps.ipv4': 'IPv4',
+      'kernel.maps.ipv6': 'IPv6',
+      'kernel.maps.ipv4Short': 'v4',
+      'kernel.maps.ipv6Short': 'v6',
+      'kernel.maps.tooltip.profile': 'Profile',
+      'kernel.maps.tooltip.mode': 'Mode',
+      'kernel.maps.tooltip.base': 'Base',
+      'kernel.maps.tooltip.decision': 'Decision',
+      'kernel.maps.tooltip.mode.adaptive': 'Adaptive',
+      'kernel.maps.tooltip.mode.fixed': 'Fixed',
+      'kernel.maps.tooltip.decision.base': 'Using startup base {{base}}',
+      'kernel.maps.tooltip.decision.expanded': 'Expanded from base {{base}} to {{current}}',
+      'kernel.maps.tooltip.decision.retained': 'Retained smaller live map {{current}} (target base {{base}})',
+      'kernel.maps.tooltip.decision.fixed': 'Using explicit limit {{limit}}',
+      'kernel.maps.tooltip.decision.current': 'Current capacity {{current}}',
+      'runtimeReason.kernelMixedFamily': 'The kernel dataplane does not support mixed IPv4/IPv6 forwarding yet.',
+      'runtimeReason.kernelTransparentIPv6': 'The kernel dataplane does not support transparent IPv6 rules yet.',
       'stats.rules.title': 'Rule Traffic Stats',
       'stats.sites.title': 'Site Traffic Stats',
       'stats.ranges.title': 'Range Traffic Stats',
+      'stats.egressNATs.title': 'Egress NAT Traffic Stats',
+      'stats.egressNATs.empty': 'No egress NAT statistics yet.',
       'stats.currentConns': 'Connections',
+      'stats.target': 'Target',
+      'stats.route.in': 'IN',
+      'stats.route.out': 'OUT',
+      'stats.route.listen': 'LISTEN',
       'stats.refreshCurrentConns': 'Fetch Current Connections',
       'stats.currentConnsManual': 'Current connections are fetched on demand',
       'stats.totalConns': 'Total Connections',
@@ -590,6 +729,7 @@
       'stats.sites.empty': 'No site statistics yet.',
       'stats.ranges.empty': 'No range statistics yet.',
       'transparent.info.invalid': 'Transparent mode requires a concrete IPv4 backend address, and reply traffic must pass back through this host.',
+      'transparent.info.ipv6Unavailable': 'Transparent mode currently supports IPv4 targets only. Disable it for IPv6 targets.',
       'transparent.warning.public': 'A public target IP was detected. Transparent mode usually fails if the default gateway of {{target}} does not route back through this host.',
       'transparent.warning.publicBridge': 'A public target IP and a bridge-like outbound interface were detected. Transparent mode usually fails if the default gateway of {{target}} does not route back through this host.',
       'transparent.info.enabled': 'Transparent mode is enabled. Confirm that the default gateway or policy route of {{target}} points back to this host, otherwise reply traffic will bypass it.',
@@ -609,6 +749,7 @@
       'noun.rule': 'Rule',
       'noun.site': 'Site',
       'noun.range': 'Range Mapping',
+      'noun.egressNAT': 'Egress NAT Takeover',
       'toast.created': '{{item}} created.',
       'toast.saved': '{{item}} saved.',
       'toast.deleted': '{{item}} deleted.',
@@ -624,6 +765,7 @@
       'validation.ruleCreateIDOmit': 'A new rule must not include an ID.',
       'validation.portRange': 'Ports must be between 1 and 65535.',
       'validation.protocol': 'Protocol must be tcp, udp, or tcp+udp.',
+      'validation.egressNATProtocol': 'Select at least one protocol (tcp, udp, icmp).',
       'validation.enginePreference': 'Engine must be auto, userspace, or kernel.',
       'validation.interfaceMissing': 'The interface does not exist on this host.',
       'validation.sourceIPTransparent': 'Fixed source IP is not allowed in transparent mode.',
@@ -651,7 +793,17 @@
       'validation.sitePortsRequired': 'Fill in either the HTTP port or the HTTPS port.',
       'validation.siteRequired': 'Please fill in the domain and backend IP.',
       'validation.rangeRequired': 'Please fill in complete IP and port range values.',
-      'validation.rangeOrder': 'The start port must not exceed the end port.'
+      'validation.rangeOrder': 'The start port must not exceed the end port.',
+      'validation.egressNATRequired': 'Select the parent interface and outbound interface.',
+      'validation.egressNATNotFound': 'The egress NAT takeover no longer exists.',
+      'validation.egressNATCreateIDOmit': 'Do not send an ID when creating an egress NAT takeover.',
+      'validation.egressNATChildConflict': 'The selected egress NAT scope is already claimed by egress NAT takeover #{{id}}.',
+      'validation.egressNATNoChildren': 'The selected parent interface currently has no eligible child interfaces to take over.',
+      'validation.egressNATNatType': 'NAT type must be symmetric or full_cone.',
+      'validation.egressNATSingleTargetOutConflict': 'The parent interface must be different from the outbound interface in single-target mode.',
+      'validation.childInterfaceDifferent': 'The child interface must be different from the outbound interface.',
+      'validation.childParentMismatch': 'The child interface is not attached to the selected parent interface.',
+      'validation.sourceIPEgressIPv4Only': 'The fixed egress NAT source IP currently supports IPv4 only.'
     }
   };
 
@@ -670,7 +822,8 @@
   app.state.forms = app.state.forms || {
     rule: { mode: 'add', sourceId: 0 },
     site: { mode: 'add', sourceId: 0 },
-    range: { mode: 'add', sourceId: 0 }
+    range: { mode: 'add', sourceId: 0 },
+    egressNAT: { mode: 'add', sourceId: 0 }
   };
 
   app.normalizeLocale = function normalizeLocale(locale) {
@@ -956,37 +1109,90 @@
     return !warning || !warning.needsConfirm;
   };
 
+  app.transparentAvailability = function transparentAvailability(backendIP) {
+    const family = typeof app.ipFamily === 'function' ? app.ipFamily((backendIP || '').trim()) : '';
+    if (family === 'ipv6') {
+      return {
+        supported: false,
+        level: 'info',
+        text: app.t('transparent.info.ipv6Unavailable'),
+        needsConfirm: false
+      };
+    }
+    return {
+      supported: true,
+      level: '',
+      text: '',
+      needsConfirm: false
+    };
+  };
+
+  app.syncTransparentToggleState = function syncTransparentToggleState(input, backendIP) {
+    const availability = typeof app.transparentAvailability === 'function'
+      ? app.transparentAvailability(backendIP)
+      : { supported: true, level: '', text: '', needsConfirm: false };
+
+    if (!input) return availability;
+
+    if (!availability.supported) {
+      input.checked = false;
+      input.disabled = true;
+      input.setAttribute('aria-disabled', 'true');
+      if (availability.text) input.setAttribute('title', availability.text);
+      else input.removeAttribute('title');
+      return availability;
+    }
+
+    input.disabled = false;
+    input.removeAttribute('aria-disabled');
+    input.removeAttribute('title');
+    return availability;
+  };
+
   app.updateRuleTransparentWarning = function updateRuleTransparentWarning() {
+    const availability = app.syncTransparentToggleState(app.el.ruleTransparent, app.el.ruleOutIP.value);
     app.syncTransparentSourceIPState(app.el.ruleOutSourceIP, app.el.ruleTransparent.checked);
     return app.applyTransparentWarning(
       app.el.ruleTransparentWarning,
-      app.buildTransparentWarning(app.el.ruleTransparent.checked, app.el.ruleOutIP.value, app.el.outInterface.value, 'transparent.target.backend')
+      availability && availability.supported
+        ? app.buildTransparentWarning(app.el.ruleTransparent.checked, app.el.ruleOutIP.value, app.el.outInterface.value, 'transparent.target.backend')
+        : availability
     );
   };
 
   app.updateSiteTransparentWarning = function updateSiteTransparentWarning() {
+    const availability = app.syncTransparentToggleState(app.el.siteTransparent, app.el.siteBackendIP.value);
     app.syncTransparentSourceIPState(app.el.siteBackendSourceIP, app.el.siteTransparent.checked);
     return app.applyTransparentWarning(
       app.el.siteTransparentWarning,
-      app.buildTransparentWarning(app.el.siteTransparent.checked, app.el.siteBackendIP.value, '', 'transparent.target.backend')
+      availability && availability.supported
+        ? app.buildTransparentWarning(app.el.siteTransparent.checked, app.el.siteBackendIP.value, '', 'transparent.target.backend')
+        : availability
     );
   };
 
   app.updateRangeTransparentWarning = function updateRangeTransparentWarning() {
+    const availability = app.syncTransparentToggleState(app.el.rangeTransparent, app.el.rangeOutIP.value);
     app.syncTransparentSourceIPState(app.el.rangeOutSourceIP, app.el.rangeTransparent.checked);
     return app.applyTransparentWarning(
       app.el.rangeTransparentWarning,
-      app.buildTransparentWarning(app.el.rangeTransparent.checked, app.el.rangeOutIP.value, app.el.rangeOutInterface.value, 'transparent.target.destination')
+      availability && availability.supported
+        ? app.buildTransparentWarning(app.el.rangeTransparent.checked, app.el.rangeOutIP.value, app.el.rangeOutInterface.value, 'transparent.target.destination')
+        : availability
     );
   };
 
   app.populateInterfaceSelect = function populateInterfaceSelect(sel, selected) {
+    if (typeof app.populateInterfaceSelectFiltered === 'function') {
+      app.populateInterfaceSelectFiltered(sel, selected, { preserveSelected: true });
+      return;
+    }
     if (!sel) return;
     const current = selected == null ? sel.value : selected;
     app.clearNode(sel);
     app.addOption(sel, '', app.t('common.unspecified'));
     app.interfaces.forEach((iface) => {
-      app.addOption(sel, iface.name, iface.name + ' (' + iface.addrs.join(', ') + ')');
+      app.addOption(sel, iface.name, app.interfaceOptionLabel(iface));
     });
     sel.value = current || '';
   };
@@ -1001,14 +1207,14 @@
 
     if (!ifaceName) {
       app.interfaces.forEach((iface) => {
-        iface.addrs.forEach((addr) => {
+        app.interfaceAddresses(iface).forEach((addr) => {
           app.addOption(ipSel, addr, addr + ' (' + iface.name + ')');
         });
       });
     } else {
       const iface = app.interfaces.find((item) => item.name === ifaceName);
       if (iface) {
-        iface.addrs.forEach((addr) => app.addOption(ipSel, addr, addr));
+        app.interfaceAddresses(iface).forEach((addr) => app.addOption(ipSel, addr, addr));
       }
     }
 
@@ -1019,16 +1225,21 @@
     app.populateIPSelect(ifaceSel, ipSel, selected);
   };
 
-  app.populateSourceIPSelect = function populateSourceIPSelect(ifaceSel, inputEl, selected) {
+  app.populateSourceIPSelect = function populateSourceIPSelect(ifaceSel, inputEl, selected, legacy, options) {
     if (!inputEl) return;
 
+    const opts = (options && typeof options === 'object')
+      ? options
+      : ((legacy && typeof legacy === 'object') ? legacy : {});
     const current = selected == null ? inputEl.value : selected;
     const ifaceName = ifaceSel ? ifaceSel.value : '';
+    const family = String(opts.family || '').trim().toLowerCase();
     const listId = inputEl.getAttribute('list');
     const listEl = listId ? app.$(listId) : null;
     const seen = Object.create(null);
     if (!listEl) {
-      inputEl.value = current || '';
+      if (family && current && app.isValidIP(current) && app.ipFamily(current) !== family) inputEl.value = '';
+      else inputEl.value = current || '';
       return;
     }
 
@@ -1037,6 +1248,7 @@
     const appendOption = function appendOption(value, label) {
       if (!value || seen[value]) return;
       if (!app.isValidIP(value)) return;
+      if (family && app.ipFamily(value) !== family) return;
       const normalized = String(value).trim().toLowerCase();
       if (normalized === '0.0.0.0' || normalized === '::' || /^127\./.test(value) || normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') return;
       seen[value] = true;
@@ -1048,14 +1260,15 @@
 
     if (!ifaceName) {
       app.interfaces.forEach((iface) => {
-        iface.addrs.forEach((addr) => appendOption(addr, addr + ' (' + iface.name + ')'));
+        app.interfaceAddresses(iface).forEach((addr) => appendOption(addr, addr + ' (' + iface.name + ')'));
       });
     } else {
       const iface = app.interfaces.find((item) => item.name === ifaceName);
-      if (iface) iface.addrs.forEach((addr) => appendOption(addr, addr));
+      if (iface) app.interfaceAddresses(iface).forEach((addr) => appendOption(addr, addr));
     }
 
-    inputEl.value = current || '';
+    if (family && current && app.isValidIP(current) && app.ipFamily(current) !== family) inputEl.value = '';
+    else inputEl.value = current || '';
   };
 
   app.populateTagSelect = function populateTagSelect(sel, selected) {
@@ -1071,18 +1284,42 @@
     if (app.el.localeSelect) app.el.localeSelect.value = app.state.locale;
     if (app.el.themeSelect) app.el.themeSelect.value = app.state.theme;
 
-    app.populateInterfaceSelect(app.el.inInterface, app.el.inInterface.value);
-    app.populateInterfaceSelect(app.el.outInterface, app.el.outInterface.value);
-    app.populateInterfaceSelect(app.el.siteListenIface, app.el.siteListenIface.value);
-    app.populateInterfaceSelect(app.el.rangeInInterface, app.el.rangeInInterface.value);
-    app.populateInterfaceSelect(app.el.rangeOutInterface, app.el.rangeOutInterface.value);
+    if (typeof app.refreshRuleInterfaceSelectors === 'function') app.refreshRuleInterfaceSelectors();
+    else {
+      app.populateInterfaceSelect(app.el.inInterface, app.el.inInterface.value);
+      app.populateInterfaceSelect(app.el.outInterface, app.el.outInterface.value);
+      app.populateIPSelect(app.el.inInterface, app.el.inIP, app.el.inIP.value);
+    }
+    if (typeof app.refreshSiteInterfaceSelectors === 'function') app.refreshSiteInterfaceSelectors();
+    else {
+      app.populateInterfaceSelect(app.el.siteListenIface, app.el.siteListenIface.value);
+      app.populateSiteListenIP(app.el.siteListenIface, app.el.siteListenIP, app.el.siteListenIP.value);
+    }
+    if (typeof app.refreshRangeInterfaceSelectors === 'function') app.refreshRangeInterfaceSelectors();
+    else {
+      app.populateInterfaceSelect(app.el.rangeInInterface, app.el.rangeInInterface.value);
+      app.populateInterfaceSelect(app.el.rangeOutInterface, app.el.rangeOutInterface.value);
+      app.populateIPSelect(app.el.rangeInInterface, app.el.rangeInIP, app.el.rangeInIP.value);
+    }
 
-    app.populateIPSelect(app.el.inInterface, app.el.inIP, app.el.inIP.value);
-    app.populateIPSelect(app.el.rangeInInterface, app.el.rangeInIP, app.el.rangeInIP.value);
-    app.populateSiteListenIP(app.el.siteListenIface, app.el.siteListenIP, app.el.siteListenIP.value);
-    app.populateSourceIPSelect(app.el.outInterface, app.el.ruleOutSourceIP, app.el.ruleOutSourceIP.value, true);
-    app.populateSourceIPSelect(null, app.el.siteBackendSourceIP, app.el.siteBackendSourceIP.value, true);
-    app.populateSourceIPSelect(app.el.rangeOutInterface, app.el.rangeOutSourceIP, app.el.rangeOutSourceIP.value, true);
+    if (typeof app.refreshRuleSourceIPOptions === 'function') {
+      app.refreshRuleSourceIPOptions(app.el.ruleOutSourceIP.value);
+    } else {
+      app.populateSourceIPSelect(app.el.outInterface, app.el.ruleOutSourceIP, app.el.ruleOutSourceIP.value, true);
+    }
+    if (typeof app.refreshSiteBackendSourceIPOptions === 'function') {
+      app.refreshSiteBackendSourceIPOptions(app.el.siteBackendSourceIP.value);
+    } else {
+      app.populateSourceIPSelect(null, app.el.siteBackendSourceIP, app.el.siteBackendSourceIP.value, true);
+    }
+    if (typeof app.refreshRangeSourceIPOptions === 'function') {
+      app.refreshRangeSourceIPOptions(app.el.rangeOutSourceIP.value);
+    } else {
+      app.populateSourceIPSelect(app.el.rangeOutInterface, app.el.rangeOutSourceIP, app.el.rangeOutSourceIP.value, true);
+    }
+    app.populateSourceIPSelect(app.el.egressNATOutInterface, app.el.egressNATOutSourceIP, app.el.egressNATOutSourceIP.value, true);
+    if (typeof app.populateEgressNATInterfaceSelectors === 'function') app.populateEgressNATInterfaceSelectors();
+    if (typeof app.refreshEgressNATProtocolUI === 'function') app.refreshEgressNATProtocolUI();
 
     app.populateTagSelect(app.$('ruleTag'), app.$('ruleTag').value);
     app.populateTagSelect(app.$('siteTag'), app.$('siteTag').value);
@@ -1096,6 +1333,7 @@
     if (typeof app.syncRuleFormState === 'function') app.syncRuleFormState();
     if (typeof app.syncSiteFormState === 'function') app.syncSiteFormState();
     if (typeof app.syncRangeFormState === 'function') app.syncRangeFormState();
+    if (typeof app.syncEgressNATFormState === 'function') app.syncEgressNATFormState();
 
     app.updateRuleTransparentWarning();
     app.updateSiteTransparentWarning();
@@ -1104,11 +1342,13 @@
     if (typeof app.renderRulesTable === 'function') app.renderRulesTable();
     if (typeof app.renderSitesTable === 'function') app.renderSitesTable();
     if (typeof app.renderRangesTable === 'function') app.renderRangesTable();
+    if (typeof app.renderEgressNATsTable === 'function') app.renderEgressNATsTable();
     if (typeof app.renderWorkersTable === 'function') app.renderWorkersTable();
     if (typeof app.renderKernelRuntime === 'function') app.renderKernelRuntime();
     if (typeof app.renderRuleStatsTable === 'function') app.renderRuleStatsTable();
     if (typeof app.renderSiteStatsTable === 'function') app.renderSiteStatsTable();
     if (typeof app.renderRangeStatsTable === 'function') app.renderRangeStatsTable();
+    if (typeof app.renderEgressNATStatsTable === 'function') app.renderEgressNATStatsTable();
   };
 
   app.state.locale = app.getLocale();

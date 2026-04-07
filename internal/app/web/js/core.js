@@ -18,8 +18,12 @@
       rulesBody: $('rulesBody'),
       noRules: $('noRules'),
       inInterface: $('inInterface'),
+      inInterfacePicker: $('inInterfacePicker'),
+      inInterfaceOptions: $('inInterfaceOptions'),
       inIP: $('inIP'),
       outInterface: $('outInterface'),
+      outInterfacePicker: $('outInterfacePicker'),
+      outInterfaceOptions: $('outInterfaceOptions'),
       ruleOutSourceIP: $('ruleOutSourceIP'),
       ruleOutSourceIPOptions: $('ruleOutSourceIPOptions'),
       ruleTransparent: $('ruleTransparent'),
@@ -34,6 +38,8 @@
       sitesBody: $('sitesBody'),
       noSites: $('noSites'),
       siteListenIface: $('siteListenIface'),
+      siteListenIfacePicker: $('siteListenIfacePicker'),
+      siteListenIfaceOptions: $('siteListenIfaceOptions'),
       siteListenIP: $('siteListenIP'),
       siteBackendSourceIP: $('siteBackendSourceIP'),
       siteBackendSourceIPOptions: $('siteBackendSourceIPOptions'),
@@ -49,13 +55,45 @@
       rangesBody: $('rangesBody'),
       noRanges: $('noRanges'),
       rangeInInterface: $('rangeInInterface'),
+      rangeInInterfacePicker: $('rangeInInterfacePicker'),
+      rangeInInterfaceOptions: $('rangeInInterfaceOptions'),
       rangeInIP: $('rangeInIP'),
       rangeOutInterface: $('rangeOutInterface'),
+      rangeOutInterfacePicker: $('rangeOutInterfacePicker'),
+      rangeOutInterfaceOptions: $('rangeOutInterfaceOptions'),
       rangeOutSourceIP: $('rangeOutSourceIP'),
       rangeOutSourceIPOptions: $('rangeOutSourceIPOptions'),
       rangeTransparent: $('rangeTransparent'),
       rangeOutIP: $('rangeOutIP'),
       rangeTransparentWarning: $('rangeTransparentWarning'),
+
+      egressNATForm: $('egressNATForm'),
+      egressNATFormTitle: $('egressNATFormTitle'),
+      egressNATSubmitBtn: $('egressNATSubmitBtn'),
+      egressNATCancelBtn: $('egressNATCancelBtn'),
+      editEgressNATId: $('editEgressNATId'),
+      egressNATsBody: $('egressNATsBody'),
+      noEgressNATs: $('noEgressNATs'),
+      egressNATParentInterface: $('egressNATParentInterface'),
+      egressNATParentPicker: $('egressNATParentPicker'),
+      egressNATParentOptions: $('egressNATParentOptions'),
+      egressNATChildInterface: $('egressNATChildInterface'),
+      egressNATChildPicker: $('egressNATChildPicker'),
+      egressNATChildOptions: $('egressNATChildOptions'),
+      egressNATOutInterface: $('egressNATOutInterface'),
+      egressNATOutPicker: $('egressNATOutPicker'),
+      egressNATOutOptions: $('egressNATOutOptions'),
+      egressNATOutInterfaceHint: $('egressNATOutInterfaceHint'),
+      egressNATOutSourceIP: $('egressNATOutSourceIP'),
+      egressNATProtocol: $('egressNATProtocol'),
+      egressNATNatType: $('egressNATNatType'),
+      egressNATProtocolDropdown: $('egressNATProtocolDropdown'),
+      egressNATProtocolTrigger: $('egressNATProtocolTrigger'),
+      egressNATProtocolMenu: $('egressNATProtocolMenu'),
+      egressNATProtocolTCP: $('egressNATProtocolTCP'),
+      egressNATProtocolUDP: $('egressNATProtocolUDP'),
+      egressNATProtocolICMP: $('egressNATProtocolICMP'),
+      egressNATOutSourceIPOptions: $('egressNATOutSourceIPOptions'),
 
       workersBody: $('workersBody'),
       noWorkers: $('noWorkers'),
@@ -69,6 +107,8 @@
       noSiteStats: $('noSiteStats'),
       rangeStatsBody: $('rangeStatsBody'),
       noRangeStats: $('noRangeStats'),
+      egressNATStatsBody: $('egressNATStatsBody'),
+      noEgressNATStats: $('noEgressNATStats'),
       refreshCurrentConnsBtns: Array.from(document.querySelectorAll('.refresh-current-conns-btn')),
 
       masterVersion: $('masterVersion')
@@ -79,16 +119,19 @@
       rules: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10, selectedIds: new Set(), batchDeleting: false },
       sites: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
       ranges: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
+      egressNATs: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
       workers: { data: [], sortKey: '', sortAsc: true, masterHash: '', page: 1, pageSize: 10 },
       kernelRuntime: { data: null },
       ruleStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20, total: 0 },
       siteStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20 },
       rangeStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20, total: 0 },
+      egressNATStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20, total: 0 },
       currentConnsSnapshot: {
         loaded: false,
         rules: {},
         sites: {},
-        ranges: {}
+        ranges: {},
+        egressNATs: {}
       }
     }
   };
@@ -167,6 +210,24 @@
     return /^(vmbr|virbr|br|ovs)/i.test((name || '').trim());
   };
 
+  app.transparentAvailability = function transparentAvailability(backendIP) {
+    const family = typeof app.ipFamily === 'function' ? app.ipFamily((backendIP || '').trim()) : '';
+    if (family === 'ipv6') {
+      return {
+        supported: false,
+        level: 'info',
+        text: '透明传输当前仅支持 IPv4 目标；IPv6 目标请关闭透传。',
+        needsConfirm: false
+      };
+    }
+    return {
+      supported: true,
+      level: '',
+      text: '',
+      needsConfirm: false
+    };
+  };
+
   app.buildTransparentWarning = function buildTransparentWarning(transparent, backendIP, outIface, targetLabel) {
     if (!transparent) return { level: '', text: '', needsConfirm: false };
 
@@ -212,6 +273,28 @@
     return !warning || !warning.needsConfirm;
   };
 
+  app.syncTransparentToggleState = function syncTransparentToggleState(input, backendIP) {
+    const availability = typeof app.transparentAvailability === 'function'
+      ? app.transparentAvailability(backendIP)
+      : { supported: true, level: '', text: '', needsConfirm: false };
+
+    if (!input) return availability;
+
+    if (!availability.supported) {
+      input.checked = false;
+      input.disabled = true;
+      input.setAttribute('aria-disabled', 'true');
+      if (availability.text) input.setAttribute('title', availability.text);
+      else input.removeAttribute('title');
+      return availability;
+    }
+
+    input.disabled = false;
+    input.removeAttribute('aria-disabled');
+    input.removeAttribute('title');
+    return availability;
+  };
+
   app.syncTransparentSourceIPState = function syncTransparentSourceIPState(input, transparent) {
     if (!input) return;
     if (transparent) {
@@ -226,28 +309,37 @@
 
   app.updateRuleTransparentWarning = function updateRuleTransparentWarning() {
     const el = app.el;
+    const availability = app.syncTransparentToggleState(el.ruleTransparent, el.ruleOutIP.value);
     app.syncTransparentSourceIPState(el.ruleOutSourceIP, el.ruleTransparent.checked);
     return app.applyTransparentWarning(
       el.ruleTransparentWarning,
-      app.buildTransparentWarning(el.ruleTransparent.checked, el.ruleOutIP.value, el.outInterface.value, '后端主机')
+      availability && availability.supported
+        ? app.buildTransparentWarning(el.ruleTransparent.checked, el.ruleOutIP.value, el.outInterface.value, '后端主机')
+        : availability
     );
   };
 
   app.updateSiteTransparentWarning = function updateSiteTransparentWarning() {
     const el = app.el;
+    const availability = app.syncTransparentToggleState(el.siteTransparent, el.siteBackendIP.value);
     app.syncTransparentSourceIPState(el.siteBackendSourceIP, el.siteTransparent.checked);
     return app.applyTransparentWarning(
       el.siteTransparentWarning,
-      app.buildTransparentWarning(el.siteTransparent.checked, el.siteBackendIP.value, '', '后端主机')
+      availability && availability.supported
+        ? app.buildTransparentWarning(el.siteTransparent.checked, el.siteBackendIP.value, '', '后端主机')
+        : availability
     );
   };
 
   app.updateRangeTransparentWarning = function updateRangeTransparentWarning() {
     const el = app.el;
+    const availability = app.syncTransparentToggleState(el.rangeTransparent, el.rangeOutIP.value);
     app.syncTransparentSourceIPState(el.rangeOutSourceIP, el.rangeTransparent.checked);
     return app.applyTransparentWarning(
       el.rangeTransparentWarning,
-      app.buildTransparentWarning(el.rangeTransparent.checked, el.rangeOutIP.value, el.rangeOutInterface.value, '目标主机')
+      availability && availability.supported
+        ? app.buildTransparentWarning(el.rangeTransparent.checked, el.rangeOutIP.value, el.rangeOutInterface.value, '目标主机')
+        : availability
     );
   };
 
@@ -363,22 +455,243 @@
     return app.formatBytes(bps) + '/s';
   };
 
-  app.populateInterfaceSelect = function populateInterfaceSelect(sel, selected) {
-    const current = sel.value;
+  function interfaceAddressSummary(addrs) {
+    if (!Array.isArray(addrs)) return '';
+    const items = addrs.filter(Boolean);
+    if (!items.length) return '';
+    const preview = items.slice(0, 2);
+    const suffix = items.length > preview.length ? ', +' + (items.length - preview.length) : '';
+    return preview.join(', ') + suffix;
+  }
+
+  app.interfaceOptionLabel = function interfaceOptionLabel(iface) {
+    if (!iface) return '';
+    const name = String(iface.name || '').trim();
+    const kind = String(iface.kind || '').trim().toLowerCase();
+    const parent = String(iface.parent || '').trim();
+    const meta = [];
+    if (kind) meta.push(kind);
+    if (parent) meta.push('via ' + parent);
+
+    let label = name;
+    if (meta.length) label += ' [' + meta.join(' ') + ']';
+
+    const addressText = interfaceAddressSummary(iface.addrs);
+    if (addressText) label += ' (' + addressText + ')';
+    return label;
+  };
+
+  app.interfaceAddresses = function interfaceAddresses(iface) {
+    return Array.isArray(iface && iface.addrs) ? iface.addrs.filter(Boolean) : [];
+  };
+
+  app.interfaceSearchText = function interfaceSearchText(iface) {
+    if (!iface) return '';
+    return [
+      iface.name,
+      iface.kind,
+      iface.parent,
+      app.interfaceOptionLabel(iface),
+      ...app.interfaceAddresses(iface)
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+  };
+
+  app.filterInterfaceItems = function filterInterfaceItems(items, query) {
+    const list = Array.isArray(items) ? items.slice() : [];
+    const tokens = String(query || '')
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (!tokens.length) return list;
+    return list.filter((iface) => {
+      const haystack = app.interfaceSearchText(iface);
+      return tokens.every((token) => haystack.indexOf(token) >= 0);
+    });
+  };
+
+  app.findInterfaceByName = function findInterfaceByName(name, items) {
+    const target = String(name || '').trim();
+    const list = Array.isArray(items) ? items : app.interfaces;
+    if (!target || !Array.isArray(list)) return null;
+    return list.find((iface) => iface && iface.name === target) || null;
+  };
+
+  app.findInterfaceByDisplayText = function findInterfaceByDisplayText(text, items) {
+    const target = String(text || '').trim();
+    const list = Array.isArray(items) ? items : app.interfaces;
+    if (!target || !Array.isArray(list)) return null;
+    return list.find((iface) => iface && (iface.name === target || app.interfaceOptionLabel(iface) === target)) || null;
+  };
+
+  app.getInterfacePickerItems = function getInterfacePickerItems(hiddenEl, options) {
+    const opts = options || {};
+    const baseItems = Array.isArray(opts.items)
+      ? opts.items.slice()
+      : (typeof opts.getItems === 'function' ? opts.getItems() : (app.interfaces || [])).slice();
+    const seen = Object.create(null);
+    const items = [];
+    baseItems.forEach((iface) => {
+      if (!iface || !iface.name || seen[iface.name]) return;
+      seen[iface.name] = true;
+      items.push(iface);
+    });
+    const selectedName = hiddenEl ? String(hiddenEl.value || '').trim() : '';
+    if (opts.preserveSelected && selectedName && !seen[selectedName]) {
+      const selectedInfo = app.findInterfaceByName(selectedName);
+      if (selectedInfo) {
+        seen[selectedName] = true;
+        items.push(selectedInfo);
+      }
+    }
+    return items;
+  };
+
+  app.setInterfacePickerValue = function setInterfacePickerValue(hiddenEl, pickerEl, value, options) {
+    const opts = options || {};
+    const normalized = String(value || '').trim();
+    if (hiddenEl) hiddenEl.value = normalized;
+    if (!pickerEl) return null;
+    if (!normalized) {
+      pickerEl.value = '';
+      return null;
+    }
+    const items = app.getInterfacePickerItems(hiddenEl, opts);
+    const iface = app.findInterfaceByName(normalized, items) || app.findInterfaceByName(normalized);
+    pickerEl.value = iface ? app.interfaceOptionLabel(iface) : normalized;
+    return iface || null;
+  };
+
+  app.syncInterfacePickerSelection = function syncInterfacePickerSelection(hiddenEl, pickerEl, options) {
+    const opts = options || {};
+    const items = app.getInterfacePickerItems(hiddenEl, opts);
+    const text = String(pickerEl && pickerEl.value || '').trim();
+    if (!hiddenEl) return { value: '', item: null, items: items, text: text };
+    if (!text) {
+      hiddenEl.value = '';
+      return { value: '', item: null, items: items, text: '' };
+    }
+
+    const exact = app.findInterfaceByDisplayText(text, items) || app.findInterfaceByDisplayText(text);
+    if (exact) {
+      hiddenEl.value = exact.name;
+      if (pickerEl && opts.commitLabel !== false) pickerEl.value = app.interfaceOptionLabel(exact);
+      return { value: exact.name, item: exact, items: items, text: text };
+    }
+
+    const matches = app.filterInterfaceItems(items, text);
+    if (matches.length === 1) {
+      hiddenEl.value = matches[0].name;
+      if (pickerEl && opts.commitLabel) pickerEl.value = app.interfaceOptionLabel(matches[0]);
+      return { value: matches[0].name, item: matches[0], items: items, text: text, matches: matches };
+    }
+
+    hiddenEl.value = '';
+    return { value: '', item: null, items: items, text: text, matches: matches };
+  };
+
+  app.getInterfaceSubmissionValue = function getInterfaceSubmissionValue(hiddenEl, pickerEl, options) {
+    const currentValue = hiddenEl ? String(hiddenEl.value || '').trim() : '';
+    const currentText = String(pickerEl && pickerEl.value || '').trim();
+    if (!currentText) return currentValue;
+    const result = app.syncInterfacePickerSelection(hiddenEl, pickerEl, Object.assign({}, options || {}, { commitLabel: true }));
+    if (result && result.value) return result.value;
+    return currentText;
+  };
+
+  app.populateInterfacePicker = function populateInterfacePicker(hiddenEl, pickerEl, listEl, options) {
+    const opts = options || {};
+    const items = app.getInterfacePickerItems(hiddenEl, opts);
+    if (listEl) {
+      app.clearNode(listEl);
+      items.forEach((iface) => {
+        const opt = document.createElement('option');
+        opt.value = app.interfaceOptionLabel(iface);
+        opt.label = iface.name;
+        listEl.appendChild(opt);
+      });
+    }
+    if (pickerEl) {
+      pickerEl.disabled = !!opts.disabled;
+      if (opts.disabled) pickerEl.setAttribute('aria-disabled', 'true');
+      else pickerEl.removeAttribute('aria-disabled');
+      if (Object.prototype.hasOwnProperty.call(opts, 'placeholder')) {
+        const placeholder = opts.placeholder == null ? '' : String(opts.placeholder);
+        pickerEl.placeholder = placeholder;
+      }
+    }
+    const currentValue = hiddenEl ? String(hiddenEl.value || '').trim() : '';
+    const currentInItems = currentValue ? app.findInterfaceByName(currentValue, items) : null;
+    if (currentValue && (opts.preserveSelected || currentInItems)) {
+      app.setInterfacePickerValue(hiddenEl, pickerEl, currentValue, opts);
+    } else {
+      if (hiddenEl && currentValue && !opts.preserveSelected) hiddenEl.value = '';
+      if (pickerEl && !opts.preserveText) pickerEl.value = '';
+    }
+    return items;
+  };
+
+  app.addSelectPlaceholderOption = function addSelectPlaceholderOption(sel, label, options) {
+    if (!sel) return null;
+    const opts = options || {};
+    const opt = document.createElement('option');
+    opt.value = opts.value == null ? '__placeholder__' : String(opts.value);
+    opt.textContent = label == null ? '' : String(label);
+    if (opts.disabled !== false) opt.disabled = true;
+    if (opts.hidden) opt.hidden = true;
+    sel.appendChild(opt);
+    return opt;
+  };
+
+  app.populateInterfaceSelectFiltered = function populateInterfaceSelectFiltered(sel, selected, options) {
+    if (!sel) return;
+    const opts = options || {};
+    const current = selected == null ? sel.value : selected;
+    const baseItems = Array.isArray(opts.items) ? opts.items.slice() : (app.interfaces || []).slice();
+    const filteredItems = app.filterInterfaceItems(baseItems, opts.query);
+    const unspecifiedText = typeof app.t === 'function' ? app.t('common.unspecified') : 'Unspecified';
+
     while (sel.firstChild) sel.removeChild(sel.firstChild);
     {
       const opt = document.createElement('option');
       opt.value = '';
-      opt.textContent = 'Unspecified';
+      opt.textContent = unspecifiedText;
       sel.appendChild(opt);
     }
-    app.interfaces.forEach((iface) => {
+    filteredItems.forEach((iface) => {
       const opt = document.createElement('option');
       opt.value = iface.name;
-      opt.textContent = iface.name + ' (' + iface.addrs.join(', ') + ')';
+      opt.textContent = app.interfaceOptionLabel(iface);
       sel.appendChild(opt);
     });
-    sel.value = selected || current || '';
+    if (opts.preserveSelected && current) {
+      const hasCurrent = Array.from(sel.options || []).some((option) => option.value === current);
+      if (!hasCurrent) {
+        const currentInfo = baseItems.find((iface) => iface && iface.name === current) ||
+          (app.interfaces || []).find((iface) => iface && iface.name === current);
+        const opt = document.createElement('option');
+        opt.value = current;
+        opt.textContent = currentInfo ? app.interfaceOptionLabel(currentInfo) : current;
+        sel.appendChild(opt);
+      }
+    }
+    const hasSelectableOption = Array.from(sel.options || []).some((option) => option && option.value);
+    if (!hasSelectableOption && String(opts.query || '').trim()) {
+      app.addSelectPlaceholderOption(
+        sel,
+        typeof app.t === 'function' ? app.t('interface.search.noResults') : 'No matching interfaces',
+        { value: '__no_matching_interfaces__' }
+      );
+    }
+    const resolved = current && Array.from(sel.options || []).some((option) => option.value === current) ? current : '';
+    sel.value = resolved;
+  };
+
+  app.populateInterfaceSelect = function populateInterfaceSelect(sel, selected) {
+    app.populateInterfaceSelectFiltered(sel, selected, { preserveSelected: true });
   };
 
   app.populateIPSelect = function populateIPSelect(ifaceSel, ipSel, selected) {
@@ -392,7 +705,7 @@
     }
     if (!ifaceName) {
       app.interfaces.forEach((iface) => {
-        iface.addrs.forEach((addr) => {
+        app.interfaceAddresses(iface).forEach((addr) => {
           const o = document.createElement('option');
           o.value = addr;
           o.textContent = addr + ' (' + iface.name + ')';
@@ -402,7 +715,7 @@
     } else {
       const iface = app.interfaces.find((i) => i.name === ifaceName);
       if (iface) {
-        iface.addrs.forEach((addr) => {
+        app.interfaceAddresses(iface).forEach((addr) => {
           const o = document.createElement('option');
           o.value = addr;
           o.textContent = addr;
@@ -424,7 +737,7 @@
     }
     if (!ifaceName) {
       app.interfaces.forEach((iface) => {
-        iface.addrs.forEach((addr) => {
+        app.interfaceAddresses(iface).forEach((addr) => {
           const o = document.createElement('option');
           o.value = addr;
           o.textContent = addr + ' (' + iface.name + ')';
@@ -434,7 +747,7 @@
     } else {
       const iface = app.interfaces.find((i) => i.name === ifaceName);
       if (iface) {
-        iface.addrs.forEach((addr) => {
+        app.interfaceAddresses(iface).forEach((addr) => {
           const o = document.createElement('option');
           o.value = addr;
           o.textContent = addr;
@@ -477,18 +790,43 @@
     try {
       const el = app.el;
       app.interfaces = await app.apiCall('GET', '/api/interfaces');
-      app.populateInterfaceSelect(el.inInterface);
-      app.populateInterfaceSelect(el.outInterface);
-      app.populateInterfaceSelect(el.siteListenIface);
-      app.populateInterfaceSelect(el.rangeInInterface);
-      app.populateInterfaceSelect(el.rangeOutInterface);
-      app.populateIPSelect(el.inInterface, el.inIP, el.inIP.value);
-      app.populateIPSelect(el.rangeInInterface, el.rangeInIP, el.rangeInIP.value);
-      app.populateSiteListenIP(el.siteListenIface, el.siteListenIP, el.siteListenIP.value);
-      if (typeof app.populateSourceIPSelect === 'function') {
+      if (typeof app.refreshRuleInterfaceSelectors === 'function') app.refreshRuleInterfaceSelectors();
+      else {
+        app.populateInterfaceSelect(el.inInterface);
+        app.populateInterfaceSelect(el.outInterface);
+        app.populateIPSelect(el.inInterface, el.inIP, el.inIP.value);
+      }
+      if (typeof app.refreshSiteInterfaceSelectors === 'function') app.refreshSiteInterfaceSelectors();
+      else {
+        app.populateInterfaceSelect(el.siteListenIface);
+        app.populateSiteListenIP(el.siteListenIface, el.siteListenIP, el.siteListenIP.value);
+      }
+      if (typeof app.refreshRangeInterfaceSelectors === 'function') app.refreshRangeInterfaceSelectors();
+      else {
+        app.populateInterfaceSelect(el.rangeInInterface);
+        app.populateInterfaceSelect(el.rangeOutInterface);
+        app.populateIPSelect(el.rangeInInterface, el.rangeInIP, el.rangeInIP.value);
+      }
+      if (typeof app.refreshRuleSourceIPOptions === 'function') {
+        app.refreshRuleSourceIPOptions(el.ruleOutSourceIP.value);
+      } else if (typeof app.populateSourceIPSelect === 'function') {
         app.populateSourceIPSelect(el.outInterface, el.ruleOutSourceIP, el.ruleOutSourceIP.value);
+      }
+      if (typeof app.refreshSiteBackendSourceIPOptions === 'function') {
+        app.refreshSiteBackendSourceIPOptions(el.siteBackendSourceIP.value);
+      } else if (typeof app.populateSourceIPSelect === 'function') {
         app.populateSourceIPSelect(null, el.siteBackendSourceIP, el.siteBackendSourceIP.value);
+      }
+      if (typeof app.refreshRangeSourceIPOptions === 'function') {
+        app.refreshRangeSourceIPOptions(el.rangeOutSourceIP.value);
+      } else if (typeof app.populateSourceIPSelect === 'function') {
         app.populateSourceIPSelect(el.rangeOutInterface, el.rangeOutSourceIP, el.rangeOutSourceIP.value);
+      }
+      if (typeof app.populateSourceIPSelect === 'function') {
+        app.populateSourceIPSelect(el.egressNATOutInterface, el.egressNATOutSourceIP, el.egressNATOutSourceIP.value);
+      }
+      if (typeof app.populateEgressNATInterfaceSelectors === 'function') {
+        app.populateEgressNATInterfaceSelectors();
       }
       app.updateRuleTransparentWarning();
       app.updateSiteTransparentWarning();

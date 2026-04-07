@@ -368,6 +368,18 @@ func loadValidationEntities(db sqlRuleStore) ([]Rule, []Site, []PortRange, error
 	return rules, sites, ranges, nil
 }
 
+func loadValidationInterfaceData() (map[string]struct{}, map[string]InterfaceInfo, hostInterfaceAddrs, error) {
+	knownIfaces, hostAddrs, err := loadHostValidationData()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	items, err := loadInterfaceInfos()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return knownIfaces, buildInterfaceInfoMap(items), hostAddrs, nil
+}
+
 func prepareSiteCreate(db sqlRuleStore, raw Site) (Site, []ruleValidationIssue, error) {
 	knownIfaces, hostAddrs, err := loadHostValidationData()
 	if err != nil {
@@ -572,6 +584,254 @@ func prepareRangeToggle(db sqlRuleStore, id int64) (PortRange, []ruleValidationI
 		return PortRange{}, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "id", Message: "range not found"}}, nil
 	}
 	return target, detectProjectedConflicts(projectExistingRuleStates(rules), projectExistingSiteStates(sites), rangeStates), nil
+}
+
+func normalizeAndValidateEgressNAT(raw EgressNAT, requireID bool, knownIfaces map[string]struct{}, ifaceByName map[string]InterfaceInfo, hostAddrs hostInterfaceAddrs) (EgressNAT, string) {
+	raw.ParentInterface = strings.TrimSpace(raw.ParentInterface)
+	raw.ChildInterface = strings.TrimSpace(raw.ChildInterface)
+	raw.OutInterface = strings.TrimSpace(raw.OutInterface)
+	raw.OutSourceIP = strings.TrimSpace(raw.OutSourceIP)
+	raw.Protocol = normalizeEgressNATProtocol(raw.Protocol)
+	raw.NATType = normalizeEgressNATType(raw.NATType)
+	if raw.ChildInterface == "*" {
+		raw.ChildInterface = ""
+	}
+
+	if requireID && raw.ID <= 0 {
+		return raw, "id is required"
+	}
+	if !requireID && raw.ID != 0 {
+		return raw, "id must be omitted when creating an egress nat"
+	}
+	if raw.ParentInterface == "" || raw.OutInterface == "" {
+		return raw, "parent_interface and out_interface are required"
+	}
+	if !isValidEgressNATProtocol(raw.Protocol) {
+		return raw, "protocol must include one or more of tcp, udp, icmp"
+	}
+	if !isValidEgressNATType(raw.NATType) {
+		return raw, "nat_type must be symmetric or full_cone"
+	}
+	if egressNATUsesSingleTargetParent(raw, ifaceByName) && raw.ParentInterface == raw.OutInterface {
+		return raw, "parent_interface must be different from out_interface when selecting a single target interface"
+	}
+	raw = normalizeEgressNATScope(raw, ifaceByName)
+	if raw.ChildInterface != "" && raw.ChildInterface == raw.OutInterface {
+		return raw, "child_interface must be different from out_interface"
+	}
+	if _, ok := knownIfaces[raw.ParentInterface]; !ok {
+		return raw, "parent_interface does not exist on this host"
+	}
+	if _, ok := knownIfaces[raw.OutInterface]; !ok {
+		return raw, "out_interface does not exist on this host"
+	}
+	if raw.ChildInterface != "" {
+		childInfo, ok := ifaceByName[raw.ChildInterface]
+		if !ok {
+			return raw, "child_interface does not exist on this host"
+		}
+		if strings.TrimSpace(childInfo.Parent) != raw.ParentInterface {
+			return raw, "child_interface is not attached to the selected parent_interface"
+		}
+	}
+	normalizedSourceIP, err := normalizeOptionalSpecificIP(raw.OutSourceIP)
+	if err != nil {
+		return raw, "out_source_ip " + err.Error()
+	}
+	raw.OutSourceIP = normalizedSourceIP
+	if raw.OutSourceIP != "" {
+		if ipLiteralFamily(raw.OutSourceIP) != ipFamilyIPv4 {
+			return raw, "out_source_ip must be a valid IPv4 address"
+		}
+		if msg := validateLocalSourceIP(raw.OutSourceIP, raw.OutInterface, hostAddrs); msg != "" {
+			return raw, "out_source_ip " + msg
+		}
+	}
+	return raw, ""
+}
+
+func egressNATValidationField(message string) string {
+	text := strings.TrimSpace(message)
+	for _, prefix := range []string{"id ", "parent_interface ", "child_interface ", "out_interface ", "out_source_ip ", "protocol ", "nat_type "} {
+		if strings.HasPrefix(text, prefix) {
+			return strings.TrimSpace(strings.TrimSuffix(prefix, " "))
+		}
+	}
+	switch text {
+	case "id is required", "id must be omitted when creating an egress nat":
+		return "id"
+	case "parent_interface must be different from out_interface when selecting a single target interface":
+		return "parent_interface"
+	default:
+		return "egress_nat"
+	}
+}
+
+type egressNATScopeDescriptor struct {
+	Parent   string
+	Target   string
+	Wildcard bool
+}
+
+func describeEgressNATScope(item EgressNAT, ifaceByName map[string]InterfaceInfo) egressNATScopeDescriptor {
+	item = normalizeEgressNATScope(item, ifaceByName)
+	parentName := strings.TrimSpace(item.ParentInterface)
+	childName := strings.TrimSpace(item.ChildInterface)
+	if childName != "" {
+		return egressNATScopeDescriptor{
+			Parent:   parentName,
+			Target:   childName,
+			Wildcard: false,
+		}
+	}
+	return egressNATScopeDescriptor{
+		Parent:   parentName,
+		Wildcard: true,
+	}
+}
+
+func egressNATScopesOverlap(a, b EgressNAT, ifaceByName map[string]InterfaceInfo) bool {
+	scopeA := describeEgressNATScope(a, ifaceByName)
+	scopeB := describeEgressNATScope(b, ifaceByName)
+	if scopeA.Parent == "" || scopeB.Parent == "" {
+		return false
+	}
+	if scopeA.Wildcard {
+		if scopeB.Wildcard {
+			return scopeA.Parent == scopeB.Parent
+		}
+		return scopeA.Parent == scopeB.Parent
+	}
+	if scopeB.Wildcard {
+		return scopeA.Parent == scopeB.Parent
+	}
+	return scopeA.Target != "" && scopeA.Target == scopeB.Target
+}
+
+func validateProjectedEgressNATs(items []EgressNAT, ifaceByName map[string]InterfaceInfo, scope string, id int64) []ruleValidationIssue {
+	if len(items) == 0 {
+		return nil
+	}
+	targetIndex := -1
+	for i, item := range items {
+		if scope == "create" && item.ID == 0 {
+			targetIndex = i
+			break
+		}
+		if scope != "create" && item.ID == id {
+			targetIndex = i
+			break
+		}
+	}
+	if targetIndex < 0 {
+		return nil
+	}
+
+	target := items[targetIndex]
+	if !target.Enabled {
+		return nil
+	}
+	field := "child_interface"
+	if strings.TrimSpace(target.ChildInterface) == "" {
+		field = "parent_interface"
+	}
+
+	for i, other := range items {
+		if i == targetIndex || !other.Enabled {
+			continue
+		}
+		if !ruleProtocolsOverlap(normalizeEgressNATProtocol(target.Protocol), normalizeEgressNATProtocol(other.Protocol)) {
+			continue
+		}
+		if !egressNATScopesOverlap(target, other, ifaceByName) {
+			continue
+		}
+		return []ruleValidationIssue{{
+			Scope:   scope,
+			ID:      id,
+			Field:   field,
+			Message: fmt.Sprintf("egress nat scope conflicts with egress nat #%d", other.ID),
+		}}
+	}
+	return nil
+}
+
+func prepareEgressNATCreate(db sqlRuleStore, raw EgressNAT) (EgressNAT, []ruleValidationIssue, error) {
+	knownIfaces, ifaceByName, hostAddrs, err := loadValidationInterfaceData()
+	if err != nil {
+		return raw, nil, err
+	}
+	item, validationErr := normalizeAndValidateEgressNAT(raw, false, knownIfaces, ifaceByName, hostAddrs)
+	if validationErr != "" {
+		return item, []ruleValidationIssue{{Scope: "create", Index: 1, Field: egressNATValidationField(validationErr), Message: validationErr}}, nil
+	}
+	item.Enabled = true
+
+	existing, err := dbGetEgressNATs(db)
+	if err != nil {
+		return item, nil, err
+	}
+	projected := append(existing, item)
+	return item, validateProjectedEgressNATs(projected, ifaceByName, "create", 0), nil
+}
+
+func prepareEgressNATUpdate(db sqlRuleStore, raw EgressNAT) (EgressNAT, []ruleValidationIssue, error) {
+	knownIfaces, ifaceByName, hostAddrs, err := loadValidationInterfaceData()
+	if err != nil {
+		return raw, nil, err
+	}
+	item, validationErr := normalizeAndValidateEgressNAT(raw, true, knownIfaces, ifaceByName, hostAddrs)
+	if validationErr != "" {
+		return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: egressNATValidationField(validationErr), Message: validationErr}}, nil
+	}
+
+	existing, err := dbGetEgressNATs(db)
+	if err != nil {
+		return item, nil, err
+	}
+	found := false
+	projected := make([]EgressNAT, 0, len(existing))
+	for _, current := range existing {
+		if current.ID != item.ID {
+			projected = append(projected, current)
+			continue
+		}
+		item.Enabled = current.Enabled
+		projected = append(projected, item)
+		found = true
+	}
+	if !found {
+		return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "id", Message: "egress nat not found"}}, nil
+	}
+	return item, validateProjectedEgressNATs(projected, ifaceByName, "update", item.ID), nil
+}
+
+func prepareEgressNATToggle(db sqlRuleStore, id int64) (EgressNAT, []ruleValidationIssue, error) {
+	_, ifaceByName, _, err := loadValidationInterfaceData()
+	if err != nil {
+		return EgressNAT{}, nil, err
+	}
+	items, err := dbGetEgressNATs(db)
+	if err != nil {
+		return EgressNAT{}, nil, err
+	}
+	projected := make([]EgressNAT, 0, len(items))
+	var target EgressNAT
+	found := false
+	for _, item := range items {
+		if item.ID != id {
+			projected = append(projected, item)
+			continue
+		}
+		target = item
+		target.Enabled = !item.Enabled
+		projected = append(projected, target)
+		found = true
+	}
+	if !found {
+		return EgressNAT{}, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "id", Message: "egress nat not found"}}, nil
+	}
+	return target, validateProjectedEgressNATs(projected, ifaceByName, "toggle", id), nil
 }
 
 func hasValidationMessage(issues []ruleValidationIssue, message string) bool {

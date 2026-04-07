@@ -2,7 +2,10 @@
 
 package app
 
-import "testing"
+import (
+	"net"
+	"testing"
+)
 
 func TestSameKernelRuleDataplaneConfig(t *testing.T) {
 	base := Rule{
@@ -250,12 +253,15 @@ func TestDiffPreparedKernelRulesIgnoresMetadataOnlyChanges(t *testing.T) {
 	next.rule.Remark = "after"
 	next.rule.Tag = "after"
 
-	diff := diffPreparedKernelRules([]preparedKernelRule{base}, []preparedKernelRule{next})
-	if len(diff.upserts) != 0 {
-		t.Fatalf("diffPreparedKernelRules() upserts = %d, want 0", len(diff.upserts))
+	diff, err := diffPreparedKernelRules([]preparedKernelRule{base}, []preparedKernelRule{next})
+	if err != nil {
+		t.Fatalf("diffPreparedKernelRules() error = %v", err)
 	}
-	if len(diff.deletes) != 0 {
-		t.Fatalf("diffPreparedKernelRules() deletes = %d, want 0", len(diff.deletes))
+	if kernelDualStackRuleMapDiffUpsertCount(diff) != 0 {
+		t.Fatalf("diffPreparedKernelRules() upserts = %d, want 0", kernelDualStackRuleMapDiffUpsertCount(diff))
+	}
+	if kernelDualStackRuleMapDiffDeleteCount(diff) != 0 {
+		t.Fatalf("diffPreparedKernelRules() deletes = %d, want 0", kernelDualStackRuleMapDiffDeleteCount(diff))
 	}
 }
 
@@ -305,19 +311,22 @@ func TestDiffPreparedKernelRulesDetectsUpsertsAndDeletes(t *testing.T) {
 		},
 	}
 
-	diff := diffPreparedKernelRules(
+	diff, err := diffPreparedKernelRules(
 		[]preparedKernelRule{oldA, oldB},
 		[]preparedKernelRule{nextA, nextC},
 	)
-	if len(diff.upserts) != 2 {
-		t.Fatalf("diffPreparedKernelRules() upserts = %d, want 2", len(diff.upserts))
+	if err != nil {
+		t.Fatalf("diffPreparedKernelRules() error = %v", err)
 	}
-	if len(diff.deletes) != 1 {
-		t.Fatalf("diffPreparedKernelRules() deletes = %d, want 1", len(diff.deletes))
+	if kernelDualStackRuleMapDiffUpsertCount(diff) != 2 {
+		t.Fatalf("diffPreparedKernelRules() upserts = %d, want 2", kernelDualStackRuleMapDiffUpsertCount(diff))
+	}
+	if kernelDualStackRuleMapDiffDeleteCount(diff) != 1 {
+		t.Fatalf("diffPreparedKernelRules() deletes = %d, want 1", kernelDualStackRuleMapDiffDeleteCount(diff))
 	}
 
-	upserts := make(map[tcRuleKeyV4]tcRuleValueV4, len(diff.upserts))
-	for _, item := range diff.upserts {
+	upserts := make(map[tcRuleKeyV4]tcRuleValueV4, len(diff.v4.upserts))
+	for _, item := range diff.v4.upserts {
 		upserts[item.key] = item.value
 	}
 	if got, ok := upserts[nextA.key]; !ok || got.BackendPort != 2222 {
@@ -326,7 +335,248 @@ func TestDiffPreparedKernelRulesDetectsUpsertsAndDeletes(t *testing.T) {
 	if got, ok := upserts[nextC.key]; !ok || got.RuleID != 33 {
 		t.Fatalf("diffPreparedKernelRules() missing new key %#v, got %#v", nextC.key, got)
 	}
-	if diff.deletes[0] != oldB.key {
-		t.Fatalf("diffPreparedKernelRules() delete key = %#v, want %#v", diff.deletes[0], oldB.key)
+	if diff.v4.deletes[0] != oldB.key {
+		t.Fatalf("diffPreparedKernelRules() delete key = %#v, want %#v", diff.v4.deletes[0], oldB.key)
+	}
+}
+
+func TestDiffPreparedKernelRulesDetectsIPv6UpsertsAndDeletes(t *testing.T) {
+	dstA, err := kernelPreparedAddrFromIP(net.ParseIP("2001:db8::10"), ipFamilyIPv6)
+	if err != nil {
+		t.Fatalf("kernelPreparedAddrFromIP(dstA) error = %v", err)
+	}
+	dstB, err := kernelPreparedAddrFromIP(net.ParseIP("2001:db8::11"), ipFamilyIPv6)
+	if err != nil {
+		t.Fatalf("kernelPreparedAddrFromIP(dstB) error = %v", err)
+	}
+	backendA, err := kernelPreparedAddrFromIP(net.ParseIP("2001:db8::20"), ipFamilyIPv6)
+	if err != nil {
+		t.Fatalf("kernelPreparedAddrFromIP(backendA) error = %v", err)
+	}
+	backendB, err := kernelPreparedAddrFromIP(net.ParseIP("2001:db8::21"), ipFamilyIPv6)
+	if err != nil {
+		t.Fatalf("kernelPreparedAddrFromIP(backendB) error = %v", err)
+	}
+
+	oldA := preparedKernelRule{
+		rule: Rule{ID: 41, InIP: "2001:db8::10", OutIP: "2001:db8::20", InPort: 443, OutPort: 8443, Protocol: "tcp"},
+		spec: kernelPreparedRuleSpec{
+			Family:      ipFamilyIPv6,
+			DstAddr:     dstA,
+			BackendAddr: backendA,
+		},
+		inIfIndex:  2,
+		outIfIndex: 3,
+		key: tcRuleKeyV4{
+			IfIndex: 2,
+			DstPort: 443,
+			Proto:   6,
+		},
+		value: tcRuleValueV4{
+			RuleID:      41,
+			BackendPort: 8443,
+			OutIfIndex:  3,
+		},
+	}
+	oldB := preparedKernelRule{
+		rule: Rule{ID: 42, InIP: "2001:db8::11", OutIP: "2001:db8::21", InPort: 53, OutPort: 53, Protocol: "udp"},
+		spec: kernelPreparedRuleSpec{
+			Family:      ipFamilyIPv6,
+			DstAddr:     dstB,
+			BackendAddr: backendB,
+		},
+		inIfIndex:  2,
+		outIfIndex: 3,
+		key: tcRuleKeyV4{
+			IfIndex: 2,
+			DstPort: 53,
+			Proto:   17,
+		},
+		value: tcRuleValueV4{
+			RuleID:      42,
+			BackendPort: 53,
+			OutIfIndex:  3,
+		},
+	}
+	nextA := oldA
+	nextA.value.BackendPort = 9443
+
+	diff, err := diffPreparedKernelRules([]preparedKernelRule{oldA, oldB}, []preparedKernelRule{nextA})
+	if err != nil {
+		t.Fatalf("diffPreparedKernelRules() error = %v", err)
+	}
+	if len(diff.v4.upserts) != 0 || len(diff.v4.deletes) != 0 {
+		t.Fatalf("diffPreparedKernelRules() unexpected IPv4 diff = %+v", diff.v4)
+	}
+	if len(diff.v6.upserts) != 1 {
+		t.Fatalf("diffPreparedKernelRules() IPv6 upserts = %d, want 1", len(diff.v6.upserts))
+	}
+	if len(diff.v6.deletes) != 1 {
+		t.Fatalf("diffPreparedKernelRules() IPv6 deletes = %d, want 1", len(diff.v6.deletes))
+	}
+	if diff.v6.upserts[0].value.BackendPort != 9443 {
+		t.Fatalf("diffPreparedKernelRules() IPv6 upsert backend port = %d, want 9443", diff.v6.upserts[0].value.BackendPort)
+	}
+	oldBKey, _, err := encodePreparedKernelRuleV6(oldB)
+	if err != nil {
+		t.Fatalf("encodePreparedKernelRuleV6(oldB) error = %v", err)
+	}
+	if diff.v6.deletes[0] != oldBKey {
+		t.Fatalf("diffPreparedKernelRules() IPv6 delete key = %#v, want %#v", diff.v6.deletes[0], oldBKey)
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeIDsIgnoresMetadataOnlyChanges(t *testing.T) {
+	base := preparedKernelRule{
+		rule: Rule{
+			ID:           41,
+			InInterface:  "vmbr0",
+			InIP:         "198.51.100.10",
+			InPort:       20022,
+			OutInterface: "vmbr1",
+			OutIP:        "192.0.2.6",
+			OutPort:      22,
+			Protocol:     "tcp",
+			Remark:       "before",
+		},
+		inIfIndex:  2,
+		outIfIndex: 3,
+		key: tcRuleKeyV4{
+			IfIndex: 2,
+			DstAddr: 1,
+			DstPort: 20022,
+			Proto:   6,
+		},
+		value: tcRuleValueV4{
+			RuleID:      41,
+			BackendAddr: 2,
+			BackendPort: 22,
+			OutIfIndex:  3,
+		},
+	}
+
+	next := base
+	next.rule.Remark = "after"
+	next.rule.Tag = "after"
+
+	if got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{base}, []preparedKernelRule{next}); len(got) != 0 {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want no purge ids", got)
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeIDsMarksRemovedAndChangedRules(t *testing.T) {
+	unchangedOld := preparedKernelRule{
+		rule:  Rule{ID: 51, Protocol: "tcp"},
+		key:   tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 10001, Proto: 6},
+		value: tcRuleValueV4{RuleID: 51, BackendAddr: 2, BackendPort: 80, OutIfIndex: 3},
+	}
+	changedOld := preparedKernelRule{
+		rule:  Rule{ID: 52, Protocol: "udp"},
+		key:   tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 10002, Proto: 17},
+		value: tcRuleValueV4{RuleID: 52, BackendAddr: 3, BackendPort: 53, OutIfIndex: 3},
+	}
+	removedOld := preparedKernelRule{
+		rule:  Rule{ID: 53, Protocol: "tcp"},
+		key:   tcRuleKeyV4{IfIndex: 4, DstAddr: 1, DstPort: 10003, Proto: 6},
+		value: tcRuleValueV4{RuleID: 53, BackendAddr: 4, BackendPort: 22, OutIfIndex: 5},
+	}
+
+	unchangedNew := unchangedOld
+	changedNew := changedOld
+	changedNew.value.BackendPort = 5353
+
+	got := collectPreparedKernelRuleFlowPurgeIDs(
+		[]preparedKernelRule{unchangedOld, changedOld, removedOld},
+		[]preparedKernelRule{unchangedNew, changedNew},
+	)
+
+	if len(got) != 2 {
+		t.Fatalf("len(collectPreparedKernelRuleFlowPurgeIDs()) = %d, want 2", len(got))
+	}
+	if _, ok := got[52]; !ok {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() missing changed rule id 52: %#v", got)
+	}
+	if _, ok := got[53]; !ok {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() missing removed rule id 53: %#v", got)
+	}
+	if _, ok := got[51]; ok {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() unexpectedly marked unchanged rule id 51: %#v", got)
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeIDsIgnoresSyntheticRuleIDDrift(t *testing.T) {
+	oldRule := preparedKernelRule{
+		rule: Rule{
+			ID:               62,
+			Protocol:         "tcp",
+			kernelMode:       kernelModeEgressNAT,
+			kernelLogKind:    workerKindEgressNAT,
+			kernelLogOwnerID: 9,
+			InInterface:      "tap100i0",
+			OutInterface:     "vmbr0",
+			OutSourceIP:      "15.235.165.86",
+		},
+		key: tcRuleKeyV4{IfIndex: 4, DstAddr: 0, DstPort: 0, Proto: 6},
+		value: tcRuleValueV4{
+			RuleID:     62,
+			OutIfIndex: 5,
+			NATAddr:    7,
+		},
+	}
+	newRule := oldRule
+	newRule.rule.ID = 72
+	newRule.value.RuleID = 72
+
+	if got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{oldRule}, []preparedKernelRule{newRule}); len(got) != 0 {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want no purge ids when only synthetic rule ids drift", got)
+	}
+}
+
+func TestPreparedKernelRulesNeedAttachmentResetForEgressNATChanges(t *testing.T) {
+	mainRule := preparedKernelRule{
+		rule: Rule{ID: 61, Protocol: "tcp"},
+		key:  tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 10001, Proto: 6},
+		value: tcRuleValueV4{
+			RuleID:      61,
+			BackendAddr: 2,
+			BackendPort: 80,
+			OutIfIndex:  3,
+		},
+	}
+	egressRule := preparedKernelRule{
+		rule: Rule{
+			ID:               62,
+			Protocol:         "tcp",
+			kernelMode:       kernelModeEgressNAT,
+			kernelLogKind:    workerKindEgressNAT,
+			kernelLogOwnerID: 9,
+		},
+		key: tcRuleKeyV4{IfIndex: 4, DstAddr: 0, DstPort: 0, Proto: 6},
+		value: tcRuleValueV4{
+			RuleID:     62,
+			OutIfIndex: 5,
+			NATAddr:    7,
+		},
+	}
+	sameEgressWithNewSyntheticID := egressRule
+	sameEgressWithNewSyntheticID.rule.ID = 72
+	sameEgressWithNewSyntheticID.value.RuleID = 72
+	changedMainRule := mainRule
+	changedMainRule.value.BackendPort = 8080
+
+	if !preparedKernelRulesNeedAttachmentReset([]preparedKernelRule{mainRule, egressRule}, []preparedKernelRule{mainRule}) {
+		t.Fatal("preparedKernelRulesNeedAttachmentReset() = false, want true when egress nat entries are removed")
+	}
+	if !preparedKernelRulesNeedAttachmentReset([]preparedKernelRule{mainRule}, []preparedKernelRule{mainRule, egressRule}) {
+		t.Fatal("preparedKernelRulesNeedAttachmentReset() = false, want true when egress nat entries are added")
+	}
+	if preparedKernelRulesNeedAttachmentReset([]preparedKernelRule{mainRule}, []preparedKernelRule{mainRule}) {
+		t.Fatal("preparedKernelRulesNeedAttachmentReset() = true, want false when no egress nat entries are involved")
+	}
+	if preparedKernelRulesNeedAttachmentReset([]preparedKernelRule{mainRule, egressRule}, []preparedKernelRule{changedMainRule, egressRule}) {
+		t.Fatal("preparedKernelRulesNeedAttachmentReset() = true, want false when only non-egress entries change")
+	}
+	if preparedKernelRulesNeedAttachmentReset([]preparedKernelRule{mainRule, egressRule}, []preparedKernelRule{mainRule, sameEgressWithNewSyntheticID}) {
+		t.Fatal("preparedKernelRulesNeedAttachmentReset() = true, want false when only egress synthetic rule ids drift")
 	}
 }

@@ -9,7 +9,7 @@ const (
 	ruleEngineAuto      = "auto"
 	ruleEngineUserspace = "userspace"
 	ruleEngineKernel    = "kernel"
-	kernelFlowsMapLimit = 131072
+	kernelFlowsMapLimit = 262144
 )
 
 type hostInterfaceAddrs map[string]map[string]struct{}
@@ -111,6 +111,87 @@ func (dp kernelRuntimeRuleDataplane) SupportsRule(rule Rule) (bool, string) {
 func (dp tcEBPFRuleDataplane) SupportsRule(rule Rule) (bool, string) {
 	if dp.hostErr != "" {
 		return false, "kernel dataplane could not inspect host interfaces"
+	}
+	if isKernelEgressNATPassthroughRule(rule) {
+		if rule.Protocol != "tcp" && rule.Protocol != "udp" && rule.Protocol != "icmp" {
+			return false, "kernel dataplane currently supports only single-protocol TCP/UDP/ICMP egress nat rules"
+		}
+		if strings.TrimSpace(rule.InInterface) == "" {
+			return false, "kernel dataplane requires an explicit inbound interface"
+		}
+		if strings.TrimSpace(rule.OutInterface) == "" {
+			return false, "kernel dataplane requires an explicit outbound interface"
+		}
+		if _, ok := dp.hostAddrs[rule.InInterface]; !ok {
+			return false, "kernel dataplane cannot resolve the inbound interface"
+		}
+		if strings.TrimSpace(rule.InIP) == "" || strings.TrimSpace(rule.InIP) == "0.0.0.0" {
+			return false, "kernel dataplane passthrough guard requires a specific inbound IPv4 address"
+		}
+		if ip4 := net.ParseIP(strings.TrimSpace(rule.InIP)).To4(); ip4 == nil {
+			return false, "kernel dataplane passthrough guard requires a valid inbound IPv4 address"
+		}
+		if rule.InPort != 0 || rule.OutPort != 0 {
+			return false, "kernel dataplane passthrough guard requires wildcard TCP/UDP port matching"
+		}
+		if rule.Transparent {
+			return false, "kernel dataplane passthrough guard does not support transparent mode"
+		}
+		if _, ok := dp.hostAddrs[rule.OutInterface]; !ok {
+			return false, "kernel dataplane cannot resolve the outbound interface"
+		}
+		return true, ""
+	}
+	if isKernelEgressNATRule(rule) {
+		if rule.Protocol != "tcp" && rule.Protocol != "udp" && rule.Protocol != "icmp" {
+			return false, "kernel dataplane currently supports only single-protocol TCP/UDP/ICMP egress nat rules"
+		}
+		if strings.TrimSpace(rule.InInterface) == "" {
+			return false, "kernel dataplane requires an explicit inbound interface"
+		}
+		if strings.TrimSpace(rule.OutInterface) == "" {
+			return false, "kernel dataplane requires an explicit outbound interface"
+		}
+		if _, ok := dp.hostAddrs[rule.InInterface]; !ok {
+			return false, "kernel dataplane cannot resolve the inbound interface"
+		}
+		if strings.TrimSpace(rule.InIP) != "0.0.0.0" || rule.InPort != 0 {
+			return false, "kernel dataplane egress nat takeover requires wildcard inbound IPv4/port matching"
+		}
+		if rule.Transparent {
+			return false, "kernel dataplane egress nat takeover does not support transparent mode"
+		}
+		ifaceAddrs, ok := dp.hostAddrs[rule.OutInterface]
+		if !ok {
+			return false, "kernel dataplane cannot resolve the outbound interface"
+		}
+		outSourceIP := strings.TrimSpace(rule.OutSourceIP)
+		if outSourceIP != "" {
+			ip4 := net.ParseIP(outSourceIP).To4()
+			if ip4 == nil {
+				return false, "kernel dataplane requires a valid outbound source IPv4 address"
+			}
+			if ip4.IsLoopback() || ip4.IsUnspecified() {
+				return false, "kernel dataplane requires a specific non-loopback outbound source IPv4 address"
+			}
+			if _, ok := ifaceAddrs[outSourceIP]; !ok {
+				return false, "outbound source IP is not assigned to the selected outbound interface"
+			}
+			return true, ""
+		}
+		hasOutboundIPv4 := false
+		for addr := range ifaceAddrs {
+			ip4 := net.ParseIP(addr).To4()
+			if ip4 == nil || ip4.IsLoopback() {
+				continue
+			}
+			hasOutboundIPv4 = true
+			break
+		}
+		if !hasOutboundIPv4 {
+			return false, "kernel dataplane requires an outbound interface IPv4 address for egress nat takeover"
+		}
+		return true, ""
 	}
 	if rule.Protocol != "tcp" && rule.Protocol != "udp" {
 		return false, "kernel dataplane currently supports only single-protocol TCP/UDP rules"
@@ -282,8 +363,8 @@ func kernelRuleFamilyFallbackReason(rule Rule) string {
 	if ipLiteralPairIsMixedFamily(rule.InIP, rule.OutIP) {
 		return "kernel dataplane does not support mixed IPv4/IPv6 forwarding"
 	}
-	if ipLiteralUsesIPv6(rule.InIP, rule.OutIP) {
-		return "kernel dataplane currently supports only IPv4 rules"
+	if ipLiteralUsesIPv6(rule.InIP, rule.OutIP) && rule.Transparent {
+		return "kernel dataplane currently does not support transparent IPv6 rules"
 	}
 	return ""
 }

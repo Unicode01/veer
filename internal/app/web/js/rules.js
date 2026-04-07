@@ -2,6 +2,26 @@
   const app = window.ForwardApp;
   if (!app) return;
 
+  app.refreshRuleInterfaceSelectors = function refreshRuleInterfaceSelectors() {
+    const el = app.el;
+    app.populateInterfacePicker(el.inInterface, el.inInterfacePicker, el.inInterfaceOptions, {
+      preserveSelected: true
+    });
+    app.populateInterfacePicker(el.outInterface, el.outInterfacePicker, el.outInterfaceOptions, {
+      preserveSelected: true
+    });
+    app.populateIPSelect(el.inInterface, el.inIP, el.inIP.value);
+    app.refreshRuleSourceIPOptions(el.ruleOutSourceIP.value);
+  };
+
+  app.refreshRuleSourceIPOptions = function refreshRuleSourceIPOptions(selected) {
+    const el = app.el;
+    const family = typeof app.ipFamily === 'function' ? app.ipFamily(app.$('outIP').value) : '';
+    app.populateSourceIPSelect(el.outInterface, el.ruleOutSourceIP, selected == null ? el.ruleOutSourceIP.value : selected, true, {
+      family: family
+    });
+  };
+
   app.syncRuleFormState = function syncRuleFormState() {
     const el = app.el;
     const formState = app.state.forms.rule;
@@ -41,12 +61,13 @@
 
     app.$('ruleRemark').value = rule.remark || '';
     app.populateTagSelect(app.$('ruleTag'), rule.tag);
-    app.populateInterfaceSelect(el.inInterface, rule.in_interface);
-    app.populateIPSelect(el.inInterface, el.inIP, rule.in_ip);
+    el.inInterface.value = rule.in_interface || '';
+    el.inIP.value = rule.in_ip || '';
     app.$('inPort').value = rule.in_port;
-    app.populateInterfaceSelect(el.outInterface, rule.out_interface);
-    app.populateSourceIPSelect(el.outInterface, el.ruleOutSourceIP, rule.out_source_ip, true);
+    el.outInterface.value = rule.out_interface || '';
+    el.ruleOutSourceIP.value = rule.out_source_ip || '';
     app.$('outIP').value = rule.out_ip;
+    app.refreshRuleInterfaceSelectors();
     app.$('outPort').value = rule.out_port;
     app.$('protocol').value = rule.protocol;
     app.$('ruleTransparent').checked = !!rule.transparent;
@@ -62,12 +83,13 @@
 
     app.$('ruleRemark').value = rule.remark || '';
     app.populateTagSelect(app.$('ruleTag'), rule.tag);
-    app.populateInterfaceSelect(el.inInterface, rule.in_interface);
-    app.populateIPSelect(el.inInterface, el.inIP, rule.in_ip);
+    el.inInterface.value = rule.in_interface || '';
+    el.inIP.value = rule.in_ip || '';
     app.$('inPort').value = rule.in_port;
-    app.populateInterfaceSelect(el.outInterface, rule.out_interface);
-    app.populateSourceIPSelect(el.outInterface, el.ruleOutSourceIP, rule.out_source_ip, true);
+    el.outInterface.value = rule.out_interface || '';
+    el.ruleOutSourceIP.value = rule.out_source_ip || '';
     app.$('outIP').value = rule.out_ip;
+    app.refreshRuleInterfaceSelectors();
     app.$('outPort').value = rule.out_port;
     app.$('protocol').value = rule.protocol;
     app.$('ruleTransparent').checked = !!rule.transparent;
@@ -78,7 +100,7 @@
   app.exitRuleEditMode = function exitRuleEditMode() {
     app.setRuleFormAdd();
     app.el.ruleForm.reset();
-    app.populateSourceIPSelect(app.el.outInterface, app.el.ruleOutSourceIP, '', false);
+    app.refreshRuleInterfaceSelectors();
     app.updateRuleTransparentWarning();
   };
 
@@ -118,9 +140,24 @@
     return rule[key];
   };
 
+  app.translateRuntimeReason = function translateRuntimeReason(reason) {
+    const text = String(reason || '').trim();
+    if (!text) return '';
+
+    const translated = {
+      'kernel dataplane does not support mixed IPv4/IPv6 forwarding': app.t('runtimeReason.kernelMixedFamily'),
+      'kernel dataplane currently does not support transparent IPv6 rules': app.t('runtimeReason.kernelTransparentIPv6')
+    };
+
+    return Object.prototype.hasOwnProperty.call(translated, text) ? translated[text] : text;
+  };
+
   app.getRuleEngineInfo = function getRuleEngineInfo(rule) {
     const effective = (rule.effective_engine || 'userspace').toLowerCase();
     const kernelEngine = String(rule.effective_kernel_engine || '').toLowerCase();
+    const runtimeReason = typeof app.translateRuntimeReason === 'function'
+      ? app.translateRuntimeReason(rule.fallback_reason || rule.kernel_reason || '')
+      : String(rule.fallback_reason || rule.kernel_reason || '').trim();
     let badgeClass = 'badge-userspace';
     let badgeText = app.t('rule.engine.effective.' + effective);
     if (effective === 'kernel') {
@@ -146,8 +183,7 @@
       app.t('rule.engine.effectiveLabel') + ': ' + app.t('rule.engine.effective.' + effective)
     ];
     if (effective === 'kernel' && kernelEngine) titleParts.push('Kernel Engine: ' + kernelEngine.toUpperCase());
-    if (rule.fallback_reason) titleParts.push(rule.fallback_reason);
-    else if (rule.kernel_reason) titleParts.push(rule.kernel_reason);
+    if (runtimeReason) titleParts.push(runtimeReason);
 
     return {
       badgeClass: badgeClass,
@@ -155,6 +191,37 @@
       hintText: hintKey ? app.t(hintKey) : '',
       title: titleParts.join('\n')
     };
+  };
+
+  app.getAddressFamilyInfo = function getAddressFamilyInfo(primaryIP, secondaryIP) {
+    const families = [primaryIP, secondaryIP]
+      .map((value) => {
+        const text = String(value || '').trim();
+        return text && typeof app.ipFamily === 'function' ? app.ipFamily(text) : '';
+      })
+      .filter(Boolean);
+    if (!families.length) return null;
+
+    let family = families[0];
+    if (families.some((value) => value !== family)) family = 'mixed';
+
+    return {
+      family: family,
+      badgeClass: family === 'mixed' ? 'badge-family-mixed' : 'badge-family-' + family,
+      badgeText: app.t('common.family.' + family),
+      title: app.t('common.familyLabel') + ': ' + app.t('common.family.' + family),
+      searchText: [family, app.t('common.family.' + family)]
+        .filter(Boolean)
+        .join(' ')
+    };
+  };
+
+  app.createAddressFamilyBadgeNode = function createAddressFamilyBadgeNode(primaryIP, secondaryIP) {
+    const info = typeof app.getAddressFamilyInfo === 'function'
+      ? app.getAddressFamilyInfo(primaryIP, secondaryIP)
+      : null;
+    if (!info) return null;
+    return app.createBadgeNode(info.badgeClass, info.badgeText, info.title);
   };
 
   app.getFilteredRules = function getFilteredRules() {
@@ -174,6 +241,13 @@
         rule.out_source_ip,
         rule.out_port,
         rule.protocol,
+        rule.effective_engine,
+        rule.effective_kernel_engine,
+        rule.kernel_reason,
+        rule.fallback_reason,
+        (typeof app.getAddressFamilyInfo === 'function'
+          ? (app.getAddressFamilyInfo(rule.in_ip, rule.out_ip) || {}).searchText
+          : ''),
         app.statusInfo(rule.status, rule.enabled).text
       ]));
     }
@@ -226,10 +300,10 @@
   app.getRuleFieldInput = function getRuleFieldInput(field) {
     const map = {
       id: app.el.editRuleId,
-      in_interface: app.el.inInterface,
+      in_interface: app.el.inInterfacePicker || app.el.inInterface,
       in_ip: app.el.inIP,
       in_port: app.$('inPort'),
-      out_interface: app.el.outInterface,
+      out_interface: app.el.outInterfacePicker || app.el.outInterface,
       out_ip: app.$('outIP'),
       out_source_ip: app.el.ruleOutSourceIP,
       out_port: app.$('outPort'),
@@ -247,9 +321,13 @@
       'backend_source_ip ',
       'in_interface ',
       'in_ip ',
+      'parent_interface ',
+      'child_interface ',
       'out_interface ',
       'out_ip ',
-      'out_source_ip '
+      'out_source_ip ',
+      'protocol ',
+      'nat_type '
     ];
     for (const prefix of prefixes) {
       if (text.indexOf(prefix) === 0) return text.slice(prefix.length);
@@ -258,14 +336,28 @@
   };
 
   app.translateValidationMessage = function translateValidationMessage(message) {
-    const text = app.normalizeValidationMessage(message);
+    const rawText = String(message || '').trim();
+    if (rawText.indexOf('child_interface conflicts with egress nat #') === 0) {
+      return app.t('validation.egressNATChildConflict', {
+        id: rawText.slice('child_interface conflicts with egress nat #'.length)
+      });
+    }
+    if (rawText.indexOf('egress nat scope conflicts with egress nat #') === 0) {
+      return app.t('validation.egressNATChildConflict', {
+        id: rawText.slice('egress nat scope conflicts with egress nat #'.length)
+      });
+    }
+
+    const text = app.normalizeValidationMessage(rawText);
     if (!text) return app.t('validation.reviewErrors');
 
     const known = {
       'invalid id': app.t('validation.invalidID'),
+      'id is required': app.t('validation.invalidID'),
       'is required': app.t('validation.required'),
       'must be greater than 0': app.t('validation.positiveId'),
       'must be omitted when creating a rule': app.t('validation.ruleCreateIDOmit'),
+      'must be omitted when creating an egress nat': app.t('validation.egressNATCreateIDOmit'),
       'must be a valid IP address': app.t('validation.ip'),
       'must be a valid IPv4 address': app.t('validation.ipv4'),
       'must be a specific non-loopback IP address': app.t('validation.sourceIPSpecific'),
@@ -273,6 +365,8 @@
       'must be omitted when transparent mode is enabled': app.t('validation.sourceIPTransparent'),
       'must be between 1 and 65535': app.t('validation.portRange'),
       'must be tcp, udp, or tcp+udp': app.t('validation.protocol'),
+      'must include one or more of tcp, udp, icmp': app.t('validation.egressNATProtocol'),
+      'must be symmetric or full_cone': app.t('validation.egressNATNatType'),
       'must be auto, userspace, or kernel': app.t('validation.enginePreference'),
       'interface does not exist on this host': app.t('validation.interfaceMissing'),
       'must be assigned to the selected outbound interface': app.t('validation.sourceIPOutboundInterface'),
@@ -290,10 +384,19 @@
       'rule not found': app.t('validation.ruleNotFound'),
       'site not found': app.t('validation.siteNotFound'),
       'range not found': app.t('validation.rangeNotFound'),
+      'egress nat not found': app.t('validation.egressNATNotFound'),
       'domain and backend_ip are required': app.t('validation.siteRequired'),
       'at least one of backend_http_port or backend_https_port is required': app.t('validation.sitePortsRequired'),
       'in_ip, start_port, end_port, out_ip are required': app.t('validation.rangeRequired'),
-      'start_port must be <= end_port': app.t('validation.rangeOrder')
+      'start_port must be <= end_port': app.t('validation.rangeOrder'),
+      'parent_interface, child_interface, out_interface are required': app.t('validation.egressNATRequired'),
+      'parent_interface and out_interface are required': app.t('validation.egressNATRequired'),
+      'and out_interface are required': app.t('validation.egressNATRequired'),
+      'parent_interface must be different from out_interface when selecting a single target interface': app.t('validation.egressNATSingleTargetOutConflict'),
+      'must be different from out_interface when selecting a single target interface': app.t('validation.egressNATSingleTargetOutConflict'),
+      'child_interface must be different from out_interface': app.t('validation.childInterfaceDifferent'),
+      'child_interface is not attached to the selected parent_interface': app.t('validation.childParentMismatch'),
+      'parent_interface has no eligible child interfaces for egress nat takeover': app.t('validation.egressNATNoChildren')
     };
     if (known[text]) return known[text];
     if (text.indexOf('listener conflicts with ') === 0) {
@@ -431,6 +534,17 @@
       const tr = document.createElement('tr');
       const pending = app.isRowPending('rule', rule.id);
       const info = app.statusInfo(rule.status, rule.enabled);
+      const engine = typeof app.getRuleEngineInfo === 'function'
+        ? app.getRuleEngineInfo(rule)
+        : {
+            badgeClass: (rule.effective_engine || 'userspace') === 'kernel' ? 'badge-kernel' : 'badge-userspace',
+            badgeText: (rule.effective_engine || 'userspace'),
+            title: rule.fallback_reason || rule.kernel_reason || ''
+          };
+      const statusTitle = [
+        app.t('common.status') + ': ' + info.text,
+        engine.title || ''
+      ].filter(Boolean).join('\n');
       const toggleClass = rule.enabled ? 'btn-disable' : 'btn-enable';
       const toggleText = pending ? app.t('common.processing') : app.t(rule.enabled ? 'common.disable' : 'common.enable');
       tr.className = pending ? 'row-pending' : '';
@@ -468,7 +582,7 @@
       tr.appendChild(app.createCell(rule.transparent
         ? app.createBadgeNode('badge-running', app.t('common.yes'))
         : app.emptyCellNode()));
-      tr.appendChild(app.createCell(app.createStatusBadgeNode(info)));
+      tr.appendChild(app.createCell(app.createBadgeNode('badge-' + info.badge, info.text, statusTitle)));
       tr.appendChild(app.createCell(app.createActionDropdown([
         {
           className: toggleClass,
@@ -510,6 +624,7 @@
       app.pruneRuleSelection();
       app.markDataFresh();
       app.renderRulesTable();
+      if (typeof app.renderRuleStatsTable === 'function') app.renderRuleStatsTable();
     } catch (e) {
       if (e.message !== 'unauthorized') console.error('load rules:', e);
     }
@@ -592,10 +707,10 @@
   app.buildRuleFromForm = function buildRuleFromForm() {
     const el = app.el;
     return {
-      in_interface: el.inInterface.value,
+      in_interface: app.getInterfaceSubmissionValue(el.inInterface, el.inInterfacePicker),
       in_ip: el.inIP.value,
       in_port: parseInt(app.$('inPort').value, 10),
-      out_interface: el.outInterface.value,
+      out_interface: app.getInterfaceSubmissionValue(el.outInterface, el.outInterfacePicker),
       out_ip: app.$('outIP').value.trim(),
       out_source_ip: app.$('ruleTransparent').checked ? '' : el.ruleOutSourceIP.value,
       out_port: parseInt(app.$('outPort').value, 10),

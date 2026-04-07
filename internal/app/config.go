@@ -26,6 +26,8 @@ type Config struct {
 	KernelRulesMapLimit int             `json:"kernel_rules_map_limit"`
 	KernelFlowsMapLimit int             `json:"kernel_flows_map_limit"`
 	KernelNATMapLimit   int             `json:"kernel_nat_ports_map_limit"`
+	KernelNATPortMin    int             `json:"kernel_nat_port_min"`
+	KernelNATPortMax    int             `json:"kernel_nat_port_max"`
 	Experimental        map[string]bool `json:"experimental_features"`
 	Tags                []string        `json:"tags"`
 }
@@ -58,6 +60,10 @@ func loadConfig(path string) (*Config, error) {
 	cfg.KernelRulesMapLimit = normalizeKernelRulesMapLimit(cfg.KernelRulesMapLimit)
 	cfg.KernelFlowsMapLimit = normalizeKernelFlowsMapLimit(cfg.KernelFlowsMapLimit)
 	cfg.KernelNATMapLimit = normalizeKernelNATMapLimit(cfg.KernelNATMapLimit)
+	cfg.KernelNATPortMin, cfg.KernelNATPortMax, err = normalizeKernelNATPortRange(cfg.KernelNATPortMin, cfg.KernelNATPortMax)
+	if err != nil {
+		return nil, err
+	}
 	cfg.DefaultEngine = normalizeRuleEnginePreference(cfg.DefaultEngine)
 	if !isValidRuleEnginePreference(cfg.DefaultEngine) {
 		cfg.DefaultEngine = ruleEngineAuto

@@ -9,6 +9,7 @@ type kernelRuleApplyResult struct {
 type kernelRuleStats struct {
 	TCPActiveConns int64
 	UDPNatEntries  int64
+	ICMPNatEntries int64
 	TotalConns     int64
 	BytesIn        int64
 	BytesOut       int64
@@ -38,6 +39,7 @@ type kernelRuleSupportRuntime interface {
 type kernelHandoffRetentionRuntime interface {
 	retainedKernelRuleCandidates(rule Rule) ([]Rule, bool)
 	retainedKernelRangeCandidates(pr PortRange) ([]Rule, bool)
+	retainedKernelEgressNATCandidates(item EgressNAT) ([]Rule, bool)
 }
 
 type kernelRetainedAssignmentRuntime interface {

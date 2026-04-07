@@ -19,7 +19,7 @@
             document.documentElement.style.colorScheme = resolved;
         })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20260402-1">
+    <link rel="stylesheet" href="style.css?v=20260407-10">
 </head>
 <body>
     <div id="tokenModal" class="modal">
@@ -81,6 +81,7 @@
             <button id="tab-rules-button" class="tab active" data-tab="rules" data-i18n="tab.rules" role="tab" aria-selected="true" aria-controls="tab-rules" tabindex="0">Port Forwarding</button>
             <button id="tab-sites-button" class="tab" data-tab="sites" data-i18n="tab.sites" role="tab" aria-selected="false" aria-controls="tab-sites" tabindex="-1">Sites (80/443)</button>
             <button id="tab-ranges-button" class="tab" data-tab="ranges" data-i18n="tab.ranges" role="tab" aria-selected="false" aria-controls="tab-ranges" tabindex="-1">Range Mapping</button>
+            <button id="tab-egress-nats-button" class="tab" data-tab="egress-nats" data-i18n="tab.egressNATs" role="tab" aria-selected="false" aria-controls="tab-egress-nats" tabindex="-1">Egress NAT</button>
             <button id="tab-workers-button" class="tab" data-tab="workers" data-i18n="tab.workers" role="tab" aria-selected="false" aria-controls="tab-workers" tabindex="-1">Worker Status</button>
             <button id="tab-rule-stats-button" class="tab" data-tab="rule-stats" data-i18n="tab.stats" role="tab" aria-selected="false" aria-controls="tab-rule-stats" tabindex="-1">Traffic Stats</button>
         </div>
@@ -157,9 +158,9 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label data-i18n="form.inInterface">Inbound Interface</label>
-                            <select id="inInterface">
-                                <option value="" data-i18n="common.unspecified">Unspecified</option>
-                            </select>
+                            <input type="hidden" id="inInterface" value="">
+                            <input type="text" id="inInterfacePicker" list="inInterfaceOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="inInterfaceOptions"></datalist>
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.inIP">Inbound IP</label>
@@ -175,9 +176,9 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label data-i18n="form.outInterface">Outbound Interface</label>
-                            <select id="outInterface">
-                                <option value="" data-i18n="common.unspecified">Unspecified</option>
-                            </select>
+                            <input type="hidden" id="outInterface" value="">
+                            <input type="text" id="outInterfacePicker" list="outInterfaceOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="outInterfaceOptions"></datalist>
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.outIP">Outbound IP</label>
@@ -269,9 +270,9 @@
                         </div>
                         <div class="form-group">
                             <label data-i18n="site.form.listenInterface">Listen Interface</label>
-                            <select id="siteListenIface">
-                                <option value="" data-i18n="common.unspecified">Unspecified</option>
-                            </select>
+                            <input type="hidden" id="siteListenIface" value="">
+                            <input type="text" id="siteListenIfacePicker" list="siteListenIfaceOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="siteListenIfaceOptions"></datalist>
                         </div>
                         <div class="form-group">
                             <label data-i18n="site.form.listenIP">Listen IP</label>
@@ -388,9 +389,9 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label data-i18n="form.inInterface">Inbound Interface</label>
-                            <select id="rangeInInterface">
-                                <option value="" data-i18n="common.unspecified">Unspecified</option>
-                            </select>
+                            <input type="hidden" id="rangeInInterface" value="">
+                            <input type="text" id="rangeInInterfacePicker" list="rangeInInterfaceOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="rangeInInterfaceOptions"></datalist>
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.inIP">Inbound IP</label>
@@ -410,9 +411,9 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label data-i18n="form.outInterface">Outbound Interface</label>
-                            <select id="rangeOutInterface">
-                                <option value="" data-i18n="common.unspecified">Unspecified</option>
-                            </select>
+                            <input type="hidden" id="rangeOutInterface" value="">
+                            <input type="text" id="rangeOutInterfacePicker" list="rangeOutInterfaceOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="rangeOutInterfaceOptions"></datalist>
                         </div>
                         <div class="form-group">
                             <label data-i18n="range.form.targetIP">Target IP</label>
@@ -472,6 +473,112 @@
                 <div id="noRanges" class="empty-hint">
                     <p class="empty-title" data-i18n="range.list.empty">No range mappings yet.</p>
                     <button type="button" id="emptyAddRangeBtn" class="mini-btn" data-i18n="empty.action.range">Create First Mapping</button>
+                </div>
+            </section>
+        </div>
+
+        <div id="tab-egress-nats" class="tab-content" role="tabpanel" aria-labelledby="tab-egress-nats-button">
+            <section class="add-rule">
+                <h2 id="egressNATFormTitle" data-i18n="egressNAT.form.title.add">Add Egress NAT</h2>
+                <p class="section-desc" data-i18n="egressNAT.form.desc">Take over selected IPv4 TCP/UDP/ICMP outbound traffic from bridge child interfaces and apply TC full-NAT with a chosen uplink source IP.</p>
+                <form id="egressNATForm">
+                    <input type="hidden" id="editEgressNATId" value="">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="egressNAT.form.parentInterface">Parent Interface</label>
+                            <input type="hidden" id="egressNATParentInterface" value="">
+                            <input type="text" id="egressNATParentPicker" list="egressNATParentOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="egressNATParentOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="egressNAT.form.childInterface">Child Interface</label>
+                            <input type="hidden" id="egressNATChildInterface" value="">
+                            <input type="text" id="egressNATChildPicker" list="egressNATChildOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="egressNATChildOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.protocol">Protocol</label>
+                            <div id="egressNATProtocolDropdown" class="multi-select">
+                                <input type="hidden" id="egressNATProtocol" value="tcp+udp">
+                                <input type="button" id="egressNATProtocolTrigger" class="multi-select-trigger" value="TCP + UDP" data-i18n-title="egressNAT.form.protocolPlaceholder" aria-haspopup="true" aria-expanded="false" aria-controls="egressNATProtocolMenu">
+                                <div id="egressNATProtocolMenu" class="multi-select-menu" hidden>
+                                    <label class="multi-select-option">
+                                        <input type="checkbox" id="egressNATProtocolTCP" value="tcp" checked>
+                                        <span>TCP</span>
+                                    </label>
+                                    <label class="multi-select-option">
+                                        <input type="checkbox" id="egressNATProtocolUDP" value="udp" checked>
+                                        <span>UDP</span>
+                                    </label>
+                                    <label class="multi-select-option">
+                                        <input type="checkbox" id="egressNATProtocolICMP" value="icmp">
+                                        <span>ICMP</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="egressNAT.form.natType">NAT Type</label>
+                            <select id="egressNATNatType">
+                                <option value="symmetric" data-i18n="egressNAT.natType.symmetric">Symmetric</option>
+                                <option value="full_cone" data-i18n="egressNAT.natType.fullCone">Full Cone</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="form.outInterface">Outbound Interface</label>
+                            <input type="hidden" id="egressNATOutInterface" value="">
+                            <input type="text" id="egressNATOutPicker" list="egressNATOutOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="egressNATOutOptions"></datalist>
+                            <div id="egressNATOutInterfaceHint" class="field-hint" hidden></div>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.outSourceIP">Fixed Source IP</label>
+                            <input type="text" id="egressNATOutSourceIP" list="egressNATOutSourceIPOptions" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" inputmode="text">
+                            <datalist id="egressNATOutSourceIPOptions"></datalist>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-actions">
+                            <button type="submit" id="egressNATSubmitBtn" data-i18n="egressNAT.form.submit.add">Add Takeover</button>
+                            <button type="button" id="egressNATCancelBtn" class="btn-cancel" style="display:none" data-i18n="common.cancelEdit">Cancel</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="egressNAT.list.title">Egress NAT Takeover</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="egressNATsSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="egressNATsTable" data-i18n-placeholder="search.egressNATs.placeholder" placeholder="Search parent, child, uplink, source IP...">
+                        <p id="egressNATsFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="clearEgressNATsFilter" class="mini-btn" hidden data-i18n="filter.clear">Clear Filter</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="egressNATsTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="egressNATs" data-sort="id">ID</th>
+                                <th class="sortable" data-table="egressNATs" data-sort="parent_interface" data-i18n="egressNAT.form.parentInterface">Parent Interface</th>
+                                <th class="sortable" data-table="egressNATs" data-sort="child_interface" data-i18n="egressNAT.form.childInterface">Child Interface</th>
+                                <th class="sortable" data-table="egressNATs" data-sort="out_interface" data-i18n="form.outInterface">Outbound Interface</th>
+                                <th class="sortable" data-table="egressNATs" data-sort="out_source_ip" data-i18n="form.outSourceIP">Fixed Source IP</th>
+                                <th class="sortable" data-table="egressNATs" data-sort="protocol" data-i18n="form.protocol">Protocol</th>
+                                <th class="sortable" data-table="egressNATs" data-sort="nat_type" data-i18n="egressNAT.form.natType">NAT Type</th>
+                                <th class="sortable" data-table="egressNATs" data-sort="status" data-i18n="common.status">Status</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="egressNATsBody"></tbody>
+                    </table>
+                </div>
+                <div id="egressNATsPagination" class="table-pagination" hidden></div>
+                <div id="noEgressNATs" class="empty-hint">
+                    <p class="empty-title" data-i18n="egressNAT.list.empty">No egress NAT takeover rules yet.</p>
+                    <button type="button" id="emptyAddEgressNATBtn" class="mini-btn" data-i18n="empty.action.egressNAT">Create First Takeover</button>
                 </div>
             </section>
         </div>
@@ -552,6 +659,7 @@
                             <tr>
                                 <th class="sortable" data-table="ruleStats" data-sort="rule_id">ID</th>
                                 <th class="sortable" data-table="ruleStats" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th data-i18n="stats.target">Target</th>
                                 <th class="sortable" data-table="ruleStats" data-sort="current_conns" data-i18n="stats.currentConns">Connections</th>
                                 <th class="sortable" data-table="ruleStats" data-sort="total_conns" data-i18n="stats.totalConns">Total Connections</th>
                                 <th class="sortable" data-table="ruleStats" data-sort="rejected_conns" data-i18n="stats.rejectedConns">Rejected Connections</th>
@@ -579,6 +687,7 @@
                             <tr>
                                 <th class="sortable" data-table="siteStats" data-sort="site_id">ID</th>
                                 <th class="sortable" data-table="siteStats" data-sort="domain" data-i18n="site.form.domain">Domain</th>
+                                <th data-i18n="stats.target">Target</th>
                                 <th class="sortable" data-table="siteStats" data-sort="current_conns" data-i18n="stats.currentConns">Connections</th>
                                 <th class="sortable" data-table="siteStats" data-sort="total_conns" data-i18n="stats.totalConns">Total Connections</th>
                                 <th class="sortable" data-table="siteStats" data-sort="speed_in" data-i18n="stats.speedIn">Ingress Speed</th>
@@ -605,6 +714,7 @@
                             <tr>
                                 <th class="sortable" data-table="rangeStats" data-sort="range_id">ID</th>
                                 <th class="sortable" data-table="rangeStats" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th data-i18n="stats.target">Target</th>
                                 <th class="sortable" data-table="rangeStats" data-sort="current_conns" data-i18n="stats.currentConns">Connections</th>
                                 <th class="sortable" data-table="rangeStats" data-sort="total_conns" data-i18n="stats.totalConns">Total Connections</th>
                                 <th class="sortable" data-table="rangeStats" data-sort="rejected_conns" data-i18n="stats.rejectedConns">Rejected Connections</th>
@@ -620,17 +730,49 @@
                 <div id="rangeStatsPagination" class="table-pagination" hidden></div>
                 <p id="noRangeStats" class="empty-hint" data-i18n="stats.ranges.empty">No range statistics yet.</p>
             </section>
+
+            <section class="rule-list">
+                <div class="section-heading-row">
+                    <h2 data-i18n="stats.egressNATs.title">Egress NAT Traffic Stats</h2>
+                    <button type="button" class="mini-btn refresh-current-conns-btn" data-i18n="stats.refreshCurrentConns">获取当前连接数</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="egressNATStatsTable" class="stats-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="egressNATStats" data-sort="egress_nat_id">ID</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="parent_interface" data-i18n="egressNAT.form.parentInterface">Parent Interface</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="child_interface" data-i18n="egressNAT.form.childInterface">Child Interface</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="out_interface" data-i18n="form.outInterface">Outbound Interface</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="out_source_ip" data-i18n="form.outSourceIP">Fixed Source IP</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="protocol" data-i18n="form.protocol">Protocol</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="nat_type" data-i18n="egressNAT.form.natType">NAT Type</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="current_conns" data-i18n="stats.currentConns">Connections</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="total_conns" data-i18n="stats.totalConns">Total Connections</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="speed_in" data-i18n="stats.speedIn">Ingress Speed</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="speed_out" data-i18n="stats.speedOut">Egress Speed</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="bytes_in" data-i18n="stats.bytesIn">Ingress Total</th>
+                                <th class="sortable" data-table="egressNATStats" data-sort="bytes_out" data-i18n="stats.bytesOut">Egress Total</th>
+                            </tr>
+                        </thead>
+                        <tbody id="egressNATStatsBody"></tbody>
+                    </table>
+                </div>
+                <div id="egressNATStatsPagination" class="table-pagination" hidden></div>
+                <p id="noEgressNATStats" class="empty-hint" data-i18n="stats.egressNATs.empty">No egress NAT statistics yet.</p>
+            </section>
         </div>
     </div>
 
-    <script defer src="js/core.js?v=20260402-1"></script>
-    <script defer src="js/i18n.js?v=20260405-1"></script>
-    <script defer src="js/ui.js?v=20260402-1"></script>
-    <script defer src="js/rules.js?v=20260402-1"></script>
-    <script defer src="js/sites.js?v=20260402-1"></script>
-    <script defer src="js/ranges.js?v=20260402-1"></script>
-    <script defer src="js/workers.js?v=20260402-1"></script>
-    <script defer src="js/stats.js?v=20260405-3"></script>
-    <script defer src="js/init.js?v=20260402-1"></script>
+    <script defer src="js/core.js?v=20260407-2"></script>
+    <script defer src="js/i18n.js?v=20260407-8"></script>
+    <script defer src="js/ui.js?v=20260405-2"></script>
+    <script defer src="js/rules.js?v=20260407-5"></script>
+    <script defer src="js/sites.js?v=20260407-2"></script>
+    <script defer src="js/ranges.js?v=20260407-4"></script>
+    <script defer src="js/egress_nats.js?v=20260407-2"></script>
+    <script defer src="js/workers.js?v=20260407-5"></script>
+    <script defer src="js/stats.js?v=20260407-14"></script>
+    <script defer src="js/init.js?v=20260407-2"></script>
 </body>
 </html>

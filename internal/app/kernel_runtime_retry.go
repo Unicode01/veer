@@ -3,17 +3,19 @@
 package app
 
 type kernelRuleMatchKey struct {
-	kind         string
-	ownerID      int64
-	inInterface  string
-	inIP         string
-	inPort       int
-	outInterface string
-	outIP        string
-	outSourceIP  string
-	outPort      int
-	protocol     string
-	transparent  bool
+	kind          string
+	ownerID       int64
+	inInterface   string
+	inIP          string
+	inPort        int
+	outInterface  string
+	outIP         string
+	outSourceIP   string
+	outPort       int
+	protocol      string
+	transparent   bool
+	kernelMode    string
+	kernelNATType string
 }
 
 func sameKernelRuleDataplaneConfig(a, b Rule) bool {
@@ -25,7 +27,9 @@ func sameKernelRuleDataplaneConfig(a, b Rule) bool {
 		a.OutSourceIP == b.OutSourceIP &&
 		a.OutPort == b.OutPort &&
 		a.Protocol == b.Protocol &&
-		a.Transparent == b.Transparent
+		a.Transparent == b.Transparent &&
+		a.kernelMode == b.kernelMode &&
+		a.kernelNATType == b.kernelNATType
 }
 
 func sameKernelRuleOwnerDataplaneConfig(a, b Rule) bool {
@@ -36,17 +40,19 @@ func sameKernelRuleOwnerDataplaneConfig(a, b Rule) bool {
 
 func kernelRuleMatchKeyFor(rule Rule) kernelRuleMatchKey {
 	return kernelRuleMatchKey{
-		kind:         kernelRuleLogKind(rule),
-		ownerID:      kernelRuleLogOwnerID(rule),
-		inInterface:  rule.InInterface,
-		inIP:         rule.InIP,
-		inPort:       rule.InPort,
-		outInterface: rule.OutInterface,
-		outIP:        rule.OutIP,
-		outSourceIP:  rule.OutSourceIP,
-		outPort:      rule.OutPort,
-		protocol:     rule.Protocol,
-		transparent:  rule.Transparent,
+		kind:          kernelRuleLogKind(rule),
+		ownerID:       kernelRuleLogOwnerID(rule),
+		inInterface:   rule.InInterface,
+		inIP:          rule.InIP,
+		inPort:        rule.InPort,
+		outInterface:  rule.OutInterface,
+		outIP:         rule.OutIP,
+		outSourceIP:   rule.OutSourceIP,
+		outPort:       rule.OutPort,
+		protocol:      rule.Protocol,
+		transparent:   rule.Transparent,
+		kernelMode:    rule.kernelMode,
+		kernelNATType: rule.kernelNATType,
 	}
 }
 
@@ -86,8 +92,52 @@ func samePreparedKernelRuleDataplane(a, b preparedKernelRule) bool {
 	return sameKernelRuleDataplaneConfig(a.rule, b.rule) &&
 		a.inIfIndex == b.inIfIndex &&
 		a.outIfIndex == b.outIfIndex &&
+		sameKernelReplyIfIndexes(a.replyIfIndexes, b.replyIfIndexes) &&
+		sameKernelIfParentMappings(a.replyIfParents, b.replyIfParents) &&
+		sameKernelPreparedRuleSpec(a.spec, b.spec) &&
 		a.key == b.key &&
 		a.value == b.value
+}
+
+func samePreparedKernelRuleDataplaneIgnoringRuleID(a, b preparedKernelRule) bool {
+	if !sameKernelRuleDataplaneConfig(a.rule, b.rule) ||
+		a.inIfIndex != b.inIfIndex ||
+		a.outIfIndex != b.outIfIndex ||
+		!sameKernelReplyIfIndexes(a.replyIfIndexes, b.replyIfIndexes) ||
+		!sameKernelIfParentMappings(a.replyIfParents, b.replyIfParents) ||
+		!sameKernelPreparedRuleSpec(a.spec, b.spec) ||
+		a.key != b.key {
+		return false
+	}
+	left := a.value
+	right := b.value
+	left.RuleID = 0
+	right.RuleID = 0
+	return left == right
+}
+
+func sameKernelReplyIfIndexes(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameKernelIfParentMappings(a, b []kernelIfParentMapping) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func samePreparedXDPKernelRuleDataplane(a, b preparedXDPKernelRule) bool {

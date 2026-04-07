@@ -88,7 +88,133 @@ func TestHandleListRangeStatsRejectsInvalidSortKey(t *testing.T) {
 	}
 }
 
+func TestHandleListEgressNATStatsSortsByCurrentConns(t *testing.T) {
+	db := openTestDB(t)
+
+	items := []EgressNAT{
+		{ParentInterface: "vmbr1", ChildInterface: "tap100i0", OutInterface: "vmbr0", OutSourceIP: "198.51.100.10", Protocol: "udp", NATType: egressNATTypeFullCone, Enabled: true},
+		{ParentInterface: "vmbr2", ChildInterface: "", OutInterface: "vmbr0", OutSourceIP: "198.51.100.11", Protocol: "tcp", NATType: egressNATTypeSymmetric, Enabled: true},
+		{ParentInterface: "vmbr3", ChildInterface: "tap300i0", OutInterface: "vmbr9", OutSourceIP: "198.51.100.12", Protocol: "tcp+udp", NATType: egressNATTypeSymmetric, Enabled: true},
+	}
+	var ids []int64
+	for i := range items {
+		item := items[i]
+		id, err := dbAddEgressNAT(db, &item)
+		if err != nil {
+			t.Fatalf("add egress nat %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	pm := &ProcessManager{
+		kernelEgressNATStats: map[int64]EgressNATStatsReport{
+			ids[0]: {EgressNATID: ids[0], TotalConns: 12, NatTableSize: 7, BytesIn: 100},
+			ids[1]: {EgressNATID: ids[1], ActiveConns: 5, TotalConns: 8, BytesIn: 200},
+			ids[2]: {EgressNATID: ids[2], ActiveConns: 2, TotalConns: 9, NatTableSize: 3, BytesIn: 300},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/egress-nats/stats?page=1&page_size=1&sort_key=current_conns&sort_asc=false", nil)
+	w := httptest.NewRecorder()
+
+	handleListEgressNATStats(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp EgressNATStatsListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if resp.Total != 3 {
+		t.Fatalf("unexpected total: got %d want 3", resp.Total)
+	}
+	if resp.Page != 1 || resp.PageSize != 1 {
+		t.Fatalf("unexpected page info: page=%d page_size=%d", resp.Page, resp.PageSize)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("unexpected items length: %d", len(resp.Items))
+	}
+	if resp.Items[0].EgressNATID != ids[0] {
+		t.Fatalf("unexpected egress nat id on page 1: got %d want %d", resp.Items[0].EgressNATID, ids[0])
+	}
+	if resp.Items[0].ParentInterface != "vmbr1" || resp.Items[0].OutInterface != "vmbr0" {
+		t.Fatalf("unexpected metadata: %+v", resp.Items[0])
+	}
+	if resp.Items[0].NATType != egressNATTypeFullCone {
+		t.Fatalf("unexpected nat type: got %q want %q", resp.Items[0].NATType, egressNATTypeFullCone)
+	}
+}
+
+func TestHandleListCurrentConnsIncludesEgressNATs(t *testing.T) {
+	db := openTestDB(t)
+
+	item := EgressNAT{
+		ParentInterface: "vmbr1",
+		OutInterface:    "vmbr0",
+		OutSourceIP:     "198.51.100.20",
+		Protocol:        "tcp+udp",
+		Enabled:         true,
+	}
+	id, err := dbAddEgressNAT(db, &item)
+	if err != nil {
+		t.Fatalf("add egress nat: %v", err)
+	}
+
+	pm := &ProcessManager{
+		kernelRuntime: stubKernelStatsRuntime{
+			snapshot: kernelRuleStatsSnapshot{
+				ByRuleID: map[uint32]kernelRuleStats{
+					33: {
+						TCPActiveConns: 2,
+						UDPNatEntries:  4,
+					},
+				},
+			},
+		},
+		kernelFlowOwners: map[uint32]kernelCandidateOwner{
+			33: {kind: workerKindEgressNAT, id: id},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/stats/current-conns", nil)
+	w := httptest.NewRecorder()
+
+	handleListCurrentConns(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp CurrentConnsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.EgressNATs) != 1 {
+		t.Fatalf("unexpected egress nat conn count rows: %d", len(resp.EgressNATs))
+	}
+	if resp.EgressNATs[0].EgressNATID != id {
+		t.Fatalf("unexpected egress nat id: got %d want %d", resp.EgressNATs[0].EgressNATID, id)
+	}
+	if resp.EgressNATs[0].CurrentConns != 6 {
+		t.Fatalf("unexpected current conns: got %d want 6", resp.EgressNATs[0].CurrentConns)
+	}
+}
+
 func TestHandleKernelRuntimeIncludesFallbackSummary(t *testing.T) {
+	prevProfile := kernelAdaptiveMapProfileOverride
+	prevSet := kernelAdaptiveMapProfileOverrideSet
+	kernelAdaptiveMapProfileOverride = kernelAdaptiveMapProfile{
+		totalMemoryBytes:   4 << 30,
+		flowsBaseLimit:     131072,
+		natBaseLimit:       131072,
+		egressNATAutoFloor: 131072,
+	}
+	kernelAdaptiveMapProfileOverrideSet = true
+	defer func() {
+		kernelAdaptiveMapProfileOverride = prevProfile
+		kernelAdaptiveMapProfileOverrideSet = prevSet
+	}()
+
 	retryAt := time.Unix(1712200000, 0).UTC()
 	snapshotAt := retryAt.Add(15 * time.Second)
 	netlinkRequestedAt := retryAt.Add(7 * time.Second)
@@ -201,6 +327,29 @@ func TestHandleKernelRuntimeIncludesFallbackSummary(t *testing.T) {
 	}
 	if !resp.TCDiagnostics || !resp.TCDiagnosticsVerbose {
 		t.Fatalf("tc diagnostics flags = diag:%t verbose:%t, want true/true", resp.TCDiagnostics, resp.TCDiagnosticsVerbose)
+	}
+	if resp.KernelMapProfile != kernelAdaptiveMapProfileMedium {
+		t.Fatalf("kernel_map_profile = %q, want %q", resp.KernelMapProfile, kernelAdaptiveMapProfileMedium)
+	}
+	if resp.KernelMapTotalMemoryBytes != 4<<30 {
+		t.Fatalf("kernel_map_total_memory_bytes = %d, want %d", resp.KernelMapTotalMemoryBytes, uint64(4<<30))
+	}
+	if resp.KernelRulesMapBaseLimit != kernelRulesMapBaseLimit || resp.KernelFlowsMapBaseLimit != 131072 || resp.KernelNATMapBaseLimit != 131072 || resp.KernelEgressNATAutoFloor != 131072 {
+		t.Fatalf(
+			"kernel map bases/floor = rules:%d flows:%d nat:%d floor:%d",
+			resp.KernelRulesMapBaseLimit,
+			resp.KernelFlowsMapBaseLimit,
+			resp.KernelNATMapBaseLimit,
+			resp.KernelEgressNATAutoFloor,
+		)
+	}
+	if resp.KernelRulesMapCapacityMode != "adaptive" || resp.KernelFlowsMapCapacityMode != "adaptive" || resp.KernelNATMapCapacityMode != "adaptive" {
+		t.Fatalf(
+			"kernel map modes = rules:%q flows:%q nat:%q",
+			resp.KernelRulesMapCapacityMode,
+			resp.KernelFlowsMapCapacityMode,
+			resp.KernelNATMapCapacityMode,
+		)
 	}
 	if resp.ActiveRuleCount != 1 || resp.ActiveRangeCount != 1 {
 		t.Fatalf("active counts = rules:%d ranges:%d, want 1/1", resp.ActiveRuleCount, resp.ActiveRangeCount)
@@ -359,7 +508,7 @@ func TestHandleKernelRuntimePressureFallbackDoesNotSetRetryPending(t *testing.T)
 			1: {
 				KernelEligible:  true,
 				EffectiveEngine: ruleEngineUserspace,
-				FallbackReason:  `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+				FallbackReason:  `kernel dataplane pressure: flows 242000/262144 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
 			},
 		},
 		rangePlans: map[int64]rangeDataplanePlan{},

@@ -4,7 +4,9 @@ package app
 
 import (
 	"testing"
+	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 )
 
@@ -134,5 +136,109 @@ func TestApplyKernelRuntimeDiagView(t *testing.T) {
 	}
 	if view.DiagSnapshotError != "diag lookup failed" {
 		t.Fatalf("diag snapshot error = %q, want propagated error", view.DiagSnapshotError)
+	}
+}
+
+func TestKernelRuntimeMapCountSnapshotDetailsFresh(t *testing.T) {
+	now := time.Now()
+	snapshot := kernelRuntimeMapCountSnapshot{detailSampledAt: now}
+	if !snapshot.detailsFresh(now.Add(kernelRuntimeMapDetailCacheTTL / 2)) {
+		t.Fatal("detailsFresh() = false, want true within detail cache ttl")
+	}
+	if snapshot.detailsFresh(now.Add(kernelRuntimeMapDetailCacheTTL + time.Millisecond)) {
+		t.Fatal("detailsFresh() = true, want false after detail cache ttl")
+	}
+}
+
+func TestApplyKernelRuntimeMapBreakdown(t *testing.T) {
+	view := KernelEngineRuntimeView{}
+	counts := kernelRuntimeMapCountSnapshot{
+		rulesEntriesV4: 3,
+		rulesEntriesV6: 2,
+		flowsEntriesV4: 11,
+		flowsEntriesV6: 5,
+		natEntriesV4:   7,
+		natEntriesV6:   1,
+	}
+
+	applyKernelRuntimeMapBreakdown(&view, kernelRuntimeMapRefs{}, counts, true)
+
+	if view.RulesMapEntriesV4 != 3 || view.RulesMapEntriesV6 != 2 {
+		t.Fatalf("rules breakdown = %d/%d, want 3/2", view.RulesMapEntriesV4, view.RulesMapEntriesV6)
+	}
+	if view.FlowsMapEntriesV4 != 11 || view.FlowsMapEntriesV6 != 5 {
+		t.Fatalf("flows breakdown = %d/%d, want 11/5", view.FlowsMapEntriesV4, view.FlowsMapEntriesV6)
+	}
+	if view.NATMapEntriesV4 != 7 || view.NATMapEntriesV6 != 1 {
+		t.Fatalf("nat breakdown = %d/%d, want 7/1", view.NATMapEntriesV4, view.NATMapEntriesV6)
+	}
+}
+
+func TestApplyKernelRuntimeMapBreakdownSkipsNATWhenDisabled(t *testing.T) {
+	view := KernelEngineRuntimeView{}
+	counts := kernelRuntimeMapCountSnapshot{
+		natEntriesV4: 9,
+		natEntriesV6: 4,
+	}
+
+	applyKernelRuntimeMapBreakdown(&view, kernelRuntimeMapRefs{}, counts, false)
+
+	if view.NATMapEntriesV4 != 0 || view.NATMapEntriesV6 != 0 || view.NATMapCapacityV4 != 0 || view.NATMapCapacityV6 != 0 {
+		t.Fatalf("nat breakdown populated with includeNAT=false: %+v", view)
+	}
+}
+
+func TestKernelRuntimeMapRefsEqualTracksDualStackMaps(t *testing.T) {
+	rulesV4 := &ebpf.Map{}
+	rulesV6 := &ebpf.Map{}
+
+	a := kernelRuntimeMapRefs{rulesV4: rulesV4, rulesV6: rulesV6}
+	b := kernelRuntimeMapRefs{rulesV4: rulesV4, rulesV6: rulesV6}
+	if !kernelRuntimeMapRefsEqual(a, b) {
+		t.Fatal("kernelRuntimeMapRefsEqual() = false, want true for identical dual-stack refs")
+	}
+
+	b.rulesV6 = &ebpf.Map{}
+	if kernelRuntimeMapRefsEqual(a, b) {
+		t.Fatal("kernelRuntimeMapRefsEqual() = true, want false when IPv6 map ref differs")
+	}
+}
+
+func TestCountKernelRuntimeMapEntriesUsesIPv6RuleCounter(t *testing.T) {
+	now := time.Now()
+	refs := kernelRuntimeMapRefs{rulesV6: &ebpf.Map{}}
+	counts := countKernelRuntimeMapEntries(
+		now,
+		refs,
+		kernelRuntimeMapCountSnapshot{},
+		func(current kernelRuntimeMapRefs, _ int) (int, error) {
+			if current.rulesV6 == nil {
+				t.Fatal("countRules() received refs without IPv6 rules map")
+			}
+			return 7, nil
+		},
+		3,
+		false,
+	)
+	if counts.rulesEntries != 7 {
+		t.Fatalf("countKernelRuntimeMapEntries() rules = %d, want 7", counts.rulesEntries)
+	}
+	if counts.flowsEntries != 0 || counts.natEntries != 0 {
+		t.Fatalf("countKernelRuntimeMapEntries() flows/nat = %d/%d, want 0/0", counts.flowsEntries, counts.natEntries)
+	}
+}
+
+func TestCountKernelRuntimeMapEntriesUsesHintForIPv6RulesWithoutCounter(t *testing.T) {
+	now := time.Now()
+	counts := countKernelRuntimeMapEntries(
+		now,
+		kernelRuntimeMapRefs{rulesV6: &ebpf.Map{}},
+		kernelRuntimeMapCountSnapshot{},
+		nil,
+		5,
+		false,
+	)
+	if counts.rulesEntries != 5 {
+		t.Fatalf("countKernelRuntimeMapEntries() rules = %d, want 5", counts.rulesEntries)
 	}
 }

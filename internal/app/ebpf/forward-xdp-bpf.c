@@ -62,6 +62,7 @@ struct rule_stats_value_v4 {
 	__u64 total_conns;
 	__u64 tcp_active_conns;
 	__u64 udp_nat_entries;
+	__u64 icmp_nat_entries;
 	__u64 bytes_in;
 	__u64 bytes_out;
 };
@@ -107,12 +108,17 @@ struct packet_ctx {
 #define FORWARD_FLOW_FLAG_FRONT_ENTRY 0x8
 #define FORWARD_FLOW_FLAG_BRIDGE_INGRESS_L2 0x10
 #define FORWARD_FLOW_FLAG_COUNTED 0x20
+#define FORWARD_RULE_FLAG_FULL_NAT 0x1
 #define FORWARD_RULE_FLAG_BRIDGE_L2 0x2
 #define FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2 0x4
 #define FORWARD_RULE_FLAG_PREPARED_L2 0x10
 #define FORWARD_TCP_FLOW_REFRESH_NS (30ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_REFRESH_NS (1ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_IDLE_NS (300ULL * 1000000000ULL)
+#define FORWARD_NAT_PORT_MIN 20000U
+#define FORWARD_NAT_PORT_MAX 65535U
+#define FORWARD_NAT_PORT_RANGE (FORWARD_NAT_PORT_MAX - FORWARD_NAT_PORT_MIN + 1U)
+#define FORWARD_NAT_PORT_PROBE_ATTEMPTS 32
 #define FORWARD_CSUM_MANGLED_0 ((__sum16)0xffff)
 
 #if FORWARD_ENABLE_TRAFFIC_STATS
@@ -270,6 +276,138 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4(struct xdp_md *xdp, 
 
 	key.dst_addr = 0;
 	return bpf_map_lookup_elem(&rules_v4, &key);
+}
+
+static __always_inline int is_fullnat_rule(const struct rule_value_v4 *rule)
+{
+	return rule && (rule->flags & FORWARD_RULE_FLAG_FULL_NAT) != 0;
+}
+
+static __always_inline int is_fullnat_front_flow(const struct flow_value_v4 *flow)
+{
+	if (!flow)
+		return 0;
+	if ((flow->flags & FORWARD_FLOW_FLAG_FULL_NAT) == 0)
+		return 0;
+	if ((flow->flags & FORWARD_FLOW_FLAG_FRONT_ENTRY) == 0)
+		return 0;
+	if (flow->nat_addr == 0 || flow->nat_port == 0)
+		return 0;
+	return 1;
+}
+
+static __always_inline int is_fullnat_reply_flow(const struct flow_value_v4 *flow)
+{
+	if (!flow)
+		return 0;
+	if ((flow->flags & FORWARD_FLOW_FLAG_FULL_NAT) == 0)
+		return 0;
+	if ((flow->flags & FORWARD_FLOW_FLAG_FRONT_ENTRY) != 0)
+		return 0;
+	if (flow->nat_addr == 0 || flow->nat_port == 0)
+		return 0;
+	return 1;
+}
+
+static __always_inline void build_front_flow_key(__u32 in_ifindex, const struct packet_ctx *ctx, struct flow_key_v4 *key)
+{
+	key->ifindex = in_ifindex;
+	key->src_addr = ctx->src_addr;
+	key->dst_addr = ctx->dst_addr;
+	key->src_port = ctx->src_port;
+	key->dst_port = ctx->dst_port;
+	key->proto = ctx->proto;
+	key->pad[0] = 0;
+	key->pad[1] = 0;
+	key->pad[2] = 0;
+}
+
+static __always_inline void build_reply_flow_key_from_front(const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value, __u8 proto, struct flow_key_v4 *key)
+{
+	key->ifindex = rule->out_ifindex;
+	key->src_addr = rule->backend_addr;
+	key->dst_addr = front_value->nat_addr;
+	key->src_port = rule->backend_port;
+	key->dst_port = front_value->nat_port;
+	key->proto = proto;
+	key->pad[0] = 0;
+	key->pad[1] = 0;
+	key->pad[2] = 0;
+}
+
+static __always_inline void build_front_flow_key_from_value(const struct flow_value_v4 *flow_value, __u8 proto, struct flow_key_v4 *key)
+{
+	key->ifindex = flow_value->in_ifindex;
+	key->src_addr = flow_value->client_addr;
+	key->dst_addr = flow_value->front_addr;
+	key->src_port = flow_value->client_port;
+	key->dst_port = flow_value->front_port;
+	key->proto = proto;
+	key->pad[0] = 0;
+	key->pad[1] = 0;
+	key->pad[2] = 0;
+}
+
+static __always_inline void init_fullnat_front_value(struct flow_value_v4 *front_value, const struct rule_value_v4 *rule, const struct packet_ctx *ctx, __u32 in_ifindex, __u16 nat_port)
+{
+	front_value->rule_id = rule->rule_id;
+	front_value->front_addr = ctx->dst_addr;
+	front_value->client_addr = ctx->src_addr;
+	front_value->nat_addr = rule->nat_addr;
+	front_value->in_ifindex = in_ifindex;
+	front_value->front_port = ctx->dst_port;
+	front_value->client_port = ctx->src_port;
+	front_value->nat_port = nat_port;
+	front_value->flags = FORWARD_FLOW_FLAG_FULL_NAT | FORWARD_FLOW_FLAG_FRONT_ENTRY;
+}
+
+static __always_inline void init_fullnat_reply_value(struct flow_value_v4 *reply_value, const struct flow_value_v4 *front_value, __u64 now)
+{
+	*reply_value = *front_value;
+	reply_value->flags &= ~FORWARD_FLOW_FLAG_FRONT_ENTRY;
+	reply_value->flags |= FORWARD_FLOW_FLAG_FULL_NAT;
+	reply_value->last_seen_ns = now;
+}
+
+static __always_inline __u32 fullnat_seed(const struct rule_value_v4 *rule, const struct packet_ctx *ctx)
+{
+	__u32 x = rule->rule_id;
+
+	x ^= ctx->src_addr * 2654435761U;
+	x ^= ctx->dst_addr * 2246822519U;
+	x ^= ((__u32)ctx->src_port << 16) | (__u32)ctx->dst_port;
+	x ^= ((__u32)ctx->proto << 24);
+	x ^= rule->backend_addr;
+	x ^= ((__u32)rule->backend_port << 16) | (__u32)(rule->backend_port ^ ctx->src_port);
+	x ^= x >> 16;
+	x *= 2246822519U;
+	x ^= x >> 13;
+	x *= 3266489917U;
+	x ^= x >> 16;
+	return x;
+}
+
+static __always_inline __u32 mix_nat_probe_seed(__u32 seed)
+{
+	seed ^= seed >> 16;
+	seed *= 2246822519U;
+	seed ^= seed >> 13;
+	seed *= 3266489917U;
+	seed ^= seed >> 16;
+	return seed;
+}
+
+static __always_inline __u32 nat_probe_stride(__u32 seed)
+{
+	__u32 stride = (seed % (FORWARD_NAT_PORT_RANGE - 1U)) + 1U;
+
+	if ((stride & 1U) == 0)
+		stride += 1U;
+	if (stride >= FORWARD_NAT_PORT_RANGE)
+		stride -= (FORWARD_NAT_PORT_RANGE - 1U);
+	if (stride == 0)
+		stride = 1U;
+	return stride;
 }
 
 static __always_inline int rewrite_l4_dnat(struct xdp_md *xdp, const struct packet_ctx *ctx, __u32 new_addr_host, __u16 new_port_host)
@@ -501,10 +639,16 @@ static __always_inline int prepare_flow_reply_redirect_v4(struct xdp_md *xdp, co
 		struct redirect_target_v4 target = {
 			.ifindex = flow_value->in_ifindex,
 			.src_addr = flow_value->front_addr,
-			.dst_addr = ctx->dst_addr,
 			.src_port = flow_value->front_port,
-			.dst_port = ctx->dst_port,
 		};
+
+		if (is_fullnat_reply_flow(flow_value)) {
+			target.dst_addr = flow_value->client_addr;
+			target.dst_port = flow_value->client_port;
+		} else {
+			target.dst_addr = ctx->dst_addr;
+			target.dst_port = ctx->dst_port;
+		}
 
 		return prepare_redirect_v4(xdp, ctx, &target);
 	}
@@ -520,6 +664,23 @@ static __always_inline int prepare_rule_redirect_v4(struct xdp_md *xdp, const st
 			.src_addr = ctx->src_addr,
 			.dst_addr = rule->backend_addr,
 			.src_port = ctx->src_port,
+			.dst_port = rule->backend_port,
+		};
+
+		return prepare_redirect_v4(xdp, ctx, &target);
+	}
+}
+
+static __always_inline int prepare_rule_fullnat_redirect_v4(struct xdp_md *xdp, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value)
+{
+	if ((rule->flags & (FORWARD_RULE_FLAG_BRIDGE_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0)
+		return prepare_bridge_redirect_v4(xdp, rule);
+	{
+		struct redirect_target_v4 target = {
+			.ifindex = rule->out_ifindex,
+			.src_addr = front_value->nat_addr,
+			.dst_addr = rule->backend_addr,
+			.src_port = front_value->nat_port,
 			.dst_port = rule->backend_port,
 		};
 
@@ -605,109 +766,112 @@ static __always_inline void add_rule_traffic_bytes(__u32 rule_id, __u64 bytes_in
 #endif
 }
 
-SEC("xdp")
-int forward_xdp(struct xdp_md *xdp)
+static __always_inline void delete_fullnat_state(const struct flow_key_v4 *reply_key, const struct flow_value_v4 *reply_value, __u8 proto)
 {
-	struct packet_ctx ctx = {};
+	struct flow_key_v4 front_key = {};
+
+	if ((reply_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
+		if (proto == IPPROTO_TCP)
+			drop_rule_tcp_active(reply_value->rule_id);
+		else
+			drop_rule_udp_nat(reply_value->rule_id);
+	}
+
+	build_front_flow_key_from_value(reply_value, proto, &front_key);
+	bpf_map_delete_elem(&flows_v4, &front_key);
+	bpf_map_delete_elem(&flows_v4, reply_key);
+}
+
+static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const struct packet_ctx *ctx, const struct flow_key_v4 *flow_key, const struct flow_value_v4 *flow)
+{
+	struct flow_value_v4 flow_value = {};
+	__u64 now = 0;
+	int update_flow = 0;
+	int count_tcp_now = 0;
+	int redirect_ifindex = 0;
+
+	flow_value = *flow;
+	if (ctx->proto == IPPROTO_UDP) {
+		now = bpf_ktime_get_ns();
+		if (flow_value.last_seen_ns == 0 || now < flow_value.last_seen_ns || (now - flow_value.last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
+			if ((flow_value.flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
+				drop_rule_udp_nat(flow_value.rule_id);
+			bpf_map_delete_elem(&flows_v4, flow_key);
+			return XDP_PASS;
+		}
+		if ((now - flow_value.last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
+			flow_value.last_seen_ns = now;
+			update_flow = 1;
+		}
+	} else {
+		now = bpf_ktime_get_ns();
+		if ((flow_value.flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
+			flow_value.flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
+			flow_value.last_seen_ns = now;
+			if (!ctx->closing) {
+				flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+				count_tcp_now = 1;
+				update_flow = 1;
+			}
+		} else if (!ctx->closing && (flow_value.last_seen_ns == 0 || now < flow_value.last_seen_ns || (now - flow_value.last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+			flow_value.last_seen_ns = now;
+			update_flow = 1;
+		}
+	}
+
+	if (update_flow) {
+		if (bpf_map_update_elem(&flows_v4, flow_key, &flow_value, BPF_ANY) < 0)
+			return XDP_DROP;
+	}
+	if (count_tcp_now)
+		bump_rule_tcp_active(flow_value.rule_id);
+	if (FORWARD_FLOW_TRAFFIC_ENABLED(&flow_value))
+		add_rule_traffic_bytes(flow_value.rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
+
+	redirect_ifindex = prepare_flow_reply_redirect_v4(xdp, ctx, &flow_value);
+	if (redirect_ifindex <= 0)
+		return XDP_DROP;
+	if (rewrite_l4_snat(xdp, ctx, flow_value.front_addr, flow_value.front_port) < 0)
+		return XDP_ABORTED;
+	if (ctx->closing) {
+		if ((flow_value.flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
+			drop_rule_tcp_active(flow_value.rule_id);
+		bpf_map_delete_elem(&flows_v4, flow_key);
+	}
+	return bpf_redirect((__u32)redirect_ifindex, 0);
+}
+
+static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 in_ifindex, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
+{
 	struct flow_key_v4 flow_key = {};
 	struct flow_value_v4 flow_value = {};
 	struct flow_value_v4 *flow;
-	struct rule_value_v4 *rule;
 	void *data = (void *)(long)xdp->data;
 	void *data_end = (void *)(long)xdp->data_end;
 	struct ethhdr *eth = data;
 	__u64 now = 0;
 	int update_flow = 0;
-	int redirect_ifindex;
 	int new_session = 0;
-	int count_tcp_now = 0;
 	int count_udp_now = 0;
+	int redirect_ifindex = 0;
 
-	if (parse_ipv4_l4(xdp, &ctx) < 0)
-		return XDP_PASS;
 	if ((void *)(eth + 1) > data_end)
-		return XDP_PASS;
-
-	flow_key.ifindex = xdp->ingress_ifindex;
-	flow_key.src_addr = ctx.src_addr;
-	flow_key.dst_addr = ctx.dst_addr;
-	flow_key.src_port = ctx.src_port;
-	flow_key.dst_port = ctx.dst_port;
-	flow_key.proto = ctx.proto;
-
-	flow = bpf_map_lookup_elem(&flows_v4, &flow_key);
-	if (flow) {
-		flow_value = *flow;
-
-		if (ctx.proto == IPPROTO_UDP) {
-			now = bpf_ktime_get_ns();
-			if (flow_value.last_seen_ns == 0 || now < flow_value.last_seen_ns || (now - flow_value.last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
-				if ((flow_value.flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
-					drop_rule_udp_nat(flow_value.rule_id);
-				bpf_map_delete_elem(&flows_v4, &flow_key);
-				return XDP_PASS;
-			}
-			if ((now - flow_value.last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
-				flow_value.last_seen_ns = now;
-				update_flow = 1;
-			}
-		} else {
-			now = bpf_ktime_get_ns();
-			if ((flow_value.flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
-				flow_value.flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
-				flow_value.last_seen_ns = now;
-				if (!ctx.closing) {
-					flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
-					count_tcp_now = 1;
-					update_flow = 1;
-				}
-			} else if (!ctx.closing && (flow_value.last_seen_ns == 0 || now < flow_value.last_seen_ns || (now - flow_value.last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
-				flow_value.last_seen_ns = now;
-				update_flow = 1;
-			}
-		}
-
-		if (update_flow) {
-			if (bpf_map_update_elem(&flows_v4, &flow_key, &flow_value, BPF_ANY) < 0)
-				return XDP_DROP;
-		}
-		if (count_tcp_now)
-			bump_rule_tcp_active(flow_value.rule_id);
-		if (FORWARD_FLOW_TRAFFIC_ENABLED(&flow_value))
-			add_rule_traffic_bytes(flow_value.rule_id, 0, FORWARD_GET_PAYLOAD_LEN(&ctx));
-
-		redirect_ifindex = prepare_flow_reply_redirect_v4(xdp, &ctx, &flow_value);
-		if (redirect_ifindex <= 0)
-			return XDP_DROP;
-		if (rewrite_l4_snat(xdp, &ctx, flow_value.front_addr, flow_value.front_port) < 0)
-			return XDP_ABORTED;
-		if (ctx.closing) {
-			if ((flow_value.flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
-				drop_rule_tcp_active(flow_value.rule_id);
-			bpf_map_delete_elem(&flows_v4, &flow_key);
-		}
-		return bpf_redirect((__u32)redirect_ifindex, 0);
-	}
-
-	rule = lookup_rule_v4(xdp, &ctx);
-	if (!rule)
 		return XDP_PASS;
 
 	flow_key.ifindex = rule->out_ifindex;
 	flow_key.src_addr = rule->backend_addr;
-	flow_key.dst_addr = ctx.src_addr;
+	flow_key.dst_addr = ctx->src_addr;
 	flow_key.src_port = rule->backend_port;
-	flow_key.dst_port = ctx.src_port;
-	flow_key.proto = ctx.proto;
-
+	flow_key.dst_port = ctx->src_port;
+	flow_key.proto = ctx->proto;
 	flow = bpf_map_lookup_elem(&flows_v4, &flow_key);
 	if (!flow) {
 		now = bpf_ktime_get_ns();
 		flow_value.rule_id = rule->rule_id;
-		flow_value.front_addr = ctx.dst_addr;
-		flow_value.front_port = ctx.dst_port;
-		flow_value.in_ifindex = xdp->ingress_ifindex;
-		if (ctx.proto == IPPROTO_UDP) {
+		flow_value.front_addr = ctx->dst_addr;
+		flow_value.front_port = ctx->dst_port;
+		flow_value.in_ifindex = in_ifindex;
+		if (ctx->proto == IPPROTO_UDP) {
 			flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
 			count_udp_now = 1;
 		}
@@ -717,26 +881,23 @@ int forward_xdp(struct xdp_md *xdp)
 			flow_value.flags |= FORWARD_FLOW_FLAG_BRIDGE_INGRESS_L2;
 			store_bridge_ingress_macs(&flow_value, eth);
 		}
-		if (ctx.closing) {
+		if (ctx->closing) {
 			flow_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
 			flow_value.front_close_seen_ns = now;
 		}
 		flow_value.last_seen_ns = now;
 		update_flow = 1;
 		new_session = 1;
-	} else if (ctx.proto == IPPROTO_UDP) {
+	} else if (ctx->proto == IPPROTO_UDP) {
 		now = bpf_ktime_get_ns();
 		if (flow->last_seen_ns == 0 || now < flow->last_seen_ns || (now - flow->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
 			flow_value.rule_id = rule->rule_id;
-			flow_value.front_addr = ctx.dst_addr;
-			flow_value.front_port = ctx.dst_port;
-			flow_value.in_ifindex = xdp->ingress_ifindex;
-			if ((flow->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
-				flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
-			} else {
-				flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+			flow_value.front_addr = ctx->dst_addr;
+			flow_value.front_port = ctx->dst_port;
+			flow_value.in_ifindex = in_ifindex;
+			flow_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+			if ((flow->flags & FORWARD_FLOW_FLAG_COUNTED) == 0)
 				count_udp_now = 1;
-			}
 			if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 				flow_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 			if ((rule->flags & (FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0) {
@@ -753,7 +914,7 @@ int forward_xdp(struct xdp_md *xdp)
 		}
 	} else {
 		now = bpf_ktime_get_ns();
-		if (ctx.closing) {
+		if (ctx->closing) {
 			flow_value = *flow;
 			flow_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
 			if (flow_value.front_close_seen_ns == 0)
@@ -776,14 +937,351 @@ int forward_xdp(struct xdp_md *xdp)
 	if (count_udp_now)
 		bump_rule_udp_nat(rule->rule_id);
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
-		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(&ctx), 0);
+		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 
-	redirect_ifindex = prepare_rule_redirect_v4(xdp, &ctx, rule);
+	redirect_ifindex = prepare_rule_redirect_v4(xdp, ctx, rule);
 	if (redirect_ifindex <= 0)
 		return XDP_DROP;
-	if (rewrite_l4_dnat(xdp, &ctx, rule->backend_addr, rule->backend_port) < 0)
+	if (rewrite_l4_dnat(xdp, ctx, rule->backend_addr, rule->backend_port) < 0)
 		return XDP_ABORTED;
 	return bpf_redirect((__u32)redirect_ifindex, 0);
+}
+
+static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct packet_ctx *ctx, const struct flow_key_v4 *reply_key, const struct flow_value_v4 *flow)
+{
+	struct flow_key_v4 front_key = {};
+	struct flow_value_v4 reply_value = {};
+	struct flow_value_v4 front_value = {};
+	struct flow_value_v4 *front_flow;
+	__u64 now = bpf_ktime_get_ns();
+	int update_front = 0;
+	int update_reply = 0;
+	int count_tcp_now = 0;
+	int redirect_ifindex = 0;
+
+	reply_value = *flow;
+	if (ctx->proto == IPPROTO_UDP) {
+		if (reply_value.last_seen_ns == 0 || now < reply_value.last_seen_ns || (now - reply_value.last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
+			delete_fullnat_state(reply_key, &reply_value, ctx->proto);
+			return XDP_PASS;
+		}
+	}
+
+	build_front_flow_key_from_value(&reply_value, ctx->proto, &front_key);
+	front_flow = bpf_map_lookup_elem(&flows_v4, &front_key);
+	if (is_fullnat_front_flow(front_flow)) {
+		front_value = *front_flow;
+	} else {
+		front_value = reply_value;
+		front_value.flags |= FORWARD_FLOW_FLAG_FRONT_ENTRY;
+		front_value.flags |= FORWARD_FLOW_FLAG_FULL_NAT;
+		update_front = 1;
+	}
+
+	if (ctx->proto == IPPROTO_UDP) {
+		if (front_value.last_seen_ns == 0 || now < front_value.last_seen_ns || (now - front_value.last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
+			front_value.last_seen_ns = now;
+			update_front = 1;
+		}
+		if (reply_value.last_seen_ns == 0 || now < reply_value.last_seen_ns || (now - reply_value.last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
+			reply_value.last_seen_ns = now;
+			update_reply = 1;
+		}
+	} else if (!ctx->closing) {
+		if ((reply_value.flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
+			reply_value.flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
+			reply_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+			reply_value.last_seen_ns = now;
+			update_reply = 1;
+			count_tcp_now = 1;
+		} else if (reply_value.last_seen_ns == 0 || now < reply_value.last_seen_ns || (now - reply_value.last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
+			reply_value.last_seen_ns = now;
+			update_reply = 1;
+		}
+
+		if ((front_value.flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
+			front_value.flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
+			front_value.last_seen_ns = now;
+			update_front = 1;
+		} else if (front_value.last_seen_ns == 0 || now < front_value.last_seen_ns || (now - front_value.last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
+			front_value.last_seen_ns = now;
+			update_front = 1;
+		}
+	}
+
+	if (update_front) {
+		if (bpf_map_update_elem(&flows_v4, &front_key, &front_value, BPF_ANY) < 0)
+			return XDP_DROP;
+	}
+	if (update_reply) {
+		if (bpf_map_update_elem(&flows_v4, reply_key, &reply_value, BPF_ANY) < 0)
+			return XDP_DROP;
+	}
+	if (count_tcp_now)
+		bump_rule_tcp_active(reply_value.rule_id);
+	if (FORWARD_FLOW_TRAFFIC_ENABLED(&reply_value))
+		add_rule_traffic_bytes(reply_value.rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
+
+	redirect_ifindex = prepare_flow_reply_redirect_v4(xdp, ctx, &reply_value);
+	if (redirect_ifindex <= 0)
+		return XDP_DROP;
+	if (rewrite_l4_snat(xdp, ctx, reply_value.front_addr, reply_value.front_port) < 0)
+		return XDP_ABORTED;
+	if (rewrite_l4_dnat(xdp, ctx, reply_value.client_addr, reply_value.client_port) < 0)
+		return XDP_ABORTED;
+	if (ctx->closing)
+		delete_fullnat_state(reply_key, &reply_value, ctx->proto);
+	return bpf_redirect((__u32)redirect_ifindex, 0);
+}
+
+static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_ifindex, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *existing_front)
+{
+	struct flow_key_v4 front_key = {};
+	struct flow_key_v4 reply_key = {};
+	struct flow_value_v4 front_value = {};
+	struct flow_value_v4 reply_value = {};
+	struct flow_value_v4 *front_flow = (struct flow_value_v4 *)existing_front;
+	struct flow_value_v4 *reply_flow;
+	__u64 now = bpf_ktime_get_ns();
+	__u32 seed = 0;
+	__u32 start = 0;
+	__u32 stride = 0;
+	__u16 preferred_port = ctx->src_port;
+	int created_front = 0;
+	int created_reply = 0;
+	int update_front = 0;
+	int update_reply = 0;
+	int new_session = 0;
+	int count_udp_now = 0;
+	int redirect_ifindex = 0;
+
+	build_front_flow_key(in_ifindex, ctx, &front_key);
+	if (is_fullnat_front_flow(front_flow)) {
+		front_value = *front_flow;
+		if (front_value.nat_addr == 0)
+			front_value.nat_addr = rule->nat_addr;
+
+		build_reply_flow_key_from_front(rule, &front_value, ctx->proto, &reply_key);
+		reply_flow = bpf_map_lookup_elem(&flows_v4, &reply_key);
+		if (is_fullnat_reply_flow(reply_flow)) {
+			reply_value = *reply_flow;
+		} else {
+			init_fullnat_reply_value(&reply_value, &front_value, now);
+			if (ctx->proto == IPPROTO_UDP)
+				reply_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+			if (bpf_map_update_elem(&flows_v4, &reply_key, &reply_value, BPF_ANY) < 0)
+				return XDP_DROP;
+			created_reply = 1;
+			if (ctx->proto == IPPROTO_UDP)
+				count_udp_now = 1;
+		}
+		goto have_session;
+	}
+
+	seed = mix_nat_probe_seed(fullnat_seed(rule, ctx) ^ ((__u32)rule->out_ifindex << 1));
+	start = seed % FORWARD_NAT_PORT_RANGE;
+	stride = nat_probe_stride(seed ^ 0x9e3779b9U);
+
+	if ((__u32)preferred_port >= FORWARD_NAT_PORT_MIN && (__u32)preferred_port <= FORWARD_NAT_PORT_MAX) {
+		init_fullnat_front_value(&front_value, rule, ctx, in_ifindex, preferred_port);
+		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+			front_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
+		if (ctx->closing) {
+			front_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+			front_value.front_close_seen_ns = now;
+		}
+		front_value.last_seen_ns = now;
+
+		init_fullnat_reply_value(&reply_value, &front_value, now);
+		if (ctx->proto == IPPROTO_UDP)
+			reply_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+
+		build_reply_flow_key_from_front(rule, &front_value, ctx->proto, &reply_key);
+		if (bpf_map_update_elem(&flows_v4, &reply_key, &reply_value, BPF_NOEXIST) == 0) {
+			if (bpf_map_update_elem(&flows_v4, &front_key, &front_value, BPF_NOEXIST) == 0) {
+				created_front = 1;
+				created_reply = 1;
+				new_session = 1;
+				if (ctx->proto == IPPROTO_UDP)
+					count_udp_now = 1;
+				goto have_session;
+			}
+			bpf_map_delete_elem(&flows_v4, &reply_key);
+			front_flow = bpf_map_lookup_elem(&flows_v4, &front_key);
+			if (is_fullnat_front_flow(front_flow)) {
+				front_value = *front_flow;
+				if (front_value.nat_addr == 0)
+					front_value.nat_addr = rule->nat_addr;
+				build_reply_flow_key_from_front(rule, &front_value, ctx->proto, &reply_key);
+				reply_flow = bpf_map_lookup_elem(&flows_v4, &reply_key);
+				if (is_fullnat_reply_flow(reply_flow)) {
+					reply_value = *reply_flow;
+					goto have_session;
+				}
+				init_fullnat_reply_value(&reply_value, &front_value, now);
+				if (ctx->proto == IPPROTO_UDP)
+					reply_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+				if (bpf_map_update_elem(&flows_v4, &reply_key, &reply_value, BPF_ANY) < 0)
+					return XDP_DROP;
+				created_reply = 1;
+				if (ctx->proto == IPPROTO_UDP)
+					count_udp_now = 1;
+				goto have_session;
+			}
+		}
+	}
+
+#pragma clang loop unroll(full)
+	for (int i = 0; i < FORWARD_NAT_PORT_PROBE_ATTEMPTS; i++) {
+		__u16 nat_port = (__u16)(FORWARD_NAT_PORT_MIN + ((start + ((__u32)i * stride)) % FORWARD_NAT_PORT_RANGE));
+
+		if (nat_port == preferred_port)
+			continue;
+
+		init_fullnat_front_value(&front_value, rule, ctx, in_ifindex, nat_port);
+		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+			front_value.flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
+		if (ctx->closing) {
+			front_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+			front_value.front_close_seen_ns = now;
+		}
+		front_value.last_seen_ns = now;
+
+		init_fullnat_reply_value(&reply_value, &front_value, now);
+		if (ctx->proto == IPPROTO_UDP)
+			reply_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+
+		build_reply_flow_key_from_front(rule, &front_value, ctx->proto, &reply_key);
+		if (bpf_map_update_elem(&flows_v4, &reply_key, &reply_value, BPF_NOEXIST) < 0)
+			continue;
+		if (bpf_map_update_elem(&flows_v4, &front_key, &front_value, BPF_NOEXIST) == 0) {
+			created_front = 1;
+			created_reply = 1;
+			new_session = 1;
+			if (ctx->proto == IPPROTO_UDP)
+				count_udp_now = 1;
+			goto have_session;
+		}
+
+		bpf_map_delete_elem(&flows_v4, &reply_key);
+		front_flow = bpf_map_lookup_elem(&flows_v4, &front_key);
+		if (!is_fullnat_front_flow(front_flow))
+			continue;
+
+		front_value = *front_flow;
+		if (front_value.nat_addr == 0)
+			front_value.nat_addr = rule->nat_addr;
+		build_reply_flow_key_from_front(rule, &front_value, ctx->proto, &reply_key);
+		reply_flow = bpf_map_lookup_elem(&flows_v4, &reply_key);
+		if (is_fullnat_reply_flow(reply_flow)) {
+			reply_value = *reply_flow;
+			goto have_session;
+		}
+		init_fullnat_reply_value(&reply_value, &front_value, now);
+		if (ctx->proto == IPPROTO_UDP)
+			reply_value.flags |= FORWARD_FLOW_FLAG_COUNTED;
+		if (bpf_map_update_elem(&flows_v4, &reply_key, &reply_value, BPF_ANY) < 0)
+			return XDP_DROP;
+		created_reply = 1;
+		if (ctx->proto == IPPROTO_UDP)
+			count_udp_now = 1;
+		goto have_session;
+	}
+
+	return XDP_DROP;
+
+have_session:
+	if (ctx->proto == IPPROTO_UDP) {
+		if (!created_front && (front_value.last_seen_ns == 0 || now < front_value.last_seen_ns || (now - front_value.last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS)) {
+			front_value.last_seen_ns = now;
+			update_front = 1;
+		}
+		if (!created_reply && (reply_value.last_seen_ns == 0 || now < reply_value.last_seen_ns || (now - reply_value.last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS)) {
+			reply_value.last_seen_ns = now;
+			update_reply = 1;
+		}
+	} else if (ctx->closing) {
+		front_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+		if (front_value.front_close_seen_ns == 0)
+			front_value.front_close_seen_ns = now;
+		front_value.last_seen_ns = now;
+		update_front = 1;
+
+		reply_value.flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+		if (reply_value.front_close_seen_ns == 0)
+			reply_value.front_close_seen_ns = now;
+		reply_value.last_seen_ns = now;
+		update_reply = 1;
+	} else {
+		if (!created_front && (front_value.last_seen_ns == 0 || now < front_value.last_seen_ns || (now - front_value.last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+			front_value.last_seen_ns = now;
+			update_front = 1;
+		}
+		if (!created_reply && (reply_value.last_seen_ns == 0 || now < reply_value.last_seen_ns || (now - reply_value.last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+			reply_value.last_seen_ns = now;
+			update_reply = 1;
+		}
+	}
+
+	if (update_front) {
+		if (bpf_map_update_elem(&flows_v4, &front_key, &front_value, BPF_ANY) < 0)
+			return XDP_DROP;
+	}
+	if (update_reply) {
+		build_reply_flow_key_from_front(rule, &front_value, ctx->proto, &reply_key);
+		if (bpf_map_update_elem(&flows_v4, &reply_key, &reply_value, BPF_ANY) < 0)
+			return XDP_DROP;
+	}
+	if (new_session)
+		bump_rule_total_conns(rule->rule_id);
+	if (count_udp_now)
+		bump_rule_udp_nat(rule->rule_id);
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
+
+	redirect_ifindex = prepare_rule_fullnat_redirect_v4(xdp, ctx, rule, &front_value);
+	if (redirect_ifindex <= 0)
+		return XDP_DROP;
+	if (rewrite_l4_snat(xdp, ctx, front_value.nat_addr, front_value.nat_port) < 0)
+		return XDP_ABORTED;
+	if (rewrite_l4_dnat(xdp, ctx, rule->backend_addr, rule->backend_port) < 0)
+		return XDP_ABORTED;
+	return bpf_redirect((__u32)redirect_ifindex, 0);
+}
+
+SEC("xdp")
+int forward_xdp(struct xdp_md *xdp)
+{
+	struct packet_ctx ctx = {};
+	struct flow_key_v4 flow_key = {};
+	struct flow_value_v4 *flow;
+	struct rule_value_v4 *rule;
+	__u32 in_ifindex;
+
+	if (parse_ipv4_l4(xdp, &ctx) < 0)
+		return XDP_PASS;
+	in_ifindex = xdp->ingress_ifindex;
+	build_front_flow_key(in_ifindex, &ctx, &flow_key);
+
+	flow = bpf_map_lookup_elem(&flows_v4, &flow_key);
+	if (flow) {
+		if (is_fullnat_front_flow(flow)) {
+			rule = lookup_rule_v4(xdp, &ctx);
+			if (!is_fullnat_rule(rule))
+				return XDP_PASS;
+			return handle_fullnat_forward(xdp, in_ifindex, &ctx, rule, flow);
+		}
+		if (is_fullnat_reply_flow(flow))
+			return handle_fullnat_reply(xdp, &ctx, &flow_key, flow);
+		return handle_transparent_reply(xdp, &ctx, &flow_key, flow);
+	}
+
+	rule = lookup_rule_v4(xdp, &ctx);
+	if (!rule)
+		return XDP_PASS;
+	if (is_fullnat_rule(rule))
+		return handle_fullnat_forward(xdp, in_ifindex, &ctx, rule, NULL);
+	return handle_transparent_forward(xdp, in_ifindex, &ctx, rule);
 }
 
 char _license[] SEC("license") = "GPL";

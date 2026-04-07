@@ -32,25 +32,31 @@
     rangesFilterMeta: app.$('rangesFilterMeta'),
     rangesSearchInput: app.$('rangesSearchInput'),
     clearRangesFilter: app.$('clearRangesFilter'),
+    egressNATsFilterMeta: app.$('egressNATsFilterMeta'),
+    egressNATsSearchInput: app.$('egressNATsSearchInput'),
+    clearEgressNATsFilter: app.$('clearEgressNATsFilter'),
     workersFilterMeta: app.$('workersFilterMeta'),
     workersSearchInput: app.$('workersSearchInput'),
     refreshWorkersBtn: app.$('refreshWorkersBtn'),
     emptyAddRuleBtn: app.$('emptyAddRuleBtn'),
     emptyAddSiteBtn: app.$('emptyAddSiteBtn'),
     emptyAddRangeBtn: app.$('emptyAddRangeBtn'),
+    emptyAddEgressNATBtn: app.$('emptyAddEgressNATBtn'),
     emptyRefreshWorkersBtn: app.$('emptyRefreshWorkersBtn'),
     rulesPagination: app.$('rulesPagination'),
     sitesPagination: app.$('sitesPagination'),
     rangesPagination: app.$('rangesPagination'),
+    egressNATsPagination: app.$('egressNATsPagination'),
     workersPagination: app.$('workersPagination'),
     ruleStatsPagination: app.$('ruleStatsPagination'),
     siteStatsPagination: app.$('siteStatsPagination'),
-    rangeStatsPagination: app.$('rangeStatsPagination')
+    rangeStatsPagination: app.$('rangeStatsPagination'),
+    egressNATStatsPagination: app.$('egressNATStatsPagination')
   });
 
   app.state.activeTab = app.state.activeTab || localStorage.getItem(app.storageKeys.activeTab) || 'rules';
   app.state.pendingRows = app.state.pendingRows || {};
-  app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false };
+  app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false, egressNAT: false };
   app.state.lastSyncAt = app.state.lastSyncAt || 0;
   app.state.confirmResolver = null;
   app.state.confirmFocusReturn = null;
@@ -63,6 +69,7 @@
     rules: { container: app.el.rulesPagination, pageSizes: [10, 20, 50], render: () => app.renderRulesTable() },
     sites: { container: app.el.sitesPagination, pageSizes: [10, 20, 50], render: () => app.renderSitesTable() },
     ranges: { container: app.el.rangesPagination, pageSizes: [10, 20, 50], render: () => app.renderRangesTable() },
+    egressNATs: { container: app.el.egressNATsPagination, pageSizes: [10, 20, 50], render: () => app.renderEgressNATsTable() },
     workers: { container: app.el.workersPagination, pageSizes: [10, 20, 50], render: () => app.renderWorkersTable() },
     ruleStats: {
       container: app.el.ruleStatsPagination,
@@ -76,10 +83,16 @@
       pageSizes: [20, 50, 100],
       render: () => app.renderRangeStatsTable(),
       reload: () => app.loadRangeStats()
+    },
+    egressNATStats: {
+      container: app.el.egressNATStatsPagination,
+      pageSizes: [20, 50, 100],
+      render: () => app.renderEgressNATStatsTable(),
+      reload: () => app.loadEgressNATStats()
     }
   };
 
-  ['rules', 'sites', 'ranges', 'workers', 'ruleStats', 'siteStats', 'rangeStats'].forEach((table) => {
+  ['rules', 'sites', 'ranges', 'egressNATs', 'workers', 'ruleStats', 'siteStats', 'rangeStats', 'egressNATStats'].forEach((table) => {
     if (!app.state[table]) return;
     app.state[table].searchQuery = app.state[table].searchQuery || '';
     app.state[table].page = Math.max(1, parseInt(app.state[table].page, 10) || 1);
@@ -183,6 +196,7 @@
     });
     app.state.activeDropdown = null;
     app.state.dropdownPositionScheduled = false;
+    if (typeof app.closeEgressNATProtocolMenu === 'function') app.closeEgressNATProtocolMenu();
   };
 
   app.openConfirmModal = function openConfirmModal(options) {
@@ -375,6 +389,7 @@
     if (typeof app.loadRules === 'function') tasks.push(app.loadRules());
     if (typeof app.loadSites === 'function') tasks.push(app.loadSites());
     if (typeof app.loadRanges === 'function') tasks.push(app.loadRanges());
+    if (typeof app.loadEgressNATs === 'function') tasks.push(app.loadEgressNATs());
     if (opts.includeWorkers && typeof app.loadWorkers === 'function') tasks.push(app.loadWorkers());
     if (opts.includeStats && typeof app.loadAllStats === 'function') tasks.push(app.loadAllStats());
     return Promise.all(tasks);
@@ -516,7 +531,8 @@
     const runningTotal =
       (app.state.rules.data || []).filter((item) => item.enabled !== false && item.status === 'running').length +
       (app.state.sites.data || []).filter((item) => item.enabled !== false && item.status === 'running').length +
-      (app.state.ranges.data || []).filter((item) => item.enabled !== false && item.status === 'running').length;
+      (app.state.ranges.data || []).filter((item) => item.enabled !== false && item.status === 'running').length +
+      (app.state.egressNATs.data || []).filter((item) => item.enabled !== false && item.status === 'running').length;
 
     if (app.el.overviewRunningValue) app.el.overviewRunningValue.textContent = String(runningTotal);
     const busy = app.state.activeRequests > 0;
@@ -553,6 +569,7 @@
       rules: { meta: app.el.rulesFilterMeta, clear: app.el.clearRulesFilter },
       sites: { meta: app.el.sitesFilterMeta, clear: app.el.clearSitesFilter },
       ranges: { meta: app.el.rangesFilterMeta, clear: app.el.clearRangesFilter },
+      egressNATs: { meta: app.el.egressNATsFilterMeta, clear: app.el.clearEgressNATsFilter },
       workers: { meta: app.el.workersFilterMeta, clear: null }
     };
 
@@ -625,6 +642,7 @@
       app.renderFilterMeta('rules');
       app.renderFilterMeta('sites');
       app.renderFilterMeta('ranges');
+      app.renderFilterMeta('egressNATs');
       app.renderFilterMeta('workers');
       if (app.el.confirmModal && !app.el.confirmModal.classList.contains('active')) {
         app.el.confirmCancelBtn.textContent = app.t('common.cancel');
@@ -727,7 +745,8 @@
   [
     { button: app.el.clearRulesFilter, table: 'rules', render: () => app.renderRulesTable() },
     { button: app.el.clearSitesFilter, table: 'sites', render: () => app.renderSitesTable() },
-    { button: app.el.clearRangesFilter, table: 'ranges', render: () => app.renderRangesTable() }
+    { button: app.el.clearRangesFilter, table: 'ranges', render: () => app.renderRangesTable() },
+    { button: app.el.clearEgressNATsFilter, table: 'egressNATs', render: () => app.renderEgressNATsTable() }
   ].forEach((entry) => {
     if (!entry.button) return;
     entry.button.addEventListener('click', () => {

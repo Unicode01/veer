@@ -36,6 +36,23 @@ func (rt *orderedKernelRuleRuntime) retainedKernelRangeCandidates(pr PortRange) 
 	return nil, false
 }
 
+func (rt *orderedKernelRuleRuntime) retainedKernelEgressNATCandidates(item EgressNAT) ([]Rule, bool) {
+	rt.mu.Lock()
+	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	rt.mu.Unlock()
+
+	for _, entry := range entries {
+		retainer, ok := entry.rt.(kernelHandoffRetentionRuntime)
+		if !ok || retainer == nil {
+			continue
+		}
+		if candidates, ok := retainer.retainedKernelEgressNATCandidates(item); ok {
+			return candidates, true
+		}
+	}
+	return nil, false
+}
+
 func (rt *linuxKernelRuleRuntime) retainedKernelRuleCandidates(rule Rule) ([]Rule, bool) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -53,6 +70,17 @@ func (rt *linuxKernelRuleRuntime) retainedKernelRangeCandidates(pr PortRange) ([
 
 	items := collectPreparedKernelOwnerRules(rt.preparedRules, workerKindRange, pr.ID)
 	if !activeOwnerRulesMatchRange(items, pr) {
+		return nil, false
+	}
+	return cloneRuleSlice(items), true
+}
+
+func (rt *linuxKernelRuleRuntime) retainedKernelEgressNATCandidates(item EgressNAT) ([]Rule, bool) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	items := collectPreparedKernelOwnerRules(rt.preparedRules, workerKindEgressNAT, item.ID)
+	if len(items) == 0 {
 		return nil, false
 	}
 	return cloneRuleSlice(items), true
@@ -78,6 +106,10 @@ func (rt *xdpKernelRuleRuntime) retainedKernelRangeCandidates(pr PortRange) ([]R
 		return nil, false
 	}
 	return cloneRuleSlice(items), true
+}
+
+func (rt *xdpKernelRuleRuntime) retainedKernelEgressNATCandidates(item EgressNAT) ([]Rule, bool) {
+	return nil, false
 }
 
 func collectPreparedKernelOwnerRules(prepared []preparedKernelRule, kind string, ownerID int64) []Rule {
@@ -117,7 +149,8 @@ func sameKernelRuleDataplaneFields(a Rule, b Rule) bool {
 		a.OutSourceIP == b.OutSourceIP &&
 		a.OutPort == b.OutPort &&
 		a.Protocol == b.Protocol &&
-		a.Transparent == b.Transparent
+		a.Transparent == b.Transparent &&
+		a.kernelMode == b.kernelMode
 }
 
 func cloneRuleSlice(src []Rule) []Rule {

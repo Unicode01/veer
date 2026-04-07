@@ -59,7 +59,8 @@
 }
 
 .form-group.has-error select,
-.form-group.has-error input {
+.form-group.has-error input,
+.form-group.has-error .multi-select-trigger {
     border-color: var(--danger-border);
     box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.08);
 }
@@ -71,12 +72,35 @@
     line-height: 1.4;
 }
 
+.field-hint {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-soft);
+    line-height: 1.45;
+}
+
+.field-hint[hidden] {
+    display: none;
+}
+
+.interface-picker-input {
+    margin-top: 0;
+    min-height: 36px;
+    font-size: 13px;
+}
+
+.interface-filter-input {
+    margin-top: 8px;
+    min-height: 36px;
+    font-size: 12px;
+}
+
 .form-group-checkbox {
     flex: 0 0 auto;
     min-width: auto;
-    justify-content: flex-end;
-    align-self: flex-end;
-    padding-bottom: 0;
+    justify-content: flex-start;
+    align-self: stretch;
+    padding-top: 19px;
 }
 
 .form-group-checkbox label {
@@ -232,6 +256,7 @@
 
     .form-group-checkbox {
         align-self: stretch;
+        padding-top: 0;
     }
 
     .form-group-checkbox label {

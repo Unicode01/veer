@@ -32,6 +32,28 @@ func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 		resp.TrafficStats = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
 		resp.TCDiagnosticsVerbose = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
 		resp.TCDiagnostics = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag) || resp.TCDiagnosticsVerbose
+		resp.KernelRulesMapConfiguredLimit = pm.cfg.KernelRulesMapLimit
+		resp.KernelFlowsMapConfiguredLimit = pm.cfg.KernelFlowsMapLimit
+		resp.KernelNATMapConfiguredLimit = pm.cfg.KernelNATMapLimit
+		resp.KernelRulesMapCapacityMode = kernelRulesMapCapacityMode(pm.cfg.KernelRulesMapLimit)
+		resp.KernelFlowsMapCapacityMode = kernelFlowsMapCapacityMode(pm.cfg.KernelFlowsMapLimit)
+		resp.KernelNATMapCapacityMode = kernelNATMapCapacityMode(pm.cfg.KernelNATMapLimit)
+	}
+	profile := currentKernelAdaptiveMapProfile()
+	resp.KernelMapProfile = kernelAdaptiveMapProfileName(profile)
+	resp.KernelMapTotalMemoryBytes = profile.totalMemoryBytes
+	resp.KernelRulesMapBaseLimit = kernelRulesMapBaseLimit
+	resp.KernelFlowsMapBaseLimit = profile.flowsBaseLimit
+	resp.KernelNATMapBaseLimit = profile.natBaseLimit
+	resp.KernelEgressNATAutoFloor = profile.egressNATAutoFloor
+	if resp.KernelRulesMapCapacityMode == "" {
+		resp.KernelRulesMapCapacityMode = kernelRulesMapCapacityMode(0)
+	}
+	if resp.KernelFlowsMapCapacityMode == "" {
+		resp.KernelFlowsMapCapacityMode = kernelFlowsMapCapacityMode(0)
+	}
+	if resp.KernelNATMapCapacityMode == "" {
+		resp.KernelNATMapCapacityMode = kernelNATMapCapacityMode(0)
 	}
 	now := time.Now()
 	pm.mu.Lock()

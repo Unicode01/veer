@@ -92,3 +92,43 @@ func TestListRulesIncludesOutSourceIP(t *testing.T) {
 		t.Fatalf("response out_source_ip mismatch: got %q", got[0].OutSourceIP)
 	}
 }
+
+func TestRuleEnginePreferencePersistsInDB(t *testing.T) {
+	db := openTestDB(t)
+
+	input := Rule{
+		InIP:             "198.51.100.3",
+		InPort:           30022,
+		OutInterface:     "eth0",
+		OutIP:            "203.0.113.30",
+		OutPort:          22,
+		Protocol:         "tcp",
+		Enabled:          true,
+		EnginePreference: ruleEngineUserspace,
+	}
+	id, err := dbAddRule(db, &input)
+	if err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+
+	got, err := dbGetRule(db, id)
+	if err != nil {
+		t.Fatalf("get rule: %v", err)
+	}
+	if got.EnginePreference != ruleEngineUserspace {
+		t.Fatalf("engine preference mismatch after add: got %q want %q", got.EnginePreference, ruleEngineUserspace)
+	}
+
+	got.EnginePreference = ruleEngineKernel
+	if err := dbUpdateRule(db, got); err != nil {
+		t.Fatalf("update rule: %v", err)
+	}
+
+	updated, err := dbGetRule(db, id)
+	if err != nil {
+		t.Fatalf("get updated rule: %v", err)
+	}
+	if updated.EnginePreference != ruleEngineKernel {
+		t.Fatalf("engine preference mismatch after update: got %q want %q", updated.EnginePreference, ruleEngineKernel)
+	}
+}

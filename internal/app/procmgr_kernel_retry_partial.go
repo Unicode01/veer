@@ -13,18 +13,24 @@ type kernelIncrementalRetryResult struct {
 	detail               string
 	matchedRuleOwners    int
 	matchedRangeOwners   int
+	matchedEgressNATs    int
 	attemptedRuleOwners  int
 	attemptedRangeOwners int
+	attemptedEgressNATs  int
 	retainedRuleOwners   int
 	retainedRangeOwners  int
+	retainedEgressNATs   int
 	recoveredRuleOwners  int
 	recoveredRangeOwners int
+	recoveredEgressNATs  int
 	cooldownRuleOwners   int
 	cooldownRangeOwners  int
+	cooldownEgressNATs   int
 	cooldownSummary      string
 	cooldownScope        string
 	backoffRuleOwners    int
 	backoffRangeOwners   int
+	backoffEgressNATs    int
 	backoffSummary       string
 	backoffScope         string
 	backoffMaxFailures   int
@@ -58,6 +64,19 @@ func retainKernelRangeStatsReports(prev map[int64]RangeStatsReport, active map[i
 			continue
 		}
 		stats[id] = RangeStatsReport{RangeID: id}
+	}
+	return stats
+}
+
+func retainKernelEgressNATStatsReports(prev map[int64]EgressNATStatsReport, active map[int64]bool) map[int64]EgressNATStatsReport {
+	stats := make(map[int64]EgressNATStatsReport, len(active))
+	for id := range active {
+		if item, ok := prev[id]; ok {
+			item.EgressNATID = id
+			stats[id] = item
+			continue
+		}
+		stats[id] = EgressNATStatsReport{EgressNATID: id}
 	}
 	return stats
 }
@@ -118,11 +137,16 @@ func maxWorkerIndex[T any](workers map[int]T) int {
 	return max
 }
 
-func kernelIncrementalRetryCooldownDetailSuffix(ruleOwners int, rangeOwners int) string {
-	if ruleOwners == 0 && rangeOwners == 0 {
+func kernelIncrementalRetryCooldownDetailSuffix(ruleOwners int, rangeOwners int, egressNATs int) string {
+	if ruleOwners == 0 && rangeOwners == 0 && egressNATs == 0 {
 		return ""
 	}
-	return fmt.Sprintf(" cooldown_rule_owners=%d cooldown_range_owners=%d", ruleOwners, rangeOwners)
+	return fmt.Sprintf(
+		" cooldown_rule_owners=%d cooldown_range_owners=%d cooldown_egress_nat_owners=%d",
+		ruleOwners,
+		rangeOwners,
+		egressNATs,
+	)
 }
 
 func kernelIncrementalRetryCooldownSummaryDetailSuffix(summary string) string {
@@ -133,11 +157,16 @@ func kernelIncrementalRetryCooldownSummaryDetailSuffix(summary string) string {
 	return " cooldown_reasons=" + summary
 }
 
-func kernelIncrementalRetryBackoffDetailSuffix(ruleOwners int, rangeOwners int, summary string, maxFailures int, maxDuration time.Duration) string {
-	if ruleOwners == 0 && rangeOwners == 0 && strings.TrimSpace(summary) == "" && maxFailures == 0 && maxDuration <= 0 {
+func kernelIncrementalRetryBackoffDetailSuffix(ruleOwners int, rangeOwners int, egressNATs int, summary string, maxFailures int, maxDuration time.Duration) string {
+	if ruleOwners == 0 && rangeOwners == 0 && egressNATs == 0 && strings.TrimSpace(summary) == "" && maxFailures == 0 && maxDuration <= 0 {
 		return ""
 	}
-	suffix := fmt.Sprintf(" backoff_rule_owners=%d backoff_range_owners=%d", ruleOwners, rangeOwners)
+	suffix := fmt.Sprintf(
+		" backoff_rule_owners=%d backoff_range_owners=%d backoff_egress_nat_owners=%d",
+		ruleOwners,
+		rangeOwners,
+		egressNATs,
+	)
 	if summary = strings.TrimSpace(summary); summary != "" {
 		suffix += " backoff_reasons=" + summary
 	}
@@ -185,6 +214,7 @@ func summarizeKernelIncrementalRetryOwnerScope(owners []kernelCandidateOwner) st
 	}
 	ruleIDs := make(map[int64]struct{})
 	rangeIDs := make(map[int64]struct{})
+	egressNATIDs := make(map[int64]struct{})
 	for _, owner := range owners {
 		if owner.id <= 0 {
 			continue
@@ -194,13 +224,18 @@ func summarizeKernelIncrementalRetryOwnerScope(owners []kernelCandidateOwner) st
 			ruleIDs[owner.id] = struct{}{}
 		case workerKindRange:
 			rangeIDs[owner.id] = struct{}{}
+		case workerKindEgressNAT:
+			egressNATIDs[owner.id] = struct{}{}
 		}
 	}
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 3)
 	if item := summarizeKernelIncrementalRetryOwnerIDs("rule_ids", ruleIDs); item != "" {
 		parts = append(parts, item)
 	}
 	if item := summarizeKernelIncrementalRetryOwnerIDs("range_ids", rangeIDs); item != "" {
+		parts = append(parts, item)
+	}
+	if item := summarizeKernelIncrementalRetryOwnerIDs("egress_nat_ids", egressNATIDs); item != "" {
 		parts = append(parts, item)
 	}
 	return strings.Join(parts, "; ")
@@ -221,9 +256,13 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	now := time.Now()
 	currentKernelRules := make(map[int64]bool)
 	currentKernelRanges := make(map[int64]bool)
+	currentKernelEgressNATs := make(map[int64]bool)
+	matchedEgressNATOwners := make(map[int64]struct{})
+	cooldownEgressNATOwners := make(map[int64]struct{})
 	retryOwners := make(map[kernelCandidateOwner]struct{})
 	unmatchedRuleFallbackPlans := make(map[int64]ruleDataplanePlan)
 	unmatchedRangeFallbackPlans := make(map[int64]rangeDataplanePlan)
+	unmatchedEgressNATFallbackPlans := make(map[int64]ruleDataplanePlan)
 	cooldownUntil := map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState{}
 	failureCounts := map[kernelCandidateOwner]int{}
 	cooldownRuleOwners := 0
@@ -256,6 +295,11 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	for id, ok := range pm.kernelRanges {
 		if ok {
 			currentKernelRanges[id] = true
+		}
+	}
+	for id, ok := range pm.kernelEgressNATs {
+		if ok {
+			currentKernelEgressNATs[id] = true
 		}
 	}
 	for id, plan := range pm.rulePlans {
@@ -302,10 +346,38 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		}
 		unmatchedRangeFallbackPlans[id] = plan
 	}
+	for id, plan := range pm.egressNATPlans {
+		if !isNetlinkTriggeredKernelFallbackPlan(plan) {
+			continue
+		}
+		owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: id}
+		if triggerMatchesEgressNATFallbackPlan(trigger, plan) {
+			if _, ok := matchedEgressNATOwners[id]; !ok {
+				matchedEgressNATOwners[id] = struct{}{}
+				result.matchedEgressNATs++
+			}
+			if state, ok := cooldownUntil[owner]; ok && state.Until.After(now) {
+				if _, counted := cooldownEgressNATOwners[id]; !counted {
+					cooldownEgressNATOwners[id] = struct{}{}
+					result.cooldownEgressNATs++
+					cooldownOwners = append(cooldownOwners, owner)
+					source := strings.TrimSpace(state.Source)
+					if source == "" {
+						source = kernelNetlinkOwnerRetryCooldownSourceForPlan(trigger, plan)
+					}
+					cooldownSummaryCounts[source]++
+				}
+			} else {
+				retryOwners[owner] = struct{}{}
+			}
+			continue
+		}
+		unmatchedEgressNATFallbackPlans[id] = plan
+	}
 	pm.mu.Unlock()
 
-	if len(retryOwners) == 0 {
-		if cooldownRuleOwners == 0 && cooldownRangeOwners == 0 {
+	if len(retryOwners) == 0 && !trigger.hasSource("link") {
+		if cooldownRuleOwners == 0 && cooldownRangeOwners == 0 && result.cooldownEgressNATs == 0 {
 			return kernelIncrementalRetryResult{handled: true}
 		}
 		result.attempted = true
@@ -316,12 +388,12 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		result.cooldownScope = summarizeKernelIncrementalRetryOwnerScope(cooldownOwners)
 		result.detail = fmt.Sprintf(
 			"incremental retry skipped due to owner cooldown%s%s",
-			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners),
+			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
 			kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
 		)
 		pm.mu.Lock()
-		pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, now, pm.rulePlans, pm.rangePlans)
-		pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(failureCounts, pm.rulePlans, pm.rangePlans)
+		pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, now, pm.rulePlans, pm.rangePlans, pm.egressNATPlans)
+		pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(failureCounts, pm.rulePlans, pm.rangePlans, pm.egressNATPlans)
 		pm.mu.Unlock()
 		return result
 	}
@@ -345,6 +417,12 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		result.detail = fmt.Sprintf("load ranges: %v", err)
 		return result
 	}
+	egressNATs, err := dbGetEgressNATs(pm.db)
+	if err != nil {
+		result.handled = false
+		result.detail = fmt.Sprintf("load egress nats: %v", err)
+		return result
+	}
 
 	defaultEngine := ruleEngineAuto
 	maxWorkers := 0
@@ -357,33 +435,123 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	}
 	planner = newRuleDataplanePlanner(pm.kernelRuntime, defaultEngine)
 	kernelPressure := snapshotKernelRuntimePressure(pm.kernelRuntime)
+	egressNATSnapshot := egressNATInterfaceSnapshot{}
+	dynamicEgressNATParents := map[string]struct{}{}
+	if len(egressNATs) > 0 {
+		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
+		egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
+		dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
+	}
+	dynamicRetryEgressNATOwners := collectDynamicEgressNATOwnersForTrigger(trigger, egressNATs, egressNATSnapshot)
+	for id := range dynamicRetryEgressNATOwners {
+		owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: id}
+		if _, ok := matchedEgressNATOwners[id]; !ok {
+			matchedEgressNATOwners[id] = struct{}{}
+			result.matchedEgressNATs++
+		}
+		if _, ok := retryOwners[owner]; ok {
+			continue
+		}
+		if state, ok := cooldownUntil[owner]; ok && state.Until.After(now) {
+			if _, counted := cooldownEgressNATOwners[id]; counted {
+				continue
+			}
+			cooldownEgressNATOwners[id] = struct{}{}
+			result.cooldownEgressNATs++
+			cooldownOwners = append(cooldownOwners, owner)
+			source := strings.TrimSpace(state.Source)
+			if source == "" {
+				source = kernelNetlinkOwnerRetryCooldownSourceForPlan(trigger, kernelOwnerDataplanePlan(owner, nil, nil, pm.egressNATPlans))
+			}
+			cooldownSummaryCounts[source]++
+			continue
+		}
+		retryOwners[owner] = struct{}{}
+	}
+
+	if len(retryOwners) == 0 {
+		if cooldownRuleOwners == 0 && cooldownRangeOwners == 0 && result.cooldownEgressNATs == 0 {
+			return kernelIncrementalRetryResult{handled: true}
+		}
+		result.attempted = true
+		result.handled = true
+		result.cooldownRuleOwners = cooldownRuleOwners
+		result.cooldownRangeOwners = cooldownRangeOwners
+		result.cooldownSummary = summarizeKernelNetlinkOwnerRetryCooldownSourceCounts(cooldownSummaryCounts)
+		result.cooldownScope = summarizeKernelIncrementalRetryOwnerScope(cooldownOwners)
+		result.detail = fmt.Sprintf(
+			"incremental retry skipped due to owner cooldown%s%s",
+			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
+			kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
+		)
+		pm.mu.Lock()
+		pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, now, pm.rulePlans, pm.rangePlans, pm.egressNATPlans)
+		pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(failureCounts, pm.rulePlans, pm.rangePlans, pm.egressNATPlans)
+		pm.mu.Unlock()
+		return result
+	}
 
 	candidates, rulePlans, rangePlans := buildKernelCandidateRules(rules, ranges, planner, configuredKernelRulesMapLimit)
 	applyKernelOwnerConstraints(candidates, rulePlans, rangePlans)
 	applyKernelPressurePolicy(kernelPressure, candidates, currentKernelRules, currentKernelRanges, rulePlans, rangePlans)
 	preserveUnmatchedNetlinkFallbackPlans(unmatchedRuleFallbackPlans, unmatchedRangeFallbackPlans, rulePlans, rangePlans)
 
-	activeCandidates := filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
-	retryCandidates := filterKernelCandidatesByOwners(activeCandidates, retryOwners, rulePlans, rangePlans)
-	result.attemptedRuleOwners, result.attemptedRangeOwners = countKernelCandidateOwnersByKind(retryCandidates)
+	activeRuleRangeKernelCandidates := filterActiveKernelCandidates(candidates, rulePlans, rangePlans, nil)
+	usedCandidateRuleIDs := make(map[int64]struct{}, len(rules)+len(candidates))
+	maxCandidateRuleID := int64(0)
+	for _, rule := range rules {
+		if rule.ID > maxCandidateRuleID {
+			maxCandidateRuleID = rule.ID
+		}
+		if rule.ID > 0 {
+			usedCandidateRuleIDs[rule.ID] = struct{}{}
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate.rule.ID > maxCandidateRuleID {
+			maxCandidateRuleID = candidate.rule.ID
+		}
+		if candidate.rule.ID > 0 {
+			usedCandidateRuleIDs[candidate.rule.ID] = struct{}{}
+		}
+	}
+	nextSyntheticID := maxCandidateRuleID + 1
+	egressNATCandidates, egressNATPlans := buildEgressNATKernelCandidatesWithSnapshot(
+		egressNATs,
+		planner,
+		configuredKernelRulesMapLimit,
+		len(activeRuleRangeKernelCandidates),
+		usedCandidateRuleIDs,
+		&nextSyntheticID,
+		egressNATSnapshot,
+	)
+	preserveUnmatchedNetlinkFallbackEgressPlans(unmatchedEgressNATFallbackPlans, egressNATPlans)
+
+	allKernelCandidates := append(append([]kernelCandidateRule(nil), candidates...), egressNATCandidates...)
+	activeCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
+	retryCandidates := filterKernelCandidatesByOwners(activeCandidates, retryOwners, rulePlans, rangePlans, egressNATPlans)
+	result.attemptedRuleOwners, result.attemptedRangeOwners, result.attemptedEgressNATs = countKernelCandidateOwnersByKind(retryCandidates)
 
 	retainedByEngine := map[string][]Rule{}
 	retainedCandidates := make([]kernelCandidateRule, 0)
-	if len(currentKernelRules) > 0 || len(currentKernelRanges) > 0 {
+	retainedSummary := kernelRetainedAssignmentSummary{}
+	if len(currentKernelRules) > 0 || len(currentKernelRanges) > 0 || len(currentKernelEgressNATs) > 0 {
 		retainer, ok := pm.kernelRuntime.(kernelHandoffRetentionRuntime)
 		if !ok || retainer == nil {
 			result.handled = false
 			result.detail = "incremental kernel retry cannot retain current kernel owners"
 			return result
 		}
-		var retainedSummary kernelRetainedAssignmentSummary
 		retainedByEngine, retainedCandidates, retainedSummary, err = buildRetainedKernelAssignments(
 			rules,
 			ranges,
-			currentKernelRules,
-			currentKernelRanges,
+			egressNATs,
+			filterCurrentKernelOwnerIDsExcluding(currentKernelRules, retryOwners, workerKindRule),
+			filterCurrentKernelOwnerIDsExcluding(currentKernelRanges, retryOwners, workerKindRange),
+			filterCurrentKernelOwnerIDsExcluding(currentKernelEgressNATs, retryOwners, workerKindEgressNAT),
 			rulePlans,
 			rangePlans,
+			egressNATPlans,
 			groupKernelCandidatesByOwner(activeCandidates),
 			retainer,
 			pm.kernelRuntime.SnapshotAssignments(),
@@ -395,19 +563,22 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		}
 		result.retainedRuleOwners = retainedSummary.ruleOwners
 		result.retainedRangeOwners = retainedSummary.rangeOwners
+		result.retainedEgressNATs = retainedSummary.egressNATOwners
 	}
+	retainedKernelOwners := retainedSummary.ruleOwners > 0 || retainedSummary.rangeOwners > 0 || retainedSummary.egressNATOwners > 0
 
-	if len(retryCandidates) == 0 {
+	if len(retryCandidates) == 0 && result.attemptedEgressNATs == 0 {
 		result.detail = fmt.Sprintf(
-			"incremental retry found no recoverable owners under current policy (retained_rule_owners=%d retained_range_owners=%d)%s%s",
+			"incremental retry found no recoverable owners under current policy (retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d)%s%s",
 			result.retainedRuleOwners,
 			result.retainedRangeOwners,
-			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners),
+			result.retainedEgressNATs,
+			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
 			kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
 		)
 		pm.mu.Lock()
-		pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, time.Now(), rulePlans, rangePlans)
-		pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(failureCounts, rulePlans, rangePlans)
+		pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, time.Now(), rulePlans, rangePlans, egressNATPlans)
+		pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(failureCounts, rulePlans, rangePlans, egressNATPlans)
 		pm.mu.Unlock()
 		return result
 	}
@@ -428,9 +599,9 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		failureAt := time.Now()
 		ownerMetadata := collectKernelOwnerFallbackMetadata(activeRetryCandidates, ownerFailures)
 		for owner, reason := range ownerFailures {
-			applyKernelOwnerFallbackWithMetadata(owner, reason, ownerMetadata[owner], rulePlans, rangePlans)
+			applyKernelOwnerFallbackWithMetadata(owner, reason, ownerMetadata[owner], rulePlans, rangePlans, egressNATPlans)
 			failureCounts[owner] = nextKernelNetlinkOwnerRetryFailureCount(failureCounts[owner])
-			source := kernelNetlinkOwnerRetryCooldownSourceForPlan(trigger, kernelOwnerDataplanePlan(owner, rulePlans, rangePlans))
+			source := kernelNetlinkOwnerRetryCooldownSourceForPlan(trigger, kernelOwnerDataplanePlan(owner, rulePlans, rangePlans, egressNATPlans))
 			backoffSummaryCounts[source]++
 			backoffOwners = append(backoffOwners, owner)
 			switch owner.kind {
@@ -438,6 +609,8 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 				backoffRuleOwners++
 			case workerKindRange:
 				backoffRangeOwners++
+			case workerKindEgressNAT:
+				result.backoffEgressNATs++
 			}
 			if failureCounts[owner] > backoffMaxFailures {
 				backoffMaxFailures = failureCounts[owner]
@@ -451,7 +624,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 				Source: source,
 			}
 		}
-		activeRetryCandidates = filterKernelCandidatesByOwners(activeCandidates, retryOwners, rulePlans, rangePlans)
+		activeRetryCandidates = filterKernelCandidatesByOwners(activeCandidates, retryOwners, rulePlans, rangePlans, egressNATPlans)
 		if len(activeRetryCandidates) == 0 {
 			break
 		}
@@ -468,8 +641,10 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 
 	kernelAppliedRuleEngines := make(map[int64]string)
 	kernelAppliedRangeEngines := make(map[int64]string)
+	kernelAppliedEgressNATEngines := make(map[int64]string)
 	kernelAppliedRules := make(map[int64]bool)
 	kernelAppliedRanges := make(map[int64]bool)
+	kernelAppliedEgressNATs := make(map[int64]bool)
 	kernelFlowOwners := make(map[uint32]kernelCandidateOwner, len(finalActiveCandidates))
 	for _, candidate := range finalActiveCandidates {
 		if candidate.rule.ID <= 0 || candidate.rule.ID > int64(^uint32(0)) {
@@ -485,12 +660,17 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 			kernelAppliedRuleEngines[candidate.owner.id] = mergeKernelEngineName(kernelAppliedRuleEngines[candidate.owner.id], engine)
 			continue
 		}
+		if candidate.owner.kind == workerKindEgressNAT {
+			kernelAppliedEgressNATs[candidate.owner.id] = true
+			kernelAppliedEgressNATEngines[candidate.owner.id] = mergeKernelEngineName(kernelAppliedEgressNATEngines[candidate.owner.id], engine)
+			continue
+		}
 		kernelAppliedRanges[candidate.owner.id] = true
 		kernelAppliedRangeEngines[candidate.owner.id] = mergeKernelEngineName(kernelAppliedRangeEngines[candidate.owner.id], engine)
 	}
 
-	result.recoveredRuleOwners, result.recoveredRangeOwners = countKernelCandidateOwnersByKind(activeRetryCandidates)
-	refreshKernelStats := pm.kernelRuntime != nil && (result.recoveredRuleOwners > 0 || result.recoveredRangeOwners > 0)
+	result.recoveredRuleOwners, result.recoveredRangeOwners, result.recoveredEgressNATs = countKernelCandidateOwnersByKind(activeRetryCandidates)
+	refreshKernelStats := pm.kernelRuntime != nil && (result.recoveredRuleOwners > 0 || result.recoveredRangeOwners > 0 || result.recoveredEgressNATs > 0)
 	for _, candidate := range activeRetryCandidates {
 		delete(cooldownUntil, candidate.owner)
 		delete(failureCounts, candidate.owner)
@@ -505,6 +685,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	pm.mu.Lock()
 	prevKernelRuleStats := cloneRuleStatsReports(pm.kernelRuleStats)
 	prevKernelRangeStats := cloneRangeStatsReports(pm.kernelRangeStats)
+	prevKernelEgressNATStats := cloneEgressNATStatsReports(pm.kernelEgressNATStats)
 	prevKernelFlowOwners := make(map[uint32]kernelCandidateOwner, len(pm.kernelFlowOwners))
 	for id, owner := range pm.kernelFlowOwners {
 		prevKernelFlowOwners[id] = owner
@@ -515,15 +696,20 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 
 	pm.rulePlans = rulePlans
 	pm.rangePlans = rangePlans
+	pm.egressNATPlans = egressNATPlans
+	pm.dynamicEgressNATParents = dynamicEgressNATParents
 	pm.kernelRules = kernelAppliedRules
 	pm.kernelRanges = kernelAppliedRanges
+	pm.kernelEgressNATs = kernelAppliedEgressNATs
 	pm.kernelRuleEngines = kernelAppliedRuleEngines
 	pm.kernelRangeEngines = kernelAppliedRangeEngines
+	pm.kernelEgressNATEngines = kernelAppliedEgressNATEngines
 	pm.kernelFlowOwners = kernelFlowOwners
 	pm.kernelRuleStats = retainKernelRuleStatsReports(prevKernelRuleStats, kernelAppliedRules)
 	pm.kernelRangeStats = retainKernelRangeStatsReports(prevKernelRangeStats, kernelAppliedRanges)
+	pm.kernelEgressNATStats = retainKernelEgressNATStatsReports(prevKernelEgressNATStats, kernelAppliedEgressNATs)
 	pm.kernelStatsSnapshot = preservedKernelSnapshot
-	if result.retainedRuleOwners > 0 || result.retainedRangeOwners > 0 {
+	if retainedKernelOwners {
 		pm.kernelStatsAt = preservedKernelStatsAt
 	} else {
 		pm.kernelStatsAt = time.Time{}
@@ -533,8 +719,8 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	} else {
 		pm.kernelStatsSnapshotAt = preservedKernelSnapshotAt
 	}
-	pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, time.Now(), rulePlans, rangePlans)
-	pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(failureCounts, rulePlans, rangePlans)
+	pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, time.Now(), rulePlans, rangePlans, egressNATPlans)
+	pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(failureCounts, rulePlans, rangePlans, egressNATPlans)
 	pm.mu.Unlock()
 
 	currentRuleAssignments, currentRangeAssignments := pm.snapshotUserspaceAssignments()
@@ -549,34 +735,52 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	if refreshKernelStats {
 		pm.refreshKernelStatsCache()
 	}
-	if result.recoveredRuleOwners == 0 && result.recoveredRangeOwners == 0 {
+	if result.recoveredRuleOwners == 0 && result.recoveredRangeOwners == 0 && result.recoveredEgressNATs == 0 {
+		if result.attemptedEgressNATs > 0 {
+			result.detail = fmt.Sprintf(
+				"incremental retry refreshed egress_nat_owners=%d entries=%d retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d%s%s%s",
+				result.attemptedEgressNATs,
+				len(activeRetryCandidates),
+				result.retainedRuleOwners,
+				result.retainedRangeOwners,
+				result.retainedEgressNATs,
+				kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
+				kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
+				kernelIncrementalRetryBackoffDetailSuffix(result.backoffRuleOwners, result.backoffRangeOwners, result.backoffEgressNATs, result.backoffSummary, result.backoffMaxFailures, result.backoffMaxDuration),
+			)
+			return result
+		}
 		result.detail = fmt.Sprintf(
-			"incremental retry completed without recovered owners (retained_rule_owners=%d retained_range_owners=%d)%s%s%s",
+			"incremental retry completed without recovered owners (retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d)%s%s%s",
 			result.retainedRuleOwners,
 			result.retainedRangeOwners,
-			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners),
+			result.retainedEgressNATs,
+			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
 			kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
-			kernelIncrementalRetryBackoffDetailSuffix(result.backoffRuleOwners, result.backoffRangeOwners, result.backoffSummary, result.backoffMaxFailures, result.backoffMaxDuration),
+			kernelIncrementalRetryBackoffDetailSuffix(result.backoffRuleOwners, result.backoffRangeOwners, result.backoffEgressNATs, result.backoffSummary, result.backoffMaxFailures, result.backoffMaxDuration),
 		)
 		return result
 	}
 	result.detail = fmt.Sprintf(
-		"incremental retry recovered rule_owners=%d range_owners=%d entries=%d retained_rule_owners=%d retained_range_owners=%d%s%s%s",
+		"incremental retry recovered rule_owners=%d range_owners=%d egress_nat_owners=%d entries=%d retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d%s%s%s",
 		result.recoveredRuleOwners,
 		result.recoveredRangeOwners,
+		result.recoveredEgressNATs,
 		len(activeRetryCandidates),
 		result.retainedRuleOwners,
 		result.retainedRangeOwners,
-		kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners),
+		result.retainedEgressNATs,
+		kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
 		kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
-		kernelIncrementalRetryBackoffDetailSuffix(result.backoffRuleOwners, result.backoffRangeOwners, result.backoffSummary, result.backoffMaxFailures, result.backoffMaxDuration),
+		kernelIncrementalRetryBackoffDetailSuffix(result.backoffRuleOwners, result.backoffRangeOwners, result.backoffEgressNATs, result.backoffSummary, result.backoffMaxFailures, result.backoffMaxDuration),
 	)
 	return result
 }
 
 type kernelRetainedAssignmentSummary struct {
-	ruleOwners  int
-	rangeOwners int
+	ruleOwners      int
+	rangeOwners     int
+	egressNATOwners int
 }
 
 func isNetlinkTriggeredKernelFallbackPlan(plan ruleDataplanePlan) bool {
@@ -598,6 +802,74 @@ func preserveUnmatchedNetlinkFallbackPlans(prevRulePlans map[int64]ruleDataplane
 		}
 		rangePlans[id] = prev
 	}
+}
+
+func preserveUnmatchedNetlinkFallbackEgressPlans(prevEgressNATPlans map[int64]ruleDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) {
+	for id, prev := range prevEgressNATPlans {
+		current, ok := egressNATPlans[id]
+		if !ok || current.EffectiveEngine != ruleEngineKernel || !current.KernelEligible {
+			continue
+		}
+		egressNATPlans[id] = prev
+	}
+}
+
+func collectDynamicEgressNATOwnersForTrigger(trigger kernelNetlinkRecoveryTrigger, items []EgressNAT, snapshot egressNATInterfaceSnapshot) map[int64]struct{} {
+	if len(items) == 0 || !trigger.hasSource("link") {
+		return nil
+	}
+	matchedParents := kernelNetlinkTriggerMatchesDynamicEgressNATParents(trigger, collectDynamicEgressNATParentsWithSnapshot(items, snapshot))
+	if len(matchedParents) == 0 {
+		return nil
+	}
+
+	out := make(map[int64]struct{})
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		if snapshot.Err == nil {
+			item = normalizeEgressNATScope(item, snapshot.IfaceByName)
+		}
+		parent := normalizeKernelTransientFallbackInterface(item.ParentInterface)
+		if _, ok := matchedParents[parent]; !ok {
+			continue
+		}
+		if strings.TrimSpace(item.ParentInterface) == "" || strings.TrimSpace(item.ChildInterface) != "" {
+			continue
+		}
+		out[item.ID] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func triggerMatchesEgressNATFallbackPlan(trigger kernelNetlinkRecoveryTrigger, plan ruleDataplanePlan) bool {
+	if !isNetlinkTriggeredKernelFallbackPlan(plan) {
+		return false
+	}
+	reasonClass := strings.TrimSpace(plan.TransientFallback.ReasonClass)
+	if reasonClass == "" {
+		reasonClass = normalizeTransientKernelFallbackReason(plan.FallbackReason)
+	}
+	if trigger.hasSource("netlink") {
+		return true
+	}
+	if trigger.hasSource("link") && reasonClass == "neighbor_missing" {
+		return trigger.matchesLinkNeighborInterface(plan.TransientFallback.OutInterface)
+	}
+	if trigger.hasSource("link") && reasonClass == "fdb_missing" {
+		return trigger.matchesLinkFDBInterface(plan.TransientFallback.OutInterface)
+	}
+	if trigger.hasSource("neighbor") && reasonClass == "neighbor_missing" {
+		return trigger.matchesOutInterface(plan.TransientFallback.OutInterface)
+	}
+	if trigger.hasSource("fdb") && reasonClass == "fdb_missing" {
+		return trigger.matchesOutInterface(plan.TransientFallback.OutInterface)
+	}
+	return len(trigger.sources) == 0
 }
 
 func kernelNetlinkOwnerRetryCooldownSourceForPlan(trigger kernelNetlinkRecoveryTrigger, plan ruleDataplanePlan) string {
@@ -666,9 +938,12 @@ func summarizeKernelNetlinkOwnerRetryCooldownSourceCounts(counts map[string]int)
 	return strings.Join(parts, ",")
 }
 
-func kernelOwnerDataplanePlan(owner kernelCandidateOwner, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) ruleDataplanePlan {
+func kernelOwnerDataplanePlan(owner kernelCandidateOwner, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) ruleDataplanePlan {
 	if owner.kind == workerKindRule {
 		return rulePlans[owner.id]
+	}
+	if owner.kind == workerKindEgressNAT {
+		return egressNATPlans[owner.id]
 	}
 	return rangePlans[owner.id]
 }
@@ -707,7 +982,7 @@ func cloneKernelNetlinkOwnerRetryFailures(src map[kernelCandidateOwner]int) map[
 	return out
 }
 
-func syncKernelNetlinkOwnerRetryCooldowns(cooldowns map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState, now time.Time, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState {
+func syncKernelNetlinkOwnerRetryCooldowns(cooldowns map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState, now time.Time, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState {
 	if len(cooldowns) == 0 {
 		return nil
 	}
@@ -725,6 +1000,10 @@ func syncKernelNetlinkOwnerRetryCooldowns(cooldowns map[kernelCandidateOwner]ker
 			if !isNetlinkTriggeredKernelFallbackPlan(rangePlans[owner.id]) {
 				continue
 			}
+		case workerKindEgressNAT:
+			if !isNetlinkTriggeredKernelFallbackPlan(egressNATPlans[owner.id]) {
+				continue
+			}
 		default:
 			continue
 		}
@@ -736,7 +1015,7 @@ func syncKernelNetlinkOwnerRetryCooldowns(cooldowns map[kernelCandidateOwner]ker
 	return out
 }
 
-func syncKernelNetlinkOwnerRetryFailures(failures map[kernelCandidateOwner]int, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) map[kernelCandidateOwner]int {
+func syncKernelNetlinkOwnerRetryFailures(failures map[kernelCandidateOwner]int, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) map[kernelCandidateOwner]int {
 	if len(failures) == 0 {
 		return nil
 	}
@@ -752,6 +1031,10 @@ func syncKernelNetlinkOwnerRetryFailures(failures map[kernelCandidateOwner]int, 
 			}
 		case workerKindRange:
 			if !isNetlinkTriggeredKernelFallbackPlan(rangePlans[owner.id]) {
+				continue
+			}
+		case workerKindEgressNAT:
+			if !isNetlinkTriggeredKernelFallbackPlan(egressNATPlans[owner.id]) {
 				continue
 			}
 		default:
@@ -867,7 +1150,7 @@ func groupKernelCandidatesByOwner(candidates []kernelCandidateRule) map[kernelCa
 	return grouped
 }
 
-func filterKernelCandidatesByOwners(candidates []kernelCandidateRule, owners map[kernelCandidateOwner]struct{}, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelCandidateRule {
+func filterKernelCandidatesByOwners(candidates []kernelCandidateRule, owners map[kernelCandidateOwner]struct{}, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) []kernelCandidateRule {
 	if len(candidates) == 0 || len(owners) == 0 {
 		return nil
 	}
@@ -876,7 +1159,7 @@ func filterKernelCandidatesByOwners(candidates []kernelCandidateRule, owners map
 		if _, ok := owners[candidate.owner]; !ok {
 			continue
 		}
-		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans) != ruleEngineKernel {
+		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans, egressNATPlans) != ruleEngineKernel {
 			continue
 		}
 		out = append(out, candidate)
@@ -884,7 +1167,27 @@ func filterKernelCandidatesByOwners(candidates []kernelCandidateRule, owners map
 	return out
 }
 
-func buildRetainedKernelAssignments(rules []Rule, ranges []PortRange, currentKernelRules map[int64]bool, currentKernelRanges map[int64]bool, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, desiredByOwner map[kernelCandidateOwner][]kernelCandidateRule, retainer kernelHandoffRetentionRuntime, assignments map[int64]string) (map[string][]Rule, []kernelCandidateRule, kernelRetainedAssignmentSummary, error) {
+func filterCurrentKernelOwnerIDsExcluding(current map[int64]bool, owners map[kernelCandidateOwner]struct{}, kind string) map[int64]bool {
+	if len(current) == 0 {
+		return nil
+	}
+	out := make(map[int64]bool, len(current))
+	for id, active := range current {
+		if !active {
+			continue
+		}
+		if _, ok := owners[kernelCandidateOwner{kind: kind, id: id}]; ok {
+			continue
+		}
+		out[id] = true
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func buildRetainedKernelAssignments(rules []Rule, ranges []PortRange, egressNATs []EgressNAT, currentKernelRules map[int64]bool, currentKernelRanges map[int64]bool, currentKernelEgressNATs map[int64]bool, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan, desiredByOwner map[kernelCandidateOwner][]kernelCandidateRule, retainer kernelHandoffRetentionRuntime, assignments map[int64]string) (map[string][]Rule, []kernelCandidateRule, kernelRetainedAssignmentSummary, error) {
 	retainedByEngine := make(map[string][]Rule)
 	retainedCandidates := make([]kernelCandidateRule, 0)
 	seenRuleIDs := make(map[int64]struct{})
@@ -897,6 +1200,10 @@ func buildRetainedKernelAssignments(rules []Rule, ranges []PortRange, currentKer
 	rangesByID := make(map[int64]PortRange, len(ranges))
 	for _, pr := range ranges {
 		rangesByID[pr.ID] = pr
+	}
+	egressNATByID := make(map[int64]EgressNAT, len(egressNATs))
+	for _, item := range egressNATs {
+		egressNATByID[item.ID] = item
 	}
 
 	for id := range currentKernelRules {
@@ -943,6 +1250,28 @@ func buildRetainedKernelAssignments(rules []Rule, ranges []PortRange, currentKer
 		summary.rangeOwners++
 	}
 
+	for id := range currentKernelEgressNATs {
+		item, ok := egressNATByID[id]
+		if !ok {
+			return nil, nil, summary, fmt.Errorf("incremental kernel retry requires full redistribute: active egress nat owner %d is no longer present", id)
+		}
+		if egressNATPlans[id].EffectiveEngine != ruleEngineKernel {
+			return nil, nil, summary, fmt.Errorf("incremental kernel retry requires full redistribute: active egress nat owner %d changed target engine", id)
+		}
+		owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: id}
+		retained, ok := retainer.retainedKernelEgressNATCandidates(item)
+		if !ok || !retainedKernelCandidatesMatchDesired(retained, desiredByOwner[owner], owner) {
+			return nil, nil, summary, fmt.Errorf("incremental kernel retry requires full redistribute: active egress nat owner %d cannot be retained in place", id)
+		}
+		for _, retainedItem := range retained {
+			if err := appendRetainedKernelAssignment(retainedByEngine, assignments, seenRuleIDs, retainedItem); err != nil {
+				return nil, nil, summary, err
+			}
+			retainedCandidates = append(retainedCandidates, kernelCandidateRule{owner: owner, rule: retainedItem})
+		}
+		summary.egressNATOwners++
+	}
+
 	return retainedByEngine, retainedCandidates, summary, nil
 }
 
@@ -964,26 +1293,32 @@ func retainedKernelCandidatesMatchDesired(retained []Rule, desired []kernelCandi
 		return false
 	}
 
-	desiredByID := make(map[int64]Rule, len(desired))
+	desiredRules := make([]Rule, 0, len(desired))
 	for _, candidate := range desired {
 		if candidate.owner != owner {
 			return false
 		}
-		desiredByID[candidate.rule.ID] = candidate.rule
+		desiredRules = append(desiredRules, candidate.rule)
 	}
-	if len(desiredByID) != len(desired) {
-		return false
-	}
+	matchedDesired := make([]bool, len(desiredRules))
 
 	for _, item := range retained {
 		if item.kernelLogKind != owner.kind || item.kernelLogOwnerID != owner.id {
 			return false
 		}
-		want, ok := desiredByID[item.ID]
-		if !ok {
-			return false
+		matched := false
+		for idx, want := range desiredRules {
+			if matchedDesired[idx] {
+				continue
+			}
+			if !sameRetainedKernelRuleDataplaneIgnoringID(item, want) {
+				continue
+			}
+			matchedDesired[idx] = true
+			matched = true
+			break
 		}
-		if !sameRetainedKernelRuleDataplane(item, want) {
+		if !matched {
 			return false
 		}
 	}
@@ -992,7 +1327,11 @@ func retainedKernelCandidatesMatchDesired(retained []Rule, desired []kernelCandi
 
 func sameRetainedKernelRuleDataplane(a Rule, b Rule) bool {
 	return a.ID == b.ID &&
-		a.InInterface == b.InInterface &&
+		sameRetainedKernelRuleDataplaneIgnoringID(a, b)
+}
+
+func sameRetainedKernelRuleDataplaneIgnoringID(a Rule, b Rule) bool {
+	return a.InInterface == b.InInterface &&
 		a.InIP == b.InIP &&
 		a.InPort == b.InPort &&
 		a.OutInterface == b.OutInterface &&
@@ -1000,7 +1339,11 @@ func sameRetainedKernelRuleDataplane(a Rule, b Rule) bool {
 		a.OutSourceIP == b.OutSourceIP &&
 		a.OutPort == b.OutPort &&
 		a.Protocol == b.Protocol &&
-		a.Transparent == b.Transparent
+		a.Transparent == b.Transparent &&
+		a.kernelMode == b.kernelMode &&
+		a.kernelNATType == b.kernelNATType &&
+		a.kernelLogKind == b.kernelLogKind &&
+		a.kernelLogOwnerID == b.kernelLogOwnerID
 }
 
 func reconcileIncrementalKernelRetry(runtime kernelRuleRuntime, retainedByEngine map[string][]Rule, retryCandidates []kernelCandidateRule) (map[int64]kernelRuleApplyResult, error) {
@@ -1022,17 +1365,22 @@ func totalRetainedKernelAssignments(retainedByEngine map[string][]Rule) int {
 	return total
 }
 
-func countKernelCandidateOwnersByKind(candidates []kernelCandidateRule) (int, int) {
+func countKernelCandidateOwnersByKind(candidates []kernelCandidateRule) (int, int, int) {
 	rules := make(map[int64]struct{})
 	ranges := make(map[int64]struct{})
+	egressNATs := make(map[int64]struct{})
 	for _, candidate := range candidates {
 		if candidate.owner.kind == workerKindRule {
 			rules[candidate.owner.id] = struct{}{}
+			continue
+		}
+		if candidate.owner.kind == workerKindEgressNAT {
+			egressNATs[candidate.owner.id] = struct{}{}
 			continue
 		}
 		if candidate.owner.kind == workerKindRange {
 			ranges[candidate.owner.id] = struct{}{}
 		}
 	}
-	return len(rules), len(ranges)
+	return len(rules), len(ranges), len(egressNATs)
 }

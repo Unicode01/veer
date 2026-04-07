@@ -120,13 +120,18 @@ func (rt *linuxKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRun
 		rt.observability.updatePressure(false, now)
 		return rt.pressureState
 	}
+	if len(rt.preparedRules) == 0 {
+		rt.pressureState = kernelRuntimePressureState{}
+		rt.observability.updatePressure(false, now)
+		return rt.pressureState
+	}
 	if !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
 		return rt.pressureState
 	}
 
 	counts := rt.runtimeMapCounts
 	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, countTCRuleMapEntries, true)
+		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), true)
 		rt.runtimeMapCounts = counts
 	}
 	capacities := rt.currentMapCapacitiesLocked()
@@ -144,13 +149,18 @@ func (rt *xdpKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRunti
 		rt.observability.updatePressure(false, now)
 		return rt.pressureState
 	}
+	if len(rt.preparedRules) == 0 {
+		rt.pressureState = kernelRuntimePressureState{}
+		rt.observability.updatePressure(false, now)
+		return rt.pressureState
+	}
 	if !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
 		return rt.pressureState
 	}
 
 	counts := rt.runtimeMapCounts
 	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, countXDPRuleMapEntries, false)
+		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), false)
 		rt.runtimeMapCounts = counts
 	}
 	flowsCapacity := rt.flowsMapCapacity

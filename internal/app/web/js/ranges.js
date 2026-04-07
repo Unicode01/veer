@@ -2,6 +2,26 @@
   const app = window.ForwardApp;
   if (!app) return;
 
+  app.refreshRangeInterfaceSelectors = function refreshRangeInterfaceSelectors() {
+    const el = app.el;
+    app.populateInterfacePicker(el.rangeInInterface, el.rangeInInterfacePicker, el.rangeInInterfaceOptions, {
+      preserveSelected: true
+    });
+    app.populateInterfacePicker(el.rangeOutInterface, el.rangeOutInterfacePicker, el.rangeOutInterfaceOptions, {
+      preserveSelected: true
+    });
+    app.populateIPSelect(el.rangeInInterface, el.rangeInIP, el.rangeInIP.value);
+    app.refreshRangeSourceIPOptions(el.rangeOutSourceIP.value);
+  };
+
+  app.refreshRangeSourceIPOptions = function refreshRangeSourceIPOptions(selected) {
+    const el = app.el;
+    const family = typeof app.ipFamily === 'function' ? app.ipFamily(app.$('rangeOutIP').value) : '';
+    app.populateSourceIPSelect(el.rangeOutInterface, el.rangeOutSourceIP, selected == null ? el.rangeOutSourceIP.value : selected, true, {
+      family: family
+    });
+  };
+
   app.syncRangeFormState = function syncRangeFormState() {
     const el = app.el;
     const formState = app.state.forms.range;
@@ -41,13 +61,14 @@
 
     app.$('rangeRemark').value = range.remark || '';
     app.populateTagSelect(app.$('rangeTag'), range.tag);
-    app.populateInterfaceSelect(el.rangeInInterface, range.in_interface);
-    app.populateIPSelect(el.rangeInInterface, el.rangeInIP, range.in_ip);
+    el.rangeInInterface.value = range.in_interface || '';
+    el.rangeInIP.value = range.in_ip || '';
     app.$('rangeStartPort').value = range.start_port;
     app.$('rangeEndPort').value = range.end_port;
-    app.populateInterfaceSelect(el.rangeOutInterface, range.out_interface);
-    app.populateSourceIPSelect(el.rangeOutInterface, el.rangeOutSourceIP, range.out_source_ip, true);
+    el.rangeOutInterface.value = range.out_interface || '';
+    el.rangeOutSourceIP.value = range.out_source_ip || '';
     app.$('rangeOutIP').value = range.out_ip;
+    app.refreshRangeInterfaceSelectors();
     app.$('rangeOutStartPort').value = range.out_start_port || '';
     app.$('rangeProtocol').value = range.protocol;
     app.$('rangeTransparent').checked = !!range.transparent;
@@ -63,13 +84,14 @@
 
     app.$('rangeRemark').value = range.remark || '';
     app.populateTagSelect(app.$('rangeTag'), range.tag);
-    app.populateInterfaceSelect(el.rangeInInterface, range.in_interface);
-    app.populateIPSelect(el.rangeInInterface, el.rangeInIP, range.in_ip);
+    el.rangeInInterface.value = range.in_interface || '';
+    el.rangeInIP.value = range.in_ip || '';
     app.$('rangeStartPort').value = range.start_port;
     app.$('rangeEndPort').value = range.end_port;
-    app.populateInterfaceSelect(el.rangeOutInterface, range.out_interface);
-    app.populateSourceIPSelect(el.rangeOutInterface, el.rangeOutSourceIP, range.out_source_ip, true);
+    el.rangeOutInterface.value = range.out_interface || '';
+    el.rangeOutSourceIP.value = range.out_source_ip || '';
     app.$('rangeOutIP').value = range.out_ip;
+    app.refreshRangeInterfaceSelectors();
     app.$('rangeOutStartPort').value = range.out_start_port || '';
     app.$('rangeProtocol').value = range.protocol;
     app.$('rangeTransparent').checked = !!range.transparent;
@@ -80,7 +102,7 @@
   app.exitRangeEditMode = function exitRangeEditMode() {
     app.setRangeFormAdd();
     app.el.rangeForm.reset();
-    app.populateSourceIPSelect(app.el.rangeOutInterface, app.el.rangeOutSourceIP, '', false);
+    app.refreshRangeInterfaceSelectors();
     app.updateRangeTransparentWarning();
   };
 
@@ -89,11 +111,11 @@
     const field = String((issue && issue.field) || '').trim();
     const map = {
       id: app.el.editRangeId,
-      in_interface: app.el.rangeInInterface,
+      in_interface: app.el.rangeInInterfacePicker || app.el.rangeInInterface,
       in_ip: app.el.rangeInIP,
       start_port: app.$('rangeStartPort'),
       end_port: app.$('rangeEndPort'),
-      out_interface: app.el.rangeOutInterface,
+      out_interface: app.el.rangeOutInterfacePicker || app.el.rangeOutInterface,
       out_ip: app.$('rangeOutIP'),
       out_source_ip: app.el.rangeOutSourceIP,
       out_start_port: app.$('rangeOutStartPort'),
@@ -107,9 +129,9 @@
     }
     if (msg === 'start_port must be <= end_port') return [app.$('rangeStartPort'), app.$('rangeEndPort')];
     if (msg === 'transparent mode currently supports only IPv4 rules') return [app.$('rangeTransparent')];
-    if (msg.indexOf('in_interface ') === 0) return [app.el.rangeInInterface];
+    if (msg.indexOf('in_interface ') === 0) return [app.el.rangeInInterfacePicker || app.el.rangeInInterface];
     if (msg.indexOf('in_ip ') === 0) return [app.el.rangeInIP];
-    if (msg.indexOf('out_interface ') === 0) return [app.el.rangeOutInterface];
+    if (msg.indexOf('out_interface ') === 0) return [app.el.rangeOutInterfacePicker || app.el.rangeOutInterface];
     if (msg.indexOf('out_ip ') === 0) return [app.$('rangeOutIP')];
     if (msg.indexOf('out_source_ip ') === 0) return [app.el.rangeOutSourceIP];
     if (msg.indexOf('listener conflicts with ') === 0) return [app.$('rangeStartPort')];
@@ -149,6 +171,7 @@
       return 2;
     }
     if (key === 'transparent') return range.transparent ? 1 : 0;
+    if (key === 'effective_engine') return (range.effective_engine || 'userspace') + ':' + String(range.effective_kernel_engine || '');
     return range[key];
   };
 
@@ -172,6 +195,13 @@
         range.out_source_ip,
         range.out_start_port,
         range.protocol,
+        range.effective_engine,
+        range.effective_kernel_engine,
+        range.kernel_reason,
+        range.fallback_reason,
+        (typeof app.getAddressFamilyInfo === 'function'
+          ? (app.getAddressFamilyInfo(range.in_ip, range.out_ip) || {}).searchText
+          : ''),
         app.statusInfo(range.status, range.enabled).text
       ]));
     }
@@ -202,6 +232,17 @@
       const tr = document.createElement('tr');
       const pending = app.isRowPending('range', range.id);
       const info = app.statusInfo(range.status, range.enabled);
+      const engine = typeof app.getRuleEngineInfo === 'function'
+        ? app.getRuleEngineInfo(range)
+        : {
+            badgeClass: (range.effective_engine || 'userspace') === 'kernel' ? 'badge-kernel' : 'badge-userspace',
+            badgeText: (range.effective_engine || 'userspace'),
+            title: range.fallback_reason || range.kernel_reason || ''
+          };
+      const statusTitle = [
+        app.t('common.status') + ': ' + info.text,
+        engine.title || ''
+      ].filter(Boolean).join('\n');
       const outEndPort = range.out_start_port + (range.end_port - range.start_port);
       const toggleClass = range.enabled ? 'btn-disable' : 'btn-enable';
       const toggleText = pending ? app.t('common.processing') : app.t(range.enabled ? 'common.disable' : 'common.enable');
@@ -232,7 +273,7 @@
       tr.appendChild(app.createCell(range.transparent
         ? app.createBadgeNode('badge-running', app.t('common.yes'))
         : app.emptyCellNode()));
-      tr.appendChild(app.createCell(app.createStatusBadgeNode(info)));
+      tr.appendChild(app.createCell(app.createBadgeNode('badge-' + info.badge, info.text, statusTitle)));
       tr.appendChild(app.createCell(app.createActionDropdown([
         {
           className: toggleClass,
@@ -273,6 +314,7 @@
       app.state.ranges.data = await app.apiCall('GET', '/api/ranges');
       app.markDataFresh();
       app.renderRangesTable();
+      if (typeof app.renderRangeStatsTable === 'function') app.renderRangeStatsTable();
     } catch (e) {
       if (e.message !== 'unauthorized') console.error('load ranges:', e);
     }

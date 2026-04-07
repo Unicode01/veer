@@ -12,18 +12,21 @@ func (rt *linuxKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentH
 	loaded := rt.coll != nil
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
-	forwardProgramID := 0
-	replyProgramID := 0
-	if rt.coll != nil {
-		forwardProgramID = int(kernelProgramID(rt.coll.Programs[kernelForwardProgramName]))
-		replyProgramID = int(kernelProgramID(rt.coll.Programs[kernelReplyProgramName]))
-	}
+	forwardProg, replyProg, forwardProgV6, replyProgV6 := kernelAttachmentProgramsForPreparedRules(rt.coll, preparedRules)
 	rt.mu.Unlock()
 
 	healthy := true
 	if len(preparedRules) > 0 {
 		forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(preparedRules)
-		healthy = kernelAttachmentsHealthy(forwardIfRules, replyIfRules, attachments, forwardProgramID, replyProgramID)
+		healthy = kernelAttachmentsHealthy(
+			forwardIfRules,
+			replyIfRules,
+			attachments,
+			forwardProg,
+			replyProg,
+			forwardProgV6,
+			replyProgV6,
+		)
 	}
 	return []kernelAttachmentHealthSnapshot{{
 		Engine:        kernelEngineTC,
@@ -84,21 +87,31 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 		return nil, nil
 	}
 
-	forwardProg, replyProg, _, err := lookupKernelCollectionPieces(rt.coll)
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
 	if err != nil {
 		return nil, err
+	}
+	forwardProg := pieces.forwardProg
+	replyProg := pieces.replyProg
+	forwardProgV6 := pieces.forwardProgV6
+	replyProgV6 := pieces.replyProgV6
+	if !kernelPreparedRulesIncludeIPv6(rt.preparedRules) {
+		forwardProgV6 = nil
+		replyProgV6 = nil
 	}
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(rt.preparedRules)
 	if kernelAttachmentsHealthy(
 		forwardIfRules,
 		replyIfRules,
 		rt.attachments,
-		int(kernelProgramID(forwardProg)),
-		int(kernelProgramID(replyProg)),
+		forwardProg,
+		replyProg,
+		forwardProgV6,
+		replyProgV6,
 	) {
 		return nil, nil
 	}
-	plans := desiredKernelAttachmentPlans(forwardIfRules, replyIfRules, forwardProg, replyProg)
+	plans := desiredKernelAttachmentPlansDualStack(forwardIfRules, replyIfRules, forwardProg, replyProg, forwardProgV6, replyProgV6)
 	if len(plans) == 0 {
 		return nil, nil
 	}

@@ -34,12 +34,53 @@
     });
   }
 
+  function bindInterfacePicker(hiddenInput, pickerInput, options) {
+    if (!hiddenInput || !pickerInput) return;
+    const opts = options || {};
+    const sync = function sync(commitLabel) {
+      const previousValue = String(hiddenInput.value || '').trim();
+      const result = app.syncInterfacePickerSelection(
+        hiddenInput,
+        pickerInput,
+        Object.assign({}, opts, { commitLabel: !!commitLabel })
+      );
+      if (typeof opts.onSync === 'function') opts.onSync(result, previousValue);
+    };
+
+    pickerInput.addEventListener('input', () => sync(false));
+    pickerInput.addEventListener('change', () => sync(true));
+    pickerInput.addEventListener('blur', () => sync(true));
+    pickerInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !pickerInput.value) return;
+      e.preventDefault();
+      pickerInput.value = '';
+      hiddenInput.value = '';
+      if (typeof opts.onSync === 'function') opts.onSync({ value: '', item: null, items: [], text: '' });
+    });
+  }
+
+  app.shouldPauseAutoRefresh = function shouldPauseAutoRefresh() {
+    if (app.state.activeDropdown) return true;
+    if (app.el.egressNATProtocolMenu && !app.el.egressNATProtocolMenu.hidden) return true;
+    if (app.el.confirmModal && app.el.confirmModal.classList && typeof app.el.confirmModal.classList.contains === 'function' &&
+      app.el.confirmModal.classList.contains('active')) {
+      return true;
+    }
+
+    const active = document.activeElement;
+    if (!active) return false;
+    const tag = String(active.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (active === app.el.egressNATProtocolTrigger) return true;
+    return false;
+  };
+
   app.startPolling = function startPolling() {
     app.stopPolling();
     if (!app.getToken() || document.hidden) return;
 
     app.state.pollerId = setInterval(() => {
-      if (document.hidden) return;
+      if (document.hidden || app.shouldPauseAutoRefresh()) return;
       app.refreshDashboard({
         includeWorkers: true,
         includeStats: app.state.activeTab === 'rule-stats'
@@ -105,6 +146,7 @@
   bindSearchInput(app.el.rulesSearchInput, 'rules', () => app.renderRulesTable());
   bindSearchInput(app.el.sitesSearchInput, 'sites', () => app.renderSitesTable());
   bindSearchInput(app.el.rangesSearchInput, 'ranges', () => app.renderRangesTable());
+  bindSearchInput(app.el.egressNATsSearchInput, 'egressNATs', () => app.renderEgressNATsTable());
   bindSearchInput(app.el.workersSearchInput, 'workers', () => app.renderWorkersTable());
 
   if (app.el.batchDeleteRulesBtn) {
@@ -156,6 +198,10 @@
     app.el.emptyAddRangeBtn.addEventListener('click', () => app.focusSection('ranges', app.el.rangeFormTitle, app.$('rangeRemark')));
   }
 
+  if (app.el.emptyAddEgressNATBtn) {
+    app.el.emptyAddEgressNATBtn.addEventListener('click', () => app.focusSection('egress-nats', app.el.egressNATFormTitle, app.el.egressNATParentPicker || app.el.egressNATParentInterface));
+  }
+
   app.el.tokenSubmit.addEventListener('click', () => {
     const token = app.el.tokenInput.value.trim();
     if (!token) return;
@@ -182,31 +228,96 @@
     app.showTokenModal();
   });
 
-  app.el.inInterface.addEventListener('change', () => app.populateIPSelect(app.el.inInterface, app.el.inIP));
-  app.el.rangeInInterface.addEventListener('change', () => app.populateIPSelect(app.el.rangeInInterface, app.el.rangeInIP));
-  app.el.siteListenIface.addEventListener('change', () => {
-    app.populateSiteListenIP(app.el.siteListenIface, app.el.siteListenIP);
-    app.updateSiteTransparentWarning();
+  bindInterfacePicker(app.el.inInterface, app.el.inInterfacePicker, {
+    onSync() {
+      app.populateIPSelect(app.el.inInterface, app.el.inIP, app.el.inIP.value);
+    }
   });
-
-  app.el.outInterface.addEventListener('change', () => {
-    app.populateSourceIPSelect(app.el.outInterface, app.el.ruleOutSourceIP, app.el.ruleOutSourceIP.value, false);
-    app.updateRuleTransparentWarning();
+  bindInterfacePicker(app.el.outInterface, app.el.outInterfacePicker, {
+    onSync() {
+      if (typeof app.refreshRuleSourceIPOptions === 'function') app.refreshRuleSourceIPOptions(app.el.ruleOutSourceIP.value);
+      else app.populateSourceIPSelect(app.el.outInterface, app.el.ruleOutSourceIP, app.el.ruleOutSourceIP.value, false);
+      app.updateRuleTransparentWarning();
+    }
   });
-  app.el.rangeOutInterface.addEventListener('change', () => {
-    app.populateSourceIPSelect(app.el.rangeOutInterface, app.el.rangeOutSourceIP, app.el.rangeOutSourceIP.value, false);
-    app.updateRangeTransparentWarning();
+  bindInterfacePicker(app.el.siteListenIface, app.el.siteListenIfacePicker, {
+    onSync() {
+      app.populateSiteListenIP(app.el.siteListenIface, app.el.siteListenIP, app.el.siteListenIP.value);
+      app.updateSiteTransparentWarning();
+    }
   });
+  bindInterfacePicker(app.el.rangeInInterface, app.el.rangeInInterfacePicker, {
+    onSync() {
+      app.populateIPSelect(app.el.rangeInInterface, app.el.rangeInIP, app.el.rangeInIP.value);
+    }
+  });
+  bindInterfacePicker(app.el.rangeOutInterface, app.el.rangeOutInterfacePicker, {
+    onSync() {
+      if (typeof app.refreshRangeSourceIPOptions === 'function') app.refreshRangeSourceIPOptions(app.el.rangeOutSourceIP.value);
+      else app.populateSourceIPSelect(app.el.rangeOutInterface, app.el.rangeOutSourceIP, app.el.rangeOutSourceIP.value, false);
+      app.updateRangeTransparentWarning();
+    }
+  });
+  bindInterfacePicker(app.el.egressNATParentInterface, app.el.egressNATParentPicker, {
+    getItems() {
+      return typeof app.getEgressNATParentInterfaces === 'function' ? app.getEgressNATParentInterfaces() : (app.interfaces || []);
+    },
+    preserveSelected: true,
+    onSync(result, previousValue) {
+      if (previousValue === String((result && result.value) || '').trim()) return;
+      app.el.egressNATChildInterface.value = '';
+      if (app.el.egressNATChildPicker) app.el.egressNATChildPicker.value = '';
+      app.populateEgressNATInterfaceSelectors();
+    }
+  });
+  bindInterfacePicker(app.el.egressNATChildInterface, app.el.egressNATChildPicker, {
+    getItems() {
+      return typeof app.getEgressNATChildInterfaces === 'function'
+        ? app.getEgressNATChildInterfaces(app.el.egressNATParentInterface.value)
+        : [];
+    },
+    preserveSelected: true,
+    onSync() {
+      app.populateEgressNATInterfaceSelectors({ preserveOutSelection: true, autoSelectOut: false });
+    }
+  });
+  bindInterfacePicker(app.el.egressNATOutInterface, app.el.egressNATOutPicker, {
+    getItems() {
+      return typeof app.getEgressNATOutInterfaceCandidates === 'function'
+        ? app.getEgressNATOutInterfaceCandidates(app.el.egressNATParentInterface.value, app.el.egressNATChildInterface.value)
+        : (app.interfaces || []);
+    },
+    preserveSelected: true,
+    onSync() {
+      if (typeof app.updateEgressNATOutInterfaceHint === 'function') {
+        app.updateEgressNATOutInterfaceHint('', false);
+      }
+      app.populateEgressNATSourceIPSelect(app.el.egressNATOutSourceIP.value);
+    }
+  });
+  if (app.el.egressNATProtocolTCP) app.el.egressNATProtocolTCP.addEventListener('change', app.syncEgressNATProtocolSelectionFromInputs);
+  if (app.el.egressNATProtocolUDP) app.el.egressNATProtocolUDP.addEventListener('change', app.syncEgressNATProtocolSelectionFromInputs);
+  if (app.el.egressNATProtocolICMP) app.el.egressNATProtocolICMP.addEventListener('change', app.syncEgressNATProtocolSelectionFromInputs);
   app.el.ruleTransparent.addEventListener('change', app.updateRuleTransparentWarning);
   app.el.siteTransparent.addEventListener('change', app.updateSiteTransparentWarning);
   app.el.rangeTransparent.addEventListener('change', app.updateRangeTransparentWarning);
-  app.el.ruleOutIP.addEventListener('input', app.updateRuleTransparentWarning);
-  app.el.siteBackendIP.addEventListener('input', app.updateSiteTransparentWarning);
-  app.el.rangeOutIP.addEventListener('input', app.updateRangeTransparentWarning);
+  app.el.ruleOutIP.addEventListener('input', () => {
+    if (typeof app.refreshRuleSourceIPOptions === 'function') app.refreshRuleSourceIPOptions();
+    app.updateRuleTransparentWarning();
+  });
+  app.el.siteBackendIP.addEventListener('input', () => {
+    if (typeof app.refreshSiteBackendSourceIPOptions === 'function') app.refreshSiteBackendSourceIPOptions();
+    app.updateSiteTransparentWarning();
+  });
+  app.el.rangeOutIP.addEventListener('input', () => {
+    if (typeof app.refreshRangeSourceIPOptions === 'function') app.refreshRangeSourceIPOptions();
+    app.updateRangeTransparentWarning();
+  });
 
   app.el.ruleCancelBtn.addEventListener('click', app.exitRuleEditMode);
   app.el.siteCancelBtn.addEventListener('click', app.exitSiteEditMode);
   app.el.rangeCancelBtn.addEventListener('click', app.exitRangeEditMode);
+  if (app.el.egressNATCancelBtn) app.el.egressNATCancelBtn.addEventListener('click', app.exitEgressNATEditMode);
 
   document.addEventListener('visibilitychange', () => {
     app.state.pageVisible = !document.hidden;
@@ -225,6 +336,11 @@
   });
 
   document.addEventListener('change', (e) => {
+    if (e.target === app.el.egressNATProtocolTCP || e.target === app.el.egressNATProtocolUDP || e.target === app.el.egressNATProtocolICMP) {
+      app.syncEgressNATProtocolSelectionFromInputs();
+      return;
+    }
+
     const ruleSelect = e.target.closest('.rule-select-checkbox[data-id]');
     if (!ruleSelect) return;
     app.setRuleSelected(parseInt(ruleSelect.dataset.id, 10), ruleSelect.checked);
@@ -232,6 +348,20 @@
   });
 
   document.addEventListener('click', (e) => {
+    if (e.target === app.el.egressNATProtocolTrigger) {
+      e.stopPropagation();
+      const isOpen = !!(app.el.egressNATProtocolMenu && !app.el.egressNATProtocolMenu.hidden);
+      app.closeDropdowns();
+      if (!isOpen) app.openEgressNATProtocolMenu();
+      return;
+    }
+
+    if (e.target.closest('#egressNATProtocolMenu')) {
+      return;
+    }
+
+    if (typeof app.closeEgressNATProtocolMenu === 'function') app.closeEgressNATProtocolMenu();
+
     const trigger = e.target.closest('.action-dropdown-trigger');
     if (trigger) {
       e.stopPropagation();
@@ -254,10 +384,12 @@
         if (table === 'rules') app.renderRulesTable();
         else if (table === 'sites') app.renderSitesTable();
         else if (table === 'ranges') app.renderRangesTable();
+        else if (table === 'egressNATs') app.renderEgressNATsTable();
         else if (table === 'workers') app.renderWorkersTable();
         else if (table === 'ruleStats') app.loadRuleStats();
         else if (table === 'siteStats') app.renderSiteStatsTable();
         else if (table === 'rangeStats') app.loadRangeStats();
+        else if (table === 'egressNATStats') app.loadEgressNATStats();
       }
       return;
     }
@@ -279,6 +411,12 @@
     const toggle = e.target.closest('.btn-enable, .btn-disable');
     if (toggle) {
       app.toggleItem(toggle.dataset.type, parseInt(toggle.dataset.id, 10));
+      return;
+    }
+
+    const toggleEgressNAT = e.target.closest('.btn-egress-enable, .btn-egress-disable');
+    if (toggleEgressNAT) {
+      app.toggleEgressNAT(parseInt(toggleEgressNAT.dataset.id, 10));
       return;
     }
 
@@ -312,6 +450,12 @@
       return;
     }
 
+    const editEgressNAT = e.target.closest('.btn-edit-egress-nat');
+    if (editEgressNAT) {
+      app.enterEgressNATEditMode(app.decData(editEgressNAT.dataset.egressNat));
+      return;
+    }
+
     const cloneRange = e.target.closest('.btn-clone-range');
     if (cloneRange) {
       app.enterRangeCloneMode(app.decData(cloneRange.dataset.range));
@@ -324,6 +468,12 @@
       if (del.dataset.type === 'site') app.deleteSite(id);
       else if (del.dataset.type === 'range') app.deleteRange(id);
       else app.deleteRule(id);
+      return;
+    }
+
+    const deleteEgressNAT = e.target.closest('.btn-delete-egress-nat');
+    if (deleteEgressNAT) {
+      app.deleteEgressNAT(parseInt(deleteEgressNAT.dataset.id, 10));
     }
   });
 
@@ -429,7 +579,7 @@
     const site = {
       domain: app.$('siteDomain').value.trim(),
       listen_ip: app.el.siteListenIP.value || '0.0.0.0',
-      listen_interface: app.el.siteListenIface.value,
+      listen_interface: app.getInterfaceSubmissionValue(app.el.siteListenIface, app.el.siteListenIfacePicker),
       backend_ip: app.$('siteBackendIP').value.trim(),
       backend_source_ip: app.$('siteTransparent').checked ? '' : app.el.siteBackendSourceIP.value,
       backend_http_port: httpPort,
@@ -514,11 +664,11 @@
     }
 
     const range = {
-      in_interface: app.el.rangeInInterface.value,
+      in_interface: app.getInterfaceSubmissionValue(app.el.rangeInInterface, app.el.rangeInInterfacePicker),
       in_ip: inIPVal,
       start_port: startPort,
       end_port: endPort,
-      out_interface: app.el.rangeOutInterface.value,
+      out_interface: app.getInterfaceSubmissionValue(app.el.rangeOutInterface, app.el.rangeOutInterfacePicker),
       out_ip: outIP,
       out_source_ip: app.$('rangeTransparent').checked ? '' : app.el.rangeOutSourceIP.value,
       out_start_port: parseInt(app.$('rangeOutStartPort').value, 10) || 0,
@@ -566,6 +716,89 @@
     );
   });
 
+  if (app.el.egressNATForm) {
+    app.el.egressNATForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      app.clearFormErrors(app.el.egressNATForm);
+
+      const item = app.buildEgressNATFromForm();
+      let valid = true;
+      if (!app.validateRequiredField(app.el.egressNATParentPicker || app.el.egressNATParentInterface)) valid = false;
+      if (!app.validateRequiredField(app.el.egressNATOutPicker || app.el.egressNATOutInterface)) valid = false;
+      if (!item.protocol) {
+        app.setFieldError(app.el.egressNATProtocolTrigger || app.el.egressNATProtocol, app.t('validation.egressNATProtocol'));
+        valid = false;
+      } else if (app.el.egressNATProtocolTrigger || app.el.egressNATProtocol) {
+        app.clearFieldError(app.el.egressNATProtocolTrigger || app.el.egressNATProtocol);
+      }
+
+      if (item.out_source_ip) {
+        if (!app.parseIPv4(item.out_source_ip)) {
+          app.setFieldError(app.el.egressNATOutSourceIP, app.t('validation.ipv4'));
+          valid = false;
+        } else {
+          app.clearFieldError(app.el.egressNATOutSourceIP);
+        }
+      }
+
+      if (!valid || !item.parent_interface || !item.out_interface) {
+        app.notify('error', app.t('validation.reviewErrors'));
+        app.focusFirstError(app.el.egressNATForm);
+        return;
+      }
+
+      if (item.child_interface && item.child_interface === item.out_interface) {
+        app.setFieldError(app.el.egressNATChildPicker || app.el.egressNATChildInterface, app.t('validation.childInterfaceDifferent'));
+        app.setFieldError(app.el.egressNATOutPicker || app.el.egressNATOutInterface, app.t('validation.childInterfaceDifferent'));
+        app.notify('error', app.t('validation.childInterfaceDifferent'));
+        app.focusFirstError(app.el.egressNATForm);
+        return;
+      }
+      if (typeof app.isEgressNATSingleTargetInterfaceName === 'function' &&
+        app.isEgressNATSingleTargetInterfaceName(item.parent_interface) &&
+        item.parent_interface === item.out_interface) {
+        app.setFieldError(app.el.egressNATParentPicker || app.el.egressNATParentInterface, app.t('validation.egressNATSingleTargetOutConflict'));
+        app.setFieldError(app.el.egressNATOutPicker || app.el.egressNATOutInterface, app.t('validation.egressNATSingleTargetOutConflict'));
+        app.notify('error', app.t('validation.egressNATSingleTargetOutConflict'));
+        app.focusFirstError(app.el.egressNATForm);
+        return;
+      }
+
+      const editing = parseInt(app.el.editEgressNATId.value || '0', 10);
+      await app.withFormBusy(
+        'egressNAT',
+        app.el.egressNATSubmitBtn,
+        app.el.egressNATCancelBtn,
+        app.t('common.saving'),
+        async () => {
+          try {
+            if (editing > 0) {
+              await app.apiCall('PUT', '/api/egress-nats', Object.assign({ id: editing }, item));
+              app.notify('success', app.t('toast.saved', { item: app.t('noun.egressNAT') }));
+            } else {
+              await app.apiCall('POST', '/api/egress-nats', item);
+              app.notify('success', app.t('toast.created', { item: app.t('noun.egressNAT') }));
+            }
+            app.exitEgressNATEditMode();
+            await app.loadEgressNATs();
+          } catch (err) {
+            if (err.message !== 'unauthorized') {
+              if (err.payload && Array.isArray(err.payload.issues) && err.payload.issues.length > 0) {
+                app.applyEgressNATValidationIssues(err.payload.issues);
+                return;
+              }
+              app.notify('error', app.t('errors.actionFailed', {
+                action: app.t(editing > 0 ? 'action.update' : 'action.add'),
+                message: app.translateValidationMessage(err.message)
+              }));
+            }
+          }
+        },
+        app.syncEgressNATFormState
+      );
+    });
+  }
+
   app.init = function init() {
     if (!app.getToken()) {
       app.showTokenModal();
@@ -576,6 +809,7 @@
     app.setRuleFormAdd();
     app.setSiteFormAdd();
     app.setRangeFormAdd();
+    if (typeof app.setEgressNATFormAdd === 'function') app.setEgressNATFormAdd();
     app.activateTab(app.state.activeTab, { persist: false, skipLoad: true });
 
     app.refreshDashboard({

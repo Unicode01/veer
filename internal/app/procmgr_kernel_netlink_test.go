@@ -67,7 +67,7 @@ func TestIsNetlinkTriggeredKernelFallbackReason(t *testing.T) {
 		},
 		{
 			name:   "pressure",
-			reason: `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+			reason: `kernel dataplane pressure: flows 242000/262144 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
 			want:   false,
 		},
 	}
@@ -97,7 +97,7 @@ func TestSummarizeNetlinkTriggeredKernelFallbacksLocked(t *testing.T) {
 			3: {
 				KernelEligible:  true,
 				EffectiveEngine: ruleEngineUserspace,
-				FallbackReason:  `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+				FallbackReason:  `kernel dataplane pressure: flows 242000/262144 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
 			},
 		},
 		rangePlans: map[int64]rangeDataplanePlan{
@@ -136,6 +136,82 @@ func TestNextKernelNetlinkRetryState(t *testing.T) {
 	retry, nextAt := nextKernelNetlinkRetryState(at, now.Add(kernelNetlinkRetryDebounce+time.Second), "")
 	if retry || !nextAt.Equal(at) {
 		t.Fatalf("empty summary = (%v, %v), want false with unchanged timestamp", retry, nextAt)
+	}
+}
+
+func TestMergeKernelNetlinkRecoverySummaries(t *testing.T) {
+	got := mergeKernelNetlinkRecoverySummaries(
+		"rules=1 ranges=0 reasons=neighbor_missing=1",
+		"",
+		"egress_nat_parents=vmbr1",
+	)
+	want := "rules=1 ranges=0 reasons=neighbor_missing=1; egress_nat_parents=vmbr1"
+	if got != want {
+		t.Fatalf("mergeKernelNetlinkRecoverySummaries() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizeDynamicEgressNATParentInterfaces(t *testing.T) {
+	got := summarizeDynamicEgressNATParentInterfaces(map[string]struct{}{
+		"vmbr1": {},
+		"vmbr0": {},
+		"vmbr2": {},
+		"vmbr3": {},
+	})
+	want := "egress_nat_parents=vmbr0,vmbr1,vmbr2,+1"
+	if got != want {
+		t.Fatalf("summarizeDynamicEgressNATParentInterfaces() = %q, want %q", got, want)
+	}
+}
+
+func TestKernelNetlinkTriggerMatchesDynamicEgressNATParentsWithoutHintsIsConservative(t *testing.T) {
+	trigger := newKernelNetlinkRecoveryTrigger("link")
+
+	got := kernelNetlinkTriggerMatchesDynamicEgressNATParents(trigger, map[string]struct{}{
+		"vmbr1": {},
+		"vmbr0": {},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("len(matches) = %d, want 2", len(got))
+	}
+	if _, ok := got["vmbr0"]; !ok {
+		t.Fatal("matches missing vmbr0")
+	}
+	if _, ok := got["vmbr1"]; !ok {
+		t.Fatal("matches missing vmbr1")
+	}
+}
+
+func TestKernelNetlinkTriggerMatchesDynamicEgressNATParentsFiltersUnrelatedInterfaces(t *testing.T) {
+	trigger := newKernelNetlinkRecoveryTrigger("link")
+	trigger.addInterfaceName("eno2")
+	trigger.addLinkNeighborInterface("eno2")
+	trigger.addLinkFDBInterface("vmbr9")
+
+	got := kernelNetlinkTriggerMatchesDynamicEgressNATParents(trigger, map[string]struct{}{
+		"vmbr1": {},
+	})
+	if len(got) != 0 {
+		t.Fatalf("matches = %#v, want none", got)
+	}
+}
+
+func TestKernelNetlinkTriggerMatchesDynamicEgressNATParentsReturnsMatchedSubset(t *testing.T) {
+	trigger := newKernelNetlinkRecoveryTrigger("link")
+	trigger.addInterfaceName("eno2")
+	trigger.addLinkNeighborInterface("tap100i0")
+	trigger.addLinkFDBInterface("vmbr1")
+
+	got := kernelNetlinkTriggerMatchesDynamicEgressNATParents(trigger, map[string]struct{}{
+		"vmbr1": {},
+		"vmbr2": {},
+	})
+	if len(got) != 1 {
+		t.Fatalf("len(matches) = %d, want 1", len(got))
+	}
+	if _, ok := got["vmbr1"]; !ok {
+		t.Fatal("matches missing vmbr1")
 	}
 }
 
@@ -584,6 +660,70 @@ func TestHandleKernelNetlinkRecoveryEventQueuesAsyncRetry(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("runKernelNetlinkRecoveryLoop() did not exit after stop")
+	}
+}
+
+func TestHandleKernelNetlinkRecoveryTriggerLinkChangeForDynamicEgressNATQueuesIncrementalRefresh(t *testing.T) {
+	pm := &ProcessManager{
+		cfg:                      &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 3},
+		kernelRuntime:            &stubNetlinkFallbackRuntime{},
+		redistributeWake:         make(chan struct{}, 1),
+		dynamicEgressNATParents:  map[string]struct{}{"vmbr1": {}},
+		rulePlans:                map[int64]ruleDataplanePlan{},
+		rangePlans:               map[int64]rangeDataplanePlan{},
+		kernelNetlinkRecoverWake: make(chan struct{}, 1),
+	}
+
+	pm.handleKernelNetlinkRecoveryTrigger(newKernelNetlinkRecoveryTrigger("link"))
+
+	if pm.redistributePending {
+		t.Fatal("redistributePending = true, want queued incremental refresh for parent-scope egress nat link change")
+	}
+	if !pm.kernelNetlinkRecoverPending {
+		t.Fatal("kernelNetlinkRecoverPending = false, want queued incremental refresh")
+	}
+	if pm.kernelRetryCount != 1 {
+		t.Fatalf("kernelRetryCount = %d, want 1", pm.kernelRetryCount)
+	}
+	if pm.lastKernelRetryReason != "egress_nat_parents=vmbr1" {
+		t.Fatalf("lastKernelRetryReason = %q, want parent-scope egress nat summary", pm.lastKernelRetryReason)
+	}
+	if pm.kernelNetlinkRecoverSource != "link" {
+		t.Fatalf("kernelNetlinkRecoverSource = %q, want link", pm.kernelNetlinkRecoverSource)
+	}
+	if pm.kernelNetlinkRecoverSummary != "egress_nat_parents=vmbr1" {
+		t.Fatalf("kernelNetlinkRecoverSummary = %q, want parent-scope egress nat summary", pm.kernelNetlinkRecoverSummary)
+	}
+}
+
+func TestHandleKernelNetlinkRecoveryTriggerLinkChangeForUnrelatedDynamicEgressNATSkipsRedistribute(t *testing.T) {
+	pm := &ProcessManager{
+		cfg:                      &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 3},
+		kernelRuntime:            &stubNetlinkFallbackRuntime{},
+		redistributeWake:         make(chan struct{}, 1),
+		dynamicEgressNATParents:  map[string]struct{}{"vmbr1": {}},
+		rulePlans:                map[int64]ruleDataplanePlan{},
+		rangePlans:               map[int64]rangeDataplanePlan{},
+		kernelNetlinkRecoverWake: make(chan struct{}, 1),
+	}
+
+	trigger := newKernelNetlinkRecoveryTrigger("link")
+	trigger.addInterfaceName("eno2")
+	trigger.addLinkNeighborInterface("eno2")
+	trigger.addLinkFDBInterface("vmbr9")
+	pm.handleKernelNetlinkRecoveryTrigger(trigger)
+
+	if pm.redistributePending {
+		t.Fatal("redistributePending = true, want false for unrelated link change")
+	}
+	if pm.kernelNetlinkRecoverPending {
+		t.Fatal("kernelNetlinkRecoverPending = true, want no queued recovery for unrelated link change without fallback summary")
+	}
+	if pm.kernelRetryCount != 0 {
+		t.Fatalf("kernelRetryCount = %d, want 0", pm.kernelRetryCount)
+	}
+	if pm.lastKernelRetryReason != "" {
+		t.Fatalf("lastKernelRetryReason = %q, want empty", pm.lastKernelRetryReason)
 	}
 }
 

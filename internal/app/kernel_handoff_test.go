@@ -3,8 +3,9 @@ package app
 import "testing"
 
 type stubKernelHandoffRuntime struct {
-	ruleRetain  map[int64][]Rule
-	rangeRetain map[int64][]Rule
+	ruleRetain      map[int64][]Rule
+	rangeRetain     map[int64][]Rule
+	egressNATRetain map[int64][]Rule
 }
 
 func (s stubKernelHandoffRuntime) Available() (bool, string) {
@@ -38,6 +39,11 @@ func (s stubKernelHandoffRuntime) retainedKernelRuleCandidates(rule Rule) ([]Rul
 
 func (s stubKernelHandoffRuntime) retainedKernelRangeCandidates(pr PortRange) ([]Rule, bool) {
 	items, ok := s.rangeRetain[pr.ID]
+	return items, ok
+}
+
+func (s stubKernelHandoffRuntime) retainedKernelEgressNATCandidates(item EgressNAT) ([]Rule, bool) {
+	items, ok := s.egressNATRetain[item.ID]
 	return items, ok
 }
 

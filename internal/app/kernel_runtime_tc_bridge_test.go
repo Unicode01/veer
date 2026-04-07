@@ -45,6 +45,15 @@ func TestClassifyTCBridgeRoutes(t *testing.T) {
 			t.Fatalf("classifyTCBridgeRoutes() = matched=%v direct=%v, want matched=true direct=true", matched, direct)
 		}
 	})
+
+	t.Run("bridge member route is accepted as direct match", func(t *testing.T) {
+		matched, direct := classifyTCBridgeRoutesWithMembers([]netlink.Route{
+			{LinkIndex: 77},
+		}, 12, map[int]struct{}{77: {}})
+		if !matched || !direct {
+			t.Fatalf("classifyTCBridgeRoutesWithMembers() = matched=%v direct=%v, want matched=true direct=true", matched, direct)
+		}
+	})
 }
 
 func TestShouldFallbackTCBridgeFastPath(t *testing.T) {
@@ -82,4 +91,61 @@ func TestShouldFallbackTCBridgeFastPath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMatchBridgeNeighborTarget(t *testing.T) {
+	backendIP := net.ParseIP("198.51.100.20").To4()
+	backendMAC := net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee}
+
+	t.Run("prefers bridge slave neighbor link index", func(t *testing.T) {
+		target, ok := matchBridgeNeighborTarget([]netlink.Neigh{
+			{
+				IP:           backendIP,
+				LinkIndex:    17,
+				MasterIndex:  12,
+				HardwareAddr: backendMAC,
+			},
+		}, 12, nil, backendIP)
+		if !ok {
+			t.Fatal("matchBridgeNeighborTarget() = not found, want found")
+		}
+		if target.linkIndex != 17 {
+			t.Fatalf("target.linkIndex = %d, want 17", target.linkIndex)
+		}
+		if target.mac.String() != backendMAC.String() {
+			t.Fatalf("target.mac = %s, want %s", target.mac, backendMAC)
+		}
+	})
+
+	t.Run("keeps bridge master neighbor without member index", func(t *testing.T) {
+		target, ok := matchBridgeNeighborTarget([]netlink.Neigh{
+			{
+				IP:           backendIP,
+				LinkIndex:    12,
+				HardwareAddr: backendMAC,
+			},
+		}, 12, nil, backendIP)
+		if !ok {
+			t.Fatal("matchBridgeNeighborTarget() = not found, want found")
+		}
+		if target.linkIndex != 0 {
+			t.Fatalf("target.linkIndex = %d, want 0", target.linkIndex)
+		}
+	})
+
+	t.Run("accepts bridge member neighbor without master index", func(t *testing.T) {
+		target, ok := matchBridgeNeighborTarget([]netlink.Neigh{
+			{
+				IP:           backendIP,
+				LinkIndex:    17,
+				HardwareAddr: backendMAC,
+			},
+		}, 12, map[int]struct{}{17: {}}, backendIP)
+		if !ok {
+			t.Fatal("matchBridgeNeighborTarget() = not found, want found")
+		}
+		if target.linkIndex != 17 {
+			t.Fatalf("target.linkIndex = %d, want 17", target.linkIndex)
+		}
+	})
 }

@@ -20,6 +20,8 @@ type Rule struct {
 
 	kernelLogKind    string
 	kernelLogOwnerID int64
+	kernelMode       string
+	kernelNATType    string
 }
 
 type Site struct {
@@ -76,8 +78,31 @@ type IPCMessage struct {
 }
 
 type InterfaceInfo struct {
-	Name  string   `json:"name"`
-	Addrs []string `json:"addrs"`
+	Name   string   `json:"name"`
+	Addrs  []string `json:"addrs"`
+	Parent string   `json:"parent,omitempty"`
+	Kind   string   `json:"kind,omitempty"`
+}
+
+type EgressNAT struct {
+	ID              int64  `json:"id"`
+	ParentInterface string `json:"parent_interface"`
+	ChildInterface  string `json:"child_interface"`
+	OutInterface    string `json:"out_interface"`
+	OutSourceIP     string `json:"out_source_ip"`
+	Protocol        string `json:"protocol"`
+	NATType         string `json:"nat_type"`
+	Enabled         bool   `json:"enabled"`
+}
+
+type EgressNATStatus struct {
+	EgressNAT
+	Status                string `json:"status"`
+	EffectiveEngine       string `json:"effective_engine"`
+	EffectiveKernelEngine string `json:"effective_kernel_engine,omitempty"`
+	KernelEligible        bool   `json:"kernel_eligible"`
+	KernelReason          string `json:"kernel_reason,omitempty"`
+	FallbackReason        string `json:"fallback_reason,omitempty"`
 }
 
 type RuleStatus struct {
@@ -106,15 +131,17 @@ type PortRangeStatus struct {
 }
 
 type WorkerView struct {
-	Kind       string            `json:"kind"`
-	Index      int               `json:"index"`
-	Status     string            `json:"status"`
-	BinaryHash string            `json:"binary_hash,omitempty"`
-	RuleCount  int               `json:"rule_count,omitempty"`
-	RangeCount int               `json:"range_count,omitempty"`
-	SiteCount  int               `json:"site_count,omitempty"`
-	Rules      []RuleStatus      `json:"rules,omitempty"`
-	Ranges     []PortRangeStatus `json:"ranges,omitempty"`
+	Kind           string            `json:"kind"`
+	Index          int               `json:"index"`
+	Status         string            `json:"status"`
+	BinaryHash     string            `json:"binary_hash,omitempty"`
+	RuleCount      int               `json:"rule_count,omitempty"`
+	RangeCount     int               `json:"range_count,omitempty"`
+	SiteCount      int               `json:"site_count,omitempty"`
+	EgressNATCount int               `json:"egress_nat_count,omitempty"`
+	Rules          []RuleStatus      `json:"rules,omitempty"`
+	Ranges         []PortRangeStatus `json:"ranges,omitempty"`
+	EgressNATs     []EgressNATStatus `json:"egress_nats,omitempty"`
 }
 
 type WorkerListResponse struct {
@@ -189,6 +216,42 @@ type RangeStatsListResponse struct {
 	Items    []RangeStatsListItem `json:"items"`
 }
 
+type EgressNATStatsReport struct {
+	EgressNATID  int64 `json:"egress_nat_id"`
+	ActiveConns  int64 `json:"active_conns"`
+	TotalConns   int64 `json:"total_conns"`
+	BytesIn      int64 `json:"bytes_in"`
+	BytesOut     int64 `json:"bytes_out"`
+	SpeedIn      int64 `json:"speed_in"`
+	SpeedOut     int64 `json:"speed_out"`
+	NatTableSize int   `json:"nat_table_size"`
+}
+
+type EgressNATCurrentConnsReport struct {
+	EgressNATID  int64 `json:"egress_nat_id"`
+	CurrentConns int64 `json:"current_conns"`
+}
+
+type EgressNATStatsListItem struct {
+	EgressNATStatsReport
+	ParentInterface string `json:"parent_interface"`
+	ChildInterface  string `json:"child_interface"`
+	OutInterface    string `json:"out_interface"`
+	OutSourceIP     string `json:"out_source_ip"`
+	Protocol        string `json:"protocol"`
+	NATType         string `json:"nat_type"`
+	CurrentConns    int64  `json:"-"`
+}
+
+type EgressNATStatsListResponse struct {
+	Page     int                      `json:"page"`
+	PageSize int                      `json:"page_size"`
+	Total    int                      `json:"total"`
+	SortKey  string                   `json:"sort_key,omitempty"`
+	SortAsc  bool                     `json:"sort_asc"`
+	Items    []EgressNATStatsListItem `json:"items"`
+}
+
 type SiteStatsReport struct {
 	SiteID      int64  `json:"site_id"`
 	Domain      string `json:"domain"`
@@ -206,58 +269,86 @@ type SiteCurrentConnsReport struct {
 }
 
 type CurrentConnsResponse struct {
-	Rules  []RuleCurrentConnsReport  `json:"rules"`
-	Ranges []RangeCurrentConnsReport `json:"ranges"`
-	Sites  []SiteCurrentConnsReport  `json:"sites"`
+	Rules      []RuleCurrentConnsReport      `json:"rules"`
+	Ranges     []RangeCurrentConnsReport     `json:"ranges"`
+	Sites      []SiteCurrentConnsReport      `json:"sites"`
+	EgressNATs []EgressNATCurrentConnsReport `json:"egress_nats"`
 }
 
 type KernelEngineRuntimeView struct {
-	Name                       string    `json:"name"`
-	Available                  bool      `json:"available"`
-	AvailableReason            string    `json:"available_reason,omitempty"`
-	PressureActive             bool      `json:"pressure_active"`
-	PressureLevel              string    `json:"pressure_level,omitempty"`
-	PressureReason             string    `json:"pressure_reason,omitempty"`
-	PressureSince              time.Time `json:"pressure_since,omitempty"`
-	Degraded                   bool      `json:"degraded"`
-	DegradedReason             string    `json:"degraded_reason,omitempty"`
-	DegradedSince              time.Time `json:"degraded_since,omitempty"`
-	Loaded                     bool      `json:"loaded"`
-	ActiveEntries              int       `json:"active_entries"`
-	Attachments                int       `json:"attachments"`
-	AttachmentsHealthy         bool      `json:"attachments_healthy"`
-	AttachmentSummary          string    `json:"attachment_summary,omitempty"`
-	AttachmentsUnhealthyCount  int       `json:"attachments_unhealthy_count,omitempty"`
-	LastAttachmentsUnhealthyAt time.Time `json:"last_attachments_unhealthy_at,omitempty"`
-	RulesMapEntries            int       `json:"rules_map_entries"`
-	RulesMapCapacity           int       `json:"rules_map_capacity"`
-	FlowsMapEntries            int       `json:"flows_map_entries"`
-	FlowsMapCapacity           int       `json:"flows_map_capacity"`
-	NATMapEntries              int       `json:"nat_map_entries,omitempty"`
-	NATMapCapacity             int       `json:"nat_map_capacity,omitempty"`
-	LastReconcileMode          string    `json:"last_reconcile_mode,omitempty"`
-	TrafficStats               bool      `json:"traffic_stats"`
-	Diagnostics                bool      `json:"diagnostics"`
-	DiagnosticsVerbose         bool      `json:"diagnostics_verbose"`
-	DiagFIBNonSuccess          uint64    `json:"diag_fib_non_success,omitempty"`
-	DiagRedirectNeighUsed      uint64    `json:"diag_redirect_neigh_used,omitempty"`
-	DiagRedirectDrop           uint64    `json:"diag_redirect_drop,omitempty"`
-	DiagNATReserveFail         uint64    `json:"diag_nat_reserve_fail,omitempty"`
-	DiagNATSelfHealInsert      uint64    `json:"diag_nat_self_heal_insert,omitempty"`
-	DiagFlowUpdateFail         uint64    `json:"diag_flow_update_fail,omitempty"`
-	DiagNATUpdateFail          uint64    `json:"diag_nat_update_fail,omitempty"`
-	DiagRewriteFail            uint64    `json:"diag_rewrite_fail,omitempty"`
-	DiagNATProbeRound2Used     uint64    `json:"diag_nat_probe_round2_used,omitempty"`
-	DiagNATProbeRound3Used     uint64    `json:"diag_nat_probe_round3_used,omitempty"`
-	DiagReplyFlowRecreated     uint64    `json:"diag_reply_flow_recreated,omitempty"`
-	DiagTCPCloseDelete         uint64    `json:"diag_tcp_close_delete,omitempty"`
-	DiagSnapshotError          string    `json:"diag_snapshot_error,omitempty"`
-	LastMaintainAt             time.Time `json:"last_maintain_at,omitempty"`
-	LastMaintainMs             int64     `json:"last_maintain_ms,omitempty"`
-	LastMaintainError          string    `json:"last_maintain_error,omitempty"`
-	LastPruneBudget            int       `json:"last_prune_budget,omitempty"`
-	LastPruneScanned           int       `json:"last_prune_scanned,omitempty"`
-	LastPruneDeleted           int       `json:"last_prune_deleted,omitempty"`
+	Name                          string    `json:"name"`
+	Available                     bool      `json:"available"`
+	AvailableReason               string    `json:"available_reason,omitempty"`
+	PressureActive                bool      `json:"pressure_active"`
+	PressureLevel                 string    `json:"pressure_level,omitempty"`
+	PressureReason                string    `json:"pressure_reason,omitempty"`
+	PressureSince                 time.Time `json:"pressure_since,omitempty"`
+	Degraded                      bool      `json:"degraded"`
+	DegradedReason                string    `json:"degraded_reason,omitempty"`
+	DegradedSince                 time.Time `json:"degraded_since,omitempty"`
+	Loaded                        bool      `json:"loaded"`
+	ActiveEntries                 int       `json:"active_entries"`
+	Attachments                   int       `json:"attachments"`
+	AttachmentsHealthy            bool      `json:"attachments_healthy"`
+	AttachmentSummary             string    `json:"attachment_summary,omitempty"`
+	AttachmentsUnhealthyCount     int       `json:"attachments_unhealthy_count,omitempty"`
+	LastAttachmentsUnhealthyAt    time.Time `json:"last_attachments_unhealthy_at,omitempty"`
+	RulesMapEntries               int       `json:"rules_map_entries"`
+	RulesMapCapacity              int       `json:"rules_map_capacity"`
+	RulesMapEntriesV4             int       `json:"rules_map_entries_v4,omitempty"`
+	RulesMapCapacityV4            int       `json:"rules_map_capacity_v4,omitempty"`
+	RulesMapEntriesV6             int       `json:"rules_map_entries_v6,omitempty"`
+	RulesMapCapacityV6            int       `json:"rules_map_capacity_v6,omitempty"`
+	FlowsMapEntries               int       `json:"flows_map_entries"`
+	FlowsMapCapacity              int       `json:"flows_map_capacity"`
+	FlowsMapEntriesV4             int       `json:"flows_map_entries_v4,omitempty"`
+	FlowsMapCapacityV4            int       `json:"flows_map_capacity_v4,omitempty"`
+	FlowsMapEntriesV6             int       `json:"flows_map_entries_v6,omitempty"`
+	FlowsMapCapacityV6            int       `json:"flows_map_capacity_v6,omitempty"`
+	NATMapEntries                 int       `json:"nat_map_entries,omitempty"`
+	NATMapCapacity                int       `json:"nat_map_capacity,omitempty"`
+	NATMapEntriesV4               int       `json:"nat_map_entries_v4,omitempty"`
+	NATMapCapacityV4              int       `json:"nat_map_capacity_v4,omitempty"`
+	NATMapEntriesV6               int       `json:"nat_map_entries_v6,omitempty"`
+	NATMapCapacityV6              int       `json:"nat_map_capacity_v6,omitempty"`
+	LastReconcileMode             string    `json:"last_reconcile_mode,omitempty"`
+	TrafficStats                  bool      `json:"traffic_stats"`
+	Diagnostics                   bool      `json:"diagnostics"`
+	DiagnosticsVerbose            bool      `json:"diagnostics_verbose"`
+	DiagFIBNonSuccess             uint64    `json:"diag_fib_non_success,omitempty"`
+	DiagRedirectNeighUsed         uint64    `json:"diag_redirect_neigh_used,omitempty"`
+	DiagRedirectDrop              uint64    `json:"diag_redirect_drop,omitempty"`
+	DiagNATReserveFail            uint64    `json:"diag_nat_reserve_fail,omitempty"`
+	DiagNATSelfHealInsert         uint64    `json:"diag_nat_self_heal_insert,omitempty"`
+	DiagFlowUpdateFail            uint64    `json:"diag_flow_update_fail,omitempty"`
+	DiagNATUpdateFail             uint64    `json:"diag_nat_update_fail,omitempty"`
+	DiagRewriteFail               uint64    `json:"diag_rewrite_fail,omitempty"`
+	DiagNATProbeRound2Used        uint64    `json:"diag_nat_probe_round2_used,omitempty"`
+	DiagNATProbeRound3Used        uint64    `json:"diag_nat_probe_round3_used,omitempty"`
+	DiagReplyFlowRecreated        uint64    `json:"diag_reply_flow_recreated,omitempty"`
+	DiagTCPCloseDelete            uint64    `json:"diag_tcp_close_delete,omitempty"`
+	DiagSnapshotError             string    `json:"diag_snapshot_error,omitempty"`
+	LastReconcileAt               time.Time `json:"last_reconcile_at,omitempty"`
+	LastReconcileMs               int64     `json:"last_reconcile_ms,omitempty"`
+	LastReconcileError            string    `json:"last_reconcile_error,omitempty"`
+	LastReconcileRequestEntries   int       `json:"last_reconcile_request_entries,omitempty"`
+	LastReconcilePreparedEntries  int       `json:"last_reconcile_prepared_entries,omitempty"`
+	LastReconcileAppliedEntries   int       `json:"last_reconcile_applied_entries,omitempty"`
+	LastReconcileUpserts          int       `json:"last_reconcile_upserts,omitempty"`
+	LastReconcileDeletes          int       `json:"last_reconcile_deletes,omitempty"`
+	LastReconcileAttaches         int       `json:"last_reconcile_attaches,omitempty"`
+	LastReconcileDetaches         int       `json:"last_reconcile_detaches,omitempty"`
+	LastReconcilePreserved        int       `json:"last_reconcile_preserved,omitempty"`
+	LastReconcileFlowPurgeDeleted int       `json:"last_reconcile_flow_purge_deleted,omitempty"`
+	LastReconcilePrepareMs        int64     `json:"last_reconcile_prepare_ms,omitempty"`
+	LastReconcileAttachMs         int64     `json:"last_reconcile_attach_ms,omitempty"`
+	LastReconcileFlowPurgeMs      int64     `json:"last_reconcile_flow_purge_ms,omitempty"`
+	LastMaintainAt                time.Time `json:"last_maintain_at,omitempty"`
+	LastMaintainMs                int64     `json:"last_maintain_ms,omitempty"`
+	LastMaintainError             string    `json:"last_maintain_error,omitempty"`
+	LastPruneBudget               int       `json:"last_prune_budget,omitempty"`
+	LastPruneScanned              int       `json:"last_prune_scanned,omitempty"`
+	LastPruneDeleted              int       `json:"last_prune_deleted,omitempty"`
 }
 
 type KernelRuntimeResponse struct {
@@ -268,6 +359,18 @@ type KernelRuntimeResponse struct {
 	TrafficStats                                   bool                      `json:"traffic_stats"`
 	TCDiagnostics                                  bool                      `json:"tc_diagnostics"`
 	TCDiagnosticsVerbose                           bool                      `json:"tc_diagnostics_verbose"`
+	KernelMapProfile                               string                    `json:"kernel_map_profile,omitempty"`
+	KernelMapTotalMemoryBytes                      uint64                    `json:"kernel_map_total_memory_bytes,omitempty"`
+	KernelRulesMapBaseLimit                        int                       `json:"kernel_rules_map_base_limit,omitempty"`
+	KernelFlowsMapBaseLimit                        int                       `json:"kernel_flows_map_base_limit,omitempty"`
+	KernelNATMapBaseLimit                          int                       `json:"kernel_nat_map_base_limit,omitempty"`
+	KernelEgressNATAutoFloor                       int                       `json:"kernel_egress_nat_auto_floor,omitempty"`
+	KernelRulesMapConfiguredLimit                  int                       `json:"kernel_rules_map_configured_limit,omitempty"`
+	KernelFlowsMapConfiguredLimit                  int                       `json:"kernel_flows_map_configured_limit,omitempty"`
+	KernelNATMapConfiguredLimit                    int                       `json:"kernel_nat_map_configured_limit,omitempty"`
+	KernelRulesMapCapacityMode                     string                    `json:"kernel_rules_map_capacity_mode,omitempty"`
+	KernelFlowsMapCapacityMode                     string                    `json:"kernel_flows_map_capacity_mode,omitempty"`
+	KernelNATMapCapacityMode                       string                    `json:"kernel_nat_map_capacity_mode,omitempty"`
 	ActiveRuleCount                                int                       `json:"active_rule_count"`
 	ActiveRangeCount                               int                       `json:"active_range_count"`
 	KernelFallbackRuleCount                        int                       `json:"kernel_fallback_rule_count"`

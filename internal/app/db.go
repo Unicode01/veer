@@ -24,7 +24,7 @@ func scanRule(sc interface{ Scan(...interface{}) error }) (Rule, error) {
 	err := sc.Scan(&r.ID, &r.InInterface, &r.InIP, &r.InPort, &r.OutInterface, &r.OutIP, &r.OutSourceIP, &r.OutPort, &r.Protocol, &r.Remark, &r.Tag, &enabled, &transparent, &enginePreference)
 	r.Enabled = enabled != 0
 	r.Transparent = transparent != 0
-	r.EnginePreference = ruleEngineAuto
+	r.EnginePreference = normalizeRuleEnginePreference(enginePreference)
 	return r, err
 }
 
@@ -75,6 +75,16 @@ var schema = map[string][][2]string{
 		{"tag", "TEXT NOT NULL DEFAULT ''"},
 		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
 		{"transparent", "INTEGER NOT NULL DEFAULT 0"},
+	},
+	"egress_nats": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"parent_interface", "TEXT NOT NULL DEFAULT ''"},
+		{"child_interface", "TEXT NOT NULL DEFAULT ''"},
+		{"out_interface", "TEXT NOT NULL DEFAULT ''"},
+		{"out_source_ip", "TEXT NOT NULL DEFAULT ''"},
+		{"protocol", "TEXT NOT NULL DEFAULT 'tcp+udp'"},
+		{"nat_type", "TEXT NOT NULL DEFAULT 'symmetric'"},
+		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
 	},
 }
 
@@ -154,7 +164,7 @@ func dbAddRule(db sqlRuleStore, r *Rule) (int64, error) {
 	res, err := db.Exec(
 		`INSERT INTO rules (in_interface, in_ip, in_port, out_interface, out_ip, out_source_ip, out_port, protocol, remark, tag, enabled, transparent, engine_preference)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutSourceIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent), ruleEngineAuto,
+		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutSourceIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent), normalizeRuleEnginePreference(r.EnginePreference),
 	)
 	if err != nil {
 		return 0, err
@@ -165,7 +175,7 @@ func dbAddRule(db sqlRuleStore, r *Rule) (int64, error) {
 func dbUpdateRule(db sqlRuleStore, r *Rule) error {
 	_, err := db.Exec(
 		`UPDATE rules SET in_interface=?, in_ip=?, in_port=?, out_interface=?, out_ip=?, out_source_ip=?, out_port=?, protocol=?, remark=?, tag=?, enabled=?, transparent=?, engine_preference=? WHERE id=?`,
-		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutSourceIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent), ruleEngineAuto, r.ID,
+		r.InInterface, r.InIP, r.InPort, r.OutInterface, r.OutIP, r.OutSourceIP, r.OutPort, r.Protocol, r.Remark, r.Tag, boolToInt(r.Enabled), boolToInt(r.Transparent), normalizeRuleEnginePreference(r.EnginePreference), r.ID,
 	)
 	return err
 }
@@ -383,6 +393,74 @@ func dbGetRangeMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]PortRange, err
 		result[item.ID] = item
 	}
 	return result, rows.Err()
+}
+
+const egressNATColumns = `id, parent_interface, child_interface, out_interface, out_source_ip, protocol, nat_type, enabled`
+
+func scanEgressNAT(sc interface{ Scan(...interface{}) error }) (EgressNAT, error) {
+	var item EgressNAT
+	var enabled int
+	err := sc.Scan(&item.ID, &item.ParentInterface, &item.ChildInterface, &item.OutInterface, &item.OutSourceIP, &item.Protocol, &item.NATType, &enabled)
+	item.Protocol = normalizeEgressNATProtocol(item.Protocol)
+	item.NATType = normalizeEgressNATType(item.NATType)
+	item.Enabled = enabled != 0
+	return item, err
+}
+
+func dbAddEgressNAT(db sqlRuleStore, item *EgressNAT) (int64, error) {
+	res, err := db.Exec(
+		`INSERT INTO egress_nats (parent_interface, child_interface, out_interface, out_source_ip, protocol, nat_type, enabled)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		item.ParentInterface, item.ChildInterface, item.OutInterface, item.OutSourceIP, normalizeEgressNATProtocol(item.Protocol), normalizeEgressNATType(item.NATType), boolToInt(item.Enabled),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func dbUpdateEgressNAT(db sqlRuleStore, item *EgressNAT) error {
+	_, err := db.Exec(
+		`UPDATE egress_nats SET parent_interface=?, child_interface=?, out_interface=?, out_source_ip=?, protocol=?, nat_type=?, enabled=? WHERE id=?`,
+		item.ParentInterface, item.ChildInterface, item.OutInterface, item.OutSourceIP, normalizeEgressNATProtocol(item.Protocol), normalizeEgressNATType(item.NATType), boolToInt(item.Enabled), item.ID,
+	)
+	return err
+}
+
+func dbDeleteEgressNAT(db sqlRuleStore, id int64) error {
+	_, err := db.Exec(`DELETE FROM egress_nats WHERE id = ?`, id)
+	return err
+}
+
+func dbGetEgressNATs(db sqlRuleStore) ([]EgressNAT, error) {
+	rows, err := db.Query(`SELECT ` + egressNATColumns + ` FROM egress_nats`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []EgressNAT
+	for rows.Next() {
+		item, err := scanEgressNAT(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func dbGetEgressNAT(db sqlRuleStore, id int64) (*EgressNAT, error) {
+	item, err := scanEgressNAT(db.QueryRow(`SELECT `+egressNATColumns+` FROM egress_nats WHERE id = ?`, id))
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func dbSetEgressNATEnabled(db sqlRuleStore, id int64, enabled bool) error {
+	_, err := db.Exec(`UPDATE egress_nats SET enabled=? WHERE id=?`, boolToInt(enabled), id)
+	return err
 }
 
 func boolToInt(b bool) int {

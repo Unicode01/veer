@@ -420,13 +420,17 @@ func loadPinnedKernelMap(path string) (*ebpf.Map, bool, error) {
 
 func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestartMapState, error) {
 	state := &kernelHotRestartMapState{
-		replacements:     make(map[string]*ebpf.Map, 3),
+		replacements:     make(map[string]*ebpf.Map, 5),
 		actualCapacities: desired,
 	}
 	loadedAny := false
 	haveFlows := false
 	haveNAT := false
+	haveFlowsV6 := false
+	haveNATV6 := false
 	skipStats := kernelHotRestartSkipStatsRequested()
+	preservedFlowsCapacity := 0
+	preservedNATCapacity := 0
 
 	flowsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelFlowsMapName))
 	if err != nil {
@@ -437,7 +441,19 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 		loadedAny = true
 		haveFlows = true
 		state.replacements[kernelFlowsMapName] = flowsMap
-		state.actualCapacities.Flows = int(flowsMap.MaxEntries())
+		preservedFlowsCapacity += int(flowsMap.MaxEntries())
+	}
+
+	flowsMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelFlowsMapNameV6))
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned tc IPv6 flows map: %w", err)
+	}
+	if ok {
+		loadedAny = true
+		haveFlowsV6 = true
+		state.replacements[kernelFlowsMapNameV6] = flowsMapV6
+		preservedFlowsCapacity += int(flowsMapV6.MaxEntries())
 	}
 
 	natMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelNatPortsMapName))
@@ -449,7 +465,26 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 		loadedAny = true
 		haveNAT = true
 		state.replacements[kernelNatPortsMapName] = natMap
-		state.actualCapacities.NATPorts = int(natMap.MaxEntries())
+		preservedNATCapacity += int(natMap.MaxEntries())
+	}
+
+	natMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelNatPortsMapNameV6))
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned tc IPv6 nat map: %w", err)
+	}
+	if ok {
+		loadedAny = true
+		haveNATV6 = true
+		state.replacements[kernelNatPortsMapNameV6] = natMapV6
+		preservedNATCapacity += int(natMapV6.MaxEntries())
+	}
+
+	if preservedFlowsCapacity > 0 {
+		state.actualCapacities.Flows = preservedFlowsCapacity
+	}
+	if preservedNATCapacity > 0 {
+		state.actualCapacities.NATPorts = preservedNATCapacity
 	}
 
 	if !skipStats {
@@ -476,6 +511,14 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 	if !loadedAny {
 		state.close()
 		return nil, nil
+	}
+	if haveFlowsV6 != haveNATV6 {
+		state.close()
+		return nil, fmt.Errorf(
+			"incomplete pinned tc IPv6 state: flows_v6=%t nat_v6=%t",
+			haveFlowsV6,
+			haveNATV6,
+		)
 	}
 	haveStats := skipStats || state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil
 	if !haveFlows || !haveNAT || !haveStats {

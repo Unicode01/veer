@@ -5,6 +5,7 @@ package app
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/vishvananda/netlink"
@@ -36,11 +37,12 @@ func resolveTCBridgeTarget(outLink netlink.Link, rule Rule) (tcBridgeTarget, err
 		return tcBridgeTarget{}, fmt.Errorf("kernel dataplane bridge egress requires an explicit outbound IPv4 address")
 	}
 
-	backendMAC, err := lookupBridgeNeighborMAC(outLink.Attrs().Index, backendIP)
+	neighborTarget, err := lookupBridgeNeighborTarget(outLink.Attrs().Index, backendIP)
 	if err != nil {
 		return tcBridgeTarget{}, err
 	}
-	memberLink, err := lookupBridgeFDBPort(outLink.Attrs().Index, backendMAC)
+	backendMAC := neighborTarget.mac
+	memberLink, err := resolveBridgeMemberLink(outLink.Attrs().Index, neighborTarget, backendMAC)
 	if err != nil {
 		return tcBridgeTarget{}, err
 	}
@@ -129,7 +131,11 @@ func isTCBridgeDirectTarget(outLink netlink.Link, backendIP string) (bool, error
 		return false, fmt.Errorf("resolve outbound bridge route to %s on %q: no matching route", ip4.String(), outLink.Attrs().Name)
 	}
 
-	matched, direct := classifyTCBridgeRoutes(routes, outLink.Attrs().Index)
+	memberIndexes, err := listTCBridgeMemberIndexes(outLink.Attrs().Index)
+	if err != nil {
+		return false, fmt.Errorf("resolve outbound bridge members for %q: %w", outLink.Attrs().Name, err)
+	}
+	matched, direct := classifyTCBridgeRoutesWithMembers(routes, outLink.Attrs().Index, memberIndexes)
 	if !matched {
 		return false, nil
 	}
@@ -137,9 +143,15 @@ func isTCBridgeDirectTarget(outLink netlink.Link, backendIP string) (bool, error
 }
 
 func classifyTCBridgeRoutes(routes []netlink.Route, outIfIndex int) (matched bool, direct bool) {
+	return classifyTCBridgeRoutesWithMembers(routes, outIfIndex, nil)
+}
+
+func classifyTCBridgeRoutesWithMembers(routes []netlink.Route, outIfIndex int, memberIndexes map[int]struct{}) (matched bool, direct bool) {
 	for _, route := range routes {
 		if route.LinkIndex != 0 && route.LinkIndex != outIfIndex {
-			continue
+			if _, ok := memberIndexes[route.LinkIndex]; !ok {
+				continue
+			}
 		}
 		if gw := route.Gw.To4(); gw != nil && !gw.IsUnspecified() {
 			return true, false
@@ -147,4 +159,91 @@ func classifyTCBridgeRoutes(routes []netlink.Route, outIfIndex int) (matched boo
 		return true, true
 	}
 	return false, false
+}
+
+func listTCBridgeMemberIndexes(bridgeIndex int) (map[int]struct{}, error) {
+	links, err := listTCBridgeMemberLinks(bridgeIndex)
+	if err != nil {
+		return nil, err
+	}
+	indexes := make(map[int]struct{}, len(links))
+	for _, link := range links {
+		if link == nil || link.Attrs() == nil {
+			continue
+		}
+		indexes[link.Attrs().Index] = struct{}{}
+	}
+	return indexes, nil
+}
+
+func listTCBridgeMemberLinks(bridgeIndex int) ([]netlink.Link, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, err
+	}
+	members := make([]netlink.Link, 0, len(links))
+	for _, link := range links {
+		if link == nil || link.Attrs() == nil {
+			continue
+		}
+		if link.Attrs().MasterIndex != bridgeIndex {
+			continue
+		}
+		members = append(members, link)
+	}
+	sort.Slice(members, func(i, j int) bool {
+		if members[i].Attrs().Index != members[j].Attrs().Index {
+			return members[i].Attrs().Index < members[j].Attrs().Index
+		}
+		return members[i].Attrs().Name < members[j].Attrs().Name
+	})
+	return members, nil
+}
+
+func resolveTCReplyAttachments(outLink netlink.Link, outIfIndex int) ([]int, []kernelIfParentMapping, error) {
+	if outIfIndex <= 0 {
+		return nil, nil, fmt.Errorf("kernel dataplane cannot resolve reply interfaces")
+	}
+
+	replyIfIndexes := []int{outIfIndex}
+	if outLink == nil || outLink.Attrs() == nil || !isXDPBridgeLink(outLink) || outIfIndex != outLink.Attrs().Index {
+		return replyIfIndexes, nil, nil
+	}
+
+	members, err := listTCBridgeMemberLinks(outLink.Attrs().Index)
+	if err != nil {
+		return nil, nil, err
+	}
+	parents := make([]kernelIfParentMapping, 0, len(members))
+	seen := map[int]struct{}{outIfIndex: {}}
+	for _, link := range members {
+		if link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 {
+			continue
+		}
+		if _, ok := seen[link.Attrs().Index]; ok {
+			continue
+		}
+		seen[link.Attrs().Index] = struct{}{}
+		replyIfIndexes = append(replyIfIndexes, link.Attrs().Index)
+		parents = append(parents, kernelIfParentMapping{
+			ifindex:       link.Attrs().Index,
+			parentIfIndex: outIfIndex,
+		})
+	}
+	sort.Ints(replyIfIndexes)
+	return replyIfIndexes, parents, nil
+}
+
+func resolveTCBridgeParentMapping(link netlink.Link) (kernelIfParentMapping, bool) {
+	if link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 || link.Attrs().MasterIndex <= 0 {
+		return kernelIfParentMapping{}, false
+	}
+	parent, err := netlink.LinkByIndex(link.Attrs().MasterIndex)
+	if err != nil || parent == nil || parent.Attrs() == nil || !isXDPBridgeLink(parent) {
+		return kernelIfParentMapping{}, false
+	}
+	return kernelIfParentMapping{
+		ifindex:       link.Attrs().Index,
+		parentIfIndex: parent.Attrs().Index,
+	}, true
 }

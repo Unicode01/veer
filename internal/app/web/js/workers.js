@@ -6,6 +6,7 @@
     if (kind === 'kernel') return app.t('workers.kind.kernel');
     if (kind === 'rule') return app.t('workers.kind.rule');
     if (kind === 'range') return app.t('workers.kind.range');
+    if (kind === 'egress_nat') return app.t('workers.kind.egress_nat');
     return app.t('workers.kind.shared');
   };
 
@@ -13,6 +14,7 @@
     if (worker.kind === 'kernel') return worker.rule_count || worker.range_count || 0;
     if (worker.kind === 'rule') return worker.rule_count || 0;
     if (worker.kind === 'range') return worker.range_count || 0;
+    if (worker.kind === 'egress_nat') return worker.egress_nat_count || 0;
     return worker.site_count || 0;
   };
 
@@ -30,11 +32,51 @@
     if ((worker.kind === 'kernel' || worker.kind === 'rule') && (worker.rules || []).length > 0) {
       (worker.rules || []).forEach((rule) => {
         values.push(rule.id, rule.remark, rule.in_ip, rule.in_port, rule.out_ip, rule.out_port, rule.protocol, rule.tag, rule.effective_engine, rule.effective_kernel_engine, rule.kernel_reason, rule.fallback_reason);
+        const familyInfo = typeof app.getAddressFamilyInfo === 'function'
+          ? app.getAddressFamilyInfo(rule.in_ip, rule.out_ip)
+          : null;
+        if (familyInfo && familyInfo.searchText) values.push(familyInfo.searchText);
       });
     }
     if ((worker.kind === 'kernel' || worker.kind === 'range') && (worker.ranges || []).length > 0) {
       (worker.ranges || []).forEach((range) => {
         values.push(range.id, range.remark, range.in_ip, range.start_port, range.end_port, range.out_ip, range.out_start_port, range.protocol, range.tag, range.effective_engine, range.effective_kernel_engine, range.kernel_reason, range.fallback_reason);
+        const familyInfo = typeof app.getAddressFamilyInfo === 'function'
+          ? app.getAddressFamilyInfo(range.in_ip, range.out_ip)
+          : null;
+        if (familyInfo && familyInfo.searchText) values.push(familyInfo.searchText);
+      });
+    }
+    if (worker.kind === 'egress_nat' && (worker.egress_nats || []).length > 0) {
+      (worker.egress_nats || []).forEach((item) => {
+        const childScope = typeof app.formatEgressNATTableChildScope === 'function'
+          ? app.formatEgressNATTableChildScope(item.child_interface, item.parent_interface)
+          : (typeof app.formatEgressNATChildScope === 'function'
+            ? app.formatEgressNATChildScope(item.child_interface, item.parent_interface)
+            : (item.child_interface || '*'));
+        const protocol = typeof app.formatEgressNATProtocol === 'function'
+          ? app.formatEgressNATProtocol(item.protocol || '')
+          : String(item.protocol || '').toUpperCase();
+        const natType = typeof app.formatEgressNATNatType === 'function'
+          ? app.formatEgressNATNatType(item.nat_type || '')
+          : String(item.nat_type || '');
+        values.push(
+          item.id,
+          item.parent_interface,
+          item.child_interface,
+          childScope,
+          item.out_interface,
+          item.out_source_ip,
+          item.protocol,
+          protocol,
+          item.nat_type,
+          natType,
+          item.status,
+          item.effective_engine,
+          item.effective_kernel_engine,
+          item.kernel_reason,
+          item.fallback_reason
+        );
       });
     }
     if (worker.kind === 'shared') {
@@ -45,8 +87,8 @@
   };
 
   app.workerSortValue = function workerSortValue(worker, key) {
-    if (key === 'kind') return worker.kind === 'kernel' ? 0 : (worker.kind === 'rule' ? 1 : (worker.kind === 'range' ? 2 : 3));
-    if (key === 'index') return worker.kind === 'shared' || worker.kind === 'kernel' ? -1 : worker.index;
+    if (key === 'kind') return worker.kind === 'kernel' ? 0 : (worker.kind === 'rule' ? 1 : (worker.kind === 'range' ? 2 : (worker.kind === 'egress_nat' ? 3 : 4)));
+    if (key === 'index') return worker.kind === 'shared' || worker.kind === 'kernel' || worker.kind === 'egress_nat' ? -1 : worker.index;
     if (key === 'status') return worker.status === 'running' ? 0 : (worker.status === 'draining' ? 1 : (worker.status === 'error' ? 2 : 3));
     if (key === 'binary_hash') return worker.binary_hash || '';
     if (key === 'count') return app.workerCount(worker);
@@ -70,8 +112,12 @@
             badgeText: (rule.effective_engine || 'userspace'),
             title: rule.fallback_reason || rule.kernel_reason || ''
           };
+      const statusTitle = [
+        app.t('common.status') + ': ' + info.text,
+        engine.title || ''
+      ].filter(Boolean).join('\n');
       const row = app.createNode('div', { className: 'worker-detail-row' });
-      row.appendChild(app.createStatusBadgeNode(info));
+      row.appendChild(app.createBadgeNode('badge-' + info.badge, info.text, statusTitle));
       row.appendChild(app.createNode('span', {
         className: 'worker-route',
         text: '#' + rule.id + ' ' + rule.in_ip + ':' + rule.in_port + ' -> ' + rule.out_ip + ':' + rule.out_port
@@ -80,7 +126,6 @@
         className: 'worker-proto',
         text: String(rule.protocol || '').toUpperCase()
       }));
-      row.appendChild(app.createBadgeNode(engine.badgeClass, engine.badgeText, engine.title || ''));
       if (rule.remark) {
         row.appendChild(app.createNode('span', {
           className: 'worker-meta',
@@ -109,9 +154,13 @@
             badgeText: (range.effective_engine || 'userspace'),
             title: range.fallback_reason || range.kernel_reason || ''
           };
+      const statusTitle = [
+        app.t('common.status') + ': ' + info.text,
+        engine.title || ''
+      ].filter(Boolean).join('\n');
       const outEnd = range.out_start_port + (range.end_port - range.start_port);
       const row = app.createNode('div', { className: 'worker-detail-row' });
-      row.appendChild(app.createStatusBadgeNode(info));
+      row.appendChild(app.createBadgeNode('badge-' + info.badge, info.text, statusTitle));
       row.appendChild(app.createNode('span', {
         className: 'worker-route',
         text: '#' + range.id + ' ' + range.in_ip + ':' + range.start_port + '-' + range.end_port + ' -> ' + range.out_ip + ':' + range.out_start_port + '-' + outEnd
@@ -120,11 +169,70 @@
         className: 'worker-proto',
         text: String(range.protocol || '').toUpperCase()
       }));
-      row.appendChild(app.createBadgeNode(engine.badgeClass, engine.badgeText, engine.title || ''));
       if (range.remark) {
         row.appendChild(app.createNode('span', {
           className: 'worker-meta',
           text: '(' + range.remark + ')'
+        }));
+      }
+      list.appendChild(row);
+    });
+    return list;
+  };
+
+  app.renderEgressNATDetails = function renderEgressNATDetails(items) {
+    if (!items || items.length === 0) {
+      return app.createNode('span', {
+        className: 'worker-empty',
+        text: app.t('workers.emptyEgressNATs')
+      });
+    }
+    const list = app.createNode('div', { className: 'worker-detail-list' });
+    items.forEach((item) => {
+      const info = app.statusInfo(item.status, item.enabled);
+      const engine = typeof app.getRuleEngineInfo === 'function'
+        ? app.getRuleEngineInfo(item)
+        : {
+            badgeClass: 'badge-kernel',
+            badgeText: String(item.effective_kernel_engine || item.effective_engine || 'kernel').toUpperCase(),
+            title: item.fallback_reason || item.kernel_reason || ''
+          };
+      const statusTitle = [
+        app.t('common.status') + ': ' + info.text,
+        engine.title || ''
+      ].filter(Boolean).join('\n');
+      const singleTarget = typeof app.isEgressNATSingleTargetInterfaceName === 'function'
+        ? app.isEgressNATSingleTargetInterfaceName(item.parent_interface) && !item.child_interface
+        : false;
+      const childScope = typeof app.formatEgressNATTableChildScope === 'function'
+        ? app.formatEgressNATTableChildScope(item.child_interface, item.parent_interface)
+        : (typeof app.formatEgressNATChildScope === 'function'
+          ? app.formatEgressNATChildScope(item.child_interface, item.parent_interface)
+          : (item.child_interface || '*'));
+      const protocol = typeof app.formatEgressNATProtocol === 'function'
+        ? app.formatEgressNATProtocol(item.protocol || '')
+        : String(item.protocol || '').toUpperCase();
+      const natType = typeof app.formatEgressNATNatType === 'function'
+        ? app.formatEgressNATNatType(item.nat_type || '')
+        : String(item.nat_type || '');
+      const row = app.createNode('div', { className: 'worker-detail-row' });
+      row.appendChild(app.createBadgeNode('badge-' + info.badge, info.text, statusTitle));
+      row.appendChild(app.createNode('span', {
+        className: 'worker-route',
+        text: '#' + item.id + ' ' + (singleTarget ? item.parent_interface : (item.parent_interface + '/' + childScope)) + ' -> ' + item.out_interface
+      }));
+      row.appendChild(app.createNode('span', {
+        className: 'worker-proto',
+        text: protocol
+      }));
+      row.appendChild(app.createNode('span', {
+        className: 'worker-meta',
+        text: '[' + natType + ']'
+      }));
+      if (item.out_source_ip) {
+        row.appendChild(app.createNode('span', {
+          className: 'worker-meta',
+          text: '(' + item.out_source_ip + ')'
         }));
       }
       list.appendChild(row);
@@ -180,12 +288,14 @@
               })
             })
           })
+        : (worker.kind === 'egress_nat'
+          ? app.renderEgressNATDetails(worker.egress_nats || [])
         : ((worker.rules || []).length > 0
           ? app.renderRuleDetails(worker.rules)
-          : app.renderRangeDetails(worker.ranges));
+          : app.renderRangeDetails(worker.ranges)));
       const typeClass = worker.kind === 'kernel'
         ? 'worker-type-kernel'
-        : (worker.kind === 'rule' ? 'worker-type-rule' : (worker.kind === 'range' ? 'worker-type-range' : 'worker-type-shared'));
+        : (worker.kind === 'rule' ? 'worker-type-rule' : (worker.kind === 'range' ? 'worker-type-range' : (worker.kind === 'egress_nat' ? 'worker-type-egress-nat' : 'worker-type-shared')));
       const workerHash = worker.binary_hash || '';
       const hashClass = !workerHash ? '' : (workerHash === masterHash ? 'hash-match' : 'hash-outdated');
       const hashShort = workerHash ? workerHash.substring(0, 8) : app.t('common.dash');
@@ -194,7 +304,7 @@
         className: 'worker-type ' + typeClass,
         text: app.workerTypeLabel(worker.kind)
       })));
-      tr.appendChild(app.createCell(worker.kind === 'shared' || worker.kind === 'kernel' ? app.emptyCellNode() : String(worker.index)));
+      tr.appendChild(app.createCell(worker.kind === 'shared' || worker.kind === 'kernel' || worker.kind === 'egress_nat' ? app.emptyCellNode() : String(worker.index)));
       tr.appendChild(app.createCell(app.createStatusBadgeNode(info)));
       tr.appendChild(app.createCell(app.createNode('span', {
         className: 'worker-hash ' + hashClass,

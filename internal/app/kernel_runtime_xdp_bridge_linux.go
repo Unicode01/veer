@@ -19,6 +19,11 @@ type xdpBridgeTarget struct {
 	dstMAC     [6]byte
 }
 
+type bridgeNeighborTarget struct {
+	mac       net.HardwareAddr
+	linkIndex int
+}
+
 func resolveXDPInboundLinks(inLink netlink.Link, rule Rule, opts xdpPrepareOptions) ([]netlink.Link, error) {
 	if inLink == nil || inLink.Attrs() == nil {
 		return nil, fmt.Errorf("xdp dataplane cannot resolve the inbound interface")
@@ -59,12 +64,13 @@ func resolveXDPBridgeTarget(outLink netlink.Link, rule Rule, opts xdpPrepareOpti
 		return xdpBridgeTarget{}, fmt.Errorf("xdp bridge dataplane requires an explicit outbound IPv4 address")
 	}
 
-	backendMAC, err := lookupBridgeNeighborMAC(outLink.Attrs().Index, backendIP)
+	neighborTarget, err := lookupBridgeNeighborTarget(outLink.Attrs().Index, backendIP)
 	if err != nil {
 		return xdpBridgeTarget{}, fmt.Errorf("resolve bridge neighbor for %s on %q: %w", backendIP.String(), rule.OutInterface, err)
 	}
+	backendMAC := neighborTarget.mac
 
-	memberLink, err := lookupBridgeFDBPort(outLink.Attrs().Index, backendMAC)
+	memberLink, err := resolveBridgeMemberLink(outLink.Attrs().Index, neighborTarget, backendMAC)
 	if err != nil {
 		return xdpBridgeTarget{}, fmt.Errorf("resolve bridge forwarding port for %s on %q: %w", backendMAC.String(), rule.OutInterface, err)
 	}
@@ -91,38 +97,71 @@ func resolveXDPBridgeTarget(outLink netlink.Link, rule Rule, opts xdpPrepareOpti
 }
 
 func lookupBridgeNeighborMAC(bridgeIndex int, backendIP net.IP) (net.HardwareAddr, error) {
-	neighbors, err := netlink.NeighList(bridgeIndex, unix.AF_INET)
+	target, err := lookupBridgeNeighborTarget(bridgeIndex, backendIP)
 	if err != nil {
 		return nil, err
 	}
-	if hw, ok := matchBridgeNeighborMAC(neighbors, bridgeIndex, backendIP); ok {
-		return hw, nil
+	return target.mac, nil
+}
+
+func lookupBridgeNeighborTarget(bridgeIndex int, backendIP net.IP) (bridgeNeighborTarget, error) {
+	memberIndexes, err := listTCBridgeMemberIndexes(bridgeIndex)
+	if err != nil {
+		return bridgeNeighborTarget{}, err
+	}
+	neighbors, err := netlink.NeighList(bridgeIndex, unix.AF_INET)
+	if err != nil {
+		return bridgeNeighborTarget{}, err
+	}
+	if target, ok := matchBridgeNeighborTarget(neighbors, bridgeIndex, memberIndexes, backendIP); ok {
+		return target, nil
 	}
 
 	neighbors, err = netlink.NeighList(0, unix.AF_INET)
 	if err != nil {
-		return nil, err
+		return bridgeNeighborTarget{}, err
 	}
-	if hw, ok := matchBridgeNeighborMAC(neighbors, bridgeIndex, backendIP); ok {
-		return hw, nil
+	if target, ok := matchBridgeNeighborTarget(neighbors, bridgeIndex, memberIndexes, backendIP); ok {
+		return target, nil
 	}
-	return nil, fmt.Errorf("no learned IPv4 neighbor entry was found; ensure the backend has recent traffic or ARP state")
+	return bridgeNeighborTarget{}, fmt.Errorf("no learned IPv4 neighbor entry was found; ensure the backend has recent traffic or ARP state")
 }
 
-func matchBridgeNeighborMAC(neighbors []netlink.Neigh, bridgeIndex int, backendIP net.IP) (net.HardwareAddr, bool) {
+func matchBridgeNeighborTarget(neighbors []netlink.Neigh, bridgeIndex int, memberIndexes map[int]struct{}, backendIP net.IP) (bridgeNeighborTarget, bool) {
 	for _, neigh := range neighbors {
 		if neigh.IP == nil || !neigh.IP.Equal(backendIP) {
 			continue
 		}
 		if neigh.LinkIndex != bridgeIndex && neigh.MasterIndex != bridgeIndex {
-			continue
+			if _, ok := memberIndexes[neigh.LinkIndex]; !ok {
+				continue
+			}
 		}
 		if !isValidHardwareAddr(neigh.HardwareAddr) {
 			continue
 		}
-		return append(net.HardwareAddr(nil), neigh.HardwareAddr...), true
+		linkIndex := 0
+		if neigh.LinkIndex > 0 && neigh.LinkIndex != bridgeIndex {
+			linkIndex = neigh.LinkIndex
+		}
+		return bridgeNeighborTarget{
+			mac:       append(net.HardwareAddr(nil), neigh.HardwareAddr...),
+			linkIndex: linkIndex,
+		}, true
 	}
-	return nil, false
+	return bridgeNeighborTarget{}, false
+}
+
+func resolveBridgeMemberLink(bridgeIndex int, target bridgeNeighborTarget, backendMAC net.HardwareAddr) (netlink.Link, error) {
+	if target.linkIndex > 0 {
+		link, err := netlink.LinkByIndex(target.linkIndex)
+		if err == nil && link != nil && link.Attrs() != nil {
+			if link.Attrs().MasterIndex == bridgeIndex {
+				return link, nil
+			}
+		}
+	}
+	return lookupBridgeFDBPort(bridgeIndex, backendMAC)
 }
 
 func lookupBridgeFDBPort(bridgeIndex int, backendMAC net.HardwareAddr) (netlink.Link, error) {

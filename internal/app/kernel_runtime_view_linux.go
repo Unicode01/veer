@@ -3,6 +3,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,21 +16,36 @@ import (
 
 const (
 	kernelRuntimeMapCountCacheTTL       = 2 * time.Second
+	kernelRuntimeMapDetailCacheTTL      = 10 * time.Second
 	kernelRuntimeInterfaceLabelCacheTTL = 30 * time.Second
+	kernelRuntimeMapCountBatchSize      = 4096
 )
 
 type kernelRuntimeMapCountSnapshot struct {
-	sampledAt    time.Time
-	rulesEntries int
-	flowsEntries int
-	natEntries   int
+	sampledAt       time.Time
+	detailSampledAt time.Time
+	rulesEntries    int
+	rulesEntriesV4  int
+	rulesEntriesV6  int
+	flowsEntries    int
+	flowsEntriesV4  int
+	flowsEntriesV6  int
+	natEntries      int
+	natEntriesV4    int
+	natEntriesV6    int
 }
 
 type kernelRuntimeMapRefs struct {
-	rules *ebpf.Map
-	flows *ebpf.Map
-	nat   *ebpf.Map
+	rulesV4   *ebpf.Map
+	rulesV6   *ebpf.Map
+	flowsV4   *ebpf.Map
+	flowsV6   *ebpf.Map
+	natV4     *ebpf.Map
+	natV6     *ebpf.Map
+	occupancy *ebpf.Map
 }
+
+type kernelRuntimeRuleCounter func(kernelRuntimeMapRefs, int) (int, error)
 
 type kernelRuntimeInterfaceLabelCacheEntry struct {
 	label     string
@@ -37,6 +53,7 @@ type kernelRuntimeInterfaceLabelCacheEntry struct {
 }
 
 var kernelRuntimeInterfaceLabelCache sync.Map
+var kernelRuntimeBatchLookupSupport sync.Map
 
 func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
@@ -54,6 +71,28 @@ func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 		resp.TrafficStats = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
 		resp.TCDiagnosticsVerbose = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
 		resp.TCDiagnostics = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag) || resp.TCDiagnosticsVerbose
+		resp.KernelRulesMapConfiguredLimit = pm.cfg.KernelRulesMapLimit
+		resp.KernelFlowsMapConfiguredLimit = pm.cfg.KernelFlowsMapLimit
+		resp.KernelNATMapConfiguredLimit = pm.cfg.KernelNATMapLimit
+		resp.KernelRulesMapCapacityMode = kernelRulesMapCapacityMode(pm.cfg.KernelRulesMapLimit)
+		resp.KernelFlowsMapCapacityMode = kernelFlowsMapCapacityMode(pm.cfg.KernelFlowsMapLimit)
+		resp.KernelNATMapCapacityMode = kernelNATMapCapacityMode(pm.cfg.KernelNATMapLimit)
+	}
+	profile := currentKernelAdaptiveMapProfile()
+	resp.KernelMapProfile = kernelAdaptiveMapProfileName(profile)
+	resp.KernelMapTotalMemoryBytes = profile.totalMemoryBytes
+	resp.KernelRulesMapBaseLimit = kernelRulesMapBaseLimit
+	resp.KernelFlowsMapBaseLimit = profile.flowsBaseLimit
+	resp.KernelNATMapBaseLimit = profile.natBaseLimit
+	resp.KernelEgressNATAutoFloor = profile.egressNATAutoFloor
+	if resp.KernelRulesMapCapacityMode == "" {
+		resp.KernelRulesMapCapacityMode = kernelRulesMapCapacityMode(0)
+	}
+	if resp.KernelFlowsMapCapacityMode == "" {
+		resp.KernelFlowsMapCapacityMode = kernelFlowsMapCapacityMode(0)
+	}
+	if resp.KernelNATMapCapacityMode == "" {
+		resp.KernelNATMapCapacityMode = kernelNATMapCapacityMode(0)
 	}
 	if pm.kernelRuntime != nil {
 		resp.Available, resp.AvailableReason = pm.kernelRuntime.Available()
@@ -211,7 +250,17 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 	available, reason := rt.currentAvailabilityLocked(now)
 	pressure := rt.pressureState
 	actualCapacities := rt.currentMapCapacitiesLocked()
-	degraded := tcKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit, rt.degradedSource)
+	counts := rt.currentRuntimeMapCountsLocked(now)
+	degraded := tcKernelRuntimeDegradedState(
+		len(rt.preparedRules),
+		actualCapacities,
+		counts,
+		rt.rulesMapLimit,
+		rt.flowsMapLimit,
+		rt.natMapLimit,
+		preparedKernelRulesNeedEgressNATAutoMapFloors(rt.preparedRules),
+		rt.degradedSource,
+	)
 	rt.observability.updateDegraded(degraded.active, now)
 	obs := rt.observability.snapshot()
 
@@ -236,32 +285,34 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 	applyKernelRuntimeObservabilityView(&view, obs)
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
-	forwardProgramID := 0
-	replyProgramID := 0
 	coll := rt.coll
-	if coll != nil {
-		forwardProgramID = int(kernelProgramID(coll.Programs[kernelForwardProgramName]))
-		replyProgramID = int(kernelProgramID(coll.Programs[kernelReplyProgramName]))
-	}
+	forwardProg, replyProg, forwardProgV6, replyProgV6 := kernelAttachmentProgramsForPreparedRules(coll, preparedRules)
 	mapRefs := kernelRuntimeMapRefsFromCollection(coll)
-	cachedCounts := rt.runtimeMapCounts
 	rt.mu.Unlock()
 
 	view.Attachments = len(attachments)
 	view.AttachmentSummary = describeKernelAttachments(attachments)
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(preparedRules)
-	view.AttachmentsHealthy = len(preparedRules) == 0 || kernelAttachmentsHealthy(forwardIfRules, replyIfRules, attachments, forwardProgramID, replyProgramID)
+	view.AttachmentsHealthy = len(preparedRules) == 0 || kernelAttachmentsHealthy(
+		forwardIfRules,
+		replyIfRules,
+		attachments,
+		forwardProg,
+		replyProg,
+		forwardProgV6,
+		replyProgV6,
+	)
 	rt.mu.Lock()
 	rt.observability.observeAttachmentsHealthy(view.AttachmentsHealthy, now)
 	applyKernelRuntimeObservabilityView(&view, rt.observability.snapshot())
 	rt.mu.Unlock()
 
-	counts := cachedCounts
-	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, mapRefs, cachedCounts, countTCRuleMapEntries, true)
+	if !counts.detailsFresh(now) {
+		counts = countTCKernelRuntimeMapEntryDetails(now, mapRefs, counts, true)
 		rt.updateRuntimeMapCountCache(mapRefs, counts)
 	}
 	applyKernelRuntimeMapCounts(&view, counts, true)
+	applyKernelRuntimeMapBreakdown(&view, mapRefs, counts, true)
 	if coll != nil {
 		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiag(coll))
 	}
@@ -275,7 +326,8 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	available, reason := rt.currentAvailabilityLocked(now)
 	pressure := rt.pressureState
 	actualCapacities := rt.currentMapCapacitiesLocked()
-	degraded := xdpKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, rt.rulesMapLimit, rt.flowsMapLimit, rt.degradedSource)
+	counts := rt.currentRuntimeMapCountsLocked(now)
+	degraded := xdpKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, counts, rt.rulesMapLimit, rt.flowsMapLimit, rt.degradedSource)
 	rt.observability.updateDegraded(degraded.active, now)
 	obs := rt.observability.snapshot()
 
@@ -299,7 +351,6 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	attachments := append([]xdpAttachment(nil), rt.attachments...)
 	programID := rt.programID
 	mapRefs := kernelRuntimeMapRefsFromCollection(rt.coll)
-	cachedCounts := rt.runtimeMapCounts
 	rt.mu.Unlock()
 
 	view.Attachments = len(attachments)
@@ -311,12 +362,12 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	applyKernelRuntimeObservabilityView(&view, rt.observability.snapshot())
 	rt.mu.Unlock()
 
-	counts := cachedCounts
-	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, mapRefs, cachedCounts, countXDPRuleMapEntries, false)
+	if !counts.detailsFresh(now) {
+		counts = countXDPKernelRuntimeMapEntryDetails(now, mapRefs, counts)
 		rt.updateRuntimeMapCountCache(mapRefs, counts)
 	}
 	applyKernelRuntimeMapCounts(&view, counts, false)
+	applyKernelRuntimeMapBreakdown(&view, mapRefs, counts, false)
 
 	return view
 }
@@ -390,8 +441,12 @@ func kernelAttachmentProgramLabel(handle uint32, priority uint16) string {
 	switch {
 	case handle == netlink.MakeHandle(0, kernelForwardFilterHandle) || priority == kernelForwardFilterPrio:
 		return "forward"
+	case handle == netlink.MakeHandle(0, kernelForwardFilterHandleV6) || priority == kernelForwardFilterPrioV6:
+		return "forward_v6"
 	case handle == netlink.MakeHandle(0, kernelReplyFilterHandle) || priority == kernelReplyFilterPrio:
 		return "reply"
+	case handle == netlink.MakeHandle(0, kernelReplyFilterHandleV6) || priority == kernelReplyFilterPrioV6:
+		return "reply_v6"
 	default:
 		return fmt.Sprintf("handle=%d", handle)
 	}
@@ -429,31 +484,10 @@ func kernelAttachmentExpectationForPlan(plan kernelAttachmentPlan) kernelAttachm
 	return item
 }
 
-func expectedKernelAttachments(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProgramID int, replyProgramID int) []kernelAttachmentExpectation {
-	expected := make([]kernelAttachmentExpectation, 0, len(forwardIfRules)+len(replyIfRules))
-	for ifindex := range forwardIfRules {
-		expected = append(expected, kernelAttachmentExpectation{
-			key: kernelAttachmentKey{
-				linkIndex: ifindex,
-				parent:    netlink.HANDLE_MIN_INGRESS,
-				priority:  kernelForwardFilterPrio,
-				handle:    netlink.MakeHandle(0, kernelForwardFilterHandle),
-			},
-			name:      kernelForwardProgramName,
-			programID: forwardProgramID,
-		})
-	}
-	for ifindex := range replyIfRules {
-		expected = append(expected, kernelAttachmentExpectation{
-			key: kernelAttachmentKey{
-				linkIndex: ifindex,
-				parent:    netlink.HANDLE_MIN_INGRESS,
-				priority:  kernelReplyFilterPrio,
-				handle:    netlink.MakeHandle(0, kernelReplyFilterHandle),
-			},
-			name:      kernelReplyProgramName,
-			programID: replyProgramID,
-		})
+func expectedKernelAttachments(plans []kernelAttachmentPlan) []kernelAttachmentExpectation {
+	expected := make([]kernelAttachmentExpectation, 0, len(plans))
+	for _, plan := range plans {
+		expected = append(expected, kernelAttachmentExpectationForPlan(plan))
 	}
 	return expected
 }
@@ -559,6 +593,20 @@ func countTCRuleMapEntries(m *ebpf.Map) (int, error) {
 	return count, iter.Err()
 }
 
+func countTCRuleMapEntriesV6(m *ebpf.Map) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	iter := m.Iterate()
+	count := 0
+	var key tcRuleKeyV6
+	var value tcRuleValueV6
+	for iter.Next(&key, &value) {
+		count++
+	}
+	return count, iter.Err()
+}
+
 func countXDPRuleMapEntries(m *ebpf.Map) (int, error) {
 	if m == nil {
 		return 0, nil
@@ -573,10 +621,124 @@ func countXDPRuleMapEntries(m *ebpf.Map) (int, error) {
 	return count, iter.Err()
 }
 
+func countTCKernelRuntimeRuleEntries(refs kernelRuntimeMapRefs, _ int) (int, error) {
+	total := 0
+	if refs.rulesV4 != nil {
+		count, err := countTCRuleMapEntries(refs.rulesV4)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	if refs.rulesV6 != nil {
+		count, err := countTCRuleMapEntriesV6(refs.rulesV6)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	return total, nil
+}
+
+func countXDPKernelRuntimeRuleEntries(refs kernelRuntimeMapRefs, _ int) (int, error) {
+	return countXDPRuleMapEntries(refs.rulesV4)
+}
+
 func countKernelFlowMapEntries(m *ebpf.Map) (int, error) {
 	if m == nil {
 		return 0, nil
 	}
+	var batchErr error
+	if supported, known := kernelRuntimeBatchLookupSupportForType(m.Type()); !known || supported {
+		count, supported, err := countKernelFlowMapEntriesBatch(m)
+		if err == nil {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), true)
+			return count, nil
+		}
+		if !supported {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), false)
+		} else {
+			batchErr = err
+		}
+	}
+	count, err := countKernelFlowMapEntriesIter(m)
+	if err == nil {
+		return count, nil
+	}
+	if batchErr != nil {
+		return 0, fmt.Errorf("count kernel flow map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
+	}
+	return 0, err
+}
+
+func countKernelFlowMapEntriesV6(m *ebpf.Map) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	var batchErr error
+	if supported, known := kernelRuntimeBatchLookupSupportForType(m.Type()); !known || supported {
+		count, supported, err := countKernelFlowMapEntriesBatchV6(m)
+		if err == nil {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), true)
+			return count, nil
+		}
+		if !supported {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), false)
+		} else {
+			batchErr = err
+		}
+	}
+	count, err := countKernelFlowMapEntriesIterV6(m)
+	if err == nil {
+		return count, nil
+	}
+	if batchErr != nil {
+		return 0, fmt.Errorf("count kernel ipv6 flow map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
+	}
+	return 0, err
+}
+
+func countKernelFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
+	cursor := ebpf.MapBatchCursor{}
+	keys := make([]tcFlowKeyV4, kernelRuntimeMapCountBatchSize)
+	values := make([]tcFlowValueV4, kernelRuntimeMapCountBatchSize)
+	count := 0
+	for {
+		n, err := m.BatchLookup(&cursor, keys, values, nil)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
+				return 0, false, nil
+			}
+			return 0, true, err
+		}
+		count += n
+		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
+			return count, true, nil
+		}
+	}
+}
+
+func countKernelFlowMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
+	cursor := ebpf.MapBatchCursor{}
+	keys := make([]tcFlowKeyV6, kernelRuntimeMapCountBatchSize)
+	values := make([]tcFlowValueV6, kernelRuntimeMapCountBatchSize)
+	count := 0
+	for {
+		n, err := m.BatchLookup(&cursor, keys, values, nil)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
+				return 0, false, nil
+			}
+			return 0, true, err
+		}
+		count += n
+		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
+			return count, true, nil
+		}
+	}
+}
+
+func countKernelFlowMapEntriesIter(m *ebpf.Map) (int, error) {
 	iter := m.Iterate()
 	count := 0
 	var key tcFlowKeyV4
@@ -587,10 +749,112 @@ func countKernelFlowMapEntries(m *ebpf.Map) (int, error) {
 	return count, iter.Err()
 }
 
+func countKernelFlowMapEntriesIterV6(m *ebpf.Map) (int, error) {
+	iter := m.Iterate()
+	count := 0
+	var key tcFlowKeyV6
+	var value tcFlowValueV6
+	for iter.Next(&key, &value) {
+		count++
+	}
+	return count, iter.Err()
+}
+
 func countKernelNATMapEntries(m *ebpf.Map) (int, error) {
 	if m == nil {
 		return 0, nil
 	}
+	var batchErr error
+	if supported, known := kernelRuntimeBatchLookupSupportForType(m.Type()); !known || supported {
+		count, supported, err := countKernelNATMapEntriesBatch(m)
+		if err == nil {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), true)
+			return count, nil
+		}
+		if !supported {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), false)
+		} else {
+			batchErr = err
+		}
+	}
+	count, err := countKernelNATMapEntriesIter(m)
+	if err == nil {
+		return count, nil
+	}
+	if batchErr != nil {
+		return 0, fmt.Errorf("count kernel nat map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
+	}
+	return 0, err
+}
+
+func countKernelNATMapEntriesV6(m *ebpf.Map) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	var batchErr error
+	if supported, known := kernelRuntimeBatchLookupSupportForType(m.Type()); !known || supported {
+		count, supported, err := countKernelNATMapEntriesBatchV6(m)
+		if err == nil {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), true)
+			return count, nil
+		}
+		if !supported {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), false)
+		} else {
+			batchErr = err
+		}
+	}
+	count, err := countKernelNATMapEntriesIterV6(m)
+	if err == nil {
+		return count, nil
+	}
+	if batchErr != nil {
+		return 0, fmt.Errorf("count kernel ipv6 nat map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
+	}
+	return 0, err
+}
+
+func countKernelNATMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
+	cursor := ebpf.MapBatchCursor{}
+	keys := make([]tcNATPortKeyV4, kernelRuntimeMapCountBatchSize)
+	values := make([]uint32, kernelRuntimeMapCountBatchSize)
+	count := 0
+	for {
+		n, err := m.BatchLookup(&cursor, keys, values, nil)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
+				return 0, false, nil
+			}
+			return 0, true, err
+		}
+		count += n
+		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
+			return count, true, nil
+		}
+	}
+}
+
+func countKernelNATMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
+	cursor := ebpf.MapBatchCursor{}
+	keys := make([]tcNATPortKeyV6, kernelRuntimeMapCountBatchSize)
+	values := make([]uint32, kernelRuntimeMapCountBatchSize)
+	count := 0
+	for {
+		n, err := m.BatchLookup(&cursor, keys, values, nil)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
+				return 0, false, nil
+			}
+			return 0, true, err
+		}
+		count += n
+		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
+			return count, true, nil
+		}
+	}
+}
+
+func countKernelNATMapEntriesIter(m *ebpf.Map) (int, error) {
 	iter := m.Iterate()
 	count := 0
 	var key tcNATPortKeyV4
@@ -601,8 +865,249 @@ func countKernelNATMapEntries(m *ebpf.Map) (int, error) {
 	return count, iter.Err()
 }
 
+func countKernelNATMapEntriesIterV6(m *ebpf.Map) (int, error) {
+	iter := m.Iterate()
+	count := 0
+	var key tcNATPortKeyV6
+	var value uint32
+	for iter.Next(&key, &value) {
+		count++
+	}
+	return count, iter.Err()
+}
+
+func (refs kernelRuntimeMapRefs) hasRules() bool {
+	return refs.rulesV4 != nil || refs.rulesV6 != nil
+}
+
+func (refs kernelRuntimeMapRefs) hasFlows() bool {
+	return refs.flowsV4 != nil || refs.flowsV6 != nil
+}
+
+func (refs kernelRuntimeMapRefs) hasNAT() bool {
+	return refs.natV4 != nil || refs.natV6 != nil
+}
+
+func kernelRuntimeMapTotalCapacity(maps ...*ebpf.Map) int {
+	total := 0
+	for _, m := range maps {
+		if m == nil {
+			continue
+		}
+		total += int(m.MaxEntries())
+	}
+	return total
+}
+
+func kernelRuntimeRuleMapCapacity(refs kernelRuntimeMapRefs) int {
+	return kernelRuntimeMapTotalCapacity(refs.rulesV4, refs.rulesV6)
+}
+
+func kernelRuntimeFlowMapCapacity(refs kernelRuntimeMapRefs) int {
+	return kernelRuntimeMapTotalCapacity(refs.flowsV4, refs.flowsV6)
+}
+
+func kernelRuntimeNATMapCapacity(refs kernelRuntimeMapRefs) int {
+	return kernelRuntimeMapTotalCapacity(refs.natV4, refs.natV6)
+}
+
+func kernelRuntimeMapCapacity(m *ebpf.Map) int {
+	if m == nil {
+		return 0
+	}
+	return int(m.MaxEntries())
+}
+
+func countKernelRuntimeFlowEntriesExact(refs kernelRuntimeMapRefs) (int, error) {
+	total := 0
+	if refs.flowsV4 != nil {
+		count, err := countKernelFlowMapEntries(refs.flowsV4)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	if refs.flowsV6 != nil {
+		count, err := countKernelFlowMapEntriesV6(refs.flowsV6)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	return total, nil
+}
+
+func countKernelRuntimeNATEntriesExact(refs kernelRuntimeMapRefs) (int, error) {
+	total := 0
+	if refs.natV4 != nil {
+		count, err := countKernelNATMapEntries(refs.natV4)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	if refs.natV6 != nil {
+		count, err := countKernelNATMapEntriesV6(refs.natV6)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	return total, nil
+}
+
+func countTCKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRefs, cached kernelRuntimeMapCountSnapshot, includeNAT bool) kernelRuntimeMapCountSnapshot {
+	counts := cached
+	exact := true
+
+	rulesTotal := 0
+	if refs.rulesV4 == nil {
+		counts.rulesEntriesV4 = 0
+	} else if count, err := countTCRuleMapEntries(refs.rulesV4); err == nil {
+		counts.rulesEntriesV4 = count
+		rulesTotal += count
+	} else {
+		exact = false
+	}
+	if refs.rulesV6 == nil {
+		counts.rulesEntriesV6 = 0
+	} else if count, err := countTCRuleMapEntriesV6(refs.rulesV6); err == nil {
+		counts.rulesEntriesV6 = count
+		rulesTotal += count
+	} else {
+		exact = false
+	}
+	if refs.hasRules() && exact {
+		counts.rulesEntries = rulesTotal
+	}
+
+	flowsExact := true
+	flowsTotal := 0
+	if refs.flowsV4 == nil {
+		counts.flowsEntriesV4 = 0
+	} else if count, err := countKernelFlowMapEntries(refs.flowsV4); err == nil {
+		counts.flowsEntriesV4 = count
+		flowsTotal += count
+	} else {
+		flowsExact = false
+		exact = false
+	}
+	if refs.flowsV6 == nil {
+		counts.flowsEntriesV6 = 0
+	} else if count, err := countKernelFlowMapEntriesV6(refs.flowsV6); err == nil {
+		counts.flowsEntriesV6 = count
+		flowsTotal += count
+	} else {
+		flowsExact = false
+		exact = false
+	}
+	if refs.hasFlows() && flowsExact {
+		counts.flowsEntries = flowsTotal
+	}
+
+	if includeNAT {
+		natExact := true
+		natTotal := 0
+		if refs.natV4 == nil {
+			counts.natEntriesV4 = 0
+		} else if count, err := countKernelNATMapEntries(refs.natV4); err == nil {
+			counts.natEntriesV4 = count
+			natTotal += count
+		} else {
+			natExact = false
+			exact = false
+		}
+		if refs.natV6 == nil {
+			counts.natEntriesV6 = 0
+		} else if count, err := countKernelNATMapEntriesV6(refs.natV6); err == nil {
+			counts.natEntriesV6 = count
+			natTotal += count
+		} else {
+			natExact = false
+			exact = false
+		}
+		if refs.hasNAT() && natExact {
+			counts.natEntries = natTotal
+		}
+	} else {
+		counts.natEntries = 0
+		counts.natEntriesV4 = 0
+		counts.natEntriesV6 = 0
+	}
+
+	if exact {
+		counts.detailSampledAt = now
+	}
+	return counts
+}
+
+func countXDPKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRefs, cached kernelRuntimeMapCountSnapshot) kernelRuntimeMapCountSnapshot {
+	counts := cached
+	exact := true
+
+	if refs.rulesV4 == nil {
+		counts.rulesEntriesV4 = 0
+		counts.rulesEntries = 0
+	} else if count, err := countXDPRuleMapEntries(refs.rulesV4); err == nil {
+		counts.rulesEntriesV4 = count
+		counts.rulesEntries = count
+	} else {
+		exact = false
+	}
+	counts.rulesEntriesV6 = 0
+
+	flowsExact := true
+	flowsTotal := 0
+	if refs.flowsV4 == nil {
+		counts.flowsEntriesV4 = 0
+	} else if count, err := countKernelFlowMapEntries(refs.flowsV4); err == nil {
+		counts.flowsEntriesV4 = count
+		flowsTotal += count
+	} else {
+		flowsExact = false
+		exact = false
+	}
+	if refs.flowsV6 == nil {
+		counts.flowsEntriesV6 = 0
+	} else if count, err := countKernelFlowMapEntriesV6(refs.flowsV6); err == nil {
+		counts.flowsEntriesV6 = count
+		flowsTotal += count
+	} else {
+		flowsExact = false
+		exact = false
+	}
+	if refs.hasFlows() && flowsExact {
+		counts.flowsEntries = flowsTotal
+	}
+
+	counts.natEntries = 0
+	counts.natEntriesV4 = 0
+	counts.natEntriesV6 = 0
+
+	if exact {
+		counts.detailSampledAt = now
+	}
+	return counts
+}
+
+func kernelRuntimeBatchLookupSupportForType(mapType ebpf.MapType) (bool, bool) {
+	value, ok := kernelRuntimeBatchLookupSupport.Load(mapType)
+	if !ok {
+		return false, false
+	}
+	supported, ok := value.(bool)
+	if !ok {
+		return false, false
+	}
+	return supported, true
+}
+
 func (s kernelRuntimeMapCountSnapshot) fresh(now time.Time) bool {
 	return !s.sampledAt.IsZero() && now.Sub(s.sampledAt) < kernelRuntimeMapCountCacheTTL
+}
+
+func (s kernelRuntimeMapCountSnapshot) detailsFresh(now time.Time) bool {
+	return !s.detailSampledAt.IsZero() && now.Sub(s.detailSampledAt) < kernelRuntimeMapDetailCacheTTL
 }
 
 func kernelRuntimeMapRefsFromCollection(coll *ebpf.Collection) kernelRuntimeMapRefs {
@@ -610,39 +1115,100 @@ func kernelRuntimeMapRefsFromCollection(coll *ebpf.Collection) kernelRuntimeMapR
 		return kernelRuntimeMapRefs{}
 	}
 	return kernelRuntimeMapRefs{
-		rules: coll.Maps[kernelRulesMapName],
-		flows: coll.Maps[kernelFlowsMapName],
-		nat:   coll.Maps[kernelNatPortsMapName],
+		rulesV4:   coll.Maps[kernelRulesMapNameV4],
+		rulesV6:   coll.Maps[kernelRulesMapNameV6],
+		flowsV4:   coll.Maps[kernelFlowsMapNameV4],
+		flowsV6:   coll.Maps[kernelFlowsMapNameV6],
+		natV4:     coll.Maps[kernelNatPortsMapNameV4],
+		natV6:     coll.Maps[kernelNatPortsMapNameV6],
+		occupancy: coll.Maps[kernelOccupancyMapName],
 	}
 }
 
 func kernelRuntimeMapRefsEqual(a, b kernelRuntimeMapRefs) bool {
-	return a.rules == b.rules && a.flows == b.flows && a.nat == b.nat
+	return a.rulesV4 == b.rulesV4 &&
+		a.rulesV6 == b.rulesV6 &&
+		a.flowsV4 == b.flowsV4 &&
+		a.flowsV6 == b.flowsV6 &&
+		a.natV4 == b.natV4 &&
+		a.natV6 == b.natV6 &&
+		a.occupancy == b.occupancy
 }
 
-func countKernelRuntimeMapEntries(now time.Time, refs kernelRuntimeMapRefs, cached kernelRuntimeMapCountSnapshot, countRules func(*ebpf.Map) (int, error), includeNAT bool) kernelRuntimeMapCountSnapshot {
+func (rt *linuxKernelRuleRuntime) currentRuntimeMapCountsLocked(now time.Time) kernelRuntimeMapCountSnapshot {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	counts := rt.runtimeMapCounts
+	if !counts.fresh(now) {
+		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), true)
+		rt.runtimeMapCounts = counts
+	}
+	return counts
+}
+
+func (rt *xdpKernelRuleRuntime) currentRuntimeMapCountsLocked(now time.Time) kernelRuntimeMapCountSnapshot {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	counts := rt.runtimeMapCounts
+	if !counts.fresh(now) {
+		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), false)
+		rt.runtimeMapCounts = counts
+	}
+	return counts
+}
+
+func countKernelRuntimeMapEntries(now time.Time, refs kernelRuntimeMapRefs, cached kernelRuntimeMapCountSnapshot, countRules kernelRuntimeRuleCounter, rulesEntriesHint int, includeNAT bool) kernelRuntimeMapCountSnapshot {
 	counts := cached
 	counts.sampledAt = now
 
-	if refs.rules == nil {
+	if !refs.hasRules() {
 		counts.rulesEntries = 0
-	} else if count, err := countRules(refs.rules); err == nil {
+	} else if countRules == nil {
+		counts.rulesEntries = max(0, rulesEntriesHint)
+	} else if count, err := countRules(refs, rulesEntriesHint); err == nil {
 		counts.rulesEntries = count
 	}
 
-	if refs.flows == nil {
+	if !refs.hasFlows() {
 		counts.flowsEntries = 0
-	} else if count, err := countKernelFlowMapEntries(refs.flows); err == nil {
-		counts.flowsEntries = count
+	} else {
+		usedOccupancy := false
+		if refs.occupancy != nil {
+			if flowEntries, natEntries, err := snapshotKernelRuntimeOccupancyEntries(refs, includeNAT); err == nil {
+				counts.flowsEntries = flowEntries
+				if includeNAT {
+					counts.natEntries = natEntries
+				} else {
+					counts.natEntries = 0
+				}
+				usedOccupancy = true
+			}
+		}
+		if !usedOccupancy {
+			if count, err := countKernelRuntimeFlowEntriesExact(refs); err == nil {
+				counts.flowsEntries = count
+			}
+			if includeNAT {
+				if !refs.hasNAT() {
+					counts.natEntries = 0
+				} else if count, err := countKernelRuntimeNATEntriesExact(refs); err == nil {
+					counts.natEntries = count
+				}
+			} else {
+				counts.natEntries = 0
+			}
+		}
 	}
 
-	if includeNAT {
-		if refs.nat == nil {
+	if !refs.hasFlows() && includeNAT {
+		if !refs.hasNAT() {
 			counts.natEntries = 0
-		} else if count, err := countKernelNATMapEntries(refs.nat); err == nil {
+		} else if count, err := countKernelRuntimeNATEntriesExact(refs); err == nil {
 			counts.natEntries = count
 		}
-	} else {
+	} else if !includeNAT {
 		counts.natEntries = 0
 	}
 
@@ -660,8 +1226,35 @@ func applyKernelRuntimeMapCounts(view *KernelEngineRuntimeView, counts kernelRun
 	}
 }
 
-func kernelAttachmentsHealthy(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, attachments []kernelAttachment, forwardProgramID int, replyProgramID int) bool {
-	expected := expectedKernelAttachments(forwardIfRules, replyIfRules, forwardProgramID, replyProgramID)
+func applyKernelRuntimeMapBreakdown(view *KernelEngineRuntimeView, refs kernelRuntimeMapRefs, counts kernelRuntimeMapCountSnapshot, includeNAT bool) {
+	if view == nil {
+		return
+	}
+	view.RulesMapEntriesV4 = counts.rulesEntriesV4
+	view.RulesMapCapacityV4 = kernelRuntimeMapCapacity(refs.rulesV4)
+	view.RulesMapEntriesV6 = counts.rulesEntriesV6
+	view.RulesMapCapacityV6 = kernelRuntimeMapCapacity(refs.rulesV6)
+	view.FlowsMapEntriesV4 = counts.flowsEntriesV4
+	view.FlowsMapCapacityV4 = kernelRuntimeMapCapacity(refs.flowsV4)
+	view.FlowsMapEntriesV6 = counts.flowsEntriesV6
+	view.FlowsMapCapacityV6 = kernelRuntimeMapCapacity(refs.flowsV6)
+	if includeNAT {
+		view.NATMapEntriesV4 = counts.natEntriesV4
+		view.NATMapCapacityV4 = kernelRuntimeMapCapacity(refs.natV4)
+		view.NATMapEntriesV6 = counts.natEntriesV6
+		view.NATMapCapacityV6 = kernelRuntimeMapCapacity(refs.natV6)
+	}
+}
+
+func kernelAttachmentsHealthy(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, attachments []kernelAttachment, forwardProg *ebpf.Program, replyProg *ebpf.Program, forwardProgV6 *ebpf.Program, replyProgV6 *ebpf.Program) bool {
+	expected := expectedKernelAttachments(desiredKernelAttachmentPlansDualStack(
+		forwardIfRules,
+		replyIfRules,
+		forwardProg,
+		replyProg,
+		forwardProgV6,
+		replyProgV6,
+	))
 	keys := make([]kernelAttachmentKey, 0, len(expected))
 	for _, item := range expected {
 		keys = append(keys, item.key)

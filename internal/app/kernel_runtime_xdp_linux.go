@@ -23,6 +23,7 @@ import (
 const kernelXDPProgramName = "forward_xdp"
 
 const (
+	xdpRuleFlagFullNAT         = 0x1
 	xdpRuleFlagBridgeL2        = 0x2
 	xdpRuleFlagBridgeIngressL2 = 0x4
 	xdpRuleFlagTrafficStats    = 0x8
@@ -158,11 +159,17 @@ func (rt *xdpKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
 	return true, ""
 }
 
-func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
+func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	results := make(map[int64]kernelRuleApplyResult, len(rules))
+	reconcileStartedAt := time.Now()
+	reconcileMetrics := kernelReconcileMetrics{RequestEntries: len(rules)}
+	defer func() {
+		rt.observability.recordReconcile(reconcileStartedAt, time.Since(reconcileStartedAt), reconcileMetrics, reconcileErr, results)
+	}()
+
+	results = make(map[int64]kernelRuleApplyResult, len(rules))
 	if rt.coll == nil && !kernelHotRestartStateExists(kernelEngineXDP) {
 		if err := cleanupOrphanXDPKernelRuntimeState(); err != nil {
 			log.Printf("xdp dataplane startup cleanup: xdp orphan cleanup failed: %v", err)
@@ -176,7 +183,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 		return results, nil
 	}
 
+	prepareStartedAt := time.Now()
 	prepared, _, _, prepareResults, skipLines := prepareXDPKernelRules(rules, rt.prepareOptions, rt.preparedRules, rt.coll != nil)
+	reconcileMetrics.PrepareDuration = time.Since(prepareStartedAt)
+	reconcileMetrics.PreparedEntries = len(prepared)
 	rt.lastSkipLog = logKernelLineSetOnce(rt.lastSkipLog, skipLines)
 	for id, result := range prepareResults {
 		results[id] = result
@@ -196,6 +206,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	requiredIfIndices := collectXDPInterfaces(prepared)
 	if rt.samePreparedRulesLocked(prepared, requiredIfIndices) {
 		rt.lastReconcileMode = "steady"
+		reconcileMetrics.AppliedEntries = len(prepared)
 		rt.stateLog.Logf("xdp dataplane reconcile: entry set unchanged, keeping %d active kernel entry(s)", len(prepared))
 		for _, rule := range rules {
 			if current, ok := results[rule.ID]; ok && current.Error != "" {
@@ -229,7 +240,18 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 		}
 		return results, nil
 	}
-	desiredCapacities, err := applyKernelMapCapacities(spec, rt.rulesMapLimit, rt.flowsMapLimit, 0, len(prepared), false)
+	currentCounts := rt.currentRuntimeMapCountsLocked(time.Now())
+	desiredCapacities, err := applyKernelMapCapacitiesWithOccupancy(
+		spec,
+		rt.rulesMapLimit,
+		rt.flowsMapLimit,
+		0,
+		len(prepared),
+		currentCounts,
+		false,
+		normalizeKernelFlowsMapLimit(rt.flowsMapLimit) == 0,
+		false,
+	)
 	if err != nil {
 		msg := err.Error()
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -422,6 +444,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 	programID := kernelProgramID(prog)
 	oldAttachments := append([]xdpAttachment(nil), rt.attachments...)
 	newAttachments := make([]xdpAttachment, 0, len(requiredIfIndices))
+	attachStartedAt := time.Now()
 	for _, ifindex := range requiredIfIndices {
 		att, err := rt.attachProgramLocked(ifindex, prog, oldAttachments)
 		if err != nil {
@@ -439,6 +462,8 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 		}
 		newAttachments = append(newAttachments, att)
 	}
+	reconcileMetrics.AttachDuration = time.Since(attachStartedAt)
+	reconcileMetrics.Attaches = len(newAttachments)
 
 	if len(newAttachments) == 0 {
 		coll.Close()
@@ -458,6 +483,9 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApp
 		}
 		results[item.rule.ID] = kernelRuleApplyResult{Running: true, Engine: kernelEngineXDP}
 	}
+	reconcileMetrics.AppliedEntries = len(prepared)
+	reconcileMetrics.Upserts = len(prepared)
+	reconcileMetrics.Detaches = xdpAttachmentDeleteCount(oldAttachments, newAttachments)
 
 	rt.stateLog.Logf("xdp dataplane reconcile: applied %d/%d kernel entry(s) attachments=%d mode=%s",
 		len(prepared),
@@ -530,12 +558,12 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		fullSuccess := true
 		driftDetected := false
 		if rt.coll != nil && rt.coll.Maps != nil {
-			live, _, liveErr := snapshotKernelLiveStateFromFlows(nil, rt.coll.Maps[kernelFlowsMapName], false)
+			live, liveErr := snapshotKernelLiveStateFromFlows(nil, rt.coll.Maps[kernelFlowsMapName], false)
 			if liveErr != nil {
 				fullSuccess = false
 				log.Printf("xdp dataplane maintenance: snapshot live xdp flow state failed: %v", liveErr)
 			} else {
-				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(rt.coll.Maps[kernelStatsMapName], live)
+				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(rt.coll.Maps[kernelStatsMapName], live.ByRuleID)
 				if correctionErr != nil {
 					fullSuccess = false
 					log.Printf("xdp dataplane maintenance: reconcile xdp stats correction failed: %v", correctionErr)
@@ -1029,12 +1057,6 @@ func prepareXDPKernelRules(rules []Rule, opts xdpPrepareOptions, previous []prep
 	previousByKey := groupPreparedXDPKernelRulesByMatchKey(previous)
 
 	for _, rule := range rules {
-		if !rule.Transparent {
-			err := fmt.Errorf("xdp dataplane currently supports only transparent rules")
-			skipLogger.Add(rule, err)
-			results[rule.ID] = kernelRuleApplyResult{Error: err.Error()}
-			continue
-		}
 		items, err := prepareXDPKernelRule(rule, opts)
 		if err != nil {
 			if reused, ok := reusablePreparedXDPKernelRules(rule, err, previousByKey, allowTransientReuse); ok {
@@ -1083,6 +1105,9 @@ func reusablePreparedXDPKernelRules(rule Rule, err error, previousByKey map[kern
 }
 
 func prepareXDPKernelRule(rule Rule, opts xdpPrepareOptions) ([]preparedXDPKernelRule, error) {
+	if isKernelEgressNATRule(rule) {
+		return nil, fmt.Errorf("xdp dataplane currently does not support egress nat takeover")
+	}
 	inLink, err := netlink.LinkByName(rule.InInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve inbound interface %q: %w", rule.InInterface, err)
@@ -1113,6 +1138,14 @@ func prepareXDPKernelRule(rule Rule, opts xdpPrepareOptions) ([]preparedXDPKerne
 		RuleID:      uint32(rule.ID),
 		BackendAddr: outAddr,
 		BackendPort: uint16(rule.OutPort),
+	}
+	if !rule.Transparent {
+		natAddr, err := resolveKernelSNATIPv4(outLink, rule.OutIP, rule.OutSourceIP)
+		if err != nil {
+			return nil, fmt.Errorf("resolve outbound source ip on %q: %w", rule.OutInterface, err)
+		}
+		value.Flags |= xdpRuleFlagFullNAT
+		value.NATAddr = natAddr
 	}
 	if opts.enableTrafficStats {
 		value.Flags |= xdpRuleFlagTrafficStats

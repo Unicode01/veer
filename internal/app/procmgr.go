@@ -179,14 +179,19 @@ type ProcessManager struct {
 	ready                                          bool
 	rulePlans                                      map[int64]ruleDataplanePlan
 	rangePlans                                     map[int64]rangeDataplanePlan
+	egressNATPlans                                 map[int64]ruleDataplanePlan
+	dynamicEgressNATParents                        map[string]struct{}
 	kernelRuntime                                  kernelRuleRuntime
 	kernelRules                                    map[int64]bool
 	kernelRanges                                   map[int64]bool
+	kernelEgressNATs                               map[int64]bool
 	kernelRuleEngines                              map[int64]string
 	kernelRangeEngines                             map[int64]string
+	kernelEgressNATEngines                         map[int64]string
 	kernelFlowOwners                               map[uint32]kernelCandidateOwner
 	kernelRuleStats                                map[int64]RuleStatsReport
 	kernelRangeStats                               map[int64]RangeStatsReport
+	kernelEgressNATStats                           map[int64]EgressNATStatsReport
 	kernelStatsSnapshot                            kernelRuleStatsSnapshot
 	kernelStatsAt                                  time.Time
 	kernelStatsSnapshotAt                          time.Time
@@ -273,14 +278,19 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		binaryHash:                           binaryHash,
 		rulePlans:                            make(map[int64]ruleDataplanePlan),
 		rangePlans:                           make(map[int64]rangeDataplanePlan),
+		egressNATPlans:                       make(map[int64]ruleDataplanePlan),
+		dynamicEgressNATParents:              make(map[string]struct{}),
 		kernelRuntime:                        newKernelRuleRuntime(cfg),
 		kernelRules:                          make(map[int64]bool),
 		kernelRanges:                         make(map[int64]bool),
+		kernelEgressNATs:                     make(map[int64]bool),
 		kernelRuleEngines:                    make(map[int64]string),
 		kernelRangeEngines:                   make(map[int64]string),
+		kernelEgressNATEngines:               make(map[int64]string),
 		kernelFlowOwners:                     make(map[uint32]kernelCandidateOwner),
 		kernelRuleStats:                      make(map[int64]RuleStatsReport),
 		kernelRangeStats:                     make(map[int64]RangeStatsReport),
+		kernelEgressNATStats:                 make(map[int64]EgressNATStatsReport),
 		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
 		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
 		kernelStatsSnapshot:                  emptyKernelRuleStatsSnapshot(),
@@ -292,10 +302,11 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 
 	if pm.kernelRuntime != nil {
 		available, reason := pm.kernelRuntime.Available()
+		profileFields := kernelAdaptiveMapProfileLogFields(currentKernelAdaptiveMapProfile())
 		if available {
-			log.Printf("kernel dataplane ready (default_engine=%s): %s", cfg.DefaultEngine, reason)
+			log.Printf("kernel dataplane ready (default_engine=%s): %s | %s", cfg.DefaultEngine, reason, profileFields)
 		} else {
-			log.Printf("kernel dataplane unavailable (default_engine=%s): %s", cfg.DefaultEngine, reason)
+			log.Printf("kernel dataplane unavailable (default_engine=%s): %s | %s", cfg.DefaultEngine, reason, profileFields)
 		}
 	}
 
@@ -618,7 +629,18 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load ranges: %v", err)
 		return
 	}
-
+	egressNATs, err := dbGetEgressNATs(pm.db)
+	if err != nil {
+		log.Printf("load egress nats: %v", err)
+		return
+	}
+	egressNATSnapshot := egressNATInterfaceSnapshot{}
+	dynamicEgressNATParents := map[string]struct{}{}
+	if len(egressNATs) > 0 {
+		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
+		egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
+		dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
+	}
 	planner := newRuleDataplanePlanner(pm.kernelRuntime, pm.cfg.DefaultEngine)
 	configuredKernelRulesMapLimit := 0
 	if pm.cfg != nil {
@@ -640,7 +662,29 @@ func (pm *ProcessManager) redistributeWorkers() {
 	applyKernelPressurePolicy(kernelPressure, candidates, previousKernelRules, previousKernelRanges, rulePlans, rangePlans)
 	candidates = pm.prewarmKernelToUserspaceHandoffs(rules, ranges, candidates, rulePlans, rangePlans)
 
-	activeKernelCandidates := filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
+	activeRuleRangeKernelCandidates := filterActiveKernelCandidates(candidates, rulePlans, rangePlans, nil)
+	usedCandidateRuleIDs := make(map[int64]struct{}, len(rules)+len(candidates))
+	maxCandidateRuleID := int64(0)
+	for _, rule := range rules {
+		if rule.ID > maxCandidateRuleID {
+			maxCandidateRuleID = rule.ID
+		}
+		if rule.ID > 0 {
+			usedCandidateRuleIDs[rule.ID] = struct{}{}
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate.rule.ID > maxCandidateRuleID {
+			maxCandidateRuleID = candidate.rule.ID
+		}
+		if candidate.rule.ID > 0 {
+			usedCandidateRuleIDs[candidate.rule.ID] = struct{}{}
+		}
+	}
+	nextSyntheticID := maxCandidateRuleID + 1
+	egressNATCandidates, egressNATPlans := buildEgressNATKernelCandidatesWithSnapshot(egressNATs, planner, configuredKernelRulesMapLimit, len(activeRuleRangeKernelCandidates), usedCandidateRuleIDs, &nextSyntheticID, egressNATSnapshot)
+	allKernelCandidates := append(append([]kernelCandidateRule(nil), candidates...), egressNATCandidates...)
+	activeKernelCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 	if pm.kernelRuntime != nil {
 		for {
 			results, err := pm.kernelRuntime.Reconcile(kernelCandidateRules(activeKernelCandidates))
@@ -654,25 +698,28 @@ func (pm *ProcessManager) redistributeWorkers() {
 			}
 			ownerMetadata := collectKernelOwnerFallbackMetadata(activeKernelCandidates, ownerFailures)
 			for owner, reason := range ownerFailures {
-				applyKernelOwnerFallbackWithMetadata(owner, reason, ownerMetadata[owner], rulePlans, rangePlans)
+				applyKernelOwnerFallbackWithMetadata(owner, reason, ownerMetadata[owner], rulePlans, rangePlans, egressNATPlans)
 			}
-			activeKernelCandidates = filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
+			activeKernelCandidates = filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 		}
 	}
 
 	pm.logRuleDataplanePlans(rules, rulePlans, pm.cfg.DefaultEngine)
 	pm.logRangeDataplanePlans(ranges, rangePlans, pm.cfg.DefaultEngine)
-	activeKernelCandidates = filterActiveKernelCandidates(candidates, rulePlans, rangePlans)
+	activeKernelCandidates = filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 	pm.logPlannerSummary(
-		"kernel dataplane planner summary: default_engine=%s enabled_rules=%d enabled_ranges=%d kernel_target_rules=%d kernel_target_ranges=%d kernel_target_entries=%d kernel_rules_map_capacity=%d capacity_mode=%s",
+		"kernel dataplane planner summary: default_engine=%s enabled_rules=%d enabled_ranges=%d enabled_egress_nats=%d kernel_target_rules=%d kernel_target_ranges=%d kernel_target_egress_nats=%d kernel_target_entries=%d kernel_rules_map_capacity=%d capacity_mode=%s %s",
 		pm.cfg.DefaultEngine,
 		countEnabledRules(rules),
 		countEnabledRanges(ranges),
+		countEnabledEgressNATs(egressNATs),
 		countKernelRulePlans(rules, rulePlans),
 		countKernelRangePlans(ranges, rangePlans),
+		countKernelEgressNATPlans(egressNATs, egressNATPlans),
 		len(activeKernelCandidates),
 		effectiveKernelRulesMapLimit(configuredKernelRulesMapLimit, len(activeKernelCandidates)),
 		kernelRulesMapCapacityMode(configuredKernelRulesMapLimit),
+		kernelAdaptiveMapProfileLogFields(currentKernelAdaptiveMapProfile()),
 	)
 
 	kernelAssignments := map[int64]string{}
@@ -682,8 +729,10 @@ func (pm *ProcessManager) redistributeWorkers() {
 
 	kernelAppliedRuleEngines := make(map[int64]string)
 	kernelAppliedRangeEngines := make(map[int64]string)
+	kernelAppliedEgressNATEngines := make(map[int64]string)
 	kernelAppliedRules := make(map[int64]bool)
 	kernelAppliedRanges := make(map[int64]bool)
+	kernelAppliedEgressNATs := make(map[int64]bool)
 	kernelFlowOwners := make(map[uint32]kernelCandidateOwner, len(activeKernelCandidates))
 	for _, candidate := range activeKernelCandidates {
 		if candidate.rule.ID <= 0 || candidate.rule.ID > int64(^uint32(0)) {
@@ -693,12 +742,19 @@ func (pm *ProcessManager) redistributeWorkers() {
 		if engine == "" {
 			continue
 		}
-		kernelFlowOwners[uint32(candidate.rule.ID)] = candidate.owner
 		if candidate.owner.kind == workerKindRule {
+			kernelFlowOwners[uint32(candidate.rule.ID)] = candidate.owner
 			kernelAppliedRules[candidate.owner.id] = true
 			kernelAppliedRuleEngines[candidate.owner.id] = mergeKernelEngineName(kernelAppliedRuleEngines[candidate.owner.id], engine)
 			continue
 		}
+		if candidate.owner.kind == workerKindEgressNAT {
+			kernelFlowOwners[uint32(candidate.rule.ID)] = candidate.owner
+			kernelAppliedEgressNATs[candidate.owner.id] = true
+			kernelAppliedEgressNATEngines[candidate.owner.id] = mergeKernelEngineName(kernelAppliedEgressNATEngines[candidate.owner.id], engine)
+			continue
+		}
+		kernelFlowOwners[uint32(candidate.rule.ID)] = candidate.owner
 		kernelAppliedRanges[candidate.owner.id] = true
 		kernelAppliedRangeEngines[candidate.owner.id] = mergeKernelEngineName(kernelAppliedRangeEngines[candidate.owner.id], engine)
 	}
@@ -706,17 +762,24 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.mu.Lock()
 	pm.rulePlans = rulePlans
 	pm.rangePlans = rangePlans
+	pm.egressNATPlans = egressNATPlans
+	pm.dynamicEgressNATParents = dynamicEgressNATParents
 	pm.kernelRules = kernelAppliedRules
 	pm.kernelRanges = kernelAppliedRanges
+	pm.kernelEgressNATs = kernelAppliedEgressNATs
 	pm.kernelRuleEngines = kernelAppliedRuleEngines
 	pm.kernelRangeEngines = kernelAppliedRangeEngines
+	pm.kernelEgressNATEngines = kernelAppliedEgressNATEngines
 	pm.kernelFlowOwners = kernelFlowOwners
-	pm.kernelRuleStats, pm.kernelRangeStats = pm.buildEmptyKernelStatsLocked()
+	pm.kernelRuleStats, pm.kernelRangeStats, pm.kernelEgressNATStats = pm.buildEmptyKernelStatsLocked()
 	pm.kernelStatsSnapshot = emptyKernelRuleStatsSnapshot()
 	pm.kernelStatsAt = time.Time{}
 	pm.kernelStatsSnapshotAt = time.Time{}
-	pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(pm.kernelNetlinkOwnerRetryCooldownUntil, time.Now(), rulePlans, rangePlans)
-	pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(pm.kernelNetlinkOwnerRetryFailures, rulePlans, rangePlans)
+	pm.kernelStatsLastDuration = 0
+	pm.kernelStatsLastError = ""
+	pm.kernelMaintenanceAt = time.Now()
+	pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(pm.kernelNetlinkOwnerRetryCooldownUntil, time.Now(), rulePlans, rangePlans, egressNATPlans)
+	pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(pm.kernelNetlinkOwnerRetryFailures, rulePlans, rangePlans, egressNATPlans)
 	pm.mu.Unlock()
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
@@ -729,7 +792,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.applyRuleAssignments(ruleAssignments)
 	pm.applyRangeAssignments(rangeAssignments)
 	if pm.kernelRuntime != nil {
-		pm.refreshKernelStatsCache()
+		pm.refreshKernelStatsCacheIfNeeded()
 	}
 }
 
@@ -829,6 +892,16 @@ func countEnabledRanges(ranges []PortRange) int {
 	count := 0
 	for _, pr := range ranges {
 		if pr.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
+func countEnabledEgressNATs(items []EgressNAT) int {
+	count := 0
+	for _, item := range items {
+		if item.Enabled {
 			count++
 		}
 	}
@@ -941,11 +1014,11 @@ func sampleKernelRangePlan(pr PortRange, variants []string, planner *ruleDatapla
 	return aggregateKernelOwnerPlan(preferred, entryPlans)
 }
 
-func applyKernelOwnerFallback(owner kernelCandidateOwner, reason string, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
-	applyKernelOwnerFallbackWithMetadata(owner, reason, kernelTransientFallbackMetadata{}, rulePlans, rangePlans)
+func applyKernelOwnerFallback(owner kernelCandidateOwner, reason string, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) {
+	applyKernelOwnerFallbackWithMetadata(owner, reason, kernelTransientFallbackMetadata{}, rulePlans, rangePlans, egressNATPlans)
 }
 
-func applyKernelOwnerFallbackWithMetadata(owner kernelCandidateOwner, reason string, metadata kernelTransientFallbackMetadata, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
+func applyKernelOwnerFallbackWithMetadata(owner kernelCandidateOwner, reason string, metadata kernelTransientFallbackMetadata, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) {
 	if owner.kind == workerKindRule {
 		plan := rulePlans[owner.id]
 		plan.EffectiveEngine = ruleEngineUserspace
@@ -954,6 +1027,16 @@ func applyKernelOwnerFallbackWithMetadata(owner kernelCandidateOwner, reason str
 			plan.TransientFallback = metadata
 		}
 		rulePlans[owner.id] = plan
+		return
+	}
+	if owner.kind == workerKindEgressNAT {
+		plan := egressNATPlans[owner.id]
+		plan.EffectiveEngine = ruleEngineUserspace
+		if plan.FallbackReason == "" {
+			plan.FallbackReason = reason
+			plan.TransientFallback = metadata
+		}
+		egressNATPlans[owner.id] = plan
 		return
 	}
 
@@ -994,7 +1077,7 @@ func applyKernelPressurePolicy(snapshot kernelRuntimePressureSnapshot, candidate
 			if item.previous {
 				continue
 			}
-			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans)
+			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans, nil)
 		}
 	case kernelRuntimePressureLevelShed:
 		targetFallbackEntries := kernelPressureShedTargetEntries(owners)
@@ -1005,7 +1088,7 @@ func applyKernelPressurePolicy(snapshot kernelRuntimePressureSnapshot, candidate
 				previousOwners = append(previousOwners, item)
 				continue
 			}
-			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans)
+			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans, nil)
 			fallbackEntries += item.entries
 		}
 		remainingPrevious := len(previousOwners)
@@ -1018,13 +1101,13 @@ func applyKernelPressurePolicy(snapshot kernelRuntimePressureSnapshot, candidate
 				break
 			}
 			item := previousOwners[idx]
-			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans)
+			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans, nil)
 			fallbackEntries += item.entries
 			remainingPrevious--
 		}
 	case kernelRuntimePressureLevelFull:
 		for _, item := range owners {
-			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans)
+			applyKernelOwnerFallback(item.owner, reason, rulePlans, rangePlans, nil)
 		}
 	}
 }
@@ -1032,7 +1115,7 @@ func applyKernelPressurePolicy(snapshot kernelRuntimePressureSnapshot, candidate
 func collectKernelPressureOwners(candidates []kernelCandidateRule, previousKernelRules map[int64]bool, previousKernelRanges map[int64]bool, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelPressureOwnerInfo {
 	byOwner := make(map[kernelCandidateOwner]*kernelPressureOwnerInfo, len(candidates))
 	for _, candidate := range candidates {
-		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans) != ruleEngineKernel {
+		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans, nil) != ruleEngineKernel {
 			continue
 		}
 		item := byOwner[candidate.owner]
@@ -1083,9 +1166,12 @@ func kernelPressureShedTargetEntries(owners []kernelPressureOwnerInfo) int {
 	return fallbackEntries
 }
 
-func kernelOwnerEffectiveEngine(owner kernelCandidateOwner, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) string {
+func kernelOwnerEffectiveEngine(owner kernelCandidateOwner, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) string {
 	if owner.kind == workerKindRule {
 		return rulePlans[owner.id].EffectiveEngine
+	}
+	if owner.kind == workerKindEgressNAT {
+		return egressNATPlans[owner.id].EffectiveEngine
 	}
 	return rangePlans[owner.id].EffectiveEngine
 }
@@ -1245,7 +1331,7 @@ func applyKernelOwnerConstraints(candidates []kernelCandidateRule, rulePlans map
 
 	grouped := make(map[backendKey]map[kernelCandidateOwner]struct{})
 	for _, candidate := range candidates {
-		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans) != ruleEngineKernel {
+		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans, nil) != ruleEngineKernel {
 			continue
 		}
 		if !candidate.rule.Transparent {
@@ -1267,15 +1353,15 @@ func applyKernelOwnerConstraints(candidates []kernelCandidateRule, rulePlans map
 			continue
 		}
 		for owner := range owners {
-			applyKernelOwnerFallback(owner, "transparent kernel dataplane requires a unique backend endpoint per active protocol binding", rulePlans, rangePlans)
+			applyKernelOwnerFallback(owner, "transparent kernel dataplane requires a unique backend endpoint per active protocol binding", rulePlans, rangePlans, nil)
 		}
 	}
 }
 
-func filterActiveKernelCandidates(candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelCandidateRule {
+func filterActiveKernelCandidates(candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) []kernelCandidateRule {
 	out := make([]kernelCandidateRule, 0, len(candidates))
 	for _, candidate := range candidates {
-		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans) == ruleEngineKernel {
+		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans, egressNATPlans) == ruleEngineKernel {
 			out = append(out, candidate)
 		}
 	}
@@ -1411,6 +1497,19 @@ func countKernelRangePlans(ranges []PortRange, plans map[int64]rangeDataplanePla
 			continue
 		}
 		if plan, ok := plans[pr.ID]; ok && plan.EffectiveEngine == ruleEngineKernel {
+			count++
+		}
+	}
+	return count
+}
+
+func countKernelEgressNATPlans(items []EgressNAT, plans map[int64]ruleDataplanePlan) int {
+	count := 0
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		if plan, ok := plans[item.ID]; ok && plan.EffectiveEngine == ruleEngineKernel {
 			count++
 		}
 	}
@@ -2185,6 +2284,53 @@ func (pm *ProcessManager) buildRangeStatus(pr PortRange, status string) PortRang
 	return item
 }
 
+func (pm *ProcessManager) egressNATRuntimeStatus(id int64, enabled bool) string {
+	if !enabled {
+		return "stopped"
+	}
+	pm.mu.Lock()
+	running := pm.kernelEgressNATs[id]
+	plan, ok := pm.egressNATPlans[id]
+	pm.mu.Unlock()
+	if running {
+		return "running"
+	}
+	if ok && egressNATPlanIsUnavailable(plan) {
+		return "error"
+	}
+	return "stopped"
+}
+
+func egressNATPlanIsUnavailable(plan ruleDataplanePlan) bool {
+	return strings.TrimSpace(plan.FallbackReason) != "" || (!plan.KernelEligible && strings.TrimSpace(plan.KernelReason) != "")
+}
+
+func (pm *ProcessManager) buildEgressNATStatus(item EgressNAT, status string) EgressNATStatus {
+	out := EgressNATStatus{
+		EgressNAT:       item,
+		Status:          status,
+		EffectiveEngine: ruleEngineKernel,
+	}
+	if pm == nil {
+		return out
+	}
+
+	pm.mu.Lock()
+	plan, ok := pm.egressNATPlans[item.ID]
+	kernelEngine := pm.kernelEgressNATEngines[item.ID]
+	pm.mu.Unlock()
+	if !ok {
+		return out
+	}
+
+	out.EffectiveEngine = ruleEngineKernel
+	out.EffectiveKernelEngine = kernelEngine
+	out.KernelEligible = plan.KernelEligible
+	out.KernelReason = plan.KernelReason
+	out.FallbackReason = plan.FallbackReason
+	return out
+}
+
 func mergeKernelEngineName(current string, next string) string {
 	current = strings.TrimSpace(current)
 	next = strings.TrimSpace(next)
@@ -2743,53 +2889,78 @@ func (pm *ProcessManager) collectRangeStats() map[int64]RangeStatsReport {
 	return result
 }
 
+func (pm *ProcessManager) collectEgressNATStats() map[int64]EgressNATStatsReport {
+	pm.mu.Lock()
+	result := cloneEgressNATStatsReports(pm.kernelEgressNATStats)
+	pm.mu.Unlock()
+	return result
+}
+
 func currentConnCountForProtocol(protocol string, activeConns int64, natTableSize int64) int64 {
-	text := strings.ToLower(strings.TrimSpace(protocol))
-	hasTCP := strings.Contains(text, "tcp")
-	hasUDP := strings.Contains(text, "udp")
+	return currentConnCountForProtocolDatagrams(protocol, activeConns, natTableSize, 0)
+}
+
+func currentConnCountForProtocolDatagrams(protocol string, activeConns int64, udpNatTableSize int64, icmpNatTableSize int64) int64 {
+	mask := protocolMaskFromString(protocol)
+	hasTCP := mask&protocolMaskTCP != 0
+	hasUDP := mask&protocolMaskUDP != 0
+	hasICMP := mask&protocolMaskICMP != 0
+	datagramConns := int64(0)
+
+	if hasUDP {
+		datagramConns += udpNatTableSize
+	}
+	if hasICMP {
+		datagramConns += icmpNatTableSize
+	}
 
 	switch {
-	case hasTCP && hasUDP:
-		return activeConns + natTableSize
-	case hasUDP:
-		return natTableSize
+	case hasTCP && (hasUDP || hasICMP):
+		return activeConns + datagramConns
+	case hasUDP || hasICMP:
+		return datagramConns
 	case hasTCP:
 		return activeConns
 	default:
-		return activeConns + natTableSize
+		return activeConns + udpNatTableSize + icmpNatTableSize
 	}
 }
 
-func addRuleCurrentConnCount(result map[int64]int64, protocols map[int64]string, ruleID int64, activeConns int64, natTableSize int64) {
-	result[ruleID] += currentConnCountForProtocol(protocols[ruleID], activeConns, natTableSize)
+func addRuleCurrentConnCount(result map[int64]int64, protocols map[int64]string, ruleID int64, activeConns int64, udpNatTableSize int64, icmpNatTableSize int64) {
+	result[ruleID] += currentConnCountForProtocolDatagrams(protocols[ruleID], activeConns, udpNatTableSize, icmpNatTableSize)
 }
 
-func addRangeCurrentConnCount(result map[int64]int64, protocols map[int64]string, rangeID int64, activeConns int64, natTableSize int64) {
-	result[rangeID] += currentConnCountForProtocol(protocols[rangeID], activeConns, natTableSize)
+func addRangeCurrentConnCount(result map[int64]int64, protocols map[int64]string, rangeID int64, activeConns int64, udpNatTableSize int64, icmpNatTableSize int64) {
+	result[rangeID] += currentConnCountForProtocolDatagrams(protocols[rangeID], activeConns, udpNatTableSize, icmpNatTableSize)
 }
 
-func (pm *ProcessManager) collectCurrentConns(ruleProtocols map[int64]string, rangeProtocols map[int64]string) (map[int64]int64, map[int64]int64, map[int64]int64, error) {
+func addEgressNATCurrentConnCount(result map[int64]int64, protocols map[int64]string, egressNATID int64, activeConns int64, udpNatTableSize int64, icmpNatTableSize int64) {
+	result[egressNATID] += currentConnCountForProtocolDatagrams(protocols[egressNATID], activeConns, udpNatTableSize, icmpNatTableSize)
+}
+
+func (pm *ProcessManager) collectCurrentConns(ruleProtocols map[int64]string, rangeProtocols map[int64]string, egressNATProtocols map[int64]string) (map[int64]int64, map[int64]int64, map[int64]int64, map[int64]int64, error) {
 	ruleResult := make(map[int64]int64)
 	rangeResult := make(map[int64]int64)
 	siteResult := make(map[int64]int64)
+	egressNATResult := make(map[int64]int64)
 
 	pm.mu.Lock()
 	for _, wi := range pm.ruleWorkers {
 		for id, stats := range wi.ruleStats {
-			addRuleCurrentConnCount(ruleResult, ruleProtocols, id, stats.ActiveConns, int64(stats.NatTableSize))
+			addRuleCurrentConnCount(ruleResult, ruleProtocols, id, stats.ActiveConns, int64(stats.NatTableSize), 0)
 		}
 	}
 	for _, wi := range pm.rangeWorkers {
 		for id, stats := range wi.rangeStats {
-			addRangeCurrentConnCount(rangeResult, rangeProtocols, id, stats.ActiveConns, int64(stats.NatTableSize))
+			addRangeCurrentConnCount(rangeResult, rangeProtocols, id, stats.ActiveConns, int64(stats.NatTableSize), 0)
 		}
 	}
 	for _, dw := range pm.drainingWorkers {
 		for id, stats := range dw.ruleStats {
-			addRuleCurrentConnCount(ruleResult, ruleProtocols, id, stats.ActiveConns, int64(stats.NatTableSize))
+			addRuleCurrentConnCount(ruleResult, ruleProtocols, id, stats.ActiveConns, int64(stats.NatTableSize), 0)
 		}
 		for id, stats := range dw.rangeStats {
-			addRangeCurrentConnCount(rangeResult, rangeProtocols, id, stats.ActiveConns, int64(stats.NatTableSize))
+			addRangeCurrentConnCount(rangeResult, rangeProtocols, id, stats.ActiveConns, int64(stats.NatTableSize), 0)
 		}
 		if dw.kind == workerKindShared {
 			for _, stats := range dw.siteStatsMap {
@@ -2810,13 +2981,13 @@ func (pm *ProcessManager) collectCurrentConns(ruleProtocols map[int64]string, ra
 	pm.mu.Unlock()
 
 	if runtime == nil {
-		return ruleResult, rangeResult, siteResult, nil
+		return ruleResult, rangeResult, siteResult, egressNATResult, nil
 	}
 
 	_ = runtime
 	snapshot, _, err := pm.snapshotKernelStatsShared(time.Time{})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	for kernelRuleID, counts := range snapshot.ByRuleID {
@@ -2825,15 +2996,19 @@ func (pm *ProcessManager) collectCurrentConns(ruleProtocols map[int64]string, ra
 			continue
 		}
 		if owner.kind == workerKindRule {
-			addRuleCurrentConnCount(ruleResult, ruleProtocols, owner.id, counts.TCPActiveConns, counts.UDPNatEntries)
+			addRuleCurrentConnCount(ruleResult, ruleProtocols, owner.id, counts.TCPActiveConns, counts.UDPNatEntries, counts.ICMPNatEntries)
 			continue
 		}
 		if owner.kind == workerKindRange {
-			addRangeCurrentConnCount(rangeResult, rangeProtocols, owner.id, counts.TCPActiveConns, counts.UDPNatEntries)
+			addRangeCurrentConnCount(rangeResult, rangeProtocols, owner.id, counts.TCPActiveConns, counts.UDPNatEntries, counts.ICMPNatEntries)
+			continue
+		}
+		if owner.kind == workerKindEgressNAT {
+			addEgressNATCurrentConnCount(egressNATResult, egressNATProtocols, owner.id, counts.TCPActiveConns, counts.UDPNatEntries, counts.ICMPNatEntries)
 		}
 	}
 
-	return ruleResult, rangeResult, siteResult, nil
+	return ruleResult, rangeResult, siteResult, egressNATResult, nil
 }
 
 func cloneRuleStatsReports(src map[int64]RuleStatsReport) map[int64]RuleStatsReport {
@@ -2852,6 +3027,17 @@ func cloneRangeStatsReports(src map[int64]RangeStatsReport) map[int64]RangeStats
 		return map[int64]RangeStatsReport{}
 	}
 	dst := make(map[int64]RangeStatsReport, len(src))
+	for id, stats := range src {
+		dst[id] = stats
+	}
+	return dst
+}
+
+func cloneEgressNATStatsReports(src map[int64]EgressNATStatsReport) map[int64]EgressNATStatsReport {
+	if len(src) == 0 {
+		return map[int64]EgressNATStatsReport{}
+	}
+	dst := make(map[int64]EgressNATStatsReport, len(src))
 	for id, stats := range src {
 		dst[id] = stats
 	}
@@ -2987,16 +3173,20 @@ func (pm *ProcessManager) takeKernelRetryLogLineLocked(summary string, now time.
 	return fmt.Sprintf("kernel dataplane retry: re-evaluating transient kernel path fallbacks (%s)", summary)
 }
 
-func (pm *ProcessManager) buildEmptyKernelStatsLocked() (map[int64]RuleStatsReport, map[int64]RangeStatsReport) {
+func (pm *ProcessManager) buildEmptyKernelStatsLocked() (map[int64]RuleStatsReport, map[int64]RangeStatsReport, map[int64]EgressNATStatsReport) {
 	ruleStats := make(map[int64]RuleStatsReport)
 	rangeStats := make(map[int64]RangeStatsReport)
+	egressNATStats := make(map[int64]EgressNATStatsReport)
 	for id := range pm.kernelRules {
 		ruleStats[id] = RuleStatsReport{RuleID: id}
 	}
 	for id := range pm.kernelRanges {
 		rangeStats[id] = RangeStatsReport{RangeID: id}
 	}
-	return ruleStats, rangeStats
+	for id := range pm.kernelEgressNATs {
+		egressNATStats[id] = EgressNATStatsReport{EgressNATID: id}
+	}
+	return ruleStats, rangeStats, egressNATStats
 }
 
 func (pm *ProcessManager) markKernelStatsDemand() {
@@ -3012,7 +3202,7 @@ func (pm *ProcessManager) shouldRefreshKernelStatsLocked(now time.Time) bool {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if len(pm.kernelRules) == 0 && len(pm.kernelRanges) == 0 {
+	if len(pm.kernelRules) == 0 && len(pm.kernelRanges) == 0 && len(pm.kernelEgressNATs) == 0 {
 		return false
 	}
 	if pm.kernelStatsDemandAt.IsZero() || now.Sub(pm.kernelStatsDemandAt) > kernelStatsDemandWindow {
@@ -3106,11 +3296,24 @@ func applyKernelRangeTrafficSpeeds(dst map[int64]RangeStatsReport, prev map[int6
 	}
 }
 
+func applyKernelEgressNATTrafficSpeeds(dst map[int64]EgressNATStatsReport, prev map[int64]EgressNATStatsReport, elapsed time.Duration) {
+	if elapsed <= 0 {
+		return
+	}
+	for id, current := range dst {
+		previous := prev[id]
+		current.SpeedIn = kernelTrafficSpeed(current.BytesIn, previous.BytesIn, elapsed)
+		current.SpeedOut = kernelTrafficSpeed(current.BytesOut, previous.BytesOut, elapsed)
+		dst[id] = current
+	}
+}
+
 func (pm *ProcessManager) refreshKernelStatsCache() {
 	if pm.kernelRuntime == nil {
 		pm.mu.Lock()
 		pm.kernelRuleStats = make(map[int64]RuleStatsReport)
 		pm.kernelRangeStats = make(map[int64]RangeStatsReport)
+		pm.kernelEgressNATStats = make(map[int64]EgressNATStatsReport)
 		pm.kernelStatsSnapshot = emptyKernelRuleStatsSnapshot()
 		pm.kernelStatsAt = time.Now()
 		pm.kernelStatsSnapshotAt = time.Time{}
@@ -3127,9 +3330,10 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 	}
 	prevRuleStats := cloneRuleStatsReports(pm.kernelRuleStats)
 	prevRangeStats := cloneRangeStatsReports(pm.kernelRangeStats)
+	prevEgressNATStats := cloneEgressNATStatsReports(pm.kernelEgressNATStats)
 	prevStatsAt := pm.kernelStatsAt
 	trafficStatsEnabled := pm.cfg != nil && pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
-	ruleStats, rangeStats := pm.buildEmptyKernelStatsLocked()
+	ruleStats, rangeStats, egressNATStats := pm.buildEmptyKernelStatsLocked()
 	pm.mu.Unlock()
 
 	snapshot, sampledAt, err := pm.snapshotKernelStatsShared(time.Time{})
@@ -3151,7 +3355,7 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 			item.RuleID = owner.id
 			item.ActiveConns += counts.TCPActiveConns
 			item.TotalConns += counts.TotalConns
-			item.NatTableSize += int(counts.UDPNatEntries)
+			item.NatTableSize += int(counts.UDPNatEntries + counts.ICMPNatEntries)
 			if trafficStatsEnabled {
 				item.BytesIn += counts.BytesIn
 				item.BytesOut += counts.BytesOut
@@ -3164,12 +3368,25 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 			item.RangeID = owner.id
 			item.ActiveConns += counts.TCPActiveConns
 			item.TotalConns += counts.TotalConns
-			item.NatTableSize += int(counts.UDPNatEntries)
+			item.NatTableSize += int(counts.UDPNatEntries + counts.ICMPNatEntries)
 			if trafficStatsEnabled {
 				item.BytesIn += counts.BytesIn
 				item.BytesOut += counts.BytesOut
 			}
 			rangeStats[owner.id] = item
+			continue
+		}
+		if owner.kind == workerKindEgressNAT {
+			item := egressNATStats[owner.id]
+			item.EgressNATID = owner.id
+			item.ActiveConns += counts.TCPActiveConns
+			item.TotalConns += counts.TotalConns
+			item.NatTableSize += int(counts.UDPNatEntries + counts.ICMPNatEntries)
+			if trafficStatsEnabled {
+				item.BytesIn += counts.BytesIn
+				item.BytesOut += counts.BytesOut
+			}
+			egressNATStats[owner.id] = item
 		}
 	}
 
@@ -3178,11 +3395,13 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 		elapsed := now.Sub(prevStatsAt)
 		applyKernelRuleTrafficSpeeds(ruleStats, prevRuleStats, elapsed)
 		applyKernelRangeTrafficSpeeds(rangeStats, prevRangeStats, elapsed)
+		applyKernelEgressNATTrafficSpeeds(egressNATStats, prevEgressNATStats, elapsed)
 	}
 
 	pm.mu.Lock()
 	pm.kernelRuleStats = ruleStats
 	pm.kernelRangeStats = rangeStats
+	pm.kernelEgressNATStats = egressNATStats
 	pm.kernelStatsAt = now
 	pm.mu.Unlock()
 }

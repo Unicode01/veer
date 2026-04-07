@@ -15,9 +15,11 @@ func TestTCKernelRuntimeDegradedState(t *testing.T) {
 			Flows:    131072,
 			NATPorts: 131072,
 		},
+		kernelRuntimeMapCountSnapshot{},
 		0,
 		0,
 		0,
+		false,
 		kernelRuntimeDegradedSourceHotRestart,
 	)
 	if !state.active {
@@ -39,9 +41,11 @@ func TestKernelRuntimeDegradedStateSkipsZeroPreparedEntries(t *testing.T) {
 			Flows:    65536,
 			NATPorts: 65536,
 		},
+		kernelRuntimeMapCountSnapshot{},
 		0,
 		0,
 		0,
+		false,
 		kernelRuntimeDegradedSourceNone,
 	)
 	if state.active {
@@ -54,8 +58,9 @@ func TestXDPKernelRuntimeDegradedStateIgnoresSatisfiedCapacity(t *testing.T) {
 		16384,
 		kernelMapCapacities{
 			Rules: 16384,
-			Flows: 131072,
+			Flows: 262144,
 		},
+		kernelRuntimeMapCountSnapshot{},
 		0,
 		0,
 		kernelRuntimeDegradedSourceNone,
@@ -73,9 +78,11 @@ func TestTCKernelRuntimeDegradedStateMentionsHotRestart(t *testing.T) {
 			Flows:    131072,
 			NATPorts: 131072,
 		},
+		kernelRuntimeMapCountSnapshot{},
 		0,
 		0,
 		0,
+		false,
 		kernelRuntimeDegradedSourceHotRestart,
 	)
 	if !strings.Contains(state.reason, "hot restart") {
@@ -83,6 +90,58 @@ func TestTCKernelRuntimeDegradedStateMentionsHotRestart(t *testing.T) {
 	}
 	if !strings.Contains(state.reason, "cold restart") {
 		t.Fatalf("tcKernelRuntimeDegradedState() reason = %q, want cold restart guidance", state.reason)
+	}
+}
+
+func TestTCKernelRuntimeDegradedStateUsesEgressNATAutoMapFloor(t *testing.T) {
+	state := tcKernelRuntimeDegradedState(
+		128,
+		kernelMapCapacities{
+			Rules:    16384,
+			Flows:    131072,
+			NATPorts: 131072,
+		},
+		kernelRuntimeMapCountSnapshot{},
+		0,
+		0,
+		0,
+		true,
+		kernelRuntimeDegradedSourceNone,
+	)
+	if !state.active {
+		t.Fatal("tcKernelRuntimeDegradedState() = inactive, want active when egress nat auto floor raises desired flow/nat capacity")
+	}
+	if !strings.Contains(state.reason, kernelFlowsMapName) {
+		t.Fatalf("tcKernelRuntimeDegradedState() reason = %q, want flows map detail", state.reason)
+	}
+	if !strings.Contains(state.reason, kernelNatPortsMapName) {
+		t.Fatalf("tcKernelRuntimeDegradedState() reason = %q, want nat map detail", state.reason)
+	}
+}
+
+func TestTCKernelRuntimeDegradedStateUsesLiveOccupancyForAdaptiveGrowth(t *testing.T) {
+	state := tcKernelRuntimeDegradedState(
+		8,
+		kernelMapCapacities{
+			Rules:    16384,
+			Flows:    262144,
+			NATPorts: 262144,
+		},
+		kernelRuntimeMapCountSnapshot{
+			flowsEntries: 200000,
+			natEntries:   200000,
+		},
+		0,
+		0,
+		0,
+		false,
+		kernelRuntimeDegradedSourceLivePreserve,
+	)
+	if !state.active {
+		t.Fatal("tcKernelRuntimeDegradedState() = inactive, want active when live occupancy requires a larger adaptive flow/nat map")
+	}
+	if !strings.Contains(state.reason, "desired=524288") {
+		t.Fatalf("tcKernelRuntimeDegradedState() reason = %q, want occupancy-driven desired capacity", state.reason)
 	}
 }
 

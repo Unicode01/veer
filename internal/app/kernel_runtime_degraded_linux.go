@@ -36,17 +36,26 @@ func (rt *xdpKernelRuleRuntime) currentMapCapacitiesLocked() kernelMapCapacities
 	return capacities
 }
 
+func preparedKernelRulesNeedEgressNATAutoMapFloors(prepared []preparedKernelRule) bool {
+	for _, item := range prepared {
+		if isKernelEgressNATRule(item.rule) || isKernelEgressNATPassthroughRule(item.rule) {
+			return true
+		}
+	}
+	return false
+}
+
+func tcKernelRuntimeConfiguredMapLimits(rulesConfiguredLimit int, flowsConfiguredLimit int, natConfiguredLimit int, useEgressNATAutoFloors bool) (int, int, int) {
+	flowsConfiguredLimit, natConfiguredLimit = kernelEgressNATAutoMapFloors(flowsConfiguredLimit, natConfiguredLimit, useEgressNATAutoFloors)
+	return rulesConfiguredLimit, flowsConfiguredLimit, natConfiguredLimit
+}
+
 func (rt *linuxKernelRuleRuntime) shouldPreferFreshMapGrowthLocked(desired kernelMapCapacities) bool {
 	actual := rt.currentMapCapacitiesLocked()
 	if !kernelRuntimeNeedsMapGrowth(actual, desired, true) {
 		return false
 	}
-	now := time.Now()
-	counts := rt.runtimeMapCounts
-	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, countTCRuleMapEntries, true)
-		rt.runtimeMapCounts = counts
-	}
+	counts := rt.currentRuntimeMapCountsLocked(time.Now())
 	return kernelRuntimeCanGrowMapsWhenIdle(actual, desired, counts, true)
 }
 
@@ -55,22 +64,41 @@ func (rt *xdpKernelRuleRuntime) shouldPreferFreshMapGrowthLocked(desired kernelM
 	if !kernelRuntimeNeedsMapGrowth(actual, desired, false) {
 		return false
 	}
-	now := time.Now()
-	counts := rt.runtimeMapCounts
-	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, countXDPRuleMapEntries, false)
-		rt.runtimeMapCounts = counts
-	}
+	counts := rt.currentRuntimeMapCountsLocked(time.Now())
 	return kernelRuntimeCanGrowMapsWhenIdle(actual, desired, counts, false)
 }
 
-func tcKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacities, rulesConfiguredLimit int, flowsConfiguredLimit int, natConfiguredLimit int, source string) kernelRuntimeDegradedState {
-	desired := desiredKernelMapCapacities(rulesConfiguredLimit, flowsConfiguredLimit, natConfiguredLimit, preparedEntries, true)
+func tcKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacities, counts kernelRuntimeMapCountSnapshot, rulesConfiguredLimit int, flowsConfiguredLimit int, natConfiguredLimit int, useEgressNATAutoFloors bool, source string) kernelRuntimeDegradedState {
+	rulesConfiguredLimit, flowsConfiguredLimit, natConfiguredLimit = tcKernelRuntimeConfiguredMapLimits(
+		rulesConfiguredLimit,
+		flowsConfiguredLimit,
+		natConfiguredLimit,
+		useEgressNATAutoFloors,
+	)
+	desired := desiredKernelMapCapacitiesWithOccupancy(
+		rulesConfiguredLimit,
+		flowsConfiguredLimit,
+		natConfiguredLimit,
+		preparedEntries,
+		counts,
+		true,
+		normalizeKernelFlowsMapLimit(flowsConfiguredLimit) == 0 || useEgressNATAutoFloors,
+		normalizeKernelNATMapLimit(natConfiguredLimit) == 0 || useEgressNATAutoFloors,
+	)
 	return buildKernelRuntimeDegradedState(preparedEntries, actual, desired, true, source)
 }
 
-func xdpKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacities, rulesConfiguredLimit int, flowsConfiguredLimit int, source string) kernelRuntimeDegradedState {
-	desired := desiredKernelMapCapacities(rulesConfiguredLimit, flowsConfiguredLimit, 0, preparedEntries, false)
+func xdpKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacities, counts kernelRuntimeMapCountSnapshot, rulesConfiguredLimit int, flowsConfiguredLimit int, source string) kernelRuntimeDegradedState {
+	desired := desiredKernelMapCapacitiesWithOccupancy(
+		rulesConfiguredLimit,
+		flowsConfiguredLimit,
+		0,
+		preparedEntries,
+		counts,
+		false,
+		normalizeKernelFlowsMapLimit(flowsConfiguredLimit) == 0,
+		false,
+	)
 	return buildKernelRuntimeDegradedState(preparedEntries, actual, desired, false, source)
 }
 

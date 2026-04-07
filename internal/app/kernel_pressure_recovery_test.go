@@ -8,7 +8,7 @@ func TestHasPressureTriggeredKernelFallbacksLocked(t *testing.T) {
 			1: {
 				KernelEligible:  true,
 				EffectiveEngine: ruleEngineUserspace,
-				FallbackReason:  `kernel dataplane pressure: flows 121000/131072 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
+				FallbackReason:  `kernel dataplane pressure: flows 242000/262144 (92.3%) exceeded 92% high watermark, routing new sessions back to userspace until usage drops below 85%`,
 			},
 		},
 		rangePlans: map[int64]rangeDataplanePlan{},

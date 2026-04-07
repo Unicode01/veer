@@ -387,6 +387,18 @@ func nextKernelNetlinkRetryState(lastRetryAt time.Time, now time.Time, summary s
 	return false, lastRetryAt
 }
 
+func mergeKernelNetlinkRecoverySummaries(parts ...string) string {
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		items = append(items, part)
+	}
+	return strings.Join(items, "; ")
+}
+
 func mergeKernelNetlinkRecoverySources(existing string, next string) string {
 	existing = strings.TrimSpace(existing)
 	next = strings.TrimSpace(next)
@@ -453,6 +465,87 @@ func summarizeKernelNetlinkRecoveryIndexHints(label string, values map[int]struc
 		labels = append(labels, fmt.Sprintf("+%d", len(items)-limit))
 	}
 	return fmt.Sprintf("%s=%s", label, strings.Join(labels, ","))
+}
+
+func summarizeDynamicEgressNATParentInterfaces(parents map[string]struct{}) string {
+	if len(parents) == 0 {
+		return ""
+	}
+	return summarizeKernelNetlinkRecoveryStringHints("egress_nat_parents", parents)
+}
+
+func cloneKernelStringHintSet(values map[string]struct{}) map[string]struct{} {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(values))
+	for value := range values {
+		value = normalizeKernelTransientFallbackInterface(value)
+		if value == "" {
+			continue
+		}
+		out[value] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func kernelNetlinkTriggerHasLinkHints(trigger kernelNetlinkRecoveryTrigger) bool {
+	return len(trigger.interfaceNames) > 0 ||
+		len(trigger.linkIndexes) > 0 ||
+		len(trigger.linkNeighborInterfaces) > 0 ||
+		len(trigger.linkNeighborIndexes) > 0 ||
+		len(trigger.linkFDBInterfaces) > 0 ||
+		len(trigger.linkFDBIndexes) > 0
+}
+
+func kernelNetlinkTriggerMatchesDynamicEgressNATParents(trigger kernelNetlinkRecoveryTrigger, parents map[string]struct{}) map[string]struct{} {
+	if len(parents) == 0 {
+		return nil
+	}
+
+	normalizedParents := cloneKernelStringHintSet(parents)
+	if len(normalizedParents) == 0 {
+		return nil
+	}
+
+	normalizedTrigger := normalizeKernelNetlinkRecoveryTrigger(trigger)
+	matches := make(map[string]struct{})
+	for _, hints := range []map[string]struct{}{
+		normalizedTrigger.interfaceNames,
+		normalizedTrigger.linkNeighborInterfaces,
+		normalizedTrigger.linkFDBInterfaces,
+	} {
+		for name := range hints {
+			name = normalizeKernelTransientFallbackInterface(name)
+			if _, ok := normalizedParents[name]; ok {
+				matches[name] = struct{}{}
+			}
+		}
+	}
+	if len(matches) > 0 {
+		return matches
+	}
+
+	if !kernelNetlinkTriggerHasLinkHints(trigger) {
+		return normalizedParents
+	}
+
+	// Link delete/update notifications can arrive with only ifindex hints, and the
+	// master relationship may already be gone by the time we attempt resolution.
+	if len(trigger.linkIndexes) > 0 && len(normalizedTrigger.interfaceNames) == 0 {
+		return normalizedParents
+	}
+	if len(trigger.linkNeighborIndexes) > 0 && len(normalizedTrigger.linkNeighborInterfaces) == 0 {
+		return normalizedParents
+	}
+	if len(trigger.linkFDBIndexes) > 0 && len(normalizedTrigger.linkFDBInterfaces) == 0 {
+		return normalizedParents
+	}
+
+	return nil
 }
 
 func summarizeKernelNetlinkRecoveryTrigger(trigger kernelNetlinkRecoveryTrigger) string {
@@ -578,13 +671,13 @@ func shouldLogKernelNetlinkRecoveryResult(result kernelIncrementalRetryResult) b
 	if !result.handled {
 		return true
 	}
-	if result.backoffRuleOwners > 0 || result.backoffRangeOwners > 0 {
+	if result.backoffRuleOwners > 0 || result.backoffRangeOwners > 0 || result.backoffEgressNATs > 0 {
 		return true
 	}
-	if result.cooldownRuleOwners > 0 || result.cooldownRangeOwners > 0 {
+	if result.cooldownRuleOwners > 0 || result.cooldownRangeOwners > 0 || result.cooldownEgressNATs > 0 {
 		return true
 	}
-	return result.recoveredRuleOwners == 0 && result.recoveredRangeOwners == 0
+	return result.recoveredRuleOwners == 0 && result.recoveredRangeOwners == 0 && result.recoveredEgressNATs == 0
 }
 
 func (pm *ProcessManager) handleKernelNetlinkRecoveryEvent(source string) {
@@ -606,6 +699,16 @@ func (pm *ProcessManager) handleKernelNetlinkRecoveryTrigger(trigger kernelNetli
 	pm.kernelAttachmentCheckAt = time.Time{}
 	if pm.kernelRuntime != nil {
 		summary = pm.summarizeNetlinkTriggeredKernelFallbacksLocked()
+		if trigger.hasSource("link") {
+			// Parent-scope egress NAT depends on live child-interface inventory. Link
+			// changes on tracked parents should enter the incremental recovery queue so
+			// only the affected egress owners are refreshed in place.
+			dynamicParents := kernelNetlinkTriggerMatchesDynamicEgressNATParents(trigger, pm.dynamicEgressNATParents)
+			dynamicSummary := summarizeDynamicEgressNATParentInterfaces(dynamicParents)
+			if dynamicSummary != "" {
+				summary = mergeKernelNetlinkRecoverySummaries(summary, dynamicSummary)
+			}
+		}
 		shouldRetry, pm.kernelNetlinkRetryAt = nextKernelNetlinkRetryState(pm.kernelNetlinkRetryAt, now, summary)
 		if shouldRetry {
 			pm.kernelRetryAt = now

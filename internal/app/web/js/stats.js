@@ -8,7 +8,8 @@
         loaded: false,
         rules: {},
         sites: {},
-        ranges: {}
+        ranges: {},
+        egressNATs: {}
       };
     }
     return app.state.currentConnsSnapshot;
@@ -45,6 +46,139 @@
       params.set('sort_asc', state.sortAsc === false ? 'false' : 'true');
     }
     return params.toString();
+  }
+
+  function findRuleConfig(ruleID) {
+    const list = app.state && app.state.rules && Array.isArray(app.state.rules.data)
+      ? app.state.rules.data
+      : [];
+    return list.find((rule) => rule && rule.id === ruleID) || null;
+  }
+
+  function findRangeConfig(rangeID) {
+    const list = app.state && app.state.ranges && Array.isArray(app.state.ranges.data)
+      ? app.state.ranges.data
+      : [];
+    return list.find((range) => range && range.id === rangeID) || null;
+  }
+
+  function findSiteConfig(siteID) {
+    const list = app.state && app.state.sites && Array.isArray(app.state.sites.data)
+      ? app.state.sites.data
+      : [];
+    return list.find((site) => site && site.id === siteID) || null;
+  }
+
+  function statsTargetCellNode(primary, sourceIP, detailText, metaText) {
+    if (!primary) return app.emptyCellNode('stat-muted');
+    const node = app.createEndpointNode(primary, sourceIP);
+    const extras = [];
+    if (detailText) {
+      extras.push(app.createNode('span', {
+        className: 'endpoint-secondary',
+        text: detailText
+      }));
+    }
+    if (metaText) {
+      extras.push(app.createNode('span', {
+        className: 'endpoint-secondary',
+        text: metaText
+      }));
+    }
+    if (!extras.length) return node;
+    if (node && node.classList && typeof node.classList.contains === 'function' && node.classList.contains('endpoint-cell')) {
+      extras.forEach((item) => node.appendChild(item));
+      return node;
+    }
+    return app.createNode('div', {
+      className: 'endpoint-cell',
+      children: [node].concat(extras)
+    });
+  }
+
+  function ruleStatsTargetCellNode(rule) {
+    if (!rule) return app.emptyCellNode('stat-muted');
+    const detail = [
+      String(rule.protocol || '').toUpperCase(),
+      rule.out_port ? String(rule.out_port) : ''
+    ].filter(Boolean).join(' · ');
+    const meta = [
+      rule.in_interface ? app.t('stats.route.in') + ' ' + rule.in_interface : '',
+      rule.out_interface ? app.t('stats.route.out') + ' ' + rule.out_interface : ''
+    ].filter(Boolean).join(' · ');
+    return statsTargetCellNode(rule.out_ip, rule.out_source_ip, detail, meta);
+  }
+
+  function rangeStatsTargetCellNode(range) {
+    if (!range) return app.emptyCellNode('stat-muted');
+    let portText = '';
+    if (range.out_start_port) {
+      const outEnd = range.out_start_port + ((range.end_port || 0) - (range.start_port || 0));
+      portText = String(range.out_start_port) + '-' + String(outEnd);
+    }
+    const routeText = [range.in_interface, range.out_interface].filter(Boolean).join(' -> ');
+    const mainText = [
+      range.out_ip,
+      portText
+    ].filter(Boolean).join(' · ');
+    const subText = [
+      range.out_source_ip ? app.t('common.sourceShort') + ' ' + range.out_source_ip : '',
+      String(range.protocol || '').toUpperCase(),
+      routeText
+    ].filter(Boolean).join(' · ');
+    const title = [
+      app.t('stats.target') + ': ' + String(range.out_ip || ''),
+      portText ? app.t('range.list.outboundRange') + ': ' + portText : '',
+      range.out_source_ip ? app.t('common.sourceShort') + ': ' + range.out_source_ip : '',
+      range.protocol ? app.t('form.protocol') + ': ' + String(range.protocol || '').toUpperCase() : '',
+      range.in_interface ? app.t('stats.route.in') + ': ' + range.in_interface : '',
+      range.out_interface ? app.t('stats.route.out') + ': ' + range.out_interface : ''
+    ].filter(Boolean).join('\n');
+    return app.createNode('div', {
+      className: 'stats-target-cell',
+      title: title,
+      children: [
+        app.createNode('span', {
+          className: 'stats-target-main',
+          text: mainText
+        }),
+        subText
+          ? app.createNode('span', {
+              className: 'stats-target-sub',
+              text: subText
+            })
+          : null
+      ].filter(Boolean)
+    });
+  }
+
+  function siteStatsTargetCellNode(site) {
+    if (!site) return app.emptyCellNode('stat-muted');
+    const detail = [];
+    if (site.backend_http_port) detail.push('HTTP ' + String(site.backend_http_port));
+    if (site.backend_https_port) detail.push('HTTPS ' + String(site.backend_https_port));
+    const meta = [
+      site.listen_interface ? app.t('stats.route.listen') + ' ' + site.listen_interface : '',
+      site.transparent ? app.t('form.transparentShort') : ''
+    ].filter(Boolean).join(' · ');
+    return statsTargetCellNode(site.backend_ip, site.backend_source_ip, detail.join(' · '), meta);
+  }
+
+  function egressNATStatsProtocolNode(protocol) {
+    const normalized = typeof app.normalizeEgressNATProtocolValue === 'function'
+      ? app.normalizeEgressNATProtocolValue(protocol)
+      : String(protocol || '').trim().toLowerCase();
+    const fullText = typeof app.formatEgressNATProtocol === 'function'
+      ? app.formatEgressNATProtocol(protocol || '')
+      : String(protocol || '').toUpperCase();
+    const compactText = normalized
+      ? normalized.split('+').map((item) => item.toUpperCase()).join('/')
+      : fullText;
+    return app.createNode('span', {
+      className: 'stats-inline-compact',
+      text: compactText,
+      title: fullText
+    });
   }
 
   function rebuildCurrentConns(kind, rows, idKey) {
@@ -110,6 +244,9 @@
   }
 
   function kernelRuntimePressureBadge(level, reason) {
+    const title = typeof app.translateRuntimeReason === 'function'
+      ? app.translateRuntimeReason(reason)
+      : String(reason || '').trim();
     let badgeClass = 'badge-disabled';
     switch (level) {
       case 'hold':
@@ -125,7 +262,7 @@
         badgeClass = 'badge-disabled';
         break;
     }
-    return app.createBadgeNode(badgeClass, app.t('kernel.pressure.' + level), reason || '');
+    return app.createBadgeNode(badgeClass, app.t('kernel.pressure.' + level), title || '');
   }
 
   function kernelRuntimePressureSummary(engines) {
@@ -177,21 +314,160 @@
     return 'low';
   }
 
-  function kernelRuntimeMapTooltipContent(item, percentText) {
-    return [
-      app.createNode('span', {
-        className: 'kernel-runtime-tooltip-title',
-        text: item.label
-      }),
-      app.createNode('span', {
-        className: 'kernel-runtime-tooltip-primary',
-        text: percentText
+  function kernelRuntimeMapTooltipDetailText(detail) {
+    const entries = Number(detail && detail.entries || 0);
+    const capacity = Number(detail && detail.capacity || 0);
+    const percent = kernelRuntimeMapPercent(entries, capacity);
+    return formatKernelRuntimePercent(percent) + ' · ' + String(entries) + ' / ' + String(capacity);
+  }
+
+  function kernelRuntimeTooltipBreakdownRow(label, value) {
+    return app.createNode('div', {
+      className: 'kernel-runtime-tooltip-breakdown-row',
+      children: [
+        app.createNode('span', {
+          className: 'kernel-runtime-tooltip-breakdown-label',
+          text: label
+        }),
+        app.createNode('span', {
+          className: 'kernel-runtime-tooltip-breakdown-value',
+          text: value
+        })
+      ]
+    });
+  }
+
+  function kernelRuntimeMapTooltipDetailRow(detail) {
+    return kernelRuntimeTooltipBreakdownRow(detail.label, kernelRuntimeMapTooltipDetailText(detail));
+  }
+
+  function kernelRuntimeMapBaseLimit(kind, runtimeData) {
+    if (!runtimeData) return 0;
+    if (kind === 'rules') return Number(runtimeData.kernel_rules_map_base_limit || 0);
+    if (kind === 'flows') return Number(runtimeData.kernel_flows_map_base_limit || 0);
+    if (kind === 'nat') return Number(runtimeData.kernel_nat_map_base_limit || 0);
+    return 0;
+  }
+
+  function kernelRuntimeMapConfiguredLimit(kind, runtimeData) {
+    if (!runtimeData) return 0;
+    if (kind === 'rules') return Number(runtimeData.kernel_rules_map_configured_limit || 0);
+    if (kind === 'flows') return Number(runtimeData.kernel_flows_map_configured_limit || 0);
+    if (kind === 'nat') return Number(runtimeData.kernel_nat_map_configured_limit || 0);
+    return 0;
+  }
+
+  function kernelRuntimeMapCapacityMode(kind, runtimeData) {
+    if (!runtimeData) return '';
+    if (kind === 'rules') return String(runtimeData.kernel_rules_map_capacity_mode || '').trim();
+    if (kind === 'flows') return String(runtimeData.kernel_flows_map_capacity_mode || '').trim();
+    if (kind === 'nat') return String(runtimeData.kernel_nat_map_capacity_mode || '').trim();
+    return '';
+  }
+
+  function kernelRuntimeMapDecisionText(item, runtimeData) {
+    const mode = kernelRuntimeMapCapacityMode(item.kind, runtimeData);
+    const configuredLimit = kernelRuntimeMapConfiguredLimit(item.kind, runtimeData);
+    const baseLimit = kernelRuntimeMapBaseLimit(item.kind, runtimeData);
+    const currentCapacity = Number(item && item.capacity || 0);
+
+    if (mode === 'fixed') {
+      return app.t('kernel.maps.tooltip.decision.fixed', {
+        limit: configuredLimit || currentCapacity || baseLimit || 0
+      });
+    }
+    if (baseLimit > 0 && currentCapacity > 0 && currentCapacity < baseLimit) {
+      return app.t('kernel.maps.tooltip.decision.retained', {
+        current: currentCapacity,
+        base: baseLimit
+      });
+    }
+    if (baseLimit > 0 && currentCapacity > baseLimit) {
+      return app.t('kernel.maps.tooltip.decision.expanded', {
+        base: baseLimit,
+        current: currentCapacity
+      });
+    }
+    if (baseLimit > 0) {
+      return app.t('kernel.maps.tooltip.decision.base', {
+        base: baseLimit
+      });
+    }
+    return app.t('kernel.maps.tooltip.decision.current', {
+      current: currentCapacity
+    });
+  }
+
+  function kernelRuntimeMapInfoRows(item, runtimeData) {
+    if (!runtimeData) return [];
+
+    const rows = [];
+    if (runtimeData.kernel_map_profile) {
+      rows.push({
+        label: app.t('kernel.maps.tooltip.profile'),
+        value: kernelRuntimeMapProfileLabel(runtimeData.kernel_map_profile) + ' · ' + kernelRuntimeMapProfileMemoryLabel(runtimeData.kernel_map_total_memory_bytes)
+      });
+    }
+
+    const mode = kernelRuntimeMapCapacityMode(item.kind, runtimeData);
+    if (mode) {
+      rows.push({
+        label: app.t('kernel.maps.tooltip.mode'),
+        value: app.t('kernel.maps.tooltip.mode.' + mode)
+      });
+    }
+
+    const baseLimit = kernelRuntimeMapBaseLimit(item.kind, runtimeData);
+    if (baseLimit > 0) {
+      rows.push({
+        label: app.t('kernel.maps.tooltip.base'),
+        value: String(baseLimit)
+      });
+    }
+
+    rows.push({
+      label: app.t('kernel.maps.tooltip.decision'),
+      value: kernelRuntimeMapDecisionText(item, runtimeData)
+    });
+
+    return rows;
+  }
+
+  function kernelRuntimeMapTooltipContent(item, percentText, runtimeData) {
+    const details = (Array.isArray(item.details) ? item.details : []).filter((detail) => (detail.capacity || 0) > 0 || (detail.entries || 0) > 0);
+    const infoRows = kernelRuntimeMapInfoRows(item, runtimeData);
+    const nodes = [
+      app.createNode('div', {
+        className: 'kernel-runtime-tooltip-header',
+        children: [
+          app.createNode('span', {
+            className: 'kernel-runtime-tooltip-title',
+            text: item.label
+          }),
+          app.createNode('span', {
+            className: 'kernel-runtime-tooltip-primary',
+            text: percentText
+          })
+        ]
       }),
       app.createNode('span', {
         className: 'kernel-runtime-tooltip-meta',
         text: String(item.entries) + ' / ' + String(item.capacity)
       })
     ];
+    if (details.length) {
+      nodes.push(app.createNode('div', {
+        className: 'kernel-runtime-tooltip-breakdown',
+        children: details.map((detail) => kernelRuntimeMapTooltipDetailRow(detail))
+      }));
+    }
+    if (infoRows.length) {
+      nodes.push(app.createNode('div', {
+        className: 'kernel-runtime-tooltip-breakdown',
+        children: infoRows.map((detail) => kernelRuntimeTooltipBreakdownRow(detail.label, detail.value))
+      }));
+    }
+    return nodes;
   }
 
   function bindKernelRuntimeTooltip(trigger, contentFactory) {
@@ -218,27 +494,72 @@
     });
   }
 
-  function kernelRuntimeMapsNode(engine) {
+  function kernelRuntimeMapsNode(engine, runtimeData) {
     ensureKernelRuntimeTooltip();
 
     const items = [
       {
+        kind: 'rules',
         label: app.t('kernel.maps.rules'),
         entries: engine.rules_map_entries || 0,
-        capacity: engine.rules_map_capacity || 0
+        capacity: engine.rules_map_capacity || 0,
+        details: [
+          {
+            label: app.t('kernel.maps.ipv4'),
+            shortLabel: app.t('kernel.maps.ipv4Short'),
+            entries: engine.rules_map_entries_v4 || 0,
+            capacity: engine.rules_map_capacity_v4 || 0
+          },
+          {
+            label: app.t('kernel.maps.ipv6'),
+            shortLabel: app.t('kernel.maps.ipv6Short'),
+            entries: engine.rules_map_entries_v6 || 0,
+            capacity: engine.rules_map_capacity_v6 || 0
+          }
+        ]
       },
       {
+        kind: 'flows',
         label: app.t('kernel.maps.flows'),
         entries: engine.flows_map_entries || 0,
-        capacity: engine.flows_map_capacity || 0
+        capacity: engine.flows_map_capacity || 0,
+        details: [
+          {
+            label: app.t('kernel.maps.ipv4'),
+            shortLabel: app.t('kernel.maps.ipv4Short'),
+            entries: engine.flows_map_entries_v4 || 0,
+            capacity: engine.flows_map_capacity_v4 || 0
+          },
+          {
+            label: app.t('kernel.maps.ipv6'),
+            shortLabel: app.t('kernel.maps.ipv6Short'),
+            entries: engine.flows_map_entries_v6 || 0,
+            capacity: engine.flows_map_capacity_v6 || 0
+          }
+        ]
       }
     ];
 
     if ((engine.nat_map_entries || 0) > 0 || (engine.nat_map_capacity || 0) > 0) {
       items.push({
+        kind: 'nat',
         label: app.t('kernel.maps.nat'),
         entries: engine.nat_map_entries || 0,
-        capacity: engine.nat_map_capacity || 0
+        capacity: engine.nat_map_capacity || 0,
+        details: [
+          {
+            label: app.t('kernel.maps.ipv4'),
+            shortLabel: app.t('kernel.maps.ipv4Short'),
+            entries: engine.nat_map_entries_v4 || 0,
+            capacity: engine.nat_map_capacity_v4 || 0
+          },
+          {
+            label: app.t('kernel.maps.ipv6'),
+            shortLabel: app.t('kernel.maps.ipv6Short'),
+            entries: engine.nat_map_entries_v6 || 0,
+            capacity: engine.nat_map_capacity_v6 || 0
+          }
+        ]
       });
     }
 
@@ -265,7 +586,7 @@
           })
         ]
       });
-      bindKernelRuntimeTooltip(badge, () => kernelRuntimeMapTooltipContent(item, percentText));
+      bindKernelRuntimeTooltip(badge, () => kernelRuntimeMapTooltipContent(item, percentText, runtimeData));
       list.appendChild(badge);
     });
     return list;
@@ -313,6 +634,74 @@
     return (Math.round(seconds * 10) / 10).toFixed(1) + 's';
   }
 
+  function kernelRuntimeMapProfileLabel(profileName) {
+    const name = String(profileName || '').trim();
+    if (!name) return app.t('common.dash');
+    return app.t('kernel.summary.mapProfileValue.' + name);
+  }
+
+  function kernelRuntimeMapProfileMemoryLabel(totalMemoryBytes) {
+    const value = Number(totalMemoryBytes || 0);
+    if (!(value > 0)) return app.t('kernel.summary.mapProfileMemoryUnknown');
+    return app.formatBytes(value);
+  }
+
+  function kernelRuntimeMapProfileDetail(data) {
+    if (!data) return '';
+    const flows = Number(data.kernel_flows_map_base_limit || 0);
+    const nat = Number(data.kernel_nat_map_base_limit || 0);
+    const egress = Number(data.kernel_egress_nat_auto_floor || 0);
+    if (!(flows > 0) && !(nat > 0) && !(egress > 0)) return '';
+    return app.t('kernel.summary.mapProfileDetail', {
+      memory: kernelRuntimeMapProfileMemoryLabel(data.kernel_map_total_memory_bytes),
+      flows: flows || 0,
+      nat: nat || 0,
+      egress: egress || 0
+    });
+  }
+
+  function kernelRuntimeReconcileDetail(engine) {
+    if (!engine) return '';
+    const parts = [];
+    const duration = kernelRuntimeDurationLabel(engine.last_reconcile_ms);
+    if (duration) parts.push(duration);
+    if (engine.last_reconcile_at) parts.push('@' + app.formatClock(engine.last_reconcile_at));
+    if (
+      engine.last_reconcile_request_entries ||
+      engine.last_reconcile_prepared_entries ||
+      engine.last_reconcile_applied_entries ||
+      engine.last_reconcile_upserts ||
+      engine.last_reconcile_deletes ||
+      engine.last_reconcile_attaches ||
+      engine.last_reconcile_detaches ||
+      engine.last_reconcile_preserved ||
+      engine.last_reconcile_flow_purge_deleted
+    ) {
+      parts.push(
+        'req=' + String(engine.last_reconcile_request_entries || 0),
+        'prep=' + String(engine.last_reconcile_prepared_entries || 0),
+        'applied=' + String(engine.last_reconcile_applied_entries || 0),
+        'upsert=' + String(engine.last_reconcile_upserts || 0),
+        'delete=' + String(engine.last_reconcile_deletes || 0),
+        'attach=' + String(engine.last_reconcile_attaches || 0),
+        'detach=' + String(engine.last_reconcile_detaches || 0),
+        'preserve=' + String(engine.last_reconcile_preserved || 0),
+        'purge=' + String(engine.last_reconcile_flow_purge_deleted || 0)
+      );
+    }
+    const phaseParts = [];
+    if (engine.last_reconcile_prepare_ms) phaseParts.push('prepare=' + kernelRuntimeDurationLabel(engine.last_reconcile_prepare_ms));
+    if (engine.last_reconcile_attach_ms) phaseParts.push('attach=' + kernelRuntimeDurationLabel(engine.last_reconcile_attach_ms));
+    if (engine.last_reconcile_flow_purge_ms) phaseParts.push('purge=' + kernelRuntimeDurationLabel(engine.last_reconcile_flow_purge_ms));
+    if (phaseParts.length) {
+      parts.push(phaseParts.join(' '));
+    }
+    if (engine.last_reconcile_error) {
+      parts.push('err=' + String(engine.last_reconcile_error));
+    }
+    return parts.join(' ');
+  }
+
   function kernelRuntimeCooldownWindowLabel(nextExpiry, clearAt) {
     const next = kernelRuntimeTimestampLabel(nextExpiry);
     const clear = kernelRuntimeTimestampLabel(clearAt);
@@ -329,7 +718,9 @@
   }
 
   function kernelRuntimeSummaryNote(labelKey, timestamp, detail) {
-    const text = String(detail || '').trim();
+    const text = typeof app.translateRuntimeReason === 'function'
+      ? app.translateRuntimeReason(detail)
+      : String(detail || '').trim();
     if (!text) return null;
 
     const parts = [app.t(labelKey)];
@@ -358,13 +749,19 @@
   function kernelRuntimeDetailText(engine) {
     if (!engine) return '';
     const parts = [];
+    const reconcileDetail = kernelRuntimeReconcileDetail(engine);
+    if (reconcileDetail) {
+      parts.push('reconcile ' + reconcileDetail);
+    }
     [
       engine.pressure_reason,
       engine.degraded_reason,
       engine.available_reason,
       engine.attachment_summary
     ].forEach((item) => {
-      const text = String(item || '').trim();
+      const text = typeof app.translateRuntimeReason === 'function'
+        ? app.translateRuntimeReason(item)
+        : String(item || '').trim();
       if (!text) return;
       if (parts.indexOf(text) >= 0) return;
       parts.push(text);
@@ -427,6 +824,31 @@
       parts.push('diag_err=' + String(engine.diag_snapshot_error));
     }
     return parts.join(' | ');
+  }
+
+  function kernelRuntimeReconcileNode(engine) {
+    if (!engine) return app.emptyCellNode('stat-muted');
+
+    const modeText = kernelRuntimeModeLabel(engine.last_reconcile_mode);
+    const detail = kernelRuntimeReconcileDetail(engine);
+    const badge = app.createNode('span', {
+      className: 'badge ' + (engine.last_reconcile_error ? 'badge-error' : 'badge-disabled') + (detail ? ' kernel-runtime-reconcile-badge' : ''),
+      text: modeText || app.t('common.dash'),
+      title: detail || '',
+      attrs: detail ? {
+        tabindex: '0',
+        role: 'button',
+        'aria-describedby': 'kernelRuntimeFloatingTooltip',
+        'aria-expanded': 'false'
+      } : null
+    });
+
+    if (detail) {
+      ensureKernelRuntimeTooltip();
+      bindKernelRuntimeTooltip(badge, () => detail);
+    }
+
+    return badge;
   }
 
   function kernelRuntimeDegradedSummaryText(engines) {
@@ -554,7 +976,8 @@
       loaded: true,
       rules: {},
       sites: {},
-      ranges: {}
+      ranges: {},
+      egressNATs: {}
     };
 
     (payload && payload.rules ? payload.rules : []).forEach((item) => {
@@ -566,11 +989,15 @@
     (payload && payload.ranges ? payload.ranges : []).forEach((item) => {
       next.ranges[item.range_id] = item.current_conns || 0;
     });
+    (payload && payload.egress_nats ? payload.egress_nats : []).forEach((item) => {
+      next.egressNATs[item.egress_nat_id] = item.current_conns || 0;
+    });
 
     app.state.currentConnsSnapshot = next;
     app.state.ruleStats.data = rebuildCurrentConns('rules', app.state.ruleStats.data, 'rule_id');
     app.state.siteStats.data = rebuildCurrentConns('sites', app.state.siteStats.data, 'site_id');
     app.state.rangeStats.data = rebuildCurrentConns('ranges', app.state.rangeStats.data, 'range_id');
+    app.state.egressNATStats.data = rebuildCurrentConns('egressNATs', app.state.egressNATStats.data, 'egress_nat_id');
   }
 
   app.renderKernelRuntime = function renderKernelRuntime() {
@@ -592,6 +1019,7 @@
     const configuredOrderNodes = configuredOrder.length
       ? configuredOrder.map((name) => kernelEngineBadge(name))
       : [app.emptyCellNode('stat-muted')];
+    const mapProfileDetail = kernelRuntimeMapProfileDetail(data);
 
     const summaryFragment = document.createDocumentFragment();
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
@@ -607,6 +1035,16 @@
           }),
           configuredOrderNodes
         ]),
+        data.kernel_map_profile
+          ? app.createNode('div', {
+              text: app.t('kernel.summary.mapProfile') + ': ' + kernelRuntimeMapProfileLabel(data.kernel_map_profile)
+            })
+          : null,
+        mapProfileDetail
+          ? app.createNode('div', {
+              text: mapProfileDetail
+            })
+          : null,
         !data.available && (data.available_reason || app.t('common.unavailable'))
           ? app.createNode('div', {
               text: data.available_reason || app.t('common.unavailable')
@@ -800,8 +1238,8 @@
       tr.appendChild(app.createCell(String(engine.active_entries || 0), 'stat-mono'));
       tr.appendChild(app.createCell(String(engine.attachments || 0), 'stat-mono'));
       tr.appendChild(app.createCell(kernelStatePill(!!engine.attachments_healthy, 'kernel.attachments.healthy', 'kernel.attachments.degraded')));
-      tr.appendChild(app.createCell(kernelRuntimeMapsNode(engine), 'kernel-runtime-maps'));
-      tr.appendChild(app.createCell(kernelRuntimeModeLabel(engine.last_reconcile_mode)));
+      tr.appendChild(app.createCell(kernelRuntimeMapsNode(engine, data), 'kernel-runtime-maps'));
+      tr.appendChild(app.createCell(kernelRuntimeReconcileNode(engine)));
       tr.appendChild(app.createCell(kernelStatePill(!!engine.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled')));
       tr.appendChild(app.createCell(
         kernelRuntimeDetailNode(kernelRuntimeDetailText(engine), !!engine.degraded || !!engine.pressure_active),
@@ -831,9 +1269,11 @@
 
     const fragment = document.createDocumentFragment();
     list.forEach((s) => {
+      const rule = findRuleConfig(s.rule_id);
       const tr = document.createElement('tr');
       tr.appendChild(app.createCell(String(s.rule_id), 'stat-mono'));
       tr.appendChild(app.createCell(s.remark ? s.remark : app.emptyCellNode('stat-muted')));
+      tr.appendChild(app.createCell(ruleStatsTargetCellNode(rule)));
       tr.appendChild(app.createCell(currentConnsCellNode(s.current_conns)));
       tr.appendChild(app.createCell(String(s.total_conns)));
       tr.appendChild(app.createCell(String(s.rejected_conns)));
@@ -865,9 +1305,11 @@
 
     const fragment = document.createDocumentFragment();
     list.forEach((s) => {
+      const site = findSiteConfig(s.site_id);
       const tr = document.createElement('tr');
       tr.appendChild(app.createCell(String(s.site_id), 'stat-mono'));
       tr.appendChild(app.createCell(s.domain ? s.domain : app.emptyCellNode('stat-muted')));
+      tr.appendChild(app.createCell(siteStatsTargetCellNode(site)));
       tr.appendChild(app.createCell(currentConnsCellNode(s.current_conns)));
       tr.appendChild(app.createCell(String(s.total_conns)));
       tr.appendChild(app.createCell(app.formatSpeed(s.speed_in)));
@@ -898,9 +1340,11 @@
 
     const fragment = document.createDocumentFragment();
     list.forEach((s) => {
+      const range = findRangeConfig(s.range_id);
       const tr = document.createElement('tr');
       tr.appendChild(app.createCell(String(s.range_id), 'stat-mono'));
       tr.appendChild(app.createCell(s.remark ? s.remark : app.emptyCellNode('stat-muted')));
+      tr.appendChild(app.createCell(rangeStatsTargetCellNode(range)));
       tr.appendChild(app.createCell(currentConnsCellNode(s.current_conns)));
       tr.appendChild(app.createCell(String(s.total_conns)));
       tr.appendChild(app.createCell(String(s.rejected_conns)));
@@ -911,6 +1355,54 @@
       fragment.appendChild(tr);
     });
     el.rangeStatsBody.appendChild(fragment);
+  };
+
+  app.renderEgressNATStatsTable = function renderEgressNATStatsTable() {
+    const el = app.el;
+    const st = app.state.egressNATStats;
+    const list = Array.isArray(st.data) ? st.data : [];
+    const total = typeof st.total === 'number' ? st.total : list.length;
+    app.clearNode(el.egressNATStatsBody);
+    app.updateSortIndicators('egressNATStatsTable', st);
+    app.renderPagination('egressNATStats', total);
+
+    if (!list.length) {
+      el.noEgressNATStats.style.display = 'block';
+      app.toggleTableVisibility('egressNATStatsTable', false);
+      return;
+    }
+    el.noEgressNATStats.style.display = 'none';
+    app.toggleTableVisibility('egressNATStatsTable', true);
+
+    const fragment = document.createDocumentFragment();
+    list.forEach((s) => {
+      const tr = document.createElement('tr');
+      tr.appendChild(app.createCell(String(s.egress_nat_id), 'stat-mono'));
+      tr.appendChild(app.createCell(s.parent_interface || app.emptyCellNode('stat-muted')));
+      tr.appendChild(app.createCell(
+        typeof app.formatEgressNATStatsChildScope === 'function'
+          ? app.formatEgressNATStatsChildScope(s.child_interface, s.parent_interface)
+          : (s.child_interface || app.emptyCellNode('stat-muted'))
+      ));
+      tr.appendChild(app.createCell(s.out_interface || app.emptyCellNode('stat-muted')));
+      tr.appendChild(app.createCell(s.out_source_ip || app.emptyCellNode('stat-muted')));
+      tr.appendChild(app.createCell(
+        egressNATStatsProtocolNode(s.protocol || '')
+      ));
+      tr.appendChild(app.createCell(
+        typeof app.formatEgressNATNatType === 'function'
+          ? app.formatEgressNATNatType(s.nat_type || '')
+          : String(s.nat_type || '')
+      ));
+      tr.appendChild(app.createCell(currentConnsCellNode(s.current_conns)));
+      tr.appendChild(app.createCell(String(s.total_conns)));
+      tr.appendChild(app.createCell(app.formatSpeed(s.speed_in)));
+      tr.appendChild(app.createCell(app.formatSpeed(s.speed_out)));
+      tr.appendChild(app.createCell(app.formatBytes(s.bytes_in)));
+      tr.appendChild(app.createCell(app.formatBytes(s.bytes_out)));
+      fragment.appendChild(tr);
+    });
+    el.egressNATStatsBody.appendChild(fragment);
   };
 
   app.loadKernelRuntime = async function loadKernelRuntime() {
@@ -997,6 +1489,38 @@
     }
   };
 
+  app.loadEgressNATStats = async function loadEgressNATStats() {
+    try {
+      const st = app.state.egressNATStats;
+      const payload = await app.apiCall('GET', '/api/egress-nats/stats?' + buildStatsQuery(st));
+
+      st.page = payload && payload.page ? payload.page : st.page;
+      st.pageSize = payload && payload.page_size ? payload.page_size : st.pageSize;
+      st.total = payload && typeof payload.total === 'number' ? payload.total : 0;
+      st.data = ((payload && payload.items) || []).map((s) => {
+        return {
+          egress_nat_id: s.egress_nat_id,
+          parent_interface: s.parent_interface || '',
+          child_interface: s.child_interface || '',
+          out_interface: s.out_interface || '',
+          out_source_ip: s.out_source_ip || '',
+          protocol: s.protocol || '',
+          nat_type: s.nat_type || '',
+          current_conns: getCurrentConnValue('egressNATs', s.egress_nat_id),
+          total_conns: s.total_conns || 0,
+          speed_in: s.speed_in || 0,
+          speed_out: s.speed_out || 0,
+          bytes_in: s.bytes_in || 0,
+          bytes_out: s.bytes_out || 0
+        };
+      });
+
+      app.renderEgressNATStatsTable();
+    } catch (e) {
+      if (e.message !== 'unauthorized') console.error('load egress nat stats:', e);
+    }
+  };
+
   app.loadCurrentConns = async function loadCurrentConns() {
     try {
       const snapshot = await app.apiCall('GET', '/api/stats/current-conns');
@@ -1004,12 +1528,13 @@
       app.renderRuleStatsTable();
       app.renderSiteStatsTable();
       app.renderRangeStatsTable();
+      app.renderEgressNATStatsTable();
     } catch (e) {
       if (e.message !== 'unauthorized') console.error('load current conns:', e);
     }
   };
 
   app.loadAllStats = async function loadAllStats() {
-    await Promise.all([app.loadKernelRuntime(), app.loadRuleStats(), app.loadSiteStats(), app.loadRangeStats()]);
+    await Promise.all([app.loadKernelRuntime(), app.loadRuleStats(), app.loadSiteStats(), app.loadRangeStats(), app.loadEgressNATStats()]);
   };
 })();

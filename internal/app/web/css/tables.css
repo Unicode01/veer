@@ -240,10 +240,67 @@ tr.row-pending td {
     text-align: left;
 }
 
+#ruleStatsTable th:nth-child(3),
+#ruleStatsTable td:nth-child(3),
+#siteStatsTable th:nth-child(3),
+#siteStatsTable td:nth-child(3),
+#rangeStatsTable th:nth-child(3),
+#rangeStatsTable td:nth-child(3) {
+    text-align: left;
+}
+
+#egressNATStatsTable th:nth-child(-n+6),
+#egressNATStatsTable td:nth-child(-n+6) {
+    text-align: left;
+}
+
 .stats-table td:nth-child(2) {
     white-space: normal;
     max-width: 260px;
     word-break: break-word;
+}
+
+#ruleStatsTable td:nth-child(3),
+#siteStatsTable td:nth-child(3),
+#rangeStatsTable td:nth-child(3) {
+    white-space: normal;
+    max-width: 260px;
+}
+
+.stats-target-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.stats-target-main,
+.stats-target-sub {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.stats-target-main {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    color: var(--text);
+}
+
+.stats-target-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.stats-inline-compact {
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .stat-pill {
@@ -354,12 +411,12 @@ tr.row-pending td {
 }
 
 .kernel-runtime-map-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 24px;
-    padding: 0 8px;
-    max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 8px;
+  max-width: 100%;
     font: inherit;
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -405,23 +462,31 @@ tr.row-pending td {
 }
 
 .kernel-runtime-map-badge-value {
-    white-space: nowrap;
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 1.2;
-    font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.kernel-runtime-tooltip-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .kernel-runtime-tooltip-title {
     display: block;
-    margin-bottom: 4px;
     color: var(--text);
     font-size: 12px;
     font-weight: 700;
+    line-height: 1.4;
 }
 
 .kernel-runtime-tooltip-primary {
     display: block;
+    white-space: nowrap;
     font-size: 12px;
     font-weight: 700;
     color: var(--text);
@@ -436,6 +501,39 @@ tr.row-pending td {
     color: var(--text-muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     font-variant-numeric: tabular-nums;
+}
+
+.kernel-runtime-tooltip-breakdown {
+    display: grid;
+    gap: 4px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.kernel-runtime-tooltip-breakdown-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.kernel-runtime-tooltip-breakdown-label,
+.kernel-runtime-tooltip-breakdown-value {
+    font-size: 12px;
+    line-height: 1.4;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+.kernel-runtime-tooltip-breakdown-label {
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.kernel-runtime-tooltip-breakdown-value {
+    color: var(--text);
+    white-space: nowrap;
 }
 
 .kernel-runtime-detail-cell {
@@ -479,6 +577,15 @@ tr.row-pending td {
     color: var(--warning-text);
 }
 
+.kernel-runtime-reconcile-badge {
+    cursor: pointer;
+}
+
+.kernel-runtime-reconcile-badge:focus {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+
 .kernel-runtime-floating-tooltip {
     position: fixed;
     left: 0;
@@ -512,23 +619,24 @@ tr.row-pending td {
 #kernelRuntimeTable,
 #ruleStatsTable,
 #siteStatsTable,
-#rangeStatsTable {
+#rangeStatsTable,
+#egressNATStatsTable {
     width: 100%;
 }
 
-@media (min-width: 961px) {
-    #kernelRuntimeTable {
-        table-layout: fixed;
-    }
+#egressNATStatsTable {
+    table-layout: fixed;
+}
 
-    #kernelRuntimeTable th,
-    #kernelRuntimeTable td,
+@media (min-width: 961px) {
     #ruleStatsTable th,
     #ruleStatsTable td,
     #siteStatsTable th,
     #siteStatsTable td,
     #rangeStatsTable th,
-    #rangeStatsTable td {
+    #rangeStatsTable td,
+    #egressNATStatsTable th,
+    #egressNATStatsTable td {
         max-width: 0;
     }
 
@@ -536,14 +644,24 @@ tr.row-pending td {
     #ruleStatsTable th,
     #siteStatsTable th,
     #rangeStatsTable th {
-        white-space: normal;
         line-height: 1.35;
+    }
+
+    #kernelRuntimeTable th {
+        white-space: nowrap;
+    }
+
+    #egressNATStatsTable th {
+        white-space: nowrap;
+        line-height: 1.25;
+        font-size: 11px;
     }
 
     #kernelRuntimeTable td,
     #ruleStatsTable td,
     #siteStatsTable td,
-    #rangeStatsTable td {
+    #rangeStatsTable td,
+    #egressNATStatsTable td {
         line-height: 1.4;
     }
 
@@ -552,51 +670,17 @@ tr.row-pending td {
         padding: 11px 12px;
     }
 
-    #kernelRuntimeTable th:nth-child(1),
-    #kernelRuntimeTable td:nth-child(1) {
-        width: 80px;
-    }
-
-    #kernelRuntimeTable th:nth-child(2),
-    #kernelRuntimeTable td:nth-child(2),
-    #kernelRuntimeTable th:nth-child(3),
-    #kernelRuntimeTable td:nth-child(3),
-    #kernelRuntimeTable th:nth-child(4),
-    #kernelRuntimeTable td:nth-child(4),
-    #kernelRuntimeTable th:nth-child(5),
-    #kernelRuntimeTable td:nth-child(5),
-    #kernelRuntimeTable th:nth-child(6),
-    #kernelRuntimeTable td:nth-child(6),
-    #kernelRuntimeTable th:nth-child(9),
-    #kernelRuntimeTable td:nth-child(9),
-    #kernelRuntimeTable th:nth-child(10),
-    #kernelRuntimeTable td:nth-child(10) {
-        width: 96px;
-    }
-
-    #kernelRuntimeTable th:nth-child(7),
-    #kernelRuntimeTable td:nth-child(7) {
-        width: 118px;
-    }
-
-    #kernelRuntimeTable th:nth-child(8),
-    #kernelRuntimeTable td:nth-child(8) {
-        width: 28%;
-    }
-
-    #kernelRuntimeTable th:nth-child(11),
-    #kernelRuntimeTable td:nth-child(11) {
-        width: 92px;
-    }
-
     #ruleStatsTable th,
     #ruleStatsTable td,
     #siteStatsTable th,
     #siteStatsTable td,
     #rangeStatsTable th,
-    #rangeStatsTable td {
-        padding: 10px 12px;
+    #rangeStatsTable td,
+    #egressNATStatsTable th,
+    #egressNATStatsTable td {
+        padding: 8px 10px;
         max-width: none;
+        font-size: 12px;
     }
 
     #ruleStatsTable th:nth-child(1),
@@ -604,7 +688,9 @@ tr.row-pending td {
     #siteStatsTable th:nth-child(1),
     #siteStatsTable td:nth-child(1),
     #rangeStatsTable th:nth-child(1),
-    #rangeStatsTable td:nth-child(1) {
+    #rangeStatsTable td:nth-child(1),
+    #egressNATStatsTable th:nth-child(1),
+    #egressNATStatsTable td:nth-child(1) {
         width: 1%;
         white-space: nowrap;
     }
@@ -629,6 +715,85 @@ tr.row-pending td {
     #ruleStatsTable td:nth-child(n+3),
     #siteStatsTable td:nth-child(n+3),
     #rangeStatsTable td:nth-child(n+3) {
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+    }
+
+    #egressNATStatsTable th:nth-child(-n+6),
+    #egressNATStatsTable td:nth-child(-n+6) {
+        text-align: left;
+    }
+
+    #egressNATStatsTable th:nth-child(1),
+    #egressNATStatsTable td:nth-child(1) {
+        width: 44px;
+        white-space: nowrap;
+    }
+
+    #egressNATStatsTable th:nth-child(2),
+    #egressNATStatsTable th:nth-child(3),
+    #egressNATStatsTable th:nth-child(4),
+    #egressNATStatsTable td:nth-child(2),
+    #egressNATStatsTable td:nth-child(3),
+    #egressNATStatsTable td:nth-child(4) {
+        width: 80px;
+    }
+
+    #egressNATStatsTable td:nth-child(2),
+    #egressNATStatsTable td:nth-child(3),
+    #egressNATStatsTable td:nth-child(4) {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+
+    #egressNATStatsTable th:nth-child(5),
+    #egressNATStatsTable td:nth-child(5) {
+        width: 92px;
+    }
+
+    #egressNATStatsTable td:nth-child(5) {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+
+    #egressNATStatsTable th:nth-child(6),
+    #egressNATStatsTable td:nth-child(6) {
+        width: 96px;
+    }
+
+    #egressNATStatsTable th:nth-child(7),
+    #egressNATStatsTable td:nth-child(7) {
+        width: 88px;
+    }
+
+    #egressNATStatsTable td:nth-child(6),
+    #egressNATStatsTable td:nth-child(7) {
+        white-space: nowrap;
+    }
+
+    #egressNATStatsTable th:nth-child(8),
+    #egressNATStatsTable td:nth-child(8),
+    #egressNATStatsTable th:nth-child(9),
+    #egressNATStatsTable td:nth-child(9) {
+        width: 72px;
+        white-space: nowrap;
+    }
+
+    #egressNATStatsTable th:nth-child(10),
+    #egressNATStatsTable td:nth-child(10),
+    #egressNATStatsTable th:nth-child(11),
+    #egressNATStatsTable td:nth-child(11),
+    #egressNATStatsTable th:nth-child(12),
+    #egressNATStatsTable td:nth-child(12),
+    #egressNATStatsTable th:nth-child(13),
+    #egressNATStatsTable td:nth-child(13) {
+        width: 82px;
+        white-space: nowrap;
+    }
+
+    #egressNATStatsTable td:nth-child(n+8) {
         white-space: nowrap;
         font-variant-numeric: tabular-nums;
     }
@@ -687,6 +852,12 @@ tr.row-pending td {
     background: var(--success-bg);
     color: var(--success-text);
     border-color: var(--success-border);
+}
+
+.worker-type-egress-nat {
+    background: var(--danger-bg);
+    color: var(--danger-text);
+    border-color: var(--danger-border);
 }
 
 .worker-type-shared {
