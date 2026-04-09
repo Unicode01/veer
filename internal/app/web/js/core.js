@@ -95,6 +95,24 @@
       egressNATProtocolICMP: $('egressNATProtocolICMP'),
       egressNATOutSourceIPOptions: $('egressNATOutSourceIPOptions'),
 
+      ipv6AssignmentForm: $('ipv6AssignmentForm'),
+      ipv6AssignmentFormTitle: $('ipv6AssignmentFormTitle'),
+      ipv6AssignmentSubmitBtn: $('ipv6AssignmentSubmitBtn'),
+      ipv6AssignmentCancelBtn: $('ipv6AssignmentCancelBtn'),
+      ipv6AssignmentModeHint: $('ipv6AssignmentModeHint'),
+      editIPv6AssignmentId: $('editIPv6AssignmentId'),
+      ipv6AssignmentsBody: $('ipv6AssignmentsBody'),
+      noIPv6Assignments: $('noIPv6Assignments'),
+      ipv6ParentInterface: $('ipv6ParentInterface'),
+      ipv6ParentPicker: $('ipv6ParentPicker'),
+      ipv6ParentOptions: $('ipv6ParentOptions'),
+      ipv6ParentPrefix: $('ipv6ParentPrefix'),
+      ipv6TargetInterface: $('ipv6TargetInterface'),
+      ipv6TargetPicker: $('ipv6TargetPicker'),
+      ipv6TargetOptions: $('ipv6TargetOptions'),
+      ipv6AssignedPrefix: $('ipv6AssignedPrefix'),
+      ipv6AssignmentRemark: $('ipv6AssignmentRemark'),
+
       workersBody: $('workersBody'),
       noWorkers: $('noWorkers'),
 
@@ -114,12 +132,14 @@
       masterVersion: $('masterVersion')
     },
     interfaces: [],
+    hostNetworkInterfaces: [],
     tags: [],
     state: {
       rules: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10, selectedIds: new Set(), batchDeleting: false },
       sites: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
       ranges: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
       egressNATs: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
+      ipv6Assignments: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
       workers: { data: [], sortKey: '', sortAsc: true, masterHash: '', page: 1, pageSize: 10 },
       kernelRuntime: { data: null },
       ruleStats: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 20, total: 0 },
@@ -185,6 +205,16 @@
   app.isValidIP = function isValidIP(ip) {
     const text = (ip || '').trim();
     return !!app.parseIPv4(text) || app.isValidIPv6(text);
+  };
+
+  app.isValidIPv6Prefix = function isValidIPv6Prefix(value) {
+    const text = String(value || '').trim();
+    if (!text) return false;
+    const slash = text.lastIndexOf('/');
+    if (slash <= 0 || slash === text.length - 1) return false;
+    const address = text.slice(0, slash).trim();
+    const prefixLen = parseInt(text.slice(slash + 1).trim(), 10);
+    return app.isValidIPv6(address) && !Number.isNaN(prefixLen) && prefixLen >= 1 && prefixLen <= 128;
   };
 
   app.ipFamily = function ipFamily(ip) {
@@ -783,6 +813,21 @@
       app.populateTagSelect(app.$('rangeTag'), app.$('rangeTag').value);
     } catch (e) {
       if (e.message !== 'unauthorized') console.error('load tags:', e);
+    }
+  };
+
+  app.loadHostNetwork = async function loadHostNetwork() {
+    try {
+      const resp = await app.apiCall('GET', '/api/host-network');
+      app.hostNetworkInterfaces = Array.isArray(resp && resp.interfaces) ? resp.interfaces : [];
+      if (typeof app.refreshManagedNetworkInterfaceSelectors === 'function') {
+        app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: true });
+      }
+      if (typeof app.refreshIPv6AssignmentInterfaceSelectors === 'function') {
+        app.refreshIPv6AssignmentInterfaceSelectors({ preservePrefix: true });
+      }
+    } catch (e) {
+      if (e.message !== 'unauthorized') console.error('load host network:', e);
     }
   };
 

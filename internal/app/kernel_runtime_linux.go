@@ -49,6 +49,7 @@ const (
 	kernelTCPFlowIdleTimeout        = 10 * 60 * 1000000000
 	kernelICMPFlowIdleTimeout       = 30 * 1000000000
 	kernelUDPFlowIdleTimeout        = 300 * 1000000000
+	kernelOrphanNATPruneLogEvery    = 10 * time.Minute
 )
 
 const (
@@ -386,6 +387,7 @@ type linuxKernelRuleRuntime struct {
 	pressureState      kernelRuntimePressureState
 	observability      kernelRuntimeObservabilityState
 	maintenanceState   kernelAdaptiveMaintenanceState
+	orphanNATPruneLog  kernelCountLogState
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPruneState     kernelFlowPruneState
 	runtimeMapCounts   kernelRuntimeMapCountSnapshot
@@ -749,48 +751,81 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 				)
 			}
 		}
-	} else if state, err := loadTCKernelHotRestartState(desiredCapacities); err != nil {
-		log.Printf("kernel dataplane hot restart: load tc state failed, cleaning stale hot restart state: %v", err)
+	} else if objectHash, hashErr := kernelTCHotRestartObjectHash(rt.enableTrafficStats); hashErr != nil {
+		log.Printf(
+			"kernel dataplane hot restart: tc handoff unavailable because current object fingerprint could not be calculated; falling back to fresh maps (cold restart): %v",
+			hashErr,
+		)
+		if cleanupErr := cleanupStaleTCKernelHotRestartState(); cleanupErr != nil {
+			log.Printf("kernel dataplane hot restart: cleanup stale tc state failed, discarding pinned state only: %v", cleanupErr)
+			clearKernelHotRestartState(kernelEngineTC)
+		}
+	} else if state, err := loadTCKernelHotRestartState(desiredCapacities, objectHash); err != nil {
+		if isKernelHotRestartIncompatible(err) {
+			log.Printf(
+				"kernel dataplane hot restart: preserved tc handoff is incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
+				kernelHotRestartIncompatibilityReason(err),
+			)
+		} else {
+			log.Printf("kernel dataplane hot restart: load tc state failed, cleaning stale hot restart state: %v", err)
+		}
 		if cleanupErr := cleanupStaleTCKernelHotRestartState(); cleanupErr != nil {
 			log.Printf("kernel dataplane hot restart: cleanup stale tc state failed, discarding pinned state only: %v", cleanupErr)
 			clearKernelHotRestartState(kernelEngineTC)
 		}
 	} else if state != nil {
-		hotRestartState = state
-		if len(state.replacements) > 0 {
-			mapReplacements = state.replacements
-		}
-		oldStatsMap = state.oldStatsMap
-		actualCapacities = state.actualCapacities
-		if actualCapacities.Flows < desiredCapacities.Flows {
+		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, map[string]bool{
+			kernelFlowsMapName:      true,
+			kernelFlowsMapNameV6:    true,
+			kernelNatPortsMapName:   true,
+			kernelNatPortsMapNameV6: true,
+		}); err != nil {
 			log.Printf(
-				"kernel dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
-				kernelFlowsMapName,
-				actualCapacities.Flows,
-				desiredCapacities.Flows,
+				"kernel dataplane hot restart: preserved tc maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
+				kernelHotRestartIncompatibilityReason(err),
+			)
+			state.close()
+			if cleanupErr := cleanupStaleTCKernelHotRestartState(); cleanupErr != nil {
+				log.Printf("kernel dataplane hot restart: cleanup stale tc state failed, discarding pinned state only: %v", cleanupErr)
+				clearKernelHotRestartState(kernelEngineTC)
+			}
+		} else {
+			hotRestartState = state
+			if len(state.replacements) > 0 {
+				mapReplacements = state.replacements
+			}
+			oldStatsMap = state.oldStatsMap
+			actualCapacities = state.actualCapacities
+			if actualCapacities.Flows < desiredCapacities.Flows {
+				log.Printf(
+					"kernel dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
+					kernelFlowsMapName,
+					actualCapacities.Flows,
+					desiredCapacities.Flows,
+				)
+			}
+			if actualCapacities.NATPorts < desiredCapacities.NATPorts {
+				log.Printf(
+					"kernel dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
+					kernelNatPortsMapName,
+					actualCapacities.NATPorts,
+					desiredCapacities.NATPorts,
+				)
+			}
+			if oldStatsMap != nil {
+				log.Printf(
+					"kernel dataplane hot restart: recreating %s map with capacity=%d (pinned=%d too small)",
+					kernelStatsMapName,
+					desiredCapacities.Rules,
+					oldStatsMap.MaxEntries(),
+				)
+			}
+			log.Printf(
+				"kernel dataplane hot restart: adopting pinned tc maps=%s from %s",
+				strings.Join(state.replacementMapNames(), ","),
+				kernelHotRestartEngineDir(kernelEngineTC),
 			)
 		}
-		if actualCapacities.NATPorts < desiredCapacities.NATPorts {
-			log.Printf(
-				"kernel dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
-				kernelNatPortsMapName,
-				actualCapacities.NATPorts,
-				desiredCapacities.NATPorts,
-			)
-		}
-		if oldStatsMap != nil {
-			log.Printf(
-				"kernel dataplane hot restart: recreating %s map with capacity=%d (pinned=%d too small)",
-				kernelStatsMapName,
-				desiredCapacities.Rules,
-				oldStatsMap.MaxEntries(),
-			)
-		}
-		log.Printf(
-			"kernel dataplane hot restart: adopting pinned tc maps=%s from %s",
-			strings.Join(state.replacementMapNames(), ","),
-			kernelHotRestartEngineDir(kernelEngineTC),
-		)
 	}
 	if len(mapReplacements) > 0 {
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(mapReplacements))
@@ -798,7 +833,10 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
 	}
 	if err != nil && hotRestartState != nil {
-		log.Printf("kernel dataplane hot restart: adopt tc state failed, retrying with fresh maps: %v", err)
+		log.Printf(
+			"kernel dataplane hot restart: tc handoff failed during collection load, abandoning handoff and falling back to fresh maps (cold restart): %v",
+			err,
+		)
 		hotRestartState.close()
 		hotRestartState = nil
 		mapReplacements = nil
@@ -1055,7 +1093,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
 		log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed kernel rule id(s)", purgedFlows, len(flowPurgeIDs))
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed: %v", err)
 	}
 	if hotRestartState != nil {
@@ -1115,7 +1153,11 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
 				} else if deleted > 0 {
 					driftDetected = true
-					log.Printf("kernel dataplane maintenance: pruned %d orphan tc nat reservation(s)", deleted)
+					if rt.orphanNATPruneLog.ShouldLog(deleted, startedAt, kernelOrphanNATPruneLogEvery) {
+						log.Printf("kernel dataplane maintenance: pruned %d orphan tc nat reservation(s)", deleted)
+					}
+				} else {
+					rt.orphanNATPruneLog.Reset()
 				}
 				if fullSuccess {
 					natEntries, countErr := countKernelRuntimeNATEntriesExact(refs)
@@ -1264,6 +1306,12 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	if rt.coll == nil || rt.coll.Maps == nil || len(rt.attachments) == 0 {
 		return false
 	}
+	objectHash, err := kernelTCHotRestartObjectHash(rt.enableTrafficStats)
+	if err != nil {
+		log.Printf("kernel dataplane hot restart: fingerprint tc object failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
 	maps := map[string]*ebpf.Map{
 		kernelFlowsMapName:    rt.coll.Maps[kernelFlowsMapName],
 		kernelNatPortsMapName: rt.coll.Maps[kernelNatPortsMapName],
@@ -1284,7 +1332,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	if err := writeKernelHotRestartMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+	if err := writeKernelHotRestartMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, objectHash)); err != nil {
 		clearKernelHotRestartState(kernelEngineTC)
 		log.Printf("kernel dataplane hot restart: write tc metadata failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
@@ -1903,7 +1951,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {
-		if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+		if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
 			log.Printf("kernel dataplane runtime metadata: refresh tc runtime metadata failed after rule drain: %v", err)
 		}
 	}
@@ -2099,7 +2147,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		metrics.AttachDuration = attachDuration
 		metrics.FlowPurgeDuration = flowPurgeDuration
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed after in-place update: %v", err)
 	}
 	if attachmentReset && detachedAttachments > 0 {
@@ -2348,6 +2396,13 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 }
 
 func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRule, error) {
+	return prepareKernelRuleRef(ctx, &rule)
+}
+
+func prepareKernelRuleRef(ctx *kernelPrepareContext, rule *Rule) ([]preparedKernelRule, error) {
+	if rule == nil {
+		return nil, fmt.Errorf("kernel dataplane requires a rule")
+	}
 	inLink, err := ctx.linkByName(rule.InInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve inbound interface %q: %w", rule.InInterface, err)
@@ -2360,21 +2415,21 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) {
 		return nil, fmt.Errorf("kernel dataplane requires a rule id in uint32 range")
 	}
-	if isKernelEgressNATPassthroughRule(rule) || isKernelEgressNATRule(rule) {
+	if isKernelEgressNATPassthroughRule(*rule) || isKernelEgressNATRule(*rule) {
 		if !kernelEgressProtocolSupported(rule.Protocol) {
 			return nil, fmt.Errorf("kernel dataplane currently supports only single-protocol TCP/UDP/ICMP egress nat rules")
 		}
 	} else if !kernelProtocolSupported(rule.Protocol) {
 		return nil, fmt.Errorf("kernel dataplane currently supports only single-protocol TCP/UDP rules")
 	}
-	if isKernelEgressNATPassthroughRule(rule) {
-		return prepareKernelEgressNATPassthroughRule(ctx, rule, inLink, outLink)
+	if isKernelEgressNATPassthroughRule(*rule) {
+		return prepareKernelEgressNATPassthroughRule(ctx, *rule, inLink, outLink)
 	}
-	if isKernelEgressNATRule(rule) {
-		return prepareKernelEgressNATRule(ctx, rule, inLink, outLink)
+	if isKernelEgressNATRule(*rule) {
+		return prepareKernelEgressNATRule(ctx, *rule, inLink, outLink)
 	}
 
-	spec, err := buildKernelPreparedForwardRuleSpec(rule, func(family string) (net.IP, error) {
+	spec, err := buildKernelPreparedForwardRuleSpec(*rule, func(family string) (net.IP, error) {
 		if rule.Transparent {
 			return nil, nil
 		}
@@ -2405,7 +2460,7 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 		return nil, fmt.Errorf("resolve inbound kernel interfaces for %q: %w", rule.InInterface, err)
 	}
 
-	path, err := ctx.resolveOutboundPath(outLink, rule)
+	path, err := ctx.resolveOutboundPath(outLink, *rule)
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound path on %q: %w", rule.OutInterface, err)
 	}
@@ -2433,7 +2488,7 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 				itemReplyIfParents = append(itemReplyIfParents, mapping)
 			}
 			prepared = append(prepared, preparedKernelRule{
-				rule:           rule,
+				rule:           *rule,
 				inIfIndex:      currentInLink.Attrs().Index,
 				outIfIndex:     path.outIfIndex,
 				replyIfIndexes: replyIfIndexes,
@@ -2479,7 +2534,7 @@ func prepareKernelRule(ctx *kernelPrepareContext, rule Rule) ([]preparedKernelRu
 				itemReplyIfParents = append(itemReplyIfParents, mapping)
 			}
 			prepared = append(prepared, preparedKernelRule{
-				rule:           rule,
+				rule:           *rule,
 				inIfIndex:      currentInLink.Attrs().Index,
 				outIfIndex:     path.outIfIndex,
 				replyIfIndexes: replyIfIndexes,
@@ -3513,14 +3568,6 @@ func resolveKernelRouteSourceIPv4(link netlink.Link, backendIP net.IP) (net.IP, 
 	}
 
 	return nil, fmt.Errorf("route lookup returned no usable source IPv4")
-}
-
-func ipv4BytesToUint32(ip net.IP) uint32 {
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return 0
-	}
-	return uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
 }
 
 func ipv4ToUint32(text string) uint32 {

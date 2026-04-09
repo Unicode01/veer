@@ -141,9 +141,20 @@ func sameKernelIfParentMappings(a, b []kernelIfParentMapping) bool {
 }
 
 func samePreparedXDPKernelRuleDataplane(a, b preparedXDPKernelRule) bool {
-	return sameKernelRuleDataplaneConfig(a.rule, b.rule) &&
-		a.inIfIndex == b.inIfIndex &&
-		a.outIfIndex == b.outIfIndex &&
-		a.key == b.key &&
-		a.value == b.value
+	if !sameKernelRuleDataplaneConfig(a.rule, b.rule) ||
+		a.inIfIndex != b.inIfIndex ||
+		a.outIfIndex != b.outIfIndex ||
+		!sameKernelPreparedRuleSpec(a.spec, b.spec) {
+		return false
+	}
+	switch xdpPreparedRuleFamily(a) {
+	case ipFamilyIPv6:
+		return xdpPreparedRuleFamily(b) == ipFamilyIPv6 &&
+			a.keyV6 == b.keyV6 &&
+			a.valueV6 == b.valueV6
+	default:
+		return xdpPreparedRuleFamily(b) == ipFamilyIPv4 &&
+			a.keyV4 == b.keyV4 &&
+			a.valueV4 == b.valueV4
+	}
 }

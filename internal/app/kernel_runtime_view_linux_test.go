@@ -8,6 +8,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 )
 
 func TestKernelExpectedAttachmentsHealthyRequiresMatchingProgramIdentity(t *testing.T) {
@@ -122,6 +123,10 @@ func TestApplyKernelRuntimeDiagView(t *testing.T) {
 		NATProbeRound3Used: 11,
 		ReplyFlowRecreated: 12,
 		TCPCloseDelete:     13,
+		XDPV4TransparentEnter:    14,
+		XDPV4FullNATForwardEnter: 15,
+		XDPV4FullNATReplyEnter:   16,
+		XDPRedirectInvoked:       17,
 		LastError:          "diag lookup failed",
 	})
 
@@ -133,6 +138,9 @@ func TestApplyKernelRuntimeDiagView(t *testing.T) {
 	}
 	if view.DiagRewriteFail != 9 || view.DiagNATProbeRound2Used != 10 || view.DiagNATProbeRound3Used != 11 || view.DiagTCPCloseDelete != 13 {
 		t.Fatalf("probe/rewrite diag counters not applied: %+v", view)
+	}
+	if view.DiagXDPV4TransparentEnter != 14 || view.DiagXDPV4FullNATForwardEnter != 15 || view.DiagXDPV4FullNATReplyEnter != 16 || view.DiagXDPRedirectInvoked != 17 {
+		t.Fatalf("xdp hit counters not applied: %+v", view)
 	}
 	if view.DiagSnapshotError != "diag lookup failed" {
 		t.Fatalf("diag snapshot error = %q, want propagated error", view.DiagSnapshotError)
@@ -201,6 +209,57 @@ func TestKernelRuntimeMapRefsEqualTracksDualStackMaps(t *testing.T) {
 	b.rulesV6 = &ebpf.Map{}
 	if kernelRuntimeMapRefsEqual(a, b) {
 		t.Fatal("kernelRuntimeMapRefsEqual() = true, want false when IPv6 map ref differs")
+	}
+}
+
+func TestXDPAttachmentMode(t *testing.T) {
+	tests := []struct {
+		name        string
+		attachments []xdpAttachment
+		want        string
+	}{
+		{
+			name: "none",
+			want: "",
+		},
+		{
+			name: "driver",
+			attachments: []xdpAttachment{
+				{ifindex: 1, flags: nl.XDP_FLAGS_DRV_MODE},
+				{ifindex: 2, flags: nl.XDP_FLAGS_DRV_MODE},
+			},
+			want: "driver",
+		},
+		{
+			name: "generic",
+			attachments: []xdpAttachment{
+				{ifindex: 1, flags: nl.XDP_FLAGS_SKB_MODE},
+			},
+			want: "generic",
+		},
+		{
+			name: "mixed",
+			attachments: []xdpAttachment{
+				{ifindex: 1, flags: nl.XDP_FLAGS_DRV_MODE},
+				{ifindex: 2, flags: nl.XDP_FLAGS_SKB_MODE},
+			},
+			want: "mixed",
+		},
+		{
+			name: "unknown flags collapse to mixed",
+			attachments: []xdpAttachment{
+				{ifindex: 1, flags: 0},
+			},
+			want: "mixed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := xdpAttachmentMode(tc.attachments); got != tc.want {
+				t.Fatalf("xdpAttachmentMode() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

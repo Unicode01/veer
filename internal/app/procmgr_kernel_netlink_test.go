@@ -696,6 +696,38 @@ func TestHandleKernelNetlinkRecoveryTriggerLinkChangeForDynamicEgressNATQueuesIn
 	}
 }
 
+func TestHandleKernelNetlinkRecoveryTriggerLinkChangeWithActiveKernelOwnersQueuesFullRedistribute(t *testing.T) {
+	db := openTestDB(t)
+
+	pm := &ProcessManager{
+		db:               db,
+		cfg:              &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 3},
+		kernelRuntime:    &stubNetlinkFallbackRuntime{},
+		kernelRules:      map[int64]bool{11: true},
+		kernelRanges:     map[int64]bool{},
+		kernelEgressNATs: map[int64]bool{},
+		redistributeWake: make(chan struct{}, 1),
+	}
+
+	pm.handleKernelNetlinkRecoveryTrigger(newKernelNetlinkRecoveryTrigger("link"))
+
+	if !pm.redistributePending {
+		t.Fatal("redistributePending = false, want full re-evaluation after active kernel link change")
+	}
+	if pm.kernelRetryCount != 1 {
+		t.Fatalf("kernelRetryCount = %d, want 1", pm.kernelRetryCount)
+	}
+	if !strings.Contains(pm.lastKernelRetryReason, "active_kernel_entries=1") {
+		t.Fatalf("lastKernelRetryReason = %q, want active kernel summary", pm.lastKernelRetryReason)
+	}
+	if pm.kernelIncrementalRetryCount != 1 {
+		t.Fatalf("kernelIncrementalRetryCount = %d, want 1", pm.kernelIncrementalRetryCount)
+	}
+	if !strings.Contains(pm.lastKernelIncrementalRetryResult, "link change requires full kernel re-evaluation") {
+		t.Fatalf("lastKernelIncrementalRetryResult = %q, want forced full re-evaluation detail", pm.lastKernelIncrementalRetryResult)
+	}
+}
+
 func TestHandleKernelNetlinkRecoveryTriggerLinkChangeForUnrelatedDynamicEgressNATSkipsRedistribute(t *testing.T) {
 	pm := &ProcessManager{
 		cfg:                      &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 3},

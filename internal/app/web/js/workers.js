@@ -62,6 +62,7 @@
           : String(item.nat_type || '');
         values.push(
           item.id,
+          egressNATWorkerIDText(item.id),
           item.parent_interface,
           item.child_interface,
           childScope,
@@ -94,6 +95,22 @@
     if (key === 'count') return app.workerCount(worker);
     return worker[key];
   };
+
+  function egressNATWorkerIDText(id) {
+    const numericID = Number(id);
+    if (!Number.isFinite(numericID) || numericID >= 0) {
+      return '#' + String(id);
+    }
+    return app.t('stats.egressNATs.id.auto');
+  }
+
+  function egressNATWorkerIDTitle(id) {
+    const numericID = Number(id);
+    if (!Number.isFinite(numericID) || numericID >= 0) {
+      return '';
+    }
+    return app.t('stats.egressNATs.id.auto.title', { id: numericID });
+  }
 
   app.renderRuleDetails = function renderRuleDetails(rules) {
     if (!rules || rules.length === 0) {
@@ -215,11 +232,13 @@
       const natType = typeof app.formatEgressNATNatType === 'function'
         ? app.formatEgressNATNatType(item.nat_type || '')
         : String(item.nat_type || '');
+      const routeTitle = egressNATWorkerIDTitle(item.id);
       const row = app.createNode('div', { className: 'worker-detail-row' });
       row.appendChild(app.createBadgeNode('badge-' + info.badge, info.text, statusTitle));
       row.appendChild(app.createNode('span', {
         className: 'worker-route',
-        text: '#' + item.id + ' ' + (singleTarget ? item.parent_interface : (item.parent_interface + '/' + childScope)) + ' -> ' + item.out_interface
+        text: egressNATWorkerIDText(item.id) + ' ' + (singleTarget ? item.parent_interface : (item.parent_interface + '/' + childScope)) + ' -> ' + item.out_interface,
+        title: routeTitle
       }));
       row.appendChild(app.createNode('span', {
         className: 'worker-proto',

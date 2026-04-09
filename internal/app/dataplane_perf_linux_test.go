@@ -75,6 +75,8 @@ const (
 	dataplanePerfIdleEnv        = "FORWARD_PERF_CONN_IDLE_MS"
 	dataplanePerfBackendWorkEnv = "FORWARD_PERF_BACKEND_WORKERS"
 	dataplanePerfOffloadsEnv    = "FORWARD_PERF_DISABLE_OFFLOADS"
+	dataplanePerfTCDiagEnv      = "FORWARD_PERF_TC_DIAG"
+	dataplanePerfTCDiagVerbEnv  = "FORWARD_PERF_TC_DIAG_VERBOSE"
 	dataplanePerfHelperEnv      = "FORWARD_PERF_HELPER"
 	dataplanePerfHelperRoleEnv  = "FORWARD_PERF_HELPER_ROLE"
 	dataplanePerfTargetEnv      = "FORWARD_PERF_TARGET_ADDR"
@@ -100,6 +102,7 @@ type dataplanePerfMode struct {
 	Order        []string
 	Expected     string
 	ExpectedKern string
+	Experimental map[string]bool
 }
 
 type dataplanePerfScenario struct {
@@ -113,25 +116,30 @@ type dataplanePerfScenario struct {
 }
 
 type dataplanePerfResult struct {
-	Scenario           string  `json:"scenario,omitempty"`
-	Mode               string  `json:"mode"`
-	Connections        int     `json:"connections"`
-	Concurrency        int     `json:"concurrency"`
-	BytesPerConnection int64   `json:"bytes_per_connection"`
-	IOChunkBytes       int64   `json:"io_chunk_bytes"`
-	PayloadBytes       int64   `json:"payload_bytes"`
-	PayloadPackets     int64   `json:"payload_packets"`
-	WirePackets        int64   `json:"wire_packets"`
-	ElapsedSeconds     float64 `json:"elapsed_seconds"`
-	PayloadMiBPerSec   float64 `json:"payload_mib_per_sec"`
-	WireMiBPerSec      float64 `json:"wire_mib_per_sec"`
-	PayloadPPS         float64 `json:"payload_packets_per_sec"`
-	WirePPS            float64 `json:"wire_packets_per_sec"`
-	ConnPerSec         float64 `json:"conn_per_sec"`
-	ForwardCPUSeconds  float64 `json:"forward_cpu_seconds"`
-	PayloadMiBPerCPU   float64 `json:"payload_mib_per_cpu_second"`
-	EffectiveEngine    string  `json:"effective_engine"`
-	KernelEngine       string  `json:"effective_kernel_engine,omitempty"`
+	Scenario              string  `json:"scenario,omitempty"`
+	Mode                  string  `json:"mode"`
+	Connections           int     `json:"connections"`
+	Concurrency           int     `json:"concurrency"`
+	BytesPerConnection    int64   `json:"bytes_per_connection"`
+	IOChunkBytes          int64   `json:"io_chunk_bytes"`
+	PayloadBytes          int64   `json:"payload_bytes"`
+	PayloadPackets        int64   `json:"payload_packets"`
+	WirePackets           int64   `json:"wire_packets"`
+	ElapsedSeconds        float64 `json:"elapsed_seconds"`
+	PayloadMiBPerSec      float64 `json:"payload_mib_per_sec"`
+	WireMiBPerSec         float64 `json:"wire_mib_per_sec"`
+	PayloadPPS            float64 `json:"payload_packets_per_sec"`
+	WirePPS               float64 `json:"wire_packets_per_sec"`
+	ConnPerSec            float64 `json:"conn_per_sec"`
+	ForwardCPUSeconds     float64 `json:"forward_cpu_seconds"`
+	PayloadMiBPerCPU      float64 `json:"payload_mib_per_cpu_second"`
+	EffectiveEngine       string  `json:"effective_engine"`
+	KernelEngine          string  `json:"effective_kernel_engine,omitempty"`
+	TCDiagnostics         bool    `json:"tc_diagnostics,omitempty"`
+	TCDiagnosticsVerbose  bool    `json:"tc_diagnostics_verbose,omitempty"`
+	DiagFIBNonSuccess     uint64  `json:"diag_fib_non_success,omitempty"`
+	DiagRedirectNeighUsed uint64  `json:"diag_redirect_neigh_used,omitempty"`
+	DiagRedirectDrop      uint64  `json:"diag_redirect_drop,omitempty"`
 }
 
 type dataplanePerfClientResult struct {
@@ -231,6 +239,7 @@ func TestDataplanePerfMatrix(t *testing.T) {
 	scenarios := dataplanePerfScenarios(connections, concurrency, bytesPerConn, ioChunkBytes, warmupConnections, warmupBytesPerConn)
 
 	modes := []dataplanePerfMode{
+		{Name: "iptables", Expected: "iptables"},
 		{Name: "userspace", Default: ruleEngineUserspace, Expected: ruleEngineUserspace},
 		{Name: "tc", Default: ruleEngineKernel, Order: []string{kernelEngineTC}, Expected: ruleEngineKernel, ExpectedKern: kernelEngineTC},
 		{Name: "xdp", Default: ruleEngineKernel, Order: []string{kernelEngineXDP}, Expected: ruleEngineKernel, ExpectedKern: kernelEngineXDP},
@@ -256,6 +265,16 @@ func TestDataplanePerfMatrix(t *testing.T) {
 						result.ForwardCPUSeconds,
 						result.PayloadMiBPerCPU,
 					)
+					if result.TCDiagnostics || result.DiagFIBNonSuccess != 0 || result.DiagRedirectNeighUsed != 0 || result.DiagRedirectDrop != 0 {
+						t.Logf("%s diag tc=%t verbose=%t fib=%d neigh=%d drop=%d",
+							mode.Name,
+							result.TCDiagnostics,
+							result.TCDiagnosticsVerbose,
+							result.DiagFIBNonSuccess,
+							result.DiagRedirectNeighUsed,
+							result.DiagRedirectDrop,
+						)
+					}
 				})
 			}
 		}
@@ -281,6 +300,9 @@ func runDataplanePerfMode(t *testing.T, baseBinary string, topology dataplanePer
 	cleanupTransparentRouting()
 	defer cleanupTransparentRouting()
 	steadySeconds := envInt(dataplanePerfSteadyEnv, 0)
+	if mode.Name == "iptables" {
+		return runDataplanePerfIptablesMode(t, topology, scenario, steadySeconds)
+	}
 
 	modeDir := t.TempDir()
 	forwardBinary := filepath.Join(modeDir, "forward-perf")
@@ -342,15 +364,55 @@ func runDataplanePerfMode(t *testing.T, baseBinary string, topology dataplanePer
 		cpuSeconds = 0
 	}
 
+	result := dataplanePerfBuildResult(mode.Name, scenario, clientResult, cpuSeconds, rule.EffectiveEngine, rule.EffectiveKernelEngine)
+	runtimeResp := fetchDataplanePerfKernelRuntime(t, apiBase)
+	if engineView, ok := dataplanePerfFindKernelEngine(runtimeResp.Engines, mode.ExpectedKern); ok {
+		result.TCDiagnostics = runtimeResp.TCDiagnostics
+		result.TCDiagnosticsVerbose = runtimeResp.TCDiagnosticsVerbose
+		result.DiagFIBNonSuccess = engineView.DiagFIBNonSuccess
+		result.DiagRedirectNeighUsed = engineView.DiagRedirectNeighUsed
+		result.DiagRedirectDrop = engineView.DiagRedirectDrop
+	}
+
+	if t.Failed() {
+		if data, err := os.ReadFile(forwardLogs); err == nil {
+			t.Logf("%s forward logs:\n%s", mode.Name, string(data))
+		}
+	}
+
+	return result
+}
+
+func runDataplanePerfIptablesMode(t *testing.T, topology dataplanePerfTopology, scenario dataplanePerfScenario, steadySeconds int) dataplanePerfResult {
+	t.Helper()
+	backend := setupDataplanePerfIptablesDNAT(t, topology)
+	defer cleanupDataplanePerfIptablesDNAT(topology)
+
+	seedDataplanePerfNeighbors(t, topology)
+
+	if _, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, scenario.WarmupConnections, minInt(scenario.Concurrency, maxInt(1, scenario.WarmupConnections)), scenario.WarmupBytesPerConn, scenario.IOChunkBytes, 0); err != nil {
+		t.Fatalf("iptables warmup client benchmark failed: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	clientResult, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, steadySeconds)
+	if err != nil {
+		t.Fatalf("iptables client benchmark failed: %v", err)
+	}
+
+	return dataplanePerfBuildResult("iptables", scenario, clientResult, 0, "iptables", backend)
+}
+
+func dataplanePerfBuildResult(modeName string, scenario dataplanePerfScenario, clientResult dataplanePerfClientResult, cpuSeconds float64, effectiveEngine string, kernelEngine string) dataplanePerfResult {
 	payloadMiB := float64(clientResult.PayloadBytes) / (1024.0 * 1024.0)
 	elapsedSeconds := clientResult.Elapsed.Seconds()
 	payloadPackets := dataplanePerfPacketCount(clientResult.PayloadBytes, scenario.IOChunkBytes)
 	wireMultiplier := dataplanePerfWireMultiplier()
 	wireMiB := payloadMiB * wireMultiplier
 	wirePackets := int64(math.Round(float64(payloadPackets) * wireMultiplier))
-	result := dataplanePerfResult{
+	return dataplanePerfResult{
 		Scenario:           scenario.Label,
-		Mode:               mode.Name,
+		Mode:               modeName,
 		Connections:        scenario.Connections,
 		Concurrency:        scenario.Concurrency,
 		BytesPerConnection: scenario.BytesPerConnection,
@@ -366,17 +428,9 @@ func runDataplanePerfMode(t *testing.T, baseBinary string, topology dataplanePer
 		ConnPerSec:         safeRate(float64(scenario.Connections), elapsedSeconds),
 		ForwardCPUSeconds:  cpuSeconds,
 		PayloadMiBPerCPU:   safeRate(payloadMiB, cpuSeconds),
-		EffectiveEngine:    rule.EffectiveEngine,
-		KernelEngine:       rule.EffectiveKernelEngine,
+		EffectiveEngine:    effectiveEngine,
+		KernelEngine:       kernelEngine,
 	}
-
-	if t.Failed() {
-		if data, err := os.ReadFile(forwardLogs); err == nil {
-			t.Logf("%s forward logs:\n%s", mode.Name, string(data))
-		}
-	}
-
-	return result
 }
 
 func dataplanePerfWireMultiplier() float64 {
@@ -1467,16 +1521,130 @@ func findRepoRoot(t *testing.T) string {
 
 func requireEmbeddedEBPFObjects(t *testing.T, repoRoot string) {
 	t.Helper()
-	required := []string{
-		filepath.Join(repoRoot, "internal", "app", "ebpf", "forward-tc-bpf.o"),
-		filepath.Join(repoRoot, "internal", "app", "ebpf", "forward-tc-bpf-stats.o"),
-		filepath.Join(repoRoot, "internal", "app", "ebpf", "forward-xdp-bpf.o"),
-		filepath.Join(repoRoot, "internal", "app", "ebpf", "forward-xdp-bpf-stats.o"),
+	if err := validateEmbeddedEBPFObjects(repoRoot); err != nil {
+		t.Fatal(err)
 	}
-	for _, path := range required {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("missing embedded eBPF object %s; run `bash release.sh` first", path)
+}
+
+func validateEmbeddedEBPFObjects(repoRoot string) error {
+	ebpfDir := filepath.Join(repoRoot, "internal", "app", "ebpf")
+	includeDeps, err := filepath.Glob(filepath.Join(ebpfDir, "include", "*.h"))
+	if err != nil {
+		return fmt.Errorf("list eBPF include dependencies: %w", err)
+	}
+
+	checks := []struct {
+		objectPath string
+		deps       []string
+	}{
+		{
+			objectPath: filepath.Join(ebpfDir, "forward-tc-bpf.o"),
+			deps: append([]string{
+				filepath.Join(ebpfDir, "forward-tc-bpf.c"),
+			}, includeDeps...),
+		},
+		{
+			objectPath: filepath.Join(ebpfDir, "forward-tc-bpf-stats.o"),
+			deps: append([]string{
+				filepath.Join(ebpfDir, "forward-tc-bpf.c"),
+			}, includeDeps...),
+		},
+		{
+			objectPath: filepath.Join(ebpfDir, "forward-xdp-bpf.o"),
+			deps: append([]string{
+				filepath.Join(ebpfDir, "forward-xdp-bpf.c"),
+			}, includeDeps...),
+		},
+		{
+			objectPath: filepath.Join(ebpfDir, "forward-xdp-bpf-stats.o"),
+			deps: append([]string{
+				filepath.Join(ebpfDir, "forward-xdp-bpf.c"),
+			}, includeDeps...),
+		},
+	}
+
+	for _, check := range checks {
+		objectInfo, err := os.Stat(check.objectPath)
+		if err != nil {
+			return fmt.Errorf("missing embedded eBPF object %s; run `bash release.sh` first", check.objectPath)
 		}
+
+		var newestDep string
+		var newestDepTime time.Time
+		for _, depPath := range check.deps {
+			depInfo, err := os.Stat(depPath)
+			if err != nil {
+				return fmt.Errorf("missing eBPF source dependency %s", depPath)
+			}
+			if depInfo.ModTime().After(newestDepTime) {
+				newestDep = depPath
+				newestDepTime = depInfo.ModTime()
+			}
+		}
+
+		if newestDep != "" && objectInfo.ModTime().Before(newestDepTime) {
+			return fmt.Errorf("embedded eBPF object %s is older than %s; run `bash release.sh` first", check.objectPath, newestDep)
+		}
+	}
+
+	return nil
+}
+
+func TestValidateEmbeddedEBPFObjectsDetectsStaleObject(t *testing.T) {
+	repoRoot := t.TempDir()
+	ebpfDir := filepath.Join(repoRoot, "internal", "app", "ebpf")
+	includeDir := filepath.Join(ebpfDir, "include")
+	if err := os.MkdirAll(includeDir, 0o755); err != nil {
+		t.Fatalf("create eBPF include dir: %v", err)
+	}
+
+	writeFile := func(path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("test"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	setModTime := func(path string, ts time.Time) {
+		t.Helper()
+		if err := os.Chtimes(path, ts, ts); err != nil {
+			t.Fatalf("set modtime for %s: %v", path, err)
+		}
+	}
+
+	header := filepath.Join(includeDir, "bpf_helpers.h")
+	tcSource := filepath.Join(ebpfDir, "forward-tc-bpf.c")
+	xdpSource := filepath.Join(ebpfDir, "forward-xdp-bpf.c")
+	tcObject := filepath.Join(ebpfDir, "forward-tc-bpf.o")
+	tcStatsObject := filepath.Join(ebpfDir, "forward-tc-bpf-stats.o")
+	xdpObject := filepath.Join(ebpfDir, "forward-xdp-bpf.o")
+	xdpStatsObject := filepath.Join(ebpfDir, "forward-xdp-bpf-stats.o")
+
+	for _, path := range []string{header, tcSource, xdpSource, tcObject, tcStatsObject, xdpObject, xdpStatsObject} {
+		writeFile(path)
+	}
+
+	base := time.Now().Add(-2 * time.Hour).Round(time.Second)
+	for _, path := range []string{header, tcSource, xdpSource} {
+		setModTime(path, base)
+	}
+	for _, path := range []string{tcObject, tcStatsObject, xdpObject, xdpStatsObject} {
+		setModTime(path, base.Add(time.Hour))
+	}
+
+	if err := validateEmbeddedEBPFObjects(repoRoot); err != nil {
+		t.Fatalf("validateEmbeddedEBPFObjects() unexpected error for fresh objects: %v", err)
+	}
+
+	setModTime(xdpSource, base.Add(2*time.Hour))
+	err := validateEmbeddedEBPFObjects(repoRoot)
+	if err == nil {
+		t.Fatal("validateEmbeddedEBPFObjects() error = nil, want stale object failure")
+	}
+	if !strings.Contains(err.Error(), xdpObject) {
+		t.Fatalf("validateEmbeddedEBPFObjects() error = %q, want object path %q", err.Error(), xdpObject)
+	}
+	if !strings.Contains(err.Error(), xdpSource) {
+		t.Fatalf("validateEmbeddedEBPFObjects() error = %q, want source path %q", err.Error(), xdpSource)
 	}
 }
 
@@ -1555,6 +1723,122 @@ func seedDataplanePerfNeighbors(t *testing.T, topology dataplanePerfTopology) {
 
 	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", dataplanePerfBackendAddr, "lladdr", mustReadDataplanePerfNetnsMAC(t, topology.BackendNS, topology.BackendNSIF), "dev", topology.BackendHostIF, "nud", "permanent")
 	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", dataplanePerfClientAddr, "lladdr", mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF), "dev", topology.ClientHostIF, "nud", "permanent")
+}
+
+func setupDataplanePerfIptablesDNAT(t *testing.T, topology dataplanePerfTopology) string {
+	t.Helper()
+
+	proto := dataplanePerfProtocol()
+	backend := dataplanePerfIptablesBackend(t)
+	originalIPForward := strings.TrimSpace(readDataplanePerfProcFile(t, "/proc/sys/net/ipv4/ip_forward"))
+	cleanupDataplanePerfIptablesDNAT(topology)
+	t.Cleanup(func() {
+		if originalIPForward != "" {
+			if output, err := exec.Command("sysctl", "-w", "net.ipv4.ip_forward="+originalIPForward).CombinedOutput(); err != nil {
+				t.Logf("dataplane perf: restore net.ipv4.ip_forward=%s failed: %v (%s)", originalIPForward, err, strings.TrimSpace(string(output)))
+			}
+		}
+		cleanupDataplanePerfIptablesDNAT(topology)
+	})
+
+	mustRunDataplanePerfCmd(t, "sysctl", "-w", "net.ipv4.ip_forward=1")
+
+	mustRunDataplanePerfCmd(t, "iptables", "-t", "nat", "-N", "FORWARD_PERF_DNAT")
+	mustRunDataplanePerfCmd(t, "iptables", "-t", "nat", "-F", "FORWARD_PERF_DNAT")
+	mustRunDataplanePerfCmd(t, "iptables", "-t", "nat", "-A", "FORWARD_PERF_DNAT",
+		"-i", topology.ClientHostIF,
+		"-p", proto,
+		"-d", dataplanePerfFrontAddr,
+		"--dport", strconv.Itoa(dataplanePerfFrontPort),
+		"-j", "DNAT",
+		"--to-destination", net.JoinHostPort(dataplanePerfBackendAddr, strconv.Itoa(dataplanePerfBackendPort)),
+	)
+	mustRunDataplanePerfCmd(t, "iptables", "-t", "nat", "-I", "PREROUTING", "1",
+		"-i", topology.ClientHostIF,
+		"-j", "FORWARD_PERF_DNAT",
+	)
+
+	mustRunDataplanePerfCmd(t, "iptables", "-N", "FORWARD_PERF_FWD")
+	mustRunDataplanePerfCmd(t, "iptables", "-F", "FORWARD_PERF_FWD")
+	mustRunDataplanePerfCmd(t, "iptables", "-A", "FORWARD_PERF_FWD",
+		"-i", topology.ClientHostIF,
+		"-o", topology.BackendHostIF,
+		"-p", proto,
+		"-d", dataplanePerfBackendAddr,
+		"--dport", strconv.Itoa(dataplanePerfBackendPort),
+		"-j", "ACCEPT",
+	)
+	mustRunDataplanePerfCmd(t, "iptables", "-A", "FORWARD_PERF_FWD",
+		"-i", topology.BackendHostIF,
+		"-o", topology.ClientHostIF,
+		"-p", proto,
+		"-s", dataplanePerfBackendAddr,
+		"--sport", strconv.Itoa(dataplanePerfBackendPort),
+		"-m", "conntrack",
+		"--ctstate", "ESTABLISHED,RELATED",
+		"-j", "ACCEPT",
+	)
+	mustRunDataplanePerfCmd(t, "iptables", "-I", "FORWARD", "1",
+		"-i", topology.ClientHostIF,
+		"-o", topology.BackendHostIF,
+		"-j", "FORWARD_PERF_FWD",
+	)
+	mustRunDataplanePerfCmd(t, "iptables", "-I", "FORWARD", "1",
+		"-i", topology.BackendHostIF,
+		"-o", topology.ClientHostIF,
+		"-j", "FORWARD_PERF_FWD",
+	)
+
+	return backend
+}
+
+func cleanupDataplanePerfIptablesDNAT(topology dataplanePerfTopology) {
+	runDataplanePerfCmd("iptables", "-t", "nat", "-D", "PREROUTING",
+		"-i", topology.ClientHostIF,
+		"-j", "FORWARD_PERF_DNAT",
+	)
+	runDataplanePerfCmd("iptables", "-D", "FORWARD",
+		"-i", topology.ClientHostIF,
+		"-o", topology.BackendHostIF,
+		"-j", "FORWARD_PERF_FWD",
+	)
+	runDataplanePerfCmd("iptables", "-D", "FORWARD",
+		"-i", topology.BackendHostIF,
+		"-o", topology.ClientHostIF,
+		"-j", "FORWARD_PERF_FWD",
+	)
+	runDataplanePerfCmd("iptables", "-t", "nat", "-F", "FORWARD_PERF_DNAT")
+	runDataplanePerfCmd("iptables", "-t", "nat", "-X", "FORWARD_PERF_DNAT")
+	runDataplanePerfCmd("iptables", "-F", "FORWARD_PERF_FWD")
+	runDataplanePerfCmd("iptables", "-X", "FORWARD_PERF_FWD")
+}
+
+func dataplanePerfIptablesBackend(t *testing.T) string {
+	t.Helper()
+
+	output, err := exec.Command("iptables", "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("iptables --version: %v\n%s", err, string(output))
+	}
+	version := strings.TrimSpace(string(output))
+	switch {
+	case strings.Contains(version, "(nf_tables)"):
+		return "nf_tables"
+	case strings.Contains(version, "(legacy)"):
+		return "legacy"
+	default:
+		return version
+	}
+}
+
+func readDataplanePerfProcFile(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
 }
 
 func mustReadDataplanePerfNetnsMAC(t *testing.T, netns string, ifName string) string {
@@ -1700,6 +1984,16 @@ func writeDataplanePerfConfig(t *testing.T, path string, mode dataplanePerfMode,
 			experimentalFeatureKernelTraffic: false,
 		},
 	}
+	for key, enabled := range mode.Experimental {
+		cfg.Experimental[key] = enabled
+	}
+	if envBool(dataplanePerfTCDiagEnv) {
+		cfg.Experimental[experimentalFeatureKernelTCDiag] = true
+	}
+	if envBool(dataplanePerfTCDiagVerbEnv) {
+		cfg.Experimental[experimentalFeatureKernelTCDiagVerbose] = true
+		cfg.Experimental[experimentalFeatureKernelTCDiag] = true
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)
@@ -1707,6 +2001,39 @@ func writeDataplanePerfConfig(t *testing.T, path string, mode dataplanePerfMode,
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+}
+
+func fetchDataplanePerfKernelRuntime(t *testing.T, apiBase string) KernelRuntimeResponse {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, apiBase+"/api/kernel/runtime", nil)
+	if err != nil {
+		t.Fatalf("build kernel runtime request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+dataplanePerfToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("fetch kernel runtime: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("kernel runtime unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+	var runtimeResp KernelRuntimeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&runtimeResp); err != nil {
+		t.Fatalf("decode kernel runtime response: %v", err)
+	}
+	return runtimeResp
+}
+
+func dataplanePerfFindKernelEngine(engines []KernelEngineRuntimeView, name string) (KernelEngineRuntimeView, bool) {
+	for _, engine := range engines {
+		if strings.EqualFold(strings.TrimSpace(engine.Name), strings.TrimSpace(name)) {
+			return engine, true
+		}
+	}
+	return KernelEngineRuntimeView{}, false
 }
 
 func waitForDataplanePerfAPI(t *testing.T, apiBase string) {
@@ -2296,6 +2623,16 @@ func envIntList(name string) []int {
 		out = append(out, value)
 	}
 	return out
+}
+
+func envBool(name string) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func safeRate(value float64, seconds float64) float64 {

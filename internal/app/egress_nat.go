@@ -1,7 +1,6 @@
 package app
 
 import (
-	"encoding/binary"
 	"fmt"
 	"net"
 	"sort"
@@ -341,7 +340,7 @@ func parseEgressNATIPv4Uint32(text string) (uint32, error) {
 	if ip4 == nil {
 		return 0, fmt.Errorf("invalid IPv4 address")
 	}
-	return binary.BigEndian.Uint32(ip4), nil
+	return ipv4BytesToUint32(ip4), nil
 }
 
 func buildKernelEgressNATLocalIPv4Set(rules []Rule) (map[uint32]uint8, error) {
@@ -413,11 +412,11 @@ func buildEgressNATPassthroughRule(item EgressNAT, childInterface string, localI
 	}
 }
 
-func buildEgressNATKernelCandidates(items []EgressNAT, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, reservedKernelEntries int, usedIDs map[int64]struct{}, nextSyntheticID *int64) ([]kernelCandidateRule, map[int64]ruleDataplanePlan) {
-	return buildEgressNATKernelCandidatesWithSnapshot(items, planner, configuredKernelRulesMapLimit, reservedKernelEntries, usedIDs, nextSyntheticID, loadEgressNATInterfaceSnapshot())
+func buildEgressNATKernelCandidates(items []EgressNAT, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, reservedKernelEntries int, nextSyntheticID *int64) ([]kernelCandidateRule, map[int64]ruleDataplanePlan) {
+	return buildEgressNATKernelCandidatesWithSnapshot(items, planner, configuredKernelRulesMapLimit, reservedKernelEntries, nextSyntheticID, loadEgressNATInterfaceSnapshot())
 }
 
-func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, reservedKernelEntries int, usedIDs map[int64]struct{}, nextSyntheticID *int64, snapshot egressNATInterfaceSnapshot) ([]kernelCandidateRule, map[int64]ruleDataplanePlan) {
+func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, reservedKernelEntries int, nextSyntheticID *int64, snapshot egressNATInterfaceSnapshot) ([]kernelCandidateRule, map[int64]ruleDataplanePlan) {
 	plans := make(map[int64]ruleDataplanePlan, len(items))
 	candidates := make([]kernelCandidateRule, 0, len(items)*2)
 	if planner == nil {
@@ -435,8 +434,7 @@ func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *rule
 			}
 			continue
 		}
-		entryPlans := make([]ruleDataplanePlan, 0)
-		entryCandidates := make([]kernelCandidateRule, 0)
+		acc := newKernelOwnerPlanAccumulator(ruleEngineKernel)
 
 		if snapshot.Err != nil {
 			plans[item.ID] = ruleDataplanePlan{
@@ -457,11 +455,15 @@ func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *rule
 			continue
 		}
 
+		if item.Enabled {
+			candidates = growKernelCandidateBuffer(candidates, len(targetInfos)*len(protocols))
+		}
+		candidateStart := len(candidates)
 		for _, target := range targetInfos {
 			for _, proto := range protocols {
-				id, err := allocateSyntheticKernelRuleID(nextSyntheticID, usedIDs)
+				id, err := allocateSyntheticKernelRuleID(nextSyntheticID)
 				if err != nil {
-					entryPlans = append(entryPlans, ruleDataplanePlan{
+					acc.Add(ruleDataplanePlan{
 						PreferredEngine: ruleEngineKernel,
 						EffectiveEngine: ruleEngineUserspace,
 						FallbackReason:  err.Error(),
@@ -470,14 +472,16 @@ func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *rule
 				}
 				rule := buildEgressNATSyntheticRule(item, target.Name, id, proto)
 				annotateKernelCandidateRule(&rule, owner)
-				entryPlans = append(entryPlans, planner.Plan(rule))
-				entryCandidates = append(entryCandidates, kernelCandidateRule{owner: owner, rule: rule})
+				acc.Add(planner.planWithPreferredAndKernelReason(rule, ruleEngineKernel, ""))
+				if item.Enabled {
+					candidates = append(candidates, kernelCandidateRule{owner: owner, rule: rule})
+				}
 			}
 		}
 
-		plan := aggregateKernelOwnerPlan(ruleEngineKernel, entryPlans)
+		plan := acc.Result()
 		if item.Enabled && plan.EffectiveEngine == ruleEngineKernel {
-			neededEntries := len(entryCandidates)
+			neededEntries := len(candidates) - candidateStart
 			requestedEntries := reservedKernelEntries + neededEntries
 			if requestedEntries > effectiveKernelRulesMapLimit(configuredKernelRulesMapLimit, requestedEntries) {
 				plan.EffectiveEngine = ruleEngineUserspace
@@ -485,10 +489,12 @@ func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *rule
 					plan.FallbackReason = kernelRulesCapacityReason(configuredKernelRulesMapLimit, requestedEntries)
 				}
 			} else {
-				candidates = append(candidates, entryCandidates...)
 				reservedKernelEntries += neededEntries
+				plans[item.ID] = plan
+				continue
 			}
 		}
+		candidates = candidates[:candidateStart]
 		plans[item.ID] = plan
 	}
 

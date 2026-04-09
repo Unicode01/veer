@@ -83,6 +83,59 @@
     display: none;
 }
 
+.advanced-options {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-muted);
+}
+
+.advanced-options summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    list-style: none;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    user-select: none;
+}
+
+.advanced-options summary::-webkit-details-marker {
+    display: none;
+}
+
+.advanced-options summary::before {
+    content: '▸';
+    color: var(--text-soft);
+    font-size: 11px;
+    transition: transform 0.2s ease;
+}
+
+.advanced-options[open] summary::before {
+    transform: rotate(90deg);
+}
+
+.advanced-options summary:hover {
+    color: var(--primary);
+}
+
+.advanced-options summary:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+    border-radius: 8px;
+}
+
+.advanced-options-body {
+    padding: 0 12px 12px;
+}
+
+.advanced-options-row {
+    margin-bottom: 0;
+}
+
 .interface-picker-input {
     margin-top: 0;
     min-height: 36px;

@@ -3,14 +3,21 @@
   "web_token": "change-me-to-a-secure-token",
   "max_workers": 0,
   "drain_timeout_hours": 24,
+  "managed_network_auto_repair": true,
   "default_engine": "auto",
-  "kernel_engine_order": ["tc"],
+  "kernel_engine_order": [
+    "tc",
+    "xdp"
+  ],
   "kernel_rules_map_limit": 0,
   "kernel_flows_map_limit": 0,
   "kernel_nat_ports_map_limit": 0,
   "experimental_features": {
     "bridge_xdp": false,
-    "kernel_traffic_stats": false
+    "xdp_generic": false,
+    "kernel_traffic_stats": false,
+    "kernel_tc_diag": false,
+    "kernel_tc_diag_verbose": false
   },
   "tags": []
 }

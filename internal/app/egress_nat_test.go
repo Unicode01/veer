@@ -1,6 +1,9 @@
 package app
 
-import "testing"
+import (
+	"net"
+	"testing"
+)
 
 func TestNormalizeAndValidateEgressNAT(t *testing.T) {
 	knownIfaces := map[string]struct{}{
@@ -427,7 +430,6 @@ func TestBuildEgressNATKernelCandidates(t *testing.T) {
 		available: true,
 		supported: true,
 	}, ruleEngineKernel)
-	usedIDs := map[int64]struct{}{1: {}}
 	nextID := int64(2)
 
 	oldLoad := loadInterfaceInfosForEgressNATTests
@@ -451,7 +453,7 @@ func TestBuildEgressNATKernelCandidates(t *testing.T) {
 		OutSourceIP:     "198.51.100.10",
 		Protocol:        "tcp+udp+icmp",
 		Enabled:         true,
-	}}, planner, 0, 0, usedIDs, &nextID)
+	}}, planner, 0, 0, &nextID)
 
 	if got := plans[7].EffectiveEngine; got != ruleEngineKernel {
 		t.Fatalf("plans[7].EffectiveEngine = %q, want %q", got, ruleEngineKernel)
@@ -486,7 +488,6 @@ func TestBuildEgressNATKernelCandidatesSingleProtocol(t *testing.T) {
 		available: true,
 		supported: true,
 	}, ruleEngineKernel)
-	usedIDs := map[int64]struct{}{1: {}}
 	nextID := int64(2)
 
 	oldLoad := loadInterfaceInfosForEgressNATTests
@@ -509,7 +510,7 @@ func TestBuildEgressNATKernelCandidatesSingleProtocol(t *testing.T) {
 		OutSourceIP:     "198.51.100.10",
 		Protocol:        "icmp",
 		Enabled:         true,
-	}}, planner, 0, 0, usedIDs, &nextID)
+	}}, planner, 0, 0, &nextID)
 
 	if got := plans[7].EffectiveEngine; got != ruleEngineKernel {
 		t.Fatalf("plans[7].EffectiveEngine = %q, want %q", got, ruleEngineKernel)
@@ -562,6 +563,17 @@ func TestBuildKernelEgressNATLocalIPv4Set(t *testing.T) {
 	}
 	if _, ok := set[second]; !ok {
 		t.Fatal("local IPv4 set missing 198.51.100.10")
+	}
+}
+
+func TestParseEgressNATIPv4Uint32UsesBPFScalarOrder(t *testing.T) {
+	got, err := parseEgressNATIPv4Uint32("198.51.100.10")
+	if err != nil {
+		t.Fatalf("parseEgressNATIPv4Uint32() error = %v", err)
+	}
+	want := ipv4BytesToUint32(net.ParseIP("198.51.100.10"))
+	if got != want {
+		t.Fatalf("parseEgressNATIPv4Uint32() = %#x, want %#x", got, want)
 	}
 }
 

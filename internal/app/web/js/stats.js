@@ -37,6 +37,18 @@
     });
   }
 
+  function egressNATStatsIDCellContent(id) {
+    const numericID = Number(id);
+    if (!Number.isFinite(numericID) || numericID >= 0) {
+      return String(id);
+    }
+    return app.createNode('span', {
+      className: 'stat-muted',
+      text: app.t('stats.egressNATs.id.auto'),
+      title: app.t('stats.egressNATs.id.auto.title', { id: numericID })
+    });
+  }
+
   function buildStatsQuery(state) {
     const params = new URLSearchParams();
     params.set('page', String(state.page || 1));
@@ -494,6 +506,12 @@
     });
   }
 
+  app.bindFloatingDetailTooltip = function bindFloatingDetailTooltip(trigger, contentFactory) {
+    if (!trigger || typeof contentFactory !== 'function') return;
+    ensureKernelRuntimeTooltip();
+    bindKernelRuntimeTooltip(trigger, contentFactory);
+  };
+
   function kernelRuntimeMapsNode(engine, runtimeData) {
     ensureKernelRuntimeTooltip();
 
@@ -753,6 +771,14 @@
     if (reconcileDetail) {
       parts.push('reconcile ' + reconcileDetail);
     }
+    const attachmentMode = String(engine.attachment_mode || '').trim().toLowerCase();
+    if (String(engine.name || '').trim().toLowerCase() === 'xdp') {
+      if (attachmentMode === 'generic') {
+        parts.push(app.t('runtimeReason.xdpGenericMode'));
+      } else if (attachmentMode === 'mixed') {
+        parts.push(app.t('runtimeReason.xdpMixedMode'));
+      }
+    }
     [
       engine.pressure_reason,
       engine.degraded_reason,
@@ -824,6 +850,22 @@
       parts.push('diag_err=' + String(engine.diag_snapshot_error));
     }
     return parts.join(' | ');
+  }
+
+  function kernelRuntimeXDPAttachmentModeNote(engines) {
+    const xdpEngine = (engines || []).find((engine) => String(engine.name || '').trim().toLowerCase() === 'xdp');
+    if (!xdpEngine) return null;
+
+    const mode = String(xdpEngine.attachment_mode || '').trim().toLowerCase();
+    let detail = '';
+    if (mode === 'generic') detail = app.t('runtimeReason.xdpGenericMode');
+    else if (mode === 'mixed') detail = app.t('runtimeReason.xdpMixedMode');
+    if (!detail) return null;
+
+    return app.createNode('div', {
+      className: 'kernel-runtime-note',
+      text: app.t('kernel.note.xdpAttachmentMode') + ' · ' + detail
+    });
   }
 
   function kernelRuntimeReconcileNode(engine) {
@@ -1217,6 +1259,10 @@
         text: app.t('kernel.summary.degraded') + ': ' + degradedSummary
       }));
     }
+    const xdpAttachmentModeNote = kernelRuntimeXDPAttachmentModeNote(engines);
+    if (xdpAttachmentModeNote) {
+      el.kernelRuntimeSummary.appendChild(xdpAttachmentModeNote);
+    }
 
     if (!engines.length) {
       el.noKernelRuntime.style.display = 'block';
@@ -1377,7 +1423,10 @@
     const fragment = document.createDocumentFragment();
     list.forEach((s) => {
       const tr = document.createElement('tr');
-      tr.appendChild(app.createCell(String(s.egress_nat_id), 'stat-mono'));
+      tr.appendChild(app.createCell(
+        egressNATStatsIDCellContent(s.egress_nat_id),
+        Number(s.egress_nat_id) < 0 ? '' : 'stat-mono'
+      ));
       tr.appendChild(app.createCell(s.parent_interface || app.emptyCellNode('stat-muted')));
       tr.appendChild(app.createCell(
         typeof app.formatEgressNATStatsChildScope === 'function'

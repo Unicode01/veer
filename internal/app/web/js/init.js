@@ -146,7 +146,11 @@
   bindSearchInput(app.el.rulesSearchInput, 'rules', () => app.renderRulesTable());
   bindSearchInput(app.el.sitesSearchInput, 'sites', () => app.renderSitesTable());
   bindSearchInput(app.el.rangesSearchInput, 'ranges', () => app.renderRangesTable());
+  bindSearchInput(app.el.managedNetworksSearchInput, 'managedNetworks', () => app.renderManagedNetworksTable());
+  bindSearchInput(app.el.managedNetworkReservationCandidatesSearchInput, 'managedNetworkReservationCandidates', () => app.renderManagedNetworkReservationCandidatesTable());
+  bindSearchInput(app.el.managedNetworkReservationsSearchInput, 'managedNetworkReservations', () => app.renderManagedNetworkReservationsTable());
   bindSearchInput(app.el.egressNATsSearchInput, 'egressNATs', () => app.renderEgressNATsTable());
+  bindSearchInput(app.el.ipv6AssignmentsSearchInput, 'ipv6Assignments', () => app.renderIPv6AssignmentsTable());
   bindSearchInput(app.el.workersSearchInput, 'workers', () => app.renderWorkersTable());
 
   if (app.el.batchDeleteRulesBtn) {
@@ -198,8 +202,27 @@
     app.el.emptyAddRangeBtn.addEventListener('click', () => app.focusSection('ranges', app.el.rangeFormTitle, app.$('rangeRemark')));
   }
 
+  if (app.el.emptyAddManagedNetworkBtn) {
+    app.el.emptyAddManagedNetworkBtn.addEventListener('click', () => app.focusSection('managed-networks', app.el.managedNetworkFormTitle, app.el.managedNetworkName));
+  }
+
+  if (app.el.emptyAddManagedNetworkReservationBtn) {
+    app.el.emptyAddManagedNetworkReservationBtn.addEventListener('click', () => {
+      const hasManagedNetworks = !!(app.state.managedNetworks && Array.isArray(app.state.managedNetworks.data) && app.state.managedNetworks.data.length);
+      if (!hasManagedNetworks) {
+        app.focusSection('managed-networks', app.el.managedNetworkFormTitle, app.el.managedNetworkName);
+        return;
+      }
+      app.focusSection('managed-networks', app.el.managedNetworkReservationFormTitle, app.el.managedNetworkReservationManagedNetworkId);
+    });
+  }
+
   if (app.el.emptyAddEgressNATBtn) {
     app.el.emptyAddEgressNATBtn.addEventListener('click', () => app.focusSection('egress-nats', app.el.egressNATFormTitle, app.el.egressNATParentPicker || app.el.egressNATParentInterface));
+  }
+
+  if (app.el.emptyAddIPv6AssignmentBtn) {
+    app.el.emptyAddIPv6AssignmentBtn.addEventListener('click', () => app.focusSection('ipv6-assignments', app.el.ipv6AssignmentFormTitle, app.el.ipv6ParentPicker || app.el.ipv6ParentInterface));
   }
 
   app.el.tokenSubmit.addEventListener('click', () => {
@@ -258,6 +281,39 @@
       app.updateRangeTransparentWarning();
     }
   });
+  bindInterfacePicker(app.el.managedNetworkBridgeInterface, app.el.managedNetworkBridgePicker, {
+    getItems() {
+      return typeof app.getManagedNetworkBridgeItems === 'function' ? app.getManagedNetworkBridgeItems() : [];
+    },
+    preserveSelected: true,
+    onSync(result, previousValue) {
+      const existingMode = String(app.el.managedNetworkBridgeMode && app.el.managedNetworkBridgeMode.value || '').trim().toLowerCase() === 'existing';
+      if (!existingMode) return;
+      if (previousValue === String((result && result.value) || '').trim()) return;
+      if (typeof app.refreshManagedNetworkInterfaceSelectors === 'function') {
+        app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: true });
+      }
+    }
+  });
+  bindInterfacePicker(app.el.managedNetworkUplinkInterface, app.el.managedNetworkUplinkPicker, {
+    getItems() {
+      return typeof app.getManagedNetworkUplinkItems === 'function'
+        ? app.getManagedNetworkUplinkItems(app.el.managedNetworkBridgeInterface.value)
+        : [];
+    },
+    preserveSelected: true
+  });
+  bindInterfacePicker(app.el.managedNetworkIPv6ParentInterface, app.el.managedNetworkIPv6ParentPicker, {
+    getItems() {
+      return typeof app.getManagedNetworkIPv6ParentItems === 'function' ? app.getManagedNetworkIPv6ParentItems() : [];
+    },
+    preserveSelected: true,
+    onSync() {
+      if (typeof app.refreshManagedNetworkInterfaceSelectors === 'function') {
+        app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: false });
+      }
+    }
+  });
   bindInterfacePicker(app.el.egressNATParentInterface, app.el.egressNATParentPicker, {
     getItems() {
       return typeof app.getEgressNATParentInterfaces === 'function' ? app.getEgressNATParentInterfaces() : (app.interfaces || []);
@@ -295,6 +351,88 @@
       app.populateEgressNATSourceIPSelect(app.el.egressNATOutSourceIP.value);
     }
   });
+  bindInterfacePicker(app.el.ipv6ParentInterface, app.el.ipv6ParentPicker, {
+    getItems() {
+      return typeof app.refreshIPv6AssignmentInterfaceSelectors === 'function' && typeof app.getParentInterfaceItems === 'function'
+        ? app.getParentInterfaceItems()
+        : [];
+    },
+    preserveSelected: true,
+    onSync() {
+      if (typeof app.refreshIPv6AssignmentInterfaceSelectors === 'function') {
+        app.refreshIPv6AssignmentInterfaceSelectors({ preservePrefix: false });
+      }
+    }
+  });
+  bindInterfacePicker(app.el.ipv6TargetInterface, app.el.ipv6TargetPicker, {
+    getItems() {
+      return typeof app.getTargetInterfaceItems === 'function'
+        ? app.getTargetInterfaceItems(app.el.ipv6ParentInterface.value)
+        : [];
+    },
+    preserveSelected: true
+  });
+  if (app.el.ipv6ParentPrefix) {
+    app.el.ipv6ParentPrefix.addEventListener('change', () => {
+      if (typeof app.syncIPv6AssignedPrefixFromParentPrefix === 'function') {
+        app.syncIPv6AssignedPrefixFromParentPrefix();
+      }
+    });
+  }
+  if (app.el.ipv6AssignedPrefix) {
+    app.el.ipv6AssignedPrefix.addEventListener('input', () => {
+      if (typeof app.updateIPv6AssignmentModeHint === 'function') app.updateIPv6AssignmentModeHint();
+    });
+    app.el.ipv6AssignedPrefix.addEventListener('change', () => {
+      if (typeof app.updateIPv6AssignmentModeHint === 'function') app.updateIPv6AssignmentModeHint();
+    });
+  }
+  if (app.el.managedNetworkIPv4Enabled) {
+    app.el.managedNetworkIPv4Enabled.addEventListener('change', () => {
+      if (typeof app.syncManagedNetworkFormState === 'function') app.syncManagedNetworkFormState();
+    });
+  }
+  if (app.el.managedNetworkBridgeMode) {
+    app.el.managedNetworkBridgeMode.addEventListener('change', () => {
+      if (typeof app.refreshManagedNetworkInterfaceSelectors === 'function') {
+        app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: true });
+      }
+      if (typeof app.syncManagedNetworkFormState === 'function') app.syncManagedNetworkFormState();
+    });
+  }
+  if (app.el.managedNetworkBridgePicker) {
+    app.el.managedNetworkBridgePicker.addEventListener('input', () => {
+      if (app.el.managedNetworkBridgePicker.dataset) delete app.el.managedNetworkBridgePicker.dataset.autofilled;
+    });
+  }
+  if (app.el.managedNetworkPVEQuickFillBtn) {
+    app.el.managedNetworkPVEQuickFillBtn.addEventListener('click', () => {
+      if (typeof app.applyManagedNetworkPVEQuickFill === 'function') app.applyManagedNetworkPVEQuickFill();
+    });
+  }
+  if (app.el.reloadManagedNetworkRuntimeBtn) {
+    app.el.reloadManagedNetworkRuntimeBtn.addEventListener('click', () => {
+      if (typeof app.reloadManagedNetworkRuntime === 'function') app.reloadManagedNetworkRuntime();
+    });
+  }
+  if (app.el.repairManagedNetworkRuntimeBtn) {
+    app.el.repairManagedNetworkRuntimeBtn.addEventListener('click', () => {
+      if (typeof app.repairManagedNetworkRuntime === 'function') app.repairManagedNetworkRuntime();
+    });
+  }
+  if (app.el.managedNetworkIPv6Enabled) {
+    app.el.managedNetworkIPv6Enabled.addEventListener('change', () => {
+      if (typeof app.refreshManagedNetworkInterfaceSelectors === 'function') {
+        app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: true });
+      }
+      if (typeof app.syncManagedNetworkFormState === 'function') app.syncManagedNetworkFormState();
+    });
+  }
+  if (app.el.managedNetworkIPv6ParentPrefix) {
+    app.el.managedNetworkIPv6ParentPrefix.addEventListener('change', () => {
+      if (typeof app.syncManagedNetworkFormState === 'function') app.syncManagedNetworkFormState();
+    });
+  }
   if (app.el.egressNATProtocolTCP) app.el.egressNATProtocolTCP.addEventListener('change', app.syncEgressNATProtocolSelectionFromInputs);
   if (app.el.egressNATProtocolUDP) app.el.egressNATProtocolUDP.addEventListener('change', app.syncEgressNATProtocolSelectionFromInputs);
   if (app.el.egressNATProtocolICMP) app.el.egressNATProtocolICMP.addEventListener('change', app.syncEgressNATProtocolSelectionFromInputs);
@@ -317,7 +455,10 @@
   app.el.ruleCancelBtn.addEventListener('click', app.exitRuleEditMode);
   app.el.siteCancelBtn.addEventListener('click', app.exitSiteEditMode);
   app.el.rangeCancelBtn.addEventListener('click', app.exitRangeEditMode);
+  if (app.el.managedNetworkCancelBtn) app.el.managedNetworkCancelBtn.addEventListener('click', app.exitManagedNetworkEditMode);
+  if (app.el.managedNetworkReservationCancelBtn) app.el.managedNetworkReservationCancelBtn.addEventListener('click', app.exitManagedNetworkReservationEditMode);
   if (app.el.egressNATCancelBtn) app.el.egressNATCancelBtn.addEventListener('click', app.exitEgressNATEditMode);
+  if (app.el.ipv6AssignmentCancelBtn) app.el.ipv6AssignmentCancelBtn.addEventListener('click', app.exitIPv6AssignmentEditMode);
 
   document.addEventListener('visibilitychange', () => {
     app.state.pageVisible = !document.hidden;
@@ -384,7 +525,9 @@
         if (table === 'rules') app.renderRulesTable();
         else if (table === 'sites') app.renderSitesTable();
         else if (table === 'ranges') app.renderRangesTable();
+        else if (table === 'managedNetworks') app.renderManagedNetworksTable();
         else if (table === 'egressNATs') app.renderEgressNATsTable();
+        else if (table === 'ipv6Assignments') app.renderIPv6AssignmentsTable();
         else if (table === 'workers') app.renderWorkersTable();
         else if (table === 'ruleStats') app.loadRuleStats();
         else if (table === 'siteStats') app.renderSiteStatsTable();
@@ -417,6 +560,12 @@
     const toggleEgressNAT = e.target.closest('.btn-egress-enable, .btn-egress-disable');
     if (toggleEgressNAT) {
       app.toggleEgressNAT(parseInt(toggleEgressNAT.dataset.id, 10));
+      return;
+    }
+
+    const toggleManagedNetwork = e.target.closest('.btn-enable-managed-network, .btn-disable-managed-network');
+    if (toggleManagedNetwork) {
+      app.toggleManagedNetwork(parseInt(toggleManagedNetwork.dataset.id, 10));
       return;
     }
 
@@ -456,6 +605,36 @@
       return;
     }
 
+    const editManagedNetwork = e.target.closest('.btn-edit-managed-network');
+    if (editManagedNetwork) {
+      app.enterManagedNetworkEditMode(app.decData(editManagedNetwork.dataset.managedNetwork));
+      return;
+    }
+
+    const editManagedNetworkReservation = e.target.closest('.btn-edit-managed-network-reservation');
+    if (editManagedNetworkReservation) {
+      app.enterManagedNetworkReservationEditMode(app.decData(editManagedNetworkReservation.dataset.managedNetworkReservation));
+      return;
+    }
+
+    const editManagedNetworkReservationCandidate = e.target.closest('.btn-edit-managed-network-reservation-candidate');
+    if (editManagedNetworkReservationCandidate) {
+      app.editManagedNetworkReservationFromCandidate(app.decData(editManagedNetworkReservationCandidate.dataset.managedNetworkReservationCandidate));
+      return;
+    }
+
+    const fillManagedNetworkReservationCandidate = e.target.closest('.btn-fill-managed-network-reservation-candidate');
+    if (fillManagedNetworkReservationCandidate) {
+      app.prefillManagedNetworkReservationFromCandidate(app.decData(fillManagedNetworkReservationCandidate.dataset.managedNetworkReservationCandidate));
+      return;
+    }
+
+    const createManagedNetworkReservationCandidate = e.target.closest('.btn-create-managed-network-reservation-candidate');
+    if (createManagedNetworkReservationCandidate) {
+      app.createManagedNetworkReservationFromCandidate(app.decData(createManagedNetworkReservationCandidate.dataset.managedNetworkReservationCandidate));
+      return;
+    }
+
     const cloneRange = e.target.closest('.btn-clone-range');
     if (cloneRange) {
       app.enterRangeCloneMode(app.decData(cloneRange.dataset.range));
@@ -474,6 +653,36 @@
     const deleteEgressNAT = e.target.closest('.btn-delete-egress-nat');
     if (deleteEgressNAT) {
       app.deleteEgressNAT(parseInt(deleteEgressNAT.dataset.id, 10));
+      return;
+    }
+
+    const deleteManagedNetwork = e.target.closest('.btn-delete-managed-network');
+    if (deleteManagedNetwork) {
+      app.deleteManagedNetwork(parseInt(deleteManagedNetwork.dataset.id, 10));
+      return;
+    }
+
+    const deleteManagedNetworkReservation = e.target.closest('.btn-delete-managed-network-reservation');
+    if (deleteManagedNetworkReservation) {
+      app.deleteManagedNetworkReservation(parseInt(deleteManagedNetworkReservation.dataset.id, 10));
+      return;
+    }
+
+    const toggleIPv6Assignment = e.target.closest('.btn-enable-ipv6-assignment, .btn-disable-ipv6-assignment');
+    if (toggleIPv6Assignment) {
+      app.toggleIPv6Assignment(parseInt(toggleIPv6Assignment.dataset.id, 10));
+      return;
+    }
+
+    const editIPv6Assignment = e.target.closest('.btn-edit-ipv6-assignment');
+    if (editIPv6Assignment) {
+      app.enterIPv6AssignmentEditMode(app.decData(editIPv6Assignment.dataset.ipv6Assignment));
+      return;
+    }
+
+    const deleteIPv6Assignment = e.target.closest('.btn-delete-ipv6-assignment');
+    if (deleteIPv6Assignment) {
+      app.deleteIPv6Assignment(parseInt(deleteIPv6Assignment.dataset.id, 10));
     }
   });
 
@@ -716,6 +925,120 @@
     );
   });
 
+  if (app.el.managedNetworkForm) {
+    app.el.managedNetworkForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      app.clearFormErrors(app.el.managedNetworkForm);
+
+      const item = app.buildManagedNetworkFromForm();
+      const valid = typeof app.validateManagedNetworkFormFields === 'function'
+        ? app.validateManagedNetworkFormFields(item)
+        : true;
+
+      if (!valid || !item.name || !item.bridge) {
+        app.notify('error', app.t('validation.reviewErrors'));
+        app.focusFirstError(app.el.managedNetworkForm);
+        return;
+      }
+
+      const editing = parseInt(app.el.editManagedNetworkId.value || '0', 10);
+      await app.withFormBusy(
+        'managedNetwork',
+        app.el.managedNetworkSubmitBtn,
+        app.el.managedNetworkCancelBtn,
+        app.t('common.saving'),
+        async () => {
+          try {
+            const current = editing > 0
+              ? (app.state.managedNetworks.data || []).find((entry) => entry.id === editing)
+              : null;
+            const payload = Object.assign({}, item, {
+              enabled: current ? current.enabled !== false : true
+            });
+
+            if (editing > 0) {
+              payload.id = editing;
+              await app.apiCall('PUT', '/api/managed-networks', payload);
+              app.notify('success', app.t('toast.saved', { item: app.t('noun.managedNetwork') }));
+            } else {
+              await app.apiCall('POST', '/api/managed-networks', payload);
+              app.notify('success', app.t('toast.created', { item: app.t('noun.managedNetwork') }));
+            }
+            app.exitManagedNetworkEditMode();
+            if (typeof app.loadHostNetwork === 'function') await app.loadHostNetwork();
+            await app.loadManagedNetworks();
+          } catch (err) {
+            if (err.message !== 'unauthorized') {
+              if (err.payload && Array.isArray(err.payload.issues) && err.payload.issues.length > 0) {
+                app.applyManagedNetworkValidationIssues(err.payload.issues);
+                return;
+              }
+              app.notify('error', app.t('errors.actionFailed', {
+                action: app.t(editing > 0 ? 'action.update' : 'action.add'),
+                message: app.translateValidationMessage(err.message)
+              }));
+            }
+          }
+        },
+        app.syncManagedNetworkFormState
+      );
+    });
+  }
+
+  if (app.el.managedNetworkReservationForm) {
+    app.el.managedNetworkReservationForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      app.clearFormErrors(app.el.managedNetworkReservationForm);
+
+      const item = app.buildManagedNetworkReservationFromForm();
+      const valid = typeof app.validateManagedNetworkReservationFormFields === 'function'
+        ? app.validateManagedNetworkReservationFormFields(item)
+        : true;
+
+      if (!valid || !item.managed_network_id || !item.mac_address || !item.ipv4_address) {
+        app.notify('error', app.t('validation.reviewErrors'));
+        app.focusFirstError(app.el.managedNetworkReservationForm);
+        return;
+      }
+
+      const editing = parseInt(app.el.editManagedNetworkReservationId.value || '0', 10);
+      await app.withFormBusy(
+        'managedNetworkReservation',
+        app.el.managedNetworkReservationSubmitBtn,
+        app.el.managedNetworkReservationCancelBtn,
+        app.t('common.saving'),
+        async () => {
+          try {
+            if (editing > 0) {
+              await app.apiCall('PUT', '/api/managed-network-reservations', Object.assign({ id: editing }, item));
+              app.notify('success', app.t('toast.saved', { item: app.t('noun.managedNetworkReservation') }));
+            } else {
+              await app.apiCall('POST', '/api/managed-network-reservations', item);
+              app.notify('success', app.t('toast.created', { item: app.t('noun.managedNetworkReservation') }));
+            }
+            app.exitManagedNetworkReservationEditMode();
+            await Promise.all([
+              typeof app.loadManagedNetworks === 'function' ? app.loadManagedNetworks() : Promise.resolve(),
+              typeof app.loadManagedNetworkReservations === 'function' ? app.loadManagedNetworkReservations() : Promise.resolve()
+            ]);
+          } catch (err) {
+            if (err.message !== 'unauthorized') {
+              if (err.payload && Array.isArray(err.payload.issues) && err.payload.issues.length > 0) {
+                app.applyManagedNetworkReservationValidationIssues(err.payload.issues);
+                return;
+              }
+              app.notify('error', app.t('errors.actionFailed', {
+                action: app.t(editing > 0 ? 'action.update' : 'action.add'),
+                message: app.translateValidationMessage(err.message)
+              }));
+            }
+          }
+        },
+        app.syncManagedNetworkReservationFormState
+      );
+    });
+  }
+
   if (app.el.egressNATForm) {
     app.el.egressNATForm.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -799,6 +1122,73 @@
     });
   }
 
+  if (app.el.ipv6AssignmentForm) {
+    app.el.ipv6AssignmentForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      app.clearFormErrors(app.el.ipv6AssignmentForm);
+
+      const item = app.buildIPv6AssignmentFromForm();
+      let valid = true;
+      if (!app.validateRequiredField(app.el.ipv6ParentPicker || app.el.ipv6ParentInterface)) valid = false;
+      if (!app.validateRequiredField(app.el.ipv6ParentPrefix)) valid = false;
+      if (!app.validateRequiredField(app.el.ipv6TargetPicker || app.el.ipv6TargetInterface)) valid = false;
+      if (!app.validateRequiredField(app.el.ipv6AssignedPrefix)) valid = false;
+      if (valid && typeof app.validateIPv6PrefixField === 'function' && !app.validateIPv6PrefixField(app.el.ipv6AssignedPrefix)) valid = false;
+
+      if (!valid || !item.parent_interface || !item.parent_prefix || !item.target_interface || !item.assigned_prefix) {
+        app.notify('error', app.t('validation.reviewErrors'));
+        app.focusFirstError(app.el.ipv6AssignmentForm);
+        return;
+      }
+
+      const editing = parseInt(app.el.editIPv6AssignmentId.value || '0', 10);
+      await app.withFormBusy(
+        'ipv6Assignment',
+        app.el.ipv6AssignmentSubmitBtn,
+        app.el.ipv6AssignmentCancelBtn,
+        app.t('common.saving'),
+        async () => {
+          try {
+            const current = editing > 0
+              ? (app.state.ipv6Assignments.data || []).find((entry) => entry.id === editing)
+              : null;
+            const payload = {
+              parent_interface: item.parent_interface,
+              target_interface: item.target_interface,
+              parent_prefix: item.parent_prefix,
+              assigned_prefix: item.assigned_prefix,
+              remark: item.remark || '',
+              enabled: current ? current.enabled !== false : true
+            };
+
+            if (editing > 0) {
+              payload.id = editing;
+              await app.apiCall('PUT', '/api/ipv6-assignments', payload);
+              app.notify('success', app.t('toast.saved', { item: app.t('noun.ipv6Assignment') }));
+            } else {
+              await app.apiCall('POST', '/api/ipv6-assignments', payload);
+              app.notify('success', app.t('toast.created', { item: app.t('noun.ipv6Assignment') }));
+            }
+            app.exitIPv6AssignmentEditMode();
+            await app.loadIPv6Assignments();
+          } catch (err) {
+            if (err.message !== 'unauthorized') {
+              if (err.payload && Array.isArray(err.payload.issues) && err.payload.issues.length > 0) {
+                app.applyIPv6AssignmentValidationIssues(err.payload.issues);
+                return;
+              }
+              app.notify('error', app.t('errors.actionFailed', {
+                action: app.t(editing > 0 ? 'action.update' : 'action.add'),
+                message: app.translateValidationMessage(err.message)
+              }));
+            }
+          }
+        },
+        app.syncIPv6AssignmentFormState
+      );
+    });
+  }
+
   app.init = function init() {
     if (!app.getToken()) {
       app.showTokenModal();
@@ -809,7 +1199,10 @@
     app.setRuleFormAdd();
     app.setSiteFormAdd();
     app.setRangeFormAdd();
+    if (typeof app.setManagedNetworkFormAdd === 'function') app.setManagedNetworkFormAdd();
+    if (typeof app.setManagedNetworkReservationFormAdd === 'function') app.setManagedNetworkReservationFormAdd();
     if (typeof app.setEgressNATFormAdd === 'function') app.setEgressNATFormAdd();
+    if (typeof app.setIPv6AssignmentFormAdd === 'function') app.setIPv6AssignmentFormAdd();
     app.activateTab(app.state.activeTab, { persist: false, skipLoad: true });
 
     app.refreshDashboard({

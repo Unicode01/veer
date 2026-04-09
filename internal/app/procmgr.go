@@ -73,6 +73,8 @@ const (
 	kernelNetlinkOwnerRetryCooldownMax = 30 * time.Second
 	kernelUserspaceWarmupTimeout       = 5 * time.Second
 	kernelUserspaceWarmupPoll          = 100 * time.Millisecond
+	managedNetworkReloadDebounce       = 1 * time.Second
+	managedNetworkSelfEventSuppressFor = 2 * time.Second
 )
 
 const forwardKernelMaintenanceIntervalEnv = "FORWARD_KERNEL_MAINTENANCE_INTERVAL_MS"
@@ -181,6 +183,11 @@ type ProcessManager struct {
 	rangePlans                                     map[int64]rangeDataplanePlan
 	egressNATPlans                                 map[int64]ruleDataplanePlan
 	dynamicEgressNATParents                        map[string]struct{}
+	managedNetworkRuntime                          managedNetworkRuntime
+	managedNetworkInterfaces                       map[string]struct{}
+	ipv6Runtime                                    ipv6AssignmentRuntime
+	ipv6AssignmentsConfigured                      bool
+	ipv6AssignmentInterfaces                       map[string]struct{}
 	kernelRuntime                                  kernelRuleRuntime
 	kernelRules                                    map[int64]bool
 	kernelRanges                                   map[int64]bool
@@ -245,9 +252,27 @@ type ProcessManager struct {
 	kernelNetlinkOwnerRetryCooldownUntil           map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState
 	kernelNetlinkOwnerRetryFailures                map[kernelCandidateOwner]int
 	kernelPressureSnapshot                         kernelRuntimePressureSnapshot
+	managedRuntimeReloadWake                       chan struct{}
+	managedRuntimeReloadPending                    bool
+	managedRuntimeReloadDueAt                      time.Time
+	managedRuntimeReloadInterfaces                 map[string]struct{}
+	managedRuntimeReloadSuppressUntil              map[string]time.Time
+	managedRuntimeReloadLastRequestedAt            time.Time
+	managedRuntimeReloadLastRequestSource          string
+	managedRuntimeReloadLastRequestSummary         string
+	managedRuntimeReloadLastStartedAt              time.Time
+	managedRuntimeReloadLastCompletedAt            time.Time
+	managedRuntimeReloadLastResult                 string
+	managedRuntimeReloadLastAppliedSummary         string
+	managedRuntimeReloadLastError                  string
 	redistributeWake                               chan struct{}
 	redistributePending                            bool
 	redistributeDueAt                              time.Time
+	shuttingDown                                   bool
+	shutdownCh                                     chan struct{}
+	monitorDone                                    chan struct{}
+	managedRuntimeReloadDone                       chan struct{}
+	redistributeDone                               chan struct{}
 	lastRulePlanLog                                map[int64]string
 	lastRangePlanLog                               map[int64]string
 	lastPlannerSummary                             string
@@ -280,6 +305,10 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		rangePlans:                           make(map[int64]rangeDataplanePlan),
 		egressNATPlans:                       make(map[int64]ruleDataplanePlan),
 		dynamicEgressNATParents:              make(map[string]struct{}),
+		managedNetworkRuntime:                newManagedNetworkRuntime(),
+		managedNetworkInterfaces:             make(map[string]struct{}),
+		ipv6Runtime:                          newIPv6AssignmentRuntime(),
+		ipv6AssignmentInterfaces:             make(map[string]struct{}),
 		kernelRuntime:                        newKernelRuleRuntime(cfg),
 		kernelRules:                          make(map[int64]bool),
 		kernelRanges:                         make(map[int64]bool),
@@ -294,7 +323,13 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
 		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
 		kernelStatsSnapshot:                  emptyKernelRuleStatsSnapshot(),
+		managedRuntimeReloadWake:             make(chan struct{}, 1),
+		managedRuntimeReloadSuppressUntil:    make(map[string]time.Time),
 		redistributeWake:                     make(chan struct{}, 1),
+		shutdownCh:                           make(chan struct{}),
+		monitorDone:                          make(chan struct{}),
+		managedRuntimeReloadDone:             make(chan struct{}),
+		redistributeDone:                     make(chan struct{}),
 		lastRulePlanLog:                      make(map[int64]string),
 		lastRangePlanLog:                     make(map[int64]string),
 		kernelMaintenanceEvery:               configuredKernelMaintenanceInterval(),
@@ -311,6 +346,7 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 
 	go pm.monitorLoop()
+	go pm.managedRuntimeReloadLoop()
 	go pm.redistributeLoop()
 	pm.startKernelNetlinkMonitor()
 
@@ -629,17 +665,70 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load ranges: %v", err)
 		return
 	}
+	managedNetworks, err := dbGetManagedNetworks(pm.db)
+	if err != nil {
+		log.Printf("load managed networks: %v", err)
+		return
+	}
+	managedNetworkReservations, err := dbGetManagedNetworkReservations(pm.db)
+	if err != nil {
+		log.Printf("load managed network reservations: %v", err)
+		return
+	}
+	if pm.managedNetworkRuntime != nil {
+		if err := pm.managedNetworkRuntime.Reconcile(managedNetworks, managedNetworkReservations); err != nil {
+			log.Printf("managed network runtime reconcile: %v", err)
+		}
+	}
 	egressNATs, err := dbGetEgressNATs(pm.db)
 	if err != nil {
 		log.Printf("load egress nats: %v", err)
 		return
 	}
+	ipv6Assignments, ipv6AssignmentLoadErr := dbGetIPv6Assignments(pm.db)
+	if ipv6AssignmentLoadErr != nil {
+		log.Printf("load ipv6 assignments: %v", ipv6AssignmentLoadErr)
+	}
 	egressNATSnapshot := egressNATInterfaceSnapshot{}
 	dynamicEgressNATParents := map[string]struct{}{}
-	if len(egressNATs) > 0 {
+	needsManagedNetworkCompilation := len(managedNetworks) > 0
+	if len(egressNATs) > 0 || needsManagedNetworkCompilation {
 		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
-		egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
-		dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
+	}
+	if needsManagedNetworkCompilation && egressNATSnapshot.Err != nil {
+		log.Printf("managed network runtime: interface inventory unavailable: %v", egressNATSnapshot.Err)
+	}
+	egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
+	managedNetworkCompiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, egressNATs, egressNATSnapshot.Infos)
+	if len(managedNetworkCompiled.Warnings) > 0 {
+		for _, warning := range managedNetworkCompiled.Warnings {
+			log.Printf("managed network runtime: %s", warning)
+		}
+	}
+	if len(managedNetworkCompiled.IPv6Assignments) > 0 {
+		ipv6Assignments = append(ipv6Assignments, managedNetworkCompiled.IPv6Assignments...)
+	}
+	if len(managedNetworkCompiled.EgressNATs) > 0 {
+		egressNATs = append(egressNATs, managedNetworkCompiled.EgressNATs...)
+	}
+	dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
+	if ipv6AssignmentLoadErr == nil {
+		if pm.ipv6Runtime != nil {
+			if err := pm.ipv6Runtime.Reconcile(ipv6Assignments); err != nil {
+				log.Printf("ipv6 assignment runtime reconcile: %v", err)
+			}
+		}
+		ipv6Interfaces, ipv6ConfiguredCount := collectIPv6AssignmentInterfaceNames(ipv6Assignments)
+		for name := range managedNetworkCompiled.RedistributeIfaces {
+			if ipv6Interfaces == nil {
+				ipv6Interfaces = make(map[string]struct{})
+			}
+			ipv6Interfaces[name] = struct{}{}
+		}
+		pm.mu.Lock()
+		pm.ipv6AssignmentsConfigured = ipv6ConfiguredCount > 0 || len(managedNetworkCompiled.RedistributeIfaces) > 0
+		pm.ipv6AssignmentInterfaces = ipv6Interfaces
+		pm.mu.Unlock()
 	}
 	planner := newRuleDataplanePlanner(pm.kernelRuntime, pm.cfg.DefaultEngine)
 	configuredKernelRulesMapLimit := 0
@@ -662,32 +751,32 @@ func (pm *ProcessManager) redistributeWorkers() {
 	applyKernelPressurePolicy(kernelPressure, candidates, previousKernelRules, previousKernelRanges, rulePlans, rangePlans)
 	candidates = pm.prewarmKernelToUserspaceHandoffs(rules, ranges, candidates, rulePlans, rangePlans)
 
-	activeRuleRangeKernelCandidates := filterActiveKernelCandidates(candidates, rulePlans, rangePlans, nil)
-	usedCandidateRuleIDs := make(map[int64]struct{}, len(rules)+len(candidates))
+	activeRuleRangeKernelCandidateCount := countActiveKernelCandidates(candidates, rulePlans, rangePlans, nil)
 	maxCandidateRuleID := int64(0)
 	for _, rule := range rules {
 		if rule.ID > maxCandidateRuleID {
 			maxCandidateRuleID = rule.ID
-		}
-		if rule.ID > 0 {
-			usedCandidateRuleIDs[rule.ID] = struct{}{}
 		}
 	}
 	for _, candidate := range candidates {
 		if candidate.rule.ID > maxCandidateRuleID {
 			maxCandidateRuleID = candidate.rule.ID
 		}
-		if candidate.rule.ID > 0 {
-			usedCandidateRuleIDs[candidate.rule.ID] = struct{}{}
-		}
 	}
 	nextSyntheticID := maxCandidateRuleID + 1
-	egressNATCandidates, egressNATPlans := buildEgressNATKernelCandidatesWithSnapshot(egressNATs, planner, configuredKernelRulesMapLimit, len(activeRuleRangeKernelCandidates), usedCandidateRuleIDs, &nextSyntheticID, egressNATSnapshot)
-	allKernelCandidates := append(append([]kernelCandidateRule(nil), candidates...), egressNATCandidates...)
-	activeKernelCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
+	egressNATCandidates, egressNATPlans := buildEgressNATKernelCandidatesWithSnapshot(egressNATs, planner, configuredKernelRulesMapLimit, activeRuleRangeKernelCandidateCount, &nextSyntheticID, egressNATSnapshot)
+	allKernelCandidates := make([]kernelCandidateRule, 0, len(candidates)+len(egressNATCandidates))
+	allKernelCandidates = append(allKernelCandidates, candidates...)
+	allKernelCandidates = append(allKernelCandidates, egressNATCandidates...)
+	activeKernelCandidateBuf := make([]kernelCandidateRule, 0, len(allKernelCandidates))
+	activeKernelCandidates := filterActiveKernelCandidatesInto(activeKernelCandidateBuf, allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
+	activeKernelCandidateBuf = activeKernelCandidates[:0]
+	activeKernelRuleBuf := make([]Rule, 0, len(activeKernelCandidates))
 	if pm.kernelRuntime != nil {
 		for {
-			results, err := pm.kernelRuntime.Reconcile(kernelCandidateRules(activeKernelCandidates))
+			activeKernelRules := kernelCandidateRulesInto(activeKernelRuleBuf, activeKernelCandidates)
+			activeKernelRuleBuf = activeKernelRules[:0]
+			results, err := pm.kernelRuntime.Reconcile(activeKernelRules)
 			if len(activeKernelCandidates) == 0 {
 				break
 			}
@@ -700,13 +789,13 @@ func (pm *ProcessManager) redistributeWorkers() {
 			for owner, reason := range ownerFailures {
 				applyKernelOwnerFallbackWithMetadata(owner, reason, ownerMetadata[owner], rulePlans, rangePlans, egressNATPlans)
 			}
-			activeKernelCandidates = filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
+			activeKernelCandidates = filterActiveKernelCandidatesInto(activeKernelCandidateBuf, allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
+			activeKernelCandidateBuf = activeKernelCandidates[:0]
 		}
 	}
 
 	pm.logRuleDataplanePlans(rules, rulePlans, pm.cfg.DefaultEngine)
 	pm.logRangeDataplanePlans(ranges, rangePlans, pm.cfg.DefaultEngine)
-	activeKernelCandidates = filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 	pm.logPlannerSummary(
 		"kernel dataplane planner summary: default_engine=%s enabled_rules=%d enabled_ranges=%d enabled_egress_nats=%d kernel_target_rules=%d kernel_target_ranges=%d kernel_target_egress_nats=%d kernel_target_entries=%d kernel_rules_map_capacity=%d capacity_mode=%s %s",
 		pm.cfg.DefaultEngine,
@@ -763,6 +852,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.rulePlans = rulePlans
 	pm.rangePlans = rangePlans
 	pm.egressNATPlans = egressNATPlans
+	pm.managedNetworkInterfaces = cloneManagedNetworkInterfaceSet(managedNetworkCompiled.RedistributeIfaces)
 	pm.dynamicEgressNATParents = dynamicEgressNATParents
 	pm.kernelRules = kernelAppliedRules
 	pm.kernelRanges = kernelAppliedRanges
@@ -806,6 +896,10 @@ func (pm *ProcessManager) requestRedistributeWorkers(delay time.Duration) {
 	dueAt := time.Now().Add(delay)
 
 	pm.mu.Lock()
+	if pm.shuttingDown {
+		pm.mu.Unlock()
+		return
+	}
 	if !pm.redistributePending || dueAt.Before(pm.redistributeDueAt) {
 		pm.redistributeDueAt = dueAt
 	}
@@ -822,13 +916,24 @@ func (pm *ProcessManager) requestRedistributeWorkers(delay time.Duration) {
 }
 
 func (pm *ProcessManager) redistributeLoop() {
+	defer close(pm.redistributeDone)
+
 	var timer *time.Timer
 	for {
 		pm.mu.Lock()
 		pending := pm.redistributePending
 		dueAt := pm.redistributeDueAt
 		wake := pm.redistributeWake
+		shutdownCh := pm.shutdownCh
+		shuttingDown := pm.shuttingDown
 		pm.mu.Unlock()
+
+		if shuttingDown {
+			if timer != nil {
+				stopTimer(timer)
+			}
+			return
+		}
 
 		if !pending {
 			if timer != nil {
@@ -838,8 +943,13 @@ func (pm *ProcessManager) redistributeLoop() {
 			if wake == nil {
 				return
 			}
-			if _, ok := <-wake; !ok {
+			select {
+			case <-shutdownCh:
 				return
+			case _, ok := <-wake:
+				if !ok {
+					return
+				}
 			}
 			continue
 		}
@@ -851,6 +961,9 @@ func (pm *ProcessManager) redistributeLoop() {
 				resetTimer(timer, wait)
 			}
 			select {
+			case <-shutdownCh:
+				stopTimer(timer)
+				return
 			case _, ok := <-wake:
 				if !ok {
 					stopTimer(timer)
@@ -862,6 +975,13 @@ func (pm *ProcessManager) redistributeLoop() {
 		}
 
 		pm.mu.Lock()
+		if pm.shuttingDown {
+			pm.mu.Unlock()
+			if timer != nil {
+				stopTimer(timer)
+			}
+			return
+		}
 		if !pm.redistributePending {
 			pm.mu.Unlock()
 			continue
@@ -874,6 +994,9 @@ func (pm *ProcessManager) redistributeLoop() {
 		pm.redistributeDueAt = time.Time{}
 		pm.mu.Unlock()
 
+		if pm.isShuttingDown() {
+			return
+		}
 		pm.redistributeWorkers()
 	}
 }
@@ -898,6 +1021,33 @@ func countEnabledRanges(ranges []PortRange) int {
 	return count
 }
 
+func (pm *ProcessManager) isShuttingDown() bool {
+	if pm == nil {
+		return true
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.shuttingDown
+}
+
+func (pm *ProcessManager) beginShutdown() {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	if pm.shuttingDown {
+		pm.mu.Unlock()
+		return
+	}
+	pm.shuttingDown = true
+	shutdownCh := pm.shutdownCh
+	pm.mu.Unlock()
+
+	if shutdownCh != nil {
+		close(shutdownCh)
+	}
+}
+
 func countEnabledEgressNATs(items []EgressNAT) int {
 	count := 0
 	for _, item := range items {
@@ -918,36 +1068,80 @@ type kernelCandidateRule struct {
 	rule  Rule
 }
 
+type kernelRuleFamilyFallbackCacheKey struct {
+	inIP        string
+	outIP       string
+	transparent bool
+}
+
+type kernelRuleFamilyFallbackCache struct {
+	firstKey   kernelRuleFamilyFallbackCacheKey
+	firstValue string
+	firstSet   bool
+	byKey      map[kernelRuleFamilyFallbackCacheKey]string
+}
+
+func (c *kernelRuleFamilyFallbackCache) Reason(inIP string, outIP string, transparent bool) string {
+	if c == nil {
+		return kernelRuleFamilyFallbackReasonFromIPs(inIP, outIP, transparent)
+	}
+	key := kernelRuleFamilyFallbackCacheKey{
+		inIP:        inIP,
+		outIP:       outIP,
+		transparent: transparent,
+	}
+	if c.firstSet {
+		if key == c.firstKey {
+			return c.firstValue
+		}
+		if reason, ok := c.byKey[key]; ok {
+			return reason
+		}
+	}
+	reason := kernelRuleFamilyFallbackReasonFromIPs(inIP, outIP, transparent)
+	if !c.firstSet {
+		c.firstKey = key
+		c.firstValue = reason
+		c.firstSet = true
+		return reason
+	}
+	if c.byKey == nil {
+		c.byKey = make(map[kernelRuleFamilyFallbackCacheKey]string, 8)
+	}
+	c.byKey[key] = reason
+	return reason
+}
+
+var (
+	kernelProtocolVariantTCP    = []string{"tcp"}
+	kernelProtocolVariantUDP    = []string{"udp"}
+	kernelProtocolVariantTCPUDP = []string{"tcp", "udp"}
+)
+
 func kernelProtocolVariants(protocol string) []string {
 	switch protocol {
 	case "tcp":
-		return []string{"tcp"}
+		return kernelProtocolVariantTCP
 	case "udp":
-		return []string{"udp"}
+		return kernelProtocolVariantUDP
 	case "tcp+udp":
-		return []string{"tcp", "udp"}
+		return kernelProtocolVariantTCPUDP
 	default:
 		return nil
 	}
 }
 
-func allocateSyntheticKernelRuleID(nextID *int64, used map[int64]struct{}) (int64, error) {
+func allocateSyntheticKernelRuleID(nextID *int64) (int64, error) {
 	limit := int64(^uint32(0))
-	for {
-		if *nextID <= 0 {
-			*nextID = 1
-		}
-		if *nextID > limit {
-			return 0, fmt.Errorf("kernel dataplane synthetic rule ids exhausted uint32 range")
-		}
-		id := *nextID
-		*nextID++
-		if _, exists := used[id]; exists {
-			continue
-		}
-		used[id] = struct{}{}
-		return id, nil
+	if *nextID <= 0 {
+		*nextID = 1
 	}
+	if *nextID > limit {
+		return 0, fmt.Errorf("kernel dataplane synthetic rule ids exhausted uint32 range")
+	}
+	id := *nextID
+	*nextID++
+	return id, nil
 }
 
 func annotateKernelCandidateRule(item *Rule, owner kernelCandidateOwner) {
@@ -958,60 +1152,86 @@ func annotateKernelCandidateRule(item *Rule, owner kernelCandidateOwner) {
 	item.kernelLogOwnerID = owner.id
 }
 
-func aggregateKernelOwnerPlan(preferred string, entryPlans []ruleDataplanePlan) ruleDataplanePlan {
-	plan := ruleDataplanePlan{
-		PreferredEngine: preferred,
-		EffectiveEngine: ruleEngineUserspace,
-	}
-	if len(entryPlans) == 0 {
-		return plan
-	}
-
-	allKernel := true
-	allEligible := true
-	for _, item := range entryPlans {
-		if !item.KernelEligible {
-			allEligible = false
-			if plan.KernelReason == "" {
-				plan.KernelReason = item.KernelReason
-			}
-		}
-		if item.EffectiveEngine != ruleEngineKernel {
-			allKernel = false
-			if plan.FallbackReason == "" && item.FallbackReason != "" {
-				plan.FallbackReason = item.FallbackReason
-				plan.TransientFallback = item.TransientFallback
-			}
-		}
-	}
-	plan.KernelEligible = allEligible
-	if allKernel {
-		plan.EffectiveEngine = ruleEngineKernel
-	}
-	return plan
+type kernelOwnerPlanAccumulator struct {
+	plan        ruleDataplanePlan
+	initialized bool
+	allKernel   bool
+	allEligible bool
 }
 
-func sampleKernelRangePlan(pr PortRange, variants []string, planner *ruleDataplanePlanner, preferred string) rangeDataplanePlan {
-	entryPlans := make([]ruleDataplanePlan, 0, len(variants))
-	for _, proto := range variants {
-		entryPlans = append(entryPlans, planner.Plan(Rule{
-			ID:               1,
-			InInterface:      pr.InInterface,
-			InIP:             pr.InIP,
-			InPort:           pr.StartPort,
-			OutInterface:     pr.OutInterface,
-			OutIP:            pr.OutIP,
-			OutSourceIP:      pr.OutSourceIP,
-			OutPort:          pr.OutStartPort,
-			Protocol:         proto,
-			Remark:           pr.Remark,
-			Tag:              pr.Tag,
-			Enabled:          pr.Enabled,
-			Transparent:      pr.Transparent,
-			EnginePreference: ruleEngineAuto,
-		}))
+func newKernelOwnerPlanAccumulator(preferred string) kernelOwnerPlanAccumulator {
+	return kernelOwnerPlanAccumulator{
+		plan: ruleDataplanePlan{
+			PreferredEngine: preferred,
+			EffectiveEngine: ruleEngineUserspace,
+		},
+		allKernel:   true,
+		allEligible: true,
 	}
-	return aggregateKernelOwnerPlan(preferred, entryPlans)
+}
+
+func (a *kernelOwnerPlanAccumulator) Add(item ruleDataplanePlan) {
+	if a == nil {
+		return
+	}
+	a.initialized = true
+	if !item.KernelEligible {
+		a.allEligible = false
+		if a.plan.KernelReason == "" {
+			a.plan.KernelReason = item.KernelReason
+		}
+	}
+	if item.EffectiveEngine != ruleEngineKernel {
+		a.allKernel = false
+		if a.plan.FallbackReason == "" && item.FallbackReason != "" {
+			a.plan.FallbackReason = item.FallbackReason
+			a.plan.TransientFallback = item.TransientFallback
+		}
+	}
+}
+
+func (a kernelOwnerPlanAccumulator) Result() ruleDataplanePlan {
+	if !a.initialized {
+		return a.plan
+	}
+	a.plan.KernelEligible = a.allEligible
+	if a.allKernel {
+		a.plan.EffectiveEngine = ruleEngineKernel
+	}
+	return a.plan
+}
+
+func aggregateKernelOwnerPlan(preferred string, entryPlans []ruleDataplanePlan) ruleDataplanePlan {
+	acc := newKernelOwnerPlanAccumulator(preferred)
+	for _, item := range entryPlans {
+		acc.Add(item)
+	}
+	return acc.Result()
+}
+
+func sampleKernelRangePlan(pr PortRange, variants []string, planner *ruleDataplanePlanner, preferred string, kernelReason string) rangeDataplanePlan {
+	acc := newKernelOwnerPlanAccumulator(preferred)
+	baseRule := Rule{
+		ID:               1,
+		InInterface:      pr.InInterface,
+		InIP:             pr.InIP,
+		InPort:           pr.StartPort,
+		OutInterface:     pr.OutInterface,
+		OutIP:            pr.OutIP,
+		OutSourceIP:      pr.OutSourceIP,
+		OutPort:          pr.OutStartPort,
+		Remark:           pr.Remark,
+		Tag:              pr.Tag,
+		Enabled:          pr.Enabled,
+		Transparent:      pr.Transparent,
+		EnginePreference: ruleEngineAuto,
+	}
+	for _, proto := range variants {
+		item := baseRule
+		item.Protocol = proto
+		acc.Add(planner.planWithPreferredAndKernelReason(item, preferred, kernelReason))
+	}
+	return acc.Result()
 }
 
 func applyKernelOwnerFallback(owner kernelCandidateOwner, reason string, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) {
@@ -1179,41 +1399,46 @@ func kernelOwnerEffectiveEngine(owner kernelCandidateOwner, rulePlans map[int64]
 func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int) ([]kernelCandidateRule, map[int64]ruleDataplanePlan, map[int64]rangeDataplanePlan) {
 	rulePlans := make(map[int64]ruleDataplanePlan, len(rules))
 	rangePlans := make(map[int64]rangeDataplanePlan, len(ranges))
+	familyFallbackCache := kernelRuleFamilyFallbackCache{}
 
 	maxRuleID := int64(0)
-	usedIDs := make(map[int64]struct{}, len(rules))
+	ruleCandidateCapacity := 0
 	for _, rule := range rules {
 		if rule.ID > maxRuleID {
 			maxRuleID = rule.ID
 		}
-		if rule.ID > 0 {
-			usedIDs[rule.ID] = struct{}{}
+		if !rule.Enabled {
+			continue
 		}
+		ruleCandidateCapacity += len(kernelProtocolVariants(rule.Protocol))
 	}
 	nextSyntheticID := maxRuleID + 1
 
-	candidates := make([]kernelCandidateRule, 0)
+	candidates := make([]kernelCandidateRule, 0, ruleCandidateCapacity)
 	reservedKernelEntries := 0
 
 	for _, rule := range rules {
 		owner := kernelCandidateOwner{kind: workerKindRule, id: rule.ID}
+		preferred := planner.resolvePreferredEngine(rule.EnginePreference)
+		kernelReason := familyFallbackCache.Reason(rule.InIP, rule.OutIP, rule.Transparent)
 		variants := kernelProtocolVariants(rule.Protocol)
 		if len(variants) == 0 {
-			plan := planner.Plan(rule)
+			plan := planner.planWithPreferredAndKernelReason(rule, preferred, kernelReason)
 			rulePlans[rule.ID] = plan
 			continue
 		}
 
-		entryPlans := make([]ruleDataplanePlan, 0, len(variants))
-		entryCandidates := make([]kernelCandidateRule, 0, len(variants))
+		var entryCandidates [2]kernelCandidateRule
+		entryCount := 0
+		acc := newKernelOwnerPlanAccumulator(preferred)
 		for idx, proto := range variants {
 			item := rule
 			item.Protocol = proto
 			if idx > 0 {
-				id, err := allocateSyntheticKernelRuleID(&nextSyntheticID, usedIDs)
+				id, err := allocateSyntheticKernelRuleID(&nextSyntheticID)
 				if err != nil {
-					entryPlans = append(entryPlans, ruleDataplanePlan{
-						PreferredEngine: planner.resolvePreferredEngine(rule.EnginePreference),
+					acc.Add(ruleDataplanePlan{
+						PreferredEngine: preferred,
 						EffectiveEngine: ruleEngineUserspace,
 						FallbackReason:  err.Error(),
 					})
@@ -1222,13 +1447,14 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 				item.ID = id
 			}
 			annotateKernelCandidateRule(&item, owner)
-			entryPlans = append(entryPlans, planner.Plan(item))
-			entryCandidates = append(entryCandidates, kernelCandidateRule{owner: owner, rule: item})
+			acc.Add(planner.planWithPreferredAndKernelReason(item, preferred, kernelReason))
+			entryCandidates[entryCount] = kernelCandidateRule{owner: owner, rule: item}
+			entryCount++
 		}
 
-		plan := aggregateKernelOwnerPlan(planner.resolvePreferredEngine(rule.EnginePreference), entryPlans)
+		plan := acc.Result()
 		if rule.Enabled && plan.EffectiveEngine == ruleEngineKernel {
-			neededEntries := len(entryCandidates)
+			neededEntries := entryCount
 			requestedEntries := reservedKernelEntries + neededEntries
 			if requestedEntries > effectiveKernelRulesMapLimit(configuredKernelRulesMapLimit, requestedEntries) {
 				plan.EffectiveEngine = ruleEngineUserspace
@@ -1236,7 +1462,7 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 					plan.FallbackReason = kernelRulesCapacityReason(configuredKernelRulesMapLimit, requestedEntries)
 				}
 			} else {
-				candidates = append(candidates, entryCandidates...)
+				candidates = append(candidates, entryCandidates[:entryCount]...)
 				reservedKernelEntries += neededEntries
 			}
 		}
@@ -1246,6 +1472,7 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 	rangePreferred := planner.resolvePreferredEngine("")
 	for _, pr := range ranges {
 		owner := kernelCandidateOwner{kind: workerKindRange, id: pr.ID}
+		kernelReason := familyFallbackCache.Reason(pr.InIP, pr.OutIP, pr.Transparent)
 		variants := kernelProtocolVariants(pr.Protocol)
 		if len(variants) == 0 {
 			rangePlans[pr.ID] = rangeDataplanePlan{
@@ -1259,7 +1486,7 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 		totalEntries := (pr.EndPort - pr.StartPort + 1) * len(variants)
 		requestedEntries := reservedKernelEntries + totalEntries
 		if pr.Enabled && requestedEntries > effectiveKernelRulesMapLimit(configuredKernelRulesMapLimit, requestedEntries) {
-			plan := sampleKernelRangePlan(pr, variants, planner, rangePreferred)
+			plan := sampleKernelRangePlan(pr, variants, planner, rangePreferred, kernelReason)
 			if plan.EffectiveEngine == ruleEngineKernel {
 				plan.EffectiveEngine = ruleEngineUserspace
 				if plan.FallbackReason == "" {
@@ -1269,15 +1496,32 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 			rangePlans[pr.ID] = plan
 			continue
 		}
-		entryPlans := make([]ruleDataplanePlan, 0, totalEntries)
-		entryCandidates := make([]kernelCandidateRule, 0, totalEntries)
+		if pr.Enabled {
+			candidates = growKernelCandidateBuffer(candidates, totalEntries)
+		}
+		acc := newKernelOwnerPlanAccumulator(rangePreferred)
+		candidateStart := len(candidates)
 		allExpanded := true
+		baseRule := Rule{
+			InInterface:      pr.InInterface,
+			InIP:             pr.InIP,
+			OutInterface:     pr.OutInterface,
+			OutIP:            pr.OutIP,
+			OutSourceIP:      pr.OutSourceIP,
+			Remark:           pr.Remark,
+			Tag:              pr.Tag,
+			Enabled:          pr.Enabled,
+			Transparent:      pr.Transparent,
+			EnginePreference: ruleEngineAuto,
+			kernelLogKind:    owner.kind,
+			kernelLogOwnerID: owner.id,
+		}
 		for port := pr.StartPort; port <= pr.EndPort; port++ {
 			outPort := pr.OutStartPort + (port - pr.StartPort)
 			for _, proto := range variants {
-				id, err := allocateSyntheticKernelRuleID(&nextSyntheticID, usedIDs)
+				id, err := allocateSyntheticKernelRuleID(&nextSyntheticID)
 				if err != nil {
-					entryPlans = append(entryPlans, ruleDataplanePlan{
+					acc.Add(ruleDataplanePlan{
 						PreferredEngine: rangePreferred,
 						EffectiveEngine: ruleEngineUserspace,
 						FallbackReason:  err.Error(),
@@ -1286,37 +1530,28 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 					continue
 				}
 
-				item := Rule{
-					ID:               id,
-					InInterface:      pr.InInterface,
-					InIP:             pr.InIP,
-					InPort:           port,
-					OutInterface:     pr.OutInterface,
-					OutIP:            pr.OutIP,
-					OutSourceIP:      pr.OutSourceIP,
-					OutPort:          outPort,
-					Protocol:         proto,
-					Remark:           pr.Remark,
-					Tag:              pr.Tag,
-					Enabled:          pr.Enabled,
-					Transparent:      pr.Transparent,
-					EnginePreference: ruleEngineAuto,
+				item := baseRule
+				item.ID = id
+				item.InPort = port
+				item.OutPort = outPort
+				item.Protocol = proto
+				acc.Add(planner.planWithPreferredAndKernelReason(item, rangePreferred, kernelReason))
+				if pr.Enabled {
+					candidates = append(candidates, kernelCandidateRule{owner: owner, rule: item})
 				}
-				annotateKernelCandidateRule(&item, owner)
-				entryPlans = append(entryPlans, planner.Plan(item))
-				entryCandidates = append(entryCandidates, kernelCandidateRule{owner: owner, rule: item})
 			}
 		}
 
-		plan := aggregateKernelOwnerPlan(rangePreferred, entryPlans)
+		plan := acc.Result()
 		if !allExpanded && plan.FallbackReason == "" {
 			plan.FallbackReason = "kernel dataplane synthetic rule expansion failed"
 		}
 		rangePlans[pr.ID] = plan
 		if pr.Enabled && plan.EffectiveEngine == ruleEngineKernel {
-			candidates = append(candidates, entryCandidates...)
-			reservedKernelEntries += len(entryCandidates)
+			reservedKernelEntries += len(candidates) - candidateStart
+			continue
 		}
+		candidates = candidates[:candidateStart]
 	}
 
 	return candidates, rulePlans, rangePlans
@@ -1358,8 +1593,43 @@ func applyKernelOwnerConstraints(candidates []kernelCandidateRule, rulePlans map
 	}
 }
 
-func filterActiveKernelCandidates(candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) []kernelCandidateRule {
-	out := make([]kernelCandidateRule, 0, len(candidates))
+func countActiveKernelCandidates(candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) int {
+	count := 0
+	for _, candidate := range candidates {
+		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans, egressNATPlans) == ruleEngineKernel {
+			count++
+		}
+	}
+	return count
+}
+
+func growKernelCandidateBuffer(candidates []kernelCandidateRule, additional int) []kernelCandidateRule {
+	if additional <= 0 {
+		return candidates
+	}
+	required := len(candidates) + additional
+	if required <= cap(candidates) {
+		return candidates
+	}
+	newCap := cap(candidates) * 2
+	if newCap < required {
+		newCap = required
+	}
+	if newCap <= 0 {
+		newCap = additional
+	}
+	grown := make([]kernelCandidateRule, len(candidates), newCap)
+	copy(grown, candidates)
+	return grown
+}
+
+func filterActiveKernelCandidatesInto(dst []kernelCandidateRule, candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) []kernelCandidateRule {
+	var out []kernelCandidateRule
+	if cap(dst) >= len(candidates) {
+		out = dst[:0]
+	} else {
+		out = make([]kernelCandidateRule, 0, len(candidates))
+	}
 	for _, candidate := range candidates {
 		if kernelOwnerEffectiveEngine(candidate.owner, rulePlans, rangePlans, egressNATPlans) == ruleEngineKernel {
 			out = append(out, candidate)
@@ -1368,12 +1638,25 @@ func filterActiveKernelCandidates(candidates []kernelCandidateRule, rulePlans ma
 	return out
 }
 
-func kernelCandidateRules(candidates []kernelCandidateRule) []Rule {
-	out := make([]Rule, 0, len(candidates))
+func filterActiveKernelCandidates(candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan) []kernelCandidateRule {
+	return filterActiveKernelCandidatesInto(nil, candidates, rulePlans, rangePlans, egressNATPlans)
+}
+
+func kernelCandidateRulesInto(dst []Rule, candidates []kernelCandidateRule) []Rule {
+	var out []Rule
+	if cap(dst) >= len(candidates) {
+		out = dst[:0]
+	} else {
+		out = make([]Rule, 0, len(candidates))
+	}
 	for _, candidate := range candidates {
 		out = append(out, candidate.rule)
 	}
 	return out
+}
+
+func kernelCandidateRules(candidates []kernelCandidateRule) []Rule {
+	return kernelCandidateRulesInto(nil, candidates)
 }
 
 func splitKernelFailureReason(reason string) []string {
@@ -2344,6 +2627,10 @@ func mergeKernelEngineName(current string, next string) string {
 }
 
 func (pm *ProcessManager) startRuleWorker(workerIndex int) error {
+	if pm.isShuttingDown() {
+		return nil
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -2363,6 +2650,12 @@ func (pm *ProcessManager) startRuleWorker(workerIndex int) error {
 	}
 
 	pm.mu.Lock()
+	if pm.shuttingDown {
+		pm.mu.Unlock()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil
+	}
 	wi, ok := pm.ruleWorkers[workerIndex]
 	if !ok {
 		wi = &WorkerInfo{
@@ -2534,6 +2827,10 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 }
 
 func (pm *ProcessManager) startRangeWorker(workerIndex int) error {
+	if pm.isShuttingDown() {
+		return nil
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -2553,6 +2850,12 @@ func (pm *ProcessManager) startRangeWorker(workerIndex int) error {
 	}
 
 	pm.mu.Lock()
+	if pm.shuttingDown {
+		pm.mu.Unlock()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil
+	}
 	wi, ok := pm.rangeWorkers[workerIndex]
 	if !ok {
 		wi = &WorkerInfo{workerIndex: workerIndex, kind: workerKindRange, failedRanges: make(map[int64]bool)}
@@ -2663,6 +2966,10 @@ func (pm *ProcessManager) startSharedProxyIfNeeded() {
 }
 
 func (pm *ProcessManager) startSharedProxy() {
+	if pm.isShuttingDown() {
+		return
+	}
+
 	pm.mu.Lock()
 	if pm.sharedProxy != nil && (pm.sharedProxy.running || pm.sharedProxy.process != nil || pm.sharedProxy.conn != nil) {
 		pm.mu.Unlock()
@@ -2691,6 +2998,12 @@ func (pm *ProcessManager) startSharedProxy() {
 
 	waitCh := make(chan struct{})
 	pm.mu.Lock()
+	if pm.shuttingDown {
+		pm.mu.Unlock()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return
+	}
 	pm.sharedProxy = &WorkerInfo{
 		kind:        workerKindShared,
 		process:     cmd.Process,
@@ -3458,40 +3771,128 @@ func (pm *ProcessManager) updateTransparentRouting(enabledRules []Rule, enabledR
 }
 
 func (pm *ProcessManager) stopAll() {
+	pm.beginShutdown()
 	pm.stopKernelNetlinkMonitor()
+	if pm.ipv6Runtime != nil {
+		if err := pm.ipv6Runtime.Close(); err != nil {
+			log.Printf("stop ipv6 assignment runtime: %v", err)
+		}
+	}
+	if pm.managedNetworkRuntime != nil {
+		if err := pm.managedNetworkRuntime.Close(); err != nil {
+			log.Printf("stop managed network runtime: %v", err)
+		}
+	}
 	if pm.kernelRuntime != nil {
 		if err := pm.kernelRuntime.Close(); err != nil {
 			log.Printf("stop kernel runtime: %v", err)
 		}
 	}
 
-	pm.listener.Close()
+	if pm.listener != nil {
+		pm.listener.Close()
+	}
+	if pm.sockPath != "" {
+		_ = os.Remove(pm.sockPath)
+	}
 
-	// Close IPC connections without sending stop - workers will reconnect
 	pm.mu.Lock()
+	workers := make([]*WorkerInfo, 0, len(pm.ruleWorkers)+len(pm.rangeWorkers)+len(pm.drainingWorkers)+1)
 	for _, wi := range pm.ruleWorkers {
-		if wi.conn != nil {
-			wi.conn.Close()
-			wi.conn = nil
-		}
+		workers = append(workers, wi)
 	}
 	for _, wi := range pm.rangeWorkers {
-		if wi.conn != nil {
-			wi.conn.Close()
-			wi.conn = nil
-		}
+		workers = append(workers, wi)
 	}
-	if pm.sharedProxy != nil && pm.sharedProxy.conn != nil {
-		pm.sharedProxy.conn.Close()
-		pm.sharedProxy.conn = nil
+	for _, wi := range pm.drainingWorkers {
+		workers = append(workers, wi)
 	}
+	if pm.sharedProxy != nil {
+		workers = append(workers, pm.sharedProxy)
+	}
+	pm.ruleWorkers = map[int]*WorkerInfo{}
+	pm.rangeWorkers = map[int]*WorkerInfo{}
+	pm.drainingWorkers = nil
+	pm.sharedProxy = nil
 	pm.mu.Unlock()
+
+	for _, wi := range uniqueWorkerInfosByProcess(workers) {
+		killWorkerInfo(wi)
+	}
+	pm.waitForBackgroundLoops(2 * time.Second)
+}
+
+func uniqueWorkerInfosByProcess(items []*WorkerInfo) []*WorkerInfo {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*WorkerInfo, 0, len(items))
+	seenProcess := make(map[int]struct{}, len(items))
+	seenNoProcess := make(map[*WorkerInfo]struct{}, len(items))
+	for _, wi := range items {
+		if wi == nil {
+			continue
+		}
+		if wi.process != nil && wi.process.Pid > 0 {
+			if _, ok := seenProcess[wi.process.Pid]; ok {
+				continue
+			}
+			seenProcess[wi.process.Pid] = struct{}{}
+			out = append(out, wi)
+			continue
+		}
+		if _, ok := seenNoProcess[wi]; ok {
+			continue
+		}
+		seenNoProcess[wi] = struct{}{}
+		out = append(out, wi)
+	}
+	return out
+}
+
+func waitForStopChannel(ch <-chan struct{}, timeout time.Duration) bool {
+	if ch == nil {
+		return true
+	}
+	if timeout <= 0 {
+		<-ch
+		return true
+	}
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func (pm *ProcessManager) waitForBackgroundLoops(timeout time.Duration) {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	monitorDone := pm.monitorDone
+	managedRuntimeReloadDone := pm.managedRuntimeReloadDone
+	redistributeDone := pm.redistributeDone
+	pm.mu.Unlock()
+
+	_ = waitForStopChannel(monitorDone, timeout)
+	_ = waitForStopChannel(managedRuntimeReloadDone, timeout)
+	_ = waitForStopChannel(redistributeDone, timeout)
 }
 
 func (pm *ProcessManager) monitorLoop() {
+	defer close(pm.monitorDone)
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-pm.shutdownCh:
+			return
+		case <-ticker.C:
+		}
+
 		type workerRetryTask struct {
 			index        int
 			failureCount int
@@ -3530,8 +3931,16 @@ func (pm *ProcessManager) monitorLoop() {
 		hasPressureFallbacks := false
 		now := time.Now()
 
+		if pm.isShuttingDown() {
+			return
+		}
+
 		pm.mu.Lock()
 		runtime := pm.kernelRuntime
+		if pm.shuttingDown {
+			pm.mu.Unlock()
+			return
+		}
 		if pm.shouldRefreshKernelStatsLocked(now) {
 			refreshKernelStats = true
 		}

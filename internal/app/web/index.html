@@ -19,7 +19,7 @@
             document.documentElement.style.colorScheme = resolved;
         })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20260407-10">
+    <link rel="stylesheet" href="style.css?v=20260409-2">
 </head>
 <body>
     <div id="tokenModal" class="modal">
@@ -81,7 +81,9 @@
             <button id="tab-rules-button" class="tab active" data-tab="rules" data-i18n="tab.rules" role="tab" aria-selected="true" aria-controls="tab-rules" tabindex="0">Port Forwarding</button>
             <button id="tab-sites-button" class="tab" data-tab="sites" data-i18n="tab.sites" role="tab" aria-selected="false" aria-controls="tab-sites" tabindex="-1">Sites (80/443)</button>
             <button id="tab-ranges-button" class="tab" data-tab="ranges" data-i18n="tab.ranges" role="tab" aria-selected="false" aria-controls="tab-ranges" tabindex="-1">Range Mapping</button>
+            <button id="tab-managed-networks-button" class="tab" data-tab="managed-networks" data-i18n="tab.managedNetworks" role="tab" aria-selected="false" aria-controls="tab-managed-networks" tabindex="-1">Managed Networks</button>
             <button id="tab-egress-nats-button" class="tab" data-tab="egress-nats" data-i18n="tab.egressNATs" role="tab" aria-selected="false" aria-controls="tab-egress-nats" tabindex="-1">Egress NAT</button>
+            <button id="tab-ipv6-assignments-button" class="tab" data-tab="ipv6-assignments" data-i18n="tab.ipv6Assignments" role="tab" aria-selected="false" aria-controls="tab-ipv6-assignments" tabindex="-1">IPv6 Assignments</button>
             <button id="tab-workers-button" class="tab" data-tab="workers" data-i18n="tab.workers" role="tab" aria-selected="false" aria-controls="tab-workers" tabindex="-1">Worker Status</button>
             <button id="tab-rule-stats-button" class="tab" data-tab="rule-stats" data-i18n="tab.stats" role="tab" aria-selected="false" aria-controls="tab-rule-stats" tabindex="-1">Traffic Stats</button>
         </div>
@@ -477,6 +479,277 @@
             </section>
         </div>
 
+        <div id="tab-managed-networks" class="tab-content" role="tabpanel" aria-labelledby="tab-managed-networks-button">
+            <section class="add-rule">
+                <h2 id="managedNetworkFormTitle" data-i18n="managedNetwork.form.title.add">Add Managed Network</h2>
+                <p class="section-desc" data-i18n="managedNetwork.form.desc">Use one managed network entry to define the downstream bridge, IPv4 gateway + DHCP pool, optional IPv6 handout source, and whether outbound traffic should be auto-taken over with egress NAT.</p>
+                <form id="managedNetworkForm">
+                    <input type="hidden" id="editManagedNetworkId" value="">
+                    <div class="form-row">
+                        <div class="form-group" style="flex:1.5">
+                            <label data-i18n="managedNetwork.form.name">Name</label>
+                            <input type="text" id="managedNetworkName" data-i18n-placeholder="managedNetwork.form.name.placeholder" placeholder="vm100-lan" spellcheck="false" autocapitalize="off" autocomplete="off" required>
+                        </div>
+                        <div class="form-group" style="flex:2">
+                            <label data-i18n="form.remark">Remark</label>
+                            <input type="text" id="managedNetworkRemark" data-i18n-placeholder="managedNetwork.form.remark.placeholder" placeholder="Optional, e.g. VM 100 private LAN" spellcheck="false" autocapitalize="off" autocomplete="off">
+                        </div>
+                    </div>
+                      <div class="form-row">
+                          <div class="form-group">
+                              <label data-i18n="managedNetwork.form.bridgeMode">Bridge Mode</label>
+                            <select id="managedNetworkBridgeMode">
+                                <option value="create" data-i18n="managedNetwork.form.bridgeMode.create">Create New Bridge</option>
+                                <option value="existing" data-i18n="managedNetwork.form.bridgeMode.existing">Use Existing Interface</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label id="managedNetworkBridgeLabel" data-i18n="managedNetwork.form.bridge">Bridge / Downstream Interface</label>
+                            <input type="hidden" id="managedNetworkBridgeInterface" value="">
+                            <input type="text" id="managedNetworkBridgePicker" list="managedNetworkBridgeOptions" class="interface-picker-input" data-i18n-placeholder="managedNetwork.form.bridge.placeholder.create" placeholder="Type a new bridge name, for example vmbr1" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="managedNetworkBridgeOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.uplinkInterface">Uplink Interface</label>
+                            <input type="hidden" id="managedNetworkUplinkInterface" value="">
+                            <input type="text" id="managedNetworkUplinkPicker" list="managedNetworkUplinkOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="managedNetworkUplinkOptions"></datalist>
+                        </div>
+                          <div class="form-group form-group-checkbox">
+                              <label>
+                                  <input type="checkbox" id="managedNetworkAutoEgressNAT" checked>
+                                  <span data-i18n="managedNetwork.form.autoEgressNAT">Auto Egress NAT</span>
+                              </label>
+                          </div>
+                      </div>
+                      <div class="form-row" id="managedNetworkBridgeAdvancedRow">
+                          <details id="managedNetworkBridgeAdvancedDetails" class="advanced-options">
+                              <summary data-i18n="managedNetwork.form.advancedOptions">Advanced Options</summary>
+                              <div class="advanced-options-body">
+                                  <div class="field-hint" data-i18n="managedNetwork.form.bridgeAdvancedHint">Only applies when creating a new managed bridge. Existing-interface mode keeps the current bridge settings.</div>
+                                  <div class="form-row advanced-options-row">
+                                      <div class="form-group">
+                                          <label data-i18n="managedNetwork.form.bridgeMTU">Bridge MTU</label>
+                                          <input type="number" id="managedNetworkBridgeMTU" min="0" max="65535" step="1" data-i18n-placeholder="common.auto" placeholder="Auto" inputmode="numeric">
+                                      </div>
+                                      <div class="form-group form-group-checkbox">
+                                          <label>
+                                              <input type="checkbox" id="managedNetworkBridgeVLANAware">
+                                              <span data-i18n="managedNetwork.form.bridgeVLANAware">VLAN Aware Bridge</span>
+                                          </label>
+                                      </div>
+                                  </div>
+                              </div>
+                          </details>
+                      </div>
+                      <div class="form-row">
+                          <div class="form-group form-group-checkbox">
+                              <label>
+                                <input type="checkbox" id="managedNetworkIPv4Enabled" checked>
+                                <span data-i18n="managedNetwork.form.ipv4Enabled">Enable IPv4 Gateway + DHCPv4</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.ipv4CIDR">IPv4 Gateway CIDR</label>
+                            <input type="text" id="managedNetworkIPv4CIDR" data-i18n-placeholder="managedNetwork.form.ipv4CIDR.placeholder" placeholder="192.0.2.1/24" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.ipv4Gateway">IPv4 Gateway Override</label>
+                            <input type="text" id="managedNetworkIPv4Gateway" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.ipv4PoolStart">DHCPv4 Pool Start</label>
+                            <input type="text" id="managedNetworkIPv4PoolStart" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.ipv4PoolEnd">DHCPv4 Pool End</label>
+                            <input type="text" id="managedNetworkIPv4PoolEnd" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.ipv4DNSServers">DHCPv4 DNS Servers</label>
+                            <input type="text" id="managedNetworkIPv4DNSServers" data-i18n-placeholder="managedNetwork.form.ipv4DNSServers.placeholder" placeholder="1.1.1.1, 8.8.8.8" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-group-checkbox">
+                            <label>
+                                <input type="checkbox" id="managedNetworkIPv6Enabled">
+                                <span data-i18n="managedNetwork.form.ipv6Enabled">Enable IPv6 Handout</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.ipv6ParentInterface">IPv6 Parent Interface</label>
+                            <input type="hidden" id="managedNetworkIPv6ParentInterface" value="">
+                            <input type="text" id="managedNetworkIPv6ParentPicker" list="managedNetworkIPv6ParentOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="managedNetworkIPv6ParentOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.ipv6ParentPrefix">IPv6 Parent Prefix</label>
+                            <select id="managedNetworkIPv6ParentPrefix">
+                                <option value="" data-i18n="common.selectInterfaceFirst">Select interface first</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetwork.form.ipv6AssignmentMode">IPv6 Assignment Mode</label>
+                            <select id="managedNetworkIPv6AssignmentMode">
+                                <option value="single_128" data-i18n="managedNetwork.form.ipv6Mode.single128">Single IP (/128)</option>
+                                <option value="prefix_64" data-i18n="managedNetwork.form.ipv6Mode.prefix64">Delegated Prefix (/64)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-actions">
+                            <button type="button" id="managedNetworkPVEQuickFillBtn" class="mini-btn" data-i18n="managedNetwork.form.quickFill">PVE 快速填充</button>
+                            <button type="submit" id="managedNetworkSubmitBtn" data-i18n="managedNetwork.form.submit.add">Add Managed Network</button>
+                            <button type="button" id="managedNetworkCancelBtn" class="btn-cancel" style="display:none" data-i18n="common.cancelEdit">Cancel</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="managedNetwork.list.title">Managed Networks</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="managedNetworksSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="managedNetworksTable" data-i18n-placeholder="search.managedNetworks.placeholder" placeholder="Search name, bridge, uplink, prefixes...">
+                        <p id="managedNetworksFilterMeta" class="table-meta"></p>
+                    </div>
+                    <div class="table-toolbar-actions">
+                        <button type="button" id="managedNetworkRuntimeStatusBtn" class="kernel-runtime-detail-trigger managed-network-runtime-status" hidden>状态</button>
+                        <button type="button" id="repairManagedNetworkRuntimeBtn" class="mini-btn" data-i18n="managedNetwork.repair.action">修复网络</button>
+                        <button type="button" id="reloadManagedNetworkRuntimeBtn" class="mini-btn" data-i18n="managedNetwork.runtimeReload.action">重载运行时</button>
+                        <button type="button" id="clearManagedNetworksFilter" class="mini-btn" hidden data-i18n="filter.reset">Reset View</button>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table id="managedNetworksTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="managedNetworks" data-sort="id">ID</th>
+                                <th class="sortable" data-table="managedNetworks" data-sort="name" data-i18n="managedNetwork.form.name">Name</th>
+                                <th class="sortable" data-table="managedNetworks" data-sort="bridge" data-i18n="managedNetwork.form.bridge">Bridge</th>
+                                <th class="sortable" data-table="managedNetworks" data-sort="uplink_interface" data-i18n="managedNetwork.form.uplinkInterface">Uplink</th>
+                                <th class="sortable" data-table="managedNetworks" data-sort="child_interface_count" data-i18n="managedNetwork.list.targets">Targets</th>
+                                <th data-i18n="common.family.ipv4">IPv4</th>
+                                <th data-i18n="common.family.ipv6">IPv6</th>
+                                <th class="sortable" data-table="managedNetworks" data-sort="auto_egress_nat" data-i18n="managedNetwork.form.autoEgressNAT">Auto Egress NAT</th>
+                                <th class="sortable" data-table="managedNetworks" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th class="sortable" data-table="managedNetworks" data-sort="enabled" data-i18n="common.status">Status</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="managedNetworksBody"></tbody>
+                    </table>
+                </div>
+                <div id="managedNetworksPagination" class="table-pagination" hidden></div>
+                <div id="noManagedNetworks" class="empty-hint">
+                    <p class="empty-title" data-i18n="managedNetwork.list.empty">No managed networks yet.</p>
+                    <button type="button" id="emptyAddManagedNetworkBtn" class="mini-btn" data-i18n="empty.action.managedNetwork">Create First Managed Network</button>
+                </div>
+            </section>
+
+            <section class="add-rule">
+                <h2 id="managedNetworkReservationFormTitle" data-i18n="managedNetworkReservation.form.title.add">Add Fixed DHCPv4 Lease</h2>
+                <p class="section-desc" data-i18n="managedNetworkReservation.form.desc">Bind a VM NIC MAC address to a fixed IPv4 inside a managed network. DHCPv4 will always prefer this address and the dynamic pool will automatically avoid it.</p>
+                <form id="managedNetworkReservationForm">
+                    <input type="hidden" id="editManagedNetworkReservationId" value="">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="managedNetworkReservation.form.managedNetwork">Managed Network</label>
+                            <select id="managedNetworkReservationManagedNetworkId">
+                                <option value="" data-i18n="managedNetworkReservation.form.managedNetwork.empty">Create a managed network first</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetworkReservation.form.macAddress">MAC Address</label>
+                            <input type="text" id="managedNetworkReservationMACAddress" data-i18n-placeholder="managedNetworkReservation.form.macAddress.placeholder" placeholder="bc:24:11:31:53:db" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text" required>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="managedNetworkReservation.form.ipv4Address">Fixed IPv4</label>
+                            <input type="text" id="managedNetworkReservationIPv4Address" data-i18n-placeholder="managedNetworkReservation.form.ipv4Address.placeholder" placeholder="10.0.0.10" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text" required>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group" style="flex:2">
+                            <label data-i18n="form.remark">Remark</label>
+                            <input type="text" id="managedNetworkReservationRemark" data-i18n-placeholder="managedNetworkReservation.form.remark.placeholder" placeholder="Optional, e.g. VM 100 LAN" spellcheck="false" autocapitalize="off" autocomplete="off">
+                        </div>
+                        <div class="form-group form-actions">
+                            <button type="submit" id="managedNetworkReservationSubmitBtn" data-i18n="managedNetworkReservation.form.submit.add">Add Fixed Lease</button>
+                            <button type="button" id="managedNetworkReservationCancelBtn" class="btn-cancel" style="display:none" data-i18n="common.cancelEdit">Cancel</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="managedNetworkCandidate.list.title">Discovered MAC Candidates</h2>
+                <p class="section-desc" data-i18n="managedNetworkCandidate.list.desc">Learn guest MAC addresses from the managed bridge forwarding database and offer one-click fixed DHCPv4 lease creation.</p>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="managedNetworkReservationCandidatesSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="managedNetworkReservationCandidatesTable" data-i18n-placeholder="search.managedNetworkReservationCandidates.placeholder" placeholder="Search managed network, guest, interface, MAC, IPv4...">
+                        <p id="managedNetworkReservationCandidatesFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="clearManagedNetworkReservationCandidatesFilter" class="mini-btn" hidden data-i18n="filter.reset">Reset View</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="managedNetworkReservationCandidatesTable">
+                        <thead>
+                            <tr>
+                                <th data-i18n="managedNetworkReservation.form.managedNetwork">Managed Network</th>
+                                <th data-i18n="managedNetwork.form.bridge">Bridge</th>
+                                <th data-i18n="managedNetworkCandidate.list.guest">Guest</th>
+                                <th data-i18n="managedNetworkCandidate.list.childInterface">Child Interface</th>
+                                <th data-i18n="managedNetworkReservation.form.macAddress">MAC Address</th>
+                                <th data-i18n="managedNetworkCandidate.list.ipv4Candidates">IPv4 Candidates</th>
+                                <th data-i18n="managedNetworkCandidate.list.status">Status</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="managedNetworkReservationCandidatesBody"></tbody>
+                    </table>
+                </div>
+                <div id="managedNetworkReservationCandidatesPagination" class="table-pagination" hidden></div>
+                <div id="noManagedNetworkReservationCandidates" class="empty-hint">
+                    <p class="empty-title" data-i18n="managedNetworkCandidate.list.empty">No guest MAC candidates discovered yet.</p>
+                </div>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="managedNetworkReservation.list.title">Fixed DHCPv4 Leases</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="managedNetworkReservationsSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="managedNetworkReservationsTable" data-i18n-placeholder="search.managedNetworkReservations.placeholder" placeholder="Search managed network, bridge, MAC, IPv4...">
+                        <p id="managedNetworkReservationsFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="clearManagedNetworkReservationsFilter" class="mini-btn" hidden data-i18n="filter.reset">Reset View</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="managedNetworkReservationsTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="managedNetworkReservations" data-sort="id">ID</th>
+                                <th class="sortable" data-table="managedNetworkReservations" data-sort="managed_network_name" data-i18n="managedNetworkReservation.form.managedNetwork">Managed Network</th>
+                                <th class="sortable" data-table="managedNetworkReservations" data-sort="managed_network_bridge" data-i18n="managedNetwork.form.bridge">Bridge</th>
+                                <th class="sortable" data-table="managedNetworkReservations" data-sort="mac_address" data-i18n="managedNetworkReservation.form.macAddress">MAC Address</th>
+                                <th class="sortable" data-table="managedNetworkReservations" data-sort="ipv4_address" data-i18n="managedNetworkReservation.form.ipv4Address">Fixed IPv4</th>
+                                <th class="sortable" data-table="managedNetworkReservations" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="managedNetworkReservationsBody"></tbody>
+                    </table>
+                </div>
+                <div id="managedNetworkReservationsPagination" class="table-pagination" hidden></div>
+                <div id="noManagedNetworkReservations" class="empty-hint">
+                    <p class="empty-title" data-i18n="managedNetworkReservation.list.empty">No fixed DHCPv4 leases yet.</p>
+                    <button type="button" id="emptyAddManagedNetworkReservationBtn" class="mini-btn" data-i18n="empty.action.managedNetworkReservation">Create First Fixed Lease</button>
+                </div>
+            </section>
+        </div>
+
         <div id="tab-egress-nats" class="tab-content" role="tabpanel" aria-labelledby="tab-egress-nats-button">
             <section class="add-rule">
                 <h2 id="egressNATFormTitle" data-i18n="egressNAT.form.title.add">Add Egress NAT</h2>
@@ -579,6 +852,87 @@
                 <div id="noEgressNATs" class="empty-hint">
                     <p class="empty-title" data-i18n="egressNAT.list.empty">No egress NAT takeover rules yet.</p>
                     <button type="button" id="emptyAddEgressNATBtn" class="mini-btn" data-i18n="empty.action.egressNAT">Create First Takeover</button>
+                </div>
+            </section>
+        </div>
+
+        <div id="tab-ipv6-assignments" class="tab-content" role="tabpanel" aria-labelledby="tab-ipv6-assignments-button">
+            <section class="add-rule">
+                <h2 id="ipv6AssignmentFormTitle" data-i18n="ipv6.form.title.add">Add IPv6 Assignment</h2>
+                <p class="section-desc" data-i18n="ipv6.form.desc">Record which IPv6 address or prefix a target side may use from a parent prefix. This does not mean adding the address onto the host-side target interface.</p>
+                <form id="ipv6AssignmentForm">
+                    <input type="hidden" id="editIPv6AssignmentId" value="">
+                    <div class="form-row">
+                        <div class="form-group" style="flex:2">
+                            <label data-i18n="form.remark">Remark</label>
+                            <input type="text" id="ipv6AssignmentRemark" data-i18n-placeholder="ipv6.form.remark.placeholder" placeholder="Optional, e.g. VM 100 delegated IPv6" spellcheck="false" autocapitalize="off" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="ipv6.form.parentInterface">Parent Interface</label>
+                            <input type="hidden" id="ipv6ParentInterface" value="">
+                            <input type="text" id="ipv6ParentPicker" list="ipv6ParentOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="ipv6ParentOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="ipv6.form.parentPrefix">Parent Prefix</label>
+                            <select id="ipv6ParentPrefix">
+                                <option value="" data-i18n="common.selectInterfaceFirst">Select interface first</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="ipv6.form.targetInterface">Target Interface</label>
+                            <input type="hidden" id="ipv6TargetInterface" value="">
+                            <input type="text" id="ipv6TargetPicker" list="ipv6TargetOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="ipv6TargetOptions"></datalist>
+                        </div>
+                        <div class="form-group" style="flex:2">
+                            <label data-i18n="ipv6.form.assignedPrefix">Assigned Prefix</label>
+                            <input type="text" id="ipv6AssignedPrefix" data-i18n-placeholder="ipv6.form.assignedPrefix.placeholder" placeholder="2001:db8:100:1::/64" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text" required>
+                            <div id="ipv6AssignmentModeHint" class="field-hint" data-i18n="ipv6.form.modeHint.generic">/128 means a single IPv6 for the target to use and can be announced with managed RA + DHCPv6 IA_NA; /64 suits a guest subnet and will advertise that prefix with RA for SLAAC; other prefix lengths are better treated as delegated downstream prefixes. The address is not bound to the host-side target interface.</div>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-actions">
+                            <button type="submit" id="ipv6AssignmentSubmitBtn" data-i18n="ipv6.form.submit.add">Add Assignment</button>
+                            <button type="button" id="ipv6AssignmentCancelBtn" class="btn-cancel" style="display:none" data-i18n="common.cancelEdit">Cancel</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="ipv6.list.title">IPv6 Assignments</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="ipv6AssignmentsSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="ipv6AssignmentsTable" data-i18n-placeholder="search.ipv6Assignments.placeholder" placeholder="Search interface, prefix, remark...">
+                        <p id="ipv6AssignmentsFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="clearIPv6AssignmentsFilter" class="mini-btn" hidden data-i18n="filter.reset">Reset View</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="ipv6AssignmentsTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="ipv6Assignments" data-sort="id">ID</th>
+                                <th class="sortable" data-table="ipv6Assignments" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th class="sortable" data-table="ipv6Assignments" data-sort="parent_interface" data-i18n="ipv6.form.parentInterface">Parent Interface</th>
+                                <th class="sortable" data-table="ipv6Assignments" data-sort="parent_prefix" data-i18n="ipv6.form.parentPrefix">Parent Prefix</th>
+                                <th class="sortable" data-table="ipv6Assignments" data-sort="target_interface" data-i18n="ipv6.form.targetInterface">Target Interface</th>
+                                <th class="sortable" data-table="ipv6Assignments" data-sort="assigned_prefix" data-i18n="ipv6.form.assignedPrefix">Assigned Prefix</th>
+                                <th data-i18n="ipv6.list.assignmentCount">Handout Count</th>
+                                <th class="sortable" data-table="ipv6Assignments" data-sort="enabled" data-i18n="common.status">Status</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ipv6AssignmentsBody"></tbody>
+                    </table>
+                </div>
+                <div id="ipv6AssignmentsPagination" class="table-pagination" hidden></div>
+                <div id="noIPv6Assignments" class="empty-hint">
+                    <p class="empty-title" data-i18n="ipv6.list.empty">No IPv6 assignments yet.</p>
+                    <button type="button" id="emptyAddIPv6AssignmentBtn" class="mini-btn" data-i18n="empty.action.ipv6Assignment">Create First Assignment</button>
                 </div>
             </section>
         </div>
@@ -764,15 +1118,17 @@
         </div>
     </div>
 
-    <script defer src="js/core.js?v=20260407-2"></script>
-    <script defer src="js/i18n.js?v=20260407-8"></script>
+    <script defer src="js/core.js?v=20260408-3"></script>
+    <script defer src="js/i18n.js?v=20260409-2"></script>
     <script defer src="js/ui.js?v=20260405-2"></script>
-    <script defer src="js/rules.js?v=20260407-5"></script>
+    <script defer src="js/rules.js?v=20260409-1"></script>
     <script defer src="js/sites.js?v=20260407-2"></script>
     <script defer src="js/ranges.js?v=20260407-4"></script>
     <script defer src="js/egress_nats.js?v=20260407-2"></script>
+    <script defer src="js/ipv6_assignments.js?v=20260408-6"></script>
+    <script defer src="js/managed_networks.js?v=20260409-2"></script>
     <script defer src="js/workers.js?v=20260407-5"></script>
-    <script defer src="js/stats.js?v=20260407-14"></script>
-    <script defer src="js/init.js?v=20260407-2"></script>
+    <script defer src="js/stats.js?v=20260408-15"></script>
+    <script defer src="js/init.js?v=20260408-2"></script>
 </body>
 </html>

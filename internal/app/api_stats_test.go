@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
@@ -143,6 +144,67 @@ func TestHandleListEgressNATStatsSortsByCurrentConns(t *testing.T) {
 	}
 	if resp.Items[0].NATType != egressNATTypeFullCone {
 		t.Fatalf("unexpected nat type: got %q want %q", resp.Items[0].NATType, egressNATTypeFullCone)
+	}
+}
+
+func TestHandleListEgressNATStatsIncludesManagedNetworkAutoEgressNATMetadata(t *testing.T) {
+	db := openTestDB(t)
+
+	network := ManagedNetwork{
+		Name:            "managed-net",
+		BridgeMode:      managedNetworkBridgeModeExisting,
+		Bridge:          "vmbr1",
+		UplinkInterface: "vmbr0",
+		AutoEgressNAT:   true,
+		Enabled:         true,
+	}
+	networkID, err := dbAddManagedNetwork(db, &network)
+	if err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	syntheticID := managedNetworkSyntheticID("egress_nat", networkID, network.Bridge)
+	pm := &ProcessManager{
+		kernelEgressNATStats: map[int64]EgressNATStatsReport{
+			syntheticID: {
+				EgressNATID:  syntheticID,
+				ActiveConns:  3,
+				TotalConns:   5,
+				NatTableSize: 2,
+				BytesIn:      123,
+			},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/egress-nats/stats", nil)
+	w := httptest.NewRecorder()
+
+	handleListEgressNATStats(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp EgressNATStatsListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("unexpected items length: %d", len(resp.Items))
+	}
+	if resp.Items[0].EgressNATID != syntheticID {
+		t.Fatalf("unexpected egress nat id: got %d want %d", resp.Items[0].EgressNATID, syntheticID)
+	}
+	if resp.Items[0].ParentInterface != network.Bridge {
+		t.Fatalf("unexpected parent interface: got %q want %q", resp.Items[0].ParentInterface, network.Bridge)
+	}
+	if resp.Items[0].OutInterface != network.UplinkInterface {
+		t.Fatalf("unexpected out interface: got %q want %q", resp.Items[0].OutInterface, network.UplinkInterface)
+	}
+	if resp.Items[0].Protocol != "tcp+udp+icmp" {
+		t.Fatalf("unexpected protocol: got %q want %q", resp.Items[0].Protocol, "tcp+udp+icmp")
+	}
+	if resp.Items[0].NATType != egressNATTypeSymmetric {
+		t.Fatalf("unexpected nat type: got %q want %q", resp.Items[0].NATType, egressNATTypeSymmetric)
 	}
 }
 

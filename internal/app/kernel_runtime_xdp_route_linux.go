@@ -11,14 +11,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func validateXDPDirectTarget(outLink netlink.Link, rule Rule) error {
+func validateXDPDirectTarget(outLink netlink.Link, rule Rule, family string) error {
 	if outLink == nil || outLink.Attrs() == nil {
 		return fmt.Errorf("xdp dataplane cannot resolve the outbound interface")
 	}
 
-	backendIP := net.ParseIP(strings.TrimSpace(rule.OutIP)).To4()
+	backendIP := normalizeKernelFamilyIP(net.ParseIP(strings.TrimSpace(rule.OutIP)), family)
 	if backendIP == nil {
-		return fmt.Errorf("xdp dataplane requires an explicit outbound IPv4 address")
+		return fmt.Errorf("xdp dataplane requires an explicit outbound %s address", kernelFamilyLabel(family))
 	}
 
 	routes, err := netlink.RouteGetWithOptions(backendIP, &netlink.RouteGetOptions{
@@ -48,20 +48,20 @@ func validateXDPDirectTarget(outLink netlink.Link, rule Rule) error {
 	}
 
 	nextHopIP := backendIP
-	if gw := selected.Gw.To4(); gw != nil && !gw.IsUnspecified() {
+	if gw := normalizeKernelFamilyIP(selected.Gw, family); gw != nil && !gw.IsUnspecified() {
 		nextHopIP = gw
 	}
-	return validateXDPNeighbor(outLink.Attrs().Index, nextHopIP, rule.OutInterface)
+	return validateXDPNeighbor(outLink.Attrs().Index, nextHopIP, rule.OutInterface, family)
 }
 
-func resolveXDPDirectTarget(outLink netlink.Link, rule Rule) (xdpBridgeTarget, error) {
+func resolveXDPDirectTarget(outLink netlink.Link, rule Rule, family string) (xdpBridgeTarget, error) {
 	if outLink == nil || outLink.Attrs() == nil {
 		return xdpBridgeTarget{}, fmt.Errorf("xdp dataplane cannot resolve the outbound interface")
 	}
 
-	backendIP := net.ParseIP(strings.TrimSpace(rule.OutIP)).To4()
+	backendIP := normalizeKernelFamilyIP(net.ParseIP(strings.TrimSpace(rule.OutIP)), family)
 	if backendIP == nil {
-		return xdpBridgeTarget{}, fmt.Errorf("xdp dataplane requires an explicit outbound IPv4 address")
+		return xdpBridgeTarget{}, fmt.Errorf("xdp dataplane requires an explicit outbound %s address", kernelFamilyLabel(family))
 	}
 
 	routes, err := netlink.RouteGetWithOptions(backendIP, &netlink.RouteGetOptions{
@@ -91,10 +91,10 @@ func resolveXDPDirectTarget(outLink netlink.Link, rule Rule) (xdpBridgeTarget, e
 	}
 
 	nextHopIP := backendIP
-	if gw := selected.Gw.To4(); gw != nil && !gw.IsUnspecified() {
+	if gw := normalizeKernelFamilyIP(selected.Gw, family); gw != nil && !gw.IsUnspecified() {
 		nextHopIP = gw
 	}
-	neighborMAC, err := resolveXDPNeighborMAC(outLink.Attrs().Index, nextHopIP, rule.OutInterface)
+	neighborMAC, err := resolveXDPNeighborMAC(outLink.Attrs().Index, nextHopIP, rule.OutInterface, family)
 	if err != nil {
 		return xdpBridgeTarget{}, err
 	}
@@ -110,26 +110,30 @@ func resolveXDPDirectTarget(outLink netlink.Link, rule Rule) (xdpBridgeTarget, e
 	}, nil
 }
 
-func validateXDPNeighbor(ifindex int, ip net.IP, ifName string) error {
-	_, err := resolveXDPNeighborMAC(ifindex, ip, ifName)
+func validateXDPNeighbor(ifindex int, ip net.IP, ifName string, family string) error {
+	_, err := resolveXDPNeighborMAC(ifindex, ip, ifName, family)
 	return err
 }
 
-func resolveXDPNeighborMAC(ifindex int, ip net.IP, ifName string) (net.HardwareAddr, error) {
+func resolveXDPNeighborMAC(ifindex int, ip net.IP, ifName string, family string) (net.HardwareAddr, error) {
 	if ifindex <= 0 {
 		return nil, fmt.Errorf("xdp dataplane cannot resolve the outbound interface index")
 	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return nil, fmt.Errorf("xdp dataplane requires an IPv4 neighbor on %q", ifName)
+	ip = normalizeKernelFamilyIP(ip, family)
+	if ip == nil {
+		return nil, fmt.Errorf("xdp dataplane requires a %s neighbor on %q", kernelFamilyLabel(family), ifName)
 	}
 
-	neighbors, err := netlink.NeighList(ifindex, unix.AF_INET)
+	af := unix.AF_INET
+	if family == ipFamilyIPv6 {
+		af = unix.AF_INET6
+	}
+	neighbors, err := netlink.NeighList(ifindex, af)
 	if err != nil {
-		return nil, fmt.Errorf("xdp dataplane cannot inspect IPv4 neighbors on %q: %w", ifName, err)
+		return nil, fmt.Errorf("xdp dataplane cannot inspect %s neighbors on %q: %w", kernelFamilyLabel(family), ifName, err)
 	}
 	for _, neigh := range neighbors {
-		if neigh.IP == nil || !neigh.IP.Equal(ip4) {
+		if neigh.IP == nil || !neigh.IP.Equal(ip) {
 			continue
 		}
 		if !isValidHardwareAddr(neigh.HardwareAddr) {
@@ -138,5 +142,5 @@ func resolveXDPNeighborMAC(ifindex int, ip net.IP, ifName string) (net.HardwareA
 		return append(net.HardwareAddr(nil), neigh.HardwareAddr...), nil
 	}
 
-	return nil, fmt.Errorf("xdp dataplane requires a learned IPv4 neighbor entry for %s on %q", ip4.String(), ifName)
+	return nil, fmt.Errorf("xdp dataplane requires a learned %s neighbor entry for %s on %q", kernelFamilyLabel(family), ip.String(), ifName)
 }

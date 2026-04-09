@@ -32,21 +32,42 @@
     rangesFilterMeta: app.$('rangesFilterMeta'),
     rangesSearchInput: app.$('rangesSearchInput'),
     clearRangesFilter: app.$('clearRangesFilter'),
+    managedNetworksFilterMeta: app.$('managedNetworksFilterMeta'),
+    managedNetworksSearchInput: app.$('managedNetworksSearchInput'),
+    clearManagedNetworksFilter: app.$('clearManagedNetworksFilter'),
+    repairManagedNetworkRuntimeBtn: app.$('repairManagedNetworkRuntimeBtn'),
+    reloadManagedNetworkRuntimeBtn: app.$('reloadManagedNetworkRuntimeBtn'),
+    managedNetworkReservationCandidatesFilterMeta: app.$('managedNetworkReservationCandidatesFilterMeta'),
+    managedNetworkReservationCandidatesSearchInput: app.$('managedNetworkReservationCandidatesSearchInput'),
+    clearManagedNetworkReservationCandidatesFilter: app.$('clearManagedNetworkReservationCandidatesFilter'),
+    managedNetworkReservationsFilterMeta: app.$('managedNetworkReservationsFilterMeta'),
+    managedNetworkReservationsSearchInput: app.$('managedNetworkReservationsSearchInput'),
+    clearManagedNetworkReservationsFilter: app.$('clearManagedNetworkReservationsFilter'),
     egressNATsFilterMeta: app.$('egressNATsFilterMeta'),
     egressNATsSearchInput: app.$('egressNATsSearchInput'),
     clearEgressNATsFilter: app.$('clearEgressNATsFilter'),
+    ipv6AssignmentsFilterMeta: app.$('ipv6AssignmentsFilterMeta'),
+    ipv6AssignmentsSearchInput: app.$('ipv6AssignmentsSearchInput'),
+    clearIPv6AssignmentsFilter: app.$('clearIPv6AssignmentsFilter'),
     workersFilterMeta: app.$('workersFilterMeta'),
     workersSearchInput: app.$('workersSearchInput'),
     refreshWorkersBtn: app.$('refreshWorkersBtn'),
     emptyAddRuleBtn: app.$('emptyAddRuleBtn'),
     emptyAddSiteBtn: app.$('emptyAddSiteBtn'),
     emptyAddRangeBtn: app.$('emptyAddRangeBtn'),
+    emptyAddManagedNetworkBtn: app.$('emptyAddManagedNetworkBtn'),
+    emptyAddManagedNetworkReservationBtn: app.$('emptyAddManagedNetworkReservationBtn'),
     emptyAddEgressNATBtn: app.$('emptyAddEgressNATBtn'),
+    emptyAddIPv6AssignmentBtn: app.$('emptyAddIPv6AssignmentBtn'),
     emptyRefreshWorkersBtn: app.$('emptyRefreshWorkersBtn'),
     rulesPagination: app.$('rulesPagination'),
     sitesPagination: app.$('sitesPagination'),
     rangesPagination: app.$('rangesPagination'),
+    managedNetworksPagination: app.$('managedNetworksPagination'),
+    managedNetworkReservationCandidatesPagination: app.$('managedNetworkReservationCandidatesPagination'),
+    managedNetworkReservationsPagination: app.$('managedNetworkReservationsPagination'),
     egressNATsPagination: app.$('egressNATsPagination'),
+    ipv6AssignmentsPagination: app.$('ipv6AssignmentsPagination'),
     workersPagination: app.$('workersPagination'),
     ruleStatsPagination: app.$('ruleStatsPagination'),
     siteStatsPagination: app.$('siteStatsPagination'),
@@ -55,8 +76,16 @@
   });
 
   app.state.activeTab = app.state.activeTab || localStorage.getItem(app.storageKeys.activeTab) || 'rules';
+  app.state.managedNetworks = app.state.managedNetworks || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
+  app.state.managedNetworkReservationCandidates = app.state.managedNetworkReservationCandidates || { data: [], page: 1, pageSize: 10, searchQuery: '', selectedIPv4ByKey: {} };
+  app.state.managedNetworkReservations = app.state.managedNetworkReservations || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
   app.state.pendingRows = app.state.pendingRows || {};
-  app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false, egressNAT: false };
+  app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false, managedNetwork: false, managedNetworkReservation: false, egressNAT: false, ipv6Assignment: false };
+  if (!Object.prototype.hasOwnProperty.call(app.state.pendingForms, 'managedNetwork')) app.state.pendingForms.managedNetwork = false;
+  if (!Object.prototype.hasOwnProperty.call(app.state.pendingForms, 'managedNetworkReservation')) app.state.pendingForms.managedNetworkReservation = false;
+  app.state.forms = app.state.forms || {};
+  app.state.forms.managedNetwork = app.state.forms.managedNetwork || { mode: 'add', sourceId: 0 };
+  app.state.forms.managedNetworkReservation = app.state.forms.managedNetworkReservation || { mode: 'add', sourceId: 0 };
   app.state.lastSyncAt = app.state.lastSyncAt || 0;
   app.state.confirmResolver = null;
   app.state.confirmFocusReturn = null;
@@ -69,7 +98,11 @@
     rules: { container: app.el.rulesPagination, pageSizes: [10, 20, 50], render: () => app.renderRulesTable() },
     sites: { container: app.el.sitesPagination, pageSizes: [10, 20, 50], render: () => app.renderSitesTable() },
     ranges: { container: app.el.rangesPagination, pageSizes: [10, 20, 50], render: () => app.renderRangesTable() },
+    managedNetworks: { container: app.el.managedNetworksPagination, pageSizes: [10, 20, 50], render: () => app.renderManagedNetworksTable() },
+    managedNetworkReservationCandidates: { container: app.el.managedNetworkReservationCandidatesPagination, pageSizes: [10, 20, 50], render: () => app.renderManagedNetworkReservationCandidatesTable() },
+    managedNetworkReservations: { container: app.el.managedNetworkReservationsPagination, pageSizes: [10, 20, 50], render: () => app.renderManagedNetworkReservationsTable() },
     egressNATs: { container: app.el.egressNATsPagination, pageSizes: [10, 20, 50], render: () => app.renderEgressNATsTable() },
+    ipv6Assignments: { container: app.el.ipv6AssignmentsPagination, pageSizes: [10, 20, 50], render: () => app.renderIPv6AssignmentsTable() },
     workers: { container: app.el.workersPagination, pageSizes: [10, 20, 50], render: () => app.renderWorkersTable() },
     ruleStats: {
       container: app.el.ruleStatsPagination,
@@ -92,13 +125,16 @@
     }
   };
 
-  ['rules', 'sites', 'ranges', 'egressNATs', 'workers', 'ruleStats', 'siteStats', 'rangeStats', 'egressNATStats'].forEach((table) => {
+  ['rules', 'sites', 'ranges', 'managedNetworks', 'managedNetworkReservationCandidates', 'managedNetworkReservations', 'egressNATs', 'ipv6Assignments', 'workers', 'ruleStats', 'siteStats', 'rangeStats', 'egressNATStats'].forEach((table) => {
     if (!app.state[table]) return;
     app.state[table].searchQuery = app.state[table].searchQuery || '';
     app.state[table].page = Math.max(1, parseInt(app.state[table].page, 10) || 1);
     app.state[table].pageSize = Math.max(1, parseInt(app.state[table].pageSize, 10) || ((table.indexOf('Stats') >= 0) ? 20 : 10));
     if (table === 'rules' && !(app.state.rules.selectedIds instanceof Set)) {
       app.state.rules.selectedIds = new Set(app.state.rules.selectedIds || []);
+    }
+    if (table === 'managedNetworkReservationCandidates' && (!app.state[table].selectedIPv4ByKey || typeof app.state[table].selectedIPv4ByKey !== 'object')) {
+      app.state[table].selectedIPv4ByKey = {};
     }
   });
 
@@ -383,13 +419,17 @@
 
     const tasks = [];
     if (opts.includeMeta) {
-      if (typeof app.loadInterfaces === 'function') tasks.push(app.loadInterfaces());
+    if (typeof app.loadInterfaces === 'function') tasks.push(app.loadInterfaces());
+      if (typeof app.loadHostNetwork === 'function') tasks.push(app.loadHostNetwork());
       if (typeof app.loadTags === 'function') tasks.push(app.loadTags());
     }
     if (typeof app.loadRules === 'function') tasks.push(app.loadRules());
     if (typeof app.loadSites === 'function') tasks.push(app.loadSites());
     if (typeof app.loadRanges === 'function') tasks.push(app.loadRanges());
+    if (typeof app.loadManagedNetworks === 'function') tasks.push(app.loadManagedNetworks());
+    if (typeof app.loadManagedNetworkReservations === 'function') tasks.push(app.loadManagedNetworkReservations());
     if (typeof app.loadEgressNATs === 'function') tasks.push(app.loadEgressNATs());
+    if (typeof app.loadIPv6Assignments === 'function') tasks.push(app.loadIPv6Assignments());
     if (opts.includeWorkers && typeof app.loadWorkers === 'function') tasks.push(app.loadWorkers());
     if (opts.includeStats && typeof app.loadAllStats === 'function') tasks.push(app.loadAllStats());
     return Promise.all(tasks);
@@ -536,7 +576,7 @@
 
     if (app.el.overviewRunningValue) app.el.overviewRunningValue.textContent = String(runningTotal);
     const busy = app.state.activeRequests > 0;
-    [app.el.refreshNowBtn, app.el.refreshWorkersBtn, app.el.emptyRefreshWorkersBtn].forEach((button) => {
+    [app.el.refreshNowBtn, app.el.refreshWorkersBtn, app.el.emptyRefreshWorkersBtn, app.el.repairManagedNetworkRuntimeBtn, app.el.reloadManagedNetworkRuntimeBtn].forEach((button) => {
       if (!button) return;
       button.disabled = busy;
       button.classList.toggle('is-busy', busy);
@@ -569,7 +609,11 @@
       rules: { meta: app.el.rulesFilterMeta, clear: app.el.clearRulesFilter },
       sites: { meta: app.el.sitesFilterMeta, clear: app.el.clearSitesFilter },
       ranges: { meta: app.el.rangesFilterMeta, clear: app.el.clearRangesFilter },
+      managedNetworks: { meta: app.el.managedNetworksFilterMeta, clear: app.el.clearManagedNetworksFilter },
+      managedNetworkReservationCandidates: { meta: app.el.managedNetworkReservationCandidatesFilterMeta, clear: app.el.clearManagedNetworkReservationCandidatesFilter },
+      managedNetworkReservations: { meta: app.el.managedNetworkReservationsFilterMeta, clear: app.el.clearManagedNetworkReservationsFilter },
       egressNATs: { meta: app.el.egressNATsFilterMeta, clear: app.el.clearEgressNATsFilter },
+      ipv6Assignments: { meta: app.el.ipv6AssignmentsFilterMeta, clear: app.el.clearIPv6AssignmentsFilter },
       workers: { meta: app.el.workersFilterMeta, clear: null }
     };
 
@@ -593,6 +637,8 @@
   };
 
   app.handleTabLoad = function handleTabLoad(target) {
+    if (target === 'managed-networks' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
+    if (target === 'ipv6-assignments' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
     if (target === 'workers') app.loadWorkers();
     if (target === 'rule-stats') app.loadAllStats();
   };
@@ -642,7 +688,11 @@
       app.renderFilterMeta('rules');
       app.renderFilterMeta('sites');
       app.renderFilterMeta('ranges');
+      app.renderFilterMeta('managedNetworks');
+      app.renderFilterMeta('managedNetworkReservationCandidates');
+      app.renderFilterMeta('managedNetworkReservations');
       app.renderFilterMeta('egressNATs');
+      app.renderFilterMeta('ipv6Assignments');
       app.renderFilterMeta('workers');
       if (app.el.confirmModal && !app.el.confirmModal.classList.contains('active')) {
         app.el.confirmCancelBtn.textContent = app.t('common.cancel');
@@ -746,7 +796,11 @@
     { button: app.el.clearRulesFilter, table: 'rules', render: () => app.renderRulesTable() },
     { button: app.el.clearSitesFilter, table: 'sites', render: () => app.renderSitesTable() },
     { button: app.el.clearRangesFilter, table: 'ranges', render: () => app.renderRangesTable() },
-    { button: app.el.clearEgressNATsFilter, table: 'egressNATs', render: () => app.renderEgressNATsTable() }
+    { button: app.el.clearManagedNetworksFilter, table: 'managedNetworks', render: () => app.renderManagedNetworksTable() },
+    { button: app.el.clearManagedNetworkReservationCandidatesFilter, table: 'managedNetworkReservationCandidates', render: () => app.renderManagedNetworkReservationCandidatesTable() },
+    { button: app.el.clearManagedNetworkReservationsFilter, table: 'managedNetworkReservations', render: () => app.renderManagedNetworkReservationsTable() },
+    { button: app.el.clearEgressNATsFilter, table: 'egressNATs', render: () => app.renderEgressNATsTable() },
+    { button: app.el.clearIPv6AssignmentsFilter, table: 'ipv6Assignments', render: () => app.renderIPv6AssignmentsTable() }
   ].forEach((entry) => {
     if (!entry.button) return;
     entry.button.addEventListener('click', () => {

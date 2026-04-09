@@ -12,6 +12,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 )
 
 const (
@@ -350,11 +351,13 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	preparedRules := append([]preparedXDPKernelRule(nil), rt.preparedRules...)
 	attachments := append([]xdpAttachment(nil), rt.attachments...)
 	programID := rt.programID
-	mapRefs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	coll := rt.coll
+	mapRefs := kernelRuntimeMapRefsFromCollection(coll)
 	rt.mu.Unlock()
 
 	view.Attachments = len(attachments)
 	view.AttachmentSummary = describeXDPAttachments(attachments)
+	view.AttachmentMode = xdpAttachmentMode(attachments)
 	requiredIfIndices := collectXDPInterfaces(preparedRules)
 	view.AttachmentsHealthy = len(preparedRules) == 0 || xdpAttachmentsHealthy(requiredIfIndices, attachments, programID)
 	rt.mu.Lock()
@@ -368,6 +371,9 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	}
 	applyKernelRuntimeMapCounts(&view, counts, false)
 	applyKernelRuntimeMapBreakdown(&view, mapRefs, counts, false)
+	if coll != nil {
+		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiag(coll))
+	}
 
 	return view
 }
@@ -412,6 +418,34 @@ func describeXDPAttachments(attachments []xdpAttachment) string {
 	}
 	sort.Strings(labels)
 	return strings.Join(labels, ", ")
+}
+
+func xdpAttachmentMode(attachments []xdpAttachment) string {
+	if len(attachments) == 0 {
+		return ""
+	}
+	hasDriver := false
+	hasGeneric := false
+	for _, att := range attachments {
+		switch att.flags {
+		case nl.XDP_FLAGS_DRV_MODE:
+			hasDriver = true
+		case nl.XDP_FLAGS_SKB_MODE:
+			hasGeneric = true
+		default:
+			return "mixed"
+		}
+	}
+	switch {
+	case hasDriver && hasGeneric:
+		return "mixed"
+	case hasDriver:
+		return "driver"
+	case hasGeneric:
+		return "generic"
+	default:
+		return ""
+	}
 }
 
 func kernelRuntimeInterfaceLabel(ifindex int) string {
@@ -621,6 +655,20 @@ func countXDPRuleMapEntries(m *ebpf.Map) (int, error) {
 	return count, iter.Err()
 }
 
+func countXDPRuleMapEntriesV6(m *ebpf.Map) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	iter := m.Iterate()
+	count := 0
+	var key tcRuleKeyV6
+	var value xdpRuleValueV6
+	for iter.Next(&key, &value) {
+		count++
+	}
+	return count, iter.Err()
+}
+
 func countTCKernelRuntimeRuleEntries(refs kernelRuntimeMapRefs, _ int) (int, error) {
 	total := 0
 	if refs.rulesV4 != nil {
@@ -641,7 +689,22 @@ func countTCKernelRuntimeRuleEntries(refs kernelRuntimeMapRefs, _ int) (int, err
 }
 
 func countXDPKernelRuntimeRuleEntries(refs kernelRuntimeMapRefs, _ int) (int, error) {
-	return countXDPRuleMapEntries(refs.rulesV4)
+	total := 0
+	if refs.rulesV4 != nil {
+		count, err := countXDPRuleMapEntries(refs.rulesV4)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	if refs.rulesV6 != nil {
+		count, err := countXDPRuleMapEntriesV6(refs.rulesV6)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	return total, nil
 }
 
 func countKernelFlowMapEntries(m *ebpf.Map) (int, error) {
@@ -1047,14 +1110,21 @@ func countXDPKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRe
 
 	if refs.rulesV4 == nil {
 		counts.rulesEntriesV4 = 0
-		counts.rulesEntries = 0
 	} else if count, err := countXDPRuleMapEntries(refs.rulesV4); err == nil {
 		counts.rulesEntriesV4 = count
-		counts.rulesEntries = count
 	} else {
 		exact = false
 	}
-	counts.rulesEntriesV6 = 0
+	if refs.rulesV6 == nil {
+		counts.rulesEntriesV6 = 0
+	} else if count, err := countXDPRuleMapEntriesV6(refs.rulesV6); err == nil {
+		counts.rulesEntriesV6 = count
+	} else {
+		exact = false
+	}
+	if exact {
+		counts.rulesEntries = counts.rulesEntriesV4 + counts.rulesEntriesV6
+	}
 
 	flowsExact := true
 	flowsTotal := 0

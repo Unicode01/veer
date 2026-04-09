@@ -5,8 +5,10 @@ package app
 // Linux usage:
 //   1. Prepare embedded eBPF objects first:
 //      bash release.sh
-//   2. Run the integration test as root:
+//   2. Run the TC integration test as root:
 //      FORWARD_RUN_EGRESS_NAT_TEST=1 go test ./internal/app -run TestEgressNATTCIntegration -count=1 -v
+//   3. Run the XDP integration test as root:
+//      FORWARD_RUN_EGRESS_NAT_XDP_TEST=1 go test ./internal/app -run TestEgressNATXDPIntegration -count=1 -v
 
 import (
 	"bufio"
@@ -31,6 +33,7 @@ import (
 
 const (
 	egressNATTestEnableEnv        = "FORWARD_RUN_EGRESS_NAT_TEST"
+	egressNATXDPTestEnableEnv     = "FORWARD_RUN_EGRESS_NAT_XDP_TEST"
 	egressNATHelperEnv            = "FORWARD_EGRESS_NAT_HELPER"
 	egressNATHelperRoleEnv        = "FORWARD_EGRESS_NAT_HELPER_ROLE"
 	egressNATHelperProtocolEnv    = "FORWARD_EGRESS_NAT_PROTOCOL"
@@ -55,6 +58,7 @@ const (
 	egressNATObservedFmtHost      = "host"
 	egressNATObservedFmtHostPort  = "hostport"
 	egressNATExpectedKernelEngine = kernelEngineTC
+	egressNATExpectedXDPKernel    = kernelEngineXDP
 )
 
 type egressNATIntegrationTopology struct {
@@ -86,6 +90,14 @@ type egressNATIntegrationHarness struct {
 	APIBase  string
 	LogPath  string
 	Cmd      *exec.Cmd
+}
+
+type egressNATPacketCapture struct {
+	Label   string
+	cancel  context.CancelFunc
+	cmd     *exec.Cmd
+	output  bytes.Buffer
+	stopped bool
 }
 
 func TestEgressNATIntegrationHelperProcess(t *testing.T) {
@@ -170,6 +182,88 @@ func TestEgressNATTCIntegration(t *testing.T) {
 	for _, proto := range []string{"tcp", "udp", "icmp"} {
 		proto := proto
 		t.Run(proto, func(t *testing.T) {
+			observedIP := runEgressNATIntegrationProbe(t, topology, proto)
+			if observedIP != egressNATUplinkAddr {
+				logForwardLogOnFailure(t, logPath)
+				t.Fatalf("%s backend observed source IP %q, want %q", proto, observedIP, egressNATUplinkAddr)
+			}
+		})
+	}
+}
+
+func TestEgressNATXDPIntegration(t *testing.T) {
+	if os.Getenv(egressNATXDPTestEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux xdp egress NAT integration test", egressNATXDPTestEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+	if reason := xdpVethNATRedirectGuardReasonForRelease(kernelRelease()); reason != "" {
+		t.Skip(reason)
+	}
+
+	repoRoot := findRepoRoot(t)
+	requireEmbeddedEBPFObjects(t, repoRoot)
+	baseBinary := buildDataplanePerfBinary(t, repoRoot)
+	topology := setupEgressNATIntegrationDirectTopology(t)
+	seedEgressNATIntegrationNeighbor(t, topology)
+
+	runtimeDir := makeShortEgressNATTestDir(t)
+	forwardBinary := filepath.Join(runtimeDir, "forward")
+	copyFile(t, baseBinary, forwardBinary)
+
+	workDir := filepath.Join(runtimeDir, "work-xdp")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("create work dir: %v", err)
+	}
+	webPort := freeTCPPort(t)
+	configPath := filepath.Join(workDir, "config.json")
+	writeDataplanePerfConfig(t, configPath, dataplanePerfMode{
+		Name:         "xdp-egress-nat",
+		Default:      ruleEngineKernel,
+		Order:        []string{kernelEngineXDP, kernelEngineTC},
+		Expected:     ruleEngineKernel,
+		ExpectedKern: egressNATExpectedXDPKernel,
+		Experimental: map[string]bool{
+			experimentalFeatureXDPGeneric: true,
+		},
+	}, webPort)
+
+	logPath := filepath.Join(workDir, "forward-egress-nat-xdp.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create forward log file: %v", err)
+	}
+	defer logFile.Close()
+
+	cmd := exec.Command(forwardBinary, "--config", configPath)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)))
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start forward: %v", err)
+	}
+	defer stopForwardProcessTree(t, cmd)
+
+	apiBase := fmt.Sprintf("http://127.0.0.1:%d", webPort)
+	waitForEgressNATIntegrationAPI(t, apiBase, cmd, logPath)
+	createEgressNATIntegrationEntryForScopeWithProtocol(t, apiBase, topology, topology.ChildHostIF, "tcp+udp")
+	waitForEgressNATIntegrationStatusWithKernelEngine(t, apiBase, topology, topology.ChildHostIF, egressNATExpectedXDPKernel)
+
+	for _, proto := range []string{"tcp", "udp"} {
+		proto := proto
+		t.Run(proto, func(t *testing.T) {
+			defer func() {
+				if t.Failed() {
+					logKernelRuntimeOnFailure(t, apiBase)
+					logForwardLogOnFailure(t, logPath)
+				}
+			}()
 			observedIP := runEgressNATIntegrationProbe(t, topology, proto)
 			if observedIP != egressNATUplinkAddr {
 				logForwardLogOnFailure(t, logPath)
@@ -844,6 +938,98 @@ func setupEgressNATIntegrationTopology(t *testing.T) egressNATIntegrationTopolog
 	return topology
 }
 
+func setupEgressNATIntegrationDirectTopology(t *testing.T) egressNATIntegrationTopology {
+	t.Helper()
+
+	suffix := strconv.Itoa(os.Getpid() % 100000)
+	topology := egressNATIntegrationTopology{
+		ClientNS:     "fwec" + suffix,
+		BackendNS:    "fweb" + suffix,
+		BridgeIF:     truncateIfName("fwfr" + suffix),
+		ChildHostIF:  "",
+		ClientNSIF:   truncateIfName("fwcn" + suffix),
+		UplinkHostIF: truncateIfName("fwup" + suffix),
+		BackendNSIF:  truncateIfName("fwbn" + suffix),
+	}
+
+	cleanup := func() {
+		runDataplanePerfCmd("ip", "link", "del", topology.BridgeIF)
+		runDataplanePerfCmd("ip", "link", "del", topology.UplinkHostIF)
+		runDataplanePerfCmd("ip", "netns", "del", topology.ClientNS)
+		runDataplanePerfCmd("ip", "netns", "del", topology.BackendNS)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	mustRunDataplanePerfCmd(t, "ip", "netns", "add", topology.ClientNS)
+	mustRunDataplanePerfCmd(t, "ip", "netns", "add", topology.BackendNS)
+
+	mustRunDataplanePerfCmd(t, "ip", "link", "add", topology.BridgeIF, "type", "veth", "peer", "name", topology.ClientNSIF)
+	mustRunDataplanePerfCmd(t, "ip", "addr", "add", egressNATBridgeAddr+"/24", "dev", topology.BridgeIF)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.BridgeIF, "up")
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.ClientNSIF, "netns", topology.ClientNS)
+
+	mustRunDataplanePerfCmd(t, "ip", "link", "add", topology.UplinkHostIF, "type", "veth", "peer", "name", topology.BackendNSIF)
+	mustRunDataplanePerfCmd(t, "ip", "addr", "add", egressNATUplinkAddr+"/24", "dev", topology.UplinkHostIF)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.UplinkHostIF, "up")
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.BackendNSIF, "netns", topology.BackendNS)
+
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "link", "set", "lo", "up")
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "addr", "add", egressNATClientAddr+"/24", "dev", topology.ClientNSIF)
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "link", "set", topology.ClientNSIF, "up")
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "route", "replace", "default", "via", egressNATBridgeAddr, "dev", topology.ClientNSIF)
+
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.BackendNS, "ip", "link", "set", "lo", "up")
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.BackendNS, "ip", "addr", "add", egressNATBackendAddr+"/24", "dev", topology.BackendNSIF)
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.BackendNS, "ip", "link", "set", topology.BackendNSIF, "up")
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.BackendNS, "ip", "route", "replace", "default", "via", egressNATUplinkAddr, "dev", topology.BackendNSIF)
+
+	if dataplanePerfDisableOffloads() {
+		bestEffortDisableDataplanePerfOffloads(t, dataplanePerfTopology{
+			ClientNS:      topology.ClientNS,
+			BackendNS:     topology.BackendNS,
+			ClientHostIF:  topology.BridgeIF,
+			ClientNSIF:    topology.ClientNSIF,
+			BackendHostIF: topology.UplinkHostIF,
+			BackendNSIF:   topology.BackendNSIF,
+		})
+		restoreEgressNATDirectTopologyGRO(t, topology)
+	} else {
+		t.Log("dataplane perf: keeping veth offloads enabled")
+	}
+
+	return topology
+}
+
+func restoreEgressNATDirectTopologyGRO(t *testing.T, topology egressNATIntegrationTopology) {
+	t.Helper()
+
+	// XDP redirect between veth peers can stall in this direct test topology if
+	// the namespace-side peer has GRO disabled, so restore GRO after the broad
+	// perf-style offload disable pass.
+	restore := func(netns string, ifName string) {
+		if strings.TrimSpace(netns) == "" || strings.TrimSpace(ifName) == "" {
+			return
+		}
+		if _, err := exec.LookPath("ethtool"); err != nil {
+			return
+		}
+		args := []string{"ip", "netns", "exec", netns, "ethtool", "-K", ifName, "gro", "on"}
+		if output, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			text := strings.TrimSpace(string(output))
+			if text == "" {
+				text = err.Error()
+			}
+			t.Logf("xdp egress nat: ethtool %s/%s gro on skipped: %s", netns, ifName, text)
+			return
+		}
+		t.Logf("xdp egress nat: restored gro on for %s/%s", netns, ifName)
+	}
+
+	restore(topology.ClientNS, topology.ClientNSIF)
+	restore(topology.BackendNS, topology.BackendNSIF)
+}
+
 func startEgressNATIntegrationHarness(t *testing.T, name string) egressNATIntegrationHarness {
 	t.Helper()
 
@@ -907,14 +1093,21 @@ func seedEgressNATIntegrationNeighbor(t *testing.T, topology egressNATIntegratio
 	t.Helper()
 
 	bridgeMAC := mustReadHostInterfaceMAC(t, topology.BridgeIF)
-	childPeerMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
 	uplinkMAC := mustReadHostInterfaceMAC(t, topology.UplinkHostIF)
 	backendPeerMAC := mustReadDataplanePerfNetnsMAC(t, topology.BackendNS, topology.BackendNSIF)
 
-	runDataplanePerfCmd("ip", "neigh", "del", egressNATClientAddr, "dev", topology.ChildHostIF)
 	mustRunDataplanePerfCmd(t, "ip", "route", "replace", egressNATBackendAddr+"/32", "dev", topology.UplinkHostIF, "src", egressNATUplinkAddr)
 	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "neigh", "replace", egressNATBridgeAddr, "lladdr", bridgeMAC, "dev", topology.ClientNSIF, "nud", "permanent")
-	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATClientAddr, "lladdr", childPeerMAC, "dev", topology.ChildHostIF, "nud", "permanent")
+	if strings.TrimSpace(topology.ChildHostIF) == "" {
+		clientPeerMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
+		runDataplanePerfCmd("ip", "neigh", "del", egressNATClientAddr, "dev", topology.BridgeIF)
+		mustRunDataplanePerfCmd(t, "ip", "route", "replace", egressNATClientAddr+"/32", "dev", topology.BridgeIF, "src", egressNATBridgeAddr)
+		mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATClientAddr, "lladdr", clientPeerMAC, "dev", topology.BridgeIF, "nud", "permanent")
+	} else {
+		childPeerMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
+		runDataplanePerfCmd("ip", "neigh", "del", egressNATClientAddr, "dev", topology.ChildHostIF)
+		mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATClientAddr, "lladdr", childPeerMAC, "dev", topology.ChildHostIF, "nud", "permanent")
+	}
 	runDataplanePerfCmd("ip", "neigh", "del", egressNATBackendAddr, "dev", topology.UplinkHostIF)
 	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATBackendAddr, "lladdr", backendPeerMAC, "dev", topology.UplinkHostIF, "nud", "permanent")
 	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.BackendNS, "ip", "neigh", "replace", egressNATUplinkAddr, "lladdr", uplinkMAC, "dev", topology.BackendNSIF, "nud", "permanent")
@@ -1014,7 +1207,7 @@ func createEgressNATIntegrationEntryForScopeWithOptions(t *testing.T, apiBase st
 
 func waitForEgressNATIntegrationStatus(t *testing.T, apiBase string, topology egressNATIntegrationTopology, childInterface string) {
 	t.Helper()
-	_ = waitForEgressNATIntegrationRunningStatus(t, apiBase, topology, childInterface)
+	_ = waitForEgressNATIntegrationRunningStatusWithKernelEngine(t, apiBase, topology, childInterface, egressNATExpectedKernelEngine)
 }
 
 func listEgressNATIntegrationStatuses(t *testing.T, apiBase string) []egressNATIntegrationStatus {
@@ -1043,6 +1236,15 @@ func listEgressNATIntegrationStatuses(t *testing.T, apiBase string) []egressNATI
 }
 
 func waitForEgressNATIntegrationRunningStatus(t *testing.T, apiBase string, topology egressNATIntegrationTopology, childInterface string) egressNATIntegrationStatus {
+	return waitForEgressNATIntegrationRunningStatusWithKernelEngine(t, apiBase, topology, childInterface, egressNATExpectedKernelEngine)
+}
+
+func waitForEgressNATIntegrationStatusWithKernelEngine(t *testing.T, apiBase string, topology egressNATIntegrationTopology, childInterface string, expectedKernelEngine string) {
+	t.Helper()
+	_ = waitForEgressNATIntegrationRunningStatusWithKernelEngine(t, apiBase, topology, childInterface, expectedKernelEngine)
+}
+
+func waitForEgressNATIntegrationRunningStatusWithKernelEngine(t *testing.T, apiBase string, topology egressNATIntegrationTopology, childInterface string, expectedKernelEngine string) egressNATIntegrationStatus {
 	t.Helper()
 
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -1075,8 +1277,8 @@ func waitForEgressNATIntegrationRunningStatus(t *testing.T, apiBase string, topo
 			if item.EffectiveEngine != ruleEngineKernel {
 				t.Fatalf("egress nat effective engine = %q, want %q (kernel_reason=%q fallback=%q)", item.EffectiveEngine, ruleEngineKernel, item.KernelReason, item.FallbackReason)
 			}
-			if item.EffectiveKernelEngine != egressNATExpectedKernelEngine {
-				t.Fatalf("egress nat kernel engine = %q, want %q (kernel_reason=%q fallback=%q)", item.EffectiveKernelEngine, egressNATExpectedKernelEngine, item.KernelReason, item.FallbackReason)
+			if item.EffectiveKernelEngine != expectedKernelEngine {
+				t.Fatalf("egress nat kernel engine = %q, want %q (kernel_reason=%q fallback=%q)", item.EffectiveKernelEngine, expectedKernelEngine, item.KernelReason, item.FallbackReason)
 			}
 			if item.OutSourceIP != egressNATUplinkAddr {
 				t.Fatalf("egress nat out_source_ip = %q, want %q", item.OutSourceIP, egressNATUplinkAddr)
@@ -1085,7 +1287,7 @@ func waitForEgressNATIntegrationRunningStatus(t *testing.T, apiBase string, topo
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	t.Fatal("egress nat did not enter running/kernel tc state in time")
+	t.Fatalf("egress nat did not enter running/kernel %s state in time", expectedKernelEngine)
 	return egressNATIntegrationStatus{}
 }
 
@@ -1284,6 +1486,9 @@ func runEgressNATIntegrationProbe(t *testing.T, topology egressNATIntegrationTop
 		}
 	})
 
+	captures := startEgressNATPacketCaptures(t, topology, proto)
+	defer stopEgressNATPacketCaptures(captures)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -1295,10 +1500,11 @@ func runEgressNATIntegrationProbe(t *testing.T, topology egressNATIntegrationTop
 		egressNATHelperTargetAddrEnv+"="+targetAddr,
 	)
 	if output, err := clientCmd.CombinedOutput(); err != nil {
+		captureLogs := stopAndCollectEgressNATPacketCaptures(captures)
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("%s client helper timed out\nclient output:\n%s\nbackend logs:\n%s", proto, string(output), backendLogs.String())
+			t.Fatalf("%s client helper timed out\nclient output:\n%s\nbackend logs:\n%s\npacket capture:\n%s", proto, string(output), backendLogs.String(), captureLogs)
 		}
-		t.Fatalf("%s client helper failed: %v\nclient output:\n%s\nbackend logs:\n%s", proto, err, string(output), backendLogs.String())
+		t.Fatalf("%s client helper failed: %v\nclient output:\n%s\nbackend logs:\n%s\npacket capture:\n%s", proto, err, string(output), backendLogs.String(), captureLogs)
 	} else if len(output) > 0 {
 		t.Logf("%s client helper output:\n%s", proto, string(output))
 	}
@@ -1306,9 +1512,131 @@ func runEgressNATIntegrationProbe(t *testing.T, topology egressNATIntegrationTop
 	waitForEgressNATHelperExit(t, backendCmd, proto, backendLogs.String())
 	data, err := os.ReadFile(observedFile)
 	if err != nil {
-		t.Fatalf("%s read observed peer file: %v\n%s", proto, err, backendLogs.String())
+		t.Fatalf("%s read observed peer file: %v\n%s\npacket capture:\n%s", proto, err, backendLogs.String(), stopAndCollectEgressNATPacketCaptures(captures))
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func startEgressNATPacketCaptures(t *testing.T, topology egressNATIntegrationTopology, proto string) []*egressNATPacketCapture {
+	t.Helper()
+
+	if strings.TrimSpace(topology.ChildHostIF) != "" {
+		return nil
+	}
+	if _, err := exec.LookPath("tcpdump"); err != nil {
+		return nil
+	}
+
+	captures := []*egressNATPacketCapture{
+		startEgressNATPacketCapture(t, "host "+topology.UplinkHostIF, "", topology.UplinkHostIF, proto),
+		startEgressNATPacketCapture(t, "netns "+topology.BackendNS+"/"+topology.BackendNSIF, topology.BackendNS, topology.BackendNSIF, proto),
+	}
+	anyStarted := false
+	for _, capture := range captures {
+		if capture != nil {
+			anyStarted = true
+			break
+		}
+	}
+	if anyStarted {
+		time.Sleep(300 * time.Millisecond)
+	}
+	return captures
+}
+
+func startEgressNATPacketCapture(t *testing.T, label string, namespace string, ifName string, proto string) *egressNATPacketCapture {
+	t.Helper()
+
+	if strings.TrimSpace(ifName) == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	args := []string{"tcpdump", "-l", "-nn", "-e", "-vvv", "-c", "8", "-i", ifName}
+	args = append(args, egressNATPacketCaptureFilter(proto)...)
+
+	var cmd *exec.Cmd
+	if strings.TrimSpace(namespace) == "" {
+		cmd = exec.CommandContext(ctx, args[0], args[1:]...)
+	} else {
+		nsArgs := append([]string{"netns", "exec", namespace}, args...)
+		cmd = exec.CommandContext(ctx, "ip", nsArgs...)
+	}
+
+	capture := &egressNATPacketCapture{
+		Label:  label,
+		cancel: cancel,
+		cmd:    cmd,
+	}
+	cmd.Stdout = &capture.output
+	cmd.Stderr = &capture.output
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Logf("start packet capture %s failed: %v", label, err)
+		return nil
+	}
+	return capture
+}
+
+func egressNATPacketCaptureFilter(proto string) []string {
+	switch strings.ToLower(strings.TrimSpace(proto)) {
+	case "tcp":
+		return []string{"tcp", "and", "port", strconv.Itoa(egressNATProbePort)}
+	case "udp":
+		return []string{"udp", "and", "port", strconv.Itoa(egressNATProbePort)}
+	case "icmp":
+		return []string{"icmp"}
+	default:
+		return nil
+	}
+}
+
+func stopEgressNATPacketCaptures(captures []*egressNATPacketCapture) {
+	for _, capture := range captures {
+		if capture == nil || capture.stopped {
+			continue
+		}
+		capture.stopped = true
+		capture.cancel()
+		if capture.cmd == nil {
+			continue
+		}
+		done := make(chan error, 1)
+		go func(cmd *exec.Cmd) {
+			done <- cmd.Wait()
+		}(capture.cmd)
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			if capture.cmd.Process != nil {
+				_ = capture.cmd.Process.Kill()
+			}
+			<-done
+		}
+	}
+}
+
+func stopAndCollectEgressNATPacketCaptures(captures []*egressNATPacketCapture) string {
+	stopEgressNATPacketCaptures(captures)
+	return collectEgressNATPacketCaptures(captures)
+}
+
+func collectEgressNATPacketCaptures(captures []*egressNATPacketCapture) string {
+	parts := make([]string, 0, len(captures))
+	for _, capture := range captures {
+		if capture == nil {
+			continue
+		}
+		text := strings.TrimSpace(capture.output.String())
+		if text == "" {
+			text = "(no packets captured)"
+		}
+		parts = append(parts, fmt.Sprintf("[%s]\n%s", capture.Label, text))
+	}
+	if len(parts) == 0 {
+		return "(packet capture unavailable)"
+	}
+	return strings.Join(parts, "\n")
 }
 
 func expectEgressNATIntegrationProbeFailure(t *testing.T, topology egressNATIntegrationTopology, proto string) {
@@ -1604,4 +1932,44 @@ func logForwardLogOnFailure(t *testing.T, logPath string) {
 		return
 	}
 	t.Logf("forward log:\n%s", string(data))
+}
+
+func logKernelRuntimeOnFailure(t *testing.T, apiBase string) {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, apiBase+"/api/kernel/runtime", nil)
+	if err != nil {
+		t.Logf("build kernel runtime request: %v", err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+egressNATTestToken)
+
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		t.Logf("request kernel runtime: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Logf("read kernel runtime response: %v", err)
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Logf("kernel runtime unexpected status %d:\n%s", resp.StatusCode, string(body))
+		return
+	}
+
+	var runtime KernelRuntimeResponse
+	if err := json.Unmarshal(body, &runtime); err != nil {
+		t.Logf("decode kernel runtime response: %v\n%s", err, string(body))
+		return
+	}
+	pretty, err := json.MarshalIndent(runtime, "", "  ")
+	if err != nil {
+		t.Logf("marshal kernel runtime response: %v\n%s", err, string(body))
+		return
+	}
+	t.Logf("kernel runtime:\n%s", string(pretty))
 }

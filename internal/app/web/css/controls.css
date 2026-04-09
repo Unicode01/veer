@@ -111,30 +111,43 @@
 
 /* Action buttons */
 .btn-delete,
-.btn-delete-egress-nat {
+.btn-delete-egress-nat,
+.btn-delete-ipv6-assignment,
+.btn-delete-managed-network,
+.btn-delete-managed-network-reservation {
     color: var(--danger-text);
 }
 
 .btn-edit,
 .btn-edit-range,
 .btn-edit-site,
-.btn-edit-egress-nat {
+.btn-edit-egress-nat,
+.btn-edit-ipv6-assignment,
+.btn-edit-managed-network,
+.btn-edit-managed-network-reservation,
+.btn-edit-managed-network-reservation-candidate,
+.btn-fill-managed-network-reservation-candidate {
     color: var(--primary);
 }
 
 .btn-clone,
 .btn-clone-site,
-.btn-clone-range {
+.btn-clone-range,
+.btn-create-managed-network-reservation-candidate {
     color: #059669;
 }
 
 .btn-enable,
-.btn-egress-enable {
+.btn-egress-enable,
+.btn-enable-ipv6-assignment,
+.btn-enable-managed-network {
     color: var(--success-text);
 }
 
 .btn-disable,
-.btn-egress-disable {
+.btn-egress-disable,
+.btn-disable-ipv6-assignment,
+.btn-disable-managed-network {
     color: var(--warning-text);
 }
 
@@ -223,30 +236,43 @@
 }
 
 .action-dropdown-menu .btn-delete:hover,
-.action-dropdown-menu .btn-delete-egress-nat:hover {
+.action-dropdown-menu .btn-delete-egress-nat:hover,
+.action-dropdown-menu .btn-delete-ipv6-assignment:hover,
+.action-dropdown-menu .btn-delete-managed-network:hover,
+.action-dropdown-menu .btn-delete-managed-network-reservation:hover {
     background: var(--danger-bg);
 }
 
 .action-dropdown-menu .btn-edit:hover,
 .action-dropdown-menu .btn-edit-site:hover,
 .action-dropdown-menu .btn-edit-range:hover,
-.action-dropdown-menu .btn-edit-egress-nat:hover {
+.action-dropdown-menu .btn-edit-egress-nat:hover,
+.action-dropdown-menu .btn-edit-ipv6-assignment:hover,
+.action-dropdown-menu .btn-edit-managed-network:hover,
+.action-dropdown-menu .btn-edit-managed-network-reservation:hover,
+.action-dropdown-menu .btn-edit-managed-network-reservation-candidate:hover,
+.action-dropdown-menu .btn-fill-managed-network-reservation-candidate:hover {
     background: var(--info-bg);
 }
 
 .action-dropdown-menu .btn-clone:hover,
 .action-dropdown-menu .btn-clone-site:hover,
-.action-dropdown-menu .btn-clone-range:hover {
+.action-dropdown-menu .btn-clone-range:hover,
+.action-dropdown-menu .btn-create-managed-network-reservation-candidate:hover {
     background: var(--success-bg);
 }
 
 .action-dropdown-menu .btn-enable:hover,
-.action-dropdown-menu .btn-egress-enable:hover {
+.action-dropdown-menu .btn-egress-enable:hover,
+.action-dropdown-menu .btn-enable-ipv6-assignment:hover,
+.action-dropdown-menu .btn-enable-managed-network:hover {
     background: var(--success-bg);
 }
 
 .action-dropdown-menu .btn-disable:hover,
-.action-dropdown-menu .btn-egress-disable:hover {
+.action-dropdown-menu .btn-egress-disable:hover,
+.action-dropdown-menu .btn-disable-ipv6-assignment:hover,
+.action-dropdown-menu .btn-disable-managed-network:hover {
     background: var(--warning-bg);
 }
 

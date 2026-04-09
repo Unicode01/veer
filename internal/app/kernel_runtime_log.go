@@ -5,6 +5,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 )
 
 type kernelSkipSummaryKey string
@@ -27,6 +28,11 @@ type kernelStateLogger struct {
 
 type kernelKeyedStateLogger struct {
 	last map[string]string
+}
+
+type kernelCountLogState struct {
+	lastCount int
+	lastAt    time.Time
 }
 
 func newKernelSkipLogger(engine string) *kernelSkipLogger {
@@ -100,6 +106,32 @@ func (l *kernelStateLogger) Reset() {
 		return
 	}
 	l.last = ""
+}
+
+func (s *kernelCountLogState) Reset() {
+	if s == nil {
+		return
+	}
+	s.lastCount = 0
+	s.lastAt = time.Time{}
+}
+
+func (s *kernelCountLogState) ShouldLog(count int, now time.Time, repeatEvery time.Duration) bool {
+	if count <= 0 {
+		if s != nil {
+			s.Reset()
+		}
+		return false
+	}
+	if s == nil {
+		return true
+	}
+	if s.lastCount != count || s.lastAt.IsZero() || (repeatEvery > 0 && now.Sub(s.lastAt) >= repeatEvery) {
+		s.lastCount = count
+		s.lastAt = now
+		return true
+	}
+	return false
 }
 
 func (l *kernelKeyedStateLogger) Logf(key string, format string, args ...interface{}) {

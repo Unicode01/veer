@@ -470,6 +470,23 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	}
 
 	if len(retryOwners) == 0 {
+		if trigger.hasSource("link") && (len(currentKernelRules) > 0 || len(currentKernelRanges) > 0 || len(currentKernelEgressNATs) > 0) {
+			result.attempted = true
+			result.handled = false
+			result.cooldownRuleOwners = cooldownRuleOwners
+			result.cooldownRangeOwners = cooldownRangeOwners
+			result.cooldownSummary = summarizeKernelNetlinkOwnerRetryCooldownSourceCounts(cooldownSummaryCounts)
+			result.cooldownScope = summarizeKernelIncrementalRetryOwnerScope(cooldownOwners)
+			result.detail = fmt.Sprintf(
+				"link change requires full kernel re-evaluation of active owners (rule_owners=%d range_owners=%d egress_nat_owners=%d)%s%s",
+				len(currentKernelRules),
+				len(currentKernelRanges),
+				len(currentKernelEgressNATs),
+				kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
+				kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
+			)
+			return result
+		}
 		if cooldownRuleOwners == 0 && cooldownRangeOwners == 0 && result.cooldownEgressNATs == 0 {
 			return kernelIncrementalRetryResult{handled: true}
 		}
@@ -496,23 +513,16 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	applyKernelPressurePolicy(kernelPressure, candidates, currentKernelRules, currentKernelRanges, rulePlans, rangePlans)
 	preserveUnmatchedNetlinkFallbackPlans(unmatchedRuleFallbackPlans, unmatchedRangeFallbackPlans, rulePlans, rangePlans)
 
-	activeRuleRangeKernelCandidates := filterActiveKernelCandidates(candidates, rulePlans, rangePlans, nil)
-	usedCandidateRuleIDs := make(map[int64]struct{}, len(rules)+len(candidates))
+	activeRuleRangeKernelCandidateCount := countActiveKernelCandidates(candidates, rulePlans, rangePlans, nil)
 	maxCandidateRuleID := int64(0)
 	for _, rule := range rules {
 		if rule.ID > maxCandidateRuleID {
 			maxCandidateRuleID = rule.ID
 		}
-		if rule.ID > 0 {
-			usedCandidateRuleIDs[rule.ID] = struct{}{}
-		}
 	}
 	for _, candidate := range candidates {
 		if candidate.rule.ID > maxCandidateRuleID {
 			maxCandidateRuleID = candidate.rule.ID
-		}
-		if candidate.rule.ID > 0 {
-			usedCandidateRuleIDs[candidate.rule.ID] = struct{}{}
 		}
 	}
 	nextSyntheticID := maxCandidateRuleID + 1
@@ -520,14 +530,15 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		egressNATs,
 		planner,
 		configuredKernelRulesMapLimit,
-		len(activeRuleRangeKernelCandidates),
-		usedCandidateRuleIDs,
+		activeRuleRangeKernelCandidateCount,
 		&nextSyntheticID,
 		egressNATSnapshot,
 	)
 	preserveUnmatchedNetlinkFallbackEgressPlans(unmatchedEgressNATFallbackPlans, egressNATPlans)
 
-	allKernelCandidates := append(append([]kernelCandidateRule(nil), candidates...), egressNATCandidates...)
+	allKernelCandidates := make([]kernelCandidateRule, 0, len(candidates)+len(egressNATCandidates))
+	allKernelCandidates = append(allKernelCandidates, candidates...)
+	allKernelCandidates = append(allKernelCandidates, egressNATCandidates...)
 	activeCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 	retryCandidates := filterKernelCandidatesByOwners(activeCandidates, retryOwners, rulePlans, rangePlans, egressNATPlans)
 	result.attemptedRuleOwners, result.attemptedRangeOwners, result.attemptedEgressNATs = countKernelCandidateOwnersByKind(retryCandidates)
@@ -1347,14 +1358,15 @@ func sameRetainedKernelRuleDataplaneIgnoringID(a Rule, b Rule) bool {
 }
 
 func reconcileIncrementalKernelRetry(runtime kernelRuleRuntime, retainedByEngine map[string][]Rule, retryCandidates []kernelCandidateRule) (map[int64]kernelRuleApplyResult, error) {
+	retryRules := kernelCandidateRules(retryCandidates)
 	if totalRetainedKernelAssignments(retainedByEngine) == 0 {
-		return runtime.Reconcile(kernelCandidateRules(retryCandidates))
+		return runtime.Reconcile(retryRules)
 	}
 	retainedRuntime, ok := runtime.(kernelRetainedAssignmentRuntime)
 	if !ok || retainedRuntime == nil {
 		return nil, fmt.Errorf("incremental kernel retry cannot retain current kernel assignments on this runtime")
 	}
-	return retainedRuntime.ReconcileRetainingAssignments(retainedByEngine, kernelCandidateRules(retryCandidates))
+	return retainedRuntime.ReconcileRetainingAssignments(retainedByEngine, retryRules)
 }
 
 func totalRetainedKernelAssignments(retainedByEngine map[string][]Rule) int {

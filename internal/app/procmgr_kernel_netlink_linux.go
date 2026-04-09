@@ -61,12 +61,18 @@ func (pm *ProcessManager) stopKernelNetlinkMonitor() {
 
 func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 	linkUpdates := make(chan netlink.LinkUpdate, 16)
+	addrUpdates := make(chan netlink.AddrUpdate, 16)
 	neighUpdates := make(chan netlink.NeighUpdate, 32)
 
 	linkReady := false
 	if err := netlink.LinkSubscribeWithOptions(linkUpdates, stop, netlink.LinkSubscribeOptions{
 		ErrorCallback: func(err error) {
 			if err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+				}
 				log.Printf("kernel dataplane netlink: link monitor error: %v", err)
 			}
 		},
@@ -76,10 +82,33 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		linkReady = true
 	}
 
+	addrReady := false
+	if err := netlink.AddrSubscribeWithOptions(addrUpdates, stop, netlink.AddrSubscribeOptions{
+		ErrorCallback: func(err error) {
+			if err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				log.Printf("kernel dataplane netlink: address monitor error: %v", err)
+			}
+		},
+	}); err != nil {
+		log.Printf("kernel dataplane netlink: address monitor unavailable: %v", err)
+	} else {
+		addrReady = true
+	}
+
 	neighReady := false
 	if err := netlink.NeighSubscribeWithOptions(neighUpdates, stop, netlink.NeighSubscribeOptions{
 		ErrorCallback: func(err error) {
 			if err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+				}
 				log.Printf("kernel dataplane netlink: neighbor monitor error: %v", err)
 			}
 		},
@@ -89,7 +118,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		neighReady = true
 	}
 
-	if !linkReady && !neighReady {
+	if !linkReady && !addrReady && !neighReady {
 		return
 	}
 
@@ -100,7 +129,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		case update, ok := <-linkUpdates:
 			if !ok {
 				linkUpdates = nil
-				if neighUpdates == nil {
+				if addrUpdates == nil && neighUpdates == nil {
 					return
 				}
 				continue
@@ -109,12 +138,25 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 				if !pm.shouldHandleKernelNetlinkLinkUpdate(update) {
 					continue
 				}
+				pm.handleIPv6AssignmentLinkUpdate(update)
 				pm.handleKernelNetlinkRecoveryTrigger(kernelNetlinkRecoveryTriggerFromLinkUpdate(update))
 			}
+		case update, ok := <-addrUpdates:
+			if !ok {
+				addrUpdates = nil
+				if linkUpdates == nil && neighUpdates == nil {
+					return
+				}
+				continue
+			}
+			if !isVisibleInterfaceIP(update.LinkAddress.IP) {
+				continue
+			}
+			pm.handleIPv6AssignmentAddrUpdate(update)
 		case update, ok := <-neighUpdates:
 			if !ok {
 				neighUpdates = nil
-				if linkUpdates == nil {
+				if linkUpdates == nil && addrUpdates == nil {
 					return
 				}
 				continue
@@ -128,6 +170,71 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 				pm.handleKernelNetlinkRecoveryTrigger(kernelNetlinkRecoveryTriggerFromNeighUpdate("neighbor", update))
 			}
 		}
+	}
+}
+
+func collectIPv6AssignmentRelatedInterfaceNames(link netlink.Link) []string {
+	if link == nil || link.Attrs() == nil {
+		return nil
+	}
+	relatedNames := make([]string, 0, 3)
+	if name := strings.TrimSpace(link.Attrs().Name); name != "" {
+		relatedNames = append(relatedNames, name)
+	}
+	if link.Attrs().MasterIndex > 0 {
+		if master, err := netlink.LinkByIndex(link.Attrs().MasterIndex); err == nil && master != nil && master.Attrs() != nil {
+			if masterName := strings.TrimSpace(master.Attrs().Name); masterName != "" {
+				relatedNames = append(relatedNames, masterName)
+			}
+		}
+	}
+	if link.Attrs().ParentIndex > 0 {
+		if parent, err := netlink.LinkByIndex(link.Attrs().ParentIndex); err == nil && parent != nil && parent.Attrs() != nil {
+			if parentName := strings.TrimSpace(parent.Attrs().Name); parentName != "" {
+				relatedNames = append(relatedNames, parentName)
+			}
+		}
+	}
+	return uniqueManagedNetworkRuntimeInterfaceNames(relatedNames...)
+}
+
+func (pm *ProcessManager) handleIPv6AssignmentLinkUpdate(update netlink.LinkUpdate) {
+	if pm == nil {
+		return
+	}
+
+	name := ""
+	relatedNames := make([]string, 0, 3)
+	if update.Link != nil && update.Link.Attrs() != nil {
+		name = strings.TrimSpace(update.Link.Attrs().Name)
+		relatedNames = append(relatedNames, collectIPv6AssignmentRelatedInterfaceNames(update.Link)...)
+	}
+	if name == "" && update.IfInfomsg.Index > 0 && update.Header.Type != unix.RTM_DELLINK {
+		if resolved, err := netlink.LinkByIndex(int(update.IfInfomsg.Index)); err == nil && resolved != nil && resolved.Attrs() != nil {
+			name = strings.TrimSpace(resolved.Attrs().Name)
+			relatedNames = append(relatedNames, collectIPv6AssignmentRelatedInterfaceNames(resolved)...)
+		}
+	}
+
+	if !pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", relatedNames...) && name != "" {
+		pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", name)
+	}
+}
+
+func (pm *ProcessManager) handleIPv6AssignmentAddrUpdate(update netlink.AddrUpdate) {
+	if pm == nil {
+		return
+	}
+	name := ""
+	relatedNames := make([]string, 0, 3)
+	if update.LinkIndex > 0 {
+		if link, err := netlink.LinkByIndex(update.LinkIndex); err == nil && link != nil && link.Attrs() != nil {
+			name = strings.TrimSpace(link.Attrs().Name)
+			relatedNames = append(relatedNames, collectIPv6AssignmentRelatedInterfaceNames(link)...)
+		}
+	}
+	if !pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", relatedNames...) && name != "" {
+		pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", name)
 	}
 }
 

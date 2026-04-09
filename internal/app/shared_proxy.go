@@ -19,7 +19,8 @@ import (
 )
 
 func runSharedProxy(sockPath string) {
-	signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 	myHash := computeBinaryHash()
 
 	var (
@@ -27,9 +28,6 @@ func runSharedProxy(sockPath string) {
 		ipcConn        net.Conn
 		pendingUpgrade int32
 	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	sp := &sharedProxyEngine{
 		httpRoutes:        make(map[string]string),
@@ -81,6 +79,18 @@ func runSharedProxy(sockPath string) {
 		sendIPC(IPCMessage{Type: "site_stats", SiteStats: reports})
 	}
 
+	go func() {
+		<-ctx.Done()
+		connMu.Lock()
+		conn := ipcConn
+		ipcConn = nil
+		connMu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		sp.closeAll()
+	}()
+
 	// Periodic stats reporting
 	go func() {
 		speedTimer := time.NewTimer(workerStatsIdleUpdateInterval)
@@ -118,7 +128,12 @@ func runSharedProxy(sockPath string) {
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 			if atomic.LoadInt32(&pendingUpgrade) == 0 {
 				continue
 			}
@@ -137,9 +152,22 @@ func runSharedProxy(sockPath string) {
 
 	// Reconnect loop
 	for {
-		conn, err := net.Dial("unix", sockPath)
+		if ctx.Err() != nil {
+			sp.closeAll()
+			return
+		}
+		conn, err := (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
 		if err != nil {
-			time.Sleep(2 * time.Second)
+			if ctx.Err() != nil {
+				sp.closeAll()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				sp.closeAll()
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -199,8 +227,17 @@ func runSharedProxy(sockPath string) {
 		ipcConn = nil
 		connMu.Unlock()
 		conn.Close()
+		if ctx.Err() != nil {
+			sp.closeAll()
+			return
+		}
 		log.Println("shared proxy: disconnected from master, reconnecting...")
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			sp.closeAll()
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 

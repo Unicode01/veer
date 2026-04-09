@@ -25,27 +25,20 @@ type bridgeNeighborTarget struct {
 }
 
 func resolveXDPInboundLinks(inLink netlink.Link, rule Rule, opts xdpPrepareOptions) ([]netlink.Link, error) {
+	_ = rule
 	if inLink == nil || inLink.Attrs() == nil {
 		return nil, fmt.Errorf("xdp dataplane cannot resolve the inbound interface")
 	}
 	if xdpLinkTypeAllowed(inLink.Type()) {
 		return []netlink.Link{inLink}, nil
 	}
-	if !opts.enableBridge {
-		return nil, fmt.Errorf("xdp dataplane currently supports only native-capable inbound interfaces (device/veth); got %q", inLink.Type())
-	}
 	if !isXDPBridgeLink(inLink) {
 		return nil, fmt.Errorf("xdp dataplane currently supports only native-capable inbound interfaces (device/veth); got %q", inLink.Type())
 	}
-
-	members, err := listXDPBridgeMembers(inLink.Attrs().Index)
-	if err != nil {
-		return nil, fmt.Errorf("resolve inbound bridge members for %q: %w", rule.InInterface, err)
+	if !opts.enableBridge {
+		return nil, fmt.Errorf("xdp dataplane inbound bridge support requires experimental feature %q", experimentalFeatureBridgeXDP)
 	}
-	if len(members) == 0 {
-		return nil, fmt.Errorf("xdp bridge ingress requires at least one attachable bridge member on %q", rule.InInterface)
-	}
-	return members, nil
+	return nil, fmt.Errorf("xdp dataplane inbound bridge interfaces are not supported on the current kernel path; use tc for bridge ingress rules")
 }
 
 func resolveXDPBridgeTarget(outLink netlink.Link, rule Rule, opts xdpPrepareOptions) (xdpBridgeTarget, error) {

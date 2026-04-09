@@ -193,12 +193,17 @@ func TestSamePreparedXDPKernelRuleDataplane(t *testing.T) {
 		rule:       baseRule,
 		inIfIndex:  5,
 		outIfIndex: 8,
-		key: tcRuleKeyV4{
+		spec: kernelPreparedRuleSpec{
+			Family:      ipFamilyIPv4,
+			DstAddr:     kernelPreparedAddrFromIPv4Uint32(0),
+			BackendAddr: kernelPreparedAddrFromIPv4Uint32(9),
+		},
+		keyV4: tcRuleKeyV4{
 			IfIndex: 5,
 			DstPort: 10022,
 			Proto:   6,
 		},
-		value: xdpRuleValueV4{
+		valueV4: xdpRuleValueV4{
 			RuleID:      12,
 			BackendAddr: 9,
 			BackendPort: 22,
@@ -213,9 +218,80 @@ func TestSamePreparedXDPKernelRuleDataplane(t *testing.T) {
 	}
 
 	diff := base
-	diff.key.DstPort = 10023
+	diff.keyV4.DstPort = 10023
 	if samePreparedXDPKernelRuleDataplane(base, diff) {
 		t.Fatal("samePreparedXDPKernelRuleDataplane() = true, want false when dataplane changes")
+	}
+}
+
+func TestSamePreparedXDPKernelRuleDataplaneIPv6(t *testing.T) {
+	inAddr := net.ParseIP("2001:db8::10").To16()
+	backendAddr := net.ParseIP("2001:db8::20").To16()
+	natAddr := net.ParseIP("2001:db8::30").To16()
+	if inAddr == nil || backendAddr == nil || natAddr == nil {
+		t.Fatal("parse IPv6 fixtures")
+	}
+
+	var dst kernelPreparedAddr
+	var backend kernelPreparedAddr
+	var nat kernelPreparedAddr
+	var valueBackend [16]byte
+	var valueNAT [16]byte
+	copy(dst[:], inAddr)
+	copy(backend[:], backendAddr)
+	copy(nat[:], natAddr)
+	copy(valueBackend[:], backendAddr)
+	copy(valueNAT[:], natAddr)
+
+	baseRule := Rule{
+		ID:           13,
+		InInterface:  "eno1",
+		InIP:         "2001:db8::10",
+		InPort:       10022,
+		OutInterface: "vmbr1",
+		OutIP:        "2001:db8::20",
+		OutPort:      22,
+		OutSourceIP:  "2001:db8::30",
+		Protocol:     "udp",
+		Transparent:  false,
+		Remark:       "before",
+	}
+	base := preparedXDPKernelRule{
+		rule:       baseRule,
+		inIfIndex:  5,
+		outIfIndex: 8,
+		spec: kernelPreparedRuleSpec{
+			Family:      ipFamilyIPv6,
+			DstAddr:     dst,
+			BackendAddr: backend,
+			NATAddr:     nat,
+		},
+		keyV6: tcRuleKeyV6{
+			IfIndex: 5,
+			DstAddr: [16]byte(dst),
+			DstPort: 10022,
+			Proto:   17,
+		},
+		valueV6: xdpRuleValueV6{
+			RuleID:      13,
+			BackendAddr: valueBackend,
+			BackendPort: 22,
+			Flags:       xdpRuleFlagFullNAT,
+			OutIfIndex:  8,
+			NATAddr:     valueNAT,
+		},
+	}
+
+	same := base
+	same.rule.Remark = "after"
+	if !samePreparedXDPKernelRuleDataplane(base, same) {
+		t.Fatal("samePreparedXDPKernelRuleDataplane() = false, want true for IPv6 when only metadata changed")
+	}
+
+	diff := base
+	diff.valueV6.NATAddr[15]++
+	if samePreparedXDPKernelRuleDataplane(base, diff) {
+		t.Fatal("samePreparedXDPKernelRuleDataplane() = true, want false when IPv6 dataplane changes")
 	}
 }
 
@@ -399,7 +475,7 @@ func TestDiffPreparedKernelRulesDetectsIPv6UpsertsAndDeletes(t *testing.T) {
 		},
 	}
 	nextA := oldA
-	nextA.value.BackendPort = 9443
+	nextA.rule.OutPort = 9443
 
 	diff, err := diffPreparedKernelRules([]preparedKernelRule{oldA, oldB}, []preparedKernelRule{nextA})
 	if err != nil {

@@ -421,7 +421,8 @@ func sortedInt64SetKeys(values map[int64]struct{}) []int64 {
 // runWorker handles a worker process that can forward multiple rules.
 // workerIndex identifies the logical worker slot; the master sends rule configs over the socket.
 func runWorker(workerIndex int, sockPath string) {
-	signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 	myHash := computeBinaryHash()
 
 	var (
@@ -465,6 +466,18 @@ func runWorker(workerIndex int, sockPath string) {
 		stateMu.Unlock()
 		stopRuleBindings(bindings)
 	}
+
+	go func() {
+		<-ctx.Done()
+		connMu.Lock()
+		conn := ipcConn
+		ipcConn = nil
+		connMu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		stopBindings(true)
+	}()
 
 	applyRules := func(rules []Rule) {
 		ids := make([]int64, 0, len(rules))
@@ -531,6 +544,8 @@ func runWorker(workerIndex int, sockPath string) {
 		defer stopTimer(sendTimer)
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-speedTimer.C:
 				stateMu.Lock()
 				statsSnapshot := snapshotRuleStatsMap(currentStats)
@@ -562,7 +577,12 @@ func runWorker(workerIndex int, sockPath string) {
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 			if atomic.LoadInt32(&pendingUpgrade) == 0 {
 				continue
 			}
@@ -585,9 +605,22 @@ func runWorker(workerIndex int, sockPath string) {
 	}()
 
 	for {
-		conn, err := net.Dial("unix", sockPath)
+		if ctx.Err() != nil {
+			stopBindings(true)
+			return
+		}
+		conn, err := (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
 		if err != nil {
-			time.Sleep(2 * time.Second)
+			if ctx.Err() != nil {
+				stopBindings(true)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				stopBindings(true)
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -640,8 +673,17 @@ func runWorker(workerIndex int, sockPath string) {
 		ipcConn = nil
 		connMu.Unlock()
 		conn.Close()
+		if ctx.Err() != nil {
+			stopBindings(true)
+			return
+		}
 		log.Printf("worker[%d]: disconnected from master, reconnecting...", workerIndex)
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			stopBindings(true)
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 

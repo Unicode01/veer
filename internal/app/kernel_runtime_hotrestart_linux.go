@@ -3,7 +3,10 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -18,12 +21,44 @@ import (
 )
 
 const (
-	forwardHotRestartMarkerEnv = "FORWARD_HOT_RESTART_MARKER"
-	forwardBPFStateDirEnv      = "FORWARD_BPF_STATE_DIR"
-	forwardRuntimeStateDirEnv  = "FORWARD_RUNTIME_STATE_DIR"
-	defaultForwardBPFStateDir  = "/sys/fs/bpf/forward"
-	hotRestartSkipStatsSuffix  = ".skip-stats"
+	forwardHotRestartMarkerEnv            = "FORWARD_HOT_RESTART_MARKER"
+	forwardBPFStateDirEnv                 = "FORWARD_BPF_STATE_DIR"
+	forwardRuntimeStateDirEnv             = "FORWARD_RUNTIME_STATE_DIR"
+	defaultForwardBPFStateDir             = "/sys/fs/bpf/forward"
+	hotRestartSkipStatsSuffix             = ".skip-stats"
+	kernelHotRestartMetadataFormatVersion = 1
 )
+
+type kernelHotRestartIncompatibleError struct {
+	reason string
+}
+
+func (err *kernelHotRestartIncompatibleError) Error() string {
+	if err == nil {
+		return ""
+	}
+	return err.reason
+}
+
+func newKernelHotRestartIncompatibleError(format string, args ...any) error {
+	return &kernelHotRestartIncompatibleError{reason: fmt.Sprintf(format, args...)}
+}
+
+func isKernelHotRestartIncompatible(err error) bool {
+	var target *kernelHotRestartIncompatibleError
+	return errors.As(err, &target)
+}
+
+func kernelHotRestartIncompatibilityReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	var target *kernelHotRestartIncompatibleError
+	if errors.As(err, &target) {
+		return target.Error()
+	}
+	return err.Error()
+}
 
 type kernelHotRestartMapState struct {
 	replacements     map[string]*ebpf.Map
@@ -31,8 +66,18 @@ type kernelHotRestartMapState struct {
 	oldStatsMap      *ebpf.Map
 }
 
+type kernelHotRestartMapDescriptor struct {
+	Type       ebpf.MapType
+	KeySize    uint32
+	ValueSize  uint32
+	MaxEntries uint32
+	Flags      uint32
+}
+
 type kernelHotRestartMetadata struct {
+	FormatVersion   int                             `json:"format_version,omitempty"`
 	Engine          string                          `json:"engine"`
+	ObjectHash      string                          `json:"object_hash,omitempty"`
 	OwnerPID        int                             `json:"owner_pid,omitempty"`
 	OwnerStartTicks uint64                          `json:"owner_start_ticks,omitempty"`
 	TCAttachments   []kernelHotRestartTCAttachment  `json:"tc_attachments,omitempty"`
@@ -51,9 +96,11 @@ type kernelHotRestartXDPAttachment struct {
 	Flags   int `json:"flags"`
 }
 
-func kernelHotRestartTCMetadata(attachments []kernelAttachment) kernelHotRestartMetadata {
+func kernelHotRestartTCMetadata(attachments []kernelAttachment, objectHash string) kernelHotRestartMetadata {
 	meta := kernelHotRestartMetadata{
+		FormatVersion: kernelHotRestartMetadataFormatVersion,
 		Engine:        kernelEngineTC,
+		ObjectHash:    strings.TrimSpace(objectHash),
 		TCAttachments: make([]kernelHotRestartTCAttachment, 0, len(attachments)),
 	}
 	for _, att := range attachments {
@@ -70,9 +117,11 @@ func kernelHotRestartTCMetadata(attachments []kernelAttachment) kernelHotRestart
 	return meta
 }
 
-func kernelHotRestartXDPMetadata(attachments []xdpAttachment) kernelHotRestartMetadata {
+func kernelHotRestartXDPMetadata(attachments []xdpAttachment, objectHash string) kernelHotRestartMetadata {
 	meta := kernelHotRestartMetadata{
+		FormatVersion:  kernelHotRestartMetadataFormatVersion,
 		Engine:         kernelEngineXDP,
+		ObjectHash:     strings.TrimSpace(objectHash),
 		XDPAttachments: make([]kernelHotRestartXDPAttachment, 0, len(attachments)),
 	}
 	for _, att := range attachments {
@@ -86,6 +135,72 @@ func kernelHotRestartXDPMetadata(attachments []xdpAttachment) kernelHotRestartMe
 
 func kernelHotRestartMarkerPath() string {
 	return strings.TrimSpace(os.Getenv(forwardHotRestartMarkerEnv))
+}
+
+func kernelTCObjectBytes(enableTrafficStats bool) ([]byte, string) {
+	objectBytes := embeddedForwardTCObject
+	objectName := "internal/app/ebpf/forward-tc-bpf.o"
+	if enableTrafficStats {
+		objectBytes = embeddedForwardTCStatsObject
+		objectName = "internal/app/ebpf/forward-tc-bpf-stats.o"
+	}
+	return objectBytes, objectName
+}
+
+func kernelXDPObjectBytes(enableTrafficStats bool) ([]byte, string) {
+	objectBytes := embeddedForwardXDPObject
+	objectName := "internal/app/ebpf/forward-xdp-bpf.o"
+	if enableTrafficStats {
+		objectBytes = embeddedForwardXDPStatsObject
+		objectName = "internal/app/ebpf/forward-xdp-bpf-stats.o"
+	}
+	return objectBytes, objectName
+}
+
+func kernelHotRestartObjectHash(objectBytes []byte, objectName string) (string, error) {
+	if len(objectBytes) == 0 {
+		return "", fmt.Errorf("embedded eBPF object %s is empty", strings.TrimSpace(objectName))
+	}
+	sum := sha256.Sum256(objectBytes)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func kernelTCHotRestartObjectHash(enableTrafficStats bool) (string, error) {
+	objectBytes, objectName := kernelTCObjectBytes(enableTrafficStats)
+	return kernelHotRestartObjectHash(objectBytes, objectName)
+}
+
+func kernelXDPHotRestartObjectHash(enableTrafficStats bool) (string, error) {
+	objectBytes, objectName := kernelXDPObjectBytes(enableTrafficStats)
+	return kernelHotRestartObjectHash(objectBytes, objectName)
+}
+
+func validateKernelHotRestartMetadata(meta kernelHotRestartMetadata, engine string, objectHash string) error {
+	engine = strings.TrimSpace(engine)
+	if strings.TrimSpace(meta.Engine) != engine {
+		return newKernelHotRestartIncompatibleError("metadata engine=%q but current runtime expects %q", meta.Engine, engine)
+	}
+	if meta.FormatVersion != kernelHotRestartMetadataFormatVersion {
+		return newKernelHotRestartIncompatibleError(
+			"metadata format=%d but current runtime expects %d",
+			meta.FormatVersion,
+			kernelHotRestartMetadataFormatVersion,
+		)
+	}
+	if strings.TrimSpace(meta.ObjectHash) == "" {
+		return newKernelHotRestartIncompatibleError("metadata object hash is missing")
+	}
+	if strings.TrimSpace(objectHash) == "" {
+		return newKernelHotRestartIncompatibleError("current object hash is missing")
+	}
+	if strings.TrimSpace(meta.ObjectHash) != strings.TrimSpace(objectHash) {
+		return newKernelHotRestartIncompatibleError(
+			"metadata object hash=%s but current runtime expects %s",
+			meta.ObjectHash,
+			objectHash,
+		)
+	}
+	return nil
 }
 
 func kernelHotRestartRequested() bool {
@@ -418,7 +533,106 @@ func loadPinnedKernelMap(path string) (*ebpf.Map, bool, error) {
 	return m, true, nil
 }
 
-func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestartMapState, error) {
+func kernelHotRestartMapDescriptorFromSpec(spec *ebpf.MapSpec) (kernelHotRestartMapDescriptor, error) {
+	if spec == nil {
+		return kernelHotRestartMapDescriptor{}, fmt.Errorf("map spec is missing")
+	}
+	return kernelHotRestartMapDescriptor{
+		Type:       spec.Type,
+		KeySize:    spec.KeySize,
+		ValueSize:  spec.ValueSize,
+		MaxEntries: spec.MaxEntries,
+		Flags:      spec.Flags,
+	}, nil
+}
+
+func kernelHotRestartMapDescriptorFromMap(m *ebpf.Map) (kernelHotRestartMapDescriptor, error) {
+	if m == nil {
+		return kernelHotRestartMapDescriptor{}, fmt.Errorf("map is missing")
+	}
+	info, err := m.Info()
+	if err != nil {
+		return kernelHotRestartMapDescriptor{}, err
+	}
+	if info == nil {
+		return kernelHotRestartMapDescriptor{}, fmt.Errorf("map info is unavailable")
+	}
+	return kernelHotRestartMapDescriptor{
+		Type:       info.Type,
+		KeySize:    info.KeySize,
+		ValueSize:  info.ValueSize,
+		MaxEntries: info.MaxEntries,
+		Flags:      info.Flags,
+	}, nil
+}
+
+func validateKernelHotRestartMapCompatibility(name string, actual kernelHotRestartMapDescriptor, desired kernelHotRestartMapDescriptor, allowSmallerCapacity bool) error {
+	if actual.Type != desired.Type {
+		return newKernelHotRestartIncompatibleError("type=%v but current object expects %v", actual.Type, desired.Type)
+	}
+	if actual.KeySize != desired.KeySize {
+		return newKernelHotRestartIncompatibleError("key_size=%d but current object expects %d", actual.KeySize, desired.KeySize)
+	}
+	if actual.ValueSize != desired.ValueSize {
+		return newKernelHotRestartIncompatibleError("value_size=%d but current object expects %d", actual.ValueSize, desired.ValueSize)
+	}
+	if actual.Flags != desired.Flags {
+		return newKernelHotRestartIncompatibleError("flags=0x%x but current object expects 0x%x", actual.Flags, desired.Flags)
+	}
+	if actual.MaxEntries < desired.MaxEntries && !allowSmallerCapacity {
+		return newKernelHotRestartIncompatibleError(
+			"max_entries=%d but current object expects at least %d",
+			actual.MaxEntries,
+			desired.MaxEntries,
+		)
+	}
+	return nil
+}
+
+func validateKernelHotRestartMapReplacements(spec *ebpf.CollectionSpec, replacements map[string]*ebpf.Map, allowSmallerCapacity map[string]bool) error {
+	if spec == nil {
+		return fmt.Errorf("collection spec is missing")
+	}
+	if len(replacements) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(replacements))
+	for name := range replacements {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		currentSpec := spec.Maps[name]
+		if currentSpec == nil {
+			return newKernelHotRestartIncompatibleError("map %q is preserved but missing from current object", name)
+		}
+		actual, err := kernelHotRestartMapDescriptorFromMap(replacements[name])
+		if err != nil {
+			return fmt.Errorf("read preserved map %q info: %w", name, err)
+		}
+		desired, err := kernelHotRestartMapDescriptorFromSpec(currentSpec)
+		if err != nil {
+			return fmt.Errorf("read current map %q spec: %w", name, err)
+		}
+		if err := validateKernelHotRestartMapCompatibility(name, actual, desired, allowSmallerCapacity[name]); err != nil {
+			return fmt.Errorf("map %q incompatible: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func loadTCKernelHotRestartState(desired kernelMapCapacities, objectHash string) (*kernelHotRestartMapState, error) {
+	if !kernelHotRestartStateExists(kernelEngineTC) {
+		return nil, nil
+	}
+	meta, err := readKernelHotRestartMetadata(kernelEngineTC)
+	if err != nil {
+		return nil, fmt.Errorf("read tc hot restart metadata: %w", err)
+	}
+	if err := validateKernelHotRestartMetadata(meta, kernelEngineTC, objectHash); err != nil {
+		return nil, fmt.Errorf("validate tc hot restart metadata: %w", err)
+	}
 	state := &kernelHotRestartMapState{
 		replacements:     make(map[string]*ebpf.Map, 5),
 		actualCapacities: desired,
@@ -514,8 +728,8 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 	}
 	if haveFlowsV6 != haveNATV6 {
 		state.close()
-		return nil, fmt.Errorf(
-			"incomplete pinned tc IPv6 state: flows_v6=%t nat_v6=%t",
+		return nil, newKernelHotRestartIncompatibleError(
+			"preserved tc IPv6 map set is incomplete: flows_v6=%t nat_v6=%t",
 			haveFlowsV6,
 			haveNATV6,
 		)
@@ -523,8 +737,8 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 	haveStats := skipStats || state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil
 	if !haveFlows || !haveNAT || !haveStats {
 		state.close()
-		return nil, fmt.Errorf(
-			"incomplete pinned tc state: flows=%t nat=%t stats=%t",
+		return nil, newKernelHotRestartIncompatibleError(
+			"preserved tc map set is incomplete: flows=%t nat=%t stats=%t",
 			haveFlows,
 			haveNAT,
 			haveStats,
@@ -536,9 +750,19 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestart
 	return state, nil
 }
 
-func loadXDPKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestartMapState, error) {
+func loadXDPKernelHotRestartState(desired kernelMapCapacities, objectHash string) (*kernelHotRestartMapState, error) {
+	if !kernelHotRestartStateExists(kernelEngineXDP) {
+		return nil, nil
+	}
+	meta, err := readKernelHotRestartMetadata(kernelEngineXDP)
+	if err != nil {
+		return nil, fmt.Errorf("read xdp hot restart metadata: %w", err)
+	}
+	if err := validateKernelHotRestartMetadata(meta, kernelEngineXDP, objectHash); err != nil {
+		return nil, fmt.Errorf("validate xdp hot restart metadata: %w", err)
+	}
 	state := &kernelHotRestartMapState{
-		replacements:     make(map[string]*ebpf.Map, 2),
+		replacements:     make(map[string]*ebpf.Map, 3),
 		actualCapacities: desired,
 	}
 	loadedAny := false
@@ -554,7 +778,23 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestar
 		loadedAny = true
 		haveFlows = true
 		state.replacements[kernelFlowsMapName] = flowsMap
-		state.actualCapacities.Flows = int(flowsMap.MaxEntries())
+		if flowCapacity := int(flowsMap.MaxEntries()); flowCapacity < state.actualCapacities.Flows {
+			state.actualCapacities.Flows = flowCapacity
+		}
+	}
+
+	flowsMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelFlowsMapNameV6))
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned xdp IPv6 flows map: %w", err)
+	}
+	if ok {
+		loadedAny = true
+		haveFlows = true
+		state.replacements[kernelFlowsMapNameV6] = flowsMapV6
+		if flowCapacity := int(flowsMapV6.MaxEntries()); flowCapacity < state.actualCapacities.Flows {
+			state.actualCapacities.Flows = flowCapacity
+		}
 	}
 
 	if !skipStats {
@@ -585,8 +825,8 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities) (*kernelHotRestar
 	haveStats := skipStats || state.oldStatsMap != nil || state.replacements[kernelStatsMapName] != nil
 	if !haveFlows || !haveStats {
 		state.close()
-		return nil, fmt.Errorf(
-			"incomplete pinned xdp state: flows=%t stats=%t",
+		return nil, newKernelHotRestartIncompatibleError(
+			"preserved xdp map set is incomplete: flows=%t stats=%t",
 			haveFlows,
 			haveStats,
 		)

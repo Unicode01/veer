@@ -123,6 +123,7 @@ function createHarness() {
     'validation.required': 'This field is required.',
     'validation.invalidID': 'The ID is invalid.',
     'validation.ipv4': 'Enter a valid IPv4 address.',
+    'validation.macAddress': 'Enter a valid MAC address.',
     'validation.positiveId': 'The ID must be greater than 0.',
     'validation.portRange': 'Ports must be between 1 and 65535.',
     'validation.protocol': 'Protocol must be tcp, udp, or tcp+udp.',
@@ -134,12 +135,142 @@ function createHarness() {
     'validation.rangeOrder': 'The start port must not exceed the end port.',
     'runtimeReason.kernelMixedFamily': 'The kernel dataplane does not support mixed IPv4/IPv6 forwarding yet.',
     'runtimeReason.kernelTransparentIPv6': 'The kernel dataplane does not support transparent IPv6 rules yet.',
+    'runtimeReason.xdpGenericExperimental': 'XDP generic/mixed attachment is disabled by default; enable the experimental `xdp_generic` feature to allow it.',
+    'runtimeReason.xdpVethNatRedirectLegacyKernel': 'XDP NAT redirect on veth is disabled on this kernel; fall back to TC or upgrade to a newer kernel.',
     'transparent.info.ipv6Unavailable': 'Transparent mode currently supports IPv4 targets only. Disable it for IPv6 targets.',
     'validation.issueJoiner': '; ',
     'validation.issueSummaryMore': '{{messages}} (and {{count}} more)',
     'validation.reviewErrors': 'Review the highlighted fields.',
+    'common.enable': 'Enable',
+    'common.disable': 'Disable',
+    'common.processing': 'Processing...',
+    'common.saving': 'Saving...',
+    'common.cancelEdit': 'Cancel',
     'egressNAT.natType.symmetric': 'Symmetric',
-    'egressNAT.natType.fullCone': 'Full Cone'
+    'egressNAT.natType.fullCone': 'Full Cone',
+    'status.enabled': 'Enabled',
+    'status.disabled': 'Disabled',
+    'noun.managedNetwork': 'Managed Network',
+    'noun.managedNetworkReservation': 'Fixed Lease',
+    'noun.ipv6Assignment': 'IPv6 Assignment',
+    'empty.action.managedNetwork': 'Create First Managed Network',
+    'empty.action.managedNetworkReservation': 'Create First Fixed Lease',
+    'empty.action.ipv6Assignment': 'Create First Assignment',
+    'validation.ipv4CIDR': 'Enter a valid IPv4 CIDR.',
+    'validation.ipv6Prefix': 'Enter a valid IPv6 CIDR prefix.',
+    'validation.managedNetworkNotFound': 'The managed network no longer exists.',
+    'validation.managedNetworkCreateIDOmit': 'Do not send an ID when creating a managed network.',
+    'validation.managedNetworkReservationNotFound': 'The fixed lease no longer exists.',
+    'validation.managedNetworkReservationCreateIDOmit': 'Do not send an ID when creating a fixed lease.',
+    'validation.managedNetworkReservationIPv4Disabled': 'The selected managed network does not have IPv4 gateway + DHCPv4 enabled.',
+    'validation.managedNetworkReservationIPv4Invalid': 'The selected managed network has an invalid IPv4 configuration. Fix the managed network first.',
+    'validation.managedNetworkReservationIPv4InsideCIDR': 'The fixed IPv4 must stay inside the managed network IPv4 CIDR.',
+    'validation.managedNetworkReservationGatewayConflict': 'The fixed IPv4 must not be the managed network gateway address.',
+    'validation.managedNetworkReservationHostRequired': 'The fixed IPv4 must use a usable host address.',
+    'validation.managedNetworkReservationMACConflict': 'That MAC is already claimed by fixed lease #{{id}}.',
+    'validation.managedNetworkReservationIPConflict': 'That IPv4 is already claimed by fixed lease #{{id}}.',
+    'validation.managedNetworkIPv4Required': 'Fill in the IPv4 gateway CIDR when IPv4 is enabled.',
+    'validation.managedNetworkIPv6Required': 'Select the IPv6 parent interface and parent prefix when IPv6 is enabled.',
+    'validation.managedNetworkBridgeUplinkConflict': 'The bridge interface must be different from the uplink interface.',
+    'validation.managedNetworkBridgeMode': 'Choose whether to create a new bridge or use an existing interface.',
+    'validation.managedNetworkBridgeMissing': 'The selected bridge interface does not exist on this host.',
+    'validation.managedNetworkBridgeNameConflict': 'That bridge name is already used by a non-bridge interface. Pick another name or switch to using an existing interface.',
+    'validation.managedNetworkBridgeMTU': 'Bridge MTU must be between 0 and 65535.',
+    'validation.managedNetworkUplinkRequired': 'Select an uplink interface when auto egress NAT is enabled.',
+    'validation.managedNetworkIPv4PoolOrder': 'The DHCPv4 pool start must not exceed the pool end.',
+    'validation.ipv6AssignmentNotFound': 'The IPv6 assignment no longer exists.',
+    'validation.assignedPrefixInsideParent': 'Assigned prefix must stay inside the selected parent prefix.',
+    'validation.ipv6AssignmentOverlap': 'Overlaps with IPv6 assignment #{{id}}.',
+    'managedNetwork.form.title.add': 'Add Managed Network',
+    'managedNetwork.form.title.edit': 'Edit Managed Network #{{id}}',
+    'managedNetwork.form.submit.add': 'Add Managed Network',
+    'managedNetwork.form.submit.edit': 'Save Changes',
+    'managedNetwork.form.bridgeMode': 'Bridge Mode',
+    'managedNetwork.form.bridgeMode.create': 'Create New Bridge',
+    'managedNetwork.form.bridgeMode.existing': 'Use Existing Interface',
+    'managedNetwork.form.bridge.createLabel': 'New Bridge Name',
+    'managedNetwork.form.bridge.existingLabel': 'Existing Bridge / Downstream Interface',
+    'managedNetwork.form.bridge.placeholder.create': 'Type a new bridge name, for example vmbr1',
+    'managedNetwork.form.bridge.placeholder.existing': 'Search or select interface...',
+    'managedNetwork.form.advancedOptions': 'Advanced Options',
+    'managedNetwork.form.bridgeMTU': 'Bridge MTU',
+    'managedNetwork.form.bridgeVLANAware': 'VLAN Aware Bridge',
+    'managedNetwork.form.bridgeAdvancedHint': 'Only applies when creating a new managed bridge. Existing-interface mode keeps the current bridge settings.',
+    'managedNetwork.form.quickFill': 'PVE Quick Fill',
+    'managedNetworkCandidate.status.available': 'Ready',
+    'managedNetworkCandidate.status.reserved': 'Reserved',
+    'managedNetworkCandidate.status.unavailable': 'Unavailable',
+    'managedNetworkCandidate.action.create': 'Create Fixed Lease',
+    'managedNetworkCandidate.action.edit': 'Edit Fixed Lease',
+    'managedNetworkCandidate.action.fill': 'Fill Form',
+    'managedNetworkCandidate.list.ipv4Candidates': 'IPv4 Candidates',
+    'managedNetworkCandidate.list.ipv4CandidateCount': '{{count}} candidates',
+    'managedNetworkCandidate.list.empty': 'No guest MAC candidates discovered yet.',
+    'managedNetwork.list.reservations': '{{count}} fixed lease(s)',
+    'managedNetwork.repair.action': 'Repair Network',
+    'managedNetwork.repair.queued': 'Managed network repair started and runtime reload was triggered.',
+    'managedNetwork.repair.partial': 'Managed network repair partially applied and runtime reload was triggered.',
+    'managedNetwork.repair.summary.none': 'No bridge or guest-link repairs were needed.',
+    'managedNetwork.repair.summary.bridges': 'Bridges {{count}}: {{items}}',
+    'managedNetwork.repair.summary.guestLinks': 'Guest links {{count}}: {{items}}',
+    'managedNetwork.runtimeReload.action': 'Reload Runtime',
+    'managedNetwork.runtimeReload.queued': 'Managed network runtime reload queued.',
+    'managedNetwork.runtimeReload.completed': 'Managed network runtime reload completed.',
+    'managedNetwork.runtimeReload.badge.idle': 'Status',
+    'managedNetwork.runtimeReload.badge.pending': 'Pending',
+    'managedNetwork.runtimeReload.badge.reloaded': 'Reloaded',
+    'managedNetwork.runtimeReload.badge.autoRecovered': 'Recovered',
+    'managedNetwork.runtimeReload.badge.partial': 'Partial',
+    'managedNetwork.runtimeReload.badge.fallback': 'Fallback',
+    'managedNetwork.runtimeReload.source.manual': 'Manual reload',
+    'managedNetwork.runtimeReload.source.linkChange': 'Auto recovery from link change',
+    'managedNetwork.runtimeReload.result.idle': 'No reload has been recorded yet',
+    'managedNetwork.runtimeReload.result.pending': 'Waiting to run',
+    'managedNetwork.runtimeReload.result.success': 'Reload completed successfully',
+    'managedNetwork.runtimeReload.result.autoRecovered': 'Auto recovery completed successfully',
+    'managedNetwork.runtimeReload.result.partial': 'Targeted reload completed with runtime apply errors',
+    'managedNetwork.runtimeReload.result.fallback': 'Fell back to full redistribute',
+    'managedNetwork.runtimeReload.result.unknown': 'Unknown',
+    'managedNetwork.runtimeReload.tooltip.status': 'Status',
+    'managedNetwork.runtimeReload.tooltip.source': 'Source',
+    'managedNetwork.runtimeReload.tooltip.requestedAt': 'Requested At',
+    'managedNetwork.runtimeReload.tooltip.startedAt': 'Started At',
+    'managedNetwork.runtimeReload.tooltip.completedAt': 'Completed At',
+    'managedNetwork.runtimeReload.tooltip.dueAt': 'Scheduled For',
+    'managedNetwork.runtimeReload.tooltip.requestSummary': 'Triggered Interfaces',
+    'managedNetwork.runtimeReload.tooltip.appliedSummary': 'Applied Summary',
+    'managedNetwork.runtimeReload.tooltip.error': 'Error',
+    'managedNetwork.runtimeReload.tooltip.note': 'Note',
+    'managedNetwork.form.ipv6Mode.single128': 'Single IP (/128)',
+    'managedNetwork.form.ipv6Mode.prefix64': 'Delegated Prefix (/64)',
+    'managedNetwork.list.empty': 'No managed networks yet.',
+    'managedNetwork.delete.confirm': 'Delete managed network #{{id}}?',
+    'managedNetworkReservation.form.title.add': 'Add Fixed DHCPv4 Lease',
+    'managedNetworkReservation.form.title.edit': 'Edit Fixed DHCPv4 Lease #{{id}}',
+    'managedNetworkReservation.form.submit.add': 'Add Fixed Lease',
+    'managedNetworkReservation.form.submit.edit': 'Save Changes',
+    'managedNetworkReservation.form.managedNetwork.empty': 'Create a managed network first',
+    'managedNetworkReservation.list.empty': 'No fixed DHCPv4 leases yet.',
+    'managedNetworkReservation.delete.confirm': 'Delete fixed DHCPv4 lease #{{id}}?',
+    'ipv6.form.desc': 'Record which IPv6 address or prefix from a parent prefix the target side may use. This does not mean binding that address onto the host-side target interface.',
+    'ipv6.form.title.add': 'Add IPv6 Assignment',
+    'ipv6.form.title.edit': 'Edit IPv6 Assignment #{{id}}',
+    'ipv6.form.submit.add': 'Add Assignment',
+    'ipv6.form.submit.edit': 'Save Changes',
+    'ipv6.form.parentPrefix.placeholder': 'Select a parent interface first',
+    'ipv6.form.parentPrefix.empty': 'The selected interface has no usable IPv6 prefixes',
+    'ipv6.form.modeHint.generic': '/128 means a single IPv6 for the target to use and can be announced with managed RA + DHCPv6 IA_NA; /64 suits a guest subnet and will advertise that prefix with RA for SLAAC; other prefix lengths are better treated as delegated downstream prefixes. The address is not bound to the host-side target interface.',
+    'ipv6.form.modeHint.singleAddress': '/128 single-address semantics: the target side uses this IPv6 itself instead of adding it onto the host-side target interface. The runtime will send managed RA on the target interface and hand out this address via DHCPv6 IA_NA.',
+    'ipv6.form.modeHint.slaacPrefix': '/64 subnet semantics: hand the whole prefix to the target side, which suits a guest subnet; the runtime will send RA on the target interface so the guest can pick it up via SLAAC.',
+    'ipv6.form.modeHint.delegatedPrefix': '/{{prefix_len}} delegated-prefix semantics: route this prefix toward the target side for downstream subnet planning or manual addressing.',
+    'ipv6.list.assignmentCount': 'Handout Count',
+    'ipv6.list.assignmentCount.ra': 'RA {{count}}',
+    'ipv6.list.assignmentCount.dhcpv6': 'DHCPv6 {{count}}',
+    'ipv6.delete.confirm': 'Delete IPv6 assignment #{{id}}?',
+    'ipv6.list.empty': 'No IPv6 assignments yet.',
+    'search.managedNetworkReservations.placeholder': 'Search managed network, bridge, MAC, IPv4...',
+    'search.managedNetworkReservationCandidates.placeholder': 'Search managed network, guest, interface, MAC, IPv4...',
+    'common.dash': '-'
   };
 
   const elements = {
@@ -215,6 +346,25 @@ function createHarness() {
     egressNATOutSourceIPOptions: createInput('egressNATOutSourceIPOptions'),
     egressNATsSearchInput: createInput('egressNATsSearchInput'),
     emptyAddEgressNATBtn: createInput('emptyAddEgressNATBtn'),
+    editIPv6AssignmentId: createInput('editIPv6AssignmentId'),
+    ipv6AssignmentForm: createInput('ipv6AssignmentForm'),
+    ipv6AssignmentFormTitle: createInput('ipv6AssignmentFormTitle'),
+    ipv6AssignmentSubmitBtn: createInput('ipv6AssignmentSubmitBtn'),
+    ipv6AssignmentCancelBtn: createInput('ipv6AssignmentCancelBtn'),
+    ipv6AssignmentModeHint: createInput('ipv6AssignmentModeHint'),
+    ipv6AssignmentsBody: createInput('ipv6AssignmentsBody'),
+    noIPv6Assignments: createInput('noIPv6Assignments'),
+    ipv6ParentInterface: createInput('ipv6ParentInterface'),
+    ipv6ParentPicker: createInput('ipv6ParentPicker'),
+    ipv6ParentOptions: createInput('ipv6ParentOptions'),
+    ipv6ParentPrefix: createInput('ipv6ParentPrefix'),
+    ipv6TargetInterface: createInput('ipv6TargetInterface'),
+    ipv6TargetPicker: createInput('ipv6TargetPicker'),
+    ipv6TargetOptions: createInput('ipv6TargetOptions'),
+    ipv6AssignedPrefix: createInput('ipv6AssignedPrefix'),
+    ipv6AssignmentRemark: createInput('ipv6AssignmentRemark'),
+    ipv6AssignmentsSearchInput: createInput('ipv6AssignmentsSearchInput'),
+    emptyAddIPv6AssignmentBtn: createInput('emptyAddIPv6AssignmentBtn'),
     tokenSubmit: createInput('tokenSubmit'),
     tokenInput: createInput('tokenInput'),
     logoutBtn: createInput('logoutBtn'),
@@ -233,7 +383,65 @@ function createHarness() {
     siteBackendSourceIPOptions: createInput('siteBackendSourceIPOptions'),
     rangeOutSourceIPOptions: createInput('rangeOutSourceIPOptions'),
     ruleOutSourceIPOptions: createInput('ruleOutSourceIPOptions'),
-    rangeRemark: createInput('rangeRemark')
+    rangeRemark: createInput('rangeRemark'),
+    editManagedNetworkId: createInput('editManagedNetworkId'),
+    managedNetworkForm: createInput('managedNetworkForm'),
+    managedNetworkFormTitle: createInput('managedNetworkFormTitle'),
+    managedNetworkSubmitBtn: createInput('managedNetworkSubmitBtn'),
+    managedNetworkCancelBtn: createInput('managedNetworkCancelBtn'),
+    managedNetworkPVEQuickFillBtn: createInput('managedNetworkPVEQuickFillBtn'),
+    managedNetworkName: createInput('managedNetworkName'),
+    managedNetworkRemark: createInput('managedNetworkRemark'),
+    managedNetworkBridgeLabel: createInput('managedNetworkBridgeLabel'),
+    managedNetworkBridgeMode: createInput('managedNetworkBridgeMode'),
+    managedNetworkBridgeInterface: createInput('managedNetworkBridgeInterface'),
+    managedNetworkBridgePicker: createInput('managedNetworkBridgePicker'),
+    managedNetworkBridgeOptions: createInput('managedNetworkBridgeOptions'),
+    managedNetworkBridgeAdvancedRow: createInput('managedNetworkBridgeAdvancedRow'),
+    managedNetworkBridgeAdvancedDetails: createInput('managedNetworkBridgeAdvancedDetails'),
+    managedNetworkBridgeMTU: createInput('managedNetworkBridgeMTU'),
+    managedNetworkBridgeVLANAware: createInput('managedNetworkBridgeVLANAware'),
+    managedNetworkUplinkInterface: createInput('managedNetworkUplinkInterface'),
+    managedNetworkUplinkPicker: createInput('managedNetworkUplinkPicker'),
+    managedNetworkUplinkOptions: createInput('managedNetworkUplinkOptions'),
+    managedNetworkIPv4Enabled: createInput('managedNetworkIPv4Enabled'),
+    managedNetworkIPv4CIDR: createInput('managedNetworkIPv4CIDR'),
+    managedNetworkIPv4Gateway: createInput('managedNetworkIPv4Gateway'),
+    managedNetworkIPv4PoolStart: createInput('managedNetworkIPv4PoolStart'),
+    managedNetworkIPv4PoolEnd: createInput('managedNetworkIPv4PoolEnd'),
+    managedNetworkIPv4DNSServers: createInput('managedNetworkIPv4DNSServers'),
+    managedNetworkIPv6Enabled: createInput('managedNetworkIPv6Enabled'),
+    managedNetworkIPv6ParentInterface: createInput('managedNetworkIPv6ParentInterface'),
+    managedNetworkIPv6ParentPicker: createInput('managedNetworkIPv6ParentPicker'),
+    managedNetworkIPv6ParentOptions: createInput('managedNetworkIPv6ParentOptions'),
+    managedNetworkIPv6ParentPrefix: createInput('managedNetworkIPv6ParentPrefix'),
+    managedNetworkIPv6AssignmentMode: createInput('managedNetworkIPv6AssignmentMode'),
+    managedNetworkAutoEgressNAT: createInput('managedNetworkAutoEgressNAT'),
+    managedNetworksBody: createInput('managedNetworksBody'),
+    noManagedNetworks: createInput('noManagedNetworks'),
+    managedNetworksSearchInput: createInput('managedNetworksSearchInput'),
+    managedNetworkReservationCandidatesFilterMeta: createInput('managedNetworkReservationCandidatesFilterMeta'),
+    managedNetworkReservationCandidatesSearchInput: createInput('managedNetworkReservationCandidatesSearchInput'),
+    clearManagedNetworkReservationCandidatesFilter: createInput('clearManagedNetworkReservationCandidatesFilter'),
+    managedNetworkRuntimeStatusBtn: createInput('managedNetworkRuntimeStatusBtn'),
+    reloadManagedNetworkRuntimeBtn: createInput('reloadManagedNetworkRuntimeBtn'),
+    emptyAddManagedNetworkBtn: createInput('emptyAddManagedNetworkBtn'),
+    editManagedNetworkReservationId: createInput('editManagedNetworkReservationId'),
+    managedNetworkReservationForm: createInput('managedNetworkReservationForm'),
+    managedNetworkReservationFormTitle: createInput('managedNetworkReservationFormTitle'),
+    managedNetworkReservationSubmitBtn: createInput('managedNetworkReservationSubmitBtn'),
+    managedNetworkReservationCancelBtn: createInput('managedNetworkReservationCancelBtn'),
+    managedNetworkReservationManagedNetworkId: createInput('managedNetworkReservationManagedNetworkId'),
+    managedNetworkReservationMACAddress: createInput('managedNetworkReservationMACAddress'),
+    managedNetworkReservationIPv4Address: createInput('managedNetworkReservationIPv4Address'),
+    managedNetworkReservationRemark: createInput('managedNetworkReservationRemark'),
+    managedNetworkReservationCandidatesBody: createInput('managedNetworkReservationCandidatesBody'),
+    managedNetworkReservationCandidatesPagination: createInput('managedNetworkReservationCandidatesPagination'),
+    noManagedNetworkReservationCandidates: createInput('noManagedNetworkReservationCandidates'),
+    managedNetworkReservationsBody: createInput('managedNetworkReservationsBody'),
+    noManagedNetworkReservations: createInput('noManagedNetworkReservations'),
+    managedNetworkReservationsSearchInput: createInput('managedNetworkReservationsSearchInput'),
+    emptyAddManagedNetworkReservationBtn: createInput('emptyAddManagedNetworkReservationBtn')
   };
 
   elements.egressNATProtocolTCP.value = 'tcp';
@@ -252,8 +460,23 @@ function createHarness() {
       rules: { data: [], selectedIds: new Set(), batchDeleting: false },
       sites: { data: [] },
       ranges: { data: [] },
-      egressNATs: { data: [] }
+      managedNetworks: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
+      managedNetworkReservationCandidates: { data: [], page: 1, pageSize: 10, searchQuery: '', selectedIPv4ByKey: {} },
+      managedNetworkReservations: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
+      egressNATs: { data: [] },
+      ipv6Assignments: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
+      forms: {
+        managedNetwork: { mode: 'add', sourceId: 0 },
+        managedNetworkReservation: { mode: 'add', sourceId: 0 },
+        ipv6Assignment: { mode: 'add', sourceId: 0 }
+      },
+      pendingForms: {
+        managedNetwork: false,
+        managedNetworkReservation: false,
+        ipv6Assignment: false
+      }
     },
+    hostNetworkInterfaces: [],
     el: {
       editRuleId: elements.editRuleId,
       inInterface: elements.inInterface,
@@ -297,6 +520,64 @@ function createHarness() {
       rangeTransparentWarning: elements.rangeTransparentWarning,
       rangeForm: elements.rangeForm,
       rangeCancelBtn: elements.rangeCancelBtn,
+      editManagedNetworkId: elements.editManagedNetworkId,
+      managedNetworkForm: elements.managedNetworkForm,
+      managedNetworkFormTitle: elements.managedNetworkFormTitle,
+      managedNetworkSubmitBtn: elements.managedNetworkSubmitBtn,
+      managedNetworkCancelBtn: elements.managedNetworkCancelBtn,
+      managedNetworkPVEQuickFillBtn: elements.managedNetworkPVEQuickFillBtn,
+      managedNetworkName: elements.managedNetworkName,
+      managedNetworkRemark: elements.managedNetworkRemark,
+      managedNetworkBridgeLabel: elements.managedNetworkBridgeLabel,
+      managedNetworkBridgeMode: elements.managedNetworkBridgeMode,
+      managedNetworkBridgeInterface: elements.managedNetworkBridgeInterface,
+      managedNetworkBridgePicker: elements.managedNetworkBridgePicker,
+      managedNetworkBridgeOptions: elements.managedNetworkBridgeOptions,
+      managedNetworkBridgeAdvancedRow: elements.managedNetworkBridgeAdvancedRow,
+      managedNetworkBridgeAdvancedDetails: elements.managedNetworkBridgeAdvancedDetails,
+      managedNetworkBridgeMTU: elements.managedNetworkBridgeMTU,
+      managedNetworkBridgeVLANAware: elements.managedNetworkBridgeVLANAware,
+      managedNetworkUplinkInterface: elements.managedNetworkUplinkInterface,
+      managedNetworkUplinkPicker: elements.managedNetworkUplinkPicker,
+      managedNetworkUplinkOptions: elements.managedNetworkUplinkOptions,
+      managedNetworkIPv4Enabled: elements.managedNetworkIPv4Enabled,
+      managedNetworkIPv4CIDR: elements.managedNetworkIPv4CIDR,
+      managedNetworkIPv4Gateway: elements.managedNetworkIPv4Gateway,
+      managedNetworkIPv4PoolStart: elements.managedNetworkIPv4PoolStart,
+      managedNetworkIPv4PoolEnd: elements.managedNetworkIPv4PoolEnd,
+      managedNetworkIPv4DNSServers: elements.managedNetworkIPv4DNSServers,
+      managedNetworkIPv6Enabled: elements.managedNetworkIPv6Enabled,
+      managedNetworkIPv6ParentInterface: elements.managedNetworkIPv6ParentInterface,
+      managedNetworkIPv6ParentPicker: elements.managedNetworkIPv6ParentPicker,
+      managedNetworkIPv6ParentOptions: elements.managedNetworkIPv6ParentOptions,
+      managedNetworkIPv6ParentPrefix: elements.managedNetworkIPv6ParentPrefix,
+      managedNetworkIPv6AssignmentMode: elements.managedNetworkIPv6AssignmentMode,
+      managedNetworkAutoEgressNAT: elements.managedNetworkAutoEgressNAT,
+      managedNetworksBody: elements.managedNetworksBody,
+      noManagedNetworks: elements.noManagedNetworks,
+      managedNetworksSearchInput: elements.managedNetworksSearchInput,
+      managedNetworkReservationCandidatesFilterMeta: elements.managedNetworkReservationCandidatesFilterMeta,
+      managedNetworkReservationCandidatesSearchInput: elements.managedNetworkReservationCandidatesSearchInput,
+      clearManagedNetworkReservationCandidatesFilter: elements.clearManagedNetworkReservationCandidatesFilter,
+      managedNetworkRuntimeStatusBtn: elements.managedNetworkRuntimeStatusBtn,
+      reloadManagedNetworkRuntimeBtn: elements.reloadManagedNetworkRuntimeBtn,
+      emptyAddManagedNetworkBtn: elements.emptyAddManagedNetworkBtn,
+      editManagedNetworkReservationId: elements.editManagedNetworkReservationId,
+      managedNetworkReservationForm: elements.managedNetworkReservationForm,
+      managedNetworkReservationFormTitle: elements.managedNetworkReservationFormTitle,
+      managedNetworkReservationSubmitBtn: elements.managedNetworkReservationSubmitBtn,
+      managedNetworkReservationCancelBtn: elements.managedNetworkReservationCancelBtn,
+      managedNetworkReservationManagedNetworkId: elements.managedNetworkReservationManagedNetworkId,
+      managedNetworkReservationMACAddress: elements.managedNetworkReservationMACAddress,
+      managedNetworkReservationIPv4Address: elements.managedNetworkReservationIPv4Address,
+      managedNetworkReservationRemark: elements.managedNetworkReservationRemark,
+      managedNetworkReservationCandidatesBody: elements.managedNetworkReservationCandidatesBody,
+      managedNetworkReservationCandidatesPagination: elements.managedNetworkReservationCandidatesPagination,
+      noManagedNetworkReservationCandidates: elements.noManagedNetworkReservationCandidates,
+      managedNetworkReservationsBody: elements.managedNetworkReservationsBody,
+      noManagedNetworkReservations: elements.noManagedNetworkReservations,
+      managedNetworkReservationsSearchInput: elements.managedNetworkReservationsSearchInput,
+      emptyAddManagedNetworkReservationBtn: elements.emptyAddManagedNetworkReservationBtn,
       editEgressNATId: elements.editEgressNATId,
       egressNATForm: elements.egressNATForm,
       egressNATFormTitle: elements.egressNATFormTitle,
@@ -323,6 +604,25 @@ function createHarness() {
       egressNATProtocolICMP: elements.egressNATProtocolICMP,
       egressNATsSearchInput: elements.egressNATsSearchInput,
       emptyAddEgressNATBtn: elements.emptyAddEgressNATBtn,
+      editIPv6AssignmentId: elements.editIPv6AssignmentId,
+      ipv6AssignmentForm: elements.ipv6AssignmentForm,
+      ipv6AssignmentFormTitle: elements.ipv6AssignmentFormTitle,
+      ipv6AssignmentSubmitBtn: elements.ipv6AssignmentSubmitBtn,
+      ipv6AssignmentCancelBtn: elements.ipv6AssignmentCancelBtn,
+      ipv6AssignmentModeHint: elements.ipv6AssignmentModeHint,
+      ipv6AssignmentsBody: elements.ipv6AssignmentsBody,
+      noIPv6Assignments: elements.noIPv6Assignments,
+      ipv6ParentInterface: elements.ipv6ParentInterface,
+      ipv6ParentPicker: elements.ipv6ParentPicker,
+      ipv6ParentOptions: elements.ipv6ParentOptions,
+      ipv6ParentPrefix: elements.ipv6ParentPrefix,
+      ipv6TargetInterface: elements.ipv6TargetInterface,
+      ipv6TargetPicker: elements.ipv6TargetPicker,
+      ipv6TargetOptions: elements.ipv6TargetOptions,
+      ipv6AssignedPrefix: elements.ipv6AssignedPrefix,
+      ipv6AssignmentRemark: elements.ipv6AssignmentRemark,
+      ipv6AssignmentsSearchInput: elements.ipv6AssignmentsSearchInput,
+      emptyAddIPv6AssignmentBtn: elements.emptyAddIPv6AssignmentBtn,
       batchDeleteRulesBtn: elements.batchDeleteRulesBtn,
       rulesSelectAll: elements.rulesSelectAll
     },
@@ -358,6 +658,15 @@ function createHarness() {
     isValidIP(ip) {
       const text = String(ip || '').trim();
       return !!this.parseIPv4(text) || this.isValidIPv6(text);
+    },
+    isValidIPv6Prefix(value) {
+      const text = String(value || '').trim();
+      if (!text) return false;
+      const slash = text.lastIndexOf('/');
+      if (slash <= 0 || slash === text.length - 1) return false;
+      const address = text.slice(0, slash).trim();
+      const prefixLen = parseInt(text.slice(slash + 1).trim(), 10);
+      return this.isValidIPv6(address) && !Number.isNaN(prefixLen) && prefixLen >= 1 && prefixLen <= 128;
     },
     ipFamily(ip) {
       const text = String(ip || '').trim();
@@ -514,6 +823,15 @@ function createHarness() {
       input.ariaInvalid = false;
       input.errorMessage = '';
     },
+    validateRequiredField(input) {
+      const value = input && input.value != null ? String(input.value).trim() : '';
+      if (value) {
+        this.clearFieldError(input);
+        return true;
+      }
+      this.setFieldError(input, this.t('validation.required'));
+      return false;
+    },
     clearFormErrors() {},
     focusFirstError() {},
     confirmAction() {
@@ -522,7 +840,9 @@ function createHarness() {
     renderRulesTable() {},
     renderSitesTable() {},
     renderRangesTable() {},
+    renderManagedNetworksTable() {},
     renderEgressNATsTable() {},
+    renderIPv6AssignmentsTable() {},
     loadRules() {
       return Promise.resolve();
     },
@@ -532,13 +852,21 @@ function createHarness() {
     loadRanges() {
       return Promise.resolve();
     },
+    loadManagedNetworks() {
+      return Promise.resolve();
+    },
     loadEgressNATs() {
+      return Promise.resolve();
+    },
+    loadIPv6Assignments() {
       return Promise.resolve();
     },
     exitRuleEditMode() {},
     exitSiteEditMode() {},
     exitRangeEditMode() {},
+    exitManagedNetworkEditMode() {},
     exitEgressNATEditMode() {},
+    exitIPv6AssignmentEditMode() {},
     isRowPending(type, id) {
       return !!pendingRows[type + ':' + id];
     },
@@ -862,12 +1190,17 @@ function createHarness() {
   loadScript(context, path.join(baseDir, 'sites.js'));
   loadScript(context, path.join(baseDir, 'ranges.js'));
   loadScript(context, path.join(baseDir, 'egress_nats.js'));
+  loadScript(context, path.join(baseDir, 'ipv6_assignments.js'));
+  loadScript(context, path.join(baseDir, 'managed_networks.js'));
   loadScript(context, path.join(baseDir, 'init.js'));
 
   app.renderRulesTable = function renderRulesTable() {};
   app.renderSitesTable = function renderSitesTable() {};
   app.renderRangesTable = function renderRangesTable() {};
+  app.renderManagedNetworksTable = function renderManagedNetworksTable() {};
+  app.renderManagedNetworkReservationsTable = function renderManagedNetworkReservationsTable() {};
   app.renderEgressNATsTable = function renderEgressNATsTable() {};
+  app.renderIPv6AssignmentsTable = function renderIPv6AssignmentsTable() {};
   app.loadRules = function loadRules() {
     return Promise.resolve();
   };
@@ -877,7 +1210,16 @@ function createHarness() {
   app.loadRanges = function loadRanges() {
     return Promise.resolve();
   };
+  app.loadManagedNetworks = function loadManagedNetworks() {
+    return Promise.resolve();
+  };
+  app.loadManagedNetworkReservations = function loadManagedNetworkReservations() {
+    return Promise.resolve();
+  };
   app.loadEgressNATs = function loadEgressNATs() {
+    return Promise.resolve();
+  };
+  app.loadIPv6Assignments = function loadIPv6Assignments() {
     return Promise.resolve();
   };
   app.populateEgressNATSourceIPSelect = function populateEgressNATSourceIPSelect() {};
@@ -890,6 +1232,18 @@ test('translateValidationMessage covers batch-required message', () => {
   assert.equal(
     app.translateValidationMessage('at least one batch operation is required'),
     'At least one batch operation is required.'
+  );
+});
+
+test('translateValidationMessage covers managed network reservation conflict messages', () => {
+  const { app } = createHarness();
+  assert.equal(
+    app.translateValidationMessage('mac_address conflicts with reservation #12'),
+    'That MAC is already claimed by fixed lease #12.'
+  );
+  assert.equal(
+    app.translateValidationMessage('ipv4_address conflicts with reservation #34'),
+    'That IPv4 is already claimed by fixed lease #34.'
   );
 });
 
@@ -1009,6 +1363,18 @@ test('translateRuntimeReason covers IPv6 kernel fallback reasons', () => {
   assert.equal(
     app.translateRuntimeReason('kernel dataplane currently does not support transparent IPv6 rules'),
     'The kernel dataplane does not support transparent IPv6 rules yet.'
+  );
+  assert.equal(
+    app.translateRuntimeReason('xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"'),
+    'XDP generic/mixed attachment is disabled by default; enable the experimental `xdp_generic` feature to allow it.'
+  );
+  assert.equal(
+    app.translateRuntimeReason('attach xdp program on ifindex 3: driver=operation not supported; generic skipped: xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"'),
+    'attach xdp program on ifindex 3: driver=operation not supported; generic skipped: XDP generic/mixed attachment is disabled by default; enable the experimental `xdp_generic` feature to allow it.'
+  );
+  assert.equal(
+    app.translateRuntimeReason('xdp dataplane nat redirect over veth is disabled on 5.10.0-39-amd64; use tc or upgrade to kernel 5.11+'),
+    'XDP NAT redirect on veth is disabled on this kernel; fall back to TC or upgrade to a newer kernel.'
   );
   assert.equal(
     app.translateRuntimeReason('some other runtime reason'),
@@ -1260,6 +1626,801 @@ test('populateEgressNATInterfaceSelectors disables child picker for single-targe
   assert.equal(elements.egressNATChildPicker.placeholder, 'Selected Interface');
 });
 
+test('getParentInterfaceItems keeps only host interfaces with IPv6 prefixes', () => {
+  const { app } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv4', ip: '15.235.165.86', cidr: '15.235.165.86/24' },
+        { family: 'ipv6', ip: '2402:db8::1', cidr: '2402:db8::/64' }
+      ]
+    },
+    {
+      name: 'tap100i0',
+      kind: 'tuntap',
+      parent: 'vmbr1',
+      addresses: []
+    },
+    {
+      name: 'vmbr1',
+      kind: 'bridge',
+      addresses: [{ family: 'ipv4', ip: '10.0.0.254', cidr: '10.0.0.254/24' }]
+    }
+  ];
+
+  assert.deepEqual(
+    app.getParentInterfaceItems().map((item) => item.name),
+    ['vmbr0']
+  );
+});
+
+test('refreshIPv6AssignmentInterfaceSelectors populates parent target and prefix options from host network', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv6', ip: '2402:db8:1::1', cidr: '2402:db8:1::/64' },
+        { family: 'ipv6', ip: '2402:db8:2::1', cidr: '2402:db8:2::/64' }
+      ]
+    },
+    {
+      name: 'tap100i0',
+      kind: 'tuntap',
+      parent: 'vmbr0',
+      addresses: [{ family: 'ipv6', ip: '2402:db8:1::10', cidr: '2402:db8:1::10/128' }]
+    },
+    {
+      name: 'eno1',
+      kind: 'device',
+      addresses: [{ family: 'ipv4', ip: '198.51.100.10', cidr: '198.51.100.10/24' }]
+    }
+  ];
+  elements.ipv6ParentInterface.value = 'vmbr0';
+  elements.ipv6TargetInterface.value = 'tap100i0';
+  elements.ipv6ParentPrefix.value = '2402:db8:2::/64';
+
+  app.refreshIPv6AssignmentInterfaceSelectors({ preservePrefix: true });
+
+  assert.equal(elements.ipv6ParentPicker.value, 'vmbr0 [bridge] (2402:db8:1::1, 2402:db8:2::1)');
+  assert.equal(elements.ipv6TargetPicker.value, 'tap100i0 [tuntap via vmbr0] (2402:db8:1::10)');
+  assert.deepEqual(
+    elements.ipv6TargetOptions.options.map((option) => option.label),
+    ['eno1', 'tap100i0']
+  );
+  assert.deepEqual(
+    elements.ipv6ParentPrefix.options.map((option) => option.value),
+    ['', '2402:db8:1::/64', '2402:db8:2::/64']
+  );
+  assert.equal(elements.ipv6ParentPrefix.value, '2402:db8:2::/64');
+});
+
+test('syncIPv6AssignedPrefixFromParentPrefix auto-derives single IPv6 values from /64 parent prefixes', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv6', ip: '2402:db8:1::1', cidr: '2402:db8:1::/64' },
+        { family: 'ipv6', ip: '2402:db8:2::1', cidr: '2402:db8:2::/64' }
+      ]
+    }
+  ];
+  app.state.ipv6Assignments.data = [
+    {
+      id: 7,
+      parent_interface: 'vmbr0',
+      parent_prefix: '2402:db8:1::/64',
+      assigned_prefix: '2402:db8:1::2/128'
+    }
+  ];
+
+  elements.ipv6ParentInterface.value = 'vmbr0';
+  elements.ipv6AssignedPrefix.value = '';
+  elements.ipv6ParentPrefix.value = '2402:db8:1::/64';
+  app.syncIPv6AssignedPrefixFromParentPrefix();
+  assert.equal(elements.ipv6AssignedPrefix.value, '2402:db8:1::3/128');
+  assert.equal(
+    elements.ipv6AssignmentModeHint.textContent,
+    '/128 single-address semantics: the target side uses this IPv6 itself instead of adding it onto the host-side target interface. The runtime will send managed RA on the target interface and hand out this address via DHCPv6 IA_NA.'
+  );
+
+  elements.ipv6ParentPrefix.value = '2402:db8:2::/64';
+  app.syncIPv6AssignedPrefixFromParentPrefix();
+  assert.equal(elements.ipv6AssignedPrefix.value, '2402:db8:2::2/128');
+});
+
+test('syncIPv6AssignedPrefixFromParentPrefix auto-derives the next free /64 from shorter parent prefixes', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'uplink0',
+      kind: 'device',
+      addresses: [
+        { family: 'ipv6', ip: '2402:db8:100::1', cidr: '2402:db8:100::/48' }
+      ]
+    }
+  ];
+  app.state.ipv6Assignments.data = [
+    {
+      id: 11,
+      parent_interface: 'uplink0',
+      parent_prefix: '2402:db8:100::/48',
+      assigned_prefix: '2402:db8:100::/64'
+    }
+  ];
+
+  elements.ipv6ParentInterface.value = 'uplink0';
+  elements.ipv6AssignedPrefix.value = '';
+  elements.ipv6ParentPrefix.value = '2402:db8:100::/48';
+
+  app.syncIPv6AssignedPrefixFromParentPrefix();
+
+  assert.equal(elements.ipv6AssignedPrefix.value, '2402:db8:100:1::/64');
+  assert.equal(
+    elements.ipv6AssignmentModeHint.textContent,
+    '/64 subnet semantics: hand the whole prefix to the target side, which suits a guest subnet; the runtime will send RA on the target interface so the guest can pick it up via SLAAC.'
+  );
+});
+
+test('syncIPv6AssignedPrefixFromParentPrefix keeps manual assigned prefixes intact', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv6', ip: '2402:db8:1::1', cidr: '2402:db8:1::/64' },
+        { family: 'ipv6', ip: '2402:db8:2::1', cidr: '2402:db8:2::/64' }
+      ]
+    }
+  ];
+
+  elements.ipv6ParentInterface.value = 'vmbr0';
+  elements.ipv6AssignedPrefix.value = '';
+  elements.ipv6ParentPrefix.value = '2402:db8:1::/64';
+  app.syncIPv6AssignedPrefixFromParentPrefix();
+  elements.ipv6AssignedPrefix.value = '2402:db8:1:100::/80';
+
+  elements.ipv6ParentPrefix.value = '2402:db8:2::/64';
+  app.syncIPv6AssignedPrefixFromParentPrefix();
+  assert.equal(elements.ipv6AssignedPrefix.value, '2402:db8:1:100::/80');
+});
+
+test('buildIPv6AssignmentFromForm returns normalized IPv6 assignment payload', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [{ family: 'ipv6', ip: '2402:db8:1::1', cidr: '2402:db8:1::/64' }]
+    },
+    {
+      name: 'tap100i0',
+      kind: 'tuntap',
+      parent: 'vmbr0',
+      addresses: []
+    }
+  ];
+  elements.ipv6ParentInterface.value = 'vmbr0';
+  elements.ipv6TargetInterface.value = 'tap100i0';
+  elements.ipv6ParentPrefix.value = '2402:db8:1::/64';
+  elements.ipv6AssignedPrefix.value = '2402:db8:1:100::/80';
+  elements.ipv6AssignmentRemark.value = 'VM 100 delegated subnet';
+
+  const item = app.buildIPv6AssignmentFromForm();
+
+  assert.equal(item.parent_interface, 'vmbr0');
+  assert.equal(item.target_interface, 'tap100i0');
+  assert.equal(item.parent_prefix, '2402:db8:1::/64');
+  assert.equal(item.assigned_prefix, '2402:db8:1:100::/80');
+  assert.equal(item.remark, 'VM 100 delegated subnet');
+});
+
+test('refreshManagedNetworkInterfaceSelectors populates bridge uplink and ipv6 parent selectors from host network', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv4', ip: '192.0.2.1', cidr: '192.0.2.0/24' },
+        { family: 'ipv6', ip: '2402:db8:1::1', cidr: '2402:db8:1::/64' }
+      ]
+    },
+    {
+      name: 'vmbr1',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv4', ip: '10.0.0.1', cidr: '10.0.0.0/24' }
+      ]
+    },
+    {
+      name: 'eno1',
+      kind: 'device',
+      addresses: [
+        { family: 'ipv4', ip: '198.51.100.10', cidr: '198.51.100.0/24' }
+      ]
+    }
+  ];
+  elements.managedNetworkBridgeMode.value = 'existing';
+  elements.managedNetworkBridgeInterface.value = 'vmbr1';
+  elements.managedNetworkUplinkInterface.value = 'eno1';
+  elements.managedNetworkIPv6Enabled.checked = true;
+  elements.managedNetworkIPv6ParentInterface.value = 'vmbr0';
+
+  app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: false });
+
+  assert.equal(elements.managedNetworkBridgePicker.value, 'vmbr1 [bridge] (10.0.0.1)');
+  assert.equal(elements.managedNetworkUplinkPicker.value, 'eno1 [device] (198.51.100.10)');
+  assert.equal(elements.managedNetworkIPv6ParentPicker.value, 'vmbr0 [bridge] (192.0.2.1, 2402:db8:1::1)');
+  assert.deepEqual(
+    elements.managedNetworkIPv6ParentPrefix.options.map((option) => option.value),
+    ['', '2402:db8:1::/64']
+  );
+  assert.equal(elements.managedNetworkIPv6ParentPrefix.value, '2402:db8:1::/64');
+});
+
+test('buildManagedNetworkFromForm returns normalized managed network payload', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr1',
+      kind: 'bridge',
+      addresses: [{ family: 'ipv4', ip: '10.0.0.1', cidr: '10.0.0.0/24' }]
+    },
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [{ family: 'ipv6', ip: '2402:db8:1::1', cidr: '2402:db8:1::/64' }]
+    },
+    {
+      name: 'eno1',
+      kind: 'device',
+      addresses: [{ family: 'ipv4', ip: '198.51.100.10', cidr: '198.51.100.0/24' }]
+    }
+  ];
+
+  elements.managedNetworkName.value = 'vm100-lan';
+  elements.managedNetworkRemark.value = 'VM 100 private LAN';
+  elements.managedNetworkBridgeMode.value = 'existing';
+  elements.managedNetworkBridgeInterface.value = 'vmbr1';
+  elements.managedNetworkBridgePicker.value = 'vmbr1';
+  elements.managedNetworkBridgeMTU.value = '9000';
+  elements.managedNetworkBridgeVLANAware.checked = true;
+  elements.managedNetworkUplinkInterface.value = 'eno1';
+  elements.managedNetworkIPv4Enabled.checked = true;
+  elements.managedNetworkIPv4CIDR.value = '10.0.0.1/24';
+  elements.managedNetworkIPv4PoolStart.value = '10.0.0.100';
+  elements.managedNetworkIPv4PoolEnd.value = '10.0.0.150';
+  elements.managedNetworkIPv4DNSServers.value = '1.1.1.1, 8.8.8.8';
+  elements.managedNetworkIPv6Enabled.checked = true;
+  elements.managedNetworkIPv6ParentInterface.value = 'vmbr0';
+  elements.managedNetworkIPv6ParentPrefix.value = '2402:db8:1::/64';
+  elements.managedNetworkIPv6AssignmentMode.value = 'prefix_64';
+  elements.managedNetworkAutoEgressNAT.checked = true;
+
+  const item = app.buildManagedNetworkFromForm();
+
+  assert.equal(item.name, 'vm100-lan');
+  assert.equal(item.remark, 'VM 100 private LAN');
+  assert.equal(item.bridge_mode, 'existing');
+  assert.equal(item.bridge, 'vmbr1');
+  assert.equal(item.bridge_mtu, 0);
+  assert.equal(item.bridge_vlan_aware, false);
+  assert.equal(item.uplink_interface, 'eno1');
+  assert.equal(item.ipv4_enabled, true);
+  assert.equal(item.ipv4_cidr, '10.0.0.1/24');
+  assert.equal(item.ipv4_pool_start, '10.0.0.100');
+  assert.equal(item.ipv4_pool_end, '10.0.0.150');
+  assert.equal(item.ipv4_dns_servers, '1.1.1.1, 8.8.8.8');
+  assert.equal(item.ipv6_enabled, true);
+  assert.equal(item.ipv6_parent_interface, 'vmbr0');
+  assert.equal(item.ipv6_parent_prefix, '2402:db8:1::/64');
+  assert.equal(item.ipv6_assignment_mode, 'prefix_64');
+  assert.equal(item.auto_egress_nat, true);
+});
+
+test('buildManagedNetworkFromForm includes create-only bridge settings for new bridges', () => {
+  const { app, elements } = createHarness();
+
+  elements.managedNetworkName.value = 'vm200-lan';
+  elements.managedNetworkBridgeMode.value = 'create';
+  elements.managedNetworkBridgeInterface.value = 'vmbr2';
+  elements.managedNetworkBridgePicker.value = 'vmbr2';
+  elements.managedNetworkBridgeMTU.value = '9000';
+  elements.managedNetworkBridgeVLANAware.checked = true;
+
+  const item = app.buildManagedNetworkFromForm();
+
+  assert.equal(item.bridge_mode, 'create');
+  assert.equal(item.bridge, 'vmbr2');
+  assert.equal(item.bridge_mtu, 9000);
+  assert.equal(item.bridge_vlan_aware, true);
+});
+
+test('syncManagedNetworkFormState hides and collapses bridge advanced options for existing interfaces', () => {
+  const { app, elements } = createHarness();
+
+  elements.managedNetworkBridgeMode.value = 'existing';
+  elements.managedNetworkBridgeAdvancedDetails.open = true;
+
+  app.syncManagedNetworkFormState();
+
+  assert.equal(elements.managedNetworkBridgeAdvancedRow.hidden, true);
+  assert.equal(elements.managedNetworkBridgeAdvancedDetails.open, false);
+  assert.equal(elements.managedNetworkBridgeMTU.disabled, true);
+  assert.equal(elements.managedNetworkBridgeVLANAware.disabled, true);
+});
+
+test('enterManagedNetworkEditMode expands bridge advanced options when configured', () => {
+  const { app, elements } = createHarness();
+
+  app.enterManagedNetworkEditMode({
+    id: 7,
+    name: 'vm200-lan',
+    remark: '',
+    bridge_mode: 'create',
+    bridge: 'vmbr2',
+    bridge_mtu: 9000,
+    bridge_vlan_aware: true,
+    uplink_interface: '',
+    ipv4_enabled: true,
+    ipv4_cidr: '10.0.0.1/24',
+    ipv4_gateway: '',
+    ipv4_pool_start: '',
+    ipv4_pool_end: '',
+    ipv4_dns_servers: '',
+    ipv6_enabled: false,
+    ipv6_parent_interface: '',
+    ipv6_parent_prefix: '',
+    ipv6_assignment_mode: 'single_128',
+    auto_egress_nat: false
+  });
+
+  assert.equal(elements.managedNetworkBridgeAdvancedRow.hidden, false);
+  assert.equal(elements.managedNetworkBridgeAdvancedDetails.open, true);
+});
+
+test('refreshManagedNetworkInterfaceSelectors suggests next vmbr name in create mode', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    { name: 'vmbr0', kind: 'bridge', addresses: [] },
+    { name: 'eno1', kind: 'device', addresses: [] }
+  ];
+  elements.managedNetworkBridgeMode.value = 'create';
+
+  app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: false });
+
+  assert.equal(elements.managedNetworkBridgeInterface.value, 'vmbr1');
+  assert.equal(elements.managedNetworkBridgePicker.value, 'vmbr1');
+  assert.equal(elements.managedNetworkBridgeLabel.textContent, 'New Bridge Name');
+});
+
+test('refreshManagedNetworkInterfaceSelectors keeps manually typed bridge name in create mode', () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    { name: 'vmbr0', kind: 'bridge', addresses: [] },
+    { name: 'eno1', kind: 'device', addresses: [] }
+  ];
+  elements.managedNetworkBridgeMode.value = 'create';
+  elements.managedNetworkBridgeInterface.value = '';
+  elements.managedNetworkBridgePicker.value = 'lanbr0';
+  elements.managedNetworkBridgePicker.dataset.autofilled = 'true';
+
+  app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: false });
+
+  assert.equal(elements.managedNetworkBridgePicker.value, 'lanbr0');
+  assert.equal(elements.managedNetworkBridgeLabel.textContent, 'New Bridge Name');
+});
+
+test('applyManagedNetworkPVEQuickFill fills recommended managed-network defaults', async () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv4', ip: '203.0.113.10', cidr: '203.0.113.0/24' },
+        { family: 'ipv6', ip: '2402:db8:1::10', cidr: '2402:db8:1::/64' }
+      ]
+    },
+    {
+      name: 'vmbr1',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv4', ip: '10.0.0.1', cidr: '10.0.0.0/24' }
+      ]
+    },
+    {
+      name: 'eno1',
+      kind: 'device',
+      parent: 'vmbr0',
+      addresses: [
+        { family: 'ipv4', ip: '203.0.113.11', cidr: '203.0.113.0/24' }
+      ]
+    }
+  ];
+  app.state.managedNetworks.data = [
+    { id: 1, name: 'existing-lan', ipv4_cidr: '192.168.100.1/24' }
+  ];
+
+  await app.applyManagedNetworkPVEQuickFill();
+
+  assert.equal(elements.managedNetworkBridgeMode.value, 'create');
+  assert.equal(elements.managedNetworkBridgeInterface.value, 'vmbr2');
+  assert.equal(elements.managedNetworkBridgePicker.value, 'vmbr2');
+  assert.equal(elements.managedNetworkName.value, 'vmbr2-lan');
+  assert.equal(elements.managedNetworkUplinkInterface.value, 'vmbr0');
+  assert.equal(elements.managedNetworkIPv4Enabled.checked, true);
+  assert.equal(elements.managedNetworkIPv4CIDR.value, '192.168.101.1/24');
+  assert.equal(elements.managedNetworkIPv4PoolStart.value, '192.168.101.10');
+  assert.equal(elements.managedNetworkIPv4PoolEnd.value, '192.168.101.250');
+  assert.equal(elements.managedNetworkIPv4DNSServers.value, '1.1.1.1, 8.8.8.8');
+  assert.equal(elements.managedNetworkAutoEgressNAT.checked, true);
+  assert.equal(elements.managedNetworkIPv6Enabled.checked, true);
+  assert.equal(elements.managedNetworkIPv6ParentInterface.value, 'vmbr0');
+  assert.equal(elements.managedNetworkIPv6ParentPrefix.value, '2402:db8:1::/64');
+  assert.equal(elements.managedNetworkIPv6AssignmentMode.value, 'single_128');
+});
+
+test('applyManagedNetworkPVEQuickFill prefers direct physical uplink on blank PVE', async () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: []
+    },
+    {
+      name: 'eno1',
+      kind: 'device',
+      addresses: [
+        { family: 'ipv4', ip: '203.0.113.11', cidr: '203.0.113.0/24' },
+        { family: 'ipv6', ip: '2402:db8:1::10', cidr: '2402:db8:1::/64' }
+      ]
+    }
+  ];
+  app.state.managedNetworks.data = [
+    { id: 1, name: 'existing-lan', ipv4_cidr: '192.168.100.1/24' }
+  ];
+
+  await app.applyManagedNetworkPVEQuickFill();
+
+  assert.equal(elements.managedNetworkBridgeMode.value, 'create');
+  assert.equal(elements.managedNetworkBridgeInterface.value, 'vmbr1');
+  assert.equal(elements.managedNetworkBridgePicker.value, 'vmbr1');
+  assert.equal(elements.managedNetworkName.value, 'vmbr1-lan');
+  assert.equal(elements.managedNetworkUplinkInterface.value, 'eno1');
+  assert.equal(elements.managedNetworkIPv4Enabled.checked, true);
+  assert.equal(elements.managedNetworkIPv4CIDR.value, '192.168.101.1/24');
+  assert.equal(elements.managedNetworkIPv4PoolStart.value, '192.168.101.10');
+  assert.equal(elements.managedNetworkIPv4PoolEnd.value, '192.168.101.250');
+  assert.equal(elements.managedNetworkIPv4DNSServers.value, '1.1.1.1, 8.8.8.8');
+  assert.equal(elements.managedNetworkAutoEgressNAT.checked, true);
+  assert.equal(elements.managedNetworkIPv6Enabled.checked, true);
+  assert.equal(elements.managedNetworkIPv6ParentInterface.value, 'eno1');
+  assert.equal(elements.managedNetworkIPv6ParentPrefix.value, '2402:db8:1::/64');
+  assert.equal(elements.managedNetworkIPv6AssignmentMode.value, 'single_128');
+});
+
+test('reloadManagedNetworkRuntime queues backend reload and refreshes related views', async () => {
+  const { app, notifications } = createHarness();
+  const calls = [];
+  let hostReloads = 0;
+  let ifaceReloads = 0;
+  let networkReloads = 0;
+  let reservationReloads = 0;
+  let ipv6Reloads = 0;
+
+  app.apiCall = async function apiCall(method, path) {
+    calls.push({ method, path });
+    return { status: 'queued' };
+  };
+  app.loadHostNetwork = async function loadHostNetwork() {
+    hostReloads++;
+  };
+  app.loadInterfaces = async function loadInterfaces() {
+    ifaceReloads++;
+  };
+  app.loadManagedNetworks = async function loadManagedNetworks() {
+    networkReloads++;
+  };
+  app.loadManagedNetworkReservations = async function loadManagedNetworkReservations() {
+    reservationReloads++;
+  };
+  app.loadIPv6Assignments = async function loadIPv6Assignments() {
+    ipv6Reloads++;
+  };
+
+  await app.reloadManagedNetworkRuntime();
+
+  assert.deepEqual(calls, [{ method: 'POST', path: '/api/managed-networks/reload-runtime' }]);
+  assert.equal(hostReloads, 1);
+  assert.equal(ifaceReloads, 1);
+  assert.equal(networkReloads, 1);
+  assert.equal(reservationReloads, 1);
+  assert.equal(ipv6Reloads, 1);
+  assert.deepEqual(notifications, [{ type: 'success', message: 'Managed network runtime reload queued.' }]);
+});
+
+test('reloadManagedNetworkRuntime reports immediate success when backend completes synchronously', async () => {
+  const { app, notifications } = createHarness();
+
+  app.apiCall = async function apiCall() {
+    return { status: 'success' };
+  };
+  app.loadHostNetwork = async function loadHostNetwork() {};
+  app.loadInterfaces = async function loadInterfaces() {};
+  app.loadManagedNetworks = async function loadManagedNetworks() {};
+  app.loadManagedNetworkReservations = async function loadManagedNetworkReservations() {};
+  app.loadIPv6Assignments = async function loadIPv6Assignments() {};
+
+  await app.reloadManagedNetworkRuntime();
+
+  assert.deepEqual(notifications, [{ type: 'success', message: 'Managed network runtime reload completed.' }]);
+});
+
+test('reloadManagedNetworkRuntime reports partial result when backend finishes with runtime apply errors', async () => {
+  const { app, notifications } = createHarness();
+
+  app.apiCall = async function apiCall() {
+    return {
+      status: 'partial',
+      error: 'ipv6 assignment runtime reconcile: apply failed'
+    };
+  };
+  app.loadHostNetwork = async function loadHostNetwork() {};
+  app.loadInterfaces = async function loadInterfaces() {};
+  app.loadManagedNetworks = async function loadManagedNetworks() {};
+  app.loadManagedNetworkReservations = async function loadManagedNetworkReservations() {};
+  app.loadIPv6Assignments = async function loadIPv6Assignments() {};
+
+  await app.reloadManagedNetworkRuntime();
+
+  assert.deepEqual(notifications, [{
+    type: 'warning',
+    message: 'Targeted reload completed with runtime apply errors ipv6 assignment runtime reconcile: apply failed'
+  }]);
+});
+
+test('loadManagedNetworkRuntimeStatus renders compact recovery badge', async () => {
+  const { app, elements } = createHarness();
+  const calls = [];
+
+  app.apiCall = async function apiCall(method, path) {
+    calls.push({ method, path });
+    return {
+      pending: false,
+      last_request_source: 'link_change',
+      last_result: 'success',
+      last_request_summary: 'tap100i0,vmbr1',
+      last_applied_summary: 'networks=1 bridges=vmbr1'
+    };
+  };
+
+  await app.loadManagedNetworkRuntimeStatus();
+
+  assert.deepEqual(calls, [{ method: 'GET', path: '/api/managed-networks/runtime-status' }]);
+  assert.equal(elements.managedNetworkRuntimeStatusBtn.hidden, false);
+  assert.equal(elements.managedNetworkRuntimeStatusBtn.textContent, 'Recovered');
+  assert.match(elements.managedNetworkRuntimeStatusBtn.title, /Auto recovery completed successfully/);
+  assert.match(elements.managedNetworkRuntimeStatusBtn.title, /Triggered Interfaces: tap100i0,vmbr1/);
+  assert.match(elements.managedNetworkRuntimeStatusBtn.title, /Applied Summary: networks=1/);
+  assert.match(elements.managedNetworkRuntimeStatusBtn.title, /Applied Summary: bridges=vmbr1/);
+});
+
+test('loadManagedNetworkRuntimeStatus renders partial warning badge', async () => {
+  const { app, elements } = createHarness();
+
+  app.apiCall = async function apiCall() {
+    return {
+      pending: false,
+      last_request_source: 'manual',
+      last_result: 'partial',
+      last_error: 'ipv6 assignment runtime reconcile: apply failed',
+      last_applied_summary: 'networks=1 bridges=vmbr1'
+    };
+  };
+
+  await app.loadManagedNetworkRuntimeStatus();
+
+  assert.equal(elements.managedNetworkRuntimeStatusBtn.hidden, false);
+  assert.equal(elements.managedNetworkRuntimeStatusBtn.textContent, 'Partial');
+  assert.match(elements.managedNetworkRuntimeStatusBtn.title, /Targeted reload completed with runtime apply errors/);
+  assert.match(elements.managedNetworkRuntimeStatusBtn.title, /Error: ipv6 assignment runtime reconcile: apply failed/);
+});
+
+test('repairManagedNetworkRuntime shows partial warning and refreshes related views', async () => {
+  const { app, notifications } = createHarness();
+  let hostReloads = 0;
+  let ifaceReloads = 0;
+  let networkReloads = 0;
+  let reservationReloads = 0;
+  let ipv6Reloads = 0;
+
+  app.apiCall = async function apiCall(method, path) {
+    assert.equal(method, 'POST');
+    assert.equal(path, '/api/managed-networks/repair');
+    return {
+      status: 'partial',
+      bridges: ['vmbr1'],
+      guest_links: ['fwpr100p0->vmbr1'],
+      error: 'repair guest links: permission denied'
+    };
+  };
+  app.loadHostNetwork = async function loadHostNetwork() {
+    hostReloads++;
+  };
+  app.loadInterfaces = async function loadInterfaces() {
+    ifaceReloads++;
+  };
+  app.loadManagedNetworks = async function loadManagedNetworks() {
+    networkReloads++;
+  };
+  app.loadManagedNetworkReservations = async function loadManagedNetworkReservations() {
+    reservationReloads++;
+  };
+  app.loadIPv6Assignments = async function loadIPv6Assignments() {
+    ipv6Reloads++;
+  };
+
+  await app.repairManagedNetworkRuntime();
+
+  assert.equal(hostReloads, 1);
+  assert.equal(ifaceReloads, 1);
+  assert.equal(networkReloads, 1);
+  assert.equal(reservationReloads, 1);
+  assert.equal(ipv6Reloads, 1);
+  assert.deepEqual(notifications, [{
+    type: 'warning',
+    message: 'Managed network repair partially applied and runtime reload was triggered. Bridges 1: vmbr1; Guest links 1: fwpr100p0->vmbr1 repair guest links: permission denied'
+  }]);
+});
+
+test('refreshManagedNetworkReservationNetworkOptions populates managed network select', () => {
+  const { app, elements } = createHarness();
+  app.state.managedNetworks.data = [
+    { id: 2, name: 'vm101-lan', bridge: 'vmbr11', ipv4_enabled: true },
+    { id: 1, name: 'vm100-lan', bridge: 'vmbr10', ipv4_enabled: true }
+  ];
+
+  app.refreshManagedNetworkReservationNetworkOptions();
+
+  assert.deepEqual(
+    elements.managedNetworkReservationManagedNetworkId.options.map((option) => option.value),
+    ['', '1', '2']
+  );
+  assert.equal(elements.managedNetworkReservationManagedNetworkId.value, '1');
+});
+
+test('buildManagedNetworkReservationFromForm returns normalized reservation payload', () => {
+  const { app, elements } = createHarness();
+  elements.managedNetworkReservationManagedNetworkId.value = '7';
+  elements.managedNetworkReservationMACAddress.value = 'AA-BB-CC-DD-EE-FF';
+  elements.managedNetworkReservationIPv4Address.value = '10.0.0.10';
+  elements.managedNetworkReservationRemark.value = 'VM 100 LAN';
+
+  const item = app.buildManagedNetworkReservationFromForm();
+
+  assert.equal(item.managed_network_id, 7);
+  assert.equal(item.mac_address, 'aa:bb:cc:dd:ee:ff');
+  assert.equal(item.ipv4_address, '10.0.0.10');
+  assert.equal(item.remark, 'VM 100 LAN');
+});
+
+test('validateManagedNetworkReservationFormFields rejects invalid MAC and IPv4-disabled network', () => {
+  const { app, elements } = createHarness();
+  app.state.managedNetworks.data = [
+    { id: 9, name: 'vm100-lan', bridge: 'vmbr10', ipv4_enabled: false }
+  ];
+  elements.managedNetworkReservationManagedNetworkId.value = '9';
+  elements.managedNetworkReservationMACAddress.value = 'not-a-mac';
+  elements.managedNetworkReservationIPv4Address.value = '10.0.0.10';
+
+  const valid = app.validateManagedNetworkReservationFormFields(app.buildManagedNetworkReservationFromForm());
+
+  assert.equal(valid, false);
+  assert.equal(elements.managedNetworkReservationManagedNetworkId.errorMessage, 'The selected managed network does not have IPv4 gateway + DHCPv4 enabled.');
+  assert.equal(elements.managedNetworkReservationMACAddress.errorMessage, 'Enter a valid MAC address.');
+});
+
+test('validateManagedNetworkFormFields rejects invalid bridge uplink and ipv4 pool order', () => {
+  const { app, elements } = createHarness();
+  elements.managedNetworkName.value = 'vm100-lan';
+  elements.managedNetworkBridgeMode.value = 'existing';
+  elements.managedNetworkBridgeInterface.value = 'vmbr1';
+  elements.managedNetworkBridgePicker.value = 'vmbr1';
+  elements.managedNetworkUplinkInterface.value = 'vmbr1';
+  elements.managedNetworkUplinkPicker.value = 'vmbr1';
+  elements.managedNetworkIPv4Enabled.checked = true;
+  elements.managedNetworkIPv4CIDR.value = '10.0.0.1/24';
+  elements.managedNetworkIPv4PoolStart.value = '10.0.0.150';
+  elements.managedNetworkIPv4PoolEnd.value = '10.0.0.100';
+  elements.managedNetworkAutoEgressNAT.checked = true;
+
+  const item = app.buildManagedNetworkFromForm();
+  const valid = app.validateManagedNetworkFormFields(item);
+
+  assert.equal(valid, false);
+  assert.equal(elements.managedNetworkBridgePicker.errorMessage, 'The bridge interface must be different from the uplink interface.');
+  assert.equal(elements.managedNetworkIPv4PoolStart.errorMessage, 'The DHCPv4 pool start must not exceed the pool end.');
+});
+
+test('validateManagedNetworkFormFields rejects invalid create-only bridge MTU', () => {
+  const { app, elements } = createHarness();
+  elements.managedNetworkName.value = 'vm200-lan';
+  elements.managedNetworkBridgeMode.value = 'create';
+  elements.managedNetworkBridgeInterface.value = 'vmbr2';
+  elements.managedNetworkBridgePicker.value = 'vmbr2';
+  elements.managedNetworkBridgeMTU.value = '70000';
+  elements.managedNetworkBridgeAdvancedDetails.open = false;
+
+  const item = app.buildManagedNetworkFromForm();
+  const valid = app.validateManagedNetworkFormFields(item);
+
+  assert.equal(valid, false);
+  assert.equal(elements.managedNetworkBridgeAdvancedDetails.open, true);
+  assert.equal(elements.managedNetworkBridgeMTU.errorMessage, 'Bridge MTU must be between 0 and 65535.');
+});
+
+test('validateIPv6PrefixField accepts valid CIDR and rejects invalid input', () => {
+  const { app, elements } = createHarness();
+  elements.ipv6AssignedPrefix.value = '2402:db8:1::10/128';
+  assert.equal(app.validateIPv6PrefixField(elements.ipv6AssignedPrefix), true);
+
+  elements.ipv6AssignedPrefix.value = '2402:db8:1::10';
+  assert.equal(app.validateIPv6PrefixField(elements.ipv6AssignedPrefix), false);
+});
+
+test('updateIPv6AssignmentModeHint distinguishes single-address and delegated-prefix semantics', () => {
+  const { app, elements } = createHarness();
+
+  elements.ipv6AssignedPrefix.value = '2402:db8:1::10/128';
+  app.updateIPv6AssignmentModeHint();
+  assert.equal(
+    elements.ipv6AssignmentModeHint.textContent,
+    '/128 single-address semantics: the target side uses this IPv6 itself instead of adding it onto the host-side target interface. The runtime will send managed RA on the target interface and hand out this address via DHCPv6 IA_NA.'
+  );
+
+  elements.ipv6AssignedPrefix.value = '2402:db8:1:100::/80';
+  app.updateIPv6AssignmentModeHint();
+  assert.equal(
+    elements.ipv6AssignmentModeHint.textContent,
+    '/80 delegated-prefix semantics: route this prefix toward the target side for downstream subnet planning or manual addressing.'
+  );
+});
+
+test('formatIPv6AssignmentHandoutCount renders RA and DHCPv6 counters by assignment mode', () => {
+  const { app } = createHarness();
+
+  assert.equal(
+    app.formatIPv6AssignmentHandoutCount({
+      assigned_prefix: '2402:db8:1::10/128',
+      ra_advertisement_count: 12,
+      dhcpv6_reply_count: 5
+    }),
+    'RA 12 / DHCPv6 5'
+  );
+  assert.equal(
+    app.formatIPv6AssignmentHandoutCount({
+      assigned_prefix: '2402:db8:1::/64',
+      ra_advertisement_count: 7
+    }),
+    'RA 7'
+  );
+  assert.equal(
+    app.formatIPv6AssignmentHandoutCount({
+      assigned_prefix: '2402:db8:1:100::/80'
+    }),
+    '-'
+  );
+});
+
 test('refreshRuleInterfaceSelectors syncs picker labels from hidden interface values', () => {
   const { app, elements } = createHarness();
   app.interfaces = [
@@ -1505,6 +2666,28 @@ test('toggleEgressNAT shows translated not-found issue in toast', async () => {
   await app.toggleEgressNAT(17);
 
   assert.equal(notifications.at(-1).message, 'Operation failed: The egress NAT takeover no longer exists.');
+});
+
+test('toggleIPv6Assignment shows translated not-found issue in toast', async () => {
+  const { app, notifications } = createHarness();
+  app.state.ipv6Assignments.data = [{
+    id: 23,
+    parent_interface: 'vmbr0',
+    target_interface: 'tap100i0',
+    parent_prefix: '2402:db8:1::/64',
+    assigned_prefix: '2402:db8:1::10/128',
+    remark: '',
+    enabled: true
+  }];
+  app.apiCall = async () => {
+    const err = new Error('toggle failed');
+    err.payload = { issues: [{ scope: 'update', field: 'id', message: 'ipv6 assignment not found' }] };
+    throw err;
+  };
+
+  await app.toggleIPv6Assignment(23);
+
+  assert.equal(notifications.at(-1).message, 'Operation failed: The IPv6 assignment no longer exists.');
 });
 
 test('deleteSelectedRules shows aggregated multi-issue toast summary', async () => {

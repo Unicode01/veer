@@ -199,6 +199,7 @@ http://127.0.0.1:8080
   "web_token": "change-me-to-a-secure-token",
   "max_workers": 0,
   "drain_timeout_hours": 24,
+  "managed_network_auto_repair": true,
   "default_engine": "auto",
   "kernel_engine_order": ["tc"],
   "kernel_rules_map_limit": 0,
@@ -206,6 +207,7 @@ http://127.0.0.1:8080
   "kernel_nat_ports_map_limit": 0,
   "experimental_features": {
     "bridge_xdp": false,
+    "xdp_generic": false,
     "kernel_traffic_stats": false,
     "kernel_tc_diag": false,
     "kernel_tc_diag_verbose": false
@@ -220,12 +222,13 @@ http://127.0.0.1:8080
 - `web_token`：管理 API 和前端登录使用的 Bearer Token
 - `max_workers`：最大 Worker 数量；小于等于 `0` 时按 CPU 核数自动计算，内部最少保留 3 个 Worker 槽位
 - `drain_timeout_hours`：旧 Worker 进入 draining 状态后的最长保留时长，默认 `24`
+- `managed_network_auto_repair`：托管网络链路变更后的自动自愈开关，默认 `true`；开启后会在 `link_change` 触发的托管网络运行时重载前，自动补桥并把 PVE 来宾链路重新挂回目标 bridge
 - `default_engine`：默认转发引擎，可选 `auto`、`userspace`、`kernel`
 - `kernel_engine_order`：Linux 内核态引擎尝试顺序，默认 `["tc"]`；当前会自动跳过不可用引擎并回退。如果想显式试验 XDP，再配置成 `["xdp", "tc"]`
 - `kernel_rules_map_limit`：内核 `rules_v4/stats_v4` map 容量；`0` 或省略时按当前 kernel entries 自适应扩容，默认从 `16384` 起按 2 倍增长到 `262144`；设置为正数时使用固定上限
 - `kernel_flows_map_limit`：内核 `flows_v4` 连接跟踪表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
 - `kernel_nat_ports_map_limit`：内核 `nat_ports_v4` 端口保留表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
-- `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp`、`kernel_traffic_stats`、`kernel_tc_diag` 这类高风险、兼容性或性能权衡仍在收敛中的能力会通过这里单独放开
+- `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp`、`xdp_generic`、`kernel_traffic_stats`、`kernel_tc_diag` 这类高风险、兼容性或性能权衡仍在收敛中的能力会通过这里单独放开
 - `tags`：可选标签列表，会在前端表单中作为下拉项出现
 
 示例：
@@ -233,6 +236,7 @@ http://127.0.0.1:8080
 ```json
 "experimental_features": {
   "bridge_xdp": true,
+  "xdp_generic": false,
   "kernel_traffic_stats": true,
   "kernel_tc_diag": true,
   "kernel_tc_diag_verbose": false
@@ -244,6 +248,7 @@ http://127.0.0.1:8080
 - 键名会按小写、`-` 转 `_` 归一化，例如 `bridge-xdp` 会被视为 `bridge_xdp`
 - 只有代码中显式接入检查的实验项才会生效；未接入的键会被保留但不会影响当前行为
 - `bridge_xdp` 已接入第一版实验实现，默认仍为关闭；当前主要面向透明 XDP 场景，依赖 bridge 邻居/FDB 解析，解析失败或接口不兼容时会自动回退
+- `xdp_generic` 默认关闭；不打开时，XDP 只允许 `driver/native` 附加，若设备只能走 `generic/SKB` 或最终形成 `mixed` 附加，会直接回退到后续内核引擎（通常是 `tc`）
 - `kernel_traffic_stats` 用于给内核态规则补充 `bytes/speed` 统计；它会在 TC/XDP 转发路径上增加按包计数，默认关闭，只建议在确实需要观察内核态流量时启用
 - `kernel_tc_diag` 用于开启 TC 内核态的低频诊断计数与观测增强；默认关闭，后续只把可能影响转发热路径的诊断项挂在这里
 - `kernel_tc_diag_verbose` 用于开启更重的 TC 排障诊断；它隐含启用 `kernel_tc_diag`，默认关闭，只建议短时压测或专项排障时使用
@@ -256,6 +261,7 @@ http://127.0.0.1:8080
 - `default_engine = kernel`：优先要求进入内核态；不满足条件时仍会安全回退到用户态
 - `default_engine = auto`：先尝试内核态，再自动回退到用户态
 - Linux 下内核态会按 `kernel_engine_order` 依次尝试；默认只走 `tc`，如果显式配置 `["xdp", "tc"]` 才会优先尝试 XDP
+- XDP 默认只接受 `driver/native` 附加；如果目标环境只能提供 `generic/SKB`，需要再显式开启实验项 `xdp_generic`
 
 地址族补充：
 
@@ -274,7 +280,7 @@ http://127.0.0.1:8080
 
 当前两条内核链路的定位大致是：
 
-- `XDP`：优先级更高，路径更短，但当前主要覆盖透明、单协议、接口条件较理想的规则；桥接出口相关能力仍主要通过 `bridge_xdp` 实验开关控制
+- `XDP`：优先级更高，路径更短，但当前主要覆盖透明、单协议、接口条件较理想的规则；桥接出口相关能力仍主要通过 `bridge_xdp` 实验开关控制，`generic/SKB` 或 `mixed` 附加默认不会启用
 - `TC`：覆盖面更广，是当前更通用、更稳妥的内核转发后备路径；很多 XDP 无法接入的规则最终会回落到 TC
 
 补充说明：

@@ -101,7 +101,7 @@ type statsListQuery struct {
 
 const maxStatsPageSize = 500
 
-func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
+func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) *http.Server {
 	mux := http.NewServeMux()
 
 	webSub, _ := fs.Sub(webFS, "web")
@@ -117,7 +117,69 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 		staticFileServer.ServeHTTP(w, r)
 	}))
 
+	mux.HandleFunc("/api/host-network", authMiddleware(cfg, handleHostNetwork))
 	mux.HandleFunc("/api/interfaces", authMiddleware(cfg, handleInterfaces))
+	mux.HandleFunc("/api/managed-networks", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListManagedNetworks(w, r, db, pm)
+		case http.MethodPost:
+			handleAddManagedNetwork(w, r, db, pm)
+		case http.MethodPut:
+			handleUpdateManagedNetwork(w, r, db, pm)
+		case http.MethodDelete:
+			handleDeleteManagedNetwork(w, r, db, pm)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	mux.HandleFunc("/api/managed-networks/toggle", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleToggleManagedNetwork(w, r, db, pm)
+	}))
+	mux.HandleFunc("/api/managed-networks/reload-runtime", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleReloadManagedNetworkRuntime(w, r, pm)
+	}))
+	mux.HandleFunc("/api/managed-networks/repair", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleRepairManagedNetworkRuntime(w, r, pm)
+	}))
+	mux.HandleFunc("/api/managed-networks/runtime-status", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleManagedNetworkRuntimeReloadStatus(w, r, pm)
+	}))
+	mux.HandleFunc("/api/managed-network-reservations", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListManagedNetworkReservations(w, r, db)
+		case http.MethodPost:
+			handleAddManagedNetworkReservation(w, r, db, pm)
+		case http.MethodPut:
+			handleUpdateManagedNetworkReservation(w, r, db, pm)
+		case http.MethodDelete:
+			handleDeleteManagedNetworkReservation(w, r, db, pm)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	mux.HandleFunc("/api/managed-network-reservation-candidates", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleListManagedNetworkReservationCandidates(w, r, db)
+	}))
+	mux.HandleFunc("/api/ipv6-assignments", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListIPv6Assignments(w, r, db, pm)
+		case http.MethodPost:
+			handleAddIPv6Assignment(w, r, db, pm)
+		case http.MethodPut:
+			handleUpdateIPv6Assignment(w, r, db, pm)
+		case http.MethodDelete:
+			handleDeleteIPv6Assignment(w, r, db, pm)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
 	mux.HandleFunc("/api/tags", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -262,10 +324,17 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) {
 	}))
 
 	addr := fmt.Sprintf(":%d", cfg.WebPort)
-	log.Printf("web server listening on %s", addr)
-	if err := http.ListenAndServe(addr, securityHeadersMiddleware(mux)); err != nil {
-		log.Fatalf("http server: %v", err)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: securityHeadersMiddleware(mux),
 	}
+	go func() {
+		log.Printf("web server listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("http server: %v", err)
+		}
+	}()
+	return server
 }
 
 func securityHeadersMiddleware(next http.Handler) http.Handler {
@@ -1733,6 +1802,36 @@ func handleListEgressNATs(w http.ResponseWriter, r *http.Request, db *sql.DB, pm
 	writeJSON(w, http.StatusOK, statuses)
 }
 
+func loadEffectiveEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
+	items, err := dbGetEgressNATs(db)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot := loadEgressNATInterfaceSnapshot()
+	items = normalizeEgressNATItemsWithSnapshot(items, snapshot)
+
+	managedNetworks, err := dbGetManagedNetworks(db)
+	if err != nil {
+		return nil, err
+	}
+	if len(managedNetworks) == 0 {
+		return items, nil
+	}
+
+	ipv6Assignments, err := dbGetIPv6Assignments(db)
+	if err != nil {
+		return nil, err
+	}
+	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, items, snapshot.Infos)
+	if len(compiled.EgressNATs) == 0 {
+		return items, nil
+	}
+
+	items = append(items, compiled.EgressNATs...)
+	return items, nil
+}
+
 func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	page := 1
 	pageSize := 0
@@ -1760,12 +1859,11 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	allEgressNATs, err := dbGetEgressNATs(db)
+	allEgressNATs, err := loadEffectiveEgressNATItems(db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	allEgressNATs = normalizeEgressNATItemsWithCurrentInterfaces(allEgressNATs)
 
 	enabledSites := 0
 	if sites, err := dbGetSites(db); err == nil {
@@ -2943,12 +3041,11 @@ func handleListEgressNATStats(w http.ResponseWriter, r *http.Request, db *sql.DB
 		return
 	}
 
-	items, err := dbGetEgressNATs(db)
+	items, err := loadEffectiveEgressNATItems(db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	items = normalizeEgressNATItemsWithCurrentInterfaces(items)
 	metaByID := make(map[int64]EgressNAT, len(items))
 	for _, item := range items {
 		metaByID[item.ID] = item

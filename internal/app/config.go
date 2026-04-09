@@ -10,6 +10,7 @@ import (
 
 const (
 	experimentalFeatureBridgeXDP           = "bridge_xdp"
+	experimentalFeatureXDPGeneric          = "xdp_generic"
 	experimentalFeatureKernelTraffic       = "kernel_traffic_stats"
 	experimentalFeatureKernelTCDiag        = "kernel_tc_diag"
 	experimentalFeatureKernelTCDiagVerbose = "kernel_tc_diag_verbose"
@@ -17,19 +18,20 @@ const (
 )
 
 type Config struct {
-	WebPort             int             `json:"web_port"`
-	WebToken            string          `json:"web_token"`
-	MaxWorkers          int             `json:"max_workers"`
-	DrainTimeoutHours   int             `json:"drain_timeout_hours"`
-	DefaultEngine       string          `json:"default_engine"`
-	KernelEngineOrder   []string        `json:"kernel_engine_order"`
-	KernelRulesMapLimit int             `json:"kernel_rules_map_limit"`
-	KernelFlowsMapLimit int             `json:"kernel_flows_map_limit"`
-	KernelNATMapLimit   int             `json:"kernel_nat_ports_map_limit"`
-	KernelNATPortMin    int             `json:"kernel_nat_port_min"`
-	KernelNATPortMax    int             `json:"kernel_nat_port_max"`
-	Experimental        map[string]bool `json:"experimental_features"`
-	Tags                []string        `json:"tags"`
+	WebPort                  int             `json:"web_port"`
+	WebToken                 string          `json:"web_token"`
+	MaxWorkers               int             `json:"max_workers"`
+	DrainTimeoutHours        int             `json:"drain_timeout_hours"`
+	ManagedNetworkAutoRepair *bool           `json:"managed_network_auto_repair,omitempty"`
+	DefaultEngine            string          `json:"default_engine"`
+	KernelEngineOrder        []string        `json:"kernel_engine_order"`
+	KernelRulesMapLimit      int             `json:"kernel_rules_map_limit"`
+	KernelFlowsMapLimit      int             `json:"kernel_flows_map_limit"`
+	KernelNATMapLimit        int             `json:"kernel_nat_ports_map_limit"`
+	KernelNATPortMin         int             `json:"kernel_nat_port_min"`
+	KernelNATPortMax         int             `json:"kernel_nat_port_max"`
+	Experimental             map[string]bool `json:"experimental_features"`
+	Tags                     []string        `json:"tags"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -82,6 +84,13 @@ func (cfg *Config) ExperimentalFeatureEnabled(name string) bool {
 		return false
 	}
 	return cfg.Experimental[name]
+}
+
+func (cfg *Config) ManagedNetworkAutoRepairEnabled() bool {
+	if cfg == nil || cfg.ManagedNetworkAutoRepair == nil {
+		return true
+	}
+	return *cfg.ManagedNetworkAutoRepair
 }
 
 func (cfg *Config) EnabledExperimentalFeatures() []string {

@@ -86,6 +86,46 @@ var schema = map[string][][2]string{
 		{"nat_type", "TEXT NOT NULL DEFAULT 'symmetric'"},
 		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
 	},
+	"ipv6_assignments": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"parent_interface", "TEXT NOT NULL DEFAULT ''"},
+		{"target_interface", "TEXT NOT NULL DEFAULT ''"},
+		{"parent_prefix", "TEXT NOT NULL DEFAULT ''"},
+		{"assigned_prefix", "TEXT NOT NULL DEFAULT ''"},
+		{"address", "TEXT NOT NULL DEFAULT ''"},
+		{"prefix_len", "INTEGER NOT NULL DEFAULT 128"},
+		{"remark", "TEXT NOT NULL DEFAULT ''"},
+		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
+	},
+	"managed_networks": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"name", "TEXT NOT NULL DEFAULT ''"},
+		{"bridge_mode", "TEXT NOT NULL DEFAULT 'create'"},
+		{"bridge", "TEXT NOT NULL DEFAULT ''"},
+		{"bridge_mtu", "INTEGER NOT NULL DEFAULT 0"},
+		{"bridge_vlan_aware", "INTEGER NOT NULL DEFAULT 0"},
+		{"uplink_interface", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv4_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"ipv4_cidr", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv4_gateway", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv4_pool_start", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv4_pool_end", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv4_dns_servers", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv6_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"ipv6_parent_interface", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv6_parent_prefix", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv6_assignment_mode", "TEXT NOT NULL DEFAULT 'single_128'"},
+		{"auto_egress_nat", "INTEGER NOT NULL DEFAULT 0"},
+		{"remark", "TEXT NOT NULL DEFAULT ''"},
+		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
+	},
+	"managed_network_reservations": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"managed_network_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"mac_address", "TEXT NOT NULL DEFAULT ''"},
+		{"ipv4_address", "TEXT NOT NULL DEFAULT ''"},
+		{"remark", "TEXT NOT NULL DEFAULT ''"},
+	},
 }
 
 func initDB(path string) (*sql.DB, error) {
@@ -483,4 +523,358 @@ func dbSetSiteEnabled(db sqlRuleStore, id int64, enabled bool) error {
 func dbSetRangeEnabled(db sqlRuleStore, id int64, enabled bool) error {
 	_, err := db.Exec(`UPDATE ranges SET enabled=? WHERE id=?`, boolToInt(enabled), id)
 	return err
+}
+
+func dbSetManagedNetworkEnabled(db sqlRuleStore, id int64, enabled bool) error {
+	_, err := db.Exec(`UPDATE managed_networks SET enabled=? WHERE id=?`, boolToInt(enabled), id)
+	return err
+}
+
+const ipv6AssignmentColumns = `id, parent_interface, target_interface, parent_prefix, assigned_prefix, address, prefix_len, remark, enabled`
+
+func scanIPv6Assignment(sc interface{ Scan(...interface{}) error }) (IPv6Assignment, error) {
+	var item IPv6Assignment
+	var enabled int
+	err := sc.Scan(
+		&item.ID,
+		&item.ParentInterface,
+		&item.TargetInterface,
+		&item.ParentPrefix,
+		&item.AssignedPrefix,
+		&item.Address,
+		&item.PrefixLen,
+		&item.Remark,
+		&enabled,
+	)
+	item.Enabled = enabled != 0
+	hydrateIPv6AssignmentCompatibilityFields(&item)
+	return item, err
+}
+
+func dbAddIPv6Assignment(db sqlRuleStore, item *IPv6Assignment) (int64, error) {
+	stored := *item
+	hydrateIPv6AssignmentCompatibilityFields(&stored)
+	res, err := db.Exec(
+		`INSERT INTO ipv6_assignments (parent_interface, target_interface, parent_prefix, assigned_prefix, address, prefix_len, remark, enabled)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		stored.ParentInterface,
+		stored.TargetInterface,
+		stored.ParentPrefix,
+		stored.AssignedPrefix,
+		stored.Address,
+		stored.PrefixLen,
+		stored.Remark,
+		boolToInt(stored.Enabled),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func dbUpdateIPv6Assignment(db sqlRuleStore, item *IPv6Assignment) error {
+	stored := *item
+	hydrateIPv6AssignmentCompatibilityFields(&stored)
+	_, err := db.Exec(
+		`UPDATE ipv6_assignments
+		 SET parent_interface=?, target_interface=?, parent_prefix=?, assigned_prefix=?, address=?, prefix_len=?, remark=?, enabled=?
+		 WHERE id=?`,
+		stored.ParentInterface,
+		stored.TargetInterface,
+		stored.ParentPrefix,
+		stored.AssignedPrefix,
+		stored.Address,
+		stored.PrefixLen,
+		stored.Remark,
+		boolToInt(stored.Enabled),
+		stored.ID,
+	)
+	return err
+}
+
+func dbDeleteIPv6Assignment(db sqlRuleStore, id int64) error {
+	_, err := db.Exec(`DELETE FROM ipv6_assignments WHERE id = ?`, id)
+	return err
+}
+
+func dbGetIPv6Assignments(db sqlRuleStore) ([]IPv6Assignment, error) {
+	rows, err := db.Query(`SELECT ` + ipv6AssignmentColumns + ` FROM ipv6_assignments`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []IPv6Assignment
+	for rows.Next() {
+		item, err := scanIPv6Assignment(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func dbGetIPv6Assignment(db sqlRuleStore, id int64) (*IPv6Assignment, error) {
+	item, err := scanIPv6Assignment(db.QueryRow(`SELECT `+ipv6AssignmentColumns+` FROM ipv6_assignments WHERE id = ?`, id))
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+const managedNetworkColumns = `id, name, bridge_mode, bridge, bridge_mtu, bridge_vlan_aware, uplink_interface, ipv4_enabled, ipv4_cidr, ipv4_gateway, ipv4_pool_start, ipv4_pool_end, ipv4_dns_servers, ipv6_enabled, ipv6_parent_interface, ipv6_parent_prefix, ipv6_assignment_mode, auto_egress_nat, remark, enabled`
+
+func scanManagedNetwork(sc interface{ Scan(...interface{}) error }) (ManagedNetwork, error) {
+	var item ManagedNetwork
+	var bridgeVLANAware, ipv4Enabled, ipv6Enabled, autoEgressNAT, enabled int
+	err := sc.Scan(
+		&item.ID,
+		&item.Name,
+		&item.BridgeMode,
+		&item.Bridge,
+		&item.BridgeMTU,
+		&bridgeVLANAware,
+		&item.UplinkInterface,
+		&ipv4Enabled,
+		&item.IPv4CIDR,
+		&item.IPv4Gateway,
+		&item.IPv4PoolStart,
+		&item.IPv4PoolEnd,
+		&item.IPv4DNSServers,
+		&ipv6Enabled,
+		&item.IPv6ParentInterface,
+		&item.IPv6ParentPrefix,
+		&item.IPv6AssignmentMode,
+		&autoEgressNAT,
+		&item.Remark,
+		&enabled,
+	)
+	item.BridgeVLANAware = bridgeVLANAware != 0
+	item.IPv4Enabled = ipv4Enabled != 0
+	item.IPv6Enabled = ipv6Enabled != 0
+	item.AutoEgressNAT = autoEgressNAT != 0
+	item.Enabled = enabled != 0
+	item = normalizeManagedNetwork(item)
+	return item, err
+}
+
+func dbAddManagedNetwork(db sqlRuleStore, item *ManagedNetwork) (int64, error) {
+	stored := normalizeManagedNetwork(*item)
+	res, err := db.Exec(
+		`INSERT INTO managed_networks (name, bridge_mode, bridge, bridge_mtu, bridge_vlan_aware, uplink_interface, ipv4_enabled, ipv4_cidr, ipv4_gateway, ipv4_pool_start, ipv4_pool_end, ipv4_dns_servers, ipv6_enabled, ipv6_parent_interface, ipv6_parent_prefix, ipv6_assignment_mode, auto_egress_nat, remark, enabled)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		stored.Name,
+		stored.BridgeMode,
+		stored.Bridge,
+		stored.BridgeMTU,
+		boolToInt(stored.BridgeVLANAware),
+		stored.UplinkInterface,
+		boolToInt(stored.IPv4Enabled),
+		stored.IPv4CIDR,
+		stored.IPv4Gateway,
+		stored.IPv4PoolStart,
+		stored.IPv4PoolEnd,
+		stored.IPv4DNSServers,
+		boolToInt(stored.IPv6Enabled),
+		stored.IPv6ParentInterface,
+		stored.IPv6ParentPrefix,
+		stored.IPv6AssignmentMode,
+		boolToInt(stored.AutoEgressNAT),
+		stored.Remark,
+		boolToInt(stored.Enabled),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func dbUpdateManagedNetwork(db sqlRuleStore, item *ManagedNetwork) error {
+	stored := normalizeManagedNetwork(*item)
+	_, err := db.Exec(
+		`UPDATE managed_networks
+		 SET name=?, bridge_mode=?, bridge=?, bridge_mtu=?, bridge_vlan_aware=?, uplink_interface=?, ipv4_enabled=?, ipv4_cidr=?, ipv4_gateway=?, ipv4_pool_start=?, ipv4_pool_end=?, ipv4_dns_servers=?, ipv6_enabled=?, ipv6_parent_interface=?, ipv6_parent_prefix=?, ipv6_assignment_mode=?, auto_egress_nat=?, remark=?, enabled=?
+		 WHERE id=?`,
+		stored.Name,
+		stored.BridgeMode,
+		stored.Bridge,
+		stored.BridgeMTU,
+		boolToInt(stored.BridgeVLANAware),
+		stored.UplinkInterface,
+		boolToInt(stored.IPv4Enabled),
+		stored.IPv4CIDR,
+		stored.IPv4Gateway,
+		stored.IPv4PoolStart,
+		stored.IPv4PoolEnd,
+		stored.IPv4DNSServers,
+		boolToInt(stored.IPv6Enabled),
+		stored.IPv6ParentInterface,
+		stored.IPv6ParentPrefix,
+		stored.IPv6AssignmentMode,
+		boolToInt(stored.AutoEgressNAT),
+		stored.Remark,
+		boolToInt(stored.Enabled),
+		stored.ID,
+	)
+	return err
+}
+
+func dbDeleteManagedNetwork(db sqlRuleStore, id int64) error {
+	if err := dbDeleteManagedNetworkReservationsByManagedNetworkID(db, id); err != nil {
+		return err
+	}
+	_, err := db.Exec(`DELETE FROM managed_networks WHERE id = ?`, id)
+	return err
+}
+
+func dbGetManagedNetworks(db sqlRuleStore) ([]ManagedNetwork, error) {
+	rows, err := db.Query(`SELECT ` + managedNetworkColumns + ` FROM managed_networks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []ManagedNetwork
+	for rows.Next() {
+		item, err := scanManagedNetwork(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func dbGetManagedNetwork(db sqlRuleStore, id int64) (*ManagedNetwork, error) {
+	item, err := scanManagedNetwork(db.QueryRow(`SELECT `+managedNetworkColumns+` FROM managed_networks WHERE id = ?`, id))
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+const managedNetworkReservationColumns = `id, managed_network_id, mac_address, ipv4_address, remark`
+
+func scanManagedNetworkReservation(sc interface{ Scan(...interface{}) error }) (ManagedNetworkReservation, error) {
+	var item ManagedNetworkReservation
+	err := sc.Scan(
+		&item.ID,
+		&item.ManagedNetworkID,
+		&item.MACAddress,
+		&item.IPv4Address,
+		&item.Remark,
+	)
+	return item, err
+}
+
+func dbAddManagedNetworkReservation(db sqlRuleStore, item *ManagedNetworkReservation) (int64, error) {
+	res, err := db.Exec(
+		`INSERT INTO managed_network_reservations (managed_network_id, mac_address, ipv4_address, remark)
+		 VALUES (?, ?, ?, ?)`,
+		item.ManagedNetworkID,
+		item.MACAddress,
+		item.IPv4Address,
+		item.Remark,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func dbUpdateManagedNetworkReservation(db sqlRuleStore, item *ManagedNetworkReservation) error {
+	_, err := db.Exec(
+		`UPDATE managed_network_reservations
+		 SET managed_network_id=?, mac_address=?, ipv4_address=?, remark=?
+		 WHERE id=?`,
+		item.ManagedNetworkID,
+		item.MACAddress,
+		item.IPv4Address,
+		item.Remark,
+		item.ID,
+	)
+	return err
+}
+
+func dbDeleteManagedNetworkReservation(db sqlRuleStore, id int64) error {
+	_, err := db.Exec(`DELETE FROM managed_network_reservations WHERE id = ?`, id)
+	return err
+}
+
+func dbDeleteManagedNetworkReservationsByManagedNetworkID(db sqlRuleStore, managedNetworkID int64) error {
+	_, err := db.Exec(`DELETE FROM managed_network_reservations WHERE managed_network_id = ?`, managedNetworkID)
+	return err
+}
+
+func dbGetManagedNetworkReservations(db sqlRuleStore) ([]ManagedNetworkReservation, error) {
+	rows, err := db.Query(`SELECT ` + managedNetworkReservationColumns + ` FROM managed_network_reservations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []ManagedNetworkReservation
+	for rows.Next() {
+		item, err := scanManagedNetworkReservation(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func dbGetManagedNetworkReservationCounts(db sqlRuleStore) (map[int64]int, error) {
+	rows, err := db.Query(`SELECT managed_network_id, COUNT(*) FROM managed_network_reservations WHERE managed_network_id > 0 GROUP BY managed_network_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out map[int64]int
+	for rows.Next() {
+		var managedNetworkID int64
+		var count int
+		if err := rows.Scan(&managedNetworkID, &count); err != nil {
+			return nil, err
+		}
+		if managedNetworkID <= 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[int64]int)
+		}
+		out[managedNetworkID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func dbGetManagedNetworkReservationsByManagedNetworkID(db sqlRuleStore, managedNetworkID int64) ([]ManagedNetworkReservation, error) {
+	rows, err := db.Query(`SELECT `+managedNetworkReservationColumns+` FROM managed_network_reservations WHERE managed_network_id = ?`, managedNetworkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []ManagedNetworkReservation
+	for rows.Next() {
+		item, err := scanManagedNetworkReservation(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func dbGetManagedNetworkReservation(db sqlRuleStore, id int64) (*ManagedNetworkReservation, error) {
+	item, err := scanManagedNetworkReservation(db.QueryRow(`SELECT `+managedNetworkReservationColumns+` FROM managed_network_reservations WHERE id = ?`, id))
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
 }

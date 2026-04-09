@@ -91,12 +91,15 @@ func Main(buildNonce string) {
 	pm.startAccepting()
 	pm.ready = true
 
-	go startAPI(cfg, db, pm)
+	apiServer := startAPI(cfg, db, pm)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
 	log.Println("shutting down...")
+	if apiServer != nil {
+		_ = apiServer.Close()
+	}
 	pm.stopAll()
 }

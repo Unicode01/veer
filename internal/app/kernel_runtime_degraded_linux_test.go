@@ -94,12 +94,18 @@ func TestTCKernelRuntimeDegradedStateMentionsHotRestart(t *testing.T) {
 }
 
 func TestTCKernelRuntimeDegradedStateUsesEgressNATAutoMapFloor(t *testing.T) {
+	autoFloor := kernelAdaptiveEgressNATAutoMapFloor()
+	actualCapacity := autoFloor / 2
+	if actualCapacity <= 0 {
+		actualCapacity = 1
+	}
+
 	state := tcKernelRuntimeDegradedState(
 		128,
 		kernelMapCapacities{
 			Rules:    16384,
-			Flows:    131072,
-			NATPorts: 131072,
+			Flows:    actualCapacity,
+			NATPorts: actualCapacity,
 		},
 		kernelRuntimeMapCountSnapshot{},
 		0,
@@ -109,7 +115,11 @@ func TestTCKernelRuntimeDegradedStateUsesEgressNATAutoMapFloor(t *testing.T) {
 		kernelRuntimeDegradedSourceNone,
 	)
 	if !state.active {
-		t.Fatal("tcKernelRuntimeDegradedState() = inactive, want active when egress nat auto floor raises desired flow/nat capacity")
+		t.Fatalf(
+			"tcKernelRuntimeDegradedState() = inactive, want active when egress nat auto floor=%d raises desired flow/nat capacity above actual=%d",
+			autoFloor,
+			actualCapacity,
+		)
 	}
 	if !strings.Contains(state.reason, kernelFlowsMapName) {
 		t.Fatalf("tcKernelRuntimeDegradedState() reason = %q, want flows map detail", state.reason)

@@ -521,6 +521,9 @@ func requireXDPFullNATIntegrationBinary(t *testing.T) string {
 	if _, err := exec.LookPath("ip"); err != nil {
 		t.Skip("ip command is required")
 	}
+	if reason := xdpVethNATRedirectGuardReasonForRelease(kernelRelease()); reason != "" {
+		t.Skip(reason)
+	}
 
 	repoRoot := findRepoRoot(t)
 	requireEmbeddedEBPFObjects(t, repoRoot)

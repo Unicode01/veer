@@ -56,6 +56,8 @@ type tcFlowValueV6 struct {
 	ClientPort       uint16
 	NATPort          uint16
 	Flags            uint16
+	FrontMAC         [6]byte
+	ClientMAC        [6]byte
 	Pad              uint32
 	LastSeenNS       uint64
 	FrontCloseSeenNS uint64

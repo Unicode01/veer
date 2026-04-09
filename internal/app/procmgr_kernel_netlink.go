@@ -374,6 +374,36 @@ func (pm *ProcessManager) summarizeNetlinkTriggeredKernelFallbacksLocked() strin
 	return fmt.Sprintf("rules=%d ranges=%d reasons=%s", ruleCount, rangeCount, strings.Join(reasons, ","))
 }
 
+func (pm *ProcessManager) summarizeActiveKernelLinkRecoveryLocked() string {
+	if pm == nil {
+		return ""
+	}
+
+	ruleCount := 0
+	rangeCount := 0
+	egressNATCount := 0
+	for _, ok := range pm.kernelRules {
+		if ok {
+			ruleCount++
+		}
+	}
+	for _, ok := range pm.kernelRanges {
+		if ok {
+			rangeCount++
+		}
+	}
+	for _, ok := range pm.kernelEgressNATs {
+		if ok {
+			egressNATCount++
+		}
+	}
+	total := ruleCount + rangeCount + egressNATCount
+	if total == 0 {
+		return ""
+	}
+	return fmt.Sprintf("active_kernel_entries=%d(rule_owners=%d range_owners=%d egress_nat_owners=%d)", total, ruleCount, rangeCount, egressNATCount)
+}
+
 func nextKernelNetlinkRetryState(lastRetryAt time.Time, now time.Time, summary string) (bool, time.Time) {
 	if strings.TrimSpace(summary) == "" {
 		return false, lastRetryAt
@@ -707,6 +737,9 @@ func (pm *ProcessManager) handleKernelNetlinkRecoveryTrigger(trigger kernelNetli
 			dynamicSummary := summarizeDynamicEgressNATParentInterfaces(dynamicParents)
 			if dynamicSummary != "" {
 				summary = mergeKernelNetlinkRecoverySummaries(summary, dynamicSummary)
+			}
+			if activeSummary := pm.summarizeActiveKernelLinkRecoveryLocked(); activeSummary != "" {
+				summary = mergeKernelNetlinkRecoverySummaries(summary, activeSummary)
 			}
 		}
 		shouldRetry, pm.kernelNetlinkRetryAt = nextKernelNetlinkRetryState(pm.kernelNetlinkRetryAt, now, summary)

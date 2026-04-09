@@ -143,12 +143,21 @@
   app.translateRuntimeReason = function translateRuntimeReason(reason) {
     const text = String(reason || '').trim();
     if (!text) return '';
+    const xdpGenericExperimentalReason = 'xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"';
+    const xdpVethNATRedirectPrefix = 'xdp dataplane nat redirect over veth is disabled on ';
 
     const translated = {
       'kernel dataplane does not support mixed IPv4/IPv6 forwarding': app.t('runtimeReason.kernelMixedFamily'),
-      'kernel dataplane currently does not support transparent IPv6 rules': app.t('runtimeReason.kernelTransparentIPv6')
+      'kernel dataplane currently does not support transparent IPv6 rules': app.t('runtimeReason.kernelTransparentIPv6'),
+      'xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"': app.t('runtimeReason.xdpGenericExperimental')
     };
 
+    if (text.indexOf(xdpGenericExperimentalReason) >= 0) {
+      return text.replace(xdpGenericExperimentalReason, app.t('runtimeReason.xdpGenericExperimental'));
+    }
+    if (text.indexOf(xdpVethNATRedirectPrefix) === 0) {
+      return app.t('runtimeReason.xdpVethNatRedirectLegacyKernel');
+    }
     return Object.prototype.hasOwnProperty.call(translated, text) ? translated[text] : text;
   };
 
@@ -321,8 +330,13 @@
       'backend_source_ip ',
       'in_interface ',
       'in_ip ',
+      'target_interface ',
+      'parent_prefix ',
       'parent_interface ',
       'child_interface ',
+      'assigned_prefix ',
+      'address ',
+      'prefix_len ',
       'out_interface ',
       'out_ip ',
       'out_source_ip ',
@@ -337,6 +351,11 @@
 
   app.translateValidationMessage = function translateValidationMessage(message) {
     const rawText = String(message || '').trim();
+    if (rawText.indexOf('overlaps with ipv6 assignment #') === 0) {
+      return app.t('validation.ipv6AssignmentOverlap', {
+        id: rawText.slice('overlaps with ipv6 assignment #'.length)
+      });
+    }
     if (rawText.indexOf('child_interface conflicts with egress nat #') === 0) {
       return app.t('validation.egressNATChildConflict', {
         id: rawText.slice('child_interface conflicts with egress nat #'.length)
@@ -345,6 +364,16 @@
     if (rawText.indexOf('egress nat scope conflicts with egress nat #') === 0) {
       return app.t('validation.egressNATChildConflict', {
         id: rawText.slice('egress nat scope conflicts with egress nat #'.length)
+      });
+    }
+    if (rawText.indexOf('mac_address conflicts with reservation #') === 0) {
+      return app.t('validation.managedNetworkReservationMACConflict', {
+        id: rawText.slice('mac_address conflicts with reservation #'.length)
+      });
+    }
+    if (rawText.indexOf('ipv4_address conflicts with reservation #') === 0) {
+      return app.t('validation.managedNetworkReservationIPConflict', {
+        id: rawText.slice('ipv4_address conflicts with reservation #'.length)
       });
     }
 
@@ -357,10 +386,19 @@
       'is required': app.t('validation.required'),
       'must be greater than 0': app.t('validation.positiveId'),
       'must be omitted when creating a rule': app.t('validation.ruleCreateIDOmit'),
+      'must be omitted when creating a managed network': app.t('validation.managedNetworkCreateIDOmit'),
+      'must be omitted when creating a managed network reservation': app.t('validation.managedNetworkReservationCreateIDOmit'),
       'must be omitted when creating an egress nat': app.t('validation.egressNATCreateIDOmit'),
+      'must be omitted when creating an ipv6 assignment': app.t('validation.ipv6AssignmentCreateIDOmit'),
+      'must be a valid Ethernet MAC address': app.t('validation.macAddress'),
       'must be a valid IP address': app.t('validation.ip'),
       'must be a valid IPv4 address': app.t('validation.ipv4'),
+      'must be a valid IPv4 CIDR': app.t('validation.ipv4CIDR'),
+      'must be a valid IPv6 address': app.t('validation.ipv6'),
+      'must be a valid IPv6 CIDR prefix': app.t('validation.ipv6Prefix'),
+      'must be between 1 and 128': app.t('validation.prefixLength'),
       'must be a specific non-loopback IP address': app.t('validation.sourceIPSpecific'),
+      'must be a specific non-loopback IPv6 address': app.t('validation.ipv6'),
       'must be a specific non-loopback IPv4 address': app.t('validation.sourceIPSpecific'),
       'must be omitted when transparent mode is enabled': app.t('validation.sourceIPTransparent'),
       'must be between 1 and 65535': app.t('validation.portRange'),
@@ -384,7 +422,19 @@
       'rule not found': app.t('validation.ruleNotFound'),
       'site not found': app.t('validation.siteNotFound'),
       'range not found': app.t('validation.rangeNotFound'),
+      'managed network not found': app.t('validation.managedNetworkNotFound'),
+      'managed network reservation not found': app.t('validation.managedNetworkReservationNotFound'),
+      'managed network ipv4 is disabled': app.t('validation.managedNetworkReservationIPv4Disabled'),
+      'managed network ipv4 configuration is invalid': app.t('validation.managedNetworkReservationIPv4Invalid'),
+      'ipv6 assignment not found': app.t('validation.ipv6AssignmentNotFound'),
       'egress nat not found': app.t('validation.egressNATNotFound'),
+      'must be one of create, existing': app.t('validation.managedNetworkBridgeMode'),
+      'bridge interface does not exist on this host': app.t('validation.managedNetworkBridgeMissing'),
+      'bridge name is already used by a non-bridge interface': app.t('validation.managedNetworkBridgeNameConflict'),
+      'bridge_mtu must be between 0 and 65535': app.t('validation.managedNetworkBridgeMTU'),
+      'must stay inside managed network ipv4_cidr': app.t('validation.managedNetworkReservationIPv4InsideCIDR'),
+      'must not use the managed network gateway address': app.t('validation.managedNetworkReservationGatewayConflict'),
+      'must use a usable host address': app.t('validation.managedNetworkReservationHostRequired'),
       'domain and backend_ip are required': app.t('validation.siteRequired'),
       'at least one of backend_http_port or backend_https_port is required': app.t('validation.sitePortsRequired'),
       'in_ip, start_port, end_port, out_ip are required': app.t('validation.rangeRequired'),
@@ -394,6 +444,10 @@
       'and out_interface are required': app.t('validation.egressNATRequired'),
       'parent_interface must be different from out_interface when selecting a single target interface': app.t('validation.egressNATSingleTargetOutConflict'),
       'must be different from out_interface when selecting a single target interface': app.t('validation.egressNATSingleTargetOutConflict'),
+      'must be different from parent_interface': app.t('validation.targetInterfaceDifferent'),
+      'must exist on the selected parent_interface': app.t('validation.parentPrefixMissing'),
+      'must be contained within parent_prefix': app.t('validation.assignedPrefixInsideParent'),
+      'is already assigned on the host': app.t('validation.ipv6AssignedOnHost'),
       'child_interface must be different from out_interface': app.t('validation.childInterfaceDifferent'),
       'child_interface is not attached to the selected parent_interface': app.t('validation.childParentMismatch'),
       'parent_interface has no eligible child interfaces for egress nat takeover': app.t('validation.egressNATNoChildren')

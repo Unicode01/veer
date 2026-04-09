@@ -114,7 +114,8 @@ func diffRangeConfigs(current map[int64]PortRange, desired []PortRange) (map[int
 
 // runRangeWorker handles a worker process that can forward multiple port ranges.
 func runRangeWorker(workerIndex int, sockPath string) {
-	signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 	myHash := computeBinaryHash()
 
 	var (
@@ -158,6 +159,18 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		stateMu.Unlock()
 		stopRangeBindings(bindings)
 	}
+
+	go func() {
+		<-ctx.Done()
+		connMu.Lock()
+		conn := ipcConn
+		ipcConn = nil
+		connMu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		stopBindings(true)
+	}()
 
 	applyRanges := func(ranges []PortRange) {
 		ids := make([]int64, 0, len(ranges))
@@ -224,6 +237,8 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		defer stopTimer(sendTimer)
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-speedTimer.C:
 				stateMu.Lock()
 				statsSnapshot := snapshotRuleStatsMap(currentStats)
@@ -255,7 +270,12 @@ func runRangeWorker(workerIndex int, sockPath string) {
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 			if atomic.LoadInt32(&pendingUpgrade) == 0 {
 				continue
 			}
@@ -278,9 +298,22 @@ func runRangeWorker(workerIndex int, sockPath string) {
 	}()
 
 	for {
-		conn, err := net.Dial("unix", sockPath)
+		if ctx.Err() != nil {
+			stopBindings(true)
+			return
+		}
+		conn, err := (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
 		if err != nil {
-			time.Sleep(2 * time.Second)
+			if ctx.Err() != nil {
+				stopBindings(true)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				stopBindings(true)
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -333,8 +366,17 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		ipcConn = nil
 		connMu.Unlock()
 		conn.Close()
+		if ctx.Err() != nil {
+			stopBindings(true)
+			return
+		}
 		log.Printf("range worker[%d]: disconnected from master, reconnecting...", workerIndex)
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			stopBindings(true)
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 

@@ -84,6 +84,142 @@ type InterfaceInfo struct {
 	Kind   string   `json:"kind,omitempty"`
 }
 
+type HostInterfaceAddress struct {
+	Family    string `json:"family"`
+	IP        string `json:"ip"`
+	CIDR      string `json:"cidr"`
+	PrefixLen int    `json:"prefix_len"`
+}
+
+type HostNetworkInterface struct {
+	Name      string                 `json:"name"`
+	Kind      string                 `json:"kind,omitempty"`
+	Parent    string                 `json:"parent,omitempty"`
+	Addresses []HostInterfaceAddress `json:"addresses,omitempty"`
+}
+
+type HostNetworkResponse struct {
+	Interfaces []HostNetworkInterface `json:"interfaces"`
+}
+
+type ManagedNetwork struct {
+	ID                  int64  `json:"id"`
+	Name                string `json:"name"`
+	BridgeMode          string `json:"bridge_mode"`
+	Bridge              string `json:"bridge"`
+	BridgeMTU           int    `json:"bridge_mtu"`
+	BridgeVLANAware     bool   `json:"bridge_vlan_aware"`
+	UplinkInterface     string `json:"uplink_interface"`
+	IPv4Enabled         bool   `json:"ipv4_enabled"`
+	IPv4CIDR            string `json:"ipv4_cidr"`
+	IPv4Gateway         string `json:"ipv4_gateway"`
+	IPv4PoolStart       string `json:"ipv4_pool_start"`
+	IPv4PoolEnd         string `json:"ipv4_pool_end"`
+	IPv4DNSServers      string `json:"ipv4_dns_servers"`
+	IPv6Enabled         bool   `json:"ipv6_enabled"`
+	IPv6ParentInterface string `json:"ipv6_parent_interface"`
+	IPv6ParentPrefix    string `json:"ipv6_parent_prefix"`
+	IPv6AssignmentMode  string `json:"ipv6_assignment_mode"`
+	AutoEgressNAT       bool   `json:"auto_egress_nat"`
+	Remark              string `json:"remark"`
+	Enabled             bool   `json:"enabled"`
+}
+
+type ManagedNetworkStatus struct {
+	ManagedNetwork
+	ChildInterfaceCount          int      `json:"child_interface_count"`
+	ChildInterfaces              []string `json:"child_interfaces,omitempty"`
+	GeneratedIPv6AssignmentCount int      `json:"generated_ipv6_assignment_count"`
+	GeneratedEgressNAT           bool     `json:"generated_egress_nat"`
+	ReservationCount             int      `json:"reservation_count"`
+	PreviewWarnings              []string `json:"preview_warnings,omitempty"`
+	RepairRecommended            bool     `json:"repair_recommended,omitempty"`
+	RepairIssues                 []string `json:"repair_issues,omitempty"`
+	IPv4RuntimeStatus            string   `json:"ipv4_runtime_status,omitempty"`
+	IPv4RuntimeDetail            string   `json:"ipv4_runtime_detail,omitempty"`
+	IPv4DHCPv4ReplyCount         uint64   `json:"ipv4_dhcpv4_reply_count,omitempty"`
+	IPv6RuntimeStatus            string   `json:"ipv6_runtime_status,omitempty"`
+	IPv6RuntimeDetail            string   `json:"ipv6_runtime_detail,omitempty"`
+	IPv6RAAdvertisementCount     uint64   `json:"ipv6_ra_advertisement_count,omitempty"`
+	IPv6DHCPv6ReplyCount         uint64   `json:"ipv6_dhcpv6_reply_count,omitempty"`
+}
+
+type ManagedNetworkRepairResponse struct {
+	Status     string   `json:"status"`
+	Bridges    []string `json:"bridges,omitempty"`
+	GuestLinks []string `json:"guest_links,omitempty"`
+	Error      string   `json:"error,omitempty"`
+}
+
+type ManagedNetworkRuntimeReloadStatus struct {
+	Pending            bool      `json:"pending"`
+	DueAt              time.Time `json:"due_at,omitempty"`
+	LastRequestedAt    time.Time `json:"last_requested_at,omitempty"`
+	LastRequestSource  string    `json:"last_request_source,omitempty"`
+	LastRequestSummary string    `json:"last_request_summary,omitempty"`
+	LastStartedAt      time.Time `json:"last_started_at,omitempty"`
+	LastCompletedAt    time.Time `json:"last_completed_at,omitempty"`
+	LastResult         string    `json:"last_result,omitempty"`
+	LastAppliedSummary string    `json:"last_applied_summary,omitempty"`
+	LastError          string    `json:"last_error,omitempty"`
+}
+
+type ManagedNetworkRuntimeReloadResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type ManagedNetworkReservation struct {
+	ID               int64  `json:"id"`
+	ManagedNetworkID int64  `json:"managed_network_id"`
+	MACAddress       string `json:"mac_address"`
+	IPv4Address      string `json:"ipv4_address"`
+	Remark           string `json:"remark"`
+}
+
+type ManagedNetworkReservationStatus struct {
+	ManagedNetworkReservation
+	ManagedNetworkName   string `json:"managed_network_name"`
+	ManagedNetworkBridge string `json:"managed_network_bridge"`
+}
+
+type ManagedNetworkReservationCandidate struct {
+	ManagedNetworkID          int64    `json:"managed_network_id"`
+	ManagedNetworkName        string   `json:"managed_network_name"`
+	ManagedNetworkBridge      string   `json:"managed_network_bridge"`
+	PVEVMID                   string   `json:"pve_vmid,omitempty"`
+	PVEGuestName              string   `json:"pve_guest_name,omitempty"`
+	PVEGuestNIC               string   `json:"pve_guest_nic,omitempty"`
+	ChildInterface            string   `json:"child_interface"`
+	MACAddress                string   `json:"mac_address"`
+	SuggestedIPv4             string   `json:"suggested_ipv4"`
+	IPv4Candidates            []string `json:"ipv4_candidates,omitempty"`
+	SuggestedRemark           string   `json:"suggested_remark"`
+	Status                    string   `json:"status"`
+	StatusMessage             string   `json:"status_message,omitempty"`
+	ExistingReservationID     int64    `json:"existing_reservation_id,omitempty"`
+	ExistingReservationIPv4   string   `json:"existing_reservation_ipv4,omitempty"`
+	ExistingReservationRemark string   `json:"existing_reservation_remark,omitempty"`
+}
+
+// IPv6Assignment describes what IPv6 address or prefix the target side may use.
+// It is intentionally not a host-side "addr add" request for target_interface.
+type IPv6Assignment struct {
+	ID                   int64  `json:"id"`
+	ParentInterface      string `json:"parent_interface"`
+	TargetInterface      string `json:"target_interface"`
+	ParentPrefix         string `json:"parent_prefix"`
+	AssignedPrefix       string `json:"assigned_prefix"`
+	Address              string `json:"address"`
+	PrefixLen            int    `json:"prefix_len"`
+	Remark               string `json:"remark"`
+	Enabled              bool   `json:"enabled"`
+	RAAdvertisementCount uint64 `json:"ra_advertisement_count,omitempty"`
+	DHCPv6ReplyCount     uint64 `json:"dhcpv6_reply_count,omitempty"`
+	RuntimeStatus        string `json:"runtime_status,omitempty"`
+	RuntimeDetail        string `json:"runtime_detail,omitempty"`
+}
+
 type EgressNAT struct {
 	ID              int64  `json:"id"`
 	ParentInterface string `json:"parent_interface"`
@@ -291,6 +427,7 @@ type KernelEngineRuntimeView struct {
 	Attachments                   int       `json:"attachments"`
 	AttachmentsHealthy            bool      `json:"attachments_healthy"`
 	AttachmentSummary             string    `json:"attachment_summary,omitempty"`
+	AttachmentMode                string    `json:"attachment_mode,omitempty"`
 	AttachmentsUnhealthyCount     int       `json:"attachments_unhealthy_count,omitempty"`
 	LastAttachmentsUnhealthyAt    time.Time `json:"last_attachments_unhealthy_at,omitempty"`
 	RulesMapEntries               int       `json:"rules_map_entries"`
@@ -327,6 +464,10 @@ type KernelEngineRuntimeView struct {
 	DiagNATProbeRound3Used        uint64    `json:"diag_nat_probe_round3_used,omitempty"`
 	DiagReplyFlowRecreated        uint64    `json:"diag_reply_flow_recreated,omitempty"`
 	DiagTCPCloseDelete            uint64    `json:"diag_tcp_close_delete,omitempty"`
+	DiagXDPV4TransparentEnter     uint64    `json:"diag_xdp_v4_transparent_enter,omitempty"`
+	DiagXDPV4FullNATForwardEnter  uint64    `json:"diag_xdp_v4_fullnat_forward_enter,omitempty"`
+	DiagXDPV4FullNATReplyEnter    uint64    `json:"diag_xdp_v4_fullnat_reply_enter,omitempty"`
+	DiagXDPRedirectInvoked        uint64    `json:"diag_xdp_redirect_invoked,omitempty"`
 	DiagSnapshotError             string    `json:"diag_snapshot_error,omitempty"`
 	LastReconcileAt               time.Time `json:"last_reconcile_at,omitempty"`
 	LastReconcileMs               int64     `json:"last_reconcile_ms,omitempty"`

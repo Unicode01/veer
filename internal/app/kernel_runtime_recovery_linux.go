@@ -153,7 +153,7 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 	rt.attachments = newAttachments
 	rt.maintenanceState.requestFull()
 	if len(rt.attachments) > 0 {
-		if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments)); err != nil {
+		if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
 			rt.stateLog.Logf("kernel dataplane self-heal: refreshed tc attachments but failed to update runtime metadata: %v", err)
 		}
 	}
@@ -218,7 +218,7 @@ func (rt *xdpKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResult,
 	rt.attachments = newAttachments
 	rt.maintenanceState.requestFull()
 	if len(rt.attachments) > 0 {
-		if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments)); err != nil {
+		if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
 			rt.stateLog.Logf("xdp dataplane self-heal: refreshed xdp attachments but failed to update runtime metadata: %v", err)
 		}
 	}

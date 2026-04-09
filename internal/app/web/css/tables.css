@@ -165,6 +165,11 @@ td {
     min-width: 980px;
 }
 
+#managedNetworksTable {
+    width: max-content;
+    min-width: 100%;
+}
+
 thead th {
     position: sticky;
     top: 0;
@@ -513,8 +518,7 @@ tr.row-pending td {
 
 .kernel-runtime-tooltip-breakdown-row {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    align-items: flex-start;
     gap: 12px;
 }
 
@@ -528,12 +532,18 @@ tr.row-pending td {
 
 .kernel-runtime-tooltip-breakdown-label {
     color: var(--text-muted);
+    flex: 0 0 auto;
     white-space: nowrap;
 }
 
 .kernel-runtime-tooltip-breakdown-value {
     color: var(--text);
-    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    text-align: right;
 }
 
 .kernel-runtime-detail-cell {
@@ -575,6 +585,36 @@ tr.row-pending td {
     border-color: var(--warning-border);
     background: var(--warning-bg);
     color: var(--warning-text);
+}
+
+.managed-network-runtime-status {
+    min-width: 64px;
+}
+
+.managed-network-runtime-status.is-success {
+    border-color: var(--success-border);
+    background: var(--success-bg);
+    color: var(--success-text);
+}
+
+.managed-network-runtime-status.is-success:hover,
+.managed-network-runtime-status.is-success:focus {
+    border-color: var(--success-border);
+    background: var(--success-bg);
+    color: var(--success-text);
+}
+
+.managed-network-runtime-status.is-pending {
+    border-color: var(--info-border);
+    background: var(--info-bg);
+    color: var(--info-text);
+}
+
+.managed-network-runtime-status.is-pending:hover,
+.managed-network-runtime-status.is-pending:focus {
+    border-color: var(--info-border);
+    background: var(--info-bg);
+    color: var(--info-text);
 }
 
 .kernel-runtime-reconcile-badge {
@@ -823,6 +863,76 @@ tr.row-pending td {
     color: var(--text-muted);
 }
 
+#managedNetworksTable th,
+#managedNetworksTable td {
+    padding: 8px 8px;
+}
+
+#managedNetworksTable th:nth-child(1),
+#managedNetworksTable td:nth-child(1),
+#managedNetworksTable th:nth-child(5),
+#managedNetworksTable td:nth-child(5),
+#managedNetworksTable th:nth-child(8),
+#managedNetworksTable td:nth-child(8),
+#managedNetworksTable th:nth-child(10),
+#managedNetworksTable td:nth-child(10),
+#managedNetworksTable th:nth-child(11),
+#managedNetworksTable td:nth-child(11) {
+    white-space: nowrap;
+}
+
+.managed-network-cell-text,
+.managed-network-cell-compact {
+    min-width: 0;
+}
+
+.managed-network-cell-tight {
+    white-space: nowrap;
+}
+
+.managed-network-text,
+.managed-network-summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 100%;
+    vertical-align: middle;
+}
+
+.managed-network-text {
+    display: inline-block;
+    max-width: clamp(7rem, 12vw, 12rem);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.managed-network-text-mono,
+.managed-network-summary-mono .managed-network-summary-main {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.managed-network-summary-main {
+    min-width: 0;
+    max-width: clamp(8rem, 14vw, 14rem);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.managed-network-summary-badges {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.managed-network-summary-badges .badge {
+    flex: 0 0 auto;
+}
+
 #workersTable td {
     vertical-align: top;
 }
@@ -1005,6 +1115,17 @@ tr.row-pending td {
     min-width: 90px;
     text-align: center;
     color: var(--text-muted);
+}
+
+.table-inline-select {
+    min-height: 30px;
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    padding: 0 8px;
+    font-size: 12px;
 }
 
 @media (max-width: 720px) {

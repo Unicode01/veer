@@ -10,17 +10,44 @@ import (
 	"log"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
+	ebpflink "github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
 )
 
-const kernelXDPProgramName = "forward_xdp"
+const (
+	kernelXDPProgramName                 = "forward_xdp"
+	kernelXDPProgramV4Name               = "forward_xdp_v4"
+	kernelXDPProgramV6Name               = "forward_xdp_v6"
+	kernelXDPProgramV4TransparentName    = "forward_xdp_v4_transparent"
+	kernelXDPProgramV4FullNATForwardName = "forward_xdp_v4_fullnat_forward"
+	kernelXDPProgramV4FullNATReplyName   = "forward_xdp_v4_fullnat_reply"
+	kernelXDPProgramV6FullNATForwardName = "forward_xdp_v6_fullnat_forward"
+	kernelXDPProgramV6FullNATReplyName   = "forward_xdp_v6_fullnat_reply"
+	kernelXDPRedirectMapName             = "xdp_redirect_map"
+	kernelXDPProgramChainMapName         = "xdp_prog_chain"
+	kernelXDPFIBScratchMapName           = "xdp_fib_scratch"
+	kernelXDPFlowScratchV4MapName        = "xdp_flow_scratch_v4"
+	kernelXDPFlowAuxScratchV4MapName     = "xdp_flow_aux_scratch_v4"
+	kernelXDPFlowScratchV6MapName        = "xdp_flow_scratch_v6"
+	kernelXDPFlowAuxScratchV6MapName     = "xdp_flow_aux_scratch_v6"
+	kernelXDPDispatchScratchV4MapName    = "xdp_dispatch_scratch_v4"
+	kernelXDPDispatchScratchV6MapName    = "xdp_dispatch_scratch_v6"
+	xdpProgramChainIndexV4               = 0
+	xdpProgramChainIndexV6               = 1
+	xdpProgramChainIndexV4Transparent    = 2
+	xdpProgramChainIndexV4FullNATForward = 3
+	xdpProgramChainIndexV4FullNATReply   = 4
+	xdpProgramChainIndexV6FullNATForward = 5
+	xdpProgramChainIndexV6FullNATReply   = 6
+)
 
 const (
 	xdpRuleFlagFullNAT         = 0x1
@@ -28,6 +55,12 @@ const (
 	xdpRuleFlagBridgeIngressL2 = 0x4
 	xdpRuleFlagTrafficStats    = 0x8
 	xdpRuleFlagPreparedL2      = 0x10
+	xdpRuleFlagEgressNAT       = 0x20
+)
+
+const (
+	xdpVethNATRedirectMinKernelMajor = 5
+	xdpVethNATRedirectMinKernelMinor = 11
 )
 
 type xdpPrepareOptions struct {
@@ -46,12 +79,51 @@ type xdpRuleValueV4 struct {
 	DstMAC      [6]byte
 }
 
+type xdpRuleValueV6 struct {
+	RuleID      uint32
+	BackendAddr [16]byte
+	BackendPort uint16
+	Flags       uint16
+	OutIfIndex  uint32
+	NATAddr     [16]byte
+	SrcMAC      [6]byte
+	DstMAC      [6]byte
+}
+
 type preparedXDPKernelRule struct {
 	rule       Rule
 	inIfIndex  int
 	outIfIndex int
-	key        tcRuleKeyV4
-	value      xdpRuleValueV4
+	spec       kernelPreparedRuleSpec
+	keyV4      tcRuleKeyV4
+	valueV4    xdpRuleValueV4
+	keyV6      tcRuleKeyV6
+	valueV6    xdpRuleValueV6
+}
+
+type xdpCollectionPieces struct {
+	prog                 *ebpf.Program
+	progV4               *ebpf.Program
+	progV6               *ebpf.Program
+	progV4Transparent    *ebpf.Program
+	progV4FullNATForward *ebpf.Program
+	progV4FullNATReply   *ebpf.Program
+	progV6FullNATForward *ebpf.Program
+	progV6FullNATReply   *ebpf.Program
+	redirectMap          *ebpf.Map
+	progChain            *ebpf.Map
+	rulesV4              *ebpf.Map
+	rulesV6              *ebpf.Map
+	flowsV4              *ebpf.Map
+	flowsV6              *ebpf.Map
+	localIPv4s           *ebpf.Map
+}
+
+type preparedXDPKernelRuleBatches struct {
+	v4Keys   []tcRuleKeyV4
+	v4Values []xdpRuleValueV4
+	v6Keys   []tcRuleKeyV6
+	v6Values []xdpRuleValueV6
 }
 
 //go:embed ebpf/forward-xdp-bpf.o
@@ -66,40 +138,45 @@ type xdpAttachment struct {
 }
 
 type xdpKernelRuleRuntime struct {
-	mu                sync.Mutex
-	availableOnce     sync.Once
-	available         bool
-	availableReason   string
-	rulesMapLimit     int
-	flowsMapLimit     int
-	rulesMapCapacity  int
-	flowsMapCapacity  int
-	memlockOnce       sync.Once
-	memlockErr        error
-	coll              *ebpf.Collection
-	attachments       []xdpAttachment
-	preparedRules     []preparedXDPKernelRule
-	programID         uint32
-	prepareOptions    xdpPrepareOptions
-	lastSkipLog       map[string]struct{}
-	lastBridgeLog     map[string]struct{}
-	lastReconcileMode string
-	degradedSource    string
-	stateLog          kernelStateLogger
-	pressureState     kernelRuntimePressureState
-	observability     kernelRuntimeObservabilityState
-	maintenanceState  kernelAdaptiveMaintenanceState
-	statsCorrection   map[uint32]kernelRuleStats
-	flowPruneState    kernelFlowPruneState
-	runtimeMapCounts  kernelRuntimeMapCountSnapshot
+	mu                 sync.Mutex
+	availableOnce      sync.Once
+	available          bool
+	availableReason    string
+	allowGenericAttach bool
+	rulesMapLimit      int
+	flowsMapLimit      int
+	rulesMapCapacity   int
+	flowsMapCapacity   int
+	memlockOnce        sync.Once
+	memlockErr         error
+	coll               *ebpf.Collection
+	attachments        []xdpAttachment
+	preparedRules      []preparedXDPKernelRule
+	programID          uint32
+	prepareOptions     xdpPrepareOptions
+	lastSkipLog        map[string]struct{}
+	lastBridgeLog      map[string]struct{}
+	lastReconcileMode  string
+	degradedSource     string
+	stateLog           kernelStateLogger
+	pressureState      kernelRuntimePressureState
+	observability      kernelRuntimeObservabilityState
+	maintenanceState   kernelAdaptiveMaintenanceState
+	statsCorrection    map[uint32]kernelRuleStats
+	flowPruneState     kernelFlowPruneState
+	runtimeMapCounts   kernelRuntimeMapCountSnapshot
 }
 
 func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	opts := xdpPrepareOptions{}
+	allowGeneric := false
 	rulesLimit := 0
 	flowsLimit := 0
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureBridgeXDP) {
 		opts.enableBridge = true
+	}
+	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureXDPGeneric) {
+		allowGeneric = true
 	}
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic) {
 		opts.enableTrafficStats = true
@@ -109,10 +186,11 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 		flowsLimit = cfg.KernelFlowsMapLimit
 	}
 	return &xdpKernelRuleRuntime{
-		prepareOptions:  opts,
-		rulesMapLimit:   rulesLimit,
-		flowsMapLimit:   flowsLimit,
-		statsCorrection: make(map[uint32]kernelRuleStats),
+		prepareOptions:     opts,
+		allowGenericAttach: allowGeneric,
+		rulesMapLimit:      rulesLimit,
+		flowsMapLimit:      flowsLimit,
+		statsCorrection:    make(map[uint32]kernelRuleStats),
 	}
 }
 
@@ -141,6 +219,11 @@ func (rt *xdpKernelRuleRuntime) Available() (bool, string) {
 		rt.availableReason = "embedded xdp eBPF object available"
 		if rt.prepareOptions.enableBridge {
 			rt.availableReason += "; bridge_xdp experimental path enabled"
+		}
+		if rt.allowGenericAttach {
+			rt.availableReason += "; xdp_generic experimental path enabled"
+		} else {
+			rt.availableReason += fmt.Sprintf("; generic/mixed attachment requires experimental feature %q", experimentalFeatureXDPGeneric)
 		}
 		if rt.prepareOptions.enableTrafficStats {
 			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
@@ -204,7 +287,31 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	}
 
 	requiredIfIndices := collectXDPInterfaces(prepared)
-	if rt.samePreparedRulesLocked(prepared, requiredIfIndices) {
+	samePrepared := rt.samePreparedRulesLocked(prepared, requiredIfIndices)
+	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
+	if localIPv4Err != nil && !samePrepared {
+		msg := fmt.Sprintf("build xdp egress nat local IPv4 inventory: %v", localIPv4Err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("xdp dataplane reconcile: %s", msg)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if samePrepared {
+		if localIPv4Err != nil {
+			log.Printf("xdp dataplane reconcile: keep current local IPv4 bypass inventory after refresh failure: %v", localIPv4Err)
+		} else if pieces, err := lookupXDPCollectionPieces(rt.coll); err != nil {
+			log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory skipped: %v", err)
+		} else if pieces.localIPv4s == nil {
+			if len(desiredLocalIPv4s) > 0 {
+				log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory skipped: embedded xdp eBPF object is missing map %q", kernelLocalIPv4MapName)
+			}
+		} else if err := syncKernelLocalIPv4Map(pieces.localIPv4s, desiredLocalIPv4s); err != nil {
+			log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory failed: %v", err)
+		}
 		rt.lastReconcileMode = "steady"
 		reconcileMetrics.AppliedEntries = len(prepared)
 		rt.stateLog.Logf("xdp dataplane reconcile: entry set unchanged, keeping %d active kernel entry(s)", len(prepared))
@@ -293,15 +400,36 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
 			if !preferFreshMapGrowth {
 				if flowMapReplacement == nil {
-					flowMapReplacement = make(map[string]*ebpf.Map, 2)
+					flowMapReplacement = make(map[string]*ebpf.Map, 3)
 				}
 				flowMapReplacement[kernelFlowsMapName] = flowsMap
-				actualCapacities.Flows = int(flowsMap.MaxEntries())
-				if actualCapacities.Flows < desiredCapacities.Flows {
+				if flowCapacity := int(flowsMap.MaxEntries()); flowCapacity < actualCapacities.Flows {
+					actualCapacities.Flows = flowCapacity
+				}
+				if int(flowsMap.MaxEntries()) < desiredCapacities.Flows {
 					log.Printf(
 						"xdp dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
 						kernelFlowsMapName,
-						actualCapacities.Flows,
+						flowsMap.MaxEntries(),
+						desiredCapacities.Flows,
+					)
+				}
+			}
+		}
+		if flowsMapV6 := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMapV6 != nil {
+			if !preferFreshMapGrowth {
+				if flowMapReplacement == nil {
+					flowMapReplacement = make(map[string]*ebpf.Map, 3)
+				}
+				flowMapReplacement[kernelFlowsMapNameV6] = flowsMapV6
+				if flowCapacity := int(flowsMapV6.MaxEntries()); flowCapacity < actualCapacities.Flows {
+					actualCapacities.Flows = flowCapacity
+				}
+				if int(flowsMapV6.MaxEntries()) < desiredCapacities.Flows {
+					log.Printf(
+						"xdp dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
+						kernelFlowsMapNameV6,
+						flowsMapV6.MaxEntries(),
 						desiredCapacities.Flows,
 					)
 				}
@@ -310,7 +438,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		if statsMap := rt.coll.Maps[kernelStatsMapName]; statsMap != nil {
 			if kernelMapReusableWithCapacity(statsMap, desiredCapacities.Rules) {
 				if flowMapReplacement == nil {
-					flowMapReplacement = make(map[string]*ebpf.Map, 2)
+					flowMapReplacement = make(map[string]*ebpf.Map, 3)
 				}
 				flowMapReplacement[kernelStatsMapName] = statsMap
 			} else {
@@ -323,40 +451,71 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 				)
 			}
 		}
-	} else if state, err := loadXDPKernelHotRestartState(desiredCapacities); err != nil {
-		log.Printf("xdp dataplane hot restart: load xdp state failed, cleaning stale hot restart state: %v", err)
+	} else if objectHash, hashErr := kernelXDPHotRestartObjectHash(rt.prepareOptions.enableTrafficStats); hashErr != nil {
+		log.Printf(
+			"xdp dataplane hot restart: xdp handoff unavailable because current object fingerprint could not be calculated; falling back to fresh maps (cold restart): %v",
+			hashErr,
+		)
+		if cleanupErr := cleanupStaleXDPKernelHotRestartState(); cleanupErr != nil {
+			log.Printf("xdp dataplane hot restart: cleanup stale xdp state failed, discarding pinned state only: %v", cleanupErr)
+			clearKernelHotRestartState(kernelEngineXDP)
+		}
+	} else if state, err := loadXDPKernelHotRestartState(desiredCapacities, objectHash); err != nil {
+		if isKernelHotRestartIncompatible(err) {
+			log.Printf(
+				"xdp dataplane hot restart: preserved xdp handoff is incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
+				kernelHotRestartIncompatibilityReason(err),
+			)
+		} else {
+			log.Printf("xdp dataplane hot restart: load xdp state failed, cleaning stale hot restart state: %v", err)
+		}
 		if cleanupErr := cleanupStaleXDPKernelHotRestartState(); cleanupErr != nil {
 			log.Printf("xdp dataplane hot restart: cleanup stale xdp state failed, discarding pinned state only: %v", cleanupErr)
 			clearKernelHotRestartState(kernelEngineXDP)
 		}
 	} else if state != nil {
-		hotRestartState = state
-		if len(state.replacements) > 0 {
-			flowMapReplacement = state.replacements
-		}
-		oldStatsMap = state.oldStatsMap
-		actualCapacities = state.actualCapacities
-		if actualCapacities.Flows < desiredCapacities.Flows {
+		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, map[string]bool{
+			kernelFlowsMapName:   true,
+			kernelFlowsMapNameV6: true,
+		}); err != nil {
 			log.Printf(
-				"xdp dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
-				kernelFlowsMapName,
-				actualCapacities.Flows,
-				desiredCapacities.Flows,
+				"xdp dataplane hot restart: preserved xdp maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
+				kernelHotRestartIncompatibilityReason(err),
+			)
+			state.close()
+			if cleanupErr := cleanupStaleXDPKernelHotRestartState(); cleanupErr != nil {
+				log.Printf("xdp dataplane hot restart: cleanup stale xdp state failed, discarding pinned state only: %v", cleanupErr)
+				clearKernelHotRestartState(kernelEngineXDP)
+			}
+		} else {
+			hotRestartState = state
+			if len(state.replacements) > 0 {
+				flowMapReplacement = state.replacements
+			}
+			oldStatsMap = state.oldStatsMap
+			actualCapacities = state.actualCapacities
+			if actualCapacities.Flows < desiredCapacities.Flows {
+				log.Printf(
+					"xdp dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
+					kernelFlowsMapName,
+					actualCapacities.Flows,
+					desiredCapacities.Flows,
+				)
+			}
+			if oldStatsMap != nil {
+				log.Printf(
+					"xdp dataplane hot restart: recreating %s map with capacity=%d (pinned=%d too small)",
+					kernelStatsMapName,
+					desiredCapacities.Rules,
+					oldStatsMap.MaxEntries(),
+				)
+			}
+			log.Printf(
+				"xdp dataplane hot restart: adopting pinned xdp maps=%s from %s",
+				strings.Join(state.replacementMapNames(), ","),
+				kernelHotRestartEngineDir(kernelEngineXDP),
 			)
 		}
-		if oldStatsMap != nil {
-			log.Printf(
-				"xdp dataplane hot restart: recreating %s map with capacity=%d (pinned=%d too small)",
-				kernelStatsMapName,
-				desiredCapacities.Rules,
-				oldStatsMap.MaxEntries(),
-			)
-		}
-		log.Printf(
-			"xdp dataplane hot restart: adopting pinned xdp maps=%s from %s",
-			strings.Join(state.replacementMapNames(), ","),
-			kernelHotRestartEngineDir(kernelEngineXDP),
-		)
 	}
 	if len(flowMapReplacement) > 0 {
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(flowMapReplacement))
@@ -364,7 +523,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
 	}
 	if err != nil && hotRestartState != nil {
-		log.Printf("xdp dataplane hot restart: adopt xdp state failed, retrying with fresh maps: %v", err)
+		log.Printf(
+			"xdp dataplane hot restart: xdp handoff failed during collection load, abandoning handoff and falling back to fresh maps (cold restart): %v",
+			err,
+		)
 		hotRestartState.close()
 		hotRestartState = nil
 		flowMapReplacement = nil
@@ -391,7 +553,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		return results, nil
 	}
 
-	prog, rulesMap, err := lookupXDPCollectionPieces(coll)
+	pieces, err := lookupXDPCollectionPieces(coll)
 	if err != nil {
 		coll.Close()
 		msg := err.Error()
@@ -399,6 +561,18 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			return results, nil
 		}
 		log.Printf("xdp dataplane reconcile: object lookup failed: %s", msg)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if err := configureXDPProgramChain(pieces); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("configure xdp program chain: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("xdp dataplane program chain setup failed: %v", err)
 		for _, rule := range rules {
 			results[rule.ID] = kernelRuleApplyResult{Error: msg}
 		}
@@ -415,38 +589,69 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		}
 	}
 	if hotRestartState != nil {
-		if correction, err := reconcileKernelStatsCorrectionFromMaps(coll.Maps[kernelStatsMapName], coll.Maps[kernelFlowsMapName]); err != nil {
+		if correction, err := reconcileKernelStatsCorrectionFromRuntimeMaps(coll.Maps[kernelStatsMapName], kernelRuntimeMapRefsFromCollection(coll)); err != nil {
 			log.Printf("xdp dataplane hot restart: reconcile xdp stats against flows failed: %v", err)
 		} else {
 			hotRestartStatsCorrection = correction
 		}
 	}
-
-	keys := make([]tcRuleKeyV4, 0, len(prepared))
-	values := make([]xdpRuleValueV4, 0, len(prepared))
-	for _, item := range prepared {
-		keys = append(keys, item.key)
-		values = append(values, item.value)
-	}
-	if err := updateKernelMapEntries(rulesMap, keys, values); err != nil {
+	if pieces.localIPv4s != nil {
+		if err := syncKernelLocalIPv4Map(pieces.localIPv4s, desiredLocalIPv4s); err != nil {
+			coll.Close()
+			msg := fmt.Sprintf("sync xdp local IPv4 bypass map: %v", err)
+			if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+				return results, nil
+			}
+			log.Printf("xdp dataplane local IPv4 bypass map sync failed: %v", err)
+			for _, rule := range rules {
+				results[rule.ID] = kernelRuleApplyResult{Error: msg}
+			}
+			return results, nil
+		}
+	} else if len(desiredLocalIPv4s) > 0 {
 		coll.Close()
-		msg := fmt.Sprintf("update xdp rule map: %v", err)
+		msg := fmt.Sprintf("embedded xdp eBPF object is missing map %q; rebuild the xdp eBPF object", kernelLocalIPv4MapName)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
 			return results, nil
 		}
-		log.Printf("xdp dataplane rule map bulk update failed: %v", err)
+		log.Printf("xdp dataplane local IPv4 bypass map sync failed: %s", msg)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if err := syncXDPRedirectMap(pieces.redirectMap, requiredIfIndices); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("sync xdp redirect map: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("xdp dataplane redirect map sync failed: %v", err)
 		for _, rule := range rules {
 			results[rule.ID] = kernelRuleApplyResult{Error: msg}
 		}
 		return results, nil
 	}
 
-	programID := kernelProgramID(prog)
+	if err := syncPreparedXDPKernelRuleMaps(pieces, prepared); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("sync xdp rule maps: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("xdp dataplane rule map sync failed: %v", err)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+
+	programID := kernelProgramID(pieces.prog)
 	oldAttachments := append([]xdpAttachment(nil), rt.attachments...)
 	newAttachments := make([]xdpAttachment, 0, len(requiredIfIndices))
 	attachStartedAt := time.Now()
 	for _, ifindex := range requiredIfIndices {
-		att, err := rt.attachProgramLocked(ifindex, prog, oldAttachments)
+		att, err := rt.attachProgramLocked(ifindex, pieces.prog, oldAttachments)
 		if err != nil {
 			rt.discardAttachmentsLocked(newAttachments)
 			coll.Close()
@@ -519,7 +724,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	if hotRestartState != nil {
 		rt.statsCorrection = hotRestartStatsCorrection
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments)); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
 		log.Printf("xdp dataplane runtime metadata: write xdp runtime metadata failed: %v", err)
 	}
 	if hotRestartState != nil {
@@ -546,11 +751,34 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	defer rt.mu.Unlock()
 
 	startedAt := time.Now()
-	corrections, pruneMetrics, err := pruneStaleKernelFlowsInCollection(rt.coll, &rt.flowPruneState, rt.flowMaintenanceBudgetLocked())
-	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-	if err != nil {
-		return err
+	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	v4Budget, v6Budget := rt.flowMaintenanceBudgetsLocked(refs)
+	corrections := map[uint32]kernelRuleStats{}
+	pruneMetrics := kernelFlowPruneMetrics{}
+
+	if refs.flowsV4 != nil {
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsInCollection(rt.coll, &rt.flowPruneState, v4Budget)
+		pruneMetrics.Budget += v4Metrics.Budget
+		pruneMetrics.Scanned += v4Metrics.Scanned
+		pruneMetrics.Deleted += v4Metrics.Deleted
+		if err != nil {
+			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
+			return err
+		}
+		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
+	if refs.flowsV6 != nil {
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &rt.flowPruneState, v6Budget)
+		pruneMetrics.Budget += v6Metrics.Budget
+		pruneMetrics.Scanned += v6Metrics.Scanned
+		pruneMetrics.Deleted += v6Metrics.Deleted
+		if err != nil {
+			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
+			return err
+		}
+		mergeKernelStatsCorrections(corrections, v6Corrections)
+	}
+	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, nil)
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
 	pressureActive := rt.pressureState.active
 	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
@@ -558,7 +786,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		fullSuccess := true
 		driftDetected := false
 		if rt.coll != nil && rt.coll.Maps != nil {
-			live, liveErr := snapshotKernelLiveStateFromFlows(nil, rt.coll.Maps[kernelFlowsMapName], false)
+			live, liveErr := snapshotKernelLiveStateFromRuntimeMapRefs(refs, false)
 			if liveErr != nil {
 				fullSuccess = false
 				log.Printf("xdp dataplane maintenance: snapshot live xdp flow state failed: %v", liveErr)
@@ -608,8 +836,17 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 	if rt.coll == nil || rt.coll.Maps == nil || len(rt.attachments) == 0 {
 		return false
 	}
+	objectHash, err := kernelXDPHotRestartObjectHash(rt.prepareOptions.enableTrafficStats)
+	if err != nil {
+		log.Printf("xdp dataplane hot restart: fingerprint xdp object failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
 	maps := map[string]*ebpf.Map{
 		kernelFlowsMapName: rt.coll.Maps[kernelFlowsMapName],
+	}
+	if rt.coll.Maps[kernelFlowsMapNameV6] != nil {
+		maps[kernelFlowsMapNameV6] = rt.coll.Maps[kernelFlowsMapNameV6]
 	}
 	if kernelHotRestartSkipStatsRequested() {
 		log.Printf("xdp dataplane hot restart: preserving flow map without %s as requested", kernelStatsMapName)
@@ -621,7 +858,7 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	if err := writeKernelHotRestartMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments)); err != nil {
+	if err := writeKernelHotRestartMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, objectHash)); err != nil {
 		clearKernelHotRestartState(kernelEngineXDP)
 		log.Printf("xdp dataplane hot restart: write xdp metadata failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
@@ -705,9 +942,9 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 	if rt.coll == nil || rt.coll.Maps == nil || len(rt.preparedRules) == 0 {
 		return retained, nil
 	}
-	rulesMap := rt.coll.Maps[kernelRulesMapName]
-	if rulesMap == nil {
-		return retained, nil
+	pieces, err := lookupXDPCollectionPieces(rt.coll)
+	if err != nil {
+		return nil, err
 	}
 
 	desiredByKey := indexKernelRulesByMatchKey(rules)
@@ -720,17 +957,13 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 			retained[desired.ID] = struct{}{}
 			continue
 		}
-		if err := deleteKernelMapEntry(rulesMap, item.key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		if err := deletePreparedXDPKernelRuleMapEntry(pieces, item); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return nil, fmt.Errorf("delete stale preserved xdp rule %d: %w", item.rule.ID, err)
 		}
 	}
 	rt.preparedRules = kept
-	if rulesMap != nil {
-		rt.rulesMapCapacity = int(rulesMap.MaxEntries())
-	}
-	if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-		rt.flowsMapCapacity = int(flowsMap.MaxEntries())
-	}
+	rt.rulesMapCapacity = kernelRuntimeRuleMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
+	rt.flowsMapCapacity = kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	rt.flowPruneState.reset()
 	rt.maintenanceState.requestFull()
 	rt.invalidatePressureStateLocked()
@@ -750,30 +983,25 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 		rt.cleanupLocked()
 		return nil
 	}
-	rulesMap := rt.coll.Maps[kernelRulesMapName]
-	if rulesMap == nil {
-		rt.cleanupLocked()
-		return nil
+	pieces, err := lookupXDPCollectionPieces(rt.coll)
+	if err != nil {
+		return err
 	}
 	for _, item := range rt.preparedRules {
-		if err := deleteKernelMapEntry(rulesMap, item.key); err != nil {
+		if err := deletePreparedXDPKernelRuleMapEntry(pieces, item); err != nil {
 			return fmt.Errorf("clear xdp rule key during drain: %w", err)
 		}
 	}
 	rt.preparedRules = nil
-	if rulesMap != nil {
-		rt.rulesMapCapacity = int(rulesMap.MaxEntries())
-	}
-	if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-		rt.flowsMapCapacity = int(flowsMap.MaxEntries())
-	}
+	rt.rulesMapCapacity = kernelRuntimeRuleMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
+	rt.flowsMapCapacity = kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	rt.lastReconcileMode = "cleared"
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {
-		if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments)); err != nil {
+		if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
 			log.Printf("xdp dataplane runtime metadata: refresh xdp runtime metadata failed after rule drain: %v", err)
 		}
 	}
@@ -783,11 +1011,29 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 
 func (rt *xdpKernelRuleRuntime) flowMaintenanceBudgetLocked() int {
 	if rt.coll != nil && rt.coll.Maps != nil {
-		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-			return kernelFlowMaintenanceBudgetForCapacity(int(flowsMap.MaxEntries()))
+		if totalCapacity := kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll)); totalCapacity > 0 {
+			return kernelFlowMaintenanceBudgetForCapacity(totalCapacity)
 		}
 	}
 	return kernelFlowMaintenanceBudgetForCapacity(rt.flowsMapCapacity)
+}
+
+func (rt *xdpKernelRuleRuntime) flowMaintenanceBudgetsLocked(refs kernelRuntimeMapRefs) (int, int) {
+	baseBudget := rt.flowMaintenanceBudgetLocked()
+	switch {
+	case refs.flowsV4 != nil && refs.flowsV6 != nil:
+		v4Budget := baseBudget / 2
+		if v4Budget <= 0 {
+			v4Budget = 1
+		}
+		return v4Budget, baseBudget - v4Budget
+	case refs.flowsV4 != nil:
+		return baseBudget, 0
+	case refs.flowsV6 != nil:
+		return 0, baseBudget
+	default:
+		return baseBudget, 0
+	}
 }
 
 func (rt *xdpKernelRuleRuntime) disableLocked(reason string) {
@@ -824,12 +1070,22 @@ func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Prog
 	}
 
 	var errs []string
-	for _, flags := range xdpAttachOrder(link, oldAttachments) {
+	for _, flags := range xdpAttachOrder(link, oldAttachments, rt.allowGenericAttach) {
 		if err := netlink.LinkSetXdpFdWithFlags(link, prog.FD(), flags); err == nil {
+			if len(errs) > 0 {
+				rt.stateLog.Logf("xdp dataplane attach: %s attached in %s mode after fallback (%s)",
+					xdpInterfaceLabel(ifindex),
+					xdpAttachFlagsLabel(flags),
+					strings.Join(errs, "; "),
+				)
+			}
 			return xdpAttachment{ifindex: ifindex, flags: flags}, nil
 		} else {
 			errs = append(errs, fmt.Sprintf("%s=%v", xdpAttachFlagsLabel(flags), err))
 		}
+	}
+	if !rt.allowGenericAttach {
+		errs = append(errs, "generic skipped: "+xdpGenericAttachmentExperimentalReason())
 	}
 	return xdpAttachment{}, errors.New(strings.Join(errs, "; "))
 }
@@ -878,8 +1134,19 @@ func validateXDPCollectionSpec(spec *ebpf.CollectionSpec) error {
 	if spec == nil {
 		return fmt.Errorf("embedded xdp eBPF object is missing")
 	}
-	if _, ok := spec.Programs[kernelXDPProgramName]; !ok {
-		return fmt.Errorf("embedded xdp eBPF object is missing program %q", kernelXDPProgramName)
+	for _, name := range []string{
+		kernelXDPProgramName,
+		kernelXDPProgramV4Name,
+		kernelXDPProgramV6Name,
+		kernelXDPProgramV4TransparentName,
+		kernelXDPProgramV4FullNATForwardName,
+		kernelXDPProgramV4FullNATReplyName,
+		kernelXDPProgramV6FullNATForwardName,
+		kernelXDPProgramV6FullNATReplyName,
+	} {
+		if _, ok := spec.Programs[name]; !ok {
+			return fmt.Errorf("embedded xdp eBPF object is missing program %q", name)
+		}
 	}
 	if _, ok := spec.Maps[kernelRulesMapName]; !ok {
 		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelRulesMapName)
@@ -890,17 +1157,208 @@ func validateXDPCollectionSpec(spec *ebpf.CollectionSpec) error {
 	if _, ok := spec.Maps[kernelStatsMapName]; !ok {
 		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelStatsMapName)
 	}
+	if _, ok := spec.Maps[kernelXDPRedirectMapName]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelXDPRedirectMapName)
+	}
+	if _, ok := spec.Maps[kernelXDPProgramChainMapName]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelXDPProgramChainMapName)
+	}
+	if _, ok := spec.Maps[kernelXDPFIBScratchMapName]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelXDPFIBScratchMapName)
+	}
+	for _, name := range []string{
+		kernelXDPFlowScratchV4MapName,
+		kernelXDPFlowAuxScratchV4MapName,
+		kernelXDPFlowScratchV6MapName,
+		kernelXDPFlowAuxScratchV6MapName,
+		kernelXDPDispatchScratchV4MapName,
+		kernelXDPDispatchScratchV6MapName,
+	} {
+		if _, ok := spec.Maps[name]; !ok {
+			return fmt.Errorf("embedded xdp eBPF object is missing map %q", name)
+		}
+	}
+	if _, ok := spec.Maps[kernelRulesMapNameV6]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelRulesMapNameV6)
+	}
+	if _, ok := spec.Maps[kernelFlowsMapNameV6]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelFlowsMapNameV6)
+	}
 	return nil
 }
 
-func lookupXDPCollectionPieces(coll *ebpf.Collection) (*ebpf.Program, *ebpf.Map, error) {
-	prog := coll.Programs[kernelXDPProgramName]
-	rulesMap := coll.Maps[kernelRulesMapName]
-	flowsMap := coll.Maps[kernelFlowsMapName]
-	if prog == nil || rulesMap == nil || flowsMap == nil {
-		return nil, nil, fmt.Errorf("xdp object is missing required program or maps")
+func lookupXDPCollectionPieces(coll *ebpf.Collection) (xdpCollectionPieces, error) {
+	if coll == nil {
+		return xdpCollectionPieces{}, fmt.Errorf("xdp object is missing")
 	}
-	return prog, rulesMap, nil
+	pieces := xdpCollectionPieces{
+		prog:                 coll.Programs[kernelXDPProgramName],
+		progV4:               coll.Programs[kernelXDPProgramV4Name],
+		progV6:               coll.Programs[kernelXDPProgramV6Name],
+		progV4Transparent:    coll.Programs[kernelXDPProgramV4TransparentName],
+		progV4FullNATForward: coll.Programs[kernelXDPProgramV4FullNATForwardName],
+		progV4FullNATReply:   coll.Programs[kernelXDPProgramV4FullNATReplyName],
+		progV6FullNATForward: coll.Programs[kernelXDPProgramV6FullNATForwardName],
+		progV6FullNATReply:   coll.Programs[kernelXDPProgramV6FullNATReplyName],
+		redirectMap:          coll.Maps[kernelXDPRedirectMapName],
+		progChain:            coll.Maps[kernelXDPProgramChainMapName],
+		rulesV4:              coll.Maps[kernelRulesMapNameV4],
+		rulesV6:              coll.Maps[kernelRulesMapNameV6],
+		flowsV4:              coll.Maps[kernelFlowsMapNameV4],
+		flowsV6:              coll.Maps[kernelFlowsMapNameV6],
+		localIPv4s:           coll.Maps[kernelLocalIPv4MapName],
+	}
+	if pieces.prog == nil ||
+		pieces.progV4 == nil ||
+		pieces.progV6 == nil ||
+		pieces.progV4Transparent == nil ||
+		pieces.progV4FullNATForward == nil ||
+		pieces.progV4FullNATReply == nil ||
+		pieces.progV6FullNATForward == nil ||
+		pieces.progV6FullNATReply == nil ||
+		pieces.redirectMap == nil ||
+		pieces.progChain == nil ||
+		pieces.rulesV4 == nil ||
+		pieces.flowsV4 == nil {
+		return xdpCollectionPieces{}, fmt.Errorf("xdp object is missing required program or maps")
+	}
+	if pieces.rulesV6 == nil || pieces.flowsV6 == nil {
+		return xdpCollectionPieces{}, fmt.Errorf("xdp object has incomplete IPv6 map set")
+	}
+	return pieces, nil
+}
+
+func configureXDPProgramChain(pieces xdpCollectionPieces) error {
+	if pieces.progChain == nil ||
+		pieces.progV4 == nil ||
+		pieces.progV6 == nil ||
+		pieces.progV4Transparent == nil ||
+		pieces.progV4FullNATForward == nil ||
+		pieces.progV4FullNATReply == nil ||
+		pieces.progV6FullNATForward == nil ||
+		pieces.progV6FullNATReply == nil {
+		return fmt.Errorf("xdp object is missing program chain pieces")
+	}
+	if err := pieces.progChain.Put(uint32(xdpProgramChainIndexV4), uint32(pieces.progV4.FD())); err != nil {
+		return fmt.Errorf("install xdp IPv4 tail-call target: %w", err)
+	}
+	if err := pieces.progChain.Put(uint32(xdpProgramChainIndexV6), uint32(pieces.progV6.FD())); err != nil {
+		return fmt.Errorf("install xdp IPv6 tail-call target: %w", err)
+	}
+	if err := pieces.progChain.Put(uint32(xdpProgramChainIndexV4Transparent), uint32(pieces.progV4Transparent.FD())); err != nil {
+		return fmt.Errorf("install xdp IPv4 transparent tail-call target: %w", err)
+	}
+	if err := pieces.progChain.Put(uint32(xdpProgramChainIndexV4FullNATForward), uint32(pieces.progV4FullNATForward.FD())); err != nil {
+		return fmt.Errorf("install xdp IPv4 full-nat forward tail-call target: %w", err)
+	}
+	if err := pieces.progChain.Put(uint32(xdpProgramChainIndexV4FullNATReply), uint32(pieces.progV4FullNATReply.FD())); err != nil {
+		return fmt.Errorf("install xdp IPv4 full-nat reply tail-call target: %w", err)
+	}
+	if err := pieces.progChain.Put(uint32(xdpProgramChainIndexV6FullNATForward), uint32(pieces.progV6FullNATForward.FD())); err != nil {
+		return fmt.Errorf("install xdp IPv6 full-nat forward tail-call target: %w", err)
+	}
+	if err := pieces.progChain.Put(uint32(xdpProgramChainIndexV6FullNATReply), uint32(pieces.progV6FullNATReply.FD())); err != nil {
+		return fmt.Errorf("install xdp IPv6 full-nat reply tail-call target: %w", err)
+	}
+	return nil
+}
+
+func xdpPreparedRuleFamily(item preparedXDPKernelRule) string {
+	if item.spec.Family != "" {
+		return normalizedKernelPreparedRuleFamily(item.spec.Family)
+	}
+	if family := ipLiteralFamily(item.rule.InIP); family != "" {
+		return normalizedKernelPreparedRuleFamily(family)
+	}
+	if family := ipLiteralFamily(item.rule.OutIP); family != "" {
+		return normalizedKernelPreparedRuleFamily(family)
+	}
+	return ipFamilyIPv4
+}
+
+func buildPreparedXDPKernelRuleBatches(prepared []preparedXDPKernelRule) (preparedXDPKernelRuleBatches, error) {
+	batches := preparedXDPKernelRuleBatches{
+		v4Keys:   make([]tcRuleKeyV4, 0, len(prepared)),
+		v4Values: make([]xdpRuleValueV4, 0, len(prepared)),
+		v6Keys:   make([]tcRuleKeyV6, 0, len(prepared)),
+		v6Values: make([]xdpRuleValueV6, 0, len(prepared)),
+	}
+	for _, item := range prepared {
+		switch xdpPreparedRuleFamily(item) {
+		case ipFamilyIPv6:
+			batches.v6Keys = append(batches.v6Keys, item.keyV6)
+			batches.v6Values = append(batches.v6Values, item.valueV6)
+		default:
+			batches.v4Keys = append(batches.v4Keys, item.keyV4)
+			batches.v4Values = append(batches.v4Values, item.valueV4)
+		}
+	}
+	return batches, nil
+}
+
+func syncPreparedXDPKernelRuleMaps(pieces xdpCollectionPieces, prepared []preparedXDPKernelRule) error {
+	batches, err := buildPreparedXDPKernelRuleBatches(prepared)
+	if err != nil {
+		return err
+	}
+	if err := updateKernelMapEntries(pieces.rulesV4, batches.v4Keys, batches.v4Values); err != nil {
+		return fmt.Errorf("update IPv4 xdp rule map: %w", err)
+	}
+	if err := updateKernelMapEntries(pieces.rulesV6, batches.v6Keys, batches.v6Values); err != nil {
+		return fmt.Errorf("update IPv6 xdp rule map: %w", err)
+	}
+	return nil
+}
+
+func syncXDPRedirectMap(m *ebpf.Map, requiredIfIndices []int) error {
+	if m == nil {
+		return fmt.Errorf("xdp redirect map is nil")
+	}
+
+	desired := make(map[uint32]uint32, len(requiredIfIndices))
+	for _, ifindex := range requiredIfIndices {
+		if ifindex <= 0 {
+			continue
+		}
+		desired[uint32(ifindex)] = uint32(ifindex)
+	}
+
+	existing := make(map[uint32]uint32)
+	iter := m.Iterate()
+	var key uint32
+	var value uint32
+	for iter.Next(&key, &value) {
+		existing[key] = value
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate xdp redirect map: %w", err)
+	}
+
+	for ifindex, target := range desired {
+		if current, ok := existing[ifindex]; ok && current == target {
+			delete(existing, ifindex)
+			continue
+		}
+		if err := m.Put(ifindex, target); err != nil {
+			return fmt.Errorf("update xdp redirect map entry %d=>%d: %w", ifindex, target, err)
+		}
+		delete(existing, ifindex)
+	}
+	for ifindex := range existing {
+		if err := m.Delete(ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete stale xdp redirect map entry %d: %w", ifindex, err)
+		}
+	}
+	return nil
+}
+
+func deletePreparedXDPKernelRuleMapEntry(pieces xdpCollectionPieces, item preparedXDPKernelRule) error {
+	switch xdpPreparedRuleFamily(item) {
+	case ipFamilyIPv6:
+		return deleteKernelMapEntry(pieces.rulesV6, item.keyV6)
+	default:
+		return deleteKernelMapEntry(pieces.rulesV4, item.keyV4)
+	}
 }
 
 func collectXDPInterfaces(prepared []preparedXDPKernelRule) []int {
@@ -918,9 +1376,16 @@ func collectXDPInterfaces(prepared []preparedXDPKernelRule) []int {
 	return out
 }
 
-func xdpAttachOrder(link netlink.Link, oldAttachments []xdpAttachment) []int {
+func xdpGenericAttachmentExperimentalReason() string {
+	return fmt.Sprintf("xdp dataplane generic/mixed attachment requires experimental feature %q", experimentalFeatureXDPGeneric)
+}
+
+func xdpAttachOrder(link netlink.Link, oldAttachments []xdpAttachment, allowGeneric bool) []int {
+	if !allowGeneric {
+		return []int{nl.XDP_FLAGS_DRV_MODE}
+	}
 	preferred := []int{nl.XDP_FLAGS_DRV_MODE, nl.XDP_FLAGS_SKB_MODE}
-	if link != nil && strings.EqualFold(strings.TrimSpace(link.Type()), "veth") {
+	if xdpPreferGenericAttach(link) {
 		preferred = []int{nl.XDP_FLAGS_SKB_MODE, nl.XDP_FLAGS_DRV_MODE}
 	}
 	if link == nil || link.Attrs() == nil {
@@ -939,6 +1404,13 @@ func xdpAttachOrder(link netlink.Link, oldAttachments []xdpAttachment) []int {
 		}
 	}
 	return preferred
+}
+
+func xdpPreferGenericAttach(link netlink.Link) bool {
+	if link == nil || link.Attrs() == nil {
+		return false
+	}
+	return link.Attrs().MasterIndex > 0
 }
 
 func xdpAttachFlagsLabel(flags int) string {
@@ -982,14 +1454,42 @@ func xdpAttachmentExists(att xdpAttachment, programID uint32) bool {
 	if attrs == nil || attrs.Xdp == nil || !attrs.Xdp.Attached {
 		return false
 	}
-	if programID != 0 && attrs.Xdp.ProgId != programID {
-		return false
-	}
 	modeMask := uint32(nl.XDP_FLAGS_DRV_MODE | nl.XDP_FLAGS_SKB_MODE)
-	if (attrs.Xdp.Flags & modeMask) != (uint32(att.flags) & modeMask) {
+	observedMode := attrs.Xdp.Flags & modeMask
+	if observedMode == 0 {
+		switch attrs.Xdp.AttachMode {
+		case nl.XDP_ATTACHED_DRV:
+			observedMode = uint32(nl.XDP_FLAGS_DRV_MODE)
+		case nl.XDP_ATTACHED_SKB:
+			observedMode = uint32(nl.XDP_FLAGS_SKB_MODE)
+		}
+	}
+	if observedMode != (uint32(att.flags) & modeMask) {
 		return false
 	}
-	return true
+	if programID == 0 || attrs.Xdp.ProgId == programID {
+		return true
+	}
+	return xdpQueryProgramAttached(att.ifindex, programID)
+}
+
+func xdpQueryProgramAttached(ifindex int, programID uint32) bool {
+	if ifindex <= 0 || programID == 0 {
+		return false
+	}
+	result, err := ebpflink.QueryPrograms(ebpflink.QueryOptions{
+		Target: ifindex,
+		Attach: ebpf.AttachXDP,
+	})
+	if err != nil {
+		return false
+	}
+	for _, prog := range result.Programs {
+		if uint32(prog.ID) == programID {
+			return true
+		}
+	}
+	return false
 }
 
 func detachXDPAttachment(att xdpAttachment) error {
@@ -1105,8 +1605,15 @@ func reusablePreparedXDPKernelRules(rule Rule, err error, previousByKey map[kern
 }
 
 func prepareXDPKernelRule(rule Rule, opts xdpPrepareOptions) ([]preparedXDPKernelRule, error) {
-	if isKernelEgressNATRule(rule) {
-		return nil, fmt.Errorf("xdp dataplane currently does not support egress nat takeover")
+	return prepareXDPKernelRuleRef(&rule, opts)
+}
+
+func prepareXDPKernelRuleRef(rule *Rule, opts xdpPrepareOptions) ([]preparedXDPKernelRule, error) {
+	if rule == nil {
+		return nil, fmt.Errorf("xdp dataplane requires a rule")
+	}
+	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) {
+		return nil, fmt.Errorf("xdp dataplane requires a rule id in uint32 range")
 	}
 	inLink, err := netlink.LinkByName(rule.InInterface)
 	if err != nil {
@@ -1118,74 +1625,218 @@ func prepareXDPKernelRule(rule Rule, opts xdpPrepareOptions) ([]preparedXDPKerne
 		return nil, fmt.Errorf("resolve outbound interface %q: %w", rule.OutInterface, err)
 	}
 
-	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) {
-		return nil, fmt.Errorf("xdp dataplane requires a rule id in uint32 range")
+	if isKernelEgressNATRule(*rule) {
+		return prepareXDPEgressNATRule(*rule, opts, inLink, outLink)
 	}
 	if !kernelProtocolSupported(rule.Protocol) {
 		return nil, fmt.Errorf("xdp dataplane currently supports only single-protocol TCP/UDP rules")
 	}
-
-	inAddr, err := parseKernelInboundIPv4Uint32(rule.InIP)
-	if err != nil {
-		return nil, fmt.Errorf("parse inbound ip %q: %w", rule.InIP, err)
-	}
-	outAddr, err := parseIPv4Uint32(rule.OutIP)
-	if err != nil {
-		return nil, fmt.Errorf("parse outbound ip %q: %w", rule.OutIP, err)
+	if !rule.Transparent {
+		if reason := xdpVethNATRedirectGuardReason(inLink, outLink); reason != "" {
+			return nil, errors.New(reason)
+		}
 	}
 
-	value := xdpRuleValueV4{
+	spec, err := buildKernelPreparedForwardRuleSpec(*rule, func(family string) (net.IP, error) {
+		if rule.Transparent {
+			return nil, nil
+		}
+		if family == ipFamilyIPv6 {
+			natIP, resolveErr := resolveKernelSNATIPv6(outLink, rule.OutIP, rule.OutSourceIP)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("resolve outbound source ip on %q: %w", rule.OutInterface, resolveErr)
+			}
+			return natIP, nil
+		}
+		natAddr, resolveErr := resolveKernelSNATIPv4(outLink, rule.OutIP, rule.OutSourceIP)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve outbound source ip on %q: %w", rule.OutInterface, resolveErr)
+		}
+		return net.IPv4(
+			byte(natAddr>>24),
+			byte(natAddr>>16),
+			byte(natAddr>>8),
+			byte(natAddr),
+		), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	valueV4 := xdpRuleValueV4{
 		RuleID:      uint32(rule.ID),
-		BackendAddr: outAddr,
 		BackendPort: uint16(rule.OutPort),
 	}
-	if !rule.Transparent {
-		natAddr, err := resolveKernelSNATIPv4(outLink, rule.OutIP, rule.OutSourceIP)
-		if err != nil {
-			return nil, fmt.Errorf("resolve outbound source ip on %q: %w", rule.OutInterface, err)
+	valueV6 := xdpRuleValueV6{
+		RuleID:      uint32(rule.ID),
+		BackendPort: uint16(rule.OutPort),
+	}
+	switch spec.Family {
+	case ipFamilyIPv6:
+		valueV6.BackendAddr = spec.BackendAddr
+		if !rule.Transparent {
+			valueV6.Flags |= xdpRuleFlagFullNAT
+			valueV6.NATAddr = spec.NATAddr
 		}
-		value.Flags |= xdpRuleFlagFullNAT
-		value.NATAddr = natAddr
+	default:
+		outAddr, convErr := spec.BackendAddr.ipv4Uint32()
+		if convErr != nil {
+			return nil, fmt.Errorf("prepare outbound IPv4 address: %w", convErr)
+		}
+		valueV4.BackendAddr = outAddr
+		if !rule.Transparent {
+			natAddr, convErr := spec.NATAddr.ipv4Uint32()
+			if convErr != nil {
+				return nil, fmt.Errorf("prepare outbound source IPv4 address: %w", convErr)
+			}
+			valueV4.Flags |= xdpRuleFlagFullNAT
+			valueV4.NATAddr = natAddr
+		}
 	}
 	if opts.enableTrafficStats {
-		value.Flags |= xdpRuleFlagTrafficStats
+		valueV4.Flags |= xdpRuleFlagTrafficStats
+		valueV6.Flags |= xdpRuleFlagTrafficStats
 	}
 	outIfIndex := 0
 
 	if xdpLinkTypeAllowed(outLink.Type()) {
+		if spec.Family == ipFamilyIPv6 && !xdpPreparedL2LinkTypeAllowed(outLink.Type()) {
+			return nil, fmt.Errorf("xdp dataplane IPv6 currently supports only veth outbound interfaces")
+		}
 		outIfIndex = outLink.Attrs().Index
 		if xdpPreparedL2LinkTypeAllowed(outLink.Type()) {
-			target, err := resolveXDPDirectTarget(outLink, rule)
+			target, err := resolveXDPDirectTarget(outLink, *rule, spec.Family)
 			if err != nil {
 				return nil, err
 			}
 			outIfIndex = target.outIfIndex
-			value.Flags |= xdpRuleFlagPreparedL2
-			value.SrcMAC = target.srcMAC
-			value.DstMAC = target.dstMAC
+			valueV4.Flags |= xdpRuleFlagPreparedL2
+			valueV4.SrcMAC = target.srcMAC
+			valueV4.DstMAC = target.dstMAC
+			valueV6.Flags |= xdpRuleFlagPreparedL2
+			valueV6.SrcMAC = target.srcMAC
+			valueV6.DstMAC = target.dstMAC
 		} else {
-			if err := validateXDPDirectTarget(outLink, rule); err != nil {
+			if err := validateXDPDirectTarget(outLink, *rule, spec.Family); err != nil {
 				return nil, err
 			}
 		}
 	} else {
-		target, err := resolveXDPBridgeTarget(outLink, rule, opts)
+		target, err := resolveXDPBridgeTarget(outLink, *rule, opts)
 		if err != nil {
 			return nil, err
 		}
 		outIfIndex = target.outIfIndex
-		value.Flags |= xdpRuleFlagBridgeL2
-		value.SrcMAC = target.srcMAC
-		value.DstMAC = target.dstMAC
+		valueV4.Flags |= xdpRuleFlagBridgeL2
+		valueV4.SrcMAC = target.srcMAC
+		valueV4.DstMAC = target.dstMAC
+		valueV6.Flags |= xdpRuleFlagBridgeL2
+		valueV6.SrcMAC = target.srcMAC
+		valueV6.DstMAC = target.dstMAC
 	}
-	value.OutIfIndex = uint32(outIfIndex)
+	valueV4.OutIfIndex = uint32(outIfIndex)
+	valueV6.OutIfIndex = uint32(outIfIndex)
+
+	inLinks, err := resolveXDPInboundLinks(inLink, *rule, opts)
+	if err != nil {
+		return nil, err
+	}
+	prepared := make([]preparedXDPKernelRule, 0, len(inLinks))
+	for _, currentInLink := range inLinks {
+		if currentInLink == nil || currentInLink.Attrs() == nil {
+			continue
+		}
+		item := preparedXDPKernelRule{
+			rule:       *rule,
+			inIfIndex:  currentInLink.Attrs().Index,
+			outIfIndex: outIfIndex,
+			spec:       spec,
+		}
+		switch spec.Family {
+		case ipFamilyIPv6:
+			item.keyV6 = tcRuleKeyV6{
+				IfIndex: uint32(currentInLink.Attrs().Index),
+				DstAddr: spec.DstAddr,
+				DstPort: uint16(rule.InPort),
+				Proto:   kernelRuleProtocol(rule.Protocol),
+			}
+			item.valueV6 = valueV6
+		default:
+			inAddr, convErr := spec.DstAddr.ipv4Uint32()
+			if convErr != nil {
+				return nil, fmt.Errorf("prepare inbound IPv4 address: %w", convErr)
+			}
+			item.keyV4 = tcRuleKeyV4{
+				IfIndex: uint32(currentInLink.Attrs().Index),
+				DstAddr: inAddr,
+				DstPort: uint16(rule.InPort),
+				Proto:   kernelRuleProtocol(rule.Protocol),
+			}
+			item.valueV4 = valueV4
+		}
+		prepared = append(prepared, item)
+	}
+	if len(prepared) == 0 {
+		return nil, fmt.Errorf("xdp dataplane bridge ingress expansion produced no attachable member interfaces")
+	}
+	return prepared, nil
+}
+
+func prepareXDPEgressNATRule(rule Rule, opts xdpPrepareOptions, inLink netlink.Link, outLink netlink.Link) ([]preparedXDPKernelRule, error) {
+	inAddr, err := parseKernelInboundIPv4Uint32(rule.InIP)
+	if err != nil {
+		return nil, fmt.Errorf("parse inbound ip %q: %w", rule.InIP, err)
+	}
+	if inAddr != 0 {
+		return nil, fmt.Errorf("xdp dataplane egress nat takeover requires wildcard inbound IPv4 0.0.0.0")
+	}
+	if rule.InPort != 0 || rule.OutPort != 0 {
+		return nil, fmt.Errorf("xdp dataplane egress nat takeover requires wildcard inbound port/identifier matching")
+	}
+	if rule.Transparent {
+		return nil, fmt.Errorf("xdp dataplane egress nat takeover does not support transparent mode")
+	}
+	if !kernelEgressProtocolSupported(rule.Protocol) {
+		return nil, fmt.Errorf("xdp dataplane currently supports only single-protocol TCP/UDP/ICMP egress nat rules")
+	}
+	if normalizeEgressNATType(rule.kernelNATType) != egressNATTypeSymmetric {
+		return nil, fmt.Errorf("xdp dataplane currently supports only symmetric egress nat takeover")
+	}
+	if outLink == nil || outLink.Attrs() == nil || outLink.Attrs().Index <= 0 {
+		return nil, fmt.Errorf("resolve outbound interface %q: invalid link", rule.OutInterface)
+	}
+	if !xdpLinkTypeAllowed(outLink.Type()) {
+		return nil, fmt.Errorf("xdp dataplane egress nat takeover currently supports only native-capable outbound interfaces (device/veth); got %q", outLink.Type())
+	}
+	if reason := xdpUnsupportedEgressNATInboundReason(inLink); reason != "" {
+		return nil, errors.New(reason)
+	}
+	if reason := xdpVethNATRedirectGuardReason(inLink, outLink); reason != "" {
+		return nil, errors.New(reason)
+	}
 
 	inLinks, err := resolveXDPInboundLinks(inLink, rule, opts)
 	if err != nil {
 		return nil, err
 	}
-	if isXDPBridgeLink(inLink) {
-		value.Flags |= xdpRuleFlagBridgeIngressL2
+	natAddr, err := resolveKernelEgressSNATIPv4(outLink, rule.OutSourceIP)
+	if err != nil {
+		return nil, fmt.Errorf("resolve outbound nat ip on %q: %w", rule.OutInterface, err)
+	}
+
+	flags := uint16(xdpRuleFlagFullNAT | xdpRuleFlagEgressNAT)
+	if opts.enableTrafficStats {
+		flags |= xdpRuleFlagTrafficStats
+	}
+	outIfIndex := outLink.Attrs().Index
+	var srcMAC [6]byte
+	var dstMAC [6]byte
+	// Egress NAT destinations are dynamic, so precomputing a single L2 next hop
+	// is fragile even on veth-backed test topologies. Keep the redirect on the
+	// FIB path and let the dataplane resolve the current destination per packet.
+	spec := kernelPreparedRuleSpec{
+		Family:  ipFamilyIPv4,
+		NATAddr: kernelPreparedAddrFromIPv4Uint32(natAddr),
 	}
 	prepared := make([]preparedXDPKernelRule, 0, len(inLinks))
 	for _, currentInLink := range inLinks {
@@ -1196,19 +1847,95 @@ func prepareXDPKernelRule(rule Rule, opts xdpPrepareOptions) ([]preparedXDPKerne
 			rule:       rule,
 			inIfIndex:  currentInLink.Attrs().Index,
 			outIfIndex: outIfIndex,
-			key: tcRuleKeyV4{
+			spec:       spec,
+			keyV4: tcRuleKeyV4{
 				IfIndex: uint32(currentInLink.Attrs().Index),
-				DstAddr: inAddr,
-				DstPort: uint16(rule.InPort),
+				DstAddr: 0,
+				DstPort: 0,
 				Proto:   kernelRuleProtocol(rule.Protocol),
 			},
-			value: value,
+			valueV4: xdpRuleValueV4{
+				RuleID:     uint32(rule.ID),
+				Flags:      flags,
+				OutIfIndex: uint32(outIfIndex),
+				NATAddr:    natAddr,
+				SrcMAC:     srcMAC,
+				DstMAC:     dstMAC,
+			},
 		})
 	}
 	if len(prepared) == 0 {
 		return nil, fmt.Errorf("xdp dataplane bridge ingress expansion produced no attachable member interfaces")
 	}
 	return prepared, nil
+}
+
+func xdpUnsupportedEgressNATInboundReason(inLink netlink.Link) string {
+	if inLink == nil || inLink.Attrs() == nil {
+		return ""
+	}
+	if inLink.Attrs().MasterIndex > 0 {
+		return "xdp dataplane egress nat takeover does not support bridge-enslaved inbound interfaces; use tc for managed-network bridge members"
+	}
+	return ""
+}
+
+func xdpVethNATRedirectGuardReason(inLink netlink.Link, outLink netlink.Link) string {
+	if !xdpLinkIsVeth(inLink) && !xdpLinkIsVeth(outLink) {
+		return ""
+	}
+	return xdpVethNATRedirectGuardReasonForRelease(kernelRelease())
+}
+
+func xdpVethNATRedirectGuardReasonForRelease(release string) string {
+	major, minor, ok := parseKernelReleaseMajorMinor(release)
+	if !ok {
+		return ""
+	}
+	if major > xdpVethNATRedirectMinKernelMajor || (major == xdpVethNATRedirectMinKernelMajor && minor >= xdpVethNATRedirectMinKernelMinor) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"xdp dataplane nat redirect over veth is disabled on %s; use tc or upgrade to kernel %d.%d+",
+		release,
+		xdpVethNATRedirectMinKernelMajor,
+		xdpVethNATRedirectMinKernelMinor,
+	)
+}
+
+func parseKernelReleaseMajorMinor(release string) (major int, minor int, ok bool) {
+	release = strings.TrimSpace(release)
+	if release == "" {
+		return 0, 0, false
+	}
+	firstDot := strings.IndexByte(release, '.')
+	if firstDot <= 0 {
+		return 0, 0, false
+	}
+	majorValue, err := strconv.Atoi(release[:firstDot])
+	if err != nil {
+		return 0, 0, false
+	}
+	rest := release[firstDot+1:]
+	minorDigits := 0
+	for minorDigits < len(rest) && rest[minorDigits] >= '0' && rest[minorDigits] <= '9' {
+		minorDigits++
+	}
+	if minorDigits == 0 {
+		return 0, 0, false
+	}
+	minorValue, err := strconv.Atoi(rest[:minorDigits])
+	if err != nil {
+		return 0, 0, false
+	}
+	return majorValue, minorValue, true
+}
+
+func xdpLinkIsVeth(link netlink.Link) bool {
+	if link == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(link.Type()), "veth")
 }
 
 func xdpLinkTypeAllowed(linkType string) bool {
@@ -1237,38 +1964,63 @@ func sortPreparedXDPKernelRules(items []preparedXDPKernelRule) {
 	sort.Slice(items, func(i, j int) bool {
 		a := items[i]
 		b := items[j]
-		if a.key.IfIndex != b.key.IfIndex {
-			return a.key.IfIndex < b.key.IfIndex
+		if a.inIfIndex != b.inIfIndex {
+			return a.inIfIndex < b.inIfIndex
 		}
-		if a.key.DstAddr != b.key.DstAddr {
-			return a.key.DstAddr < b.key.DstAddr
+		if a.outIfIndex != b.outIfIndex {
+			return a.outIfIndex < b.outIfIndex
 		}
-		if a.key.DstPort != b.key.DstPort {
-			return a.key.DstPort < b.key.DstPort
+		if aFamily, bFamily := xdpPreparedRuleFamily(a), xdpPreparedRuleFamily(b); aFamily != bFamily {
+			return aFamily < bFamily
 		}
-		if a.key.Proto != b.key.Proto {
-			return a.key.Proto < b.key.Proto
+		if cmp := compareKernelPreparedAddr(a.spec.DstAddr, b.spec.DstAddr); cmp != 0 {
+			return cmp < 0
 		}
-		if a.value.BackendAddr != b.value.BackendAddr {
-			return a.value.BackendAddr < b.value.BackendAddr
+		if a.rule.InPort != b.rule.InPort {
+			return a.rule.InPort < b.rule.InPort
 		}
-		if a.value.BackendPort != b.value.BackendPort {
-			return a.value.BackendPort < b.value.BackendPort
+		if aProto, bProto := kernelRuleProtocol(a.rule.Protocol), kernelRuleProtocol(b.rule.Protocol); aProto != bProto {
+			return aProto < bProto
 		}
-		if a.value.Flags != b.value.Flags {
-			return a.value.Flags < b.value.Flags
+		if cmp := compareKernelPreparedAddr(a.spec.BackendAddr, b.spec.BackendAddr); cmp != 0 {
+			return cmp < 0
 		}
-		if a.value.OutIfIndex != b.value.OutIfIndex {
-			return a.value.OutIfIndex < b.value.OutIfIndex
+		if a.rule.OutPort != b.rule.OutPort {
+			return a.rule.OutPort < b.rule.OutPort
 		}
-		if a.value.NATAddr != b.value.NATAddr {
-			return a.value.NATAddr < b.value.NATAddr
-		}
-		if a.value.SrcMAC != b.value.SrcMAC {
-			return string(a.value.SrcMAC[:]) < string(b.value.SrcMAC[:])
-		}
-		if a.value.DstMAC != b.value.DstMAC {
-			return string(a.value.DstMAC[:]) < string(b.value.DstMAC[:])
+		switch xdpPreparedRuleFamily(a) {
+		case ipFamilyIPv6:
+			if a.valueV6.Flags != b.valueV6.Flags {
+				return a.valueV6.Flags < b.valueV6.Flags
+			}
+			if a.valueV6.OutIfIndex != b.valueV6.OutIfIndex {
+				return a.valueV6.OutIfIndex < b.valueV6.OutIfIndex
+			}
+			if cmp := compareKernelPreparedAddr(kernelPreparedAddr(a.valueV6.NATAddr), kernelPreparedAddr(b.valueV6.NATAddr)); cmp != 0 {
+				return cmp < 0
+			}
+			if a.valueV6.SrcMAC != b.valueV6.SrcMAC {
+				return string(a.valueV6.SrcMAC[:]) < string(b.valueV6.SrcMAC[:])
+			}
+			if a.valueV6.DstMAC != b.valueV6.DstMAC {
+				return string(a.valueV6.DstMAC[:]) < string(b.valueV6.DstMAC[:])
+			}
+		default:
+			if a.valueV4.Flags != b.valueV4.Flags {
+				return a.valueV4.Flags < b.valueV4.Flags
+			}
+			if a.valueV4.OutIfIndex != b.valueV4.OutIfIndex {
+				return a.valueV4.OutIfIndex < b.valueV4.OutIfIndex
+			}
+			if a.valueV4.NATAddr != b.valueV4.NATAddr {
+				return a.valueV4.NATAddr < b.valueV4.NATAddr
+			}
+			if a.valueV4.SrcMAC != b.valueV4.SrcMAC {
+				return string(a.valueV4.SrcMAC[:]) < string(b.valueV4.SrcMAC[:])
+			}
+			if a.valueV4.DstMAC != b.valueV4.DstMAC {
+				return string(a.valueV4.DstMAC[:]) < string(b.valueV4.DstMAC[:])
+			}
 		}
 		return a.rule.ID < b.rule.ID
 	})
@@ -1277,7 +2029,17 @@ func sortPreparedXDPKernelRules(items []preparedXDPKernelRule) {
 func snapshotPreparedXDPBridgeEntries(prepared []preparedXDPKernelRule) map[string]struct{} {
 	lines := make(map[string]struct{})
 	for _, item := range prepared {
-		if item.value.Flags&(xdpRuleFlagBridgeL2|xdpRuleFlagBridgeIngressL2|xdpRuleFlagPreparedL2) == 0 {
+		flags := item.valueV4.Flags
+		srcMAC := item.valueV4.SrcMAC
+		dstMAC := item.valueV4.DstMAC
+		backendPort := item.valueV4.BackendPort
+		if xdpPreparedRuleFamily(item) == ipFamilyIPv6 {
+			flags = item.valueV6.Flags
+			srcMAC = item.valueV6.SrcMAC
+			dstMAC = item.valueV6.DstMAC
+			backendPort = item.valueV6.BackendPort
+		}
+		if flags&(xdpRuleFlagBridgeL2|xdpRuleFlagBridgeIngressL2|xdpRuleFlagPreparedL2) == 0 {
 			continue
 		}
 		line := fmt.Sprintf(
@@ -1285,22 +2047,24 @@ func snapshotPreparedXDPBridgeEntries(prepared []preparedXDPKernelRule) map[stri
 			kernelRuleLogLabel(item.rule),
 			xdpInterfaceLabel(item.inIfIndex),
 			xdpInterfaceLabel(item.outIfIndex),
-			(item.value.Flags&xdpRuleFlagBridgeIngressL2) != 0,
-			(item.value.Flags&xdpRuleFlagBridgeL2) != 0,
-			(item.value.Flags&xdpRuleFlagPreparedL2) != 0,
-			net.IPv4(
-				byte(item.value.BackendAddr>>24),
-				byte(item.value.BackendAddr>>16),
-				byte(item.value.BackendAddr>>8),
-				byte(item.value.BackendAddr),
-			).String(),
-			item.value.BackendPort,
-			formatXDPMAC(item.value.SrcMAC),
-			formatXDPMAC(item.value.DstMAC),
+			(flags&xdpRuleFlagBridgeIngressL2) != 0,
+			(flags&xdpRuleFlagBridgeL2) != 0,
+			(flags&xdpRuleFlagPreparedL2) != 0,
+			formatXDPPreparedAddr(item.spec.BackendAddr, xdpPreparedRuleFamily(item)),
+			backendPort,
+			formatXDPMAC(srcMAC),
+			formatXDPMAC(dstMAC),
 		)
 		lines[line] = struct{}{}
 	}
 	return lines
+}
+
+func formatXDPPreparedAddr(addr kernelPreparedAddr, family string) string {
+	if family == ipFamilyIPv6 {
+		return canonicalIPLiteral(net.IP(addr[:]))
+	}
+	return canonicalIPLiteral(net.IP(addr[12:16]))
 }
 
 func xdpInterfaceLabel(ifindex int) string {

@@ -22,6 +22,10 @@ type kernelDiagValueV4 struct {
 	NATProbeRound3Used uint64
 	ReplyFlowRecreated uint64
 	TCPCloseDelete     uint64
+	XDPV4TransparentEnter    uint64
+	XDPV4FullNATForwardEnter uint64
+	XDPV4FullNATReplyEnter   uint64
+	XDPRedirectInvoked       uint64
 }
 
 type kernelRuntimeDiagSnapshot struct {
@@ -37,6 +41,10 @@ type kernelRuntimeDiagSnapshot struct {
 	NATProbeRound3Used uint64
 	ReplyFlowRecreated uint64
 	TCPCloseDelete     uint64
+	XDPV4TransparentEnter    uint64
+	XDPV4FullNATForwardEnter uint64
+	XDPV4FullNATReplyEnter   uint64
+	XDPRedirectInvoked       uint64
 	LastError          string
 }
 
@@ -93,6 +101,10 @@ func snapshotKernelRuntimeDiag(coll *ebpf.Collection) kernelRuntimeDiagSnapshot 
 		NATProbeRound3Used: value.NATProbeRound3Used,
 		ReplyFlowRecreated: value.ReplyFlowRecreated,
 		TCPCloseDelete:     value.TCPCloseDelete,
+		XDPV4TransparentEnter:    value.XDPV4TransparentEnter,
+		XDPV4FullNATForwardEnter: value.XDPV4FullNATForwardEnter,
+		XDPV4FullNATReplyEnter:   value.XDPV4FullNATReplyEnter,
+		XDPRedirectInvoked:       value.XDPRedirectInvoked,
 	}
 }
 
@@ -112,6 +124,10 @@ func applyKernelRuntimeDiagView(view *KernelEngineRuntimeView, snapshot kernelRu
 	view.DiagNATProbeRound3Used = snapshot.NATProbeRound3Used
 	view.DiagReplyFlowRecreated = snapshot.ReplyFlowRecreated
 	view.DiagTCPCloseDelete = snapshot.TCPCloseDelete
+	view.DiagXDPV4TransparentEnter = snapshot.XDPV4TransparentEnter
+	view.DiagXDPV4FullNATForwardEnter = snapshot.XDPV4FullNATForwardEnter
+	view.DiagXDPV4FullNATReplyEnter = snapshot.XDPV4FullNATReplyEnter
+	view.DiagXDPRedirectInvoked = snapshot.XDPRedirectInvoked
 	view.DiagSnapshotError = snapshot.LastError
 }
 
@@ -130,6 +146,10 @@ func aggregateKernelPerCPUDiag(values []kernelDiagValueV4) kernelDiagValueV4 {
 		out.NATProbeRound3Used += value.NATProbeRound3Used
 		out.ReplyFlowRecreated += value.ReplyFlowRecreated
 		out.TCPCloseDelete += value.TCPCloseDelete
+		out.XDPV4TransparentEnter += value.XDPV4TransparentEnter
+		out.XDPV4FullNATForwardEnter += value.XDPV4FullNATForwardEnter
+		out.XDPV4FullNATReplyEnter += value.XDPV4FullNATReplyEnter
+		out.XDPRedirectInvoked += value.XDPRedirectInvoked
 	}
 	return out
 }
