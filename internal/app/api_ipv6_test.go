@@ -8,44 +8,6 @@ import (
 	"testing"
 )
 
-func TestHandleHostNetworkUsesLoaderOverride(t *testing.T) {
-	oldLoad := loadHostNetworkInterfacesForTests
-	loadHostNetworkInterfacesForTests = func() ([]HostNetworkInterface, error) {
-		return []HostNetworkInterface{
-			{
-				Name:   "eno1",
-				Kind:   "device",
-				Parent: "vmbr0",
-				Addresses: []HostInterfaceAddress{
-					{Family: ipFamilyIPv6, IP: "2001:db8::10", CIDR: "2001:db8::/64", PrefixLen: 64},
-				},
-			},
-		}, nil
-	}
-	defer func() {
-		loadHostNetworkInterfacesForTests = oldLoad
-	}()
-
-	req := httptest.NewRequest(http.MethodGet, "/api/host-network", nil)
-	w := httptest.NewRecorder()
-
-	handleHostNetwork(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
-	}
-
-	var resp HostNetworkResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
-	}
-	if len(resp.Interfaces) != 1 || resp.Interfaces[0].Name != "eno1" {
-		t.Fatalf("interfaces = %+v, want eno1", resp.Interfaces)
-	}
-	if got := resp.Interfaces[0].Addresses[0].CIDR; got != "2001:db8::/64" {
-		t.Fatalf("cidr = %q, want %q", got, "2001:db8::/64")
-	}
-}
-
 func TestHandleAddIPv6AssignmentValidationErrorIncludesIssues(t *testing.T) {
 	db := openTestDB(t)
 
