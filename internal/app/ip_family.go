@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -10,6 +11,11 @@ const (
 	ipFamilyIPv4 = "ipv4"
 	ipFamilyIPv6 = "ipv6"
 )
+
+type ipLiteralPairInfo struct {
+	firstFamily  string
+	secondFamily string
+}
 
 func normalizeIPLiteral(value string) (string, error) {
 	ip := parseIPLiteral(value)
@@ -27,6 +33,18 @@ func parseIPLiteral(value string) net.IP {
 	return net.ParseIP(text)
 }
 
+func parseIPLiteralAddr(value string) (netip.Addr, bool) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return netip.Addr{}, false
+	}
+	addr, err := netip.ParseAddr(text)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr, true
+}
+
 func canonicalIPLiteral(ip net.IP) string {
 	if ip == nil {
 		return ""
@@ -37,20 +55,46 @@ func canonicalIPLiteral(ip net.IP) string {
 	return ip.String()
 }
 
-func ipLiteralFamily(value string) string {
-	ip := parseIPLiteral(value)
-	if ip == nil {
+func ipLiteralFamilyFromAddr(addr netip.Addr) string {
+	if !addr.IsValid() {
 		return ""
 	}
-	if ip.To4() != nil {
+	if addr.Is4() || addr.Is4In6() {
 		return ipFamilyIPv4
 	}
 	return ipFamilyIPv6
 }
 
+func ipLiteralFamily(value string) string {
+	addr, ok := parseIPLiteralAddr(value)
+	if !ok {
+		return ""
+	}
+	return ipLiteralFamilyFromAddr(addr)
+}
+
 func ipLiteralIsWildcard(value string) bool {
-	ip := parseIPLiteral(value)
-	return ip != nil && ip.IsUnspecified()
+	addr, ok := parseIPLiteralAddr(value)
+	return ok && addr.IsUnspecified()
+}
+
+func analyzeIPLiteralPair(a, b string) ipLiteralPairInfo {
+	info := ipLiteralPairInfo{}
+	if addr, ok := parseIPLiteralAddr(a); ok {
+		info.firstFamily = ipLiteralFamilyFromAddr(addr)
+	}
+	if addr, ok := parseIPLiteralAddr(b); ok {
+		info.secondFamily = ipLiteralFamilyFromAddr(addr)
+	}
+	return info
+}
+
+func (info ipLiteralPairInfo) mixedFamily() bool {
+	return info.firstFamily != "" && info.secondFamily != "" && info.firstFamily != info.secondFamily
+}
+
+func (info ipLiteralPairInfo) usesIPv6() bool {
+	return info.firstFamily == ipFamilyIPv6 || info.secondFamily == ipFamilyIPv6
 }
 
 func ipLiteralUsesIPv6(values ...string) bool {
@@ -67,9 +111,7 @@ func ipLiteralPairIsPureIPv4(a, b string) bool {
 }
 
 func ipLiteralPairIsMixedFamily(a, b string) bool {
-	aFamily := ipLiteralFamily(a)
-	bFamily := ipLiteralFamily(b)
-	return aFamily != "" && bFamily != "" && aFamily != bFamily
+	return analyzeIPLiteralPair(a, b).mixedFamily()
 }
 
 func isVisibleInterfaceIP(ip net.IP) bool {

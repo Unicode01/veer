@@ -278,9 +278,11 @@ type kernelTransientFallbackMetadata struct {
 }
 
 type ruleDataplanePlanner struct {
-	userspace     ruleDataplane
-	kernel        ruleDataplane
-	defaultEngine string
+	userspace               ruleDataplane
+	kernel                  ruleDataplane
+	defaultEngine           string
+	kernelAvailable         bool
+	kernelUnavailableReason string
 }
 
 func newRuleDataplanePlanner(kernelRuntime kernelRuleRuntime, defaultEngine string) *ruleDataplanePlanner {
@@ -312,46 +314,53 @@ func newRuleDataplanePlanner(kernelRuntime kernelRuleRuntime, defaultEngine stri
 	}
 
 	return &ruleDataplanePlanner{
-		userspace:     userspaceRuleDataplane{},
-		defaultEngine: normalizeRuleEnginePreference(defaultEngine),
-		kernel:        kernel,
+		userspace:               userspaceRuleDataplane{},
+		defaultEngine:           normalizeRuleEnginePreference(defaultEngine),
+		kernel:                  kernel,
+		kernelAvailable:         available,
+		kernelUnavailableReason: reason,
 	}
 }
 
 func (p *ruleDataplanePlanner) Plan(rule Rule) ruleDataplanePlan {
-	preferred := p.resolvePreferredEngine(rule.EnginePreference)
+	return p.planWithPreferredAndKernelReason(rule, p.resolvePreferredEngine(rule.EnginePreference), kernelRuleFamilyFallbackReason(rule))
+}
+
+func (p *ruleDataplanePlanner) planWithPreferred(rule Rule, preferred string) ruleDataplanePlan {
+	return p.planWithPreferredAndKernelReason(rule, preferred, kernelRuleFamilyFallbackReason(rule))
+}
+
+func (p *ruleDataplanePlanner) planWithPreferredAndKernelReason(rule Rule, preferred string, kernelReason string) ruleDataplanePlan {
 	plan := ruleDataplanePlan{
 		PreferredEngine: preferred,
 		EffectiveEngine: ruleEngineUserspace,
 	}
 
-	kernelReason := kernelRuleFamilyFallbackReason(rule)
 	kernelEligible := false
 	if kernelReason == "" {
 		kernelEligible, kernelReason = p.kernel.SupportsRule(rule)
 	}
-	kernelAvailable, kernelUnavailableReason := p.kernel.Available()
 	plan.KernelEligible = kernelEligible
 	plan.KernelReason = kernelReason
 
 	switch preferred {
 	case ruleEngineKernel:
-		if kernelEligible && kernelAvailable {
+		if kernelEligible && p.kernelAvailable {
 			plan.EffectiveEngine = ruleEngineKernel
 			return plan
 		}
 		if !kernelEligible {
 			plan.FallbackReason = kernelReason
 		} else {
-			plan.FallbackReason = kernelUnavailableReason
+			plan.FallbackReason = p.kernelUnavailableReason
 		}
 	case ruleEngineAuto:
-		if kernelEligible && kernelAvailable {
+		if kernelEligible && p.kernelAvailable {
 			plan.EffectiveEngine = ruleEngineKernel
 		} else if !kernelEligible {
 			plan.FallbackReason = kernelReason
-		} else if !kernelAvailable {
-			plan.FallbackReason = kernelUnavailableReason
+		} else if !p.kernelAvailable {
+			plan.FallbackReason = p.kernelUnavailableReason
 		}
 	}
 	plan.TransientFallback = kernelTransientFallbackMetadataForRule(rule, plan.FallbackReason)
@@ -360,10 +369,15 @@ func (p *ruleDataplanePlanner) Plan(rule Rule) ruleDataplanePlan {
 }
 
 func kernelRuleFamilyFallbackReason(rule Rule) string {
-	if ipLiteralPairIsMixedFamily(rule.InIP, rule.OutIP) {
+	return kernelRuleFamilyFallbackReasonFromIPs(rule.InIP, rule.OutIP, rule.Transparent)
+}
+
+func kernelRuleFamilyFallbackReasonFromIPs(inIP string, outIP string, transparent bool) string {
+	pair := analyzeIPLiteralPair(inIP, outIP)
+	if pair.mixedFamily() {
 		return "kernel dataplane does not support mixed IPv4/IPv6 forwarding"
 	}
-	if ipLiteralUsesIPv6(rule.InIP, rule.OutIP) && rule.Transparent {
+	if transparent && pair.usesIPv6() {
 		return "kernel dataplane currently does not support transparent IPv6 rules"
 	}
 	return ""

@@ -102,3 +102,48 @@ func TestRuleDataplanePlannerPrefersKernelRuntimeSupportReason(t *testing.T) {
 		t.Fatalf("FallbackReason = %q, want %q", plan.FallbackReason, wantReason)
 	}
 }
+
+func TestKernelRuleFamilyFallbackReasonFromIPs(t *testing.T) {
+	tests := []struct {
+		name        string
+		inIP        string
+		outIP       string
+		transparent bool
+		want        string
+	}{
+		{
+			name:  "mixed family rejected",
+			inIP:  "192.0.2.10",
+			outIP: "2001:db8::20",
+			want:  "kernel dataplane does not support mixed IPv4/IPv6 forwarding",
+		},
+		{
+			name:        "transparent ipv6 rejected",
+			inIP:        "2001:db8::10",
+			outIP:       "2001:db8::20",
+			transparent: true,
+			want:        "kernel dataplane currently does not support transparent IPv6 rules",
+		},
+		{
+			name:        "transparent ipv4 allowed",
+			inIP:        "192.0.2.10",
+			outIP:       "192.0.2.20",
+			transparent: true,
+			want:        "",
+		},
+		{
+			name:  "missing literal allowed",
+			inIP:  "",
+			outIP: "192.0.2.20",
+			want:  "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kernelRuleFamilyFallbackReasonFromIPs(tc.inIP, tc.outIP, tc.transparent); got != tc.want {
+				t.Fatalf("kernelRuleFamilyFallbackReasonFromIPs(%q, %q, %t) = %q, want %q", tc.inIP, tc.outIP, tc.transparent, got, tc.want)
+			}
+		})
+	}
+}

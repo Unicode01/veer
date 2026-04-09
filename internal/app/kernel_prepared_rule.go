@@ -3,11 +3,24 @@
 package app
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
+	"unsafe"
 )
 
 type kernelPreparedAddr [16]byte
+
+var nativeEndian binary.ByteOrder
+
+func init() {
+	var value uint16 = 0x0102
+	if *(*byte)(unsafe.Pointer(&value)) == 0x02 {
+		nativeEndian = binary.LittleEndian
+		return
+	}
+	nativeEndian = binary.BigEndian
+}
 
 type kernelPreparedRuleSpec struct {
 	Family      string
@@ -50,14 +63,28 @@ func (addr kernelPreparedAddr) ipv4Uint32() (uint32, error) {
 	return uint32(addr[12])<<24 | uint32(addr[13])<<16 | uint32(addr[14])<<8 | uint32(addr[15]), nil
 }
 
+func (addr kernelPreparedAddr) ipv4HostUint32() (uint32, error) {
+	if addr.isZero() {
+		return 0, nil
+	}
+	return nativeEndian.Uint32(addr[12:16]), nil
+}
+
+func ipv4Uint32NetworkToHost(value uint32) uint32 {
+	var raw [4]byte
+	binary.BigEndian.PutUint32(raw[:], value)
+	return nativeEndian.Uint32(raw[:])
+}
+
 func buildKernelPreparedForwardRuleSpec(rule Rule, resolveNAT func(family string) (net.IP, error)) (kernelPreparedRuleSpec, error) {
-	if ipLiteralPairIsMixedFamily(rule.InIP, rule.OutIP) {
+	pair := analyzeIPLiteralPair(rule.InIP, rule.OutIP)
+	if pair.mixedFamily() {
 		return kernelPreparedRuleSpec{}, fmt.Errorf("kernel dataplane does not support mixed IPv4/IPv6 forwarding")
 	}
 
-	family := ipLiteralFamily(rule.InIP)
+	family := pair.firstFamily
 	if family == "" {
-		family = ipLiteralFamily(rule.OutIP)
+		family = pair.secondFamily
 	}
 	if family == "" {
 		return kernelPreparedRuleSpec{}, fmt.Errorf("kernel dataplane requires valid inbound/outbound IP addresses")
