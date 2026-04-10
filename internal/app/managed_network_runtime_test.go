@@ -216,6 +216,55 @@ func TestCompileManagedNetworkRuntimePrefersExplicitTapAssignmentOverResolvedFir
 	}
 }
 
+func TestCompileManagedNetworkRuntimeResolvesProxmoxFirewallPortToLXCVethForIPv6(t *testing.T) {
+	t.Parallel()
+
+	compiled := compileManagedNetworkRuntime(
+		[]ManagedNetwork{{
+			ID:                  1,
+			Name:                "lab",
+			Bridge:              "vmbr0",
+			IPv6Enabled:         true,
+			IPv6ParentInterface: "vmbr0",
+			IPv6ParentPrefix:    "2001:db8:100::/64",
+			IPv6AssignmentMode:  managedNetworkIPv6AssignmentModeSingle128,
+			Enabled:             true,
+		}},
+		nil,
+		nil,
+		[]InterfaceInfo{
+			{Name: "vmbr0", Kind: "bridge"},
+			{Name: "fwpr100p0", Parent: "vmbr0", Kind: "veth"},
+			{Name: "fwbr100i0", Kind: "bridge"},
+			{Name: "veth100i0", Parent: "fwbr100i0", Kind: "veth"},
+			{Name: "veth101i0", Parent: "vmbr0", Kind: "veth"},
+		},
+	)
+
+	if len(compiled.IPv6Assignments) != 2 {
+		t.Fatalf("len(IPv6Assignments) = %d, want 2", len(compiled.IPv6Assignments))
+	}
+
+	seenTargets := make(map[string]struct{}, len(compiled.IPv6Assignments))
+	for _, item := range compiled.IPv6Assignments {
+		seenTargets[item.TargetInterface] = struct{}{}
+	}
+	if _, ok := seenTargets["veth100i0"]; !ok {
+		t.Fatalf("generated targets = %v, want veth100i0", seenTargets)
+	}
+	if _, ok := seenTargets["veth101i0"]; !ok {
+		t.Fatalf("generated targets = %v, want veth101i0", seenTargets)
+	}
+	if _, ok := seenTargets["fwpr100p0"]; ok {
+		t.Fatalf("generated targets = %v, want fwpr100p0 to resolve to veth100i0", seenTargets)
+	}
+
+	preview := compiled.Previews[1]
+	if !reflect.DeepEqual(preview.ChildInterfaces, []string{"veth100i0", "veth101i0"}) {
+		t.Fatalf("preview.ChildInterfaces = %v, want [veth100i0 veth101i0]", preview.ChildInterfaces)
+	}
+}
+
 func TestCompileManagedNetworkRuntimeSkipsOverlappingAutoEgressNAT(t *testing.T) {
 	t.Parallel()
 
@@ -262,10 +311,12 @@ func TestParseManagedNetworkProxmoxGuestPort(t *testing.T) {
 		wantOK   bool
 	}{
 		{name: "tap", input: "tap100i0", wantVMID: "100", wantSlot: "0", wantOK: true},
+		{name: "lxc veth", input: "veth404i3", wantVMID: "404", wantSlot: "3", wantOK: true},
 		{name: "firewall peer", input: "fwpr101p1", wantVMID: "101", wantSlot: "1", wantOK: true},
 		{name: "firewall link", input: "fwln202i0", wantVMID: "202", wantSlot: "0", wantOK: true},
 		{name: "trim spaces", input: "  tap303i2  ", wantVMID: "303", wantSlot: "2", wantOK: true},
 		{name: "missing slot", input: "tap100i", wantOK: false},
+		{name: "veth bad separator", input: "veth404p3", wantOK: false},
 		{name: "bad separator", input: "tap100x0", wantOK: false},
 		{name: "uppercase prefix", input: "Tap100i0", wantOK: false},
 		{name: "nondigit suffix", input: "fwpr100p0a", wantOK: false},

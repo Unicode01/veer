@@ -308,6 +308,8 @@ http://127.0.0.1:8080
 - IPv6 `/128` 或 `/64` 下发
 - 自动生成 Egress NAT
 - 链路变更后的自动修复
+- PVE `qemu-server` 与 `lxc` 配置识别
+- PVE guest 链路自动识别与修复，覆盖 `fwpr*`、`tap*`、`veth*`
 
 ### PVE 最低版本
 

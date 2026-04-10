@@ -211,5 +211,6 @@ func managedNetworkPVEGuestLinkCandidates(binding managedNetworkPVEBridgeBinding
 	return []string{
 		"fwpr" + vmid + "p" + slot,
 		"tap" + vmid + "i" + slot,
+		"veth" + vmid + "i" + slot,
 	}
 }

@@ -210,6 +210,8 @@ Content-Type: application/json
     {
       "name": "vmbr0",
       "kind": "bridge",
+      "default_ipv4_route": true,
+      "default_ipv6_route": true,
       "addresses": [
         {
           "family": "ipv4",
@@ -228,6 +230,9 @@ Content-Type: application/json
   ]
 }
 ```
+
+- `default_ipv4_route`: 该接口当前是否承载主路由表里的 IPv4 默认路由
+- `default_ipv6_route`: 该接口当前是否承载主路由表里的 IPv6 默认路由
 
 ### RuleStatus
 
@@ -958,7 +963,7 @@ Content-Type: application/json
 {
   "status": "queued",
   "bridges": ["vmbr0"],
-  "guest_links": ["tap100i0"]
+  "guest_links": ["tap100i0->vmbr0"]
 }
 ```
 
@@ -971,6 +976,8 @@ Content-Type: application/json
   "error": "..."
 }
 ```
+
+其中 `guest_links` 可能包含 PVE guest 侧链路名，例如 `fwpr100p0->vmbr0`、`tap100i0->vmbr0`、`veth101i0->vmbr0`。
 
 ### 6.9 获取托管网络运行时重载状态
 

@@ -236,6 +236,14 @@
     return hostInterfaceAddressesByFamily(iface, 'ipv4').some((address) => app.isPublicIPv4(address && address.ip));
   }
 
+  function hostInterfaceHasDefaultIPv4Route(iface) {
+    return !!(iface && iface.default_ipv4_route);
+  }
+
+  function hostInterfaceHasDefaultIPv6Route(iface) {
+    return !!(iface && iface.default_ipv6_route);
+  }
+
   function hostInterfaceHasIPv4(iface) {
     return hostInterfaceAddressesByFamily(iface, 'ipv4').length > 0;
   }
@@ -260,8 +268,10 @@
 
     const name = String(iface.name).trim().toLowerCase();
     let score = 0;
+    if (hostInterfaceHasDefaultIPv4Route(iface)) score += 500;
     if (hostInterfaceHasIPv4(iface)) score += 200;
     if (hostInterfaceHasPublicIPv4(iface)) score += 120;
+    if (hostInterfaceHasDefaultIPv6Route(iface)) score += 30;
     if (name === 'vmbr0') score += 100;
     if (isBridgeHostInterface(iface)) score += 60;
     if (/^vmbr\d+$/.test(name)) score += 20;
@@ -391,7 +401,20 @@
     if (!items.length) return null;
 
     const preferred = items.find((iface) => String(iface && iface.name || '').trim() === selectedUplink);
-    const current = preferred || items[0];
+    const ranked = items.slice().sort((a, b) => {
+      const score = (iface) => {
+        let current = 0;
+        if (String(iface && iface.name || '').trim() === selectedUplink) current += 400;
+        if (hostInterfaceHasDefaultIPv6Route(iface)) current += 300;
+        if (hostInterfaceHasDefaultIPv4Route(iface)) current += 80;
+        if (isBridgeHostInterface(iface)) current += 20;
+        return current;
+      };
+      const scoreDiff = score(b) - score(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      return app.compareValues(String(a && a.name || ''), String(b && b.name || ''));
+    });
+    const current = preferred || ranked[0];
     const prefixes = hostInterfaceIPv6Prefixes(current);
     if (!current || !prefixes.length) return null;
 

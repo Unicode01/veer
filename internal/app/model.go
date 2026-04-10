@@ -92,10 +92,12 @@ type HostInterfaceAddress struct {
 }
 
 type HostNetworkInterface struct {
-	Name      string                 `json:"name"`
-	Kind      string                 `json:"kind,omitempty"`
-	Parent    string                 `json:"parent,omitempty"`
-	Addresses []HostInterfaceAddress `json:"addresses,omitempty"`
+	Name             string                 `json:"name"`
+	Kind             string                 `json:"kind,omitempty"`
+	Parent           string                 `json:"parent,omitempty"`
+	DefaultIPv4Route bool                   `json:"default_ipv4_route,omitempty"`
+	DefaultIPv6Route bool                   `json:"default_ipv6_route,omitempty"`
+	Addresses        []HostInterfaceAddress `json:"addresses,omitempty"`
 }
 
 type HostNetworkResponse struct {

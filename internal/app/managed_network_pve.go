@@ -69,6 +69,7 @@ func parseManagedNetworkPVEGuestNICs(vmid string, content string) []managedNetwo
 
 func parseManagedNetworkPVEGuestName(content string) string {
 	lines := strings.Split(content, "\n")
+	hostname := ""
 	for _, rawLine := range lines {
 		line := strings.TrimSpace(strings.SplitN(rawLine, "#", 2)[0])
 		if line == "" {
@@ -78,12 +79,16 @@ func parseManagedNetworkPVEGuestName(content string) string {
 		if len(parts) != 2 {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(parts[0]), "name") {
-			continue
+		switch strings.ToLower(strings.TrimSpace(parts[0])) {
+		case "name":
+			return strings.TrimSpace(parts[1])
+		case "hostname":
+			if hostname == "" {
+				hostname = strings.TrimSpace(parts[1])
+			}
 		}
-		return strings.TrimSpace(parts[1])
 	}
-	return ""
+	return hostname
 }
 
 func parseManagedNetworkPVENetworkMACAddress(value string) string {

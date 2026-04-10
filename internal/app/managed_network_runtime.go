@@ -492,15 +492,20 @@ func resolveManagedNetworkIPv6TargetName(child InterfaceInfo, ifaceByName map[st
 	if !ok {
 		return name
 	}
-	tapName := "tap" + vmid + "i" + slot
-	tap, ok := ifaceByName[tapName]
-	if !ok || strings.TrimSpace(tap.Name) == "" {
-		return name
+	for _, candidateName := range []string{
+		"tap" + vmid + "i" + slot,
+		"veth" + vmid + "i" + slot,
+	} {
+		target, ok := ifaceByName[candidateName]
+		if !ok || strings.TrimSpace(target.Name) == "" {
+			continue
+		}
+		if !isManagedNetworkIPv6GuestFacingInterface(target) {
+			continue
+		}
+		return strings.TrimSpace(target.Name)
 	}
-	if !isManagedNetworkIPv6GuestFacingInterface(tap) {
-		return name
-	}
-	return strings.TrimSpace(tap.Name)
+	return name
 }
 
 func parseManagedNetworkProxmoxGuestPort(name string) (string, string, bool) {
@@ -510,11 +515,21 @@ func parseManagedNetworkProxmoxGuestPort(name string) (string, string, bool) {
 	}
 
 	prefixLen := 0
+	separator := byte(0)
 	switch {
 	case strings.HasPrefix(name, "tap"):
 		prefixLen = 3
+		separator = 'i'
+	case strings.HasPrefix(name, "veth"):
+		prefixLen = 4
+		separator = 'i'
 	case strings.HasPrefix(name, "fwpr"), strings.HasPrefix(name, "fwln"):
 		prefixLen = 4
+		if strings.HasPrefix(name, "fwpr") {
+			separator = 'p'
+		} else {
+			separator = 'i'
+		}
 	default:
 		return "", "", false
 	}
@@ -527,9 +542,7 @@ func parseManagedNetworkProxmoxGuestPort(name string) (string, string, bool) {
 	if vmidEnd == vmidStart || vmidEnd >= len(name) {
 		return "", "", false
 	}
-	switch name[vmidEnd] {
-	case 'i', 'p':
-	default:
+	if name[vmidEnd] != separator {
 		return "", "", false
 	}
 	slotStart := vmidEnd + 1
@@ -556,7 +569,8 @@ func isManagedNetworkIPv6GuestFacingInterface(info InterfaceInfo) bool {
 	case "device":
 		return false
 	}
-	return strings.HasPrefix(strings.ToLower(name), "tap")
+	lowerName := strings.ToLower(name)
+	return strings.HasPrefix(lowerName, "tap") || strings.HasPrefix(lowerName, "veth")
 }
 
 func collectExplicitManagedNetworkIPv6Targets(items []IPv6Assignment) map[string][]managedNetworkExplicitIPv6Target {

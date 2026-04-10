@@ -1,6 +1,9 @@
 package app
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestParseManagedNetworkPVEBridgeBindings(t *testing.T) {
 	t.Parallel()
@@ -35,5 +38,33 @@ func TestManagedNetworkRepairResultInterfaceNames(t *testing.T) {
 	}
 	if got[0] != "vmbr1" || got[1] != "fwpr100p0" || got[2] != "tap100i0" {
 		t.Fatalf("managedNetworkRepairResultInterfaceNames() = %v, want [vmbr1 fwpr100p0 tap100i0]", got)
+	}
+}
+
+func TestManagedNetworkPVEGuestLinkCandidatesIncludesLXCVeth(t *testing.T) {
+	t.Parallel()
+
+	got := managedNetworkPVEGuestLinkCandidates(managedNetworkPVEBridgeBinding{
+		VMID: "101",
+		Slot: "0",
+	})
+	want := []string{"fwpr101p0", "tap101i0", "veth101i0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("managedNetworkPVEGuestLinkCandidates() = %v, want %v", got, want)
+	}
+}
+
+func TestDetectManagedNetworkDetachedPVEGuestLinkSupportsLXCVeth(t *testing.T) {
+	t.Parallel()
+
+	detached, name := detectManagedNetworkDetachedPVEGuestLink(
+		managedNetworkPVEBridgeBinding{VMID: "101", Slot: "0", Bridge: "vmbr1"},
+		"vmbr1",
+		map[string]string{
+			"veth101i0": "vmbr9",
+		},
+	)
+	if !detached || name != "veth101i0" {
+		t.Fatalf("detectManagedNetworkDetachedPVEGuestLink() = (%v, %q), want (true, %q)", detached, name, "veth101i0")
 	}
 }

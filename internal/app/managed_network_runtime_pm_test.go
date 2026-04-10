@@ -35,6 +35,9 @@ func TestProcessManagerShouldReloadManagedNetworkRuntimeForInterface(t *testing.
 	if !pm.shouldReloadManagedNetworkRuntimeForInterface("tap200i0") {
 		t.Fatal("shouldReloadManagedNetworkRuntimeForInterface(tap200i0) = false, want true for dynamic guest link")
 	}
+	if !pm.shouldReloadManagedNetworkRuntimeForInterface("veth300i1") {
+		t.Fatal("shouldReloadManagedNetworkRuntimeForInterface(veth300i1) = false, want true for dynamic guest link")
+	}
 	if !pm.shouldReloadManagedNetworkRuntimeForInterface("") {
 		t.Fatal("shouldReloadManagedNetworkRuntimeForInterface(\"\") = false, want true when interface name is unavailable")
 	}

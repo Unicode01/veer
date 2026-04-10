@@ -22,6 +22,21 @@ net2: virtio=BC:24:11:31:53:DD,bridge=none
 	}
 }
 
+func TestParseManagedNetworkPVEGuestNICsSupportsLXCMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := parseManagedNetworkPVEGuestNICs("101", `
+hostname: ct-101
+net0: name=eth0,bridge=vmbr1,hwaddr=BC:24:11:31:53:DB,type=veth
+`)
+	if len(got) != 1 {
+		t.Fatalf("len(parseManagedNetworkPVEGuestNICs()) = %d, want 1", len(got))
+	}
+	if got[0].VMID != "101" || got[0].GuestName != "ct-101" || got[0].ConfigKey != "net0" || got[0].Bridge != "vmbr1" || got[0].MACAddress != "bc:24:11:31:53:db" {
+		t.Fatalf("nics[0] = %+v, want vmid=101 guest=ct-101 key=net0 bridge=vmbr1 mac=bc:24:11:31:53:db", got[0])
+	}
+}
+
 func TestEnrichManagedNetworkDiscoveredMACsWithPVEGuestNICsMatchesVMIDSlotAndMAC(t *testing.T) {
 	t.Parallel()
 
@@ -45,5 +60,31 @@ func TestEnrichManagedNetworkDiscoveredMACsWithPVEGuestNICsMatchesVMIDSlotAndMAC
 	}
 	if got[0].PVEVMID != "100" || got[0].PVEGuestName != "web-100" || got[0].PVEGuestNIC != "net0" {
 		t.Fatalf("items[0] = %+v, want vmid=100 guest=web-100 nic=net0", got[0])
+	}
+}
+
+func TestEnrichManagedNetworkDiscoveredMACsWithPVEGuestNICsSupportsLXCVeth(t *testing.T) {
+	t.Parallel()
+
+	got := enrichManagedNetworkDiscoveredMACsWithPVEGuestNICs(
+		[]managedNetworkDiscoveredMAC{{
+			ManagedNetworkID: 8,
+			ChildInterface:   "veth101i0",
+			MACAddress:       "bc:24:11:31:53:db",
+		}},
+		[]managedNetworkPVEGuestNIC{{
+			VMID:       "101",
+			GuestName:  "ct-101",
+			Slot:       "0",
+			ConfigKey:  "net0",
+			Bridge:     "vmbr1",
+			MACAddress: "bc:24:11:31:53:db",
+		}},
+	)
+	if len(got) != 1 {
+		t.Fatalf("len(enrichManagedNetworkDiscoveredMACsWithPVEGuestNICs()) = %d, want 1", len(got))
+	}
+	if got[0].PVEVMID != "101" || got[0].PVEGuestName != "ct-101" || got[0].PVEGuestNIC != "net0" {
+		t.Fatalf("items[0] = %+v, want vmid=101 guest=ct-101 nic=net0", got[0])
 	}
 }

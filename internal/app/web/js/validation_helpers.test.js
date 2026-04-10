@@ -2114,6 +2114,84 @@ test('applyManagedNetworkPVEQuickFill prefers direct physical uplink on blank PV
   assert.equal(elements.managedNetworkIPv6AssignmentMode.value, 'single_128');
 });
 
+test('applyManagedNetworkPVEQuickFill prefers the default IPv4 route uplink over a higher-scored non-default bridge', async () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv4', ip: '203.0.113.10', cidr: '203.0.113.0/24' },
+        { family: 'ipv6', ip: '2402:db8:1::10', cidr: '2402:db8:1::/64' }
+      ]
+    },
+    {
+      name: 'eno1',
+      kind: 'device',
+      parent: 'vmbr0',
+      addresses: [
+        { family: 'ipv4', ip: '203.0.113.11', cidr: '203.0.113.0/24' }
+      ]
+    },
+    {
+      name: 'vmbr2',
+      kind: 'bridge',
+      default_ipv4_route: true,
+      addresses: [
+        { family: 'ipv4', ip: '198.51.100.1', cidr: '198.51.100.0/24' }
+      ]
+    },
+    {
+      name: 'enp5s0',
+      kind: 'device',
+      parent: 'vmbr2',
+      addresses: [
+        { family: 'ipv4', ip: '198.51.100.2', cidr: '198.51.100.0/24' }
+      ]
+    }
+  ];
+
+  await app.applyManagedNetworkPVEQuickFill();
+
+  assert.equal(elements.managedNetworkUplinkInterface.value, 'vmbr2');
+});
+
+test('applyManagedNetworkPVEQuickFill prefers the default IPv6 route interface when the selected uplink has no IPv6 prefix', async () => {
+  const { app, elements } = createHarness();
+  app.hostNetworkInterfaces = [
+    {
+      name: 'vmbr0',
+      kind: 'bridge',
+      default_ipv4_route: true,
+      addresses: [
+        { family: 'ipv4', ip: '203.0.113.10', cidr: '203.0.113.0/24' }
+      ]
+    },
+    {
+      name: 'eno1',
+      kind: 'device',
+      parent: 'vmbr0',
+      default_ipv6_route: true,
+      addresses: [
+        { family: 'ipv6', ip: '2402:db8:1::10', cidr: '2402:db8:1::/64' }
+      ]
+    },
+    {
+      name: 'vmbr1',
+      kind: 'bridge',
+      addresses: [
+        { family: 'ipv6', ip: '2402:db8:2::1', cidr: '2402:db8:2::/64' }
+      ]
+    }
+  ];
+
+  await app.applyManagedNetworkPVEQuickFill();
+
+  assert.equal(elements.managedNetworkUplinkInterface.value, 'vmbr0');
+  assert.equal(elements.managedNetworkIPv6ParentInterface.value, 'eno1');
+  assert.equal(elements.managedNetworkIPv6ParentPrefix.value, '2402:db8:1::/64');
+});
+
 test('reloadManagedNetworkRuntime queues backend reload and refreshes related views', async () => {
   const { app, notifications } = createHarness();
   const calls = [];

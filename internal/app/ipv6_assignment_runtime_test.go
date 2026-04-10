@@ -766,6 +766,9 @@ func TestProcessManagerShouldRedistributeIPv6AssignmentsForInterface(t *testing.
 	if !pm.shouldRedistributeIPv6AssignmentsForInterface("tap200i0") {
 		t.Fatal("shouldRedistributeIPv6AssignmentsForInterface(tap200i0) = false, want true for dynamic guest link")
 	}
+	if !pm.shouldRedistributeIPv6AssignmentsForInterface("veth300i1") {
+		t.Fatal("shouldRedistributeIPv6AssignmentsForInterface(veth300i1) = false, want true for dynamic guest link")
+	}
 	if !pm.shouldRedistributeIPv6AssignmentsForInterface("") {
 		t.Fatal("shouldRedistributeIPv6AssignmentsForInterface(\"\") = false, want true when interface name is unavailable")
 	}

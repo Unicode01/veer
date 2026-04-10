@@ -5,6 +5,8 @@ package app
 import (
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -88,6 +90,78 @@ func TestRepairManagedNetworkPVEBridgeLinksPrefersFwprWhenPresent(t *testing.T) 
 	}
 	if len(ops.setUp) != 2 || ops.setUp[0] != "vmbr1" || ops.setUp[1] != "fwpr100p0" {
 		t.Fatalf("setUp = %v, want [vmbr1 fwpr100p0]", ops.setUp)
+	}
+}
+
+func TestRepairManagedNetworkPVEBridgeLinksFallsBackToLXCVeth(t *testing.T) {
+	t.Parallel()
+
+	bridge := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: "vmbr1", Index: 10}}
+	veth := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "veth101i0", Index: 11}}
+	ops := &fakeManagedNetworkRepairLinkOps{
+		byName: map[string]netlink.Link{
+			"vmbr1":     bridge,
+			"veth101i0": veth,
+		},
+		byIndex: map[int]netlink.Link{
+			10: bridge,
+			11: veth,
+		},
+	}
+
+	result, err := repairManagedNetworkPVEBridgeLinks(
+		map[string]ManagedNetwork{"vmbr1": {Bridge: "vmbr1", Enabled: true}},
+		[]managedNetworkPVEBridgeBinding{{VMID: "101", Slot: "0", Bridge: "vmbr1"}},
+		ops,
+	)
+	if err != nil {
+		t.Fatalf("repairManagedNetworkPVEBridgeLinks() error = %v", err)
+	}
+	if len(result.GuestLinks) != 1 || result.GuestLinks[0] != "veth101i0->vmbr1" {
+		t.Fatalf("GuestLinks = %v, want [veth101i0->vmbr1]", result.GuestLinks)
+	}
+	if len(ops.setMaster) != 1 || ops.setMaster[0] != "veth101i0->vmbr1" {
+		t.Fatalf("setMaster = %v, want [veth101i0->vmbr1]", ops.setMaster)
+	}
+	if len(ops.setUp) != 2 || ops.setUp[0] != "vmbr1" || ops.setUp[1] != "veth101i0" {
+		t.Fatalf("setUp = %v, want [vmbr1 veth101i0]", ops.setUp)
+	}
+}
+
+func TestLoadManagedNetworkPVEConfigsFromGlobsIncludesQEMUAndLXC(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	qemuDir := filepath.Join(root, "qemu-server")
+	lxcDir := filepath.Join(root, "lxc")
+	if err := os.MkdirAll(qemuDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(qemuDir) error = %v", err)
+	}
+	if err := os.MkdirAll(lxcDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(lxcDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(qemuDir, "100.conf"), []byte("name: vm-100\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(qemu config) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(lxcDir, "101.conf"), []byte("hostname: ct-101\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(lxc config) error = %v", err)
+	}
+
+	got, err := loadManagedNetworkPVEConfigsFromGlobs([]string{
+		filepath.Join(qemuDir, "*.conf"),
+		filepath.Join(lxcDir, "*.conf"),
+	})
+	if err != nil {
+		t.Fatalf("loadManagedNetworkPVEConfigsFromGlobs() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(loadManagedNetworkPVEConfigsFromGlobs()) = %d, want 2", len(got))
+	}
+	if got["100"] != "name: vm-100\n" {
+		t.Fatalf("configs[100] = %q, want %q", got["100"], "name: vm-100\n")
+	}
+	if got["101"] != "hostname: ct-101\n" {
+		t.Fatalf("configs[101] = %q, want %q", got["101"], "hostname: ct-101\n")
 	}
 }
 

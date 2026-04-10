@@ -17,6 +17,11 @@ import (
 var loadManagedNetworkPVEConfigsForTests func() (map[string]string, error)
 var managedNetworkRepairLinkOpsForTests managedNetworkRepairLinkOps
 
+var managedNetworkPVEConfigGlobs = []string{
+	"/etc/pve/qemu-server/*.conf",
+	"/etc/pve/lxc/*.conf",
+}
+
 type managedNetworkRepairLinkOps interface {
 	LinkByName(name string) (netlink.Link, error)
 	LinkByIndex(index int) (netlink.Link, error)
@@ -175,14 +180,30 @@ func loadManagedNetworkPVEConfigs() (map[string]string, error) {
 	if loadManagedNetworkPVEConfigsForTests != nil {
 		return loadManagedNetworkPVEConfigsForTests()
 	}
+	return loadManagedNetworkPVEConfigsFromGlobs(managedNetworkPVEConfigGlobs)
+}
 
-	paths, err := filepath.Glob("/etc/pve/qemu-server/*.conf")
-	if err != nil {
-		return nil, err
+func loadManagedNetworkPVEConfigsFromGlobs(patterns []string) (map[string]string, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+
+	paths := make([]string, 0)
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, matches...)
 	}
 	if len(paths) == 0 {
 		return nil, nil
 	}
+	sort.Strings(paths)
 
 	configs := make(map[string]string, len(paths))
 	for _, path := range paths {
