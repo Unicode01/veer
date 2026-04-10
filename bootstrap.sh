@@ -159,6 +159,57 @@ detect_arch() {
     esac
 }
 
+detect_memory_limit_kib() {
+    local value=""
+
+    if [[ -r /sys/fs/cgroup/memory.max ]]; then
+        value="$(< /sys/fs/cgroup/memory.max)"
+        if [[ "${value}" =~ ^[0-9]+$ ]] && (( value > 0 )); then
+            echo $(( value / 1024 ))
+            return 0
+        fi
+    fi
+
+    if [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+        value="$(< /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+        if [[ "${value}" =~ ^[0-9]+$ ]] && (( value > 0 && value < 9223372036854771712 )); then
+            echo $(( value / 1024 ))
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+warn_low_memory() {
+    local total_kib=""
+    local limit_kib=""
+    local effective_kib=""
+    local effective_mib=0
+
+    total_kib="$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
+    if [[ "${total_kib}" =~ ^[0-9]+$ ]]; then
+        effective_kib="${total_kib}"
+    fi
+
+    limit_kib="$(detect_memory_limit_kib || true)"
+    if [[ "${limit_kib}" =~ ^[0-9]+$ ]]; then
+        if [[ -z "${effective_kib}" ]] || (( limit_kib < effective_kib )); then
+            effective_kib="${limit_kib}"
+        fi
+    fi
+
+    if ! [[ "${effective_kib}" =~ ^[0-9]+$ ]]; then
+        warn "无法检测可用内存，继续执行"
+        return
+    fi
+
+    if (( effective_kib < 1024 * 1024 )); then
+        effective_mib=$(( effective_kib / 1024 ))
+        warn "检测到可用内存约 ${effective_mib} MiB，小于 1 GiB；编译与首次部署可能因内存不足失败，建议先增加内存或临时启用 swap"
+    fi
+}
+
 require_supported_distro() {
     [[ -f /etc/os-release ]] || fail "未找到 /etc/os-release，无法识别发行版"
     # shellcheck disable=SC1091
@@ -275,6 +326,8 @@ main() {
     set_step "检测架构"
     detect_arch
     FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
+    set_step "检查内存"
+    warn_low_memory
     set_step "检查发行版"
     require_supported_distro
     set_step "安装系统依赖"
