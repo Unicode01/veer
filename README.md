@@ -309,6 +309,15 @@ http://127.0.0.1:8080
 - 自动生成 Egress NAT
 - 链路变更后的自动修复
 
+### PVE 最低版本
+
+如果是面向 Proxmox VE 部署，建议按下面这条边界理解：
+
+- 最低可运行版本按 `PVE 7.0` 起算；从 `7.0` 开始默认进入 `5.11` 内核线，满足当前 `TC` 主线路径的最低内核要求，也覆盖了 `veth` 场景下 XDP NAT redirect 已知要求的 `5.11+` 边界
+- 不建议再把 `PVE 6.x` 视为受支持目标；它默认是 `5.4` 内核线，不在当前内核 dataplane 支持范围内
+- 对外文档如果要写得更稳，建议直接写 `PVE 8.x+`
+- 最终仍以宿主机实际内核版本为准；如果宿主机手动 pin 到旧内核，只看 PVE 大版本并不能保证内核 dataplane 可用
+
 ### PVE 相关建议
 
 如果你是在 Proxmox 上用：
@@ -336,6 +345,16 @@ Linux 现在支持把 `create` 模式下的 bridge 写入宿主机 `interfaces` 
 推荐运行环境：
 
 - Linux
+
+### Debian / Ubuntu 最低版本
+
+如果是直接部署在 Debian 或 Ubuntu 上，建议按下面这条边界理解：
+
+- Debian 的最低可运行版本按 `Debian 11 (bullseye)` 起算；它自带 `5.10` 内核线，满足当前 `TC` 主线路径的最低内核要求
+- 如果你希望在发行版默认内核上同时覆盖 `TC` 和 `veth` 场景下的 XDP NAT redirect，Debian 侧更推荐直接使用 `Debian 12 (bookworm)+`
+- Ubuntu 的最低支持版本按 `Ubuntu 22.04 LTS` 起算；服务端默认使用 `5.15` GA 内核，满足当前内核 dataplane 边界
+- 不建议把 `Ubuntu 20.04 LTS` 视为默认受支持目标；它的服务端默认 GA 内核是 `5.4`，版本号本身不能保证内核 dataplane 可用
+- 最终仍以宿主机实际内核版本为准；如果系统切到了 HWE、OEM 或自定义内核，应直接以 `uname -r` 判断，而不是只看发行版版本号
 
 构建要求：
 

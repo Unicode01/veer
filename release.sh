@@ -36,7 +36,9 @@ EBPF_XDP_OBJ="${EBPF_DIR}/forward-xdp-bpf.o"
 EBPF_XDP_STATS_OBJ="${EBPF_DIR}/forward-xdp-bpf-stats.o"
 BPF_CLANG="${BPF_CLANG:-clang}"
 BPF_EXTRA_CFLAGS="${BPF_EXTRA_CFLAGS:-}"
-BPF_OLEVEL="${BPF_OLEVEL:-1}"
+# Debian 5.10 rejects the TC object emitted at -O1 with a 9-frame verifier stack.
+# -O2 produces verifier-safe subprog layout without changing the source inputs.
+BPF_OLEVEL="${BPF_OLEVEL:-2}"
 
 if ! command -v go &>/dev/null; then
     fail "未找到 go 命令，请先安装 Go >= 1.21"
