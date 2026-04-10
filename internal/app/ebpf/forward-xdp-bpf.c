@@ -2746,7 +2746,6 @@ static __always_inline int prepare_fullnat_forward_v6(struct xdp_md *xdp, const 
 			return -1;
 	}
 
-#pragma clang loop unroll(full)
 	for (int i = 0; i < FORWARD_NAT_PORT_PROBE_ATTEMPTS; i++) {
 		__u16 nat_port = (__u16)(FORWARD_NAT_PORT_MIN + ((start + ((__u32)i * stride)) % FORWARD_NAT_PORT_RANGE));
 
