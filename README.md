@@ -1,64 +1,85 @@
 # forward
 
-`forward` 是一个面向虚拟机场景的 NAT Forward 管理服务。
+`forward` 是一个面向虚拟机宿主机场景的 NAT Forward 管理服务。
 
-## 典型适用场景
+它用 Go 编写，内置 Web UI 和管理 API，使用 SQLite 持久化配置与状态，目标是把宿主机上的端口转发、共享代理、端口范围、Egress NAT、托管网络和 IPv6 分发统一收敛到一个进程里管理。
 
-- NAT forward for virtual machine
-- 宿主机将公网端口转发到内网虚拟机
-- 一台宿主机同时管理多台虚拟机的端口暴露
-- 多个域名共享宿主机 80/443，再按域名转发到不同虚拟机
-- 将一整段端口范围映射到某台虚拟机
-- 在多网卡、VLAN 子接口环境里按接口做入口和出口绑定
+开发者接口见 [API.md](./API.md)。
 
-它使用 Go 编写，内置 Web 管理面板，使用 SQLite 持久化规则和状态，重点解决“宿主机为虚拟机做 NAT 转发”这类场景下的统一管理问题。
+## 项目定位
 
-如果你的机器同时承担下面这些职责，这个项目会比较合适：
+这个项目主要解决下面这些宿主机场景：
 
-- 把宿主机的 TCP / UDP 端口暴露给虚拟机
-- 把 80/443 收口到宿主机，再按域名分发到不同虚拟机
-- 管理游戏服、业务服务或测试环境的一段连续端口
-- 观察 worker 状态、draining 过程和基础流量统计
+- 把宿主机公网端口转发到内网虚拟机
+- 把 80/443 收口到宿主机，再按域名转发到不同 VM
+- 把一段连续端口映射给某台 VM
+- 给托管桥分配 IPv4 DHCP、静态保留和 IPv6 下发
+- 让 VM 通过宿主机做 Egress NAT
+- 在 Linux 上用 `userspace / tc / xdp` 多条 dataplane 路径做转发和回退
 
-当前支持统一管理以下几类转发任务：
+如果你的环境是 Proxmox、KVM、自建 Linux bridge，或者其他“宿主机负责给 VM 提供网络入口/出口”的部署方式，这个项目是对口的。
 
-- 单端口转发
-- 80/443 共享建站转发
-- 端口范围映射
-- Worker 进程状态与流量统计
+## 当前能力
 
-当前 Web 面板已支持深色模式、中英文切换、搜索过滤、分页和基础状态提示。
+当前可以统一管理下面几类对象：
 
-开发者对接文档见 [API.md](./API.md)。
+- 规则转发：单端口 TCP / UDP 转发
+- 共享站点：80/443 共享代理，按域名分发
+- 端口范围：连续端口区间映射
+- Egress NAT：按父接口 / 子接口 / 出接口管理出向 NAT
+- 托管网络：创建或托管现有 bridge，维护 IPv4 DHCP、保留地址、自动 Egress NAT
+- IPv6 分发：向目标接口下发 `/128` 或 `/64`
 
-## 主要特性
+配套能力包括：
 
-- 内置 Web UI，无需额外前端构建步骤
-- SQLite 持久化，默认生成 `forward.db`
-- 支持规则、站点、范围映射三类转发模型
-- 用户态规则 / 范围映射已支持 IPv4 / IPv6 的 TCP、UDP 转发；共享站点代理的非透传监听 / 回源也支持 IPv6
-- Linux 下支持 XDP / TC eBPF 内核转发，并按配置自动回退到用户态
-- 透明模式与当前内核数据面仍按 IPv4 路径工作，IPv6 会保留在用户态转发链路
-- 支持 Worker 自动分配、重分布和 draining 退出
-- 支持规则 / 站点 / 范围映射流量统计
-- 支持按需刷新当前连接数，避免每轮刷新都遍历连接表
-- 支持标签、排序、搜索、分页
-- 通过 Bearer Token 保护管理 API
-- 仓库内附带 WHMCS 插件，支持多宿主机入口映射、规则管理、80/443 共享建站和 HAProxy 规则导入脚本
+- Web UI
+- Bearer Token 鉴权的管理 API
+- SQLite 持久化
+- Worker 热重载与 draining
+- Linux 内核 dataplane 运行时视图
+- 仓库内附带 WHMCS 插件
 
-## 平台说明
+## 当前建议
 
-- 推荐运行环境：Linux
-- `SO_BINDTODEVICE` 仅在 Linux 下生效
-- 透明源地址转发依赖 Linux 的 `IP_TRANSPARENT`、`ip rule`、`ip route` 和 `iptables`
-- 非 Linux 平台可以编译，但透明转发和按接口绑定会降级或不可用
-- 多网卡场景支持按入接口 / 出接口绑定
-- VLAN 子接口会按普通 Linux 网卡名处理，例如 `eth0.100`
-- 同一网卡上的多个 IPv4 / IPv6 地址会在前端作为可选监听地址列出
+先说结论：
 
-## 典型虚拟机场景示例
+- 生产上优先按 Linux 使用
+- 想进内核 dataplane，优先把 `TC` 当主线
+- `XDP` 仍然属于实验路径，建议按拓扑单独验证
+- 透明转发仍然更适合按 IPv4 理解和部署
+- 如果是 `veth / netns / VM tap` 这类实验拓扑，要跑 XDP 基本应显式开启 `xdp_generic`
 
-下面是一种很常见的宿主机 + `vmbr0` 拓扑，适合放在 Proxmox / KVM / 自建 Linux bridge 环境里：
+更具体一点：
+
+- 用户态转发已经覆盖最广，适合作为最终回退路径
+- `TC` 是当前更通用、更稳妥的 Linux 内核转发路径
+- `XDP` 已经能通过完整集成测试，但它对网卡类型、attach mode、bridge/veth 组合更敏感
+- 在一台 Debian 调试机上，这轮已经确认：`veth` 上的 XDP NAT redirect 在 `driver/native` 模式下可能直接返回 `EOPNOTSUPP`；同一拓扑切到 `generic/SKB` 后可恢复正常
+- 如果你当前不准备试验 XDP，最直接的做法就是把 `kernel_engine_order` 固定成 `["tc"]`
+- 因此，README 里的 XDP 结论都应该理解为“可用但需按环境验证”，而不是“默认可替代 TC”
+
+## 2026-04-10 测试状态
+
+下面这些套件已经在远程 Debian 调试机上重新跑过：
+
+- `go test ./...`
+- `FORWARD_RUN_EGRESS_NAT_TEST=1`
+- `FORWARD_RUN_EGRESS_NAT_XDP_TEST=1`
+- `FORWARD_RUN_MANAGED_NETWORK_TEST=1`
+- `FORWARD_RUN_IPV6_ASSIGNMENT_TEST=1 -run TestIPv6AssignmentManagedAddressIntegration`
+- `FORWARD_RUN_TC_IPV6_TEST=1`
+- `FORWARD_RUN_XDP_FULLNAT_TEST=1`
+- `FORWARD_RUN_XDP_IPV6_TEST=1`
+
+这轮补充确认的关键点：
+
+- XDP Egress NAT、XDP IPv4 full-NAT、XDP IPv6 integration 现在都能通过
+- veth 型 XDP 集成拓扑需要 `xdp_generic`
+- 这不是规则命中问题，而是部分内核/拓扑下 `driver/native` redirect 自身不可用
+
+## 典型拓扑
+
+最常见的 VM 宿主机场景大致如下：
 
 ```text
 公网
@@ -67,22 +88,20 @@
   |
 宿主机
   ├─ eth0              公网接口
-  └─ vmbr0             虚拟机网桥，198.51.100.1/24
-       ├─ VM-A         198.51.100.10   Web / SSH
-       └─ VM-B         198.51.100.20   Game / UDP
+  └─ vmbr0             VM 网桥，198.51.100.1/24
+       ├─ VM-A         198.51.100.10
+       └─ VM-B         198.51.100.20
 ```
 
-在这个场景下，`forward` 的典型用法通常是：
+典型做法：
 
-- 用 `eth0` 作为入口接口，接公网访问
-- 用 `vmbr0` 作为出口接口，把流量转给虚拟机
-- 让虚拟机默认网关指向宿主机桥地址，例如 `198.51.100.1`
+- 用 `eth0` 作为入口接口
+- 用 `vmbr0` 作为出口接口或托管 bridge
+- 让 VM 默认网关指向宿主机桥地址，例如 `198.51.100.1`
 
-对应到本项目里，可以这样配置：
+### 单端口转发
 
-### 1. SSH 或单端口服务转发到 VM
-
-把宿主机公网 `203.0.113.10:2222` 转发到 `VM-A` 的 `22` 端口：
+把宿主机公网 `203.0.113.10:2222` 转发到 VM-A 的 `22`：
 
 ```text
 in_interface  = eth0
@@ -94,24 +113,22 @@ out_port      = 22
 protocol      = tcp
 ```
 
-### 2. 80/443 建站转发到 VM
+### 共享站点
 
-把 `app.example.com` 交给 `VM-A`：
+把 `app.example.com` 转发到 VM-A：
 
 ```text
-domain            = app.example.com
-listen_interface  = eth0
-listen_ip         = 203.0.113.10
-backend_ip        = 198.51.100.10
-backend_http_port = 80
-backend_https_port= 443
+domain             = app.example.com
+listen_interface   = eth0
+listen_ip          = 203.0.113.10
+backend_ip         = 198.51.100.10
+backend_http_port  = 80
+backend_https_port = 443
 ```
 
-这里 `listen_interface = eth0` 表示 80/443 共享代理只在公网入口侧监听；这轮代码也已经确保该字段会真实参与监听绑定，不再只是界面字段。
+### 端口范围
 
-### 3. 一段游戏端口映射到 VM
-
-把 `30000-30100` 映射到 `VM-B`：
+把 `30000-30100` 映射到 VM-B：
 
 ```text
 in_interface   = eth0
@@ -124,56 +141,39 @@ out_start_port = 30000
 protocol       = tcp+udp
 ```
 
-### 4. 透传源地址时的注意事项
+### Egress NAT
 
-如果你在 `eth0 -> vmbr0 -> VM` 的路径上启用了“透传源 IP”：
-
-- VM 必须能把回包重新发回宿主机
-- 最常见做法是让 VM 默认网关指向 `vmbr0` 的宿主机地址
-- 如果 VM 默认网关绕过宿主机，透传通常会失败
-
-也就是说，在上面的例子里，`VM-A` / `VM-B` 的默认网关通常应该是：
+如果 VM 的默认路由走宿主机桥，出向 NAT 一般会长这样：
 
 ```text
-198.51.100.1
+parent_interface = vmbr0
+child_interface  = tap100i0
+out_interface    = eth0
+out_source_ip    = 203.0.113.10
+protocol         = tcp+udp+icmp
+nat_type         = symmetric
 ```
-
-如果你只是做普通 DNAT/端口映射，不要求后端虚拟机看到真实客户端源地址，那么可以不启用透传，配置会更宽松。
-
-## 运行要求
-
-- Go 1.25.1 或更高版本
-- 生产环境建议使用 Linux
-- 若需要低位端口监听、透明转发或网卡绑定，进程需要相应权限
-  - `CAP_NET_BIND_SERVICE`
-  - `CAP_NET_RAW`
-  - `CAP_NET_ADMIN`
-- 若需要 tc eBPF 内核转发，还需要
-  - `CAP_BPF`
-  - `CAP_PERFMON`（较新的内核上通常需要；缺失时 verifier 可能把程序按 `!root` 路径拒绝）
-
-项目自带的 [deploy.sh](./deploy.sh) 已处理 Debian 系统上的常见权限与 systemd 配置。
 
 ## 快速开始
 
-1. 复制示例配置：
+1. 复制配置文件：
 
 ```bash
 cp config.example.json config.json
 ```
 
-Windows PowerShell:
+Windows PowerShell：
 
 ```powershell
 Copy-Item config.example.json config.json
 ```
 
-2. 修改 `config.json`，至少把 `web_token` 改成一个真实的随机值。
+2. 修改 `config.json`，至少设置一个真实的 `web_token`
 
 注意：
 
 - `web_token` 不能为空
-- 程序会拒绝使用示例占位值 `change-me-to-a-secure-token` 启动
+- 程序会拒绝使用示例占位值 `change-me-to-a-secure-token`
 
 3. 直接运行：
 
@@ -187,9 +187,7 @@ go run .
 http://127.0.0.1:8080
 ```
 
-5. 在登录弹窗里输入 `config.json` 中配置的 `web_token`。
-
-## 配置说明
+## 配置概览
 
 示例配置见 [config.example.json](./config.example.json)：
 
@@ -201,7 +199,7 @@ http://127.0.0.1:8080
   "drain_timeout_hours": 24,
   "managed_network_auto_repair": true,
   "default_engine": "auto",
-  "kernel_engine_order": ["tc"],
+  "kernel_engine_order": ["tc", "xdp"],
   "kernel_rules_map_limit": 0,
   "kernel_flows_map_limit": 0,
   "kernel_nat_ports_map_limit": 0,
@@ -216,157 +214,237 @@ http://127.0.0.1:8080
 }
 ```
 
-字段说明：
+最关键的字段：
 
-- `web_port`：Web 管理面板监听端口，默认 `8080`
-- `web_token`：管理 API 和前端登录使用的 Bearer Token
-- `max_workers`：最大 Worker 数量；小于等于 `0` 时按 CPU 核数自动计算，内部最少保留 3 个 Worker 槽位
-- `drain_timeout_hours`：旧 Worker 进入 draining 状态后的最长保留时长，默认 `24`
-- `managed_network_auto_repair`：托管网络链路变更后的自动自愈开关，默认 `true`；开启后会在 `link_change` 触发的托管网络运行时重载前，自动补桥并把 PVE 来宾链路重新挂回目标 bridge
-- `default_engine`：默认转发引擎，可选 `auto`、`userspace`、`kernel`
-- `kernel_engine_order`：Linux 内核态引擎尝试顺序，默认 `["tc"]`；当前会自动跳过不可用引擎并回退。如果想显式试验 XDP，再配置成 `["xdp", "tc"]`
-- `kernel_rules_map_limit`：内核 `rules_v4/stats_v4` map 容量；`0` 或省略时按当前 kernel entries 自适应扩容，默认从 `16384` 起按 2 倍增长到 `262144`；设置为正数时使用固定上限
-- `kernel_flows_map_limit`：内核 `flows_v4` 连接跟踪表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
-- `kernel_nat_ports_map_limit`：内核 `nat_ports_v4` 端口保留表容量；`0` 时按内核 entries 的 4 倍目标自适应扩容，默认基线 `131072`，上限 `1048576`
-- `experimental_features`：实验性功能开关表，默认关闭；像 `bridge_xdp`、`xdp_generic`、`kernel_traffic_stats`、`kernel_tc_diag` 这类高风险、兼容性或性能权衡仍在收敛中的能力会通过这里单独放开
-- `tags`：可选标签列表，会在前端表单中作为下拉项出现
+- `web_port`：Web UI / API 监听端口
+- `web_token`：管理面板和 API 的 Bearer Token
+- `default_engine`：`auto`、`userspace`、`kernel`
+- `kernel_engine_order`：内核引擎顺序。代码默认在省略时只走 `tc`；示例配置里显式写成 `["tc", "xdp"]`，只是为了把 XDP 保留在候选链里，想走更保守的生产配置时可直接改回 `["tc"]`
+- `managed_network_auto_repair`：托管网络链路变更后的自动修复
+- `kernel_rules_map_limit` / `kernel_flows_map_limit` / `kernel_nat_ports_map_limit`：内核 map 容量上限，`0` 表示自适应
+- `experimental_features`：实验特性开关
 
-示例：
+实验特性里目前最重要的几个键：
 
-```json
-"experimental_features": {
-  "bridge_xdp": true,
-  "xdp_generic": false,
-  "kernel_traffic_stats": true,
-  "kernel_tc_diag": true,
-  "kernel_tc_diag_verbose": false
-}
-```
+- `bridge_xdp`
+- `xdp_generic`
+- `kernel_traffic_stats`
+- `kernel_tc_diag`
+- `kernel_tc_diag_verbose`
 
-说明：
+关于 `xdp_generic`：
 
-- 键名会按小写、`-` 转 `_` 归一化，例如 `bridge-xdp` 会被视为 `bridge_xdp`
-- 只有代码中显式接入检查的实验项才会生效；未接入的键会被保留但不会影响当前行为
-- `bridge_xdp` 已接入第一版实验实现，默认仍为关闭；当前主要面向透明 XDP 场景，依赖 bridge 邻居/FDB 解析，解析失败或接口不兼容时会自动回退
-- `xdp_generic` 默认关闭；不打开时，XDP 只允许 `driver/native` 附加，若设备只能走 `generic/SKB` 或最终形成 `mixed` 附加，会直接回退到后续内核引擎（通常是 `tc`）
-- `kernel_traffic_stats` 用于给内核态规则补充 `bytes/speed` 统计；它会在 TC/XDP 转发路径上增加按包计数，默认关闭，只建议在确实需要观察内核态流量时启用
-- `kernel_tc_diag` 用于开启 TC 内核态的低频诊断计数与观测增强；默认关闭，后续只把可能影响转发热路径的诊断项挂在这里
-- `kernel_tc_diag_verbose` 用于开启更重的 TC 排障诊断；它隐含启用 `kernel_tc_diag`，默认关闭，只建议短时压测或专项排障时使用
+- 默认关闭
+- 不打开时，XDP 只接受 `driver/native`
+- 打开后，XDP 才允许 `generic/SKB` 或 mixed attach
+- 对 `veth / tap / netns` 型实验拓扑，通常应该显式打开
 
-## 内核引擎与回退链
+## 内核 dataplane
 
-`forward` 当前的引擎选择逻辑是：
+### 引擎选择
 
-- `default_engine = userspace`：全部走用户态 Worker
-- `default_engine = kernel`：优先要求进入内核态；不满足条件时仍会安全回退到用户态
-- `default_engine = auto`：先尝试内核态，再自动回退到用户态
-- Linux 下内核态会按 `kernel_engine_order` 依次尝试；默认只走 `tc`，如果显式配置 `["xdp", "tc"]` 才会优先尝试 XDP
-- XDP 默认只接受 `driver/native` 附加；如果目标环境只能提供 `generic/SKB`，需要再显式开启实验项 `xdp_generic`
+当前引擎选择逻辑：
 
-地址族补充：
+- `default_engine = userspace`：全部走用户态
+- `default_engine = kernel`：尽量走内核态，失败再安全回退
+- `default_engine = auto`：优先尝试内核态，再回退到用户态
+- Linux 下会按 `kernel_engine_order` 依次尝试
 
-- 纯用户态目前已支持 IPv4 / IPv6 的 TCP / UDP 单端口与端口范围转发
-- 共享站点代理在非透传模式下可使用 IPv4 / IPv6 的 `listen_ip`、`backend_ip` 和 `backend_source_ip`
-- 透明模式与当前内核态接入条件仍按纯 IPv4 校验；IPv6 不会进入透明 / eBPF 数据面
+### 当前推荐
 
-当前想进入内核态，通常至少需要满足：
+- `TC`：当前更通用、更稳妥的主线内核引擎
+- `XDP`：路径更短，但更依赖接口和 attach 条件，建议单独验证
 
-- 规则协议必须是单协议 `tcp` 或 `udp`，不能是同一条规则里的 `tcp+udp`
-- 必须显式指定 `in_interface` 和 `out_interface`
-- 必须有明确的后端 IPv4 地址
-- `in_ip` 需要是有效 IPv4；`0.0.0.0` 可以接受，但仍要求显式入接口
-- 非透传的 full-NAT 场景下，出接口上需要有可用 IPv4，或者显式指定 `out_source_ip`
-- `transparent=true` 和固定 `out_source_ip` 互斥
+### 当前边界
 
-当前两条内核链路的定位大致是：
+想进入内核态，通常至少需要满足：
 
-- `XDP`：优先级更高，路径更短，但当前主要覆盖透明、单协议、接口条件较理想的规则；桥接出口相关能力仍主要通过 `bridge_xdp` 实验开关控制，`generic/SKB` 或 `mixed` 附加默认不会启用
-- `TC`：覆盖面更广，是当前更通用、更稳妥的内核转发后备路径；很多 XDP 无法接入的规则最终会回落到 TC
+- 普通转发规则通常要求明确的单协议匹配；Egress NAT 有自己单独的约束
+- 明确指定 `in_interface` 和 `out_interface`
+- 后端地址和出接口可解析
+- full-NAT / egress NAT 场景下，出接口上能得到可用源地址，或显式给出 `out_source_ip`
 
-补充说明：
+当前更保守的理解方式是：
 
-- 端口范围映射进入内核态时，会展开成逐端口的 kernel entries，因此大范围映射需要关注 `kernel_rules_map_limit`
-- 默认不会强行抖动现有内核会话；运行时更倾向保留活跃映射并在条件允许时原地更新
-- `kernel_traffic_stats` 默认关闭，不打开时不会额外在内核路径上维护速率/流量统计
+- `TC` 负责更广的兼容面
+- `XDP` 负责更激进的实验路径
+- 透明转发仍主要按 IPv4 工作流理解
+- IPv6 的非透明内核路径已经有 TC / XDP 集成测试覆盖
 
-### 内核态生命周期与异常退出预期
+### 运行时观测
 
-- 正常停止服务时，例如 `systemctl stop forward`、`systemctl restart forward` 或给主进程发送 `SIGTERM`，当前 TC/XDP 附加点会按正常退出流程清理或进入热更新接力
-- 使用 [deploy.sh](./deploy.sh) 更新时，程序会尝试保留内核态会话表并由新进程接力；这是“尽量不断流”的热更新路径，不等于强一致零中断承诺
-- 如果主进程被 `kill -9`、OOM kill 或异常崩溃，userspace 清理逻辑不会执行；已经附加到内核的 TC/XDP 转发可能继续生效一段时间
-- 当前版本会在下次启动时检查并清理这类 orphan 的内核态附加点，但它不能让 `kill -9` 当下立刻停止转发
-- 如果你的目标是“进程退出后立刻停转发”，应使用正常停止路径，而不要把 `kill -9` 视为内核态的即时停机手段
+当前提供：
 
-### 内核态运行时观测
+- Web UI 里的 `Kernel Runtime` 面板
+- `GET /api/kernel/runtime`
 
-- 统计页新增 `Kernel Runtime` 面板，会展示当前内核态总状态、内核承载规则/范围数量、回退计数、待重试状态，以及每个内核引擎的 map 占用、附加点、压力/降级持续时间、最近一次 maintenance/prune 信息和最近一次 reconcile 方式
-- 同时提供 `GET /api/kernel/runtime` 调试接口，便于脚本或外部面板直接读取这些运行时信息
-- 这套观测主要面向调试和联调，不打算作为当前版本的生产告警接口
+能看到的内容包括：
 
-## 性能测试说明
+- 当前默认引擎与配置顺序
+- 每个内核引擎的 active entries
+- attach 状态和 attach mode
+- map 占用
+- retry / self-heal / degraded / pressure 信息
+- TC / XDP 诊断字段
 
-仓库内附带 Linux-only dataplane benchmark，主要用于做两类评估：
+### 热更新与异常退出
 
-- `pps` 评估：更关注小包包速率、连接规模和 `userspace / tc / xdp` 的相对差异
-- `throughput` 评估：更关注大流量 TCP 吞吐，更接近日常 `iperf3` 使用方式
+- 正常停止或 `deploy.sh` 更新时，会尽量让内核态状态由新进程接力
+- 这条路径是“尽量不断流”，不是绝对零中断承诺
+- 如果进程被 `kill -9`、OOM kill 或异常崩溃，内核附加点可能会暂时继续生效
+- 下次启动会尝试识别并清理 orphan 附加点
 
-需要注意：
+## 托管网络与 PVE
 
-- 基准测试默认使用 `netns + veth` 拓扑，不等于真实物理网卡线速
-- 关闭 offload 的结果更适合看软件路径和小包 `pps`
-- 保留 offload 的结果更适合看大流 TCP 吞吐
-- `XDP` 在部分 offload / 设备组合下仍可能无法加载，因此当前吞吐结论主要基于 `userspace` 与 `tc`
-- 当前 benchmark 主要用于调试环境下比较 dataplane 路径差异，不作为生产容量承诺
+`Managed Network` 现在有两种工作方式：
 
-### 小包 PPS 参考
+- `create`：由 `forward` 动态创建 bridge
+- `existing`：托管一个宿主机上已经存在的 bridge
 
-测试口径：
+当前托管网络能力包括：
+
+- IPv4 DHCP
+- IPv4 静态保留
+- IPv6 `/128` 或 `/64` 下发
+- 自动生成 Egress NAT
+- 链路变更后的自动修复
+
+### PVE 相关建议
+
+如果你是在 Proxmox 上用：
+
+- PVE 界面更偏向识别写入 `/etc/network/interfaces` 的 bridge
+- 动态创建的 bridge 不一定会被 PVE 视为“可配置网络”
+- 这时更推荐两种方式之一：
+  - 直接托管现有 bridge
+  - 先用 `create` 动态创建，再执行“持久化 bridge”
+
+### 托管 bridge 持久化
+
+Linux 现在支持把 `create` 模式下的 bridge 写入宿主机 `interfaces` 配置：
+
+- 目标文件：`/etc/network/interfaces`
+- 会创建备份
+- 会写入一个带 `BEGIN/END forward managed bridge` 标记的静态 block
+- 写入成功后，该托管网络会转成 `existing` 模式
+
+这条路径是为 `ifupdown` / PVE 一类环境准备的，不是通用网络配置管理器。
+如果你的系统会由其他工具重写 `interfaces`，应把 `forward` 视为辅助写入工具，而不是唯一的 source of truth。
+
+## 平台与依赖
+
+推荐运行环境：
+
+- Linux
+
+构建要求：
+
+- Go 1.25.1 或更高
+- `release.sh` 需要 `clang`
+- Debian / Ubuntu 上通常还需要 `linux-libc-dev`
+
+如果要使用低位端口、网卡绑定、透明转发或内核 dataplane，还需要相应权限：
+
+- `CAP_NET_BIND_SERVICE`
+- `CAP_NET_RAW`
+- `CAP_NET_ADMIN`
+- `CAP_BPF`
+- `CAP_PERFMON`
+
+非 Linux 平台可以编译，但很多高级能力会降级或不可用。
+
+## 性能说明
+
+先给结论：
+
+- 当前 README 的性能数字只代表 `netns + veth` 调试拓扑
+- 它们适合比较 dataplane 路径差异
+- 它们不等价于真实物理网卡线速
+
+这轮保留的样本来自 `2026-04-10` 的重新复跑。
+
+### 普通 dataplane 小包 PPS
+
+口径：
 
 - UDP steady
 - `64B` payload
 - `8192` 总连接
 - `16` 活跃连接
 - `FORWARD_PERF_DISABLE_OFFLOADS=1`
-- `FORWARD_PERF_BACKEND_WORKERS=8`
 
-参考结果：
-
-| Engine | Payload PPS | Payload Throughput |
+| Engine | Payload PPS | Mean Payload Throughput |
 | --- | ---: | ---: |
-| TC | `~119.5k pps` | `~7.30 MiB/s` |
-| XDP | `~122.1k pps` | `~7.45 MiB/s` |
+| iptables | `~84.3-90.0k pps` | `~5.29 MiB/s` |
+| nftables | `~84.1-86.3k pps` | `~5.20 MiB/s` |
+| userspace | `~28.2-28.5k pps` | `~1.73 MiB/s` |
+| TC | `~90.8-96.0k pps` | `~5.69 MiB/s` |
 
-这一组更适合说明：在当前软件拓扑下，小包场景里 `XDP` 相对 `TC` 仍有小幅优势，但绝对值会明显受到 benchmark 拓扑、helper 与 offload 策略影响。
+### 普通 dataplane 大流吞吐
 
-### 大流吞吐参考
+口径：
 
-测试口径：
-
-- TCP 单向上传流
-- `FORWARD_PERF_TCP_MODE=upload`
+- TCP upload
 - `16` 连接 / `16` 并发
 - `512 MiB` per connection
 - `128 KiB` chunk
 - `FORWARD_PERF_DISABLE_OFFLOADS=0`
-- `go test -count=3`
 
-参考结果：
+| Engine | Payload Throughput |
+| --- | ---: |
+| iptables | `~1027-1121 MiB/s` |
+| nftables | `~965-1085 MiB/s` |
+| userspace | `~841-875 MiB/s` |
+| TC | `~1352-1509 MiB/s` |
 
-| Engine | Scenario | Payload Throughput |
-| --- | --- | ---: |
-| Userspace | `16 streams` | `~3076-3444 MiB/s` |
-| TC | `16 streams` | `~4947-4969 MiB/s` |
+### Egress NAT 小包 PPS
 
-说明：
+口径：
 
-- 这一组已经更接近常规 `iperf3` 风格的大流 TCP 单向吞吐测试
-- `Userspace` 在该实验模型下大致处于 `~25.8-28.9 Gbps` 区间，3 次复测均值约 `3248 MiB/s`
-- `TC` 在该实验模型下大致处于 `~41.5-41.7 Gbps` 区间，3 次复测均值约 `4956 MiB/s`
-- 同口径下 `TC` 相比 `Userspace` 提升约 `52%`
-- `TC` 在 `veth` / 内存路径下可以高于真实 `10G NIC` 线速，这更像软件路径上限，不应直接等价为真实物理网卡吞吐
-- 在同机 `netns + veth` 基准里，`32 streams` 及以上的 TCP upload 结果会开始明显受到本机 socket / softirq / veth 竞争影响；这类结果更像测试拓扑的极限，不建议直接作为真实部署下的 `TC` 聚合吞吐结论
-- 因此更推荐把 `4-16 streams` 视为较有参考价值的聚合吞吐区间
-- 如果目标是接近线上网卡表现，建议重点参考 `payload_mib_per_sec`，不要把实验环境下的 `wire` 估算值直接当作物理链路线速
+- bridge + uplink `veth`
+- UDP steady
+- `64B` payload
+- `8192` 总连接
+- `16` 活跃连接
+- `FORWARD_PERF_DISABLE_OFFLOADS=1`
+
+| Engine | Payload PPS | Mean Payload Throughput |
+| --- | ---: | ---: |
+| iptables | `~74.7k pps` | `~4.56 MiB/s` |
+| nftables | `~71.7k pps` | `~4.38 MiB/s` |
+| TC | `~83.4k pps` | `~5.09 MiB/s` |
+
+### Egress NAT 大流吞吐
+
+口径：
+
+- bridge + uplink `veth`
+- TCP 单向流
+- `64` 连接 / `8` 并发
+- `1 MiB` per connection
+- `16 KiB` chunk
+- `FORWARD_PERF_DISABLE_OFFLOADS=0`
+
+| Engine | Upload | Download |
+| --- | ---: | ---: |
+| iptables | `~1255 MiB/s` | `~1525 MiB/s` |
+| nftables | `~1331 MiB/s` | `~1787 MiB/s` |
+| TC | `~1936 MiB/s` | `~1828 MiB/s` |
+
+### XDP 性能状态
+
+这轮不再给 XDP 统一性能表，原因很简单：
+
+- XDP 对 attach mode 和拓扑非常敏感
+- 同一套规则在 `driver/native` 和 `generic/SKB` 下的表现与可用性都可能不同
+- 在 `veth / netns` 压测里，很多瓶颈其实来自本机队列、GRO、softirq 和发送侧背压，而不是规则命中本身
+
+如果你要评估 XDP：
+
+- 按目标网卡、bridge 结构和 offload 组合单独复测
+- 同时看 `GET /api/kernel/runtime`
+- 同时看 `ip -s link`
+- 对 `veth` 型环境，优先确认是否需要 `xdp_generic`
 
 ## 构建
 
@@ -382,8 +460,12 @@ go build -o forward .
 ./release.sh
 ```
 
-`release.sh` 会先用 `clang` 编译 `internal/app/ebpf/forward-tc-bpf.o` 和 `internal/app/ebpf/forward-xdp-bpf.o`，再把它们 embed 进最终二进制，因此构建机需要可用的 `clang` 和 Linux 内核头文件。
-在 Debian / Ubuntu 上，通常至少需要安装 `clang` 和 `linux-libc-dev`。
+`release.sh` 会先编译：
+
+- `internal/app/ebpf/forward-tc-bpf.o`
+- `internal/app/ebpf/forward-xdp-bpf.o`
+
+然后把它们 embed 进最终二进制。
 
 只构建指定架构：
 
@@ -394,7 +476,7 @@ go build -o forward .
 
 ## 部署
 
-项目自带 Debian 部署脚本 [deploy.sh](./deploy.sh)。
+仓库自带 Debian 部署脚本 [deploy.sh](./deploy.sh)。
 
 常见流程：
 
@@ -404,100 +486,71 @@ scp forward-linux-amd64 deploy.sh root@server:/tmp/
 ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 ```
 
-部署脚本会自动完成：
+部署脚本会处理：
 
 - 安装二进制到 `/opt/forward`
 - 生成 `config.json`
 - 创建并启用 systemd 服务
-- 放行 Web / HTTP / HTTPS 端口
+- 放行常用端口
 - 打开 `net.ipv4.ip_forward`
 
 ## 运行时文件
 
-下面这些文件默认不建议提交到 Git：
+下面这些文件不建议提交到 Git：
 
 - `config.json`
 - `forward.db`
 - `forward.db-wal`
 - `forward.db-shm`
-- 本地编译产物，如 `forward`、`forward-linux-amd64`
-
-这轮已经通过 [.gitignore](./.gitignore) 预设好了。
+- 本地编译产物，例如 `forward`、`forward-linux-amd64`
 
 ## WHMCS 插件
 
-仓库内附带一个可单独部署的 WHMCS addon 插件，源码位于：
+仓库内附带 WHMCS addon 插件，源码位于：
 
 ```text
 plugins/whmcs/forward/
 ```
 
-插件目录包含以下内容：
-
-- `forward.php`：WHMCS addon 主入口
-- `templates/`：客户区模板
-- `assets/`：客户区样式资源
-- `lang/`：语言文件
-- `import_haproxy.py`：HAProxy 规则导入脚本
-
-这个目录是仓库内的源码位置，不是 WHMCS 最终运行路径。部署到 WHMCS 时，应把整个目录放到：
+部署到 WHMCS 时，应放到：
 
 ```text
 modules/addons/forward/
 ```
 
-也就是说，最终目录名仍然必须是 `forward`，因为插件运行时模块名、客户区路由和资源路径都按 `forward` 解析。
-
-当前这套 WHMCS 插件已经按“多宿主机、多 forward 端点”场景做了收敛，重点能力包括：
-
-- 支持按 `serverID` 映射入口 IP 池：`server_ip_server_map`
-- 支持按 `serverID` 映射不同的 forward API / Token：`api_server_map`
-- 客户区可按产品与服务 IP 自动收敛可用入口 IP，避免跨宿主机误配
-- 管理员可以限制客户区允许的产品、客户端目标 IP、协议和端口范围
-- 管理员可以单独控制客户区是否允许编辑以下字段：
-  - 规则：`listen_ip`、`protocol`、`description`
-  - 站点：`listen_ip`、`backend_http_port` / `backend_https_port`、`description`
-- `transparent`、`out_source_ip`、`backend_source_ip`、接口字段和默认标签属于管理员侧控制项，客户区不会直接放开
-
-如果你是在多母鸡环境下给 VM 做 NAT / 端口转发，推荐至少配置：
-
-- `server_ip_server_map`
-- `api_server_map`
-- `client_min_port` / `client_max_port`
-- 需要的话再收紧 `client_rule_edit_*` 与 `client_site_edit_*`
+它主要面向多宿主机、多入口 IP、多 API endpoint 的 NAT/站点管理场景。
 
 ## 项目结构
 
 ```text
 .
-├─ main.go                  精简入口
+├─ main.go
 ├─ internal/
 │  └─ app/
-│     ├─ run.go             主程序启动流程
-│     ├─ api.go             Web UI 与管理 API
-│     ├─ procmgr.go         Worker 调度与 draining 管理
-│     ├─ worker.go          端口转发 Worker
-│     ├─ range_worker.go    范围映射 Worker
-│     ├─ shared_proxy.go    共享建站代理
-│     ├─ db.go              SQLite 初始化与迁移
-│     ├─ config.go          配置加载
-│     ├─ dataplane.go       用户态 / 内核态引擎规划
-│     ├─ kernel_runtime*.go 内核态运行时
-│     ├─ ebpf/              eBPF 源码与编译产物
-│     └─ web/               内置前端资源
-├─ release.sh               交叉编译脚本
-├─ deploy.sh                Debian 部署脚本
-├─ plugins/
-│  └─ whmcs/
-│     └─ forward/           WHMCS addon 插件源码
+│     ├─ run.go
+│     ├─ api.go
+│     ├─ db.go
+│     ├─ worker.go
+│     ├─ range_worker.go
+│     ├─ shared_proxy.go
+│     ├─ dataplane.go
+│     ├─ kernel_runtime*.go
+│     ├─ managed_network*.go
+│     ├─ ipv6_assignment*.go
+│     ├─ ebpf/
+│     └─ web/
+├─ release.sh
+├─ deploy.sh
+├─ API.md
+└─ plugins/
 ```
 
 ## 安全建议
 
-- 不要把真实的 `config.json` 提交到公开仓库
-- 不要在 README、Issue 或截图中暴露 `web_token`
-- 如果服务暴露到公网，建议额外放在反向代理或受限网络环境之后
+- 不要把真实 `config.json` 提交到公开仓库
+- 不要泄露 `web_token`
+- 如果 Web 管理面板暴露到公网，建议再放在反向代理或受限网络之后
 
 ## License
 
-本仓库当前使用 [MIT License](./LICENSE)。
+[MIT License](./LICENSE)

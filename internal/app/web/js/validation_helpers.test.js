@@ -103,6 +103,7 @@ function createHarness() {
     'interface.search.placeholder': 'Filter interfaces...',
     'interface.search.noResults': 'No matching interfaces',
     'errors.operationFailed': 'Operation failed: {{message}}',
+    'errors.actionFailed': '{{action}} failed: {{message}}',
     'errors.deleteFailed': 'Delete failed: {{message}}',
     'validation.ruleNotFound': 'The rule no longer exists.',
     'validation.siteNotFound': 'The site no longer exists.',
@@ -176,6 +177,7 @@ function createHarness() {
     'validation.managedNetworkBridgeMissing': 'The selected bridge interface does not exist on this host.',
     'validation.managedNetworkBridgeNameConflict': 'That bridge name is already used by a non-bridge interface. Pick another name or switch to using an existing interface.',
     'validation.managedNetworkBridgeMTU': 'Bridge MTU must be between 0 and 65535.',
+    'validation.managedNetworkPersistRequiresCreate': 'Only managed networks in create-bridge mode can be written into host config.',
     'validation.managedNetworkUplinkRequired': 'Select an uplink interface when auto egress NAT is enabled.',
     'validation.managedNetworkIPv4PoolOrder': 'The DHCPv4 pool start must not exceed the pool end.',
     'validation.ipv6AssignmentNotFound': 'The IPv6 assignment no longer exists.',
@@ -213,6 +215,10 @@ function createHarness() {
     'managedNetwork.repair.summary.none': 'No bridge or guest-link repairs were needed.',
     'managedNetwork.repair.summary.bridges': 'Bridges {{count}}: {{items}}',
     'managedNetwork.repair.summary.guestLinks': 'Guest links {{count}}: {{items}}',
+    'managedNetwork.persist.action': 'Persist Bridge',
+    'managedNetwork.persist.confirm.title': 'Persist Host Network Bridge',
+    'managedNetwork.persist.confirm.message': 'Write bridge {{bridge}} into {{path}}, keep the live bridge as-is, and switch this managed network to existing-interface mode?',
+    'managedNetwork.persist.success': 'Bridge {{bridge}} was written to host network config and this managed network now uses existing-interface mode.',
     'managedNetwork.runtimeReload.action': 'Reload Runtime',
     'managedNetwork.runtimeReload.queued': 'Managed network runtime reload queued.',
     'managedNetwork.runtimeReload.completed': 'Managed network runtime reload completed.',
@@ -2279,6 +2285,57 @@ test('repairManagedNetworkRuntime shows partial warning and refreshes related vi
   assert.deepEqual(notifications, [{
     type: 'warning',
     message: 'Managed network repair partially applied and runtime reload was triggered. Bridges 1: vmbr1; Guest links 1: fwpr100p0->vmbr1 repair guest links: permission denied'
+  }]);
+});
+
+test('persistManagedNetworkBridge writes host config and refreshes related views', async () => {
+  const { app, notifications, elements } = createHarness();
+  const calls = [];
+  let hostReloads = 0;
+  let ifaceReloads = 0;
+  let networkReloads = 0;
+  let reservationReloads = 0;
+  let ipv6Reloads = 0;
+
+  app.state.managedNetworks.data = [
+    { id: 7, bridge_mode: 'create', bridge: 'vmbr7' }
+  ];
+  elements.editManagedNetworkId.value = '7';
+  app.exitManagedNetworkEditMode = function exitManagedNetworkEditMode() {
+    elements.editManagedNetworkId.value = '';
+  };
+  app.apiCall = async function apiCall(method, path) {
+    calls.push({ method, path });
+    return { status: 'persisted', bridge: 'vmbr7' };
+  };
+  app.loadHostNetwork = async function loadHostNetwork() {
+    hostReloads++;
+  };
+  app.loadInterfaces = async function loadInterfaces() {
+    ifaceReloads++;
+  };
+  app.loadManagedNetworks = async function loadManagedNetworks() {
+    networkReloads++;
+  };
+  app.loadManagedNetworkReservations = async function loadManagedNetworkReservations() {
+    reservationReloads++;
+  };
+  app.loadIPv6Assignments = async function loadIPv6Assignments() {
+    ipv6Reloads++;
+  };
+
+  await app.persistManagedNetworkBridge(7);
+
+  assert.deepEqual(calls, [{ method: 'POST', path: '/api/managed-networks/persist-bridge?id=7' }]);
+  assert.equal(elements.editManagedNetworkId.value, '');
+  assert.equal(hostReloads, 1);
+  assert.equal(ifaceReloads, 1);
+  assert.equal(networkReloads, 1);
+  assert.equal(reservationReloads, 1);
+  assert.equal(ipv6Reloads, 1);
+  assert.deepEqual(notifications, [{
+    type: 'success',
+    message: 'Bridge vmbr7 was written to host network config and this managed network now uses existing-interface mode.'
   }]);
 });
 

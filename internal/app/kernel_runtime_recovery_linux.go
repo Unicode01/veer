@@ -12,7 +12,8 @@ func (rt *linuxKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentH
 	loaded := rt.coll != nil
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
-	forwardProg, replyProg, forwardProgV6, replyProgV6 := kernelAttachmentProgramsForPreparedRules(rt.coll, preparedRules)
+	mode := rt.attachmentMode
+	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, preparedRules, mode)
 	rt.mu.Unlock()
 
 	healthy := true
@@ -22,10 +23,10 @@ func (rt *linuxKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentH
 			forwardIfRules,
 			replyIfRules,
 			attachments,
-			forwardProg,
-			replyProg,
-			forwardProgV6,
-			replyProgV6,
+			programs.forwardProg,
+			programs.replyProg,
+			programs.forwardProgV6,
+			programs.replyProgV6,
 		)
 	}
 	return []kernelAttachmentHealthSnapshot{{
@@ -91,27 +92,27 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 	if err != nil {
 		return nil, err
 	}
-	forwardProg := pieces.forwardProg
-	replyProg := pieces.replyProg
-	forwardProgV6 := pieces.forwardProgV6
-	replyProgV6 := pieces.replyProgV6
-	if !kernelPreparedRulesIncludeIPv6(rt.preparedRules) {
-		forwardProgV6 = nil
-		replyProgV6 = nil
-	}
+	programs := kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(rt.preparedRules), rt.attachmentMode)
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(rt.preparedRules)
 	if kernelAttachmentsHealthy(
 		forwardIfRules,
 		replyIfRules,
 		rt.attachments,
-		forwardProg,
-		replyProg,
-		forwardProgV6,
-		replyProgV6,
+		programs.forwardProg,
+		programs.replyProg,
+		programs.forwardProgV6,
+		programs.replyProgV6,
 	) {
 		return nil, nil
 	}
-	plans := desiredKernelAttachmentPlansDualStack(forwardIfRules, replyIfRules, forwardProg, replyProg, forwardProgV6, replyProgV6)
+	plans := desiredKernelAttachmentPlansDualStack(
+		forwardIfRules,
+		replyIfRules,
+		programs.forwardProg,
+		programs.replyProg,
+		programs.forwardProgV6,
+		programs.replyProgV6,
+	)
 	if len(plans) == 0 {
 		return nil, nil
 	}

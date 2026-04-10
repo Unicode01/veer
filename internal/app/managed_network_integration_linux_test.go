@@ -5,6 +5,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
 )
 
@@ -116,7 +118,11 @@ func TestManagedNetworkIntegration(t *testing.T) {
 	backendHelper := startIPv6AssignmentIntegrationBackendHelperWithAddrs(t, perfTopology, ipv6AssignmentIntegrationBackendAddr, ipv6AssignmentIntegrationParentAddr, managedIPv6.Address)
 	defer stopIPv6AssignmentIntegrationHelper(t, backendHelper)
 
-	runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway)
+	if err := runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
 
 	if observedIP := runEgressNATIntegrationProbe(t, topology, "tcp"); observedIP != egressNATUplinkAddr {
 		logForwardLogOnFailure(t, harness.LogPath)
@@ -187,7 +193,11 @@ func TestManagedNetworkIntegrationRenewsAfterForwardRestart(t *testing.T) {
 		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
 		t.Fatal(err)
 	}
-	runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway)
+	if err := runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
 	seedManagedNetworkIntegrationIPv4Neighbors(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4Gateway)
 	if observedIP := runEgressNATIntegrationProbe(t, topology, "tcp"); observedIP != egressNATUplinkAddr {
 		logForwardLogOnFailure(t, harness.LogPath)
@@ -229,7 +239,11 @@ func TestManagedNetworkIntegrationRenewsAfterForwardRestart(t *testing.T) {
 		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
 		t.Fatal(err)
 	}
-	runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway)
+	if err := runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
 	seedManagedNetworkIntegrationIPv4Neighbors(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4Gateway)
 	if observedIP := runEgressNATIntegrationProbe(t, topology, "tcp"); observedIP != egressNATUplinkAddr {
 		logForwardLogOnFailure(t, harness.LogPath)
@@ -305,7 +319,11 @@ func TestManagedNetworkIntegrationRecoversAfterBridgeIPv4AddressReset(t *testing
 		t.Fatal(err)
 	}
 
-	runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway)
+	if err := runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
 	if observedIP := runEgressNATIntegrationProbe(t, topology, "tcp"); observedIP != egressNATUplinkAddr {
 		logForwardLogOnFailure(t, harness.LogPath)
 		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
@@ -330,7 +348,11 @@ func TestManagedNetworkIntegrationRecoversAfterBridgeIPv4AddressReset(t *testing
 	}
 
 	prepareManagedNetworkIntegrationClientNamespace(t, topology)
-	runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway)
+	if err := runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
 	seedManagedNetworkIntegrationIPv4Neighbors(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4Gateway)
 	seedEgressNATIntegrationNeighbor(t, topology)
 	if observedIP := runEgressNATIntegrationProbe(t, topology, "tcp"); observedIP != egressNATUplinkAddr {
@@ -702,11 +724,14 @@ func prepareManagedNetworkIntegrationClientNamespace(t *testing.T, topology egre
 	runDataplanePerfCmd("ip", "netns", "exec", topology.ClientNS, "ip", "-4", "route", "del", "default")
 }
 
-func runManagedNetworkDHCPv4Client(t *testing.T, topology egressNATIntegrationTopology, expectedIPv4 string, expectedCIDR string, gateway string) {
+func runManagedNetworkDHCPv4Client(t *testing.T, topology egressNATIntegrationTopology, expectedIPv4 string, expectedCIDR string, gateway string) error {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+
+	captures := startManagedNetworkDHCPv4PacketCaptures(t, topology)
+	defer stopEgressNATPacketCaptures(captures)
 
 	cmd := exec.CommandContext(ctx, "ip", "netns", "exec", topology.ClientNS, os.Args[0], "-test.run", "TestManagedNetworkIntegrationHelperProcess", "-test.v=false")
 	cmd.Env = append(os.Environ(),
@@ -719,11 +744,82 @@ func runManagedNetworkDHCPv4Client(t *testing.T, topology egressNATIntegrationTo
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		logManagedNetworkIntegrationStateOnFailure(t, dataplanePerfTopology{
+			ClientNS:      topology.ClientNS,
+			BackendNS:     topology.BackendNS,
+			ClientHostIF:  topology.ChildHostIF,
+			ClientNSIF:    topology.ClientNSIF,
+			BackendHostIF: topology.UplinkHostIF,
+			BackendNSIF:   topology.BackendNSIF,
+		})
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("managed network dhcpv4 helper timed out\n%s", string(output))
+			return fmt.Errorf("managed network dhcpv4 helper timed out\n%s\npacket capture:\n%s", string(output), stopAndCollectEgressNATPacketCaptures(captures))
 		}
-		t.Fatalf("managed network dhcpv4 helper failed: %v\n%s", err, string(output))
+		return fmt.Errorf("managed network dhcpv4 helper failed: %w\n%s\npacket capture:\n%s", err, string(output), stopAndCollectEgressNATPacketCaptures(captures))
 	}
+	return nil
+}
+
+func startManagedNetworkDHCPv4PacketCaptures(t *testing.T, topology egressNATIntegrationTopology) []*egressNATPacketCapture {
+	t.Helper()
+
+	if _, err := exec.LookPath("tcpdump"); err != nil {
+		return nil
+	}
+
+	captures := []*egressNATPacketCapture{
+		startManagedNetworkDHCPv4PacketCapture(t, "host "+topology.BridgeIF, "", topology.BridgeIF),
+		startManagedNetworkDHCPv4PacketCapture(t, "host "+topology.ChildHostIF, "", topology.ChildHostIF),
+		startManagedNetworkDHCPv4PacketCapture(t, "netns "+topology.ClientNS+"/"+topology.ClientNSIF, topology.ClientNS, topology.ClientNSIF),
+	}
+	anyStarted := false
+	for _, capture := range captures {
+		if capture != nil {
+			anyStarted = true
+			break
+		}
+	}
+	if anyStarted {
+		time.Sleep(300 * time.Millisecond)
+	}
+	return captures
+}
+
+func startManagedNetworkDHCPv4PacketCapture(t *testing.T, label string, namespace string, ifName string) *egressNATPacketCapture {
+	t.Helper()
+
+	if strings.TrimSpace(ifName) == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	args := []string{"tcpdump", "-l", "-nn", "-e", "-vvv", "-c", "12", "-i", ifName}
+	args = append(args, managedNetworkDHCPv4PacketCaptureFilter()...)
+
+	var cmd *exec.Cmd
+	if strings.TrimSpace(namespace) == "" {
+		cmd = exec.CommandContext(ctx, args[0], args[1:]...)
+	} else {
+		nsArgs := append([]string{"netns", "exec", namespace}, args...)
+		cmd = exec.CommandContext(ctx, "ip", nsArgs...)
+	}
+
+	capture := &egressNATPacketCapture{
+		Label:  label,
+		cancel: cancel,
+		cmd:    cmd,
+	}
+	cmd.Stdout = &capture.output
+	cmd.Stderr = &capture.output
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Logf("start dhcp packet capture %s failed: %v", label, err)
+		return nil
+	}
+	return capture
+}
+
+func managedNetworkDHCPv4PacketCaptureFilter() []string {
+	return []string{"udp", "and", "(", "port", "67", "or", "port", "68", ")"}
 }
 
 func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP, timeout time.Duration) (net.IP, error) {
@@ -788,7 +884,38 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 	return nil, fmt.Errorf("timed out waiting for dhcpv4 lease on %s", iface.Name)
 }
 
-func openManagedNetworkDHCPv4ClientConn(ifaceName string) (*net.UDPConn, error) {
+type managedNetworkDHCPv4ClientConn struct {
+	send *net.UDPConn
+	recv int
+}
+
+func (conn *managedNetworkDHCPv4ClientConn) Close() error {
+	if conn == nil {
+		return nil
+	}
+	var firstErr error
+	if conn.send != nil {
+		if err := conn.send.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if conn.recv >= 0 {
+		if err := unix.Close(conn.recv); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		conn.recv = -1
+	}
+	return firstErr
+}
+
+func (conn *managedNetworkDHCPv4ClientConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) {
+	if conn == nil || conn.send == nil {
+		return 0, fmt.Errorf("dhcpv4 client sender unavailable")
+	}
+	return conn.send.WriteToUDP(b, addr)
+}
+
+func openManagedNetworkDHCPv4ClientConn(ifaceName string) (*managedNetworkDHCPv4ClientConn, error) {
 	lc := net.ListenConfig{
 		Control: func(network, address string, raw syscall.RawConn) error {
 			var controlErr error
@@ -816,21 +943,44 @@ func openManagedNetworkDHCPv4ClientConn(ifaceName string) (*net.UDPConn, error) 
 		_ = pc.Close()
 		return nil, fmt.Errorf("unexpected dhcpv4 packet conn type %T", pc)
 	}
-	return conn, nil
+	_, recvFD, err := openPacketListenerSocket(ifaceName, 2*time.Second, buildManagedNetworkDHCPv4ClientSocketFilter())
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return &managedNetworkDHCPv4ClientConn{
+		send: conn,
+		recv: recvFD,
+	}, nil
 }
 
-func waitForManagedNetworkDHCPv4Response(conn *net.UDPConn, xid uint32, hwAddr net.HardwareAddr, timeout time.Duration) (parsedManagedNetworkDHCPv4Message, error) {
-	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+type managedNetworkDHCPv4TimeoutError struct{}
+
+func (managedNetworkDHCPv4TimeoutError) Error() string   { return "i/o timeout" }
+func (managedNetworkDHCPv4TimeoutError) Timeout() bool   { return true }
+func (managedNetworkDHCPv4TimeoutError) Temporary() bool { return true }
+
+func waitForManagedNetworkDHCPv4Response(conn *managedNetworkDHCPv4ClientConn, xid uint32, hwAddr net.HardwareAddr, timeout time.Duration) (parsedManagedNetworkDHCPv4Message, error) {
+	if conn == nil || conn.recv < 0 {
+		return parsedManagedNetworkDHCPv4Message{}, fmt.Errorf("dhcpv4 client receiver unavailable")
+	}
+	tv := unix.NsecToTimeval(timeout.Nanoseconds())
+	if err := unix.SetsockoptTimeval(conn.recv, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
 		return parsedManagedNetworkDHCPv4Message{}, err
 	}
-	buf := make([]byte, 1500)
 	for {
-		n, _, err := conn.ReadFromUDP(buf)
+		frame, err := readManagedNetworkDHCPv4ClientFrame(conn.recv)
 		if err != nil {
+			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+				return parsedManagedNetworkDHCPv4Message{}, managedNetworkDHCPv4TimeoutError{}
+			}
 			return parsedManagedNetworkDHCPv4Message{}, err
 		}
-		msg, err := parseManagedNetworkDHCPv4Message(buf[:n])
+		msg, err := parseManagedNetworkDHCPv4Message(frame.Payload)
 		if err != nil {
+			continue
+		}
+		if msg.Op != dhcpv4BootReply {
 			continue
 		}
 		if msg.XID != xid {
@@ -841,6 +991,69 @@ func waitForManagedNetworkDHCPv4Response(conn *net.UDPConn, xid uint32, hwAddr n
 		}
 		return msg, nil
 	}
+}
+
+func readManagedNetworkDHCPv4ClientFrame(fd int) (managedNetworkDHCPv4Frame, error) {
+	buf := make([]byte, 2048)
+	for {
+		n, _, err := unix.Recvfrom(fd, buf, 0)
+		if err != nil {
+			return managedNetworkDHCPv4Frame{}, err
+		}
+		frame, ok := parseManagedNetworkDHCPv4ClientFrame(buf[:n])
+		if ok {
+			return frame, nil
+		}
+	}
+}
+
+func parseManagedNetworkDHCPv4ClientFrame(frame []byte) (managedNetworkDHCPv4Frame, bool) {
+	if len(frame) < 14+20+8+240 {
+		return managedNetworkDHCPv4Frame{}, false
+	}
+	if binary.BigEndian.Uint16(frame[12:14]) != 0x0800 {
+		return managedNetworkDHCPv4Frame{}, false
+	}
+	ipHeader := frame[14:]
+	if version := ipHeader[0] >> 4; version != 4 {
+		return managedNetworkDHCPv4Frame{}, false
+	}
+	ihl := int(ipHeader[0]&0x0f) * 4
+	if ihl < 20 || len(ipHeader) < ihl+8 {
+		return managedNetworkDHCPv4Frame{}, false
+	}
+	if ipHeader[9] != ipv4ProtocolUDP {
+		return managedNetworkDHCPv4Frame{}, false
+	}
+	totalLen := int(binary.BigEndian.Uint16(ipHeader[2:4]))
+	if totalLen < ihl+8 || totalLen > len(ipHeader) {
+		return managedNetworkDHCPv4Frame{}, false
+	}
+	udp := ipHeader[ihl:totalLen]
+	if binary.BigEndian.Uint16(udp[0:2]) != dhcpv4ServerPort || binary.BigEndian.Uint16(udp[2:4]) != dhcpv4ClientPort {
+		return managedNetworkDHCPv4Frame{}, false
+	}
+	udpLen := int(binary.BigEndian.Uint16(udp[4:6]))
+	if udpLen < 8 || udpLen > len(udp) {
+		return managedNetworkDHCPv4Frame{}, false
+	}
+	srcIP := net.IP(append([]byte(nil), ipHeader[12:16]...))
+	dstIP := net.IP(append([]byte(nil), ipHeader[16:20]...))
+	return managedNetworkDHCPv4Frame{
+		SrcMAC:  append(net.HardwareAddr(nil), frame[6:12]...),
+		SrcIP:   srcIP,
+		DstIP:   dstIP,
+		Payload: append([]byte(nil), udp[8:udpLen]...),
+	}, true
+}
+
+func buildManagedNetworkDHCPv4ClientSocketFilter() []bpf.Instruction {
+	return buildPacketSocketEqualityFilter([]packetSocketEqualityCheck{
+		{Offset: packetSocketEtherTypeOffset, Size: 2, Value: 0x0800},
+		{Offset: packetSocketIPv4ProtocolOffset, Size: 1, Value: ipv4ProtocolUDP},
+		{Offset: packetSocketIPv4UDPSourcePortOffset, Size: 2, Value: dhcpv4ServerPort},
+		{Offset: packetSocketIPv4UDPDestPortOffset, Size: 2, Value: dhcpv4ClientPort},
+	})
 }
 
 func buildManagedNetworkDHCPv4ClientPacket(xid uint32, hwAddr net.HardwareAddr, messageType byte, requestedIP net.IP, serverID net.IP, clientID []byte) []byte {

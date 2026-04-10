@@ -136,6 +136,9 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) *http.Server {
 	mux.HandleFunc("/api/managed-networks/toggle", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		handleToggleManagedNetwork(w, r, db, pm)
 	}))
+	mux.HandleFunc("/api/managed-networks/persist-bridge", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePersistManagedNetworkBridge(w, r, db, pm)
+	}))
 	mux.HandleFunc("/api/managed-networks/reload-runtime", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		handleReloadManagedNetworkRuntime(w, r, pm)
 	}))

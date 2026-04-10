@@ -134,6 +134,20 @@ func TestXDPVethNATRedirectGuardReasonForReleaseAllowsModernKernel(t *testing.T)
 	}
 }
 
+func TestXDPPreferGenericAttach(t *testing.T) {
+	if !xdpPreferGenericAttach(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Index: 1}}) {
+		t.Fatal("xdpPreferGenericAttach(veth) = false, want true")
+	}
+
+	if !xdpPreferGenericAttach(&netlink.Device{LinkAttrs: netlink.LinkAttrs{Index: 2, MasterIndex: 10}}) {
+		t.Fatal("xdpPreferGenericAttach(bridge-slave) = false, want true")
+	}
+
+	if xdpPreferGenericAttach(&netlink.Device{LinkAttrs: netlink.LinkAttrs{Index: 3}}) {
+		t.Fatal("xdpPreferGenericAttach(device) = true, want false")
+	}
+}
+
 func TestKernelPreparedAddrIPv4Uint32(t *testing.T) {
 	addr, err := kernelPreparedAddrFromIP(net.ParseIP("198.51.100.20"), ipFamilyIPv4)
 	if err != nil {
@@ -165,6 +179,7 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 			kernelRulesMapNameV4:              &ebpf.MapSpec{},
 			kernelFlowsMapNameV4:              &ebpf.MapSpec{},
 			kernelStatsMapName:                &ebpf.MapSpec{},
+			kernelXDPRedirectMapName:          &ebpf.MapSpec{},
 			kernelXDPProgramChainMapName:      &ebpf.MapSpec{},
 			kernelXDPFIBScratchMapName:        &ebpf.MapSpec{},
 			kernelXDPFlowScratchV4MapName:     &ebpf.MapSpec{},
@@ -230,6 +245,7 @@ func TestLookupXDPCollectionPiecesIncludesLocalIPv4MapWhenPresent(t *testing.T) 
 			kernelFlowsMapNameV4:         &ebpf.Map{},
 			kernelRulesMapNameV6:         &ebpf.Map{},
 			kernelFlowsMapNameV6:         &ebpf.Map{},
+			kernelXDPRedirectMapName:     &ebpf.Map{},
 			kernelXDPProgramChainMapName: &ebpf.Map{},
 			kernelLocalIPv4MapName:       localMap,
 		},
@@ -348,10 +364,10 @@ func TestXDPAttachOrderHonorsGenericExperiment(t *testing.T) {
 			want:         []int{nl.XDP_FLAGS_DRV_MODE},
 		},
 		{
-			name:         "veth still prefers driver when explicitly enabled",
+			name:         "veth prefers generic when explicitly enabled",
 			link:         &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Index: 3}},
 			allowGeneric: true,
-			want:         []int{nl.XDP_FLAGS_DRV_MODE, nl.XDP_FLAGS_SKB_MODE},
+			want:         []int{nl.XDP_FLAGS_SKB_MODE, nl.XDP_FLAGS_DRV_MODE},
 		},
 		{
 			name:         "bridge slave prefers generic when explicitly enabled",

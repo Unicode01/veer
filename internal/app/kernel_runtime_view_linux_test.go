@@ -111,23 +111,27 @@ func TestKernelAttachmentObservationMatchesExpectationRejectsWrongName(t *testin
 func TestApplyKernelRuntimeDiagView(t *testing.T) {
 	view := KernelEngineRuntimeView{}
 	applyKernelRuntimeDiagView(&view, kernelRuntimeDiagSnapshot{
-		FIBNonSuccess:      4,
-		RedirectNeighUsed:  2,
-		RedirectDrop:       3,
-		NATReserveFail:     5,
-		NATSelfHealInsert:  6,
-		FlowUpdateFail:     7,
-		NATUpdateFail:      8,
-		RewriteFail:        9,
-		NATProbeRound2Used: 10,
-		NATProbeRound3Used: 11,
-		ReplyFlowRecreated: 12,
-		TCPCloseDelete:     13,
-		XDPV4TransparentEnter:    14,
-		XDPV4FullNATForwardEnter: 15,
-		XDPV4FullNATReplyEnter:   16,
-		XDPRedirectInvoked:       17,
-		LastError:          "diag lookup failed",
+		FIBNonSuccess:                       4,
+		RedirectNeighUsed:                   2,
+		RedirectDrop:                        3,
+		NATReserveFail:                      5,
+		NATSelfHealInsert:                   6,
+		FlowUpdateFail:                      7,
+		NATUpdateFail:                       8,
+		RewriteFail:                         9,
+		NATProbeRound2Used:                  10,
+		NATProbeRound3Used:                  11,
+		ReplyFlowRecreated:                  12,
+		TCPCloseDelete:                      13,
+		XDPV4TransparentEnter:               14,
+		XDPV4FullNATForwardEnter:            15,
+		XDPV4FullNATReplyEnter:              16,
+		XDPRedirectInvoked:                  17,
+		XDPV4TransparentReplyFlowHit:        18,
+		XDPV4TransparentForwardRuleHit:      19,
+		XDPV4TransparentNoMatchPass:         20,
+		XDPV4TransparentReplyClosingHandled: 21,
+		LastError:                           "diag lookup failed",
 	})
 
 	if view.DiagFIBNonSuccess != 4 || view.DiagRedirectDrop != 3 || view.DiagNATReserveFail != 5 || view.DiagReplyFlowRecreated != 12 {
@@ -141,6 +145,9 @@ func TestApplyKernelRuntimeDiagView(t *testing.T) {
 	}
 	if view.DiagXDPV4TransparentEnter != 14 || view.DiagXDPV4FullNATForwardEnter != 15 || view.DiagXDPV4FullNATReplyEnter != 16 || view.DiagXDPRedirectInvoked != 17 {
 		t.Fatalf("xdp hit counters not applied: %+v", view)
+	}
+	if view.DiagXDPV4TransparentReplyFlowHit != 18 || view.DiagXDPV4TransparentForwardRuleHit != 19 || view.DiagXDPV4TransparentNoMatchPass != 20 || view.DiagXDPV4TransparentReplyClosingHandled != 21 {
+		t.Fatalf("xdp transparent detail counters not applied: %+v", view)
 	}
 	if view.DiagSnapshotError != "diag lookup failed" {
 		t.Fatalf("diag snapshot error = %q, want propagated error", view.DiagSnapshotError)
@@ -258,6 +265,47 @@ func TestXDPAttachmentMode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := xdpAttachmentMode(tc.attachments); got != tc.want {
 				t.Fatalf("xdpAttachmentMode() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTCAttachmentMode(t *testing.T) {
+	tests := []struct {
+		name        string
+		attachments []kernelAttachment
+		mode        kernelTCAttachmentProgramMode
+		want        string
+	}{
+		{
+			name: "none",
+			mode: kernelTCAttachmentProgramModeLegacy,
+			want: "",
+		},
+		{
+			name:        "legacy",
+			attachments: []kernelAttachment{{}},
+			mode:        kernelTCAttachmentProgramModeLegacy,
+			want:        "legacy",
+		},
+		{
+			name:        "dispatch",
+			attachments: []kernelAttachment{{}},
+			mode:        kernelTCAttachmentProgramModeDispatchV4,
+			want:        "dispatch_v4",
+		},
+		{
+			name:        "unknown",
+			attachments: []kernelAttachment{{}},
+			mode:        kernelTCAttachmentProgramMode("unexpected"),
+			want:        "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tcAttachmentMode(tc.attachments, tc.mode); got != tc.want {
+				t.Fatalf("tcAttachmentMode() = %q, want %q", got, tc.want)
 			}
 		})
 	}

@@ -156,6 +156,85 @@ func TestLookupKernelCollectionPiecesRejectsIncompleteIPv6Programs(t *testing.T)
 	}
 }
 
+func TestValidateKernelCollectionSpecRejectsIncompleteIPv4DispatcherSet(t *testing.T) {
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{
+			kernelForwardProgramName:         &ebpf.ProgramSpec{},
+			kernelReplyProgramName:           &ebpf.ProgramSpec{},
+			kernelForwardDispatchProgramName: &ebpf.ProgramSpec{},
+		},
+		Maps: map[string]*ebpf.MapSpec{
+			kernelRulesMapNameV4:            &ebpf.MapSpec{},
+			kernelFlowsMapNameV4:            &ebpf.MapSpec{},
+			kernelNatPortsMapNameV4:         &ebpf.MapSpec{},
+			kernelIfParentMapName:           &ebpf.MapSpec{},
+			kernelLocalIPv4MapName:          &ebpf.MapSpec{},
+			kernelEgressWildcardFastMapName: &ebpf.MapSpec{},
+			kernelNATConfigMapName:          &ebpf.MapSpec{},
+			kernelStatsMapName:              &ebpf.MapSpec{},
+			kernelOccupancyMapName:          &ebpf.MapSpec{},
+			kernelTCProgramChainMapName:     &ebpf.MapSpec{},
+		},
+	}
+
+	if err := validateKernelCollectionSpec(spec); err == nil {
+		t.Fatal("validateKernelCollectionSpec() error = nil, want incomplete IPv4 dispatcher set error")
+	}
+}
+
+func TestLookupKernelCollectionPiecesRejectsIncompleteIPv4DispatcherSet(t *testing.T) {
+	coll := &ebpf.Collection{
+		Programs: map[string]*ebpf.Program{
+			kernelForwardProgramName:         &ebpf.Program{},
+			kernelReplyProgramName:           &ebpf.Program{},
+			kernelForwardDispatchProgramName: &ebpf.Program{},
+		},
+		Maps: map[string]*ebpf.Map{
+			kernelRulesMapNameV4:        &ebpf.Map{},
+			kernelFlowsMapNameV4:        &ebpf.Map{},
+			kernelNatPortsMapNameV4:     &ebpf.Map{},
+			kernelTCProgramChainMapName: &ebpf.Map{},
+		},
+	}
+
+	if _, err := lookupKernelCollectionPieces(coll); err == nil {
+		t.Fatal("lookupKernelCollectionPieces() error = nil, want incomplete IPv4 dispatcher set error")
+	}
+}
+
+func TestValidateKernelCollectionSpecRejectsIncompleteIPv4FullNATSplitSet(t *testing.T) {
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{
+			kernelForwardProgramName:                &ebpf.ProgramSpec{},
+			kernelReplyProgramName:                  &ebpf.ProgramSpec{},
+			kernelForwardDispatchProgramName:        &ebpf.ProgramSpec{},
+			kernelForwardTransparentProgramName:     &ebpf.ProgramSpec{},
+			kernelForwardFullNATProgramName:         &ebpf.ProgramSpec{},
+			kernelForwardFullNATExistingProgramName: &ebpf.ProgramSpec{},
+			kernelForwardEgressNATProgramName:       &ebpf.ProgramSpec{},
+			kernelReplyDispatchProgramName:          &ebpf.ProgramSpec{},
+			kernelReplyTransparentProgramName:       &ebpf.ProgramSpec{},
+			kernelReplyFullNATProgramName:           &ebpf.ProgramSpec{},
+		},
+		Maps: map[string]*ebpf.MapSpec{
+			kernelRulesMapNameV4:            &ebpf.MapSpec{},
+			kernelFlowsMapNameV4:            &ebpf.MapSpec{},
+			kernelNatPortsMapNameV4:         &ebpf.MapSpec{},
+			kernelIfParentMapName:           &ebpf.MapSpec{},
+			kernelLocalIPv4MapName:          &ebpf.MapSpec{},
+			kernelEgressWildcardFastMapName: &ebpf.MapSpec{},
+			kernelNATConfigMapName:          &ebpf.MapSpec{},
+			kernelStatsMapName:              &ebpf.MapSpec{},
+			kernelOccupancyMapName:          &ebpf.MapSpec{},
+			kernelTCProgramChainMapName:     &ebpf.MapSpec{},
+		},
+	}
+
+	if err := validateKernelCollectionSpec(spec); err == nil {
+		t.Fatal("validateKernelCollectionSpec() error = nil, want incomplete IPv4 full-nat split set error")
+	}
+}
+
 func TestKernelAttachmentProgramsForPreparedRulesSkipsIPv6ProgramsForIPv4PreparedRules(t *testing.T) {
 	forwardV4 := &ebpf.Program{}
 	replyV4 := &ebpf.Program{}
@@ -169,17 +248,22 @@ func TestKernelAttachmentProgramsForPreparedRulesSkipsIPv6ProgramsForIPv4Prepare
 			kernelForwardProgramNameV6: forwardV6,
 			kernelReplyProgramNameV6:   replyV6,
 		},
+		Maps: map[string]*ebpf.Map{
+			kernelRulesMapNameV4:    &ebpf.Map{},
+			kernelFlowsMapNameV4:    &ebpf.Map{},
+			kernelNatPortsMapNameV4: &ebpf.Map{},
+		},
 	}
 	prepared := []preparedKernelRule{{
 		rule: Rule{ID: 1, InIP: "198.51.100.10", OutIP: "203.0.113.10"},
 		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
 	}}
 
-	gotForwardV4, gotReplyV4, gotForwardV6, gotReplyV6 := kernelAttachmentProgramsForPreparedRules(coll, prepared)
-	if gotForwardV4 != forwardV4 || gotReplyV4 != replyV4 {
+	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeLegacy)
+	if got.forwardProg != forwardV4 || got.replyProg != replyV4 {
 		t.Fatal("kernelAttachmentProgramsForPreparedRules() did not return IPv4 programs")
 	}
-	if gotForwardV6 != nil || gotReplyV6 != nil {
+	if got.forwardProgV6 != nil || got.replyProgV6 != nil {
 		t.Fatal("kernelAttachmentProgramsForPreparedRules() returned IPv6 programs for IPv4-only prepared rules")
 	}
 }
@@ -197,18 +281,107 @@ func TestKernelAttachmentProgramsForPreparedRulesIncludesIPv6ProgramsWhenNeeded(
 			kernelForwardProgramNameV6: forwardV6,
 			kernelReplyProgramNameV6:   replyV6,
 		},
+		Maps: map[string]*ebpf.Map{
+			kernelRulesMapNameV4:    &ebpf.Map{},
+			kernelFlowsMapNameV4:    &ebpf.Map{},
+			kernelNatPortsMapNameV4: &ebpf.Map{},
+			kernelRulesMapNameV6:    &ebpf.Map{},
+			kernelFlowsMapNameV6:    &ebpf.Map{},
+			kernelNatPortsMapNameV6: &ebpf.Map{},
+		},
 	}
 	prepared := []preparedKernelRule{{
 		rule: Rule{ID: 1, InIP: "2001:db8::10", OutIP: "2001:db8::20"},
 		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv6},
 	}}
 
-	gotForwardV4, gotReplyV4, gotForwardV6, gotReplyV6 := kernelAttachmentProgramsForPreparedRules(coll, prepared)
-	if gotForwardV4 != forwardV4 || gotReplyV4 != replyV4 {
+	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeLegacy)
+	if got.forwardProg != forwardV4 || got.replyProg != replyV4 {
 		t.Fatal("kernelAttachmentProgramsForPreparedRules() did not return IPv4 programs")
 	}
-	if gotForwardV6 != forwardV6 || gotReplyV6 != replyV6 {
+	if got.forwardProgV6 != forwardV6 || got.replyProgV6 != replyV6 {
 		t.Fatal("kernelAttachmentProgramsForPreparedRules() did not return IPv6 programs for IPv6 prepared rules")
+	}
+}
+
+func TestKernelAttachmentProgramsForPreparedRulesUsesIPv4DispatcherWhenEnabled(t *testing.T) {
+	forwardV4 := &ebpf.Program{}
+	replyV4 := &ebpf.Program{}
+	forwardDispatch := &ebpf.Program{}
+	replyDispatch := &ebpf.Program{}
+
+	coll := &ebpf.Collection{
+		Programs: map[string]*ebpf.Program{
+			kernelForwardProgramName:            forwardV4,
+			kernelReplyProgramName:              replyV4,
+			kernelForwardDispatchProgramName:    forwardDispatch,
+			kernelForwardTransparentProgramName: &ebpf.Program{},
+			kernelForwardFullNATProgramName:     &ebpf.Program{},
+			kernelForwardEgressNATProgramName:   &ebpf.Program{},
+			kernelReplyDispatchProgramName:      replyDispatch,
+			kernelReplyTransparentProgramName:   &ebpf.Program{},
+			kernelReplyFullNATProgramName:       &ebpf.Program{},
+		},
+		Maps: map[string]*ebpf.Map{
+			kernelRulesMapNameV4:        &ebpf.Map{},
+			kernelFlowsMapNameV4:        &ebpf.Map{},
+			kernelNatPortsMapNameV4:     &ebpf.Map{},
+			kernelTCProgramChainMapName: &ebpf.Map{},
+		},
+	}
+	prepared := []preparedKernelRule{{
+		rule: Rule{ID: 1, InIP: "198.51.100.10", OutIP: "203.0.113.10"},
+		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+		value: tcRuleValueV4{
+			Flags: kernelRuleFlagFullNAT,
+		},
+	}}
+
+	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeDispatchV4)
+	if got.forwardProg != forwardDispatch || got.replyProg != replyDispatch {
+		t.Fatal("kernelAttachmentProgramsForPreparedRules() did not select IPv4 dispatcher programs")
+	}
+	if got.mode != kernelTCAttachmentProgramModeDispatchV4 {
+		t.Fatalf("kernelAttachmentProgramsForPreparedRules() mode = %q, want %q", got.mode, kernelTCAttachmentProgramModeDispatchV4)
+	}
+}
+
+func TestKernelAttachmentProgramsForPreparedRulesKeepsTransparentIPv4OnLegacyPrograms(t *testing.T) {
+	forwardV4 := &ebpf.Program{}
+	replyV4 := &ebpf.Program{}
+	forwardDispatch := &ebpf.Program{}
+	replyDispatch := &ebpf.Program{}
+
+	coll := &ebpf.Collection{
+		Programs: map[string]*ebpf.Program{
+			kernelForwardProgramName:            forwardV4,
+			kernelReplyProgramName:              replyV4,
+			kernelForwardDispatchProgramName:    forwardDispatch,
+			kernelForwardTransparentProgramName: &ebpf.Program{},
+			kernelForwardFullNATProgramName:     &ebpf.Program{},
+			kernelForwardEgressNATProgramName:   &ebpf.Program{},
+			kernelReplyDispatchProgramName:      replyDispatch,
+			kernelReplyTransparentProgramName:   &ebpf.Program{},
+			kernelReplyFullNATProgramName:       &ebpf.Program{},
+		},
+		Maps: map[string]*ebpf.Map{
+			kernelRulesMapNameV4:        &ebpf.Map{},
+			kernelFlowsMapNameV4:        &ebpf.Map{},
+			kernelNatPortsMapNameV4:     &ebpf.Map{},
+			kernelTCProgramChainMapName: &ebpf.Map{},
+		},
+	}
+	prepared := []preparedKernelRule{{
+		rule: Rule{ID: 1, InIP: "198.51.100.10", OutIP: "203.0.113.10", Transparent: true},
+		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+	}}
+
+	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeDispatchV4)
+	if got.forwardProg != forwardV4 || got.replyProg != replyV4 {
+		t.Fatal("kernelAttachmentProgramsForPreparedRules() selected dispatcher programs for transparent-only IPv4 rules")
+	}
+	if got.mode != kernelTCAttachmentProgramModeLegacy {
+		t.Fatalf("kernelAttachmentProgramsForPreparedRules() mode = %q, want %q for transparent-only IPv4 rules", got.mode, kernelTCAttachmentProgramModeLegacy)
 	}
 }
 

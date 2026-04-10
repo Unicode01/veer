@@ -101,6 +101,21 @@ func TestBuildManagedNetworkDHCPv4ReplyFrameSetsUDPChecksum(t *testing.T) {
 	}
 }
 
+func TestManagedNetworkDHCPv4ReplyIfIndexPrefersIngressInterface(t *testing.T) {
+	state := managedNetworkDHCPv4State{
+		IfIndex:       11,
+		BridgeIfIndex: 22,
+	}
+	if got := managedNetworkDHCPv4ReplyIfIndex(state); got != 11 {
+		t.Fatalf("managedNetworkDHCPv4ReplyIfIndex() = %d, want 11", got)
+	}
+
+	state.IfIndex = 0
+	if got := managedNetworkDHCPv4ReplyIfIndex(state); got != 22 {
+		t.Fatalf("managedNetworkDHCPv4ReplyIfIndex() fallback = %d, want 22", got)
+	}
+}
+
 func TestManagedNetworkDHCPv4UDPChecksumReturnsStableValue(t *testing.T) {
 	udp := make([]byte, 8+4)
 	binary.BigEndian.PutUint16(udp[0:2], dhcpv4ServerPort)

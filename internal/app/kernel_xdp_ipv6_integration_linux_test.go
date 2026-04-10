@@ -67,6 +67,9 @@ func TestXDPKernelIPv6Integration(t *testing.T) {
 				Order:        []string{kernelEngineXDP},
 				Expected:     ruleEngineKernel,
 				ExpectedKern: kernelEngineXDP,
+				Experimental: map[string]bool{
+					experimentalFeatureXDPGeneric: true,
+				},
 			}
 			configPath := filepath.Join(workDir, "config.json")
 			writeDataplanePerfConfig(t, configPath, mode, webPort)

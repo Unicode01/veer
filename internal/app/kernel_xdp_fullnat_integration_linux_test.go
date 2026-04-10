@@ -406,6 +406,11 @@ func runXDPFullNATIntegrationProbe(t *testing.T, topology dataplanePerfTopology,
 	observedFile := filepath.Join(t.TempDir(), "observed-"+proto+".txt")
 	backendTarget := net.JoinHostPort(dataplanePerfBackendAddr, strconv.Itoa(backendPort))
 	clientTarget := net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(frontPort))
+	captures := startEgressNATPacketCaptures(t, egressNATIntegrationTopology{
+		BackendNS:    topology.BackendNS,
+		UplinkHostIF: topology.BackendHostIF,
+		BackendNSIF:  topology.BackendNSIF,
+	}, proto)
 
 	backendCmd, backendLogs := startEgressNATBackendHelperInNamespace(t, topology.BackendNS, proto, backendTarget, observedFile)
 	t.Cleanup(func() {
@@ -426,17 +431,19 @@ func runXDPFullNATIntegrationProbe(t *testing.T, topology dataplanePerfTopology,
 	)
 	output, err := clientCmd.CombinedOutput()
 	if err != nil {
+		captureLogs := stopAndCollectEgressNATPacketCaptures(captures)
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("%s XDP full-NAT client helper timed out\nclient output:\n%s\nbackend logs:\n%s", proto, string(output), backendLogs.String())
+			t.Fatalf("%s XDP full-NAT client helper timed out\nclient output:\n%s\nbackend logs:\n%s\npacket capture:\n%s", proto, string(output), backendLogs.String(), captureLogs)
 		}
-		t.Fatalf("%s XDP full-NAT client helper failed: %v\nclient output:\n%s\nbackend logs:\n%s", proto, err, string(output), backendLogs.String())
+		t.Fatalf("%s XDP full-NAT client helper failed: %v\nclient output:\n%s\nbackend logs:\n%s\npacket capture:\n%s", proto, err, string(output), backendLogs.String(), captureLogs)
 	}
 
 	waitForEgressNATHelperExit(t, backendCmd, proto, backendLogs.String())
 	data, err := os.ReadFile(observedFile)
 	if err != nil {
-		t.Fatalf("%s read observed peer file: %v\n%s", proto, err, backendLogs.String())
+		t.Fatalf("%s read observed peer file: %v\n%s\npacket capture:\n%s", proto, err, backendLogs.String(), stopAndCollectEgressNATPacketCaptures(captures))
 	}
+	_ = stopAndCollectEgressNATPacketCaptures(captures)
 	return strings.TrimSpace(string(data))
 }
 
@@ -572,6 +579,12 @@ func startXDPFullNATIntegrationHarness(t *testing.T, baseBinary string, name str
 
 	apiBase := fmt.Sprintf("http://127.0.0.1:%d", webPort)
 	waitForXDPFullNATIntegrationAPI(t, apiBase, cmd, logPath)
+	t.Cleanup(func() {
+		if t.Failed() {
+			logKernelRuntimeOnFailure(t, apiBase)
+			logForwardLogOnFailure(t, logPath)
+		}
+	})
 	return xdpFullNATIntegrationHarness{
 		Topology: topology,
 		APIBase:  apiBase,
@@ -586,6 +599,9 @@ func xdpFullNATIntegrationMode(name string) dataplanePerfMode {
 		Order:        []string{kernelEngineXDP},
 		Expected:     ruleEngineKernel,
 		ExpectedKern: kernelEngineXDP,
+		Experimental: map[string]bool{
+			experimentalFeatureXDPGeneric: true,
+		},
 	}
 }
 

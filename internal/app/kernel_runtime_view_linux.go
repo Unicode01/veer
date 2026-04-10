@@ -287,21 +287,23 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	coll := rt.coll
-	forwardProg, replyProg, forwardProgV6, replyProgV6 := kernelAttachmentProgramsForPreparedRules(coll, preparedRules)
+	mode := rt.attachmentMode
+	programs := kernelAttachmentProgramsForPreparedRules(coll, preparedRules, mode)
 	mapRefs := kernelRuntimeMapRefsFromCollection(coll)
 	rt.mu.Unlock()
 
 	view.Attachments = len(attachments)
 	view.AttachmentSummary = describeKernelAttachments(attachments)
+	view.AttachmentMode = tcAttachmentMode(attachments, mode)
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(preparedRules)
 	view.AttachmentsHealthy = len(preparedRules) == 0 || kernelAttachmentsHealthy(
 		forwardIfRules,
 		replyIfRules,
 		attachments,
-		forwardProg,
-		replyProg,
-		forwardProgV6,
-		replyProgV6,
+		programs.forwardProg,
+		programs.replyProg,
+		programs.forwardProgV6,
+		programs.replyProgV6,
 	)
 	rt.mu.Lock()
 	rt.observability.observeAttachmentsHealthy(view.AttachmentsHealthy, now)
@@ -443,6 +445,18 @@ func xdpAttachmentMode(attachments []xdpAttachment) string {
 		return "driver"
 	case hasGeneric:
 		return "generic"
+	default:
+		return ""
+	}
+}
+
+func tcAttachmentMode(attachments []kernelAttachment, mode kernelTCAttachmentProgramMode) string {
+	if len(attachments) == 0 {
+		return ""
+	}
+	switch mode {
+	case kernelTCAttachmentProgramModeLegacy, kernelTCAttachmentProgramModeDispatchV4:
+		return string(mode)
 	default:
 		return ""
 	}

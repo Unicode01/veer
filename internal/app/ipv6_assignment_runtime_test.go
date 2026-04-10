@@ -208,7 +208,13 @@ func TestBuildIPv6AssignmentRuntimePlanDelegatedPrefixUsesRouteOnly(t *testing.T
 }
 
 func TestManagedIPv6AssignmentRuntimeReconcileCleansUpRemovedState(t *testing.T) {
-	t.Parallel()
+	oldLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldLoad
+	})
 
 	ops := &fakeIPv6AssignmentNetOps{}
 	rt := newManagedIPv6AssignmentRuntime(ops)
@@ -462,7 +468,13 @@ func TestManagedIPv6AssignmentRuntimeReconcileRejectsAmbiguousCurrentParentPrefi
 }
 
 func TestManagedIPv6AssignmentRuntimeReconcileScopesTargetRuntimeErrors(t *testing.T) {
-	t.Parallel()
+	oldLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldLoad
+	})
 
 	ops := &fakeIPv6AssignmentNetOps{
 		ensureRAErrors: map[string]error{
@@ -524,7 +536,13 @@ func TestManagedIPv6AssignmentRuntimeReconcileScopesTargetRuntimeErrors(t *testi
 }
 
 func TestManagedIPv6AssignmentRuntimeReconcileScopesParentInterfaceErrors(t *testing.T) {
-	t.Parallel()
+	oldLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldLoad
+	})
 
 	ops := &fakeIPv6AssignmentNetOps{
 		acceptRAErrors: map[string]error{

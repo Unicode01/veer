@@ -911,11 +911,18 @@ func writeManagedNetworkDHCPv4Reply(state managedNetworkDHCPv4State, dstIP net.I
 	var addr [8]byte
 	copy(addr[:], dstMAC[:6])
 	return unix.Sendto(fd, frame, 0, &unix.SockaddrLinklayer{
-		Ifindex:  state.IfIndex,
+		Ifindex:  managedNetworkDHCPv4ReplyIfIndex(state),
 		Protocol: htonsUnix(unix.ETH_P_IP),
 		Halen:    6,
 		Addr:     addr,
 	})
+}
+
+func managedNetworkDHCPv4ReplyIfIndex(state managedNetworkDHCPv4State) int {
+	if state.IfIndex > 0 {
+		return state.IfIndex
+	}
+	return state.BridgeIfIndex
 }
 
 func buildManagedNetworkDHCPv4ReplyFrame(state managedNetworkDHCPv4State, dstIP net.IP, dstMAC net.HardwareAddr, payload []byte) ([]byte, error) {

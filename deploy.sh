@@ -177,6 +177,7 @@ NoNewPrivileges=false
 ProtectSystem=strict
 ReadWritePaths=${INSTALL_DIR}
 ReadWritePaths=${RUNTIME_STATE_DIR}
+ReadWritePaths=/etc/network
 ReadWritePaths=/tmp
 ReadWritePaths=/sys/fs/bpf
 ReadWritePaths=${BPF_STATE_DIR}

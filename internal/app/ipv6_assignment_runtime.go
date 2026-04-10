@@ -279,7 +279,7 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 	}
 
 	hostIfaceByName := map[string]HostNetworkInterface{}
-	if hostIfaces, err := loadCurrentHostNetworkInterfaces(); err == nil {
+	if hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces(); err == nil {
 		hostIfaceByName = buildHostNetworkInterfaceMap(hostIfaces)
 	}
 

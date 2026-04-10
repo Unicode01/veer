@@ -519,6 +519,104 @@ func TestHandleToggleManagedNetworkFlipsEnabledState(t *testing.T) {
 	}
 }
 
+func TestHandlePersistManagedNetworkBridgeConvertsNetworkToExistingMode(t *testing.T) {
+	db := openTestDB(t)
+
+	id, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:            "managed",
+		BridgeMode:      managedNetworkBridgeModeCreate,
+		Bridge:          "vmbr7",
+		BridgeMTU:       9000,
+		BridgeVLANAware: true,
+		Enabled:         true,
+	})
+	if err != nil {
+		t.Fatalf("seed managed network: %v", err)
+	}
+
+	oldPersist := persistManagedNetworkBridgeForTests
+	persistManagedNetworkBridgeForTests = func(item ManagedNetwork) (managedNetworkPersistBridgeResult, error) {
+		if item.ID != id || item.Bridge != "vmbr7" || item.BridgeMode != managedNetworkBridgeModeCreate {
+			t.Fatalf("persist hook item = %+v, want create-mode vmbr7 network", item)
+		}
+		return managedNetworkPersistBridgeResult{
+			Status:         "persisted",
+			Bridge:         "vmbr7",
+			InterfacesPath: managedNetworkHostInterfacesConfigPath,
+			BackupPath:     managedNetworkHostInterfacesConfigPath + ".forward.bak.test",
+		}, nil
+	}
+	defer func() {
+		persistManagedNetworkBridgeForTests = oldPersist
+	}()
+
+	req := newJSONRequest(t, http.MethodPost, "/api/managed-networks/persist-bridge?id="+strconv.FormatInt(id, 10), nil)
+	w := httptest.NewRecorder()
+
+	handlePersistManagedNetworkBridge(w, req, db, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp managedNetworkPersistBridgeResult
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if resp.Status != "persisted" || resp.Bridge != "vmbr7" {
+		t.Fatalf("response = %+v, want persisted vmbr7 result", resp)
+	}
+
+	item, err := dbGetManagedNetwork(db, id)
+	if err != nil {
+		t.Fatalf("dbGetManagedNetwork(%d) error = %v", id, err)
+	}
+	if item.BridgeMode != managedNetworkBridgeModeExisting {
+		t.Fatalf("BridgeMode = %q, want %q", item.BridgeMode, managedNetworkBridgeModeExisting)
+	}
+	if item.BridgeMTU != 0 || item.BridgeVLANAware {
+		t.Fatalf("bridge config = %+v, want existing-mode zero values", item)
+	}
+}
+
+func TestHandlePersistManagedNetworkBridgeRejectsExistingMode(t *testing.T) {
+	db := openTestDB(t)
+
+	id, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:       "managed",
+		BridgeMode: managedNetworkBridgeModeExisting,
+		Bridge:     "vmbr7",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("seed managed network: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/managed-networks/persist-bridge?id="+strconv.FormatInt(id, 10), nil)
+	w := httptest.NewRecorder()
+
+	handlePersistManagedNetworkBridge(w, req, db, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	resp := decodeValidationResponse(t, w)
+	assertValidationIssue(t, resp, "persist", "bridge_mode", "managed network bridge persistence requires create mode")
+}
+
+func TestHandlePersistManagedNetworkBridgeNotFoundIncludesIssues(t *testing.T) {
+	db := openTestDB(t)
+	req := newJSONRequest(t, http.MethodPost, "/api/managed-networks/persist-bridge?id=404", nil)
+	w := httptest.NewRecorder()
+
+	handlePersistManagedNetworkBridge(w, req, db, nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+
+	resp := decodeValidationResponse(t, w)
+	assertValidationIssue(t, resp, "persist", "id", "managed network not found")
+}
+
 func TestHandleReloadManagedNetworkRuntimeQueuesRedistribute(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/managed-networks/reload-runtime", nil)
 	w := httptest.NewRecorder()

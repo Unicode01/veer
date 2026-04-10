@@ -161,6 +161,10 @@ struct kernel_diag_value_v4 {
 	__u64 xdp_v4_fullnat_forward_enter;
 	__u64 xdp_v4_fullnat_reply_enter;
 	__u64 xdp_redirect_invoked;
+	__u64 xdp_v4_transparent_reply_flow_hit;
+	__u64 xdp_v4_transparent_forward_rule_hit;
+	__u64 xdp_v4_transparent_no_match_pass;
+	__u64 xdp_v4_transparent_reply_closing_handled;
 };
 
 struct redirect_target_v4 {
@@ -705,6 +709,38 @@ static __always_inline void xdp_diag_redirect_invoked(void)
 
 	if (diag)
 		diag->xdp_redirect_invoked += 1;
+}
+
+static __always_inline void xdp_diag_v4_transparent_reply_flow_hit(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_xdp_diag_v4();
+
+	if (diag)
+		diag->xdp_v4_transparent_reply_flow_hit += 1;
+}
+
+static __always_inline void xdp_diag_v4_transparent_forward_rule_hit(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_xdp_diag_v4();
+
+	if (diag)
+		diag->xdp_v4_transparent_forward_rule_hit += 1;
+}
+
+static __always_inline void xdp_diag_v4_transparent_no_match_pass(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_xdp_diag_v4();
+
+	if (diag)
+		diag->xdp_v4_transparent_no_match_pass += 1;
+}
+
+static __always_inline void xdp_diag_v4_transparent_reply_closing_handled(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_xdp_diag_v4();
+
+	if (diag)
+		diag->xdp_v4_transparent_reply_closing_handled += 1;
 }
 
 static __always_inline int load_packet_macs(struct xdp_md *xdp, __u8 dst_mac[ETH_ALEN], __u8 src_mac[ETH_ALEN])
@@ -1616,7 +1652,7 @@ static __always_inline int prepare_redirect_v4(struct xdp_md *xdp, const struct 
 
 	__builtin_memcpy(eth->h_dest, fib->dmac, sizeof(eth->h_dest));
 	__builtin_memcpy(eth->h_source, fib->smac, sizeof(eth->h_source));
-	return (int)fib->ifindex;
+	return (int)(fib->ifindex ? fib->ifindex : target->ifindex);
 }
 
 static __always_inline int prepare_redirect_v6(struct xdp_md *xdp, const struct packet_ctx_v6 *ctx, const struct redirect_target_v6 *target)
@@ -1659,7 +1695,7 @@ static __always_inline int prepare_redirect_v6(struct xdp_md *xdp, const struct 
 
 	__builtin_memcpy(eth->h_dest, fib->dmac, sizeof(eth->h_dest));
 	__builtin_memcpy(eth->h_source, fib->smac, sizeof(eth->h_source));
-	return (int)fib->ifindex;
+	return (int)(fib->ifindex ? fib->ifindex : target->ifindex);
 }
 
 static __always_inline int prepare_bridge_redirect_v4(struct xdp_md *xdp, const struct rule_value_v4 *rule)
@@ -1807,7 +1843,7 @@ static __always_inline int prepare_rule_fullnat_redirect_v6(struct xdp_md *xdp, 
 
 		__builtin_memcpy(eth->h_dest, fib->dmac, sizeof(eth->h_dest));
 		__builtin_memcpy(eth->h_source, fib->smac, sizeof(eth->h_source));
-		return (int)fib->ifindex;
+		return (int)(fib->ifindex ? fib->ifindex : rule->out_ifindex);
 	}
 }
 
@@ -2029,6 +2065,7 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 	if (rewrite_l4_snat(xdp, ctx, flow_value->front_addr, flow_value->front_port) < 0)
 		return XDP_ABORTED;
 	if (ctx->closing) {
+		xdp_diag_v4_transparent_reply_closing_handled();
 		if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
 			drop_rule_tcp_active(flow_value->rule_id);
 		bpf_map_delete_elem(&flows_v4, flow_key);
@@ -2846,13 +2883,16 @@ static __always_inline int forward_xdp_v4_impl(struct xdp_md *xdp)
 			bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V4_FULLNAT_REPLY);
 			return XDP_PASS;
 		}
+		xdp_diag_v4_transparent_reply_flow_hit();
 		bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V4_TRANSPARENT);
 		return XDP_PASS;
 	}
 
 	rule = lookup_rule_v4_for_ifindex(in_ifindex, &dispatch->ctx);
-	if (!rule)
+	if (!rule) {
+		xdp_diag_v4_transparent_no_match_pass();
 		return XDP_PASS;
+	}
 	dispatch->rule_value = *rule;
 	dispatch->have_rule = 1;
 	if (is_fullnat_rule(rule)) {
@@ -2861,6 +2901,7 @@ static __always_inline int forward_xdp_v4_impl(struct xdp_md *xdp)
 		bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V4_FULLNAT_FORWARD);
 		return XDP_PASS;
 	}
+	xdp_diag_v4_transparent_forward_rule_hit();
 	bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V4_TRANSPARENT);
 	return XDP_PASS;
 }

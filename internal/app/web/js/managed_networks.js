@@ -119,6 +119,10 @@
     return String(value || '').trim().toLowerCase() === 'existing' ? 'existing' : 'create';
   }
 
+  function canPersistManagedNetworkBridge(item) {
+    return normalizeManagedNetworkBridgeMode(item && item.bridge_mode) === 'create';
+  }
+
   function managedNetworkUsesExistingBridge() {
     return normalizeManagedNetworkBridgeMode(app.el.managedNetworkBridgeMode && app.el.managedNetworkBridgeMode.value) === 'existing';
   }
@@ -1654,6 +1658,7 @@
       const tr = document.createElement('tr');
       const pending = app.isRowPending('managed-network', item.id);
       const toggleText = pending ? app.t('common.processing') : app.t(item.enabled === false ? 'common.enable' : 'common.disable');
+      const actions = [];
       tr.className = pending ? 'row-pending' : '';
       tr.setAttribute('aria-busy', pending ? 'true' : 'false');
 
@@ -1670,26 +1675,33 @@
       tr.appendChild(app.createCell(createManagedNetworkAutoEgressNATNode(item), 'managed-network-cell-tight'));
       tr.appendChild(app.createCell(createManagedNetworkTextNode(item.remark), 'managed-network-cell-text'));
       tr.appendChild(app.createCell(enabledBadge(item.enabled !== false)));
-      tr.appendChild(app.createCell(app.createActionDropdown([
-        {
-          className: item.enabled === false ? 'btn-enable-managed-network' : 'btn-disable-managed-network',
-          text: toggleText,
+      if (canPersistManagedNetworkBridge(item)) {
+        actions.push({
+          className: 'btn-persist-managed-network-bridge',
+          text: app.t('managedNetwork.persist.action'),
           dataset: { id: item.id },
           disabled: pending
-        },
-        {
-          className: 'btn-edit-managed-network',
-          text: app.t('common.edit'),
-          dataset: { managedNetwork: app.encData(item) },
-          disabled: pending
-        },
-        {
-          className: 'btn-delete-managed-network',
-          text: app.t('common.delete'),
-          dataset: { id: item.id },
-          disabled: pending
-        }
-      ], pending), 'cell-actions'));
+        });
+      }
+      actions.push({
+        className: item.enabled === false ? 'btn-enable-managed-network' : 'btn-disable-managed-network',
+        text: toggleText,
+        dataset: { id: item.id },
+        disabled: pending
+      });
+      actions.push({
+        className: 'btn-edit-managed-network',
+        text: app.t('common.edit'),
+        dataset: { managedNetwork: app.encData(item) },
+        disabled: pending
+      });
+      actions.push({
+        className: 'btn-delete-managed-network',
+        text: app.t('common.delete'),
+        dataset: { id: item.id },
+        disabled: pending
+      });
+      tr.appendChild(app.createCell(app.createActionDropdown(actions, pending), 'cell-actions'));
 
       fragment.appendChild(tr);
     });
@@ -1776,6 +1788,53 @@
           message: app.translateValidationMessage(e.message)
         }));
       }
+    }
+  };
+
+  app.persistManagedNetworkBridge = async function persistManagedNetworkBridge(id) {
+    if (app.isRowPending('managed-network', id)) return;
+
+    const item = (app.state.managedNetworks && Array.isArray(app.state.managedNetworks.data))
+      ? app.state.managedNetworks.data.find((entry) => entry && entry.id === id)
+      : null;
+    const bridge = String(item && item.bridge || '').trim() || ('#' + String(id));
+    const confirmed = await app.confirmAction({
+      title: app.t('managedNetwork.persist.confirm.title'),
+      message: app.t('managedNetwork.persist.confirm.message', {
+        bridge: bridge,
+        path: '/etc/network/interfaces'
+      }),
+      confirmText: app.t('managedNetwork.persist.action'),
+      cancelText: app.t('common.cancel')
+    });
+    if (!confirmed) return;
+
+    app.setRowPending('managed-network', id, true);
+    app.renderManagedNetworksTable();
+    try {
+      const result = await app.apiCall('POST', '/api/managed-networks/persist-bridge?id=' + encodeURIComponent(String(id)));
+      if (parseInt(app.el.editManagedNetworkId.value || '0', 10) === id) app.exitManagedNetworkEditMode();
+      app.notify('success', app.t('managedNetwork.persist.success', {
+        bridge: String(result && result.bridge || bridge).trim() || bridge
+      }));
+      await Promise.all([
+        typeof app.loadHostNetwork === 'function' ? app.loadHostNetwork() : Promise.resolve(),
+        typeof app.loadInterfaces === 'function' ? app.loadInterfaces() : Promise.resolve(),
+        typeof app.loadManagedNetworks === 'function' ? app.loadManagedNetworks() : Promise.resolve(),
+        typeof app.loadManagedNetworkReservations === 'function' ? app.loadManagedNetworkReservations() : Promise.resolve(),
+        typeof app.loadIPv6Assignments === 'function' ? app.loadIPv6Assignments() : Promise.resolve()
+      ]);
+    } catch (e) {
+      if (e.message !== 'unauthorized') {
+        const message = app.getValidationIssueMessage(e.payload, ['persist']) || app.translateValidationMessage(e.message);
+        app.notify('error', app.t('errors.actionFailed', {
+          action: app.t('managedNetwork.persist.action'),
+          message: message
+        }));
+      }
+    } finally {
+      app.setRowPending('managed-network', id, false);
+      app.renderManagedNetworksTable();
     }
   };
 

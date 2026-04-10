@@ -1410,6 +1410,11 @@ func xdpPreferGenericAttach(link netlink.Link) bool {
 	if link == nil || link.Attrs() == nil {
 		return false
 	}
+	// veth native XDP devmap redirects are still inconsistent across kernels;
+	// prefer skb mode when available so direct NAT test topologies remain viable.
+	if strings.EqualFold(strings.TrimSpace(link.Type()), "veth") {
+		return true
+	}
 	return link.Attrs().MasterIndex > 0
 }
 

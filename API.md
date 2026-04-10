@@ -5,8 +5,17 @@
 - 自定义运维平台
 - CMDB / 资源编排系统
 - 虚拟机开通脚本
+- 工单系统、自动化脚本、内部控制台
 - n8n / Dify / Flowise / 自建 Agent
-- 内部控制台、工单系统、自动化脚本
+
+`forward` 当前不只是规则转发 API，还包含：
+
+- 规则、站点、端口范围
+- Egress NAT
+- 托管网络
+- 托管网络固定 DHCPv4 保留
+- IPv6 Assignment
+- Worker / Stats / Kernel Runtime 观测
 
 ## 基本信息
 
@@ -28,11 +37,11 @@
 注意：
 
 - `web_token` 不能为空
-- 程序会拒绝使用示例占位值 `change-me-to-a-secure-token` 启动
+- 程序会拒绝使用示例占位值 `change-me-to-a-secure-token`
 
-## 认证
+## 认证与错误约定
 
-所有 `/api/*` 端点都需要带 Bearer Token。
+所有 `/api/*` 端点都需要 Bearer Token。
 
 请求头示例：
 
@@ -41,68 +50,186 @@ Authorization: Bearer your-token-here
 Content-Type: application/json
 ```
 
-`curl` 示例：
-
-```bash
-curl -H "Authorization: Bearer your-token-here" \
-  http://127.0.0.1:8080/api/rules
-```
-
-## 响应与错误约定
-
-成功时一般返回 JSON。
-
-常见情况：
+常见状态码：
 
 - `200 OK`: 成功
 - `400 Bad Request`: 参数错误或请求体非法
 - `401 Unauthorized`: Token 错误或缺失
-- `404 Not Found`: 部分场景下资源不存在
+- `404 Not Found`: 资源不存在
 - `405 Method Not Allowed`: 请求方法不支持
 - `500 Internal Server Error`: 服务端内部错误
 
-需要注意：
-
-- 大多数业务错误返回 JSON，例如 `{"error":"invalid id"}`
-- `401` 和部分 `405` 仍可能通过 `http.Error(...)` 返回纯文本，不保证是 JSON
-
-对接方建议：
-
-- 优先按 HTTP 状态码判断成功 / 失败
-- 如果响应体是 JSON，再读取 `error` 字段
-- 不要假设所有失败返回都能直接按 JSON 解析
-
-## 对象模型
-
-### Rule
+大多数业务错误会返回 JSON，例如：
 
 ```json
 {
-  "id": 1,
-  "in_interface": "eth0",
-  "in_ip": "203.0.113.10",
-  "in_port": 2222,
-  "out_interface": "vmbr0",
-  "out_ip": "198.51.100.10",
-  "out_source_ip": "",
-  "out_port": 22,
-  "protocol": "tcp",
-  "remark": "vm-a ssh",
-  "tag": "vm",
-  "enabled": true,
-  "transparent": false,
-  "engine_preference": "auto"
+  "error": "invalid id"
 }
 ```
 
-字段补充：
+字段校验类错误通常返回：
 
-- `out_source_ip`：非透传 full-NAT 时可选，强制指定回源 / SNAT 使用的宿主机本地源 IP，地址族必须与 `out_ip` 一致
-- `engine_preference`：规则级引擎偏好，可选 `auto`、`userspace`、`kernel`
+```json
+{
+  "error": "create[1] out_source_ip: out_source_ip must be a valid IPv4 address",
+  "issues": [
+    {
+      "scope": "create",
+      "index": 1,
+      "field": "out_source_ip",
+      "message": "out_source_ip must be a valid IPv4 address"
+    }
+  ]
+}
+```
+
+`issues` 中常见字段：
+
+- `scope`: `create` / `update` / `toggle` / `delete` / `persist`
+- `index`: 批量请求里的条目序号
+- `id`: 相关对象 ID
+- `field`: 出错字段
+- `message`: 原始错误信息
+
+需要注意：
+
+- `401` 和部分 `405` 仍可能是纯文本响应
+- `Kernel Runtime` 的调试字段会随版本演进增加，外部解析时应按“已知字段尽量读取，未知字段忽略”处理
+
+## 接口总览
+
+### 基础发现
+
+- `GET /api/interfaces`
+- `GET /api/host-network`
+- `GET /api/tags`
+
+### 规则
+
+- `GET /api/rules`
+- `POST /api/rules`
+- `PUT /api/rules`
+- `DELETE /api/rules?id=<rule_id>`
+- `POST /api/rules/toggle?id=<rule_id>`
+- `POST /api/rules/validate`
+- `POST /api/rules/batch`
+
+### 站点
+
+- `GET /api/sites`
+- `POST /api/sites`
+- `PUT /api/sites`
+- `DELETE /api/sites?id=<site_id>`
+- `POST /api/sites/toggle?id=<site_id>`
+
+### 端口范围
+
+- `GET /api/ranges`
+- `POST /api/ranges`
+- `PUT /api/ranges`
+- `DELETE /api/ranges?id=<range_id>`
+- `POST /api/ranges/toggle?id=<range_id>`
+
+### Egress NAT
+
+- `GET /api/egress-nats`
+- `POST /api/egress-nats`
+- `PUT /api/egress-nats`
+- `DELETE /api/egress-nats?id=<egress_nat_id>`
+- `POST /api/egress-nats/toggle?id=<egress_nat_id>`
+
+### 托管网络
+
+- `GET /api/managed-networks`
+- `POST /api/managed-networks`
+- `PUT /api/managed-networks`
+- `DELETE /api/managed-networks?id=<managed_network_id>`
+- `POST /api/managed-networks/toggle?id=<managed_network_id>`
+- `POST /api/managed-networks/persist-bridge?id=<managed_network_id>`
+- `POST /api/managed-networks/reload-runtime`
+- `POST /api/managed-networks/repair`
+- `GET /api/managed-networks/runtime-status`
+
+### 托管网络固定保留
+
+- `GET /api/managed-network-reservations`
+- `POST /api/managed-network-reservations`
+- `PUT /api/managed-network-reservations`
+- `DELETE /api/managed-network-reservations?id=<reservation_id>`
+- `GET /api/managed-network-reservation-candidates`
+
+### IPv6 Assignment
+
+- `GET /api/ipv6-assignments`
+- `POST /api/ipv6-assignments`
+- `PUT /api/ipv6-assignments`
+- `DELETE /api/ipv6-assignments?id=<assignment_id>`
+
+### Worker 与运行时
+
+- `GET /api/workers`
+- `GET /api/kernel/runtime`
+
+### 统计
+
+- `GET /api/rules/stats`
+- `GET /api/ranges/stats`
+- `GET /api/egress-nats/stats`
+- `GET /api/sites/stats`
+- `GET /api/stats/current-conns`
+
+## 常用对象
+
+### InterfaceInfo
+
+`GET /api/interfaces` 返回简化接口清单：
+
+```json
+[
+  {
+    "name": "eth0",
+    "addrs": ["203.0.113.10", "2001:db8::10"],
+    "kind": "device"
+  },
+  {
+    "name": "tap100i0",
+    "addrs": [],
+    "parent": "vmbr0",
+    "kind": "tap"
+  }
+]
+```
+
+### HostNetworkResponse
+
+`GET /api/host-network` 返回更完整的宿主机接口视图：
+
+```json
+{
+  "interfaces": [
+    {
+      "name": "vmbr0",
+      "kind": "bridge",
+      "addresses": [
+        {
+          "family": "ipv4",
+          "ip": "192.168.4.1",
+          "cidr": "192.168.4.1/24",
+          "prefix_len": 24
+        },
+        {
+          "family": "ipv6",
+          "ip": "2402:db8:1::1",
+          "cidr": "2402:db8:1::/64",
+          "prefix_len": 64
+        }
+      ]
+    }
+  ]
+}
+```
 
 ### RuleStatus
-
-`GET /api/rules` 和 `GET /api/workers` 中的规则项会带运行时字段：
 
 ```json
 {
@@ -127,36 +254,14 @@ curl -H "Authorization: Bearer your-token-here" \
 }
 ```
 
-字段补充：
+运行时补充字段：
 
-- `effective_engine`：当前实际生效的引擎，通常为 `userspace` 或 `kernel`
-- `effective_kernel_engine`：内核态具体引擎，当前可能为 `xdp`、`tc` 或 `mixed`
-- `kernel_eligible`：规则是否满足内核态接入条件
-- `kernel_reason`：不满足内核态条件时的原因
-- `fallback_reason`：满足条件但最终回退用户态时的原因
-- `effective_kernel_engine`、`kernel_reason`、`fallback_reason` 为空时会被省略
-
-### Site
-
-```json
-{
-  "id": 1,
-  "domain": "app.example.com",
-  "listen_ip": "203.0.113.10",
-  "listen_interface": "eth0",
-  "backend_ip": "198.51.100.10",
-  "backend_source_ip": "",
-  "backend_http_port": 80,
-  "backend_https_port": 443,
-  "tag": "vm",
-  "enabled": true,
-  "transparent": false
-}
-```
-
-字段补充：
-
-- `backend_source_ip`：非透传时可选，指定共享站点代理访问后端时使用的本地源 IP，地址族必须与 `backend_ip` 一致
+- `status`: `running` / `stopped` / `error`
+- `effective_engine`: `userspace` / `kernel`
+- `effective_kernel_engine`: `tc` / `xdp` / `mixed`
+- `kernel_eligible`: 是否满足内核态接入条件
+- `kernel_reason`: 不满足内核态条件时的原因
+- `fallback_reason`: 满足条件但最终回退时的原因
 
 ### SiteStatus
 
@@ -177,7 +282,7 @@ curl -H "Authorization: Bearer your-token-here" \
 }
 ```
 
-### PortRange
+### PortRangeStatus
 
 ```json
 {
@@ -194,29 +299,6 @@ curl -H "Authorization: Bearer your-token-here" \
   "remark": "vm-b game",
   "tag": "game",
   "enabled": true,
-  "transparent": false
-}
-```
-
-### PortRangeStatus
-
-`GET /api/ranges` 和 `GET /api/workers` 中的范围项会带运行时字段：
-
-```json
-{
-  "id": 1,
-  "in_interface": "eth0",
-  "in_ip": "203.0.113.10",
-  "start_port": 30000,
-  "end_port": 30100,
-  "out_interface": "vmbr0",
-  "out_ip": "198.51.100.20",
-  "out_source_ip": "",
-  "out_start_port": 30000,
-  "protocol": "tcp",
-  "remark": "vm-b game",
-  "tag": "game",
-  "enabled": true,
   "transparent": false,
   "status": "running",
   "effective_engine": "kernel",
@@ -225,41 +307,240 @@ curl -H "Authorization: Bearer your-token-here" \
 }
 ```
 
-状态值说明：
+### EgressNATStatus
 
-- 规则 / 站点 / 范围列表接口中的 `status` 常见值为 `running`、`stopped`、`error`
-- `GET /api/workers` 内嵌的规则 / 范围项还可能出现 `disabled`
-- worker 自身 `status` 还可能是 `draining`
+```json
+{
+  "id": 1,
+  "parent_interface": "vmbr0",
+  "child_interface": "tap100i0",
+  "out_interface": "eth0",
+  "out_source_ip": "203.0.113.10",
+  "protocol": "tcp+udp+icmp",
+  "nat_type": "symmetric",
+  "enabled": true,
+  "status": "running",
+  "effective_engine": "kernel",
+  "effective_kernel_engine": "tc",
+  "kernel_eligible": true
+}
+```
 
-## 接口列表
+### ManagedNetworkStatus
 
-### 1. 获取接口列表
+```json
+{
+  "id": 2,
+  "name": "vmbr",
+  "bridge_mode": "existing",
+  "bridge": "vmbr0",
+  "bridge_mtu": 0,
+  "bridge_vlan_aware": false,
+  "uplink_interface": "eno1",
+  "ipv4_enabled": true,
+  "ipv4_cidr": "192.168.4.1/24",
+  "ipv4_gateway": "",
+  "ipv4_pool_start": "192.168.4.2",
+  "ipv4_pool_end": "192.168.4.254",
+  "ipv4_dns_servers": "8.8.8.8",
+  "ipv6_enabled": true,
+  "ipv6_parent_interface": "eno1",
+  "ipv6_parent_prefix": "2402:db8:1::/64",
+  "ipv6_assignment_mode": "single_128",
+  "auto_egress_nat": true,
+  "remark": "",
+  "enabled": true,
+  "child_interface_count": 3,
+  "generated_ipv6_assignment_count": 3,
+  "generated_egress_nat": true,
+  "reservation_count": 2,
+  "preview_warnings": [],
+  "repair_recommended": false,
+  "ipv4_runtime_status": "running",
+  "ipv4_runtime_detail": "listening for dhcpv4",
+  "ipv6_runtime_status": "running"
+}
+```
+
+补充字段：
+
+- `bridge_mode`: `create` / `existing`
+- `generated_ipv6_assignment_count`: 自动生成的 IPv6 Assignment 数量
+- `generated_egress_nat`: 是否自动生成 Egress NAT
+- `preview_warnings`: 基于当前接口拓扑计算出的提示
+- `repair_recommended` / `repair_issues`: 是否建议执行托管网络修复
+- `ipv4_*` / `ipv6_*`: 托管网络运行时状态与计数器
+
+### ManagedNetworkReservationStatus
+
+```json
+{
+  "id": 1,
+  "managed_network_id": 2,
+  "mac_address": "bc:24:11:84:f5:2c",
+  "ipv4_address": "192.168.4.6",
+  "remark": "SelfWindows / net0",
+  "managed_network_name": "vmbr",
+  "managed_network_bridge": "vmbr0"
+}
+```
+
+### ManagedNetworkReservationCandidate
+
+```json
+{
+  "managed_network_id": 1,
+  "managed_network_name": "vmbr",
+  "managed_network_bridge": "vmbr0",
+  "pve_vmid": "104",
+  "pve_guest_name": "SelfWindows",
+  "pve_guest_nic": "net0",
+  "child_interface": "tap104i0",
+  "mac_address": "bc:24:11:84:f5:2c",
+  "suggested_ipv4": "192.168.4.6",
+  "ipv4_candidates": [
+    "192.168.4.6",
+    "192.168.4.7",
+    "192.168.4.8"
+  ],
+  "suggested_remark": "SelfWindows / net0",
+  "status": "available"
+}
+```
+
+如果候选已经和现有固定保留匹配，还会附带：
+
+- `existing_reservation_id`
+- `existing_reservation_ipv4`
+- `existing_reservation_remark`
+
+### IPv6Assignment
+
+```json
+{
+  "id": 1,
+  "parent_interface": "eno1",
+  "target_interface": "tap100i0",
+  "parent_prefix": "2402:db8:100::/48",
+  "assigned_prefix": "2402:db8:100:1::/64",
+  "address": "2402:db8:100:1::",
+  "prefix_len": 64,
+  "remark": "vm-a ipv6",
+  "enabled": true,
+  "ra_advertisement_count": 8,
+  "dhcpv6_reply_count": 0,
+  "runtime_status": "running"
+}
+```
+
+语义说明：
+
+- `/128` 表示“目标侧使用这个单地址”
+- `/64` 常用于目标侧子网和 SLAAC
+- 其他前缀长度更适合“下游委派前缀”语义
+- 这不是把该地址直接绑定到宿主机 `target_interface`
+
+### WorkerListResponse
+
+```json
+{
+  "page": 1,
+  "page_size": 20,
+  "total": 5,
+  "binary_hash": "abc123",
+  "workers": [
+    {
+      "kind": "kernel",
+      "index": 0,
+      "status": "running",
+      "binary_hash": "abc123",
+      "rule_count": 2,
+      "rules": []
+    },
+    {
+      "kind": "egress_nat",
+      "index": 0,
+      "status": "running",
+      "binary_hash": "abc123",
+      "egress_nat_count": 1,
+      "egress_nats": []
+    }
+  ]
+}
+```
+
+`kind` 可能值：
+
+- `kernel`
+- `rule`
+- `range`
+- `egress_nat`
+- `shared`
+
+`status` 常见值：
+
+- `running`
+- `stopped`
+- `draining`
+- `error`
+
+### KernelRuntimeResponse
+
+`GET /api/kernel/runtime` 是运行时调试视图，常见关键字段：
+
+```json
+{
+  "available": true,
+  "available_reason": "selected tc kernel engine",
+  "default_engine": "auto",
+  "configured_order": ["tc", "xdp"],
+  "traffic_stats": true,
+  "active_rule_count": 12,
+  "active_range_count": 3,
+  "engines": [
+    {
+      "name": "tc",
+      "available": true,
+      "loaded": true,
+      "active_entries": 128,
+      "attachments": 6,
+      "attachment_summary": "eno1(3)/forward, eno1(3)/reply"
+    }
+  ]
+}
+```
+
+它还会包含大量调试字段，例如：
+
+- map 容量与占用
+- attach mode 与 attachment health
+- retry / self-heal / cooldown / backoff
+- traffic stats / diagnostics
+- 最近一次 reconcile / maintain / prune 信息
+
+## 详细接口
+
+## 1. 基础发现
+
+### 1.1 获取简化接口列表
 
 `GET /api/interfaces`
 
-返回当前主机上存在可见 IP 地址的接口列表，包含 IPv4 / IPv6。多网卡、VLAN 子接口、同卡多地址都会反映在这里。
+用途：
 
-响应示例：
+- 给规则、范围、站点、Egress NAT 表单做接口下拉
+- 返回每个接口的 IP 字符串列表
 
-```json
-[
-  {
-    "name": "eth0",
-    "addrs": ["203.0.113.10", "2001:db8::10"]
-  },
-  {
-    "name": "vmbr0",
-    "addrs": ["198.51.100.1", "2001:db8:100::1"]
-  }
-]
-```
+### 1.2 获取宿主机网络拓扑
 
-地址族补充：
+`GET /api/host-network`
 
-- 用户态规则、共享站点代理和范围映射支持 IPv4 / IPv6
-- `transparent = true` 以及当前内核态接入条件仍按纯 IPv4 限制
+用途：
 
-### 2. 获取标签列表
+- 给托管网络和 IPv6 Assignment 表单提供更完整的宿主机网络视图
+- 返回按地址族拆开的 `addresses`
+
+### 1.3 获取标签列表
 
 `GET /api/tags`
 
@@ -269,57 +550,40 @@ curl -H "Authorization: Bearer your-token-here" \
 ["vm", "prod", "game"]
 ```
 
-### 3. 规则接口
+## 2. 规则接口
 
-#### 3.1 获取规则列表
+### 2.1 获取规则列表
 
 `GET /api/rules`
 
-支持按查询参数过滤，常用参数：
+支持过滤参数：
 
-- `id` / `ids`：按规则 ID 过滤，支持逗号分隔
-- `tag` / `tags`：按标签过滤，支持逗号分隔
-- `protocol` / `protocols`：按协议过滤，支持 `tcp`、`udp`、`tcp+udp`
-- `enabled`：按启用状态过滤，支持 `true` / `false`
-- `transparent`：按透传开关过滤，支持 `true` / `false`
-- `status` / `statuses`：按运行状态过滤，支持 `running`、`stopped`、`error`
-- `in_interface` / `out_interface`：按入/出接口精确过滤
-- `in_ip` / `out_ip` / `out_source_ip`：按入/出 IP 精确过滤
-- `in_port` / `out_port`：按入/出端口精确过滤
-- `q`：按 `id`、备注、标签、接口、IP、端口、协议、状态做模糊匹配
+- `id` / `ids`
+- `tag` / `tags`
+- `protocol` / `protocols`
+- `enabled`
+- `transparent`
+- `status` / `statuses`
+- `in_interface`
+- `out_interface`
+- `in_ip`
+- `out_ip`
+- `out_source_ip`
+- `in_port`
+- `out_port`
+- `q`
 
-响应示例：
+说明：
 
-```json
-[
-  {
-    "id": 1,
-    "in_interface": "eth0",
-    "in_ip": "203.0.113.10",
-    "in_port": 2222,
-    "out_interface": "vmbr0",
-    "out_ip": "198.51.100.10",
-    "out_source_ip": "",
-    "out_port": 22,
-    "protocol": "tcp",
-    "remark": "vm-a ssh",
-    "tag": "vm",
-    "enabled": true,
-    "transparent": false,
-    "engine_preference": "auto",
-    "status": "running",
-    "effective_engine": "kernel",
-    "effective_kernel_engine": "tc",
-    "kernel_eligible": true
-  }
-]
-```
+- `protocol` 支持 `tcp`、`udp`、`tcp+udp`
+- `status` 支持 `running`、`stopped`、`error`
+- `q` 会匹配 `id`、备注、标签、接口、IP、端口、协议、状态、引擎字段
 
-#### 3.2 新增规则
+### 2.2 新增规则
 
 `POST /api/rules`
 
-请求体：
+请求体示例：
 
 ```json
 {
@@ -342,25 +606,25 @@ curl -H "Authorization: Bearer your-token-here" \
 
 - 必填：`in_ip`、`in_port`、`out_ip`、`out_port`
 - `protocol` 允许：`tcp`、`udp`、`tcp+udp`
-- `engine_preference` 允许：`auto`、`userspace`、`kernel`
 - 省略 `protocol` 时默认 `tcp`
+- `engine_preference` 允许：`auto`、`userspace`、`kernel`
 - 省略 `engine_preference` 时默认 `auto`
 - 创建后默认 `enabled = true`
 - `transparent = true` 时必须省略 `out_source_ip`
-- IPv6 规则会保留在用户态；`transparent` 和内核态接入条件仍限纯 IPv4
+- IPv6 规则可创建，但当前透明路径和内核接入条件仍主要按 IPv4 约束理解
 
-#### 3.3 更新规则
+### 2.3 更新规则
 
 `PUT /api/rules`
 
-请求体与新增规则类似，但必须包含 `id`。
+请求体与新增类似，但必须包含 `id`。
 
 说明：
 
-- 更新时会保留原有 `enabled` 状态；如需修改启停，请使用 `POST /api/rules/toggle` 或 `POST /api/rules/batch` 的 `set_enabled`
-- 更新成功后会触发一次规则重分布 / 引擎重规划
+- 更新时保留原有 `enabled`
+- 更新成功后会触发规则重分布 / 引擎重规划
 
-#### 3.4 启用 / 禁用规则
+### 2.4 启用或禁用规则
 
 `POST /api/rules/toggle?id=<rule_id>`
 
@@ -373,11 +637,11 @@ curl -H "Authorization: Bearer your-token-here" \
 }
 ```
 
-#### 3.5 删除规则
+### 2.5 删除规则
 
 `DELETE /api/rules?id=<rule_id>`
 
-响应示例：
+成功响应：
 
 ```json
 {
@@ -385,155 +649,48 @@ curl -H "Authorization: Bearer your-token-here" \
 }
 ```
 
-#### 3.6 校验规则批量操作
+### 2.6 校验规则批量请求
 
 `POST /api/rules/validate`
 
-请求体与批量接口一致，用于在真正写入前做字段校验、接口存在性校验和监听冲突检查。
+用途：
 
-请求体示例：
+- 在真正写入前做字段校验、接口存在性校验和冲突检查
 
-```json
-{
-  "create": [
-    {
-      "in_interface": "eth0",
-      "in_ip": "203.0.113.10",
-      "in_port": 2222,
-      "out_interface": "vmbr0",
-      "out_ip": "198.51.100.10",
-      "out_source_ip": "",
-      "out_port": 22,
-      "protocol": "tcp",
-      "remark": "vm-a ssh",
-      "tag": "vm",
-      "transparent": false,
-      "engine_preference": "auto"
-    }
-  ],
-  "update": [],
-  "delete_ids": [],
-  "set_enabled": []
-}
-```
+请求体字段：
 
-响应示例：
+- `create`
+- `update`
+- `delete_ids`
+- `set_enabled`
 
-```json
-{
-  "valid": true,
-  "create": [
-    {
-      "id": 0,
-      "in_interface": "eth0",
-      "in_ip": "203.0.113.10",
-      "in_port": 2222,
-      "out_interface": "vmbr0",
-      "out_ip": "198.51.100.10",
-      "out_source_ip": "",
-      "out_port": 22,
-      "protocol": "tcp",
-      "remark": "vm-a ssh",
-      "tag": "vm",
-      "enabled": true,
-      "transparent": false,
-      "engine_preference": "auto"
-    }
-  ]
-}
-```
+成功时会返回 `valid = true` 和归一化后的内容。失败时返回 `valid = false`、`error`、`issues`。
 
-校验失败时会返回：
-
-- `valid = false`
-- `error`：首条错误摘要，方便脚本直接展示
-- `issues`：逐项错误明细，包含 `scope`、`index`、`id`、`field`、`message`
-
-#### 3.7 批量写入规则
+### 2.7 批量写入规则
 
 `POST /api/rules/batch`
 
 请求体字段：
 
-- `create`：批量创建规则
-- `update`：批量更新规则
-- `delete_ids`：批量删除规则 ID
-- `set_enabled`：批量设置启用状态，元素格式为 `{ "id": 1, "enabled": true }`
+- `create`
+- `update`
+- `delete_ids`
+- `set_enabled`
 
-批量接口会在一个事务内执行，并只触发一次规则重分布。
+说明：
 
-请求体示例：
+- 整体在一个事务内执行
+- 只触发一次规则重分布
 
-```json
-{
-  "create": [
-    {
-      "in_interface": "eth0",
-      "in_ip": "203.0.113.10",
-      "in_port": 2222,
-      "out_interface": "vmbr0",
-      "out_ip": "198.51.100.10",
-      "out_source_ip": "",
-      "out_port": 22,
-      "protocol": "tcp",
-      "remark": "vm-a ssh",
-      "tag": "vm",
-      "transparent": false,
-      "engine_preference": "auto"
-    }
-  ],
-  "update": [
-    {
-      "id": 2,
-      "in_interface": "eth0",
-      "in_ip": "203.0.113.10",
-      "in_port": 8080,
-      "out_interface": "vmbr0",
-      "out_ip": "198.51.100.20",
-      "out_source_ip": "",
-      "out_port": 80,
-      "protocol": "tcp",
-      "remark": "vm-b web",
-      "tag": "vm",
-      "transparent": false,
-      "engine_preference": "kernel"
-    }
-  ],
-  "delete_ids": [3],
-  "set_enabled": [
-    {
-      "id": 4,
-      "enabled": false
-    }
-  ]
-}
-```
+## 3. 站点接口
 
-成功响应示例：
-
-```json
-{
-  "created": [],
-  "updated": [],
-  "deleted_ids": [3],
-  "set_enabled": [
-    {
-      "id": 4,
-      "enabled": false
-    }
-  ]
-}
-```
-
-### 4. 站点接口
-
-#### 4.1 获取站点列表
+### 3.1 获取站点列表
 
 `GET /api/sites`
 
-返回 `[]SiteStatus`，每项包含站点配置和 `status` 字段。
+返回 `[]SiteStatus`。
 
-#### 4.2 新增站点
+### 3.2 新增站点
 
 `POST /api/sites`
 
@@ -556,52 +713,35 @@ curl -H "Authorization: Bearer your-token-here" \
 规则：
 
 - 必填：`domain`、`backend_ip`
-- `backend_http_port` 和 `backend_https_port` 至少有一个非 `0`
+- `backend_http_port` 和 `backend_https_port` 至少一个非 `0`
 - `listen_ip` 为空时默认 `0.0.0.0`
 - `transparent = true` 时必须省略 `backend_source_ip`
 - 创建后默认 `enabled = true`
-- IPv6 站点监听 / 后端走普通共享代理路径；`transparent` 仍限纯 IPv4
+- IPv6 站点监听和回源可走普通共享代理路径；透明模式仍限 IPv4
 
-#### 4.3 更新站点
+### 3.3 更新站点
 
 `PUT /api/sites`
 
-必须带 `id`，其余字段与新增站点一致。
+必须带 `id`。
 
-#### 4.4 启用 / 禁用站点
+### 3.4 启用或禁用站点
 
 `POST /api/sites/toggle?id=<site_id>`
 
-成功响应：
-
-```json
-{
-  "id": 1,
-  "enabled": true
-}
-```
-
-失败时如果找不到站点，会返回：
-
-```json
-{
-  "error": "site not found"
-}
-```
-
-#### 4.5 删除站点
+### 3.5 删除站点
 
 `DELETE /api/sites?id=<site_id>`
 
-### 5. 范围映射接口
+## 4. 端口范围接口
 
-#### 5.1 获取范围映射列表
+### 4.1 获取范围列表
 
 `GET /api/ranges`
 
-返回 `[]PortRangeStatus`，每项包含范围配置、`status` 和内核引擎相关字段。
+返回 `[]PortRangeStatus`。
 
-#### 5.2 新增范围映射
+### 4.2 新增范围
 
 `POST /api/ranges`
 
@@ -627,35 +767,353 @@ curl -H "Authorization: Bearer your-token-here" \
 规则：
 
 - 必填：`in_ip`、`start_port`、`end_port`、`out_ip`
-- `start_port` 必须小于等于 `end_port`
+- `start_port <= end_port`
 - `protocol` 允许：`tcp`、`udp`、`tcp+udp`
-- `protocol` 默认为 `tcp`
+- 省略 `protocol` 时默认 `tcp`
 - `out_start_port = 0` 时自动等于 `start_port`
 - `transparent = true` 时必须省略 `out_source_ip`
 - 创建后默认 `enabled = true`
-- IPv6 范围映射会保留在用户态；`transparent` 仍限纯 IPv4
 
-#### 5.3 更新范围映射
+### 4.3 更新范围
 
 `PUT /api/ranges`
 
-必须带 `id`，其余校验规则与新增相同。
+必须带 `id`。
 
-#### 5.4 启用 / 禁用范围映射
+### 4.4 启用或禁用范围
 
 `POST /api/ranges/toggle?id=<range_id>`
 
-#### 5.5 删除范围映射
+### 4.5 删除范围
 
 `DELETE /api/ranges?id=<range_id>`
 
-### 6. Worker 接口
+## 5. Egress NAT 接口
 
-#### 6.1 获取 Worker 列表
+### 5.1 获取 Egress NAT 列表
+
+`GET /api/egress-nats`
+
+返回 `[]EgressNATStatus`。
+
+### 5.2 新增 Egress NAT
+
+`POST /api/egress-nats`
+
+请求体示例：
+
+```json
+{
+  "parent_interface": "vmbr0",
+  "child_interface": "tap100i0",
+  "out_interface": "eno1",
+  "out_source_ip": "203.0.113.10",
+  "protocol": "tcp+udp+icmp",
+  "nat_type": "symmetric"
+}
+```
+
+规则：
+
+- 必填：`parent_interface`、`out_interface`
+- `child_interface` 可选
+- `child_interface` 为空表示接管该 `parent_interface` 下所有可接管子接口
+- `child_interface = "*"` 会被规范化成空字符串
+- `protocol` 必须包含一个或多个：`tcp`、`udp`、`icmp`
+- 省略 `protocol` 时默认 `tcp+udp`
+- `nat_type` 允许：`symmetric`、`full_cone`
+- 省略 `nat_type` 时默认 `symmetric`
+- `out_source_ip` 可选，但必须是 `out_interface` 上的本地 IPv4
+- `parent_interface` / `child_interface` / `out_interface` 之间不能形成非法重叠
+- 同协议集合下，enabled 的 Egress NAT scope 不能互相冲突
+- 创建后默认 `enabled = true`
+
+### 5.3 更新 Egress NAT
+
+`PUT /api/egress-nats`
+
+必须带 `id`，更新时保留原有 `enabled`。
+
+### 5.4 启用或禁用 Egress NAT
+
+`POST /api/egress-nats/toggle?id=<egress_nat_id>`
+
+### 5.5 删除 Egress NAT
+
+`DELETE /api/egress-nats?id=<egress_nat_id>`
+
+## 6. 托管网络接口
+
+### 6.1 获取托管网络列表
+
+`GET /api/managed-networks`
+
+返回 `[]ManagedNetworkStatus`。
+
+### 6.2 新增托管网络
+
+`POST /api/managed-networks`
+
+请求体示例：
+
+```json
+{
+  "name": "vmbr",
+  "bridge_mode": "existing",
+  "bridge": "vmbr0",
+  "bridge_mtu": 0,
+  "bridge_vlan_aware": false,
+  "uplink_interface": "eno1",
+  "ipv4_enabled": true,
+  "ipv4_cidr": "192.168.4.1/24",
+  "ipv4_gateway": "",
+  "ipv4_pool_start": "192.168.4.2",
+  "ipv4_pool_end": "192.168.4.254",
+  "ipv4_dns_servers": "8.8.8.8",
+  "ipv6_enabled": true,
+  "ipv6_parent_interface": "eno1",
+  "ipv6_parent_prefix": "2402:db8:1::/64",
+  "ipv6_assignment_mode": "single_128",
+  "auto_egress_nat": true,
+  "remark": ""
+}
+```
+
+规则：
+
+- 必填：`name`、`bridge`
+- `bridge_mode` 允许：`create`、`existing`
+- 省略 `bridge_mode` 时默认 `create`
+- `ipv6_assignment_mode` 允许：`single_128`、`prefix_64`
+- `bridge_mtu` 仅在 `create` 模式生效，范围为 `0-65535`
+- `existing` 模式下 `bridge_mtu` 和 `bridge_vlan_aware` 会被归零
+- `existing` 模式要求目标 bridge 已存在于宿主机
+- `create` 模式要求 bridge 名称不与非 bridge 接口冲突
+- 创建后默认 `enabled = true`
+
+### 6.3 更新托管网络
+
+`PUT /api/managed-networks`
+
+必须带 `id`，更新时保留原有 `enabled`。
+
+### 6.4 启用或禁用托管网络
+
+`POST /api/managed-networks/toggle?id=<managed_network_id>`
+
+### 6.5 删除托管网络
+
+`DELETE /api/managed-networks?id=<managed_network_id>`
+
+### 6.6 持久化 create 模式 bridge
+
+`POST /api/managed-networks/persist-bridge?id=<managed_network_id>`
+
+用途：
+
+- 把 `create` 模式下的 bridge 写入宿主机 `/etc/network/interfaces`
+- 写入成功后，把该托管网络切换成 `existing` 模式
+
+仅支持：
+
+- Linux
+- `bridge_mode = create`
+
+成功响应示例：
+
+```json
+{
+  "status": "persisted",
+  "bridge": "vmbr7",
+  "interfaces_path": "/etc/network/interfaces",
+  "backup_path": "/etc/network/interfaces.forward.bak"
+}
+```
+
+### 6.7 触发托管网络运行时重载
+
+`POST /api/managed-networks/reload-runtime`
+
+响应示例：
+
+```json
+{
+  "status": "queued"
+}
+```
+
+`status` 常见值：
+
+- `queued`
+- `success`
+- `fallback`
+
+### 6.8 修复托管网络宿主机状态
+
+`POST /api/managed-networks/repair`
+
+响应示例：
+
+```json
+{
+  "status": "queued",
+  "bridges": ["vmbr0"],
+  "guest_links": ["tap100i0"]
+}
+```
+
+如果只做了部分修复，还可能返回：
+
+```json
+{
+  "status": "partial",
+  "bridges": ["vmbr0"],
+  "error": "..."
+}
+```
+
+### 6.9 获取托管网络运行时重载状态
+
+`GET /api/managed-networks/runtime-status`
+
+响应字段包括：
+
+- `pending`
+- `due_at`
+- `last_requested_at`
+- `last_request_source`
+- `last_request_summary`
+- `last_started_at`
+- `last_completed_at`
+- `last_result`
+- `last_applied_summary`
+- `last_error`
+
+## 7. 托管网络固定 DHCPv4 保留
+
+### 7.1 获取固定保留列表
+
+`GET /api/managed-network-reservations`
+
+返回 `[]ManagedNetworkReservationStatus`。
+
+### 7.2 获取保留候选
+
+`GET /api/managed-network-reservation-candidates`
+
+用途：
+
+- 从托管 bridge 当前学习到的 MAC / guest 元信息里给出一键固定保留候选
+
+常见字段：
+
+- `suggested_ipv4`
+- `ipv4_candidates`
+- `suggested_remark`
+- `status`
+- `existing_reservation_*`
+
+### 7.3 新增固定保留
+
+`POST /api/managed-network-reservations`
+
+请求体示例：
+
+```json
+{
+  "managed_network_id": 1,
+  "mac_address": "bc:24:11:84:f5:2c",
+  "ipv4_address": "192.168.4.6",
+  "remark": "SelfWindows / net0"
+}
+```
+
+规则：
+
+- `managed_network_id` 必须存在，且对应托管网络 `ipv4_enabled = true`
+- `mac_address` 必须是有效以太网 MAC，写入时会归一化为小写
+- `ipv4_address` 必须落在该托管网络的 `ipv4_cidr` 内
+- `ipv4_address` 不能等于托管网络网关地址
+- `ipv4_address` 必须是可用 host 地址
+- 同一托管网络内，`mac_address` 和 `ipv4_address` 都不能与现有保留冲突
+
+### 7.4 更新固定保留
+
+`PUT /api/managed-network-reservations`
+
+必须带 `id`。
+
+### 7.5 删除固定保留
+
+`DELETE /api/managed-network-reservations?id=<reservation_id>`
+
+成功响应：
+
+```json
+{
+  "id": 12
+}
+```
+
+## 8. IPv6 Assignment 接口
+
+### 8.1 获取 IPv6 Assignment 列表
+
+`GET /api/ipv6-assignments`
+
+返回 `[]IPv6Assignment`，并附带运行时计数：
+
+- `ra_advertisement_count`
+- `dhcpv6_reply_count`
+- `runtime_status`
+- `runtime_detail`
+
+### 8.2 新增 IPv6 Assignment
+
+`POST /api/ipv6-assignments`
+
+请求体示例：
+
+```json
+{
+  "parent_interface": "eno1",
+  "target_interface": "tap100i0",
+  "parent_prefix": "2402:db8:100::/48",
+  "assigned_prefix": "2402:db8:100:1::/64",
+  "remark": "vm-a ipv6"
+}
+```
+
+规则：
+
+- 必填：`parent_interface`、`target_interface`、`parent_prefix`
+- `assigned_prefix` 是当前主字段
+- 兼容旧字段：也可用 `address` + `prefix_len` 提交，服务端会回填 `assigned_prefix`
+- `parent_prefix` 必须是有效 IPv6 CIDR
+- `assigned_prefix` 必须是有效 IPv6 CIDR 或可推导出的 IPv6 地址前缀
+- `parent_prefix` 必须存在于所选 `parent_interface`
+- `assigned_prefix` 必须包含在 `parent_prefix` 中
+- `assigned_prefix` 不能和已有 IPv6 Assignment 重叠
+- 如果 `address` 已经在宿主机存在，也会被拒绝
+- 创建后默认 `enabled = true`
+
+### 8.3 更新 IPv6 Assignment
+
+`PUT /api/ipv6-assignments`
+
+必须带 `id`。
+
+### 8.4 删除 IPv6 Assignment
+
+`DELETE /api/ipv6-assignments?id=<assignment_id>`
+
+## 9. Worker 与运行时接口
+
+### 9.1 获取 Worker 列表
 
 `GET /api/workers`
 
-支持查询参数：
+查询参数：
 
 - `page`
 - `page_size`
@@ -664,167 +1122,118 @@ curl -H "Authorization: Bearer your-token-here" \
 
 - `page_size` 最大 `1000`
 - 不传 `page_size` 时返回全部 worker
-- 该接口会把用户态规则 worker、范围 worker、共享站点 worker，以及内核态 worker 统一合并后返回
+- 该接口会把规则 worker、范围 worker、共享站点 worker、kernel worker、egress_nat worker 合并返回
 
-响应示例：
+### 9.2 获取内核运行时
 
-```json
-{
-  "page": 1,
-  "page_size": 20,
-  "total": 4,
-  "binary_hash": "abc123...",
-  "workers": [
-    {
-      "kind": "kernel",
-      "index": 0,
-      "status": "running",
-      "binary_hash": "abc123...",
-      "rule_count": 2,
-      "rules": []
-    },
-    {
-      "kind": "rule",
-      "index": 0,
-      "status": "running",
-      "binary_hash": "abc123...",
-      "rule_count": 2,
-      "rules": []
-    },
-    {
-      "kind": "shared",
-      "index": 0,
-      "status": "running",
-      "binary_hash": "abc123...",
-      "site_count": 1
-    }
-  ]
-}
-```
+`GET /api/kernel/runtime`
 
-`kind` 可能值：
+用途：
 
-- `kernel`
-- `rule`
-- `range`
-- `shared`
+- 查看当前内核 dataplane 是否可用
+- 查看 `tc` / `xdp` 当前 attach、entries、map 占用、retry、自愈和诊断信息
 
-### 7. 统计接口
+对接建议：
 
-#### 7.1 规则统计
+- 适合做排障和可视化
+- 不建议把所有字段当成稳定契约硬编码
+
+## 10. 统计接口
+
+### 10.1 规则统计
 
 `GET /api/rules/stats`
 
-支持查询参数：
-
-- `page`：页码，默认 `1`
-- `page_size`：每页数量，默认 `20`，最大 `500`
-- `sort_key`：可选 `rule_id`、`remark`、`current_conns`、`total_conns`、`rejected_conns`、`speed_in`、`speed_out`、`bytes_in`、`bytes_out`
-- `sort_asc`：是否升序，默认 `true`
-
-响应示例：
-
-```json
-{
-  "page": 1,
-  "page_size": 20,
-  "total": 1,
-  "sort_key": "bytes_out",
-  "sort_asc": false,
-  "items": [
-    {
-      "rule_id": 1,
-      "remark": "vm-a ssh",
-      "active_conns": 2,
-      "total_conns": 120,
-      "rejected_conns": 0,
-      "bytes_in": 1048576,
-      "bytes_out": 2097152,
-      "speed_in": 1024,
-      "speed_out": 2048,
-      "nat_table_size": 0
-    }
-  ]
-}
-```
-
-注意：
-
-- 这个接口支持按 `current_conns` 排序，但返回项本身不包含 `current_conns` 字段
-- 如果你要拿实时当前连接数，请调用 `GET /api/stats/current-conns`
-
-#### 7.2 范围映射统计
-
-`GET /api/ranges/stats`
-
-支持查询参数：
+查询参数：
 
 - `page`
 - `page_size`
+- `sort_key`
 - `sort_asc`
-- `sort_key`：可选 `range_id`、`remark`、`current_conns`、`total_conns`、`rejected_conns`、`speed_in`、`speed_out`、`bytes_in`、`bytes_out`
 
-响应示例：
+`sort_key` 允许：
 
-```json
-{
-  "page": 1,
-  "page_size": 20,
-  "total": 1,
-  "sort_key": "range_id",
-  "sort_asc": true,
-  "items": [
-    {
-      "range_id": 1,
-      "remark": "vm-b game",
-      "active_conns": 3,
-      "total_conns": 300,
-      "rejected_conns": 0,
-      "bytes_in": 1048576,
-      "bytes_out": 3145728,
-      "speed_in": 2048,
-      "speed_out": 4096,
-      "nat_table_size": 1
-    }
-  ]
-}
-```
+- `rule_id`
+- `remark`
+- `current_conns`
+- `total_conns`
+- `rejected_conns`
+- `speed_in`
+- `speed_out`
+- `bytes_in`
+- `bytes_out`
 
-同样地：
+### 10.2 范围统计
 
-- 支持按 `current_conns` 排序
-- 返回项本身不直接包含 `current_conns`
+`GET /api/ranges/stats`
 
-#### 7.3 站点统计
+查询参数与 `GET /api/rules/stats` 相同：
+
+- `page`
+- `page_size`
+- `sort_key`
+- `sort_asc`
+
+`sort_key` 允许：
+
+- `range_id`
+- `remark`
+- `current_conns`
+- `total_conns`
+- `rejected_conns`
+- `speed_in`
+- `speed_out`
+- `bytes_in`
+- `bytes_out`
+
+### 10.3 Egress NAT 统计
+
+`GET /api/egress-nats/stats`
+
+查询参数与 `GET /api/rules/stats` 相同：
+
+- `page`
+- `page_size`
+- `sort_key`
+- `sort_asc`
+
+`sort_key` 允许：
+
+- `egress_nat_id`
+- `parent_interface`
+- `child_interface`
+- `out_interface`
+- `out_source_ip`
+- `protocol`
+- `nat_type`
+- `current_conns`
+- `total_conns`
+- `speed_in`
+- `speed_out`
+- `bytes_in`
+- `bytes_out`
+
+响应项会补充 Egress NAT 元信息，例如：
+
+- `parent_interface`
+- `child_interface`
+- `out_interface`
+- `out_source_ip`
+- `protocol`
+- `nat_type`
+
+### 10.4 站点统计
 
 `GET /api/sites/stats`
 
-返回值仍是数组，不分页：
+说明：
 
-```json
-[
-  {
-    "site_id": 1,
-    "domain": "app.example.com",
-    "active_conns": 3,
-    "total_conns": 300,
-    "bytes_in": 1048576,
-    "bytes_out": 3145728,
-    "speed_in": 2048,
-    "speed_out": 4096
-  }
-]
-```
+- 返回数组
+- 不分页
 
-#### 7.4 当前连接数
+### 10.5 当前连接数
 
 `GET /api/stats/current-conns`
-
-用于按需获取规则 / 范围 / 站点的实时当前连接数，避免轮询统计列表时每次都遍历连接表。
-
-返回说明：
-
-- 某个对象没有出现在对应数组里时，通常可视为当前连接数为 `0`
 
 响应示例：
 
@@ -847,39 +1256,28 @@ curl -H "Authorization: Bearer your-token-here" \
       "site_id": 1,
       "current_conns": 1
     }
+  ],
+  "egress_nats": [
+    {
+      "egress_nat_id": 1,
+      "current_conns": 4
+    }
   ]
 }
 ```
 
-## 常见集成流程
+用途：
 
-### 场景 1：创建虚拟机后自动开通 SSH 转发
+- 按需拿实时连接数
+- 避免每轮都重新拉整张统计表
 
-1. 云管平台 / 虚拟化平台创建 VM
-2. 获取 VM 内网 IP，例如 `198.51.100.10`
-3. 调用 `POST /api/rules`
-4. 记录返回的 `id`
-5. 后续如需停用，调用 `POST /api/rules/toggle?id=<id>`
+## 对接建议
 
-### 场景 2：为虚拟机自动开通域名
-
-1. 完成 DNS 解析
-2. 调用 `POST /api/sites`
-3. 把 `domain -> backend_ip` 关系写入内部系统
-4. 轮询 `GET /api/workers` 或 `GET /api/sites` 检查状态
-
-### 场景 3：面板侧做状态展示
-
-建议最少轮询以下接口：
-
-- `GET /api/rules`
-- `GET /api/sites`
-- `GET /api/ranges`
-- `GET /api/workers`
-- `GET /api/rules/stats`
-- `GET /api/sites/stats`
-- `GET /api/ranges/stats`
-- `GET /api/stats/current-conns`
+- 上层系统应保存本地资源 ID 与 `forward` 对象 `id` 的映射
+- 写接口成功后，不要立刻假设 runtime 已完全切换完成，建议再查列表或 `workers`
+- 如果依赖真实客户端源地址，启用 `transparent` 前先确认回程路由
+- 非透传 full-NAT 且出口接口有多个同族地址时，建议显式传 `out_source_ip` 或 `backend_source_ip`
+- 如果要消费 `kernel/runtime`，请按松耦合方式解析 JSON
 
 ## curl 示例
 
@@ -895,52 +1293,54 @@ curl -X POST "http://127.0.0.1:8080/api/rules" \
     "in_port": 2222,
     "out_interface": "vmbr0",
     "out_ip": "198.51.100.10",
-    "out_source_ip": "",
     "out_port": 22,
     "protocol": "tcp",
-    "remark": "vm-a ssh",
-    "tag": "vm",
-    "transparent": false,
-    "engine_preference": "auto"
+    "remark": "vm-a ssh"
   }'
 ```
 
-### 关闭一条规则
+### 新增一条 Egress NAT
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/api/rules/toggle?id=1" \
-  -H "Authorization: Bearer your-token-here"
+curl -X POST "http://127.0.0.1:8080/api/egress-nats" \
+  -H "Authorization: Bearer your-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "parent_interface": "vmbr0",
+    "child_interface": "tap100i0",
+    "out_interface": "eno1",
+    "out_source_ip": "203.0.113.10",
+    "protocol": "tcp+udp+icmp",
+    "nat_type": "symmetric"
+  }'
 ```
 
-### 查询 workers
+### 新增一个托管网络
 
 ```bash
-curl "http://127.0.0.1:8080/api/workers?page=1&page_size=20" \
-  -H "Authorization: Bearer your-token-here"
+curl -X POST "http://127.0.0.1:8080/api/managed-networks" \
+  -H "Authorization: Bearer your-token-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "vmbr",
+    "bridge_mode": "existing",
+    "bridge": "vmbr0",
+    "uplink_interface": "eno1",
+    "ipv4_enabled": true,
+    "ipv4_cidr": "192.168.4.1/24",
+    "ipv4_pool_start": "192.168.4.2",
+    "ipv4_pool_end": "192.168.4.254",
+    "ipv6_enabled": true,
+    "ipv6_parent_interface": "eno1",
+    "ipv6_parent_prefix": "2402:db8:1::/64",
+    "ipv6_assignment_mode": "single_128",
+    "auto_egress_nat": true
+  }'
 ```
 
-### 查询当前连接数
+### 查询内核运行时
 
 ```bash
-curl "http://127.0.0.1:8080/api/stats/current-conns" \
+curl "http://127.0.0.1:8080/api/kernel/runtime" \
   -H "Authorization: Bearer your-token-here"
 ```
-
-## 对接建议
-
-- 你的上层系统最好保存本地资源 ID 和 `forward` 返回对象 `id` 的映射
-- 写接口成功后，不要立刻假设 worker 已完全切换完成，建议随后查询状态接口确认
-- 如果你依赖真实客户端源地址，启用 `transparent` 前要先保证回程路由正确
-- 如果你只是做普通端口映射，优先不要启用 `transparent`
-- 非透传 full-NAT 且宿主机出口接口存在多个与目标同地址族的本地地址时，建议显式传 `out_source_ip` / `backend_source_ip`
-
-## 与前端行为的差异
-
-有几个实现细节需要明确：
-
-- `GET /api/workers` 是服务端分页
-- `GET /api/rules/stats` 和 `GET /api/ranges/stats` 现在也是服务端分页
-- `GET /api/sites/stats`、`GET /api/rules`、`GET /api/sites`、`GET /api/ranges` 仍然返回全量列表
-- 前端表格的本地搜索 / 本地分页行为，不代表所有后端接口都支持同样的分页或筛选语义
-
-如果你后续要做大规模自动化对接，建议优先基于对象 `id` 做增量同步，而不是完全复用前端的分页逻辑。

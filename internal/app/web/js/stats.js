@@ -778,6 +778,8 @@
       } else if (attachmentMode === 'mixed') {
         parts.push(app.t('runtimeReason.xdpMixedMode'));
       }
+    } else if (String(engine.name || '').trim().toLowerCase() === 'tc' && attachmentMode) {
+      parts.push('attach=' + attachmentMode);
     }
     [
       engine.pressure_reason,

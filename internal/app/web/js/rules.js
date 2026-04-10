@@ -423,6 +423,7 @@
       'site not found': app.t('validation.siteNotFound'),
       'range not found': app.t('validation.rangeNotFound'),
       'managed network not found': app.t('validation.managedNetworkNotFound'),
+      'managed network bridge persistence requires create mode': app.t('validation.managedNetworkPersistRequiresCreate'),
       'managed network reservation not found': app.t('validation.managedNetworkReservationNotFound'),
       'managed network ipv4 is disabled': app.t('validation.managedNetworkReservationIPv4Disabled'),
       'managed network ipv4 configuration is invalid': app.t('validation.managedNetworkReservationIPv4Invalid'),

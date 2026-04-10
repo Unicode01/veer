@@ -562,6 +562,68 @@ func handleToggleManagedNetwork(w http.ResponseWriter, r *http.Request, db *sql.
 	writeJSON(w, http.StatusOK, map[string]interface{}{"id": id, "enabled": item.Enabled})
 }
 
+func handlePersistManagedNetworkBridge(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil {
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("persist", 0, "id", "invalid id"))
+		return
+	}
+
+	item, err := dbGetManagedNetwork(db, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeValidationIssueResponse(w, http.StatusNotFound, singleValidationIssue("persist", id, "id", "managed network not found"))
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if item.BridgeMode != managedNetworkBridgeModeCreate {
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("persist", id, "bridge_mode", "managed network bridge persistence requires create mode"))
+		return
+	}
+
+	result, err := persistManagedNetworkBridgeWithHook(*item)
+	if err != nil {
+		var issue managedNetworkPersistBridgeIssue
+		if errors.As(err, &issue) {
+			writeValidationIssueResponse(w, http.StatusBadRequest, []ruleValidationIssue{{
+				Scope:   "persist",
+				ID:      id,
+				Field:   issue.Field,
+				Message: issue.Message,
+			}})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	item.BridgeMode = managedNetworkBridgeModeExisting
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	if err := dbUpdateManagedNetwork(tx, item); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	maybeRedistributeManagedNetworkWorkers(pm)
+	writeJSON(w, http.StatusOK, result)
+}
+
 func handleReloadManagedNetworkRuntime(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -23,7 +23,8 @@ package app
 //   FORWARD_PERF_WARMUP_CONNECTIONS
 //   FORWARD_PERF_WARMUP_BYTES_PER_CONN
 //   FORWARD_PERF_BACKEND_WORKERS
-//   FORWARD_PERF_DISABLE_OFFLOADS
+//   FORWARD_PERF_DISABLE_OFFLOADS  (default: keep veth offloads enabled)
+//   FORWARD_PERF_TXQLEN            (default: 10000)
 //
 // The test builds a temporary forward binary, creates two network namespaces plus
 // two veth pairs, then benchmarks userspace, tc, and xdp sequentially with the
@@ -75,6 +76,7 @@ const (
 	dataplanePerfIdleEnv        = "FORWARD_PERF_CONN_IDLE_MS"
 	dataplanePerfBackendWorkEnv = "FORWARD_PERF_BACKEND_WORKERS"
 	dataplanePerfOffloadsEnv    = "FORWARD_PERF_DISABLE_OFFLOADS"
+	dataplanePerfTXQLenEnv      = "FORWARD_PERF_TXQLEN"
 	dataplanePerfTCDiagEnv      = "FORWARD_PERF_TC_DIAG"
 	dataplanePerfTCDiagVerbEnv  = "FORWARD_PERF_TC_DIAG_VERBOSE"
 	dataplanePerfHelperEnv      = "FORWARD_PERF_HELPER"
@@ -94,6 +96,8 @@ const (
 	dataplanePerfTCPEchoMode     = "echo"
 	dataplanePerfTCPUploadMode   = "upload"
 	dataplanePerfTCPDownloadMode = "download"
+	dataplanePerfTCPSocketBuf    = 4 << 20
+	dataplanePerfDefaultTXQLen   = 10000
 )
 
 type dataplanePerfMode struct {
@@ -133,6 +137,7 @@ type dataplanePerfResult struct {
 	ConnPerSec            float64 `json:"conn_per_sec"`
 	ForwardCPUSeconds     float64 `json:"forward_cpu_seconds"`
 	PayloadMiBPerCPU      float64 `json:"payload_mib_per_cpu_second"`
+	HostBusyCores         float64 `json:"host_busy_cores,omitempty"`
 	EffectiveEngine       string  `json:"effective_engine"`
 	KernelEngine          string  `json:"effective_kernel_engine,omitempty"`
 	TCDiagnostics         bool    `json:"tc_diagnostics,omitempty"`
@@ -147,6 +152,17 @@ type dataplanePerfClientResult struct {
 	PayloadBytes   int64         `json:"payload_bytes"`
 	Elapsed        time.Duration `json:"elapsed"`
 	ElapsedSeconds float64       `json:"elapsed_seconds"`
+}
+
+type dataplanePerfCPUStat struct {
+	User    int64
+	Nice    int64
+	System  int64
+	Idle    int64
+	Iowait  int64
+	IRQ     int64
+	SoftIRQ int64
+	Steal   int64
 }
 
 type dataplanePerfRuleStatus struct {
@@ -231,7 +247,7 @@ func TestDataplanePerfMatrix(t *testing.T) {
 	defer stopDataplanePerfHelper(t, backendCmd)
 
 	connections := envInt(dataplanePerfConnEnv, 256)
-	concurrency := envInt(dataplanePerfConcurrencyEnv, 32)
+	concurrency := envInt(dataplanePerfConcurrencyEnv, 16)
 	bytesPerConn := envInt64(dataplanePerfBytesEnv, 1<<20)
 	ioChunkBytes := envInt64(dataplanePerfIOChunkEnv, 16<<10)
 	warmupConnections := envInt(dataplanePerfWarmupConnEnv, 8)
@@ -240,9 +256,19 @@ func TestDataplanePerfMatrix(t *testing.T) {
 
 	modes := []dataplanePerfMode{
 		{Name: "iptables", Expected: "iptables"},
+		{Name: "nftables", Expected: "nftables"},
 		{Name: "userspace", Default: ruleEngineUserspace, Expected: ruleEngineUserspace},
 		{Name: "tc", Default: ruleEngineKernel, Order: []string{kernelEngineTC}, Expected: ruleEngineKernel, ExpectedKern: kernelEngineTC},
-		{Name: "xdp", Default: ruleEngineKernel, Order: []string{kernelEngineXDP}, Expected: ruleEngineKernel, ExpectedKern: kernelEngineXDP},
+		{
+			Name:         "xdp",
+			Default:      ruleEngineKernel,
+			Order:        []string{kernelEngineXDP},
+			Expected:     ruleEngineKernel,
+			ExpectedKern: kernelEngineXDP,
+			Experimental: map[string]bool{
+				experimentalFeatureXDPGeneric: true,
+			},
+		},
 	}
 	modes = selectDataplanePerfModes(t, modes)
 
@@ -255,7 +281,7 @@ func TestDataplanePerfMatrix(t *testing.T) {
 				t.Run(mode.Name, func(t *testing.T) {
 					result := runDataplanePerfMode(t, baseBinary, topology, mode, scenario)
 					results = append(results, result)
-					t.Logf("%s payload=%.2f MiB/s wire=%.2f MiB/s payload_pps=%.0f wire_pps=%.0f conn=%.2f/s cpu=%.2fs payload/cpu=%.2f MiB/s",
+					t.Logf("%s payload=%.2f MiB/s wire=%.2f MiB/s payload_pps=%.0f wire_pps=%.0f conn=%.2f/s cpu=%.2fs payload/cpu=%.2f MiB/s host=%.2f cores",
 						mode.Name,
 						result.PayloadMiBPerSec,
 						result.WireMiBPerSec,
@@ -264,6 +290,7 @@ func TestDataplanePerfMatrix(t *testing.T) {
 						result.ConnPerSec,
 						result.ForwardCPUSeconds,
 						result.PayloadMiBPerCPU,
+						result.HostBusyCores,
 					)
 					if result.TCDiagnostics || result.DiagFIBNonSuccess != 0 || result.DiagRedirectNeighUsed != 0 || result.DiagRedirectDrop != 0 {
 						t.Logf("%s diag tc=%t verbose=%t fib=%d neigh=%d drop=%d",
@@ -303,6 +330,9 @@ func runDataplanePerfMode(t *testing.T, baseBinary string, topology dataplanePer
 	if mode.Name == "iptables" {
 		return runDataplanePerfIptablesMode(t, topology, scenario, steadySeconds)
 	}
+	if mode.Name == "nftables" {
+		return runDataplanePerfNFTablesMode(t, topology, scenario, steadySeconds)
+	}
 
 	modeDir := t.TempDir()
 	forwardBinary := filepath.Join(modeDir, "forward-perf")
@@ -341,23 +371,29 @@ func runDataplanePerfMode(t *testing.T, baseBinary string, topology dataplanePer
 	rule := waitForDataplanePerfRule(t, apiBase, mode)
 
 	if _, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, scenario.WarmupConnections, minInt(scenario.Concurrency, maxInt(1, scenario.WarmupConnections)), scenario.WarmupBytesPerConn, scenario.IOChunkBytes, 0); err != nil {
+		logDataplanePerfKernelRuntime(t, apiBase, mode.Name+" kernel runtime before warmup failure")
+		logDataplanePerfInterfaceStats(t, topology, mode.Name+" interface stats before warmup failure")
 		if data, readErr := os.ReadFile(forwardLogs); readErr == nil {
 			t.Logf("%s forward logs before warmup failure:\n%s", mode.Name, string(data))
 		}
 		t.Fatalf("warmup client benchmark failed: %v", err)
 	}
-	time.Sleep(400 * time.Millisecond)
+	waitForDataplanePerfModeSettle(t, apiBase, mode)
 
 	hz := procClockTicks(t)
+	hostCPUStart := readDataplanePerfCPUStat(t)
 	startCPU := sampleProcessTreeJiffies(t, cmd.Process.Pid)
 	clientResult, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, steadySeconds)
 	if err != nil {
+		logDataplanePerfKernelRuntime(t, apiBase, mode.Name+" kernel runtime before client failure")
+		logDataplanePerfInterfaceStats(t, topology, mode.Name+" interface stats before client failure")
 		if data, readErr := os.ReadFile(forwardLogs); readErr == nil {
 			t.Logf("%s forward logs before client failure:\n%s", mode.Name, string(data))
 		}
 		t.Fatalf("client benchmark failed: %v", err)
 	}
 	endCPU := sampleProcessTreeJiffies(t, cmd.Process.Pid)
+	hostCPUEnd := readDataplanePerfCPUStat(t)
 
 	cpuSeconds := float64(endCPU-startCPU) / float64(hz)
 	if cpuSeconds < 0 {
@@ -365,6 +401,7 @@ func runDataplanePerfMode(t *testing.T, baseBinary string, topology dataplanePer
 	}
 
 	result := dataplanePerfBuildResult(mode.Name, scenario, clientResult, cpuSeconds, rule.EffectiveEngine, rule.EffectiveKernelEngine)
+	result.HostBusyCores = dataplanePerfBusyCores(hostCPUStart, hostCPUEnd, hz, clientResult.Elapsed)
 	runtimeResp := fetchDataplanePerfKernelRuntime(t, apiBase)
 	if engineView, ok := dataplanePerfFindKernelEngine(runtimeResp.Engines, mode.ExpectedKern); ok {
 		result.TCDiagnostics = runtimeResp.TCDiagnostics
@@ -395,12 +432,42 @@ func runDataplanePerfIptablesMode(t *testing.T, topology dataplanePerfTopology, 
 	}
 	time.Sleep(400 * time.Millisecond)
 
+	hz := procClockTicks(t)
+	hostCPUStart := readDataplanePerfCPUStat(t)
 	clientResult, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, steadySeconds)
 	if err != nil {
 		t.Fatalf("iptables client benchmark failed: %v", err)
 	}
+	hostCPUEnd := readDataplanePerfCPUStat(t)
 
-	return dataplanePerfBuildResult("iptables", scenario, clientResult, 0, "iptables", backend)
+	result := dataplanePerfBuildResult("iptables", scenario, clientResult, 0, "iptables", backend)
+	result.HostBusyCores = dataplanePerfBusyCores(hostCPUStart, hostCPUEnd, hz, clientResult.Elapsed)
+	return result
+}
+
+func runDataplanePerfNFTablesMode(t *testing.T, topology dataplanePerfTopology, scenario dataplanePerfScenario, steadySeconds int) dataplanePerfResult {
+	t.Helper()
+	backend := setupDataplanePerfNFTablesDNAT(t, topology)
+	defer cleanupDataplanePerfNFTablesDNAT(topology)
+
+	seedDataplanePerfNeighbors(t, topology)
+
+	if _, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, scenario.WarmupConnections, minInt(scenario.Concurrency, maxInt(1, scenario.WarmupConnections)), scenario.WarmupBytesPerConn, scenario.IOChunkBytes, 0); err != nil {
+		t.Fatalf("nftables warmup client benchmark failed: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	hz := procClockTicks(t)
+	hostCPUStart := readDataplanePerfCPUStat(t)
+	clientResult, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, steadySeconds)
+	if err != nil {
+		t.Fatalf("nftables client benchmark failed: %v", err)
+	}
+	hostCPUEnd := readDataplanePerfCPUStat(t)
+
+	result := dataplanePerfBuildResult("nftables", scenario, clientResult, 0, "nftables", backend)
+	result.HostBusyCores = dataplanePerfBusyCores(hostCPUStart, hostCPUEnd, hz, clientResult.Elapsed)
+	return result
 }
 
 func dataplanePerfBuildResult(modeName string, scenario dataplanePerfScenario, clientResult dataplanePerfClientResult, cpuSeconds float64, effectiveEngine string, kernelEngine string) dataplanePerfResult {
@@ -471,7 +538,7 @@ func runDataplanePerfBackendTCP() error {
 		go func(c net.Conn) {
 			defer c.Close()
 			if tcpConn, ok := c.(*net.TCPConn); ok {
-				_ = tcpConn.SetNoDelay(true)
+				configureDataplanePerfTCPConn(tcpConn)
 			}
 			var serveErr error
 			switch tcpMode {
@@ -483,6 +550,9 @@ func runDataplanePerfBackendTCP() error {
 				serveErr = runDataplanePerfBackendTCPEcho(c)
 			}
 			if serveErr != nil {
+				if !errors.Is(serveErr, io.EOF) && !errors.Is(serveErr, net.ErrClosed) {
+					fmt.Fprintf(os.Stderr, "backend tcp %s %s -> %s: %v\n", tcpMode, c.RemoteAddr(), c.LocalAddr(), serveErr)
+				}
 				return
 			}
 		}(conn)
@@ -1226,7 +1296,7 @@ func runDataplanePerfConnection(target string, tcpMode string, payloadBytes int6
 	defer conn.Close()
 
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		_ = tcpConn.SetNoDelay(true)
+		configureDataplanePerfTCPConn(tcpConn)
 	}
 	if deadline <= 0 {
 		deadline = 120 * time.Second
@@ -1340,6 +1410,15 @@ func writeDataplanePerfTCPTransferHeader(conn net.Conn, tcpMode string, payloadB
 		}
 	}
 	return writeAll(conn, header[:])
+}
+
+func configureDataplanePerfTCPConn(conn *net.TCPConn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.SetNoDelay(true)
+	_ = conn.SetReadBuffer(dataplanePerfTCPSocketBuf)
+	_ = conn.SetWriteBuffer(dataplanePerfTCPSocketBuf)
 }
 
 func readDataplanePerfTCPTransferHeader(conn net.Conn, expectedMode string) (int64, error) {
@@ -1688,6 +1767,7 @@ func setupDataplanePerfTopology(t *testing.T) dataplanePerfTopology {
 	mustRunDataplanePerfCmd(t, "ip", "link", "add", topology.BackendHostIF, "type", "veth", "peer", "name", topology.BackendNSIF)
 	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.ClientNSIF, "netns", topology.ClientNS)
 	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.BackendNSIF, "netns", topology.BackendNS)
+	applyDataplanePerfTopologyTXQLen(t, topology)
 
 	mustRunDataplanePerfCmd(t, "ip", "addr", "add", dataplanePerfFrontAddr+"/24", "dev", topology.ClientHostIF)
 	mustRunDataplanePerfCmd(t, "ip", "addr", "add", dataplanePerfBackendHost+"/24", "dev", topology.BackendHostIF)
@@ -1705,11 +1785,56 @@ func setupDataplanePerfTopology(t *testing.T) dataplanePerfTopology {
 	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.BackendNS, "ip", "route", "replace", "default", "via", dataplanePerfBackendHost, "dev", topology.BackendNSIF)
 	if dataplanePerfDisableOffloads() {
 		bestEffortDisableDataplanePerfOffloads(t, topology)
+		restoreDataplanePerfTopologyGRO(t, topology)
 	} else {
 		t.Log("dataplane perf: keeping veth offloads enabled")
 	}
 
 	return topology
+}
+
+func applyDataplanePerfTopologyTXQLen(t *testing.T, topology dataplanePerfTopology) {
+	t.Helper()
+
+	txqlen := envInt(dataplanePerfTXQLenEnv, dataplanePerfDefaultTXQLen)
+	if txqlen <= 0 {
+		return
+	}
+
+	value := strconv.Itoa(txqlen)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", "dev", topology.ClientHostIF, "txqueuelen", value)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", "dev", topology.BackendHostIF, "txqueuelen", value)
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "link", "set", "dev", topology.ClientNSIF, "txqueuelen", value)
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.BackendNS, "ip", "link", "set", "dev", topology.BackendNSIF, "txqueuelen", value)
+	t.Logf("dataplane perf: set veth txqueuelen=%d", txqlen)
+}
+
+func restoreDataplanePerfTopologyGRO(t *testing.T, topology dataplanePerfTopology) {
+	t.Helper()
+
+	// veth XDP redirect requires the namespace-side peers to keep GRO enabled so
+	// the host-side redirect targets advertise ndo_xdp_xmit support.
+	restore := func(netns string, ifName string) {
+		if strings.TrimSpace(netns) == "" || strings.TrimSpace(ifName) == "" {
+			return
+		}
+		if _, err := exec.LookPath("ethtool"); err != nil {
+			return
+		}
+		args := []string{"ip", "netns", "exec", netns, "ethtool", "-K", ifName, "gro", "on"}
+		if output, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			text := strings.TrimSpace(string(output))
+			if text == "" {
+				text = err.Error()
+			}
+			t.Logf("dataplane perf: ethtool %s/%s gro on skipped: %s", netns, ifName, text)
+			return
+		}
+		t.Logf("dataplane perf: restored gro on for %s/%s", netns, ifName)
+	}
+
+	restore(topology.ClientNS, topology.ClientNSIF)
+	restore(topology.BackendNS, topology.BackendNSIF)
 }
 
 func seedDataplanePerfNeighbors(t *testing.T, topology dataplanePerfTopology) {
@@ -1792,6 +1917,59 @@ func setupDataplanePerfIptablesDNAT(t *testing.T, topology dataplanePerfTopology
 	return backend
 }
 
+func setupDataplanePerfNFTablesDNAT(t *testing.T, topology dataplanePerfTopology) string {
+	t.Helper()
+
+	const (
+		natTable    = "forward_perf_nat_nft"
+		filterTable = "forward_perf_filter_nft"
+	)
+
+	dataplanePerfRequireNFTables(t)
+	proto := dataplanePerfProtocol()
+	originalIPForward := strings.TrimSpace(readDataplanePerfProcFile(t, "/proc/sys/net/ipv4/ip_forward"))
+	cleanupDataplanePerfNFTablesDNAT(topology)
+	t.Cleanup(func() {
+		if originalIPForward != "" {
+			if output, err := exec.Command("sysctl", "-w", "net.ipv4.ip_forward="+originalIPForward).CombinedOutput(); err != nil {
+				t.Logf("dataplane perf: restore net.ipv4.ip_forward=%s failed: %v (%s)", originalIPForward, err, strings.TrimSpace(string(output)))
+			}
+		}
+		cleanupDataplanePerfNFTablesDNAT(topology)
+	})
+
+	mustRunDataplanePerfCmd(t, "sysctl", "-w", "net.ipv4.ip_forward=1")
+
+	mustRunDataplanePerfCmd(t, "nft", "add", "table", "ip", natTable)
+	mustRunDataplanePerfCmd(t, "nft", "add", "chain", "ip", natTable, "prerouting", "{ type nat hook prerouting priority dstnat; policy accept; }")
+	mustRunDataplanePerfCmd(t, "nft", "add", "rule", "ip", natTable, "prerouting",
+		"iifname", topology.ClientHostIF,
+		"ip", "daddr", dataplanePerfFrontAddr,
+		proto, "dport", strconv.Itoa(dataplanePerfFrontPort),
+		"dnat", "to", net.JoinHostPort(dataplanePerfBackendAddr, strconv.Itoa(dataplanePerfBackendPort)),
+	)
+
+	mustRunDataplanePerfCmd(t, "nft", "add", "table", "ip", filterTable)
+	mustRunDataplanePerfCmd(t, "nft", "add", "chain", "ip", filterTable, "forward", "{ type filter hook forward priority filter; policy accept; }")
+	mustRunDataplanePerfCmd(t, "nft", "add", "rule", "ip", filterTable, "forward",
+		"iifname", topology.ClientHostIF,
+		"oifname", topology.BackendHostIF,
+		"ip", "daddr", dataplanePerfBackendAddr,
+		proto, "dport", strconv.Itoa(dataplanePerfBackendPort),
+		"accept",
+	)
+	mustRunDataplanePerfCmd(t, "nft", "add", "rule", "ip", filterTable, "forward",
+		"iifname", topology.BackendHostIF,
+		"oifname", topology.ClientHostIF,
+		"ip", "saddr", dataplanePerfBackendAddr,
+		proto, "sport", strconv.Itoa(dataplanePerfBackendPort),
+		"ct", "state", "established,related",
+		"accept",
+	)
+
+	return "native"
+}
+
 func cleanupDataplanePerfIptablesDNAT(topology dataplanePerfTopology) {
 	runDataplanePerfCmd("iptables", "-t", "nat", "-D", "PREROUTING",
 		"-i", topology.ClientHostIF,
@@ -1813,6 +1991,11 @@ func cleanupDataplanePerfIptablesDNAT(topology dataplanePerfTopology) {
 	runDataplanePerfCmd("iptables", "-X", "FORWARD_PERF_FWD")
 }
 
+func cleanupDataplanePerfNFTablesDNAT(topology dataplanePerfTopology) {
+	runDataplanePerfCmd("nft", "delete", "table", "ip", "forward_perf_nat_nft")
+	runDataplanePerfCmd("nft", "delete", "table", "ip", "forward_perf_filter_nft")
+}
+
 func dataplanePerfIptablesBackend(t *testing.T) string {
 	t.Helper()
 
@@ -1831,6 +2014,14 @@ func dataplanePerfIptablesBackend(t *testing.T) string {
 	}
 }
 
+func dataplanePerfRequireNFTables(t *testing.T) {
+	t.Helper()
+
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft command is required")
+	}
+}
+
 func readDataplanePerfProcFile(t *testing.T, path string) string {
 	t.Helper()
 
@@ -1839,6 +2030,66 @@ func readDataplanePerfProcFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+func readDataplanePerfCPUStat(t *testing.T) dataplanePerfCPUStat {
+	t.Helper()
+
+	data := readDataplanePerfProcFile(t, "/proc/stat")
+	line := ""
+	for _, item := range strings.Split(data, "\n") {
+		if strings.HasPrefix(item, "cpu ") {
+			line = item
+			break
+		}
+	}
+	if line == "" {
+		t.Fatal("read /proc/stat: missing aggregate cpu line")
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 9 {
+		t.Fatalf("read /proc/stat: unexpected aggregate cpu line %q", line)
+	}
+	parse := func(index int) int64 {
+		value, err := strconv.ParseInt(fields[index], 10, 64)
+		if err != nil {
+			t.Fatalf("parse /proc/stat field %d from %q: %v", index, line, err)
+		}
+		return value
+	}
+	return dataplanePerfCPUStat{
+		User:    parse(1),
+		Nice:    parse(2),
+		System:  parse(3),
+		Idle:    parse(4),
+		Iowait:  parse(5),
+		IRQ:     parse(6),
+		SoftIRQ: parse(7),
+		Steal:   parse(8),
+	}
+}
+
+func (stat dataplanePerfCPUStat) total() int64 {
+	return stat.User + stat.Nice + stat.System + stat.Idle + stat.Iowait + stat.IRQ + stat.SoftIRQ + stat.Steal
+}
+
+func dataplanePerfBusyCores(start dataplanePerfCPUStat, end dataplanePerfCPUStat, hz int64, elapsed time.Duration) float64 {
+	if hz <= 0 || elapsed <= 0 {
+		return 0
+	}
+	deltaTotal := end.total() - start.total()
+	deltaIdle := (end.Idle + end.Iowait) - (start.Idle + start.Iowait)
+	if deltaTotal <= 0 {
+		return 0
+	}
+	if deltaIdle < 0 {
+		deltaIdle = 0
+	}
+	deltaBusy := deltaTotal - deltaIdle
+	if deltaBusy <= 0 {
+		return 0
+	}
+	return float64(deltaBusy) / float64(hz) / elapsed.Seconds()
 }
 
 func mustReadDataplanePerfNetnsMAC(t *testing.T, netns string, ifName string) string {
@@ -1887,12 +2138,12 @@ func bestEffortDisableDataplanePerfOffloads(t *testing.T, topology dataplanePerf
 func dataplanePerfDisableOffloads() bool {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv(dataplanePerfOffloadsEnv)))
 	switch raw {
-	case "", "1", "true", "yes", "on":
+	case "1", "true", "yes", "on":
 		return true
-	case "0", "false", "no", "off":
+	case "", "0", "false", "no", "off":
 		return false
 	default:
-		return true
+		return false
 	}
 }
 
@@ -2006,25 +2257,96 @@ func writeDataplanePerfConfig(t *testing.T, path string, mode dataplanePerfMode,
 func fetchDataplanePerfKernelRuntime(t *testing.T, apiBase string) KernelRuntimeResponse {
 	t.Helper()
 
+	runtimeResp, err := tryFetchDataplanePerfKernelRuntime(apiBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runtimeResp
+}
+
+func tryFetchDataplanePerfKernelRuntime(apiBase string) (KernelRuntimeResponse, error) {
 	req, err := http.NewRequest(http.MethodGet, apiBase+"/api/kernel/runtime", nil)
 	if err != nil {
-		t.Fatalf("build kernel runtime request: %v", err)
+		return KernelRuntimeResponse{}, fmt.Errorf("build kernel runtime request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+dataplanePerfToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("fetch kernel runtime: %v", err)
+		return KernelRuntimeResponse{}, fmt.Errorf("fetch kernel runtime: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("kernel runtime unexpected status %d: %s", resp.StatusCode, string(body))
+		return KernelRuntimeResponse{}, fmt.Errorf("kernel runtime unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 	var runtimeResp KernelRuntimeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&runtimeResp); err != nil {
-		t.Fatalf("decode kernel runtime response: %v", err)
+		return KernelRuntimeResponse{}, fmt.Errorf("decode kernel runtime response: %w", err)
 	}
-	return runtimeResp
+	return runtimeResp, nil
+}
+
+func logDataplanePerfKernelRuntime(t *testing.T, apiBase string, label string) {
+	t.Helper()
+
+	runtimeResp, err := tryFetchDataplanePerfKernelRuntime(apiBase)
+	if err != nil {
+		t.Logf("%s: %v", label, err)
+		return
+	}
+	data, err := json.MarshalIndent(runtimeResp, "", "  ")
+	if err != nil {
+		t.Logf("%s: marshal runtime: %v", label, err)
+		return
+	}
+	t.Logf("%s:\n%s", label, string(data))
+}
+
+func logDataplanePerfInterfaceStats(t *testing.T, topology dataplanePerfTopology, label string) {
+	t.Helper()
+
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "host " + topology.ClientHostIF,
+			args: []string{"ip", "-s", "link", "show", "dev", topology.ClientHostIF},
+		},
+		{
+			name: "host " + topology.BackendHostIF,
+			args: []string{"ip", "-s", "link", "show", "dev", topology.BackendHostIF},
+		},
+		{
+			name: "netns " + topology.ClientNS + "/" + topology.ClientNSIF,
+			args: []string{"ip", "netns", "exec", topology.ClientNS, "ip", "-s", "link", "show", "dev", topology.ClientNSIF},
+		},
+		{
+			name: "netns " + topology.BackendNS + "/" + topology.BackendNSIF,
+			args: []string{"ip", "netns", "exec", topology.BackendNS, "ip", "-s", "link", "show", "dev", topology.BackendNSIF},
+		},
+	}
+
+	var out strings.Builder
+	for _, command := range commands {
+		data, err := exec.Command(command.args[0], command.args[1:]...).CombinedOutput()
+		out.WriteString("[")
+		out.WriteString(command.name)
+		out.WriteString("]\n")
+		if err != nil {
+			out.WriteString(err.Error())
+			if len(data) != 0 {
+				out.WriteString("\n")
+				out.Write(data)
+			}
+		} else {
+			out.Write(data)
+		}
+		if out.Len() == 0 || out.String()[out.Len()-1] != '\n' {
+			out.WriteString("\n")
+		}
+	}
+	t.Logf("%s:\n%s", label, out.String())
 }
 
 func dataplanePerfFindKernelEngine(engines []KernelEngineRuntimeView, name string) (KernelEngineRuntimeView, bool) {
@@ -2034,6 +2356,59 @@ func dataplanePerfFindKernelEngine(engines []KernelEngineRuntimeView, name strin
 		}
 	}
 	return KernelEngineRuntimeView{}, false
+}
+
+func waitForDataplanePerfModeSettle(t *testing.T, apiBase string, mode dataplanePerfMode) {
+	t.Helper()
+
+	if !strings.EqualFold(mode.ExpectedKern, kernelEngineXDP) {
+		time.Sleep(400 * time.Millisecond)
+		return
+	}
+
+	const (
+		minSettle    = 4 * time.Second
+		quietWindow  = 1500 * time.Millisecond
+		pollInterval = 250 * time.Millisecond
+	)
+
+	start := time.Now()
+	deadline := start.Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		runtimeResp, err := tryFetchDataplanePerfKernelRuntime(apiBase)
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+		engine, ok := dataplanePerfFindKernelEngine(runtimeResp.Engines, mode.ExpectedKern)
+		if !ok || !engine.Loaded || engine.ActiveEntries <= 0 || runtimeResp.RetryPending {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		lastEvent := start
+		lastEvent = maxDataplanePerfTime(lastEvent, runtimeResp.LastKernelRetryAt)
+		lastEvent = maxDataplanePerfTime(lastEvent, runtimeResp.LastKernelIncrementalRetryAt)
+		lastEvent = maxDataplanePerfTime(lastEvent, engine.LastAttachmentsUnhealthyAt)
+		lastEvent = maxDataplanePerfTime(lastEvent, engine.LastReconcileAt)
+
+		readyAt := maxDataplanePerfTime(start.Add(minSettle), lastEvent.Add(quietWindow))
+		if !time.Now().Before(readyAt) {
+			t.Logf("dataplane perf: %s settled after %s", mode.ExpectedKern, time.Since(start).Round(100*time.Millisecond))
+			return
+		}
+		time.Sleep(pollInterval)
+	}
+
+	logDataplanePerfKernelRuntime(t, apiBase, mode.Name+" kernel runtime before settle timeout")
+	t.Logf("dataplane perf: %s did not fully settle within 15s; proceeding", mode.ExpectedKern)
+}
+
+func maxDataplanePerfTime(a time.Time, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 func waitForDataplanePerfAPI(t *testing.T, apiBase string) {
@@ -2161,11 +2536,23 @@ func runDataplanePerfClientBenchmark(t *testing.T, clientNS string, connections 
 }
 
 func runDataplanePerfClientBenchmarkRaw(clientNS string, connections int, concurrency int, bytesPerConn int64, ioChunkBytes int64, steadySeconds int) (dataplanePerfClientResult, error) {
+	return runDataplanePerfClientBenchmarkRawToTarget(
+		clientNS,
+		net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(dataplanePerfFrontPort)),
+		connections,
+		concurrency,
+		bytesPerConn,
+		ioChunkBytes,
+		steadySeconds,
+	)
+}
+
+func runDataplanePerfClientBenchmarkRawToTarget(clientNS string, targetAddr string, connections int, concurrency int, bytesPerConn int64, ioChunkBytes int64, steadySeconds int) (dataplanePerfClientResult, error) {
 	cmd := exec.Command("ip", "netns", "exec", clientNS, os.Args[0], "-test.run", "TestDataplanePerfHelperProcess", "-test.v=false")
 	cmd.Env = append(os.Environ(),
 		dataplanePerfHelperEnv+"=1",
 		dataplanePerfHelperRoleEnv+"=client",
-		dataplanePerfTargetEnv+"="+net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(dataplanePerfFrontPort)),
+		dataplanePerfTargetEnv+"="+targetAddr,
 		dataplanePerfConnEnv+"="+strconv.Itoa(connections),
 		dataplanePerfConcurrencyEnv+"="+strconv.Itoa(concurrency),
 		dataplanePerfBytesEnv+"="+strconv.FormatInt(bytesPerConn, 10),

@@ -273,6 +273,42 @@ func TestEgressNATXDPIntegration(t *testing.T) {
 	}
 }
 
+func TestEgressNATTraditionalSNATIntegration(t *testing.T) {
+	if os.Getenv(egressNATTestEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+
+	t.Setenv(dataplanePerfProtocolEnv, "tcp")
+
+	cases := []struct {
+		name  string
+		setup func(*testing.T, egressNATIntegrationTopology) string
+	}{
+		{name: "iptables", setup: setupEgressNATPerfIptablesSNAT},
+		{name: "nftables", setup: setupEgressNATPerfNFTablesSNAT},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			topology := setupEgressNATIntegrationTopology(t)
+			seedEgressNATIntegrationNeighbor(t, topology)
+			tc.setup(t, topology)
+
+			observedIP := runEgressNATIntegrationProbeToAddr(t, topology, "tcp", net.JoinHostPort(egressNATBackendAddr, strconv.Itoa(dataplanePerfBackendPort)))
+			if observedIP != egressNATUplinkAddr {
+				t.Fatalf("%s backend observed source IP %q, want %q", tc.name, observedIP, egressNATUplinkAddr)
+			}
+		})
+	}
+}
+
 func TestEgressNATUDPMappingRespectsNATType(t *testing.T) {
 	if os.Getenv(egressNATTestEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
@@ -615,7 +651,11 @@ func TestEgressNATToggleDisableReenableRestoresConnectivity(t *testing.T) {
 	waitForEgressNATIntegrationTCActiveEntries(t, harness.APIBase, harness.LogPath, "after disable", func(entries int) bool {
 		return entries == 0
 	})
-	expectEgressNATIntegrationProbeFailure(t, harness.Topology, "tcp")
+	observedIP := runEgressNATIntegrationProbe(t, harness.Topology, "tcp")
+	if observedIP != egressNATClientAddr {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("tcp backend observed source IP after disable %q, want %q", observedIP, egressNATClientAddr)
+	}
 
 	toggleEgressNATIntegrationEntry(t, harness.APIBase, item.ID)
 	waitForEgressNATIntegrationRunningStatus(t, harness.APIBase, harness.Topology, harness.Topology.ChildHostIF)
@@ -661,7 +701,11 @@ func TestEgressNATDeleteRecreateWildcardRestoresConnectivity(t *testing.T) {
 	waitForEgressNATIntegrationTCActiveEntries(t, harness.APIBase, harness.LogPath, "after wildcard delete", func(entries int) bool {
 		return entries == 0
 	})
-	expectEgressNATIntegrationProbeFailure(t, harness.Topology, "tcp")
+	observedIP = runEgressNATIntegrationProbe(t, harness.Topology, "tcp")
+	if observedIP != egressNATClientAddr {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("tcp backend observed source IP after wildcard delete %q, want %q", observedIP, egressNATClientAddr)
+	}
 
 	createEgressNATIntegrationEntryForScope(t, harness.APIBase, harness.Topology, "")
 	waitForEgressNATIntegrationRunningStatus(t, harness.APIBase, harness.Topology, "")
@@ -889,6 +933,7 @@ func setupEgressNATIntegrationTopology(t *testing.T) egressNATIntegrationTopolog
 	}
 
 	cleanup := func() {
+		runDataplanePerfCmd("ip", "link", "del", topology.ChildHostIF)
 		runDataplanePerfCmd("ip", "link", "del", topology.UplinkHostIF)
 		runDataplanePerfCmd("ip", "link", "del", topology.BridgeIF)
 		runDataplanePerfCmd("ip", "netns", "del", topology.ClientNS)
@@ -1094,19 +1139,19 @@ func seedEgressNATIntegrationNeighbor(t *testing.T, topology egressNATIntegratio
 
 	bridgeMAC := mustReadHostInterfaceMAC(t, topology.BridgeIF)
 	uplinkMAC := mustReadHostInterfaceMAC(t, topology.UplinkHostIF)
+	clientPeerMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
 	backendPeerMAC := mustReadDataplanePerfNetnsMAC(t, topology.BackendNS, topology.BackendNSIF)
 
 	mustRunDataplanePerfCmd(t, "ip", "route", "replace", egressNATBackendAddr+"/32", "dev", topology.UplinkHostIF, "src", egressNATUplinkAddr)
 	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "neigh", "replace", egressNATBridgeAddr, "lladdr", bridgeMAC, "dev", topology.ClientNSIF, "nud", "permanent")
-	if strings.TrimSpace(topology.ChildHostIF) == "" {
-		clientPeerMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
-		runDataplanePerfCmd("ip", "neigh", "del", egressNATClientAddr, "dev", topology.BridgeIF)
-		mustRunDataplanePerfCmd(t, "ip", "route", "replace", egressNATClientAddr+"/32", "dev", topology.BridgeIF, "src", egressNATBridgeAddr)
-		mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATClientAddr, "lladdr", clientPeerMAC, "dev", topology.BridgeIF, "nud", "permanent")
-	} else {
-		childPeerMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
+	// Classic routed SNAT returns through the bridge master, while the kernel
+	// dataplane fast path may redirect straight to the child port.
+	runDataplanePerfCmd("ip", "neigh", "del", egressNATClientAddr, "dev", topology.BridgeIF)
+	mustRunDataplanePerfCmd(t, "ip", "route", "replace", egressNATClientAddr+"/32", "dev", topology.BridgeIF, "src", egressNATBridgeAddr)
+	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATClientAddr, "lladdr", clientPeerMAC, "dev", topology.BridgeIF, "nud", "permanent")
+	if strings.TrimSpace(topology.ChildHostIF) != "" {
 		runDataplanePerfCmd("ip", "neigh", "del", egressNATClientAddr, "dev", topology.ChildHostIF)
-		mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATClientAddr, "lladdr", childPeerMAC, "dev", topology.ChildHostIF, "nud", "permanent")
+		mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATClientAddr, "lladdr", clientPeerMAC, "dev", topology.ChildHostIF, "nud", "permanent")
 	}
 	runDataplanePerfCmd("ip", "neigh", "del", egressNATBackendAddr, "dev", topology.UplinkHostIF)
 	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATBackendAddr, "lladdr", backendPeerMAC, "dev", topology.UplinkHostIF, "nud", "permanent")
@@ -1473,11 +1518,17 @@ func createEgressNATForwardRuleWithInboundIP(t *testing.T, apiBase string, topol
 func runEgressNATIntegrationProbe(t *testing.T, topology egressNATIntegrationTopology, proto string) string {
 	t.Helper()
 
-	observedFile := filepath.Join(t.TempDir(), "observed-"+proto+".txt")
 	targetAddr := net.JoinHostPort(egressNATBackendAddr, strconv.Itoa(egressNATProbePort))
 	if proto == "icmp" {
 		targetAddr = egressNATBackendAddr
 	}
+	return runEgressNATIntegrationProbeToAddr(t, topology, proto, targetAddr)
+}
+
+func runEgressNATIntegrationProbeToAddr(t *testing.T, topology egressNATIntegrationTopology, proto string, targetAddr string) string {
+	t.Helper()
+
+	observedFile := filepath.Join(t.TempDir(), "observed-"+proto+".txt")
 
 	backendCmd, backendLogs := startEgressNATBackendHelperInNamespace(t, topology.BackendNS, proto, targetAddr, observedFile)
 	t.Cleanup(func() {

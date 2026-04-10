@@ -21,35 +21,52 @@ import (
 )
 
 const (
-	kernelForwardProgramName        = "forward_ingress"
-	kernelReplyProgramName          = "reply_ingress"
-	kernelForwardProgramNameV6      = "forward_ingress_v6"
-	kernelReplyProgramNameV6        = "reply_ingress_v6"
-	kernelRulesMapName              = kernelRulesMapNameV4
-	kernelFlowsMapName              = kernelFlowsMapNameV4
-	kernelNatPortsMapName           = kernelNatPortsMapNameV4
-	kernelIfParentMapName           = "if_parent_v4"
-	kernelLocalIPv4MapName          = "local_ipv4s_v4"
-	kernelEgressWildcardFastMapName = "egress_wildcard_fast_v4"
-	kernelNATConfigMapName          = "nat_config_v4"
-	kernelStatsMapName              = "stats_v4"
-	kernelDiagMapName               = "diag_v4"
-	kernelOccupancyMapName          = "occupancy_v4"
-	kernelReplyFilterPrio           = 10
-	kernelReplyFilterPrioV6         = 11
-	kernelForwardFilterPrio         = 20
-	kernelForwardFilterPrioV6       = 21
-	kernelForwardFilterHandle       = 10
-	kernelForwardFilterHandleV6     = 11
-	kernelReplyFilterHandle         = 20
-	kernelReplyFilterHandleV6       = 21
-	kernelVerifierLogSize           = 4 * 1024 * 1024
-	kernelTCPClosingGraceNS         = 15 * 1000000000
-	kernelTCPUnrepliedTimeout       = 30 * 1000000000
-	kernelTCPFlowIdleTimeout        = 10 * 60 * 1000000000
-	kernelICMPFlowIdleTimeout       = 30 * 1000000000
-	kernelUDPFlowIdleTimeout        = 300 * 1000000000
-	kernelOrphanNATPruneLogEvery    = 10 * time.Minute
+	kernelForwardProgramName                = "forward_ingress"
+	kernelReplyProgramName                  = "reply_ingress"
+	kernelForwardProgramNameV6              = "forward_ingress_v6"
+	kernelReplyProgramNameV6                = "reply_ingress_v6"
+	kernelForwardDispatchProgramName        = "forward_ingress_dispatch"
+	kernelForwardTransparentProgramName     = "forward_ingress_v4_transparent"
+	kernelForwardFullNATProgramName         = "forward_ingress_v4_fullnat"
+	kernelForwardFullNATExistingProgramName = "forward_ingress_v4_fullnat_existing"
+	kernelForwardFullNATNewProgramName      = "forward_ingress_v4_fullnat_new"
+	kernelForwardEgressNATProgramName       = "forward_ingress_v4_egress_nat"
+	kernelReplyDispatchProgramName          = "reply_ingress_dispatch"
+	kernelReplyTransparentProgramName       = "reply_ingress_v4_transparent"
+	kernelReplyFullNATProgramName           = "reply_ingress_v4_fullnat"
+	kernelRulesMapName                      = kernelRulesMapNameV4
+	kernelFlowsMapName                      = kernelFlowsMapNameV4
+	kernelNatPortsMapName                   = kernelNatPortsMapNameV4
+	kernelIfParentMapName                   = "if_parent_v4"
+	kernelLocalIPv4MapName                  = "local_ipv4s_v4"
+	kernelEgressWildcardFastMapName         = "egress_wildcard_fast_v4"
+	kernelNATConfigMapName                  = "nat_config_v4"
+	kernelStatsMapName                      = "stats_v4"
+	kernelDiagMapName                       = "diag_v4"
+	kernelOccupancyMapName                  = "occupancy_v4"
+	kernelTCProgramChainMapName             = "tc_prog_chain_v4"
+	kernelReplyFilterPrio                   = 10
+	kernelReplyFilterPrioV6                 = 11
+	kernelForwardFilterPrio                 = 20
+	kernelForwardFilterPrioV6               = 21
+	kernelForwardFilterHandle               = 10
+	kernelForwardFilterHandleV6             = 11
+	kernelReplyFilterHandle                 = 20
+	kernelReplyFilterHandleV6               = 21
+	kernelVerifierLogSize                   = 4 * 1024 * 1024
+	kernelTCPClosingGraceNS                 = 15 * 1000000000
+	kernelTCPUnrepliedTimeout               = 30 * 1000000000
+	kernelTCPFlowIdleTimeout                = 10 * 60 * 1000000000
+	kernelICMPFlowIdleTimeout               = 30 * 1000000000
+	kernelUDPFlowIdleTimeout                = 300 * 1000000000
+	kernelOrphanNATPruneLogEvery            = 10 * time.Minute
+	tcProgramChainIndexV4Transparent        = 0
+	tcProgramChainIndexV4FullNATForward     = 1
+	tcProgramChainIndexV4EgressNATForward   = 2
+	tcProgramChainIndexV4ReplyTransparent   = 3
+	tcProgramChainIndexV4ReplyFullNAT       = 4
+	tcProgramChainIndexV4FullNATExisting    = 5
+	tcProgramChainIndexV4FullNATNew         = 6
 )
 
 const (
@@ -69,6 +86,13 @@ const (
 	kernelRuleFlagEgressNAT    = 0x8
 	kernelRuleFlagPassthrough  = 0x10
 	kernelRuleFlagFullCone     = 0x20
+)
+
+type kernelTCAttachmentProgramMode string
+
+const (
+	kernelTCAttachmentProgramModeLegacy     kernelTCAttachmentProgramMode = "legacy"
+	kernelTCAttachmentProgramModeDispatchV4 kernelTCAttachmentProgramMode = "dispatch_v4"
 )
 
 //go:embed ebpf/forward-tc-bpf.o
@@ -187,16 +211,34 @@ type kernelDualStackRuleMapDiff struct {
 }
 
 type kernelCollectionPieces struct {
+	forwardProg                *ebpf.Program
+	replyProg                  *ebpf.Program
+	forwardProgV6              *ebpf.Program
+	replyProgV6                *ebpf.Program
+	forwardDispatchProg        *ebpf.Program
+	forwardTransparentProg     *ebpf.Program
+	forwardFullNATProg         *ebpf.Program
+	forwardFullNATExistingProg *ebpf.Program
+	forwardFullNATNewProg      *ebpf.Program
+	forwardEgressNATProg       *ebpf.Program
+	replyDispatchProg          *ebpf.Program
+	replyTransparentProg       *ebpf.Program
+	replyFullNATProg           *ebpf.Program
+	progChainV4                *ebpf.Map
+	rulesV4                    *ebpf.Map
+	rulesV6                    *ebpf.Map
+	flowsV4                    *ebpf.Map
+	flowsV6                    *ebpf.Map
+	natV4                      *ebpf.Map
+	natV6                      *ebpf.Map
+}
+
+type kernelAttachmentPrograms struct {
 	forwardProg   *ebpf.Program
 	replyProg     *ebpf.Program
 	forwardProgV6 *ebpf.Program
 	replyProgV6   *ebpf.Program
-	rulesV4       *ebpf.Map
-	rulesV6       *ebpf.Map
-	flowsV4       *ebpf.Map
-	flowsV6       *ebpf.Map
-	natV4         *ebpf.Map
-	natV6         *ebpf.Map
+	mode          kernelTCAttachmentProgramMode
 }
 
 type kernelAttachmentPlan struct {
@@ -380,6 +422,7 @@ type linuxKernelRuleRuntime struct {
 	coll               *ebpf.Collection
 	attachments        []kernelAttachment
 	preparedRules      []preparedKernelRule
+	attachmentMode     kernelTCAttachmentProgramMode
 	lastSkipLog        map[string]struct{}
 	lastReconcileMode  string
 	degradedSource     string
@@ -423,6 +466,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		natPortMin:         natPortMin,
 		natPortMax:         natPortMax,
 		statsCorrection:    make(map[uint32]kernelRuleStats),
+		attachmentMode:     kernelTCAttachmentProgramModeLegacy,
 		enableTrafficStats: enableTrafficStats,
 		enableDiagnostics:  enableDiagnostics,
 		enableDiagVerbose:  enableDiagVerbose,
@@ -876,13 +920,9 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		}
 		return results, nil
 	}
-	forwardProg := pieces.forwardProg
-	replyProg := pieces.replyProg
-	var forwardProgV6 *ebpf.Program
-	var replyProgV6 *ebpf.Program
-	if kernelPreparedRulesIncludeIPv6(prepared) {
-		forwardProgV6 = pieces.forwardProgV6
-		replyProgV6 = pieces.replyProgV6
+	attachmentPrograms, attachmentWarning := configureKernelAttachmentPrograms(pieces, prepared)
+	if attachmentWarning != "" {
+		log.Printf("kernel dataplane reconcile: %s", attachmentWarning)
 	}
 	if oldStatsMap != nil {
 		if err := copyKernelStatsMap(coll.Maps[kernelStatsMapName], oldStatsMap); err != nil {
@@ -969,7 +1009,14 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 	oldAttachments := append([]kernelAttachment(nil), rt.attachments...)
 	forwardReady := make(map[int]bool)
 	replyReady := make(map[int]bool)
-	attachmentPlans := desiredKernelAttachmentPlansDualStack(forwardIfRules, replyIfRules, forwardProg, replyProg, forwardProgV6, replyProgV6)
+	attachmentPlans := desiredKernelAttachmentPlansDualStack(
+		forwardIfRules,
+		replyIfRules,
+		attachmentPrograms.forwardProg,
+		attachmentPrograms.replyProg,
+		attachmentPrograms.forwardProgV6,
+		attachmentPrograms.replyProgV6,
+	)
 	newAttachments := make([]kernelAttachment, 0, len(attachmentPlans))
 	attachFailure := ""
 	attachStartedAt := time.Now()
@@ -1071,6 +1118,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 	rt.coll = coll
 	rt.attachments = newAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
+	rt.attachmentMode = attachmentPrograms.mode
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
 	rt.natMapCapacity = actualCapacities.NATPorts
@@ -1348,6 +1396,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.rulesMapCapacity = 0
 	rt.flowsMapCapacity = 0
 	rt.natMapCapacity = 0
+	rt.attachmentMode = kernelTCAttachmentProgramModeLegacy
 	rt.lastReconcileMode = ""
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
@@ -1374,6 +1423,7 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.rulesMapCapacity = 0
 	rt.flowsMapCapacity = 0
 	rt.natMapCapacity = 0
+	rt.attachmentMode = kernelTCAttachmentProgramModeLegacy
 	rt.lastReconcileMode = ""
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
@@ -1693,6 +1743,9 @@ func collectPreparedKernelRuleFlowPurgeIDs(oldItems []preparedKernelRule, nextIt
 }
 
 func preparedKernelRulesNeedAttachmentReset(oldItems []preparedKernelRule, nextItems []preparedKernelRule) bool {
+	if preparedKernelRulesNeedDispatchV4(oldItems) != preparedKernelRulesNeedDispatchV4(nextItems) {
+		return true
+	}
 	return !preparedKernelRuleSetsEqualByMatchKey(
 		filterPreparedKernelRules(oldItems, isPreparedKernelEgressRule),
 		filterPreparedKernelRules(nextItems, isPreparedKernelEgressRule),
@@ -1727,6 +1780,18 @@ func filterPreparedKernelRules(items []preparedKernelRule, keep func(preparedKer
 
 func isPreparedKernelEgressRule(item preparedKernelRule) bool {
 	return isKernelEgressNATRule(item.rule) || isKernelEgressNATPassthroughRule(item.rule)
+}
+
+func preparedKernelRulesNeedDispatchV4(items []preparedKernelRule) bool {
+	for _, item := range items {
+		if kernelPreparedRuleFamily(item) != ipFamilyIPv4 {
+			continue
+		}
+		if (item.value.Flags & (kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT)) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func preparedKernelRuleSetsEqualByMatchKey(oldItems []preparedKernelRule, nextItems []preparedKernelRule, equal func(preparedKernelRule, preparedKernelRule) bool) bool {
@@ -1966,20 +2031,23 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err != nil {
 		return err
 	}
-	forwardProg := pieces.forwardProg
-	replyProg := pieces.replyProg
-	var forwardProgV6 *ebpf.Program
-	var replyProgV6 *ebpf.Program
-	if kernelPreparedRulesIncludeIPv6(prepared) {
-		forwardProgV6 = pieces.forwardProgV6
-		replyProgV6 = pieces.replyProgV6
+	attachmentPrograms, attachmentWarning := configureKernelAttachmentPrograms(pieces, prepared)
+	if attachmentWarning != "" {
+		log.Printf("kernel dataplane reconcile: %s", attachmentWarning)
 	}
 
 	diff, err := diffPreparedKernelRules(rt.preparedRules, prepared)
 	if err != nil {
 		return err
 	}
-	plans := desiredKernelAttachmentPlansDualStack(forwardIfRules, replyIfRules, forwardProg, replyProg, forwardProgV6, replyProgV6)
+	plans := desiredKernelAttachmentPlansDualStack(
+		forwardIfRules,
+		replyIfRules,
+		attachmentPrograms.forwardProg,
+		attachmentPrograms.replyProg,
+		attachmentPrograms.forwardProgV6,
+		attachmentPrograms.replyProgV6,
+	)
 	currentAttachments := make(map[kernelAttachmentKey]kernelAttachment, len(rt.attachments))
 	for _, att := range rt.attachments {
 		if att.filter == nil {
@@ -2089,6 +2157,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	actualCapacities := rt.currentMapCapacitiesLocked()
 	rt.attachments = finalAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
+	rt.attachmentMode = attachmentPrograms.mode
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
 	rt.natMapCapacity = actualCapacities.NATPorts
@@ -2291,17 +2360,96 @@ func kernelPreparedRulesIncludeIPv6(items []preparedKernelRule) bool {
 	return false
 }
 
-func kernelAttachmentProgramsForPreparedRules(coll *ebpf.Collection, prepared []preparedKernelRule) (forwardProg, replyProg, forwardProgV6, replyProgV6 *ebpf.Program) {
+func kernelAttachmentProgramsForPreparedRules(coll *ebpf.Collection, prepared []preparedKernelRule, mode kernelTCAttachmentProgramMode) kernelAttachmentPrograms {
 	if coll == nil {
-		return nil, nil, nil, nil
+		return kernelAttachmentPrograms{mode: kernelTCAttachmentProgramModeLegacy}
 	}
-	forwardProg = coll.Programs[kernelForwardProgramName]
-	replyProg = coll.Programs[kernelReplyProgramName]
-	if kernelPreparedRulesIncludeIPv6(prepared) {
-		forwardProgV6 = coll.Programs[kernelForwardProgramNameV6]
-		replyProgV6 = coll.Programs[kernelReplyProgramNameV6]
+	pieces, err := lookupKernelCollectionPieces(coll)
+	if err != nil {
+		return kernelAttachmentPrograms{mode: kernelTCAttachmentProgramModeLegacy}
 	}
-	return forwardProg, replyProg, forwardProgV6, replyProgV6
+	if mode == kernelTCAttachmentProgramModeDispatchV4 && !preparedKernelRulesNeedDispatchV4(prepared) {
+		mode = kernelTCAttachmentProgramModeLegacy
+	}
+	return kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(prepared), mode)
+}
+
+func kernelAttachmentProgramsFromPieces(pieces kernelCollectionPieces, includeIPv6 bool, mode kernelTCAttachmentProgramMode) kernelAttachmentPrograms {
+	programs := kernelAttachmentPrograms{
+		forwardProg: pieces.forwardProg,
+		replyProg:   pieces.replyProg,
+		mode:        kernelTCAttachmentProgramModeLegacy,
+	}
+	if includeIPv6 {
+		programs.forwardProgV6 = pieces.forwardProgV6
+		programs.replyProgV6 = pieces.replyProgV6
+	}
+	if mode == kernelTCAttachmentProgramModeDispatchV4 && kernelCollectionPiecesSupportDispatchV4(pieces) {
+		programs.forwardProg = pieces.forwardDispatchProg
+		programs.replyProg = pieces.replyDispatchProg
+		programs.mode = kernelTCAttachmentProgramModeDispatchV4
+	}
+	return programs
+}
+
+func kernelCollectionPiecesSupportDispatchV4(pieces kernelCollectionPieces) bool {
+	return pieces.forwardDispatchProg != nil &&
+		pieces.forwardTransparentProg != nil &&
+		pieces.forwardFullNATProg != nil &&
+		pieces.forwardEgressNATProg != nil &&
+		pieces.replyDispatchProg != nil &&
+		pieces.replyTransparentProg != nil &&
+		pieces.replyFullNATProg != nil &&
+		pieces.progChainV4 != nil
+}
+
+func kernelCollectionPiecesSupportFullNATSplitV4(pieces kernelCollectionPieces) bool {
+	return pieces.forwardFullNATExistingProg != nil &&
+		pieces.forwardFullNATNewProg != nil
+}
+
+func configureTCKernelProgramChain(pieces kernelCollectionPieces) error {
+	if !kernelCollectionPiecesSupportDispatchV4(pieces) {
+		return fmt.Errorf("tc object is missing IPv4 dispatcher chain pieces")
+	}
+	if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4Transparent), uint32(pieces.forwardTransparentProg.FD())); err != nil {
+		return fmt.Errorf("install tc IPv4 transparent tail-call target: %w", err)
+	}
+	if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4FullNATForward), uint32(pieces.forwardFullNATProg.FD())); err != nil {
+		return fmt.Errorf("install tc IPv4 full-nat forward tail-call target: %w", err)
+	}
+	if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4EgressNATForward), uint32(pieces.forwardEgressNATProg.FD())); err != nil {
+		return fmt.Errorf("install tc IPv4 egress-nat forward tail-call target: %w", err)
+	}
+	if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4ReplyTransparent), uint32(pieces.replyTransparentProg.FD())); err != nil {
+		return fmt.Errorf("install tc IPv4 reply transparent tail-call target: %w", err)
+	}
+	if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4ReplyFullNAT), uint32(pieces.replyFullNATProg.FD())); err != nil {
+		return fmt.Errorf("install tc IPv4 reply full-nat tail-call target: %w", err)
+	}
+	if kernelCollectionPiecesSupportFullNATSplitV4(pieces) {
+		if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4FullNATExisting), uint32(pieces.forwardFullNATExistingProg.FD())); err != nil {
+			return fmt.Errorf("install tc IPv4 full-nat existing tail-call target: %w", err)
+		}
+		if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4FullNATNew), uint32(pieces.forwardFullNATNewProg.FD())); err != nil {
+			return fmt.Errorf("install tc IPv4 full-nat new tail-call target: %w", err)
+		}
+	}
+	return nil
+}
+
+func configureKernelAttachmentPrograms(pieces kernelCollectionPieces, prepared []preparedKernelRule) (kernelAttachmentPrograms, string) {
+	programs := kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(prepared), kernelTCAttachmentProgramModeLegacy)
+	if !preparedKernelRulesNeedDispatchV4(prepared) {
+		return programs, ""
+	}
+	if !kernelCollectionPiecesSupportDispatchV4(pieces) {
+		return programs, ""
+	}
+	if err := configureTCKernelProgramChain(pieces); err != nil {
+		return programs, fmt.Sprintf("tc IPv4 dispatcher setup failed, using legacy tc programs: %v", err)
+	}
+	return kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(prepared), kernelTCAttachmentProgramModeDispatchV4), ""
 }
 
 func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
@@ -2341,6 +2489,46 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 	if _, ok := spec.Maps[kernelOccupancyMapName]; !ok {
 		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelOccupancyMapName)
 	}
+	hasAnyDispatchV4 := spec.Programs[kernelForwardDispatchProgramName] != nil ||
+		spec.Programs[kernelForwardTransparentProgramName] != nil ||
+		spec.Programs[kernelForwardFullNATProgramName] != nil ||
+		spec.Programs[kernelForwardFullNATExistingProgramName] != nil ||
+		spec.Programs[kernelForwardFullNATNewProgramName] != nil ||
+		spec.Programs[kernelForwardEgressNATProgramName] != nil ||
+		spec.Programs[kernelReplyDispatchProgramName] != nil ||
+		spec.Programs[kernelReplyTransparentProgramName] != nil ||
+		spec.Programs[kernelReplyFullNATProgramName] != nil ||
+		spec.Maps[kernelTCProgramChainMapName] != nil
+	if hasAnyDispatchV4 {
+		for _, name := range []string{
+			kernelForwardDispatchProgramName,
+			kernelForwardTransparentProgramName,
+			kernelForwardFullNATProgramName,
+			kernelForwardEgressNATProgramName,
+			kernelReplyDispatchProgramName,
+			kernelReplyTransparentProgramName,
+			kernelReplyFullNATProgramName,
+		} {
+			if _, ok := spec.Programs[name]; !ok {
+				return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 dispatcher set: missing program %q", name)
+			}
+		}
+		if _, ok := spec.Maps[kernelTCProgramChainMapName]; !ok {
+			return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 dispatcher set: missing map %q", kernelTCProgramChainMapName)
+		}
+	}
+	hasAnyFullNATSplitV4 := spec.Programs[kernelForwardFullNATExistingProgramName] != nil ||
+		spec.Programs[kernelForwardFullNATNewProgramName] != nil
+	if hasAnyFullNATSplitV4 {
+		for _, name := range []string{
+			kernelForwardFullNATExistingProgramName,
+			kernelForwardFullNATNewProgramName,
+		} {
+			if _, ok := spec.Programs[name]; !ok {
+				return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 full-nat split set: missing program %q", name)
+			}
+		}
+	}
 	hasRulesV6 := spec.Maps[kernelRulesMapNameV6] != nil
 	hasFlowsV6 := spec.Maps[kernelFlowsMapNameV6] != nil
 	hasNATV6 := spec.Maps[kernelNatPortsMapNameV6] != nil
@@ -2369,19 +2557,45 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		return kernelCollectionPieces{}, fmt.Errorf("kernel object is missing")
 	}
 	pieces := kernelCollectionPieces{
-		forwardProg:   coll.Programs[kernelForwardProgramName],
-		replyProg:     coll.Programs[kernelReplyProgramName],
-		forwardProgV6: coll.Programs[kernelForwardProgramNameV6],
-		replyProgV6:   coll.Programs[kernelReplyProgramNameV6],
-		rulesV4:       coll.Maps[kernelRulesMapNameV4],
-		rulesV6:       coll.Maps[kernelRulesMapNameV6],
-		flowsV4:       coll.Maps[kernelFlowsMapNameV4],
-		flowsV6:       coll.Maps[kernelFlowsMapNameV6],
-		natV4:         coll.Maps[kernelNatPortsMapNameV4],
-		natV6:         coll.Maps[kernelNatPortsMapNameV6],
+		forwardProg:                coll.Programs[kernelForwardProgramName],
+		replyProg:                  coll.Programs[kernelReplyProgramName],
+		forwardProgV6:              coll.Programs[kernelForwardProgramNameV6],
+		replyProgV6:                coll.Programs[kernelReplyProgramNameV6],
+		forwardDispatchProg:        coll.Programs[kernelForwardDispatchProgramName],
+		forwardTransparentProg:     coll.Programs[kernelForwardTransparentProgramName],
+		forwardFullNATProg:         coll.Programs[kernelForwardFullNATProgramName],
+		forwardFullNATExistingProg: coll.Programs[kernelForwardFullNATExistingProgramName],
+		forwardFullNATNewProg:      coll.Programs[kernelForwardFullNATNewProgramName],
+		forwardEgressNATProg:       coll.Programs[kernelForwardEgressNATProgramName],
+		replyDispatchProg:          coll.Programs[kernelReplyDispatchProgramName],
+		replyTransparentProg:       coll.Programs[kernelReplyTransparentProgramName],
+		replyFullNATProg:           coll.Programs[kernelReplyFullNATProgramName],
+		progChainV4:                coll.Maps[kernelTCProgramChainMapName],
+		rulesV4:                    coll.Maps[kernelRulesMapNameV4],
+		rulesV6:                    coll.Maps[kernelRulesMapNameV6],
+		flowsV4:                    coll.Maps[kernelFlowsMapNameV4],
+		flowsV6:                    coll.Maps[kernelFlowsMapNameV6],
+		natV4:                      coll.Maps[kernelNatPortsMapNameV4],
+		natV6:                      coll.Maps[kernelNatPortsMapNameV6],
 	}
 	if pieces.forwardProg == nil || pieces.replyProg == nil || pieces.rulesV4 == nil || pieces.flowsV4 == nil || pieces.natV4 == nil {
 		return kernelCollectionPieces{}, fmt.Errorf("kernel object is missing required programs or maps")
+	}
+	hasAnyDispatchV4 := pieces.forwardDispatchProg != nil ||
+		pieces.forwardTransparentProg != nil ||
+		pieces.forwardFullNATProg != nil ||
+		pieces.forwardFullNATExistingProg != nil ||
+		pieces.forwardFullNATNewProg != nil ||
+		pieces.forwardEgressNATProg != nil ||
+		pieces.replyDispatchProg != nil ||
+		pieces.replyTransparentProg != nil ||
+		pieces.replyFullNATProg != nil ||
+		pieces.progChainV4 != nil
+	if hasAnyDispatchV4 && !kernelCollectionPiecesSupportDispatchV4(pieces) {
+		return kernelCollectionPieces{}, fmt.Errorf("kernel object has incomplete IPv4 dispatcher set")
+	}
+	if (pieces.forwardFullNATExistingProg != nil || pieces.forwardFullNATNewProg != nil) && !kernelCollectionPiecesSupportFullNATSplitV4(pieces) {
+		return kernelCollectionPieces{}, fmt.Errorf("kernel object has incomplete IPv4 full-nat split set")
 	}
 	hasAnyV6 := pieces.rulesV6 != nil || pieces.flowsV6 != nil || pieces.natV6 != nil
 	if hasAnyV6 {
@@ -2919,15 +3133,15 @@ func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(forwardIfRules map[in
 	if rt.coll == nil {
 		return false
 	}
-	forwardProg, replyProg, forwardProgV6, replyProgV6 := kernelAttachmentProgramsForPreparedRules(rt.coll, rt.preparedRules)
+	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, rt.preparedRules, rt.attachmentMode)
 	return kernelAttachmentsHealthy(
 		forwardIfRules,
 		replyIfRules,
 		rt.attachments,
-		forwardProg,
-		replyProg,
-		forwardProgV6,
-		replyProgV6,
+		programs.forwardProg,
+		programs.replyProg,
+		programs.forwardProgV6,
+		programs.replyProgV6,
 	)
 }
 

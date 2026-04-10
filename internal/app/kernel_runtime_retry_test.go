@@ -656,3 +656,33 @@ func TestPreparedKernelRulesNeedAttachmentResetForEgressNATChanges(t *testing.T)
 		t.Fatal("preparedKernelRulesNeedAttachmentReset() = true, want false when only egress synthetic rule ids drift")
 	}
 }
+
+func TestPreparedKernelRulesNeedAttachmentResetWhenDispatchRequirementChanges(t *testing.T) {
+	transparentRule := preparedKernelRule{
+		rule: Rule{ID: 81, Protocol: "tcp", Transparent: true},
+		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+		key:  tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 10001, Proto: 6},
+		value: tcRuleValueV4{
+			RuleID:      81,
+			BackendAddr: 2,
+			BackendPort: 80,
+			OutIfIndex:  3,
+		},
+	}
+	fullNATRule := transparentRule
+	fullNATRule.rule.ID = 82
+	fullNATRule.rule.Transparent = false
+	fullNATRule.value.RuleID = 82
+	fullNATRule.value.Flags = kernelRuleFlagFullNAT
+	fullNATRule.value.NATAddr = 7
+
+	if !preparedKernelRulesNeedAttachmentReset([]preparedKernelRule{transparentRule}, []preparedKernelRule{fullNATRule}) {
+		t.Fatal("preparedKernelRulesNeedAttachmentReset() = false, want true when IPv4 rules start requiring dispatcher mode")
+	}
+	if !preparedKernelRulesNeedAttachmentReset([]preparedKernelRule{fullNATRule}, []preparedKernelRule{transparentRule}) {
+		t.Fatal("preparedKernelRulesNeedAttachmentReset() = false, want true when IPv4 rules stop requiring dispatcher mode")
+	}
+	if preparedKernelRulesNeedAttachmentReset([]preparedKernelRule{fullNATRule}, []preparedKernelRule{fullNATRule}) {
+		t.Fatal("preparedKernelRulesNeedAttachmentReset() = true, want false when dispatcher requirement is unchanged")
+	}
+}

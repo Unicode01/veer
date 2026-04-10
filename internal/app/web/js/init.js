@@ -569,6 +569,12 @@
       return;
     }
 
+    const persistManagedNetworkBridge = e.target.closest('.btn-persist-managed-network-bridge');
+    if (persistManagedNetworkBridge) {
+      app.persistManagedNetworkBridge(parseInt(persistManagedNetworkBridge.dataset.id, 10));
+      return;
+    }
+
     const editRule = e.target.closest('.btn-edit');
     if (editRule) {
       app.enterRuleEditMode(app.decData(editRule.dataset.rule));
