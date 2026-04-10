@@ -494,16 +494,6 @@ ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 - 放行常用端口
 - 打开 `net.ipv4.ip_forward`
 
-## 运行时文件
-
-下面这些文件不建议提交到 Git：
-
-- `config.json`
-- `forward.db`
-- `forward.db-wal`
-- `forward.db-shm`
-- 本地编译产物，例如 `forward`、`forward-linux-amd64`
-
 ## WHMCS 插件
 
 仓库内附带 WHMCS addon 插件，源码位于：
