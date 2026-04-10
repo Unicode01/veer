@@ -515,6 +515,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads
 
 - 当前默认入口就是 GitHub Raw 上的 `bootstrap.sh`
 - 一键脚本会在目标机安装依赖、拉取指定 `Git ref`、执行 `release.sh`，最后再调用 `deploy.sh`
+- 如果目标机原本没有满足版本要求的 Go，一键脚本会把 Go 临时解压到 `FORWARD_WORKDIR` 下，仅供当前引导流程使用；脚本退出后会连同源码一起清理，不会写入 `/usr/local/go`
 - 如果你更偏向可复现部署，建议把 `FORWARD_REF` 固定到 tag 或 commit，而不是长期直接跟 `main`
 
 常见流程：

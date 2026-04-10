@@ -70,6 +70,9 @@ FORWARD_GO_VERSION="${FORWARD_GO_VERSION:-1.25.1}"
 FORWARD_WORKDIR="${FORWARD_WORKDIR:-/tmp/forward-bootstrap}"
 FORWARD_SKIP_APT="${FORWARD_SKIP_APT:-0}"
 FORWARD_SKIP_GO="${FORWARD_SKIP_GO:-0}"
+FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
+FORWARD_GO_ROOT="${FORWARD_WORKDIR}/go"
+FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH:-amd64}.tar.gz"
 
 DEPLOY_ARGS=("$@")
 
@@ -156,7 +159,6 @@ current_go_version() {
 install_go_if_needed() {
     local current=""
     local url=""
-    local tarball=""
 
     if [[ "${FORWARD_SKIP_GO}" == "1" ]]; then
         warn "已跳过 Go 安装检查"
@@ -169,52 +171,50 @@ install_go_if_needed() {
         return
     fi
 
-    info "安装 Go ${FORWARD_GO_VERSION}..."
+    info "安装临时 Go ${FORWARD_GO_VERSION}..."
     url="https://go.dev/dl/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
-    tarball="/tmp/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
+    FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
 
-    rm -f "${tarball}"
-    curl -fsSL "${url}" -o "${tarball}"
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf "${tarball}"
-    rm -f "${tarball}"
+    mkdir -p "${FORWARD_WORKDIR}"
+    rm -f "${FORWARD_GO_TARBALL}"
+    rm -rf "${FORWARD_GO_ROOT}"
+    curl -fsSL "${url}" -o "${FORWARD_GO_TARBALL}"
+    tar -C "${FORWARD_WORKDIR}" -xzf "${FORWARD_GO_TARBALL}"
+    rm -f "${FORWARD_GO_TARBALL}"
 
-    export PATH="/usr/local/go/bin:${PATH}"
+    export GOROOT="${FORWARD_GO_ROOT}"
+    export PATH="${FORWARD_GO_ROOT}/bin:${PATH}"
     current="$(current_go_version || true)"
     if [[ -z "${current}" ]] || ! dpkg --compare-versions "${current}" ge "${FORWARD_GO_VERSION}"; then
         fail "Go 安装失败，当前版本: ${current:-unknown}"
     fi
-    ok "Go 已安装: ${current}"
+    ok "临时 Go 已安装: ${current} (${FORWARD_GO_ROOT})"
 }
 
 clone_repo() {
-    local repo_dir="${FORWARD_WORKDIR}/repo"
-
     info "拉取源码: ${FORWARD_REPO_URL} @ ${FORWARD_REF}"
-    rm -rf "${FORWARD_WORKDIR}"
-    mkdir -p "${repo_dir}"
+    rm -rf "${FORWARD_REPO_DIR}"
+    mkdir -p "${FORWARD_REPO_DIR}"
 
-    git init -q "${repo_dir}"
-    git -C "${repo_dir}" remote add origin "${FORWARD_REPO_URL}"
-    git -C "${repo_dir}" fetch --depth 1 origin "${FORWARD_REF}"
-    git -C "${repo_dir}" checkout -q FETCH_HEAD
+    git init -q "${FORWARD_REPO_DIR}"
+    git -C "${FORWARD_REPO_DIR}" remote add origin "${FORWARD_REPO_URL}"
+    git -C "${FORWARD_REPO_DIR}" fetch --depth 1 origin "${FORWARD_REF}"
+    git -C "${FORWARD_REPO_DIR}" checkout -q FETCH_HEAD
 
-    FORWARD_REPO_DIR="${repo_dir}"
-    ok "源码已就绪: $(git -C "${repo_dir}" rev-parse --short HEAD)"
+    ok "源码已就绪: $(git -C "${FORWARD_REPO_DIR}" rev-parse --short HEAD)"
 }
 
 build_release() {
     info "开始构建 linux/${GOARCH}..."
-    export PATH="/usr/local/go/bin:${PATH}"
     cd "${FORWARD_REPO_DIR}"
-    ./release.sh "${GOARCH}"
+    bash ./release.sh "${GOARCH}"
     ok "构建完成"
 }
 
 run_deploy() {
     info "开始部署..."
     cd "${FORWARD_REPO_DIR}"
-    ./deploy.sh "${DEPLOY_ARGS[@]}"
+    bash ./deploy.sh "${DEPLOY_ARGS[@]}"
 }
 
 main() {
@@ -224,6 +224,7 @@ main() {
     require_command tar
 
     detect_arch
+    FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
     require_supported_distro
     install_apt_deps
     require_command git
