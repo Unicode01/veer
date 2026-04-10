@@ -13,10 +13,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed web
 var webFS embed.FS
+
+const (
+	apiServerReadHeaderTimeout = 10 * time.Second
+	apiServerReadTimeout       = 30 * time.Second
+	apiServerWriteTimeout      = 30 * time.Second
+	apiServerIdleTimeout       = 120 * time.Second
+	apiServerMaxHeaderBytes    = 1 << 20
+)
 
 type ruleSetEnabledRequest struct {
 	ID      int64 `json:"id"`
@@ -328,8 +337,13 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) *http.Server {
 
 	addr := fmt.Sprintf(":%d", cfg.WebPort)
 	server := &http.Server{
-		Addr:    addr,
-		Handler: securityHeadersMiddleware(mux),
+		Addr:              addr,
+		Handler:           securityHeadersMiddleware(mux),
+		ReadHeaderTimeout: apiServerReadHeaderTimeout,
+		ReadTimeout:       apiServerReadTimeout,
+		WriteTimeout:      apiServerWriteTimeout,
+		IdleTimeout:       apiServerIdleTimeout,
+		MaxHeaderBytes:    apiServerMaxHeaderBytes,
 	}
 	go func() {
 		log.Printf("web server listening on %s", addr)
@@ -391,7 +405,7 @@ func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 		return
 	}
 
-	rules, err := dbGetRules(db)
+	rules, err := dbGetRulesFiltered(db, filters)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -659,7 +673,7 @@ func matchesRuleSearchQuery(rule RuleStatus, query string) bool {
 
 func handleValidateRules(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	var req ruleBatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequestBody(w, r, &req, apiJSONBatchBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -684,7 +698,7 @@ func handleValidateRules(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 func handleBatchRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var req ruleBatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequestBody(w, r, &req, apiJSONBatchBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -770,23 +784,40 @@ func prepareRuleBatch(db sqlRuleStore, req ruleBatchRequest) (preparedRuleBatch,
 	if err != nil {
 		return prepared, nil, err
 	}
-	existingRules, err := dbGetRules(db)
+	existingRules, err := dbGetEnabledRules(db)
 	if err != nil {
 		return prepared, nil, err
 	}
-	existingSites, err := dbGetSites(db)
+	referencedRules, err := dbGetRulesByIDs(db, collectReferencedRuleBatchIDs(req))
 	if err != nil {
 		return prepared, nil, err
 	}
-	existingRanges, err := dbGetRanges(db)
+	existingSites, err := dbGetEnabledSites(db)
+	if err != nil {
+		return prepared, nil, err
+	}
+	existingRanges, err := dbGetEnabledRanges(db)
 	if err != nil {
 		return prepared, nil, err
 	}
 
-	existingByID := make(map[int64]Rule, len(existingRules))
-	projected := make(map[int64]projectedRuleState, len(existingRules))
+	existingByID := make(map[int64]Rule, len(existingRules)+len(referencedRules))
+	projected := make(map[int64]projectedRuleState, len(existingRules)+len(referencedRules))
 	for _, rule := range existingRules {
 		existingByID[rule.ID] = rule
+		projected[rule.ID] = projectedRuleState{
+			Rule:         rule,
+			ContentScope: "existing",
+			ContentIndex: -1,
+			EnableScope:  "existing",
+			EnableIndex:  -1,
+		}
+	}
+	for _, rule := range referencedRules {
+		existingByID[rule.ID] = rule
+		if _, ok := projected[rule.ID]; ok {
+			continue
+		}
 		projected[rule.ID] = projectedRuleState{
 			Rule:         rule,
 			ContentScope: "existing",
@@ -908,6 +939,18 @@ func prepareRuleBatch(db sqlRuleStore, req ruleBatchRequest) (preparedRuleBatch,
 
 	sort.Slice(prepared.DeleteIDs, func(i, j int) bool { return prepared.DeleteIDs[i] < prepared.DeleteIDs[j] })
 	return prepared, issues, nil
+}
+
+func collectReferencedRuleBatchIDs(req ruleBatchRequest) []int64 {
+	ids := make([]int64, 0, len(req.DeleteIDs)+len(req.Update)+len(req.SetEnabled))
+	ids = append(ids, req.DeleteIDs...)
+	for _, rule := range req.Update {
+		ids = append(ids, rule.ID)
+	}
+	for _, change := range req.SetEnabled {
+		ids = append(ids, change.ID)
+	}
+	return ids
 }
 
 func loadHostValidationData() (map[string]struct{}, hostInterfaceAddrs, error) {
@@ -1343,7 +1386,7 @@ func hasRuleNotFoundIssue(issues []ruleValidationIssue) bool {
 
 func handleAddRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var rule Rule
-	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+	if err := decodeJSONRequestBody(w, r, &rule, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -1389,7 +1432,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Proce
 
 func handleUpdateRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var rule Rule
-	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+	if err := decodeJSONRequestBody(w, r, &rule, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -1570,7 +1613,7 @@ func handleListSites(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 
 func handleAddSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var site Site
-	if err := json.NewDecoder(r.Body).Decode(&site); err != nil {
+	if err := decodeJSONRequestBody(w, r, &site, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -1594,6 +1637,10 @@ func handleAddSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Proce
 
 	id, err := dbAddSite(tx, &site)
 	if err != nil {
+		if issues := siteConstraintIssuesFromDBError(tx, site, err, "create"); len(issues) > 0 {
+			writeValidationIssueResponse(w, http.StatusBadRequest, issues)
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1610,7 +1657,7 @@ func handleAddSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Proce
 
 func handleUpdateSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var site Site
-	if err := json.NewDecoder(r.Body).Decode(&site); err != nil {
+	if err := decodeJSONRequestBody(w, r, &site, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -1636,6 +1683,10 @@ func handleUpdateSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	}
 
 	if err := dbUpdateSite(tx, &site); err != nil {
+		if issues := siteConstraintIssuesFromDBError(tx, site, err, "update"); len(issues) > 0 {
+			writeValidationIssueResponse(w, http.StatusBadRequest, issues)
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1814,7 +1865,7 @@ func loadEffectiveEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
 	snapshot := loadEgressNATInterfaceSnapshot()
 	items = normalizeEgressNATItemsWithSnapshot(items, snapshot)
 
-	managedNetworks, err := dbGetManagedNetworks(db)
+	managedNetworks, err := dbGetEnabledManagedNetworks(db)
 	if err != nil {
 		return nil, err
 	}
@@ -1822,7 +1873,37 @@ func loadEffectiveEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
 		return items, nil
 	}
 
-	ipv6Assignments, err := dbGetIPv6Assignments(db)
+	ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
+	if err != nil {
+		return nil, err
+	}
+	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, items, snapshot.Infos)
+	if len(compiled.EgressNATs) == 0 {
+		return items, nil
+	}
+
+	items = append(items, compiled.EgressNATs...)
+	return items, nil
+}
+
+func loadEffectiveEnabledEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
+	items, err := dbGetEnabledEgressNATs(db)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot := loadEgressNATInterfaceSnapshot()
+	items = normalizeEgressNATItemsWithSnapshot(items, snapshot)
+
+	managedNetworks, err := dbGetEnabledManagedNetworks(db)
+	if err != nil {
+		return nil, err
+	}
+	if len(managedNetworks) == 0 {
+		return items, nil
+	}
+
+	ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
 	if err != nil {
 		return nil, err
 	}
@@ -1852,31 +1933,6 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		pageSize = 1000
 	}
 
-	allRules, err := dbGetRules(db)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	allRanges, err := dbGetRanges(db)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	allEgressNATs, err := loadEffectiveEgressNATItems(db)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	enabledSites := 0
-	if sites, err := dbGetSites(db); err == nil {
-		for _, s := range sites {
-			if s.Enabled {
-				enabledSites++
-			}
-		}
-	}
-
 	type workerSnap struct {
 		kind           string
 		index          int
@@ -1896,6 +1952,7 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	kernelRuleIDs := make(map[int64]bool)
 	kernelRangeIDs := make(map[int64]bool)
 	kernelBinaryHash := ""
+	needsSharedSiteCount := false
 	pm.mu.Lock()
 	for id := range pm.kernelRules {
 		kernelRuleIDs[id] = true
@@ -1962,7 +2019,8 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		}
 		snaps = append(snaps, s)
 	}
-	if pm.sharedProxy != nil && enabledSites > 0 {
+	if pm.sharedProxy != nil {
+		needsSharedSiteCount = true
 		snaps = append(snaps, workerSnap{
 			kind:       "shared",
 			index:      0,
@@ -2077,14 +2135,47 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	}
 	pm.mu.Unlock()
 
-	if len(kernelRuleIDs) > 0 {
-		kernelRules := make([]Rule, 0, len(kernelRuleIDs))
-		for _, rule := range allRules {
-			if !rule.Enabled || !kernelRuleIDs[rule.ID] {
-				continue
-			}
-			kernelRules = append(kernelRules, rule)
+	enabledSites := 0
+	if needsSharedSiteCount {
+		count, err := dbCountEnabledSites(db)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
 		}
+		enabledSites = count
+		if enabledSites == 0 {
+			filtered := snaps[:0]
+			for _, snap := range snaps {
+				if snap.kind == workerKindShared {
+					continue
+				}
+				filtered = append(filtered, snap)
+			}
+			snaps = filtered
+		}
+	}
+
+	var kernelRules []Rule
+	if len(kernelRuleIDs) > 0 {
+		var err error
+		kernelRules, err = dbGetEnabledRulesByIDs(db, trueInt64Keys(kernelRuleIDs))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	var kernelRanges []PortRange
+	if len(kernelRangeIDs) > 0 {
+		var err error
+		kernelRanges, err = dbGetEnabledRangesByIDs(db, trueInt64Keys(kernelRangeIDs))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	if len(kernelRuleIDs) > 0 {
 		if len(kernelRules) > 0 {
 			sort.Slice(kernelRules, func(i, j int) bool { return kernelRules[i].ID < kernelRules[j].ID })
 			snaps = append(snaps, workerSnap{
@@ -2097,13 +2188,6 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		}
 	}
 	if len(kernelRangeIDs) > 0 {
-		kernelRanges := make([]PortRange, 0, len(kernelRangeIDs))
-		for _, pr := range allRanges {
-			if !pr.Enabled || !kernelRangeIDs[pr.ID] {
-				continue
-			}
-			kernelRanges = append(kernelRanges, pr)
-		}
 		if len(kernelRanges) > 0 {
 			sort.Slice(kernelRanges, func(i, j int) bool { return kernelRanges[i].ID < kernelRanges[j].ID })
 			snaps = append(snaps, workerSnap{
@@ -2188,11 +2272,13 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		workers = append(workers, view)
 	}
 
+	allEgressNATs, err := loadEffectiveEnabledEgressNATItems(db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	enabledEgressNATs := make([]EgressNATStatus, 0, len(allEgressNATs))
 	for _, item := range allEgressNATs {
-		if !item.Enabled {
-			continue
-		}
 		enabledEgressNATs = append(enabledEgressNATs, pm.buildEgressNATStatus(item, pm.egressNATRuntimeStatus(item.ID, item.Enabled)))
 	}
 	if len(enabledEgressNATs) > 0 {
@@ -2265,10 +2351,81 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		Page:       page,
 		PageSize:   pageSize,
 		Total:      total,
-		BinaryHash: pm.binaryHash,
+		BinaryHash: kernelBinaryHash,
 		Workers:    out,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func trueInt64Keys(values map[int64]bool) []int64 {
+	keys := make([]int64, 0, len(values))
+	for id, ok := range values {
+		if ok {
+			keys = append(keys, id)
+		}
+	}
+	return keys
+}
+
+func siteConstraintIssuesFromDBError(db sqlRuleStore, site Site, err error, scope string) []ruleValidationIssue {
+	indexName := sqliteUniqueConstraintIndexName(err)
+	switch indexName {
+	case dbConstraintIndexSitesHTTPDomainEnabled:
+		return loadSiteDomainConstraintIssue(db, site, scope, "http")
+	case dbConstraintIndexSitesHTTPSDomainEnabled:
+		return loadSiteDomainConstraintIssue(db, site, scope, "https")
+	default:
+		return nil
+	}
+}
+
+func loadSiteDomainConstraintIssue(db sqlRuleStore, site Site, scope, kind string) []ruleValidationIssue {
+	conflictID, err := dbFindConflictingEnabledSiteDomainID(db, site, kind)
+	if err != nil {
+		return []ruleValidationIssue{singleSiteConstraintIssue(scope, site.ID, "domain", strings.ToUpper(kind)+" route conflicts with an existing enabled site domain")}
+	}
+
+	domain := strings.ToLower(strings.TrimSpace(site.Domain))
+	message := strings.ToUpper(kind) + " route conflicts with an existing enabled site domain"
+	if conflictID > 0 {
+		message = fmt.Sprintf("%s route conflicts with site #%d domain=%s [%s]", strings.ToUpper(kind), conflictID, domain, strings.ToUpper(kind))
+	}
+	return []ruleValidationIssue{singleSiteConstraintIssue(scope, site.ID, "domain", message)}
+}
+
+func singleSiteConstraintIssue(scope string, id int64, field, message string) ruleValidationIssue {
+	issue := ruleValidationIssue{
+		Scope:   scope,
+		ID:      id,
+		Field:   field,
+		Message: message,
+	}
+	if scope == "create" || scope == "update" {
+		issue.Index = 1
+	}
+	return issue
+}
+
+func dbFindConflictingEnabledSiteDomainID(db sqlRuleStore, site Site, kind string) (int64, error) {
+	var query string
+	switch kind {
+	case "http":
+		query = `SELECT id FROM sites WHERE id <> ? AND enabled = 1 AND backend_http > 0 AND lower(trim(domain)) = lower(trim(?)) ORDER BY id LIMIT 1`
+	case "https":
+		query = `SELECT id FROM sites WHERE id <> ? AND enabled = 1 AND backend_https > 0 AND lower(trim(domain)) = lower(trim(?)) ORDER BY id LIMIT 1`
+	default:
+		return 0, nil
+	}
+
+	var id int64
+	err := db.QueryRow(query, site.ID, site.Domain).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func handleKernelRuntime(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
@@ -2277,7 +2434,7 @@ func handleKernelRuntime(w http.ResponseWriter, r *http.Request, pm *ProcessMana
 
 func handleAddRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var pr PortRange
-	if err := json.NewDecoder(r.Body).Decode(&pr); err != nil {
+	if err := decodeJSONRequestBody(w, r, &pr, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -2317,7 +2474,7 @@ func handleAddRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Proc
 
 func handleUpdateRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var pr PortRange
-	if err := json.NewDecoder(r.Body).Decode(&pr); err != nil {
+	if err := decodeJSONRequestBody(w, r, &pr, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -2439,7 +2596,7 @@ func handleDeleteRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 
 func handleAddEgressNAT(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var item EgressNAT
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+	if err := decodeJSONRequestBody(w, r, &item, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -2478,7 +2635,7 @@ func handleAddEgressNAT(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *
 
 func handleUpdateEgressNAT(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var item EgressNAT
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+	if err := decodeJSONRequestBody(w, r, &item, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -3086,33 +3243,20 @@ func handleListSiteStats(w http.ResponseWriter, r *http.Request, pm *ProcessMana
 }
 
 func handleListCurrentConns(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
-	rules, err := dbGetRules(db)
+	ruleProtocols, err := dbGetRuleProtocolMap(db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	ranges, err := dbGetRanges(db)
+	rangeProtocols, err := dbGetRangeProtocolMap(db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	egressNATs, err := dbGetEgressNATs(db)
+	egressNATProtocols, err := dbGetEgressNATProtocolMap(db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
-	}
-
-	ruleProtocols := make(map[int64]string, len(rules))
-	for _, rule := range rules {
-		ruleProtocols[rule.ID] = rule.Protocol
-	}
-	rangeProtocols := make(map[int64]string, len(ranges))
-	for _, pr := range ranges {
-		rangeProtocols[pr.ID] = pr.Protocol
-	}
-	egressNATProtocols := make(map[int64]string, len(egressNATs))
-	for _, item := range egressNATs {
-		egressNATProtocols[item.ID] = item.Protocol
 	}
 
 	ruleCounts, rangeCounts, siteCounts, egressNATCounts, err := pm.collectCurrentConns(ruleProtocols, rangeProtocols, egressNATProtocols)

@@ -2,7 +2,6 @@ package app
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -242,7 +241,7 @@ func buildManagedNetworkStatuses(db sqlRuleStore, items []ManagedNetwork, pm *Pr
 		return statuses, nil
 	}
 
-	explicitIPv6, err := dbGetIPv6Assignments(db)
+	explicitIPv6, err := dbGetEnabledIPv6Assignments(db)
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +249,7 @@ func buildManagedNetworkStatuses(db sqlRuleStore, items []ManagedNetwork, pm *Pr
 	if err != nil {
 		return nil, err
 	}
-	explicitEgressNATs, err := dbGetEgressNATs(db)
+	explicitEgressNATs, err := dbGetEnabledEgressNATs(db)
 	if err != nil {
 		return nil, err
 	}
@@ -443,7 +442,7 @@ func hasManagedNetworkRepairChanges(result managedNetworkRepairResult) bool {
 
 func handleAddManagedNetwork(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var item ManagedNetwork
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+	if err := decodeJSONRequestBody(w, r, &item, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -481,7 +480,7 @@ func handleAddManagedNetwork(w http.ResponseWriter, r *http.Request, db *sql.DB,
 
 func handleUpdateManagedNetwork(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var item ManagedNetwork
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+	if err := decodeJSONRequestBody(w, r, &item, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}

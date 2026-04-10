@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +31,16 @@ func decodeValidationResponse(t *testing.T, w *httptest.ResponseRecorder) valida
 	var resp validationErrorResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode validation response: %v body=%s", err, w.Body.String())
+	}
+	return resp
+}
+
+func decodeErrorResponse(t *testing.T, w *httptest.ResponseRecorder) map[string]string {
+	t.Helper()
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v body=%s", err, w.Body.String())
 	}
 	return resp
 }
@@ -275,4 +286,58 @@ func TestHandleDeleteRangeNotFoundIncludesIssues(t *testing.T) {
 
 	resp := decodeValidationResponse(t, w)
 	assertValidationIssue(t, resp, "delete", "id", "range not found")
+}
+
+func TestHandleAddSiteRejectsUnknownJSONField(t *testing.T) {
+	db := openTestDB(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/sites", bytes.NewBufferString(`{"domain":"example.com","listen_ip":"0.0.0.0","backend_ip":"192.0.2.10","backend_http":8080,"unexpected":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handleAddSite(w, req, db, &ProcessManager{})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	resp := decodeErrorResponse(t, w)
+	if resp["error"] != "invalid request body" {
+		t.Fatalf("error = %q, want %q", resp["error"], "invalid request body")
+	}
+}
+
+func TestHandleAddIPv6AssignmentRejectsTrailingJSONPayload(t *testing.T) {
+	db := openTestDB(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/ipv6-assignments", bytes.NewBufferString(`{"parent_interface":"vmbr0"}{"target_interface":"tap100i0"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handleAddIPv6Assignment(w, req, db, &ProcessManager{})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	resp := decodeErrorResponse(t, w)
+	if resp["error"] != "invalid request body" {
+		t.Fatalf("error = %q, want %q", resp["error"], "invalid request body")
+	}
+}
+
+func TestHandleBatchRulesRejectsOversizedJSONBody(t *testing.T) {
+	db := openTestDB(t)
+	payload := `{"create":[{"in_ip":"0.0.0.0","in_port":10000,"out_ip":"192.0.2.10","out_port":10000,"protocol":"tcp","remark":"` +
+		strings.Repeat("x", int(apiJSONBatchBodyMaxBytes)) +
+		`"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/rules/batch", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handleBatchRules(w, req, db, &ProcessManager{})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	resp := decodeErrorResponse(t, w)
+	if resp["error"] != "invalid request body" {
+		t.Fatalf("error = %q, want %q", resp["error"], "invalid request body")
+	}
 }

@@ -2,7 +2,6 @@ package app
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -139,7 +138,12 @@ func buildManagedNetworkReservationStatuses(db sqlRuleStore, items []ManagedNetw
 	if len(items) == 0 {
 		return []ManagedNetworkReservationStatus{}, nil
 	}
-	networks, err := dbGetManagedNetworks(db)
+
+	networkIDs := make([]int64, 0, len(items))
+	for _, item := range items {
+		networkIDs = append(networkIDs, item.ManagedNetworkID)
+	}
+	networks, err := dbGetManagedNetworksByIDs(db, networkIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +193,7 @@ func handleListManagedNetworkReservationCandidates(w http.ResponseWriter, r *htt
 
 func handleAddManagedNetworkReservation(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var item ManagedNetworkReservation
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+	if err := decodeJSONRequestBody(w, r, &item, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -217,6 +221,10 @@ func handleAddManagedNetworkReservation(w http.ResponseWriter, r *http.Request, 
 
 	id, err := dbAddManagedNetworkReservation(tx, &item)
 	if err != nil {
+		if issues := managedNetworkReservationConstraintIssuesFromDBError(tx, item, err, "create"); len(issues) > 0 {
+			writeValidationIssueResponse(w, http.StatusBadRequest, issues)
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -231,7 +239,7 @@ func handleAddManagedNetworkReservation(w http.ResponseWriter, r *http.Request, 
 
 func handleUpdateManagedNetworkReservation(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var item ManagedNetworkReservation
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+	if err := decodeJSONRequestBody(w, r, &item, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -258,6 +266,10 @@ func handleUpdateManagedNetworkReservation(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := dbUpdateManagedNetworkReservation(tx, &item); err != nil {
+		if issues := managedNetworkReservationConstraintIssuesFromDBError(tx, item, err, "update"); len(issues) > 0 {
+			writeValidationIssueResponse(w, http.StatusBadRequest, issues)
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -267,6 +279,66 @@ func handleUpdateManagedNetworkReservation(w http.ResponseWriter, r *http.Reques
 	}
 	maybeRedistributeManagedNetworkWorkers(pm)
 	writeJSON(w, http.StatusOK, item)
+}
+
+func managedNetworkReservationConstraintIssuesFromDBError(db sqlRuleStore, item ManagedNetworkReservation, err error, scope string) []ruleValidationIssue {
+	switch sqliteUniqueConstraintIndexName(err) {
+	case dbConstraintIndexManagedNetworkReservationNetworkMAC:
+		conflictID, lookupErr := dbFindConflictingManagedNetworkReservationIDByMAC(db, item)
+		message := "mac_address conflicts with an existing reservation"
+		if lookupErr == nil && conflictID > 0 {
+			message = "mac_address conflicts with reservation #" + strconv.FormatInt(conflictID, 10)
+		}
+		return []ruleValidationIssue{singleManagedNetworkReservationConstraintIssue(scope, item.ID, "mac_address", message)}
+	case dbConstraintIndexManagedNetworkReservationNetworkIPv4:
+		conflictID, lookupErr := dbFindConflictingManagedNetworkReservationIDByIPv4(db, item)
+		message := "ipv4_address conflicts with an existing reservation"
+		if lookupErr == nil && conflictID > 0 {
+			message = "ipv4_address conflicts with reservation #" + strconv.FormatInt(conflictID, 10)
+		}
+		return []ruleValidationIssue{singleManagedNetworkReservationConstraintIssue(scope, item.ID, "ipv4_address", message)}
+	default:
+		return nil
+	}
+}
+
+func singleManagedNetworkReservationConstraintIssue(scope string, id int64, field, message string) ruleValidationIssue {
+	return ruleValidationIssue{
+		Scope:   scope,
+		ID:      id,
+		Field:   field,
+		Message: message,
+	}
+}
+
+func dbFindConflictingManagedNetworkReservationIDByMAC(db sqlRuleStore, item ManagedNetworkReservation) (int64, error) {
+	var id int64
+	err := db.QueryRow(
+		`SELECT id FROM managed_network_reservations WHERE id <> ? AND managed_network_id = ? AND lower(trim(mac_address)) = lower(trim(?)) ORDER BY id LIMIT 1`,
+		item.ID, item.ManagedNetworkID, item.MACAddress,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func dbFindConflictingManagedNetworkReservationIDByIPv4(db sqlRuleStore, item ManagedNetworkReservation) (int64, error) {
+	var id int64
+	err := db.QueryRow(
+		`SELECT id FROM managed_network_reservations WHERE id <> ? AND managed_network_id = ? AND trim(ipv4_address) = trim(?) ORDER BY id LIMIT 1`,
+		item.ID, item.ManagedNetworkID, item.IPv4Address,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func handleDeleteManagedNetworkReservation(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {

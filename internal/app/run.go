@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
@@ -10,7 +11,10 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
+
+const apiServerShutdownTimeout = 15 * time.Second
 
 func computeBinaryHash() string {
 	exe, err := os.Executable()
@@ -93,13 +97,18 @@ func Main(buildNonce string) {
 
 	apiServer := startAPI(cfg, db, pm)
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	<-sigCtx.Done()
 
 	log.Println("shutting down...")
 	if apiServer != nil {
-		_ = apiServer.Close()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), apiServerShutdownTimeout)
+		if err := apiServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("http server shutdown: %v", err)
+			_ = apiServer.Close()
+		}
+		cancel()
 	}
 	pm.stopAll()
 }

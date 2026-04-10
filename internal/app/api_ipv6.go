@@ -2,7 +2,6 @@ package app
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
@@ -61,7 +60,7 @@ func prepareIPv6AssignmentCreate(db sqlRuleStore, item IPv6Assignment) (IPv6Assi
 	if err != nil {
 		return IPv6Assignment{}, nil, err
 	}
-	existing, err := dbGetIPv6Assignments(db)
+	existing, err := dbGetEnabledIPv6Assignments(db)
 	if err != nil {
 		return IPv6Assignment{}, nil, err
 	}
@@ -84,7 +83,7 @@ func prepareIPv6AssignmentUpdate(db sqlRuleStore, item IPv6Assignment) (IPv6Assi
 	if err != nil {
 		return IPv6Assignment{}, nil, err
 	}
-	existing, err := dbGetIPv6Assignments(db)
+	existing, err := dbGetEnabledIPv6Assignments(db)
 	if err != nil {
 		return IPv6Assignment{}, nil, err
 	}
@@ -94,7 +93,7 @@ func prepareIPv6AssignmentUpdate(db sqlRuleStore, item IPv6Assignment) (IPv6Assi
 
 func handleAddIPv6Assignment(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var item IPv6Assignment
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+	if err := decodeJSONRequestBody(w, r, &item, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -133,7 +132,7 @@ func handleAddIPv6Assignment(w http.ResponseWriter, r *http.Request, db *sql.DB,
 
 func handleUpdateIPv6Assignment(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
 	var item IPv6Assignment
-	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+	if err := decodeJSONRequestBody(w, r, &item, apiJSONBodyMaxBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}

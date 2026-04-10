@@ -18,6 +18,15 @@ import (
 	"time"
 )
 
+const (
+	sharedProxyInitialReadTimeout = 15 * time.Second
+	sharedProxyHTTPReadBufferSize = 8 * 1024
+	sharedProxyTLSReadBufferSize  = 32 * 1024
+	sharedProxyMaxHeaderBytes     = 64 * 1024
+	sharedProxyMaxHeaderLines     = 128
+	sharedProxyMaxTLSRecordBytes  = 16 * 1024
+)
+
 func runSharedProxy(sockPath string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -319,6 +328,104 @@ type sharedProxyEngine struct {
 	domainTransparent map[string]bool       // domain -> transparent flag
 }
 
+type sharedProxyHTTPHeaders struct {
+	lines []string
+	host  string
+}
+
+func setSharedProxyReadDeadline(conn net.Conn, timeout time.Duration) {
+	if conn == nil {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+}
+
+func clearSharedProxyReadDeadline(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+}
+
+func readSharedProxyHTTPHeaders(br *bufio.Reader, clientIP string) (sharedProxyHTTPHeaders, error) {
+	var result sharedProxyHTTPHeaders
+	totalBytes := 0
+	lineCount := 0
+	hasXFF := false
+
+	for {
+		line, err := br.ReadSlice('\n')
+		if err != nil {
+			if err == bufio.ErrBufferFull {
+				return result, fmt.Errorf("http header line exceeds %d bytes", sharedProxyHTTPReadBufferSize)
+			}
+			return result, err
+		}
+
+		totalBytes += len(line)
+		if totalBytes > sharedProxyMaxHeaderBytes {
+			return result, fmt.Errorf("http headers exceed %d bytes", sharedProxyMaxHeaderBytes)
+		}
+
+		lineCount++
+		if lineCount > sharedProxyMaxHeaderLines {
+			return result, fmt.Errorf("http headers exceed %d lines", sharedProxyMaxHeaderLines)
+		}
+
+		trimmed := strings.TrimRight(string(line), "\r\n")
+		if trimmed == "" {
+			break
+		}
+
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "host:") {
+			host := strings.TrimSpace(trimmed[5:])
+			if colonIdx := strings.LastIndex(host, ":"); colonIdx > 0 {
+				host = host[:colonIdx]
+			}
+			result.host = strings.ToLower(host)
+		}
+		if strings.HasPrefix(lower, "x-forwarded-for:") {
+			hasXFF = true
+			existing := strings.TrimSpace(trimmed[16:])
+			trimmed = "X-Forwarded-For: " + existing + ", " + clientIP
+		}
+		result.lines = append(result.lines, trimmed)
+	}
+
+	if result.host == "" {
+		return result, fmt.Errorf("missing host header")
+	}
+	if !hasXFF && clientIP != "" {
+		result.lines = append(result.lines, "X-Forwarded-For: "+clientIP)
+	}
+	return result, nil
+}
+
+func peekSharedProxyTLSRecord(br *bufio.Reader) ([]byte, error) {
+	header, err := br.Peek(5)
+	if err != nil {
+		return nil, err
+	}
+	if header[0] != 0x16 {
+		return nil, fmt.Errorf("not a tls handshake record")
+	}
+
+	recordLen := int(header[3])<<8 | int(header[4])
+	if recordLen <= 0 {
+		return nil, fmt.Errorf("invalid tls record length")
+	}
+	if recordLen > sharedProxyMaxTLSRecordBytes {
+		return nil, fmt.Errorf("tls record exceeds %d bytes", sharedProxyMaxTLSRecordBytes)
+	}
+
+	record, err := br.Peek(5 + recordLen)
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
 func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site) sharedProxyApplyResult {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
@@ -478,58 +585,25 @@ func (sp *sharedProxyEngine) handleHTTPConn(ctx context.Context, src net.Conn) {
 
 	clientIP, _, _ := net.SplitHostPort(src.RemoteAddr().String())
 
-	br := bufio.NewReader(src)
-	var headerLines []string
-	host := ""
-	hasXFF := false
-
-	// Read HTTP headers to extract Host
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			return
-		}
-		trimmed := strings.TrimRight(line, "\r\n")
-		if trimmed == "" {
-			break
-		}
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "host:") {
-			h := strings.TrimSpace(trimmed[5:])
-			if colonIdx := strings.LastIndex(h, ":"); colonIdx > 0 {
-				h = h[:colonIdx]
-			}
-			host = strings.ToLower(h)
-		}
-		if strings.HasPrefix(lower, "x-forwarded-for:") {
-			hasXFF = true
-			existing := strings.TrimSpace(trimmed[16:])
-			trimmed = "X-Forwarded-For: " + existing + ", " + clientIP
-		}
-		headerLines = append(headerLines, trimmed)
-	}
-
-	if host == "" {
+	br := bufio.NewReaderSize(src, sharedProxyHTTPReadBufferSize)
+	setSharedProxyReadDeadline(src, sharedProxyInitialReadTimeout)
+	headers, err := readSharedProxyHTTPHeaders(br, clientIP)
+	if err != nil {
 		return
 	}
 
-	// Inject X-Forwarded-For if not present
-	if !hasXFF && clientIP != "" {
-		headerLines = append(headerLines, "X-Forwarded-For: "+clientIP)
-	}
-
 	sp.mu.RLock()
-	backend, ok := sp.httpRoutes[host]
-	ss := sp.domainStats[host]
-	sourceIP := sp.domainSourceIP[host]
-	transparent := sp.domainTransparent[host]
+	backend, ok := sp.httpRoutes[headers.host]
+	ss := sp.domainStats[headers.host]
+	sourceIP := sp.domainSourceIP[headers.host]
+	transparent := sp.domainTransparent[headers.host]
 	sp.mu.RUnlock()
 	if !ok {
 		return
 	}
 
 	var dst net.Conn
-	var err error
+	var dialErr error
 	if transparent {
 		clientAddr := src.RemoteAddr().(*net.TCPAddr)
 		ip4 := clientAddr.IP.To4()
@@ -541,17 +615,17 @@ func (sp *sharedProxyEngine) handleHTTPConn(ctx context.Context, src net.Conn) {
 			LocalAddr: &net.TCPAddr{IP: ip4, Port: 0},
 			Control:   controlTransparent(ip4, ""),
 		}
-		dst, err = dialer.DialContext(ctx, "tcp4", backend)
+		dst, dialErr = dialer.DialContext(ctx, "tcp4", backend)
 	} else {
 		dialer := net.Dialer{Timeout: 10 * time.Second}
-		if err = configureOutboundTCPDialer(&dialer, "", sourceIP); err != nil {
-			log.Printf("shared proxy http dial %s -> %s: %v", host, backend, err)
+		if dialErr = configureOutboundTCPDialer(&dialer, "", sourceIP); dialErr != nil {
+			log.Printf("shared proxy http dial %s -> %s: %v", headers.host, backend, dialErr)
 			return
 		}
-		dst, err = dialer.DialContext(ctx, "tcp", backend)
+		dst, dialErr = dialer.DialContext(ctx, "tcp", backend)
 	}
-	if err != nil {
-		log.Printf("shared proxy http dial %s -> %s: %v", host, backend, err)
+	if dialErr != nil {
+		log.Printf("shared proxy http dial %s -> %s: %v", headers.host, backend, dialErr)
 		return
 	}
 	defer dst.Close()
@@ -564,7 +638,7 @@ func (sp *sharedProxyEngine) handleHTTPConn(ctx context.Context, src net.Conn) {
 
 	// Write buffered headers (count as bytes in)
 	var headerBuf bytes.Buffer
-	for _, h := range headerLines {
+	for _, h := range headers.lines {
 		headerBuf.WriteString(h)
 		headerBuf.WriteString("\r\n")
 	}
@@ -575,11 +649,12 @@ func (sp *sharedProxyEngine) handleHTTPConn(ctx context.Context, src net.Conn) {
 		}
 		return &ss.bytesIn
 	}()); err != nil {
-		log.Printf("shared proxy http write buffered headers %s -> %s: %v", host, backend, err)
+		log.Printf("shared proxy http write buffered headers %s -> %s: %v", headers.host, backend, err)
 		return
 	}
 
 	// Bridge remaining data
+	clearSharedProxyReadDeadline(src)
 	var inCounter, outCounter *int64
 	if ss != nil {
 		inCounter = &ss.bytesIn
@@ -591,21 +666,9 @@ func (sp *sharedProxyEngine) handleHTTPConn(ctx context.Context, src net.Conn) {
 func (sp *sharedProxyEngine) handleHTTPSConn(ctx context.Context, src net.Conn) {
 	defer src.Close()
 
-	br := bufio.NewReader(src)
-
-	// Peek TLS record header (5 bytes)
-	header, err := br.Peek(5)
-	if err != nil || header[0] != 0x16 {
-		return
-	}
-
-	recordLen := int(header[3])<<8 | int(header[4])
-	if recordLen > 16384 {
-		return
-	}
-
-	// Peek full TLS record
-	record, err := br.Peek(5 + recordLen)
+	br := bufio.NewReaderSize(src, sharedProxyTLSReadBufferSize)
+	setSharedProxyReadDeadline(src, sharedProxyInitialReadTimeout)
+	record, err := peekSharedProxyTLSRecord(br)
 	if err != nil {
 		return
 	}
@@ -660,6 +723,7 @@ func (sp *sharedProxyEngine) handleHTTPSConn(ctx context.Context, src net.Conn) 
 		defer atomic.AddInt64(&ss.activeConns, -1)
 	}
 
+	clearSharedProxyReadDeadline(src)
 	var inCounter, outCounter *int64
 	if ss != nil {
 		inCounter = &ss.bytesIn

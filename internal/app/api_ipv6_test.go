@@ -298,6 +298,51 @@ func TestHandleAddIPv6AssignmentRejectsOverlappingPrefix(t *testing.T) {
 	assertValidationIssue(t, resp, "create", "assigned_prefix", "overlaps with ipv6 assignment #1")
 }
 
+func TestHandleAddIPv6AssignmentIgnoresDisabledOverlap(t *testing.T) {
+	db := openTestDB(t)
+
+	oldLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return []HostNetworkInterface{
+			{
+				Name: "vmbr0",
+				Addresses: []HostInterfaceAddress{
+					{Family: ipFamilyIPv6, IP: "2001:db8:100::10", CIDR: "2001:db8:100::/48", PrefixLen: 48},
+				},
+			},
+			{Name: "tap100i0"},
+			{Name: "tap101i0"},
+		}, nil
+	}
+	defer func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldLoad
+	}()
+
+	if _, err := dbAddIPv6Assignment(db, &IPv6Assignment{
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap100i0",
+		ParentPrefix:    "2001:db8:100::/48",
+		AssignedPrefix:  "2001:db8:100:1::/64",
+		Enabled:         false,
+	}); err != nil {
+		t.Fatalf("seed disabled assignment: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/ipv6-assignments", IPv6Assignment{
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap101i0",
+		ParentPrefix:    "2001:db8:100::/48",
+		AssignedPrefix:  "2001:db8:100:1::1/128",
+		Enabled:         true,
+	})
+	w := httptest.NewRecorder()
+
+	handleAddIPv6Assignment(w, req, db, &ProcessManager{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+}
+
 func TestDBGetIPv6AssignmentSynthesizesAssignedPrefixFromLegacyColumns(t *testing.T) {
 	db := openTestDB(t)
 
@@ -347,6 +392,62 @@ func TestHandleUpdateIPv6AssignmentNotFoundIncludesIssues(t *testing.T) {
 
 	resp := decodeValidationResponse(t, w)
 	assertValidationIssue(t, resp, "update", "id", "ipv6 assignment not found")
+}
+
+func TestHandleUpdateIPv6AssignmentEnableIgnoresDisabledOverlap(t *testing.T) {
+	db := openTestDB(t)
+
+	oldLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return []HostNetworkInterface{
+			{
+				Name: "vmbr0",
+				Addresses: []HostInterfaceAddress{
+					{Family: ipFamilyIPv6, IP: "2001:db8:100::10", CIDR: "2001:db8:100::/48", PrefixLen: 48},
+				},
+			},
+			{Name: "tap100i0"},
+			{Name: "tap101i0"},
+		}, nil
+	}
+	defer func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldLoad
+	}()
+
+	id, err := dbAddIPv6Assignment(db, &IPv6Assignment{
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap100i0",
+		ParentPrefix:    "2001:db8:100::/48",
+		AssignedPrefix:  "2001:db8:100:1::/64",
+		Enabled:         false,
+	})
+	if err != nil {
+		t.Fatalf("seed target assignment: %v", err)
+	}
+	if _, err := dbAddIPv6Assignment(db, &IPv6Assignment{
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap101i0",
+		ParentPrefix:    "2001:db8:100::/48",
+		AssignedPrefix:  "2001:db8:100:1::1/128",
+		Enabled:         false,
+	}); err != nil {
+		t.Fatalf("seed overlapping disabled assignment: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPut, "/api/ipv6-assignments", IPv6Assignment{
+		ID:              id,
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap100i0",
+		ParentPrefix:    "2001:db8:100::/48",
+		AssignedPrefix:  "2001:db8:100:1::/64",
+		Enabled:         true,
+	})
+	w := httptest.NewRecorder()
+
+	handleUpdateIPv6Assignment(w, req, db, &ProcessManager{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
 }
 
 func TestHandleUpdateIPv6AssignmentQueuesRedistribute(t *testing.T) {

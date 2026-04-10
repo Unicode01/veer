@@ -27,11 +27,19 @@ type managedNetworkDiscoveredMAC struct {
 var loadManagedNetworkReservationCandidatesForTests func([]ManagedNetwork, []ManagedNetworkReservation) ([]ManagedNetworkReservationCandidate, error)
 
 func loadManagedNetworkReservationCandidates(db sqlRuleStore) ([]ManagedNetworkReservationCandidate, error) {
-	networks, err := dbGetManagedNetworks(db)
+	networks, err := dbGetEnabledManagedNetworks(db)
 	if err != nil {
 		return nil, err
 	}
-	reservations, err := dbGetManagedNetworkReservations(db)
+	if len(networks) == 0 {
+		return []ManagedNetworkReservationCandidate{}, nil
+	}
+
+	networkIDs := make([]int64, 0, len(networks))
+	for _, network := range networks {
+		networkIDs = append(networkIDs, network.ID)
+	}
+	reservations, err := dbGetManagedNetworkReservationsByManagedNetworkIDs(db, networkIDs)
 	if err != nil {
 		return nil, err
 	}

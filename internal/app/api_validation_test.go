@@ -139,6 +139,35 @@ func TestPrepareRangeToggleRejectsConflictWithEnabledRule(t *testing.T) {
 	}
 }
 
+func TestPrepareRuleBatchDeleteDisabledRuleStillDeletesExistingItem(t *testing.T) {
+	db := openValidationTestDB(t)
+
+	ruleID, err := dbAddRule(db, &Rule{
+		InIP:     "0.0.0.0",
+		InPort:   30022,
+		OutIP:    "192.0.2.20",
+		OutPort:  22,
+		Protocol: "tcp",
+		Enabled:  false,
+	})
+	if err != nil {
+		t.Fatalf("dbAddRule() error = %v", err)
+	}
+
+	prepared, issues, err := prepareRuleBatch(db, ruleBatchRequest{
+		DeleteIDs: []int64{ruleID},
+	})
+	if err != nil {
+		t.Fatalf("prepareRuleBatch() error = %v", err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("prepareRuleBatch() issues = %#v, want none", issues)
+	}
+	if len(prepared.DeleteIDs) != 1 || prepared.DeleteIDs[0] != ruleID {
+		t.Fatalf("prepared.DeleteIDs = %#v, want [%d]", prepared.DeleteIDs, ruleID)
+	}
+}
+
 func openValidationTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 

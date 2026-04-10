@@ -2,14 +2,34 @@ package app
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	_ "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const ruleColumns = `id, in_interface, in_ip, in_port, out_interface, out_ip, out_source_ip, out_port, protocol, remark, tag, enabled, transparent, engine_preference`
+
+const (
+	dbBusyTimeoutMillis = 5000
+	dbTxLockMode        = "immediate"
+)
+
+type dbIndexDefinition struct {
+	Name    string
+	Table   string
+	Columns string
+}
+
+type dbConstraintIndexDefinition struct {
+	Name           string
+	CreateSQL      string
+	DuplicateProbe string
+}
 
 type sqlRuleStore interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
@@ -128,8 +148,78 @@ var schema = map[string][][2]string{
 	},
 }
 
+var schemaIndexes = []dbIndexDefinition{
+	{Name: "idx_rules_enabled", Table: "rules", Columns: "enabled"},
+	{Name: "idx_rules_tag", Table: "rules", Columns: "tag"},
+	{Name: "idx_rules_protocol", Table: "rules", Columns: "protocol"},
+	{Name: "idx_rules_listener", Table: "rules", Columns: "in_interface, in_ip, in_port, protocol, enabled"},
+	{Name: "idx_rules_target", Table: "rules", Columns: "out_interface, out_ip, out_port, enabled"},
+	{Name: "idx_sites_enabled", Table: "sites", Columns: "enabled"},
+	{Name: "idx_sites_domain", Table: "sites", Columns: "domain"},
+	{Name: "idx_sites_listener", Table: "sites", Columns: "listen_iface, listen_ip, enabled"},
+	{Name: "idx_ranges_enabled", Table: "ranges", Columns: "enabled"},
+	{Name: "idx_ranges_tag", Table: "ranges", Columns: "tag"},
+	{Name: "idx_ranges_protocol", Table: "ranges", Columns: "protocol"},
+	{Name: "idx_ranges_listener", Table: "ranges", Columns: "in_interface, in_ip, start_port, end_port, enabled"},
+	{Name: "idx_egress_nats_enabled", Table: "egress_nats", Columns: "enabled"},
+	{Name: "idx_egress_nats_scope", Table: "egress_nats", Columns: "parent_interface, child_interface, out_interface, enabled"},
+	{Name: "idx_managed_networks_enabled", Table: "managed_networks", Columns: "enabled"},
+	{Name: "idx_managed_network_reservations_network_id", Table: "managed_network_reservations", Columns: "managed_network_id"},
+	{Name: "idx_ipv6_assignments_enabled", Table: "ipv6_assignments", Columns: "enabled"},
+}
+
+const (
+	dbConstraintIndexSitesHTTPDomainEnabled               = "ux_sites_http_domain_enabled"
+	dbConstraintIndexSitesHTTPSDomainEnabled              = "ux_sites_https_domain_enabled"
+	dbConstraintIndexManagedNetworkReservationNetworkMAC  = "ux_managed_network_reservations_network_mac"
+	dbConstraintIndexManagedNetworkReservationNetworkIPv4 = "ux_managed_network_reservations_network_ipv4"
+)
+
+var schemaConstraintIndexes = []dbConstraintIndexDefinition{
+	{
+		Name:      dbConstraintIndexSitesHTTPDomainEnabled,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + dbConstraintIndexSitesHTTPDomainEnabled + ` ON sites((CASE WHEN enabled = 1 AND backend_http > 0 AND trim(domain) <> '' THEN lower(trim(domain)) END))`,
+		DuplicateProbe: `SELECT lower(trim(domain))
+			FROM sites
+			WHERE enabled = 1 AND backend_http > 0 AND trim(domain) <> ''
+			GROUP BY lower(trim(domain))
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      dbConstraintIndexSitesHTTPSDomainEnabled,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + dbConstraintIndexSitesHTTPSDomainEnabled + ` ON sites((CASE WHEN enabled = 1 AND backend_https > 0 AND trim(domain) <> '' THEN lower(trim(domain)) END))`,
+		DuplicateProbe: `SELECT lower(trim(domain))
+			FROM sites
+			WHERE enabled = 1 AND backend_https > 0 AND trim(domain) <> ''
+			GROUP BY lower(trim(domain))
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      dbConstraintIndexManagedNetworkReservationNetworkMAC,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + dbConstraintIndexManagedNetworkReservationNetworkMAC + ` ON managed_network_reservations(managed_network_id, (CASE WHEN trim(mac_address) <> '' THEN lower(trim(mac_address)) END)) WHERE managed_network_id > 0 AND trim(mac_address) <> ''`,
+		DuplicateProbe: `SELECT printf('%d:%s', managed_network_id, lower(trim(mac_address)))
+			FROM managed_network_reservations
+			WHERE managed_network_id > 0 AND trim(mac_address) <> ''
+			GROUP BY managed_network_id, lower(trim(mac_address))
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      dbConstraintIndexManagedNetworkReservationNetworkIPv4,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + dbConstraintIndexManagedNetworkReservationNetworkIPv4 + ` ON managed_network_reservations(managed_network_id, (CASE WHEN trim(ipv4_address) <> '' THEN trim(ipv4_address) END)) WHERE managed_network_id > 0 AND trim(ipv4_address) <> ''`,
+		DuplicateProbe: `SELECT printf('%d:%s', managed_network_id, trim(ipv4_address))
+			FROM managed_network_reservations
+			WHERE managed_network_id > 0 AND trim(ipv4_address) <> ''
+			GROUP BY managed_network_id, trim(ipv4_address)
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+}
+
 func initDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_txlock=%s", path, dbBusyTimeoutMillis, dbTxLockMode))
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +228,12 @@ func initDB(path string) (*sql.DB, error) {
 		if err := ensureTable(db, table, cols); err != nil {
 			return nil, fmt.Errorf("migrate table %s: %w", table, err)
 		}
+	}
+	if err := ensureIndexes(db, schemaIndexes); err != nil {
+		return nil, fmt.Errorf("migrate indexes: %w", err)
+	}
+	if err := ensureConstraintIndexes(db, schemaConstraintIndexes); err != nil {
+		return nil, fmt.Errorf("migrate constraint indexes: %w", err)
 	}
 
 	return db, nil
@@ -200,6 +296,106 @@ func getTableColumns(db *sql.DB, table string) (map[string]bool, error) {
 	return cols, rows.Err()
 }
 
+func ensureIndexes(db *sql.DB, indexes []dbIndexDefinition) error {
+	for _, index := range indexes {
+		if err := ensureIndex(db, index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureIndex(db *sql.DB, index dbIndexDefinition) error {
+	var existing string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, index.Name).Scan(&existing)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+
+	createSQL := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)", index.Name, index.Table, index.Columns)
+	if _, err := db.Exec(createSQL); err != nil {
+		return fmt.Errorf("create index %s: %w", index.Name, err)
+	}
+	log.Printf("db migrate: added index %s on %s", index.Name, index.Table)
+	return nil
+}
+
+func ensureConstraintIndexes(db *sql.DB, indexes []dbConstraintIndexDefinition) error {
+	for _, index := range indexes {
+		if err := ensureConstraintIndex(db, index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureConstraintIndex(db *sql.DB, index dbConstraintIndexDefinition) error {
+	exists, err := dbIndexExists(db, index.Name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	if index.DuplicateProbe != "" {
+		var sample string
+		err := db.QueryRow(index.DuplicateProbe).Scan(&sample)
+		switch {
+		case err == nil:
+			log.Printf("db migrate: skipped unique index %s due to existing duplicate value %q", index.Name, sample)
+			return nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+	}
+
+	if _, err := db.Exec(index.CreateSQL); err != nil {
+		return fmt.Errorf("create unique index %s: %w", index.Name, err)
+	}
+	log.Printf("db migrate: added unique index %s", index.Name)
+	return nil
+}
+
+func dbIndexExists(db *sql.DB, name string) (bool, error) {
+	var existing string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&existing)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, err
+}
+
+type sqliteErrorCoder interface {
+	Code() int
+}
+
+func sqliteUniqueConstraintIndexName(err error) string {
+	var coder sqliteErrorCoder
+	if !errors.As(err, &coder) || coder.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+		return ""
+	}
+
+	msg := err.Error()
+	const marker = "index '"
+	start := strings.Index(msg, marker)
+	if start < 0 {
+		return ""
+	}
+	start += len(marker)
+	end := strings.Index(msg[start:], "'")
+	if end < 0 {
+		return ""
+	}
+	return msg[start : start+end]
+}
+
 func dbAddRule(db sqlRuleStore, r *Rule) (int64, error) {
 	res, err := db.Exec(
 		`INSERT INTO rules (in_interface, in_ip, in_port, out_interface, out_ip, out_source_ip, out_port, protocol, remark, tag, enabled, transparent, engine_preference)
@@ -226,7 +422,85 @@ func dbDeleteRule(db sqlRuleStore, id int64) error {
 }
 
 func dbGetRules(db sqlRuleStore) ([]Rule, error) {
-	rows, err := db.Query(`SELECT ` + ruleColumns + ` FROM rules`)
+	return dbQueryRules(db, `SELECT `+ruleColumns+` FROM rules`)
+}
+
+func dbGetEnabledRules(db sqlRuleStore) ([]Rule, error) {
+	return dbQueryRules(db, `SELECT `+ruleColumns+` FROM rules WHERE enabled = 1`)
+}
+
+func dbGetRulesByIDs(db sqlRuleStore, ids []int64) ([]Rule, error) {
+	normalized := normalizePositiveInt64Values(ids)
+	if len(normalized) == 0 {
+		return []Rule{}, nil
+	}
+
+	args := make([]interface{}, 0, len(normalized))
+	holders := make([]string, 0, len(normalized))
+	for _, id := range normalized {
+		holders = append(holders, "?")
+		args = append(args, id)
+	}
+
+	query := `SELECT ` + ruleColumns + ` FROM rules WHERE id IN (` + strings.Join(holders, ",") + `)`
+	return dbQueryRules(db, query, args...)
+}
+
+func dbGetRulesFiltered(db sqlRuleStore, filters ruleFilter) ([]Rule, error) {
+	query := `SELECT ` + ruleColumns + ` FROM rules`
+	var where []string
+	var args []interface{}
+
+	appendInt64SetCondition(&where, &args, "id", filters.IDs)
+	appendStringSetCondition(&where, &args, "tag", filters.Tags)
+	appendLowerStringSetCondition(&where, &args, "protocol", filters.Protocols)
+	if filters.Enabled != nil {
+		where = append(where, "enabled = ?")
+		args = append(args, boolToInt(*filters.Enabled))
+	}
+	if filters.Transparent != nil {
+		where = append(where, "transparent = ?")
+		args = append(args, boolToInt(*filters.Transparent))
+	}
+	appendExactStringCondition(&where, &args, "in_interface", filters.InInterface)
+	appendExactStringCondition(&where, &args, "out_interface", filters.OutInterface)
+	appendExactStringCondition(&where, &args, "in_ip", filters.InIP)
+	appendExactStringCondition(&where, &args, "out_ip", filters.OutIP)
+	appendExactStringCondition(&where, &args, "out_source_ip", filters.OutSourceIP)
+	if filters.InPort > 0 {
+		where = append(where, "in_port = ?")
+		args = append(args, filters.InPort)
+	}
+	if filters.OutPort > 0 {
+		where = append(where, "out_port = ?")
+		args = append(args, filters.OutPort)
+	}
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, ` AND `)
+	}
+
+	return dbQueryRules(db, query, args...)
+}
+
+func dbGetEnabledRulesByIDs(db sqlRuleStore, ids []int64) ([]Rule, error) {
+	normalized := normalizePositiveInt64Values(ids)
+	if len(normalized) == 0 {
+		return []Rule{}, nil
+	}
+
+	args := make([]interface{}, 0, len(normalized)+1)
+	holders := make([]string, 0, len(normalized))
+	for _, id := range normalized {
+		holders = append(holders, "?")
+		args = append(args, id)
+	}
+
+	query := `SELECT ` + ruleColumns + ` FROM rules WHERE enabled = 1 AND id IN (` + strings.Join(holders, ",") + `)`
+	return dbQueryRules(db, query, args...)
+}
+
+func dbQueryRules(db sqlRuleStore, query string, args ...interface{}) ([]Rule, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +515,90 @@ func dbGetRules(db sqlRuleStore) ([]Rule, error) {
 		rules = append(rules, r)
 	}
 	return rules, rows.Err()
+}
+
+func appendInt64SetCondition(where *[]string, args *[]interface{}, column string, values map[int64]struct{}) {
+	if len(values) == 0 {
+		return
+	}
+
+	items := make([]int64, 0, len(values))
+	for value := range values {
+		items = append(items, value)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i] < items[j]
+	})
+
+	holders := make([]string, 0, len(items))
+	for _, value := range items {
+		holders = append(holders, "?")
+		*args = append(*args, value)
+	}
+	*where = append(*where, fmt.Sprintf("%s IN (%s)", column, strings.Join(holders, ",")))
+}
+
+func appendStringSetCondition(where *[]string, args *[]interface{}, column string, values map[string]struct{}) {
+	appendNormalizedStringSetCondition(where, args, column, values, false)
+}
+
+func appendLowerStringSetCondition(where *[]string, args *[]interface{}, column string, values map[string]struct{}) {
+	appendNormalizedStringSetCondition(where, args, column, values, true)
+}
+
+func appendNormalizedStringSetCondition(where *[]string, args *[]interface{}, column string, values map[string]struct{}, lowerColumn bool) {
+	if len(values) == 0 {
+		return
+	}
+
+	items := make([]string, 0, len(values))
+	for value := range values {
+		items = append(items, value)
+	}
+	sort.Strings(items)
+
+	holders := make([]string, 0, len(items))
+	for _, value := range items {
+		holders = append(holders, "?")
+		*args = append(*args, value)
+	}
+
+	columnExpr := column
+	if lowerColumn {
+		columnExpr = "LOWER(" + column + ")"
+	}
+	*where = append(*where, fmt.Sprintf("%s IN (%s)", columnExpr, strings.Join(holders, ",")))
+}
+
+func appendExactStringCondition(where *[]string, args *[]interface{}, column, value string) {
+	if value == "" {
+		return
+	}
+	*where = append(*where, column+" = ?")
+	*args = append(*args, value)
+}
+
+func normalizePositiveInt64Values(values []int64) []int64 {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[int64]struct{}, len(values))
+	out := make([]int64, 0, len(values))
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i] < out[j]
+	})
+	return out
 }
 
 func dbGetRule(db sqlRuleStore, id int64) (*Rule, error) {
@@ -283,6 +641,12 @@ func dbGetRuleMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]Rule, error) {
 	return result, rows.Err()
 }
 
+func dbGetRuleProtocolMap(db sqlRuleStore) (map[int64]string, error) {
+	return dbQueryProtocolMap(db, `SELECT id, protocol FROM rules`, func(protocol string) string {
+		return protocol
+	})
+}
+
 func dbAddSite(db sqlRuleStore, s *Site) (int64, error) {
 	res, err := db.Exec(
 		`INSERT INTO sites (domain, listen_ip, listen_iface, backend_ip, backend_source_ip, backend_http, backend_https, tag, enabled, transparent)
@@ -309,7 +673,15 @@ func dbDeleteSite(db sqlRuleStore, id int64) error {
 }
 
 func dbGetSites(db sqlRuleStore) ([]Site, error) {
-	rows, err := db.Query(`SELECT id, domain, listen_ip, listen_iface, backend_ip, backend_source_ip, backend_http, backend_https, tag, enabled, transparent FROM sites`)
+	return dbQuerySites(db, `SELECT id, domain, listen_ip, listen_iface, backend_ip, backend_source_ip, backend_http, backend_https, tag, enabled, transparent FROM sites`)
+}
+
+func dbGetEnabledSites(db sqlRuleStore) ([]Site, error) {
+	return dbQuerySites(db, `SELECT id, domain, listen_ip, listen_iface, backend_ip, backend_source_ip, backend_http, backend_https, tag, enabled, transparent FROM sites WHERE enabled = 1`)
+}
+
+func dbQuerySites(db sqlRuleStore, query string, args ...interface{}) ([]Site, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -327,6 +699,14 @@ func dbGetSites(db sqlRuleStore) ([]Site, error) {
 		sites = append(sites, s)
 	}
 	return sites, rows.Err()
+}
+
+func dbCountEnabledSites(db sqlRuleStore) (int, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sites WHERE enabled = 1`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func dbGetSite(db sqlRuleStore, id int64) (*Site, error) {
@@ -378,7 +758,32 @@ func dbDeleteRange(db sqlRuleStore, id int64) error {
 }
 
 func dbGetRanges(db sqlRuleStore) ([]PortRange, error) {
-	rows, err := db.Query(`SELECT ` + rangeColumns + ` FROM ranges`)
+	return dbQueryRanges(db, `SELECT `+rangeColumns+` FROM ranges`)
+}
+
+func dbGetEnabledRanges(db sqlRuleStore) ([]PortRange, error) {
+	return dbQueryRanges(db, `SELECT `+rangeColumns+` FROM ranges WHERE enabled = 1`)
+}
+
+func dbGetEnabledRangesByIDs(db sqlRuleStore, ids []int64) ([]PortRange, error) {
+	normalized := normalizePositiveInt64Values(ids)
+	if len(normalized) == 0 {
+		return []PortRange{}, nil
+	}
+
+	args := make([]interface{}, 0, len(normalized))
+	holders := make([]string, 0, len(normalized))
+	for _, id := range normalized {
+		holders = append(holders, "?")
+		args = append(args, id)
+	}
+
+	query := `SELECT ` + rangeColumns + ` FROM ranges WHERE enabled = 1 AND id IN (` + strings.Join(holders, ",") + `)`
+	return dbQueryRanges(db, query, args...)
+}
+
+func dbQueryRanges(db sqlRuleStore, query string, args ...interface{}) ([]PortRange, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -435,6 +840,12 @@ func dbGetRangeMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]PortRange, err
 	return result, rows.Err()
 }
 
+func dbGetRangeProtocolMap(db sqlRuleStore) (map[int64]string, error) {
+	return dbQueryProtocolMap(db, `SELECT id, protocol FROM ranges`, func(protocol string) string {
+		return protocol
+	})
+}
+
 const egressNATColumns = `id, parent_interface, child_interface, out_interface, out_source_ip, protocol, nat_type, enabled`
 
 func scanEgressNAT(sc interface{ Scan(...interface{}) error }) (EgressNAT, error) {
@@ -473,7 +884,15 @@ func dbDeleteEgressNAT(db sqlRuleStore, id int64) error {
 }
 
 func dbGetEgressNATs(db sqlRuleStore) ([]EgressNAT, error) {
-	rows, err := db.Query(`SELECT ` + egressNATColumns + ` FROM egress_nats`)
+	return dbQueryEgressNATs(db, `SELECT `+egressNATColumns+` FROM egress_nats`)
+}
+
+func dbGetEnabledEgressNATs(db sqlRuleStore) ([]EgressNAT, error) {
+	return dbQueryEgressNATs(db, `SELECT `+egressNATColumns+` FROM egress_nats WHERE enabled = 1`)
+}
+
+func dbQueryEgressNATs(db sqlRuleStore, query string, args ...interface{}) ([]EgressNAT, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -496,6 +915,10 @@ func dbGetEgressNAT(db sqlRuleStore, id int64) (*EgressNAT, error) {
 		return nil, err
 	}
 	return &item, nil
+}
+
+func dbGetEgressNATProtocolMap(db sqlRuleStore) (map[int64]string, error) {
+	return dbQueryProtocolMap(db, `SELECT id, protocol FROM egress_nats`, normalizeEgressNATProtocol)
 }
 
 func dbSetEgressNATEnabled(db sqlRuleStore, id int64, enabled bool) error {
@@ -598,7 +1021,15 @@ func dbDeleteIPv6Assignment(db sqlRuleStore, id int64) error {
 }
 
 func dbGetIPv6Assignments(db sqlRuleStore) ([]IPv6Assignment, error) {
-	rows, err := db.Query(`SELECT ` + ipv6AssignmentColumns + ` FROM ipv6_assignments`)
+	return dbQueryIPv6Assignments(db, `SELECT `+ipv6AssignmentColumns+` FROM ipv6_assignments`)
+}
+
+func dbGetEnabledIPv6Assignments(db sqlRuleStore) ([]IPv6Assignment, error) {
+	return dbQueryIPv6Assignments(db, `SELECT `+ipv6AssignmentColumns+` FROM ipv6_assignments WHERE enabled = 1`)
+}
+
+func dbQueryIPv6Assignments(db sqlRuleStore, query string, args ...interface{}) ([]IPv6Assignment, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -613,6 +1044,27 @@ func dbGetIPv6Assignments(db sqlRuleStore) ([]IPv6Assignment, error) {
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func dbQueryProtocolMap(db sqlRuleStore, query string, normalize func(string) string) (map[int64]string, error) {
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]string)
+	for rows.Next() {
+		var (
+			id       int64
+			protocol string
+		)
+		if err := rows.Scan(&id, &protocol); err != nil {
+			return nil, err
+		}
+		result[id] = normalize(protocol)
+	}
+	return result, rows.Err()
 }
 
 func dbGetIPv6Assignment(db sqlRuleStore, id int64) (*IPv6Assignment, error) {
@@ -729,7 +1181,32 @@ func dbDeleteManagedNetwork(db sqlRuleStore, id int64) error {
 }
 
 func dbGetManagedNetworks(db sqlRuleStore) ([]ManagedNetwork, error) {
-	rows, err := db.Query(`SELECT ` + managedNetworkColumns + ` FROM managed_networks`)
+	return dbQueryManagedNetworks(db, `SELECT `+managedNetworkColumns+` FROM managed_networks`)
+}
+
+func dbGetEnabledManagedNetworks(db sqlRuleStore) ([]ManagedNetwork, error) {
+	return dbQueryManagedNetworks(db, `SELECT `+managedNetworkColumns+` FROM managed_networks WHERE enabled = 1`)
+}
+
+func dbGetManagedNetworksByIDs(db sqlRuleStore, ids []int64) ([]ManagedNetwork, error) {
+	normalized := normalizePositiveInt64Values(ids)
+	if len(normalized) == 0 {
+		return []ManagedNetwork{}, nil
+	}
+
+	args := make([]interface{}, 0, len(normalized))
+	holders := make([]string, 0, len(normalized))
+	for _, id := range normalized {
+		args = append(args, id)
+		holders = append(holders, "?")
+	}
+
+	query := `SELECT ` + managedNetworkColumns + ` FROM managed_networks WHERE id IN (` + strings.Join(holders, ",") + `)`
+	return dbQueryManagedNetworks(db, query, args...)
+}
+
+func dbQueryManagedNetworks(db sqlRuleStore, query string, args ...interface{}) ([]ManagedNetwork, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -808,7 +1285,28 @@ func dbDeleteManagedNetworkReservationsByManagedNetworkID(db sqlRuleStore, manag
 }
 
 func dbGetManagedNetworkReservations(db sqlRuleStore) ([]ManagedNetworkReservation, error) {
-	rows, err := db.Query(`SELECT ` + managedNetworkReservationColumns + ` FROM managed_network_reservations`)
+	return dbQueryManagedNetworkReservations(db, `SELECT `+managedNetworkReservationColumns+` FROM managed_network_reservations`)
+}
+
+func dbGetManagedNetworkReservationsByManagedNetworkIDs(db sqlRuleStore, managedNetworkIDs []int64) ([]ManagedNetworkReservation, error) {
+	normalized := normalizePositiveInt64Values(managedNetworkIDs)
+	if len(normalized) == 0 {
+		return []ManagedNetworkReservation{}, nil
+	}
+
+	args := make([]interface{}, 0, len(normalized))
+	holders := make([]string, 0, len(normalized))
+	for _, managedNetworkID := range normalized {
+		args = append(args, managedNetworkID)
+		holders = append(holders, "?")
+	}
+
+	query := `SELECT ` + managedNetworkReservationColumns + ` FROM managed_network_reservations WHERE managed_network_id IN (` + strings.Join(holders, ",") + `)`
+	return dbQueryManagedNetworkReservations(db, query, args...)
+}
+
+func dbQueryManagedNetworkReservations(db sqlRuleStore, query string, args ...interface{}) ([]ManagedNetworkReservation, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -854,21 +1352,7 @@ func dbGetManagedNetworkReservationCounts(db sqlRuleStore) (map[int64]int, error
 }
 
 func dbGetManagedNetworkReservationsByManagedNetworkID(db sqlRuleStore, managedNetworkID int64) ([]ManagedNetworkReservation, error) {
-	rows, err := db.Query(`SELECT `+managedNetworkReservationColumns+` FROM managed_network_reservations WHERE managed_network_id = ?`, managedNetworkID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var items []ManagedNetworkReservation
-	for rows.Next() {
-		item, err := scanManagedNetworkReservation(rows)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return dbQueryManagedNetworkReservations(db, `SELECT `+managedNetworkReservationColumns+` FROM managed_network_reservations WHERE managed_network_id = ?`, managedNetworkID)
 }
 
 func dbGetManagedNetworkReservation(db sqlRuleStore, id int64) (*ManagedNetworkReservation, error) {

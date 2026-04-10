@@ -167,3 +167,128 @@ func TestHandleListWorkersIncludesManagedNetworkAutoEgressNATWorker(t *testing.T
 		t.Fatalf("effective kernel engine = %q, want %q", worker.EgressNATs[0].EffectiveKernelEngine, kernelEngineTC)
 	}
 }
+
+func TestHandleListWorkersIncludesSharedProxyEnabledSiteCount(t *testing.T) {
+	db := openTestDB(t)
+
+	for _, site := range []Site{
+		{Domain: "a.example.com", ListenIP: "0.0.0.0", BackendIP: "127.0.0.1", BackendHTTP: 8080, Enabled: true},
+		{Domain: "b.example.com", ListenIP: "0.0.0.0", BackendIP: "127.0.0.1", BackendHTTPS: 8443, Enabled: true},
+		{Domain: "c.example.com", ListenIP: "0.0.0.0", BackendIP: "127.0.0.1", BackendHTTP: 8081, Enabled: false},
+	} {
+		if _, err := dbAddSite(db, &site); err != nil {
+			t.Fatalf("add site: %v", err)
+		}
+	}
+
+	pm := &ProcessManager{
+		binaryHash:       "proxyhash",
+		ruleWorkers:      map[int]*WorkerInfo{},
+		rangeWorkers:     map[int]*WorkerInfo{},
+		kernelRules:      map[int64]bool{},
+		kernelRanges:     map[int64]bool{},
+		kernelEgressNATs: map[int64]bool{},
+		sharedProxy: &WorkerInfo{
+			kind:       workerKindShared,
+			running:    true,
+			binaryHash: "proxyhash",
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/workers", nil)
+	w := httptest.NewRecorder()
+
+	handleListWorkers(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp WorkerListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Workers) != 1 {
+		t.Fatalf("unexpected worker rows: %d", len(resp.Workers))
+	}
+	worker := resp.Workers[0]
+	if worker.Kind != workerKindShared {
+		t.Fatalf("worker kind = %q, want %q", worker.Kind, workerKindShared)
+	}
+	if worker.Status != "running" {
+		t.Fatalf("worker status = %q, want running", worker.Status)
+	}
+	if worker.SiteCount != 2 {
+		t.Fatalf("worker site_count = %d, want 2", worker.SiteCount)
+	}
+}
+
+func TestHandleListWorkersIncludesKernelRulesFromEnabledIDQuery(t *testing.T) {
+	db := openTestDB(t)
+
+	enabledRuleID, err := dbAddRule(db, &Rule{
+		InIP:     "198.51.100.10",
+		InPort:   443,
+		OutIP:    "203.0.113.10",
+		OutPort:  8443,
+		Protocol: "tcp",
+		Enabled:  true,
+		Remark:   "enabled",
+		Tag:      "prod",
+	})
+	if err != nil {
+		t.Fatalf("add enabled rule: %v", err)
+	}
+	disabledRuleID, err := dbAddRule(db, &Rule{
+		InIP:     "198.51.100.11",
+		InPort:   443,
+		OutIP:    "203.0.113.11",
+		OutPort:  8443,
+		Protocol: "tcp",
+		Enabled:  false,
+		Remark:   "disabled",
+		Tag:      "prod",
+	})
+	if err != nil {
+		t.Fatalf("add disabled rule: %v", err)
+	}
+
+	pm := &ProcessManager{
+		binaryHash:        "kernelhash",
+		ruleWorkers:       map[int]*WorkerInfo{},
+		rangeWorkers:      map[int]*WorkerInfo{},
+		kernelRules:       map[int64]bool{enabledRuleID: true, disabledRuleID: true},
+		kernelRanges:      map[int64]bool{},
+		kernelEgressNATs:  map[int64]bool{},
+		rulePlans:         map[int64]ruleDataplanePlan{enabledRuleID: {KernelEligible: true, EffectiveEngine: ruleEngineKernel}},
+		kernelRuleEngines: map[int64]string{enabledRuleID: kernelEngineTC},
+	}
+
+	req := httptest.NewRequest("GET", "/api/workers", nil)
+	w := httptest.NewRecorder()
+
+	handleListWorkers(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp WorkerListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Workers) != 1 {
+		t.Fatalf("unexpected worker rows: %d", len(resp.Workers))
+	}
+	worker := resp.Workers[0]
+	if worker.Kind != "kernel" {
+		t.Fatalf("worker kind = %q, want kernel", worker.Kind)
+	}
+	if worker.RuleCount != 1 || len(worker.Rules) != 1 {
+		t.Fatalf("unexpected kernel rule counts: count=%d details=%d", worker.RuleCount, len(worker.Rules))
+	}
+	if worker.Rules[0].ID != enabledRuleID {
+		t.Fatalf("worker rule id = %d, want %d", worker.Rules[0].ID, enabledRuleID)
+	}
+	if worker.Rules[0].Status != "running" {
+		t.Fatalf("worker rule status = %q, want running", worker.Rules[0].Status)
+	}
+}

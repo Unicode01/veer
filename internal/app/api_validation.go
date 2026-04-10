@@ -1,6 +1,7 @@
 package app
 
 import (
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -368,6 +369,22 @@ func loadValidationEntities(db sqlRuleStore) ([]Rule, []Site, []PortRange, error
 	return rules, sites, ranges, nil
 }
 
+func loadEnabledValidationEntities(db sqlRuleStore) ([]Rule, []Site, []PortRange, error) {
+	rules, err := dbGetEnabledRules(db)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	sites, err := dbGetEnabledSites(db)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ranges, err := dbGetEnabledRanges(db)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return rules, sites, ranges, nil
+}
+
 func loadValidationInterfaceData() (map[string]struct{}, map[string]InterfaceInfo, hostInterfaceAddrs, error) {
 	knownIfaces, hostAddrs, err := loadHostValidationData()
 	if err != nil {
@@ -390,7 +407,7 @@ func prepareSiteCreate(db sqlRuleStore, raw Site) (Site, []ruleValidationIssue, 
 		return site, []ruleValidationIssue{{Scope: "create", Index: 1, Field: "site", Message: validationErr}}, nil
 	}
 	site.Enabled = true
-	rules, sites, ranges, err := loadValidationEntities(db)
+	rules, sites, ranges, err := loadEnabledValidationEntities(db)
 	if err != nil {
 		return site, nil, err
 	}
@@ -414,72 +431,78 @@ func prepareSiteUpdate(db sqlRuleStore, raw Site) (Site, []ruleValidationIssue, 
 	if validationErr != "" {
 		return site, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "site", Message: validationErr}}, nil
 	}
-	rules, sites, ranges, err := loadValidationEntities(db)
+	rules, sites, ranges, err := loadEnabledValidationEntities(db)
 	if err != nil {
 		return site, nil, err
 	}
+	current, err := dbGetSite(db, site.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return site, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "id", Message: "site not found"}}, nil
+		}
+		return site, nil, err
+	}
+	site.Enabled = current.Enabled
+
 	siteStates := make([]projectedSiteState, 0, len(sites))
-	found := false
 	for _, existing := range sites {
-		if existing.ID != site.ID {
-			siteStates = append(siteStates, projectedSiteState{
-				Site:         existing,
-				ContentScope: "existing",
-				ContentIndex: -1,
-				EnableScope:  "existing",
-				EnableIndex:  -1,
-			})
+		if existing.ID == site.ID {
 			continue
 		}
-		site.Enabled = existing.Enabled
 		siteStates = append(siteStates, projectedSiteState{
-			Site:         site,
-			ContentScope: "update",
-			ContentIndex: 1,
-			EnableScope:  "update",
-			EnableIndex:  1,
+			Site:         existing,
+			ContentScope: "existing",
+			ContentIndex: -1,
+			EnableScope:  "existing",
+			EnableIndex:  -1,
 		})
-		found = true
 	}
-	if !found {
-		return site, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "id", Message: "site not found"}}, nil
-	}
+	siteStates = append(siteStates, projectedSiteState{
+		Site:         site,
+		ContentScope: "update",
+		ContentIndex: 1,
+		EnableScope:  "update",
+		EnableIndex:  1,
+	})
 	return site, detectProjectedConflicts(projectExistingRuleStates(rules), siteStates, projectExistingRangeStates(ranges)), nil
 }
 
 func prepareSiteToggle(db sqlRuleStore, id int64) (Site, []ruleValidationIssue, error) {
-	rules, sites, ranges, err := loadValidationEntities(db)
+	rules, sites, ranges, err := loadEnabledValidationEntities(db)
 	if err != nil {
 		return Site{}, nil, err
 	}
+	current, err := dbGetSite(db, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Site{}, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "id", Message: "site not found"}}, nil
+		}
+		return Site{}, nil, err
+	}
+
 	siteStates := make([]projectedSiteState, 0, len(sites))
-	var target Site
-	found := false
 	for _, existing := range sites {
-		if existing.ID != id {
-			siteStates = append(siteStates, projectedSiteState{
-				Site:         existing,
-				ContentScope: "existing",
-				ContentIndex: -1,
-				EnableScope:  "existing",
-				EnableIndex:  -1,
-			})
+		if existing.ID == id {
 			continue
 		}
-		target = existing
-		target.Enabled = !existing.Enabled
 		siteStates = append(siteStates, projectedSiteState{
-			Site:         target,
+			Site:         existing,
 			ContentScope: "existing",
 			ContentIndex: -1,
-			EnableScope:  "toggle",
-			EnableIndex:  0,
+			EnableScope:  "existing",
+			EnableIndex:  -1,
 		})
-		found = true
 	}
-	if !found {
-		return Site{}, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "id", Message: "site not found"}}, nil
-	}
+
+	target := *current
+	target.Enabled = !current.Enabled
+	siteStates = append(siteStates, projectedSiteState{
+		Site:         target,
+		ContentScope: "existing",
+		ContentIndex: -1,
+		EnableScope:  "toggle",
+		EnableIndex:  0,
+	})
 	return target, detectProjectedConflicts(projectExistingRuleStates(rules), siteStates, projectExistingRangeStates(ranges)), nil
 }
 
@@ -493,7 +516,7 @@ func prepareRangeCreate(db sqlRuleStore, raw PortRange) (PortRange, []ruleValida
 		return pr, []ruleValidationIssue{{Scope: "create", Index: 1, Field: "range", Message: validationErr}}, nil
 	}
 	pr.Enabled = true
-	rules, sites, ranges, err := loadValidationEntities(db)
+	rules, sites, ranges, err := loadEnabledValidationEntities(db)
 	if err != nil {
 		return pr, nil, err
 	}
@@ -517,72 +540,78 @@ func prepareRangeUpdate(db sqlRuleStore, raw PortRange) (PortRange, []ruleValida
 	if validationErr != "" {
 		return pr, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "range", Message: validationErr}}, nil
 	}
-	rules, sites, ranges, err := loadValidationEntities(db)
+	rules, sites, ranges, err := loadEnabledValidationEntities(db)
 	if err != nil {
 		return pr, nil, err
 	}
+	current, err := dbGetRange(db, pr.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return pr, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "id", Message: "range not found"}}, nil
+		}
+		return pr, nil, err
+	}
+	pr.Enabled = current.Enabled
+
 	rangeStates := make([]projectedRangeState, 0, len(ranges))
-	found := false
 	for _, existing := range ranges {
-		if existing.ID != pr.ID {
-			rangeStates = append(rangeStates, projectedRangeState{
-				PortRange:    existing,
-				ContentScope: "existing",
-				ContentIndex: -1,
-				EnableScope:  "existing",
-				EnableIndex:  -1,
-			})
+		if existing.ID == pr.ID {
 			continue
 		}
-		pr.Enabled = existing.Enabled
 		rangeStates = append(rangeStates, projectedRangeState{
-			PortRange:    pr,
-			ContentScope: "update",
-			ContentIndex: 1,
-			EnableScope:  "update",
-			EnableIndex:  1,
+			PortRange:    existing,
+			ContentScope: "existing",
+			ContentIndex: -1,
+			EnableScope:  "existing",
+			EnableIndex:  -1,
 		})
-		found = true
 	}
-	if !found {
-		return pr, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "id", Message: "range not found"}}, nil
-	}
+	rangeStates = append(rangeStates, projectedRangeState{
+		PortRange:    pr,
+		ContentScope: "update",
+		ContentIndex: 1,
+		EnableScope:  "update",
+		EnableIndex:  1,
+	})
 	return pr, detectProjectedConflicts(projectExistingRuleStates(rules), projectExistingSiteStates(sites), rangeStates), nil
 }
 
 func prepareRangeToggle(db sqlRuleStore, id int64) (PortRange, []ruleValidationIssue, error) {
-	rules, sites, ranges, err := loadValidationEntities(db)
+	rules, sites, ranges, err := loadEnabledValidationEntities(db)
 	if err != nil {
 		return PortRange{}, nil, err
 	}
+	current, err := dbGetRange(db, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return PortRange{}, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "id", Message: "range not found"}}, nil
+		}
+		return PortRange{}, nil, err
+	}
+
 	rangeStates := make([]projectedRangeState, 0, len(ranges))
-	var target PortRange
-	found := false
 	for _, existing := range ranges {
-		if existing.ID != id {
-			rangeStates = append(rangeStates, projectedRangeState{
-				PortRange:    existing,
-				ContentScope: "existing",
-				ContentIndex: -1,
-				EnableScope:  "existing",
-				EnableIndex:  -1,
-			})
+		if existing.ID == id {
 			continue
 		}
-		target = existing
-		target.Enabled = !existing.Enabled
 		rangeStates = append(rangeStates, projectedRangeState{
-			PortRange:    target,
+			PortRange:    existing,
 			ContentScope: "existing",
 			ContentIndex: -1,
-			EnableScope:  "toggle",
-			EnableIndex:  0,
+			EnableScope:  "existing",
+			EnableIndex:  -1,
 		})
-		found = true
 	}
-	if !found {
-		return PortRange{}, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "id", Message: "range not found"}}, nil
-	}
+
+	target := *current
+	target.Enabled = !current.Enabled
+	rangeStates = append(rangeStates, projectedRangeState{
+		PortRange:    target,
+		ContentScope: "existing",
+		ContentIndex: -1,
+		EnableScope:  "toggle",
+		EnableIndex:  0,
+	})
 	return target, detectProjectedConflicts(projectExistingRuleStates(rules), projectExistingSiteStates(sites), rangeStates), nil
 }
 
@@ -767,7 +796,7 @@ func prepareEgressNATCreate(db sqlRuleStore, raw EgressNAT) (EgressNAT, []ruleVa
 	}
 	item.Enabled = true
 
-	existing, err := dbGetEgressNATs(db)
+	existing, err := dbGetEnabledEgressNATs(db)
 	if err != nil {
 		return item, nil, err
 	}
@@ -785,24 +814,26 @@ func prepareEgressNATUpdate(db sqlRuleStore, raw EgressNAT) (EgressNAT, []ruleVa
 		return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: egressNATValidationField(validationErr), Message: validationErr}}, nil
 	}
 
-	existing, err := dbGetEgressNATs(db)
+	existing, err := dbGetEnabledEgressNATs(db)
 	if err != nil {
 		return item, nil, err
 	}
-	found := false
-	projected := make([]EgressNAT, 0, len(existing))
+	current, err := dbGetEgressNAT(db, item.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "id", Message: "egress nat not found"}}, nil
+		}
+		return item, nil, err
+	}
+	item.Enabled = current.Enabled
+
+	projected := make([]EgressNAT, 0, len(existing)+1)
 	for _, current := range existing {
 		if current.ID != item.ID {
 			projected = append(projected, current)
-			continue
 		}
-		item.Enabled = current.Enabled
-		projected = append(projected, item)
-		found = true
 	}
-	if !found {
-		return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "id", Message: "egress nat not found"}}, nil
-	}
+	projected = append(projected, item)
 	return item, validateProjectedEgressNATs(projected, ifaceByName, "update", item.ID), nil
 }
 
@@ -811,26 +842,28 @@ func prepareEgressNATToggle(db sqlRuleStore, id int64) (EgressNAT, []ruleValidat
 	if err != nil {
 		return EgressNAT{}, nil, err
 	}
-	items, err := dbGetEgressNATs(db)
+	items, err := dbGetEnabledEgressNATs(db)
 	if err != nil {
 		return EgressNAT{}, nil, err
 	}
-	projected := make([]EgressNAT, 0, len(items))
-	var target EgressNAT
-	found := false
+	current, err := dbGetEgressNAT(db, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return EgressNAT{}, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "id", Message: "egress nat not found"}}, nil
+		}
+		return EgressNAT{}, nil, err
+	}
+
+	projected := make([]EgressNAT, 0, len(items)+1)
 	for _, item := range items {
-		if item.ID != id {
-			projected = append(projected, item)
+		if item.ID == id {
 			continue
 		}
-		target = item
-		target.Enabled = !item.Enabled
-		projected = append(projected, target)
-		found = true
+		projected = append(projected, item)
 	}
-	if !found {
-		return EgressNAT{}, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "id", Message: "egress nat not found"}}, nil
-	}
+	target := *current
+	target.Enabled = !current.Enabled
+	projected = append(projected, target)
 	return target, validateProjectedEgressNATs(projected, ifaceByName, "toggle", id), nil
 }
 
