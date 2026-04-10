@@ -18,7 +18,7 @@
 #   - 目前仅支持 Debian 11+ 与 Ubuntu 22.04+
 #   - 最终仍以实际内核版本为准
 #
-set -euo pipefail
+set -Eeuo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -26,11 +26,13 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 BOOTSTRAP_HINT_URL="https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh"
+CURRENT_STEP="初始化"
+BOOTSTRAP_FAILED=0
 
 info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+fail()  { BOOTSTRAP_FAILED=1; echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 
 usage() {
     cat <<EOF
@@ -42,6 +44,8 @@ usage() {
   FORWARD_REF          拉取的 Git ref，默认 main
   FORWARD_GO_VERSION   安装的 Go 版本，默认 1.25.1
   FORWARD_WORKDIR      临时工作目录，默认 /tmp/forward-bootstrap
+  FORWARD_KEEP_WORKDIR_ON_ERROR
+                        失败时保留临时目录，默认 1
   FORWARD_SKIP_APT     设为 1 时跳过 apt 依赖安装
   FORWARD_SKIP_GO      设为 1 时跳过 Go 安装检查
 
@@ -68,6 +72,7 @@ FORWARD_REPO_URL="${FORWARD_REPO_URL:-https://github.com/Unicode01/forward.git}"
 FORWARD_REF="${FORWARD_REF:-main}"
 FORWARD_GO_VERSION="${FORWARD_GO_VERSION:-1.25.1}"
 FORWARD_WORKDIR="${FORWARD_WORKDIR:-/tmp/forward-bootstrap}"
+FORWARD_KEEP_WORKDIR_ON_ERROR="${FORWARD_KEEP_WORKDIR_ON_ERROR:-1}"
 FORWARD_SKIP_APT="${FORWARD_SKIP_APT:-0}"
 FORWARD_SKIP_GO="${FORWARD_SKIP_GO:-0}"
 FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
@@ -76,12 +81,61 @@ FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBAL
 
 DEPLOY_ARGS=("$@")
 
+set_step() {
+    CURRENT_STEP="$1"
+    info "${CURRENT_STEP}..."
+}
+
+run_with_retry() {
+    local attempts="$1"
+    local delay_seconds="$2"
+    local description="$3"
+    shift 3
+
+    local try=1
+    while true; do
+        if "$@"; then
+            return 0
+        fi
+
+        local exit_code=$?
+        if (( try >= attempts )); then
+            fail "${description} 失败，已重试 ${attempts} 次 (exit=${exit_code})"
+        fi
+
+        warn "${description} 失败 (exit=${exit_code})，${delay_seconds}s 后重试 (${try}/${attempts})"
+        sleep "${delay_seconds}"
+        try=$((try + 1))
+    done
+}
+
+on_error() {
+    local line="$1"
+    local command="$2"
+    local exit_code="$?"
+
+    BOOTSTRAP_FAILED=1
+    echo -e "${RED}[FAIL]${NC}  bootstrap 执行失败"
+    echo -e "        step: ${CURRENT_STEP}"
+    echo -e "        line: ${line}"
+    echo -e "        exit: ${exit_code}"
+    echo -e "     command: ${command}"
+    if [[ -n "${FORWARD_WORKDIR:-}" ]]; then
+        echo -e "        work: ${FORWARD_WORKDIR}"
+    fi
+}
+
 cleanup() {
     if [[ -n "${FORWARD_WORKDIR:-}" && -d "${FORWARD_WORKDIR}" ]]; then
+        if [[ "${BOOTSTRAP_FAILED}" == "1" && "${FORWARD_KEEP_WORKDIR_ON_ERROR}" == "1" ]]; then
+            warn "bootstrap 失败，已保留临时目录: ${FORWARD_WORKDIR}"
+            return
+        fi
         rm -rf "${FORWARD_WORKDIR}"
     fi
 }
 trap cleanup EXIT
+trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -135,10 +189,9 @@ install_apt_deps() {
         return
     fi
 
-    info "安装系统依赖..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends \
+    run_with_retry 3 3 "apt-get update" apt-get update
+    run_with_retry 3 3 "安装系统依赖" apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
@@ -171,14 +224,13 @@ install_go_if_needed() {
         return
     fi
 
-    info "安装临时 Go ${FORWARD_GO_VERSION}..."
     url="https://go.dev/dl/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
     FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
 
     mkdir -p "${FORWARD_WORKDIR}"
     rm -f "${FORWARD_GO_TARBALL}"
     rm -rf "${FORWARD_GO_ROOT}"
-    curl -fsSL "${url}" -o "${FORWARD_GO_TARBALL}"
+    run_with_retry 3 3 "下载 Go ${FORWARD_GO_VERSION}" curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 -o "${FORWARD_GO_TARBALL}" "${url}"
     tar -C "${FORWARD_WORKDIR}" -xzf "${FORWARD_GO_TARBALL}"
     rm -f "${FORWARD_GO_TARBALL}"
 
@@ -192,27 +244,24 @@ install_go_if_needed() {
 }
 
 clone_repo() {
-    info "拉取源码: ${FORWARD_REPO_URL} @ ${FORWARD_REF}"
     rm -rf "${FORWARD_REPO_DIR}"
     mkdir -p "${FORWARD_REPO_DIR}"
 
     git init -q "${FORWARD_REPO_DIR}"
     git -C "${FORWARD_REPO_DIR}" remote add origin "${FORWARD_REPO_URL}"
-    git -C "${FORWARD_REPO_DIR}" fetch --depth 1 origin "${FORWARD_REF}"
+    run_with_retry 3 3 "拉取源码 ${FORWARD_REPO_URL}@${FORWARD_REF}" git -C "${FORWARD_REPO_DIR}" fetch --depth 1 origin "${FORWARD_REF}"
     git -C "${FORWARD_REPO_DIR}" checkout -q FETCH_HEAD
 
     ok "源码已就绪: $(git -C "${FORWARD_REPO_DIR}" rev-parse --short HEAD)"
 }
 
 build_release() {
-    info "开始构建 linux/${GOARCH}..."
     cd "${FORWARD_REPO_DIR}"
     bash ./release.sh "${GOARCH}"
     ok "构建完成"
 }
 
 run_deploy() {
-    info "开始部署..."
     cd "${FORWARD_REPO_DIR}"
     bash ./deploy.sh "${DEPLOY_ARGS[@]}"
 }
@@ -223,14 +272,22 @@ main() {
     require_command curl
     require_command tar
 
+    set_step "检测架构"
     detect_arch
     FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
+    set_step "检查发行版"
     require_supported_distro
+    set_step "安装系统依赖"
     install_apt_deps
+    set_step "检查 Git"
     require_command git
+    set_step "安装 Go"
     install_go_if_needed
+    set_step "拉取源码"
     clone_repo
+    set_step "构建 release"
     build_release
+    set_step "执行部署"
     run_deploy
 }
 
