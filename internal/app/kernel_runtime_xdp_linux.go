@@ -40,6 +40,9 @@ const (
 	kernelXDPFlowAuxScratchV6MapName     = "xdp_flow_aux_scratch_v6"
 	kernelXDPDispatchScratchV4MapName    = "xdp_dispatch_scratch_v4"
 	kernelXDPDispatchScratchV6MapName    = "xdp_dispatch_scratch_v6"
+	kernelXDPFlowsOldMapNameV4           = "flows_old_v4"
+	kernelXDPFlowsOldMapNameV6           = "flows_old_v6"
+	kernelXDPFlowMigrationStateMapName   = "xdp_flow_migration_state"
 	xdpProgramChainIndexV4               = 0
 	xdpProgramChainIndexV6               = 1
 	xdpProgramChainIndexV4Transparent    = 2
@@ -61,6 +64,11 @@ const (
 const (
 	xdpVethNATRedirectMinKernelMajor = 5
 	xdpVethNATRedirectMinKernelMinor = 11
+)
+
+const (
+	xdpFlowMigrationFlagV4Old = 0x1
+	xdpFlowMigrationFlagV6Old = 0x2
 )
 
 type xdpPrepareOptions struct {
@@ -116,6 +124,9 @@ type xdpCollectionPieces struct {
 	rulesV6              *ebpf.Map
 	flowsV4              *ebpf.Map
 	flowsV6              *ebpf.Map
+	flowsOldV4           *ebpf.Map
+	flowsOldV6           *ebpf.Map
+	flowMigrationState   *ebpf.Map
 	localIPv4s           *ebpf.Map
 }
 
@@ -164,6 +175,7 @@ type xdpKernelRuleRuntime struct {
 	maintenanceState   kernelAdaptiveMaintenanceState
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPruneState     kernelFlowPruneState
+	oldFlowPruneState  kernelFlowPruneState
 	runtimeMapCounts   kernelRuntimeMapCountSnapshot
 }
 
@@ -396,50 +408,77 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	var oldStatsMap *ebpf.Map
 	var hotRestartState *kernelHotRestartMapState
 	hotRestartStatsCorrection := map[uint32]kernelRuleStats{}
-	if rt.coll != nil && rt.coll.Maps != nil {
-		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-			if !preferFreshMapGrowth {
-				if flowMapReplacement == nil {
-					flowMapReplacement = make(map[string]*ebpf.Map, 3)
-				}
-				flowMapReplacement[kernelFlowsMapName] = flowsMap
-				if flowCapacity := int(flowsMap.MaxEntries()); flowCapacity < actualCapacities.Flows {
-					actualCapacities.Flows = flowCapacity
-				}
-				if int(flowsMap.MaxEntries()) < desiredCapacities.Flows {
-					log.Printf(
-						"xdp dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
-						kernelFlowsMapName,
-						flowsMap.MaxEntries(),
-						desiredCapacities.Flows,
-					)
-				}
-			}
+	flowMigrationFlags := uint32(0)
+	ensureFlowMapReplacement := func() {
+		if flowMapReplacement == nil {
+			flowMapReplacement = make(map[string]*ebpf.Map, 5)
 		}
-		if flowsMapV6 := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMapV6 != nil {
-			if !preferFreshMapGrowth {
-				if flowMapReplacement == nil {
-					flowMapReplacement = make(map[string]*ebpf.Map, 3)
+	}
+	if rt.coll != nil && rt.coll.Maps != nil {
+		if !preferFreshMapGrowth {
+			existingMigrationFlags, flowStateErr := xdpOldFlowMigrationFlagsFromCollection(rt.coll)
+			if flowStateErr != nil {
+				msg := fmt.Sprintf("inspect xdp old-bank flow state: %v", flowStateErr)
+				if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+					return results, nil
 				}
-				flowMapReplacement[kernelFlowsMapNameV6] = flowsMapV6
-				if flowCapacity := int(flowsMapV6.MaxEntries()); flowCapacity < actualCapacities.Flows {
-					actualCapacities.Flows = flowCapacity
+				log.Printf("xdp dataplane reconcile: %s", msg)
+				for _, rule := range rules {
+					results[rule.ID] = kernelRuleApplyResult{Error: msg}
 				}
-				if int(flowsMapV6.MaxEntries()) < desiredCapacities.Flows {
+				return results, nil
+			}
+			if existingMigrationFlags != 0 {
+				if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
+					ensureFlowMapReplacement()
+					flowMapReplacement[kernelFlowsMapName] = flowsMap
+					if flowCapacity := int(flowsMap.MaxEntries()); flowCapacity < actualCapacities.Flows {
+						actualCapacities.Flows = flowCapacity
+					}
+				}
+				if flowsMapV6 := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMapV6 != nil {
+					ensureFlowMapReplacement()
+					flowMapReplacement[kernelFlowsMapNameV6] = flowsMapV6
+					if flowCapacity := int(flowsMapV6.MaxEntries()); flowCapacity < actualCapacities.Flows {
+						actualCapacities.Flows = flowCapacity
+					}
+				}
+				if existingMigrationFlags&xdpFlowMigrationFlagV4Old != 0 {
+					if flowsOldMap := rt.coll.Maps[kernelXDPFlowsOldMapNameV4]; flowsOldMap != nil {
+						ensureFlowMapReplacement()
+						flowMapReplacement[kernelXDPFlowsOldMapNameV4] = flowsOldMap
+					}
+				}
+				if existingMigrationFlags&xdpFlowMigrationFlagV6Old != 0 {
+					if flowsOldMapV6 := rt.coll.Maps[kernelXDPFlowsOldMapNameV6]; flowsOldMapV6 != nil {
+						ensureFlowMapReplacement()
+						flowMapReplacement[kernelXDPFlowsOldMapNameV6] = flowsOldMapV6
+					}
+				}
+				flowMigrationFlags = existingMigrationFlags
+				if actualCapacities.Flows < desiredCapacities.Flows {
 					log.Printf(
-						"xdp dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
-						kernelFlowsMapNameV6,
-						flowsMapV6.MaxEntries(),
+						"xdp dataplane reconcile: preserving active/old flow banks while migration is still draining; active flow map capacity=%d remains below desired=%d",
+						actualCapacities.Flows,
 						desiredCapacities.Flows,
 					)
+				}
+			} else {
+				if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
+					ensureFlowMapReplacement()
+					flowMapReplacement[kernelXDPFlowsOldMapNameV4] = flowsMap
+					flowMigrationFlags |= xdpFlowMigrationFlagV4Old
+				}
+				if flowsMapV6 := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMapV6 != nil {
+					ensureFlowMapReplacement()
+					flowMapReplacement[kernelXDPFlowsOldMapNameV6] = flowsMapV6
+					flowMigrationFlags |= xdpFlowMigrationFlagV6Old
 				}
 			}
 		}
 		if statsMap := rt.coll.Maps[kernelStatsMapName]; statsMap != nil {
 			if kernelMapReusableWithCapacity(statsMap, desiredCapacities.Rules) {
-				if flowMapReplacement == nil {
-					flowMapReplacement = make(map[string]*ebpf.Map, 3)
-				}
+				ensureFlowMapReplacement()
 				flowMapReplacement[kernelStatsMapName] = statsMap
 			} else {
 				oldStatsMap = statsMap
@@ -460,7 +499,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			log.Printf("xdp dataplane hot restart: cleanup stale xdp state failed, discarding pinned state only: %v", cleanupErr)
 			clearKernelHotRestartState(kernelEngineXDP)
 		}
-	} else if state, err := loadXDPKernelHotRestartState(desiredCapacities, objectHash); err != nil {
+	} else if state, err := loadXDPKernelHotRestartState(
+		desiredCapacities,
+		kernelXDPHotRestartValidationOptions(objectHash, rt.prepareOptions.enableTrafficStats),
+	); err != nil {
 		if isKernelHotRestartIncompatible(err) {
 			log.Printf(
 				"xdp dataplane hot restart: preserved xdp handoff is incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
@@ -475,8 +517,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		}
 	} else if state != nil {
 		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, map[string]bool{
-			kernelFlowsMapName:   true,
-			kernelFlowsMapNameV6: true,
+			kernelFlowsMapName:         true,
+			kernelFlowsMapNameV6:       true,
+			kernelXDPFlowsOldMapNameV4: true,
+			kernelXDPFlowsOldMapNameV6: true,
 		}); err != nil {
 			log.Printf(
 				"xdp dataplane hot restart: preserved xdp maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
@@ -494,10 +538,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			}
 			oldStatsMap = state.oldStatsMap
 			actualCapacities = state.actualCapacities
+			flowMigrationFlags = state.xdpFlowMigrationFlags
 			if actualCapacities.Flows < desiredCapacities.Flows {
 				log.Printf(
-					"xdp dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
-					kernelFlowsMapName,
+					"xdp dataplane hot restart: preserving pinned active/old flow banks while migration is still draining; active flow map capacity=%d remains below desired=%d",
 					actualCapacities.Flows,
 					desiredCapacities.Flows,
 				)
@@ -517,8 +561,14 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			)
 		}
 	}
+	loadSpec := spec
 	if len(flowMapReplacement) > 0 {
-		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(flowMapReplacement))
+		loadSpec, err = kernelCollectionSpecWithReplacementMapCapacities(spec, flowMapReplacement)
+		if err == nil {
+			coll, err = ebpf.NewCollectionWithOptions(loadSpec, kernelCollectionOptions(flowMapReplacement))
+		} else {
+			err = fmt.Errorf("prepare xdp collection replacement maps: %w", err)
+		}
 	} else {
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
 	}
@@ -532,6 +582,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		flowMapReplacement = nil
 		oldStatsMap = nil
 		actualCapacities = desiredCapacities
+		flowMigrationFlags = 0
 		if cleanupErr := cleanupStaleXDPKernelHotRestartState(); cleanupErr != nil {
 			log.Printf("xdp dataplane hot restart: cleanup stale xdp state failed, discarding pinned state only: %v", cleanupErr)
 			clearKernelHotRestartState(kernelEngineXDP)
@@ -573,6 +624,18 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			return results, nil
 		}
 		log.Printf("xdp dataplane program chain setup failed: %v", err)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if err := configureXDPFlowMigrationState(pieces, flowMigrationFlags); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("configure xdp flow migration state: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("xdp dataplane flow migration state setup failed: %v", err)
 		for _, rule := range rules {
 			results[rule.ID] = kernelRuleApplyResult{Error: msg}
 		}
@@ -717,6 +780,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		rt.degradedSource = kernelRuntimeDegradedSourceNone
 	}
 	rt.flowPruneState.reset()
+	rt.oldFlowPruneState.reset()
 	rt.lastReconcileMode = "rebuild"
 	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
@@ -753,11 +817,40 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
 	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
 	v4Budget, v6Budget := rt.flowMaintenanceBudgetsLocked(refs)
+	splitFamilyBudget := func(total int, primaryPresent bool, oldPresent bool) (int, int) {
+		switch {
+		case primaryPresent && oldPresent:
+			primary := total / 2
+			if primary <= 0 {
+				primary = 1
+			}
+			return primary, total - primary
+		case primaryPresent:
+			return total, 0
+		case oldPresent:
+			return 0, total
+		default:
+			return 0, 0
+		}
+	}
+	v4ActiveBudget, v4OldBudget := splitFamilyBudget(v4Budget, refs.flowsV4 != nil, refs.flowsOldV4 != nil)
+	v6ActiveBudget, v6OldBudget := splitFamilyBudget(v6Budget, refs.flowsV6 != nil, refs.flowsOldV6 != nil)
 	corrections := map[uint32]kernelRuleStats{}
 	pruneMetrics := kernelFlowPruneMetrics{}
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsInCollection(rt.coll, &rt.flowPruneState, v4Budget)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, nil, &rt.flowPruneState, v4ActiveBudget)
+		pruneMetrics.Budget += v4Metrics.Budget
+		pruneMetrics.Scanned += v4Metrics.Scanned
+		pruneMetrics.Deleted += v4Metrics.Deleted
+		if err != nil {
+			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
+			return err
+		}
+		mergeKernelStatsCorrections(corrections, v4Corrections)
+	}
+	if refs.flowsOldV4 != nil {
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, nil, &rt.oldFlowPruneState, v4OldBudget)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -768,7 +861,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &rt.flowPruneState, v6Budget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &rt.flowPruneState, v6ActiveBudget)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -777,6 +870,24 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 			return err
 		}
 		mergeKernelStatsCorrections(corrections, v6Corrections)
+	}
+	if refs.flowsOldV6 != nil {
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, &rt.oldFlowPruneState, v6OldBudget)
+		pruneMetrics.Budget += v6Metrics.Budget
+		pruneMetrics.Scanned += v6Metrics.Scanned
+		pruneMetrics.Deleted += v6Metrics.Deleted
+		if err != nil {
+			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
+			return err
+		}
+		mergeKernelStatsCorrections(corrections, v6Corrections)
+	}
+	if currentFlags, err := xdpOldFlowMigrationFlagsFromRuntimeMapRefs(refs); err != nil {
+		log.Printf("xdp dataplane maintenance: inspect old-bank flow state failed: %v", err)
+	} else if refs.xdpFlowMigrationState != nil {
+		if err := refs.xdpFlowMigrationState.Put(uint32(0), currentFlags); err != nil {
+			log.Printf("xdp dataplane maintenance: update flow migration state failed: %v", err)
+		}
 	}
 	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, nil)
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
@@ -842,11 +953,23 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
+	existingMigrationFlags, err := xdpOldFlowMigrationFlagsFromCollection(rt.coll)
+	if err != nil {
+		log.Printf("xdp dataplane hot restart: inspect old-bank flow state failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
 	maps := map[string]*ebpf.Map{
 		kernelFlowsMapName: rt.coll.Maps[kernelFlowsMapName],
 	}
 	if rt.coll.Maps[kernelFlowsMapNameV6] != nil {
 		maps[kernelFlowsMapNameV6] = rt.coll.Maps[kernelFlowsMapNameV6]
+	}
+	if existingMigrationFlags&xdpFlowMigrationFlagV4Old != 0 {
+		maps[kernelXDPFlowsOldMapNameV4] = rt.coll.Maps[kernelXDPFlowsOldMapNameV4]
+	}
+	if existingMigrationFlags&xdpFlowMigrationFlagV6Old != 0 {
+		maps[kernelXDPFlowsOldMapNameV6] = rt.coll.Maps[kernelXDPFlowsOldMapNameV6]
 	}
 	if kernelHotRestartSkipStatsRequested() {
 		log.Printf("xdp dataplane hot restart: preserving flow map without %s as requested", kernelStatsMapName)
@@ -858,7 +981,10 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	if err := writeKernelHotRestartMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, objectHash)); err != nil {
+	if err := writeKernelHotRestartMetadata(
+		kernelEngineXDP,
+		kernelHotRestartXDPMetadataForHotRestart(rt.attachments, objectHash, rt.prepareOptions.enableTrafficStats),
+	); err != nil {
 		clearKernelHotRestartState(kernelEngineXDP)
 		log.Printf("xdp dataplane hot restart: write xdp metadata failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
@@ -878,6 +1004,7 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
@@ -904,6 +1031,7 @@ func (rt *xdpKernelRuleRuntime) cleanupLocked() {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
@@ -965,6 +1093,7 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 	rt.rulesMapCapacity = kernelRuntimeRuleMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	rt.flowsMapCapacity = kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	rt.flowPruneState.reset()
+	rt.oldFlowPruneState.reset()
 	rt.maintenanceState.requestFull()
 	rt.invalidatePressureStateLocked()
 	return retained, nil
@@ -1020,16 +1149,18 @@ func (rt *xdpKernelRuleRuntime) flowMaintenanceBudgetLocked() int {
 
 func (rt *xdpKernelRuleRuntime) flowMaintenanceBudgetsLocked(refs kernelRuntimeMapRefs) (int, int) {
 	baseBudget := rt.flowMaintenanceBudgetLocked()
+	haveV4 := refs.flowsV4 != nil || refs.flowsOldV4 != nil
+	haveV6 := refs.flowsV6 != nil || refs.flowsOldV6 != nil
 	switch {
-	case refs.flowsV4 != nil && refs.flowsV6 != nil:
+	case haveV4 && haveV6:
 		v4Budget := baseBudget / 2
 		if v4Budget <= 0 {
 			v4Budget = 1
 		}
 		return v4Budget, baseBudget - v4Budget
-	case refs.flowsV4 != nil:
+	case haveV4:
 		return baseBudget, 0
-	case refs.flowsV6 != nil:
+	case haveV6:
 		return 0, baseBudget
 	default:
 		return baseBudget, 0
@@ -1173,6 +1304,7 @@ func validateXDPCollectionSpec(spec *ebpf.CollectionSpec) error {
 		kernelXDPFlowAuxScratchV6MapName,
 		kernelXDPDispatchScratchV4MapName,
 		kernelXDPDispatchScratchV6MapName,
+		kernelXDPFlowMigrationStateMapName,
 	} {
 		if _, ok := spec.Maps[name]; !ok {
 			return fmt.Errorf("embedded xdp eBPF object is missing map %q", name)
@@ -1183,6 +1315,27 @@ func validateXDPCollectionSpec(spec *ebpf.CollectionSpec) error {
 	}
 	if _, ok := spec.Maps[kernelFlowsMapNameV6]; !ok {
 		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelFlowsMapNameV6)
+	}
+	if _, ok := spec.Maps[kernelXDPFlowsOldMapNameV4]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelXDPFlowsOldMapNameV4)
+	}
+	if _, ok := spec.Maps[kernelXDPFlowsOldMapNameV6]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelXDPFlowsOldMapNameV6)
+	}
+	for _, name := range []string{
+		kernelFlowsMapNameV4,
+		kernelFlowsMapNameV6,
+		kernelXDPFlowsOldMapNameV4,
+		kernelXDPFlowsOldMapNameV6,
+	} {
+		if spec.Maps[name].Type != ebpf.Hash {
+			return fmt.Errorf(
+				"embedded xdp eBPF object map %q has type %v, want %v",
+				name,
+				spec.Maps[name].Type,
+				ebpf.Hash,
+			)
+		}
 	}
 	return nil
 }
@@ -1206,6 +1359,9 @@ func lookupXDPCollectionPieces(coll *ebpf.Collection) (xdpCollectionPieces, erro
 		rulesV6:              coll.Maps[kernelRulesMapNameV6],
 		flowsV4:              coll.Maps[kernelFlowsMapNameV4],
 		flowsV6:              coll.Maps[kernelFlowsMapNameV6],
+		flowsOldV4:           coll.Maps[kernelXDPFlowsOldMapNameV4],
+		flowsOldV6:           coll.Maps[kernelXDPFlowsOldMapNameV6],
+		flowMigrationState:   coll.Maps[kernelXDPFlowMigrationStateMapName],
 		localIPv4s:           coll.Maps[kernelLocalIPv4MapName],
 	}
 	if pieces.prog == nil ||
@@ -1219,10 +1375,12 @@ func lookupXDPCollectionPieces(coll *ebpf.Collection) (xdpCollectionPieces, erro
 		pieces.redirectMap == nil ||
 		pieces.progChain == nil ||
 		pieces.rulesV4 == nil ||
-		pieces.flowsV4 == nil {
+		pieces.flowsV4 == nil ||
+		pieces.flowsOldV4 == nil ||
+		pieces.flowMigrationState == nil {
 		return xdpCollectionPieces{}, fmt.Errorf("xdp object is missing required program or maps")
 	}
-	if pieces.rulesV6 == nil || pieces.flowsV6 == nil {
+	if pieces.rulesV6 == nil || pieces.flowsV6 == nil || pieces.flowsOldV6 == nil {
 		return xdpCollectionPieces{}, fmt.Errorf("xdp object has incomplete IPv6 map set")
 	}
 	return pieces, nil
@@ -1261,6 +1419,66 @@ func configureXDPProgramChain(pieces xdpCollectionPieces) error {
 		return fmt.Errorf("install xdp IPv6 full-nat reply tail-call target: %w", err)
 	}
 	return nil
+}
+
+func configureXDPFlowMigrationState(pieces xdpCollectionPieces, flags uint32) error {
+	if pieces.flowMigrationState == nil {
+		return fmt.Errorf("xdp object is missing flow migration state map")
+	}
+	key := uint32(0)
+	if err := pieces.flowMigrationState.Put(key, flags); err != nil {
+		return fmt.Errorf("update xdp flow migration state: %w", err)
+	}
+	return nil
+}
+
+func xdpOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, error) {
+	if coll == nil || coll.Maps == nil {
+		return 0, nil
+	}
+	var flags uint32
+	if m := coll.Maps[kernelXDPFlowsOldMapNameV4]; m != nil {
+		count, err := countKernelFlowMapEntries(m)
+		if err != nil {
+			return 0, fmt.Errorf("count old xdp IPv4 flows: %w", err)
+		}
+		if count > 0 {
+			flags |= xdpFlowMigrationFlagV4Old
+		}
+	}
+	if m := coll.Maps[kernelXDPFlowsOldMapNameV6]; m != nil {
+		count, err := countKernelFlowMapEntriesV6(m)
+		if err != nil {
+			return 0, fmt.Errorf("count old xdp IPv6 flows: %w", err)
+		}
+		if count > 0 {
+			flags |= xdpFlowMigrationFlagV6Old
+		}
+	}
+	return flags, nil
+}
+
+func xdpOldFlowMigrationFlagsFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (uint32, error) {
+	var flags uint32
+	if refs.flowsOldV4 != nil {
+		count, err := countKernelFlowMapEntries(refs.flowsOldV4)
+		if err != nil {
+			return 0, fmt.Errorf("count old xdp IPv4 flows: %w", err)
+		}
+		if count > 0 {
+			flags |= xdpFlowMigrationFlagV4Old
+		}
+	}
+	if refs.flowsOldV6 != nil {
+		count, err := countKernelFlowMapEntriesV6(refs.flowsOldV6)
+		if err != nil {
+			return 0, fmt.Errorf("count old xdp IPv6 flows: %w", err)
+		}
+		if count > 0 {
+			flags |= xdpFlowMigrationFlagV6Old
+		}
+	}
+	return flags, nil
 }
 
 func xdpPreparedRuleFamily(item preparedXDPKernelRule) string {

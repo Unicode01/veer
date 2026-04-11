@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
 
 func assertKernelHotRestartIncompatible(t *testing.T, err error) {
@@ -133,6 +135,29 @@ func TestValidateKernelHotRestartMetadata(t *testing.T) {
 			assertKernelHotRestartIncompatible(t, err)
 		}
 	})
+
+	t.Run("abi compatibility accepts matching compat token", func(t *testing.T) {
+		meta := base
+		meta.FormatVersion = kernelHotRestartMetadataFormatVersionABI
+		meta.CompatMode = kernelHotRestartCompatModeABI
+		meta.CompatToken = kernelTCHotRestartCompatToken(false)
+		meta.ObjectHash = "old-object"
+		if err := validateKernelHotRestartMetadataWithOptions(meta, kernelTCHotRestartValidationOptions(objectHash, false)); err != nil {
+			t.Fatalf("validateKernelHotRestartMetadataWithOptions() error = %v, want nil", err)
+		}
+	})
+
+	t.Run("abi compatibility rejects different compat token", func(t *testing.T) {
+		meta := base
+		meta.FormatVersion = kernelHotRestartMetadataFormatVersionABI
+		meta.CompatMode = kernelHotRestartCompatModeABI
+		meta.CompatToken = "tc:base:v999"
+		if err := validateKernelHotRestartMetadataWithOptions(meta, kernelTCHotRestartValidationOptions(objectHash, false)); err == nil {
+			t.Fatal("validateKernelHotRestartMetadataWithOptions() error = nil, want compat token mismatch")
+		} else {
+			assertKernelHotRestartIncompatible(t, err)
+		}
+	})
 }
 
 func TestKernelHotRestartIncompatibilityReason(t *testing.T) {
@@ -183,6 +208,53 @@ func TestValidateKernelHotRestartMapCompatibilityClassifiesIncompatibility(t *te
 	assertKernelHotRestartIncompatible(t, err)
 }
 
+func TestKernelCollectionSpecWithReplacementMapCapacitiesUsesExactMapSizes(t *testing.T) {
+	spec := &ebpf.CollectionSpec{
+		Maps: map[string]*ebpf.MapSpec{
+			kernelFlowsMapName: {
+				Name:       kernelFlowsMapName,
+				Type:       ebpf.Hash,
+				KeySize:    4,
+				ValueSize:  8,
+				MaxEntries: 128,
+			},
+			kernelStatsMapName: {
+				Name:       kernelStatsMapName,
+				Type:       ebpf.Hash,
+				KeySize:    4,
+				ValueSize:  8,
+				MaxEntries: 256,
+			},
+		},
+	}
+	replacement := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    4,
+		ValueSize:  8,
+		MaxEntries: 64,
+	})
+
+	loadSpec, err := kernelCollectionSpecWithReplacementMapCapacities(spec, map[string]*ebpf.Map{
+		kernelFlowsMapName: replacement,
+	})
+	if err != nil {
+		t.Fatalf("kernelCollectionSpecWithReplacementMapCapacities() error = %v", err)
+	}
+	if loadSpec == spec {
+		t.Fatal("kernelCollectionSpecWithReplacementMapCapacities() reused the original spec, want a copy")
+	}
+	if got := spec.Maps[kernelFlowsMapName].MaxEntries; got != 128 {
+		t.Fatalf("original spec flows max_entries = %d, want 128", got)
+	}
+	if got := loadSpec.Maps[kernelFlowsMapName].MaxEntries; got != 64 {
+		t.Fatalf("load spec flows max_entries = %d, want 64", got)
+	}
+	if got := loadSpec.Maps[kernelStatsMapName].MaxEntries; got != 256 {
+		t.Fatalf("load spec stats max_entries = %d, want 256", got)
+	}
+}
+
 func TestIsKernelHotRestartIncompatibleUsesErrorChain(t *testing.T) {
 	t.Parallel()
 
@@ -192,4 +264,425 @@ func TestIsKernelHotRestartIncompatibleUsesErrorChain(t *testing.T) {
 		t.Fatalf("errors.Is(%v, %v) = false, want true", err, base)
 	}
 	assertKernelHotRestartIncompatible(t, err)
+}
+
+func TestLoadTCKernelHotRestartStatePromotesActiveMapsToOldBank(t *testing.T) {
+	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
+	runtimeRoot := t.TempDir()
+	t.Setenv(forwardBPFStateDirEnv, bpfRoot)
+	t.Setenv(forwardRuntimeStateDirEnv, runtimeRoot)
+	clearKernelHotRestartState(kernelEngineTC)
+	t.Cleanup(func() { clearKernelHotRestartState(kernelEngineTC) })
+
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 64,
+	})
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 64,
+	})
+	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelStatsMapName,
+		Type:       ebpf.PerCPUHash,
+		KeySize:    4,
+		ValueSize:  uint32(unsafe.Sizeof(kernelStatsValueV4{})),
+		MaxEntries: 128,
+	})
+	if err := pinKernelHotRestartMaps(kernelEngineTC, map[string]*ebpf.Map{
+		kernelFlowsMapName:    flows,
+		kernelNatPortsMapName: nat,
+		kernelStatsMapName:    stats,
+	}); err != nil {
+		t.Fatalf("pinKernelHotRestartMaps() error = %v", err)
+	}
+	meta := kernelHotRestartMetadataWithABI(kernelHotRestartTCMetadata(nil, "old-object"), kernelTCHotRestartCompatToken(false))
+	if err := writeKernelHotRestartMetadata(kernelEngineTC, meta); err != nil {
+		t.Fatalf("writeKernelHotRestartMetadata() error = %v", err)
+	}
+
+	desired := kernelMapCapacities{Rules: 128, Flows: 128, NATPorts: 128}
+	state, err := loadTCKernelHotRestartState(desired, kernelTCHotRestartValidationOptions("new-object", false))
+	if err != nil {
+		t.Fatalf("loadTCKernelHotRestartState() error = %v", err)
+	}
+	if state == nil {
+		t.Fatal("loadTCKernelHotRestartState() = nil, want promoted old-bank state")
+	}
+	defer state.close()
+
+	if state.tcFlowMigrationFlags != tcFlowMigrationFlagV4Old {
+		t.Fatalf("tcFlowMigrationFlags = %#x, want %#x", state.tcFlowMigrationFlags, tcFlowMigrationFlagV4Old)
+	}
+	if state.replacements[kernelTCFlowsOldMapNameV4] == nil || state.replacements[kernelTCNatPortsOldMapNameV4] == nil {
+		t.Fatalf("replacements = %v, want promoted old-bank flow/nat maps", state.replacementMapNames())
+	}
+	if state.replacements[kernelFlowsMapName] != nil || state.replacements[kernelNatPortsMapName] != nil {
+		t.Fatalf("replacements = %v, want fresh active maps after promotion", state.replacementMapNames())
+	}
+	if state.replacements[kernelStatsMapName] == nil {
+		t.Fatalf("replacements = %v, want preserved stats map", state.replacementMapNames())
+	}
+	if state.actualCapacities != desired {
+		t.Fatalf("actualCapacities = %+v, want %+v", state.actualCapacities, desired)
+	}
+}
+
+func TestLoadTCKernelHotRestartStateKeepsExistingTCBanks(t *testing.T) {
+	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
+	runtimeRoot := t.TempDir()
+	t.Setenv(forwardBPFStateDirEnv, bpfRoot)
+	t.Setenv(forwardRuntimeStateDirEnv, runtimeRoot)
+	clearKernelHotRestartState(kernelEngineTC)
+	t.Cleanup(func() { clearKernelHotRestartState(kernelEngineTC) })
+
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 64,
+	})
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 64,
+	})
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 32,
+	})
+	natOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCNatPortsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 32,
+	})
+	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelStatsMapName,
+		Type:       ebpf.PerCPUHash,
+		KeySize:    4,
+		ValueSize:  uint32(unsafe.Sizeof(kernelStatsValueV4{})),
+		MaxEntries: 256,
+	})
+	if err := pinKernelHotRestartMaps(kernelEngineTC, map[string]*ebpf.Map{
+		kernelFlowsMapName:           flows,
+		kernelNatPortsMapName:        nat,
+		kernelTCFlowsOldMapNameV4:    flowsOld,
+		kernelTCNatPortsOldMapNameV4: natOld,
+		kernelStatsMapName:           stats,
+	}); err != nil {
+		t.Fatalf("pinKernelHotRestartMaps() error = %v", err)
+	}
+	meta := kernelHotRestartMetadataWithABI(kernelHotRestartTCMetadata(nil, "old-object"), kernelTCHotRestartCompatToken(false))
+	if err := writeKernelHotRestartMetadata(kernelEngineTC, meta); err != nil {
+		t.Fatalf("writeKernelHotRestartMetadata() error = %v", err)
+	}
+
+	desired := kernelMapCapacities{Rules: 128, Flows: 128, NATPorts: 128}
+	state, err := loadTCKernelHotRestartState(desired, kernelTCHotRestartValidationOptions("new-object", false))
+	if err != nil {
+		t.Fatalf("loadTCKernelHotRestartState() error = %v", err)
+	}
+	if state == nil {
+		t.Fatal("loadTCKernelHotRestartState() = nil, want preserved dual-bank state")
+	}
+	defer state.close()
+
+	if state.tcFlowMigrationFlags != tcFlowMigrationFlagV4Old {
+		t.Fatalf("tcFlowMigrationFlags = %#x, want %#x", state.tcFlowMigrationFlags, tcFlowMigrationFlagV4Old)
+	}
+	for _, name := range []string{
+		kernelFlowsMapName,
+		kernelNatPortsMapName,
+		kernelTCFlowsOldMapNameV4,
+		kernelTCNatPortsOldMapNameV4,
+		kernelStatsMapName,
+	} {
+		if state.replacements[name] == nil {
+			t.Fatalf("replacements = %v, want map %q", state.replacementMapNames(), name)
+		}
+	}
+	if state.actualCapacities.Flows != 64 {
+		t.Fatalf("actualCapacities.Flows = %d, want 64", state.actualCapacities.Flows)
+	}
+	if state.actualCapacities.NATPorts != 64 {
+		t.Fatalf("actualCapacities.NATPorts = %d, want 64", state.actualCapacities.NATPorts)
+	}
+}
+
+func TestTCOldFlowMigrationFlagsFromRuntimeMapRefsTracksOldBankOccupancy(t *testing.T) {
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 8,
+	})
+
+	flags, err := tcOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{flowsOldV4: flowsOld})
+	if err != nil {
+		t.Fatalf("tcOldFlowMigrationFlagsFromRuntimeMapRefs(empty) error = %v", err)
+	}
+	if flags != 0 {
+		t.Fatalf("flags(empty) = %#x, want 0", flags)
+	}
+
+	key := tcFlowKeyV4{IfIndex: 1, SrcAddr: 0x0a000001, DstAddr: 0x0a000002, SrcPort: 12345, DstPort: 80, Proto: unix.IPPROTO_TCP}
+	value := tcFlowValueV4{RuleID: 7, NATAddr: 0x0a000003, NATPort: 20001}
+	if err := flowsOld.Put(key, value); err != nil {
+		t.Fatalf("flowsOld.Put() error = %v", err)
+	}
+
+	flags, err = tcOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{flowsOldV4: flowsOld})
+	if err != nil {
+		t.Fatalf("tcOldFlowMigrationFlagsFromRuntimeMapRefs(populated) error = %v", err)
+	}
+	if flags != tcFlowMigrationFlagV4Old {
+		t.Fatalf("flags(populated) = %#x, want %#x", flags, tcFlowMigrationFlagV4Old)
+	}
+}
+
+func TestConfigureTCFlowMigrationStateWritesArrayValue(t *testing.T) {
+	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowMigrationStateMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+
+	want := uint32(tcFlowMigrationFlagV4Old | tcFlowMigrationFlagV6Old)
+	if err := configureTCFlowMigrationState(kernelCollectionPieces{flowMigrationState: flowState}, want); err != nil {
+		t.Fatalf("configureTCFlowMigrationState() error = %v", err)
+	}
+
+	var got uint32
+	if err := flowState.Lookup(uint32(0), &got); err != nil {
+		t.Fatalf("flowState.Lookup() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("flow migration state = %#x, want %#x", got, want)
+	}
+}
+
+func TestLoadXDPKernelHotRestartStatePromotesActiveMapsToOldBank(t *testing.T) {
+	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
+	runtimeRoot := t.TempDir()
+	t.Setenv(forwardBPFStateDirEnv, bpfRoot)
+	t.Setenv(forwardRuntimeStateDirEnv, runtimeRoot)
+	clearKernelHotRestartState(kernelEngineXDP)
+	t.Cleanup(func() { clearKernelHotRestartState(kernelEngineXDP) })
+
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 64,
+	})
+	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelStatsMapName,
+		Type:       ebpf.PerCPUHash,
+		KeySize:    4,
+		ValueSize:  uint32(unsafe.Sizeof(kernelStatsValueV4{})),
+		MaxEntries: 128,
+	})
+	if err := pinKernelHotRestartMaps(kernelEngineXDP, map[string]*ebpf.Map{
+		kernelFlowsMapName: flows,
+		kernelStatsMapName: stats,
+	}); err != nil {
+		t.Fatalf("pinKernelHotRestartMaps() error = %v", err)
+	}
+	meta := kernelHotRestartMetadataWithABI(kernelHotRestartXDPMetadata(nil, "old-object"), kernelXDPHotRestartCompatToken(false))
+	if err := writeKernelHotRestartMetadata(kernelEngineXDP, meta); err != nil {
+		t.Fatalf("writeKernelHotRestartMetadata() error = %v", err)
+	}
+
+	desired := kernelMapCapacities{Rules: 128, Flows: 128}
+	state, err := loadXDPKernelHotRestartState(desired, kernelXDPHotRestartValidationOptions("new-object", false))
+	if err != nil {
+		t.Fatalf("loadXDPKernelHotRestartState() error = %v", err)
+	}
+	if state == nil {
+		t.Fatal("loadXDPKernelHotRestartState() = nil, want promoted old-bank state")
+	}
+	defer state.close()
+
+	if state.xdpFlowMigrationFlags != xdpFlowMigrationFlagV4Old {
+		t.Fatalf("xdpFlowMigrationFlags = %#x, want %#x", state.xdpFlowMigrationFlags, xdpFlowMigrationFlagV4Old)
+	}
+	if state.replacements[kernelXDPFlowsOldMapNameV4] == nil {
+		t.Fatalf("replacements = %v, want promoted old-bank flow map", state.replacementMapNames())
+	}
+	if state.replacements[kernelFlowsMapName] != nil {
+		t.Fatalf("replacements = %v, want fresh active flow map after promotion", state.replacementMapNames())
+	}
+	if state.replacements[kernelStatsMapName] == nil {
+		t.Fatalf("replacements = %v, want preserved stats map", state.replacementMapNames())
+	}
+	if state.actualCapacities != desired {
+		t.Fatalf("actualCapacities = %+v, want %+v", state.actualCapacities, desired)
+	}
+}
+
+func TestLoadXDPKernelHotRestartStateKeepsExistingXDPBanks(t *testing.T) {
+	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
+	runtimeRoot := t.TempDir()
+	t.Setenv(forwardBPFStateDirEnv, bpfRoot)
+	t.Setenv(forwardRuntimeStateDirEnv, runtimeRoot)
+	clearKernelHotRestartState(kernelEngineXDP)
+	t.Cleanup(func() { clearKernelHotRestartState(kernelEngineXDP) })
+
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 64,
+	})
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 32,
+	})
+	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelStatsMapName,
+		Type:       ebpf.PerCPUHash,
+		KeySize:    4,
+		ValueSize:  uint32(unsafe.Sizeof(kernelStatsValueV4{})),
+		MaxEntries: 256,
+	})
+	if err := pinKernelHotRestartMaps(kernelEngineXDP, map[string]*ebpf.Map{
+		kernelFlowsMapName:         flows,
+		kernelXDPFlowsOldMapNameV4: flowsOld,
+		kernelStatsMapName:         stats,
+	}); err != nil {
+		t.Fatalf("pinKernelHotRestartMaps() error = %v", err)
+	}
+	meta := kernelHotRestartMetadataWithABI(kernelHotRestartXDPMetadata(nil, "old-object"), kernelXDPHotRestartCompatToken(false))
+	if err := writeKernelHotRestartMetadata(kernelEngineXDP, meta); err != nil {
+		t.Fatalf("writeKernelHotRestartMetadata() error = %v", err)
+	}
+
+	desired := kernelMapCapacities{Rules: 128, Flows: 128}
+	state, err := loadXDPKernelHotRestartState(desired, kernelXDPHotRestartValidationOptions("new-object", false))
+	if err != nil {
+		t.Fatalf("loadXDPKernelHotRestartState() error = %v", err)
+	}
+	if state == nil {
+		t.Fatal("loadXDPKernelHotRestartState() = nil, want preserved dual-bank state")
+	}
+	defer state.close()
+
+	if state.xdpFlowMigrationFlags != xdpFlowMigrationFlagV4Old {
+		t.Fatalf("xdpFlowMigrationFlags = %#x, want %#x", state.xdpFlowMigrationFlags, xdpFlowMigrationFlagV4Old)
+	}
+	for _, name := range []string{
+		kernelFlowsMapName,
+		kernelXDPFlowsOldMapNameV4,
+		kernelStatsMapName,
+	} {
+		if state.replacements[name] == nil {
+			t.Fatalf("replacements = %v, want map %q", state.replacementMapNames(), name)
+		}
+	}
+	if state.actualCapacities.Flows != 64 {
+		t.Fatalf("actualCapacities.Flows = %d, want 64", state.actualCapacities.Flows)
+	}
+}
+
+func TestXDPOldFlowMigrationFlagsFromRuntimeMapRefsTracksOldBankOccupancy(t *testing.T) {
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 8,
+	})
+
+	flags, err := xdpOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{flowsOldV4: flowsOld})
+	if err != nil {
+		t.Fatalf("xdpOldFlowMigrationFlagsFromRuntimeMapRefs(empty) error = %v", err)
+	}
+	if flags != 0 {
+		t.Fatalf("flags(empty) = %#x, want 0", flags)
+	}
+
+	key := tcFlowKeyV4{IfIndex: 1, SrcAddr: 0x0a000001, DstAddr: 0x0a000002, SrcPort: 12345, DstPort: 80, Proto: unix.IPPROTO_TCP}
+	value := tcFlowValueV4{RuleID: 7, NATAddr: 0x0a000003, NATPort: 20001}
+	if err := flowsOld.Put(key, value); err != nil {
+		t.Fatalf("flowsOld.Put() error = %v", err)
+	}
+
+	flags, err = xdpOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{flowsOldV4: flowsOld})
+	if err != nil {
+		t.Fatalf("xdpOldFlowMigrationFlagsFromRuntimeMapRefs(populated) error = %v", err)
+	}
+	if flags != xdpFlowMigrationFlagV4Old {
+		t.Fatalf("flags(populated) = %#x, want %#x", flags, xdpFlowMigrationFlagV4Old)
+	}
+}
+
+func TestConfigureXDPFlowMigrationStateWritesArrayValue(t *testing.T) {
+	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowMigrationStateMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+
+	want := uint32(xdpFlowMigrationFlagV4Old | xdpFlowMigrationFlagV6Old)
+	if err := configureXDPFlowMigrationState(xdpCollectionPieces{flowMigrationState: flowState}, want); err != nil {
+		t.Fatalf("configureXDPFlowMigrationState() error = %v", err)
+	}
+
+	var got uint32
+	if err := flowState.Lookup(uint32(0), &got); err != nil {
+		t.Fatalf("flowState.Lookup() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("flow migration state = %#x, want %#x", got, want)
+	}
+}
+
+func requireKernelHotRestartBPFStateRoot(t *testing.T) string {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("requires root for bpffs pinning")
+	}
+	root, err := os.MkdirTemp("/sys/fs/bpf", "forward-hot-restart-test-")
+	if err != nil {
+		t.Skipf("bpffs temp dir unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return root
+}
+
+func newKernelHotRestartTestMap(t *testing.T, spec *ebpf.MapSpec) *ebpf.Map {
+	t.Helper()
+	m, err := ebpf.NewMap(spec)
+	if err != nil {
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+			t.Skipf("eBPF map creation unavailable: %v", err)
+		}
+		t.Fatalf("ebpf.NewMap(%q) error = %v", spec.Name, err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	return m
 }

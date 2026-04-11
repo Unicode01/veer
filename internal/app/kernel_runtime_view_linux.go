@@ -37,13 +37,19 @@ type kernelRuntimeMapCountSnapshot struct {
 }
 
 type kernelRuntimeMapRefs struct {
-	rulesV4   *ebpf.Map
-	rulesV6   *ebpf.Map
-	flowsV4   *ebpf.Map
-	flowsV6   *ebpf.Map
-	natV4     *ebpf.Map
-	natV6     *ebpf.Map
-	occupancy *ebpf.Map
+	rulesV4               *ebpf.Map
+	rulesV6               *ebpf.Map
+	flowsV4               *ebpf.Map
+	flowsV6               *ebpf.Map
+	flowsOldV4            *ebpf.Map
+	flowsOldV6            *ebpf.Map
+	natV4                 *ebpf.Map
+	natV6                 *ebpf.Map
+	natOldV4              *ebpf.Map
+	natOldV6              *ebpf.Map
+	occupancy             *ebpf.Map
+	tcFlowMigrationState  *ebpf.Map
+	xdpFlowMigrationState *ebpf.Map
 }
 
 type kernelRuntimeRuleCounter func(kernelRuntimeMapRefs, int) (int, error)
@@ -958,11 +964,11 @@ func (refs kernelRuntimeMapRefs) hasRules() bool {
 }
 
 func (refs kernelRuntimeMapRefs) hasFlows() bool {
-	return refs.flowsV4 != nil || refs.flowsV6 != nil
+	return refs.flowsV4 != nil || refs.flowsV6 != nil || refs.flowsOldV4 != nil || refs.flowsOldV6 != nil
 }
 
 func (refs kernelRuntimeMapRefs) hasNAT() bool {
-	return refs.natV4 != nil || refs.natV6 != nil
+	return refs.natV4 != nil || refs.natV6 != nil || refs.natOldV4 != nil || refs.natOldV6 != nil
 }
 
 func kernelRuntimeMapTotalCapacity(maps ...*ebpf.Map) int {
@@ -981,11 +987,11 @@ func kernelRuntimeRuleMapCapacity(refs kernelRuntimeMapRefs) int {
 }
 
 func kernelRuntimeFlowMapCapacity(refs kernelRuntimeMapRefs) int {
-	return kernelRuntimeMapTotalCapacity(refs.flowsV4, refs.flowsV6)
+	return kernelRuntimeMapTotalCapacity(refs.flowsV4, refs.flowsV6, refs.flowsOldV4, refs.flowsOldV6)
 }
 
 func kernelRuntimeNATMapCapacity(refs kernelRuntimeMapRefs) int {
-	return kernelRuntimeMapTotalCapacity(refs.natV4, refs.natV6)
+	return kernelRuntimeMapTotalCapacity(refs.natV4, refs.natV6, refs.natOldV4, refs.natOldV6)
 }
 
 func kernelRuntimeMapCapacity(m *ebpf.Map) int {
@@ -993,6 +999,15 @@ func kernelRuntimeMapCapacity(m *ebpf.Map) int {
 		return 0
 	}
 	return int(m.MaxEntries())
+}
+
+func firstNonNilMap(maps ...*ebpf.Map) *ebpf.Map {
+	for _, m := range maps {
+		if m != nil {
+			return m
+		}
+	}
+	return nil
 }
 
 func countKernelRuntimeFlowEntriesExact(refs kernelRuntimeMapRefs) (int, error) {
@@ -1006,6 +1021,20 @@ func countKernelRuntimeFlowEntriesExact(refs kernelRuntimeMapRefs) (int, error) 
 	}
 	if refs.flowsV6 != nil {
 		count, err := countKernelFlowMapEntriesV6(refs.flowsV6)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	if refs.flowsOldV4 != nil {
+		count, err := countKernelFlowMapEntries(refs.flowsOldV4)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	if refs.flowsOldV6 != nil {
+		count, err := countKernelFlowMapEntriesV6(refs.flowsOldV6)
 		if err != nil {
 			return 0, err
 		}
@@ -1025,6 +1054,20 @@ func countKernelRuntimeNATEntriesExact(refs kernelRuntimeMapRefs) (int, error) {
 	}
 	if refs.natV6 != nil {
 		count, err := countKernelNATMapEntriesV6(refs.natV6)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	if refs.natOldV4 != nil {
+		count, err := countKernelNATMapEntries(refs.natOldV4)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	if refs.natOldV6 != nil {
+		count, err := countKernelNATMapEntriesV6(refs.natOldV6)
 		if err != nil {
 			return 0, err
 		}
@@ -1064,20 +1107,36 @@ func countTCKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRef
 		counts.flowsEntriesV4 = 0
 	} else if count, err := countKernelFlowMapEntries(refs.flowsV4); err == nil {
 		counts.flowsEntriesV4 = count
-		flowsTotal += count
 	} else {
 		flowsExact = false
 		exact = false
 	}
+	if refs.flowsOldV4 != nil {
+		if count, err := countKernelFlowMapEntries(refs.flowsOldV4); err == nil {
+			counts.flowsEntriesV4 += count
+		} else {
+			flowsExact = false
+			exact = false
+		}
+	}
+	flowsTotal += counts.flowsEntriesV4
 	if refs.flowsV6 == nil {
 		counts.flowsEntriesV6 = 0
 	} else if count, err := countKernelFlowMapEntriesV6(refs.flowsV6); err == nil {
 		counts.flowsEntriesV6 = count
-		flowsTotal += count
 	} else {
 		flowsExact = false
 		exact = false
 	}
+	if refs.flowsOldV6 != nil {
+		if count, err := countKernelFlowMapEntriesV6(refs.flowsOldV6); err == nil {
+			counts.flowsEntriesV6 += count
+		} else {
+			flowsExact = false
+			exact = false
+		}
+	}
+	flowsTotal += counts.flowsEntriesV6
 	if refs.hasFlows() && flowsExact {
 		counts.flowsEntries = flowsTotal
 	}
@@ -1094,6 +1153,15 @@ func countTCKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRef
 			natExact = false
 			exact = false
 		}
+		if refs.natOldV4 != nil {
+			if count, err := countKernelNATMapEntries(refs.natOldV4); err == nil {
+				counts.natEntriesV4 += count
+				natTotal += count
+			} else {
+				natExact = false
+				exact = false
+			}
+		}
 		if refs.natV6 == nil {
 			counts.natEntriesV6 = 0
 		} else if count, err := countKernelNATMapEntriesV6(refs.natV6); err == nil {
@@ -1102,6 +1170,15 @@ func countTCKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRef
 		} else {
 			natExact = false
 			exact = false
+		}
+		if refs.natOldV6 != nil {
+			if count, err := countKernelNATMapEntriesV6(refs.natOldV6); err == nil {
+				counts.natEntriesV6 += count
+				natTotal += count
+			} else {
+				natExact = false
+				exact = false
+			}
 		}
 		if refs.hasNAT() && natExact {
 			counts.natEntries = natTotal
@@ -1199,13 +1276,19 @@ func kernelRuntimeMapRefsFromCollection(coll *ebpf.Collection) kernelRuntimeMapR
 		return kernelRuntimeMapRefs{}
 	}
 	return kernelRuntimeMapRefs{
-		rulesV4:   coll.Maps[kernelRulesMapNameV4],
-		rulesV6:   coll.Maps[kernelRulesMapNameV6],
-		flowsV4:   coll.Maps[kernelFlowsMapNameV4],
-		flowsV6:   coll.Maps[kernelFlowsMapNameV6],
-		natV4:     coll.Maps[kernelNatPortsMapNameV4],
-		natV6:     coll.Maps[kernelNatPortsMapNameV6],
-		occupancy: coll.Maps[kernelOccupancyMapName],
+		rulesV4:               coll.Maps[kernelRulesMapNameV4],
+		rulesV6:               coll.Maps[kernelRulesMapNameV6],
+		flowsV4:               coll.Maps[kernelFlowsMapNameV4],
+		flowsV6:               coll.Maps[kernelFlowsMapNameV6],
+		flowsOldV4:            firstNonNilMap(coll.Maps[kernelTCFlowsOldMapNameV4], coll.Maps[kernelXDPFlowsOldMapNameV4]),
+		flowsOldV6:            firstNonNilMap(coll.Maps[kernelTCFlowsOldMapNameV6], coll.Maps[kernelXDPFlowsOldMapNameV6]),
+		natV4:                 coll.Maps[kernelNatPortsMapNameV4],
+		natV6:                 coll.Maps[kernelNatPortsMapNameV6],
+		natOldV4:              coll.Maps[kernelTCNatPortsOldMapNameV4],
+		natOldV6:              coll.Maps[kernelTCNatPortsOldMapNameV6],
+		occupancy:             coll.Maps[kernelOccupancyMapName],
+		tcFlowMigrationState:  coll.Maps[kernelTCFlowMigrationStateMapName],
+		xdpFlowMigrationState: coll.Maps[kernelXDPFlowMigrationStateMapName],
 	}
 }
 
@@ -1214,9 +1297,15 @@ func kernelRuntimeMapRefsEqual(a, b kernelRuntimeMapRefs) bool {
 		a.rulesV6 == b.rulesV6 &&
 		a.flowsV4 == b.flowsV4 &&
 		a.flowsV6 == b.flowsV6 &&
+		a.flowsOldV4 == b.flowsOldV4 &&
+		a.flowsOldV6 == b.flowsOldV6 &&
 		a.natV4 == b.natV4 &&
 		a.natV6 == b.natV6 &&
-		a.occupancy == b.occupancy
+		a.natOldV4 == b.natOldV4 &&
+		a.natOldV6 == b.natOldV6 &&
+		a.occupancy == b.occupancy &&
+		a.tcFlowMigrationState == b.tcFlowMigrationState &&
+		a.xdpFlowMigrationState == b.xdpFlowMigrationState
 }
 
 func (rt *linuxKernelRuleRuntime) currentRuntimeMapCountsLocked(now time.Time) kernelRuntimeMapCountSnapshot {
@@ -1319,14 +1408,14 @@ func applyKernelRuntimeMapBreakdown(view *KernelEngineRuntimeView, refs kernelRu
 	view.RulesMapEntriesV6 = counts.rulesEntriesV6
 	view.RulesMapCapacityV6 = kernelRuntimeMapCapacity(refs.rulesV6)
 	view.FlowsMapEntriesV4 = counts.flowsEntriesV4
-	view.FlowsMapCapacityV4 = kernelRuntimeMapCapacity(refs.flowsV4)
+	view.FlowsMapCapacityV4 = kernelRuntimeMapTotalCapacity(refs.flowsV4, refs.flowsOldV4)
 	view.FlowsMapEntriesV6 = counts.flowsEntriesV6
-	view.FlowsMapCapacityV6 = kernelRuntimeMapCapacity(refs.flowsV6)
+	view.FlowsMapCapacityV6 = kernelRuntimeMapTotalCapacity(refs.flowsV6, refs.flowsOldV6)
 	if includeNAT {
 		view.NATMapEntriesV4 = counts.natEntriesV4
-		view.NATMapCapacityV4 = kernelRuntimeMapCapacity(refs.natV4)
+		view.NATMapCapacityV4 = kernelRuntimeMapTotalCapacity(refs.natV4, refs.natOldV4)
 		view.NATMapEntriesV6 = counts.natEntriesV6
-		view.NATMapCapacityV6 = kernelRuntimeMapCapacity(refs.natV6)
+		view.NATMapCapacityV6 = kernelRuntimeMapTotalCapacity(refs.natV6, refs.natOldV6)
 	}
 }
 

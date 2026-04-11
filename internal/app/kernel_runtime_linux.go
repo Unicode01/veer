@@ -45,6 +45,11 @@ const (
 	kernelDiagMapName                       = "diag_v4"
 	kernelOccupancyMapName                  = "occupancy_v4"
 	kernelTCProgramChainMapName             = "tc_prog_chain_v4"
+	kernelTCFlowsOldMapNameV4               = "flows_old_v4"
+	kernelTCFlowsOldMapNameV6               = "flows_old_v6"
+	kernelTCNatPortsOldMapNameV4            = "nat_ports_old_v4"
+	kernelTCNatPortsOldMapNameV6            = "nat_ports_old_v6"
+	kernelTCFlowMigrationStateMapName       = "tc_flow_migration_state"
 	kernelReplyFilterPrio                   = 10
 	kernelReplyFilterPrioV6                 = 11
 	kernelForwardFilterPrio                 = 20
@@ -86,6 +91,11 @@ const (
 	kernelRuleFlagEgressNAT    = 0x8
 	kernelRuleFlagPassthrough  = 0x10
 	kernelRuleFlagFullCone     = 0x20
+)
+
+const (
+	tcFlowMigrationFlagV4Old = 0x1
+	tcFlowMigrationFlagV6Old = 0x2
 )
 
 type kernelTCAttachmentProgramMode string
@@ -229,8 +239,13 @@ type kernelCollectionPieces struct {
 	rulesV6                    *ebpf.Map
 	flowsV4                    *ebpf.Map
 	flowsV6                    *ebpf.Map
+	flowsOldV4                 *ebpf.Map
+	flowsOldV6                 *ebpf.Map
 	natV4                      *ebpf.Map
 	natV6                      *ebpf.Map
+	natOldV4                   *ebpf.Map
+	natOldV6                   *ebpf.Map
+	flowMigrationState         *ebpf.Map
 }
 
 type kernelAttachmentPrograms struct {
@@ -433,6 +448,7 @@ type linuxKernelRuleRuntime struct {
 	orphanNATPruneLog  kernelCountLogState
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPruneState     kernelFlowPruneState
+	oldFlowPruneState  kernelFlowPruneState
 	runtimeMapCounts   kernelRuntimeMapCountSnapshot
 	enableTrafficStats bool
 	enableDiagnostics  bool
@@ -726,64 +742,110 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 	var oldStatsMap *ebpf.Map
 	var hotRestartState *kernelHotRestartMapState
 	hotRestartStatsCorrection := map[uint32]kernelRuleStats{}
+	tcFlowMigrationFlags := uint32(0)
+	ensureMapReplacements := func() {
+		if mapReplacements == nil {
+			mapReplacements = make(map[string]*ebpf.Map, 9)
+		}
+	}
 	if rt.coll != nil && rt.coll.Maps != nil {
-		preservedFlowsCapacity := 0
-		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-			if mapReplacements == nil {
-				mapReplacements = make(map[string]*ebpf.Map, 5)
+		existingMigrationFlags, flowStateErr := tcOldFlowMigrationFlagsFromCollection(rt.coll)
+		if flowStateErr != nil {
+			msg := fmt.Sprintf("inspect tc old-bank flow state: %v", flowStateErr)
+			if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+				return results, nil
 			}
-			mapReplacements[kernelFlowsMapName] = flowsMap
-			preservedFlowsCapacity += int(flowsMap.MaxEntries())
-		}
-		if flowsMap := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMap != nil {
-			if mapReplacements == nil {
-				mapReplacements = make(map[string]*ebpf.Map, 5)
+			log.Printf("kernel dataplane reconcile: %s", msg)
+			for _, rule := range rules {
+				results[rule.ID] = kernelRuleApplyResult{Error: msg}
 			}
-			mapReplacements[kernelFlowsMapNameV6] = flowsMap
-			preservedFlowsCapacity += int(flowsMap.MaxEntries())
+			return results, nil
 		}
-		if preservedFlowsCapacity > 0 {
-			actualCapacities.Flows = preservedFlowsCapacity
+		if existingMigrationFlags != 0 {
+			for _, item := range []struct {
+				name   string
+				m      *ebpf.Map
+				isFlow bool
+				isNAT  bool
+			}{
+				{name: kernelFlowsMapName, m: rt.coll.Maps[kernelFlowsMapName], isFlow: true},
+				{name: kernelFlowsMapNameV6, m: rt.coll.Maps[kernelFlowsMapNameV6], isFlow: true},
+				{name: kernelNatPortsMapName, m: rt.coll.Maps[kernelNatPortsMapName], isNAT: true},
+				{name: kernelNatPortsMapNameV6, m: rt.coll.Maps[kernelNatPortsMapNameV6], isNAT: true},
+			} {
+				if item.m == nil {
+					continue
+				}
+				ensureMapReplacements()
+				mapReplacements[item.name] = item.m
+				if item.isFlow {
+					if capacity := int(item.m.MaxEntries()); capacity < actualCapacities.Flows {
+						actualCapacities.Flows = capacity
+					}
+				}
+				if item.isNAT {
+					if capacity := int(item.m.MaxEntries()); capacity < actualCapacities.NATPorts {
+						actualCapacities.NATPorts = capacity
+					}
+				}
+			}
+			if existingMigrationFlags&tcFlowMigrationFlagV4Old != 0 {
+				if old := rt.coll.Maps[kernelTCFlowsOldMapNameV4]; old != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCFlowsOldMapNameV4] = old
+				}
+				if old := rt.coll.Maps[kernelTCNatPortsOldMapNameV4]; old != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCNatPortsOldMapNameV4] = old
+				}
+			}
+			if existingMigrationFlags&tcFlowMigrationFlagV6Old != 0 {
+				if old := rt.coll.Maps[kernelTCFlowsOldMapNameV6]; old != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCFlowsOldMapNameV6] = old
+				}
+				if old := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; old != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCNatPortsOldMapNameV6] = old
+				}
+			}
+			tcFlowMigrationFlags = existingMigrationFlags
 			if actualCapacities.Flows < desiredCapacities.Flows {
 				log.Printf(
-					"kernel dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
-					kernelFlowsMapName,
+					"kernel dataplane reconcile: preserving active/old tc flow banks while migration is still draining; active flow map capacity=%d remains below desired=%d",
 					actualCapacities.Flows,
 					desiredCapacities.Flows,
 				)
 			}
-		}
-		preservedNATCapacity := 0
-		if natPortsMap := rt.coll.Maps[kernelNatPortsMapName]; natPortsMap != nil {
-			if mapReplacements == nil {
-				mapReplacements = make(map[string]*ebpf.Map, 5)
-			}
-			mapReplacements[kernelNatPortsMapName] = natPortsMap
-			preservedNATCapacity += int(natPortsMap.MaxEntries())
-		}
-		if natPortsMap := rt.coll.Maps[kernelNatPortsMapNameV6]; natPortsMap != nil {
-			if mapReplacements == nil {
-				mapReplacements = make(map[string]*ebpf.Map, 5)
-			}
-			mapReplacements[kernelNatPortsMapNameV6] = natPortsMap
-			preservedNATCapacity += int(natPortsMap.MaxEntries())
-		}
-		if preservedNATCapacity > 0 {
-			actualCapacities.NATPorts = preservedNATCapacity
 			if actualCapacities.NATPorts < desiredCapacities.NATPorts {
 				log.Printf(
-					"kernel dataplane reconcile: keeping existing %s map capacity=%d below desired=%d until restart to preserve active sessions",
-					kernelNatPortsMapName,
+					"kernel dataplane reconcile: preserving active/old tc nat banks while migration is still draining; active nat map capacity=%d remains below desired=%d",
 					actualCapacities.NATPorts,
 					desiredCapacities.NATPorts,
 				)
 			}
+		} else {
+			if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
+				ensureMapReplacements()
+				mapReplacements[kernelTCFlowsOldMapNameV4] = flowsMap
+				tcFlowMigrationFlags |= tcFlowMigrationFlagV4Old
+			}
+			if natMap := rt.coll.Maps[kernelNatPortsMapName]; natMap != nil {
+				ensureMapReplacements()
+				mapReplacements[kernelTCNatPortsOldMapNameV4] = natMap
+			}
+			if flowsMap := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMap != nil {
+				if natMap := rt.coll.Maps[kernelNatPortsMapNameV6]; natMap != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCFlowsOldMapNameV6] = flowsMap
+					mapReplacements[kernelTCNatPortsOldMapNameV6] = natMap
+					tcFlowMigrationFlags |= tcFlowMigrationFlagV6Old
+				}
+			}
 		}
 		if statsMap := rt.coll.Maps[kernelStatsMapName]; statsMap != nil {
 			if kernelMapReusableWithCapacity(statsMap, desiredCapacities.Rules) {
-				if mapReplacements == nil {
-					mapReplacements = make(map[string]*ebpf.Map, 5)
-				}
+				ensureMapReplacements()
 				mapReplacements[kernelStatsMapName] = statsMap
 			} else {
 				oldStatsMap = statsMap
@@ -804,7 +866,10 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 			log.Printf("kernel dataplane hot restart: cleanup stale tc state failed, discarding pinned state only: %v", cleanupErr)
 			clearKernelHotRestartState(kernelEngineTC)
 		}
-	} else if state, err := loadTCKernelHotRestartState(desiredCapacities, objectHash); err != nil {
+	} else if state, err := loadTCKernelHotRestartState(
+		desiredCapacities,
+		kernelTCHotRestartValidationOptions(objectHash, rt.enableTrafficStats),
+	); err != nil {
 		if isKernelHotRestartIncompatible(err) {
 			log.Printf(
 				"kernel dataplane hot restart: preserved tc handoff is incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
@@ -819,10 +884,14 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		}
 	} else if state != nil {
 		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, map[string]bool{
-			kernelFlowsMapName:      true,
-			kernelFlowsMapNameV6:    true,
-			kernelNatPortsMapName:   true,
-			kernelNatPortsMapNameV6: true,
+			kernelFlowsMapName:           true,
+			kernelFlowsMapNameV6:         true,
+			kernelNatPortsMapName:        true,
+			kernelNatPortsMapNameV6:      true,
+			kernelTCFlowsOldMapNameV4:    true,
+			kernelTCFlowsOldMapNameV6:    true,
+			kernelTCNatPortsOldMapNameV4: true,
+			kernelTCNatPortsOldMapNameV6: true,
 		}); err != nil {
 			log.Printf(
 				"kernel dataplane hot restart: preserved tc maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
@@ -840,18 +909,17 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 			}
 			oldStatsMap = state.oldStatsMap
 			actualCapacities = state.actualCapacities
+			tcFlowMigrationFlags = state.tcFlowMigrationFlags
 			if actualCapacities.Flows < desiredCapacities.Flows {
 				log.Printf(
-					"kernel dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
-					kernelFlowsMapName,
+					"kernel dataplane hot restart: preserving pinned active/old tc flow banks while migration is still draining; active flow map capacity=%d remains below desired=%d",
 					actualCapacities.Flows,
 					desiredCapacities.Flows,
 				)
 			}
 			if actualCapacities.NATPorts < desiredCapacities.NATPorts {
 				log.Printf(
-					"kernel dataplane hot restart: keeping pinned %s map capacity=%d below desired=%d until restart to preserve active sessions",
-					kernelNatPortsMapName,
+					"kernel dataplane hot restart: preserving pinned active/old tc nat banks while migration is still draining; active nat map capacity=%d remains below desired=%d",
 					actualCapacities.NATPorts,
 					desiredCapacities.NATPorts,
 				)
@@ -871,8 +939,14 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 			)
 		}
 	}
+	loadSpec := spec
 	if len(mapReplacements) > 0 {
-		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(mapReplacements))
+		loadSpec, err = kernelCollectionSpecWithReplacementMapCapacities(spec, mapReplacements)
+		if err == nil {
+			coll, err = ebpf.NewCollectionWithOptions(loadSpec, kernelCollectionOptions(mapReplacements))
+		} else {
+			err = fmt.Errorf("prepare tc collection replacement maps: %w", err)
+		}
 	} else {
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
 	}
@@ -886,6 +960,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		mapReplacements = nil
 		oldStatsMap = nil
 		actualCapacities = desiredCapacities
+		tcFlowMigrationFlags = 0
 		if cleanupErr := cleanupStaleTCKernelHotRestartState(); cleanupErr != nil {
 			log.Printf("kernel dataplane hot restart: cleanup stale tc state failed, discarding pinned state only: %v", cleanupErr)
 			clearKernelHotRestartState(kernelEngineTC)
@@ -920,9 +995,30 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		}
 		return results, nil
 	}
-	attachmentPrograms, attachmentWarning := configureKernelAttachmentPrograms(pieces, prepared)
-	if attachmentWarning != "" {
-		log.Printf("kernel dataplane reconcile: %s", attachmentWarning)
+	attachmentPrograms, err := configureKernelAttachmentPrograms(pieces, prepared)
+	if err != nil {
+		coll.Close()
+		msg := err.Error()
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("kernel dataplane reconcile: %s", msg)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if err := configureTCFlowMigrationState(pieces, tcFlowMigrationFlags); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("configure tc flow migration state: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("kernel dataplane flow migration state setup failed: %v", err)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
 	}
 	if oldStatsMap != nil {
 		if err := copyKernelStatsMap(coll.Maps[kernelStatsMapName], oldStatsMap); err != nil {
@@ -1130,6 +1226,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		rt.degradedSource = kernelRuntimeDegradedSourceNone
 	}
 	rt.flowPruneState.reset()
+	rt.oldFlowPruneState.reset()
 	rt.lastReconcileMode = "rebuild"
 	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
@@ -1169,11 +1266,95 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	defer rt.mu.Unlock()
 
 	startedAt := time.Now()
-	corrections, pruneMetrics, err := pruneStaleKernelFlowsInCollection(rt.coll, &rt.flowPruneState, rt.flowMaintenanceBudgetLocked())
-	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-	if err != nil {
-		return err
+	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	baseBudget := rt.flowMaintenanceBudgetLocked()
+	haveV4 := refs.flowsV4 != nil || refs.flowsOldV4 != nil
+	haveV6 := refs.flowsV6 != nil || refs.flowsOldV6 != nil
+	v4Budget, v6Budget := baseBudget, 0
+	switch {
+	case haveV4 && haveV6:
+		v4Budget = baseBudget / 2
+		if v4Budget <= 0 {
+			v4Budget = 1
+		}
+		v6Budget = baseBudget - v4Budget
+	case haveV6:
+		v4Budget = 0
+		v6Budget = baseBudget
 	}
+	splitBankBudget := func(total int, activePresent bool, oldPresent bool) (int, int) {
+		switch {
+		case activePresent && oldPresent:
+			active := total / 2
+			if active <= 0 {
+				active = 1
+			}
+			return active, total - active
+		case activePresent:
+			return total, 0
+		case oldPresent:
+			return 0, total
+		default:
+			return 0, 0
+		}
+	}
+	v4ActiveBudget, v4OldBudget := splitBankBudget(v4Budget, refs.flowsV4 != nil, refs.flowsOldV4 != nil)
+	v6ActiveBudget, v6OldBudget := splitBankBudget(v6Budget, refs.flowsV6 != nil, refs.flowsOldV6 != nil)
+	corrections := map[uint32]kernelRuleStats{}
+	pruneMetrics := kernelFlowPruneMetrics{}
+
+	if refs.flowsV4 != nil {
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &rt.flowPruneState, v4ActiveBudget)
+		pruneMetrics.Budget += v4Metrics.Budget
+		pruneMetrics.Scanned += v4Metrics.Scanned
+		pruneMetrics.Deleted += v4Metrics.Deleted
+		if err != nil {
+			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
+			return err
+		}
+		mergeKernelStatsCorrections(corrections, v4Corrections)
+	}
+	if refs.flowsOldV4 != nil {
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &rt.oldFlowPruneState, v4OldBudget)
+		pruneMetrics.Budget += v4Metrics.Budget
+		pruneMetrics.Scanned += v4Metrics.Scanned
+		pruneMetrics.Deleted += v4Metrics.Deleted
+		if err != nil {
+			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
+			return err
+		}
+		mergeKernelStatsCorrections(corrections, v4Corrections)
+	}
+	if refs.flowsV6 != nil {
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &rt.flowPruneState, v6ActiveBudget)
+		pruneMetrics.Budget += v6Metrics.Budget
+		pruneMetrics.Scanned += v6Metrics.Scanned
+		pruneMetrics.Deleted += v6Metrics.Deleted
+		if err != nil {
+			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
+			return err
+		}
+		mergeKernelStatsCorrections(corrections, v6Corrections)
+	}
+	if refs.flowsOldV6 != nil {
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, &rt.oldFlowPruneState, v6OldBudget)
+		pruneMetrics.Budget += v6Metrics.Budget
+		pruneMetrics.Scanned += v6Metrics.Scanned
+		pruneMetrics.Deleted += v6Metrics.Deleted
+		if err != nil {
+			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
+			return err
+		}
+		mergeKernelStatsCorrections(corrections, v6Corrections)
+	}
+	if currentFlags, err := tcOldFlowMigrationFlagsFromRuntimeMapRefs(refs); err != nil {
+		log.Printf("kernel dataplane maintenance: inspect old-bank tc flow state failed: %v", err)
+	} else if refs.tcFlowMigrationState != nil {
+		if err := refs.tcFlowMigrationState.Put(uint32(0), currentFlags); err != nil {
+			log.Printf("kernel dataplane maintenance: update tc flow migration state failed: %v", err)
+		}
+	}
+	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, nil)
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
 	pressureActive := rt.pressureState.active
 	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
@@ -1181,7 +1362,6 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		fullSuccess := true
 		driftDetected := false
 		if rt.coll != nil && rt.coll.Maps != nil {
-			refs := kernelRuntimeMapRefsFromCollection(rt.coll)
 			live, liveErr := snapshotKernelLiveStateFromRuntimeMapRefs(refs, true)
 			if liveErr != nil {
 				fullSuccess = false
@@ -1195,16 +1375,23 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					driftDetected = !kernelStatsCorrectionsEqual(rt.statsCorrection, exact)
 					syncKernelLiveStatsCorrections(rt.statsCorrection, exact)
 				}
-				deleted, natErr := pruneOrphanKernelNATReservations(rt.coll.Maps[kernelNatPortsMapName], live.UsedNAT)
-				if natErr != nil {
-					fullSuccess = false
-					log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
-				} else if deleted > 0 {
+				deleted := 0
+				for _, natMap := range []*ebpf.Map{refs.natV4, refs.natOldV4} {
+					itemDeleted, natErr := pruneOrphanKernelNATReservations(natMap, live.UsedNAT)
+					if natErr != nil {
+						fullSuccess = false
+						log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
+						deleted = 0
+						break
+					}
+					deleted += itemDeleted
+				}
+				if fullSuccess && deleted > 0 {
 					driftDetected = true
 					if rt.orphanNATPruneLog.ShouldLog(deleted, startedAt, kernelOrphanNATPruneLogEvery) {
 						log.Printf("kernel dataplane maintenance: pruned %d orphan tc nat reservation(s)", deleted)
 					}
-				} else {
+				} else if fullSuccess {
 					rt.orphanNATPruneLog.Reset()
 				}
 				if fullSuccess {
@@ -1360,6 +1547,12 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
+	existingMigrationFlags, err := tcOldFlowMigrationFlagsFromCollection(rt.coll)
+	if err != nil {
+		log.Printf("kernel dataplane hot restart: inspect tc old-bank flow state failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
 	maps := map[string]*ebpf.Map{
 		kernelFlowsMapName:    rt.coll.Maps[kernelFlowsMapName],
 		kernelNatPortsMapName: rt.coll.Maps[kernelNatPortsMapName],
@@ -1369,6 +1562,22 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	}
 	if rt.coll.Maps[kernelNatPortsMapNameV6] != nil {
 		maps[kernelNatPortsMapNameV6] = rt.coll.Maps[kernelNatPortsMapNameV6]
+	}
+	if existingMigrationFlags&tcFlowMigrationFlagV4Old != 0 {
+		if m := rt.coll.Maps[kernelTCFlowsOldMapNameV4]; m != nil {
+			maps[kernelTCFlowsOldMapNameV4] = m
+		}
+		if m := rt.coll.Maps[kernelTCNatPortsOldMapNameV4]; m != nil {
+			maps[kernelTCNatPortsOldMapNameV4] = m
+		}
+	}
+	if existingMigrationFlags&tcFlowMigrationFlagV6Old != 0 {
+		if m := rt.coll.Maps[kernelTCFlowsOldMapNameV6]; m != nil {
+			maps[kernelTCFlowsOldMapNameV6] = m
+		}
+		if m := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; m != nil {
+			maps[kernelTCNatPortsOldMapNameV6] = m
+		}
 	}
 	if kernelHotRestartSkipStatsRequested() {
 		log.Printf("kernel dataplane hot restart: preserving tc flow/nat maps without %s as requested", kernelStatsMapName)
@@ -1380,7 +1589,27 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	if err := writeKernelHotRestartMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, objectHash)); err != nil {
+	if rt.attachmentMode == kernelTCAttachmentProgramModeDispatchV4 {
+		programs := map[string]*ebpf.Program{
+			kernelForwardTransparentProgramName:     rt.coll.Programs[kernelForwardTransparentProgramName],
+			kernelForwardFullNATProgramName:         rt.coll.Programs[kernelForwardFullNATProgramName],
+			kernelForwardFullNATExistingProgramName: rt.coll.Programs[kernelForwardFullNATExistingProgramName],
+			kernelForwardFullNATNewProgramName:      rt.coll.Programs[kernelForwardFullNATNewProgramName],
+			kernelForwardEgressNATProgramName:       rt.coll.Programs[kernelForwardEgressNATProgramName],
+			kernelReplyTransparentProgramName:       rt.coll.Programs[kernelReplyTransparentProgramName],
+			kernelReplyFullNATProgramName:           rt.coll.Programs[kernelReplyFullNATProgramName],
+		}
+		if err := pinKernelHotRestartPrograms(kernelEngineTC, programs); err != nil {
+			clearKernelHotRestartState(kernelEngineTC)
+			log.Printf("kernel dataplane hot restart: preserve tc tail-call programs failed, falling back to full cleanup: %v", err)
+			rt.cleanupLocked()
+			return true
+		}
+	}
+	if err := writeKernelHotRestartMetadata(
+		kernelEngineTC,
+		kernelHotRestartTCMetadataForHotRestart(rt.attachments, objectHash, rt.enableTrafficStats),
+	); err != nil {
 		clearKernelHotRestartState(kernelEngineTC)
 		log.Printf("kernel dataplane hot restart: write tc metadata failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
@@ -1401,13 +1630,13 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
-	if rt.coll != nil {
-		rt.coll.Close()
-		rt.coll = nil
-	}
+	// Keep the predecessor collection alive until process exit so attached tc
+	// filters retain all program and map references throughout the handoff
+	// window before the successor finishes attaching.
 	return true
 }
 
@@ -1428,6 +1657,7 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPruneState = kernelFlowPruneState{}
+	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
@@ -1491,12 +1721,18 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 	rt.flowsMapCapacity = capacities.Flows
 	rt.natMapCapacity = capacities.NATPorts
 	rt.flowPruneState.reset()
+	rt.oldFlowPruneState.reset()
 	rt.maintenanceState.requestFull()
 	rt.invalidatePressureStateLocked()
 	return retained, nil
 }
 
 func (rt *linuxKernelRuleRuntime) flowMaintenanceBudgetLocked() int {
+	if rt.coll != nil && rt.coll.Maps != nil {
+		if totalCapacity := kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll)); totalCapacity > 0 {
+			return kernelFlowMaintenanceBudgetForCapacity(totalCapacity)
+		}
+	}
 	if capacities := rt.currentMapCapacitiesLocked(); capacities.Flows > 0 {
 		return kernelFlowMaintenanceBudgetForCapacity(capacities.Flows)
 	}
@@ -1907,15 +2143,14 @@ func (rt *linuxKernelRuleRuntime) currentMapCapacitiesLocked() kernelMapCapaciti
 	if rt.coll == nil || rt.coll.Maps == nil {
 		return capacities
 	}
-	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
-	if rulesCapacity := kernelRuntimeRuleMapCapacity(refs); rulesCapacity > 0 {
-		capacities.Rules = rulesCapacity
+	if rulesMap := rt.coll.Maps[kernelRulesMapName]; rulesMap != nil {
+		capacities.Rules = int(rulesMap.MaxEntries())
 	}
-	if flowsCapacity := kernelRuntimeFlowMapCapacity(refs); flowsCapacity > 0 {
-		capacities.Flows = flowsCapacity
+	if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
+		capacities.Flows = int(flowsMap.MaxEntries())
 	}
-	if natCapacity := kernelRuntimeNATMapCapacity(refs); natCapacity > 0 {
-		capacities.NATPorts = natCapacity
+	if natMap := rt.coll.Maps[kernelNatPortsMapName]; natMap != nil {
+		capacities.NATPorts = int(natMap.MaxEntries())
 	}
 	return capacities
 }
@@ -2013,6 +2248,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.lastReconcileMode = "cleared"
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.maintenanceState.reset()
+	rt.oldFlowPruneState.reset()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {
@@ -2031,9 +2267,9 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err != nil {
 		return err
 	}
-	attachmentPrograms, attachmentWarning := configureKernelAttachmentPrograms(pieces, prepared)
-	if attachmentWarning != "" {
-		log.Printf("kernel dataplane reconcile: %s", attachmentWarning)
+	attachmentPrograms, err := configureKernelAttachmentPrograms(pieces, prepared)
+	if err != nil {
+		return err
 	}
 
 	diff, err := diffPreparedKernelRules(rt.preparedRules, prepared)
@@ -2438,18 +2674,59 @@ func configureTCKernelProgramChain(pieces kernelCollectionPieces) error {
 	return nil
 }
 
-func configureKernelAttachmentPrograms(pieces kernelCollectionPieces, prepared []preparedKernelRule) (kernelAttachmentPrograms, string) {
+func configureTCFlowMigrationState(pieces kernelCollectionPieces, flags uint32) error {
+	if pieces.flowMigrationState == nil {
+		return fmt.Errorf("kernel object is missing tc flow migration state map")
+	}
+	key := uint32(0)
+	if err := pieces.flowMigrationState.Put(key, flags); err != nil {
+		return fmt.Errorf("update tc flow migration state: %w", err)
+	}
+	return nil
+}
+
+func tcOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, error) {
+	if coll == nil || coll.Maps == nil {
+		return 0, nil
+	}
+	return tcOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefsFromCollection(coll))
+}
+
+func tcOldFlowMigrationFlagsFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (uint32, error) {
+	var flags uint32
+	if refs.flowsOldV4 != nil {
+		count, err := countKernelFlowMapEntries(refs.flowsOldV4)
+		if err != nil {
+			return 0, fmt.Errorf("count old tc IPv4 flows: %w", err)
+		}
+		if count > 0 {
+			flags |= tcFlowMigrationFlagV4Old
+		}
+	}
+	if refs.flowsOldV6 != nil {
+		count, err := countKernelFlowMapEntriesV6(refs.flowsOldV6)
+		if err != nil {
+			return 0, fmt.Errorf("count old tc IPv6 flows: %w", err)
+		}
+		if count > 0 {
+			flags |= tcFlowMigrationFlagV6Old
+		}
+	}
+	return flags, nil
+}
+
+func configureKernelAttachmentPrograms(pieces kernelCollectionPieces, prepared []preparedKernelRule) (kernelAttachmentPrograms, error) {
 	programs := kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(prepared), kernelTCAttachmentProgramModeLegacy)
 	if !preparedKernelRulesNeedDispatchV4(prepared) {
-		return programs, ""
+		return programs, nil
 	}
 	if !kernelCollectionPiecesSupportDispatchV4(pieces) {
-		return programs, ""
+		return kernelAttachmentPrograms{}, fmt.Errorf("tc IPv4 dispatcher setup required for full-nat/egress rules, but dispatcher chain pieces are unavailable")
 	}
 	if err := configureTCKernelProgramChain(pieces); err != nil {
-		return programs, fmt.Sprintf("tc IPv4 dispatcher setup failed, using legacy tc programs: %v", err)
+		return kernelAttachmentPrograms{}, fmt.Errorf("tc IPv4 dispatcher setup failed: %w", err)
 	}
-	return kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(prepared), kernelTCAttachmentProgramModeDispatchV4), ""
+	return kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(prepared), kernelTCAttachmentProgramModeDispatchV4), nil
 }
 
 func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
@@ -2488,6 +2765,17 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 	}
 	if _, ok := spec.Maps[kernelOccupancyMapName]; !ok {
 		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelOccupancyMapName)
+	}
+	for _, name := range []string{
+		kernelTCFlowsOldMapNameV4,
+		kernelTCNatPortsOldMapNameV4,
+		kernelTCFlowsOldMapNameV6,
+		kernelTCNatPortsOldMapNameV6,
+		kernelTCFlowMigrationStateMapName,
+	} {
+		if _, ok := spec.Maps[name]; !ok {
+			return fmt.Errorf("embedded tc eBPF object is missing map %q", name)
+		}
 	}
 	hasAnyDispatchV4 := spec.Programs[kernelForwardDispatchProgramName] != nil ||
 		spec.Programs[kernelForwardTransparentProgramName] != nil ||
@@ -2575,10 +2863,22 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		rulesV6:                    coll.Maps[kernelRulesMapNameV6],
 		flowsV4:                    coll.Maps[kernelFlowsMapNameV4],
 		flowsV6:                    coll.Maps[kernelFlowsMapNameV6],
+		flowsOldV4:                 coll.Maps[kernelTCFlowsOldMapNameV4],
+		flowsOldV6:                 coll.Maps[kernelTCFlowsOldMapNameV6],
 		natV4:                      coll.Maps[kernelNatPortsMapNameV4],
 		natV6:                      coll.Maps[kernelNatPortsMapNameV6],
+		natOldV4:                   coll.Maps[kernelTCNatPortsOldMapNameV4],
+		natOldV6:                   coll.Maps[kernelTCNatPortsOldMapNameV6],
+		flowMigrationState:         coll.Maps[kernelTCFlowMigrationStateMapName],
 	}
-	if pieces.forwardProg == nil || pieces.replyProg == nil || pieces.rulesV4 == nil || pieces.flowsV4 == nil || pieces.natV4 == nil {
+	if pieces.forwardProg == nil ||
+		pieces.replyProg == nil ||
+		pieces.rulesV4 == nil ||
+		pieces.flowsV4 == nil ||
+		pieces.flowsOldV4 == nil ||
+		pieces.natV4 == nil ||
+		pieces.natOldV4 == nil ||
+		pieces.flowMigrationState == nil {
 		return kernelCollectionPieces{}, fmt.Errorf("kernel object is missing required programs or maps")
 	}
 	hasAnyDispatchV4 := pieces.forwardDispatchProg != nil ||
@@ -2599,12 +2899,14 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 	}
 	hasAnyV6 := pieces.rulesV6 != nil || pieces.flowsV6 != nil || pieces.natV6 != nil
 	if hasAnyV6 {
-		if pieces.rulesV6 == nil || pieces.flowsV6 == nil || pieces.natV6 == nil {
+		if pieces.rulesV6 == nil || pieces.flowsV6 == nil || pieces.natV6 == nil || pieces.flowsOldV6 == nil || pieces.natOldV6 == nil {
 			return kernelCollectionPieces{}, fmt.Errorf("kernel object has incomplete IPv6 map set")
 		}
 		if pieces.forwardProgV6 == nil || pieces.replyProgV6 == nil {
 			return kernelCollectionPieces{}, fmt.Errorf("kernel object has incomplete IPv6 program set")
 		}
+	} else if pieces.flowsOldV6 == nil || pieces.natOldV6 == nil {
+		return kernelCollectionPieces{}, fmt.Errorf("kernel object is missing required IPv6 old-bank maps")
 	}
 	return pieces, nil
 }

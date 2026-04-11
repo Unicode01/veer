@@ -134,8 +134,18 @@ func (rt *linuxKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRun
 		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), true)
 		rt.runtimeMapCounts = counts
 	}
-	capacities := rt.currentMapCapacitiesLocked()
-	next := buildKernelRuntimePressureState(rt.pressureState.level, counts.flowsEntries, capacities.Flows, counts.natEntries, capacities.NATPorts, true)
+	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	flowsCapacity := rt.flowsMapCapacity
+	natCapacity := rt.natMapCapacity
+	if rt.coll != nil && rt.coll.Maps != nil {
+		if total := kernelRuntimeFlowMapCapacity(refs); total > 0 {
+			flowsCapacity = total
+		}
+		if total := kernelRuntimeNATMapCapacity(refs); total > 0 {
+			natCapacity = total
+		}
+	}
+	next := buildKernelRuntimePressureState(rt.pressureState.level, counts.flowsEntries, flowsCapacity, counts.natEntries, natCapacity, true)
 	next.sampledAt = now
 	logKernelRuntimePressureTransition(kernelEngineTC, rt.pressureState, next)
 	rt.pressureState = next
@@ -165,9 +175,7 @@ func (rt *xdpKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRunti
 	}
 	flowsCapacity := rt.flowsMapCapacity
 	if rt.coll != nil && rt.coll.Maps != nil {
-		if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
-			flowsCapacity = int(flowsMap.MaxEntries())
-		}
+		flowsCapacity = kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	}
 	next := buildKernelRuntimePressureState(rt.pressureState.level, counts.flowsEntries, flowsCapacity, 0, 0, false)
 	next.sampledAt = now

@@ -99,13 +99,17 @@ func pruneStaleKernelFlowsInCollection(coll *ebpf.Collection, state *kernelFlowP
 		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
 	}
 
+	rulesMap := coll.Maps[kernelRulesMapName]
 	flowsMap := coll.Maps[kernelFlowsMapName]
+	natPortsMap := coll.Maps[kernelNatPortsMapName]
+	return pruneStaleKernelFlowsMap(rulesMap, flowsMap, natPortsMap, state, budget)
+}
+
+func pruneStaleKernelFlowsMap(rulesMap, flowsMap, natPortsMap *ebpf.Map, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	if flowsMap == nil {
 		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
 	}
 
-	rulesMap := coll.Maps[kernelRulesMapName]
-	natPortsMap := coll.Maps[kernelNatPortsMapName]
 	nowNS, haveNow := kernelMonotonicNowNS()
 	if budget <= 0 {
 		budget = kernelFlowMaintenanceBudgetMin
@@ -310,11 +314,25 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 		}
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
+	if refs.flowsOldV4 != nil {
+		live, err := snapshotKernelLiveStateFromFlows(refs.rulesV4, refs.flowsOldV4, includeNAT)
+		if err != nil {
+			return kernelFlowLiveStateSnapshot{}, err
+		}
+		mergeKernelLiveStateSnapshot(&out, live)
+	}
 	if refs.flowsV6 != nil {
 		// IPv6 TC support is still being phased in. The live snapshot aggregates IPv6
 		// flow counts here, while UsedNAT remains IPv4-only for orphan NAT pruning.
 		// Runtime occupancy sync uses exact NAT map counts instead of this set.
 		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsV6)
+		if err != nil {
+			return kernelFlowLiveStateSnapshot{}, err
+		}
+		mergeKernelLiveStateSnapshot(&out, live)
+	}
+	if refs.flowsOldV6 != nil {
+		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsOldV6)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
@@ -710,7 +728,7 @@ func pruneStaleKernelFlowsBatch(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS
 				continue
 			}
 			metrics.Scanned++
-			if kernelFlowShouldDelete(keys[i], value, nowNS, haveNow) {
+			if kernelFlowDeleteReason(keys[i], value, nowNS, haveNow) != "" {
 				deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, staleKernelFlow{key: keys[i], value: value}, corrections)
 				metrics.Deleted++
 			}
@@ -738,7 +756,7 @@ func pruneStaleKernelFlowsFullInCollection(rulesMap, flowsMap, natPortsMap *ebpf
 			continue
 		}
 		metrics.Scanned++
-		if kernelFlowShouldDelete(key, value, nowNS, haveNow) {
+		if kernelFlowDeleteReason(key, value, nowNS, haveNow) != "" {
 			staleFlows = append(staleFlows, staleKernelFlow{key: key, value: value})
 		}
 	}
@@ -804,7 +822,7 @@ func pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMa
 
 		if value.RuleID != 0 {
 			metrics.Scanned++
-			if kernelFlowShouldDelete(current, value, nowNS, haveNow) {
+			if kernelFlowDeleteReason(current, value, nowNS, haveNow) != "" {
 				deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, staleKernelFlow{key: current, value: value}, corrections)
 				metrics.Deleted++
 			}
@@ -992,35 +1010,51 @@ func pruneStaleKernelFlowsIncrementalV6InCollection(rulesMap, flowsMap *ebpf.Map
 }
 
 func kernelFlowShouldDelete(key tcFlowKeyV4, value tcFlowValueV4, nowNS uint64, haveNow bool) bool {
+	return kernelFlowDeleteReason(key, value, nowNS, haveNow) != ""
+}
+
+func kernelFlowDeleteReason(key tcFlowKeyV4, value tcFlowValueV4, nowNS uint64, haveNow bool) string {
 	if value.Flags&kernelFlowFlagFrontEntry != 0 && value.Flags&kernelFlowFlagFullNAT == 0 {
-		return true
+		return "front_entry_without_fullnat"
 	}
 	if value.Flags&kernelFlowFlagFullNAT != 0 && (value.NATAddr == 0 || value.NATPort == 0) {
-		return true
+		return "fullnat_missing_nat"
 	}
 	if !haveNow {
-		return false
+		return ""
 	}
 	if value.LastSeenNS == 0 || nowNS < value.LastSeenNS {
-		return true
+		return "invalid_last_seen"
 	}
 
 	ageNS := nowNS - value.LastSeenNS
 	if kernelFlowUsesDatagramAccounting(key.Proto) {
-		return ageNS > kernelDatagramFlowIdleTimeout(key.Proto)
+		if ageNS > kernelDatagramFlowIdleTimeout(key.Proto) {
+			return "datagram_idle_timeout"
+		}
+		return ""
 	}
 
 	if value.Flags&kernelFlowFlagReplySeen == 0 {
-		return ageNS > kernelTCPUnrepliedTimeout
+		if ageNS > kernelTCPUnrepliedTimeout {
+			return "tcp_unreplied_timeout"
+		}
+		return ""
 	}
 	if value.Flags&kernelFlowFlagFrontClosing != 0 {
 		closeSeenNS := value.FrontCloseSeenNS
 		if closeSeenNS == 0 {
 			closeSeenNS = value.LastSeenNS
 		}
-		return nowNS >= closeSeenNS && (nowNS-closeSeenNS) > kernelTCPClosingGraceNS
+		if nowNS >= closeSeenNS && (nowNS-closeSeenNS) > kernelTCPClosingGraceNS {
+			return "tcp_closing_grace_expired"
+		}
+		return ""
 	}
-	return ageNS > kernelTCPFlowIdleTimeout
+	if ageNS > kernelTCPFlowIdleTimeout {
+		return "tcp_idle_timeout"
+	}
+	return ""
 }
 
 func kernelFlowShouldDeleteV6(key tcFlowKeyV6, value tcFlowValueV6, nowNS uint64, haveNow bool) bool {

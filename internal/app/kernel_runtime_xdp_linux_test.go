@@ -176,18 +176,21 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 			kernelXDPProgramV6FullNATReplyName:   &ebpf.ProgramSpec{},
 		},
 		Maps: map[string]*ebpf.MapSpec{
-			kernelRulesMapNameV4:              &ebpf.MapSpec{},
-			kernelFlowsMapNameV4:              &ebpf.MapSpec{},
-			kernelStatsMapName:                &ebpf.MapSpec{},
-			kernelXDPRedirectMapName:          &ebpf.MapSpec{},
-			kernelXDPProgramChainMapName:      &ebpf.MapSpec{},
-			kernelXDPFIBScratchMapName:        &ebpf.MapSpec{},
-			kernelXDPFlowScratchV4MapName:     &ebpf.MapSpec{},
-			kernelXDPFlowAuxScratchV4MapName:  &ebpf.MapSpec{},
-			kernelXDPFlowScratchV6MapName:     &ebpf.MapSpec{},
-			kernelXDPFlowAuxScratchV6MapName:  &ebpf.MapSpec{},
-			kernelXDPDispatchScratchV4MapName: &ebpf.MapSpec{},
-			kernelXDPDispatchScratchV6MapName: &ebpf.MapSpec{},
+			kernelRulesMapNameV4:               &ebpf.MapSpec{},
+			kernelFlowsMapNameV4:               &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelStatsMapName:                 &ebpf.MapSpec{},
+			kernelXDPRedirectMapName:           &ebpf.MapSpec{},
+			kernelXDPProgramChainMapName:       &ebpf.MapSpec{},
+			kernelXDPFIBScratchMapName:         &ebpf.MapSpec{},
+			kernelXDPFlowScratchV4MapName:      &ebpf.MapSpec{},
+			kernelXDPFlowAuxScratchV4MapName:   &ebpf.MapSpec{},
+			kernelXDPFlowScratchV6MapName:      &ebpf.MapSpec{},
+			kernelXDPFlowAuxScratchV6MapName:   &ebpf.MapSpec{},
+			kernelXDPDispatchScratchV4MapName:  &ebpf.MapSpec{},
+			kernelXDPDispatchScratchV6MapName:  &ebpf.MapSpec{},
+			kernelXDPFlowMigrationStateMapName: &ebpf.MapSpec{},
+			kernelXDPFlowsOldMapNameV4:         &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelXDPFlowsOldMapNameV6:         &ebpf.MapSpec{Type: ebpf.Hash},
 		},
 	}
 
@@ -196,9 +199,66 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 	}
 
 	spec.Maps[kernelRulesMapNameV6] = &ebpf.MapSpec{}
-	spec.Maps[kernelFlowsMapNameV6] = &ebpf.MapSpec{}
+	spec.Maps[kernelFlowsMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
 	if err := validateXDPCollectionSpec(spec); err != nil {
 		t.Fatalf("validateXDPCollectionSpec() error = %v, want nil with dual-stack map set", err)
+	}
+}
+
+func TestValidateXDPCollectionSpecRejectsLRUFlowBanks(t *testing.T) {
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{
+			kernelXDPProgramName:                 &ebpf.ProgramSpec{},
+			kernelXDPProgramV4Name:               &ebpf.ProgramSpec{},
+			kernelXDPProgramV6Name:               &ebpf.ProgramSpec{},
+			kernelXDPProgramV4TransparentName:    &ebpf.ProgramSpec{},
+			kernelXDPProgramV4FullNATForwardName: &ebpf.ProgramSpec{},
+			kernelXDPProgramV4FullNATReplyName:   &ebpf.ProgramSpec{},
+			kernelXDPProgramV6FullNATForwardName: &ebpf.ProgramSpec{},
+			kernelXDPProgramV6FullNATReplyName:   &ebpf.ProgramSpec{},
+		},
+		Maps: map[string]*ebpf.MapSpec{
+			kernelRulesMapNameV4:               &ebpf.MapSpec{},
+			kernelFlowsMapNameV4:               &ebpf.MapSpec{Type: ebpf.LRUHash},
+			kernelStatsMapName:                 &ebpf.MapSpec{},
+			kernelXDPRedirectMapName:           &ebpf.MapSpec{},
+			kernelXDPProgramChainMapName:       &ebpf.MapSpec{},
+			kernelXDPFIBScratchMapName:         &ebpf.MapSpec{},
+			kernelXDPFlowScratchV4MapName:      &ebpf.MapSpec{},
+			kernelXDPFlowAuxScratchV4MapName:   &ebpf.MapSpec{},
+			kernelXDPFlowScratchV6MapName:      &ebpf.MapSpec{},
+			kernelXDPFlowAuxScratchV6MapName:   &ebpf.MapSpec{},
+			kernelXDPDispatchScratchV4MapName:  &ebpf.MapSpec{},
+			kernelXDPDispatchScratchV6MapName:  &ebpf.MapSpec{},
+			kernelXDPFlowMigrationStateMapName: &ebpf.MapSpec{},
+			kernelRulesMapNameV6:               &ebpf.MapSpec{},
+			kernelFlowsMapNameV6:               &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelXDPFlowsOldMapNameV4:         &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelXDPFlowsOldMapNameV6:         &ebpf.MapSpec{Type: ebpf.Hash},
+		},
+	}
+
+	if err := validateXDPCollectionSpec(spec); err == nil {
+		t.Fatal("validateXDPCollectionSpec() error = nil, want flow map type rejection")
+	}
+}
+
+func TestLoadEmbeddedXDPCollectionSpecUsesHashFlowBanks(t *testing.T) {
+	for _, enableTrafficStats := range []bool{false, true} {
+		spec, err := loadEmbeddedXDPCollectionSpec(enableTrafficStats)
+		if err != nil {
+			t.Fatalf("loadEmbeddedXDPCollectionSpec(%t) error = %v", enableTrafficStats, err)
+		}
+		for _, name := range []string{
+			kernelFlowsMapNameV4,
+			kernelFlowsMapNameV6,
+			kernelXDPFlowsOldMapNameV4,
+			kernelXDPFlowsOldMapNameV6,
+		} {
+			if got := spec.Maps[name].Type; got != ebpf.Hash {
+				t.Fatalf("loadEmbeddedXDPCollectionSpec(%t) map %q type = %v, want %v", enableTrafficStats, name, got, ebpf.Hash)
+			}
+		}
 	}
 }
 
@@ -215,10 +275,12 @@ func TestLookupXDPCollectionPiecesRejectsIncompleteIPv6MapSet(t *testing.T) {
 			kernelXDPProgramV6FullNATReplyName:   &ebpf.Program{},
 		},
 		Maps: map[string]*ebpf.Map{
-			kernelRulesMapNameV4:         &ebpf.Map{},
-			kernelFlowsMapNameV4:         &ebpf.Map{},
-			kernelRulesMapNameV6:         &ebpf.Map{},
-			kernelXDPProgramChainMapName: &ebpf.Map{},
+			kernelRulesMapNameV4:               &ebpf.Map{},
+			kernelFlowsMapNameV4:               &ebpf.Map{},
+			kernelXDPFlowsOldMapNameV4:         &ebpf.Map{},
+			kernelRulesMapNameV6:               &ebpf.Map{},
+			kernelXDPFlowMigrationStateMapName: &ebpf.Map{},
+			kernelXDPProgramChainMapName:       &ebpf.Map{},
 		},
 	}
 
@@ -241,13 +303,16 @@ func TestLookupXDPCollectionPiecesIncludesLocalIPv4MapWhenPresent(t *testing.T) 
 			kernelXDPProgramV6FullNATReplyName:   &ebpf.Program{},
 		},
 		Maps: map[string]*ebpf.Map{
-			kernelRulesMapNameV4:         &ebpf.Map{},
-			kernelFlowsMapNameV4:         &ebpf.Map{},
-			kernelRulesMapNameV6:         &ebpf.Map{},
-			kernelFlowsMapNameV6:         &ebpf.Map{},
-			kernelXDPRedirectMapName:     &ebpf.Map{},
-			kernelXDPProgramChainMapName: &ebpf.Map{},
-			kernelLocalIPv4MapName:       localMap,
+			kernelRulesMapNameV4:               &ebpf.Map{},
+			kernelFlowsMapNameV4:               &ebpf.Map{},
+			kernelXDPFlowsOldMapNameV4:         &ebpf.Map{},
+			kernelRulesMapNameV6:               &ebpf.Map{},
+			kernelFlowsMapNameV6:               &ebpf.Map{},
+			kernelXDPFlowsOldMapNameV6:         &ebpf.Map{},
+			kernelXDPRedirectMapName:           &ebpf.Map{},
+			kernelXDPFlowMigrationStateMapName: &ebpf.Map{},
+			kernelXDPProgramChainMapName:       &ebpf.Map{},
+			kernelLocalIPv4MapName:             localMap,
 		},
 	}
 

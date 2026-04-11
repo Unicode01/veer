@@ -219,6 +219,27 @@ func TestKernelRuntimeMapRefsEqualTracksDualStackMaps(t *testing.T) {
 	}
 }
 
+func TestKernelRuntimeMapRefsEqualTracksOldNATAndMigrationMaps(t *testing.T) {
+	natOldV4 := &ebpf.Map{}
+	migration := &ebpf.Map{}
+
+	a := kernelRuntimeMapRefs{natOldV4: natOldV4, tcFlowMigrationState: migration}
+	b := kernelRuntimeMapRefs{natOldV4: natOldV4, tcFlowMigrationState: migration}
+	if !kernelRuntimeMapRefsEqual(a, b) {
+		t.Fatal("kernelRuntimeMapRefsEqual() = false, want true for identical old-bank refs")
+	}
+
+	b.natOldV4 = &ebpf.Map{}
+	if kernelRuntimeMapRefsEqual(a, b) {
+		t.Fatal("kernelRuntimeMapRefsEqual() = true, want false when old nat map ref differs")
+	}
+
+	b = kernelRuntimeMapRefs{natOldV4: natOldV4, tcFlowMigrationState: &ebpf.Map{}}
+	if kernelRuntimeMapRefsEqual(a, b) {
+		t.Fatal("kernelRuntimeMapRefsEqual() = true, want false when tc flow migration map ref differs")
+	}
+}
+
 func TestXDPAttachmentMode(t *testing.T) {
 	tests := []struct {
 		name        string

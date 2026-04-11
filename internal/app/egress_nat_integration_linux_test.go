@@ -100,6 +100,22 @@ type egressNATPacketCapture struct {
 	stopped bool
 }
 
+func ensureEgressNATIntegrationIPForwarding(t *testing.T) {
+	t.Helper()
+
+	originalIPForward := strings.TrimSpace(readDataplanePerfProcFile(t, "/proc/sys/net/ipv4/ip_forward"))
+	t.Cleanup(func() {
+		if originalIPForward == "" {
+			return
+		}
+		if output, err := exec.Command("sysctl", "-w", "net.ipv4.ip_forward="+originalIPForward).CombinedOutput(); err != nil {
+			t.Logf("egress nat integration: restore net.ipv4.ip_forward=%s failed: %v (%s)", originalIPForward, err, strings.TrimSpace(string(output)))
+		}
+	})
+
+	mustRunDataplanePerfCmd(t, "sysctl", "-w", "net.ipv4.ip_forward=1")
+}
+
 func TestEgressNATIntegrationHelperProcess(t *testing.T) {
 	if os.Getenv(egressNATHelperEnv) != "1" {
 		return
@@ -920,6 +936,7 @@ func runEgressNATClientHelper() error {
 
 func setupEgressNATIntegrationTopology(t *testing.T) egressNATIntegrationTopology {
 	t.Helper()
+	ensureEgressNATIntegrationIPForwarding(t)
 
 	suffix := strconv.Itoa(os.Getpid() % 100000)
 	topology := egressNATIntegrationTopology{
@@ -985,6 +1002,7 @@ func setupEgressNATIntegrationTopology(t *testing.T) egressNATIntegrationTopolog
 
 func setupEgressNATIntegrationDirectTopology(t *testing.T) egressNATIntegrationTopology {
 	t.Helper()
+	ensureEgressNATIntegrationIPForwarding(t)
 
 	suffix := strconv.Itoa(os.Getpid() % 100000)
 	topology := egressNATIntegrationTopology{

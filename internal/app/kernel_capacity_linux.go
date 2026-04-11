@@ -67,12 +67,30 @@ func applyKernelMapCapacitiesWithOccupancy(spec *ebpf.CollectionSpec, rulesConfi
 	if err := setKernelCollectionMapCapacity(spec, kernelFlowsMapNameV6, capacities.Flows, false, "kernel IPv6 flows"); err != nil {
 		return kernelMapCapacities{}, err
 	}
+	if err := setKernelCollectionMapCapacity(spec, kernelTCFlowsOldMapNameV4, capacities.Flows, false, "tc old IPv4 flows"); err != nil {
+		return kernelMapCapacities{}, err
+	}
+	if err := setKernelCollectionMapCapacity(spec, kernelTCFlowsOldMapNameV6, capacities.Flows, false, "tc old IPv6 flows"); err != nil {
+		return kernelMapCapacities{}, err
+	}
+	if err := setKernelCollectionMapCapacity(spec, kernelXDPFlowsOldMapNameV4, capacities.Flows, false, "xdp old IPv4 flows"); err != nil {
+		return kernelMapCapacities{}, err
+	}
+	if err := setKernelCollectionMapCapacity(spec, kernelXDPFlowsOldMapNameV6, capacities.Flows, false, "xdp old IPv6 flows"); err != nil {
+		return kernelMapCapacities{}, err
+	}
 
 	if includeNAT {
 		if err := setKernelCollectionMapCapacity(spec, kernelNatPortsMapName, capacities.NATPorts, true, "kernel nat ports"); err != nil {
 			return kernelMapCapacities{}, err
 		}
 		if err := setKernelCollectionMapCapacity(spec, kernelNatPortsMapNameV6, capacities.NATPorts, false, "kernel IPv6 nat ports"); err != nil {
+			return kernelMapCapacities{}, err
+		}
+		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV4, capacities.NATPorts, false, "tc old IPv4 nat ports"); err != nil {
+			return kernelMapCapacities{}, err
+		}
+		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV6, capacities.NATPorts, false, "tc old IPv6 nat ports"); err != nil {
 			return kernelMapCapacities{}, err
 		}
 	}
