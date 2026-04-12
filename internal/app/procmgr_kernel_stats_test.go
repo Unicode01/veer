@@ -1,6 +1,7 @@
 package app
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -31,6 +32,55 @@ func (rt stubKernelStatsRuntime) SnapshotAssignments() map[int64]string {
 
 func (rt stubKernelStatsRuntime) Close() error {
 	return nil
+}
+
+type blockingKernelStatsRuntime struct {
+	snapshot      kernelRuleStatsSnapshot
+	started       chan struct{}
+	release       chan struct{}
+	mu            sync.Mutex
+	startedClosed bool
+	snapshotCalls int
+}
+
+func (rt *blockingKernelStatsRuntime) Available() (bool, string) {
+	return true, "ok"
+}
+
+func (rt *blockingKernelStatsRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
+	return map[int64]kernelRuleApplyResult{}, nil
+}
+
+func (rt *blockingKernelStatsRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error) {
+	rt.mu.Lock()
+	rt.snapshotCalls++
+	if !rt.startedClosed && rt.started != nil {
+		close(rt.started)
+		rt.startedClosed = true
+	}
+	rt.mu.Unlock()
+	if rt.release != nil {
+		<-rt.release
+	}
+	return rt.snapshot, nil
+}
+
+func (rt *blockingKernelStatsRuntime) Maintain() error {
+	return nil
+}
+
+func (rt *blockingKernelStatsRuntime) SnapshotAssignments() map[int64]string {
+	return map[int64]string{}
+}
+
+func (rt *blockingKernelStatsRuntime) Close() error {
+	return nil
+}
+
+func (rt *blockingKernelStatsRuntime) SnapshotCallCount() int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.snapshotCalls
 }
 
 func TestRefreshKernelStatsCacheIncludesTrafficWhenExperimentalEnabled(t *testing.T) {
@@ -114,5 +164,56 @@ func TestRefreshKernelStatsCacheSkipsTrafficWhenExperimentalDisabled(t *testing.
 	}
 	if got.BytesIn != 0 || got.BytesOut != 0 || got.SpeedIn != 0 || got.SpeedOut != 0 {
 		t.Fatalf("kernel traffic stats = %+v, want all traffic fields zero when experimental disabled", got)
+	}
+}
+
+func TestRefreshKernelStatsCacheDeduplicatesConcurrentRefreshes(t *testing.T) {
+	rt := &blockingKernelStatsRuntime{
+		snapshot: kernelRuleStatsSnapshot{
+			ByRuleID: map[uint32]kernelRuleStats{
+				11: {
+					TCPActiveConns: 4,
+					UDPNatEntries:  2,
+					TotalConns:     7,
+				},
+			},
+		},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	pm := &ProcessManager{
+		cfg:           &Config{},
+		kernelRuntime: rt,
+		kernelFlowOwners: map[uint32]kernelCandidateOwner{
+			11: {kind: workerKindRule, id: 101},
+		},
+		kernelRules: make(map[int64]bool),
+	}
+	pm.kernelRules[101] = true
+
+	const callers = 4
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+			pm.refreshKernelStatsCache()
+		}()
+	}
+
+	select {
+	case <-rt.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first SnapshotStats call")
+	}
+	close(rt.release)
+	wg.Wait()
+
+	if got := rt.SnapshotCallCount(); got != 1 {
+		t.Fatalf("SnapshotStats() calls = %d, want 1", got)
+	}
+	got := pm.kernelRuleStats[101]
+	if got.ActiveConns != 4 || got.NatTableSize != 2 || got.TotalConns != 7 {
+		t.Fatalf("kernel rule stats = %+v, want active=4 nat=2 total=7", got)
 	}
 }

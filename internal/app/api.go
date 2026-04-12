@@ -1905,34 +1905,116 @@ func handleListEgressNATs(w http.ResponseWriter, r *http.Request, db *sql.DB, pm
 	writeJSON(w, http.StatusOK, statuses)
 }
 
-func loadEffectiveEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
-	items, err := dbGetEgressNATs(db)
-	if err != nil {
-		return nil, err
+func loadEffectiveEgressNATMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]EgressNAT, error) {
+	result := make(map[int64]EgressNAT, len(ids))
+	if len(ids) == 0 {
+		return result, nil
 	}
 
 	snapshot := loadEgressNATInterfaceSnapshot()
+
+	items, err := dbGetEgressNATsByIDs(db, ids)
+	if err != nil {
+		return nil, err
+	}
 	items = normalizeEgressNATItemsWithSnapshot(items, snapshot)
+	for _, item := range items {
+		result[item.ID] = item
+	}
+
+	hasSynthetic := false
+	requested := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		requested[id] = struct{}{}
+		if id < 0 {
+			hasSynthetic = true
+		}
+	}
+	if !hasSynthetic {
+		return result, nil
+	}
 
 	managedNetworks, err := dbGetEnabledManagedNetworks(db)
 	if err != nil {
 		return nil, err
 	}
 	if len(managedNetworks) == 0 {
-		return items, nil
+		return result, nil
 	}
 
 	ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
 	if err != nil {
 		return nil, err
 	}
-	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, items, snapshot.Infos)
-	if len(compiled.EgressNATs) == 0 {
-		return items, nil
+
+	allItems, err := dbGetEgressNATs(db)
+	if err != nil {
+		return nil, err
+	}
+	allItems = normalizeEgressNATItemsWithSnapshot(allItems, snapshot)
+
+	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, allItems, snapshot.Infos)
+	for _, item := range compiled.EgressNATs {
+		if _, ok := requested[item.ID]; ok {
+			result[item.ID] = item
+		}
+	}
+	return result, nil
+}
+
+func loadEffectiveEgressNATProtocolByIDs(db sqlRuleStore, ids []int64) (map[int64]string, error) {
+	result := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return result, nil
 	}
 
-	items = append(items, compiled.EgressNATs...)
-	return items, nil
+	protocols, err := dbGetEgressNATProtocolMapByIDs(db, ids)
+	if err != nil {
+		return nil, err
+	}
+	for id, protocol := range protocols {
+		result[id] = protocol
+	}
+
+	hasSynthetic := false
+	requested := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		requested[id] = struct{}{}
+		if id < 0 {
+			hasSynthetic = true
+		}
+	}
+	if !hasSynthetic {
+		return result, nil
+	}
+
+	managedNetworks, err := dbGetEnabledManagedNetworks(db)
+	if err != nil {
+		return nil, err
+	}
+	if len(managedNetworks) == 0 {
+		return result, nil
+	}
+
+	ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot := loadEgressNATInterfaceSnapshot()
+	explicitItems, err := dbGetEgressNATs(db)
+	if err != nil {
+		return nil, err
+	}
+	explicitItems = normalizeEgressNATItemsWithSnapshot(explicitItems, snapshot)
+
+	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, explicitItems, snapshot.Infos)
+	for _, item := range compiled.EgressNATs {
+		if _, ok := requested[item.ID]; ok {
+			result[item.ID] = item.Protocol
+		}
+	}
+	return result, nil
 }
 
 func loadEffectiveEnabledEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
@@ -2478,7 +2560,12 @@ func dbFindConflictingEnabledSiteDomainID(db sqlRuleStore, site Site, kind strin
 }
 
 func handleKernelRuntime(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
-	writeJSON(w, http.StatusOK, pm.snapshotKernelRuntime())
+	forceFresh := false
+	if r != nil {
+		cacheControl := strings.ToLower(r.Header.Get("Cache-Control"))
+		forceFresh = strings.Contains(cacheControl, "no-cache") || strings.EqualFold(r.URL.Query().Get("refresh"), "1")
+	}
+	writeJSON(w, http.StatusOK, pm.snapshotKernelRuntimeShared(time.Time{}, forceFresh))
 }
 
 func handleAddRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
@@ -2983,6 +3070,67 @@ func rangeStatsPageIDs(items []RangeStatsListItem) []int64 {
 	return ids
 }
 
+func egressNATStatsPageIDs(items []EgressNATStatsListItem) []int64 {
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.EgressNATID)
+	}
+	return ids
+}
+
+func ruleStatsMapIDs(items map[int64]RuleStatsReport) []int64 {
+	ids := make([]int64, 0, len(items))
+	for id := range items {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func rangeStatsMapIDs(items map[int64]RangeStatsReport) []int64 {
+	ids := make([]int64, 0, len(items))
+	for id := range items {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func egressNATStatsMapIDs(items map[int64]EgressNATStatsReport) []int64 {
+	ids := make([]int64, 0, len(items))
+	for id := range items {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func currentConnStatsMapIDs(items map[int64]currentConnProtocolStats) []int64 {
+	ids := make([]int64, 0, len(items))
+	for id := range items {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func egressNATStatsSortNeedsAllMeta(sortKey string) bool {
+	switch sortKey {
+	case "parent_interface", "child_interface", "out_interface", "out_source_ip", "protocol", "nat_type":
+		return true
+	default:
+		return false
+	}
+}
+
+func populateEgressNATStatsItemsMeta(items []EgressNATStatsListItem, metaByID map[int64]EgressNAT) {
+	for i := range items {
+		meta := metaByID[items[i].EgressNATID]
+		items[i].ParentInterface = meta.ParentInterface
+		items[i].ChildInterface = meta.ChildInterface
+		items[i].OutInterface = meta.OutInterface
+		items[i].OutSourceIP = meta.OutSourceIP
+		items[i].Protocol = meta.Protocol
+		items[i].NATType = meta.NATType
+	}
+}
+
 func ruleStatsLess(a, b RuleStatsListItem, sortKey string, sortAsc bool) bool {
 	compare := 0
 	switch sortKey {
@@ -3125,9 +3273,10 @@ func handleListRuleStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm 
 		result = append(result, RuleStatsListItem{RuleStatsReport: s})
 	}
 
-	needsAllMeta := query.SortKey == "remark" || query.SortKey == "current_conns"
+	statsIDs := ruleStatsMapIDs(statsMap)
+	needsAllMeta := query.SortKey == "remark"
 	if needsAllMeta {
-		ruleMeta, err := dbGetRuleMetaByIDs(db, ruleStatsPageIDs(result))
+		ruleMeta, err := dbGetRuleMetaByIDs(db, statsIDs)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -3135,7 +3284,16 @@ func handleListRuleStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm 
 		for i := range result {
 			meta := ruleMeta[result[i].RuleID]
 			result[i].Remark = meta.Remark
-			result[i].CurrentConns = currentConnCountForProtocol(meta.Protocol, result[i].ActiveConns, int64(result[i].NatTableSize))
+		}
+	} else if query.SortKey == "current_conns" {
+		ruleProtocols, err := dbGetRuleProtocolMapByIDs(db, statsIDs)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for i := range result {
+			protocol := ruleProtocols[result[i].RuleID]
+			result[i].CurrentConns = currentConnCountForProtocolWithICMP(protocol, result[i].ActiveConns, int64(result[i].NatTableSize), int64(result[i].ICMPNatSize))
 		}
 	}
 
@@ -3188,9 +3346,10 @@ func handleListRangeStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm
 		result = append(result, RangeStatsListItem{RangeStatsReport: s})
 	}
 
-	needsAllMeta := query.SortKey == "remark" || query.SortKey == "current_conns"
+	statsIDs := rangeStatsMapIDs(statsMap)
+	needsAllMeta := query.SortKey == "remark"
 	if needsAllMeta {
-		rangeMeta, err := dbGetRangeMetaByIDs(db, rangeStatsPageIDs(result))
+		rangeMeta, err := dbGetRangeMetaByIDs(db, statsIDs)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -3198,7 +3357,16 @@ func handleListRangeStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm
 		for i := range result {
 			meta := rangeMeta[result[i].RangeID]
 			result[i].Remark = meta.Remark
-			result[i].CurrentConns = currentConnCountForProtocol(meta.Protocol, result[i].ActiveConns, int64(result[i].NatTableSize))
+		}
+	} else if query.SortKey == "current_conns" {
+		rangeProtocols, err := dbGetRangeProtocolMapByIDs(db, statsIDs)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for i := range result {
+			protocol := rangeProtocols[result[i].RangeID]
+			result[i].CurrentConns = currentConnCountForProtocolWithICMP(protocol, result[i].ActiveConns, int64(result[i].NatTableSize), int64(result[i].ICMPNatSize))
 		}
 	}
 
@@ -3250,36 +3418,45 @@ func handleListEgressNATStats(w http.ResponseWriter, r *http.Request, db *sql.DB
 		return
 	}
 
-	items, err := loadEffectiveEgressNATItems(db)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	metaByID := make(map[int64]EgressNAT, len(items))
-	for _, item := range items {
-		metaByID[item.ID] = item
-	}
-
 	result := make([]EgressNATStatsListItem, 0, len(statsMap))
 	for _, s := range statsMap {
-		meta := metaByID[s.EgressNATID]
-		result = append(result, EgressNATStatsListItem{
-			EgressNATStatsReport: s,
-			ParentInterface:      meta.ParentInterface,
-			ChildInterface:       meta.ChildInterface,
-			OutInterface:         meta.OutInterface,
-			OutSourceIP:          meta.OutSourceIP,
-			Protocol:             meta.Protocol,
-			NATType:              meta.NATType,
-			CurrentConns:         currentConnCountForProtocol(meta.Protocol, s.ActiveConns, int64(s.NatTableSize)),
-		})
+		result = append(result, EgressNATStatsListItem{EgressNATStatsReport: s})
+	}
+
+	statsIDs := egressNATStatsMapIDs(statsMap)
+	needsAllMeta := egressNATStatsSortNeedsAllMeta(query.SortKey)
+	if needsAllMeta {
+		metaByID, err := loadEffectiveEgressNATMetaByIDs(db, statsIDs)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		populateEgressNATStatsItemsMeta(result, metaByID)
+	} else if query.SortKey == "current_conns" {
+		protocols, err := loadEffectiveEgressNATProtocolByIDs(db, statsIDs)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for i := range result {
+			result[i].CurrentConns = currentConnCountForProtocolWithICMP(protocols[result[i].EgressNATID], result[i].ActiveConns, int64(result[i].NatTableSize), int64(result[i].ICMPNatSize))
+		}
 	}
 
 	sort.Slice(result, func(i, j int) bool {
 		return egressNATStatsLess(result[i], result[j], query.SortKey, query.SortAsc)
 	})
 
-	writeJSON(w, http.StatusOK, paginateEgressNATStatsItems(result, query))
+	resp := paginateEgressNATStatsItems(result, query)
+	if !needsAllMeta && len(resp.Items) > 0 {
+		metaByID, err := loadEffectiveEgressNATMetaByIDs(db, egressNATStatsPageIDs(resp.Items))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		populateEgressNATStatsItemsMeta(resp.Items, metaByID)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func handleListSiteStats(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
@@ -3292,26 +3469,40 @@ func handleListSiteStats(w http.ResponseWriter, r *http.Request, pm *ProcessMana
 }
 
 func handleListCurrentConns(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
-	ruleProtocols, err := dbGetRuleProtocolMap(db)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	rangeProtocols, err := dbGetRangeProtocolMap(db)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	egressNATProtocols, err := dbGetEgressNATProtocolMap(db)
+	pm.markKernelStatsDemand()
+	ruleStats, rangeStats, siteCounts, egressNATStats, err := pm.collectCurrentConnStats()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	ruleCounts, rangeCounts, siteCounts, egressNATCounts, err := pm.collectCurrentConns(ruleProtocols, rangeProtocols, egressNATProtocols)
+	ruleProtocols, err := dbGetRuleProtocolMapByIDs(db, currentConnStatsMapIDs(ruleStats))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	rangeProtocols, err := dbGetRangeProtocolMapByIDs(db, currentConnStatsMapIDs(rangeStats))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	egressNATProtocols, err := loadEffectiveEgressNATProtocolByIDs(db, currentConnStatsMapIDs(egressNATStats))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	ruleCounts := make(map[int64]int64, len(ruleStats))
+	for id, stats := range ruleStats {
+		ruleCounts[id] = currentConnCountForProtocolDatagrams(ruleProtocols[id], stats.ActiveConns, stats.UDPNatEntries, stats.ICMPNatEntries)
+	}
+	rangeCounts := make(map[int64]int64, len(rangeStats))
+	for id, stats := range rangeStats {
+		rangeCounts[id] = currentConnCountForProtocolDatagrams(rangeProtocols[id], stats.ActiveConns, stats.UDPNatEntries, stats.ICMPNatEntries)
+	}
+	egressNATCounts := make(map[int64]int64, len(egressNATStats))
+	for id, stats := range egressNATStats {
+		egressNATCounts[id] = currentConnCountForProtocolDatagrams(egressNATProtocols[id], stats.ActiveConns, stats.UDPNatEntries, stats.ICMPNatEntries)
 	}
 
 	resp := CurrentConnsResponse{

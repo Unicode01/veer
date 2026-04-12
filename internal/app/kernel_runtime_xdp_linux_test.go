@@ -179,6 +179,7 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 			kernelRulesMapNameV4:               &ebpf.MapSpec{},
 			kernelFlowsMapNameV4:               &ebpf.MapSpec{Type: ebpf.Hash},
 			kernelStatsMapName:                 &ebpf.MapSpec{},
+			kernelOccupancyMapName:             &ebpf.MapSpec{},
 			kernelXDPRedirectMapName:           &ebpf.MapSpec{},
 			kernelXDPProgramChainMapName:       &ebpf.MapSpec{},
 			kernelXDPFIBScratchMapName:         &ebpf.MapSpec{},
@@ -221,6 +222,7 @@ func TestValidateXDPCollectionSpecRejectsLRUFlowBanks(t *testing.T) {
 			kernelRulesMapNameV4:               &ebpf.MapSpec{},
 			kernelFlowsMapNameV4:               &ebpf.MapSpec{Type: ebpf.LRUHash},
 			kernelStatsMapName:                 &ebpf.MapSpec{},
+			kernelOccupancyMapName:             &ebpf.MapSpec{},
 			kernelXDPRedirectMapName:           &ebpf.MapSpec{},
 			kernelXDPProgramChainMapName:       &ebpf.MapSpec{},
 			kernelXDPFIBScratchMapName:         &ebpf.MapSpec{},
@@ -248,6 +250,9 @@ func TestLoadEmbeddedXDPCollectionSpecUsesHashFlowBanks(t *testing.T) {
 		spec, err := loadEmbeddedXDPCollectionSpec(enableTrafficStats)
 		if err != nil {
 			t.Fatalf("loadEmbeddedXDPCollectionSpec(%t) error = %v", enableTrafficStats, err)
+		}
+		if err := validateXDPCollectionSpec(spec); err != nil {
+			t.Fatalf("validateXDPCollectionSpec(loadEmbeddedXDPCollectionSpec(%t)) error = %v", enableTrafficStats, err)
 		}
 		for _, name := range []string{
 			kernelFlowsMapNameV4,
@@ -465,5 +470,30 @@ func TestXDPGenericAttachmentExperimentalReason(t *testing.T) {
 	want := `xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"`
 	if got != want {
 		t.Fatalf("xdpGenericAttachmentExperimentalReason() = %q, want %q", got, want)
+	}
+}
+
+func TestXDPModeSwitchAttachmentRequiredWhenExistingModeNotAllowed(t *testing.T) {
+	att, ok := xdpModeSwitchAttachment([]xdpAttachment{
+		{ifindex: 7, flags: nl.XDP_FLAGS_SKB_MODE},
+	}, 7, []int{nl.XDP_FLAGS_DRV_MODE})
+	if !ok {
+		t.Fatal("xdpModeSwitchAttachment() = false, want true for generic->driver mode switch")
+	}
+	if att.ifindex != 7 || att.flags != nl.XDP_FLAGS_SKB_MODE {
+		t.Fatalf("xdpModeSwitchAttachment() = %+v, want generic attachment for ifindex 7", att)
+	}
+}
+
+func TestXDPModeSwitchAttachmentSkippedWhenExistingModeStillAllowed(t *testing.T) {
+	if _, ok := xdpModeSwitchAttachment([]xdpAttachment{
+		{ifindex: 7, flags: nl.XDP_FLAGS_SKB_MODE},
+	}, 7, []int{nl.XDP_FLAGS_SKB_MODE, nl.XDP_FLAGS_DRV_MODE}); ok {
+		t.Fatal("xdpModeSwitchAttachment() = true, want false when existing mode remains allowed")
+	}
+	if _, ok := xdpModeSwitchAttachment([]xdpAttachment{
+		{ifindex: 7, flags: nl.XDP_FLAGS_DRV_MODE},
+	}, 8, []int{nl.XDP_FLAGS_SKB_MODE}); ok {
+		t.Fatal("xdpModeSwitchAttachment() = true, want false for unrelated interface")
 	}
 }

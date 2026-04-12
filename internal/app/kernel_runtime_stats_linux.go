@@ -76,39 +76,43 @@ var (
 	kernelPossibleCPUsErr  error
 )
 
-func snapshotKernelStatsFromCollection(coll *ebpf.Collection, corrections map[uint32]kernelRuleStats) (kernelRuleStatsSnapshot, error) {
+func snapshotKernelStatsFromMap(statsMap *ebpf.Map, corrections map[uint32]kernelRuleStats) (kernelRuleStatsSnapshot, error) {
 	snapshot := emptyKernelRuleStatsSnapshot()
-	if coll == nil || coll.Maps == nil {
+	if statsMap == nil {
 		return snapshot, nil
 	}
 
-	statsMap := coll.Maps[kernelStatsMapName]
-	if statsMap != nil {
-		statsIter := statsMap.Iterate()
-		if kernelMapHasPerCPUValue(statsMap.Type()) {
-			possibleCPUs, err := kernelPossibleCPUCount()
-			if err != nil {
-				return emptyKernelRuleStatsSnapshot(), fmt.Errorf("resolve possible cpu count for kernel stats: %w", err)
-			}
-			var ruleID uint32
-			values := make([]kernelStatsValueV4, possibleCPUs)
-			for statsIter.Next(&ruleID, values) {
-				snapshot.ByRuleID[ruleID] = kernelRuleStatsFromValue(aggregateKernelPerCPUStats(values))
-			}
-		} else {
-			var ruleID uint32
-			var value kernelStatsValueV4
-			for statsIter.Next(&ruleID, &value) {
-				snapshot.ByRuleID[ruleID] = kernelRuleStatsFromValue(value)
-			}
+	statsIter := statsMap.Iterate()
+	if kernelMapHasPerCPUValue(statsMap.Type()) {
+		possibleCPUs, err := kernelPossibleCPUCount()
+		if err != nil {
+			return emptyKernelRuleStatsSnapshot(), fmt.Errorf("resolve possible cpu count for kernel stats: %w", err)
 		}
-		if err := statsIter.Err(); err != nil {
-			return emptyKernelRuleStatsSnapshot(), fmt.Errorf("iterate kernel stats map: %w", err)
+		var ruleID uint32
+		values := make([]kernelStatsValueV4, possibleCPUs)
+		for statsIter.Next(&ruleID, values) {
+			snapshot.ByRuleID[ruleID] = kernelRuleStatsFromValue(aggregateKernelPerCPUStats(values))
 		}
+	} else {
+		var ruleID uint32
+		var value kernelStatsValueV4
+		for statsIter.Next(&ruleID, &value) {
+			snapshot.ByRuleID[ruleID] = kernelRuleStatsFromValue(value)
+		}
+	}
+	if err := statsIter.Err(); err != nil {
+		return emptyKernelRuleStatsSnapshot(), fmt.Errorf("iterate kernel stats map: %w", err)
 	}
 
 	applyKernelStatsCorrections(snapshot.ByRuleID, corrections)
 	return snapshot, nil
+}
+
+func snapshotKernelStatsFromCollection(coll *ebpf.Collection, corrections map[uint32]kernelRuleStats) (kernelRuleStatsSnapshot, error) {
+	if coll == nil || coll.Maps == nil {
+		return emptyKernelRuleStatsSnapshot(), nil
+	}
+	return snapshotKernelStatsFromMap(coll.Maps[kernelStatsMapName], corrections)
 }
 
 func pruneStaleKernelFlowsInCollection(coll *ebpf.Collection, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {

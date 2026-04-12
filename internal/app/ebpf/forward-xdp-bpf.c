@@ -169,6 +169,14 @@ struct kernel_diag_value_v4 {
 	__u64 xdp_v4_transparent_reply_closing_handled;
 };
 
+struct kernel_occupancy_value_v4 {
+	__s64 flow_entries;
+	__s64 nat_entries;
+	__u32 flow_capacity;
+	__u32 nat_capacity;
+	__u32 pad;
+};
+
 struct redirect_target_v4 {
 	__u32 ifindex;
 	__u32 src_addr;
@@ -470,6 +478,13 @@ struct bpf_map_def SEC("maps") diag_v4 = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct kernel_diag_value_v4),
+	.max_entries = 1,
+};
+
+struct bpf_map_def SEC("maps") occupancy_v4 = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct kernel_occupancy_value_v4),
 	.max_entries = 1,
 };
 
@@ -872,26 +887,24 @@ static __always_inline int update_flow_v6_in_bank(__u8 bank, const struct flow_k
 	return bpf_map_update_elem(&flows_v6, key, value, flags);
 }
 
-static __always_inline void delete_flow_v4_in_bank(__u8 bank, const struct flow_key_v4 *key)
+static __always_inline int delete_flow_v4_in_bank(__u8 bank, const struct flow_key_v4 *key)
 {
 	if (!key)
-		return;
+		return -1;
 	if (bank == FORWARD_XDP_FLOW_BANK_OLD) {
-		bpf_map_delete_elem(&flows_old_v4, key);
-		return;
+		return bpf_map_delete_elem(&flows_old_v4, key);
 	}
-	bpf_map_delete_elem(&flows_v4, key);
+	return bpf_map_delete_elem(&flows_v4, key);
 }
 
-static __always_inline void delete_flow_v6_in_bank(__u8 bank, const struct flow_key_v6 *key)
+static __always_inline int delete_flow_v6_in_bank(__u8 bank, const struct flow_key_v6 *key)
 {
 	if (!key)
-		return;
+		return -1;
 	if (bank == FORWARD_XDP_FLOW_BANK_OLD) {
-		bpf_map_delete_elem(&flows_old_v6, key);
-		return;
+		return bpf_map_delete_elem(&flows_old_v6, key);
 	}
-	bpf_map_delete_elem(&flows_v6, key);
+	return bpf_map_delete_elem(&flows_v6, key);
 }
 
 static __always_inline int load_packet_macs(struct xdp_md *xdp, __u8 dst_mac[ETH_ALEN], __u8 src_mac[ETH_ALEN])
@@ -2142,6 +2155,35 @@ static __always_inline void add_rule_traffic_bytes(__u32 rule_id, __u64 bytes_in
 #endif
 }
 
+static __always_inline struct kernel_occupancy_value_v4 *lookup_kernel_occupancy(void)
+{
+	__u32 key = 0;
+
+	return bpf_map_lookup_elem(&occupancy_v4, &key);
+}
+
+static __always_inline void bump_kernel_flow_occupancy(void)
+{
+	struct kernel_occupancy_value_v4 *occupancy = lookup_kernel_occupancy();
+
+	if (!occupancy)
+		return;
+	if (occupancy->flow_capacity != 0 && occupancy->flow_entries >= (__s64)occupancy->flow_capacity)
+		return;
+	__sync_fetch_and_add(&occupancy->flow_entries, 1);
+}
+
+static __always_inline void drop_kernel_flow_occupancy(void)
+{
+	struct kernel_occupancy_value_v4 *occupancy = lookup_kernel_occupancy();
+
+	if (!occupancy)
+		return;
+	if (occupancy->flow_entries <= 0)
+		return;
+	__sync_fetch_and_add(&occupancy->flow_entries, -1);
+}
+
 static __always_inline void delete_fullnat_state(const struct flow_key_v4 *reply_key, const struct flow_value_v4 *reply_value, __u8 proto, __u8 flow_bank)
 {
 	struct flow_key_v4 front_key = {};
@@ -2154,8 +2196,10 @@ static __always_inline void delete_fullnat_state(const struct flow_key_v4 *reply
 	}
 
 	build_front_flow_key_from_value(reply_value, proto, &front_key);
-	delete_flow_v4_in_bank(flow_bank, &front_key);
-	delete_flow_v4_in_bank(flow_bank, reply_key);
+	if (delete_flow_v4_in_bank(flow_bank, &front_key) == 0)
+		drop_kernel_flow_occupancy();
+	if (delete_flow_v4_in_bank(flow_bank, reply_key) == 0)
+		drop_kernel_flow_occupancy();
 }
 
 static __always_inline void delete_fullnat_state_v6(const struct flow_key_v6 *reply_key, const struct flow_value_v6 *reply_value, __u8 proto, __u8 flow_bank)
@@ -2170,8 +2214,10 @@ static __always_inline void delete_fullnat_state_v6(const struct flow_key_v6 *re
 	}
 
 	build_front_flow_key_from_value_v6(reply_value, proto, &front_key);
-	delete_flow_v6_in_bank(flow_bank, &front_key);
-	delete_flow_v6_in_bank(flow_bank, reply_key);
+	if (delete_flow_v6_in_bank(flow_bank, &front_key) == 0)
+		drop_kernel_flow_occupancy();
+	if (delete_flow_v6_in_bank(flow_bank, reply_key) == 0)
+		drop_kernel_flow_occupancy();
 }
 
 static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const struct packet_ctx *ctx, const struct flow_key_v4 *flow_key, const struct flow_value_v4 *flow, __u8 flow_bank)
@@ -2190,7 +2236,8 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 		if (flow_value->last_seen_ns == 0 || now < flow_value->last_seen_ns || (now - flow_value->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
 			if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
 				drop_rule_udp_nat(flow_value->rule_id);
-			delete_flow_v4_in_bank(flow_bank, flow_key);
+			if (delete_flow_v4_in_bank(flow_bank, flow_key) == 0)
+				drop_kernel_flow_occupancy();
 			return XDP_PASS;
 		}
 		if ((now - flow_value->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
@@ -2231,7 +2278,8 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 		xdp_diag_v4_transparent_reply_closing_handled();
 		if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
 			drop_rule_tcp_active(flow_value->rule_id);
-		delete_flow_v4_in_bank(flow_bank, flow_key);
+		if (delete_flow_v4_in_bank(flow_bank, flow_key) == 0)
+			drop_kernel_flow_occupancy();
 	}
 	xdp_diag_redirect_invoked();
 	return xdp_redirect_ifindex((__u32)redirect_ifindex);
@@ -2286,7 +2334,8 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 		if (flow->last_seen_ns == 0 || now < flow->last_seen_ns || (now - flow->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
 			if ((flow->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
 				drop_rule_udp_nat(flow->rule_id);
-			delete_flow_v4_in_bank(flow_bank, &flow_key);
+			if (delete_flow_v4_in_bank(flow_bank, &flow_key) == 0)
+				drop_kernel_flow_occupancy();
 			__builtin_memset(flow_value, 0, sizeof(*flow_value));
 			now = bpf_ktime_get_ns();
 			flow_value->rule_id = rule->rule_id;
@@ -2326,6 +2375,8 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 	if (update_flow) {
 		if (update_flow_v4_in_bank(flow_bank, &flow_key, flow_value, BPF_ANY) < 0)
 			return XDP_DROP;
+		if (new_session)
+			bump_kernel_flow_occupancy();
 	}
 	if (new_session)
 		bump_rule_total_conns(rule->rule_id);
@@ -2350,6 +2401,7 @@ static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct
 	struct flow_value_v4 *front_value = lookup_xdp_flow_aux_scratch_v4();
 	struct flow_value_v4 *front_flow;
 	__u64 now = bpf_ktime_get_ns();
+	int created_front = 0;
 	int update_front = 0;
 	int update_reply = 0;
 	int count_tcp_now = 0;
@@ -2377,6 +2429,7 @@ static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct
 		if (is_egress_nat_flow(reply_value))
 			front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT;
 		xdp_diag_reply_flow_recreated();
+		created_front = 1;
 		update_front = 1;
 	}
 
@@ -2416,6 +2469,8 @@ static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct
 			xdp_diag_flow_update_fail();
 			return XDP_DROP;
 		}
+		if (created_front)
+			bump_kernel_flow_occupancy();
 	}
 	if (update_reply) {
 		if (update_flow_v4_in_bank(flow_bank, reply_key, reply_value, BPF_ANY) < 0) {
@@ -2696,6 +2751,10 @@ have_session:
 			return XDP_DROP;
 		}
 	}
+	if (created_front)
+		bump_kernel_flow_occupancy();
+	if (created_reply)
+		bump_kernel_flow_occupancy();
 	if (new_session)
 		bump_rule_total_conns(rule->rule_id);
 	if (count_udp_now)
@@ -2729,6 +2788,7 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 	struct flow_value_v6 *front_value = lookup_xdp_flow_aux_scratch_v6();
 	struct flow_value_v6 *front_flow;
 	__u64 now = bpf_ktime_get_ns();
+	int created_front = 0;
 	int update_front = 0;
 	int update_reply = 0;
 	int count_tcp_now = 0;
@@ -2752,6 +2812,7 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 		*front_value = *reply_value;
 		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_ENTRY;
 		front_value->flags |= FORWARD_FLOW_FLAG_FULL_NAT;
+		created_front = 1;
 		update_front = 1;
 	}
 
@@ -2789,6 +2850,8 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 	if (update_front) {
 		if (update_flow_v6_in_bank(flow_bank, front_key, front_value, BPF_ANY) < 0)
 			return XDP_DROP;
+		if (created_front)
+			bump_kernel_flow_occupancy();
 	}
 	if (update_reply) {
 		if (update_flow_v6_in_bank(flow_bank, reply_key, reply_value, BPF_ANY) < 0)
@@ -3027,6 +3090,10 @@ static __always_inline int finalize_fullnat_forward_v6(struct xdp_md *xdp, const
 		if (update_flow_v6_in_bank(flow_bank, reply_key, reply_value, BPF_ANY) < 0)
 			return XDP_DROP;
 	}
+	if ((state & FORWARD_FULLNAT_STATE_CREATED_FRONT) != 0)
+		bump_kernel_flow_occupancy();
+	if ((state & FORWARD_FULLNAT_STATE_CREATED_REPLY) != 0)
+		bump_kernel_flow_occupancy();
 	if ((state & FORWARD_FULLNAT_STATE_NEW_SESSION) != 0)
 		bump_rule_total_conns(rule->rule_id);
 	if ((state & FORWARD_FULLNAT_STATE_COUNT_UDP_NOW) != 0)

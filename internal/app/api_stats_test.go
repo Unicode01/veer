@@ -2,12 +2,71 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+type stubKernelRuntimeViewRuntime struct {
+	available bool
+	reason    string
+}
+
+func (rt stubKernelRuntimeViewRuntime) Available() (bool, string) {
+	return rt.available, rt.reason
+}
+
+func (rt stubKernelRuntimeViewRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
+	return map[int64]kernelRuleApplyResult{}, nil
+}
+
+func (rt stubKernelRuntimeViewRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error) {
+	return emptyKernelRuleStatsSnapshot(), nil
+}
+
+func (rt stubKernelRuntimeViewRuntime) Maintain() error {
+	return nil
+}
+
+func (rt stubKernelRuntimeViewRuntime) SnapshotAssignments() map[int64]string {
+	return map[int64]string{}
+}
+
+func (rt stubKernelRuntimeViewRuntime) Close() error {
+	return nil
+}
+
+type failingKernelStatsRuntime struct {
+	err error
+}
+
+func (rt failingKernelStatsRuntime) Available() (bool, string) {
+	return true, "ok"
+}
+
+func (rt failingKernelStatsRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
+	return map[int64]kernelRuleApplyResult{}, nil
+}
+
+func (rt failingKernelStatsRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error) {
+	return emptyKernelRuleStatsSnapshot(), rt.err
+}
+
+func (rt failingKernelStatsRuntime) Maintain() error {
+	return nil
+}
+
+func (rt failingKernelStatsRuntime) SnapshotAssignments() map[int64]string {
+	return map[int64]string{}
+}
+
+func (rt failingKernelStatsRuntime) Close() error {
+	return nil
+}
 
 func TestHandleListRuleStatsPaginatesAndIncludesRemark(t *testing.T) {
 	db := openTestDB(t)
@@ -71,6 +130,60 @@ func TestHandleListRuleStatsPaginatesAndIncludesRemark(t *testing.T) {
 	}
 }
 
+func TestHandleListRuleStatsSortsByCurrentConnsAndIncludesRemark(t *testing.T) {
+	db := openTestDB(t)
+
+	rules := []Rule{
+		{InIP: "198.51.100.11", InPort: 11001, OutIP: "203.0.113.11", OutPort: 21001, Protocol: "tcp", Remark: "tcp-rule", Enabled: true},
+		{InIP: "198.51.100.12", InPort: 11002, OutIP: "203.0.113.12", OutPort: 21002, Protocol: "udp+icmp", Remark: "udp-icmp-rule", Enabled: true},
+	}
+	var ids []int64
+	for i := range rules {
+		rule := rules[i]
+		id, err := dbAddRule(db, &rule)
+		if err != nil {
+			t.Fatalf("add rule %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	pm := &ProcessManager{
+		ruleWorkers: map[int]*WorkerInfo{
+			0: {
+				ruleStats: map[int64]RuleStatsReport{
+					ids[0]: {RuleID: ids[0], ActiveConns: 4},
+					ids[1]: {RuleID: ids[1], NatTableSize: 7, ICMPNatSize: 3},
+				},
+			},
+		},
+		rangeWorkers:     map[int]*WorkerInfo{},
+		kernelRuleStats:  map[int64]RuleStatsReport{},
+		kernelRangeStats: map[int64]RangeStatsReport{},
+	}
+
+	req := httptest.NewRequest("GET", "/api/rules/stats?page=1&page_size=1&sort_key=current_conns&sort_asc=false", nil)
+	w := httptest.NewRecorder()
+
+	handleListRuleStats(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp RuleStatsListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("unexpected items length: %d", len(resp.Items))
+	}
+	if resp.Items[0].RuleID != ids[1] {
+		t.Fatalf("unexpected first rule id: got %d want %d", resp.Items[0].RuleID, ids[1])
+	}
+	if resp.Items[0].Remark != "udp-icmp-rule" {
+		t.Fatalf("unexpected remark: got %q want %q", resp.Items[0].Remark, "udp-icmp-rule")
+	}
+}
+
 func TestHandleListRangeStatsRejectsInvalidSortKey(t *testing.T) {
 	db := openTestDB(t)
 	pm := &ProcessManager{
@@ -86,6 +199,60 @@ func TestHandleListRangeStatsRejectsInvalidSortKey(t *testing.T) {
 	handleListRangeStats(w, req, db, pm)
 	if w.Code != 400 {
 		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleListRangeStatsSortsByCurrentConnsAndIncludesRemark(t *testing.T) {
+	db := openTestDB(t)
+
+	ranges := []PortRange{
+		{InIP: "198.51.100.21", StartPort: 12001, EndPort: 12001, OutIP: "203.0.113.21", OutStartPort: 22001, Protocol: "tcp", Remark: "tcp-range", Enabled: true},
+		{InIP: "198.51.100.22", StartPort: 12002, EndPort: 12002, OutIP: "203.0.113.22", OutStartPort: 22002, Protocol: "icmp", Remark: "icmp-range", Enabled: true},
+	}
+	var ids []int64
+	for i := range ranges {
+		item := ranges[i]
+		id, err := dbAddRange(db, &item)
+		if err != nil {
+			t.Fatalf("add range %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	pm := &ProcessManager{
+		ruleWorkers: map[int]*WorkerInfo{},
+		rangeWorkers: map[int]*WorkerInfo{
+			0: {
+				rangeStats: map[int64]RangeStatsReport{
+					ids[0]: {RangeID: ids[0], ActiveConns: 5},
+					ids[1]: {RangeID: ids[1], NatTableSize: 6, ICMPNatSize: 6},
+				},
+			},
+		},
+		kernelRuleStats:  map[int64]RuleStatsReport{},
+		kernelRangeStats: map[int64]RangeStatsReport{},
+	}
+
+	req := httptest.NewRequest("GET", "/api/ranges/stats?page=1&page_size=1&sort_key=current_conns&sort_asc=false", nil)
+	w := httptest.NewRecorder()
+
+	handleListRangeStats(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp RangeStatsListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("unexpected items length: %d", len(resp.Items))
+	}
+	if resp.Items[0].RangeID != ids[1] {
+		t.Fatalf("unexpected first range id: got %d want %d", resp.Items[0].RangeID, ids[1])
+	}
+	if resp.Items[0].Remark != "icmp-range" {
+		t.Fatalf("unexpected remark: got %q want %q", resp.Items[0].Remark, "icmp-range")
 	}
 }
 
@@ -215,7 +382,7 @@ func TestHandleListCurrentConnsIncludesEgressNATs(t *testing.T) {
 		ParentInterface: "vmbr1",
 		OutInterface:    "vmbr0",
 		OutSourceIP:     "198.51.100.20",
-		Protocol:        "tcp+udp",
+		Protocol:        "udp+icmp",
 		Enabled:         true,
 	}
 	id, err := dbAddEgressNAT(db, &item)
@@ -228,11 +395,14 @@ func TestHandleListCurrentConnsIncludesEgressNATs(t *testing.T) {
 			snapshot: kernelRuleStatsSnapshot{
 				ByRuleID: map[uint32]kernelRuleStats{
 					33: {
-						TCPActiveConns: 2,
 						UDPNatEntries:  4,
+						ICMPNatEntries: 5,
 					},
 				},
 			},
+		},
+		kernelEgressNATs: map[int64]bool{
+			id: true,
 		},
 		kernelFlowOwners: map[uint32]kernelCandidateOwner{
 			33: {kind: workerKindEgressNAT, id: id},
@@ -257,8 +427,255 @@ func TestHandleListCurrentConnsIncludesEgressNATs(t *testing.T) {
 	if resp.EgressNATs[0].EgressNATID != id {
 		t.Fatalf("unexpected egress nat id: got %d want %d", resp.EgressNATs[0].EgressNATID, id)
 	}
-	if resp.EgressNATs[0].CurrentConns != 6 {
-		t.Fatalf("unexpected current conns: got %d want 6", resp.EgressNATs[0].CurrentConns)
+	if resp.EgressNATs[0].CurrentConns != 9 {
+		t.Fatalf("unexpected current conns: got %d want 9", resp.EgressNATs[0].CurrentConns)
+	}
+}
+
+func TestHandleListEgressNATStatsSortsICMPCurrentConnsCorrectly(t *testing.T) {
+	db := openTestDB(t)
+
+	items := []EgressNAT{
+		{ParentInterface: "vmbr1", OutInterface: "vmbr0", OutSourceIP: "198.51.100.30", Protocol: "icmp", NATType: egressNATTypeSymmetric, Enabled: true},
+		{ParentInterface: "vmbr2", OutInterface: "vmbr0", OutSourceIP: "198.51.100.31", Protocol: "udp", NATType: egressNATTypeSymmetric, Enabled: true},
+	}
+	var ids []int64
+	for i := range items {
+		item := items[i]
+		id, err := dbAddEgressNAT(db, &item)
+		if err != nil {
+			t.Fatalf("add egress nat %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	pm := &ProcessManager{
+		kernelEgressNATStats: map[int64]EgressNATStatsReport{
+			ids[0]: {EgressNATID: ids[0], NatTableSize: 5, ICMPNatSize: 5},
+			ids[1]: {EgressNATID: ids[1], NatTableSize: 4},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/egress-nats/stats?page=1&page_size=1&sort_key=current_conns&sort_asc=false", nil)
+	w := httptest.NewRecorder()
+
+	handleListEgressNATStats(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp EgressNATStatsListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("unexpected items length: %d", len(resp.Items))
+	}
+	if resp.Items[0].EgressNATID != ids[0] {
+		t.Fatalf("unexpected first egress nat id: got %d want %d", resp.Items[0].EgressNATID, ids[0])
+	}
+}
+
+func TestHandleListCurrentConnsIncludesSyntheticManagedNetworkEgressNATs(t *testing.T) {
+	db := openTestDB(t)
+
+	network := ManagedNetwork{
+		Name:            "managed-net",
+		BridgeMode:      managedNetworkBridgeModeExisting,
+		Bridge:          "vmbr1",
+		UplinkInterface: "vmbr0",
+		AutoEgressNAT:   true,
+		Enabled:         true,
+	}
+	networkID, err := dbAddManagedNetwork(db, &network)
+	if err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	syntheticID := managedNetworkSyntheticID("egress_nat", networkID, network.Bridge)
+	pm := &ProcessManager{
+		kernelRuntime: stubKernelStatsRuntime{
+			snapshot: kernelRuleStatsSnapshot{
+				ByRuleID: map[uint32]kernelRuleStats{
+					44: {
+						TCPActiveConns: 2,
+						UDPNatEntries:  3,
+						ICMPNatEntries: 4,
+					},
+				},
+			},
+		},
+		kernelEgressNATs: map[int64]bool{
+			syntheticID: true,
+		},
+		kernelFlowOwners: map[uint32]kernelCandidateOwner{
+			44: {kind: workerKindEgressNAT, id: syntheticID},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/stats/current-conns", nil)
+	w := httptest.NewRecorder()
+
+	handleListCurrentConns(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp CurrentConnsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.EgressNATs) != 1 {
+		t.Fatalf("unexpected egress nat conn count rows: %d", len(resp.EgressNATs))
+	}
+	if resp.EgressNATs[0].EgressNATID != syntheticID {
+		t.Fatalf("unexpected synthetic egress nat id: got %d want %d", resp.EgressNATs[0].EgressNATID, syntheticID)
+	}
+	if resp.EgressNATs[0].CurrentConns != 9 {
+		t.Fatalf("unexpected current conns: got %d want 9", resp.EgressNATs[0].CurrentConns)
+	}
+}
+
+func TestHandleListCurrentConnsReturnsKernelSnapshotError(t *testing.T) {
+	db := openTestDB(t)
+	pm := &ProcessManager{
+		kernelRuntime: failingKernelStatsRuntime{err: errors.New("snapshot failed")},
+		kernelRules: map[int64]bool{
+			1: true,
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/stats/current-conns", nil)
+	w := httptest.NewRecorder()
+
+	handleListCurrentConns(w, req, db, pm)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "snapshot failed") {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestHandleListCurrentConnsUsesSharedKernelSnapshotInsteadOfAggregateCache(t *testing.T) {
+	db := openTestDB(t)
+
+	rule := Rule{
+		InIP:     "198.51.100.51",
+		InPort:   15001,
+		OutIP:    "203.0.113.51",
+		OutPort:  25001,
+		Protocol: "udp",
+		Enabled:  true,
+	}
+	ruleID, err := dbAddRule(db, &rule)
+	if err != nil {
+		t.Fatalf("dbAddRule() error = %v", err)
+	}
+
+	pm := &ProcessManager{
+		kernelRuntime: stubKernelStatsRuntime{
+			snapshot: kernelRuleStatsSnapshot{
+				ByRuleID: map[uint32]kernelRuleStats{
+					91: {UDPNatEntries: 7},
+				},
+			},
+		},
+		kernelRules: map[int64]bool{
+			ruleID: true,
+		},
+		kernelRuleStats: map[int64]RuleStatsReport{
+			ruleID: {RuleID: ruleID, NatTableSize: 1},
+		},
+		kernelStatsAt: time.Now(),
+		kernelFlowOwners: map[uint32]kernelCandidateOwner{
+			91: {kind: workerKindRule, id: ruleID},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/stats/current-conns", nil)
+	w := httptest.NewRecorder()
+
+	handleListCurrentConns(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp CurrentConnsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Rules) != 1 {
+		t.Fatalf("unexpected rule rows: %d", len(resp.Rules))
+	}
+	if resp.Rules[0].RuleID != ruleID {
+		t.Fatalf("unexpected rule id: got %d want %d", resp.Rules[0].RuleID, ruleID)
+	}
+	if resp.Rules[0].CurrentConns != 7 {
+		t.Fatalf("unexpected current conns: got %d want 7", resp.Rules[0].CurrentConns)
+	}
+}
+
+func TestHandleListEgressNATStatsSortsSyntheticCurrentConnsCorrectly(t *testing.T) {
+	db := openTestDB(t)
+
+	explicit := EgressNAT{
+		ParentInterface: "vmbr2",
+		OutInterface:    "vmbr0",
+		OutSourceIP:     "198.51.100.40",
+		Protocol:        "tcp",
+		NATType:         egressNATTypeSymmetric,
+		Enabled:         true,
+	}
+	explicitID, err := dbAddEgressNAT(db, &explicit)
+	if err != nil {
+		t.Fatalf("dbAddEgressNAT() error = %v", err)
+	}
+
+	network := ManagedNetwork{
+		Name:            "managed-net",
+		BridgeMode:      managedNetworkBridgeModeExisting,
+		Bridge:          "vmbr1",
+		UplinkInterface: "vmbr0",
+		AutoEgressNAT:   true,
+		Enabled:         true,
+	}
+	networkID, err := dbAddManagedNetwork(db, &network)
+	if err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	syntheticID := managedNetworkSyntheticID("egress_nat", networkID, network.Bridge)
+	pm := &ProcessManager{
+		kernelEgressNATStats: map[int64]EgressNATStatsReport{
+			explicitID:  {EgressNATID: explicitID, ActiveConns: 5},
+			syntheticID: {EgressNATID: syntheticID, ActiveConns: 2, NatTableSize: 7, ICMPNatSize: 4},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/egress-nats/stats?page=1&page_size=1&sort_key=current_conns&sort_asc=false", nil)
+	w := httptest.NewRecorder()
+
+	handleListEgressNATStats(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp EgressNATStatsListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("unexpected items length: %d", len(resp.Items))
+	}
+	if resp.Items[0].EgressNATID != syntheticID {
+		t.Fatalf("unexpected first egress nat id: got %d want %d", resp.Items[0].EgressNATID, syntheticID)
+	}
+	if resp.Items[0].Protocol != "tcp+udp+icmp" {
+		t.Fatalf("unexpected protocol: got %q want %q", resp.Items[0].Protocol, "tcp+udp+icmp")
+	}
+	if resp.Items[0].ParentInterface != network.Bridge {
+		t.Fatalf("unexpected parent interface: got %q want %q", resp.Items[0].ParentInterface, network.Bridge)
 	}
 }
 
@@ -596,5 +1013,92 @@ func TestHandleKernelRuntimePressureFallbackDoesNotSetRetryPending(t *testing.T)
 	}
 	if resp.RetryPending {
 		t.Fatal("retry_pending = true, want false for pressure-only fallback")
+	}
+}
+
+func TestHandleKernelRuntimeUsesSharedSnapshotCache(t *testing.T) {
+	pm := &ProcessManager{
+		cfg: &Config{DefaultEngine: ruleEngineAuto},
+		kernelRuntime: stubKernelRuntimeViewRuntime{
+			available: true,
+			reason:    "ok",
+		},
+		kernelRules: map[int64]bool{
+			101: true,
+		},
+		rulePlans: map[int64]ruleDataplanePlan{
+			201: {
+				KernelEligible:  true,
+				EffectiveEngine: ruleEngineUserspace,
+				FallbackReason:  "initial fallback",
+			},
+		},
+		kernelRetryCount:      1,
+		lastKernelRetryReason: "initial retry",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/kernel/runtime", nil)
+	w := httptest.NewRecorder()
+	handleKernelRuntime(w, req, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first status = %d body=%s", w.Code, w.Body.String())
+	}
+	var first KernelRuntimeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode first response: %v body=%s", err, w.Body.String())
+	}
+	if first.ActiveRuleCount != 1 || first.KernelFallbackRuleCount != 1 || first.KernelRetryCount != 1 {
+		t.Fatalf(
+			"first response = active_rules:%d fallback_rules:%d retry_count:%d, want 1/1/1",
+			first.ActiveRuleCount,
+			first.KernelFallbackRuleCount,
+			first.KernelRetryCount,
+		)
+	}
+
+	pm.mu.Lock()
+	pm.kernelRules[102] = true
+	pm.rulePlans = map[int64]ruleDataplanePlan{}
+	pm.kernelRetryCount = 2
+	pm.lastKernelRetryReason = "updated retry"
+	pm.mu.Unlock()
+
+	w = httptest.NewRecorder()
+	handleKernelRuntime(w, req, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("second status = %d body=%s", w.Code, w.Body.String())
+	}
+	var cached KernelRuntimeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &cached); err != nil {
+		t.Fatalf("decode cached response: %v body=%s", err, w.Body.String())
+	}
+	if cached.ActiveRuleCount != first.ActiveRuleCount ||
+		cached.KernelFallbackRuleCount != first.KernelFallbackRuleCount ||
+		cached.KernelRetryCount != first.KernelRetryCount ||
+		cached.LastKernelRetryReason != first.LastKernelRetryReason {
+		t.Fatalf("cached response changed unexpectedly: %+v (first=%+v)", cached, first)
+	}
+
+	freshReq := httptest.NewRequest(http.MethodGet, "/api/kernel/runtime?refresh=1", nil)
+	freshReq.Header.Set("Cache-Control", "no-cache")
+	w = httptest.NewRecorder()
+	handleKernelRuntime(w, freshReq, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("fresh status = %d body=%s", w.Code, w.Body.String())
+	}
+	var fresh KernelRuntimeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &fresh); err != nil {
+		t.Fatalf("decode fresh response: %v body=%s", err, w.Body.String())
+	}
+	if fresh.ActiveRuleCount != 2 || fresh.KernelFallbackRuleCount != 0 || fresh.KernelRetryCount != 2 {
+		t.Fatalf(
+			"fresh response = active_rules:%d fallback_rules:%d retry_count:%d, want 2/0/2",
+			fresh.ActiveRuleCount,
+			fresh.KernelFallbackRuleCount,
+			fresh.KernelRetryCount,
+		)
+	}
+	if fresh.LastKernelRetryReason != "updated retry" {
+		t.Fatalf("fresh last_kernel_retry_reason = %q, want %q", fresh.LastKernelRetryReason, "updated retry")
 	}
 }

@@ -15,8 +15,9 @@ import (
 const ruleColumns = `id, in_interface, in_ip, in_port, out_interface, out_ip, out_source_ip, out_port, protocol, remark, tag, enabled, transparent, engine_preference`
 
 const (
-	dbBusyTimeoutMillis = 5000
-	dbTxLockMode        = "immediate"
+	dbBusyTimeoutMillis  = 5000
+	dbTxLockMode         = "immediate"
+	dbByIDQueryChunkSize = 500
 )
 
 type dbIndexDefinition struct {
@@ -610,39 +611,44 @@ func dbGetRule(db sqlRuleStore, id int64) (*Rule, error) {
 }
 
 func dbGetRuleMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]Rule, error) {
-	if len(ids) == 0 {
+	normalized := normalizePositiveInt64Values(ids)
+	if len(normalized) == 0 {
 		return map[int64]Rule{}, nil
 	}
 
-	args := make([]interface{}, 0, len(ids))
-	holders := make([]string, 0, len(ids))
-	for _, id := range ids {
-		args = append(args, id)
-		holders = append(holders, "?")
-	}
-
-	rows, err := db.Query(
-		`SELECT id, protocol, remark FROM rules WHERE id IN (`+strings.Join(holders, ",")+`)`,
-		args...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[int64]Rule, len(ids))
-	for rows.Next() {
-		var item Rule
-		if err := rows.Scan(&item.ID, &item.Protocol, &item.Remark); err != nil {
+	result := make(map[int64]Rule, len(normalized))
+	for start := 0; start < len(normalized); start += dbByIDQueryChunkSize {
+		end := start + dbByIDQueryChunkSize
+		if end > len(normalized) {
+			end = len(normalized)
+		}
+		chunk := normalized[start:end]
+		rows, err := db.Query(
+			`SELECT id, protocol, remark FROM rules WHERE id IN (`+dbSQLPlaceholders(len(chunk))+`)`,
+			dbInt64Args(chunk)...,
+		)
+		if err != nil {
 			return nil, err
 		}
-		result[item.ID] = item
+		for rows.Next() {
+			var item Rule
+			if err := rows.Scan(&item.ID, &item.Protocol, &item.Remark); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[item.ID] = item
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
-func dbGetRuleProtocolMap(db sqlRuleStore) (map[int64]string, error) {
-	return dbQueryProtocolMap(db, `SELECT id, protocol FROM rules`, func(protocol string) string {
+func dbGetRuleProtocolMapByIDs(db sqlRuleStore, ids []int64) (map[int64]string, error) {
+	return dbQueryProtocolMapByIDs(db, `SELECT id, protocol FROM rules WHERE id IN (%s)`, ids, func(protocol string) string {
 		return protocol
 	})
 }
@@ -809,39 +815,44 @@ func dbGetRange(db sqlRuleStore, id int64) (*PortRange, error) {
 }
 
 func dbGetRangeMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]PortRange, error) {
-	if len(ids) == 0 {
+	normalized := normalizePositiveInt64Values(ids)
+	if len(normalized) == 0 {
 		return map[int64]PortRange{}, nil
 	}
 
-	args := make([]interface{}, 0, len(ids))
-	holders := make([]string, 0, len(ids))
-	for _, id := range ids {
-		args = append(args, id)
-		holders = append(holders, "?")
-	}
-
-	rows, err := db.Query(
-		`SELECT id, protocol, remark FROM ranges WHERE id IN (`+strings.Join(holders, ",")+`)`,
-		args...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[int64]PortRange, len(ids))
-	for rows.Next() {
-		var item PortRange
-		if err := rows.Scan(&item.ID, &item.Protocol, &item.Remark); err != nil {
+	result := make(map[int64]PortRange, len(normalized))
+	for start := 0; start < len(normalized); start += dbByIDQueryChunkSize {
+		end := start + dbByIDQueryChunkSize
+		if end > len(normalized) {
+			end = len(normalized)
+		}
+		chunk := normalized[start:end]
+		rows, err := db.Query(
+			`SELECT id, protocol, remark FROM ranges WHERE id IN (`+dbSQLPlaceholders(len(chunk))+`)`,
+			dbInt64Args(chunk)...,
+		)
+		if err != nil {
 			return nil, err
 		}
-		result[item.ID] = item
+		for rows.Next() {
+			var item PortRange
+			if err := rows.Scan(&item.ID, &item.Protocol, &item.Remark); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[item.ID] = item
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
-func dbGetRangeProtocolMap(db sqlRuleStore) (map[int64]string, error) {
-	return dbQueryProtocolMap(db, `SELECT id, protocol FROM ranges`, func(protocol string) string {
+func dbGetRangeProtocolMapByIDs(db sqlRuleStore, ids []int64) (map[int64]string, error) {
+	return dbQueryProtocolMapByIDs(db, `SELECT id, protocol FROM ranges WHERE id IN (%s)`, ids, func(protocol string) string {
 		return protocol
 	})
 }
@@ -891,6 +902,29 @@ func dbGetEnabledEgressNATs(db sqlRuleStore) ([]EgressNAT, error) {
 	return dbQueryEgressNATs(db, `SELECT `+egressNATColumns+` FROM egress_nats WHERE enabled = 1`)
 }
 
+func dbGetEgressNATsByIDs(db sqlRuleStore, ids []int64) ([]EgressNAT, error) {
+	normalized := normalizePositiveInt64Values(ids)
+	if len(normalized) == 0 {
+		return []EgressNAT{}, nil
+	}
+
+	items := make([]EgressNAT, 0, len(normalized))
+	for start := 0; start < len(normalized); start += dbByIDQueryChunkSize {
+		end := start + dbByIDQueryChunkSize
+		if end > len(normalized) {
+			end = len(normalized)
+		}
+		chunk := normalized[start:end]
+		query := `SELECT ` + egressNATColumns + ` FROM egress_nats WHERE id IN (` + dbSQLPlaceholders(len(chunk)) + `)`
+		chunkItems, err := dbQueryEgressNATs(db, query, dbInt64Args(chunk)...)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, chunkItems...)
+	}
+	return items, nil
+}
+
 func dbQueryEgressNATs(db sqlRuleStore, query string, args ...interface{}) ([]EgressNAT, error) {
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -917,8 +951,8 @@ func dbGetEgressNAT(db sqlRuleStore, id int64) (*EgressNAT, error) {
 	return &item, nil
 }
 
-func dbGetEgressNATProtocolMap(db sqlRuleStore) (map[int64]string, error) {
-	return dbQueryProtocolMap(db, `SELECT id, protocol FROM egress_nats`, normalizeEgressNATProtocol)
+func dbGetEgressNATProtocolMapByIDs(db sqlRuleStore, ids []int64) (map[int64]string, error) {
+	return dbQueryProtocolMapByIDs(db, `SELECT id, protocol FROM egress_nats WHERE id IN (%s)`, ids, normalizeEgressNATProtocol)
 }
 
 func dbSetEgressNATEnabled(db sqlRuleStore, id int64, enabled bool) error {
@@ -1046,25 +1080,60 @@ func dbQueryIPv6Assignments(db sqlRuleStore, query string, args ...interface{}) 
 	return items, rows.Err()
 }
 
-func dbQueryProtocolMap(db sqlRuleStore, query string, normalize func(string) string) (map[int64]string, error) {
-	rows, err := db.Query(query)
-	if err != nil {
-		return nil, err
+func dbQueryProtocolMapByIDs(db sqlRuleStore, queryFmt string, ids []int64, normalize func(string) string) (map[int64]string, error) {
+	normalized := normalizePositiveInt64Values(ids)
+	if len(normalized) == 0 {
+		return map[int64]string{}, nil
 	}
-	defer rows.Close()
 
-	result := make(map[int64]string)
-	for rows.Next() {
-		var (
-			id       int64
-			protocol string
-		)
-		if err := rows.Scan(&id, &protocol); err != nil {
+	result := make(map[int64]string, len(normalized))
+	for start := 0; start < len(normalized); start += dbByIDQueryChunkSize {
+		end := start + dbByIDQueryChunkSize
+		if end > len(normalized) {
+			end = len(normalized)
+		}
+		chunk := normalized[start:end]
+		rows, err := db.Query(fmt.Sprintf(queryFmt, dbSQLPlaceholders(len(chunk))), dbInt64Args(chunk)...)
+		if err != nil {
 			return nil, err
 		}
-		result[id] = normalize(protocol)
+		for rows.Next() {
+			var (
+				id       int64
+				protocol string
+			)
+			if err := rows.Scan(&id, &protocol); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[id] = normalize(protocol)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return result, rows.Err()
+	return result, nil
+}
+
+func dbInt64Args(values []int64) []interface{} {
+	args := make([]interface{}, 0, len(values))
+	for _, value := range values {
+		args = append(args, value)
+	}
+	return args
+}
+
+func dbSQLPlaceholders(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	holders := make([]string, count)
+	for i := range holders {
+		holders[i] = "?"
+	}
+	return strings.Join(holders, ",")
 }
 
 func dbGetIPv6Assignment(db sqlRuleStore, id int64) (*IPv6Assignment, error) {

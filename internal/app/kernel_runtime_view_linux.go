@@ -52,6 +52,13 @@ type kernelRuntimeMapRefs struct {
 	xdpFlowMigrationState *ebpf.Map
 }
 
+type kernelRuntimeMapSnapshot struct {
+	source kernelRuntimeMapRefs
+	refs   kernelRuntimeMapRefs
+	stats  *ebpf.Map
+	diag   *ebpf.Map
+}
+
 type kernelRuntimeRuleCounter func(kernelRuntimeMapRefs, int) (int, error)
 
 type kernelRuntimeInterfaceLabelCacheEntry struct {
@@ -61,6 +68,138 @@ type kernelRuntimeInterfaceLabelCacheEntry struct {
 
 var kernelRuntimeInterfaceLabelCache sync.Map
 var kernelRuntimeBatchLookupSupport sync.Map
+
+func cloneKernelRuntimeMap(m *ebpf.Map, label string) (*ebpf.Map, error) {
+	if m == nil {
+		return nil, nil
+	}
+	cloned, err := m.Clone()
+	if err != nil {
+		return nil, fmt.Errorf("clone %s: %w", label, err)
+	}
+	return cloned, nil
+}
+
+func cloneKernelRuntimeMapRefs(refs kernelRuntimeMapRefs) (kernelRuntimeMapRefs, error) {
+	cloned := kernelRuntimeMapRefs{}
+	var err error
+	if cloned.rulesV4, err = cloneKernelRuntimeMap(refs.rulesV4, kernelRulesMapNameV4); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.rulesV6, err = cloneKernelRuntimeMap(refs.rulesV6, kernelRulesMapNameV6); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.flowsV4, err = cloneKernelRuntimeMap(refs.flowsV4, kernelFlowsMapNameV4); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.flowsV6, err = cloneKernelRuntimeMap(refs.flowsV6, kernelFlowsMapNameV6); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.flowsOldV4, err = cloneKernelRuntimeMap(refs.flowsOldV4, kernelTCFlowsOldMapNameV4); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.flowsOldV6, err = cloneKernelRuntimeMap(refs.flowsOldV6, kernelTCFlowsOldMapNameV6); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.natV4, err = cloneKernelRuntimeMap(refs.natV4, kernelNatPortsMapNameV4); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.natV6, err = cloneKernelRuntimeMap(refs.natV6, kernelNatPortsMapNameV6); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.natOldV4, err = cloneKernelRuntimeMap(refs.natOldV4, kernelTCNatPortsOldMapNameV4); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.natOldV6, err = cloneKernelRuntimeMap(refs.natOldV6, kernelTCNatPortsOldMapNameV6); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.occupancy, err = cloneKernelRuntimeMap(refs.occupancy, kernelOccupancyMapName); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.tcFlowMigrationState, err = cloneKernelRuntimeMap(refs.tcFlowMigrationState, kernelTCFlowMigrationStateMapName); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.xdpFlowMigrationState, err = cloneKernelRuntimeMap(refs.xdpFlowMigrationState, kernelXDPFlowMigrationStateMapName); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	return cloned, nil
+}
+
+func closeKernelRuntimeMapRefs(refs kernelRuntimeMapRefs) {
+	for _, m := range []*ebpf.Map{
+		refs.rulesV4,
+		refs.rulesV6,
+		refs.flowsV4,
+		refs.flowsV6,
+		refs.flowsOldV4,
+		refs.flowsOldV6,
+		refs.natV4,
+		refs.natV6,
+		refs.natOldV4,
+		refs.natOldV6,
+		refs.occupancy,
+		refs.tcFlowMigrationState,
+		refs.xdpFlowMigrationState,
+	} {
+		if m != nil {
+			_ = m.Close()
+		}
+	}
+}
+
+func snapshotKernelRuntimeMaps(coll *ebpf.Collection, cloneStats bool, cloneDiag bool) (kernelRuntimeMapSnapshot, error) {
+	snapshot := kernelRuntimeMapSnapshot{
+		source: kernelRuntimeMapRefsFromCollection(coll),
+	}
+	var err error
+	if snapshot.refs, err = cloneKernelRuntimeMapRefs(snapshot.source); err != nil {
+		snapshot.Close()
+		return kernelRuntimeMapSnapshot{}, err
+	}
+	if cloneStats {
+		if snapshot.stats, err = cloneKernelRuntimeMap(snapshotCollectionMap(coll, kernelStatsMapName), kernelStatsMapName); err != nil {
+			snapshot.Close()
+			return kernelRuntimeMapSnapshot{}, err
+		}
+	}
+	if cloneDiag {
+		if snapshot.diag, err = cloneKernelRuntimeMap(snapshotCollectionMap(coll, kernelDiagMapName), kernelDiagMapName); err != nil {
+			snapshot.Close()
+			return kernelRuntimeMapSnapshot{}, err
+		}
+	}
+	return snapshot, nil
+}
+
+func snapshotCollectionMap(coll *ebpf.Collection, name string) *ebpf.Map {
+	if coll == nil || coll.Maps == nil {
+		return nil
+	}
+	return coll.Maps[name]
+}
+
+func (snapshot kernelRuntimeMapSnapshot) Close() {
+	closeKernelRuntimeMapRefs(snapshot.refs)
+	if snapshot.stats != nil {
+		_ = snapshot.stats.Close()
+	}
+	if snapshot.diag != nil {
+		_ = snapshot.diag.Close()
+	}
+}
 
 func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
@@ -294,36 +433,39 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	coll := rt.coll
 	mode := rt.attachmentMode
-	programs := kernelAttachmentProgramsForPreparedRules(coll, preparedRules, mode)
-	mapRefs := kernelRuntimeMapRefsFromCollection(coll)
+	expectedAttachments := expectedKernelAttachmentsForPreparedRules(coll, preparedRules, mode)
+	mapSnapshot, mapErr := snapshotKernelRuntimeMaps(coll, false, true)
 	rt.mu.Unlock()
+	defer mapSnapshot.Close()
 
 	view.Attachments = len(attachments)
 	view.AttachmentSummary = describeKernelAttachments(attachments)
 	view.AttachmentMode = tcAttachmentMode(attachments, mode)
-	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(preparedRules)
-	view.AttachmentsHealthy = len(preparedRules) == 0 || kernelAttachmentsHealthy(
-		forwardIfRules,
-		replyIfRules,
-		attachments,
-		programs.forwardProg,
-		programs.replyProg,
-		programs.forwardProgV6,
-		programs.replyProgV6,
-	)
+	if len(preparedRules) == 0 {
+		view.AttachmentsHealthy = true
+	} else {
+		view.AttachmentsHealthy = kernelExpectedAttachmentsHealthy(
+			expectedAttachments,
+			len(attachments),
+			kernelAttachmentObservations(kernelAttachmentKeys(expectedAttachments)),
+		)
+	}
 	rt.mu.Lock()
 	rt.observability.observeAttachmentsHealthy(view.AttachmentsHealthy, now)
 	applyKernelRuntimeObservabilityView(&view, rt.observability.snapshot())
 	rt.mu.Unlock()
 
-	if !counts.detailsFresh(now) {
-		counts = countTCKernelRuntimeMapEntryDetails(now, mapRefs, counts, true)
-		rt.updateRuntimeMapCountCache(mapRefs, counts)
-	}
 	applyKernelRuntimeMapCounts(&view, counts, true)
-	applyKernelRuntimeMapBreakdown(&view, mapRefs, counts, true)
-	if coll != nil {
-		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiag(coll))
+	if mapErr == nil {
+		if !counts.detailsFresh(now) {
+			counts = countTCKernelRuntimeMapEntryDetails(now, mapSnapshot.refs, counts, true)
+			rt.updateRuntimeMapCountCache(mapSnapshot.source, counts)
+		}
+		applyKernelRuntimeMapCounts(&view, counts, true)
+		applyKernelRuntimeMapBreakdown(&view, mapSnapshot.refs, counts, true)
+		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiagFromMap(mapSnapshot.diag))
+	} else if strings.TrimSpace(view.DiagSnapshotError) == "" {
+		view.DiagSnapshotError = mapErr.Error()
 	}
 
 	return view
@@ -360,8 +502,9 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	attachments := append([]xdpAttachment(nil), rt.attachments...)
 	programID := rt.programID
 	coll := rt.coll
-	mapRefs := kernelRuntimeMapRefsFromCollection(coll)
+	mapSnapshot, mapErr := snapshotKernelRuntimeMaps(coll, false, true)
 	rt.mu.Unlock()
+	defer mapSnapshot.Close()
 
 	view.Attachments = len(attachments)
 	view.AttachmentSummary = describeXDPAttachments(attachments)
@@ -373,14 +516,17 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	applyKernelRuntimeObservabilityView(&view, rt.observability.snapshot())
 	rt.mu.Unlock()
 
-	if !counts.detailsFresh(now) {
-		counts = countXDPKernelRuntimeMapEntryDetails(now, mapRefs, counts)
-		rt.updateRuntimeMapCountCache(mapRefs, counts)
-	}
 	applyKernelRuntimeMapCounts(&view, counts, false)
-	applyKernelRuntimeMapBreakdown(&view, mapRefs, counts, false)
-	if coll != nil {
-		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiag(coll))
+	if mapErr == nil {
+		if !counts.detailsFresh(now) {
+			counts = countXDPKernelRuntimeMapEntryDetails(now, mapSnapshot.refs, counts)
+			rt.updateRuntimeMapCountCache(mapSnapshot.source, counts)
+		}
+		applyKernelRuntimeMapCounts(&view, counts, false)
+		applyKernelRuntimeMapBreakdown(&view, mapSnapshot.refs, counts, false)
+		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiagFromMap(mapSnapshot.diag))
+	} else if strings.TrimSpace(view.DiagSnapshotError) == "" {
+		view.DiagSnapshotError = mapErr.Error()
 	}
 
 	return view
@@ -544,6 +690,27 @@ func expectedKernelAttachments(plans []kernelAttachmentPlan) []kernelAttachmentE
 		expected = append(expected, kernelAttachmentExpectationForPlan(plan))
 	}
 	return expected
+}
+
+func kernelAttachmentKeys(expected []kernelAttachmentExpectation) []kernelAttachmentKey {
+	keys := make([]kernelAttachmentKey, 0, len(expected))
+	for _, item := range expected {
+		keys = append(keys, item.key)
+	}
+	return keys
+}
+
+func expectedKernelAttachmentsForPreparedRules(coll *ebpf.Collection, prepared []preparedKernelRule, mode kernelTCAttachmentProgramMode) []kernelAttachmentExpectation {
+	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(prepared)
+	programs := kernelAttachmentProgramsForPreparedRules(coll, prepared, mode)
+	return expectedKernelAttachments(desiredKernelAttachmentPlansDualStack(
+		forwardIfRules,
+		replyIfRules,
+		programs.forwardProg,
+		programs.replyProg,
+		programs.forwardProgV6,
+		programs.replyProgV6,
+	))
 }
 
 func kernelAttachmentObservationMatchesExpectation(observed kernelAttachmentObservation, expected kernelAttachmentExpectation) bool {

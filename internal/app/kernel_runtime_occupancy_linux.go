@@ -164,6 +164,16 @@ func syncKernelOccupancyMapForCollection(coll *ebpf.Collection, flowsEntries int
 	)
 }
 
+func syncKernelOccupancyMapForRuntimeRefs(refs kernelRuntimeMapRefs, flowsEntries int, natEntries int) error {
+	return syncKernelOccupancyMap(
+		refs.occupancy,
+		flowsEntries,
+		natEntries,
+		kernelRuntimeFlowMapCapacity(refs),
+		kernelRuntimeNATMapCapacity(refs),
+	)
+}
+
 func syncKernelOccupancyMapFromCollectionExact(coll *ebpf.Collection, includeNAT bool) error {
 	if coll == nil || coll.Maps == nil {
 		return nil

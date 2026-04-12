@@ -1256,18 +1256,38 @@ func (rt *linuxKernelRuleRuntime) ensureMemlock() error {
 
 func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error) {
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
-
-	return snapshotKernelStatsFromCollection(rt.coll, cloneKernelStatsCorrections(rt.statsCorrection))
+	statsMap, err := cloneKernelRuntimeMap(snapshotCollectionMap(rt.coll, kernelStatsMapName), kernelStatsMapName)
+	corrections := cloneKernelStatsCorrections(rt.statsCorrection)
+	rt.mu.Unlock()
+	if err != nil {
+		return emptyKernelRuleStatsSnapshot(), err
+	}
+	if statsMap != nil {
+		defer statsMap.Close()
+	}
+	return snapshotKernelStatsFromMap(statsMap, corrections)
 }
 
 func (rt *linuxKernelRuleRuntime) Maintain() error {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-
 	startedAt := time.Now()
-	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	rt.mu.Lock()
+	pressureActive := rt.pressureState.active
+	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
+	mapSnapshot, err := snapshotKernelRuntimeMaps(rt.coll, runFull, false)
+	if err != nil {
+		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{}, err)
+		rt.mu.Unlock()
+		return err
+	}
 	baseBudget := rt.flowMaintenanceBudgetLocked()
+	flowPruneState := rt.flowPruneState
+	oldFlowPruneState := rt.oldFlowPruneState
+	statsCorrection := cloneKernelStatsCorrections(rt.statsCorrection)
+	rt.mu.Unlock()
+	defer mapSnapshot.Close()
+
+	refs := mapSnapshot.refs
+	matchRefs := mapSnapshot.source
 	haveV4 := refs.flowsV4 != nil || refs.flowsOldV4 != nil
 	haveV6 := refs.flowsV6 != nil || refs.flowsOldV6 != nil
 	v4Budget, v6Budget := baseBudget, 0
@@ -1302,48 +1322,51 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	v6ActiveBudget, v6OldBudget := splitBankBudget(v6Budget, refs.flowsV6 != nil, refs.flowsOldV6 != nil)
 	corrections := map[uint32]kernelRuleStats{}
 	pruneMetrics := kernelFlowPruneMetrics{}
+	var maintainErr error
+	fullSuccess := true
+	driftDetected := false
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &rt.flowPruneState, v4ActiveBudget)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &flowPruneState, v4ActiveBudget)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
 		if err != nil {
-			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-			return err
+			maintainErr = err
+			goto done
 		}
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsOldV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &rt.oldFlowPruneState, v4OldBudget)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &oldFlowPruneState, v4OldBudget)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
 		if err != nil {
-			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-			return err
+			maintainErr = err
+			goto done
 		}
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &rt.flowPruneState, v6ActiveBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &flowPruneState, v6ActiveBudget)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
 		if err != nil {
-			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-			return err
+			maintainErr = err
+			goto done
 		}
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
 	if refs.flowsOldV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, &rt.oldFlowPruneState, v6OldBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, &oldFlowPruneState, v6OldBudget)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
 		if err != nil {
-			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-			return err
+			maintainErr = err
+			goto done
 		}
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
@@ -1354,26 +1377,21 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 			log.Printf("kernel dataplane maintenance: update tc flow migration state failed: %v", err)
 		}
 	}
-	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, nil)
-	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
-	pressureActive := rt.pressureState.active
-	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
+	mergeKernelStatsCorrections(statsCorrection, corrections)
 	if runFull {
-		fullSuccess := true
-		driftDetected := false
-		if rt.coll != nil && rt.coll.Maps != nil {
+		if refs.hasFlows() || refs.hasNAT() || mapSnapshot.stats != nil {
 			live, liveErr := snapshotKernelLiveStateFromRuntimeMapRefs(refs, true)
 			if liveErr != nil {
 				fullSuccess = false
 				log.Printf("kernel dataplane maintenance: snapshot live tc flow state failed: %v", liveErr)
 			} else {
-				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(rt.coll.Maps[kernelStatsMapName], live.ByRuleID)
+				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(mapSnapshot.stats, live.ByRuleID)
 				if correctionErr != nil {
 					fullSuccess = false
 					log.Printf("kernel dataplane maintenance: reconcile tc stats correction failed: %v", correctionErr)
 				} else {
-					driftDetected = !kernelStatsCorrectionsEqual(rt.statsCorrection, exact)
-					syncKernelLiveStatsCorrections(rt.statsCorrection, exact)
+					driftDetected = !kernelStatsCorrectionsEqual(statsCorrection, exact)
+					syncKernelLiveStatsCorrections(statsCorrection, exact)
 				}
 				deleted := 0
 				for _, natMap := range []*ebpf.Map{refs.natV4, refs.natOldV4} {
@@ -1399,13 +1417,30 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					if countErr != nil {
 						fullSuccess = false
 						log.Printf("kernel dataplane maintenance: count exact tc nat occupancy failed: %v", countErr)
-					} else if syncErr := syncKernelOccupancyMapForCollection(rt.coll, live.FlowEntries, natEntries); syncErr != nil {
+					} else if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, live.FlowEntries, natEntries); syncErr != nil {
 						fullSuccess = false
 						log.Printf("kernel dataplane maintenance: sync tc occupancy counters failed: %v", syncErr)
 					}
 				}
 			}
 		}
+	}
+
+done:
+	duration := time.Since(startedAt)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if !kernelRuntimeMapRefsEqual(matchRefs, kernelRuntimeMapRefsFromCollection(rt.coll)) {
+		return maintainErr
+	}
+	rt.observability.recordMaintain(startedAt, duration, pruneMetrics, maintainErr)
+	if maintainErr != nil {
+		return maintainErr
+	}
+	rt.flowPruneState = flowPruneState
+	rt.oldFlowPruneState = oldFlowPruneState
+	rt.statsCorrection = statsCorrection
+	if runFull {
 		rt.maintenanceState.observeFull(pressureActive, fullSuccess, driftDetected)
 	}
 	rt.invalidateRuntimeMapCountCacheLocked()

@@ -1,10 +1,34 @@
 package app
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
+
+type countingRuleStore struct {
+	*sql.DB
+	mu         sync.Mutex
+	queryCalls int
+}
+
+func (s *countingRuleStore) Query(query string, args ...interface{}) (*sql.Rows, error) {
+	rows, err := s.DB.Query(query, args...)
+	if err == nil {
+		s.mu.Lock()
+		s.queryCalls++
+		s.mu.Unlock()
+	}
+	return rows, err
+}
+
+func (s *countingRuleStore) QueryCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.queryCalls
+}
 
 func TestInitDBCreatesAllDefinedIndexes(t *testing.T) {
 	db := openTestDB(t)
@@ -204,5 +228,104 @@ func TestHandleListRulesCombinesDBAndRuntimeFilters(t *testing.T) {
 	}
 	if items[0].Status != "running" {
 		t.Fatalf("items[0].Status = %q, want running", items[0].Status)
+	}
+}
+
+func TestDBGetRuleProtocolMapByIDsBatchesLargeInput(t *testing.T) {
+	db := openTestDB(t)
+	store := &countingRuleStore{DB: db}
+
+	ids := make([]int64, 0, dbByIDQueryChunkSize+25)
+	for i := 0; i < dbByIDQueryChunkSize+25; i++ {
+		rule := Rule{
+			InIP:     "198.51.100.10",
+			InPort:   10000 + i,
+			OutIP:    "203.0.113.10",
+			OutPort:  20000 + i,
+			Protocol: "tcp",
+			Enabled:  true,
+		}
+		id, err := dbAddRule(db, &rule)
+		if err != nil {
+			t.Fatalf("add rule %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	protocols, err := dbGetRuleProtocolMapByIDs(store, ids)
+	if err != nil {
+		t.Fatalf("dbGetRuleProtocolMapByIDs() error = %v", err)
+	}
+	if len(protocols) != len(ids) {
+		t.Fatalf("len(protocols) = %d, want %d", len(protocols), len(ids))
+	}
+	if got := store.QueryCalls(); got < 2 {
+		t.Fatalf("Query() calls = %d, want >= 2 for batched lookup", got)
+	}
+}
+
+func TestDBGetRuleMetaByIDsBatchesLargeInput(t *testing.T) {
+	db := openTestDB(t)
+	store := &countingRuleStore{DB: db}
+
+	ids := make([]int64, 0, dbByIDQueryChunkSize+25)
+	for i := 0; i < dbByIDQueryChunkSize+25; i++ {
+		rule := Rule{
+			InIP:     "198.51.100.20",
+			InPort:   11000 + i,
+			OutIP:    "203.0.113.20",
+			OutPort:  21000 + i,
+			Protocol: "udp",
+			Remark:   "batched-meta",
+			Enabled:  true,
+		}
+		id, err := dbAddRule(db, &rule)
+		if err != nil {
+			t.Fatalf("add rule %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	meta, err := dbGetRuleMetaByIDs(store, ids)
+	if err != nil {
+		t.Fatalf("dbGetRuleMetaByIDs() error = %v", err)
+	}
+	if len(meta) != len(ids) {
+		t.Fatalf("len(meta) = %d, want %d", len(meta), len(ids))
+	}
+	if got := store.QueryCalls(); got < 2 {
+		t.Fatalf("Query() calls = %d, want >= 2 for batched meta lookup", got)
+	}
+}
+
+func TestDBGetEgressNATsByIDsBatchesLargeInput(t *testing.T) {
+	db := openTestDB(t)
+	store := &countingRuleStore{DB: db}
+
+	ids := make([]int64, 0, dbByIDQueryChunkSize+25)
+	for i := 0; i < dbByIDQueryChunkSize+25; i++ {
+		item := EgressNAT{
+			ParentInterface: "vmbr1",
+			OutInterface:    "vmbr0",
+			OutSourceIP:     "198.51.100.30",
+			Protocol:        "tcp+udp",
+			Enabled:         true,
+		}
+		id, err := dbAddEgressNAT(db, &item)
+		if err != nil {
+			t.Fatalf("add egress nat %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	items, err := dbGetEgressNATsByIDs(store, ids)
+	if err != nil {
+		t.Fatalf("dbGetEgressNATsByIDs() error = %v", err)
+	}
+	if len(items) != len(ids) {
+		t.Fatalf("len(items) = %d, want %d", len(items), len(ids))
+	}
+	if got := store.QueryCalls(); got < 2 {
+		t.Fatalf("Query() calls = %d, want >= 2 for batched egress nat lookup", got)
 	}
 }

@@ -674,6 +674,9 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			hotRestartStatsCorrection = correction
 		}
 	}
+	if err := syncKernelOccupancyMapFromCollectionExact(coll, false); err != nil {
+		log.Printf("xdp dataplane reconcile: sync xdp occupancy counters failed before attach: %v", err)
+	}
 	if pieces.localIPv4s != nil {
 		if err := syncKernelLocalIPv4Map(pieces.localIPv4s, desiredLocalIPv4s); err != nil {
 			coll.Close()
@@ -727,10 +730,11 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 
 	programID := kernelProgramID(pieces.prog)
 	oldAttachments := append([]xdpAttachment(nil), rt.attachments...)
+	oldProg := xdpCollectionProgram(rt.coll)
 	newAttachments := make([]xdpAttachment, 0, len(requiredIfIndices))
 	attachStartedAt := time.Now()
 	for _, ifindex := range requiredIfIndices {
-		att, err := rt.attachProgramLocked(ifindex, pieces.prog, oldAttachments)
+		att, err := rt.attachProgramLocked(ifindex, pieces.prog, oldProg, oldAttachments)
 		if err != nil {
 			rt.discardAttachmentsLocked(newAttachments)
 			coll.Close()
@@ -822,17 +826,38 @@ func (rt *xdpKernelRuleRuntime) ensureMemlock() error {
 
 func (rt *xdpKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error) {
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	return snapshotKernelStatsFromCollection(rt.coll, cloneKernelStatsCorrections(rt.statsCorrection))
+	statsMap, err := cloneKernelRuntimeMap(snapshotCollectionMap(rt.coll, kernelStatsMapName), kernelStatsMapName)
+	corrections := cloneKernelStatsCorrections(rt.statsCorrection)
+	rt.mu.Unlock()
+	if err != nil {
+		return emptyKernelRuleStatsSnapshot(), err
+	}
+	if statsMap != nil {
+		defer statsMap.Close()
+	}
+	return snapshotKernelStatsFromMap(statsMap, corrections)
 }
 
 func (rt *xdpKernelRuleRuntime) Maintain() error {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-
 	startedAt := time.Now()
-	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	rt.mu.Lock()
+	pressureActive := rt.pressureState.active
+	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
+	mapSnapshot, err := snapshotKernelRuntimeMaps(rt.coll, runFull, false)
+	if err != nil {
+		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{}, err)
+		rt.mu.Unlock()
+		return err
+	}
+	refs := mapSnapshot.refs
 	v4Budget, v6Budget := rt.flowMaintenanceBudgetsLocked(refs)
+	flowPruneState := rt.flowPruneState
+	oldFlowPruneState := rt.oldFlowPruneState
+	statsCorrection := cloneKernelStatsCorrections(rt.statsCorrection)
+	rt.mu.Unlock()
+	defer mapSnapshot.Close()
+
+	matchRefs := mapSnapshot.source
 	splitFamilyBudget := func(total int, primaryPresent bool, oldPresent bool) (int, int) {
 		switch {
 		case primaryPresent && oldPresent:
@@ -853,48 +878,51 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	v6ActiveBudget, v6OldBudget := splitFamilyBudget(v6Budget, refs.flowsV6 != nil, refs.flowsOldV6 != nil)
 	corrections := map[uint32]kernelRuleStats{}
 	pruneMetrics := kernelFlowPruneMetrics{}
+	var maintainErr error
+	fullSuccess := true
+	driftDetected := false
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsV4, &rt.flowPruneState, v4ActiveBudget)
+		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsV4, &flowPruneState, v4ActiveBudget)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
 		if err != nil {
-			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-			return err
+			maintainErr = err
+			goto done
 		}
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsOldV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsOldV4, &rt.oldFlowPruneState, v4OldBudget)
+		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsOldV4, &oldFlowPruneState, v4OldBudget)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
 		if err != nil {
-			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-			return err
+			maintainErr = err
+			goto done
 		}
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &rt.flowPruneState, v6ActiveBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &flowPruneState, v6ActiveBudget)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
 		if err != nil {
-			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-			return err
+			maintainErr = err
+			goto done
 		}
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
 	if refs.flowsOldV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, &rt.oldFlowPruneState, v6OldBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, &oldFlowPruneState, v6OldBudget)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
 		if err != nil {
-			rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, err)
-			return err
+			maintainErr = err
+			goto done
 		}
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
@@ -905,29 +933,47 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 			log.Printf("xdp dataplane maintenance: update flow migration state failed: %v", err)
 		}
 	}
-	rt.observability.recordMaintain(startedAt, time.Since(startedAt), pruneMetrics, nil)
-	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
-	pressureActive := rt.pressureState.active
-	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
+	mergeKernelStatsCorrections(statsCorrection, corrections)
 	if runFull {
-		fullSuccess := true
-		driftDetected := false
-		if rt.coll != nil && rt.coll.Maps != nil {
+		if refs.hasFlows() || mapSnapshot.stats != nil {
 			live, liveErr := snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs)
 			if liveErr != nil {
 				fullSuccess = false
 				log.Printf("xdp dataplane maintenance: snapshot live xdp flow state failed: %v", liveErr)
 			} else {
-				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(rt.coll.Maps[kernelStatsMapName], live.ByRuleID)
+				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(mapSnapshot.stats, live.ByRuleID)
 				if correctionErr != nil {
 					fullSuccess = false
 					log.Printf("xdp dataplane maintenance: reconcile xdp stats correction failed: %v", correctionErr)
 				} else {
-					driftDetected = !kernelStatsCorrectionsEqual(rt.statsCorrection, exact)
-					syncKernelLiveStatsCorrections(rt.statsCorrection, exact)
+					driftDetected = !kernelStatsCorrectionsEqual(statsCorrection, exact)
+					syncKernelLiveStatsCorrections(statsCorrection, exact)
+				}
+				if fullSuccess {
+					if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, live.FlowEntries, 0); syncErr != nil {
+						fullSuccess = false
+						log.Printf("xdp dataplane maintenance: sync xdp occupancy counters failed: %v", syncErr)
+					}
 				}
 			}
 		}
+	}
+
+done:
+	duration := time.Since(startedAt)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if !kernelRuntimeMapRefsEqual(matchRefs, kernelRuntimeMapRefsFromCollection(rt.coll)) {
+		return maintainErr
+	}
+	rt.observability.recordMaintain(startedAt, duration, pruneMetrics, maintainErr)
+	if maintainErr != nil {
+		return maintainErr
+	}
+	rt.flowPruneState = flowPruneState
+	rt.oldFlowPruneState = oldFlowPruneState
+	rt.statsCorrection = statsCorrection
+	if runFull {
 		rt.maintenanceState.observeFull(pressureActive, fullSuccess, driftDetected)
 	}
 	rt.invalidateRuntimeMapCountCacheLocked()
@@ -1210,14 +1256,15 @@ func (rt *xdpKernelRuleRuntime) attachmentsHealthyLocked(requiredIfIndices []int
 	return xdpAttachmentsHealthy(requiredIfIndices, rt.attachments, rt.programID)
 }
 
-func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Program, oldAttachments []xdpAttachment) (xdpAttachment, error) {
+func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Program, oldProg *ebpf.Program, oldAttachments []xdpAttachment) (xdpAttachment, error) {
 	link, err := netlink.LinkByIndex(ifindex)
 	if err != nil {
 		return xdpAttachment{}, fmt.Errorf("resolve interface by index %d: %w", ifindex, err)
 	}
 
+	order := xdpAttachOrder(link, oldAttachments, rt.allowGenericAttach)
 	var errs []string
-	for _, flags := range xdpAttachOrder(link, oldAttachments, rt.allowGenericAttach) {
+	for _, flags := range order {
 		if err := netlink.LinkSetXdpFdWithFlags(link, prog.FD(), flags); err == nil {
 			if len(errs) > 0 {
 				rt.stateLog.Logf("xdp dataplane attach: %s attached in %s mode after fallback (%s)",
@@ -1229,6 +1276,35 @@ func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Prog
 			return xdpAttachment{ifindex: ifindex, flags: flags}, nil
 		} else {
 			errs = append(errs, fmt.Sprintf("%s=%v", xdpAttachFlagsLabel(flags), err))
+		}
+	}
+	if stale, ok := xdpModeSwitchAttachment(oldAttachments, ifindex, order); ok && oldProg != nil {
+		if err := detachXDPAttachment(stale); err != nil {
+			errs = append(errs, fmt.Sprintf("detach existing %s=%v", xdpAttachFlagsLabel(stale.flags), err))
+		} else {
+			switchErrs := make([]string, 0, len(order))
+			for _, flags := range order {
+				if err := netlink.LinkSetXdpFdWithFlags(link, prog.FD(), flags); err == nil {
+					if len(errs) > 0 || len(switchErrs) > 0 {
+						details := append([]string{}, errs...)
+						details = append(details, switchErrs...)
+						rt.stateLog.Logf("xdp dataplane attach: %s switched from %s to %s after retry (%s)",
+							xdpInterfaceLabel(ifindex),
+							xdpAttachFlagsLabel(stale.flags),
+							xdpAttachFlagsLabel(flags),
+							strings.Join(details, "; "),
+						)
+					}
+					return xdpAttachment{ifindex: ifindex, flags: flags}, nil
+				} else {
+					switchErrs = append(switchErrs, fmt.Sprintf("retry %s=%v", xdpAttachFlagsLabel(flags), err))
+				}
+			}
+			if rollbackErr := netlink.LinkSetXdpFdWithFlags(link, oldProg.FD(), stale.flags); rollbackErr != nil {
+				errs = append(errs, fmt.Sprintf("mode switch retry failed (%s); rollback %s=%v", strings.Join(switchErrs, "; "), xdpAttachFlagsLabel(stale.flags), rollbackErr))
+			} else {
+				errs = append(errs, fmt.Sprintf("mode switch retry failed (%s); rolled back to %s", strings.Join(switchErrs, "; "), xdpAttachFlagsLabel(stale.flags)))
+			}
 		}
 	}
 	if !rt.allowGenericAttach {
@@ -1303,6 +1379,9 @@ func validateXDPCollectionSpec(spec *ebpf.CollectionSpec) error {
 	}
 	if _, ok := spec.Maps[kernelStatsMapName]; !ok {
 		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelStatsMapName)
+	}
+	if _, ok := spec.Maps[kernelOccupancyMapName]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelOccupancyMapName)
 	}
 	if _, ok := spec.Maps[kernelXDPRedirectMapName]; !ok {
 		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelXDPRedirectMapName)
@@ -1656,6 +1735,33 @@ func xdpAttachOrder(link netlink.Link, oldAttachments []xdpAttachment, allowGene
 		}
 	}
 	return preferred
+}
+
+func xdpCollectionProgram(coll *ebpf.Collection) *ebpf.Program {
+	if coll == nil || coll.Programs == nil {
+		return nil
+	}
+	return coll.Programs[kernelXDPProgramName]
+}
+
+func xdpModeSwitchAttachment(oldAttachments []xdpAttachment, ifindex int, attachOrder []int) (xdpAttachment, bool) {
+	for _, att := range oldAttachments {
+		if att.ifindex != ifindex {
+			continue
+		}
+		for _, flags := range attachOrder {
+			if xdpAttachModeEqual(att.flags, flags) {
+				return xdpAttachment{}, false
+			}
+		}
+		return att, true
+	}
+	return xdpAttachment{}, false
+}
+
+func xdpAttachModeEqual(a int, b int) bool {
+	modeMask := nl.XDP_FLAGS_DRV_MODE | nl.XDP_FLAGS_SKB_MODE
+	return (a & modeMask) == (b & modeMask)
 }
 
 func xdpPreferGenericAttach(link netlink.Link) bool {

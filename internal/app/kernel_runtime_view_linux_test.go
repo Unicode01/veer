@@ -247,6 +247,69 @@ func TestKernelRuntimeMapRefsEqualTracksOldNATAndMigrationMaps(t *testing.T) {
 	}
 }
 
+func TestSnapshotKernelRuntimeMapsClonesRefsAndAuxMaps(t *testing.T) {
+	rules := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelRulesMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 4,
+	})
+	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelStatsMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  8,
+		MaxEntries: 1,
+	})
+	diag := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelDiagMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  8,
+		MaxEntries: 1,
+	})
+
+	key := uint32(1)
+	value := uint32(9)
+	if err := rules.Put(key, value); err != nil {
+		t.Fatalf("rules.Put() error = %v", err)
+	}
+
+	snapshot, err := snapshotKernelRuntimeMaps(&ebpf.Collection{
+		Maps: map[string]*ebpf.Map{
+			kernelRulesMapNameV4: rules,
+			kernelStatsMapName:   stats,
+			kernelDiagMapName:    diag,
+		},
+	}, true, true)
+	if err != nil {
+		t.Fatalf("snapshotKernelRuntimeMaps() error = %v", err)
+	}
+	defer snapshot.Close()
+
+	if snapshot.source.rulesV4 != rules {
+		t.Fatal("snapshotKernelRuntimeMaps() source rules ref mismatch")
+	}
+	if snapshot.refs.rulesV4 == nil || snapshot.refs.rulesV4 == rules {
+		t.Fatal("snapshotKernelRuntimeMaps() rules clone missing or reused original map")
+	}
+	if snapshot.stats == nil || snapshot.stats == stats {
+		t.Fatal("snapshotKernelRuntimeMaps() stats clone missing or reused original map")
+	}
+	if snapshot.diag == nil || snapshot.diag == diag {
+		t.Fatal("snapshotKernelRuntimeMaps() diag clone missing or reused original map")
+	}
+
+	var got uint32
+	if err := snapshot.refs.rulesV4.Lookup(key, &got); err != nil {
+		t.Fatalf("snapshot rules clone Lookup() error = %v", err)
+	}
+	if got != value {
+		t.Fatalf("snapshot rules clone Lookup() = %d, want %d", got, value)
+	}
+}
+
 func TestXDPAttachmentMode(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -315,6 +315,7 @@ type RuleStatsReport struct {
 	SpeedIn       int64 `json:"speed_in"`
 	SpeedOut      int64 `json:"speed_out"`
 	NatTableSize  int   `json:"nat_table_size"`
+	ICMPNatSize   int   `json:"-"`
 }
 
 type RuleCurrentConnsReport struct {
@@ -332,6 +333,7 @@ type RangeStatsReport struct {
 	SpeedIn       int64 `json:"speed_in"`
 	SpeedOut      int64 `json:"speed_out"`
 	NatTableSize  int   `json:"nat_table_size"`
+	ICMPNatSize   int   `json:"-"`
 }
 
 type RangeCurrentConnsReport struct {
@@ -363,6 +365,7 @@ type EgressNATStatsReport struct {
 	SpeedIn      int64 `json:"speed_in"`
 	SpeedOut     int64 `json:"speed_out"`
 	NatTableSize int   `json:"nat_table_size"`
+	ICMPNatSize  int   `json:"-"`
 }
 
 type EgressNATCurrentConnsReport struct {

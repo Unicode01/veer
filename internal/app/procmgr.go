@@ -63,6 +63,7 @@ const (
 	kernelStatsRefreshInterval         = 5 * time.Second
 	kernelStatsDemandWindow            = 15 * time.Second
 	kernelStatsSnapshotShareTTL        = 1 * time.Second
+	kernelRuntimeSnapshotShareTTL      = 1 * time.Second
 	kernelMaintenanceInterval          = 10 * time.Second
 	kernelFallbackRetryInterval        = 30 * time.Second
 	kernelFallbackRetryLogEvery        = 10 * time.Minute
@@ -202,6 +203,10 @@ type ProcessManager struct {
 	kernelStatsSnapshot                            kernelRuleStatsSnapshot
 	kernelStatsAt                                  time.Time
 	kernelStatsSnapshotAt                          time.Time
+	kernelStatsRefreshWait                         chan struct{}
+	kernelRuntimeSnapshot                          KernelRuntimeResponse
+	kernelRuntimeSnapshotAt                        time.Time
+	kernelRuntimeSnapshotWait                      chan struct{}
 	kernelStatsLastDuration                        time.Duration
 	kernelStatsLastError                           string
 	kernelStatsDemandAt                            time.Time
@@ -277,6 +282,52 @@ type ProcessManager struct {
 	lastRangePlanLog                               map[int64]string
 	lastPlannerSummary                             string
 	lastKernelRetryLog                             string
+}
+
+func (pm *ProcessManager) snapshotKernelRuntimeShared(now time.Time, force bool) KernelRuntimeResponse {
+	if pm == nil {
+		return KernelRuntimeResponse{}
+	}
+
+	for {
+		if now.IsZero() {
+			now = time.Now()
+		}
+		pm.mu.Lock()
+		if !force && !pm.kernelRuntimeSnapshotAt.IsZero() && now.Sub(pm.kernelRuntimeSnapshotAt) < kernelRuntimeSnapshotShareTTL {
+			snapshot := pm.kernelRuntimeSnapshot
+			pm.mu.Unlock()
+			return snapshot
+		}
+		if wait := pm.kernelRuntimeSnapshotWait; wait != nil {
+			pm.mu.Unlock()
+			waitForKernelRuntimeSnapshot(wait)
+			force = false
+			now = time.Time{}
+			continue
+		}
+		wait := make(chan struct{})
+		pm.kernelRuntimeSnapshotWait = wait
+		pm.mu.Unlock()
+
+		snapshot := pm.snapshotKernelRuntime()
+		completedAt := time.Now()
+
+		pm.mu.Lock()
+		pm.kernelRuntimeSnapshot = snapshot
+		pm.kernelRuntimeSnapshotAt = completedAt
+		pm.kernelRuntimeSnapshotWait = nil
+		pm.mu.Unlock()
+		close(wait)
+		return snapshot
+	}
+}
+
+func waitForKernelRuntimeSnapshot(wait <-chan struct{}) {
+	if wait == nil {
+		return
+	}
+	<-wait
 }
 
 func (pm *ProcessManager) setReady(ready bool) {
@@ -3147,6 +3198,7 @@ func (pm *ProcessManager) collectRuleStats() map[int64]RuleStatsReport {
 				existing.SpeedIn += s.SpeedIn
 				existing.SpeedOut += s.SpeedOut
 				existing.NatTableSize += s.NatTableSize
+				existing.ICMPNatSize += s.ICMPNatSize
 				result[id] = existing
 			} else {
 				result[id] = s
@@ -3166,6 +3218,7 @@ func (pm *ProcessManager) collectRuleStats() map[int64]RuleStatsReport {
 			existing.SpeedIn += s.SpeedIn
 			existing.SpeedOut += s.SpeedOut
 			existing.NatTableSize += s.NatTableSize
+			existing.ICMPNatSize += s.ICMPNatSize
 			result[id] = existing
 		} else {
 			result[id] = s
@@ -3193,6 +3246,7 @@ func (pm *ProcessManager) collectRangeStats() map[int64]RangeStatsReport {
 				existing.SpeedIn += s.SpeedIn
 				existing.SpeedOut += s.SpeedOut
 				existing.NatTableSize += s.NatTableSize
+				existing.ICMPNatSize += s.ICMPNatSize
 				result[id] = existing
 			} else {
 				result[id] = s
@@ -3212,6 +3266,7 @@ func (pm *ProcessManager) collectRangeStats() map[int64]RangeStatsReport {
 			existing.SpeedIn += s.SpeedIn
 			existing.SpeedOut += s.SpeedOut
 			existing.NatTableSize += s.NatTableSize
+			existing.ICMPNatSize += s.ICMPNatSize
 			result[id] = existing
 		} else {
 			result[id] = s
@@ -3227,8 +3282,38 @@ func (pm *ProcessManager) collectEgressNATStats() map[int64]EgressNATStatsReport
 	return result
 }
 
-func currentConnCountForProtocol(protocol string, activeConns int64, natTableSize int64) int64 {
-	return currentConnCountForProtocolDatagrams(protocol, activeConns, natTableSize, 0)
+func currentConnCountForProtocolWithICMP(protocol string, activeConns int64, natTableSize int64, icmpNatTableSize int64) int64 {
+	udpNatTableSize := natTableSize - icmpNatTableSize
+	if udpNatTableSize < 0 {
+		udpNatTableSize = 0
+	}
+	return currentConnCountForProtocolDatagrams(protocol, activeConns, udpNatTableSize, icmpNatTableSize)
+}
+
+type currentConnProtocolStats struct {
+	ActiveConns    int64
+	UDPNatEntries  int64
+	ICMPNatEntries int64
+}
+
+func currentConnProtocolStatsFromReport(activeConns int64, natTableSize int64, icmpNatTableSize int64) currentConnProtocolStats {
+	udpNatEntries := natTableSize - icmpNatTableSize
+	if udpNatEntries < 0 {
+		udpNatEntries = 0
+	}
+	return currentConnProtocolStats{
+		ActiveConns:    activeConns,
+		UDPNatEntries:  udpNatEntries,
+		ICMPNatEntries: icmpNatTableSize,
+	}
+}
+
+func addCurrentConnProtocolStats(dst map[int64]currentConnProtocolStats, id int64, delta currentConnProtocolStats) {
+	current := dst[id]
+	current.ActiveConns += delta.ActiveConns
+	current.UDPNatEntries += delta.UDPNatEntries
+	current.ICMPNatEntries += delta.ICMPNatEntries
+	dst[id] = current
 }
 
 func currentConnCountForProtocolDatagrams(protocol string, activeConns int64, udpNatTableSize int64, icmpNatTableSize int64) int64 {
@@ -3257,41 +3342,45 @@ func currentConnCountForProtocolDatagrams(protocol string, activeConns int64, ud
 	}
 }
 
-func addRuleCurrentConnCount(result map[int64]int64, protocols map[int64]string, ruleID int64, activeConns int64, udpNatTableSize int64, icmpNatTableSize int64) {
-	result[ruleID] += currentConnCountForProtocolDatagrams(protocols[ruleID], activeConns, udpNatTableSize, icmpNatTableSize)
-}
-
-func addRangeCurrentConnCount(result map[int64]int64, protocols map[int64]string, rangeID int64, activeConns int64, udpNatTableSize int64, icmpNatTableSize int64) {
-	result[rangeID] += currentConnCountForProtocolDatagrams(protocols[rangeID], activeConns, udpNatTableSize, icmpNatTableSize)
-}
-
-func addEgressNATCurrentConnCount(result map[int64]int64, protocols map[int64]string, egressNATID int64, activeConns int64, udpNatTableSize int64, icmpNatTableSize int64) {
-	result[egressNATID] += currentConnCountForProtocolDatagrams(protocols[egressNATID], activeConns, udpNatTableSize, icmpNatTableSize)
-}
-
-func (pm *ProcessManager) collectCurrentConns(ruleProtocols map[int64]string, rangeProtocols map[int64]string, egressNATProtocols map[int64]string) (map[int64]int64, map[int64]int64, map[int64]int64, map[int64]int64, error) {
-	ruleResult := make(map[int64]int64)
-	rangeResult := make(map[int64]int64)
+func (pm *ProcessManager) collectCurrentConnStats() (map[int64]currentConnProtocolStats, map[int64]currentConnProtocolStats, map[int64]int64, map[int64]currentConnProtocolStats, error) {
+	ruleResult := make(map[int64]currentConnProtocolStats)
+	rangeResult := make(map[int64]currentConnProtocolStats)
 	siteResult := make(map[int64]int64)
-	egressNATResult := make(map[int64]int64)
+	egressNATResult := make(map[int64]currentConnProtocolStats)
 
 	pm.mu.Lock()
 	for _, wi := range pm.ruleWorkers {
 		for id, stats := range wi.ruleStats {
-			addRuleCurrentConnCount(ruleResult, ruleProtocols, id, stats.ActiveConns, int64(stats.NatTableSize), 0)
+			addCurrentConnProtocolStats(ruleResult, id, currentConnProtocolStatsFromReport(
+				stats.ActiveConns,
+				int64(stats.NatTableSize),
+				int64(stats.ICMPNatSize),
+			))
 		}
 	}
 	for _, wi := range pm.rangeWorkers {
 		for id, stats := range wi.rangeStats {
-			addRangeCurrentConnCount(rangeResult, rangeProtocols, id, stats.ActiveConns, int64(stats.NatTableSize), 0)
+			addCurrentConnProtocolStats(rangeResult, id, currentConnProtocolStatsFromReport(
+				stats.ActiveConns,
+				int64(stats.NatTableSize),
+				int64(stats.ICMPNatSize),
+			))
 		}
 	}
 	for _, dw := range pm.drainingWorkers {
 		for id, stats := range dw.ruleStats {
-			addRuleCurrentConnCount(ruleResult, ruleProtocols, id, stats.ActiveConns, int64(stats.NatTableSize), 0)
+			addCurrentConnProtocolStats(ruleResult, id, currentConnProtocolStatsFromReport(
+				stats.ActiveConns,
+				int64(stats.NatTableSize),
+				int64(stats.ICMPNatSize),
+			))
 		}
 		for id, stats := range dw.rangeStats {
-			addRangeCurrentConnCount(rangeResult, rangeProtocols, id, stats.ActiveConns, int64(stats.NatTableSize), 0)
+			addCurrentConnProtocolStats(rangeResult, id, currentConnProtocolStatsFromReport(
+				stats.ActiveConns,
+				int64(stats.NatTableSize),
+				int64(stats.ICMPNatSize),
+			))
 		}
 		if dw.kind == workerKindShared {
 			for _, stats := range dw.siteStatsMap {
@@ -3315,27 +3404,27 @@ func (pm *ProcessManager) collectCurrentConns(ruleProtocols map[int64]string, ra
 		return ruleResult, rangeResult, siteResult, egressNATResult, nil
 	}
 
-	_ = runtime
 	snapshot, _, err := pm.snapshotKernelStatsShared(time.Time{})
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-
 	for kernelRuleID, counts := range snapshot.ByRuleID {
 		owner, ok := ownerIndex[kernelRuleID]
 		if !ok {
 			continue
 		}
-		if owner.kind == workerKindRule {
-			addRuleCurrentConnCount(ruleResult, ruleProtocols, owner.id, counts.TCPActiveConns, counts.UDPNatEntries, counts.ICMPNatEntries)
-			continue
+		delta := currentConnProtocolStats{
+			ActiveConns:    counts.TCPActiveConns,
+			UDPNatEntries:  counts.UDPNatEntries,
+			ICMPNatEntries: counts.ICMPNatEntries,
 		}
-		if owner.kind == workerKindRange {
-			addRangeCurrentConnCount(rangeResult, rangeProtocols, owner.id, counts.TCPActiveConns, counts.UDPNatEntries, counts.ICMPNatEntries)
-			continue
-		}
-		if owner.kind == workerKindEgressNAT {
-			addEgressNATCurrentConnCount(egressNATResult, egressNATProtocols, owner.id, counts.TCPActiveConns, counts.UDPNatEntries, counts.ICMPNatEntries)
+		switch owner.kind {
+		case workerKindRule:
+			addCurrentConnProtocolStats(ruleResult, owner.id, delta)
+		case workerKindRange:
+			addCurrentConnProtocolStats(rangeResult, owner.id, delta)
+		case workerKindEgressNAT:
+			addCurrentConnProtocolStats(egressNATResult, owner.id, delta)
 		}
 	}
 
@@ -3526,6 +3615,49 @@ func (pm *ProcessManager) markKernelStatsDemand() {
 	pm.mu.Unlock()
 }
 
+func (pm *ProcessManager) beginKernelStatsRefresh(force bool, now time.Time) (bool, <-chan struct{}) {
+	if pm == nil {
+		return false, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if pm.kernelStatsRefreshWait != nil {
+		return false, pm.kernelStatsRefreshWait
+	}
+	if !force && !pm.shouldRefreshKernelStatsLocked(now) {
+		return false, nil
+	}
+
+	wait := make(chan struct{})
+	pm.kernelStatsRefreshWait = wait
+	return true, wait
+}
+
+func (pm *ProcessManager) endKernelStatsRefresh() {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	wait := pm.kernelStatsRefreshWait
+	pm.kernelStatsRefreshWait = nil
+	pm.mu.Unlock()
+	if wait != nil {
+		close(wait)
+	}
+}
+
+func waitForKernelStatsRefresh(wait <-chan struct{}) {
+	if wait == nil {
+		return
+	}
+	<-wait
+}
+
 func (pm *ProcessManager) shouldRefreshKernelStatsLocked(now time.Time) bool {
 	if pm.kernelRuntime == nil {
 		return false
@@ -3543,12 +3675,13 @@ func (pm *ProcessManager) shouldRefreshKernelStatsLocked(now time.Time) bool {
 }
 
 func (pm *ProcessManager) refreshKernelStatsCacheIfNeeded() {
-	pm.mu.Lock()
-	shouldRefresh := pm.shouldRefreshKernelStatsLocked(time.Now())
-	pm.mu.Unlock()
-	if shouldRefresh {
-		pm.refreshKernelStatsCache()
+	start, wait := pm.beginKernelStatsRefresh(false, time.Now())
+	if !start {
+		waitForKernelStatsRefresh(wait)
+		return
 	}
+	defer pm.endKernelStatsRefresh()
+	pm.refreshKernelStatsCacheNow()
 }
 
 func (pm *ProcessManager) snapshotKernelStatsShared(now time.Time) (kernelRuleStatsSnapshot, time.Time, error) {
@@ -3586,14 +3719,15 @@ func (pm *ProcessManager) snapshotKernelStatsShared(now time.Time) (kernelRuleSt
 		pm.mu.Unlock()
 		return emptyKernelRuleStatsSnapshot(), now, err
 	}
+	sampledAt := time.Now()
 
 	pm.mu.Lock()
 	pm.kernelStatsSnapshot = snapshot
-	pm.kernelStatsSnapshotAt = now
+	pm.kernelStatsSnapshotAt = sampledAt
 	pm.kernelStatsLastDuration = duration
 	pm.kernelStatsLastError = ""
 	pm.mu.Unlock()
-	return snapshot, now, nil
+	return snapshot, sampledAt, nil
 }
 
 func kernelTrafficSpeed(nextBytes int64, prevBytes int64, elapsed time.Duration) int64 {
@@ -3640,6 +3774,16 @@ func applyKernelEgressNATTrafficSpeeds(dst map[int64]EgressNATStatsReport, prev 
 }
 
 func (pm *ProcessManager) refreshKernelStatsCache() {
+	start, wait := pm.beginKernelStatsRefresh(true, time.Now())
+	if !start {
+		waitForKernelStatsRefresh(wait)
+		return
+	}
+	defer pm.endKernelStatsRefresh()
+	pm.refreshKernelStatsCacheNow()
+}
+
+func (pm *ProcessManager) refreshKernelStatsCacheNow() {
 	if pm.kernelRuntime == nil {
 		pm.mu.Lock()
 		pm.kernelRuleStats = make(map[int64]RuleStatsReport)
@@ -3687,6 +3831,7 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 			item.ActiveConns += counts.TCPActiveConns
 			item.TotalConns += counts.TotalConns
 			item.NatTableSize += int(counts.UDPNatEntries + counts.ICMPNatEntries)
+			item.ICMPNatSize += int(counts.ICMPNatEntries)
 			if trafficStatsEnabled {
 				item.BytesIn += counts.BytesIn
 				item.BytesOut += counts.BytesOut
@@ -3700,6 +3845,7 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 			item.ActiveConns += counts.TCPActiveConns
 			item.TotalConns += counts.TotalConns
 			item.NatTableSize += int(counts.UDPNatEntries + counts.ICMPNatEntries)
+			item.ICMPNatSize += int(counts.ICMPNatEntries)
 			if trafficStatsEnabled {
 				item.BytesIn += counts.BytesIn
 				item.BytesOut += counts.BytesOut
@@ -3713,6 +3859,7 @@ func (pm *ProcessManager) refreshKernelStatsCache() {
 			item.ActiveConns += counts.TCPActiveConns
 			item.TotalConns += counts.TotalConns
 			item.NatTableSize += int(counts.UDPNatEntries + counts.ICMPNatEntries)
+			item.ICMPNatSize += int(counts.ICMPNatEntries)
 			if trafficStatsEnabled {
 				item.BytesIn += counts.BytesIn
 				item.BytesOut += counts.BytesOut
