@@ -442,14 +442,18 @@ type KernelEngineRuntimeView struct {
 	FlowsMapCapacity                        int       `json:"flows_map_capacity"`
 	FlowsMapEntriesV4                       int       `json:"flows_map_entries_v4,omitempty"`
 	FlowsMapCapacityV4                      int       `json:"flows_map_capacity_v4,omitempty"`
+	FlowsMapOldCapacityV4                   int       `json:"flows_map_old_capacity_v4,omitempty"`
 	FlowsMapEntriesV6                       int       `json:"flows_map_entries_v6,omitempty"`
 	FlowsMapCapacityV6                      int       `json:"flows_map_capacity_v6,omitempty"`
+	FlowsMapOldCapacityV6                   int       `json:"flows_map_old_capacity_v6,omitempty"`
 	NATMapEntries                           int       `json:"nat_map_entries,omitempty"`
 	NATMapCapacity                          int       `json:"nat_map_capacity,omitempty"`
 	NATMapEntriesV4                         int       `json:"nat_map_entries_v4,omitempty"`
 	NATMapCapacityV4                        int       `json:"nat_map_capacity_v4,omitempty"`
+	NATMapOldCapacityV4                     int       `json:"nat_map_old_capacity_v4,omitempty"`
 	NATMapEntriesV6                         int       `json:"nat_map_entries_v6,omitempty"`
 	NATMapCapacityV6                        int       `json:"nat_map_capacity_v6,omitempty"`
+	NATMapOldCapacityV6                     int       `json:"nat_map_old_capacity_v6,omitempty"`
 	LastReconcileMode                       string    `json:"last_reconcile_mode,omitempty"`
 	TrafficStats                            bool      `json:"traffic_stats"`
 	Diagnostics                             bool      `json:"diagnostics"`

@@ -233,8 +233,26 @@ func (pm *ProcessManager) handleIPv6AssignmentAddrUpdate(update netlink.AddrUpda
 			relatedNames = append(relatedNames, collectIPv6AssignmentRelatedInterfaceNames(link)...)
 		}
 	}
+	family := unix.AF_UNSPEC
+	if ip := update.LinkAddress.IP; ip != nil {
+		if ip.To4() != nil {
+			family = unix.AF_INET
+		} else {
+			family = unix.AF_INET6
+		}
+	}
+	pm.handleVisibleInterfaceAddrUpdate(family, name, relatedNames...)
+}
+
+func (pm *ProcessManager) handleVisibleInterfaceAddrUpdate(family int, name string, relatedNames ...string) {
+	if pm == nil {
+		return
+	}
 	if !pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", relatedNames...) && name != "" {
 		pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", name)
+	}
+	if family == unix.AF_INET6 {
+		pm.requestRedistributeWorkers(0)
 	}
 }
 

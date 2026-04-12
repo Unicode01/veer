@@ -193,6 +193,8 @@ http://127.0.0.1:8080
 
 ```json
 {
+  "web_bind": "127.0.0.1",
+  "web_ui_enabled": true,
   "web_port": 8080,
   "web_token": "change-me-to-a-secure-token",
   "max_workers": 0,
@@ -203,6 +205,8 @@ http://127.0.0.1:8080
   "kernel_rules_map_limit": 0,
   "kernel_flows_map_limit": 0,
   "kernel_nat_ports_map_limit": 0,
+  "kernel_nat_port_min": 20000,
+  "kernel_nat_port_max": 65535,
   "experimental_features": {
     "bridge_xdp": false,
     "xdp_generic": false,
@@ -216,12 +220,15 @@ http://127.0.0.1:8080
 
 最关键的字段：
 
+- `web_bind`：Web UI / API 监听地址。默认 `127.0.0.1`，更适合生产；如果你明确要直接对外暴露管理面，再显式改成 `0.0.0.0` 或具体管理 IP
+- `web_ui_enabled`：是否提供静态 Web UI。默认开启；设为 `false` 后只保留 `/api/*`、`/healthz`、`/readyz`
 - `web_port`：Web UI / API 监听端口
 - `web_token`：管理面板和 API 的 Bearer Token
 - `default_engine`：`auto`、`userspace`、`kernel`
 - `kernel_engine_order`：内核引擎顺序。代码默认在省略时只走 `tc`；示例配置里显式写成 `["tc", "xdp"]`，只是为了把 XDP 保留在候选链里，想走更保守的生产配置时可直接改回 `["tc"]`
 - `managed_network_auto_repair`：托管网络链路变更后的自动修复
 - `kernel_rules_map_limit` / `kernel_flows_map_limit` / `kernel_nat_ports_map_limit`：内核 map 容量上限，`0` 表示自适应
+- `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT 端口池范围，默认 `20000-65535`
 - `experimental_features`：实验特性开关
 
 实验特性里目前最重要的几个键：
@@ -510,6 +517,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads
 
 ```bash
 FORWARD_REF=main bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
+WEB_BIND=0.0.0.0 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
+WEB_UI_ENABLED=false bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
@@ -517,9 +526,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads
 
 - 当前默认入口就是 GitHub Raw 上的 `bootstrap.sh`
 - 一键脚本会在目标机安装依赖、拉取指定 `Git ref`、执行 `release.sh`，最后再调用 `deploy.sh`
+- `deploy.sh` 现在默认把管理面限制在 `127.0.0.1`；如果你确实要直接远程打开管理面，请显式设置 `WEB_BIND=0.0.0.0` 或在 `config.json` 里写入具体监听地址
+- 如果你只想暴露 API / 探针、不想提供浏览器前端，可设置 `WEB_UI_ENABLED=false`，或在 `config.json` 里写入 `"web_ui_enabled": false`
+- `deploy.sh` 生成的新 `config.json` 会直接写入完整默认配置；升级旧配置时也会补齐缺失字段，不需要再翻文档手抄默认项
+- 如果旧 `config.json` 里还保留示例占位值 `change-me-to-a-secure-token`，`deploy.sh` 会拒绝继续部署；先改成真实 token，或在部署时显式传入 `WEB_TOKEN=...`
+- 更新部署会先备份旧二进制与 systemd unit，再用本机 `/readyz` 探针确认新版本可用；如果热更新失败或 30 秒内未就绪，会自动回滚到上一版本
 - 如果目标机原本没有满足版本要求的 Go，一键脚本会把 Go 临时解压到 `FORWARD_WORKDIR` 下，仅供当前引导流程使用；脚本退出后会连同源码一起清理，不会写入 `/usr/local/go`
 - 如果引导流程失败，脚本会输出失败步骤、命令和行号；默认还会保留 `FORWARD_WORKDIR` 便于排查，设置 `FORWARD_KEEP_WORKDIR_ON_ERROR=0` 可改回失败即清理
 - 如果你更偏向可复现部署，建议把 `FORWARD_REF` 固定到 tag 或 commit，而不是长期直接跟 `main`
+
+本机探针：
+
+```text
+http://127.0.0.1:8080/healthz
+http://127.0.0.1:8080/readyz
+```
 
 常见流程：
 

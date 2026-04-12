@@ -29,6 +29,22 @@ type staleKernelFlowV6 struct {
 	value tcFlowValueV6
 }
 
+func kernelFlowValueFromXDP(value xdpFlowValueV4) tcFlowValueV4 {
+	return tcFlowValueV4{
+		RuleID:           value.RuleID,
+		FrontAddr:        value.FrontAddr,
+		ClientAddr:       value.ClientAddr,
+		NATAddr:          value.NATAddr,
+		InIfIndex:        value.InIfIndex,
+		FrontPort:        value.FrontPort,
+		ClientPort:       value.ClientPort,
+		NATPort:          value.NATPort,
+		Flags:            value.Flags,
+		LastSeenNS:       value.LastSeenNS,
+		FrontCloseSeenNS: value.FrontCloseSeenNS,
+	}
+}
+
 type kernelStatsValueV4 struct {
 	TotalConns     uint64
 	TCPActiveConns uint64
@@ -50,6 +66,7 @@ type kernelFlowPruneState struct {
 	keys              []tcFlowKeyV4
 	keysV6            []tcFlowKeyV6
 	values            []tcFlowValueV4
+	xdpValues         []xdpFlowValueV4
 	valuesV6          []tcFlowValueV6
 }
 
@@ -131,6 +148,34 @@ func pruneStaleKernelFlowsMap(rulesMap, flowsMap, natPortsMap *ebpf.Map, state *
 		log.Printf("kernel dataplane maintenance: batch flow scan unavailable, falling back to full scan: %v", err)
 	}
 	return pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, metrics)
+}
+
+func pruneStaleXDPFlowsMap(rulesMap, flowsMap *ebpf.Map, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+	if flowsMap == nil {
+		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
+	}
+
+	nowNS, haveNow := kernelMonotonicNowNS()
+	if budget <= 0 {
+		budget = kernelFlowMaintenanceBudgetMin
+	}
+	metrics := kernelFlowPruneMetrics{Budget: budget}
+	if state == nil {
+		return pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap, nowNS, haveNow, metrics)
+	}
+	if !state.batchSupportKnown || state.batchSupported {
+		corrections, pruneMetrics, err := pruneStaleXDPFlowsBatch(rulesMap, flowsMap, nowNS, haveNow, state, metrics)
+		if err == nil {
+			state.batchSupportKnown = true
+			state.batchSupported = true
+			return corrections, pruneMetrics, nil
+		}
+		state.reset()
+		state.batchSupportKnown = true
+		state.batchSupported = false
+		log.Printf("xdp dataplane maintenance: batch flow scan unavailable, falling back to full scan: %v", err)
+	}
+	return pruneStaleXDPFlowsIncrementalInCollection(rulesMap, flowsMap, nowNS, haveNow, state, metrics)
 }
 
 func applyKernelStatsCorrections(dst map[uint32]kernelRuleStats, corrections map[uint32]kernelRuleStats) {
@@ -341,6 +386,39 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 	return out, nil
 }
 
+func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (kernelFlowLiveStateSnapshot, error) {
+	out := newKernelFlowLiveStateSnapshot(false)
+	if refs.flowsV4 != nil {
+		live, err := snapshotXDPKernelLiveStateFromFlows(refs.flowsV4)
+		if err != nil {
+			return kernelFlowLiveStateSnapshot{}, err
+		}
+		mergeKernelLiveStateSnapshot(&out, live)
+	}
+	if refs.flowsOldV4 != nil {
+		live, err := snapshotXDPKernelLiveStateFromFlows(refs.flowsOldV4)
+		if err != nil {
+			return kernelFlowLiveStateSnapshot{}, err
+		}
+		mergeKernelLiveStateSnapshot(&out, live)
+	}
+	if refs.flowsV6 != nil {
+		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsV6)
+		if err != nil {
+			return kernelFlowLiveStateSnapshot{}, err
+		}
+		mergeKernelLiveStateSnapshot(&out, live)
+	}
+	if refs.flowsOldV6 != nil {
+		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsOldV6)
+		if err != nil {
+			return kernelFlowLiveStateSnapshot{}, err
+		}
+		mergeKernelLiveStateSnapshot(&out, live)
+	}
+	return out, nil
+}
+
 func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, includeNAT bool) (kernelFlowLiveStateSnapshot, error) {
 	out := newKernelFlowLiveStateSnapshot(includeNAT)
 	if flowsMap == nil {
@@ -372,6 +450,37 @@ func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, in
 	}
 	if err := iter.Err(); err != nil {
 		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate kernel flows map for live counts: %w", err)
+	}
+	return out, nil
+}
+
+func snapshotXDPKernelLiveStateFromFlows(flowsMap *ebpf.Map) (kernelFlowLiveStateSnapshot, error) {
+	out := newKernelFlowLiveStateSnapshot(false)
+	if flowsMap == nil {
+		return out, nil
+	}
+
+	iter := flowsMap.Iterate()
+	var key tcFlowKeyV4
+	var raw xdpFlowValueV4
+	for iter.Next(&key, &raw) {
+		value := kernelFlowValueFromXDP(raw)
+		out.FlowEntries++
+		if !kernelFlowCountsTowardLiveGauge(value) {
+			continue
+		}
+		item := out.ByRuleID[value.RuleID]
+		if kernelFlowUsesUDPAccounting(key.Proto) {
+			item.UDPNatEntries++
+		} else if kernelFlowUsesICMPAccounting(key.Proto) {
+			item.ICMPNatEntries++
+		} else {
+			item.TCPActiveConns++
+		}
+		out.ByRuleID[value.RuleID] = item
+	}
+	if err := iter.Err(); err != nil {
+		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate xdp flows map for live counts: %w", err)
 	}
 	return out, nil
 }
@@ -675,6 +784,7 @@ func (state *kernelFlowPruneState) reset() {
 	state.keys = nil
 	state.keysV6 = nil
 	state.values = nil
+	state.xdpValues = nil
 	state.valuesV6 = nil
 }
 
@@ -690,6 +800,20 @@ func (state *kernelFlowPruneState) ensureBuffers(size int) ([]tcFlowKeyV4, []tcF
 		state.values = state.values[:size]
 	}
 	return state.keys, state.values
+}
+
+func (state *kernelFlowPruneState) ensureXDPBuffers(size int) ([]tcFlowKeyV4, []xdpFlowValueV4) {
+	if cap(state.keys) < size {
+		state.keys = make([]tcFlowKeyV4, size)
+	} else {
+		state.keys = state.keys[:size]
+	}
+	if cap(state.xdpValues) < size {
+		state.xdpValues = make([]xdpFlowValueV4, size)
+	} else {
+		state.xdpValues = state.xdpValues[:size]
+	}
+	return state.keys, state.xdpValues
 }
 
 func (state *kernelFlowPruneState) ensureBuffersV6(size int) ([]tcFlowKeyV6, []tcFlowValueV6) {
@@ -824,6 +948,144 @@ func pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMa
 			metrics.Scanned++
 			if kernelFlowDeleteReason(current, value, nowNS, haveNow) != "" {
 				deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, staleKernelFlow{key: current, value: value}, corrections)
+				metrics.Deleted++
+			}
+		}
+		scanned++
+
+		if !nextValid {
+			state.fullCursorValid = false
+			state.fullCursor = tcFlowKeyV4{}
+			return corrections, metrics, nil
+		}
+		current = next
+		state.fullCursor = current
+		state.fullCursorValid = true
+	}
+
+	return corrections, metrics, nil
+}
+
+func pruneStaleXDPFlowsBatch(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+	corrections := make(map[uint32]kernelRuleStats)
+	remaining := metrics.Budget
+
+	for remaining > 0 {
+		size := min(remaining, kernelFlowMaintenanceBatchSize)
+		keys, values := state.ensureXDPBuffers(size)
+		n, err := flowsMap.BatchLookup(&state.batchCursor, keys, values, nil)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil, metrics, err
+		}
+		if n == 0 {
+			state.batchCursor = ebpf.MapBatchCursor{}
+			return corrections, metrics, nil
+		}
+
+		for i := 0; i < n; i++ {
+			value := kernelFlowValueFromXDP(values[i])
+			if value.RuleID == 0 {
+				continue
+			}
+			metrics.Scanned++
+			if kernelFlowDeleteReason(keys[i], value, nowNS, haveNow) != "" {
+				deleteStaleKernelFlow(rulesMap, flowsMap, nil, staleKernelFlow{key: keys[i], value: value}, corrections)
+				metrics.Deleted++
+			}
+		}
+
+		remaining -= n
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			state.batchCursor = ebpf.MapBatchCursor{}
+			return corrections, metrics, nil
+		}
+	}
+
+	return corrections, metrics, nil
+}
+
+func pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+	iter := flowsMap.Iterate()
+	var key tcFlowKeyV4
+	var raw xdpFlowValueV4
+	var staleFlows []staleKernelFlow
+	corrections := make(map[uint32]kernelRuleStats)
+
+	for iter.Next(&key, &raw) {
+		value := kernelFlowValueFromXDP(raw)
+		if value.RuleID == 0 {
+			continue
+		}
+		metrics.Scanned++
+		if kernelFlowDeleteReason(key, value, nowNS, haveNow) != "" {
+			staleFlows = append(staleFlows, staleKernelFlow{key: key, value: value})
+		}
+	}
+
+	if err := iter.Err(); err != nil {
+		return nil, metrics, fmt.Errorf("iterate xdp flows map: %w", err)
+	}
+
+	for _, stale := range staleFlows {
+		deleteStaleKernelFlow(rulesMap, flowsMap, nil, stale, corrections)
+		metrics.Deleted++
+	}
+	return corrections, metrics, nil
+}
+
+func pruneStaleXDPFlowsIncrementalInCollection(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+	if state == nil {
+		return pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap, nowNS, haveNow, metrics)
+	}
+	if metrics.Budget <= 0 {
+		metrics.Budget = kernelFlowMaintenanceBudgetMin
+	}
+
+	corrections := make(map[uint32]kernelRuleStats)
+	var current tcFlowKeyV4
+	if state.fullCursorValid {
+		current = state.fullCursor
+	} else {
+		if err := flowsMap.NextKey(nil, &current); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				state.fullCursorValid = false
+				state.fullCursor = tcFlowKeyV4{}
+				return corrections, metrics, nil
+			}
+			return nil, metrics, fmt.Errorf("iterate xdp flows map: %w", err)
+		}
+	}
+
+	for scanned := 0; scanned < metrics.Budget; {
+		var next tcFlowKeyV4
+		nextValid := false
+		if err := flowsMap.NextKey(current, &next); err == nil {
+			nextValid = true
+		} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil, metrics, fmt.Errorf("iterate xdp flows map: %w", err)
+		}
+
+		var raw xdpFlowValueV4
+		if err := flowsMap.Lookup(current, &raw); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				if !nextValid {
+					state.fullCursorValid = false
+					state.fullCursor = tcFlowKeyV4{}
+					return corrections, metrics, nil
+				}
+				current = next
+				state.fullCursor = current
+				state.fullCursorValid = true
+				continue
+			}
+			return nil, metrics, fmt.Errorf("lookup xdp flow during fallback scan: %w", err)
+		}
+
+		value := kernelFlowValueFromXDP(raw)
+		if value.RuleID != 0 {
+			metrics.Scanned++
+			if kernelFlowDeleteReason(current, value, nowNS, haveNow) != "" {
+				deleteStaleKernelFlow(rulesMap, flowsMap, nil, staleKernelFlow{key: current, value: value}, corrections)
 				metrics.Deleted++
 			}
 		}

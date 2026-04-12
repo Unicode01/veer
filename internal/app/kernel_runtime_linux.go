@@ -749,7 +749,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		}
 	}
 	if rt.coll != nil && rt.coll.Maps != nil {
-		existingMigrationFlags, flowStateErr := tcOldFlowMigrationFlagsFromCollection(rt.coll)
+		existingMigrationFlags, flowStateErr := tcEffectiveOldFlowMigrationFlagsFromCollection(rt.coll)
 		if flowStateErr != nil {
 			msg := fmt.Sprintf("inspect tc old-bank flow state: %v", flowStateErr)
 			if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -1547,7 +1547,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	existingMigrationFlags, err := tcOldFlowMigrationFlagsFromCollection(rt.coll)
+	existingMigrationFlags, err := tcEffectiveOldFlowMigrationFlagsFromCollection(rt.coll)
 	if err != nil {
 		log.Printf("kernel dataplane hot restart: inspect tc old-bank flow state failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
@@ -2683,6 +2683,24 @@ func configureTCFlowMigrationState(pieces kernelCollectionPieces, flags uint32) 
 		return fmt.Errorf("update tc flow migration state: %w", err)
 	}
 	return nil
+}
+
+func tcEffectiveOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, error) {
+	if coll == nil || coll.Maps == nil {
+		return 0, nil
+	}
+	return tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefsFromCollection(coll))
+}
+
+func tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (uint32, error) {
+	flags, ok, err := lookupKernelFlowMigrationStateFlags(refs.tcFlowMigrationState)
+	if err != nil {
+		return 0, fmt.Errorf("lookup tc flow migration state: %w", err)
+	}
+	if ok {
+		return flags & (tcFlowMigrationFlagV4Old | tcFlowMigrationFlagV6Old), nil
+	}
+	return tcOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
 }
 
 func tcOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, error) {

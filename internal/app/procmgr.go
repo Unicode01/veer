@@ -279,6 +279,24 @@ type ProcessManager struct {
 	lastKernelRetryLog                             string
 }
 
+func (pm *ProcessManager) setReady(ready bool) {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	pm.ready = ready
+	pm.mu.Unlock()
+}
+
+func (pm *ProcessManager) isReady() bool {
+	if pm == nil {
+		return false
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.ready
+}
+
 func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessManager, error) {
 	exe, err := os.Executable()
 	if err != nil {

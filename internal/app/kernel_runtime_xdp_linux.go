@@ -98,6 +98,22 @@ type xdpRuleValueV6 struct {
 	DstMAC      [6]byte
 }
 
+type xdpFlowValueV4 struct {
+	RuleID           uint32
+	FrontAddr        uint32
+	ClientAddr       uint32
+	NATAddr          uint32
+	InIfIndex        uint32
+	FrontPort        uint16
+	ClientPort       uint16
+	NATPort          uint16
+	Flags            uint16
+	FrontMAC         [6]byte
+	ClientMAC        [6]byte
+	LastSeenNS       uint64
+	FrontCloseSeenNS uint64
+}
+
 type preparedXDPKernelRule struct {
 	rule       Rule
 	inIfIndex  int
@@ -416,7 +432,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	}
 	if rt.coll != nil && rt.coll.Maps != nil {
 		if !preferFreshMapGrowth {
-			existingMigrationFlags, flowStateErr := xdpOldFlowMigrationFlagsFromCollection(rt.coll)
+			existingMigrationFlags, flowStateErr := xdpEffectiveOldFlowMigrationFlagsFromCollection(rt.coll)
 			if flowStateErr != nil {
 				msg := fmt.Sprintf("inspect xdp old-bank flow state: %v", flowStateErr)
 				if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -839,7 +855,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	pruneMetrics := kernelFlowPruneMetrics{}
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, nil, &rt.flowPruneState, v4ActiveBudget)
+		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsV4, &rt.flowPruneState, v4ActiveBudget)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -850,7 +866,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsOldV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, nil, &rt.oldFlowPruneState, v4OldBudget)
+		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsOldV4, &rt.oldFlowPruneState, v4OldBudget)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -897,7 +913,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		fullSuccess := true
 		driftDetected := false
 		if rt.coll != nil && rt.coll.Maps != nil {
-			live, liveErr := snapshotKernelLiveStateFromRuntimeMapRefs(refs, false)
+			live, liveErr := snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs)
 			if liveErr != nil {
 				fullSuccess = false
 				log.Printf("xdp dataplane maintenance: snapshot live xdp flow state failed: %v", liveErr)
@@ -953,7 +969,7 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	existingMigrationFlags, err := xdpOldFlowMigrationFlagsFromCollection(rt.coll)
+	existingMigrationFlags, err := xdpEffectiveOldFlowMigrationFlagsFromCollection(rt.coll)
 	if err != nil {
 		log.Printf("xdp dataplane hot restart: inspect old-bank flow state failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
@@ -1432,13 +1448,31 @@ func configureXDPFlowMigrationState(pieces xdpCollectionPieces, flags uint32) er
 	return nil
 }
 
+func xdpEffectiveOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, error) {
+	if coll == nil || coll.Maps == nil {
+		return 0, nil
+	}
+	return xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefsFromCollection(coll))
+}
+
+func xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (uint32, error) {
+	flags, ok, err := lookupKernelFlowMigrationStateFlags(refs.xdpFlowMigrationState)
+	if err != nil {
+		return 0, fmt.Errorf("lookup xdp flow migration state: %w", err)
+	}
+	if ok {
+		return flags & (xdpFlowMigrationFlagV4Old | xdpFlowMigrationFlagV6Old), nil
+	}
+	return xdpOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
+}
+
 func xdpOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, error) {
 	if coll == nil || coll.Maps == nil {
 		return 0, nil
 	}
 	var flags uint32
 	if m := coll.Maps[kernelXDPFlowsOldMapNameV4]; m != nil {
-		count, err := countKernelFlowMapEntries(m)
+		count, err := countXDPFlowMapEntries(m)
 		if err != nil {
 			return 0, fmt.Errorf("count old xdp IPv4 flows: %w", err)
 		}
@@ -1461,7 +1495,7 @@ func xdpOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, erro
 func xdpOldFlowMigrationFlagsFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (uint32, error) {
 	var flags uint32
 	if refs.flowsOldV4 != nil {
-		count, err := countKernelFlowMapEntries(refs.flowsOldV4)
+		count, err := countXDPFlowMapEntries(refs.flowsOldV4)
 		if err != nil {
 			return 0, fmt.Errorf("count old xdp IPv4 flows: %w", err)
 		}

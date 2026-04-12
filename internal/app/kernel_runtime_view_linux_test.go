@@ -5,6 +5,7 @@ package app
 import (
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
@@ -184,8 +185,14 @@ func TestApplyKernelRuntimeMapBreakdown(t *testing.T) {
 	if view.FlowsMapEntriesV4 != 11 || view.FlowsMapEntriesV6 != 5 {
 		t.Fatalf("flows breakdown = %d/%d, want 11/5", view.FlowsMapEntriesV4, view.FlowsMapEntriesV6)
 	}
+	if view.FlowsMapOldCapacityV4 != 0 || view.FlowsMapOldCapacityV6 != 0 {
+		t.Fatalf("flows old capacity breakdown = %d/%d, want 0/0", view.FlowsMapOldCapacityV4, view.FlowsMapOldCapacityV6)
+	}
 	if view.NATMapEntriesV4 != 7 || view.NATMapEntriesV6 != 1 {
 		t.Fatalf("nat breakdown = %d/%d, want 7/1", view.NATMapEntriesV4, view.NATMapEntriesV6)
+	}
+	if view.NATMapOldCapacityV4 != 0 || view.NATMapOldCapacityV6 != 0 {
+		t.Fatalf("nat old capacity breakdown = %d/%d, want 0/0", view.NATMapOldCapacityV4, view.NATMapOldCapacityV6)
 	}
 }
 
@@ -198,7 +205,7 @@ func TestApplyKernelRuntimeMapBreakdownSkipsNATWhenDisabled(t *testing.T) {
 
 	applyKernelRuntimeMapBreakdown(&view, kernelRuntimeMapRefs{}, counts, false)
 
-	if view.NATMapEntriesV4 != 0 || view.NATMapEntriesV6 != 0 || view.NATMapCapacityV4 != 0 || view.NATMapCapacityV6 != 0 {
+	if view.NATMapEntriesV4 != 0 || view.NATMapEntriesV6 != 0 || view.NATMapCapacityV4 != 0 || view.NATMapCapacityV6 != 0 || view.NATMapOldCapacityV4 != 0 || view.NATMapOldCapacityV6 != 0 {
 		t.Fatalf("nat breakdown populated with includeNAT=false: %+v", view)
 	}
 }
@@ -368,5 +375,41 @@ func TestCountKernelRuntimeMapEntriesUsesHintForIPv6RulesWithoutCounter(t *testi
 	)
 	if counts.rulesEntries != 5 {
 		t.Fatalf("countKernelRuntimeMapEntries() rules = %d, want 5", counts.rulesEntries)
+	}
+}
+
+func TestCountXDPKernelRuntimeMapEntryDetailsCountsV4OldBank(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 16,
+	})
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 16,
+	})
+
+	keyA := tcFlowKeyV4{IfIndex: 1, SrcAddr: 1, DstAddr: 2, SrcPort: 1000, DstPort: 2000, Proto: 6}
+	keyB := tcFlowKeyV4{IfIndex: 1, SrcAddr: 3, DstAddr: 4, SrcPort: 3000, DstPort: 4000, Proto: 6}
+	value := xdpFlowValueV4{RuleID: 9, Flags: kernelFlowFlagCounted}
+	if err := flows.Put(keyA, value); err != nil {
+		t.Fatalf("flows.Put() error = %v", err)
+	}
+	if err := flowsOld.Put(keyB, value); err != nil {
+		t.Fatalf("flowsOld.Put() error = %v", err)
+	}
+
+	counts := countXDPKernelRuntimeMapEntryDetails(time.Now(), kernelRuntimeMapRefs{
+		flowsV4:    flows,
+		flowsOldV4: flowsOld,
+	}, kernelRuntimeMapCountSnapshot{})
+
+	if counts.flowsEntriesV4 != 2 || counts.flowsEntries != 2 {
+		t.Fatalf("countXDPKernelRuntimeMapEntryDetails() flows = %+v, want flows_v4=2 flows=2", counts)
 	}
 }

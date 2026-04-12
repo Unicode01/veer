@@ -44,11 +44,11 @@ func TestApplyKernelMapCapacitiesWithOccupancySetsOptionalIPv6Maps(t *testing.T)
 	if got := spec.Maps[kernelFlowsMapNameV6].MaxEntries; got != uint32(capacities.Flows) {
 		t.Fatalf("%s MaxEntries = %d, want %d", kernelFlowsMapNameV6, got, capacities.Flows)
 	}
-	if got := spec.Maps[kernelTCFlowsOldMapNameV4].MaxEntries; got != uint32(capacities.Flows) {
-		t.Fatalf("%s MaxEntries = %d, want %d", kernelTCFlowsOldMapNameV4, got, capacities.Flows)
+	if got := spec.Maps[kernelTCFlowsOldMapNameV4].MaxEntries; got != uint32(kernelOldBankPlaceholderEntries) {
+		t.Fatalf("%s MaxEntries = %d, want %d", kernelTCFlowsOldMapNameV4, got, kernelOldBankPlaceholderEntries)
 	}
-	if got := spec.Maps[kernelTCFlowsOldMapNameV6].MaxEntries; got != uint32(capacities.Flows) {
-		t.Fatalf("%s MaxEntries = %d, want %d", kernelTCFlowsOldMapNameV6, got, capacities.Flows)
+	if got := spec.Maps[kernelTCFlowsOldMapNameV6].MaxEntries; got != uint32(kernelOldBankPlaceholderEntries) {
+		t.Fatalf("%s MaxEntries = %d, want %d", kernelTCFlowsOldMapNameV6, got, kernelOldBankPlaceholderEntries)
 	}
 	if got := spec.Maps[kernelNatPortsMapNameV4].MaxEntries; got != uint32(capacities.NATPorts) {
 		t.Fatalf("%s MaxEntries = %d, want %d", kernelNatPortsMapNameV4, got, capacities.NATPorts)
@@ -56,11 +56,11 @@ func TestApplyKernelMapCapacitiesWithOccupancySetsOptionalIPv6Maps(t *testing.T)
 	if got := spec.Maps[kernelNatPortsMapNameV6].MaxEntries; got != uint32(capacities.NATPorts) {
 		t.Fatalf("%s MaxEntries = %d, want %d", kernelNatPortsMapNameV6, got, capacities.NATPorts)
 	}
-	if got := spec.Maps[kernelTCNatPortsOldMapNameV4].MaxEntries; got != uint32(capacities.NATPorts) {
-		t.Fatalf("%s MaxEntries = %d, want %d", kernelTCNatPortsOldMapNameV4, got, capacities.NATPorts)
+	if got := spec.Maps[kernelTCNatPortsOldMapNameV4].MaxEntries; got != uint32(kernelOldBankPlaceholderEntries) {
+		t.Fatalf("%s MaxEntries = %d, want %d", kernelTCNatPortsOldMapNameV4, got, kernelOldBankPlaceholderEntries)
 	}
-	if got := spec.Maps[kernelTCNatPortsOldMapNameV6].MaxEntries; got != uint32(capacities.NATPorts) {
-		t.Fatalf("%s MaxEntries = %d, want %d", kernelTCNatPortsOldMapNameV6, got, capacities.NATPorts)
+	if got := spec.Maps[kernelTCNatPortsOldMapNameV6].MaxEntries; got != uint32(kernelOldBankPlaceholderEntries) {
+		t.Fatalf("%s MaxEntries = %d, want %d", kernelTCNatPortsOldMapNameV6, got, kernelOldBankPlaceholderEntries)
 	}
 }
 
@@ -75,15 +75,15 @@ func TestApplyKernelMapCapacitiesWithOccupancySetsOptionalXDPFlowBanks(t *testin
 		},
 	}
 
-	capacities, err := applyKernelMapCapacitiesWithOccupancy(spec, 0, 0, 0, 64, kernelRuntimeMapCountSnapshot{}, false, false, false)
+	_, err := applyKernelMapCapacitiesWithOccupancy(spec, 0, 0, 0, 64, kernelRuntimeMapCountSnapshot{}, false, false, false)
 	if err != nil {
 		t.Fatalf("applyKernelMapCapacitiesWithOccupancy() error = %v", err)
 	}
-	if got := spec.Maps[kernelXDPFlowsOldMapNameV4].MaxEntries; got != uint32(capacities.Flows) {
-		t.Fatalf("%s MaxEntries = %d, want %d", kernelXDPFlowsOldMapNameV4, got, capacities.Flows)
+	if got := spec.Maps[kernelXDPFlowsOldMapNameV4].MaxEntries; got != uint32(kernelOldBankPlaceholderEntries) {
+		t.Fatalf("%s MaxEntries = %d, want %d", kernelXDPFlowsOldMapNameV4, got, kernelOldBankPlaceholderEntries)
 	}
-	if got := spec.Maps[kernelXDPFlowsOldMapNameV6].MaxEntries; got != uint32(capacities.Flows) {
-		t.Fatalf("%s MaxEntries = %d, want %d", kernelXDPFlowsOldMapNameV6, got, capacities.Flows)
+	if got := spec.Maps[kernelXDPFlowsOldMapNameV6].MaxEntries; got != uint32(kernelOldBankPlaceholderEntries) {
+		t.Fatalf("%s MaxEntries = %d, want %d", kernelXDPFlowsOldMapNameV6, got, kernelOldBankPlaceholderEntries)
 	}
 }
 

@@ -19,6 +19,8 @@ const (
 
 type Config struct {
 	WebPort                  int             `json:"web_port"`
+	WebBind                  string          `json:"web_bind"`
+	WebUIEnabledSetting      *bool           `json:"web_ui_enabled,omitempty"`
 	WebToken                 string          `json:"web_token"`
 	MaxWorkers               int             `json:"max_workers"`
 	DrainTimeoutHours        int             `json:"drain_timeout_hours"`
@@ -46,6 +48,7 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.WebPort == 0 {
 		cfg.WebPort = 8080
 	}
+	cfg.WebBind = normalizeWebBind(cfg.WebBind)
 	cfg.WebToken = strings.TrimSpace(cfg.WebToken)
 	if cfg.WebToken == "" {
 		return nil, fmt.Errorf("web_token must not be empty")
@@ -75,6 +78,17 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+func normalizeWebBind(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") && len(value) > 2 {
+		value = value[1 : len(value)-1]
+	}
+	if value == "" {
+		return "127.0.0.1"
+	}
+	return value
+}
+
 func (cfg *Config) ExperimentalFeatureEnabled(name string) bool {
 	if cfg == nil {
 		return false
@@ -91,6 +105,13 @@ func (cfg *Config) ManagedNetworkAutoRepairEnabled() bool {
 		return true
 	}
 	return *cfg.ManagedNetworkAutoRepair
+}
+
+func (cfg *Config) WebUIEnabled() bool {
+	if cfg == nil || cfg.WebUIEnabledSetting == nil {
+		return true
+	}
+	return *cfg.WebUIEnabledSetting
 }
 
 func (cfg *Config) EnabledExperimentalFeatures() []string {

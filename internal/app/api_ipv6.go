@@ -31,6 +31,14 @@ func handleListIPv6Assignments(w http.ResponseWriter, r *http.Request, db *sql.D
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces(); err == nil {
+		ifaceByName := buildHostNetworkInterfaceMap(hostIfaces)
+		for i := range items {
+			if resolved, _, resolveErr := resolveIPv6AssignmentForCurrentHost(items[i], ifaceByName); resolveErr == nil {
+				items[i] = resolved
+			}
+		}
+	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	if stats := pm.snapshotIPv6AssignmentRuntimeStats(); len(stats) > 0 {
 		for i := range items {
@@ -83,11 +91,15 @@ func prepareIPv6AssignmentUpdate(db sqlRuleStore, item IPv6Assignment) (IPv6Assi
 	if err != nil {
 		return IPv6Assignment{}, nil, err
 	}
+	ifaceByName := buildHostNetworkInterfaceMap(hostIfaces)
+	if currentItem, _, err := resolveIPv6AssignmentForCurrentHost(item, ifaceByName); err == nil {
+		item = currentItem
+	}
 	existing, err := dbGetEnabledIPv6Assignments(db)
 	if err != nil {
 		return IPv6Assignment{}, nil, err
 	}
-	item, issues := normalizeAndValidateIPv6Assignment(item, "update", true, buildHostNetworkInterfaceMap(hostIfaces), hostIfaces, existing)
+	item, issues := normalizeAndValidateIPv6Assignment(item, "update", true, ifaceByName, hostIfaces, existing)
 	return item, issues, nil
 }
 

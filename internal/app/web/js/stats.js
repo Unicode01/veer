@@ -83,28 +83,32 @@
 
   function statsTargetCellNode(primary, sourceIP, detailText, metaText) {
     if (!primary) return app.emptyCellNode('stat-muted');
-    const node = app.createEndpointNode(primary, sourceIP);
-    const extras = [];
-    if (detailText) {
-      extras.push(app.createNode('span', {
-        className: 'endpoint-secondary',
-        text: detailText
-      }));
-    }
-    if (metaText) {
-      extras.push(app.createNode('span', {
-        className: 'endpoint-secondary',
-        text: metaText
-      }));
-    }
-    if (!extras.length) return node;
-    if (node && node.classList && typeof node.classList.contains === 'function' && node.classList.contains('endpoint-cell')) {
-      extras.forEach((item) => node.appendChild(item));
-      return node;
-    }
+    const subParts = [
+      sourceIP ? app.t('common.sourceShort') + ' ' + sourceIP : '',
+      detailText,
+      metaText
+    ].filter(Boolean);
+    const title = [
+      app.t('stats.target') + ': ' + primary,
+      sourceIP ? app.t('common.sourceShort') + ': ' + sourceIP : '',
+      detailText,
+      metaText
+    ].filter(Boolean).join('\n');
     return app.createNode('div', {
-      className: 'endpoint-cell',
-      children: [node].concat(extras)
+      className: 'stats-target-cell',
+      title: title,
+      children: [
+        app.createNode('span', {
+          className: 'stats-target-main',
+          text: primary
+        }),
+        subParts.length
+          ? app.createNode('span', {
+              className: 'stats-target-sub',
+              text: subParts.join(' · ')
+            })
+          : null
+      ].filter(Boolean)
     });
   }
 
@@ -353,6 +357,38 @@
     return kernelRuntimeTooltipBreakdownRow(detail.label, kernelRuntimeMapTooltipDetailText(detail));
   }
 
+  function kernelRuntimeMapDisplay(item) {
+    const details = Array.isArray(item && item.details) ? item.details : [];
+    let aggregateEntries = 0;
+    let aggregateCapacity = 0;
+    let aggregateOldCapacity = 0;
+    let aggregateUsed = false;
+
+    details.forEach((detail) => {
+      const entries = Number(detail && detail.entries || 0);
+      const capacity = Number(detail && detail.capacity || 0);
+      const oldCapacity = Number(detail && detail.oldCapacity || 0);
+      if (entries > 0 || capacity > 0 || oldCapacity > 0) {
+        aggregateEntries += entries;
+        aggregateCapacity += capacity;
+        aggregateOldCapacity += oldCapacity;
+        aggregateUsed = true;
+      }
+    });
+
+    const rawEntries = Number(item && item.entries || 0);
+    const rawCapacity = Number(item && item.capacity || 0);
+    return {
+      rawEntries: rawEntries,
+      rawCapacity: rawCapacity,
+      entries: aggregateUsed ? aggregateEntries : rawEntries,
+      capacity: aggregateUsed ? aggregateCapacity : rawCapacity,
+      oldCapacity: aggregateOldCapacity,
+      aggregated: aggregateUsed,
+      hasOldBank: aggregateOldCapacity > 0
+    };
+  }
+
   function kernelRuntimeMapBaseLimit(kind, runtimeData) {
     if (!runtimeData) return 0;
     if (kind === 'rules') return Number(runtimeData.kernel_rules_map_base_limit || 0);
@@ -381,7 +417,7 @@
     const mode = kernelRuntimeMapCapacityMode(item.kind, runtimeData);
     const configuredLimit = kernelRuntimeMapConfiguredLimit(item.kind, runtimeData);
     const baseLimit = kernelRuntimeMapBaseLimit(item.kind, runtimeData);
-    const currentCapacity = Number(item && item.capacity || 0);
+    const currentCapacity = kernelRuntimeMapDisplay(item).capacity;
 
     if (mode === 'fixed') {
       return app.t('kernel.maps.tooltip.decision.fixed', {
@@ -410,10 +446,23 @@
     });
   }
 
+  function kernelRuntimeMapOldBankSummary(details) {
+    const activeDetails = Array.isArray(details) ? details : [];
+    const parts = activeDetails.reduce((items, detail) => {
+      const oldCapacity = Number(detail && detail.oldCapacity || 0);
+      if (!(oldCapacity > 0)) return items;
+      const label = String(detail && (detail.shortLabel || detail.label) || '').trim();
+      items.push((label || app.t('common.dash')) + ' ' + String(oldCapacity));
+      return items;
+    }, []);
+    return parts.join(' · ');
+  }
+
   function kernelRuntimeMapInfoRows(item, runtimeData) {
     if (!runtimeData) return [];
 
     const rows = [];
+    const display = kernelRuntimeMapDisplay(item);
     if (runtimeData.kernel_map_profile) {
       rows.push({
         label: app.t('kernel.maps.tooltip.profile'),
@@ -442,12 +491,26 @@
       value: kernelRuntimeMapDecisionText(item, runtimeData)
     });
 
+    if (display.aggregated && (display.rawCapacity !== display.capacity || display.rawEntries !== display.entries)) {
+      rows.push({
+        label: app.t('kernel.maps.tooltip.scope'),
+        value: app.t('kernel.maps.tooltip.scope.families')
+      });
+    }
+    if (display.hasOldBank) {
+      rows.push({
+        label: app.t('kernel.maps.tooltip.oldBank'),
+        value: kernelRuntimeMapOldBankSummary(item.details)
+      });
+    }
+
     return rows;
   }
 
   function kernelRuntimeMapTooltipContent(item, percentText, runtimeData) {
     const details = (Array.isArray(item.details) ? item.details : []).filter((detail) => (detail.capacity || 0) > 0 || (detail.entries || 0) > 0);
     const infoRows = kernelRuntimeMapInfoRows(item, runtimeData);
+    const display = kernelRuntimeMapDisplay(item);
     const nodes = [
       app.createNode('div', {
         className: 'kernel-runtime-tooltip-header',
@@ -464,7 +527,7 @@
       }),
       app.createNode('span', {
         className: 'kernel-runtime-tooltip-meta',
-        text: String(item.entries) + ' / ' + String(item.capacity)
+        text: String(display.entries) + ' / ' + String(display.capacity)
       })
     ];
     if (details.length) {
@@ -546,13 +609,15 @@
             label: app.t('kernel.maps.ipv4'),
             shortLabel: app.t('kernel.maps.ipv4Short'),
             entries: engine.flows_map_entries_v4 || 0,
-            capacity: engine.flows_map_capacity_v4 || 0
+            capacity: engine.flows_map_capacity_v4 || 0,
+            oldCapacity: engine.flows_map_old_capacity_v4 || 0
           },
           {
             label: app.t('kernel.maps.ipv6'),
             shortLabel: app.t('kernel.maps.ipv6Short'),
             entries: engine.flows_map_entries_v6 || 0,
-            capacity: engine.flows_map_capacity_v6 || 0
+            capacity: engine.flows_map_capacity_v6 || 0,
+            oldCapacity: engine.flows_map_old_capacity_v6 || 0
           }
         ]
       }
@@ -569,13 +634,15 @@
             label: app.t('kernel.maps.ipv4'),
             shortLabel: app.t('kernel.maps.ipv4Short'),
             entries: engine.nat_map_entries_v4 || 0,
-            capacity: engine.nat_map_capacity_v4 || 0
+            capacity: engine.nat_map_capacity_v4 || 0,
+            oldCapacity: engine.nat_map_old_capacity_v4 || 0
           },
           {
             label: app.t('kernel.maps.ipv6'),
             shortLabel: app.t('kernel.maps.ipv6Short'),
             entries: engine.nat_map_entries_v6 || 0,
-            capacity: engine.nat_map_capacity_v6 || 0
+            capacity: engine.nat_map_capacity_v6 || 0,
+            oldCapacity: engine.nat_map_old_capacity_v6 || 0
           }
         ]
       });
@@ -583,15 +650,16 @@
 
     const list = app.createNode('div', { className: 'kernel-runtime-map-list' });
     items.forEach((item) => {
-      const percent = kernelRuntimeMapPercent(item.entries, item.capacity);
+      const display = kernelRuntimeMapDisplay(item);
+      const percent = kernelRuntimeMapPercent(display.entries, display.capacity);
       const percentText = formatKernelRuntimePercent(percent);
       const badge = app.createNode('button', {
-        className: 'kernel-runtime-map-badge is-' + kernelRuntimeMapLevel(percent, item.capacity),
+        className: 'kernel-runtime-map-badge is-' + kernelRuntimeMapLevel(percent, display.capacity),
         attrs: {
           type: 'button',
           'aria-describedby': 'kernelRuntimeFloatingTooltip',
           'aria-expanded': 'false',
-          'aria-label': item.label + ' ' + percentText + ' (' + String(item.entries) + '/' + String(item.capacity) + ')'
+          'aria-label': item.label + ' ' + percentText + ' (' + String(display.entries) + '/' + String(display.capacity) + ')'
         },
         children: [
           app.createNode('span', {

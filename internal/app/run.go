@@ -93,7 +93,7 @@ func Main(buildNonce string) {
 
 	pm.redistributeWorkers()
 	pm.startAccepting()
-	pm.ready = true
+	pm.setReady(true)
 
 	apiServer := startAPI(cfg, db, pm)
 
@@ -102,6 +102,7 @@ func Main(buildNonce string) {
 	<-sigCtx.Done()
 
 	log.Println("shutting down...")
+	pm.setReady(false)
 	if apiServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), apiServerShutdownTimeout)
 		if err := apiServer.Shutdown(shutdownCtx); err != nil {

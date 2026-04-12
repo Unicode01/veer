@@ -14,6 +14,9 @@ type kernelMapCapacities struct {
 	NATPorts int
 }
 
+// Keep old-bank map symbols loadable without reserving a full spare bank in steady-state.
+const kernelOldBankPlaceholderEntries = 1
+
 func desiredKernelMapCapacities(rulesConfiguredLimit int, flowsConfiguredLimit int, natConfiguredLimit int, requestedEntries int, includeNAT bool) kernelMapCapacities {
 	return desiredKernelMapCapacitiesWithOccupancy(rulesConfiguredLimit, flowsConfiguredLimit, natConfiguredLimit, requestedEntries, kernelRuntimeMapCountSnapshot{}, includeNAT, false, false)
 }
@@ -67,16 +70,16 @@ func applyKernelMapCapacitiesWithOccupancy(spec *ebpf.CollectionSpec, rulesConfi
 	if err := setKernelCollectionMapCapacity(spec, kernelFlowsMapNameV6, capacities.Flows, false, "kernel IPv6 flows"); err != nil {
 		return kernelMapCapacities{}, err
 	}
-	if err := setKernelCollectionMapCapacity(spec, kernelTCFlowsOldMapNameV4, capacities.Flows, false, "tc old IPv4 flows"); err != nil {
+	if err := setKernelCollectionMapCapacity(spec, kernelTCFlowsOldMapNameV4, kernelOldBankPlaceholderEntries, false, "tc old IPv4 flows"); err != nil {
 		return kernelMapCapacities{}, err
 	}
-	if err := setKernelCollectionMapCapacity(spec, kernelTCFlowsOldMapNameV6, capacities.Flows, false, "tc old IPv6 flows"); err != nil {
+	if err := setKernelCollectionMapCapacity(spec, kernelTCFlowsOldMapNameV6, kernelOldBankPlaceholderEntries, false, "tc old IPv6 flows"); err != nil {
 		return kernelMapCapacities{}, err
 	}
-	if err := setKernelCollectionMapCapacity(spec, kernelXDPFlowsOldMapNameV4, capacities.Flows, false, "xdp old IPv4 flows"); err != nil {
+	if err := setKernelCollectionMapCapacity(spec, kernelXDPFlowsOldMapNameV4, kernelOldBankPlaceholderEntries, false, "xdp old IPv4 flows"); err != nil {
 		return kernelMapCapacities{}, err
 	}
-	if err := setKernelCollectionMapCapacity(spec, kernelXDPFlowsOldMapNameV6, capacities.Flows, false, "xdp old IPv6 flows"); err != nil {
+	if err := setKernelCollectionMapCapacity(spec, kernelXDPFlowsOldMapNameV6, kernelOldBankPlaceholderEntries, false, "xdp old IPv6 flows"); err != nil {
 		return kernelMapCapacities{}, err
 	}
 
@@ -87,10 +90,10 @@ func applyKernelMapCapacitiesWithOccupancy(spec *ebpf.CollectionSpec, rulesConfi
 		if err := setKernelCollectionMapCapacity(spec, kernelNatPortsMapNameV6, capacities.NATPorts, false, "kernel IPv6 nat ports"); err != nil {
 			return kernelMapCapacities{}, err
 		}
-		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV4, capacities.NATPorts, false, "tc old IPv4 nat ports"); err != nil {
+		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV4, kernelOldBankPlaceholderEntries, false, "tc old IPv4 nat ports"); err != nil {
 			return kernelMapCapacities{}, err
 		}
-		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV6, capacities.NATPorts, false, "tc old IPv6 nat ports"); err != nil {
+		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV6, kernelOldBankPlaceholderEntries, false, "tc old IPv6 nat ports"); err != nil {
 			return kernelMapCapacities{}, err
 		}
 	}

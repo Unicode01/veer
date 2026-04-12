@@ -39,6 +39,7 @@ const (
 	ipv6AssignmentIntegrationHelperRoleEnv         = "FORWARD_IPV6_ASSIGNMENT_HELPER_ROLE"
 	ipv6AssignmentIntegrationHelperIfaceEnv        = "FORWARD_IPV6_ASSIGNMENT_HELPER_IFACE"
 	ipv6AssignmentIntegrationHelperExpectedAddrEnv = "FORWARD_IPV6_ASSIGNMENT_HELPER_EXPECTED_ADDR"
+	ipv6AssignmentIntegrationHelperExpectedPrefEnv = "FORWARD_IPV6_ASSIGNMENT_HELPER_EXPECTED_PREFIX"
 	ipv6AssignmentIntegrationHelperTargetEnv       = "FORWARD_IPV6_ASSIGNMENT_HELPER_TARGET"
 	ipv6AssignmentIntegrationHelperListenEnv       = "FORWARD_IPV6_ASSIGNMENT_HELPER_LISTEN"
 	ipv6AssignmentIntegrationHelperParentAddrEnv   = "FORWARD_IPV6_ASSIGNMENT_HELPER_PARENT_ADDR"
@@ -80,6 +81,8 @@ func TestIPv6AssignmentIntegrationHelperProcess(t *testing.T) {
 	switch strings.TrimSpace(os.Getenv(ipv6AssignmentIntegrationHelperRoleEnv)) {
 	case "", "client":
 		err = runIPv6AssignmentIntegrationHelper()
+	case "client-slaac":
+		err = runIPv6AssignmentSLAACIntegrationHelper()
 	case "backend":
 		err = runIPv6AssignmentIntegrationBackendHelper()
 	default:
@@ -504,6 +507,52 @@ func runIPv6AssignmentIntegrationHelper() error {
 	return verifyIPv6AssignmentTCPConnectivity(target, expectedIP, 10*time.Second)
 }
 
+func runIPv6AssignmentSLAACIntegrationHelper() error {
+	ifaceName := strings.TrimSpace(os.Getenv(ipv6AssignmentIntegrationHelperIfaceEnv))
+	expectedPrefixText := strings.TrimSpace(os.Getenv(ipv6AssignmentIntegrationHelperExpectedPrefEnv))
+	if ifaceName == "" {
+		return errors.New("missing helper interface name")
+	}
+	if expectedPrefixText == "" {
+		return errors.New("missing helper expected prefix")
+	}
+
+	iface, srcIP, err := waitForIPv6AssignmentLinkLocal(ifaceName, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	expectedPrefix, err := parseIPv6AssignmentExpectedPrefix(expectedPrefixText)
+	if err != nil {
+		return err
+	}
+	if err := enableIPv6SLAACOnInterface(ifaceName); err != nil {
+		return err
+	}
+
+	icmpConn, err := icmp.ListenPacket("ip6:ipv6-icmp", "::")
+	if err != nil {
+		return fmt.Errorf("listen icmpv6 socket: %w", err)
+	}
+	defer icmpConn.Close()
+	icmpPacketConn := icmpConn.IPv6PacketConn()
+	if err := icmpPacketConn.SetControlMessage(ipv6.FlagInterface, true); err != nil {
+		return fmt.Errorf("enable icmpv6 control messages: %w", err)
+	}
+
+	fmt.Println(ipv6AssignmentIntegrationReadyLine)
+
+	if err := sendIPv6AssignmentRouterSolicitation(*iface, srcIP); err != nil {
+		return fmt.Errorf("send router solicitation: %w", err)
+	}
+	if err := waitForIPv6RouterAdvertisementForPrefix(icmpConn, icmpPacketConn, iface.Index, expectedPrefix, 15*time.Second); err != nil {
+		return err
+	}
+	if _, err := waitForIPv6AddressInPrefix(ifaceName, expectedPrefix, 20*time.Second); err != nil {
+		return err
+	}
+	return nil
+}
+
 func restartIPv6AssignmentIntegrationForward(t *testing.T, cmd *exec.Cmd, forwardBinary string, workDir string, configPath string, apiBase string, logPath string) *exec.Cmd {
 	t.Helper()
 
@@ -659,6 +708,78 @@ func startIPv6AssignmentIntegrationHelperWithExpectedAddr(t *testing.T, topology
 		_ = cmd.Wait()
 		<-scanDone
 		t.Fatalf("ipv6 assignment helper ready timeout\nstdout:\n%s\n\nstderr:\n%s", stdoutBuf.String(), stderrBuf.String())
+	}
+
+	return ipv6AssignmentIntegrationHelperHandle{
+		cmd:      cmd,
+		stdout:   &stdoutBuf,
+		stderr:   &stderrBuf,
+		scanDone: scanDone,
+	}
+}
+
+func startIPv6AssignmentSLAACIntegrationHelperWithExpectedPrefix(t *testing.T, topology dataplanePerfTopology, expectedPrefix string) ipv6AssignmentIntegrationHelperHandle {
+	t.Helper()
+
+	cmd := exec.Command("ip", "netns", "exec", topology.ClientNS, os.Args[0], "-test.run", "TestIPv6AssignmentIntegrationHelperProcess", "-test.v=false")
+	cmd.Env = append(os.Environ(),
+		ipv6AssignmentIntegrationHelperEnv+"=1",
+		ipv6AssignmentIntegrationHelperRoleEnv+"=client-slaac",
+		ipv6AssignmentIntegrationHelperIfaceEnv+"="+topology.ClientNSIF,
+		ipv6AssignmentIntegrationHelperExpectedPrefEnv+"="+strings.TrimSpace(expectedPrefix),
+	)
+
+	var stdoutBuf bytes.Buffer
+	var stderrBuf bytes.Buffer
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("slaac helper stdout pipe: %v", err)
+	}
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start ipv6 assignment slaac helper: %v", err)
+	}
+
+	ready := make(chan error, 1)
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+
+		scanner := bufio.NewScanner(stdoutPipe)
+		signaled := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !signaled && strings.TrimSpace(line) == ipv6AssignmentIntegrationReadyLine {
+				signaled = true
+				ready <- nil
+				continue
+			}
+			stdoutBuf.WriteString(line)
+			stdoutBuf.WriteByte('\n')
+		}
+		if signaled {
+			return
+		}
+		if err := scanner.Err(); err != nil {
+			ready <- err
+			return
+		}
+		ready <- errors.New("ipv6 assignment slaac helper exited before ready")
+	}()
+
+	select {
+	case err := <-ready:
+		if err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			<-scanDone
+			t.Fatalf("ipv6 assignment slaac helper ready: %v\nstdout:\n%s\n\nstderr:\n%s", err, stdoutBuf.String(), stderrBuf.String())
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		<-scanDone
+		t.Fatalf("ipv6 assignment slaac helper ready timeout\nstdout:\n%s\n\nstderr:\n%s", stdoutBuf.String(), stderrBuf.String())
 	}
 
 	return ipv6AssignmentIntegrationHelperHandle{
@@ -1365,6 +1486,163 @@ func waitForManagedIPv6RouterAdvertisement(conn *icmp.PacketConn, packetConn *ip
 		}
 	}
 	return fmt.Errorf("timed out waiting for managed router advertisement on ifindex %d", ifIndex)
+}
+
+func parseIPv6AssignmentExpectedPrefix(prefixText string) (*net.IPNet, error) {
+	_, prefix, err := net.ParseCIDR(strings.TrimSpace(prefixText))
+	if err != nil || prefix == nil || prefix.IP == nil || prefix.IP.To4() != nil {
+		return nil, fmt.Errorf("invalid expected IPv6 prefix %q", prefixText)
+	}
+	return &net.IPNet{
+		IP:   append(net.IP(nil), prefix.IP.Mask(prefix.Mask)...),
+		Mask: append(net.IPMask(nil), prefix.Mask...),
+	}, nil
+}
+
+func enableIPv6SLAACOnInterface(ifaceName string) error {
+	ifaceName = strings.TrimSpace(ifaceName)
+	if ifaceName == "" {
+		return errors.New("interface name is required")
+	}
+	settings := []struct {
+		path  string
+		value string
+	}{
+		{path: "/proc/sys/net/ipv6/conf/all/accept_ra", value: "2\n"},
+		{path: "/proc/sys/net/ipv6/conf/default/accept_ra", value: "2\n"},
+		{path: "/proc/sys/net/ipv6/conf/" + ifaceName + "/accept_ra", value: "2\n"},
+		{path: "/proc/sys/net/ipv6/conf/all/autoconf", value: "1\n"},
+		{path: "/proc/sys/net/ipv6/conf/default/autoconf", value: "1\n"},
+		{path: "/proc/sys/net/ipv6/conf/" + ifaceName + "/autoconf", value: "1\n"},
+		{path: "/proc/sys/net/ipv6/conf/all/accept_ra_pinfo", value: "1\n"},
+		{path: "/proc/sys/net/ipv6/conf/default/accept_ra_pinfo", value: "1\n"},
+		{path: "/proc/sys/net/ipv6/conf/" + ifaceName + "/accept_ra_pinfo", value: "1\n"},
+		{path: "/proc/sys/net/ipv6/conf/all/accept_ra_defrtr", value: "1\n"},
+		{path: "/proc/sys/net/ipv6/conf/default/accept_ra_defrtr", value: "1\n"},
+		{path: "/proc/sys/net/ipv6/conf/" + ifaceName + "/accept_ra_defrtr", value: "1\n"},
+	}
+	for _, item := range settings {
+		if err := os.WriteFile(item.path, []byte(item.value), 0o644); err != nil {
+			return fmt.Errorf("configure slaac sysctl %s: %w", item.path, err)
+		}
+	}
+	return nil
+}
+
+func waitForIPv6RouterAdvertisementForPrefix(conn *icmp.PacketConn, packetConn *ipv6.PacketConn, ifIndex int, expectedPrefix *net.IPNet, timeout time.Duration) error {
+	buf := make([]byte, 2048)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		step := time.Until(deadline)
+		if step > time.Second {
+			step = time.Second
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(step)); err != nil {
+			return fmt.Errorf("set icmpv6 read deadline: %w", err)
+		}
+		n, cm, _, err := packetConn.ReadFrom(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return fmt.Errorf("read icmpv6 router advertisement: %w", err)
+		}
+		if cm != nil && cm.IfIndex > 0 && cm.IfIndex != ifIndex {
+			continue
+		}
+		msg, err := icmp.ParseMessage(58, buf[:n])
+		if err != nil {
+			continue
+		}
+		if msg.Type != ipv6.ICMPTypeRouterAdvertisement {
+			continue
+		}
+		raw, ok := msg.Body.(*icmp.RawBody)
+		if !ok || raw == nil || len(raw.Data) < 12 {
+			continue
+		}
+		if ipv6RouterAdvertisementIncludesPrefix(raw.Data[12:], expectedPrefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("timed out waiting for router advertisement prefix %s on ifindex %d", expectedPrefix.String(), ifIndex)
+}
+
+func ipv6RouterAdvertisementIncludesPrefix(options []byte, expectedPrefix *net.IPNet) bool {
+	if expectedPrefix == nil {
+		return false
+	}
+	expectedIP := expectedPrefix.IP.Mask(expectedPrefix.Mask).To16()
+	if len(expectedIP) != net.IPv6len {
+		return false
+	}
+	expectedOnes, expectedBits := expectedPrefix.Mask.Size()
+	if expectedOnes < 0 || expectedBits != 128 {
+		return false
+	}
+
+	for len(options) >= 2 {
+		optionType := options[0]
+		optionLenUnits := int(options[1])
+		if optionLenUnits == 0 {
+			return false
+		}
+		optionLen := optionLenUnits * 8
+		if optionLen > len(options) {
+			return false
+		}
+		option := options[:optionLen]
+		options = options[optionLen:]
+
+		if optionType != 3 || optionLen < 32 {
+			continue
+		}
+		if int(option[2]) != expectedOnes || option[3]&0xc0 != 0xc0 {
+			continue
+		}
+		prefixIP := net.IP(option[16:32]).Mask(expectedPrefix.Mask).To16()
+		if len(prefixIP) != net.IPv6len {
+			continue
+		}
+		if prefixIP.Equal(expectedIP) {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForIPv6AddressInPrefix(ifaceName string, expectedPrefix *net.IPNet, timeout time.Duration) (net.IP, error) {
+	ifaceName = strings.TrimSpace(ifaceName)
+	if ifaceName == "" {
+		return nil, errors.New("interface name is required")
+	}
+	if expectedPrefix == nil {
+		return nil, errors.New("expected prefix is required")
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		iface, err := net.InterfaceByName(ifaceName)
+		if err == nil && iface != nil {
+			addrs, err := iface.Addrs()
+			if err == nil {
+				for _, raw := range addrs {
+					ipNet, ok := raw.(*net.IPNet)
+					if !ok || ipNet == nil || ipNet.IP == nil {
+						continue
+					}
+					ip := ipNet.IP.To16()
+					if len(ip) != net.IPv6len || ip.To4() != nil || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+						continue
+					}
+					if expectedPrefix.Contains(ip) {
+						return append(net.IP(nil), ip...), nil
+					}
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timed out waiting for ipv6 address in prefix %s on %s", expectedPrefix.String(), ifaceName)
 }
 
 func performIPv6AssignmentDHCPv6Handshake(conn *net.UDPConn, iface net.Interface, srcIP net.IP, clientID []byte, iaid [4]byte, timeout time.Duration) (parsedIPv6AssignmentDHCPv6Response, error) {

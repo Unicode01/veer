@@ -4,7 +4,9 @@ package app
 
 import (
 	"testing"
+	"unsafe"
 
+	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
 
@@ -351,5 +353,92 @@ func TestKernelFlowShouldDeleteUsesProtocolSpecificDatagramIdleTimeout(t *testin
 				t.Fatalf("kernelFlowShouldDelete(proto=%d, age=%d) = %t, want %t", tc.proto, tc.ageNS, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSnapshotXDPKernelLiveStateFromRuntimeMapRefsCountsV4Flows(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 16,
+	})
+
+	replyKey := tcFlowKeyV4{IfIndex: 5, SrcAddr: 10, DstAddr: 20, SrcPort: 1234, DstPort: 20000, Proto: unix.IPPROTO_TCP}
+	replyValue := xdpFlowValueV4{
+		RuleID:     7,
+		Flags:      kernelFlowFlagCounted | kernelFlowFlagFullNAT,
+		NATAddr:    30,
+		NATPort:    20000,
+		LastSeenNS: 2,
+	}
+	if err := flows.Put(replyKey, replyValue); err != nil {
+		t.Fatalf("flows.Put(reply) error = %v", err)
+	}
+
+	frontKey := tcFlowKeyV4{IfIndex: 5, SrcAddr: 11, DstAddr: 21, SrcPort: 2345, DstPort: 10000, Proto: unix.IPPROTO_TCP}
+	frontValue := xdpFlowValueV4{
+		RuleID:     7,
+		Flags:      kernelFlowFlagCounted | kernelFlowFlagFullNAT | kernelFlowFlagFrontEntry,
+		NATAddr:    30,
+		NATPort:    20000,
+		LastSeenNS: 2,
+	}
+	if err := flows.Put(frontKey, frontValue); err != nil {
+		t.Fatalf("flows.Put(front) error = %v", err)
+	}
+
+	live, err := snapshotXDPKernelLiveStateFromRuntimeMapRefs(kernelRuntimeMapRefs{flowsV4: flows})
+	if err != nil {
+		t.Fatalf("snapshotXDPKernelLiveStateFromRuntimeMapRefs() error = %v", err)
+	}
+	if live.FlowEntries != 2 {
+		t.Fatalf("live.FlowEntries = %d, want 2", live.FlowEntries)
+	}
+	if got := live.ByRuleID[7]; got.TCPActiveConns != 1 || got.UDPNatEntries != 0 || got.ICMPNatEntries != 0 {
+		t.Fatalf("live.ByRuleID[7] = %+v, want tcp=1", got)
+	}
+}
+
+func TestPruneStaleXDPFlowsMapDeletesInvalidFlow(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 16,
+	})
+
+	key := tcFlowKeyV4{IfIndex: 5, SrcAddr: 10, DstAddr: 20, SrcPort: 1234, DstPort: 20000, Proto: unix.IPPROTO_TCP}
+	value := xdpFlowValueV4{
+		RuleID:     11,
+		Flags:      kernelFlowFlagCounted | kernelFlowFlagFullNAT,
+		NATAddr:    30,
+		NATPort:    20000,
+		InIfIndex:  5,
+		FrontAddr:  40,
+		ClientAddr: 50,
+		FrontPort:  10000,
+		ClientPort: 1234,
+	}
+	if err := flows.Put(key, value); err != nil {
+		t.Fatalf("flows.Put() error = %v", err)
+	}
+
+	corrections, metrics, err := pruneStaleXDPFlowsMap(nil, flows, &kernelFlowPruneState{}, 1)
+	if err != nil {
+		t.Fatalf("pruneStaleXDPFlowsMap() error = %v", err)
+	}
+	if metrics.Deleted != 1 {
+		t.Fatalf("metrics.Deleted = %d, want 1", metrics.Deleted)
+	}
+	if got := corrections[11]; got.TCPActiveConns != -1 {
+		t.Fatalf("corrections[11] = %+v, want tcp=-1", got)
+	}
+	if count, err := countXDPFlowMapEntries(flows); err != nil {
+		t.Fatalf("countXDPFlowMapEntries() error = %v", err)
+	} else if count != 0 {
+		t.Fatalf("countXDPFlowMapEntries() = %d, want 0", count)
 	}
 }

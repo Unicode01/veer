@@ -727,6 +727,33 @@ func countXDPKernelRuntimeRuleEntries(refs kernelRuntimeMapRefs, _ int) (int, er
 	return total, nil
 }
 
+func countXDPFlowMapEntries(m *ebpf.Map) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	var batchErr error
+	if supported, known := kernelRuntimeBatchLookupSupportForType(m.Type()); !known || supported {
+		count, supported, err := countXDPFlowMapEntriesBatch(m)
+		if err == nil {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), true)
+			return count, nil
+		}
+		if !supported {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), false)
+		} else {
+			batchErr = err
+		}
+	}
+	count, err := countXDPFlowMapEntriesIter(m)
+	if err == nil {
+		return count, nil
+	}
+	if batchErr != nil {
+		return 0, fmt.Errorf("count xdp flow map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
+	}
+	return 0, err
+}
+
 func countKernelFlowMapEntries(m *ebpf.Map) (int, error) {
 	if m == nil {
 		return 0, nil
@@ -781,6 +808,26 @@ func countKernelFlowMapEntriesV6(m *ebpf.Map) (int, error) {
 	return 0, err
 }
 
+func countXDPFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
+	cursor := ebpf.MapBatchCursor{}
+	keys := make([]tcFlowKeyV4, kernelRuntimeMapCountBatchSize)
+	values := make([]xdpFlowValueV4, kernelRuntimeMapCountBatchSize)
+	count := 0
+	for {
+		n, err := m.BatchLookup(&cursor, keys, values, nil)
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
+				return 0, false, nil
+			}
+			return 0, true, err
+		}
+		count += n
+		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
+			return count, true, nil
+		}
+	}
+}
+
 func countKernelFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
 	cursor := ebpf.MapBatchCursor{}
 	keys := make([]tcFlowKeyV4, kernelRuntimeMapCountBatchSize)
@@ -819,6 +866,17 @@ func countKernelFlowMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
 			return count, true, nil
 		}
 	}
+}
+
+func countXDPFlowMapEntriesIter(m *ebpf.Map) (int, error) {
+	iter := m.Iterate()
+	count := 0
+	var key tcFlowKeyV4
+	var value xdpFlowValueV4
+	for iter.Next(&key, &value) {
+		count++
+	}
+	return count, iter.Err()
 }
 
 func countKernelFlowMapEntriesIter(m *ebpf.Map) (int, error) {
@@ -971,6 +1029,21 @@ func (refs kernelRuntimeMapRefs) hasNAT() bool {
 	return refs.natV4 != nil || refs.natV6 != nil || refs.natOldV4 != nil || refs.natOldV6 != nil
 }
 
+func lookupKernelFlowMigrationStateFlags(m *ebpf.Map) (uint32, bool, error) {
+	if m == nil {
+		return 0, false, nil
+	}
+	key := uint32(0)
+	var flags uint32
+	if err := m.Lookup(key, &flags); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, true, nil
+		}
+		return 0, true, err
+	}
+	return flags, true, nil
+}
+
 func kernelRuntimeMapTotalCapacity(maps ...*ebpf.Map) int {
 	total := 0
 	for _, m := range maps {
@@ -986,12 +1059,85 @@ func kernelRuntimeRuleMapCapacity(refs kernelRuntimeMapRefs) int {
 	return kernelRuntimeMapTotalCapacity(refs.rulesV4, refs.rulesV6)
 }
 
+func kernelRuntimeTCOldFlowMigrationFlags(refs kernelRuntimeMapRefs) uint32 {
+	flags, err := tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
+	if err == nil {
+		return flags
+	}
+	flags, err = tcOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
+	if err == nil {
+		return flags
+	}
+	return 0
+}
+
+func kernelRuntimeXDPOldFlowMigrationFlags(refs kernelRuntimeMapRefs) uint32 {
+	flags, err := xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
+	if err == nil {
+		return flags
+	}
+	flags, err = xdpOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
+	if err == nil {
+		return flags
+	}
+	return 0
+}
+
+func kernelRuntimeFlowMapCapacityBreakdown(refs kernelRuntimeMapRefs) (int, int, int, int) {
+	tcFlags := kernelRuntimeTCOldFlowMigrationFlags(refs)
+	xdpFlags := kernelRuntimeXDPOldFlowMigrationFlags(refs)
+
+	activeV4 := kernelRuntimeMapCapacity(refs.flowsV4)
+	oldV4 := 0
+	if tcFlags&tcFlowMigrationFlagV4Old != 0 || xdpFlags&xdpFlowMigrationFlagV4Old != 0 {
+		oldV4 = kernelRuntimeMapCapacity(refs.flowsOldV4)
+	}
+
+	activeV6 := kernelRuntimeMapCapacity(refs.flowsV6)
+	oldV6 := 0
+	if tcFlags&tcFlowMigrationFlagV6Old != 0 || xdpFlags&xdpFlowMigrationFlagV6Old != 0 {
+		oldV6 = kernelRuntimeMapCapacity(refs.flowsOldV6)
+	}
+
+	return activeV4, oldV4, activeV6, oldV6
+}
+
+func kernelRuntimeFlowMapCapacities(refs kernelRuntimeMapRefs) (int, int) {
+	activeV4, oldV4, activeV6, oldV6 := kernelRuntimeFlowMapCapacityBreakdown(refs)
+	return activeV4 + oldV4, activeV6 + oldV6
+}
+
+func kernelRuntimeNATMapCapacityBreakdown(refs kernelRuntimeMapRefs) (int, int, int, int) {
+	tcFlags := kernelRuntimeTCOldFlowMigrationFlags(refs)
+
+	activeV4 := kernelRuntimeMapCapacity(refs.natV4)
+	oldV4 := 0
+	if tcFlags&tcFlowMigrationFlagV4Old != 0 {
+		oldV4 = kernelRuntimeMapCapacity(refs.natOldV4)
+	}
+
+	activeV6 := kernelRuntimeMapCapacity(refs.natV6)
+	oldV6 := 0
+	if tcFlags&tcFlowMigrationFlagV6Old != 0 {
+		oldV6 = kernelRuntimeMapCapacity(refs.natOldV6)
+	}
+
+	return activeV4, oldV4, activeV6, oldV6
+}
+
+func kernelRuntimeNATMapCapacities(refs kernelRuntimeMapRefs) (int, int) {
+	activeV4, oldV4, activeV6, oldV6 := kernelRuntimeNATMapCapacityBreakdown(refs)
+	return activeV4 + oldV4, activeV6 + oldV6
+}
+
 func kernelRuntimeFlowMapCapacity(refs kernelRuntimeMapRefs) int {
-	return kernelRuntimeMapTotalCapacity(refs.flowsV4, refs.flowsV6, refs.flowsOldV4, refs.flowsOldV6)
+	v4, v6 := kernelRuntimeFlowMapCapacities(refs)
+	return v4 + v6
 }
 
 func kernelRuntimeNATMapCapacity(refs kernelRuntimeMapRefs) int {
-	return kernelRuntimeMapTotalCapacity(refs.natV4, refs.natV6, refs.natOldV4, refs.natOldV6)
+	v4, v6 := kernelRuntimeNATMapCapacities(refs)
+	return v4 + v6
 }
 
 func kernelRuntimeMapCapacity(m *ebpf.Map) int {
@@ -1221,22 +1367,38 @@ func countXDPKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRe
 	flowsTotal := 0
 	if refs.flowsV4 == nil {
 		counts.flowsEntriesV4 = 0
-	} else if count, err := countKernelFlowMapEntries(refs.flowsV4); err == nil {
+	} else if count, err := countXDPFlowMapEntries(refs.flowsV4); err == nil {
 		counts.flowsEntriesV4 = count
-		flowsTotal += count
 	} else {
 		flowsExact = false
 		exact = false
 	}
+	if refs.flowsOldV4 != nil {
+		if count, err := countXDPFlowMapEntries(refs.flowsOldV4); err == nil {
+			counts.flowsEntriesV4 += count
+		} else {
+			flowsExact = false
+			exact = false
+		}
+	}
+	flowsTotal += counts.flowsEntriesV4
 	if refs.flowsV6 == nil {
 		counts.flowsEntriesV6 = 0
 	} else if count, err := countKernelFlowMapEntriesV6(refs.flowsV6); err == nil {
 		counts.flowsEntriesV6 = count
-		flowsTotal += count
 	} else {
 		flowsExact = false
 		exact = false
 	}
+	if refs.flowsOldV6 != nil {
+		if count, err := countKernelFlowMapEntriesV6(refs.flowsOldV6); err == nil {
+			counts.flowsEntriesV6 += count
+		} else {
+			flowsExact = false
+			exact = false
+		}
+	}
+	flowsTotal += counts.flowsEntriesV6
 	if refs.hasFlows() && flowsExact {
 		counts.flowsEntries = flowsTotal
 	}
@@ -1408,14 +1570,12 @@ func applyKernelRuntimeMapBreakdown(view *KernelEngineRuntimeView, refs kernelRu
 	view.RulesMapEntriesV6 = counts.rulesEntriesV6
 	view.RulesMapCapacityV6 = kernelRuntimeMapCapacity(refs.rulesV6)
 	view.FlowsMapEntriesV4 = counts.flowsEntriesV4
-	view.FlowsMapCapacityV4 = kernelRuntimeMapTotalCapacity(refs.flowsV4, refs.flowsOldV4)
 	view.FlowsMapEntriesV6 = counts.flowsEntriesV6
-	view.FlowsMapCapacityV6 = kernelRuntimeMapTotalCapacity(refs.flowsV6, refs.flowsOldV6)
+	view.FlowsMapCapacityV4, view.FlowsMapOldCapacityV4, view.FlowsMapCapacityV6, view.FlowsMapOldCapacityV6 = kernelRuntimeFlowMapCapacityBreakdown(refs)
 	if includeNAT {
 		view.NATMapEntriesV4 = counts.natEntriesV4
-		view.NATMapCapacityV4 = kernelRuntimeMapTotalCapacity(refs.natV4, refs.natOldV4)
 		view.NATMapEntriesV6 = counts.natEntriesV6
-		view.NATMapCapacityV6 = kernelRuntimeMapTotalCapacity(refs.natV6, refs.natOldV6)
+		view.NATMapCapacityV4, view.NATMapOldCapacityV4, view.NATMapCapacityV6, view.NATMapOldCapacityV6 = kernelRuntimeNATMapCapacityBreakdown(refs)
 	}
 }
 

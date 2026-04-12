@@ -97,6 +97,68 @@ func TestHandleListIPv6AssignmentsIncludesRuntimeStats(t *testing.T) {
 	}
 }
 
+func TestHandleListIPv6AssignmentsRebasesCurrentHostPrefixes(t *testing.T) {
+	db := openTestDB(t)
+
+	id, err := dbAddIPv6Assignment(db, &IPv6Assignment{
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap100i0",
+		ParentPrefix:    "2001:db8:100::/64",
+		AssignedPrefix:  "2001:db8:100::1234/128",
+		Enabled:         true,
+	})
+	if err != nil {
+		t.Fatalf("seed assignment: %v", err)
+	}
+
+	oldLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return []HostNetworkInterface{
+			{
+				Name: "vmbr0",
+				Addresses: []HostInterfaceAddress{
+					{Family: ipFamilyIPv6, IP: "2001:db8:200::1", CIDR: "2001:db8:200::/64", PrefixLen: 64},
+				},
+			},
+			{Name: "tap100i0"},
+		}, nil
+	}
+	defer func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldLoad
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/ipv6-assignments", nil)
+	w := httptest.NewRecorder()
+
+	handleListIPv6Assignments(w, req, db, &ProcessManager{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var items []IPv6Assignment
+	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0].ID != id {
+		t.Fatalf("items[0].ID = %d, want %d", items[0].ID, id)
+	}
+	if items[0].ParentPrefix != "2001:db8:200::/64" {
+		t.Fatalf("items[0].ParentPrefix = %q, want 2001:db8:200::/64", items[0].ParentPrefix)
+	}
+	if items[0].AssignedPrefix != "2001:db8:200::1234/128" {
+		t.Fatalf("items[0].AssignedPrefix = %q, want 2001:db8:200::1234/128", items[0].AssignedPrefix)
+	}
+	if items[0].Address != "2001:db8:200::1234" {
+		t.Fatalf("items[0].Address = %q, want 2001:db8:200::1234", items[0].Address)
+	}
+	if items[0].PrefixLen != 128 {
+		t.Fatalf("items[0].PrefixLen = %d, want 128", items[0].PrefixLen)
+	}
+}
+
 func TestHandleAddIPv6AssignmentPersistsCanonicalItem(t *testing.T) {
 	db := openTestDB(t)
 
@@ -499,6 +561,92 @@ func TestHandleUpdateIPv6AssignmentQueuesRedistribute(t *testing.T) {
 	}
 	if !pm.redistributePending {
 		t.Fatal("redistributePending = false, want true after successful update")
+	}
+}
+
+func TestHandleUpdateIPv6AssignmentRebasesStaleParentPrefixToCurrentHost(t *testing.T) {
+	db := openTestDB(t)
+
+	id, err := dbAddIPv6Assignment(db, &IPv6Assignment{
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap100i0",
+		ParentPrefix:    "2001:db8:100::/64",
+		AssignedPrefix:  "2001:db8:100::1234/128",
+		Remark:          "before rotate",
+		Enabled:         true,
+	})
+	if err != nil {
+		t.Fatalf("seed assignment: %v", err)
+	}
+
+	oldLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return []HostNetworkInterface{
+			{
+				Name: "vmbr0",
+				Addresses: []HostInterfaceAddress{
+					{Family: ipFamilyIPv6, IP: "2001:db8:200::1", CIDR: "2001:db8:200::/64", PrefixLen: 64},
+				},
+			},
+			{Name: "tap100i0"},
+		}, nil
+	}
+	defer func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldLoad
+	}()
+
+	req := newJSONRequest(t, http.MethodPut, "/api/ipv6-assignments", IPv6Assignment{
+		ID:              id,
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap100i0",
+		ParentPrefix:    "2001:db8:100::/64",
+		AssignedPrefix:  "2001:db8:100::1234/128",
+		Remark:          "after rotate",
+		Enabled:         false,
+	})
+	w := httptest.NewRecorder()
+	pm := &ProcessManager{}
+
+	handleUpdateIPv6Assignment(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if !pm.redistributePending {
+		t.Fatal("redistributePending = false, want true after successful update")
+	}
+
+	var item IPv6Assignment
+	if err := json.Unmarshal(w.Body.Bytes(), &item); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if item.ParentPrefix != "2001:db8:200::/64" {
+		t.Fatalf("item.ParentPrefix = %q, want 2001:db8:200::/64", item.ParentPrefix)
+	}
+	if item.AssignedPrefix != "2001:db8:200::1234/128" {
+		t.Fatalf("item.AssignedPrefix = %q, want 2001:db8:200::1234/128", item.AssignedPrefix)
+	}
+	if item.Address != "2001:db8:200::1234" {
+		t.Fatalf("item.Address = %q, want 2001:db8:200::1234", item.Address)
+	}
+	if item.Remark != "after rotate" {
+		t.Fatalf("item.Remark = %q, want after rotate", item.Remark)
+	}
+	if item.Enabled {
+		t.Fatal("item.Enabled = true, want false")
+	}
+
+	stored, err := dbGetIPv6Assignment(db, id)
+	if err != nil {
+		t.Fatalf("dbGetIPv6Assignment() error = %v", err)
+	}
+	if stored.ParentPrefix != "2001:db8:200::/64" {
+		t.Fatalf("stored.ParentPrefix = %q, want 2001:db8:200::/64", stored.ParentPrefix)
+	}
+	if stored.AssignedPrefix != "2001:db8:200::1234/128" {
+		t.Fatalf("stored.AssignedPrefix = %q, want 2001:db8:200::1234/128", stored.AssignedPrefix)
+	}
+	if stored.Address != "2001:db8:200::1234" {
+		t.Fatalf("stored.Address = %q, want 2001:db8:200::1234", stored.Address)
 	}
 }
 

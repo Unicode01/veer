@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -111,12 +112,65 @@ type statsListQuery struct {
 const maxStatsPageSize = 500
 
 func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) *http.Server {
+	addr := apiListenAddr(cfg)
+	handler := buildAPIHandler(cfg, db, pm)
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: apiServerReadHeaderTimeout,
+		ReadTimeout:       apiServerReadTimeout,
+		WriteTimeout:      apiServerWriteTimeout,
+		IdleTimeout:       apiServerIdleTimeout,
+		MaxHeaderBytes:    apiServerMaxHeaderBytes,
+	}
+	go func() {
+		log.Printf("web server listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("http server: %v", err)
+		}
+	}()
+	return server
+}
+
+func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		ready := pm.isReady()
+		statusCode := http.StatusServiceUnavailable
+		status := "starting"
+		if ready {
+			statusCode = http.StatusOK
+			status = "ready"
+		}
+		writeJSON(w, statusCode, map[string]interface{}{
+			"status": status,
+			"ready":  ready,
+		})
+	})
+
+	webUIEnabled := cfg.WebUIEnabled()
 	webSub, _ := fs.Sub(webFS, "web")
 	staticFileServer := http.FileServer(http.FS(webSub))
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+		if !webUIEnabled {
 			http.NotFound(w, r)
 			return
 		}
@@ -334,24 +388,19 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) *http.Server {
 		}
 		handleListCurrentConns(w, r, db, pm)
 	}))
+	return securityHeadersMiddleware(mux)
+}
 
-	addr := fmt.Sprintf(":%d", cfg.WebPort)
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           securityHeadersMiddleware(mux),
-		ReadHeaderTimeout: apiServerReadHeaderTimeout,
-		ReadTimeout:       apiServerReadTimeout,
-		WriteTimeout:      apiServerWriteTimeout,
-		IdleTimeout:       apiServerIdleTimeout,
-		MaxHeaderBytes:    apiServerMaxHeaderBytes,
-	}
-	go func() {
-		log.Printf("web server listening on %s", addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http server: %v", err)
+func apiListenAddr(cfg *Config) string {
+	bind := normalizeWebBind("")
+	port := 8080
+	if cfg != nil {
+		bind = normalizeWebBind(cfg.WebBind)
+		if cfg.WebPort > 0 {
+			port = cfg.WebPort
 		}
-	}()
-	return server
+	}
+	return net.JoinHostPort(bind, strconv.Itoa(port))
 }
 
 func securityHeadersMiddleware(next http.Handler) http.Handler {

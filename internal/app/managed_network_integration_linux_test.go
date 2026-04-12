@@ -48,6 +48,9 @@ const (
 	managedNetworkIntegrationIPv4PoolStart         = "10.0.0.100"
 	managedNetworkIntegrationIPv4PoolEnd           = "10.0.0.150"
 	managedNetworkIntegrationName                  = "managed-network-integration"
+	managedNetworkIntegrationIPv6Prefix64Parent    = "2001:db8:300::/60"
+	managedNetworkIntegrationIPv6Prefix64HostAddr  = "2001:db8:300::1"
+	managedNetworkIntegrationIPv6Prefix64PeerAddr  = "2001:db8:300::2"
 )
 
 func TestManagedNetworkIntegrationHelperProcess(t *testing.T) {
@@ -142,6 +145,66 @@ func TestManagedNetworkIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := waitForIPv6AssignmentIntegrationHelper(backendHelper, 5*time.Second); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+}
+
+func TestManagedNetworkIntegrationDelegatedPrefixSLAAC(t *testing.T) {
+	if os.Getenv(managedNetworkIntegrationEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux managed network integration test", managedNetworkIntegrationEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+
+	harness := startEgressNATIntegrationHarness(t, "managed-network-prefix64-slaac")
+	topology := harness.Topology
+	perfTopology := dataplanePerfTopology{
+		ClientNS:      topology.ClientNS,
+		BackendNS:     topology.BackendNS,
+		ClientHostIF:  topology.ChildHostIF,
+		ClientNSIF:    topology.ClientNSIF,
+		BackendHostIF: topology.UplinkHostIF,
+		BackendNSIF:   topology.BackendNSIF,
+	}
+
+	prepareManagedNetworkIntegrationClientNamespace(t, topology)
+	mustEnsureIPv6AssignmentAddress(t, perfTopology.BackendHostIF, managedNetworkIntegrationIPv6Prefix64HostAddr+"/60")
+	mustEnsureManagedNetworkIntegrationIPv6AddressInNamespace(t, perfTopology.BackendNS, perfTopology.BackendNSIF, managedNetworkIntegrationIPv6Prefix64PeerAddr+"/60")
+	mustEnsureManagedNetworkIntegrationIPv6DefaultRouteInNamespace(t, perfTopology.BackendNS, perfTopology.BackendNSIF, managedNetworkIntegrationIPv6Prefix64HostAddr)
+	seedIPv6AssignmentIntegrationBackendNeighborsForAddresses(t, perfTopology, managedNetworkIntegrationIPv6Prefix64HostAddr, managedNetworkIntegrationIPv6Prefix64PeerAddr)
+
+	network := createManagedNetworkIntegrationNetworkWithIPv6Settings(
+		t,
+		harness.APIBase,
+		topology,
+		managedNetworkIntegrationIPv6Prefix64Parent,
+		managedNetworkIPv6AssignmentModePrefix64,
+	)
+	managedIPv6 := mustBuildManagedNetworkIntegrationIPv6Assignment(t, network, topology.ChildHostIF)
+	clientMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
+	createManagedNetworkIntegrationReservation(t, harness.APIBase, network.ID, clientMAC, managedNetworkIntegrationIPv4Lease)
+	waitForManagedNetworkIntegrationReady(t, harness.APIBase, network.ID, topology)
+	seedEgressNATIntegrationNeighbor(t, topology)
+	waitForManagedNetworkIntegrationAutoEgressNATReady(t, harness.APIBase, harness.LogPath, "initial apply")
+	if err := waitForManagedNetworkIntegrationIPv4Address(topology.BridgeIF, managedNetworkIntegrationIPv4CIDR, 15*time.Second); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+	if err := waitForIPv6AssignmentRouteForPrefix(perfTopology, managedIPv6.AssignedPrefix); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+
+	ipv6Helper := startIPv6AssignmentSLAACIntegrationHelperWithExpectedPrefix(t, perfTopology, managedIPv6.AssignedPrefix)
+	if err := waitForIPv6AssignmentIntegrationHelper(ipv6Helper, 25*time.Second); err != nil {
 		logForwardLogOnFailure(t, harness.LogPath)
 		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
 		t.Fatal(err)
@@ -543,6 +606,14 @@ func restartManagedNetworkIntegrationForward(t *testing.T, harness *egressNATInt
 }
 
 func createManagedNetworkIntegrationNetwork(t *testing.T, apiBase string, topology egressNATIntegrationTopology) ManagedNetwork {
+	return createManagedNetworkIntegrationNetworkWithIPv6Settings(t, apiBase, topology, ipv6AssignmentIntegrationParentPrefix, managedNetworkIPv6AssignmentModeSingle128)
+}
+
+func createManagedNetworkIntegrationNetworkWithIPv6Mode(t *testing.T, apiBase string, topology egressNATIntegrationTopology, ipv6AssignmentMode string) ManagedNetwork {
+	return createManagedNetworkIntegrationNetworkWithIPv6Settings(t, apiBase, topology, ipv6AssignmentIntegrationParentPrefix, ipv6AssignmentMode)
+}
+
+func createManagedNetworkIntegrationNetworkWithIPv6Settings(t *testing.T, apiBase string, topology egressNATIntegrationTopology, ipv6ParentPrefix string, ipv6AssignmentMode string) ManagedNetwork {
 	t.Helper()
 
 	payload := ManagedNetwork{
@@ -557,8 +628,8 @@ func createManagedNetworkIntegrationNetwork(t *testing.T, apiBase string, topolo
 		IPv4DNSServers:      "1.1.1.1",
 		IPv6Enabled:         true,
 		IPv6ParentInterface: topology.UplinkHostIF,
-		IPv6ParentPrefix:    ipv6AssignmentIntegrationParentPrefix,
-		IPv6AssignmentMode:  managedNetworkIPv6AssignmentModeSingle128,
+		IPv6ParentPrefix:    strings.TrimSpace(ipv6ParentPrefix),
+		IPv6AssignmentMode:  normalizeManagedNetworkIPv6AssignmentMode(ipv6AssignmentMode),
 		AutoEgressNAT:       true,
 	}
 	data, err := json.Marshal(payload)

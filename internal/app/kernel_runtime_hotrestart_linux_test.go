@@ -478,6 +478,104 @@ func TestConfigureTCFlowMigrationStateWritesArrayValue(t *testing.T) {
 	}
 }
 
+func TestTCEffectiveOldFlowMigrationFlagsFromRuntimeMapRefsUsesMigrationState(t *testing.T) {
+	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowMigrationStateMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+
+	want := uint32(tcFlowMigrationFlagV4Old)
+	if err := flowState.Put(uint32(0), want); err != nil {
+		t.Fatalf("flowState.Put() error = %v", err)
+	}
+
+	flags, err := tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{tcFlowMigrationState: flowState})
+	if err != nil {
+		t.Fatalf("tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs() error = %v", err)
+	}
+	if flags != want {
+		t.Fatalf("flags = %#x, want %#x", flags, want)
+	}
+}
+
+func TestKernelRuntimeMapCapacityUsesTCMigrationState(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 64,
+	})
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 32,
+	})
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 40,
+	})
+	natOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCNatPortsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 20,
+	})
+	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowMigrationStateMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+
+	refs := kernelRuntimeMapRefs{
+		flowsV4:              flows,
+		flowsOldV4:           flowsOld,
+		natV4:                nat,
+		natOldV4:             natOld,
+		tcFlowMigrationState: flowState,
+	}
+
+	if got := kernelRuntimeFlowMapCapacity(refs); got != 64 {
+		t.Fatalf("kernelRuntimeFlowMapCapacity(inactive old bank) = %d, want 64", got)
+	}
+	if got := kernelRuntimeNATMapCapacity(refs); got != 40 {
+		t.Fatalf("kernelRuntimeNATMapCapacity(inactive old bank) = %d, want 40", got)
+	}
+
+	var view KernelEngineRuntimeView
+	applyKernelRuntimeMapBreakdown(&view, refs, kernelRuntimeMapCountSnapshot{}, true)
+	if view.FlowsMapCapacityV4 != 64 || view.FlowsMapOldCapacityV4 != 0 || view.NATMapCapacityV4 != 40 || view.NATMapOldCapacityV4 != 0 {
+		t.Fatalf("inactive old-bank breakdown = %+v, want flow_v4=64 flow_old_v4=0 nat_v4=40 nat_old_v4=0", view)
+	}
+
+	if err := flowState.Put(uint32(0), uint32(tcFlowMigrationFlagV4Old)); err != nil {
+		t.Fatalf("flowState.Put(active) error = %v", err)
+	}
+	if got := kernelRuntimeFlowMapCapacity(refs); got != 96 {
+		t.Fatalf("kernelRuntimeFlowMapCapacity(active old bank) = %d, want 96", got)
+	}
+	if got := kernelRuntimeNATMapCapacity(refs); got != 60 {
+		t.Fatalf("kernelRuntimeNATMapCapacity(active old bank) = %d, want 60", got)
+	}
+
+	view = KernelEngineRuntimeView{}
+	applyKernelRuntimeMapBreakdown(&view, refs, kernelRuntimeMapCountSnapshot{}, true)
+	if view.FlowsMapCapacityV4 != 64 || view.FlowsMapOldCapacityV4 != 32 || view.NATMapCapacityV4 != 40 || view.NATMapOldCapacityV4 != 20 {
+		t.Fatalf("active old-bank breakdown = %+v, want flow_v4=64 flow_old_v4=32 nat_v4=40 nat_old_v4=20", view)
+	}
+}
+
 func TestLoadXDPKernelHotRestartStatePromotesActiveMapsToOldBank(t *testing.T) {
 	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
 	runtimeRoot := t.TempDir()
@@ -490,7 +588,7 @@ func TestLoadXDPKernelHotRestartStatePromotesActiveMapsToOldBank(t *testing.T) {
 		Name:       kernelFlowsMapName,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
-		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
 		MaxEntries: 64,
 	})
 	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
@@ -550,14 +648,14 @@ func TestLoadXDPKernelHotRestartStateKeepsExistingXDPBanks(t *testing.T) {
 		Name:       kernelFlowsMapName,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
-		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
 		MaxEntries: 64,
 	})
 	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
 		Name:       kernelXDPFlowsOldMapNameV4,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
-		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
 		MaxEntries: 32,
 	})
 	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
@@ -611,7 +709,7 @@ func TestXDPOldFlowMigrationFlagsFromRuntimeMapRefsTracksOldBankOccupancy(t *tes
 		Name:       kernelXDPFlowsOldMapNameV4,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
-		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
 		MaxEntries: 8,
 	})
 
@@ -624,7 +722,7 @@ func TestXDPOldFlowMigrationFlagsFromRuntimeMapRefsTracksOldBankOccupancy(t *tes
 	}
 
 	key := tcFlowKeyV4{IfIndex: 1, SrcAddr: 0x0a000001, DstAddr: 0x0a000002, SrcPort: 12345, DstPort: 80, Proto: unix.IPPROTO_TCP}
-	value := tcFlowValueV4{RuleID: 7, NATAddr: 0x0a000003, NATPort: 20001}
+	value := xdpFlowValueV4{RuleID: 7, NATAddr: 0x0a000003, NATPort: 20001}
 	if err := flowsOld.Put(key, value); err != nil {
 		t.Fatalf("flowsOld.Put() error = %v", err)
 	}
@@ -632,6 +730,46 @@ func TestXDPOldFlowMigrationFlagsFromRuntimeMapRefsTracksOldBankOccupancy(t *tes
 	flags, err = xdpOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{flowsOldV4: flowsOld})
 	if err != nil {
 		t.Fatalf("xdpOldFlowMigrationFlagsFromRuntimeMapRefs(populated) error = %v", err)
+	}
+	if flags != xdpFlowMigrationFlagV4Old {
+		t.Fatalf("flags(populated) = %#x, want %#x", flags, xdpFlowMigrationFlagV4Old)
+	}
+}
+
+func TestXDPOldFlowMigrationFlagsFromCollectionTracksOldBankOccupancy(t *testing.T) {
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 8,
+	})
+
+	flags, err := xdpOldFlowMigrationFlagsFromCollection(&ebpf.Collection{
+		Maps: map[string]*ebpf.Map{
+			kernelXDPFlowsOldMapNameV4: flowsOld,
+		},
+	})
+	if err != nil {
+		t.Fatalf("xdpOldFlowMigrationFlagsFromCollection(empty) error = %v", err)
+	}
+	if flags != 0 {
+		t.Fatalf("flags(empty) = %#x, want 0", flags)
+	}
+
+	key := tcFlowKeyV4{IfIndex: 1, SrcAddr: 0x0a000001, DstAddr: 0x0a000002, SrcPort: 12345, DstPort: 80, Proto: unix.IPPROTO_TCP}
+	value := xdpFlowValueV4{RuleID: 7, NATAddr: 0x0a000003, NATPort: 20001}
+	if err := flowsOld.Put(key, value); err != nil {
+		t.Fatalf("flowsOld.Put() error = %v", err)
+	}
+
+	flags, err = xdpOldFlowMigrationFlagsFromCollection(&ebpf.Collection{
+		Maps: map[string]*ebpf.Map{
+			kernelXDPFlowsOldMapNameV4: flowsOld,
+		},
+	})
+	if err != nil {
+		t.Fatalf("xdpOldFlowMigrationFlagsFromCollection(populated) error = %v", err)
 	}
 	if flags != xdpFlowMigrationFlagV4Old {
 		t.Fatalf("flags(populated) = %#x, want %#x", flags, xdpFlowMigrationFlagV4Old)
@@ -658,6 +796,75 @@ func TestConfigureXDPFlowMigrationStateWritesArrayValue(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("flow migration state = %#x, want %#x", got, want)
+	}
+}
+
+func TestXDPEffectiveOldFlowMigrationFlagsFromRuntimeMapRefsUsesMigrationState(t *testing.T) {
+	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowMigrationStateMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+
+	want := uint32(xdpFlowMigrationFlagV4Old)
+	if err := flowState.Put(uint32(0), want); err != nil {
+		t.Fatalf("flowState.Put() error = %v", err)
+	}
+
+	flags, err := xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{xdpFlowMigrationState: flowState})
+	if err != nil {
+		t.Fatalf("xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs() error = %v", err)
+	}
+	if flags != want {
+		t.Fatalf("flags = %#x, want %#x", flags, want)
+	}
+}
+
+func TestKernelRuntimeFlowMapCapacityUsesXDPMigrationState(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 64,
+	})
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 32,
+	})
+	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowMigrationStateMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+
+	refs := kernelRuntimeMapRefs{
+		flowsV4:               flows,
+		flowsOldV4:            flowsOld,
+		xdpFlowMigrationState: flowState,
+	}
+
+	if got := kernelRuntimeFlowMapCapacity(refs); got != 64 {
+		t.Fatalf("kernelRuntimeFlowMapCapacity(inactive xdp old bank) = %d, want 64", got)
+	}
+	if err := flowState.Put(uint32(0), uint32(xdpFlowMigrationFlagV4Old)); err != nil {
+		t.Fatalf("flowState.Put(active) error = %v", err)
+	}
+	if got := kernelRuntimeFlowMapCapacity(refs); got != 96 {
+		t.Fatalf("kernelRuntimeFlowMapCapacity(active xdp old bank) = %d, want 96", got)
+	}
+
+	var view KernelEngineRuntimeView
+	applyKernelRuntimeMapBreakdown(&view, refs, kernelRuntimeMapCountSnapshot{}, false)
+	if view.FlowsMapCapacityV4 != 64 || view.FlowsMapOldCapacityV4 != 32 {
+		t.Fatalf("active xdp old-bank breakdown = %+v, want flow_v4=64 flow_old_v4=32", view)
 	}
 }
 

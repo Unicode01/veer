@@ -1,4 +1,6 @@
 {
+  "web_bind": "127.0.0.1",
+  "web_ui_enabled": true,
   "web_port": 8080,
   "web_token": "change-me-to-a-secure-token",
   "max_workers": 0,
@@ -12,6 +14,8 @@
   "kernel_rules_map_limit": 0,
   "kernel_flows_map_limit": 0,
   "kernel_nat_ports_map_limit": 0,
+  "kernel_nat_port_min": 20000,
+  "kernel_nat_port_max": 65535,
   "experimental_features": {
     "bridge_xdp": false,
     "xdp_generic": false,
