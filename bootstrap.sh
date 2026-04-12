@@ -249,6 +249,7 @@ install_apt_deps() {
         clang \
         llvm \
         linux-libc-dev \
+        python3 \
         xz-utils
     ok "系统依赖安装完成"
 }

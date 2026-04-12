@@ -479,6 +479,7 @@ log_explicit_config_overrides() {
 
 rollback_update() {
     local reason="$1"
+    local rollback_ready_url="${API_READY_URL}"
 
     warn "${reason}"
     if [[ ! -f "${BINARY_BACKUP_PATH}" ]]; then
@@ -499,7 +500,15 @@ rollback_update() {
         PRESERVE_HOT_RESTART_MARKERS_ON_EXIT=1
         fail "回滚后的服务重启失败；查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
     fi
-    if wait_for_service_ready "${API_READY_URL}" 30; then
+    if [[ -f "${INSTALL_DIR}/config.json" ]]; then
+        if rollback_env="$(load_config_runtime_values "${INSTALL_DIR}/config.json")"; then
+            eval "${rollback_env}"
+            rollback_ready_url="$(compute_ready_url "$WEB_BIND" "$WEB_PORT")"
+        else
+            warn "回滚配置解析失败，继续使用当前 readyz 探针"
+        fi
+    fi
+    if wait_for_service_ready "${rollback_ready_url}" 30; then
         fail "新版本部署失败，已自动回滚到上一版本"
     fi
     PRESERVE_HOT_RESTART_MARKERS_ON_EXIT=1
