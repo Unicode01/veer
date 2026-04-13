@@ -2,7 +2,9 @@ package app
 
 import (
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type fakeManagedNetworkNetOps struct {
@@ -14,6 +16,10 @@ type fakeManagedNetworkNetOps struct {
 	ensureDHCPv4         []managedNetworkDHCPv4Config
 	deleteDHCPv4         []string
 	snapshotStates       map[string]managedNetworkDHCPv4RuntimeState
+	deleteDHCPv4Delay    time.Duration
+	deleteDHCPv4Mu       sync.Mutex
+	deleteDHCPv4Active   int
+	deleteDHCPv4Max      int
 }
 
 func (ops *fakeManagedNetworkNetOps) EnsureIPv4ForwardingEnabled() error {
@@ -47,7 +53,23 @@ func (ops *fakeManagedNetworkNetOps) EnsureManagedNetworkDHCPv4(config managedNe
 }
 
 func (ops *fakeManagedNetworkNetOps) DeleteManagedNetworkDHCPv4(bridge string) error {
+	ops.deleteDHCPv4Mu.Lock()
 	ops.deleteDHCPv4 = append(ops.deleteDHCPv4, bridge)
+	ops.deleteDHCPv4Mu.Unlock()
+	if ops.deleteDHCPv4Delay > 0 {
+		ops.deleteDHCPv4Mu.Lock()
+		ops.deleteDHCPv4Active++
+		if ops.deleteDHCPv4Active > ops.deleteDHCPv4Max {
+			ops.deleteDHCPv4Max = ops.deleteDHCPv4Active
+		}
+		ops.deleteDHCPv4Mu.Unlock()
+		defer func() {
+			ops.deleteDHCPv4Mu.Lock()
+			ops.deleteDHCPv4Active--
+			ops.deleteDHCPv4Mu.Unlock()
+		}()
+		time.Sleep(ops.deleteDHCPv4Delay)
+	}
 	return nil
 }
 
@@ -187,6 +209,35 @@ func TestManagedIPv4NetworkRuntimeSnapshotStatusRefreshesLiveDHCPState(t *testin
 	status = rt.SnapshotStatus()
 	if status[1].RuntimeStatus != "running" || status[1].RuntimeDetail != "listening for dhcpv4 (replies=2)" || status[1].DHCPv4ReplyCount != 2 {
 		t.Fatalf("refreshed status = %+v, want live dhcp state", status[1])
+	}
+}
+
+func TestManagedIPv4NetworkRuntimeCloseStopsDHCPv4InParallel(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeManagedNetworkNetOps{deleteDHCPv4Delay: 150 * time.Millisecond}
+	rt := newManagedIPv4NetworkRuntime(ops)
+	typed, ok := rt.(*managedIPv4NetworkRuntime)
+	if !ok {
+		t.Fatalf("runtime type = %T, want *managedIPv4NetworkRuntime", rt)
+	}
+	typed.dhcpv4 = map[string]managedNetworkDHCPv4Config{
+		"vmbr0": {Bridge: "vmbr0"},
+		"vmbr1": {Bridge: "vmbr1"},
+		"vmbr2": {Bridge: "vmbr2"},
+	}
+
+	start := time.Now()
+	if err := typed.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if ops.deleteDHCPv4Max < 2 {
+		t.Fatalf("DeleteManagedNetworkDHCPv4 max concurrency = %d, want >= 2", ops.deleteDHCPv4Max)
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Fatalf("Close() took %s, want parallel shutdown under 300ms", elapsed)
 	}
 }
 

@@ -777,3 +777,278 @@ func TestManagedRuntimeReloadLoopManualReloadSkipsAutoRepair(t *testing.T) {
 		t.Fatalf("repairCalls = %d, want 0 for manual reload", repairCalls)
 	}
 }
+
+func TestManagedRuntimeReloadLoopAddrChangeSkipsAutoRepair(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:          "lab",
+		BridgeMode:    managedNetworkBridgeModeCreate,
+		Bridge:        "vmbr1",
+		IPv4Enabled:   true,
+		IPv4CIDR:      "192.0.2.1/24",
+		IPv4PoolEnd:   "192.0.2.20",
+		IPv4PoolStart: "192.0.2.10",
+		Enabled:       true,
+	}); err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	oldRepair := repairManagedNetworkHostStateForTests
+	repairCalls := 0
+	repairManagedNetworkHostStateForTests = func(items []ManagedNetwork) (managedNetworkRepairResult, error) {
+		repairCalls++
+		return managedNetworkRepairResult{Bridges: []string{"vmbr1"}}, nil
+	}
+	defer func() {
+		repairManagedNetworkHostStateForTests = oldRepair
+	}()
+
+	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                       db,
+		cfg:                      &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:    fakeManagedRuntime,
+		ipv6Runtime:              fakeIPv6Runtime,
+		shutdownCh:               make(chan struct{}),
+		managedRuntimeReloadWake: make(chan struct{}, 1),
+		managedRuntimeReloadDone: make(chan struct{}),
+		redistributeWake:         make(chan struct{}, 1),
+	}
+
+	go pm.managedRuntimeReloadLoop()
+	t.Cleanup(func() {
+		pm.beginShutdown()
+		if !waitForStopChannel(pm.managedRuntimeReloadDone, time.Second) {
+			t.Fatal("managedRuntimeReloadDone did not close during cleanup")
+		}
+	})
+
+	pm.requestManagedNetworkRuntimeReloadWithSource(0, "addr_change", "vmbr1")
+
+	waitForManagedNetworkReloadCondition(t, 2*time.Second, func() bool {
+		status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+		return status.LastResult == "success" && fakeManagedRuntime.reconcileCalls == 1
+	}, "address-triggered managed runtime reload success")
+
+	if repairCalls != 0 {
+		t.Fatalf("repairCalls = %d, want 0 for address-triggered reload", repairCalls)
+	}
+}
+
+func TestManagedRuntimeReloadLoopAddrChangeSkipsUnchangedEffectiveState(t *testing.T) {
+	db := openTestDB(t)
+
+	network := ManagedNetwork{
+		Name:          "lab",
+		BridgeMode:    managedNetworkBridgeModeCreate,
+		Bridge:        "vmbr1",
+		IPv4Enabled:   true,
+		IPv4CIDR:      "192.0.2.1/24",
+		IPv4PoolEnd:   "192.0.2.20",
+		IPv4PoolStart: "192.0.2.10",
+		Enabled:       true,
+	}
+	id, err := dbAddManagedNetwork(db, &network)
+	if err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+	network.ID = id
+
+	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                                     db,
+		cfg:                                    &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:                  fakeManagedRuntime,
+		ipv6Runtime:                            fakeIPv6Runtime,
+		shutdownCh:                             make(chan struct{}),
+		managedRuntimeReloadWake:               make(chan struct{}, 1),
+		managedRuntimeReloadDone:               make(chan struct{}),
+		redistributeWake:                       make(chan struct{}, 1),
+		managedRuntimeReloadAppliedFingerprint: buildManagedNetworkRuntimeReloadFingerprint([]ManagedNetwork{network}, nil, nil, nil, nil),
+	}
+
+	go pm.managedRuntimeReloadLoop()
+	t.Cleanup(func() {
+		pm.beginShutdown()
+		if !waitForStopChannel(pm.managedRuntimeReloadDone, time.Second) {
+			t.Fatal("managedRuntimeReloadDone did not close during cleanup")
+		}
+	})
+
+	pm.requestManagedNetworkRuntimeReloadWithSource(0, "addr_change", "eno1")
+
+	waitForManagedNetworkReloadCondition(t, 2*time.Second, func() bool {
+		status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+		return status.LastResult == "success"
+	}, "address-triggered managed runtime reload skip success")
+
+	status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+	if fakeManagedRuntime.reconcileCalls != 0 {
+		t.Fatalf("managed runtime reconcileCalls = %d, want 0 when effective state is unchanged", fakeManagedRuntime.reconcileCalls)
+	}
+	if fakeIPv6Runtime.reconcileCalls != 0 {
+		t.Fatalf("ipv6 runtime reconcileCalls = %d, want 0 when effective state is unchanged", fakeIPv6Runtime.reconcileCalls)
+	}
+	if !strings.Contains(status.LastAppliedSummary, "networks=1") || !strings.Contains(status.LastAppliedSummary, "bridges=vmbr1") {
+		t.Fatalf("LastAppliedSummary = %q, want unchanged-state summary", status.LastAppliedSummary)
+	}
+}
+
+func TestRedistributeWorkersSeedsManagedRuntimeReloadFingerprintForAddrChangeSkip(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:          "lab",
+		BridgeMode:    managedNetworkBridgeModeCreate,
+		Bridge:        "vmbr1",
+		IPv4Enabled:   true,
+		IPv4CIDR:      "192.0.2.1/24",
+		IPv4PoolEnd:   "192.0.2.20",
+		IPv4PoolStart: "192.0.2.10",
+		Enabled:       true,
+	}); err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	oldLoad := loadInterfaceInfosForEgressNATTests
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return []InterfaceInfo{
+			{Name: "vmbr1", Kind: "bridge"},
+		}, nil
+	}
+	defer func() {
+		loadInterfaceInfosForEgressNATTests = oldLoad
+	}()
+
+	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                                   db,
+		cfg:                                  &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:                fakeManagedRuntime,
+		ipv6Runtime:                          fakeIPv6Runtime,
+		rulePlans:                            make(map[int64]ruleDataplanePlan),
+		rangePlans:                           make(map[int64]rangeDataplanePlan),
+		egressNATPlans:                       make(map[int64]ruleDataplanePlan),
+		dynamicEgressNATParents:              make(map[string]struct{}),
+		ipv6AssignmentInterfaces:             make(map[string]struct{}),
+		kernelRules:                          make(map[int64]bool),
+		kernelRanges:                         make(map[int64]bool),
+		kernelEgressNATs:                     make(map[int64]bool),
+		kernelRuleEngines:                    make(map[int64]string),
+		kernelRangeEngines:                   make(map[int64]string),
+		kernelEgressNATEngines:               make(map[int64]string),
+		kernelFlowOwners:                     make(map[uint32]kernelCandidateOwner),
+		kernelRuleStats:                      make(map[int64]RuleStatsReport),
+		kernelRangeStats:                     make(map[int64]RangeStatsReport),
+		kernelEgressNATStats:                 make(map[int64]EgressNATStatsReport),
+		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
+		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
+		lastRulePlanLog:                      make(map[int64]string),
+		lastRangePlanLog:                     make(map[int64]string),
+	}
+
+	pm.redistributeWorkers()
+
+	if fakeManagedRuntime.reconcileCalls != 1 {
+		t.Fatalf("managed runtime reconcileCalls = %d, want 1 after redistribute", fakeManagedRuntime.reconcileCalls)
+	}
+	if pm.managedRuntimeReloadAppliedFingerprint == "" {
+		t.Fatal("managedRuntimeReloadAppliedFingerprint = empty, want initialized fingerprint after redistribute")
+	}
+
+	pm.mu.Lock()
+	pm.managedRuntimeReloadLastRequestSource = "addr_change"
+	pm.mu.Unlock()
+
+	if err := pm.reloadManagedNetworkRuntimeOnly(); err != nil {
+		t.Fatalf("reloadManagedNetworkRuntimeOnly() error = %v", err)
+	}
+	if fakeManagedRuntime.reconcileCalls != 1 {
+		t.Fatalf("managed runtime reconcileCalls = %d, want addr-change reload skip after seeded fingerprint", fakeManagedRuntime.reconcileCalls)
+	}
+}
+
+func TestReloadManagedNetworkRuntimeOnlyAddrChangeDoesNotSkipDynamicSourceEgressRefresh(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:            "lab",
+		BridgeMode:      managedNetworkBridgeModeCreate,
+		Bridge:          "vmbr1",
+		UplinkInterface: "eno1",
+		AutoEgressNAT:   true,
+		Enabled:         true,
+	}); err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	currentOutAddrs := []string{"198.51.100.10"}
+	oldLoad := loadInterfaceInfosForEgressNATTests
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return []InterfaceInfo{
+			{Name: "eno1", Kind: "device", Addrs: append([]string(nil), currentOutAddrs...)},
+			{Name: "vmbr1", Kind: "bridge"},
+			{Name: "tap100i0", Parent: "vmbr1", Kind: "tap"},
+		}, nil
+	}
+	defer func() {
+		loadInterfaceInfosForEgressNATTests = oldLoad
+	}()
+
+	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                                   db,
+		cfg:                                  &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:                fakeManagedRuntime,
+		ipv6Runtime:                          fakeIPv6Runtime,
+		rulePlans:                            make(map[int64]ruleDataplanePlan),
+		rangePlans:                           make(map[int64]rangeDataplanePlan),
+		egressNATPlans:                       make(map[int64]ruleDataplanePlan),
+		dynamicEgressNATParents:              make(map[string]struct{}),
+		ipv6AssignmentInterfaces:             make(map[string]struct{}),
+		kernelRules:                          make(map[int64]bool),
+		kernelRanges:                         make(map[int64]bool),
+		kernelEgressNATs:                     make(map[int64]bool),
+		kernelRuleEngines:                    make(map[int64]string),
+		kernelRangeEngines:                   make(map[int64]string),
+		kernelEgressNATEngines:               make(map[int64]string),
+		kernelFlowOwners:                     make(map[uint32]kernelCandidateOwner),
+		kernelRuleStats:                      make(map[int64]RuleStatsReport),
+		kernelRangeStats:                     make(map[int64]RangeStatsReport),
+		kernelEgressNATStats:                 make(map[int64]EgressNATStatsReport),
+		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
+		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
+		lastRulePlanLog:                      make(map[int64]string),
+		lastRangePlanLog:                     make(map[int64]string),
+	}
+
+	pm.redistributeWorkers()
+
+	if fakeManagedRuntime.reconcileCalls != 1 {
+		t.Fatalf("managed runtime reconcileCalls = %d, want 1 after initial redistribute", fakeManagedRuntime.reconcileCalls)
+	}
+	initialFingerprint := pm.managedRuntimeReloadAppliedFingerprint
+	if initialFingerprint == "" {
+		t.Fatal("managedRuntimeReloadAppliedFingerprint = empty, want initialized fingerprint after redistribute")
+	}
+
+	currentOutAddrs = []string{"198.51.100.11"}
+	pm.mu.Lock()
+	pm.managedRuntimeReloadLastRequestSource = "addr_change"
+	pm.mu.Unlock()
+
+	if err := pm.reloadManagedNetworkRuntimeOnly(); err != nil {
+		t.Fatalf("reloadManagedNetworkRuntimeOnly() error = %v", err)
+	}
+	if fakeManagedRuntime.reconcileCalls != 2 {
+		t.Fatalf("managed runtime reconcileCalls = %d, want refresh after dynamic source IPv4 address change", fakeManagedRuntime.reconcileCalls)
+	}
+	if pm.managedRuntimeReloadAppliedFingerprint == initialFingerprint {
+		t.Fatal("managedRuntimeReloadAppliedFingerprint unchanged, want dynamic-source interface address change to refresh fingerprint")
+	}
+}

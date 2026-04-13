@@ -457,6 +457,159 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersAllowsRuleRecoveryWhileEgressN
 	}
 }
 
+func TestRetryNetlinkTriggeredKernelFallbackOwnersRefreshesActiveKernelRuleOnAddrChange(t *testing.T) {
+	db := openTestDB(t)
+
+	rule := Rule{
+		InInterface:  "eno9",
+		InIP:         "192.0.2.51",
+		InPort:       15001,
+		OutInterface: "eno1",
+		OutIP:        "198.51.100.51",
+		OutPort:      25001,
+		Protocol:     "tcp",
+		Enabled:      true,
+	}
+	ruleID, err := dbAddRule(db, &rule)
+	if err != nil {
+		t.Fatalf("dbAddRule() error = %v", err)
+	}
+	rule.ID = ruleID
+	rule.kernelLogKind = workerKindRule
+	rule.kernelLogOwnerID = ruleID
+
+	rt := &stubIncrementalKernelRuntime{
+		assignments: map[int64]string{},
+	}
+
+	pm := &ProcessManager{
+		ruleWorkers:            make(map[int]*WorkerInfo),
+		rangeWorkers:           make(map[int]*WorkerInfo),
+		db:                     db,
+		cfg:                    &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 1},
+		rulePlans:              map[int64]ruleDataplanePlan{},
+		rangePlans:             map[int64]rangeDataplanePlan{},
+		egressNATPlans:         map[int64]ruleDataplanePlan{},
+		kernelRuntime:          rt,
+		kernelRules:            map[int64]bool{rule.ID: true},
+		kernelRanges:           map[int64]bool{},
+		kernelEgressNATs:       map[int64]bool{},
+		kernelRuleEngines:      map[int64]string{rule.ID: kernelEngineTC},
+		kernelRangeEngines:     map[int64]string{},
+		kernelEgressNATEngines: map[int64]string{},
+		kernelFlowOwners: map[uint32]kernelCandidateOwner{
+			uint32(rule.ID): {kind: workerKindRule, id: rule.ID},
+		},
+	}
+	pm.rulePlans[rule.ID] = ruleDataplanePlan{
+		KernelEligible:  true,
+		EffectiveEngine: ruleEngineKernel,
+		AddrRefresh: kernelAddressRefreshMetadata{
+			OutInterface: "eno1",
+			Family:       ipFamilyIPv4,
+		},
+	}
+
+	trigger := newKernelNetlinkRecoveryTrigger("addr")
+	trigger.addInterfaceName("eno1")
+	trigger.addAddrFamily(ipFamilyIPv4)
+
+	result := pm.retryNetlinkTriggeredKernelFallbackOwnersForTrigger(trigger)
+	if !result.handled {
+		t.Fatal("retryNetlinkTriggeredKernelFallbackOwnersForTrigger() handled = false, want true")
+	}
+	if !result.attempted {
+		t.Fatal("retryNetlinkTriggeredKernelFallbackOwnersForTrigger() attempted = false, want true")
+	}
+	if result.matchedRuleOwners != 1 || result.attemptedRuleOwners != 1 || result.recoveredRuleOwners != 1 {
+		t.Fatalf("rule owner counts = matched:%d attempted:%d recovered:%d, want 1/1/1", result.matchedRuleOwners, result.attemptedRuleOwners, result.recoveredRuleOwners)
+	}
+	if got := rt.assignments[rule.ID]; got != kernelEngineTC {
+		t.Fatalf("runtime assignments = %#v, want refreshed rule %d on %q", rt.assignments, rule.ID, kernelEngineTC)
+	}
+	if !pm.kernelRules[rule.ID] {
+		t.Fatalf("kernelRules = %#v, want rule %d active after addr refresh", pm.kernelRules, rule.ID)
+	}
+}
+
+func TestRetryNetlinkTriggeredKernelFallbackOwnersRecoversSourceIPFallbackOnAddrChange(t *testing.T) {
+	db := openTestDB(t)
+
+	rule := Rule{
+		InInterface:  "eno9",
+		InIP:         "192.0.2.52",
+		InPort:       15002,
+		OutInterface: "eno1",
+		OutIP:        "198.51.100.52",
+		OutSourceIP:  "198.51.100.10",
+		OutPort:      25002,
+		Protocol:     "tcp",
+		Enabled:      true,
+	}
+	ruleID, err := dbAddRule(db, &rule)
+	if err != nil {
+		t.Fatalf("dbAddRule() error = %v", err)
+	}
+	rule.ID = ruleID
+
+	rt := &stubIncrementalKernelRuntime{}
+
+	pm := &ProcessManager{
+		ruleWorkers:            make(map[int]*WorkerInfo),
+		rangeWorkers:           make(map[int]*WorkerInfo),
+		db:                     db,
+		cfg:                    &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 1},
+		rulePlans:              map[int64]ruleDataplanePlan{},
+		rangePlans:             map[int64]rangeDataplanePlan{},
+		egressNATPlans:         map[int64]ruleDataplanePlan{},
+		kernelRuntime:          rt,
+		kernelRules:            map[int64]bool{},
+		kernelRanges:           map[int64]bool{},
+		kernelEgressNATs:       map[int64]bool{},
+		kernelRuleEngines:      map[int64]string{},
+		kernelRangeEngines:     map[int64]string{},
+		kernelEgressNATEngines: map[int64]string{},
+		kernelFlowOwners:       map[uint32]kernelCandidateOwner{},
+	}
+	pm.rulePlans[rule.ID] = ruleDataplanePlan{
+		KernelEligible:  true,
+		EffectiveEngine: ruleEngineUserspace,
+		FallbackReason:  "outbound source IP is not assigned to the selected outbound interface",
+		TransientFallback: kernelTransientFallbackMetadata{
+			ReasonClass:  "source_ip_unassigned",
+			OutInterface: "eno1",
+		},
+		AddrRefresh: kernelAddressRefreshMetadata{
+			OutInterface: "eno1",
+			Family:       ipFamilyIPv4,
+		},
+	}
+
+	trigger := newKernelNetlinkRecoveryTrigger("addr")
+	trigger.addInterfaceName("eno1")
+	trigger.addAddrFamily(ipFamilyIPv4)
+
+	result := pm.retryNetlinkTriggeredKernelFallbackOwnersForTrigger(trigger)
+	if !result.handled {
+		t.Fatal("retryNetlinkTriggeredKernelFallbackOwnersForTrigger() handled = false, want true")
+	}
+	if !result.attempted {
+		t.Fatal("retryNetlinkTriggeredKernelFallbackOwnersForTrigger() attempted = false, want true")
+	}
+	if result.matchedRuleOwners != 1 || result.attemptedRuleOwners != 1 || result.recoveredRuleOwners != 1 {
+		t.Fatalf("rule owner counts = matched:%d attempted:%d recovered:%d, want 1/1/1", result.matchedRuleOwners, result.attemptedRuleOwners, result.recoveredRuleOwners)
+	}
+	if got := rt.assignments[rule.ID]; got != kernelEngineTC {
+		t.Fatalf("runtime assignments = %#v, want recovered rule %d on %q", rt.assignments, rule.ID, kernelEngineTC)
+	}
+	if !pm.kernelRules[rule.ID] {
+		t.Fatalf("kernelRules = %#v, want rule %d recovered into kernel", pm.kernelRules, rule.ID)
+	}
+	if got := pm.rulePlans[rule.ID]; got.EffectiveEngine != ruleEngineKernel || got.FallbackReason != "" {
+		t.Fatalf("rule plan = %+v, want kernel engine with cleared fallback after addr recovery", got)
+	}
+}
+
 func TestRetryNetlinkTriggeredKernelFallbackOwnersRecoversMatchedEgressNATFallbackIncrementally(t *testing.T) {
 	db := openTestDB(t)
 

@@ -681,30 +681,61 @@ func (rt *managedIPv4NetworkRuntime) Close() error {
 	}
 
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
-
 	preserveAddresses := managedNetworkPreserveStateOnClose()
-	errs := make([]string, 0)
-
-	for bridge, config := range rt.dhcpv4 {
-		if err := rt.ops.DeleteManagedNetworkDHCPv4(config.Bridge); err != nil {
-			errs = append(errs, fmt.Sprintf("remove dhcpv4 on %s: %v", bridge, err))
-		}
+	dhcpv4 := make([]managedNetworkDHCPv4Config, 0, len(rt.dhcpv4))
+	for _, config := range rt.dhcpv4 {
+		dhcpv4 = append(dhcpv4, config)
 	}
+	addresses := make(map[string]managedNetworkIPv4AddressSpec, len(rt.addresses))
 	if !preserveAddresses {
 		for bridge, spec := range rt.addresses {
+			addresses[bridge] = spec
+		}
+	}
+	rt.dhcpv4 = make(map[string]managedNetworkDHCPv4Config)
+	rt.addresses = make(map[string]managedNetworkIPv4AddressSpec)
+	rt.bridges = make(map[int64]string)
+	rt.status = make(map[int64]managedNetworkRuntimeStatus)
+	rt.mu.Unlock()
+
+	errs := managedNetworkCloseDHCPv4Configs(rt.ops, dhcpv4)
+	if !preserveAddresses {
+		for bridge, spec := range addresses {
 			if err := rt.ops.DeleteManagedNetworkIPv4Address(spec); err != nil {
 				errs = append(errs, fmt.Sprintf("remove ipv4 address on %s: %v", bridge, err))
 			}
 		}
 	}
-
-	rt.dhcpv4 = make(map[string]managedNetworkDHCPv4Config)
-	rt.addresses = make(map[string]managedNetworkIPv4AddressSpec)
-	rt.bridges = make(map[int64]string)
-	rt.status = make(map[int64]managedNetworkRuntimeStatus)
 	if len(errs) == 0 {
 		return nil
 	}
+	sort.Strings(errs)
 	return errors.New(strings.Join(errs, "; "))
+}
+
+func managedNetworkCloseDHCPv4Configs(ops managedNetworkNetOps, configs []managedNetworkDHCPv4Config) []string {
+	if ops == nil || len(configs) == 0 {
+		return nil
+	}
+
+	errs := make(chan string, len(configs))
+	var wg sync.WaitGroup
+	for _, config := range configs {
+		config := config
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := ops.DeleteManagedNetworkDHCPv4(config.Bridge); err != nil {
+				errs <- fmt.Sprintf("remove dhcpv4 on %s: %v", config.Bridge, err)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	out := make([]string, 0, len(errs))
+	for errText := range errs {
+		out = append(out, errText)
+	}
+	return out
 }

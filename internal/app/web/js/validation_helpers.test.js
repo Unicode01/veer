@@ -230,6 +230,7 @@ function createHarness() {
     'managedNetwork.runtimeReload.badge.fallback': 'Fallback',
     'managedNetwork.runtimeReload.source.manual': 'Manual reload',
     'managedNetwork.runtimeReload.source.linkChange': 'Auto recovery from link change',
+    'managedNetwork.runtimeReload.source.addrChange': 'Targeted refresh from address change',
     'managedNetwork.runtimeReload.result.idle': 'No reload has been recorded yet',
     'managedNetwork.runtimeReload.result.pending': 'Waiting to run',
     'managedNetwork.runtimeReload.result.success': 'Reload completed successfully',

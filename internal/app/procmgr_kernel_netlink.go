@@ -15,6 +15,7 @@ type kernelNetlinkRecoveryTrigger struct {
 	linkNeighborIndexes    map[int]struct{}
 	linkFDBInterfaces      map[string]struct{}
 	linkFDBIndexes         map[int]struct{}
+	addrFamilies           map[string]struct{}
 	backendIPs             map[string]struct{}
 	backendMACs            map[string]struct{}
 	sources                map[string]struct{}
@@ -121,6 +122,20 @@ func (trigger *kernelNetlinkRecoveryTrigger) addLinkFDBIndex(index int) {
 	trigger.linkFDBIndexes[index] = struct{}{}
 }
 
+func (trigger *kernelNetlinkRecoveryTrigger) addAddrFamily(family string) {
+	if trigger == nil {
+		return
+	}
+	family = strings.TrimSpace(strings.ToLower(family))
+	if family != ipFamilyIPv4 && family != ipFamilyIPv6 {
+		return
+	}
+	if trigger.addrFamilies == nil {
+		trigger.addrFamilies = make(map[string]struct{})
+	}
+	trigger.addrFamilies[family] = struct{}{}
+}
+
 func (trigger *kernelNetlinkRecoveryTrigger) addBackendIP(value string) {
 	if trigger == nil {
 		return
@@ -170,6 +185,9 @@ func (trigger *kernelNetlinkRecoveryTrigger) merge(other kernelNetlinkRecoveryTr
 	}
 	for index := range other.linkFDBIndexes {
 		trigger.addLinkFDBIndex(index)
+	}
+	for family := range other.addrFamilies {
+		trigger.addAddrFamily(family)
 	}
 	for ip := range other.backendIPs {
 		trigger.addBackendIP(ip)
@@ -269,6 +287,18 @@ func (trigger kernelNetlinkRecoveryTrigger) matchesBackendMAC(mac string) bool {
 		return false
 	}
 	_, ok := trigger.backendMACs[mac]
+	return ok
+}
+
+func (trigger kernelNetlinkRecoveryTrigger) matchesAddrFamily(family string) bool {
+	if len(trigger.addrFamilies) == 0 {
+		return true
+	}
+	family = strings.TrimSpace(strings.ToLower(family))
+	if family == "" {
+		return true
+	}
+	_, ok := trigger.addrFamilies[family]
 	return ok
 }
 
@@ -402,6 +432,84 @@ func (pm *ProcessManager) summarizeActiveKernelLinkRecoveryLocked() string {
 		return ""
 	}
 	return fmt.Sprintf("active_kernel_entries=%d(rule_owners=%d range_owners=%d egress_nat_owners=%d)", total, ruleCount, rangeCount, egressNATCount)
+}
+
+func (pm *ProcessManager) summarizeKernelAddrRefreshLocked(trigger kernelNetlinkRecoveryTrigger) string {
+	if pm == nil || !trigger.hasSource("addr") {
+		return ""
+	}
+
+	activeRuleOwners := 0
+	fallbackRuleOwners := 0
+	for id, plan := range pm.rulePlans {
+		if !triggerMatchesAddrRefreshPlan(trigger, plan) {
+			continue
+		}
+		if pm.kernelRules[id] {
+			activeRuleOwners++
+			continue
+		}
+		if isAddrTriggeredKernelFallbackPlan(plan) {
+			fallbackRuleOwners++
+		}
+	}
+
+	activeRangeOwners := 0
+	fallbackRangeOwners := 0
+	for id, plan := range pm.rangePlans {
+		if !triggerMatchesAddrRefreshPlan(trigger, plan) {
+			continue
+		}
+		if pm.kernelRanges[id] {
+			activeRangeOwners++
+			continue
+		}
+		if isAddrTriggeredKernelFallbackPlan(plan) {
+			fallbackRangeOwners++
+		}
+	}
+
+	activeEgressNATOwners := 0
+	fallbackEgressNATOwners := 0
+	for id, plan := range pm.egressNATPlans {
+		if id <= 0 || !triggerMatchesAddrRefreshPlan(trigger, plan) {
+			continue
+		}
+		if pm.kernelEgressNATs[id] {
+			activeEgressNATOwners++
+			continue
+		}
+		if isAddrTriggeredKernelFallbackPlan(plan) {
+			fallbackEgressNATOwners++
+		}
+	}
+
+	if activeRuleOwners == 0 && fallbackRuleOwners == 0 &&
+		activeRangeOwners == 0 && fallbackRangeOwners == 0 &&
+		activeEgressNATOwners == 0 && fallbackEgressNATOwners == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, 6)
+	if activeRuleOwners > 0 {
+		parts = append(parts, fmt.Sprintf("addr_active_rule_owners=%d", activeRuleOwners))
+	}
+	if fallbackRuleOwners > 0 {
+		parts = append(parts, fmt.Sprintf("addr_fallback_rule_owners=%d", fallbackRuleOwners))
+	}
+	if activeRangeOwners > 0 {
+		parts = append(parts, fmt.Sprintf("addr_active_range_owners=%d", activeRangeOwners))
+	}
+	if fallbackRangeOwners > 0 {
+		parts = append(parts, fmt.Sprintf("addr_fallback_range_owners=%d", fallbackRangeOwners))
+	}
+	if activeEgressNATOwners > 0 {
+		parts = append(parts, fmt.Sprintf("addr_active_egress_nat_owners=%d", activeEgressNATOwners))
+	}
+	if fallbackEgressNATOwners > 0 {
+		parts = append(parts, fmt.Sprintf("addr_fallback_egress_nat_owners=%d", fallbackEgressNATOwners))
+	}
+	return strings.Join(parts, " ")
 }
 
 func nextKernelNetlinkRetryState(lastRetryAt time.Time, now time.Time, summary string) (bool, time.Time) {
@@ -587,6 +695,7 @@ func summarizeKernelNetlinkRecoveryTrigger(trigger kernelNetlinkRecoveryTrigger)
 		summarizeKernelNetlinkRecoveryIndexHints("neigh_ifindex", trigger.linkNeighborIndexes),
 		summarizeKernelNetlinkRecoveryStringHints("fdb_if", trigger.linkFDBInterfaces),
 		summarizeKernelNetlinkRecoveryIndexHints("fdb_ifindex", trigger.linkFDBIndexes),
+		summarizeKernelNetlinkRecoveryStringHints("family", trigger.addrFamilies),
 		summarizeKernelNetlinkRecoveryStringHints("backend_ip", trigger.backendIPs),
 		summarizeKernelNetlinkRecoveryStringHints("backend_mac", trigger.backendMACs),
 	} {
@@ -728,7 +837,12 @@ func (pm *ProcessManager) handleKernelNetlinkRecoveryTrigger(trigger kernelNetli
 	pm.mu.Lock()
 	pm.kernelAttachmentCheckAt = time.Time{}
 	if pm.kernelRuntime != nil {
-		summary = pm.summarizeNetlinkTriggeredKernelFallbacksLocked()
+		if !trigger.hasSource("addr") || len(trigger.sources) > 1 {
+			summary = pm.summarizeNetlinkTriggeredKernelFallbacksLocked()
+		}
+		if trigger.hasSource("addr") {
+			summary = mergeKernelNetlinkRecoverySummaries(summary, pm.summarizeKernelAddrRefreshLocked(trigger))
+		}
 		if trigger.hasSource("link") {
 			// Parent-scope egress NAT depends on live child-interface inventory. Link
 			// changes on tracked parents should enter the incremental recovery queue so

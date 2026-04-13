@@ -248,12 +248,25 @@ func (pm *ProcessManager) handleVisibleInterfaceAddrUpdate(family int, name stri
 	if pm == nil {
 		return
 	}
-	if !pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", relatedNames...) && name != "" {
-		pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", name)
+	const reloadSource = "addr_change"
+	if !pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces(reloadSource, relatedNames...) && name != "" {
+		pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces(reloadSource, name)
 	}
-	if family == unix.AF_INET6 {
-		pm.requestRedistributeWorkers(0)
+	pm.handleKernelNetlinkRecoveryTrigger(kernelNetlinkRecoveryTriggerFromAddrUpdate(family, append(append([]string(nil), relatedNames...), name)...))
+}
+
+func kernelNetlinkRecoveryTriggerFromAddrUpdate(family int, names ...string) kernelNetlinkRecoveryTrigger {
+	trigger := newKernelNetlinkRecoveryTrigger("addr")
+	switch family {
+	case unix.AF_INET:
+		trigger.addAddrFamily(ipFamilyIPv4)
+	case unix.AF_INET6:
+		trigger.addAddrFamily(ipFamilyIPv6)
 	}
+	for _, name := range uniqueManagedNetworkRuntimeInterfaceNames(names...) {
+		trigger.addInterfaceName(name)
+	}
+	return trigger
 }
 
 func snapshotKernelNetlinkLinkStates() (map[int]kernelNetlinkLinkSnapshot, error) {

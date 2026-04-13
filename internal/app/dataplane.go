@@ -266,6 +266,7 @@ type ruleDataplanePlan struct {
 	KernelReason      string
 	FallbackReason    string
 	TransientFallback kernelTransientFallbackMetadata
+	AddrRefresh       kernelAddressRefreshMetadata
 }
 
 type rangeDataplanePlan = ruleDataplanePlan
@@ -275,6 +276,11 @@ type kernelTransientFallbackMetadata struct {
 	OutInterface string
 	BackendIP    string
 	BackendMAC   string
+}
+
+type kernelAddressRefreshMetadata struct {
+	OutInterface string
+	Family       string
 }
 
 type ruleDataplanePlanner struct {
@@ -334,6 +340,7 @@ func (p *ruleDataplanePlanner) planWithPreferredAndKernelReason(rule Rule, prefe
 	plan := ruleDataplanePlan{
 		PreferredEngine: preferred,
 		EffectiveEngine: ruleEngineUserspace,
+		AddrRefresh:     kernelAddressRefreshMetadataForRule(rule),
 	}
 
 	kernelEligible := false
@@ -396,8 +403,41 @@ func kernelTransientFallbackMetadataForRule(rule Rule, reason string) kernelTran
 			metadata.BackendMAC = resolveKernelTransientFallbackBackendMAC(rule, reasonClass)
 		}
 		return metadata
+	case "source_ip_unassigned":
+		return kernelTransientFallbackMetadata{
+			ReasonClass:  reasonClass,
+			OutInterface: normalizeKernelTransientFallbackInterface(rule.OutInterface),
+		}
 	default:
 		return kernelTransientFallbackMetadata{}
+	}
+}
+
+func kernelAddressRefreshMetadataForRule(rule Rule) kernelAddressRefreshMetadata {
+	if strings.TrimSpace(rule.OutInterface) == "" || rule.Transparent {
+		return kernelAddressRefreshMetadata{}
+	}
+
+	family := ipLiteralFamily(rule.OutSourceIP)
+	if family == "" {
+		if isKernelEgressNATRule(rule) || isKernelEgressNATPassthroughRule(rule) {
+			family = ipFamilyIPv4
+		} else {
+			pair := analyzeIPLiteralPair(rule.InIP, rule.OutIP)
+			switch {
+			case pair.firstFamily != "" && pair.secondFamily == "":
+				family = pair.firstFamily
+			case pair.secondFamily != "" && pair.firstFamily == "":
+				family = pair.secondFamily
+			case pair.firstFamily == pair.secondFamily:
+				family = pair.firstFamily
+			}
+		}
+	}
+
+	return kernelAddressRefreshMetadata{
+		OutInterface: normalizeKernelTransientFallbackInterface(rule.OutInterface),
+		Family:       family,
 	}
 }
 

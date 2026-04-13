@@ -596,6 +596,7 @@
   function managedNetworkRuntimeReloadSourceLabel(source) {
     const normalized = String(source || '').trim().toLowerCase();
     if (normalized === 'link_change') return app.t('managedNetwork.runtimeReload.source.linkChange');
+    if (normalized === 'addr_change') return app.t('managedNetwork.runtimeReload.source.addrChange');
     if (normalized === 'manual') return app.t('managedNetwork.runtimeReload.source.manual');
     return normalized || app.t('managedNetwork.runtimeReload.result.unknown');
   }

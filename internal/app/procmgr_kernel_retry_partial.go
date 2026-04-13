@@ -257,6 +257,8 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	currentKernelRules := make(map[int64]bool)
 	currentKernelRanges := make(map[int64]bool)
 	currentKernelEgressNATs := make(map[int64]bool)
+	matchedRuleOwners := make(map[int64]struct{})
+	matchedRangeOwners := make(map[int64]struct{})
 	matchedEgressNATOwners := make(map[int64]struct{})
 	cooldownEgressNATOwners := make(map[int64]struct{})
 	retryOwners := make(map[kernelCandidateOwner]struct{})
@@ -303,12 +305,18 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		}
 	}
 	for id, plan := range pm.rulePlans {
-		if !isNetlinkTriggeredKernelFallbackPlan(plan) {
-			continue
-		}
 		owner := kernelCandidateOwner{kind: workerKindRule, id: id}
+		matched := false
 		if trigger.matchesPlan(plan) {
-			result.matchedRuleOwners++
+			matched = true
+		} else if triggerMatchesAddrRefreshPlan(trigger, plan) && (currentKernelRules[id] || isAddrTriggeredKernelFallbackPlan(plan)) {
+			matched = true
+		}
+		if matched {
+			if _, counted := matchedRuleOwners[id]; !counted {
+				matchedRuleOwners[id] = struct{}{}
+				result.matchedRuleOwners++
+			}
 			if state, ok := cooldownUntil[owner]; ok && state.Until.After(now) {
 				cooldownRuleOwners++
 				cooldownOwners = append(cooldownOwners, owner)
@@ -322,15 +330,23 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 			}
 			continue
 		}
-		unmatchedRuleFallbackPlans[id] = plan
+		if isNetlinkTriggeredKernelFallbackPlan(plan) {
+			unmatchedRuleFallbackPlans[id] = plan
+		}
 	}
 	for id, plan := range pm.rangePlans {
-		if !isNetlinkTriggeredKernelFallbackPlan(plan) {
-			continue
-		}
 		owner := kernelCandidateOwner{kind: workerKindRange, id: id}
+		matched := false
 		if trigger.matchesPlan(plan) {
-			result.matchedRangeOwners++
+			matched = true
+		} else if triggerMatchesAddrRefreshPlan(trigger, plan) && (currentKernelRanges[id] || isAddrTriggeredKernelFallbackPlan(plan)) {
+			matched = true
+		}
+		if matched {
+			if _, counted := matchedRangeOwners[id]; !counted {
+				matchedRangeOwners[id] = struct{}{}
+				result.matchedRangeOwners++
+			}
 			if state, ok := cooldownUntil[owner]; ok && state.Until.After(now) {
 				cooldownRangeOwners++
 				cooldownOwners = append(cooldownOwners, owner)
@@ -344,14 +360,20 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 			}
 			continue
 		}
-		unmatchedRangeFallbackPlans[id] = plan
+		if isNetlinkTriggeredKernelFallbackPlan(plan) {
+			unmatchedRangeFallbackPlans[id] = plan
+		}
 	}
 	for id, plan := range pm.egressNATPlans {
-		if !isNetlinkTriggeredKernelFallbackPlan(plan) {
-			continue
-		}
 		owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: id}
-		if triggerMatchesEgressNATFallbackPlan(trigger, plan) {
+		matched := false
+		switch {
+		case triggerMatchesEgressNATFallbackPlan(trigger, plan):
+			matched = true
+		case id > 0 && triggerMatchesAddrRefreshPlan(trigger, plan) && (currentKernelEgressNATs[id] || isAddrTriggeredKernelFallbackPlan(plan)):
+			matched = true
+		}
+		if matched {
 			if _, ok := matchedEgressNATOwners[id]; !ok {
 				matchedEgressNATOwners[id] = struct{}{}
 				result.matchedEgressNATs++
@@ -372,7 +394,9 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 			}
 			continue
 		}
-		unmatchedEgressNATFallbackPlans[id] = plan
+		if isNetlinkTriggeredKernelFallbackPlan(plan) {
+			unmatchedEgressNATFallbackPlans[id] = plan
+		}
 	}
 	pm.mu.Unlock()
 
@@ -798,6 +822,29 @@ func isNetlinkTriggeredKernelFallbackPlan(plan ruleDataplanePlan) bool {
 	return plan.KernelEligible && plan.EffectiveEngine != ruleEngineKernel && isNetlinkTriggeredKernelFallbackReason(plan.FallbackReason)
 }
 
+func isAddrTriggeredKernelRefreshReason(reason string) bool {
+	return normalizeTransientKernelFallbackReason(reason) == "source_ip_unassigned"
+}
+
+func isAddrTriggeredKernelFallbackPlan(plan ruleDataplanePlan) bool {
+	return plan.KernelEligible && plan.EffectiveEngine != ruleEngineKernel && isAddrTriggeredKernelRefreshReason(plan.FallbackReason)
+}
+
+func isKernelIncrementalRetryCooldownPlan(plan ruleDataplanePlan) bool {
+	return isNetlinkTriggeredKernelFallbackPlan(plan) || isAddrTriggeredKernelFallbackPlan(plan)
+}
+
+func triggerMatchesAddrRefreshPlan(trigger kernelNetlinkRecoveryTrigger, plan ruleDataplanePlan) bool {
+	if !trigger.hasSource("addr") {
+		return false
+	}
+	outInterface := normalizeKernelTransientFallbackInterface(plan.AddrRefresh.OutInterface)
+	if outInterface == "" {
+		return false
+	}
+	return trigger.matchesOutInterface(outInterface) && trigger.matchesAddrFamily(plan.AddrRefresh.Family)
+}
+
 func preserveUnmatchedNetlinkFallbackPlans(prevRulePlans map[int64]ruleDataplanePlan, prevRangePlans map[int64]rangeDataplanePlan, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {
 	for id, prev := range prevRulePlans {
 		current, ok := rulePlans[id]
@@ -888,6 +935,9 @@ func kernelNetlinkOwnerRetryCooldownSourceForPlan(trigger kernelNetlinkRecoveryT
 	if reasonClass == "" {
 		reasonClass = normalizeTransientKernelFallbackReason(plan.FallbackReason)
 	}
+	if trigger.hasSource("addr") {
+		return "addr"
+	}
 	if trigger.hasSource("link") {
 		return "link"
 	}
@@ -924,7 +974,7 @@ func summarizeKernelNetlinkOwnerRetryCooldownSourceCounts(counts map[string]int)
 	if len(counts) == 0 {
 		return ""
 	}
-	order := []string{"neighbor", "fdb", "link", "netlink", "mixed", "unknown"}
+	order := []string{"addr", "neighbor", "fdb", "link", "netlink", "mixed", "unknown"}
 	parts := make([]string, 0, len(counts))
 	seen := make(map[string]struct{}, len(order))
 	for _, key := range order {
@@ -1004,15 +1054,15 @@ func syncKernelNetlinkOwnerRetryCooldowns(cooldowns map[kernelCandidateOwner]ker
 		}
 		switch owner.kind {
 		case workerKindRule:
-			if !isNetlinkTriggeredKernelFallbackPlan(rulePlans[owner.id]) {
+			if !isKernelIncrementalRetryCooldownPlan(rulePlans[owner.id]) {
 				continue
 			}
 		case workerKindRange:
-			if !isNetlinkTriggeredKernelFallbackPlan(rangePlans[owner.id]) {
+			if !isKernelIncrementalRetryCooldownPlan(rangePlans[owner.id]) {
 				continue
 			}
 		case workerKindEgressNAT:
-			if !isNetlinkTriggeredKernelFallbackPlan(egressNATPlans[owner.id]) {
+			if !isKernelIncrementalRetryCooldownPlan(egressNATPlans[owner.id]) {
 				continue
 			}
 		default:
@@ -1037,15 +1087,15 @@ func syncKernelNetlinkOwnerRetryFailures(failures map[kernelCandidateOwner]int, 
 		}
 		switch owner.kind {
 		case workerKindRule:
-			if !isNetlinkTriggeredKernelFallbackPlan(rulePlans[owner.id]) {
+			if !isKernelIncrementalRetryCooldownPlan(rulePlans[owner.id]) {
 				continue
 			}
 		case workerKindRange:
-			if !isNetlinkTriggeredKernelFallbackPlan(rangePlans[owner.id]) {
+			if !isKernelIncrementalRetryCooldownPlan(rangePlans[owner.id]) {
 				continue
 			}
 		case workerKindEgressNAT:
-			if !isNetlinkTriggeredKernelFallbackPlan(egressNATPlans[owner.id]) {
+			if !isKernelIncrementalRetryCooldownPlan(egressNATPlans[owner.id]) {
 				continue
 			}
 		default:

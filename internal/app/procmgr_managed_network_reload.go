@@ -1,14 +1,278 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"sort"
 	"strings"
 	"time"
 )
 
 var loadIPv6AssignmentsForManagedNetworkReload = dbGetIPv6Assignments
+
+type managedNetworkRuntimeReloadFingerprint struct {
+	ManagedNetworks         []managedNetworkRuntimeReloadFingerprintNetwork             `json:"managed_networks,omitempty"`
+	Reservations            []managedNetworkRuntimeReloadFingerprintReservation         `json:"reservations,omitempty"`
+	IPv6Assignments         []managedNetworkRuntimeReloadFingerprintIPv6Assign          `json:"ipv6_assignments,omitempty"`
+	EgressNATs              []managedNetworkRuntimeReloadFingerprintEgressNAT           `json:"egress_nats,omitempty"`
+	DynamicSourceInterfaces []managedNetworkRuntimeReloadFingerprintDynamicSourceTarget `json:"dynamic_source_interfaces,omitempty"`
+}
+
+type managedNetworkRuntimeReloadFingerprintNetwork struct {
+	ID                  int64  `json:"id"`
+	BridgeMode          string `json:"bridge_mode,omitempty"`
+	Bridge              string `json:"bridge,omitempty"`
+	BridgeMTU           int    `json:"bridge_mtu,omitempty"`
+	BridgeVLANAware     bool   `json:"bridge_vlan_aware,omitempty"`
+	UplinkInterface     string `json:"uplink_interface,omitempty"`
+	IPv4Enabled         bool   `json:"ipv4_enabled,omitempty"`
+	IPv4CIDR            string `json:"ipv4_cidr,omitempty"`
+	IPv4Gateway         string `json:"ipv4_gateway,omitempty"`
+	IPv4PoolStart       string `json:"ipv4_pool_start,omitempty"`
+	IPv4PoolEnd         string `json:"ipv4_pool_end,omitempty"`
+	IPv4DNSServers      string `json:"ipv4_dns_servers,omitempty"`
+	IPv6Enabled         bool   `json:"ipv6_enabled,omitempty"`
+	IPv6ParentInterface string `json:"ipv6_parent_interface,omitempty"`
+	IPv6ParentPrefix    string `json:"ipv6_parent_prefix,omitempty"`
+	IPv6AssignmentMode  string `json:"ipv6_assignment_mode,omitempty"`
+	AutoEgressNAT       bool   `json:"auto_egress_nat,omitempty"`
+	Enabled             bool   `json:"enabled,omitempty"`
+}
+
+type managedNetworkRuntimeReloadFingerprintReservation struct {
+	ManagedNetworkID int64  `json:"managed_network_id"`
+	MACAddress       string `json:"mac_address,omitempty"`
+	IPv4Address      string `json:"ipv4_address,omitempty"`
+}
+
+type managedNetworkRuntimeReloadFingerprintIPv6Assign struct {
+	ParentInterface string `json:"parent_interface,omitempty"`
+	TargetInterface string `json:"target_interface,omitempty"`
+	ParentPrefix    string `json:"parent_prefix,omitempty"`
+	AssignedPrefix  string `json:"assigned_prefix,omitempty"`
+	Address         string `json:"address,omitempty"`
+	PrefixLen       int    `json:"prefix_len,omitempty"`
+	Enabled         bool   `json:"enabled,omitempty"`
+}
+
+type managedNetworkRuntimeReloadFingerprintEgressNAT struct {
+	ParentInterface string `json:"parent_interface,omitempty"`
+	ChildInterface  string `json:"child_interface,omitempty"`
+	OutInterface    string `json:"out_interface,omitempty"`
+	OutSourceIP     string `json:"out_source_ip,omitempty"`
+	Protocol        string `json:"protocol,omitempty"`
+	NATType         string `json:"nat_type,omitempty"`
+	Enabled         bool   `json:"enabled,omitempty"`
+}
+
+type managedNetworkRuntimeReloadFingerprintDynamicSourceTarget struct {
+	Interface string   `json:"interface,omitempty"`
+	IPv4Addrs []string `json:"ipv4_addrs,omitempty"`
+}
+
+func buildManagedNetworkRuntimeReloadFingerprint(managedNetworks []ManagedNetwork, reservations []ManagedNetworkReservation, effectiveIPv6Assignments []IPv6Assignment, effectiveEgressNATs []EgressNAT, ifaceInfos []InterfaceInfo) string {
+	payload := managedNetworkRuntimeReloadFingerprint{
+		ManagedNetworks:         managedNetworkRuntimeReloadFingerprintNetworks(managedNetworks),
+		Reservations:            managedNetworkRuntimeReloadFingerprintReservations(reservations),
+		IPv6Assignments:         managedNetworkRuntimeReloadFingerprintIPv6Assignments(effectiveIPv6Assignments),
+		EgressNATs:              managedNetworkRuntimeReloadFingerprintEgressNATs(effectiveEgressNATs),
+		DynamicSourceInterfaces: managedNetworkRuntimeReloadFingerprintDynamicSourceInterfaces(effectiveEgressNATs, ifaceInfos),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func managedNetworkRuntimeReloadFingerprintNetworks(items []ManagedNetwork) []managedNetworkRuntimeReloadFingerprintNetwork {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]managedNetworkRuntimeReloadFingerprintNetwork, 0, len(items))
+	for _, item := range items {
+		item = normalizeManagedNetwork(item)
+		out = append(out, managedNetworkRuntimeReloadFingerprintNetwork{
+			ID:                  item.ID,
+			BridgeMode:          item.BridgeMode,
+			Bridge:              item.Bridge,
+			BridgeMTU:           item.BridgeMTU,
+			BridgeVLANAware:     item.BridgeVLANAware,
+			UplinkInterface:     item.UplinkInterface,
+			IPv4Enabled:         item.IPv4Enabled,
+			IPv4CIDR:            item.IPv4CIDR,
+			IPv4Gateway:         item.IPv4Gateway,
+			IPv4PoolStart:       item.IPv4PoolStart,
+			IPv4PoolEnd:         item.IPv4PoolEnd,
+			IPv4DNSServers:      item.IPv4DNSServers,
+			IPv6Enabled:         item.IPv6Enabled,
+			IPv6ParentInterface: item.IPv6ParentInterface,
+			IPv6ParentPrefix:    item.IPv6ParentPrefix,
+			IPv6AssignmentMode:  item.IPv6AssignmentMode,
+			AutoEgressNAT:       item.AutoEgressNAT,
+			Enabled:             item.Enabled,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ID != out[j].ID {
+			return out[i].ID < out[j].ID
+		}
+		if out[i].Bridge != out[j].Bridge {
+			return out[i].Bridge < out[j].Bridge
+		}
+		return out[i].UplinkInterface < out[j].UplinkInterface
+	})
+	return out
+}
+
+func managedNetworkRuntimeReloadFingerprintReservations(items []ManagedNetworkReservation) []managedNetworkRuntimeReloadFingerprintReservation {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]managedNetworkRuntimeReloadFingerprintReservation, 0, len(items))
+	for _, item := range items {
+		out = append(out, managedNetworkRuntimeReloadFingerprintReservation{
+			ManagedNetworkID: item.ManagedNetworkID,
+			MACAddress:       strings.TrimSpace(item.MACAddress),
+			IPv4Address:      strings.TrimSpace(item.IPv4Address),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ManagedNetworkID != out[j].ManagedNetworkID {
+			return out[i].ManagedNetworkID < out[j].ManagedNetworkID
+		}
+		if out[i].MACAddress != out[j].MACAddress {
+			return out[i].MACAddress < out[j].MACAddress
+		}
+		return out[i].IPv4Address < out[j].IPv4Address
+	})
+	return out
+}
+
+func managedNetworkRuntimeReloadFingerprintIPv6Assignments(items []IPv6Assignment) []managedNetworkRuntimeReloadFingerprintIPv6Assign {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]managedNetworkRuntimeReloadFingerprintIPv6Assign, 0, len(items))
+	for _, item := range items {
+		out = append(out, managedNetworkRuntimeReloadFingerprintIPv6Assign{
+			ParentInterface: strings.TrimSpace(item.ParentInterface),
+			TargetInterface: strings.TrimSpace(item.TargetInterface),
+			ParentPrefix:    strings.TrimSpace(item.ParentPrefix),
+			AssignedPrefix:  strings.TrimSpace(item.AssignedPrefix),
+			Address:         strings.TrimSpace(item.Address),
+			PrefixLen:       item.PrefixLen,
+			Enabled:         item.Enabled,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ParentInterface != out[j].ParentInterface {
+			return out[i].ParentInterface < out[j].ParentInterface
+		}
+		if out[i].TargetInterface != out[j].TargetInterface {
+			return out[i].TargetInterface < out[j].TargetInterface
+		}
+		if out[i].AssignedPrefix != out[j].AssignedPrefix {
+			return out[i].AssignedPrefix < out[j].AssignedPrefix
+		}
+		if out[i].Address != out[j].Address {
+			return out[i].Address < out[j].Address
+		}
+		return out[i].ParentPrefix < out[j].ParentPrefix
+	})
+	return out
+}
+
+func managedNetworkRuntimeReloadFingerprintEgressNATs(items []EgressNAT) []managedNetworkRuntimeReloadFingerprintEgressNAT {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]managedNetworkRuntimeReloadFingerprintEgressNAT, 0, len(items))
+	for _, item := range items {
+		out = append(out, managedNetworkRuntimeReloadFingerprintEgressNAT{
+			ParentInterface: strings.TrimSpace(item.ParentInterface),
+			ChildInterface:  strings.TrimSpace(item.ChildInterface),
+			OutInterface:    strings.TrimSpace(item.OutInterface),
+			OutSourceIP:     strings.TrimSpace(item.OutSourceIP),
+			Protocol:        normalizeEgressNATProtocol(item.Protocol),
+			NATType:         normalizeEgressNATType(item.NATType),
+			Enabled:         item.Enabled,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ParentInterface != out[j].ParentInterface {
+			return out[i].ParentInterface < out[j].ParentInterface
+		}
+		if out[i].ChildInterface != out[j].ChildInterface {
+			return out[i].ChildInterface < out[j].ChildInterface
+		}
+		if out[i].OutInterface != out[j].OutInterface {
+			return out[i].OutInterface < out[j].OutInterface
+		}
+		if out[i].OutSourceIP != out[j].OutSourceIP {
+			return out[i].OutSourceIP < out[j].OutSourceIP
+		}
+		if out[i].Protocol != out[j].Protocol {
+			return out[i].Protocol < out[j].Protocol
+		}
+		return out[i].NATType < out[j].NATType
+	})
+	return out
+}
+
+func managedNetworkRuntimeReloadFingerprintDynamicSourceInterfaces(items []EgressNAT, infos []InterfaceInfo) []managedNetworkRuntimeReloadFingerprintDynamicSourceTarget {
+	if len(items) == 0 {
+		return nil
+	}
+
+	targets := make(map[string]struct{})
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		if strings.TrimSpace(item.OutSourceIP) != "" {
+			continue
+		}
+		outInterface := strings.TrimSpace(item.OutInterface)
+		if outInterface == "" {
+			continue
+		}
+		targets[outInterface] = struct{}{}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	ifaceByName := buildInterfaceInfoMap(infos)
+	out := make([]managedNetworkRuntimeReloadFingerprintDynamicSourceTarget, 0, len(targets))
+	for name := range targets {
+		target := managedNetworkRuntimeReloadFingerprintDynamicSourceTarget{Interface: name}
+		if info, ok := ifaceByName[name]; ok {
+			addrs := make([]string, 0, len(info.Addrs))
+			for _, addr := range info.Addrs {
+				ip := net.ParseIP(strings.TrimSpace(addr))
+				if ip == nil || ip.To4() == nil {
+					continue
+				}
+				addrs = append(addrs, canonicalIPLiteral(ip))
+			}
+			if len(addrs) > 0 {
+				sort.Strings(addrs)
+				target.IPv4Addrs = addrs
+			}
+		}
+		out = append(out, target)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Interface < out[j].Interface
+	})
+	return out
+}
 
 func (pm *ProcessManager) requestManagedNetworkRuntimeReload(delay time.Duration, names ...string) {
 	pm.requestManagedNetworkRuntimeReloadWithSource(delay, "", names...)
@@ -92,6 +356,15 @@ func (pm *ProcessManager) markManagedNetworkRuntimeReloadCompleted(result string
 		pm.managedRuntimeReloadLastError = ""
 	}
 	pm.mu.Unlock()
+}
+
+func (pm *ProcessManager) shouldSkipManagedNetworkAddrReload(fingerprint string) bool {
+	if pm == nil || strings.TrimSpace(fingerprint) == "" {
+		return false
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.managedRuntimeReloadAppliedFingerprint != "" && pm.managedRuntimeReloadAppliedFingerprint == fingerprint
 }
 
 func appendManagedNetworkRuntimeReloadIssue(issues []string, scope string, err error) []string {
@@ -242,7 +515,7 @@ func (pm *ProcessManager) managedRuntimeReloadLoop() {
 
 		pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, managedNetworkRuntimeInterfaceNamesFromSet(reloadInterfaces)...)
 		if summary := summarizeManagedRuntimeReloadInterfaces(reloadInterfaces); summary != "" {
-			log.Printf("managed network runtime: auto reload triggered by link change on %s", summary)
+			log.Printf("managed network runtime: auto reload triggered by %s on %s", managedNetworkRuntimeReloadSourceLabel(reloadSource), summary)
 		}
 		pm.markManagedNetworkRuntimeReloadStarted()
 		var reloadRepairErr error
@@ -287,12 +560,6 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		return fmt.Errorf("load managed network reservations: %w", err)
 	}
 	reloadIssues := make([]string, 0, 2)
-	if pm.managedNetworkRuntime != nil {
-		if err := pm.managedNetworkRuntime.Reconcile(managedNetworks, managedNetworkReservations); err != nil {
-			log.Printf("managed network runtime reconcile: %v", err)
-			reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "managed network runtime reconcile", err)
-		}
-	}
 
 	explicitEgressNATs, err := dbGetEgressNATs(pm.db)
 	if err != nil {
@@ -331,7 +598,40 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	dynamicEgressNATParents := collectDynamicEgressNATParentsWithSnapshot(effectiveEgressNATs, egressNATSnapshot)
 	managedNetworkInterfaces := cloneManagedNetworkInterfaceSet(managedNetworkCompiled.RedistributeIfaces)
 	reloadSummary := summarizeManagedNetworkRuntimeReload(managedNetworks, managedNetworkReservations, effectiveIPv6Assignments, managedNetworkCompiled.EgressNATs)
+	reloadFingerprint := buildManagedNetworkRuntimeReloadFingerprint(managedNetworks, managedNetworkReservations, effectiveIPv6Assignments, effectiveEgressNATs, egressNATSnapshot.Infos)
 	pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, collectManagedNetworkRuntimeTouchedInterfaces(managedNetworks, effectiveIPv6Assignments, managedNetworkCompiled)...)
+
+	ipv6Interfaces, ipv6ConfiguredCount := collectIPv6AssignmentInterfaceNames(effectiveIPv6Assignments)
+	for name := range managedNetworkCompiled.RedistributeIfaces {
+		if ipv6Interfaces == nil {
+			ipv6Interfaces = make(map[string]struct{})
+		}
+		ipv6Interfaces[name] = struct{}{}
+	}
+
+	reloadSource := pm.snapshotManagedNetworkRuntimeReloadStatus().LastRequestSource
+	if reloadSource == "addr_change" && ipv6AssignmentLoadErr == nil && egressNATSnapshot.Err == nil && pm.shouldSkipManagedNetworkAddrReload(reloadFingerprint) {
+		pm.mu.Lock()
+		pm.managedNetworkInterfaces = managedNetworkInterfaces
+		pm.dynamicEgressNATParents = dynamicEgressNATParents
+		pm.ipv6AssignmentsConfigured = ipv6ConfiguredCount > 0 || len(managedNetworkCompiled.RedistributeIfaces) > 0
+		pm.ipv6AssignmentInterfaces = ipv6Interfaces
+		pm.mu.Unlock()
+		if summary := summarizeManagedRuntimeReloadInterfaces(managedNetworkInterfaces); summary != "" {
+			log.Printf("managed network runtime: address-triggered reload skipped on %s (effective state unchanged)", summary)
+		} else {
+			log.Printf("managed network runtime: address-triggered reload skipped (effective state unchanged)")
+		}
+		pm.markManagedNetworkRuntimeReloadCompleted("success", reloadSummary, nil)
+		return nil
+	}
+
+	if pm.managedNetworkRuntime != nil {
+		if err := pm.managedNetworkRuntime.Reconcile(managedNetworks, managedNetworkReservations); err != nil {
+			log.Printf("managed network runtime reconcile: %v", err)
+			reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "managed network runtime reconcile", err)
+		}
+	}
 
 	if ipv6AssignmentLoadErr == nil {
 		if pm.ipv6Runtime != nil {
@@ -339,13 +639,6 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 				log.Printf("ipv6 assignment runtime reconcile: %v", err)
 				reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "ipv6 assignment runtime reconcile", err)
 			}
-		}
-		ipv6Interfaces, ipv6ConfiguredCount := collectIPv6AssignmentInterfaceNames(effectiveIPv6Assignments)
-		for name := range managedNetworkCompiled.RedistributeIfaces {
-			if ipv6Interfaces == nil {
-				ipv6Interfaces = make(map[string]struct{})
-			}
-			ipv6Interfaces[name] = struct{}{}
 		}
 		pm.mu.Lock()
 		pm.managedNetworkInterfaces = managedNetworkInterfaces
@@ -363,6 +656,9 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		pm.mu.Lock()
 		pm.managedNetworkInterfaces = managedNetworkInterfaces
 		pm.dynamicEgressNATParents = dynamicEgressNATParents
+		if reloadErr == nil {
+			pm.managedRuntimeReloadAppliedFingerprint = reloadFingerprint
+		}
 		pm.mu.Unlock()
 		if reloadSummary != "" {
 			log.Printf("managed network runtime: targeted reload applied %s", reloadSummary)
@@ -373,6 +669,11 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 
 	if err := pm.reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs, managedNetworkCompiled.EgressNATs, dynamicEgressNATParents, egressNATSnapshot); err != nil {
 		return err
+	}
+	if reloadErr == nil {
+		pm.mu.Lock()
+		pm.managedRuntimeReloadAppliedFingerprint = reloadFingerprint
+		pm.mu.Unlock()
 	}
 	if reloadSummary != "" {
 		log.Printf("managed network runtime: targeted reload applied %s", reloadSummary)

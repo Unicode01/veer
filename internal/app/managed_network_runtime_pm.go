@@ -41,6 +41,19 @@ func normalizeManagedNetworkRuntimeReloadSource(source string) string {
 	return source
 }
 
+func managedNetworkRuntimeReloadSourceLabel(source string) string {
+	switch normalizeManagedNetworkRuntimeReloadSource(source) {
+	case "link_change":
+		return "link change"
+	case "addr_change":
+		return "address change"
+	case "manual":
+		return "manual request"
+	default:
+		return strings.ReplaceAll(normalizeManagedNetworkRuntimeReloadSource(source), "_", " ")
+	}
+}
+
 func (pm *ProcessManager) shouldAutoRepairManagedNetworkRuntimeReload(source string) bool {
 	if pm == nil {
 		return false

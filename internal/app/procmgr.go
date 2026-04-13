@@ -184,6 +184,7 @@ type ProcessManager struct {
 	rangePlans                                     map[int64]rangeDataplanePlan
 	egressNATPlans                                 map[int64]ruleDataplanePlan
 	dynamicEgressNATParents                        map[string]struct{}
+	managedRuntimeReloadAppliedFingerprint         string
 	managedNetworkRuntime                          managedNetworkRuntime
 	managedNetworkInterfaces                       map[string]struct{}
 	ipv6Runtime                                    ipv6AssignmentRuntime
@@ -744,9 +745,13 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load managed network reservations: %v", err)
 		return
 	}
+	managedRuntimeReloadFingerprint := ""
+	managedRuntimeReconcileOK := pm.managedNetworkRuntime == nil
 	if pm.managedNetworkRuntime != nil {
 		if err := pm.managedNetworkRuntime.Reconcile(managedNetworks, managedNetworkReservations); err != nil {
 			log.Printf("managed network runtime reconcile: %v", err)
+		} else {
+			managedRuntimeReconcileOK = true
 		}
 	}
 	egressNATs, err := dbGetEgressNATs(pm.db)
@@ -782,9 +787,13 @@ func (pm *ProcessManager) redistributeWorkers() {
 	}
 	dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
 	if ipv6AssignmentLoadErr == nil {
+		ipv6RuntimeReconcileOK := pm.ipv6Runtime == nil
 		if pm.ipv6Runtime != nil {
 			if err := pm.ipv6Runtime.Reconcile(ipv6Assignments); err != nil {
 				log.Printf("ipv6 assignment runtime reconcile: %v", err)
+				ipv6RuntimeReconcileOK = false
+			} else {
+				ipv6RuntimeReconcileOK = true
 			}
 		}
 		ipv6Interfaces, ipv6ConfiguredCount := collectIPv6AssignmentInterfaceNames(ipv6Assignments)
@@ -798,6 +807,9 @@ func (pm *ProcessManager) redistributeWorkers() {
 		pm.ipv6AssignmentsConfigured = ipv6ConfiguredCount > 0 || len(managedNetworkCompiled.RedistributeIfaces) > 0
 		pm.ipv6AssignmentInterfaces = ipv6Interfaces
 		pm.mu.Unlock()
+		if managedRuntimeReconcileOK && ipv6RuntimeReconcileOK && egressNATSnapshot.Err == nil {
+			managedRuntimeReloadFingerprint = buildManagedNetworkRuntimeReloadFingerprint(managedNetworks, managedNetworkReservations, ipv6Assignments, egressNATs, egressNATSnapshot.Infos)
+		}
 	}
 	planner := newRuleDataplanePlanner(pm.kernelRuntime, pm.cfg.DefaultEngine)
 	configuredKernelRulesMapLimit := 0
@@ -923,6 +935,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.egressNATPlans = egressNATPlans
 	pm.managedNetworkInterfaces = cloneManagedNetworkInterfaceSet(managedNetworkCompiled.RedistributeIfaces)
 	pm.dynamicEgressNATParents = dynamicEgressNATParents
+	pm.managedRuntimeReloadAppliedFingerprint = managedRuntimeReloadFingerprint
 	pm.kernelRules = kernelAppliedRules
 	pm.kernelRanges = kernelAppliedRanges
 	pm.kernelEgressNATs = kernelAppliedEgressNATs
@@ -1244,6 +1257,9 @@ func (a *kernelOwnerPlanAccumulator) Add(item ruleDataplanePlan) {
 		return
 	}
 	a.initialized = true
+	if a.plan.AddrRefresh.OutInterface == "" && item.AddrRefresh.OutInterface != "" {
+		a.plan.AddrRefresh = item.AddrRefresh
+	}
 	if !item.KernelEligible {
 		a.allEligible = false
 		if a.plan.KernelReason == "" {
@@ -3471,7 +3487,12 @@ func isTransientKernelFallbackReason(reason string) bool {
 	}
 	return strings.Contains(text, "no learned ipv4 neighbor entry was found") ||
 		strings.Contains(text, "requires a learned ipv4 neighbor entry") ||
-		strings.Contains(text, "no forwarding database entry matched the backend mac")
+		strings.Contains(text, "no forwarding database entry matched the backend mac") ||
+		strings.Contains(text, "outbound source ip is not assigned to the selected outbound interface") ||
+		(strings.Contains(text, "preferred source ipv4") && strings.Contains(text, "is not assigned")) ||
+		(strings.Contains(text, "preferred source ipv6") && strings.Contains(text, "is not assigned")) ||
+		strings.Contains(text, "route lookup returned no usable source ipv4") ||
+		strings.Contains(text, "route lookup returned no usable source ipv6")
 }
 
 func isPressureTriggeredKernelFallbackReason(reason string) bool {
@@ -3491,6 +3512,16 @@ func normalizeTransientKernelFallbackReason(reason string) string {
 		return "neighbor_missing"
 	case strings.Contains(text, "no forwarding database entry matched the backend mac"):
 		return "fdb_missing"
+	case strings.Contains(text, "outbound source ip is not assigned to the selected outbound interface"):
+		return "source_ip_unassigned"
+	case strings.Contains(text, "preferred source ipv4") && strings.Contains(text, "is not assigned"):
+		return "source_ip_unassigned"
+	case strings.Contains(text, "preferred source ipv6") && strings.Contains(text, "is not assigned"):
+		return "source_ip_unassigned"
+	case strings.Contains(text, "route lookup returned no usable source ipv4"):
+		return "source_ip_unassigned"
+	case strings.Contains(text, "route lookup returned no usable source ipv6"):
+		return "source_ip_unassigned"
 	case strings.Contains(text, "kernel dataplane pressure"):
 		return "table_pressure"
 	default:
@@ -3939,23 +3970,17 @@ func (pm *ProcessManager) stopAll() {
 	pm.beginShutdown()
 	pm.stopKernelNetlinkMonitor()
 	if pm.ipv6Runtime != nil {
-		if err := pm.ipv6Runtime.Close(); err != nil {
-			log.Printf("stop ipv6 assignment runtime: %v", err)
-		}
+		logShutdownStep("stop ipv6 assignment runtime", pm.ipv6Runtime.Close)
 	}
 	if pm.managedNetworkRuntime != nil {
-		if err := pm.managedNetworkRuntime.Close(); err != nil {
-			log.Printf("stop managed network runtime: %v", err)
-		}
+		logShutdownStep("stop managed network runtime", pm.managedNetworkRuntime.Close)
 	}
 	if pm.kernelRuntime != nil {
-		if err := pm.kernelRuntime.Close(); err != nil {
-			log.Printf("stop kernel runtime: %v", err)
-		}
+		logShutdownStep("stop kernel runtime", pm.kernelRuntime.Close)
 	}
 
 	if pm.listener != nil {
-		pm.listener.Close()
+		logShutdownStep("close control listener", pm.listener.Close)
 	}
 	if pm.sockPath != "" {
 		_ = os.Remove(pm.sockPath)
@@ -3981,10 +4006,32 @@ func (pm *ProcessManager) stopAll() {
 	pm.sharedProxy = nil
 	pm.mu.Unlock()
 
-	for _, wi := range uniqueWorkerInfosByProcess(workers) {
-		killWorkerInfo(wi)
+	uniqueWorkers := uniqueWorkerInfosByProcess(workers)
+	if len(uniqueWorkers) > 0 {
+		start := time.Now()
+		log.Printf("shutdown: stopping %d worker process(es)", len(uniqueWorkers))
+		for _, wi := range uniqueWorkers {
+			killWorkerInfo(wi)
+		}
+		log.Printf("shutdown: worker stop complete (%s)", time.Since(start).Round(time.Millisecond))
 	}
+	start := time.Now()
+	log.Printf("shutdown: waiting for background loops")
 	pm.waitForBackgroundLoops(2 * time.Second)
+	log.Printf("shutdown: background loop wait complete (%s)", time.Since(start).Round(time.Millisecond))
+}
+
+func logShutdownStep(name string, fn func() error) {
+	if fn == nil {
+		return
+	}
+	start := time.Now()
+	log.Printf("shutdown: %s", name)
+	if err := fn(); err != nil {
+		log.Printf("shutdown: %s failed after %s: %v", name, time.Since(start).Round(time.Millisecond), err)
+		return
+	}
+	log.Printf("shutdown: %s complete (%s)", name, time.Since(start).Round(time.Millisecond))
 }
 
 func uniqueWorkerInfosByProcess(items []*WorkerInfo) []*WorkerInfo {
@@ -4041,9 +4088,19 @@ func (pm *ProcessManager) waitForBackgroundLoops(timeout time.Duration) {
 	redistributeDone := pm.redistributeDone
 	pm.mu.Unlock()
 
-	_ = waitForStopChannel(monitorDone, timeout)
-	_ = waitForStopChannel(managedRuntimeReloadDone, timeout)
-	_ = waitForStopChannel(redistributeDone, timeout)
+	items := []struct {
+		name string
+		ch   <-chan struct{}
+	}{
+		{name: "monitor", ch: monitorDone},
+		{name: "managed-network-reload", ch: managedRuntimeReloadDone},
+		{name: "redistribute", ch: redistributeDone},
+	}
+	for _, item := range items {
+		if !waitForStopChannel(item.ch, timeout) {
+			log.Printf("shutdown: background loop %s did not exit within %s", item.name, timeout)
+		}
+	}
 }
 
 func (pm *ProcessManager) monitorLoop() {
