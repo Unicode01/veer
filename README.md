@@ -574,6 +574,22 @@ modules/addons/forward/
 
 它主要面向多宿主机、多入口 IP、多 API endpoint 的 NAT/站点管理场景。
 
+最少配置项：
+
+- `API 地址` 与 `API Token`
+- `默认入口 IP`，或按宿主机配置 `server_ip_server_map`
+
+多宿主机场景建议同时配置：
+
+- `server_ip_server_map`
+- `api_server_map`
+
+使用客户区时建议额外确认：
+
+- WHMCS 服务已正确绑定到对应 `Server`
+- `allowed_product_ids` 已限制到允许使用 Forward 的产品
+- 如需限制客户可选后端 IP，再配置 `allowed_client_ips`
+
 ## 项目结构
 
 ```text

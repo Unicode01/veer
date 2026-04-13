@@ -16,7 +16,7 @@ function forward_config()
     return [
         'name' => 'Forward 管理',
         'description' => '对接 forward 的规则接口，提供端口转发规则的后台与客户区管理。',
-        'version' => '1.3.0',
+        'version' => '1.3.1',
         'author' => 'OpenAI Codex',
         'language' => 'chinese',
         'fields' => [
@@ -224,9 +224,9 @@ function forward_activate()
                 $table->text('description')->nullable();
                 $table->timestamp('created_at')->useCurrent();
                 $table->timestamp('updated_at')->useCurrent();
-                $table->index(['user_id', 'status']);
-                $table->index(['server_id', 'remote_rule_id']);
-                $table->index(['in_ip', 'in_port']);
+                $table->index(['user_id', 'status'], 'idx_mod_forward_rules_user_status');
+                $table->index(['server_id', 'remote_rule_id'], 'idx_mod_forward_rules_server_remote');
+                $table->index(['in_ip', 'in_port'], 'idx_mod_forward_rules_listen');
             });
         } else {
             $columns = [
@@ -281,10 +281,10 @@ function forward_activate()
                 $table->text('description')->nullable();
                 $table->timestamp('created_at')->useCurrent();
                 $table->timestamp('updated_at')->useCurrent();
-                $table->index(['user_id', 'status']);
-                $table->index(['server_id', 'remote_site_id']);
-                $table->index(['domain']);
-                $table->index(['backend_ip']);
+                $table->index(['user_id', 'status'], 'idx_mod_forward_sites_user_status');
+                $table->index(['server_id', 'remote_site_id'], 'idx_mod_forward_sites_server_remote');
+                $table->index(['domain'], 'idx_mod_forward_sites_domain');
+                $table->index(['backend_ip'], 'idx_mod_forward_sites_backend_ip');
             });
         } else {
             $columns = [
@@ -337,6 +337,114 @@ function forward_get_module_settings()
         forward_log('get_module_settings_error', [], $e->getMessage());
         return [];
     }
+}
+
+function forward_list_table_indexes($table)
+{
+    $table = trim((string) $table);
+    if ($table === '') {
+        return [];
+    }
+
+    try {
+        $rows = Capsule::select('SHOW INDEX FROM `' . str_replace('`', '``', $table) . '`');
+    } catch (Throwable $e) {
+        forward_log('list_table_indexes_error', ['table' => $table], $e->getMessage());
+        return [];
+    }
+
+    $indexes = [];
+    foreach ($rows as $row) {
+        $name = strtolower(trim((string) ($row->Key_name ?? '')));
+        $column = strtolower(trim((string) ($row->Column_name ?? '')));
+        $seq = (int) ($row->Seq_in_index ?? 0);
+        if ($name === '' || $column === '' || $seq <= 0) {
+            continue;
+        }
+
+        if (!isset($indexes[$name])) {
+            $indexes[$name] = [
+                'unique' => (int) ($row->Non_unique ?? 1) === 0,
+                'columns' => [],
+            ];
+        }
+        $indexes[$name]['columns'][$seq] = $column;
+    }
+
+    foreach ($indexes as $name => $index) {
+        ksort($indexes[$name]['columns']);
+        $indexes[$name]['columns'] = array_values($indexes[$name]['columns']);
+    }
+
+    return $indexes;
+}
+
+function forward_table_has_index($table, array $columns, $unique = null)
+{
+    $expected = [];
+    foreach ($columns as $column) {
+        $column = strtolower(trim((string) $column));
+        if ($column !== '') {
+            $expected[] = $column;
+        }
+    }
+    if (empty($expected)) {
+        return false;
+    }
+
+    $indexes = forward_list_table_indexes($table);
+    foreach ($indexes as $index) {
+        if ($unique !== null && (bool) ($index['unique'] ?? false) !== (bool) $unique) {
+            continue;
+        }
+        if (($index['columns'] ?? []) === $expected) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function forward_ensure_table_index($table, array $columns, $name, $unique = false)
+{
+    $table = trim((string) $table);
+    if ($table === '' || !Capsule::schema()->hasTable($table)) {
+        return;
+    }
+    if (forward_table_has_index($table, $columns, $unique)) {
+        return;
+    }
+
+    try {
+        Capsule::schema()->table($table, function ($schema) use ($columns, $name, $unique) {
+            if ($unique) {
+                $schema->unique($columns, $name);
+            } else {
+                $schema->index($columns, $name);
+            }
+        });
+    } catch (Throwable $e) {
+        if (!forward_table_has_index($table, $columns, $unique)) {
+            forward_log('ensure_table_index_error', [
+                'table' => $table,
+                'index' => $name,
+                'columns' => implode(',', $columns),
+                'unique' => $unique ? '1' : '0',
+            ], $e->getMessage());
+        }
+    }
+}
+
+function forward_ensure_runtime_indexes()
+{
+    forward_ensure_table_index('mod_forward_rules', ['user_id', 'status'], 'idx_mod_forward_rules_user_status');
+    forward_ensure_table_index('mod_forward_rules', ['server_id', 'remote_rule_id'], 'idx_mod_forward_rules_server_remote');
+    forward_ensure_table_index('mod_forward_rules', ['in_ip', 'in_port'], 'idx_mod_forward_rules_listen');
+
+    forward_ensure_table_index('mod_forward_sites', ['user_id', 'status'], 'idx_mod_forward_sites_user_status');
+    forward_ensure_table_index('mod_forward_sites', ['server_id', 'remote_site_id'], 'idx_mod_forward_sites_server_remote');
+    forward_ensure_table_index('mod_forward_sites', ['domain'], 'idx_mod_forward_sites_domain');
+    forward_ensure_table_index('mod_forward_sites', ['backend_ip'], 'idx_mod_forward_sites_backend_ip');
 }
 
 function forward_get_server_details_map()
@@ -661,6 +769,7 @@ function forward_ensure_runtime_schema()
         forward_log('ensure_runtime_schema_error', [], $e->getMessage());
     }
 
+    forward_ensure_runtime_indexes();
     forward_backfill_remote_resource_ids();
     forward_backfill_endpoint_server_bindings();
     forward_backfill_local_service_bindings();
