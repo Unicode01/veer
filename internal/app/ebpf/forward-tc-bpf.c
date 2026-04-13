@@ -2393,10 +2393,12 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 	struct flow_key_v4 *flow_key = lookup_scratch_flow_key_v4();
 	struct flow_value_v4 *flow_value = lookup_scratch_flow_v4();
 	struct flow_value_v4 *existing_flow;
+	struct flow_key_v4 close_key = {};
 	__u64 now = 0;
 	__u8 update_flow = 0;
 	__u8 new_session = 0;
 	__u8 count_udp_now = 0;
+	int close_complete = 0;
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 
 	if (!flow_key || !flow_value)
@@ -2413,6 +2415,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 
 	existing_flow = lookup_flow_v4_active_or_old(flow_key, &flow_bank);
 	if (!existing_flow) {
+		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
+			return TC_ACT_SHOT;
 		now = bpf_ktime_get_ns();
 		flow_value->rule_id = rule->rule_id;
 		flow_value->front_addr = bpf_ntohl(ctx->dst_addr);
@@ -2463,6 +2467,9 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 				flow_value->front_close_seen_ns = now;
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
+		} else if ((existing_flow->flags & FORWARD_FLOW_FLAG_FRONT_CLOSING) != 0 && ctx->tcp_flags == FORWARD_TCP_FLAG_ACK) {
+			close_key = *flow_key;
+			close_complete = 1;
 		} else if (existing_flow->last_seen_ns == 0 || now < existing_flow->last_seen_ns || (now - existing_flow->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 			*flow_value = *existing_flow;
 			flow_value->last_seen_ns = now;
@@ -2489,14 +2496,25 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 	if (rewrite_l4_dnat(skb, ctx, rule->backend_addr, rule->backend_port) < 0)
 		return TC_ACT_SHOT;
 
-	if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_L2) != 0)
-		return redirect_bridge_ifindex(skb, rule);
+	if ((rule->flags & FORWARD_RULE_FLAG_BRIDGE_L2) != 0) {
+		int action = redirect_bridge_ifindex(skb, rule);
+
+		if (close_complete && action == TC_ACT_REDIRECT && delete_flow_v4_in_bank(flow_bank, flow_key) == 0)
+			drop_kernel_flow_occupancy();
+		return action;
+	}
 	flow_key->ifindex = rule->out_ifindex;
 	flow_key->src_addr = bpf_ntohl(ctx->src_addr);
 	flow_key->dst_addr = rule->backend_addr;
 	flow_key->src_port = ctx->src_port;
 	flow_key->dst_port = rule->backend_port;
-	return redirect_ifindex(skb, ctx, (const struct redirect_target_v4 *)flow_key);
+	{
+		int action = redirect_ifindex(skb, ctx, (const struct redirect_target_v4 *)flow_key);
+
+		if (close_complete && action == TC_ACT_REDIRECT && delete_flow_v4_in_bank(flow_bank, &close_key) == 0)
+			drop_kernel_flow_occupancy();
+		return action;
+	}
 }
 
 static __always_inline int redirect_fullnat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value)
@@ -3112,7 +3130,6 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 	struct redirect_target_v4 redirect = {};
 	__u64 now = 0;
 	int update_flow = 0;
-	int closing;
 	int count_tcp_now = 0;
 	__u8 bank = flow_bank & FORWARD_TC_FLOW_BANK_MASK;
 	int flow_live = (flow_bank & FORWARD_TC_FLOW_BANK_DISPATCH_SNAPSHOT) == 0;
@@ -3148,6 +3165,17 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
 		}
+		if (ctx->closing) {
+			flow_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+			if (flow_value->front_close_seen_ns == 0)
+				flow_value->front_close_seen_ns = now;
+			flow_value->last_seen_ns = now;
+			if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
+				drop_rule_tcp_active(flow_value->rule_id);
+				flow_value->flags &= ~FORWARD_FLOW_FLAG_COUNTED;
+			}
+			update_flow = 1;
+		}
 	}
 
 	if (update_flow) {
@@ -3162,16 +3190,8 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 	if (FORWARD_FLOW_TRAFFIC_ENABLED(flow_value))
 		add_rule_traffic_bytes(flow_value->rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
 
-	closing = ctx->closing;
 	if (rewrite_l4_snat(skb, ctx, flow_value->front_addr, flow_value->front_port) < 0)
 		return TC_ACT_SHOT;
-
-	if (closing) {
-		if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
-			drop_rule_tcp_active(flow_value->rule_id);
-		delete_flow_v4_in_bank(bank, flow_key);
-		drop_kernel_flow_occupancy();
-	}
 
 	redirect.ifindex = flow_value->in_ifindex;
 	redirect.src_addr = flow_value->front_addr;

@@ -208,7 +208,9 @@ struct packet_ctx {
 	__u8 proto;
 	__u8 has_l4_checksum;
 	__u8 closing;
+	__u8 tcp_flags;
 	__u8 tos;
+	__u8 pad;
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 tot_len;
@@ -225,7 +227,7 @@ struct packet_ctx_v6 {
 	__u8 proto;
 	__u8 has_l4_checksum;
 	__u8 closing;
-	__u8 pad;
+	__u8 tcp_flags;
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 tot_len;
@@ -298,6 +300,10 @@ struct xdp_dispatch_ctx_v6 {
 #define FORWARD_FULLNAT_STATE_NEW_SESSION 0x4
 #define FORWARD_FULLNAT_STATE_COUNT_UDP_NOW 0x8
 #define FORWARD_FULLNAT_STATE_FLOW_BANK_OLD 0x10
+#define FORWARD_TCP_FLAG_FIN 0x01
+#define FORWARD_TCP_FLAG_SYN 0x02
+#define FORWARD_TCP_FLAG_RST 0x04
+#define FORWARD_TCP_FLAG_ACK 0x10
 #define FORWARD_XDP_FLOW_BANK_ACTIVE 0
 #define FORWARD_XDP_FLOW_BANK_OLD 1
 #define FORWARD_XDP_FLOW_MIGRATION_V4_OLD 0x1
@@ -1012,6 +1018,11 @@ static __always_inline int parse_ipv4_l4(struct xdp_md *xdp, struct packet_ctx *
 		ctx->src_port = bpf_ntohs(tcph->source);
 		ctx->dst_port = bpf_ntohs(tcph->dest);
 		ctx->has_l4_checksum = 1;
+		ctx->tcp_flags =
+			(tcph->fin ? FORWARD_TCP_FLAG_FIN : 0) |
+			(tcph->syn ? FORWARD_TCP_FLAG_SYN : 0) |
+			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
+			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
 		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
 		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
@@ -1028,6 +1039,7 @@ static __always_inline int parse_ipv4_l4(struct xdp_md *xdp, struct packet_ctx *
 		ctx->src_port = bpf_ntohs(udph->source);
 		ctx->dst_port = bpf_ntohs(udph->dest);
 		ctx->has_l4_checksum = udph->check != 0;
+		ctx->tcp_flags = 0;
 		ctx->closing = 0;
 		FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
 		return 0;
@@ -1046,6 +1058,7 @@ static __always_inline int parse_ipv4_l4(struct xdp_md *xdp, struct packet_ctx *
 		ctx->dst_port = bpf_ntohs(icmph->un.echo.id);
 	}
 	ctx->has_l4_checksum = 1;
+	ctx->tcp_flags = 0;
 	ctx->closing = 0;
 	FORWARD_SET_PAYLOAD_LEN(ctx, 0);
 	if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
@@ -1111,6 +1124,11 @@ static __always_inline int parse_ipv6_l4(struct xdp_md *xdp, struct packet_ctx_v
 		ctx->src_port = bpf_ntohs(tcph->source);
 		ctx->dst_port = bpf_ntohs(tcph->dest);
 		ctx->has_l4_checksum = 1;
+		ctx->tcp_flags =
+			(tcph->fin ? FORWARD_TCP_FLAG_FIN : 0) |
+			(tcph->syn ? FORWARD_TCP_FLAG_SYN : 0) |
+			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
+			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
 		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
 		if (ctx->tot_len > (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)))
@@ -1126,6 +1144,7 @@ static __always_inline int parse_ipv6_l4(struct xdp_md *xdp, struct packet_ctx_v
 	ctx->src_port = bpf_ntohs(udph->source);
 	ctx->dst_port = bpf_ntohs(udph->dest);
 	ctx->has_l4_checksum = 1;
+	ctx->tcp_flags = 0;
 	ctx->closing = 0;
 	FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
 	return 0;
@@ -1229,6 +1248,20 @@ static __always_inline int is_egress_nat_flow(const struct flow_value_v4 *flow)
 static __always_inline int is_datagram_proto(__u8 proto)
 {
 	return proto == IPPROTO_UDP || proto == IPPROTO_ICMP;
+}
+
+static __always_inline int is_initial_tcp_syn(const struct packet_ctx *ctx)
+{
+	if (!ctx || ctx->proto != IPPROTO_TCP)
+		return 0;
+	return ctx->tcp_flags == FORWARD_TCP_FLAG_SYN;
+}
+
+static __always_inline int is_initial_tcp_syn_v6(const struct packet_ctx_v6 *ctx)
+{
+	if (!ctx || ctx->proto != IPPROTO_TCP)
+		return 0;
+	return ctx->tcp_flags == FORWARD_TCP_FLAG_SYN;
 }
 
 static __always_inline int is_local_ipv4(__u32 addr)
@@ -2258,6 +2291,17 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
 		}
+		if (ctx->closing) {
+			flow_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+			if (flow_value->front_close_seen_ns == 0)
+				flow_value->front_close_seen_ns = now;
+			flow_value->last_seen_ns = now;
+			if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
+				drop_rule_tcp_active(flow_value->rule_id);
+				flow_value->flags &= ~FORWARD_FLOW_FLAG_COUNTED;
+			}
+			update_flow = 1;
+		}
 	}
 
 	if (update_flow) {
@@ -2274,13 +2318,6 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 		return XDP_DROP;
 	if (rewrite_l4_snat(xdp, ctx, flow_value->front_addr, flow_value->front_port) < 0)
 		return XDP_ABORTED;
-	if (ctx->closing) {
-		xdp_diag_v4_transparent_reply_closing_handled();
-		if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
-			drop_rule_tcp_active(flow_value->rule_id);
-		if (delete_flow_v4_in_bank(flow_bank, flow_key) == 0)
-			drop_kernel_flow_occupancy();
-	}
 	xdp_diag_redirect_invoked();
 	return xdp_redirect_ifindex((__u32)redirect_ifindex);
 }
@@ -2295,6 +2332,7 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 	int update_flow = 0;
 	int new_session = 0;
 	int count_udp_now = 0;
+	int close_complete = 0;
 	int redirect_ifindex = 0;
 
 	if (!flow_value)
@@ -2309,6 +2347,8 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 
 	flow = lookup_flow_v4_active_or_old(&flow_key, &flow_bank);
 	if (!flow) {
+		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
+			return XDP_DROP;
 		now = bpf_ktime_get_ns();
 		flow_value->rule_id = rule->rule_id;
 		flow_value->front_addr = ctx->dst_addr;
@@ -2365,6 +2405,8 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 				flow_value->front_close_seen_ns = now;
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
+		} else if ((flow->flags & FORWARD_FLOW_FLAG_FRONT_CLOSING) != 0 && ctx->tcp_flags == FORWARD_TCP_FLAG_ACK) {
+			close_complete = 1;
 		} else if (flow->last_seen_ns == 0 || now < flow->last_seen_ns || (now - flow->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 			*flow_value = *flow;
 			flow_value->last_seen_ns = now;
@@ -2391,7 +2433,13 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 	if (rewrite_l4_dnat(xdp, ctx, rule->backend_addr, rule->backend_port) < 0)
 		return XDP_ABORTED;
 	xdp_diag_redirect_invoked();
-	return xdp_redirect_ifindex((__u32)redirect_ifindex);
+	{
+		int action = xdp_redirect_ifindex((__u32)redirect_ifindex);
+
+		if (close_complete && action == XDP_REDIRECT && delete_flow_v4_in_bank(flow_bank, &flow_key) == 0)
+			drop_kernel_flow_occupancy();
+		return action;
+	}
 }
 
 static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct packet_ctx *ctx, const struct flow_key_v4 *reply_key, const struct flow_value_v4 *flow, __u8 flow_bank)
@@ -2565,6 +2613,8 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 		}
 		goto have_session;
 	}
+	if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
+		return XDP_DROP;
 
 	seed = mix_nat_probe_seed(fullnat_seed(rule, ctx) ^ ((__u32)rule->out_ifindex << 1));
 	start = seed % FORWARD_NAT_PORT_RANGE;
@@ -2988,6 +3038,8 @@ static __always_inline int prepare_fullnat_forward_v6(struct xdp_md *xdp, const 
 	}
 	if (flow_bank_out)
 		*flow_bank_out = FORWARD_XDP_FLOW_BANK_ACTIVE;
+	if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn_v6(ctx))
+		return -2;
 
 	seed = mix_nat_probe_seed(fullnat_seed_v6(rule, ctx) ^ ((__u32)rule->out_ifindex << 1));
 	start = seed % FORWARD_NAT_PORT_RANGE;
@@ -3116,6 +3168,8 @@ static __always_inline int handle_fullnat_forward_v6(struct xdp_md *xdp, const s
 	__u8 flow_bank = existing_flow_bank;
 	int state = prepare_fullnat_forward_v6(xdp, ctx, rule, &flow_bank);
 
+	if (state == -2)
+		return XDP_PASS;
 	if (state < 0)
 		return XDP_DROP;
 	return finalize_fullnat_forward_v6(xdp, ctx, rule, (__u8)state, flow_bank);
