@@ -370,7 +370,10 @@ func maybeRedistributeManagedNetworkWorkers(pm *ProcessManager) {
 	if pm == nil || pm.db == nil || pm.cfg == nil {
 		return
 	}
-	pm.redistributeWorkers()
+	resp := queueManagedNetworkRuntimeReload(pm)
+	if strings.TrimSpace(resp.Error) != "" {
+		log.Printf("managed network runtime reload after api change finished with status=%s: %s", strings.TrimSpace(resp.Status), strings.TrimSpace(resp.Error))
+	}
 }
 
 func queueManagedNetworkRuntimeReload(pm *ProcessManager) ManagedNetworkRuntimeReloadResponse {

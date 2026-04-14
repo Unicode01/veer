@@ -443,6 +443,38 @@ func TestHandleAddManagedNetworkRejectsInvalidBridgeMTU(t *testing.T) {
 	assertValidationIssue(t, resp, "create", "bridge_mtu", "bridge_mtu must be between 0 and 65535")
 }
 
+func TestHandleAddManagedNetworkQueuesTargetedRuntimeReload(t *testing.T) {
+	db := openTestDB(t)
+
+	pm := &ProcessManager{
+		db:                       db,
+		cfg:                      &Config{DefaultEngine: ruleEngineAuto},
+		managedRuntimeReloadWake: make(chan struct{}, 1),
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/managed-networks", ManagedNetwork{
+		Name:       "lab",
+		BridgeMode: managedNetworkBridgeModeCreate,
+		Bridge:     "vmbr9",
+	})
+	w := httptest.NewRecorder()
+
+	handleAddManagedNetwork(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if !pm.managedRuntimeReloadPending {
+		t.Fatal("managedRuntimeReloadPending = false, want queued targeted reload")
+	}
+	if pm.redistributePending {
+		t.Fatal("redistributePending = true, want no immediate full redistribute")
+	}
+	status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+	if status.LastRequestSource != "manual" {
+		t.Fatalf("LastRequestSource = %q, want manual", status.LastRequestSource)
+	}
+}
+
 func TestHandleUpdateManagedNetworkNotFoundIncludesIssues(t *testing.T) {
 	db := openTestDB(t)
 	req := newJSONRequest(t, http.MethodPut, "/api/managed-networks", ManagedNetwork{
