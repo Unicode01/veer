@@ -116,6 +116,25 @@ func samePreparedKernelRuleDataplaneIgnoringRuleID(a, b preparedKernelRule) bool
 	return left == right
 }
 
+func samePreparedKernelRuleFlowContinuity(a, b preparedKernelRule) bool {
+	if !sameKernelRuleDataplaneConfig(a.rule, b.rule) ||
+		a.inIfIndex != b.inIfIndex ||
+		a.outIfIndex != b.outIfIndex ||
+		!sameKernelReplyIfIndexes(a.replyIfIndexes, b.replyIfIndexes) ||
+		!sameKernelIfParentMappings(a.replyIfParents, b.replyIfParents) ||
+		!sameKernelPreparedRuleSpec(a.spec, b.spec) ||
+		a.key != b.key {
+		return false
+	}
+	left := a.value
+	right := b.value
+	left.RuleID = 0
+	right.RuleID = 0
+	left.Flags &^= kernelRuleFlagTrafficStats
+	right.Flags &^= kernelRuleFlagTrafficStats
+	return left == right
+}
+
 func sameKernelReplyIfIndexes(a, b []int) bool {
 	if len(a) != len(b) {
 		return false

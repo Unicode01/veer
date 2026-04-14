@@ -608,6 +608,36 @@ func TestCollectPreparedKernelRuleFlowPurgeIDsIgnoresSyntheticRuleIDDrift(t *tes
 	}
 }
 
+func TestCollectPreparedKernelRuleFlowPurgeIDsIgnoresTrafficStatsFlagChange(t *testing.T) {
+	oldRule := preparedKernelRule{
+		rule: Rule{
+			ID:       71,
+			Protocol: "tcp",
+		},
+		inIfIndex:  2,
+		outIfIndex: 3,
+		key: tcRuleKeyV4{
+			IfIndex: 2,
+			DstAddr: 0x0a000001,
+			DstPort: 443,
+			Proto:   6,
+		},
+		value: tcRuleValueV4{
+			RuleID:      71,
+			BackendAddr: 0xc0000201,
+			BackendPort: 8443,
+			Flags:       0,
+			OutIfIndex:  3,
+		},
+	}
+	newRule := oldRule
+	newRule.value.Flags = kernelRuleFlagTrafficStats
+
+	if got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{oldRule}, []preparedKernelRule{newRule}); len(got) != 0 {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want no purge ids when only traffic stats flag changes", got)
+	}
+}
+
 func TestPreparedKernelRulesNeedAttachmentResetForEgressNATChanges(t *testing.T) {
 	mainRule := preparedKernelRule{
 		rule: Rule{ID: 61, Protocol: "tcp"},

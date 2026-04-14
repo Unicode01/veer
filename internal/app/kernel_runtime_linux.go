@@ -1997,7 +1997,7 @@ func collectPreparedKernelRuleFlowPurgeIDs(oldItems []preparedKernelRule, nextIt
 
 	var purgeIDs map[uint32]struct{}
 	for key, oldGroup := range oldByKey {
-		if preparedKernelRuleGroupsEqualBy(oldGroup, nextByKey[key], samePreparedKernelRuleDataplaneIgnoringRuleID) {
+		if preparedKernelRuleGroupsEqualBy(oldGroup, nextByKey[key], samePreparedKernelRuleFlowContinuity) {
 			continue
 		}
 		for _, item := range oldGroup {
