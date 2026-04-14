@@ -1570,8 +1570,8 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 
 		totalEntries := (pr.EndPort - pr.StartPort + 1) * len(variants)
 		requestedEntries := reservedKernelEntries + totalEntries
+		plan := sampleKernelRangePlan(pr, variants, planner, rangePreferred, kernelReason)
 		if pr.Enabled && requestedEntries > effectiveKernelRulesMapLimit(configuredKernelRulesMapLimit, requestedEntries) {
-			plan := sampleKernelRangePlan(pr, variants, planner, rangePreferred, kernelReason)
 			if plan.EffectiveEngine == ruleEngineKernel {
 				plan.EffectiveEngine = ruleEngineUserspace
 				if plan.FallbackReason == "" {
@@ -1581,10 +1581,11 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 			rangePlans[pr.ID] = plan
 			continue
 		}
-		if pr.Enabled {
-			candidates = growKernelCandidateBuffer(candidates, totalEntries)
+		rangePlans[pr.ID] = plan
+		if !pr.Enabled || plan.EffectiveEngine != ruleEngineKernel {
+			continue
 		}
-		acc := newKernelOwnerPlanAccumulator(rangePreferred)
+		candidates = growKernelCandidateBuffer(candidates, totalEntries)
 		candidateStart := len(candidates)
 		allExpanded := true
 		baseRule := Rule{
@@ -1606,11 +1607,6 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 			for _, proto := range variants {
 				id, err := allocateSyntheticKernelRuleID(&nextSyntheticID)
 				if err != nil {
-					acc.Add(ruleDataplanePlan{
-						PreferredEngine: rangePreferred,
-						EffectiveEngine: ruleEngineUserspace,
-						FallbackReason:  err.Error(),
-					})
 					allExpanded = false
 					continue
 				}
@@ -1620,22 +1616,19 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 				item.InPort = port
 				item.OutPort = outPort
 				item.Protocol = proto
-				acc.Add(planner.planWithPreferredAndKernelReason(item, rangePreferred, kernelReason))
-				if pr.Enabled {
-					candidates = append(candidates, kernelCandidateRule{owner: owner, rule: item})
-				}
+				candidates = append(candidates, kernelCandidateRule{owner: owner, rule: item})
 			}
 		}
 
-		plan := acc.Result()
-		if !allExpanded && plan.FallbackReason == "" {
-			plan.FallbackReason = "kernel dataplane synthetic rule expansion failed"
-		}
-		rangePlans[pr.ID] = plan
-		if pr.Enabled && plan.EffectiveEngine == ruleEngineKernel {
+		if allExpanded {
 			reservedKernelEntries += len(candidates) - candidateStart
 			continue
 		}
+		plan.EffectiveEngine = ruleEngineUserspace
+		if plan.FallbackReason == "" {
+			plan.FallbackReason = "kernel dataplane synthetic rule expansion failed"
+		}
+		rangePlans[pr.ID] = plan
 		candidates = candidates[:candidateStart]
 	}
 
