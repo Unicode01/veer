@@ -367,6 +367,8 @@ func (pm *ProcessManager) shouldSkipManagedNetworkAddrReload(fingerprint string)
 	return pm.managedRuntimeReloadAppliedFingerprint != "" && pm.managedRuntimeReloadAppliedFingerprint == fingerprint
 }
 
+var managedNetworkAddrReloadSkipCheck = canSkipManagedNetworkAddrReload
+
 func appendManagedNetworkRuntimeReloadIssue(issues []string, scope string, err error) []string {
 	if err == nil {
 		return issues
@@ -513,15 +515,18 @@ func (pm *ProcessManager) managedRuntimeReloadLoop() {
 		pm.managedRuntimeReloadInterfaces = nil
 		pm.mu.Unlock()
 
-		pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, managedNetworkRuntimeInterfaceNamesFromSet(reloadInterfaces)...)
+		reloadInterfaceNames := managedNetworkRuntimeInterfaceNamesFromSet(reloadInterfaces)
+		pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, reloadInterfaceNames...)
 		if summary := summarizeManagedRuntimeReloadInterfaces(reloadInterfaces); summary != "" {
 			log.Printf("managed network runtime: auto reload triggered by %s on %s", managedNetworkRuntimeReloadSourceLabel(reloadSource), summary)
 		}
 		pm.markManagedNetworkRuntimeReloadStarted()
 		var reloadRepairErr error
+		var repairInterfaceNames []string
 		if pm.shouldAutoRepairManagedNetworkRuntimeReload(reloadSource) {
 			repairResult, repairErr := repairManagedNetworkHostStateForProcessManager(pm)
-			pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, managedNetworkRepairResultInterfaceNames(repairResult)...)
+			repairInterfaceNames = managedNetworkRepairResultInterfaceNames(repairResult)
+			pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, repairInterfaceNames...)
 			if repairSummary := summarizeManagedNetworkRepairResult(repairResult); repairSummary != "" {
 				log.Printf("managed network runtime: auto repair applied %s", repairSummary)
 			}
@@ -537,6 +542,7 @@ func (pm *ProcessManager) managedRuntimeReloadLoop() {
 			continue
 		}
 		pm.noteManagedNetworkRuntimeReloadIssue("managed network auto repair", reloadRepairErr)
+		pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkRuntimeReloadPostApplySuppressFor(reloadSource), append(reloadInterfaceNames, repairInterfaceNames...)...)
 	}
 }
 
@@ -610,7 +616,11 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	}
 
 	reloadSource := pm.snapshotManagedNetworkRuntimeReloadStatus().LastRequestSource
-	if reloadSource == "addr_change" && ipv6AssignmentLoadErr == nil && egressNATSnapshot.Err == nil && pm.shouldSkipManagedNetworkAddrReload(reloadFingerprint) {
+	if reloadSource == "addr_change" &&
+		ipv6AssignmentLoadErr == nil &&
+		egressNATSnapshot.Err == nil &&
+		managedNetworkAddrReloadSkipCheck(managedNetworks, managedNetworkReservations) &&
+		pm.shouldSkipManagedNetworkAddrReload(reloadFingerprint) {
 		pm.mu.Lock()
 		pm.managedNetworkInterfaces = managedNetworkInterfaces
 		pm.dynamicEgressNATParents = dynamicEgressNATParents

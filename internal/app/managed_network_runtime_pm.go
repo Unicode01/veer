@@ -54,6 +54,13 @@ func managedNetworkRuntimeReloadSourceLabel(source string) string {
 	}
 }
 
+func managedNetworkRuntimeReloadPostApplySuppressFor(source string) time.Duration {
+	if normalizeManagedNetworkRuntimeReloadSource(source) == "link_change" {
+		return managedNetworkLinkChangeSuppressFor
+	}
+	return 0
+}
+
 func (pm *ProcessManager) shouldAutoRepairManagedNetworkRuntimeReload(source string) bool {
 	if pm == nil {
 		return false

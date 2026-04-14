@@ -139,13 +139,47 @@ func (srv *managedNetworkDHCPv4Server) start() {
 	go srv.run()
 }
 
-func (srv *managedNetworkDHCPv4Server) update(config managedNetworkDHCPv4Config) {
+func managedNetworkDHCPv4ConfigsEqual(a managedNetworkDHCPv4Config, b managedNetworkDHCPv4Config) bool {
+	if a.Bridge != b.Bridge ||
+		a.UplinkInterface != b.UplinkInterface ||
+		a.ServerCIDR != b.ServerCIDR ||
+		a.ServerIP != b.ServerIP ||
+		a.Gateway != b.Gateway ||
+		a.PoolStart != b.PoolStart ||
+		a.PoolEnd != b.PoolEnd {
+		return false
+	}
+	if len(a.DNSServers) != len(b.DNSServers) {
+		return false
+	}
+	for i := range a.DNSServers {
+		if a.DNSServers[i] != b.DNSServers[i] {
+			return false
+		}
+	}
+	if len(a.Reservations) != len(b.Reservations) {
+		return false
+	}
+	for i := range a.Reservations {
+		if a.Reservations[i] != b.Reservations[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (srv *managedNetworkDHCPv4Server) update(config managedNetworkDHCPv4Config) bool {
 	if srv == nil {
-		return
+		return false
 	}
 	srv.mu.Lock()
+	if managedNetworkDHCPv4ConfigsEqual(srv.config, config) {
+		srv.mu.Unlock()
+		return false
+	}
 	srv.config = config
 	srv.mu.Unlock()
+	return true
 }
 
 func (srv *managedNetworkDHCPv4Server) snapshot() managedNetworkDHCPv4Config {

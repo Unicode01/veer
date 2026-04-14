@@ -504,7 +504,7 @@ func TestManagedNetworkIntegrationRecoversAfterBridgeIPv4AddressReset(t *testing
 		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
 		t.Fatalf("remove managed network bridge ipv4 address: %v", err)
 	}
-	if err := waitForManagedNetworkRuntimeReload(t, harness.APIBase, reloadRequestedAfter, "link_change"); err != nil {
+	if err := waitForManagedNetworkRuntimeReload(t, harness.APIBase, reloadRequestedAfter, "link_change", "addr_change"); err != nil {
 		logForwardLogOnFailure(t, harness.LogPath)
 		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
 		t.Fatal(err)
@@ -607,12 +607,20 @@ func mustBuildManagedNetworkIntegrationIPv6Assignment(t *testing.T, network Mana
 	return assignments[0]
 }
 
-func waitForManagedNetworkRuntimeReload(t *testing.T, apiBase string, requestedAfter time.Time, source string) error {
+func waitForManagedNetworkRuntimeReload(t *testing.T, apiBase string, requestedAfter time.Time, sources ...string) error {
 	t.Helper()
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(20 * time.Second)
 	var last ManagedNetworkRuntimeReloadStatus
+	allowedSources := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		source = strings.TrimSpace(source)
+		if source == "" {
+			continue
+		}
+		allowedSources[source] = struct{}{}
+	}
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequest(http.MethodGet, apiBase+"/api/managed-networks/runtime-status", nil)
 		if err != nil {
@@ -652,11 +660,14 @@ func waitForManagedNetworkRuntimeReload(t *testing.T, apiBase string, requestedA
 			time.Sleep(250 * time.Millisecond)
 			continue
 		}
-		if expected := strings.TrimSpace(source); expected != "" && strings.TrimSpace(last.LastRequestSource) != expected {
-			time.Sleep(250 * time.Millisecond)
-			continue
+		if len(allowedSources) > 0 {
+			if _, ok := allowedSources[strings.TrimSpace(last.LastRequestSource)]; !ok {
+				time.Sleep(250 * time.Millisecond)
+				continue
+			}
 		}
 		if strings.TrimSpace(last.LastResult) != "success" {
+			time.Sleep(250 * time.Millisecond)
 			return fmt.Errorf("managed network runtime reload completed with result=%q error=%q summary=%q", last.LastResult, last.LastError, last.LastAppliedSummary)
 		}
 		return nil

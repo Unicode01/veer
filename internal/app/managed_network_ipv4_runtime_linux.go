@@ -173,8 +173,11 @@ func (ops *linuxManagedNetworkNetOps) EnsureManagedNetworkDHCPv4(config managedN
 		log.Printf("managed network runtime: dhcpv4 enabled on %s (gateway=%s pool=%s-%s dns=%v reservations=%d)", config.Bridge, config.Gateway, config.PoolStart, config.PoolEnd, config.DNSServers, len(config.Reservations))
 		return nil
 	}
-	server.update(config)
+	changed := server.update(config)
 	ops.mu.Unlock()
+	if !changed {
+		return nil
+	}
 	log.Printf("managed network runtime: dhcpv4 updated on %s (gateway=%s pool=%s-%s dns=%v reservations=%d)", config.Bridge, config.Gateway, config.PoolStart, config.PoolEnd, config.DNSServers, len(config.Reservations))
 	return nil
 }

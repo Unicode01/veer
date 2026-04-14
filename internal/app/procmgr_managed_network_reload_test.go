@@ -346,6 +346,66 @@ func TestManagedRuntimeReloadLoopAppliesQueuedReload(t *testing.T) {
 	}
 }
 
+func TestManagedRuntimeReloadLoopLinkChangeExtendsInterfaceSuppression(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:          "lab",
+		BridgeMode:    managedNetworkBridgeModeCreate,
+		Bridge:        "vmbr1",
+		IPv4Enabled:   true,
+		IPv4CIDR:      "192.0.2.1/24",
+		IPv4PoolEnd:   "192.0.2.20",
+		IPv4PoolStart: "192.0.2.10",
+		Enabled:       true,
+	}); err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                                db,
+		cfg:                               &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:             fakeManagedRuntime,
+		ipv6Runtime:                       fakeIPv6Runtime,
+		shutdownCh:                        make(chan struct{}),
+		managedRuntimeReloadWake:          make(chan struct{}, 1),
+		managedRuntimeReloadDone:          make(chan struct{}),
+		managedRuntimeReloadSuppressUntil: make(map[string]time.Time),
+		redistributeWake:                  make(chan struct{}, 1),
+	}
+
+	go pm.managedRuntimeReloadLoop()
+	t.Cleanup(func() {
+		pm.beginShutdown()
+		if !waitForStopChannel(pm.managedRuntimeReloadDone, time.Second) {
+			t.Fatal("managedRuntimeReloadDone did not close during cleanup")
+		}
+	})
+
+	pm.requestManagedNetworkRuntimeReloadWithSource(0, "link_change", "tap100i0", "vmbr1")
+
+	waitForManagedNetworkReloadCondition(t, 2*time.Second, func() bool {
+		status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+		return status.LastResult == "success" && fakeManagedRuntime.reconcileCalls == 1
+	}, "managed runtime reload success with extended suppression")
+
+	now := time.Now()
+	pm.mu.Lock()
+	tapSuppressUntil := pm.managedRuntimeReloadSuppressUntil["tap100i0"]
+	bridgeSuppressUntil := pm.managedRuntimeReloadSuppressUntil["vmbr1"]
+	pm.mu.Unlock()
+
+	minExpected := now.Add(managedNetworkLinkChangeSuppressFor - 2*time.Second)
+	if !tapSuppressUntil.After(minExpected) {
+		t.Fatalf("tap100i0 suppress until = %v, want after %v", tapSuppressUntil, minExpected)
+	}
+	if !bridgeSuppressUntil.After(minExpected) {
+		t.Fatalf("vmbr1 suppress until = %v, want after %v", bridgeSuppressUntil, minExpected)
+	}
+}
+
 func TestManagedRuntimeReloadLoopMarksPartialWhenManagedRuntimeReconcileFails(t *testing.T) {
 	db := openTestDB(t)
 
@@ -840,6 +900,14 @@ func TestManagedRuntimeReloadLoopAddrChangeSkipsAutoRepair(t *testing.T) {
 func TestManagedRuntimeReloadLoopAddrChangeSkipsUnchangedEffectiveState(t *testing.T) {
 	db := openTestDB(t)
 
+	oldAddrReloadSkipCheck := managedNetworkAddrReloadSkipCheck
+	managedNetworkAddrReloadSkipCheck = func([]ManagedNetwork, []ManagedNetworkReservation) bool {
+		return true
+	}
+	defer func() {
+		managedNetworkAddrReloadSkipCheck = oldAddrReloadSkipCheck
+	}()
+
 	network := ManagedNetwork{
 		Name:          "lab",
 		BridgeMode:    managedNetworkBridgeModeCreate,
@@ -899,6 +967,14 @@ func TestManagedRuntimeReloadLoopAddrChangeSkipsUnchangedEffectiveState(t *testi
 
 func TestRedistributeWorkersSeedsManagedRuntimeReloadFingerprintForAddrChangeSkip(t *testing.T) {
 	db := openTestDB(t)
+
+	oldAddrReloadSkipCheck := managedNetworkAddrReloadSkipCheck
+	managedNetworkAddrReloadSkipCheck = func([]ManagedNetwork, []ManagedNetworkReservation) bool {
+		return true
+	}
+	defer func() {
+		managedNetworkAddrReloadSkipCheck = oldAddrReloadSkipCheck
+	}()
 
 	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
 		Name:          "lab",

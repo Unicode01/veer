@@ -1052,6 +1052,147 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersRefreshesDynamicEgressNATOwner
 	}
 }
 
+func TestRetryNetlinkTriggeredKernelFallbackOwnersRemovesManagedAutoEgressNATOwnerOnLinkChangeWithoutChildren(t *testing.T) {
+	db := openTestDB(t)
+
+	oldLoad := loadInterfaceInfosForEgressNATTests
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return []InterfaceInfo{
+			{Name: "vmbr1", Kind: "bridge"},
+			{Name: "eno1", Kind: "device"},
+		}, nil
+	}
+	defer func() {
+		loadInterfaceInfosForEgressNATTests = oldLoad
+	}()
+
+	rule := Rule{
+		InInterface:  "eno1",
+		InIP:         "192.0.2.53",
+		InPort:       15003,
+		OutInterface: "vmbr1",
+		OutIP:        "198.51.100.53",
+		OutPort:      25003,
+		Protocol:     "tcp",
+		Enabled:      true,
+	}
+	ruleID, err := dbAddRule(db, &rule)
+	if err != nil {
+		t.Fatalf("dbAddRule(rule) error = %v", err)
+	}
+	rule.ID = ruleID
+	rule.kernelLogKind = workerKindRule
+	rule.kernelLogOwnerID = ruleID
+
+	network := ManagedNetwork{
+		Name:            "managed-vmbr1",
+		Bridge:          "vmbr1",
+		UplinkInterface: "eno1",
+		AutoEgressNAT:   true,
+		Enabled:         true,
+	}
+	networkID, err := dbAddManagedNetwork(db, &network)
+	if err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+	natID := managedNetworkSyntheticID("egress_nat", networkID, "vmbr1")
+
+	oldEgressRule := Rule{
+		ID:               5001,
+		InInterface:      "tap100i0",
+		InIP:             "0.0.0.0",
+		InPort:           0,
+		OutInterface:     "eno1",
+		OutIP:            "0.0.0.0",
+		OutPort:          0,
+		Protocol:         "tcp",
+		Enabled:          true,
+		kernelMode:       kernelModeEgressNAT,
+		kernelNATType:    egressNATTypeSymmetric,
+		kernelLogKind:    workerKindEgressNAT,
+		kernelLogOwnerID: natID,
+	}
+
+	rt := &stubIncrementalKernelRuntime{
+		assignments: map[int64]string{
+			ruleID:           kernelEngineTC,
+			oldEgressRule.ID: kernelEngineTC,
+		},
+		retainedRules: map[int64][]Rule{
+			ruleID: {rule},
+		},
+		retainedEgressNATs: map[int64][]Rule{
+			natID: {oldEgressRule},
+		},
+	}
+
+	pm := &ProcessManager{
+		ruleWorkers:            make(map[int]*WorkerInfo),
+		rangeWorkers:           make(map[int]*WorkerInfo),
+		db:                     db,
+		cfg:                    &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 3},
+		rulePlans:              map[int64]ruleDataplanePlan{},
+		rangePlans:             map[int64]rangeDataplanePlan{},
+		egressNATPlans:         map[int64]ruleDataplanePlan{},
+		kernelRuntime:          rt,
+		kernelRules:            map[int64]bool{ruleID: true},
+		kernelRanges:           map[int64]bool{},
+		kernelEgressNATs:       map[int64]bool{natID: true},
+		kernelRuleEngines:      map[int64]string{ruleID: kernelEngineTC},
+		kernelRangeEngines:     map[int64]string{},
+		kernelEgressNATEngines: map[int64]string{natID: kernelEngineTC},
+		kernelFlowOwners: map[uint32]kernelCandidateOwner{
+			uint32(ruleID):           {kind: workerKindRule, id: ruleID},
+			uint32(oldEgressRule.ID): {kind: workerKindEgressNAT, id: natID},
+		},
+	}
+	pm.rulePlans[ruleID] = ruleDataplanePlan{
+		KernelEligible:  true,
+		EffectiveEngine: ruleEngineKernel,
+	}
+	pm.egressNATPlans[natID] = ruleDataplanePlan{
+		PreferredEngine: ruleEngineKernel,
+		KernelEligible:  true,
+		EffectiveEngine: ruleEngineKernel,
+	}
+
+	trigger := newKernelNetlinkRecoveryTrigger("link")
+	trigger.addInterfaceName("vmbr1")
+
+	result := pm.retryNetlinkTriggeredKernelFallbackOwnersForTrigger(trigger)
+	if !result.handled {
+		t.Fatal("retryNetlinkTriggeredKernelFallbackOwnersForTrigger() unexpectedly requested full redistribute for managed auto egress nat removal")
+	}
+	if !result.attempted {
+		t.Fatal("retryNetlinkTriggeredKernelFallbackOwnersForTrigger() attempted = false, want true")
+	}
+	if result.recoveredEgressNATs != 0 {
+		t.Fatalf("recovered egress nat owners = %d, want 0 when child interfaces disappeared", result.recoveredEgressNATs)
+	}
+	if len(rt.incrementalCalls) != 1 {
+		t.Fatalf("incremental reconcile calls = %d, want 1 retained-only refresh", len(rt.incrementalCalls))
+	}
+	retained := rt.incrementalCalls[0].retainedByEngine[kernelEngineTC]
+	if len(retained) != 1 || retained[0].ID != ruleID {
+		t.Fatalf("retained tc rules = %#v, want only retained forward rule %d", retained, ruleID)
+	}
+	if len(rt.incrementalCalls[0].newRules) != 0 {
+		t.Fatalf("incremental new rules = %#v, want 0 after managed auto egress nat targets disappeared", rt.incrementalCalls[0].newRules)
+	}
+	if !pm.kernelRules[ruleID] {
+		t.Fatalf("kernelRules = %#v, want retained rule %d active", pm.kernelRules, ruleID)
+	}
+	if len(pm.kernelEgressNATs) != 0 {
+		t.Fatalf("kernelEgressNATs = %#v, want managed auto egress nat removed from kernel", pm.kernelEgressNATs)
+	}
+	if _, ok := pm.kernelFlowOwners[uint32(oldEgressRule.ID)]; ok {
+		t.Fatalf("kernelFlowOwners still contains removed egress rule id %d: %#v", oldEgressRule.ID, pm.kernelFlowOwners)
+	}
+	if got := pm.egressNATPlans[natID]; got.EffectiveEngine != ruleEngineUserspace || !strings.Contains(got.FallbackReason, "no eligible child interfaces") {
+		t.Fatalf("egress nat plan = %+v, want userspace fallback after child removal", got)
+	}
+}
+
 func TestRetryNetlinkTriggeredKernelFallbackOwnersTargetsMatchingNeighborTrigger(t *testing.T) {
 	db := openTestDB(t)
 

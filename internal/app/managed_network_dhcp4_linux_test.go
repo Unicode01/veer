@@ -74,6 +74,46 @@ func TestManagedNetworkDHCPv4AllocateLeaseSkipsReservedPoolAddress(t *testing.T)
 	}
 }
 
+func TestManagedNetworkDHCPv4ConfigsEqual(t *testing.T) {
+	base := managedNetworkDHCPv4Config{
+		Bridge:          "vmbr1",
+		UplinkInterface: "eno1",
+		ServerCIDR:      "192.0.2.1/24",
+		ServerIP:        "192.0.2.1",
+		Gateway:         "192.0.2.1",
+		PoolStart:       "192.0.2.10",
+		PoolEnd:         "192.0.2.20",
+		DNSServers:      []string{"1.1.1.1", "8.8.8.8"},
+		Reservations: []managedNetworkDHCPv4Reservation{{
+			MACAddress:  "aa:bb:cc:dd:ee:ff",
+			IPv4Address: "192.0.2.11",
+			Remark:      "vm100",
+		}},
+	}
+	same := base
+	same.DNSServers = append([]string(nil), base.DNSServers...)
+	same.Reservations = append([]managedNetworkDHCPv4Reservation(nil), base.Reservations...)
+	if !managedNetworkDHCPv4ConfigsEqual(base, same) {
+		t.Fatal("managedNetworkDHCPv4ConfigsEqual() = false, want true for identical config")
+	}
+
+	changedDNS := same
+	changedDNS.DNSServers = []string{"1.1.1.1"}
+	if managedNetworkDHCPv4ConfigsEqual(base, changedDNS) {
+		t.Fatal("managedNetworkDHCPv4ConfigsEqual() = true, want false after dns change")
+	}
+
+	changedReservation := same
+	changedReservation.Reservations = []managedNetworkDHCPv4Reservation{{
+		MACAddress:  "aa:bb:cc:dd:ee:ff",
+		IPv4Address: "192.0.2.12",
+		Remark:      "vm100",
+	}}
+	if managedNetworkDHCPv4ConfigsEqual(base, changedReservation) {
+		t.Fatal("managedNetworkDHCPv4ConfigsEqual() = true, want false after reservation change")
+	}
+}
+
 func TestBuildManagedNetworkDHCPv4ReplyFrameSetsUDPChecksum(t *testing.T) {
 	state := managedNetworkDHCPv4State{
 		IfName: "vmbr0",

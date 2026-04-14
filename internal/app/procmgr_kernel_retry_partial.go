@@ -447,6 +447,12 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		result.detail = fmt.Sprintf("load egress nats: %v", err)
 		return result
 	}
+	managedNetworks, err := dbGetManagedNetworks(pm.db)
+	if err != nil {
+		result.handled = false
+		result.detail = fmt.Sprintf("load managed networks: %v", err)
+		return result
+	}
 
 	defaultEngine := ruleEngineAuto
 	maxWorkers := 0
@@ -461,11 +467,19 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	kernelPressure := snapshotKernelRuntimePressure(pm.kernelRuntime)
 	egressNATSnapshot := egressNATInterfaceSnapshot{}
 	dynamicEgressNATParents := map[string]struct{}{}
-	if len(egressNATs) > 0 {
+	if len(egressNATs) > 0 || len(managedNetworks) > 0 {
 		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
-		egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
-		dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
 	}
+	if len(egressNATs) > 0 {
+		egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
+	}
+	if len(managedNetworks) > 0 {
+		managedNetworkCompiled := compileManagedNetworkRuntime(managedNetworks, nil, egressNATs, egressNATSnapshot.Infos)
+		if len(managedNetworkCompiled.EgressNATs) > 0 {
+			egressNATs = append(egressNATs, managedNetworkCompiled.EgressNATs...)
+		}
+	}
+	dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
 	dynamicRetryEgressNATOwners := collectDynamicEgressNATOwnersForTrigger(trigger, egressNATs, egressNATSnapshot)
 	for id := range dynamicRetryEgressNATOwners {
 		owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: id}
@@ -566,6 +580,12 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	activeCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 	retryCandidates := filterKernelCandidatesByOwners(activeCandidates, retryOwners, rulePlans, rangePlans, egressNATPlans)
 	result.attemptedRuleOwners, result.attemptedRangeOwners, result.attemptedEgressNATs = countKernelCandidateOwnersByKind(retryCandidates)
+	retryRequiresKernelMutation := hasActiveKernelOwnersMatchingRetryOwners(
+		retryOwners,
+		currentKernelRules,
+		currentKernelRanges,
+		currentKernelEgressNATs,
+	)
 
 	retainedByEngine := map[string][]Rule{}
 	retainedCandidates := make([]kernelCandidateRule, 0)
@@ -602,7 +622,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	}
 	retainedKernelOwners := retainedSummary.ruleOwners > 0 || retainedSummary.rangeOwners > 0 || retainedSummary.egressNATOwners > 0
 
-	if len(retryCandidates) == 0 && result.attemptedEgressNATs == 0 {
+	if len(retryCandidates) == 0 && !retryRequiresKernelMutation {
 		result.detail = fmt.Sprintf(
 			"incremental retry found no recoverable owners under current policy (retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d)%s%s",
 			result.retainedRuleOwners,
@@ -1246,6 +1266,29 @@ func filterCurrentKernelOwnerIDsExcluding(current map[int64]bool, owners map[ker
 		return nil
 	}
 	return out
+}
+
+func hasActiveKernelOwnersMatchingRetryOwners(owners map[kernelCandidateOwner]struct{}, currentKernelRules map[int64]bool, currentKernelRanges map[int64]bool, currentKernelEgressNATs map[int64]bool) bool {
+	if len(owners) == 0 {
+		return false
+	}
+	for owner := range owners {
+		switch owner.kind {
+		case workerKindRule:
+			if currentKernelRules[owner.id] {
+				return true
+			}
+		case workerKindRange:
+			if currentKernelRanges[owner.id] {
+				return true
+			}
+		case workerKindEgressNAT:
+			if currentKernelEgressNATs[owner.id] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func buildRetainedKernelAssignments(rules []Rule, ranges []PortRange, egressNATs []EgressNAT, currentKernelRules map[int64]bool, currentKernelRanges map[int64]bool, currentKernelEgressNATs map[int64]bool, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan, egressNATPlans map[int64]ruleDataplanePlan, desiredByOwner map[kernelCandidateOwner][]kernelCandidateRule, retainer kernelHandoffRetentionRuntime, assignments map[int64]string) (map[string][]Rule, []kernelCandidateRule, kernelRetainedAssignmentSummary, error) {
