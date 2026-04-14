@@ -44,6 +44,12 @@ if ! command -v go &>/dev/null; then
     fail "未找到 go 命令，请先安装 Go >= 1.21"
 fi
 ok "Go: $(go version)"
+if [[ -n "${GOPROXY:-}" ]]; then
+    info "GOPROXY: ${GOPROXY}"
+fi
+if [[ -n "${GOSUMDB:-}" ]]; then
+    info "GOSUMDB: ${GOSUMDB}"
+fi
 
 if ! command -v "${BPF_CLANG}" &>/dev/null; then
     fail "未找到 clang，无法编译 internal/app/ebpf/forward-{tc,xdp}-bpf{,-stats}.o"

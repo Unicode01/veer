@@ -47,6 +47,14 @@ usage() {
   FORWARD_GO_BASE_URL  显式覆盖 Go 下载源前缀，例如 https://mirror.example.com/golang
   FORWARD_GO_CN_BASE_URL
                       CN 模式优先使用的 Go 镜像前缀，默认 https://mirrors.aliyun.com/golang
+  FORWARD_GOPROXY      显式覆盖 Go 模块代理，例如 https://goproxy.cn|direct
+  FORWARD_GOPROXY_CN   CN 模式默认模块代理，默认 https://goproxy.cn|direct
+  FORWARD_GOPROXY_GLOBAL
+                      global 模式默认模块代理，默认 https://proxy.golang.org|direct
+  FORWARD_GOSUMDB      显式覆盖 Go 校验源，例如 sum.golang.google.cn
+  FORWARD_GOSUMDB_CN   CN 模式默认校验源，默认 sum.golang.google.cn
+  FORWARD_GOSUMDB_GLOBAL
+                      global 模式默认校验源，默认 sum.golang.org
   FORWARD_WORKDIR      临时工作目录，默认 /tmp/forward-bootstrap
   FORWARD_KEEP_WORKDIR_ON_ERROR
                         失败时保留临时目录，默认 1
@@ -78,6 +86,12 @@ FORWARD_GO_VERSION="${FORWARD_GO_VERSION:-1.25.1}"
 FORWARD_GO_REGION="${FORWARD_GO_REGION:-auto}"
 FORWARD_GO_BASE_URL="${FORWARD_GO_BASE_URL:-}"
 FORWARD_GO_CN_BASE_URL="${FORWARD_GO_CN_BASE_URL:-https://mirrors.aliyun.com/golang}"
+FORWARD_GOPROXY="${FORWARD_GOPROXY:-}"
+FORWARD_GOPROXY_CN="${FORWARD_GOPROXY_CN:-https://goproxy.cn|direct}"
+FORWARD_GOPROXY_GLOBAL="${FORWARD_GOPROXY_GLOBAL:-https://proxy.golang.org|direct}"
+FORWARD_GOSUMDB="${FORWARD_GOSUMDB:-}"
+FORWARD_GOSUMDB_CN="${FORWARD_GOSUMDB_CN:-sum.golang.google.cn}"
+FORWARD_GOSUMDB_GLOBAL="${FORWARD_GOSUMDB_GLOBAL:-sum.golang.org}"
 FORWARD_GO_EFFECTIVE_REGION=""
 FORWARD_WORKDIR="${FORWARD_WORKDIR:-/tmp/forward-bootstrap}"
 FORWARD_KEEP_WORKDIR_ON_ERROR="${FORWARD_KEEP_WORKDIR_ON_ERROR:-1}"
@@ -118,9 +132,9 @@ run_with_retry() {
 }
 
 on_error() {
-    local line="$1"
-    local command="$2"
-    local exit_code="$?"
+    local exit_code="$1"
+    local line="$2"
+    local command="$3"
 
     BOOTSTRAP_FAILED=1
     echo -e "${RED}[FAIL]${NC}  bootstrap 执行失败"
@@ -143,7 +157,7 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
-trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
+trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -402,6 +416,52 @@ detect_go_download_region() {
     fi
 }
 
+configure_go_module_env() {
+    local region=""
+    local effective_proxy=""
+    local effective_sumdb=""
+
+    if [[ -z "${FORWARD_GO_EFFECTIVE_REGION}" ]]; then
+        detect_go_download_region
+    fi
+    region="${FORWARD_GO_EFFECTIVE_REGION:-global}"
+
+    if [[ -n "${FORWARD_GOPROXY}" ]]; then
+        effective_proxy="${FORWARD_GOPROXY}"
+    elif [[ ${GOPROXY+x} ]]; then
+        effective_proxy="${GOPROXY}"
+    elif [[ "${region}" == "cn" ]]; then
+        effective_proxy="${FORWARD_GOPROXY_CN}"
+    else
+        effective_proxy="${FORWARD_GOPROXY_GLOBAL}"
+    fi
+
+    if [[ -n "${FORWARD_GOSUMDB}" ]]; then
+        effective_sumdb="${FORWARD_GOSUMDB}"
+    elif [[ ${GOSUMDB+x} ]]; then
+        effective_sumdb="${GOSUMDB}"
+    elif [[ "${region}" == "cn" ]]; then
+        effective_sumdb="${FORWARD_GOSUMDB_CN}"
+    else
+        effective_sumdb="${FORWARD_GOSUMDB_GLOBAL}"
+    fi
+
+    export GOPROXY="${effective_proxy}"
+    export GOSUMDB="${effective_sumdb}"
+
+    if [[ -n "${GOPROXY}" ]]; then
+        info "Go 模块代理: ${GOPROXY}"
+    else
+        warn "Go 模块代理为空，将使用 Go 默认行为"
+    fi
+
+    if [[ -n "${GOSUMDB}" ]]; then
+        info "Go 校验源: ${GOSUMDB}"
+    else
+        warn "Go 校验源为空，模块校验将按当前环境默认行为处理"
+    fi
+}
+
 join_url_path() {
     local base="${1%/}"
     local path="${2#/}"
@@ -536,6 +596,8 @@ main() {
     require_command git
     set_step "安装 Go"
     install_go_if_needed
+    set_step "配置 Go 模块代理"
+    configure_go_module_env
     set_step "拉取源码"
     clone_repo
     set_step "构建 release"
