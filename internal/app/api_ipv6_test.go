@@ -97,6 +97,29 @@ func TestHandleListIPv6AssignmentsIncludesRuntimeStats(t *testing.T) {
 	}
 }
 
+func TestQueueIPv6AssignmentRedistributeQueuesTargetedRuntimeReload(t *testing.T) {
+	db := openTestDB(t)
+
+	pm := &ProcessManager{
+		db:                       db,
+		cfg:                      &Config{DefaultEngine: ruleEngineAuto},
+		managedRuntimeReloadWake: make(chan struct{}, 1),
+	}
+
+	queueIPv6AssignmentRedistribute(pm)
+
+	if !pm.managedRuntimeReloadPending {
+		t.Fatal("managedRuntimeReloadPending = false, want queued targeted reload")
+	}
+	if pm.redistributePending {
+		t.Fatal("redistributePending = true, want no immediate full redistribute")
+	}
+	status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+	if status.LastRequestSource != "manual" {
+		t.Fatalf("LastRequestSource = %q, want manual", status.LastRequestSource)
+	}
+}
+
 func TestHandleListIPv6AssignmentsRebasesCurrentHostPrefixes(t *testing.T) {
 	db := openTestDB(t)
 

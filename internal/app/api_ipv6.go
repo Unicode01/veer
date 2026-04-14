@@ -60,7 +60,7 @@ func queueIPv6AssignmentRedistribute(pm *ProcessManager) {
 	if pm == nil {
 		return
 	}
-	pm.requestRedistributeWorkers(0)
+	queueManagedNetworkRuntimeReload(pm)
 }
 
 func prepareIPv6AssignmentCreate(db sqlRuleStore, item IPv6Assignment) (IPv6Assignment, []ruleValidationIssue, error) {
