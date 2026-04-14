@@ -389,6 +389,48 @@
     };
   }
 
+  function kernelRuntimeMapBadgeMetrics(item, display) {
+    const details = Array.isArray(item && item.details) ? item.details : [];
+    let peak = null;
+
+    details.forEach((detail) => {
+      const entries = Number(detail && detail.entries || 0);
+      const capacity = Number(detail && detail.capacity || 0);
+      if (!(capacity > 0)) return;
+      const percent = kernelRuntimeMapPercent(entries, capacity);
+      if (!peak ||
+        percent > peak.percent ||
+        (percent === peak.percent && entries > peak.entries) ||
+        (percent === peak.percent && entries === peak.entries && capacity > peak.capacity)) {
+        peak = {
+          label: String(detail && (detail.shortLabel || detail.label) || '').trim(),
+          entries: entries,
+          capacity: capacity,
+          percent: percent
+        };
+      }
+    });
+
+    if (peak) {
+      return peak;
+    }
+    return {
+      label: '',
+      entries: display.entries,
+      capacity: display.capacity,
+      percent: kernelRuntimeMapPercent(display.entries, display.capacity)
+    };
+  }
+
+  function kernelRuntimeMapBadgeAriaLabel(item, metrics) {
+    const parts = [item.label, formatKernelRuntimePercent(metrics.percent)];
+    if (metrics.capacity > 0) {
+      const scope = metrics.label ? metrics.label + ' ' : '';
+      parts.push('(' + scope + String(metrics.entries) + '/' + String(metrics.capacity) + ')');
+    }
+    return parts.join(' ');
+  }
+
   function kernelRuntimeMapBaseLimit(kind, runtimeData) {
     if (!runtimeData) return 0;
     if (kind === 'rules') return Number(runtimeData.kernel_rules_map_base_limit || 0);
@@ -651,15 +693,16 @@
     const list = app.createNode('div', { className: 'kernel-runtime-map-list' });
     items.forEach((item) => {
       const display = kernelRuntimeMapDisplay(item);
-      const percent = kernelRuntimeMapPercent(display.entries, display.capacity);
+      const badgeMetrics = kernelRuntimeMapBadgeMetrics(item, display);
+      const percent = badgeMetrics.percent;
       const percentText = formatKernelRuntimePercent(percent);
       const badge = app.createNode('button', {
-        className: 'kernel-runtime-map-badge is-' + kernelRuntimeMapLevel(percent, display.capacity),
+        className: 'kernel-runtime-map-badge is-' + kernelRuntimeMapLevel(percent, badgeMetrics.capacity),
         attrs: {
           type: 'button',
           'aria-describedby': 'kernelRuntimeFloatingTooltip',
           'aria-expanded': 'false',
-          'aria-label': item.label + ' ' + percentText + ' (' + String(display.entries) + '/' + String(display.capacity) + ')'
+          'aria-label': kernelRuntimeMapBadgeAriaLabel(item, badgeMetrics)
         },
         children: [
           app.createNode('span', {
