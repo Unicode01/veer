@@ -357,6 +357,10 @@
     return kernelRuntimeTooltipBreakdownRow(detail.label, kernelRuntimeMapTooltipDetailText(detail));
   }
 
+  function kernelRuntimeMapCounterText(entries, capacity) {
+    return String(entries) + ' / ' + String(capacity);
+  }
+
   function kernelRuntimeMapDisplay(item) {
     const details = Array.isArray(item && item.details) ? item.details : [];
     let aggregateEntries = 0;
@@ -426,9 +430,20 @@
     const parts = [item.label, formatKernelRuntimePercent(metrics.percent)];
     if (metrics.capacity > 0) {
       const scope = metrics.label ? metrics.label + ' ' : '';
-      parts.push('(' + scope + String(metrics.entries) + '/' + String(metrics.capacity) + ')');
+      parts.push('(' + scope + kernelRuntimeMapCounterText(metrics.entries, metrics.capacity) + ')');
     }
     return parts.join(' ');
+  }
+
+  function kernelRuntimeMapTooltipMetaText(display, badgeMetrics) {
+    if (badgeMetrics && badgeMetrics.label && badgeMetrics.capacity > 0 &&
+      (badgeMetrics.entries !== display.entries || badgeMetrics.capacity !== display.capacity)) {
+      return app.t('kernel.maps.tooltip.peak') + ' ' + badgeMetrics.label + ' ' +
+        kernelRuntimeMapCounterText(badgeMetrics.entries, badgeMetrics.capacity) + ' · ' +
+        app.t('kernel.maps.tooltip.total') + ' ' +
+        kernelRuntimeMapCounterText(display.entries, display.capacity);
+    }
+    return kernelRuntimeMapCounterText(display.entries, display.capacity);
   }
 
   function kernelRuntimeMapBaseLimit(kind, runtimeData) {
@@ -549,7 +564,7 @@
     return rows;
   }
 
-  function kernelRuntimeMapTooltipContent(item, percentText, runtimeData) {
+  function kernelRuntimeMapTooltipContent(item, percentText, runtimeData, badgeMetrics) {
     const details = (Array.isArray(item.details) ? item.details : []).filter((detail) => (detail.capacity || 0) > 0 || (detail.entries || 0) > 0);
     const infoRows = kernelRuntimeMapInfoRows(item, runtimeData);
     const display = kernelRuntimeMapDisplay(item);
@@ -569,7 +584,7 @@
       }),
       app.createNode('span', {
         className: 'kernel-runtime-tooltip-meta',
-        text: String(display.entries) + ' / ' + String(display.capacity)
+        text: kernelRuntimeMapTooltipMetaText(display, badgeMetrics)
       })
     ];
     if (details.length) {
@@ -715,7 +730,7 @@
           })
         ]
       });
-      bindKernelRuntimeTooltip(badge, () => kernelRuntimeMapTooltipContent(item, percentText, runtimeData));
+      bindKernelRuntimeTooltip(badge, () => kernelRuntimeMapTooltipContent(item, percentText, runtimeData, badgeMetrics));
       list.appendChild(badge);
     });
     return list;
