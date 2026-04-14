@@ -519,6 +519,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads
 FORWARD_REF=main bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
 WEB_BIND=0.0.0.0 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
 WEB_UI_ENABLED=false bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
+READY_TIMEOUT_SECONDS=180 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
@@ -530,7 +531,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads
 - 如果你只想暴露 API / 探针、不想提供浏览器前端，可设置 `WEB_UI_ENABLED=false`，或在 `config.json` 里写入 `"web_ui_enabled": false`
 - `deploy.sh` 生成的新 `config.json` 会直接写入完整默认配置；升级旧配置时也会补齐缺失字段，不需要再翻文档手抄默认项
 - 如果旧 `config.json` 里还保留示例占位值 `change-me-to-a-secure-token`，`deploy.sh` 会拒绝继续部署；先改成真实 token，或在部署时显式传入 `WEB_TOKEN=...`
-- 更新部署会先备份旧二进制与 systemd unit，再用本机 `/readyz` 探针确认新版本可用；如果热更新失败或 30 秒内未就绪，会自动回滚到上一版本
+- 更新部署会先备份旧二进制与 systemd unit，再用本机 `/readyz` 探针确认新版本可用；默认等待 120 秒，也可用 `READY_TIMEOUT_SECONDS` 覆盖；如果热更新失败或超时未就绪，会自动回滚到上一版本
 - 如果目标机原本没有满足版本要求的 Go，一键脚本会把 Go 临时解压到 `FORWARD_WORKDIR` 下，仅供当前引导流程使用；脚本退出后会连同源码一起清理，不会写入 `/usr/local/go`
 - 如果引导流程失败，脚本会输出失败步骤、命令和行号；默认还会保留 `FORWARD_WORKDIR` 便于排查，设置 `FORWARD_KEEP_WORKDIR_ON_ERROR=0` 可改回失败即清理
 - 如果你更偏向可复现部署，建议把 `FORWARD_REF` 固定到 tag 或 commit，而不是长期直接跟 `main`

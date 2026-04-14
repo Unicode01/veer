@@ -16,6 +16,15 @@ import (
 
 const apiServerShutdownTimeout = 15 * time.Second
 
+func logStartupPhase(name string, phaseStartedAt time.Time, totalStartedAt time.Time) {
+	log.Printf(
+		"startup: %s completed in %s (total=%s)",
+		name,
+		time.Since(phaseStartedAt).Round(time.Millisecond),
+		time.Since(totalStartedAt).Round(time.Millisecond),
+	)
+}
+
 func computeBinaryHash() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -69,33 +78,46 @@ func Main(buildNonce string) {
 		return
 	}
 
+	startupStartedAt := time.Now()
+	phaseStartedAt := startupStartedAt
+
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	logStartupPhase("load config", phaseStartedAt, startupStartedAt)
 	if features := cfg.EnabledExperimentalFeatures(); len(features) > 0 {
 		log.Printf("experimental features enabled: %s", strings.Join(features, ", "))
 	}
 
+	phaseStartedAt = time.Now()
 	db, err := initDB("forward.db")
 	if err != nil {
 		log.Fatalf("init db: %v", err)
 	}
 	defer db.Close()
+	logStartupPhase("init db", phaseStartedAt, startupStartedAt)
 
 	binHash := computeBinaryHash()
 	log.Printf("binary hash: %s", binHash)
 
+	phaseStartedAt = time.Now()
 	pm, err := newProcessManager(db, cfg, binHash)
 	if err != nil {
 		log.Fatalf("init process manager: %v", err)
 	}
+	logStartupPhase("init process manager", phaseStartedAt, startupStartedAt)
 
+	log.Printf("startup: beginning initial dataplane reconcile")
+	phaseStartedAt = time.Now()
 	pm.redistributeWorkers()
+	logStartupPhase("initial dataplane reconcile", phaseStartedAt, startupStartedAt)
 	pm.startAccepting()
 	pm.setReady(true)
 
+	phaseStartedAt = time.Now()
 	apiServer := startAPI(cfg, db, pm)
+	logStartupPhase("start api", phaseStartedAt, startupStartedAt)
 
 	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()

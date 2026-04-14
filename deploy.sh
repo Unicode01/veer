@@ -12,6 +12,7 @@
 #
 # 可选环境变量:
 #   INSTALL_DIR   安装目录       (默认 /opt/forward)
+#   READY_TIMEOUT_SECONDS /readyz 等待秒数 (默认 120)
 #   WEB_BIND      Web 监听地址   (默认 127.0.0.1)
 #   WEB_UI_ENABLED 是否启用 Web UI (默认 true)
 #   WEB_PORT      Web 管理端口   (默认 8080)
@@ -39,6 +40,9 @@ usage() {
   --no-inherit-stats   热更新时不继承内核 stats_v4 统计表，流量统计从 0 重新累计，
                        但 flow / nat 等其它热更新状态仍尽量继承
   -h, --help           显示帮助
+
+环境变量:
+  READY_TIMEOUT_SECONDS  /readyz 就绪检查等待秒数，默认 120
 EOF
 }
 
@@ -78,6 +82,7 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/forward}"
 SERVICE_NAME="forward"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 CONFIG_TEMPLATE_PATH="${SCRIPT_DIR}/config.example.json"
+READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-120}"
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_BIND="${WEB_BIND:-127.0.0.1}"
 WEB_UI_ENABLED="${WEB_UI_ENABLED:-true}"
@@ -145,6 +150,17 @@ validate_port() {
     fi
     if (( value < 1 || value > 65535 )); then
         fail "WEB_PORT 必须是 1-65535 的整数，当前值: ${value}"
+    fi
+}
+
+validate_positive_integer() {
+    local name="$1"
+    local value="${2:-}"
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        fail "${name} 必须是大于 0 的整数，当前值: ${value:-<empty>}"
+    fi
+    if (( value < 1 )); then
+        fail "${name} 必须是大于 0 的整数，当前值: ${value}"
     fi
 }
 
@@ -216,7 +232,7 @@ PY
 
 wait_for_service_ready() {
     local ready_url="$1"
-    local timeout_seconds="${2:-30}"
+    local timeout_seconds="${2:-${READY_TIMEOUT_SECONDS}}"
     local deadline=$((SECONDS + timeout_seconds))
 
     if ! http_probe_available; then
@@ -237,6 +253,8 @@ wait_for_service_ready() {
     done
     return 1
 }
+
+validate_positive_integer "READY_TIMEOUT_SECONDS" "${READY_TIMEOUT_SECONDS}"
 
 backup_existing_installation() {
     if [[ -f "${INSTALL_DIR}/config.json" ]]; then
@@ -508,7 +526,8 @@ rollback_update() {
             warn "回滚配置解析失败，继续使用当前 readyz 探针"
         fi
     fi
-    if wait_for_service_ready "${rollback_ready_url}" 30; then
+    info "等待回滚后的服务通过 readyz 检查（超时 ${READY_TIMEOUT_SECONDS}s）..."
+    if wait_for_service_ready "${rollback_ready_url}" "${READY_TIMEOUT_SECONDS}"; then
         fail "新版本部署失败，已自动回滚到上一版本"
     fi
     PRESERVE_HOT_RESTART_MARKERS_ON_EXIT=1
@@ -667,7 +686,8 @@ else
     fi
 fi
 
-if wait_for_service_ready "${API_READY_URL}" 30; then
+info "等待服务通过 readyz 检查（超时 ${READY_TIMEOUT_SECONDS}s）..."
+if wait_for_service_ready "${API_READY_URL}" "${READY_TIMEOUT_SECONDS}"; then
     rm -f "$HOT_RESTART_MARKER"
     rm -f "$HOT_RESTART_SKIP_STATS_MARKER"
     if $SERVICE_RUNNING; then
@@ -679,9 +699,9 @@ if wait_for_service_ready "${API_READY_URL}" 30; then
     fi
 else
     if $HAS_EXISTING_INSTALL; then
-        rollback_update "新版本在 30 秒内未通过 readyz 检查，正在回滚"
+        rollback_update "新版本在 ${READY_TIMEOUT_SECONDS} 秒内未通过 readyz 检查，正在回滚"
     fi
-    fail "服务在 30 秒内未通过 readyz 检查；查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+    fail "服务在 ${READY_TIMEOUT_SECONDS} 秒内未通过 readyz 检查；查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
 fi
 
 # ---------- 防火墙 ----------
@@ -739,6 +759,7 @@ else
     fi
 fi
 echo -e "  就绪探针:  ${CYAN}${API_READY_URL}${NC}"
+echo -e "  就绪超时:  ${CYAN}${READY_TIMEOUT_SECONDS}s${NC}"
 echo -e "  API Token: ${YELLOW}${WEB_TOKEN}${NC}"
 echo ""
 echo -e "  服务管理:"
