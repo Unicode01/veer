@@ -3170,6 +3170,15 @@ func sendStop(conn net.Conn) {
 	writeIPC(conn, IPCMessage{Type: "stop"})
 }
 
+func detachWorkerInfo(wi *WorkerInfo) {
+	if wi == nil || wi.conn == nil {
+		return
+	}
+	wi.writeMu.Lock()
+	wi.conn.Close()
+	wi.writeMu.Unlock()
+}
+
 func killWorkerInfo(wi *WorkerInfo) {
 	if wi.conn != nil {
 		wi.writeMu.Lock()
@@ -3980,19 +3989,21 @@ func (pm *ProcessManager) stopAll() {
 		_ = os.Remove(pm.sockPath)
 	}
 
+	preserveUserspaceWorkers := userspaceWorkerPreserveOnClose()
 	pm.mu.Lock()
-	workers := make([]*WorkerInfo, 0, len(pm.ruleWorkers)+len(pm.rangeWorkers)+len(pm.drainingWorkers)+1)
+	activeWorkers := make([]*WorkerInfo, 0, len(pm.ruleWorkers)+len(pm.rangeWorkers)+1)
+	drainingWorkers := make([]*WorkerInfo, 0, len(pm.drainingWorkers))
 	for _, wi := range pm.ruleWorkers {
-		workers = append(workers, wi)
+		activeWorkers = append(activeWorkers, wi)
 	}
 	for _, wi := range pm.rangeWorkers {
-		workers = append(workers, wi)
+		activeWorkers = append(activeWorkers, wi)
 	}
 	for _, wi := range pm.drainingWorkers {
-		workers = append(workers, wi)
+		drainingWorkers = append(drainingWorkers, wi)
 	}
 	if pm.sharedProxy != nil {
-		workers = append(workers, pm.sharedProxy)
+		activeWorkers = append(activeWorkers, pm.sharedProxy)
 	}
 	pm.ruleWorkers = map[int]*WorkerInfo{}
 	pm.rangeWorkers = map[int]*WorkerInfo{}
@@ -4000,7 +4011,23 @@ func (pm *ProcessManager) stopAll() {
 	pm.sharedProxy = nil
 	pm.mu.Unlock()
 
-	uniqueWorkers := uniqueWorkerInfosByProcess(workers)
+	workersToStop := activeWorkers
+	if preserveUserspaceWorkers {
+		preservedWorkers := uniqueWorkerInfosByProcess(activeWorkers)
+		if len(preservedWorkers) > 0 {
+			start := time.Now()
+			log.Printf("shutdown: detaching %d active userspace worker process(es) for hot restart", len(preservedWorkers))
+			for _, wi := range preservedWorkers {
+				detachWorkerInfo(wi)
+			}
+			log.Printf("shutdown: active userspace worker detach complete (%s)", time.Since(start).Round(time.Millisecond))
+		}
+		workersToStop = drainingWorkers
+	} else {
+		workersToStop = append(workersToStop, drainingWorkers...)
+	}
+
+	uniqueWorkers := uniqueWorkerInfosByProcess(workersToStop)
 	if len(uniqueWorkers) > 0 {
 		start := time.Now()
 		log.Printf("shutdown: stopping %d worker process(es)", len(uniqueWorkers))
