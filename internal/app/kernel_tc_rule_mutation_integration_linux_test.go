@@ -38,6 +38,7 @@ const (
 	tcRuleMutationProbeDeadlineMs           = 3000
 	tcRuleMutationProbeIdleMs               = 1000
 	tcRuleMutationSteadyDuration            = 4 * time.Second
+	tcRuleMutationRestartSteadyDuration     = 8 * time.Second
 	tcRuleMutationSteadyStepDeadline        = 1500 * time.Millisecond
 	tcRuleMutationSteadyPayload             = "forward-tc-rule-mutation"
 	tcRuleMutationExtraRuleFrontPortOffset  = 17
@@ -46,9 +47,16 @@ const (
 )
 
 type tcRuleMutationHarness struct {
-	Topology dataplanePerfTopology
-	APIBase  string
-	LogPath  string
+	Topology             dataplanePerfTopology
+	APIBase              string
+	LogPath              string
+	Cmd                  *exec.Cmd
+	WorkDir              string
+	ForwardBinary        string
+	ConfigPath           string
+	HotRestartMarkerPath string
+	BPFStateRoot         string
+	RuntimeStateRoot     string
 }
 
 type tcRuleMutationSteadyClient struct {
@@ -186,6 +194,120 @@ func TestTCKernelRuleMutationEstablishedTCPConnection(t *testing.T) {
 	}
 }
 
+func TestTCKernelRuleMutationHotRestartKeepsEstablishedTCPConnection(t *testing.T) {
+	baseBinary := requireTCRuleMutationIntegrationBinary(t)
+
+	harness := startTCRuleMutationHarness(t, baseBinary, "hot-restart-established")
+	rule := createTCRuleMutationRule(t, harness.APIBase, harness.Topology, Rule{
+		InInterface:      harness.Topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     harness.Topology.BackendHostIF,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Remark:           "tc-rule-mutation-hot-restart",
+		Tag:              "tc-rule-mutation",
+		Transparent:      true,
+		EnginePreference: ruleEngineKernel,
+	})
+
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))); err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("baseline probe failed: %v", err)
+	}
+
+	client := startTCRuleMutationSteadyClientWithDuration(
+		t,
+		harness.Topology.ClientNS,
+		net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort)),
+		tcRuleMutationRestartSteadyDuration,
+	)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+
+	if err := os.WriteFile(harness.HotRestartMarkerPath, []byte("1"), 0o644); err != nil {
+		stopTCRuleMutationSteadyClient(t, client)
+		t.Fatalf("write hot restart marker: %v", err)
+	}
+
+	restartTCRuleMutationForward(t, &harness)
+	waitForTCRuleMutationRuleRunning(t, harness.APIBase, rule.ID)
+
+	stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+	if err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("steady client failed across hot restart: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))); err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("post-restart probe failed: %v", err)
+	}
+}
+
+func TestTCKernelRuleMutationHotRestartKeepsEstablishedFullNATTCPConnection(t *testing.T) {
+	baseBinary := requireTCRuleMutationIntegrationBinary(t)
+
+	harness := startTCRuleMutationHarness(t, baseBinary, "hot-restart-fullnat")
+	rule := createTCRuleMutationRule(t, harness.APIBase, harness.Topology, Rule{
+		InInterface:      harness.Topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     harness.Topology.BackendHostIF,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Remark:           "tc-rule-mutation-hot-restart-fullnat",
+		Tag:              "tc-rule-mutation",
+		Transparent:      false,
+		EnginePreference: ruleEngineKernel,
+	})
+
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))); err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("baseline probe failed: %v", err)
+	}
+
+	client := startTCRuleMutationSteadyClientWithDuration(
+		t,
+		harness.Topology.ClientNS,
+		net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort)),
+		tcRuleMutationRestartSteadyDuration,
+	)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+
+	if err := os.WriteFile(harness.HotRestartMarkerPath, []byte("1"), 0o644); err != nil {
+		stopTCRuleMutationSteadyClient(t, client)
+		t.Fatalf("write hot restart marker: %v", err)
+	}
+
+	restartTCRuleMutationForward(t, &harness)
+	waitForTCRuleMutationRuleRunning(t, harness.APIBase, rule.ID)
+	postRestartProbeErr := runTCRuleMutationProbe(harness.Topology.ClientNS, net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort)))
+
+	stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+	if err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("steady client failed across fullnat hot restart: %v\npost_restart_probe_err=%v\nstdout=%s\nstderr=%s", err, postRestartProbeErr, stdout, stderr)
+	}
+
+	if postRestartProbeErr != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("post-restart probe failed: %v", postRestartProbeErr)
+	}
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))); err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("post-restart probe failed: %v", err)
+	}
+}
+
 func runTCRuleMutationSteadyClientHelper() error {
 	target := strings.TrimSpace(os.Getenv(tcRuleMutationHelperTargetEnv))
 	if target == "" {
@@ -214,16 +336,16 @@ func runTCRuleMutationSteadyClientHelper() error {
 
 	exchange := func() error {
 		if err := conn.SetDeadline(time.Now().Add(tcRuleMutationSteadyStepDeadline)); err != nil {
-			return err
+			return fmt.Errorf("%s set deadline: %w", time.Now().Format(time.RFC3339Nano), err)
 		}
 		if err := writeAll(conn, payload); err != nil {
-			return err
+			return fmt.Errorf("%s write: %w", time.Now().Format(time.RFC3339Nano), err)
 		}
 		if _, err := io.ReadFull(conn, reply); err != nil {
-			return err
+			return fmt.Errorf("%s read: %w", time.Now().Format(time.RFC3339Nano), err)
 		}
 		if !bytes.Equal(reply, payload) {
-			return fmt.Errorf("echo payload mismatch: got %q want %q", string(reply), string(payload))
+			return fmt.Errorf("%s echo payload mismatch: got %q want %q", time.Now().Format(time.RFC3339Nano), string(reply), string(payload))
 		}
 		totalBytes += len(payload)
 		return nil
@@ -281,6 +403,12 @@ func startTCRuleMutationHarness(t *testing.T, baseBinary string, name string) tc
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("create work dir: %v", err)
 	}
+	runtimeStateRoot := filepath.Join(runtimeDir, "runtime-state")
+	if err := os.MkdirAll(runtimeStateRoot, 0o755); err != nil {
+		t.Fatalf("create hot restart runtime state dir: %v", err)
+	}
+	bpfStateRoot := requireKernelHotRestartBPFStateRoot(t)
+	hotRestartMarkerPath := filepath.Join(runtimeDir, ".hot-restart-kernel")
 	webPort := freeTCPPort(t)
 	configPath := filepath.Join(workDir, "config.json")
 	writeDataplanePerfConfig(t, configPath, dataplanePerfMode{
@@ -302,7 +430,12 @@ func startTCRuleMutationHarness(t *testing.T, baseBinary string, name string) tc
 
 	cmd := exec.Command(forwardBinary, "--config", configPath)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)))
+	cmd.Env = append(os.Environ(),
+		forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)),
+		forwardHotRestartMarkerEnv+"="+hotRestartMarkerPath,
+		forwardBPFStateDirEnv+"="+bpfStateRoot,
+		forwardRuntimeStateDirEnv+"="+runtimeStateRoot,
+	)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -323,9 +456,16 @@ func startTCRuleMutationHarness(t *testing.T, baseBinary string, name string) tc
 		}
 	})
 	return tcRuleMutationHarness{
-		Topology: topology,
-		APIBase:  apiBase,
-		LogPath:  logPath,
+		Topology:             topology,
+		APIBase:              apiBase,
+		LogPath:              logPath,
+		Cmd:                  cmd,
+		WorkDir:              workDir,
+		ForwardBinary:        forwardBinary,
+		ConfigPath:           configPath,
+		HotRestartMarkerPath: hotRestartMarkerPath,
+		BPFStateRoot:         bpfStateRoot,
+		RuntimeStateRoot:     runtimeStateRoot,
 	}
 }
 
@@ -531,6 +671,10 @@ func waitForTCRuleMutationRuleAbsent(t *testing.T, apiBase string, id int64) {
 }
 
 func startTCRuleMutationSteadyClient(t *testing.T, clientNS string, targetAddr string) *tcRuleMutationSteadyClient {
+	return startTCRuleMutationSteadyClientWithDuration(t, clientNS, targetAddr, tcRuleMutationSteadyDuration)
+}
+
+func startTCRuleMutationSteadyClientWithDuration(t *testing.T, clientNS string, targetAddr string, duration time.Duration) *tcRuleMutationSteadyClient {
 	t.Helper()
 
 	client := &tcRuleMutationSteadyClient{
@@ -542,7 +686,7 @@ func startTCRuleMutationSteadyClient(t *testing.T, clientNS string, targetAddr s
 	cmd.Env = append(os.Environ(),
 		tcRuleMutationHelperEnv+"=1",
 		tcRuleMutationHelperTargetEnv+"="+targetAddr,
-		tcRuleMutationHelperDurationMsEnv+"="+strconv.Itoa(int(tcRuleMutationSteadyDuration/time.Millisecond)),
+		tcRuleMutationHelperDurationMsEnv+"="+strconv.Itoa(int(duration/time.Millisecond)),
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -580,6 +724,47 @@ func startTCRuleMutationSteadyClient(t *testing.T, clientNS string, targetAddr s
 	}()
 
 	return client
+}
+
+func restartTCRuleMutationForward(t *testing.T, harness *tcRuleMutationHarness) {
+	t.Helper()
+
+	if harness == nil {
+		t.Fatal("tc rule mutation harness is nil")
+	}
+
+	stopForwardProcessTree(t, harness.Cmd)
+	if delayMs := envInt("FORWARD_HOT_RESTART_DELAY_MS", 0); delayMs > 0 {
+		time.Sleep(time.Duration(delayMs) * time.Millisecond)
+	}
+
+	logFile, err := os.OpenFile(harness.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open forward log file for restart: %v", err)
+	}
+
+	cmd := exec.Command(harness.ForwardBinary, "--config", harness.ConfigPath)
+	cmd.Dir = harness.WorkDir
+	cmd.Env = append(os.Environ(),
+		forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)),
+		forwardHotRestartMarkerEnv+"="+harness.HotRestartMarkerPath,
+		forwardBPFStateDirEnv+"="+harness.BPFStateRoot,
+		forwardRuntimeStateDirEnv+"="+harness.RuntimeStateRoot,
+	)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		t.Fatalf("restart forward: %v", err)
+	}
+	_ = logFile.Close()
+
+	harness.Cmd = cmd
+	t.Cleanup(func() {
+		stopForwardProcessTree(t, cmd)
+	})
+	waitForDataplanePerfAPI(t, harness.APIBase)
 }
 
 func waitForTCRuleMutationSteadyClientReady(t *testing.T, client *tcRuleMutationSteadyClient) {

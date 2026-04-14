@@ -86,10 +86,16 @@ type egressNATIntegrationStatus struct {
 }
 
 type egressNATIntegrationHarness struct {
-	Topology egressNATIntegrationTopology
-	APIBase  string
-	LogPath  string
-	Cmd      *exec.Cmd
+	Topology             egressNATIntegrationTopology
+	APIBase              string
+	LogPath              string
+	Cmd                  *exec.Cmd
+	WorkDir              string
+	ForwardBinary        string
+	ConfigPath           string
+	HotRestartMarkerPath string
+	BPFStateRoot         string
+	RuntimeStateRoot     string
 }
 
 type egressNATPacketCapture struct {
@@ -1110,6 +1116,12 @@ func startEgressNATIntegrationHarness(t *testing.T, name string) egressNATIntegr
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("create work dir: %v", err)
 	}
+	runtimeStateRoot := filepath.Join(runtimeDir, "runtime-state")
+	if err := os.MkdirAll(runtimeStateRoot, 0o755); err != nil {
+		t.Fatalf("create hot restart runtime state dir: %v", err)
+	}
+	bpfStateRoot := requireKernelHotRestartBPFStateRoot(t)
+	hotRestartMarkerPath := filepath.Join(runtimeDir, ".hot-restart-kernel")
 	webPort := freeTCPPort(t)
 	configPath := filepath.Join(workDir, "config.json")
 	writeDataplanePerfConfig(t, configPath, dataplanePerfMode{
@@ -1131,7 +1143,12 @@ func startEgressNATIntegrationHarness(t *testing.T, name string) egressNATIntegr
 
 	cmd := exec.Command(forwardBinary, "--config", configPath)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)))
+	cmd.Env = append(os.Environ(),
+		forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)),
+		forwardHotRestartMarkerEnv+"="+hotRestartMarkerPath,
+		forwardBPFStateDirEnv+"="+bpfStateRoot,
+		forwardRuntimeStateDirEnv+"="+runtimeStateRoot,
+	)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -1145,10 +1162,16 @@ func startEgressNATIntegrationHarness(t *testing.T, name string) egressNATIntegr
 	apiBase := fmt.Sprintf("http://127.0.0.1:%d", webPort)
 	waitForEgressNATIntegrationAPI(t, apiBase, cmd, logPath)
 	return egressNATIntegrationHarness{
-		Topology: topology,
-		APIBase:  apiBase,
-		LogPath:  logPath,
-		Cmd:      cmd,
+		Topology:             topology,
+		APIBase:              apiBase,
+		LogPath:              logPath,
+		Cmd:                  cmd,
+		WorkDir:              workDir,
+		ForwardBinary:        forwardBinary,
+		ConfigPath:           configPath,
+		HotRestartMarkerPath: hotRestartMarkerPath,
+		BPFStateRoot:         bpfStateRoot,
+		RuntimeStateRoot:     runtimeStateRoot,
 	}
 }
 

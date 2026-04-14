@@ -630,6 +630,9 @@ static __always_inline struct kernel_diag_value_v4 *lookup_tc_diag_v4(void);
 static __always_inline int handle_forward_ingress_v4_transparent(struct __sk_buff *skb);
 static __always_inline int handle_forward_ingress_v4_fullnat(struct __sk_buff *skb);
 static __always_inline int handle_forward_ingress_v4_egress_nat(struct __sk_buff *skb);
+static __always_inline int handle_forward_ingress_v4_fullnat_existing(struct __sk_buff *skb);
+static __always_inline int handle_forward_ingress_v4_fullnat_new(struct __sk_buff *skb);
+static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank);
 static __always_inline int handle_reply_ingress_v4_transparent(struct __sk_buff *skb);
 static __always_inline int handle_reply_ingress_v4_fullnat(struct __sk_buff *skb);
 
@@ -3693,6 +3696,9 @@ static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 	struct rule_value_v4 *rule;
+	struct flow_value_v4 *front_flow;
+	struct flow_value_v4 *active_flow;
+	struct flow_value_v4 *old_flow = 0;
 
 	if (!dispatch)
 		return TC_ACT_UNSPEC;
@@ -3716,15 +3722,48 @@ static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 	if (is_egress_nat_rule(rule)) {
 		if (is_local_ipv4(dispatch->ctx.dst_addr))
 			return TC_ACT_OK;
+		if (!is_full_cone_egress_nat_rule(rule)) {
+			/* Keep established egress NAT sessions on the current program across
+			 * hot-restart handoff so they don't depend on a successor-only tail call.
+			 */
+			__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
+			dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+			build_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
+			front_flow = lookup_flow_v4_active_or_old(&dispatch->flow_key, &dispatch->flow_bank);
+			if (front_flow && !is_egress_nat_flow(front_flow))
+				return TC_ACT_OK;
+			if (is_fullnat_front_flow(front_flow))
+				return handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank);
+		}
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return TC_ACT_UNSPEC;
 	}
 	if (is_fullnat_rule(rule)) {
-		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_FULLNAT_FORWARD);
+		/* Keep established full-NAT sessions on the dispatcher during the
+		 * predecessor/successor gap; new sessions can still use the split path.
+		 */
+		__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
+		dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+		build_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
+		active_flow = lookup_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &dispatch->flow_key);
+		if (tc_flow_old_bank_enabled_v4())
+			old_flow = lookup_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_OLD, &dispatch->flow_key);
+		front_flow = active_flow;
+		if (front_flow) {
+			dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+		} else if (old_flow) {
+			dispatch->flow_bank = FORWARD_TC_FLOW_BANK_OLD;
+			front_flow = old_flow;
+		}
+		if (is_fullnat_front_flow(front_flow)) {
+			dispatch->flow_value = *front_flow;
+			dispatch->have_flow = 1;
+			return handle_forward_ingress_v4_fullnat_existing(skb);
+		}
+		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_FULLNAT_NEW);
 		return TC_ACT_UNSPEC;
 	}
-	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_TRANSPARENT);
-	return TC_ACT_UNSPEC;
+	return handle_forward_ingress_v4_transparent(skb);
 }
 
 static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
@@ -3758,14 +3797,14 @@ static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
 
 	dispatch->flow_value = *flow;
 	dispatch->have_flow = 1;
-	if (is_fullnat_reply_flow(flow)) {
-		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_REPLY_FULLNAT);
-		return TC_ACT_UNSPEC;
-	}
+	/* Established reply traffic must keep working before the successor reattaches,
+	 * so handle reply flows here instead of relying on a tail-call target.
+	 */
+	if (is_fullnat_reply_flow(flow))
+		return handle_fullnat_reply(skb, &dispatch->ctx, &dispatch->flow_key, flow, dispatch->flow_bank);
 	if ((flow->flags & FORWARD_FLOW_FLAG_FULL_NAT) != 0)
 		return TC_ACT_UNSPEC;
-	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_REPLY_TRANSPARENT);
-	return TC_ACT_UNSPEC;
+	return handle_transparent_reply(skb, &dispatch->ctx, &dispatch->flow_key, flow, dispatch->flow_bank);
 }
 
 static __always_inline int handle_forward_ingress_v4_transparent(struct __sk_buff *skb)

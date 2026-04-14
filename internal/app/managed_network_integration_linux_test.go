@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -336,6 +335,112 @@ func TestManagedNetworkIntegrationRenewsAfterForwardRestart(t *testing.T) {
 	}
 }
 
+func TestManagedNetworkIntegrationHotRestartKeepsEstablishedEgressTCPConnection(t *testing.T) {
+	if os.Getenv(managedNetworkIntegrationEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux managed network integration test", managedNetworkIntegrationEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+
+	harness := startEgressNATIntegrationHarness(t, "managed-network-hot-restart-established")
+	topology := harness.Topology
+	perfTopology := dataplanePerfTopology{
+		ClientNS:      topology.ClientNS,
+		BackendNS:     topology.BackendNS,
+		ClientHostIF:  topology.ChildHostIF,
+		ClientNSIF:    topology.ClientNSIF,
+		BackendHostIF: topology.UplinkHostIF,
+		BackendNSIF:   topology.BackendNSIF,
+	}
+
+	prepareManagedNetworkIntegrationClientNamespace(t, topology)
+	mustEnsureIPv6AssignmentAddress(t, perfTopology.BackendHostIF, ipv6AssignmentIntegrationParentAddr+"/64")
+	mustEnsureManagedNetworkIntegrationIPv6AddressInNamespace(t, perfTopology.BackendNS, perfTopology.BackendNSIF, ipv6AssignmentIntegrationBackendAddr+"/64")
+	mustEnsureManagedNetworkIntegrationIPv6DefaultRouteInNamespace(t, perfTopology.BackendNS, perfTopology.BackendNSIF, ipv6AssignmentIntegrationParentAddr)
+	seedIPv6AssignmentIntegrationBackendNeighbors(t, perfTopology)
+
+	network := createManagedNetworkIntegrationNetwork(t, harness.APIBase, topology)
+	managedIPv6 := mustBuildManagedNetworkIntegrationIPv6Assignment(t, network, topology.ChildHostIF)
+	clientMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
+	createManagedNetworkIntegrationReservation(t, harness.APIBase, network.ID, clientMAC, managedNetworkIntegrationIPv4Lease)
+	waitForManagedNetworkIntegrationReady(t, harness.APIBase, network.ID, topology)
+	seedEgressNATIntegrationNeighbor(t, topology)
+	waitForManagedNetworkIntegrationAutoEgressNATReady(t, harness.APIBase, harness.LogPath, "initial apply")
+	if err := waitForManagedNetworkIntegrationIPv4Address(topology.BridgeIF, managedNetworkIntegrationIPv4CIDR, 15*time.Second); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+	if err := waitForIPv6AssignmentRouteForPrefix(perfTopology, managedIPv6.AssignedPrefix); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+	if err := runManagedNetworkDHCPv4Client(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4LeaseCIDR, managedNetworkIntegrationIPv4Gateway); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+	seedManagedNetworkIntegrationIPv4Neighbors(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4Gateway)
+	if observedIP := runEgressNATIntegrationProbe(t, topology, "tcp"); observedIP != egressNATUplinkAddr {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatalf("initial managed network tcp backend observed source IP %q, want %q", observedIP, egressNATUplinkAddr)
+	}
+
+	backendCmd, backendLogs := startDataplanePerfBackend(t, perfTopology)
+	t.Cleanup(func() {
+		stopDataplanePerfHelper(t, backendCmd)
+	})
+
+	client := startTCRuleMutationSteadyClientWithDuration(
+		t,
+		topology.ClientNS,
+		net.JoinHostPort(dataplanePerfBackendAddr, strconv.Itoa(dataplanePerfBackendPort)),
+		tcRuleMutationRestartSteadyDuration,
+	)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+
+	if err := os.WriteFile(harness.HotRestartMarkerPath, []byte("1"), 0o644); err != nil {
+		stopTCRuleMutationSteadyClient(t, client)
+		t.Fatalf("write hot restart marker: %v", err)
+	}
+
+	restartManagedNetworkIntegrationForward(t, &harness)
+	waitForManagedNetworkIntegrationReady(t, harness.APIBase, network.ID, topology)
+	seedEgressNATIntegrationNeighbor(t, topology)
+	waitForManagedNetworkIntegrationAutoEgressNATReady(t, harness.APIBase, harness.LogPath, "post-hot-restart apply")
+	if err := waitForManagedNetworkIntegrationIPv4Address(topology.BridgeIF, managedNetworkIntegrationIPv4CIDR, 15*time.Second); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+	seedManagedNetworkIntegrationIPv4Neighbors(t, topology, managedNetworkIntegrationIPv4Lease, managedNetworkIntegrationIPv4Gateway)
+
+	stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+	if err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatalf(
+			"steady client failed across managed network hot restart: %v\nstdout=%s\nstderr=%s\nbackend logs=%s",
+			err,
+			stdout,
+			stderr,
+			backendLogs.String(),
+		)
+	}
+
+	if observedIP := runEgressNATIntegrationProbe(t, topology, "tcp"); observedIP != egressNATUplinkAddr {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatalf("post-hot-restart managed network tcp backend observed source IP %q, want %q", observedIP, egressNATUplinkAddr)
+	}
+}
+
 func TestManagedNetworkIntegrationRecoversAfterBridgeIPv4AddressReset(t *testing.T) {
 	if os.Getenv(managedNetworkIntegrationEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux managed network integration test", managedNetworkIntegrationEnableEnv)
@@ -576,19 +681,19 @@ func restartManagedNetworkIntegrationForward(t *testing.T, harness *egressNATInt
 
 	stopForwardProcessTree(t, harness.Cmd)
 
-	workDir := filepath.Dir(harness.LogPath)
-	runtimeDir := filepath.Dir(workDir)
-	forwardBinary := filepath.Join(runtimeDir, "forward")
-	configPath := filepath.Join(workDir, "config.json")
-
 	logFile, err := os.OpenFile(harness.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		t.Fatalf("open forward log file for restart: %v", err)
 	}
 
-	cmd := exec.Command(forwardBinary, "--config", configPath)
-	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)))
+	cmd := exec.Command(harness.ForwardBinary, "--config", harness.ConfigPath)
+	cmd.Dir = harness.WorkDir
+	cmd.Env = append(os.Environ(),
+		forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)),
+		forwardHotRestartMarkerEnv+"="+harness.HotRestartMarkerPath,
+		forwardBPFStateDirEnv+"="+harness.BPFStateRoot,
+		forwardRuntimeStateDirEnv+"="+harness.RuntimeStateRoot,
+	)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
