@@ -43,6 +43,10 @@ usage() {
   FORWARD_REPO_URL     Git 仓库地址，默认 https://github.com/Unicode01/forward.git
   FORWARD_REF          拉取的 Git ref，默认 main
   FORWARD_GO_VERSION   安装的 Go 版本，默认 1.25.1
+  FORWARD_GO_REGION    Go 下载区域策略: auto/cn/global，默认 auto
+  FORWARD_GO_BASE_URL  显式覆盖 Go 下载源前缀，例如 https://mirror.example.com/golang
+  FORWARD_GO_CN_BASE_URL
+                      CN 模式优先使用的 Go 镜像前缀，默认 https://mirrors.aliyun.com/golang
   FORWARD_WORKDIR      临时工作目录，默认 /tmp/forward-bootstrap
   FORWARD_KEEP_WORKDIR_ON_ERROR
                         失败时保留临时目录，默认 1
@@ -71,6 +75,10 @@ fi
 FORWARD_REPO_URL="${FORWARD_REPO_URL:-https://github.com/Unicode01/forward.git}"
 FORWARD_REF="${FORWARD_REF:-main}"
 FORWARD_GO_VERSION="${FORWARD_GO_VERSION:-1.25.1}"
+FORWARD_GO_REGION="${FORWARD_GO_REGION:-auto}"
+FORWARD_GO_BASE_URL="${FORWARD_GO_BASE_URL:-}"
+FORWARD_GO_CN_BASE_URL="${FORWARD_GO_CN_BASE_URL:-https://mirrors.aliyun.com/golang}"
+FORWARD_GO_EFFECTIVE_REGION=""
 FORWARD_WORKDIR="${FORWARD_WORKDIR:-/tmp/forward-bootstrap}"
 FORWARD_KEEP_WORKDIR_ON_ERROR="${FORWARD_KEEP_WORKDIR_ON_ERROR:-1}"
 FORWARD_SKIP_APT="${FORWARD_SKIP_APT:-0}"
@@ -261,9 +269,199 @@ current_go_version() {
     go version | awk '{print $3}' | sed 's/^go//'
 }
 
+normalize_go_region() {
+    local value="${1:-}"
+    value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "${value}" in
+        ""|auto)
+            printf 'auto'
+            ;;
+        cn)
+            printf 'cn'
+            ;;
+        global)
+            printf 'global'
+            ;;
+        *)
+            fail "FORWARD_GO_REGION 仅支持 auto/cn/global，当前值: ${1:-<empty>}"
+            ;;
+    esac
+}
+
+detect_timezone_name() {
+    local tz=""
+
+    if command -v timedatectl >/dev/null 2>&1; then
+        tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+    fi
+
+    if [[ -z "${tz}" && -r /etc/timezone ]]; then
+        tz="$(tr -d '[:space:]' < /etc/timezone 2>/dev/null || true)"
+    fi
+
+    if [[ -z "${tz}" && -L /etc/localtime ]]; then
+        tz="$(readlink /etc/localtime 2>/dev/null || true)"
+        tz="${tz#*/zoneinfo/}"
+    fi
+
+    printf '%s' "${tz}"
+}
+
+timezone_indicates_cn() {
+    case "${1:-}" in
+        Asia/Shanghai|Asia/Chongqing|Asia/Harbin|Asia/Urumqi)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+fetch_country_code() {
+    local url="$1"
+    local format="${2:-plain}"
+    local output=""
+    local code=""
+
+    output="$(curl -fsS --max-time 3 "${url}" 2>/dev/null || true)"
+    if [[ -z "${output}" ]]; then
+        return 1
+    fi
+
+    case "${format}" in
+        trace)
+            code="$(printf '%s\n' "${output}" | awk -F= '/^loc=/{print $2; exit}')"
+            ;;
+        plain)
+            code="$(printf '%s' "${output}" | tr -d '[:space:]')"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    code="$(printf '%s' "${code}" | tr '[:lower:]' '[:upper:]')"
+    if [[ -z "${code}" ]]; then
+        return 1
+    fi
+
+    printf '%s' "${code}"
+}
+
+detect_go_download_region() {
+    local requested=""
+    local timezone_name=""
+    local country_code=""
+
+    [[ -n "${FORWARD_GO_EFFECTIVE_REGION}" ]] && return 0
+
+    if [[ -n "${FORWARD_GO_BASE_URL}" ]]; then
+        FORWARD_GO_EFFECTIVE_REGION="custom"
+        info "Go 下载源已显式指定: ${FORWARD_GO_BASE_URL}"
+        return 0
+    fi
+
+    requested="$(normalize_go_region "${FORWARD_GO_REGION}")"
+    case "${requested}" in
+        cn)
+            FORWARD_GO_EFFECTIVE_REGION="cn"
+            info "Go 下载区域已强制设为中国大陆镜像"
+            return 0
+            ;;
+        global)
+            FORWARD_GO_EFFECTIVE_REGION="global"
+            info "Go 下载区域已强制设为默认源"
+            return 0
+            ;;
+    esac
+
+    timezone_name="$(detect_timezone_name)"
+    if [[ -n "${timezone_name}" ]] && timezone_indicates_cn "${timezone_name}"; then
+        FORWARD_GO_EFFECTIVE_REGION="cn"
+        info "检测到中国大陆时区 (${timezone_name})，Go 下载将优先使用国内镜像"
+        return 0
+    fi
+
+    country_code="$(fetch_country_code "https://www.cloudflare.com/cdn-cgi/trace" trace || true)"
+    if [[ -z "${country_code}" ]]; then
+        country_code="$(fetch_country_code "https://ifconfig.co/country-iso" plain || true)"
+    fi
+    if [[ -z "${country_code}" ]]; then
+        country_code="$(fetch_country_code "https://ipinfo.io/country" plain || true)"
+    fi
+
+    if [[ "${country_code}" == "CN" ]]; then
+        FORWARD_GO_EFFECTIVE_REGION="cn"
+        info "检测到中国大陆网络 (${country_code})，Go 下载将优先使用国内镜像"
+    else
+        FORWARD_GO_EFFECTIVE_REGION="global"
+        if [[ -n "${country_code}" ]]; then
+            info "Go 下载区域检测结果: ${country_code}，使用默认源"
+        else
+            warn "无法确定 Go 下载区域，默认使用 go.dev"
+        fi
+    fi
+}
+
+join_url_path() {
+    local base="${1%/}"
+    local path="${2#/}"
+    printf '%s/%s' "${base}" "${path}"
+}
+
+resolve_go_download_urls() {
+    local filename="$1"
+    local region=""
+
+    if [[ -n "${FORWARD_GO_BASE_URL}" ]]; then
+        printf '%s\n' "$(join_url_path "${FORWARD_GO_BASE_URL}" "${filename}")"
+        return 0
+    fi
+
+    if [[ -z "${FORWARD_GO_EFFECTIVE_REGION}" ]]; then
+        detect_go_download_region >/dev/null
+    fi
+    region="${FORWARD_GO_EFFECTIVE_REGION:-global}"
+    if [[ "${region}" == "cn" ]]; then
+        printf '%s\n' "$(join_url_path "${FORWARD_GO_CN_BASE_URL}" "${filename}")"
+        printf '%s\n' "https://golang.google.cn/dl/${filename}"
+        printf '%s\n' "https://go.dev/dl/${filename}"
+        return 0
+    fi
+    printf '%s\n' "https://go.dev/dl/${filename}"
+    printf '%s\n' "https://golang.google.cn/dl/${filename}"
+}
+
+download_go_tarball() {
+    local filename="$1"
+    local url=""
+    local attempt_index=0
+    local total_urls=0
+    local urls=()
+
+    mapfile -t urls < <(resolve_go_download_urls "${filename}")
+    total_urls="${#urls[@]}"
+
+    if (( total_urls == 0 )); then
+        fail "未生成任何 Go 下载地址"
+    fi
+
+    for url in "${urls[@]}"; do
+        attempt_index=$((attempt_index + 1))
+        info "尝试下载 Go ${FORWARD_GO_VERSION} (${attempt_index}/${total_urls}): ${url}"
+        if curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 -o "${FORWARD_GO_TARBALL}" "${url}"; then
+            ok "Go 下载完成: ${url}"
+            return 0
+        fi
+        warn "Go 下载失败，尝试下一个源: ${url}"
+        rm -f "${FORWARD_GO_TARBALL}"
+    done
+
+    fail "下载 Go ${FORWARD_GO_VERSION} 失败，已尝试 ${total_urls} 个源"
+}
+
 install_go_if_needed() {
     local current=""
-    local url=""
+    local filename=""
 
     if [[ "${FORWARD_SKIP_GO}" == "1" ]]; then
         warn "已跳过 Go 安装检查"
@@ -276,13 +474,14 @@ install_go_if_needed() {
         return
     fi
 
-    url="https://go.dev/dl/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
-    FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
+    filename="go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
+    FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/${filename}"
 
     mkdir -p "${FORWARD_WORKDIR}"
     rm -f "${FORWARD_GO_TARBALL}"
     rm -rf "${FORWARD_GO_ROOT}"
-    run_with_retry 3 3 "下载 Go ${FORWARD_GO_VERSION}" curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 -o "${FORWARD_GO_TARBALL}" "${url}"
+    detect_go_download_region
+    download_go_tarball "${filename}"
     tar -C "${FORWARD_WORKDIR}" -xzf "${FORWARD_GO_TARBALL}"
     rm -f "${FORWARD_GO_TARBALL}"
 

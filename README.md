@@ -527,6 +527,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads
 
 - 当前默认入口就是 GitHub Raw 上的 `bootstrap.sh`
 - 一键脚本会在目标机安装依赖、拉取指定 `Git ref`、执行 `release.sh`，最后再调用 `deploy.sh`
+- `bootstrap.sh` 会自动检测是否位于中国大陆；如果命中，会优先从国内 Go 镜像拉取工具链。也可用 `FORWARD_GO_REGION=cn|global|auto`、`FORWARD_GO_BASE_URL=...`、`FORWARD_GO_CN_BASE_URL=...` 显式覆盖
 - `deploy.sh` 现在默认把管理面限制在 `127.0.0.1`；如果你确实要直接远程打开管理面，请显式设置 `WEB_BIND=0.0.0.0` 或在 `config.json` 里写入具体监听地址
 - 如果你只想暴露 API / 探针、不想提供浏览器前端，可设置 `WEB_UI_ENABLED=false`，或在 `config.json` 里写入 `"web_ui_enabled": false`
 - `deploy.sh` 生成的新 `config.json` 会直接写入完整默认配置；升级旧配置时也会补齐缺失字段，不需要再翻文档手抄默认项
