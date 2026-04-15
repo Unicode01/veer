@@ -28,11 +28,12 @@ NC='\033[0m'
 BOOTSTRAP_HINT_URL="https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh"
 CURRENT_STEP="初始化"
 BOOTSTRAP_FAILED=0
+BOOTSTRAP_ERROR_REPORTED=0
 
 info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-fail()  { BOOTSTRAP_FAILED=1; echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+fail()  { BOOTSTRAP_FAILED=1; BOOTSTRAP_ERROR_REPORTED=1; echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 
 usage() {
     cat <<EOF
@@ -41,6 +42,11 @@ usage() {
 
 常用环境变量:
   FORWARD_REPO_URL     Git 仓库地址，默认 https://github.com/Unicode01/forward.git
+  FORWARD_REPO_URL_CN  CN 模式优先尝试的 Git 源，默认空
+  FORWARD_REPO_ARCHIVE_URL
+                      显式覆盖源码归档地址，git 拉取失败时作为回退
+  FORWARD_REPO_ARCHIVE_URL_CN
+                      CN 模式优先尝试的源码归档地址，默认空
   FORWARD_REF          拉取的 Git ref，默认 main
   FORWARD_GO_VERSION   安装的 Go 版本，默认 1.25.1
   FORWARD_GO_REGION    Go 下载区域策略: auto/cn/global，默认 auto
@@ -81,6 +87,9 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 FORWARD_REPO_URL="${FORWARD_REPO_URL:-https://github.com/Unicode01/forward.git}"
+FORWARD_REPO_URL_CN="${FORWARD_REPO_URL_CN:-}"
+FORWARD_REPO_ARCHIVE_URL="${FORWARD_REPO_ARCHIVE_URL:-}"
+FORWARD_REPO_ARCHIVE_URL_CN="${FORWARD_REPO_ARCHIVE_URL_CN:-}"
 FORWARD_REF="${FORWARD_REF:-main}"
 FORWARD_GO_VERSION="${FORWARD_GO_VERSION:-1.25.1}"
 FORWARD_GO_REGION="${FORWARD_GO_REGION:-auto}"
@@ -131,12 +140,42 @@ run_with_retry() {
     done
 }
 
+try_with_retry() {
+    local attempts="$1"
+    local delay_seconds="$2"
+    local description="$3"
+    shift 3
+
+    local try=1
+    local exit_code=0
+    while true; do
+        if "$@"; then
+            return 0
+        fi
+
+        exit_code=$?
+        if (( try >= attempts )); then
+            warn "${description} 失败，已重试 ${attempts} 次 (exit=${exit_code})"
+            return "${exit_code}"
+        fi
+
+        warn "${description} 失败 (exit=${exit_code})，${delay_seconds}s 后重试 (${try}/${attempts})"
+        sleep "${delay_seconds}"
+        try=$((try + 1))
+    done
+}
+
 on_error() {
     local exit_code="$1"
     local line="$2"
     local command="$3"
 
+    if [[ "${BOOTSTRAP_ERROR_REPORTED}" == "1" ]]; then
+        return
+    fi
+
     BOOTSTRAP_FAILED=1
+    BOOTSTRAP_ERROR_REPORTED=1
     echo -e "${RED}[FAIL]${NC}  bootstrap 执行失败"
     echo -e "        step: ${CURRENT_STEP}"
     echo -e "        line: ${line}"
@@ -368,12 +407,6 @@ detect_go_download_region() {
 
     [[ -n "${FORWARD_GO_EFFECTIVE_REGION}" ]] && return 0
 
-    if [[ -n "${FORWARD_GO_BASE_URL}" ]]; then
-        FORWARD_GO_EFFECTIVE_REGION="custom"
-        info "Go 下载源已显式指定: ${FORWARD_GO_BASE_URL}"
-        return 0
-    fi
-
     requested="$(normalize_go_region "${FORWARD_GO_REGION}")"
     case "${requested}" in
         cn)
@@ -414,6 +447,19 @@ detect_go_download_region() {
             warn "无法确定 Go 下载区域，默认使用 go.dev"
         fi
     fi
+}
+
+array_contains() {
+    local needle="$1"
+    shift
+
+    local item=""
+    for item in "$@"; do
+        if [[ "${item}" == "${needle}" ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 configure_go_module_env() {
@@ -468,6 +514,99 @@ join_url_path() {
     printf '%s/%s' "${base}" "${path}"
 }
 
+github_repo_slug_from_url() {
+    local url="$1"
+    local path=""
+
+    case "${url}" in
+        https://github.com/*)
+            path="${url#https://github.com/}"
+            ;;
+        http://github.com/*)
+            path="${url#http://github.com/}"
+            ;;
+        https://www.github.com/*)
+            path="${url#https://www.github.com/}"
+            ;;
+        http://www.github.com/*)
+            path="${url#http://www.github.com/}"
+            ;;
+        ssh://git@github.com/*)
+            path="${url#ssh://git@github.com/}"
+            ;;
+        git@github.com:*)
+            path="${url#git@github.com:}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    path="${path%.git}"
+    if [[ "${path}" != */* ]]; then
+        return 1
+    fi
+    printf '%s' "${path}"
+}
+
+resolve_repo_fetch_urls() {
+    local region=""
+    local urls=()
+
+    if [[ -z "${FORWARD_GO_EFFECTIVE_REGION}" ]]; then
+        detect_go_download_region
+    fi
+    region="${FORWARD_GO_EFFECTIVE_REGION:-global}"
+
+    if [[ "${region}" == "cn" && -n "${FORWARD_REPO_URL_CN}" ]] && ! array_contains "${FORWARD_REPO_URL_CN}" "${urls[@]}"; then
+        urls+=("${FORWARD_REPO_URL_CN}")
+    fi
+    if [[ -n "${FORWARD_REPO_URL}" ]] && ! array_contains "${FORWARD_REPO_URL}" "${urls[@]}"; then
+        urls+=("${FORWARD_REPO_URL}")
+    fi
+    if (( ${#urls[@]} == 0 )); then
+        return 0
+    fi
+    printf '%s\n' "${urls[@]}"
+}
+
+resolve_repo_archive_urls() {
+    local region=""
+    local slug=""
+    local urls=()
+    local url=""
+
+    if [[ -z "${FORWARD_GO_EFFECTIVE_REGION}" ]]; then
+        detect_go_download_region
+    fi
+    region="${FORWARD_GO_EFFECTIVE_REGION:-global}"
+
+    if [[ "${region}" == "cn" && -n "${FORWARD_REPO_ARCHIVE_URL_CN}" ]] && ! array_contains "${FORWARD_REPO_ARCHIVE_URL_CN}" "${urls[@]}"; then
+        urls+=("${FORWARD_REPO_ARCHIVE_URL_CN}")
+    fi
+    if [[ -n "${FORWARD_REPO_ARCHIVE_URL}" ]] && ! array_contains "${FORWARD_REPO_ARCHIVE_URL}" "${urls[@]}"; then
+        urls+=("${FORWARD_REPO_ARCHIVE_URL}")
+    fi
+
+    slug="$(github_repo_slug_from_url "${FORWARD_REPO_URL}" || true)"
+    if [[ -n "${slug}" ]]; then
+        for url in \
+            "https://codeload.github.com/${slug}/tar.gz/refs/heads/${FORWARD_REF}" \
+            "https://codeload.github.com/${slug}/tar.gz/refs/tags/${FORWARD_REF}" \
+            "https://codeload.github.com/${slug}/tar.gz/${FORWARD_REF}"
+        do
+            if ! array_contains "${url}" "${urls[@]}"; then
+                urls+=("${url}")
+            fi
+        done
+    fi
+
+    if (( ${#urls[@]} == 0 )); then
+        return 0
+    fi
+    printf '%s\n' "${urls[@]}"
+}
+
 resolve_go_download_urls() {
     local filename="$1"
     local region=""
@@ -489,6 +628,39 @@ resolve_go_download_urls() {
     fi
     printf '%s\n' "https://go.dev/dl/${filename}"
     printf '%s\n' "https://golang.google.cn/dl/${filename}"
+}
+
+fetch_repo_via_git() {
+    local repo_url="$1"
+
+    rm -rf "${FORWARD_REPO_DIR}"
+    mkdir -p "${FORWARD_REPO_DIR}"
+    git init -q "${FORWARD_REPO_DIR}"
+    git -C "${FORWARD_REPO_DIR}" remote add origin "${repo_url}"
+    if ! try_with_retry 3 3 "拉取源码 ${repo_url}@${FORWARD_REF}" git -C "${FORWARD_REPO_DIR}" fetch --depth 1 origin "${FORWARD_REF}"; then
+        return 1
+    fi
+    git -C "${FORWARD_REPO_DIR}" checkout -q FETCH_HEAD
+}
+
+fetch_repo_via_archive() {
+    local archive_url="$1"
+    local archive_path="${FORWARD_WORKDIR}/repo-src.tar.gz"
+
+    rm -f "${archive_path}"
+    if ! try_with_retry 3 3 "下载源码归档 ${archive_url}" curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 -o "${archive_path}" "${archive_url}"; then
+        rm -f "${archive_path}"
+        return 1
+    fi
+
+    rm -rf "${FORWARD_REPO_DIR}"
+    mkdir -p "${FORWARD_REPO_DIR}"
+    if ! tar -C "${FORWARD_REPO_DIR}" --strip-components=1 -xzf "${archive_path}"; then
+        rm -f "${archive_path}"
+        rm -rf "${FORWARD_REPO_DIR}"
+        return 1
+    fi
+    rm -f "${archive_path}"
 }
 
 download_go_tarball() {
@@ -555,15 +727,41 @@ install_go_if_needed() {
 }
 
 clone_repo() {
-    rm -rf "${FORWARD_REPO_DIR}"
-    mkdir -p "${FORWARD_REPO_DIR}"
+    local fetch_urls=()
+    local archive_urls=()
+    local url=""
+    local index=0
+    local total=0
 
-    git init -q "${FORWARD_REPO_DIR}"
-    git -C "${FORWARD_REPO_DIR}" remote add origin "${FORWARD_REPO_URL}"
-    run_with_retry 3 3 "拉取源码 ${FORWARD_REPO_URL}@${FORWARD_REF}" git -C "${FORWARD_REPO_DIR}" fetch --depth 1 origin "${FORWARD_REF}"
-    git -C "${FORWARD_REPO_DIR}" checkout -q FETCH_HEAD
+    mapfile -t fetch_urls < <(resolve_repo_fetch_urls)
+    total="${#fetch_urls[@]}"
+    for url in "${fetch_urls[@]}"; do
+        [[ -n "${url}" ]] || continue
+        index=$((index + 1))
+        info "尝试拉取源码 (${index}/${total}): ${url}"
+        if fetch_repo_via_git "${url}"; then
+            ok "源码已就绪: $(git -C "${FORWARD_REPO_DIR}" rev-parse --short HEAD)"
+            return 0
+        fi
+        warn "源码拉取失败，尝试下一个源: ${url}"
+    done
 
-    ok "源码已就绪: $(git -C "${FORWARD_REPO_DIR}" rev-parse --short HEAD)"
+    mapfile -t archive_urls < <(resolve_repo_archive_urls)
+    total="${#archive_urls[@]}"
+    index=0
+    for url in "${archive_urls[@]}"; do
+        [[ -n "${url}" ]] || continue
+        index=$((index + 1))
+        info "尝试源码归档回退 (${index}/${total}): ${url}"
+        if fetch_repo_via_archive "${url}"; then
+            [[ -f "${FORWARD_REPO_DIR}/release.sh" ]] || fail "源码归档缺少 release.sh，无法继续构建"
+            ok "源码已通过归档回退方式就绪: ${FORWARD_REF}"
+            return 0
+        fi
+        warn "源码归档回退失败，尝试下一个源: ${url}"
+    done
+
+    fail "拉取源码失败，Git 拉取与归档回退均不可用"
 }
 
 build_release() {

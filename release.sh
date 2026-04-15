@@ -25,6 +25,30 @@ info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
 fail() { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 
+run_with_retry() {
+    local attempts="$1"
+    local delay_seconds="$2"
+    local description="$3"
+    shift 3
+
+    local try=1
+    local exit_code=0
+    while true; do
+        if "$@"; then
+            return 0
+        fi
+
+        exit_code=$?
+        if (( try >= attempts )); then
+            fail "${description} 失败，已重试 ${attempts} 次 (exit=${exit_code})"
+        fi
+
+        info "${description} 失败 (exit=${exit_code})，${delay_seconds}s 后重试 (${try}/${attempts})"
+        sleep "${delay_seconds}"
+        try=$((try + 1))
+    done
+}
+
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EBPF_DIR="${PROJECT_DIR}/internal/app/ebpf"
 EBPF_INC="${EBPF_DIR}/include"
@@ -73,7 +97,7 @@ cd "$PROJECT_DIR"
 [[ -f "go.mod" ]] || fail "go.mod 未找到，请在项目根目录运行"
 
 info "下载依赖..."
-go mod download
+run_with_retry 3 3 "下载 Go 依赖" go mod download
 
 [[ -f "${EBPF_TC_SRC}" ]] || fail "eBPF 源文件未找到: ${EBPF_TC_SRC}"
 [[ -f "${EBPF_XDP_SRC}" ]] || fail "eBPF 源文件未找到: ${EBPF_XDP_SRC}"
