@@ -255,8 +255,15 @@ func buildManagedNetworkStatuses(db sqlRuleStore, items []ManagedNetwork, pm *Pr
 	}
 
 	inventory := buildManagedNetworkInterfaceInventory(infos, false)
-	compiled := compileManagedNetworkRuntimeWithInventory(items, explicitIPv6, explicitEgressNATs, inventory)
+	normalizedExplicitEgressNATs := normalizeEgressNATItemsWithSnapshot(explicitEgressNATs, egressNATInterfaceSnapshot{Infos: infos})
+	compiled := compileManagedNetworkRuntimeWithInventory(items, explicitIPv6, normalizedExplicitEgressNATs, inventory)
 	repairIssues := buildManagedNetworkRepairIssueMap(items, buildManagedNetworkRepairInterfaceParentMap(infos))
+	hostIfaceByName := map[string]HostNetworkInterface{}
+	if hasManagedNetworkIPv6(items) {
+		if hostIfaces, err := loadManagedNetworkHostInterfaces(); err == nil {
+			hostIfaceByName = buildHostNetworkInterfaceMap(hostIfaces)
+		}
+	}
 	var ipv6RuntimeStats map[int64]ipv6AssignmentRuntimeStats
 	if len(compiled.IPv6Assignments) > 0 {
 		ipv6RuntimeStats = pm.snapshotIPv6AssignmentRuntimeStats()
@@ -280,6 +287,15 @@ func buildManagedNetworkStatuses(db sqlRuleStore, items []ManagedNetwork, pm *Pr
 			status.IPv4RuntimeDetail = runtime.RuntimeDetail
 			status.IPv4DHCPv4ReplyCount = runtime.DHCPv4ReplyCount
 		}
+		if item.Enabled && item.IPv6Enabled {
+			currentPrefix, currentPrefixWarnings := resolveManagedNetworkIPv6ParentForCurrentHost(item, hostIfaceByName)
+			if currentPrefix != "" {
+				status.IPv6ParentPrefix = currentPrefix
+			}
+			if len(currentPrefixWarnings) > 0 {
+				status.PreviewWarnings = sortAndDedupeStrings(append(status.PreviewWarnings, currentPrefixWarnings...))
+			}
+		}
 		if len(preview.GeneratedIPv6AssignmentIDs) > 0 {
 			runtimeStatus, runtimeDetail, raCount, dhcpCount := aggregateManagedNetworkIPv6RuntimeStatus(preview.GeneratedIPv6AssignmentIDs, ipv6RuntimeStats)
 			status.IPv6RuntimeStatus = runtimeStatus
@@ -290,6 +306,16 @@ func buildManagedNetworkStatuses(db sqlRuleStore, items []ManagedNetwork, pm *Pr
 		statuses = append(statuses, status)
 	}
 	return statuses, nil
+}
+
+func hasManagedNetworkIPv6(items []ManagedNetwork) bool {
+	for _, item := range items {
+		item = normalizeManagedNetwork(item)
+		if item.Enabled && item.IPv6Enabled {
+			return true
+		}
+	}
+	return false
 }
 
 func aggregateManagedNetworkIPv6RuntimeStatus(ids []int64, stats map[int64]ipv6AssignmentRuntimeStats) (string, string, uint64, uint64) {

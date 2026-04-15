@@ -661,6 +661,26 @@ func prepareManagedNetworkIPv6Parent(network ManagedNetwork) (string, string, *n
 	return parentInterface, parentPrefixText, parentPrefix, nil
 }
 
+func resolveManagedNetworkIPv6ParentForCurrentHost(network ManagedNetwork, ifaceByName map[string]HostNetworkInterface) (string, []string) {
+	parentInterface, parentPrefixText, parentPrefix, warnings := prepareManagedNetworkIPv6Parent(network)
+	if parentInterface == "" || parentPrefix == nil || len(ifaceByName) == 0 {
+		return parentPrefixText, warnings
+	}
+
+	iface, ok := ifaceByName[parentInterface]
+	if !ok {
+		warnings = append(warnings, fmt.Sprintf("managed network #%d (%s): ipv6 parent interface %s is not present on this host", network.ID, network.Name, parentInterface))
+		return parentPrefixText, warnings
+	}
+
+	currentParentText, _, err := selectCurrentIPv6ParentPrefix(iface, parentPrefix)
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("managed network #%d (%s): resolve current ipv6_parent_prefix on %s: %v", network.ID, network.Name, parentInterface, err))
+		return parentPrefixText, warnings
+	}
+	return currentParentText, warnings
+}
+
 func buildManagedNetworkIPv6AssignmentsPrepared(network ManagedNetwork, childNames []string, parentInterface string, parentPrefixText string, parentPrefix *net.IPNet, explicitTargets map[string][]managedNetworkExplicitIPv6Target, claimedTargets map[string]struct{}, usedPrefixes []*net.IPNet, usedPrefixIndex *managedNetworkUsedIPv6PrefixIndex) ([]IPv6Assignment, []string, []*net.IPNet) {
 	if parentInterface == "" || parentPrefix == nil {
 		return nil, nil, nil

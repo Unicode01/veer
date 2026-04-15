@@ -41,6 +41,18 @@ func (rt *fakeManagedNetworkRuntime) Close() error {
 	return nil
 }
 
+func setManagedNetworkHostInterfacesForTest(t *testing.T, items []HostNetworkInterface) {
+	t.Helper()
+
+	oldLoad := loadHostNetworkInterfacesForManagedNetworkTests
+	loadHostNetworkInterfacesForManagedNetworkTests = func() ([]HostNetworkInterface, error) {
+		return append([]HostNetworkInterface(nil), items...), nil
+	}
+	t.Cleanup(func() {
+		loadHostNetworkInterfacesForManagedNetworkTests = oldLoad
+	})
+}
+
 func TestManagedNetworkPersistsInDB(t *testing.T) {
 	db := openTestDB(t)
 
@@ -158,6 +170,18 @@ func TestHandleListManagedNetworksReturnsSortedItems(t *testing.T) {
 
 func TestHandleListManagedNetworksIncludesDerivedPreview(t *testing.T) {
 	db := openTestDB(t)
+	setManagedNetworkHostInterfacesForTest(t, []HostNetworkInterface{
+		{
+			Name: "vmbr0",
+			Kind: "bridge",
+			Addresses: []HostInterfaceAddress{{
+				Family:    ipFamilyIPv6,
+				IP:        "2001:db8:100::1",
+				CIDR:      "2001:db8:100::/64",
+				PrefixLen: 64,
+			}},
+		},
+	})
 
 	oldLoad := loadInterfaceInfosForManagedNetworkPreviewTests
 	loadInterfaceInfosForManagedNetworkPreviewTests = func() ([]InterfaceInfo, error) {
@@ -219,6 +243,138 @@ func TestHandleListManagedNetworksIncludesDerivedPreview(t *testing.T) {
 	}
 }
 
+func TestHandleListManagedNetworksResolvesCurrentIPv6ParentPrefix(t *testing.T) {
+	db := openTestDB(t)
+	setManagedNetworkHostInterfacesForTest(t, []HostNetworkInterface{
+		{
+			Name: "eno1",
+			Kind: "device",
+			Addresses: []HostInterfaceAddress{{
+				Family:    ipFamilyIPv6,
+				IP:        "240e:390:7685:3770:8647:9ff:fe4c:53f1",
+				CIDR:      "240e:390:7685:3770::/64",
+				PrefixLen: 64,
+			}},
+		},
+	})
+
+	oldLoad := loadInterfaceInfosForManagedNetworkPreviewTests
+	loadInterfaceInfosForManagedNetworkPreviewTests = func() ([]InterfaceInfo, error) {
+		return []InterfaceInfo{
+			{Name: "eno1", Kind: "device"},
+			{Name: "enp1s0", Kind: "device"},
+		}, nil
+	}
+	defer func() {
+		loadInterfaceInfosForManagedNetworkPreviewTests = oldLoad
+	}()
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:                "device",
+		BridgeMode:          managedNetworkBridgeModeExisting,
+		Bridge:              "enp1s0",
+		UplinkInterface:     "eno1",
+		IPv4Enabled:         true,
+		IPv4CIDR:            "192.168.3.1/24",
+		IPv4PoolStart:       "192.168.3.2",
+		IPv4PoolEnd:         "192.168.3.254",
+		IPv4DNSServers:      "8.8.8.8",
+		IPv6Enabled:         true,
+		IPv6ParentInterface: "eno1",
+		IPv6ParentPrefix:    "240e:390:7681:a470::/64",
+		IPv6AssignmentMode:  managedNetworkIPv6AssignmentModeSingle128,
+		AutoEgressNAT:       true,
+		Enabled:             true,
+	}); err != nil {
+		t.Fatalf("seed managed network: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/managed-networks", nil)
+	w := httptest.NewRecorder()
+
+	handleListManagedNetworks(w, req, db, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var items []ManagedNetworkStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0].IPv6ParentPrefix != "240e:390:7685:3770::/64" {
+		t.Fatalf("IPv6ParentPrefix = %q, want current host prefix 240e:390:7685:3770::/64", items[0].IPv6ParentPrefix)
+	}
+	if items[0].GeneratedIPv6AssignmentCount != 0 {
+		t.Fatalf("GeneratedIPv6AssignmentCount = %d, want 0 without child interfaces", items[0].GeneratedIPv6AssignmentCount)
+	}
+}
+
+func TestHandleListManagedNetworksDoesNotQueueRuntimeReloadWhenEffectiveIPv6Drifts(t *testing.T) {
+	db := openTestDB(t)
+	setManagedNetworkHostInterfacesForTest(t, []HostNetworkInterface{
+		{
+			Name: "eno1",
+			Kind: "device",
+			Addresses: []HostInterfaceAddress{{
+				Family:    ipFamilyIPv6,
+				IP:        "240e:390:7685:3770::1",
+				CIDR:      "240e:390:7685:3770::/64",
+				PrefixLen: 64,
+			}},
+		},
+	})
+
+	oldLoad := loadInterfaceInfosForManagedNetworkPreviewTests
+	loadInterfaceInfosForManagedNetworkPreviewTests = func() ([]InterfaceInfo, error) {
+		return []InterfaceInfo{
+			{Name: "eno1", Kind: "device"},
+			{Name: "vmbr0", Kind: "bridge"},
+			{Name: "tap100i0", Parent: "vmbr0", Kind: "tap"},
+		}, nil
+	}
+	defer func() {
+		loadInterfaceInfosForManagedNetworkPreviewTests = oldLoad
+	}()
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:                "lab",
+		BridgeMode:          managedNetworkBridgeModeExisting,
+		Bridge:              "vmbr0",
+		UplinkInterface:     "eno1",
+		IPv6Enabled:         true,
+		IPv6ParentInterface: "eno1",
+		IPv6ParentPrefix:    "240e:390:7681:a470::/64",
+		IPv6AssignmentMode:  managedNetworkIPv6AssignmentModeSingle128,
+		Enabled:             true,
+	}); err != nil {
+		t.Fatalf("seed managed network: %v", err)
+	}
+
+	pm := &ProcessManager{
+		db:                                     db,
+		managedRuntimeReloadWake:               make(chan struct{}, 1),
+		managedRuntimeReloadAppliedFingerprint: "stale-fingerprint",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/managed-networks", nil)
+	w := httptest.NewRecorder()
+
+	handleListManagedNetworks(w, req, db, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if pm.managedRuntimeReloadPending {
+		t.Fatal("managedRuntimeReloadPending = true, want GET /api/managed-networks to remain side-effect free")
+	}
+	status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+	if status.LastRequestSource != "" {
+		t.Fatalf("LastRequestSource = %q, want empty for read-only managed network list", status.LastRequestSource)
+	}
+}
+
 func TestHandleListManagedNetworksMarksRepairRecommended(t *testing.T) {
 	db := openTestDB(t)
 
@@ -265,6 +421,18 @@ func TestHandleListManagedNetworksMarksRepairRecommended(t *testing.T) {
 
 func TestHandleListManagedNetworksIncludesRuntimeStatus(t *testing.T) {
 	db := openTestDB(t)
+	setManagedNetworkHostInterfacesForTest(t, []HostNetworkInterface{
+		{
+			Name: "vmbr0",
+			Kind: "bridge",
+			Addresses: []HostInterfaceAddress{{
+				Family:    ipFamilyIPv6,
+				IP:        "2001:db8:100::1",
+				CIDR:      "2001:db8:100::/64",
+				PrefixLen: 64,
+			}},
+		},
+	})
 
 	oldLoad := loadInterfaceInfosForManagedNetworkPreviewTests
 	loadInterfaceInfosForManagedNetworkPreviewTests = func() ([]InterfaceInfo, error) {

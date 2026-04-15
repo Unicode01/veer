@@ -1016,6 +1016,67 @@ func TestHandleKernelRuntimePressureFallbackDoesNotSetRetryPending(t *testing.T)
 	}
 }
 
+func TestHandleDismissKernelRuntimeNotePersistsAcrossRefresh(t *testing.T) {
+	pm := &ProcessManager{
+		kernelRuntimeDismissedNoteKeys: make(map[string]struct{}),
+	}
+
+	primeReq := httptest.NewRequest(http.MethodGet, "/api/kernel/runtime", nil)
+	primeResp := httptest.NewRecorder()
+	handleKernelRuntime(primeResp, primeReq, pm)
+	if primeResp.Code != http.StatusOK {
+		t.Fatalf("prime kernel runtime status = %d body=%s", primeResp.Code, primeResp.Body.String())
+	}
+
+	dismissReq := httptest.NewRequest(http.MethodPost, "/api/kernel/runtime/dismiss-note", strings.NewReader(`{"key":"attachment_issue|tc(active_entries=3)"}`))
+	dismissReq.Header.Set("Content-Type", "application/json")
+	dismissResp := httptest.NewRecorder()
+	handleDismissKernelRuntimeNote(dismissResp, dismissReq, pm)
+	if dismissResp.Code != http.StatusOK {
+		t.Fatalf("dismiss kernel runtime note status = %d body=%s", dismissResp.Code, dismissResp.Body.String())
+	}
+
+	var dismissPayload struct {
+		DismissedNoteKeys []string `json:"dismissed_note_keys"`
+	}
+	if err := json.Unmarshal(dismissResp.Body.Bytes(), &dismissPayload); err != nil {
+		t.Fatalf("decode dismiss response: %v body=%s", err, dismissResp.Body.String())
+	}
+	if !reflect.DeepEqual(dismissPayload.DismissedNoteKeys, []string{"attachment_issue|tc(active_entries=3)"}) {
+		t.Fatalf("dismissed_note_keys = %v, want single dismissed key", dismissPayload.DismissedNoteKeys)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/kernel/runtime", nil)
+	w := httptest.NewRecorder()
+	handleKernelRuntime(w, req, pm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("kernel runtime status = %d body=%s", w.Code, w.Body.String())
+	}
+
+	var runtimeResp KernelRuntimeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &runtimeResp); err != nil {
+		t.Fatalf("decode kernel runtime response: %v body=%s", err, w.Body.String())
+	}
+	if !reflect.DeepEqual(runtimeResp.DismissedNoteKeys, []string{"attachment_issue|tc(active_entries=3)"}) {
+		t.Fatalf("runtime dismissed_note_keys = %v, want dismissed key to survive refresh", runtimeResp.DismissedNoteKeys)
+	}
+}
+
+func TestHandleDismissKernelRuntimeNoteRejectsBlankKey(t *testing.T) {
+	pm := &ProcessManager{
+		kernelRuntimeDismissedNoteKeys: make(map[string]struct{}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/kernel/runtime/dismiss-note", strings.NewReader(`{"key":"   "}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handleDismissKernelRuntimeNote(w, req, pm)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("dismiss blank key status = %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleKernelRuntimeUsesSharedSnapshotCache(t *testing.T) {
 	pm := &ProcessManager{
 		cfg: &Config{DefaultEngine: ruleEngineAuto},

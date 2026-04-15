@@ -412,6 +412,34 @@ func resolveIPv6AssignmentForCurrentHost(item IPv6Assignment, ifaceByName map[st
 	return item, true, nil
 }
 
+func resolveIPv6AssignmentsForCurrentHost(items []IPv6Assignment, ifaceByName map[string]HostNetworkInterface) ([]IPv6Assignment, []string) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	resolved := append([]IPv6Assignment(nil), items...)
+	if len(ifaceByName) == 0 {
+		return resolved, nil
+	}
+
+	warnings := make([]string, 0)
+	for i := range resolved {
+		if !resolved[i].Enabled {
+			continue
+		}
+		currentItem, _, err := resolveIPv6AssignmentForCurrentHost(resolved[i], ifaceByName)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("assignment #%d resolve current parent prefix: %v", resolved[i].ID, err))
+			continue
+		}
+		resolved[i] = currentItem
+	}
+	if len(warnings) == 0 {
+		return resolved, nil
+	}
+	return resolved, warnings
+}
+
 func hostNetworkInterfaceHasPrefix(item HostNetworkInterface, prefix string) bool {
 	for _, address := range item.Addresses {
 		if address.Family != ipFamilyIPv6 {

@@ -47,6 +47,8 @@ func managedNetworkRuntimeReloadSourceLabel(source string) string {
 		return "link change"
 	case "addr_change":
 		return "address change"
+	case "drift_check":
+		return "state drift"
 	case "manual":
 		return "manual request"
 	default:

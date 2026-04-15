@@ -154,6 +154,52 @@ func TestSelectCurrentIPv6ParentPrefixPrefersSamePrefixClass(t *testing.T) {
 	}
 }
 
+func TestResolveIPv6AssignmentsForCurrentHostRebasesEnabledAssignments(t *testing.T) {
+	t.Parallel()
+
+	resolved, warnings := resolveIPv6AssignmentsForCurrentHost([]IPv6Assignment{
+		{
+			ID:              1,
+			ParentInterface: "eno1",
+			TargetInterface: "tap100i0",
+			ParentPrefix:    "240e:390:7681:a470::/64",
+			AssignedPrefix:  "240e:390:7681:a470::1234/128",
+			Enabled:         true,
+		},
+		{
+			ID:              2,
+			ParentInterface: "eno1",
+			TargetInterface: "tap100i1",
+			ParentPrefix:    "240e:390:7681:a470::/64",
+			AssignedPrefix:  "240e:390:7681:a470::5678/128",
+			Enabled:         false,
+		},
+	}, map[string]HostNetworkInterface{
+		"eno1": {
+			Name: "eno1",
+			Addresses: []HostInterfaceAddress{{
+				Family:    ipFamilyIPv6,
+				IP:        "240e:390:7685:3770::1",
+				CIDR:      "240e:390:7685:3770::/64",
+				PrefixLen: 64,
+			}},
+		},
+	})
+
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("len(resolved) = %d, want 2", len(resolved))
+	}
+	if resolved[0].ParentPrefix != "240e:390:7685:3770::/64" || resolved[0].AssignedPrefix != "240e:390:7685:3770::1234/128" {
+		t.Fatalf("resolved[0] = %+v, want rebased enabled assignment under current parent prefix", resolved[0])
+	}
+	if resolved[1].ParentPrefix != "240e:390:7681:a470::/64" || resolved[1].AssignedPrefix != "240e:390:7681:a470::5678/128" {
+		t.Fatalf("resolved[1] = %+v, want disabled assignment to remain unchanged", resolved[1])
+	}
+}
+
 func TestIPv6PrefixesOverlap(t *testing.T) {
 	t.Parallel()
 

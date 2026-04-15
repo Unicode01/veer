@@ -1211,3 +1211,227 @@ func TestReloadManagedNetworkRuntimeOnlyAddrChangeDoesNotSkipDynamicSourceEgress
 		t.Fatal("managedRuntimeReloadAppliedFingerprint unchanged, want dynamic-source interface address change to refresh fingerprint")
 	}
 }
+
+func TestReloadManagedNetworkRuntimeOnlyAddrChangeDoesNotSkipIPv6ParentPrefixRotation(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:                "lab",
+		BridgeMode:          managedNetworkBridgeModeCreate,
+		Bridge:              "vmbr1",
+		UplinkInterface:     "eno1",
+		IPv6Enabled:         true,
+		IPv6ParentInterface: "eno1",
+		IPv6ParentPrefix:    "240e:390:7681:a470::/64",
+		IPv6AssignmentMode:  managedNetworkIPv6AssignmentModeSingle128,
+		Enabled:             true,
+	}); err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	oldInterfaceLoad := loadInterfaceInfosForEgressNATTests
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return []InterfaceInfo{
+			{Name: "eno1", Kind: "device"},
+			{Name: "vmbr1", Kind: "bridge"},
+			{Name: "tap100i0", Parent: "vmbr1", Kind: "tap"},
+		}, nil
+	}
+	defer func() {
+		loadInterfaceInfosForEgressNATTests = oldInterfaceLoad
+	}()
+
+	currentParentPrefix := "240e:390:7681:a470::/64"
+	oldHostLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return []HostNetworkInterface{
+			{
+				Name: "eno1",
+				Kind: "device",
+				Addresses: []HostInterfaceAddress{{
+					Family:    ipFamilyIPv6,
+					IP:        strings.TrimSuffix(currentParentPrefix, "/64") + "1",
+					CIDR:      currentParentPrefix,
+					PrefixLen: 64,
+				}},
+			},
+		}, nil
+	}
+	defer func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldHostLoad
+	}()
+
+	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                                   db,
+		cfg:                                  &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:                fakeManagedRuntime,
+		ipv6Runtime:                          fakeIPv6Runtime,
+		rulePlans:                            make(map[int64]ruleDataplanePlan),
+		rangePlans:                           make(map[int64]rangeDataplanePlan),
+		egressNATPlans:                       make(map[int64]ruleDataplanePlan),
+		dynamicEgressNATParents:              make(map[string]struct{}),
+		ipv6AssignmentInterfaces:             make(map[string]struct{}),
+		kernelRules:                          make(map[int64]bool),
+		kernelRanges:                         make(map[int64]bool),
+		kernelEgressNATs:                     make(map[int64]bool),
+		kernelRuleEngines:                    make(map[int64]string),
+		kernelRangeEngines:                   make(map[int64]string),
+		kernelEgressNATEngines:               make(map[int64]string),
+		kernelFlowOwners:                     make(map[uint32]kernelCandidateOwner),
+		kernelRuleStats:                      make(map[int64]RuleStatsReport),
+		kernelRangeStats:                     make(map[int64]RangeStatsReport),
+		kernelEgressNATStats:                 make(map[int64]EgressNATStatsReport),
+		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
+		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
+		lastRulePlanLog:                      make(map[int64]string),
+		lastRangePlanLog:                     make(map[int64]string),
+	}
+
+	pm.redistributeWorkers()
+
+	if fakeManagedRuntime.reconcileCalls != 1 {
+		t.Fatalf("managed runtime reconcileCalls = %d, want 1 after initial redistribute", fakeManagedRuntime.reconcileCalls)
+	}
+	if fakeIPv6Runtime.reconcileCalls != 1 {
+		t.Fatalf("ipv6 runtime reconcileCalls = %d, want 1 after initial redistribute", fakeIPv6Runtime.reconcileCalls)
+	}
+	if len(fakeIPv6Runtime.lastItems) != 1 {
+		t.Fatalf("len(fakeIPv6Runtime.lastItems) = %d, want 1 generated ipv6 assignment", len(fakeIPv6Runtime.lastItems))
+	}
+	if fakeIPv6Runtime.lastItems[0].ParentPrefix != "240e:390:7681:a470::/64" {
+		t.Fatalf("initial ParentPrefix = %q, want 240e:390:7681:a470::/64", fakeIPv6Runtime.lastItems[0].ParentPrefix)
+	}
+
+	initialFingerprint := pm.managedRuntimeReloadAppliedFingerprint
+	if initialFingerprint == "" {
+		t.Fatal("managedRuntimeReloadAppliedFingerprint = empty, want initialized fingerprint after redistribute")
+	}
+
+	currentParentPrefix = "240e:390:7685:3770::/64"
+	pm.mu.Lock()
+	pm.managedRuntimeReloadLastRequestSource = "addr_change"
+	pm.mu.Unlock()
+
+	if err := pm.reloadManagedNetworkRuntimeOnly(); err != nil {
+		t.Fatalf("reloadManagedNetworkRuntimeOnly() error = %v", err)
+	}
+	if fakeManagedRuntime.reconcileCalls != 2 {
+		t.Fatalf("managed runtime reconcileCalls = %d, want refresh after ipv6 parent prefix rotation", fakeManagedRuntime.reconcileCalls)
+	}
+	if fakeIPv6Runtime.reconcileCalls != 2 {
+		t.Fatalf("ipv6 runtime reconcileCalls = %d, want refresh after ipv6 parent prefix rotation", fakeIPv6Runtime.reconcileCalls)
+	}
+	if len(fakeIPv6Runtime.lastItems) != 1 {
+		t.Fatalf("len(fakeIPv6Runtime.lastItems) = %d, want 1 generated ipv6 assignment after reload", len(fakeIPv6Runtime.lastItems))
+	}
+	if fakeIPv6Runtime.lastItems[0].ParentPrefix != "240e:390:7685:3770::/64" {
+		t.Fatalf("reloaded ParentPrefix = %q, want rotated host prefix 240e:390:7685:3770::/64", fakeIPv6Runtime.lastItems[0].ParentPrefix)
+	}
+	if !strings.HasPrefix(fakeIPv6Runtime.lastItems[0].AssignedPrefix, "240e:390:7685:3770:") {
+		t.Fatalf("reloaded AssignedPrefix = %q, want rebased prefix under 240e:390:7685:3770::/64", fakeIPv6Runtime.lastItems[0].AssignedPrefix)
+	}
+	if pm.managedRuntimeReloadAppliedFingerprint == initialFingerprint {
+		t.Fatal("managedRuntimeReloadAppliedFingerprint unchanged, want ipv6 parent prefix rotation to refresh fingerprint")
+	}
+}
+
+func TestDetectManagedNetworkRuntimeDriftQueuesReloadWhenIPv6ParentPrefixRotates(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:                "lab",
+		BridgeMode:          managedNetworkBridgeModeCreate,
+		Bridge:              "vmbr1",
+		UplinkInterface:     "eno1",
+		IPv6Enabled:         true,
+		IPv6ParentInterface: "eno1",
+		IPv6ParentPrefix:    "240e:390:7681:a470::/64",
+		IPv6AssignmentMode:  managedNetworkIPv6AssignmentModeSingle128,
+		Enabled:             true,
+	}); err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	oldInterfaceLoad := loadInterfaceInfosForEgressNATTests
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return []InterfaceInfo{
+			{Name: "eno1", Kind: "device"},
+			{Name: "vmbr1", Kind: "bridge"},
+			{Name: "tap100i0", Parent: "vmbr1", Kind: "tap"},
+		}, nil
+	}
+	defer func() {
+		loadInterfaceInfosForEgressNATTests = oldInterfaceLoad
+	}()
+
+	currentParentPrefix := "240e:390:7681:a470::/64"
+	oldHostLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return []HostNetworkInterface{
+			{
+				Name: "eno1",
+				Kind: "device",
+				Addresses: []HostInterfaceAddress{{
+					Family:    ipFamilyIPv6,
+					IP:        strings.TrimSuffix(currentParentPrefix, "/64") + "1",
+					CIDR:      currentParentPrefix,
+					PrefixLen: 64,
+				}},
+			},
+		}, nil
+	}
+	defer func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldHostLoad
+	}()
+
+	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                                   db,
+		cfg:                                  &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:                fakeManagedRuntime,
+		ipv6Runtime:                          fakeIPv6Runtime,
+		managedRuntimeReloadWake:             make(chan struct{}, 1),
+		rulePlans:                            make(map[int64]ruleDataplanePlan),
+		rangePlans:                           make(map[int64]rangeDataplanePlan),
+		egressNATPlans:                       make(map[int64]ruleDataplanePlan),
+		dynamicEgressNATParents:              make(map[string]struct{}),
+		ipv6AssignmentInterfaces:             make(map[string]struct{}),
+		kernelRules:                          make(map[int64]bool),
+		kernelRanges:                         make(map[int64]bool),
+		kernelEgressNATs:                     make(map[int64]bool),
+		kernelRuleEngines:                    make(map[int64]string),
+		kernelRangeEngines:                   make(map[int64]string),
+		kernelEgressNATEngines:               make(map[int64]string),
+		kernelFlowOwners:                     make(map[uint32]kernelCandidateOwner),
+		kernelRuleStats:                      make(map[int64]RuleStatsReport),
+		kernelRangeStats:                     make(map[int64]RangeStatsReport),
+		kernelEgressNATStats:                 make(map[int64]EgressNATStatsReport),
+		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
+		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
+		lastRulePlanLog:                      make(map[int64]string),
+		lastRangePlanLog:                     make(map[int64]string),
+	}
+
+	pm.redistributeWorkers()
+
+	if pm.managedRuntimeReloadAppliedFingerprint == "" {
+		t.Fatal("managedRuntimeReloadAppliedFingerprint = empty, want initialized fingerprint after redistribute")
+	}
+	if pm.managedRuntimeReloadPending {
+		t.Fatal("managedRuntimeReloadPending = true, want no pending reload after initial redistribute")
+	}
+
+	currentParentPrefix = "240e:390:7685:3770::/64"
+	pm.detectManagedNetworkRuntimeDrift()
+
+	if !pm.managedRuntimeReloadPending {
+		t.Fatal("managedRuntimeReloadPending = false, want drift detector to queue targeted reload after ipv6 parent prefix rotation")
+	}
+	status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+	if status.LastRequestSource != "drift_check" {
+		t.Fatalf("LastRequestSource = %q, want drift_check", status.LastRequestSource)
+	}
+}

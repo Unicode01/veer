@@ -572,6 +572,7 @@ type KernelRuntimeResponse struct {
 	LastKernelAttachmentHealAt                     time.Time                 `json:"last_kernel_attachment_heal_at,omitempty"`
 	LastKernelAttachmentHealSummary                string                    `json:"last_kernel_attachment_heal_summary,omitempty"`
 	LastKernelAttachmentHealError                  string                    `json:"last_kernel_attachment_heal_error,omitempty"`
+	DismissedNoteKeys                              []string                  `json:"dismissed_note_keys,omitempty"`
 	LastStatsSnapshotAt                            time.Time                 `json:"last_stats_snapshot_at,omitempty"`
 	LastStatsSnapshotMs                            int64                     `json:"last_stats_snapshot_ms,omitempty"`
 	LastStatsSnapshotError                         string                    `json:"last_stats_snapshot_error,omitempty"`

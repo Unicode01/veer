@@ -357,6 +357,13 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		handleKernelRuntime(w, r, pm)
 	}))
+	mux.HandleFunc("/api/kernel/runtime/dismiss-note", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleDismissKernelRuntimeNote(w, r, pm)
+	}))
 	mux.HandleFunc("/api/rules/stats", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2570,6 +2577,24 @@ func handleKernelRuntime(w http.ResponseWriter, r *http.Request, pm *ProcessMana
 		forceFresh = strings.Contains(cacheControl, "no-cache") || strings.EqualFold(r.URL.Query().Get("refresh"), "1")
 	}
 	writeJSON(w, http.StatusOK, pm.snapshotKernelRuntimeShared(time.Time{}, forceFresh))
+}
+
+func handleDismissKernelRuntimeNote(w http.ResponseWriter, r *http.Request, pm *ProcessManager) {
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := decodeJSONRequestBody(w, r, &req, apiJSONBodyMaxBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	key := normalizeKernelRuntimeNoteKey(req.Key)
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key is required"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dismissed_note_keys": pm.dismissKernelRuntimeNote(key),
+	})
 }
 
 func handleAddRange(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {

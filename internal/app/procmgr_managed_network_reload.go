@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -367,6 +368,101 @@ func (pm *ProcessManager) shouldSkipManagedNetworkAddrReload(fingerprint string)
 	return pm.managedRuntimeReloadAppliedFingerprint != "" && pm.managedRuntimeReloadAppliedFingerprint == fingerprint
 }
 
+func (pm *ProcessManager) detectManagedNetworkRuntimeDrift() {
+	if pm == nil || pm.db == nil {
+		return
+	}
+
+	pm.mu.Lock()
+	hasManagedRuntime := len(pm.managedNetworkInterfaces) > 0 || pm.ipv6AssignmentsConfigured
+	pending := pm.managedRuntimeReloadPending
+	appliedFingerprint := strings.TrimSpace(pm.managedRuntimeReloadAppliedFingerprint)
+	shuttingDown := pm.shuttingDown
+	pm.mu.Unlock()
+
+	if shuttingDown || pending || !hasManagedRuntime || appliedFingerprint == "" {
+		return
+	}
+
+	currentFingerprint, touchedInterfaces, err := pm.currentManagedNetworkRuntimeFingerprint()
+	if err != nil {
+		log.Printf("managed network runtime: drift check skipped: %v", err)
+		return
+	}
+	currentFingerprint = strings.TrimSpace(currentFingerprint)
+	if currentFingerprint == "" || currentFingerprint == appliedFingerprint {
+		return
+	}
+
+	if summary := summarizeManagedRuntimeReloadInterfaces(sliceToManagedNetworkInterfaceSet(touchedInterfaces)); summary != "" {
+		log.Printf("managed network runtime: detected effective state drift on %s, queueing targeted reload", summary)
+	} else {
+		log.Printf("managed network runtime: detected effective state drift, queueing targeted reload")
+	}
+	pm.requestManagedNetworkRuntimeReloadWithSource(0, "drift_check", touchedInterfaces...)
+}
+
+func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []string, error) {
+	if pm == nil || pm.db == nil {
+		return "", nil, nil
+	}
+
+	managedNetworks, err := dbGetManagedNetworks(pm.db)
+	if err != nil {
+		return "", nil, fmt.Errorf("load managed networks: %w", err)
+	}
+	managedNetworkReservations, err := dbGetManagedNetworkReservations(pm.db)
+	if err != nil {
+		return "", nil, fmt.Errorf("load managed network reservations: %w", err)
+	}
+	explicitEgressNATs, err := dbGetEgressNATs(pm.db)
+	if err != nil {
+		return "", nil, fmt.Errorf("load egress nats: %w", err)
+	}
+	ipv6Assignments, err := loadIPv6AssignmentsForManagedNetworkReload(pm.db)
+	if err != nil {
+		return "", nil, fmt.Errorf("load ipv6 assignments: %w", err)
+	}
+
+	egressNATSnapshot := loadEgressNATInterfaceSnapshot()
+	if egressNATSnapshot.Err != nil {
+		return "", nil, fmt.Errorf("load interface inventory: %w", egressNATSnapshot.Err)
+	}
+	explicitEgressNATs = normalizeEgressNATItemsWithSnapshot(explicitEgressNATs, egressNATSnapshot)
+	managedNetworkCompiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, explicitEgressNATs, egressNATSnapshot.Infos)
+
+	effectiveIPv6Assignments := append([]IPv6Assignment(nil), ipv6Assignments...)
+	if len(managedNetworkCompiled.IPv6Assignments) > 0 {
+		effectiveIPv6Assignments = append(effectiveIPv6Assignments, managedNetworkCompiled.IPv6Assignments...)
+	}
+	if len(effectiveIPv6Assignments) > 0 {
+		hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces()
+		if err != nil {
+			return "", nil, fmt.Errorf("load host interfaces for ipv6 resolution: %w", err)
+		}
+		resolvedAssignments, warnings := resolveIPv6AssignmentsForCurrentHost(effectiveIPv6Assignments, buildHostNetworkInterfaceMap(hostIfaces))
+		if len(warnings) > 0 {
+			return "", nil, errors.New(strings.Join(warnings, "; "))
+		}
+		effectiveIPv6Assignments = resolvedAssignments
+	}
+
+	effectiveEgressNATs := append([]EgressNAT(nil), explicitEgressNATs...)
+	if len(managedNetworkCompiled.EgressNATs) > 0 {
+		effectiveEgressNATs = append(effectiveEgressNATs, managedNetworkCompiled.EgressNATs...)
+	}
+
+	fingerprint := buildManagedNetworkRuntimeReloadFingerprint(
+		managedNetworks,
+		managedNetworkReservations,
+		effectiveIPv6Assignments,
+		effectiveEgressNATs,
+		egressNATSnapshot.Infos,
+	)
+	touchedInterfaces := collectManagedNetworkRuntimeTouchedInterfaces(managedNetworks, effectiveIPv6Assignments, managedNetworkCompiled)
+	return fingerprint, touchedInterfaces, nil
+}
+
 var managedNetworkAddrReloadSkipCheck = canSkipManagedNetworkAddrReload
 
 func appendManagedNetworkRuntimeReloadIssue(issues []string, scope string, err error) []string {
@@ -616,6 +712,18 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	if len(managedNetworkCompiled.IPv6Assignments) > 0 {
 		effectiveIPv6Assignments = append(effectiveIPv6Assignments, managedNetworkCompiled.IPv6Assignments...)
 	}
+	ipv6ResolutionWarnings := make([]string, 0)
+	if len(effectiveIPv6Assignments) > 0 {
+		if hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces(); err == nil {
+			effectiveIPv6Assignments, ipv6ResolutionWarnings = resolveIPv6AssignmentsForCurrentHost(effectiveIPv6Assignments, buildHostNetworkInterfaceMap(hostIfaces))
+		} else {
+			log.Printf("managed network runtime: load host interfaces for ipv6 resolution: %v", err)
+			ipv6ResolutionWarnings = append(ipv6ResolutionWarnings, fmt.Sprintf("load host interfaces for ipv6 resolution: %v", err))
+		}
+		for _, warning := range ipv6ResolutionWarnings {
+			log.Printf("managed network runtime: %s", warning)
+		}
+	}
 
 	effectiveEgressNATs := append([]EgressNAT(nil), explicitEgressNATs...)
 	if len(managedNetworkCompiled.EgressNATs) > 0 {
@@ -639,6 +747,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	if reloadSource == "addr_change" &&
 		ipv6AssignmentLoadErr == nil &&
 		egressNATSnapshot.Err == nil &&
+		len(ipv6ResolutionWarnings) == 0 &&
 		managedNetworkAddrReloadSkipCheck(managedNetworks, managedNetworkReservations) &&
 		pm.shouldSkipManagedNetworkAddrReload(reloadFingerprint) {
 		pm.mu.Lock()
@@ -855,6 +964,24 @@ func cloneManagedNetworkInterfaceSet(src map[string]struct{}) map[string]struct{
 		return nil
 	}
 	return dst
+}
+
+func sliceToManagedNetworkInterfaceSet(items []string) map[string]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		out[item] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func summarizeManagedRuntimeReloadInterfaces(src map[string]struct{}) string {

@@ -861,6 +861,107 @@
     });
   }
 
+  function ensureKernelRuntimeDismissedNotes() {
+    if (!app.state.kernelRuntimeDismissedNotes || typeof app.state.kernelRuntimeDismissedNotes !== 'object') {
+      app.state.kernelRuntimeDismissedNotes = {};
+    }
+    return app.state.kernelRuntimeDismissedNotes;
+  }
+
+  function syncKernelRuntimeDismissedNotes(data) {
+    const dismissed = {};
+    const keys = Array.isArray(data && data.dismissed_note_keys) ? data.dismissed_note_keys : [];
+    keys.forEach((key) => {
+      key = String(key || '').trim();
+      if (!key) return;
+      dismissed[key] = true;
+    });
+    app.state.kernelRuntimeDismissedNotes = dismissed;
+    return dismissed;
+  }
+
+  function pruneKernelRuntimeDismissedNotes(activeKeys) {
+    const dismissed = ensureKernelRuntimeDismissedNotes();
+    const keep = activeKeys && typeof activeKeys === 'object' ? activeKeys : {};
+    Object.keys(dismissed).forEach((key) => {
+      if (!keep[key]) delete dismissed[key];
+    });
+  }
+
+  async function dismissKernelRuntimeNote(key) {
+    key = String(key || '').trim();
+    if (!key) return false;
+
+    const response = await app.apiCall('POST', '/api/kernel/runtime/dismiss-note', { key: key });
+    const data = app.state && app.state.kernelRuntime ? app.state.kernelRuntime.data : null;
+    if (data && response && Array.isArray(response.dismissed_note_keys)) {
+      data.dismissed_note_keys = response.dismissed_note_keys.slice();
+    }
+    syncKernelRuntimeDismissedNotes(data || response || null);
+    return true;
+  }
+
+  function kernelRuntimeNoteSpec(kind, text) {
+    const message = String(text || '').trim();
+    if (!message) return null;
+    const scope = String(kind || 'note').trim() || 'note';
+    return {
+      key: scope + '|' + message,
+      text: message
+    };
+  }
+
+  function createKernelRuntimeNoteNode(spec) {
+    if (!spec || !spec.key || !spec.text) return null;
+    const dismissed = ensureKernelRuntimeDismissedNotes();
+    if (dismissed[spec.key]) return null;
+
+    const node = app.createNode('div', { className: 'kernel-runtime-note' });
+    node.appendChild(app.createNode('span', {
+      className: 'kernel-runtime-note-text',
+      text: spec.text
+    }));
+
+    const closeButton = app.createNode('button', {
+      className: 'kernel-runtime-note-close',
+      text: app.t('common.close'),
+      attrs: {
+        type: 'button',
+        title: app.t('common.close'),
+        'aria-label': app.t('common.close')
+      }
+    });
+    closeButton.addEventListener('click', async () => {
+      if (closeButton.disabled) return;
+      closeButton.disabled = true;
+      try {
+        await dismissKernelRuntimeNote(spec.key);
+        if (typeof hideKernelRuntimeTooltip === 'function') hideKernelRuntimeTooltip();
+        if (typeof app.renderKernelRuntime === 'function') {
+          app.renderKernelRuntime();
+        }
+      } catch (e) {
+        closeButton.disabled = false;
+        if (e.message !== 'unauthorized') {
+          app.notify('error', app.t('errors.actionFailed', {
+            action: app.t('common.close'),
+            message: app.translateValidationMessage(e.message)
+          }));
+        }
+      }
+    });
+    node.appendChild(closeButton);
+
+    return node;
+  }
+
+  function appendKernelRuntimeNote(container, spec, activeKeys) {
+    if (!container || !spec || !spec.key) return;
+    if (activeKeys) activeKeys[spec.key] = true;
+    const node = createKernelRuntimeNoteNode(spec);
+    if (node) container.appendChild(node);
+  }
+
   function kernelRuntimeSummaryNote(labelKey, timestamp, detail) {
     const text = typeof app.translateRuntimeReason === 'function'
       ? app.translateRuntimeReason(detail)
@@ -872,10 +973,7 @@
     if (clock) parts.push(clock);
     parts.push(text);
 
-    return app.createNode('div', {
-      className: 'kernel-runtime-note',
-      text: parts.join(' · ')
-    });
+    return kernelRuntimeNoteSpec(labelKey, parts.join(' · '));
   }
 
   function kernelRuntimeNetlinkRecoveryDetail(data) {
@@ -990,10 +1088,7 @@
     else if (mode === 'mixed') detail = app.t('runtimeReason.xdpMixedMode');
     if (!detail) return null;
 
-    return app.createNode('div', {
-      className: 'kernel-runtime-note',
-      text: app.t('kernel.note.xdpAttachmentMode') + ' · ' + detail
-    });
+    return kernelRuntimeNoteSpec('xdp_attachment_mode', app.t('kernel.note.xdpAttachmentMode') + ' · ' + detail);
   }
 
   function kernelRuntimeReconcileNode(engine) {
@@ -1178,6 +1273,7 @@
     app.clearNode(el.kernelRuntimeBody);
 
     if (!data) {
+      pruneKernelRuntimeDismissedNotes({});
       el.noKernelRuntime.style.display = 'block';
       app.toggleTableVisibility('kernelRuntimeTable', false);
       return;
@@ -1338,59 +1434,45 @@
     ));
     el.kernelRuntimeSummary.appendChild(summaryFragment);
 
-    if (data.transient_fallback_summary) {
-      el.kernelRuntimeSummary.appendChild(app.createNode('div', {
-        className: 'kernel-runtime-note',
-        text: data.transient_fallback_summary
-      }));
-    }
+    const activeKernelRuntimeNotes = {};
+    appendKernelRuntimeNote(
+      el.kernelRuntimeSummary,
+      kernelRuntimeNoteSpec('transient_fallback_summary', data.transient_fallback_summary),
+      activeKernelRuntimeNotes
+    );
     const lastRetryNote = kernelRuntimeSummaryNote('kernel.note.lastRetry', data.last_kernel_retry_at, data.last_kernel_retry_reason);
-    if (lastRetryNote) {
-      el.kernelRuntimeSummary.appendChild(lastRetryNote);
-    }
+    appendKernelRuntimeNote(el.kernelRuntimeSummary, lastRetryNote, activeKernelRuntimeNotes);
     const lastIncrementalRetryNote = kernelRuntimeSummaryNote('kernel.note.lastIncrementalRetry', data.last_kernel_incremental_retry_at, data.last_kernel_incremental_retry_result);
-    if (lastIncrementalRetryNote) {
-      el.kernelRuntimeSummary.appendChild(lastIncrementalRetryNote);
-    }
+    appendKernelRuntimeNote(el.kernelRuntimeSummary, lastIncrementalRetryNote, activeKernelRuntimeNotes);
     const pendingNetlinkRecoveryNote = kernelRuntimeSummaryNote(
       'kernel.note.pendingNetlinkRecovery',
       data.kernel_netlink_recover_requested_at,
       kernelRuntimeNetlinkRecoveryDetail(data)
     );
-    if (pendingNetlinkRecoveryNote) {
-      el.kernelRuntimeSummary.appendChild(pendingNetlinkRecoveryNote);
-    }
+    appendKernelRuntimeNote(el.kernelRuntimeSummary, pendingNetlinkRecoveryNote, activeKernelRuntimeNotes);
     const attachmentIssueNote = kernelRuntimeSummaryNote('kernel.note.attachmentIssue', '', data.last_kernel_attachment_issue);
-    if (attachmentIssueNote) {
-      el.kernelRuntimeSummary.appendChild(attachmentIssueNote);
-    }
+    appendKernelRuntimeNote(el.kernelRuntimeSummary, attachmentIssueNote, activeKernelRuntimeNotes);
     const attachmentHealErrorNote = kernelRuntimeSummaryNote(
       'kernel.note.lastAttachmentHealError',
       data.last_kernel_attachment_heal_at,
       data.last_kernel_attachment_heal_error
     );
-    if (attachmentHealErrorNote) {
-      el.kernelRuntimeSummary.appendChild(attachmentHealErrorNote);
-    }
+    appendKernelRuntimeNote(el.kernelRuntimeSummary, attachmentHealErrorNote, activeKernelRuntimeNotes);
     const attachmentHealNote = kernelRuntimeSummaryNote(
       'kernel.note.lastAttachmentHeal',
       data.last_kernel_attachment_heal_at,
       data.last_kernel_attachment_heal_summary
     );
-    if (attachmentHealNote) {
-      el.kernelRuntimeSummary.appendChild(attachmentHealNote);
-    }
+    appendKernelRuntimeNote(el.kernelRuntimeSummary, attachmentHealNote, activeKernelRuntimeNotes);
     const degradedSummary = kernelRuntimeDegradedSummaryText(engines);
-    if (degradedSummary) {
-      el.kernelRuntimeSummary.appendChild(app.createNode('div', {
-        className: 'kernel-runtime-note',
-        text: app.t('kernel.summary.degraded') + ': ' + degradedSummary
-      }));
-    }
+    appendKernelRuntimeNote(
+      el.kernelRuntimeSummary,
+      kernelRuntimeNoteSpec('degraded_summary', app.t('kernel.summary.degraded') + ': ' + degradedSummary),
+      activeKernelRuntimeNotes
+    );
     const xdpAttachmentModeNote = kernelRuntimeXDPAttachmentModeNote(engines);
-    if (xdpAttachmentModeNote) {
-      el.kernelRuntimeSummary.appendChild(xdpAttachmentModeNote);
-    }
+    appendKernelRuntimeNote(el.kernelRuntimeSummary, xdpAttachmentModeNote, activeKernelRuntimeNotes);
+    pruneKernelRuntimeDismissedNotes(activeKernelRuntimeNotes);
 
     if (!engines.length) {
       el.noKernelRuntime.style.display = 'block';
@@ -1585,6 +1667,7 @@
   app.loadKernelRuntime = async function loadKernelRuntime() {
     try {
       app.state.kernelRuntime.data = await app.apiCall('GET', '/api/kernel/runtime');
+      syncKernelRuntimeDismissedNotes(app.state.kernelRuntime.data);
       app.renderKernelRuntime();
     } catch (e) {
       if (e.message !== 'unauthorized') console.error('load kernel runtime:', e);

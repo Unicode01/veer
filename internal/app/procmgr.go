@@ -75,6 +75,7 @@ const (
 	kernelUserspaceWarmupTimeout        = 5 * time.Second
 	kernelUserspaceWarmupPoll           = 100 * time.Millisecond
 	managedNetworkReloadDebounce        = 1 * time.Second
+	managedNetworkDriftCheckEvery       = 10 * time.Second
 	managedNetworkSelfEventSuppressFor  = 2 * time.Second
 	managedNetworkLinkChangeSuppressFor = 10 * time.Second
 )
@@ -186,6 +187,7 @@ type ProcessManager struct {
 	egressNATPlans                                 map[int64]ruleDataplanePlan
 	dynamicEgressNATParents                        map[string]struct{}
 	managedRuntimeReloadAppliedFingerprint         string
+	managedRuntimeDriftCheckAt                     time.Time
 	managedNetworkRuntime                          managedNetworkRuntime
 	managedNetworkInterfaces                       map[string]struct{}
 	ipv6Runtime                                    ipv6AssignmentRuntime
@@ -207,6 +209,7 @@ type ProcessManager struct {
 	kernelStatsSnapshotAt                          time.Time
 	kernelStatsRefreshWait                         chan struct{}
 	kernelRuntimeSnapshot                          KernelRuntimeResponse
+	kernelRuntimeDismissedNoteKeys                 map[string]struct{}
 	kernelRuntimeSnapshotAt                        time.Time
 	kernelRuntimeSnapshotWait                      chan struct{}
 	kernelStatsLastDuration                        time.Duration
@@ -391,6 +394,7 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		kernelRuleStats:                      make(map[int64]RuleStatsReport),
 		kernelRangeStats:                     make(map[int64]RangeStatsReport),
 		kernelEgressNATStats:                 make(map[int64]EgressNATStatsReport),
+		kernelRuntimeDismissedNoteKeys:       make(map[string]struct{}),
 		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
 		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
 		kernelStatsSnapshot:                  emptyKernelRuleStatsSnapshot(),
@@ -785,6 +789,17 @@ func (pm *ProcessManager) redistributeWorkers() {
 	}
 	if len(managedNetworkCompiled.EgressNATs) > 0 {
 		egressNATs = append(egressNATs, managedNetworkCompiled.EgressNATs...)
+	}
+	if len(ipv6Assignments) > 0 {
+		if hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces(); err == nil {
+			resolvedAssignments, resolveWarnings := resolveIPv6AssignmentsForCurrentHost(ipv6Assignments, buildHostNetworkInterfaceMap(hostIfaces))
+			ipv6Assignments = resolvedAssignments
+			for _, warning := range resolveWarnings {
+				log.Printf("managed network runtime: %s", warning)
+			}
+		} else {
+			log.Printf("managed network runtime: load host interfaces for ipv6 resolution: %v", err)
+		}
 	}
 	dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
 	if ipv6AssignmentLoadErr == nil {
@@ -4164,6 +4179,7 @@ func (pm *ProcessManager) monitorLoop() {
 		retryKernelLogLine := ""
 		recoverPressureFallbacks := false
 		pressureRecoveryLogLine := ""
+		checkManagedRuntimeDrift := false
 		kernelAttachmentIssue := ""
 		kernelAttachmentRecovered := ""
 		attemptKernelAttachmentHeal := false
@@ -4194,6 +4210,10 @@ func (pm *ProcessManager) monitorLoop() {
 		if pm.kernelRuntime != nil && (pm.kernelAttachmentCheckAt.IsZero() || now.Sub(pm.kernelAttachmentCheckAt) >= kernelAttachmentCheckEvery) {
 			checkKernelAttachments = true
 			pm.kernelAttachmentCheckAt = now
+		}
+		if pm.managedRuntimeDriftCheckAt.IsZero() || now.Sub(pm.managedRuntimeDriftCheckAt) >= managedNetworkDriftCheckEvery {
+			checkManagedRuntimeDrift = true
+			pm.managedRuntimeDriftCheckAt = now
 		}
 		if pm.kernelRuntime != nil && (pm.kernelDegradedHealAt.IsZero() || now.Sub(pm.kernelDegradedHealAt) >= kernelDegradedRebuildCooldown) {
 			checkKernelDegradedIdleRebuild = true
@@ -4483,6 +4503,9 @@ func (pm *ProcessManager) monitorLoop() {
 		if kernelDegradedIdleRebuildReason != "" {
 			log.Printf("kernel dataplane self-heal: %s; rebuilding kernel dataplane now", kernelDegradedIdleRebuildReason)
 			pm.requestRedistributeWorkers(0)
+		}
+		if checkManagedRuntimeDrift {
+			pm.detectManagedNetworkRuntimeDrift()
 		}
 
 		for _, task := range staleControls {

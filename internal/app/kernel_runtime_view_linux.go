@@ -293,6 +293,7 @@ func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRunti
 	resp.LastKernelAttachmentHealAt = pm.kernelAttachmentHealAt
 	resp.LastKernelAttachmentHealSummary = pm.lastKernelAttachmentHealSummary
 	resp.LastKernelAttachmentHealError = pm.lastKernelAttachmentHealError
+	resp.DismissedNoteKeys = pm.snapshotKernelRuntimeDismissedNoteKeysLocked()
 	resp.LastStatsSnapshotAt = pm.kernelStatsSnapshotAt
 	resp.LastStatsSnapshotMs = pm.kernelStatsLastDuration.Milliseconds()
 	resp.LastStatsSnapshotError = pm.kernelStatsLastError

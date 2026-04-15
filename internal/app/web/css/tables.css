@@ -372,6 +372,9 @@ tr.row-pending td {
 
 .kernel-runtime-note {
     grid-column: 1 / -1;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
     margin-top: 0;
     padding: 8px 10px;
     border: 1px solid var(--warning-border);
@@ -380,6 +383,39 @@ tr.row-pending td {
     color: var(--warning-text);
     font-size: 12px;
     line-height: 1.6;
+}
+
+.kernel-runtime-note-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.kernel-runtime-note-close {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 22px;
+    margin-left: auto;
+    padding: 0 8px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.kernel-runtime-note-close:hover,
+.kernel-runtime-note-close:focus {
+    border-color: var(--warning-border);
+    background: var(--surface-solid);
+    color: var(--warning-text);
 }
 
 .kernel-runtime-inline {
