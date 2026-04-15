@@ -513,6 +513,14 @@ go build -o forward .
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
 ```
 
+如果 `raw.githubusercontent.com` 不通，也可以走源码归档入口：
+
+```bash
+tmpdir="$(mktemp -d)" && \
+curl -fsSL https://codeload.github.com/Unicode01/forward/tar.gz/refs/heads/main | tar -xzf - --strip-components=1 -C "$tmpdir" && \
+bash "$tmpdir/bootstrap.sh"
+```
+
 常见变体：
 
 ```bash

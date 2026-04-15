@@ -82,6 +82,12 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
+# Allow `bash bootstrap.sh -- --deploy-arg` so callers can safely separate bash
+# arguments from deploy.sh arguments without leaking the sentinel into deploy.sh.
+if [[ "${1:-}" == "--" ]]; then
+    shift
+fi
+
 if [[ $EUID -ne 0 ]]; then
     fail "请使用 root 运行。建议先执行 sudo -i，再运行 bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})"
 fi
