@@ -113,11 +113,14 @@ func Main(buildNonce string) {
 	pm.redistributeWorkers()
 	logStartupPhase("initial dataplane reconcile", phaseStartedAt, startupStartedAt)
 	pm.startAccepting()
-	pm.setReady(true)
 
 	phaseStartedAt = time.Now()
-	apiServer := startAPI(cfg, db, pm)
+	apiServer, err := startAPI(cfg, db, pm)
+	if err != nil {
+		log.Fatalf("start api: %v", err)
+	}
 	logStartupPhase("start api", phaseStartedAt, startupStartedAt)
+	pm.setReady(true)
 
 	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()

@@ -2,8 +2,10 @@ package app
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -121,5 +123,32 @@ func TestBuildAPIHandlerCanDisableStaticWebUIOnly(t *testing.T) {
 	}
 	if len(tags) != 0 {
 		t.Fatalf("/api/tags = %#v, want empty list", tags)
+	}
+}
+
+func TestStartAPIReportsBindFailure(t *testing.T) {
+	db := openTestDB(t)
+	pm := &ProcessManager{}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	server, err := startAPI(&Config{
+		WebBind:  "127.0.0.1",
+		WebPort:  port,
+		WebToken: "test-token",
+	}, db, pm)
+	if err == nil {
+		if server != nil {
+			_ = server.Close()
+		}
+		t.Fatalf("startAPI() error = nil, want bind failure for port %s", strconv.Itoa(port))
+	}
+	if server != nil {
+		t.Fatalf("startAPI() server = %#v, want nil on bind failure", server)
 	}
 }

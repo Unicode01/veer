@@ -111,7 +111,7 @@ type statsListQuery struct {
 
 const maxStatsPageSize = 500
 
-func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) *http.Server {
+func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) (*http.Server, error) {
 	addr := apiListenAddr(cfg)
 	handler := buildAPIHandler(cfg, db, pm)
 	server := &http.Server{
@@ -123,13 +123,17 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) *http.Server {
 		IdleTimeout:       apiServerIdleTimeout,
 		MaxHeaderBytes:    apiServerMaxHeaderBytes,
 	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	go func() {
 		log.Printf("web server listening on %s", addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("http server: %v", err)
 		}
 	}()
-	return server
+	return server, nil
 }
 
 func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
