@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -358,13 +357,9 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	if err != nil {
 		return nil, fmt.Errorf("get executable path: %w", err)
 	}
-	exeDir := filepath.Dir(exe)
-	sockPath := filepath.Join(exeDir, "forward-ctl.sock")
-	os.Remove(sockPath)
-
-	ln, err := net.Listen("unix", sockPath)
+	ln, sockPath, err := prepareSecureIPCListener(exe)
 	if err != nil {
-		return nil, fmt.Errorf("listen unix socket: %w", err)
+		return nil, err
 	}
 
 	pm := &ProcessManager{
@@ -455,6 +450,11 @@ func (pm *ProcessManager) handleWorkerConn(conn net.Conn) {
 		conn.Close()
 		return
 	}
+	if err := pm.authorizeIPCRegistration(conn, msg); err != nil {
+		log.Printf("control socket: rejected %s registration: %v", strings.TrimSpace(msg.Type), err)
+		conn.Close()
+		return
+	}
 
 	switch msg.Type {
 	case "register":
@@ -465,6 +465,53 @@ func (pm *ProcessManager) handleWorkerConn(conn net.Conn) {
 		pm.handleSharedProxyConn(conn, scanner, msg.BinaryHash)
 	default:
 		conn.Close()
+	}
+}
+
+func (pm *ProcessManager) authorizeIPCRegistration(conn net.Conn, msg IPCMessage) error {
+	expectedPID, desc, err := pm.expectedIPCProcess(msg)
+	if err != nil {
+		return err
+	}
+	if err := validateIPCPeerProcess(conn, expectedPID); err != nil {
+		return fmt.Errorf("%s peer validation failed: %w", desc, err)
+	}
+	return nil
+}
+
+func (pm *ProcessManager) expectedIPCProcess(msg IPCMessage) (int, string, error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	switch msg.Type {
+	case "register":
+		wi, ok := pm.ruleWorkers[msg.WorkerIndex]
+		if !ok || wi == nil {
+			return 0, fmt.Sprintf("rule worker[%d]", msg.WorkerIndex), fmt.Errorf("unknown rule worker")
+		}
+		if wi.process == nil {
+			return 0, fmt.Sprintf("rule worker[%d]", msg.WorkerIndex), fmt.Errorf("rule worker process not running")
+		}
+		return wi.process.Pid, fmt.Sprintf("rule worker[%d]", msg.WorkerIndex), nil
+	case "register_range":
+		wi, ok := pm.rangeWorkers[msg.WorkerIndex]
+		if !ok || wi == nil {
+			return 0, fmt.Sprintf("range worker[%d]", msg.WorkerIndex), fmt.Errorf("unknown range worker")
+		}
+		if wi.process == nil {
+			return 0, fmt.Sprintf("range worker[%d]", msg.WorkerIndex), fmt.Errorf("range worker process not running")
+		}
+		return wi.process.Pid, fmt.Sprintf("range worker[%d]", msg.WorkerIndex), nil
+	case "register_proxy":
+		if pm.sharedProxy == nil {
+			return 0, "shared proxy", fmt.Errorf("shared proxy not expected")
+		}
+		if pm.sharedProxy.process == nil {
+			return 0, "shared proxy", fmt.Errorf("shared proxy process not running")
+		}
+		return pm.sharedProxy.process.Pid, "shared proxy", nil
+	default:
+		return 0, strings.TrimSpace(msg.Type), fmt.Errorf("unsupported registration type")
 	}
 }
 
@@ -4000,9 +4047,7 @@ func (pm *ProcessManager) stopAll() {
 	if pm.listener != nil {
 		logShutdownStep("close control listener", pm.listener.Close)
 	}
-	if pm.sockPath != "" {
-		_ = os.Remove(pm.sockPath)
-	}
+	cleanupSecureIPCListener(pm.sockPath)
 
 	preserveUserspaceWorkers := userspaceWorkerPreserveOnClose()
 	pm.mu.Lock()
