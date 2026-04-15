@@ -698,12 +698,26 @@ func TestHandleKernelNetlinkRecoveryTriggerLinkChangeForDynamicEgressNATQueuesIn
 
 func TestHandleKernelNetlinkRecoveryTriggerLinkChangeWithActiveKernelOwnersQueuesFullRedistribute(t *testing.T) {
 	db := openTestDB(t)
+	id, err := dbAddRule(db, &Rule{
+		InInterface:      "vmbr1",
+		InIP:             "0.0.0.0",
+		InPort:           10000,
+		OutInterface:     "eno1",
+		OutIP:            "203.0.113.10",
+		OutPort:          10000,
+		Protocol:         "tcp",
+		Enabled:          true,
+		EnginePreference: ruleEngineKernel,
+	})
+	if err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
 
 	pm := &ProcessManager{
 		db:               db,
 		cfg:              &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 3},
 		kernelRuntime:    &stubNetlinkFallbackRuntime{},
-		kernelRules:      map[int64]bool{11: true},
+		kernelRules:      map[int64]bool{id: true},
 		kernelRanges:     map[int64]bool{},
 		kernelEgressNATs: map[int64]bool{},
 		redistributeWake: make(chan struct{}, 1),
@@ -725,6 +739,53 @@ func TestHandleKernelNetlinkRecoveryTriggerLinkChangeWithActiveKernelOwnersQueue
 	}
 	if !strings.Contains(pm.lastKernelIncrementalRetryResult, "link change requires full kernel re-evaluation") {
 		t.Fatalf("lastKernelIncrementalRetryResult = %q, want forced full re-evaluation detail", pm.lastKernelIncrementalRetryResult)
+	}
+}
+
+func TestHandleKernelNetlinkRecoveryTriggerLinkChangeWithUnrelatedActiveKernelOwnersSkipsFullRedistribute(t *testing.T) {
+	db := openTestDB(t)
+	id, err := dbAddRule(db, &Rule{
+		InInterface:      "vmbr1",
+		InIP:             "0.0.0.0",
+		InPort:           10000,
+		OutInterface:     "eno1",
+		OutIP:            "203.0.113.10",
+		OutPort:          10000,
+		Protocol:         "tcp",
+		Enabled:          true,
+		EnginePreference: ruleEngineKernel,
+	})
+	if err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+
+	pm := &ProcessManager{
+		db:               db,
+		cfg:              &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 3},
+		kernelRuntime:    &stubNetlinkFallbackRuntime{},
+		kernelRules:      map[int64]bool{id: true},
+		kernelRanges:     map[int64]bool{},
+		kernelEgressNATs: map[int64]bool{},
+		redistributeWake: make(chan struct{}, 1),
+	}
+
+	trigger := newKernelNetlinkRecoveryTrigger("link")
+	trigger.addInterfaceName("tap104i0")
+	trigger.addLinkNeighborInterface("tap104i0")
+	trigger.addLinkFDBInterface("vmbr9")
+	pm.handleKernelNetlinkRecoveryTrigger(trigger)
+
+	if pm.redistributePending {
+		t.Fatal("redistributePending = true, want false for unrelated active kernel link change")
+	}
+	if pm.kernelRetryCount != 1 {
+		t.Fatalf("kernelRetryCount = %d, want 1", pm.kernelRetryCount)
+	}
+	if pm.kernelIncrementalRetryCount != 0 {
+		t.Fatalf("kernelIncrementalRetryCount = %d, want 0 when link change does not match any active owner", pm.kernelIncrementalRetryCount)
+	}
+	if pm.lastKernelIncrementalRetryResult != "" {
+		t.Fatalf("lastKernelIncrementalRetryResult = %q, want empty when no incremental retry was needed", pm.lastKernelIncrementalRetryResult)
 	}
 }
 

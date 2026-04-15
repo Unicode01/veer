@@ -1,9 +1,11 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -11,6 +13,9 @@ const (
 	kernelMaintenanceFullScanEvery    = 6
 	kernelMaintenanceFullScanMinEvery = 3
 	kernelMaintenanceFullScanMaxEvery = 12
+
+	kernelErrnoNoDevice syscall.Errno = 19
+	kernelErrnoNoSuchIO syscall.Errno = 6
 )
 
 type kernelAttachmentHealthSnapshot struct {
@@ -109,6 +114,20 @@ func kernelAttachmentHealOutcomeSummary(rawSummary string, remainingIssue string
 		return "issue cleared without targeted attachment changes"
 	}
 	return "no targeted attachment changes applied"
+}
+
+func kernelAttachmentHealErrorRequiresRedistribute(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, kernelErrnoNoDevice) || errors.Is(err, kernelErrnoNoSuchIO) {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(text, "no such device") || strings.Contains(text, "link not found") {
+		return false
+	}
+	return true
 }
 
 func (state *kernelAdaptiveMaintenanceState) requestFull() {

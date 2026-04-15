@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -101,6 +103,38 @@ func TestKernelAttachmentHealOutcomeSummary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := kernelAttachmentHealOutcomeSummary(tc.rawSummary, tc.remainingIssue); got != tc.want {
 				t.Fatalf("kernelAttachmentHealOutcomeSummary() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKernelAttachmentHealErrorRequiresRedistribute(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "missing device errno skips redistribute",
+			err:  fmt.Errorf("repair attachment: %w", syscall.Errno(19)),
+			want: false,
+		},
+		{
+			name: "missing device text skips redistribute",
+			err:  fmt.Errorf("repair attachment on ifindex 17: no such device"),
+			want: false,
+		},
+		{
+			name: "other errors still redistribute",
+			err:  fmt.Errorf("repair attachment: %w", syscall.Errno(1)),
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kernelAttachmentHealErrorRequiresRedistribute(tc.err); got != tc.want {
+				t.Fatalf("kernelAttachmentHealErrorRequiresRedistribute(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

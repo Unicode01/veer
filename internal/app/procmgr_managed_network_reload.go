@@ -504,14 +504,34 @@ func (pm *ProcessManager) managedRuntimeReloadLoop() {
 			pm.mu.Unlock()
 			continue
 		}
-		if !pm.managedRuntimeReloadDueAt.IsZero() && time.Now().Before(pm.managedRuntimeReloadDueAt) {
+		now := time.Now()
+		if !pm.managedRuntimeReloadDueAt.IsZero() && now.Before(pm.managedRuntimeReloadDueAt) {
 			pm.mu.Unlock()
 			continue
 		}
+		reloadSource := pm.managedRuntimeReloadLastRequestSource
+		reloadInterfaces := cloneManagedNetworkInterfaceSet(pm.managedRuntimeReloadInterfaces)
+		if len(reloadInterfaces) > 0 && managedNetworkRuntimeReloadSourceHonorsSuppression(reloadSource) {
+			reloadInterfaces = pm.filterSuppressedManagedNetworkRuntimeInterfaceSetLocked(reloadInterfaces, now)
+			if len(reloadInterfaces) == 0 {
+				skippedSummary := summarizeManagedRuntimeReloadInterfaces(pm.managedRuntimeReloadInterfaces)
+				pm.managedRuntimeReloadPending = false
+				pm.managedRuntimeReloadDueAt = time.Time{}
+				pm.managedRuntimeReloadInterfaces = nil
+				pm.mu.Unlock()
+				if skippedSummary != "" {
+					log.Printf(
+						"managed network runtime: skipped queued %s reload on %s (interfaces still suppressed after recent apply)",
+						managedNetworkRuntimeReloadSourceLabel(reloadSource),
+						skippedSummary,
+					)
+				}
+				continue
+			}
+			pm.managedRuntimeReloadLastRequestSummary = summarizeManagedRuntimeReloadInterfaces(reloadInterfaces)
+		}
 		pm.managedRuntimeReloadPending = false
 		pm.managedRuntimeReloadDueAt = time.Time{}
-		reloadInterfaces := cloneManagedNetworkInterfaceSet(pm.managedRuntimeReloadInterfaces)
-		reloadSource := pm.managedRuntimeReloadLastRequestSource
 		pm.managedRuntimeReloadInterfaces = nil
 		pm.mu.Unlock()
 

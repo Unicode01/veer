@@ -4,6 +4,7 @@ package app
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -21,8 +22,9 @@ const (
 
 func (rt *xdpKernelRuleRuntime) currentMapCapacitiesLocked() kernelMapCapacities {
 	capacities := kernelMapCapacities{
-		Rules: rt.rulesMapCapacity,
-		Flows: rt.flowsMapCapacity,
+		Rules:    rt.rulesMapCapacity,
+		Flows:    rt.flowsMapCapacity,
+		NATPorts: rt.natMapCapacity,
 	}
 	if rt.coll == nil || rt.coll.Maps == nil {
 		return capacities
@@ -32,6 +34,9 @@ func (rt *xdpKernelRuleRuntime) currentMapCapacitiesLocked() kernelMapCapacities
 	}
 	if flowsMap := rt.coll.Maps[kernelFlowsMapName]; flowsMap != nil {
 		capacities.Flows = int(flowsMap.MaxEntries())
+	}
+	if natMap := rt.coll.Maps[kernelNatPortsMapName]; natMap != nil {
+		capacities.NATPorts = int(natMap.MaxEntries())
 	}
 	return capacities
 }
@@ -56,16 +61,33 @@ func (rt *linuxKernelRuleRuntime) shouldPreferFreshMapGrowthLocked(desired kerne
 		return false
 	}
 	counts := rt.currentRuntimeMapCountsLocked(time.Now())
+	if rt.coll != nil && rt.coll.Maps != nil {
+		counts = kernelRuntimeCountsForIdleGrowthDecision(
+			kernelRuntimeMapRefsFromCollection(rt.coll),
+			counts,
+			true,
+			"kernel dataplane map growth",
+		)
+	}
 	return kernelRuntimeCanGrowMapsWhenIdle(actual, desired, counts, true)
 }
 
 func (rt *xdpKernelRuleRuntime) shouldPreferFreshMapGrowthLocked(desired kernelMapCapacities) bool {
 	actual := rt.currentMapCapacitiesLocked()
-	if !kernelRuntimeNeedsMapGrowth(actual, desired, false) {
+	includeNAT := desired.NATPorts > 0
+	if !kernelRuntimeNeedsMapGrowth(actual, desired, includeNAT) {
 		return false
 	}
 	counts := rt.currentRuntimeMapCountsLocked(time.Now())
-	return kernelRuntimeCanGrowMapsWhenIdle(actual, desired, counts, false)
+	if rt.coll != nil && rt.coll.Maps != nil {
+		counts = kernelRuntimeCountsForIdleGrowthDecision(
+			kernelRuntimeMapRefsFromCollection(rt.coll),
+			counts,
+			includeNAT,
+			"xdp dataplane map growth",
+		)
+	}
+	return kernelRuntimeCanGrowMapsWhenIdle(actual, desired, counts, includeNAT)
 }
 
 func tcKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacities, counts kernelRuntimeMapCountSnapshot, rulesConfiguredLimit int, flowsConfiguredLimit int, natConfiguredLimit int, useEgressNATAutoFloors bool, source string) kernelRuntimeDegradedState {
@@ -88,18 +110,18 @@ func tcKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacitie
 	return buildKernelRuntimeDegradedState(preparedEntries, actual, desired, true, source)
 }
 
-func xdpKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacities, counts kernelRuntimeMapCountSnapshot, rulesConfiguredLimit int, flowsConfiguredLimit int, source string) kernelRuntimeDegradedState {
+func xdpKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacities, counts kernelRuntimeMapCountSnapshot, rulesConfiguredLimit int, flowsConfiguredLimit int, natConfiguredLimit int, includeNAT bool, source string) kernelRuntimeDegradedState {
 	desired := desiredKernelMapCapacitiesWithOccupancy(
 		rulesConfiguredLimit,
 		flowsConfiguredLimit,
-		0,
+		natConfiguredLimit,
 		preparedEntries,
 		counts,
-		false,
+		includeNAT,
 		normalizeKernelFlowsMapLimit(flowsConfiguredLimit) == 0,
-		false,
+		includeNAT && normalizeKernelNATMapLimit(natConfiguredLimit) == 0,
 	)
-	return buildKernelRuntimeDegradedState(preparedEntries, actual, desired, false, source)
+	return buildKernelRuntimeDegradedState(preparedEntries, actual, desired, includeNAT, source)
 }
 
 func buildKernelRuntimeDegradedState(preparedEntries int, actual kernelMapCapacities, desired kernelMapCapacities, includeNAT bool, source string) kernelRuntimeDegradedState {
@@ -160,6 +182,24 @@ func kernelRuntimeCanGrowMapsWhenIdle(actual kernelMapCapacities, desired kernel
 	return true
 }
 
+func kernelRuntimeCountsForIdleGrowthDecision(refs kernelRuntimeMapRefs, counts kernelRuntimeMapCountSnapshot, includeNAT bool, context string) kernelRuntimeMapCountSnapshot {
+	if counts.flowsEntries <= 0 {
+		if exactFlows, err := countKernelRuntimeFlowEntriesExact(refs); err != nil {
+			log.Printf("%s: exact flow entry count failed, using cached flow count=%d: %v", context, counts.flowsEntries, err)
+		} else {
+			counts.flowsEntries = exactFlows
+		}
+	}
+	if includeNAT && counts.natEntries <= 0 {
+		if exactNAT, err := countKernelRuntimeNATEntriesExact(refs); err != nil {
+			log.Printf("%s: exact nat entry count failed, using cached nat count=%d: %v", context, counts.natEntries, err)
+		} else {
+			counts.natEntries = exactNAT
+		}
+	}
+	return counts
+}
+
 func kernelRuntimeIdleDegradedRebuildReason(view KernelEngineRuntimeView) string {
 	if !view.Degraded || !view.Loaded || view.ActiveEntries <= 0 || view.PressureActive {
 		return ""
@@ -167,7 +207,7 @@ func kernelRuntimeIdleDegradedRebuildReason(view KernelEngineRuntimeView) string
 	if view.FlowsMapEntries > 0 {
 		return ""
 	}
-	if view.Name == kernelEngineTC && view.NATMapEntries > 0 {
+	if view.NATMapEntries > 0 {
 		return ""
 	}
 	return fmt.Sprintf("%s degraded runtime is idle and eligible for fresh map growth", view.Name)

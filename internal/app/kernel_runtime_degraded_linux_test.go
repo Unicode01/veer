@@ -5,6 +5,9 @@ package app
 import (
 	"strings"
 	"testing"
+	"unsafe"
+
+	"github.com/cilium/ebpf"
 )
 
 func TestTCKernelRuntimeDegradedState(t *testing.T) {
@@ -63,6 +66,8 @@ func TestXDPKernelRuntimeDegradedStateIgnoresSatisfiedCapacity(t *testing.T) {
 		kernelRuntimeMapCountSnapshot{},
 		0,
 		0,
+		0,
+		false,
 		kernelRuntimeDegradedSourceNone,
 	)
 	if state.active {
@@ -169,6 +174,42 @@ func TestKernelRuntimeCanGrowMapsWhenIdle(t *testing.T) {
 	}
 }
 
+func TestKernelRuntimeCountsForIdleGrowthDecisionUsesExactCountsWhenCacheIsZero(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 16,
+	})
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 16,
+	})
+	if err := flows.Put(tcFlowKeyV4{IfIndex: 1}, tcFlowValueV4{RuleID: 1}); err != nil {
+		t.Fatalf("flows.Put() error = %v", err)
+	}
+	if err := nat.Put(tcNATPortKeyV4{IfIndex: 1}, uint32(1)); err != nil {
+		t.Fatalf("nat.Put() error = %v", err)
+	}
+
+	got := kernelRuntimeCountsForIdleGrowthDecision(
+		kernelRuntimeMapRefs{flowsV4: flows, natV4: nat},
+		kernelRuntimeMapCountSnapshot{},
+		true,
+		"test",
+	)
+	if got.flowsEntries != 1 {
+		t.Fatalf("flowsEntries = %d, want 1", got.flowsEntries)
+	}
+	if got.natEntries != 1 {
+		t.Fatalf("natEntries = %d, want 1", got.natEntries)
+	}
+}
+
 func TestKernelRuntimeIdleDegradedRebuildReason(t *testing.T) {
 	view := KernelEngineRuntimeView{
 		Name:            kernelEngineTC,
@@ -184,5 +225,17 @@ func TestKernelRuntimeIdleDegradedRebuildReason(t *testing.T) {
 	view.NATMapEntries = 3
 	if reason := kernelRuntimeIdleDegradedRebuildReason(view); reason != "" {
 		t.Fatalf("kernelRuntimeIdleDegradedRebuildReason() = %q with live nat entries, want empty", reason)
+	}
+
+	view = KernelEngineRuntimeView{
+		Name:            kernelEngineXDP,
+		Loaded:          true,
+		ActiveEntries:   8,
+		Degraded:        true,
+		FlowsMapEntries: 0,
+		NATMapEntries:   3,
+	}
+	if reason := kernelRuntimeIdleDegradedRebuildReason(view); reason != "" {
+		t.Fatalf("kernelRuntimeIdleDegradedRebuildReason() = %q for xdp with live nat entries, want empty", reason)
 	}
 }

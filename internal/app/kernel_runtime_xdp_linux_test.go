@@ -7,10 +7,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
+	"golang.org/x/sys/unix"
 )
 
 func TestPrepareXDPKernelRulesDoesNotPreRejectFullNAT(t *testing.T) {
@@ -68,6 +70,37 @@ func TestPrepareXDPKernelRulesDoesNotPreRejectEgressNATTCP(t *testing.T) {
 	}
 	if strings.Contains(result.Error, "does not support egress nat takeover") {
 		t.Fatalf("prepare result error = %q, want egress nat XDP preparation to continue past the old hard gate", result.Error)
+	}
+	if !strings.Contains(result.Error, `resolve inbound interface "missing-in"`) {
+		t.Fatalf("prepare result error = %q, want inbound interface resolution failure", result.Error)
+	}
+}
+
+func TestPrepareXDPKernelRulesDoesNotPreRejectEgressNATFullCone(t *testing.T) {
+	rule := Rule{
+		ID:            1,
+		InInterface:   "missing-in",
+		InIP:          "0.0.0.0",
+		OutInterface:  "missing-out",
+		OutIP:         "0.0.0.0",
+		OutPort:       0,
+		OutSourceIP:   "198.51.100.30",
+		Protocol:      "udp",
+		Transparent:   false,
+		kernelMode:    kernelModeEgressNAT,
+		kernelNATType: egressNATTypeFullCone,
+	}
+
+	_, _, _, results, _ := prepareXDPKernelRules([]Rule{rule}, xdpPrepareOptions{}, nil, false)
+	result, ok := results[rule.ID]
+	if !ok {
+		t.Fatalf("missing prepare result for rule %d", rule.ID)
+	}
+	if result.Error == "" {
+		t.Fatalf("prepare result error = empty, want failure from interface resolution")
+	}
+	if strings.Contains(result.Error, "supports only symmetric egress nat takeover") {
+		t.Fatalf("prepare result error = %q, want full-cone egress nat XDP preparation to continue past nat-type gating", result.Error)
 	}
 	if !strings.Contains(result.Error, `resolve inbound interface "missing-in"`) {
 		t.Fatalf("prepare result error = %q, want inbound interface resolution failure", result.Error)
@@ -178,6 +211,8 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 		Maps: map[string]*ebpf.MapSpec{
 			kernelRulesMapNameV4:               &ebpf.MapSpec{},
 			kernelFlowsMapNameV4:               &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelNatPortsMapNameV4:            &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelNATConfigMapName:             &ebpf.MapSpec{},
 			kernelStatsMapName:                 &ebpf.MapSpec{},
 			kernelOccupancyMapName:             &ebpf.MapSpec{},
 			kernelXDPRedirectMapName:           &ebpf.MapSpec{},
@@ -191,6 +226,7 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 			kernelXDPDispatchScratchV6MapName:  &ebpf.MapSpec{},
 			kernelXDPFlowMigrationStateMapName: &ebpf.MapSpec{},
 			kernelXDPFlowsOldMapNameV4:         &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelTCNatPortsOldMapNameV4:       &ebpf.MapSpec{Type: ebpf.Hash},
 			kernelXDPFlowsOldMapNameV6:         &ebpf.MapSpec{Type: ebpf.Hash},
 		},
 	}
@@ -201,6 +237,8 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 
 	spec.Maps[kernelRulesMapNameV6] = &ebpf.MapSpec{}
 	spec.Maps[kernelFlowsMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
+	spec.Maps[kernelNatPortsMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
+	spec.Maps[kernelTCNatPortsOldMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
 	if err := validateXDPCollectionSpec(spec); err != nil {
 		t.Fatalf("validateXDPCollectionSpec() error = %v, want nil with dual-stack map set", err)
 	}
@@ -221,6 +259,8 @@ func TestValidateXDPCollectionSpecRejectsLRUFlowBanks(t *testing.T) {
 		Maps: map[string]*ebpf.MapSpec{
 			kernelRulesMapNameV4:               &ebpf.MapSpec{},
 			kernelFlowsMapNameV4:               &ebpf.MapSpec{Type: ebpf.LRUHash},
+			kernelNatPortsMapNameV4:            &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelNATConfigMapName:             &ebpf.MapSpec{},
 			kernelStatsMapName:                 &ebpf.MapSpec{},
 			kernelOccupancyMapName:             &ebpf.MapSpec{},
 			kernelXDPRedirectMapName:           &ebpf.MapSpec{},
@@ -235,8 +275,11 @@ func TestValidateXDPCollectionSpecRejectsLRUFlowBanks(t *testing.T) {
 			kernelXDPFlowMigrationStateMapName: &ebpf.MapSpec{},
 			kernelRulesMapNameV6:               &ebpf.MapSpec{},
 			kernelFlowsMapNameV6:               &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelNatPortsMapNameV6:            &ebpf.MapSpec{Type: ebpf.Hash},
 			kernelXDPFlowsOldMapNameV4:         &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelTCNatPortsOldMapNameV4:       &ebpf.MapSpec{Type: ebpf.Hash},
 			kernelXDPFlowsOldMapNameV6:         &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelTCNatPortsOldMapNameV6:       &ebpf.MapSpec{Type: ebpf.Hash},
 		},
 	}
 
@@ -256,13 +299,20 @@ func TestLoadEmbeddedXDPCollectionSpecUsesHashFlowBanks(t *testing.T) {
 		}
 		for _, name := range []string{
 			kernelFlowsMapNameV4,
+			kernelNatPortsMapNameV4,
 			kernelFlowsMapNameV6,
+			kernelNatPortsMapNameV6,
 			kernelXDPFlowsOldMapNameV4,
+			kernelTCNatPortsOldMapNameV4,
 			kernelXDPFlowsOldMapNameV6,
+			kernelTCNatPortsOldMapNameV6,
 		} {
 			if got := spec.Maps[name].Type; got != ebpf.Hash {
 				t.Fatalf("loadEmbeddedXDPCollectionSpec(%t) map %q type = %v, want %v", enableTrafficStats, name, got, ebpf.Hash)
 			}
+		}
+		if got := spec.Maps[kernelNATConfigMapName].Type; got != ebpf.Array {
+			t.Fatalf("loadEmbeddedXDPCollectionSpec(%t) map %q type = %v, want %v", enableTrafficStats, kernelNATConfigMapName, got, ebpf.Array)
 		}
 	}
 }
@@ -282,8 +332,12 @@ func TestLookupXDPCollectionPiecesRejectsIncompleteIPv6MapSet(t *testing.T) {
 		Maps: map[string]*ebpf.Map{
 			kernelRulesMapNameV4:               &ebpf.Map{},
 			kernelFlowsMapNameV4:               &ebpf.Map{},
+			kernelNatPortsMapNameV4:            &ebpf.Map{},
+			kernelNATConfigMapName:             &ebpf.Map{},
 			kernelXDPFlowsOldMapNameV4:         &ebpf.Map{},
+			kernelTCNatPortsOldMapNameV4:       &ebpf.Map{},
 			kernelRulesMapNameV6:               &ebpf.Map{},
+			kernelNatPortsMapNameV6:            &ebpf.Map{},
 			kernelXDPFlowMigrationStateMapName: &ebpf.Map{},
 			kernelXDPProgramChainMapName:       &ebpf.Map{},
 		},
@@ -296,6 +350,7 @@ func TestLookupXDPCollectionPiecesRejectsIncompleteIPv6MapSet(t *testing.T) {
 
 func TestLookupXDPCollectionPiecesIncludesLocalIPv4MapWhenPresent(t *testing.T) {
 	localMap := &ebpf.Map{}
+	natConfigMap := &ebpf.Map{}
 	coll := &ebpf.Collection{
 		Programs: map[string]*ebpf.Program{
 			kernelXDPProgramName:                 &ebpf.Program{},
@@ -310,10 +365,15 @@ func TestLookupXDPCollectionPiecesIncludesLocalIPv4MapWhenPresent(t *testing.T) 
 		Maps: map[string]*ebpf.Map{
 			kernelRulesMapNameV4:               &ebpf.Map{},
 			kernelFlowsMapNameV4:               &ebpf.Map{},
+			kernelNatPortsMapNameV4:            &ebpf.Map{},
+			kernelNATConfigMapName:             natConfigMap,
 			kernelXDPFlowsOldMapNameV4:         &ebpf.Map{},
+			kernelTCNatPortsOldMapNameV4:       &ebpf.Map{},
 			kernelRulesMapNameV6:               &ebpf.Map{},
 			kernelFlowsMapNameV6:               &ebpf.Map{},
+			kernelNatPortsMapNameV6:            &ebpf.Map{},
 			kernelXDPFlowsOldMapNameV6:         &ebpf.Map{},
+			kernelTCNatPortsOldMapNameV6:       &ebpf.Map{},
 			kernelXDPRedirectMapName:           &ebpf.Map{},
 			kernelXDPFlowMigrationStateMapName: &ebpf.Map{},
 			kernelXDPProgramChainMapName:       &ebpf.Map{},
@@ -327,6 +387,12 @@ func TestLookupXDPCollectionPiecesIncludesLocalIPv4MapWhenPresent(t *testing.T) 
 	}
 	if pieces.localIPv4s != localMap {
 		t.Fatalf("lookupXDPCollectionPieces() localIPv4s = %p, want %p", pieces.localIPv4s, localMap)
+	}
+	if pieces.natConfigV4 != natConfigMap {
+		t.Fatalf("lookupXDPCollectionPieces() natConfigV4 = %p, want %p", pieces.natConfigV4, natConfigMap)
+	}
+	if pieces.natV6 == nil || pieces.natOldV6 == nil {
+		t.Fatalf("lookupXDPCollectionPieces() = %+v, want IPv6 nat maps", pieces)
 	}
 }
 
@@ -391,6 +457,80 @@ func TestBuildPreparedXDPKernelRuleBatchesSplitsFamilies(t *testing.T) {
 	}
 }
 
+func TestPreparedXDPKernelRulesNeedFullConeNATMapIncludesIPv6FullNAT(t *testing.T) {
+	prepared := []preparedXDPKernelRule{
+		{
+			rule: Rule{ID: 1, InIP: "2001:db8::10", OutIP: "2001:db8::20"},
+			spec: kernelPreparedRuleSpec{Family: ipFamilyIPv6},
+			valueV6: xdpRuleValueV6{
+				Flags: xdpRuleFlagFullNAT,
+			},
+		},
+	}
+	if !preparedXDPKernelRulesNeedFullConeNATMap(prepared) {
+		t.Fatal("preparedXDPKernelRulesNeedFullConeNATMap() = false, want true for IPv6 fullnat rules")
+	}
+}
+
+func TestXDPExactNATEntriesForPreservationUsesExactCountWhenCacheIsZero(t *testing.T) {
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 16,
+	})
+	if err := nat.Put(tcNATPortKeyV4{IfIndex: 3, NATAddr: 4, NATPort: 5, Proto: unix.IPPROTO_UDP}, uint32(1)); err != nil {
+		t.Fatalf("nat.Put() error = %v", err)
+	}
+
+	got := xdpExactNATEntriesForPreservation(kernelRuntimeMapRefs{natV4: nat}, 0, "test")
+	if got != 1 {
+		t.Fatalf("xdpExactNATEntriesForPreservation() = %d, want 1", got)
+	}
+}
+
+func TestXDPRuntimeNATStateForDecisionUsesExactCountWhenCacheIsZero(t *testing.T) {
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 16,
+	})
+	if err := nat.Put(tcNATPortKeyV4{IfIndex: 3, NATAddr: 4, NATPort: 5, Proto: unix.IPPROTO_UDP}, uint32(1)); err != nil {
+		t.Fatalf("nat.Put() error = %v", err)
+	}
+
+	counts, useNATMaps := xdpRuntimeNATStateForDecision(nil, kernelRuntimeMapRefs{natV4: nat}, kernelRuntimeMapCountSnapshot{}, "test")
+	if !useNATMaps {
+		t.Fatal("xdpRuntimeNATStateForDecision() useNATMaps = false, want true")
+	}
+	if counts.natEntries != 1 {
+		t.Fatalf("xdpRuntimeNATStateForDecision() natEntries = %d, want 1", counts.natEntries)
+	}
+}
+
+func TestXDPRuntimeNATStateForDecisionIncludesPreparedNATMapsWithoutLiveEntries(t *testing.T) {
+	prepared := []preparedXDPKernelRule{
+		{
+			rule: Rule{ID: 1, InIP: "2001:db8::10", OutIP: "2001:db8::20"},
+			spec: kernelPreparedRuleSpec{Family: ipFamilyIPv6},
+			valueV6: xdpRuleValueV6{
+				Flags: xdpRuleFlagFullNAT,
+			},
+		},
+	}
+
+	counts, useNATMaps := xdpRuntimeNATStateForDecision(prepared, kernelRuntimeMapRefs{}, kernelRuntimeMapCountSnapshot{}, "test")
+	if !useNATMaps {
+		t.Fatal("xdpRuntimeNATStateForDecision() useNATMaps = false, want true for prepared NAT rules")
+	}
+	if counts.natEntries != 0 {
+		t.Fatalf("xdpRuntimeNATStateForDecision() natEntries = %d, want 0 without live NAT state", counts.natEntries)
+	}
+}
+
 func TestNewXDPKernelRuleRuntimeDisablesGenericAttachByDefault(t *testing.T) {
 	rt, ok := newXDPKernelRuleRuntime(nil).(*xdpKernelRuleRuntime)
 	if !ok {
@@ -398,6 +538,9 @@ func TestNewXDPKernelRuleRuntimeDisablesGenericAttachByDefault(t *testing.T) {
 	}
 	if rt.allowGenericAttach {
 		t.Fatal("allowGenericAttach = true, want false by default")
+	}
+	if rt.natPortMin != kernelDefaultNATPortMin || rt.natPortMax != kernelDefaultNATPortMax {
+		t.Fatalf("default nat port range = (%d, %d), want (%d, %d)", rt.natPortMin, rt.natPortMax, kernelDefaultNATPortMin, kernelDefaultNATPortMax)
 	}
 
 	rt, ok = newXDPKernelRuleRuntime(&Config{
@@ -410,6 +553,17 @@ func TestNewXDPKernelRuleRuntimeDisablesGenericAttachByDefault(t *testing.T) {
 	}
 	if !rt.allowGenericAttach {
 		t.Fatal("allowGenericAttach = false, want true when xdp_generic is enabled")
+	}
+
+	rt, ok = newXDPKernelRuleRuntime(&Config{
+		KernelNATPortMin: 31000,
+		KernelNATPortMax: 41000,
+	}).(*xdpKernelRuleRuntime)
+	if !ok {
+		t.Fatal("newXDPKernelRuleRuntime(nat-range config) did not return *xdpKernelRuleRuntime")
+	}
+	if rt.natPortMin != 31000 || rt.natPortMax != 41000 {
+		t.Fatalf("configured nat port range = (%d, %d), want (31000, 41000)", rt.natPortMin, rt.natPortMax)
 	}
 }
 

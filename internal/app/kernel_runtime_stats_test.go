@@ -154,12 +154,15 @@ func TestKernelFlowCountsTowardLiveGaugeV6(t *testing.T) {
 func TestMergeKernelLiveStateSnapshot(t *testing.T) {
 	dst := newKernelFlowLiveStateSnapshot(true)
 	dst.ByRuleID[1] = kernelStatsValueV4{TCPActiveConns: 1}
-	dst.UsedNAT[tcNATPortKeyV4{IfIndex: 2, NATAddr: 3, NATPort: 4, Proto: unix.IPPROTO_UDP}] = struct{}{}
+	dst.UsedNATV4[tcNATPortKeyV4{IfIndex: 2, NATAddr: 3, NATPort: 4, Proto: unix.IPPROTO_UDP}] = struct{}{}
+	dst.UsedNATV6[tcNATPortKeyV6{IfIndex: 5, NATAddr: [16]byte{1}, NATPort: 6, Proto: unix.IPPROTO_TCP}] = struct{}{}
 	dst.FlowEntries = 2
 
-	src := newKernelFlowLiveStateSnapshot(false)
+	src := newKernelFlowLiveStateSnapshot(true)
 	src.ByRuleID[1] = kernelStatsValueV4{UDPNatEntries: 2}
 	src.ByRuleID[2] = kernelStatsValueV4{ICMPNatEntries: 3}
+	src.UsedNATV4[tcNATPortKeyV4{IfIndex: 7, NATAddr: 8, NATPort: 9, Proto: unix.IPPROTO_TCP}] = struct{}{}
+	src.UsedNATV6[tcNATPortKeyV6{IfIndex: 10, NATAddr: [16]byte{2}, NATPort: 11, Proto: unix.IPPROTO_UDP}] = struct{}{}
 	src.FlowEntries = 5
 
 	mergeKernelLiveStateSnapshot(&dst, src)
@@ -173,8 +176,11 @@ func TestMergeKernelLiveStateSnapshot(t *testing.T) {
 	if got := dst.ByRuleID[2]; got.ICMPNatEntries != 3 {
 		t.Fatalf("mergeKernelLiveStateSnapshot() rule 2 = %+v, want icmp=3", got)
 	}
-	if len(dst.UsedNAT) != 1 {
-		t.Fatalf("mergeKernelLiveStateSnapshot() used nat len = %d, want 1", len(dst.UsedNAT))
+	if len(dst.UsedNATV4) != 2 {
+		t.Fatalf("mergeKernelLiveStateSnapshot() used nat v4 len = %d, want 2", len(dst.UsedNATV4))
+	}
+	if len(dst.UsedNATV6) != 2 {
+		t.Fatalf("mergeKernelLiveStateSnapshot() used nat v6 len = %d, want 2", len(dst.UsedNATV6))
 	}
 }
 
@@ -389,7 +395,7 @@ func TestSnapshotXDPKernelLiveStateFromRuntimeMapRefsCountsV4Flows(t *testing.T)
 		t.Fatalf("flows.Put(front) error = %v", err)
 	}
 
-	live, err := snapshotXDPKernelLiveStateFromRuntimeMapRefs(kernelRuntimeMapRefs{flowsV4: flows})
+	live, err := snapshotXDPKernelLiveStateFromRuntimeMapRefs(kernelRuntimeMapRefs{flowsV4: flows}, true)
 	if err != nil {
 		t.Fatalf("snapshotXDPKernelLiveStateFromRuntimeMapRefs() error = %v", err)
 	}
@@ -398,6 +404,45 @@ func TestSnapshotXDPKernelLiveStateFromRuntimeMapRefsCountsV4Flows(t *testing.T)
 	}
 	if got := live.ByRuleID[7]; got.TCPActiveConns != 1 || got.UDPNatEntries != 0 || got.ICMPNatEntries != 0 {
 		t.Fatalf("live.ByRuleID[7] = %+v, want tcp=1", got)
+	}
+	if len(live.UsedNATV4) != 1 {
+		t.Fatalf("len(live.UsedNATV4) = %d, want 1", len(live.UsedNATV4))
+	}
+}
+
+func TestSnapshotKernelLiveStateFromFlowsV6TracksNATReservations(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapNameV6,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV6{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV6{})),
+		MaxEntries: 16,
+	})
+
+	key := tcFlowKeyV6{IfIndex: 6, SrcAddr: [16]byte{1}, DstAddr: [16]byte{2}, SrcPort: 1234, DstPort: 20000, Proto: unix.IPPROTO_TCP}
+	value := tcFlowValueV6{
+		RuleID:     21,
+		Flags:      kernelFlowFlagCounted | kernelFlowFlagFullNAT,
+		NATAddr:    [16]byte{3},
+		NATPort:    20000,
+		LastSeenNS: 2,
+	}
+	if err := flows.Put(key, value); err != nil {
+		t.Fatalf("flows.Put() error = %v", err)
+	}
+
+	live, err := snapshotKernelLiveStateFromFlowsV6(nil, flows, true)
+	if err != nil {
+		t.Fatalf("snapshotKernelLiveStateFromFlowsV6() error = %v", err)
+	}
+	if live.FlowEntries != 1 {
+		t.Fatalf("live.FlowEntries = %d, want 1", live.FlowEntries)
+	}
+	if got := live.ByRuleID[21]; got.TCPActiveConns != 1 {
+		t.Fatalf("live.ByRuleID[21] = %+v, want tcp=1", got)
+	}
+	if len(live.UsedNATV6) != 1 {
+		t.Fatalf("len(live.UsedNATV6) = %d, want 1", len(live.UsedNATV6))
 	}
 }
 
@@ -426,7 +471,7 @@ func TestPruneStaleXDPFlowsMapDeletesInvalidFlow(t *testing.T) {
 		t.Fatalf("flows.Put() error = %v", err)
 	}
 
-	corrections, metrics, err := pruneStaleXDPFlowsMap(nil, flows, &kernelFlowPruneState{}, 1)
+	corrections, metrics, err := pruneStaleXDPFlowsMap(nil, flows, nil, &kernelFlowPruneState{}, 1)
 	if err != nil {
 		t.Fatalf("pruneStaleXDPFlowsMap() error = %v", err)
 	}
@@ -440,5 +485,143 @@ func TestPruneStaleXDPFlowsMapDeletesInvalidFlow(t *testing.T) {
 		t.Fatalf("countXDPFlowMapEntries() error = %v", err)
 	} else if count != 0 {
 		t.Fatalf("countXDPFlowMapEntries() = %d, want 0", count)
+	}
+}
+
+func TestDeleteStaleKernelFlowV6DeletesNATReservation(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapNameV6,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV6{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV6{})),
+		MaxEntries: 16,
+	})
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapNameV6,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV6{})),
+		ValueSize:  4,
+		MaxEntries: 16,
+	})
+
+	replyKey := tcFlowKeyV6{IfIndex: 8, SrcAddr: [16]byte{1}, DstAddr: [16]byte{2}, SrcPort: 80, DstPort: 20000, Proto: unix.IPPROTO_TCP}
+	replyValue := tcFlowValueV6{
+		RuleID:     31,
+		Flags:      kernelFlowFlagCounted | kernelFlowFlagFullNAT,
+		NATAddr:    [16]byte{3},
+		NATPort:    20000,
+		InIfIndex:  5,
+		FrontAddr:  [16]byte{4},
+		ClientAddr: [16]byte{5},
+		FrontPort:  443,
+		ClientPort: 12345,
+		LastSeenNS: 1,
+	}
+	frontKey := tcFlowKeyV6{IfIndex: 5, SrcAddr: [16]byte{5}, DstAddr: [16]byte{4}, SrcPort: 12345, DstPort: 443, Proto: unix.IPPROTO_TCP}
+	frontValue := tcFlowValueV6{
+		RuleID:     31,
+		Flags:      kernelFlowFlagCounted | kernelFlowFlagFullNAT | kernelFlowFlagFrontEntry,
+		NATAddr:    [16]byte{3},
+		NATPort:    20000,
+		InIfIndex:  5,
+		FrontAddr:  [16]byte{4},
+		ClientAddr: [16]byte{5},
+		FrontPort:  443,
+		ClientPort: 12345,
+		LastSeenNS: 1,
+	}
+	natKey := tcNATPortKeyV6{IfIndex: 8, NATAddr: [16]byte{3}, NATPort: 20000, Proto: unix.IPPROTO_TCP}
+
+	for _, item := range []struct {
+		key   tcFlowKeyV6
+		value tcFlowValueV6
+	}{
+		{key: replyKey, value: replyValue},
+		{key: frontKey, value: frontValue},
+	} {
+		if err := flows.Put(item.key, item.value); err != nil {
+			t.Fatalf("flows.Put(%+v) error = %v", item.key, err)
+		}
+	}
+	if err := nat.Put(natKey, uint32(31)); err != nil {
+		t.Fatalf("nat.Put() error = %v", err)
+	}
+
+	corrections := map[uint32]kernelRuleStats{}
+	deleteStaleKernelFlowV6(nil, flows, nat, staleKernelFlowV6{key: replyKey, value: replyValue}, corrections)
+
+	if got := corrections[31]; got.TCPActiveConns != -1 {
+		t.Fatalf("corrections[31] = %+v, want tcp=-1", got)
+	}
+	if count, err := countKernelFlowMapEntriesV6(flows); err != nil {
+		t.Fatalf("countKernelFlowMapEntriesV6() error = %v", err)
+	} else if count != 0 {
+		t.Fatalf("countKernelFlowMapEntriesV6() = %d, want 0", count)
+	}
+	if count, err := countKernelNATMapEntriesV6(nat); err != nil {
+		t.Fatalf("countKernelNATMapEntriesV6() error = %v", err)
+	} else if count != 0 {
+		t.Fatalf("countKernelNATMapEntriesV6() = %d, want 0", count)
+	}
+}
+
+func TestPurgeKernelFlowsForRuleIDsPurgesIPv6State(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapNameV6,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV6{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV6{})),
+		MaxEntries: 16,
+	})
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapNameV6,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV6{})),
+		ValueSize:  4,
+		MaxEntries: 16,
+	})
+
+	replyKey := tcFlowKeyV6{IfIndex: 9, SrcAddr: [16]byte{1}, DstAddr: [16]byte{2}, SrcPort: 80, DstPort: 21000, Proto: unix.IPPROTO_TCP}
+	replyValue := tcFlowValueV6{
+		RuleID:     41,
+		Flags:      kernelFlowFlagCounted | kernelFlowFlagFullNAT,
+		NATAddr:    [16]byte{3},
+		NATPort:    21000,
+		InIfIndex:  6,
+		FrontAddr:  [16]byte{4},
+		ClientAddr: [16]byte{5},
+		FrontPort:  443,
+		ClientPort: 34567,
+	}
+	natKey := tcNATPortKeyV6{IfIndex: 9, NATAddr: [16]byte{3}, NATPort: 21000, Proto: unix.IPPROTO_TCP}
+	if err := flows.Put(replyKey, replyValue); err != nil {
+		t.Fatalf("flows.Put() error = %v", err)
+	}
+	if err := nat.Put(natKey, uint32(41)); err != nil {
+		t.Fatalf("nat.Put() error = %v", err)
+	}
+
+	corrections, deleted, err := purgeKernelFlowsForRuleIDs(kernelRuntimeMapRefs{
+		flowsV6: flows,
+		natV6:   nat,
+	}, map[uint32]struct{}{41: {}})
+	if err != nil {
+		t.Fatalf("purgeKernelFlowsForRuleIDs() error = %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+	if got := corrections[41]; got.TCPActiveConns != -1 {
+		t.Fatalf("corrections[41] = %+v, want tcp=-1", got)
+	}
+	if count, err := countKernelFlowMapEntriesV6(flows); err != nil {
+		t.Fatalf("countKernelFlowMapEntriesV6() error = %v", err)
+	} else if count != 0 {
+		t.Fatalf("countKernelFlowMapEntriesV6() = %d, want 0", count)
+	}
+	if count, err := countKernelNATMapEntriesV6(nat); err != nil {
+		t.Fatalf("countKernelNATMapEntriesV6() error = %v", err)
+	} else if count != 0 {
+		t.Fatalf("countKernelNATMapEntriesV6() = %d, want 0", count)
 	}
 }

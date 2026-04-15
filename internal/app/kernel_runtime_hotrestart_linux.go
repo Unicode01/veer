@@ -154,9 +154,9 @@ func kernelTCHotRestartCompatToken(enableTrafficStats bool) string {
 
 func kernelXDPHotRestartCompatToken(enableTrafficStats bool) string {
 	if enableTrafficStats {
-		return "xdp:traffic_stats:v3"
+		return "xdp:traffic_stats:v5"
 	}
-	return "xdp:base:v3"
+	return "xdp:base:v5"
 }
 
 func kernelTCHotRestartValidationOptions(objectHash string, enableTrafficStats bool) kernelHotRestartValidationOptions {
@@ -1021,13 +1021,21 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		return nil, fmt.Errorf("validate xdp hot restart metadata: %w", err)
 	}
 	state := &kernelHotRestartMapState{
-		replacements:     make(map[string]*ebpf.Map, 5),
+		replacements:     make(map[string]*ebpf.Map, 9),
 		actualCapacities: desired,
 	}
 	loadedAny := false
 	haveFlows := false
 	haveActiveFlows := false
 	haveOldFlows := false
+	haveActiveFlowsV4 := false
+	haveActiveFlowsV6 := false
+	haveOldFlowsV4 := false
+	haveOldFlowsV6 := false
+	haveActiveNATV4 := false
+	haveActiveNATV6 := false
+	haveOldNATV4 := false
+	haveOldNATV6 := false
 	skipStats := kernelHotRestartSkipStatsRequested()
 
 	flowsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelFlowsMapName))
@@ -1039,6 +1047,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		loadedAny = true
 		haveFlows = true
 		haveActiveFlows = true
+		haveActiveFlowsV4 = true
 		state.replacements[kernelFlowsMapName] = flowsMap
 	}
 
@@ -1051,6 +1060,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		loadedAny = true
 		haveFlows = true
 		haveActiveFlows = true
+		haveActiveFlowsV6 = true
 		state.replacements[kernelFlowsMapNameV6] = flowsMapV6
 	}
 
@@ -1062,6 +1072,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 	if ok {
 		loadedAny = true
 		haveOldFlows = true
+		haveOldFlowsV4 = true
 		state.replacements[kernelXDPFlowsOldMapNameV4] = flowsOldMap
 		state.xdpFlowMigrationFlags |= xdpFlowMigrationFlagV4Old
 	}
@@ -1074,20 +1085,102 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 	if ok {
 		loadedAny = true
 		haveOldFlows = true
+		haveOldFlowsV6 = true
 		state.replacements[kernelXDPFlowsOldMapNameV6] = flowsOldMapV6
 		state.xdpFlowMigrationFlags |= xdpFlowMigrationFlagV6Old
+	}
+
+	natMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelNatPortsMapName))
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned xdp nat map: %w", err)
+	}
+	if ok {
+		loadedAny = true
+		haveActiveNATV4 = true
+		state.replacements[kernelNatPortsMapName] = natMap
+	}
+
+	natMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelNatPortsMapNameV6))
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned xdp IPv6 nat map: %w", err)
+	}
+	if ok {
+		loadedAny = true
+		haveActiveNATV6 = true
+		state.replacements[kernelNatPortsMapNameV6] = natMapV6
+	}
+
+	natOldMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelTCNatPortsOldMapNameV4))
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned xdp old IPv4 nat map: %w", err)
+	}
+	if ok {
+		loadedAny = true
+		haveOldNATV4 = true
+		state.replacements[kernelTCNatPortsOldMapNameV4] = natOldMap
+	}
+
+	natOldMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelTCNatPortsOldMapNameV6))
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned xdp old IPv6 nat map: %w", err)
+	}
+	if ok {
+		loadedAny = true
+		haveOldNATV6 = true
+		state.replacements[kernelTCNatPortsOldMapNameV6] = natOldMapV6
+	}
+
+	if haveOldNATV4 && state.xdpFlowMigrationFlags&xdpFlowMigrationFlagV4Old == 0 {
+		state.close()
+		return nil, newKernelHotRestartIncompatibleError(
+			"preserved xdp old IPv4 nat map is present without old IPv4 flow bank",
+		)
+	}
+	if haveOldNATV6 && state.xdpFlowMigrationFlags&xdpFlowMigrationFlagV6Old == 0 {
+		state.close()
+		return nil, newKernelHotRestartIncompatibleError(
+			"preserved xdp old IPv6 nat map is present without old IPv6 flow bank",
+		)
+	}
+	if haveActiveNATV4 && !haveActiveFlowsV4 {
+		state.close()
+		return nil, newKernelHotRestartIncompatibleError("preserved xdp active IPv4 nat map is present without active IPv4 flow bank")
+	}
+	if haveActiveNATV6 && !haveActiveFlowsV6 {
+		state.close()
+		return nil, newKernelHotRestartIncompatibleError("preserved xdp active IPv6 nat map is present without active IPv6 flow bank")
+	}
+	if haveOldFlowsV4 && !haveActiveFlowsV4 {
+		state.close()
+		return nil, newKernelHotRestartIncompatibleError("preserved xdp old IPv4 flow bank is missing active IPv4 flow bank")
+	}
+	if haveOldFlowsV6 && !haveActiveFlowsV6 {
+		state.close()
+		return nil, newKernelHotRestartIncompatibleError("preserved xdp old IPv6 flow bank is missing active IPv6 flow bank")
 	}
 
 	if state.xdpFlowMigrationFlags == 0 {
 		delete(state.replacements, kernelFlowsMapName)
 		delete(state.replacements, kernelFlowsMapNameV6)
+		delete(state.replacements, kernelNatPortsMapName)
+		delete(state.replacements, kernelNatPortsMapNameV6)
 		if flowsMap != nil {
 			state.replacements[kernelXDPFlowsOldMapNameV4] = flowsMap
 			state.xdpFlowMigrationFlags |= xdpFlowMigrationFlagV4Old
+			if natMap != nil {
+				state.replacements[kernelTCNatPortsOldMapNameV4] = natMap
+			}
 		}
 		if flowsMapV6 != nil {
 			state.replacements[kernelXDPFlowsOldMapNameV6] = flowsMapV6
 			state.xdpFlowMigrationFlags |= xdpFlowMigrationFlagV6Old
+			if natMapV6 != nil {
+				state.replacements[kernelTCNatPortsOldMapNameV6] = natMapV6
+			}
 		}
 	} else {
 		if flowCapacity := kernelRuntimeMapCapacity(flowsMap); flowCapacity > 0 && flowCapacity < state.actualCapacities.Flows {
@@ -1095,6 +1188,12 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		}
 		if flowCapacity := kernelRuntimeMapCapacity(flowsMapV6); flowCapacity > 0 && flowCapacity < state.actualCapacities.Flows {
 			state.actualCapacities.Flows = flowCapacity
+		}
+		if natCapacity := kernelRuntimeMapCapacity(natMap); natCapacity > 0 && natCapacity < state.actualCapacities.NATPorts {
+			state.actualCapacities.NATPorts = natCapacity
+		}
+		if natCapacity := kernelRuntimeMapCapacity(natMapV6); natCapacity > 0 && natCapacity < state.actualCapacities.NATPorts {
+			state.actualCapacities.NATPorts = natCapacity
 		}
 	}
 

@@ -154,7 +154,7 @@ func pruneStaleKernelFlowsMap(rulesMap, flowsMap, natPortsMap *ebpf.Map, state *
 	return pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, metrics)
 }
 
-func pruneStaleXDPFlowsMap(rulesMap, flowsMap *ebpf.Map, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+func pruneStaleXDPFlowsMap(rulesMap, flowsMap, natPortsMap *ebpf.Map, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	if flowsMap == nil {
 		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
 	}
@@ -165,10 +165,10 @@ func pruneStaleXDPFlowsMap(rulesMap, flowsMap *ebpf.Map, state *kernelFlowPruneS
 	}
 	metrics := kernelFlowPruneMetrics{Budget: budget}
 	if state == nil {
-		return pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap, nowNS, haveNow, metrics)
+		return pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, metrics)
 	}
 	if !state.batchSupportKnown || state.batchSupported {
-		corrections, pruneMetrics, err := pruneStaleXDPFlowsBatch(rulesMap, flowsMap, nowNS, haveNow, state, metrics)
+		corrections, pruneMetrics, err := pruneStaleXDPFlowsBatch(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, metrics)
 		if err == nil {
 			state.batchSupportKnown = true
 			state.batchSupported = true
@@ -179,7 +179,7 @@ func pruneStaleXDPFlowsMap(rulesMap, flowsMap *ebpf.Map, state *kernelFlowPruneS
 		state.batchSupported = false
 		log.Printf("xdp dataplane maintenance: batch flow scan unavailable, falling back to full scan: %v", err)
 	}
-	return pruneStaleXDPFlowsIncrementalInCollection(rulesMap, flowsMap, nowNS, haveNow, state, metrics)
+	return pruneStaleXDPFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, metrics)
 }
 
 func applyKernelStatsCorrections(dst map[uint32]kernelRuleStats, corrections map[uint32]kernelRuleStats) {
@@ -346,11 +346,15 @@ func mergeKernelLiveStateSnapshot(dst *kernelFlowLiveStateSnapshot, src kernelFl
 		current.BytesOut += value.BytesOut
 		dst.ByRuleID[ruleID] = current
 	}
-	if dst.UsedNAT == nil || len(src.UsedNAT) == 0 {
-		return
+	if dst.UsedNATV4 != nil && len(src.UsedNATV4) > 0 {
+		for natKey := range src.UsedNATV4 {
+			dst.UsedNATV4[natKey] = struct{}{}
+		}
 	}
-	for natKey := range src.UsedNAT {
-		dst.UsedNAT[natKey] = struct{}{}
+	if dst.UsedNATV6 != nil && len(src.UsedNATV6) > 0 {
+		for natKey := range src.UsedNATV6 {
+			dst.UsedNATV6[natKey] = struct{}{}
+		}
 	}
 }
 
@@ -371,17 +375,14 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsV6 != nil {
-		// IPv6 TC support is still being phased in. The live snapshot aggregates IPv6
-		// flow counts here, while UsedNAT remains IPv4-only for orphan NAT pruning.
-		// Runtime occupancy sync uses exact NAT map counts instead of this set.
-		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsV6)
+		live, err := snapshotKernelLiveStateFromFlowsV6(refs.rulesV6, refs.flowsV6, includeNAT)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV6 != nil {
-		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsOldV6)
+		live, err := snapshotKernelLiveStateFromFlowsV6(refs.rulesV6, refs.flowsOldV6, includeNAT)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
@@ -390,31 +391,31 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 	return out, nil
 }
 
-func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (kernelFlowLiveStateSnapshot, error) {
-	out := newKernelFlowLiveStateSnapshot(false)
+func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includeNAT bool) (kernelFlowLiveStateSnapshot, error) {
+	out := newKernelFlowLiveStateSnapshot(includeNAT)
 	if refs.flowsV4 != nil {
-		live, err := snapshotXDPKernelLiveStateFromFlows(refs.flowsV4)
+		live, err := snapshotXDPKernelLiveStateFromFlows(refs.rulesV4, refs.flowsV4, includeNAT)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV4 != nil {
-		live, err := snapshotXDPKernelLiveStateFromFlows(refs.flowsOldV4)
+		live, err := snapshotXDPKernelLiveStateFromFlows(refs.rulesV4, refs.flowsOldV4, includeNAT)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsV6 != nil {
-		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsV6)
+		live, err := snapshotKernelLiveStateFromFlowsV6(refs.rulesV6, refs.flowsV6, includeNAT)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV6 != nil {
-		live, err := snapshotKernelLiveStateFromFlowsV6(refs.flowsOldV6)
+		live, err := snapshotKernelLiveStateFromFlowsV6(refs.rulesV6, refs.flowsOldV6, includeNAT)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
@@ -448,7 +449,7 @@ func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, in
 		out.ByRuleID[value.RuleID] = item
 		if includeNAT {
 			if natKey, ok := kernelUsedNATReservationKey(rulesMap, key, value); ok {
-				out.UsedNAT[natKey] = struct{}{}
+				out.UsedNATV4[natKey] = struct{}{}
 			}
 		}
 	}
@@ -458,8 +459,8 @@ func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, in
 	return out, nil
 }
 
-func snapshotXDPKernelLiveStateFromFlows(flowsMap *ebpf.Map) (kernelFlowLiveStateSnapshot, error) {
-	out := newKernelFlowLiveStateSnapshot(false)
+func snapshotXDPKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, includeNAT bool) (kernelFlowLiveStateSnapshot, error) {
+	out := newKernelFlowLiveStateSnapshot(includeNAT)
 	if flowsMap == nil {
 		return out, nil
 	}
@@ -482,6 +483,11 @@ func snapshotXDPKernelLiveStateFromFlows(flowsMap *ebpf.Map) (kernelFlowLiveStat
 			item.TCPActiveConns++
 		}
 		out.ByRuleID[value.RuleID] = item
+		if includeNAT {
+			if natKey, ok := kernelUsedNATReservationKey(rulesMap, key, value); ok {
+				out.UsedNATV4[natKey] = struct{}{}
+			}
+		}
 	}
 	if err := iter.Err(); err != nil {
 		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate xdp flows map for live counts: %w", err)
@@ -489,8 +495,8 @@ func snapshotXDPKernelLiveStateFromFlows(flowsMap *ebpf.Map) (kernelFlowLiveStat
 	return out, nil
 }
 
-func snapshotKernelLiveStateFromFlowsV6(flowsMap *ebpf.Map) (kernelFlowLiveStateSnapshot, error) {
-	out := newKernelFlowLiveStateSnapshot(false)
+func snapshotKernelLiveStateFromFlowsV6(rulesMap *ebpf.Map, flowsMap *ebpf.Map, includeNAT bool) (kernelFlowLiveStateSnapshot, error) {
+	out := newKernelFlowLiveStateSnapshot(includeNAT)
 	if flowsMap == nil {
 		return out, nil
 	}
@@ -512,6 +518,11 @@ func snapshotKernelLiveStateFromFlowsV6(flowsMap *ebpf.Map) (kernelFlowLiveState
 			item.TCPActiveConns++
 		}
 		out.ByRuleID[value.RuleID] = item
+		if includeNAT {
+			if natKey, ok := kernelUsedNATReservationKeyV6(rulesMap, key, value); ok {
+				out.UsedNATV6[natKey] = struct{}{}
+			}
+		}
 	}
 	if err := iter.Err(); err != nil {
 		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate kernel ipv6 flows map for live counts: %w", err)
@@ -537,6 +548,29 @@ func kernelUsedNATReservationKey(rulesMap *ebpf.Map, key tcFlowKeyV4, value tcFl
 	ruleValue, ok := lookupRuleValueForFrontFlow(rulesMap, key)
 	if !ok || ruleValue.OutIfIndex == 0 {
 		return tcNATPortKeyV4{}, false
+	}
+	natKey.IfIndex = ruleValue.OutIfIndex
+	return natKey, true
+}
+
+func kernelUsedNATReservationKeyV6(rulesMap *ebpf.Map, key tcFlowKeyV6, value tcFlowValueV6) (tcNATPortKeyV6, bool) {
+	if value.Flags&kernelFlowFlagFullNAT == 0 || value.NATAddr == [16]byte{} || value.NATPort == 0 {
+		return tcNATPortKeyV6{}, false
+	}
+
+	natKey := tcNATPortKeyV6{
+		NATAddr: value.NATAddr,
+		NATPort: value.NATPort,
+		Proto:   key.Proto,
+	}
+	if value.Flags&kernelFlowFlagFrontEntry == 0 {
+		natKey.IfIndex = key.IfIndex
+		return natKey, true
+	}
+
+	ruleValue, ok := lookupRuleValueForFrontFlowV6(rulesMap, key)
+	if !ok || ruleValue.OutIfIndex == 0 {
+		return tcNATPortKeyV6{}, false
 	}
 	natKey.IfIndex = ruleValue.OutIfIndex
 	return natKey, true
@@ -706,6 +740,35 @@ func pruneOrphanKernelNATReservations(natPortsMap *ebpf.Map, used map[tcNATPortK
 	for _, item := range staleKeys {
 		if err := natPortsMap.Delete(item); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return deleted, fmt.Errorf("delete orphan nat reservation: %w", err)
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
+func pruneOrphanKernelNATReservationsV6(natPortsMap *ebpf.Map, used map[tcNATPortKeyV6]struct{}) (int, error) {
+	if natPortsMap == nil {
+		return 0, nil
+	}
+
+	iter := natPortsMap.Iterate()
+	var staleKeys []tcNATPortKeyV6
+	var key tcNATPortKeyV6
+	var value uint32
+	for iter.Next(&key, &value) {
+		if _, ok := used[key]; ok {
+			continue
+		}
+		staleKeys = append(staleKeys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("iterate kernel IPv6 nat map: %w", err)
+	}
+
+	deleted := 0
+	for _, item := range staleKeys {
+		if err := natPortsMap.Delete(item); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return deleted, fmt.Errorf("delete orphan IPv6 nat reservation: %w", err)
 		}
 		deleted++
 	}
@@ -970,7 +1033,7 @@ func pruneStaleKernelFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMa
 	return corrections, metrics, nil
 }
 
-func pruneStaleXDPFlowsBatch(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+func pruneStaleXDPFlowsBatch(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	remaining := metrics.Budget
 
@@ -993,7 +1056,7 @@ func pruneStaleXDPFlowsBatch(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow
 			}
 			metrics.Scanned++
 			if kernelFlowDeleteReason(keys[i], value, nowNS, haveNow) != "" {
-				deleteStaleKernelFlow(rulesMap, flowsMap, nil, staleKernelFlow{key: keys[i], value: value}, corrections)
+				deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, staleKernelFlow{key: keys[i], value: value}, corrections)
 				metrics.Deleted++
 			}
 		}
@@ -1008,7 +1071,7 @@ func pruneStaleXDPFlowsBatch(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow
 	return corrections, metrics, nil
 }
 
-func pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+func pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	iter := flowsMap.Iterate()
 	var key tcFlowKeyV4
 	var raw xdpFlowValueV4
@@ -1031,15 +1094,15 @@ func pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap *ebpf.Map, nowNS uint
 	}
 
 	for _, stale := range staleFlows {
-		deleteStaleKernelFlow(rulesMap, flowsMap, nil, stale, corrections)
+		deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, stale, corrections)
 		metrics.Deleted++
 	}
 	return corrections, metrics, nil
 }
 
-func pruneStaleXDPFlowsIncrementalInCollection(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+func pruneStaleXDPFlowsIncrementalInCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	if state == nil {
-		return pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap, nowNS, haveNow, metrics)
+		return pruneStaleXDPFlowsFullInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, metrics)
 	}
 	if metrics.Budget <= 0 {
 		metrics.Budget = kernelFlowMaintenanceBudgetMin
@@ -1089,7 +1152,7 @@ func pruneStaleXDPFlowsIncrementalInCollection(rulesMap, flowsMap *ebpf.Map, now
 		if value.RuleID != 0 {
 			metrics.Scanned++
 			if kernelFlowDeleteReason(current, value, nowNS, haveNow) != "" {
-				deleteStaleKernelFlow(rulesMap, flowsMap, nil, staleKernelFlow{key: current, value: value}, corrections)
+				deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, staleKernelFlow{key: current, value: value}, corrections)
 				metrics.Deleted++
 			}
 		}
@@ -1108,7 +1171,7 @@ func pruneStaleXDPFlowsIncrementalInCollection(rulesMap, flowsMap *ebpf.Map, now
 	return corrections, metrics, nil
 }
 
-func pruneStaleKernelFlowsV6InCollection(rulesMap, flowsMap *ebpf.Map, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+func pruneStaleKernelFlowsV6InCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	if flowsMap == nil {
 		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
 	}
@@ -1119,10 +1182,10 @@ func pruneStaleKernelFlowsV6InCollection(rulesMap, flowsMap *ebpf.Map, state *ke
 	}
 	metrics := kernelFlowPruneMetrics{Budget: budget}
 	if state == nil {
-		return pruneStaleKernelFlowsV6FullInCollection(rulesMap, flowsMap, nowNS, haveNow, metrics)
+		return pruneStaleKernelFlowsV6FullInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, metrics)
 	}
 	if !state.batchSupportKnown || state.batchSupported {
-		corrections, pruneMetrics, err := pruneStaleKernelFlowsBatchV6(rulesMap, flowsMap, nowNS, haveNow, state, metrics)
+		corrections, pruneMetrics, err := pruneStaleKernelFlowsBatchV6(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, metrics)
 		if err == nil {
 			state.batchSupportKnown = true
 			state.batchSupported = true
@@ -1137,10 +1200,10 @@ func pruneStaleKernelFlowsV6InCollection(rulesMap, flowsMap *ebpf.Map, state *ke
 		state.batchSupported = false
 		log.Printf("kernel dataplane maintenance: batch IPv6 flow scan unavailable, falling back to full scan: %v", err)
 	}
-	return pruneStaleKernelFlowsIncrementalV6InCollection(rulesMap, flowsMap, nowNS, haveNow, state, metrics)
+	return pruneStaleKernelFlowsIncrementalV6InCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, state, metrics)
 }
 
-func pruneStaleKernelFlowsBatchV6(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+func pruneStaleKernelFlowsBatchV6(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	remaining := metrics.Budget
 
@@ -1163,7 +1226,7 @@ func pruneStaleKernelFlowsBatchV6(rulesMap, flowsMap *ebpf.Map, nowNS uint64, ha
 			}
 			metrics.Scanned++
 			if kernelFlowShouldDeleteV6(keys[i], value, nowNS, haveNow) {
-				deleteStaleKernelFlowV6(rulesMap, flowsMap, staleKernelFlowV6{key: keys[i], value: value}, corrections)
+				deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap, staleKernelFlowV6{key: keys[i], value: value}, corrections)
 				metrics.Deleted++
 			}
 		}
@@ -1178,7 +1241,7 @@ func pruneStaleKernelFlowsBatchV6(rulesMap, flowsMap *ebpf.Map, nowNS uint64, ha
 	return corrections, metrics, nil
 }
 
-func pruneStaleKernelFlowsV6FullInCollection(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+func pruneStaleKernelFlowsV6FullInCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	iter := flowsMap.Iterate()
 	var key tcFlowKeyV6
 	var value tcFlowValueV6
@@ -1199,15 +1262,15 @@ func pruneStaleKernelFlowsV6FullInCollection(rulesMap, flowsMap *ebpf.Map, nowNS
 	}
 
 	for _, stale := range staleFlows {
-		deleteStaleKernelFlowV6(rulesMap, flowsMap, stale, corrections)
+		deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap, stale, corrections)
 		metrics.Deleted++
 	}
 	return corrections, metrics, nil
 }
 
-func pruneStaleKernelFlowsIncrementalV6InCollection(rulesMap, flowsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
+func pruneStaleKernelFlowsIncrementalV6InCollection(rulesMap, flowsMap, natPortsMap *ebpf.Map, nowNS uint64, haveNow bool, state *kernelFlowPruneState, metrics kernelFlowPruneMetrics) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	if state == nil {
-		return pruneStaleKernelFlowsV6FullInCollection(rulesMap, flowsMap, nowNS, haveNow, metrics)
+		return pruneStaleKernelFlowsV6FullInCollection(rulesMap, flowsMap, natPortsMap, nowNS, haveNow, metrics)
 	}
 	if metrics.Budget <= 0 {
 		metrics.Budget = kernelFlowMaintenanceBudgetMin
@@ -1256,7 +1319,7 @@ func pruneStaleKernelFlowsIncrementalV6InCollection(rulesMap, flowsMap *ebpf.Map
 		if value.RuleID != 0 {
 			metrics.Scanned++
 			if kernelFlowShouldDeleteV6(current, value, nowNS, haveNow) {
-				deleteStaleKernelFlowV6(rulesMap, flowsMap, staleKernelFlowV6{key: current, value: value}, corrections)
+				deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap, staleKernelFlowV6{key: current, value: value}, corrections)
 				metrics.Deleted++
 			}
 		}
@@ -1448,7 +1511,7 @@ func deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap *ebpf.Map, stale stal
 	})
 }
 
-func deleteStaleKernelFlowV6(rulesMap, flowsMap *ebpf.Map, stale staleKernelFlowV6, corrections map[uint32]kernelRuleStats) {
+func deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap *ebpf.Map, stale staleKernelFlowV6, corrections map[uint32]kernelRuleStats) {
 	if stale.value.Flags&kernelFlowFlagCounted != 0 {
 		item := corrections[stale.value.RuleID]
 		if kernelFlowUsesUDPAccounting(stale.key.Proto) {
@@ -1495,6 +1558,12 @@ func deleteStaleKernelFlowV6(rulesMap, flowsMap *ebpf.Map, stale staleKernelFlow
 				err,
 			)
 		}
+		deleteStaleKernelNATReservationV6(natPortsMap, tcNATPortKeyV6{
+			IfIndex: stale.key.IfIndex,
+			NATAddr: stale.value.NATAddr,
+			NATPort: stale.value.NATPort,
+			Proto:   stale.key.Proto,
+		})
 		return
 	}
 
@@ -1511,6 +1580,10 @@ func deleteStaleKernelFlowV6(rulesMap, flowsMap *ebpf.Map, stale staleKernelFlow
 		DstPort: stale.value.NATPort,
 		Proto:   stale.key.Proto,
 	}
+	if stale.value.Flags&kernelFlowFlagEgressNAT != 0 {
+		replyKey.SrcAddr = stale.value.FrontAddr
+		replyKey.SrcPort = stale.value.FrontPort
+	}
 	if err := flowsMap.Delete(replyKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		log.Printf(
 			"kernel dataplane maintenance: delete stale IPv6 reply flow failed: proto=%d ifindex=%d sport=%d dport=%d err=%v",
@@ -1521,6 +1594,12 @@ func deleteStaleKernelFlowV6(rulesMap, flowsMap *ebpf.Map, stale staleKernelFlow
 			err,
 		)
 	}
+	deleteStaleKernelNATReservationV6(natPortsMap, tcNATPortKeyV6{
+		IfIndex: ruleValue.OutIfIndex,
+		NATAddr: stale.value.NATAddr,
+		NATPort: stale.value.NATPort,
+		Proto:   stale.key.Proto,
+	})
 }
 
 func lookupRuleValueForFrontFlow(rulesMap *ebpf.Map, frontKey tcFlowKeyV4) (tcRuleValueV4, bool) {
@@ -1591,6 +1670,21 @@ func deleteStaleKernelNATReservation(natPortsMap *ebpf.Map, natKey tcNATPortKeyV
 			natKey.Proto,
 			natKey.IfIndex,
 			natKey.NATAddr,
+			natKey.NATPort,
+			err,
+		)
+	}
+}
+
+func deleteStaleKernelNATReservationV6(natPortsMap *ebpf.Map, natKey tcNATPortKeyV6) {
+	if natPortsMap == nil || natKey.NATAddr == [16]byte{} || natKey.NATPort == 0 {
+		return
+	}
+	if err := natPortsMap.Delete(natKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		log.Printf(
+			"kernel dataplane maintenance: delete stale IPv6 nat reservation failed: proto=%d ifindex=%d nat_port=%d err=%v",
+			natKey.Proto,
+			natKey.IfIndex,
 			natKey.NATPort,
 			err,
 		)

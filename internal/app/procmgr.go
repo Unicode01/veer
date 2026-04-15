@@ -312,7 +312,7 @@ func (pm *ProcessManager) snapshotKernelRuntimeShared(now time.Time, force bool)
 		pm.kernelRuntimeSnapshotWait = wait
 		pm.mu.Unlock()
 
-		snapshot := pm.snapshotKernelRuntime()
+		snapshot := pm.snapshotKernelRuntimeWithForce(force)
 		completedAt := time.Now()
 
 		pm.mu.Lock()
@@ -4405,8 +4405,12 @@ func (pm *ProcessManager) monitorLoop() {
 				pm.lastKernelAttachmentHealSummary = ""
 				pm.lastKernelAttachmentHealError = kernelAttachmentHealError
 				pm.mu.Unlock()
-				log.Printf("kernel dataplane self-heal: targeted attachment repair failed (%s): %v", kernelAttachmentIssue, healErr)
-				pm.requestRedistributeWorkers(0)
+				if kernelAttachmentHealErrorRequiresRedistribute(healErr) {
+					log.Printf("kernel dataplane self-heal: targeted attachment repair failed (%s): %v", kernelAttachmentIssue, healErr)
+					pm.requestRedistributeWorkers(0)
+				} else {
+					log.Printf("kernel dataplane self-heal: targeted attachment repair hit a disappearing interface (%s): %v; waiting for link-driven recovery", kernelAttachmentIssue, healErr)
+				}
 			} else {
 				rawKernelAttachmentHealSummary := summarizeKernelAttachmentHealResults(healResults)
 				postHealIssue := summarizeUnhealthyKernelAttachments(snapshotKernelAttachmentHealth(runtime))

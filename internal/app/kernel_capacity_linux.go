@@ -96,6 +96,19 @@ func applyKernelMapCapacitiesWithOccupancy(spec *ebpf.CollectionSpec, rulesConfi
 		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV6, kernelOldBankPlaceholderEntries, false, "tc old IPv6 nat ports"); err != nil {
 			return kernelMapCapacities{}, err
 		}
+	} else {
+		if err := setKernelCollectionMapCapacity(spec, kernelNatPortsMapName, kernelOldBankPlaceholderEntries, false, "kernel nat ports"); err != nil {
+			return kernelMapCapacities{}, err
+		}
+		if err := setKernelCollectionMapCapacity(spec, kernelNatPortsMapNameV6, kernelOldBankPlaceholderEntries, false, "kernel IPv6 nat ports"); err != nil {
+			return kernelMapCapacities{}, err
+		}
+		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV4, kernelOldBankPlaceholderEntries, false, "tc old IPv4 nat ports"); err != nil {
+			return kernelMapCapacities{}, err
+		}
+		if err := setKernelCollectionMapCapacity(spec, kernelTCNatPortsOldMapNameV6, kernelOldBankPlaceholderEntries, false, "tc old IPv6 nat ports"); err != nil {
+			return kernelMapCapacities{}, err
+		}
 	}
 
 	return capacities, nil

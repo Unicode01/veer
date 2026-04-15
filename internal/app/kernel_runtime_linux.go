@@ -1191,7 +1191,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 	purgedFlows := 0
 	if len(flowPurgeIDs) > 0 {
 		flowPurgeStartedAt := time.Now()
-		purgeCorrections, purgedFlows, err = purgeKernelFlowsForRuleIDs(coll.Maps[kernelRulesMapName], coll.Maps[kernelFlowsMapName], coll.Maps[kernelNatPortsMapName], flowPurgeIDs)
+		purgeCorrections, purgedFlows, err = purgeKernelFlowsForRuleIDs(kernelRuntimeMapRefsFromCollection(coll), flowPurgeIDs)
 		reconcileMetrics.FlowPurgeDuration = time.Since(flowPurgeStartedAt)
 		if err != nil {
 			log.Printf("kernel dataplane reconcile: purge stale tc flow state after rebuild failed: %v", err)
@@ -1349,7 +1349,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, &flowPruneState, v6ActiveBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natV6, &flowPruneState, v6ActiveBudget)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -1360,7 +1360,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
 	if refs.flowsOldV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, &oldFlowPruneState, v6OldBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldV6, &oldFlowPruneState, v6OldBudget)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -1395,10 +1395,20 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 				}
 				deleted := 0
 				for _, natMap := range []*ebpf.Map{refs.natV4, refs.natOldV4} {
-					itemDeleted, natErr := pruneOrphanKernelNATReservations(natMap, live.UsedNAT)
+					itemDeleted, natErr := pruneOrphanKernelNATReservations(natMap, live.UsedNATV4)
 					if natErr != nil {
 						fullSuccess = false
 						log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
+						deleted = 0
+						break
+					}
+					deleted += itemDeleted
+				}
+				for _, natMap := range []*ebpf.Map{refs.natV6, refs.natOldV6} {
+					itemDeleted, natErr := pruneOrphanKernelNATReservationsV6(natMap, live.UsedNATV6)
+					if natErr != nil {
+						fullSuccess = false
+						log.Printf("kernel dataplane maintenance: prune orphan tc IPv6 nat reservations failed: %v", natErr)
 						deleted = 0
 						break
 					}
@@ -2115,7 +2125,32 @@ func preparedKernelRuleGroupsEqualBy(a []preparedKernelRule, b []preparedKernelR
 	return true
 }
 
-func purgeKernelFlowsForRuleIDs(rulesMap, flowsMap, natPortsMap *ebpf.Map, ruleIDs map[uint32]struct{}) (map[uint32]kernelRuleStats, int, error) {
+func purgeKernelFlowsForRuleIDs(refs kernelRuntimeMapRefs, ruleIDs map[uint32]struct{}) (map[uint32]kernelRuleStats, int, error) {
+	corrections := make(map[uint32]kernelRuleStats)
+	if len(ruleIDs) == 0 {
+		return corrections, 0, nil
+	}
+
+	deleted := 0
+
+	v4Corrections, v4Deleted, err := purgeKernelFlowsForRuleIDsV4(refs.rulesV4, refs.flowsV4, refs.natV4, ruleIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	mergeKernelStatsCorrections(corrections, v4Corrections)
+	deleted += v4Deleted
+
+	v6Corrections, v6Deleted, err := purgeKernelFlowsForRuleIDsV6(refs.rulesV6, refs.flowsV6, refs.natV6, ruleIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	mergeKernelStatsCorrections(corrections, v6Corrections)
+	deleted += v6Deleted
+
+	return corrections, deleted, nil
+}
+
+func purgeKernelFlowsForRuleIDsV4(rulesMap, flowsMap, natPortsMap *ebpf.Map, ruleIDs map[uint32]struct{}) (map[uint32]kernelRuleStats, int, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	if flowsMap == nil || len(ruleIDs) == 0 {
 		return corrections, 0, nil
@@ -2141,7 +2176,57 @@ func purgeKernelFlowsForRuleIDs(rulesMap, flowsMap, natPortsMap *ebpf.Map, ruleI
 	return corrections, len(stale), nil
 }
 
-func purgeAllKernelConnectionState(rulesMap, flowsMap, natPortsMap *ebpf.Map) (map[uint32]kernelRuleStats, int, int, error) {
+func purgeKernelFlowsForRuleIDsV6(rulesMap, flowsMap, natPortsMap *ebpf.Map, ruleIDs map[uint32]struct{}) (map[uint32]kernelRuleStats, int, error) {
+	corrections := make(map[uint32]kernelRuleStats)
+	if flowsMap == nil || len(ruleIDs) == 0 {
+		return corrections, 0, nil
+	}
+
+	iter := flowsMap.Iterate()
+	stale := make([]staleKernelFlowV6, 0)
+	var key tcFlowKeyV6
+	var value tcFlowValueV6
+	for iter.Next(&key, &value) {
+		if _, ok := ruleIDs[value.RuleID]; !ok {
+			continue
+		}
+		stale = append(stale, staleKernelFlowV6{key: key, value: value})
+	}
+	if err := iter.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate kernel IPv6 flows map for targeted purge: %w", err)
+	}
+
+	for _, item := range stale {
+		deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap, item, corrections)
+	}
+	return corrections, len(stale), nil
+}
+
+func purgeAllKernelConnectionState(refs kernelRuntimeMapRefs) (map[uint32]kernelRuleStats, int, int, error) {
+	corrections := make(map[uint32]kernelRuleStats)
+	deletedFlows := 0
+	deletedNAT := 0
+
+	v4Corrections, v4DeletedFlows, v4DeletedNAT, err := purgeAllKernelConnectionStateV4(refs.rulesV4, refs.flowsV4, refs.natV4)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	mergeKernelStatsCorrections(corrections, v4Corrections)
+	deletedFlows += v4DeletedFlows
+	deletedNAT += v4DeletedNAT
+
+	v6Corrections, v6DeletedFlows, v6DeletedNAT, err := purgeAllKernelConnectionStateV6(refs.rulesV6, refs.flowsV6, refs.natV6)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	mergeKernelStatsCorrections(corrections, v6Corrections)
+	deletedFlows += v6DeletedFlows
+	deletedNAT += v6DeletedNAT
+
+	return corrections, deletedFlows, deletedNAT, nil
+}
+
+func purgeAllKernelConnectionStateV4(rulesMap, flowsMap, natPortsMap *ebpf.Map) (map[uint32]kernelRuleStats, int, int, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	if flowsMap == nil {
 		deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
@@ -2163,6 +2248,34 @@ func purgeAllKernelConnectionState(rulesMap, flowsMap, natPortsMap *ebpf.Map) (m
 		deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, item, corrections)
 	}
 	deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
+	if err != nil {
+		return nil, len(stale), 0, err
+	}
+	return corrections, len(stale), deletedNAT, nil
+}
+
+func purgeAllKernelConnectionStateV6(rulesMap, flowsMap, natPortsMap *ebpf.Map) (map[uint32]kernelRuleStats, int, int, error) {
+	corrections := make(map[uint32]kernelRuleStats)
+	if flowsMap == nil {
+		deletedNAT, err := pruneOrphanKernelNATReservationsV6(natPortsMap, nil)
+		return corrections, 0, deletedNAT, err
+	}
+
+	iter := flowsMap.Iterate()
+	stale := make([]staleKernelFlowV6, 0)
+	var key tcFlowKeyV6
+	var value tcFlowValueV6
+	for iter.Next(&key, &value) {
+		stale = append(stale, staleKernelFlowV6{key: key, value: value})
+	}
+	if err := iter.Err(); err != nil {
+		return nil, 0, 0, fmt.Errorf("iterate kernel IPv6 flows map for full purge: %w", err)
+	}
+
+	for _, item := range stale {
+		deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap, item, corrections)
+	}
+	deletedNAT, err := pruneOrphanKernelNATReservationsV6(natPortsMap, nil)
 	if err != nil {
 		return nil, len(stale), 0, err
 	}
@@ -2463,7 +2576,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	flowPurgeDuration := time.Duration(0)
 	if len(flowPurgeIDs) > 0 {
 		flowPurgeStartedAt := time.Now()
-		corrections, deleted, purgeErr := purgeKernelFlowsForRuleIDs(rt.coll.Maps[kernelRulesMapName], rt.coll.Maps[kernelFlowsMapName], rt.coll.Maps[kernelNatPortsMapName], flowPurgeIDs)
+		corrections, deleted, purgeErr := purgeKernelFlowsForRuleIDs(kernelRuntimeMapRefsFromCollection(rt.coll), flowPurgeIDs)
 		flowPurgeDuration = time.Since(flowPurgeStartedAt)
 		if purgeErr != nil {
 			log.Printf("kernel dataplane reconcile: purge stale tc flow state after in-place update failed: %v", purgeErr)

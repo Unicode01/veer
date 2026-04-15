@@ -11,11 +11,19 @@ func snapshotKernelRuntimeEngines(rt kernelRuleRuntime) []KernelEngineRuntimeVie
 	return nil
 }
 
+func snapshotKernelRuntimeEnginesWithForce(rt kernelRuleRuntime, force bool) []KernelEngineRuntimeView {
+	return snapshotKernelRuntimeEngines(rt)
+}
+
 func kernelRuntimeIdleDegradedRebuildReason(view KernelEngineRuntimeView) string {
 	return ""
 }
 
 func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
+	return pm.snapshotKernelRuntimeWithForce(false)
+}
+
+func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
 		Available:       false,
 		AvailableReason: "kernel dataplane requires Linux",

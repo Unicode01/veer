@@ -507,24 +507,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		retryOwners[owner] = struct{}{}
 	}
 
-	if len(retryOwners) == 0 {
-		if trigger.hasSource("link") && (len(currentKernelRules) > 0 || len(currentKernelRanges) > 0 || len(currentKernelEgressNATs) > 0) {
-			result.attempted = true
-			result.handled = false
-			result.cooldownRuleOwners = cooldownRuleOwners
-			result.cooldownRangeOwners = cooldownRangeOwners
-			result.cooldownSummary = summarizeKernelNetlinkOwnerRetryCooldownSourceCounts(cooldownSummaryCounts)
-			result.cooldownScope = summarizeKernelIncrementalRetryOwnerScope(cooldownOwners)
-			result.detail = fmt.Sprintf(
-				"link change requires full kernel re-evaluation of active owners (rule_owners=%d range_owners=%d egress_nat_owners=%d)%s%s",
-				len(currentKernelRules),
-				len(currentKernelRanges),
-				len(currentKernelEgressNATs),
-				kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
-				kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
-			)
-			return result
-		}
+	if len(retryOwners) == 0 && !trigger.hasSource("link") {
 		if cooldownRuleOwners == 0 && cooldownRangeOwners == 0 && result.cooldownEgressNATs == 0 {
 			return kernelIncrementalRetryResult{handled: true}
 		}
@@ -578,6 +561,52 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	allKernelCandidates = append(allKernelCandidates, candidates...)
 	allKernelCandidates = append(allKernelCandidates, egressNATCandidates...)
 	activeCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
+	matchedActiveLinkCandidates := filterLinkTriggeredActiveKernelCandidates(
+		trigger,
+		activeCandidates,
+		currentKernelRules,
+		currentKernelRanges,
+		currentKernelEgressNATs,
+	)
+	if len(retryOwners) == 0 {
+		if len(matchedActiveLinkCandidates) > 0 {
+			result.attempted = true
+			result.handled = false
+			result.cooldownRuleOwners = cooldownRuleOwners
+			result.cooldownRangeOwners = cooldownRangeOwners
+			result.cooldownSummary = summarizeKernelNetlinkOwnerRetryCooldownSourceCounts(cooldownSummaryCounts)
+			result.cooldownScope = summarizeKernelIncrementalRetryOwnerScope(cooldownOwners)
+			matchedActiveRuleOwners, matchedActiveRangeOwners, matchedActiveEgressNATs := countKernelCandidateOwnersByKind(matchedActiveLinkCandidates)
+			result.detail = fmt.Sprintf(
+				"link change requires full kernel re-evaluation of impacted active owners (rule_owners=%d range_owners=%d egress_nat_owners=%d)%s%s",
+				matchedActiveRuleOwners,
+				matchedActiveRangeOwners,
+				matchedActiveEgressNATs,
+				kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
+				kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
+			)
+			return result
+		}
+		if cooldownRuleOwners == 0 && cooldownRangeOwners == 0 && result.cooldownEgressNATs == 0 {
+			return kernelIncrementalRetryResult{handled: true}
+		}
+		result.attempted = true
+		result.handled = true
+		result.cooldownRuleOwners = cooldownRuleOwners
+		result.cooldownRangeOwners = cooldownRangeOwners
+		result.cooldownSummary = summarizeKernelNetlinkOwnerRetryCooldownSourceCounts(cooldownSummaryCounts)
+		result.cooldownScope = summarizeKernelIncrementalRetryOwnerScope(cooldownOwners)
+		result.detail = fmt.Sprintf(
+			"incremental retry skipped due to owner cooldown%s%s",
+			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
+			kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
+		)
+		pm.mu.Lock()
+		pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, now, rulePlans, rangePlans, egressNATPlans)
+		pm.kernelNetlinkOwnerRetryFailures = syncKernelNetlinkOwnerRetryFailures(failureCounts, rulePlans, rangePlans, egressNATPlans)
+		pm.mu.Unlock()
+		return result
+	}
 	retryCandidates := filterKernelCandidatesByOwners(activeCandidates, retryOwners, rulePlans, rangePlans, egressNATPlans)
 	result.attemptedRuleOwners, result.attemptedRangeOwners, result.attemptedEgressNATs = countKernelCandidateOwnersByKind(retryCandidates)
 	retryRequiresKernelMutation := hasActiveKernelOwnersMatchingRetryOwners(
@@ -863,6 +892,59 @@ func triggerMatchesAddrRefreshPlan(trigger kernelNetlinkRecoveryTrigger, plan ru
 		return false
 	}
 	return trigger.matchesOutInterface(outInterface) && trigger.matchesAddrFamily(plan.AddrRefresh.Family)
+}
+
+func triggerMatchesActiveKernelCandidate(trigger kernelNetlinkRecoveryTrigger, candidate kernelCandidateRule) bool {
+	if !trigger.hasSource("link") {
+		return false
+	}
+	if !kernelNetlinkTriggerHasLinkHints(trigger) {
+		return true
+	}
+	for _, iface := range []string{candidate.rule.InInterface, candidate.rule.OutInterface} {
+		name := normalizeKernelTransientFallbackInterface(iface)
+		if name == "" {
+			continue
+		}
+		if trigger.matchesOutInterface(name) || trigger.matchesLinkNeighborInterface(name) || trigger.matchesLinkFDBInterface(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterLinkTriggeredActiveKernelCandidates(trigger kernelNetlinkRecoveryTrigger, candidates []kernelCandidateRule, currentKernelRules map[int64]bool, currentKernelRanges map[int64]bool, currentKernelEgressNATs map[int64]bool) []kernelCandidateRule {
+	if !trigger.hasSource("link") || len(candidates) == 0 {
+		return nil
+	}
+
+	out := make([]kernelCandidateRule, 0, len(candidates))
+	for _, candidate := range candidates {
+		if !triggerMatchesActiveKernelCandidate(trigger, candidate) {
+			continue
+		}
+		switch candidate.owner.kind {
+		case workerKindRule:
+			if !currentKernelRules[candidate.owner.id] {
+				continue
+			}
+		case workerKindRange:
+			if !currentKernelRanges[candidate.owner.id] {
+				continue
+			}
+		case workerKindEgressNAT:
+			if !currentKernelEgressNATs[candidate.owner.id] {
+				continue
+			}
+		default:
+			continue
+		}
+		out = append(out, candidate)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func preserveUnmatchedNetlinkFallbackPlans(prevRulePlans map[int64]ruleDataplanePlan, prevRangePlans map[int64]rangeDataplanePlan, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) {

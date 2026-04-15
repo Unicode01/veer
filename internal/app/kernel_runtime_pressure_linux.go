@@ -28,11 +28,21 @@ type kernelRuntimePressureState struct {
 	natCapacity   int
 }
 
+type kernelRuntimePressureUsageSample struct {
+	label    string
+	entries  int
+	capacity int
+}
+
 func (rt *linuxKernelRuleRuntime) currentAvailabilityLocked(now time.Time) (bool, string) {
+	return rt.currentAvailabilityLockedWithForce(now, false)
+}
+
+func (rt *linuxKernelRuleRuntime) currentAvailabilityLockedWithForce(now time.Time, force bool) (bool, string) {
 	if !rt.available {
 		return false, rt.availableReason
 	}
-	pressure := rt.refreshPressureLocked(now)
+	pressure := rt.refreshPressureLockedWithForce(now, force)
 	if pressure.level.blocksKernelAvailability() {
 		return false, pressure.reason
 	}
@@ -40,10 +50,14 @@ func (rt *linuxKernelRuleRuntime) currentAvailabilityLocked(now time.Time) (bool
 }
 
 func (rt *xdpKernelRuleRuntime) currentAvailabilityLocked(now time.Time) (bool, string) {
+	return rt.currentAvailabilityLockedWithForce(now, false)
+}
+
+func (rt *xdpKernelRuleRuntime) currentAvailabilityLockedWithForce(now time.Time, force bool) (bool, string) {
 	if !rt.available {
 		return false, rt.availableReason
 	}
-	pressure := rt.refreshPressureLocked(now)
+	pressure := rt.refreshPressureLockedWithForce(now, force)
 	if pressure.level.blocksKernelAvailability() {
 		return false, pressure.reason
 	}
@@ -83,6 +97,8 @@ func (rt *xdpKernelRuleRuntime) pressureSnapshot() kernelRuntimePressureSnapshot
 		SampledAt:       pressure.sampledAt,
 		FlowsEntries:    pressure.flowsEntries,
 		FlowsCapacity:   pressure.flowsCapacity,
+		NATEntries:      pressure.natEntries,
+		NATCapacity:     pressure.natCapacity,
 	}
 }
 
@@ -115,6 +131,10 @@ func (rt *orderedKernelRuleRuntime) pressureSnapshot() kernelRuntimePressureSnap
 }
 
 func (rt *linuxKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRuntimePressureState {
+	return rt.refreshPressureLockedWithForce(now, false)
+}
+
+func (rt *linuxKernelRuleRuntime) refreshPressureLockedWithForce(now time.Time, force bool) kernelRuntimePressureState {
 	if !rt.available || rt.coll == nil || rt.coll.Maps == nil {
 		rt.pressureState = kernelRuntimePressureState{}
 		rt.observability.updatePressure(false, now)
@@ -125,27 +145,16 @@ func (rt *linuxKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRun
 		rt.observability.updatePressure(false, now)
 		return rt.pressureState
 	}
-	if !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
+	if !force && !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
 		return rt.pressureState
 	}
 
-	counts := rt.runtimeMapCounts
-	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), true)
-		rt.runtimeMapCounts = counts
-	}
 	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
-	flowsCapacity := rt.flowsMapCapacity
-	natCapacity := rt.natMapCapacity
-	if rt.coll != nil && rt.coll.Maps != nil {
-		if total := kernelRuntimeFlowMapCapacity(refs); total > 0 {
-			flowsCapacity = total
-		}
-		if total := kernelRuntimeNATMapCapacity(refs); total > 0 {
-			natCapacity = total
-		}
-	}
-	next := buildKernelRuntimePressureState(rt.pressureState.level, counts.flowsEntries, flowsCapacity, counts.natEntries, natCapacity, true)
+	counts := rt.currentRuntimeMapCountsLockedWithForce(now, force)
+	counts = countTCKernelRuntimeMapEntryDetails(now, refs, counts, true)
+	counts = kernelRuntimeCountsForIdleGrowthDecision(refs, counts, true, "kernel dataplane pressure")
+	rt.runtimeMapCounts = counts
+	next := buildKernelRuntimePressureStateFromDetailedCounts(rt.pressureState.level, refs, counts, true)
 	next.sampledAt = now
 	logKernelRuntimePressureTransition(kernelEngineTC, rt.pressureState, next)
 	rt.pressureState = next
@@ -154,6 +163,10 @@ func (rt *linuxKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRun
 }
 
 func (rt *xdpKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRuntimePressureState {
+	return rt.refreshPressureLockedWithForce(now, false)
+}
+
+func (rt *xdpKernelRuleRuntime) refreshPressureLockedWithForce(now time.Time, force bool) kernelRuntimePressureState {
 	if !rt.available || rt.coll == nil || rt.coll.Maps == nil {
 		rt.pressureState = kernelRuntimePressureState{}
 		rt.observability.updatePressure(false, now)
@@ -164,20 +177,17 @@ func (rt *xdpKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRunti
 		rt.observability.updatePressure(false, now)
 		return rt.pressureState
 	}
-	if !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
+	if !force && !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
 		return rt.pressureState
 	}
 
-	counts := rt.runtimeMapCounts
-	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), false)
-		rt.runtimeMapCounts = counts
-	}
-	flowsCapacity := rt.flowsMapCapacity
-	if rt.coll != nil && rt.coll.Maps != nil {
-		flowsCapacity = kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
-	}
-	next := buildKernelRuntimePressureState(rt.pressureState.level, counts.flowsEntries, flowsCapacity, 0, 0, false)
+	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	counts := rt.currentRuntimeMapCountsLockedWithForce(now, force)
+	counts = countXDPKernelRuntimeMapEntryDetails(now, refs, counts)
+	counts = kernelRuntimeCountsForIdleGrowthDecision(refs, counts, false, "xdp dataplane pressure")
+	counts, includeNAT := xdpRuntimeNATStateForDecision(rt.preparedRules, refs, counts, "xdp dataplane pressure")
+	rt.runtimeMapCounts = counts
+	next := buildKernelRuntimePressureStateFromDetailedCounts(rt.pressureState.level, refs, counts, includeNAT)
 	next.sampledAt = now
 	logKernelRuntimePressureTransition(kernelEngineXDP, rt.pressureState, next)
 	rt.pressureState = next
@@ -186,34 +196,146 @@ func (rt *xdpKernelRuleRuntime) refreshPressureLocked(now time.Time) kernelRunti
 }
 
 func buildKernelRuntimePressureState(previousLevel kernelRuntimePressureLevel, flowsEntries int, flowsCapacity int, natEntries int, natCapacity int, includeNAT bool) kernelRuntimePressureState {
-	state := kernelRuntimePressureState{
-		flowsEntries:  flowsEntries,
-		flowsCapacity: flowsCapacity,
-		natEntries:    natEntries,
-		natCapacity:   natCapacity,
-	}
-	flowsLevel := kernelRuntimePressureLevelForUsage(flowsEntries, flowsCapacity, previousLevel)
-	natLevel := kernelRuntimePressureLevelNone
+	flowSamples := []kernelRuntimePressureUsageSample{{
+		label:    "flows",
+		entries:  flowsEntries,
+		capacity: flowsCapacity,
+	}}
+	natSamples := []kernelRuntimePressureUsageSample{}
 	if includeNAT {
-		natLevel = kernelRuntimePressureLevelForUsage(natEntries, natCapacity, previousLevel)
+		natSamples = append(natSamples, kernelRuntimePressureUsageSample{
+			label:    "nat",
+			entries:  natEntries,
+			capacity: natCapacity,
+		})
 	}
+	return buildKernelRuntimePressureStateFromSamples(previousLevel, flowSamples, natSamples)
+}
+
+func buildKernelRuntimePressureStateFromDetailedCounts(previousLevel kernelRuntimePressureLevel, refs kernelRuntimeMapRefs, counts kernelRuntimeMapCountSnapshot, includeNAT bool) kernelRuntimePressureState {
+	flowSamples, natSamples := kernelRuntimePressureSamplesFromDetailedCounts(refs, counts, includeNAT)
+	state := buildKernelRuntimePressureStateFromSamples(previousLevel, flowSamples, natSamples)
+	if state.active {
+		return state
+	}
+
+	flowsCapacity := kernelRuntimeFlowMapCapacity(refs)
+	natCapacity := 0
+	if includeNAT {
+		natCapacity = kernelRuntimeNATMapCapacity(refs)
+	}
+	fallback := buildKernelRuntimePressureState(previousLevel, counts.flowsEntries, flowsCapacity, counts.natEntries, natCapacity, includeNAT)
+	if kernelRuntimePressureLevelRank(fallback.level) > kernelRuntimePressureLevelRank(state.level) {
+		return fallback
+	}
+	if state.flowsCapacity == 0 {
+		state.flowsEntries = counts.flowsEntries
+		state.flowsCapacity = flowsCapacity
+	}
+	if includeNAT && state.natCapacity == 0 {
+		state.natEntries = counts.natEntries
+		state.natCapacity = natCapacity
+	}
+	return state
+}
+
+func buildKernelRuntimePressureStateFromSamples(previousLevel kernelRuntimePressureLevel, flowSamples []kernelRuntimePressureUsageSample, natSamples []kernelRuntimePressureUsageSample) kernelRuntimePressureState {
+	flowsLevel, flowSample := kernelRuntimePressureMaxSample(previousLevel, flowSamples)
+	natLevel, natSample := kernelRuntimePressureMaxSample(previousLevel, natSamples)
 	level := maxKernelRuntimePressureLevel(flowsLevel, natLevel)
+
+	state := kernelRuntimePressureState{
+		flowsEntries:  flowSample.entries,
+		flowsCapacity: flowSample.capacity,
+		natEntries:    natSample.entries,
+		natCapacity:   natSample.capacity,
+	}
 	if !level.active() {
 		return state
 	}
 
 	parts := make([]string, 0, 2)
 	if flowsLevel.active() {
-		parts = append(parts, fmt.Sprintf("flows %s", kernelRuntimePressureUsage(flowsEntries, flowsCapacity)))
+		parts = append(parts, kernelRuntimePressureUsageSampleText(flowSample))
 	}
 	if natLevel.active() {
-		parts = append(parts, fmt.Sprintf("nat %s", kernelRuntimePressureUsage(natEntries, natCapacity)))
+		parts = append(parts, kernelRuntimePressureUsageSampleText(natSample))
 	}
 
 	state.level = level
 	state.active = true
 	state.reason = kernelRuntimePressureReason(level, strings.Join(parts, ", "))
 	return state
+}
+
+func kernelRuntimePressureSamplesFromDetailedCounts(refs kernelRuntimeMapRefs, counts kernelRuntimeMapCountSnapshot, includeNAT bool) ([]kernelRuntimePressureUsageSample, []kernelRuntimePressureUsageSample) {
+	flows := make([]kernelRuntimePressureUsageSample, 0, 2)
+	flowsCapV4, flowsOldCapV4, flowsCapV6, flowsOldCapV6 := kernelRuntimeFlowMapCapacityBreakdown(refs)
+	if capacity := flowsCapV4 + flowsOldCapV4; capacity > 0 {
+		flows = append(flows, kernelRuntimePressureUsageSample{
+			label:    "flows ipv4",
+			entries:  counts.flowsEntriesV4,
+			capacity: capacity,
+		})
+	}
+	if capacity := flowsCapV6 + flowsOldCapV6; capacity > 0 {
+		flows = append(flows, kernelRuntimePressureUsageSample{
+			label:    "flows ipv6",
+			entries:  counts.flowsEntriesV6,
+			capacity: capacity,
+		})
+	}
+
+	nats := make([]kernelRuntimePressureUsageSample, 0, 2)
+	if includeNAT {
+		natCapV4, natOldCapV4, natCapV6, natOldCapV6 := kernelRuntimeNATMapCapacityBreakdown(refs)
+		if capacity := natCapV4 + natOldCapV4; capacity > 0 {
+			nats = append(nats, kernelRuntimePressureUsageSample{
+				label:    "nat ipv4",
+				entries:  counts.natEntriesV4,
+				capacity: capacity,
+			})
+		}
+		if capacity := natCapV6 + natOldCapV6; capacity > 0 {
+			nats = append(nats, kernelRuntimePressureUsageSample{
+				label:    "nat ipv6",
+				entries:  counts.natEntriesV6,
+				capacity: capacity,
+			})
+		}
+	}
+	return flows, nats
+}
+
+func kernelRuntimePressureMaxSample(previousLevel kernelRuntimePressureLevel, samples []kernelRuntimePressureUsageSample) (kernelRuntimePressureLevel, kernelRuntimePressureUsageSample) {
+	bestLevel := kernelRuntimePressureLevelNone
+	bestSample := kernelRuntimePressureUsageSample{}
+	bestUsage := -1.0
+	for _, sample := range samples {
+		level := kernelRuntimePressureLevelForUsage(sample.entries, sample.capacity, previousLevel)
+		usage := kernelRuntimePressureUsageRatio(sample.entries, sample.capacity)
+		if kernelRuntimePressureLevelRank(level) > kernelRuntimePressureLevelRank(bestLevel) ||
+			(kernelRuntimePressureLevelRank(level) == kernelRuntimePressureLevelRank(bestLevel) && usage > bestUsage) {
+			bestLevel = level
+			bestSample = sample
+			bestUsage = usage
+		}
+	}
+	return bestLevel, bestSample
+}
+
+func kernelRuntimePressureUsageSampleText(sample kernelRuntimePressureUsageSample) string {
+	if strings.TrimSpace(sample.label) == "" {
+		return kernelRuntimePressureUsage(sample.entries, sample.capacity)
+	}
+	return fmt.Sprintf("%s %s", sample.label, kernelRuntimePressureUsage(sample.entries, sample.capacity))
+}
+
+func kernelRuntimePressureUsageRatio(entries int, capacity int) float64 {
+	if capacity <= 0 {
+		return 0
+	}
+	return float64(entries) / float64(capacity)
 }
 
 func kernelRuntimePressureReason(level kernelRuntimePressureLevel, usage string) string {

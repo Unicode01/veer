@@ -61,6 +61,15 @@ func managedNetworkRuntimeReloadPostApplySuppressFor(source string) time.Duratio
 	return 0
 }
 
+func managedNetworkRuntimeReloadSourceHonorsSuppression(source string) bool {
+	switch normalizeManagedNetworkRuntimeReloadSource(source) {
+	case "link_change", "addr_change":
+		return true
+	default:
+		return false
+	}
+}
+
 func (pm *ProcessManager) shouldAutoRepairManagedNetworkRuntimeReload(source string) bool {
 	if pm == nil {
 		return false
@@ -190,6 +199,31 @@ func (pm *ProcessManager) filterSuppressedManagedNetworkRuntimeInterfaces(names 
 		return nil
 	}
 	return out
+}
+
+func (pm *ProcessManager) filterSuppressedManagedNetworkRuntimeInterfaceSetLocked(items map[string]struct{}, now time.Time) map[string]struct{} {
+	if pm == nil {
+		return cloneManagedNetworkInterfaceSet(items)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	for name, expiry := range pm.managedRuntimeReloadSuppressUntil {
+		if !expiry.After(now) {
+			delete(pm.managedRuntimeReloadSuppressUntil, name)
+		}
+	}
+	filtered := make(map[string]struct{}, len(items))
+	for name := range items {
+		if until, ok := pm.managedRuntimeReloadSuppressUntil[name]; ok && until.After(now) {
+			continue
+		}
+		filtered[name] = struct{}{}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 func (pm *ProcessManager) requestManagedNetworkRuntimeReloadForRelevantInterfaces(source string, names ...string) bool {

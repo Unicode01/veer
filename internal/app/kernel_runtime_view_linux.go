@@ -202,6 +202,10 @@ func (snapshot kernelRuntimeMapSnapshot) Close() {
 }
 
 func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
+	return pm.snapshotKernelRuntimeWithForce(false)
+}
+
+func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
 		DefaultEngine:   ruleEngineAuto,
 		ConfiguredOrder: defaultKernelEngineOrder(),
@@ -294,7 +298,13 @@ func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
 	resp.LastStatsSnapshotError = pm.kernelStatsLastError
 	pm.mu.Unlock()
 
-	resp.Engines = snapshotKernelRuntimeEngines(pm.kernelRuntime)
+	resp.Engines = snapshotKernelRuntimeEnginesWithForce(pm.kernelRuntime, force)
+	if force {
+		if available, reason, ok := kernelRuntimeAvailabilityFromViews(resp.ConfiguredOrder, resp.Engines); ok {
+			resp.Available = available
+			resp.AvailableReason = reason
+		}
+	}
 	return resp
 }
 
@@ -329,40 +339,52 @@ func countRangePlanFallbacks(plans map[int64]rangeDataplanePlan) (int, int) {
 }
 
 func snapshotKernelRuntimeEngines(rt kernelRuleRuntime) []KernelEngineRuntimeView {
+	return snapshotKernelRuntimeEnginesWithForce(rt, false)
+}
+
+func snapshotKernelRuntimeEnginesWithForce(rt kernelRuleRuntime, force bool) []KernelEngineRuntimeView {
 	switch current := rt.(type) {
 	case *orderedKernelRuleRuntime:
-		return current.snapshotKernelRuntimeEngines()
+		return current.snapshotKernelRuntimeEnginesWithForce(force)
 	case *linuxKernelRuleRuntime:
-		return []KernelEngineRuntimeView{current.snapshotRuntimeView()}
+		return []KernelEngineRuntimeView{current.snapshotRuntimeViewWithForce(force)}
 	case *xdpKernelRuleRuntime:
-		return []KernelEngineRuntimeView{current.snapshotRuntimeView()}
+		return []KernelEngineRuntimeView{current.snapshotRuntimeViewWithForce(force)}
 	default:
 		return []KernelEngineRuntimeView{}
 	}
 }
 
 func (rt *orderedKernelRuleRuntime) snapshotKernelRuntimeEngines() []KernelEngineRuntimeView {
+	return rt.snapshotKernelRuntimeEnginesWithForce(false)
+}
+
+func (rt *orderedKernelRuleRuntime) snapshotKernelRuntimeEnginesWithForce(force bool) []KernelEngineRuntimeView {
 	rt.mu.Lock()
 	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
 	rt.mu.Unlock()
 
 	views := make([]KernelEngineRuntimeView, 0, len(entries))
 	for _, entry := range entries {
-		views = append(views, snapshotKernelEngineRuntimeView(entry.name, entry.rt))
+		views = append(views, snapshotKernelEngineRuntimeViewWithForce(entry.name, entry.rt, force))
 	}
 	return views
 }
 
 func snapshotKernelEngineRuntimeView(name string, rt kernelRuleRuntime) KernelEngineRuntimeView {
+	return snapshotKernelEngineRuntimeViewWithForce(name, rt, false)
+}
+
+func snapshotKernelEngineRuntimeViewWithForce(name string, rt kernelRuleRuntime, force bool) KernelEngineRuntimeView {
 	switch current := rt.(type) {
 	case *linuxKernelRuleRuntime:
-		view := current.snapshotRuntimeView()
+		view := current.snapshotRuntimeViewWithForce(force)
 		if view.Name == "" {
 			view.Name = name
 		}
 		return view
 	case *xdpKernelRuleRuntime:
-		view := current.snapshotRuntimeView()
+		view := current.snapshotRuntimeViewWithForce(force)
 		if view.Name == "" {
 			view.Name = name
 		}
@@ -381,6 +403,59 @@ func snapshotKernelEngineRuntimeView(name string, rt kernelRuleRuntime) KernelEn
 	}
 }
 
+func kernelRuntimeAvailabilityFromViews(order []string, views []KernelEngineRuntimeView) (bool, string, bool) {
+	if len(views) == 0 {
+		return false, "", false
+	}
+
+	byName := make(map[string]KernelEngineRuntimeView, len(views))
+	for _, view := range views {
+		name := strings.TrimSpace(view.Name)
+		if name == "" {
+			continue
+		}
+		byName[name] = view
+	}
+
+	ordered := normalizeKernelEngineOrder(order)
+	if len(ordered) == 0 {
+		for _, view := range views {
+			if strings.TrimSpace(view.Name) != "" {
+				ordered = append(ordered, view.Name)
+			}
+		}
+	}
+	if len(ordered) == 0 {
+		return false, "", false
+	}
+
+	failures := make([]string, 0, len(ordered))
+	for _, name := range ordered {
+		view, ok := byName[name]
+		if !ok {
+			continue
+		}
+		reason := strings.TrimSpace(view.AvailableReason)
+		if view.Available {
+			if reason == "" {
+				reason = "ready"
+			}
+			if len(failures) > 0 {
+				return true, fmt.Sprintf("selected %s kernel engine: %s (skipped: %s)", name, reason, strings.Join(failures, "; ")), true
+			}
+			return true, fmt.Sprintf("selected %s kernel engine: %s", name, reason), true
+		}
+		if reason == "" {
+			reason = "unavailable"
+		}
+		failures = append(failures, fmt.Sprintf("%s=%s", name, reason))
+	}
+	if len(failures) == 0 {
+		return false, "", false
+	}
+	return false, "no kernel dataplane engines available: " + strings.Join(failures, "; "), true
+}
+
 func applyKernelRuntimePressureView(view *KernelEngineRuntimeView, pressure kernelRuntimePressureState) {
 	if view == nil || !pressure.level.active() {
 		return
@@ -390,13 +465,45 @@ func applyKernelRuntimePressureView(view *KernelEngineRuntimeView, pressure kern
 	view.PressureReason = pressure.reason
 }
 
+func overrideKernelRuntimePressureView(view *KernelEngineRuntimeView, pressure kernelRuntimePressureState) {
+	if view == nil {
+		return
+	}
+	view.PressureActive = false
+	view.PressureLevel = ""
+	view.PressureReason = ""
+	applyKernelRuntimePressureView(view, pressure)
+}
+
+func overrideKernelRuntimeAvailabilityView(view *KernelEngineRuntimeView, runtimeAvailable bool, runtimeReason string, pressure kernelRuntimePressureState) {
+	if view == nil {
+		return
+	}
+	view.Available = runtimeAvailable
+	view.AvailableReason = runtimeReason
+	if runtimeAvailable && pressure.level.blocksKernelAvailability() {
+		view.Available = false
+		view.AvailableReason = pressure.reason
+	}
+}
+
+func kernelRuntimePressureStateForRuntimeView(previousLevel kernelRuntimePressureLevel, refs kernelRuntimeMapRefs, counts kernelRuntimeMapCountSnapshot, includeNAT bool) kernelRuntimePressureState {
+	return buildKernelRuntimePressureStateFromDetailedCounts(previousLevel, refs, counts, includeNAT)
+}
+
 func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
+	return rt.snapshotRuntimeViewWithForce(false)
+}
+
+func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) KernelEngineRuntimeView {
 	now := time.Now()
 	rt.mu.Lock()
-	available, reason := rt.currentAvailabilityLocked(now)
+	available, reason := rt.currentAvailabilityLockedWithForce(now, force)
+	runtimeAvailable := rt.available
+	runtimeAvailableReason := rt.availableReason
 	pressure := rt.pressureState
 	actualCapacities := rt.currentMapCapacitiesLocked()
-	counts := rt.currentRuntimeMapCountsLocked(now)
+	counts := rt.currentRuntimeMapCountsLockedWithForce(now, force)
 	degraded := tcKernelRuntimeDegradedState(
 		len(rt.preparedRules),
 		actualCapacities,
@@ -464,6 +571,11 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 		applyKernelRuntimeMapCounts(&view, counts, true)
 		applyKernelRuntimeMapBreakdown(&view, mapSnapshot.refs, counts, true)
 		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiagFromMap(mapSnapshot.diag))
+		if force {
+			forcedPressure := kernelRuntimePressureStateForRuntimeView(pressure.level, mapSnapshot.refs, counts, true)
+			overrideKernelRuntimePressureView(&view, forcedPressure)
+			overrideKernelRuntimeAvailabilityView(&view, runtimeAvailable, runtimeAvailableReason, forcedPressure)
+		}
 	} else if strings.TrimSpace(view.DiagSnapshotError) == "" {
 		view.DiagSnapshotError = mapErr.Error()
 	}
@@ -472,13 +584,20 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 }
 
 func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
+	return rt.snapshotRuntimeViewWithForce(false)
+}
+
+func (rt *xdpKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) KernelEngineRuntimeView {
 	now := time.Now()
 	rt.mu.Lock()
-	available, reason := rt.currentAvailabilityLocked(now)
+	available, reason := rt.currentAvailabilityLockedWithForce(now, force)
+	runtimeAvailable := rt.available
+	runtimeAvailableReason := rt.availableReason
 	pressure := rt.pressureState
 	actualCapacities := rt.currentMapCapacitiesLocked()
-	counts := rt.currentRuntimeMapCountsLocked(now)
-	degraded := xdpKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, counts, rt.rulesMapLimit, rt.flowsMapLimit, rt.degradedSource)
+	counts := rt.currentRuntimeMapCountsLockedWithForce(now, force)
+	counts, useNATMaps := xdpRuntimeNATStateForDecision(rt.preparedRules, kernelRuntimeMapRefsFromCollection(rt.coll), counts, "xdp dataplane runtime view")
+	degraded := xdpKernelRuntimeDegradedState(len(rt.preparedRules), actualCapacities, counts, rt.rulesMapLimit, rt.flowsMapLimit, rt.natMapLimit, useNATMaps, rt.degradedSource)
 	rt.observability.updateDegraded(degraded.active, now)
 	obs := rt.observability.snapshot()
 
@@ -495,6 +614,9 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 		FlowsMapCapacity:  actualCapacities.Flows,
 		LastReconcileMode: rt.lastReconcileMode,
 		TrafficStats:      rt.prepareOptions.enableTrafficStats,
+	}
+	if useNATMaps {
+		view.NATMapCapacity = actualCapacities.NATPorts
 	}
 	applyKernelRuntimePressureView(&view, pressure)
 	applyKernelRuntimeObservabilityView(&view, obs)
@@ -516,15 +638,20 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 	applyKernelRuntimeObservabilityView(&view, rt.observability.snapshot())
 	rt.mu.Unlock()
 
-	applyKernelRuntimeMapCounts(&view, counts, false)
+	applyKernelRuntimeMapCounts(&view, counts, useNATMaps)
 	if mapErr == nil {
 		if !counts.detailsFresh(now) {
 			counts = countXDPKernelRuntimeMapEntryDetails(now, mapSnapshot.refs, counts)
 			rt.updateRuntimeMapCountCache(mapSnapshot.source, counts)
 		}
-		applyKernelRuntimeMapCounts(&view, counts, false)
-		applyKernelRuntimeMapBreakdown(&view, mapSnapshot.refs, counts, false)
+		applyKernelRuntimeMapCounts(&view, counts, useNATMaps)
+		applyKernelRuntimeMapBreakdown(&view, mapSnapshot.refs, counts, useNATMaps)
 		applyKernelRuntimeDiagView(&view, snapshotKernelRuntimeDiagFromMap(mapSnapshot.diag))
+		if force {
+			forcedPressure := kernelRuntimePressureStateForRuntimeView(pressure.level, mapSnapshot.refs, counts, useNATMaps)
+			overrideKernelRuntimePressureView(&view, forcedPressure)
+			overrideKernelRuntimeAvailabilityView(&view, runtimeAvailable, runtimeAvailableReason, forcedPressure)
+		}
 	} else if strings.TrimSpace(view.DiagSnapshotError) == "" {
 		view.DiagSnapshotError = mapErr.Error()
 	}
@@ -1276,16 +1403,17 @@ func kernelRuntimeFlowMapCapacities(refs kernelRuntimeMapRefs) (int, int) {
 
 func kernelRuntimeNATMapCapacityBreakdown(refs kernelRuntimeMapRefs) (int, int, int, int) {
 	tcFlags := kernelRuntimeTCOldFlowMigrationFlags(refs)
+	xdpFlags := kernelRuntimeXDPOldFlowMigrationFlags(refs)
 
 	activeV4 := kernelRuntimeMapCapacity(refs.natV4)
 	oldV4 := 0
-	if tcFlags&tcFlowMigrationFlagV4Old != 0 {
+	if tcFlags&tcFlowMigrationFlagV4Old != 0 || xdpFlags&xdpFlowMigrationFlagV4Old != 0 {
 		oldV4 = kernelRuntimeMapCapacity(refs.natOldV4)
 	}
 
 	activeV6 := kernelRuntimeMapCapacity(refs.natV6)
 	oldV6 := 0
-	if tcFlags&tcFlowMigrationFlagV6Old != 0 {
+	if tcFlags&tcFlowMigrationFlagV6Old != 0 || xdpFlags&xdpFlowMigrationFlagV6Old != 0 {
 		oldV6 = kernelRuntimeMapCapacity(refs.natOldV6)
 	}
 
@@ -1326,7 +1454,7 @@ func firstNonNilMap(maps ...*ebpf.Map) *ebpf.Map {
 func countKernelRuntimeFlowEntriesExact(refs kernelRuntimeMapRefs) (int, error) {
 	total := 0
 	if refs.flowsV4 != nil {
-		count, err := countKernelFlowMapEntries(refs.flowsV4)
+		count, err := countKernelRuntimeFlowEntriesExactV4(refs.flowsV4)
 		if err != nil {
 			return 0, err
 		}
@@ -1340,7 +1468,7 @@ func countKernelRuntimeFlowEntriesExact(refs kernelRuntimeMapRefs) (int, error) 
 		total += count
 	}
 	if refs.flowsOldV4 != nil {
-		count, err := countKernelFlowMapEntries(refs.flowsOldV4)
+		count, err := countKernelRuntimeFlowEntriesExactV4(refs.flowsOldV4)
 		if err != nil {
 			return 0, err
 		}
@@ -1354,6 +1482,21 @@ func countKernelRuntimeFlowEntriesExact(refs kernelRuntimeMapRefs) (int, error) 
 		total += count
 	}
 	return total, nil
+}
+
+func countKernelRuntimeFlowEntriesExactV4(m *ebpf.Map) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	count, kernelErr := countKernelFlowMapEntries(m)
+	if kernelErr == nil {
+		return count, nil
+	}
+	count, xdpErr := countXDPFlowMapEntries(m)
+	if xdpErr == nil {
+		return count, nil
+	}
+	return 0, fmt.Errorf("count runtime ipv4 flow map entries: tc decode failed: %v; xdp decode failed: %w", kernelErr, xdpErr)
 }
 
 func countKernelRuntimeNATEntriesExact(refs kernelRuntimeMapRefs) (int, error) {
@@ -1570,9 +1713,47 @@ func countXDPKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRe
 		counts.flowsEntries = flowsTotal
 	}
 
-	counts.natEntries = 0
-	counts.natEntriesV4 = 0
-	counts.natEntriesV6 = 0
+	natExact := true
+	natTotal := 0
+	if refs.natV4 == nil {
+		counts.natEntriesV4 = 0
+	} else if count, err := countKernelNATMapEntries(refs.natV4); err == nil {
+		counts.natEntriesV4 = count
+		natTotal += count
+	} else {
+		natExact = false
+		exact = false
+	}
+	if refs.natOldV4 != nil {
+		if count, err := countKernelNATMapEntries(refs.natOldV4); err == nil {
+			counts.natEntriesV4 += count
+			natTotal += count
+		} else {
+			natExact = false
+			exact = false
+		}
+	}
+	if refs.natV6 == nil {
+		counts.natEntriesV6 = 0
+	} else if count, err := countKernelNATMapEntriesV6(refs.natV6); err == nil {
+		counts.natEntriesV6 = count
+		natTotal += count
+	} else {
+		natExact = false
+		exact = false
+	}
+	if refs.natOldV6 != nil {
+		if count, err := countKernelNATMapEntriesV6(refs.natOldV6); err == nil {
+			counts.natEntriesV6 += count
+			natTotal += count
+		} else {
+			natExact = false
+			exact = false
+		}
+	}
+	if refs.hasNAT() && natExact {
+		counts.natEntries = natTotal
+	}
 
 	if exact {
 		counts.detailSampledAt = now
@@ -1638,11 +1819,15 @@ func kernelRuntimeMapRefsEqual(a, b kernelRuntimeMapRefs) bool {
 }
 
 func (rt *linuxKernelRuleRuntime) currentRuntimeMapCountsLocked(now time.Time) kernelRuntimeMapCountSnapshot {
+	return rt.currentRuntimeMapCountsLockedWithForce(now, false)
+}
+
+func (rt *linuxKernelRuleRuntime) currentRuntimeMapCountsLockedWithForce(now time.Time, force bool) kernelRuntimeMapCountSnapshot {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	counts := rt.runtimeMapCounts
-	if !counts.fresh(now) {
+	if force || !counts.fresh(now) {
 		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), true)
 		rt.runtimeMapCounts = counts
 	}
@@ -1650,12 +1835,16 @@ func (rt *linuxKernelRuleRuntime) currentRuntimeMapCountsLocked(now time.Time) k
 }
 
 func (rt *xdpKernelRuleRuntime) currentRuntimeMapCountsLocked(now time.Time) kernelRuntimeMapCountSnapshot {
+	return rt.currentRuntimeMapCountsLockedWithForce(now, false)
+}
+
+func (rt *xdpKernelRuleRuntime) currentRuntimeMapCountsLockedWithForce(now time.Time, force bool) kernelRuntimeMapCountSnapshot {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	counts := rt.runtimeMapCounts
-	if !counts.fresh(now) {
-		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), false)
+	if force || !counts.fresh(now) {
+		counts = countKernelRuntimeMapEntries(now, kernelRuntimeMapRefsFromCollection(rt.coll), counts, nil, len(rt.preparedRules), true)
 		rt.runtimeMapCounts = counts
 	}
 	return counts

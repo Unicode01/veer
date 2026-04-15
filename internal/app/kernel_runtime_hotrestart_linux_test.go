@@ -636,6 +636,68 @@ func TestLoadXDPKernelHotRestartStatePromotesActiveMapsToOldBank(t *testing.T) {
 	}
 }
 
+func TestLoadXDPKernelHotRestartStatePromotesActiveIPv6NATMapsToOldBank(t *testing.T) {
+	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
+	runtimeRoot := t.TempDir()
+	t.Setenv(forwardBPFStateDirEnv, bpfRoot)
+	t.Setenv(forwardRuntimeStateDirEnv, runtimeRoot)
+	clearKernelHotRestartState(kernelEngineXDP)
+	t.Cleanup(func() { clearKernelHotRestartState(kernelEngineXDP) })
+
+	flowsV6 := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapNameV6,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV6{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV6{})),
+		MaxEntries: 64,
+	})
+	natV6 := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapNameV6,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV6{})),
+		ValueSize:  4,
+		MaxEntries: 32,
+	})
+	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelStatsMapName,
+		Type:       ebpf.PerCPUHash,
+		KeySize:    4,
+		ValueSize:  uint32(unsafe.Sizeof(kernelStatsValueV4{})),
+		MaxEntries: 128,
+	})
+	if err := pinKernelHotRestartMaps(kernelEngineXDP, map[string]*ebpf.Map{
+		kernelFlowsMapNameV6:    flowsV6,
+		kernelNatPortsMapNameV6: natV6,
+		kernelStatsMapName:      stats,
+	}); err != nil {
+		t.Fatalf("pinKernelHotRestartMaps() error = %v", err)
+	}
+	meta := kernelHotRestartMetadataWithABI(kernelHotRestartXDPMetadata(nil, "old-object"), kernelXDPHotRestartCompatToken(false))
+	if err := writeKernelHotRestartMetadata(kernelEngineXDP, meta); err != nil {
+		t.Fatalf("writeKernelHotRestartMetadata() error = %v", err)
+	}
+
+	desired := kernelMapCapacities{Rules: 128, Flows: 128, NATPorts: 128}
+	state, err := loadXDPKernelHotRestartState(desired, kernelXDPHotRestartValidationOptions("new-object", false))
+	if err != nil {
+		t.Fatalf("loadXDPKernelHotRestartState() error = %v", err)
+	}
+	if state == nil {
+		t.Fatal("loadXDPKernelHotRestartState() = nil, want promoted IPv6 old-bank state")
+	}
+	defer state.close()
+
+	if state.xdpFlowMigrationFlags != xdpFlowMigrationFlagV6Old {
+		t.Fatalf("xdpFlowMigrationFlags = %#x, want %#x", state.xdpFlowMigrationFlags, xdpFlowMigrationFlagV6Old)
+	}
+	if state.replacements[kernelXDPFlowsOldMapNameV6] == nil || state.replacements[kernelTCNatPortsOldMapNameV6] == nil {
+		t.Fatalf("replacements = %v, want promoted IPv6 old-bank flow/nat maps", state.replacementMapNames())
+	}
+	if state.replacements[kernelFlowsMapNameV6] != nil || state.replacements[kernelNatPortsMapNameV6] != nil {
+		t.Fatalf("replacements = %v, want fresh active IPv6 flow/nat maps after promotion", state.replacementMapNames())
+	}
+}
+
 func TestLoadXDPKernelHotRestartStateKeepsExistingXDPBanks(t *testing.T) {
 	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
 	runtimeRoot := t.TempDir()
@@ -702,6 +764,44 @@ func TestLoadXDPKernelHotRestartStateKeepsExistingXDPBanks(t *testing.T) {
 	if state.actualCapacities.Flows != 64 {
 		t.Fatalf("actualCapacities.Flows = %d, want 64", state.actualCapacities.Flows)
 	}
+}
+
+func TestLoadXDPKernelHotRestartStateRejectsOrphanOldNATBank(t *testing.T) {
+	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
+	runtimeRoot := t.TempDir()
+	t.Setenv(forwardBPFStateDirEnv, bpfRoot)
+	t.Setenv(forwardRuntimeStateDirEnv, runtimeRoot)
+	clearKernelHotRestartState(kernelEngineXDP)
+	t.Cleanup(func() { clearKernelHotRestartState(kernelEngineXDP) })
+
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 64,
+	})
+	natOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCNatPortsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 32,
+	})
+	if err := pinKernelHotRestartMaps(kernelEngineXDP, map[string]*ebpf.Map{
+		kernelFlowsMapName:           flows,
+		kernelTCNatPortsOldMapNameV4: natOld,
+	}); err != nil {
+		t.Fatalf("pinKernelHotRestartMaps() error = %v", err)
+	}
+	meta := kernelHotRestartMetadataWithABI(kernelHotRestartXDPMetadata(nil, "old-object"), kernelXDPHotRestartCompatToken(false))
+	if err := writeKernelHotRestartMetadata(kernelEngineXDP, meta); err != nil {
+		t.Fatalf("writeKernelHotRestartMetadata() error = %v", err)
+	}
+
+	desired := kernelMapCapacities{Rules: 128, Flows: 128}
+	_, err := loadXDPKernelHotRestartState(desired, kernelXDPHotRestartValidationOptions("new-object", false))
+	assertKernelHotRestartIncompatible(t, err)
 }
 
 func TestXDPOldFlowMigrationFlagsFromRuntimeMapRefsTracksOldBankOccupancy(t *testing.T) {
@@ -837,6 +937,20 @@ func TestKernelRuntimeFlowMapCapacityUsesXDPMigrationState(t *testing.T) {
 		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
 		MaxEntries: 32,
 	})
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 40,
+	})
+	natOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCNatPortsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 20,
+	})
 	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
 		Name:       kernelXDPFlowMigrationStateMapName,
 		Type:       ebpf.Array,
@@ -848,6 +962,8 @@ func TestKernelRuntimeFlowMapCapacityUsesXDPMigrationState(t *testing.T) {
 	refs := kernelRuntimeMapRefs{
 		flowsV4:               flows,
 		flowsOldV4:            flowsOld,
+		natV4:                 nat,
+		natOldV4:              natOld,
 		xdpFlowMigrationState: flowState,
 	}
 
@@ -860,11 +976,14 @@ func TestKernelRuntimeFlowMapCapacityUsesXDPMigrationState(t *testing.T) {
 	if got := kernelRuntimeFlowMapCapacity(refs); got != 96 {
 		t.Fatalf("kernelRuntimeFlowMapCapacity(active xdp old bank) = %d, want 96", got)
 	}
+	if got := kernelRuntimeNATMapCapacity(refs); got != 60 {
+		t.Fatalf("kernelRuntimeNATMapCapacity(active xdp old bank) = %d, want 60", got)
+	}
 
 	var view KernelEngineRuntimeView
-	applyKernelRuntimeMapBreakdown(&view, refs, kernelRuntimeMapCountSnapshot{}, false)
-	if view.FlowsMapCapacityV4 != 64 || view.FlowsMapOldCapacityV4 != 32 {
-		t.Fatalf("active xdp old-bank breakdown = %+v, want flow_v4=64 flow_old_v4=32", view)
+	applyKernelRuntimeMapBreakdown(&view, refs, kernelRuntimeMapCountSnapshot{}, true)
+	if view.FlowsMapCapacityV4 != 64 || view.FlowsMapOldCapacityV4 != 32 || view.NATMapCapacityV4 != 40 || view.NATMapOldCapacityV4 != 20 {
+		t.Fatalf("active xdp old-bank breakdown = %+v, want flow_v4=64 flow_old_v4=32 nat_v4=40 nat_old_v4=20", view)
 	}
 }
 

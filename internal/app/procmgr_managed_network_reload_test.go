@@ -37,6 +37,26 @@ func (rt *orderedManagedNetworkRuntime) Close() error {
 	return nil
 }
 
+type requeueManagedNetworkRuntime struct {
+	fakeManagedNetworkRuntime
+	pm        *ProcessManager
+	source    string
+	names     []string
+	queueOnce sync.Once
+}
+
+func (rt *requeueManagedNetworkRuntime) Reconcile(items []ManagedNetwork, reservations []ManagedNetworkReservation) error {
+	if err := rt.fakeManagedNetworkRuntime.Reconcile(items, reservations); err != nil {
+		return err
+	}
+	rt.queueOnce.Do(func() {
+		if rt.pm != nil {
+			rt.pm.requestManagedNetworkRuntimeReloadWithSource(0, rt.source, rt.names...)
+		}
+	})
+	return nil
+}
+
 func TestReloadManagedNetworkRuntimeOnlyRetainsKernelRulesWhileRefreshingManagedAutoEgressNAT(t *testing.T) {
 	db := openTestDB(t)
 
@@ -403,6 +423,69 @@ func TestManagedRuntimeReloadLoopLinkChangeExtendsInterfaceSuppression(t *testin
 	}
 	if !bridgeSuppressUntil.After(minExpected) {
 		t.Fatalf("vmbr1 suppress until = %v, want after %v", bridgeSuppressUntil, minExpected)
+	}
+}
+
+func TestManagedRuntimeReloadLoopDropsQueuedSuppressedLinkChangeReload(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := dbAddManagedNetwork(db, &ManagedNetwork{
+		Name:          "lab",
+		BridgeMode:    managedNetworkBridgeModeCreate,
+		Bridge:        "vmbr1",
+		IPv4Enabled:   true,
+		IPv4CIDR:      "192.0.2.1/24",
+		IPv4PoolEnd:   "192.0.2.20",
+		IPv4PoolStart: "192.0.2.10",
+		Enabled:       true,
+	}); err != nil {
+		t.Fatalf("dbAddManagedNetwork() error = %v", err)
+	}
+
+	fakeManagedRuntime := &requeueManagedNetworkRuntime{
+		source: "link_change",
+		names:  []string{"tap100i0", "vmbr1"},
+	}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                                db,
+		cfg:                               &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:             fakeManagedRuntime,
+		ipv6Runtime:                       fakeIPv6Runtime,
+		shutdownCh:                        make(chan struct{}),
+		managedRuntimeReloadWake:          make(chan struct{}, 1),
+		managedRuntimeReloadDone:          make(chan struct{}),
+		managedRuntimeReloadSuppressUntil: make(map[string]time.Time),
+		redistributeWake:                  make(chan struct{}, 1),
+	}
+	fakeManagedRuntime.pm = pm
+
+	go pm.managedRuntimeReloadLoop()
+	t.Cleanup(func() {
+		pm.beginShutdown()
+		if !waitForStopChannel(pm.managedRuntimeReloadDone, time.Second) {
+			t.Fatal("managedRuntimeReloadDone did not close during cleanup")
+		}
+	})
+
+	pm.requestManagedNetworkRuntimeReloadWithSource(0, "link_change", "tap100i0", "vmbr1")
+
+	waitForManagedNetworkReloadCondition(t, 2*time.Second, func() bool {
+		status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+		return status.LastResult == "success" && fakeManagedRuntime.reconcileCalls == 1 && !status.Pending
+	}, "managed runtime reload success without replaying suppressed queued link-change reload")
+
+	time.Sleep(200 * time.Millisecond)
+
+	status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+	if status.Pending {
+		t.Fatal("Pending = true, want false after dropping suppressed queued reload")
+	}
+	if fakeManagedRuntime.reconcileCalls != 1 {
+		t.Fatalf("managed runtime reconcileCalls = %d, want 1 after dropping suppressed queued reload", fakeManagedRuntime.reconcileCalls)
+	}
+	if fakeIPv6Runtime.reconcileCalls != 1 {
+		t.Fatalf("ipv6 runtime reconcileCalls = %d, want 1 after dropping suppressed queued reload", fakeIPv6Runtime.reconcileCalls)
 	}
 }
 
