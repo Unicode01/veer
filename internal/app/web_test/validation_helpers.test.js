@@ -1192,7 +1192,7 @@ function createHarness() {
     console
   });
 
-  const baseDir = __dirname;
+  const baseDir = path.join(__dirname, '..', 'web', 'js');
   loadScript(context, path.join(baseDir, 'rules.js'));
   loadScript(context, path.join(baseDir, 'sites.js'));
   loadScript(context, path.join(baseDir, 'ranges.js'));

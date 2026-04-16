@@ -1467,7 +1467,9 @@
     const degradedSummary = kernelRuntimeDegradedSummaryText(engines);
     appendKernelRuntimeNote(
       el.kernelRuntimeSummary,
-      kernelRuntimeNoteSpec('degraded_summary', app.t('kernel.summary.degraded') + ': ' + degradedSummary),
+      degradedSummary
+        ? kernelRuntimeNoteSpec('degraded_summary', app.t('kernel.summary.degraded') + ': ' + degradedSummary)
+        : null,
       activeKernelRuntimeNotes
     );
     const xdpAttachmentModeNote = kernelRuntimeXDPAttachmentModeNote(engines);
