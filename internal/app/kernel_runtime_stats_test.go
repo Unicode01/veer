@@ -271,6 +271,56 @@ func TestKernelLiveStatsCorrectionTracksProtocolSpecificCounts(t *testing.T) {
 	}
 }
 
+func TestReconcileKernelStatsCorrectionFromCandidates(t *testing.T) {
+	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelStatsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    4,
+		ValueSize:  uint32(unsafe.Sizeof(kernelStatsValueV4{})),
+		MaxEntries: 32,
+	})
+
+	for ruleID, value := range map[uint32]kernelStatsValueV4{
+		1:  {TCPActiveConns: 10},
+		2:  {UDPNatEntries: 4},
+		99: {TCPActiveConns: 30},
+	} {
+		if err := stats.Put(ruleID, value); err != nil {
+			t.Fatalf("stats.Put(%d) error = %v", ruleID, err)
+		}
+	}
+
+	live := map[uint32]kernelStatsValueV4{
+		1: {TCPActiveConns: 3},
+		3: {TCPActiveConns: 2},
+	}
+	current := map[uint32]kernelRuleStats{
+		2: {UDPNatEntries: -1},
+	}
+
+	got, err := reconcileKernelStatsCorrectionFromCandidates(stats, live, current)
+	if err != nil {
+		t.Fatalf("reconcileKernelStatsCorrectionFromCandidates() error = %v", err)
+	}
+
+	want := map[uint32]kernelRuleStats{
+		1: {TCPActiveConns: -7},
+		2: {UDPNatEntries: -4},
+		3: {TCPActiveConns: 2},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("reconcileKernelStatsCorrectionFromCandidates() len = %d, want %d", len(got), len(want))
+	}
+	for ruleID, expected := range want {
+		if got[ruleID] != expected {
+			t.Fatalf("reconcileKernelStatsCorrectionFromCandidates()[%d] = %+v, want %+v", ruleID, got[ruleID], expected)
+		}
+	}
+	if _, ok := got[99]; ok {
+		t.Fatal("reconcileKernelStatsCorrectionFromCandidates() unexpectedly included non-candidate rule 99")
+	}
+}
+
 func TestMergeKernelStatsCorrectionsIncludesICMP(t *testing.T) {
 	dst := map[uint32]kernelRuleStats{
 		9: {
@@ -305,6 +355,40 @@ func TestMergeKernelStatsCorrectionsIncludesICMP(t *testing.T) {
 	}
 	if got := dst[9]; got != want {
 		t.Fatalf("mergeKernelStatsCorrections()[9] = %+v, want %+v", got, want)
+	}
+}
+
+func TestPruneOrphanKernelNATReservationsTracksRemainingEntries(t *testing.T) {
+	nat := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelNatPortsMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+		ValueSize:  4,
+		MaxEntries: 16,
+	})
+
+	usedKey := tcNATPortKeyV4{IfIndex: 2, NATAddr: 3, NATPort: 4, Proto: unix.IPPROTO_TCP}
+	staleKey := tcNATPortKeyV4{IfIndex: 5, NATAddr: 6, NATPort: 7, Proto: unix.IPPROTO_UDP}
+	for _, key := range []tcNATPortKeyV4{usedKey, staleKey} {
+		if err := nat.Put(key, uint32(1)); err != nil {
+			t.Fatalf("nat.Put(%+v) error = %v", key, err)
+		}
+	}
+
+	remaining, deleted, err := pruneOrphanKernelNATReservations(nat, map[tcNATPortKeyV4]struct{}{usedKey: {}})
+	if err != nil {
+		t.Fatalf("pruneOrphanKernelNATReservations() error = %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining = %d, want 1", remaining)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+	if count, err := countKernelNATMapEntries(nat); err != nil {
+		t.Fatalf("countKernelNATMapEntries() error = %v", err)
+	} else if count != 1 {
+		t.Fatalf("countKernelNATMapEntries() = %d, want 1", count)
 	}
 }
 

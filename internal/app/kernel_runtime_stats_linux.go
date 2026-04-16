@@ -263,6 +263,35 @@ func snapshotKernelStatsValues(statsMap *ebpf.Map) (map[uint32]kernelStatsValueV
 	return out, nil
 }
 
+func lookupKernelStatsValue(statsMap *ebpf.Map, ruleID uint32) (kernelStatsValueV4, bool, error) {
+	if statsMap == nil {
+		return kernelStatsValueV4{}, false, nil
+	}
+	if kernelMapHasPerCPUValue(statsMap.Type()) {
+		possibleCPUs, err := kernelPossibleCPUCount()
+		if err != nil {
+			return kernelStatsValueV4{}, false, fmt.Errorf("resolve possible cpu count for kernel stats lookup: %w", err)
+		}
+		values := make([]kernelStatsValueV4, possibleCPUs)
+		if err := statsMap.Lookup(&ruleID, values); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				return kernelStatsValueV4{}, false, nil
+			}
+			return kernelStatsValueV4{}, false, fmt.Errorf("lookup kernel stats for rule %d: %w", ruleID, err)
+		}
+		return aggregateKernelPerCPUStats(values), true, nil
+	}
+
+	var value kernelStatsValueV4
+	if err := statsMap.Lookup(&ruleID, &value); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return kernelStatsValueV4{}, false, nil
+		}
+		return kernelStatsValueV4{}, false, fmt.Errorf("lookup kernel stats for rule %d: %w", ruleID, err)
+	}
+	return value, true, nil
+}
+
 func copyKernelStatsMap(dst *ebpf.Map, src *ebpf.Map) error {
 	if dst == nil || src == nil {
 		return nil
@@ -675,6 +704,34 @@ func reconcileKernelStatsCorrectionFromSnapshot(statsMap *ebpf.Map, live map[uin
 	return kernelLiveStatsCorrection(observed, live), nil
 }
 
+func reconcileKernelStatsCorrectionFromCandidates(statsMap *ebpf.Map, live map[uint32]kernelStatsValueV4, current map[uint32]kernelRuleStats) (map[uint32]kernelRuleStats, error) {
+	candidates := make(map[uint32]struct{}, len(live)+len(current))
+	for ruleID := range live {
+		candidates[ruleID] = struct{}{}
+	}
+	for ruleID, correction := range current {
+		if correction.TCPActiveConns == 0 && correction.UDPNatEntries == 0 && correction.ICMPNatEntries == 0 {
+			continue
+		}
+		candidates[ruleID] = struct{}{}
+	}
+	if len(candidates) == 0 {
+		return map[uint32]kernelRuleStats{}, nil
+	}
+
+	observed := make(map[uint32]kernelStatsValueV4, len(candidates))
+	for ruleID := range candidates {
+		value, ok, err := lookupKernelStatsValue(statsMap, ruleID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			observed[ruleID] = value
+		}
+	}
+	return kernelLiveStatsCorrection(observed, live), nil
+}
+
 func syncKernelLiveStatsCorrections(dst map[uint32]kernelRuleStats, exact map[uint32]kernelRuleStats) {
 	if dst == nil {
 		return
@@ -717,62 +774,66 @@ func kernelStatsCorrectionsEqual(a map[uint32]kernelRuleStats, b map[uint32]kern
 	return true
 }
 
-func pruneOrphanKernelNATReservations(natPortsMap *ebpf.Map, used map[tcNATPortKeyV4]struct{}) (int, error) {
+func pruneOrphanKernelNATReservations(natPortsMap *ebpf.Map, used map[tcNATPortKeyV4]struct{}) (int, int, error) {
 	if natPortsMap == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	iter := natPortsMap.Iterate()
 	var staleKeys []tcNATPortKeyV4
 	var key tcNATPortKeyV4
 	var value uint32
+	remaining := 0
 	for iter.Next(&key, &value) {
 		if _, ok := used[key]; ok {
+			remaining++
 			continue
 		}
 		staleKeys = append(staleKeys, key)
 	}
 	if err := iter.Err(); err != nil {
-		return 0, fmt.Errorf("iterate kernel nat map: %w", err)
+		return 0, 0, fmt.Errorf("iterate kernel nat map: %w", err)
 	}
 
 	deleted := 0
 	for _, item := range staleKeys {
 		if err := natPortsMap.Delete(item); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return deleted, fmt.Errorf("delete orphan nat reservation: %w", err)
+			return remaining, deleted, fmt.Errorf("delete orphan nat reservation: %w", err)
 		}
 		deleted++
 	}
-	return deleted, nil
+	return remaining, deleted, nil
 }
 
-func pruneOrphanKernelNATReservationsV6(natPortsMap *ebpf.Map, used map[tcNATPortKeyV6]struct{}) (int, error) {
+func pruneOrphanKernelNATReservationsV6(natPortsMap *ebpf.Map, used map[tcNATPortKeyV6]struct{}) (int, int, error) {
 	if natPortsMap == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	iter := natPortsMap.Iterate()
 	var staleKeys []tcNATPortKeyV6
 	var key tcNATPortKeyV6
 	var value uint32
+	remaining := 0
 	for iter.Next(&key, &value) {
 		if _, ok := used[key]; ok {
+			remaining++
 			continue
 		}
 		staleKeys = append(staleKeys, key)
 	}
 	if err := iter.Err(); err != nil {
-		return 0, fmt.Errorf("iterate kernel IPv6 nat map: %w", err)
+		return 0, 0, fmt.Errorf("iterate kernel IPv6 nat map: %w", err)
 	}
 
 	deleted := 0
 	for _, item := range staleKeys {
 		if err := natPortsMap.Delete(item); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return deleted, fmt.Errorf("delete orphan IPv6 nat reservation: %w", err)
+			return remaining, deleted, fmt.Errorf("delete orphan IPv6 nat reservation: %w", err)
 		}
 		deleted++
 	}
-	return deleted, nil
+	return remaining, deleted, nil
 }
 
 func kernelRuleStatsFromValue(value kernelStatsValueV4) kernelRuleStats {

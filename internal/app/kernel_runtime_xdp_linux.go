@@ -1060,7 +1060,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 				fullSuccess = false
 				log.Printf("xdp dataplane maintenance: snapshot live xdp flow state failed: %v", liveErr)
 			} else {
-				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(mapSnapshot.stats, live.ByRuleID)
+				exact, correctionErr := reconcileKernelStatsCorrectionFromCandidates(mapSnapshot.stats, live.ByRuleID, statsCorrection)
 				if correctionErr != nil {
 					fullSuccess = false
 					log.Printf("xdp dataplane maintenance: reconcile xdp stats correction failed: %v", correctionErr)
@@ -1069,24 +1069,29 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 					syncKernelLiveStatsCorrections(statsCorrection, exact)
 				}
 				deleted := 0
+				natEntries := 0
 				for _, natMap := range []*ebpf.Map{refs.natV4, refs.natOldV4} {
-					itemDeleted, natErr := pruneOrphanKernelNATReservations(natMap, live.UsedNATV4)
+					itemRemaining, itemDeleted, natErr := pruneOrphanKernelNATReservations(natMap, live.UsedNATV4)
 					if natErr != nil {
 						fullSuccess = false
 						log.Printf("xdp dataplane maintenance: prune orphan xdp nat reservations failed: %v", natErr)
 						deleted = 0
+						natEntries = 0
 						break
 					}
+					natEntries += itemRemaining
 					deleted += itemDeleted
 				}
 				for _, natMap := range []*ebpf.Map{refs.natV6, refs.natOldV6} {
-					itemDeleted, natErr := pruneOrphanKernelNATReservationsV6(natMap, live.UsedNATV6)
+					itemRemaining, itemDeleted, natErr := pruneOrphanKernelNATReservationsV6(natMap, live.UsedNATV6)
 					if natErr != nil {
 						fullSuccess = false
 						log.Printf("xdp dataplane maintenance: prune orphan xdp IPv6 nat reservations failed: %v", natErr)
 						deleted = 0
+						natEntries = 0
 						break
 					}
+					natEntries += itemRemaining
 					deleted += itemDeleted
 				}
 				if fullSuccess && deleted > 0 {
@@ -1094,11 +1099,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 					log.Printf("xdp dataplane maintenance: pruned %d orphan xdp nat reservation(s)", deleted)
 				}
 				if fullSuccess {
-					natEntries, countErr := countKernelRuntimeNATEntriesExact(refs)
-					if countErr != nil {
-						fullSuccess = false
-						log.Printf("xdp dataplane maintenance: count exact xdp nat occupancy failed: %v", countErr)
-					} else if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, live.FlowEntries, natEntries); syncErr != nil {
+					if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, live.FlowEntries, natEntries); syncErr != nil {
 						fullSuccess = false
 						log.Printf("xdp dataplane maintenance: sync xdp occupancy counters failed: %v", syncErr)
 					}

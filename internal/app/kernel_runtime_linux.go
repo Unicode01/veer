@@ -1389,7 +1389,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 				fullSuccess = false
 				log.Printf("kernel dataplane maintenance: snapshot live tc flow state failed: %v", liveErr)
 			} else {
-				exact, correctionErr := reconcileKernelStatsCorrectionFromSnapshot(mapSnapshot.stats, live.ByRuleID)
+				exact, correctionErr := reconcileKernelStatsCorrectionFromCandidates(mapSnapshot.stats, live.ByRuleID, statsCorrection)
 				if correctionErr != nil {
 					fullSuccess = false
 					log.Printf("kernel dataplane maintenance: reconcile tc stats correction failed: %v", correctionErr)
@@ -1398,24 +1398,29 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					syncKernelLiveStatsCorrections(statsCorrection, exact)
 				}
 				deleted := 0
+				natEntries := 0
 				for _, natMap := range []*ebpf.Map{refs.natV4, refs.natOldV4} {
-					itemDeleted, natErr := pruneOrphanKernelNATReservations(natMap, live.UsedNATV4)
+					itemRemaining, itemDeleted, natErr := pruneOrphanKernelNATReservations(natMap, live.UsedNATV4)
 					if natErr != nil {
 						fullSuccess = false
 						log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
 						deleted = 0
+						natEntries = 0
 						break
 					}
+					natEntries += itemRemaining
 					deleted += itemDeleted
 				}
 				for _, natMap := range []*ebpf.Map{refs.natV6, refs.natOldV6} {
-					itemDeleted, natErr := pruneOrphanKernelNATReservationsV6(natMap, live.UsedNATV6)
+					itemRemaining, itemDeleted, natErr := pruneOrphanKernelNATReservationsV6(natMap, live.UsedNATV6)
 					if natErr != nil {
 						fullSuccess = false
 						log.Printf("kernel dataplane maintenance: prune orphan tc IPv6 nat reservations failed: %v", natErr)
 						deleted = 0
+						natEntries = 0
 						break
 					}
+					natEntries += itemRemaining
 					deleted += itemDeleted
 				}
 				if fullSuccess && deleted > 0 {
@@ -1427,11 +1432,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					rt.orphanNATPruneLog.Reset()
 				}
 				if fullSuccess {
-					natEntries, countErr := countKernelRuntimeNATEntriesExact(refs)
-					if countErr != nil {
-						fullSuccess = false
-						log.Printf("kernel dataplane maintenance: count exact tc nat occupancy failed: %v", countErr)
-					} else if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, live.FlowEntries, natEntries); syncErr != nil {
+					if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, live.FlowEntries, natEntries); syncErr != nil {
 						fullSuccess = false
 						log.Printf("kernel dataplane maintenance: sync tc occupancy counters failed: %v", syncErr)
 					}
@@ -2233,7 +2234,7 @@ func purgeAllKernelConnectionState(refs kernelRuntimeMapRefs) (map[uint32]kernel
 func purgeAllKernelConnectionStateV4(rulesMap, flowsMap, natPortsMap *ebpf.Map) (map[uint32]kernelRuleStats, int, int, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	if flowsMap == nil {
-		deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
+		_, deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
 		return corrections, 0, deletedNAT, err
 	}
 
@@ -2251,7 +2252,7 @@ func purgeAllKernelConnectionStateV4(rulesMap, flowsMap, natPortsMap *ebpf.Map) 
 	for _, item := range stale {
 		deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, item, corrections)
 	}
-	deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
+	_, deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
 	if err != nil {
 		return nil, len(stale), 0, err
 	}
@@ -2261,7 +2262,7 @@ func purgeAllKernelConnectionStateV4(rulesMap, flowsMap, natPortsMap *ebpf.Map) 
 func purgeAllKernelConnectionStateV6(rulesMap, flowsMap, natPortsMap *ebpf.Map) (map[uint32]kernelRuleStats, int, int, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	if flowsMap == nil {
-		deletedNAT, err := pruneOrphanKernelNATReservationsV6(natPortsMap, nil)
+		_, deletedNAT, err := pruneOrphanKernelNATReservationsV6(natPortsMap, nil)
 		return corrections, 0, deletedNAT, err
 	}
 
@@ -2279,7 +2280,7 @@ func purgeAllKernelConnectionStateV6(rulesMap, flowsMap, natPortsMap *ebpf.Map) 
 	for _, item := range stale {
 		deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap, item, corrections)
 	}
-	deletedNAT, err := pruneOrphanKernelNATReservationsV6(natPortsMap, nil)
+	_, deletedNAT, err := pruneOrphanKernelNATReservationsV6(natPortsMap, nil)
 	if err != nil {
 		return nil, len(stale), 0, err
 	}
