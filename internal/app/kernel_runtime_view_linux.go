@@ -498,6 +498,7 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView 
 
 func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) KernelEngineRuntimeView {
 	now := time.Now()
+	rt.ensureAvailabilityInitialized()
 	rt.mu.Lock()
 	available, reason := rt.currentAvailabilityLockedWithForce(now, force)
 	runtimeAvailable := rt.available
@@ -590,6 +591,7 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
 
 func (rt *xdpKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) KernelEngineRuntimeView {
 	now := time.Now()
+	rt.ensureAvailabilityInitialized()
 	rt.mu.Lock()
 	available, reason := rt.currentAvailabilityLockedWithForce(now, force)
 	runtimeAvailable := rt.available

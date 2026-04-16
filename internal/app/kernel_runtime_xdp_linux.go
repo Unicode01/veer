@@ -239,7 +239,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	}
 }
 
-func (rt *xdpKernelRuleRuntime) Available() (bool, string) {
+func (rt *xdpKernelRuleRuntime) ensureAvailabilityInitialized() {
 	rt.availableOnce.Do(func() {
 		spec, err := loadEmbeddedXDPCollectionSpec(rt.prepareOptions.enableTrafficStats)
 		if err != nil {
@@ -274,6 +274,10 @@ func (rt *xdpKernelRuleRuntime) Available() (bool, string) {
 			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
 		}
 	})
+}
+
+func (rt *xdpKernelRuleRuntime) Available() (bool, string) {
+	rt.ensureAvailabilityInitialized()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return rt.currentAvailabilityLocked(time.Now())

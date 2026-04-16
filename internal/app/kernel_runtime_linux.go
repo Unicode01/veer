@@ -496,7 +496,7 @@ func newKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	return newOrderedKernelRuleRuntime(cfg.KernelEngineOrder, cfg)
 }
 
-func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
+func (rt *linuxKernelRuleRuntime) ensureAvailabilityInitialized() {
 	rt.availableOnce.Do(func() {
 		spec, err := loadEmbeddedKernelCollectionSpec(rt.enableTrafficStats)
 		if err != nil {
@@ -529,6 +529,10 @@ func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
 			rt.availableReason += "; kernel_tc_diag_verbose experimental path enabled"
 		}
 	})
+}
+
+func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
+	rt.ensureAvailabilityInitialized()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return rt.currentAvailabilityLocked(time.Now())

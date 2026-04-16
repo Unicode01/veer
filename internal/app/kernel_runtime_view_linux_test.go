@@ -3,6 +3,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -11,6 +12,23 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
 )
+
+func TestSnapshotRuntimeViewInitializesEngineAvailabilityReason(t *testing.T) {
+	tcRuntime := newTCKernelRuleRuntime(&Config{})
+	tcView := tcRuntime.snapshotRuntimeViewWithForce(false)
+	if strings.TrimSpace(tcView.AvailableReason) == "" {
+		t.Fatal("tc snapshot available_reason = empty, want initialized availability detail")
+	}
+
+	xdpRuntime, ok := newXDPKernelRuleRuntime(&Config{}).(*xdpKernelRuleRuntime)
+	if !ok || xdpRuntime == nil {
+		t.Fatal("newXDPKernelRuleRuntime() did not return *xdpKernelRuleRuntime")
+	}
+	xdpView := xdpRuntime.snapshotRuntimeViewWithForce(false)
+	if strings.TrimSpace(xdpView.AvailableReason) == "" {
+		t.Fatal("xdp snapshot available_reason = empty, want initialized availability detail")
+	}
+}
 
 func TestKernelExpectedAttachmentsHealthyRequiresMatchingProgramIdentity(t *testing.T) {
 	key := kernelAttachmentKey{
