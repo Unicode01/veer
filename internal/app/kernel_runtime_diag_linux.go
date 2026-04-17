@@ -87,13 +87,6 @@ func snapshotKernelDiagFromMap(diagMap *ebpf.Map) (kernelDiagValueV4, error) {
 	return value, nil
 }
 
-func snapshotKernelDiagFromCollection(coll *ebpf.Collection) (kernelDiagValueV4, error) {
-	if coll == nil || coll.Maps == nil {
-		return kernelDiagValueV4{}, nil
-	}
-	return snapshotKernelDiagFromMap(coll.Maps[kernelDiagMapName])
-}
-
 func snapshotKernelRuntimeDiagFromMap(diagMap *ebpf.Map) kernelRuntimeDiagSnapshot {
 	value, err := snapshotKernelDiagFromMap(diagMap)
 	if err != nil {
@@ -121,13 +114,6 @@ func snapshotKernelRuntimeDiagFromMap(diagMap *ebpf.Map) kernelRuntimeDiagSnapsh
 		XDPV4TransparentNoMatchPass:         value.XDPV4TransparentNoMatchPass,
 		XDPV4TransparentReplyClosingHandled: value.XDPV4TransparentReplyClosingHandled,
 	}
-}
-
-func snapshotKernelRuntimeDiag(coll *ebpf.Collection) kernelRuntimeDiagSnapshot {
-	if coll == nil || coll.Maps == nil {
-		return kernelRuntimeDiagSnapshot{}
-	}
-	return snapshotKernelRuntimeDiagFromMap(coll.Maps[kernelDiagMapName])
 }
 
 func applyKernelRuntimeDiagView(view *KernelEngineRuntimeView, snapshot kernelRuntimeDiagSnapshot) {

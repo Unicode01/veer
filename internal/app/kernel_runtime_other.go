@@ -41,3 +41,31 @@ func (rt unavailableKernelRuleRuntime) SnapshotAssignments() map[int64]string {
 func (rt unavailableKernelRuleRuntime) Close() error {
 	return nil
 }
+
+func resolveKernelTransientFallbackBackendMAC(rule Rule, reasonClass string) string {
+	return ""
+}
+
+func newManagedNetworkRuntime() managedNetworkRuntime {
+	return nil
+}
+
+func managedNetworkPreserveStateOnClose() bool {
+	return false
+}
+
+func newIPv6AssignmentRuntime() ipv6AssignmentRuntime {
+	return nil
+}
+
+func userspaceWorkerPreserveOnClose() bool {
+	return false
+}
+
+func (pm *ProcessManager) startKernelNetlinkMonitor() {}
+
+func (pm *ProcessManager) stopKernelNetlinkMonitor() {}
+
+func normalizeKernelNetlinkRecoveryTrigger(trigger kernelNetlinkRecoveryTrigger) kernelNetlinkRecoveryTrigger {
+	return trigger
+}

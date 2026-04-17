@@ -201,10 +201,6 @@ func (snapshot kernelRuntimeMapSnapshot) Close() {
 	}
 }
 
-func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
-	return pm.snapshotKernelRuntimeWithForce(false)
-}
-
 func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
 		DefaultEngine:   ruleEngineAuto,
@@ -356,10 +352,6 @@ func snapshotKernelRuntimeEnginesWithForce(rt kernelRuleRuntime, force bool) []K
 	}
 }
 
-func (rt *orderedKernelRuleRuntime) snapshotKernelRuntimeEngines() []KernelEngineRuntimeView {
-	return rt.snapshotKernelRuntimeEnginesWithForce(false)
-}
-
 func (rt *orderedKernelRuleRuntime) snapshotKernelRuntimeEnginesWithForce(force bool) []KernelEngineRuntimeView {
 	rt.mu.Lock()
 	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
@@ -370,10 +362,6 @@ func (rt *orderedKernelRuleRuntime) snapshotKernelRuntimeEnginesWithForce(force 
 		views = append(views, snapshotKernelEngineRuntimeViewWithForce(entry.name, entry.rt, force))
 	}
 	return views
-}
-
-func snapshotKernelEngineRuntimeView(name string, rt kernelRuleRuntime) KernelEngineRuntimeView {
-	return snapshotKernelEngineRuntimeViewWithForce(name, rt, false)
 }
 
 func snapshotKernelEngineRuntimeViewWithForce(name string, rt kernelRuleRuntime, force bool) KernelEngineRuntimeView {
@@ -492,10 +480,6 @@ func kernelRuntimePressureStateForRuntimeView(previousLevel kernelRuntimePressur
 	return buildKernelRuntimePressureStateFromDetailedCounts(previousLevel, refs, counts, includeNAT)
 }
 
-func (rt *linuxKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
-	return rt.snapshotRuntimeViewWithForce(false)
-}
-
 func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) KernelEngineRuntimeView {
 	now := time.Now()
 	rt.ensureAvailabilityInitialized()
@@ -583,10 +567,6 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) Kerne
 	}
 
 	return view
-}
-
-func (rt *xdpKernelRuleRuntime) snapshotRuntimeView() KernelEngineRuntimeView {
-	return rt.snapshotRuntimeViewWithForce(false)
 }
 
 func (rt *xdpKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) KernelEngineRuntimeView {
@@ -920,16 +900,6 @@ func kernelAttachmentObservations(keys []kernelAttachmentKey) map[kernelAttachme
 	return observed
 }
 
-func kernelAttachmentPresence(keys []kernelAttachmentKey) map[kernelAttachmentKey]bool {
-	present := make(map[kernelAttachmentKey]bool, len(keys))
-	for key, item := range kernelAttachmentObservations(keys) {
-		if item.present {
-			present[key] = true
-		}
-	}
-	return present
-}
-
 func countTCRuleMapEntries(m *ebpf.Map) (int, error) {
 	if m == nil {
 		return 0, nil
@@ -984,44 +954,6 @@ func countXDPRuleMapEntriesV6(m *ebpf.Map) (int, error) {
 		count++
 	}
 	return count, iter.Err()
-}
-
-func countTCKernelRuntimeRuleEntries(refs kernelRuntimeMapRefs, _ int) (int, error) {
-	total := 0
-	if refs.rulesV4 != nil {
-		count, err := countTCRuleMapEntries(refs.rulesV4)
-		if err != nil {
-			return 0, err
-		}
-		total += count
-	}
-	if refs.rulesV6 != nil {
-		count, err := countTCRuleMapEntriesV6(refs.rulesV6)
-		if err != nil {
-			return 0, err
-		}
-		total += count
-	}
-	return total, nil
-}
-
-func countXDPKernelRuntimeRuleEntries(refs kernelRuntimeMapRefs, _ int) (int, error) {
-	total := 0
-	if refs.rulesV4 != nil {
-		count, err := countXDPRuleMapEntries(refs.rulesV4)
-		if err != nil {
-			return 0, err
-		}
-		total += count
-	}
-	if refs.rulesV6 != nil {
-		count, err := countXDPRuleMapEntriesV6(refs.rulesV6)
-		if err != nil {
-			return 0, err
-		}
-		total += count
-	}
-	return total, nil
 }
 
 func countXDPFlowMapEntries(m *ebpf.Map) (int, error) {

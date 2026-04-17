@@ -265,8 +265,8 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	unmatchedRuleFallbackPlans := make(map[int64]ruleDataplanePlan)
 	unmatchedRangeFallbackPlans := make(map[int64]rangeDataplanePlan)
 	unmatchedEgressNATFallbackPlans := make(map[int64]ruleDataplanePlan)
-	cooldownUntil := map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState{}
-	failureCounts := map[kernelCandidateOwner]int{}
+	var cooldownUntil map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState
+	var failureCounts map[kernelCandidateOwner]int
 	cooldownRuleOwners := 0
 	cooldownRangeOwners := 0
 	cooldownSummaryCounts := make(map[string]int)
@@ -466,7 +466,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	planner = newRuleDataplanePlanner(pm.kernelRuntime, defaultEngine)
 	kernelPressure := snapshotKernelRuntimePressure(pm.kernelRuntime)
 	egressNATSnapshot := egressNATInterfaceSnapshot{}
-	dynamicEgressNATParents := map[string]struct{}{}
+	var dynamicEgressNATParents map[string]struct{}
 	if len(egressNATs) > 0 || len(managedNetworks) > 0 {
 		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
 	}
@@ -1509,11 +1509,6 @@ func retainedKernelCandidatesMatchDesired(retained []Rule, desired []kernelCandi
 		}
 	}
 	return true
-}
-
-func sameRetainedKernelRuleDataplane(a Rule, b Rule) bool {
-	return a.ID == b.ID &&
-		sameRetainedKernelRuleDataplaneIgnoringID(a, b)
 }
 
 func sameRetainedKernelRuleDataplaneIgnoringID(a Rule, b Rule) bool {

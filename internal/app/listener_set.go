@@ -22,36 +22,38 @@ const (
 var (
 	tcpProxyBufferPool = sync.Pool{
 		New: func() any {
-			return make([]byte, tcpProxyBufferSize)
+			return new([tcpProxyBufferSize]byte)
 		},
 	}
 	udpPacketBufferPool = sync.Pool{
 		New: func() any {
-			return make([]byte, udpPacketBufferSize)
+			return new([udpPacketBufferSize]byte)
 		},
 	}
 )
 
 func getTCPProxyBuffer() []byte {
-	return tcpProxyBufferPool.Get().([]byte)
+	return tcpProxyBufferPool.Get().(*[tcpProxyBufferSize]byte)[:]
 }
 
 func putTCPProxyBuffer(buf []byte) {
 	if cap(buf) < tcpProxyBufferSize {
 		return
 	}
-	tcpProxyBufferPool.Put(buf[:tcpProxyBufferSize])
+	buf = buf[:tcpProxyBufferSize]
+	tcpProxyBufferPool.Put((*[tcpProxyBufferSize]byte)(buf))
 }
 
 func getUDPPacketBuffer() []byte {
-	return udpPacketBufferPool.Get().([]byte)
+	return udpPacketBufferPool.Get().(*[udpPacketBufferSize]byte)[:]
 }
 
 func putUDPPacketBuffer(buf []byte) {
 	if cap(buf) < udpPacketBufferSize {
 		return
 	}
-	udpPacketBufferPool.Put(buf[:udpPacketBufferSize])
+	buf = buf[:udpPacketBufferSize]
+	udpPacketBufferPool.Put((*[udpPacketBufferSize]byte)(buf))
 }
 
 func statsUpdateInterval(active bool) time.Duration {

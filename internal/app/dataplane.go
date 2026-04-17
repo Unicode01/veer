@@ -332,10 +332,6 @@ func (p *ruleDataplanePlanner) Plan(rule Rule) ruleDataplanePlan {
 	return p.planWithPreferredAndKernelReason(rule, p.resolvePreferredEngine(rule.EnginePreference), kernelRuleFamilyFallbackReason(rule))
 }
 
-func (p *ruleDataplanePlanner) planWithPreferred(rule Rule, preferred string) ruleDataplanePlan {
-	return p.planWithPreferredAndKernelReason(rule, preferred, kernelRuleFamilyFallbackReason(rule))
-}
-
 func (p *ruleDataplanePlanner) planWithPreferredAndKernelReason(rule Rule, preferred string, kernelReason string) ruleDataplanePlan {
 	plan := ruleDataplanePlan{
 		PreferredEngine: preferred,
@@ -488,48 +484,6 @@ func (p *ruleDataplanePlanner) PlanAll(rules []Rule) map[int64]ruleDataplanePlan
 	for _, rule := range rules {
 		plans[rule.ID] = p.Plan(rule)
 	}
-	return plans
-}
-
-func applyKernelRuleSetConstraints(rules []Rule, plans map[int64]ruleDataplanePlan) map[int64]ruleDataplanePlan {
-	type backendKey struct {
-		OutIP    string
-		OutPort  int
-		Protocol string
-	}
-
-	grouped := make(map[backendKey][]int64)
-	for _, rule := range rules {
-		if !rule.Enabled {
-			continue
-		}
-		if !rule.Transparent {
-			continue
-		}
-		plan, ok := plans[rule.ID]
-		if !ok || plan.EffectiveEngine != ruleEngineKernel {
-			continue
-		}
-		key := backendKey{
-			OutIP:    strings.TrimSpace(rule.OutIP),
-			OutPort:  rule.OutPort,
-			Protocol: strings.ToLower(strings.TrimSpace(rule.Protocol)),
-		}
-		grouped[key] = append(grouped[key], rule.ID)
-	}
-
-	for _, ids := range grouped {
-		if len(ids) < 2 {
-			continue
-		}
-		for _, id := range ids {
-			plan := plans[id]
-			plan.EffectiveEngine = ruleEngineUserspace
-			plan.FallbackReason = "transparent kernel dataplane requires a unique backend endpoint per active rule"
-			plans[id] = plan
-		}
-	}
-
 	return plans
 }
 

@@ -32,21 +32,21 @@ const (
 var ipv6AllNodesLinkLocal = net.ParseIP("ff02::1")
 
 type ipv6RouterAdvertiser struct {
-	mu            sync.Mutex
-	config        ipv6AssignmentRAConfig
-	stopCh        chan struct{}
-	wakeCh        chan struct{}
-	doneCh        chan struct{}
-	rsDoneCh      chan struct{}
-	currentRSFD   int
+	mu               sync.Mutex
+	config           ipv6AssignmentRAConfig
+	stopCh           chan struct{}
+	wakeCh           chan struct{}
+	doneCh           chan struct{}
+	rsDoneCh         chan struct{}
+	currentRSFD      int
 	rsListeningSince time.Time
-	lastIssueText string
-	lastIssueAt   time.Time
-	lastRSIssue   string
-	lastRSIssueAt time.Time
-	lastRSSeenAt  time.Time
-	sendCount     uint64
-	lastSendAt    time.Time
+	lastIssueText    string
+	lastIssueAt      time.Time
+	lastRSIssue      string
+	lastRSIssueAt    time.Time
+	lastRSSeenAt     time.Time
+	sendCount        uint64
+	lastSendAt       time.Time
 }
 
 func newIPv6RouterAdvertiser(config ipv6AssignmentRAConfig) *ipv6RouterAdvertiser {
@@ -241,15 +241,6 @@ func (adv *ipv6RouterAdvertiser) send() {
 	adv.sendCount++
 	adv.lastSendAt = time.Now()
 	adv.mu.Unlock()
-}
-
-func (adv *ipv6RouterAdvertiser) transmitCount() uint64 {
-	if adv == nil {
-		return 0
-	}
-	adv.mu.Lock()
-	defer adv.mu.Unlock()
-	return adv.sendCount
 }
 
 type ipv6RouterAdvertisementRuntimeState struct {

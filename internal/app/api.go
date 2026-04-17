@@ -1314,40 +1314,6 @@ func appendRuleIssue(issues []ruleValidationIssue, scope string, index int, id i
 	})
 }
 
-func detectRuleConflicts(states []projectedRuleState) []ruleValidationIssue {
-	byPort := make(map[int][]projectedRuleState)
-	for _, state := range states {
-		byPort[state.Rule.InPort] = append(byPort[state.Rule.InPort], state)
-	}
-
-	var issues []ruleValidationIssue
-	for _, group := range byPort {
-		for i := 0; i < len(group); i++ {
-			for j := i + 1; j < len(group); j++ {
-				if !rulesConflict(group[i].Rule, group[j].Rule) {
-					continue
-				}
-				issues = appendRuleConflictIssue(issues, group[i], group[j])
-				issues = appendRuleConflictIssue(issues, group[j], group[i])
-			}
-		}
-	}
-	return issues
-}
-
-func rulesConflict(a, b Rule) bool {
-	if !ruleProtocolsOverlap(a.Protocol, b.Protocol) {
-		return false
-	}
-	if !ruleInterfacesOverlap(a.InInterface, b.InInterface) {
-		return false
-	}
-	if !ruleIPsOverlap(a.InIP, b.InIP) {
-		return false
-	}
-	return a.InPort == b.InPort
-}
-
 func ruleProtocolsOverlap(a, b string) bool {
 	return ruleProtocolMask(a)&ruleProtocolMask(b) != 0
 }
@@ -1367,14 +1333,6 @@ func ruleIPsOverlap(a, b string) bool {
 		return false
 	}
 	return ipLiteralIsWildcard(a) || ipLiteralIsWildcard(b) || a == b
-}
-
-func appendRuleConflictIssue(issues []ruleValidationIssue, current, other projectedRuleState) []ruleValidationIssue {
-	scope, index, id, field := ruleConflictIssueTarget(current)
-	if scope == "" {
-		return issues
-	}
-	return appendRuleIssue(issues, scope, index, id, field, fmt.Sprintf("listener conflicts with %s", describeRuleConflict(other)))
 }
 
 func ruleConflictIssueTarget(state projectedRuleState) (string, int, int64, string) {

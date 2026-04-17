@@ -217,18 +217,42 @@ func TestManagedIPv4NetworkRuntimeCloseStopsDHCPv4InParallel(t *testing.T) {
 
 	ops := &fakeManagedNetworkNetOps{deleteDHCPv4Delay: 150 * time.Millisecond}
 	rt := newManagedIPv4NetworkRuntime(ops)
-	typed, ok := rt.(*managedIPv4NetworkRuntime)
-	if !ok {
-		t.Fatalf("runtime type = %T, want *managedIPv4NetworkRuntime", rt)
+	if rt == nil {
+		t.Fatal("newManagedIPv4NetworkRuntime() = nil")
 	}
-	typed.dhcpv4 = map[string]managedNetworkDHCPv4Config{
-		"vmbr0": {Bridge: "vmbr0"},
-		"vmbr1": {Bridge: "vmbr1"},
-		"vmbr2": {Bridge: "vmbr2"},
+
+	err := rt.Reconcile([]ManagedNetwork{
+		{
+			ID:          1,
+			Name:        "lab-0",
+			Bridge:      "vmbr0",
+			IPv4Enabled: true,
+			IPv4CIDR:    "192.0.2.1/24",
+			Enabled:     true,
+		},
+		{
+			ID:          2,
+			Name:        "lab-1",
+			Bridge:      "vmbr1",
+			IPv4Enabled: true,
+			IPv4CIDR:    "198.51.100.1/24",
+			Enabled:     true,
+		},
+		{
+			ID:          3,
+			Name:        "lab-2",
+			Bridge:      "vmbr2",
+			IPv4Enabled: true,
+			IPv4CIDR:    "203.0.113.1/24",
+			Enabled:     true,
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
 	}
 
 	start := time.Now()
-	if err := typed.Close(); err != nil {
+	if err := rt.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 	elapsed := time.Since(start)

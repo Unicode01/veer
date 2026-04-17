@@ -353,22 +353,6 @@ func describeRangeConflict(state projectedRangeState) string {
 	}
 }
 
-func loadValidationEntities(db sqlRuleStore) ([]Rule, []Site, []PortRange, error) {
-	rules, err := dbGetRules(db)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	sites, err := dbGetSites(db)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	ranges, err := dbGetRanges(db)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return rules, sites, ranges, nil
-}
-
 func loadEnabledValidationEntities(db sqlRuleStore) ([]Rule, []Site, []PortRange, error) {
 	rules, err := dbGetEnabledRules(db)
 	if err != nil {

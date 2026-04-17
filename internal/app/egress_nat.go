@@ -208,11 +208,6 @@ func egressNATUsesSingleTargetParent(item EgressNAT, ifaceByName map[string]Inte
 	return isEgressNATSingleTargetInterface(info)
 }
 
-func egressNATAppliesToAllChildren(item EgressNAT, ifaceByName map[string]InterfaceInfo) bool {
-	item = normalizeEgressNATScope(item, ifaceByName)
-	return strings.TrimSpace(item.ParentInterface) != "" && strings.TrimSpace(item.ChildInterface) == ""
-}
-
 func collectDynamicEgressNATParents(items []EgressNAT) map[string]struct{} {
 	return collectDynamicEgressNATParentsWithSnapshot(items, loadEgressNATInterfaceSnapshot())
 }
@@ -389,25 +384,6 @@ func buildEgressNATSyntheticRule(item EgressNAT, childInterface string, id int64
 		Transparent:      false,
 		EnginePreference: ruleEngineKernel,
 		kernelMode:       kernelModeEgressNAT,
-		kernelNATType:    normalizeEgressNATType(item.NATType),
-	}
-}
-
-func buildEgressNATPassthroughRule(item EgressNAT, childInterface string, localIP string, id int64, proto string) Rule {
-	return Rule{
-		ID:               id,
-		InInterface:      strings.TrimSpace(childInterface),
-		InIP:             strings.TrimSpace(localIP),
-		InPort:           0,
-		OutInterface:     item.OutInterface,
-		OutIP:            "0.0.0.0",
-		OutSourceIP:      item.OutSourceIP,
-		OutPort:          0,
-		Protocol:         proto,
-		Enabled:          item.Enabled,
-		Transparent:      false,
-		EnginePreference: ruleEngineKernel,
-		kernelMode:       kernelModeEgressNATPassthrough,
 		kernelNATType:    normalizeEgressNATType(item.NATType),
 	}
 }

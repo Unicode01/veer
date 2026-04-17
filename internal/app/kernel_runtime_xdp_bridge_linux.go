@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"fmt"
 	"net"
-	"sort"
 	"strings"
 
 	"github.com/vishvananda/netlink"
@@ -222,31 +221,4 @@ func isXDPBridgeLink(link netlink.Link) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(link.Type()), "bridge")
-}
-
-func listXDPBridgeMembers(bridgeIndex int) ([]netlink.Link, error) {
-	links, err := netlink.LinkList()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]netlink.Link, 0, len(links))
-	for _, link := range links {
-		if link == nil || link.Attrs() == nil {
-			continue
-		}
-		if link.Attrs().MasterIndex != bridgeIndex {
-			continue
-		}
-		if !xdpLinkTypeAllowed(link.Type()) {
-			continue
-		}
-		out = append(out, link)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Attrs().Index != out[j].Attrs().Index {
-			return out[i].Attrs().Index < out[j].Attrs().Index
-		}
-		return out[i].Attrs().Name < out[j].Attrs().Name
-	})
-	return out, nil
 }

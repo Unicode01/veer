@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/binary"
 	"fmt"
+	"forward/internal/managednet"
 	"hash/fnv"
 	"net"
 	"net/netip"
@@ -10,6 +11,141 @@ import (
 	"strconv"
 	"strings"
 )
+
+type managedNetworkRuntimeStatus = managednet.RuntimeStatus
+type managedNetworkIPv4AddressSpec = managednet.IPv4AddressSpec
+type managedNetworkDHCPv4Reservation = managednet.DHCPv4Reservation
+type managedNetworkDHCPv4Config = managednet.DHCPv4Config
+type managedNetworkInterfaceSpec = managednet.InterfaceSpec
+type managedNetworkDHCPv4RuntimeState = managednet.DHCPv4RuntimeState
+type managedNetworkNetOps = managednet.NetOps
+type managedNetworkIPv4Plan = managednet.IPv4Plan
+
+type managedNetworkRuntime interface {
+	Reconcile(items []ManagedNetwork, reservations []ManagedNetworkReservation) error
+	SnapshotStatus() map[int64]managedNetworkRuntimeStatus
+	Close() error
+}
+
+type managedNetworkRuntimeAdapter struct {
+	inner managednet.Runtime
+}
+
+func newManagedIPv4NetworkRuntime(ops managedNetworkNetOps) managedNetworkRuntime {
+	return &managedNetworkRuntimeAdapter{
+		inner: managednet.NewIPv4Runtime(ops, managedNetworkPreserveStateOnClose),
+	}
+}
+
+func managedNetworkInterfaceSpecForItem(item ManagedNetwork) managedNetworkInterfaceSpec {
+	return managednet.InterfaceSpecForItem(toManagednetManagedNetwork(item))
+}
+
+func buildManagedNetworkIPv4Plan(item ManagedNetwork, reservations []ManagedNetworkReservation) (managedNetworkIPv4Plan, error) {
+	return managednet.BuildIPv4Plan(toManagednetManagedNetwork(item), toManagednetManagedNetworkReservations(reservations))
+}
+
+func normalizeManagedNetworkIPv4CIDR(value string) (string, string, *net.IPNet, error) {
+	return managednet.NormalizeIPv4CIDR(value)
+}
+
+func normalizeManagedNetworkIPv4Gateway(value string, serverIP string) (string, error) {
+	return managednet.NormalizeIPv4Gateway(value, serverIP)
+}
+
+func normalizeManagedNetworkIPv4Literal(value string) (string, error) {
+	return managednet.NormalizeIPv4Literal(value)
+}
+
+func isManagedNetworkIPv4ReservedHost(ip net.IP, network net.IP, mask net.IPMask) bool {
+	return managednet.IsReservedIPv4Host(ip, network, mask)
+}
+
+func managedNetworkIPv4LiteralToUint32(text string) uint32 {
+	return managedNetworkIPv4ToUint32(parseIPLiteral(text))
+}
+
+func managedNetworkIPv4ToUint32(ip net.IP) uint32 {
+	return ipv4BytesToUint32(ip)
+}
+
+func uint32ToIPv4(value uint32) net.IP {
+	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+}
+
+func (rt *managedNetworkRuntimeAdapter) Reconcile(items []ManagedNetwork, reservations []ManagedNetworkReservation) error {
+	if rt == nil || rt.inner == nil {
+		return nil
+	}
+	return rt.inner.Reconcile(toManagednetManagedNetworks(items), toManagednetManagedNetworkReservations(reservations))
+}
+
+func (rt *managedNetworkRuntimeAdapter) SnapshotStatus() map[int64]managedNetworkRuntimeStatus {
+	if rt == nil || rt.inner == nil {
+		return nil
+	}
+	return rt.inner.SnapshotStatus()
+}
+
+func (rt *managedNetworkRuntimeAdapter) Close() error {
+	if rt == nil || rt.inner == nil {
+		return nil
+	}
+	return rt.inner.Close()
+}
+
+func toManagednetManagedNetwork(item ManagedNetwork) managednet.ManagedNetwork {
+	return managednet.ManagedNetwork{
+		ID:                  item.ID,
+		Name:                item.Name,
+		BridgeMode:          item.BridgeMode,
+		Bridge:              item.Bridge,
+		BridgeMTU:           item.BridgeMTU,
+		BridgeVLANAware:     item.BridgeVLANAware,
+		UplinkInterface:     item.UplinkInterface,
+		IPv4Enabled:         item.IPv4Enabled,
+		IPv4CIDR:            item.IPv4CIDR,
+		IPv4Gateway:         item.IPv4Gateway,
+		IPv4PoolStart:       item.IPv4PoolStart,
+		IPv4PoolEnd:         item.IPv4PoolEnd,
+		IPv4DNSServers:      item.IPv4DNSServers,
+		IPv6Enabled:         item.IPv6Enabled,
+		IPv6ParentInterface: item.IPv6ParentInterface,
+		IPv6ParentPrefix:    item.IPv6ParentPrefix,
+		IPv6AssignmentMode:  item.IPv6AssignmentMode,
+		AutoEgressNAT:       item.AutoEgressNAT,
+		Remark:              item.Remark,
+		Enabled:             item.Enabled,
+	}
+}
+
+func toManagednetManagedNetworks(items []ManagedNetwork) []managednet.ManagedNetwork {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]managednet.ManagedNetwork, 0, len(items))
+	for _, item := range items {
+		out = append(out, toManagednetManagedNetwork(item))
+	}
+	return out
+}
+
+func toManagednetManagedNetworkReservations(items []ManagedNetworkReservation) []managednet.ManagedNetworkReservation {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]managednet.ManagedNetworkReservation, 0, len(items))
+	for _, item := range items {
+		out = append(out, managednet.ManagedNetworkReservation{
+			ID:               item.ID,
+			ManagedNetworkID: item.ManagedNetworkID,
+			MACAddress:       item.MACAddress,
+			IPv4Address:      item.IPv4Address,
+			Remark:           item.Remark,
+		})
+	}
+	return out
+}
 
 type managedNetworkRuntimeCompilation struct {
 	IPv6Assignments    []IPv6Assignment
@@ -332,10 +468,6 @@ func collectManagedNetworkChildInterfaces(bridge string, uplink string, infos []
 	return children
 }
 
-func collectManagedNetworkIPv6TargetInterfaces(bridge string, uplink string, infos []InterfaceInfo) []InterfaceInfo {
-	return collectManagedNetworkIPv6TargetInterfacesFromInventory(bridge, uplink, buildManagedNetworkInterfaceInventory(infos, false))
-}
-
 func collectManagedNetworkIPv6TargetNamesFromInventory(bridge string, uplink string, inventory managedNetworkInterfaceInventory) []string {
 	bridge = strings.TrimSpace(bridge)
 	uplink = strings.TrimSpace(uplink)
@@ -424,63 +556,6 @@ func countManagedNetworkIPv6TargetsFromEntries(entries []managedNetworkChildTarg
 		count++
 	}
 	return count
-}
-
-func collectManagedNetworkIPv6TargetInterfacesFromInventory(bridge string, uplink string, inventory managedNetworkInterfaceInventory) []InterfaceInfo {
-	bridge = strings.TrimSpace(bridge)
-	uplink = strings.TrimSpace(uplink)
-	if bridge == "" {
-		return nil
-	}
-
-	entries := inventory.childTargetsByBridge[bridge]
-	if len(entries) == 0 {
-		return nil
-	}
-
-	if !inventory.dedupeTargetsByBridge[bridge] {
-		targets := make([]InterfaceInfo, 0, len(entries))
-		ifaceByName := inventory.ifaceMap()
-		for _, entry := range entries {
-			if uplink != "" && strings.EqualFold(entry.childName, uplink) {
-				continue
-			}
-			target, ok := ifaceByName[entry.targetName]
-			if !ok {
-				target = InterfaceInfo{Name: entry.targetName}
-			}
-			targets = append(targets, target)
-		}
-		if len(targets) == 0 {
-			return nil
-		}
-		return targets
-	}
-
-	targets := make([]InterfaceInfo, 0, len(entries))
-	seen := make(map[string]struct{}, len(entries))
-	ifaceByName := inventory.ifaceMap()
-	for _, entry := range entries {
-		if uplink != "" && strings.EqualFold(entry.childName, uplink) {
-			continue
-		}
-		if _, ok := seen[entry.targetName]; ok {
-			continue
-		}
-		seen[entry.targetName] = struct{}{}
-		target, ok := ifaceByName[entry.targetName]
-		if !ok {
-			target = InterfaceInfo{Name: entry.targetName}
-		}
-		targets = append(targets, target)
-	}
-	if len(targets) == 0 {
-		return nil
-	}
-	slices.SortFunc(targets, func(a, b InterfaceInfo) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return targets
 }
 
 func resolveManagedNetworkIPv6TargetName(child InterfaceInfo, ifaceByName map[string]InterfaceInfo) string {

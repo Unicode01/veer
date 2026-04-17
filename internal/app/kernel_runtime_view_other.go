@@ -19,10 +19,6 @@ func kernelRuntimeIdleDegradedRebuildReason(view KernelEngineRuntimeView) string
 	return ""
 }
 
-func (pm *ProcessManager) snapshotKernelRuntime() KernelRuntimeResponse {
-	return pm.snapshotKernelRuntimeWithForce(false)
-}
-
 func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
 		Available:       false,

@@ -71,8 +71,6 @@ type tcNATPortKeyV6 struct {
 	Pad     uint8
 }
 
-type tcEgressWildcardKeyV6 = tcRuleKeyV6
-
 func normalizedKernelPreparedRuleFamily(family string) string {
 	if family == ipFamilyIPv6 {
 		return ipFamilyIPv6

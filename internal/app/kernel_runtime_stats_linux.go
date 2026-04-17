@@ -108,24 +108,6 @@ func snapshotKernelStatsFromMap(statsMap *ebpf.Map, corrections map[uint32]kerne
 	return snapshot, nil
 }
 
-func snapshotKernelStatsFromCollection(coll *ebpf.Collection, corrections map[uint32]kernelRuleStats) (kernelRuleStatsSnapshot, error) {
-	if coll == nil || coll.Maps == nil {
-		return emptyKernelRuleStatsSnapshot(), nil
-	}
-	return snapshotKernelStatsFromMap(coll.Maps[kernelStatsMapName], corrections)
-}
-
-func pruneStaleKernelFlowsInCollection(coll *ebpf.Collection, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
-	if coll == nil || coll.Maps == nil {
-		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
-	}
-
-	rulesMap := coll.Maps[kernelRulesMapName]
-	flowsMap := coll.Maps[kernelFlowsMapName]
-	natPortsMap := coll.Maps[kernelNatPortsMapName]
-	return pruneStaleKernelFlowsMap(rulesMap, flowsMap, natPortsMap, state, budget)
-}
-
 func pruneStaleKernelFlowsMap(rulesMap, flowsMap, natPortsMap *ebpf.Map, state *kernelFlowPruneState, budget int) (map[uint32]kernelRuleStats, kernelFlowPruneMetrics, error) {
 	if flowsMap == nil {
 		return map[uint32]kernelRuleStats{}, kernelFlowPruneMetrics{}, nil
@@ -352,14 +334,6 @@ func copyKernelStatsMap(dst *ebpf.Map, src *ebpf.Map) error {
 	return nil
 }
 
-func snapshotKernelLiveCountsFromFlows(flowsMap *ebpf.Map) (map[uint32]kernelStatsValueV4, error) {
-	live, err := snapshotKernelLiveStateFromFlows(nil, flowsMap, false)
-	if err != nil {
-		return nil, err
-	}
-	return live.ByRuleID, nil
-}
-
 func mergeKernelLiveStateSnapshot(dst *kernelFlowLiveStateSnapshot, src kernelFlowLiveStateSnapshot) {
 	if dst == nil {
 		return
@@ -375,12 +349,12 @@ func mergeKernelLiveStateSnapshot(dst *kernelFlowLiveStateSnapshot, src kernelFl
 		current.BytesOut += value.BytesOut
 		dst.ByRuleID[ruleID] = current
 	}
-	if dst.UsedNATV4 != nil && len(src.UsedNATV4) > 0 {
+	if dst.UsedNATV4 != nil {
 		for natKey := range src.UsedNATV4 {
 			dst.UsedNATV4[natKey] = struct{}{}
 		}
 	}
-	if dst.UsedNATV6 != nil && len(src.UsedNATV6) > 0 {
+	if dst.UsedNATV6 != nil {
 		for natKey := range src.UsedNATV6 {
 			dst.UsedNATV6[natKey] = struct{}{}
 		}
@@ -678,14 +652,6 @@ func kernelLiveStatsCorrection(observed map[uint32]kernelStatsValueV4, live map[
 		out[ruleID] = delta
 	}
 	return out
-}
-
-func reconcileKernelStatsCorrectionFromMaps(statsMap *ebpf.Map, flowsMap *ebpf.Map) (map[uint32]kernelRuleStats, error) {
-	live, err := snapshotKernelLiveStateFromFlows(nil, flowsMap, false)
-	if err != nil {
-		return nil, err
-	}
-	return reconcileKernelStatsCorrectionFromSnapshot(statsMap, live.ByRuleID)
 }
 
 func reconcileKernelStatsCorrectionFromRuntimeMaps(statsMap *ebpf.Map, refs kernelRuntimeMapRefs) (map[uint32]kernelRuleStats, error) {

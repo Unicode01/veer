@@ -274,10 +274,6 @@ func (trigger kernelNetlinkRecoveryTrigger) matchesBackendIP(ip string) bool {
 	return ok
 }
 
-func (trigger kernelNetlinkRecoveryTrigger) hasBackendMACHints() bool {
-	return len(trigger.backendMACs) > 0
-}
-
 func (trigger kernelNetlinkRecoveryTrigger) matchesBackendMAC(mac string) bool {
 	if len(trigger.backendMACs) == 0 {
 		return true

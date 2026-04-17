@@ -255,7 +255,7 @@ func TestIPv6AssignmentManagedAddressIntegrationReacquiresAfterForwardRestart(t 
 		t.Fatal(err)
 	}
 
-	cmd = restartIPv6AssignmentIntegrationForward(t, cmd, forwardBinary, workDir, configPath, apiBase, logPath)
+	restartIPv6AssignmentIntegrationForward(t, cmd, forwardBinary, workDir, configPath, apiBase, logPath)
 
 	seedIPv6AssignmentIntegrationBackendNeighbors(t, topology)
 	if err := waitForIPv6AssignmentRoute(topology); err != nil {

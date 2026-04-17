@@ -10,6 +10,7 @@
 #include <stddef.h>
 
 #include "include/bpf_endian.h"
+#include "include/forward_addr_helpers.h"
 #include "include/bpf_helpers.h"
 
 #define ICMP_ECHOREPLY 0
@@ -974,46 +975,6 @@ static __always_inline int parse_eth_proto(struct __sk_buff *skb, __u16 *proto, 
 
 	*l3_off = (int)sizeof(*eth);
 	return 0;
-}
-
-static __always_inline void copy_ipv6_addr(__u8 dst[16], const __u8 src[16])
-{
-	__builtin_memcpy(dst, src, sizeof(__u8) * 16);
-}
-
-static __always_inline int ipv6_addr_is_zero(const __u8 addr[16])
-{
-	int i;
-	__u8 acc = 0;
-
-#pragma clang loop unroll(full)
-	for (i = 0; i < 16; i++)
-		acc |= addr[i];
-	return acc == 0;
-}
-
-static __always_inline int ipv6_addr_equal(const __u8 a[16], const __u8 b[16])
-{
-	int i;
-	__u8 diff = 0;
-
-#pragma clang loop unroll(full)
-	for (i = 0; i < 16; i++)
-		diff |= a[i] ^ b[i];
-	return diff == 0;
-}
-
-static __always_inline __u32 mix_ipv6_addr_seed(__u32 seed, const __u8 addr[16])
-{
-	int i;
-
-#pragma clang loop unroll(full)
-	for (i = 0; i < 16; i++) {
-		seed ^= ((__u32)addr[i]) << ((i & 3) * 8);
-		seed *= 2246822519U;
-		seed ^= seed >> 13;
-	}
-	return seed;
 }
 
 static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ctx *ctx)

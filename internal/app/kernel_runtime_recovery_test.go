@@ -153,12 +153,12 @@ func TestNextKernelAttachmentHealState(t *testing.T) {
 	}
 
 	nextIssue, recovered, heal, healAt = nextKernelAttachmentHealState(nextIssue, healAt, now.Add(kernelAttachmentHealBackoff), nextIssue)
-	if !heal || !healAt.Equal(now.Add(kernelAttachmentHealBackoff)) {
-		t.Fatalf("backoff expiry did not request a new heal: heal=%v healAt=%v", heal, healAt)
+	if nextIssue != "tc(active_entries=4)" || recovered != "" || !heal || !healAt.Equal(now.Add(kernelAttachmentHealBackoff)) {
+		t.Fatalf("backoff expiry state = (%q, %q, %v, %v), want current issue + heal at expiry", nextIssue, recovered, heal, healAt)
 	}
 
 	nextIssue, recovered, heal, healAt = nextKernelAttachmentHealState(nextIssue, healAt, now.Add(kernelAttachmentHealBackoff), "")
-	if nextIssue != "" || recovered == "" || heal {
-		t.Fatalf("recovery state = (%q, %q, %v), want cleared issue with recovery notice", nextIssue, recovered, heal)
+	if nextIssue != "" || recovered == "" || heal || !healAt.Equal(now.Add(kernelAttachmentHealBackoff)) {
+		t.Fatalf("recovery state = (%q, %q, %v, %v), want cleared issue with recovery notice and unchanged heal timestamp", nextIssue, recovered, heal, healAt)
 	}
 }

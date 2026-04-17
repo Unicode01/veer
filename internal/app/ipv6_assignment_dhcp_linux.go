@@ -43,18 +43,18 @@ const (
 var dhcpv6AllServersAndRelays = net.ParseIP("ff02::1:2")
 
 type ipv6DHCPv6Server struct {
-	mu            sync.Mutex
-	config        ipv6AssignmentDHCPv6Config
-	stopCh        chan struct{}
-	doneCh        chan struct{}
+	mu             sync.Mutex
+	config         ipv6AssignmentDHCPv6Config
+	stopCh         chan struct{}
+	doneCh         chan struct{}
 	currentFD      int
 	listeningSince time.Time
-	lastIssueText string
-	lastIssueAt   time.Time
-	lastSeenText  string
-	lastSeenAt    time.Time
-	replyTotal    uint64
-	lastReplyAt   time.Time
+	lastIssueText  string
+	lastIssueAt    time.Time
+	lastSeenText   string
+	lastSeenAt     time.Time
+	replyTotal     uint64
+	lastReplyAt    time.Time
 }
 
 func newIPv6DHCPv6Server(config ipv6AssignmentDHCPv6Config) *ipv6DHCPv6Server {
@@ -186,15 +186,6 @@ func (srv *ipv6DHCPv6Server) run() {
 		default:
 		}
 	}
-}
-
-func (srv *ipv6DHCPv6Server) replyCount() uint64 {
-	if srv == nil {
-		return 0
-	}
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	return srv.replyTotal
 }
 
 func (srv *ipv6DHCPv6Server) logIssue(text string) {

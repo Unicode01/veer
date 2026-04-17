@@ -2525,16 +2525,6 @@ func waitForDataplanePerfRule(t *testing.T, apiBase string, mode dataplanePerfMo
 	return dataplanePerfRuleStatus{}
 }
 
-func runDataplanePerfClientBenchmark(t *testing.T, clientNS string, connections int, concurrency int, bytesPerConn int64, ioChunkBytes int64, steadySeconds int) dataplanePerfClientResult {
-	t.Helper()
-
-	result, err := runDataplanePerfClientBenchmarkRaw(clientNS, connections, concurrency, bytesPerConn, ioChunkBytes, steadySeconds)
-	if err != nil {
-		t.Fatalf("client benchmark failed: %v", err)
-	}
-	return result
-}
-
 func runDataplanePerfClientBenchmarkRaw(clientNS string, connections int, concurrency int, bytesPerConn int64, ioChunkBytes int64, steadySeconds int) (dataplanePerfClientResult, error) {
 	return runDataplanePerfClientBenchmarkRawToTarget(
 		clientNS,

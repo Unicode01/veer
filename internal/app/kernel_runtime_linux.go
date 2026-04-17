@@ -1798,10 +1798,6 @@ func kernelAttachmentKeyForFilter(filter *netlink.BpfFilter) kernelAttachmentKey
 	}
 }
 
-func desiredKernelAttachmentPlans(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProg *ebpf.Program, replyProg *ebpf.Program) []kernelAttachmentPlan {
-	return desiredKernelAttachmentPlansDualStack(forwardIfRules, replyIfRules, forwardProg, replyProg, nil, nil)
-}
-
 func desiredKernelAttachmentPlansDualStack(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProg *ebpf.Program, replyProg *ebpf.Program, forwardProgV6 *ebpf.Program, replyProgV6 *ebpf.Program) []kernelAttachmentPlan {
 	plans := make([]kernelAttachmentPlan, 0, (len(forwardIfRules)+len(replyIfRules))*2)
 	for ifindex := range forwardIfRules {
@@ -2094,10 +2090,6 @@ func preparedKernelRuleSetsEqualByMatchKey(oldItems []preparedKernelRule, nextIt
 	return true
 }
 
-func preparedKernelRuleGroupsEqual(a []preparedKernelRule, b []preparedKernelRule) bool {
-	return preparedKernelRuleGroupsEqualBy(a, b, samePreparedKernelRuleDataplane)
-}
-
 func preparedKernelRuleGroupsEqualBy(a []preparedKernelRule, b []preparedKernelRule, equal func(preparedKernelRule, preparedKernelRule) bool) bool {
 	if len(a) != len(b) {
 		return false
@@ -2205,86 +2197,6 @@ func purgeKernelFlowsForRuleIDsV6(rulesMap, flowsMap, natPortsMap *ebpf.Map, rul
 		deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap, item, corrections)
 	}
 	return corrections, len(stale), nil
-}
-
-func purgeAllKernelConnectionState(refs kernelRuntimeMapRefs) (map[uint32]kernelRuleStats, int, int, error) {
-	corrections := make(map[uint32]kernelRuleStats)
-	deletedFlows := 0
-	deletedNAT := 0
-
-	v4Corrections, v4DeletedFlows, v4DeletedNAT, err := purgeAllKernelConnectionStateV4(refs.rulesV4, refs.flowsV4, refs.natV4)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	mergeKernelStatsCorrections(corrections, v4Corrections)
-	deletedFlows += v4DeletedFlows
-	deletedNAT += v4DeletedNAT
-
-	v6Corrections, v6DeletedFlows, v6DeletedNAT, err := purgeAllKernelConnectionStateV6(refs.rulesV6, refs.flowsV6, refs.natV6)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	mergeKernelStatsCorrections(corrections, v6Corrections)
-	deletedFlows += v6DeletedFlows
-	deletedNAT += v6DeletedNAT
-
-	return corrections, deletedFlows, deletedNAT, nil
-}
-
-func purgeAllKernelConnectionStateV4(rulesMap, flowsMap, natPortsMap *ebpf.Map) (map[uint32]kernelRuleStats, int, int, error) {
-	corrections := make(map[uint32]kernelRuleStats)
-	if flowsMap == nil {
-		_, deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
-		return corrections, 0, deletedNAT, err
-	}
-
-	iter := flowsMap.Iterate()
-	stale := make([]staleKernelFlow, 0)
-	var key tcFlowKeyV4
-	var value tcFlowValueV4
-	for iter.Next(&key, &value) {
-		stale = append(stale, staleKernelFlow{key: key, value: value})
-	}
-	if err := iter.Err(); err != nil {
-		return nil, 0, 0, fmt.Errorf("iterate kernel flows map for full purge: %w", err)
-	}
-
-	for _, item := range stale {
-		deleteStaleKernelFlow(rulesMap, flowsMap, natPortsMap, item, corrections)
-	}
-	_, deletedNAT, err := pruneOrphanKernelNATReservations(natPortsMap, nil)
-	if err != nil {
-		return nil, len(stale), 0, err
-	}
-	return corrections, len(stale), deletedNAT, nil
-}
-
-func purgeAllKernelConnectionStateV6(rulesMap, flowsMap, natPortsMap *ebpf.Map) (map[uint32]kernelRuleStats, int, int, error) {
-	corrections := make(map[uint32]kernelRuleStats)
-	if flowsMap == nil {
-		_, deletedNAT, err := pruneOrphanKernelNATReservationsV6(natPortsMap, nil)
-		return corrections, 0, deletedNAT, err
-	}
-
-	iter := flowsMap.Iterate()
-	stale := make([]staleKernelFlowV6, 0)
-	var key tcFlowKeyV6
-	var value tcFlowValueV6
-	for iter.Next(&key, &value) {
-		stale = append(stale, staleKernelFlowV6{key: key, value: value})
-	}
-	if err := iter.Err(); err != nil {
-		return nil, 0, 0, fmt.Errorf("iterate kernel IPv6 flows map for full purge: %w", err)
-	}
-
-	for _, item := range stale {
-		deleteStaleKernelFlowV6(rulesMap, flowsMap, natPortsMap, item, corrections)
-	}
-	_, deletedNAT, err := pruneOrphanKernelNATReservationsV6(natPortsMap, nil)
-	if err != nil {
-		return nil, len(stale), 0, err
-	}
-	return corrections, len(stale), deletedNAT, nil
 }
 
 func (rt *linuxKernelRuleRuntime) currentMapCapacitiesLocked() kernelMapCapacities {
@@ -2854,13 +2766,6 @@ func tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(refs kernelRuntimeMapRef
 		return flags & (tcFlowMigrationFlagV4Old | tcFlowMigrationFlagV6Old), nil
 	}
 	return tcOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
-}
-
-func tcOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, error) {
-	if coll == nil || coll.Maps == nil {
-		return 0, nil
-	}
-	return tcOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefsFromCollection(coll))
 }
 
 func tcOldFlowMigrationFlagsFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (uint32, error) {
@@ -3618,10 +3523,6 @@ func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(forwardIfRules map[in
 	)
 }
 
-func kernelAttachmentExists(key kernelAttachmentKey) bool {
-	return kernelAttachmentPresence([]kernelAttachmentKey{key})[key]
-}
-
 func updateKernelMapEntries[K any, V any](m *ebpf.Map, keys []K, values []V) error {
 	if m == nil {
 		return fmt.Errorf("kernel map is nil")
@@ -4038,14 +3939,6 @@ func kernelProtocolSupported(protocol string) bool {
 	}
 }
 
-func parseIPv4Uint32(text string) (uint32, error) {
-	ip, err := parseKernelExplicitIP(text, ipFamilyIPv4)
-	if err != nil {
-		return 0, err
-	}
-	return ipv4BytesToUint32(ip), nil
-}
-
 func parseKernelInboundIPv4Uint32(text string) (uint32, error) {
 	ip, wildcard, err := parseKernelInboundIP(text, ipFamilyIPv4)
 	if err != nil {
@@ -4257,14 +4150,46 @@ func resolveKernelRouteSourceIPv4(link netlink.Link, backendIP net.IP) (net.IP, 
 	return nil, fmt.Errorf("route lookup returned no usable source IPv4")
 }
 
-func ipv4ToUint32(text string) uint32 {
-	ip := net.ParseIP(text)
-	if ip == nil {
-		return 0
+func resolveKernelTransientFallbackBackendMAC(rule Rule, reasonClass string) string {
+	if reasonClass != "fdb_missing" {
+		return ""
 	}
-	ip = ip.To4()
-	if ip == nil {
-		return 0
+	if strings.TrimSpace(rule.OutInterface) == "" {
+		return ""
 	}
-	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
+	backendIP := net.ParseIP(strings.TrimSpace(rule.OutIP)).To4()
+	if backendIP == nil {
+		return ""
+	}
+
+	link, err := netlink.LinkByName(strings.TrimSpace(rule.OutInterface))
+	if err != nil || link == nil || link.Attrs() == nil || !isXDPBridgeLink(link) {
+		return ""
+	}
+	backendMAC, err := lookupBridgeNeighborMAC(link.Attrs().Index, backendIP)
+	if err != nil || !isValidHardwareAddr(backendMAC) {
+		return ""
+	}
+	return normalizeKernelTransientFallbackBackendMAC(backendMAC.String())
+}
+
+func syncKernelNATConfigMap(m *ebpf.Map, portMin int, portMax int) error {
+	if m == nil {
+		return nil
+	}
+
+	portMin, portMax, err := normalizeKernelNATPortRange(portMin, portMax)
+	if err != nil {
+		return err
+	}
+
+	key := uint32(0)
+	value := tcNATConfigValueV4{
+		PortMin: uint32(portMin),
+		PortMax: uint32(portMax),
+	}
+	if err := m.Put(key, value); err != nil {
+		return fmt.Errorf("sync kernel nat config map: %w", err)
+	}
+	return nil
 }

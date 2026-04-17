@@ -460,11 +460,6 @@ func waitForTCIPv6IntegrationRange(t *testing.T, apiBase string, proto string) {
 	t.Fatalf("IPv6 range %s did not enter running/%s state in time", proto, ruleEngineKernel)
 }
 
-func runTCIPv6IntegrationProbe(t *testing.T, topology dataplanePerfTopology, proto string) error {
-	t.Helper()
-	return runTCIPv6IntegrationProbePorts(t, topology, proto, tcIPv6IntegrationFrontPort, tcIPv6IntegrationBackendPort)
-}
-
 func runTCIPv6IntegrationProbePorts(t *testing.T, topology dataplanePerfTopology, proto string, frontPort int, backendPort int) error {
 	t.Helper()
 

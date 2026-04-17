@@ -725,10 +725,6 @@ func createManagedNetworkIntegrationNetwork(t *testing.T, apiBase string, topolo
 	return createManagedNetworkIntegrationNetworkWithIPv6Settings(t, apiBase, topology, ipv6AssignmentIntegrationParentPrefix, managedNetworkIPv6AssignmentModeSingle128)
 }
 
-func createManagedNetworkIntegrationNetworkWithIPv6Mode(t *testing.T, apiBase string, topology egressNATIntegrationTopology, ipv6AssignmentMode string) ManagedNetwork {
-	return createManagedNetworkIntegrationNetworkWithIPv6Settings(t, apiBase, topology, ipv6AssignmentIntegrationParentPrefix, ipv6AssignmentMode)
-}
-
 func createManagedNetworkIntegrationNetworkWithIPv6Settings(t *testing.T, apiBase string, topology egressNATIntegrationTopology, ipv6ParentPrefix string, ipv6AssignmentMode string) ManagedNetwork {
 	t.Helper()
 
@@ -807,48 +803,6 @@ func createManagedNetworkIntegrationReservation(t *testing.T, apiBase string, ne
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("create managed network reservation unexpected status %d: %s", resp.StatusCode, string(body))
 	}
-}
-
-func waitForManagedNetworkIntegrationPreview(t *testing.T, apiBase string, networkID int64, topology egressNATIntegrationTopology) ManagedNetworkStatus {
-	t.Helper()
-
-	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		req, err := http.NewRequest(http.MethodGet, apiBase+"/api/managed-networks", nil)
-		if err != nil {
-			t.Fatalf("build list managed networks request: %v", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+dataplanePerfToken)
-		resp, err := client.Do(req)
-		if err != nil {
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		var items []ManagedNetworkStatus
-		err = json.NewDecoder(resp.Body).Decode(&items)
-		resp.Body.Close()
-		if err != nil {
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		for _, item := range items {
-			if item.ID != networkID {
-				continue
-			}
-			if item.ChildInterfaceCount == 1 &&
-				len(item.ChildInterfaces) == 1 &&
-				item.ChildInterfaces[0] == topology.ChildHostIF &&
-				item.GeneratedIPv6AssignmentCount == 1 &&
-				item.GeneratedEgressNAT &&
-				item.ReservationCount == 1 {
-				return item
-			}
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("managed network #%d preview did not become ready in time", networkID)
-	return ManagedNetworkStatus{}
 }
 
 func waitForManagedNetworkIntegrationReady(t *testing.T, apiBase string, networkID int64, topology egressNATIntegrationTopology) ManagedNetworkStatus {
@@ -1449,7 +1403,7 @@ func ensureManagedNetworkIntegrationIPv6AddressInNamespace(namespace string, ifa
 	if err != nil {
 		return err
 	}
-	defer handle.Delete()
+	defer handle.Close()
 
 	link, err := handle.LinkByName(strings.TrimSpace(ifaceName))
 	if err != nil {
@@ -1484,7 +1438,7 @@ func ensureManagedNetworkIntegrationIPv6DefaultRouteInNamespace(namespace string
 	if err != nil {
 		return err
 	}
-	defer handle.Delete()
+	defer handle.Close()
 
 	link, err := handle.LinkByName(strings.TrimSpace(ifaceName))
 	if err != nil {

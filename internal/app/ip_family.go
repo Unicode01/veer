@@ -1,15 +1,15 @@
 package app
 
 import (
-	"fmt"
 	"net"
 	"net/netip"
-	"strings"
+
+	"forward/internal/netutil"
 )
 
 const (
-	ipFamilyIPv4 = "ipv4"
-	ipFamilyIPv6 = "ipv6"
+	ipFamilyIPv4 = netutil.FamilyIPv4
+	ipFamilyIPv6 = netutil.FamilyIPv6
 )
 
 type ipLiteralPairInfo struct {
@@ -18,75 +18,39 @@ type ipLiteralPairInfo struct {
 }
 
 func normalizeIPLiteral(value string) (string, error) {
-	ip := parseIPLiteral(value)
-	if ip == nil {
-		return "", fmt.Errorf("must be a valid IP address")
-	}
-	return canonicalIPLiteral(ip), nil
+	return netutil.NormalizeIPLiteral(value)
 }
 
 func parseIPLiteral(value string) net.IP {
-	text := strings.TrimSpace(value)
-	if text == "" {
-		return nil
-	}
-	return net.ParseIP(text)
+	return netutil.ParseIPLiteral(value)
 }
 
 func parseIPLiteralAddr(value string) (netip.Addr, bool) {
-	text := strings.TrimSpace(value)
-	if text == "" {
-		return netip.Addr{}, false
-	}
-	addr, err := netip.ParseAddr(text)
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	return addr, true
+	return netutil.ParseIPLiteralAddr(value)
 }
 
 func canonicalIPLiteral(ip net.IP) string {
-	if ip == nil {
-		return ""
-	}
-	if ip4 := ip.To4(); ip4 != nil {
-		return ip4.String()
-	}
-	return ip.String()
+	return netutil.CanonicalIPLiteral(ip)
 }
 
 func ipLiteralFamilyFromAddr(addr netip.Addr) string {
-	if !addr.IsValid() {
-		return ""
-	}
-	if addr.Is4() || addr.Is4In6() {
-		return ipFamilyIPv4
-	}
-	return ipFamilyIPv6
+	return netutil.IPLiteralFamilyFromAddr(addr)
 }
 
 func ipLiteralFamily(value string) string {
-	addr, ok := parseIPLiteralAddr(value)
-	if !ok {
-		return ""
-	}
-	return ipLiteralFamilyFromAddr(addr)
+	return netutil.IPLiteralFamily(value)
 }
 
 func ipLiteralIsWildcard(value string) bool {
-	addr, ok := parseIPLiteralAddr(value)
-	return ok && addr.IsUnspecified()
+	return netutil.IPLiteralIsWildcard(value)
 }
 
 func analyzeIPLiteralPair(a, b string) ipLiteralPairInfo {
-	info := ipLiteralPairInfo{}
-	if addr, ok := parseIPLiteralAddr(a); ok {
-		info.firstFamily = ipLiteralFamilyFromAddr(addr)
+	info := netutil.AnalyzeIPLiteralPair(a, b)
+	return ipLiteralPairInfo{
+		firstFamily:  info.FirstFamily,
+		secondFamily: info.SecondFamily,
 	}
-	if addr, ok := parseIPLiteralAddr(b); ok {
-		info.secondFamily = ipLiteralFamilyFromAddr(addr)
-	}
-	return info
 }
 
 func (info ipLiteralPairInfo) mixedFamily() bool {
@@ -97,72 +61,73 @@ func (info ipLiteralPairInfo) usesIPv6() bool {
 	return info.firstFamily == ipFamilyIPv6 || info.secondFamily == ipFamilyIPv6
 }
 
-func ipLiteralUsesIPv6(values ...string) bool {
-	for _, value := range values {
-		if ipLiteralFamily(value) == ipFamilyIPv6 {
-			return true
-		}
-	}
-	return false
-}
-
 func ipLiteralPairIsPureIPv4(a, b string) bool {
-	return ipLiteralFamily(a) == ipFamilyIPv4 && ipLiteralFamily(b) == ipFamilyIPv4
-}
-
-func ipLiteralPairIsMixedFamily(a, b string) bool {
-	return analyzeIPLiteralPair(a, b).mixedFamily()
+	return netutil.IPLiteralPairIsPureIPv4(a, b)
 }
 
 func isVisibleInterfaceIP(ip net.IP) bool {
-	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
-		return false
-	}
-	if ip.To4() == nil && ip.IsLinkLocalUnicast() {
-		return false
-	}
-	return true
+	return netutil.IsVisibleInterfaceIP(ip)
 }
 
 func tcpListenNetworkForIP(bindIP string) string {
-	switch ipLiteralFamily(bindIP) {
-	case ipFamilyIPv6:
-		return "tcp6"
-	case ipFamilyIPv4:
-		return "tcp4"
-	default:
-		return "tcp"
-	}
+	return netutil.TCPListenNetworkForIP(bindIP)
 }
 
 func tcpListenNetworkForAddr(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "tcp"
-	}
-	return tcpListenNetworkForIP(host)
+	return netutil.TCPListenNetworkForAddr(addr)
 }
 
 func udpListenNetworkForIP(bindIP string) string {
-	switch ipLiteralFamily(bindIP) {
-	case ipFamilyIPv6:
-		return "udp6"
-	case ipFamilyIPv4:
-		return "udp4"
-	default:
-		return "udp"
-	}
+	return netutil.UDPListenNetworkForIP(bindIP)
 }
 
 func udpNetworkForIP(ip net.IP) string {
-	if ip == nil {
-		return "udp"
-	}
-	if ip.To4() != nil {
-		return "udp4"
-	}
-	if ip.To16() != nil {
-		return "udp6"
-	}
-	return "udp"
+	return netutil.UDPNetworkForIP(ip)
+}
+
+func ipv4BytesToUint32(ip net.IP) uint32 {
+	return netutil.IPv4BytesToUint32(ip)
+}
+
+func kernelFamilyLabel(family string) string {
+	return netutil.KernelFamilyLabel(family)
+}
+
+func normalizeKernelFamilyIP(ip net.IP, family string) net.IP {
+	return netutil.NormalizeKernelFamilyIP(ip, family)
+}
+
+func zeroKernelFamilyIP(family string) net.IP {
+	return netutil.ZeroKernelFamilyIP(family)
+}
+
+func parseKernelExplicitIP(text string, family string) (net.IP, error) {
+	return netutil.ParseKernelExplicitIP(text, family)
+}
+
+func parseKernelInboundIP(text string, family string) (net.IP, bool, error) {
+	return netutil.ParseKernelInboundIP(text, family)
+}
+
+func splitKernelUsableSourceIPs(addrs []net.IP, family string) ([]net.IP, []net.IP) {
+	return netutil.SplitKernelUsableSourceIPs(addrs, family)
+}
+
+func selectKernelAutoSourceIP(ifaceName string, family string, usable []net.IP, linkLocal []net.IP) (net.IP, error) {
+	return netutil.SelectKernelAutoSourceIP(ifaceName, family, usable, linkLocal)
+}
+
+const (
+	kernelDefaultNATPortMin     = netutil.KernelDefaultNATPortMin
+	kernelDefaultNATPortMax     = netutil.KernelDefaultNATPortMax
+	kernelMinimumAllowedNATPort = netutil.KernelMinimumAllowedNATPort
+	kernelMaximumAllowedNATPort = netutil.KernelMaximumAllowedNATPort
+)
+
+func normalizeKernelNATPortRange(portMin int, portMax int) (int, int, error) {
+	return netutil.NormalizeKernelNATPortRange(portMin, portMax)
+}
+
+func effectiveKernelNATPortRange(portMin int, portMax int) (int, int) {
+	return netutil.EffectiveKernelNATPortRange(portMin, portMax)
 }

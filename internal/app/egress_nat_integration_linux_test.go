@@ -1731,43 +1731,6 @@ func collectEgressNATPacketCaptures(captures []*egressNATPacketCapture) string {
 	return strings.Join(parts, "\n")
 }
 
-func expectEgressNATIntegrationProbeFailure(t *testing.T, topology egressNATIntegrationTopology, proto string) {
-	t.Helper()
-
-	observedFile := filepath.Join(t.TempDir(), "observed-fail-"+proto+".txt")
-	targetAddr := net.JoinHostPort(egressNATBackendAddr, strconv.Itoa(egressNATProbePort))
-	if proto == "icmp" {
-		targetAddr = egressNATBackendAddr
-	}
-
-	backendCmd, backendLogs := startEgressNATBackendHelperInNamespace(t, topology.BackendNS, proto, targetAddr, observedFile)
-	defer func() {
-		if backendCmd != nil && backendCmd.ProcessState == nil {
-			stopDataplanePerfHelper(t, backendCmd)
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-
-	clientCmd := exec.CommandContext(ctx, "ip", "netns", "exec", topology.ClientNS, os.Args[0], "-test.run", "TestEgressNATIntegrationHelperProcess", "-test.v=false")
-	clientCmd.Env = append(os.Environ(),
-		egressNATHelperEnv+"=1",
-		egressNATHelperRoleEnv+"="+egressNATHelperRoleClient,
-		egressNATHelperProtocolEnv+"="+proto,
-		egressNATHelperTargetAddrEnv+"="+targetAddr,
-	)
-	output, err := clientCmd.CombinedOutput()
-	if err == nil {
-		waitForEgressNATHelperExit(t, backendCmd, proto, backendLogs.String())
-		t.Fatalf("%s client helper unexpectedly succeeded while failure was expected\nclient output:\n%s\nbackend logs:\n%s", proto, string(output), backendLogs.String())
-	}
-	if _, statErr := os.Stat(observedFile); statErr == nil {
-		waitForEgressNATHelperExit(t, backendCmd, proto, backendLogs.String())
-		t.Fatalf("%s probe unexpectedly reached backend while failure was expected\nclient output:\n%s\nbackend logs:\n%s", proto, string(output), backendLogs.String())
-	}
-}
-
 func runEgressNATUDPMappingProbe(t *testing.T, topology egressNATIntegrationTopology, targetPort int, localPort int) string {
 	t.Helper()
 
@@ -1807,10 +1770,6 @@ func runEgressNATUDPMappingProbe(t *testing.T, topology egressNATIntegrationTopo
 		t.Fatalf("udp mapping read observed peer file: %v\n%s", err, backendLogs.String())
 	}
 	return strings.TrimSpace(string(data))
-}
-
-func startEgressNATBackendHelper(t *testing.T, topology egressNATIntegrationTopology, proto string, listenAddr string, observedFile string) (*exec.Cmd, *bytes.Buffer) {
-	return startEgressNATBackendHelperInNamespace(t, topology.BackendNS, proto, listenAddr, observedFile)
 }
 
 func startEgressNATBackendHelperInNamespace(t *testing.T, namespace string, proto string, listenAddr string, observedFile string) (*exec.Cmd, *bytes.Buffer) {

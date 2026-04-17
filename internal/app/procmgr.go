@@ -816,7 +816,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load ipv6 assignments: %v", ipv6AssignmentLoadErr)
 	}
 	egressNATSnapshot := egressNATInterfaceSnapshot{}
-	dynamicEgressNATParents := map[string]struct{}{}
+	var dynamicEgressNATParents map[string]struct{}
 	needsManagedNetworkCompilation := len(managedNetworks) > 0
 	if len(egressNATs) > 0 || needsManagedNetworkCompilation {
 		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
@@ -1347,14 +1347,6 @@ func (a kernelOwnerPlanAccumulator) Result() ruleDataplanePlan {
 		a.plan.EffectiveEngine = ruleEngineKernel
 	}
 	return a.plan
-}
-
-func aggregateKernelOwnerPlan(preferred string, entryPlans []ruleDataplanePlan) ruleDataplanePlan {
-	acc := newKernelOwnerPlanAccumulator(preferred)
-	for _, item := range entryPlans {
-		acc.Add(item)
-	}
-	return acc.Result()
 }
 
 func sampleKernelRangePlan(pr PortRange, variants []string, planner *ruleDataplanePlanner, preferred string, kernelReason string) rangeDataplanePlan {
@@ -2830,19 +2822,6 @@ func (pm *ProcessManager) startRuleWorker(workerIndex int) error {
 	return nil
 }
 
-func (pm *ProcessManager) stopRuleWorker(workerIndex int) {
-	pm.mu.Lock()
-	wi, ok := pm.ruleWorkers[workerIndex]
-	if !ok {
-		pm.mu.Unlock()
-		return
-	}
-	delete(pm.ruleWorkers, workerIndex)
-	pm.mu.Unlock()
-
-	killWorkerInfo(wi)
-}
-
 func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Scanner, workerIndex int, workerHash string) {
 	pm.mu.Lock()
 	wi, ok := pm.rangeWorkers[workerIndex]
@@ -3025,19 +3004,6 @@ func (pm *ProcessManager) startRangeWorker(workerIndex int) error {
 	return nil
 }
 
-func (pm *ProcessManager) stopRangeWorker(workerIndex int) {
-	pm.mu.Lock()
-	wi, ok := pm.rangeWorkers[workerIndex]
-	if !ok {
-		pm.mu.Unlock()
-		return
-	}
-	delete(pm.rangeWorkers, workerIndex)
-	pm.mu.Unlock()
-
-	killWorkerInfo(wi)
-}
-
 func (pm *ProcessManager) sendRuleConfig(wi *WorkerInfo) {
 	if wi == nil {
 		return
@@ -3086,24 +3052,6 @@ func (pm *ProcessManager) sendSitesConfig(wi *WorkerInfo, sites []Site) {
 	wi.writeMu.Lock()
 	writeIPC(conn, IPCMessage{Type: "sites_config", Sites: sites, BinaryHash: binHash})
 	wi.writeMu.Unlock()
-}
-
-func (pm *ProcessManager) startSharedProxyIfNeeded() {
-	sites, err := dbGetSites(pm.db)
-	if err != nil || len(sites) == 0 {
-		return
-	}
-	hasEnabled := false
-	for _, s := range sites {
-		if s.Enabled {
-			hasEnabled = true
-			break
-		}
-	}
-	if !hasEnabled {
-		return
-	}
-	pm.startSharedProxy()
 }
 
 func (pm *ProcessManager) startSharedProxy() {
@@ -4059,9 +4007,7 @@ func (pm *ProcessManager) stopAll() {
 	for _, wi := range pm.rangeWorkers {
 		activeWorkers = append(activeWorkers, wi)
 	}
-	for _, wi := range pm.drainingWorkers {
-		drainingWorkers = append(drainingWorkers, wi)
-	}
+	drainingWorkers = append(drainingWorkers, pm.drainingWorkers...)
 	if pm.sharedProxy != nil {
 		activeWorkers = append(activeWorkers, pm.sharedProxy)
 	}

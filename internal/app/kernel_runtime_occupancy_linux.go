@@ -90,18 +90,6 @@ func snapshotKernelOccupancyEntriesWithCapacities(occupancyMap *ebpf.Map, flowCa
 	return flowsEntries, natEntries, nil
 }
 
-func snapshotKernelOccupancyEntries(occupancyMap *ebpf.Map, flowsMap *ebpf.Map, natMap *ebpf.Map, includeNAT bool) (int, int, error) {
-	flowCapacity := 0
-	if flowsMap != nil {
-		flowCapacity = int(flowsMap.MaxEntries())
-	}
-	natCapacity := 0
-	if natMap != nil {
-		natCapacity = int(natMap.MaxEntries())
-	}
-	return snapshotKernelOccupancyEntriesWithCapacities(occupancyMap, flowCapacity, natCapacity, includeNAT)
-}
-
 func snapshotKernelRuntimeOccupancyEntries(refs kernelRuntimeMapRefs, includeNAT bool) (int, int, error) {
 	return snapshotKernelOccupancyEntriesWithCapacities(
 		refs.occupancy,
