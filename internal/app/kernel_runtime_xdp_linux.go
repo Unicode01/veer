@@ -783,7 +783,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	if err := syncKernelOccupancyMapFromCollectionExact(coll, useNATMaps); err != nil {
 		log.Printf("xdp dataplane reconcile: sync xdp occupancy counters failed before attach: %v", err)
 	}
-	if err := syncKernelNATConfigMap(pieces.natConfigV4, rt.natPortMin, rt.natPortMax); err != nil {
+	if err := syncKernelNATConfigMap(pieces.natConfigV4, rt.natPortMin, rt.natPortMax, 0); err != nil {
 		coll.Close()
 		msg := fmt.Sprintf("sync xdp nat config map: %v", err)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {

@@ -25,6 +25,7 @@ package app
 //   FORWARD_PERF_BACKEND_WORKERS
 //   FORWARD_PERF_DISABLE_OFFLOADS  (default: keep veth offloads enabled)
 //   FORWARD_PERF_TXQLEN            (default: 10000)
+//   FORWARD_PERF_EXPERIMENTAL      (comma-separated experimental feature names)
 //
 // The test builds a temporary forward binary, creates two network namespaces plus
 // two veth pairs, then benchmarks userspace, tc, and xdp sequentially with the
@@ -58,38 +59,39 @@ import (
 )
 
 const (
-	dataplanePerfEnableEnv      = "FORWARD_RUN_PERF_TEST"
-	dataplanePerfConnEnv        = "FORWARD_PERF_CONNECTIONS"
-	dataplanePerfConnSeriesEnv  = "FORWARD_PERF_CONNECTION_SERIES"
-	dataplanePerfConcurrencyEnv = "FORWARD_PERF_CONCURRENCY"
-	dataplanePerfConcSeriesEnv  = "FORWARD_PERF_CONCURRENCY_SERIES"
-	dataplanePerfModesEnv       = "FORWARD_PERF_MODES"
-	dataplanePerfProtocolEnv    = "FORWARD_PERF_PROTOCOL"
-	dataplanePerfTCPModeEnv     = "FORWARD_PERF_TCP_MODE"
-	dataplanePerfBytesEnv       = "FORWARD_PERF_BYTES_PER_CONN"
-	dataplanePerfIOChunkEnv     = "FORWARD_PERF_IO_CHUNK_BYTES"
-	dataplanePerfTotalBytesEnv  = "FORWARD_PERF_TOTAL_PAYLOAD_BYTES"
-	dataplanePerfSteadyEnv      = "FORWARD_PERF_STEADY_SECONDS"
-	dataplanePerfWarmupConnEnv  = "FORWARD_PERF_WARMUP_CONNECTIONS"
-	dataplanePerfWarmupBytesEnv = "FORWARD_PERF_WARMUP_BYTES_PER_CONN"
-	dataplanePerfDeadlineEnv    = "FORWARD_PERF_CONN_DEADLINE_MS"
-	dataplanePerfIdleEnv        = "FORWARD_PERF_CONN_IDLE_MS"
-	dataplanePerfBackendWorkEnv = "FORWARD_PERF_BACKEND_WORKERS"
-	dataplanePerfOffloadsEnv    = "FORWARD_PERF_DISABLE_OFFLOADS"
-	dataplanePerfTXQLenEnv      = "FORWARD_PERF_TXQLEN"
-	dataplanePerfTCDiagEnv      = "FORWARD_PERF_TC_DIAG"
-	dataplanePerfTCDiagVerbEnv  = "FORWARD_PERF_TC_DIAG_VERBOSE"
-	dataplanePerfHelperEnv      = "FORWARD_PERF_HELPER"
-	dataplanePerfHelperRoleEnv  = "FORWARD_PERF_HELPER_ROLE"
-	dataplanePerfTargetEnv      = "FORWARD_PERF_TARGET_ADDR"
-	dataplanePerfBackendEnv     = "FORWARD_PERF_BACKEND_ADDR"
-	dataplanePerfToken          = "forward-perf-token"
-	dataplanePerfFrontAddr      = "198.18.0.1"
-	dataplanePerfClientAddr     = "198.18.0.2"
-	dataplanePerfBackendHost    = "198.19.0.1"
-	dataplanePerfBackendAddr    = "198.19.0.2"
-	dataplanePerfFrontPort      = 10000
-	dataplanePerfBackendPort    = 20000
+	dataplanePerfEnableEnv       = "FORWARD_RUN_PERF_TEST"
+	dataplanePerfConnEnv         = "FORWARD_PERF_CONNECTIONS"
+	dataplanePerfConnSeriesEnv   = "FORWARD_PERF_CONNECTION_SERIES"
+	dataplanePerfConcurrencyEnv  = "FORWARD_PERF_CONCURRENCY"
+	dataplanePerfConcSeriesEnv   = "FORWARD_PERF_CONCURRENCY_SERIES"
+	dataplanePerfModesEnv        = "FORWARD_PERF_MODES"
+	dataplanePerfProtocolEnv     = "FORWARD_PERF_PROTOCOL"
+	dataplanePerfTCPModeEnv      = "FORWARD_PERF_TCP_MODE"
+	dataplanePerfBytesEnv        = "FORWARD_PERF_BYTES_PER_CONN"
+	dataplanePerfIOChunkEnv      = "FORWARD_PERF_IO_CHUNK_BYTES"
+	dataplanePerfTotalBytesEnv   = "FORWARD_PERF_TOTAL_PAYLOAD_BYTES"
+	dataplanePerfSteadyEnv       = "FORWARD_PERF_STEADY_SECONDS"
+	dataplanePerfWarmupConnEnv   = "FORWARD_PERF_WARMUP_CONNECTIONS"
+	dataplanePerfWarmupBytesEnv  = "FORWARD_PERF_WARMUP_BYTES_PER_CONN"
+	dataplanePerfDeadlineEnv     = "FORWARD_PERF_CONN_DEADLINE_MS"
+	dataplanePerfIdleEnv         = "FORWARD_PERF_CONN_IDLE_MS"
+	dataplanePerfBackendWorkEnv  = "FORWARD_PERF_BACKEND_WORKERS"
+	dataplanePerfOffloadsEnv     = "FORWARD_PERF_DISABLE_OFFLOADS"
+	dataplanePerfTXQLenEnv       = "FORWARD_PERF_TXQLEN"
+	dataplanePerfTCDiagEnv       = "FORWARD_PERF_TC_DIAG"
+	dataplanePerfTCDiagVerbEnv   = "FORWARD_PERF_TC_DIAG_VERBOSE"
+	dataplanePerfExperimentalEnv = "FORWARD_PERF_EXPERIMENTAL"
+	dataplanePerfHelperEnv       = "FORWARD_PERF_HELPER"
+	dataplanePerfHelperRoleEnv   = "FORWARD_PERF_HELPER_ROLE"
+	dataplanePerfTargetEnv       = "FORWARD_PERF_TARGET_ADDR"
+	dataplanePerfBackendEnv      = "FORWARD_PERF_BACKEND_ADDR"
+	dataplanePerfToken           = "forward-perf-token"
+	dataplanePerfFrontAddr       = "198.18.0.1"
+	dataplanePerfClientAddr      = "198.18.0.2"
+	dataplanePerfBackendHost     = "198.19.0.1"
+	dataplanePerfBackendAddr     = "198.19.0.2"
+	dataplanePerfFrontPort       = 10000
+	dataplanePerfBackendPort     = 20000
 )
 
 const (
@@ -2238,6 +2240,13 @@ func writeDataplanePerfConfig(t *testing.T, path string, mode dataplanePerfMode,
 	for key, enabled := range mode.Experimental {
 		cfg.Experimental[key] = enabled
 	}
+	for _, feature := range envStringList(dataplanePerfExperimentalEnv) {
+		name := normalizeExperimentalFeatureName(feature)
+		if name == "" {
+			continue
+		}
+		cfg.Experimental[name] = true
+	}
 	if envBool(dataplanePerfTCDiagEnv) {
 		cfg.Experimental[experimentalFeatureKernelTCDiag] = true
 	}
@@ -2998,6 +3007,23 @@ func envIntList(name string) []int {
 			continue
 		}
 		out = append(out, value)
+	}
+	return out
+}
+
+func envStringList(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
 	}
 	return out
 }

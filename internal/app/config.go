@@ -9,12 +9,15 @@ import (
 )
 
 const (
-	experimentalFeatureBridgeXDP           = "bridge_xdp"
-	experimentalFeatureXDPGeneric          = "xdp_generic"
-	experimentalFeatureKernelTraffic       = "kernel_traffic_stats"
-	experimentalFeatureKernelTCDiag        = "kernel_tc_diag"
-	experimentalFeatureKernelTCDiagVerbose = "kernel_tc_diag_verbose"
-	insecureDefaultWebToken                = "change-me-to-a-secure-token"
+	experimentalFeatureBridgeXDP                 = "bridge_xdp"
+	experimentalFeatureXDPGeneric                = "xdp_generic"
+	experimentalFeatureKernelTraffic             = "kernel_traffic_stats"
+	experimentalFeatureKernelTCDiag              = "kernel_tc_diag"
+	experimentalFeatureKernelTCDiagVerbose       = "kernel_tc_diag_verbose"
+	experimentalFeatureKernelTCRedirectNeighFast = "kernel_tc_redirect_neigh_fast"
+	experimentalFeatureKernelTCPreparedL2        = "kernel_tc_prepared_l2"
+	experimentalFeatureKernelTCReplyL2Cache      = "kernel_tc_reply_l2_cache"
+	insecureDefaultWebToken                      = "change-me-to-a-secure-token"
 )
 
 type Config struct {

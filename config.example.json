@@ -21,7 +21,10 @@
     "xdp_generic": false,
     "kernel_traffic_stats": false,
     "kernel_tc_diag": false,
-    "kernel_tc_diag_verbose": false
+    "kernel_tc_diag_verbose": false,
+    "kernel_tc_redirect_neigh_fast": false,
+    "kernel_tc_prepared_l2": false,
+    "kernel_tc_reply_l2_cache": false
   },
   "tags": []
 }

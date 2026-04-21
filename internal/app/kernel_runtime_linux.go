@@ -91,11 +91,17 @@ const (
 	kernelRuleFlagEgressNAT    = 0x8
 	kernelRuleFlagPassthrough  = 0x10
 	kernelRuleFlagFullCone     = 0x20
+	kernelRuleFlagPreparedL2   = 0x40
 )
 
 const (
 	tcFlowMigrationFlagV4Old = 0x1
 	tcFlowMigrationFlagV6Old = 0x2
+)
+
+const (
+	kernelNATConfigFlagTCRedirectNeighFast = 0x1
+	kernelNATConfigFlagTCReplyL2Cache      = 0x2
 )
 
 type kernelTCAttachmentProgramMode string
@@ -310,15 +316,17 @@ type cachedKernelPath struct {
 
 type kernelPrepareContext struct {
 	enableTrafficStats bool
+	enablePreparedL2   bool
 	links              map[string]cachedKernelLink
 	snatAddrs          map[string]cachedKernelSNAT
 	snatIPs            map[string]cachedKernelSNATIP
 	outPaths           map[string]cachedKernelPath
 }
 
-func newKernelPrepareContext(enableTrafficStats bool) *kernelPrepareContext {
+func newKernelPrepareContext(enableTrafficStats bool, enablePreparedL2 bool) *kernelPrepareContext {
 	return &kernelPrepareContext{
 		enableTrafficStats: enableTrafficStats,
+		enablePreparedL2:   enablePreparedL2,
 		links:              make(map[string]cachedKernelLink),
 		snatAddrs:          make(map[string]cachedKernelSNAT),
 		snatIPs:            make(map[string]cachedKernelSNATIP),
@@ -395,11 +403,11 @@ func (ctx *kernelPrepareContext) resolveSNATIPv6(link netlink.Link, backendIP st
 	return append(net.IP(nil), addr...), err
 }
 
-func (ctx *kernelPrepareContext) resolveOutboundPath(outLink netlink.Link, rule Rule) (preparedKernelPath, error) {
+func (ctx *kernelPrepareContext) resolveOutboundPath(outLink netlink.Link, rule Rule, family string) (preparedKernelPath, error) {
 	if outLink == nil || outLink.Attrs() == nil {
 		return preparedKernelPath{}, fmt.Errorf("invalid outbound interface")
 	}
-	key := fmt.Sprintf("%d|%s", outLink.Attrs().Index, strings.TrimSpace(rule.OutIP))
+	key := fmt.Sprintf("%d|%s|%s", outLink.Attrs().Index, strings.TrimSpace(rule.OutIP), family)
 	if ctx != nil {
 		if item, ok := ctx.outPaths[key]; ok {
 			return item.path, item.err
@@ -412,6 +420,14 @@ func (ctx *kernelPrepareContext) resolveOutboundPath(outLink netlink.Link, rule 
 	var err error
 	if isXDPBridgeLink(outLink) {
 		path, err = resolveTCOutboundPath(outLink, rule)
+	} else if ctx != nil && ctx.enablePreparedL2 {
+		target, targetErr := resolveXDPDirectTarget(outLink, rule, family)
+		if targetErr == nil {
+			path.outIfIndex = target.outIfIndex
+			path.flags |= kernelRuleFlagPreparedL2
+			path.srcMAC = target.srcMAC
+			path.dstMAC = target.dstMAC
+		}
 	}
 	if ctx != nil {
 		ctx.outPaths[key] = cachedKernelPath{path: path, err: err}
@@ -420,39 +436,42 @@ func (ctx *kernelPrepareContext) resolveOutboundPath(outLink netlink.Link, rule 
 }
 
 type linuxKernelRuleRuntime struct {
-	mu                 sync.Mutex
-	availableOnce      sync.Once
-	available          bool
-	availableReason    string
-	rulesMapLimit      int
-	flowsMapLimit      int
-	natMapLimit        int
-	natPortMin         int
-	natPortMax         int
-	rulesMapCapacity   int
-	flowsMapCapacity   int
-	natMapCapacity     int
-	memlockOnce        sync.Once
-	memlockErr         error
-	coll               *ebpf.Collection
-	attachments        []kernelAttachment
-	preparedRules      []preparedKernelRule
-	attachmentMode     kernelTCAttachmentProgramMode
-	lastSkipLog        map[string]struct{}
-	lastReconcileMode  string
-	degradedSource     string
-	stateLog           kernelStateLogger
-	pressureState      kernelRuntimePressureState
-	observability      kernelRuntimeObservabilityState
-	maintenanceState   kernelAdaptiveMaintenanceState
-	orphanNATPruneLog  kernelCountLogState
-	statsCorrection    map[uint32]kernelRuleStats
-	flowPruneState     kernelFlowPruneState
-	oldFlowPruneState  kernelFlowPruneState
-	runtimeMapCounts   kernelRuntimeMapCountSnapshot
-	enableTrafficStats bool
-	enableDiagnostics  bool
-	enableDiagVerbose  bool
+	mu                      sync.Mutex
+	availableOnce           sync.Once
+	available               bool
+	availableReason         string
+	rulesMapLimit           int
+	flowsMapLimit           int
+	natMapLimit             int
+	natPortMin              int
+	natPortMax              int
+	rulesMapCapacity        int
+	flowsMapCapacity        int
+	natMapCapacity          int
+	memlockOnce             sync.Once
+	memlockErr              error
+	coll                    *ebpf.Collection
+	attachments             []kernelAttachment
+	preparedRules           []preparedKernelRule
+	attachmentMode          kernelTCAttachmentProgramMode
+	lastSkipLog             map[string]struct{}
+	lastReconcileMode       string
+	degradedSource          string
+	stateLog                kernelStateLogger
+	pressureState           kernelRuntimePressureState
+	observability           kernelRuntimeObservabilityState
+	maintenanceState        kernelAdaptiveMaintenanceState
+	orphanNATPruneLog       kernelCountLogState
+	statsCorrection         map[uint32]kernelRuleStats
+	flowPruneState          kernelFlowPruneState
+	oldFlowPruneState       kernelFlowPruneState
+	runtimeMapCounts        kernelRuntimeMapCountSnapshot
+	enableTrafficStats      bool
+	enableDiagnostics       bool
+	enableDiagVerbose       bool
+	enableRedirectNeighFast bool
+	enablePreparedL2        bool
+	enableReplyL2Cache      bool
 }
 
 func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
@@ -463,6 +482,9 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	enableTrafficStats := false
 	enableDiagnostics := false
 	enableDiagVerbose := false
+	enableRedirectNeighFast := false
+	enablePreparedL2 := false
+	enableReplyL2Cache := false
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
@@ -471,22 +493,42 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		enableTrafficStats = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
 		enableDiagnostics = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag)
 		enableDiagVerbose = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
+		enableRedirectNeighFast = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCRedirectNeighFast)
+		enablePreparedL2 = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCPreparedL2)
+		enableReplyL2Cache = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCReplyL2Cache)
 	}
 	if enableDiagVerbose {
 		enableDiagnostics = true
 	}
 	return &linuxKernelRuleRuntime{
-		rulesMapLimit:      rulesLimit,
-		flowsMapLimit:      flowsLimit,
-		natMapLimit:        natLimit,
-		natPortMin:         natPortMin,
-		natPortMax:         natPortMax,
-		statsCorrection:    make(map[uint32]kernelRuleStats),
-		attachmentMode:     kernelTCAttachmentProgramModeLegacy,
-		enableTrafficStats: enableTrafficStats,
-		enableDiagnostics:  enableDiagnostics,
-		enableDiagVerbose:  enableDiagVerbose,
+		rulesMapLimit:           rulesLimit,
+		flowsMapLimit:           flowsLimit,
+		natMapLimit:             natLimit,
+		natPortMin:              natPortMin,
+		natPortMax:              natPortMax,
+		statsCorrection:         make(map[uint32]kernelRuleStats),
+		attachmentMode:          kernelTCAttachmentProgramModeLegacy,
+		enableTrafficStats:      enableTrafficStats,
+		enableDiagnostics:       enableDiagnostics,
+		enableDiagVerbose:       enableDiagVerbose,
+		enableRedirectNeighFast: enableRedirectNeighFast,
+		enablePreparedL2:        enablePreparedL2,
+		enableReplyL2Cache:      enableReplyL2Cache,
 	}
+}
+
+func (rt *linuxKernelRuleRuntime) natConfigFlags() uint32 {
+	if rt == nil {
+		return 0
+	}
+	var flags uint32
+	if rt.enableRedirectNeighFast {
+		flags |= kernelNATConfigFlagTCRedirectNeighFast
+	}
+	if rt.enableReplyL2Cache {
+		flags |= kernelNATConfigFlagTCReplyL2Cache
+	}
+	return flags
 }
 
 func newKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
@@ -528,6 +570,15 @@ func (rt *linuxKernelRuleRuntime) ensureAvailabilityInitialized() {
 		if rt.enableDiagVerbose {
 			rt.availableReason += "; kernel_tc_diag_verbose experimental path enabled"
 		}
+		if rt.enableRedirectNeighFast {
+			rt.availableReason += "; kernel_tc_redirect_neigh_fast experimental path enabled"
+		}
+		if rt.enablePreparedL2 {
+			rt.availableReason += "; kernel_tc_prepared_l2 experimental path enabled"
+		}
+		if rt.enableReplyL2Cache {
+			rt.availableReason += "; kernel_tc_reply_l2_cache experimental path enabled"
+		}
 	})
 }
 
@@ -539,7 +590,7 @@ func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
 }
 
 func (rt *linuxKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
-	prepared, err := prepareKernelRule(newKernelPrepareContext(rt.enableTrafficStats), rule)
+	prepared, err := prepareKernelRule(newKernelPrepareContext(rt.enableTrafficStats, rt.enablePreparedL2), rule)
 	if err != nil {
 		return false, err.Error()
 	}
@@ -583,7 +634,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 	}
 
 	prepareStartedAt := time.Now()
-	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats)
+	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2)
 	reconcileMetrics.PrepareDuration = time.Since(prepareStartedAt)
 	reconcileMetrics.PreparedEntries = len(prepared)
 	rt.lastSkipLog = logKernelLineSetOnce(rt.lastSkipLog, skipLines)
@@ -1044,7 +1095,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 	if err := syncKernelOccupancyMapFromCollectionExact(coll, true); err != nil {
 		log.Printf("kernel dataplane reconcile: sync tc occupancy counters failed before attach: %v", err)
 	}
-	if err := syncKernelNATConfigMap(coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax); err != nil {
+	if err := syncKernelNATConfigMap(coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax, rt.natConfigFlags()); err != nil {
 		coll.Close()
 		msg := fmt.Sprintf("sync kernel nat config map: %v", err)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -2400,7 +2451,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel egress wildcard fast map: %w", err)
 	}
-	if err := syncKernelNATConfigMap(rt.coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax); err != nil {
+	if err := syncKernelNATConfigMap(rt.coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax, rt.natConfigFlags()); err != nil {
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel nat config map: %w", err)
 	}
@@ -3052,7 +3103,7 @@ func prepareKernelRuleRef(ctx *kernelPrepareContext, rule *Rule) ([]preparedKern
 		return nil, fmt.Errorf("resolve inbound kernel interfaces for %q: %w", rule.InInterface, err)
 	}
 
-	path, err := ctx.resolveOutboundPath(outLink, *rule)
+	path, err := ctx.resolveOutboundPath(outLink, *rule, spec.Family)
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound path on %q: %w", rule.OutInterface, err)
 	}
@@ -3290,14 +3341,14 @@ func prepareKernelEgressNATPassthroughRule(ctx *kernelPrepareContext, rule Rule,
 	}}, nil
 }
 
-func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
+func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool, enablePreparedL2 bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
 	prepared := make([]preparedKernelRule, 0, len(rules))
 	forwardIfRules := make(map[int][]int64)
 	replyIfRules := make(map[int][]int64)
 	parentIfMap := make(map[uint32]uint32)
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	skipLogger := newKernelSkipLogger("kernel")
-	prepareCtx := newKernelPrepareContext(enableTrafficStats)
+	prepareCtx := newKernelPrepareContext(enableTrafficStats, enablePreparedL2)
 	previousByKey := groupPreparedKernelRulesByMatchKey(previous)
 
 	for _, rule := range rules {
@@ -4173,7 +4224,7 @@ func resolveKernelTransientFallbackBackendMAC(rule Rule, reasonClass string) str
 	return normalizeKernelTransientFallbackBackendMAC(backendMAC.String())
 }
 
-func syncKernelNATConfigMap(m *ebpf.Map, portMin int, portMax int) error {
+func syncKernelNATConfigMap(m *ebpf.Map, portMin int, portMax int, flags uint32) error {
 	if m == nil {
 		return nil
 	}
@@ -4187,6 +4238,7 @@ func syncKernelNATConfigMap(m *ebpf.Map, portMin int, portMax int) error {
 	value := tcNATConfigValueV4{
 		PortMin: uint32(portMin),
 		PortMax: uint32(portMax),
+		Pad0:    flags,
 	}
 	if err := m.Put(key, value); err != nil {
 		return fmt.Errorf("sync kernel nat config map: %w", err)
