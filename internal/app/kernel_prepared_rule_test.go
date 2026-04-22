@@ -115,7 +115,7 @@ func TestBuildKernelPreparedForwardRuleSpecRejectsTransparentIPv6(t *testing.T) 
 }
 
 func TestPrepareKernelRuleAllowsIPv6FullNAT(t *testing.T) {
-	ctx := newKernelPrepareContext(false, false)
+	ctx := newKernelPrepareContext(false, false, false)
 	ctx.links["eno1"] = cachedKernelLink{
 		link: &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "eno1", Index: 1}},
 	}

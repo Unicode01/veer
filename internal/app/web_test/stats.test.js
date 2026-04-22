@@ -158,6 +158,9 @@ function createHarness() {
     body: makeNode('body'),
     hidden: false,
     activeElement: null,
+    getElementById() {
+      return null;
+    },
     createElement(tagName) {
       return makeNode(tagName);
     },
@@ -177,15 +180,48 @@ function createHarness() {
     }
   };
 
+  const tabRulesButton = makeNode('button', { className: 'tab' });
+  tabRulesButton.dataset.tab = 'rules';
+  const tabEgressNATButton = makeNode('button', { className: 'tab' });
+  tabEgressNATButton.dataset.tab = 'egress-nats';
+  const tabRulesPanel = makeNode('div', { className: 'tab-content' });
+  const tabEgressNATPanel = makeNode('div', { className: 'tab-content' });
+  const egressNATStatsSection = makeNode('section');
+  const managedNetworkAutoEgressNATGroup = makeNode('div');
+  const managedNetworksAutoEgressNATHeader = makeNode('th');
+  const elements = {
+    'tab-rules-button': tabRulesButton,
+    'tab-egress-nats-button': tabEgressNATButton,
+    'tab-rules': tabRulesPanel,
+    'tab-egress-nats': tabEgressNATPanel,
+    egressNATStatsSection,
+    managedNetworkAutoEgressNATGroup,
+    managedNetworksAutoEgressNATHeader
+  };
+
+  documentRef.getElementById = function getElementById(id) {
+    return Object.prototype.hasOwnProperty.call(elements, id) ? elements[id] : null;
+  };
+  documentRef.querySelectorAll = function querySelectorAll(selector) {
+    if (selector === '.tab') return [tabRulesButton, tabEgressNATButton];
+    if (selector === '.tab-content') return [tabRulesPanel, tabEgressNATPanel];
+    return [];
+  };
+
   const app = {
     state: {
       kernelRuntime: { data: null },
-      kernelRuntimeDismissedNotes: {}
+      kernelRuntimeDismissedNotes: {},
+      kernelFeatureVisibility: { loaded: false, egressNAT: true, managedNetworkAutoEgressNAT: true },
+      activeTab: 'rules'
     },
     el: {
       kernelRuntimeSummary: makeNode('div'),
       kernelRuntimeBody: makeNode('tbody'),
       noKernelRuntime: makeNode('div')
+    },
+    $(id) {
+      return Object.prototype.hasOwnProperty.call(elements, id) ? elements[id] : null;
     },
     t(key, params) {
       let text = Object.prototype.hasOwnProperty.call(translations, key) ? translations[key] : key;
@@ -231,6 +267,19 @@ function createHarness() {
       node.childNodes = [];
     },
     toggleTableVisibility() {},
+    activateTab(tabId) {
+      this.state.activeTab = tabId;
+    },
+    firstVisibleTabId() {
+      return !tabRulesButton.hidden ? 'rules' : '';
+    },
+    syncManagedNetworkKernelFeatureVisibility() {
+      const visible = typeof this.kernelFeatureVisible === 'function'
+        ? this.kernelFeatureVisible('managedNetworkAutoEgressNAT')
+        : true;
+      managedNetworkAutoEgressNATGroup.hidden = !visible;
+      managedNetworksAutoEgressNATHeader.hidden = !visible;
+    },
     formatClock(value) {
       return String(value || '');
     },
@@ -261,7 +310,7 @@ function createHarness() {
   const code = fs.readFileSync(path.join(baseDir, 'stats.js'), 'utf8');
   vm.runInContext(code, context, { filename: path.join(baseDir, 'stats.js') });
 
-  return { app };
+  return { app, elements };
 }
 
 function collectKernelRuntimeNotes(node, out = []) {
@@ -355,6 +404,43 @@ test('renderKernelRuntime omits degraded note when no engine is degraded', () =>
   const notes = collectKernelRuntimeNotes(app.el.kernelRuntimeSummary);
   const degradedNotes = notes.filter((note) => collectText(note).includes('Kernel Engine Degraded'));
   assert.equal(degradedNotes.length, 0);
+});
+
+test('applyKernelFeatureVisibility hides egress nat surfaces when kernel dataplane is unavailable', () => {
+  const { app, elements } = createHarness();
+  app.state.activeTab = 'egress-nats';
+
+  app.applyKernelFeatureVisibility({
+    available: false,
+    engines: [
+      { name: 'tc', available: false },
+      { name: 'xdp', available: false }
+    ]
+  });
+
+  assert.equal(elements['tab-egress-nats-button'].hidden, true);
+  assert.equal(elements['tab-egress-nats'].hidden, true);
+  assert.equal(elements.egressNATStatsSection.hidden, true);
+  assert.equal(elements.managedNetworkAutoEgressNATGroup.hidden, true);
+  assert.equal(elements.managedNetworksAutoEgressNATHeader.hidden, true);
+  assert.equal(app.state.activeTab, 'rules');
+});
+
+test('applyKernelFeatureVisibility keeps egress nat surfaces visible when kernel dataplane is available', () => {
+  const { app, elements } = createHarness();
+
+  app.applyKernelFeatureVisibility({
+    available: true,
+    engines: [
+      { name: 'tc', available: true }
+    ]
+  });
+
+  assert.equal(elements['tab-egress-nats-button'].hidden, false);
+  assert.equal(elements['tab-egress-nats'].hidden, false);
+  assert.equal(elements.egressNATStatsSection.hidden, false);
+  assert.equal(elements.managedNetworkAutoEgressNATGroup.hidden, false);
+  assert.equal(elements.managedNetworksAutoEgressNATHeader.hidden, false);
 });
 
 test('renderKernelRuntime renders degraded note when an engine is degraded', () => {

@@ -119,7 +119,7 @@
     tab.addEventListener('click', () => app.activateTab(tab.dataset.tab));
 
     tab.addEventListener('keydown', (e) => {
-      const tabs = Array.from(document.querySelectorAll('.tab'));
+      const tabs = Array.from(document.querySelectorAll('.tab')).filter((item) => item && !item.hidden);
       const index = tabs.indexOf(tab);
       if (index < 0) return;
 

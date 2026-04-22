@@ -989,10 +989,12 @@ static __always_inline int delete_nat_port_v6_in_bank(__u8 bank, const struct na
 static __always_inline int load_packet_macs(struct xdp_md *xdp, __u8 dst_mac[ETH_ALEN], __u8 src_mac[ETH_ALEN])
 {
 #ifdef BPF_FUNC_xdp_load_bytes
-	if (bpf_xdp_load_bytes(xdp, 0, dst_mac, ETH_ALEN) < 0)
+	__u8 macs[ETH_ALEN * 2];
+
+	if (bpf_xdp_load_bytes(xdp, 0, macs, sizeof(macs)) < 0)
 		return -1;
-	if (bpf_xdp_load_bytes(xdp, ETH_ALEN, src_mac, ETH_ALEN) < 0)
-		return -1;
+	__builtin_memcpy(dst_mac, macs, ETH_ALEN);
+	__builtin_memcpy(src_mac, macs + ETH_ALEN, ETH_ALEN);
 	return 0;
 #else
 	void *data = (void *)(long)xdp->data;
@@ -1003,18 +1005,8 @@ static __always_inline int load_packet_macs(struct xdp_md *xdp, __u8 dst_mac[ETH
 		return -1;
 	eth = data;
 
-	dst_mac[0] = eth->h_dest[0];
-	dst_mac[1] = eth->h_dest[1];
-	dst_mac[2] = eth->h_dest[2];
-	dst_mac[3] = eth->h_dest[3];
-	dst_mac[4] = eth->h_dest[4];
-	dst_mac[5] = eth->h_dest[5];
-	src_mac[0] = eth->h_source[0];
-	src_mac[1] = eth->h_source[1];
-	src_mac[2] = eth->h_source[2];
-	src_mac[3] = eth->h_source[3];
-	src_mac[4] = eth->h_source[4];
-	src_mac[5] = eth->h_source[5];
+	__builtin_memcpy(dst_mac, eth->h_dest, ETH_ALEN);
+	__builtin_memcpy(src_mac, eth->h_source, ETH_ALEN);
 	return 0;
 #endif
 }
@@ -2171,9 +2163,11 @@ static __always_inline int prepare_bridge_redirect_macs(struct xdp_md *xdp, __u3
 	if (!ifindex)
 		return -1;
 #ifdef BPF_FUNC_xdp_store_bytes
-	if (bpf_xdp_store_bytes(xdp, 0, dst_mac, ETH_ALEN) < 0)
-		return -1;
-	if (bpf_xdp_store_bytes(xdp, ETH_ALEN, src_mac, ETH_ALEN) < 0)
+	__u8 macs[ETH_ALEN * 2];
+
+	__builtin_memcpy(macs, dst_mac, ETH_ALEN);
+	__builtin_memcpy(macs + ETH_ALEN, src_mac, ETH_ALEN);
+	if (bpf_xdp_store_bytes(xdp, 0, macs, sizeof(macs)) < 0)
 		return -1;
 	return (int)ifindex;
 #else
@@ -2185,18 +2179,8 @@ static __always_inline int prepare_bridge_redirect_macs(struct xdp_md *xdp, __u3
 		return -1;
 	eth = data;
 
-	eth->h_dest[0] = dst_mac[0];
-	eth->h_dest[1] = dst_mac[1];
-	eth->h_dest[2] = dst_mac[2];
-	eth->h_dest[3] = dst_mac[3];
-	eth->h_dest[4] = dst_mac[4];
-	eth->h_dest[5] = dst_mac[5];
-	eth->h_source[0] = src_mac[0];
-	eth->h_source[1] = src_mac[1];
-	eth->h_source[2] = src_mac[2];
-	eth->h_source[3] = src_mac[3];
-	eth->h_source[4] = src_mac[4];
-	eth->h_source[5] = src_mac[5];
+	__builtin_memcpy(eth->h_dest, dst_mac, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, src_mac, ETH_ALEN);
 	return (int)ifindex;
 #endif
 }

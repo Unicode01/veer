@@ -936,6 +936,29 @@ static __always_inline int rewrite_eth_addrs(struct __sk_buff *skb, const __u8 d
 	return bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_dest), mac_addrs, sizeof(mac_addrs), 0);
 }
 
+static __always_inline int prepend_eth_header(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN], __be16 proto)
+{
+	void *data;
+	void *data_end;
+	struct ethhdr *eth;
+
+	if (!skb)
+		return -1;
+	if (bpf_skb_change_head(skb, sizeof(struct ethhdr), 0) < 0)
+		return -1;
+
+	data = (void *)(long)skb->data;
+	data_end = (void *)(long)skb->data_end;
+	eth = data;
+	if ((void *)(eth + 1) > data_end)
+		return -1;
+
+	__builtin_memcpy(eth->h_dest, dst, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, src, ETH_ALEN);
+	eth->h_proto = proto;
+	return 0;
+}
+
 static __always_inline int load_packet_macs(struct __sk_buff *skb, struct reply_l2_value_v4 *value)
 {
 	if (!value)
@@ -1112,6 +1135,119 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 	ctx->l3_off = l3_off;
 	ctx->l4_off = l4_off;
 	return 0;
+}
+
+static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packet_ctx *ctx)
+{
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct iphdr *iph;
+	struct tcphdr *tcph;
+	struct udphdr *udph;
+	struct icmphdr *icmph;
+	int l3_off = 0;
+	int l4_off;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return -1;
+
+	iph = data;
+	if ((void *)(iph + 1) > data_end)
+		return -1;
+	if (iph->version != 4)
+		return -1;
+	if (iph->ihl != 5)
+		return -1;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_MASK) != 0)
+		return -1;
+	if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP && iph->protocol != IPPROTO_ICMP)
+		return -1;
+
+	l4_off = (int)sizeof(*iph);
+	ctx->src_addr = iph->saddr;
+	ctx->dst_addr = iph->daddr;
+	ctx->proto = iph->protocol;
+	ctx->icmp_type = 0;
+	ctx->tcp_flags = 0;
+	ctx->tos = iph->tos;
+	ctx->tot_len = bpf_ntohs(iph->tot_len);
+	if (ctx->proto == IPPROTO_TCP) {
+		tcph = (void *)(iph + 1);
+		if ((void *)(tcph + 1) > data_end)
+			return -1;
+		if (tcph->doff < 5)
+			return -1;
+		if ((void *)tcph + ((__u32)tcph->doff << 2) > data_end)
+			return -1;
+		ctx->src_port = bpf_ntohs(tcph->source);
+		ctx->dst_port = bpf_ntohs(tcph->dest);
+		ctx->has_l4_checksum = 1;
+		ctx->tcp_flags =
+			(tcph->fin ? FORWARD_TCP_FLAG_FIN : 0) |
+			(tcph->syn ? FORWARD_TCP_FLAG_SYN : 0) |
+			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
+			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
+		ctx->closing = tcph->fin || tcph->rst;
+		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
+		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
+			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
+		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | sizeof(__be32);
+		ctx->l4_port_csum_flags = sizeof(__be16);
+		ctx->l4_check_off = (int)(l4_off + offsetof(struct tcphdr, check));
+		ctx->l4_src_off = (int)(l4_off + offsetof(struct tcphdr, source));
+		ctx->l4_dst_off = (int)(l4_off + offsetof(struct tcphdr, dest));
+	} else if (ctx->proto == IPPROTO_UDP) {
+		udph = (void *)(iph + 1);
+		if ((void *)(udph + 1) > data_end)
+			return -1;
+		if (bpf_ntohs(udph->len) < sizeof(*udph))
+			return -1;
+		ctx->src_port = bpf_ntohs(udph->source);
+		ctx->dst_port = bpf_ntohs(udph->dest);
+		ctx->has_l4_checksum = udph->check != 0;
+		ctx->closing = 0;
+		FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
+		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(__be32);
+		ctx->l4_port_csum_flags = BPF_F_MARK_MANGLED_0 | sizeof(__be16);
+		ctx->l4_check_off = (int)(l4_off + offsetof(struct udphdr, check));
+		ctx->l4_src_off = (int)(l4_off + offsetof(struct udphdr, source));
+		ctx->l4_dst_off = (int)(l4_off + offsetof(struct udphdr, dest));
+	} else {
+		icmph = (void *)(iph + 1);
+		if ((void *)(icmph + 1) > data_end)
+			return -1;
+		if (icmph->type != ICMP_ECHO && icmph->type != ICMP_ECHOREPLY)
+			return -1;
+		ctx->icmp_type = icmph->type;
+		if (icmph->type == ICMP_ECHO) {
+			ctx->src_port = bpf_ntohs(icmph->un.echo.id);
+			ctx->dst_port = 0;
+		} else {
+			ctx->src_port = 0;
+			ctx->dst_port = bpf_ntohs(icmph->un.echo.id);
+		}
+		ctx->has_l4_checksum = 1;
+		ctx->closing = 0;
+		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
+		if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
+			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + sizeof(*icmph)));
+		ctx->l4_addr_csum_flags = 0;
+		ctx->l4_port_csum_flags = sizeof(__be16);
+		ctx->l4_check_off = (int)(l4_off + offsetof(struct icmphdr, checksum));
+		ctx->l4_src_off = (int)(l4_off + offsetof(struct icmphdr, un.echo.id));
+		ctx->l4_dst_off = (int)(l4_off + offsetof(struct icmphdr, un.echo.id));
+	}
+
+	ctx->l3_off = l3_off;
+	ctx->l4_off = l4_off;
+	return 0;
+}
+
+static __always_inline int parse_ipv4_l4_any(struct __sk_buff *skb, struct packet_ctx *ctx)
+{
+	if (parse_ipv4_l4(skb, ctx) == 0)
+		return 0;
+	return parse_ipv4_l4_raw(skb, ctx);
 }
 
 static __always_inline int parse_ipv6_l4(struct __sk_buff *skb, struct packet_ctx_v6 *ctx)
@@ -1393,7 +1529,7 @@ static __always_inline void update_reply_l2_cache_v4(struct __sk_buff *skb, cons
 	bpf_map_update_elem(&reply_l2_cache_v4, reply_key, &value, BPF_ANY);
 }
 
-static __always_inline int redirect_reply_l2_cache_v4(struct __sk_buff *skb, const struct flow_key_v4 *reply_key, __u32 ifindex, __u32 nat_cfg_flags)
+static __always_inline int redirect_reply_l2_cache_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *reply_key, __u32 ifindex, __u32 nat_cfg_flags)
 {
 	struct reply_l2_value_v4 *value;
 	long act;
@@ -1405,8 +1541,13 @@ static __always_inline int redirect_reply_l2_cache_v4(struct __sk_buff *skb, con
 		return -1;
 	if (mac_addr_is_zero(value->front_mac) || mac_addr_is_zero(value->client_mac))
 		return -1;
-	if (rewrite_eth_addrs(skb, value->client_mac, value->front_mac) < 0)
-		return -1;
+	if (ctx && ctx->l3_off == 0) {
+		if (prepend_eth_header(skb, value->client_mac, value->front_mac, bpf_htons(ETH_P_IP)) < 0)
+			return -1;
+	} else {
+		if (rewrite_eth_addrs(skb, value->client_mac, value->front_mac) < 0)
+			return -1;
+	}
 	act = bpf_redirect(ifindex, 0);
 	if (act == TC_ACT_REDIRECT)
 		return (int)act;
@@ -3264,10 +3405,12 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 
 	redirect.ifindex = resolve_reply_redirect_ifindex(flow_value);
 	{
-		int action = redirect_reply_l2_cache_v4(skb, flow_key, redirect.ifindex, nat_cfg_flags);
+		int action = redirect_reply_l2_cache_v4(skb, ctx, flow_key, redirect.ifindex, nat_cfg_flags);
 
 		if (action == TC_ACT_REDIRECT)
 			return action;
+		if (ctx->l3_off == 0)
+			return TC_ACT_SHOT;
 	}
 
 	redirect.src_addr = flow_value->front_addr;
@@ -3396,10 +3539,12 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 
 	redirect.ifindex = resolve_reply_redirect_ifindex(reply_value);
 	{
-		int action = redirect_reply_l2_cache_v4(skb, reply_key, redirect.ifindex, nat_cfg_flags);
+		int action = redirect_reply_l2_cache_v4(skb, ctx, reply_key, redirect.ifindex, nat_cfg_flags);
 
 		if (action == TC_ACT_REDIRECT)
 			return action;
+		if (ctx->l3_off == 0)
+			return TC_ACT_SHOT;
 	}
 	redirect.dst_addr = reply_value->client_addr;
 	redirect.dst_port = reply_value->client_port;
@@ -3747,7 +3892,7 @@ static __always_inline int handle_reply_ingress_v4(struct __sk_buff *skb)
 	__builtin_memset(ctx, 0, sizeof(*ctx));
 	__builtin_memset(flow_key, 0, sizeof(*flow_key));
 
-	if (parse_ipv4_l4(skb, ctx) < 0) {
+	if (parse_ipv4_l4_any(skb, ctx) < 0) {
 		return TC_ACT_UNSPEC;
 	}
 
@@ -3858,7 +4003,7 @@ static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
 	__builtin_memset(&dispatch->ctx, 0, sizeof(dispatch->ctx));
 	__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
 
-	if (parse_ipv4_l4(skb, &dispatch->ctx) < 0) {
+	if (parse_ipv4_l4_any(skb, &dispatch->ctx) < 0) {
 		return TC_ACT_UNSPEC;
 	}
 

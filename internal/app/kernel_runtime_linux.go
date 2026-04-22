@@ -317,16 +317,18 @@ type cachedKernelPath struct {
 type kernelPrepareContext struct {
 	enableTrafficStats bool
 	enablePreparedL2   bool
+	enableReplyL2Cache bool
 	links              map[string]cachedKernelLink
 	snatAddrs          map[string]cachedKernelSNAT
 	snatIPs            map[string]cachedKernelSNATIP
 	outPaths           map[string]cachedKernelPath
 }
 
-func newKernelPrepareContext(enableTrafficStats bool, enablePreparedL2 bool) *kernelPrepareContext {
+func newKernelPrepareContext(enableTrafficStats bool, enablePreparedL2 bool, enableReplyL2Cache bool) *kernelPrepareContext {
 	return &kernelPrepareContext{
 		enableTrafficStats: enableTrafficStats,
 		enablePreparedL2:   enablePreparedL2,
+		enableReplyL2Cache: enableReplyL2Cache,
 		links:              make(map[string]cachedKernelLink),
 		snatAddrs:          make(map[string]cachedKernelSNAT),
 		snatIPs:            make(map[string]cachedKernelSNATIP),
@@ -590,7 +592,7 @@ func (rt *linuxKernelRuleRuntime) Available() (bool, string) {
 }
 
 func (rt *linuxKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
-	prepared, err := prepareKernelRule(newKernelPrepareContext(rt.enableTrafficStats, rt.enablePreparedL2), rule)
+	prepared, err := prepareKernelRule(newKernelPrepareContext(rt.enableTrafficStats, rt.enablePreparedL2, rt.enableReplyL2Cache), rule)
 	if err != nil {
 		return false, err.Error()
 	}
@@ -634,7 +636,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 	}
 
 	prepareStartedAt := time.Now()
-	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2)
+	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2, rt.enableReplyL2Cache)
 	reconcileMetrics.PrepareDuration = time.Since(prepareStartedAt)
 	reconcileMetrics.PreparedEntries = len(prepared)
 	rt.lastSkipLog = logKernelLineSetOnce(rt.lastSkipLog, skipLines)
@@ -1177,7 +1179,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		if plan.name == kernelReplyProgramName || plan.name == kernelReplyProgramNameV6 {
 			ruleIDs = replyIfRules[plan.ifindex]
 		}
-		if err := rt.attachProgramLocked(&newAttachments, plan.ifindex, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+		if err := rt.attachProgramLocked(&newAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
 			log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", plan.name, plan.ifindex, ruleIDs, err)
 			label := "forward"
 			switch plan.name {
@@ -2425,7 +2427,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		if current, ok := currentAttachments[plan.key]; ok && kernelAttachmentObservationMatchesExpectation(observedAttachments[plan.key], expectedAttachments[plan.key]) {
 			newAttachments = append(newAttachments, current)
 		} else {
-			if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+			if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
 				rt.discardAttachmentsLocked(createdAttachments)
 				return fmt.Errorf("attach %s on ifindex %d: %w", plan.name, plan.ifindex, err)
 			}
@@ -2640,7 +2642,7 @@ func (rt *linuxKernelRuleRuntime) deleteStaleAttachmentsLocked(oldAttachments, n
 	}
 }
 
-func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, ifindex int, priority uint16, handleMinor uint16, name string, prog *ebpf.Program) error {
+func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, ifindex int, parent uint32, priority uint16, handleMinor uint16, name string, prog *ebpf.Program) error {
 	if err := ensureClsactQdisc(ifindex); err != nil {
 		return err
 	}
@@ -2649,7 +2651,7 @@ func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, i
 		FilterAttrs: netlink.FilterAttrs{
 			LinkIndex: ifindex,
 			Handle:    netlink.MakeHandle(0, handleMinor),
-			Parent:    netlink.HANDLE_MIN_INGRESS,
+			Parent:    parent,
 			Priority:  priority,
 			Protocol:  unix.ETH_P_ALL,
 		},
@@ -3341,14 +3343,14 @@ func prepareKernelEgressNATPassthroughRule(ctx *kernelPrepareContext, rule Rule,
 	}}, nil
 }
 
-func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool, enablePreparedL2 bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
+func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool, enablePreparedL2 bool, enableReplyL2Cache bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
 	prepared := make([]preparedKernelRule, 0, len(rules))
 	forwardIfRules := make(map[int][]int64)
 	replyIfRules := make(map[int][]int64)
 	parentIfMap := make(map[uint32]uint32)
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	skipLogger := newKernelSkipLogger("kernel")
-	prepareCtx := newKernelPrepareContext(enableTrafficStats, enablePreparedL2)
+	prepareCtx := newKernelPrepareContext(enableTrafficStats, enablePreparedL2, enableReplyL2Cache)
 	previousByKey := groupPreparedKernelRulesByMatchKey(previous)
 
 	for _, rule := range rules {

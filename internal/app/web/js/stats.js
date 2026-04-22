@@ -1666,9 +1666,63 @@
     el.egressNATStatsBody.appendChild(fragment);
   };
 
+  function kernelDataplaneVisibleFromRuntime(runtime) {
+    if (!runtime || typeof runtime !== 'object') return true;
+    const engines = Array.isArray(runtime.engines) ? runtime.engines : [];
+    const anyAvailableEngine = engines.some((engine) => engine && engine.available);
+    return !!runtime.available || anyAvailableEngine;
+  }
+
+  function setHiddenByID(id, hidden) {
+    const node = typeof app.$ === 'function' ? app.$(id) : document.getElementById(id);
+    if (!node) return;
+    node.hidden = !!hidden;
+  }
+
+  app.kernelFeatureVisible = function kernelFeatureVisible(name) {
+    const state = app.state.kernelFeatureVisibility || {};
+    if (!state.loaded) return true;
+    return state[name] !== false;
+  };
+
+  app.computeKernelFeatureVisibility = function computeKernelFeatureVisibility(runtime) {
+    const loaded = !!runtime && typeof runtime === 'object';
+    const kernelVisible = loaded ? kernelDataplaneVisibleFromRuntime(runtime) : true;
+    return {
+      loaded: loaded,
+      egressNAT: kernelVisible,
+      managedNetworkAutoEgressNAT: kernelVisible
+    };
+  };
+
+  app.applyKernelFeatureVisibility = function applyKernelFeatureVisibility(runtime) {
+    if (runtime && typeof runtime === 'object') {
+      app.state.kernelFeatureVisibility = app.computeKernelFeatureVisibility(runtime);
+    } else if (!app.state.kernelFeatureVisibility) {
+      app.state.kernelFeatureVisibility = app.computeKernelFeatureVisibility(null);
+    }
+
+    const showEgressNAT = app.kernelFeatureVisible('egressNAT');
+    setHiddenByID('tab-egress-nats-button', !showEgressNAT);
+    setHiddenByID('tab-egress-nats', !showEgressNAT);
+    setHiddenByID('egressNATStatsSection', !showEgressNAT);
+
+    if (!showEgressNAT && app.state.activeTab === 'egress-nats' && typeof app.activateTab === 'function') {
+      const fallback = typeof app.firstVisibleTabId === 'function' ? app.firstVisibleTabId() : 'rules';
+      if (fallback && fallback !== 'egress-nats') {
+        app.activateTab(fallback, { persist: true, skipLoad: true });
+      }
+    }
+
+    if (typeof app.syncManagedNetworkKernelFeatureVisibility === 'function') {
+      app.syncManagedNetworkKernelFeatureVisibility();
+    }
+  };
+
   app.loadKernelRuntime = async function loadKernelRuntime() {
     try {
       app.state.kernelRuntime.data = await app.apiCall('GET', '/api/kernel/runtime');
+      app.applyKernelFeatureVisibility(app.state.kernelRuntime.data);
       syncKernelRuntimeDismissedNotes(app.state.kernelRuntime.data);
       app.renderKernelRuntime();
     } catch (e) {

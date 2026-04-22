@@ -515,7 +515,7 @@
                             <input type="text" id="managedNetworkUplinkPicker" list="managedNetworkUplinkOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
                             <datalist id="managedNetworkUplinkOptions"></datalist>
                         </div>
-                          <div class="form-group form-group-checkbox">
+                          <div id="managedNetworkAutoEgressNATGroup" class="form-group form-group-checkbox">
                               <label>
                                   <input type="checkbox" id="managedNetworkAutoEgressNAT" checked>
                                   <span data-i18n="managedNetwork.form.autoEgressNAT">Auto Egress NAT</span>
@@ -634,7 +634,7 @@
                                 <th class="sortable" data-table="managedNetworks" data-sort="child_interface_count" data-i18n="managedNetwork.list.targets">Targets</th>
                                 <th data-i18n="common.family.ipv4">IPv4</th>
                                 <th data-i18n="common.family.ipv6">IPv6</th>
-                                <th class="sortable" data-table="managedNetworks" data-sort="auto_egress_nat" data-i18n="managedNetwork.form.autoEgressNAT">Auto Egress NAT</th>
+                                <th id="managedNetworksAutoEgressNATHeader" class="sortable" data-table="managedNetworks" data-sort="auto_egress_nat" data-i18n="managedNetwork.form.autoEgressNAT">Auto Egress NAT</th>
                                 <th class="sortable" data-table="managedNetworks" data-sort="remark" data-i18n="form.remark">Remark</th>
                                 <th class="sortable" data-table="managedNetworks" data-sort="enabled" data-i18n="common.status">Status</th>
                                 <th data-i18n="common.actions">Actions</th>
@@ -1085,7 +1085,7 @@
                 <p id="noRangeStats" class="empty-hint" data-i18n="stats.ranges.empty">No range statistics yet.</p>
             </section>
 
-            <section class="rule-list">
+            <section id="egressNATStatsSection" class="rule-list">
                 <div class="section-heading-row">
                     <h2 data-i18n="stats.egressNATs.title">Egress NAT Traffic Stats</h2>
                     <button type="button" class="mini-btn refresh-current-conns-btn" data-i18n="stats.refreshCurrentConns">获取当前连接数</button>
@@ -1126,9 +1126,9 @@
     <script defer src="js/ranges.js?v=20260407-4"></script>
     <script defer src="js/egress_nats.js?v=20260407-2"></script>
     <script defer src="js/ipv6_assignments.js?v=20260408-6"></script>
-    <script defer src="js/managed_networks.js?v=20260410-1"></script>
+    <script defer src="js/managed_networks.js?v=20260422-1"></script>
     <script defer src="js/workers.js?v=20260407-5"></script>
-    <script defer src="js/stats.js?v=20260412-1"></script>
-    <script defer src="js/init.js?v=20260410-1"></script>
+    <script defer src="js/stats.js?v=20260422-1"></script>
+    <script defer src="js/init.js?v=20260422-1"></script>
 </body>
 </html>

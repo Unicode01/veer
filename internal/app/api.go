@@ -414,6 +414,20 @@ func apiListenAddr(cfg *Config) string {
 	return net.JoinHostPort(bind, strconv.Itoa(port))
 }
 
+func apiBindExposesRemoteClients(cfg *Config) bool {
+	bind := normalizeWebBind("")
+	if cfg != nil {
+		bind = normalizeWebBind(cfg.WebBind)
+	}
+	bind = strings.ToLower(strings.TrimSpace(bind))
+	switch bind {
+	case "", "127.0.0.1", "::1", "localhost":
+		return false
+	default:
+		return true
+	}
+}
+
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")

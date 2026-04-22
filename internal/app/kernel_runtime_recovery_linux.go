@@ -141,7 +141,7 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 			newAttachments = append(newAttachments, current)
 			continue
 		}
-		if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+		if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
 			rt.discardAttachmentsLocked(createdAttachments)
 			return nil, fmt.Errorf("repair %s attachment on ifindex %d: %w", plan.name, plan.ifindex, err)
 		}

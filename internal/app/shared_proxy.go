@@ -347,11 +347,72 @@ func clearSharedProxyReadDeadline(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 }
 
+func normalizeSharedProxyClientIP(clientIP string) string {
+	clientIP = strings.TrimSpace(clientIP)
+	if clientIP == "" {
+		return ""
+	}
+	if zoneIdx := strings.IndexByte(clientIP, '%'); zoneIdx >= 0 {
+		clientIP = clientIP[:zoneIdx]
+	}
+	ip := net.ParseIP(clientIP)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+func normalizeSharedProxyHostHeader(value string) (string, error) {
+	host := strings.TrimSpace(value)
+	if host == "" {
+		return "", fmt.Errorf("empty host header")
+	}
+	if strings.ContainsAny(host, " \t,/\r\n") {
+		return "", fmt.Errorf("invalid host header")
+	}
+	if strings.HasPrefix(host, "[") {
+		if strings.HasSuffix(host, "]") {
+			return strings.ToLower(strings.Trim(host, "[]")), nil
+		}
+		parsedHost, _, err := net.SplitHostPort(host)
+		if err != nil {
+			return "", fmt.Errorf("invalid host header")
+		}
+		return strings.ToLower(parsedHost), nil
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	} else if strings.Count(host, ":") > 1 {
+		return "", fmt.Errorf("invalid host header")
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("empty host header")
+	}
+	return strings.ToLower(host), nil
+}
+
+func buildSharedProxyForwardingHeaders(clientIP string) []string {
+	clientIP = normalizeSharedProxyClientIP(clientIP)
+	if clientIP == "" {
+		return nil
+	}
+	forwarded := "for=" + clientIP
+	if strings.Contains(clientIP, ":") {
+		forwarded = fmt.Sprintf(`for="[%s]"`, clientIP)
+	}
+	return []string{
+		"X-Forwarded-For: " + clientIP,
+		"X-Real-IP: " + clientIP,
+		"Forwarded: " + forwarded,
+	}
+}
+
 func readSharedProxyHTTPHeaders(br *bufio.Reader, clientIP string) (sharedProxyHTTPHeaders, error) {
 	var result sharedProxyHTTPHeaders
 	totalBytes := 0
 	lineCount := 0
-	hasXFF := false
+	hostSeen := false
 
 	for {
 		line, err := br.ReadSlice('\n')
@@ -377,28 +438,41 @@ func readSharedProxyHTTPHeaders(br *bufio.Reader, clientIP string) (sharedProxyH
 			break
 		}
 
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "host:") {
-			host := strings.TrimSpace(trimmed[5:])
-			if colonIdx := strings.LastIndex(host, ":"); colonIdx > 0 {
-				host = host[:colonIdx]
+		if len(result.lines) == 0 {
+			result.lines = append(result.lines, trimmed)
+			continue
+		}
+
+		if colonIdx := strings.IndexByte(trimmed, ':'); colonIdx > 0 {
+			name := strings.ToLower(strings.TrimSpace(trimmed[:colonIdx]))
+			value := trimmed[colonIdx+1:]
+
+			switch name {
+			case "host":
+				if hostSeen {
+					return result, fmt.Errorf("duplicate host header")
+				}
+				host, err := normalizeSharedProxyHostHeader(value)
+				if err != nil {
+					return result, err
+				}
+				result.host = host
+				hostSeen = true
+			case "x-forwarded-for", "x-real-ip", "forwarded":
+				/* Drop client-supplied forwarding metadata so only proxy-derived
+				 * source-address headers reach the backend.
+				 */
+				continue
 			}
-			result.host = strings.ToLower(host)
 		}
-		if strings.HasPrefix(lower, "x-forwarded-for:") {
-			hasXFF = true
-			existing := strings.TrimSpace(trimmed[16:])
-			trimmed = "X-Forwarded-For: " + existing + ", " + clientIP
-		}
+
 		result.lines = append(result.lines, trimmed)
 	}
 
 	if result.host == "" {
 		return result, fmt.Errorf("missing host header")
 	}
-	if !hasXFF && clientIP != "" {
-		result.lines = append(result.lines, "X-Forwarded-For: "+clientIP)
-	}
+	result.lines = append(result.lines, buildSharedProxyForwardingHeaders(clientIP)...)
 	return result, nil
 }
 

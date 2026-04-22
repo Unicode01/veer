@@ -87,6 +87,21 @@ func TestEncodePreparedKernelRuleV6RejectsIPv4Spec(t *testing.T) {
 }
 
 func TestKernelDualstackMapStructSizes(t *testing.T) {
+	if got := unsafe.Sizeof(tcRuleKeyV4{}); got != 12 {
+		t.Fatalf("sizeof(tcRuleKeyV4) = %d, want 12", got)
+	}
+	if got := unsafe.Sizeof(tcRuleValueV4{}); got != 32 {
+		t.Fatalf("sizeof(tcRuleValueV4) = %d, want 32", got)
+	}
+	if got := unsafe.Sizeof(tcFlowKeyV4{}); got != 20 {
+		t.Fatalf("sizeof(tcFlowKeyV4) = %d, want 20", got)
+	}
+	if got := unsafe.Sizeof(tcFlowValueV4{}); got != 48 {
+		t.Fatalf("sizeof(tcFlowValueV4) = %d, want 48", got)
+	}
+	if got := unsafe.Sizeof(tcNATPortKeyV4{}); got != 12 {
+		t.Fatalf("sizeof(tcNATPortKeyV4) = %d, want 12", got)
+	}
 	if got := unsafe.Sizeof(tcRuleKeyV6{}); got != 24 {
 		t.Fatalf("sizeof(tcRuleKeyV6) = %d, want 24", got)
 	}

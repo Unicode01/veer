@@ -16,6 +16,7 @@
     managedNetworkBridgeInterface: app.$('managedNetworkBridgeInterface'),
     managedNetworkBridgePicker: app.$('managedNetworkBridgePicker'),
     managedNetworkBridgeOptions: app.$('managedNetworkBridgeOptions'),
+    managedNetworkAutoEgressNATGroup: app.$('managedNetworkAutoEgressNATGroup'),
     managedNetworkBridgeAdvancedRow: app.$('managedNetworkBridgeAdvancedRow'),
     managedNetworkBridgeAdvancedDetails: app.$('managedNetworkBridgeAdvancedDetails'),
     managedNetworkBridgeMTU: app.$('managedNetworkBridgeMTU'),
@@ -36,6 +37,7 @@
     managedNetworkIPv6ParentPrefix: app.$('managedNetworkIPv6ParentPrefix'),
     managedNetworkIPv6AssignmentMode: app.$('managedNetworkIPv6AssignmentMode'),
     managedNetworkAutoEgressNAT: app.$('managedNetworkAutoEgressNAT'),
+    managedNetworksAutoEgressNATHeader: app.$('managedNetworksAutoEgressNATHeader'),
     managedNetworksBody: app.$('managedNetworksBody'),
     noManagedNetworks: app.$('noManagedNetworks'),
     managedNetworksSearchInput: app.$('managedNetworksSearchInput'),
@@ -127,6 +129,12 @@
     return normalizeManagedNetworkBridgeMode(app.el.managedNetworkBridgeMode && app.el.managedNetworkBridgeMode.value) === 'existing';
   }
 
+  function managedNetworkAutoEgressNATVisible() {
+    return typeof app.kernelFeatureVisible === 'function'
+      ? app.kernelFeatureVisible('managedNetworkAutoEgressNAT')
+      : true;
+  }
+
   function managedNetworkBridgePlaceholder() {
     return app.t(
       managedNetworkUsesExistingBridge()
@@ -151,6 +159,22 @@
       el.managedNetworkBridgePicker.placeholder = placeholder;
     }
   }
+
+  app.syncManagedNetworkKernelFeatureVisibility = function syncManagedNetworkKernelFeatureVisibility() {
+    const visible = managedNetworkAutoEgressNATVisible();
+    if (app.el.managedNetworkAutoEgressNATGroup) {
+      app.el.managedNetworkAutoEgressNATGroup.hidden = !visible;
+    }
+    if (app.el.managedNetworksAutoEgressNATHeader) {
+      app.el.managedNetworksAutoEgressNATHeader.hidden = !visible;
+    }
+    if (app.el.managedNetworkAutoEgressNAT) {
+      app.el.managedNetworkAutoEgressNAT.disabled = !visible;
+      if (!visible && (!app.state.forms || !app.state.forms.managedNetwork || app.state.forms.managedNetwork.mode !== 'edit')) {
+        app.el.managedNetworkAutoEgressNAT.checked = false;
+      }
+    }
+  };
 
   function setManagedNetworkBridgeAdvancedExpanded(expanded) {
     if (app.el.managedNetworkBridgeAdvancedDetails) {
@@ -1382,6 +1406,9 @@
     const el = app.el;
     if (!el.managedNetworkSubmitBtn || !el.managedNetworkCancelBtn || !el.managedNetworkFormTitle) return;
 
+    if (typeof app.syncManagedNetworkKernelFeatureVisibility === 'function') {
+      app.syncManagedNetworkKernelFeatureVisibility();
+    }
     syncManagedNetworkOptionStates();
 
     const formState = app.state.forms.managedNetwork || { mode: 'add', sourceId: 0 };
@@ -1414,7 +1441,7 @@
     if (el.managedNetworkIPv6ParentInterface) el.managedNetworkIPv6ParentInterface.value = '';
     if (el.managedNetworkIPv4Enabled) el.managedNetworkIPv4Enabled.checked = true;
     if (el.managedNetworkIPv6Enabled) el.managedNetworkIPv6Enabled.checked = false;
-    if (el.managedNetworkAutoEgressNAT) el.managedNetworkAutoEgressNAT.checked = true;
+    if (el.managedNetworkAutoEgressNAT) el.managedNetworkAutoEgressNAT.checked = managedNetworkAutoEgressNATVisible();
     if (el.managedNetworkBridgeMTU) el.managedNetworkBridgeMTU.value = '';
     if (el.managedNetworkBridgeVLANAware) el.managedNetworkBridgeVLANAware.checked = false;
     setManagedNetworkBridgeAdvancedExpanded(false);
@@ -1453,7 +1480,7 @@
       if (el.managedNetworkIPv4PoolStart) el.managedNetworkIPv4PoolStart.value = pool.start;
       if (el.managedNetworkIPv4PoolEnd) el.managedNetworkIPv4PoolEnd.value = pool.end;
       if (el.managedNetworkIPv4DNSServers) el.managedNetworkIPv4DNSServers.value = '1.1.1.1, 8.8.8.8';
-      if (el.managedNetworkAutoEgressNAT) el.managedNetworkAutoEgressNAT.checked = !!uplink;
+      if (el.managedNetworkAutoEgressNAT) el.managedNetworkAutoEgressNAT.checked = managedNetworkAutoEgressNATVisible() && !!uplink;
       if (el.managedNetworkIPv6Enabled) el.managedNetworkIPv6Enabled.checked = !!ipv6Parent;
       if (el.managedNetworkIPv6ParentInterface) el.managedNetworkIPv6ParentInterface.value = ipv6Parent ? ipv6Parent.name : '';
       if (el.managedNetworkIPv6AssignmentMode) el.managedNetworkIPv6AssignmentMode.value = 'single_128';
@@ -1610,7 +1637,11 @@
     const st = app.state.managedNetworks;
     if (!st || !el.managedNetworksBody) return;
     app.closeDropdowns();
+    if (typeof app.syncManagedNetworkKernelFeatureVisibility === 'function') {
+      app.syncManagedNetworkKernelFeatureVisibility();
+    }
     app.renderManagedNetworkRuntimeStatusButton();
+    const showAutoEgressNAT = managedNetworkAutoEgressNATVisible();
 
     let filteredList = st.data.slice();
     if (st.searchQuery) {
@@ -1696,7 +1727,9 @@
       tr.appendChild(app.createCell(createManagedNetworkTargetsNode(item), 'managed-network-cell-tight'));
       tr.appendChild(app.createCell(createManagedNetworkIPv4Node(item), 'managed-network-cell-compact'));
       tr.appendChild(app.createCell(createManagedNetworkIPv6Node(item), 'managed-network-cell-compact'));
-      tr.appendChild(app.createCell(createManagedNetworkAutoEgressNATNode(item), 'managed-network-cell-tight'));
+      if (showAutoEgressNAT) {
+        tr.appendChild(app.createCell(createManagedNetworkAutoEgressNATNode(item), 'managed-network-cell-tight'));
+      }
       tr.appendChild(app.createCell(createManagedNetworkTextNode(item.remark), 'managed-network-cell-text'));
       tr.appendChild(app.createCell(enabledBadge(item.enabled !== false)));
       if (canPersistManagedNetworkBridge(item)) {

@@ -18,8 +18,54 @@ func TestReadSharedProxyHTTPHeadersAddsForwardedFor(t *testing.T) {
 	if headers.host != "example.com" {
 		t.Fatalf("readSharedProxyHTTPHeaders() host = %q, want example.com", headers.host)
 	}
-	if len(headers.lines) == 0 || headers.lines[len(headers.lines)-1] != "X-Forwarded-For: 203.0.113.10" {
-		t.Fatalf("readSharedProxyHTTPHeaders() lines = %#v, want X-Forwarded-For appended", headers.lines)
+	if len(headers.lines) < 4 {
+		t.Fatalf("readSharedProxyHTTPHeaders() lines = %#v, want forwarding headers appended", headers.lines)
+	}
+	got := headers.lines[len(headers.lines)-3:]
+	want := []string{
+		"X-Forwarded-For: 203.0.113.10",
+		"X-Real-IP: 203.0.113.10",
+		"Forwarded: for=203.0.113.10",
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("readSharedProxyHTTPHeaders() forwarding header[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestReadSharedProxyHTTPHeadersSanitizesClientForwardingHeaders(t *testing.T) {
+	input := "GET / HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-For: 127.0.0.1\r\nX-Real-IP: 127.0.0.1\r\nForwarded: for=127.0.0.1\r\n\r\n"
+	br := bufio.NewReaderSize(strings.NewReader(input), sharedProxyHTTPReadBufferSize)
+
+	headers, err := readSharedProxyHTTPHeaders(br, "203.0.113.10")
+	if err != nil {
+		t.Fatalf("readSharedProxyHTTPHeaders() error = %v", err)
+	}
+	for _, line := range headers.lines {
+		if strings.Contains(line, "127.0.0.1") {
+			t.Fatalf("readSharedProxyHTTPHeaders() lines = %#v, want spoofed forwarding headers removed", headers.lines)
+		}
+	}
+	got := headers.lines[len(headers.lines)-3:]
+	want := []string{
+		"X-Forwarded-For: 203.0.113.10",
+		"X-Real-IP: 203.0.113.10",
+		"Forwarded: for=203.0.113.10",
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("readSharedProxyHTTPHeaders() forwarding header[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestReadSharedProxyHTTPHeadersRejectsDuplicateHost(t *testing.T) {
+	input := "GET / HTTP/1.1\r\nHost: example.com\r\nHost: attacker.example\r\n\r\n"
+	br := bufio.NewReaderSize(strings.NewReader(input), sharedProxyHTTPReadBufferSize)
+
+	if _, err := readSharedProxyHTTPHeaders(br, "203.0.113.10"); err == nil {
+		t.Fatal("readSharedProxyHTTPHeaders() error = nil, want duplicate host failure")
 	}
 }
 
