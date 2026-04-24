@@ -83,7 +83,7 @@
       if (document.hidden || app.shouldPauseAutoRefresh()) return;
       app.refreshDashboard({
         includeWorkers: true,
-        includeStats: app.state.activeTab === 'rule-stats'
+        includeStats: app.state.activeTab === 'diagnostics'
       });
     }, 5000);
   };
@@ -173,7 +173,7 @@
       app.refreshDashboard({
         includeMeta: true,
         includeWorkers: true,
-        includeStats: app.state.activeTab === 'rule-stats'
+        includeStats: app.state.activeTab === 'diagnostics'
       });
     });
   }
@@ -471,7 +471,7 @@
     if (!app.getToken()) return;
     app.refreshDashboard({
       includeWorkers: true,
-      includeStats: app.state.activeTab === 'rule-stats'
+      includeStats: app.state.activeTab === 'diagnostics'
     });
     app.startPolling();
   });
@@ -1214,7 +1214,7 @@
     app.refreshDashboard({
       includeMeta: true,
       includeWorkers: true,
-      includeStats: app.state.activeTab === 'rule-stats'
+      includeStats: app.state.activeTab === 'diagnostics'
     });
 
     app.startPolling();

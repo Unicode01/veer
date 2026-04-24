@@ -99,6 +99,7 @@ function createHarness() {
     'common.family.ipv4': 'IPv4',
     'common.family.ipv6': 'IPv6',
     'common.family.mixed': 'Mixed',
+    'tab.diagnostics': 'Diagnostics',
     'interface.picker.placeholder': 'Search or select interface...',
     'interface.search.placeholder': 'Filter interfaces...',
     'interface.search.noResults': 'No matching interfaces',

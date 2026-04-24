@@ -84,8 +84,7 @@
             <button id="tab-managed-networks-button" class="tab" data-tab="managed-networks" data-i18n="tab.managedNetworks" role="tab" aria-selected="false" aria-controls="tab-managed-networks" tabindex="-1">Managed Networks</button>
             <button id="tab-egress-nats-button" class="tab" data-tab="egress-nats" data-i18n="tab.egressNATs" role="tab" aria-selected="false" aria-controls="tab-egress-nats" tabindex="-1">Egress NAT</button>
             <button id="tab-ipv6-assignments-button" class="tab" data-tab="ipv6-assignments" data-i18n="tab.ipv6Assignments" role="tab" aria-selected="false" aria-controls="tab-ipv6-assignments" tabindex="-1">IPv6 Assignments</button>
-            <button id="tab-workers-button" class="tab" data-tab="workers" data-i18n="tab.workers" role="tab" aria-selected="false" aria-controls="tab-workers" tabindex="-1">Worker Status</button>
-            <button id="tab-rule-stats-button" class="tab" data-tab="rule-stats" data-i18n="tab.stats" role="tab" aria-selected="false" aria-controls="tab-rule-stats" tabindex="-1">Traffic Stats</button>
+            <button id="tab-diagnostics-button" class="tab" data-tab="diagnostics" data-i18n="tab.diagnostics" role="tab" aria-selected="false" aria-controls="tab-diagnostics" tabindex="-1">Diagnostics</button>
         </div>
 
         <section class="overview-panel">
@@ -937,40 +936,7 @@
             </section>
         </div>
 
-        <div id="tab-workers" class="tab-content" role="tabpanel" aria-labelledby="tab-workers-button">
-            <section class="rule-list">
-                <h2 data-i18n="workers.title">Worker Status</h2>
-                <div class="table-toolbar">
-                    <div class="table-toolbar-main">
-                        <input type="search" id="workersSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="workersTable" data-i18n-placeholder="search.workers.placeholder" placeholder="Search worker type, hash, route...">
-                        <p id="workersFilterMeta" class="table-meta"></p>
-                    </div>
-                    <button type="button" id="refreshWorkersBtn" class="mini-btn" data-i18n="workers.refresh">Refresh Workers</button>
-                </div>
-                <div class="table-scroll">
-                    <table id="workersTable">
-                        <thead>
-                            <tr>
-                                <th class="sortable" data-table="workers" data-sort="kind" data-i18n="workers.kind">Type</th>
-                                <th class="sortable" data-table="workers" data-sort="index">#</th>
-                                <th class="sortable" data-table="workers" data-sort="status" data-i18n="common.status">Status</th>
-                                <th class="sortable" data-table="workers" data-sort="binary_hash" data-i18n="workers.version">Version</th>
-                                <th class="sortable" data-table="workers" data-sort="count" data-i18n="workers.count">Count</th>
-                                <th data-i18n="workers.details">Details</th>
-                            </tr>
-                        </thead>
-                        <tbody id="workersBody"></tbody>
-                    </table>
-                </div>
-                <div id="workersPagination" class="table-pagination" hidden></div>
-                <div id="noWorkers" class="empty-hint">
-                    <p class="empty-title" data-i18n="workers.empty">No workers yet.</p>
-                    <button type="button" id="emptyRefreshWorkersBtn" class="mini-btn" data-i18n="workers.refresh">Refresh Workers</button>
-                </div>
-            </section>
-        </div>
-
-        <div id="tab-rule-stats" class="tab-content" role="tabpanel" aria-labelledby="tab-rule-stats-button">
+        <div id="tab-diagnostics" class="tab-content" role="tabpanel" aria-labelledby="tab-diagnostics-button">
             <section class="rule-list">
                 <div class="section-heading-row">
                     <div>
@@ -1115,12 +1081,43 @@
                 <div id="egressNATStatsPagination" class="table-pagination" hidden></div>
                 <p id="noEgressNATStats" class="empty-hint" data-i18n="stats.egressNATs.empty">No egress NAT statistics yet.</p>
             </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="workers.title">Worker Status</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="workersSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="workersTable" data-i18n-placeholder="search.workers.placeholder" placeholder="Search worker type, hash, route...">
+                        <p id="workersFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="refreshWorkersBtn" class="mini-btn" data-i18n="workers.refresh">Refresh Workers</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="workersTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="workers" data-sort="kind" data-i18n="workers.kind">Type</th>
+                                <th class="sortable" data-table="workers" data-sort="index">#</th>
+                                <th class="sortable" data-table="workers" data-sort="status" data-i18n="common.status">Status</th>
+                                <th class="sortable" data-table="workers" data-sort="binary_hash" data-i18n="workers.version">Version</th>
+                                <th class="sortable" data-table="workers" data-sort="count" data-i18n="workers.count">Count</th>
+                                <th data-i18n="workers.details">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="workersBody"></tbody>
+                    </table>
+                </div>
+                <div id="workersPagination" class="table-pagination" hidden></div>
+                <div id="noWorkers" class="empty-hint">
+                    <p class="empty-title" data-i18n="workers.empty">No workers yet.</p>
+                    <button type="button" id="emptyRefreshWorkersBtn" class="mini-btn" data-i18n="workers.refresh">Refresh Workers</button>
+                </div>
+            </section>
         </div>
     </div>
 
     <script defer src="js/core.js?v=20260408-3"></script>
-    <script defer src="js/i18n.js?v=20260412-1"></script>
-    <script defer src="js/ui.js?v=20260405-2"></script>
+    <script defer src="js/i18n.js?v=20260424-1"></script>
+    <script defer src="js/ui.js?v=20260424-1"></script>
     <script defer src="js/rules.js?v=20260410-1"></script>
     <script defer src="js/sites.js?v=20260407-2"></script>
     <script defer src="js/ranges.js?v=20260407-4"></script>
@@ -1129,6 +1126,6 @@
     <script defer src="js/managed_networks.js?v=20260422-1"></script>
     <script defer src="js/workers.js?v=20260407-5"></script>
     <script defer src="js/stats.js?v=20260422-1"></script>
-    <script defer src="js/init.js?v=20260422-1"></script>
+    <script defer src="js/init.js?v=20260424-1"></script>
 </body>
 </html>

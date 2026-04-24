@@ -76,6 +76,9 @@
   });
 
   app.state.activeTab = app.state.activeTab || localStorage.getItem(app.storageKeys.activeTab) || 'rules';
+  if (app.state.activeTab === 'workers' || app.state.activeTab === 'rule-stats') {
+    app.state.activeTab = 'diagnostics';
+  }
   app.state.managedNetworks = app.state.managedNetworks || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
   app.state.managedNetworkReservationCandidates = app.state.managedNetworkReservationCandidates || { data: [], page: 1, pageSize: 10, searchQuery: '', selectedIPv4ByKey: {} };
   app.state.managedNetworkReservations = app.state.managedNetworkReservations || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
@@ -413,8 +416,8 @@
   app.refreshDashboard = function refreshDashboard(options) {
     const opts = Object.assign({
       includeMeta: false,
-      includeWorkers: app.state.activeTab === 'workers',
-      includeStats: app.state.activeTab === 'rule-stats'
+      includeWorkers: app.state.activeTab === 'diagnostics',
+      includeStats: app.state.activeTab === 'diagnostics'
     }, options || {});
 
     const tasks = [];
@@ -639,8 +642,10 @@
   app.handleTabLoad = function handleTabLoad(target) {
     if (target === 'managed-networks' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
     if (target === 'ipv6-assignments' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
-    if (target === 'workers') app.loadWorkers();
-    if (target === 'rule-stats') app.loadAllStats();
+    if (target === 'diagnostics') {
+      if (typeof app.loadWorkers === 'function') app.loadWorkers();
+      if (typeof app.loadAllStats === 'function') app.loadAllStats();
+    }
   };
 
   app.activateTab = function activateTab(target, options) {
