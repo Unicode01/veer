@@ -119,6 +119,17 @@ type dataplanePerfScenario struct {
 	IOChunkBytes       int64
 	WarmupConnections  int
 	WarmupBytesPerConn int64
+	SteadySeconds      int
+}
+
+type dataplanePerfScenarioConfig struct {
+	Connections        int
+	Concurrency        int
+	BytesPerConnection int64
+	IOChunkBytes       int64
+	WarmupConnections  int
+	WarmupBytesPerConn int64
+	SteadySeconds      int
 }
 
 type dataplanePerfResult struct {
@@ -227,6 +238,44 @@ func dataplanePerfTCPMode() string {
 	}
 }
 
+func defaultDataplanePerfScenarioConfig(egressNAT bool) dataplanePerfScenarioConfig {
+	config := dataplanePerfScenarioConfig{
+		Connections:        256,
+		Concurrency:        16,
+		BytesPerConnection: 1 << 20,
+		IOChunkBytes:       16 << 10,
+		WarmupConnections:  8,
+		WarmupBytesPerConn: 64 << 10,
+		SteadySeconds:      0,
+	}
+
+	switch dataplanePerfProtocol() {
+	case "udp":
+		config.Connections = 8192
+		config.Concurrency = 16
+		config.BytesPerConnection = 64
+		config.IOChunkBytes = 64
+		config.SteadySeconds = 8
+	default:
+		switch dataplanePerfTCPMode() {
+		case dataplanePerfTCPUploadMode, dataplanePerfTCPDownloadMode:
+			if egressNAT {
+				config.Connections = 64
+				config.Concurrency = 8
+				config.BytesPerConnection = 32 << 20
+				config.IOChunkBytes = 16 << 10
+			} else {
+				config.Connections = 16
+				config.Concurrency = 16
+				config.BytesPerConnection = 256 << 20
+				config.IOChunkBytes = 128 << 10
+			}
+		}
+	}
+
+	return config
+}
+
 func TestDataplanePerfMatrix(t *testing.T) {
 	if os.Getenv(dataplanePerfEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux dataplane performance test", dataplanePerfEnableEnv)
@@ -248,13 +297,15 @@ func TestDataplanePerfMatrix(t *testing.T) {
 	backendCmd, backendLogs := startDataplanePerfBackend(t, topology)
 	defer stopDataplanePerfHelper(t, backendCmd)
 
-	connections := envInt(dataplanePerfConnEnv, 256)
-	concurrency := envInt(dataplanePerfConcurrencyEnv, 16)
-	bytesPerConn := envInt64(dataplanePerfBytesEnv, 1<<20)
-	ioChunkBytes := envInt64(dataplanePerfIOChunkEnv, 16<<10)
-	warmupConnections := envInt(dataplanePerfWarmupConnEnv, 8)
-	warmupBytesPerConn := envInt64(dataplanePerfWarmupBytesEnv, 64<<10)
-	scenarios := dataplanePerfScenarios(connections, concurrency, bytesPerConn, ioChunkBytes, warmupConnections, warmupBytesPerConn)
+	defaults := defaultDataplanePerfScenarioConfig(false)
+	connections := envInt(dataplanePerfConnEnv, defaults.Connections)
+	concurrency := envInt(dataplanePerfConcurrencyEnv, defaults.Concurrency)
+	bytesPerConn := envInt64(dataplanePerfBytesEnv, defaults.BytesPerConnection)
+	ioChunkBytes := envInt64(dataplanePerfIOChunkEnv, defaults.IOChunkBytes)
+	warmupConnections := envInt(dataplanePerfWarmupConnEnv, defaults.WarmupConnections)
+	warmupBytesPerConn := envInt64(dataplanePerfWarmupBytesEnv, defaults.WarmupBytesPerConn)
+	steadySeconds := envInt(dataplanePerfSteadyEnv, defaults.SteadySeconds)
+	scenarios := dataplanePerfScenarios(connections, concurrency, bytesPerConn, ioChunkBytes, warmupConnections, warmupBytesPerConn, steadySeconds)
 
 	modes := []dataplanePerfMode{
 		{Name: "iptables", Expected: "iptables"},
@@ -328,7 +379,7 @@ func runDataplanePerfMode(t *testing.T, baseBinary string, topology dataplanePer
 	t.Helper()
 	cleanupTransparentRouting()
 	defer cleanupTransparentRouting()
-	steadySeconds := envInt(dataplanePerfSteadyEnv, 0)
+	steadySeconds := scenario.SteadySeconds
 	if mode.Name == "iptables" {
 		return runDataplanePerfIptablesMode(t, topology, scenario, steadySeconds)
 	}
@@ -1613,6 +1664,9 @@ func validateEmbeddedEBPFObjects(repoRoot string) error {
 	if err != nil {
 		return fmt.Errorf("list eBPF include dependencies: %w", err)
 	}
+	if err := validateEmbeddedEBPFHelperDeclarations(repoRoot); err != nil {
+		return err
+	}
 
 	checks := []struct {
 		objectPath string
@@ -2779,7 +2833,7 @@ func runDataplanePerfCmd(name string, args ...string) {
 	_ = exec.Command(name, args...).Run()
 }
 
-func dataplanePerfScenarios(defaultConnections int, defaultConcurrency int, defaultBytesPerConn int64, defaultIOChunkBytes int64, defaultWarmupConnections int, defaultWarmupBytesPerConn int64) []dataplanePerfScenario {
+func dataplanePerfScenarios(defaultConnections int, defaultConcurrency int, defaultBytesPerConn int64, defaultIOChunkBytes int64, defaultWarmupConnections int, defaultWarmupBytesPerConn int64, defaultSteadySeconds int) []dataplanePerfScenario {
 	connectionSeries := envIntList(dataplanePerfConnSeriesEnv)
 	concurrencySeries := envIntList(dataplanePerfConcSeriesEnv)
 	totalPayloadBytes := envInt64(dataplanePerfTotalBytesEnv, 0)
@@ -2794,6 +2848,7 @@ func dataplanePerfScenarios(defaultConnections int, defaultConcurrency int, defa
 			IOChunkBytes:       ioChunkBytes,
 			WarmupConnections:  defaultWarmupConnections,
 			WarmupBytesPerConn: minInt64(defaultWarmupBytesPerConn, bytesPerConn),
+			SteadySeconds:      defaultSteadySeconds,
 		}}
 	}
 
@@ -2817,6 +2872,7 @@ func dataplanePerfScenarios(defaultConnections int, defaultConcurrency int, defa
 			IOChunkBytes:       ioChunkBytes,
 			WarmupConnections:  minInt(defaultWarmupConnections, maxInt(1, connections)),
 			WarmupBytesPerConn: minInt64(defaultWarmupBytesPerConn, bytesPerConn),
+			SteadySeconds:      defaultSteadySeconds,
 		})
 	}
 	return scenarios

@@ -60,13 +60,15 @@ func TestEgressNATPerfMatrix(t *testing.T) {
 	requireEmbeddedEBPFObjects(t, repoRoot)
 	baseBinary := buildDataplanePerfBinary(t, repoRoot)
 
-	connections := envInt(dataplanePerfConnEnv, 256)
-	concurrency := envInt(dataplanePerfConcurrencyEnv, 32)
-	bytesPerConn := envInt64(dataplanePerfBytesEnv, 1<<20)
-	ioChunkBytes := envInt64(dataplanePerfIOChunkEnv, 16<<10)
-	warmupConnections := envInt(dataplanePerfWarmupConnEnv, 8)
-	warmupBytesPerConn := envInt64(dataplanePerfWarmupBytesEnv, 64<<10)
-	scenarios := dataplanePerfScenarios(connections, concurrency, bytesPerConn, ioChunkBytes, warmupConnections, warmupBytesPerConn)
+	defaults := defaultDataplanePerfScenarioConfig(true)
+	connections := envInt(dataplanePerfConnEnv, defaults.Connections)
+	concurrency := envInt(dataplanePerfConcurrencyEnv, defaults.Concurrency)
+	bytesPerConn := envInt64(dataplanePerfBytesEnv, defaults.BytesPerConnection)
+	ioChunkBytes := envInt64(dataplanePerfIOChunkEnv, defaults.IOChunkBytes)
+	warmupConnections := envInt(dataplanePerfWarmupConnEnv, defaults.WarmupConnections)
+	warmupBytesPerConn := envInt64(dataplanePerfWarmupBytesEnv, defaults.WarmupBytesPerConn)
+	steadySeconds := envInt(dataplanePerfSteadyEnv, defaults.SteadySeconds)
+	scenarios := dataplanePerfScenarios(connections, concurrency, bytesPerConn, ioChunkBytes, warmupConnections, warmupBytesPerConn, steadySeconds)
 
 	modes := []dataplanePerfMode{
 		{Name: "iptables", Expected: "iptables"},
@@ -167,7 +169,7 @@ func runEgressNATPerfMode(t *testing.T, baseBinary string, mode dataplanePerfMod
 	hz := procClockTicks(t)
 	hostCPUStart := readDataplanePerfCPUStat(t)
 	startCPU := sampleProcessTreeJiffies(t, cmd.Process.Pid)
-	clientResult, err := runDataplanePerfClientBenchmarkRawToTarget(topology.ClientNS, targetAddr, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, envInt(dataplanePerfSteadyEnv, 0))
+	clientResult, err := runDataplanePerfClientBenchmarkRawToTarget(topology.ClientNS, targetAddr, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, scenario.SteadySeconds)
 	if err != nil {
 		logEgressNATPerfFailureArtifacts(t, mode.Name, forwardLogs, backendLogs.String())
 		t.Fatalf("client benchmark failed: %v", err)
@@ -216,7 +218,7 @@ func runEgressNATPerfIptablesMode(t *testing.T, scenario dataplanePerfScenario) 
 
 	hz := procClockTicks(t)
 	hostCPUStart := readDataplanePerfCPUStat(t)
-	clientResult, err := runDataplanePerfClientBenchmarkRawToTarget(topology.ClientNS, targetAddr, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, envInt(dataplanePerfSteadyEnv, 0))
+	clientResult, err := runDataplanePerfClientBenchmarkRawToTarget(topology.ClientNS, targetAddr, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, scenario.SteadySeconds)
 	if err != nil {
 		t.Logf("iptables egress nat backend logs before client failure:\n%s", backendLogs.String())
 		t.Fatalf("iptables client benchmark failed: %v", err)
@@ -248,7 +250,7 @@ func runEgressNATPerfNFTablesMode(t *testing.T, scenario dataplanePerfScenario) 
 
 	hz := procClockTicks(t)
 	hostCPUStart := readDataplanePerfCPUStat(t)
-	clientResult, err := runDataplanePerfClientBenchmarkRawToTarget(topology.ClientNS, targetAddr, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, envInt(dataplanePerfSteadyEnv, 0))
+	clientResult, err := runDataplanePerfClientBenchmarkRawToTarget(topology.ClientNS, targetAddr, scenario.Connections, scenario.Concurrency, scenario.BytesPerConnection, scenario.IOChunkBytes, scenario.SteadySeconds)
 	if err != nil {
 		t.Logf("nftables egress nat backend logs before client failure:\n%s", backendLogs.String())
 		t.Fatalf("nftables client benchmark failed: %v", err)

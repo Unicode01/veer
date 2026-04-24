@@ -8,6 +8,18 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+func TestLoadEmbeddedKernelCollectionSpecValidates(t *testing.T) {
+	for _, enableTrafficStats := range []bool{false, true} {
+		spec, err := loadEmbeddedKernelCollectionSpec(enableTrafficStats)
+		if err != nil {
+			t.Fatalf("loadEmbeddedKernelCollectionSpec(%t) error = %v", enableTrafficStats, err)
+		}
+		if err := validateKernelCollectionSpec(spec); err != nil {
+			t.Fatalf("validateKernelCollectionSpec(loadEmbeddedKernelCollectionSpec(%t)) error = %v", enableTrafficStats, err)
+		}
+	}
+}
+
 func TestValidateKernelCollectionSpecAllowsMissingIPv6Maps(t *testing.T) {
 	spec := &ebpf.CollectionSpec{
 		Programs: map[string]*ebpf.ProgramSpec{
