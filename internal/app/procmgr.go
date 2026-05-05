@@ -4417,8 +4417,13 @@ func (pm *ProcessManager) monitorLoop() {
 				pm.lastKernelAttachmentHealError = kernelAttachmentHealError
 				pm.mu.Unlock()
 				if kernelAttachmentHealErrorRequiresRedistribute(healErr) {
-					log.Printf("kernel dataplane self-heal: targeted attachment repair failed (%s): %v", kernelAttachmentIssue, healErr)
-					pm.requestRedistributeWorkers(0)
+					if kernelAttachmentHealErrorIsDisappearingInterface(healErr) {
+						log.Printf("kernel dataplane self-heal: targeted attachment repair hit a disappearing interface (%s): %v; scheduling full re-evaluation", kernelAttachmentIssue, healErr)
+						pm.requestRedistributeWorkers(managedNetworkReloadDebounce)
+					} else {
+						log.Printf("kernel dataplane self-heal: targeted attachment repair failed (%s): %v", kernelAttachmentIssue, healErr)
+						pm.requestRedistributeWorkers(0)
+					}
 				} else {
 					log.Printf("kernel dataplane self-heal: targeted attachment repair hit a disappearing interface (%s): %v; waiting for link-driven recovery", kernelAttachmentIssue, healErr)
 				}

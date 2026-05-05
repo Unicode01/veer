@@ -117,17 +117,18 @@ func kernelAttachmentHealOutcomeSummary(rawSummary string, remainingIssue string
 }
 
 func kernelAttachmentHealErrorRequiresRedistribute(err error) bool {
+	return err != nil
+}
+
+func kernelAttachmentHealErrorIsDisappearingInterface(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, kernelErrnoNoDevice) || errors.Is(err, kernelErrnoNoSuchIO) {
-		return false
+		return true
 	}
 	text := strings.ToLower(strings.TrimSpace(err.Error()))
-	if strings.Contains(text, "no such device") || strings.Contains(text, "link not found") {
-		return false
-	}
-	return true
+	return strings.Contains(text, "no such device") || strings.Contains(text, "link not found")
 }
 
 func (state *kernelAdaptiveMaintenanceState) requestFull() {

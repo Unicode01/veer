@@ -115,14 +115,19 @@ func TestKernelAttachmentHealErrorRequiresRedistribute(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "missing device errno skips redistribute",
+			name: "missing device errno redistributes",
 			err:  fmt.Errorf("repair attachment: %w", syscall.Errno(19)),
-			want: false,
+			want: true,
 		},
 		{
-			name: "missing device text skips redistribute",
+			name: "missing device text redistributes",
 			err:  fmt.Errorf("repair attachment on ifindex 17: no such device"),
-			want: false,
+			want: true,
+		},
+		{
+			name: "link not found redistributes",
+			err:  fmt.Errorf(`resolve inbound interface "tap108i1": Link not found`),
+			want: true,
 		},
 		{
 			name: "other errors still redistribute",
@@ -135,6 +140,43 @@ func TestKernelAttachmentHealErrorRequiresRedistribute(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := kernelAttachmentHealErrorRequiresRedistribute(tc.err); got != tc.want {
 				t.Fatalf("kernelAttachmentHealErrorRequiresRedistribute(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKernelAttachmentHealErrorIsDisappearingInterface(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "missing device errno",
+			err:  fmt.Errorf("repair attachment: %w", syscall.Errno(19)),
+			want: true,
+		},
+		{
+			name: "missing device text",
+			err:  fmt.Errorf("repair attachment on ifindex 17: no such device"),
+			want: true,
+		},
+		{
+			name: "link not found",
+			err:  fmt.Errorf(`resolve inbound interface "tap108i1": Link not found`),
+			want: true,
+		},
+		{
+			name: "other errors",
+			err:  fmt.Errorf("repair attachment: %w", syscall.Errno(1)),
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kernelAttachmentHealErrorIsDisappearingInterface(tc.err); got != tc.want {
+				t.Fatalf("kernelAttachmentHealErrorIsDisappearingInterface(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
