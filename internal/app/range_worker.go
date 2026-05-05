@@ -28,11 +28,14 @@ type rangeBinding struct {
 func startRangeBinding(workerIndex int, pr PortRange, st *ruleStats) (*rangeBinding, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	closeSet := &closerSet{}
-	bound, failed, wg := startRangeForwarder(ctx, &pr, st, closeSet)
+	bound, failed, firstErr, wg := startRangeForwarder(ctx, &pr, st, closeSet)
 	if bound == 0 {
 		cancel()
 		closeSet.CloseAll()
 		wg.Wait()
+		if firstErr != nil {
+			return nil, fmt.Errorf("all %d port bindings failed: %w", failed, firstErr)
+		}
 		return nil, fmt.Errorf("all %d port bindings failed", failed)
 	}
 	if failed > 0 {
@@ -140,8 +143,8 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		c.Write(data)
 	}
 
-	sendStatus := func(status, errMsg string, failedIDs []int64) {
-		sendIPC(IPCMessage{Type: "status", Status: status, Error: errMsg, FailedRangeIDs: failedIDs})
+	sendStatus := func(status, errMsg string, failedIDs []int64, rangeErrors map[int64]string) {
+		sendIPC(IPCMessage{Type: "status", Status: status, Error: errMsg, FailedRangeIDs: failedIDs, RangeErrors: rangeErrors})
 	}
 
 	sendStats := func(stats []RangeStatsReport) {
@@ -199,10 +202,12 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		}
 
 		nextFailed := make(map[int64]struct{})
+		rangeErrors := make(map[int64]string)
 		for _, pr := range startList {
 			binding, err := startRangeBinding(workerIndex, pr, sm[pr.ID])
 			if err != nil {
 				nextFailed[pr.ID] = struct{}{}
+				rangeErrors[pr.ID] = err.Error()
 				continue
 			}
 			nextBindings[pr.ID] = binding
@@ -215,16 +220,16 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		stateMu.Unlock()
 
 		if len(ranges) == 0 {
-			sendStatus("idle", "", nil)
+			sendStatus("idle", "", nil, nil)
 			return
 		}
 
 		failedIDs := sortedInt64SetKeys(nextFailed)
 		if len(nextBindings) == 0 {
-			sendStatus("error", fmt.Sprintf("all %d port range bindings failed", len(ranges)), failedIDs)
+			sendStatus("error", fmt.Sprintf("all %d port range bindings failed", len(ranges)), failedIDs, rangeErrors)
 			return
 		}
-		sendStatus("running", "", failedIDs)
+		sendStatus("running", "", failedIDs, rangeErrors)
 		if reports := buildRangeStatsReports(snapshotRuleStatsMap(sm)); len(reports) > 0 {
 			sendStats(reports)
 		}
@@ -352,7 +357,7 @@ func runRangeWorker(workerIndex int, sockPath string) {
 				}
 				if len(msg.PortRanges) == 0 {
 					stopBindings(true)
-					sendStatus("idle", "", nil)
+					sendStatus("idle", "", nil, nil)
 					continue
 				}
 				applyRanges(msg.PortRanges)
@@ -382,7 +387,7 @@ func runRangeWorker(workerIndex int, sockPath string) {
 
 // startRangeForwarder binds all ports in the range, counts successes/failures,
 // and returns the counts plus a WaitGroup that completes when all serve goroutines exit.
-func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, closeSet *closerSet) (bound int, failed int, wg *sync.WaitGroup) {
+func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, closeSet *closerSet) (bound int, failed int, firstErr error, wg *sync.WaitGroup) {
 	wg = &sync.WaitGroup{}
 
 	ports := pr.EndPort - pr.StartPort + 1
@@ -395,7 +400,7 @@ func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, clos
 	}
 	totalBinds := ports * perPort
 	if totalBinds == 0 {
-		return 0, 0, wg
+		return 0, 0, nil, wg
 	}
 
 	bindCh := make(chan error, totalBinds)
@@ -420,12 +425,15 @@ func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, clos
 	for i := 0; i < totalBinds; i++ {
 		if err := <-bindCh; err != nil {
 			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
 		} else {
 			bound++
 		}
 	}
 
-	return bound, failed, wg
+	return bound, failed, firstErr, wg
 }
 func runRangeTCPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<- error, st *ruleStats, closeSet *closerSet) {
 	lc := net.ListenConfig{}

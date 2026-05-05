@@ -292,3 +292,266 @@ func TestHandleListWorkersIncludesKernelRulesFromEnabledIDQuery(t *testing.T) {
 		t.Fatalf("worker rule status = %q, want running", worker.Rules[0].Status)
 	}
 }
+
+func TestHandleListWorkersIncludesUserspaceRuleRuntimeError(t *testing.T) {
+	db := openTestDB(t)
+
+	ruleID, err := dbAddRule(db, &Rule{
+		InIP:     "0.0.0.0",
+		InPort:   53333,
+		OutIP:    "192.0.2.10",
+		OutPort:  53333,
+		Protocol: "tcp+udp",
+		Enabled:  true,
+		Remark:   "failed-rule",
+	})
+	if err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+	rules, err := dbGetRules(db)
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	const runtimeErr = "all bindings failed: tcp listen 0.0.0.0:53333: bind: address already in use"
+	pm := &ProcessManager{
+		binaryHash:       "workerhash",
+		rangeWorkers:     map[int]*WorkerInfo{},
+		kernelRules:      map[int64]bool{},
+		kernelRanges:     map[int64]bool{},
+		kernelEgressNATs: map[int64]bool{},
+		ruleWorkers: map[int]*WorkerInfo{
+			0: {
+				kind:        workerKindRule,
+				workerIndex: 0,
+				errored:     true,
+				binaryHash:  "workerhash",
+				rules:       rules,
+				failedRules: map[int64]bool{ruleID: true},
+				ruleErrors:  map[int64]string{ruleID: runtimeErr},
+				lastError:   "all 1 rule bindings failed",
+			},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/workers", nil)
+	w := httptest.NewRecorder()
+
+	handleListWorkers(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp WorkerListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Workers) != 1 {
+		t.Fatalf("unexpected worker rows: %d", len(resp.Workers))
+	}
+	worker := resp.Workers[0]
+	if worker.Status != "error" {
+		t.Fatalf("worker status = %q, want error", worker.Status)
+	}
+	if worker.LastError != "all 1 rule bindings failed" {
+		t.Fatalf("worker last_error = %q", worker.LastError)
+	}
+	if len(worker.Rules) != 1 {
+		t.Fatalf("worker rule count = %d, want 1", len(worker.Rules))
+	}
+	if worker.Rules[0].Status != "error" {
+		t.Fatalf("rule status = %q, want error", worker.Rules[0].Status)
+	}
+	if worker.Rules[0].RuntimeError != runtimeErr {
+		t.Fatalf("rule runtime_error = %q, want %q", worker.Rules[0].RuntimeError, runtimeErr)
+	}
+}
+
+func TestHandleListRulesIncludesUserspaceRuntimeError(t *testing.T) {
+	db := openTestDB(t)
+
+	ruleID, err := dbAddRule(db, &Rule{
+		InIP:     "0.0.0.0",
+		InPort:   53333,
+		OutIP:    "192.0.2.10",
+		OutPort:  53333,
+		Protocol: "tcp+udp",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+	rules, err := dbGetRules(db)
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	const runtimeErr = "all bindings failed: udp listen 0.0.0.0:53333: bind: address already in use"
+	pm := &ProcessManager{
+		ruleWorkers: map[int]*WorkerInfo{
+			0: {
+				kind:        workerKindRule,
+				workerIndex: 0,
+				errored:     true,
+				rules:       rules,
+				failedRules: map[int64]bool{ruleID: true},
+				ruleErrors:  map[int64]string{ruleID: runtimeErr},
+				lastError:   "all 1 rule bindings failed",
+			},
+		},
+		kernelRules: map[int64]bool{},
+	}
+
+	req := httptest.NewRequest("GET", "/api/rules", nil)
+	w := httptest.NewRecorder()
+
+	handleListRules(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp []RuleStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(resp))
+	}
+	if resp[0].Status != "error" {
+		t.Fatalf("rule status = %q, want error", resp[0].Status)
+	}
+	if resp[0].RuntimeError != runtimeErr {
+		t.Fatalf("runtime_error = %q, want %q", resp[0].RuntimeError, runtimeErr)
+	}
+}
+
+func TestHandleListWorkersIncludesUserspaceRangeRuntimeError(t *testing.T) {
+	db := openTestDB(t)
+
+	rangeID, err := dbAddRange(db, &PortRange{
+		InIP:         "0.0.0.0",
+		StartPort:    61000,
+		EndPort:      61000,
+		OutIP:        "192.0.2.20",
+		OutStartPort: 61000,
+		Protocol:     "tcp+udp",
+		Enabled:      true,
+		Remark:       "failed-range",
+	})
+	if err != nil {
+		t.Fatalf("add range: %v", err)
+	}
+	ranges, err := dbGetRanges(db)
+	if err != nil {
+		t.Fatalf("load ranges: %v", err)
+	}
+
+	const runtimeErr = "all 2 port bindings failed: tcp listen 0.0.0.0:61000: bind: address already in use"
+	pm := &ProcessManager{
+		binaryHash:       "rangehash",
+		ruleWorkers:      map[int]*WorkerInfo{},
+		kernelRules:      map[int64]bool{},
+		kernelRanges:     map[int64]bool{},
+		kernelEgressNATs: map[int64]bool{},
+		rangeWorkers: map[int]*WorkerInfo{
+			0: {
+				kind:         workerKindRange,
+				workerIndex:  0,
+				errored:      true,
+				binaryHash:   "rangehash",
+				ranges:       ranges,
+				failedRanges: map[int64]bool{rangeID: true},
+				rangeErrors:  map[int64]string{rangeID: runtimeErr},
+				lastError:    "all 1 port range bindings failed",
+			},
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/api/workers", nil)
+	w := httptest.NewRecorder()
+
+	handleListWorkers(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp WorkerListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Workers) != 1 {
+		t.Fatalf("unexpected worker rows: %d", len(resp.Workers))
+	}
+	worker := resp.Workers[0]
+	if worker.LastError != "all 1 port range bindings failed" {
+		t.Fatalf("worker last_error = %q", worker.LastError)
+	}
+	if len(worker.Ranges) != 1 {
+		t.Fatalf("worker range count = %d, want 1", len(worker.Ranges))
+	}
+	if worker.Ranges[0].Status != "error" {
+		t.Fatalf("range status = %q, want error", worker.Ranges[0].Status)
+	}
+	if worker.Ranges[0].RuntimeError != runtimeErr {
+		t.Fatalf("range runtime_error = %q, want %q", worker.Ranges[0].RuntimeError, runtimeErr)
+	}
+}
+
+func TestHandleListRangesIncludesUserspaceRuntimeError(t *testing.T) {
+	db := openTestDB(t)
+
+	rangeID, err := dbAddRange(db, &PortRange{
+		InIP:         "0.0.0.0",
+		StartPort:    62000,
+		EndPort:      62000,
+		OutIP:        "192.0.2.21",
+		OutStartPort: 62000,
+		Protocol:     "udp",
+		Enabled:      true,
+	})
+	if err != nil {
+		t.Fatalf("add range: %v", err)
+	}
+	ranges, err := dbGetRanges(db)
+	if err != nil {
+		t.Fatalf("load ranges: %v", err)
+	}
+
+	const runtimeErr = "all 1 port bindings failed: udp listen 0.0.0.0:62000: bind: address already in use"
+	pm := &ProcessManager{
+		rangeWorkers: map[int]*WorkerInfo{
+			0: {
+				kind:         workerKindRange,
+				workerIndex:  0,
+				errored:      true,
+				ranges:       ranges,
+				failedRanges: map[int64]bool{rangeID: true},
+				rangeErrors:  map[int64]string{rangeID: runtimeErr},
+				lastError:    "all 1 port range bindings failed",
+			},
+		},
+		kernelRanges: map[int64]bool{},
+	}
+
+	req := httptest.NewRequest("GET", "/api/ranges", nil)
+	w := httptest.NewRecorder()
+
+	handleListRanges(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp []PortRangeStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp) != 1 {
+		t.Fatalf("range count = %d, want 1", len(resp))
+	}
+	if resp[0].Status != "error" {
+		t.Fatalf("range status = %q, want error", resp[0].Status)
+	}
+	if resp[0].RuntimeError != runtimeErr {
+		t.Fatalf("runtime_error = %q, want %q", resp[0].RuntimeError, runtimeErr)
+	}
+}

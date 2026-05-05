@@ -176,6 +176,7 @@
         site.backend_source_ip,
         site.backend_http_port,
         site.backend_https_port,
+        site.runtime_error,
         app.statusInfo(site.status, site.enabled).text
       ]));
     }
@@ -206,6 +207,10 @@
       const tr = document.createElement('tr');
       const pending = app.isRowPending('site', site.id);
       const info = app.statusInfo(site.status, site.enabled);
+      const statusTitle = [
+        app.t('common.status') + ': ' + info.text,
+        site.runtime_error ? app.t('workers.runtimeError') + ': ' + site.runtime_error : ''
+      ].filter(Boolean).join('\n');
       const toggleClass = site.enabled ? 'btn-disable' : 'btn-enable';
       const toggleText = pending ? app.t('common.processing') : app.t(site.enabled ? 'common.disable' : 'common.enable');
       tr.className = pending ? 'row-pending' : '';
@@ -221,7 +226,7 @@
       tr.appendChild(app.createCell(site.transparent
         ? app.createBadgeNode('badge-running', app.t('common.yes'))
         : app.emptyCellNode()));
-      tr.appendChild(app.createCell(app.createStatusBadgeNode(info)));
+      tr.appendChild(app.createCell(app.createStatusBadgeNode(info, statusTitle)));
       tr.appendChild(app.createCell(app.createActionDropdown([
         {
           className: toggleClass,

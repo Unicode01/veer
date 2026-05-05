@@ -485,10 +485,11 @@ func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 		return
 	}
 
-	runningRules, failedRules := collectRuleRuntimeStatus(pm)
+	runningRules, failedRules, ruleErrors := collectRuleRuntimeStatus(pm)
 	var statuses []RuleStatus
 	for _, rule := range rules {
 		item := pm.buildRuleStatus(rule, ruleRuntimeStatus(rule, runningRules, failedRules))
+		item.RuntimeError = ruleErrors[rule.ID]
 		if matchesRuleFilter(item, filters) {
 			statuses = append(statuses, item)
 		}
@@ -499,27 +500,39 @@ func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 	writeJSON(w, http.StatusOK, statuses)
 }
 
-func collectRuleRuntimeStatus(pm *ProcessManager) (map[int64]bool, map[int64]bool) {
+func collectRuleRuntimeStatus(pm *ProcessManager) (map[int64]bool, map[int64]bool, map[int64]string) {
 	runningRules := make(map[int64]bool)
 	failedRules := make(map[int64]bool)
+	ruleErrors := make(map[int64]string)
 	pm.mu.Lock()
 	for id := range pm.kernelRules {
 		runningRules[id] = true
 	}
 	for _, wi := range pm.ruleWorkers {
-		if !wi.running {
-			continue
-		}
 		for _, r := range wi.rules {
 			if wi.failedRules != nil && wi.failedRules[r.ID] {
 				failedRules[r.ID] = true
+				if errText := strings.TrimSpace(wi.ruleErrors[r.ID]); errText != "" {
+					ruleErrors[r.ID] = errText
+				} else if errText := strings.TrimSpace(wi.lastError); errText != "" {
+					ruleErrors[r.ID] = errText
+				}
 				continue
 			}
-			runningRules[r.ID] = true
+			if wi.running {
+				runningRules[r.ID] = true
+			} else if wi.errored {
+				failedRules[r.ID] = true
+				if errText := strings.TrimSpace(wi.ruleErrors[r.ID]); errText != "" {
+					ruleErrors[r.ID] = errText
+				} else if errText := strings.TrimSpace(wi.lastError); errText != "" {
+					ruleErrors[r.ID] = errText
+				}
+			}
 		}
 	}
 	pm.mu.Unlock()
-	return runningRules, failedRules
+	return runningRules, failedRules, ruleErrors
 }
 
 func ruleRuntimeStatus(rule Rule, runningRules, failedRules map[int64]bool) string {
@@ -1619,8 +1632,10 @@ func handleListSites(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 	pm.mu.Lock()
 	proxyRunning := pm.sharedProxy != nil && pm.sharedProxy.running
 	proxyErrored := pm.sharedProxy != nil && pm.sharedProxy.errored
+	proxyLastError := ""
 	failedSiteIDs := make(map[int64]bool)
 	if pm.sharedProxy != nil {
+		proxyLastError = strings.TrimSpace(pm.sharedProxy.lastError)
 		for id := range pm.sharedProxy.failedSites {
 			failedSiteIDs[id] = true
 		}
@@ -1635,7 +1650,11 @@ func handleListSites(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 		} else if site.Enabled && proxyErrored && len(failedSiteIDs) == 0 {
 			status = "error"
 		}
-		statuses = append(statuses, SiteStatus{Site: site, Status: status})
+		item := SiteStatus{Site: site, Status: status}
+		if status == "error" {
+			item.RuntimeError = proxyLastError
+		}
+		statuses = append(statuses, item)
 	}
 	if statuses == nil {
 		statuses = []SiteStatus{}
@@ -1828,17 +1847,30 @@ func handleListRanges(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	pm.mu.Lock()
 	runningRanges := make(map[int64]bool)
 	failedRanges := make(map[int64]bool)
+	rangeErrors := make(map[int64]string)
 	for id := range pm.kernelRanges {
 		runningRanges[id] = true
 	}
 	for _, wi := range pm.rangeWorkers {
-		if wi.running {
-			for _, pr := range wi.ranges {
-				if wi.failedRanges != nil && wi.failedRanges[pr.ID] {
-					failedRanges[pr.ID] = true
-					continue
+		for _, pr := range wi.ranges {
+			if wi.failedRanges != nil && wi.failedRanges[pr.ID] {
+				failedRanges[pr.ID] = true
+				if errText := strings.TrimSpace(wi.rangeErrors[pr.ID]); errText != "" {
+					rangeErrors[pr.ID] = errText
+				} else if errText := strings.TrimSpace(wi.lastError); errText != "" {
+					rangeErrors[pr.ID] = errText
 				}
+				continue
+			}
+			if wi.running {
 				runningRanges[pr.ID] = true
+			} else if wi.errored {
+				failedRanges[pr.ID] = true
+				if errText := strings.TrimSpace(wi.rangeErrors[pr.ID]); errText != "" {
+					rangeErrors[pr.ID] = errText
+				} else if errText := strings.TrimSpace(wi.lastError); errText != "" {
+					rangeErrors[pr.ID] = errText
+				}
 			}
 		}
 	}
@@ -1850,7 +1882,9 @@ func handleListRanges(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		} else if runningRanges[pr.ID] {
 			status = "running"
 		}
-		statuses = append(statuses, pm.buildRangeStatus(pr, status))
+		item := pm.buildRangeStatus(pr, status)
+		item.RuntimeError = rangeErrors[pr.ID]
+		statuses = append(statuses, item)
 	}
 	if statuses == nil {
 		statuses = []PortRangeStatus{}
@@ -2060,6 +2094,9 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		ranges         []PortRange
 		failedRules    map[int64]bool
 		failedRanges   map[int64]bool
+		ruleErrors     map[int64]string
+		rangeErrors    map[int64]string
+		lastError      string
 	}
 
 	var snaps []workerSnap
@@ -2093,6 +2130,8 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 			binaryHash:  wi.binaryHash,
 			rules:       append([]Rule(nil), wi.rules...),
 			failedRules: make(map[int64]bool),
+			ruleErrors:  cloneInt64StringMap(wi.ruleErrors),
+			lastError:   strings.TrimSpace(wi.lastError),
 		}
 		for id := range wi.failedRules {
 			s.failedRules[id] = true
@@ -2121,6 +2160,8 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 			binaryHash:   wi.binaryHash,
 			ranges:       append([]PortRange(nil), wi.ranges...),
 			failedRanges: make(map[int64]bool),
+			rangeErrors:  cloneInt64StringMap(wi.rangeErrors),
+			lastError:    strings.TrimSpace(wi.lastError),
 		}
 		for id := range wi.failedRanges {
 			s.failedRanges[id] = true
@@ -2142,6 +2183,7 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 			errored:    pm.sharedProxy.errored,
 			draining:   pm.sharedProxy.draining,
 			binaryHash: pm.sharedProxy.binaryHash,
+			lastError:  strings.TrimSpace(pm.sharedProxy.lastError),
 		})
 	}
 	for _, dw := range pm.drainingWorkers {
@@ -2225,12 +2267,15 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 			}
 		}
 		s := workerSnap{
-			kind:       dw.kind,
-			index:      mappedIndex,
-			running:    dw.running,
-			errored:    dw.errored,
-			draining:   dw.draining,
-			binaryHash: dw.binaryHash,
+			kind:        dw.kind,
+			index:       mappedIndex,
+			running:     dw.running,
+			errored:     dw.errored,
+			draining:    dw.draining,
+			binaryHash:  dw.binaryHash,
+			ruleErrors:  cloneInt64StringMap(dw.ruleErrors),
+			rangeErrors: cloneInt64StringMap(dw.rangeErrors),
+			lastError:   strings.TrimSpace(dw.lastError),
 		}
 		if dw.kind == "rule" {
 			s.rules = append([]Rule(nil), dw.rules...)
@@ -2321,6 +2366,7 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 			Index:      s.index,
 			Status:     "stopped",
 			BinaryHash: s.binaryHash,
+			LastError:  s.lastError,
 		}
 		if s.errored {
 			view.Status = "error"
@@ -2335,12 +2381,16 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 			if len(s.rules) > 0 {
 				view.RuleCount = len(s.rules)
 				for _, r := range s.rules {
-					view.Rules = append(view.Rules, pm.buildRuleStatus(r, "running"))
+					item := pm.buildRuleStatus(r, "running")
+					item.RuntimeError = s.ruleErrors[r.ID]
+					view.Rules = append(view.Rules, item)
 				}
 			} else {
 				view.RangeCount = len(s.ranges)
 				for _, pr := range s.ranges {
-					view.Ranges = append(view.Ranges, pm.buildRangeStatus(pr, "running"))
+					item := pm.buildRangeStatus(pr, "running")
+					item.RuntimeError = s.rangeErrors[pr.ID]
+					view.Ranges = append(view.Ranges, item)
 				}
 			}
 		case "rule":
@@ -2356,7 +2406,13 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 				} else if s.draining && s.activeRuleIDs[r.ID] {
 					status = "running"
 				}
-				view.Rules = append(view.Rules, pm.buildRuleStatus(r, status))
+				item := pm.buildRuleStatus(r, status)
+				if errText := strings.TrimSpace(s.ruleErrors[r.ID]); errText != "" {
+					item.RuntimeError = errText
+				} else if status == "error" {
+					item.RuntimeError = s.lastError
+				}
+				view.Rules = append(view.Rules, item)
 			}
 			if view.Status == "stopped" && len(s.rules) > 0 && len(s.failedRules) == len(s.rules) {
 				view.Status = "error"
@@ -2374,7 +2430,13 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 				} else if s.draining && s.activeRangeIDs[pr.ID] {
 					status = "running"
 				}
-				view.Ranges = append(view.Ranges, pm.buildRangeStatus(pr, status))
+				item := pm.buildRangeStatus(pr, status)
+				if errText := strings.TrimSpace(s.rangeErrors[pr.ID]); errText != "" {
+					item.RuntimeError = errText
+				} else if status == "error" {
+					item.RuntimeError = s.lastError
+				}
+				view.Ranges = append(view.Ranges, item)
 			}
 			if view.Status == "stopped" && len(s.ranges) > 0 && len(s.failedRanges) == len(s.ranges) {
 				view.Status = "error"

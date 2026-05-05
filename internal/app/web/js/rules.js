@@ -254,6 +254,7 @@
         rule.effective_kernel_engine,
         rule.kernel_reason,
         rule.fallback_reason,
+        rule.runtime_error,
         (typeof app.getAddressFamilyInfo === 'function'
           ? (app.getAddressFamilyInfo(rule.in_ip, rule.out_ip) || {}).searchText
           : ''),
@@ -598,6 +599,7 @@
           };
       const statusTitle = [
         app.t('common.status') + ': ' + info.text,
+        rule.runtime_error ? app.t('workers.runtimeError') + ': ' + rule.runtime_error : '',
         engine.title || ''
       ].filter(Boolean).join('\n');
       const toggleClass = rule.enabled ? 'btn-disable' : 'btn-enable';

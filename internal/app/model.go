@@ -67,7 +67,9 @@ type IPCMessage struct {
 	Status         string             `json:"status,omitempty"`
 	Error          string             `json:"error,omitempty"`
 	FailedRuleIDs  []int64            `json:"failed_rule_ids,omitempty"`
+	RuleErrors     map[int64]string   `json:"rule_errors,omitempty"`
 	FailedRangeIDs []int64            `json:"failed_range_ids,omitempty"`
+	RangeErrors    map[int64]string   `json:"range_errors,omitempty"`
 	FailedSiteIDs  []int64            `json:"failed_site_ids,omitempty"`
 	ActiveRuleIDs  []int64            `json:"active_rule_ids,omitempty"`
 	ActiveRangeIDs []int64            `json:"active_range_ids,omitempty"`
@@ -251,11 +253,13 @@ type RuleStatus struct {
 	KernelEligible        bool   `json:"kernel_eligible"`
 	KernelReason          string `json:"kernel_reason,omitempty"`
 	FallbackReason        string `json:"fallback_reason,omitempty"`
+	RuntimeError          string `json:"runtime_error,omitempty"`
 }
 
 type SiteStatus struct {
 	Site
-	Status string `json:"status"`
+	Status       string `json:"status"`
+	RuntimeError string `json:"runtime_error,omitempty"`
 }
 
 type PortRangeStatus struct {
@@ -266,6 +270,7 @@ type PortRangeStatus struct {
 	KernelEligible        bool   `json:"kernel_eligible"`
 	KernelReason          string `json:"kernel_reason,omitempty"`
 	FallbackReason        string `json:"fallback_reason,omitempty"`
+	RuntimeError          string `json:"runtime_error,omitempty"`
 }
 
 type WorkerView struct {
@@ -273,6 +278,7 @@ type WorkerView struct {
 	Index          int               `json:"index"`
 	Status         string            `json:"status"`
 	BinaryHash     string            `json:"binary_hash,omitempty"`
+	LastError      string            `json:"last_error,omitempty"`
 	RuleCount      int               `json:"rule_count,omitempty"`
 	RangeCount     int               `json:"range_count,omitempty"`
 	SiteCount      int               `json:"site_count,omitempty"`

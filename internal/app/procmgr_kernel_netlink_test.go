@@ -696,6 +696,36 @@ func TestHandleKernelNetlinkRecoveryTriggerLinkChangeForDynamicEgressNATQueuesIn
 	}
 }
 
+func TestHandleKernelNetlinkRecoveryTriggerDynamicEgressNATBypassesDebounce(t *testing.T) {
+	pm := &ProcessManager{
+		cfg:                      &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 3},
+		kernelRuntime:            &stubNetlinkFallbackRuntime{},
+		redistributeWake:         make(chan struct{}, 1),
+		dynamicEgressNATParents:  map[string]struct{}{"vmbr1": {}},
+		rulePlans:                map[int64]ruleDataplanePlan{},
+		rangePlans:               map[int64]rangeDataplanePlan{},
+		kernelNetlinkRecoverWake: make(chan struct{}, 1),
+		kernelNetlinkRetryAt:     time.Now(),
+	}
+
+	trigger := newKernelNetlinkRecoveryTrigger("link")
+	trigger.addInterfaceName("vmbr1")
+	pm.handleKernelNetlinkRecoveryTrigger(trigger)
+
+	if pm.redistributePending {
+		t.Fatal("redistributePending = true, want queued incremental refresh for debounce-window dynamic egress nat link change")
+	}
+	if !pm.kernelNetlinkRecoverPending {
+		t.Fatal("kernelNetlinkRecoverPending = false, want dynamic egress nat refresh even inside debounce window")
+	}
+	if pm.kernelRetryCount != 1 {
+		t.Fatalf("kernelRetryCount = %d, want 1", pm.kernelRetryCount)
+	}
+	if pm.lastKernelRetryReason != "egress_nat_parents=vmbr1" {
+		t.Fatalf("lastKernelRetryReason = %q, want parent-scope egress nat summary", pm.lastKernelRetryReason)
+	}
+}
+
 func TestHandleKernelNetlinkRecoveryTriggerLinkChangeWithActiveKernelOwnersQueuesFullRedistribute(t *testing.T) {
 	db := openTestDB(t)
 	id, err := dbAddRule(db, &Rule{

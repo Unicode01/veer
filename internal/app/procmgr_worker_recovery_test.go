@@ -174,6 +174,9 @@ func TestHandleSharedProxyConnDegradedStatusSchedulesRetry(t *testing.T) {
 	if pm.sharedProxy.binaryHash != "proxy-hash" {
 		t.Fatalf("shared proxy binaryHash = %q, want proxy-hash", pm.sharedProxy.binaryHash)
 	}
+	if pm.sharedProxy.lastError != "listener unavailable: 0.0.0.0:80" {
+		t.Fatalf("shared proxy lastError = %q, want listener error", pm.sharedProxy.lastError)
+	}
 }
 
 func TestHandleListSitesMarksSharedProxyFailures(t *testing.T) {
@@ -204,6 +207,7 @@ func TestHandleListSitesMarksSharedProxyFailures(t *testing.T) {
 			running:     true,
 			errored:     true,
 			failedSites: map[int64]bool{firstID: true},
+			lastError:   "listener unavailable: 0.0.0.0:80",
 		},
 	}
 
@@ -220,16 +224,22 @@ func TestHandleListSitesMarksSharedProxyFailures(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	got := make(map[int64]string, len(statuses))
+	got := make(map[int64]SiteStatus, len(statuses))
 	for _, status := range statuses {
-		got[status.ID] = status.Status
+		got[status.ID] = status
 	}
 
-	if got[firstID] != "error" {
-		t.Fatalf("site %d status = %q, want error", firstID, got[firstID])
+	if got[firstID].Status != "error" {
+		t.Fatalf("site %d status = %q, want error", firstID, got[firstID].Status)
 	}
-	if got[secondID] != "running" {
-		t.Fatalf("site %d status = %q, want running", secondID, got[secondID])
+	if got[firstID].RuntimeError != "listener unavailable: 0.0.0.0:80" {
+		t.Fatalf("site %d runtime_error = %q, want listener error", firstID, got[firstID].RuntimeError)
+	}
+	if got[secondID].Status != "running" {
+		t.Fatalf("site %d status = %q, want running", secondID, got[secondID].Status)
+	}
+	if got[secondID].RuntimeError != "" {
+		t.Fatalf("site %d runtime_error = %q, want empty", secondID, got[secondID].RuntimeError)
 	}
 }
 

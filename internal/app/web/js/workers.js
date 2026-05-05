@@ -26,12 +26,13 @@
       worker.status,
       app.statusInfo(worker.status).text,
       worker.binary_hash,
+      worker.last_error,
       app.workerCount(worker)
     ];
 
     if ((worker.kind === 'kernel' || worker.kind === 'rule') && (worker.rules || []).length > 0) {
       (worker.rules || []).forEach((rule) => {
-        values.push(rule.id, rule.remark, rule.in_ip, rule.in_port, rule.out_ip, rule.out_port, rule.protocol, rule.tag, rule.effective_engine, rule.effective_kernel_engine, rule.kernel_reason, rule.fallback_reason);
+        values.push(rule.id, rule.remark, rule.in_ip, rule.in_port, rule.out_ip, rule.out_port, rule.protocol, rule.tag, rule.effective_engine, rule.effective_kernel_engine, rule.kernel_reason, rule.fallback_reason, rule.runtime_error);
         const familyInfo = typeof app.getAddressFamilyInfo === 'function'
           ? app.getAddressFamilyInfo(rule.in_ip, rule.out_ip)
           : null;
@@ -40,7 +41,7 @@
     }
     if ((worker.kind === 'kernel' || worker.kind === 'range') && (worker.ranges || []).length > 0) {
       (worker.ranges || []).forEach((range) => {
-        values.push(range.id, range.remark, range.in_ip, range.start_port, range.end_port, range.out_ip, range.out_start_port, range.protocol, range.tag, range.effective_engine, range.effective_kernel_engine, range.kernel_reason, range.fallback_reason);
+        values.push(range.id, range.remark, range.in_ip, range.start_port, range.end_port, range.out_ip, range.out_start_port, range.protocol, range.tag, range.effective_engine, range.effective_kernel_engine, range.kernel_reason, range.fallback_reason, range.runtime_error);
         const familyInfo = typeof app.getAddressFamilyInfo === 'function'
           ? app.getAddressFamilyInfo(range.in_ip, range.out_ip)
           : null;
@@ -131,6 +132,7 @@
           };
       const statusTitle = [
         app.t('common.status') + ': ' + info.text,
+        rule.runtime_error ? app.t('workers.runtimeError') + ': ' + rule.runtime_error : '',
         engine.title || ''
       ].filter(Boolean).join('\n');
       const row = app.createNode('div', { className: 'worker-detail-row' });
@@ -173,6 +175,7 @@
           };
       const statusTitle = [
         app.t('common.status') + ': ' + info.text,
+        range.runtime_error ? app.t('workers.runtimeError') + ': ' + range.runtime_error : '',
         engine.title || ''
       ].filter(Boolean).join('\n');
       const outEnd = range.out_start_port + (range.end_port - range.start_port);
@@ -292,6 +295,10 @@
     list.forEach((worker) => {
       const tr = document.createElement('tr');
       const info = app.statusInfo(worker.status);
+      const statusTitle = [
+        app.t('common.status') + ': ' + info.text,
+        worker.last_error ? app.t('workers.lastError') + ': ' + worker.last_error : ''
+      ].filter(Boolean).join('\n');
       const count = app.workerCount(worker);
       const countText = worker.kind === 'shared'
         ? app.t('workers.count.sites', { count: count })
@@ -324,7 +331,7 @@
         text: app.workerTypeLabel(worker.kind)
       })));
       tr.appendChild(app.createCell(worker.kind === 'shared' || worker.kind === 'kernel' || worker.kind === 'egress_nat' ? app.emptyCellNode() : String(worker.index)));
-      tr.appendChild(app.createCell(app.createStatusBadgeNode(info)));
+      tr.appendChild(app.createCell(app.createStatusBadgeNode(info, statusTitle)));
       tr.appendChild(app.createCell(app.createNode('span', {
         className: 'worker-hash ' + hashClass,
         text: hashShort,

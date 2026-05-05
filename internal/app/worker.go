@@ -249,11 +249,15 @@ func startRuleBinding(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, 
 	}
 
 	ok := false
+	var firstErr error
 	var wg sync.WaitGroup
 
 	if rule.Protocol == "tcp" || rule.Protocol == "tcp+udp" {
 		ln, err := listenTCP(ctx, &rule)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			log.Printf("worker[%d] rule %d tcp: %v", workerIndex, rule.ID, err)
 		} else {
 			binding.tcpLn = ln
@@ -270,6 +274,9 @@ func startRuleBinding(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, 
 	if rule.Protocol == "udp" || rule.Protocol == "tcp+udp" {
 		pc, err := listenUDP(ctx, &rule)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			log.Printf("worker[%d] rule %d udp: %v", workerIndex, rule.ID, err)
 		} else {
 			binding.udpPC = pc
@@ -293,6 +300,9 @@ func startRuleBinding(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, 
 			_ = binding.udpPC.Close()
 		}
 		close(binding.done)
+		if firstErr != nil {
+			return nil, fmt.Errorf("all bindings failed: %w", firstErr)
+		}
 		return nil, fmt.Errorf("all bindings failed")
 	}
 
@@ -447,8 +457,8 @@ func runWorker(workerIndex int, sockPath string) {
 		c.Write(data)
 	}
 
-	sendStatus := func(status, errMsg string, failedIDs []int64) {
-		sendIPC(IPCMessage{Type: "status", Status: status, Error: errMsg, FailedRuleIDs: failedIDs})
+	sendStatus := func(status, errMsg string, failedIDs []int64, ruleErrors map[int64]string) {
+		sendIPC(IPCMessage{Type: "status", Status: status, Error: errMsg, FailedRuleIDs: failedIDs, RuleErrors: ruleErrors})
 	}
 
 	sendStats := func(stats []RuleStatsReport) {
@@ -506,10 +516,12 @@ func runWorker(workerIndex int, sockPath string) {
 		}
 
 		nextFailed := make(map[int64]struct{})
+		ruleErrors := make(map[int64]string)
 		for _, rule := range startList {
 			binding, err := startRuleBinding(workerIndex, rule, sm[rule.ID])
 			if err != nil {
 				nextFailed[rule.ID] = struct{}{}
+				ruleErrors[rule.ID] = err.Error()
 				continue
 			}
 			nextBindings[rule.ID] = binding
@@ -522,16 +534,16 @@ func runWorker(workerIndex int, sockPath string) {
 		stateMu.Unlock()
 
 		if len(rules) == 0 {
-			sendStatus("idle", "", nil)
+			sendStatus("idle", "", nil, nil)
 			return
 		}
 
 		failedIDs := sortedInt64SetKeys(nextFailed)
 		if len(nextBindings) == 0 {
-			sendStatus("error", fmt.Sprintf("all %d rule bindings failed", len(rules)), failedIDs)
+			sendStatus("error", fmt.Sprintf("all %d rule bindings failed", len(rules)), failedIDs, ruleErrors)
 			return
 		}
-		sendStatus("running", "", failedIDs)
+		sendStatus("running", "", failedIDs, ruleErrors)
 		if reports := buildRuleStatsReports(snapshotRuleStatsMap(sm)); len(reports) > 0 {
 			sendStats(reports)
 		}
@@ -659,7 +671,7 @@ func runWorker(workerIndex int, sockPath string) {
 				}
 				if len(msg.Rules) == 0 {
 					stopBindings(true)
-					sendStatus("idle", "", nil)
+					sendStatus("idle", "", nil, nil)
 					continue
 				}
 				applyRules(msg.Rules)

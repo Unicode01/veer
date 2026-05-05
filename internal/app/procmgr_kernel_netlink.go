@@ -827,6 +827,7 @@ func (pm *ProcessManager) handleKernelNetlinkRecoveryTrigger(trigger kernelNetli
 	now := time.Now()
 	summary := ""
 	shouldRetry := false
+	forceRetry := false
 	var wake chan struct{}
 	source := triggerSourceLabel(trigger)
 
@@ -847,12 +848,17 @@ func (pm *ProcessManager) handleKernelNetlinkRecoveryTrigger(trigger kernelNetli
 			dynamicSummary := summarizeDynamicEgressNATParentInterfaces(dynamicParents)
 			if dynamicSummary != "" {
 				summary = mergeKernelNetlinkRecoverySummaries(summary, dynamicSummary)
+				forceRetry = true
 			}
 			if activeSummary := pm.summarizeActiveKernelLinkRecoveryLocked(); activeSummary != "" {
 				summary = mergeKernelNetlinkRecoverySummaries(summary, activeSummary)
 			}
 		}
 		shouldRetry, pm.kernelNetlinkRetryAt = nextKernelNetlinkRetryState(pm.kernelNetlinkRetryAt, now, summary)
+		if forceRetry && strings.TrimSpace(summary) != "" {
+			shouldRetry = true
+			pm.kernelNetlinkRetryAt = now
+		}
 		if shouldRetry {
 			pm.kernelRetryAt = now
 			pm.kernelRetryCount++

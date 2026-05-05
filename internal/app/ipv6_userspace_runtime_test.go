@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -205,6 +206,34 @@ func TestRuleBindingIPv6UDPEcho(t *testing.T) {
 	t.Cleanup(binding.Stop)
 
 	assertUDPEcho(t, "udp6", "::1", forwardPort, []byte("hello-ipv6-udp"))
+}
+
+func TestRuleBindingReportsListenError(t *testing.T) {
+	ln, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", "0"))
+	if err != nil {
+		t.Skipf("listen tcp4 on 127.0.0.1 unavailable: %v", err)
+	}
+	defer ln.Close()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	binding, err := startRuleBinding(0, Rule{
+		ID:       10,
+		InIP:     "127.0.0.1",
+		InPort:   addr.Port,
+		OutIP:    "127.0.0.1",
+		OutPort:  9,
+		Protocol: "tcp",
+	}, &ruleStats{})
+	if binding != nil {
+		t.Cleanup(binding.Stop)
+	}
+	if err == nil {
+		t.Fatal("startRuleBinding() error = nil, want listen failure")
+	}
+	text := err.Error()
+	if !strings.Contains(text, "all bindings failed: tcp listen 127.0.0.1:") || !strings.Contains(text, "bind:") {
+		t.Fatalf("startRuleBinding() error = %q, want concrete tcp listen bind error", text)
+	}
 }
 
 func TestRuleBindingIPv6ToIPv4UDPEcho(t *testing.T) {

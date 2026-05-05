@@ -25,6 +25,9 @@ type WorkerInfo struct {
 	failedRules    map[int64]bool
 	failedRanges   map[int64]bool
 	failedSites    map[int64]bool
+	ruleErrors     map[int64]string
+	rangeErrors    map[int64]string
+	lastError      string
 	ruleStats      map[int64]RuleStatsReport
 	rangeStats     map[int64]RangeStatsReport
 	siteStatsMap   []SiteStatsReport
@@ -107,6 +110,9 @@ func resetWorkerRetryState(wi *WorkerInfo) {
 	wi.nextRetry = time.Time{}
 	wi.lastIssueAt = time.Time{}
 	wi.lastIssueText = ""
+	wi.lastError = ""
+	wi.ruleErrors = nil
+	wi.rangeErrors = nil
 }
 
 func noteWorkerMessage(wi *WorkerInfo, now time.Time) {
@@ -154,6 +160,38 @@ func shouldRecoverStaleWorkerControl(wi *WorkerInfo, now time.Time) bool {
 	}
 	wi.staleRecoverAt = now
 	return true
+}
+
+func cloneInt64StringMap(src map[int64]string) map[int64]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[int64]string, len(src))
+	for k, v := range src {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		dst[k] = v
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+func recordWorkerStatusError(wi *WorkerInfo, status IPCMessage) {
+	if wi == nil {
+		return
+	}
+	if strings.TrimSpace(status.Error) != "" {
+		wi.lastError = strings.TrimSpace(status.Error)
+	}
+	if status.RuleErrors != nil {
+		wi.ruleErrors = cloneInt64StringMap(status.RuleErrors)
+	}
+	if status.RangeErrors != nil {
+		wi.rangeErrors = cloneInt64StringMap(status.RangeErrors)
+	}
 }
 
 func configuredKernelMaintenanceInterval() time.Duration {
@@ -565,6 +603,8 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 					binaryHash:    workerHash,
 					activeRuleIDs: status.ActiveRuleIDs,
 					rules:         rules,
+					ruleErrors:    cloneInt64StringMap(status.RuleErrors),
+					lastError:     strings.TrimSpace(status.Error),
 					ruleStats:     copiedStats,
 					process:       wi.process,
 					waitCh:        wi.waitCh,
@@ -587,6 +627,7 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 				target.activeRuleIDs = append([]int64(nil), status.ActiveRuleIDs...)
 				noteWorkerMessage(target, now)
 				if status.Status == "error" {
+					recordWorkerStatusError(target, status)
 					logIssue = shouldLogWorkerIssue(target, status.Error, now)
 					if target == wi {
 						scheduleWorkerRetry(target, now)
@@ -595,6 +636,7 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 					}
 				} else {
 					resetWorkerRetryState(target)
+					recordWorkerStatusError(target, status)
 					if target == wi {
 						target.errored = false
 					}
@@ -730,6 +772,7 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 					if issueText == "" {
 						issueText = fmt.Sprintf("%d site listener(s) unavailable", len(target.failedSites))
 					}
+					target.lastError = issueText
 					logIssue = shouldLogWorkerIssue(target, issueText, now)
 					if target == proxy {
 						scheduleWorkerRetry(target, now)
@@ -738,6 +781,7 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 					}
 				} else {
 					resetWorkerRetryState(target)
+					recordWorkerStatusError(target, status)
 				}
 			}
 			pm.mu.Unlock()
@@ -2870,6 +2914,8 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 					binaryHash:     workerHash,
 					activeRangeIDs: status.ActiveRangeIDs,
 					ranges:         ranges,
+					rangeErrors:    cloneInt64StringMap(status.RangeErrors),
+					lastError:      strings.TrimSpace(status.Error),
 					rangeStats:     copiedStats,
 					process:        wi.process,
 					waitCh:         wi.waitCh,
@@ -2892,6 +2938,7 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 				target.activeRangeIDs = append([]int64(nil), status.ActiveRangeIDs...)
 				noteWorkerMessage(target, now)
 				if status.Status == "error" {
+					recordWorkerStatusError(target, status)
 					logIssue = shouldLogWorkerIssue(target, status.Error, now)
 					if target == wi {
 						scheduleWorkerRetry(target, now)
@@ -2900,6 +2947,7 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 					}
 				} else {
 					resetWorkerRetryState(target)
+					recordWorkerStatusError(target, status)
 				}
 				target.failedRanges = make(map[int64]bool)
 				for _, id := range status.FailedRangeIDs {

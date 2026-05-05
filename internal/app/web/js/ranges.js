@@ -199,6 +199,7 @@
         range.effective_kernel_engine,
         range.kernel_reason,
         range.fallback_reason,
+        range.runtime_error,
         (typeof app.getAddressFamilyInfo === 'function'
           ? (app.getAddressFamilyInfo(range.in_ip, range.out_ip) || {}).searchText
           : ''),
@@ -241,6 +242,7 @@
           };
       const statusTitle = [
         app.t('common.status') + ': ' + info.text,
+        range.runtime_error ? app.t('workers.runtimeError') + ': ' + range.runtime_error : '',
         engine.title || ''
       ].filter(Boolean).join('\n');
       const outEndPort = range.out_start_port + (range.end_port - range.start_port);

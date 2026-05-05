@@ -312,6 +312,8 @@
       'workers.count.sites': '{{count}} 个站点',
       'workers.count.entries': '{{count}} 条',
       'workers.sharedSites': '共享站点：{{count}}',
+      'workers.lastError': '最近错误',
+      'workers.runtimeError': '运行时错误',
       'workers.refresh': '刷新 Workers',
       'overview.kicker': '实时概览',
       'overview.title': '概览',
@@ -912,6 +914,8 @@
       'workers.count.sites': '{{count}} sites',
       'workers.count.entries': '{{count}} entries',
       'workers.sharedSites': 'Shared sites: {{count}}',
+      'workers.lastError': 'Last error',
+      'workers.runtimeError': 'Runtime error',
       'workers.refresh': 'Refresh Workers',
       'overview.kicker': 'Live Overview',
       'overview.title': 'Overview',
@@ -1373,11 +1377,12 @@
     });
   };
 
-  app.createStatusBadgeNode = function createStatusBadgeNode(status, enabled) {
+  app.createStatusBadgeNode = function createStatusBadgeNode(status, enabled, title) {
     const info = typeof status === 'object' && status && Object.prototype.hasOwnProperty.call(status, 'badge')
       ? status
       : app.statusInfo(status, enabled);
-    return app.createBadgeNode('badge-' + info.badge, info.text);
+    const badgeTitle = typeof enabled === 'string' && title == null ? enabled : title;
+    return app.createBadgeNode('badge-' + info.badge, info.text, badgeTitle || '');
   };
 
   app.createTagBadgeNode = function createTagBadgeNode(table, tag, active) {
