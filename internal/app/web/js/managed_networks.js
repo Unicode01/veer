@@ -24,6 +24,7 @@
     managedNetworkUplinkInterface: app.$('managedNetworkUplinkInterface'),
     managedNetworkUplinkPicker: app.$('managedNetworkUplinkPicker'),
     managedNetworkUplinkOptions: app.$('managedNetworkUplinkOptions'),
+    managedNetworkWANProfile: app.$('managedNetworkWANProfile'),
     managedNetworkIPv4Enabled: app.$('managedNetworkIPv4Enabled'),
     managedNetworkIPv4CIDR: app.$('managedNetworkIPv4CIDR'),
     managedNetworkIPv4Gateway: app.$('managedNetworkIPv4Gateway'),
@@ -1400,6 +1401,20 @@
 
     populateManagedNetworkIPv6ParentPrefixSelect(opts.preservePrefix ? el.managedNetworkIPv6ParentPrefix.value : '');
     syncManagedNetworkOptionStates();
+    app.syncManagedNetworkWANProfileState();
+  };
+
+  app.syncManagedNetworkWANProfileState = function syncManagedNetworkWANProfileState() {
+    const el = app.el;
+    const profileID = parseInt(String(el.managedNetworkWANProfile && el.managedNetworkWANProfile.value || '').trim(), 10) || 0;
+    const usingProfile = profileID > 0;
+    [el.managedNetworkUplinkPicker, el.managedNetworkUplinkInterface].forEach((input) => {
+      if (!input) return;
+      input.disabled = usingProfile;
+      if (usingProfile) input.setAttribute('aria-disabled', 'true');
+      else input.removeAttribute('aria-disabled');
+    });
+    if (usingProfile) app.clearFieldError(el.managedNetworkUplinkPicker || el.managedNetworkUplinkInterface);
   };
 
   app.syncManagedNetworkFormState = function syncManagedNetworkFormState() {
@@ -1438,6 +1453,7 @@
     if (el.managedNetworkBridgeMode) el.managedNetworkBridgeMode.value = 'create';
     if (el.managedNetworkBridgeInterface) el.managedNetworkBridgeInterface.value = '';
     if (el.managedNetworkUplinkInterface) el.managedNetworkUplinkInterface.value = '';
+    if (el.managedNetworkWANProfile) el.managedNetworkWANProfile.value = '';
     if (el.managedNetworkIPv6ParentInterface) el.managedNetworkIPv6ParentInterface.value = '';
     if (el.managedNetworkIPv4Enabled) el.managedNetworkIPv4Enabled.checked = true;
     if (el.managedNetworkIPv6Enabled) el.managedNetworkIPv6Enabled.checked = false;
@@ -1474,6 +1490,7 @@
 
       if (el.managedNetworkName) el.managedNetworkName.value = bridgeName + '-lan';
       if (el.managedNetworkUplinkInterface) el.managedNetworkUplinkInterface.value = uplink ? String(uplink.name || '') : '';
+      if (el.managedNetworkWANProfile) el.managedNetworkWANProfile.value = '';
       if (el.managedNetworkIPv4Enabled) el.managedNetworkIPv4Enabled.checked = true;
       if (el.managedNetworkIPv4CIDR) el.managedNetworkIPv4CIDR.value = ipv4CIDR;
       if (el.managedNetworkIPv4Gateway) el.managedNetworkIPv4Gateway.value = '';
@@ -1517,6 +1534,7 @@
     if (el.managedNetworkBridgeVLANAware) el.managedNetworkBridgeVLANAware.checked = !!item.bridge_vlan_aware;
     setManagedNetworkBridgeAdvancedExpanded(hasManagedNetworkBridgeAdvancedConfig(item));
     el.managedNetworkUplinkInterface.value = item.uplink_interface || '';
+    if (el.managedNetworkWANProfile) el.managedNetworkWANProfile.value = item.wan_profile_id ? String(item.wan_profile_id) : '';
     el.managedNetworkIPv4Enabled.checked = item.ipv4_enabled !== false;
     el.managedNetworkIPv4CIDR.value = item.ipv4_cidr || '';
     el.managedNetworkIPv4Gateway.value = item.ipv4_gateway || '';
@@ -1558,6 +1576,7 @@
         items: app.getManagedNetworkUplinkItems(el.managedNetworkBridgeInterface.value),
         preserveSelected: true
       }),
+      wan_profile_id: parseInt(String(el.managedNetworkWANProfile && el.managedNetworkWANProfile.value || '').trim(), 10) || 0,
       ipv4_enabled: !!(el.managedNetworkIPv4Enabled && el.managedNetworkIPv4Enabled.checked),
       ipv4_cidr: String(el.managedNetworkIPv4CIDR && el.managedNetworkIPv4CIDR.value || '').trim(),
       ipv4_gateway: String(el.managedNetworkIPv4Gateway && el.managedNetworkIPv4Gateway.value || '').trim(),
@@ -1589,6 +1608,7 @@
       bridge_mtu: app.el.managedNetworkBridgeMTU,
       bridge_vlan_aware: app.el.managedNetworkBridgeVLANAware,
       uplink_interface: app.el.managedNetworkUplinkPicker || app.el.managedNetworkUplinkInterface,
+      wan_profile_id: app.el.managedNetworkWANProfile,
       ipv4_cidr: app.el.managedNetworkIPv4CIDR,
       ipv4_gateway: app.el.managedNetworkIPv4Gateway,
       ipv4_pool_start: app.el.managedNetworkIPv4PoolStart,
@@ -1655,6 +1675,8 @@
         item.bridge_mtu,
         item.bridge_vlan_aware ? app.t('status.enabled') : app.t('status.disabled'),
         item.uplink_interface,
+        item.wan_profile_id,
+        app.formatWANProfileRef ? app.formatWANProfileRef(item.wan_profile_id) : '',
         item.child_interface_count,
         ...(managedNetworkChildInterfaces(item)),
         item.ipv4_cidr,
@@ -1723,7 +1745,21 @@
         mono: true,
         title: buildManagedNetworkBridgeTitle(item)
       }), 'managed-network-cell-text'));
-      tr.appendChild(app.createCell(createManagedNetworkTextNode(item.uplink_interface, { mono: true }), 'managed-network-cell-text'));
+      tr.appendChild(app.createCell(item.wan_profile_id > 0
+        ? app.createNode('div', {
+            className: 'endpoint-cell',
+            children: [
+              app.createNode('span', {
+                className: 'endpoint-primary',
+                text: app.formatWANProfileRef ? app.formatWANProfileRef(item.wan_profile_id, '#' + item.wan_profile_id) : ('#' + item.wan_profile_id)
+              }),
+              app.createNode('span', {
+                className: 'endpoint-secondary',
+                text: item.uplink_interface || app.t('common.dash')
+              })
+            ]
+          })
+        : createManagedNetworkTextNode(item.uplink_interface, { mono: true }), 'managed-network-cell-text'));
       tr.appendChild(app.createCell(createManagedNetworkTargetsNode(item), 'managed-network-cell-tight'));
       tr.appendChild(app.createCell(createManagedNetworkIPv4Node(item), 'managed-network-cell-compact'));
       tr.appendChild(app.createCell(createManagedNetworkIPv6Node(item), 'managed-network-cell-compact'));
@@ -2246,7 +2282,7 @@
       valid = false;
     }
 
-    if (item.auto_egress_nat && !item.uplink_interface) {
+    if (item.auto_egress_nat && !item.uplink_interface && !item.wan_profile_id) {
       app.setFieldError(el.managedNetworkUplinkPicker || el.managedNetworkUplinkInterface, app.t('validation.managedNetworkUplinkRequired'));
       valid = false;
     }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -160,6 +161,39 @@ func TestHandleDeleteRuleNotFoundIncludesIssues(t *testing.T) {
 
 	resp := decodeValidationResponse(t, w)
 	assertValidationIssue(t, resp, "delete", "id", "rule not found")
+}
+
+func TestHandleDeleteWANProfileReferencedIncludesIssues(t *testing.T) {
+	db := openTestDB(t)
+	wanID, err := dbAddWANProfile(db, &WANProfile{
+		Name:             "wan",
+		Type:             wanProfileTypeExisting,
+		RuntimeInterface: "pppoe-wan",
+		Enabled:          true,
+	})
+	if err != nil {
+		t.Fatalf("dbAddWANProfile() error = %v", err)
+	}
+	if _, err := dbAddEgressNAT(db, &EgressNAT{
+		ParentInterface: "vmbr0",
+		WANProfileID:    wanID,
+		Protocol:        "tcp+udp",
+		NATType:         egressNATTypeSymmetric,
+		Enabled:         true,
+	}); err != nil {
+		t.Fatalf("dbAddEgressNAT() error = %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodDelete, "/api/wans?id="+strconv.FormatInt(wanID, 10), nil)
+	w := httptest.NewRecorder()
+
+	handleDeleteWANProfile(w, req, db)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	resp := decodeValidationResponse(t, w)
+	assertValidationIssue(t, resp, "delete", "id", "wan profile is referenced")
 }
 
 func TestHandleUpdateSiteNotFoundIncludesIssues(t *testing.T) {

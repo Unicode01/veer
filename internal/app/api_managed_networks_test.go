@@ -125,6 +125,50 @@ func TestManagedNetworkExistingBridgeIgnoresCreateOnlyBridgeConfig(t *testing.T)
 	}
 }
 
+func TestPrepareManagedNetworkCreateRejectsMissingWANProfile(t *testing.T) {
+	db := openTestDB(t)
+
+	_, issues, err := prepareManagedNetworkCreate(db, ManagedNetwork{
+		Name:         "lab",
+		BridgeMode:   managedNetworkBridgeModeCreate,
+		Bridge:       "vmbr1",
+		WANProfileID: 404,
+	})
+	if err != nil {
+		t.Fatalf("prepareManagedNetworkCreate() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].Field != "wan_profile_id" || issues[0].Message != "wan profile not found" {
+		t.Fatalf("issues = %#v, want missing wan profile issue", issues)
+	}
+}
+
+func TestPrepareManagedNetworkCreateRejectsDisabledWANProfile(t *testing.T) {
+	db := openTestDB(t)
+
+	wanID, err := dbAddWANProfile(db, &WANProfile{
+		Name:             "wan",
+		Type:             wanProfileTypeExisting,
+		RuntimeInterface: "pppoe-wan",
+		Enabled:          false,
+	})
+	if err != nil {
+		t.Fatalf("dbAddWANProfile() error = %v", err)
+	}
+
+	_, issues, err := prepareManagedNetworkCreate(db, ManagedNetwork{
+		Name:         "lab",
+		BridgeMode:   managedNetworkBridgeModeCreate,
+		Bridge:       "vmbr1",
+		WANProfileID: wanID,
+	})
+	if err != nil {
+		t.Fatalf("prepareManagedNetworkCreate() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].Field != "wan_profile_id" || issues[0].Message != "wan profile is disabled" {
+		t.Fatalf("issues = %#v, want disabled wan profile issue", issues)
+	}
+}
+
 func TestHandleListManagedNetworksReturnsSortedItems(t *testing.T) {
 	db := openTestDB(t)
 

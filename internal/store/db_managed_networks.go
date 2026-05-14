@@ -2,7 +2,7 @@ package store
 
 import "strings"
 
-const managedNetworkColumns = `id, name, bridge_mode, bridge, bridge_mtu, bridge_vlan_aware, uplink_interface, ipv4_enabled, ipv4_cidr, ipv4_gateway, ipv4_pool_start, ipv4_pool_end, ipv4_dns_servers, ipv6_enabled, ipv6_parent_interface, ipv6_parent_prefix, ipv6_assignment_mode, auto_egress_nat, remark, enabled`
+const managedNetworkColumns = `id, name, bridge_mode, bridge, bridge_mtu, bridge_vlan_aware, uplink_interface, wan_profile_id, ipv4_enabled, ipv4_cidr, ipv4_gateway, ipv4_pool_start, ipv4_pool_end, ipv4_dns_servers, ipv6_enabled, ipv6_parent_interface, ipv6_parent_prefix, ipv6_assignment_mode, auto_egress_nat, remark, enabled`
 
 func scanManagedNetwork(sc interface{ Scan(...interface{}) error }) (ManagedNetwork, error) {
 	var item ManagedNetwork
@@ -15,6 +15,7 @@ func scanManagedNetwork(sc interface{ Scan(...interface{}) error }) (ManagedNetw
 		&item.BridgeMTU,
 		&bridgeVLANAware,
 		&item.UplinkInterface,
+		&item.WANProfileID,
 		&ipv4Enabled,
 		&item.IPv4CIDR,
 		&item.IPv4Gateway,
@@ -40,14 +41,15 @@ func scanManagedNetwork(sc interface{ Scan(...interface{}) error }) (ManagedNetw
 func AddManagedNetwork(db RuleStore, item *ManagedNetwork) (int64, error) {
 	stored := *item
 	res, err := db.Exec(
-		`INSERT INTO managed_networks (name, bridge_mode, bridge, bridge_mtu, bridge_vlan_aware, uplink_interface, ipv4_enabled, ipv4_cidr, ipv4_gateway, ipv4_pool_start, ipv4_pool_end, ipv4_dns_servers, ipv6_enabled, ipv6_parent_interface, ipv6_parent_prefix, ipv6_assignment_mode, auto_egress_nat, remark, enabled)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO managed_networks (name, bridge_mode, bridge, bridge_mtu, bridge_vlan_aware, uplink_interface, wan_profile_id, ipv4_enabled, ipv4_cidr, ipv4_gateway, ipv4_pool_start, ipv4_pool_end, ipv4_dns_servers, ipv6_enabled, ipv6_parent_interface, ipv6_parent_prefix, ipv6_assignment_mode, auto_egress_nat, remark, enabled)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		stored.Name,
 		stored.BridgeMode,
 		stored.Bridge,
 		stored.BridgeMTU,
 		boolToInt(stored.BridgeVLANAware),
 		stored.UplinkInterface,
+		stored.WANProfileID,
 		boolToInt(stored.IPv4Enabled),
 		stored.IPv4CIDR,
 		stored.IPv4Gateway,
@@ -72,7 +74,7 @@ func UpdateManagedNetwork(db RuleStore, item *ManagedNetwork) error {
 	stored := *item
 	_, err := db.Exec(
 		`UPDATE managed_networks
-		 SET name=?, bridge_mode=?, bridge=?, bridge_mtu=?, bridge_vlan_aware=?, uplink_interface=?, ipv4_enabled=?, ipv4_cidr=?, ipv4_gateway=?, ipv4_pool_start=?, ipv4_pool_end=?, ipv4_dns_servers=?, ipv6_enabled=?, ipv6_parent_interface=?, ipv6_parent_prefix=?, ipv6_assignment_mode=?, auto_egress_nat=?, remark=?, enabled=?
+		 SET name=?, bridge_mode=?, bridge=?, bridge_mtu=?, bridge_vlan_aware=?, uplink_interface=?, wan_profile_id=?, ipv4_enabled=?, ipv4_cidr=?, ipv4_gateway=?, ipv4_pool_start=?, ipv4_pool_end=?, ipv4_dns_servers=?, ipv6_enabled=?, ipv6_parent_interface=?, ipv6_parent_prefix=?, ipv6_assignment_mode=?, auto_egress_nat=?, remark=?, enabled=?
 		 WHERE id=?`,
 		stored.Name,
 		stored.BridgeMode,
@@ -80,6 +82,7 @@ func UpdateManagedNetwork(db RuleStore, item *ManagedNetwork) error {
 		stored.BridgeMTU,
 		boolToInt(stored.BridgeVLANAware),
 		stored.UplinkInterface,
+		stored.WANProfileID,
 		boolToInt(stored.IPv4Enabled),
 		stored.IPv4CIDR,
 		stored.IPv4Gateway,

@@ -855,6 +855,14 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load egress nats: %v", err)
 		return
 	}
+	managedNetworks, managedWANWarnings := resolveWANProfilesForManagedNetworks(pm.db, managedNetworks)
+	if warning := wanProfileRuntimeWarningText(managedWANWarnings); warning != "" {
+		log.Printf("managed network runtime: resolve wan profiles: %s", warning)
+	}
+	egressNATs, egressWANWarnings := resolveWANProfilesForEgressNATs(pm.db, egressNATs)
+	if warning := wanProfileRuntimeWarningText(egressWANWarnings); warning != "" {
+		log.Printf("egress nat runtime: resolve wan profiles: %s", warning)
+	}
 	ipv6Assignments, ipv6AssignmentLoadErr := dbGetIPv6Assignments(pm.db)
 	if ipv6AssignmentLoadErr != nil {
 		log.Printf("load ipv6 assignments: %v", ipv6AssignmentLoadErr)

@@ -82,6 +82,7 @@
             <button id="tab-sites-button" class="tab" data-tab="sites" data-i18n="tab.sites" role="tab" aria-selected="false" aria-controls="tab-sites" tabindex="-1">Sites (80/443)</button>
             <button id="tab-ranges-button" class="tab" data-tab="ranges" data-i18n="tab.ranges" role="tab" aria-selected="false" aria-controls="tab-ranges" tabindex="-1">Range Mapping</button>
             <button id="tab-managed-networks-button" class="tab" data-tab="managed-networks" data-i18n="tab.managedNetworks" role="tab" aria-selected="false" aria-controls="tab-managed-networks" tabindex="-1">Managed Networks</button>
+            <button id="tab-wans-button" class="tab" data-tab="wans" data-i18n="tab.wans" role="tab" aria-selected="false" aria-controls="tab-wans" tabindex="-1">WAN Profiles</button>
             <button id="tab-egress-nats-button" class="tab" data-tab="egress-nats" data-i18n="tab.egressNATs" role="tab" aria-selected="false" aria-controls="tab-egress-nats" tabindex="-1">Egress NAT</button>
             <button id="tab-ipv6-assignments-button" class="tab" data-tab="ipv6-assignments" data-i18n="tab.ipv6Assignments" role="tab" aria-selected="false" aria-controls="tab-ipv6-assignments" tabindex="-1">IPv6 Assignments</button>
             <button id="tab-diagnostics-button" class="tab" data-tab="diagnostics" data-i18n="tab.diagnostics" role="tab" aria-selected="false" aria-controls="tab-diagnostics" tabindex="-1">Diagnostics</button>
@@ -514,6 +515,12 @@
                             <input type="text" id="managedNetworkUplinkPicker" list="managedNetworkUplinkOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
                             <datalist id="managedNetworkUplinkOptions"></datalist>
                         </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.reference">WAN Profile</label>
+                            <select id="managedNetworkWANProfile">
+                                <option value="" data-i18n="wan.select.noneManagedNetwork">Use uplink interface</option>
+                            </select>
+                        </div>
                           <div id="managedNetworkAutoEgressNATGroup" class="form-group form-group-checkbox">
                               <label>
                                   <input type="checkbox" id="managedNetworkAutoEgressNAT" checked>
@@ -749,6 +756,140 @@
             </section>
         </div>
 
+        <div id="tab-wans" class="tab-content" role="tabpanel" aria-labelledby="tab-wans-button">
+            <section class="add-rule">
+                <h2 id="wanProfileFormTitle" data-i18n="wan.form.title.add">Add WAN Profile</h2>
+                <p class="section-desc" data-i18n="wan.form.desc">Define a WAN control-plane profile using existing Linux/OpenWrt interfaces or system-managed DHCP/PPPoE/static configuration. TC/XDP rules still consume the resolved runtime interface.</p>
+                <form id="wanProfileForm">
+                    <input type="hidden" id="editWANProfileId" value="">
+                    <div class="form-row">
+                        <div class="form-group" style="flex:1.5">
+                            <label data-i18n="wan.form.name">Name</label>
+                            <input type="text" id="wanProfileName" data-i18n-placeholder="wan.form.name.placeholder" placeholder="wan" spellcheck="false" autocapitalize="off" autocomplete="off" required>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.type">Type</label>
+                            <select id="wanProfileType">
+                                <option value="existing" data-i18n="wan.type.existing">Existing Interface</option>
+                                <option value="dhcp" data-i18n="wan.type.dhcp">DHCP</option>
+                                <option value="static" data-i18n="wan.type.static">Static IPv4</option>
+                                <option value="pppoe" data-i18n="wan.type.pppoe">PPPoE</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="flex:2">
+                            <label data-i18n="form.remark">Remark</label>
+                            <input type="text" id="wanProfileRemark" data-i18n-placeholder="wan.form.remark.placeholder" placeholder="Optional, e.g. primary uplink" spellcheck="false" autocapitalize="off" autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="wan.form.parentInterface">Parent Interface</label>
+                            <input type="hidden" id="wanProfileParentInterface" value="">
+                            <input type="text" id="wanProfileParentPicker" list="wanProfileParentOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="wanProfileParentOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.runtimeInterface">Runtime Interface</label>
+                            <input type="hidden" id="wanProfileRuntimeInterface" value="">
+                            <input type="text" id="wanProfileRuntimePicker" list="wanProfileRuntimeOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
+                            <datalist id="wanProfileRuntimeOptions"></datalist>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.ipv4CIDR">Static IPv4 CIDR</label>
+                            <input type="text" id="wanProfileIPv4CIDR" data-i18n-placeholder="wan.form.ipv4CIDR.placeholder" placeholder="198.51.100.2/24" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.ipv4Gateway">Static IPv4 Gateway</label>
+                            <input type="text" id="wanProfileIPv4Gateway" data-i18n-placeholder="common.auto" placeholder="Auto" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label data-i18n="wan.form.username">PPPoE Username</label>
+                            <input type="text" id="wanProfileUsername" spellcheck="false" autocapitalize="off" autocomplete="username">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.password">PPPoE Password</label>
+                            <input type="password" id="wanProfilePassword" data-i18n-placeholder="wan.form.password.placeholder" placeholder="Leave empty to keep current password" autocomplete="new-password">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.mtu">MTU</label>
+                            <input type="number" id="wanProfileMTU" min="0" max="65535" step="1" data-i18n-placeholder="common.auto" placeholder="Auto" inputmode="numeric">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.mru">MRU</label>
+                            <input type="number" id="wanProfileMRU" min="0" max="65535" step="1" data-i18n-placeholder="common.auto" placeholder="Auto" inputmode="numeric">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-group-checkbox">
+                            <label>
+                                <input type="checkbox" id="wanProfileDefaultRoute" checked>
+                                <span data-i18n="wan.form.defaultRoute">Install Default Route</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.metric">Route Metric</label>
+                            <input type="number" id="wanProfileMetric" min="0" max="2147483647" step="1" data-i18n-placeholder="common.auto" placeholder="Auto" inputmode="numeric">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.dnsMode">DNS Mode</label>
+                            <select id="wanProfileDNSMode">
+                                <option value="auto" data-i18n="wan.dnsMode.auto">Auto</option>
+                                <option value="manual" data-i18n="wan.dnsMode.manual">Manual</option>
+                                <option value="ignore" data-i18n="wan.dnsMode.ignore">Ignore Peer DNS</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.dnsServers">DNS Servers</label>
+                            <input type="text" id="wanProfileDNSServers" data-i18n-placeholder="wan.form.dnsServers.placeholder" placeholder="223.5.5.5, 1.1.1.1" spellcheck="false" autocapitalize="off" autocomplete="off" inputmode="text">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group form-actions">
+                            <button type="submit" id="wanProfileSubmitBtn" data-i18n="wan.form.submit.add">Add WAN Profile</button>
+                            <button type="button" id="wanProfileCancelBtn" class="btn-cancel" style="display:none" data-i18n="common.cancelEdit">Cancel</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+
+            <section class="rule-list">
+                <h2 data-i18n="wan.list.title">WAN Profiles</h2>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="wanProfilesSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="wanProfilesTable" data-i18n-placeholder="search.wans.placeholder" placeholder="Search WAN profiles, interfaces, addresses...">
+                        <p id="wanProfilesFilterMeta" class="table-meta"></p>
+                    </div>
+                    <button type="button" id="clearWANProfilesFilter" class="mini-btn" hidden data-i18n="filter.reset">Reset View</button>
+                </div>
+                <div class="table-scroll">
+                    <table id="wanProfilesTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="wanProfiles" data-sort="id">ID</th>
+                                <th class="sortable" data-table="wanProfiles" data-sort="name" data-i18n="wan.form.name">Name</th>
+                                <th class="sortable" data-table="wanProfiles" data-sort="type" data-i18n="wan.form.type">Type</th>
+                                <th class="sortable" data-table="wanProfiles" data-sort="parent_interface" data-i18n="wan.form.parentInterface">Parent Interface</th>
+                                <th class="sortable" data-table="wanProfiles" data-sort="effective_interface" data-i18n="wan.list.effectiveInterface">Runtime Interface</th>
+                                <th data-i18n="wan.list.addresses">Addresses</th>
+                                <th class="sortable" data-table="wanProfiles" data-sort="status" data-i18n="common.status">Status</th>
+                                <th class="sortable" data-table="wanProfiles" data-sort="dns_mode" data-i18n="wan.form.dnsMode">DNS</th>
+                                <th class="sortable" data-table="wanProfiles" data-sort="remark" data-i18n="form.remark">Remark</th>
+                                <th data-i18n="common.actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="wanProfilesBody"></tbody>
+                    </table>
+                </div>
+                <div id="wanProfilesPagination" class="table-pagination" hidden></div>
+                <div id="noWANProfiles" class="empty-hint">
+                    <p class="empty-title" data-i18n="wan.list.empty">No WAN profiles yet.</p>
+                    <button type="button" id="emptyAddWANProfileBtn" class="mini-btn" data-i18n="empty.action.wan">Create First WAN Profile</button>
+                </div>
+            </section>
+        </div>
+
         <div id="tab-egress-nats" class="tab-content" role="tabpanel" aria-labelledby="tab-egress-nats-button">
             <section class="add-rule">
                 <h2 id="egressNATFormTitle" data-i18n="egressNAT.form.title.add">Add Egress NAT</h2>
@@ -804,6 +945,12 @@
                             <input type="text" id="egressNATOutPicker" list="egressNATOutOptions" class="interface-picker-input" data-i18n-placeholder="interface.picker.placeholder" placeholder="Search or select interface..." spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search">
                             <datalist id="egressNATOutOptions"></datalist>
                             <div id="egressNATOutInterfaceHint" class="field-hint" hidden></div>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="wan.form.reference">WAN Profile</label>
+                            <select id="egressNATWANProfile">
+                                <option value="" data-i18n="wan.select.noneEgressNAT">Use outbound interface</option>
+                            </select>
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.outSourceIP">Fixed Source IP</label>
@@ -1121,6 +1268,7 @@
     <script defer src="js/rules.js?v=20260410-1"></script>
     <script defer src="js/sites.js?v=20260407-2"></script>
     <script defer src="js/ranges.js?v=20260407-4"></script>
+    <script defer src="js/wans.js?v=20260514-1"></script>
     <script defer src="js/egress_nats.js?v=20260407-2"></script>
     <script defer src="js/ipv6_assignments.js?v=20260408-6"></script>
     <script defer src="js/managed_networks.js?v=20260422-1"></script>

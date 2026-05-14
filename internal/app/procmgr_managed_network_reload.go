@@ -419,6 +419,14 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 	if err != nil {
 		return "", nil, fmt.Errorf("load egress nats: %w", err)
 	}
+	managedNetworks, managedWANWarnings := resolveWANProfilesForManagedNetworks(pm.db, managedNetworks)
+	if warning := wanProfileRuntimeWarningText(managedWANWarnings); warning != "" {
+		return "", nil, fmt.Errorf("resolve managed network wan profiles: %s", warning)
+	}
+	explicitEgressNATs, egressWANWarnings := resolveWANProfilesForEgressNATs(pm.db, explicitEgressNATs)
+	if warning := wanProfileRuntimeWarningText(egressWANWarnings); warning != "" {
+		return "", nil, fmt.Errorf("resolve egress nat wan profiles: %s", warning)
+	}
 	ipv6Assignments, err := loadIPv6AssignmentsForManagedNetworkReload(pm.db)
 	if err != nil {
 		return "", nil, fmt.Errorf("load ipv6 assignments: %w", err)
@@ -686,6 +694,16 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	explicitEgressNATs, err := dbGetEgressNATs(pm.db)
 	if err != nil {
 		return fmt.Errorf("load egress nats: %w", err)
+	}
+	managedNetworks, managedWANWarnings := resolveWANProfilesForManagedNetworks(pm.db, managedNetworks)
+	if warning := wanProfileRuntimeWarningText(managedWANWarnings); warning != "" {
+		log.Printf("managed network runtime: resolve wan profiles: %s", warning)
+		reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "resolve managed network wan profiles", fmt.Errorf("%s", warning))
+	}
+	explicitEgressNATs, egressWANWarnings := resolveWANProfilesForEgressNATs(pm.db, explicitEgressNATs)
+	if warning := wanProfileRuntimeWarningText(egressWANWarnings); warning != "" {
+		log.Printf("egress nat runtime: resolve wan profiles: %s", warning)
+		reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "resolve egress nat wan profiles", fmt.Errorf("%s", warning))
 	}
 	ipv6Assignments, ipv6AssignmentLoadErr := loadIPv6AssignmentsForManagedNetworkReload(pm.db)
 	if ipv6AssignmentLoadErr != nil {

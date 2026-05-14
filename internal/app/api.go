@@ -186,6 +186,32 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 
 	mux.HandleFunc("/api/host-network", authMiddleware(cfg, handleHostNetwork))
 	mux.HandleFunc("/api/interfaces", authMiddleware(cfg, handleInterfaces))
+	mux.HandleFunc("/api/wans", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListWANProfiles(w, r, db)
+		case http.MethodPost:
+			handleAddWANProfile(w, r, db)
+		case http.MethodPut:
+			handleUpdateWANProfile(w, r, db)
+		case http.MethodDelete:
+			handleDeleteWANProfile(w, r, db)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	mux.HandleFunc("/api/wans/toggle", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleToggleWANProfile(w, r, db)
+	}))
+	mux.HandleFunc("/api/wans/status", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleWANProfileStatus(w, r, db)
+	}))
+	mux.HandleFunc("/api/wans/apply", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleApplyWANProfile(w, r, db)
+	}))
+	mux.HandleFunc("/api/wans/reconnect", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleReconnectWANProfile(w, r, db)
+	}))
 	mux.HandleFunc("/api/managed-networks", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -1909,6 +1935,13 @@ func handleListEgressNATs(w http.ResponseWriter, r *http.Request, db *sql.DB, pm
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	configuredOutInterfaces := make(map[int64]string, len(items))
+	for _, item := range items {
+		if configured := egressNATConfiguredOutInterface(item); configured != "" {
+			configuredOutInterfaces[item.ID] = configured
+		}
+	}
+	items, wanWarnings := resolveWANProfilesForEgressNATs(db, items)
 	items = normalizeEgressNATItemsWithCurrentInterfaces(items)
 
 	statuses := make([]EgressNATStatus, 0, len(items))
@@ -1918,14 +1951,30 @@ func handleListEgressNATs(w http.ResponseWriter, r *http.Request, db *sql.DB, pm
 			status = pm.egressNATRuntimeStatus(item.ID, item.Enabled)
 		}
 		if pm != nil {
-			statuses = append(statuses, pm.buildEgressNATStatus(item, status))
+			egressStatus := pm.buildEgressNATStatus(item, status)
+			egressStatus.ConfiguredOutInterface = configuredOutInterfaces[item.ID]
+			if warning := strings.TrimSpace(wanWarnings[item.ID]); warning != "" {
+				egressStatus.FallbackReason = joinNonEmptyReason(egressStatus.FallbackReason, warning)
+				if item.Enabled {
+					egressStatus.Status = "error"
+				}
+			}
+			statuses = append(statuses, egressStatus)
 			continue
 		}
-		statuses = append(statuses, EgressNATStatus{
-			EgressNAT:       item,
-			Status:          status,
-			EffectiveEngine: ruleEngineKernel,
-		})
+		egressStatus := EgressNATStatus{
+			EgressNAT:              item,
+			ConfiguredOutInterface: configuredOutInterfaces[item.ID],
+			Status:                 status,
+			EffectiveEngine:        ruleEngineKernel,
+		}
+		if warning := strings.TrimSpace(wanWarnings[item.ID]); warning != "" {
+			egressStatus.FallbackReason = warning
+			if item.Enabled {
+				egressStatus.Status = "error"
+			}
+		}
+		statuses = append(statuses, egressStatus)
 	}
 	if statuses == nil {
 		statuses = []EgressNATStatus{}
@@ -1945,6 +1994,7 @@ func loadEffectiveEgressNATMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]Eg
 	if err != nil {
 		return nil, err
 	}
+	items, _ = resolveWANProfilesForEgressNATs(db, items)
 	items = normalizeEgressNATItemsWithSnapshot(items, snapshot)
 	for _, item := range items {
 		result[item.ID] = item
@@ -1966,6 +2016,7 @@ func loadEffectiveEgressNATMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]Eg
 	if err != nil {
 		return nil, err
 	}
+	managedNetworks, _ = resolveWANProfilesForManagedNetworks(db, managedNetworks)
 	if len(managedNetworks) == 0 {
 		return result, nil
 	}
@@ -1979,6 +2030,7 @@ func loadEffectiveEgressNATMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]Eg
 	if err != nil {
 		return nil, err
 	}
+	allItems, _ = resolveWANProfilesForEgressNATs(db, allItems)
 	allItems = normalizeEgressNATItemsWithSnapshot(allItems, snapshot)
 
 	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, allItems, snapshot.Infos)
@@ -2020,6 +2072,7 @@ func loadEffectiveEgressNATProtocolByIDs(db sqlRuleStore, ids []int64) (map[int6
 	if err != nil {
 		return nil, err
 	}
+	managedNetworks, _ = resolveWANProfilesForManagedNetworks(db, managedNetworks)
 	if len(managedNetworks) == 0 {
 		return result, nil
 	}
@@ -2034,6 +2087,7 @@ func loadEffectiveEgressNATProtocolByIDs(db sqlRuleStore, ids []int64) (map[int6
 	if err != nil {
 		return nil, err
 	}
+	explicitItems, _ = resolveWANProfilesForEgressNATs(db, explicitItems)
 	explicitItems = normalizeEgressNATItemsWithSnapshot(explicitItems, snapshot)
 
 	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, explicitItems, snapshot.Infos)
@@ -2052,11 +2106,19 @@ func loadEffectiveEnabledEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
 	}
 
 	snapshot := loadEgressNATInterfaceSnapshot()
+	items, wanWarnings := resolveWANProfilesForEgressNATs(db, items)
+	if warning := wanProfileRuntimeWarningText(wanWarnings); warning != "" {
+		return nil, fmt.Errorf("resolve egress nat wan profiles: %s", warning)
+	}
 	items = normalizeEgressNATItemsWithSnapshot(items, snapshot)
 
 	managedNetworks, err := dbGetEnabledManagedNetworks(db)
 	if err != nil {
 		return nil, err
+	}
+	managedNetworks, managedWANWarnings := resolveWANProfilesForManagedNetworks(db, managedNetworks)
+	if warning := wanProfileRuntimeWarningText(managedWANWarnings); warning != "" {
+		return nil, fmt.Errorf("resolve managed network wan profiles: %s", warning)
 	}
 	if len(managedNetworks) == 0 {
 		return items, nil
@@ -3315,6 +3377,18 @@ func compareInt64(a, b int64) int {
 	default:
 		return 0
 	}
+}
+
+func joinNonEmptyReason(current string, next string) string {
+	current = strings.TrimSpace(current)
+	next = strings.TrimSpace(next)
+	if current == "" {
+		return next
+	}
+	if next == "" || strings.Contains(current, next) {
+		return current
+	}
+	return current + "; " + next
 }
 
 func handleListRuleStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {

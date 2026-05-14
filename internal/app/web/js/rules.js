@@ -341,6 +341,7 @@
       'out_interface ',
       'out_ip ',
       'out_source_ip ',
+      'wan_profile_id ',
       'protocol ',
       'nat_type '
     ];
@@ -387,6 +388,7 @@
       'is required': app.t('validation.required'),
       'must be greater than 0': app.t('validation.positiveId'),
       'must be omitted when creating a rule': app.t('validation.ruleCreateIDOmit'),
+      'must be omitted when creating a wan profile': app.t('validation.wanProfileCreateIDOmit'),
       'must be omitted when creating a managed network': app.t('validation.managedNetworkCreateIDOmit'),
       'must be omitted when creating a managed network reservation': app.t('validation.managedNetworkReservationCreateIDOmit'),
       'must be omitted when creating an egress nat': app.t('validation.egressNATCreateIDOmit'),
@@ -424,6 +426,11 @@
       'site not found': app.t('validation.siteNotFound'),
       'range not found': app.t('validation.rangeNotFound'),
       'managed network not found': app.t('validation.managedNetworkNotFound'),
+      'wan profile not found': app.t('validation.wanProfileNotFound'),
+      'wan profile is disabled': app.t('validation.wanProfileDisabled'),
+      'wan profile is referenced': app.t('validation.wanProfileReferenced'),
+      'wan profile runtime interface is unresolved': app.t('validation.wanProfileRuntimeUnresolved'),
+      'wan profile runtime interface does not exist on this host': app.t('validation.wanProfileRuntimeMissing'),
       'managed network bridge persistence requires create mode': app.t('validation.managedNetworkPersistRequiresCreate'),
       'managed network reservation not found': app.t('validation.managedNetworkReservationNotFound'),
       'managed network ipv4 is disabled': app.t('validation.managedNetworkReservationIPv4Disabled'),

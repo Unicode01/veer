@@ -32,6 +32,9 @@
     rangesFilterMeta: app.$('rangesFilterMeta'),
     rangesSearchInput: app.$('rangesSearchInput'),
     clearRangesFilter: app.$('clearRangesFilter'),
+    wanProfilesFilterMeta: app.$('wanProfilesFilterMeta'),
+    wanProfilesSearchInput: app.$('wanProfilesSearchInput'),
+    clearWANProfilesFilter: app.$('clearWANProfilesFilter'),
     managedNetworksFilterMeta: app.$('managedNetworksFilterMeta'),
     managedNetworksSearchInput: app.$('managedNetworksSearchInput'),
     clearManagedNetworksFilter: app.$('clearManagedNetworksFilter'),
@@ -63,6 +66,7 @@
     rulesPagination: app.$('rulesPagination'),
     sitesPagination: app.$('sitesPagination'),
     rangesPagination: app.$('rangesPagination'),
+    wanProfilesPagination: app.$('wanProfilesPagination'),
     managedNetworksPagination: app.$('managedNetworksPagination'),
     managedNetworkReservationCandidatesPagination: app.$('managedNetworkReservationCandidatesPagination'),
     managedNetworkReservationsPagination: app.$('managedNetworkReservationsPagination'),
@@ -80,13 +84,16 @@
     app.state.activeTab = 'diagnostics';
   }
   app.state.managedNetworks = app.state.managedNetworks || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
+  app.state.wanProfiles = app.state.wanProfiles || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
   app.state.managedNetworkReservationCandidates = app.state.managedNetworkReservationCandidates || { data: [], page: 1, pageSize: 10, searchQuery: '', selectedIPv4ByKey: {} };
   app.state.managedNetworkReservations = app.state.managedNetworkReservations || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
   app.state.pendingRows = app.state.pendingRows || {};
-  app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false, managedNetwork: false, managedNetworkReservation: false, egressNAT: false, ipv6Assignment: false };
+  app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false, wanProfile: false, managedNetwork: false, managedNetworkReservation: false, egressNAT: false, ipv6Assignment: false };
+  if (!Object.prototype.hasOwnProperty.call(app.state.pendingForms, 'wanProfile')) app.state.pendingForms.wanProfile = false;
   if (!Object.prototype.hasOwnProperty.call(app.state.pendingForms, 'managedNetwork')) app.state.pendingForms.managedNetwork = false;
   if (!Object.prototype.hasOwnProperty.call(app.state.pendingForms, 'managedNetworkReservation')) app.state.pendingForms.managedNetworkReservation = false;
   app.state.forms = app.state.forms || {};
+  app.state.forms.wanProfile = app.state.forms.wanProfile || { mode: 'add', sourceId: 0 };
   app.state.forms.managedNetwork = app.state.forms.managedNetwork || { mode: 'add', sourceId: 0 };
   app.state.forms.managedNetworkReservation = app.state.forms.managedNetworkReservation || { mode: 'add', sourceId: 0 };
   app.state.lastSyncAt = app.state.lastSyncAt || 0;
@@ -101,6 +108,7 @@
     rules: { container: app.el.rulesPagination, pageSizes: [10, 20, 50], render: () => app.renderRulesTable() },
     sites: { container: app.el.sitesPagination, pageSizes: [10, 20, 50], render: () => app.renderSitesTable() },
     ranges: { container: app.el.rangesPagination, pageSizes: [10, 20, 50], render: () => app.renderRangesTable() },
+    wanProfiles: { container: app.el.wanProfilesPagination, pageSizes: [10, 20, 50], render: () => app.renderWANProfilesTable() },
     managedNetworks: { container: app.el.managedNetworksPagination, pageSizes: [10, 20, 50], render: () => app.renderManagedNetworksTable() },
     managedNetworkReservationCandidates: { container: app.el.managedNetworkReservationCandidatesPagination, pageSizes: [10, 20, 50], render: () => app.renderManagedNetworkReservationCandidatesTable() },
     managedNetworkReservations: { container: app.el.managedNetworkReservationsPagination, pageSizes: [10, 20, 50], render: () => app.renderManagedNetworkReservationsTable() },
@@ -128,7 +136,7 @@
     }
   };
 
-  ['rules', 'sites', 'ranges', 'managedNetworks', 'managedNetworkReservationCandidates', 'managedNetworkReservations', 'egressNATs', 'ipv6Assignments', 'workers', 'ruleStats', 'siteStats', 'rangeStats', 'egressNATStats'].forEach((table) => {
+  ['rules', 'sites', 'ranges', 'wanProfiles', 'managedNetworks', 'managedNetworkReservationCandidates', 'managedNetworkReservations', 'egressNATs', 'ipv6Assignments', 'workers', 'ruleStats', 'siteStats', 'rangeStats', 'egressNATStats'].forEach((table) => {
     if (!app.state[table]) return;
     app.state[table].searchQuery = app.state[table].searchQuery || '';
     app.state[table].page = Math.max(1, parseInt(app.state[table].page, 10) || 1);
@@ -429,6 +437,7 @@
     if (typeof app.loadRules === 'function') tasks.push(app.loadRules());
     if (typeof app.loadSites === 'function') tasks.push(app.loadSites());
     if (typeof app.loadRanges === 'function') tasks.push(app.loadRanges());
+    if (typeof app.loadWANProfiles === 'function') tasks.push(app.loadWANProfiles());
     if (typeof app.loadManagedNetworks === 'function') tasks.push(app.loadManagedNetworks());
     if (typeof app.loadManagedNetworkReservations === 'function') tasks.push(app.loadManagedNetworkReservations());
     if (typeof app.loadEgressNATs === 'function') tasks.push(app.loadEgressNATs());
@@ -612,6 +621,7 @@
       rules: { meta: app.el.rulesFilterMeta, clear: app.el.clearRulesFilter },
       sites: { meta: app.el.sitesFilterMeta, clear: app.el.clearSitesFilter },
       ranges: { meta: app.el.rangesFilterMeta, clear: app.el.clearRangesFilter },
+      wanProfiles: { meta: app.el.wanProfilesFilterMeta, clear: app.el.clearWANProfilesFilter },
       managedNetworks: { meta: app.el.managedNetworksFilterMeta, clear: app.el.clearManagedNetworksFilter },
       managedNetworkReservationCandidates: { meta: app.el.managedNetworkReservationCandidatesFilterMeta, clear: app.el.clearManagedNetworkReservationCandidatesFilter },
       managedNetworkReservations: { meta: app.el.managedNetworkReservationsFilterMeta, clear: app.el.clearManagedNetworkReservationsFilter },
@@ -641,6 +651,7 @@
 
   app.handleTabLoad = function handleTabLoad(target) {
     if (target === 'managed-networks' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
+    if (target === 'wans' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
     if (target === 'ipv6-assignments' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
     if (target === 'diagnostics') {
       if (typeof app.loadWorkers === 'function') app.loadWorkers();
@@ -693,6 +704,7 @@
       app.renderFilterMeta('rules');
       app.renderFilterMeta('sites');
       app.renderFilterMeta('ranges');
+      app.renderFilterMeta('wanProfiles');
       app.renderFilterMeta('managedNetworks');
       app.renderFilterMeta('managedNetworkReservationCandidates');
       app.renderFilterMeta('managedNetworkReservations');
@@ -801,6 +813,7 @@
     { button: app.el.clearRulesFilter, table: 'rules', render: () => app.renderRulesTable() },
     { button: app.el.clearSitesFilter, table: 'sites', render: () => app.renderSitesTable() },
     { button: app.el.clearRangesFilter, table: 'ranges', render: () => app.renderRangesTable() },
+    { button: app.el.clearWANProfilesFilter, table: 'wanProfiles', render: () => app.renderWANProfilesTable() },
     { button: app.el.clearManagedNetworksFilter, table: 'managedNetworks', render: () => app.renderManagedNetworksTable() },
     { button: app.el.clearManagedNetworkReservationCandidatesFilter, table: 'managedNetworkReservationCandidates', render: () => app.renderManagedNetworkReservationCandidatesTable() },
     { button: app.el.clearManagedNetworkReservationsFilter, table: 'managedNetworkReservations', render: () => app.renderManagedNetworkReservationsTable() },

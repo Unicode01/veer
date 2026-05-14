@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -452,6 +453,14 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		result.handled = false
 		result.detail = fmt.Sprintf("load managed networks: %v", err)
 		return result
+	}
+	managedNetworks, managedWANWarnings := resolveWANProfilesForManagedNetworks(pm.db, managedNetworks)
+	if warning := wanProfileRuntimeWarningText(managedWANWarnings); warning != "" {
+		log.Printf("managed network runtime: resolve wan profiles during retry: %s", warning)
+	}
+	egressNATs, egressWANWarnings := resolveWANProfilesForEgressNATs(pm.db, egressNATs)
+	if warning := wanProfileRuntimeWarningText(egressWANWarnings); warning != "" {
+		log.Printf("egress nat runtime: resolve wan profiles during retry: %s", warning)
 	}
 
 	defaultEngine := ruleEngineAuto

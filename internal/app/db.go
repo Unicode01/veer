@@ -212,6 +212,7 @@ func toStoreEgressNAT(item EgressNAT) store.EgressNAT {
 		ParentInterface: item.ParentInterface,
 		ChildInterface:  item.ChildInterface,
 		OutInterface:    item.OutInterface,
+		WANProfileID:    item.WANProfileID,
 		OutSourceIP:     item.OutSourceIP,
 		Protocol:        item.Protocol,
 		NATType:         item.NATType,
@@ -225,6 +226,7 @@ func fromStoreEgressNAT(item store.EgressNAT) EgressNAT {
 		ParentInterface: item.ParentInterface,
 		ChildInterface:  item.ChildInterface,
 		OutInterface:    item.OutInterface,
+		WANProfileID:    item.WANProfileID,
 		OutSourceIP:     item.OutSourceIP,
 		Protocol:        normalizeEgressNATProtocol(item.Protocol),
 		NATType:         normalizeEgressNATType(item.NATType),
@@ -297,6 +299,7 @@ func toStoreManagedNetwork(item ManagedNetwork) store.ManagedNetwork {
 		BridgeMTU:           item.BridgeMTU,
 		BridgeVLANAware:     item.BridgeVLANAware,
 		UplinkInterface:     item.UplinkInterface,
+		WANProfileID:        item.WANProfileID,
 		IPv4Enabled:         item.IPv4Enabled,
 		IPv4CIDR:            item.IPv4CIDR,
 		IPv4Gateway:         item.IPv4Gateway,
@@ -322,6 +325,7 @@ func fromStoreManagedNetwork(item store.ManagedNetwork) ManagedNetwork {
 		BridgeMTU:           item.BridgeMTU,
 		BridgeVLANAware:     item.BridgeVLANAware,
 		UplinkInterface:     item.UplinkInterface,
+		WANProfileID:        item.WANProfileID,
 		IPv4Enabled:         item.IPv4Enabled,
 		IPv4CIDR:            item.IPv4CIDR,
 		IPv4Gateway:         item.IPv4Gateway,
@@ -370,6 +374,59 @@ func fromStoreManagedNetworkReservationSlice(items []store.ManagedNetworkReserva
 	out := make([]ManagedNetworkReservation, 0, len(items))
 	for _, item := range items {
 		out = append(out, fromStoreManagedNetworkReservation(item))
+	}
+	return out
+}
+
+func toStoreWANProfile(item WANProfile) store.WANProfile {
+	return store.WANProfile{
+		ID:               item.ID,
+		Name:             item.Name,
+		Type:             item.Type,
+		ParentInterface:  item.ParentInterface,
+		RuntimeInterface: item.RuntimeInterface,
+		IPv4CIDR:         item.IPv4CIDR,
+		IPv4Gateway:      item.IPv4Gateway,
+		Username:         item.Username,
+		Password:         item.Password,
+		MTU:              item.MTU,
+		MRU:              item.MRU,
+		DefaultRoute:     item.DefaultRoute,
+		Metric:           item.Metric,
+		DNSMode:          item.DNSMode,
+		DNSServers:       item.DNSServers,
+		Remark:           item.Remark,
+		Enabled:          item.Enabled,
+	}
+}
+
+func fromStoreWANProfile(item store.WANProfile) WANProfile {
+	return WANProfile{
+		ID:               item.ID,
+		Name:             item.Name,
+		Type:             item.Type,
+		ParentInterface:  item.ParentInterface,
+		RuntimeInterface: item.RuntimeInterface,
+		IPv4CIDR:         item.IPv4CIDR,
+		IPv4Gateway:      item.IPv4Gateway,
+		Username:         item.Username,
+		Password:         item.Password,
+		PasswordSet:      item.Password != "",
+		MTU:              item.MTU,
+		MRU:              item.MRU,
+		DefaultRoute:     item.DefaultRoute,
+		Metric:           item.Metric,
+		DNSMode:          item.DNSMode,
+		DNSServers:       item.DNSServers,
+		Remark:           item.Remark,
+		Enabled:          item.Enabled,
+	}
+}
+
+func fromStoreWANProfileSlice(items []store.WANProfile) []WANProfile {
+	out := make([]WANProfile, 0, len(items))
+	for _, item := range items {
+		out = append(out, fromStoreWANProfile(item))
 	}
 	return out
 }
@@ -780,4 +837,58 @@ func dbGetManagedNetworkReservation(db sqlRuleStore, id int64) (*ManagedNetworkR
 	}
 	out := fromStoreManagedNetworkReservation(*item)
 	return &out, nil
+}
+
+func dbAddWANProfile(db sqlRuleStore, item *WANProfile) (int64, error) {
+	stored := toStoreWANProfile(*item)
+	return store.AddWANProfile(db, &stored)
+}
+
+func dbUpdateWANProfile(db sqlRuleStore, item *WANProfile) error {
+	stored := toStoreWANProfile(*item)
+	return store.UpdateWANProfile(db, &stored)
+}
+
+func dbDeleteWANProfile(db sqlRuleStore, id int64) error {
+	return store.DeleteWANProfile(db, id)
+}
+
+func dbCountWANProfileReferences(db sqlRuleStore, id int64) (WANProfileReferenceCounts, error) {
+	counts, err := store.CountWANProfileReferences(db, id)
+	if err != nil {
+		return WANProfileReferenceCounts{}, err
+	}
+	return WANProfileReferenceCounts{
+		EgressNATs:      counts.EgressNATs,
+		ManagedNetworks: counts.ManagedNetworks,
+	}, nil
+}
+
+func dbGetWANProfiles(db sqlRuleStore) ([]WANProfile, error) {
+	items, err := store.GetWANProfiles(db)
+	if err != nil {
+		return nil, err
+	}
+	return fromStoreWANProfileSlice(items), nil
+}
+
+func dbGetEnabledWANProfiles(db sqlRuleStore) ([]WANProfile, error) {
+	items, err := store.GetEnabledWANProfiles(db)
+	if err != nil {
+		return nil, err
+	}
+	return fromStoreWANProfileSlice(items), nil
+}
+
+func dbGetWANProfile(db sqlRuleStore, id int64) (*WANProfile, error) {
+	item, err := store.GetWANProfile(db, id)
+	if err != nil {
+		return nil, err
+	}
+	out := fromStoreWANProfile(*item)
+	return &out, nil
+}
+
+func dbSetWANProfileEnabled(db sqlRuleStore, id int64, enabled bool) error {
+	return store.SetWANProfileEnabled(db, id, enabled)
 }

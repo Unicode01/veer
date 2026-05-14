@@ -138,6 +138,7 @@
       rules: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10, selectedIds: new Set(), batchDeleting: false },
       sites: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
       ranges: { data: [], sortKey: '', sortAsc: true, filterTag: '', page: 1, pageSize: 10 },
+      wanProfiles: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
       egressNATs: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
       ipv6Assignments: { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 },
       workers: { data: [], sortKey: '', sortAsc: true, masterHash: '', page: 1, pageSize: 10 },
@@ -872,6 +873,9 @@
       }
       if (typeof app.populateEgressNATInterfaceSelectors === 'function') {
         app.populateEgressNATInterfaceSelectors();
+      }
+      if (typeof app.refreshWANInterfaceSelectors === 'function') {
+        app.refreshWANInterfaceSelectors();
       }
       app.updateRuleTransparentWarning();
       app.updateSiteTransparentWarning();

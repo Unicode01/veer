@@ -121,7 +121,7 @@ func validateManagedNetworkBridgeHostState(item ManagedNetwork) ([]ruleValidatio
 	return nil, nil
 }
 
-func prepareManagedNetworkCreate(item ManagedNetwork) (ManagedNetwork, []ruleValidationIssue, error) {
+func prepareManagedNetworkCreate(db sqlRuleStore, item ManagedNetwork) (ManagedNetwork, []ruleValidationIssue, error) {
 	item = normalizeManagedNetwork(item)
 	if item.ID != 0 {
 		return ManagedNetwork{}, singleValidationIssue("create", 0, "id", "must be omitted when creating a managed network"), nil
@@ -148,6 +148,9 @@ func prepareManagedNetworkCreate(item ManagedNetwork) (ManagedNetwork, []ruleVal
 	if len(issues) > 0 {
 		issues[0].Scope = "create"
 		return ManagedNetwork{}, issues, nil
+	}
+	if issues, err := validateManagedNetworkWANProfile(db, item, "create"); err != nil || len(issues) > 0 {
+		return ManagedNetwork{}, issues, err
 	}
 	item.Enabled = true
 	return item, nil, nil
@@ -189,8 +192,31 @@ func prepareManagedNetworkUpdate(db sqlRuleStore, item ManagedNetwork) (ManagedN
 		issues[0].ID = item.ID
 		return ManagedNetwork{}, issues, nil
 	}
+	if issues, err := validateManagedNetworkWANProfile(db, item, "update"); err != nil || len(issues) > 0 {
+		return ManagedNetwork{}, issues, err
+	}
 	item.Enabled = existing.Enabled
 	return item, nil, nil
+}
+
+func validateManagedNetworkWANProfile(db sqlRuleStore, item ManagedNetwork, scope string) ([]ruleValidationIssue, error) {
+	if item.WANProfileID <= 0 {
+		return nil, nil
+	}
+	wan, err := dbGetWANProfile(db, item.WANProfileID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return singleValidationIssue(scope, item.ID, "wan_profile_id", "wan profile not found"), nil
+		}
+		return nil, err
+	}
+	if !wan.Enabled {
+		return singleValidationIssue(scope, item.ID, "wan_profile_id", "wan profile is disabled"), nil
+	}
+	if strings.TrimSpace(resolveWANProfileRuntimeInterface(*wan)) == "" {
+		return singleValidationIssue(scope, item.ID, "wan_profile_id", "wan profile runtime interface is unresolved"), nil
+	}
+	return nil, nil
 }
 
 func prepareManagedNetworkToggle(db sqlRuleStore, id int64) (ManagedNetwork, []ruleValidationIssue, error) {
@@ -253,10 +279,12 @@ func buildManagedNetworkStatuses(db sqlRuleStore, items []ManagedNetwork, pm *Pr
 	if err != nil {
 		return nil, err
 	}
+	resolvedItems, managedWANWarnings := resolveWANProfilesForManagedNetworks(db, items)
+	resolvedExplicitEgressNATs, egressWANWarnings := resolveWANProfilesForEgressNATs(db, explicitEgressNATs)
 
 	inventory := buildManagedNetworkInterfaceInventory(infos, false)
-	normalizedExplicitEgressNATs := normalizeEgressNATItemsWithSnapshot(explicitEgressNATs, egressNATInterfaceSnapshot{Infos: infos})
-	compiled := compileManagedNetworkRuntimeWithInventory(items, explicitIPv6, normalizedExplicitEgressNATs, inventory)
+	normalizedExplicitEgressNATs := normalizeEgressNATItemsWithSnapshot(resolvedExplicitEgressNATs, egressNATInterfaceSnapshot{Infos: infos})
+	compiled := compileManagedNetworkRuntimeWithInventory(resolvedItems, explicitIPv6, normalizedExplicitEgressNATs, inventory)
 	repairIssues := buildManagedNetworkRepairIssueMap(items, buildManagedNetworkRepairInterfaceParentMap(infos))
 	hostIfaceByName := map[string]HostNetworkInterface{}
 	if hasManagedNetworkIPv6(items) {
@@ -281,6 +309,12 @@ func buildManagedNetworkStatuses(db sqlRuleStore, items []ManagedNetwork, pm *Pr
 			PreviewWarnings:              append([]string(nil), preview.Warnings...),
 			RepairRecommended:            len(repairIssues[item.ID]) > 0,
 			RepairIssues:                 append([]string(nil), repairIssues[item.ID]...),
+		}
+		if warning := strings.TrimSpace(managedWANWarnings[item.ID]); warning != "" {
+			status.PreviewWarnings = sortAndDedupeStrings(append(status.PreviewWarnings, "wan profile: "+warning))
+		}
+		if warning := wanProfileRuntimeWarningText(egressWANWarnings); warning != "" && item.AutoEgressNAT {
+			status.PreviewWarnings = sortAndDedupeStrings(append(status.PreviewWarnings, "egress nat wan profile: "+warning))
 		}
 		if runtime, ok := ipv4RuntimeStatuses[item.ID]; ok {
 			status.IPv4RuntimeStatus = runtime.RuntimeStatus
@@ -476,7 +510,14 @@ func handleAddManagedNetwork(w http.ResponseWriter, r *http.Request, db *sql.DB,
 		return
 	}
 
-	item, issues, err := prepareManagedNetworkCreate(item)
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	item, issues, err := prepareManagedNetworkCreate(tx, item)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -485,13 +526,6 @@ func handleAddManagedNetwork(w http.ResponseWriter, r *http.Request, db *sql.DB,
 		writeValidationIssueResponse(w, http.StatusBadRequest, issues)
 		return
 	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	defer tx.Rollback()
 
 	id, err := dbAddManagedNetwork(tx, &item)
 	if err != nil {
