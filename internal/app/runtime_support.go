@@ -1,6 +1,7 @@
 package app
 
 import (
+	"log"
 	"net"
 	"os/exec"
 	"syscall"
@@ -19,6 +20,8 @@ const (
 	controlSocketFileName = ipcsec.ControlSocketFileName
 )
 
+var transparentRoutingLastErrorProvider = tproxysetup.LastError
+
 func controlTransparent(clientIP net.IP, outIface string) func(network, address string, c syscall.RawConn) error {
 	return socketio.ControlTransparent(clientIP, outIface)
 }
@@ -35,11 +38,25 @@ func setSysProcAttr(cmd *exec.Cmd) {
 }
 
 func ensureTransparentRouting() {
-	tproxysetup.EnsureRouting()
+	if err := tproxysetup.EnsureRouting(); err != nil {
+		log.Printf("transparent routing setup failed: %v", err)
+	}
 }
 
 func cleanupTransparentRouting() {
-	tproxysetup.CleanupRouting()
+	if err := tproxysetup.CleanupRouting(); err != nil {
+		log.Printf("transparent routing cleanup failed: %v", err)
+	}
+}
+
+func transparentRoutingLastError() string {
+	if transparentRoutingLastErrorProvider == nil {
+		return ""
+	}
+	if err := transparentRoutingLastErrorProvider(); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 func prepareSecureIPCListener(exePath string) (net.Listener, string, error) {

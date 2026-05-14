@@ -1091,6 +1091,96 @@
     return kernelRuntimeNoteSpec('xdp_attachment_mode', app.t('kernel.note.xdpAttachmentMode') + ' · ' + detail);
   }
 
+  function kernelCapabilityStateText(check) {
+    if (!check || typeof check !== 'object') return app.t('common.unknown');
+    if (check.available) return app.t('common.available');
+    const reason = String(check.reason || '').trim();
+    return app.t('common.unavailable') + (reason ? (': ' + reason) : '');
+  }
+
+  function kernelRuntimeCapabilitySummary(capabilities) {
+    if (!capabilities || typeof capabilities !== 'object') return '';
+    const parts = [];
+    [
+      ['TC', capabilities.tc],
+      ['XDP', capabilities.xdp_generic]
+    ].forEach(([label, check]) => {
+      if (!check || typeof check !== 'object') return;
+      parts.push(label + '=' + (check.available ? app.t('common.available') : app.t('common.unavailable')));
+    });
+    const netlink = capabilities.netlink || {};
+    const netlinkChecks = [
+      netlink.route_socket,
+      netlink.link_list,
+      netlink.route_list,
+      netlink.link_subscribe,
+      netlink.address_subscribe,
+      netlink.neighbor_subscribe,
+      netlink.route_subscribe
+    ].filter((check) => check && typeof check === 'object');
+    if (netlinkChecks.length) {
+      const okCount = netlinkChecks.filter((check) => !!check.available).length;
+      parts.push('netlink=' + String(okCount) + '/' + String(netlinkChecks.length));
+    }
+    return parts.join(' · ');
+  }
+
+  function kernelRuntimeCapabilityDetails(capabilities) {
+    if (!capabilities || typeof capabilities !== 'object') return [];
+    const rows = [];
+    const osArch = [capabilities.os, capabilities.arch].filter(Boolean).join('/');
+    if (osArch || capabilities.kernel_release) {
+      rows.push(app.t('kernel.capability.platform') + ': ' + [osArch, capabilities.kernel_release].filter(Boolean).join(' '));
+    }
+    [
+      ['kernel.capability.tc', capabilities.tc],
+      ['kernel.capability.xdpGeneric', capabilities.xdp_generic],
+      ['kernel.capability.xdpGenericAttach', capabilities.xdp_generic_attach],
+      ['kernel.capability.bpfArray', capabilities.bpf_map_array],
+      ['kernel.capability.bpfHash', capabilities.bpf_map_hash],
+      ['kernel.capability.bpfLRUHash', capabilities.bpf_map_lru_hash],
+      ['kernel.capability.bpfPerCPUHash', capabilities.bpf_map_percpu_hash],
+      ['kernel.capability.bpfPerCPUArray', capabilities.bpf_map_percpu_array],
+      ['kernel.capability.bpfProgArray', capabilities.bpf_map_prog_array],
+      ['kernel.capability.bpfDevMapHash', capabilities.bpf_map_devmap_hash],
+      ['kernel.capability.bpfSchedCLS', capabilities.bpf_sched_cls],
+      ['kernel.capability.bpfXDP', capabilities.bpf_xdp]
+    ].forEach(([labelKey, check]) => {
+      if (!check || typeof check !== 'object') return;
+      rows.push(app.t(labelKey) + ': ' + kernelCapabilityStateText(check));
+    });
+    const netlink = capabilities.netlink || {};
+    [
+      ['kernel.capability.netlinkRouteSocket', netlink.route_socket],
+      ['kernel.capability.netlinkLinkList', netlink.link_list],
+      ['kernel.capability.netlinkRouteList', netlink.route_list],
+      ['kernel.capability.netlinkLinkSubscribe', netlink.link_subscribe],
+      ['kernel.capability.netlinkAddressSubscribe', netlink.address_subscribe],
+      ['kernel.capability.netlinkNeighborSubscribe', netlink.neighbor_subscribe],
+      ['kernel.capability.netlinkRouteSubscribe', netlink.route_subscribe]
+    ].forEach(([labelKey, check]) => {
+      if (!check || typeof check !== 'object') return;
+      rows.push(app.t(labelKey) + ': ' + kernelCapabilityStateText(check));
+    });
+    const ipRoute = capabilities.ip_route || {};
+    [
+      ['kernel.capability.ipCommand', ipRoute.command],
+      ['kernel.capability.ipRuleShow', ipRoute.rule_show],
+      ['kernel.capability.ipRouteShow', ipRoute.route_show]
+    ].forEach(([labelKey, check]) => {
+      if (!check || typeof check !== 'object') return;
+      rows.push(app.t(labelKey) + ': ' + kernelCapabilityStateText(check));
+    });
+    if (ipRoute.path) {
+      rows.push(app.t('kernel.capability.ipPath') + ': ' + String(ipRoute.path));
+    }
+    (Array.isArray(capabilities.warnings) ? capabilities.warnings : []).forEach((warning) => {
+      const text = String(warning || '').trim();
+      if (text) rows.push(app.t('kernel.capability.warning') + ': ' + text);
+    });
+    return rows;
+  }
+
   function kernelRuntimeReconcileNode(engine) {
     if (!engine) return app.emptyCellNode('stat-muted');
 
@@ -1286,6 +1376,8 @@
       ? configuredOrder.map((name) => kernelEngineBadge(name))
       : [app.emptyCellNode('stat-muted')];
     const mapProfileDetail = kernelRuntimeMapProfileDetail(data);
+    const capabilitySummary = kernelRuntimeCapabilitySummary(data.kernel_capabilities);
+    const capabilityDetails = kernelRuntimeCapabilityDetails(data.kernel_capabilities);
 
     const summaryFragment = document.createDocumentFragment();
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
@@ -1309,6 +1401,16 @@
         mapProfileDetail
           ? app.createNode('div', {
               text: mapProfileDetail
+            })
+          : null,
+        capabilitySummary
+          ? app.createNode('div', {
+              text: app.t('kernel.summary.capabilities') + ': ' + capabilitySummary
+            })
+          : null,
+        capabilityDetails.length
+          ? app.createNode('div', {
+              text: capabilityDetails.join(' | ')
             })
           : null,
         !data.available && (data.available_reason || app.t('common.unavailable'))

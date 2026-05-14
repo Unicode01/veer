@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"testing"
 )
@@ -425,6 +426,70 @@ func TestHandleListRulesIncludesUserspaceRuntimeError(t *testing.T) {
 	}
 }
 
+func TestHandleListRulesIncludesTransparentRoutingRuntimeError(t *testing.T) {
+	db := openTestDB(t)
+
+	_, err := dbAddRule(db, &Rule{
+		InIP:        "0.0.0.0",
+		InPort:      53333,
+		OutIP:       "192.0.2.10",
+		OutPort:     53333,
+		Protocol:    "tcp",
+		Enabled:     true,
+		Transparent: true,
+	})
+	if err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+
+	const runtimeErr = "transparent routing setup failed: iptables not found"
+	restore := setTransparentRoutingLastErrorForTest(t, runtimeErr)
+	defer restore()
+
+	pm := &ProcessManager{
+		ruleWorkers: map[int]*WorkerInfo{
+			0: {
+				kind:        workerKindRule,
+				workerIndex: 0,
+				running:     true,
+				rules: []Rule{{
+					ID:          1,
+					InIP:        "0.0.0.0",
+					InPort:      53333,
+					OutIP:       "192.0.2.10",
+					OutPort:     53333,
+					Protocol:    "tcp",
+					Enabled:     true,
+					Transparent: true,
+				}},
+			},
+		},
+		kernelRules: map[int64]bool{},
+	}
+
+	req := httptest.NewRequest("GET", "/api/rules", nil)
+	w := httptest.NewRecorder()
+
+	handleListRules(w, req, db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp []RuleStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	if len(resp) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(resp))
+	}
+	if resp[0].Status != "running" {
+		t.Fatalf("rule status = %q, want running", resp[0].Status)
+	}
+	if resp[0].RuntimeError != runtimeErr {
+		t.Fatalf("runtime_error = %q, want %q", resp[0].RuntimeError, runtimeErr)
+	}
+}
+
 func TestHandleListWorkersIncludesUserspaceRangeRuntimeError(t *testing.T) {
 	db := openTestDB(t)
 
@@ -553,5 +618,16 @@ func TestHandleListRangesIncludesUserspaceRuntimeError(t *testing.T) {
 	}
 	if resp[0].RuntimeError != runtimeErr {
 		t.Fatalf("runtime_error = %q, want %q", resp[0].RuntimeError, runtimeErr)
+	}
+}
+
+func setTransparentRoutingLastErrorForTest(t *testing.T, message string) func() {
+	t.Helper()
+	old := transparentRoutingLastErrorProvider
+	transparentRoutingLastErrorProvider = func() error {
+		return errors.New(message)
+	}
+	return func() {
+		transparentRoutingLastErrorProvider = old
 	}
 }

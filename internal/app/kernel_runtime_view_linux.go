@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"forward/internal/kernelcap"
+
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
@@ -203,9 +205,10 @@ func (snapshot kernelRuntimeMapSnapshot) Close() {
 
 func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
-		DefaultEngine:   ruleEngineAuto,
-		ConfiguredOrder: defaultKernelEngineOrder(),
-		Engines:         []KernelEngineRuntimeView{},
+		KernelCapabilities: kernelcap.DetectKernelCapabilities(),
+		DefaultEngine:      ruleEngineAuto,
+		ConfiguredOrder:    defaultKernelEngineOrder(),
+		Engines:            []KernelEngineRuntimeView{},
 	}
 	if pm == nil {
 		return resp

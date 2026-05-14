@@ -2,6 +2,8 @@
 
 package tproxysetup
 
-func EnsureRouting() {}
+func EnsureRouting() error { return nil }
 
-func CleanupRouting() {}
+func CleanupRouting() error { return nil }
+
+func LastError() error { return nil }

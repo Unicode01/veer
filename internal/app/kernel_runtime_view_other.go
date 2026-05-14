@@ -5,6 +5,8 @@ package app
 import (
 	"strings"
 	"time"
+
+	"forward/internal/kernelcap"
 )
 
 func snapshotKernelRuntimeEngines(rt kernelRuleRuntime) []KernelEngineRuntimeView {
@@ -21,11 +23,12 @@ func kernelRuntimeIdleDegradedRebuildReason(view KernelEngineRuntimeView) string
 
 func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
-		Available:       false,
-		AvailableReason: "kernel dataplane requires Linux",
-		DefaultEngine:   ruleEngineAuto,
-		ConfiguredOrder: defaultKernelEngineOrder(),
-		Engines:         []KernelEngineRuntimeView{},
+		Available:          false,
+		AvailableReason:    "kernel dataplane requires Linux",
+		KernelCapabilities: kernelcap.DetectKernelCapabilities(),
+		DefaultEngine:      ruleEngineAuto,
+		ConfiguredOrder:    defaultKernelEngineOrder(),
+		Engines:            []KernelEngineRuntimeView{},
 	}
 	if pm == nil {
 		return resp

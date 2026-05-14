@@ -486,10 +486,14 @@ func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 	}
 
 	runningRules, failedRules, ruleErrors := collectRuleRuntimeStatus(pm)
+	transparentErr := strings.TrimSpace(transparentRoutingLastError())
 	var statuses []RuleStatus
 	for _, rule := range rules {
 		item := pm.buildRuleStatus(rule, ruleRuntimeStatus(rule, runningRules, failedRules))
 		item.RuntimeError = ruleErrors[rule.ID]
+		if item.RuntimeError == "" && rule.Enabled && rule.Transparent {
+			item.RuntimeError = transparentErr
+		}
 		if matchesRuleFilter(item, filters) {
 			statuses = append(statuses, item)
 		}
@@ -1641,6 +1645,7 @@ func handleListSites(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 		}
 	}
 	pm.mu.Unlock()
+	transparentErr := strings.TrimSpace(transparentRoutingLastError())
 	for _, site := range sites {
 		status := "stopped"
 		if site.Enabled && failedSiteIDs[site.ID] {
@@ -1653,6 +1658,8 @@ func handleListSites(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 		item := SiteStatus{Site: site, Status: status}
 		if status == "error" {
 			item.RuntimeError = proxyLastError
+		} else if site.Enabled && site.Transparent {
+			item.RuntimeError = transparentErr
 		}
 		statuses = append(statuses, item)
 	}
@@ -1875,6 +1882,7 @@ func handleListRanges(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		}
 	}
 	pm.mu.Unlock()
+	transparentErr := strings.TrimSpace(transparentRoutingLastError())
 	for _, pr := range ranges {
 		status := "stopped"
 		if failedRanges[pr.ID] {
@@ -1884,6 +1892,9 @@ func handleListRanges(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		}
 		item := pm.buildRangeStatus(pr, status)
 		item.RuntimeError = rangeErrors[pr.ID]
+		if item.RuntimeError == "" && pr.Enabled && pr.Transparent {
+			item.RuntimeError = transparentErr
+		}
 		statuses = append(statuses, item)
 	}
 	if statuses == nil {

@@ -241,6 +241,12 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 
 func (rt *xdpKernelRuleRuntime) ensureAvailabilityInitialized() {
 	rt.availableOnce.Do(func() {
+		if reason := xdpKernelRuntimeCapabilityUnavailableReason(); reason != "" {
+			rt.available = false
+			rt.availableReason = reason
+			log.Printf("xdp dataplane unavailable: %s", rt.availableReason)
+			return
+		}
 		spec, err := loadEmbeddedXDPCollectionSpec(rt.prepareOptions.enableTrafficStats)
 		if err != nil {
 			rt.available = false

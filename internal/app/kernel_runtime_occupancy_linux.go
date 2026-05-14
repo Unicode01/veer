@@ -53,7 +53,7 @@ func normalizeKernelOccupancyCapacity(capacity int) uint32 {
 	if capacity <= 0 {
 		return 0
 	}
-	if capacity > int(^uint32(0)) {
+	if uint64(capacity) > uint64(^uint32(0)) {
 		return ^uint32(0)
 	}
 	return uint32(capacity)
@@ -115,19 +115,13 @@ func syncKernelOccupancyMap(occupancyMap *ebpf.Map, flowsEntries int, natEntries
 	if natCapacity < 0 {
 		natCapacity = 0
 	}
-	if flowCapacity > int(^uint32(0)) {
-		flowCapacity = int(^uint32(0))
-	}
-	if natCapacity > int(^uint32(0)) {
-		natCapacity = int(^uint32(0))
-	}
 
 	key := uint32(0)
 	value := kernelOccupancyValueV4{
 		FlowEntries:  int64(flowsEntries),
 		NatEntries:   int64(natEntries),
-		FlowCapacity: uint32(flowCapacity),
-		NatCapacity:  uint32(natCapacity),
+		FlowCapacity: normalizeKernelOccupancyCapacity(flowCapacity),
+		NatCapacity:  normalizeKernelOccupancyCapacity(natCapacity),
 	}
 	if err := occupancyMap.Put(key, value); err != nil {
 		return fmt.Errorf("sync kernel occupancy map: %w", err)

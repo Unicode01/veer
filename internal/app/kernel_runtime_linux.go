@@ -542,6 +542,12 @@ func newKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 
 func (rt *linuxKernelRuleRuntime) ensureAvailabilityInitialized() {
 	rt.availableOnce.Do(func() {
+		if reason := tcKernelRuntimeCapabilityUnavailableReason(); reason != "" {
+			rt.available = false
+			rt.availableReason = reason
+			log.Printf("kernel dataplane unavailable: %s", rt.availableReason)
+			return
+		}
 		spec, err := loadEmbeddedKernelCollectionSpec(rt.enableTrafficStats)
 		if err != nil {
 			rt.available = false

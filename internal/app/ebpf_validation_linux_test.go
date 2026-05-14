@@ -3,6 +3,8 @@
 package app
 
 import (
+	"bytes"
+	"debug/elf"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -124,6 +126,36 @@ func stripEmbeddedEBPFComments(content string) string {
 		content = content[:start] + content[end+2:]
 	}
 	return content
+}
+
+func TestEmbeddedEBPFObjectsAreArchitectureNeutralBPF(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "tc", data: embeddedForwardTCObject},
+		{name: "tc-stats", data: embeddedForwardTCStatsObject},
+		{name: "xdp", data: embeddedForwardXDPObject},
+		{name: "xdp-stats", data: embeddedForwardXDPStatsObject},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			file, err := elf.NewFile(bytes.NewReader(tc.data))
+			if err != nil {
+				t.Fatalf("elf.NewFile() error = %v", err)
+			}
+			if file.FileHeader.Machine != elf.EM_BPF {
+				t.Fatalf("machine = %v, want EM_BPF", file.FileHeader.Machine)
+			}
+			if file.FileHeader.Class != elf.ELFCLASS64 {
+				t.Fatalf("class = %v, want ELFCLASS64", file.FileHeader.Class)
+			}
+			if file.FileHeader.Data != elf.ELFDATA2LSB {
+				t.Fatalf("data = %v, want little-endian BPF object", file.FileHeader.Data)
+			}
+		})
+	}
 }
 
 func TestValidateEmbeddedEBPFHelperDeclarationsDetectsMissingHelper(t *testing.T) {
