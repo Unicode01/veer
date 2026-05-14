@@ -370,6 +370,13 @@ tr.row-pending td {
     color: var(--text-soft);
 }
 
+.kernel-runtime-sub > div {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
 .kernel-runtime-note {
     grid-column: 1 / -1;
     display: flex;

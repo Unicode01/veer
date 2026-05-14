@@ -440,23 +440,6 @@
       app.updateEgressNATOutInterfaceHint('', false);
     }
     app.populateEgressNATSourceIPSelect(el.egressNATOutSourceIP.value);
-    app.syncEgressNATWANProfileState();
-  };
-
-  app.syncEgressNATWANProfileState = function syncEgressNATWANProfileState() {
-    const el = app.el;
-    const profileID = parseInt(String(el.egressNATWANProfile && el.egressNATWANProfile.value || '').trim(), 10) || 0;
-    const usingProfile = profileID > 0;
-    [el.egressNATOutPicker, el.egressNATOutInterface].forEach((input) => {
-      if (!input) return;
-      input.disabled = usingProfile;
-      if (usingProfile) input.setAttribute('aria-disabled', 'true');
-      else input.removeAttribute('aria-disabled');
-    });
-    if (usingProfile) {
-      app.clearFieldError(el.egressNATOutPicker || el.egressNATOutInterface);
-      app.updateEgressNATOutInterfaceHint('', false);
-    }
   };
 
   app.syncEgressNATFormState = function syncEgressNATFormState() {
@@ -485,7 +468,6 @@
     app.el.editEgressNATId.value = '';
     app.setEgressNATProtocolValue('tcp+udp');
     if (app.el.egressNATNatType) app.el.egressNATNatType.value = 'symmetric';
-    if (app.el.egressNATWANProfile) app.el.egressNATWANProfile.value = '';
     app.syncEgressNATFormState();
   };
 
@@ -495,10 +477,8 @@
     el.editEgressNATId.value = item.id;
     el.egressNATParentInterface.value = item.parent_interface || '';
     el.egressNATChildInterface.value = item.child_interface || '';
-    el.egressNATOutInterface.value = item.configured_out_interface || item.out_interface || '';
-    if (el.egressNATWANProfile) el.egressNATWANProfile.value = item.wan_profile_id ? String(item.wan_profile_id) : '';
+    el.egressNATOutInterface.value = item.out_interface || '';
     app.populateEgressNATInterfaceSelectors({ preserveOutSelection: true });
-    app.syncEgressNATWANProfileState();
     app.populateEgressNATSourceIPSelect(item.out_source_ip || '');
     app.setEgressNATProtocolValue(item.protocol || 'tcp+udp');
     if (el.egressNATNatType) el.egressNATNatType.value = app.normalizeEgressNATTypeValue(item.nat_type);
@@ -510,8 +490,6 @@
     app.setEgressNATFormAdd();
     app.el.egressNATForm.reset();
     app.populateEgressNATInterfaceSelectors();
-    if (app.el.egressNATWANProfile) app.el.egressNATWANProfile.value = '';
-    app.syncEgressNATWANProfileState();
     app.setEgressNATProtocolValue('tcp+udp');
     if (app.el.egressNATNatType) app.el.egressNATNatType.value = 'symmetric';
     app.closeEgressNATProtocolMenu();
@@ -539,7 +517,6 @@
       parent_interface: scope.parent_interface,
       child_interface: scope.child_interface,
       out_interface: String(outInterface || '').trim(),
-      wan_profile_id: parseInt(String(el.egressNATWANProfile && el.egressNATWANProfile.value || '').trim(), 10) || 0,
       out_source_ip: el.egressNATOutSourceIP.value.trim(),
       protocol: app.getEgressNATProtocolValue() || '',
       nat_type: app.normalizeEgressNATTypeValue(el.egressNATNatType ? el.egressNATNatType.value : '')
@@ -554,7 +531,6 @@
       parent_interface: app.el.egressNATParentPicker || app.el.egressNATParentInterface,
       child_interface: app.el.egressNATChildPicker || app.el.egressNATChildInterface,
       out_interface: app.el.egressNATOutPicker || app.el.egressNATOutInterface,
-      wan_profile_id: app.el.egressNATWANProfile,
       out_source_ip: app.el.egressNATOutSourceIP,
       protocol: app.el.egressNATProtocolTrigger || app.el.egressNATProtocol,
       nat_type: app.el.egressNATNatType,
@@ -635,8 +611,6 @@
         item.child_interface,
         app.formatEgressNATTableChildScope(item.child_interface, item.parent_interface),
         item.out_interface,
-        item.wan_profile_id,
-        app.formatWANProfileRef ? app.formatWANProfileRef(item.wan_profile_id) : '',
         item.out_source_ip,
         item.protocol,
         item.nat_type,
@@ -691,21 +665,7 @@
       tr.appendChild(app.createCell(String(item.id)));
       tr.appendChild(app.createCell(item.parent_interface || app.emptyCellNode()));
       tr.appendChild(app.createCell(app.formatEgressNATTableChildScope(item.child_interface, item.parent_interface)));
-      tr.appendChild(app.createCell(item.wan_profile_id > 0
-        ? app.createNode('div', {
-            className: 'endpoint-cell',
-            children: [
-              app.createNode('span', {
-                className: 'endpoint-primary',
-                text: app.formatWANProfileRef ? app.formatWANProfileRef(item.wan_profile_id, '#' + item.wan_profile_id) : ('#' + item.wan_profile_id)
-              }),
-              app.createNode('span', {
-                className: 'endpoint-secondary',
-                text: item.out_interface || app.t('common.dash')
-              })
-            ]
-          })
-        : (item.out_interface || app.emptyCellNode())));
+      tr.appendChild(app.createCell(item.out_interface || app.emptyCellNode()));
       tr.appendChild(app.createCell(item.out_source_ip || app.emptyCellNode()));
       tr.appendChild(app.createCell(app.formatEgressNATProtocol(item.protocol || 'tcp+udp')));
       tr.appendChild(app.createCell(app.formatEgressNATNatType(item.nat_type)));

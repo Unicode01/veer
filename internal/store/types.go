@@ -53,7 +53,6 @@ type EgressNAT struct {
 	ParentInterface string
 	ChildInterface  string
 	OutInterface    string
-	WANProfileID    int64
 	OutSourceIP     string
 	Protocol        string
 	NATType         string
@@ -80,7 +79,6 @@ type ManagedNetwork struct {
 	BridgeMTU           int
 	BridgeVLANAware     bool
 	UplinkInterface     string
-	WANProfileID        int64
 	IPv4Enabled         bool
 	IPv4CIDR            string
 	IPv4Gateway         string
@@ -94,26 +92,6 @@ type ManagedNetwork struct {
 	AutoEgressNAT       bool
 	Remark              string
 	Enabled             bool
-}
-
-type WANProfile struct {
-	ID               int64
-	Name             string
-	Type             string
-	ParentInterface  string
-	RuntimeInterface string
-	IPv4CIDR         string
-	IPv4Gateway      string
-	Username         string
-	Password         string
-	MTU              int
-	MRU              int
-	DefaultRoute     bool
-	Metric           int
-	DNSMode          string
-	DNSServers       string
-	Remark           string
-	Enabled          bool
 }
 
 type ManagedNetworkReservation struct {

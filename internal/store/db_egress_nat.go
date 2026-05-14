@@ -1,20 +1,20 @@
 package store
 
-const egressNATColumns = `id, parent_interface, child_interface, out_interface, wan_profile_id, out_source_ip, protocol, nat_type, enabled`
+const egressNATColumns = `id, parent_interface, child_interface, out_interface, out_source_ip, protocol, nat_type, enabled`
 
 func scanEgressNAT(sc interface{ Scan(...interface{}) error }) (EgressNAT, error) {
 	var item EgressNAT
 	var enabled int
-	err := sc.Scan(&item.ID, &item.ParentInterface, &item.ChildInterface, &item.OutInterface, &item.WANProfileID, &item.OutSourceIP, &item.Protocol, &item.NATType, &enabled)
+	err := sc.Scan(&item.ID, &item.ParentInterface, &item.ChildInterface, &item.OutInterface, &item.OutSourceIP, &item.Protocol, &item.NATType, &enabled)
 	item.Enabled = enabled != 0
 	return item, err
 }
 
 func AddEgressNAT(db RuleStore, item *EgressNAT) (int64, error) {
 	res, err := db.Exec(
-		`INSERT INTO egress_nats (parent_interface, child_interface, out_interface, wan_profile_id, out_source_ip, protocol, nat_type, enabled)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		item.ParentInterface, item.ChildInterface, item.OutInterface, item.WANProfileID, item.OutSourceIP, item.Protocol, item.NATType, boolToInt(item.Enabled),
+		`INSERT INTO egress_nats (parent_interface, child_interface, out_interface, out_source_ip, protocol, nat_type, enabled)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		item.ParentInterface, item.ChildInterface, item.OutInterface, item.OutSourceIP, item.Protocol, item.NATType, boolToInt(item.Enabled),
 	)
 	if err != nil {
 		return 0, err
@@ -24,8 +24,8 @@ func AddEgressNAT(db RuleStore, item *EgressNAT) (int64, error) {
 
 func UpdateEgressNAT(db RuleStore, item *EgressNAT) error {
 	_, err := db.Exec(
-		`UPDATE egress_nats SET parent_interface=?, child_interface=?, out_interface=?, wan_profile_id=?, out_source_ip=?, protocol=?, nat_type=?, enabled=? WHERE id=?`,
-		item.ParentInterface, item.ChildInterface, item.OutInterface, item.WANProfileID, item.OutSourceIP, item.Protocol, item.NATType, boolToInt(item.Enabled), item.ID,
+		`UPDATE egress_nats SET parent_interface=?, child_interface=?, out_interface=?, out_source_ip=?, protocol=?, nat_type=?, enabled=? WHERE id=?`,
+		item.ParentInterface, item.ChildInterface, item.OutInterface, item.OutSourceIP, item.Protocol, item.NATType, boolToInt(item.Enabled), item.ID,
 	)
 	return err
 }

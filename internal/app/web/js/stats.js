@@ -1093,7 +1093,7 @@
 
   function kernelCapabilityStateText(check) {
     if (!check || typeof check !== 'object') return app.t('common.unknown');
-    if (check.available) return app.t('common.available');
+    if (check.available) return app.t('kernel.available.yes');
     const reason = String(check.reason || '').trim();
     return app.t('common.unavailable') + (reason ? (': ' + reason) : '');
   }
@@ -1179,6 +1179,48 @@
       if (text) rows.push(app.t('kernel.capability.warning') + ': ' + text);
     });
     return rows;
+  }
+
+  function kernelRuntimeCapabilityDetailsNode(summary, details) {
+    const detailRows = Array.isArray(details) ? details.filter(Boolean) : [];
+    if (!detailRows.length) return null;
+    ensureKernelRuntimeTooltip();
+
+    const button = app.createNode('button', {
+      className: 'kernel-runtime-detail-trigger',
+      text: app.t('kernel.engine.details'),
+      attrs: {
+        type: 'button',
+        'aria-label': detailRows.join('\n'),
+        'aria-describedby': 'kernelRuntimeFloatingTooltip',
+        'aria-expanded': 'false'
+      }
+    });
+    bindKernelRuntimeTooltip(button, () => app.createNode('div', {
+      children: [
+        app.createNode('span', {
+          className: 'kernel-runtime-tooltip-title',
+          text: app.t('kernel.summary.capabilities')
+        }),
+        summary
+          ? app.createNode('span', {
+              className: 'kernel-runtime-tooltip-meta',
+              text: summary
+            })
+          : null,
+        app.createNode('div', {
+          className: 'kernel-runtime-tooltip-breakdown',
+          children: detailRows.map((row) => {
+            const text = String(row || '');
+            const idx = text.indexOf(':');
+            const label = idx >= 0 ? text.slice(0, idx) : text;
+            const value = idx >= 0 ? text.slice(idx + 1).trim() : '';
+            return kernelRuntimeTooltipBreakdownRow(label, value || app.t('common.dash'));
+          })
+        })
+      ].filter(Boolean)
+    }));
+    return button;
   }
 
   function kernelRuntimeReconcileNode(engine) {
@@ -1405,12 +1447,12 @@
           : null,
         capabilitySummary
           ? app.createNode('div', {
-              text: app.t('kernel.summary.capabilities') + ': ' + capabilitySummary
-            })
-          : null,
-        capabilityDetails.length
-          ? app.createNode('div', {
-              text: capabilityDetails.join(' | ')
+              children: [
+                app.createNode('span', {
+                  text: app.t('kernel.summary.capabilities') + ': ' + capabilitySummary
+                }),
+                kernelRuntimeCapabilityDetailsNode(capabilitySummary, capabilityDetails)
+              ].filter(Boolean)
             })
           : null,
         !data.available && (data.available_reason || app.t('common.unavailable'))

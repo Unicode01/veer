@@ -118,7 +118,6 @@ type ManagedNetwork struct {
 	BridgeMTU           int    `json:"bridge_mtu"`
 	BridgeVLANAware     bool   `json:"bridge_vlan_aware"`
 	UplinkInterface     string `json:"uplink_interface"`
-	WANProfileID        int64  `json:"wan_profile_id"`
 	IPv4Enabled         bool   `json:"ipv4_enabled"`
 	IPv4CIDR            string `json:"ipv4_cidr"`
 	IPv4Gateway         string `json:"ipv4_gateway"`
@@ -234,7 +233,6 @@ type EgressNAT struct {
 	ParentInterface string `json:"parent_interface"`
 	ChildInterface  string `json:"child_interface"`
 	OutInterface    string `json:"out_interface"`
-	WANProfileID    int64  `json:"wan_profile_id"`
 	OutSourceIP     string `json:"out_source_ip"`
 	Protocol        string `json:"protocol"`
 	NATType         string `json:"nat_type"`
@@ -243,53 +241,12 @@ type EgressNAT struct {
 
 type EgressNATStatus struct {
 	EgressNAT
-	ConfiguredOutInterface string `json:"configured_out_interface,omitempty"`
-	Status                 string `json:"status"`
-	EffectiveEngine        string `json:"effective_engine"`
-	EffectiveKernelEngine  string `json:"effective_kernel_engine,omitempty"`
-	KernelEligible         bool   `json:"kernel_eligible"`
-	KernelReason           string `json:"kernel_reason,omitempty"`
-	FallbackReason         string `json:"fallback_reason,omitempty"`
-}
-
-type WANProfile struct {
-	ID               int64  `json:"id"`
-	Name             string `json:"name"`
-	Type             string `json:"type"`
-	ParentInterface  string `json:"parent_interface"`
-	RuntimeInterface string `json:"runtime_interface"`
-	IPv4CIDR         string `json:"ipv4_cidr"`
-	IPv4Gateway      string `json:"ipv4_gateway"`
-	Username         string `json:"username,omitempty"`
-	Password         string `json:"password,omitempty"`
-	PasswordSet      bool   `json:"password_set,omitempty"`
-	MTU              int    `json:"mtu"`
-	MRU              int    `json:"mru"`
-	DefaultRoute     bool   `json:"default_route"`
-	Metric           int    `json:"metric"`
-	DNSMode          string `json:"dns_mode"`
-	DNSServers       string `json:"dns_servers"`
-	Remark           string `json:"remark"`
-	Enabled          bool   `json:"enabled"`
-}
-
-type WANProfileStatus struct {
-	WANProfile
-	Status             string   `json:"status"`
-	Platform           string   `json:"platform"`
-	Supported          bool     `json:"supported"`
-	SupportedReason    string   `json:"supported_reason,omitempty"`
-	EffectiveInterface string   `json:"effective_interface,omitempty"`
-	IPv4Addresses      []string `json:"ipv4_addresses,omitempty"`
-	IPv6Addresses      []string `json:"ipv6_addresses,omitempty"`
-	DefaultIPv4Route   bool     `json:"default_ipv4_route,omitempty"`
-	DefaultIPv6Route   bool     `json:"default_ipv6_route,omitempty"`
-	LastError          string   `json:"last_error,omitempty"`
-}
-
-type WANProfileReferenceCounts struct {
-	EgressNATs      int `json:"egress_nats"`
-	ManagedNetworks int `json:"managed_networks"`
+	Status                string `json:"status"`
+	EffectiveEngine       string `json:"effective_engine"`
+	EffectiveKernelEngine string `json:"effective_kernel_engine,omitempty"`
+	KernelEligible        bool   `json:"kernel_eligible"`
+	KernelReason          string `json:"kernel_reason,omitempty"`
+	FallbackReason        string `json:"fallback_reason,omitempty"`
 }
 
 type RuleStatus struct {

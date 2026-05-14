@@ -616,7 +616,7 @@ func normalizeAndValidateEgressNAT(raw EgressNAT, requireID bool, knownIfaces ma
 	if !requireID && raw.ID != 0 {
 		return raw, "id must be omitted when creating an egress nat"
 	}
-	if raw.ParentInterface == "" || (raw.OutInterface == "" && raw.WANProfileID <= 0) {
+	if raw.ParentInterface == "" || raw.OutInterface == "" {
 		return raw, "parent_interface and out_interface are required"
 	}
 	if !isValidEgressNATProtocol(raw.Protocol) {
@@ -635,12 +635,7 @@ func normalizeAndValidateEgressNAT(raw EgressNAT, requireID bool, knownIfaces ma
 	if _, ok := knownIfaces[raw.ParentInterface]; !ok {
 		return raw, "parent_interface does not exist on this host"
 	}
-	if raw.WANProfileID <= 0 && raw.OutInterface != "" {
-		if _, ok := knownIfaces[raw.OutInterface]; !ok {
-			return raw, "out_interface does not exist on this host"
-		}
-	}
-	if raw.OutInterface == "" && raw.WANProfileID <= 0 {
+	if _, ok := knownIfaces[raw.OutInterface]; !ok {
 		return raw, "out_interface does not exist on this host"
 	}
 	if raw.ChildInterface != "" {
@@ -661,11 +656,7 @@ func normalizeAndValidateEgressNAT(raw EgressNAT, requireID bool, knownIfaces ma
 		if ipLiteralFamily(raw.OutSourceIP) != ipFamilyIPv4 {
 			return raw, "out_source_ip must be a valid IPv4 address"
 		}
-		sourceCheckInterface := raw.OutInterface
-		if raw.WANProfileID > 0 {
-			sourceCheckInterface = ""
-		}
-		if msg := validateLocalSourceIP(raw.OutSourceIP, sourceCheckInterface, hostAddrs); msg != "" {
+		if msg := validateLocalSourceIP(raw.OutSourceIP, raw.OutInterface, hostAddrs); msg != "" {
 			return raw, "out_source_ip " + msg
 		}
 	}
@@ -674,7 +665,7 @@ func normalizeAndValidateEgressNAT(raw EgressNAT, requireID bool, knownIfaces ma
 
 func egressNATValidationField(message string) string {
 	text := strings.TrimSpace(message)
-	for _, prefix := range []string{"id ", "parent_interface ", "child_interface ", "out_interface ", "wan_profile_id ", "out_source_ip ", "protocol ", "nat_type "} {
+	for _, prefix := range []string{"id ", "parent_interface ", "child_interface ", "out_interface ", "out_source_ip ", "protocol ", "nat_type "} {
 		if strings.HasPrefix(text, prefix) {
 			return strings.TrimSpace(strings.TrimSuffix(prefix, " "))
 		}
@@ -787,40 +778,13 @@ func prepareEgressNATCreate(db sqlRuleStore, raw EgressNAT) (EgressNAT, []ruleVa
 	if validationErr != "" {
 		return item, []ruleValidationIssue{{Scope: "create", Index: 1, Field: egressNATValidationField(validationErr), Message: validationErr}}, nil
 	}
-	resolvedItem := item
-	if item.WANProfileID > 0 {
-		wan, err := dbGetWANProfile(db, item.WANProfileID)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return item, []ruleValidationIssue{{Scope: "create", Index: 1, Field: "wan_profile_id", Message: "wan profile not found"}}, nil
-			}
-			return item, nil, err
-		}
-		if !wan.Enabled {
-			return item, []ruleValidationIssue{{Scope: "create", Index: 1, Field: "wan_profile_id", Message: "wan profile is disabled"}}, nil
-		}
-		resolvedItem.OutInterface = resolveWANProfileRuntimeInterface(*wan)
-		if resolvedItem.OutInterface == "" {
-			return item, []ruleValidationIssue{{Scope: "create", Index: 1, Field: "wan_profile_id", Message: "wan profile runtime interface is unresolved"}}, nil
-		}
-		if _, ok := knownIfaces[resolvedItem.OutInterface]; !ok {
-			return item, []ruleValidationIssue{{Scope: "create", Index: 1, Field: "wan_profile_id", Message: "wan profile runtime interface does not exist on this host"}}, nil
-		}
-		if item.OutSourceIP != "" {
-			if msg := validateLocalSourceIP(item.OutSourceIP, resolvedItem.OutInterface, hostAddrs); msg != "" {
-				return item, []ruleValidationIssue{{Scope: "create", Index: 1, Field: "out_source_ip", Message: "out_source_ip " + msg}}, nil
-			}
-		}
-	}
 	item.Enabled = true
-	resolvedItem.Enabled = true
 
 	existing, err := dbGetEnabledEgressNATs(db)
 	if err != nil {
 		return item, nil, err
 	}
-	existing, _ = resolveWANProfilesForEgressNATs(db, existing)
-	projected := append(existing, resolvedItem)
+	projected := append(existing, item)
 	return item, validateProjectedEgressNATs(projected, ifaceByName, "create", 0), nil
 }
 
@@ -832,31 +796,6 @@ func prepareEgressNATUpdate(db sqlRuleStore, raw EgressNAT) (EgressNAT, []ruleVa
 	item, validationErr := normalizeAndValidateEgressNAT(raw, true, knownIfaces, ifaceByName, hostAddrs)
 	if validationErr != "" {
 		return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: egressNATValidationField(validationErr), Message: validationErr}}, nil
-	}
-	resolvedItem := item
-	if item.WANProfileID > 0 {
-		wan, err := dbGetWANProfile(db, item.WANProfileID)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "wan_profile_id", Message: "wan profile not found"}}, nil
-			}
-			return item, nil, err
-		}
-		if !wan.Enabled {
-			return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "wan_profile_id", Message: "wan profile is disabled"}}, nil
-		}
-		resolvedItem.OutInterface = resolveWANProfileRuntimeInterface(*wan)
-		if resolvedItem.OutInterface == "" {
-			return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "wan_profile_id", Message: "wan profile runtime interface is unresolved"}}, nil
-		}
-		if _, ok := knownIfaces[resolvedItem.OutInterface]; !ok {
-			return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "wan_profile_id", Message: "wan profile runtime interface does not exist on this host"}}, nil
-		}
-		if item.OutSourceIP != "" {
-			if msg := validateLocalSourceIP(item.OutSourceIP, resolvedItem.OutInterface, hostAddrs); msg != "" {
-				return item, []ruleValidationIssue{{Scope: "update", Index: 1, ID: raw.ID, Field: "out_source_ip", Message: "out_source_ip " + msg}}, nil
-			}
-		}
 	}
 
 	existing, err := dbGetEnabledEgressNATs(db)
@@ -871,16 +810,14 @@ func prepareEgressNATUpdate(db sqlRuleStore, raw EgressNAT) (EgressNAT, []ruleVa
 		return item, nil, err
 	}
 	item.Enabled = current.Enabled
-	resolvedItem.Enabled = current.Enabled
 
 	projected := make([]EgressNAT, 0, len(existing)+1)
-	existing, _ = resolveWANProfilesForEgressNATs(db, existing)
 	for _, current := range existing {
 		if current.ID != item.ID {
 			projected = append(projected, current)
 		}
 	}
-	projected = append(projected, resolvedItem)
+	projected = append(projected, item)
 	return item, validateProjectedEgressNATs(projected, ifaceByName, "update", item.ID), nil
 }
 
@@ -910,32 +847,7 @@ func prepareEgressNATToggle(db sqlRuleStore, id int64) (EgressNAT, []ruleValidat
 	}
 	target := *current
 	target.Enabled = !current.Enabled
-	resolvedTarget := target
-	if target.Enabled && target.WANProfileID > 0 {
-		wan, err := dbGetWANProfile(db, target.WANProfileID)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return target, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "wan_profile_id", Message: "wan profile not found"}}, nil
-			}
-			return target, nil, err
-		}
-		if !wan.Enabled {
-			return target, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "wan_profile_id", Message: "wan profile is disabled"}}, nil
-		}
-		resolvedTarget.OutInterface = resolveWANProfileRuntimeInterface(*wan)
-		if resolvedTarget.OutInterface == "" {
-			return target, []ruleValidationIssue{{Scope: "toggle", ID: id, Field: "wan_profile_id", Message: "wan profile runtime interface is unresolved"}}, nil
-		}
-	}
-	items, _ = resolveWANProfilesForEgressNATs(db, items)
-	projected = make([]EgressNAT, 0, len(items)+1)
-	for _, item := range items {
-		if item.ID == id {
-			continue
-		}
-		projected = append(projected, item)
-	}
-	projected = append(projected, resolvedTarget)
+	projected = append(projected, target)
 	return target, validateProjectedEgressNATs(projected, ifaceByName, "toggle", id), nil
 }
 

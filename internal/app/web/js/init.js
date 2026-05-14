@@ -146,7 +146,6 @@
   bindSearchInput(app.el.rulesSearchInput, 'rules', () => app.renderRulesTable());
   bindSearchInput(app.el.sitesSearchInput, 'sites', () => app.renderSitesTable());
   bindSearchInput(app.el.rangesSearchInput, 'ranges', () => app.renderRangesTable());
-  bindSearchInput(app.el.wanProfilesSearchInput, 'wanProfiles', () => app.renderWANProfilesTable());
   bindSearchInput(app.el.managedNetworksSearchInput, 'managedNetworks', () => app.renderManagedNetworksTable());
   bindSearchInput(app.el.managedNetworkReservationCandidatesSearchInput, 'managedNetworkReservationCandidates', () => app.renderManagedNetworkReservationCandidatesTable());
   bindSearchInput(app.el.managedNetworkReservationsSearchInput, 'managedNetworkReservations', () => app.renderManagedNetworkReservationsTable());
@@ -201,10 +200,6 @@
 
   if (app.el.emptyAddRangeBtn) {
     app.el.emptyAddRangeBtn.addEventListener('click', () => app.focusSection('ranges', app.el.rangeFormTitle, app.$('rangeRemark')));
-  }
-
-  if (app.el.emptyAddWANProfileBtn) {
-    app.el.emptyAddWANProfileBtn.addEventListener('click', () => app.focusSection('wans', app.el.wanProfileFormTitle, app.el.wanProfileName));
   }
 
   if (app.el.emptyAddManagedNetworkBtn) {
@@ -308,23 +303,6 @@
     },
     preserveSelected: true
   });
-  if (app.el.managedNetworkWANProfile) {
-    app.el.managedNetworkWANProfile.addEventListener('change', () => {
-      if (typeof app.syncManagedNetworkWANProfileState === 'function') app.syncManagedNetworkWANProfileState();
-    });
-  }
-  bindInterfacePicker(app.el.wanProfileParentInterface, app.el.wanProfileParentPicker, {
-    getItems() {
-      return typeof app.getWANParentItems === 'function' ? app.getWANParentItems() : [];
-    },
-    preserveSelected: true
-  });
-  bindInterfacePicker(app.el.wanProfileRuntimeInterface, app.el.wanProfileRuntimePicker, {
-    getItems() {
-      return typeof app.getWANRuntimeItems === 'function' ? app.getWANRuntimeItems() : [];
-    },
-    preserveSelected: true
-  });
   bindInterfacePicker(app.el.managedNetworkIPv6ParentInterface, app.el.managedNetworkIPv6ParentPicker, {
     getItems() {
       return typeof app.getManagedNetworkIPv6ParentItems === 'function' ? app.getManagedNetworkIPv6ParentItems() : [];
@@ -373,12 +351,6 @@
       app.populateEgressNATSourceIPSelect(app.el.egressNATOutSourceIP.value);
     }
   });
-  if (app.el.egressNATWANProfile) {
-    app.el.egressNATWANProfile.addEventListener('change', () => {
-      if (typeof app.syncEgressNATWANProfileState === 'function') app.syncEgressNATWANProfileState();
-      if (typeof app.populateEgressNATSourceIPSelect === 'function') app.populateEgressNATSourceIPSelect(app.el.egressNATOutSourceIP.value);
-    });
-  }
   bindInterfacePicker(app.el.ipv6ParentInterface, app.el.ipv6ParentPicker, {
     getItems() {
       return typeof app.refreshIPv6AssignmentInterfaceSelectors === 'function' && typeof app.getParentInterfaceItems === 'function'
@@ -426,16 +398,6 @@
         app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: true });
       }
       if (typeof app.syncManagedNetworkFormState === 'function') app.syncManagedNetworkFormState();
-    });
-  }
-  if (app.el.wanProfileType) {
-    app.el.wanProfileType.addEventListener('change', () => {
-      if (typeof app.syncWANProfileFormState === 'function') app.syncWANProfileFormState();
-    });
-  }
-  if (app.el.wanProfileDNSMode) {
-    app.el.wanProfileDNSMode.addEventListener('change', () => {
-      if (typeof app.syncWANProfileFormState === 'function') app.syncWANProfileFormState();
     });
   }
   if (app.el.managedNetworkBridgePicker) {
@@ -493,7 +455,6 @@
   app.el.ruleCancelBtn.addEventListener('click', app.exitRuleEditMode);
   app.el.siteCancelBtn.addEventListener('click', app.exitSiteEditMode);
   app.el.rangeCancelBtn.addEventListener('click', app.exitRangeEditMode);
-  if (app.el.wanProfileCancelBtn) app.el.wanProfileCancelBtn.addEventListener('click', app.exitWANProfileEditMode);
   if (app.el.managedNetworkCancelBtn) app.el.managedNetworkCancelBtn.addEventListener('click', app.exitManagedNetworkEditMode);
   if (app.el.managedNetworkReservationCancelBtn) app.el.managedNetworkReservationCancelBtn.addEventListener('click', app.exitManagedNetworkReservationEditMode);
   if (app.el.egressNATCancelBtn) app.el.egressNATCancelBtn.addEventListener('click', app.exitEgressNATEditMode);
@@ -564,7 +525,6 @@
         if (table === 'rules') app.renderRulesTable();
         else if (table === 'sites') app.renderSitesTable();
         else if (table === 'ranges') app.renderRangesTable();
-        else if (table === 'wanProfiles') app.renderWANProfilesTable();
         else if (table === 'managedNetworks') app.renderManagedNetworksTable();
         else if (table === 'egressNATs') app.renderEgressNATsTable();
         else if (table === 'ipv6Assignments') app.renderIPv6AssignmentsTable();
@@ -600,24 +560,6 @@
     const toggleEgressNAT = e.target.closest('.btn-egress-enable, .btn-egress-disable');
     if (toggleEgressNAT) {
       app.toggleEgressNAT(parseInt(toggleEgressNAT.dataset.id, 10));
-      return;
-    }
-
-    const toggleWANProfile = e.target.closest('.btn-enable-wan-profile, .btn-disable-wan-profile');
-    if (toggleWANProfile) {
-      app.toggleWANProfile(parseInt(toggleWANProfile.dataset.id, 10));
-      return;
-    }
-
-    const applyWANProfile = e.target.closest('.btn-apply-wan-profile');
-    if (applyWANProfile) {
-      app.applyWANProfile(parseInt(applyWANProfile.dataset.id, 10));
-      return;
-    }
-
-    const reconnectWANProfile = e.target.closest('.btn-reconnect-wan-profile');
-    if (reconnectWANProfile) {
-      app.reconnectWANProfile(parseInt(reconnectWANProfile.dataset.id, 10));
       return;
     }
 
@@ -669,12 +611,6 @@
       return;
     }
 
-    const editWANProfile = e.target.closest('.btn-edit-wan-profile');
-    if (editWANProfile) {
-      app.enterWANProfileEditMode(app.decData(editWANProfile.dataset.wanProfile));
-      return;
-    }
-
     const editManagedNetwork = e.target.closest('.btn-edit-managed-network');
     if (editManagedNetwork) {
       app.enterManagedNetworkEditMode(app.decData(editManagedNetwork.dataset.managedNetwork));
@@ -723,12 +659,6 @@
     const deleteEgressNAT = e.target.closest('.btn-delete-egress-nat');
     if (deleteEgressNAT) {
       app.deleteEgressNAT(parseInt(deleteEgressNAT.dataset.id, 10));
-      return;
-    }
-
-    const deleteWANProfile = e.target.closest('.btn-delete-wan-profile');
-    if (deleteWANProfile) {
-      app.deleteWANProfile(parseInt(deleteWANProfile.dataset.id, 10));
       return;
     }
 
@@ -1001,57 +931,6 @@
     );
   });
 
-  if (app.el.wanProfileForm) {
-    app.el.wanProfileForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      app.clearFormErrors(app.el.wanProfileForm);
-
-      const item = app.buildWANProfileFromForm();
-      const valid = typeof app.validateWANProfileFormFields === 'function'
-        ? app.validateWANProfileFormFields(item)
-        : true;
-
-      if (!valid || !item.name) {
-        app.notify('error', app.t('validation.reviewErrors'));
-        app.focusFirstError(app.el.wanProfileForm);
-        return;
-      }
-
-      const editing = parseInt(app.el.editWANProfileId.value || '0', 10);
-      await app.withFormBusy(
-        'wanProfile',
-        app.el.wanProfileSubmitBtn,
-        app.el.wanProfileCancelBtn,
-        app.t('common.saving'),
-        async () => {
-          try {
-            if (editing > 0) {
-              await app.apiCall('PUT', '/api/wans', Object.assign({ id: editing }, item));
-              app.notify('success', app.t('toast.saved', { item: app.t('noun.wanProfile') }));
-            } else {
-              await app.apiCall('POST', '/api/wans', item);
-              app.notify('success', app.t('toast.created', { item: app.t('noun.wanProfile') }));
-            }
-            app.exitWANProfileEditMode();
-            await app.loadWANProfiles();
-          } catch (err) {
-            if (err.message !== 'unauthorized') {
-              if (err.payload && Array.isArray(err.payload.issues) && err.payload.issues.length > 0) {
-                app.applyWANProfileValidationIssues(err.payload.issues);
-                return;
-              }
-              app.notify('error', app.t('errors.actionFailed', {
-                action: app.t(editing > 0 ? 'action.update' : 'action.add'),
-                message: app.translateValidationMessage(err.message)
-              }));
-            }
-          }
-        },
-        app.syncWANProfileFormState
-      );
-    });
-  }
-
   if (app.el.managedNetworkForm) {
     app.el.managedNetworkForm.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1174,7 +1053,7 @@
       const item = app.buildEgressNATFromForm();
       let valid = true;
       if (!app.validateRequiredField(app.el.egressNATParentPicker || app.el.egressNATParentInterface)) valid = false;
-      if (!item.wan_profile_id && !app.validateRequiredField(app.el.egressNATOutPicker || app.el.egressNATOutInterface)) valid = false;
+      if (!app.validateRequiredField(app.el.egressNATOutPicker || app.el.egressNATOutInterface)) valid = false;
       if (!item.protocol) {
         app.setFieldError(app.el.egressNATProtocolTrigger || app.el.egressNATProtocol, app.t('validation.egressNATProtocol'));
         valid = false;
@@ -1191,7 +1070,7 @@
         }
       }
 
-      if (!valid || !item.parent_interface || (!item.out_interface && !item.wan_profile_id)) {
+      if (!valid || !item.parent_interface || !item.out_interface) {
         app.notify('error', app.t('validation.reviewErrors'));
         app.focusFirstError(app.el.egressNATForm);
         return;
@@ -1326,7 +1205,6 @@
     app.setRuleFormAdd();
     app.setSiteFormAdd();
     app.setRangeFormAdd();
-    if (typeof app.setWANProfileFormAdd === 'function') app.setWANProfileFormAdd();
     if (typeof app.setManagedNetworkFormAdd === 'function') app.setManagedNetworkFormAdd();
     if (typeof app.setManagedNetworkReservationFormAdd === 'function') app.setManagedNetworkReservationFormAdd();
     if (typeof app.setEgressNATFormAdd === 'function') app.setEgressNATFormAdd();

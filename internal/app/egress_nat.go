@@ -388,13 +388,6 @@ func buildEgressNATSyntheticRule(item EgressNAT, childInterface string, id int64
 	}
 }
 
-func egressNATConfiguredOutInterface(item EgressNAT) string {
-	if item.WANProfileID <= 0 {
-		return ""
-	}
-	return strings.TrimSpace(item.OutInterface)
-}
-
 func buildEgressNATKernelCandidates(items []EgressNAT, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, reservedKernelEntries int, nextSyntheticID *int64) ([]kernelCandidateRule, map[int64]ruleDataplanePlan) {
 	return buildEgressNATKernelCandidatesWithSnapshot(items, planner, configuredKernelRulesMapLimit, reservedKernelEntries, nextSyntheticID, loadEgressNATInterfaceSnapshot())
 }
