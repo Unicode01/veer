@@ -1106,7 +1106,7 @@
       ['XDP', capabilities.xdp_generic]
     ].forEach(([label, check]) => {
       if (!check || typeof check !== 'object') return;
-      parts.push(label + '=' + (check.available ? app.t('common.available') : app.t('common.unavailable')));
+      parts.push(label + '=' + (check.available ? app.t('kernel.available.yes') : app.t('common.unavailable')));
     });
     const netlink = capabilities.netlink || {};
     const netlinkChecks = [
@@ -1181,8 +1181,19 @@
     return rows;
   }
 
-  function kernelRuntimeCapabilityDetailsNode(summary, details) {
-    const detailRows = Array.isArray(details) ? details.filter(Boolean) : [];
+  function kernelRuntimeStatusDetailsNode(mapProfileDetail, capabilitySummary, capabilityDetails, availableReason) {
+    const detailRows = [];
+    const mapDetail = String(mapProfileDetail || '').trim();
+    const capabilityDetailRows = Array.isArray(capabilityDetails) ? capabilityDetails.filter(Boolean) : [];
+    const reason = String(availableReason || '').trim();
+
+    if (mapDetail) {
+      detailRows.push(app.t('kernel.summary.mapProfile') + ': ' + mapDetail);
+    }
+    capabilityDetailRows.forEach((row) => detailRows.push(row));
+    if (reason) {
+      detailRows.push(app.t('common.unavailable') + ': ' + reason);
+    }
     if (!detailRows.length) return null;
     ensureKernelRuntimeTooltip();
 
@@ -1200,12 +1211,12 @@
       children: [
         app.createNode('span', {
           className: 'kernel-runtime-tooltip-title',
-          text: app.t('kernel.summary.capabilities')
+          text: app.t('kernel.summary.status')
         }),
-        summary
+        capabilitySummary
           ? app.createNode('span', {
               className: 'kernel-runtime-tooltip-meta',
-              text: summary
+              text: app.t('kernel.summary.capabilities') + ': ' + capabilitySummary
             })
           : null,
         app.createNode('div', {
@@ -1435,31 +1446,24 @@
           }),
           configuredOrderNodes
         ]),
-        data.kernel_map_profile
-          ? app.createNode('div', {
-              text: app.t('kernel.summary.mapProfile') + ': ' + kernelRuntimeMapProfileLabel(data.kernel_map_profile)
-            })
-          : null,
-        mapProfileDetail
-          ? app.createNode('div', {
-              text: mapProfileDetail
-            })
-          : null,
-        capabilitySummary
-          ? app.createNode('div', {
-              children: [
-                app.createNode('span', {
-                  text: app.t('kernel.summary.capabilities') + ': ' + capabilitySummary
-                }),
-                kernelRuntimeCapabilityDetailsNode(capabilitySummary, capabilityDetails)
-              ].filter(Boolean)
-            })
-          : null,
-        !data.available && (data.available_reason || app.t('common.unavailable'))
-          ? app.createNode('div', {
-              text: data.available_reason || app.t('common.unavailable')
-            })
-          : null
+        kernelRuntimeSummaryInline([
+          data.kernel_map_profile
+            ? app.createNode('span', {
+                text: app.t('kernel.summary.mapProfile') + ': ' + kernelRuntimeMapProfileLabel(data.kernel_map_profile)
+              })
+            : null,
+          capabilitySummary
+            ? app.createNode('span', {
+                text: app.t('kernel.summary.capabilities') + ': ' + capabilitySummary
+              })
+            : null,
+          kernelRuntimeStatusDetailsNode(
+            mapProfileDetail,
+            capabilitySummary,
+            capabilityDetails,
+            !data.available ? data.available_reason : ''
+          )
+        ].filter(Boolean))
       ]
     ));
     summaryFragment.appendChild(kernelRuntimeSummaryCard(

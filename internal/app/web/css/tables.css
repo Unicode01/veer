@@ -27,6 +27,7 @@ td {
     overflow-x: auto;
     border-radius: 8px;
     max-width: 100%;
+    scrollbar-width: thin;
 }
 
 .table-toolbar {
@@ -175,6 +176,8 @@ thead th {
     top: 0;
     z-index: 10;
     white-space: nowrap;
+    background: var(--table-head);
+    box-shadow: 0 1px 0 var(--border);
 }
 
 #rulesTable tbody tr:nth-child(even) td,
@@ -327,18 +330,18 @@ tr.row-pending td {
 
 .kernel-runtime-summary {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    margin: 0 0 14px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin: 0 0 12px;
     align-items: start;
 }
 
 .kernel-runtime-card {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
     min-height: 0;
-    padding: 10px 12px;
+    padding: 9px 12px;
     border: 1px solid var(--border);
     border-radius: 10px;
     background: var(--surface-muted);
@@ -366,7 +369,7 @@ tr.row-pending td {
 .kernel-runtime-sub {
     margin-top: 0;
     font-size: 11px;
-    line-height: 1.45;
+    line-height: 1.35;
     color: var(--text-soft);
 }
 
@@ -598,13 +601,13 @@ tr.row-pending td {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 24px;
-    padding: 0 10px;
+    min-height: 22px;
+    padding: 0 9px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: var(--surface-muted);
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
     transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
@@ -1158,6 +1161,7 @@ tr.row-pending td {
     min-width: 90px;
     text-align: center;
     color: var(--text-muted);
+    white-space: nowrap;
 }
 
 .table-inline-select {
@@ -1192,6 +1196,7 @@ tr.row-pending td {
 
     .table-pagination {
         align-items: stretch;
+        gap: 8px;
     }
 
     .table-pagination-summary,
@@ -1200,7 +1205,26 @@ tr.row-pending td {
     }
 
     .table-pagination-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+
+    .pagination-size-label,
+    .pagination-page-label {
+        grid-column: 1 / -1;
+    }
+
+    .pagination-size-label {
         justify-content: space-between;
+    }
+
+    .pagination-size-select {
+        min-width: 96px;
+    }
+
+    .pagination-btn {
+        width: 100%;
     }
 
     .kernel-runtime-summary {
@@ -1212,14 +1236,8 @@ tr.row-pending td {
     }
 }
 
-@media (min-width: 961px) {
+@media (min-width: 721px) and (max-width: 1100px) {
     .kernel-runtime-summary {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-}
-
-@media (min-width: 1440px) {
-    .kernel-runtime-summary {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
