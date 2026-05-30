@@ -2439,7 +2439,6 @@ func prepareXDPEgressNATRule(rule Rule, opts xdpPrepareOptions, inLink netlink.L
 		flags |= xdpRuleFlagTrafficStats
 	}
 	outIfIndex := outLink.Attrs().Index
-	var srcMAC [6]byte
 	var dstMAC [6]byte
 	// Egress NAT destinations are dynamic, so precomputing a single L2 next hop
 	// is fragile even on veth-backed test topologies. Keep the redirect on the
@@ -2453,6 +2452,7 @@ func prepareXDPEgressNATRule(rule Rule, opts xdpPrepareOptions, inLink netlink.L
 		if currentInLink == nil || currentInLink.Attrs() == nil {
 			continue
 		}
+		ingressLocalMAC := egressNATIngressLocalMAC(currentInLink)
 		prepared = append(prepared, preparedXDPKernelRule{
 			rule:       rule,
 			inIfIndex:  currentInLink.Attrs().Index,
@@ -2469,7 +2469,7 @@ func prepareXDPEgressNATRule(rule Rule, opts xdpPrepareOptions, inLink netlink.L
 				Flags:      flags,
 				OutIfIndex: uint32(outIfIndex),
 				NATAddr:    natAddr,
-				SrcMAC:     srcMAC,
+				SrcMAC:     ingressLocalMAC,
 				DstMAC:     dstMAC,
 			},
 		})

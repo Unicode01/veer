@@ -936,6 +936,37 @@ static __always_inline int rewrite_eth_addrs(struct __sk_buff *skb, const __u8 d
 	return bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_dest), mac_addrs, sizeof(mac_addrs), 0);
 }
 
+static __always_inline int mac_is_zero(const __u8 mac[ETH_ALEN])
+{
+#pragma unroll
+	for (int i = 0; i < ETH_ALEN; i++) {
+		if (mac[i] != 0)
+			return 0;
+	}
+	return 1;
+}
+
+static __always_inline int mac_equal(const __u8 left[ETH_ALEN], const __u8 right[ETH_ALEN])
+{
+#pragma unroll
+	for (int i = 0; i < ETH_ALEN; i++) {
+		if (left[i] != right[i])
+			return 0;
+	}
+	return 1;
+}
+
+static __always_inline int egress_nat_dst_mac_mismatch(struct __sk_buff *skb, const struct rule_value_v4 *rule)
+{
+	__u8 dst[ETH_ALEN];
+
+	if (!rule || (rule->flags & FORWARD_RULE_FLAG_EGRESS_NAT) == 0 || mac_is_zero(rule->src_mac))
+		return 0;
+	if (bpf_skb_load_bytes(skb, offsetof(struct ethhdr, h_dest), dst, sizeof(dst)) < 0)
+		return 0;
+	return !mac_equal(dst, rule->src_mac);
+}
+
 static __always_inline int prepend_eth_header(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN], __be16 proto)
 {
 	void *data;
@@ -3868,6 +3899,8 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 		return TC_ACT_OK;
 	if (is_egress_nat_rule(rule) && is_local_ipv4(ctx->dst_addr))
 		return TC_ACT_OK;
+	if (egress_nat_dst_mac_mismatch(skb, rule))
+		return TC_ACT_OK;
 	if (is_egress_nat_rule(rule)) {
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return TC_ACT_UNSPEC;
@@ -3946,6 +3979,8 @@ static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 		return TC_ACT_OK;
 	if (is_egress_nat_rule(rule)) {
 		if (is_local_ipv4(dispatch->ctx.dst_addr))
+			return TC_ACT_OK;
+		if (egress_nat_dst_mac_mismatch(skb, rule))
 			return TC_ACT_OK;
 		if (!is_full_cone_egress_nat_rule(rule)) {
 			/* Keep established egress NAT sessions on the current program across
@@ -4087,6 +4122,8 @@ static __always_inline int handle_forward_ingress_v4_egress_nat(struct __sk_buff
 	if (!is_egress_nat_rule(&dispatch->rule_value))
 		return TC_ACT_UNSPEC;
 	if (is_local_ipv4(dispatch->ctx.dst_addr))
+		return TC_ACT_OK;
+	if (egress_nat_dst_mac_mismatch(skb, &dispatch->rule_value))
 		return TC_ACT_OK;
 	return handle_egress_nat_forward(skb, &dispatch->ctx, &dispatch->rule_value);
 }

@@ -1011,6 +1011,26 @@ static __always_inline int load_packet_macs(struct xdp_md *xdp, __u8 dst_mac[ETH
 #endif
 }
 
+static __always_inline int mac_is_zero(const __u8 mac[ETH_ALEN])
+{
+#pragma unroll
+	for (int i = 0; i < ETH_ALEN; i++) {
+		if (mac[i] != 0)
+			return 0;
+	}
+	return 1;
+}
+
+static __always_inline int mac_equal(const __u8 left[ETH_ALEN], const __u8 right[ETH_ALEN])
+{
+#pragma unroll
+	for (int i = 0; i < ETH_ALEN; i++) {
+		if (left[i] != right[i])
+			return 0;
+	}
+	return 1;
+}
+
 static __always_inline void store_packet_macs_v4(struct xdp_md *xdp, struct flow_value_v4 *flow_value)
 {
 	if (!flow_value)
@@ -1308,6 +1328,18 @@ static __always_inline int is_egress_nat_rule(const struct rule_value_v4 *rule)
 static __always_inline int is_full_cone_egress_nat_rule(const struct rule_value_v4 *rule)
 {
 	return is_egress_nat_rule(rule) && (rule->flags & FORWARD_RULE_FLAG_FULL_CONE) != 0;
+}
+
+static __always_inline int egress_nat_dst_mac_mismatch(struct xdp_md *xdp, const struct rule_value_v4 *rule)
+{
+	__u8 dst[ETH_ALEN];
+	__u8 src[ETH_ALEN];
+
+	if (!rule || !is_egress_nat_rule(rule) || mac_is_zero(rule->src_mac))
+		return 0;
+	if (load_packet_macs(xdp, dst, src) < 0)
+		return 0;
+	return !mac_equal(dst, rule->src_mac);
 }
 
 static __always_inline int is_egress_nat_flow(const struct flow_value_v4 *flow)
@@ -3772,6 +3804,8 @@ static __always_inline int forward_xdp_v4_impl(struct xdp_md *xdp)
 	if (is_fullnat_rule(rule)) {
 		if (is_egress_nat_rule(rule) && is_local_ipv4(dispatch->ctx.dst_addr))
 			return XDP_PASS;
+		if (egress_nat_dst_mac_mismatch(xdp, rule))
+			return XDP_PASS;
 		bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V4_FULLNAT_FORWARD);
 		return XDP_PASS;
 	}
@@ -3832,6 +3866,8 @@ static __always_inline int forward_xdp_v4_fullnat_forward_impl(struct xdp_md *xd
 	if (!is_fullnat_rule(rule))
 		return XDP_PASS;
 	if (is_egress_nat_rule(rule) && is_local_ipv4(dispatch->ctx.dst_addr))
+		return XDP_PASS;
+	if (egress_nat_dst_mac_mismatch(xdp, rule))
 		return XDP_PASS;
 	return handle_fullnat_forward(xdp, dispatch->in_ifindex, &dispatch->ctx, rule, flow);
 }

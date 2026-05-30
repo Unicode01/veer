@@ -3264,6 +3264,7 @@ func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink net
 		if mapping, ok := resolveTCBridgeParentMapping(currentInLink); ok {
 			itemReplyIfParents = append(itemReplyIfParents, mapping)
 		}
+		ingressLocalMAC := egressNATIngressLocalMAC(currentInLink)
 		prepared = append(prepared, preparedKernelRule{
 			rule:           rule,
 			inIfIndex:      currentInLink.Attrs().Index,
@@ -3287,6 +3288,7 @@ func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink net
 				Flags:       flags,
 				OutIfIndex:  uint32(outLink.Attrs().Index),
 				NATAddr:     natAddr,
+				SrcMAC:      ingressLocalMAC,
 			},
 		})
 	}

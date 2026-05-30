@@ -196,6 +196,22 @@ func selectBridgeSourceMAC(bridgeLink, memberLink netlink.Link) ([6]byte, error)
 	return [6]byte{}, fmt.Errorf("bridge dataplane could not determine a valid source MAC address")
 }
 
+func egressNATIngressLocalMAC(link netlink.Link) [6]byte {
+	if link == nil || link.Attrs() == nil {
+		return [6]byte{}
+	}
+	attrs := link.Attrs()
+	if attrs.MasterIndex > 0 {
+		if parent, err := netlink.LinkByIndex(attrs.MasterIndex); err == nil && parent != nil && parent.Attrs() != nil && isValidHardwareAddr(parent.Attrs().HardwareAddr) {
+			return hardwareAddrToArray(parent.Attrs().HardwareAddr)
+		}
+	}
+	if isValidHardwareAddr(attrs.HardwareAddr) {
+		return hardwareAddrToArray(attrs.HardwareAddr)
+	}
+	return [6]byte{}
+}
+
 func hardwareAddrToArray(hw net.HardwareAddr) [6]byte {
 	var out [6]byte
 	if len(hw) >= len(out) {
