@@ -37,6 +37,7 @@ func TestValidateKernelCollectionSpecAllowsMissingIPv6Maps(t *testing.T) {
 			kernelTCFlowMigrationStateMapName: &ebpf.MapSpec{},
 			kernelIfParentMapName:             &ebpf.MapSpec{},
 			kernelLocalIPv4MapName:            &ebpf.MapSpec{},
+			kernelLocalMACMapName:             &ebpf.MapSpec{},
 			kernelEgressWildcardFastMapName:   &ebpf.MapSpec{},
 			kernelNATConfigMapName:            &ebpf.MapSpec{},
 			kernelStatsMapName:                &ebpf.MapSpec{},
@@ -66,6 +67,7 @@ func TestValidateKernelCollectionSpecRejectsIncompleteIPv6MapSet(t *testing.T) {
 			kernelTCFlowMigrationStateMapName: &ebpf.MapSpec{},
 			kernelIfParentMapName:             &ebpf.MapSpec{},
 			kernelLocalIPv4MapName:            &ebpf.MapSpec{},
+			kernelLocalMACMapName:             &ebpf.MapSpec{},
 			kernelEgressWildcardFastMapName:   &ebpf.MapSpec{},
 			kernelNATConfigMapName:            &ebpf.MapSpec{},
 			kernelStatsMapName:                &ebpf.MapSpec{},
@@ -100,6 +102,7 @@ func TestLookupKernelCollectionPiecesAllowsOptionalIPv6Maps(t *testing.T) {
 			kernelTCFlowsOldMapNameV6:         &ebpf.Map{},
 			kernelTCNatPortsOldMapNameV6:      &ebpf.Map{},
 			kernelTCFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:             &ebpf.Map{},
 		},
 	}
 
@@ -131,6 +134,7 @@ func TestLookupKernelCollectionPiecesRejectsIncompleteIPv6Maps(t *testing.T) {
 			kernelTCFlowsOldMapNameV6:         &ebpf.Map{},
 			kernelTCNatPortsOldMapNameV6:      &ebpf.Map{},
 			kernelTCFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:             &ebpf.Map{},
 		},
 	}
 
@@ -156,6 +160,7 @@ func TestValidateKernelCollectionSpecRejectsMissingIPv6Programs(t *testing.T) {
 			kernelTCFlowMigrationStateMapName: &ebpf.MapSpec{},
 			kernelIfParentMapName:             &ebpf.MapSpec{},
 			kernelLocalIPv4MapName:            &ebpf.MapSpec{},
+			kernelLocalMACMapName:             &ebpf.MapSpec{},
 			kernelEgressWildcardFastMapName:   &ebpf.MapSpec{},
 			kernelNATConfigMapName:            &ebpf.MapSpec{},
 			kernelStatsMapName:                &ebpf.MapSpec{},
@@ -190,6 +195,7 @@ func TestLookupKernelCollectionPiecesRejectsIncompleteIPv6Programs(t *testing.T)
 			kernelTCFlowsOldMapNameV6:         &ebpf.Map{},
 			kernelTCNatPortsOldMapNameV6:      &ebpf.Map{},
 			kernelTCFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:             &ebpf.Map{},
 		},
 	}
 
@@ -216,6 +222,7 @@ func TestValidateKernelCollectionSpecRejectsIncompleteIPv4DispatcherSet(t *testi
 			kernelTCFlowMigrationStateMapName: &ebpf.MapSpec{},
 			kernelIfParentMapName:             &ebpf.MapSpec{},
 			kernelLocalIPv4MapName:            &ebpf.MapSpec{},
+			kernelLocalMACMapName:             &ebpf.MapSpec{},
 			kernelEgressWildcardFastMapName:   &ebpf.MapSpec{},
 			kernelNATConfigMapName:            &ebpf.MapSpec{},
 			kernelStatsMapName:                &ebpf.MapSpec{},
@@ -245,6 +252,7 @@ func TestLookupKernelCollectionPiecesRejectsIncompleteIPv4DispatcherSet(t *testi
 			kernelTCFlowsOldMapNameV6:         &ebpf.Map{},
 			kernelTCNatPortsOldMapNameV6:      &ebpf.Map{},
 			kernelTCFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:             &ebpf.Map{},
 			kernelTCProgramChainMapName:       &ebpf.Map{},
 		},
 	}
@@ -279,6 +287,7 @@ func TestValidateKernelCollectionSpecRejectsIncompleteIPv4FullNATSplitSet(t *tes
 			kernelTCFlowMigrationStateMapName: &ebpf.MapSpec{},
 			kernelIfParentMapName:             &ebpf.MapSpec{},
 			kernelLocalIPv4MapName:            &ebpf.MapSpec{},
+			kernelLocalMACMapName:             &ebpf.MapSpec{},
 			kernelEgressWildcardFastMapName:   &ebpf.MapSpec{},
 			kernelNATConfigMapName:            &ebpf.MapSpec{},
 			kernelStatsMapName:                &ebpf.MapSpec{},
@@ -314,6 +323,7 @@ func TestKernelAttachmentProgramsForPreparedRulesSkipsIPv6ProgramsForIPv4Prepare
 			kernelTCFlowsOldMapNameV6:         &ebpf.Map{},
 			kernelTCNatPortsOldMapNameV6:      &ebpf.Map{},
 			kernelTCFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:             &ebpf.Map{},
 		},
 	}
 	prepared := []preparedKernelRule{{
@@ -355,6 +365,7 @@ func TestKernelAttachmentProgramsForPreparedRulesIncludesIPv6ProgramsWhenNeeded(
 			kernelTCFlowsOldMapNameV6:         &ebpf.Map{},
 			kernelTCNatPortsOldMapNameV6:      &ebpf.Map{},
 			kernelTCFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:             &ebpf.Map{},
 		},
 	}
 	prepared := []preparedKernelRule{{
@@ -398,6 +409,7 @@ func TestKernelAttachmentProgramsForPreparedRulesUsesIPv4DispatcherWhenEnabled(t
 			kernelTCFlowsOldMapNameV6:         &ebpf.Map{},
 			kernelTCNatPortsOldMapNameV6:      &ebpf.Map{},
 			kernelTCFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:             &ebpf.Map{},
 			kernelTCProgramChainMapName:       &ebpf.Map{},
 		},
 	}
@@ -445,6 +457,7 @@ func TestKernelAttachmentProgramsForPreparedRulesKeepsTransparentIPv4OnLegacyPro
 			kernelTCFlowsOldMapNameV6:         &ebpf.Map{},
 			kernelTCNatPortsOldMapNameV6:      &ebpf.Map{},
 			kernelTCFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:             &ebpf.Map{},
 			kernelTCProgramChainMapName:       &ebpf.Map{},
 		},
 	}

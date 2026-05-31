@@ -150,3 +150,75 @@ func TestPrepareKernelRuleAllowsIPv6FullNAT(t *testing.T) {
 		t.Fatalf("prepared NATAddr = %q, want %q", got, "2001:db8::30")
 	}
 }
+
+func TestPrepareKernelRuleWildcardFullNATLocalMACGuard(t *testing.T) {
+	ctx := newKernelPrepareContext(false, false, false)
+	ingressMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}
+	ctx.links["lan0"] = cachedKernelLink{
+		link: &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "lan0", Index: 1, HardwareAddr: ingressMAC}},
+	}
+	ctx.links["wan0"] = cachedKernelLink{
+		link: &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "wan0", Index: 2}},
+	}
+	ctx.snatAddrs["2|192.0.2.20|"] = cachedKernelSNAT{addr: 0xc6336401}
+
+	items, err := prepareKernelRule(ctx, Rule{
+		ID:           2,
+		InInterface:  "lan0",
+		InIP:         "0.0.0.0",
+		InPort:       443,
+		OutInterface: "wan0",
+		OutIP:        "192.0.2.20",
+		OutPort:      8443,
+		Protocol:     "tcp",
+	})
+	if err != nil {
+		t.Fatalf("prepareKernelRule() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("prepareKernelRule() items = %d, want 1", len(items))
+	}
+	if items[0].ingressMAC != hardwareAddrToArray(ingressMAC) {
+		t.Fatalf("ingressMAC = %v, want %v", items[0].ingressMAC, ingressMAC)
+	}
+	localMACs := buildKernelLocalMACMap(items)
+	if got := localMACs[1].MAC; got != hardwareAddrToArray(ingressMAC) {
+		t.Fatalf("local MAC guard map[1] = %v, want %v", got, ingressMAC)
+	}
+}
+
+func TestPrepareKernelRuleWildcardTransparentLocalMACGuard(t *testing.T) {
+	ctx := newKernelPrepareContext(false, false, false)
+	ingressMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}
+	ctx.links["lan0"] = cachedKernelLink{
+		link: &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "lan0", Index: 1, HardwareAddr: ingressMAC}},
+	}
+	ctx.links["wan0"] = cachedKernelLink{
+		link: &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "wan0", Index: 2}},
+	}
+
+	items, err := prepareKernelRule(ctx, Rule{
+		ID:           3,
+		InInterface:  "lan0",
+		InIP:         "0.0.0.0",
+		InPort:       443,
+		OutInterface: "wan0",
+		OutIP:        "192.0.2.20",
+		OutPort:      8443,
+		Protocol:     "tcp",
+		Transparent:  true,
+	})
+	if err != nil {
+		t.Fatalf("prepareKernelRule() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("prepareKernelRule() items = %d, want 1", len(items))
+	}
+	if items[0].ingressMAC != hardwareAddrToArray(ingressMAC) {
+		t.Fatalf("ingressMAC = %v, want %v", items[0].ingressMAC, ingressMAC)
+	}
+	localMACs := buildKernelLocalMACMap(items)
+	if got := localMACs[1].MAC; got != hardwareAddrToArray(ingressMAC) {
+		t.Fatalf("local MAC guard map[1] = %v, want %v", got, ingressMAC)
+	}
+}

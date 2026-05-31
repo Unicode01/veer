@@ -224,6 +224,11 @@ struct nat_probe_window_v4 {
 	__u32 stride;
 };
 
+struct local_mac_value {
+	__u8 mac[ETH_ALEN];
+	__u8 pad[2];
+};
+
 struct redirect_target_v4 {
 	__u32 ifindex;
 	__u32 src_addr;
@@ -262,6 +267,7 @@ struct packet_ctx {
 	__u8 has_l4_checksum;
 	__u8 closing;
 	__u8 tos;
+	__u8 rule_wildcard_addr;
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 tot_len;
@@ -284,6 +290,7 @@ struct packet_ctx_v6 {
 	__u8 tcp_flags;
 	__u8 has_l4_checksum;
 	__u8 closing;
+	__u8 rule_wildcard_addr;
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 tot_len;
@@ -551,6 +558,13 @@ struct bpf_map_def SEC("maps") local_ipv4s_v4 = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u8),
+	.max_entries = 4096,
+};
+
+struct bpf_map_def SEC("maps") local_macs = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct local_mac_value),
 	.max_entries = 4096,
 };
 
@@ -967,6 +981,22 @@ static __always_inline int egress_nat_dst_mac_mismatch(struct __sk_buff *skb, co
 	return !mac_equal(dst, rule->src_mac);
 }
 
+static __always_inline int local_dst_mac_mismatch(struct __sk_buff *skb, __u8 wildcard_addr_match)
+{
+	struct local_mac_value *local;
+	__u32 ifindex = skb->ifindex;
+	__u8 dst[ETH_ALEN];
+
+	if (!wildcard_addr_match)
+		return 0;
+	local = bpf_map_lookup_elem(&local_macs, &ifindex);
+	if (!local || mac_is_zero(local->mac))
+		return 0;
+	if (bpf_skb_load_bytes(skb, offsetof(struct ethhdr, h_dest), dst, sizeof(dst)) < 0)
+		return 0;
+	return !mac_equal(dst, local->mac);
+}
+
 static __always_inline int prepend_eth_header(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN], __be16 proto)
 {
 	void *data;
@@ -1359,7 +1389,7 @@ static __always_inline int parse_ipv6_l4(struct __sk_buff *skb, struct packet_ct
 	return 0;
 }
 
-static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *skb, const struct packet_ctx *ctx)
+static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *skb, struct packet_ctx *ctx)
 {
 	struct rule_key_v4 key = {
 		.ifindex = skb->ifindex,
@@ -1369,14 +1399,17 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *sk
 	};
 	struct rule_value_v4 *rule;
 
+	ctx->rule_wildcard_addr = 0;
 	rule = bpf_map_lookup_elem(&rules_v4, &key);
 	if (rule)
 		return rule;
 
 	key.dst_addr = 0;
 	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule)
+	if (rule) {
+		ctx->rule_wildcard_addr = 1;
 		return rule;
+	}
 
 	key.dst_addr = bpf_ntohl(ctx->dst_addr);
 	key.dst_port = 0;
@@ -1387,18 +1420,22 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *sk
 	key.dst_addr = 0;
 	if (bpf_map_lookup_elem(&egress_wildcard_fast_v4, &key)) {
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule)
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
 			return rule;
+		}
 	}
 
 	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule)
+	if (rule) {
+		ctx->rule_wildcard_addr = 1;
 		return rule;
+	}
 
 	return 0;
 }
 
-static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx)
+static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *skb, struct packet_ctx_v6 *ctx)
 {
 	struct rule_key_v6 key = {
 		.ifindex = skb->ifindex,
@@ -1407,6 +1444,7 @@ static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *sk
 	};
 	struct rule_value_v6 *rule;
 
+	ctx->rule_wildcard_addr = 0;
 	copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
 	rule = bpf_map_lookup_elem(&rules_v6, &key);
 	if (rule)
@@ -1414,8 +1452,10 @@ static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *sk
 
 	__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
 	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule)
+	if (rule) {
+		ctx->rule_wildcard_addr = 1;
 		return rule;
+	}
 
 	copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
 	key.dst_port = 0;
@@ -1425,8 +1465,10 @@ static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *sk
 
 	__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
 	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule)
+	if (rule) {
+		ctx->rule_wildcard_addr = 1;
 		return rule;
+	}
 
 	return 0;
 }
@@ -2631,6 +2673,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 	__u32 nat_cfg_flags = load_kernel_nat_config_flags();
 
+	if (local_dst_mac_mismatch(skb, ctx->rule_wildcard_addr))
+		return TC_ACT_OK;
 	if (!flow_key || !flow_value)
 		return TC_ACT_SHOT;
 	__builtin_memset(flow_key, 0, sizeof(*flow_key));
@@ -3905,6 +3949,8 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return TC_ACT_UNSPEC;
 	}
+	if (is_fullnat_rule(rule) && local_dst_mac_mismatch(skb, ctx->rule_wildcard_addr))
+		return TC_ACT_OK;
 	if (is_fullnat_rule(rule)) {
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_FULLNAT_FORWARD);
 		return TC_ACT_UNSPEC;
@@ -3999,6 +4045,8 @@ static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 	if (is_fullnat_rule(rule)) {
+		if (local_dst_mac_mismatch(skb, dispatch->ctx.rule_wildcard_addr))
+			return TC_ACT_OK;
 		/* Keep established full-NAT sessions on the dispatcher during the
 		 * predecessor/successor gap; new sessions can still use the split path.
 		 */
@@ -4089,6 +4137,8 @@ static __always_inline int handle_forward_ingress_v4_fullnat(struct __sk_buff *s
 		return TC_ACT_UNSPEC;
 	if (!is_fullnat_rule(&dispatch->rule_value) || is_egress_nat_rule(&dispatch->rule_value))
 		return TC_ACT_UNSPEC;
+	if (local_dst_mac_mismatch(skb, dispatch->ctx.rule_wildcard_addr))
+		return TC_ACT_OK;
 	dispatch->have_flow = 0;
 	dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 	__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
@@ -4237,6 +4287,8 @@ int forward_ingress_v6(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	if (!is_fullnat_rule_v6(rule_v6))
 		return TC_ACT_UNSPEC;
+	if (local_dst_mac_mismatch(skb, ctx_v6->rule_wildcard_addr))
+		return TC_ACT_OK;
 	return handle_fullnat_forward_v6(skb, ctx_v6, rule_v6);
 }
 

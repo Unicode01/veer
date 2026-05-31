@@ -119,6 +119,7 @@ type preparedXDPKernelRule struct {
 	rule       Rule
 	inIfIndex  int
 	outIfIndex int
+	ingressMAC [6]byte
 	spec       kernelPreparedRuleSpec
 	keyV4      tcRuleKeyV4
 	valueV4    xdpRuleValueV4
@@ -150,6 +151,7 @@ type xdpCollectionPieces struct {
 	natOldV6             *ebpf.Map
 	flowMigrationState   *ebpf.Map
 	localIPv4s           *ebpf.Map
+	localMACs            *ebpf.Map
 }
 
 type preparedXDPKernelRuleBatches struct {
@@ -344,6 +346,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	requiredIfIndices := collectXDPInterfaces(prepared)
 	samePrepared := rt.samePreparedRulesLocked(prepared, requiredIfIndices)
 	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
+	desiredLocalMACs := buildXDPKernelLocalMACMap(prepared)
 	if localIPv4Err != nil && !samePrepared {
 		msg := fmt.Sprintf("build xdp egress nat local IPv4 inventory: %v", localIPv4Err)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -366,6 +369,11 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			}
 		} else if err := syncKernelLocalIPv4Map(pieces.localIPv4s, desiredLocalIPv4s); err != nil {
 			log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory failed: %v", err)
+		}
+		if pieces, err := lookupXDPCollectionPieces(rt.coll); err != nil {
+			log.Printf("xdp dataplane reconcile: refresh local MAC guard map skipped: %v", err)
+		} else if err := syncKernelLocalMACMap(pieces.localMACs, desiredLocalMACs); err != nil {
+			log.Printf("xdp dataplane reconcile: refresh local MAC guard map failed: %v", err)
 		}
 		rt.lastReconcileMode = "steady"
 		reconcileMetrics.AppliedEntries = len(prepared)
@@ -821,6 +829,18 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			return results, nil
 		}
 		log.Printf("xdp dataplane local IPv4 bypass map sync failed: %s", msg)
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: msg}
+		}
+		return results, nil
+	}
+	if err := syncKernelLocalMACMap(pieces.localMACs, desiredLocalMACs); err != nil {
+		coll.Close()
+		msg := fmt.Sprintf("sync xdp local MAC guard map: %v", err)
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
+			return results, nil
+		}
+		log.Printf("xdp dataplane local MAC guard map sync failed: %v", err)
 		for _, rule := range rules {
 			results[rule.ID] = kernelRuleApplyResult{Error: msg}
 		}
@@ -1362,6 +1382,14 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 			return fmt.Errorf("clear xdp rule key during drain: %w", err)
 		}
 	}
+	if pieces.localIPv4s != nil {
+		if err := syncKernelLocalIPv4Map(pieces.localIPv4s, nil); err != nil {
+			return fmt.Errorf("clear xdp local IPv4 bypass map during drain: %w", err)
+		}
+	}
+	if err := syncKernelLocalMACMap(pieces.localMACs, nil); err != nil {
+		return fmt.Errorf("clear xdp local MAC guard map during drain: %w", err)
+	}
 	rt.preparedRules = nil
 	rt.rulesMapCapacity = kernelRuntimeRuleMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	rt.flowsMapCapacity = kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
@@ -1569,6 +1597,9 @@ func validateXDPCollectionSpec(spec *ebpf.CollectionSpec) error {
 	if _, ok := spec.Maps[kernelOccupancyMapName]; !ok {
 		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelOccupancyMapName)
 	}
+	if _, ok := spec.Maps[kernelLocalMACMapName]; !ok {
+		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelLocalMACMapName)
+	}
 	if _, ok := spec.Maps[kernelXDPRedirectMapName]; !ok {
 		return fmt.Errorf("embedded xdp eBPF object is missing map %q", kernelXDPRedirectMapName)
 	}
@@ -1662,6 +1693,7 @@ func lookupXDPCollectionPieces(coll *ebpf.Collection) (xdpCollectionPieces, erro
 		natOldV6:             coll.Maps[kernelTCNatPortsOldMapNameV6],
 		flowMigrationState:   coll.Maps[kernelXDPFlowMigrationStateMapName],
 		localIPv4s:           coll.Maps[kernelLocalIPv4MapName],
+		localMACs:            coll.Maps[kernelLocalMACMapName],
 	}
 	if pieces.prog == nil ||
 		pieces.progV4 == nil ||
@@ -1679,7 +1711,8 @@ func lookupXDPCollectionPieces(coll *ebpf.Collection) (xdpCollectionPieces, erro
 		pieces.natConfigV4 == nil ||
 		pieces.flowsOldV4 == nil ||
 		pieces.natOldV4 == nil ||
-		pieces.flowMigrationState == nil {
+		pieces.flowMigrationState == nil ||
+		pieces.localMACs == nil {
 		return xdpCollectionPieces{}, fmt.Errorf("xdp object is missing required program or maps")
 	}
 	if pieces.rulesV6 == nil || pieces.flowsV6 == nil || pieces.natV6 == nil || pieces.flowsOldV6 == nil || pieces.natOldV6 == nil {
@@ -1828,6 +1861,30 @@ func preparedXDPKernelRulesNeedFullConeNATMap(prepared []preparedXDPKernelRule) 
 		}
 	}
 	return false
+}
+
+func preparedXDPKernelRuleNeedsLocalMACGuard(item preparedXDPKernelRule) bool {
+	if isKernelEgressNATRule(item.rule) {
+		return false
+	}
+	return item.spec.DstAddr.isZero()
+}
+
+func buildXDPKernelLocalMACMap(prepared []preparedXDPKernelRule) map[uint32]kernelLocalMACValue {
+	if len(prepared) == 0 {
+		return map[uint32]kernelLocalMACValue{}
+	}
+	out := make(map[uint32]kernelLocalMACValue)
+	for _, item := range prepared {
+		if !preparedXDPKernelRuleNeedsLocalMACGuard(item) || item.inIfIndex <= 0 {
+			continue
+		}
+		if item.ingressMAC == ([6]byte{}) {
+			continue
+		}
+		out[uint32(item.inIfIndex)] = kernelLocalMACValue{MAC: item.ingressMAC}
+	}
+	return out
 }
 
 func xdpRuntimeNATStateForDecision(prepared []preparedXDPKernelRule, refs kernelRuntimeMapRefs, counts kernelRuntimeMapCountSnapshot, context string) (kernelRuntimeMapCountSnapshot, bool) {
@@ -2358,6 +2415,9 @@ func prepareXDPKernelRuleRef(rule *Rule, opts xdpPrepareOptions) ([]preparedXDPK
 			outIfIndex: outIfIndex,
 			spec:       spec,
 		}
+		if spec.DstAddr.isZero() {
+			item.ingressMAC = egressNATIngressLocalMAC(currentInLink)
+		}
 		switch spec.Family {
 		case ipFamilyIPv6:
 			item.keyV6 = tcRuleKeyV6{
@@ -2631,6 +2691,9 @@ func sortPreparedXDPKernelRules(items []preparedXDPKernelRule) {
 			if a.valueV4.DstMAC != b.valueV4.DstMAC {
 				return string(a.valueV4.DstMAC[:]) < string(b.valueV4.DstMAC[:])
 			}
+		}
+		if cmp := bytes.Compare(a.ingressMAC[:], b.ingressMAC[:]); cmp != 0 {
+			return cmp < 0
 		}
 		return a.rule.ID < b.rule.ID
 	})

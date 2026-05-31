@@ -226,6 +226,11 @@ struct nat_probe_window_v4 {
 	__u32 stride;
 };
 
+struct local_mac_value {
+	__u8 mac[ETH_ALEN];
+	__u8 pad[2];
+};
+
 struct redirect_target_v4 {
 	__u32 ifindex;
 	__u32 src_addr;
@@ -259,7 +264,7 @@ struct packet_ctx {
 	__u8 closing;
 	__u8 tcp_flags;
 	__u8 tos;
-	__u8 pad;
+	__u8 rule_wildcard_addr;
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 tot_len;
@@ -277,6 +282,7 @@ struct packet_ctx_v6 {
 	__u8 has_l4_checksum;
 	__u8 closing;
 	__u8 tcp_flags;
+	__u8 rule_wildcard_addr;
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 tot_len;
@@ -450,6 +456,13 @@ struct bpf_map_def SEC("maps") local_ipv4s_v4 = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u8),
+	.max_entries = 4096,
+};
+
+struct bpf_map_def SEC("maps") local_macs = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct local_mac_value),
 	.max_entries = 4096,
 };
 
@@ -1256,7 +1269,7 @@ static __always_inline __be16 forward_xdp_eth_proto(struct xdp_md *xdp)
 	return proto;
 }
 
-static __always_inline struct rule_value_v4 *lookup_rule_v4_for_ifindex(__u32 in_ifindex, const struct packet_ctx *ctx)
+static __always_inline struct rule_value_v4 *lookup_rule_v4_for_ifindex(__u32 in_ifindex, struct packet_ctx *ctx)
 {
 	struct rule_key_v4 key = {
 		.ifindex = in_ifindex,
@@ -1266,14 +1279,17 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4_for_ifindex(__u32 in
 	};
 	struct rule_value_v4 *rule;
 
+	ctx->rule_wildcard_addr = 0;
 	rule = bpf_map_lookup_elem(&rules_v4, &key);
 	if (rule)
 		return rule;
 
 	key.dst_addr = 0;
 	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule)
+	if (rule) {
+		ctx->rule_wildcard_addr = 1;
 		return rule;
+	}
 
 	key.dst_addr = ctx->dst_addr;
 	key.dst_port = 0;
@@ -1282,21 +1298,25 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4_for_ifindex(__u32 in
 		return rule;
 
 	key.dst_addr = 0;
-	return bpf_map_lookup_elem(&rules_v4, &key);
+	rule = bpf_map_lookup_elem(&rules_v4, &key);
+	if (rule)
+		ctx->rule_wildcard_addr = 1;
+	return rule;
 }
 
-static __always_inline struct rule_value_v4 *lookup_rule_v4(struct xdp_md *xdp, const struct packet_ctx *ctx)
+static __always_inline struct rule_value_v4 *lookup_rule_v4(struct xdp_md *xdp, struct packet_ctx *ctx)
 {
 	return lookup_rule_v4_for_ifindex(xdp->ingress_ifindex, ctx);
 }
 
-static __always_inline struct rule_value_v6 *lookup_rule_v6_for_ifindex(__u32 in_ifindex, const struct packet_ctx_v6 *ctx)
+static __always_inline struct rule_value_v6 *lookup_rule_v6_for_ifindex(__u32 in_ifindex, struct packet_ctx_v6 *ctx)
 {
 	struct rule_key_v6 *key = lookup_xdp_rule_key_scratch_v6();
 	struct rule_value_v6 *rule;
 
 	if (!key)
 		return 0;
+	ctx->rule_wildcard_addr = 0;
 	key->ifindex = in_ifindex;
 	key->dst_port = ctx->dst_port;
 	key->proto = ctx->proto;
@@ -1307,10 +1327,13 @@ static __always_inline struct rule_value_v6 *lookup_rule_v6_for_ifindex(__u32 in
 		return rule;
 
 	__builtin_memset(key->dst_addr, 0, sizeof(key->dst_addr));
-	return bpf_map_lookup_elem(&rules_v6, key);
+	rule = bpf_map_lookup_elem(&rules_v6, key);
+	if (rule)
+		ctx->rule_wildcard_addr = 1;
+	return rule;
 }
 
-static __always_inline struct rule_value_v6 *lookup_rule_v6(struct xdp_md *xdp, const struct packet_ctx_v6 *ctx)
+static __always_inline struct rule_value_v6 *lookup_rule_v6(struct xdp_md *xdp, struct packet_ctx_v6 *ctx)
 {
 	return lookup_rule_v6_for_ifindex(xdp->ingress_ifindex, ctx);
 }
@@ -1340,6 +1363,22 @@ static __always_inline int egress_nat_dst_mac_mismatch(struct xdp_md *xdp, const
 	if (load_packet_macs(xdp, dst, src) < 0)
 		return 0;
 	return !mac_equal(dst, rule->src_mac);
+}
+
+static __always_inline int local_dst_mac_mismatch(struct xdp_md *xdp, __u32 in_ifindex, __u8 wildcard_addr_match)
+{
+	struct local_mac_value *local;
+	__u8 dst[ETH_ALEN];
+	__u8 src[ETH_ALEN];
+
+	if (!wildcard_addr_match)
+		return 0;
+	local = bpf_map_lookup_elem(&local_macs, &in_ifindex);
+	if (!local || mac_is_zero(local->mac))
+		return 0;
+	if (load_packet_macs(xdp, dst, src) < 0)
+		return 0;
+	return !mac_equal(dst, local->mac);
 }
 
 static __always_inline int is_egress_nat_flow(const struct flow_value_v4 *flow)
@@ -2653,6 +2692,8 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 	int close_complete = 0;
 	int redirect_ifindex = 0;
 
+	if (local_dst_mac_mismatch(xdp, in_ifindex, ctx->rule_wildcard_addr))
+		return XDP_PASS;
 	if (!flow_value)
 		return XDP_DROP;
 	__builtin_memset(flow_value, 0, sizeof(*flow_value));
@@ -3775,6 +3816,8 @@ static __always_inline int forward_xdp_v4_impl(struct xdp_md *xdp)
 				return XDP_PASS;
 			dispatch->rule_value = *rule;
 			dispatch->have_rule = 1;
+			if (!is_egress_nat_rule(rule) && local_dst_mac_mismatch(xdp, in_ifindex, dispatch->ctx.rule_wildcard_addr))
+				return XDP_PASS;
 			bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V4_FULLNAT_FORWARD);
 			return XDP_PASS;
 		}
@@ -3805,6 +3848,8 @@ static __always_inline int forward_xdp_v4_impl(struct xdp_md *xdp)
 		if (is_egress_nat_rule(rule) && is_local_ipv4(dispatch->ctx.dst_addr))
 			return XDP_PASS;
 		if (egress_nat_dst_mac_mismatch(xdp, rule))
+			return XDP_PASS;
+		if (!is_egress_nat_rule(rule) && local_dst_mac_mismatch(xdp, in_ifindex, dispatch->ctx.rule_wildcard_addr))
 			return XDP_PASS;
 		bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V4_FULLNAT_FORWARD);
 		return XDP_PASS;
@@ -3869,6 +3914,8 @@ static __always_inline int forward_xdp_v4_fullnat_forward_impl(struct xdp_md *xd
 		return XDP_PASS;
 	if (egress_nat_dst_mac_mismatch(xdp, rule))
 		return XDP_PASS;
+	if (!is_egress_nat_rule(rule) && local_dst_mac_mismatch(xdp, dispatch->in_ifindex, dispatch->ctx.rule_wildcard_addr))
+		return XDP_PASS;
 	return handle_fullnat_forward(xdp, dispatch->in_ifindex, &dispatch->ctx, rule, flow);
 }
 
@@ -3911,6 +3958,8 @@ static __always_inline int forward_xdp_v6_impl(struct xdp_md *xdp)
 				return XDP_PASS;
 			dispatch->rule_value = *rule_v6;
 			dispatch->have_rule = 1;
+			if (local_dst_mac_mismatch(xdp, dispatch->in_ifindex, dispatch->ctx.rule_wildcard_addr))
+				return XDP_PASS;
 			bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V6_FULLNAT_FORWARD);
 			return XDP_PASS;
 		}
@@ -3926,6 +3975,8 @@ static __always_inline int forward_xdp_v6_impl(struct xdp_md *xdp)
 		return XDP_PASS;
 	dispatch->rule_value = *rule_v6;
 	dispatch->have_rule = 1;
+	if (local_dst_mac_mismatch(xdp, dispatch->in_ifindex, dispatch->ctx.rule_wildcard_addr))
+		return XDP_PASS;
 	bpf_tail_call(xdp, &xdp_prog_chain, FORWARD_XDP_PROG_V6_FULLNAT_FORWARD);
 	return XDP_PASS;
 }
@@ -3947,6 +3998,8 @@ static __always_inline int forward_xdp_v6_fullnat_forward_impl(struct xdp_md *xd
 
 	rule_v6 = &dispatch->rule_value;
 	if (!is_fullnat_rule_v6(rule_v6))
+		return XDP_PASS;
+	if (local_dst_mac_mismatch(xdp, dispatch->in_ifindex, dispatch->ctx.rule_wildcard_addr))
 		return XDP_PASS;
 	return handle_fullnat_forward_v6(xdp, &dispatch->ctx, rule_v6, dispatch->flow_bank);
 }

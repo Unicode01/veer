@@ -94,6 +94,7 @@ func samePreparedKernelRuleDataplane(a, b preparedKernelRule) bool {
 		a.outIfIndex == b.outIfIndex &&
 		sameKernelReplyIfIndexes(a.replyIfIndexes, b.replyIfIndexes) &&
 		sameKernelIfParentMappings(a.replyIfParents, b.replyIfParents) &&
+		a.ingressMAC == b.ingressMAC &&
 		sameKernelPreparedRuleSpec(a.spec, b.spec) &&
 		a.key == b.key &&
 		a.value == b.value
@@ -105,6 +106,7 @@ func samePreparedKernelRuleDataplaneIgnoringRuleID(a, b preparedKernelRule) bool
 		a.outIfIndex != b.outIfIndex ||
 		!sameKernelReplyIfIndexes(a.replyIfIndexes, b.replyIfIndexes) ||
 		!sameKernelIfParentMappings(a.replyIfParents, b.replyIfParents) ||
+		a.ingressMAC != b.ingressMAC ||
 		!sameKernelPreparedRuleSpec(a.spec, b.spec) ||
 		a.key != b.key {
 		return false
@@ -122,6 +124,7 @@ func samePreparedKernelRuleFlowContinuity(a, b preparedKernelRule) bool {
 		a.outIfIndex != b.outIfIndex ||
 		!sameKernelReplyIfIndexes(a.replyIfIndexes, b.replyIfIndexes) ||
 		!sameKernelIfParentMappings(a.replyIfParents, b.replyIfParents) ||
+		a.ingressMAC != b.ingressMAC ||
 		!sameKernelPreparedRuleSpec(a.spec, b.spec) ||
 		a.key != b.key {
 		return false
@@ -163,6 +166,7 @@ func samePreparedXDPKernelRuleDataplane(a, b preparedXDPKernelRule) bool {
 	if !sameKernelRuleDataplaneConfig(a.rule, b.rule) ||
 		a.inIfIndex != b.inIfIndex ||
 		a.outIfIndex != b.outIfIndex ||
+		a.ingressMAC != b.ingressMAC ||
 		!sameKernelPreparedRuleSpec(a.spec, b.spec) {
 		return false
 	}

@@ -215,6 +215,7 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 			kernelNATConfigMapName:             &ebpf.MapSpec{},
 			kernelStatsMapName:                 &ebpf.MapSpec{},
 			kernelOccupancyMapName:             &ebpf.MapSpec{},
+			kernelLocalMACMapName:              &ebpf.MapSpec{},
 			kernelXDPRedirectMapName:           &ebpf.MapSpec{},
 			kernelXDPProgramChainMapName:       &ebpf.MapSpec{},
 			kernelXDPFIBScratchMapName:         &ebpf.MapSpec{},
@@ -263,6 +264,7 @@ func TestValidateXDPCollectionSpecRejectsLRUFlowBanks(t *testing.T) {
 			kernelNATConfigMapName:             &ebpf.MapSpec{},
 			kernelStatsMapName:                 &ebpf.MapSpec{},
 			kernelOccupancyMapName:             &ebpf.MapSpec{},
+			kernelLocalMACMapName:              &ebpf.MapSpec{},
 			kernelXDPRedirectMapName:           &ebpf.MapSpec{},
 			kernelXDPProgramChainMapName:       &ebpf.MapSpec{},
 			kernelXDPFIBScratchMapName:         &ebpf.MapSpec{},
@@ -339,6 +341,8 @@ func TestLookupXDPCollectionPiecesRejectsIncompleteIPv6MapSet(t *testing.T) {
 			kernelRulesMapNameV6:               &ebpf.Map{},
 			kernelNatPortsMapNameV6:            &ebpf.Map{},
 			kernelXDPFlowMigrationStateMapName: &ebpf.Map{},
+			kernelLocalMACMapName:              &ebpf.Map{},
+			kernelXDPRedirectMapName:           &ebpf.Map{},
 			kernelXDPProgramChainMapName:       &ebpf.Map{},
 		},
 	}
@@ -378,6 +382,7 @@ func TestLookupXDPCollectionPiecesIncludesLocalIPv4MapWhenPresent(t *testing.T) 
 			kernelXDPFlowMigrationStateMapName: &ebpf.Map{},
 			kernelXDPProgramChainMapName:       &ebpf.Map{},
 			kernelLocalIPv4MapName:             localMap,
+			kernelLocalMACMapName:              &ebpf.Map{},
 		},
 	}
 
@@ -393,6 +398,9 @@ func TestLookupXDPCollectionPiecesIncludesLocalIPv4MapWhenPresent(t *testing.T) 
 	}
 	if pieces.natV6 == nil || pieces.natOldV6 == nil {
 		t.Fatalf("lookupXDPCollectionPieces() = %+v, want IPv6 nat maps", pieces)
+	}
+	if pieces.localMACs == nil {
+		t.Fatal("lookupXDPCollectionPieces() localMACs = nil, want local MAC guard map")
 	}
 }
 
@@ -469,6 +477,23 @@ func TestPreparedXDPKernelRulesNeedFullConeNATMapIncludesIPv6FullNAT(t *testing.
 	}
 	if !preparedXDPKernelRulesNeedFullConeNATMap(prepared) {
 		t.Fatal("preparedXDPKernelRulesNeedFullConeNATMap() = false, want true for IPv6 fullnat rules")
+	}
+}
+
+func TestBuildXDPKernelLocalMACMapIncludesWildcardTransparentRule(t *testing.T) {
+	ingressMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x30}
+	prepared := []preparedXDPKernelRule{
+		{
+			rule:       Rule{ID: 1, InIP: "0.0.0.0", OutIP: "192.0.2.20", Transparent: true},
+			inIfIndex:  7,
+			ingressMAC: ingressMAC,
+			spec:       kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+		},
+	}
+
+	localMACs := buildXDPKernelLocalMACMap(prepared)
+	if got := localMACs[7].MAC; got != ingressMAC {
+		t.Fatalf("local MAC guard map[7] = %v, want %v", got, ingressMAC)
 	}
 }
 
