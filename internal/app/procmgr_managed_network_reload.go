@@ -1093,6 +1093,9 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 	activeRetryCandidates := retryCandidates
 	for {
 		results, err := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeRetryCandidates)
+		if err != nil && (len(activeRetryCandidates) == 0 || totalRetainedKernelAssignments(retainedByEngine) > 0) {
+			return err
+		}
 		if len(activeRetryCandidates) == 0 {
 			break
 		}

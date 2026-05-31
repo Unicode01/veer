@@ -40,6 +40,152 @@ func writePipeMessage(t *testing.T, conn net.Conn, msg IPCMessage) {
 	}
 }
 
+func waitForDrainingWorker(t *testing.T, pm *ProcessManager, kind string) *WorkerInfo {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pm.mu.Lock()
+		for _, wi := range pm.drainingWorkers {
+			if wi != nil && wi.kind == kind {
+				pm.mu.Unlock()
+				return wi
+			}
+		}
+		pm.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for draining %s worker", kind)
+	return nil
+}
+
+func TestHandleRuleWorkerConnDrainingUsesLatestRuleSnapshot(t *testing.T) {
+	initialRule := Rule{ID: 1, InIP: "198.51.100.10", InPort: 10000, OutIP: "203.0.113.10", OutPort: 20000, Protocol: "tcp", Enabled: true}
+	currentRule := Rule{ID: 2, InIP: "198.51.100.11", InPort: 10001, OutIP: "203.0.113.11", OutPort: 20001, Protocol: "tcp", Enabled: true}
+	pm := &ProcessManager{
+		binaryHash:   "manager-hash",
+		shuttingDown: true,
+		ruleWorkers: map[int]*WorkerInfo{
+			0: {
+				workerIndex: 0,
+				kind:        workerKindRule,
+				rules:       []Rule{initialRule},
+				failedRules: make(map[int64]bool),
+				ruleStats:   make(map[int64]RuleStatsReport),
+			},
+		},
+	}
+
+	server, client := net.Pipe()
+	defer client.Close()
+	scanner := newPipeScanner(client)
+
+	done := make(chan struct{})
+	go func() {
+		pm.handleRuleWorkerConn(server, newPipeScanner(server), 0, "worker-hash")
+		close(done)
+	}()
+
+	msg := readPipeMessage(t, scanner)
+	if msg.Type != "config" || len(msg.Rules) != 1 || msg.Rules[0].ID != initialRule.ID {
+		t.Fatalf("initial IPC message = %#v, want config for rule %d", msg, initialRule.ID)
+	}
+
+	pm.mu.Lock()
+	pm.ruleWorkers[0].rules = []Rule{currentRule}
+	pm.mu.Unlock()
+
+	writePipeMessage(t, client, IPCMessage{
+		Type:          "status",
+		Status:        "draining",
+		ActiveRuleIDs: []int64{currentRule.ID},
+	})
+
+	dw := waitForDrainingWorker(t, pm, workerKindRule)
+	if len(dw.rules) == 0 || dw.rules[0].ID != currentRule.ID {
+		t.Fatalf("draining rules = %#v, want current rule %d first", dw.rules, currentRule.ID)
+	}
+	foundInitial := false
+	for _, rule := range dw.rules {
+		if rule.ID == initialRule.ID {
+			foundInitial = true
+		}
+	}
+	if !foundInitial {
+		t.Fatalf("draining rules = %#v, want initial rule %d retained as fallback snapshot", dw.rules, initialRule.ID)
+	}
+
+	_ = client.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleRuleWorkerConn() did not exit after client close")
+	}
+}
+
+func TestHandleRangeWorkerConnDrainingUsesLatestRangeSnapshot(t *testing.T) {
+	initialRange := PortRange{ID: 1, InIP: "198.51.100.10", StartPort: 10000, EndPort: 10000, OutIP: "203.0.113.10", OutStartPort: 20000, Protocol: "tcp", Enabled: true}
+	currentRange := PortRange{ID: 2, InIP: "198.51.100.11", StartPort: 10001, EndPort: 10001, OutIP: "203.0.113.11", OutStartPort: 20001, Protocol: "tcp", Enabled: true}
+	pm := &ProcessManager{
+		binaryHash:   "manager-hash",
+		shuttingDown: true,
+		rangeWorkers: map[int]*WorkerInfo{
+			0: {
+				workerIndex:  0,
+				kind:         workerKindRange,
+				ranges:       []PortRange{initialRange},
+				failedRanges: make(map[int64]bool),
+				rangeStats:   make(map[int64]RangeStatsReport),
+			},
+		},
+	}
+
+	server, client := net.Pipe()
+	defer client.Close()
+	scanner := newPipeScanner(client)
+
+	done := make(chan struct{})
+	go func() {
+		pm.handleRangeWorkerConn(server, newPipeScanner(server), 0, "worker-hash")
+		close(done)
+	}()
+
+	msg := readPipeMessage(t, scanner)
+	if msg.Type != "range_config" || len(msg.PortRanges) != 1 || msg.PortRanges[0].ID != initialRange.ID {
+		t.Fatalf("initial IPC message = %#v, want range_config for range %d", msg, initialRange.ID)
+	}
+
+	pm.mu.Lock()
+	pm.rangeWorkers[0].ranges = []PortRange{currentRange}
+	pm.mu.Unlock()
+
+	writePipeMessage(t, client, IPCMessage{
+		Type:           "status",
+		Status:         "draining",
+		ActiveRangeIDs: []int64{currentRange.ID},
+	})
+
+	dw := waitForDrainingWorker(t, pm, workerKindRange)
+	if len(dw.ranges) == 0 || dw.ranges[0].ID != currentRange.ID {
+		t.Fatalf("draining ranges = %#v, want current range %d first", dw.ranges, currentRange.ID)
+	}
+	foundInitial := false
+	for _, pr := range dw.ranges {
+		if pr.ID == initialRange.ID {
+			foundInitial = true
+		}
+	}
+	if !foundInitial {
+		t.Fatalf("draining ranges = %#v, want initial range %d retained as fallback snapshot", dw.ranges, initialRange.ID)
+	}
+
+	_ = client.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleRangeWorkerConn() did not exit after client close")
+	}
+}
+
 func TestHandleRangeWorkerConnErrorSchedulesRetry(t *testing.T) {
 	pm := &ProcessManager{
 		binaryHash: "manager-hash",

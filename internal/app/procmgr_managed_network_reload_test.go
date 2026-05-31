@@ -174,6 +174,88 @@ func TestReloadManagedNetworkRuntimeOnlyRetainsKernelRulesWhileRefreshingManaged
 	}
 }
 
+func TestReconcileManagedNetworkAutoEgressNATsReturnsRetainedOnlyKernelError(t *testing.T) {
+	db := openTestDB(t)
+
+	rule := Rule{
+		InInterface:  "eno1",
+		InIP:         "192.0.2.10",
+		InPort:       10001,
+		OutInterface: "eno2",
+		OutIP:        "198.51.100.10",
+		OutPort:      20001,
+		Protocol:     "tcp",
+		Enabled:      true,
+	}
+	ruleID, err := dbAddRule(db, &rule)
+	if err != nil {
+		t.Fatalf("dbAddRule() error = %v", err)
+	}
+	rule.ID = ruleID
+	rule.kernelLogKind = workerKindRule
+	rule.kernelLogOwnerID = ruleID
+
+	natID := managedNetworkSyntheticID("egress_nat", 1, "vmbr1")
+	oldEgressRule := Rule{
+		ID:               5001,
+		InInterface:      "tap100i0",
+		InIP:             "0.0.0.0",
+		InPort:           0,
+		OutInterface:     "eno1",
+		OutIP:            "0.0.0.0",
+		OutPort:          0,
+		Protocol:         "tcp",
+		Enabled:          true,
+		kernelMode:       kernelModeEgressNAT,
+		kernelNATType:    egressNATTypeSymmetric,
+		kernelLogKind:    workerKindEgressNAT,
+		kernelLogOwnerID: natID,
+	}
+	retainedErr := errors.New("retained refresh failed")
+	rt := &stubIncrementalKernelRuntime{
+		assignments: map[int64]string{
+			rule.ID:          kernelEngineTC,
+			oldEgressRule.ID: kernelEngineTC,
+		},
+		retainedRules: map[int64][]Rule{
+			rule.ID: {rule},
+		},
+		incrementalErr: retainedErr,
+	}
+
+	pm := &ProcessManager{
+		db:                     db,
+		cfg:                    &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 1},
+		ruleWorkers:            make(map[int]*WorkerInfo),
+		rangeWorkers:           make(map[int]*WorkerInfo),
+		rulePlans:              map[int64]ruleDataplanePlan{rule.ID: {KernelEligible: true, EffectiveEngine: ruleEngineKernel}},
+		rangePlans:             map[int64]rangeDataplanePlan{},
+		egressNATPlans:         map[int64]ruleDataplanePlan{natID: {KernelEligible: true, EffectiveEngine: ruleEngineKernel}},
+		kernelRuntime:          rt,
+		kernelRules:            map[int64]bool{rule.ID: true},
+		kernelRanges:           map[int64]bool{},
+		kernelEgressNATs:       map[int64]bool{natID: true},
+		kernelRuleEngines:      map[int64]string{rule.ID: kernelEngineTC},
+		kernelRangeEngines:     map[int64]string{},
+		kernelEgressNATEngines: map[int64]string{natID: kernelEngineTC},
+		kernelFlowOwners: map[uint32]kernelCandidateOwner{
+			uint32(rule.ID):          {kind: workerKindRule, id: rule.ID},
+			uint32(oldEgressRule.ID): {kind: workerKindEgressNAT, id: natID},
+		},
+	}
+
+	err = pm.reconcileManagedNetworkAutoEgressNATs(nil, nil, nil, egressNATInterfaceSnapshot{})
+	if !errors.Is(err, retainedErr) {
+		t.Fatalf("reconcileManagedNetworkAutoEgressNATs() error = %v, want %v", err, retainedErr)
+	}
+	if len(rt.incrementalCalls) != 1 {
+		t.Fatalf("incrementalCalls = %d, want retained-only refresh attempt", len(rt.incrementalCalls))
+	}
+	if !pm.kernelEgressNATs[natID] {
+		t.Fatalf("kernelEgressNATs = %#v, want old egress nat owner preserved after failed reload", pm.kernelEgressNATs)
+	}
+}
+
 func TestSummarizeManagedNetworkRuntimeReload(t *testing.T) {
 	t.Parallel()
 

@@ -19,6 +19,7 @@ type stubIncrementalKernelRuntime struct {
 	retainedEgressNATs map[int64][]Rule
 	incrementalCalls   []incrementalKernelRetryCall
 	incrementalResults map[int64]kernelRuleApplyResult
+	incrementalErr     error
 	pressure           kernelRuntimePressureSnapshot
 	snapshot           kernelRuleStatsSnapshot
 	snapshotErr        error
@@ -67,6 +68,9 @@ func (s *stubIncrementalKernelRuntime) ReconcileRetainingAssignments(retainedByE
 		newRules:         append([]Rule(nil), newRules...),
 	}
 	s.incrementalCalls = append(s.incrementalCalls, call)
+	if s.incrementalErr != nil {
+		return nil, s.incrementalErr
+	}
 
 	nextAssignments := make(map[int64]string)
 	for engine, rules := range retainedByEngine {

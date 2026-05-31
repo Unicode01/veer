@@ -595,6 +595,7 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 				for id, s := range wi.ruleStats {
 					copiedStats[id] = s
 				}
+				drainingRules := mergeRuleSnapshotsByID(wi.rules, rules)
 				dw := &WorkerInfo{
 					workerIndex:   workerIndex,
 					kind:          workerKindRule,
@@ -602,7 +603,7 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 					draining:      true,
 					binaryHash:    workerHash,
 					activeRuleIDs: status.ActiveRuleIDs,
-					rules:         rules,
+					rules:         drainingRules,
 					ruleErrors:    cloneInt64StringMap(status.RuleErrors),
 					lastError:     strings.TrimSpace(status.Error),
 					ruleStats:     copiedStats,
@@ -2697,6 +2698,44 @@ func sameUserspaceRangeConfig(a, b PortRange) bool {
 		a.Transparent == b.Transparent
 }
 
+func mergeRuleSnapshotsByID(primary []Rule, fallback []Rule) []Rule {
+	if len(primary) == 0 {
+		return append([]Rule(nil), fallback...)
+	}
+	out := append([]Rule(nil), primary...)
+	seen := make(map[int64]struct{}, len(out)+len(fallback))
+	for _, rule := range out {
+		seen[rule.ID] = struct{}{}
+	}
+	for _, rule := range fallback {
+		if _, ok := seen[rule.ID]; ok {
+			continue
+		}
+		seen[rule.ID] = struct{}{}
+		out = append(out, rule)
+	}
+	return out
+}
+
+func mergeRangeSnapshotsByID(primary []PortRange, fallback []PortRange) []PortRange {
+	if len(primary) == 0 {
+		return append([]PortRange(nil), fallback...)
+	}
+	out := append([]PortRange(nil), primary...)
+	seen := make(map[int64]struct{}, len(out)+len(fallback))
+	for _, pr := range out {
+		seen[pr.ID] = struct{}{}
+	}
+	for _, pr := range fallback {
+		if _, ok := seen[pr.ID]; ok {
+			continue
+		}
+		seen[pr.ID] = struct{}{}
+		out = append(out, pr)
+	}
+	return out
+}
+
 func (pm *ProcessManager) buildRuleStatus(rule Rule, status string) RuleStatus {
 	item := RuleStatus{
 		Rule:            rule,
@@ -2906,6 +2945,7 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 				for id, s := range wi.rangeStats {
 					copiedStats[id] = s
 				}
+				drainingRanges := mergeRangeSnapshotsByID(wi.ranges, ranges)
 				dw := &WorkerInfo{
 					workerIndex:    workerIndex,
 					kind:           workerKindRange,
@@ -2913,7 +2953,7 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 					draining:       true,
 					binaryHash:     workerHash,
 					activeRangeIDs: status.ActiveRangeIDs,
-					ranges:         ranges,
+					ranges:         drainingRanges,
 					rangeErrors:    cloneInt64StringMap(status.RangeErrors),
 					lastError:      strings.TrimSpace(status.Error),
 					rangeStats:     copiedStats,
@@ -4386,37 +4426,11 @@ func (pm *ProcessManager) monitorLoop() {
 				stopNow := false
 				switch dw.kind {
 				case workerKindRule:
-					hasOwnActive := false
-					if len(dw.activeRuleIDs) > 0 && len(dw.rules) > 0 {
-						own := make(map[int64]struct{}, len(dw.rules))
-						for _, r := range dw.rules {
-							own[r.ID] = struct{}{}
-						}
-						for _, id := range dw.activeRuleIDs {
-							if _, ok := own[id]; ok {
-								hasOwnActive = true
-								break
-							}
-						}
-					}
-					if dw.draining && !dw.running && !hasOwnActive {
+					if dw.draining && !dw.running && len(dw.activeRuleIDs) == 0 {
 						stopNow = true
 					}
 				case workerKindRange:
-					hasOwnActive := false
-					if len(dw.activeRangeIDs) > 0 && len(dw.ranges) > 0 {
-						own := make(map[int64]struct{}, len(dw.ranges))
-						for _, pr := range dw.ranges {
-							own[pr.ID] = struct{}{}
-						}
-						for _, id := range dw.activeRangeIDs {
-							if _, ok := own[id]; ok {
-								hasOwnActive = true
-								break
-							}
-						}
-					}
-					if dw.draining && !dw.running && !hasOwnActive {
+					if dw.draining && !dw.running && len(dw.activeRangeIDs) == 0 {
 						stopNow = true
 					}
 				case workerKindShared:
