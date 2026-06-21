@@ -16,7 +16,7 @@ function forward_config()
     return [
         'name' => 'Forward 管理',
         'description' => '对接 forward 的规则接口，提供端口转发规则的后台与客户区管理。',
-        'version' => '1.3.1',
+        'version' => '1.3.4',
         'author' => 'OpenAI Codex',
         'language' => 'chinese',
         'fields' => [
@@ -35,24 +35,24 @@ function forward_config()
                 'Default' => '',
             ],
             'api_endpoint' => [
-                'FriendlyName' => 'API 地址',
+                'FriendlyName' => '默认 Forward API 地址',
                 'Type' => 'text',
                 'Size' => '50',
-                'Description' => '例如: http://127.0.0.1:8080',
+                'Description' => '默认 Forward 控制端地址；未命中宿主机覆盖映射时使用，例如 http://127.0.0.1:8080',
                 'Default' => 'http://127.0.0.1:8080',
             ],
             'api_token' => [
-                'FriendlyName' => 'API Token',
+                'FriendlyName' => '默认 Forward Bearer Token',
                 'Type' => 'password',
                 'Size' => '50',
-                'Description' => 'forward 的 Web Token，会以 Authorization: Bearer <token> 调用',
+                'Description' => '对应 forward 配置里的 web_token；仅作为默认端点令牌，会以 Authorization: Bearer <token> 调用',
                 'Default' => '',
             ],
             'api_server_map' => [
-                'FriendlyName' => '按宿主机映射 Forward 端点',
+                'FriendlyName' => '宿主机覆盖端点映射',
                 'Type' => 'textarea',
                 'Rows' => '6',
-                'Description' => "按 WHMCS serverID 指定 forward API 与 Token，每行一条，格式如 3=https://forward-a.example.com|tokenA；命中映射时会优先走该端点，未命中时才回退到全局 API 地址/Token",
+                'Description' => "可选，仅多宿主机/多 Forward 实例需要。每行按 WHMCS serverID 指定 API 与 Bearer Token，格式如 3=https://forward-a.example.com|tokenA；命中后覆盖上面的默认地址和默认 Token",
                 'Default' => '',
             ],
             'skip_tls_verify' => [
@@ -126,8 +126,15 @@ function forward_config()
                 'FriendlyName' => '每用户最大规则数',
                 'Type' => 'text',
                 'Size' => '10',
-                'Description' => '客户区每个用户最多可创建的规则数量',
+                'Description' => '客户区每个用户默认最多可创建的端口规则数量；可被下面的按产品规则上限覆盖',
                 'Default' => '10',
+            ],
+            'product_rule_limits' => [
+                'FriendlyName' => '按产品规则上限',
+                'Type' => 'textarea',
+                'Rows' => '4',
+                'Description' => "可选。按 WHMCS 产品 ID 覆盖端口规则上限，每行一条，格式如 12=10；0 表示该产品不限。未配置的产品使用“每用户最大规则数”",
+                'Default' => '',
             ],
             'max_sites_per_user' => [
                 'FriendlyName' => '每用户最大站点数',
@@ -220,6 +227,7 @@ function forward_activate()
                 $table->string('protocol', 20)->default('tcp');
                 $table->string('tag', 100)->default('');
                 $table->boolean('transparent')->default(false);
+                $table->boolean('service_suspended')->default(false);
                 $table->string('status', 20)->default('active');
                 $table->text('description')->nullable();
                 $table->timestamp('created_at')->useCurrent();
@@ -247,7 +255,8 @@ function forward_activate()
                 'protocol' => function ($table) { $table->string('protocol', 20)->default('tcp')->after('out_source_ip'); },
                 'tag' => function ($table) { $table->string('tag', 100)->default('')->after('protocol'); },
                 'transparent' => function ($table) { $table->boolean('transparent')->default(false)->after('tag'); },
-                'status' => function ($table) { $table->string('status', 20)->default('active')->after('transparent'); },
+                'service_suspended' => function ($table) { $table->boolean('service_suspended')->default(false)->after('transparent'); },
+                'status' => function ($table) { $table->string('status', 20)->default('active')->after('service_suspended'); },
                 'description' => function ($table) { $table->text('description')->nullable()->after('status'); },
                 'created_at' => function ($table) { $table->timestamp('created_at')->useCurrent()->after('description'); },
                 'updated_at' => function ($table) { $table->timestamp('updated_at')->useCurrent()->after('created_at'); },
@@ -277,6 +286,7 @@ function forward_activate()
                 $table->integer('backend_https_port')->default(443);
                 $table->string('tag', 100)->default('');
                 $table->boolean('transparent')->default(false);
+                $table->boolean('service_suspended')->default(false);
                 $table->string('status', 20)->default('active');
                 $table->text('description')->nullable();
                 $table->timestamp('created_at')->useCurrent();
@@ -303,7 +313,8 @@ function forward_activate()
                 'backend_https_port' => function ($table) { $table->integer('backend_https_port')->default(443)->after('backend_http_port'); },
                 'tag' => function ($table) { $table->string('tag', 100)->default('')->after('backend_https_port'); },
                 'transparent' => function ($table) { $table->boolean('transparent')->default(false)->after('tag'); },
-                'status' => function ($table) { $table->string('status', 20)->default('active')->after('transparent'); },
+                'service_suspended' => function ($table) { $table->boolean('service_suspended')->default(false)->after('transparent'); },
+                'status' => function ($table) { $table->string('status', 20)->default('active')->after('service_suspended'); },
                 'description' => function ($table) { $table->text('description')->nullable()->after('status'); },
                 'created_at' => function ($table) { $table->timestamp('created_at')->useCurrent()->after('description'); },
                 'updated_at' => function ($table) { $table->timestamp('updated_at')->useCurrent()->after('created_at'); },
@@ -744,6 +755,11 @@ function forward_ensure_runtime_schema()
                 $table->string('out_source_ip', 45)->default('')->after('out_port');
             });
         }
+        if (Capsule::schema()->hasTable('mod_forward_rules') && !Capsule::schema()->hasColumn('mod_forward_rules', 'service_suspended')) {
+            Capsule::schema()->table('mod_forward_rules', function ($table) {
+                $table->boolean('service_suspended')->default(false)->after('transparent');
+            });
+        }
 
         if (Capsule::schema()->hasTable('mod_forward_sites') && !Capsule::schema()->hasColumn('mod_forward_sites', 'remote_site_id')) {
             Capsule::schema()->table('mod_forward_sites', function ($table) {
@@ -765,6 +781,11 @@ function forward_ensure_runtime_schema()
                 $table->string('backend_source_ip', 45)->default('')->after('backend_ip');
             });
         }
+        if (Capsule::schema()->hasTable('mod_forward_sites') && !Capsule::schema()->hasColumn('mod_forward_sites', 'service_suspended')) {
+            Capsule::schema()->table('mod_forward_sites', function ($table) {
+                $table->boolean('service_suspended')->default(false)->after('transparent');
+            });
+        }
     } catch (Exception $e) {
         forward_log('ensure_runtime_schema_error', [], $e->getMessage());
     }
@@ -775,9 +796,92 @@ function forward_ensure_runtime_schema()
     forward_backfill_local_service_bindings();
 }
 
+function forward_log_key_is_sensitive($key)
+{
+    $key = strtolower((string) $key);
+    foreach (['token', 'password', 'secret', 'authorization', 'csrf', 'bearer'] as $needle) {
+        if (strpos($key, $needle) !== false) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function forward_sanitize_log_value($value, $key = '')
+{
+    if (forward_log_key_is_sensitive($key)) {
+        return '[redacted]';
+    }
+
+    if (is_array($value)) {
+        $out = [];
+        foreach ($value as $itemKey => $itemValue) {
+            $out[$itemKey] = forward_sanitize_log_value($itemValue, $itemKey);
+        }
+        return $out;
+    }
+
+    if (is_object($value)) {
+        return forward_sanitize_log_value(get_object_vars($value), $key);
+    }
+
+    if (is_string($value) && strlen($value) > 4000) {
+        return substr($value, 0, 4000) . '... [truncated]';
+    }
+
+    return $value;
+}
+
+function forward_log_to_string($value)
+{
+    if ($value === null || $value === '') {
+        return '';
+    }
+    if (is_scalar($value)) {
+        return (string) $value;
+    }
+    $encoded = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return $encoded === false ? '[unserializable]' : $encoded;
+}
+
 function forward_log($action, $request = null, $response = null, $processed = '')
 {
-    logModuleCall('forward', $action, $request, $response, $processed);
+    $safeRequest = forward_sanitize_log_value($request);
+    $safeResponse = forward_sanitize_log_value($response);
+    $safeProcessed = forward_sanitize_log_value($processed);
+    $moduleLogError = '';
+
+    if (function_exists('logModuleCall')) {
+        try {
+            logModuleCall('forward', $action, $safeRequest, $safeResponse, $safeProcessed);
+        } catch (Throwable $e) {
+            $moduleLogError = $e->getMessage();
+        }
+    } else {
+        $moduleLogError = 'logModuleCall unavailable';
+    }
+
+    $activityMessage = 'Forward module: ' . (string) $action;
+    $responseText = forward_log_to_string($safeResponse);
+    if ($responseText !== '') {
+        $activityMessage .= ' | ' . substr($responseText, 0, 1000);
+    }
+    if ($moduleLogError !== '') {
+        $activityMessage .= ' | module log fallback: ' . $moduleLogError;
+    }
+
+    if (function_exists('logActivity')) {
+        try {
+            logActivity($activityMessage);
+            return;
+        } catch (Throwable $e) {
+            $activityMessage .= ' | activity log failed: ' . $e->getMessage();
+        }
+    }
+
+    if (function_exists('error_log')) {
+        @error_log($activityMessage);
+    }
 }
 
 function forward_get_csrf_token()
@@ -996,6 +1100,42 @@ function forward_parse_allowed_product_ids($value)
         }
     }
     return array_values(array_unique($ids));
+}
+
+function forward_parse_product_rule_limits($value)
+{
+    $lines = preg_split('/\r\n|\r|\n/', (string) $value);
+    $limits = [];
+    foreach ($lines as $line) {
+        $line = trim((string) $line);
+        if ($line === '' || strpos($line, '#') === 0) {
+            continue;
+        }
+        if (!preg_match('/^(\d+)\s*[:=]\s*(\d+)$/', $line, $matches)) {
+            continue;
+        }
+        $productId = (int) $matches[1];
+        $limit = (int) $matches[2];
+        if ($productId > 0) {
+            $limits[$productId] = max(0, $limit);
+        }
+    }
+    return $limits;
+}
+
+function forward_default_rule_limit(array $settings)
+{
+    return max(0, (int) ($settings['max_rules_per_user'] ?? 10));
+}
+
+function forward_rule_limit_for_product(array $settings, $productId)
+{
+    $productId = (int) $productId;
+    $limits = forward_parse_product_rule_limits($settings['product_rule_limits'] ?? '');
+    if ($productId > 0 && array_key_exists($productId, $limits)) {
+        return (int) $limits[$productId];
+    }
+    return forward_default_rule_limit($settings);
 }
 
 function forward_parse_allowed_client_ips($value)
@@ -1282,25 +1422,69 @@ function forward_attach_service_listen_ips(array $services, array $settings)
     return $result;
 }
 
-function forward_get_user_services($userId, array $allowedProductIds = [], array $allowedClientIps = [])
+function forward_service_from_hosting_row($row, array $allowedClientIps = [])
+{
+    $ips = [];
+    if (!empty($row->dedicatedip)) {
+        $ips[] = trim((string) $row->dedicatedip);
+    }
+    if (!empty($row->assignedips)) {
+        $parts = preg_split('/[\r\n,\s]+/', (string) $row->assignedips, -1, PREG_SPLIT_NO_EMPTY);
+        foreach ($parts as $part) {
+            $ips[] = trim((string) $part);
+        }
+    }
+
+    $ips = forward_normalize_ip_list(implode(' ', $ips));
+    if (!empty($allowedClientIps)) {
+        $ips = array_values(array_intersect($ips, $allowedClientIps));
+    }
+    if (empty($ips)) {
+        return null;
+    }
+
+    return [
+        'user_id' => (int) ($row->user_id ?? $row->userid ?? 0),
+        'service_id' => (int) $row->service_id,
+        'server_id' => (int) $row->server_id,
+        'server_label' => forward_format_server_label($row->server_id, $row->server_name ?? '', $row->server_hostname ?? ''),
+        'product_id' => (int) $row->product_id,
+        'product_group_id' => (int) $row->product_group_id,
+        'product_name' => (string) $row->product_name,
+        'domainstatus' => (string) ($row->domainstatus ?? ''),
+        'ips' => $ips,
+    ];
+}
+
+function forward_base_services_query()
+{
+    return Capsule::table('tblhosting')
+        ->join('tblproducts', 'tblhosting.packageid', '=', 'tblproducts.id')
+        ->leftJoin('tblservers', 'tblhosting.server', '=', 'tblservers.id')
+        ->select(
+            'tblhosting.id as service_id',
+            'tblhosting.userid as user_id',
+            'tblhosting.server as server_id',
+            'tblhosting.packageid as product_id',
+            'tblhosting.domainstatus',
+            'tblhosting.dedicatedip',
+            'tblhosting.assignedips',
+            'tblproducts.name as product_name',
+            'tblproducts.gid as product_group_id',
+            'tblservers.name as server_name',
+            'tblservers.hostname as server_hostname'
+        );
+}
+
+function forward_get_user_services($userId, array $allowedProductIds = [], array $allowedClientIps = [], array $statuses = ['Active'])
 {
     try {
-        $query = Capsule::table('tblhosting')
-            ->join('tblproducts', 'tblhosting.packageid', '=', 'tblproducts.id')
-            ->leftJoin('tblservers', 'tblhosting.server', '=', 'tblservers.id')
-            ->where('tblhosting.userid', (int) $userId)
-            ->whereIn('tblhosting.domainstatus', ['Active', 'Suspended'])
-            ->select(
-                'tblhosting.id as service_id',
-                'tblhosting.server as server_id',
-                'tblhosting.packageid as product_id',
-                'tblhosting.dedicatedip',
-                'tblhosting.assignedips',
-                'tblproducts.name as product_name',
-                'tblproducts.gid as product_group_id',
-                'tblservers.name as server_name',
-                'tblservers.hostname as server_hostname'
-            );
+        $query = forward_base_services_query()
+            ->where('tblhosting.userid', (int) $userId);
+
+        if (!empty($statuses)) {
+            $query->whereIn('tblhosting.domainstatus', $statuses);
+        }
 
         if (!empty($allowedProductIds)) {
             $query->whereIn('tblhosting.packageid', $allowedProductIds);
@@ -1309,37 +1493,72 @@ function forward_get_user_services($userId, array $allowedProductIds = [], array
         $rows = $query->get();
         $services = [];
         foreach ($rows as $row) {
-            $ips = [];
-            if (!empty($row->dedicatedip)) {
-                $ips[] = trim($row->dedicatedip);
+            $service = forward_service_from_hosting_row($row, $allowedClientIps);
+            if ($service !== null) {
+                $services[] = $service;
             }
-            if (!empty($row->assignedips)) {
-                $parts = preg_split('/[\r\n,\s]+/', $row->assignedips, -1, PREG_SPLIT_NO_EMPTY);
-                foreach ($parts as $part) {
-                    $ips[] = trim($part);
-                }
-            }
-            $ips = forward_normalize_ip_list(implode(' ', $ips));
-            if (!empty($allowedClientIps)) {
-                $ips = array_values(array_intersect($ips, $allowedClientIps));
-            }
-            if (empty($ips)) {
-                continue;
-            }
-            $services[] = [
-                'service_id' => (int) $row->service_id,
-                'server_id' => (int) $row->server_id,
-                'server_label' => forward_format_server_label($row->server_id, $row->server_name ?? '', $row->server_hostname ?? ''),
-                'product_id' => (int) $row->product_id,
-                'product_group_id' => (int) $row->product_group_id,
-                'product_name' => $row->product_name,
-                'ips' => $ips,
-            ];
         }
         return $services;
     } catch (Exception $e) {
         forward_log('get_user_services_error', ['user_id' => $userId], $e->getMessage());
         return [];
+    }
+}
+
+function forward_get_all_forward_services(array $settings)
+{
+    try {
+        $allowedProductIds = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
+        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
+        $query = forward_base_services_query()
+            ->whereIn('tblhosting.domainstatus', ['Active', 'Suspended']);
+
+        if (!empty($allowedProductIds)) {
+            $query->whereIn('tblhosting.packageid', $allowedProductIds);
+        }
+
+        $rows = $query->get();
+        $services = [];
+        foreach ($rows as $row) {
+            $service = forward_service_from_hosting_row($row, $allowedClientIps);
+            if ($service !== null) {
+                $services[] = $service;
+            }
+        }
+        return $services;
+    } catch (Exception $e) {
+        forward_log('get_all_forward_services_error', [], $e->getMessage());
+        return [];
+    }
+}
+
+function forward_get_service_by_id($serviceId, $settings = null, array $statuses = [])
+{
+    $serviceId = (int) $serviceId;
+    if ($serviceId <= 0) {
+        return null;
+    }
+
+    try {
+        $settings = $settings === null ? forward_get_module_settings() : $settings;
+        if (!is_array($settings)) {
+            $settings = [];
+        }
+        $allowedProductIds = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
+        $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
+        $query = forward_base_services_query()->where('tblhosting.id', $serviceId);
+        if (!empty($statuses)) {
+            $query->whereIn('tblhosting.domainstatus', $statuses);
+        }
+        if (!empty($allowedProductIds)) {
+            $query->whereIn('tblhosting.packageid', $allowedProductIds);
+        }
+
+        $row = $query->first();
+        return $row ? forward_service_from_hosting_row($row, $allowedClientIps) : null;
+    } catch (Exception $e) {
+        forward_log('get_service_by_id_error', ['service_id' => $serviceId], $e->getMessage());
+        return null;
     }
 }
 
@@ -1414,6 +1633,96 @@ function forward_find_service_for_ip(array $services, $ip, $serviceId = 0, $serv
     return count($matches) === 1 ? $matches[0] : null;
 }
 
+function forward_count_user_product_rules($userId, $productId, $productName = '')
+{
+    $userId = (int) $userId;
+    $productId = (int) $productId;
+    $productName = trim((string) $productName);
+    if ($userId <= 0 || ($productId <= 0 && $productName === '')) {
+        return 0;
+    }
+
+    $services = forward_get_user_services($userId, [], [], []);
+    $serviceProductMap = [];
+    foreach ($services as $service) {
+        $serviceId = (int) ($service['service_id'] ?? 0);
+        if ($serviceId > 0) {
+            $serviceProductMap[$serviceId] = (int) ($service['product_id'] ?? 0);
+        }
+    }
+
+    try {
+        $rows = Capsule::table('mod_forward_rules')
+            ->where('user_id', $userId)
+            ->select('service_id', 'product_name')
+            ->get();
+        $count = 0;
+        foreach ($rows as $row) {
+            $serviceId = (int) ($row->service_id ?? 0);
+            if ($serviceId > 0 && $productId > 0 && (($serviceProductMap[$serviceId] ?? 0) === $productId)) {
+                $count++;
+                continue;
+            }
+            if ($serviceId <= 0 && $productName !== '' && trim((string) ($row->product_name ?? '')) === $productName) {
+                $count++;
+            }
+        }
+        return $count;
+    } catch (Exception $e) {
+        forward_log('count_user_product_rules_error', [
+            'user_id' => $userId,
+            'product_id' => $productId,
+        ], $e->getMessage());
+        return 0;
+    }
+}
+
+function forward_product_rule_quota(array $settings, $userId, array $service)
+{
+    $productId = (int) ($service['product_id'] ?? 0);
+    $productName = (string) ($service['product_name'] ?? '');
+    $limit = forward_rule_limit_for_product($settings, $productId);
+    $count = forward_count_user_product_rules($userId, $productId, $productName);
+    $remaining = $limit > 0 ? max(0, $limit - $count) : 0;
+
+    return [
+        'product_id' => $productId,
+        'limit' => $limit,
+        'count' => $count,
+        'remaining' => $remaining,
+        'can_create' => $limit === 0 || $count < $limit,
+    ];
+}
+
+function forward_attach_service_rule_quotas(array $services, array $settings, $userId)
+{
+    $quotaCache = [];
+    foreach ($services as $index => $service) {
+        $productId = (int) ($service['product_id'] ?? 0);
+        $productName = (string) ($service['product_name'] ?? '');
+        $key = $productId > 0 ? ('id:' . $productId) : ('name:' . $productName);
+        if (!isset($quotaCache[$key])) {
+            $quotaCache[$key] = forward_product_rule_quota($settings, $userId, $service);
+        }
+        $services[$index]['rule_quota'] = $quotaCache[$key];
+        $services[$index]['rule_limit'] = $quotaCache[$key]['limit'];
+        $services[$index]['rule_count'] = $quotaCache[$key]['count'];
+        $services[$index]['rule_remaining'] = $quotaCache[$key]['remaining'];
+        $services[$index]['rule_can_create'] = $quotaCache[$key]['can_create'];
+    }
+    return $services;
+}
+
+function forward_any_service_rule_capacity(array $services)
+{
+    foreach ($services as $service) {
+        if (!empty($service['rule_can_create'])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function forward_backfill_local_service_bindings()
 {
     static $done = false;
@@ -1446,7 +1755,7 @@ function forward_backfill_local_service_bindings()
             foreach ($rows as $row) {
                 $userId = (int) $row->user_id;
                 if (!isset($serviceCache[$userId])) {
-                    $serviceCache[$userId] = forward_get_user_services($userId);
+                    $serviceCache[$userId] = forward_get_user_services($userId, [], [], ['Active', 'Suspended']);
                 }
 
                 $service = forward_find_service_for_ip(
@@ -1555,6 +1864,32 @@ function forward_backfill_endpoint_server_bindings()
     }
 }
 
+function forward_api_error_message($status, $response = '', $decoded = null)
+{
+    $status = (int) $status;
+    $raw = trim((string) $response);
+    $message = '';
+
+    if (is_array($decoded)) {
+        $message = trim((string) ($decoded['error'] ?? $decoded['message'] ?? ''));
+    }
+    if ($message === '' && $raw !== '') {
+        $message = $raw;
+    }
+
+    if ($status === 401 || strtolower($message) === 'unauthorized') {
+        return 'Forward Bearer Token 认证失败：请确认 WHMCS 中填写的 Bearer Token 与 forward config.json 的 web_token 一致';
+    }
+    if ($status === 403) {
+        return 'Forward API 拒绝访问：请检查 Token 权限或反向代理访问控制';
+    }
+    if ($message === '') {
+        $message = 'HTTP ' . $status;
+    }
+
+    return 'Forward API 返回 HTTP ' . $status . ': ' . $message;
+}
+
 function forward_call_api_target(array $target, $path, $method = 'GET', array $payload = null)
 {
     $endpoint = rtrim((string) ($target['endpoint'] ?? ''), '/');
@@ -1565,7 +1900,7 @@ function forward_call_api_target(array $target, $path, $method = 'GET', array $p
         return ['success' => false, 'message' => '未配置 Forward API 地址'];
     }
     if ($token === '') {
-        return ['success' => false, 'message' => '未配置 Forward API Token'];
+        return ['success' => false, 'message' => '未配置 Forward Bearer Token'];
     }
 
     $url = $endpoint . $path;
@@ -1609,18 +1944,18 @@ function forward_call_api_target(array $target, $path, $method = 'GET', array $p
     if ($response === false || $response === '') {
         return ($status >= 200 && $status < 300)
             ? ['success' => true, 'data' => null]
-            : ['success' => false, 'message' => 'API 返回空响应，HTTP 状态码: ' . $status];
+            : ['success' => false, 'message' => forward_api_error_message($status, '')];
     }
 
     $decoded = json_decode($response, true);
     if (json_last_error() !== JSON_ERROR_NONE) {
         return ($status >= 200 && $status < 300)
             ? ['success' => true, 'data' => $response]
-            : ['success' => false, 'message' => 'API 返回异常内容: ' . $response];
+            : ['success' => false, 'message' => forward_api_error_message($status, $response)];
     }
 
     if ($status < 200 || $status >= 300) {
-        $message = $decoded['error'] ?? $decoded['message'] ?? ('HTTP ' . $status);
+        $message = forward_api_error_message($status, $response, $decoded);
         return ['success' => false, 'message' => $message, 'data' => $decoded];
     }
 
@@ -2225,12 +2560,14 @@ function forward_create_rule(array $data, $userId = 0, $isClient = false)
     $rule = $validated['data'];
 
     if ($isClient) {
-        $maxRules = max(0, (int) ($settings['max_rules_per_user'] ?? 0));
-        if ($maxRules > 0) {
-            $currentCount = (int) Capsule::table('mod_forward_rules')->where('user_id', (int) $userId)->count();
-            if ($currentCount >= $maxRules) {
-                return ['success' => false, 'message' => '已达到最大规则数量限制'];
-            }
+        $quota = forward_product_rule_quota($settings, $userId, $service);
+        if (empty($quota['can_create'])) {
+            $productLabel = trim((string) ($service['product_name'] ?? ''));
+            $productText = $productLabel !== '' ? ('产品“' . $productLabel . '”') : '当前产品';
+            return [
+                'success' => false,
+                'message' => $productText . '已达到端口规则数量限制（' . (int) $quota['count'] . '/' . (int) $quota['limit'] . '）',
+            ];
         }
 
         $rule['product_name'] = $service['product_name'];
@@ -2622,6 +2959,288 @@ function forward_get_remote_site_maps(array $settings, array $serverIds)
 function forward_get_remote_site_snapshot(array $settings, array $serverIds)
 {
     return forward_get_remote_resource_snapshot(forward_collect_api_targets($settings, $serverIds), '/api/sites');
+}
+
+function forward_remote_field(array $resource, $key, $default = '')
+{
+    return array_key_exists($key, $resource) ? $resource[$key] : $default;
+}
+
+function forward_remote_string(array $resource, $key, $default = '')
+{
+    return trim((string) forward_remote_field($resource, $key, $default));
+}
+
+function forward_remote_int(array $resource, $key, $default = 0)
+{
+    return (int) forward_remote_field($resource, $key, $default);
+}
+
+function forward_remote_enabled(array $resource)
+{
+    if (array_key_exists('enabled', $resource)) {
+        return (bool) $resource['enabled'];
+    }
+    $status = strtolower(forward_remote_string($resource, 'status'));
+    if ($status === 'stopped' || $status === 'inactive' || $status === 'disabled') {
+        return false;
+    }
+    return true;
+}
+
+function forward_match_unique_service_for_remote_ip(array $services, $ip)
+{
+    $ip = forward_normalize_ip_literal($ip);
+    if ($ip === '') {
+        return null;
+    }
+
+    $matches = [];
+    foreach ($services as $service) {
+        $serviceId = (int) ($service['service_id'] ?? 0);
+        if ($serviceId <= 0 || !in_array($ip, $service['ips'] ?? [], true)) {
+            continue;
+        }
+        $matches[$serviceId] = $service;
+    }
+
+    return count($matches) === 1 ? reset($matches) : null;
+}
+
+function forward_services_by_api_target(array $services, array $settings)
+{
+    $targets = [];
+    $servicesByTarget = [];
+    foreach ($services as $service) {
+        if (empty($service['ips'])) {
+            continue;
+        }
+        $target = forward_get_api_target($settings, (int) ($service['server_id'] ?? 0));
+        if (!forward_api_target_enabled($target)) {
+            continue;
+        }
+        $key = $target['key'] ?? '';
+        if ($key === '') {
+            continue;
+        }
+        $targets[$key] = $target;
+        if (!isset($servicesByTarget[$key])) {
+            $servicesByTarget[$key] = [];
+        }
+        $servicesByTarget[$key][] = $service;
+    }
+
+    return [$targets, $servicesByTarget];
+}
+
+function forward_upsert_synced_rule(array $remoteRule, array $service)
+{
+    $remoteId = forward_remote_int($remoteRule, 'id');
+    $outIp = forward_normalize_ip_literal(forward_remote_string($remoteRule, 'out_ip'));
+    $inIp = forward_normalize_ip_literal(forward_remote_string($remoteRule, 'in_ip', '0.0.0.0'));
+    $outSourceIp = forward_normalize_optional_ip(forward_remote_string($remoteRule, 'out_source_ip'));
+    $protocol = forward_normalize_protocol(forward_remote_string($remoteRule, 'protocol', 'tcp'));
+    if ($remoteId <= 0 || $outIp === '' || $protocol === '') {
+        return false;
+    }
+    if ($inIp === '') {
+        $inIp = '0.0.0.0';
+    }
+    if (!$outSourceIp['success']) {
+        $outSourceIp = ['value' => ''];
+    }
+
+    $serverId = (int) ($service['server_id'] ?? 0);
+    $existing = Capsule::table('mod_forward_rules')
+        ->where('server_id', $serverId)
+        ->where('remote_rule_id', $remoteId)
+        ->first();
+
+    if (!$existing) {
+        $existing = Capsule::table('mod_forward_rules')
+            ->where('server_id', $serverId)
+            ->where('forward_rule_id', $remoteId)
+            ->first();
+    }
+
+    $ruleName = forward_remote_string($remoteRule, 'remark');
+    if ($ruleName === '') {
+        $ruleName = 'Forward #' . $remoteId;
+    }
+
+    $values = [
+        'forward_rule_id' => null,
+        'remote_rule_id' => $remoteId,
+        'user_id' => (int) ($service['user_id'] ?? 0),
+        'product_name' => trim((string) ($service['product_name'] ?? '')) !== '' ? (string) $service['product_name'] : null,
+        'server_id' => $serverId,
+        'service_id' => (int) ($service['service_id'] ?? 0),
+        'rule_name' => $ruleName,
+        'in_interface' => forward_remote_string($remoteRule, 'in_interface'),
+        'in_ip' => $inIp,
+        'in_port' => forward_remote_int($remoteRule, 'in_port'),
+        'out_interface' => forward_remote_string($remoteRule, 'out_interface'),
+        'out_ip' => $outIp,
+        'out_port' => forward_remote_int($remoteRule, 'out_port'),
+        'out_source_ip' => $outSourceIp['value'],
+        'protocol' => $protocol,
+        'tag' => forward_remote_string($remoteRule, 'tag'),
+        'transparent' => forward_remote_enabled(['enabled' => forward_remote_field($remoteRule, 'transparent', false)]) ? 1 : 0,
+        'status' => forward_remote_enabled($remoteRule) ? 'active' : 'inactive',
+        'updated_at' => date('Y-m-d H:i:s'),
+    ];
+
+    if ($existing) {
+        $result = forward_execute_db_write('sync_remote_rule_update_error', function () use ($existing, $values) {
+            return Capsule::table('mod_forward_rules')->where('id', (int) $existing->id)->update($values);
+        });
+        return !empty($result['success']);
+    }
+
+    $values['description'] = '';
+    $values['created_at'] = date('Y-m-d H:i:s');
+    $result = forward_execute_db_write('sync_remote_rule_insert_error', function () use ($values) {
+        return Capsule::table('mod_forward_rules')->insert($values);
+    });
+    return !empty($result['success']);
+}
+
+function forward_upsert_synced_site(array $remoteSite, array $service)
+{
+    $remoteId = forward_remote_int($remoteSite, 'id');
+    $backendIp = forward_normalize_ip_literal(forward_remote_string($remoteSite, 'backend_ip'));
+    $listenIp = forward_normalize_ip_literal(forward_remote_string($remoteSite, 'listen_ip', '0.0.0.0'));
+    $domain = forward_normalize_domain(forward_remote_string($remoteSite, 'domain'));
+    $backendSourceIp = forward_normalize_optional_ip(forward_remote_string($remoteSite, 'backend_source_ip'));
+    if ($remoteId <= 0 || $backendIp === '' || !forward_is_valid_domain($domain)) {
+        return false;
+    }
+    if ($listenIp === '') {
+        $listenIp = '0.0.0.0';
+    }
+    if (!$backendSourceIp['success']) {
+        $backendSourceIp = ['value' => ''];
+    }
+
+    $serverId = (int) ($service['server_id'] ?? 0);
+    $existing = Capsule::table('mod_forward_sites')
+        ->where('server_id', $serverId)
+        ->where('remote_site_id', $remoteId)
+        ->first();
+
+    if (!$existing) {
+        $existing = Capsule::table('mod_forward_sites')
+            ->where('server_id', $serverId)
+            ->where('forward_site_id', $remoteId)
+            ->first();
+    }
+
+    $values = [
+        'forward_site_id' => null,
+        'remote_site_id' => $remoteId,
+        'user_id' => (int) ($service['user_id'] ?? 0),
+        'product_name' => trim((string) ($service['product_name'] ?? '')) !== '' ? (string) $service['product_name'] : null,
+        'server_id' => $serverId,
+        'service_id' => (int) ($service['service_id'] ?? 0),
+        'domain' => $domain,
+        'listen_interface' => forward_remote_string($remoteSite, 'listen_interface'),
+        'listen_ip' => $listenIp,
+        'backend_ip' => $backendIp,
+        'backend_source_ip' => $backendSourceIp['value'],
+        'backend_http_port' => forward_remote_int($remoteSite, 'backend_http_port', 80),
+        'backend_https_port' => forward_remote_int($remoteSite, 'backend_https_port', 443),
+        'tag' => forward_remote_string($remoteSite, 'tag'),
+        'transparent' => forward_remote_enabled(['enabled' => forward_remote_field($remoteSite, 'transparent', false)]) ? 1 : 0,
+        'status' => forward_remote_enabled($remoteSite) ? 'active' : 'inactive',
+        'updated_at' => date('Y-m-d H:i:s'),
+    ];
+
+    if ($existing) {
+        $result = forward_execute_db_write('sync_remote_site_update_error', function () use ($existing, $values) {
+            return Capsule::table('mod_forward_sites')->where('id', (int) $existing->id)->update($values);
+        });
+        return !empty($result['success']);
+    }
+
+    $values['description'] = '';
+    $values['created_at'] = date('Y-m-d H:i:s');
+    $result = forward_execute_db_write('sync_remote_site_insert_error', function () use ($values) {
+        return Capsule::table('mod_forward_sites')->insert($values);
+    });
+    return !empty($result['success']);
+}
+
+function forward_sync_remote_bindings_for_services(array $services, array $settings)
+{
+    if (empty($services)) {
+        return ['rules' => 0, 'sites' => 0, 'errors' => 0];
+    }
+
+    list($targets, $servicesByTarget) = forward_services_by_api_target($services, $settings);
+    if (empty($targets)) {
+        return ['rules' => 0, 'sites' => 0, 'errors' => 0];
+    }
+
+    $summary = ['rules' => 0, 'sites' => 0, 'errors' => 0];
+    $ruleSnapshot = forward_get_remote_resource_snapshot($targets, '/api/rules');
+    $siteSnapshot = forward_get_remote_resource_snapshot($targets, '/api/sites');
+
+    foreach ($targets as $key => $target) {
+        $targetServices = $servicesByTarget[$key] ?? [];
+        if (($ruleSnapshot['errors'][$key] ?? '') !== '') {
+            $summary['errors']++;
+            forward_log('sync_remote_rules_snapshot_error', [
+                'target' => forward_api_target_label($target),
+            ], $ruleSnapshot['errors'][$key]);
+        } else {
+            foreach (($ruleSnapshot['maps'][$key] ?? []) as $remoteRule) {
+                $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteRule, 'out_ip'));
+                if ($service === null) {
+                    continue;
+                }
+                if (forward_upsert_synced_rule($remoteRule, $service)) {
+                    $summary['rules']++;
+                }
+            }
+        }
+
+        if (($siteSnapshot['errors'][$key] ?? '') !== '') {
+            $summary['errors']++;
+            forward_log('sync_remote_sites_snapshot_error', [
+                'target' => forward_api_target_label($target),
+            ], $siteSnapshot['errors'][$key]);
+        } else {
+            foreach (($siteSnapshot['maps'][$key] ?? []) as $remoteSite) {
+                $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteSite, 'backend_ip'));
+                if ($service === null) {
+                    continue;
+                }
+                if (forward_upsert_synced_site($remoteSite, $service)) {
+                    $summary['sites']++;
+                }
+            }
+        }
+    }
+
+    return $summary;
+}
+
+function forward_sync_remote_bindings_for_service_id($serviceId, $settings = null)
+{
+    $settings = $settings === null ? forward_get_module_settings() : $settings;
+    if (!is_array($settings)) {
+        $settings = [];
+    }
+    $service = forward_get_service_by_id($serviceId, $settings, ['Active', 'Suspended', 'Terminated', 'Cancelled']);
+    if ($service === null) {
+        return ['rules' => 0, 'sites' => 0, 'errors' => 0];
+    }
+    return forward_sync_remote_bindings_for_services([$service], $settings);
+}
+
+function forward_sync_all_remote_bindings(array $settings)
+{
+    return forward_sync_remote_bindings_for_services(forward_get_all_forward_services($settings), $settings);
 }
 
 function forward_get_local_sites($userId = null)
@@ -3306,6 +3925,235 @@ function forward_delete_site($siteId, $userId = null)
     return ['success' => true, 'message' => '共享站点删除成功'];
 }
 
+function forward_service_resource_query($table, $serviceId, $userId = 0)
+{
+    $query = Capsule::table($table)->where('service_id', (int) $serviceId);
+    if ((int) $userId > 0) {
+        $query->where('user_id', (int) $userId);
+    }
+    return $query;
+}
+
+function forward_toggle_remote_resource_to_state($togglePath, $remoteId, $serverId, $desiredEnabled, $currentEnabled)
+{
+    $remoteId = (int) $remoteId;
+    if ($remoteId <= 0 || (bool) $desiredEnabled === (bool) $currentEnabled) {
+        return ['success' => true, 'changed' => false, 'enabled' => (bool) $currentEnabled];
+    }
+
+    $toggle = forward_remote_toggle_resource($togglePath, $remoteId, $serverId, (bool) $currentEnabled);
+    if (!$toggle['success']) {
+        return ['success' => false, 'message' => $toggle['message'] ?? '远端切换失败'];
+    }
+
+    $enabled = $toggle['enabled'] === null ? (bool) $desiredEnabled : (bool) $toggle['enabled'];
+    if ($enabled !== (bool) $desiredEnabled) {
+        return ['success' => false, 'message' => '远端切换后状态与期望不一致'];
+    }
+
+    return ['success' => true, 'changed' => true, 'enabled' => $enabled];
+}
+
+function forward_set_service_resources_enabled($serviceId, $userId, $enabled, $restoreOnlySuspended = false)
+{
+    $serviceId = (int) $serviceId;
+    $userId = (int) $userId;
+    if ($serviceId <= 0) {
+        return ['success' => false, 'message' => '无效的服务 ID'];
+    }
+
+    $settings = forward_get_module_settings();
+    forward_sync_remote_bindings_for_service_id($serviceId, $settings);
+
+    $summary = ['rules' => 0, 'sites' => 0, 'errors' => 0];
+    $resources = [
+        [
+            'table' => 'mod_forward_rules',
+            'remote_id' => 'remote_rule_id',
+            'legacy_remote_id' => 'forward_rule_id',
+            'toggle_path' => '/api/rules/toggle',
+            'log_action' => 'service_lifecycle_rule_toggle_error',
+        ],
+        [
+            'table' => 'mod_forward_sites',
+            'remote_id' => 'remote_site_id',
+            'legacy_remote_id' => 'forward_site_id',
+            'toggle_path' => '/api/sites/toggle',
+            'log_action' => 'service_lifecycle_site_toggle_error',
+        ],
+    ];
+
+    foreach ($resources as $resource) {
+        $query = forward_service_resource_query($resource['table'], $serviceId, $userId);
+        if ($restoreOnlySuspended) {
+            $query->where('service_suspended', 1);
+        }
+        $rows = $query->get();
+        foreach ($rows as $row) {
+            $remoteId = (int) (forward_data_get($row, $resource['remote_id'], 0) ?: forward_data_get($row, $resource['legacy_remote_id'], 0));
+            $serverId = (int) forward_data_get($row, 'server_id', 0);
+            $currentEnabled = (forward_data_get($row, 'status', 'active') !== 'inactive');
+            $shouldMarkSuspended = !$enabled && $currentEnabled;
+            $toggle = ['success' => true, 'changed' => false, 'enabled' => $currentEnabled];
+            if ($remoteId > 0) {
+                $toggle = forward_toggle_remote_resource_to_state(
+                    $resource['toggle_path'],
+                    $remoteId,
+                    $serverId,
+                    (bool) $enabled,
+                    $currentEnabled
+                );
+            }
+            if (!$toggle['success']) {
+                $summary['errors']++;
+                forward_log($resource['log_action'], [
+                    'service_id' => $serviceId,
+                    'user_id' => $userId,
+                    'remote_id' => $remoteId,
+                    'server_id' => $serverId,
+                    'desired_enabled' => (bool) $enabled,
+                ], $toggle['message'] ?? '远端切换失败');
+                continue;
+            }
+
+            $updateValues = [
+                'status' => $enabled ? 'active' : 'inactive',
+                'updated_at' => date('Y-m-d H:i:s'),
+            ];
+            if (!$enabled && $shouldMarkSuspended) {
+                $updateValues['service_suspended'] = 1;
+            } elseif ($enabled && $restoreOnlySuspended) {
+                $updateValues['service_suspended'] = 0;
+            }
+
+            $result = forward_execute_db_write('service_lifecycle_local_status_update_error', function () use ($resource, $row, $updateValues) {
+                return Capsule::table($resource['table'])->where('id', (int) $row->id)->update($updateValues);
+            });
+            if (!$result['success']) {
+                $summary['errors']++;
+                continue;
+            }
+
+            if ($resource['table'] === 'mod_forward_rules') {
+                $summary['rules']++;
+            } else {
+                $summary['sites']++;
+            }
+        }
+    }
+
+    return ['success' => $summary['errors'] === 0, 'summary' => $summary];
+}
+
+function forward_delete_service_resources($serviceId, $userId = 0)
+{
+    $serviceId = (int) $serviceId;
+    $userId = (int) $userId;
+    if ($serviceId <= 0) {
+        return ['success' => false, 'message' => '无效的服务 ID'];
+    }
+
+    $settings = forward_get_module_settings();
+    forward_sync_remote_bindings_for_service_id($serviceId, $settings);
+
+    $summary = ['rules' => 0, 'sites' => 0, 'errors' => 0];
+    $resources = [
+        [
+            'table' => 'mod_forward_rules',
+            'remote_id' => 'remote_rule_id',
+            'legacy_remote_id' => 'forward_rule_id',
+            'delete_path' => '/api/rules',
+            'log_action' => 'service_lifecycle_rule_delete_error',
+        ],
+        [
+            'table' => 'mod_forward_sites',
+            'remote_id' => 'remote_site_id',
+            'legacy_remote_id' => 'forward_site_id',
+            'delete_path' => '/api/sites',
+            'log_action' => 'service_lifecycle_site_delete_error',
+        ],
+    ];
+
+    foreach ($resources as $resource) {
+        $rows = forward_service_resource_query($resource['table'], $serviceId, $userId)->get();
+        foreach ($rows as $row) {
+            $remoteId = (int) (forward_data_get($row, $resource['remote_id'], 0) ?: forward_data_get($row, $resource['legacy_remote_id'], 0));
+            $serverId = (int) forward_data_get($row, 'server_id', 0);
+            if ($remoteId > 0) {
+                $remoteDelete = forward_remote_delete_resource($resource['delete_path'], $remoteId, $serverId);
+                if (!$remoteDelete['success']) {
+                    $summary['errors']++;
+                    forward_log($resource['log_action'], [
+                        'service_id' => $serviceId,
+                        'user_id' => $userId,
+                        'remote_id' => $remoteId,
+                        'server_id' => $serverId,
+                    ], $remoteDelete['message'] ?? '远端删除失败');
+                    continue;
+                }
+            }
+
+            $result = forward_execute_db_write('service_lifecycle_local_delete_error', function () use ($resource, $row) {
+                return Capsule::table($resource['table'])->where('id', (int) $row->id)->delete();
+            });
+            if (!$result['success']) {
+                $summary['errors']++;
+                continue;
+            }
+
+            if ($resource['table'] === 'mod_forward_rules') {
+                $summary['rules']++;
+            } else {
+                $summary['sites']++;
+            }
+        }
+    }
+
+    return ['success' => $summary['errors'] === 0, 'summary' => $summary];
+}
+
+function forward_service_context_from_hook_vars(array $vars)
+{
+    $params = is_array($vars['params'] ?? null) ? $vars['params'] : [];
+    $serviceId = (int) ($params['serviceid'] ?? $vars['serviceid'] ?? 0);
+    $userId = (int) ($params['userid'] ?? $vars['userid'] ?? $vars['clientId'] ?? 0);
+
+    return ['service_id' => $serviceId, 'user_id' => $userId];
+}
+
+function forward_handle_service_lifecycle_hook(array $vars, $action)
+{
+    try {
+        forward_ensure_runtime_schema();
+        $context = forward_service_context_from_hook_vars($vars);
+        $serviceId = (int) $context['service_id'];
+        $userId = (int) $context['user_id'];
+        if ($serviceId <= 0) {
+            forward_log('service_lifecycle_missing_service_id', ['action' => $action], $vars);
+            return;
+        }
+
+        if ($action === 'suspend') {
+            $result = forward_set_service_resources_enabled($serviceId, $userId, false, false);
+        } elseif ($action === 'unsuspend') {
+            $result = forward_set_service_resources_enabled($serviceId, $userId, true, true);
+        } else {
+            $result = forward_delete_service_resources($serviceId, $userId);
+        }
+
+        forward_log('service_lifecycle_' . $action, [
+            'service_id' => $serviceId,
+            'user_id' => $userId,
+        ], $result);
+    } catch (Throwable $e) {
+        forward_log('service_lifecycle_hook_error', [
+            'action' => $action,
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+        ], $e->getMessage(), $e->getTraceAsString());
+    }
+}
+
 function forward_json_response(array $payload)
 {
     header('Content-Type: application/json; charset=utf-8');
@@ -3430,11 +4278,53 @@ function forward_protocol_select_html(array $protocols)
 
 function forward_output($vars)
 {
+    try {
+        forward_output_render($vars);
+    } catch (Throwable $e) {
+        $context = [
+            'request_method' => $_SERVER['REQUEST_METHOD'] ?? '',
+            'action' => $_POST['action'] ?? '',
+            'uri' => $_SERVER['REQUEST_URI'] ?? '',
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+        ];
+        forward_log('admin_output_error', $context, $e->getMessage(), $e->getTraceAsString());
+
+        if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !empty($_POST['action'])) {
+            forward_json_response(['success' => false, 'message' => 'Forward 后台操作失败：' . $e->getMessage()]);
+        }
+
+        forward_render_admin_error('Forward 后台加载失败', $e, $context);
+    }
+}
+
+function forward_render_admin_error($title, Throwable $e, array $context = [])
+{
+    $title = htmlspecialchars((string) $title, ENT_QUOTES, 'UTF-8');
+    $message = htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8');
+    $file = htmlspecialchars((string) $e->getFile(), ENT_QUOTES, 'UTF-8');
+    $line = (int) $e->getLine();
+    $contextJson = htmlspecialchars(json_encode(forward_sanitize_log_value($context), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), ENT_QUOTES, 'UTF-8');
+
+    echo '<div class="forward-admin-error" style="margin:20px 0;padding:18px 20px;border:1px solid #f0b8b8;border-radius:14px;background:#fff7f7;color:#6f1d1d;">';
+    echo '<h3 style="margin:0 0 10px;font-size:18px;">' . $title . '</h3>';
+    echo '<p style="margin:0 0 10px;">模块后台初始化失败，已写入 WHMCS Activity Log / Module Log / PHP error_log 兜底日志。</p>';
+    echo '<p style="margin:0 0 10px;"><strong>错误：</strong>' . $message . '</p>';
+    echo '<p style="margin:0 0 10px;"><strong>位置：</strong><code>' . $file . ':' . $line . '</code></p>';
+    if ($contextJson !== '' && $contextJson !== 'null') {
+        echo '<details style="margin-top:10px;"><summary style="cursor:pointer;">上下文</summary><pre style="white-space:pre-wrap;margin-top:8px;">' . $contextJson . '</pre></details>';
+    }
+    echo '</div>';
+}
+
+function forward_output_render($vars)
+{
     forward_ensure_runtime_schema();
 
     forward_handle_admin_ajax();
 
     $settings = forward_get_module_settings();
+    forward_sync_all_remote_bindings($settings);
     $rules = forward_get_local_rules();
     $sites = forward_get_local_sites();
     $activeRuleCount = 0;
@@ -3483,17 +4373,21 @@ function forward_output($vars)
     echo <<<HTML
 <style>
 .forward-admin {
-  --forward-ink: #17313a;
-  --forward-muted: #60727a;
-  --forward-line: #d5dee2;
-  --forward-soft: #f4f7f8;
-  --forward-hero-a: #17313a;
-  --forward-hero-b: #2d5d63;
+  --forward-ink: #102a32;
+  --forward-muted: #3f5962;
+  --forward-line: #b8c9d0;
+  --forward-soft: #eef5f6;
+  --forward-hero-a: #102a32;
+  --forward-hero-b: #245f62;
   --forward-accent: #efb366;
-  --forward-card-shadow: 0 18px 40px rgba(16, 37, 43, 0.08);
+  --forward-card-shadow: 0 20px 46px rgba(16, 42, 50, 0.14);
+  width: 100%;
+  max-width: 100%;
   color: var(--forward-ink);
 }
-.forward-admin * {
+.forward-admin *,
+.forward-admin *::before,
+.forward-admin *::after {
   box-sizing: border-box;
 }
 .forward-admin .panel {
@@ -3519,6 +4413,7 @@ function forward_output($vars)
   margin-bottom: 18px;
 }
 .forward-admin__intro {
+  min-width: 0;
   background: linear-gradient(135deg, rgba(23, 49, 58, 0.98), rgba(45, 93, 99, 0.92));
   border-radius: 22px;
   color: #fff;
@@ -3551,11 +4446,68 @@ function forward_output($vars)
   gap: 14px;
 }
 .forward-admin__stat {
+  min-width: 0;
   background: #fff;
   border: 1px solid var(--forward-line);
   border-radius: 18px;
   padding: 18px;
   box-shadow: var(--forward-card-shadow);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.forward-admin__stat:hover {
+  border-color: #8eb0ba;
+  box-shadow: 0 24px 54px rgba(16, 42, 50, 0.16);
+}
+.forward-admin__notice {
+  position: sticky;
+  top: 12px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  font-weight: 600;
+  box-shadow: 0 18px 38px rgba(16, 42, 50, 0.14);
+}
+.forward-admin__notice--success {
+  background: #e8f6f1;
+  border-color: #98d2c1;
+  color: #075c49;
+}
+.forward-admin__notice--warning {
+  background: #fff3df;
+  border-color: #e8b36f;
+  color: #7a410c;
+}
+.forward-admin__notice--danger {
+  background: #fff0ef;
+  border-color: #e59a95;
+  color: #8d221e;
+}
+.forward-admin__notice-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.forward-admin__notice-action {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: #102a32;
+  color: #fff;
+  font-weight: 700;
+  transition: transform 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+.forward-admin__notice-action:hover,
+.forward-admin__notice-action:focus {
+  background: #245f62;
+  box-shadow: 0 8px 18px rgba(16, 42, 50, 0.22);
+  color: #fff;
+  transform: translateY(-1px);
 }
 .forward-admin__stat-label {
   display: block;
@@ -3584,6 +4536,7 @@ function forward_output($vars)
   margin-bottom: 18px;
 }
 .forward-admin__summary-card {
+  min-width: 0;
   border: 1px solid var(--forward-line);
   border-radius: 16px;
   background: #fff;
@@ -3595,50 +4548,98 @@ function forward_output($vars)
   margin-top: 8px;
 }
 .forward-admin code {
+  max-width: 100%;
   border-radius: 10px;
   padding: 2px 8px;
   background: var(--forward-soft);
   color: var(--forward-ink);
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .forward-admin .table-responsive {
   border: 1px solid var(--forward-line);
   border-radius: 16px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
 }
 .forward-admin .table {
+  min-width: 860px;
   margin: 0;
 }
 .forward-admin .table > thead > tr > th {
   border-top: 0;
   border-bottom: 1px solid var(--forward-line);
-  background: var(--forward-soft);
-  color: var(--forward-muted);
+  background: #e8f0f2;
+  color: #284650;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 .forward-admin .table > tbody > tr > td {
   vertical-align: middle;
-  border-top: 1px solid #ebeff1;
+  border-top: 1px solid #dce7eb;
 }
 .forward-admin .table > tbody > tr:hover {
-  background: #fbfcfc;
+  background: #f6fafb;
+}
+.forward-admin .table > tbody > tr.is-removing {
+  opacity: 0.45;
+  transform: translateX(6px);
+  transition: opacity 180ms ease, transform 180ms ease;
 }
 .forward-admin .btn {
   border-radius: 999px;
   font-weight: 600;
+  transition: transform 150ms ease, box-shadow 150ms ease, background 150ms ease, border-color 150ms ease, color 150ms ease, opacity 150ms ease;
+}
+.forward-admin .btn:hover,
+.forward-admin .btn:focus {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(16, 42, 50, 0.14);
+}
+.forward-admin .btn:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+.forward-admin .btn.is-loading {
+  cursor: progress;
+  opacity: 0.78;
 }
 .forward-admin .btn-primary {
-  background: linear-gradient(135deg, #1f5963, #3d7680);
+  color: #fff;
+  background: linear-gradient(135deg, #164b54, #2c747b);
   border-color: transparent;
 }
 .forward-admin .btn-warning {
-  color: #17313a;
+  color: #102a32;
+  background: #f0b35e;
+  border-color: #d89943;
+}
+.forward-admin .btn-danger {
+  color: #fff;
+  background: #b63a34;
+  border-color: #9e302b;
 }
 .forward-admin .label {
   display: inline-block;
   padding: 5px 10px;
   border-radius: 999px;
+}
+.forward-admin .label-success {
+  background: #0f7b62;
+}
+.forward-admin .label-default {
+  background: #536b74;
+}
+.forward-admin .label-info {
+  background: #185f78;
+}
+.forward-admin .label-warning {
+  background: #985719;
+}
+.forward-admin .label-danger {
+  background: #a5332e;
 }
 .forward-admin .modal-content {
   border-radius: 20px;
@@ -3689,6 +4690,7 @@ HTML;
     if ($legacyServerMapNotice !== '') {
         echo '<div class="alert alert-warning" style="border-radius:14px;margin-bottom:18px;">' . htmlspecialchars($legacyServerMapNotice, ENT_QUOTES, 'UTF-8') . '</div>';
     }
+    echo '<div id="forwardAdminNotice" class="forward-admin__notice" style="display:none;"></div>';
 
     echo '<div class="panel panel-default">';
     echo '<div class="panel-heading"><div class="row">';
@@ -3704,14 +4706,14 @@ HTML;
             $ruleSourceMeta = !empty($rule['transparent'])
                 ? '源地址：透传'
                 : (!empty($rule['out_source_ip']) ? ('回源 IP：' . $rule['out_source_ip']) : '回源 IP：自动');
-            echo '<tr>';
+            echo '<tr data-forward-rule-row="' . (int) $rule['id'] . '">';
             echo '<td>' . (int) $rule['id'] . '</td>';
             echo '<td><strong>' . htmlspecialchars($rule['rule_name'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($rule['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($rule['in_endpoint'], ENT_QUOTES, 'UTF-8') . '</td>';
             echo '<td>' . htmlspecialchars($rule['out_endpoint'], ENT_QUOTES, 'UTF-8') . '<br><small>' . htmlspecialchars($ruleSourceMeta, ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td><span class="label label-info">' . htmlspecialchars($rule['protocol'], ENT_QUOTES, 'UTF-8') . '</span></td>';
             echo '<td>' . htmlspecialchars($rule['tag'] ?: '-', ENT_QUOTES, 'UTF-8') . '</td>';
-            echo '<td><span class="label label-' . htmlspecialchars($rule['status_class'], ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($rule['status_text'], ENT_QUOTES, 'UTF-8') . '</span></td>';
+            echo '<td><span class="label forward-admin-status label-' . htmlspecialchars($rule['status_class'], ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($rule['status_text'], ENT_QUOTES, 'UTF-8') . '</span></td>';
             echo '<td>' . (int) $rule['user_id'] . '</td>';
             echo '<td><button type="button" class="btn btn-xs btn-' . ($rule['enabled'] ? 'default' : 'success') . ' forward-toggle-rule" data-id="' . (int) $rule['id'] . '">' . ($rule['enabled'] ? '禁用' : '启用') . '</button> ';
             echo '<button type="button" class="btn btn-xs btn-warning forward-edit-rule" data-rule="' . $ruleJson . '">编辑</button> ';
@@ -3760,13 +4762,13 @@ HTML;
             $siteSourceMeta = !empty($site['transparent'])
                 ? '源地址：透传'
                 : (!empty($site['backend_source_ip']) ? ('回源 IP：' . $site['backend_source_ip']) : '回源 IP：自动');
-            echo '<tr>';
+            echo '<tr data-forward-site-row="' . (int) $site['id'] . '">';
             echo '<td>' . (int) $site['id'] . '</td>';
             echo '<td><strong>' . htmlspecialchars($site['domain'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($site['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($site['listen_endpoint'], ENT_QUOTES, 'UTF-8') . '</td>';
             echo '<td>' . htmlspecialchars($site['backend_ip'], ENT_QUOTES, 'UTF-8') . ' <small>(' . htmlspecialchars($backendHttp . '，' . $backendHttps, ENT_QUOTES, 'UTF-8') . ')</small><br><small>' . htmlspecialchars($siteSourceMeta, ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($site['tag'] ?: '-', ENT_QUOTES, 'UTF-8') . '</td>';
-            echo '<td><span class="label label-' . htmlspecialchars($site['status_class'], ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($site['status_text'], ENT_QUOTES, 'UTF-8') . '</span></td>';
+            echo '<td><span class="label forward-admin-status label-' . htmlspecialchars($site['status_class'], ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($site['status_text'], ENT_QUOTES, 'UTF-8') . '</span></td>';
             echo '<td>' . (int) $site['user_id'] . '</td>';
             echo '<td><button type="button" class="btn btn-xs btn-' . ($site['enabled'] ? 'default' : 'success') . ' forward-toggle-site" data-id="' . (int) $site['id'] . '">' . ($site['enabled'] ? '禁用' : '启用') . '</button> ';
             echo '<button type="button" class="btn btn-xs btn-warning forward-edit-site" data-site="' . $siteJson . '">编辑</button> ';
@@ -3798,12 +4800,12 @@ HTML;
     echo '</div><div class="modal-footer"><button type="button" class="btn btn-default" data-dismiss="modal">取消</button><button type="submit" class="btn btn-primary">保存</button></div></form>';
     echo '</div></div></div>';
 
-    echo <<<HTML
-<script>
-(function ($) {
-  var csrfToken = {$csrfTokenJs};
-  var adminServerOptions = {$adminServerOptionsJs};
-  var adminDefaultTransparent = {$adminDefaultTransparentJs};
+    echo '<script>' . PHP_EOL;
+    echo '(function ($) {' . PHP_EOL;
+    echo '  var csrfToken = ' . $csrfTokenJs . ';' . PHP_EOL;
+    echo '  var adminServerOptions = ' . $adminServerOptionsJs . ';' . PHP_EOL;
+    echo '  var adminDefaultTransparent = ' . $adminDefaultTransparentJs . ';' . PHP_EOL;
+    echo <<<'HTML'
 
   function normalizeServerId(value) {
     var parsed = parseInt(value, 10);
@@ -3908,6 +4910,54 @@ HTML;
     }
   }
 
+  function showAdminNotice(type, message, actionLabel, actionHandler) {
+    var $notice = $('#forwardAdminNotice');
+    $notice
+      .removeClass('forward-admin__notice--success forward-admin__notice--warning forward-admin__notice--danger')
+      .addClass('forward-admin__notice--' + type)
+      .empty();
+    $('<span class="forward-admin__notice-text"></span>').text(message).appendTo($notice);
+    if (actionLabel && $.isFunction(actionHandler)) {
+      $('<button type="button" class="forward-admin__notice-action"></button>')
+        .text(actionLabel)
+        .on('click', actionHandler)
+        .appendTo($notice);
+    }
+    $notice.stop(true, true).css('display', 'flex').hide().fadeIn(120);
+  }
+
+  function showAdminRefreshNotice(message) {
+    showAdminNotice('success', message + '，列表未自动刷新。', '刷新列表', function () {
+      window.location.reload();
+    });
+  }
+
+  function setAdminButtonLoading($button, loading, text) {
+    if (!$button || !$button.length) {
+      return;
+    }
+    if (!$button.data('default-text')) {
+      $button.data('default-text', $.trim($button.text()));
+    }
+    $button.prop('disabled', loading).toggleClass('is-loading', loading);
+    $button.text(loading ? (text || '处理中...') : $button.data('default-text'));
+  }
+
+  function setAdminStatus($row, enabled) {
+    $row.find('.forward-admin-status').first()
+      .removeClass('label-success label-warning label-danger label-default label-info')
+      .addClass(enabled ? 'label-success' : 'label-default')
+      .text(enabled ? '运行中' : '已停止');
+  }
+
+  function setAdminToggleButton($button, enabled) {
+    $button
+      .removeClass('btn-default btn-success')
+      .addClass(enabled ? 'btn-default' : 'btn-success')
+      .text(enabled ? '禁用' : '启用')
+      .data('default-text', enabled ? '禁用' : '启用');
+  }
+
   function resetForm() {
     $('#forwardAdminRuleForm')[0].reset();
     $('#forward_admin_rule_id').val('');
@@ -4002,63 +5052,98 @@ HTML;
   });
 
   $('.forward-delete-rule').on('click', function () {
-    var ruleId = $(this).data('id');
+    var $button = $(this);
+    var $row = $button.closest('tr');
+    var ruleId = $button.data('id');
     if (!confirm('确定删除这条规则吗？')) return;
+    setAdminButtonLoading($button, true);
     $.post(window.location.href, {action: 'delete_rule', rule_id: ruleId, csrf_token: csrfToken}, function (response) {
       if (response && response.success) {
-        window.location.reload();
+        showAdminNotice('success', response.message || '规则已删除');
+        $row.addClass('is-removing').fadeOut(180, function () {
+          $(this).remove();
+        });
       } else {
-        alert(response && response.message ? response.message : '删除失败');
+        showAdminNotice('danger', response && response.message ? response.message : '删除失败');
       }
     }, 'json').fail(function () {
-      alert('删除失败，请稍后重试');
+      showAdminNotice('danger', '删除失败，请稍后重试');
+    }).always(function () {
+      setAdminButtonLoading($button, false);
     });
   });
 
   $('.forward-delete-site').on('click', function () {
-    var siteId = $(this).data('id');
+    var $button = $(this);
+    var $row = $button.closest('tr');
+    var siteId = $button.data('id');
     if (!confirm('确定删除这个共享站点吗？')) return;
+    setAdminButtonLoading($button, true);
     $.post(window.location.href, {action: 'delete_site', site_id: siteId, csrf_token: csrfToken}, function (response) {
       if (response && response.success) {
-        window.location.reload();
+        showAdminNotice('success', response.message || '共享站点已删除');
+        $row.addClass('is-removing').fadeOut(180, function () {
+          $(this).remove();
+        });
       } else {
-        alert(response && response.message ? response.message : '删除失败');
+        showAdminNotice('danger', response && response.message ? response.message : '删除失败');
       }
     }, 'json').fail(function () {
-      alert('删除失败，请稍后重试');
+      showAdminNotice('danger', '删除失败，请稍后重试');
+    }).always(function () {
+      setAdminButtonLoading($button, false);
     });
   });
 
   $('.forward-toggle-rule').on('click', function () {
-    var ruleId = $(this).data('id');
+    var $button = $(this);
+    var $row = $button.closest('tr');
+    var ruleId = $button.data('id');
+    setAdminButtonLoading($button, true);
     $.post(window.location.href, {action: 'toggle_rule', rule_id: ruleId, csrf_token: csrfToken}, function (response) {
       if (response && response.success) {
-        window.location.reload();
+        var enabled = !!response.enabled;
+        setAdminToggleButton($button, enabled);
+        setAdminStatus($row, enabled);
+        showAdminNotice('success', response.message || '规则状态已更新');
       } else {
-        alert(response && response.message ? response.message : '切换状态失败');
+        showAdminNotice('danger', response && response.message ? response.message : '切换状态失败');
       }
     }, 'json').fail(function () {
-      alert('切换状态失败，请稍后重试');
+      showAdminNotice('danger', '切换状态失败，请稍后重试');
+    }).always(function () {
+      setAdminButtonLoading($button, false);
     });
   });
 
   $('.forward-toggle-site').on('click', function () {
-    var siteId = $(this).data('id');
+    var $button = $(this);
+    var $row = $button.closest('tr');
+    var siteId = $button.data('id');
+    setAdminButtonLoading($button, true);
     $.post(window.location.href, {action: 'toggle_site', site_id: siteId, csrf_token: csrfToken}, function (response) {
       if (response && response.success) {
-        window.location.reload();
+        var enabled = !!response.enabled;
+        setAdminToggleButton($button, enabled);
+        setAdminStatus($row, enabled);
+        showAdminNotice('success', response.message || '共享站点状态已更新');
       } else {
-        alert(response && response.message ? response.message : '切换状态失败');
+        showAdminNotice('danger', response && response.message ? response.message : '切换状态失败');
       }
     }, 'json').fail(function () {
-      alert('切换状态失败，请稍后重试');
+      showAdminNotice('danger', '切换状态失败，请稍后重试');
+    }).always(function () {
+      setAdminButtonLoading($button, false);
     });
   });
 
   $('#forwardAdminRuleForm').on('submit', function (e) {
     e.preventDefault();
-    var formData = $(this).serializeArray();
+    var $form = $(this);
+    var $submit = $form.find('button[type="submit"]');
+    var formData = $form.serializeArray();
     formData.push({name: 'action', value: $('#forward_admin_rule_id').val() ? 'edit_rule' : 'add_rule'});
+    setAdminButtonLoading($submit, true, '保存中...');
     $.ajax({
       url: window.location.href,
       type: 'POST',
@@ -4066,19 +5151,25 @@ HTML;
       dataType: 'json'
     }).done(function (response) {
       if (response && response.success) {
-        window.location.reload();
+        $('#forwardAdminRuleModal').modal('hide');
+        showAdminRefreshNotice(response.message || '规则保存成功');
       } else {
-        alert(response && response.message ? response.message : '保存失败');
+        showAdminNotice('danger', response && response.message ? response.message : '保存失败');
       }
     }).fail(function () {
-      alert('保存失败，请稍后重试');
+      showAdminNotice('danger', '保存失败，请稍后重试');
+    }).always(function () {
+      setAdminButtonLoading($submit, false);
     });
   });
 
   $('#forwardAdminSiteForm').on('submit', function (e) {
     e.preventDefault();
-    var formData = $(this).serializeArray();
+    var $form = $(this);
+    var $submit = $form.find('button[type="submit"]');
+    var formData = $form.serializeArray();
     formData.push({name: 'action', value: $('#forward_admin_site_id').val() ? 'edit_site' : 'add_site'});
+    setAdminButtonLoading($submit, true, '保存中...');
     $.ajax({
       url: window.location.href,
       type: 'POST',
@@ -4086,12 +5177,15 @@ HTML;
       dataType: 'json'
     }).done(function (response) {
       if (response && response.success) {
-        window.location.reload();
+        $('#forwardAdminSiteModal').modal('hide');
+        showAdminRefreshNotice(response.message || '共享站点保存成功');
       } else {
-        alert(response && response.message ? response.message : '保存失败');
+        showAdminNotice('danger', response && response.message ? response.message : '保存失败');
       }
     }).fail(function () {
-      alert('保存失败，请稍后重试');
+      showAdminNotice('danger', '保存失败，请稍后重试');
+    }).always(function () {
+      setAdminButtonLoading($submit, false);
     });
   });
 
@@ -4106,6 +5200,38 @@ HTML;
 }
 
 function forward_clientarea($vars)
+{
+    try {
+        return forward_clientarea_render($vars);
+    } catch (Throwable $e) {
+        $context = [
+            'request_method' => $_SERVER['REQUEST_METHOD'] ?? '',
+            'action' => $_POST['action'] ?? '',
+            'uri' => $_SERVER['REQUEST_URI'] ?? '',
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+        ];
+        forward_log('clientarea_output_error', $context, $e->getMessage(), $e->getTraceAsString());
+
+        if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !empty($_POST['action'])) {
+            forward_json_response(['success' => false, 'message' => 'Forward 客户区操作失败：' . $e->getMessage()]);
+        }
+
+        return [
+            'pagetitle' => 'Forward',
+            'breadcrumb' => ['index.php?m=forward' => 'Forward'],
+            'templatefile' => 'clientarea_disabled',
+            'requirelogin' => true,
+            'vars' => [
+                'asset_url' => 'modules/addons/forward',
+                'modulelink' => $vars['modulelink'] ?? 'index.php?m=forward',
+                'message' => 'Forward 客户区加载失败：' . $e->getMessage(),
+            ],
+        ];
+    }
+}
+
+function forward_clientarea_render($vars)
 {
     forward_ensure_runtime_schema();
 
@@ -4133,8 +5259,14 @@ function forward_clientarea($vars)
     $services = $clientId > 0 ? forward_get_user_services($clientId, $allowedProducts, $allowedClientIps) : [];
     $services = forward_attach_service_listen_ips($services, $settings);
     $hasAccess = $clientId > 0 && !empty($services);
+    if ($hasAccess) {
+        forward_sync_remote_bindings_for_services($services, $settings);
+    }
     $rules = $clientId > 0 ? forward_get_local_rules($clientId) : [];
     $sites = $clientId > 0 ? forward_get_local_sites($clientId) : [];
+    if ($hasAccess) {
+        $services = forward_attach_service_rule_quotas($services, $settings, $clientId);
+    }
     $activeRuleCount = 0;
     foreach ($rules as $rule) {
         if (!empty($rule['enabled'])) {
@@ -4149,7 +5281,7 @@ function forward_clientarea($vars)
     }
     $protocols = forward_protocol_options($settings['allowed_protocols'] ?? ($vars['allowed_protocols'] ?? 'tcp+udp'));
     $clientPermissions = forward_client_permissions($settings);
-    $maxRules = max(0, (int) ($settings['max_rules_per_user'] ?? ($vars['max_rules_per_user'] ?? 10)));
+    $maxRules = forward_default_rule_limit($settings);
     $maxSites = max(0, (int) ($settings['max_sites_per_user'] ?? ($vars['max_sites_per_user'] ?? 5)));
     $allServerIps = forward_get_all_server_ips($settings);
     $clientListenPortRange = forward_get_listen_port_range($settings, true);
@@ -4187,7 +5319,7 @@ function forward_clientarea($vars)
             'current_rule_count' => count($rules),
             'active_rule_count' => $activeRuleCount,
             'inactive_rule_count' => count($rules) - $activeRuleCount,
-            'can_add_more' => $maxRules === 0 || count($rules) < $maxRules,
+            'can_add_more' => forward_any_service_rule_capacity($services),
             'max_sites' => $maxSites,
             'current_site_count' => count($sites),
             'active_site_count' => $activeSiteCount,

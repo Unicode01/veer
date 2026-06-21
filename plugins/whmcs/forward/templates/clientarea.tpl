@@ -1,4 +1,4 @@
-<link rel="stylesheet" href="{$asset_url|escape:'html'}/assets/client.css">
+<link rel="stylesheet" href="{$asset_url|escape:'html'}/assets/client.css?v=1.3.4">
 
 <div class="forward-client">
     <div class="forward-shell">
@@ -12,7 +12,7 @@
                 <div class="forward-stat">
                     <span class="forward-stat__label">端口规则</span>
                     <strong class="forward-stat__value">{$current_rule_count}</strong>
-                    <span class="forward-stat__hint">{if $max_rules > 0}上限 {$max_rules}{else}不限{/if}</span>
+                    <span class="forward-stat__hint">{if $max_rules > 0}默认上限 {$max_rules}/产品{else}默认不限{/if}</span>
                 </div>
                 <div class="forward-stat">
                     <span class="forward-stat__label">共享站点</span>
@@ -53,7 +53,7 @@
                                 <optgroup label="{$productName|escape:'html'}">
                                     {foreach $serviceGroup as $service}
                                         {foreach $service.ips as $ip}
-                                            <option value="{$ip|escape:'html'}" data-product="{$service.product_name|escape:'html'}" data-service-id="{$service.service_id|escape:'html'}" data-server-id="{$service.server_id|escape:'html'}" data-server-label="{$service.server_label|escape:'html'}" data-listen-ips="{$service.listen_ips_csv|escape:'html'}">
+                                            <option value="{$ip|escape:'html'}" data-product="{$service.product_name|escape:'html'}" data-product-id="{$service.product_id|escape:'html'}" data-service-id="{$service.service_id|escape:'html'}" data-server-id="{$service.server_id|escape:'html'}" data-server-label="{$service.server_label|escape:'html'}" data-listen-ips="{$service.listen_ips_csv|escape:'html'}" data-rule-limit="{$service.rule_limit|escape:'html'}" data-rule-count="{$service.rule_count|escape:'html'}" data-rule-remaining="{$service.rule_remaining|escape:'html'}">
                                                 {$service.product_name|escape:'html'} - {$ip|escape:'html'} ({$service.server_label|escape:'html'})
                                             </option>
                                         {/foreach}
@@ -72,6 +72,10 @@
                         <div>
                             <span class="forward-selection__label">可用入口 IP</span>
                             <strong class="forward-selection__value" id="forwardSelectedListenIps">{$server_ip_summary|escape:'html'}</strong>
+                        </div>
+                        <div>
+                            <span class="forward-selection__label">产品规则额度</span>
+                            <strong class="forward-selection__value" id="forwardSelectedRuleQuota">请选择服务后显示</strong>
                         </div>
                         <div>
                             <span class="forward-selection__label">规则预览</span>
@@ -114,8 +118,8 @@
                             <span>{$active_site_count|escape:'html'} 启用 / {$inactive_site_count|escape:'html'} 停用</span>
                         </div>
                         <div class="forward-overview__row">
-                            <span>规则剩余额度</span>
-                            <span>{if $max_rules > 0}{$max_rules-$current_rule_count}{else}不限{/if}</span>
+                            <span>端口规则额度</span>
+                            <span>按用户 + 产品计算，选择服务后显示剩余</span>
                         </div>
                         <div class="forward-overview__row">
                             <span>站点剩余额度</span>
@@ -148,7 +152,7 @@
                         <tbody>
                             {if $rules|@count > 0}
                                 {foreach $rules as $rule}
-                                    <tr>
+                                    <tr data-forward-rule-row="{$rule.id|escape:'html'}">
                                         <td>
                                             <div class="forward-rule-name">{$rule.rule_name|escape:'html'}</div>
                                             {if $rule.product_name}
@@ -183,7 +187,7 @@
                                             </div>
                                         </td>
                                         <td>
-                                            <span class="forward-badge forward-badge--{$rule.status_class|escape:'html'}">{$rule.status_text|escape:'html'}</span>
+                                            <span class="forward-badge forward-status-badge forward-badge--{$rule.status_class|escape:'html'}">{$rule.status_text|escape:'html'}</span>
                                         </td>
                                         <td>
                                             <div class="forward-actions-cell">
@@ -236,7 +240,7 @@
                         <tbody>
                             {if $sites|@count > 0}
                                 {foreach $sites as $site}
-                                    <tr>
+                                    <tr data-forward-site-row="{$site.id|escape:'html'}">
                                         <td>
                                             <div class="forward-rule-name">{$site.domain|escape:'html'}</div>
                                             {if $site.server_label}
@@ -270,7 +274,7 @@
                                             </div>
                                         </td>
                                         <td>
-                                            <span class="forward-badge forward-badge--{$site.status_class|escape:'html'}">{$site.status_text|escape:'html'}</span>
+                                            <span class="forward-badge forward-status-badge forward-badge--{$site.status_class|escape:'html'}">{$site.status_text|escape:'html'}</span>
                                         </td>
                                         <td>
                                             <div class="forward-actions-cell">
@@ -600,6 +604,8 @@
     var clientPortMin = {$client_port_min|intval};
     var clientPortMax = {$client_port_max|intval};
     var clientPortRangeText = '{$client_port_range_text|escape:'javascript'}';
+    var canAddMoreSites = {if $can_add_more_sites}true{else}false{/if};
+{literal}
     var domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$/i;
     var noticeTimer = null;
 
@@ -645,6 +651,18 @@
     function normalizeServiceId(value) {
         var parsed = parseInt(value, 10);
         return isNaN(parsed) ? 0 : parsed;
+    }
+
+    function normalizeQuotaValue(value) {
+        var parsed = parseInt(value, 10);
+        return isNaN(parsed) || parsed < 0 ? 0 : parsed;
+    }
+
+    function formatRuleQuota(limit, count, remaining) {
+        if (limit <= 0) {
+            return '不限（当前 ' + count + ' 条）';
+        }
+        return '剩余 ' + remaining + ' / 上限 ' + limit + '（当前 ' + count + ' 条）';
     }
 
     function findServiceOption(ip, product, serverId, serviceId) {
@@ -745,18 +763,32 @@
         $('#forwardSitePreview').text(formatEndpoint(siteListenIp, '80/443') + ' -> ' + targetIp);
     }
 
-    function showNotice(type, message) {
+    function showNotice(type, message, actionLabel, actionHandler) {
         var $notice = $('#forwardNotice');
         $notice.removeClass('forward-notice--success forward-notice--warning forward-notice--danger');
-        $notice.addClass('forward-notice--' + type).text(message).stop(true, true).fadeIn(120);
+        $notice.addClass('forward-notice--' + type).empty();
+        $('<span class="forward-notice__text"></span>').text(message).appendTo($notice);
+        if (actionLabel && $.isFunction(actionHandler)) {
+            $('<button type="button" class="forward-notice__action"></button>')
+                .text(actionLabel)
+                .on('click', actionHandler)
+                .appendTo($notice);
+        }
+        $notice.stop(true, true).css('display', 'flex').hide().fadeIn(120);
         if (noticeTimer) {
             clearTimeout(noticeTimer);
         }
-        if (type === 'success') {
+        if (type === 'success' && !actionLabel) {
             noticeTimer = setTimeout(function () {
                 $notice.fadeOut(180);
             }, 2200);
         }
+    }
+
+    function showRefreshNotice(message) {
+        showNotice('success', message + '，列表未自动刷新。', '刷新列表', function () {
+            window.location.reload();
+        });
     }
 
     function setSubmitting($form, submitting) {
@@ -771,6 +803,33 @@
         $submit.text(submitting ? '保存中...' : $submit.data('default-text'));
     }
 
+    function setButtonLoading($button, loading, text) {
+        if (!$button || !$button.length) {
+            return;
+        }
+        if (!$button.data('default-text')) {
+            $button.data('default-text', $.trim($button.text()));
+        }
+        $button.prop('disabled', loading).toggleClass('is-loading', loading);
+        $button.text(loading ? (text || '处理中...') : $button.data('default-text'));
+    }
+
+    function setStatusBadge($row, enabled) {
+        var $badge = $row.find('.forward-status-badge').first();
+        $badge
+            .removeClass('forward-badge--success forward-badge--warning forward-badge--danger forward-badge--default forward-badge--info')
+            .addClass(enabled ? 'forward-badge--success' : 'forward-badge--default')
+            .text(enabled ? '运行中' : '已停止');
+    }
+
+    function setToggleButton($button, enabled) {
+        $button
+            .removeClass('btn-default btn-success')
+            .addClass(enabled ? 'btn-default' : 'btn-success')
+            .text(enabled ? '禁用' : '启用')
+            .data('default-text', enabled ? '禁用' : '启用');
+    }
+
     function syncSelectedService() {
         var selected = selectedService();
         var ip = selected.val() || '';
@@ -779,10 +838,15 @@
         var serverId = normalizeServerId(selected.data('server-id'));
         var serverLabel = $.trim(String(selected.data('server-label') || ''));
         var listenIps = parseListenIps(selected.data('listen-ips') || '');
+        var ruleLimit = normalizeQuotaValue(selected.data('rule-limit'));
+        var ruleCount = normalizeQuotaValue(selected.data('rule-count'));
+        var ruleRemaining = normalizeQuotaValue(selected.data('rule-remaining'));
+        var canCreateRule = !!ip && (ruleLimit <= 0 || ruleRemaining > 0);
         var selectedText = ip ? $.grep([product, ip, serverLabel], function (item) { return item; }).join(' / ') : '未选择';
         $('#forwardSelectedTarget').text(selectedText);
         $('#forwardSelectedListenIps').text(ip ? formatListenIps(listenIps) : serverIpSummaryText);
-        $('#forwardServiceHelp').text(ip ? ('已选择目标 IP: ' + ip + (serverLabel ? '（' + serverLabel + '）' : '') + '，可用入口 IP: ' + formatListenIps(listenIps)) : '请选择目标服务 IP，入口 IP 会按宿主机自动限制。');
+        $('#forwardSelectedRuleQuota').text(ip ? formatRuleQuota(ruleLimit, ruleCount, ruleRemaining) : '请选择服务后显示');
+        $('#forwardServiceHelp').text(ip ? ('已选择目标 IP: ' + ip + (serverLabel ? '（' + serverLabel + '）' : '') + '，可用入口 IP: ' + formatListenIps(listenIps) + '，端口规则额度: ' + formatRuleQuota(ruleLimit, ruleCount, ruleRemaining)) : '请选择目标服务 IP，入口 IP 会按宿主机自动限制。');
         $('#forward_rule_add_ip').val(ip);
         $('#forward_rule_add_product_name').val(product);
         $('#forward_rule_add_service_id').val(serviceId);
@@ -793,10 +857,12 @@
         $('#forward_site_add_server_id').val(serverId);
         populateListenIpSelect($('#forward_rule_add_listen_ip'), listenIps);
         populateListenIpSelect($('#forward_site_add_listen_ip'), listenIps);
+        $('#forwardQuickSshBtn, #forwardOpenAddRuleBtn').prop('disabled', !canCreateRule);
+        $('#forwardOpenAddSiteBtn').prop('disabled', !ip || !canAddMoreSites);
         syncTopPreview();
     }
 
-    function requireServiceSelected() {
+    function requireServiceSelected(checkRuleQuota) {
         syncSelectedService();
         if (!$('#forward_rule_add_ip').val()) {
             showNotice('warning', '请先选择目标服务 IP。');
@@ -804,6 +870,10 @@
         }
         if (!$('#forward_rule_add_listen_ip').val()) {
             showNotice('warning', '当前服务所属宿主机未配置入口 IP。');
+            return false;
+        }
+        if (checkRuleQuota && $('#forwardOpenAddRuleBtn').prop('disabled')) {
+            showNotice('warning', '当前产品已达到端口规则数量限制。');
             return false;
         }
         return true;
@@ -857,7 +927,8 @@
         return min + Math.floor(Math.random() * (max - min + 1));
     }
 
-    function postAction(payload, loadingText, successText, errorText) {
+    function postAction(payload, loadingText, successText, errorText, $button, onSuccess) {
+        setButtonLoading($button, true, '处理中...');
         $.ajax({
             url: window.location.href,
             type: 'POST',
@@ -870,15 +941,18 @@
             .done(function (res) {
                 if (res && res.success) {
                     showNotice('success', res.message || successText);
-                    setTimeout(function () {
-                        window.location.reload();
-                    }, 300);
+                    if ($.isFunction(onSuccess)) {
+                        onSuccess(res);
+                    }
                 } else {
                     showNotice('danger', res && res.message ? res.message : errorText);
                 }
             })
             .fail(function () {
                 showNotice('danger', errorText);
+            })
+            .always(function () {
+                setButtonLoading($button, false);
             });
     }
 
@@ -889,7 +963,7 @@
     $('#forward_rule_add_listen_ip, #forward_site_add_listen_ip').on('change', syncTopPreview);
 
     $('#forwardOpenAddRuleBtn').on('click', function () {
-        if (!requireServiceSelected()) {
+        if (!requireServiceSelected(true)) {
             return;
         }
         $('#forwardRuleAddForm')[0].reset();
@@ -899,7 +973,7 @@
     });
 
     $('#forwardQuickSshBtn').on('click', function () {
-        if (!requireServiceSelected()) {
+        if (!requireServiceSelected(true)) {
             return;
         }
         $('#forwardRuleAddForm')[0].reset();
@@ -918,7 +992,7 @@
     });
 
     $('#forwardOpenAddSiteBtn').on('click', function () {
-        if (!requireServiceSelected()) {
+        if (!requireServiceSelected(false)) {
             return;
         }
         $('#forwardSiteAddForm')[0].reset();
@@ -947,10 +1021,8 @@
         })
             .done(function (res) {
                 if (res && res.success) {
-                    showNotice('success', res.message || '规则创建成功');
-                    setTimeout(function () {
-                        window.location.reload();
-                    }, 300);
+                    $('#forwardRuleAddModal').modal('hide');
+                    showRefreshNotice(res.message || '规则创建成功');
                 } else {
                     showNotice('danger', res && res.message ? res.message : '保存失败');
                 }
@@ -982,10 +1054,8 @@
         })
             .done(function (res) {
                 if (res && res.success) {
-                    showNotice('success', res.message || '规则更新成功');
-                    setTimeout(function () {
-                        window.location.reload();
-                    }, 300);
+                    $('#forwardRuleEditModal').modal('hide');
+                    showRefreshNotice(res.message || '规则更新成功');
                 } else {
                     showNotice('danger', res && res.message ? res.message : '保存失败');
                 }
@@ -1018,10 +1088,8 @@
         })
             .done(function (res) {
                 if (res && res.success) {
-                    showNotice('success', res.message || '共享站点创建成功');
-                    setTimeout(function () {
-                        window.location.reload();
-                    }, 300);
+                    $('#forwardSiteAddModal').modal('hide');
+                    showRefreshNotice(res.message || '共享站点创建成功');
                 } else {
                     showNotice('danger', res && res.message ? res.message : '保存失败');
                 }
@@ -1054,10 +1122,8 @@
         })
             .done(function (res) {
                 if (res && res.success) {
-                    showNotice('success', res.message || '共享站点更新成功');
-                    setTimeout(function () {
-                        window.location.reload();
-                    }, 300);
+                    $('#forwardSiteEditModal').modal('hide');
+                    showRefreshNotice(res.message || '共享站点更新成功');
                 } else {
                     showNotice('danger', res && res.message ? res.message : '保存失败');
                 }
@@ -1107,44 +1173,76 @@
     });
 
     $('.forward-toggle-rule-btn').on('click', function () {
+        var $button = $(this);
+        var $row = $button.closest('tr');
         postAction(
-            {action: 'toggle_rule', rule_id: $(this).data('id'), csrf_token: csrfToken},
+            {action: 'toggle_rule', rule_id: $button.data('id'), csrf_token: csrfToken},
             '正在切换规则状态...',
             '规则状态已更新',
-            '切换状态失败'
+            '切换状态失败',
+            $button,
+            function (res) {
+                var enabled = !!res.enabled;
+                setToggleButton($button, enabled);
+                setStatusBadge($row, enabled);
+            }
         );
     });
 
     $('.forward-delete-rule-btn').on('click', function () {
+        var $button = $(this);
+        var $row = $button.closest('tr');
         if (!confirm('确定删除这条规则吗？')) {
             return;
         }
         postAction(
-            {action: 'delete_rule', rule_id: $(this).data('id'), csrf_token: csrfToken},
+            {action: 'delete_rule', rule_id: $button.data('id'), csrf_token: csrfToken},
             '正在删除规则...',
             '规则已删除',
-            '删除失败'
+            '删除失败',
+            $button,
+            function () {
+                $row.addClass('is-removing').fadeOut(180, function () {
+                    $(this).remove();
+                });
+            }
         );
     });
 
     $('.forward-toggle-site-btn').on('click', function () {
+        var $button = $(this);
+        var $row = $button.closest('tr');
         postAction(
-            {action: 'toggle_site', site_id: $(this).data('id'), csrf_token: csrfToken},
+            {action: 'toggle_site', site_id: $button.data('id'), csrf_token: csrfToken},
             '正在切换站点状态...',
             '站点状态已更新',
-            '切换状态失败'
+            '切换状态失败',
+            $button,
+            function (res) {
+                var enabled = !!res.enabled;
+                setToggleButton($button, enabled);
+                setStatusBadge($row, enabled);
+            }
         );
     });
 
     $('.forward-delete-site-btn').on('click', function () {
+        var $button = $(this);
+        var $row = $button.closest('tr');
         if (!confirm('确定删除这个共享站点吗？')) {
             return;
         }
         postAction(
-            {action: 'delete_site', site_id: $(this).data('id'), csrf_token: csrfToken},
+            {action: 'delete_site', site_id: $button.data('id'), csrf_token: csrfToken},
             '正在删除站点...',
             '站点已删除',
-            '删除失败'
+            '删除失败',
+            $button,
+            function () {
+                $row.addClass('is-removing').fadeOut(180, function () {
+                    $(this).remove();
+                });
+            }
         );
     });
 
@@ -1177,5 +1275,6 @@
 
     syncSelectedService();
 })(jQuery);
+{/literal}
 </script>
 {/if}

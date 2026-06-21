@@ -586,7 +586,8 @@ modules/addons/forward/
 
 最少配置项：
 
-- `API 地址` 与 `API Token`
+- `默认 Forward API 地址`
+- `默认 Forward Bearer Token`：填写 forward `config.json` 里的 `web_token`
 - `默认入口 IP`，或按宿主机配置 `server_ip_server_map`
 
 多宿主机场景建议同时配置：

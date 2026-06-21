@@ -16,7 +16,7 @@
 #   WEB_BIND      Web 监听地址   (默认 127.0.0.1)
 #   WEB_UI_ENABLED 是否启用 Web UI (默认 true)
 #   WEB_PORT      Web 管理端口   (默认 8080)
-#   WEB_TOKEN     API 认证令牌   (默认随机生成)
+#   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成)
 #
 set -euo pipefail
 
@@ -760,7 +760,7 @@ else
 fi
 echo -e "  就绪探针:  ${CYAN}${API_READY_URL}${NC}"
 echo -e "  就绪超时:  ${CYAN}${READY_TIMEOUT_SECONDS}s${NC}"
-echo -e "  API Token: ${YELLOW}${WEB_TOKEN}${NC}"
+echo -e "  Bearer Token (web_token): ${YELLOW}${WEB_TOKEN}${NC}"
 echo ""
 echo -e "  服务管理:"
 echo -e "    查看状态:  ${CYAN}systemctl status ${SERVICE_NAME}${NC}"
