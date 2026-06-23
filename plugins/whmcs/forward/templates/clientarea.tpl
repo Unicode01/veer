@@ -150,7 +150,6 @@
                                 <th>规则</th>
                                 <th>目标</th>
                                 <th>入口</th>
-                                <th>状态</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
@@ -192,9 +191,6 @@
                                             </div>
                                         </td>
                                         <td>
-                                            <span class="forward-badge forward-status-badge forward-badge--{$rule.status_class|escape:'html'}">{$rule.status_text|escape:'html'}</span>
-                                        </td>
-                                        <td>
                                             <div class="forward-actions-cell">
                                                 <button type="button" class="btn btn-xs {if $rule.enabled}btn-default{else}btn-success{/if} forward-toggle-rule-btn" data-id="{$rule.id|escape:'html'}">{if $rule.enabled}禁用{else}启用{/if}</button>
                                                 <button
@@ -219,7 +215,7 @@
                                 {/foreach}
                             {else}
                                 <tr>
-                                    <td colspan="5" class="text-center text-muted">暂无规则</td>
+                                    <td colspan="4" class="text-center text-muted">暂无规则</td>
                                 </tr>
                             {/if}
                         </tbody>
@@ -238,7 +234,6 @@
                                 <th>域名</th>
                                 <th>后端</th>
                                 <th>入口</th>
-                                <th>状态</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
@@ -279,9 +274,6 @@
                                             </div>
                                         </td>
                                         <td>
-                                            <span class="forward-badge forward-status-badge forward-badge--{$site.status_class|escape:'html'}">{$site.status_text|escape:'html'}</span>
-                                        </td>
-                                        <td>
                                             <div class="forward-actions-cell">
                                                 <button type="button" class="btn btn-xs {if $site.enabled}btn-default{else}btn-success{/if} forward-toggle-site-btn" data-id="{$site.id|escape:'html'}">{if $site.enabled}禁用{else}启用{/if}</button>
                                                 <button
@@ -305,7 +297,7 @@
                                 {/foreach}
                             {else}
                                 <tr>
-                                    <td colspan="5" class="text-center text-muted">暂无共享站点</td>
+                                    <td colspan="4" class="text-center text-muted">暂无共享站点</td>
                                 </tr>
                             {/if}
                         </tbody>
@@ -826,14 +818,6 @@
         $button.text(loading ? (text || '处理中...') : $button.data('default-text'));
     }
 
-    function setStatusBadge($row, enabled) {
-        var $badge = $row.find('.forward-status-badge').first();
-        $badge
-            .removeClass('forward-badge--success forward-badge--warning forward-badge--danger forward-badge--default forward-badge--info')
-            .addClass(enabled ? 'forward-badge--success' : 'forward-badge--default')
-            .text(enabled ? '运行中' : '已停止');
-    }
-
     function setToggleButton($button, enabled) {
         $button
             .removeClass('btn-default btn-success')
@@ -1226,7 +1210,6 @@
 
     $('.forward-toggle-rule-btn').on('click', function () {
         var $button = $(this);
-        var $row = $button.closest('tr');
         postAction(
             {action: 'toggle_rule', rule_id: $button.data('id'), csrf_token: csrfToken},
             '正在切换规则状态...',
@@ -1236,7 +1219,6 @@
             function (res) {
                 var enabled = !!res.enabled;
                 setToggleButton($button, enabled);
-                setStatusBadge($row, enabled);
             }
         );
     });
@@ -1263,7 +1245,6 @@
 
     $('.forward-toggle-site-btn').on('click', function () {
         var $button = $(this);
-        var $row = $button.closest('tr');
         postAction(
             {action: 'toggle_site', site_id: $button.data('id'), csrf_token: csrfToken},
             '正在切换站点状态...',
@@ -1273,7 +1254,6 @@
             function (res) {
                 var enabled = !!res.enabled;
                 setToggleButton($button, enabled);
-                setStatusBadge($row, enabled);
             }
         );
     });

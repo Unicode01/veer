@@ -24,6 +24,7 @@
 - API 前缀: `/api`
 - 认证方式: `Authorization: Bearer <web_token>`
 - 写操作默认使用 `application/json`
+- 探活端点: `/healthz`、`/readyz` 不使用 `/api` 前缀
 
 `web_token` 来自 `config.json`：
 
@@ -41,7 +42,7 @@
 
 ## 认证与错误约定
 
-所有 `/api/*` 端点都需要 Bearer Token。
+所有 `/api/*` 端点都需要 Bearer Token。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。
 
 请求头示例：
 
@@ -97,6 +98,11 @@ Content-Type: application/json
 - `Kernel Runtime` 的调试字段会随版本演进增加，外部解析时应按“已知字段尽量读取，未知字段忽略”处理
 
 ## 接口总览
+
+### 健康检查
+
+- `GET /healthz`
+- `GET /readyz`
 
 ### 基础发现
 
@@ -169,6 +175,7 @@ Content-Type: application/json
 
 - `GET /api/workers`
 - `GET /api/kernel/runtime`
+- `POST /api/kernel/runtime/dismiss-note`
 
 ### 统计
 
@@ -497,11 +504,15 @@ Content-Type: application/json
 {
   "available": true,
   "available_reason": "selected tc kernel engine",
+  "kernel_capabilities": {},
   "default_engine": "auto",
   "configured_order": ["tc", "xdp"],
   "traffic_stats": true,
+  "tc_diagnostics": false,
   "active_rule_count": 12,
   "active_range_count": 3,
+  "retry_pending": false,
+  "dismissed_note_keys": [],
   "engines": [
     {
       "name": "tc",
@@ -520,12 +531,56 @@ Content-Type: application/json
 - map 容量与占用
 - attach mode 与 attachment health
 - retry / self-heal / cooldown / backoff
+- netlink recover 与 attachment heal 状态
+- dismissed note keys
 - traffic stats / diagnostics
 - 最近一次 reconcile / maintain / prune 信息
 
 ## 详细接口
 
 ## 1. 基础发现
+
+### 1.0 健康检查
+
+`GET /healthz`
+
+用途：
+
+- 判断 HTTP 服务进程是否存活
+- 不需要 Bearer Token
+
+响应示例：
+
+```json
+{
+  "status": "ok"
+}
+```
+
+`GET /readyz`
+
+用途：
+
+- 判断服务是否已经完成启动并进入 ready 状态
+- 不需要 Bearer Token
+
+启动中返回 `503`：
+
+```json
+{
+  "status": "starting",
+  "ready": false
+}
+```
+
+就绪后返回 `200`：
+
+```json
+{
+  "status": "ready",
+  "ready": true
+}
+```
 
 ### 1.1 获取简化接口列表
 
@@ -1140,10 +1195,43 @@ Content-Type: application/json
 - 查看当前内核 dataplane 是否可用
 - 查看 `tc` / `xdp` 当前 attach、entries、map 占用、retry、自愈和诊断信息
 
+查询参数：
+
+- `refresh=1`: 跳过共享快照缓存，强制刷新一次运行时视图
+
+也可以通过请求头 `Cache-Control: no-cache` 达到同样的强制刷新效果。
+
 对接建议：
 
 - 适合做排障和可视化
 - 不建议把所有字段当成稳定契约硬编码
+
+### 9.3 忽略一条内核运行时提示
+
+`POST /api/kernel/runtime/dismiss-note`
+
+用途：
+
+- 让前端或外部控制台隐藏一条已确认的运行时提示
+- 只影响控制面展示，不会修改 dataplane 规则或内核 map
+
+请求体示例：
+
+```json
+{
+  "key": "attachment_issue|tc(active_entries=3)"
+}
+```
+
+成功响应：
+
+```json
+{
+  "dismissed_note_keys": [
+    "attachment_issue|tc(active_entries=3)"
+  ]
+}
+```
 
 ## 10. 统计接口
 

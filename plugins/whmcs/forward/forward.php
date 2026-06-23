@@ -2323,7 +2323,7 @@ function forward_status_meta(array $remote = null, $localStatus = 'active', $rem
         if ($localStatus === 'inactive') {
             return ['text' => '已禁用', 'class' => 'default'];
         }
-        return ['text' => '本地记录', 'class' => 'info'];
+        return ['text' => '已启用', 'class' => 'success'];
     }
 
     if (isset($remote['enabled']) && !$remote['enabled']) {
@@ -3028,7 +3028,7 @@ function forward_update_rule(array $data, $userId = null)
             $rolledBackRemote = forward_best_effort_remote_delete_resource('/api/rules', $remoteId, $targetServerId);
 
             $message = '旧 Forward 端删除规则失败：' . $cleanup['message'];
-            $message .= $restoreLocal['success'] ? '；已回滚本地记录' : '；本地回滚失败：' . $restoreLocal['message'];
+            $message .= $restoreLocal['success'] ? '；已回滚本地配置' : '；本地回滚失败：' . $restoreLocal['message'];
             $message .= $rolledBackRemote ? '，并已清理新 Forward 端规则' : '，但新 Forward 端规则清理失败，请手动核对';
             return ['success' => false, 'message' => $message];
         }
@@ -4118,7 +4118,7 @@ function forward_update_site(array $data, $userId = null)
             $rolledBackRemote = forward_best_effort_remote_delete_resource('/api/sites', $remoteId, $targetServerId);
 
             $message = '旧 Forward 端删除站点失败：' . $cleanup['message'];
-            $message .= $restoreLocal['success'] ? '；已回滚本地记录' : '；本地回滚失败：' . $restoreLocal['message'];
+            $message .= $restoreLocal['success'] ? '；已回滚本地配置' : '；本地回滚失败：' . $restoreLocal['message'];
             $message .= $rolledBackRemote ? '，并已清理新 Forward 端站点' : '，但新 Forward 端站点清理失败，请手动核对';
             return ['success' => false, 'message' => $message];
         }
