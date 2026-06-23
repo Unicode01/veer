@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# forward - Debian / Ubuntu 一键引导部署脚本
+# forward - Linux 一键引导部署脚本
 #
 # 设计目标:
 #   1. 安装构建与部署依赖
@@ -15,7 +15,7 @@
 #
 # 说明:
 #   - 该脚本适合直接通过 GitHub Raw 分发
-#   - 目前仅支持 Debian 11+ 与 Ubuntu 22.04+
+#   - 支持 Debian 11+、Ubuntu 22.04+、RHEL-compatible 9+ 与 Fedora 38+
 #   - 最终仍以实际内核版本为准
 #
 set -Eeuo pipefail
@@ -64,7 +64,8 @@ usage() {
   FORWARD_WORKDIR      临时工作目录，默认 /tmp/forward-bootstrap
   FORWARD_KEEP_WORKDIR_ON_ERROR
                         失败时保留临时目录，默认 1
-  FORWARD_SKIP_APT     设为 1 时跳过 apt 依赖安装
+  FORWARD_SKIP_DEPS    设为 1 时跳过系统依赖安装
+  FORWARD_SKIP_APT     兼容旧变量；等价于 FORWARD_SKIP_DEPS=1
   FORWARD_SKIP_GO      设为 1 时跳过 Go 安装检查
 
 部署阶段透传给 deploy.sh 的常用环境变量:
@@ -110,7 +111,10 @@ FORWARD_GOSUMDB_GLOBAL="${FORWARD_GOSUMDB_GLOBAL:-sum.golang.org}"
 FORWARD_GO_EFFECTIVE_REGION=""
 FORWARD_WORKDIR="${FORWARD_WORKDIR:-/tmp/forward-bootstrap}"
 FORWARD_KEEP_WORKDIR_ON_ERROR="${FORWARD_KEEP_WORKDIR_ON_ERROR:-1}"
-FORWARD_SKIP_APT="${FORWARD_SKIP_APT:-0}"
+FORWARD_SKIP_DEPS="${FORWARD_SKIP_DEPS:-}"
+if [[ -z "${FORWARD_SKIP_DEPS}" ]]; then
+    FORWARD_SKIP_DEPS="${FORWARD_SKIP_APT:-0}"
+fi
 FORWARD_SKIP_GO="${FORWARD_SKIP_GO:-0}"
 FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
 FORWARD_GO_ROOT="${FORWARD_WORKDIR}/go"
@@ -210,6 +214,40 @@ require_command() {
     fi
 }
 
+version_ge() {
+    local current="${1:-0}"
+    local required="${2:-0}"
+    local first=""
+
+    current="${current%%-*}"
+    required="${required%%-*}"
+    first="$(printf '%s\n%s\n' "${required}" "${current}" | sort -V | head -n 1)"
+    [[ "${first}" == "${required}" ]]
+}
+
+os_major_version() {
+    local version="${1:-0}"
+    version="${version%%-*}"
+    version="${version%%.*}"
+    if [[ "${version}" =~ ^[0-9]+$ ]]; then
+        printf '%s' "${version}"
+        return 0
+    fi
+    printf '0'
+}
+
+os_id_like_contains() {
+    local needle="$1"
+    local item=""
+
+    for item in ${ID_LIKE:-}; do
+        if [[ "${item}" == "${needle}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64)
@@ -284,40 +322,114 @@ require_supported_distro() {
 
     case "${ID:-}" in
         debian)
-            if ! dpkg --compare-versions "${VERSION_ID:-0}" ge "11"; then
+            if ! version_ge "${VERSION_ID:-0}" "11"; then
                 fail "仅支持 Debian 11+，当前为 Debian ${VERSION_ID:-unknown}"
             fi
             ;;
         ubuntu)
-            if ! dpkg --compare-versions "${VERSION_ID:-0}" ge "22.04"; then
+            if ! version_ge "${VERSION_ID:-0}" "22.04"; then
                 fail "仅支持 Ubuntu 22.04+，当前为 Ubuntu ${VERSION_ID:-unknown}"
             fi
             ;;
+        rhel|centos|almalinux|rocky|ol|oracle|oraclelinux)
+            if (( $(os_major_version "${VERSION_ID:-0}") < 9 )); then
+                fail "仅支持 RHEL-compatible 9+，当前为 ${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-unknown}}"
+            fi
+            ;;
+        fedora)
+            if (( $(os_major_version "${VERSION_ID:-0}") < 38 )); then
+                fail "仅支持 Fedora 38+，当前为 Fedora ${VERSION_ID:-unknown}"
+            fi
+            ;;
         *)
-            fail "当前仅支持 Debian 11+ 与 Ubuntu 22.04+，检测到: ${ID:-unknown} ${VERSION_ID:-unknown}"
+            if os_id_like_contains rhel || os_id_like_contains centos; then
+                if (( $(os_major_version "${VERSION_ID:-0}") < 9 )); then
+                    fail "仅支持 RHEL-compatible 9+，当前为 ${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-unknown}}"
+                fi
+            elif os_id_like_contains fedora; then
+                if (( $(os_major_version "${VERSION_ID:-0}") < 38 )); then
+                    fail "仅支持 Fedora-like 38+，当前为 ${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-unknown}}"
+                fi
+            else
+                fail "当前仅支持 Debian 11+、Ubuntu 22.04+、RHEL-compatible 9+ 与 Fedora 38+，检测到: ${ID:-unknown} ${VERSION_ID:-unknown}"
+            fi
             ;;
     esac
 
     ok "发行版检测通过: ${PRETTY_NAME:-${ID:-unknown}}"
 }
 
-install_apt_deps() {
-    if [[ "${FORWARD_SKIP_APT}" == "1" ]]; then
-        warn "已跳过 apt 依赖安装"
+detect_package_manager() {
+    if command -v apt-get >/dev/null 2>&1; then
+        printf 'apt'
+        return 0
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+        printf 'dnf'
+        return 0
+    fi
+    if command -v yum >/dev/null 2>&1; then
+        printf 'yum'
+        return 0
+    fi
+    fail "未找到受支持的包管理器: apt-get/dnf/yum"
+}
+
+install_system_deps() {
+    local package_manager=""
+
+    if [[ "${FORWARD_SKIP_DEPS}" == "1" ]]; then
+        warn "已跳过系统依赖安装"
         return
     fi
 
-    export DEBIAN_FRONTEND=noninteractive
-    run_with_retry 3 3 "apt-get update" apt-get update
-    run_with_retry 3 3 "安装系统依赖" apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        git \
-        clang \
-        llvm \
-        linux-libc-dev \
-        python3 \
-        xz-utils
+    package_manager="$(detect_package_manager)"
+    case "${package_manager}" in
+        apt)
+            export DEBIAN_FRONTEND=noninteractive
+            run_with_retry 3 3 "apt-get update" apt-get update
+            run_with_retry 3 3 "安装系统依赖" apt-get install -y --no-install-recommends \
+                ca-certificates \
+                curl \
+                git \
+                clang \
+                llvm \
+                linux-libc-dev \
+                python3 \
+                xz-utils \
+                tar
+            ;;
+        dnf)
+            run_with_retry 3 3 "刷新 dnf 元数据" dnf -y makecache --refresh
+            run_with_retry 3 3 "安装系统依赖" dnf install -y \
+                ca-certificates \
+                curl \
+                git \
+                clang \
+                llvm \
+                kernel-headers \
+                python3 \
+                xz \
+                tar
+            ;;
+        yum)
+            run_with_retry 3 3 "刷新 yum 元数据" yum -y makecache
+            run_with_retry 3 3 "安装系统依赖" yum install -y \
+                ca-certificates \
+                curl \
+                git \
+                clang \
+                llvm \
+                kernel-headers \
+                python3 \
+                xz \
+                tar
+            ;;
+        *)
+            fail "未处理的包管理器: ${package_manager}"
+            ;;
+    esac
+
     ok "系统依赖安装完成"
 }
 
@@ -707,7 +819,7 @@ install_go_if_needed() {
     fi
 
     current="$(current_go_version || true)"
-    if [[ -n "${current}" ]] && dpkg --compare-versions "${current}" ge "${FORWARD_GO_VERSION}"; then
+    if [[ -n "${current}" ]] && version_ge "${current}" "${FORWARD_GO_VERSION}"; then
         ok "Go 已满足要求: ${current}"
         return
     fi
@@ -726,7 +838,7 @@ install_go_if_needed() {
     export GOROOT="${FORWARD_GO_ROOT}"
     export PATH="${FORWARD_GO_ROOT}/bin:${PATH}"
     current="$(current_go_version || true)"
-    if [[ -z "${current}" ]] || ! dpkg --compare-versions "${current}" ge "${FORWARD_GO_VERSION}"; then
+    if [[ -z "${current}" ]] || ! version_ge "${current}" "${FORWARD_GO_VERSION}"; then
         fail "Go 安装失败，当前版本: ${current:-unknown}"
     fi
     ok "临时 Go 已安装: ${current} (${FORWARD_GO_ROOT})"
@@ -782,11 +894,6 @@ run_deploy() {
 }
 
 main() {
-    require_command dpkg
-    require_command apt-get
-    require_command curl
-    require_command tar
-
     set_step "检测架构"
     detect_arch
     FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
@@ -795,8 +902,10 @@ main() {
     set_step "检查发行版"
     require_supported_distro
     set_step "安装系统依赖"
-    install_apt_deps
-    set_step "检查 Git"
+    install_system_deps
+    set_step "检查基础工具"
+    require_command curl
+    require_command tar
     require_command git
     set_step "安装 Go"
     install_go_if_needed

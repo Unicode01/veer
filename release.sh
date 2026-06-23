@@ -140,7 +140,7 @@ if MULTIARCH_INC="$(find_multiarch_include)"; then
     BPF_CFLAGS+=(-I"${MULTIARCH_INC}")
     info "检测到多架构头文件目录: ${MULTIARCH_INC}"
 else
-    info "未检测到多架构头文件目录，若编译报 asm/*.h 缺失，请安装 linux-libc-dev 或设置 BPF_EXTRA_CFLAGS"
+    info "未检测到多架构头文件目录，若编译报 asm/*.h 缺失，请安装 linux-libc-dev/kernel-headers 或设置 BPF_EXTRA_CFLAGS"
 fi
 
 if [[ -n "${BPF_EXTRA_CFLAGS}" ]]; then
@@ -157,7 +157,7 @@ compile_bpf_object() {
     shift 3
     info "编译 ${label} eBPF 对象..."
     if ! "${BPF_CLANG}" "${BPF_CFLAGS[@]}" "$@" -c "${src}" -o "${obj}"; then
-        fail "eBPF 编译失败；Debian/Ubuntu 通常需要 linux-libc-dev，必要时可通过 BPF_EXTRA_CFLAGS 追加头文件路径"
+        fail "eBPF 编译失败；Debian/Ubuntu 通常需要 linux-libc-dev，RHEL/AlmaLinux/CentOS 通常需要 kernel-headers，必要时可通过 BPF_EXTRA_CFLAGS 追加头文件路径"
     fi
     if command -v llvm-strip &>/dev/null; then
         llvm-strip -g "${obj}" || true

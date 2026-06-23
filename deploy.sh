@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# NAT Forward - Debian 部署脚本
+# NAT Forward - Linux 部署脚本
 #
 # 用法: 将 forward-linux-<arch> 与本脚本放在同一目录，然后:
 #   chmod +x deploy.sh && sudo ./deploy.sh

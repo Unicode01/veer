@@ -355,14 +355,17 @@ Linux 现在支持把 `create` 模式下的 bridge 写入宿主机 `interfaces` 
 
 - Linux
 
-### Debian / Ubuntu 最低版本
+### Linux 最低版本
 
-如果是直接部署在 Debian 或 Ubuntu 上，建议按下面这条边界理解：
+如果是直接部署在 Linux 发行版上，建议按下面这条边界理解：
 
 - Debian 的最低可运行版本按 `Debian 11 (bullseye)` 起算；它自带 `5.10` 内核线，满足当前 `TC` 主线路径的最低内核要求
 - 如果你希望在发行版默认内核上同时覆盖 `TC` 和 `veth` 场景下的 XDP NAT redirect，Debian 侧更推荐直接使用 `Debian 12 (bookworm)+`
 - Ubuntu 的最低支持版本按 `Ubuntu 22.04 LTS` 起算；服务端默认使用 `5.15` GA 内核，满足当前内核 dataplane 边界
+- AlmaLinux / Rocky Linux / CentOS Stream / RHEL / Oracle Linux 默认按 `9+` 起算；`8.x` 默认内核版本号和 systemd capability 组合偏旧，不作为一键脚本的默认支持目标
+- Fedora 按 `38+` 起算
 - 不建议把 `Ubuntu 20.04 LTS` 视为默认受支持目标；它的服务端默认 GA 内核是 `5.4`，版本号本身不能保证内核 dataplane 可用
+- 不建议把 CentOS 7 / RHEL 7 视为受支持目标；默认内核线过旧，内核 dataplane 能力缺口太大
 - 最终仍以宿主机实际内核版本为准；如果系统切到了 HWE、OEM 或自定义内核，应直接以 `uname -r` 判断，而不是只看发行版版本号
 
 构建要求：
@@ -370,6 +373,7 @@ Linux 现在支持把 `create` 模式下的 bridge 写入宿主机 `interfaces` 
 - Go 1.25.1 或更高
 - `release.sh` 需要 `clang`
 - Debian / Ubuntu 上通常还需要 `linux-libc-dev`
+- RHEL-compatible / Fedora 上通常还需要 `kernel-headers`
 
 如果要使用低位端口、网卡绑定、透明转发或内核 dataplane，还需要相应权限：
 
@@ -504,10 +508,10 @@ go build -o forward .
 
 ## 部署
 
-仓库自带 Debian 部署脚本 [deploy.sh](./deploy.sh)。
+仓库自带 Linux 部署脚本 [deploy.sh](./deploy.sh)。
 如果你希望目标机自己安装依赖、拉源码、构建并部署，也可以直接使用一键引导脚本 [bootstrap.sh](./bootstrap.sh)。
 
-一键引导部署（Debian 11+ / Ubuntu 22.04+）：
+一键引导部署（Debian 11+ / Ubuntu 22.04+ / RHEL-compatible 9+ / Fedora 38+）：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
@@ -535,6 +539,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads
 
 - 当前默认入口就是 GitHub Raw 上的 `bootstrap.sh`
 - 一键脚本会在目标机安装依赖、拉取指定 `Git ref`、执行 `release.sh`，最后再调用 `deploy.sh`
+- Debian / Ubuntu 走 `apt-get` 安装构建依赖；AlmaLinux / Rocky Linux / CentOS Stream / RHEL / Oracle Linux / Fedora 走 `dnf` 或 `yum`
 - `bootstrap.sh` 会自动检测是否位于中国大陆；如果命中，会优先从国内 Go 镜像拉取工具链，并为构建阶段设置适合的 `GOPROXY/GOSUMDB`。源码拉取阶段在 `git fetch` 失败后也会自动尝试归档回退。也可用 `FORWARD_GO_REGION=cn|global|auto`、`FORWARD_GO_BASE_URL=...`、`FORWARD_GO_CN_BASE_URL=...`、`FORWARD_GOPROXY=...`、`FORWARD_GOSUMDB=...`、`FORWARD_REPO_URL_CN=...`、`FORWARD_REPO_ARCHIVE_URL=...` 显式覆盖
 - `deploy.sh` 现在默认把管理面限制在 `127.0.0.1`；如果你确实要直接远程打开管理面，请显式设置 `WEB_BIND=0.0.0.0` 或在 `config.json` 里写入具体监听地址
 - 如果你只想暴露 API / 探针、不想提供浏览器前端，可设置 `WEB_UI_ENABLED=false`，或在 `config.json` 里写入 `"web_ui_enabled": false`
