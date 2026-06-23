@@ -1,4 +1,4 @@
-<link rel="stylesheet" href="{$asset_url|escape:'html'}/assets/client.css?v=1.3.4">
+<link rel="stylesheet" href="{$asset_url|escape:'html'}/assets/client.css?v=1.3.7">
 
 <div class="forward-client">
     <div class="forward-shell">
@@ -17,7 +17,7 @@
                 <div class="forward-stat">
                     <span class="forward-stat__label">共享站点</span>
                     <strong class="forward-stat__value">{$current_site_count}</strong>
-                    <span class="forward-stat__hint">{if $max_sites > 0}上限 {$max_sites}{else}不限{/if}</span>
+                    <span class="forward-stat__hint">{if $max_sites > 0}默认上限 {$max_sites}/产品{else}默认不限{/if}</span>
                 </div>
             </div>
         </div>
@@ -53,7 +53,7 @@
                                 <optgroup label="{$productName|escape:'html'}">
                                     {foreach $serviceGroup as $service}
                                         {foreach $service.ips as $ip}
-                                            <option value="{$ip|escape:'html'}" data-product="{$service.product_name|escape:'html'}" data-product-id="{$service.product_id|escape:'html'}" data-service-id="{$service.service_id|escape:'html'}" data-server-id="{$service.server_id|escape:'html'}" data-server-label="{$service.server_label|escape:'html'}" data-listen-ips="{$service.listen_ips_csv|escape:'html'}" data-rule-limit="{$service.rule_limit|escape:'html'}" data-rule-count="{$service.rule_count|escape:'html'}" data-rule-remaining="{$service.rule_remaining|escape:'html'}">
+                                            <option value="{$ip|escape:'html'}" data-product="{$service.product_name|escape:'html'}" data-product-id="{$service.product_id|escape:'html'}" data-service-id="{$service.service_id|escape:'html'}" data-server-id="{$service.server_id|escape:'html'}" data-server-label="{$service.server_label|escape:'html'}" data-listen-ips="{$service.listen_ips_csv|escape:'html'}" data-rule-limit="{$service.rule_limit|escape:'html'}" data-rule-count="{$service.rule_count|escape:'html'}" data-rule-remaining="{$service.rule_remaining|escape:'html'}" data-site-limit="{$service.site_limit|escape:'html'}" data-site-count="{$service.site_count|escape:'html'}" data-site-remaining="{$service.site_remaining|escape:'html'}">
                                                 {$service.product_name|escape:'html'} - {$ip|escape:'html'} ({$service.server_label|escape:'html'})
                                             </option>
                                         {/foreach}
@@ -78,6 +78,10 @@
                             <strong class="forward-selection__value" id="forwardSelectedRuleQuota">请选择服务后显示</strong>
                         </div>
                         <div>
+                            <span class="forward-selection__label">产品站点额度</span>
+                            <strong class="forward-selection__value" id="forwardSelectedSiteQuota">请选择服务后显示</strong>
+                        </div>
+                        <div>
                             <span class="forward-selection__label">规则预览</span>
                             <code class="forward-selection__route" id="forwardRulePreview">{$server_ip_endpoint|escape:'html'}:入口端口 -> 目标IP:目标端口</code>
                         </div>
@@ -95,6 +99,7 @@
                         <button type="button" class="btn btn-success forward-btn" id="forwardQuickSshBtn" {if !$can_add_more}disabled{/if}>快速添加 SSH</button>
                         <button type="button" class="btn btn-primary forward-btn" id="forwardOpenAddRuleBtn" {if !$can_add_more}disabled{/if}>添加端口规则</button>
                         <button type="button" class="btn btn-primary forward-btn" id="forwardOpenAddSiteBtn" {if !$can_add_more_sites}disabled{/if}>添加共享站点</button>
+                        <button type="button" class="btn btn-default forward-btn" id="forwardSyncServiceBtn" disabled>同步当前服务</button>
                     </div>
                     <p class="forward-inline-tip">说明：入口 IP 会按宿主机自动限制，共享站点域名必须唯一。</p>
                 </div>
@@ -123,7 +128,7 @@
                         </div>
                         <div class="forward-overview__row">
                             <span>站点剩余额度</span>
-                            <span>{if $max_sites > 0}{$max_sites-$current_site_count}{else}不限{/if}</span>
+                            <span>按产品计算，选择服务后显示剩余</span>
                         </div>
                     </div>
 
@@ -665,6 +670,13 @@
         return '剩余 ' + remaining + ' / 上限 ' + limit + '（当前 ' + count + ' 条）';
     }
 
+    function formatSiteQuota(limit, count, remaining) {
+        if (limit <= 0) {
+            return '不限（当前 ' + count + ' 个）';
+        }
+        return '剩余 ' + remaining + ' / 上限 ' + limit + '（当前 ' + count + ' 个）';
+    }
+
     function findServiceOption(ip, product, serverId, serviceId) {
         var normalizedProduct = $.trim(String(product || ''));
         var normalizedServerId = normalizeServerId(serverId);
@@ -841,12 +853,17 @@
         var ruleLimit = normalizeQuotaValue(selected.data('rule-limit'));
         var ruleCount = normalizeQuotaValue(selected.data('rule-count'));
         var ruleRemaining = normalizeQuotaValue(selected.data('rule-remaining'));
+        var siteLimit = normalizeQuotaValue(selected.data('site-limit'));
+        var siteCount = normalizeQuotaValue(selected.data('site-count'));
+        var siteRemaining = normalizeQuotaValue(selected.data('site-remaining'));
         var canCreateRule = !!ip && (ruleLimit <= 0 || ruleRemaining > 0);
+        var canCreateSite = !!ip && canAddMoreSites && (siteLimit <= 0 || siteRemaining > 0);
         var selectedText = ip ? $.grep([product, ip, serverLabel], function (item) { return item; }).join(' / ') : '未选择';
         $('#forwardSelectedTarget').text(selectedText);
         $('#forwardSelectedListenIps').text(ip ? formatListenIps(listenIps) : serverIpSummaryText);
         $('#forwardSelectedRuleQuota').text(ip ? formatRuleQuota(ruleLimit, ruleCount, ruleRemaining) : '请选择服务后显示');
-        $('#forwardServiceHelp').text(ip ? ('已选择目标 IP: ' + ip + (serverLabel ? '（' + serverLabel + '）' : '') + '，可用入口 IP: ' + formatListenIps(listenIps) + '，端口规则额度: ' + formatRuleQuota(ruleLimit, ruleCount, ruleRemaining)) : '请选择目标服务 IP，入口 IP 会按宿主机自动限制。');
+        $('#forwardSelectedSiteQuota').text(ip ? formatSiteQuota(siteLimit, siteCount, siteRemaining) : '请选择服务后显示');
+        $('#forwardServiceHelp').text(ip ? ('已选择目标 IP: ' + ip + (serverLabel ? '（' + serverLabel + '）' : '') + '，可用入口 IP: ' + formatListenIps(listenIps) + '，端口规则额度: ' + formatRuleQuota(ruleLimit, ruleCount, ruleRemaining) + '，站点额度: ' + formatSiteQuota(siteLimit, siteCount, siteRemaining)) : '请选择目标服务 IP，入口 IP 会按宿主机自动限制。');
         $('#forward_rule_add_ip').val(ip);
         $('#forward_rule_add_product_name').val(product);
         $('#forward_rule_add_service_id').val(serviceId);
@@ -858,11 +875,12 @@
         populateListenIpSelect($('#forward_rule_add_listen_ip'), listenIps);
         populateListenIpSelect($('#forward_site_add_listen_ip'), listenIps);
         $('#forwardQuickSshBtn, #forwardOpenAddRuleBtn').prop('disabled', !canCreateRule);
-        $('#forwardOpenAddSiteBtn').prop('disabled', !ip || !canAddMoreSites);
+        $('#forwardOpenAddSiteBtn').prop('disabled', !canCreateSite);
+        $('#forwardSyncServiceBtn').prop('disabled', !ip || !serviceId);
         syncTopPreview();
     }
 
-    function requireServiceSelected(checkRuleQuota) {
+    function requireServiceSelected(checkRuleQuota, checkSiteQuota) {
         syncSelectedService();
         if (!$('#forward_rule_add_ip').val()) {
             showNotice('warning', '请先选择目标服务 IP。');
@@ -874,6 +892,10 @@
         }
         if (checkRuleQuota && $('#forwardOpenAddRuleBtn').prop('disabled')) {
             showNotice('warning', '当前产品已达到端口规则数量限制。');
+            return false;
+        }
+        if (checkSiteQuota && $('#forwardOpenAddSiteBtn').prop('disabled')) {
+            showNotice('warning', '当前产品已达到共享站点数量限制。');
             return false;
         }
         return true;
@@ -963,7 +985,7 @@
     $('#forward_rule_add_listen_ip, #forward_site_add_listen_ip').on('change', syncTopPreview);
 
     $('#forwardOpenAddRuleBtn').on('click', function () {
-        if (!requireServiceSelected(true)) {
+        if (!requireServiceSelected(true, false)) {
             return;
         }
         $('#forwardRuleAddForm')[0].reset();
@@ -973,7 +995,7 @@
     });
 
     $('#forwardQuickSshBtn').on('click', function () {
-        if (!requireServiceSelected(true)) {
+        if (!requireServiceSelected(true, false)) {
             return;
         }
         $('#forwardRuleAddForm')[0].reset();
@@ -992,7 +1014,7 @@
     });
 
     $('#forwardOpenAddSiteBtn').on('click', function () {
-        if (!requireServiceSelected(false)) {
+        if (!requireServiceSelected(false, true)) {
             return;
         }
         $('#forwardSiteAddForm')[0].reset();
@@ -1000,6 +1022,36 @@
         $('#forward_site_add_http').val('80');
         $('#forward_site_add_https').val('443');
         $('#forwardSiteAddModal').modal('show');
+    });
+
+    $('#forwardSyncServiceBtn').on('click', function () {
+        var $button = $(this);
+        var serviceId;
+        syncSelectedService();
+        serviceId = normalizeServiceId(selectedService().data('service-id'));
+        if (!serviceId) {
+            showNotice('warning', '请先选择目标服务 IP。');
+            return;
+        }
+
+        setButtonLoading($button, true, '同步中...');
+        $.post(
+            window.location.href,
+            {action: 'sync_service', service_id: serviceId, csrf_token: csrfToken},
+            function (res) {
+                if (res && res.success) {
+                    showRefreshNotice(res.message || '当前服务规则已同步');
+                } else {
+                    showNotice('danger', res && res.message ? res.message : '同步失败');
+                }
+            },
+            'json'
+        ).fail(function () {
+            showNotice('danger', '同步失败，请稍后重试');
+        }).always(function () {
+            setButtonLoading($button, false);
+            syncSelectedService();
+        });
     });
 
     $('#forwardRuleAddForm').on('submit', function (e) {

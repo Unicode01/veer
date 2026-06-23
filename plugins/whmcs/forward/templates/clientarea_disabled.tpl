@@ -1,4 +1,4 @@
-<link rel="stylesheet" href="{$asset_url|escape:'html'}/assets/client.css?v=1.3.4">
+<link rel="stylesheet" href="{$asset_url|escape:'html'}/assets/client.css?v=1.3.7">
 
 <div class="forward-client">
     <div class="forward-shell">

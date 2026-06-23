@@ -16,7 +16,7 @@ function forward_config()
     return [
         'name' => 'Forward 管理',
         'description' => '对接 forward 的规则接口，提供端口转发规则的后台与客户区管理。',
-        'version' => '1.3.4',
+        'version' => '1.3.7',
         'author' => 'OpenAI Codex',
         'language' => 'chinese',
         'fields' => [
@@ -52,7 +52,7 @@ function forward_config()
                 'FriendlyName' => '宿主机覆盖端点映射',
                 'Type' => 'textarea',
                 'Rows' => '6',
-                'Description' => "可选，仅多宿主机/多 Forward 实例需要。每行按 WHMCS serverID 指定 API 与 Bearer Token，格式如 3=https://forward-a.example.com|tokenA；命中后覆盖上面的默认地址和默认 Token",
+                'Description' => "可选，仅多宿主机/多 Forward 实例需要。每行按 WHMCS serverID 指定 API，格式如 3=https://forward-a.example.com；需要单独 Token 时写 3=https://forward-a.example.com|tokenA，未写 Token 则复用默认 Token",
                 'Default' => '',
             ],
             'skip_tls_verify' => [
@@ -137,11 +137,18 @@ function forward_config()
                 'Default' => '',
             ],
             'max_sites_per_user' => [
-                'FriendlyName' => '每用户最大站点数',
+                'FriendlyName' => '默认站点上限',
                 'Type' => 'text',
                 'Size' => '10',
-                'Description' => '客户区每个用户最多可创建的共享站点数量',
+                'Description' => '客户区每个产品默认最多可创建的共享站点数量；可被下面的按产品站点上限覆盖',
                 'Default' => '5',
+            ],
+            'product_site_limits' => [
+                'FriendlyName' => '按产品站点上限',
+                'Type' => 'textarea',
+                'Rows' => '4',
+                'Description' => "可选。按 WHMCS 产品 ID 覆盖共享站点上限，每行一条，格式如 12=5；0 表示该产品不限。未配置的产品使用“每用户最大站点数”",
+                'Default' => '',
             ],
             'allowed_protocols' => [
                 'FriendlyName' => '允许的协议',
@@ -197,8 +204,15 @@ function forward_config()
                 'FriendlyName' => '客户区可选 IP 白名单',
                 'Type' => 'textarea',
                 'Rows' => '4',
-                'Description' => '多个 IP（IPv4/IPv6）用逗号/空格/换行分隔；留空则不限制（仍受产品 IP 约束）',
+                'Description' => '多个 IP（IPv4/IPv6）用逗号/空格/换行分隔；留空则不限制（仍受产品 IP 与客户区目标 IP 类型约束）',
                 'Default' => '',
+            ],
+            'client_service_ip_family' => [
+                'FriendlyName' => '客户区目标 IP 类型',
+                'Type' => 'dropdown',
+                'Options' => 'ipv4,all,ipv6',
+                'Description' => '默认仅展示 WHMCS 服务中的 IPv4 作为机器 IP；选择 all 才会同时展示 IPv4/IPv6',
+                'Default' => 'ipv4',
             ],
         ],
     ];
@@ -542,7 +556,7 @@ function forward_parse_server_api_map($value)
         $parts = preg_split('/\s*\|\s*/', trim((string) $matches[2]), 2);
         $endpoint = rtrim(trim((string) ($parts[0] ?? '')), '/');
         $token = trim((string) ($parts[1] ?? ''));
-        if ($serverId > 0 && $endpoint !== '' && $token !== '') {
+        if ($serverId > 0 && $endpoint !== '') {
             $map[$serverId] = [
                 'endpoint' => $endpoint,
                 'token' => $token,
@@ -580,7 +594,9 @@ function forward_get_api_target(array $settings, $serverId = 0)
 
     if ($serverId > 0 && !empty($mapped[$serverId])) {
         $endpoint = $mapped[$serverId]['endpoint'];
-        $token = $mapped[$serverId]['token'];
+        if (trim((string) ($mapped[$serverId]['token'] ?? '')) !== '') {
+            $token = $mapped[$serverId]['token'];
+        }
         $source = 'mapped';
     }
 
@@ -628,6 +644,25 @@ function forward_collect_api_targets(array $settings, array $serverIds)
             $targets[$default['key']] = $default;
         }
     }
+    return $targets;
+}
+
+function forward_collect_configured_api_targets(array $settings)
+{
+    $targets = [];
+    $mapped = forward_parse_server_api_map($settings['api_server_map'] ?? '');
+    foreach (array_keys($mapped) as $serverId) {
+        $target = forward_get_api_target($settings, (int) $serverId);
+        if (forward_api_target_enabled($target)) {
+            $targets[$target['key']] = $target;
+        }
+    }
+
+    $default = forward_get_api_target($settings, 0);
+    if (forward_api_target_enabled($default) && !isset($targets[$default['key']])) {
+        $targets[$default['key']] = $default;
+    }
+
     return $targets;
 }
 
@@ -1123,6 +1158,27 @@ function forward_parse_product_rule_limits($value)
     return $limits;
 }
 
+function forward_parse_product_site_limits($value)
+{
+    $lines = preg_split('/\r\n|\r|\n/', (string) $value);
+    $limits = [];
+    foreach ($lines as $line) {
+        $line = trim((string) $line);
+        if ($line === '' || strpos($line, '#') === 0) {
+            continue;
+        }
+        if (!preg_match('/^(\d+)\s*[:=]\s*(\d+)$/', $line, $matches)) {
+            continue;
+        }
+        $productId = (int) $matches[1];
+        $limit = (int) $matches[2];
+        if ($productId > 0) {
+            $limits[$productId] = max(0, $limit);
+        }
+    }
+    return $limits;
+}
+
 function forward_default_rule_limit(array $settings)
 {
     return max(0, (int) ($settings['max_rules_per_user'] ?? 10));
@@ -1136,6 +1192,21 @@ function forward_rule_limit_for_product(array $settings, $productId)
         return (int) $limits[$productId];
     }
     return forward_default_rule_limit($settings);
+}
+
+function forward_default_site_limit(array $settings)
+{
+    return max(0, (int) ($settings['max_sites_per_user'] ?? 5));
+}
+
+function forward_site_limit_for_product(array $settings, $productId)
+{
+    $productId = (int) $productId;
+    $limits = forward_parse_product_site_limits($settings['product_site_limits'] ?? '');
+    if ($productId > 0 && array_key_exists($productId, $limits)) {
+        return (int) $limits[$productId];
+    }
+    return forward_default_site_limit($settings);
 }
 
 function forward_parse_allowed_client_ips($value)
@@ -1319,6 +1390,21 @@ function forward_admin_server_select_html(array $serverOptions)
     return $html;
 }
 
+function forward_admin_server_filter_html(array $serverOptions)
+{
+    $html = '<option value="">全部宿主机</option>';
+    foreach ($serverOptions as $option) {
+        $serverId = (int) ($option['server_id'] ?? 0);
+        $label = trim((string) ($option['server_label'] ?? ''));
+        if ($label === '') {
+            $label = $serverId > 0 ? ('宿主机 #' . $serverId) : '默认入口/默认端点';
+        }
+        $html .= '<option value="' . $serverId . '">' . htmlspecialchars($label, ENT_QUOTES, 'UTF-8') . '</option>';
+    }
+
+    return $html;
+}
+
 function forward_pick_listen_ip($value, array $allowedIps)
 {
     $listenIp = trim((string) $value);
@@ -1402,6 +1488,36 @@ function forward_format_endpoint($ip, $port)
     return forward_format_endpoint_suffix($ip, (string) $port);
 }
 
+function forward_client_service_ip_family(array $settings = null)
+{
+    if ($settings === null) {
+        $settings = forward_get_module_settings();
+    }
+    if (!is_array($settings)) {
+        $settings = [];
+    }
+
+    $family = strtolower(trim((string) ($settings['client_service_ip_family'] ?? 'ipv4')));
+    return in_array($family, ['ipv4', 'ipv6', 'all'], true) ? $family : 'ipv4';
+}
+
+function forward_filter_service_ips_by_family(array $ips, $family)
+{
+    $family = strtolower(trim((string) $family));
+    if ($family === 'all') {
+        return array_values($ips);
+    }
+
+    $targetFamily = $family === 'ipv6' ? 'ipv6' : 'ipv4';
+    $filtered = [];
+    foreach ($ips as $ip) {
+        if (forward_ip_family($ip) === $targetFamily) {
+            $filtered[] = $ip;
+        }
+    }
+    return array_values($filtered);
+}
+
 function forward_attach_service_listen_ips(array $services, array $settings)
 {
     $result = [];
@@ -1422,7 +1538,7 @@ function forward_attach_service_listen_ips(array $services, array $settings)
     return $result;
 }
 
-function forward_service_from_hosting_row($row, array $allowedClientIps = [])
+function forward_service_from_hosting_row($row, array $allowedClientIps = [], $ipFamily = 'ipv4')
 {
     $ips = [];
     if (!empty($row->dedicatedip)) {
@@ -1436,6 +1552,7 @@ function forward_service_from_hosting_row($row, array $allowedClientIps = [])
     }
 
     $ips = forward_normalize_ip_list(implode(' ', $ips));
+    $ips = forward_filter_service_ips_by_family($ips, $ipFamily);
     if (!empty($allowedClientIps)) {
         $ips = array_values(array_intersect($ips, $allowedClientIps));
     }
@@ -1476,9 +1593,10 @@ function forward_base_services_query()
         );
 }
 
-function forward_get_user_services($userId, array $allowedProductIds = [], array $allowedClientIps = [], array $statuses = ['Active'])
+function forward_get_user_services($userId, array $allowedProductIds = [], array $allowedClientIps = [], array $statuses = ['Active'], $ipFamily = null)
 {
     try {
+        $ipFamily = $ipFamily === null ? forward_client_service_ip_family() : $ipFamily;
         $query = forward_base_services_query()
             ->where('tblhosting.userid', (int) $userId);
 
@@ -1493,7 +1611,7 @@ function forward_get_user_services($userId, array $allowedProductIds = [], array
         $rows = $query->get();
         $services = [];
         foreach ($rows as $row) {
-            $service = forward_service_from_hosting_row($row, $allowedClientIps);
+            $service = forward_service_from_hosting_row($row, $allowedClientIps, $ipFamily);
             if ($service !== null) {
                 $services[] = $service;
             }
@@ -1520,7 +1638,7 @@ function forward_get_all_forward_services(array $settings)
         $rows = $query->get();
         $services = [];
         foreach ($rows as $row) {
-            $service = forward_service_from_hosting_row($row, $allowedClientIps);
+            $service = forward_service_from_hosting_row($row, $allowedClientIps, 'all');
             if ($service !== null) {
                 $services[] = $service;
             }
@@ -1532,7 +1650,7 @@ function forward_get_all_forward_services(array $settings)
     }
 }
 
-function forward_get_service_by_id($serviceId, $settings = null, array $statuses = [])
+function forward_get_service_by_id($serviceId, $settings = null, array $statuses = [], $ipFamily = null)
 {
     $serviceId = (int) $serviceId;
     if ($serviceId <= 0) {
@@ -1546,6 +1664,7 @@ function forward_get_service_by_id($serviceId, $settings = null, array $statuses
         }
         $allowedProductIds = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
         $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
+        $ipFamily = $ipFamily === null ? forward_client_service_ip_family($settings) : $ipFamily;
         $query = forward_base_services_query()->where('tblhosting.id', $serviceId);
         if (!empty($statuses)) {
             $query->whereIn('tblhosting.domainstatus', $statuses);
@@ -1555,7 +1674,7 @@ function forward_get_service_by_id($serviceId, $settings = null, array $statuses
         }
 
         $row = $query->first();
-        return $row ? forward_service_from_hosting_row($row, $allowedClientIps) : null;
+        return $row ? forward_service_from_hosting_row($row, $allowedClientIps, $ipFamily) : null;
     } catch (Exception $e) {
         forward_log('get_service_by_id_error', ['service_id' => $serviceId], $e->getMessage());
         return null;
@@ -1642,7 +1761,7 @@ function forward_count_user_product_rules($userId, $productId, $productName = ''
         return 0;
     }
 
-    $services = forward_get_user_services($userId, [], [], []);
+    $services = forward_get_user_services($userId, [], [], [], 'all');
     $serviceProductMap = [];
     foreach ($services as $service) {
         $serviceId = (int) ($service['service_id'] ?? 0);
@@ -1677,12 +1796,73 @@ function forward_count_user_product_rules($userId, $productId, $productName = ''
     }
 }
 
+function forward_count_user_product_sites($userId, $productId, $productName = '')
+{
+    $userId = (int) $userId;
+    $productId = (int) $productId;
+    $productName = trim((string) $productName);
+    if ($userId <= 0 || ($productId <= 0 && $productName === '')) {
+        return 0;
+    }
+
+    $services = forward_get_user_services($userId, [], [], [], 'all');
+    $serviceProductMap = [];
+    foreach ($services as $service) {
+        $serviceId = (int) ($service['service_id'] ?? 0);
+        if ($serviceId > 0) {
+            $serviceProductMap[$serviceId] = (int) ($service['product_id'] ?? 0);
+        }
+    }
+
+    try {
+        $rows = Capsule::table('mod_forward_sites')
+            ->where('user_id', $userId)
+            ->select('service_id', 'product_name')
+            ->get();
+        $count = 0;
+        foreach ($rows as $row) {
+            $serviceId = (int) ($row->service_id ?? 0);
+            if ($serviceId > 0 && $productId > 0 && (($serviceProductMap[$serviceId] ?? 0) === $productId)) {
+                $count++;
+                continue;
+            }
+            if ($serviceId <= 0 && $productName !== '' && trim((string) ($row->product_name ?? '')) === $productName) {
+                $count++;
+            }
+        }
+        return $count;
+    } catch (Exception $e) {
+        forward_log('count_user_product_sites_error', [
+            'user_id' => $userId,
+            'product_id' => $productId,
+        ], $e->getMessage());
+        return 0;
+    }
+}
+
 function forward_product_rule_quota(array $settings, $userId, array $service)
 {
     $productId = (int) ($service['product_id'] ?? 0);
     $productName = (string) ($service['product_name'] ?? '');
     $limit = forward_rule_limit_for_product($settings, $productId);
     $count = forward_count_user_product_rules($userId, $productId, $productName);
+    $remaining = $limit > 0 ? max(0, $limit - $count) : 0;
+
+    return [
+        'product_id' => $productId,
+        'limit' => $limit,
+        'count' => $count,
+        'remaining' => $remaining,
+        'can_create' => $limit === 0 || $count < $limit,
+    ];
+}
+
+function forward_product_site_quota(array $settings, $userId, array $service)
+{
+    $productId = (int) ($service['product_id'] ?? 0);
+    $productName = (string) ($service['product_name'] ?? '');
+    $limit = forward_site_limit_for_product($settings, $productId);
+    $count = forward_count_user_product_sites($userId, $productId, $productName);
     $remaining = $limit > 0 ? max(0, $limit - $count) : 0;
 
     return [
@@ -1713,10 +1893,39 @@ function forward_attach_service_rule_quotas(array $services, array $settings, $u
     return $services;
 }
 
+function forward_attach_service_site_quotas(array $services, array $settings, $userId)
+{
+    $quotaCache = [];
+    foreach ($services as $index => $service) {
+        $productId = (int) ($service['product_id'] ?? 0);
+        $productName = (string) ($service['product_name'] ?? '');
+        $key = $productId > 0 ? ('id:' . $productId) : ('name:' . $productName);
+        if (!isset($quotaCache[$key])) {
+            $quotaCache[$key] = forward_product_site_quota($settings, $userId, $service);
+        }
+        $services[$index]['site_quota'] = $quotaCache[$key];
+        $services[$index]['site_limit'] = $quotaCache[$key]['limit'];
+        $services[$index]['site_count'] = $quotaCache[$key]['count'];
+        $services[$index]['site_remaining'] = $quotaCache[$key]['remaining'];
+        $services[$index]['site_can_create'] = $quotaCache[$key]['can_create'];
+    }
+    return $services;
+}
+
 function forward_any_service_rule_capacity(array $services)
 {
     foreach ($services as $service) {
         if (!empty($service['rule_can_create'])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function forward_any_service_site_capacity(array $services)
+{
+    foreach ($services as $service) {
+        if (!empty($service['site_can_create'])) {
             return true;
         }
     }
@@ -1755,7 +1964,7 @@ function forward_backfill_local_service_bindings()
             foreach ($rows as $row) {
                 $userId = (int) $row->user_id;
                 if (!isset($serviceCache[$userId])) {
-                    $serviceCache[$userId] = forward_get_user_services($userId, [], [], ['Active', 'Suspended']);
+                    $serviceCache[$userId] = forward_get_user_services($userId, [], [], ['Active', 'Suspended'], 'all');
                 }
 
                 $service = forward_find_service_for_ip(
@@ -2217,7 +2426,7 @@ function forward_get_remote_rule_snapshot(array $settings, array $serverIds)
     return forward_get_remote_resource_snapshot(forward_collect_api_targets($settings, $serverIds), '/api/rules');
 }
 
-function forward_get_local_rules($userId = null)
+function forward_get_local_rules($userId = null, $refreshRemote = true)
 {
     $settings = forward_get_module_settings();
     $query = Capsule::table('mod_forward_rules')->orderBy('created_at', 'desc');
@@ -2230,7 +2439,9 @@ function forward_get_local_rules($userId = null)
     foreach ($rows as $row) {
         $serverIds[] = forward_resolve_record_server_id($row, $settings, 'in_ip');
     }
-    $remoteSnapshot = forward_get_remote_rule_snapshot($settings, $serverIds);
+    $remoteSnapshot = $refreshRemote
+        ? forward_get_remote_rule_snapshot($settings, $serverIds)
+        : ['maps' => [], 'errors' => []];
     $remoteMaps = $remoteSnapshot['maps'];
     $remoteErrors = $remoteSnapshot['errors'];
     $result = [];
@@ -2254,7 +2465,7 @@ function forward_get_local_rules($userId = null)
         ) {
             $remote = $remoteMaps[$remoteKey][$remoteId];
         }
-        $statusMeta = forward_status_meta($remote, $row->status, $remoteError, $remoteId > 0);
+        $statusMeta = forward_status_meta($remote, $row->status, $remoteError, $refreshRemote && $remoteId > 0);
         $result[] = [
             'id' => (int) $row->id,
             'forward_rule_id' => $remoteId,
@@ -2508,7 +2719,7 @@ function forward_create_rule(array $data, $userId = 0, $isClient = false)
     if ($isClient) {
         $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
         $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
+        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps, ['Active'], forward_client_service_ip_family($settings));
         $service = forward_find_service_for_ip(
             $services,
             trim((string) ($data['internal_ip'] ?? $data['out_ip'] ?? '')),
@@ -2649,7 +2860,7 @@ function forward_update_rule(array $data, $userId = null)
     if ($userId !== null) {
         $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
         $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
+        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps, ['Active'], forward_client_service_ip_family($settings));
         $service = forward_find_service_for_ip(
             $services,
             trim((string) ($data['internal_ip'] ?? $data['out_ip'] ?? '')),
@@ -3007,6 +3218,26 @@ function forward_match_unique_service_for_remote_ip(array $services, $ip)
     return count($matches) === 1 ? reset($matches) : null;
 }
 
+function forward_unbound_remote_service(array $target, array $settings, $listenIp, $backendIp)
+{
+    $serverId = (int) ($target['server_id'] ?? 0);
+    if ($serverId <= 0) {
+        $inferred = forward_infer_server_id_from_listen_ip($settings, $listenIp);
+        if ($inferred > 0) {
+            $serverId = $inferred;
+        }
+    }
+
+    $backendIp = forward_normalize_ip_literal($backendIp);
+    return [
+        'user_id' => 0,
+        'product_name' => null,
+        'server_id' => $serverId,
+        'service_id' => 0,
+        'ips' => $backendIp !== '' ? [$backendIp] : [],
+    ];
+}
+
 function forward_services_by_api_target(array $services, array $settings)
 {
     $targets = [];
@@ -3170,13 +3401,29 @@ function forward_upsert_synced_site(array $remoteSite, array $service)
     return !empty($result['success']);
 }
 
-function forward_sync_remote_bindings_for_services(array $services, array $settings)
+function forward_sync_remote_bindings_for_services(array $services, array $settings, array $extraTargets = [], $includeUnmatched = false)
 {
     if (empty($services)) {
-        return ['rules' => 0, 'sites' => 0, 'errors' => 0];
+        $targets = [];
+        $servicesByTarget = [];
+    } else {
+        list($targets, $servicesByTarget) = forward_services_by_api_target($services, $settings);
     }
 
-    list($targets, $servicesByTarget) = forward_services_by_api_target($services, $settings);
+    foreach ($extraTargets as $key => $target) {
+        if (!is_array($target) || !forward_api_target_enabled($target)) {
+            continue;
+        }
+        $targetKey = trim((string) ($target['key'] ?? $key));
+        if ($targetKey === '') {
+            continue;
+        }
+        $targets[$targetKey] = $target;
+        if (!isset($servicesByTarget[$targetKey])) {
+            $servicesByTarget[$targetKey] = [];
+        }
+    }
+
     if (empty($targets)) {
         return ['rules' => 0, 'sites' => 0, 'errors' => 0];
     }
@@ -3195,6 +3442,14 @@ function forward_sync_remote_bindings_for_services(array $services, array $setti
         } else {
             foreach (($ruleSnapshot['maps'][$key] ?? []) as $remoteRule) {
                 $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteRule, 'out_ip'));
+                if ($service === null && $includeUnmatched) {
+                    $service = forward_unbound_remote_service(
+                        $target,
+                        $settings,
+                        forward_remote_string($remoteRule, 'in_ip', '0.0.0.0'),
+                        forward_remote_string($remoteRule, 'out_ip')
+                    );
+                }
                 if ($service === null) {
                     continue;
                 }
@@ -3212,6 +3467,14 @@ function forward_sync_remote_bindings_for_services(array $services, array $setti
         } else {
             foreach (($siteSnapshot['maps'][$key] ?? []) as $remoteSite) {
                 $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteSite, 'backend_ip'));
+                if ($service === null && $includeUnmatched) {
+                    $service = forward_unbound_remote_service(
+                        $target,
+                        $settings,
+                        forward_remote_string($remoteSite, 'listen_ip', '0.0.0.0'),
+                        forward_remote_string($remoteSite, 'backend_ip')
+                    );
+                }
                 if ($service === null) {
                     continue;
                 }
@@ -3231,19 +3494,64 @@ function forward_sync_remote_bindings_for_service_id($serviceId, $settings = nul
     if (!is_array($settings)) {
         $settings = [];
     }
-    $service = forward_get_service_by_id($serviceId, $settings, ['Active', 'Suspended', 'Terminated', 'Cancelled']);
+    $service = forward_get_service_by_id($serviceId, $settings, ['Active', 'Suspended', 'Terminated', 'Cancelled'], 'all');
     if ($service === null) {
         return ['rules' => 0, 'sites' => 0, 'errors' => 0];
     }
     return forward_sync_remote_bindings_for_services([$service], $settings);
 }
 
-function forward_sync_all_remote_bindings(array $settings)
+function forward_find_service_in_list_by_id(array $services, $serviceId)
 {
-    return forward_sync_remote_bindings_for_services(forward_get_all_forward_services($settings), $settings);
+    $serviceId = (int) $serviceId;
+    if ($serviceId <= 0) {
+        return null;
+    }
+
+    foreach ($services as $service) {
+        if ((int) ($service['service_id'] ?? 0) === $serviceId) {
+            return $service;
+        }
+    }
+
+    return null;
 }
 
-function forward_get_local_sites($userId = null)
+function forward_sync_client_service_bindings(array $services, array $settings, $serviceId)
+{
+    $service = forward_find_service_in_list_by_id($services, $serviceId);
+    if ($service === null) {
+        return ['success' => false, 'message' => '无权同步该服务或服务不存在'];
+    }
+
+    $result = forward_sync_remote_bindings_for_services([$service], $settings);
+    if (!empty($result['errors'])) {
+        return [
+            'success' => false,
+            'message' => '当前服务同步失败，请稍后重试或联系管理员查看 Forward 端点状态',
+            'summary' => $result,
+        ];
+    }
+
+    return [
+        'success' => true,
+        'message' => '当前服务规则已同步',
+        'summary' => $result,
+        'reload' => true,
+    ];
+}
+
+function forward_sync_all_remote_bindings(array $settings)
+{
+    return forward_sync_remote_bindings_for_services(
+        forward_get_all_forward_services($settings),
+        $settings,
+        forward_collect_configured_api_targets($settings),
+        true
+    );
+}
+
+function forward_get_local_sites($userId = null, $refreshRemote = true)
 {
     $settings = forward_get_module_settings();
     $query = Capsule::table('mod_forward_sites')->orderBy('created_at', 'desc');
@@ -3256,7 +3564,9 @@ function forward_get_local_sites($userId = null)
     foreach ($rows as $row) {
         $serverIds[] = forward_resolve_record_server_id($row, $settings, 'listen_ip');
     }
-    $remoteSnapshot = forward_get_remote_site_snapshot($settings, $serverIds);
+    $remoteSnapshot = $refreshRemote
+        ? forward_get_remote_site_snapshot($settings, $serverIds)
+        : ['maps' => [], 'errors' => []];
     $remoteMaps = $remoteSnapshot['maps'];
     $remoteErrors = $remoteSnapshot['errors'];
     $result = [];
@@ -3280,7 +3590,7 @@ function forward_get_local_sites($userId = null)
         ) {
             $remote = $remoteMaps[$remoteKey][$remoteId];
         }
-        $statusMeta = forward_status_meta($remote, $row->status, $remoteError, $remoteId > 0);
+        $statusMeta = forward_status_meta($remote, $row->status, $remoteError, $refreshRemote && $remoteId > 0);
         $result[] = [
             'id' => (int) $row->id,
             'forward_site_id' => $remoteId,
@@ -3505,7 +3815,7 @@ function forward_create_site(array $data, $userId = 0, $isClient = false)
     if ($isClient) {
         $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
         $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
+        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps, ['Active'], forward_client_service_ip_family($settings));
         $service = forward_find_service_for_ip(
             $services,
             trim((string) ($data['backend_ip'] ?? $data['internal_ip'] ?? '')),
@@ -3557,12 +3867,14 @@ function forward_create_site(array $data, $userId = 0, $isClient = false)
     $site = $validated['data'];
 
     if ($isClient) {
-        $maxSites = max(0, (int) ($settings['max_sites_per_user'] ?? 0));
-        if ($maxSites > 0) {
-            $currentCount = (int) Capsule::table('mod_forward_sites')->where('user_id', (int) $userId)->count();
-            if ($currentCount >= $maxSites) {
-                return ['success' => false, 'message' => '已达到最大共享站点数量限制'];
-            }
+        $quota = forward_product_site_quota($settings, $userId, $service);
+        if (empty($quota['can_create'])) {
+            $productLabel = trim((string) ($service['product_name'] ?? ''));
+            $productText = $productLabel !== '' ? ('产品“' . $productLabel . '”') : '当前产品';
+            return [
+                'success' => false,
+                'message' => $productText . '已达到共享站点数量限制（' . (int) $quota['count'] . '/' . (int) $quota['limit'] . '）',
+            ];
         }
 
         $site['product_name'] = $service['product_name'];
@@ -3644,7 +3956,7 @@ function forward_update_site(array $data, $userId = null)
     if ($userId !== null) {
         $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
         $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps);
+        $services = forward_get_user_services($userId, $allowedProducts, $allowedClientIps, ['Active'], forward_client_service_ip_family($settings));
         $service = forward_find_service_for_ip(
             $services,
             trim((string) ($data['backend_ip'] ?? $data['internal_ip'] ?? '')),
@@ -4225,7 +4537,7 @@ function forward_handle_client_ajax()
 
     $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
     $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
-    $services = forward_get_user_services($clientId, $allowedProducts, $allowedClientIps);
+    $services = forward_get_user_services($clientId, $allowedProducts, $allowedClientIps, ['Active'], forward_client_service_ip_family($settings));
     if (empty($services)) {
         forward_json_response(['success' => false, 'message' => '您的产品当前未开放 Forward 规则管理。']);
     }
@@ -4258,6 +4570,9 @@ function forward_handle_client_ajax()
             break;
         case 'delete_site':
             forward_json_response(forward_delete_site((int) ($_POST['site_id'] ?? 0), $clientId));
+            break;
+        case 'sync_service':
+            forward_json_response(forward_sync_client_service_bindings($services, $settings, (int) ($_POST['service_id'] ?? 0)));
             break;
         default:
             forward_json_response(['success' => false, 'message' => '不支持的操作']);
@@ -4352,8 +4667,26 @@ function forward_output_render($vars)
     $allServerIps = forward_get_all_server_ips($settings);
     $adminListenPortRange = forward_get_listen_port_range($settings, false);
     $adminServerOptions = forward_get_admin_server_options($settings);
+    $adminViewServerOptions = $adminServerOptions;
+    foreach (array_merge($rules, $sites) as $record) {
+        $recordServerId = (int) ($record['server_id'] ?? 0);
+        $key = (string) $recordServerId;
+        if (!isset($adminViewServerOptions[$key])) {
+            $adminViewServerOptions[$key] = [
+                'server_id' => $recordServerId,
+                'server_label' => $record['server_label'] ?? forward_get_server_label($recordServerId),
+                'listen_ips' => [],
+                'listen_ips_csv' => '',
+                'target_label' => '',
+            ];
+        }
+    }
+    uksort($adminViewServerOptions, function ($a, $b) {
+        return (int) $a <=> (int) $b;
+    });
     $serverIp = htmlspecialchars(forward_format_ip_list($allServerIps), ENT_QUOTES, 'UTF-8');
     $adminServerOptionsHtml = forward_admin_server_select_html($adminServerOptions);
+    $adminServerFilterHtml = forward_admin_server_filter_html($adminViewServerOptions);
     $adminServerOptionsJs = json_encode($adminServerOptions, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($adminServerOptionsJs === false) {
         $adminServerOptionsJs = '{}';
@@ -4547,6 +4880,34 @@ function forward_output_render($vars)
   display: block;
   margin-top: 8px;
 }
+.forward-admin__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--forward-line);
+  border-radius: 16px;
+  background: #f7fbfc;
+}
+.forward-admin__toolbar-label {
+  display: block;
+  margin: 0 0 4px;
+  color: var(--forward-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.forward-admin__toolbar-text {
+  margin: 0;
+  color: var(--forward-muted);
+  font-size: 13px;
+}
+.forward-admin__toolbar-control {
+  min-width: 260px;
+}
 .forward-admin code {
   max-width: 100%;
   border-radius: 10px;
@@ -4665,6 +5026,14 @@ function forward_output_render($vars)
   .forward-admin__meta {
     grid-template-columns: 1fr;
   }
+  .forward-admin__toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .forward-admin__toolbar-control {
+    min-width: 0;
+    width: 100%;
+  }
 }
 </style>
 HTML;
@@ -4687,6 +5056,10 @@ HTML;
     echo '<div class="forward-admin__summary-card"><span>默认标签</span><strong>' . ($defaultTag !== '' ? $defaultTag : '-') . '</strong></div>';
     echo '<div class="forward-admin__summary-card"><span>接口绑定</span><strong>入 ' . ($inInterface !== '' ? $inInterface : '-') . ' / 出 ' . ($outInterface !== '' ? $outInterface : '-') . '</strong></div>';
     echo '</div>';
+    echo '<div class="forward-admin__toolbar">';
+    echo '<div><span class="forward-admin__toolbar-label">当前视图</span><p class="forward-admin__toolbar-text" id="forwardAdminServerFilterMeta">按宿主机切换规则和共享站点列表。</p></div>';
+    echo '<select class="form-control forward-admin__toolbar-control" id="forwardAdminServerFilter">' . $adminServerFilterHtml . '</select>';
+    echo '</div>';
     if ($legacyServerMapNotice !== '') {
         echo '<div class="alert alert-warning" style="border-radius:14px;margin-bottom:18px;">' . htmlspecialchars($legacyServerMapNotice, ENT_QUOTES, 'UTF-8') . '</div>';
     }
@@ -4706,7 +5079,7 @@ HTML;
             $ruleSourceMeta = !empty($rule['transparent'])
                 ? '源地址：透传'
                 : (!empty($rule['out_source_ip']) ? ('回源 IP：' . $rule['out_source_ip']) : '回源 IP：自动');
-            echo '<tr data-forward-rule-row="' . (int) $rule['id'] . '">';
+            echo '<tr data-forward-rule-row="' . (int) $rule['id'] . '" data-server-id="' . (int) ($rule['server_id'] ?? 0) . '">';
             echo '<td>' . (int) $rule['id'] . '</td>';
             echo '<td><strong>' . htmlspecialchars($rule['rule_name'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($rule['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($rule['in_endpoint'], ENT_QUOTES, 'UTF-8') . '</td>';
@@ -4721,8 +5094,9 @@ HTML;
             echo '</tr>';
         }
     } else {
-        echo '<tr><td colspan="9" class="text-center text-muted">暂无规则</td></tr>';
+        echo '<tr class="forward-admin-empty-row forward-admin-empty-row--all forward-admin-rule-empty-all"><td colspan="9" class="text-center text-muted">暂无规则</td></tr>';
     }
+    echo '<tr class="forward-admin-empty-row forward-admin-empty-row--filter forward-admin-rule-empty-filter" style="display:none;"><td colspan="9" class="text-center text-muted">当前宿主机暂无规则</td></tr>';
 
     echo '</tbody></table></div></div></div>';
     echo '<div class="modal fade" id="forwardAdminRuleModal" tabindex="-1" role="dialog" aria-hidden="true"><div class="modal-dialog" role="document"><div class="modal-content">';
@@ -4762,7 +5136,7 @@ HTML;
             $siteSourceMeta = !empty($site['transparent'])
                 ? '源地址：透传'
                 : (!empty($site['backend_source_ip']) ? ('回源 IP：' . $site['backend_source_ip']) : '回源 IP：自动');
-            echo '<tr data-forward-site-row="' . (int) $site['id'] . '">';
+            echo '<tr data-forward-site-row="' . (int) $site['id'] . '" data-server-id="' . (int) ($site['server_id'] ?? 0) . '">';
             echo '<td>' . (int) $site['id'] . '</td>';
             echo '<td><strong>' . htmlspecialchars($site['domain'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($site['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($site['listen_endpoint'], ENT_QUOTES, 'UTF-8') . '</td>';
@@ -4776,8 +5150,9 @@ HTML;
             echo '</tr>';
         }
     } else {
-        echo '<tr><td colspan="8" class="text-center text-muted">暂无共享站点</td></tr>';
+        echo '<tr class="forward-admin-empty-row forward-admin-empty-row--all forward-admin-site-empty-all"><td colspan="8" class="text-center text-muted">暂无共享站点</td></tr>';
     }
+    echo '<tr class="forward-admin-empty-row forward-admin-empty-row--filter forward-admin-site-empty-filter" style="display:none;"><td colspan="8" class="text-center text-muted">当前宿主机暂无共享站点</td></tr>';
 
     echo '</tbody></table></div></div></div>';
     echo '<div class="modal fade" id="forwardAdminSiteModal" tabindex="-1" role="dialog" aria-hidden="true"><div class="modal-dialog" role="document"><div class="modal-content">';
@@ -4810,6 +5185,44 @@ HTML;
   function normalizeServerId(value) {
     var parsed = parseInt(value, 10);
     return isNaN(parsed) ? 0 : parsed;
+  }
+
+  function selectedAdminViewServerId() {
+    var value = $('#forwardAdminServerFilter').val();
+    return value === null || typeof value === 'undefined' ? '' : String(value);
+  }
+
+  function applyAdminServerFilter() {
+    var selected = selectedAdminViewServerId();
+    var selectedKey = selected === '' ? '' : String(normalizeServerId(selected));
+    var $ruleRows = $('[data-forward-rule-row]');
+    var $siteRows = $('[data-forward-site-row]');
+    var visibleRules = 0;
+    var visibleSites = 0;
+
+    $ruleRows.each(function () {
+      var match = selectedKey === '' || String(normalizeServerId($(this).data('server-id'))) === selectedKey;
+      $(this).toggle(match);
+      if (match) {
+        visibleRules++;
+      }
+    });
+
+    $siteRows.each(function () {
+      var match = selectedKey === '' || String(normalizeServerId($(this).data('server-id'))) === selectedKey;
+      $(this).toggle(match);
+      if (match) {
+        visibleSites++;
+      }
+    });
+
+    $('.forward-admin-rule-empty-all').toggle(selectedKey === '' && $ruleRows.length === 0);
+    $('.forward-admin-site-empty-all').toggle(selectedKey === '' && $siteRows.length === 0);
+    $('.forward-admin-rule-empty-filter').toggle(selectedKey !== '' && $ruleRows.length > 0 && visibleRules === 0);
+    $('.forward-admin-site-empty-filter').toggle(selectedKey !== '' && $siteRows.length > 0 && visibleSites === 0);
+
+    var label = selectedKey === '' ? '全部宿主机' : ($('#forwardAdminServerFilter option:selected').text() || ('宿主机 #' + selectedKey));
+    $('#forwardAdminServerFilterMeta').text(label + '：规则 ' + visibleRules + ' 条 / 共享站点 ' + visibleSites + ' 个');
   }
 
   function syncAdminTransparentSource(toggleSelector, sourceSelector, wrapSelector, sourceValue) {
@@ -4967,7 +5380,12 @@ HTML;
     syncAdminTransparentSource('#forward_admin_rule_transparent', '#forward_admin_rule_out_source_ip', '#forward_admin_rule_source_wrap', '');
     $('#forwardAdminRuleModalTitle').text('添加规则');
     syncAdminRuleServer('');
-    autoSelectSingleServer($('#forward_admin_rule_server_id'), function () { syncAdminRuleServer(''); });
+    if (selectedAdminViewServerId() !== '' && adminServerOption(selectedAdminViewServerId())) {
+      $('#forward_admin_rule_server_id').val(selectedAdminViewServerId());
+      syncAdminRuleServer('');
+    } else {
+      autoSelectSingleServer($('#forward_admin_rule_server_id'), function () { syncAdminRuleServer(''); });
+    }
   }
 
   function resetSiteForm() {
@@ -4981,8 +5399,15 @@ HTML;
     syncAdminTransparentSource('#forward_admin_site_transparent', '#forward_admin_site_backend_source_ip', '#forward_admin_site_source_wrap', '');
     $('#forwardAdminSiteModalTitle').text('添加共享站点');
     syncAdminSiteServer('');
-    autoSelectSingleServer($('#forward_admin_site_server_id'), function () { syncAdminSiteServer(''); });
+    if (selectedAdminViewServerId() !== '' && adminServerOption(selectedAdminViewServerId())) {
+      $('#forward_admin_site_server_id').val(selectedAdminViewServerId());
+      syncAdminSiteServer('');
+    } else {
+      autoSelectSingleServer($('#forward_admin_site_server_id'), function () { syncAdminSiteServer(''); });
+    }
   }
+
+  $('#forwardAdminServerFilter').on('change', applyAdminServerFilter);
 
   $('#forward_admin_rule_server_id').on('change', function () {
     syncAdminRuleServer('');
@@ -5062,6 +5487,7 @@ HTML;
         showAdminNotice('success', response.message || '规则已删除');
         $row.addClass('is-removing').fadeOut(180, function () {
           $(this).remove();
+          applyAdminServerFilter();
         });
       } else {
         showAdminNotice('danger', response && response.message ? response.message : '删除失败');
@@ -5084,6 +5510,7 @@ HTML;
         showAdminNotice('success', response.message || '共享站点已删除');
         $row.addClass('is-removing').fadeOut(180, function () {
           $(this).remove();
+          applyAdminServerFilter();
         });
       } else {
         showAdminNotice('danger', response && response.message ? response.message : '删除失败');
@@ -5191,6 +5618,7 @@ HTML;
 
   syncAdminTransparentSource('#forward_admin_rule_transparent', '#forward_admin_rule_out_source_ip', '#forward_admin_rule_source_wrap', '');
   syncAdminTransparentSource('#forward_admin_site_transparent', '#forward_admin_site_backend_source_ip', '#forward_admin_site_source_wrap', '');
+  applyAdminServerFilter();
 })(jQuery);
 </script>
 HTML;
@@ -5256,16 +5684,14 @@ function forward_clientarea_render($vars)
     $clientId = isset($_SESSION['uid']) ? (int) $_SESSION['uid'] : 0;
     $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? ($vars['allowed_product_ids'] ?? ''));
     $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? ($vars['allowed_client_ips'] ?? ''));
-    $services = $clientId > 0 ? forward_get_user_services($clientId, $allowedProducts, $allowedClientIps) : [];
+    $services = $clientId > 0 ? forward_get_user_services($clientId, $allowedProducts, $allowedClientIps, ['Active'], forward_client_service_ip_family($settings)) : [];
     $services = forward_attach_service_listen_ips($services, $settings);
     $hasAccess = $clientId > 0 && !empty($services);
-    if ($hasAccess) {
-        forward_sync_remote_bindings_for_services($services, $settings);
-    }
-    $rules = $clientId > 0 ? forward_get_local_rules($clientId) : [];
-    $sites = $clientId > 0 ? forward_get_local_sites($clientId) : [];
+    $rules = $clientId > 0 ? forward_get_local_rules($clientId, false) : [];
+    $sites = $clientId > 0 ? forward_get_local_sites($clientId, false) : [];
     if ($hasAccess) {
         $services = forward_attach_service_rule_quotas($services, $settings, $clientId);
+        $services = forward_attach_service_site_quotas($services, $settings, $clientId);
     }
     $activeRuleCount = 0;
     foreach ($rules as $rule) {
@@ -5282,7 +5708,7 @@ function forward_clientarea_render($vars)
     $protocols = forward_protocol_options($settings['allowed_protocols'] ?? ($vars['allowed_protocols'] ?? 'tcp+udp'));
     $clientPermissions = forward_client_permissions($settings);
     $maxRules = forward_default_rule_limit($settings);
-    $maxSites = max(0, (int) ($settings['max_sites_per_user'] ?? ($vars['max_sites_per_user'] ?? 5)));
+    $maxSites = forward_default_site_limit($settings ?: ['max_sites_per_user' => ($vars['max_sites_per_user'] ?? 5)]);
     $allServerIps = forward_get_all_server_ips($settings);
     $clientListenPortRange = forward_get_listen_port_range($settings, true);
 
@@ -5324,7 +5750,7 @@ function forward_clientarea_render($vars)
             'current_site_count' => count($sites),
             'active_site_count' => $activeSiteCount,
             'inactive_site_count' => count($sites) - $activeSiteCount,
-            'can_add_more_sites' => $maxSites === 0 || count($sites) < $maxSites,
+            'can_add_more_sites' => forward_any_service_site_capacity($services),
             'service_ip_count' => forward_count_service_ips($services),
             'allowed_protocols' => $protocols,
             'client_rule_can_edit_listen_ip' => !empty($clientPermissions['rule']['listen_ip']),
