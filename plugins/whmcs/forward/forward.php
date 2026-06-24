@@ -1874,6 +1874,43 @@ function forward_product_site_quota(array $settings, $userId, array $service)
     ];
 }
 
+function forward_services_for_quota_group(array $services, array $selectedService)
+{
+    $productId = (int) ($selectedService['product_id'] ?? 0);
+    $productName = trim((string) ($selectedService['product_name'] ?? ''));
+    $matches = [];
+
+    foreach ($services as $service) {
+        if ($productId > 0) {
+            if ((int) ($service['product_id'] ?? 0) === $productId) {
+                $matches[] = $service;
+            }
+            continue;
+        }
+
+        if ($productName !== '' && trim((string) ($service['product_name'] ?? '')) === $productName) {
+            $matches[] = $service;
+        }
+    }
+
+    return !empty($matches) ? $matches : [$selectedService];
+}
+
+function forward_sync_quota_group_before_create(array $services, array $settings, array $service, $resourceKind, $resourceLabel)
+{
+    $syncServices = forward_services_for_quota_group($services, $service);
+    $result = forward_sync_remote_bindings_for_services($syncServices, $settings, [], false, [$resourceKind]);
+    if (!empty($result['errors'])) {
+        return [
+            'success' => false,
+            'message' => '创建前同步当前产品远端配置失败，已取消创建以避免超过' . $resourceLabel . '上限。请稍后重试或联系管理员查看 Forward API 状态。',
+            'summary' => $result,
+        ];
+    }
+
+    return ['success' => true, 'summary' => $result];
+}
+
 function forward_attach_service_rule_quotas(array $services, array $settings, $userId)
 {
     $quotaCache = [];
@@ -2771,6 +2808,11 @@ function forward_create_rule(array $data, $userId = 0, $isClient = false)
     $rule = $validated['data'];
 
     if ($isClient) {
+        $sync = forward_sync_quota_group_before_create($services, $settings, $service, 'rules', '端口规则');
+        if (empty($sync['success'])) {
+            return $sync;
+        }
+
         $quota = forward_product_rule_quota($settings, $userId, $service);
         if (empty($quota['can_create'])) {
             $productLabel = trim((string) ($service['product_name'] ?? ''));
@@ -3401,7 +3443,7 @@ function forward_upsert_synced_site(array $remoteSite, array $service)
     return !empty($result['success']);
 }
 
-function forward_sync_remote_bindings_for_services(array $services, array $settings, array $extraTargets = [], $includeUnmatched = false)
+function forward_sync_remote_bindings_for_services(array $services, array $settings, array $extraTargets = [], $includeUnmatched = false, $resources = null)
 {
     if (empty($services)) {
         $targets = [];
@@ -3428,58 +3470,65 @@ function forward_sync_remote_bindings_for_services(array $services, array $setti
         return ['rules' => 0, 'sites' => 0, 'errors' => 0];
     }
 
+    $resources = is_array($resources) && !empty($resources) ? array_values(array_unique($resources)) : ['rules', 'sites'];
+    $syncRules = in_array('rules', $resources, true);
+    $syncSites = in_array('sites', $resources, true);
     $summary = ['rules' => 0, 'sites' => 0, 'errors' => 0];
-    $ruleSnapshot = forward_get_remote_resource_snapshot($targets, '/api/rules');
-    $siteSnapshot = forward_get_remote_resource_snapshot($targets, '/api/sites');
+    $ruleSnapshot = $syncRules ? forward_get_remote_resource_snapshot($targets, '/api/rules') : ['maps' => [], 'errors' => []];
+    $siteSnapshot = $syncSites ? forward_get_remote_resource_snapshot($targets, '/api/sites') : ['maps' => [], 'errors' => []];
 
     foreach ($targets as $key => $target) {
         $targetServices = $servicesByTarget[$key] ?? [];
-        if (($ruleSnapshot['errors'][$key] ?? '') !== '') {
-            $summary['errors']++;
-            forward_log('sync_remote_rules_snapshot_error', [
-                'target' => forward_api_target_label($target),
-            ], $ruleSnapshot['errors'][$key]);
-        } else {
-            foreach (($ruleSnapshot['maps'][$key] ?? []) as $remoteRule) {
-                $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteRule, 'out_ip'));
-                if ($service === null && $includeUnmatched) {
-                    $service = forward_unbound_remote_service(
-                        $target,
-                        $settings,
-                        forward_remote_string($remoteRule, 'in_ip', '0.0.0.0'),
-                        forward_remote_string($remoteRule, 'out_ip')
-                    );
-                }
-                if ($service === null) {
-                    continue;
-                }
-                if (forward_upsert_synced_rule($remoteRule, $service)) {
-                    $summary['rules']++;
+        if ($syncRules) {
+            if (($ruleSnapshot['errors'][$key] ?? '') !== '') {
+                $summary['errors']++;
+                forward_log('sync_remote_rules_snapshot_error', [
+                    'target' => forward_api_target_label($target),
+                ], $ruleSnapshot['errors'][$key]);
+            } else {
+                foreach (($ruleSnapshot['maps'][$key] ?? []) as $remoteRule) {
+                    $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteRule, 'out_ip'));
+                    if ($service === null && $includeUnmatched) {
+                        $service = forward_unbound_remote_service(
+                            $target,
+                            $settings,
+                            forward_remote_string($remoteRule, 'in_ip', '0.0.0.0'),
+                            forward_remote_string($remoteRule, 'out_ip')
+                        );
+                    }
+                    if ($service === null) {
+                        continue;
+                    }
+                    if (forward_upsert_synced_rule($remoteRule, $service)) {
+                        $summary['rules']++;
+                    }
                 }
             }
         }
 
-        if (($siteSnapshot['errors'][$key] ?? '') !== '') {
-            $summary['errors']++;
-            forward_log('sync_remote_sites_snapshot_error', [
-                'target' => forward_api_target_label($target),
-            ], $siteSnapshot['errors'][$key]);
-        } else {
-            foreach (($siteSnapshot['maps'][$key] ?? []) as $remoteSite) {
-                $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteSite, 'backend_ip'));
-                if ($service === null && $includeUnmatched) {
-                    $service = forward_unbound_remote_service(
-                        $target,
-                        $settings,
-                        forward_remote_string($remoteSite, 'listen_ip', '0.0.0.0'),
-                        forward_remote_string($remoteSite, 'backend_ip')
-                    );
-                }
-                if ($service === null) {
-                    continue;
-                }
-                if (forward_upsert_synced_site($remoteSite, $service)) {
-                    $summary['sites']++;
+        if ($syncSites) {
+            if (($siteSnapshot['errors'][$key] ?? '') !== '') {
+                $summary['errors']++;
+                forward_log('sync_remote_sites_snapshot_error', [
+                    'target' => forward_api_target_label($target),
+                ], $siteSnapshot['errors'][$key]);
+            } else {
+                foreach (($siteSnapshot['maps'][$key] ?? []) as $remoteSite) {
+                    $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteSite, 'backend_ip'));
+                    if ($service === null && $includeUnmatched) {
+                        $service = forward_unbound_remote_service(
+                            $target,
+                            $settings,
+                            forward_remote_string($remoteSite, 'listen_ip', '0.0.0.0'),
+                            forward_remote_string($remoteSite, 'backend_ip')
+                        );
+                    }
+                    if ($service === null) {
+                        continue;
+                    }
+                    if (forward_upsert_synced_site($remoteSite, $service)) {
+                        $summary['sites']++;
+                    }
                 }
             }
         }
@@ -3867,6 +3916,11 @@ function forward_create_site(array $data, $userId = 0, $isClient = false)
     $site = $validated['data'];
 
     if ($isClient) {
+        $sync = forward_sync_quota_group_before_create($services, $settings, $service, 'sites', '共享站点');
+        if (empty($sync['success'])) {
+            return $sync;
+        }
+
         $quota = forward_product_site_quota($settings, $userId, $service);
         if (empty($quota['can_create'])) {
             $productLabel = trim((string) ($service['product_name'] ?? ''));
