@@ -42,7 +42,7 @@
                             <span class="forward-card__eyebrow">目标服务</span>
                             <h3 class="forward-card__title">选择服务 IP</h3>
                         </div>
-                        <span class="forward-chip">入口 {$server_ip_summary|escape:'html'}</span>
+                        <span class="forward-chip">入口按服务匹配</span>
                     </div>
 
                     <div class="form-group">
@@ -71,7 +71,7 @@
                         </div>
                         <div>
                             <span class="forward-selection__label">可用入口 IP</span>
-                            <strong class="forward-selection__value" id="forwardSelectedListenIps">{$server_ip_summary|escape:'html'}</strong>
+                            <strong class="forward-selection__value" id="forwardSelectedListenIps">请选择服务后显示</strong>
                         </div>
                         <div>
                             <span class="forward-selection__label">产品规则额度</span>
@@ -83,11 +83,11 @@
                         </div>
                         <div>
                             <span class="forward-selection__label">规则预览</span>
-                            <code class="forward-selection__route" id="forwardRulePreview">{$server_ip_endpoint|escape:'html'}:入口端口 -> 目标IP:目标端口</code>
+                            <code class="forward-selection__route" id="forwardRulePreview">请选择服务 IP 后生成</code>
                         </div>
                         <div>
                             <span class="forward-selection__label">站点预览</span>
-                            <code class="forward-selection__route" id="forwardSitePreview">{$server_ip_endpoint|escape:'html'}:80/443 -> 目标IP</code>
+                            <code class="forward-selection__route" id="forwardSitePreview">请选择服务 IP 后生成</code>
                         </div>
                         <div class="forward-actionbar" style="margin-top:0;">
                             <button type="button" class="btn btn-default btn-xs forward-copy-btn" data-copy-target="#forwardRulePreview">复制规则预览</button>
@@ -596,8 +596,6 @@
 <script>
 (function ($) {
     var csrfToken = '{$csrf_token|escape:'javascript'}';
-    var serverIpText = '{$server_ip|escape:'javascript'}';
-    var serverIpSummaryText = '{$server_ip_summary|escape:'javascript'}';
     var clientPortMin = {$client_port_min|intval};
     var clientPortMax = {$client_port_max|intval};
     var clientPortRangeText = '{$client_port_range_text|escape:'javascript'}';
@@ -760,8 +758,13 @@
     }
 
     function syncTopPreview() {
-        var targetIp = $('#forward_rule_add_ip').val() || $('#forward_site_add_ip').val() || selectedService().val() || '目标IP';
-        var ruleListenIp = $('#forward_rule_add_listen_ip').val() || serverIpText;
+        var targetIp = $('#forward_rule_add_ip').val() || $('#forward_site_add_ip').val() || selectedService().val() || '';
+        if (!targetIp) {
+            $('#forwardRulePreview').text('请选择服务 IP 后生成');
+            $('#forwardSitePreview').text('请选择服务 IP 后生成');
+            return;
+        }
+        var ruleListenIp = $('#forward_rule_add_listen_ip').val() || '入口IP';
         var siteListenIp = $('#forward_site_add_listen_ip').val() || ruleListenIp;
         $('#forwardRulePreview').text(formatEndpoint(ruleListenIp, '入口端口') + ' -> ' + formatEndpoint(targetIp, '目标端口'));
         $('#forwardSitePreview').text(formatEndpoint(siteListenIp, '80/443') + ' -> ' + targetIp);
@@ -844,7 +847,7 @@
         var canCreateSite = !!ip && canAddMoreSites && (siteLimit <= 0 || siteRemaining > 0);
         var selectedText = ip ? $.grep([product, ip, serverLabel], function (item) { return item; }).join(' / ') : '未选择';
         $('#forwardSelectedTarget').text(selectedText);
-        $('#forwardSelectedListenIps').text(ip ? formatListenIps(listenIps) : serverIpSummaryText);
+        $('#forwardSelectedListenIps').text(ip ? formatListenIps(listenIps) : '请选择服务后显示');
         $('#forwardSelectedRuleQuota').text(ip ? formatRuleQuota(ruleLimit, ruleCount, ruleRemaining) : '请选择服务后显示');
         $('#forwardSelectedSiteQuota').text(ip ? formatSiteQuota(siteLimit, siteCount, siteRemaining) : '请选择服务后显示');
         $('#forwardServiceHelp').text(ip ? ('已选择目标 IP: ' + ip + (serverLabel ? '（' + serverLabel + '）' : '') + '，可用入口 IP: ' + formatListenIps(listenIps) + '，端口规则额度: ' + formatRuleQuota(ruleLimit, ruleCount, ruleRemaining) + '，站点额度: ' + formatSiteQuota(siteLimit, siteCount, siteRemaining)) : '请选择目标服务 IP，入口 IP 会按宿主机自动限制。');
