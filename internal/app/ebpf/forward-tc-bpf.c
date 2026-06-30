@@ -568,13 +568,6 @@ struct bpf_map_def SEC("maps") local_macs = {
 	.max_entries = 4096,
 };
 
-struct bpf_map_def SEC("maps") egress_wildcard_fast_v4 = {
-	.type = BPF_MAP_TYPE_HASH,
-	.key_size = sizeof(struct rule_key_v4),
-	.value_size = sizeof(__u8),
-	.max_entries = 4096,
-};
-
 struct bpf_map_def SEC("maps") nat_config_v4 = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(__u32),
@@ -1418,14 +1411,6 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *sk
 		return rule;
 
 	key.dst_addr = 0;
-	if (bpf_map_lookup_elem(&egress_wildcard_fast_v4, &key)) {
-		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule) {
-			ctx->rule_wildcard_addr = 1;
-			return rule;
-		}
-	}
-
 	rule = bpf_map_lookup_elem(&rules_v4, &key);
 	if (rule) {
 		ctx->rule_wildcard_addr = 1;

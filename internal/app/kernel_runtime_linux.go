@@ -40,7 +40,6 @@ const (
 	kernelIfParentMapName                   = "if_parent_v4"
 	kernelLocalIPv4MapName                  = "local_ipv4s_v4"
 	kernelLocalMACMapName                   = "local_macs"
-	kernelEgressWildcardFastMapName         = "egress_wildcard_fast_v4"
 	kernelNATConfigMapName                  = "nat_config_v4"
 	kernelStatsMapName                      = "stats_v4"
 	kernelDiagMapName                       = "diag_v4"
@@ -181,8 +180,6 @@ type tcNATConfigValueV4 struct {
 	Pad0    uint32
 	Pad1    uint32
 }
-
-type tcEgressWildcardKeyV4 = tcRuleKeyV4
 
 type kernelAttachment struct {
 	filter *netlink.BpfFilter
@@ -669,7 +666,6 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 	}
 
 	samePrepared := rt.samePreparedRulesLocked(prepared, forwardIfRules, replyIfRules)
-	desiredEgressWildcardFast := buildKernelEgressWildcardFastMap(prepared)
 	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
 	desiredLocalMACs := buildKernelLocalMACMap(prepared)
 	if localIPv4Err != nil && !samePrepared {
@@ -684,9 +680,6 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		return results, nil
 	}
 	if samePrepared {
-		if err := syncKernelEgressWildcardFastMap(rt.coll.Maps[kernelEgressWildcardFastMapName], desiredEgressWildcardFast); err != nil {
-			log.Printf("kernel dataplane reconcile: refresh egress wildcard fast map failed: %v", err)
-		}
 		if localIPv4Err != nil {
 			log.Printf("kernel dataplane reconcile: keep current local IPv4 bypass inventory after refresh failure: %v", localIPv4Err)
 		} else if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], desiredLocalIPv4s); err != nil {
@@ -731,7 +724,7 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 		)
 	}
 	if rt.canReconcileInPlaceLocked(desiredCapacities) && !preferFreshMapGrowth {
-		if err := rt.reconcileInPlaceLocked(prepared, forwardIfRules, replyIfRules, parentIfMap, desiredEgressWildcardFast, desiredLocalIPv4s, desiredLocalMACs, results, &reconcileMetrics); err == nil {
+		if err := rt.reconcileInPlaceLocked(prepared, forwardIfRules, replyIfRules, parentIfMap, desiredLocalIPv4s, desiredLocalMACs, results, &reconcileMetrics); err == nil {
 			return results, nil
 		} else {
 			log.Printf("kernel dataplane reconcile: in-place update unavailable, falling back to collection rebuild: %v", err)
@@ -1135,18 +1128,6 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]ker
 			return results, nil
 		}
 		log.Printf("kernel dataplane rule map sync failed: %v", err)
-		for _, rule := range rules {
-			results[rule.ID] = kernelRuleApplyResult{Error: msg}
-		}
-		return results, nil
-	}
-	if err := syncKernelEgressWildcardFastMap(coll.Maps[kernelEgressWildcardFastMapName], desiredEgressWildcardFast); err != nil {
-		coll.Close()
-		msg := fmt.Sprintf("sync kernel egress wildcard fast map: %v", err)
-		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
-			return results, nil
-		}
-		log.Printf("kernel dataplane egress wildcard fast map sync failed: %v", err)
 		for _, rule := range rules {
 			results[rule.ID] = kernelRuleApplyResult{Error: msg}
 		}
@@ -2346,9 +2327,8 @@ func (rt *linuxKernelRuleRuntime) canReconcileInPlaceLocked(desired kernelMapCap
 	rulesMap := rt.coll.Maps[kernelRulesMapName]
 	flowsMap := rt.coll.Maps[kernelFlowsMapName]
 	natPortsMap := rt.coll.Maps[kernelNatPortsMapName]
-	egressWildcardFastMap := rt.coll.Maps[kernelEgressWildcardFastMapName]
 	statsMap := rt.coll.Maps[kernelStatsMapName]
-	if rulesMap == nil || flowsMap == nil || natPortsMap == nil || egressWildcardFastMap == nil || statsMap == nil {
+	if rulesMap == nil || flowsMap == nil || natPortsMap == nil || statsMap == nil {
 		return false
 	}
 	if !kernelMapReusableWithCapacity(rulesMap, desired.Rules) {
@@ -2382,9 +2362,6 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 			return fmt.Errorf("clear kernel rule key during drain: %w", err)
 		}
 	}
-	if err := syncKernelEgressWildcardFastMap(rt.coll.Maps[kernelEgressWildcardFastMapName], nil); err != nil {
-		return fmt.Errorf("clear kernel egress wildcard fast map during drain: %w", err)
-	}
 	if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
 		return fmt.Errorf("clear kernel local IPv4 bypass map during drain: %w", err)
 	}
@@ -2411,7 +2388,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	return nil
 }
 
-func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, forwardIfRules map[int][]int64, replyIfRules map[int][]int64, parentIfMap map[uint32]uint32, egressWildcardFast map[tcEgressWildcardKeyV4]uint8, localIPv4s map[uint32]uint8, localMACs map[uint32]kernelLocalMACValue, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
+func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, forwardIfRules map[int][]int64, replyIfRules map[int][]int64, parentIfMap map[uint32]uint32, localIPv4s map[uint32]uint8, localMACs map[uint32]kernelLocalMACValue, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
 	flowPurgeIDs := collectPreparedKernelRuleFlowPurgeIDs(rt.preparedRules, prepared)
 	attachmentReset := preparedKernelRulesNeedAttachmentReset(rt.preparedRules, prepared)
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
@@ -2487,11 +2464,6 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 			return fmt.Errorf("sync kernel local MAC guard map: %w", err)
 		}
 	}
-	conservativeFast := intersectKernelEgressWildcardFastMaps(buildKernelEgressWildcardFastMap(rt.preparedRules), egressWildcardFast)
-	if err := syncKernelEgressWildcardFastMap(rt.coll.Maps[kernelEgressWildcardFastMapName], conservativeFast); err != nil {
-		rt.discardAttachmentsLocked(createdAttachments)
-		return fmt.Errorf("sync kernel egress wildcard fast map: %w", err)
-	}
 	if err := syncKernelNATConfigMap(rt.coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax, rt.natConfigFlags()); err != nil {
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel nat config map: %w", err)
@@ -2503,10 +2475,6 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err := syncKernelIfParentMap(rt.coll.Maps[kernelIfParentMapName], parentIfMap); err != nil {
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel reply parent map: %w", err)
-	}
-	if err := syncKernelEgressWildcardFastMap(rt.coll.Maps[kernelEgressWildcardFastMapName], egressWildcardFast); err != nil {
-		rt.discardAttachmentsLocked(createdAttachments)
-		return fmt.Errorf("sync kernel egress wildcard fast map: %w", err)
 	}
 	if len(localIPv4s) == 0 {
 		if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
@@ -2930,9 +2898,6 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 	}
 	if _, ok := spec.Maps[kernelLocalMACMapName]; !ok {
 		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelLocalMACMapName)
-	}
-	if _, ok := spec.Maps[kernelEgressWildcardFastMapName]; !ok {
-		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelEgressWildcardFastMapName)
 	}
 	if _, ok := spec.Maps[kernelNATConfigMapName]; !ok {
 		return fmt.Errorf("embedded tc eBPF object is missing map %q", kernelNATConfigMapName)
@@ -3555,63 +3520,6 @@ func sortPreparedKernelRules(items []preparedKernelRule) {
 	})
 }
 
-func kernelEgressWildcardMapKey(ifindex uint32, proto uint8) tcEgressWildcardKeyV4 {
-	return tcEgressWildcardKeyV4{
-		IfIndex: ifindex,
-		DstAddr: 0,
-		DstPort: 0,
-		Proto:   proto,
-	}
-}
-
-func buildKernelEgressWildcardFastMap(prepared []preparedKernelRule) map[tcEgressWildcardKeyV4]uint8 {
-	if len(prepared) == 0 {
-		return map[tcEgressWildcardKeyV4]uint8{}
-	}
-
-	type wildcardState struct {
-		hasEgress            bool
-		hasCompetingWildcard bool
-		hasPartial           bool
-	}
-
-	states := make(map[tcEgressWildcardKeyV4]wildcardState)
-	for _, item := range prepared {
-		if kernelPreparedRuleFamily(item) != ipFamilyIPv4 {
-			continue
-		}
-		key := kernelEgressWildcardMapKey(item.key.IfIndex, item.key.Proto)
-		state := states[key]
-		fullWildcard := item.key.DstAddr == 0 && item.key.DstPort == 0
-		if fullWildcard && item.value.Flags&kernelRuleFlagEgressNAT != 0 {
-			if state.hasEgress {
-				state.hasCompetingWildcard = true
-			} else {
-				state.hasEgress = true
-			}
-			states[key] = state
-			continue
-		}
-		if fullWildcard {
-			state.hasCompetingWildcard = true
-		} else if item.key.DstAddr == 0 || item.key.DstPort == 0 {
-			state.hasPartial = true
-		}
-		states[key] = state
-	}
-
-	fast := make(map[tcEgressWildcardKeyV4]uint8)
-	for key, state := range states {
-		if !state.hasEgress || state.hasCompetingWildcard {
-			continue
-		}
-		if !state.hasPartial {
-			fast[key] = 1
-		}
-	}
-	return fast
-}
-
 func preparedKernelRuleNeedsLocalMACGuard(item preparedKernelRule) bool {
 	if isKernelEgressNATRule(item.rule) || isKernelEgressNATPassthroughRule(item.rule) {
 		return false
@@ -3632,19 +3540,6 @@ func buildKernelLocalMACMap(prepared []preparedKernelRule) map[uint32]kernelLoca
 			continue
 		}
 		out[uint32(item.inIfIndex)] = kernelLocalMACValue{MAC: item.ingressMAC}
-	}
-	return out
-}
-
-func intersectKernelEgressWildcardFastMaps(current, desired map[tcEgressWildcardKeyV4]uint8) map[tcEgressWildcardKeyV4]uint8 {
-	if len(current) == 0 || len(desired) == 0 {
-		return map[tcEgressWildcardKeyV4]uint8{}
-	}
-	out := make(map[tcEgressWildcardKeyV4]uint8)
-	for key, currentValue := range current {
-		if desiredValue, ok := desired[key]; ok && desiredValue == currentValue {
-			out[key] = currentValue
-		}
 	}
 	return out
 }
@@ -3796,43 +3691,6 @@ func syncKernelLocalMACMap(m *ebpf.Map, desired map[uint32]kernelLocalMACValue) 
 	for ifindex := range existing {
 		if err := m.Delete(ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return fmt.Errorf("delete stale local MAC map entry %d: %w", ifindex, err)
-		}
-	}
-	return nil
-}
-
-func syncKernelEgressWildcardFastMap(m *ebpf.Map, desired map[tcEgressWildcardKeyV4]uint8) error {
-	if m == nil {
-		return fmt.Errorf("kernel egress wildcard fast map is nil")
-	}
-	if desired == nil {
-		desired = make(map[tcEgressWildcardKeyV4]uint8)
-	}
-
-	existing := make(map[tcEgressWildcardKeyV4]uint8)
-	iter := m.Iterate()
-	var key tcEgressWildcardKeyV4
-	var value uint8
-	for iter.Next(&key, &value) {
-		existing[key] = value
-	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("iterate kernel egress wildcard fast map: %w", err)
-	}
-
-	for matchKey, present := range desired {
-		if current, ok := existing[matchKey]; ok && current == present {
-			delete(existing, matchKey)
-			continue
-		}
-		if err := m.Put(matchKey, present); err != nil {
-			return fmt.Errorf("update egress wildcard fast map entry %+v: %w", matchKey, err)
-		}
-		delete(existing, matchKey)
-	}
-	for matchKey := range existing {
-		if err := m.Delete(matchKey); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("delete stale egress wildcard fast map entry %+v: %w", matchKey, err)
 		}
 	}
 	return nil

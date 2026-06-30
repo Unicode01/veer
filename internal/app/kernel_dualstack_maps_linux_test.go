@@ -128,31 +128,6 @@ func TestKernelDualstackMapStructSizes(t *testing.T) {
 	}
 }
 
-func TestBuildKernelEgressWildcardMapsIgnoresIPv6PreparedRules(t *testing.T) {
-	fast := buildKernelEgressWildcardFastMap([]preparedKernelRule{{
-		rule: Rule{
-			ID:         8,
-			Protocol:   "tcp",
-			kernelMode: kernelModeEgressNAT,
-		},
-		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv6},
-		key: tcRuleKeyV4{
-			IfIndex: 5,
-			DstAddr: 0,
-			DstPort: 0,
-			Proto:   6,
-		},
-		value: tcRuleValueV4{
-			RuleID:     8,
-			Flags:      kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT,
-			OutIfIndex: 9,
-		},
-	}})
-	if len(fast) != 0 {
-		t.Fatalf("buildKernelEgressWildcardFastMap() = %#v, want IPv6 entries ignored", fast)
-	}
-}
-
 func TestSamePreparedKernelRuleDataplaneDetectsSpecDifference(t *testing.T) {
 	base := preparedKernelRule{
 		rule:       Rule{ID: 9, Protocol: "tcp"},
