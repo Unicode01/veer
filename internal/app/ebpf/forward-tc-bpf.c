@@ -311,10 +311,44 @@ struct tc_dispatch_ctx_v4 {
 	struct flow_key_v4 flow_key;
 	struct flow_value_v4 flow_value;
 	struct rule_value_v4 rule_value;
+	__u32 plugin_chain_index;
 	__u8 have_flow;
 	__u8 have_rule;
 	__u8 flow_bank;
 	__u8 pad0;
+};
+
+struct tc_plugin_config_v4 {
+	__u32 pre_forward_count;
+	__u32 post_lookup_count;
+	__u32 pre_reply_count;
+	__u32 post_reply_count;
+};
+
+struct tc_plugin_ctx_v4 {
+	__u32 ifindex;
+	__u32 src_addr;
+	__u32 dst_addr;
+	__u32 rule_id;
+	__u32 backend_addr;
+	__u32 out_ifindex;
+	__u32 nat_addr;
+	__u16 src_port;
+	__u16 dst_port;
+	__u16 backend_port;
+	__u16 rule_flags;
+	__u8 proto;
+	__u8 rule_wildcard_addr;
+	__u8 have_rule;
+	__u8 have_flow;
+	__u8 direction;
+	__u8 pad[3];
+	__u32 front_addr;
+	__u32 client_addr;
+	__u16 front_port;
+	__u16 client_port;
+	__u16 nat_port;
+	__u16 pad1;
 };
 
 #ifndef AF_INET
@@ -467,13 +501,27 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 7,
+	.max_entries = 45,
 };
 
 struct bpf_map_def SEC("maps") tc_dispatch_scratch_v4 = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_dispatch_ctx_v4),
+	.max_entries = 1,
+};
+
+struct bpf_map_def SEC("maps") tc_plugin_config_v4 = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct tc_plugin_config_v4),
+	.max_entries = 1,
+};
+
+struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct tc_plugin_ctx_v4),
 	.max_entries = 1,
 };
 
@@ -611,10 +659,25 @@ enum {
 	FORWARD_TC_PROG_V4_REPLY_FULLNAT = 4,
 	FORWARD_TC_PROG_V4_FULLNAT_EXISTING = 5,
 	FORWARD_TC_PROG_V4_FULLNAT_NEW = 6,
+	FORWARD_TC_PROG_V4_FORWARD_CORE = 7,
+	FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE = 8,
+	FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE = 9,
+	FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE = 10,
+	FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX = 8,
+	FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_BASE = 18,
+	FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX = 8,
+	FORWARD_TC_PROG_V4_REPLY_CORE = 26,
+	FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_CONTINUE = 27,
+	FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE = 28,
+	FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE = 29,
+	FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX = 8,
+	FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_BASE = 37,
+	FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX = 8,
 };
 
 static __always_inline struct kernel_occupancy_value_v4 *lookup_kernel_occupancy(void);
 static __always_inline struct kernel_nat_config_value_v4 *lookup_kernel_nat_config(void);
+static __always_inline struct tc_plugin_config_v4 *lookup_tc_plugin_config_v4(void);
 static __always_inline __u32 load_kernel_nat_config_flags(void);
 static __always_inline void load_nat_port_window(__u32 *port_min, __u32 *port_range);
 static __always_inline __u32 mix_nat_probe_seed(__u32 seed);
@@ -649,6 +712,7 @@ static __always_inline struct packet_ctx *lookup_scratch_ctx_v4(void);
 static __always_inline struct bpf_fib_lookup *lookup_scratch_fib_v4(void);
 static __always_inline struct flow_key_v4 *lookup_scratch_flow_key_v4(void);
 static __always_inline struct tc_dispatch_ctx_v4 *lookup_tc_dispatch_scratch_v4(void);
+static __always_inline struct tc_plugin_ctx_v4 *lookup_tc_plugin_ctx_v4(void);
 static __always_inline struct flow_value_v6 *lookup_scratch_flow_v6(void);
 static __always_inline struct flow_value_v6 *lookup_scratch_flow_aux_v6(void);
 static __always_inline struct packet_ctx_v6 *lookup_scratch_ctx_v6(void);
@@ -704,6 +768,20 @@ static __always_inline struct tc_dispatch_ctx_v4 *lookup_tc_dispatch_scratch_v4(
 	__u32 key = 0;
 
 	return bpf_map_lookup_elem(&tc_dispatch_scratch_v4, &key);
+}
+
+static __always_inline struct tc_plugin_ctx_v4 *lookup_tc_plugin_ctx_v4(void)
+{
+	__u32 key = 0;
+
+	return bpf_map_lookup_elem(&tc_plugin_ctx_v4, &key);
+}
+
+static __always_inline struct tc_plugin_config_v4 *lookup_tc_plugin_config_v4(void)
+{
+	__u32 key = 0;
+
+	return bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
 }
 
 static __always_inline struct flow_value_v6 *lookup_scratch_flow_v6(void)
@@ -3981,19 +4059,83 @@ static __always_inline int handle_reply_ingress_v4(struct __sk_buff *skb)
 	return handle_transparent_reply(skb, ctx, flow_key, flow, flow_bank);
 }
 
-static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
+static __always_inline void clear_tc_plugin_ctx_v4(void)
 {
-	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct tc_plugin_ctx_v4 *plugin_ctx = lookup_tc_plugin_ctx_v4();
+
+	if (plugin_ctx)
+		__builtin_memset(plugin_ctx, 0, sizeof(*plugin_ctx));
+}
+
+static __always_inline void populate_tc_plugin_ctx_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct tc_plugin_ctx_v4 *plugin_ctx)
+{
+	if (!ctx || !rule || !plugin_ctx)
+		return;
+
+	plugin_ctx->ifindex = skb->ifindex;
+	plugin_ctx->src_addr = bpf_ntohl(ctx->src_addr);
+	plugin_ctx->dst_addr = bpf_ntohl(ctx->dst_addr);
+	plugin_ctx->rule_id = rule->rule_id;
+	plugin_ctx->backend_addr = rule->backend_addr;
+	plugin_ctx->out_ifindex = rule->out_ifindex;
+	plugin_ctx->nat_addr = rule->nat_addr;
+	plugin_ctx->src_port = ctx->src_port;
+	plugin_ctx->dst_port = ctx->dst_port;
+	plugin_ctx->backend_port = rule->backend_port;
+	plugin_ctx->rule_flags = rule->flags;
+	plugin_ctx->proto = ctx->proto;
+	plugin_ctx->rule_wildcard_addr = ctx->rule_wildcard_addr;
+	plugin_ctx->have_rule = 1;
+	plugin_ctx->have_flow = 0;
+	plugin_ctx->direction = 1;
+	plugin_ctx->front_addr = bpf_ntohl(ctx->dst_addr);
+	plugin_ctx->client_addr = bpf_ntohl(ctx->src_addr);
+	plugin_ctx->front_port = ctx->dst_port;
+	plugin_ctx->client_port = ctx->src_port;
+	plugin_ctx->nat_port = 0;
+}
+
+static __always_inline void populate_tc_plugin_reply_ctx_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_value_v4 *flow, struct tc_plugin_ctx_v4 *plugin_ctx)
+{
+	if (!ctx || !flow || !plugin_ctx)
+		return;
+
+	plugin_ctx->ifindex = skb->ifindex;
+	plugin_ctx->src_addr = bpf_ntohl(ctx->src_addr);
+	plugin_ctx->dst_addr = bpf_ntohl(ctx->dst_addr);
+	plugin_ctx->rule_id = flow->rule_id;
+	plugin_ctx->backend_addr = flow->front_addr;
+	plugin_ctx->out_ifindex = flow->in_ifindex;
+	plugin_ctx->nat_addr = flow->nat_addr;
+	plugin_ctx->src_port = ctx->src_port;
+	plugin_ctx->dst_port = ctx->dst_port;
+	plugin_ctx->backend_port = flow->front_port;
+	plugin_ctx->rule_flags = flow->flags;
+	plugin_ctx->proto = ctx->proto;
+	plugin_ctx->rule_wildcard_addr = 0;
+	plugin_ctx->have_rule = 0;
+	plugin_ctx->have_flow = 1;
+	plugin_ctx->direction = 2;
+	plugin_ctx->front_addr = flow->front_addr;
+	plugin_ctx->client_addr = flow->client_addr;
+	plugin_ctx->front_port = flow->front_port;
+	plugin_ctx->client_port = flow->client_port;
+	plugin_ctx->nat_port = flow->nat_port;
+}
+
+static __always_inline int prepare_dispatch_forward_ingress_v4(struct __sk_buff *skb, struct tc_dispatch_ctx_v4 *dispatch, struct tc_plugin_ctx_v4 *plugin_ctx)
+{
 	struct rule_value_v4 *rule;
-	struct flow_value_v4 *front_flow;
-	struct flow_value_v4 *active_flow;
-	struct flow_value_v4 *old_flow = 0;
 
 	if (!dispatch)
 		return TC_ACT_UNSPEC;
 	dispatch->have_flow = 0;
 	dispatch->have_rule = 0;
+	dispatch->plugin_chain_index = 0;
+	dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 	__builtin_memset(&dispatch->ctx, 0, sizeof(dispatch->ctx));
+	if (plugin_ctx)
+		__builtin_memset(plugin_ctx, 0, sizeof(*plugin_ctx));
 
 	if (parse_ipv4_l4(skb, &dispatch->ctx) < 0) {
 		return TC_ACT_UNSPEC;
@@ -4006,6 +4148,22 @@ static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 
 	dispatch->rule_value = *rule;
 	dispatch->have_rule = 1;
+	populate_tc_plugin_ctx_v4(skb, &dispatch->ctx, rule, plugin_ctx);
+	return 0;
+}
+
+static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk_buff *skb)
+{
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct rule_value_v4 *rule;
+	struct flow_value_v4 *front_flow;
+	struct flow_value_v4 *active_flow;
+	struct flow_value_v4 *old_flow = 0;
+
+	if (!dispatch || !dispatch->have_rule)
+		return TC_ACT_UNSPEC;
+	rule = &dispatch->rule_value;
+
 	if (is_passthrough_rule(rule))
 		return TC_ACT_OK;
 	if (is_egress_nat_rule(rule)) {
@@ -4059,9 +4217,81 @@ static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 	return handle_forward_ingress_v4_transparent(skb);
 }
 
-static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
+static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+
+	if (prepare_dispatch_forward_ingress_v4(skb, dispatch, 0) != 0)
+		return TC_ACT_UNSPEC;
+	return dispatch_forward_ingress_v4_core_prepared(skb);
+}
+
+static __always_inline int dispatch_forward_ingress_pipeline_core_v4(struct __sk_buff *skb)
+{
+	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct tc_plugin_ctx_v4 *plugin_ctx = lookup_tc_plugin_ctx_v4();
+
+	if (prepare_dispatch_forward_ingress_v4(skb, dispatch, plugin_ctx) != 0)
+		return TC_ACT_UNSPEC;
+	if (config && config->post_lookup_count > 0) {
+		dispatch->plugin_chain_index = 0;
+		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE);
+	}
+	return dispatch_forward_ingress_v4_core_prepared(skb);
+}
+
+static __always_inline int dispatch_forward_ingress_pipeline_v4(struct __sk_buff *skb)
+{
+	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+
+	if (config && dispatch && (config->pre_forward_count > 0 || config->post_lookup_count > 0)) {
+		dispatch->plugin_chain_index = 0;
+		if (config->pre_forward_count > 0) {
+			clear_tc_plugin_ctx_v4();
+			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE);
+		}
+		return dispatch_forward_ingress_pipeline_core_v4(skb);
+	}
+	return dispatch_forward_ingress_v4(skb);
+}
+
+static __always_inline int dispatch_plugin_pre_forward_continue_v4(struct __sk_buff *skb)
+{
+	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	__u32 index;
+
+	if (config && dispatch) {
+		index = dispatch->plugin_chain_index;
+		if (index < config->pre_forward_count && index < FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX) {
+			dispatch->plugin_chain_index = index + 1;
+			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE + index);
+		}
+	}
+	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_FORWARD_CORE);
+	return dispatch_forward_ingress_pipeline_core_v4(skb);
+}
+
+static __always_inline int dispatch_plugin_post_lookup_continue_v4(struct __sk_buff *skb)
+{
+	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	__u32 index;
+
+	if (config && dispatch) {
+		index = dispatch->plugin_chain_index;
+		if (index < config->post_lookup_count && index < FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX) {
+			dispatch->plugin_chain_index = index + 1;
+			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_BASE + index);
+		}
+	}
+	return dispatch_forward_ingress_v4_core_prepared(skb);
+}
+
+static __always_inline int prepare_dispatch_reply_ingress_v4(struct __sk_buff *skb, struct tc_dispatch_ctx_v4 *dispatch, struct tc_plugin_ctx_v4 *plugin_ctx)
+{
 	struct flow_value_v4 *flow;
 
 	if (!dispatch)
@@ -4090,6 +4320,19 @@ static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
 
 	dispatch->flow_value = *flow;
 	dispatch->have_flow = 1;
+	populate_tc_plugin_reply_ctx_v4(skb, &dispatch->ctx, flow, plugin_ctx);
+	return 0;
+}
+
+static __always_inline int dispatch_reply_ingress_v4_core_prepared(struct __sk_buff *skb)
+{
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct flow_value_v4 *flow;
+
+	if (!dispatch || !dispatch->have_flow)
+		return TC_ACT_UNSPEC;
+	flow = &dispatch->flow_value;
+
 	/* Established reply traffic must keep working before the successor reattaches,
 	 * so handle reply flows here instead of relying on a tail-call target.
 	 */
@@ -4098,6 +4341,79 @@ static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
 	if ((flow->flags & FORWARD_FLOW_FLAG_FULL_NAT) != 0)
 		return TC_ACT_UNSPEC;
 	return handle_transparent_reply(skb, &dispatch->ctx, &dispatch->flow_key, flow, dispatch->flow_bank);
+}
+
+static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
+{
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+
+	if (prepare_dispatch_reply_ingress_v4(skb, dispatch, 0) != 0)
+		return TC_ACT_UNSPEC;
+	return dispatch_reply_ingress_v4_core_prepared(skb);
+}
+
+static __always_inline int dispatch_reply_ingress_pipeline_core_v4(struct __sk_buff *skb)
+{
+	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct tc_plugin_ctx_v4 *plugin_ctx = lookup_tc_plugin_ctx_v4();
+
+	if (prepare_dispatch_reply_ingress_v4(skb, dispatch, plugin_ctx) != 0)
+		return TC_ACT_UNSPEC;
+	if (config && config->post_reply_count > 0) {
+		dispatch->plugin_chain_index = 0;
+		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE);
+	}
+	return dispatch_reply_ingress_v4_core_prepared(skb);
+}
+
+static __always_inline int dispatch_reply_ingress_pipeline_v4(struct __sk_buff *skb)
+{
+	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+
+	if (config && dispatch && (config->pre_reply_count > 0 || config->post_reply_count > 0)) {
+		dispatch->plugin_chain_index = 0;
+		if (config->pre_reply_count > 0) {
+			clear_tc_plugin_ctx_v4();
+			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_CONTINUE);
+		}
+		return dispatch_reply_ingress_pipeline_core_v4(skb);
+	}
+	return dispatch_reply_ingress_v4(skb);
+}
+
+static __always_inline int dispatch_plugin_pre_reply_continue_v4(struct __sk_buff *skb)
+{
+	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	__u32 index;
+
+	if (config && dispatch) {
+		index = dispatch->plugin_chain_index;
+		if (index < config->pre_reply_count && index < FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX) {
+			dispatch->plugin_chain_index = index + 1;
+			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE + index);
+		}
+	}
+	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_REPLY_CORE);
+	return dispatch_reply_ingress_pipeline_core_v4(skb);
+}
+
+static __always_inline int dispatch_plugin_post_reply_continue_v4(struct __sk_buff *skb)
+{
+	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	__u32 index;
+
+	if (config && dispatch) {
+		index = dispatch->plugin_chain_index;
+		if (index < config->post_reply_count && index < FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX) {
+			dispatch->plugin_chain_index = index + 1;
+			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_BASE + index);
+		}
+	}
+	return dispatch_reply_ingress_v4_core_prepared(skb);
 }
 
 static __always_inline int handle_forward_ingress_v4_transparent(struct __sk_buff *skb)
@@ -4223,6 +4539,54 @@ SEC("classifier/forward_ingress_dispatch")
 int forward_ingress_dispatch(struct __sk_buff *skb)
 {
 	return dispatch_forward_ingress_v4(skb);
+}
+
+SEC("classifier/forward_ingress_pipeline")
+int forward_ingress_pipeline(struct __sk_buff *skb)
+{
+	return dispatch_forward_ingress_pipeline_v4(skb);
+}
+
+SEC("classifier/forward_ingress_v4_core")
+int forward_ingress_v4_core(struct __sk_buff *skb)
+{
+	return dispatch_forward_ingress_pipeline_core_v4(skb);
+}
+
+SEC("classifier/forward_ingress_v4_plugin_continue")
+int forward_ingress_v4_plugin_continue(struct __sk_buff *skb)
+{
+	return dispatch_plugin_pre_forward_continue_v4(skb);
+}
+
+SEC("classifier/forward_ingress_v4_plugin_post_lookup_continue")
+int forward_ingress_v4_plugin_post_lookup_continue(struct __sk_buff *skb)
+{
+	return dispatch_plugin_post_lookup_continue_v4(skb);
+}
+
+SEC("classifier/reply_ingress_pipeline")
+int reply_ingress_pipeline(struct __sk_buff *skb)
+{
+	return dispatch_reply_ingress_pipeline_v4(skb);
+}
+
+SEC("classifier/reply_ingress_v4_core")
+int reply_ingress_v4_core(struct __sk_buff *skb)
+{
+	return dispatch_reply_ingress_pipeline_core_v4(skb);
+}
+
+SEC("classifier/reply_ingress_v4_plugin_continue")
+int reply_ingress_v4_plugin_continue(struct __sk_buff *skb)
+{
+	return dispatch_plugin_pre_reply_continue_v4(skb);
+}
+
+SEC("classifier/reply_ingress_v4_plugin_post_reply_continue")
+int reply_ingress_v4_plugin_post_reply_continue(struct __sk_buff *skb)
+{
+	return dispatch_plugin_post_reply_continue_v4(skb);
 }
 
 SEC("classifier/forward_ingress_v4_transparent")

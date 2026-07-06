@@ -1,0 +1,75 @@
+{
+  "api_version": "v1",
+  "id": "wan_core",
+  "name": "WAN Core",
+  "version": "0.1.0",
+  "kind": "control",
+  "description": "Protocol-neutral WAN adapter. It normalizes WAN driver session state, creates a local veth/vtap handoff, and publishes the interfaces that should be connected to the fvtap/forward core pipeline.",
+  "capabilities": [
+    "wan",
+    "vtap",
+    "local_route",
+    "forward_core_adapter",
+    "net_admin",
+    "control"
+  ],
+  "virtual_interfaces": [
+    {
+      "id": "wan0",
+      "type": "logical",
+      "description": "Logical WAN endpoint backed by a protocol driver and a vtap handoff."
+    }
+  ],
+  "resources": [
+    {
+      "id": "profiles",
+      "description": "WAN adapter defaults such as local/vtap interface names, MTU, addresses, and route policy.",
+      "methods": ["list", "get", "create", "update", "delete"],
+      "runtime_update": "manual",
+      "max_records": 32,
+      "max_record_bytes": 16384
+    },
+    {
+      "id": "sessions",
+      "description": "Normalized WAN driver session state. Any protocol driver can publish this shape.",
+      "methods": ["list", "get", "create", "update", "delete"],
+      "runtime_update": "runtime_apply",
+      "max_records": 32,
+      "max_record_bytes": 32768
+    },
+    {
+      "id": "status",
+      "description": "Last applied WAN adapter state and forward_core handoff details.",
+      "methods": ["list", "get", "create", "update", "delete"],
+      "runtime_update": "manual",
+      "max_records": 32,
+      "max_record_bytes": 32768
+    }
+  ],
+  "actions": [
+    {
+      "id": "apply_session",
+      "description": "Apply a normalized WAN session from payload or the sessions resource.",
+      "runtime_update": "runtime_apply",
+      "max_payload_bytes": 32768
+    },
+    {
+      "id": "teardown",
+      "description": "Delete the configured local handoff veth pair and mark the WAN adapter down.",
+      "runtime_update": "runtime_apply",
+      "max_payload_bytes": 8192
+    }
+  ],
+  "control": {
+    "main": "control.js",
+    "permissions": ["net.admin", "resource"]
+  },
+  "ui": {
+    "static_dir": "ui",
+    "entry": "index.html"
+  },
+  "metadata": {
+    "ui.page": "wan",
+    "ui.page_title": "WAN"
+  }
+}

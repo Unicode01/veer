@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WAN Core</title>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const status = F.status('Idle');
+      const stateBody = F.h('div', { className: F.classes.stack });
+      const wanID = input('default', 'wan id');
+      const hostInterface = input('fwdlocal0', 'host-side veth');
+      const vtapInterface = input('fwdvtap0', 'forward_core parent');
+      const mtu = input('1492', 'mtu', 'number');
+      const hostCIDR = input('169.254.253.1/30', 'host cidr');
+      const vtapCIDR = input('169.254.253.2/30', 'vtap cidr');
+      const routes = F.h('textarea', {
+        className: F.classes.input,
+        attrs: {
+          rows: '4',
+          placeholder: '[{"dst":"0.0.0.0/0","dev":"fwdlocal0","table":100,"metric":10}]'
+        }
+      });
+
+      function input(value, placeholder, type) {
+        return F.h('input', {
+          className: F.classes.input,
+          attrs: { type: type || 'text', value, placeholder }
+        });
+      }
+
+      function field(label, control) {
+        return F.h('label', { className: F.classes.field }, [
+          F.h('span', { text: label }),
+          control
+        ]);
+      }
+
+      function setBusy(button, busy, text) {
+        button.disabled = !!busy;
+        if (text) button.textContent = text;
+      }
+
+      function key() {
+        return wanID.value.trim() || 'default';
+      }
+
+      function payload() {
+        return {
+          wan_id: key(),
+          host_interface: hostInterface.value.trim() || 'fwdlocal0',
+          vtap_interface: vtapInterface.value.trim() || 'fwdvtap0',
+          mtu: Number(mtu.value || 1492),
+          host_addresses: hostCIDR.value.trim() ? [hostCIDR.value.trim()] : [],
+          vtap_addresses: vtapCIDR.value.trim() ? [vtapCIDR.value.trim()] : [],
+          routes: parseRoutes()
+        };
+      }
+
+      function parseRoutes() {
+        const text = routes.value.trim();
+        if (!text) return [];
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed)) throw new Error('routes must be a JSON array');
+        return parsed;
+      }
+
+      async function upsert(resource, key, data, options) {
+        try {
+          return await F.data.update(resource, key, data, options);
+        } catch (e) {
+          return F.data.create(resource, data, Object.assign({}, options || {}, { key }));
+        }
+      }
+
+      async function saveProfile() {
+        status.textContent = 'Saving';
+        try {
+          const p = payload();
+          await upsert('profiles', key(), p, { enabled: true });
+          status.textContent = 'Saved';
+          F.toast('WAN profile saved.');
+        } catch (e) {
+          status.textContent = 'Save failed';
+          F.toast(e.message || String(e));
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function loadProfile() {
+        try {
+          const record = await F.data.get('profiles', key());
+          const data = record.data || {};
+          hostInterface.value = data.host_interface || 'fwdlocal0';
+          vtapInterface.value = data.vtap_interface || 'fwdvtap0';
+          mtu.value = data.mtu || 1492;
+          hostCIDR.value = Array.isArray(data.host_addresses) ? (data.host_addresses[0] || '') : (data.host_cidr || '');
+          vtapCIDR.value = Array.isArray(data.vtap_addresses) ? (data.vtap_addresses[0] || '') : (data.vtap_cidr || '');
+          routes.value = JSON.stringify(Array.isArray(data.routes) ? data.routes : [], null, 2);
+          F.toast('WAN profile loaded.');
+        } catch (e) {
+          F.toast(e.message || String(e));
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function apply(button) {
+        setBusy(button, true, 'Applying');
+        status.textContent = 'Applying';
+        try {
+          await F.action('apply_session', payload());
+          await loadStatus();
+          status.textContent = 'Applied';
+          F.toast('WAN handoff applied.');
+        } catch (e) {
+          status.textContent = 'Apply failed';
+          F.toast(e.message || String(e));
+        } finally {
+          setBusy(button, false, 'Apply Session');
+          F.requestResize();
+        }
+      }
+
+      async function teardown(button) {
+        setBusy(button, true, 'Deleting');
+        status.textContent = 'Deleting';
+        try {
+          await F.action('teardown', payload());
+          await loadStatus();
+          status.textContent = 'Deleted';
+          F.toast('WAN handoff deleted.');
+        } catch (e) {
+          status.textContent = 'Delete failed';
+          F.toast(e.message || String(e));
+        } finally {
+          setBusy(button, false, 'Teardown');
+          F.requestResize();
+        }
+      }
+
+      async function loadStatus() {
+        stateBody.replaceChildren();
+        try {
+          const record = await F.data.get('status', key());
+          const data = record.data || {};
+          stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
+            F.stat('Phase', data.phase || '-'),
+            F.stat('Driver', data.driver || '-'),
+            F.stat('Host', (data.host_interface || '-') + ' #' + (data.host_ifindex || '-')),
+            F.stat('forward_core parent', data.forward_core && data.forward_core.parent_interface || data.forward_parent_interface || '-'),
+            F.stat('IPv4', data.ipv4 || '-'),
+            F.stat('PD', data.pd_prefix || '-'),
+            F.stat('Routes', data.route_count == null ? '-' : data.route_count),
+            F.stat('Updated', data.updated_at || '-')
+          ]));
+        } catch (e) {
+          stateBody.appendChild(F.h('p', {
+            className: F.classes.description,
+            text: 'No applied WAN status yet.'
+          }));
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      const applyButton = F.button('Apply Session', function () { apply(applyButton); });
+      const teardownButton = F.button('Teardown', function () { teardown(teardownButton); }, true);
+      const page = F.h('main', { className: F.classes.page }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                F.h('h1', { className: F.classes.title, text: 'WAN Core' }),
+                F.h('p', {
+                  className: F.classes.description,
+                  text: 'Normalizes WAN driver session state into a veth/vtap handoff for forward_core. Protocol drivers stay outside the core hot path.'
+                })
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                F.badge('net.admin'),
+                F.badge('forward_core'),
+                status
+              ])
+            ])
+          ]),
+          F.h('div', { className: F.classes.grid }, [
+            F.stat('Input', 'WAN session', 'Consumed from the sessions resource or action payload.'),
+            F.stat('Handoff', 'host -> vtap', 'Use the vtap interface as Forward/Egress NAT parent.'),
+            F.stat('Core', 'unchanged', 'forward_core sees normalized L3/L4 traffic only.')
+          ]),
+          F.card([
+            F.h('h2', { className: F.classes.title, text: 'Adapter Profile' }),
+            F.h('div', { className: F.classes.grid }, [
+              field('WAN ID', wanID),
+              field('Host Interface', hostInterface),
+              field('VTap / forward_core Parent', vtapInterface),
+              field('MTU', mtu),
+              field('Host CIDR', hostCIDR),
+              field('VTap CIDR', vtapCIDR)
+            ]),
+            field('Routes JSON', routes),
+            F.h('div', { className: F.classes.toolbar }, [
+              F.button('Save Profile', saveProfile),
+              F.button('Load Profile', loadProfile, true),
+              applyButton,
+              teardownButton,
+              F.button('Refresh Status', loadStatus, true)
+            ])
+          ]),
+          F.card([
+            F.h('h2', { className: F.classes.title, text: 'Last Status' }),
+            stateBody
+          ])
+        ])
+      ]);
+
+      document.body.replaceChildren(page);
+      loadStatus().finally(F.requestResize);
+    })();
+  </script>
+</body>
+</html>

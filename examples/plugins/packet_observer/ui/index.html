@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Packet Observer</title>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const contractRows = [
+        ['Hook', 'tc/fvtap/pre_forward'],
+        ['Mode', 'observe'],
+        ['Priority', '10'],
+        ['Program', 'packet_observer:tc_pre_forward'],
+        ['Resource', 'bindings'],
+        ['Action', 'apply']
+      ];
+      const status = F.status('Idle');
+      const listStatus = F.status('Loading');
+      const recordsBody = F.h('div', { className: F.classes.stack });
+      const nameInput = F.h('input', {
+        className: F.classes.input,
+        attrs: { type: 'text', placeholder: 'binding name', value: 'sample' }
+      });
+      const keyInput = F.h('input', {
+        className: F.classes.input,
+        attrs: { type: 'text', placeholder: '4-byte hex key', value: '01020304' }
+      });
+      const valueInput = F.h('input', {
+        className: F.classes.input,
+        attrs: { type: 'text', placeholder: '8-byte hex value', value: '1112131415161718' }
+      });
+
+      function setBusy(button, busy, text) {
+        if (!button) return;
+        button.disabled = !!busy;
+        if (text) button.textContent = text;
+      }
+
+      function renderRecords(records) {
+        recordsBody.replaceChildren();
+        if (!records.length) {
+          recordsBody.appendChild(F.h('p', {
+            className: F.classes.description,
+            text: 'No records yet. Create one to test host-side persistence.'
+          }));
+          F.requestResize();
+          return;
+        }
+        records.forEach(function (record) {
+          const data = record.data || {};
+          const removeButton = F.button('Delete', async function () {
+            setBusy(removeButton, true, 'Deleting');
+            try {
+              await F.data.delete('bindings', record.key);
+              F.toast('Record deleted.');
+              await loadRecords();
+            } catch (e) {
+              F.toast(e.message || String(e));
+            } finally {
+              setBusy(removeButton, false, 'Delete');
+            }
+          }, true);
+          recordsBody.appendChild(F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                F.h('strong', { text: data.name || record.key }),
+                F.h('p', {
+                  className: F.classes.description,
+                  text: 'key=' + (data.key_hex || '-') + ' value=' + (data.value_hex || '-')
+                })
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                F.badge('rev ' + record.revision),
+                removeButton
+              ])
+            ])
+          ]));
+        });
+        F.requestResize();
+      }
+
+      async function loadRecords() {
+        listStatus.textContent = 'Loading';
+        try {
+          const response = await F.data.list('bindings');
+          const records = Array.isArray(response.records) ? response.records : [];
+          listStatus.textContent = records.length + ' record' + (records.length === 1 ? '' : 's');
+          renderRecords(records);
+        } catch (e) {
+          listStatus.textContent = 'Load failed';
+          F.toast(e.message || String(e));
+        }
+      }
+
+      const page = F.h('main', { className: F.classes.page }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                F.h('h1', { className: F.classes.title, text: 'Packet Observer' }),
+                F.h('p', {
+                  className: F.classes.description,
+                  text: 'A minimal plugin page rendered with host-provided JavaScript components.'
+                })
+              ]),
+              F.h('div', null, [
+                F.badge('plugin ' + F.pluginId),
+                F.badge('ui v' + F.version)
+              ])
+            ])
+          ]),
+          F.h('div', { className: F.classes.grid }, [
+            F.stat('Stage', 'pre_forward', 'Runs before fvtap core lookup.'),
+            F.stat('Engine', 'TC', 'Attached through the plugin pipeline.'),
+            F.stat('Action', 'Observe', 'The sample program does not rewrite packets.')
+          ]),
+          F.card([
+            F.h('h2', { className: F.classes.title, text: 'Dataplane Contract' }),
+            F.h('p', {
+              className: F.classes.description,
+              text: 'This page is sandboxed. It receives no API token; data and actions go through the host RPC bridge and manifest permissions.'
+            }),
+            F.table(['Field', 'Value'], contractRows)
+          ]),
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                F.h('h2', { className: F.classes.title, text: 'Host Data API' }),
+                F.h('p', {
+                  className: F.classes.description,
+                  text: 'The resource below is stored in SQLite. The Apply action runs the Goja control script and writes the latest payload into the plugin KV namespace.'
+                })
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                status,
+                (function () {
+                  const btn = F.button('Apply runtime', async function () {
+                    setBusy(btn, true, 'Applying');
+                    status.textContent = 'Applying';
+                    try {
+                      const response = await F.action('apply', { source: 'ui' });
+                      status.textContent = response.status || 'Applied';
+                    F.toast('Goja control action completed.');
+                    } catch (e) {
+                      status.textContent = 'Apply failed';
+                      F.toast(e.message || String(e));
+                    } finally {
+                      setBusy(btn, false, 'Apply runtime');
+                      F.requestResize();
+                    }
+                  }, false);
+                  return btn;
+                })()
+              ])
+            ]),
+            F.h('div', { className: F.classes.grid }, [
+              F.h('label', { className: F.classes.field }, [
+                F.h('span', { text: 'Name' }),
+                nameInput
+              ]),
+              F.h('label', { className: F.classes.field }, [
+                F.h('span', { text: 'Key hex' }),
+                keyInput
+              ]),
+              F.h('label', { className: F.classes.field }, [
+                F.h('span', { text: 'Value hex' }),
+                valueInput
+              ]),
+              F.h('div', { className: F.classes.field }, [
+                F.h('span', { text: 'Records' }),
+                listStatus
+              ])
+            ]),
+            F.h('div', { className: F.classes.toolbar }, [
+              (function () {
+                const btn = F.button('Create record', async function () {
+                  setBusy(btn, true, 'Creating');
+                  try {
+                    await F.data.create('bindings', {
+                      name: nameInput.value || 'sample',
+                      key_hex: keyInput.value || '01020304',
+                      value_hex: valueInput.value || '0000000000000000',
+                      created_at: new Date().toISOString()
+                    });
+                    F.toast('Record created in host-side SQLite storage.');
+                    await loadRecords();
+                  } catch (e) {
+                    F.toast(e.message || String(e));
+                  } finally {
+                    setBusy(btn, false, 'Create record');
+                  }
+                }, false);
+                return btn;
+              })(),
+              F.button('Refresh', loadRecords, true)
+            ]),
+            recordsBody
+          ])
+        ])
+      ]);
+
+      document.body.replaceChildren(page);
+      loadRecords().finally(function () {
+        F.requestResize();
+      });
+    })();
+  </script>
+</body>
+</html>

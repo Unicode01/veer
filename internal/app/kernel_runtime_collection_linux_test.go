@@ -326,7 +326,7 @@ func TestKernelAttachmentProgramsForPreparedRulesSkipsIPv6ProgramsForIPv4Prepare
 		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
 	}}
 
-	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeLegacy)
+	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeLegacy, false)
 	if got.forwardProg != forwardV4 || got.replyProg != replyV4 {
 		t.Fatal("kernelAttachmentProgramsForPreparedRules() did not return IPv4 programs")
 	}
@@ -368,7 +368,7 @@ func TestKernelAttachmentProgramsForPreparedRulesIncludesIPv6ProgramsWhenNeeded(
 		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv6},
 	}}
 
-	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeLegacy)
+	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeLegacy, false)
 	if got.forwardProg != forwardV4 || got.replyProg != replyV4 {
 		t.Fatal("kernelAttachmentProgramsForPreparedRules() did not return IPv4 programs")
 	}
@@ -416,7 +416,7 @@ func TestKernelAttachmentProgramsForPreparedRulesUsesIPv4DispatcherWhenEnabled(t
 		},
 	}}
 
-	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeDispatchV4)
+	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeDispatchV4, false)
 	if got.forwardProg != forwardDispatch || got.replyProg != replyDispatch {
 		t.Fatal("kernelAttachmentProgramsForPreparedRules() did not select IPv4 dispatcher programs")
 	}
@@ -461,7 +461,7 @@ func TestKernelAttachmentProgramsForPreparedRulesKeepsTransparentIPv4OnLegacyPro
 		spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
 	}}
 
-	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeDispatchV4)
+	got := kernelAttachmentProgramsForPreparedRules(coll, prepared, kernelTCAttachmentProgramModeDispatchV4, false)
 	if got.forwardProg != forwardV4 || got.replyProg != replyV4 {
 		t.Fatal("kernelAttachmentProgramsForPreparedRules() selected dispatcher programs for transparent-only IPv4 rules")
 	}

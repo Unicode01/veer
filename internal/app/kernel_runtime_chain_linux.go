@@ -3,6 +3,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -44,6 +45,84 @@ func (rt *orderedKernelRuleRuntime) Available() (bool, string) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return rt.selectLocked()
+}
+
+func (rt *orderedKernelRuleRuntime) ReconcilePlugins(catalog PluginCatalog) pluginRuntimeSnapshot {
+	rt.mu.Lock()
+	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	rt.mu.Unlock()
+
+	for _, entry := range entries {
+		runtime, ok := entry.rt.(pluginPipelineRuntime)
+		if !ok || runtime == nil {
+			continue
+		}
+		return runtime.ReconcilePlugins(catalog)
+	}
+	return kernelPluginPipelineManifestOnlySnapshot(catalog)
+}
+
+func (rt *orderedKernelRuleRuntime) PluginSnapshot() pluginRuntimeSnapshot {
+	rt.mu.Lock()
+	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	rt.mu.Unlock()
+
+	for _, entry := range entries {
+		runtime, ok := entry.rt.(pluginPipelineRuntime)
+		if !ok || runtime == nil {
+			continue
+		}
+		return runtime.PluginSnapshot()
+	}
+	return pluginRuntimeSnapshot{}
+}
+
+func (rt *orderedKernelRuleRuntime) PutPluginMapValue(pluginID string, objectID string, mapName string, key []byte, value []byte) error {
+	return rt.withPluginMapController(func(controller pluginEBPFMapController) error {
+		return controller.PutPluginMapValue(pluginID, objectID, mapName, key, value)
+	})
+}
+
+func (rt *orderedKernelRuleRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
+	return rt.withPluginMapController(func(controller pluginEBPFMapController) error {
+		return controller.DeletePluginMapValue(pluginID, objectID, mapName, key)
+	})
+}
+
+func (rt *orderedKernelRuleRuntime) ClearPluginMap(pluginID string, objectID string, mapName string) error {
+	return rt.withPluginMapController(func(controller pluginEBPFMapController) error {
+		return controller.ClearPluginMap(pluginID, objectID, mapName)
+	})
+}
+
+func (rt *orderedKernelRuleRuntime) withPluginMapController(fn func(pluginEBPFMapController) error) error {
+	if rt == nil {
+		return errPluginRuntimeTargetNotLoaded
+	}
+	rt.mu.Lock()
+	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	rt.mu.Unlock()
+
+	var notLoaded error
+	for _, entry := range entries {
+		controller, ok := entry.rt.(pluginEBPFMapController)
+		if !ok || controller == nil {
+			continue
+		}
+		err := fn(controller)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errPluginRuntimeTargetNotLoaded) {
+			notLoaded = err
+			continue
+		}
+		return err
+	}
+	if notLoaded != nil {
+		return notLoaded
+	}
+	return errPluginRuntimeTargetNotLoaded
 }
 
 func (rt *orderedKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {

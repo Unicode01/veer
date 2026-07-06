@@ -109,6 +109,7 @@ Content-Type: application/json
 - `GET /api/interfaces`
 - `GET /api/host-network`
 - `GET /api/tags`
+- `GET /api/plugins`
 
 ### 规则
 
@@ -240,6 +241,76 @@ Content-Type: application/json
 
 - `default_ipv4_route`: 该接口当前是否承载主路由表里的 IPv4 默认路由
 - `default_ipv6_route`: 该接口当前是否承载主路由表里的 IPv6 默认路由
+
+### PluginCatalog
+
+`GET /api/plugins` 返回运行时插件目录扫描结果和内置 `fvtap` 描述：
+
+```json
+{
+  "external_plugins_enabled": true,
+  "directory": "plugins/runtime",
+  "runtime": {
+    "builtin_pipeline_id": "fvtap",
+    "core_priority": 1000,
+    "manifest_discovery": true,
+    "object_validation": true,
+    "protected_assets": true,
+    "external_dataplane_attach": false,
+    "supported_engines": ["tc", "xdp", "control"],
+    "supported_hook_modes": ["observe", "rewrite", "redirect", "drop", "control"]
+  },
+  "plugins": [
+    {
+      "api_version": "v1",
+      "id": "fvtap",
+      "name": "Forward Virtual Tap",
+      "version": "builtin",
+      "kind": "pipeline",
+      "builtin": true,
+      "status": "builtin",
+      "runtime": {
+        "mode": "builtin",
+        "attachable": true,
+        "attached": true
+      },
+      "capabilities": ["egress_nat", "kernel_tc", "kernel_xdp"],
+      "objects": [
+        {"id": "forward-tc", "path": "builtin:forward-tc"},
+        {"id": "forward-xdp", "path": "builtin:forward-xdp"}
+      ]
+    }
+  ]
+}
+```
+
+字段说明：
+
+- `status`: `builtin` / `active` / `error`
+- `runtime`: 插件运行时状态；内置 `fvtap` 为 `mode=builtin` 且已挂载。默认配置下外部插件为 `mode=manifest_only`，启用 `plugins_dataplane_enabled=true` 且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
+- `runtime.core_priority`: 内置 `fvtap core` 的排序锚点，当前固定为 `1000`
+- `runtime.external_dataplane_attach`: 是否允许外部数据面插件。默认 `false`；为 `true` 时当前支持 TC `stage=forward/reply` hook 按 priority 进入内置 `fvtap` pipeline。没有实际可链入插件时，TC 热路径仍保持 legacy/dispatch，不额外进入 pipeline wrapper
+- `objects`: 插件声明的 eBPF 对象或内置对象；外部对象路径必须留在插件目录内，单个对象最大 16 MiB，声明 `sha256` 时必须匹配文件内容；服务会解析 ELF 并补充 `status`、`resolved_sha256`、`program_count`、`map_count`
+- `asset_base_path`: 插件声明 `ui.static_dir` 后生成的静态资源路径，需要 Bearer Token
+- `metadata.ui.page`: 可选的 Web UI 顶部分页 ID；声明后前端会自动创建插件页并内嵌加载 `ui.entry`。标题可用 `metadata.ui.page_title` 指定；也兼容 `ui_page`、`forward.page`、`forward_ui_page`、`tab_title` 等键
+- `hooks`: 插件声明的 dataplane hook；默认只做控制面展示。开启外部数据面后，只有 `engine=tc`、`stage=forward/reply`、`attach=ingress/both`、非 `control` mode 的 hook 会被加载到 `tc_prog_chain_v4` stage slots。插件程序执行后必须 tail-call 到对应 stage 的内置 continue slot，除非它明确返回最终 TC action。旧 `stage=pre_forward/post_lookup/pre_reply/post_reply` 作为兼容别名保留；XDP 和其他 stage 当前仍是 manifest-only
+- `hooks[].interfaces`: 可选的真实 Linux 接口名列表。留空或省略时，插件只随已有 forward/egress 规则触发的 `fvtap` attachment 运行；填写后，即使没有转发规则，TC runtime 也会把 `pipeline_v4` 挂到这些接口上。无规则模式只加载显式接口上的 `pre_forward/pre_reply` hook；core 后 hook 仍需要规则或 flow 上下文。不会自动挂载所有接口；接口不存在会让该插件本轮进入 error。当前 pipeline chain 是全局链，插件如果需要严格按接口生效，应在自己的 eBPF 程序中检查 `skb->ifindex`
+- `runtime.attachments[].priority`: 插件 manifest 的排序优先级；低于 `runtime.core_priority` 会运行在 `fvtap core` 前，高于 `runtime.core_priority` 会运行在 core 完成 IPv4/L4 解析和规则匹配后、执行 NAT/redirect 前。等于 core priority 会被拒绝。`runtime.attachments[].chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot
+- `post_lookup` 插件如需读取规则匹配上下文，必须在对象里声明共享 `tc_plugin_ctx_v4` per-CPU array map；服务会替换为内置稳定 ctx map，IPv4 地址和端口字段按 host byte order 填充
+- 当前限制：core 前和 core 后两个物理执行区各最多 8 个外部 hook，总 hook 数最多 14 个，以避免触发内核 tail-call 深度上限
+
+插件控制面数据接口：
+
+- `GET /api/plugins/<id>/resources/<resource>`：列出 manifest 允许 `list` 的资源记录，并返回该资源的 `runtime_status`
+- `GET /api/plugins/<id>/resources/<resource>/<key>`：读取 manifest 允许 `get` 的单条记录
+- `POST /api/plugins/<id>/resources/<resource>`：创建 manifest 允许 `create` 的记录，请求体为 `{"key":"optional","data":{...},"enabled":true}`；未提供 `key` 时由服务生成
+- `PUT /api/plugins/<id>/resources/<resource>/<key>`：更新 manifest 允许 `update` 的记录
+- `DELETE /api/plugins/<id>/resources/<resource>/<key>`：删除 manifest 允许 `delete` 的记录
+- `POST /api/plugins/<id>/actions/<action>`：执行 manifest 声明的动作，请求体为 `{"payload":{...}}`
+
+资源和动作都必须先在 `plugin.json` 中声明。资源数据存储在 SQLite，`secret_fields` 会在 API 返回时脱敏；`runtime_update=manual` 只标记 pending，`plugin_reconcile` 触发插件运行时重算，`runtime_apply` 调用宿主数据面实现的运行时更新接口。运行时更新失败会写入 `runtime_status.status=error` 和 `last_error`，不会让插件 UI 直接拿到 Web Token。
+
+Goja 控制脚本默认只能访问本插件资源。声明 `control.permissions=["plugin.resource"]` 后，可使用 `plugins.resources.set(pluginID, resourceID, key, data, enabled, apply)` 写入其他插件已经声明的资源；该调用仍会校验目标资源的 `methods/max_records/max_record_bytes`。`apply=true` 且目标资源为 `runtime_update=runtime_apply` 时，会立即触发目标插件的 `onResourceApply` 并更新目标资源的 `runtime_status`。未声明该权限时调用会被拒绝。
 
 ### RuleStatus
 
@@ -609,6 +680,27 @@ Content-Type: application/json
 ```json
 ["vm", "prod", "game"]
 ```
+
+### 1.4 获取插件目录
+
+`GET /api/plugins`
+
+用途：
+
+- 枚举内置 `fvtap` pipeline 描述
+- 枚举 `plugins_dir` 下外部插件 manifest
+- 暴露插件 manifest 校验错误，避免启动失败
+- 给后续插件管理 UI 或外部控制台做能力发现
+
+说明：
+
+- 默认外部插件目录为 `plugins/runtime`
+- 外部插件目录缺失不会报错
+- `plugins_enabled = false` 只关闭外部插件扫描，不隐藏内置 `fvtap`
+- `plugins_dataplane_enabled = false` 是默认值；设置为 `true` 后允许外部 TC `stage=forward/reply` 插件按 priority 进入内置 `fvtap` pipeline
+- 声明 `objects` 的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
+- 插件静态资源路径为 `/api/plugins/<id>/assets/`，同样需要 Bearer Token
+- `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC 对象围绕核心 `fvtap` priority 进入 forward/reply 的 core 前/后链。插件对象必须声明共享 `tc_prog_chain_v4` prog-array map，`max_entries` 至少为 45，并在处理后 tail-call 回对应 stage 的 continue slot；core 后插件读取匹配上下文时还需要声明共享 `tc_plugin_ctx_v4` map。`hooks[].interfaces` 可让插件在无转发规则时显式请求接口 attachment，但只有显式接口上的 pre-core hook 会在无规则模式加载，不会自动挂所有接口。生产环境应只对可信对象启用
 
 ## 2. 规则接口
 

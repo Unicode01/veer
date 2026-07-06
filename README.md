@@ -182,6 +182,9 @@ Authorization: Bearer <web_token>
   "max_workers": 0,
   "drain_timeout_hours": 24,
   "managed_network_auto_repair": true,
+  "plugins_enabled": true,
+  "plugins_dataplane_enabled": false,
+  "plugins_dir": "plugins/runtime",
   "default_engine": "auto",
   "kernel_engine_order": ["tc", "xdp"],
   "kernel_rules_map_limit": 0,
@@ -212,6 +215,9 @@ Authorization: Bearer <web_token>
 - `default_engine`：`auto`、`userspace`、`kernel`
 - `kernel_engine_order`：Linux 内核引擎尝试顺序；省略时默认 `["tc"]`
 - `managed_network_auto_repair`：托管网络链路变化后的自动修复
+- `plugins_enabled`：是否扫描外部运行时插件 manifest；内置 `fvtap` 始终可见
+- `plugins_dataplane_enabled`：是否允许外部插件进入 TC 数据面；默认关闭，当前支持按 priority 围绕 `fvtap core` 排序的 forward/reply TC 链
+- `plugins_dir`：外部运行时插件目录，默认 `plugins/runtime`
 - `kernel_rules_map_limit`：内核规则 map 容量，`0` 表示自适应
 - `kernel_flows_map_limit`：内核 flow map 容量，`0` 表示自适应
 - `kernel_nat_ports_map_limit`：内核 NAT 端口 map 容量，`0` 表示自适应
@@ -299,6 +305,79 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 - 这是尽量不断流，不是绝对零中断承诺
 - 如果进程被 `kill -9`、OOM kill 或异常崩溃，内核附加点可能短时间继续存在
 - 下次启动会尝试识别并清理 orphan 附加点
+
+## 插件层
+
+运行时插件目录默认为 `plugins/runtime`。每个插件使用独立子目录和 `plugin.json` 声明元数据、能力、虚拟接口、可校验对象、受限 dataplane hook 和可选静态 UI 资源：
+
+```json
+{
+  "api_version": "v1",
+  "id": "packet_observer",
+  "name": "Packet Observer",
+  "version": "0.1.0",
+  "kind": "pipeline",
+  "capabilities": ["observe"],
+  "virtual_interfaces": [{"id": "vtap0", "type": "logical"}],
+  "objects": [{
+    "id": "observer",
+    "path": "observer.o",
+    "sha256": "64-character-lowercase-hex-digest",
+    "programs": [{"id": "tc_pre_forward", "section": "tc/fvtap/pre_forward", "type": "tc"}]
+  }],
+  "hooks": [{
+    "id": "observe-ingress",
+    "engine": "tc",
+    "attach": "ingress",
+    "stage": "forward",
+    "priority": 10,
+    "program": "observer:tc_pre_forward",
+    "mode": "observe",
+    "interfaces": ["eth0"]
+  }],
+  "resources": [{
+    "id": "bindings",
+    "methods": ["list", "get", "create", "update", "delete"],
+    "runtime_update": "manual",
+    "max_records": 64,
+    "max_record_bytes": 4096
+  }],
+  "actions": [{
+    "id": "apply",
+    "runtime_update": "plugin_reconcile"
+  }],
+  "ui": {
+    "static_dir": "ui",
+    "entry": "index.html"
+  },
+  "metadata": {
+    "ui.page": "observe",
+    "ui.page_title": "Observe"
+  }
+}
+```
+
+当前插件层包含三部分：控制面发现、Goja 控制脚本和可选的 `fvtap` TC pipeline 数据面。`GET /api/plugins` 会返回外部插件和内置 `fvtap` 描述，并通过 `runtime.external_dataplane_attach` 标记外部数据面是否启用。默认 `plugins_dataplane_enabled=false`，外部插件的 `runtime.mode` 为 `manifest_only`，只表示 manifest、object 和 UI 资源已被发现/校验；内置 `fvtap` 的 `runtime.mode` 为 `builtin` 且 `attached=true`。
+
+启用 `plugins_dataplane_enabled=true` 后，只有当前目录里存在可链入的 `engine=tc`、`stage=forward` 或 `stage=reply` hook 时，TC 入口才会从 legacy/dispatch 切到 `pipeline_v4`。没有实际插件链时不会给热路径增加额外 lookup。内置 `fvtap core` 的 priority 固定为 `1000`；外部 TC 插件使用 manifest `priority` 和 core 对比，低于 `1000` 会装入 core 前 slots，高于 `1000` 会装入 core 后 slots，等于 `1000` 会被拒绝以避免和 core 抢同一排序点。旧 manifest 的 `stage=pre_forward/post_lookup/pre_reply/post_reply` 仍作为兼容别名保留；`GET /api/plugins` 里的 `chain_slot` 表示实际 prog-array slot。插件执行后必须 tail-call 到对应 stage 的 continue slot，除非它明确要返回最终 TC action。当前 forward 和 reply 方向各自有 core 前/后两个物理执行区，单个执行区最多 8 个外部 hook，总 hook 数最多 14 个，以避免触发内核 tail-call 深度上限。XDP 和非 `fvtap` TC hook 仍是 manifest 声明，不会进入数据面。
+
+`hooks[].interfaces` 是可选的插件自驱动 attachment 声明。留空或省略时，插件只会在已有 forward/egress 规则把 `fvtap` 挂到接口后进入链；填写真实接口名时，即使当前没有任何转发规则，TC runtime 也会把 `pipeline_v4` 挂到这些接口上，让 pre-core 插件可以作为广义 core 实现防火墙、观测、协议适配等功能。无规则模式只加载显式接口上的 `pre_forward/pre_reply` hook；core 后 hook 仍需要规则或 flow 上下文。不会自动挂载所有接口；接口不存在会让该插件本轮进入 error 状态。当前链是全局链，不是 per-interface 链；插件如果只想处理某些接口，应在自己的 eBPF 程序里检查 `skb->ifindex` 后再决定 drop/pass/redirect/tail-call。
+
+插件 eBPF object 如需进入 `fvtap` pipeline，必须声明同名共享 map `tc_prog_chain_v4`，类型为 `BPF_MAP_TYPE_PROG_ARRAY`，`max_entries` 至少为 45。服务加载插件对象时会用内置 map 替换该 map，让插件能 tail-call 回对应 stage 的 `fvtap` continue slot。core 后插件如需读取已解析/匹配的稳定上下文，还必须声明共享 map `tc_plugin_ctx_v4`，服务会替换为内置 per-CPU ctx map；其中 IPv4 地址和端口字段按 host byte order 填充，`have_rule=1` 表示本包已匹配规则或回包流。`observe` 仍是对已安装插件对象的信任契约：服务会限制 manifest、路径、大小、sha256 和 program type，但不能证明第三方 TC 程序绝不改包或丢包；生产环境应只加载可信对象。声明了 `objects` 的插件必须保证对象文件在插件目录内、单个对象不超过 16 MiB 且 sha256 匹配；服务会解析 eBPF ELF object，校验 program section/type 并返回 `status`、`program_count`、`map_count`、`resolved_sha256`。
+
+插件控制脚本通过 `control.main` 声明，运行在 Goja 控制面，不进入 TC/XDP 热路径。控制脚本可导出 `onReconcile(ctx)`、`onResourceApply(ctx)`、`onAction(ctx)` 和 `onTimer(ctx)`；可用能力必须在 `control.permissions` 中显式声明。当前 host API 包括：`kv.*` 插件私有 KV，`resources.*` 访问 manifest 资源，`plugins.resources.set()` 在声明 `plugin.resource` 权限后写入其他插件 manifest 已声明的资源，`secret.*` 存储敏感控制面值，`crypto.md5/randomBytes` 支持 CHAP 等协议控制面，`timer.setTimeout/setInterval/clear/list` 支持重试和保活，`net.l2.send/recv/recvMany/exchange/exchangeMany` 支持 Linux raw L2 控制包收发，`ebpf.mapPut/mapDelete/mapClear` 用于把控制面状态写入已加载插件对象的 map。跨插件资源写入会遵守目标资源的 `methods/max_records/max_record_bytes/runtime_update`，未声明 `plugin.resource` 的插件不能写其他插件资源。`net.l2.exchange()` 和 `net.l2.exchangeMany()` 会先准备收包再发包，适合 PPPoE discovery/LCP/IPCP/IPv6CP 这类短窗口交互；它只是控制面 primitive，不代表项目已经内置完整 PPPoE WAN。
+
+插件 UI 资源使用 Bearer Token 鉴权。前端打开插件 UI 时由宿主拉取入口文件，再注入宿主组件和 `ForwardPluginHost` RPC bridge 后放入 sandbox iframe；Web Token 不会暴露给插件页面。插件页面如需读写自己的持久化数据，应通过 `ForwardPluginHost.data.*` 调用 manifest 声明的 `resources`，如需触发显式控制面动作则调用 `ForwardPluginHost.action()`。`runtime_update=manual` 只落库并标记 pending，`plugin_reconcile` 会触发插件运行时重算，`runtime_apply` 会调用 Goja 控制脚本或实现了运行时数据更新接口的宿主数据面。数据更新发生在控制面，不会让 TC/XDP 热路径额外查询 SQLite 或 Web API。
+
+如果插件 manifest 的 `metadata` 声明了 `ui.page`，Web UI 会自动在主分页栏创建对应插件页，例如 `"ui.page": "observe"` 会生成 `Observe` 页并内嵌加载 `ui.entry`。兼容键包括 `ui.page`、`ui_page`、`forward.page`、`forward_ui_page`；标题可用 `ui.page_title`、`forward.page_title` 或 `tab_title` 指定。宿主会给插件入口注入 `fwd-page`、`fwd-card`、`fwd-button`、`fwd-badge`、`fwd-table` 等基础组件样式，并暴露 `window.ForwardPluginHost` helper，方便插件用普通 HTML/CSS/JS 构建接近宿主风格的页面。
+
+示例插件位于 `examples/plugins/packet_observer/`、`examples/plugins/wan_core/`、`examples/plugins/vtolocal/` 和 `examples/plugins/pppoe_client/`。`packet_observer` 需要先执行 `./build.sh` 生成 `packet_observer.o`，再复制到 `plugins/runtime/packet_observer/`；如果开启 `plugins_dataplane_enabled=true`，它会通过 `stage=forward, priority=10` 进入 `fvtap` core 前链，统计包数后 tail-call 回内置转发核心。`wan_core` 是协议中立 WAN adapter，消费标准化 `sessions` 资源并创建 `host veth -> vtap` handoff，状态中会输出 `forward_core.parent_interface`，供 Forward/Egress NAT 规则选择。`pppoe_client` 是 PPPoE 控制面示例，可用 Goja + raw L2 完成 PADI/PADO、PADS、LCP、PAP/CHAP、IPCP、IPv6CP 和 DHCPv6-PD，并可把标准 WAN session 同步到 `wan_core` 创建 handoff；它仍不是生产级 PPPoE WAN 接管实现，真实数据面接管需要启用并验证对应 TC tunnel/forward_core 规则。
+
+把现有转发程序做成 `fvtap` 的可行性：
+
+- 当前实现已经把现有 TC 转发能力暴露为内置 `fvtap` pipeline 节点，并允许外部 TC 插件按 priority 进入 core 前或 core 后链。
+- 不建议现在把核心 TC/XDP 拆成外部插件对象。现有热路径依赖固定 tail-call slots、共享 maps、hot restart pinning、fallback/retry 语义和统计结构，直接拆分会增加 verifier、升级兼容和性能退化风险。
+- 后续如果要继续扩展，建议先增加 post-forward/reply hook，再逐步开放 rewrite/redirect/drop。`fvtap` 应继续作为内置核心节点，而不是普通第三方插件。
 
 ## 平台与依赖
 

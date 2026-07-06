@@ -13,7 +13,7 @@ func (rt *linuxKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentH
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	mode := rt.attachmentMode
-	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, preparedRules, mode)
+	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, preparedRules, mode, rt.pluginPipelineActive)
 	rt.mu.Unlock()
 
 	healthy := true

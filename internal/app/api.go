@@ -261,6 +261,36 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, tags)
 	}))
+	mux.HandleFunc("/api/plugins", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pm != nil {
+			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
+			return
+		}
+		writeJSON(w, http.StatusOK, loadPluginCatalog(cfg))
+	}))
+	mux.HandleFunc("/api/plugins/reload", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pm != nil {
+			pm.redistributeWorkers()
+			pm.reconcilePluginsForRuntime()
+			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
+			return
+		}
+		writeJSON(w, http.StatusOK, loadPluginCatalog(cfg))
+	}))
+	mux.Handle("/api/plugins/", authStaticMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handlePluginAPIRoute(w, r, cfg, db, pm) {
+			return
+		}
+		handlePluginAsset(w, r, cfg)
+	})))
 	mux.HandleFunc("/api/rules/validate", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -441,13 +471,7 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 
 func authMiddleware(cfg *Config, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		expected := strings.TrimSpace(cfg.WebToken)
-		fields := strings.Fields(strings.TrimSpace(r.Header.Get("Authorization")))
-		token := ""
-		if len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") {
-			token = fields[1]
-		}
-		if expected == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+		if !authorizedAPIRequest(cfg, r) {
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -456,6 +480,30 @@ func authMiddleware(cfg *Config, next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		next(w, r)
 	}
+}
+
+func authStaticMiddleware(cfg *Config, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !authorizedAPIRequest(cfg, r) {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func authorizedAPIRequest(cfg *Config, r *http.Request) bool {
+	if cfg == nil {
+		return false
+	}
+	expected := strings.TrimSpace(cfg.WebToken)
+	fields := strings.Fields(strings.TrimSpace(r.Header.Get("Authorization")))
+	token := ""
+	if len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") {
+		token = fields[1]
+	}
+	return expected != "" && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
 func handleInterfaces(w http.ResponseWriter, r *http.Request) {

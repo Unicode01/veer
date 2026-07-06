@@ -1,0 +1,75 @@
+{
+  "api_version": "v1",
+  "id": "packet_observer",
+  "name": "Packet Observer",
+  "version": "0.1.0",
+  "kind": "pipeline",
+  "description": "Example runtime plugin manifest. Run build.sh to compile packet_observer.o before copying it into plugins/runtime.",
+  "capabilities": [
+    "observe",
+    "tc"
+  ],
+  "virtual_interfaces": [
+    {
+      "id": "vtap0",
+      "type": "logical",
+      "description": "Example logical pipeline node."
+    }
+  ],
+  "objects": [
+    {
+      "id": "packet_observer",
+      "path": "packet_observer.o",
+      "description": "Minimal TC pre_forward chain program used for plugin object validation.",
+      "programs": [
+        {
+          "id": "tc_pre_forward",
+          "section": "tc/fvtap/pre_forward",
+          "type": "tc"
+        }
+      ]
+    }
+  ],
+  "hooks": [
+    {
+      "id": "observe-ingress",
+      "engine": "tc",
+      "attach": "ingress",
+      "stage": "forward",
+      "priority": 10,
+      "program": "packet_observer:tc_pre_forward",
+      "mode": "observe",
+      "interfaces": []
+    }
+  ],
+  "resources": [
+    {
+      "id": "bindings",
+      "description": "Example plugin-owned JSON records persisted by the host for control-plane code.",
+      "methods": ["list", "get", "create", "update", "delete"],
+      "runtime_update": "manual",
+      "max_records": 64,
+      "max_record_bytes": 4096
+    }
+  ],
+  "actions": [
+    {
+      "id": "apply",
+      "description": "Example explicit Goja control-plane action. It persists the latest apply payload into the plugin KV namespace.",
+      "runtime_update": "runtime_apply",
+      "max_payload_bytes": 4096
+    }
+  ],
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv"]
+  },
+  "ui": {
+    "static_dir": "ui",
+    "entry": "index.html"
+  },
+  "metadata": {
+    "ui.page": "observe",
+    "ui.page_title": "Observe"
+  }
+}

@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VTap To Local</title>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const status = F.status('Idle');
+      const stateBody = F.h('div', { className: F.classes.stack });
+      const profileKey = input('default', 'profile key');
+      const hostInterface = input('fwdlocal0', 'host-side veth');
+      const vtapInterface = input('fwdvtap0', 'fvtap ingress peer');
+      const mtu = input('1492', 'mtu', 'number');
+      const hostCIDR = input('169.254.253.1/30', 'host cidr');
+      const vtapCIDR = input('169.254.253.2/30', 'vtap cidr');
+      const routes = F.h('textarea', {
+        className: F.classes.input,
+        attrs: {
+          rows: '4',
+          placeholder: '[{"dst":"198.51.100.0/24","dev":"fwdlocal0","table":100,"metric":10}]'
+        }
+      });
+
+      function input(value, placeholder, type) {
+        return F.h('input', {
+          className: F.classes.input,
+          attrs: { type: type || 'text', value, placeholder }
+        });
+      }
+
+      function field(label, control) {
+        return F.h('label', { className: F.classes.field }, [
+          F.h('span', { text: label }),
+          control
+        ]);
+      }
+
+      function setBusy(button, busy, text) {
+        button.disabled = !!busy;
+        if (text) button.textContent = text;
+      }
+
+      function payload() {
+        return {
+          profile_key: profileKey.value.trim() || 'default',
+          host_interface: hostInterface.value.trim() || 'fwdlocal0',
+          vtap_interface: vtapInterface.value.trim() || 'fwdvtap0',
+          mtu: Number(mtu.value || 1492),
+          host_addresses: hostCIDR.value.trim() ? [hostCIDR.value.trim()] : [],
+          vtap_addresses: vtapCIDR.value.trim() ? [vtapCIDR.value.trim()] : [],
+          routes: parseRoutes()
+        };
+      }
+
+      function parseRoutes() {
+        const text = routes.value.trim();
+        if (!text) return [];
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed)) throw new Error('routes must be a JSON array');
+        return parsed;
+      }
+
+      async function saveProfile() {
+        status.textContent = 'Saving';
+        try {
+          const p = payload();
+          try {
+            await F.data.update('links', p.profile_key, p, { enabled: true });
+          } catch (e) {
+            await F.data.create('links', p, { key: p.profile_key, enabled: true });
+          }
+          status.textContent = 'Saved';
+          F.toast('VToLocal profile saved.');
+        } catch (e) {
+          status.textContent = 'Save failed';
+          F.toast(e.message || String(e));
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function loadProfile() {
+        try {
+          const key = profileKey.value.trim() || 'default';
+          const record = await F.data.get('links', key);
+          const data = record.data || {};
+          hostInterface.value = data.host_interface || 'fwdlocal0';
+          vtapInterface.value = data.vtap_interface || 'fwdvtap0';
+          mtu.value = data.mtu || 1492;
+          hostCIDR.value = Array.isArray(data.host_addresses) ? (data.host_addresses[0] || '') : (data.host_cidr || data.host_ipv4_cidr || '');
+          vtapCIDR.value = Array.isArray(data.vtap_addresses) ? (data.vtap_addresses[0] || '') : (data.vtap_cidr || data.vtap_ipv4_cidr || '');
+          routes.value = JSON.stringify(Array.isArray(data.routes) ? data.routes : [], null, 2);
+          F.toast('Profile loaded.');
+        } catch (e) {
+          F.toast(e.message || String(e));
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function apply(button) {
+        setBusy(button, true, 'Applying');
+        status.textContent = 'Applying';
+        try {
+          await F.action('apply', payload());
+          await loadStatus();
+          status.textContent = 'Applied';
+          F.toast('Veth handoff applied.');
+        } catch (e) {
+          status.textContent = 'Apply failed';
+          F.toast(e.message || String(e));
+        } finally {
+          setBusy(button, false, 'Apply');
+          F.requestResize();
+        }
+      }
+
+      async function teardown(button) {
+        setBusy(button, true, 'Deleting');
+        status.textContent = 'Deleting';
+        try {
+          await F.action('teardown', payload());
+          await loadStatus();
+          status.textContent = 'Deleted';
+          F.toast('Veth pair deleted.');
+        } catch (e) {
+          status.textContent = 'Delete failed';
+          F.toast(e.message || String(e));
+        } finally {
+          setBusy(button, false, 'Teardown');
+          F.requestResize();
+        }
+      }
+
+      async function loadStatus() {
+        stateBody.replaceChildren();
+        try {
+          const key = profileKey.value.trim() || 'default';
+          const record = await F.data.get('status', key);
+          const data = record.data || {};
+          stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
+            F.stat('Phase', data.phase || '-'),
+            F.stat('Host', (data.host_interface || '-') + ' #' + (data.host_ifindex || '-')),
+            F.stat('VTap Peer', (data.vtap_interface || '-') + ' #' + (data.vtap_ifindex || '-')),
+            F.stat('Routes', data.route_count == null ? '-' : data.route_count),
+            F.stat('Egress NAT Parent', data.egress_nat_parent_interface || '-'),
+            F.stat('Updated', data.updated_at || '-')
+          ]));
+        } catch (e) {
+          stateBody.appendChild(F.h('p', {
+            className: F.classes.description,
+            text: 'No applied status yet.'
+          }));
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      const applyButton = F.button('Apply', function () { apply(applyButton); });
+      const teardownButton = F.button('Teardown', function () { teardown(teardownButton); }, true);
+      const page = F.h('main', { className: F.classes.page }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                F.h('h1', { className: F.classes.title, text: 'VTap To Local' }),
+                F.h('p', {
+                  className: F.classes.description,
+                  text: 'Creates a real veth ingress pair for host-originated traffic. Configure Forward Egress NAT against the vtap peer interface after applying.'
+                })
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                F.badge('net.admin'),
+                F.badge('veth'),
+                status
+              ])
+            ])
+          ]),
+          F.h('div', { className: F.classes.grid }, [
+            F.stat('Handoff', 'host veth -> peer ingress', 'Route local traffic to the host-side veth; fvtap attaches on the peer.'),
+            F.stat('Core Rule', 'Egress NAT', 'Use the peer interface as the parent/inbound scope.'),
+            F.stat('Routes', 'explicit only', 'This plugin does not take over the default route unless configured.')
+          ]),
+          F.card([
+            F.h('h2', { className: F.classes.title, text: 'Profile' }),
+            F.h('div', { className: F.classes.grid }, [
+              field('Profile', profileKey),
+              field('Host Interface', hostInterface),
+              field('VTap Peer Interface', vtapInterface),
+              field('MTU', mtu),
+              field('Host CIDR', hostCIDR),
+              field('Peer CIDR', vtapCIDR)
+            ]),
+            field('Routes JSON', routes),
+            F.h('div', { className: F.classes.toolbar }, [
+              F.button('Save Profile', saveProfile),
+              F.button('Load Profile', loadProfile, true),
+              applyButton,
+              teardownButton,
+              F.button('Refresh Status', loadStatus, true)
+            ])
+          ]),
+          F.card([
+            F.h('h2', { className: F.classes.title, text: 'Last Status' }),
+            stateBody
+          ])
+        ])
+      ]);
+
+      document.body.replaceChildren(page);
+      loadStatus().finally(F.requestResize);
+    })();
+  </script>
+</body>
+</html>
