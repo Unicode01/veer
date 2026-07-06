@@ -230,6 +230,8 @@ type ProcessManager struct {
 	ipv6Runtime                                    ipv6AssignmentRuntime
 	ipv6AssignmentsConfigured                      bool
 	ipv6AssignmentInterfaces                       map[string]struct{}
+	pluginControlRuntime                           pluginControlRuntime
+	pluginRuntime                                  pluginDataplaneRuntime
 	kernelRuntime                                  kernelRuleRuntime
 	kernelRules                                    map[int64]bool
 	kernelRanges                                   map[int64]bool
@@ -442,6 +444,8 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		lastRangePlanLog:                     make(map[int64]string),
 		kernelMaintenanceEvery:               configuredKernelMaintenanceInterval(),
 	}
+	pm.pluginControlRuntime = newPluginControlRuntime(db, cfg, pm)
+	pm.pluginRuntime = newPluginDataplaneRuntime(cfg)
 
 	if pm.kernelRuntime != nil {
 		available, reason := pm.kernelRuntime.Available()
@@ -4075,6 +4079,12 @@ func (pm *ProcessManager) stopAll() {
 	}
 	if pm.managedNetworkRuntime != nil {
 		logShutdownStep("stop managed network runtime", pm.managedNetworkRuntime.Close)
+	}
+	if pm.pluginRuntime != nil {
+		logShutdownStep("stop plugin runtime", pm.pluginRuntime.Close)
+	}
+	if pm.pluginControlRuntime != nil {
+		logShutdownStep("stop plugin control runtime", pm.pluginControlRuntime.Close)
 	}
 	if pm.kernelRuntime != nil {
 		logShutdownStep("stop kernel runtime", pm.kernelRuntime.Close)

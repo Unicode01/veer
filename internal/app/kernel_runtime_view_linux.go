@@ -815,7 +815,7 @@ func kernelAttachmentKeys(expected []kernelAttachmentExpectation) []kernelAttach
 
 func expectedKernelAttachmentsForPreparedRules(coll *ebpf.Collection, prepared []preparedKernelRule, mode kernelTCAttachmentProgramMode) []kernelAttachmentExpectation {
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(prepared)
-	programs := kernelAttachmentProgramsForPreparedRules(coll, prepared, mode)
+	programs := kernelAttachmentProgramsForPreparedRules(coll, prepared, mode, mode == kernelTCAttachmentProgramModePipelineV4)
 	return expectedKernelAttachments(desiredKernelAttachmentPlansDualStack(
 		forwardIfRules,
 		replyIfRules,

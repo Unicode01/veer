@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PPPoE Client Lab</title>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const status = F.status('Idle');
+      const stateBody = F.h('div', { className: F.classes.stack });
+      const profileKey = input('default', 'profile key');
+      const iface = input('', 'eth0 / vmbr0 / wan');
+      const username = input('', 'username');
+      const password = input('', 'password', 'password');
+      const service = input('', 'optional service name');
+      const auth = select([
+        ['pap', 'PAP'],
+        ['chap', 'CHAP'],
+        ['none', 'None']
+      ]);
+      const timeout = input('700', 'timeout ms', 'number');
+      const negotiateIPv4 = checkbox(true);
+      const negotiateIPv6 = checkbox(false);
+      const requestPD = checkbox(false);
+      const keepalive = input('0', '0 disables keepalive', 'number');
+      const installTunnel = checkbox(false);
+      const coupled = checkbox(false);
+      const lanInterface = input('fwdvtap0', 'vtap ingress interface');
+      const lanPeerInterface = input('fwdlocal0', 'local peer interface');
+      const wanInterface = input('', 'defaults to PPPoE interface');
+      const wanCoreSync = checkbox(true);
+      const wanCoreApply = checkbox(true);
+
+      function input(value, placeholder, type) {
+        return F.h('input', {
+          className: F.classes.input,
+          attrs: {
+            type: type || 'text',
+            value,
+            placeholder
+          }
+        });
+      }
+
+      function select(options) {
+        const el = F.h('select', { className: F.classes.input });
+        options.forEach(([value, label]) => {
+          el.appendChild(F.h('option', { text: label, attrs: { value } }));
+        });
+        return el;
+      }
+
+      function checkbox(checked) {
+        return F.h('input', {
+          className: F.classes.input,
+          attrs: {
+            type: 'checkbox',
+            checked: !!checked
+          }
+        });
+      }
+
+      function profilePayload() {
+        return {
+          interface: iface.value.trim(),
+          username: username.value.trim(),
+          password: password.value,
+          service: service.value.trim(),
+          auth: auth.value,
+          timeout_ms: Number(timeout.value || 700),
+          negotiate_ipv4: negotiateIPv4.checked,
+          negotiate_ipv6: negotiateIPv6.checked,
+          request_pd: requestPD.checked,
+          keepalive_interval_ms: Number(keepalive.value || 0),
+          install_tunnel: installTunnel.checked,
+          coupled: coupled.checked,
+          lan_interface: lanInterface.value.trim(),
+          lan_peer_interface: lanPeerInterface.value.trim(),
+          wan_interface: wanInterface.value.trim(),
+          wan_core_sync: wanCoreSync.checked,
+          wan_core_apply: wanCoreApply.checked,
+          send_padt: true
+        };
+      }
+
+      function setBusy(button, busy, text) {
+        button.disabled = !!busy;
+        if (text) button.textContent = text;
+      }
+
+      function uniqueInterfaces(values) {
+        const seen = new Set();
+        const out = [];
+        values.forEach((value) => {
+          const item = String(value || '').trim();
+          if (!item || seen.has(item)) return;
+          seen.add(item);
+          out.push(item);
+        });
+        return out;
+      }
+
+      async function upsertResource(resource, key, data, options) {
+        try {
+          return await F.data.update(resource, key, data, options);
+        } catch (e) {
+          return F.data.create(resource, data, Object.assign({}, options || {}, { key }));
+        }
+      }
+
+      async function syncHookBindings(payload) {
+        const wan = payload.wan_interface || payload.interface;
+        const forwardInterfaces = uniqueInterfaces([payload.lan_interface, wan]);
+        if (!forwardInterfaces.length) return;
+        await upsertResource('hook_bindings', 'pppoe-lab-forward', {
+          hook_id: 'pppoe-lab-forward',
+          interfaces: forwardInterfaces
+        }, { enabled: true });
+        await upsertResource('hook_bindings', 'pppoe-lab-reply', {
+          hook_id: 'pppoe-lab-reply',
+          interfaces: payload.coupled ? uniqueInterfaces([payload.lan_interface]) : []
+        }, { enabled: !!payload.coupled });
+      }
+
+      function renderState(record) {
+        stateBody.replaceChildren();
+        if (!record) {
+          stateBody.appendChild(F.h('p', {
+            className: F.classes.description,
+            text: 'No PPPoE probe result yet.'
+          }));
+          F.requestResize();
+          return;
+        }
+        const data = record.data || {};
+        stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
+          F.stat('Phase', data.phase || '-', data.message || ''),
+          F.stat('Interface', data.interface || '-'),
+          F.stat('AC MAC', data.ac_mac || '-'),
+          F.stat('Session', data.session_id_hex ? '0x' + data.session_id_hex : '-'),
+          F.stat('LCP ACK', data.lcp_ack ? 'yes' : 'no'),
+          F.stat('Auth', data.auth_sent ? data.auth_method : (data.auth || '-')),
+          F.stat('IPCP', data.ipcp && data.ipcp.phase ? data.ipcp.phase : '-'),
+          F.stat('IPv6CP', data.ipv6cp && data.ipv6cp.phase ? data.ipv6cp.phase : '-'),
+          F.stat('PD', data.dhcpv6_pd && data.dhcpv6_pd.prefixes && data.dhcpv6_pd.prefixes.length ? data.dhcpv6_pd.prefixes[0].prefix : '-'),
+          F.stat('Tunnel', data.tunnel && data.tunnel.mode ? data.tunnel.mode : '-',
+            data.tunnel && data.tunnel.prepared_l2_note ? data.tunnel.prepared_l2_note : '')
+        ]));
+        if (Array.isArray(data.frames) && data.frames.length) {
+          stateBody.appendChild(F.card([
+            F.h('h2', { className: F.classes.title, text: 'Session Frames' }),
+            F.table(['#', 'Protocol', 'Event', 'Code'], data.frames.map((frame, index) => [
+              index + 1,
+              frame.protocol || '-',
+              frame.event || '-',
+              frame.code == null ? '-' : frame.code
+            ]))
+          ]));
+        }
+        if (Array.isArray(data.tags) && data.tags.length) {
+          stateBody.appendChild(F.card([
+            F.h('h2', { className: F.classes.title, text: 'PADO Tags' }),
+            F.table(['Type', 'Bytes', 'Text'], data.tags.map((tag) => [
+              tag.type,
+              tag.bytes,
+              tag.text || '-'
+            ]))
+          ]));
+        }
+        F.requestResize();
+      }
+
+      async function loadProfile() {
+        try {
+          const key = profileKey.value.trim() || 'default';
+          const record = await F.data.get('profiles', key);
+          const data = record.data || {};
+          iface.value = data.interface || '';
+          username.value = data.username || '';
+          password.value = data.password === '__redacted__' ? '' : (data.password || '');
+          service.value = data.service || '';
+          auth.value = data.auth || 'pap';
+          timeout.value = data.timeout_ms || 700;
+          negotiateIPv4.checked = data.negotiate_ipv4 !== false;
+          negotiateIPv6.checked = !!data.negotiate_ipv6;
+          requestPD.checked = !!data.request_pd;
+          keepalive.value = data.keepalive_interval_ms || 0;
+          installTunnel.checked = !!data.install_tunnel;
+          coupled.checked = !!data.coupled;
+          lanInterface.value = data.lan_interface || data.vtap_interface || 'fwdvtap0';
+          lanPeerInterface.value = data.lan_peer_interface || data.host_interface || 'fwdlocal0';
+          wanInterface.value = data.wan_interface || '';
+          wanCoreSync.checked = data.wan_core_sync !== false;
+          wanCoreApply.checked = data.wan_core_apply !== false;
+          F.toast('Profile loaded.');
+        } catch (e) {
+          F.toast(e.message || String(e));
+        }
+      }
+
+      async function saveProfile() {
+        const key = profileKey.value.trim() || 'default';
+        const payload = profilePayload();
+        status.textContent = 'Saving profile';
+        try {
+          await syncHookBindings(payload);
+          try {
+            await F.data.update('profiles', key, payload);
+          } catch (e) {
+            await F.data.create('profiles', payload, { key });
+          }
+          status.textContent = 'Profile saved';
+          F.toast('Profile saved.');
+        } catch (e) {
+          status.textContent = 'Save failed';
+          F.toast(e.message || String(e));
+        }
+      }
+
+      async function runAction(action, button, busyText, idleText) {
+        setBusy(button, true, busyText);
+        status.textContent = busyText;
+        try {
+          const payload = profilePayload();
+          payload.profile_key = profileKey.value.trim() || 'default';
+          await syncHookBindings(payload);
+          await F.action(action, payload);
+          await loadState();
+          status.textContent = 'Completed';
+          F.toast(action === 'discover' ? 'PADI/PADO discovery completed.' : (action === 'traffic_probe' ? 'Tunnel probe completed.' : 'Session probe completed.'));
+        } catch (e) {
+          status.textContent = 'Failed';
+          F.toast(e.message || String(e));
+        } finally {
+          setBusy(button, false, idleText || (action === 'discover' ? 'Discover' : 'Probe Session'));
+          F.requestResize();
+        }
+      }
+
+      async function loadState() {
+        try {
+          const record = await F.data.get('sessions', 'last');
+          renderState(record);
+        } catch (e) {
+          renderState(null);
+        }
+      }
+
+      const discoverButton = F.button('Discover', function () {
+        runAction('discover', discoverButton, 'Discovering', 'Discover');
+      });
+      const probeButton = F.button('Probe Session', function () {
+        runAction('probe_session', probeButton, 'Probing', 'Probe Session');
+      });
+      const tunnelProbeButton = F.button('Tunnel Probe', function () {
+        installTunnel.checked = true;
+        runAction('traffic_probe', tunnelProbeButton, 'Installing Tunnel', 'Tunnel Probe');
+      });
+      const dialButton = F.button('Dial', function () {
+        const p = profilePayload();
+        p.profile_key = profileKey.value.trim() || 'default';
+        p.send_padt = false;
+        setBusy(dialButton, true, 'Dialing');
+        status.textContent = 'Dialing';
+        syncHookBindings(p).then(function () {
+          return F.action('dial', p);
+        }).then(loadState).then(function () {
+          status.textContent = 'Dialed';
+          F.toast('PPPoE session is open.');
+        }).catch(function (e) {
+          status.textContent = 'Dial failed';
+          F.toast(e.message || String(e));
+        }).finally(function () {
+          setBusy(dialButton, false, 'Dial');
+          F.requestResize();
+        });
+      });
+      const disconnectButton = F.button('Disconnect', function () {
+        setBusy(disconnectButton, true, 'Disconnecting');
+        status.textContent = 'Disconnecting';
+        F.action('disconnect', { profile_key: profileKey.value.trim() || 'default', interface: iface.value.trim() }).then(loadState).then(function () {
+          status.textContent = 'Disconnected';
+          F.toast('PADT sent.');
+        }).catch(function (e) {
+          status.textContent = 'Disconnect failed';
+          F.toast(e.message || String(e));
+        }).finally(function () {
+          setBusy(disconnectButton, false, 'Disconnect');
+          F.requestResize();
+        });
+      }, true);
+
+      const page = F.h('main', { className: F.classes.page }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                F.h('h1', { className: F.classes.title, text: 'PPPoE Client Lab' }),
+                F.h('p', {
+                  className: F.classes.description,
+                  text: 'PPPoE discovery/session control plus a minimal TC tunnel for lab vtap handoff. Direct vtap mode bypasses kernel_tc_prepared_l2; coupled fvtap mode can use it only as an optional static L2 egress optimization.'
+                })
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                F.badge('raw L2'),
+                F.badge('Goja'),
+                status
+              ])
+            ])
+          ]),
+          F.card([
+            F.h('h2', { className: F.classes.title, text: 'Profile' }),
+            F.h('div', { className: F.classes.grid }, [
+              field('Profile', profileKey),
+              field('Interface', iface),
+              field('Username', username),
+              field('Password', password),
+              field('Service', service),
+              field('Auth', auth),
+              field('Timeout', timeout),
+              field('IPCP IPv4', negotiateIPv4),
+              field('IPv6CP', negotiateIPv6),
+              field('DHCPv6-PD', requestPD),
+              field('Keepalive ms', keepalive),
+              field('Install Tunnel', installTunnel),
+              field('Coupled fvtap', coupled),
+              field('LAN/vtap', lanInterface),
+              field('Local peer', lanPeerInterface),
+              field('WAN link', wanInterface),
+              field('Sync WAN Core', wanCoreSync),
+              field('Apply WAN Core', wanCoreApply)
+            ]),
+            F.h('div', { className: F.classes.toolbar }, [
+              F.button('Save Profile', saveProfile),
+              F.button('Load Profile', loadProfile, true),
+              discoverButton,
+              probeButton,
+              tunnelProbeButton,
+              dialButton,
+              disconnectButton,
+              F.button('Refresh State', loadState, true)
+            ])
+          ]),
+          F.card([
+            F.h('h2', { className: F.classes.title, text: 'Last Result' }),
+            stateBody
+          ])
+        ])
+      ]);
+
+      function field(label, control) {
+        return F.h('label', { className: F.classes.field }, [
+          F.h('span', { text: label }),
+          control
+        ]);
+      }
+
+      document.body.replaceChildren(page);
+      loadState().finally(F.requestResize);
+    })();
+  </script>
+</body>
+</html>

@@ -84,6 +84,7 @@
             <button id="tab-managed-networks-button" class="tab" data-tab="managed-networks" data-i18n="tab.managedNetworks" role="tab" aria-selected="false" aria-controls="tab-managed-networks" tabindex="-1">Managed Networks</button>
             <button id="tab-egress-nats-button" class="tab" data-tab="egress-nats" data-i18n="tab.egressNATs" role="tab" aria-selected="false" aria-controls="tab-egress-nats" tabindex="-1">Egress NAT</button>
             <button id="tab-ipv6-assignments-button" class="tab" data-tab="ipv6-assignments" data-i18n="tab.ipv6Assignments" role="tab" aria-selected="false" aria-controls="tab-ipv6-assignments" tabindex="-1">IPv6 Assignments</button>
+            <button id="tab-plugins-button" class="tab" data-tab="plugins" data-i18n="tab.plugins" role="tab" aria-selected="false" aria-controls="tab-plugins" tabindex="-1">Plugins</button>
             <button id="tab-diagnostics-button" class="tab" data-tab="diagnostics" data-i18n="tab.diagnostics" role="tab" aria-selected="false" aria-controls="tab-diagnostics" tabindex="-1">Diagnostics</button>
         </div>
 
@@ -936,6 +937,56 @@
             </section>
         </div>
 
+        <div id="tab-plugins" class="tab-content" role="tabpanel" aria-labelledby="tab-plugins-button">
+            <section class="rule-list">
+                <div class="section-heading-row">
+                    <div>
+                        <h2 data-i18n="plugins.title">Runtime Plugins</h2>
+                        <p class="section-desc" data-i18n="plugins.desc">Manifest, object validation, TC pipeline chain, and runtime attachment status. External dataplane is off by default.</p>
+                    </div>
+                    <button type="button" id="refreshPluginsBtn" class="mini-btn" data-i18n="plugins.refresh">Refresh Plugins</button>
+                </div>
+                <div class="table-toolbar">
+                    <div class="table-toolbar-main">
+                        <input type="search" id="pluginsSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="pluginsTable" data-i18n-placeholder="search.plugins.placeholder" placeholder="Search plugin id, capability, object, hook...">
+                        <p id="pluginsFilterMeta" class="table-meta"></p>
+                    </div>
+                </div>
+                <div class="plugin-meta-grid">
+                    <div id="pluginsCatalogMeta" class="plugin-meta-card"></div>
+                    <div id="pluginsChainMeta" class="plugin-meta-card plugin-meta-card-wide"></div>
+                </div>
+                <section id="pluginUIPanel" class="plugin-ui-panel" hidden>
+                    <div class="plugin-ui-header">
+                        <div>
+                            <p class="section-kicker" data-i18n="plugins.ui.kicker">Plugin UI</p>
+                            <h3 id="pluginUITitle" data-i18n="plugins.ui.emptyTitle">No Plugin Selected</h3>
+                            <p id="pluginUIMeta" class="section-desc"></p>
+                        </div>
+                        <button type="button" id="closePluginUIBtn" class="mini-btn" data-i18n="plugins.ui.close">Close</button>
+                    </div>
+                    <iframe id="pluginUIFrame" class="plugin-ui-frame" title="Plugin UI" sandbox="allow-scripts allow-forms allow-popups"></iframe>
+                </section>
+                <div class="table-scroll">
+                    <table id="pluginsTable">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-table="plugins" data-sort="id">ID</th>
+                                <th class="sortable" data-table="plugins" data-sort="status" data-i18n="common.status">Status</th>
+                                <th class="sortable" data-table="plugins" data-sort="name" data-i18n="plugins.name">Name</th>
+                                <th class="sortable" data-table="plugins" data-sort="kind" data-i18n="plugins.kind">Kind</th>
+                                <th class="sortable" data-table="plugins" data-sort="version" data-i18n="plugins.version">Version</th>
+                                <th data-i18n="plugins.ui">UI</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pluginsBody"></tbody>
+                    </table>
+                </div>
+                <div id="pluginsPagination" class="table-pagination" hidden></div>
+                <p id="noPlugins" class="empty-hint" data-i18n="plugins.empty">No plugins matched.</p>
+            </section>
+        </div>
+
         <div id="tab-diagnostics" class="tab-content" role="tabpanel" aria-labelledby="tab-diagnostics-button">
             <section class="rule-list">
                 <div class="section-heading-row">
@@ -1125,6 +1176,7 @@
     <script defer src="js/ipv6_assignments.js?v=20260408-6"></script>
     <script defer src="js/managed_networks.js?v=20260422-1"></script>
     <script defer src="js/workers.js?v=20260407-5"></script>
+    <script defer src="js/plugins.js?v=20260704-1"></script>
     <script defer src="js/stats.js?v=20260422-1"></script>
     <script defer src="js/init.js?v=20260424-1"></script>
 </body>

@@ -102,6 +102,30 @@ type ManagedNetworkReservation struct {
 	Remark           string
 }
 
+type PluginRecord struct {
+	ID         int64
+	PluginID   string
+	ResourceID string
+	RecordKey  string
+	DataJSON   string
+	Enabled    bool
+	Revision   int64
+	CreatedAt  string
+	UpdatedAt  string
+}
+
+type PluginRuntimeStatus struct {
+	ID              int64
+	PluginID        string
+	TargetType      string
+	TargetID        string
+	Status          string
+	Revision        int64
+	AppliedRevision int64
+	LastError       string
+	UpdatedAt       string
+}
+
 type RuleFilter struct {
 	IDs          map[int64]struct{}
 	Tags         map[string]struct{}

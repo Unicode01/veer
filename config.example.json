@@ -6,6 +6,9 @@
   "max_workers": 0,
   "drain_timeout_hours": 24,
   "managed_network_auto_repair": true,
+  "plugins_enabled": true,
+  "plugins_dataplane_enabled": false,
+  "plugins_dir": "plugins/runtime",
   "default_engine": "auto",
   "kernel_engine_order": [
     "tc",

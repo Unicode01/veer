@@ -26,6 +26,10 @@ package app
 //   FORWARD_PERF_DISABLE_OFFLOADS  (default: keep veth offloads enabled)
 //   FORWARD_PERF_TXQLEN            (default: 10000)
 //   FORWARD_PERF_EXPERIMENTAL      (comma-separated experimental feature names)
+//   FORWARD_PERF_BINARY            (optional prebuilt forward binary; skips local go build)
+//   FORWARD_PERF_PLUGIN_SOURCE_DIR (optional packet_observer source dir when using a prebuilt binary outside the repo)
+//   FORWARD_PERF_PLUGIN_PIPELINE    (set to 1 to enable the sample TC fvtap plugin for tc mode)
+//   FORWARD_PERF_PLUGIN_PIPELINE_COUNT (sample TC fvtap plugin copies, default: 1, max: 8)
 //
 // The test builds a temporary forward binary, creates two network namespaces plus
 // two veth pairs, then benchmarks userspace, tc, and xdp sequentially with the
@@ -81,6 +85,10 @@ const (
 	dataplanePerfTCDiagEnv       = "FORWARD_PERF_TC_DIAG"
 	dataplanePerfTCDiagVerbEnv   = "FORWARD_PERF_TC_DIAG_VERBOSE"
 	dataplanePerfExperimentalEnv = "FORWARD_PERF_EXPERIMENTAL"
+	dataplanePerfBinaryEnv       = "FORWARD_PERF_BINARY"
+	dataplanePerfPluginSourceEnv = "FORWARD_PERF_PLUGIN_SOURCE_DIR"
+	dataplanePerfPluginEnv       = "FORWARD_PERF_PLUGIN_PIPELINE"
+	dataplanePerfPluginCountEnv  = "FORWARD_PERF_PLUGIN_PIPELINE_COUNT"
 	dataplanePerfHelperEnv       = "FORWARD_PERF_HELPER"
 	dataplanePerfHelperRoleEnv   = "FORWARD_PERF_HELPER_ROLE"
 	dataplanePerfTargetEnv       = "FORWARD_PERF_TARGET_ADDR"
@@ -287,10 +295,14 @@ func TestDataplanePerfMatrix(t *testing.T) {
 		t.Skip("ip command is required")
 	}
 
-	repoRoot := findRepoRoot(t)
-	requireEmbeddedEBPFObjects(t, repoRoot)
-
-	baseBinary := buildDataplanePerfBinary(t, repoRoot)
+	baseBinary := strings.TrimSpace(os.Getenv(dataplanePerfBinaryEnv))
+	if baseBinary == "" {
+		repoRoot := findRepoRoot(t)
+		requireEmbeddedEBPFObjects(t, repoRoot)
+		baseBinary = buildDataplanePerfBinary(t, repoRoot)
+	} else if _, err := os.Stat(baseBinary); err != nil {
+		t.Fatalf("%s=%q is not usable: %v", dataplanePerfBinaryEnv, baseBinary, err)
+	}
 	topology := setupDataplanePerfTopology(t)
 	defer cleanupTransparentRouting()
 
@@ -2308,12 +2320,76 @@ func writeDataplanePerfConfig(t *testing.T, path string, mode dataplanePerfMode,
 		cfg.Experimental[experimentalFeatureKernelTCDiagVerbose] = true
 		cfg.Experimental[experimentalFeatureKernelTCDiag] = true
 	}
+	pluginPipelineCount := dataplanePerfPluginPipelineCount()
+	if pluginPipelineCount > 0 && mode.ExpectedKern == kernelEngineTC {
+		enabled := true
+		cfg.PluginsEnabledSetting = &enabled
+		cfg.PluginsDataplaneSetting = &enabled
+		cfg.PluginsDir = defaultPluginsDir
+		setupDataplanePerfPluginPipeline(t, filepath.Dir(path), cfg.PluginsDir, pluginPipelineCount)
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal config: %v", err)
 	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
+	}
+}
+
+func dataplanePerfPluginPipelineCount() int {
+	if !envBool(dataplanePerfPluginEnv) {
+		return 0
+	}
+	count := envInt(dataplanePerfPluginCountEnv, 1)
+	if count < 1 {
+		return 1
+	}
+	if count > tcProgramChainV4PluginPreForwardMax {
+		return tcProgramChainV4PluginPreForwardMax
+	}
+	return count
+}
+
+func setupDataplanePerfPluginPipeline(t *testing.T, workDir string, pluginsDir string, count int) {
+	t.Helper()
+
+	sourceDir := strings.TrimSpace(os.Getenv(dataplanePerfPluginSourceEnv))
+	if sourceDir == "" {
+		sourceDir = filepath.Join(findRepoRoot(t), "examples", "plugins", "packet_observer")
+	}
+	for i := 0; i < count; i++ {
+		pluginID := fmt.Sprintf("packet_observer_%02d", i+1)
+		pluginDir := filepath.Join(workDir, filepath.FromSlash(pluginsDir), pluginID)
+		copyDirForTest(t, sourceDir, pluginDir)
+		writeDataplanePerfPluginManifest(t, filepath.Join(pluginDir, "plugin.json"), pluginID, 10+i)
+		compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
+	}
+}
+
+func writeDataplanePerfPluginManifest(t *testing.T, path string, pluginID string, priority int) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read perf plugin manifest: %v", err)
+	}
+	var manifest PluginManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode perf plugin manifest: %v", err)
+	}
+	manifest.ID = pluginID
+	manifest.Name = fmt.Sprintf("Packet Observer %02s", strings.TrimPrefix(pluginID, "packet_observer_"))
+	for i := range manifest.Hooks {
+		manifest.Hooks[i].Priority = priority
+	}
+	data, err = json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("encode perf plugin manifest: %v", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write perf plugin manifest: %v", err)
 	}
 }
 

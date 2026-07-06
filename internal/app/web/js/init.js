@@ -152,6 +152,7 @@
   bindSearchInput(app.el.egressNATsSearchInput, 'egressNATs', () => app.renderEgressNATsTable());
   bindSearchInput(app.el.ipv6AssignmentsSearchInput, 'ipv6Assignments', () => app.renderIPv6AssignmentsTable());
   bindSearchInput(app.el.workersSearchInput, 'workers', () => app.renderWorkersTable());
+  bindSearchInput(app.el.pluginsSearchInput, 'plugins', () => app.renderPluginsTable());
 
   if (app.el.batchDeleteRulesBtn) {
     app.el.batchDeleteRulesBtn.addEventListener('click', () => app.deleteSelectedRules());
@@ -170,16 +171,27 @@
 
   if (app.el.refreshNowBtn) {
     app.el.refreshNowBtn.addEventListener('click', () => {
-      app.refreshDashboard({
-        includeMeta: true,
-        includeWorkers: true,
-        includeStats: app.state.activeTab === 'diagnostics'
-      });
+    app.refreshDashboard({
+      includeMeta: true,
+      includePlugins: true,
+      includeWorkers: true,
+      includeStats: app.state.activeTab === 'diagnostics'
+    });
     });
   }
 
   if (app.el.refreshWorkersBtn) {
     app.el.refreshWorkersBtn.addEventListener('click', () => app.loadWorkers());
+  }
+
+  if (app.el.refreshPluginsBtn) {
+    app.el.refreshPluginsBtn.addEventListener('click', () => app.loadPlugins());
+  }
+
+  if (app.el.closePluginUIBtn) {
+    app.el.closePluginUIBtn.addEventListener('click', () => {
+      if (typeof app.closePluginUI === 'function') app.closePluginUI();
+    });
   }
 
   (app.el.refreshCurrentConnsBtns || []).forEach((button) => {
@@ -503,6 +515,18 @@
 
     if (typeof app.closeEgressNATProtocolMenu === 'function') app.closeEgressNATProtocolMenu();
 
+    const openPluginUI = e.target.closest('.btn-open-plugin-ui[data-plugin-id]');
+    if (openPluginUI) {
+      app.openPluginUI(openPluginUI.dataset.pluginId);
+      return;
+    }
+
+    const reloadPluginPage = e.target.closest('.btn-reload-plugin-page[data-plugin-tab]');
+    if (reloadPluginPage) {
+      app.reloadPluginPageForTab(reloadPluginPage.dataset.pluginTab);
+      return;
+    }
+
     const trigger = e.target.closest('.action-dropdown-trigger');
     if (trigger) {
       e.stopPropagation();
@@ -529,6 +553,7 @@
         else if (table === 'egressNATs') app.renderEgressNATsTable();
         else if (table === 'ipv6Assignments') app.renderIPv6AssignmentsTable();
         else if (table === 'workers') app.renderWorkersTable();
+        else if (table === 'plugins') app.renderPluginsTable();
         else if (table === 'ruleStats') app.loadRuleStats();
         else if (table === 'siteStats') app.renderSiteStatsTable();
         else if (table === 'rangeStats') app.loadRangeStats();
@@ -1211,11 +1236,12 @@
     if (typeof app.setIPv6AssignmentFormAdd === 'function') app.setIPv6AssignmentFormAdd();
     app.activateTab(app.state.activeTab, { persist: false, skipLoad: true });
 
-    app.refreshDashboard({
-      includeMeta: true,
-      includeWorkers: true,
-      includeStats: app.state.activeTab === 'diagnostics'
-    });
+      app.refreshDashboard({
+        includeMeta: true,
+        includePlugins: true,
+        includeWorkers: true,
+        includeStats: app.state.activeTab === 'diagnostics'
+      });
 
     app.startPolling();
   };

@@ -112,6 +112,10 @@ func Main(buildNonce string) {
 	phaseStartedAt = time.Now()
 	pm.redistributeWorkers()
 	logStartupPhase("initial dataplane reconcile", phaseStartedAt, startupStartedAt)
+
+	phaseStartedAt = time.Now()
+	pm.reconcilePluginsForRuntime()
+	logStartupPhase("plugin runtime reconcile", phaseStartedAt, startupStartedAt)
 	pm.startAccepting()
 
 	phaseStartedAt = time.Now()

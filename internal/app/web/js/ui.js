@@ -69,6 +69,19 @@
     egressNATsPagination: app.$('egressNATsPagination'),
     ipv6AssignmentsPagination: app.$('ipv6AssignmentsPagination'),
     workersPagination: app.$('workersPagination'),
+    pluginsBody: app.$('pluginsBody'),
+    noPlugins: app.$('noPlugins'),
+    pluginsSearchInput: app.$('pluginsSearchInput'),
+    pluginsFilterMeta: app.$('pluginsFilterMeta'),
+    pluginsCatalogMeta: app.$('pluginsCatalogMeta'),
+    pluginsChainMeta: app.$('pluginsChainMeta'),
+    pluginUIPanel: app.$('pluginUIPanel'),
+    pluginUITitle: app.$('pluginUITitle'),
+    pluginUIMeta: app.$('pluginUIMeta'),
+    pluginUIFrame: app.$('pluginUIFrame'),
+    closePluginUIBtn: app.$('closePluginUIBtn'),
+    refreshPluginsBtn: app.$('refreshPluginsBtn'),
+    pluginsPagination: app.$('pluginsPagination'),
     ruleStatsPagination: app.$('ruleStatsPagination'),
     siteStatsPagination: app.$('siteStatsPagination'),
     rangeStatsPagination: app.$('rangeStatsPagination'),
@@ -82,6 +95,7 @@
   app.state.managedNetworks = app.state.managedNetworks || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
   app.state.managedNetworkReservationCandidates = app.state.managedNetworkReservationCandidates || { data: [], page: 1, pageSize: 10, searchQuery: '', selectedIPv4ByKey: {} };
   app.state.managedNetworkReservations = app.state.managedNetworkReservations || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
+  app.state.plugins = app.state.plugins || { data: [], catalog: null, sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
   app.state.pendingRows = app.state.pendingRows || {};
   app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false, managedNetwork: false, managedNetworkReservation: false, egressNAT: false, ipv6Assignment: false };
   if (!Object.prototype.hasOwnProperty.call(app.state.pendingForms, 'managedNetwork')) app.state.pendingForms.managedNetwork = false;
@@ -107,6 +121,7 @@
     egressNATs: { container: app.el.egressNATsPagination, pageSizes: [10, 20, 50], render: () => app.renderEgressNATsTable() },
     ipv6Assignments: { container: app.el.ipv6AssignmentsPagination, pageSizes: [10, 20, 50], render: () => app.renderIPv6AssignmentsTable() },
     workers: { container: app.el.workersPagination, pageSizes: [10, 20, 50], render: () => app.renderWorkersTable() },
+    plugins: { container: app.el.pluginsPagination, pageSizes: [10, 20, 50], render: () => app.renderPluginsTable() },
     ruleStats: {
       container: app.el.ruleStatsPagination,
       pageSizes: [20, 50, 100],
@@ -128,7 +143,7 @@
     }
   };
 
-  ['rules', 'sites', 'ranges', 'managedNetworks', 'managedNetworkReservationCandidates', 'managedNetworkReservations', 'egressNATs', 'ipv6Assignments', 'workers', 'ruleStats', 'siteStats', 'rangeStats', 'egressNATStats'].forEach((table) => {
+  ['rules', 'sites', 'ranges', 'managedNetworks', 'managedNetworkReservationCandidates', 'managedNetworkReservations', 'egressNATs', 'ipv6Assignments', 'workers', 'plugins', 'ruleStats', 'siteStats', 'rangeStats', 'egressNATStats'].forEach((table) => {
     if (!app.state[table]) return;
     app.state[table].searchQuery = app.state[table].searchQuery || '';
     app.state[table].page = Math.max(1, parseInt(app.state[table].page, 10) || 1);
@@ -416,6 +431,7 @@
   app.refreshDashboard = function refreshDashboard(options) {
     const opts = Object.assign({
       includeMeta: false,
+      includePlugins: false,
       includeWorkers: app.state.activeTab === 'diagnostics',
       includeStats: app.state.activeTab === 'diagnostics'
     }, options || {});
@@ -433,6 +449,7 @@
     if (typeof app.loadManagedNetworkReservations === 'function') tasks.push(app.loadManagedNetworkReservations());
     if (typeof app.loadEgressNATs === 'function') tasks.push(app.loadEgressNATs());
     if (typeof app.loadIPv6Assignments === 'function') tasks.push(app.loadIPv6Assignments());
+    if (opts.includePlugins && typeof app.loadPlugins === 'function') tasks.push(app.loadPlugins());
     if (opts.includeWorkers && typeof app.loadWorkers === 'function') tasks.push(app.loadWorkers());
     if (opts.includeStats && typeof app.loadAllStats === 'function') tasks.push(app.loadAllStats());
     return Promise.all(tasks);
@@ -579,7 +596,7 @@
 
     if (app.el.overviewRunningValue) app.el.overviewRunningValue.textContent = String(runningTotal);
     const busy = app.state.activeRequests > 0;
-    [app.el.refreshNowBtn, app.el.refreshWorkersBtn, app.el.emptyRefreshWorkersBtn, app.el.repairManagedNetworkRuntimeBtn, app.el.reloadManagedNetworkRuntimeBtn].forEach((button) => {
+    [app.el.refreshNowBtn, app.el.refreshWorkersBtn, app.el.emptyRefreshWorkersBtn, app.el.refreshPluginsBtn, app.el.repairManagedNetworkRuntimeBtn, app.el.reloadManagedNetworkRuntimeBtn].forEach((button) => {
       if (!button) return;
       button.disabled = busy;
       button.classList.toggle('is-busy', busy);
@@ -617,7 +634,8 @@
       managedNetworkReservations: { meta: app.el.managedNetworkReservationsFilterMeta, clear: app.el.clearManagedNetworkReservationsFilter },
       egressNATs: { meta: app.el.egressNATsFilterMeta, clear: app.el.clearEgressNATsFilter },
       ipv6Assignments: { meta: app.el.ipv6AssignmentsFilterMeta, clear: app.el.clearIPv6AssignmentsFilter },
-      workers: { meta: app.el.workersFilterMeta, clear: null }
+      workers: { meta: app.el.workersFilterMeta, clear: null },
+      plugins: { meta: app.el.pluginsFilterMeta, clear: null }
     };
 
     const target = map[table];
@@ -642,6 +660,7 @@
   app.handleTabLoad = function handleTabLoad(target) {
     if (target === 'managed-networks' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
     if (target === 'ipv6-assignments' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
+    if (target === 'plugins' && typeof app.loadPlugins === 'function') app.loadPlugins();
     if (target === 'diagnostics') {
       if (typeof app.loadWorkers === 'function') app.loadWorkers();
       if (typeof app.loadAllStats === 'function') app.loadAllStats();
@@ -699,6 +718,7 @@
       app.renderFilterMeta('egressNATs');
       app.renderFilterMeta('ipv6Assignments');
       app.renderFilterMeta('workers');
+      app.renderFilterMeta('plugins');
       if (app.el.confirmModal && !app.el.confirmModal.classList.contains('active')) {
         app.el.confirmCancelBtn.textContent = app.t('common.cancel');
         app.el.confirmSubmitBtn.textContent = app.t('common.confirm');

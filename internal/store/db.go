@@ -134,6 +134,28 @@ var Schema = map[string][][2]string{
 		{"ipv4_address", "TEXT NOT NULL DEFAULT ''"},
 		{"remark", "TEXT NOT NULL DEFAULT ''"},
 	},
+	"plugin_records": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"resource_id", "TEXT NOT NULL DEFAULT ''"},
+		{"record_key", "TEXT NOT NULL DEFAULT ''"},
+		{"data_json", "TEXT NOT NULL DEFAULT 'null'"},
+		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
+		{"revision", "INTEGER NOT NULL DEFAULT 1"},
+		{"created_at", "TEXT NOT NULL DEFAULT ''"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	},
+	"plugin_runtime_status": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"target_type", "TEXT NOT NULL DEFAULT ''"},
+		{"target_id", "TEXT NOT NULL DEFAULT ''"},
+		{"status", "TEXT NOT NULL DEFAULT 'idle'"},
+		{"revision", "INTEGER NOT NULL DEFAULT 0"},
+		{"applied_revision", "INTEGER NOT NULL DEFAULT 0"},
+		{"last_error", "TEXT NOT NULL DEFAULT ''"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	},
 }
 
 var SchemaIndexes = []IndexDefinition{
@@ -154,6 +176,8 @@ var SchemaIndexes = []IndexDefinition{
 	{Name: "idx_managed_networks_enabled", Table: "managed_networks", Columns: "enabled"},
 	{Name: "idx_managed_network_reservations_network_id", Table: "managed_network_reservations", Columns: "managed_network_id"},
 	{Name: "idx_ipv6_assignments_enabled", Table: "ipv6_assignments", Columns: "enabled"},
+	{Name: "idx_plugin_records_scope", Table: "plugin_records", Columns: "plugin_id, resource_id"},
+	{Name: "idx_plugin_runtime_status_scope", Table: "plugin_runtime_status", Columns: "plugin_id, target_type"},
 }
 
 const (
@@ -161,6 +185,8 @@ const (
 	ConstraintIndexSitesHTTPSDomainEnabled              = "ux_sites_https_domain_enabled"
 	ConstraintIndexManagedNetworkReservationNetworkMAC  = "ux_managed_network_reservations_network_mac"
 	ConstraintIndexManagedNetworkReservationNetworkIPv4 = "ux_managed_network_reservations_network_ipv4"
+	ConstraintIndexPluginRecordKey                      = "ux_plugin_records_key"
+	ConstraintIndexPluginRuntimeStatusTarget            = "ux_plugin_runtime_status_target"
 )
 
 var SchemaConstraintIndexes = []ConstraintIndexDefinition{
@@ -201,6 +227,26 @@ var SchemaConstraintIndexes = []ConstraintIndexDefinition{
 			FROM managed_network_reservations
 			WHERE managed_network_id > 0 AND trim(ipv4_address) <> ''
 			GROUP BY managed_network_id, trim(ipv4_address)
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginRecordKey,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginRecordKey + ` ON plugin_records(plugin_id, resource_id, record_key)`,
+		DuplicateProbe: `SELECT printf('%s:%s:%s', plugin_id, resource_id, record_key)
+			FROM plugin_records
+			WHERE trim(plugin_id) <> '' AND trim(resource_id) <> '' AND trim(record_key) <> ''
+			GROUP BY plugin_id, resource_id, record_key
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginRuntimeStatusTarget,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginRuntimeStatusTarget + ` ON plugin_runtime_status(plugin_id, target_type, target_id)`,
+		DuplicateProbe: `SELECT printf('%s:%s:%s', plugin_id, target_type, target_id)
+			FROM plugin_runtime_status
+			WHERE trim(plugin_id) <> '' AND trim(target_type) <> '' AND trim(target_id) <> ''
+			GROUP BY plugin_id, target_type, target_id
 			HAVING COUNT(*) > 1
 			LIMIT 1`,
 	},

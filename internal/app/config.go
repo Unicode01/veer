@@ -28,6 +28,9 @@ type Config struct {
 	MaxWorkers               int             `json:"max_workers"`
 	DrainTimeoutHours        int             `json:"drain_timeout_hours"`
 	ManagedNetworkAutoRepair *bool           `json:"managed_network_auto_repair,omitempty"`
+	PluginsEnabledSetting    *bool           `json:"plugins_enabled,omitempty"`
+	PluginsDataplaneSetting  *bool           `json:"plugins_dataplane_enabled,omitempty"`
+	PluginsDir               string          `json:"plugins_dir"`
 	DefaultEngine            string          `json:"default_engine"`
 	KernelEngineOrder        []string        `json:"kernel_engine_order"`
 	KernelRulesMapLimit      int             `json:"kernel_rules_map_limit"`
@@ -65,6 +68,7 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.DrainTimeoutHours == 0 {
 		cfg.DrainTimeoutHours = 24
 	}
+	cfg.PluginsDir = normalizePluginsDir(cfg.PluginsDir)
 	cfg.KernelRulesMapLimit = normalizeKernelRulesMapLimit(cfg.KernelRulesMapLimit)
 	cfg.KernelFlowsMapLimit = normalizeKernelFlowsMapLimit(cfg.KernelFlowsMapLimit)
 	cfg.KernelNATMapLimit = normalizeKernelNATMapLimit(cfg.KernelNATMapLimit)
@@ -115,6 +119,28 @@ func (cfg *Config) WebUIEnabled() bool {
 		return true
 	}
 	return *cfg.WebUIEnabledSetting
+}
+
+func (cfg *Config) PluginsEnabled() bool {
+	if cfg == nil || cfg.PluginsEnabledSetting == nil {
+		return true
+	}
+	return *cfg.PluginsEnabledSetting
+}
+
+func (cfg *Config) PluginsDataplaneEnabled() bool {
+	if cfg == nil || cfg.PluginsDataplaneSetting == nil {
+		return false
+	}
+	return *cfg.PluginsDataplaneSetting
+}
+
+func normalizePluginsDir(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultPluginsDir
+	}
+	return value
 }
 
 func (cfg *Config) EnabledExperimentalFeatures() []string {
