@@ -103,6 +103,11 @@ while IFS= read -r name; do
 	(cd "$plugin_dir" && tar -cf - .) | (cd "$TMP_DIR/$name" && tar -xf -)
 done <"$PLUGIN_LIST"
 
+if [ -d "$EXAMPLE_DIR/include" ]; then
+	mkdir -p "$TMP_DIR/include"
+	(cd "$EXAMPLE_DIR/include" && tar -cf - .) | (cd "$TMP_DIR/include" && tar -xf -)
+fi
+
 "$PYTHON_BIN" - "$TMP_DIR" <<'PY'
 import hashlib
 import json

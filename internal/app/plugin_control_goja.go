@@ -96,6 +96,7 @@ type gojaPluginControlRuntime struct {
 	updateProvider       pluginResourceRuntimeUpdateProvider
 	actionUpdateProvider pluginActionRuntimeUpdateProvider
 	l2Transport          pluginControlL2Transport
+	udpTransport         pluginControlUDPTransport
 	netAdmin             pluginControlNetAdmin
 	snapshot             pluginRuntimeSnapshot
 	plugins              map[string]LoadedPlugin
@@ -158,6 +159,7 @@ type pluginControlHost struct {
 	plugin            LoadedPlugin
 	mapController     pluginEBPFMapController
 	l2Transport       pluginControlL2Transport
+	udpTransport      pluginControlUDPTransport
 	netAdmin          pluginControlNetAdmin
 	timerOps          []pluginControlTimerOperation
 	timerEvent        *pluginControlTimerSpec
@@ -204,6 +206,7 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 		updateProvider:       updateProvider,
 		actionUpdateProvider: actionUpdateProvider,
 		l2Transport:          newPluginControlL2Transport(),
+		udpTransport:         newPluginControlUDPTransport(),
 		netAdmin:             newPluginControlNetAdmin(),
 		timers:               make(map[pluginControlTimerKey]pluginControlTimerState),
 		controlVMs:           make(map[string]*pluginControlVM),
@@ -599,6 +602,7 @@ func (vm *pluginControlVM) init(plugin LoadedPlugin) (*pluginControlHost, error)
 		plugin:            plugin,
 		mapController:     vm.rt.mapController,
 		l2Transport:       vm.rt.l2Transport,
+		udpTransport:      vm.rt.udpTransport,
 		netAdmin:          vm.rt.netAdmin,
 		registrationPhase: true,
 		workerVM:          vm.mode == "worker",
@@ -1049,6 +1053,19 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := netAPI.Set("l2", l2API); err != nil {
+		return err
+	}
+	udpAPI := h.vm.NewObject()
+	if err := udpAPI.Set("send", h.udpSend); err != nil {
+		return err
+	}
+	if err := udpAPI.Set("recv", h.udpRecv); err != nil {
+		return err
+	}
+	if err := udpAPI.Set("exchange", h.udpExchange); err != nil {
+		return err
+	}
+	if err := netAPI.Set("udp", udpAPI); err != nil {
 		return err
 	}
 	linkAPI := h.vm.NewObject()
@@ -2108,6 +2125,51 @@ func (h *pluginControlHost) l2ExchangeMany(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(out)
 }
 
+func (h *pluginControlHost) udpSend(call goja.FunctionCall) goja.Value {
+	h.requirePermission("net.udp")
+	if h.udpTransport == nil {
+		h.throwf("net.udp.send: udp transport is unavailable")
+	}
+	req := h.udpSendRequest(call)
+	result, err := h.udpTransport.Send(req)
+	if err != nil {
+		h.throwf("net.udp.send: %v", err)
+	}
+	return h.vm.ToValue(h.udpResultObject(result))
+}
+
+func (h *pluginControlHost) udpRecv(call goja.FunctionCall) goja.Value {
+	h.requirePermission("net.udp")
+	if h.udpTransport == nil {
+		h.throwf("net.udp.recv: udp transport is unavailable")
+	}
+	req := h.udpRecvRequest(call)
+	datagram, err := h.udpTransport.Recv(req)
+	if errors.Is(err, errPluginControlUDPTimeout) {
+		return goja.Null()
+	}
+	if err != nil {
+		h.throwf("net.udp.recv: %v", err)
+	}
+	return h.vm.ToValue(h.udpDatagramObject(datagram))
+}
+
+func (h *pluginControlHost) udpExchange(call goja.FunctionCall) goja.Value {
+	h.requirePermission("net.udp")
+	if h.udpTransport == nil {
+		h.throwf("net.udp.exchange: udp transport is unavailable")
+	}
+	req := h.udpExchangeRequest(call)
+	datagram, err := h.udpTransport.Exchange(req)
+	if errors.Is(err, errPluginControlUDPTimeout) {
+		return goja.Null()
+	}
+	if err != nil {
+		h.throwf("net.udp.exchange: %v", err)
+	}
+	return h.vm.ToValue(h.udpDatagramObject(datagram))
+}
+
 func (h *pluginControlHost) cryptoMD5(call goja.FunctionCall) goja.Value {
 	h.requirePermission("crypto")
 	if len(call.Arguments) == 0 {
@@ -2704,6 +2766,41 @@ func (h *pluginControlHost) l2ExchangeManyRequest(call goja.FunctionCall) plugin
 	return req
 }
 
+func (h *pluginControlHost) udpSendRequest(call goja.FunctionCall) pluginControlUDPSendRequest {
+	obj := h.requiredObjectArg(call, 0, "request")
+	req := h.udpSendRequestFromObject(obj)
+	h.requireNetAccess("udp", req.Interface, "net.udp.send")
+	return req
+}
+
+func (h *pluginControlHost) udpRecvRequest(call goja.FunctionCall) pluginControlUDPRecvRequest {
+	obj := h.requiredObjectArg(call, 0, "request")
+	req := h.udpRecvRequestFromObject(obj)
+	h.requireNetAccess("udp", req.Interface, "net.udp.recv")
+	return req
+}
+
+func (h *pluginControlHost) udpExchangeRequest(call goja.FunctionCall) pluginControlUDPExchangeRequest {
+	obj := h.requiredObjectArg(call, 0, "request")
+	send := h.udpSendRequestFromObject(obj)
+	req := pluginControlUDPExchangeRequest{
+		Send: send,
+		Recv: h.udpRecvRequestFromObjectWithDefaults(obj, send.Interface, send.LocalIP, send.LocalPort, false, false),
+	}
+	if req.Recv.RemoteIP == nil {
+		req.Recv.RemoteIP = req.Send.RemoteIP
+	}
+	if req.Recv.RemotePort <= 0 {
+		req.Recv.RemotePort = req.Send.RemotePort
+	}
+	req.Recv.HasRemoteFilter = true
+	if req.Send.Interface != req.Recv.Interface {
+		h.throwf("net.udp.exchange: send and receive interface must match")
+	}
+	h.requireNetAccess("udp", req.Send.Interface, "net.udp.exchange")
+	return req
+}
+
 func (h *pluginControlHost) l2SendRequestFromObject(obj *goja.Object) pluginControlL2SendRequest {
 	payload := h.optionalHexObjectField(obj, "payload")
 	if len(payload) > pluginControlL2MaxPayloadBytes {
@@ -2802,6 +2899,64 @@ func (h *pluginControlHost) l2RecvManyRequestFromObject(obj *goja.Object) plugin
 	}
 }
 
+func (h *pluginControlHost) udpSendRequestFromObject(obj *goja.Object) pluginControlUDPSendRequest {
+	payload := h.optionalHexObjectField(obj, "payload", "payload_hex")
+	if len(payload) > pluginControlUDPMaxPayloadBytes {
+		h.throwf("net.udp.send: payload exceeds %d bytes", pluginControlUDPMaxPayloadBytes)
+	}
+	return pluginControlUDPSendRequest{
+		Interface:  h.requiredUDPInterfaceObjectField(obj, "interface"),
+		LocalIP:    h.optionalIPObjectField(obj, "local_ip", "bind_ip", "source_ip"),
+		LocalPort:  h.optionalPortObjectField(obj, 0, "local_port", "bind_port", "source_port"),
+		RemoteIP:   h.requiredIPObjectField(obj, "remote_ip", "dst_ip", "target_ip"),
+		RemotePort: h.requiredPortObjectField(obj, "remote_port", "dst_port", "target_port", "port"),
+		Payload:    payload,
+		Timeout:    h.udpTimeoutObjectField(obj, "timeout_ms"),
+	}
+}
+
+func (h *pluginControlHost) udpRecvRequestFromObject(obj *goja.Object) pluginControlUDPRecvRequest {
+	req := h.udpRecvRequestFromObjectWithDefaults(obj, "", nil, 0, true, true)
+	return req
+}
+
+func (h *pluginControlHost) udpRecvRequestFromObjectWithDefaults(obj *goja.Object, defaultInterface string, defaultLocalIP net.IP, defaultLocalPort int, requireLocalPort bool, allowPortAlias bool) pluginControlUDPRecvRequest {
+	maxBytes := 2048
+	if raw := h.objectField(obj, "max_bytes"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+		maxBytes = int(raw.ToInteger())
+		if maxBytes < 1 || maxBytes > pluginControlUDPMaxPayloadBytes {
+			h.throwf("net.udp.recv max_bytes must be between 1 and %d", pluginControlUDPMaxPayloadBytes)
+		}
+	}
+	localPortFields := []string{"local_port", "bind_port"}
+	if allowPortAlias {
+		localPortFields = append(localPortFields, "port")
+	}
+	localPort := h.optionalPortObjectField(obj, defaultLocalPort, localPortFields...)
+	if requireLocalPort && localPort <= 0 {
+		h.throwf("net.udp.recv: local_port is required")
+	}
+	req := pluginControlUDPRecvRequest{
+		Interface: h.optionalUDPInterfaceObjectField(obj, defaultInterface, "interface"),
+		LocalIP:   h.optionalIPObjectFieldWithDefault(obj, defaultLocalIP, "local_ip", "bind_ip"),
+		LocalPort: localPort,
+		Timeout:   h.udpTimeoutObjectField(obj, "timeout_ms"),
+		MaxBytes:  maxBytes,
+	}
+	if req.Interface == "" {
+		h.throwf("net.udp.recv: interface is required")
+	}
+	if remoteIP := h.optionalIPObjectField(obj, "remote_ip", "src_ip", "peer_ip"); remoteIP != nil {
+		req.RemoteIP = remoteIP
+		req.HasRemoteFilter = true
+	}
+	if remotePort := h.optionalPortObjectField(obj, 0, "remote_port", "src_port", "peer_port"); remotePort > 0 {
+		req.RemotePort = remotePort
+		req.HasRemoteFilter = true
+	}
+	return req
+}
+
 func (h *pluginControlHost) l2FrameValue(frame pluginControlL2Frame) goja.Value {
 	return h.vm.ToValue(h.l2FrameObject(frame))
 }
@@ -2816,6 +2971,43 @@ func (h *pluginControlHost) l2FrameObject(frame pluginControlL2Frame) map[string
 		"payload_hex": hex.EncodeToString(frame.Payload),
 		"frame_hex":   hex.EncodeToString(frame.Frame),
 	}
+}
+
+func (h *pluginControlHost) udpResultObject(result pluginControlUDPResult) map[string]any {
+	out := map[string]any{
+		"interface": result.Interface,
+		"bytes":     result.Bytes,
+	}
+	if result.LocalAddr != nil {
+		out["local_ip"] = result.LocalAddr.IP.String()
+		out["local_port"] = result.LocalAddr.Port
+		out["local_addr"] = result.LocalAddr.String()
+	}
+	if result.RemoteAddr != nil {
+		out["remote_ip"] = result.RemoteAddr.IP.String()
+		out["remote_port"] = result.RemoteAddr.Port
+		out["remote_addr"] = result.RemoteAddr.String()
+	}
+	return out
+}
+
+func (h *pluginControlHost) udpDatagramObject(datagram pluginControlUDPDatagram) map[string]any {
+	out := map[string]any{
+		"interface":   datagram.Interface,
+		"payload_hex": hex.EncodeToString(datagram.Payload),
+		"bytes":       len(datagram.Payload),
+	}
+	if datagram.LocalAddr != nil {
+		out["local_ip"] = datagram.LocalAddr.IP.String()
+		out["local_port"] = datagram.LocalAddr.Port
+		out["local_addr"] = datagram.LocalAddr.String()
+	}
+	if datagram.RemoteAddr != nil {
+		out["remote_ip"] = datagram.RemoteAddr.IP.String()
+		out["remote_port"] = datagram.RemoteAddr.Port
+		out["remote_addr"] = datagram.RemoteAddr.String()
+	}
+	return out
 }
 
 func (h *pluginControlHost) requiredObjectArg(call goja.FunctionCall, index int, name string) *goja.Object {
@@ -2857,6 +3049,88 @@ func (h *pluginControlHost) optionalStringObjectField(obj *goja.Object, field st
 	return strings.TrimSpace(value.String())
 }
 
+func (h *pluginControlHost) requiredUDPInterfaceObjectField(obj *goja.Object, field string) string {
+	return h.optionalUDPInterfaceObjectField(obj, "", field)
+}
+
+func (h *pluginControlHost) optionalUDPInterfaceObjectField(obj *goja.Object, fallback string, fields ...string) string {
+	value := strings.TrimSpace(fallback)
+	for _, field := range fields {
+		if current := h.optionalStringObjectField(obj, field); current != "" {
+			value = current
+			break
+		}
+	}
+	if value == "" {
+		h.throwf("%s is required", fields[0])
+	}
+	if err := validatePluginControlInterfaceName(value, fields[0]); err != nil {
+		h.throwf("%v", err)
+	}
+	return value
+}
+
+func (h *pluginControlHost) requiredIPObjectField(obj *goja.Object, fields ...string) net.IP {
+	ip := h.optionalIPObjectField(obj, fields...)
+	if ip == nil {
+		h.throwf("%s is required", fields[0])
+	}
+	return ip
+}
+
+func (h *pluginControlHost) optionalIPObjectField(obj *goja.Object, fields ...string) net.IP {
+	return h.optionalIPObjectFieldWithDefault(obj, nil, fields...)
+}
+
+func (h *pluginControlHost) optionalIPObjectFieldWithDefault(obj *goja.Object, fallback net.IP, fields ...string) net.IP {
+	for _, field := range fields {
+		raw := h.optionalStringObjectField(obj, field)
+		if raw == "" {
+			continue
+		}
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			h.throwf("%s must be a valid IP address", field)
+		}
+		return ip
+	}
+	return fallback
+}
+
+func (h *pluginControlHost) requiredPortObjectField(obj *goja.Object, fields ...string) int {
+	port := h.optionalPortObjectField(obj, 0, fields...)
+	if port <= 0 {
+		h.throwf("%s is required", fields[0])
+	}
+	return port
+}
+
+func (h *pluginControlHost) optionalPortObjectField(obj *goja.Object, fallback int, fields ...string) int {
+	for _, field := range fields {
+		raw := h.objectField(obj, field)
+		if goja.IsUndefined(raw) || goja.IsNull(raw) {
+			continue
+		}
+		port := int(raw.ToInteger())
+		if port < 0 || port > 65535 {
+			h.throwf("%s must be between 0 and 65535", field)
+		}
+		return port
+	}
+	return fallback
+}
+
+func (h *pluginControlHost) udpTimeoutObjectField(obj *goja.Object, field string) time.Duration {
+	timeout := pluginControlUDPDefaultTimeout
+	if raw := h.objectField(obj, field); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+		timeout = time.Duration(raw.ToInteger()) * time.Millisecond
+		if timeout <= 0 || timeout > pluginControlUDPMaxTimeout {
+			h.throwf("net.udp timeout_ms must be between 1 and %d", pluginControlUDPMaxTimeout.Milliseconds())
+		}
+	}
+	return timeout
+}
+
 func (h *pluginControlHost) optionalUintObjectField(obj *goja.Object, field string, bits int) (uint64, bool) {
 	value := h.objectField(obj, field)
 	if goja.IsUndefined(value) || goja.IsNull(value) {
@@ -2885,20 +3159,23 @@ func (h *pluginControlHost) requiredMACObjectField(obj *goja.Object, field strin
 	return mac
 }
 
-func (h *pluginControlHost) optionalHexObjectField(obj *goja.Object, field string) []byte {
-	value := h.objectField(obj, field)
-	if goja.IsUndefined(value) || goja.IsNull(value) {
-		return nil
+func (h *pluginControlHost) optionalHexObjectField(obj *goja.Object, fields ...string) []byte {
+	for _, field := range fields {
+		value := h.objectField(obj, field)
+		if goja.IsUndefined(value) || goja.IsNull(value) {
+			continue
+		}
+		raw := strings.TrimSpace(value.String())
+		if raw == "" {
+			continue
+		}
+		out, err := decodePluginControlHexBytes(raw)
+		if err != nil {
+			h.throwf("%s: %v", field, err)
+		}
+		return out
 	}
-	raw := strings.TrimSpace(value.String())
-	if raw == "" {
-		return nil
-	}
-	out, err := decodePluginControlHexBytes(raw)
-	if err != nil {
-		h.throwf("%s: %v", field, err)
-	}
-	return out
+	return nil
 }
 
 func (h *pluginControlHost) hexArg(call goja.FunctionCall, index int, name string) []byte {

@@ -49,6 +49,7 @@ valid_control_permission = {
     "kv",
     "net.admin",
     "net.l2",
+    "net.udp",
     "plugin.action",
     "plugin.register",
     "plugin.resource",
@@ -58,7 +59,7 @@ valid_control_permission = {
     "ui",
 }
 valid_resource_method = {"list", "get", "create", "update", "delete"}
-valid_net_operation = {"addr.write", "l2", "link.create", "link.delete", "link.master", "link.offload", "link.read", "link.state", "route.write"}
+valid_net_operation = {"addr.write", "l2", "link.create", "link.delete", "link.master", "link.offload", "link.read", "link.state", "route.write", "udp"}
 reserved_plugin_ids = {"fvtap"}
 reserved_resource_ids = {"__kv", "__secret"}
 manifest_fields = {"api_version", "id", "name", "version", "description", "kind", "stability", "control"}
@@ -244,8 +245,8 @@ def verify_control(manifest_path, plugin_dir, manifest, stability):
             check_unique(manifest_path, seen_action_access, f"{target_plugin}/{action}", "action access")
 
     net_access = check_array(manifest_path, control.get("net_access") or [], "control.net_access")
-    if ("net.admin" in permission_set or "net.l2" in permission_set) and not net_access:
-        add_error(manifest_path, "control.net_access is required when net.admin or net.l2 permission is declared")
+    if ("net.admin" in permission_set or "net.l2" in permission_set or "net.udp" in permission_set) and not net_access:
+        add_error(manifest_path, "control.net_access is required when net.admin, net.l2, or net.udp permission is declared")
     seen_net_access = set()
     for index, item in enumerate(net_access):
         label = f"control.net_access[{index}]"
@@ -258,7 +259,9 @@ def verify_control(manifest_path, plugin_dir, manifest, stability):
         for operation in operations:
             if operation == "l2" and "net.l2" not in permission_set:
                 add_error(manifest_path, f"{label}.operation {operation!r} requires net.l2 permission")
-            if operation != "l2" and "net.admin" not in permission_set:
+            if operation == "udp" and "net.udp" not in permission_set:
+                add_error(manifest_path, f"{label}.operation {operation!r} requires net.udp permission")
+            if operation not in {"l2", "udp"} and "net.admin" not in permission_set:
                 add_error(manifest_path, f"{label}.operation {operation!r} requires net.admin permission")
         key = ",".join(sorted(interfaces)) + ":" + ",".join(operations)
         check_unique(manifest_path, seen_net_access, key, "net access entry")

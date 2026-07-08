@@ -11,8 +11,7 @@
   "plugins_dir": "plugins/runtime",
   "default_engine": "auto",
   "kernel_engine_order": [
-    "tc",
-    "xdp"
+    "tc"
   ],
   "kernel_rules_map_limit": 0,
   "kernel_flows_map_limit": 0,

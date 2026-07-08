@@ -92,8 +92,8 @@ http://127.0.0.1:8080/readyz
 - 运行在 Linux 上
 - 默认把管理面绑定到 `127.0.0.1`
 - 内核 dataplane 优先使用 `TC`
-- `XDP` 只在目标拓扑验证通过后启用
-- 如果不需要 XDP，建议把 `kernel_engine_order` 设置为 `["tc"]`
+- 默认 `kernel_engine_order` 为 `["tc"]`
+- `XDP` 只在目标拓扑验证通过后显式加入启用
 
 典型 VM 宿主机拓扑：
 
@@ -171,40 +171,7 @@ Authorization: Bearer <web_token>
 
 ## 配置
 
-示例配置见 [config.example.json](./config.example.json)。
-
-```json
-{
-  "web_bind": "127.0.0.1",
-  "web_ui_enabled": true,
-  "web_port": 8080,
-  "web_token": "change-me-to-a-secure-token",
-  "max_workers": 0,
-  "drain_timeout_hours": 24,
-  "managed_network_auto_repair": true,
-  "plugins_enabled": true,
-  "plugins_dataplane_enabled": false,
-  "plugins_dir": "plugins/runtime",
-  "default_engine": "auto",
-  "kernel_engine_order": ["tc", "xdp"],
-  "kernel_rules_map_limit": 0,
-  "kernel_flows_map_limit": 0,
-  "kernel_nat_ports_map_limit": 0,
-  "kernel_nat_port_min": 20000,
-  "kernel_nat_port_max": 65535,
-  "experimental_features": {
-    "bridge_xdp": false,
-    "xdp_generic": false,
-    "kernel_traffic_stats": false,
-    "kernel_tc_diag": false,
-    "kernel_tc_diag_verbose": false,
-    "kernel_tc_redirect_neigh_fast": false,
-    "kernel_tc_prepared_l2": false,
-    "kernel_tc_reply_l2_cache": false
-  },
-  "tags": []
-}
-```
+完整示例见 [config.example.json](./config.example.json)。根 README 不再复制整份 JSON，避免示例配置和实际默认值漂移。
 
 关键字段：
 
@@ -309,9 +276,13 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 插件层
 
-插件层的使用说明和示例放在 `examples/plugins/README.md`。README 只保留入口信息：运行时插件目录默认为 `plugins/runtime`，`plugin.json` 只声明身份、稳定级别、权限和 `control.main`，资源、动作、UI、eBPF object、hook 等运行时 surface 由 `control.js` 顶层注册。
+插件层的详细说明放在 [examples/plugins/README.md](examples/plugins/README.md)。根 README 只保留关键边界：
 
-当前插件层由 slim manifest、Goja 控制面和可选的 `fvtap` TC pipeline 组成。外部数据面默认关闭，开启前应确认插件可信、对象 hash 和目标内核 eBPF 能力；控制面数据更新只影响 SQLite/Goja/eBPF map，不会让 TC/XDP 热路径查询 Web API。显式接口插件可在没有 Forward/Egress NAT 规则时独立启动 TC pipeline，此时内置 forward/reply core 关闭，pipeline 作为纯插件高速链运行。
+- 运行时插件目录默认是 `plugins/runtime`
+- `plugin.json` 只声明身份、稳定级别、权限和 `control.main`
+- 资源、动作、UI、eBPF object、hook 由 `control.js` 顶层注册
+- 外部 TC 数据面默认关闭；开启前必须确认插件可信、object hash 和目标内核能力
+- 控制面更新只影响 SQLite、Goja 和 eBPF map，不让 TC/XDP 热路径查询 Web API
 
 ## 平台与依赖
 
@@ -378,15 +349,13 @@ sh scripts/verify-example-plugin-manifests.sh
 sh scripts/package-example-plugins.sh
 ```
 
-`scripts/build-ebpf.sh` 负责核心 TC/XDP object，`scripts/build-plugin-ebpf.sh` 会执行示例插件目录里的 `build.sh`。`scripts/verify-example-plugin-manifests.sh` 只校验示例插件 slim manifest 的身份字段、稳定级别、控制入口、权限、`resource_access` 和 `net_access`；`capabilities/objects/hooks/resources/actions/ui/metadata` 这类 runtime-owned 字段出现在 manifest 中会直接报错。`stable/preview` 插件必须声明并匹配 `control.sha256`；UI 入口、eBPF object、资源、动作和 hook 都由 `control.js` 在 registration-only 阶段注册。`scripts/package-example-plugins.sh` 会生成 runtime-ready 示例插件目录，默认只打包 `stable` 示例，输出到 `dist/plugins-runtime`，并在打包副本的 `plugin.json` 中注入控制脚本 `sha256`；覆盖输出目录前会先校验临时产物，源码目录里的 manifest 不会被改写。可用 `FORWARD_PLUGIN_PACKAGE_DIR=/path/to/plugins/runtime` 指定输出目录；需要受控预览或实验插件时显式设置 `FORWARD_PLUGIN_PACKAGE_STABILITY=stable,preview`、`FORWARD_PLUGIN_PACKAGE_STABILITY=all` 或 `FORWARD_PLUGIN_PACKAGE_STABILITY=lab`。仓库默认忽略生成的 `.o` 文件和 `dist/`，发布构建应使用 `release.sh`，开发调试才需要单独运行这些脚本。
+发布构建优先使用 `release.sh`。上面的脚本仅用于开发时单独重建 eBPF、校验示例插件或生成插件运行时包；插件细节见 [examples/plugins/README.md](examples/plugins/README.md)。
 
 常规测试：
 
 ```bash
 go test ./...
 ```
-
-插件开发、打包和验收边界见 [examples/plugins/README.md](examples/plugins/README.md)。
 
 ## WHMCS 插件
 
@@ -414,37 +383,6 @@ modules/addons/forward/
 - `api_server_map`
 - `allowed_product_ids`
 - 按产品配置端口规则和共享站点上限
-
-## 项目结构
-
-```text
-.
-├─ main.go
-├─ config.example.json
-├─ bootstrap.sh
-├─ deploy.sh
-├─ release.sh
-├─ API.md
-├─ internal/
-│  ├─ app/
-│  │  ├─ api.go
-│  │  ├─ db.go
-│  │  ├─ procmgr.go
-│  │  ├─ worker.go
-│  │  ├─ range_worker.go
-│  │  ├─ shared_proxy.go
-│  │  ├─ kernel_runtime*.go
-│  │  ├─ managed_network*.go
-│  │  ├─ ipv6_assignment*.go
-│  │  ├─ ebpf/
-│  │  └─ web/
-│  ├─ kernelcap/
-│  ├─ managednet/
-│  ├─ netinfo/
-│  └─ netutil/
-└─ plugins/
-   └─ whmcs/
-```
 
 ## 安全建议
 

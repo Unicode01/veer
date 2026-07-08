@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,4 +194,135 @@ func TestPluginRuntimeApplyAllowsPrivilegedLabControlByDefault(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "plugin runtime data applier is unavailable") {
 		t.Fatalf("applyPluginActionRuntimeUpdate(privileged lab) error = %v, want applier unavailable after stability gate passes", err)
 	}
+}
+
+func TestPluginControlUDPAPIUsesNetAccess(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "udp_probe"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(udp_probe) error = %v", err)
+	}
+	writePluginControlScript(t, dir, "udp_probe", `
+exports.onAction = function () {
+  net.udp.exchange({
+    interface: "eth0",
+    remote_ip: "198.51.100.10",
+    port: 51820,
+    payload_hex: "010203",
+    timeout_ms: 50
+  });
+};
+`)
+	transport := &pluginControlUDPTestTransport{}
+	rt := newPluginControlRuntime(db, &Config{}, nil).(*gojaPluginControlRuntime)
+	rt.udpTransport = transport
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:        "udp_probe",
+			Name:      "UDP Probe",
+			Version:   "0.1.0",
+			Stability: pluginStabilityStable,
+			Control: &PluginControl{
+				Main:        "control.js",
+				Permissions: []string{"net.udp"},
+				NetAccess:   []PluginNetAccess{{Interfaces: []string{"eth*"}, Operations: []string{"udp"}}},
+			},
+		},
+		Status:          pluginStatusActive,
+		controlMainPath: filepath.Join(dir, "udp_probe", "control.js"),
+	}
+
+	if err := rt.ApplyPluginAction(plugin, PluginAction{ID: "probe"}, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction udp exchange error = %v", err)
+	}
+	if len(transport.exchanges) != 1 {
+		t.Fatalf("udp exchanges = %d, want 1", len(transport.exchanges))
+	}
+	req := transport.exchanges[0]
+	if req.Send.Interface != "eth0" || !req.Send.RemoteIP.Equal(net.ParseIP("198.51.100.10")) || req.Send.RemotePort != 51820 || string(req.Send.Payload) != "\x01\x02\x03" {
+		t.Fatalf("udp exchange request = %+v, want eth0 -> 198.51.100.10:51820 payload 010203", req.Send)
+	}
+	if req.Recv.LocalPort != 0 || !req.Recv.HasRemoteFilter || req.Recv.RemotePort != 51820 {
+		t.Fatalf("udp exchange recv request = %+v, want ephemeral local port and remote port filter 51820", req.Recv)
+	}
+}
+
+func TestPluginControlUDPAPIRejectsMissingNetAccess(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "udp_probe_denied"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(udp_probe_denied) error = %v", err)
+	}
+	writePluginControlScript(t, dir, "udp_probe_denied", `
+exports.onAction = function () {
+  net.udp.send({
+    interface: "eth0",
+    remote_ip: "198.51.100.10",
+    remote_port: 51820,
+    payload: "01"
+  });
+};
+`)
+	rt := newPluginControlRuntime(db, &Config{}, nil).(*gojaPluginControlRuntime)
+	rt.udpTransport = &pluginControlUDPTestTransport{}
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:        "udp_probe_denied",
+			Name:      "UDP Probe Denied",
+			Version:   "0.1.0",
+			Stability: pluginStabilityStable,
+			Control: &PluginControl{
+				Main:        "control.js",
+				Permissions: []string{"net.udp"},
+				NetAccess:   []PluginNetAccess{{Interfaces: []string{"eth*"}, Operations: []string{"link.read"}}},
+			},
+		},
+		Status:          pluginStatusActive,
+		controlMainPath: filepath.Join(dir, "udp_probe_denied", "control.js"),
+	}
+
+	err := rt.ApplyPluginAction(plugin, PluginAction{ID: "probe"}, json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "net_access operation udp on interface eth0 is not declared") {
+		t.Fatalf("ApplyPluginAction missing udp net_access error = %v, want net_access denial", err)
+	}
+}
+
+type pluginControlUDPTestTransport struct {
+	sends     []pluginControlUDPSendRequest
+	recvs     []pluginControlUDPRecvRequest
+	exchanges []pluginControlUDPExchangeRequest
+}
+
+func (t *pluginControlUDPTestTransport) Send(req pluginControlUDPSendRequest) (pluginControlUDPResult, error) {
+	t.sends = append(t.sends, req)
+	return pluginControlUDPResult{
+		Interface:  req.Interface,
+		LocalAddr:  &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40000},
+		RemoteAddr: &net.UDPAddr{IP: req.RemoteIP, Port: req.RemotePort},
+		Bytes:      len(req.Payload),
+	}, nil
+}
+
+func (t *pluginControlUDPTestTransport) Recv(req pluginControlUDPRecvRequest) (pluginControlUDPDatagram, error) {
+	t.recvs = append(t.recvs, req)
+	return pluginControlUDPDatagram{
+		Interface:  req.Interface,
+		LocalAddr:  &net.UDPAddr{IP: req.LocalIP, Port: req.LocalPort},
+		RemoteAddr: &net.UDPAddr{IP: net.ParseIP("198.51.100.10"), Port: 51820},
+		Payload:    []byte{0xaa},
+	}, nil
+}
+
+func (t *pluginControlUDPTestTransport) Exchange(req pluginControlUDPExchangeRequest) (pluginControlUDPDatagram, error) {
+	t.exchanges = append(t.exchanges, req)
+	return pluginControlUDPDatagram{
+		Interface:  req.Send.Interface,
+		LocalAddr:  &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40000},
+		RemoteAddr: &net.UDPAddr{IP: req.Send.RemoteIP, Port: req.Send.RemotePort},
+		Payload:    []byte{0xaa},
+	}, nil
 }
