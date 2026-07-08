@@ -154,14 +154,16 @@ type tcRuleKeyV4 struct {
 }
 
 type tcRuleValueV4 struct {
-	RuleID      uint32
-	BackendAddr uint32
-	BackendPort uint16
-	Flags       uint16
-	OutIfIndex  uint32
-	NATAddr     uint32
-	SrcMAC      [6]byte
-	DstMAC      [6]byte
+	RuleID       uint32
+	BackendAddr  uint32
+	BackendPort  uint16
+	Flags        uint16
+	OutIfIndex   uint32
+	NATAddr      uint32
+	SrcMAC       [6]byte
+	DstMAC       [6]byte
+	EgressSrcMAC [6]byte
+	EgressDstMAC [6]byte
 }
 
 type kernelLocalMACValue struct {
@@ -676,6 +678,10 @@ func (rt *linuxKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleA
 	return rt.reconcileWithPluginCatalog(rules, nil)
 }
 
+func (rt *linuxKernelRuleRuntime) ReconcileWithPluginCatalog(rules []Rule, catalog PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
+	return rt.reconcileWithPluginCatalog(rules, &catalog)
+}
+
 func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, pluginCatalogOverride *PluginCatalog) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -701,10 +707,11 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	if rt.pluginPipelineEnabled {
 		if pluginCatalogOverride != nil {
 			pluginCatalog = *pluginCatalogOverride
+			ensurePluginCatalogControlRegistration(&pluginCatalog, rt.cfg)
 		} else {
-			pluginCatalog = loadPluginCatalog(rt.cfg)
+			pluginCatalog = loadPluginCatalogWithControlRegistration(rt.cfg)
 		}
-		pluginDesired, pluginStates = buildKernelPluginPipelineDesired(pluginCatalog)
+		pluginDesired, pluginStates = buildKernelPluginPipelineDesiredForRuntime(pluginCatalog, rt.cfg)
 	} else {
 		rt.pluginPipelineActive = false
 	}
@@ -732,7 +739,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			rt.stateLog.Logf("kernel dataplane reconcile: no prepared rules, using explicit plugin pipeline attachment(s)")
 		} else if rt.coll != nil {
 			if pieces, err := lookupKernelCollectionPieces(rt.coll); err == nil {
-				rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, nil, pluginStates)
+				rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, nil, pluginStates, kernelPluginPipelineCoreConfig{})
 			} else {
 				log.Printf("kernel dataplane reconcile: clear plugin pipeline failed: %v", err)
 			}
@@ -775,7 +782,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			log.Printf("kernel dataplane reconcile: refresh local MAC guard map failed: %v", err)
 		}
 		if pieces, err := lookupKernelCollectionPieces(rt.coll); err == nil {
-			rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates)
+			rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates, kernelPluginPipelineCoreConfig{Forward: len(prepared) > 0, Reply: len(prepared) > 0})
 		} else if rt.pluginPipelineActive {
 			log.Printf("kernel dataplane reconcile: refresh plugin pipeline failed: %v", err)
 		}
@@ -1154,7 +1161,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
-	rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates)
+	rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates, kernelPluginPipelineCoreConfig{Forward: len(prepared) > 0, Reply: len(prepared) > 0})
 	if pluginOnlyPipeline && !rt.pluginPipelineActive {
 		coll.Close()
 		rt.stateLog.Logf("kernel dataplane reconcile: explicit plugin pipeline attachment skipped because no plugin programs are active")
@@ -2483,8 +2490,11 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if err := syncKernelLocalMACMap(rt.coll.Maps[kernelLocalMACMapName], nil); err != nil {
 		return fmt.Errorf("clear kernel local MAC guard map during drain: %w", err)
 	}
-	capacities := rt.currentMapCapacitiesLocked()
 	rt.preparedRules = nil
+	if rt.cleanupIdlePluginPipelineRuntimeLocked("rule drain") {
+		return nil
+	}
+	capacities := rt.currentMapCapacitiesLocked()
 	rt.rulesMapCapacity = capacities.Rules
 	rt.flowsMapCapacity = capacities.Flows
 	rt.natMapCapacity = capacities.NATPorts
@@ -2509,7 +2519,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err != nil {
 		return err
 	}
-	rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates)
+	rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates, kernelPluginPipelineCoreConfig{Forward: len(prepared) > 0, Reply: len(prepared) > 0})
 	if pluginOnlyPipeline && !rt.pluginPipelineActive {
 		return fmt.Errorf("explicit plugin pipeline attachment skipped because no plugin programs are active")
 	}
@@ -3525,6 +3535,16 @@ func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink net
 	if ctx != nil && ctx.enableTrafficStats {
 		flags |= kernelRuleFlagTrafficStats
 	}
+	var egressSrcMAC [6]byte
+	var egressDstMAC [6]byte
+	if normalizeEgressNATRedirectMode(rule.kernelRedirectMode) == egressNATRedirectModePreparedL2 {
+		var redirectErr error
+		egressSrcMAC, egressDstMAC, redirectErr = resolveKernelEgressNATPreparedL2Redirect(outLink)
+		if redirectErr != nil {
+			return nil, fmt.Errorf("resolve egress nat prepared_l2 redirect on %q: %w", rule.OutInterface, redirectErr)
+		}
+		flags |= kernelRuleFlagPreparedL2
+	}
 
 	prepared := make([]preparedKernelRule, 0, len(inLinks))
 	for _, currentInLink := range inLinks {
@@ -3553,13 +3573,15 @@ func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink net
 				Proto:   kernelRuleProtocol(rule.Protocol),
 			},
 			value: tcRuleValueV4{
-				RuleID:      uint32(rule.ID),
-				BackendAddr: 0,
-				BackendPort: 0,
-				Flags:       flags,
-				OutIfIndex:  uint32(outLink.Attrs().Index),
-				NATAddr:     natAddr,
-				SrcMAC:      ingressLocalMAC,
+				RuleID:       uint32(rule.ID),
+				BackendAddr:  0,
+				BackendPort:  0,
+				Flags:        flags,
+				OutIfIndex:   uint32(outLink.Attrs().Index),
+				NATAddr:      natAddr,
+				SrcMAC:       ingressLocalMAC,
+				EgressSrcMAC: egressSrcMAC,
+				EgressDstMAC: egressDstMAC,
 			},
 		})
 	}

@@ -53,6 +53,11 @@ func resolvePluginObjects(plugin *LoadedPlugin) error {
 			return fmt.Errorf("objects[%d]: hash object: %w", i, err)
 		}
 		object.ResolvedSHA256 = got
+		if pluginObjectSHA256Required(*plugin, *object) && object.SHA256 == "" {
+			object.Status = pluginObjectStatusError
+			object.Error = "sha256 is required for stable or preview external objects"
+			return fmt.Errorf("objects[%d]: sha256 is required for stable or preview external objects", i)
+		}
 		if object.SHA256 != "" && got != object.SHA256 {
 			object.Status = pluginObjectStatusError
 			object.Error = "sha256 mismatch"
@@ -66,6 +71,18 @@ func resolvePluginObjects(plugin *LoadedPlugin) error {
 		object.Status = pluginObjectStatusVerified
 	}
 	return nil
+}
+
+func pluginObjectSHA256Required(plugin LoadedPlugin, object PluginObject) bool {
+	if plugin.Builtin || strings.HasPrefix(object.Path, "builtin:") {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(plugin.Stability)) {
+	case pluginStabilityStable, pluginStabilityPreview:
+		return true
+	default:
+		return false
+	}
 }
 
 func resolvePluginObjectRealPath(plugin *LoadedPlugin, object PluginObject) (string, error) {

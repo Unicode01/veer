@@ -8,7 +8,7 @@ import (
 const (
 	pluginControlL2MaxPayloadBytes = 64 << 10
 	pluginControlL2DefaultTimeout  = 100 * time.Millisecond
-	pluginControlL2MaxTimeout      = 1500 * time.Millisecond
+	pluginControlL2MaxTimeout      = 5 * time.Second
 	pluginControlL2MaxRecvFrames   = 64
 )
 
@@ -32,10 +32,18 @@ type pluginControlL2SendRequest struct {
 }
 
 type pluginControlL2RecvRequest struct {
-	Interface string
-	EtherType uint16
-	Timeout   time.Duration
-	MaxBytes  int
+	Interface         string
+	EtherType         uint16
+	Timeout           time.Duration
+	MaxBytes          int
+	SrcMAC            [6]byte
+	HasSrcMAC         bool
+	DstMAC            [6]byte
+	HasDstMAC         bool
+	PPPoECode         uint8
+	HasPPPoECode      bool
+	PPPoESessionID    uint16
+	HasPPPoESessionID bool
 }
 
 type pluginControlL2ExchangeRequest struct {

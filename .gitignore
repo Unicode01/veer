@@ -7,6 +7,7 @@ forward.db-shm
 forward.db-wal
 
 # build artifacts
+.tmp/
 forward
 forward.exe
 forward-linux-amd64

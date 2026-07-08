@@ -8,6 +8,7 @@
       tokenInput: $('tokenInput'),
       tokenSubmit: $('tokenSubmit'),
       appRoot: $('app'),
+      overviewPanel: $('overviewPanel'),
       logoutBtn: $('logoutBtn'),
 
       ruleForm: $('ruleForm'),

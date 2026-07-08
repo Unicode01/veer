@@ -1,10 +1,42 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 )
+
+var pluginManifestRuntimeFields = map[string]struct{}{
+	"actions":            {},
+	"builtin":            {},
+	"capabilities":       {},
+	"hooks":              {},
+	"metadata":           {},
+	"objects":            {},
+	"resources":          {},
+	"ui":                 {},
+	"virtual_interfaces": {},
+}
+
+func (manifest *PluginManifest) UnmarshalJSON(data []byte) error {
+	type rawPluginManifest PluginManifest
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for field := range fields {
+		if _, forbidden := pluginManifestRuntimeFields[field]; forbidden {
+			return fmt.Errorf("manifest field %q is runtime-owned; register it from control.js instead", field)
+		}
+	}
+	var raw rawPluginManifest
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*manifest = PluginManifest(raw)
+	return nil
+}
 
 func normalizePluginManifest(manifest *PluginManifest) error {
 	manifest.APIVersion = strings.TrimSpace(strings.ToLower(manifest.APIVersion))
@@ -39,37 +71,14 @@ func normalizePluginManifest(manifest *PluginManifest) error {
 	if !validPluginKind(manifest.Kind) {
 		return fmt.Errorf("kind must be one of pipeline, control, ui")
 	}
+	manifest.Stability = strings.TrimSpace(strings.ToLower(manifest.Stability))
+	if manifest.Stability == "" {
+		manifest.Stability = pluginStabilityLab
+	}
+	if !validPluginStability(manifest.Stability) {
+		return fmt.Errorf("stability must be one of lab, preview, stable, deprecated")
+	}
 
-	capabilities, err := normalizePluginTokens(manifest.Capabilities, "capability")
-	if err != nil {
-		return err
-	}
-	manifest.Capabilities = capabilities
-
-	for i := range manifest.VirtualInterfaces {
-		if err := normalizePluginVirtualInterface(&manifest.VirtualInterfaces[i]); err != nil {
-			return fmt.Errorf("virtual_interfaces[%d]: %w", i, err)
-		}
-	}
-	if err := normalizePluginObjects(manifest.Objects); err != nil {
-		return err
-	}
-	seenHooks := make(map[string]struct{}, len(manifest.Hooks))
-	for i := range manifest.Hooks {
-		if err := normalizePluginHook(&manifest.Hooks[i]); err != nil {
-			return fmt.Errorf("hooks[%d]: %w", i, err)
-		}
-		if _, exists := seenHooks[manifest.Hooks[i].ID]; exists {
-			return fmt.Errorf("hooks[%d]: duplicate id %q", i, manifest.Hooks[i].ID)
-		}
-		seenHooks[manifest.Hooks[i].ID] = struct{}{}
-	}
-	if err := normalizePluginResources(manifest.Resources); err != nil {
-		return err
-	}
-	if err := normalizePluginActions(manifest.Actions); err != nil {
-		return err
-	}
 	if manifest.Control != nil {
 		if err := normalizePluginControl(manifest.Control); err != nil {
 			return fmt.Errorf("control: %w", err)
@@ -77,20 +86,6 @@ func normalizePluginManifest(manifest *PluginManifest) error {
 		if manifest.Control.Main == "" && len(manifest.Control.Permissions) == 0 {
 			manifest.Control = nil
 		}
-	}
-	if manifest.UI != nil {
-		if err := normalizePluginUI(manifest.UI); err != nil {
-			return fmt.Errorf("ui: %w", err)
-		}
-		if manifest.UI.StaticDir == "" && manifest.UI.Entry != "" {
-			return fmt.Errorf("ui.static_dir is required when ui.entry is set")
-		}
-		if manifest.UI.StaticDir == "" && manifest.UI.Entry == "" {
-			manifest.UI = nil
-		}
-	}
-	if len(manifest.Metadata) == 0 {
-		manifest.Metadata = nil
 	}
 	return nil
 }
@@ -104,17 +99,300 @@ func normalizePluginControl(control *PluginControl) error {
 	if control.Main == "" {
 		return fmt.Errorf("main is required")
 	}
+	control.SHA256 = strings.TrimSpace(strings.ToLower(control.SHA256))
+	if control.SHA256 != "" && !pluginHashPattern.MatchString(control.SHA256) {
+		return fmt.Errorf("sha256 must be a lowercase 64-character hex digest")
+	}
+	control.ResolvedSHA256 = ""
 	permissions, err := normalizePluginTokens(control.Permissions, "permission")
 	if err != nil {
 		return err
 	}
 	for _, permission := range permissions {
 		if !validPluginControlPermission(permission) {
-			return fmt.Errorf("permission %q must be one of crypto, ebpf.map_write, kv, net.admin, net.l2, plugin.resource, resource, secret, timer", permission)
+			return fmt.Errorf("permission %q must be one of crypto, ebpf.load, ebpf.map_read, ebpf.map_write, hook.attach, kv, net.admin, net.l2, plugin.action, plugin.register, plugin.resource, resource, secret, timer, ui, worker", permission)
 		}
 	}
 	control.Permissions = permissions
+	if err := normalizePluginResourceAccess(control.ResourceAccess); err != nil {
+		return fmt.Errorf("resource_access: %w", err)
+	}
+	if len(control.ResourceAccess) > 0 {
+		hasPluginResource := false
+		for _, permission := range permissions {
+			if permission == "plugin.resource" {
+				hasPluginResource = true
+				break
+			}
+		}
+		if !hasPluginResource {
+			return fmt.Errorf("resource_access requires plugin.resource permission")
+		}
+	}
+	if err := normalizePluginActionAccess(control.ActionAccess); err != nil {
+		return fmt.Errorf("action_access: %w", err)
+	}
+	if len(control.ActionAccess) > 0 {
+		hasPluginAction := false
+		for _, permission := range permissions {
+			if permission == "plugin.action" {
+				hasPluginAction = true
+				break
+			}
+		}
+		if !hasPluginAction {
+			return fmt.Errorf("action_access requires plugin.action permission")
+		}
+	}
+	if err := normalizePluginNetAccess(control.NetAccess); err != nil {
+		return fmt.Errorf("net_access: %w", err)
+	}
+	hasNetAdmin := false
+	hasNetL2 := false
+	for _, permission := range permissions {
+		switch permission {
+		case "net.admin":
+			hasNetAdmin = true
+		case "net.l2":
+			hasNetL2 = true
+		}
+	}
+	if (hasNetAdmin || hasNetL2) && len(control.NetAccess) == 0 {
+		return fmt.Errorf("net_access is required when net.admin or net.l2 permission is declared")
+	}
+	for _, access := range control.NetAccess {
+		for _, operation := range access.Operations {
+			if operation == "l2" {
+				if !hasNetL2 {
+					return fmt.Errorf("net_access operation %q requires net.l2 permission", operation)
+				}
+				continue
+			}
+			if !hasNetAdmin {
+				return fmt.Errorf("net_access operation %q requires net.admin permission", operation)
+			}
+		}
+	}
 	return nil
+}
+
+func normalizePluginResourceAccess(access []PluginResourceAccess) error {
+	if len(access) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(access))
+	for i := range access {
+		item := &access[i]
+		item.Plugin = strings.TrimSpace(strings.ToLower(item.Plugin))
+		if !pluginIDPattern.MatchString(item.Plugin) {
+			return fmt.Errorf("[%d].plugin must match %s", i, pluginIDPattern.String())
+		}
+		if item.Plugin == "fvtap" {
+			return fmt.Errorf("[%d].plugin %q is reserved for the built-in pipeline", i, item.Plugin)
+		}
+		item.Resource = strings.TrimSpace(strings.ToLower(item.Resource))
+		if pluginControlReservedResourceID(item.Resource) {
+			return fmt.Errorf("[%d].resource %q is reserved for plugin control internals", i, item.Resource)
+		}
+		if !pluginTokenPattern.MatchString(item.Resource) {
+			return fmt.Errorf("[%d].resource must match %s", i, pluginTokenPattern.String())
+		}
+		methods, err := normalizePluginResourceAccessMethods(item.Methods)
+		if err != nil {
+			return fmt.Errorf("[%d].methods: %w", i, err)
+		}
+		item.Methods = methods
+		key := item.Plugin + "/" + item.Resource
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("[%d]: duplicate resource access %s", i, key)
+		}
+		seen[key] = struct{}{}
+	}
+	sort.Slice(access, func(i, j int) bool {
+		if access[i].Plugin == access[j].Plugin {
+			return access[i].Resource < access[j].Resource
+		}
+		return access[i].Plugin < access[j].Plugin
+	})
+	return nil
+}
+
+func normalizePluginResourceAccessMethods(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("methods cannot be empty")
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		if value == "" {
+			continue
+		}
+		if !validPluginResourceMethod(value) {
+			return nil, fmt.Errorf("method %q must be one of list, get, create, update, delete", value)
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("methods cannot be empty")
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func normalizePluginActionAccess(access []PluginActionAccess) error {
+	if len(access) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(access))
+	for i := range access {
+		item := &access[i]
+		item.Plugin = strings.TrimSpace(strings.ToLower(item.Plugin))
+		if !pluginIDPattern.MatchString(item.Plugin) {
+			return fmt.Errorf("[%d].plugin must match %s", i, pluginIDPattern.String())
+		}
+		if item.Plugin == "fvtap" {
+			return fmt.Errorf("[%d].plugin %q is reserved for the built-in pipeline", i, item.Plugin)
+		}
+		actions, err := normalizePluginActionAccessActions(item.Actions)
+		if err != nil {
+			return fmt.Errorf("[%d].actions: %w", i, err)
+		}
+		item.Actions = actions
+		for _, action := range item.Actions {
+			key := item.Plugin + "/" + action
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("[%d]: duplicate action access %s", i, key)
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	sort.Slice(access, func(i, j int) bool {
+		if access[i].Plugin == access[j].Plugin {
+			return strings.Join(access[i].Actions, ",") < strings.Join(access[j].Actions, ",")
+		}
+		return access[i].Plugin < access[j].Plugin
+	})
+	return nil
+}
+
+func normalizePluginActionAccessActions(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("actions cannot be empty")
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		if value == "" {
+			continue
+		}
+		if !pluginTokenPattern.MatchString(value) {
+			return nil, fmt.Errorf("action must match %s", pluginTokenPattern.String())
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("actions cannot be empty")
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func normalizePluginNetAccess(access []PluginNetAccess) error {
+	if len(access) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(access))
+	for i := range access {
+		item := &access[i]
+		interfaces, err := normalizePluginInterfacePatterns(item.Interfaces)
+		if err != nil {
+			return fmt.Errorf("[%d].interfaces: %w", i, err)
+		}
+		operations, err := normalizePluginNetOperations(item.Operations)
+		if err != nil {
+			return fmt.Errorf("[%d].operations: %w", i, err)
+		}
+		item.Interfaces = interfaces
+		item.Operations = operations
+		key := strings.Join(interfaces, "\x00") + "\x01" + strings.Join(operations, "\x00")
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("[%d]: duplicate net access entry", i)
+		}
+		seen[key] = struct{}{}
+	}
+	sort.Slice(access, func(i, j int) bool {
+		left := strings.Join(access[i].Interfaces, ",") + ":" + strings.Join(access[i].Operations, ",")
+		right := strings.Join(access[j].Interfaces, ",") + ":" + strings.Join(access[j].Operations, ",")
+		return left < right
+	})
+	return nil
+}
+
+func normalizePluginInterfacePatterns(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("interfaces cannot be empty")
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if strings.Contains(value, "\x00") || strings.ContainsAny(value, "/\\ \t\r\n") || len(value) > 64 {
+			return nil, fmt.Errorf("interface pattern %q contains invalid characters", value)
+		}
+		if !strings.Contains(value, "*") && len(value) > linuxInterfaceNameMaxBytes {
+			return nil, fmt.Errorf("interface pattern %q exceeds %d bytes", value, linuxInterfaceNameMaxBytes)
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("interfaces cannot be empty")
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func normalizePluginNetOperations(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("operations cannot be empty")
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		if value == "" {
+			continue
+		}
+		if !validPluginNetOperation(value) {
+			return nil, fmt.Errorf("operation %q must be one of addr.write, l2, link.create, link.delete, link.master, link.offload, link.read, link.state, route.write", value)
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("operations cannot be empty")
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func normalizePluginResources(resources []PluginResource) error {
@@ -136,6 +414,9 @@ func normalizePluginResources(resources []PluginResource) error {
 
 func normalizePluginResource(resource *PluginResource) error {
 	resource.ID = strings.TrimSpace(strings.ToLower(resource.ID))
+	if pluginControlReservedResourceID(resource.ID) {
+		return fmt.Errorf("id %q is reserved for plugin control internals", resource.ID)
+	}
 	if !pluginTokenPattern.MatchString(resource.ID) {
 		return fmt.Errorf("id must match %s", pluginTokenPattern.String())
 	}
@@ -145,6 +426,13 @@ func normalizePluginResource(resource *PluginResource) error {
 		return err
 	}
 	resource.Methods = methods
+	if resource.ControlMethods != nil {
+		controlMethods, err := normalizePluginResourceMethodsExplicit(resource.ControlMethods, "control_methods")
+		if err != nil {
+			return err
+		}
+		resource.ControlMethods = controlMethods
+	}
 	resource.RuntimeUpdate = strings.TrimSpace(strings.ToLower(resource.RuntimeUpdate))
 	if resource.RuntimeUpdate == "" {
 		resource.RuntimeUpdate = "none"
@@ -176,6 +464,10 @@ func normalizePluginResourceMethods(values []string) ([]string, error) {
 	if len(values) == 0 {
 		values = []string{"list"}
 	}
+	return normalizePluginResourceMethodsExplicit(values, "methods")
+}
+
+func normalizePluginResourceMethodsExplicit(values []string, label string) ([]string, error) {
 	seen := make(map[string]struct{}, len(values))
 	out := make([]string, 0, len(values))
 	for _, value := range values {
@@ -193,7 +485,7 @@ func normalizePluginResourceMethods(values []string) ([]string, error) {
 		out = append(out, value)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("methods cannot be empty")
+		return nil, fmt.Errorf("%s cannot be empty", label)
 	}
 	sort.Strings(out)
 	return out, nil
@@ -355,6 +647,9 @@ func normalizePluginHook(hook *PluginHook) error {
 	if !pluginTokenPattern.MatchString(hook.Stage) {
 		return fmt.Errorf("stage must match %s", pluginTokenPattern.String())
 	}
+	if hook.Engine != "control" && !validPluginDataplaneHookStage(hook.Stage) {
+		return fmt.Errorf("stage must be one of forward, reply, pre_forward, post_lookup, pre_reply, post_reply")
+	}
 	if hook.Priority < -100000 || hook.Priority > 100000 {
 		return fmt.Errorf("priority out of range")
 	}
@@ -404,6 +699,25 @@ func normalizePluginUI(ui *PluginUI) error {
 	if err != nil {
 		return fmt.Errorf("entry: %w", err)
 	}
+	ui.Page = strings.TrimSpace(strings.ToLower(ui.Page))
+	if ui.Page != "" {
+		if !pluginIDPattern.MatchString(ui.Page) {
+			return fmt.Errorf("page must match %s", pluginIDPattern.String())
+		}
+		switch ui.Page {
+		case "plugins", "diagnostics":
+			return fmt.Errorf("page %q is reserved", ui.Page)
+		}
+	}
+	ui.PageTitle = strings.TrimSpace(ui.PageTitle)
+	if strings.Contains(ui.PageTitle, "\x00") || len(ui.PageTitle) > 64 {
+		return fmt.Errorf("page_title contains invalid characters")
+	}
+	ui.SHA256 = strings.TrimSpace(strings.ToLower(ui.SHA256))
+	if ui.SHA256 != "" && !pluginHashPattern.MatchString(ui.SHA256) {
+		return fmt.Errorf("sha256 must be a lowercase 64-character hex digest")
+	}
+	ui.ResolvedSHA256 = ""
 	return nil
 }
 
@@ -442,7 +756,7 @@ func normalizePluginInterfaceNames(values []string) ([]string, error) {
 		if value == "" {
 			continue
 		}
-		if strings.Contains(value, "\x00") || len(value) > 64 {
+		if strings.Contains(value, "\x00") || strings.ContainsAny(value, "/\\ \t\r\n") || len(value) > linuxInterfaceNameMaxBytes {
 			return nil, fmt.Errorf("interface %q contains invalid characters", value)
 		}
 		if _, ok := seen[value]; ok {
@@ -458,6 +772,15 @@ func normalizePluginInterfaceNames(values []string) ([]string, error) {
 func validPluginKind(value string) bool {
 	switch value {
 	case "pipeline", "control", "ui":
+		return true
+	default:
+		return false
+	}
+}
+
+func validPluginStability(value string) bool {
+	switch value {
+	case pluginStabilityLab, pluginStabilityPreview, pluginStabilityStable, pluginStabilityDeprecated:
 		return true
 	default:
 		return false
@@ -538,7 +861,25 @@ func validPluginActionRuntimeUpdate(value string) bool {
 
 func validPluginControlPermission(value string) bool {
 	switch value {
-	case "crypto", "ebpf.map_write", "kv", "net.admin", "net.l2", "plugin.resource", "resource", "secret", "timer":
+	case "crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "kv", "net.admin", "net.l2", "plugin.action", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui", "worker":
+		return true
+	default:
+		return false
+	}
+}
+
+func validPluginDataplaneHookStage(value string) bool {
+	switch value {
+	case "forward", "reply", "pre_forward", "post_lookup", "pre_reply", "post_reply":
+		return true
+	default:
+		return false
+	}
+}
+
+func validPluginNetOperation(value string) bool {
+	switch value {
+	case "addr.write", "l2", "link.create", "link.delete", "link.master", "link.offload", "link.read", "link.state", "route.write":
 		return true
 	default:
 		return false

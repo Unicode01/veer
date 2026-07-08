@@ -67,6 +67,7 @@ type managedNetworkRuntimeReloadFingerprintEgressNAT struct {
 	OutSourceIP     string `json:"out_source_ip,omitempty"`
 	Protocol        string `json:"protocol,omitempty"`
 	NATType         string `json:"nat_type,omitempty"`
+	RedirectMode    string `json:"redirect_mode,omitempty"`
 	Enabled         bool   `json:"enabled,omitempty"`
 }
 
@@ -202,6 +203,7 @@ func managedNetworkRuntimeReloadFingerprintEgressNATs(items []EgressNAT) []manag
 			OutSourceIP:     strings.TrimSpace(item.OutSourceIP),
 			Protocol:        normalizeEgressNATProtocol(item.Protocol),
 			NATType:         normalizeEgressNATType(item.NATType),
+			RedirectMode:    normalizeEgressNATRedirectMode(item.RedirectMode),
 			Enabled:         item.Enabled,
 		})
 	}
@@ -419,6 +421,10 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 	if err != nil {
 		return "", nil, fmt.Errorf("load egress nats: %w", err)
 	}
+	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pm.cfg)
+	if err != nil {
+		return "", nil, fmt.Errorf("load plugin egress nat plans: %w", err)
+	}
 	ipv6Assignments, err := loadIPv6AssignmentsForManagedNetworkReload(pm.db)
 	if err != nil {
 		return "", nil, fmt.Errorf("load ipv6 assignments: %w", err)
@@ -450,6 +456,12 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 	effectiveEgressNATs := append([]EgressNAT(nil), explicitEgressNATs...)
 	if len(managedNetworkCompiled.EgressNATs) > 0 {
 		effectiveEgressNATs = append(effectiveEgressNATs, managedNetworkCompiled.EgressNATs...)
+	}
+	if len(pluginEgressNATPlanRecords) > 0 {
+		pluginEgressNATs, _ := compilePluginEgressNATPlansWithWarnings(pluginEgressNATPlanRecords, effectiveEgressNATs, egressNATSnapshot)
+		if len(pluginEgressNATs) > 0 {
+			effectiveEgressNATs = append(effectiveEgressNATs, pluginEgressNATs...)
+		}
 	}
 
 	fingerprint := buildManagedNetworkRuntimeReloadFingerprint(
@@ -687,6 +699,10 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	if err != nil {
 		return fmt.Errorf("load egress nats: %w", err)
 	}
+	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pm.cfg)
+	if err != nil {
+		return fmt.Errorf("load plugin egress nat plans: %w", err)
+	}
 	ipv6Assignments, ipv6AssignmentLoadErr := loadIPv6AssignmentsForManagedNetworkReload(pm.db)
 	if ipv6AssignmentLoadErr != nil {
 		log.Printf("load ipv6 assignments: %v", ipv6AssignmentLoadErr)
@@ -695,10 +711,10 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 
 	egressNATSnapshot := egressNATInterfaceSnapshot{}
 	needsManagedNetworkCompilation := len(managedNetworks) > 0
-	if len(explicitEgressNATs) > 0 || needsManagedNetworkCompilation {
+	if len(explicitEgressNATs) > 0 || needsManagedNetworkCompilation || len(pluginEgressNATPlanRecords) > 0 {
 		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
 	}
-	if needsManagedNetworkCompilation && egressNATSnapshot.Err != nil {
+	if (needsManagedNetworkCompilation || len(pluginEgressNATPlanRecords) > 0) && egressNATSnapshot.Err != nil {
 		log.Printf("managed network runtime: interface inventory unavailable: %v", egressNATSnapshot.Err)
 		reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "managed network interface inventory", egressNATSnapshot.Err)
 	}
@@ -706,6 +722,17 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	managedNetworkCompiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, explicitEgressNATs, egressNATSnapshot.Infos)
 	for _, warning := range managedNetworkCompiled.Warnings {
 		log.Printf("managed network runtime: %s", warning)
+	}
+	syntheticEgressNATs := append([]EgressNAT(nil), managedNetworkCompiled.EgressNATs...)
+	if len(pluginEgressNATPlanRecords) > 0 {
+		existingForPluginPlans := append(append([]EgressNAT(nil), explicitEgressNATs...), managedNetworkCompiled.EgressNATs...)
+		pluginEgressNATs, warnings := compilePluginEgressNATPlansWithWarnings(pluginEgressNATPlanRecords, existingForPluginPlans, egressNATSnapshot)
+		for _, warning := range warnings {
+			log.Printf("plugin egress nat: %s", warning)
+		}
+		if len(pluginEgressNATs) > 0 {
+			syntheticEgressNATs = append(syntheticEgressNATs, pluginEgressNATs...)
+		}
 	}
 
 	effectiveIPv6Assignments := append([]IPv6Assignment(nil), ipv6Assignments...)
@@ -726,12 +753,12 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	}
 
 	effectiveEgressNATs := append([]EgressNAT(nil), explicitEgressNATs...)
-	if len(managedNetworkCompiled.EgressNATs) > 0 {
-		effectiveEgressNATs = append(effectiveEgressNATs, managedNetworkCompiled.EgressNATs...)
+	if len(syntheticEgressNATs) > 0 {
+		effectiveEgressNATs = append(effectiveEgressNATs, syntheticEgressNATs...)
 	}
 	dynamicEgressNATParents := collectDynamicEgressNATParentsWithSnapshot(effectiveEgressNATs, egressNATSnapshot)
 	managedNetworkInterfaces := cloneManagedNetworkInterfaceSet(managedNetworkCompiled.RedistributeIfaces)
-	reloadSummary := summarizeManagedNetworkRuntimeReload(managedNetworks, managedNetworkReservations, effectiveIPv6Assignments, managedNetworkCompiled.EgressNATs)
+	reloadSummary := summarizeManagedNetworkRuntimeReload(managedNetworks, managedNetworkReservations, effectiveIPv6Assignments, syntheticEgressNATs)
 	reloadFingerprint := buildManagedNetworkRuntimeReloadFingerprint(managedNetworks, managedNetworkReservations, effectiveIPv6Assignments, effectiveEgressNATs, egressNATSnapshot.Infos)
 	pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, collectManagedNetworkRuntimeTouchedInterfaces(managedNetworks, effectiveIPv6Assignments, managedNetworkCompiled)...)
 
@@ -806,7 +833,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		return nil
 	}
 
-	if err := pm.reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs, managedNetworkCompiled.EgressNATs, dynamicEgressNATParents, egressNATSnapshot); err != nil {
+	if err := pm.reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs, syntheticEgressNATs, dynamicEgressNATParents, egressNATSnapshot); err != nil {
 		return err
 	}
 	if reloadErr == nil {
@@ -1019,6 +1046,18 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 	if err != nil {
 		return fmt.Errorf("load ranges: %w", err)
 	}
+	sites, err := dbGetSites(pm.db)
+	if err != nil {
+		return fmt.Errorf("load sites: %w", err)
+	}
+	nextSyntheticRuleID := maxRuleID(rules) + 1
+	pluginForwardRules, _, err := loadPluginForwardRules(pm.db, pm.cfg, rules, sites, ranges, &nextSyntheticRuleID)
+	if err != nil {
+		return fmt.Errorf("load plugin forward rule plans: %w", err)
+	}
+	if len(pluginForwardRules) > 0 {
+		rules = append(rules, pluginForwardRules...)
+	}
 
 	currentRulePlans, currentRangePlans, currentEgressNATPlans, currentKernelRules, currentKernelRanges, currentKernelEgressNATs, prevKernelRuleStats, prevKernelRangeStats, prevKernelEgressNATStats, prevKernelFlowOwners, prevKernelStatsSnapshot, prevKernelStatsAt, prevKernelStatsSnapshotAt :=
 		pm.snapshotManagedNetworkKernelReloadState()
@@ -1091,8 +1130,9 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 	}
 
 	activeRetryCandidates := retryCandidates
+	pluginCatalog := pm.pluginCatalogWithControlSurface(pm.cfg)
 	for {
-		results, err := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeRetryCandidates)
+		results, err := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeRetryCandidates, &pluginCatalog)
 		if err != nil && (len(activeRetryCandidates) == 0 || totalRetainedKernelAssignments(retainedByEngine) > 0) {
 			return err
 		}

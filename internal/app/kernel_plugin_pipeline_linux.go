@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"sort"
 	"strings"
@@ -24,10 +25,24 @@ const (
 )
 
 type kernelTCPluginConfigV4 struct {
-	PreForwardCount uint32
-	PostLookupCount uint32
-	PreReplyCount   uint32
-	PostReplyCount  uint32
+	PreForwardCount   uint32
+	PostLookupCount   uint32
+	PreReplyCount     uint32
+	PostReplyCount    uint32
+	ForwardCoreEnable uint32
+	ReplyCoreEnable   uint32
+}
+
+type kernelPluginPipelineCoreConfig struct {
+	Forward bool
+	Reply   bool
+}
+
+func boolToKernelPluginConfigFlag(value bool) uint32 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 type kernelPluginPipelineDesiredPlugin struct {
@@ -64,7 +79,8 @@ func (rt *linuxKernelRuleRuntime) PluginSnapshot() pluginRuntimeSnapshot {
 }
 
 func (rt *linuxKernelRuleRuntime) ReconcilePlugins(catalog PluginCatalog) pluginRuntimeSnapshot {
-	desired, states := buildKernelPluginPipelineDesired(catalog)
+	ensurePluginCatalogControlRegistration(&catalog, rt.cfg)
+	desired, states := buildKernelPluginPipelineDesiredForRuntime(catalog, rt.cfg)
 	rt.mu.Lock()
 	noPreparedRules := len(rt.preparedRules) == 0
 	rt.mu.Unlock()
@@ -84,7 +100,13 @@ func (rt *linuxKernelRuleRuntime) ReconcilePlugins(catalog PluginCatalog) plugin
 
 	rt.pluginPipelineActive = rt.pluginPipelineEnabled && kernelPluginPipelineDesiredHasHooks(desired)
 	if !rt.pluginPipelineActive {
-		rt.cleanupPluginPipelineLocked()
+		if err := rt.clearPluginPipelineProgramsFromCollectionLocked(); err != nil {
+			log.Printf("kernel plugin pipeline cleanup: clear inactive tc chain failed: %v", err)
+		}
+		cleanedIdleRuntime := rt.cleanupIdlePluginPipelineRuntimeLocked("inactive plugin catalog")
+		if !cleanedIdleRuntime {
+			rt.cleanupPluginPipelineLocked()
+		}
 		rt.pluginRuntimeSnapshot = kernelPluginPipelineInactiveSnapshot(catalog, states)
 		return clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
 	}
@@ -95,23 +117,35 @@ func (rt *linuxKernelRuleRuntime) ReconcilePlugins(catalog PluginCatalog) plugin
 	}
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
 	if err != nil {
-		rt.cleanupPluginPipelineLocked()
+		if clearErr := rt.clearPluginPipelineProgramsFromCollectionLocked(); clearErr != nil {
+			log.Printf("kernel plugin pipeline cleanup: clear unavailable tc chain failed: %v", clearErr)
+		}
+		cleanedIdleRuntime := rt.cleanupIdlePluginPipelineRuntimeLocked("unavailable plugin pipeline")
+		if !cleanedIdleRuntime {
+			rt.cleanupPluginPipelineLocked()
+		}
 		rt.pluginRuntimeSnapshot = kernelPluginPipelineUnavailableSnapshot(catalog, err.Error())
 		return clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
 	}
-	return rt.reconcilePluginPipelineLocked(catalog, pieces, desired, states)
+	return rt.reconcilePluginPipelineLocked(catalog, pieces, desired, states, kernelPluginPipelineCoreConfig{Forward: !noPreparedRules, Reply: !noPreparedRules})
 }
 
 func (rt *linuxKernelRuleRuntime) reconcilePluginPipelineFromCatalogLocked(catalog PluginCatalog, pieces kernelCollectionPieces) pluginRuntimeSnapshot {
-	desired, states := buildKernelPluginPipelineDesired(catalog)
-	return rt.reconcilePluginPipelineLocked(catalog, pieces, desired, states)
+	ensurePluginCatalogControlRegistration(&catalog, rt.cfg)
+	desired, states := buildKernelPluginPipelineDesiredForRuntime(catalog, rt.cfg)
+	core := kernelPluginPipelineCoreConfig{Forward: len(rt.preparedRules) > 0, Reply: len(rt.preparedRules) > 0}
+	return rt.reconcilePluginPipelineLocked(catalog, pieces, desired, states, core)
 }
 
-func (rt *linuxKernelRuleRuntime) reconcilePluginPipelineLocked(catalog PluginCatalog, pieces kernelCollectionPieces, desired []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState) pluginRuntimeSnapshot {
+func (rt *linuxKernelRuleRuntime) reconcilePluginPipelineLocked(catalog PluginCatalog, pieces kernelCollectionPieces, desired []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState, core kernelPluginPipelineCoreConfig) pluginRuntimeSnapshot {
 	rt.pluginPipelineActive = rt.pluginPipelineEnabled && kernelPluginPipelineDesiredHasHooks(desired)
 	if !rt.pluginPipelineActive {
-		_ = syncKernelPluginConfigV4(pieces.pluginConfigV4, 0, 0, 0, 0)
-		rt.cleanupPluginPipelineLocked()
+		if err := clearKernelPluginPipelinePrograms(pieces); err != nil {
+			log.Printf("kernel plugin pipeline cleanup: clear inactive tc chain failed: %v", err)
+		}
+		if !rt.cleanupIdlePluginPipelineRuntimeLocked("inactive plugin pipeline") {
+			rt.cleanupPluginPipelineLocked()
+		}
 		rt.pluginRuntimeSnapshot = kernelPluginPipelineInactiveSnapshot(catalog, states)
 		return clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
 	}
@@ -126,7 +160,7 @@ func (rt *linuxKernelRuleRuntime) reconcilePluginPipelineLocked(catalog PluginCa
 		return clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
 	}
 
-	fingerprint := kernelPluginPipelineFingerprint(desired, states)
+	fingerprint := kernelPluginPipelineFingerprint(desired, states, core)
 	if fingerprint == rt.pluginPipelineFingerprint && rt.pluginPipelineProgChain == pieces.progChainV4 && len(rt.pluginPipelineLoaded) > 0 {
 		return clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
 	}
@@ -137,19 +171,24 @@ func (rt *linuxKernelRuleRuntime) reconcilePluginPipelineLocked(catalog PluginCa
 	}
 	if len(programs) == 0 {
 		cleanupKernelPluginPipelineCollections(loaded)
-		_ = installKernelPluginPipelinePrograms(pieces, nil)
+		if err := clearKernelPluginPipelinePrograms(pieces); err != nil {
+			log.Printf("kernel plugin pipeline cleanup: clear empty tc chain failed: %v", err)
+		}
 		oldLoaded := rt.pluginPipelineLoaded
 		rt.pluginPipelineLoaded = nil
 		rt.pluginPipelineFingerprint = ""
 		rt.pluginPipelineProgChain = pieces.progChainV4
 		rt.pluginPipelineActive = false
-		rt.pluginRuntimeSnapshot = kernelPluginPipelineInactiveSnapshot(catalog, states)
 		cleanupKernelPluginPipelineCollections(oldLoaded)
+		_ = rt.cleanupIdlePluginPipelineRuntimeLocked("empty plugin pipeline")
+		rt.pluginRuntimeSnapshot = kernelPluginPipelineInactiveSnapshot(catalog, states)
 		return clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
 	}
-	if err := installKernelPluginPipelinePrograms(pieces, programs); err != nil {
+	if err := installKernelPluginPipelinePrograms(pieces, programs, core); err != nil {
 		cleanupKernelPluginPipelineCollections(loaded)
-		_ = syncKernelPluginConfigV4(pieces.pluginConfigV4, 0, 0, 0, 0)
+		if clearErr := clearKernelPluginPipelinePrograms(pieces); clearErr != nil {
+			log.Printf("kernel plugin pipeline cleanup: clear failed install tc chain failed: %v", clearErr)
+		}
 		rt.cleanupPluginPipelineLocked()
 		states = kernelPluginPipelineErrorAll(catalog, fmt.Sprintf("install plugin pipeline: %v", err), states)
 		rt.pluginRuntimeSnapshot = pluginRuntimeSnapshot{Plugins: states}
@@ -229,7 +268,10 @@ func kernelPluginPipelineHookRunnableWithoutRules(plan kernelPluginPipelineHookP
 		return false
 	}
 	switch plan.Stage {
-	case kernelPluginPipelineStagePreForward, kernelPluginPipelineStagePreReply:
+	case kernelPluginPipelineStagePreForward,
+		kernelPluginPipelineStagePostLookup,
+		kernelPluginPipelineStagePreReply,
+		kernelPluginPipelineStagePostReply:
 		return true
 	default:
 		return false
@@ -401,6 +443,14 @@ func kernelPluginPipelineLess(a, b kernelPluginPipelineHookPlan) bool {
 }
 
 func buildKernelPluginPipelineDesired(catalog PluginCatalog) ([]kernelPluginPipelineDesiredPlugin, map[string]PluginRuntimeState) {
+	return buildKernelPluginPipelineDesiredWithConfig(catalog, nil, false)
+}
+
+func buildKernelPluginPipelineDesiredForRuntime(catalog PluginCatalog, cfg *Config) ([]kernelPluginPipelineDesiredPlugin, map[string]PluginRuntimeState) {
+	return buildKernelPluginPipelineDesiredWithConfig(catalog, cfg, true)
+}
+
+func buildKernelPluginPipelineDesiredWithConfig(catalog PluginCatalog, cfg *Config, enforceStability bool) ([]kernelPluginPipelineDesiredPlugin, map[string]PluginRuntimeState) {
 	states := make(map[string]PluginRuntimeState)
 	desired := make([]kernelPluginPipelineDesiredPlugin, 0, len(catalog.Plugins))
 	preForwardHooks := 0
@@ -410,6 +460,14 @@ func buildKernelPluginPipelineDesired(catalog PluginCatalog) ([]kernelPluginPipe
 	for _, plugin := range catalog.Plugins {
 		if plugin.Builtin || plugin.Status != pluginStatusActive {
 			continue
+		}
+		if enforceStability {
+			if ok, reason := pluginDataplaneStabilityAllowed(plugin, cfg); !ok {
+				state := externalPluginRuntimeState()
+				state.Reason = reason
+				states[plugin.ID] = state
+				continue
+			}
 		}
 		item, state := buildKernelPluginPipelineDesiredPlugin(plugin)
 		if len(item.hooks) == 0 || state.Error != "" {
@@ -480,6 +538,33 @@ func buildKernelPluginPipelineDesired(catalog PluginCatalog) ([]kernelPluginPipe
 	return desired, states
 }
 
+func kernelPluginPipelineCatalogHasRuntimeHooks(catalog PluginCatalog, cfg *Config) bool {
+	if cfg == nil || !cfg.PluginsEnabled() || !cfg.PluginsDataplaneEnabled() {
+		return false
+	}
+	for _, plugin := range catalog.Plugins {
+		if plugin.Builtin || plugin.Status != pluginStatusActive {
+			continue
+		}
+		if ok, _ := pluginDataplaneStabilityAllowed(plugin, cfg); !ok {
+			continue
+		}
+		for _, hook := range plugin.Hooks {
+			stage, supported, err := kernelPluginPipelineNormalizeStage(hook.Stage, hook.Priority)
+			if hook.Engine == kernelEngineTC &&
+				supported &&
+				err == nil &&
+				stage != "" &&
+				hook.Attach != "egress" &&
+				hook.Attach != "none" &&
+				hook.Mode != "control" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func buildKernelPluginPipelineDesiredPlugin(plugin LoadedPlugin) (kernelPluginPipelineDesiredPlugin, PluginRuntimeState) {
 	item := kernelPluginPipelineDesiredPlugin{plugin: plugin}
 	objects := make(map[string]PluginObject, len(plugin.Objects)*2)
@@ -495,7 +580,7 @@ func buildKernelPluginPipelineDesiredPlugin(plugin LoadedPlugin) (kernelPluginPi
 			continue
 		}
 		if hook.Engine != kernelEngineTC {
-			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: %s hooks are manifest-only in the tc pipeline", hook.ID, hook.Engine))
+			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: %s hooks are registration-only in the tc pipeline", hook.ID, hook.Engine))
 			continue
 		}
 		stage, supported, err := kernelPluginPipelineNormalizeStage(hook.Stage, hook.Priority)
@@ -503,7 +588,7 @@ func buildKernelPluginPipelineDesiredPlugin(plugin LoadedPlugin) (kernelPluginPi
 			return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s: %v", hook.ID, err))
 		}
 		if !supported {
-			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: use stage=forward/reply with priority around fvtap core priority %d, or legacy stage=pre_forward/post_lookup/pre_reply/post_reply", hook.ID, pluginPipelineCorePriority))
+			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: use stage=forward or stage=reply with priority below or above fvtap core priority %d", hook.ID, pluginPipelineCorePriority))
 			continue
 		}
 		context, err := effectiveKernelPluginPipelineHookContext(hook.Context, stage)
@@ -765,7 +850,7 @@ func loadPluginObjectForPipeline(cache map[string]*loadedPluginObject, objectPat
 	return object, nil
 }
 
-func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs []loadedKernelPluginPipelineProgram) error {
+func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs []loadedKernelPluginPipelineProgram, core kernelPluginPipelineCoreConfig) error {
 	preForward := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
 	postLookup := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
 	preReply := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
@@ -808,7 +893,7 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 		}
 		slot := uint32(tcProgramChainIndexV4PluginBase + i)
 		if err := pieces.progChainV4.Put(slot, uint32(item.prog.FD())); err != nil {
-			_ = syncKernelPluginConfigV4(pieces.pluginConfigV4, 0, 0, 0, 0)
+			_ = clearKernelPluginPipelinePrograms(pieces)
 			return fmt.Errorf("install plugin %s hook %s at slot %d: %w", item.plan.PluginID, item.plan.HookID, slot, err)
 		}
 	}
@@ -818,7 +903,7 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 		}
 		slot := uint32(tcProgramChainIndexV4PluginPostBase + i)
 		if err := pieces.progChainV4.Put(slot, uint32(item.prog.FD())); err != nil {
-			_ = syncKernelPluginConfigV4(pieces.pluginConfigV4, 0, 0, 0, 0)
+			_ = clearKernelPluginPipelinePrograms(pieces)
 			return fmt.Errorf("install plugin %s hook %s at slot %d: %w", item.plan.PluginID, item.plan.HookID, slot, err)
 		}
 	}
@@ -828,7 +913,7 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 		}
 		slot := uint32(tcProgramChainIndexV4PluginReplyBase + i)
 		if err := pieces.progChainV4.Put(slot, uint32(item.prog.FD())); err != nil {
-			_ = syncKernelPluginConfigV4(pieces.pluginConfigV4, 0, 0, 0, 0)
+			_ = clearKernelPluginPipelinePrograms(pieces)
 			return fmt.Errorf("install plugin %s hook %s at slot %d: %w", item.plan.PluginID, item.plan.HookID, slot, err)
 		}
 	}
@@ -838,12 +923,12 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 		}
 		slot := uint32(tcProgramChainIndexV4PluginReplyPostBase + i)
 		if err := pieces.progChainV4.Put(slot, uint32(item.prog.FD())); err != nil {
-			_ = syncKernelPluginConfigV4(pieces.pluginConfigV4, 0, 0, 0, 0)
+			_ = clearKernelPluginPipelinePrograms(pieces)
 			return fmt.Errorf("install plugin %s hook %s at slot %d: %w", item.plan.PluginID, item.plan.HookID, slot, err)
 		}
 	}
-	if err := syncKernelPluginConfigV4(pieces.pluginConfigV4, uint32(len(preForward)), uint32(len(postLookup)), uint32(len(preReply)), uint32(len(postReply))); err != nil {
-		_ = syncKernelPluginConfigV4(pieces.pluginConfigV4, 0, 0, 0, 0)
+	if err := syncKernelPluginConfigV4(pieces.pluginConfigV4, uint32(len(preForward)), uint32(len(postLookup)), uint32(len(preReply)), uint32(len(postReply)), core); err != nil {
+		_ = clearKernelPluginPipelinePrograms(pieces)
 		return err
 	}
 	for i := len(preForward); i < tcProgramChainV4PluginPreForwardMax; i++ {
@@ -861,7 +946,33 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 	return nil
 }
 
-func syncKernelPluginConfigV4(m *ebpf.Map, preForwardCount uint32, postLookupCount uint32, preReplyCount uint32, postReplyCount uint32) error {
+func clearKernelPluginPipelinePrograms(pieces kernelCollectionPieces) error {
+	errs := make([]string, 0)
+	if err := syncKernelPluginConfigV4(pieces.pluginConfigV4, 0, 0, 0, 0, kernelPluginPipelineCoreConfig{}); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if pieces.progChainV4 == nil {
+		errs = append(errs, "tc program chain map is nil")
+	} else {
+		deleteRange := func(base, count int) {
+			for i := 0; i < count; i++ {
+				if err := deleteKernelMapEntry(pieces.progChainV4, uint32(base+i)); err != nil {
+					errs = append(errs, fmt.Sprintf("delete tc plugin chain slot %d: %v", base+i, err))
+				}
+			}
+		}
+		deleteRange(tcProgramChainIndexV4PluginBase, tcProgramChainV4PluginPreForwardMax)
+		deleteRange(tcProgramChainIndexV4PluginPostBase, tcProgramChainV4PluginPostLookupMax)
+		deleteRange(tcProgramChainIndexV4PluginReplyBase, tcProgramChainV4PluginPreReplyMax)
+		deleteRange(tcProgramChainIndexV4PluginReplyPostBase, tcProgramChainV4PluginPostReplyMax)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func syncKernelPluginConfigV4(m *ebpf.Map, preForwardCount uint32, postLookupCount uint32, preReplyCount uint32, postReplyCount uint32, core kernelPluginPipelineCoreConfig) error {
 	if m == nil {
 		if preForwardCount == 0 && postLookupCount == 0 && preReplyCount == 0 && postReplyCount == 0 {
 			return nil
@@ -870,15 +981,52 @@ func syncKernelPluginConfigV4(m *ebpf.Map, preForwardCount uint32, postLookupCou
 	}
 	key := uint32(0)
 	value := kernelTCPluginConfigV4{
-		PreForwardCount: preForwardCount,
-		PostLookupCount: postLookupCount,
-		PreReplyCount:   preReplyCount,
-		PostReplyCount:  postReplyCount,
+		PreForwardCount:   preForwardCount,
+		PostLookupCount:   postLookupCount,
+		PreReplyCount:     preReplyCount,
+		PostReplyCount:    postReplyCount,
+		ForwardCoreEnable: boolToKernelPluginConfigFlag(core.Forward),
+		ReplyCoreEnable:   boolToKernelPluginConfigFlag(core.Reply),
 	}
 	if err := m.Put(key, value); err != nil {
 		return fmt.Errorf("sync tc plugin config: %w", err)
 	}
 	return nil
+}
+
+func (rt *linuxKernelRuleRuntime) clearPluginPipelineProgramsFromCollectionLocked() error {
+	if rt == nil || rt.coll == nil {
+		return nil
+	}
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		return err
+	}
+	return clearKernelPluginPipelinePrograms(pieces)
+}
+
+func (rt *linuxKernelRuleRuntime) cleanupIdlePluginPipelineRuntimeLocked(reason string) bool {
+	if rt == nil || rt.coll == nil || len(rt.preparedRules) > 0 {
+		return false
+	}
+	refs := kernelRuntimeMapRefsFromCollection(rt.coll)
+	flows, err := countKernelRuntimeFlowEntriesExact(refs)
+	if err != nil {
+		log.Printf("kernel plugin pipeline cleanup: preserve tc runtime after %s because flow count failed: %v", reason, err)
+		return false
+	}
+	nat, err := countKernelRuntimeNATEntriesExact(refs)
+	if err != nil {
+		log.Printf("kernel plugin pipeline cleanup: preserve tc runtime after %s because nat count failed: %v", reason, err)
+		return false
+	}
+	if flows > 0 || nat > 0 {
+		log.Printf("kernel plugin pipeline cleanup: preserve tc runtime after %s with active flow/nat entries=%d/%d", reason, flows, nat)
+		return false
+	}
+	rt.cleanupLocked()
+	rt.stateLog.Logf("kernel plugin pipeline cleanup: detached idle tc runtime after %s", reason)
+	return true
 }
 
 func (rt *linuxKernelRuleRuntime) cleanupPluginPipelineLocked() {
@@ -975,7 +1123,7 @@ func kernelPluginPipelineErrorAllFromDesired(desired []kernelPluginPipelineDesir
 	return states
 }
 
-func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState) string {
+func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState, core kernelPluginPipelineCoreConfig) string {
 	type fingerprintHook struct {
 		PluginID       string   `json:"plugin_id"`
 		HookID         string   `json:"hook_id"`
@@ -995,10 +1143,20 @@ func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, 
 		Reason string `json:"reason,omitempty"`
 		Error  string `json:"error,omitempty"`
 	}
+	type fingerprintCore struct {
+		Forward bool `json:"forward"`
+		Reply   bool `json:"reply"`
+	}
 	payload := struct {
 		Hooks  []fingerprintHook  `json:"hooks"`
 		States []fingerprintState `json:"states,omitempty"`
-	}{}
+		Core   fingerprintCore    `json:"core"`
+	}{
+		Core: fingerprintCore{
+			Forward: core.Forward,
+			Reply:   core.Reply,
+		},
+	}
 	for _, item := range items {
 		for _, hook := range item.hooks {
 			payload.Hooks = append(payload.Hooks, fingerprintHook{

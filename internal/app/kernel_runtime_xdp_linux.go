@@ -2462,6 +2462,9 @@ func prepareXDPEgressNATRule(rule Rule, opts xdpPrepareOptions, inLink netlink.L
 	if rule.Transparent {
 		return nil, fmt.Errorf("xdp dataplane egress nat takeover does not support transparent mode")
 	}
+	if normalizeEgressNATRedirectMode(rule.kernelRedirectMode) == egressNATRedirectModePreparedL2 {
+		return nil, fmt.Errorf("xdp dataplane egress nat takeover does not support prepared_l2 redirect handoff; use tc")
+	}
 	if !kernelEgressProtocolSupported(rule.Protocol) {
 		return nil, fmt.Errorf("xdp dataplane currently supports only single-protocol TCP/UDP/ICMP egress nat rules")
 	}

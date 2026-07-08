@@ -39,26 +39,30 @@ func TestPluginDataplaneRuntimeAttachesTCObservePlugin(t *testing.T) {
   "name": "Packet Observer",
   "version": "0.1.0",
   "kind": "pipeline",
-  "objects": [{
-    "id": "observer",
-    "path": "observer.o",
-    "sha256": "` + sum + `",
-    "programs": [{"id": "tc_ingress", "section": "tc/ingress", "type": "tc"}]
-  }],
-  "hooks": [{
-    "id": "observe-ingress",
-    "engine": "tc",
-    "attach": "ingress",
-    "stage": "pre_forward",
-    "program": "observer:tc_ingress",
-    "mode": "observe",
-    "interfaces": ["lo"]
-  }],
-  "ui": {"static_dir": "ui", "entry": "index.html"}
+  "control": {"main": "control.js", "permissions": ["ebpf.load", "hook.attach", "ui"]}
 }`
 	if err := os.WriteFile(filepath.Join(pluginDir, pluginManifestFile), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("WriteFile(manifest) error = %v", err)
 	}
+	writePluginControlScript(t, dir, "packet_observer", `
+ebpf.loadObject({
+  id: 'observer',
+  path: 'observer.o',
+  sha256: '`+sum+`',
+  programs: [{id: 'tc_ingress', section: 'tc/ingress', type: 'tc'}]
+});
+hooks.attach({
+  id: 'observe-ingress',
+  engine: 'tc',
+  attach: 'ingress',
+  stage: 'forward',
+  priority: 10,
+  program: 'observer:tc_ingress',
+  mode: 'observe',
+  interfaces: ['lo']
+});
+ui.register({static_dir: 'ui', entry: 'index.html'});
+`)
 
 	enabled := true
 	cfg := &Config{
@@ -126,6 +130,84 @@ func TestAssignPluginTCFilterIDsRejectsGlobalOverflow(t *testing.T) {
 	}
 }
 
+func TestPluginDataplaneStabilityGateAllowsLabByDefault(t *testing.T) {
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:        "lab_plugin",
+			Name:      "Lab Plugin",
+			Version:   "0.1.0",
+			Kind:      "pipeline",
+			Stability: pluginStabilityLab,
+		},
+		Status: pluginStatusActive,
+	}
+
+	ok, reason := pluginDataplaneStabilityAllowed(plugin, &Config{})
+	if !ok || reason != "" {
+		t.Fatalf("pluginDataplaneStabilityAllowed(lab default) = %t/%q, want allowed", ok, reason)
+	}
+}
+
+func TestPluginDataplaneStabilityGateBlocksDeprecated(t *testing.T) {
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:        "old_plugin",
+			Name:      "Old Plugin",
+			Version:   "0.1.0",
+			Kind:      "pipeline",
+			Stability: pluginStabilityDeprecated,
+		},
+		Status: pluginStatusActive,
+	}
+
+	ok, reason := pluginDataplaneStabilityAllowed(plugin, &Config{})
+	if ok || !strings.Contains(reason, "deprecated") {
+		t.Fatalf("pluginDataplaneStabilityAllowed(deprecated) = %t/%q, want blocked", ok, reason)
+	}
+}
+
+func TestBuildDesiredPluginsReportsMissingInterfaceForAllowedLabPlugin(t *testing.T) {
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:        "lab_plugin",
+			Name:      "Lab Plugin",
+			Version:   "0.1.0",
+			Kind:      "pipeline",
+			Stability: pluginStabilityLab,
+		},
+		Objects: []PluginObject{{
+			ID:     "observer",
+			Path:   "observer.o",
+			Status: pluginObjectStatusVerified,
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_ingress",
+				Section: "tc/ingress",
+				Type:    kernelEngineTC,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:         "observe-ingress",
+			Engine:     kernelEngineTC,
+			Attach:     "ingress",
+			Stage:      "forward",
+			Program:    "observer:tc_ingress",
+			Mode:       "observe",
+			Interfaces: []string{"definitely-missing0"},
+		}},
+		Status: pluginStatusActive,
+	}
+	rt := &linuxPluginDataplaneRuntime{cfg: &Config{}}
+
+	desired, states := rt.buildDesiredPlugins(PluginCatalog{Plugins: []LoadedPlugin{plugin}})
+	if len(desired) != 0 {
+		t.Fatalf("desired plugins = %+v, want none for missing interface", desired)
+	}
+	state, ok := states["lab_plugin"]
+	if !ok || state.Mode != pluginRuntimeModeError || !strings.Contains(state.Error, "resolve plugin hook interface") {
+		t.Fatalf("state = %+v/%t, want missing interface runtime error", state, ok)
+	}
+}
+
 func TestBuildDesiredPluginDataplaneSkipsAttachNone(t *testing.T) {
 	plugin := LoadedPlugin{
 		PluginManifest: PluginManifest{
@@ -133,26 +215,26 @@ func TestBuildDesiredPluginDataplaneSkipsAttachNone(t *testing.T) {
 			Name:    "No Attach",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:     "observer",
-				Path:   "observer.o",
-				Status: pluginObjectStatusVerified,
-				Programs: []PluginObjectProgram{{
-					ID:      "tc_ingress",
-					Section: "tc/ingress",
-					Type:    kernelEngineTC,
-				}},
-			}},
-			Hooks: []PluginHook{{
-				ID:         "observe-none",
-				Engine:     kernelEngineTC,
-				Attach:     "none",
-				Stage:      "pre_forward",
-				Program:    "observer:tc_ingress",
-				Mode:       "observe",
-				Interfaces: []string{"lo"},
-			}},
 		},
+		Objects: []PluginObject{{
+			ID:     "observer",
+			Path:   "observer.o",
+			Status: pluginObjectStatusVerified,
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_ingress",
+				Section: "tc/ingress",
+				Type:    kernelEngineTC,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:         "observe-none",
+			Engine:     kernelEngineTC,
+			Attach:     "none",
+			Stage:      "pre_forward",
+			Program:    "observer:tc_ingress",
+			Mode:       "observe",
+			Interfaces: []string{"lo"},
+		}},
 		Status: pluginStatusActive,
 	}
 
@@ -160,8 +242,8 @@ func TestBuildDesiredPluginDataplaneSkipsAttachNone(t *testing.T) {
 	if len(item.attachments) != 0 {
 		t.Fatalf("attachments = %+v, want none for attach=none", item.attachments)
 	}
-	if state.Mode != pluginRuntimeModeManifestOnly || !strings.Contains(state.Reason, "attach=none") {
-		t.Fatalf("state = %+v, want manifest-only attach=none reason", state)
+	if state.Mode != pluginRuntimeModeRegistered || !strings.Contains(state.Reason, "attach=none") {
+		t.Fatalf("state = %+v, want registered attach=none reason", state)
 	}
 }
 

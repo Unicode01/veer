@@ -15,13 +15,30 @@
     return { badge: 'disabled', text: status || app.t('common.dash') };
   }
 
+  function pluginStabilityInfo(plugin) {
+    const stability = String(plugin && plugin.stability || 'lab').toLowerCase();
+    if (stability === 'stable') return { className: 'is-stable', text: app.t('plugins.stability.stable') };
+    if (stability === 'preview') return { className: 'is-preview', text: app.t('plugins.stability.preview') };
+    if (stability === 'deprecated') return { className: 'is-deprecated', text: app.t('plugins.stability.deprecated') };
+    return { className: 'is-lab', text: app.t('plugins.stability.lab') };
+  }
+
+  function pluginStabilityBadgeNode(plugin) {
+    const info = pluginStabilityInfo(plugin);
+    return app.createNode('span', {
+      className: 'plugin-stability-badge ' + info.className,
+      text: info.text,
+      title: app.t('plugins.stability') + ': ' + info.text
+    });
+  }
+
   function pluginRuntimeModeText(mode) {
     const value = String(mode || '').toLowerCase();
     if (value === 'builtin') return app.t('plugins.runtime.builtin');
     if (value === 'dataplane') return app.t('plugins.runtime.dataplane');
     if (value === 'control') return app.t('plugins.runtime.control');
     if (value === 'error') return app.t('plugins.runtime.error');
-    if (value === 'manifest_only') return app.t('plugins.runtime.manifestOnly');
+    if (value === 'registered') return app.t('plugins.runtime.registered');
     if (value === 'invalid') return app.t('plugins.runtime.invalid');
     return value || app.t('common.dash');
   }
@@ -118,6 +135,7 @@
       rows: [
         detailRow('ID', item.id),
         detailRow(app.t('common.status'), info.text),
+        detailRow(app.t('plugins.stability'), pluginStabilityInfo(item).text),
         detailRow(app.t('plugins.detail.mode'), runtime ? pluginRuntimeModeText(runtime.mode) : ''),
         detailRow(app.t('plugins.runtime.attachable'), runtime ? (runtime.attachable ? app.t('common.yes') : app.t('common.no')) : ''),
         detailRow(app.t('plugins.runtime.attached'), runtime ? (runtime.attached ? app.t('common.yes') : app.t('common.no')) : ''),
@@ -253,6 +271,7 @@
           app.createNode('div', {
             className: 'plugin-detail-header-actions',
             children: [
+              pluginStabilityBadgeNode(item),
               app.createStatusBadgeNode(info, ''),
               closeButton
             ]
@@ -405,6 +424,7 @@
       plugin.name,
       plugin.version,
       plugin.kind,
+      plugin.stability,
       plugin.status,
       plugin.source,
       plugin.error,
@@ -428,15 +448,6 @@
     ];
   }
 
-  function pluginMetadata(plugin, keys) {
-    const metadata = plugin && plugin.metadata && typeof plugin.metadata === 'object' ? plugin.metadata : {};
-    for (let i = 0; i < keys.length; i++) {
-      const value = String(metadata[keys[i]] || '').trim();
-      if (value) return value;
-    }
-    return '';
-  }
-
   function normalizePluginPageID(value) {
     const page = String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
     return page && page !== 'plugins' && page !== 'diagnostics' ? page : '';
@@ -444,29 +455,10 @@
 
   function pluginPageInfo(plugin) {
     if (!plugin || !plugin.asset_base_path || !(plugin.ui && plugin.ui.entry)) return null;
-    const rawPage = pluginMetadata(plugin, [
-      'ui.page',
-      'ui_page',
-      'forward.page',
-      'forward_page',
-      'forward.ui.page',
-      'forward_ui_page',
-      'page',
-      'tab'
-    ]);
-    const page = normalizePluginPageID(rawPage);
+    const ui = plugin.ui || {};
+    const page = normalizePluginPageID(ui.page);
     if (!page) return null;
-    const title = pluginMetadata(plugin, [
-      'ui.page_title',
-      'ui_page_title',
-      'forward.page_title',
-      'forward_page_title',
-      'forward.ui.title',
-      'forward_ui_title',
-      'page_title',
-      'tab_title',
-      'title'
-    ]) || plugin.name || page;
+    const title = String(ui.page_title || '').trim() || plugin.name || page;
     return {
       tabID: 'plugin-' + page,
       page,
@@ -475,6 +467,544 @@
       entry: plugin.ui.entry,
       plugin
     };
+  }
+
+  function attachmentDirection(attachment) {
+    const stage = String(attachment && attachment.stage || '').toLowerCase();
+    const slot = attachmentChainSlot(attachment);
+    if (stage.indexOf('reply') >= 0 || slot >= 29) return 'reply';
+    return 'forward';
+  }
+
+  function attachmentIsPostCore(attachment, corePriority) {
+    const stage = String(attachment && attachment.stage || '').toLowerCase();
+    const priority = typeof (attachment && attachment.priority) === 'number' ? attachment.priority : 0;
+    const slot = attachmentChainSlot(attachment);
+    const direction = attachmentDirection(attachment);
+    if (direction === 'reply') {
+      return stage === 'post_reply' || priority > corePriority || slot >= 37;
+    }
+    return stage === 'post_lookup' || stage === 'next_forward' || priority > corePriority || (slot >= 18 && slot < 26);
+  }
+
+  function pluginAttachmentSortValue(item) {
+    const attachment = item && item.attachment ? item.attachment : {};
+    const slot = attachmentChainSlot(attachment);
+    const priority = typeof attachment.priority === 'number' ? attachment.priority : 0;
+    return {
+      slot: slot > 0 ? slot : 9999,
+      priority,
+      pluginID: item && item.pluginID || '',
+      hookID: attachment.hook_id || ''
+    };
+  }
+
+  function comparePluginAttachmentItems(a, b) {
+    const av = pluginAttachmentSortValue(a);
+    const bv = pluginAttachmentSortValue(b);
+    if (av.slot !== bv.slot) return av.slot - bv.slot;
+    if (av.priority !== bv.priority) return av.priority - bv.priority;
+    if (av.pluginID !== bv.pluginID) return av.pluginID < bv.pluginID ? -1 : 1;
+    return av.hookID < bv.hookID ? -1 : av.hookID > bv.hookID ? 1 : 0;
+  }
+
+  function pluginRuntimeAttachmentItems() {
+    const data = Array.isArray(app.state.plugins.data) ? app.state.plugins.data : [];
+    const out = [];
+    data.forEach((plugin) => {
+      const runtime = plugin && plugin.runtime && typeof plugin.runtime === 'object' ? plugin.runtime : null;
+      const attachments = runtime && Array.isArray(runtime.attachments) ? runtime.attachments : [];
+      attachments.forEach((attachment) => {
+        out.push({
+          pluginID: plugin && plugin.id || '',
+          pluginName: plugin && plugin.name || '',
+          attachment
+        });
+      });
+    });
+    return out;
+  }
+
+  function attachmentGroupKey(item) {
+    const attachment = item && item.attachment ? item.attachment : {};
+    return [
+      String(attachment.engine || '').toLowerCase(),
+      String(attachment.attach || '').toLowerCase(),
+      attachmentDirection(attachment),
+      String(attachment.interface || '').toLowerCase()
+    ].join('\x1f');
+  }
+
+  function attachmentGroupLabel(item) {
+    const attachment = item && item.attachment ? item.attachment : {};
+    const engine = attachment.engine ? String(attachment.engine).toUpperCase() : 'TC';
+    return [
+      engine,
+      attachment.attach || '',
+      attachmentDirection(attachment),
+      attachment.interface || ''
+    ].filter(Boolean).join(' ');
+  }
+
+  function pluginAttachmentSegment(item, currentPluginID) {
+    const attachment = item && item.attachment ? item.attachment : {};
+    const slot = attachmentChainSlot(attachment);
+    const label = item.pluginID || attachment.hook_id || app.t('common.dash');
+    return {
+      text: label,
+      title: [
+        item.pluginName || item.pluginID,
+        attachment.hook_id,
+        attachment.stage,
+        attachment.mode,
+        attachment.program,
+        attachment.status,
+        attachment.error ? app.t('plugins.error') + ': ' + attachment.error : ''
+      ].filter(Boolean).join(' | '),
+      current: item.pluginID === currentPluginID,
+      error: !!attachment.error,
+      detailTitle: [item.pluginID, attachment.hook_id].filter(Boolean).join('.') || label,
+      detailRows: [
+        detailRow('Plugin', item.pluginName || item.pluginID),
+        detailRow('Hook', attachment.hook_id),
+        detailRow('Engine', attachment.engine ? String(attachment.engine).toUpperCase() : ''),
+        detailRow('Attach', attachment.attach),
+        detailRow('Stage', attachment.stage),
+        detailRow('Mode', attachment.mode),
+        detailRow('Interface', attachment.interface),
+        detailRow('Program', attachment.program),
+        detailRow('Status', attachment.status),
+        detailRow('Priority', typeof attachment.priority === 'number' ? String(attachment.priority) : ''),
+        detailRow('Slot', slot > 0 ? String(slot) : ''),
+        detailRow('Context', Array.isArray(attachment.context) && attachment.context.length ? attachment.context.join(', ') : ''),
+        detailRow(app.t('plugins.error'), attachment.error)
+      ].filter(Boolean)
+    };
+  }
+
+  function pluginCoreSegment(direction, corePriority) {
+    return {
+      text: direction === 'reply'
+        ? app.t('plugins.link.replyCoreCompact')
+        : app.t('plugins.link.coreCompact'),
+      title: direction === 'reply'
+        ? app.t('plugins.chain.replyCore', { priority: corePriority })
+        : app.t('plugins.chain.core', { priority: corePriority }),
+      core: true,
+      detailTitle: direction === 'reply' ? app.t('plugins.chain.replyCore', { priority: corePriority }) : app.t('plugins.chain.core', { priority: corePriority }),
+      detailRows: [
+        detailRow(app.t('plugins.link.role'), direction === 'reply' ? app.t('plugins.link.replyCoreCompact') : app.t('plugins.link.coreCompact')),
+        detailRow(app.t('plugins.link.direction'), direction),
+        detailRow('Priority', String(corePriority))
+      ].filter(Boolean)
+    };
+  }
+
+  function pluginApplySegment(direction) {
+    return {
+      text: direction === 'reply' ? app.t('plugins.chain.replyApplyCompact') : app.t('plugins.chain.applyCompact'),
+      title: direction === 'reply' ? app.t('plugins.chain.replyApply') : app.t('plugins.chain.apply'),
+      apply: true,
+      detailTitle: direction === 'reply' ? app.t('plugins.chain.replyApply') : app.t('plugins.chain.apply'),
+      detailRows: [
+        detailRow(app.t('plugins.link.role'), direction === 'reply' ? app.t('plugins.chain.replyApplyCompact') : app.t('plugins.chain.applyCompact')),
+        detailRow(app.t('plugins.link.direction'), direction)
+      ].filter(Boolean)
+    };
+  }
+
+  function pluginAttachmentChainRows(plugin) {
+    const currentID = plugin && plugin.id || '';
+    if (!currentID) return [];
+    const all = pluginRuntimeAttachmentItems();
+    const current = all.filter((item) => item.pluginID === currentID);
+    if (!current.length) return [];
+    const relevantKeys = new Set(current.map(attachmentGroupKey));
+    const corePriority = pluginPipelineCorePriority();
+    const groups = [];
+    const groupMap = new Map();
+    all.forEach((item) => {
+      const key = attachmentGroupKey(item);
+      if (!relevantKeys.has(key)) return;
+      let group = groupMap.get(key);
+      if (!group) {
+        group = { key, sample: item, items: [] };
+        groupMap.set(key, group);
+        groups.push(group);
+      }
+      group.items.push(item);
+    });
+    groups.sort((a, b) => {
+      const al = attachmentGroupLabel(a.sample);
+      const bl = attachmentGroupLabel(b.sample);
+      return al < bl ? -1 : al > bl ? 1 : 0;
+    });
+    return groups.map((group) => {
+      const direction = attachmentDirection(group.sample.attachment);
+      const pre = group.items.filter((item) => !attachmentIsPostCore(item.attachment, corePriority)).sort(comparePluginAttachmentItems);
+      const post = group.items.filter((item) => attachmentIsPostCore(item.attachment, corePriority)).sort(comparePluginAttachmentItems);
+      return {
+        kind: app.t('plugins.link.interfaceChain'),
+        label: attachmentGroupLabel(group.sample),
+        segments: pre.map((item) => pluginAttachmentSegment(item, currentID))
+          .concat([pluginCoreSegment(direction, corePriority)])
+          .concat(post.map((item) => pluginAttachmentSegment(item, currentID)))
+          .concat([pluginApplySegment(direction)])
+      };
+    });
+  }
+
+  function hookDirection(hook) {
+    const stage = String(hook && hook.stage || '').toLowerCase();
+    if (stage.indexOf('reply') >= 0) return 'reply';
+    return 'forward';
+  }
+
+  function hookIsPostCore(hook, corePriority) {
+    const stage = String(hook && hook.stage || '').toLowerCase();
+    const priority = typeof (hook && hook.priority) === 'number' ? hook.priority : 0;
+    const direction = hookDirection(hook);
+    if (direction === 'reply') return stage === 'post_reply' || priority > corePriority;
+    return stage === 'post_lookup' || stage === 'next_forward' || priority > corePriority;
+  }
+
+  function pluginHookSegment(plugin, hook, currentPluginID) {
+    const label = plugin && plugin.id || hook && hook.id || app.t('common.dash');
+    return {
+      text: label,
+      title: [
+        plugin && (plugin.name || plugin.id),
+        hook && hook.id,
+        hook && hook.stage,
+        hook && hook.mode,
+        hook && hook.program,
+        hook && Array.isArray(hook.interfaces) && hook.interfaces.length ? 'if=' + hook.interfaces.join(',') : app.t('plugins.link.unbound')
+      ].filter(Boolean).join(' | '),
+      current: plugin && plugin.id === currentPluginID,
+      detailTitle: [plugin && plugin.id, hook && hook.id].filter(Boolean).join('.') || label,
+      detailRows: [
+        detailRow('Plugin', plugin && (plugin.name || plugin.id)),
+        detailRow('Hook', hook && hook.id),
+        detailRow('Engine', hook && hook.engine ? String(hook.engine).toUpperCase() : ''),
+        detailRow('Attach', hook && hook.attach),
+        detailRow('Stage', hook && hook.stage),
+        detailRow('Mode', hook && hook.mode),
+        detailRow('Interfaces', hook && Array.isArray(hook.interfaces) && hook.interfaces.length ? hook.interfaces.join(', ') : app.t('plugins.link.unbound')),
+        detailRow('Program', hook && hook.program),
+        detailRow('Priority', typeof (hook && hook.priority) === 'number' ? String(hook.priority) : ''),
+        detailRow('Context', hook && Array.isArray(hook.context) && hook.context.length ? hook.context.join(', ') : '')
+      ].filter(Boolean)
+    };
+  }
+
+  function comparePluginHookItems(a, b) {
+    const ah = a && a.hook ? a.hook : {};
+    const bh = b && b.hook ? b.hook : {};
+    const ap = typeof ah.priority === 'number' ? ah.priority : 0;
+    const bp = typeof bh.priority === 'number' ? bh.priority : 0;
+    if (ap !== bp) return ap - bp;
+    const aid = a && a.plugin && a.plugin.id || '';
+    const bid = b && b.plugin && b.plugin.id || '';
+    if (aid !== bid) return aid < bid ? -1 : 1;
+    const ahid = ah.id || '';
+    const bhid = bh.id || '';
+    return ahid < bhid ? -1 : ahid > bhid ? 1 : 0;
+  }
+
+  function hookGroupKey(item) {
+    const hook = item && item.hook ? item.hook : {};
+    const interfaces = Array.isArray(hook.interfaces) && hook.interfaces.length ? hook.interfaces.slice().sort().join(',') : '*';
+    return [
+      String(hook.engine || 'tc').toLowerCase(),
+      String(hook.attach || 'ingress').toLowerCase(),
+      hookDirection(hook),
+      interfaces
+    ].join('\x1f');
+  }
+
+  function hookGroupLabel(item) {
+    const hook = item && item.hook ? item.hook : {};
+    const engine = hook.engine ? String(hook.engine).toUpperCase() : 'TC';
+    const interfaces = Array.isArray(hook.interfaces) && hook.interfaces.length ? hook.interfaces.join(',') : app.t('plugins.link.unbound');
+    return [engine, hook.attach || 'ingress', hookDirection(hook), interfaces].filter(Boolean).join(' ');
+  }
+
+  function pluginDeclaredHookChainRows(plugin) {
+    const currentID = plugin && plugin.id || '';
+    if (!currentID) return [];
+    const data = Array.isArray(app.state.plugins.data) ? app.state.plugins.data : [];
+    const all = [];
+    data.forEach((candidate) => {
+      const hooks = Array.isArray(candidate && candidate.hooks) ? candidate.hooks : [];
+      hooks.forEach((hook) => {
+        all.push({ plugin: candidate, hook });
+      });
+    });
+    const current = all.filter((item) => item.plugin && item.plugin.id === currentID);
+    if (!current.length) return [];
+    const relevantKeys = new Set(current.map(hookGroupKey));
+    const corePriority = pluginPipelineCorePriority();
+    const groups = [];
+    const groupMap = new Map();
+    all.forEach((item) => {
+      const key = hookGroupKey(item);
+      if (!relevantKeys.has(key)) return;
+      let group = groupMap.get(key);
+      if (!group) {
+        group = { key, sample: item, items: [] };
+        groupMap.set(key, group);
+        groups.push(group);
+      }
+      group.items.push(item);
+    });
+    groups.sort((a, b) => {
+      const al = hookGroupLabel(a.sample);
+      const bl = hookGroupLabel(b.sample);
+      return al < bl ? -1 : al > bl ? 1 : 0;
+    });
+    return groups.map((group) => {
+      const direction = hookDirection(group.sample.hook);
+      const pre = group.items.filter((item) => !hookIsPostCore(item.hook, corePriority)).sort(comparePluginHookItems);
+      const post = group.items.filter((item) => hookIsPostCore(item.hook, corePriority)).sort(comparePluginHookItems);
+      return {
+        kind: app.t('plugins.link.declaredChain'),
+        label: hookGroupLabel(group.sample),
+        segments: pre.map((item) => pluginHookSegment(item.plugin, item.hook, currentID))
+          .concat([pluginCoreSegment(direction, corePriority)])
+          .concat(post.map((item) => pluginHookSegment(item.plugin, item.hook, currentID)))
+          .concat([pluginApplySegment(direction)])
+      };
+    });
+  }
+
+  function pluginVirtualLinkItems(plugin) {
+    const item = plugin || {};
+
+    const chains = pluginAttachmentChainRows(item);
+    if (chains.length) return chains;
+    const declaredChains = pluginDeclaredHookChainRows(item);
+    if (declaredChains.length) return declaredChains;
+
+    return [];
+  }
+
+  function pluginHasVirtualLinkCard(plugin) {
+    return pluginVirtualLinkItems(plugin).length > 0;
+  }
+
+  function pluginLinkSegmentFlags(segment) {
+    const item = segment && typeof segment === 'object' ? segment : { text: String(segment || '') };
+    return [
+      item.current ? app.t('plugins.link.current') : '',
+      item.core ? app.t('plugins.link.core') : '',
+      item.apply ? app.t('plugins.link.apply') : '',
+      item.error ? app.t('plugins.error') : ''
+    ].filter(Boolean);
+  }
+
+  function pluginLinkSegmentDetailSections(row, segment, index) {
+    const item = segment && typeof segment === 'object' ? segment : { text: String(segment || '') };
+    const flags = pluginLinkSegmentFlags(item);
+    const rows = Array.isArray(item.detailRows) ? item.detailRows : [];
+    return [
+      {
+        title: app.t('plugins.detail.runtime'),
+        rows: [
+          detailRow(app.t('plugins.link.type'), row && row.kind),
+          detailRow(app.t('plugins.link.scope'), row && row.label),
+          detailRow(app.t('plugins.link.stepIndex'), String((index || 0) + 1)),
+          detailRow(app.t('plugins.link.flags'), flags.join(', '))
+        ].filter(Boolean)
+      },
+      {
+        title: item.detailTitle || item.text || app.t('plugins.details'),
+        rows: rows.length ? rows : [
+          detailRow(app.t('plugins.link.node'), item.text),
+          detailRow(app.t('plugins.detail.description'), item.title)
+        ].filter(Boolean)
+      }
+    ].filter((section) => section.rows && section.rows.length);
+  }
+
+  function pluginLinkSegmentDetailContent(row, segment, index) {
+    const item = segment && typeof segment === 'object' ? segment : { text: String(segment || '') };
+    const closeButton = app.createNode('button', {
+      className: 'plugin-detail-close',
+      text: app.t('plugins.detail.close'),
+      attrs: { type: 'button' }
+    });
+    if (closeButton && typeof closeButton.addEventListener === 'function') {
+      closeButton.addEventListener('click', hidePluginPopover);
+    }
+    const sections = pluginLinkSegmentDetailSections(row, item, index);
+    return [
+      app.createNode('div', {
+        className: 'kernel-runtime-tooltip-header plugin-detail-header',
+        children: [
+          app.createNode('div', {
+            children: [
+              app.createNode('span', {
+                className: 'kernel-runtime-tooltip-title',
+                text: item.detailTitle || item.text || app.t('plugins.link.node')
+              }),
+              app.createNode('span', {
+                className: 'kernel-runtime-tooltip-meta',
+                text: [row && row.kind, row && row.label].filter(Boolean).join(' / ') || app.t('common.dash')
+              })
+            ]
+          }),
+          app.createNode('div', {
+            className: 'plugin-detail-header-actions',
+            children: [
+              app.createNode('span', {
+                className: 'plugin-meta-badge is-ok',
+                text: app.t('plugins.link.step', { index: (index || 0) + 1 })
+              }),
+              closeButton
+            ]
+          })
+        ]
+      }),
+      sections.length
+        ? app.createNode('div', {
+            className: 'plugin-detail-sections',
+            children: sections.map(pluginDetailSectionNode)
+          })
+        : app.createNode('div', {
+            className: 'kernel-runtime-tooltip-meta',
+            text: app.t('plugins.detail.empty')
+          })
+    ];
+  }
+
+  function showPluginLinkPopover(trigger, row, segment, index, pinned) {
+    if (!trigger || !row) return;
+    const popover = ensurePluginPopover();
+    if (pluginDetailPopoverTrigger && pluginDetailPopoverTrigger !== trigger) {
+      pluginDetailPopoverTrigger.setAttribute('aria-expanded', 'false');
+    }
+
+    pluginDetailPopoverTrigger = trigger;
+    pluginDetailPopoverPinned = !!pinned;
+    app.clearNode(popover);
+    app.appendNodeContent(popover, pluginLinkSegmentDetailContent(row, segment, index));
+    popover.hidden = false;
+    popover.classList.add('is-visible');
+    trigger.setAttribute('aria-expanded', 'true');
+    positionPluginPopover();
+  }
+
+  function togglePluginLinkPopover(trigger, row, segment, index) {
+    if (pluginDetailPopoverTrigger === trigger && pluginDetailPopoverPinned) {
+      hidePluginPopover();
+      return;
+    }
+    showPluginLinkPopover(trigger, row, segment, index, true);
+  }
+
+  function createPluginVirtualLinkCard(page) {
+    const rows = pluginVirtualLinkItems(page && page.plugin);
+    if (!rows.length) return null;
+    const rowTitle = (row) => {
+      const parts = row.segments && row.segments.length
+        ? row.segments.map((segment) => segment.text || '').filter(Boolean)
+        : (row.steps || []);
+      return [row.kind, row.label].filter(Boolean).join(': ') + (parts.length ? ' -> ' + parts.join(' -> ') : '');
+    };
+    const stepNode = (step, row, index) => {
+      const segment = step && typeof step === 'object' ? step : { text: String(step || '') };
+      const classes = [
+        'plugin-link-step',
+        segment.current ? 'is-current' : '',
+        segment.core ? 'is-core' : '',
+        segment.apply ? 'is-apply' : '',
+        segment.error ? 'is-error' : ''
+      ].filter(Boolean).join(' ');
+      const button = app.createNode('button', {
+        className: classes,
+        text: segment.text || app.t('common.dash'),
+        title: segment.detailTitle || segment.title || segment.text || '',
+        attrs: { type: 'button', 'aria-expanded': 'false' }
+      });
+      if (button && typeof button.addEventListener === 'function') {
+        button.addEventListener('click', (e) => {
+          if (e && typeof e.preventDefault === 'function') e.preventDefault();
+          if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+          togglePluginLinkPopover(button, row, segment, index);
+        });
+      }
+      return button;
+    };
+    const rowNode = (row) => {
+      return app.createNode('div', {
+        className: 'plugin-link-row',
+        title: rowTitle(row),
+        children: [
+          app.createNode('span', { className: 'plugin-link-kind', text: row.kind || app.t('common.dash') }),
+          app.createNode('span', { className: 'plugin-link-name', text: row.label || app.t('common.dash') }),
+          app.createNode('div', {
+            className: 'plugin-link-path',
+            children: (row.segments && row.segments.length ? row.segments : (row.steps && row.steps.length ? row.steps : [app.t('common.dash')])).reduce((nodes, step, index) => {
+              if (nodes.length) nodes.push(app.createNode('span', { className: 'plugin-link-inline-arrow', text: '>' }));
+              nodes.push(stepNode(step, row, index));
+              return nodes;
+            }, [])
+          })
+        ]
+      });
+    };
+    return app.createNode('section', {
+      className: 'plugin-link-card',
+      children: [
+        app.createNode('div', {
+          className: 'plugin-link-card-head',
+          children: [
+            app.createNode('div', {
+            children: [
+              app.createNode('h3', { text: app.t('plugins.link.title') }),
+              app.createNode('p', {
+                  className: 'plugin-link-desc',
+                  text: app.t('plugins.link.desc')
+                })
+            ]
+          }),
+            app.createNode('span', {
+              className: 'plugin-meta-badge is-ok',
+              text: app.t('plugins.link.count', { count: rows.length })
+            })
+          ]
+        }),
+        app.createNode('div', {
+          className: 'plugin-link-list',
+          children: rows.map(rowNode)
+        })
+      ]
+    });
+  }
+
+  function updatePluginPageLinkCard(panel, page) {
+    if (!panel || !page) return;
+    const current = panel.querySelector ? panel.querySelector('.plugin-link-card') : null;
+    const next = createPluginVirtualLinkCard(page);
+    if (!next) {
+      if (current) {
+        if (typeof current.remove === 'function') current.remove();
+        else if (current.parentNode && typeof current.parentNode.removeChild === 'function') current.parentNode.removeChild(current);
+      }
+      return;
+    }
+    if (current) {
+      if (current.parentNode && typeof current.parentNode.replaceChild === 'function') current.parentNode.replaceChild(next, current);
+      else if (typeof current.replaceWith === 'function') current.replaceWith(next);
+      return;
+    }
+    const pageSection = panel.querySelector ? panel.querySelector('.plugin-page-section') : null;
+    if (pageSection && pageSection.parentNode) {
+      if (pageSection.nextSibling) pageSection.parentNode.insertBefore(next, pageSection.nextSibling);
+      else pageSection.parentNode.appendChild(next);
+    } else {
+      panel.appendChild(next);
+    }
   }
 
   function pluginPages() {
@@ -531,111 +1061,262 @@
   function pluginHostComponentCSS() {
     return `
 :root {
-  color-scheme: light dark;
-  --fwd-bg: #f7f4ed;
-  --fwd-surface: #fffdf8;
-  --fwd-surface-soft: #f1eee7;
-  --fwd-text: #24211d;
-  --fwd-muted: #6d655a;
-  --fwd-border: #ded7ca;
-  --fwd-primary: #1f6f5b;
-  --fwd-primary-soft: #e4f2ed;
-  --fwd-radius: 14px;
-  --fwd-shadow: 0 18px 44px rgba(42, 33, 22, 0.11);
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --fwd-bg: #f5f6f8;
+  --fwd-surface: #ffffff;
+  --fwd-surface-soft: #f8f9fb;
+  --fwd-surface-tint: #eef4ff;
+  --fwd-text: #1f2937;
+  --fwd-muted: #4b5563;
+  --fwd-soft: #6b7280;
+  --fwd-border: #d9dde3;
+  --fwd-border-strong: #c7ced8;
+  --fwd-primary: #2563eb;
+  --fwd-primary-hover: #1d4ed8;
+  --fwd-primary-soft: rgba(37, 99, 235, 0.08);
+  --fwd-focus: rgba(37, 99, 235, 0.14);
+  --fwd-success-bg: #f0fdf4;
+  --fwd-success-border: #86efac;
+  --fwd-success-text: #15803d;
+  --fwd-page-wash-start: rgba(255, 255, 255, 0.92);
+  --fwd-page-wash-end: rgba(245, 246, 248, 0.92);
+  --fwd-radius: 10px;
+  --fwd-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+  color-scheme: light;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+* {
+  box-sizing: border-box;
 }
 body.fwd-plugin-body,
 body {
   margin: 0;
-  background: radial-gradient(circle at top left, rgba(31, 111, 91, 0.12), transparent 34%), var(--fwd-bg);
+  background:
+    linear-gradient(180deg, var(--fwd-page-wash-start), var(--fwd-page-wash-end)),
+    radial-gradient(circle at 12% 0%, rgba(37, 99, 235, 0.08), transparent 32%),
+    var(--fwd-bg);
   color: var(--fwd-text);
+  font-size: 13px;
 }
-.fwd-page { padding: 18px; }
-.fwd-stack { display: grid; gap: 14px; }
-.fwd-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.fwd-page { padding: 8px; }
+.fwd-stack { display: grid; gap: 8px; }
+.fwd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
 .fwd-card {
-  padding: 16px;
+  min-width: 0;
+  padding: 10px;
   border: 1px solid var(--fwd-border);
-  border-radius: var(--fwd-radius);
-  background: var(--fwd-surface);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.94);
   box-shadow: var(--fwd-shadow);
 }
-.fwd-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.fwd-title { margin: 0; font-size: 20px; line-height: 1.25; }
-.fwd-desc { margin: 6px 0 0; color: var(--fwd-muted); line-height: 1.6; }
+.fwd-card + .fwd-card { margin-top: 0; }
+.fwd-card > * + * { margin-top: 8px; }
+.fwd-card > .fwd-toolbar + * { margin-top: 10px; }
+.fwd-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 7px; flex-wrap: wrap; }
+.fwd-title { margin: 0; font-size: 16px; line-height: 1.28; font-weight: 680; letter-spacing: -0.01em; }
+.fwd-desc { margin: 3px 0 0; color: var(--fwd-muted); line-height: 1.42; font-size: 12px; }
 .fwd-muted { color: var(--fwd-muted); }
 .fwd-stat {
-  display: grid; gap: 5px; min-width: 0; padding: 13px;
-  border: 1px solid var(--fwd-border); border-radius: 12px; background: var(--fwd-surface-soft);
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--fwd-border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--fwd-surface), var(--fwd-surface-soft));
 }
-.fwd-stat-label { color: var(--fwd-muted); font-size: 12px; font-weight: 650; }
+.fwd-stat-label { color: var(--fwd-soft); font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
 .fwd-stat-value {
-  color: var(--fwd-text); font-size: 18px; font-weight: 760; line-height: 1.2;
+  color: var(--fwd-text); font-size: 14px; font-weight: 720; line-height: 1.22;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .fwd-button {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-height: 34px; padding: 0 13px; border: 1px solid var(--fwd-border);
-  border-radius: 999px; background: var(--fwd-primary); color: #fff;
-  font-weight: 650; cursor: pointer;
-  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, border-color 0.16s ease;
-}
-.fwd-button.secondary { background: var(--fwd-primary-soft); color: var(--fwd-primary); }
-.fwd-button:hover, .fwd-button:focus {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 18px rgba(31, 111, 91, 0.2);
-}
-.fwd-button:active { transform: translateY(0); box-shadow: none; }
-.fwd-button:disabled { opacity: 0.58; cursor: not-allowed; transform: none; box-shadow: none; }
-.fwd-badge {
-  display: inline-flex; align-items: center; min-height: 24px; padding: 0 9px;
-  border-radius: 999px; border: 1px solid var(--fwd-border);
-  background: var(--fwd-surface-soft); color: var(--fwd-muted); font-size: 12px; font-weight: 650;
-}
-.fwd-status {
-  min-height: 22px;
-  color: var(--fwd-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--fwd-primary);
+  border-radius: 8px;
+  background: var(--fwd-primary);
+  color: #fff;
   font-size: 12px;
   font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+.fwd-button.secondary {
+  border-color: var(--fwd-border);
+  background: var(--fwd-surface);
+  color: var(--fwd-primary);
+}
+.fwd-button:hover, .fwd-button:focus {
+  transform: translateY(-1px);
+  border-color: var(--fwd-primary-hover);
+  background: var(--fwd-primary-hover);
+  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.18);
+}
+.fwd-button.secondary:hover, .fwd-button.secondary:focus {
+  background: var(--fwd-primary-soft);
+  color: var(--fwd-primary-hover);
+}
+.fwd-button:active { transform: translateY(0); box-shadow: none; }
+.fwd-button:disabled { opacity: 0.58; cursor: wait; transform: none; box-shadow: none; }
+.fwd-badge {
+  display: inline-flex; align-items: center; min-height: 21px; padding: 0 8px;
+  border-radius: 999px; border: 1px solid var(--fwd-border);
+  background: var(--fwd-surface-soft); color: var(--fwd-muted); font-size: 11px; font-weight: 650;
+  white-space: nowrap;
+}
+.fwd-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 21px;
+  padding: 0 8px;
+  border: 1px solid var(--fwd-success-border);
+  border-radius: 999px;
+  background: var(--fwd-success-bg);
+  color: var(--fwd-success-text);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 .fwd-toast-stack {
-  position: fixed; right: 14px; bottom: 14px; z-index: 20;
-  display: grid; gap: 8px; max-width: min(320px, calc(100vw - 28px));
+  position: fixed; right: 12px; bottom: 12px; z-index: 20;
+  display: grid; gap: 7px; max-width: min(340px, calc(100vw - 24px));
 }
 .fwd-toast {
-  padding: 9px 11px; border: 1px solid var(--fwd-border); border-radius: 12px;
-  background: var(--fwd-surface); color: var(--fwd-text); box-shadow: var(--fwd-shadow);
-  font-size: 12px; line-height: 1.45; opacity: 0; transform: translateY(6px);
+  padding: 9px 11px; border: 1px solid var(--fwd-border); border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98); color: var(--fwd-text); box-shadow: 0 16px 34px rgba(15, 23, 42, 0.12);
+  font-size: 12px; line-height: 1.45; opacity: 0; transform: translateY(6px) scale(0.98);
   transition: opacity 0.16s ease, transform 0.16s ease;
 }
-.fwd-toast.is-visible { opacity: 1; transform: translateY(0); }
-.fwd-table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 10px; }
-.fwd-table th, .fwd-table td { padding: 10px 12px; border-bottom: 1px solid var(--fwd-border); text-align: left; font-size: 13px; }
-.fwd-table th { color: var(--fwd-muted); background: var(--fwd-surface-soft); }
+.fwd-toast.is-visible { opacity: 1; transform: translateY(0) scale(1); }
+.fwd-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid var(--fwd-border);
+  border-radius: 9px;
+  background: var(--fwd-surface);
+}
+.fwd-table th, .fwd-table td { padding: 8px 10px; border-bottom: 1px solid var(--fwd-border); text-align: left; font-size: 12px; }
+.fwd-table tr:last-child td { border-bottom: 0; }
+.fwd-table th { color: var(--fwd-soft); background: var(--fwd-surface-soft); font-weight: 700; }
 .fwd-table td { overflow-wrap: anywhere; }
-.fwd-field { display: grid; gap: 6px; }
-.fwd-field label { color: var(--fwd-muted); font-size: 12px; font-weight: 650; }
+.fwd-field { display: grid; gap: 6px; min-width: 0; }
+.fwd-field label,
+.fwd-field > span:first-child { color: var(--fwd-muted); font-size: 11px; font-weight: 650; }
 .fwd-input {
-  min-height: 38px; padding: 0 12px; border: 1px solid var(--fwd-border);
-  border-radius: 10px; background: var(--fwd-surface); color: var(--fwd-text);
+  width: 100%;
+  min-height: 31px;
+  padding: 5px 9px;
+  border: 1px solid var(--fwd-border);
+  border-radius: 7px;
+  background: var(--fwd-surface);
+  color: var(--fwd-text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+textarea.fwd-input {
+  min-height: 70px;
+  padding-top: 7px;
+  line-height: 1.45;
+  resize: vertical;
+}
+.fwd-input:hover {
+  border-color: var(--fwd-border-strong);
+}
+.fwd-input:focus {
+  border-color: var(--fwd-primary);
+  box-shadow: 0 0 0 3px var(--fwd-focus);
+  background: #fff;
+}
+select.fwd-input {
+  appearance: none;
+  padding-right: 30px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--fwd-soft) 50%),
+    linear-gradient(135deg, var(--fwd-soft) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) 14px,
+    calc(100% - 11px) 14px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.fwd-input[type="checkbox"] {
+  appearance: none;
+  width: 34px;
+  min-width: 34px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--fwd-surface-soft);
+  cursor: pointer;
+  position: relative;
+  vertical-align: middle;
+}
+.fwd-input[type="checkbox"]::before {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 2px;
+  top: 2px;
+  border-radius: 50%;
+  background: var(--fwd-soft);
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+.fwd-input[type="checkbox"]:checked {
+  border-color: var(--fwd-primary);
+  background: var(--fwd-primary);
+}
+.fwd-input[type="checkbox"]:checked::before {
+  transform: translateX(14px);
+  background: #fff;
+}
+.fwd-input[type="checkbox"]:focus {
+  background: var(--fwd-primary-soft);
+}
+.fwd-input[type="checkbox"]:checked:focus {
+  background: var(--fwd-primary);
 }
 @media (max-width: 720px) {
-  .fwd-page { padding: 12px; }
+  .fwd-page { padding: 8px; }
   .fwd-grid { grid-template-columns: 1fr; }
   .fwd-toolbar { align-items: flex-start; }
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --fwd-bg: #12161a;
-    --fwd-surface: #1b2026;
-    --fwd-surface-soft: #242a31;
-    --fwd-text: #f2efe8;
-    --fwd-muted: #a8a096;
+    --fwd-surface: #171b21;
+    --fwd-surface-soft: #1d232b;
+    --fwd-surface-tint: #172036;
+    --fwd-text: #e5e7eb;
+    --fwd-muted: #b3bcc8;
+    --fwd-soft: #8d98a8;
     --fwd-border: #323943;
-    --fwd-primary: #5bc0a4;
-    --fwd-primary-soft: #18352e;
-    --fwd-shadow: 0 18px 44px rgba(0, 0, 0, 0.26);
+    --fwd-border-strong: #3a4452;
+    --fwd-primary: #60a5fa;
+    --fwd-primary-hover: #93c5fd;
+    --fwd-primary-soft: rgba(96, 165, 250, 0.12);
+    --fwd-focus: rgba(96, 165, 250, 0.16);
+    --fwd-success-bg: rgba(34, 197, 94, 0.16);
+    --fwd-success-border: rgba(74, 222, 128, 0.44);
+    --fwd-success-text: #86efac;
+    --fwd-page-wash-start: rgba(17, 20, 24, 0.92);
+    --fwd-page-wash-end: rgba(17, 20, 24, 0.92);
+    --fwd-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+    color-scheme: dark;
   }
+  .fwd-card { background: rgba(23, 27, 33, 0.94); }
+  .fwd-input:focus { background: var(--fwd-surface); }
+  .fwd-toast { background: rgba(23, 27, 33, 0.98); box-shadow: 0 18px 36px rgba(0, 0, 0, 0.32); }
 }`;
   }
 
@@ -644,6 +1325,7 @@ body {
       version: 'v1',
       pluginId: plugin && plugin.id || '',
       pluginName: plugin && plugin.name || '',
+      locale: app.state.locale || 'zh-CN',
       resources: Array.isArray(plugin && plugin.resources) ? plugin.resources.map(function (resource) {
         return {
           id: resource && resource.id || '',
@@ -673,7 +1355,7 @@ body {
         muted: 'fwd-muted',
         stat: 'fwd-stat',
         statLabel: 'fwd-stat-label',
-      statValue: 'fwd-stat-value',
+        statValue: 'fwd-stat-value',
         status: 'fwd-status',
         toastStack: 'fwd-toast-stack',
         toast: 'fwd-toast',
@@ -689,6 +1371,8 @@ body {
 (function () {
   var host = ${JSON.stringify(host).replace(/</g, '\\u003c')};
   var resizeTimer = 0;
+  var currentLocale = normalizeLocale(host.locale);
+  var localeListeners = [];
   function append(parent, children) {
     (Array.isArray(children) ? children : [children]).forEach(function (child) {
       if (child == null || child === false) return;
@@ -698,16 +1382,49 @@ body {
   function tableCell(tag, text) {
     return host.h(tag, { text: text == null || text === '' ? '-' : String(text) });
   }
+  function normalizeLocale(locale) {
+    return locale === 'en-US' ? 'en-US' : 'zh-CN';
+  }
+  function formatText(text, params) {
+    text = text == null ? '' : String(text);
+    if (!params) return text;
+    return text.replace(/\\{\\{(\\w+)\\}\\}/g, function (_, name) {
+      if (!Object.prototype.hasOwnProperty.call(params, name)) return '';
+      return params[name] == null ? '' : String(params[name]);
+    });
+  }
+  function updateLocale(locale) {
+    var next = normalizeLocale(locale);
+    if (next === currentLocale) return;
+    currentLocale = next;
+    if (document && document.documentElement) document.documentElement.lang = currentLocale;
+    localeListeners.slice().forEach(function (listener) {
+      try {
+        listener(currentLocale);
+      } catch (e) {
+        console.error('plugin locale listener failed:', e);
+      }
+    });
+    scheduleHeight();
+  }
   function measureHeight() {
     var body = document.body;
-    var root = document.documentElement;
-    return Math.max(
-      body ? body.scrollHeight : 0,
-      body ? body.offsetHeight : 0,
-      root ? root.scrollHeight : 0,
-      root ? root.offsetHeight : 0,
-      160
-    );
+    if (!body) return 160;
+    var bodyRect = body.getBoundingClientRect ? body.getBoundingClientRect() : { top: 0, height: 0 };
+    var bottom = 0;
+    var children = body.children || [];
+    for (var i = 0; i < children.length; i++) {
+      var child = children[i];
+      if (!child || !child.getBoundingClientRect) continue;
+      var rect = child.getBoundingClientRect();
+      bottom = Math.max(bottom, rect.bottom - bodyRect.top);
+    }
+    var paddingBottom = 0;
+    if (window.getComputedStyle) {
+      var style = window.getComputedStyle(body);
+      paddingBottom = parseFloat(style && style.paddingBottom || '0') || 0;
+    }
+    return Math.max(Math.ceil(bottom + paddingBottom), 160);
   }
   function postHeight() {
     if (!window.parent || window.parent === window) return;
@@ -732,7 +1449,12 @@ body {
     }
     var id = host.pluginId + ':' + (++rpcSeq);
     return new Promise(function (resolve, reject) {
-      pendingRPC[id] = { resolve: resolve, reject: reject };
+      var timeout = window.setTimeout(function () {
+        if (!pendingRPC[id]) return;
+        delete pendingRPC[id];
+        reject(new Error('plugin host request timed out'));
+      }, 30000);
+      pendingRPC[id] = { resolve: resolve, reject: reject, timeout: timeout };
       window.parent.postMessage({
         type: 'forward-plugin-rpc',
         pluginId: host.pluginId,
@@ -740,21 +1462,32 @@ body {
         op: op,
         payload: payload || {}
       }, '*');
-      window.setTimeout(function () {
-        if (!pendingRPC[id]) return;
-        delete pendingRPC[id];
-        reject(new Error('plugin host request timed out'));
-      }, 30000);
     });
   }
   window.addEventListener('message', function (event) {
+    if (!window.parent || event.source !== window.parent) return;
     var data = event && event.data && typeof event.data === 'object' ? event.data : null;
+    if (data && data.type === 'forward-plugin-locale' && data.pluginId === host.pluginId) {
+      updateLocale(data.locale);
+      return;
+    }
     if (!data || data.type !== 'forward-plugin-rpc-result' || data.pluginId !== host.pluginId || !data.id) return;
     var pending = pendingRPC[data.id];
     if (!pending) return;
     delete pendingRPC[data.id];
-    if (data.ok) pending.resolve(data.result);
-    else pending.reject(new Error(data.error || 'plugin host request failed'));
+    if (pending.timeout) window.clearTimeout(pending.timeout);
+    if (data.ok) {
+      pending.resolve(data.result);
+    } else {
+      var error = new Error(data.error || 'plugin host request failed');
+      error.payload = data.error_payload || null;
+      error.status = data.status || 0;
+      if (error.payload && typeof error.payload === 'object') {
+        error.runtime_status = error.payload.runtime_status || null;
+        error.runtime_error = error.payload.runtime_error || '';
+      }
+      pending.reject(error);
+    }
   });
   host.h = function (tag, opts, children) {
     var el = document.createElement(tag);
@@ -790,6 +1523,30 @@ body {
   host.status = function (text) {
     return host.h('span', { className: host.classes.status, text: text || '' });
   };
+  Object.defineProperty(host, 'locale', {
+    enumerable: true,
+    get: function () {
+      return currentLocale;
+    }
+  });
+  host.t = function (messages, key, params) {
+    key = String(key == null ? '' : key);
+    if (!messages || typeof messages !== 'object') return formatText(key, params);
+    var dict = messages[currentLocale] && typeof messages[currentLocale] === 'object' ? messages[currentLocale] : null;
+    var fallback = messages['en-US'] && typeof messages['en-US'] === 'object'
+      ? messages['en-US']
+      : (messages['zh-CN'] && typeof messages['zh-CN'] === 'object' ? messages['zh-CN'] : {});
+    var text = dict && Object.prototype.hasOwnProperty.call(dict, key) ? dict[key]
+      : (fallback && Object.prototype.hasOwnProperty.call(fallback, key) ? fallback[key] : key);
+    return formatText(text, params);
+  };
+  host.onLocaleChange = function (callback) {
+    if (typeof callback !== 'function') return function () {};
+    localeListeners.push(callback);
+    return function unsubscribe() {
+      localeListeners = localeListeners.filter(function (item) { return item !== callback; });
+    };
+  };
   host.toast = function (message, timeout) {
     var stack = document.querySelector('.' + host.classes.toastStack);
     if (!stack) {
@@ -809,6 +1566,23 @@ body {
     scheduleHeight();
     return toast;
   };
+  host.errorText = function (error, fallback) {
+    if (!error) return fallback || 'Unknown error';
+    if (typeof error === 'string') return error;
+    var payload = error.payload && typeof error.payload === 'object' ? error.payload : null;
+    var runtimeStatus = error.runtime_status || (payload && payload.runtime_status) || null;
+    var message = error.runtime_error || (payload && payload.runtime_error) || '';
+    if (!message && runtimeStatus && typeof runtimeStatus === 'object') {
+      message = runtimeStatus.last_error || runtimeStatus.error || '';
+    }
+    if (!message && payload) message = payload.error || payload.message || '';
+    if (!message && error.message) message = error.message;
+    if (!message) message = String(error);
+    return String(message || fallback || 'Unknown error');
+  };
+  host.toastError = function (error, timeout) {
+    return host.toast(host.errorText(error), timeout || 4200);
+  };
   host.stat = function (label, value, detail) {
     return host.h('div', { className: host.classes.stat, title: detail || '' }, [
       host.h('span', { className: host.classes.statLabel, text: label }),
@@ -824,8 +1598,9 @@ body {
     ]);
   };
   host.data = Object.freeze({
-    list: function (resource) {
-      return rpc('data.list', { resource: resource });
+    list: function (resource, options) {
+      options = options || {};
+      return rpc('data.list', { resource: resource, limit: options.limit, offset: options.offset });
     },
     get: function (resource, key) {
       return rpc('data.get', { resource: resource, key: key });
@@ -838,6 +1613,13 @@ body {
       options = options || {};
       return rpc('data.update', { resource: resource, key: key, data: data, enabled: options.enabled });
     },
+    upsert: function (resource, key, data, options) {
+      options = options || {};
+      return host.data.update(resource, key, data, options).catch(function (error) {
+        if (!error || error.status !== 404) throw error;
+        return host.data.create(resource, data, Object.assign({}, options, { key: key }));
+      });
+    },
     delete: function (resource, key) {
       return rpc('data.delete', { resource: resource, key: key });
     }
@@ -847,6 +1629,7 @@ body {
   };
   host.requestResize = scheduleHeight;
   window.ForwardPluginHost = Object.freeze(host);
+  if (document && document.documentElement) document.documentElement.lang = currentLocale;
   document.addEventListener('DOMContentLoaded', function () {
     document.body.classList.add('fwd-plugin-body');
     scheduleHeight();
@@ -942,6 +1725,9 @@ body {
       iframe.dataset.pluginId = plugin && plugin.id || '';
       iframe.dataset.pluginEntry = entry || '';
     }
+    iframe.onload = function () {
+      postPluginFrameLocale(iframe);
+    };
   }
 
   function setPluginFrameHeight(iframe, height) {
@@ -963,7 +1749,32 @@ body {
     return null;
   }
 
-  function postPluginRPCResult(source, pluginId, id, ok, result, error) {
+  function currentPluginLocale() {
+    const locale = app.state && app.state.locale ? app.state.locale : 'zh-CN';
+    return typeof app.normalizeLocale === 'function' ? app.normalizeLocale(locale) : (locale === 'en-US' ? 'en-US' : 'zh-CN');
+  }
+
+  function postPluginFrameLocale(iframe) {
+    if (!iframe || !iframe.contentWindow || !iframe.dataset) return;
+    const pluginId = iframe.dataset.pluginId || '';
+    if (!pluginId) return;
+    try {
+      iframe.contentWindow.postMessage({
+        type: 'forward-plugin-locale',
+        pluginId,
+        locale: currentPluginLocale()
+      }, '*');
+    } catch (e) {
+      console.error('plugin locale message:', e);
+    }
+  }
+
+  function postAllPluginFrameLocales() {
+    if (typeof document.querySelectorAll !== 'function') return;
+    Array.from(document.querySelectorAll('iframe[data-plugin-frame="1"]')).forEach(postPluginFrameLocale);
+  }
+
+  function postPluginRPCResult(source, pluginId, id, ok, result, error, errorPayload, status) {
     if (!source || !id) return;
     try {
       source.postMessage({
@@ -972,7 +1783,9 @@ body {
         id,
         ok: !!ok,
         result: ok ? result : undefined,
-        error: ok ? undefined : (error || 'plugin request failed')
+        error: ok ? undefined : (error || 'plugin request failed'),
+        error_payload: ok ? undefined : (errorPayload || null),
+        status: ok ? undefined : (status || 0)
       }, '*');
     } catch (e) {
       console.error('plugin rpc response:', e);
@@ -990,7 +1803,12 @@ body {
     const id = encodeURIComponent(pluginRPCString(pluginId, 'plugin id'));
     const resource = payload.resource != null ? encodeURIComponent(pluginRPCString(payload.resource, 'resource')) : '';
     const key = payload.key != null && payload.key !== '' ? encodeURIComponent(pluginRPCString(payload.key, 'key')) : '';
-    if (op === 'data.list') return app.apiCall('GET', '/api/plugins/' + id + '/resources/' + resource);
+    if (op === 'data.list') {
+      const query = [];
+      if (payload.limit != null && payload.limit !== '') query.push('limit=' + encodeURIComponent(String(payload.limit)));
+      if (payload.offset != null && payload.offset !== '') query.push('offset=' + encodeURIComponent(String(payload.offset)));
+      return app.apiCall('GET', '/api/plugins/' + id + '/resources/' + resource + (query.length ? '?' + query.join('&') : ''));
+    }
     if (op === 'data.get') {
       if (!key) throw new Error('key is required');
       return app.apiCall('GET', '/api/plugins/' + id + '/resources/' + resource + '/' + key);
@@ -1021,11 +1839,13 @@ body {
   async function handlePluginFrameRPC(event, frame, data) {
     const pluginId = frame && frame.dataset ? frame.dataset.pluginId : '';
     if (!pluginId || data.pluginId !== pluginId) return;
+    if (typeof data.id !== 'string' || data.id.length < 1 || data.id.length > 128) return;
+    if (typeof data.op !== 'string' || data.op.length < 1 || data.op.length > 64) return;
     try {
-      const result = await callPluginRPCAPI(pluginId, String(data.op || ''), data.payload);
+      const result = await callPluginRPCAPI(pluginId, data.op, data.payload);
       postPluginRPCResult(event.source, pluginId, data.id, true, result, '');
     } catch (e) {
-      postPluginRPCResult(event.source, pluginId, data.id, false, null, e.message || String(e));
+      postPluginRPCResult(event.source, pluginId, data.id, false, null, e.message || String(e), e.payload || null, e.status || 0);
     }
   }
 
@@ -1056,42 +1876,46 @@ body {
     panel.setAttribute('aria-labelledby', 'tab-' + page.tabID + '-button');
     panel.hidden = true;
 
+    const children = [
+      app.createNode('div', {
+        className: 'plugin-page-toolbar',
+        children: [
+          app.createNode('div', {
+            className: 'plugin-page-title-block',
+            children: [
+              app.createNode('h2', { text: page.title }),
+              app.createNode('p', {
+                className: 'section-desc',
+                text: app.t('plugins.ui.loadedMeta', { id: page.pluginID, entry: page.entry })
+              })
+            ]
+          }),
+          app.createNode('button', {
+            className: 'mini-btn btn-reload-plugin-page',
+            text: app.t('plugins.refresh'),
+            dataset: { pluginTab: page.tabID }
+          })
+        ]
+      })
+    ];
+    children.push(app.createNode('iframe', {
+      className: 'plugin-page-frame',
+      title: page.title,
+      dataset: {
+        pluginFrame: '1',
+        pluginId: page.pluginID,
+        pluginEntry: page.entry
+      },
+      attrs: { sandbox: 'allow-scripts allow-forms allow-popups' }
+    }));
+
     const section = app.createNode('section', {
       className: 'plugin-page-section',
-      children: [
-        app.createNode('div', {
-          className: 'plugin-page-toolbar',
-          children: [
-            app.createNode('div', {
-              className: 'plugin-page-title-block',
-              children: [
-                app.createNode('h2', { text: page.title }),
-                app.createNode('p', {
-                  className: 'section-desc',
-                  text: app.t('plugins.ui.loadedMeta', { id: page.pluginID, entry: page.entry })
-                })
-              ]
-            }),
-            app.createNode('button', {
-              className: 'mini-btn btn-reload-plugin-page',
-              text: app.t('plugins.refresh'),
-              dataset: { pluginTab: page.tabID }
-            })
-          ]
-        }),
-        app.createNode('iframe', {
-          className: 'plugin-page-frame',
-          title: page.title,
-          dataset: {
-            pluginFrame: '1',
-            pluginId: page.pluginID,
-            pluginEntry: page.entry
-          },
-          attrs: { sandbox: 'allow-scripts allow-forms allow-popups' }
-        })
-      ]
+      children
     });
     panel.appendChild(section);
+    const linkCard = pluginHasVirtualLinkCard(page.plugin) ? createPluginVirtualLinkCard(page) : null;
+    if (linkCard) panel.appendChild(linkCard);
     return panel;
   }
 
@@ -1150,6 +1974,8 @@ body {
         if (diagnosticsPanel && diagnosticsPanel.parentNode === main) main.insertBefore(panel, diagnosticsPanel);
         else if (pluginsPanel && pluginsPanel.parentNode === main && pluginsPanel.nextSibling) main.insertBefore(panel, pluginsPanel.nextSibling);
         else main.appendChild(panel);
+      } else {
+        updatePluginPageLinkCard(document.getElementById('tab-' + page.tabID), page);
       }
     });
 
@@ -1381,6 +2207,7 @@ body {
         className: 'plugin-status-compact',
         children: [
           app.createStatusBadgeNode(info, ''),
+          pluginStabilityBadgeNode(plugin),
           app.createNode('button', {
             className: 'kernel-runtime-detail-trigger plugin-detail-trigger',
             text: app.t('plugins.details'),
@@ -1501,6 +2328,20 @@ body {
     if (app.el.pluginUITitle) app.el.pluginUITitle.textContent = app.t('plugins.ui.emptyTitle');
     if (app.state.plugins) app.state.plugins.activePluginId = '';
   };
+
+  if (app.__enablePluginTests) {
+    app.__pluginLinkRowsForTest = pluginVirtualLinkItems;
+    app.__createPluginLinkCardForTest = createPluginVirtualLinkCard;
+  }
+
+  app.refreshLocalizedUI = (function wrapPluginLocalizedUI(original) {
+    return function refreshLocalizedUIWithPlugins() {
+      if (typeof original === 'function') original();
+      if (typeof app.renderPluginsTable === 'function') app.renderPluginsTable();
+      renderPluginPageTabs();
+      postAllPluginFrameLocales();
+    };
+  })(app.refreshLocalizedUI);
 
   app.handleTabLoad = (function wrapPluginPageTabLoad(original) {
     return function handleTabLoadWithPluginPages(target) {

@@ -10,10 +10,18 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+const pluginControlMapClearMaxEntries = 16384
+
 func (rt *linuxKernelRuleRuntime) PutPluginMapValue(pluginID string, objectID string, mapName string, key []byte, value []byte) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return putPluginMapValueInRefs(rt.pluginPipelineLoaded, pluginID, objectID, mapName, key, value)
+}
+
+func (rt *linuxKernelRuleRuntime) GetPluginMapValue(pluginID string, objectID string, mapName string, key []byte) ([]byte, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return getPluginMapValueInRefs(rt.pluginPipelineLoaded, pluginID, objectID, mapName, key)
 }
 
 func (rt *linuxKernelRuleRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
@@ -32,6 +40,12 @@ func (rt *linuxPluginDataplaneRuntime) PutPluginMapValue(pluginID string, object
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return putPluginMapValueInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, key, value)
+}
+
+func (rt *linuxPluginDataplaneRuntime) GetPluginMapValue(pluginID string, objectID string, mapName string, key []byte) ([]byte, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return getPluginMapValueInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, key)
 }
 
 func (rt *linuxPluginDataplaneRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
@@ -71,6 +85,21 @@ func putPluginMapValueInRefs(refs []loadedPluginObjectRef, pluginID string, obje
 	return nil
 }
 
+func getPluginMapValueInRefs(refs []loadedPluginObjectRef, pluginID string, objectID string, mapName string, key []byte) ([]byte, error) {
+	m, err := findPluginLoadedMap(refs, pluginID, objectID, mapName)
+	if err != nil {
+		return nil, err
+	}
+	if int(m.KeySize()) != len(key) {
+		return nil, fmt.Errorf("map %s key size = %d, want %d", mapName, len(key), m.KeySize())
+	}
+	value := make([]byte, int(m.ValueSize()))
+	if err := m.Lookup(key, value); err != nil {
+		return nil, fmt.Errorf("get map %s: %w", mapName, err)
+	}
+	return value, nil
+}
+
 func deletePluginMapValueInRefs(refs []loadedPluginObjectRef, pluginID string, objectID string, mapName string, key []byte) error {
 	m, err := findPluginLoadedMap(refs, pluginID, objectID, mapName)
 	if err != nil {
@@ -95,9 +124,13 @@ func clearPluginMapInRefs(refs []loadedPluginObjectRef, pluginID string, objectI
 	if keySize <= 0 || valueSize <= 0 {
 		return fmt.Errorf("map %s has invalid key/value size %d/%d", mapName, keySize, valueSize)
 	}
+	maxEntries := m.MaxEntries()
+	if maxEntries > pluginControlMapClearMaxEntries {
+		return fmt.Errorf("map %s max entries = %d exceeds clear limit %d; delete keys explicitly", mapName, maxEntries, pluginControlMapClearMaxEntries)
+	}
 	key := make([]byte, keySize)
 	value := make([]byte, valueSize)
-	keys := make([][]byte, 0)
+	keys := make([][]byte, 0, maxEntries)
 	iter := m.Iterate()
 	for iter.Next(key, value) {
 		keys = append(keys, append([]byte(nil), key...))

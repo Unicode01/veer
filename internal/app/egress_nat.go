@@ -8,11 +8,12 @@ import (
 )
 
 const (
-	workerKindEgressNAT            = "egress_nat"
-	kernelModeEgressNAT            = "egress_nat"
-	kernelModeEgressNATPassthrough = "egress_nat_passthrough"
-	egressNATTypeSymmetric         = "symmetric"
-	egressNATTypeFullCone          = "full_cone"
+	workerKindEgressNAT             = "egress_nat"
+	kernelModeEgressNAT             = "egress_nat"
+	kernelModeEgressNATPassthrough  = "egress_nat_passthrough"
+	egressNATTypeSymmetric          = "symmetric"
+	egressNATTypeFullCone           = "full_cone"
+	egressNATRedirectModePreparedL2 = "prepared_l2"
 )
 
 const (
@@ -106,6 +107,26 @@ func normalizeEgressNATType(natType string) string {
 func isValidEgressNATType(natType string) bool {
 	switch normalizeEgressNATType(natType) {
 	case egressNATTypeSymmetric, egressNATTypeFullCone:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeEgressNATRedirectMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		return ""
+	case egressNATRedirectModePreparedL2, "raw_l2", "vtap":
+		return egressNATRedirectModePreparedL2
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
+func isValidEgressNATRedirectMode(mode string) bool {
+	switch normalizeEgressNATRedirectMode(mode) {
+	case "", egressNATRedirectModePreparedL2:
 		return true
 	default:
 		return false
@@ -371,20 +392,21 @@ func buildKernelEgressNATLocalIPv4SetWithSnapshot(rules []Rule, snapshot egressN
 
 func buildEgressNATSyntheticRule(item EgressNAT, childInterface string, id int64, proto string) Rule {
 	return Rule{
-		ID:               id,
-		InInterface:      strings.TrimSpace(childInterface),
-		InIP:             "0.0.0.0",
-		InPort:           0,
-		OutInterface:     item.OutInterface,
-		OutIP:            "0.0.0.0",
-		OutSourceIP:      item.OutSourceIP,
-		OutPort:          0,
-		Protocol:         proto,
-		Enabled:          item.Enabled,
-		Transparent:      false,
-		EnginePreference: ruleEngineKernel,
-		kernelMode:       kernelModeEgressNAT,
-		kernelNATType:    normalizeEgressNATType(item.NATType),
+		ID:                 id,
+		InInterface:        strings.TrimSpace(childInterface),
+		InIP:               "0.0.0.0",
+		InPort:             0,
+		OutInterface:       item.OutInterface,
+		OutIP:              "0.0.0.0",
+		OutSourceIP:        item.OutSourceIP,
+		OutPort:            0,
+		Protocol:           proto,
+		Enabled:            item.Enabled,
+		Transparent:        false,
+		EnginePreference:   ruleEngineKernel,
+		kernelMode:         kernelModeEgressNAT,
+		kernelNATType:      normalizeEgressNATType(item.NATType),
+		kernelRedirectMode: normalizeEgressNATRedirectMode(item.RedirectMode),
 	}
 }
 

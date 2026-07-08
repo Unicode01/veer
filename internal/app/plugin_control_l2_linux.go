@@ -3,6 +3,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -185,6 +186,9 @@ func recvPluginControlL2Frame(fd int, iface *net.Interface, req pluginControlL2R
 		if etherType != req.EtherType {
 			continue
 		}
+		if !pluginControlL2FrameMatchesRecvFilters(req, buf[:nread]) {
+			continue
+		}
 		var dst, src [6]byte
 		copy(dst[:], buf[0:6])
 		copy(src[:], buf[6:12])
@@ -257,6 +261,9 @@ func recvManyPluginControlL2Frames(fd int, iface *net.Interface, req pluginContr
 		if etherType != req.Recv.EtherType {
 			continue
 		}
+		if !pluginControlL2FrameMatchesRecvFilters(req.Recv, buf[:nread]) {
+			continue
+		}
 		var dst, src [6]byte
 		copy(dst[:], buf[0:6])
 		copy(src[:], buf[6:12])
@@ -273,6 +280,34 @@ func recvManyPluginControlL2Frames(fd int, iface *net.Interface, req pluginContr
 		})
 	}
 	return frames, nil
+}
+
+func pluginControlL2FrameMatchesRecvFilters(req pluginControlL2RecvRequest, frame []byte) bool {
+	if len(frame) < 14 {
+		return false
+	}
+	if req.HasDstMAC && !bytes.Equal(frame[0:6], req.DstMAC[:]) {
+		return false
+	}
+	if req.HasSrcMAC && !bytes.Equal(frame[6:12], req.SrcMAC[:]) {
+		return false
+	}
+	if req.HasPPPoECode || req.HasPPPoESessionID {
+		if len(frame) < 20 {
+			return false
+		}
+		if req.EtherType != 0x8863 && req.EtherType != 0x8864 {
+			return false
+		}
+		pppoe := frame[14:]
+		if req.HasPPPoECode && pppoe[1] != req.PPPoECode {
+			return false
+		}
+		if req.HasPPPoESessionID && binary.BigEndian.Uint16(pppoe[2:4]) != req.PPPoESessionID {
+			return false
+		}
+	}
+	return true
 }
 
 func htons(value uint16) uint16 {

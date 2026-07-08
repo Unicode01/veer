@@ -17,6 +17,10 @@ var PPP_PAP = 0xc023;
 var PPP_CHAP = 0xc223;
 var PPP_IPCP = 0x8021;
 var PPP_IPV6CP = 0x8057;
+var TUNNEL_CONFIG_RESOURCE = 'tunnel_configs';
+var TUNNEL_CONFIG_KEY = 'active';
+var TUNNEL_REPAIR_TIMER = 'tunnel_repair';
+var TUNNEL_CONFIG_HEX_BYTES = 40;
 var IPCP_OPTION_IP_ADDRESS = 3;
 var IPV6CP_OPTION_INTERFACE_ID = 1;
 var DHCPV6_SOLICIT = 1;
@@ -31,14 +35,158 @@ var DHCPV6_OPT_RECONF_ACCEPT = 20;
 var DHCPV6_OPT_IA_PD = 25;
 var DHCPV6_OPT_IAPREFIX = 26;
 var DHCPV6_OPT_CLIENT_FQDN = 39;
+var TUNNEL_STATS_BUILD_NOTE = 'Per-packet tunnel counters are compiled out in the default object. Rebuild with PPPOE_TUNNEL_DIAG=1 to enable non-zero diagnostic counters.';
+
+plugin.capabilities(['pppoe', 'raw_l2', 'control']);
+plugin.virtualInterface({
+  id: 'pppoe0',
+  type: 'logical',
+  description: 'Example logical PPPoE session endpoint used by the control-plane demo.'
+});
+ebpf.loadObject({
+  id: 'pppoe_tunnel',
+  path: 'pppoe_tunnel.o',
+  sha256: crypto.sha256File('pppoe_tunnel.o'),
+  description: 'TC dataplane that can either run a direct IPv4/IPv6-over-PPPoE tunnel or couple IPv4 PPPoE session traffic into the fvtap forward/reply pipeline.',
+  programs: [
+    {id: 'tc_tunnel', section: 'tc/fvtap/pre_forward', type: 'tc'},
+    {id: 'tc_reply_encap', section: 'tc/fvtap/post_reply', type: 'tc'}
+  ]
+});
+hooks.attach({
+  id: 'pppoe-forward',
+  engine: 'tc',
+  attach: 'ingress',
+  stage: 'forward',
+  priority: 20,
+  program: 'pppoe_tunnel:tc_tunnel',
+  mode: 'rewrite'
+});
+hooks.attach({
+  id: 'pppoe-reply',
+  engine: 'tc',
+  attach: 'ingress',
+  stage: 'reply',
+  priority: 1020,
+  program: 'pppoe_tunnel:tc_reply_encap',
+  mode: 'rewrite',
+  context: ['tc_plugin_ctx_v4']
+});
+plugin.resource({
+  id: 'hook_bindings',
+  description: 'Runtime TC hook interface bindings. Records map a declared hook_id to one or more real Linux interfaces.',
+  methods: ['list', 'get', 'create', 'update', 'delete'],
+  runtime_update: 'plugin_reconcile',
+  max_records: 16,
+  max_record_bytes: 4096
+});
+plugin.resource({
+  id: 'profiles',
+  description: 'PPPoE account and interface profile used by the example actions.',
+  methods: ['list', 'get', 'create', 'update', 'delete'],
+  runtime_update: 'manual',
+  max_records: 16,
+  max_record_bytes: 8192,
+  secret_fields: ['password']
+});
+plugin.resource({
+  id: 'sessions',
+  description: 'Last discovery/probe results written by the control script for the UI.',
+  methods: ['list', 'get', 'create', 'update', 'delete'],
+  runtime_update: 'manual',
+  max_records: 32,
+  max_record_bytes: 16384,
+  secret_fields: ['password']
+});
+plugin.resource({
+  id: 'wan_links',
+  description: 'Normalized WAN session state exported for wan_core and forward_core handoff.',
+  methods: ['list', 'get', 'create', 'update', 'delete'],
+  runtime_update: 'manual',
+  max_records: 32,
+  max_record_bytes: 32768,
+  secret_fields: ['password']
+});
+plugin.resource({
+  id: TUNNEL_CONFIG_RESOURCE,
+  description: 'Last installed TC tunnel map configuration. Replayed after plugin dataplane reloads.',
+  methods: ['list', 'get', 'create', 'update', 'delete'],
+  runtime_update: 'runtime_apply',
+  max_records: 1,
+  max_record_bytes: 4096
+});
+plugin.action({
+  id: 'discover',
+  description: 'Send PADI and record the first PADO response.',
+  runtime_update: 'runtime_apply',
+  max_payload_bytes: 8192
+});
+plugin.action({
+  id: 'probe_session',
+  description: 'Run discovery, open a PPPoE session, send one LCP request and optional PAP/CHAP response, then send PADT by default.',
+  runtime_update: 'runtime_apply',
+  max_payload_bytes: 8192
+});
+plugin.action({
+  id: 'traffic_probe',
+  description: 'Run discovery/session setup and install the TC IPv4/IPv6-over-PPPoE tunnel without sending PADT.',
+  runtime_update: 'runtime_apply',
+  max_payload_bytes: 8192
+});
+plugin.action({
+  id: 'dial',
+  description: 'Run discovery/session setup, negotiate IPCP/IPv6CP/optional DHCPv6-PD, keep the PPPoE session open, and optionally arm LCP keepalive.',
+  runtime_update: 'runtime_apply',
+  max_payload_bytes: 8192
+});
+plugin.action({
+  id: 'disconnect',
+  description: 'Send PADT for the stored or provided session and clear keepalive.',
+  runtime_update: 'runtime_apply',
+  max_payload_bytes: 4096
+});
+plugin.action({
+  id: 'clear_state',
+  description: 'Delete the stored last probe result.',
+  runtime_update: 'runtime_apply',
+  max_payload_bytes: 1024
+});
+plugin.action({
+  id: 'debug_stats',
+  description: 'Read PPPoE tunnel dataplane counters for diagnostics.',
+  runtime_update: 'runtime_apply',
+  max_payload_bytes: 1024
+});
+ui.register({
+  static_dir: 'ui',
+  entry: 'index.html',
+  sha256: crypto.sha256File('ui/index.html'),
+  page: 'pppoe',
+  page_title: 'PPPoE'
+});
 
 exports.onReconcile = function () {
-  // The lab plugin has no background state to reconcile; keep the hook explicit
-  // so the runtime reports a clean control-plane status at startup.
+  try {
+    applyStoredTunnelConfig(false);
+  } catch (e) {
+    log.info('pppoe tunnel config replay deferred: ' + errorMessage(e));
+  }
+  armTunnelRepair();
+};
+
+exports.onResourceApply = function (ctx) {
+  if (!ctx.resource || ctx.resource.id !== TUNNEL_CONFIG_RESOURCE) return;
+  applyTunnelConfigRecords(ctx.records || [], true);
+  armTunnelRepair();
 };
 
 exports.onTimer = function (ctx) {
   if (!ctx.timer) return;
+  if (ctx.timer.name === TUNNEL_REPAIR_TIMER) {
+    applyStoredTunnelConfig(false);
+    armTunnelRepair();
+    return;
+  }
   if (ctx.timer.name === 'session_control') {
     serviceSessionControlTimer(ctx.timer.payload || {});
     return;
@@ -50,8 +198,15 @@ exports.onTimer = function (ctx) {
   var peerMAC = macText(payload.ac_mac || payload.peer_mac || '');
   if (!sessionID || !peerMAC) throw new Error('lcp_echo timer requires session_id and ac_mac');
   var result = sendLCPEcho(profile, peerMAC, sessionID);
-  if (result.phase !== 'keepalive_ok' && profile.auto_redial) {
-    result = redialAfterKeepaliveFailure(profile, result);
+  if (result.phase !== 'keepalive_ok') {
+    if (profile.auto_redial) {
+      result = redialAfterKeepaliveFailure(profile, result);
+    } else if (profile.redial_clear_tunnel) {
+      clearTunnelConfig();
+    }
+    if (result.phase !== 'keepalive_ok' && result.phase !== 'redial_ok') {
+      markWANLinkDown(profile, payload, result.phase);
+    }
   }
   resources.set('sessions', 'keepalive', result);
 };
@@ -59,14 +214,24 @@ exports.onTimer = function (ctx) {
 exports.onAction = function (ctx) {
   var action = ctx.action && ctx.action.id;
   if (action === 'clear_state') {
-    var clearKey = token((ctx.payload || {}).profile_key || (ctx.payload || {}).profile || 'default');
+    var clearPayload = ctx.payload || {};
+    var clearKey = token(clearPayload.profile_key || clearPayload.profile || 'default');
+    failCloseWANCoreFromStored(clearKey, clearPayload, 'cleared');
     resources.delete('sessions', 'last');
     resources.delete('sessions', 'keepalive');
     resources.delete('sessions', 'control');
     resources.delete('wan_links', clearKey);
     timer.clear('lcp_echo');
     timer.clear('session_control');
+    timer.clear(TUNNEL_REPAIR_TIMER);
     clearTunnelConfig();
+    return;
+  }
+  if (action === 'debug_stats') {
+    resources.set('sessions', 'debug_stats', {
+      phase: 'debug_stats',
+      stats: readTunnelStats()
+    });
     return;
   }
 
@@ -86,6 +251,7 @@ exports.onAction = function (ctx) {
     if (!hasOwn(ctx.payload || {}, 'send_padt')) profile.send_padt = false;
     var tunnelSession = probeSession(profile);
     recordSession(profile, tunnelSession);
+    requireInstalledTunnel(tunnelSession);
     armSessionControl(profile, tunnelSession);
     return;
   }
@@ -111,14 +277,14 @@ function loadProfile(payload) {
   var profile = merge(data, payload || {});
   profile.profile_key = key;
   profile.wan_id = token(profile.wan_id || key);
-  profile.interface = text(profile.interface || profile.iface || '');
-  if (!profile.interface) throw new Error('interface is required');
+  profile.interface = ifaceName(profile.interface || profile.iface || '', 'interface');
   profile.username = text(profile.username || '');
   profile.password = text(profile.password || '');
+  profile.password = resolveProfilePassword(profile);
   profile.service = text(profile.service || '');
   profile.ac_name = text(profile.ac_name || '');
   profile.auth = lower(profile.auth || 'pap');
-  profile.timeout_ms = clampInt(profile.timeout_ms, 50, 1500, 700);
+  profile.timeout_ms = clampInt(profile.timeout_ms, 50, 5000, 700);
   profile.control_ack_timeout_ms = clampInt(
     firstDefined(profile.control_ack_timeout_ms, profile.ack_exchange_timeout_ms),
     10,
@@ -145,6 +311,14 @@ function loadProfile(payload) {
   profile.auto_redial = bool(firstDefined(profile.auto_redial, profile.redial, profile.reconnect, profile.reconnect_on_timeout), false);
   profile.redial_clear_tunnel = bool(firstDefined(profile.redial_clear_tunnel, profile.clear_tunnel_on_redial), true);
   profile.install_tunnel = bool(profile.install_tunnel, false);
+  profile.prepare_interfaces = bool(firstDefined(profile.prepare_interfaces, profile.prepare_tunnel_interfaces), true);
+  profile.prepare_lan_mtu = bool(firstDefined(profile.prepare_lan_mtu, profile.set_lan_mtu), true);
+  profile.prepare_wan_mtu = bool(firstDefined(profile.prepare_wan_mtu, profile.set_wan_mtu), false);
+  profile.prepare_offloads = bool(firstDefined(profile.prepare_offloads, profile.disable_offloads), true);
+  profile.prepare_lan_peer = bool(firstDefined(profile.prepare_lan_peer, profile.prepare_lan_peer_interface), !profile.lan_dst_mac);
+  profile.allow_unsafe_offloads = bool(firstDefined(profile.allow_unsafe_offloads, profile.allow_offload_prepare_failure), false);
+  profile.sync_hook_bindings = bool(firstDefined(profile.sync_hook_bindings, profile.hook_bindings), true);
+  profile.apply_hook_bindings = bool(firstDefined(profile.apply_hook_bindings, profile.hook_bindings_apply), true);
   profile.post_session_control_ms = clampInt(
     firstDefined(profile.post_session_control_ms, profile.post_dial_control_ms, profile.control_drain_ms),
     0,
@@ -152,10 +326,15 @@ function loadProfile(payload) {
     profile.install_tunnel ? 3000 : 0
   );
   profile.coupled = bool(profile.coupled || profile.forward_coupled, false);
+  profile.decap_mode = lower(firstDefined(profile.decap_mode, profile.pppoe_decap_mode, 'manual'));
+  if (profile.decap_mode !== 'manual' && profile.decap_mode !== 'auto') {
+    throw new Error('decap_mode must be manual or auto');
+  }
+  profile.manual_decap = profile.decap_mode === 'manual';
   profile.send_padt = bool(profile.send_padt, true);
-  profile.lan_interface = text(profile.lan_interface || profile.lan_if || profile.lan || profile.vtap_interface || profile.vtap || '');
-  profile.lan_peer_interface = text(profile.lan_peer_interface || profile.local_interface || profile.host_interface || profile.host || '');
-  profile.wan_interface = text(profile.wan_interface || profile.wan_if || profile.wan || profile.interface || '');
+  profile.lan_interface = optionalIfaceName(profile.lan_interface || profile.lan_if || profile.lan || profile.vtap_interface || profile.vtap || '', 'lan_interface');
+  profile.lan_peer_interface = optionalIfaceName(profile.lan_peer_interface || profile.local_interface || profile.host_interface || profile.host || '', 'lan_peer_interface');
+  profile.wan_interface = optionalIfaceName(profile.wan_interface || profile.wan_if || profile.wan || profile.interface || '', 'wan_interface');
   profile.lan_ifindex = clampInt(profile.lan_ifindex, 0, 2147483647, 0);
   profile.wan_ifindex = clampInt(profile.wan_ifindex, 0, 2147483647, 0);
   profile.lan_src_mac = macText(profile.lan_src_mac || profile.lan_mac || '');
@@ -202,14 +381,7 @@ function probeSession(profile) {
   appendForwardedTag(padrTags, pado, TAG_AC_COOKIE);
   appendForwardedTag(padrTags, pado, TAG_RELAY_SESSION_ID);
 
-  var padsFrame = net.l2.exchange({
-    interface: profile.interface,
-    ethertype: ETH_P_PPP_DISC,
-    dst_mac: padoFrame.src_mac,
-    payload: pppoeDiscovery(CODE_PADR, 0, padrTags),
-    timeout_ms: profile.timeout_ms,
-    max_bytes: 1500
-  });
+  var padsFrame = sendPADR(profile, padoFrame.src_mac, hostUniq, padrTags);
   if (padsFrame === null) {
     return baseResult(profile, 'timeout', {message: 'PADS timeout', ac_mac: padoFrame.src_mac});
   }
@@ -222,8 +394,14 @@ function probeSession(profile) {
   var frames = runSessionProbe(profile, padsFrame.src_mac, pads.session_id, padsFrame.dst_mac);
   var tunnel = null;
   if (profile.install_tunnel) {
-    if (!lcpReadyForNetworkCP(profile, frames)) throw new Error('cannot install tunnel before LCP/auth is ready');
-    tunnel = installTunnel(profile, padsFrame, pads.session_id);
+    try {
+      if (!lcpReadyForNetworkCP(profile, frames)) throw new Error('cannot install tunnel before LCP/auth is ready');
+      tunnel = installTunnel(profile, padsFrame, pads.session_id);
+    } catch (e) {
+      sendPADT(profile, padsFrame.src_mac, pads.session_id);
+      clearTunnelConfig();
+      throw e;
+    }
   }
   if (profile.send_padt) {
     sendPADT(profile, padsFrame.src_mac, pads.session_id);
@@ -255,7 +433,7 @@ function probeSession(profile) {
 
 function installTunnel(profile, padsFrame, sessionID) {
   var lanLink = profile.lan_interface ? net.link.get(profile.lan_interface) : null;
-  var lanPeerLink = profile.lan_peer_interface ? net.link.get(profile.lan_peer_interface) : null;
+  var lanPeerLink = profile.lan_peer_interface && !profile.lan_dst_mac ? net.link.get(profile.lan_peer_interface) : null;
   var wanLink = profile.wan_interface ? net.link.get(profile.wan_interface) : null;
   var lanIfIndex = profile.lan_ifindex || (lanLink && lanLink.ifindex) || 0;
   var wanIfIndex = profile.wan_ifindex || (wanLink && wanLink.ifindex) || padsFrame.ifindex || 0;
@@ -269,19 +447,51 @@ function installTunnel(profile, padsFrame, sessionID) {
   if (!lanDstMAC) throw new Error('lan_dst_mac/client_mac or lan_peer_interface mac is required to install the TC tunnel');
   if (!wanSrcMAC) throw new Error('wan_src_mac is required to install the TC tunnel');
   if (!wanDstMAC) throw new Error('wan_dst_mac/ac_mac is required to install the TC tunnel');
+  var interfacePreparation = prepareTunnelInterfaces(profile);
+  var hookBindings = syncTunnelHookBindings(profile);
+  clearTunnelStats();
 
   var flags = profile.coupled ? 1 : 0;
-  var value = ''
-    + u32lehex(1)
-    + u32lehex(lanIfIndex)
-    + u32lehex(wanIfIndex)
-    + u16lehex(sessionID)
-    + u16lehex(flags)
-    + macHex(lanSrcMAC)
-    + macHex(lanDstMAC)
-    + macHex(wanSrcMAC)
-    + macHex(wanDstMAC);
-  ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0), value);
+  if (profile.manual_decap) flags |= 2;
+  var value = tunnelConfigValueHex({
+    enabled: 1,
+    lan_ifindex: lanIfIndex,
+    wan_ifindex: wanIfIndex,
+    session_id: sessionID,
+    flags: flags,
+    lan_src_mac: lanSrcMAC,
+    lan_dst_mac: lanDstMAC,
+    wan_src_mac: wanSrcMAC,
+    wan_dst_mac: wanDstMAC
+  });
+  var tunnelRecord = {
+    object: 'pppoe_tunnel',
+    map: 'pppoe_tunnel_config',
+    value_hex: value,
+    mode: profile.coupled ? 'coupled_fvtap' : 'direct_vtap',
+    lan_interface: profile.lan_interface,
+    lan_peer_interface: profile.lan_peer_interface,
+    wan_interface: profile.wan_interface,
+    lan_ifindex: lanIfIndex,
+    wan_ifindex: wanIfIndex,
+    lan_src_mac: lanSrcMAC,
+    lan_dst_mac: lanDstMAC,
+    wan_src_mac: wanSrcMAC,
+    wan_dst_mac: wanDstMAC,
+    session_id: sessionID,
+    flags: flags,
+    coupled: profile.coupled,
+    decap_mode: profile.decap_mode,
+    tunnel_repair_interval_ms: clampInt(profile.tunnel_repair_interval_ms, 500, 86400000, 2000),
+    updated_at: new Date().toISOString()
+  };
+  try {
+    resources.set(TUNNEL_CONFIG_RESOURCE, TUNNEL_CONFIG_KEY, tunnelRecord, true, true);
+  } catch (e) {
+    clearTunnelConfig();
+    throw e;
+  }
+  armTunnelRepair();
   return {
     object: 'pppoe_tunnel',
     map: 'pppoe_tunnel_config',
@@ -297,16 +507,260 @@ function installTunnel(profile, padsFrame, sessionID) {
     lan_dst_mac: lanDstMAC,
     wan_src_mac: wanSrcMAC,
     wan_dst_mac: wanDstMAC,
-    coupled: profile.coupled
+    interface_preparation: interfacePreparation,
+    hook_bindings: hookBindings,
+    coupled: profile.coupled,
+    decap_mode: profile.decap_mode
   };
 }
 
-function clearTunnelConfig() {
-  try {
-    ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0), repeatHex('00', 40));
-  } catch (e) {
-    log.info('pppoe tunnel config clear skipped: ' + (e && e.message ? e.message : String(e)));
+function requireInstalledTunnel(session) {
+  if (!session || session.tunnel_installed !== true || !session.tunnel) {
+    throw new Error('PPPoE traffic_probe did not install tunnel: phase=' + text(session && session.phase || 'unknown') +
+      (session && session.message ? ' message=' + session.message : ''));
   }
+}
+
+function syncTunnelHookBindings(profile) {
+  if (!profile.sync_hook_bindings) {
+    return {status: 'disabled'};
+  }
+  var wan = profile.wan_interface || profile.interface || '';
+  var forwardInterfaces = uniqueInterfaces([profile.lan_interface, profile.lan_peer_interface, wan]);
+  if (!forwardInterfaces.length) {
+    return {status: 'skipped', reason: 'no hook interfaces'};
+  }
+  resources.set('hook_bindings', 'pppoe-forward', {
+    hook_id: 'pppoe-forward',
+    interfaces: forwardInterfaces
+  }, true, profile.apply_hook_bindings);
+  var replyInterfaces = profile.coupled ? uniqueInterfaces([profile.lan_interface]) : [];
+  resources.set('hook_bindings', 'pppoe-reply', {
+    hook_id: 'pppoe-reply',
+    interfaces: replyInterfaces
+  }, profile.coupled, profile.apply_hook_bindings);
+  return {
+    status: profile.apply_hook_bindings ? 'applied' : 'stored',
+    forward: forwardInterfaces,
+    reply: replyInterfaces,
+    reply_enabled: profile.coupled,
+    applied: profile.apply_hook_bindings
+  };
+}
+
+function prepareTunnelInterfaces(profile) {
+  var result = {enabled: false, mtu: [], offloads: [], warnings: []};
+  if (!profile.prepare_interfaces) return result;
+  result.enabled = true;
+
+  var lan = profile.lan_interface || '';
+  var lanPeer = profile.prepare_lan_peer ? (profile.lan_peer_interface || '') : '';
+  var wan = profile.wan_interface || profile.interface || '';
+  var tunnelMTU = clampInt(firstDefined(profile.tunnel_mtu, profile.lan_mtu, profile.mru), 576, 1492, 1492);
+  var preparedMTU = {};
+  var preparedOffloads = {};
+
+  if (profile.prepare_lan_mtu) {
+    prepareTunnelMTU(result, preparedMTU, lan, 'lan', tunnelMTU);
+    prepareTunnelMTU(result, preparedMTU, lanPeer, 'lan_peer', tunnelMTU);
+  }
+  if (profile.prepare_wan_mtu && wan) {
+    prepareTunnelMTU(result, preparedMTU, wan, 'wan', tunnelMTU);
+  }
+  if (profile.prepare_offloads) {
+    prepareTunnelOffloads(profile, result, preparedOffloads, lan, 'lan');
+    prepareTunnelOffloads(profile, result, preparedOffloads, lanPeer, 'lan_peer');
+    prepareTunnelOffloads(profile, result, preparedOffloads, wan, 'wan');
+  }
+  return result;
+}
+
+function prepareTunnelMTU(result, prepared, iface, role, mtu) {
+  if (!iface || prepared[iface]) return;
+  prepared[iface] = true;
+  net.link.setMTU(iface, mtu);
+  result.mtu.push({interface: iface, mtu: mtu, role: role});
+}
+
+function prepareTunnelOffloads(profile, result, prepared, iface, role) {
+  if (!iface) return;
+  if (prepared[iface]) return;
+  prepared[iface] = true;
+  var features = {tx: false, tso: false, gso: false, gro: false, sg: false};
+  try {
+    net.link.setOffloads(iface, features);
+    result.offloads.push({interface: iface, role: role, features: features});
+  } catch (e) {
+    var message = e && e.message ? e.message : String(e);
+    if (!profile.allow_unsafe_offloads) {
+      throw new Error('prepare PPPoE tunnel offloads on ' + iface + ': ' + message);
+    }
+    result.warnings.push({interface: iface, role: role, warning: message});
+  }
+}
+
+function clearTunnelConfig() {
+  var deleted = false;
+  try {
+    resources.delete(TUNNEL_CONFIG_RESOURCE, TUNNEL_CONFIG_KEY, true);
+    deleted = true;
+  } catch (e) {
+    log.info('pppoe tunnel config record clear skipped: ' + errorMessage(e));
+  }
+  if (!deleted) clearTunnelMap();
+  armTunnelRepair();
+}
+
+function clearTunnelMap() {
+  try {
+    ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0), zeroTunnelConfigHex());
+  } catch (e) {
+    log.info('pppoe tunnel config clear skipped: ' + errorMessage(e));
+  }
+}
+
+function applyStoredTunnelConfig(reportErrors) {
+  var records = resources.list(TUNNEL_CONFIG_RESOURCE) || [];
+  if (!selectTunnelConfigRecord(records)) return;
+  applyTunnelConfigRecords(records, reportErrors);
+}
+
+function applyTunnelConfigRecords(records, reportErrors) {
+  var selected = selectTunnelConfigRecord(records);
+  var failures = [];
+  if (!selected) {
+    clearTunnelMap();
+    return;
+  }
+  try {
+    applyTunnelConfigRecord(selected);
+  } catch (e) {
+    failures.push(errorMessage(e));
+  }
+  if (reportErrors && failures.length) {
+    throw new Error('failed to apply PPPoE tunnel config: ' + failures.join('; '));
+  }
+}
+
+function selectTunnelConfigRecord(records) {
+  for (var i = 0; i < (records || []).length; i++) {
+    var record = records[i];
+    if (!record || record.enabled === false) continue;
+    if (token(record.key || TUNNEL_CONFIG_KEY) !== TUNNEL_CONFIG_KEY) continue;
+    return record;
+  }
+  return null;
+}
+
+function applyTunnelConfigRecord(record) {
+  var data = record && record.data ? record.data : {};
+  var value = normalizeTunnelConfigValueHex(data.value_hex || tunnelConfigValueHex(data));
+  ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0), value);
+}
+
+function armTunnelRepair() {
+  var record = resources.get(TUNNEL_CONFIG_RESOURCE, TUNNEL_CONFIG_KEY);
+  if (!record || record.enabled === false) {
+    timer.clear(TUNNEL_REPAIR_TIMER);
+    return;
+  }
+  var data = record.data || {};
+  var interval = clampInt(data.tunnel_repair_interval_ms, 500, 86400000, 2000);
+  timer.setInterval(TUNNEL_REPAIR_TIMER, interval, {});
+}
+
+function zeroTunnelConfigHex() {
+  return repeatHex('00', TUNNEL_CONFIG_HEX_BYTES);
+}
+
+function tunnelConfigValueHex(data) {
+  data = data || {};
+  return ''
+    + u32lehex(clampInt(data.enabled, 0, 1, 1))
+    + u32lehex(clampInt(data.lan_ifindex, 0, 2147483647, 0))
+    + u32lehex(clampInt(data.wan_ifindex, 0, 2147483647, 0))
+    + u16lehex(clampInt(data.session_id, 0, 65535, 0))
+    + u16lehex(clampInt(data.flags, 0, 65535, 0))
+    + macHex(data.lan_src_mac || '00:00:00:00:00:00')
+    + macHex(data.lan_dst_mac || '00:00:00:00:00:00')
+    + macHex(data.wan_src_mac || '00:00:00:00:00:00')
+    + macHex(data.wan_dst_mac || '00:00:00:00:00:00');
+}
+
+function normalizeTunnelConfigValueHex(value) {
+  value = lower(value).replace(/^0x/i, '').replace(/[^0-9a-f]/g, '');
+  if (value.length !== TUNNEL_CONFIG_HEX_BYTES * 2) {
+    throw new Error('tunnel config value_hex must be ' + TUNNEL_CONFIG_HEX_BYTES + ' bytes');
+  }
+  return value;
+}
+
+function clearTunnelStats() {
+  for (var i = 0; i < 16; i++) {
+    try {
+      ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_stats', u32lehex(i), repeatHex('00', 8));
+    } catch (e) {
+      log.info('pppoe tunnel stats clear skipped: ' + (e && e.message ? e.message : String(e)));
+      return;
+    }
+  }
+}
+
+function readTunnelStats() {
+  var names = [
+    'unused',
+    'lan_encap_path',
+    'decap_path',
+    'pppoe_seen',
+    'session_match',
+    'adjust_room_fail',
+    'store_lan_eth_fail',
+    'redirect_lan_ok',
+    'redirect_lan_fail',
+    'last_adjust_room_errno',
+    'manual_decap_ok',
+    'manual_decap_fail',
+    'manual_decap_pull_fail',
+    'manual_decap_bounds_fail',
+    'manual_decap_copy_short',
+    'manual_decap_trim_fail'
+  ];
+  var out = {
+    counter_build: 'disabled_by_default',
+    note: TUNNEL_STATS_BUILD_NOTE
+  };
+  for (var i = 0; i < names.length; i++) {
+    try {
+      out[names[i]] = u64leNumber(ebpf.mapGet('pppoe_tunnel', 'pppoe_tunnel_stats', u32lehex(i)));
+    } catch (e) {
+      out.error = e && e.message ? e.message : String(e);
+      break;
+    }
+  }
+  try {
+    var configHex = ebpf.mapGet('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0));
+    out.config = decodeTunnelConfigHex(configHex);
+  } catch (e) {
+    out.config_error = errorMessage(e);
+  }
+  return out;
+}
+
+function decodeTunnelConfigHex(hex) {
+  hex = normalizeTunnelConfigValueHex(hex);
+  var bytes = hexToBytes(hex);
+  return {
+    enabled: u32le(bytes, 0),
+    lan_ifindex: u32le(bytes, 4),
+    wan_ifindex: u32le(bytes, 8),
+    session_id: u16le(bytes, 12),
+    flags: u16le(bytes, 14),
+    lan_src_mac: macBytesToText(bytes.slice(16, 22)),
+    lan_dst_mac: macBytesToText(bytes.slice(22, 28)),
+    wan_src_mac: macBytesToText(bytes.slice(28, 34)),
+    wan_dst_mac: macBytesToText(bytes.slice(34, 40)),
+    value_hex: hex
+  };
 }
 
 function sendPADI(profile, hostUniq) {
@@ -314,14 +768,105 @@ function sendPADI(profile, hostUniq) {
 		tagString(TAG_SERVICE_NAME, profile.service),
 		tagHex(TAG_HOST_UNIQ, hostUniq)
 	]);
-	return net.l2.exchange({
-		interface: profile.interface,
-		ethertype: ETH_P_PPP_DISC,
-		dst_mac: 'ff:ff:ff:ff:ff:ff',
-		payload: padi,
-		timeout_ms: profile.timeout_ms,
-		max_bytes: 1500
-	});
+	return exchangeDiscovery(profile, 'ff:ff:ff:ff:ff:ff', padi, CODE_PADO, hostUniq, '');
+}
+
+function sendPADR(profile, peerMAC, hostUniq, tags) {
+  return exchangeDiscovery(profile, peerMAC, pppoeDiscovery(CODE_PADR, 0, tags), CODE_PADS, hostUniq, peerMAC);
+}
+
+function exchangeDiscovery(profile, dstMAC, payload, wantCode, hostUniq, peerMAC) {
+  var deadline = Date.now() + profile.timeout_ms;
+  var frameLimit = Math.min(Math.max(profile.max_frames * 4, 8), 32);
+  var firstFrames = [];
+
+  if (net.l2.exchangeMany) {
+    firstFrames = net.l2.exchangeMany(pppoeDiscoveryRecvFilter({
+      interface: profile.interface,
+      ethertype: ETH_P_PPP_DISC,
+      dst_mac: dstMAC,
+      payload: payload,
+      timeout_ms: profile.timeout_ms,
+      max_bytes: 1500,
+      max_frames: frameLimit,
+      idle_timeout_ms: profile.control_idle_timeout_ms
+    }, wantCode, peerMAC)) || [];
+  } else {
+    var firstFrame = net.l2.exchange(pppoeDiscoveryRecvFilter({
+      interface: profile.interface,
+      ethertype: ETH_P_PPP_DISC,
+      dst_mac: dstMAC,
+      payload: payload,
+      timeout_ms: profile.timeout_ms,
+      max_bytes: 1500
+    }, wantCode, peerMAC));
+    if (firstFrame !== null) firstFrames = [firstFrame];
+  }
+  var matched = findDiscoveryFrame(firstFrames, wantCode, hostUniq, peerMAC, wantCode === CODE_PADO ? profile.ac_name : '');
+  if (matched !== null) return matched;
+
+  while (Date.now() < deadline) {
+    var timeout = Math.max(1, Math.min(profile.timeout_ms, deadline - Date.now()));
+    var frames = recvDiscoveryFrames(profile, timeout, frameLimit, wantCode, peerMAC);
+    if (!frames.length) break;
+    matched = findDiscoveryFrame(frames, wantCode, hostUniq, peerMAC, wantCode === CODE_PADO ? profile.ac_name : '');
+    if (matched !== null) return matched;
+  }
+  return null;
+}
+
+function recvDiscoveryFrames(profile, timeoutMs, maxFrames, wantCode, peerMAC) {
+  if (net.l2.recvMany) {
+    return net.l2.recvMany(pppoeDiscoveryRecvFilter({
+      interface: profile.interface,
+      ethertype: ETH_P_PPP_DISC,
+      timeout_ms: timeoutMs,
+      max_bytes: 1500,
+      max_frames: maxFrames,
+      idle_timeout_ms: profile.control_idle_timeout_ms
+    }, wantCode, peerMAC)) || [];
+  }
+  var frame = net.l2.recv(pppoeDiscoveryRecvFilter({
+    interface: profile.interface,
+    ethertype: ETH_P_PPP_DISC,
+    timeout_ms: timeoutMs,
+    max_bytes: 1500
+  }, wantCode, peerMAC));
+  return frame === null ? [] : [frame];
+}
+
+function pppoeDiscoveryRecvFilter(req, wantCode, peerMAC) {
+  if (wantCode != null) req.pppoe_code = wantCode;
+  if (peerMAC) req.recv_src_mac = peerMAC;
+  return req;
+}
+
+function pppoeSessionRecvFilter(req, peerMAC, sessionID) {
+  if (peerMAC) req.recv_src_mac = peerMAC;
+  if (sessionID) req.pppoe_session_id = sessionID;
+  req.pppoe_code = 0;
+  return req;
+}
+
+function findDiscoveryFrame(frames, wantCode, hostUniq, peerMAC, acName) {
+  var wantHostUniq = lower(hostUniq || '');
+  var wantPeer = macText(peerMAC || '');
+  var wantACName = text(acName || '');
+  for (var i = 0; i < frames.length; i++) {
+    if (wantPeer && macText(frames[i].src_mac || '') !== wantPeer) continue;
+    var parsed;
+    try {
+      parsed = parseDiscoveryFrame(frames[i]);
+    } catch (e) {
+      continue;
+    }
+    if (parsed.code !== wantCode) continue;
+    var gotHostUniq = lower(firstTagHex(parsed, TAG_HOST_UNIQ));
+    if (wantHostUniq && gotHostUniq && gotHostUniq !== wantHostUniq) continue;
+    if (wantACName && firstTagText(parsed, TAG_AC_NAME) !== wantACName) continue;
+    return frames[i];
+  }
+  return null;
 }
 
 function runSessionProbe(profile, peerMAC, sessionID, localMAC) {
@@ -337,12 +882,8 @@ function runSessionProbe(profile, peerMAC, sessionID, localMAC) {
 
   for (var i = 1; i < profile.max_frames; i++) {
     if (lcpReadyForNetworkCP(profile, out)) break;
-    var frame = net.l2.recv({
-      interface: profile.interface,
-      ethertype: ETH_P_PPP_SESS,
-      timeout_ms: profile.timeout_ms,
-      max_bytes: 1500
-    });
+    var frames = recvPPPSessionFrames(profile, profile.timeout_ms, 1, peerMAC, sessionID);
+    var frame = frames.length ? frames[0] : null;
     if (frame === null) {
       out.items.push({event: 'timeout'});
       break;
@@ -376,7 +917,7 @@ function lcpReadyForNetworkCP(profile, out) {
   if (!out.lcp_ack) return false;
   if (!profile.username) return true;
   if (profile.auth !== 'pap' && profile.auth !== 'chap') return true;
-  return out.auth_sent === true;
+  return false;
 }
 
 function processSessionFrame(profile, peerMAC, sessionID, frame, ourLCPID, out) {
@@ -532,7 +1073,7 @@ function armSessionControl(profile, session) {
   var payload = sessionControlTimerPayload(profile, session, profile.post_session_control_ms);
   payload.deadline_ms = Date.now() + profile.post_session_control_ms;
   payload.started_at = new Date().toISOString();
-  timer.setInterval('session_control', 10, payload);
+  timer.setTimeout('session_control', 10, payload);
 }
 
 function disconnectSession(profile, payload) {
@@ -570,12 +1111,34 @@ function markWANLinkDown(profile, previous, phase) {
   var key = token((previous && previous.wan_id) || profile.wan_id || profile.profile_key);
   var record = resources.get('wan_links', key);
   var data = record && record.data ? record.data : normalizedWANLink(profile, previous || {});
-  resources.set('wan_links', key, merge(data, {
+  var link = merge(data, {
     state: 'down',
     usable: false,
     phase: phase || 'down',
     updated_at: new Date().toISOString()
-  }));
+  });
+  var sync = syncWANCore(profile, link);
+  if (sync) link.wan_core_sync = sync;
+  resources.set('wan_links', key, link, false);
+}
+
+function failCloseWANCoreFromStored(key, payload, phase) {
+  var record = resources.get('wan_links', key);
+  if (!record || !record.data) return null;
+  var profile = {
+    profile_key: key,
+    wan_id: key,
+    wan_core_sync: bool(firstDefined(payload.wan_core_sync, payload.sync_wan_core), true),
+    wan_core_apply: bool(firstDefined(payload.wan_core_apply, payload.apply_wan_core), true),
+    wan_core_plugin: token(payload.wan_core_plugin || payload.wan_core_plugin_id || 'wan_core')
+  };
+  var link = merge(record.data, {
+    state: 'down',
+    usable: false,
+    phase: phase || 'down',
+    updated_at: new Date().toISOString()
+  });
+  return syncWANCore(profile, link);
 }
 
 function normalizedWANLink(profile, session) {
@@ -617,7 +1180,7 @@ function normalizedWANLink(profile, session) {
       preferred_mode: session.tunnel && session.tunnel.mode ? session.tunnel.mode : 'direct_vtap',
       host_interface: profile.lan_peer_interface || 'fwdlocal0',
       vtap_interface: profile.lan_interface || 'fwdvtap0',
-      forward_core_parent_interface: profile.lan_interface || 'fwdvtap0',
+      forward_core_parent_interface: profile.lan_peer_interface || 'fwdlocal0',
       requires_kernel_tc_prepared_l2: false
     },
     updated_at: session.updated_at || new Date().toISOString()
@@ -630,12 +1193,13 @@ function syncWANCore(profile, link) {
     return {status: 'skipped', reason: 'plugin.resource API is unavailable'};
   }
   try {
-    plugins.resources.set(profile.wan_core_plugin, 'sessions', link.wan_id, link, true, profile.wan_core_apply);
+    plugins.resources.set(profile.wan_core_plugin, 'sessions', link.wan_id, link, link.usable === true, profile.wan_core_apply);
     return {
       status: 'synced',
       plugin: profile.wan_core_plugin,
       resource: 'sessions',
       key: link.wan_id,
+      enabled: link.usable === true,
       applied: profile.wan_core_apply === true
     };
   } catch (e) {
@@ -659,7 +1223,7 @@ function redialAfterKeepaliveFailure(profile, keepaliveResult) {
     profile.send_padt = false;
     var session = probeSession(profile);
     recordSession(profile, session);
-    if (session && session.lcp_ack) {
+    if (session && session.lcp_ready === true) {
       armKeepalive(profile, session);
       return merge(base, {
         phase: 'redial_ok',
@@ -705,7 +1269,6 @@ function keepaliveTimerPayload(profile, session) {
     profile_key: profile.profile_key,
     interface: profile.interface,
     username: profile.username,
-    password: profile.password,
     service: profile.service,
     ac_name: profile.ac_name,
     auth: profile.auth,
@@ -742,6 +1305,31 @@ function keepaliveTimerPayload(profile, session) {
     session_id: session.session_id,
     ac_mac: session.ac_mac
   };
+}
+
+function resolveProfilePassword(profile) {
+  var key = profilePasswordSecretKey(profile.profile_key);
+  if (profile.password) {
+    try {
+      secret.set(key, profile.password);
+    } catch (e) {
+      // A transient secret-store failure must not break the current dial.
+    }
+    return profile.password;
+  }
+  try {
+    var stored = secret.get(key);
+    if (stored == null) return '';
+    if (typeof stored === 'string') return text(stored);
+    if (stored && stored.password != null) return text(stored.password);
+    return text(stored);
+  } catch (e) {
+    return '';
+  }
+}
+
+function profilePasswordSecretKey(profileKey) {
+  return 'pppoe-password-' + token(profileKey || 'default');
 }
 
 function sessionControlTimerPayload(profile, session, remainingMs) {
@@ -885,7 +1473,7 @@ function ackPeerConfigureRequests(profile, peerMAC, sessionID, protocol) {
   var targetAcked = 0;
   var skipped = 0;
   var drainTimeout = clampInt(profile.peer_ack_timeout_ms, 10, 250, profile.control_ack_timeout_ms);
-  var frames = recvPPPSessionFrames(profile, drainTimeout, Math.min(profile.max_frames, 6));
+  var frames = recvPPPSessionFrames(profile, drainTimeout, Math.min(profile.max_frames, 6), peerMAC, sessionID);
   if (!frames.length) return {phase: 'timeout', acked: acked, target_acked: targetAcked, skipped: skipped};
   for (var i = 0; i < frames.length && i < Math.min(profile.max_frames * 2, 16); i++) {
     var event = servicePPPControlFrame(profile, peerMAC, sessionID, frames[i], {});
@@ -936,11 +1524,11 @@ function serviceSessionControlTimer(payload) {
       post_session_control_armed: nextRemaining > 0
     }));
   }
-  if (deadline > 0) {
-    if (nextRemaining <= 0) timer.clear('session_control');
-  } else if (nextRemaining > 0) {
+  if (nextRemaining > 0) {
     var next = merge(payload, {remaining_ms: nextRemaining});
-    timer.setTimeout('session_control', 10, next);
+    timer.setTimeout('session_control', Math.min(50, nextRemaining), next);
+  } else {
+    timer.clear('session_control');
   }
 }
 
@@ -994,7 +1582,7 @@ function servicePPPControlWindow(profile, peerMAC, sessionID, durationMs, expect
   for (var i = 0; i < maxPolls && Date.now() < deadline; i++) {
     var timeout = Math.min(profile.timeout_ms, Math.max(1, deadline - Date.now()));
     out.polls++;
-    var frames = recvPPPSessionFrames(profile, timeout, Math.min(8, Math.max(1, maxPolls - i)));
+    var frames = recvPPPSessionFrames(profile, timeout, Math.min(8, Math.max(1, maxPolls - i)), peerMAC, sessionID);
     if (!frames.length) {
       out.timeouts++;
       continue;
@@ -1025,25 +1613,25 @@ function servicePPPControlWindow(profile, peerMAC, sessionID, durationMs, expect
   return out;
 }
 
-function recvPPPSessionFrames(profile, timeoutMs, maxFrames) {
-  timeoutMs = clampInt(timeoutMs, 1, 1500, profile.timeout_ms);
+function recvPPPSessionFrames(profile, timeoutMs, maxFrames, peerMAC, sessionID) {
+  timeoutMs = clampInt(timeoutMs, 1, 5000, profile.timeout_ms);
   maxFrames = clampInt(maxFrames, 1, 64, 1);
   if (net.l2.recvMany) {
-    return net.l2.recvMany({
+    return net.l2.recvMany(pppoeSessionRecvFilter({
       interface: profile.interface,
       ethertype: ETH_P_PPP_SESS,
       timeout_ms: timeoutMs,
       max_bytes: 1500,
       max_frames: maxFrames,
       idle_timeout_ms: profile.control_idle_timeout_ms
-    }) || [];
+    }, peerMAC, sessionID)) || [];
   }
-  var frame = net.l2.recv({
+  var frame = net.l2.recv(pppoeSessionRecvFilter({
     interface: profile.interface,
     ethertype: ETH_P_PPP_SESS,
     timeout_ms: timeoutMs,
     max_bytes: 1500
-  });
+  }, peerMAC, sessionID));
   return frame === null ? [] : [frame];
 }
 
@@ -1125,7 +1713,7 @@ function exchangeDHCPv6(profile, peerMAC, sessionID, src, dst, dhcpPayload, tran
   var deadline = Date.now() + profile.timeout_ms;
   var firstFrames = [];
   if (net.l2.exchangeMany) {
-    firstFrames = net.l2.exchangeMany({
+    firstFrames = net.l2.exchangeMany(pppoeSessionRecvFilter({
       interface: profile.interface,
       ethertype: ETH_P_PPP_SESS,
       dst_mac: peerMAC,
@@ -1134,16 +1722,16 @@ function exchangeDHCPv6(profile, peerMAC, sessionID, src, dst, dhcpPayload, tran
       max_bytes: 1500,
       max_frames: Math.min(Math.max(profile.max_frames * 4, 8), 32),
       idle_timeout_ms: profile.control_idle_timeout_ms
-    }) || [];
+    }, peerMAC, sessionID)) || [];
   } else {
-    var firstFrame = net.l2.exchange({
+    var firstFrame = net.l2.exchange(pppoeSessionRecvFilter({
       interface: profile.interface,
       ethertype: ETH_P_PPP_SESS,
       dst_mac: peerMAC,
       payload: payload,
       timeout_ms: profile.timeout_ms,
       max_bytes: 1500
-    });
+    }, peerMAC, sessionID));
     if (firstFrame !== null) firstFrames = [firstFrame];
   }
   var matched = findDHCPv6ReplyFrame(firstFrames, sessionID, transactionID);
@@ -1151,7 +1739,7 @@ function exchangeDHCPv6(profile, peerMAC, sessionID, src, dst, dhcpPayload, tran
 
   while (Date.now() < deadline) {
     var remaining = Math.max(1, Math.min(profile.timeout_ms, deadline - Date.now()));
-    var frames = recvPPPSessionFrames(profile, remaining, Math.min(Math.max(profile.max_frames * 4, 8), 32));
+    var frames = recvPPPSessionFrames(profile, remaining, Math.min(Math.max(profile.max_frames * 4, 8), 32), peerMAC, sessionID);
     if (!frames.length) break;
     matched = findDHCPv6ReplyFrame(frames, sessionID, transactionID);
     if (matched !== null) return matched;
@@ -1189,34 +1777,67 @@ function findDHCPv6ReplyFrame(frames, sessionID, transactionID) {
 }
 
 function exchangePPPControl(profile, peerMAC, sessionID, protocol, cpPayload, timeoutMs) {
-  var timeout = clampInt(timeoutMs, 1, 1500, profile.timeout_ms);
-  return net.l2.exchange({
+  var timeout = clampInt(timeoutMs, 1, 5000, profile.timeout_ms);
+  return net.l2.exchange(pppoeSessionRecvFilter({
     interface: profile.interface,
     ethertype: ETH_P_PPP_SESS,
     dst_mac: peerMAC,
     payload: pppoeSession(sessionID, u16hex(protocol) + cpPayload),
     timeout_ms: timeout,
     max_bytes: 1500
-  });
+  }, peerMAC, sessionID));
 }
 
 function exchangePPPControlFrames(profile, peerMAC, sessionID, protocol, cpPayload, timeoutMs, maxFrames) {
-  var timeout = clampInt(timeoutMs, 1, 1500, profile.timeout_ms);
+  var timeout = clampInt(timeoutMs, 1, 5000, profile.timeout_ms);
   var frameLimit = clampInt(maxFrames, 1, 64, profile.max_frames);
+  var deadline = Date.now() + timeout;
+  var out = [];
   if (net.l2.exchangeMany) {
-    return net.l2.exchangeMany({
+    appendMatchingSessionFrames(out, net.l2.exchangeMany(pppoeSessionRecvFilter({
       interface: profile.interface,
       ethertype: ETH_P_PPP_SESS,
       dst_mac: peerMAC,
       payload: pppoeSession(sessionID, u16hex(protocol) + cpPayload),
       timeout_ms: timeout,
       max_bytes: 1500,
-      max_frames: frameLimit,
+      max_frames: Math.min(64, Math.max(frameLimit * 4, frameLimit)),
       idle_timeout_ms: profile.control_idle_timeout_ms
-    }) || [];
+    }, peerMAC, sessionID)) || [], peerMAC, sessionID, frameLimit);
+    if (out.length >= frameLimit) return out;
+    if (out.length > 0) return out;
+    collectMatchingSessionFrames(profile, peerMAC, sessionID, deadline, frameLimit, out);
+    return out;
   }
   var frame = exchangePPPControl(profile, peerMAC, sessionID, protocol, cpPayload, timeout);
-  return frame === null ? [] : [frame];
+  appendMatchingSessionFrames(out, frame === null ? [] : [frame], peerMAC, sessionID, frameLimit);
+  if (out.length >= frameLimit) return out;
+  if (out.length > 0) return out;
+  collectMatchingSessionFrames(profile, peerMAC, sessionID, deadline, frameLimit, out);
+  return out;
+}
+
+function collectMatchingSessionFrames(profile, peerMAC, sessionID, deadline, frameLimit, out) {
+  while (Date.now() < deadline && out.length < frameLimit) {
+    var timeout = Math.max(1, Math.min(profile.timeout_ms, deadline - Date.now()));
+    var frames = recvPPPSessionFrames(profile, timeout, Math.min(64, Math.max((frameLimit - out.length) * 4, 4)), peerMAC, sessionID);
+    if (!frames.length) break;
+    appendMatchingSessionFrames(out, frames, peerMAC, sessionID, frameLimit);
+  }
+}
+
+function appendMatchingSessionFrames(out, frames, peerMAC, sessionID, frameLimit) {
+  var wantPeer = macText(peerMAC || '');
+  for (var i = 0; i < frames.length && out.length < frameLimit; i++) {
+    if (wantPeer && macText(frames[i].src_mac || '') !== wantPeer) continue;
+    try {
+      var parsed = parseSessionFrame(frames[i]);
+      if (parsed.session_id !== sessionID) continue;
+    } catch (e) {
+      continue;
+    }
+    out.push(frames[i]);
+  }
 }
 
 function completeCPNegotiation(profile, peerMAC, sessionID, protocol, identifier, firstFrame) {
@@ -1227,25 +1848,25 @@ function completeCPNegotiation(profile, peerMAC, sessionID, protocol, identifier
     if (parsed.protocol !== protocol) return {protocol: parsed.protocol, cp: {code: 0, identifier: 0, data_hex: ''}};
     var cp = parseCP(parsed.payload);
     if (cp.code === 1) {
-      frame = net.l2.exchange({
+      frame = net.l2.exchange(pppoeSessionRecvFilter({
         interface: profile.interface,
         ethertype: ETH_P_PPP_SESS,
         dst_mac: peerMAC,
         payload: pppoeSession(sessionID, u16hex(protocol) + cpPacket(2, cp.identifier, cp.data_hex)),
         timeout_ms: profile.timeout_ms,
         max_bytes: 1500
-      });
+      }, peerMAC, sessionID));
       continue;
     }
     if (cp.identifier === identifier || cp.code === 3 || cp.code === 4) {
       return {protocol: protocol, cp: cp};
     }
-    frame = net.l2.recv({
+    frame = net.l2.recv(pppoeSessionRecvFilter({
       interface: profile.interface,
       ethertype: ETH_P_PPP_SESS,
       timeout_ms: profile.timeout_ms,
       max_bytes: 1500
-    });
+    }, peerMAC, sessionID));
   }
   return {timeout: true};
 }
@@ -1390,6 +2011,13 @@ function appendForwardedTag(out, discovery, type) {
 function firstTagText(discovery, type) {
   for (var i = 0; i < discovery.tags.length; i++) {
     if (discovery.tags[i].type === type) return hexToString(discovery.tags[i].value_hex);
+  }
+  return '';
+}
+
+function firstTagHex(discovery, type) {
+  for (var i = 0; i < discovery.tags.length; i++) {
+    if (discovery.tags[i].type === type) return discovery.tags[i].value_hex || '';
   }
   return '';
 }
@@ -1567,7 +2195,7 @@ function ipv6TextToHex(value) {
     while (suffix.length < 16) suffix = '0' + suffix;
     return 'fe80000000000000' + suffix.slice(-16);
   }
-  throw new Error('unsupported IPv6 literal in PPPoE lab helper: ' + value);
+  throw new Error('unsupported IPv6 literal in PPPoE helper: ' + value);
 }
 
 function ipv6BytesToText(bytes) {
@@ -1608,6 +2236,46 @@ function text(value) {
   return String(value == null ? '' : value).trim();
 }
 
+function optionalIfaceName(value, label) {
+  value = text(value);
+  if (!value) return '';
+  return ifaceName(value, label);
+}
+
+function uniqueInterfaces(values) {
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < values.length; i++) {
+    var value = optionalIfaceName(values[i], 'interface');
+    if (!value || seen[value]) continue;
+    seen[value] = true;
+    out.push(value);
+  }
+  return out;
+}
+
+function ifaceName(value, label) {
+  value = text(value);
+  if (!value || utf8ByteLength(value) > 15 || /[\/\\\s\u0000]/.test(value)) {
+    throw new Error(label + ' contains invalid characters or exceeds 15 bytes');
+  }
+  return value;
+}
+
+function utf8ByteLength(value) {
+  var n = 0;
+  for (var i = 0; i < value.length; i++) {
+    var code = value.charCodeAt(i);
+    if (code <= 0x7f) n += 1;
+    else if (code <= 0x7ff) n += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
 function clampInt(value, min, max, fallback) {
   var n = parseInt(value, 10);
   if (!isFinite(n)) return fallback;
@@ -1642,6 +2310,10 @@ function firstDefined() {
   return undefined;
 }
 
+function errorMessage(error) {
+  return error && error.message ? error.message : String(error);
+}
+
 function repeatHex(value, count) {
   var out = '';
   for (var i = 0; i < count; i++) out += value;
@@ -1660,6 +2332,12 @@ function macText(value) {
 
 function macHex(value) {
   return macText(value).replace(/:/g, '');
+}
+
+function macBytesToText(bytes) {
+  var out = [];
+  for (var i = 0; i < 6; i++) out.push(hexByte(bytes[i] || 0));
+  return out.join(':');
 }
 
 function randomByte() {
@@ -1712,6 +2390,17 @@ function u32(bytes, offset) {
     + (bytes[offset + 3] || 0);
 }
 
+function u16le(bytes, offset) {
+  return (bytes[offset] || 0) | ((bytes[offset + 1] || 0) << 8);
+}
+
+function u32le(bytes, offset) {
+  return ((bytes[offset] || 0) >>> 0)
+    + ((bytes[offset + 1] || 0) << 8)
+    + ((bytes[offset + 2] || 0) << 16)
+    + (((bytes[offset + 3] || 0) << 24) >>> 0);
+}
+
 function u16hex(value) {
   value = Number(value) & 0xffff;
   return hexByte(value >> 8) + hexByte(value);
@@ -1730,6 +2419,17 @@ function u16lehex(value) {
 function u32lehex(value) {
   value = Number(value) >>> 0;
   return hexByte(value) + hexByte(value >> 8) + hexByte(value >> 16) + hexByte(value >> 24);
+}
+
+function u64leNumber(hex) {
+  var bytes = hexToBytes(hex);
+  var out = 0;
+  var mul = 1;
+  for (var i = 0; i < bytes.length && i < 8; i++) {
+    out += bytes[i] * mul;
+    mul *= 256;
+  }
+  return out;
 }
 
 function hexByte(value) {

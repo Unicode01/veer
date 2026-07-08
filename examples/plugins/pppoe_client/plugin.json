@@ -1,147 +1,27 @@
 {
   "api_version": "v1",
   "id": "pppoe_client",
-  "name": "PPPoE Client Lab",
-  "version": "0.1.0",
+  "name": "PPPoE Client",
+  "version": "1.0.0",
   "kind": "pipeline",
-  "description": "Example PPPoE lab plugin. It probes PPPoE discovery/LCP/auth primitives through the host raw L2 API and can install a minimal TC IPv4/IPv6-over-PPPoE dataplane on real or veth/vtap lab interfaces.",
-  "capabilities": [
-    "pppoe",
-    "raw_l2",
-    "control"
-  ],
-  "virtual_interfaces": [
-    {
-      "id": "pppoe0",
-      "type": "logical",
-      "description": "Example logical PPPoE session endpoint used by the control-plane demo."
-    }
-  ],
-  "objects": [
-    {
-      "id": "pppoe_tunnel",
-      "path": "pppoe_tunnel.o",
-      "description": "Minimal TC lab dataplane that can either run a direct IPv4/IPv6-over-PPPoE tunnel or couple IPv4 PPPoE session traffic into the fvtap forward/reply pipeline.",
-      "programs": [
-        {
-          "id": "tc_tunnel",
-          "section": "tc/fvtap/pre_forward",
-          "type": "tc"
-        },
-        {
-          "id": "tc_reply_encap",
-          "section": "tc/fvtap/post_reply",
-          "type": "tc"
-        }
-      ]
-    }
-  ],
-  "hooks": [
-    {
-      "id": "pppoe-lab-forward",
-      "engine": "tc",
-      "attach": "ingress",
-      "stage": "forward",
-      "priority": 20,
-      "program": "pppoe_tunnel:tc_tunnel",
-      "mode": "rewrite"
-    },
-    {
-      "id": "pppoe-lab-reply",
-      "engine": "tc",
-      "attach": "ingress",
-      "stage": "reply",
-      "priority": 1020,
-      "program": "pppoe_tunnel:tc_reply_encap",
-      "mode": "rewrite",
-      "context": ["tc_plugin_ctx_v4"]
-    }
-  ],
-  "resources": [
-    {
-      "id": "hook_bindings",
-      "description": "Runtime TC hook interface bindings. Records map a declared hook_id to one or more real Linux interfaces.",
-      "methods": ["list", "get", "create", "update", "delete"],
-      "runtime_update": "plugin_reconcile",
-      "max_records": 16,
-      "max_record_bytes": 4096
-    },
-    {
-      "id": "profiles",
-      "description": "PPPoE account and interface profile used by the example actions.",
-      "methods": ["list", "get", "create", "update", "delete"],
-      "runtime_update": "manual",
-      "max_records": 16,
-      "max_record_bytes": 8192,
-      "secret_fields": ["password"]
-    },
-    {
-      "id": "sessions",
-      "description": "Last discovery/probe results written by the control script for the UI.",
-      "methods": ["list", "get", "create", "update", "delete"],
-      "runtime_update": "manual",
-      "max_records": 32,
-      "max_record_bytes": 16384,
-      "secret_fields": ["password"]
-    },
-    {
-      "id": "wan_links",
-      "description": "Normalized WAN session state exported for wan_core and forward_core handoff.",
-      "methods": ["list", "get", "create", "update", "delete"],
-      "runtime_update": "manual",
-      "max_records": 32,
-      "max_record_bytes": 32768,
-      "secret_fields": ["password"]
-    }
-  ],
-  "actions": [
-    {
-      "id": "discover",
-      "description": "Send PADI and record the first PADO response.",
-      "runtime_update": "runtime_apply",
-      "max_payload_bytes": 8192
-    },
-    {
-      "id": "probe_session",
-      "description": "Run discovery, open a PPPoE session, send one LCP request and optional PAP/CHAP response, then send PADT by default.",
-      "runtime_update": "runtime_apply",
-      "max_payload_bytes": 8192
-    },
-    {
-      "id": "traffic_probe",
-      "description": "Run discovery/session setup and install the minimal TC IPv4-over-PPPoE lab tunnel without sending PADT.",
-      "runtime_update": "runtime_apply",
-      "max_payload_bytes": 8192
-    },
-    {
-      "id": "dial",
-      "description": "Run discovery/session setup, negotiate IPCP/IPv6CP/optional DHCPv6-PD, keep the PPPoE session open, and optionally arm LCP keepalive.",
-      "runtime_update": "runtime_apply",
-      "max_payload_bytes": 8192
-    },
-    {
-      "id": "disconnect",
-      "description": "Send PADT for the stored or provided session and clear keepalive.",
-      "runtime_update": "runtime_apply",
-      "max_payload_bytes": 4096
-    },
-    {
-      "id": "clear_state",
-      "description": "Delete the stored last probe result.",
-      "runtime_update": "runtime_apply",
-      "max_payload_bytes": 1024
-    }
-  ],
+  "stability": "stable",
+  "description": "PPPoE WAN control and TC tunnel plugin. The control script registers UI, resources, actions, eBPF objects, and TC hooks dynamically.",
   "control": {
     "main": "control.js",
-    "permissions": ["crypto", "ebpf.map_write", "net.admin", "net.l2", "plugin.resource", "resource", "timer"]
-  },
-  "ui": {
-    "static_dir": "ui",
-    "entry": "index.html"
-  },
-  "metadata": {
-    "ui.page": "pppoe",
-    "ui.page_title": "PPPoE"
+    "sha256": "b6966a7acae28dfa3d38caac47987f432025a711492debda0365e0bff732a18e",
+    "permissions": ["crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "net.admin", "net.l2", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui"],
+    "net_access": [
+      {
+        "interfaces": ["en*", "eth*", "fwd*", "lan*", "ppp*", "tap*", "veth*", "vmbr*", "wan*"],
+        "operations": ["l2", "link.offload", "link.read", "link.state"]
+      }
+    ],
+    "resource_access": [
+      {
+        "plugin": "wan_core",
+        "resource": "sessions",
+        "methods": ["create", "get", "update"]
+      }
+    ]
   }
 }

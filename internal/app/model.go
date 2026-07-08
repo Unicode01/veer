@@ -22,10 +22,11 @@ type Rule struct {
 	Transparent      bool   `json:"transparent"`
 	EnginePreference string `json:"engine_preference"`
 
-	kernelLogKind    string
-	kernelLogOwnerID int64
-	kernelMode       string
-	kernelNATType    string
+	kernelLogKind      string
+	kernelLogOwnerID   int64
+	kernelMode         string
+	kernelNATType      string
+	kernelRedirectMode string
 }
 
 type Site struct {
@@ -236,6 +237,7 @@ type EgressNAT struct {
 	OutSourceIP     string `json:"out_source_ip"`
 	Protocol        string `json:"protocol"`
 	NATType         string `json:"nat_type"`
+	RedirectMode    string `json:"redirect_mode,omitempty"`
 	Enabled         bool   `json:"enabled"`
 }
 

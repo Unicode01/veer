@@ -150,7 +150,9 @@ func sameKernelRuleDataplaneFields(a Rule, b Rule) bool {
 		a.OutPort == b.OutPort &&
 		a.Protocol == b.Protocol &&
 		a.Transparent == b.Transparent &&
-		a.kernelMode == b.kernelMode
+		a.kernelMode == b.kernelMode &&
+		a.kernelNATType == b.kernelNATType &&
+		a.kernelRedirectMode == b.kernelRedirectMode
 }
 
 func cloneRuleSlice(src []Rule) []Rule {

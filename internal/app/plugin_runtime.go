@@ -21,12 +21,12 @@ const (
 	pluginStatusBuiltin = "builtin"
 	pluginStatusError   = "error"
 
-	pluginRuntimeModeBuiltin      = "builtin"
-	pluginRuntimeModeDataplane    = "dataplane"
-	pluginRuntimeModeControl      = "control"
-	pluginRuntimeModeError        = "error"
-	pluginRuntimeModeManifestOnly = "manifest_only"
-	pluginRuntimeModeInvalid      = "invalid"
+	pluginRuntimeModeBuiltin    = "builtin"
+	pluginRuntimeModeDataplane  = "dataplane"
+	pluginRuntimeModeControl    = "control"
+	pluginRuntimeModeError      = "error"
+	pluginRuntimeModeRegistered = "registered"
+	pluginRuntimeModeInvalid    = "invalid"
 
 	pluginObjectStatusBuiltin  = "builtin"
 	pluginObjectStatusVerified = "verified"
@@ -36,10 +36,17 @@ const (
 
 	pluginPipelineCorePriority = 1000
 
+	pluginStabilityLab        = "lab"
+	pluginStabilityPreview    = "preview"
+	pluginStabilityStable     = "stable"
+	pluginStabilityDeprecated = "deprecated"
+
 	pluginResourceDefaultMaxRecords     = 1000
 	pluginResourceHardMaxRecords        = 100000
 	pluginResourceDefaultMaxRecordBytes = 64 << 10
 	pluginResourceHardMaxRecordBytes    = 1 << 20
+	pluginResourceListDefaultLimit      = 1000
+	pluginResourceListHardLimit         = 5000
 	pluginActionDefaultMaxPayloadBytes  = 64 << 10
 	pluginActionHardMaxPayloadBytes     = 1 << 20
 
@@ -65,6 +72,7 @@ type PluginRuntimeCapabilities struct {
 	ManifestDiscovery       bool     `json:"manifest_discovery"`
 	ObjectValidation        bool     `json:"object_validation"`
 	ProtectedAssets         bool     `json:"protected_assets"`
+	StabilityLevels         []string `json:"stability_levels"`
 	ExternalDataplaneAttach bool     `json:"external_dataplane_attach"`
 	SupportedEngines        []string `json:"supported_engines"`
 	SupportedHookModes      []string `json:"supported_hook_modes"`
@@ -98,22 +106,14 @@ type PluginAttachmentState struct {
 }
 
 type PluginManifest struct {
-	APIVersion        string                   `json:"api_version"`
-	ID                string                   `json:"id"`
-	Name              string                   `json:"name"`
-	Version           string                   `json:"version"`
-	Description       string                   `json:"description,omitempty"`
-	Kind              string                   `json:"kind"`
-	Builtin           bool                     `json:"builtin,omitempty"`
-	Capabilities      []string                 `json:"capabilities,omitempty"`
-	VirtualInterfaces []PluginVirtualInterface `json:"virtual_interfaces,omitempty"`
-	Objects           []PluginObject           `json:"objects,omitempty"`
-	Hooks             []PluginHook             `json:"hooks,omitempty"`
-	Resources         []PluginResource         `json:"resources,omitempty"`
-	Actions           []PluginAction           `json:"actions,omitempty"`
-	Control           *PluginControl           `json:"control,omitempty"`
-	UI                *PluginUI                `json:"ui,omitempty"`
-	Metadata          map[string]string        `json:"metadata,omitempty"`
+	APIVersion  string         `json:"api_version"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Version     string         `json:"version"`
+	Description string         `json:"description,omitempty"`
+	Kind        string         `json:"kind"`
+	Stability   string         `json:"stability,omitempty"`
+	Control     *PluginControl `json:"control,omitempty"`
 }
 
 type PluginVirtualInterface struct {
@@ -159,6 +159,7 @@ type PluginResource struct {
 	ID             string   `json:"id"`
 	Description    string   `json:"description,omitempty"`
 	Methods        []string `json:"methods,omitempty"`
+	ControlMethods []string `json:"control_methods,omitempty"`
 	RuntimeUpdate  string   `json:"runtime_update,omitempty"`
 	MaxRecords     int      `json:"max_records,omitempty"`
 	MaxRecordBytes int      `json:"max_record_bytes,omitempty"`
@@ -173,22 +174,55 @@ type PluginAction struct {
 }
 
 type PluginControl struct {
-	Main        string   `json:"main,omitempty"`
-	Permissions []string `json:"permissions,omitempty"`
+	Main           string                 `json:"main,omitempty"`
+	SHA256         string                 `json:"sha256,omitempty"`
+	ResolvedSHA256 string                 `json:"resolved_sha256,omitempty"`
+	Permissions    []string               `json:"permissions,omitempty"`
+	ResourceAccess []PluginResourceAccess `json:"resource_access,omitempty"`
+	ActionAccess   []PluginActionAccess   `json:"action_access,omitempty"`
+	NetAccess      []PluginNetAccess      `json:"net_access,omitempty"`
+}
+
+type PluginResourceAccess struct {
+	Plugin   string   `json:"plugin"`
+	Resource string   `json:"resource"`
+	Methods  []string `json:"methods,omitempty"`
+}
+
+type PluginActionAccess struct {
+	Plugin  string   `json:"plugin"`
+	Actions []string `json:"actions,omitempty"`
+}
+
+type PluginNetAccess struct {
+	Interfaces []string `json:"interfaces,omitempty"`
+	Operations []string `json:"operations,omitempty"`
 }
 
 type PluginUI struct {
-	StaticDir string `json:"static_dir,omitempty"`
-	Entry     string `json:"entry,omitempty"`
+	StaticDir      string `json:"static_dir,omitempty"`
+	Entry          string `json:"entry,omitempty"`
+	Page           string `json:"page,omitempty"`
+	PageTitle      string `json:"page_title,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
+	ResolvedSHA256 string `json:"resolved_sha256,omitempty"`
 }
 
 type LoadedPlugin struct {
 	PluginManifest
-	Status        string             `json:"status"`
-	Runtime       PluginRuntimeState `json:"runtime"`
-	Error         string             `json:"error,omitempty"`
-	Source        string             `json:"source,omitempty"`
-	AssetBasePath string             `json:"asset_base_path,omitempty"`
+	Builtin           bool                     `json:"builtin,omitempty"`
+	Capabilities      []string                 `json:"capabilities,omitempty"`
+	VirtualInterfaces []PluginVirtualInterface `json:"virtual_interfaces,omitempty"`
+	Objects           []PluginObject           `json:"objects,omitempty"`
+	Hooks             []PluginHook             `json:"hooks,omitempty"`
+	Resources         []PluginResource         `json:"resources,omitempty"`
+	Actions           []PluginAction           `json:"actions,omitempty"`
+	UI                *PluginUI                `json:"ui,omitempty"`
+	Status            string                   `json:"status"`
+	Runtime           PluginRuntimeState       `json:"runtime"`
+	Error             string                   `json:"error,omitempty"`
+	Source            string                   `json:"source,omitempty"`
+	AssetBasePath     string                   `json:"asset_base_path,omitempty"`
 
 	rootDir         string
 	staticDir       string
@@ -238,17 +272,23 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 		ManifestDiscovery:       true,
 		ObjectValidation:        true,
 		ProtectedAssets:         true,
+		StabilityLevels:         []string{pluginStabilityLab, pluginStabilityPreview, pluginStabilityStable, pluginStabilityDeprecated},
 		ExternalDataplaneAttach: externalDataplaneAttach,
 		SupportedEngines:        []string{kernelEngineTC, kernelEngineXDP, "control"},
 		SupportedHookModes:      []string{"observe", "rewrite", "redirect", "drop", "control"},
 		Limitations: []string{
-			"external dataplane loading is opt-in via plugins_dataplane_enabled and supports tc stage=forward/reply hooks ordered around the built-in fvtap core priority; legacy stage=pre_forward/post_lookup/pre_reply/post_reply hooks remain supported",
+			"external dataplane loading is opt-in via plugins_dataplane_enabled and supports tc stage=forward/reply hooks ordered around the built-in fvtap core priority",
 			"tc pipeline plugin priority is compared with fvtap core priority 1000; lower priority runs before core lookup and higher priority runs after core lookup before apply/redirect on the selected packet direction",
 			"tc pipeline plugins must tail-call the shared tc_prog_chain_v4 continue slot after processing unless they intentionally return a final tc action",
 			"post_lookup and post_reply tc plugins may read the shared tc_plugin_ctx_v4 context after fvtap has parsed IPv4/L4 and matched a rule or flow",
-			"control.main scripts run in the Goja control plane only; they can use declared permissions for kv/resource/secret/crypto/timer/net.l2/plugin.resource/ebpf map updates but never run in packet hot paths",
+			"control.main scripts run in persistent per-plugin Goja control VMs only; declared worker VMs can offload control tasks but never run in packet hot paths",
+			"control permissions gate kv/resource/secret/crypto/timer/worker/net.l2/plugin.resource/ebpf map updates; registration APIs are only available during control script initialization",
+			"plugin.resource is a two-step grant: the permission enables the API namespace and control.resource_access must explicitly allow each target plugin/resource/method",
+			"control timer and worker state is capped at 64 named timers and 16 named workers per plugin to avoid control-plane resource exhaustion",
 			"plugin dataplane mode is a trust contract for installed eBPF objects; keep external dataplane loading disabled unless the object source is trusted",
-			"xdp and non-fvtap tc hooks are manifest declarations until their dispatchers are added",
+			"plugin stability is declared by manifest.stability: lab is for examples/tests only, preview is suitable for controlled deployments, stable is expected to be production-ready, and deprecated should not be used for new deployments",
+			"lab, preview, and stable plugins can execute control scripts and join external tc dataplane when the corresponding global plugin switches are enabled; deprecated plugins are always blocked",
+			"xdp and non-fvtap tc hooks are registration-only until their dispatchers are added",
 			"plugin UI assets require the same API bearer token; prefer single-file UI assets or authenticated fetches",
 			"fvtap is the built-in forward pipeline and cannot be replaced by an external plugin manifest",
 		},
@@ -265,10 +305,10 @@ func builtinPluginRuntimeState() PluginRuntimeState {
 
 func externalPluginRuntimeState() PluginRuntimeState {
 	return PluginRuntimeState{
-		Mode:       pluginRuntimeModeManifestOnly,
+		Mode:       pluginRuntimeModeRegistered,
 		Attachable: false,
 		Attached:   false,
-		Reason:     "external dataplane loading is disabled or no supported tc pipeline hook was declared; the plugin is limited to manifest discovery, control scripts, object validation, and static UI assets",
+		Reason:     "external dataplane loading is disabled or no supported tc pipeline hook was registered; the plugin is limited to discovery, control scripts, object validation, and static UI assets",
 	}
 }
 
@@ -289,35 +329,36 @@ func builtinFVTapPlugin() LoadedPlugin {
 			Name:        "Forward Virtual Tap",
 			Version:     "builtin",
 			Kind:        "pipeline",
-			Builtin:     true,
+			Stability:   pluginStabilityStable,
 			Description: "Built-in logical pipeline for the current forward TC/XDP dataplane.",
-			Capabilities: []string{
-				"port_forward",
-				"range_forward",
-				"shared_site_proxy",
-				"egress_nat",
-				"managed_network",
-				"ipv6_assignment",
-				"kernel_tc",
-				"kernel_xdp",
-				"runtime_stats",
+		},
+		Builtin: true,
+		Capabilities: []string{
+			"port_forward",
+			"range_forward",
+			"shared_site_proxy",
+			"egress_nat",
+			"managed_network",
+			"ipv6_assignment",
+			"kernel_tc",
+			"kernel_xdp",
+			"runtime_stats",
+		},
+		VirtualInterfaces: []PluginVirtualInterface{
+			{
+				ID:          "fvtap",
+				Type:        "pipeline",
+				Description: "Logical node representing the built-in NAT/forward dataplane.",
 			},
-			VirtualInterfaces: []PluginVirtualInterface{
-				{
-					ID:          "fvtap",
-					Type:        "pipeline",
-					Description: "Logical node representing the built-in NAT/forward dataplane.",
-				},
-			},
-			Objects: []PluginObject{
-				{ID: "forward-tc", Path: "builtin:forward-tc", Description: "Built-in TC object compiled into the service.", Status: pluginObjectStatusBuiltin},
-				{ID: "forward-xdp", Path: "builtin:forward-xdp", Description: "Built-in XDP object compiled into the service.", Status: pluginObjectStatusBuiltin},
-			},
-			Hooks: []PluginHook{
-				{ID: "tc-ingress", Engine: kernelEngineTC, Attach: "ingress", Stage: "forward", Priority: pluginPipelineCorePriority, Program: "builtin:forward-tc", Mode: "rewrite"},
-				{ID: "tc-reply", Engine: kernelEngineTC, Attach: "ingress", Stage: "reply", Priority: pluginPipelineCorePriority, Program: "builtin:forward-tc", Mode: "rewrite"},
-				{ID: "xdp-ingress", Engine: kernelEngineXDP, Attach: "ingress", Stage: "forward", Priority: 0, Program: "builtin:forward-xdp", Mode: "rewrite"},
-			},
+		},
+		Objects: []PluginObject{
+			{ID: "forward-tc", Path: "builtin:forward-tc", Description: "Built-in TC object compiled into the service.", Status: pluginObjectStatusBuiltin},
+			{ID: "forward-xdp", Path: "builtin:forward-xdp", Description: "Built-in XDP object compiled into the service.", Status: pluginObjectStatusBuiltin},
+		},
+		Hooks: []PluginHook{
+			{ID: "tc-ingress", Engine: kernelEngineTC, Attach: "ingress", Stage: "forward", Priority: pluginPipelineCorePriority, Program: "builtin:forward-tc", Mode: "rewrite"},
+			{ID: "tc-reply", Engine: kernelEngineTC, Attach: "ingress", Stage: "reply", Priority: pluginPipelineCorePriority, Program: "builtin:forward-tc", Mode: "rewrite"},
+			{ID: "xdp-ingress", Engine: kernelEngineXDP, Attach: "ingress", Stage: "forward", Priority: 0, Program: "builtin:forward-xdp", Mode: "rewrite"},
 		},
 		Status:  pluginStatusBuiltin,
 		Runtime: builtinPluginRuntimeState(),
@@ -417,29 +458,11 @@ func loadPluginFromDir(rootDir, source string) (LoadedPlugin, error) {
 		Source:         source,
 		rootDir:        rootDir,
 	}
-	if err := resolvePluginObjects(&plugin); err != nil {
-		plugin.Status = pluginStatusError
-		plugin.Error = err.Error()
-	}
-	if plugin.Status == pluginStatusActive {
-		if err := validatePluginHookProgramRefs(&plugin); err != nil {
-			plugin.Status = pluginStatusError
-			plugin.Error = err.Error()
-		}
-	}
 	if plugin.Status == pluginStatusActive {
 		if err := resolvePluginControl(&plugin); err != nil {
 			plugin.Status = pluginStatusError
 			plugin.Error = err.Error()
 			plugin.controlMainPath = ""
-		}
-	}
-	if plugin.Status == pluginStatusActive {
-		if err := resolvePluginAssets(&plugin); err != nil {
-			plugin.Status = pluginStatusError
-			plugin.Error = err.Error()
-			plugin.staticDir = ""
-			plugin.AssetBasePath = ""
 		}
 	}
 	if plugin.Status != pluginStatusActive {
@@ -465,6 +488,7 @@ func pluginLoadError(id, source, message string) LoadedPlugin {
 			ID:         id,
 			Name:       name,
 			Kind:       "pipeline",
+			Stability:  pluginStabilityLab,
 		},
 		Status:  pluginStatusError,
 		Runtime: invalidPluginRuntimeState(),

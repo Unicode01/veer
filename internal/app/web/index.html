@@ -88,7 +88,7 @@
             <button id="tab-diagnostics-button" class="tab" data-tab="diagnostics" data-i18n="tab.diagnostics" role="tab" aria-selected="false" aria-controls="tab-diagnostics" tabindex="-1">Diagnostics</button>
         </div>
 
-        <section class="overview-panel">
+        <section id="overviewPanel" class="overview-panel">
             <div class="overview-header">
                 <div>
                     <p class="section-kicker" data-i18n="overview.kicker">Live Overview</p>
@@ -951,10 +951,6 @@
                         <input type="search" id="pluginsSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="pluginsTable" data-i18n-placeholder="search.plugins.placeholder" placeholder="Search plugin id, capability, object, hook...">
                         <p id="pluginsFilterMeta" class="table-meta"></p>
                     </div>
-                </div>
-                <div class="plugin-meta-grid">
-                    <div id="pluginsCatalogMeta" class="plugin-meta-card"></div>
-                    <div id="pluginsChainMeta" class="plugin-meta-card plugin-meta-card-wide"></div>
                 </div>
                 <section id="pluginUIPanel" class="plugin-ui-panel" hidden>
                     <div class="plugin-ui-header">

@@ -2,64 +2,19 @@
   "api_version": "v1",
   "id": "vtolocal",
   "name": "VTap To Local",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "kind": "control",
+  "stability": "stable",
   "description": "Creates and maintains a local veth ingress pair so host-originated traffic can enter the fvtap pipeline through a real Linux interface.",
-  "capabilities": [
-    "vtap",
-    "local_route",
-    "net_admin",
-    "control"
-  ],
-  "virtual_interfaces": [
-    {
-      "id": "vtolocal0",
-      "type": "logical",
-      "description": "Logical local-to-fvtap handoff. The real ingress side is the configured vtap peer interface."
-    }
-  ],
-  "resources": [
-    {
-      "id": "links",
-      "description": "Local veth pair and optional route/address bindings.",
-      "methods": ["list", "get", "create", "update", "delete"],
-      "runtime_update": "runtime_apply",
-      "max_records": 16,
-      "max_record_bytes": 16384
-    },
-    {
-      "id": "status",
-      "description": "Last applied local handoff status.",
-      "methods": ["list", "get", "create", "update", "delete"],
-      "runtime_update": "manual",
-      "max_records": 16,
-      "max_record_bytes": 16384
-    }
-  ],
-  "actions": [
-    {
-      "id": "apply",
-      "description": "Apply a vtolocal binding from payload or stored profile.",
-      "runtime_update": "runtime_apply",
-      "max_payload_bytes": 16384
-    },
-    {
-      "id": "teardown",
-      "description": "Delete the configured host-side veth link. Deleting one side removes the pair.",
-      "runtime_update": "runtime_apply",
-      "max_payload_bytes": 4096
-    }
-  ],
   "control": {
     "main": "control.js",
-    "permissions": ["net.admin", "resource"]
-  },
-  "ui": {
-    "static_dir": "ui",
-    "entry": "index.html"
-  },
-  "metadata": {
-    "ui.page": "vtolocal",
-    "ui.page_title": "VToLocal"
+    "sha256": "99ba6a708f57211ed8aa28a9b54a87ccd65130fa50e80ebc09f08bf41b64a03e",
+    "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
+    "net_access": [
+      {
+        "interfaces": ["fwd*", "vtolocal*"],
+        "operations": ["addr.write", "link.create", "link.delete", "route.write"]
+      }
+    ]
   }
 }

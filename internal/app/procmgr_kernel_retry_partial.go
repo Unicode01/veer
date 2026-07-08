@@ -441,10 +441,32 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		result.detail = fmt.Sprintf("load ranges: %v", err)
 		return result
 	}
+	sites, err := dbGetSites(pm.db)
+	if err != nil {
+		result.handled = false
+		result.detail = fmt.Sprintf("load sites: %v", err)
+		return result
+	}
+	nextSyntheticRuleID := maxRuleID(rules) + 1
+	pluginForwardRules, _, err := loadPluginForwardRules(pm.db, pm.cfg, rules, sites, ranges, &nextSyntheticRuleID)
+	if err != nil {
+		result.handled = false
+		result.detail = fmt.Sprintf("load plugin forward rule plans: %v", err)
+		return result
+	}
+	if len(pluginForwardRules) > 0 {
+		rules = append(rules, pluginForwardRules...)
+	}
 	egressNATs, err := dbGetEgressNATs(pm.db)
 	if err != nil {
 		result.handled = false
 		result.detail = fmt.Sprintf("load egress nats: %v", err)
+		return result
+	}
+	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pm.cfg)
+	if err != nil {
+		result.handled = false
+		result.detail = fmt.Sprintf("load plugin egress nat plans: %v", err)
 		return result
 	}
 	managedNetworks, err := dbGetManagedNetworks(pm.db)
@@ -467,7 +489,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	kernelPressure := snapshotKernelRuntimePressure(pm.kernelRuntime)
 	egressNATSnapshot := egressNATInterfaceSnapshot{}
 	var dynamicEgressNATParents map[string]struct{}
-	if len(egressNATs) > 0 || len(managedNetworks) > 0 {
+	if len(egressNATs) > 0 || len(managedNetworks) > 0 || len(pluginEgressNATPlanRecords) > 0 {
 		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
 	}
 	if len(egressNATs) > 0 {
@@ -477,6 +499,12 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		managedNetworkCompiled := compileManagedNetworkRuntime(managedNetworks, nil, egressNATs, egressNATSnapshot.Infos)
 		if len(managedNetworkCompiled.EgressNATs) > 0 {
 			egressNATs = append(egressNATs, managedNetworkCompiled.EgressNATs...)
+		}
+	}
+	if len(pluginEgressNATPlanRecords) > 0 {
+		pluginEgressNATs, _ := compilePluginEgressNATPlansWithWarnings(pluginEgressNATPlanRecords, egressNATs, egressNATSnapshot)
+		if len(pluginEgressNATs) > 0 {
+			egressNATs = append(egressNATs, pluginEgressNATs...)
 		}
 	}
 	dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
@@ -668,8 +696,9 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	}
 
 	activeRetryCandidates := retryCandidates
+	pluginCatalog := pm.pluginCatalogWithControlSurface(pm.cfg)
 	for {
-		results, err := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeRetryCandidates)
+		results, err := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeRetryCandidates, &pluginCatalog)
 		if err != nil {
 			result.handled = false
 			result.detail = err.Error()
@@ -1523,14 +1552,25 @@ func sameRetainedKernelRuleDataplaneIgnoringID(a Rule, b Rule) bool {
 		a.Transparent == b.Transparent &&
 		a.kernelMode == b.kernelMode &&
 		a.kernelNATType == b.kernelNATType &&
+		a.kernelRedirectMode == b.kernelRedirectMode &&
 		a.kernelLogKind == b.kernelLogKind &&
 		a.kernelLogOwnerID == b.kernelLogOwnerID
 }
 
-func reconcileIncrementalKernelRetry(runtime kernelRuleRuntime, retainedByEngine map[string][]Rule, retryCandidates []kernelCandidateRule) (map[int64]kernelRuleApplyResult, error) {
+func reconcileIncrementalKernelRetry(runtime kernelRuleRuntime, retainedByEngine map[string][]Rule, retryCandidates []kernelCandidateRule, pluginCatalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
 	retryRules := kernelCandidateRules(retryCandidates)
 	if totalRetainedKernelAssignments(retainedByEngine) == 0 {
+		if pluginCatalog != nil {
+			if withCatalog, ok := runtime.(kernelRuleRuntimeWithPluginCatalog); ok && withCatalog != nil {
+				return withCatalog.ReconcileWithPluginCatalog(retryRules, *pluginCatalog)
+			}
+		}
 		return runtime.Reconcile(retryRules)
+	}
+	if pluginCatalog != nil {
+		if retainedWithCatalog, ok := runtime.(kernelRetainedAssignmentRuntimeWithPluginCatalog); ok && retainedWithCatalog != nil {
+			return retainedWithCatalog.ReconcileRetainingAssignmentsWithPluginCatalog(retainedByEngine, retryRules, *pluginCatalog)
+		}
 	}
 	retainedRuntime, ok := runtime.(kernelRetainedAssignmentRuntime)
 	if !ok || retainedRuntime == nil {

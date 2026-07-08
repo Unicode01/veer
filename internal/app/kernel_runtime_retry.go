@@ -3,19 +3,20 @@
 package app
 
 type kernelRuleMatchKey struct {
-	kind          string
-	ownerID       int64
-	inInterface   string
-	inIP          string
-	inPort        int
-	outInterface  string
-	outIP         string
-	outSourceIP   string
-	outPort       int
-	protocol      string
-	transparent   bool
-	kernelMode    string
-	kernelNATType string
+	kind               string
+	ownerID            int64
+	inInterface        string
+	inIP               string
+	inPort             int
+	outInterface       string
+	outIP              string
+	outSourceIP        string
+	outPort            int
+	protocol           string
+	transparent        bool
+	kernelMode         string
+	kernelNATType      string
+	kernelRedirectMode string
 }
 
 func sameKernelRuleDataplaneConfig(a, b Rule) bool {
@@ -29,7 +30,8 @@ func sameKernelRuleDataplaneConfig(a, b Rule) bool {
 		a.Protocol == b.Protocol &&
 		a.Transparent == b.Transparent &&
 		a.kernelMode == b.kernelMode &&
-		a.kernelNATType == b.kernelNATType
+		a.kernelNATType == b.kernelNATType &&
+		a.kernelRedirectMode == b.kernelRedirectMode
 }
 
 func sameKernelRuleOwnerDataplaneConfig(a, b Rule) bool {
@@ -40,19 +42,20 @@ func sameKernelRuleOwnerDataplaneConfig(a, b Rule) bool {
 
 func kernelRuleMatchKeyFor(rule Rule) kernelRuleMatchKey {
 	return kernelRuleMatchKey{
-		kind:          kernelRuleLogKind(rule),
-		ownerID:       kernelRuleLogOwnerID(rule),
-		inInterface:   rule.InInterface,
-		inIP:          rule.InIP,
-		inPort:        rule.InPort,
-		outInterface:  rule.OutInterface,
-		outIP:         rule.OutIP,
-		outSourceIP:   rule.OutSourceIP,
-		outPort:       rule.OutPort,
-		protocol:      rule.Protocol,
-		transparent:   rule.Transparent,
-		kernelMode:    rule.kernelMode,
-		kernelNATType: rule.kernelNATType,
+		kind:               kernelRuleLogKind(rule),
+		ownerID:            kernelRuleLogOwnerID(rule),
+		inInterface:        rule.InInterface,
+		inIP:               rule.InIP,
+		inPort:             rule.InPort,
+		outInterface:       rule.OutInterface,
+		outIP:              rule.OutIP,
+		outSourceIP:        rule.OutSourceIP,
+		outPort:            rule.OutPort,
+		protocol:           rule.Protocol,
+		transparent:        rule.Transparent,
+		kernelMode:         rule.kernelMode,
+		kernelNATType:      rule.kernelNATType,
+		kernelRedirectMode: rule.kernelRedirectMode,
 	}
 }
 

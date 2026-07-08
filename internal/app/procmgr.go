@@ -836,6 +836,23 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load ranges: %v", err)
 		return
 	}
+	sites, err := dbGetSites(pm.db)
+	if err != nil {
+		log.Printf("load sites: %v", err)
+		return
+	}
+	nextSyntheticRuleID := maxRuleID(rules) + 1
+	pluginForwardRules, warnings, err := loadPluginForwardRules(pm.db, pm.cfg, rules, sites, ranges, &nextSyntheticRuleID)
+	if err != nil {
+		log.Printf("load plugin forward rule plans: %v", err)
+		return
+	}
+	for _, warning := range warnings {
+		log.Printf("plugin forward rule: %s", warning)
+	}
+	if len(pluginForwardRules) > 0 {
+		rules = append(rules, pluginForwardRules...)
+	}
 	managedNetworks, err := dbGetManagedNetworks(pm.db)
 	if err != nil {
 		log.Printf("load managed networks: %v", err)
@@ -860,6 +877,11 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load egress nats: %v", err)
 		return
 	}
+	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pm.cfg)
+	if err != nil {
+		log.Printf("load plugin egress nat plans: %v", err)
+		return
+	}
 	ipv6Assignments, ipv6AssignmentLoadErr := dbGetIPv6Assignments(pm.db)
 	if ipv6AssignmentLoadErr != nil {
 		log.Printf("load ipv6 assignments: %v", ipv6AssignmentLoadErr)
@@ -867,10 +889,10 @@ func (pm *ProcessManager) redistributeWorkers() {
 	egressNATSnapshot := egressNATInterfaceSnapshot{}
 	var dynamicEgressNATParents map[string]struct{}
 	needsManagedNetworkCompilation := len(managedNetworks) > 0
-	if len(egressNATs) > 0 || needsManagedNetworkCompilation {
+	if len(egressNATs) > 0 || needsManagedNetworkCompilation || len(pluginEgressNATPlanRecords) > 0 {
 		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
 	}
-	if needsManagedNetworkCompilation && egressNATSnapshot.Err != nil {
+	if (needsManagedNetworkCompilation || len(pluginEgressNATPlanRecords) > 0) && egressNATSnapshot.Err != nil {
 		log.Printf("managed network runtime: interface inventory unavailable: %v", egressNATSnapshot.Err)
 	}
 	egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
@@ -885,6 +907,15 @@ func (pm *ProcessManager) redistributeWorkers() {
 	}
 	if len(managedNetworkCompiled.EgressNATs) > 0 {
 		egressNATs = append(egressNATs, managedNetworkCompiled.EgressNATs...)
+	}
+	if len(pluginEgressNATPlanRecords) > 0 {
+		pluginEgressNATs, warnings := compilePluginEgressNATPlansWithWarnings(pluginEgressNATPlanRecords, egressNATs, egressNATSnapshot)
+		for _, warning := range warnings {
+			log.Printf("plugin egress nat: %s", warning)
+		}
+		if len(pluginEgressNATs) > 0 {
+			egressNATs = append(egressNATs, pluginEgressNATs...)
+		}
 	}
 	if len(ipv6Assignments) > 0 {
 		if hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces(); err == nil {
@@ -966,10 +997,21 @@ func (pm *ProcessManager) redistributeWorkers() {
 	activeKernelCandidateBuf = activeKernelCandidates[:0]
 	activeKernelRuleBuf := make([]Rule, 0, len(activeKernelCandidates))
 	if pm.kernelRuntime != nil {
+		var pluginCatalog PluginCatalog
+		kernelWithPluginCatalog, usePluginCatalog := pm.kernelRuntime.(kernelRuleRuntimeWithPluginCatalog)
+		if usePluginCatalog {
+			pluginCatalog = pm.pluginCatalogWithControlSurface(pm.cfg)
+		}
 		for {
 			activeKernelRules := kernelCandidateRulesInto(activeKernelRuleBuf, activeKernelCandidates)
 			activeKernelRuleBuf = activeKernelRules[:0]
-			results, err := pm.kernelRuntime.Reconcile(activeKernelRules)
+			var results map[int64]kernelRuleApplyResult
+			var err error
+			if usePluginCatalog {
+				results, err = kernelWithPluginCatalog.ReconcileWithPluginCatalog(activeKernelRules, pluginCatalog)
+			} else {
+				results, err = pm.kernelRuntime.Reconcile(activeKernelRules)
+			}
 			if len(activeKernelCandidates) == 0 {
 				break
 			}
