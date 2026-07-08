@@ -1,6 +1,6 @@
 module forward
 
-go 1.25.1
+go 1.25.12
 
 require (
 	github.com/cilium/ebpf v0.21.0
