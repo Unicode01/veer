@@ -405,7 +405,7 @@ hardcoded_defaults = OrderedDict([
     ("drain_timeout_hours", 24),
     ("managed_network_auto_repair", True),
     ("default_engine", "auto"),
-    ("kernel_engine_order", ["tc", "xdp"]),
+    ("kernel_engine_order", ["tc"]),
     ("kernel_rules_map_limit", 0),
     ("kernel_flows_map_limit", 0),
     ("kernel_nat_ports_map_limit", 0),

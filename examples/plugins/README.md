@@ -61,7 +61,7 @@ exports.onReconcile = function (ctx) {
 };
 ```
 
-顶层注册阶段只允许声明类 API，例如 `plugin.*`、`ebpf.loadObject`、`hooks.attach`、`ui.register`。`kv`、`resources`、`secret`、`timer`、`net.*` 和 `ebpf.mapPut/mapDelete/mapClear` 这类有副作用的 API 只能在 handler 阶段使用。
+顶层注册阶段只允许声明类 API，例如 `plugin.*`、`ebpf.loadObject`、`hooks.attach`、`ui.register`。`kv`、`resources`、`secret`、`timer`、`worker`、`net.*` 和 `ebpf.mapPut/mapDelete/mapClear` 这类有副作用的 API 只能在 handler 阶段使用。
 
 ## 控制面生命周期
 
@@ -251,7 +251,7 @@ F.onLocaleChange(function () {
 
 没有 Forward/Egress NAT 规则时，显式声明了 `interfaces` 的 hook 仍可把 `pipeline_v4` 挂到目标接口上；这时内置 forward/reply core 会被关闭，pipeline 只执行插件链。core 后插件仍可运行，但 `tc_plugin_ctx_v4` 是清空上下文，不包含规则或 flow 匹配结果。
 
-进入 `fvtap` pipeline 的 TC object 必须声明共享 `tc_prog_chain_v4` prog-array map，处理后应 tail-call 回对应 stage 的 continue slot，除非插件明确要返回最终 TC action。core 后插件如果要读取规则匹配上下文，需要声明共享 `tc_plugin_ctx_v4` map；只有内置 core 实际启用并匹配规则或回包 flow 时，该上下文才会带有 `have_rule` 或 `have_flow`。
+进入 `fvtap` pipeline 的 TC object 必须声明共享 `tc_prog_chain_v4` prog-array map，处理后应 tail-call 回对应 stage 的 continue slot，除非插件明确要返回最终 TC action。core 后插件如果要读取规则匹配上下文，需要声明共享 `tc_plugin_ctx_v4` map；只有内置 core 实际启用并匹配规则或回包 flow 时，该上下文才会带有 `have_rule` 或 `have_flow`。新插件建议直接 include `examples/plugins/include/fvtap_plugin_helpers.h`，复用 fvtap slot、共享 map、continue helper、skb 写入/校验和/redirect 包装和基础 IPv4/L4 解析 helper。
 
 生产环境只应加载可信 eBPF object。服务会校验路径、大小、sha256、program type 和 section，但不能证明第三方程序一定不会改包或丢包。
 
@@ -259,7 +259,7 @@ stable/preview 插件注册 object 或 UI 入口时必须声明 sha256。跨架�
 
 ## 网络管理权限
 
-`net.admin` 和 `net.l2` 是两段式授权：既要在 `control.permissions` 声明总权限，也要在 `control.net_access` 声明可操作接口模式和操作。
+`net.admin`、`net.l2` 和 `net.udp` 是两段式授权：既要在 `control.permissions` 声明总权限，也要在 `control.net_access` 声明可操作接口模式和操作。`net.udp` 提供 `send`、`recv`、`exchange`，Linux 下会按声明接口尝试绑定设备，适合控制面探测、协商和轻量 L4 管理流量；数据面隧道仍应放在 TC/eBPF。
 
 示例：
 
@@ -267,11 +267,11 @@ stable/preview 插件注册 object 或 UI 入口时必须声明 sha256。跨架�
 {
   "control": {
     "main": "control.js",
-    "permissions": ["plugin.register", "net.admin", "net.l2"],
+    "permissions": ["plugin.register", "net.admin", "net.l2", "net.udp"],
     "net_access": [
       {
         "interfaces": ["fwd*", "br*", "wan*"],
-        "operations": ["link.create", "link.delete", "link.master", "link.offload", "link.state", "addr.write", "route.write", "l2"]
+        "operations": ["link.create", "link.delete", "link.master", "link.offload", "link.state", "addr.write", "route.write", "l2", "udp"]
       }
     ]
   }
@@ -279,6 +279,24 @@ stable/preview 插件注册 object 或 UI 入口时必须声明 sha256。跨架�
 ```
 
 接口名运行时仍会校验长度和非法字符。生产插件应尽量只授权自己创建的接口前缀；物理口需要逐项显式授权。
+
+`net.udp.exchange` 适合做一次请求一次响应的控制面探测：
+
+```js
+var reply = net.udp.exchange({
+  interface: "wan0",
+  remote_ip: "198.51.100.10",
+  port: 51820,
+  payload_hex: "01020304",
+  timeout_ms: 1000
+});
+
+if (reply === null) {
+  throw new Error("udp probe timed out");
+}
+```
+
+`exchange` 中的 `port` 是远端端口，接收侧默认按发送目标 IP 和端口过滤回包。单独使用 `net.udp.recv` 时，`port` 表示本地监听端口；如果需要避免歧义，可显式使用 `remote_port`、`local_port`。
 
 ## 示例插件
 

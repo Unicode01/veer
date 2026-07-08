@@ -110,7 +110,7 @@ func normalizePluginControl(control *PluginControl) error {
 	}
 	for _, permission := range permissions {
 		if !validPluginControlPermission(permission) {
-			return fmt.Errorf("permission %q must be one of crypto, ebpf.load, ebpf.map_read, ebpf.map_write, hook.attach, kv, net.admin, net.l2, plugin.action, plugin.register, plugin.resource, resource, secret, timer, ui, worker", permission)
+			return fmt.Errorf("permission %q must be one of crypto, ebpf.load, ebpf.map_read, ebpf.map_write, hook.attach, kv, net.admin, net.l2, net.udp, plugin.action, plugin.register, plugin.resource, resource, secret, timer, ui, worker", permission)
 		}
 	}
 	control.Permissions = permissions
@@ -149,22 +149,31 @@ func normalizePluginControl(control *PluginControl) error {
 	}
 	hasNetAdmin := false
 	hasNetL2 := false
+	hasNetUDP := false
 	for _, permission := range permissions {
 		switch permission {
 		case "net.admin":
 			hasNetAdmin = true
 		case "net.l2":
 			hasNetL2 = true
+		case "net.udp":
+			hasNetUDP = true
 		}
 	}
-	if (hasNetAdmin || hasNetL2) && len(control.NetAccess) == 0 {
-		return fmt.Errorf("net_access is required when net.admin or net.l2 permission is declared")
+	if (hasNetAdmin || hasNetL2 || hasNetUDP) && len(control.NetAccess) == 0 {
+		return fmt.Errorf("net_access is required when net.admin, net.l2, or net.udp permission is declared")
 	}
 	for _, access := range control.NetAccess {
 		for _, operation := range access.Operations {
 			if operation == "l2" {
 				if !hasNetL2 {
 					return fmt.Errorf("net_access operation %q requires net.l2 permission", operation)
+				}
+				continue
+			}
+			if operation == "udp" {
+				if !hasNetUDP {
+					return fmt.Errorf("net_access operation %q requires net.udp permission", operation)
 				}
 				continue
 			}
@@ -380,7 +389,7 @@ func normalizePluginNetOperations(values []string) ([]string, error) {
 			continue
 		}
 		if !validPluginNetOperation(value) {
-			return nil, fmt.Errorf("operation %q must be one of addr.write, l2, link.create, link.delete, link.master, link.offload, link.read, link.state, route.write", value)
+			return nil, fmt.Errorf("operation %q must be one of addr.write, l2, link.create, link.delete, link.master, link.offload, link.read, link.state, route.write, udp", value)
 		}
 		if _, ok := seen[value]; ok {
 			continue
@@ -861,7 +870,7 @@ func validPluginActionRuntimeUpdate(value string) bool {
 
 func validPluginControlPermission(value string) bool {
 	switch value {
-	case "crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "kv", "net.admin", "net.l2", "plugin.action", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui", "worker":
+	case "crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "kv", "net.admin", "net.l2", "net.udp", "plugin.action", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui", "worker":
 		return true
 	default:
 		return false
@@ -879,7 +888,7 @@ func validPluginDataplaneHookStage(value string) bool {
 
 func validPluginNetOperation(value string) bool {
 	switch value {
-	case "addr.write", "l2", "link.create", "link.delete", "link.master", "link.offload", "link.read", "link.state", "route.write":
+	case "addr.write", "l2", "link.create", "link.delete", "link.master", "link.offload", "link.read", "link.state", "route.write", "udp":
 		return true
 	default:
 		return false

@@ -1,32 +1,28 @@
-#define SEC(name) __attribute__((section(name), used))
-#define __always_inline inline __attribute__((always_inline))
+#include "../include/fvtap_plugin_helpers.h"
 
-typedef unsigned char __u8;
-typedef unsigned short __u16;
-typedef unsigned int __u32;
-typedef unsigned long long __u64;
-typedef int __s32;
-
+#ifndef BPF_MAP_TYPE_ARRAY
 #define BPF_MAP_TYPE_ARRAY 2
-#define BPF_MAP_TYPE_PROG_ARRAY 3
-#define BPF_MAP_TYPE_PERCPU_ARRAY 6
-#define BPF_FUNC_map_lookup_elem 1
-#define BPF_FUNC_skb_store_bytes 9
-#define BPF_FUNC_l3_csum_replace 10
-#define BPF_FUNC_l4_csum_replace 11
-#define BPF_FUNC_tail_call 12
-#define BPF_FUNC_redirect 23
-#define BPF_FUNC_skb_change_tail 38
-#define BPF_FUNC_skb_pull_data 39
-#define BPF_FUNC_skb_adjust_room 50
+#endif
 
-#define BPF_ADJ_ROOM_NET 0
-#define BPF_ADJ_ROOM_MAC 1
+#ifndef BPF_FUNC_skb_change_tail
+#define BPF_FUNC_skb_change_tail 38
+#endif
+
+#ifndef BPF_F_ADJ_ROOM_FIXED_GSO
 #define BPF_F_ADJ_ROOM_FIXED_GSO (1ULL << 0)
+#endif
+
+#ifndef BPF_F_ADJ_ROOM_DECAP_L3_IPV4
 #define BPF_F_ADJ_ROOM_DECAP_L3_IPV4 (1ULL << 7)
+#endif
+
+#ifndef BPF_F_ADJ_ROOM_DECAP_L3_IPV6
 #define BPF_F_ADJ_ROOM_DECAP_L3_IPV6 (1ULL << 8)
-#define BPF_F_PSEUDO_HDR (1ULL << 4)
+#endif
+
+#ifndef BPF_F_MARK_MANGLED_0
 #define BPF_F_MARK_MANGLED_0 (1ULL << 5)
+#endif
 
 #ifndef PPPOE_DECAP_ADJ_MODE
 #define PPPOE_DECAP_ADJ_MODE BPF_ADJ_ROOM_MAC
@@ -44,10 +40,6 @@ typedef int __s32;
 #define PPPOE_TUNNEL_DIAG 0
 #endif
 
-#define TC_ACT_SHOT 2
-#define TC_ACT_REDIRECT 7
-#define TC_ACT_UNSPEC (-1)
-
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86dd
 #define ETH_P_PPP_SES 0x8864
@@ -55,39 +47,9 @@ typedef int __s32;
 #define PPP_IPV6 0x0057
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
-#define FVTAP_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE 8
-#define FVTAP_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE 28
 #define PPPOE_TUNNEL_FLAG_COUPLED 0x1
 #define PPPOE_TUNNEL_FLAG_MANUAL_DECAP 0x2
 #define PPPOE_ACT_CONTINUE (-2)
-
-struct __sk_buff {
-	__u32 len;
-	__u32 pkt_type;
-	__u32 mark;
-	__u32 queue_mapping;
-	__u32 protocol;
-	__u32 vlan_present;
-	__u32 vlan_tci;
-	__u32 vlan_proto;
-	__u32 priority;
-	__u32 ingress_ifindex;
-	__u32 ifindex;
-	__u32 tc_index;
-	__u32 cb[5];
-	__u32 hash;
-	__u32 tc_classid;
-	__u32 data;
-	__u32 data_end;
-};
-
-struct bpf_map_def {
-	__u32 type;
-	__u32 key_size;
-	__u32 value_size;
-	__u32 max_entries;
-	__u32 map_flags;
-};
 
 struct ethhdr {
 	__u8 h_dest[6];
@@ -156,32 +118,6 @@ struct pppoe_tunnel_config {
 	__u8 wan_dst_mac[6];
 };
 
-struct tc_plugin_ctx_v4 {
-	__u32 ifindex;
-	__u32 src_addr;
-	__u32 dst_addr;
-	__u32 rule_id;
-	__u32 backend_addr;
-	__u32 out_ifindex;
-	__u32 nat_addr;
-	__u16 src_port;
-	__u16 dst_port;
-	__u16 backend_port;
-	__u16 rule_flags;
-	__u8 proto;
-	__u8 rule_wildcard_addr;
-	__u8 have_rule;
-	__u8 have_flow;
-	__u8 direction;
-	__u8 pad[3];
-	__u32 front_addr;
-	__u32 client_addr;
-	__u16 front_port;
-	__u16 client_port;
-	__u16 nat_port;
-	__u16 pad1;
-};
-
 struct ipv4_l4_ctx {
 	__u32 src_addr;
 	__u32 dst_addr;
@@ -202,18 +138,12 @@ static void *(*const bpf_map_lookup_elem)(void *map, const void *key) = (void *)
 static int (*const bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const void *from, __u32 len, __u64 flags) = (void *)BPF_FUNC_skb_store_bytes;
 static int (*const bpf_l3_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to, __u64 size) = (void *)BPF_FUNC_l3_csum_replace;
 static int (*const bpf_l4_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to, __u64 flags) = (void *)BPF_FUNC_l4_csum_replace;
-static void (*const bpf_tail_call)(void *ctx, void *prog_array_map, __u32 index) = (void *)BPF_FUNC_tail_call;
 static int (*const bpf_redirect)(__u32 ifindex, __u64 flags) = (void *)BPF_FUNC_redirect;
 static int (*const bpf_skb_change_tail)(struct __sk_buff *skb, __u32 len, __u64 flags) = (void *)BPF_FUNC_skb_change_tail;
 static int (*const bpf_skb_pull_data)(struct __sk_buff *skb, __u32 len) = (void *)BPF_FUNC_skb_pull_data;
 static int (*const bpf_skb_adjust_room)(struct __sk_buff *skb, __s32 len_diff, __u32 mode, __u64 flags) = (void *)BPF_FUNC_skb_adjust_room;
 
-struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
-	.type = BPF_MAP_TYPE_PROG_ARRAY,
-	.key_size = sizeof(__u32),
-	.value_size = sizeof(__u32),
-	.max_entries = 45,
-};
+FVTAP_DECLARE_PROG_CHAIN_V4();
 
 struct bpf_map_def SEC("maps") pppoe_tunnel_config = {
 	.type = BPF_MAP_TYPE_ARRAY,
@@ -229,12 +159,7 @@ struct bpf_map_def SEC("maps") pppoe_tunnel_stats = {
 	.max_entries = 16,
 };
 
-struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
-	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
-	.key_size = sizeof(__u32),
-	.value_size = sizeof(struct tc_plugin_ctx_v4),
-	.max_entries = 1,
-};
+FVTAP_DECLARE_PLUGIN_CTX_V4();
 
 static __always_inline void bump_tunnel_stat(__u32 index)
 {
@@ -704,8 +629,7 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 
 static __always_inline int encap_forward_reply_to_pppoe(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg)
 {
-	__u32 key = 0;
-	struct tc_plugin_ctx_v4 *plugin_ctx = bpf_map_lookup_elem(&tc_plugin_ctx_v4, &key);
+	struct tc_plugin_ctx_v4 *plugin_ctx = fvtap_lookup_plugin_ctx_v4();
 	struct ipv4_l4_ctx pkt = {};
 	int act;
 
@@ -756,7 +680,7 @@ int tc_tunnel(struct __sk_buff *skb)
 	}
 
 next:
-	bpf_tail_call(skb, &tc_prog_chain_v4, FVTAP_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE);
+	fvtap_continue_pre_forward(skb);
 	return TC_ACT_UNSPEC;
 }
 
@@ -774,7 +698,7 @@ int tc_reply_encap(struct __sk_buff *skb)
 		return act;
 
 next:
-	bpf_tail_call(skb, &tc_prog_chain_v4, FVTAP_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE);
+	fvtap_continue_post_reply(skb);
 	return TC_ACT_UNSPEC;
 }
 

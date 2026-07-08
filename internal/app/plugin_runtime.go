@@ -282,7 +282,7 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 			"tc pipeline plugins must tail-call the shared tc_prog_chain_v4 continue slot after processing unless they intentionally return a final tc action",
 			"post_lookup and post_reply tc plugins may read the shared tc_plugin_ctx_v4 context after fvtap has parsed IPv4/L4 and matched a rule or flow",
 			"control.main scripts run in persistent per-plugin Goja control VMs only; declared worker VMs can offload control tasks but never run in packet hot paths",
-			"control permissions gate kv/resource/secret/crypto/timer/worker/net.l2/plugin.resource/ebpf map updates; registration APIs are only available during control script initialization",
+			"control permissions gate kv/resource/secret/crypto/timer/worker/net.l2/net.udp/plugin.resource/ebpf map updates; registration APIs are only available during control script initialization",
 			"plugin.resource is a two-step grant: the permission enables the API namespace and control.resource_access must explicitly allow each target plugin/resource/method",
 			"control timer and worker state is capped at 64 named timers and 16 named workers per plugin to avoid control-plane resource exhaustion",
 			"plugin dataplane mode is a trust contract for installed eBPF objects; keep external dataplane loading disabled unless the object source is trusted",
