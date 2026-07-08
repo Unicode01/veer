@@ -298,7 +298,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 构建要求：
 
-- Go 1.25.1+
+- Go 1.25.12+
 - `clang`
 - Debian/Ubuntu 通常需要 `linux-libc-dev`
 - RHEL-compatible/Fedora 通常需要 `kernel-headers`
