@@ -41,7 +41,7 @@ plugin.capabilities(['pppoe', 'raw_l2', 'control']);
 plugin.virtualInterface({
   id: 'pppoe0',
   type: 'logical',
-  description: 'Example logical PPPoE session endpoint used by the control-plane demo.'
+  description: 'Logical PPPoE session endpoint exported by the client control plane.'
 });
 ebpf.loadObject({
   id: 'pppoe_tunnel',
@@ -82,7 +82,7 @@ plugin.resource({
 });
 plugin.resource({
   id: 'profiles',
-  description: 'PPPoE account and interface profile used by the example actions.',
+  description: 'PPPoE account, interface, negotiation and handoff profile used by client actions.',
   methods: ['list', 'get', 'create', 'update', 'delete'],
   runtime_update: 'manual',
   max_records: 16,
@@ -153,7 +153,7 @@ plugin.action({
 });
 plugin.action({
   id: 'debug_stats',
-  description: 'Read PPPoE tunnel dataplane counters for diagnostics.',
+  description: 'Read PPPoE tunnel dataplane counters and build-mode diagnostics.',
   runtime_update: 'runtime_apply',
   max_payload_bytes: 1024
 });

@@ -386,39 +386,7 @@ sh scripts/package-example-plugins.sh
 go test ./...
 ```
 
-插件示例的真实 Linux 验收测试：
-
-```bash
-sudo sh scripts/test-plugin-examples-linux.sh
-sudo sh scripts/test-plugin-pppoe-linux.sh
-sudo sh scripts/test-plugin-production-linux.sh
-```
-
-`test-plugin-production-linux.sh` 是完整生产验收入口，默认设置 `FORWARD_PLUGIN_EXAMPLE_REPEAT=20` 和 `FORWARD_PLUGIN_PIPELINE_REPEAT=20`，先跑脚本语法、manifest verifier、默认 stable package、lab 排除和低内存 helper 自检，再跑示例插件 Linux 行为、外部 TC 插件 attach/cleanup 和插件生成 Egress NAT 的端到端流量测试，之后跑 TC 插件 pipeline 长流/新流稳定性门禁，最后跑插件 pipeline perf smoke。PPPoE gate 依赖 `pppd`、`pppoe-server`、`ethtool` 和 `/dev/net/tun`，默认不并入通用生产入口；需要 PPPoE gate 时单独运行 `test-plugin-pppoe-linux.sh`，或给生产入口设置 `FORWARD_RUN_PLUGIN_PPPOE_TEST=1`。`test-plugin-examples-linux.sh` 会先在宿主 network namespace 内创建并删除临时 veth/bridge，用于验证 `wan_core`、`lan_core`、`vtolocal` 的真实 `net.admin` 行为、repair timer 和 teardown 语义；随后运行 `packet_observer` 类外部 TC 插件 attach/cleanup 测试，再构建 eBPF object，并运行插件生成 Egress NAT plan 的 TC 端到端流量测试，覆盖 `lan_core -> egress_nat_plans -> core` 和 `lan_core -> wan_core status -> egress_nat_plans -> core` 两条路径。`test-plugin-pppoe-linux.sh` 会在可用 Node 时先执行 `examples/plugins/pppoe_client/test-control-node.js` 插件自有控制面测试，覆盖 discovery、PAP/CHAP、IPv6CP、DHCPv6-PD、keepalive/redial、disconnect 和 tunnel map 写入；随后运行插件目录自带黑盒验收：启动真实 `forward` 进程，通过 HTTP 插件 API 触发 `pppoe_client`，再用 netns/veth、rp-pppoe server/pppd AC、ping 和 iperf3 验证 TC 隧道真实流量；测试会关闭临时 veth offload，并让插件执行接口 MTU/offload 准备，避免 TCP partial checksum 在 PPPoE 隧道里被 `ppp0` 丢弃。`test-plugin-stability-linux.sh` 会在 TC+插件 pipeline 下同时保持长连接持续 echo 和周期性创建新短连接，用于捕获断流、新流无法创建、插件链状态卡死这类问题。它们默认不会随 `go test ./...` 执行；如果只想跑 net.admin 行为，可设置 `FORWARD_SKIP_PLUGIN_EGRESS_NAT_TEST=1`：
-
-```bash
-sudo FORWARD_RUN_PLUGIN_EXAMPLE_TEST=1 go test ./internal/app -run TestPluginExample -count=1 -v
-sudo FORWARD_SKIP_PLUGIN_EGRESS_NAT_TEST=1 sh scripts/test-plugin-examples-linux.sh
-sudo FORWARD_PLUGIN_EXAMPLE_REPEAT=20 sh scripts/test-plugin-examples-linux.sh
-sudo FORWARD_PLUGIN_PPPOE_REPEAT=3 sh scripts/test-plugin-pppoe-linux.sh
-sudo sh scripts/test-plugin-stability-linux.sh
-sudo sh scripts/test-plugin-perf-linux.sh
-sudo FORWARD_RUN_PLUGIN_PPPOE_TEST=1 sh scripts/test-plugin-production-linux.sh
-sudo FORWARD_SKIP_PLUGIN_PERF_TEST=1 sh scripts/test-plugin-production-linux.sh
-sh scripts/test-plugin-scripts.sh
-```
-
-低内存测试机默认会自动启用 `FORWARD_PLUGIN_TEST_LOW_MEMORY=auto`：当 `/proc/meminfo` 显示内存小于 2 GiB 时，脚本会设置 `GOMAXPROCS=2` 并给 `GOFLAGS` 追加 `-p=1`，降低 `go test`/`go build` 的峰值内存。可用 `FORWARD_PLUGIN_TEST_LOW_MEMORY=0` 关闭，也可用 `FORWARD_PLUGIN_TEST_LOW_MEMORY=1` 在更大机器上强制使用低并发模式。1 GiB 级测试机仍建议在构建机交叉编译测试二进制，避免目标机在 `go test` 编译阶段 OOM：
-
-```bash
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o forward-internal-app-linux-amd64.test ./internal/app
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o forward-linux-amd64 .
-sudo FORWARD_APP_TEST_BINARY=/path/forward-internal-app-linux-amd64.test \
-  FORWARD_PERF_BINARY=/path/forward-linux-amd64 \
-  sh scripts/test-plugin-production-linux.sh
-```
-
-`scripts/test-plugin-stability-linux.sh` 默认跑 20 秒稳定性门禁，可通过 `FORWARD_PLUGIN_STABILITY_SECONDS`、`FORWARD_PLUGIN_STABILITY_LONG_CONNECTIONS`、`FORWARD_PLUGIN_STABILITY_NEW_CONNECTIONS` 和 `FORWARD_PLUGIN_STABILITY_NEW_INTERVAL_MS` 调整时长、长连接数和新流创建频率。`scripts/test-plugin-perf-linux.sh` 默认用轻量负载跑 TC baseline、1 个插件、4 个插件三组 perf smoke；可通过 `FORWARD_PLUGIN_PERF_COUNTS`、`FORWARD_PERF_CONNECTIONS`、`FORWARD_PERF_CONCURRENCY`、`FORWARD_PERF_BYTES_PER_CONN` 等环境变量扩展成完整曲线。`scripts/test-plugin-pppoe-linux.sh` 可通过 `FORWARD_PPPOE_BLACKBOX_SECONDS` 和 `FORWARD_PPPOE_BLACKBOX_PARALLEL` 调整 PPPoE 黑盒 TCP 流量。内核集成和性能测试需要 Linux、root、netns/veth/TC/XDP 能力，按测试文件中的环境变量单独开启。`wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 的稳定性标记依赖上述真实 Linux 验收、端到端转发、长稳和性能曲线；`pppoe_client` 已覆盖插件自有控制面协议自测和黑盒 rp-pppoe server/pppd AC 下的真实 session/TCP 流量；生产部署仍应在目标运营商/AC 上额外覆盖断线重拨、真实 IPv4/IPv6/PD、接口 offload/MTU 准备和目标拓扑吞吐验收。`packet_observer` 仍是 `lab` 示例，不能作为生产级功能承诺。
+插件开发、打包和验收边界见 [examples/plugins/README.md](examples/plugins/README.md)。
 
 ## WHMCS 插件
 
