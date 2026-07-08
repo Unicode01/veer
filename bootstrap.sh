@@ -48,7 +48,7 @@ usage() {
   FORWARD_REPO_ARCHIVE_URL_CN
                       CN 模式优先尝试的源码归档地址，默认空
   FORWARD_REF          拉取的 Git ref，默认 main
-  FORWARD_GO_VERSION   安装的 Go 版本，默认 1.25.1
+  FORWARD_GO_VERSION   安装的 Go 版本，默认 1.25.12
   FORWARD_GO_REGION    Go 下载区域策略: auto/cn/global，默认 auto
   FORWARD_GO_BASE_URL  显式覆盖 Go 下载源前缀，例如 https://mirror.example.com/golang
   FORWARD_GO_CN_BASE_URL
@@ -98,7 +98,7 @@ FORWARD_REPO_URL_CN="${FORWARD_REPO_URL_CN:-}"
 FORWARD_REPO_ARCHIVE_URL="${FORWARD_REPO_ARCHIVE_URL:-}"
 FORWARD_REPO_ARCHIVE_URL_CN="${FORWARD_REPO_ARCHIVE_URL_CN:-}"
 FORWARD_REF="${FORWARD_REF:-main}"
-FORWARD_GO_VERSION="${FORWARD_GO_VERSION:-1.25.1}"
+FORWARD_GO_VERSION="${FORWARD_GO_VERSION:-1.25.12}"
 FORWARD_GO_REGION="${FORWARD_GO_REGION:-auto}"
 FORWARD_GO_BASE_URL="${FORWARD_GO_BASE_URL:-}"
 FORWARD_GO_CN_BASE_URL="${FORWARD_GO_CN_BASE_URL:-https://mirrors.aliyun.com/golang}"
