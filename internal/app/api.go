@@ -270,7 +270,7 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
 			return
 		}
-		writeJSON(w, http.StatusOK, loadPluginCatalog(cfg))
+		writeJSON(w, http.StatusOK, loadPluginCatalogWithControlRegistration(cfg))
 	}))
 	mux.HandleFunc("/api/plugins/reload", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -283,13 +283,13 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
 			return
 		}
-		writeJSON(w, http.StatusOK, loadPluginCatalog(cfg))
+		writeJSON(w, http.StatusOK, loadPluginCatalogWithControlRegistration(cfg))
 	}))
 	mux.Handle("/api/plugins/", authStaticMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if handlePluginAPIRoute(w, r, cfg, db, pm) {
 			return
 		}
-		handlePluginAsset(w, r, cfg)
+		handlePluginAsset(w, r, cfg, pm)
 	})))
 	mux.HandleFunc("/api/rules/validate", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -527,7 +527,7 @@ func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 		return
 	}
 
-	rules, err := dbGetRulesFiltered(db, filters)
+	rules, err := loadEffectiveForwardRules(db, processManagerConfig(pm))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -550,6 +550,92 @@ func handleListRules(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pro
 		statuses = []RuleStatus{}
 	}
 	writeJSON(w, http.StatusOK, statuses)
+}
+
+func loadEffectiveForwardRules(db sqlRuleStore, cfg *Config) ([]Rule, error) {
+	rules, err := dbGetRules(db)
+	if err != nil {
+		return nil, err
+	}
+	sites, err := dbGetSites(db)
+	if err != nil {
+		return nil, err
+	}
+	ranges, err := dbGetRanges(db)
+	if err != nil {
+		return nil, err
+	}
+	nextSyntheticRuleID := maxRuleID(rules) + 1
+	pluginRules, _, err := loadPluginForwardRules(db, cfg, rules, sites, ranges, &nextSyntheticRuleID)
+	if err != nil {
+		return nil, err
+	}
+	if len(pluginRules) > 0 {
+		rules = append(rules, pluginRules...)
+	}
+	return rules, nil
+}
+
+func loadEffectiveRuleMetaByIDs(db sqlRuleStore, ids []int64, cfg *Config) (map[int64]Rule, error) {
+	result := make(map[int64]Rule, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	meta, err := dbGetRuleMetaByIDs(db, ids)
+	if err != nil {
+		return nil, err
+	}
+	for id, rule := range meta {
+		result[id] = rule
+	}
+	if len(result) == len(ids) {
+		return result, nil
+	}
+	requested := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		requested[id] = struct{}{}
+	}
+	rules, err := loadEffectiveForwardRules(db, cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, rule := range rules {
+		if _, ok := requested[rule.ID]; ok {
+			result[rule.ID] = rule
+		}
+	}
+	return result, nil
+}
+
+func loadEffectiveRuleProtocolByIDs(db sqlRuleStore, ids []int64, cfg *Config) (map[int64]string, error) {
+	result := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	protocols, err := dbGetRuleProtocolMapByIDs(db, ids)
+	if err != nil {
+		return nil, err
+	}
+	for id, protocol := range protocols {
+		result[id] = protocol
+	}
+	if len(result) == len(ids) {
+		return result, nil
+	}
+	requested := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		requested[id] = struct{}{}
+	}
+	rules, err := loadEffectiveForwardRules(db, cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, rule := range rules {
+		if _, ok := requested[rule.ID]; ok {
+			result[rule.ID] = rule.Protocol
+		}
+	}
+	return result, nil
 }
 
 func collectRuleRuntimeStatus(pm *ProcessManager) (map[int64]bool, map[int64]bool, map[int64]string) {
@@ -1981,7 +2067,7 @@ func handleListEgressNATs(w http.ResponseWriter, r *http.Request, db *sql.DB, pm
 	writeJSON(w, http.StatusOK, statuses)
 }
 
-func loadEffectiveEgressNATMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]EgressNAT, error) {
+func loadEffectiveEgressNATMetaByIDs(db sqlRuleStore, ids []int64, cfg *Config) (map[int64]EgressNAT, error) {
 	result := make(map[int64]EgressNAT, len(ids))
 	if len(ids) == 0 {
 		return result, nil
@@ -2014,23 +2100,32 @@ func loadEffectiveEgressNATMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]Eg
 	if err != nil {
 		return nil, err
 	}
-	if len(managedNetworks) == 0 {
-		return result, nil
-	}
 
-	ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
+	explicitItems, err := dbGetEgressNATs(db)
 	if err != nil {
 		return nil, err
 	}
+	explicitItems = normalizeEgressNATItemsWithSnapshot(explicitItems, snapshot)
 
-	allItems, err := dbGetEgressNATs(db)
+	effectiveItems := append([]EgressNAT(nil), explicitItems...)
+	if len(managedNetworks) > 0 {
+		ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
+		if err != nil {
+			return nil, err
+		}
+		compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, explicitItems, snapshot.Infos)
+		if len(compiled.EgressNATs) > 0 {
+			effectiveItems = append(effectiveItems, compiled.EgressNATs...)
+		}
+	}
+	pluginItems, _, err := loadPluginEgressNATPlans(db, cfg, effectiveItems, snapshot)
 	if err != nil {
 		return nil, err
 	}
-	allItems = normalizeEgressNATItemsWithSnapshot(allItems, snapshot)
-
-	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, allItems, snapshot.Infos)
-	for _, item := range compiled.EgressNATs {
+	if len(pluginItems) > 0 {
+		effectiveItems = append(effectiveItems, pluginItems...)
+	}
+	for _, item := range effectiveItems {
 		if _, ok := requested[item.ID]; ok {
 			result[item.ID] = item
 		}
@@ -2038,7 +2133,7 @@ func loadEffectiveEgressNATMetaByIDs(db sqlRuleStore, ids []int64) (map[int64]Eg
 	return result, nil
 }
 
-func loadEffectiveEgressNATProtocolByIDs(db sqlRuleStore, ids []int64) (map[int64]string, error) {
+func loadEffectiveEgressNATProtocolByIDs(db sqlRuleStore, ids []int64, cfg *Config) (map[int64]string, error) {
 	result := make(map[int64]string, len(ids))
 	if len(ids) == 0 {
 		return result, nil
@@ -2068,14 +2163,6 @@ func loadEffectiveEgressNATProtocolByIDs(db sqlRuleStore, ids []int64) (map[int6
 	if err != nil {
 		return nil, err
 	}
-	if len(managedNetworks) == 0 {
-		return result, nil
-	}
-
-	ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
-	if err != nil {
-		return nil, err
-	}
 
 	snapshot := loadEgressNATInterfaceSnapshot()
 	explicitItems, err := dbGetEgressNATs(db)
@@ -2084,8 +2171,25 @@ func loadEffectiveEgressNATProtocolByIDs(db sqlRuleStore, ids []int64) (map[int6
 	}
 	explicitItems = normalizeEgressNATItemsWithSnapshot(explicitItems, snapshot)
 
-	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, explicitItems, snapshot.Infos)
-	for _, item := range compiled.EgressNATs {
+	effectiveItems := append([]EgressNAT(nil), explicitItems...)
+	if len(managedNetworks) > 0 {
+		ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
+		if err != nil {
+			return nil, err
+		}
+		compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, explicitItems, snapshot.Infos)
+		if len(compiled.EgressNATs) > 0 {
+			effectiveItems = append(effectiveItems, compiled.EgressNATs...)
+		}
+	}
+	pluginItems, _, err := loadPluginEgressNATPlans(db, cfg, effectiveItems, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if len(pluginItems) > 0 {
+		effectiveItems = append(effectiveItems, pluginItems...)
+	}
+	for _, item := range effectiveItems {
 		if _, ok := requested[item.ID]; ok {
 			result[item.ID] = item.Protocol
 		}
@@ -2093,7 +2197,7 @@ func loadEffectiveEgressNATProtocolByIDs(db sqlRuleStore, ids []int64) (map[int6
 	return result, nil
 }
 
-func loadEffectiveEnabledEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
+func loadEffectiveEnabledEgressNATItems(db sqlRuleStore, cfg *Config) ([]EgressNAT, error) {
 	items, err := dbGetEnabledEgressNATs(db)
 	if err != nil {
 		return nil, err
@@ -2106,21 +2210,32 @@ func loadEffectiveEnabledEgressNATItems(db sqlRuleStore) ([]EgressNAT, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(managedNetworks) == 0 {
-		return items, nil
+	if len(managedNetworks) > 0 {
+		ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
+		if err != nil {
+			return nil, err
+		}
+		compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, items, snapshot.Infos)
+		if len(compiled.EgressNATs) > 0 {
+			items = append(items, compiled.EgressNATs...)
+		}
 	}
 
-	ipv6Assignments, err := dbGetEnabledIPv6Assignments(db)
+	pluginItems, _, err := loadPluginEgressNATPlans(db, cfg, items, snapshot)
 	if err != nil {
 		return nil, err
 	}
-	compiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, items, snapshot.Infos)
-	if len(compiled.EgressNATs) == 0 {
-		return items, nil
+	if len(pluginItems) > 0 {
+		items = append(items, pluginItems...)
 	}
-
-	items = append(items, compiled.EgressNATs...)
 	return items, nil
+}
+
+func processManagerConfig(pm *ProcessManager) *Config {
+	if pm == nil {
+		return nil
+	}
+	return pm.cfg
 }
 
 func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {
@@ -2507,7 +2622,7 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		workers = append(workers, view)
 	}
 
-	allEgressNATs, err := loadEffectiveEnabledEgressNATItems(db)
+	allEgressNATs, err := loadEffectiveEnabledEgressNATItems(db, processManagerConfig(pm))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -3398,7 +3513,7 @@ func handleListRuleStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm 
 	statsIDs := ruleStatsMapIDs(statsMap)
 	needsAllMeta := query.SortKey == "remark"
 	if needsAllMeta {
-		ruleMeta, err := dbGetRuleMetaByIDs(db, statsIDs)
+		ruleMeta, err := loadEffectiveRuleMetaByIDs(db, statsIDs, processManagerConfig(pm))
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -3408,7 +3523,7 @@ func handleListRuleStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm 
 			result[i].Remark = meta.Remark
 		}
 	} else if query.SortKey == "current_conns" {
-		ruleProtocols, err := dbGetRuleProtocolMapByIDs(db, statsIDs)
+		ruleProtocols, err := loadEffectiveRuleProtocolByIDs(db, statsIDs, processManagerConfig(pm))
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -3425,7 +3540,7 @@ func handleListRuleStats(w http.ResponseWriter, r *http.Request, db *sql.DB, pm 
 
 	resp := paginateRuleStatsItems(result, query)
 	if !needsAllMeta && len(resp.Items) > 0 {
-		ruleMeta, err := dbGetRuleMetaByIDs(db, ruleStatsPageIDs(resp.Items))
+		ruleMeta, err := loadEffectiveRuleMetaByIDs(db, ruleStatsPageIDs(resp.Items), processManagerConfig(pm))
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -3548,14 +3663,14 @@ func handleListEgressNATStats(w http.ResponseWriter, r *http.Request, db *sql.DB
 	statsIDs := egressNATStatsMapIDs(statsMap)
 	needsAllMeta := egressNATStatsSortNeedsAllMeta(query.SortKey)
 	if needsAllMeta {
-		metaByID, err := loadEffectiveEgressNATMetaByIDs(db, statsIDs)
+		metaByID, err := loadEffectiveEgressNATMetaByIDs(db, statsIDs, processManagerConfig(pm))
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
 		populateEgressNATStatsItemsMeta(result, metaByID)
 	} else if query.SortKey == "current_conns" {
-		protocols, err := loadEffectiveEgressNATProtocolByIDs(db, statsIDs)
+		protocols, err := loadEffectiveEgressNATProtocolByIDs(db, statsIDs, processManagerConfig(pm))
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -3571,7 +3686,7 @@ func handleListEgressNATStats(w http.ResponseWriter, r *http.Request, db *sql.DB
 
 	resp := paginateEgressNATStatsItems(result, query)
 	if !needsAllMeta && len(resp.Items) > 0 {
-		metaByID, err := loadEffectiveEgressNATMetaByIDs(db, egressNATStatsPageIDs(resp.Items))
+		metaByID, err := loadEffectiveEgressNATMetaByIDs(db, egressNATStatsPageIDs(resp.Items), processManagerConfig(pm))
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -3598,7 +3713,7 @@ func handleListCurrentConns(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 		return
 	}
 
-	ruleProtocols, err := dbGetRuleProtocolMapByIDs(db, currentConnStatsMapIDs(ruleStats))
+	ruleProtocols, err := loadEffectiveRuleProtocolByIDs(db, currentConnStatsMapIDs(ruleStats), processManagerConfig(pm))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -3608,7 +3723,7 @@ func handleListCurrentConns(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	egressNATProtocols, err := loadEffectiveEgressNATProtocolByIDs(db, currentConnStatsMapIDs(egressNATStats))
+	egressNATProtocols, err := loadEffectiveEgressNATProtocolByIDs(db, currentConnStatsMapIDs(egressNATStats), processManagerConfig(pm))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

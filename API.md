@@ -256,6 +256,7 @@ Content-Type: application/json
     "manifest_discovery": true,
     "object_validation": true,
     "protected_assets": true,
+    "stability_levels": ["lab", "preview", "stable", "deprecated"],
     "external_dataplane_attach": false,
     "supported_engines": ["tc", "xdp", "control"],
     "supported_hook_modes": ["observe", "rewrite", "redirect", "drop", "control"]
@@ -267,6 +268,7 @@ Content-Type: application/json
       "name": "Forward Virtual Tap",
       "version": "builtin",
       "kind": "pipeline",
+      "stability": "stable",
       "builtin": true,
       "status": "builtin",
       "runtime": {
@@ -287,30 +289,47 @@ Content-Type: application/json
 字段说明：
 
 - `status`: `builtin` / `active` / `error`
-- `runtime`: 插件运行时状态；内置 `fvtap` 为 `mode=builtin` 且已挂载。默认配置下外部插件为 `mode=manifest_only`，启用 `plugins_dataplane_enabled=true` 且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
+- `stability`: 插件稳定性等级；`lab` 只适合实验/示例，`preview` 适合受控环境试用，`stable` 表示预期生产可用，`deprecated` 表示不建议新部署。未声明时默认为 `lab`
+- `runtime`: 插件运行时状态；内置 `fvtap` 为 `mode=builtin` 且已挂载。默认配置下外部插件为 `mode=registered`，表示 slim manifest 已发现且 `control.js` runtime surface 已注册/校验，但未进入外部数据面；启用 `plugins_dataplane_enabled=true` 且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
 - `runtime.core_priority`: 内置 `fvtap core` 的排序锚点，当前固定为 `1000`
+- `runtime.stability_levels`: 当前服务接受的插件稳定性枚举
 - `runtime.external_dataplane_attach`: 是否允许外部数据面插件。默认 `false`；为 `true` 时当前支持 TC `stage=forward/reply` hook 按 priority 进入内置 `fvtap` pipeline。没有实际可链入插件时，TC 热路径仍保持 legacy/dispatch，不额外进入 pipeline wrapper
-- `objects`: 插件声明的 eBPF 对象或内置对象；外部对象路径必须留在插件目录内，单个对象最大 16 MiB，声明 `sha256` 时必须匹配文件内容；服务会解析 ELF 并补充 `status`、`resolved_sha256`、`program_count`、`map_count`
-- `asset_base_path`: 插件声明 `ui.static_dir` 后生成的静态资源路径，需要 Bearer Token
-- `metadata.ui.page`: 可选的 Web UI 顶部分页 ID；声明后前端会自动创建插件页并内嵌加载 `ui.entry`。标题可用 `metadata.ui.page_title` 指定；也兼容 `ui_page`、`forward.page`、`forward_ui_page`、`tab_title` 等键
-- `hooks`: 插件声明的 dataplane hook；默认只做控制面展示。开启外部数据面后，只有 `engine=tc`、`stage=forward/reply`、`attach=ingress/both`、非 `control` mode 的 hook 会被加载到 `tc_prog_chain_v4` stage slots。插件程序执行后必须 tail-call 到对应 stage 的内置 continue slot，除非它明确返回最终 TC action。旧 `stage=pre_forward/post_lookup/pre_reply/post_reply` 作为兼容别名保留；XDP 和其他 stage 当前仍是 manifest-only
-- `hooks[].interfaces`: 可选的真实 Linux 接口名列表。留空或省略时，插件只随已有 forward/egress 规则触发的 `fvtap` attachment 运行；填写后，即使没有转发规则，TC runtime 也会把 `pipeline_v4` 挂到这些接口上。无规则模式只加载显式接口上的 `pre_forward/pre_reply` hook；core 后 hook 仍需要规则或 flow 上下文。不会自动挂载所有接口；接口不存在会让该插件本轮进入 error。当前 pipeline chain 是全局链，插件如果需要严格按接口生效，应在自己的 eBPF 程序中检查 `skb->ifindex`
-- `runtime.attachments[].priority`: 插件 manifest 的排序优先级；低于 `runtime.core_priority` 会运行在 `fvtap core` 前，高于 `runtime.core_priority` 会运行在 core 完成 IPv4/L4 解析和规则匹配后、执行 NAT/redirect 前。等于 core priority 会被拒绝。`runtime.attachments[].chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot
-- `post_lookup` 插件如需读取规则匹配上下文，必须在对象里声明共享 `tc_plugin_ctx_v4` per-CPU array map；服务会替换为内置稳定 ctx map，IPv4 地址和端口字段按 host byte order 填充
+- `objects`: `control.js` 通过 `ebpf.loadObject()` 注册的 eBPF 对象或内置对象；外部对象路径必须留在插件目录内，单个对象最大 16 MiB。`stable` / `preview` 外部对象必须注册 `sha256` 且匹配文件内容；`lab` 对象可省略 `sha256`，但服务仍会计算并返回 `resolved_sha256`。服务会解析 ELF 并补充 `status`、`resolved_sha256`、`program_count`、`map_count`
+- `control.sha256`: Goja 控制脚本完整性声明。`stable` / `preview` 控制脚本必须声明该字段且匹配 `control.main` 文件内容；`lab` 可省略，但服务仍会计算并返回 `control.resolved_sha256` 供审计
+- `ui.sha256`: `control.js` 通过 `ui.register()` 注册的 UI 入口完整性值。`stable` / `preview` 插件注册 `ui.entry` 时必须提供该字段且匹配入口文件内容；`lab` 可省略，但服务仍会计算并返回 `ui.resolved_sha256` 供审计
+- `asset_base_path`: 插件注册 `ui.static_dir` 后生成的静态资源路径，需要 Bearer Token
+- `ui.page` / `ui.page_title`: 可选的 Web UI 顶部分页 ID 和标题，由 `ui.register({page, page_title})` 注册；前端会自动创建插件页并内嵌加载 `ui.entry`
+- `hooks`: `control.js` 通过 `hooks.attach()` 注册的 dataplane hook。开启外部数据面后，只有 `engine=tc`、`stage=forward/reply`、`attach=ingress/both`、非 `control` mode 的 hook 会被加载到 `tc_prog_chain_v4` stage slots。`priority < runtime.core_priority` 进入 core 前链，`priority > runtime.core_priority` 进入 core 后链，等于 core priority 会被拒绝。插件程序执行后必须 tail-call 到对应 stage 的内置 continue slot，除非它明确返回最终 TC action。XDP 和非 `fvtap` TC hook 当前仍是 registration-only
+- `hooks[].interfaces`: 可选的真实 Linux 接口名列表。留空或省略时，插件只随已有 forward/egress 规则触发的 `fvtap` attachment 运行；填写后，即使没有转发规则，TC runtime 也会把 `pipeline_v4` 挂到这些接口上。无规则模式会禁用内置 forward/reply core，把 pipeline 作为纯插件高速链运行；显式接口的 core 前和 core 后 hook 都可运行，但 core 后 hook 此时只能拿到清空的 `tc_plugin_ctx_v4`，不会有规则或 flow 匹配上下文。不会自动挂载所有接口；接口不存在会让该插件本轮进入 error。当前 pipeline chain 是全局链，插件如果需要严格按接口生效，应在自己的 eBPF 程序中检查 `skb->ifindex`
+- `runtime.attachments[].priority`: 插件注册 hook 的排序优先级。`runtime.attachments[].stage` 是内部物理执行区，例如 `pre_forward`、`post_lookup`、`pre_reply`、`post_reply`；`runtime.attachments[].chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot
+- core 后插件如需读取规则匹配上下文，必须在对象里声明共享 `tc_plugin_ctx_v4` per-CPU array map；服务会替换为内置稳定 ctx map，IPv4 地址和端口字段按 host byte order 填充
 - 当前限制：core 前和 core 后两个物理执行区各最多 8 个外部 hook，总 hook 数最多 14 个，以避免触发内核 tail-call 深度上限
+- `forward_rule_plans`: 约定资源名。活跃的 `lab` / `preview` / `stable` 插件声明并写入 enabled plan 后，控制面会按普通 `Rule` 字段编译成 synthetic forward rule，参与 `/api/rules` effective 视图、规则统计元数据、Worker 分发和 TC/XDP 内核候选规划，但不会写入真实 `rules` 表。支持字段为 `in_interface/in_ip/in_port/out_interface/out_ip/out_source_ip/out_port/protocol/remark/tag/enabled/transparent/engine_preference`；校验、端口冲突检测和接口/source IP 检查与手工规则一致。显式核心规则、站点和端口范围优先，listener 冲突的插件 plan 会被跳过。插件 forward rule 使用当前分发周期内的正数 synthetic rule id 以兼容内核 map；该 id 是运行时视图，不应被插件持久引用。
+- `egress_nat_plans`: 约定资源名。活跃的 `lab` / `preview` / `stable` 插件声明并写入 enabled plan 后，控制面会编译成负数 ID 的 synthetic Egress NAT runtime item，参与 Worker、统计元数据、内核重试和托管网络局部 reload，但不会写入真实 `egress_nats` 表。显式核心 Egress NAT 和托管网络自动 NAT 优先，scope/protocol 重叠的插件 plan 会被跳过。`deprecated` 插件不会影响核心转发。`redirect_mode=prepared_l2` 是显式高级模式，只适用于 TC veth handoff 且 peer 能在 host namespace 解析的场景；XDP、普通物理出口和 peer 位于 netns 的 veth 会拒绝该模式
 
 插件控制面数据接口：
 
-- `GET /api/plugins/<id>/resources/<resource>`：列出 manifest 允许 `list` 的资源记录，并返回该资源的 `runtime_status`
-- `GET /api/plugins/<id>/resources/<resource>/<key>`：读取 manifest 允许 `get` 的单条记录
-- `POST /api/plugins/<id>/resources/<resource>`：创建 manifest 允许 `create` 的记录，请求体为 `{"key":"optional","data":{...},"enabled":true}`；未提供 `key` 时由服务生成
-- `PUT /api/plugins/<id>/resources/<resource>/<key>`：更新 manifest 允许 `update` 的记录
-- `DELETE /api/plugins/<id>/resources/<resource>/<key>`：删除 manifest 允许 `delete` 的记录
-- `POST /api/plugins/<id>/actions/<action>`：执行 manifest 声明的动作，请求体为 `{"payload":{...}}`
+- `GET /api/plugins/<id>/resources/<resource>`：列出 `control.js` 注册且允许 `list` 的资源记录，并返回该资源的 `runtime_status`。支持 `limit` 和 `offset` 查询参数，默认 `limit=1000`，最大 `limit=5000`；响应包含 `total/limit/offset/has_more`
+- `GET /api/plugins/<id>/resources/<resource>/<key>`：读取 `control.js` 注册且允许 `get` 的单条记录
+- `POST /api/plugins/<id>/resources/<resource>`：创建 `control.js` 注册且允许 `create` 的记录，请求体为 `{"key":"optional","data":{...},"enabled":true}`；未提供 `key` 时由服务生成。成功响应包含记录本身和该资源的 `runtime_status`
+- `PUT /api/plugins/<id>/resources/<resource>/<key>`：更新 `control.js` 注册且允许 `update` 的记录。成功响应包含记录本身和该资源的 `runtime_status`。资源数据会按 canonical JSON 存储，字段顺序不构成变更；资源注册了 `secret_fields` 时，更新请求中缺省的 secret 字段或值为 `__redacted__` 的 secret 字段会保留旧值，显式传入空字符串才会清空该字段；如果 `data/enabled` 语义不变且当前 runtime status 不是 `error`，该请求是 no-op，不会 bump revision 或重复 runtime apply；如果当前 runtime status 是 `error`，相同 payload 仍会重试 runtime apply
+- `DELETE /api/plugins/<id>/resources/<resource>/<key>`：删除 `control.js` 注册且允许 `delete` 的记录。成功响应包含 `status=deleted` 和该资源的 `runtime_status`
+- `control_methods`：资源可选字段，只影响本插件 Goja 控制脚本的 `resources.*` 权限校验；HTTP/UI 资源 API 和跨插件 `plugins.resources.*` 都只看目标资源的 `methods`。未声明 `control_methods` 时按 `methods` 处理。生产插件可用它把 `status`、`egress_nat_plans` 等派生资源对外和对其他插件设为只读，同时允许自身控制脚本维护。
+- `POST /api/plugins/<id>/actions/<action>`：执行 `control.js` 注册的动作，请求体为 `{"payload":{...}}`
 
-资源和动作都必须先在 `plugin.json` 中声明。资源数据存储在 SQLite，`secret_fields` 会在 API 返回时脱敏；`runtime_update=manual` 只标记 pending，`plugin_reconcile` 触发插件运行时重算，`runtime_apply` 调用宿主数据面实现的运行时更新接口。运行时更新失败会写入 `runtime_status.status=error` 和 `last_error`，不会让插件 UI 直接拿到 Web Token。
+资源和动作都必须先由 `control.js` 注册。资源数据以 canonical JSON 存储在 SQLite，`max_record_bytes` 按 canonical 后的存储大小计算，`secret_fields` 会在 API 返回时脱敏，并在 HTTP update 时支持“保留脱敏旧值”的表单语义；`runtime_update=manual` 只标记 pending，`plugin_reconcile` 触发插件运行时重算，`runtime_apply` 调用宿主数据面实现的运行时更新接口。运行时更新失败会写入 `runtime_status.status=error` 和 `last_error`，不会让插件 UI 直接拿到 Web Token。资源写接口会先提交 SQLite；如果随后的运行时应用失败，响应会使用 `5xx` 并返回已落库记录、`error`、`runtime_error` 和 `runtime_status`，调用方应按“配置已保存但运行时未生效”处理，避免盲目重试创建导致 key 冲突。动作执行失败同样返回 `5xx`、`error`、`runtime_error` 和 `runtime_status`，用于插件 UI 展示具体失败状态。
 
-Goja 控制脚本默认只能访问本插件资源。声明 `control.permissions=["plugin.resource"]` 后，可使用 `plugins.resources.set(pluginID, resourceID, key, data, enabled, apply)` 写入其他插件已经声明的资源；该调用仍会校验目标资源的 `methods/max_records/max_record_bytes`。`apply=true` 且目标资源为 `runtime_update=runtime_apply` 时，会立即触发目标插件的 `onResourceApply` 并更新目标资源的 `runtime_status`。未声明该权限时调用会被拒绝。
+Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一个持久 Goja VM，`control.js` 顶层只在注册/初始化时执行一次，顶层变量会在 `onReconcile/onResourceApply/onAction/onTimer` 之间保留；同一插件主控制事件仍串行执行，避免并发改写 KV、netlink 或 runtime status。声明 `control.permissions=["worker"]` 后，可用 `worker.call(name, handler, payload)` 同步调用命名 worker VM，或用 `worker.dispatch(name, handler, payload)` 异步投递长任务；worker VM 同样保留顶层变量，但只在控制面执行，不进入 TC/XDP 包热路径。声明 `control.permissions=["resource"]` 后，可用 `resources.set(resourceID, key, data, enabled, apply)` 和 `resources.delete(resourceID, key, apply)` 写入/删除本插件已注册资源；本插件资源访问会校验 `control_methods`（未声明则按 `methods` 处理），写入/删除会更新该资源的 `runtime_status`，`apply=true` 时会按该资源的 `runtime_update` 立即应用。声明 `control.permissions=["plugin.resource"]` 后，还必须在 `control.resource_access` 中逐项声明允许访问的目标插件、资源和方法，才可使用 `plugins.resources.get(pluginID, resourceID, key)`、`plugins.resources.list(pluginID, resourceID, options)`、`plugins.resources.set(pluginID, resourceID, key, data, enabled, apply)` 和 `plugins.resources.delete(pluginID, resourceID, key, apply)` 读取、写入或删除其他插件已注册资源；跨插件访问仍会校验目标资源的公开 `methods`、`max_records` 和 `max_record_bytes`，不会因为目标资源声明了 `control_methods` 而获得额外写权限。`resources.list(resourceID, options)`、`plugins.resources.list(..., options)` 和 `kv.list(options)` 的 `options` 支持 `{limit, offset}`，默认 `limit=1000`，最大 `limit=5000`；需要全量处理大量记录时应按页循环读取。`get/list` 返回的记录结构和本插件 `resources.get/list` 一致，且跨插件目标资源必须在 `methods` 中允许对应操作；跨插件 `get/list/set` 的返回值会按目标资源 `secret_fields` 脱敏，不会把目标插件密钥原文返回给调用方；`set` 是 upsert，调用方白名单和目标资源 `methods` 都必须同时允许 `create` 与 `update`；`delete` 要求目标资源 `methods` 允许 `delete`。`apply=true` 时，会按目标资源的 `runtime_update` 使用和 HTTP API 一致的应用流程并更新目标资源的 `runtime_status`；运行时失败会写入目标资源 `runtime_status.status=error` 和 `last_error`。`apply=false` 时，相同 `data/enabled` 的 set 和缺失 key 的 delete 是 no-op，不会重复 bump record revision 或 runtime status。未声明对应权限或白名单时调用会被拒绝。声明 `crypto` 后可使用 `crypto.md5()`、`crypto.randomBytes()` 和 `crypto.sha256File(relativePath)`；`sha256File` 只能读取本插件目录内文件，适合 stable/preview 插件在注册 eBPF object 或 UI 入口时声明当前构建产物 hash。声明 `net.admin` 后可使用 `net.link.ensureVeth/ensureBridge/setMaster/clearMaster/delete/setUp/setMTU/setOffloads`、`net.addr.replace/delete` 和 `net.route.replace/delete` 管理 Linux veth、bridge、桥成员、地址、路由和可控 offload；非 Linux 平台会返回不支持错误。每个插件最多保留 64 个命名 timer 和 16 个命名 worker，超限时本批 timer 更新或 worker 启动会被拒绝。
+
+`net.admin` 和 `net.l2` 不是单独的大权限。声明任一权限时，manifest 必须同时提供 `control.net_access`；每个条目包含 `interfaces` 和 `operations`。`interfaces` 支持精确接口名或 `*` 通配模式，`operations` 只允许 `addr.write`、`l2`、`link.create`、`link.delete`、`link.master`、`link.offload`、`link.read`、`link.state`、`route.write`。运行时传入 host API 的接口名同样会被校验：最长 15 字节，且不能包含 `/`、`\` 或空白字符。`l2` 操作要求 `net.l2`，其它操作要求 `net.admin`；调用 host API 时会按目标接口逐次校验。`net.link.list()` 会过滤为当前插件拥有 `link.read` 的接口，避免插件借枚举接口绕过白名单。`net.link.setOffloads()` 只允许调整 `rx/tx/sg/tso/ufo/gso/gro/lro`，并要求目标接口声明 `link.offload`。`net.route.replace/delete` 必须传入 `dev`，并按该接口匹配 `route.write` 白名单，避免插件写入无法归属到接口授权的系统路由。生产插件应优先授权自己创建的 `fwd*`、`wan*`、`br*` 等接口；如果需要操作 `eth*`、`vmbr*` 等物理或宿主接口，必须在 manifest 中显式声明。
+
+控制面内置存储有固定配额：每个插件最多 1024 条 `kv` 记录，单条 KV canonical JSON 最大 64 KiB；每个插件最多 128 条 `secret` 记录，单条 secret 最大 4 KiB；插件日志单行会截断到 4 KiB；每个插件最多 64 个命名 timer 和 16 个命名 worker，单个 timer payload 最大 16 KiB，单次 worker payload/result 最大 1 MiB。
+
+`__kv` 和 `__secret` 是 Goja 控制面内部资源名，插件不能通过 `plugin.resource()` 或 `control.resource_access` 声明它们；HTTP 插件资源 API 和插件 UI RPC 只暴露 `control.js` 显式注册的业务资源。
+
+`ebpf.mapPut/mapDelete/mapClear` 只能写插件自己的配置 map。共享运行时 map 名称 `tc_prog_chain_v4`、`tc_plugin_ctx_v4`、`xdp_prog_chain` 被保留，即使插件声明了 `ebpf.map_write` 也不能写入、删除或清空这些 map。`mapClear` 只允许清空 `max_entries <= 16384` 的 map；更大的配置表应由插件按 key 分批删除。
+
+插件 UI 通过宿主注入的 `ForwardPluginHost` RPC bridge 调用上述 API。`ForwardPluginHost.data.upsert(resource, key, data, options)` 会先执行 update，只有返回 `404` 时才 fallback 到 create；其他 runtime/API 错误会原样 reject，避免覆盖真实失败原因。RPC 失败时 Promise reject 的 Error 会包含 `payload`、`status`、`runtime_status` 和 `runtime_error` 字段，插件页面应优先展示 `runtime_error` 或 `runtime_status.last_error`，而不是只显示通用错误文本；宿主注入的 `ForwardPluginHost.errorText(error)` 和 `ForwardPluginHost.toastError(error)` 已封装该优先级。
 
 ### RuleStatus
 
@@ -688,8 +707,8 @@ Goja 控制脚本默认只能访问本插件资源。声明 `control.permissions
 用途：
 
 - 枚举内置 `fvtap` pipeline 描述
-- 枚举 `plugins_dir` 下外部插件 manifest
-- 暴露插件 manifest 校验错误，避免启动失败
+- 枚举 `plugins_dir` 下外部插件 slim manifest 和 `control.js` 注册 surface
+- 暴露插件 manifest / 注册 surface 校验错误，避免启动失败
 - 给后续插件管理 UI 或外部控制台做能力发现
 
 说明：
@@ -698,9 +717,9 @@ Goja 控制脚本默认只能访问本插件资源。声明 `control.permissions
 - 外部插件目录缺失不会报错
 - `plugins_enabled = false` 只关闭外部插件扫描，不隐藏内置 `fvtap`
 - `plugins_dataplane_enabled = false` 是默认值；设置为 `true` 后允许外部 TC `stage=forward/reply` 插件按 priority 进入内置 `fvtap` pipeline
-- 声明 `objects` 的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
+- 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
 - 插件静态资源路径为 `/api/plugins/<id>/assets/`，同样需要 Bearer Token
-- `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC 对象围绕核心 `fvtap` priority 进入 forward/reply 的 core 前/后链。插件对象必须声明共享 `tc_prog_chain_v4` prog-array map，`max_entries` 至少为 45，并在处理后 tail-call 回对应 stage 的 continue slot；core 后插件读取匹配上下文时还需要声明共享 `tc_plugin_ctx_v4` map。`hooks[].interfaces` 可让插件在无转发规则时显式请求接口 attachment，但只有显式接口上的 pre-core hook 会在无规则模式加载，不会自动挂所有接口。生产环境应只对可信对象启用
+- `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC 对象围绕核心 `fvtap` priority 进入 forward/reply 的 core 前/后链。插件对象必须声明共享 `tc_prog_chain_v4` prog-array map，`max_entries` 至少为 45，并在处理后 tail-call 回对应 stage 的 continue slot；core 后插件读取匹配上下文时还需要声明共享 `tc_plugin_ctx_v4` map。`hooks.attach({interfaces})` 可让插件在无转发规则时显式请求接口 attachment，但只有显式接口上的 pre-core hook 会在无规则模式加载，不会自动挂所有接口。生产环境应只对可信对象启用
 
 ## 2. 规则接口
 

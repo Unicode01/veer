@@ -62,13 +62,36 @@ func resolvePluginAssets(plugin *LoadedPlugin) error {
 		if entryInfo.IsDir() {
 			return fmt.Errorf("ui.entry is a directory")
 		}
+		got, err := sha256File(realEntry)
+		if err != nil {
+			return fmt.Errorf("hash ui.entry: %w", err)
+		}
+		plugin.UI.ResolvedSHA256 = got
+		if pluginUISHA256Required(*plugin) && plugin.UI.SHA256 == "" {
+			return fmt.Errorf("ui.sha256 is required for stable or preview UI entry files")
+		}
+		if plugin.UI.SHA256 != "" && plugin.UI.SHA256 != got {
+			return fmt.Errorf("ui.sha256 mismatch")
+		}
 	}
 	plugin.staticDir = realStatic
 	plugin.AssetBasePath = "/api/plugins/" + plugin.ID + "/assets/"
 	return nil
 }
 
-func handlePluginAsset(w http.ResponseWriter, r *http.Request, cfg *Config) {
+func pluginUISHA256Required(plugin LoadedPlugin) bool {
+	if plugin.Builtin || plugin.UI == nil || plugin.UI.Entry == "" {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(plugin.Stability)) {
+	case pluginStabilityStable, pluginStabilityPreview:
+		return true
+	default:
+		return false
+	}
+}
+
+func handlePluginAsset(w http.ResponseWriter, r *http.Request, cfg *Config, pm *ProcessManager) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -83,7 +106,10 @@ func handlePluginAsset(w http.ResponseWriter, r *http.Request, cfg *Config) {
 	}
 
 	id := parts[0]
-	catalog := loadPluginCatalog(cfg)
+	catalog := loadPluginCatalogWithControlRegistration(cfg)
+	if pm != nil {
+		catalog = pm.pluginCatalogWithConfig(cfg)
+	}
 	for _, plugin := range catalog.Plugins {
 		if plugin.ID != id || plugin.Status != pluginStatusActive || plugin.staticDir == "" || plugin.AssetBasePath == "" {
 			continue

@@ -98,6 +98,42 @@ func GetPluginRecords(db RuleStore, pluginID, resourceID string) ([]PluginRecord
 	return out, rows.Err()
 }
 
+func GetPluginRecordsPage(db RuleStore, pluginID, resourceID string, limit, offset int) ([]PluginRecord, error) {
+	rows, err := db.Query(`SELECT `+pluginRecordColumns+` FROM plugin_records WHERE plugin_id = ? AND resource_id = ? ORDER BY id ASC LIMIT ? OFFSET ?`, pluginID, resourceID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []PluginRecord
+	for rows.Next() {
+		item, err := scanPluginRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func GetPluginRecordsByResource(db RuleStore, resourceID string) ([]PluginRecord, error) {
+	rows, err := db.Query(`SELECT `+pluginRecordColumns+` FROM plugin_records WHERE resource_id = ? ORDER BY plugin_id ASC, id ASC`, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []PluginRecord
+	for rows.Next() {
+		item, err := scanPluginRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func CountPluginRecords(db RuleStore, pluginID, resourceID string) (int, error) {
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM plugin_records WHERE plugin_id = ? AND resource_id = ?`, pluginID, resourceID).Scan(&count); err != nil {

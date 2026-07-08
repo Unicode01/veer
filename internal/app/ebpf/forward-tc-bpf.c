@@ -59,6 +59,8 @@ struct rule_value_v4 {
 	__u32 nat_addr;
 	__u8 src_mac[ETH_ALEN];
 	__u8 dst_mac[ETH_ALEN];
+	__u8 egress_src_mac[ETH_ALEN];
+	__u8 egress_dst_mac[ETH_ALEN];
 };
 
 struct flow_key_v4 {
@@ -323,6 +325,8 @@ struct tc_plugin_config_v4 {
 	__u32 post_lookup_count;
 	__u32 pre_reply_count;
 	__u32 post_reply_count;
+	__u32 forward_core_enable;
+	__u32 reply_core_enable;
 };
 
 struct tc_plugin_ctx_v4 {
@@ -1542,8 +1546,6 @@ static __always_inline int rewrite_l4_dnat(struct __sk_buff *skb, const struct p
 	const int ip_dst_off = ctx->l3_off + offsetof(struct iphdr, daddr);
 	__be32 old_addr = ctx->dst_addr;
 	__be32 new_addr = bpf_htonl(new_addr_host);
-	__be16 old_port = bpf_htons(ctx->dst_port);
-	__be16 new_port = bpf_htons(new_port_host);
 
 	if (old_addr != new_addr) {
 		if (bpf_l3_csum_replace(skb, ip_check_off, old_addr, new_addr, sizeof(new_addr)) < 0)
@@ -1554,6 +1556,8 @@ static __always_inline int rewrite_l4_dnat(struct __sk_buff *skb, const struct p
 			return -1;
 	}
 
+	__be16 old_port = bpf_htons(ctx->dst_port);
+	__be16 new_port = bpf_htons(new_port_host);
 	if (old_port != new_port) {
 		if (update_l4_port_checksum(skb, ctx, ctx->l4_check_off, old_port, new_port) < 0)
 			return -1;
@@ -1570,8 +1574,6 @@ static __always_inline int rewrite_l4_snat(struct __sk_buff *skb, const struct p
 	const int ip_src_off = ctx->l3_off + offsetof(struct iphdr, saddr);
 	__be32 old_addr = ctx->src_addr;
 	__be32 new_addr = bpf_htonl(new_addr_host);
-	__be16 old_port = bpf_htons(ctx->src_port);
-	__be16 new_port = bpf_htons(new_port_host);
 
 	if (old_addr != new_addr) {
 		if (bpf_l3_csum_replace(skb, ip_check_off, old_addr, new_addr, sizeof(new_addr)) < 0)
@@ -1582,6 +1584,8 @@ static __always_inline int rewrite_l4_snat(struct __sk_buff *skb, const struct p
 			return -1;
 	}
 
+	__be16 old_port = bpf_htons(ctx->src_port);
+	__be16 new_port = bpf_htons(new_port_host);
 	if (old_port != new_port) {
 		if (update_l4_port_checksum(skb, ctx, ctx->l4_check_off, old_port, new_port) < 0)
 			return -1;
@@ -3068,10 +3072,26 @@ static __always_inline int handle_fullnat_forward(struct __sk_buff *skb, const s
 
 static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value, __u32 nat_cfg_flags)
 {
-	struct redirect_target_v4 redirect = {};
+	long act;
 
 	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
 		return TC_ACT_SHOT;
+
+	if ((rule->flags & FORWARD_RULE_FLAG_PREPARED_L2) != 0) {
+		if (!rule->out_ifindex || mac_is_zero(rule->egress_src_mac) || mac_is_zero(rule->egress_dst_mac))
+			return TC_ACT_SHOT;
+		if (rewrite_eth_addrs(skb, rule->egress_dst_mac, rule->egress_src_mac) < 0) {
+			tc_diag_redirect_drop();
+			return TC_ACT_SHOT;
+		}
+		act = bpf_redirect(rule->out_ifindex, 0);
+		if (act == TC_ACT_REDIRECT)
+			return (int)act;
+		tc_diag_redirect_drop();
+		return TC_ACT_SHOT;
+	}
+
+	struct redirect_target_v4 redirect = {};
 
 	redirect.ifindex = rule->out_ifindex;
 	redirect.src_addr = front_value->nat_addr;
@@ -4230,8 +4250,22 @@ static __always_inline int dispatch_forward_ingress_pipeline_core_v4(struct __sk
 {
 	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
-	struct tc_plugin_ctx_v4 *plugin_ctx = lookup_tc_plugin_ctx_v4();
+	struct tc_plugin_ctx_v4 *plugin_ctx = 0;
 
+	if (config && config->post_lookup_count > 0)
+		plugin_ctx = lookup_tc_plugin_ctx_v4();
+	if (config && config->forward_core_enable == 0) {
+		if (dispatch) {
+			dispatch->have_flow = 0;
+			dispatch->have_rule = 0;
+			dispatch->plugin_chain_index = 0;
+		}
+		if (plugin_ctx)
+			__builtin_memset(plugin_ctx, 0, sizeof(*plugin_ctx));
+		if (config->post_lookup_count > 0 && dispatch)
+			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE);
+		return TC_ACT_UNSPEC;
+	}
 	if (prepare_dispatch_forward_ingress_v4(skb, dispatch, plugin_ctx) != 0)
 		return TC_ACT_UNSPEC;
 	if (config && config->post_lookup_count > 0) {
@@ -4248,8 +4282,10 @@ static __always_inline int dispatch_forward_ingress_pipeline_v4(struct __sk_buff
 
 	if (config && dispatch && (config->pre_forward_count > 0 || config->post_lookup_count > 0)) {
 		dispatch->plugin_chain_index = 0;
-		if (config->pre_forward_count > 0) {
+		if (config->pre_forward_count > 0 || config->forward_core_enable == 0) {
 			clear_tc_plugin_ctx_v4();
+		}
+		if (config->pre_forward_count > 0) {
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE);
 		}
 		return dispatch_forward_ingress_pipeline_core_v4(skb);
@@ -4356,8 +4392,22 @@ static __always_inline int dispatch_reply_ingress_pipeline_core_v4(struct __sk_b
 {
 	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
-	struct tc_plugin_ctx_v4 *plugin_ctx = lookup_tc_plugin_ctx_v4();
+	struct tc_plugin_ctx_v4 *plugin_ctx = 0;
 
+	if (config && config->post_reply_count > 0)
+		plugin_ctx = lookup_tc_plugin_ctx_v4();
+	if (config && config->reply_core_enable == 0) {
+		if (dispatch) {
+			dispatch->have_flow = 0;
+			dispatch->have_rule = 0;
+			dispatch->plugin_chain_index = 0;
+		}
+		if (plugin_ctx)
+			__builtin_memset(plugin_ctx, 0, sizeof(*plugin_ctx));
+		if (config->post_reply_count > 0 && dispatch)
+			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE);
+		return TC_ACT_UNSPEC;
+	}
 	if (prepare_dispatch_reply_ingress_v4(skb, dispatch, plugin_ctx) != 0)
 		return TC_ACT_UNSPEC;
 	if (config && config->post_reply_count > 0) {
@@ -4374,8 +4424,10 @@ static __always_inline int dispatch_reply_ingress_pipeline_v4(struct __sk_buff *
 
 	if (config && dispatch && (config->pre_reply_count > 0 || config->post_reply_count > 0)) {
 		dispatch->plugin_chain_index = 0;
-		if (config->pre_reply_count > 0) {
+		if (config->pre_reply_count > 0 || config->reply_core_enable == 0) {
 			clear_tc_plugin_ctx_v4();
+		}
+		if (config->pre_reply_count > 0) {
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_CONTINUE);
 		}
 		return dispatch_reply_ingress_pipeline_core_v4(skb);

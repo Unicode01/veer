@@ -30,6 +30,13 @@ package app
 //   FORWARD_PERF_PLUGIN_SOURCE_DIR (optional packet_observer source dir when using a prebuilt binary outside the repo)
 //   FORWARD_PERF_PLUGIN_PIPELINE    (set to 1 to enable the sample TC fvtap plugin for tc mode)
 //   FORWARD_PERF_PLUGIN_PIPELINE_COUNT (sample TC fvtap plugin copies, default: 1, max: 8)
+//   FORWARD_RUN_PLUGIN_STABILITY_TEST (run plugin long-flow/new-flow stability gate)
+//   FORWARD_PLUGIN_STABILITY_SECONDS
+//   FORWARD_PLUGIN_STABILITY_LONG_CONNECTIONS
+//   FORWARD_PLUGIN_STABILITY_LONG_ACTIVE
+//   FORWARD_PLUGIN_STABILITY_NEW_CONNECTIONS
+//   FORWARD_PLUGIN_STABILITY_NEW_CONCURRENCY
+//   FORWARD_PLUGIN_STABILITY_NEW_INTERVAL_MS
 //
 // The test builds a temporary forward binary, creates two network namespaces plus
 // two veth pairs, then benchmarks userspace, tc, and xdp sequentially with the
@@ -89,6 +96,13 @@ const (
 	dataplanePerfPluginSourceEnv = "FORWARD_PERF_PLUGIN_SOURCE_DIR"
 	dataplanePerfPluginEnv       = "FORWARD_PERF_PLUGIN_PIPELINE"
 	dataplanePerfPluginCountEnv  = "FORWARD_PERF_PLUGIN_PIPELINE_COUNT"
+	pluginStabilityEnableEnv     = "FORWARD_RUN_PLUGIN_STABILITY_TEST"
+	pluginStabilitySecondsEnv    = "FORWARD_PLUGIN_STABILITY_SECONDS"
+	pluginStabilityLongConnEnv   = "FORWARD_PLUGIN_STABILITY_LONG_CONNECTIONS"
+	pluginStabilityLongActiveEnv = "FORWARD_PLUGIN_STABILITY_LONG_ACTIVE"
+	pluginStabilityNewConnEnv    = "FORWARD_PLUGIN_STABILITY_NEW_CONNECTIONS"
+	pluginStabilityNewConcEnv    = "FORWARD_PLUGIN_STABILITY_NEW_CONCURRENCY"
+	pluginStabilityIntervalEnv   = "FORWARD_PLUGIN_STABILITY_NEW_INTERVAL_MS"
 	dataplanePerfHelperEnv       = "FORWARD_PERF_HELPER"
 	dataplanePerfHelperRoleEnv   = "FORWARD_PERF_HELPER_ROLE"
 	dataplanePerfTargetEnv       = "FORWARD_PERF_TARGET_ADDR"
@@ -381,6 +395,218 @@ func TestDataplanePerfMatrix(t *testing.T) {
 		payload, _ := json.MarshalIndent(results, "", "  ")
 		t.Logf("dataplane perf summary:\n%s", payload)
 	}
+
+	if t.Failed() {
+		t.Logf("backend helper logs:\n%s", backendLogs.String())
+	}
+}
+
+func TestDataplanePluginPipelineStability(t *testing.T) {
+	if os.Getenv(pluginStabilityEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux TC plugin pipeline stability test", pluginStabilityEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+
+	t.Setenv(dataplanePerfProtocolEnv, "tcp")
+	t.Setenv(dataplanePerfTCPModeEnv, dataplanePerfTCPEchoMode)
+	if strings.TrimSpace(os.Getenv(dataplanePerfPluginEnv)) == "" {
+		t.Setenv(dataplanePerfPluginEnv, "1")
+	}
+	if strings.TrimSpace(os.Getenv(dataplanePerfPluginCountEnv)) == "" {
+		t.Setenv(dataplanePerfPluginCountEnv, "1")
+	}
+
+	baseBinary := strings.TrimSpace(os.Getenv(dataplanePerfBinaryEnv))
+	if baseBinary == "" {
+		repoRoot := findRepoRoot(t)
+		requireEmbeddedEBPFObjects(t, repoRoot)
+		baseBinary = buildDataplanePerfBinary(t, repoRoot)
+	} else if _, err := os.Stat(baseBinary); err != nil {
+		t.Fatalf("%s=%q is not usable: %v", dataplanePerfBinaryEnv, baseBinary, err)
+	}
+
+	topology := setupDataplanePerfTopology(t)
+	defer cleanupTransparentRouting()
+
+	backendCmd, backendLogs := startDataplanePerfBackend(t, topology)
+	defer stopDataplanePerfHelper(t, backendCmd)
+
+	mode := dataplanePerfMode{
+		Name:         "tc-plugin-stability",
+		Default:      ruleEngineKernel,
+		Order:        []string{kernelEngineTC},
+		Expected:     ruleEngineKernel,
+		ExpectedKern: kernelEngineTC,
+	}
+	modeDir := t.TempDir()
+	forwardBinary := filepath.Join(modeDir, "forward-stability")
+	copyFile(t, baseBinary, forwardBinary)
+	workDir := filepath.Join(modeDir, "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("create work dir: %v", err)
+	}
+
+	webPort := freeTCPPort(t)
+	configPath := filepath.Join(workDir, "config.json")
+	writeDataplanePerfConfig(t, configPath, mode, webPort)
+
+	forwardLogs := filepath.Join(workDir, "forward.log")
+	logFile, err := os.Create(forwardLogs)
+	if err != nil {
+		t.Fatalf("create forward log file: %v", err)
+	}
+	defer logFile.Close()
+
+	cmd := exec.Command(forwardBinary, "--config", configPath)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), forwardKernelMaintenanceIntervalEnv+"="+strconv.Itoa(envInt(forwardKernelMaintenanceIntervalEnv, 600000)))
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start forward: %v", err)
+	}
+	defer stopForwardProcessTree(t, cmd)
+
+	apiBase := fmt.Sprintf("http://127.0.0.1:%d", webPort)
+	waitForDataplanePerfAPI(t, apiBase)
+	seedDataplanePerfNeighbors(t, topology)
+	createDataplanePerfRule(t, apiBase, topology, mode)
+	rule := waitForDataplanePerfRule(t, apiBase, mode)
+	if rule.EffectiveKernelEngine != kernelEngineTC {
+		t.Fatalf("stability rule kernel engine = %q, want tc", rule.EffectiveKernelEngine)
+	}
+
+	if _, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, 4, 2, 64<<10, 16<<10, 0); err != nil {
+		t.Fatalf("stability warmup client benchmark failed: %v", err)
+	}
+	waitForDataplanePerfModeSettle(t, apiBase, mode)
+
+	durationSeconds := envInt(pluginStabilitySecondsEnv, 20)
+	if durationSeconds < 3 {
+		durationSeconds = 3
+	}
+	longConnections := envInt(pluginStabilityLongConnEnv, 8)
+	if longConnections < 1 {
+		longConnections = 1
+	}
+	longActive := envInt(pluginStabilityLongActiveEnv, minInt(4, longConnections))
+	if longActive < 1 {
+		longActive = 1
+	}
+	if longActive > longConnections {
+		longActive = longConnections
+	}
+	newConnections := envInt(pluginStabilityNewConnEnv, 8)
+	if newConnections < 1 {
+		newConnections = 1
+	}
+	newConcurrency := envInt(pluginStabilityNewConcEnv, minInt(2, newConnections))
+	if newConcurrency < 1 {
+		newConcurrency = 1
+	}
+	if newConcurrency > newConnections {
+		newConcurrency = newConnections
+	}
+	interval := time.Duration(envInt(pluginStabilityIntervalEnv, 1000)) * time.Millisecond
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+	longBytesPerCycle := envInt64(dataplanePerfBytesEnv, 64<<10)
+	if longBytesPerCycle < 4<<10 {
+		longBytesPerCycle = 4 << 10
+	}
+	newBytesPerConn := envInt64(dataplanePerfWarmupBytesEnv, 64<<10)
+	if newBytesPerConn < 4<<10 {
+		newBytesPerConn = 4 << 10
+	}
+	ioChunkBytes := envInt64(dataplanePerfIOChunkEnv, 16<<10)
+	if ioChunkBytes < 512 {
+		ioChunkBytes = 512
+	}
+
+	type stabilityResult struct {
+		result dataplanePerfClientResult
+		err    error
+	}
+	steadyCh := make(chan stabilityResult, 1)
+	go func() {
+		result, err := runDataplanePerfClientBenchmarkRaw(
+			topology.ClientNS,
+			longConnections,
+			longActive,
+			longBytesPerCycle,
+			ioChunkBytes,
+			durationSeconds,
+		)
+		if err == nil && result.PayloadBytes <= 0 {
+			err = errors.New("steady long-flow client transferred no payload")
+		}
+		steadyCh <- stabilityResult{result: result, err: err}
+	}()
+
+	deadline := time.Now().Add(time.Duration(durationSeconds) * time.Second)
+	time.Sleep(750 * time.Millisecond)
+	newFlowBatches := 0
+	newFlowConnections := 0
+	for time.Now().Add(interval / 2).Before(deadline) {
+		select {
+		case steady := <-steadyCh:
+			if steady.err != nil {
+				logDataplanePerfKernelRuntime(t, apiBase, "plugin stability kernel runtime after long-flow failure")
+				logDataplanePerfInterfaceStats(t, topology, "plugin stability interface stats after long-flow failure")
+				if data, readErr := os.ReadFile(forwardLogs); readErr == nil {
+					t.Logf("plugin stability forward logs after long-flow failure:\n%s", string(data))
+				}
+				t.Fatalf("steady long-flow client failed early: %v", steady.err)
+			}
+			t.Fatalf("steady long-flow client exited before new-flow loop completed: %+v", steady.result)
+		default:
+		}
+
+		result, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, newConnections, newConcurrency, newBytesPerConn, ioChunkBytes, 0)
+		if err != nil {
+			logDataplanePerfKernelRuntime(t, apiBase, "plugin stability kernel runtime after new-flow failure")
+			logDataplanePerfInterfaceStats(t, topology, "plugin stability interface stats after new-flow failure")
+			if data, readErr := os.ReadFile(forwardLogs); readErr == nil {
+				t.Logf("plugin stability forward logs after new-flow failure:\n%s", string(data))
+			}
+			t.Fatalf("new-flow batch failed while long flows were active: %v", err)
+		}
+		newFlowBatches++
+		newFlowConnections += result.Connections
+		time.Sleep(interval)
+	}
+	if newFlowBatches == 0 {
+		t.Fatal("plugin stability produced no new-flow batches")
+	}
+
+	steady := <-steadyCh
+	if steady.err != nil {
+		logDataplanePerfKernelRuntime(t, apiBase, "plugin stability kernel runtime after steady failure")
+		logDataplanePerfInterfaceStats(t, topology, "plugin stability interface stats after steady failure")
+		if data, readErr := os.ReadFile(forwardLogs); readErr == nil {
+			t.Logf("plugin stability forward logs after steady failure:\n%s", string(data))
+		}
+		t.Fatalf("steady long-flow client failed: %v", steady.err)
+	}
+	runtimeResp := fetchDataplanePerfKernelRuntime(t, apiBase)
+	if engineView, ok := dataplanePerfFindKernelEngine(runtimeResp.Engines, kernelEngineTC); !ok || !engineView.Available {
+		t.Fatalf("tc kernel engine unavailable after stability run: found=%t engine=%+v", ok, engineView)
+	}
+	t.Logf("plugin stability passed: duration=%ds long_connections=%d active=%d long_payload=%d new_batches=%d new_connections=%d",
+		durationSeconds,
+		longConnections,
+		longActive,
+		steady.result.PayloadBytes,
+		newFlowBatches,
+		newFlowConnections,
+	)
 
 	if t.Failed() {
 		t.Logf("backend helper logs:\n%s", backendLogs.String())
@@ -1797,6 +2023,12 @@ func TestValidateEmbeddedEBPFObjectsDetectsStaleObject(t *testing.T) {
 
 func buildDataplanePerfBinary(t *testing.T, repoRoot string) string {
 	t.Helper()
+	if prebuilt := strings.TrimSpace(os.Getenv(dataplanePerfBinaryEnv)); prebuilt != "" {
+		if _, err := os.Stat(prebuilt); err != nil {
+			t.Fatalf("%s points to unavailable forward binary %q: %v", dataplanePerfBinaryEnv, prebuilt, err)
+		}
+		return prebuilt
+	}
 	out := filepath.Join(t.TempDir(), "forward-perf")
 	cmd := exec.Command("go", "build", "-o", out, ".")
 	cmd.Dir = repoRoot
@@ -2374,15 +2606,12 @@ func writeDataplanePerfPluginManifest(t *testing.T, path string, pluginID string
 	if err != nil {
 		t.Fatalf("read perf plugin manifest: %v", err)
 	}
-	var manifest PluginManifest
+	var manifest map[string]any
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("decode perf plugin manifest: %v", err)
 	}
-	manifest.ID = pluginID
-	manifest.Name = fmt.Sprintf("Packet Observer %02s", strings.TrimPrefix(pluginID, "packet_observer_"))
-	for i := range manifest.Hooks {
-		manifest.Hooks[i].Priority = priority
-	}
+	manifest["id"] = pluginID
+	manifest["name"] = fmt.Sprintf("Packet Observer %02s", strings.TrimPrefix(pluginID, "packet_observer_"))
 	data, err = json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		t.Fatalf("encode perf plugin manifest: %v", err)
@@ -2390,6 +2619,16 @@ func writeDataplanePerfPluginManifest(t *testing.T, path string, pluginID string
 	data = append(data, '\n')
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatalf("write perf plugin manifest: %v", err)
+	}
+
+	controlPath := filepath.Join(filepath.Dir(path), "control.js")
+	control, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatalf("read perf plugin control: %v", err)
+	}
+	nextControl := strings.Replace(string(control), "priority: 10,", fmt.Sprintf("priority: %d,", priority), 1)
+	if err := os.WriteFile(controlPath, []byte(nextControl), 0644); err != nil {
+		t.Fatalf("write perf plugin control: %v", err)
 	}
 }
 

@@ -2,6 +2,19 @@ package app
 
 import "errors"
 
+func (pm *ProcessManager) GetPluginMapValue(pluginID string, objectID string, mapName string, key []byte) ([]byte, error) {
+	var out []byte
+	err := pm.withPluginMapController(func(controller pluginEBPFMapController) error {
+		value, err := controller.GetPluginMapValue(pluginID, objectID, mapName, key)
+		if err != nil {
+			return err
+		}
+		out = value
+		return nil
+	})
+	return out, err
+}
+
 func (pm *ProcessManager) PutPluginMapValue(pluginID string, objectID string, mapName string, key []byte, value []byte) error {
 	return pm.withPluginMapController(func(controller pluginEBPFMapController) error {
 		return controller.PutPluginMapValue(pluginID, objectID, mapName, key, value)

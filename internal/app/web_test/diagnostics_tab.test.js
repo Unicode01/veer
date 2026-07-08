@@ -170,3 +170,13 @@ test('activateTab loads diagnostics workers and stats', () => {
   assert.equal(workerLoads, 1);
   assert.equal(statsLoads, 1);
 });
+
+test('activateTab hides overview outside main data pages', () => {
+  const { app } = createDiagnosticsHarness('rules');
+
+  app.activateTab('rules');
+  assert.equal(app.el.overviewPanel.hidden, false);
+
+  app.activateTab('diagnostics');
+  assert.equal(app.el.overviewPanel.hidden, true);
+});

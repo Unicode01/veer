@@ -14,29 +14,204 @@
         return;
       }
 
+      const messages = {
+        'zh-CN': {
+          'status.idle': '空闲',
+          'status.loading': '加载中',
+          'status.deleting': '删除中',
+          'status.applying': '应用中',
+          'status.applied': '已应用',
+          'status.applyFailed': '应用失败',
+          'status.creating': '创建中',
+          'status.loadFailed': '加载失败',
+          'title': 'Packet Observer',
+          'desc': '使用宿主提供的 JavaScript 组件渲染的最小插件页面。',
+          'badge.plugin': '插件 {{id}}',
+          'badge.ui': 'UI {{version}}',
+          'stat.stage': '阶段',
+          'stat.stage.detail': '在 fvtap core 查找前运行。',
+          'stat.engine': '引擎',
+          'stat.engine.detail': '通过插件 pipeline 挂载。',
+          'stat.action': '动作',
+          'stat.action.value': '观察',
+          'stat.action.detail': '示例程序不会改写数据包。',
+          'contract.title': '数据面约定',
+          'contract.desc': '此页面运行在 sandbox 内。它不会拿到 API Token；数据和动作都通过宿主 RPC bridge 与 manifest 权限执行。',
+          'contract.field': '字段',
+          'contract.value': '值',
+          'contract.hook': 'Hook',
+          'contract.mode': '模式',
+          'contract.priority': '优先级',
+          'contract.program': '程序',
+          'contract.resource': '资源',
+          'contract.action': '动作',
+          'data.title': '宿主数据 API',
+          'data.desc': '下面的资源存储在 SQLite 中。Apply 动作会运行 Goja 控制脚本，并把最新 payload 写入插件 KV namespace。',
+          'field.name': '名称',
+          'field.key': 'Key hex',
+          'field.value': 'Value hex',
+          'field.records': '记录',
+          'placeholder.name': 'binding 名称',
+          'placeholder.key': '4 字节 hex key',
+          'placeholder.value': '8 字节 hex value',
+          'action.apply': '应用运行时',
+          'action.create': '创建记录',
+          'action.delete': '删除',
+          'action.refresh': '刷新',
+          'records.empty': '还没有记录。创建一条记录用于测试宿主持久化。',
+          'records.count': '{{count}} 条记录',
+          'records.revision': '版本 {{revision}}',
+          'records.kv': 'key={{key}} value={{value}}',
+          'toast.deleted': '记录已删除。',
+          'toast.applied': 'Goja 控制动作已完成。',
+          'toast.created': '记录已写入宿主 SQLite。'
+        },
+        'en-US': {
+          'status.idle': 'Idle',
+          'status.loading': 'Loading',
+          'status.deleting': 'Deleting',
+          'status.applying': 'Applying',
+          'status.applied': 'Applied',
+          'status.applyFailed': 'Apply failed',
+          'status.creating': 'Creating',
+          'status.loadFailed': 'Load failed',
+          'title': 'Packet Observer',
+          'desc': 'A minimal plugin page rendered with host-provided JavaScript components.',
+          'badge.plugin': 'plugin {{id}}',
+          'badge.ui': 'ui {{version}}',
+          'stat.stage': 'Stage',
+          'stat.stage.detail': 'Runs before fvtap core lookup.',
+          'stat.engine': 'Engine',
+          'stat.engine.detail': 'Attached through the plugin pipeline.',
+          'stat.action': 'Action',
+          'stat.action.value': 'Observe',
+          'stat.action.detail': 'The sample program does not rewrite packets.',
+          'contract.title': 'Dataplane Contract',
+          'contract.desc': 'This page is sandboxed. It receives no API token; data and actions go through the host RPC bridge and manifest permissions.',
+          'contract.field': 'Field',
+          'contract.value': 'Value',
+          'contract.hook': 'Hook',
+          'contract.mode': 'Mode',
+          'contract.priority': 'Priority',
+          'contract.program': 'Program',
+          'contract.resource': 'Resource',
+          'contract.action': 'Action',
+          'data.title': 'Host Data API',
+          'data.desc': 'The resource below is stored in SQLite. The Apply action runs the Goja control script and writes the latest payload into the plugin KV namespace.',
+          'field.name': 'Name',
+          'field.key': 'Key hex',
+          'field.value': 'Value hex',
+          'field.records': 'Records',
+          'placeholder.name': 'binding name',
+          'placeholder.key': '4-byte hex key',
+          'placeholder.value': '8-byte hex value',
+          'action.apply': 'Apply runtime',
+          'action.create': 'Create record',
+          'action.delete': 'Delete',
+          'action.refresh': 'Refresh',
+          'records.empty': 'No records yet. Create one to test host-side persistence.',
+          'records.count': '{{count}} record{{suffix}}',
+          'records.revision': 'rev {{revision}}',
+          'records.kv': 'key={{key}} value={{value}}',
+          'toast.deleted': 'Record deleted.',
+          'toast.applied': 'Goja control action completed.',
+          'toast.created': 'Record created in host-side SQLite storage.'
+        }
+      };
+
+      const textBindings = [];
+      const attrBindings = [];
+      let statusKey = 'status.idle';
+      let recordsCache = [];
+      let listStatusMode = 'loading';
+      let listStatusCount = 0;
+
+      function T(key, params) {
+        return F.t(messages, key, params);
+      }
+
+      function bindText(node, key, params) {
+        node.textContent = T(key, params);
+        textBindings.push({ node, key, params });
+        return node;
+      }
+
+      function bindAttr(node, attr, key, params) {
+        node.setAttribute(attr, T(key, params));
+        attrBindings.push({ node, attr, key, params });
+        return node;
+      }
+
+      function textNode(tag, opts, key, params) {
+        return bindText(F.h(tag, opts || {}), key, params);
+      }
+
+      function i18nButton(key, handler, secondary) {
+        return bindText(F.button(T(key), handler, secondary), key);
+      }
+
+      function setStatus(key, params) {
+        statusKey = key;
+        status.textContent = T(key, params);
+      }
+
+      function setListStatus(mode, count) {
+        listStatusMode = mode;
+        listStatusCount = Number(count) || 0;
+        if (mode === 'count') {
+          listStatus.textContent = countText(listStatusCount);
+          return;
+        }
+        listStatus.textContent = T(mode === 'error' ? 'status.loadFailed' : 'status.loading');
+      }
+
+      function countText(count) {
+        return T('records.count', { count, suffix: count === 1 ? '' : 's' });
+      }
+
+      function renderContract() {
+        contractBody.replaceChildren(F.table([T('contract.field'), T('contract.value')], contractRows.map((row) => [T(row[0]), row[1]])));
+      }
+
+      function refreshI18n() {
+        textBindings.forEach((item) => {
+          item.node.textContent = T(item.key, item.params);
+        });
+        attrBindings.forEach((item) => {
+          item.node.setAttribute(item.attr, T(item.key, item.params));
+        });
+        status.textContent = T(statusKey);
+        setListStatus(listStatusMode, listStatusCount);
+        renderContract();
+        renderRecords(recordsCache);
+        F.requestResize();
+      }
+
       const contractRows = [
-        ['Hook', 'tc/fvtap/pre_forward'],
-        ['Mode', 'observe'],
-        ['Priority', '10'],
-        ['Program', 'packet_observer:tc_pre_forward'],
-        ['Resource', 'bindings'],
-        ['Action', 'apply']
+        ['contract.hook', 'tc/fvtap/pre_forward'],
+        ['contract.mode', 'observe'],
+        ['contract.priority', '10'],
+        ['contract.program', 'packet_observer:tc_pre_forward'],
+        ['contract.resource', 'bindings'],
+        ['contract.action', 'apply']
       ];
-      const status = F.status('Idle');
-      const listStatus = F.status('Loading');
+      const status = F.status(T('status.idle'));
+      const listStatus = F.status(T('status.loading'));
+      const contractBody = F.h('div');
       const recordsBody = F.h('div', { className: F.classes.stack });
-      const nameInput = F.h('input', {
+      const nameInput = bindAttr(F.h('input', {
         className: F.classes.input,
-        attrs: { type: 'text', placeholder: 'binding name', value: 'sample' }
-      });
-      const keyInput = F.h('input', {
+        attrs: { type: 'text', value: 'sample' }
+      }), 'placeholder', 'placeholder.name');
+      const keyInput = bindAttr(F.h('input', {
         className: F.classes.input,
-        attrs: { type: 'text', placeholder: '4-byte hex key', value: '01020304' }
-      });
-      const valueInput = F.h('input', {
+        attrs: { type: 'text', value: '01020304' }
+      }), 'placeholder', 'placeholder.key');
+      const valueInput = bindAttr(F.h('input', {
         className: F.classes.input,
-        attrs: { type: 'text', placeholder: '8-byte hex value', value: '1112131415161718' }
-      });
+        attrs: { type: 'text', value: '1112131415161718' }
+      }), 'placeholder', 'placeholder.value');
+      F.onLocaleChange(refreshI18n);
 
       function setBusy(button, busy, text) {
         if (!button) return;
@@ -44,28 +219,40 @@
         if (text) button.textContent = text;
       }
 
+      function i18nStat(labelKey, value, detailKey, valueIsKey) {
+        const node = F.h('div', { className: F.classes.stat }, [
+          textNode('span', { className: F.classes.statLabel }, labelKey),
+          valueIsKey
+            ? textNode('span', { className: F.classes.statValue }, value)
+            : F.h('span', { className: F.classes.statValue, text: value == null || value === '' ? '-' : String(value) })
+        ]);
+        if (detailKey) bindAttr(node, 'title', detailKey);
+        return node;
+      }
+
       function renderRecords(records) {
+        recordsCache = Array.isArray(records) ? records : [];
         recordsBody.replaceChildren();
-        if (!records.length) {
+        if (!recordsCache.length) {
           recordsBody.appendChild(F.h('p', {
             className: F.classes.description,
-            text: 'No records yet. Create one to test host-side persistence.'
+            text: T('records.empty')
           }));
           F.requestResize();
           return;
         }
-        records.forEach(function (record) {
+        recordsCache.forEach(function (record) {
           const data = record.data || {};
-          const removeButton = F.button('Delete', async function () {
-            setBusy(removeButton, true, 'Deleting');
+          const removeButton = i18nButton('action.delete', async function () {
+            setBusy(removeButton, true, T('status.deleting'));
             try {
               await F.data.delete('bindings', record.key);
-              F.toast('Record deleted.');
+              F.toast(T('toast.deleted'));
               await loadRecords();
             } catch (e) {
-              F.toast(e.message || String(e));
+              F.toastError(e);
             } finally {
-              setBusy(removeButton, false, 'Delete');
+              setBusy(removeButton, false, T('action.delete'));
             }
           }, true);
           recordsBody.appendChild(F.card([
@@ -74,11 +261,11 @@
                 F.h('strong', { text: data.name || record.key }),
                 F.h('p', {
                   className: F.classes.description,
-                  text: 'key=' + (data.key_hex || '-') + ' value=' + (data.value_hex || '-')
+                  text: T('records.kv', { key: data.key_hex || '-', value: data.value_hex || '-' })
                 })
               ]),
               F.h('div', { className: F.classes.toolbar }, [
-                F.badge('rev ' + record.revision),
+                F.badge(T('records.revision', { revision: record.revision })),
                 removeButton
               ])
             ])
@@ -88,125 +275,114 @@
       }
 
       async function loadRecords() {
-        listStatus.textContent = 'Loading';
+        setListStatus('loading');
         try {
           const response = await F.data.list('bindings');
           const records = Array.isArray(response.records) ? response.records : [];
-          listStatus.textContent = records.length + ' record' + (records.length === 1 ? '' : 's');
+          setListStatus('count', records.length);
           renderRecords(records);
         } catch (e) {
-          listStatus.textContent = 'Load failed';
-          F.toast(e.message || String(e));
+          setListStatus('error');
+          F.toastError(e);
         }
       }
+
+      const applyButton = i18nButton('action.apply', async function () {
+        setBusy(applyButton, true, T('status.applying'));
+        setStatus('status.applying');
+        try {
+          const response = await F.action('apply', { source: 'ui' });
+          status.textContent = response.status || T('status.applied');
+          F.toast(T('toast.applied'));
+        } catch (e) {
+          setStatus('status.applyFailed');
+          F.toastError(e);
+        } finally {
+          setBusy(applyButton, false, T('action.apply'));
+          F.requestResize();
+        }
+      }, false);
+      const createButton = i18nButton('action.create', async function () {
+        setBusy(createButton, true, T('status.creating'));
+        try {
+          await F.data.create('bindings', {
+            name: nameInput.value || 'sample',
+            key_hex: keyInput.value || '01020304',
+            value_hex: valueInput.value || '0000000000000000',
+            created_at: new Date().toISOString()
+          });
+          F.toast(T('toast.created'));
+          await loadRecords();
+        } catch (e) {
+          F.toastError(e);
+        } finally {
+          setBusy(createButton, false, T('action.create'));
+        }
+      }, false);
 
       const page = F.h('main', { className: F.classes.page }, [
         F.stack([
           F.card([
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', null, [
-                F.h('h1', { className: F.classes.title, text: 'Packet Observer' }),
-                F.h('p', {
-                  className: F.classes.description,
-                  text: 'A minimal plugin page rendered with host-provided JavaScript components.'
-                })
+                textNode('h1', { className: F.classes.title }, 'title'),
+                textNode('p', { className: F.classes.description }, 'desc')
               ]),
               F.h('div', null, [
-                F.badge('plugin ' + F.pluginId),
-                F.badge('ui v' + F.version)
+                bindText(F.badge(T('badge.plugin', { id: F.pluginId })), 'badge.plugin', { id: F.pluginId }),
+                bindText(F.badge(T('badge.ui', { version: F.version })), 'badge.ui', { version: F.version })
               ])
             ])
           ]),
           F.h('div', { className: F.classes.grid }, [
-            F.stat('Stage', 'pre_forward', 'Runs before fvtap core lookup.'),
-            F.stat('Engine', 'TC', 'Attached through the plugin pipeline.'),
-            F.stat('Action', 'Observe', 'The sample program does not rewrite packets.')
+            i18nStat('stat.stage', 'pre_forward', 'stat.stage.detail'),
+            i18nStat('stat.engine', 'TC', 'stat.engine.detail'),
+            i18nStat('stat.action', 'stat.action.value', 'stat.action.detail', true)
           ]),
           F.card([
-            F.h('h2', { className: F.classes.title, text: 'Dataplane Contract' }),
-            F.h('p', {
-              className: F.classes.description,
-              text: 'This page is sandboxed. It receives no API token; data and actions go through the host RPC bridge and manifest permissions.'
-            }),
-            F.table(['Field', 'Value'], contractRows)
+            textNode('h2', { className: F.classes.title }, 'contract.title'),
+            textNode('p', { className: F.classes.description }, 'contract.desc'),
+            contractBody
           ]),
           F.card([
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', null, [
-                F.h('h2', { className: F.classes.title, text: 'Host Data API' }),
-                F.h('p', {
-                  className: F.classes.description,
-                  text: 'The resource below is stored in SQLite. The Apply action runs the Goja control script and writes the latest payload into the plugin KV namespace.'
-                })
+                textNode('h2', { className: F.classes.title }, 'data.title'),
+                textNode('p', { className: F.classes.description }, 'data.desc')
               ]),
               F.h('div', { className: F.classes.toolbar }, [
                 status,
-                (function () {
-                  const btn = F.button('Apply runtime', async function () {
-                    setBusy(btn, true, 'Applying');
-                    status.textContent = 'Applying';
-                    try {
-                      const response = await F.action('apply', { source: 'ui' });
-                      status.textContent = response.status || 'Applied';
-                    F.toast('Goja control action completed.');
-                    } catch (e) {
-                      status.textContent = 'Apply failed';
-                      F.toast(e.message || String(e));
-                    } finally {
-                      setBusy(btn, false, 'Apply runtime');
-                      F.requestResize();
-                    }
-                  }, false);
-                  return btn;
-                })()
+                applyButton
               ])
             ]),
             F.h('div', { className: F.classes.grid }, [
               F.h('label', { className: F.classes.field }, [
-                F.h('span', { text: 'Name' }),
+                textNode('span', null, 'field.name'),
                 nameInput
               ]),
               F.h('label', { className: F.classes.field }, [
-                F.h('span', { text: 'Key hex' }),
+                textNode('span', null, 'field.key'),
                 keyInput
               ]),
               F.h('label', { className: F.classes.field }, [
-                F.h('span', { text: 'Value hex' }),
+                textNode('span', null, 'field.value'),
                 valueInput
               ]),
               F.h('div', { className: F.classes.field }, [
-                F.h('span', { text: 'Records' }),
+                textNode('span', null, 'field.records'),
                 listStatus
               ])
             ]),
             F.h('div', { className: F.classes.toolbar }, [
-              (function () {
-                const btn = F.button('Create record', async function () {
-                  setBusy(btn, true, 'Creating');
-                  try {
-                    await F.data.create('bindings', {
-                      name: nameInput.value || 'sample',
-                      key_hex: keyInput.value || '01020304',
-                      value_hex: valueInput.value || '0000000000000000',
-                      created_at: new Date().toISOString()
-                    });
-                    F.toast('Record created in host-side SQLite storage.');
-                    await loadRecords();
-                  } catch (e) {
-                    F.toast(e.message || String(e));
-                  } finally {
-                    setBusy(btn, false, 'Create record');
-                  }
-                }, false);
-                return btn;
-              })(),
-              F.button('Refresh', loadRecords, true)
+              createButton,
+              i18nButton('action.refresh', loadRecords, true)
             ]),
             recordsBody
           ])
         ])
       ]);
 
+      renderContract();
       document.body.replaceChildren(page);
       loadRecords().finally(function () {
         F.requestResize();

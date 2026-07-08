@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/vishvananda/netlink"
@@ -81,6 +83,8 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 		}
 	} else if host.Type() != "veth" || peer.Type() != "veth" {
 		return pluginControlNetVethResult{}, fmt.Errorf("existing links must both be veth devices")
+	} else if err := pluginControlNetValidateVethPeers(host, peer); err != nil {
+		return pluginControlNetVethResult{}, err
 	}
 
 	if req.MTU > 0 {
@@ -115,6 +119,60 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 	return pluginControlNetVethResult{Host: hostInfo, Peer: peerInfo}, nil
 }
 
+func pluginControlNetValidateVethPeers(host netlink.Link, peer netlink.Link) error {
+	if host == nil || host.Attrs() == nil || peer == nil || peer.Attrs() == nil {
+		return fmt.Errorf("invalid veth pair")
+	}
+	hostPeerIndex, err := netlink.VethPeerIndex(&netlink.Veth{LinkAttrs: *host.Attrs()})
+	if err != nil {
+		return fmt.Errorf("verify veth peer for %q: %w", host.Attrs().Name, err)
+	}
+	peerPeerIndex, err := netlink.VethPeerIndex(&netlink.Veth{LinkAttrs: *peer.Attrs()})
+	if err != nil {
+		return fmt.Errorf("verify veth peer for %q: %w", peer.Attrs().Name, err)
+	}
+	if hostPeerIndex != peer.Attrs().Index || peerPeerIndex != host.Attrs().Index {
+		return fmt.Errorf("existing veth links %q and %q are not a pair", host.Attrs().Name, peer.Attrs().Name)
+	}
+	return nil
+}
+
+func (admin linuxPluginControlNetAdmin) LinkEnsureBridge(req pluginControlNetBridgeRequest) (pluginControlNetLinkInfo, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("name is required")
+	}
+	link, err := netlink.LinkByName(name)
+	if pluginControlNetLinkNotFound(err) {
+		attrs := netlink.NewLinkAttrs()
+		attrs.Name = name
+		if req.MTU > 0 {
+			attrs.MTU = req.MTU
+		}
+		if err := netlink.LinkAdd(&netlink.Bridge{LinkAttrs: attrs}); err != nil {
+			return pluginControlNetLinkInfo{}, fmt.Errorf("create bridge %s: %w", name, err)
+		}
+		link, err = netlink.LinkByName(name)
+	}
+	if err != nil {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("resolve bridge %q: %w", name, err)
+	}
+	if link.Type() != "bridge" {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("existing link %q is %s, want bridge", name, link.Type())
+	}
+	if req.MTU > 0 {
+		if err := netlink.LinkSetMTU(link, req.MTU); err != nil {
+			return pluginControlNetLinkInfo{}, fmt.Errorf("set bridge mtu: %w", err)
+		}
+	}
+	if req.Up {
+		if err := netlink.LinkSetUp(link); err != nil {
+			return pluginControlNetLinkInfo{}, fmt.Errorf("set bridge up: %w", err)
+		}
+	}
+	return admin.LinkGet(name)
+}
+
 func (linuxPluginControlNetAdmin) LinkDelete(name string) error {
 	link, err := netlink.LinkByName(strings.TrimSpace(name))
 	if pluginControlNetLinkNotFound(err) {
@@ -124,6 +182,50 @@ func (linuxPluginControlNetAdmin) LinkDelete(name string) error {
 		return err
 	}
 	return netlink.LinkDel(link)
+}
+
+func (admin linuxPluginControlNetAdmin) LinkSetMaster(req pluginControlNetMasterRequest) (pluginControlNetLinkInfo, error) {
+	linkName := strings.TrimSpace(req.Link)
+	masterName := strings.TrimSpace(req.Master)
+	link, err := netlink.LinkByName(linkName)
+	if err != nil {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("resolve link %q: %w", linkName, err)
+	}
+	master, err := netlink.LinkByName(masterName)
+	if err != nil {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("resolve master %q: %w", masterName, err)
+	}
+	if master.Type() != "bridge" {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("master %q is %s, want bridge", masterName, master.Type())
+	}
+	if link.Attrs().MasterIndex != master.Attrs().Index {
+		if link.Attrs().MasterIndex != 0 {
+			return pluginControlNetLinkInfo{}, fmt.Errorf("link %q is already enslaved to %q", linkName, pluginControlNetLinkNameByIndex(link.Attrs().MasterIndex))
+		}
+		if err := netlink.LinkSetMaster(link, master); err != nil {
+			return pluginControlNetLinkInfo{}, fmt.Errorf("set %s master %s: %w", linkName, masterName, err)
+		}
+	}
+	if req.Up {
+		if err := netlink.LinkSetUp(link); err != nil {
+			return pluginControlNetLinkInfo{}, fmt.Errorf("set link up: %w", err)
+		}
+	}
+	return admin.LinkGet(linkName)
+}
+
+func (admin linuxPluginControlNetAdmin) LinkClearMaster(name string) (pluginControlNetLinkInfo, error) {
+	linkName := strings.TrimSpace(name)
+	link, err := netlink.LinkByName(linkName)
+	if err != nil {
+		return pluginControlNetLinkInfo{}, err
+	}
+	if link.Attrs().MasterIndex != 0 {
+		if err := netlink.LinkSetNoMaster(link); err != nil {
+			return pluginControlNetLinkInfo{}, fmt.Errorf("clear %s master: %w", linkName, err)
+		}
+	}
+	return admin.LinkGet(linkName)
 }
 
 func (linuxPluginControlNetAdmin) LinkSetUp(name string, up bool) error {
@@ -143,6 +245,47 @@ func (linuxPluginControlNetAdmin) LinkSetMTU(name string, mtu int) error {
 		return err
 	}
 	return netlink.LinkSetMTU(link, mtu)
+}
+
+func (linuxPluginControlNetAdmin) LinkSetOffloads(req pluginControlNetOffloadRequest) error {
+	name := strings.TrimSpace(req.Interface)
+	if name == "" {
+		return fmt.Errorf("interface is required")
+	}
+	if _, err := netlink.LinkByName(name); err != nil {
+		return err
+	}
+	if len(req.Features) == 0 {
+		return fmt.Errorf("features are required")
+	}
+	if _, err := exec.LookPath("ethtool"); err != nil {
+		return fmt.Errorf("ethtool not found: %w", err)
+	}
+	features := make([]string, 0, len(req.Features))
+	for feature := range req.Features {
+		if !isAllowedPluginControlOffloadFeature(feature) {
+			return fmt.Errorf("unsupported offload feature %q", feature)
+		}
+		features = append(features, feature)
+	}
+	sort.Strings(features)
+	args := []string{"-K", name}
+	for _, feature := range features {
+		state := "off"
+		if req.Features[feature] {
+			state = "on"
+		}
+		args = append(args, feature, state)
+	}
+	out, err := exec.Command("ethtool", args...).CombinedOutput()
+	if err != nil {
+		text := strings.TrimSpace(string(out))
+		if text == "" {
+			text = err.Error()
+		}
+		return fmt.Errorf("ethtool -K %s failed: %s", name, text)
+	}
+	return nil
 }
 
 func (linuxPluginControlNetAdmin) AddrReplace(req pluginControlNetAddrRequest) error {

@@ -15,17 +15,35 @@ typedef int __s32;
 #define BPF_FUNC_l3_csum_replace 10
 #define BPF_FUNC_l4_csum_replace 11
 #define BPF_FUNC_tail_call 12
-#define BPF_FUNC_skb_load_bytes 26
 #define BPF_FUNC_redirect 23
 #define BPF_FUNC_skb_change_tail 38
+#define BPF_FUNC_skb_pull_data 39
 #define BPF_FUNC_skb_adjust_room 50
 
-#define BPF_ADJ_ROOM_MAC 1
 #define BPF_ADJ_ROOM_NET 0
+#define BPF_ADJ_ROOM_MAC 1
+#define BPF_F_ADJ_ROOM_FIXED_GSO (1ULL << 0)
+#define BPF_F_ADJ_ROOM_DECAP_L3_IPV4 (1ULL << 7)
+#define BPF_F_ADJ_ROOM_DECAP_L3_IPV6 (1ULL << 8)
 #define BPF_F_PSEUDO_HDR (1ULL << 4)
 #define BPF_F_MARK_MANGLED_0 (1ULL << 5)
 
-#define TC_ACT_OK 0
+#ifndef PPPOE_DECAP_ADJ_MODE
+#define PPPOE_DECAP_ADJ_MODE BPF_ADJ_ROOM_MAC
+#endif
+
+#ifndef PPPOE_DECAP_ADJ_BASE_FLAGS
+#define PPPOE_DECAP_ADJ_BASE_FLAGS BPF_F_ADJ_ROOM_FIXED_GSO
+#endif
+
+#ifndef PPPOE_DECAP_ADJ_L3_FLAGS
+#define PPPOE_DECAP_ADJ_L3_FLAGS 1
+#endif
+
+#ifndef PPPOE_TUNNEL_DIAG
+#define PPPOE_TUNNEL_DIAG 0
+#endif
+
 #define TC_ACT_SHOT 2
 #define TC_ACT_REDIRECT 7
 #define TC_ACT_UNSPEC (-1)
@@ -40,6 +58,7 @@ typedef int __s32;
 #define FVTAP_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE 8
 #define FVTAP_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE 28
 #define PPPOE_TUNNEL_FLAG_COUPLED 0x1
+#define PPPOE_TUNNEL_FLAG_MANUAL_DECAP 0x2
 #define PPPOE_ACT_CONTINUE (-2)
 
 struct __sk_buff {
@@ -54,6 +73,12 @@ struct __sk_buff {
 	__u32 priority;
 	__u32 ingress_ifindex;
 	__u32 ifindex;
+	__u32 tc_index;
+	__u32 cb[5];
+	__u32 hash;
+	__u32 tc_classid;
+	__u32 data;
+	__u32 data_end;
 };
 
 struct bpf_map_def {
@@ -76,6 +101,47 @@ struct pppoe_ppp_hdr {
 	__u16 session_id;
 	__u16 length;
 	__u16 protocol;
+} __attribute__((packed));
+
+struct ipv4_min_hdr {
+	__u8 ver_ihl;
+	__u8 tos;
+	__u16 tot_len;
+	__u16 id;
+	__u16 frag_off;
+	__u8 ttl;
+	__u8 protocol;
+	__u16 check;
+	__u32 saddr;
+	__u32 daddr;
+} __attribute__((packed));
+
+struct ipv6_min_hdr {
+	__u32 ver_tc_flow;
+	__u16 payload_len;
+	__u8 nexthdr;
+	__u8 hop_limit;
+	__u8 saddr[16];
+	__u8 daddr[16];
+} __attribute__((packed));
+
+struct tcp_min_hdr {
+	__u16 source;
+	__u16 dest;
+	__u32 seq;
+	__u32 ack_seq;
+	__u8 doff_res;
+	__u8 flags;
+	__u16 window;
+	__u16 check;
+	__u16 urg_ptr;
+} __attribute__((packed));
+
+struct udp_min_hdr {
+	__u16 source;
+	__u16 dest;
+	__u16 len;
+	__u16 check;
 } __attribute__((packed));
 
 struct pppoe_tunnel_config {
@@ -137,9 +203,9 @@ static int (*const bpf_skb_store_bytes)(struct __sk_buff *skb, __u32 offset, con
 static int (*const bpf_l3_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to, __u64 size) = (void *)BPF_FUNC_l3_csum_replace;
 static int (*const bpf_l4_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to, __u64 flags) = (void *)BPF_FUNC_l4_csum_replace;
 static void (*const bpf_tail_call)(void *ctx, void *prog_array_map, __u32 index) = (void *)BPF_FUNC_tail_call;
-static int (*const bpf_skb_load_bytes)(const struct __sk_buff *skb, __u32 offset, void *to, __u32 len) = (void *)BPF_FUNC_skb_load_bytes;
 static int (*const bpf_redirect)(__u32 ifindex, __u64 flags) = (void *)BPF_FUNC_redirect;
 static int (*const bpf_skb_change_tail)(struct __sk_buff *skb, __u32 len, __u64 flags) = (void *)BPF_FUNC_skb_change_tail;
+static int (*const bpf_skb_pull_data)(struct __sk_buff *skb, __u32 len) = (void *)BPF_FUNC_skb_pull_data;
 static int (*const bpf_skb_adjust_room)(struct __sk_buff *skb, __s32 len_diff, __u32 mode, __u64 flags) = (void *)BPF_FUNC_skb_adjust_room;
 
 struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
@@ -156,12 +222,44 @@ struct bpf_map_def SEC("maps") pppoe_tunnel_config = {
 	.max_entries = 1,
 };
 
+struct bpf_map_def SEC("maps") pppoe_tunnel_stats = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u64),
+	.max_entries = 16,
+};
+
 struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_plugin_ctx_v4),
 	.max_entries = 1,
 };
+
+static __always_inline void bump_tunnel_stat(__u32 index)
+{
+#if PPPOE_TUNNEL_DIAG
+	__u64 *value = bpf_map_lookup_elem(&pppoe_tunnel_stats, &index);
+
+	if (value)
+		__sync_fetch_and_add(value, 1);
+#else
+	(void)index;
+#endif
+}
+
+static __always_inline void set_tunnel_stat(__u32 index, __u64 stat)
+{
+#if PPPOE_TUNNEL_DIAG
+	__u64 *value = bpf_map_lookup_elem(&pppoe_tunnel_stats, &index);
+
+	if (value)
+		*value = stat;
+#else
+	(void)index;
+	(void)stat;
+#endif
+}
 
 static __always_inline __u16 bswap16(__u16 value)
 {
@@ -199,68 +297,86 @@ static __always_inline __u32 htonl32(__u32 value)
 #endif
 }
 
-static __always_inline int load_u16(struct __sk_buff *skb, __u32 off, __u16 *value)
-{
-	return bpf_skb_load_bytes(skb, off, value, sizeof(*value));
-}
-
-static __always_inline int load_u8(struct __sk_buff *skb, __u32 off, __u8 *value)
-{
-	return bpf_skb_load_bytes(skb, off, value, sizeof(*value));
-}
-
-static __always_inline int load_u32(struct __sk_buff *skb, __u32 off, __u32 *value)
-{
-	return bpf_skb_load_bytes(skb, off, value, sizeof(*value));
-}
-
 static __always_inline int store_eth(struct __sk_buff *skb, const __u8 *dst, const __u8 *src, __u16 proto)
 {
-	if (bpf_skb_store_bytes(skb, 0, dst, 6, 0) < 0)
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ethhdr *eth = data;
+
+	if ((void *)(eth + 1) > data_end)
 		return -1;
-	if (bpf_skb_store_bytes(skb, 6, src, 6, 0) < 0)
+	__builtin_memcpy(eth->h_dest, dst, 6);
+	__builtin_memcpy(eth->h_source, src, 6);
+	eth->h_proto = htons16(proto);
+	return 0;
+}
+
+static __always_inline int mac_addr_eq(const __u8 *a, const __u8 *b)
+{
+#pragma clang loop unroll(full)
+	for (int i = 0; i < 6; i++) {
+		if (a[i] != b[i])
+			return 0;
+	}
+	return 1;
+}
+
+static __always_inline int skb_matches_direct_lan_eth(struct __sk_buff *skb, const struct pppoe_tunnel_config *cfg)
+{
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ethhdr *eth = data;
+	__u16 proto;
+
+	if (!cfg || (void *)(eth + 1) > data_end)
+		return 0;
+	proto = ntohs16(eth->h_proto);
+	if (proto != ETH_P_IP && proto != ETH_P_IPV6)
+		return 0;
+	if (mac_addr_eq(eth->h_dest, cfg->lan_src_mac) &&
+		mac_addr_eq(eth->h_source, cfg->lan_dst_mac))
+		return 1;
+	return mac_addr_eq(eth->h_dest, cfg->lan_dst_mac) &&
+		mac_addr_eq(eth->h_source, cfg->lan_src_mac);
+}
+
+static __always_inline int store_pppoe_hdr(struct __sk_buff *skb, const struct pppoe_ppp_hdr *hdr)
+{
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct pppoe_ppp_hdr *packet_hdr = data + 14;
+
+	if ((void *)(packet_hdr + 1) > data_end)
 		return -1;
-	proto = htons16(proto);
-	if (bpf_skb_store_bytes(skb, 12, &proto, sizeof(proto), 0) < 0)
-		return -1;
+	*packet_hdr = *hdr;
 	return 0;
 }
 
 static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct ipv4_l4_ctx *ctx)
 {
-	__u16 eth_proto = 0;
-	__u8 ver_ihl = 0;
-	__u16 frag_off = 0;
-	__u16 src_port = 0;
-	__u16 dst_port = 0;
-	__u16 l4_check = 0;
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ethhdr *eth = data;
+	struct ipv4_min_hdr *iph;
+	void *l4;
 	const int l3_off = 14;
 	const int l4_off = 34;
 
 	if (!ctx)
 		return -1;
-	if (load_u16(skb, 12, &eth_proto) < 0 || eth_proto != htons16(ETH_P_IP))
+	if ((void *)(eth + 1) > data_end || eth->h_proto != htons16(ETH_P_IP))
 		return -1;
-	if (load_u8(skb, l3_off, &ver_ihl) < 0 || ver_ihl != 0x45)
+	iph = data + l3_off;
+	if ((void *)(iph + 1) > data_end || iph->ver_ihl != 0x45)
 		return -1;
-	if (load_u16(skb, l3_off + 6, &frag_off) < 0 || (ntohs16(frag_off) & 0x3fff) != 0)
+	if ((ntohs16(iph->frag_off) & 0x3fff) != 0)
 		return -1;
-	if (load_u8(skb, l3_off + 9, &ctx->proto) < 0)
-		return -1;
+	ctx->proto = iph->protocol;
 	if (ctx->proto != IPPROTO_TCP && ctx->proto != IPPROTO_UDP)
 		return -1;
-	if (load_u16(skb, l3_off + 2, &ctx->tot_len) < 0)
-		return -1;
-	if (load_u32(skb, l3_off + 12, &ctx->src_addr) < 0)
-		return -1;
-	if (load_u32(skb, l3_off + 16, &ctx->dst_addr) < 0)
-		return -1;
-	if (load_u16(skb, l4_off, &src_port) < 0)
-		return -1;
-	if (load_u16(skb, l4_off + 2, &dst_port) < 0)
-		return -1;
-	ctx->src_port = ntohs16(src_port);
-	ctx->dst_port = ntohs16(dst_port);
+	ctx->tot_len = iph->tot_len;
+	ctx->src_addr = iph->saddr;
+	ctx->dst_addr = iph->daddr;
 	ctx->ip_src_off = l3_off + 12;
 	ctx->ip_dst_off = l3_off + 16;
 	ctx->ip_check_off = l3_off + 10;
@@ -268,10 +384,25 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct ipv4_l4_c
 	ctx->l4_dst_off = l4_off + 2;
 	ctx->l4_check_off = l4_off + (ctx->proto == IPPROTO_TCP ? 16 : 6);
 	ctx->has_l4_checksum = 1;
-	if (ctx->proto == IPPROTO_UDP) {
-		if (load_u16(skb, ctx->l4_check_off, &l4_check) < 0)
+
+	l4 = data + l4_off;
+	if (ctx->proto == IPPROTO_TCP) {
+		struct tcp_min_hdr *tcph = l4;
+
+		if ((void *)(tcph + 1) > data_end)
 			return -1;
-		ctx->has_l4_checksum = l4_check != 0;
+		ctx->src_port = ntohs16(tcph->source);
+		ctx->dst_port = ntohs16(tcph->dest);
+		return 0;
+	}
+	if (ctx->proto == IPPROTO_UDP) {
+		struct udp_min_hdr *udph = l4;
+
+		if ((void *)(udph + 1) > data_end)
+			return -1;
+		ctx->src_port = ntohs16(udph->source);
+		ctx->dst_port = ntohs16(udph->dest);
+		ctx->has_l4_checksum = udph->check != 0;
 	}
 	return 0;
 }
@@ -343,117 +474,120 @@ static __always_inline int rewrite_ipv4_dst(struct __sk_buff *skb, const struct 
 	return 0;
 }
 
-static __always_inline int shift_payload_part_left(struct __sk_buff *skb, __u32 off, __u32 size)
+static __always_inline int l3_packet_info(struct __sk_buff *skb, __u16 *length, __u16 *ppp_proto)
 {
-	__u8 buf[64];
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ethhdr *eth = data;
+	__u16 eth_proto;
 
-	if (size > sizeof(buf))
+	if (!length || !ppp_proto)
 		return -1;
-	if (bpf_skb_load_bytes(skb, 14 + sizeof(struct pppoe_ppp_hdr) + off, buf, size) < 0)
-		return -1;
-	if (bpf_skb_store_bytes(skb, 14 + off, buf, size, 0) < 0)
-		return -1;
-	return 0;
-}
-
-static __always_inline int shift_payload_tail_left(struct __sk_buff *skb, __u32 off, __u32 remaining)
-{
-	if (remaining > 63)
-		return -1;
-	if (remaining & 32) {
-		if (shift_payload_part_left(skb, off, 32) < 0)
-			return -1;
-		off += 32;
-	}
-	if (remaining & 16) {
-		if (shift_payload_part_left(skb, off, 16) < 0)
-			return -1;
-		off += 16;
-	}
-	if (remaining & 8) {
-		if (shift_payload_part_left(skb, off, 8) < 0)
-			return -1;
-		off += 8;
-	}
-	if (remaining & 4) {
-		if (shift_payload_part_left(skb, off, 4) < 0)
-			return -1;
-		off += 4;
-	}
-	if (remaining & 2) {
-		if (shift_payload_part_left(skb, off, 2) < 0)
-			return -1;
-		off += 2;
-	}
-	if (remaining & 1) {
-		if (shift_payload_part_left(skb, off, 1) < 0)
-			return -1;
-	}
-	return 0;
-}
-
-static __always_inline int shift_pppoe_payload_left(struct __sk_buff *skb, __u32 len)
-{
-	if (len > 1492)
-		return -1;
-#pragma unroll
-	for (int i = 0; i < 24; i++) {
-		__u32 off = (__u32)i * 64;
-
-		if (len <= off)
-			break;
-		if (len >= off + 64) {
-			if (shift_payload_part_left(skb, off, 64) < 0)
-				return -1;
-			continue;
-		}
-		if (shift_payload_tail_left(skb, off, len - off) < 0)
-			return -1;
-		break;
-	}
-	return 0;
-}
-
-static __always_inline int l3_packet_length(struct __sk_buff *skb, __u16 eth_proto, __u16 *length)
-{
-	__u16 raw = 0;
-
-	if (!length)
-		return -1;
-	if (eth_proto == ETH_P_IP) {
-		if (load_u16(skb, 16, &raw) < 0)
-			return -1;
-		*length = ntohs16(raw);
+	if ((void *)(eth + 1) > data_end)
 		return 0;
+	eth_proto = ntohs16(eth->h_proto);
+	if (eth_proto == ETH_P_IP) {
+		struct ipv4_min_hdr *iph = data + 14;
+
+		if ((void *)(iph + 1) > data_end)
+			return -1;
+		*length = ntohs16(iph->tot_len);
+		*ppp_proto = PPP_IP;
+		return 1;
 	}
 	if (eth_proto == ETH_P_IPV6) {
-		if (load_u16(skb, 18, &raw) < 0)
+		struct ipv6_min_hdr *ip6h = data + 14;
+
+		if ((void *)(ip6h + 1) > data_end)
 			return -1;
-		*length = ntohs16(raw) + 40;
-		return 0;
+		*length = ntohs16(ip6h->payload_len) + 40;
+		*ppp_proto = PPP_IPV6;
+		return 1;
 	}
-	return -1;
+	return 0;
 }
 
-static __always_inline int encap_l3_to_pppoe(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg)
+static __always_inline int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
 {
-	__u16 proto = 0;
-	__u16 l3_len = 0;
-	__u16 ppp_proto = 0;
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	__u32 copied = 0;
+	__u32 new_len = 14 + (__u32)l3_len;
+
+	if (l3_len > 1492)
+		return -1;
+	if (data + 22 + l3_len > data_end || data + 14 + l3_len > data_end) {
+		if (bpf_skb_pull_data(skb, 22 + (__u32)l3_len) < 0) {
+			bump_tunnel_stat(12);
+			return -1;
+		}
+		data = (void *)(long)skb->data;
+		data_end = (void *)(long)skb->data_end;
+		if (data + 22 + l3_len > data_end || data + 14 + l3_len > data_end) {
+			bump_tunnel_stat(13);
+			return -1;
+		}
+	}
+#pragma clang loop unroll(disable)
+	for (int i = 0; i < 187; i++) {
+		void *src = data + 22 + copied;
+		void *dst = data + 14 + copied;
+
+		if (copied + 8 > l3_len)
+			break;
+		if (src + 8 > data_end || dst + 8 > data_end) {
+			bump_tunnel_stat(13);
+			return -1;
+		}
+		__builtin_memcpy(dst, src, 8);
+		copied += 8;
+	}
+	if (copied < l3_len) {
+#pragma clang loop unroll(full)
+		for (int j = 0; j < 7; j++) {
+			void *src = data + 22 + copied;
+			void *dst = data + 14 + copied;
+
+			if (copied >= l3_len)
+				break;
+			if (src + 1 > data_end || dst + 1 > data_end) {
+				bump_tunnel_stat(13);
+				return -1;
+			}
+			*(__u8 *)dst = *(__u8 *)src;
+			copied++;
+		}
+	}
+	if (copied != l3_len) {
+		bump_tunnel_stat(14);
+		return -1;
+	}
+	if (bpf_skb_change_tail(skb, new_len, 0) < 0) {
+		bump_tunnel_stat(15);
+		return -1;
+	}
+	return 0;
+}
+
+static __always_inline int skb_matches_ifindex(struct __sk_buff *skb, __u32 ifindex)
+{
+	return skb->ifindex == ifindex || skb->ingress_ifindex == ifindex;
+}
+
+static __always_inline int skb_matches_direct_lan_side(struct __sk_buff *skb, const struct pppoe_tunnel_config *cfg)
+{
+	if (!cfg)
+		return 0;
+	if (skb_matches_ifindex(skb, cfg->lan_ifindex))
+		return 1;
+	return skb_matches_direct_lan_eth(skb, cfg);
+}
+
+static __always_inline int encap_known_l3_to_pppoe(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg, __u16 l3_len, __u16 ppp_proto)
+{
 	struct pppoe_ppp_hdr hdr = {};
 	int act;
 
-	if (load_u16(skb, 12, &proto) < 0)
-		return TC_ACT_UNSPEC;
-	proto = ntohs16(proto);
-	if (proto == ETH_P_IP)
-		ppp_proto = PPP_IP;
-	else if (proto == ETH_P_IPV6)
-		ppp_proto = PPP_IPV6;
-	else
-		return TC_ACT_UNSPEC;
-	if (l3_packet_length(skb, proto, &l3_len) < 0)
-		return TC_ACT_SHOT;
 	if (l3_len > 1492)
 		return TC_ACT_UNSPEC;
 
@@ -465,7 +599,7 @@ static __always_inline int encap_l3_to_pppoe(struct __sk_buff *skb, struct pppoe
 	hdr.session_id = htons16(cfg->session_id);
 	hdr.length = htons16(l3_len + 2);
 	hdr.protocol = htons16(ppp_proto);
-	if (bpf_skb_store_bytes(skb, 14, &hdr, sizeof(hdr), 0) < 0)
+	if (store_pppoe_hdr(skb, &hdr) < 0)
 		return TC_ACT_SHOT;
 	if (store_eth(skb, cfg->wan_dst_mac, cfg->wan_src_mac, ETH_P_PPP_SES) < 0)
 		return TC_ACT_SHOT;
@@ -474,57 +608,97 @@ static __always_inline int encap_l3_to_pppoe(struct __sk_buff *skb, struct pppoe
 	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
 }
 
-static __always_inline int encap_ipv4_to_pppoe(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg)
+static __always_inline int encap_l3_to_pppoe(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg)
 {
-	__u16 proto = 0;
+	__u16 l3_len = 0;
+	__u16 ppp_proto = 0;
+	int info;
 
-	if (load_u16(skb, 12, &proto) < 0 || proto != htons16(ETH_P_IP))
+	info = l3_packet_info(skb, &l3_len, &ppp_proto);
+	if (info == 0)
 		return TC_ACT_UNSPEC;
-	return encap_l3_to_pppoe(skb, cfg);
+	if (info < 0)
+		return TC_ACT_SHOT;
+	return encap_known_l3_to_pppoe(skb, cfg, l3_len, ppp_proto);
 }
 
 static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg)
 {
-	__u16 proto = 0;
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ethhdr *eth = data;
+	struct pppoe_ppp_hdr *packet_hdr;
 	__u16 ppp_len;
+	__u16 l3_len;
 	__u16 eth_proto = 0;
+	__u64 adjust_flags = PPPOE_DECAP_ADJ_BASE_FLAGS;
 	struct pppoe_ppp_hdr hdr = {};
 	int act;
+	int ret;
 
-	if (load_u16(skb, 12, &proto) < 0 || proto != htons16(ETH_P_PPP_SES))
+	if ((void *)(eth + 1) > data_end || eth->h_proto != htons16(ETH_P_PPP_SES))
 		return TC_ACT_UNSPEC;
-	if (bpf_skb_load_bytes(skb, 14, &hdr, sizeof(hdr)) < 0)
+	bump_tunnel_stat(3);
+	packet_hdr = data + 14;
+	if ((void *)(packet_hdr + 1) > data_end)
 		return TC_ACT_SHOT;
+	hdr = *packet_hdr;
 	if (hdr.ver_type != 0x11 || hdr.code != 0 || ntohs16(hdr.session_id) != cfg->session_id)
 		return TC_ACT_UNSPEC;
-	if (hdr.protocol == htons16(PPP_IP))
+	bump_tunnel_stat(4);
+	if (hdr.protocol == htons16(PPP_IP)) {
 		eth_proto = ETH_P_IP;
-	else if (hdr.protocol == htons16(PPP_IPV6))
+#if PPPOE_DECAP_ADJ_L3_FLAGS
+		adjust_flags |= BPF_F_ADJ_ROOM_DECAP_L3_IPV4;
+#endif
+	} else if (hdr.protocol == htons16(PPP_IPV6)) {
 		eth_proto = ETH_P_IPV6;
-	else
+#if PPPOE_DECAP_ADJ_L3_FLAGS
+		adjust_flags |= BPF_F_ADJ_ROOM_DECAP_L3_IPV6;
+#endif
+	} else {
 		return TC_ACT_UNSPEC;
+	}
 	ppp_len = ntohs16(hdr.length);
 	if (ppp_len < 2 || ppp_len > 1494)
 		return TC_ACT_UNSPEC;
+	l3_len = ppp_len - 2;
 
-	if (shift_pppoe_payload_left(skb, (__u32)ppp_len - 2) < 0) {
-		return TC_ACT_SHOT;
-	}
-	if (bpf_skb_change_tail(skb, skb->len - sizeof(hdr), 0) < 0) {
-		return TC_ACT_SHOT;
+	if ((cfg->flags & PPPOE_TUNNEL_FLAG_MANUAL_DECAP) != 0) {
+		if (compact_pppoe_payload_to_l3(skb, l3_len) < 0) {
+			bump_tunnel_stat(11);
+			return TC_ACT_SHOT;
+		}
+		bump_tunnel_stat(10);
+	} else {
+		ret = bpf_skb_adjust_room(skb, -(__s32)sizeof(hdr), PPPOE_DECAP_ADJ_MODE, adjust_flags);
+		if (ret < 0) {
+			bump_tunnel_stat(5);
+			set_tunnel_stat(9, (__u64)(-ret));
+			if (compact_pppoe_payload_to_l3(skb, l3_len) < 0) {
+				bump_tunnel_stat(11);
+				return TC_ACT_SHOT;
+			}
+			bump_tunnel_stat(10);
+		}
 	}
 	if ((cfg->flags & PPPOE_TUNNEL_FLAG_COUPLED) != 0) {
 		if (eth_proto != ETH_P_IP)
 			return TC_ACT_UNSPEC;
 		if (store_eth(skb, cfg->wan_src_mac, cfg->wan_dst_mac, eth_proto) < 0)
 			return TC_ACT_SHOT;
-		return PPPOE_ACT_CONTINUE;
-	}
-	if (store_eth(skb, cfg->lan_dst_mac, cfg->lan_src_mac, eth_proto) < 0) {
+	} else if (store_eth(skb, cfg->lan_dst_mac, cfg->lan_src_mac, eth_proto) < 0) {
+		bump_tunnel_stat(6);
 		return TC_ACT_SHOT;
 	}
+	if ((cfg->flags & PPPOE_TUNNEL_FLAG_COUPLED) != 0)
+		return PPPOE_ACT_CONTINUE;
 
 	act = bpf_redirect(cfg->lan_ifindex, 0);
+	if (act == TC_ACT_REDIRECT)
+		bump_tunnel_stat(7);
+	else
+		bump_tunnel_stat(8);
 	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
 }
 
@@ -537,7 +711,7 @@ static __always_inline int encap_forward_reply_to_pppoe(struct __sk_buff *skb, s
 
 	if ((cfg->flags & PPPOE_TUNNEL_FLAG_COUPLED) == 0)
 		return TC_ACT_UNSPEC;
-	if (skb->ifindex != cfg->lan_ifindex)
+	if (!skb_matches_ifindex(skb, cfg->lan_ifindex))
 		return TC_ACT_UNSPEC;
 	if (!plugin_ctx || !plugin_ctx->have_flow || plugin_ctx->direction != 2)
 		return TC_ACT_UNSPEC;
@@ -554,7 +728,7 @@ static __always_inline int encap_forward_reply_to_pppoe(struct __sk_buff *skb, s
 		return TC_ACT_SHOT;
 	if (rewrite_ipv4_dst(skb, &pkt, plugin_ctx->client_addr, plugin_ctx->client_port) < 0)
 		return TC_ACT_SHOT;
-	act = encap_ipv4_to_pppoe(skb, cfg);
+	act = encap_known_l3_to_pppoe(skb, cfg, ntohs16(pkt.tot_len), PPP_IP);
 	return act;
 }
 
@@ -567,11 +741,13 @@ int tc_tunnel(struct __sk_buff *skb)
 
 	if (!cfg || !cfg->enabled)
 		goto next;
-	if (skb->ifindex == cfg->lan_ifindex && (cfg->flags & PPPOE_TUNNEL_FLAG_COUPLED) == 0) {
+	if (skb_matches_direct_lan_side(skb, cfg) && (cfg->flags & PPPOE_TUNNEL_FLAG_COUPLED) == 0) {
+		bump_tunnel_stat(1);
 		act = encap_l3_to_pppoe(skb, cfg);
 		if (act != TC_ACT_UNSPEC)
 			return act;
-	} else if (skb->ifindex == cfg->wan_ifindex) {
+	} else {
+		bump_tunnel_stat(2);
 		act = decap_pppoe_to_l3(skb, cfg);
 		if (act == PPPOE_ACT_CONTINUE)
 			goto next;

@@ -3,6 +3,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +16,14 @@ import (
 )
 
 const kernelPluginPipelineTestEnv = "FORWARD_RUN_PLUGIN_PIPELINE_TEST"
+
+func packetObserverPluginSourceDirForPipelineTest(t *testing.T) string {
+	t.Helper()
+	if sourceDir := strings.TrimSpace(os.Getenv(dataplanePerfPluginSourceEnv)); sourceDir != "" {
+		return sourceDir
+	}
+	return filepath.Join(findRepoRoot(t), "examples", "plugins", "packet_observer")
+}
 
 func TestPreparedKernelRulesUseDispatchV4HonorsPluginPipeline(t *testing.T) {
 	transparent := []preparedKernelRule{{
@@ -66,6 +75,69 @@ func TestNewTCKernelRuleRuntimeEnablesPluginPipelineFromConfig(t *testing.T) {
 	}
 }
 
+func TestOrderedKernelRuntimePrefersTCWhenRuntimeTCPluginHooksActive(t *testing.T) {
+	enabled := true
+	xdp := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineXDP}
+	tc := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineTC}
+	rt := &orderedKernelRuleRuntime{
+		cfg: &Config{
+			PluginsEnabledSetting:   &enabled,
+			PluginsDataplaneSetting: &enabled,
+		},
+		entries: []orderedKernelRuntimeEntry{
+			{name: kernelEngineXDP, rt: xdp},
+			{name: kernelEngineTC, rt: tc},
+		},
+	}
+
+	results, err := rt.ReconcileWithPluginCatalog([]Rule{{ID: 1, Enabled: true}}, PluginCatalog{
+		Plugins: []LoadedPlugin{builtinFVTapPlugin(), stableTCHookPluginForOrderTest()},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileWithPluginCatalog() error = %v", err)
+	}
+	if result := results[1]; !result.Running || result.Engine != kernelEngineTC {
+		t.Fatalf("rule result = %+v, want tc because active tc plugin hooks must not be bypassed by xdp", result)
+	}
+	if len(xdp.assignments) != 0 {
+		t.Fatalf("xdp assignments = %+v, want no rules assigned when tc plugin hooks are active", xdp.assignments)
+	}
+	if tc.reconcileWithCatalogCalls != 1 {
+		t.Fatalf("tc ReconcileWithPluginCatalog calls = %d, want 1", tc.reconcileWithCatalogCalls)
+	}
+}
+
+func TestOrderedKernelRuntimeKeepsEngineOrderWhenPluginDataplaneDisabled(t *testing.T) {
+	disabled := false
+	xdp := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineXDP}
+	tc := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineTC}
+	rt := &orderedKernelRuleRuntime{
+		cfg: &Config{
+			PluginsDataplaneSetting: &disabled,
+		},
+		entries: []orderedKernelRuntimeEntry{
+			{name: kernelEngineXDP, rt: xdp},
+			{name: kernelEngineTC, rt: tc},
+		},
+	}
+
+	results, err := rt.ReconcileWithPluginCatalog([]Rule{{ID: 1, Enabled: true}}, PluginCatalog{
+		Plugins: []LoadedPlugin{builtinFVTapPlugin(), stableTCHookPluginForOrderTest()},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileWithPluginCatalog() error = %v", err)
+	}
+	if result := results[1]; !result.Running || result.Engine != kernelEngineXDP {
+		t.Fatalf("rule result = %+v, want xdp when plugin dataplane is disabled", result)
+	}
+	if xdp.reconcileWithCatalogCalls != 1 {
+		t.Fatalf("xdp ReconcileWithPluginCatalog calls = %d, want 1", xdp.reconcileWithCatalogCalls)
+	}
+	if tc.reconcileCalls != 1 {
+		t.Fatalf("tc cleanup Reconcile calls = %d, want 1 cleanup after xdp assignment", tc.reconcileCalls)
+	}
+}
+
 func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t *testing.T) {
 	pieces := kernelCollectionPieces{
 		forwardProg:                 &ebpf.Program{},
@@ -114,34 +186,34 @@ func TestBuildKernelPluginPipelineDesiredAllowsInterfaceFreePreForward(t *testin
 			Name:    "Packet Observer",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{{
-					ID:      "tc_pre_forward",
-					Section: "tc/fvtap/pre_forward",
-					Type:    kernelEngineTC,
-				}},
-			}},
-			Hooks: []PluginHook{{
-				ID:       "observe-ingress",
-				Engine:   kernelEngineTC,
-				Attach:   "ingress",
-				Stage:    "pre_forward",
-				Priority: 10,
-				Program:  "observer:tc_pre_forward",
-				Mode:     "observe",
-			}},
 		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_pre_forward",
+				Section: "tc/fvtap/pre_forward",
+				Type:    kernelEngineTC,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:       "observe-ingress",
+			Engine:   kernelEngineTC,
+			Attach:   "ingress",
+			Stage:    "pre_forward",
+			Priority: 10,
+			Program:  "observer:tc_pre_forward",
+			Mode:     "observe",
+		}},
 		Status:  pluginStatusActive,
 		rootDir: dir,
 	}
 
 	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
 	if len(states) != 0 {
-		t.Fatalf("states = %+v, want no manifest-only/error state", states)
+		t.Fatalf("states = %+v, want no registered/error state", states)
 	}
 	if len(desired) != 1 || len(desired[0].hooks) != 1 {
 		t.Fatalf("desired = %+v, want one pipeline hook", desired)
@@ -167,20 +239,20 @@ func TestKernelPluginPipelineExplicitInterfacesContributeAttachmentTargets(t *te
 			Name:    "Interface Observer",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{
-					{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
-					{ID: "tc_pre_reply", Section: "tc/fvtap/pre_reply", Type: kernelEngineTC},
-				},
-			}},
-			Hooks: []PluginHook{
-				{ID: "forward-lo", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_pre_forward", Mode: "observe", Interfaces: []string{"lo"}},
-				{ID: "reply-lo", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageReply, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_pre_reply", Mode: "observe", Interfaces: []string{"lo"}},
+		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{
+				{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
+				{ID: "tc_pre_reply", Section: "tc/fvtap/pre_reply", Type: kernelEngineTC},
 			},
+		}},
+		Hooks: []PluginHook{
+			{ID: "forward-lo", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_pre_forward", Mode: "observe", Interfaces: []string{"lo"}},
+			{ID: "reply-lo", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageReply, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_pre_reply", Mode: "observe", Interfaces: []string{"lo"}},
 		},
 		Status:  pluginStatusActive,
 		rootDir: dir,
@@ -216,41 +288,41 @@ func TestKernelPluginPipelineNoRuleFilterRequiresExplicitPreCoreHook(t *testing.
 			Name:    "Interface Free",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{{
-					ID:      "tc_pre_forward",
-					Section: "tc/fvtap/pre_forward",
-					Type:    kernelEngineTC,
-				}, {
-					ID:      "tc_post_lookup",
-					Section: "tc/fvtap/post_lookup",
-					Type:    kernelEngineTC,
-				}},
+		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_pre_forward",
+				Section: "tc/fvtap/pre_forward",
+				Type:    kernelEngineTC,
+			}, {
+				ID:      "tc_post_lookup",
+				Section: "tc/fvtap/post_lookup",
+				Type:    kernelEngineTC,
 			}},
-			Hooks: []PluginHook{
-				{
-					ID:       "interface-free-forward",
-					Engine:   kernelEngineTC,
-					Attach:   "ingress",
-					Stage:    kernelPluginPipelineStageForward,
-					Priority: pluginPipelineCorePriority - 10,
-					Program:  "observer:tc_pre_forward",
-					Mode:     "observe",
-				},
-				{
-					ID:         "post-core-explicit",
-					Engine:     kernelEngineTC,
-					Attach:     "ingress",
-					Stage:      kernelPluginPipelineStageForward,
-					Priority:   pluginPipelineCorePriority + 10,
-					Program:    "observer:tc_post_lookup",
-					Mode:       "observe",
-					Interfaces: []string{"lo"},
-				},
+		}},
+		Hooks: []PluginHook{
+			{
+				ID:       "interface-free-forward",
+				Engine:   kernelEngineTC,
+				Attach:   "ingress",
+				Stage:    kernelPluginPipelineStageForward,
+				Priority: pluginPipelineCorePriority - 10,
+				Program:  "observer:tc_pre_forward",
+				Mode:     "observe",
+			},
+			{
+				ID:         "post-core-explicit",
+				Engine:     kernelEngineTC,
+				Attach:     "ingress",
+				Stage:      kernelPluginPipelineStageForward,
+				Priority:   pluginPipelineCorePriority + 10,
+				Program:    "observer:tc_post_lookup",
+				Mode:       "observe",
+				Interfaces: []string{"lo"},
 			},
 		},
 		Status:  pluginStatusActive,
@@ -268,8 +340,9 @@ func TestKernelPluginPipelineNoRuleFilterRequiresExplicitPreCoreHook(t *testing.
 	if !kernelPluginPipelineHasAttachmentTargets(forwardIfRules, replyIfRules) {
 		t.Fatalf("forwardIfRules=%+v replyIfRules=%+v, want post-core explicit hook to resolve an attachment target", forwardIfRules, replyIfRules)
 	}
-	if filtered := kernelPluginPipelineFilterNoRulePlugins(desired); len(filtered) != 0 {
-		t.Fatalf("plugin-only filter = %+v, want interface-free and post-core-only hooks excluded from no-rule attachments", filtered)
+	filtered := kernelPluginPipelineFilterNoRulePlugins(desired)
+	if len(filtered) != 1 || len(filtered[0].hooks) != 1 || filtered[0].hooks[0].HookID != "post-core-explicit" {
+		t.Fatalf("plugin-only filter = %+v, want only explicit-interface post-core hook for no-rule attachment", filtered)
 	}
 }
 
@@ -284,28 +357,28 @@ func TestKernelPluginPipelineInvalidExplicitInterfaceFiltersPlugin(t *testing.T)
 			Name:    "Bad Interface",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{{
-					ID:      "tc_pre_forward",
-					Section: "tc/fvtap/pre_forward",
-					Type:    kernelEngineTC,
-				}},
-			}},
-			Hooks: []PluginHook{{
-				ID:         "forward-missing",
-				Engine:     kernelEngineTC,
-				Attach:     "ingress",
-				Stage:      kernelPluginPipelineStageForward,
-				Priority:   pluginPipelineCorePriority - 10,
-				Program:    "observer:tc_pre_forward",
-				Mode:       "observe",
-				Interfaces: []string{"forward_missing0"},
-			}},
 		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_pre_forward",
+				Section: "tc/fvtap/pre_forward",
+				Type:    kernelEngineTC,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:         "forward-missing",
+			Engine:     kernelEngineTC,
+			Attach:     "ingress",
+			Stage:      kernelPluginPipelineStageForward,
+			Priority:   pluginPipelineCorePriority - 10,
+			Program:    "observer:tc_pre_forward",
+			Mode:       "observe",
+			Interfaces: []string{"forward_missing0"},
+		}},
 		Status:  pluginStatusActive,
 		rootDir: dir,
 	}
@@ -324,11 +397,7 @@ func TestKernelPluginPipelineInvalidExplicitInterfaceFiltersPlugin(t *testing.T)
 	}
 }
 
-func TestKernelPluginPipelineNoRuleFilterIgnoresPostCoreInvalidInterface(t *testing.T) {
-	lo, err := net.InterfaceByName("lo")
-	if err != nil {
-		t.Fatalf("InterfaceByName(lo) error = %v", err)
-	}
+func TestKernelPluginPipelineNoRuleFilterValidatesPostCoreInvalidInterface(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
 		t.Fatalf("WriteFile(observer.o) error = %v", err)
@@ -339,20 +408,20 @@ func TestKernelPluginPipelineNoRuleFilterIgnoresPostCoreInvalidInterface(t *test
 			Name:    "Mixed Interface",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{
-					{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
-					{ID: "tc_post_lookup", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
-				},
-			}},
-			Hooks: []PluginHook{
-				{ID: "pre-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_pre_forward", Mode: "observe", Interfaces: []string{"lo"}},
-				{ID: "post-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority + 10, Program: "observer:tc_post_lookup", Mode: "observe", Interfaces: []string{"forward_missing0"}},
+		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{
+				{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
+				{ID: "tc_post_lookup", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
 			},
+		}},
+		Hooks: []PluginHook{
+			{ID: "pre-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_pre_forward", Mode: "observe", Interfaces: []string{"lo"}},
+			{ID: "post-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority + 10, Program: "observer:tc_post_lookup", Mode: "observe", Interfaces: []string{"forward_missing0"}},
 		},
 		Status:  pluginStatusActive,
 		rootDir: dir,
@@ -361,14 +430,15 @@ func TestKernelPluginPipelineNoRuleFilterIgnoresPostCoreInvalidInterface(t *test
 	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
 	desired = kernelPluginPipelineFilterNoRulePlugins(desired)
 	desired, states, forwardIfRules, replyIfRules := kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
-	if len(states) != 0 {
-		t.Fatalf("states = %+v, want no error from filtered post-core missing interface", states)
+	if len(desired) != 0 {
+		t.Fatalf("desired = %+v, want plugin filtered after post-core interface resolution failure", desired)
 	}
-	if len(desired) != 1 || len(desired[0].hooks) != 1 || desired[0].hooks[0].HookID != "pre-core" {
-		t.Fatalf("desired = %+v, want only pre-core hook after no-rule filtering", desired)
+	if kernelPluginPipelineHasAttachmentTargets(forwardIfRules, replyIfRules) {
+		t.Fatalf("forwardIfRules=%+v replyIfRules=%+v, want no attachment target for failed plugin", forwardIfRules, replyIfRules)
 	}
-	if _, ok := forwardIfRules[lo.Index]; !ok || len(replyIfRules) != 0 {
-		t.Fatalf("forwardIfRules=%+v replyIfRules=%+v, want only lo forward target", forwardIfRules, replyIfRules)
+	state, ok := states["mixed_interface"]
+	if !ok || state.Error == "" || !strings.Contains(state.Error, "forward_missing0") {
+		t.Fatalf("state = %+v, want post-core interface resolution error", state)
 	}
 }
 
@@ -383,20 +453,20 @@ func TestBuildKernelPluginPipelineDesiredMapsForwardPriorityAroundCore(t *testin
 			Name:    "Priority Observer",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{
-					{ID: "tc_before_core", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
-					{ID: "tc_after_core", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
-				},
-			}},
-			Hooks: []PluginHook{
-				{ID: "after-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority + 10, Program: "observer:tc_after_core", Mode: "observe"},
-				{ID: "before-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_before_core", Mode: "observe"},
+		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{
+				{ID: "tc_before_core", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
+				{ID: "tc_after_core", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
 			},
+		}},
+		Hooks: []PluginHook{
+			{ID: "after-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority + 10, Program: "observer:tc_after_core", Mode: "observe"},
+			{ID: "before-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_before_core", Mode: "observe"},
 		},
 		Status:  pluginStatusActive,
 		rootDir: dir,
@@ -404,7 +474,7 @@ func TestBuildKernelPluginPipelineDesiredMapsForwardPriorityAroundCore(t *testin
 
 	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
 	if len(states) != 0 {
-		t.Fatalf("states = %+v, want no manifest-only/error state", states)
+		t.Fatalf("states = %+v, want no registered/error state", states)
 	}
 	if len(desired) != 1 || len(desired[0].hooks) != 2 {
 		t.Fatalf("desired = %+v, want two priority-mapped pipeline hooks", desired)
@@ -428,20 +498,20 @@ func TestBuildKernelPluginPipelineDesiredMapsReplyPriorityAroundCore(t *testing.
 			Name:    "Reply Observer",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{
-					{ID: "tc_before_reply", Section: "tc/fvtap/pre_reply", Type: kernelEngineTC},
-					{ID: "tc_after_reply", Section: "tc/fvtap/post_reply", Type: kernelEngineTC},
-				},
-			}},
-			Hooks: []PluginHook{
-				{ID: "after-reply-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageReply, Priority: pluginPipelineCorePriority + 10, Program: "observer:tc_after_reply", Mode: "observe"},
-				{ID: "before-reply-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageReply, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_before_reply", Mode: "observe"},
+		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{
+				{ID: "tc_before_reply", Section: "tc/fvtap/pre_reply", Type: kernelEngineTC},
+				{ID: "tc_after_reply", Section: "tc/fvtap/post_reply", Type: kernelEngineTC},
 			},
+		}},
+		Hooks: []PluginHook{
+			{ID: "after-reply-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageReply, Priority: pluginPipelineCorePriority + 10, Program: "observer:tc_after_reply", Mode: "observe"},
+			{ID: "before-reply-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageReply, Priority: pluginPipelineCorePriority - 10, Program: "observer:tc_before_reply", Mode: "observe"},
 		},
 		Status:  pluginStatusActive,
 		rootDir: dir,
@@ -449,7 +519,7 @@ func TestBuildKernelPluginPipelineDesiredMapsReplyPriorityAroundCore(t *testing.
 
 	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
 	if len(states) != 0 {
-		t.Fatalf("states = %+v, want no manifest-only/error state", states)
+		t.Fatalf("states = %+v, want no registered/error state", states)
 	}
 	if len(desired) != 1 || len(desired[0].hooks) != 2 {
 		t.Fatalf("desired = %+v, want two reply priority-mapped pipeline hooks", desired)
@@ -479,27 +549,27 @@ func TestBuildKernelPluginPipelineDesiredRejectsForwardCorePriorityCollision(t *
 			Name:    "Core Collision",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{{
-					ID:      "tc_forward",
-					Section: "tc/fvtap/pre_forward",
-					Type:    kernelEngineTC,
-				}},
-			}},
-			Hooks: []PluginHook{{
-				ID:       "same-as-core",
-				Engine:   kernelEngineTC,
-				Attach:   "ingress",
-				Stage:    kernelPluginPipelineStageForward,
-				Priority: pluginPipelineCorePriority,
-				Program:  "observer:tc_forward",
-				Mode:     "observe",
-			}},
 		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_forward",
+				Section: "tc/fvtap/pre_forward",
+				Type:    kernelEngineTC,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:       "same-as-core",
+			Engine:   kernelEngineTC,
+			Attach:   "ingress",
+			Stage:    kernelPluginPipelineStageForward,
+			Priority: pluginPipelineCorePriority,
+			Program:  "observer:tc_forward",
+			Mode:     "observe",
+		}},
 		Status:  pluginStatusActive,
 		rootDir: dir,
 	}
@@ -525,20 +595,20 @@ func TestBuildKernelPluginPipelineDesiredAllowsPostLookup(t *testing.T) {
 			Name:    "Rule Observer",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "abc",
-				Programs: []PluginObjectProgram{
-					{ID: "tc_post_lookup", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
-					{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
-				},
-			}},
-			Hooks: []PluginHook{
-				{ID: "after-rule", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStagePostLookup, Priority: 5, Program: "observer:tc_post_lookup", Mode: "observe"},
-				{ID: "before-parse", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStagePreForward, Priority: 10, Program: "observer:tc_pre_forward", Mode: "observe"},
+		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{
+				{ID: "tc_post_lookup", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
+				{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
 			},
+		}},
+		Hooks: []PluginHook{
+			{ID: "after-rule", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStagePostLookup, Priority: 5, Program: "observer:tc_post_lookup", Mode: "observe"},
+			{ID: "before-parse", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStagePreForward, Priority: 10, Program: "observer:tc_pre_forward", Mode: "observe"},
 		},
 		Status:  pluginStatusActive,
 		rootDir: dir,
@@ -546,13 +616,68 @@ func TestBuildKernelPluginPipelineDesiredAllowsPostLookup(t *testing.T) {
 
 	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
 	if len(states) != 0 {
-		t.Fatalf("states = %+v, want no manifest-only/error state", states)
+		t.Fatalf("states = %+v, want no registered/error state", states)
 	}
 	if len(desired) != 1 || len(desired[0].hooks) != 2 {
 		t.Fatalf("desired = %+v, want two pipeline hooks", desired)
 	}
 	if desired[0].hooks[0].Stage != kernelPluginPipelineStagePreForward || desired[0].hooks[1].Stage != kernelPluginPipelineStagePostLookup {
 		t.Fatalf("hook order = %+v, want pre_forward before post_lookup", desired[0].hooks)
+	}
+}
+
+func TestBuildKernelPluginPipelineDesiredForRuntimeAllowsLabByDefault(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
+		t.Fatalf("WriteFile(observer.o) error = %v", err)
+	}
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:        "lab_observer",
+			Name:      "Lab Observer",
+			Version:   "0.1.0",
+			Kind:      "pipeline",
+			Stability: pluginStabilityLab,
+		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_pre_forward",
+				Section: "tc/fvtap/pre_forward",
+				Type:    kernelEngineTC,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:       "before-core",
+			Engine:   kernelEngineTC,
+			Attach:   "ingress",
+			Stage:    kernelPluginPipelineStageForward,
+			Priority: pluginPipelineCorePriority - 100,
+			Program:  "observer:tc_pre_forward",
+			Mode:     "observe",
+		}},
+		Status:  pluginStatusActive,
+		rootDir: dir,
+	}
+	catalog := PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}}
+
+	enabled := true
+	cfg := &Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+	}
+	desired, states := buildKernelPluginPipelineDesiredForRuntime(catalog, cfg)
+	if len(states) != 0 {
+		t.Fatalf("states = %+v, want no lab stability block", states)
+	}
+	if len(desired) != 1 || len(desired[0].hooks) != 1 {
+		t.Fatalf("desired = %+v, want lab hook", desired)
+	}
+	if !kernelPluginPipelineCatalogHasRuntimeHooks(catalog, cfg) {
+		t.Fatal("kernelPluginPipelineCatalogHasRuntimeHooks() = false for allowed lab dataplane")
 	}
 }
 
@@ -570,34 +695,34 @@ func TestBuildKernelPluginPipelineDesiredAllowsFirewallStyleMultiObjectContext(t
 			Name:    "Firewall",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{
-				{
-					ID:             "firewall_pre",
-					Path:           "firewall_pre.o",
-					Status:         pluginObjectStatusVerified,
-					ResolvedSHA256: "pre",
-					Programs: []PluginObjectProgram{{
-						ID:      "tc_pre_filter",
-						Section: "tc/fvtap/pre_filter",
-						Type:    kernelEngineTC,
-					}},
-				},
-				{
-					ID:             "firewall_post",
-					Path:           "firewall_post.o",
-					Status:         pluginObjectStatusVerified,
-					ResolvedSHA256: "post",
-					Programs: []PluginObjectProgram{{
-						ID:      "tc_post_filter",
-						Section: "tc/fvtap/post_filter",
-						Type:    kernelEngineTC,
-					}},
-				},
+		},
+		Objects: []PluginObject{
+			{
+				ID:             "firewall_pre",
+				Path:           "firewall_pre.o",
+				Status:         pluginObjectStatusVerified,
+				ResolvedSHA256: "pre",
+				Programs: []PluginObjectProgram{{
+					ID:      "tc_pre_filter",
+					Section: "tc/fvtap/pre_filter",
+					Type:    kernelEngineTC,
+				}},
 			},
-			Hooks: []PluginHook{
-				{ID: "pre-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 100, Program: "firewall_pre:tc_pre_filter", Mode: "drop"},
-				{ID: "post-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority + 100, Program: "firewall_post:tc_post_filter", Mode: "drop"},
+			{
+				ID:             "firewall_post",
+				Path:           "firewall_post.o",
+				Status:         pluginObjectStatusVerified,
+				ResolvedSHA256: "post",
+				Programs: []PluginObjectProgram{{
+					ID:      "tc_post_filter",
+					Section: "tc/fvtap/post_filter",
+					Type:    kernelEngineTC,
+				}},
 			},
+		},
+		Hooks: []PluginHook{
+			{ID: "pre-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 100, Program: "firewall_pre:tc_pre_filter", Mode: "drop"},
+			{ID: "post-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority + 100, Program: "firewall_post:tc_post_filter", Mode: "drop"},
 		},
 		Status:  pluginStatusActive,
 		rootDir: dir,
@@ -640,20 +765,20 @@ func TestBuildKernelPluginPipelineDesiredAllowsSameObjectPrePostContext(t *testi
 			Name:    "Firewall",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "firewall",
-				Path:           "firewall.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "same-object",
-				Programs: []PluginObjectProgram{
-					{ID: "tc_pre_filter", Section: "tc/fvtap/pre_filter", Type: kernelEngineTC},
-					{ID: "tc_post_filter", Section: "tc/fvtap/post_filter", Type: kernelEngineTC},
-				},
-			}},
-			Hooks: []PluginHook{
-				{ID: "pre-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 100, Program: "firewall:tc_pre_filter", Mode: "drop"},
-				{ID: "post-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority + 100, Program: "firewall:tc_post_filter", Mode: "drop"},
+		},
+		Objects: []PluginObject{{
+			ID:             "firewall",
+			Path:           "firewall.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "same-object",
+			Programs: []PluginObjectProgram{
+				{ID: "tc_pre_filter", Section: "tc/fvtap/pre_filter", Type: kernelEngineTC},
+				{ID: "tc_post_filter", Section: "tc/fvtap/post_filter", Type: kernelEngineTC},
 			},
+		}},
+		Hooks: []PluginHook{
+			{ID: "pre-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority - 100, Program: "firewall:tc_pre_filter", Mode: "drop"},
+			{ID: "post-core", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStageForward, Priority: pluginPipelineCorePriority + 100, Program: "firewall:tc_post_filter", Mode: "drop"},
 		},
 		Status:  pluginStatusActive,
 		rootDir: dir,
@@ -694,28 +819,28 @@ func TestBuildKernelPluginPipelineDesiredRejectsPreForwardPluginContext(t *testi
 			Name:    "Bad Firewall",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "firewall_pre",
-				Path:           "firewall_pre.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "pre",
-				Programs: []PluginObjectProgram{{
-					ID:      "tc_pre_filter",
-					Section: "tc/fvtap/pre_filter",
-					Type:    kernelEngineTC,
-				}},
-			}},
-			Hooks: []PluginHook{{
-				ID:       "pre-core",
-				Engine:   kernelEngineTC,
-				Attach:   "ingress",
-				Stage:    kernelPluginPipelineStagePreForward,
-				Priority: 10,
-				Program:  "firewall_pre:tc_pre_filter",
-				Mode:     "drop",
-				Context:  []string{pluginHookContextTCPluginCtxV4},
-			}},
 		},
+		Objects: []PluginObject{{
+			ID:             "firewall_pre",
+			Path:           "firewall_pre.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "pre",
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_pre_filter",
+				Section: "tc/fvtap/pre_filter",
+				Type:    kernelEngineTC,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:       "pre-core",
+			Engine:   kernelEngineTC,
+			Attach:   "ingress",
+			Stage:    kernelPluginPipelineStagePreForward,
+			Priority: 10,
+			Program:  "firewall_pre:tc_pre_filter",
+			Mode:     "drop",
+			Context:  []string{pluginHookContextTCPluginCtxV4},
+		}},
 		Status:  pluginStatusActive,
 		rootDir: dir,
 	}
@@ -757,18 +882,18 @@ func TestBuildKernelPluginPipelineDesiredRejectsHookLimitOverflow(t *testing.T) 
 			Name:    "Too Many Hooks",
 			Version: "0.1.0",
 			Kind:    "pipeline",
-			Objects: []PluginObject{{
-				ID:             "observer",
-				Path:           "observer.o",
-				Status:         pluginObjectStatusVerified,
-				ResolvedSHA256: "fake",
-				Programs: []PluginObjectProgram{{
-					ID:      "tc_pre_filter",
-					Section: "tc/fvtap/pre_filter",
-					Type:    kernelEngineTC,
-				}},
-			}},
 		},
+		Objects: []PluginObject{{
+			ID:             "observer",
+			Path:           "observer.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "fake",
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_pre_filter",
+				Section: "tc/fvtap/pre_filter",
+				Type:    kernelEngineTC,
+			}},
+		}},
 		Status:  pluginStatusActive,
 		rootDir: dir,
 	}
@@ -794,6 +919,64 @@ func TestBuildKernelPluginPipelineDesiredRejectsHookLimitOverflow(t *testing.T) 
 	}
 }
 
+func TestKernelPluginPipelineFingerprintIncludesCoreConfig(t *testing.T) {
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:      "observer",
+			Name:    "Observer",
+			Version: "0.1.0",
+			Kind:    "pipeline",
+		},
+		Status: pluginStatusActive,
+	}
+	desired := []kernelPluginPipelineDesiredPlugin{{
+		plugin: plugin,
+		hooks: []kernelPluginPipelineHookPlan{{
+			PluginID:       plugin.ID,
+			HookID:         "observe",
+			ObjectID:       "observer",
+			ObjectPath:     "/tmp/observer.o",
+			ProgramRef:     "tc_observe",
+			ProgramSection: "tc/fvtap/pre_forward",
+			Stage:          kernelPluginPipelineStagePreForward,
+			Attach:         "ingress",
+			Mode:           "observe",
+			Priority:       10,
+		}},
+	}}
+
+	disabled := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{})
+	enabled := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{Forward: true, Reply: true})
+	if disabled == enabled {
+		t.Fatalf("fingerprint did not change when core config changed: %s", disabled)
+	}
+}
+
+func TestNormalizePluginHookAllowsPhysicalPipelineStages(t *testing.T) {
+	for _, stage := range []string{
+		kernelPluginPipelineStagePreForward,
+		kernelPluginPipelineStagePostLookup,
+		kernelPluginPipelineStagePreReply,
+		kernelPluginPipelineStagePostReply,
+	} {
+		hook := PluginHook{
+			ID:       "hook-" + strings.ReplaceAll(stage, "_", "-"),
+			Engine:   kernelEngineTC,
+			Attach:   "ingress",
+			Stage:    stage,
+			Priority: 10,
+			Program:  "observer:tc_observe",
+			Mode:     "observe",
+		}
+		if err := normalizePluginHook(&hook); err != nil {
+			t.Fatalf("normalizePluginHook(stage=%s) error = %v", stage, err)
+		}
+		if hook.Stage != stage {
+			t.Fatalf("normalizePluginHook(stage=%s) normalized stage = %s", stage, hook.Stage)
+		}
+	}
+}
+
 func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
 		t.Skipf("set %s=1 to run the privileged TC plugin pipeline smoke test", kernelPluginPipelineTestEnv)
@@ -802,7 +985,7 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Skip("root privileges are required")
 	}
 
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "packet_observer")
+	sourceDir := packetObserverPluginSourceDirForPipelineTest(t)
 	pluginsRoot := t.TempDir()
 	pluginDir := filepath.Join(pluginsRoot, "packet_observer")
 	copyDirForTest(t, sourceDir, pluginDir)
@@ -843,7 +1026,7 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Fatalf("rule result = %+v, want running tc", result)
 	}
 	if rt.attachmentMode != kernelTCAttachmentProgramModePipelineV4 {
-		t.Fatalf("attachmentMode = %q, want %q", rt.attachmentMode, kernelTCAttachmentProgramModePipelineV4)
+		t.Fatalf("attachmentMode = %q, want %q; plugin snapshot = %+v", rt.attachmentMode, kernelTCAttachmentProgramModePipelineV4, rt.PluginSnapshot())
 	}
 
 	snapshot := rt.PluginSnapshot()
@@ -875,9 +1058,33 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	if config.PostLookupCount != 0 {
 		t.Fatalf("post_lookup_count = %d, want 0", config.PostLookupCount)
 	}
+	if config.ForwardCoreEnable != 1 || config.ReplyCoreEnable != 1 {
+		t.Fatalf("plugin core config = %+v, want forward/reply core enabled with prepared rules", config)
+	}
 	if _, ok := stateHasAttachmentProgram(state, "packet_observer:tc_pre_forward"); !ok {
 		t.Fatalf("plugin state attachments = %+v, want packet_observer:tc_pre_forward", state.Attachments)
 	}
+
+	enabled = false
+	results, err = rt.ReconcileWithPluginCatalog([]Rule{rule}, loadPluginCatalog(cfg))
+	if err != nil {
+		t.Fatalf("ReconcileWithPluginCatalog(disabled plugins) error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("rule result after disabling plugins = %+v, want running tc", result)
+	}
+	if rt.attachmentMode == kernelTCAttachmentProgramModePipelineV4 {
+		t.Fatalf("attachmentMode after disabling plugins = %q, want non-pipeline mode", rt.attachmentMode)
+	}
+	snapshot = rt.PluginSnapshot()
+	if state, ok := snapshot.stateFor("packet_observer"); ok {
+		t.Fatalf("plugin snapshot still contains packet_observer after disabling plugins with active rule: %+v", state)
+	}
+	pieces, err = lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		t.Fatalf("lookupKernelCollectionPieces(after disabling plugins with active rule) error = %v", err)
+	}
+	assertKernelPluginPipelineClearedForTest(t, pieces)
 }
 
 func TestKernelPluginPipelineRuntimeAttachesExplicitInterfaceWithoutRules(t *testing.T) {
@@ -889,19 +1096,11 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitInterfaceWithoutRules(t *tes
 	}
 
 	topology := setupDataplanePerfTopology(t)
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "packet_observer")
+	sourceDir := packetObserverPluginSourceDirForPipelineTest(t)
 	pluginsRoot := t.TempDir()
 	pluginDir := filepath.Join(pluginsRoot, "packet_observer")
 	copyDirForTest(t, sourceDir, pluginDir)
-	manifestPath := filepath.Join(pluginDir, pluginManifestFile)
-	manifest, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatalf("ReadFile(plugin manifest) error = %v", err)
-	}
-	manifest = []byte(strings.Replace(string(manifest), `"interfaces": []`, fmt.Sprintf(`"interfaces": [%q]`, topology.ClientHostIF), 1))
-	if err := os.WriteFile(manifestPath, manifest, 0o644); err != nil {
-		t.Fatalf("WriteFile(plugin manifest) error = %v", err)
-	}
+	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
@@ -938,8 +1137,8 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitInterfaceWithoutRules(t *tes
 	if err := pieces.pluginConfigV4.Lookup(uint32(0), &config); err != nil {
 		t.Fatalf("lookup plugin config: %v", err)
 	}
-	if config.PreForwardCount != 1 || config.PostLookupCount != 0 || config.PreReplyCount != 0 || config.PostReplyCount != 0 {
-		t.Fatalf("plugin config = %+v, want one pre-forward hook only", config)
+	if config.PreForwardCount != 1 || config.PostLookupCount != 0 || config.PreReplyCount != 0 || config.PostReplyCount != 0 || config.ForwardCoreEnable != 0 || config.ReplyCoreEnable != 0 {
+		t.Fatalf("plugin config = %+v, want one pre-forward hook with core disabled", config)
 	}
 	snapshot := rt.PluginSnapshot()
 	state, ok := snapshot.stateFor("packet_observer")
@@ -960,19 +1159,11 @@ func TestKernelPluginPipelineRuntimeReconcilePluginsBootstrapsExplicitInterfaceW
 	}
 
 	topology := setupDataplanePerfTopology(t)
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "packet_observer")
+	sourceDir := packetObserverPluginSourceDirForPipelineTest(t)
 	pluginsRoot := t.TempDir()
 	pluginDir := filepath.Join(pluginsRoot, "packet_observer")
 	copyDirForTest(t, sourceDir, pluginDir)
-	manifestPath := filepath.Join(pluginDir, pluginManifestFile)
-	manifest, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatalf("ReadFile(plugin manifest) error = %v", err)
-	}
-	manifest = []byte(strings.Replace(string(manifest), `"interfaces": []`, fmt.Sprintf(`"interfaces": [%q]`, topology.ClientHostIF), 1))
-	if err := os.WriteFile(manifestPath, manifest, 0o644); err != nil {
-		t.Fatalf("WriteFile(plugin manifest) error = %v", err)
-	}
+	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
@@ -1002,10 +1193,7 @@ func TestKernelPluginPipelineRuntimeReconcilePluginsBootstrapsExplicitInterfaceW
 		t.Fatalf("plugin state = %+v, want one chained dataplane attachment", state)
 	}
 
-	manifest = []byte(strings.Replace(string(manifest), fmt.Sprintf(`"interfaces": [%q]`, topology.ClientHostIF), fmt.Sprintf(`"interfaces": [%q, %q]`, topology.ClientHostIF, topology.BackendHostIF), 1))
-	if err := os.WriteFile(manifestPath, manifest, 0o644); err != nil {
-		t.Fatalf("WriteFile(updated plugin manifest) error = %v", err)
-	}
+	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF, topology.BackendHostIF)
 	snapshot = rt.ReconcilePlugins(loadPluginCatalog(cfg))
 	if len(rt.attachments) < 2 {
 		t.Fatalf("attachments = %d, want ReconcilePlugins to add the second explicit interface", len(rt.attachments))
@@ -1013,6 +1201,121 @@ func TestKernelPluginPipelineRuntimeReconcilePluginsBootstrapsExplicitInterfaceW
 	state, ok = snapshot.stateFor("packet_observer")
 	if !ok || state.Mode != pluginRuntimeModeDataplane || !state.Attached || state.AttachmentCount != 1 {
 		t.Fatalf("updated plugin state = %+v, want chained dataplane attachment after interface update", state)
+	}
+
+	enabled = false
+	snapshot = rt.ReconcilePlugins(loadPluginCatalog(cfg))
+	if rt.pluginPipelineActive {
+		t.Fatal("pluginPipelineActive = true after disabling plugins, want false")
+	}
+	if state, ok := snapshot.stateFor("packet_observer"); ok {
+		t.Fatalf("plugin snapshot still contains packet_observer after disabling plugins: %+v", state)
+	}
+	if rt.coll != nil {
+		pieces, err := lookupKernelCollectionPieces(rt.coll)
+		if err != nil {
+			t.Fatalf("lookupKernelCollectionPieces(after disable) error = %v", err)
+		}
+		assertKernelPluginPipelineClearedForTest(t, pieces)
+	}
+	if rt.coll != nil || len(rt.attachments) != 0 {
+		t.Fatalf("runtime after disabling idle plugin pipeline = coll:%v attachments:%d, want fully detached idle runtime", rt.coll != nil, len(rt.attachments))
+	}
+}
+
+func TestKernelPluginPipelineRuntimeNoRulePostLookupPluginAttachesWithCoreDisabled(t *testing.T) {
+	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
+		t.Skipf("set %s=1 to run the privileged TC plugin pipeline smoke test", kernelPluginPipelineTestEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+
+	topology := setupDataplanePerfTopology(t)
+	pluginsRoot := t.TempDir()
+	pluginDir := filepath.Join(pluginsRoot, "rule_observer")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rule_observer) error = %v", err)
+	}
+	writePostLookupPluginForTest(t, pluginDir, topology.ClientHostIF)
+	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "rule_observer.bpf.c"), filepath.Join(pluginDir, "rule_observer.o"))
+
+	enabled := true
+	cfg := &Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+		PluginsDir:              pluginsRoot,
+	}
+	rt := newTCKernelRuleRuntime(cfg)
+	defer rt.Close()
+
+	results, err := rt.Reconcile(nil)
+	if err != nil {
+		t.Fatalf("Reconcile(nil) error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("results = %+v, want no rule results", results)
+	}
+	if rt.attachmentMode != kernelTCAttachmentProgramModePipelineV4 {
+		t.Fatalf("attachmentMode = %q, want %q; plugin snapshot = %+v", rt.attachmentMode, kernelTCAttachmentProgramModePipelineV4, rt.PluginSnapshot())
+	}
+
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		t.Fatalf("lookupKernelCollectionPieces() error = %v", err)
+	}
+	var config kernelTCPluginConfigV4
+	if err := pieces.pluginConfigV4.Lookup(uint32(0), &config); err != nil {
+		t.Fatalf("lookup plugin config: %v", err)
+	}
+	if config.PreForwardCount != 0 || config.PostLookupCount != 1 || config.PreReplyCount != 0 || config.PostReplyCount != 0 || config.ForwardCoreEnable != 0 || config.ReplyCoreEnable != 0 {
+		t.Fatalf("plugin config = %+v, want post_lookup hook with core disabled", config)
+	}
+
+	snapshot := rt.PluginSnapshot()
+	state, ok := snapshot.stateFor("rule_observer")
+	if !ok {
+		t.Fatalf("plugin snapshot = %+v, want rule_observer state", snapshot)
+	}
+	if state.Mode != pluginRuntimeModeDataplane || !state.Attached || state.AttachmentCount != 1 {
+		t.Fatalf("plugin state = %+v, want one chained dataplane attachment", state)
+	}
+	if len(state.Attachments) != 1 || state.Attachments[0].Stage != kernelPluginPipelineStagePostLookup || state.Attachments[0].ChainSlot != tcProgramChainIndexV4PluginPostBase {
+		t.Fatalf("plugin attachment = %+v, want post_lookup slot %d", state.Attachments, tcProgramChainIndexV4PluginPostBase)
+	}
+}
+
+func assertKernelPluginPipelineClearedForTest(t *testing.T, pieces kernelCollectionPieces) {
+	t.Helper()
+	var config kernelTCPluginConfigV4
+	if err := pieces.pluginConfigV4.Lookup(uint32(0), &config); err != nil {
+		t.Fatalf("lookup plugin config: %v", err)
+	}
+	if config.PreForwardCount != 0 || config.PostLookupCount != 0 || config.PreReplyCount != 0 || config.PostReplyCount != 0 || config.ForwardCoreEnable != 0 || config.ReplyCoreEnable != 0 {
+		t.Fatalf("plugin config = %+v, want all hook counts cleared", config)
+	}
+	assertMissing := func(slot int) {
+		t.Helper()
+		var fd uint32
+		err := pieces.progChainV4.Lookup(uint32(slot), &fd)
+		if err == nil {
+			t.Fatalf("tc plugin chain slot %d still contains fd %d, want deleted", slot, fd)
+		}
+		if !errors.Is(err, ebpf.ErrKeyNotExist) {
+			t.Fatalf("lookup tc plugin chain slot %d error = %v, want ErrKeyNotExist", slot, err)
+		}
+	}
+	for i := 0; i < tcProgramChainV4PluginPreForwardMax; i++ {
+		assertMissing(tcProgramChainIndexV4PluginBase + i)
+	}
+	for i := 0; i < tcProgramChainV4PluginPostLookupMax; i++ {
+		assertMissing(tcProgramChainIndexV4PluginPostBase + i)
+	}
+	for i := 0; i < tcProgramChainV4PluginPreReplyMax; i++ {
+		assertMissing(tcProgramChainIndexV4PluginReplyBase + i)
+	}
+	for i := 0; i < tcProgramChainV4PluginPostReplyMax; i++ {
+		assertMissing(tcProgramChainIndexV4PluginReplyPostBase + i)
 	}
 }
 
@@ -1080,7 +1383,7 @@ func TestKernelPluginPipelineRuntimeNoRulePreCorePluginCanRedirectBetweenInterfa
 	}
 
 	topology := setupDataplanePerfTopology(t)
-	restore := setDataplanePerfIPForwardForTest(t, "0")
+	restore := setDataplanePerfIPv4ForwardingForTest(t, topology, "0")
 	defer restore()
 	if output, err := runDataplanePerfPing(topology.ClientNS, dataplanePerfFrontAddr); err != nil {
 		t.Fatalf("client gateway arp warmup failed: %v\n%s", err, output)
@@ -1194,7 +1497,7 @@ func TestKernelPluginPipelineRuntimeChainsPostLookupPlugin(t *testing.T) {
 		t.Fatalf("rule result = %+v, want running tc", result)
 	}
 	if rt.attachmentMode != kernelTCAttachmentProgramModePipelineV4 {
-		t.Fatalf("attachmentMode = %q, want %q", rt.attachmentMode, kernelTCAttachmentProgramModePipelineV4)
+		t.Fatalf("attachmentMode = %q, want %q; plugin snapshot = %+v", rt.attachmentMode, kernelTCAttachmentProgramModePipelineV4, rt.PluginSnapshot())
 	}
 
 	snapshot := rt.PluginSnapshot()
@@ -1222,6 +1525,9 @@ func TestKernelPluginPipelineRuntimeChainsPostLookupPlugin(t *testing.T) {
 	}
 	if config.PostLookupCount != 1 {
 		t.Fatalf("post_lookup_count = %d, want 1", config.PostLookupCount)
+	}
+	if config.ForwardCoreEnable != 1 || config.ReplyCoreEnable != 1 {
+		t.Fatalf("plugin core config = %+v, want forward/reply core enabled with prepared rules", config)
 	}
 	if _, ok := stateHasAttachmentProgram(state, "observer:tc_post_lookup"); !ok {
 		t.Fatalf("plugin state attachments = %+v, want observer:tc_post_lookup", state.Attachments)
@@ -1314,6 +1620,9 @@ func TestKernelPluginPipelineRuntimeChainsPostReplyPlugin(t *testing.T) {
 	if config.PostReplyCount != 1 {
 		t.Fatalf("post_reply_count = %d, want 1", config.PostReplyCount)
 	}
+	if config.ForwardCoreEnable != 1 || config.ReplyCoreEnable != 1 {
+		t.Fatalf("plugin core config = %+v, want forward/reply core enabled with prepared rules", config)
+	}
 	if _, ok := stateHasAttachmentProgram(state, "observer:tc_post_reply"); !ok {
 		t.Fatalf("plugin state attachments = %+v, want observer:tc_post_reply", state.Attachments)
 	}
@@ -1325,51 +1634,136 @@ func runDataplanePerfPing(netns string, target string) (string, error) {
 	return string(output), err
 }
 
-func setDataplanePerfIPForwardForTest(t *testing.T, value string) func() {
+func setDataplanePerfIPv4ForwardingForTest(t *testing.T, topology dataplanePerfTopology, value string) func() {
 	t.Helper()
-	path := "/proc/sys/net/ipv4/ip_forward"
-	original, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	paths := []string{
+		"/proc/sys/net/ipv4/ip_forward",
+		"/proc/sys/net/ipv4/conf/all/forwarding",
+		"/proc/sys/net/ipv4/conf/default/forwarding",
 	}
-	if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
+	for _, ifName := range []string{topology.ClientHostIF, topology.BackendHostIF} {
+		if strings.TrimSpace(ifName) == "" {
+			continue
+		}
+		paths = append(paths, filepath.Join("/proc/sys/net/ipv4/conf", ifName, "forwarding"))
+	}
+	return setDataplanePerfProcFilesForTest(t, paths, value)
+}
+
+func setDataplanePerfProcFilesForTest(t *testing.T, paths []string, value string) func() {
+	t.Helper()
+	type originalValue struct {
+		path string
+		data []byte
+	}
+	originals := make([]originalValue, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		original, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		originals = append(originals, originalValue{path: path, data: original})
 	}
 	return func() {
-		if err := os.WriteFile(path, original, 0o644); err != nil {
-			t.Logf("restore %s failed: %v", path, err)
+		for i := len(originals) - 1; i >= 0; i-- {
+			item := originals[i]
+			if err := os.WriteFile(item.path, item.data, 0o644); err != nil {
+				t.Logf("restore %s failed: %v", item.path, err)
+			}
 		}
+	}
+}
+
+func setControlScriptInterfacesForPipelineTest(t *testing.T, pluginDir string, ifNames ...string) {
+	t.Helper()
+
+	controlPath := filepath.Join(pluginDir, "control.js")
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatalf("ReadFile(control.js) error = %v", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	replaced := false
+	for i, line := range lines {
+		if !strings.Contains(line, "interfaces:") {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + "interfaces: " + jsStringListForPipelineTest(ifNames...) + ","
+		replaced = true
+		break
+	}
+	if !replaced {
+		t.Fatalf("control.js does not contain an interfaces field")
+	}
+	if err := os.WriteFile(controlPath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile(control.js) error = %v", err)
+	}
+}
+
+func jsStringListForPipelineTest(values ...string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, fmt.Sprintf("%q", value))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func writeControlRegisteredPipelinePluginForTest(t *testing.T, pluginDir string, id string, name string, controlSource string) {
+	t.Helper()
+
+	manifest := fmt.Sprintf(`{
+  "api_version": "v1",
+  "id": %q,
+  "name": %q,
+  "version": "0.1.0",
+  "kind": "pipeline",
+  "stability": "lab",
+  "control": {
+    "main": "control.js",
+    "permissions": ["ebpf.load", "hook.attach", "plugin.register"]
+  }
+}`, id, name)
+	if err := os.WriteFile(filepath.Join(pluginDir, pluginManifestFile), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s manifest) error = %v", id, err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "control.js"), []byte(controlSource), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s control.js) error = %v", id, err)
 	}
 }
 
 func writeDropCorePluginForTest(t *testing.T, pluginDir string, ifName string) {
 	t.Helper()
-	manifest := fmt.Sprintf(`{
-  "api_version": "v1",
-  "id": "drop_core",
-  "name": "Drop Core",
-  "version": "0.1.0",
-  "kind": "pipeline",
-  "capabilities": ["drop", "tc"],
-  "objects": [{
-    "id": "drop",
-    "path": "drop_core.o",
-    "programs": [{"id": "tc_drop", "section": "tc/fvtap/pre_forward", "type": "tc"}]
-  }],
-  "hooks": [{
-    "id": "drop-ingress",
-    "engine": "tc",
-    "attach": "ingress",
-    "stage": "forward",
-    "priority": %d,
-    "program": "drop:tc_drop",
-    "mode": "drop",
-    "interfaces": [%q]
-  }]
-}`, pluginPipelineCorePriority-10, ifName)
-	if err := os.WriteFile(filepath.Join(pluginDir, pluginManifestFile), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("WriteFile(drop_core manifest) error = %v", err)
-	}
+	writeControlRegisteredPipelinePluginForTest(t, pluginDir, "drop_core", "Drop Core", fmt.Sprintf(`plugin.capabilities(['drop', 'tc']);
+ebpf.loadObject({
+  id: 'drop',
+  path: 'drop_core.o',
+  programs: [{id: 'tc_drop', section: 'tc/fvtap/pre_forward', type: 'tc'}]
+});
+hooks.attach({
+  id: 'drop-ingress',
+  engine: 'tc',
+  attach: 'ingress',
+  stage: 'forward',
+  priority: %d,
+  program: 'drop:tc_drop',
+  mode: 'drop',
+  interfaces: %s
+});
+`, pluginPipelineCorePriority-10, jsStringListForPipelineTest(ifName)))
 	const source = `
 #define SEC(name) __attribute__((section(name), used))
 
@@ -1421,32 +1815,23 @@ type redirectCorePluginSpec struct {
 
 func writeRedirectCorePluginForTest(t *testing.T, pluginDir string, spec redirectCorePluginSpec) {
 	t.Helper()
-	manifest := fmt.Sprintf(`{
-  "api_version": "v1",
-  "id": "redirect_core",
-  "name": "Redirect Core",
-  "version": "0.1.0",
-  "kind": "pipeline",
-  "capabilities": ["redirect", "tc"],
-  "objects": [{
-    "id": "redirect",
-    "path": "redirect_core.o",
-    "programs": [{"id": "tc_redirect", "section": "tc/fvtap/pre_forward", "type": "tc"}]
-  }],
-  "hooks": [{
-    "id": "redirect-ingress",
-    "engine": "tc",
-    "attach": "ingress",
-    "stage": "forward",
-    "priority": %d,
-    "program": "redirect:tc_redirect",
-    "mode": "redirect",
-    "interfaces": [%q, %q]
-  }]
-}`, pluginPipelineCorePriority-10, spec.clientHostIF, spec.backendHostIF)
-	if err := os.WriteFile(filepath.Join(pluginDir, pluginManifestFile), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("WriteFile(redirect_core manifest) error = %v", err)
-	}
+	writeControlRegisteredPipelinePluginForTest(t, pluginDir, "redirect_core", "Redirect Core", fmt.Sprintf(`plugin.capabilities(['redirect', 'tc']);
+ebpf.loadObject({
+  id: 'redirect',
+  path: 'redirect_core.o',
+  programs: [{id: 'tc_redirect', section: 'tc/fvtap/pre_forward', type: 'tc'}]
+});
+hooks.attach({
+  id: 'redirect-ingress',
+  engine: 'tc',
+  attach: 'ingress',
+  stage: 'forward',
+  priority: %d,
+  program: 'redirect:tc_redirect',
+  mode: 'redirect',
+  interfaces: %s
+});
+`, pluginPipelineCorePriority-10, jsStringListForPipelineTest(spec.clientHostIF, spec.backendHostIF)))
 	source := fmt.Sprintf(`
 #define SEC(name) __attribute__((section(name), used))
 
@@ -1545,30 +1930,32 @@ func macLiteralForPluginTest(t *testing.T, value string) string {
 	return strings.Join(parts, ", ")
 }
 
-func writePostLookupPluginForTest(t *testing.T, pluginDir string) {
+func controlScriptInterfacesPropertyForPipelineTest(ifNames ...string) string {
+	if len(ifNames) == 0 {
+		return ""
+	}
+	return "  interfaces: " + jsStringListForPipelineTest(ifNames...) + ",\n"
+}
+
+func writePostLookupPluginForTest(t *testing.T, pluginDir string, ifNames ...string) {
 	t.Helper()
-	const manifest = `{
-  "api_version": "v1",
-  "id": "rule_observer",
-  "name": "Rule Observer",
-  "version": "0.1.0",
-  "kind": "pipeline",
-  "capabilities": ["observe"],
-  "objects": [{
-    "id": "observer",
-    "path": "rule_observer.o",
-    "programs": [{"id": "tc_post_lookup", "section": "tc/fvtap/post_lookup", "type": "tc"}]
-  }],
-  "hooks": [{
-    "id": "after-rule",
-    "engine": "tc",
-    "attach": "ingress",
-    "stage": "post_lookup",
-    "priority": 10,
-    "program": "observer:tc_post_lookup",
-    "mode": "observe"
-  }]
-}`
+	writeControlRegisteredPipelinePluginForTest(t, pluginDir, "rule_observer", "Rule Observer", fmt.Sprintf(`plugin.capabilities(['observe', 'tc']);
+ebpf.loadObject({
+  id: 'observer',
+  path: 'rule_observer.o',
+  programs: [{id: 'tc_post_lookup', section: 'tc/fvtap/post_lookup', type: 'tc'}]
+});
+hooks.attach({
+  id: 'after-rule',
+  engine: 'tc',
+  attach: 'ingress',
+  stage: 'post_lookup',
+  priority: 10,
+  program: 'observer:tc_post_lookup',
+  mode: 'observe',
+%s
+});
+`, controlScriptInterfacesPropertyForPipelineTest(ifNames...)))
 	const source = `#define SEC(name) __attribute__((section(name), used))
 
 typedef unsigned char __u8;
@@ -1648,9 +2035,6 @@ int tc_post_lookup(struct __sk_buff *skb)
 
 char __license[] SEC("license") = "GPL";
 `
-	if err := os.WriteFile(filepath.Join(pluginDir, pluginManifestFile), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("WriteFile(plugin.json) error = %v", err)
-	}
 	if err := os.WriteFile(filepath.Join(pluginDir, "rule_observer.bpf.c"), []byte(source), 0o644); err != nil {
 		t.Fatalf("WriteFile(rule_observer.bpf.c) error = %v", err)
 	}
@@ -1658,28 +2042,22 @@ char __license[] SEC("license") = "GPL";
 
 func writePostReplyPluginForTest(t *testing.T, pluginDir string) {
 	t.Helper()
-	const manifest = `{
-  "api_version": "v1",
-  "id": "reply_observer",
-  "name": "Reply Observer",
-  "version": "0.1.0",
-  "kind": "pipeline",
-  "capabilities": ["observe"],
-  "objects": [{
-    "id": "observer",
-    "path": "reply_observer.o",
-    "programs": [{"id": "tc_post_reply", "section": "tc/fvtap/post_reply", "type": "tc"}]
-  }],
-  "hooks": [{
-    "id": "after-reply",
-    "engine": "tc",
-    "attach": "ingress",
-    "stage": "post_reply",
-    "priority": 10,
-    "program": "observer:tc_post_reply",
-    "mode": "observe"
-  }]
-}`
+	writeControlRegisteredPipelinePluginForTest(t, pluginDir, "reply_observer", "Reply Observer", `plugin.capabilities(['observe', 'tc']);
+ebpf.loadObject({
+  id: 'observer',
+  path: 'reply_observer.o',
+  programs: [{id: 'tc_post_reply', section: 'tc/fvtap/post_reply', type: 'tc'}]
+});
+hooks.attach({
+  id: 'after-reply',
+  engine: 'tc',
+  attach: 'ingress',
+  stage: 'post_reply',
+  priority: 10,
+  program: 'observer:tc_post_reply',
+  mode: 'observe'
+});
+`)
 	const source = `#define SEC(name) __attribute__((section(name), used))
 
 typedef unsigned char __u8;
@@ -1759,9 +2137,6 @@ int tc_post_reply(struct __sk_buff *skb)
 
 char __license[] SEC("license") = "GPL";
 `
-	if err := os.WriteFile(filepath.Join(pluginDir, pluginManifestFile), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("WriteFile(plugin.json) error = %v", err)
-	}
 	if err := os.WriteFile(filepath.Join(pluginDir, "reply_observer.bpf.c"), []byte(source), 0o644); err != nil {
 		t.Fatalf("WriteFile(reply_observer.bpf.c) error = %v", err)
 	}
@@ -1774,4 +2149,81 @@ func stateHasAttachmentProgram(state PluginRuntimeState, program string) (Plugin
 		}
 	}
 	return PluginAttachmentState{}, false
+}
+
+func stableTCHookPluginForOrderTest() LoadedPlugin {
+	return LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:        "stable_observer",
+			Name:      "Stable Observer",
+			Version:   "1.0.0",
+			Kind:      "pipeline",
+			Stability: pluginStabilityStable,
+		},
+		Hooks: []PluginHook{{
+			ID:       "forward",
+			Engine:   kernelEngineTC,
+			Attach:   "ingress",
+			Stage:    kernelPluginPipelineStageForward,
+			Priority: pluginPipelineCorePriority - 10,
+			Program:  "observer:tc_observe",
+			Mode:     "observe",
+		}},
+		Status: pluginStatusActive,
+	}
+}
+
+type orderedKernelRuntimeEntryTestRuntime struct {
+	engine                    string
+	reconcileCalls            int
+	reconcileWithCatalogCalls int
+	assignments               map[int64]string
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) Available() (bool, string) {
+	return true, ""
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) SupportsRule(Rule) (bool, string) {
+	return true, ""
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
+	rt.reconcileCalls++
+	return rt.apply(rules), nil
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) ReconcileWithPluginCatalog(rules []Rule, _ PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
+	rt.reconcileWithCatalogCalls++
+	return rt.apply(rules), nil
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) apply(rules []Rule) map[int64]kernelRuleApplyResult {
+	rt.assignments = make(map[int64]string, len(rules))
+	results := make(map[int64]kernelRuleApplyResult, len(rules))
+	for _, rule := range rules {
+		rt.assignments[rule.ID] = rt.engine
+		results[rule.ID] = kernelRuleApplyResult{Running: true, Engine: rt.engine}
+	}
+	return results
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error) {
+	return emptyKernelRuleStatsSnapshot(), nil
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) Maintain() error {
+	return nil
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) SnapshotAssignments() map[int64]string {
+	out := make(map[int64]string, len(rt.assignments))
+	for id, engine := range rt.assignments {
+		out[id] = engine
+	}
+	return out
+}
+
+func (rt *orderedKernelRuntimeEntryTestRuntime) Close() error {
+	return nil
 }

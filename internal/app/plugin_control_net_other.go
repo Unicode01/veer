@@ -18,6 +18,10 @@ func (unsupportedPluginControlNetAdmin) LinkList() ([]pluginControlNetLinkInfo, 
 	return nil, fmt.Errorf("net.admin is supported only on linux")
 }
 
+func (unsupportedPluginControlNetAdmin) LinkEnsureBridge(pluginControlNetBridgeRequest) (pluginControlNetLinkInfo, error) {
+	return pluginControlNetLinkInfo{}, fmt.Errorf("net.admin is supported only on linux")
+}
+
 func (unsupportedPluginControlNetAdmin) LinkEnsureVeth(pluginControlNetVethRequest) (pluginControlNetVethResult, error) {
 	return pluginControlNetVethResult{}, fmt.Errorf("net.admin is supported only on linux")
 }
@@ -26,11 +30,23 @@ func (unsupportedPluginControlNetAdmin) LinkDelete(string) error {
 	return fmt.Errorf("net.admin is supported only on linux")
 }
 
+func (unsupportedPluginControlNetAdmin) LinkSetMaster(pluginControlNetMasterRequest) (pluginControlNetLinkInfo, error) {
+	return pluginControlNetLinkInfo{}, fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) LinkClearMaster(string) (pluginControlNetLinkInfo, error) {
+	return pluginControlNetLinkInfo{}, fmt.Errorf("net.admin is supported only on linux")
+}
+
 func (unsupportedPluginControlNetAdmin) LinkSetUp(string, bool) error {
 	return fmt.Errorf("net.admin is supported only on linux")
 }
 
 func (unsupportedPluginControlNetAdmin) LinkSetMTU(string, int) error {
+	return fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) LinkSetOffloads(pluginControlNetOffloadRequest) error {
 	return fmt.Errorf("net.admin is supported only on linux")
 }
 

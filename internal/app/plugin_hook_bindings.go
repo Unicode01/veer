@@ -18,6 +18,11 @@ type pluginHookBindingRecordData struct {
 	Interfaces []string `json:"interfaces"`
 }
 
+type pluginHookBindingSet struct {
+	Interfaces map[string][]string
+	Disabled   map[string]struct{}
+}
+
 func applyPluginHookBindingsFromDB(catalog PluginCatalog, db *sql.DB) PluginCatalog {
 	if db == nil {
 		return catalog
@@ -33,15 +38,21 @@ func applyPluginHookBindingsFromDB(catalog PluginCatalog, db *sql.DB) PluginCata
 			continue
 		}
 		bindings := pluginHookBindingsFromRecords(plugin.ID, records)
-		if len(bindings) == 0 {
+		if len(bindings.Interfaces) == 0 && len(bindings.Disabled) == 0 {
 			continue
 		}
-		for hookIndex := range plugin.Hooks {
-			hookID := plugin.Hooks[hookIndex].ID
-			if interfaces, ok := bindings[hookID]; ok {
-				plugin.Hooks[hookIndex].Interfaces = interfaces
+		hooks := plugin.Hooks[:0]
+		for _, hook := range plugin.Hooks {
+			hookID := strings.TrimSpace(strings.ToLower(hook.ID))
+			if _, disabled := bindings.Disabled[hookID]; disabled {
+				continue
 			}
+			if interfaces, ok := bindings.Interfaces[hookID]; ok {
+				hook.Interfaces = interfaces
+			}
+			hooks = append(hooks, hook)
 		}
+		plugin.Hooks = hooks
 	}
 	return catalog
 }
@@ -55,16 +66,18 @@ func pluginHasResource(plugin LoadedPlugin, resourceID string) bool {
 	return false
 }
 
-func pluginHookBindingsFromRecords(pluginID string, records []store.PluginRecord) map[string][]string {
-	out := make(map[string][]string)
+func pluginHookBindingsFromRecords(pluginID string, records []store.PluginRecord) pluginHookBindingSet {
+	out := pluginHookBindingSet{
+		Interfaces: make(map[string][]string),
+		Disabled:   make(map[string]struct{}),
+	}
 	for _, record := range records {
-		if !record.Enabled {
-			continue
-		}
 		var data pluginHookBindingRecordData
 		if err := json.Unmarshal([]byte(record.DataJSON), &data); err != nil {
-			log.Printf("plugin hook bindings: %s/%s skip invalid JSON: %v", pluginID, record.RecordKey, err)
-			continue
+			if record.Enabled {
+				log.Printf("plugin hook bindings: %s/%s skip invalid JSON: %v", pluginID, record.RecordKey, err)
+				continue
+			}
 		}
 		hookID := strings.TrimSpace(strings.ToLower(data.HookID))
 		if hookID == "" {
@@ -75,6 +88,14 @@ func pluginHookBindingsFromRecords(pluginID string, records []store.PluginRecord
 		}
 		if !pluginIDPattern.MatchString(hookID) {
 			log.Printf("plugin hook bindings: %s/%s skip invalid hook_id %q", pluginID, record.RecordKey, hookID)
+			continue
+		}
+		if !record.Enabled {
+			out.Disabled[hookID] = struct{}{}
+			delete(out.Interfaces, hookID)
+			continue
+		}
+		if _, disabled := out.Disabled[hookID]; disabled {
 			continue
 		}
 		interfaces := append([]string(nil), data.Interfaces...)
@@ -89,7 +110,7 @@ func pluginHookBindingsFromRecords(pluginID string, records []store.PluginRecord
 		if len(interfaces) == 0 {
 			continue
 		}
-		out[hookID] = interfaces
+		out.Interfaces[hookID] = interfaces
 	}
 	return out
 }

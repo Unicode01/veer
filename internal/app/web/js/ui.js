@@ -13,6 +13,7 @@
     confirmMessage: app.$('confirmMessage'),
     confirmCancelBtn: app.$('confirmCancelBtn'),
     confirmSubmitBtn: app.$('confirmSubmitBtn'),
+    overviewPanel: app.el.overviewPanel || app.$('overviewPanel'),
     lastSyncLabel: app.$('lastSyncLabel'),
     overviewRulesValue: app.$('overviewRulesValue'),
     overviewSitesValue: app.$('overviewSitesValue'),
@@ -667,6 +668,12 @@
     }
   };
 
+  app.updateOverviewVisibility = function updateOverviewVisibility(tabId) {
+    if (!app.el.overviewPanel) return;
+    const visibleTabs = new Set(['rules', 'sites', 'ranges', 'managed-networks', 'egress-nats', 'ipv6-assignments']);
+    app.el.overviewPanel.hidden = !visibleTabs.has(String(tabId || ''));
+  };
+
   app.activateTab = function activateTab(target, options) {
     const opts = options || {};
     const tabId = target || 'rules';
@@ -688,6 +695,7 @@
     });
 
     app.state.activeTab = tabId;
+    app.updateOverviewVisibility(tabId);
     if (opts.persist !== false) localStorage.setItem(app.storageKeys.activeTab, tabId);
     if (opts.focus) nextTab.focus();
     app.closeDropdowns();

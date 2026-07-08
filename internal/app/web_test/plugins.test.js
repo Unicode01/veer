@@ -11,10 +11,12 @@ function makeNode(tagName, opts = {}) {
     textContent: opts.text || '',
     title: opts.title || '',
     attributes: {},
+    dataset: Object.assign({}, opts.dataset || {}),
     hidden: false,
     style: {},
     childNodes: [],
     parentNode: null,
+    contentWindow: opts.contentWindow || null,
     appendChild(child) {
       if (!child) return child;
       if (child.__isFragment) {
@@ -80,6 +82,7 @@ function collectAttribute(node, name) {
 function createHarness() {
   const notifications = [];
   const openedWindows = [];
+  const windowListeners = {};
   const elements = {
     pluginsBody: makeNode('tbody'),
     noPlugins: makeNode('p'),
@@ -131,7 +134,7 @@ function createHarness() {
     'plugins.runtime.dataplane': 'Dataplane enabled',
     'plugins.runtime.error': 'Runtime error',
     'plugins.runtime.invalid': 'Validation failed',
-    'plugins.runtime.manifestOnly': 'Manifest only',
+    'plugins.runtime.registered': 'Registered',
     'plugins.source': 'Source',
     'plugins.status.active': 'Loaded',
     'plugins.status.builtin': 'Built-in',
@@ -148,6 +151,26 @@ function createHarness() {
     'plugins.chain.replyCoreCompact': 'r-core p{{priority}}',
     'plugins.chain.postReplyCompact': 'r-post x{{count}}',
     'plugins.chain.replyApplyCompact': 'r-apply',
+    'plugins.link.title': 'Plugin Dataplane Chains',
+    'plugins.link.desc': 'Shows how this plugin is attached to the fvtap pipeline; the current plugin is highlighted.',
+    'plugins.link.count': '{{count}} items',
+    'plugins.link.interfaceChain': 'Interface Chain',
+    'plugins.link.declaredChain': 'Declared Chain',
+    'plugins.link.unbound': 'unbound',
+    'plugins.link.current': 'Current plugin',
+    'plugins.link.core': 'fvtap core',
+    'plugins.link.apply': 'apply/rewrite',
+    'plugins.link.coreCompact': 'core',
+    'plugins.link.replyCoreCompact': 'r-core',
+    'plugins.link.role': 'Role',
+    'plugins.link.direction': 'Direction',
+    'plugins.link.type': 'Type',
+    'plugins.link.scope': 'Scope',
+    'plugins.link.steps': 'Steps',
+    'plugins.link.step': '#{{index}}',
+    'plugins.link.stepIndex': 'Step',
+    'plugins.link.flags': 'Flags',
+    'plugins.link.node': 'Node',
     'plugins.ui.assets': 'Static Assets',
     'plugins.ui.emptyTitle': 'No Plugin Selected',
     'plugins.ui.loadedMeta': '{{id}} / {{entry}}'
@@ -155,7 +178,9 @@ function createHarness() {
 
   const app = {
     el: elements,
+    __enablePluginTests: true,
     state: {
+      locale: 'zh-CN',
       plugins: {
         data: [],
         catalog: null,
@@ -247,6 +272,10 @@ function createHarness() {
   const context = vm.createContext({
     window: {
       ForwardApp: app,
+      addEventListener(type, handler) {
+        if (!windowListeners[type]) windowListeners[type] = [];
+        windowListeners[type].push(handler);
+      },
       setTimeout(fn) {
         if (typeof fn === 'function') fn();
       },
@@ -281,6 +310,12 @@ function createHarness() {
             return child;
           }
         };
+      },
+      querySelectorAll(selector) {
+        if (selector === 'iframe[data-plugin-frame="1"]') {
+          return [elements.pluginUIFrame].filter((frame) => frame.dataset && frame.dataset.pluginFrame === '1');
+        }
+        return [];
       }
     },
     fetch: async () => ({ ok: false, status: 404, statusText: 'not found', headers: { get() { return ''; } }, text: async () => '' }),
@@ -307,7 +342,82 @@ function createHarness() {
   app.__context = context;
   app.__openedWindows = openedWindows;
   app.__notifications = notifications;
+  app.__windowListeners = windowListeners;
   return app;
+}
+
+function extractForwardPluginHostScript(srcdoc) {
+  const match = String(srcdoc || '').match(/<script data-forward-plugin-host>([\s\S]*?)<\/script>/);
+  assert.ok(match, 'decorated plugin HTML should include ForwardPluginHost script');
+  return match[1];
+}
+
+function attachPluginHostChildFrame(app) {
+  const childListeners = {};
+  let timerID = 0;
+  const timers = new Map();
+  let childWindow;
+  const parentWindow = {
+    postMessage(message) {
+      const handlers = app.__windowListeners.message || [];
+      handlers.forEach((handler) => handler({ source: childWindow, data: message }));
+    }
+  };
+  childWindow = {
+    parent: parentWindow,
+    addEventListener(type, handler) {
+      if (!childListeners[type]) childListeners[type] = [];
+      childListeners[type].push(handler);
+    },
+    postMessage(message) {
+      const handlers = childListeners.message || [];
+      handlers.forEach((handler) => handler({ source: parentWindow, data: message }));
+    },
+    setTimeout(fn) {
+      timerID += 1;
+      timers.set(timerID, fn);
+      return timerID;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    requestAnimationFrame(fn) {
+      if (typeof fn === 'function') fn();
+      return 1;
+    },
+    cancelAnimationFrame() {}
+  };
+  app.el.pluginUIFrame.contentWindow = childWindow;
+
+  const childContext = vm.createContext({
+    window: childWindow,
+    document: {
+      body: {
+        classList: { add() {} },
+        appendChild() {},
+        scrollHeight: 0,
+        offsetHeight: 0
+      },
+      documentElement: {
+        scrollHeight: 0,
+        offsetHeight: 0
+      },
+      addEventListener() {},
+      createElement(tagName) {
+        return makeNode(tagName);
+      },
+      createTextNode(text) {
+        return makeNode('#text', { text: String(text || '') });
+      },
+      querySelector() {
+        return null;
+      }
+    },
+    Node: function TestNode() {},
+    console
+  });
+  vm.runInContext(extractForwardPluginHostScript(app.el.pluginUIFrame.srcdoc), childContext, { filename: 'forward-plugin-host.js' });
+  return childContext.window.ForwardPluginHost;
 }
 
 test('renderPluginsTable renders builtin and external plugin details', () => {
@@ -341,7 +451,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
       capabilities: ['observe'],
       virtual_interfaces: [{ id: 'vtap0', type: 'logical' }],
       objects: [{ id: 'observer', path: 'observer.o', programs: [{ id: 'tc_ingress', section: 'tc/ingress', type: 'tc' }] }],
-      hooks: [{ id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'pre_forward', program: 'observer.o:tc_ingress', mode: 'observe', interfaces: ['fvtap'] }],
+      hooks: [{ id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 10, program: 'observer.o:tc_ingress', mode: 'observe', interfaces: ['fvtap'] }],
       ui: { entry: 'index.html' },
       asset_base_path: '/api/plugins/packet_observer/assets/'
     }
@@ -454,6 +564,51 @@ test('renderPluginsTable renders reply chain separately from forward chain', () 
   assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: fvtap core(priority=1000) -> fvtap apply/redirect | reply: pre_reply[slot 29 reply_observer.before-reply (priority=990)] -> fvtap reply core(priority=1000) -> post_reply[slot 37 reply_observer.after-reply (priority=1010)] -> fvtap reply rewrite');
 });
 
+test('plugin dataplane link rows hide virtual-interface-only control plugins', () => {
+  const app = createHarness();
+  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins/runtime', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
+  const controlOnly = {
+    id: 'wan_core',
+    name: 'WAN Core',
+    kind: 'control',
+    virtual_interfaces: [{ id: 'fwdwan0', type: 'veth', description: 'local WAN handoff' }]
+  };
+  const pppoe = {
+    id: 'pppoe_client',
+    name: 'PPPoE Client',
+    kind: 'pipeline',
+    hooks: [{ id: 'pppoe-forward', engine: 'tc', attach: 'ingress', stage: 'pre_forward', priority: 20, program: 'pppoe.o:tc_ingress', mode: 'rewrite', interfaces: ['eth1'] }]
+  };
+  app.state.plugins.data = [controlOnly, pppoe];
+
+  assert.equal(app.__pluginLinkRowsForTest(controlOnly).length, 0);
+
+  const rows = app.__pluginLinkRowsForTest(pppoe);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, 'Declared Chain');
+  assert.equal(rows[0].label, 'TC ingress forward eth1');
+  const current = rows[0].segments.find((segment) => segment.current);
+  assert.equal(current.text, 'pppoe_client');
+  assert.equal(current.detailTitle, 'pppoe_client.pppoe-forward');
+  assert.ok(current.detailRows.some((row) => row.label === 'Priority' && row.value === '20'));
+  assert.ok(current.detailRows.some((row) => row.label === 'Interfaces' && row.value === 'eth1'));
+  const core = rows[0].segments.find((segment) => segment.core);
+  assert.equal(core.text, 'core');
+  assert.ok(core.detailRows.some((row) => row.label === 'Priority' && row.value === '1000'));
+  assert.ok(rows[0].segments.some((segment) => segment.apply && segment.text === 'apply'));
+
+  const card = app.__createPluginLinkCardForTest({ plugin: pppoe });
+  assert.doesNotMatch(collectText(card), /\bDetails\b/);
+  const buttons = [];
+  const walk = (node) => {
+    if (!node) return;
+    if (node.tagName === 'BUTTON') buttons.push(node);
+    (node.childNodes || []).forEach(walk);
+  };
+  walk(card);
+  assert.deepEqual(buttons.map((button) => button.textContent), ['pppoe_client', 'core', 'apply']);
+});
+
 test('openPluginUI fetches protected asset and renders inline iframe', async () => {
   const app = createHarness();
   const calls = [];
@@ -484,14 +639,276 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
   assert.equal(app.el.pluginUITitle.textContent, 'Packet Observer');
   assert.equal(app.el.pluginUIMeta.textContent, 'packet_observer / index.html');
   assert.equal(app.el.pluginUIFrame.src, 'about:blank');
+  assert.equal(app.el.pluginUIFrame.getAttribute('sandbox'), 'allow-scripts allow-forms allow-popups');
   assert.match(String(app.el.pluginUIFrame.srcdoc), /data-forward-plugin-host/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /ForwardPluginHost/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.data/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /list: function \(resource, options\)/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /upsert: function \(resource, key, data, options\)/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /error\.status !== 404/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /limit: options\.limit/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /offset: options\.offset/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.action/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.errorText/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.toastError/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.t = function/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.onLocaleChange/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /error_payload/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /runtime_status/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /runtime_error/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /clearTimeout\(pending\.timeout\)/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /event\.source !== window\.parent/);
 
   app.closePluginUI();
 
   assert.equal(app.el.pluginUIPanel.hidden, true);
+});
+
+test('plugin RPC data.list forwards pagination query params', () => {
+  const filePath = path.join(__dirname, '..', 'web', 'js', 'plugins.js');
+  const source = fs.readFileSync(filePath, 'utf8');
+  assert.match(source, /payload\.limit/);
+  assert.match(source, /payload\.offset/);
+  assert.match(source, /limit=/);
+  assert.match(source, /offset=/);
+});
+
+test('plugin host data.upsert only falls back to create on missing records', async () => {
+  const app = createHarness();
+  const calls = [];
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html' }
+  }];
+  app.__context.fetch = async function fetch() {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get(name) { return name === 'Content-Type' ? 'text/html' : ''; } },
+      text: async () => '<!doctype html><title>Plugin</title>'
+    };
+  };
+
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+
+  app.apiCall = async function apiCall(method, reqPath, body) {
+    calls.push({ method, reqPath, body });
+    if (method === 'PUT') {
+      const error = new Error('record not found');
+      error.status = 404;
+      error.payload = { error: 'record not found' };
+      throw error;
+    }
+    assert.equal(method, 'POST');
+    return { key: 'alpha', data: body.data, enabled: body.enabled !== false };
+  };
+
+  const created = await host.data.upsert('bindings', 'alpha', { name: 'alpha' }, { enabled: true });
+  assert.equal(created.key, 'alpha');
+  assert.deepEqual(calls.map((call) => call.method), ['PUT', 'POST']);
+  assert.equal(calls[0].reqPath, '/api/plugins/packet_observer/resources/bindings/alpha');
+  assert.equal(calls[1].reqPath, '/api/plugins/packet_observer/resources/bindings');
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1].body)), { data: { name: 'alpha' }, key: 'alpha', enabled: true });
+
+  calls.length = 0;
+  app.apiCall = async function apiCall(method, reqPath, body) {
+    calls.push({ method, reqPath, body });
+    const error = new Error('runtime apply failed');
+    error.status = 500;
+    error.payload = {
+      error: 'runtime apply failed',
+      runtime_error: 'runtime apply failed',
+      runtime_status: { status: 'error', last_error: 'runtime apply failed' }
+    };
+    throw error;
+  };
+
+  await assert.rejects(
+    host.data.upsert('bindings', 'alpha', { name: 'alpha' }, { enabled: true }),
+    (error) => {
+      assert.equal(error.status, 500);
+      assert.equal(error.runtime_error, 'runtime apply failed');
+      assert.equal(error.runtime_status.status, 'error');
+      return true;
+    }
+  );
+  assert.deepEqual(calls.map((call) => call.method), ['PUT']);
+});
+
+test('plugin host exposes locale helper and receives locale broadcasts', async () => {
+  const app = createHarness();
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html' }
+  }];
+  app.__context.fetch = async function fetch() {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get(name) { return name === 'Content-Type' ? 'text/html' : ''; } },
+      text: async () => '<!doctype html><title>Plugin</title>'
+    };
+  };
+
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+  const messages = {
+    'zh-CN': { greeting: '你好 {{name}}' },
+    'en-US': { greeting: 'Hello {{name}}' }
+  };
+
+  assert.equal(host.locale, 'zh-CN');
+  assert.equal(host.t(messages, 'greeting', { name: 'Forward' }), '你好 Forward');
+
+  let changedLocale = '';
+  host.onLocaleChange((locale) => {
+    changedLocale = locale;
+  });
+  app.state.locale = 'en-US';
+  app.refreshLocalizedUI();
+
+  assert.equal(changedLocale, 'en-US');
+  assert.equal(host.locale, 'en-US');
+  assert.equal(host.t(messages, 'greeting', { name: 'Forward' }), 'Hello Forward');
+});
+
+test('plugin iframe RPC returns runtime error payload and rejects plugin id mismatch', async () => {
+  const app = createHarness();
+  const frameWindow = {
+    messages: [],
+    postMessage(message, targetOrigin) {
+      this.messages.push({ message, targetOrigin });
+    }
+  };
+  app.el.pluginUIFrame.dataset.pluginFrame = '1';
+  app.el.pluginUIFrame.dataset.pluginId = 'packet_observer';
+  app.el.pluginUIFrame.contentWindow = frameWindow;
+  app.apiCall = async function apiCall(method, reqPath, body) {
+    assert.equal(method, 'PUT');
+    assert.equal(reqPath, '/api/plugins/packet_observer/resources/bindings/alpha');
+    assert.equal(JSON.stringify(body), JSON.stringify({ data: { name: 'alpha' } }));
+    const error = new Error('attach failed');
+    error.status = 500;
+    error.payload = {
+      error: 'attach failed',
+      runtime_error: 'attach failed',
+      runtime_status: {
+        target_type: 'resource',
+        target_id: 'bindings',
+        status: 'error',
+        last_error: 'attach failed'
+      }
+    };
+    throw error;
+  };
+
+  const handlers = app.__windowListeners.message || [];
+  assert.equal(handlers.length, 1);
+  handlers[0]({
+    source: frameWindow,
+    data: {
+      type: 'forward-plugin-rpc',
+      pluginId: 'packet_observer',
+      id: 'rpc-1',
+      op: 'data.update',
+      payload: {
+        resource: 'bindings',
+        key: 'alpha',
+        data: { name: 'alpha' }
+      }
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(frameWindow.messages.length, 1);
+  const response = frameWindow.messages[0].message;
+  assert.equal(frameWindow.messages[0].targetOrigin, '*');
+  assert.equal(response.type, 'forward-plugin-rpc-result');
+  assert.equal(response.pluginId, 'packet_observer');
+  assert.equal(response.id, 'rpc-1');
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'attach failed');
+  assert.equal(response.status, 500);
+  assert.equal(response.error_payload.runtime_error, 'attach failed');
+  assert.equal(response.error_payload.runtime_status.status, 'error');
+
+  handlers[0]({
+    source: frameWindow,
+    data: {
+      type: 'forward-plugin-rpc',
+      pluginId: 'other_plugin',
+      id: 'rpc-2',
+      op: 'data.list',
+      payload: { resource: 'bindings' }
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(frameWindow.messages.length, 1);
+});
+
+test('plugin iframe RPC ignores foreign or malformed messages before API calls', async () => {
+  const app = createHarness();
+  const frameWindow = { messages: [], postMessage(message) { this.messages.push(message); } };
+  const foreignWindow = { messages: [], postMessage(message) { this.messages.push(message); } };
+  let apiCalls = 0;
+  app.el.pluginUIFrame.dataset.pluginFrame = '1';
+  app.el.pluginUIFrame.dataset.pluginId = 'packet_observer';
+  app.el.pluginUIFrame.contentWindow = frameWindow;
+  app.apiCall = async function apiCall() {
+    apiCalls += 1;
+    return {};
+  };
+
+  const handlers = app.__windowListeners.message || [];
+  assert.equal(handlers.length, 1);
+  handlers[0]({
+    source: foreignWindow,
+    data: {
+      type: 'forward-plugin-rpc',
+      pluginId: 'packet_observer',
+      id: 'rpc-foreign',
+      op: 'data.list',
+      payload: { resource: 'bindings' }
+    }
+  });
+  handlers[0]({
+    source: frameWindow,
+    data: {
+      type: 'forward-plugin-rpc',
+      pluginId: 'packet_observer',
+      op: 'data.list',
+      payload: { resource: 'bindings' }
+    }
+  });
+  handlers[0]({
+    source: frameWindow,
+    data: {
+      type: 'forward-plugin-rpc',
+      pluginId: 'packet_observer',
+      id: 'x'.repeat(129),
+      op: 'data.list',
+      payload: { resource: 'bindings' }
+    }
+  });
+  handlers[0]({
+    source: frameWindow,
+    data: {
+      type: 'forward-plugin-rpc',
+      pluginId: 'packet_observer',
+      id: 'rpc-no-op',
+      payload: { resource: 'bindings' }
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(apiCalls, 0);
+  assert.equal(frameWindow.messages.length, 0);
+  assert.equal(foreignWindow.messages.length, 0);
 });
 
 test('openPluginUI handles unauthorized asset response', async () => {

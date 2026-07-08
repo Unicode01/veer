@@ -1,0 +1,35 @@
+{
+  "api_version": "v1",
+  "id": "lan_core",
+  "name": "LAN Core",
+  "version": "1.0.0",
+  "kind": "control",
+  "stability": "stable",
+  "description": "Protocol-neutral LAN adapter. It creates or manages a Linux bridge, attaches LAN ports, assigns gateway addresses, and publishes an Egress NAT plan consumed by the core dataplane.",
+  "control": {
+    "main": "control.js",
+    "sha256": "0b007cdefdf01a90b8cc414393b53365986cf6a19d33eb035fd4547a726da9cb",
+    "permissions": ["net.admin", "plugin.register", "plugin.resource", "resource", "timer", "ui"],
+    "net_access": [
+      {
+        "interfaces": ["br*"],
+        "operations": ["addr.write", "link.create", "link.delete", "link.master", "link.read"]
+      },
+      {
+        "interfaces": ["vmbr*"],
+        "operations": ["addr.write", "link.create", "link.master", "link.read"]
+      },
+      {
+        "interfaces": ["en*", "eth*", "fw*", "lan*", "tap*", "veth*", "vmbr*"],
+        "operations": ["link.master", "link.read"]
+      }
+    ],
+    "resource_access": [
+      {
+        "plugin": "wan_core",
+        "resource": "status",
+        "methods": ["get"]
+      }
+    ]
+  }
+}

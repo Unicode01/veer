@@ -34,6 +34,10 @@ type kernelRuleRuntime interface {
 	Close() error
 }
 
+type kernelRuleRuntimeWithPluginCatalog interface {
+	ReconcileWithPluginCatalog(rules []Rule, catalog PluginCatalog) (map[int64]kernelRuleApplyResult, error)
+}
+
 type kernelRuleSupportRuntime interface {
 	SupportsRule(rule Rule) (bool, string)
 }
@@ -46,6 +50,10 @@ type kernelHandoffRetentionRuntime interface {
 
 type kernelRetainedAssignmentRuntime interface {
 	ReconcileRetainingAssignments(retainedByEngine map[string][]Rule, newRules []Rule) (map[int64]kernelRuleApplyResult, error)
+}
+
+type kernelRetainedAssignmentRuntimeWithPluginCatalog interface {
+	ReconcileRetainingAssignmentsWithPluginCatalog(retainedByEngine map[string][]Rule, newRules []Rule, catalog PluginCatalog) (map[int64]kernelRuleApplyResult, error)
 }
 
 const (

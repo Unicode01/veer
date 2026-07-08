@@ -17,6 +17,7 @@ type orderedKernelRuntimeEntry struct {
 
 type orderedKernelRuleRuntime struct {
 	mu                sync.Mutex
+	cfg               *Config
 	entries           []orderedKernelRuntimeEntry
 	assignmentLog     kernelKeyedStateLogger
 	engineFallbackLog kernelKeyedStateLogger
@@ -37,6 +38,7 @@ func newOrderedKernelRuleRuntime(order []string, cfg *Config) kernelRuleRuntime 
 		return staticUnavailableKernelRuleRuntime{reason: "no supported kernel dataplane engines configured"}
 	}
 	return &orderedKernelRuleRuntime{
+		cfg:     cfg,
 		entries: entries,
 	}
 }
@@ -81,6 +83,19 @@ func (rt *orderedKernelRuleRuntime) PutPluginMapValue(pluginID string, objectID 
 	return rt.withPluginMapController(func(controller pluginEBPFMapController) error {
 		return controller.PutPluginMapValue(pluginID, objectID, mapName, key, value)
 	})
+}
+
+func (rt *orderedKernelRuleRuntime) GetPluginMapValue(pluginID string, objectID string, mapName string, key []byte) ([]byte, error) {
+	var out []byte
+	err := rt.withPluginMapController(func(controller pluginEBPFMapController) error {
+		value, err := controller.GetPluginMapValue(pluginID, objectID, mapName, key)
+		if err != nil {
+			return err
+		}
+		out = value
+		return nil
+	})
+	return out, err
 }
 
 func (rt *orderedKernelRuleRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
@@ -153,17 +168,26 @@ func (rt *orderedKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
 }
 
 func (rt *orderedKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRuleApplyResult, error) {
+	return rt.reconcileWithOptionalPluginCatalog(rules, nil)
+}
+
+func (rt *orderedKernelRuleRuntime) ReconcileWithPluginCatalog(rules []Rule, catalog PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
+	return rt.reconcileWithOptionalPluginCatalog(rules, &catalog)
+}
+
+func (rt *orderedKernelRuleRuntime) reconcileWithOptionalPluginCatalog(rules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
+	entries := rt.entriesForCatalogLocked(catalog)
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	failuresByRule := make(map[int64][]string, len(rules))
 	pending := append([]Rule(nil), rules...)
-	assignedEntries := make(map[string]bool, len(rt.entries))
-	assignedLogKeys := make(map[string]struct{}, len(rt.entries))
-	fallbackLogKeys := make(map[string]struct{}, len(rt.entries))
+	assignedEntries := make(map[string]bool, len(entries))
+	assignedLogKeys := make(map[string]struct{}, len(entries))
+	fallbackLogKeys := make(map[string]struct{}, len(entries))
 
-	for _, entry := range rt.entries {
+	for _, entry := range entries {
 		available, reason := entry.rt.Available()
 		if !available {
 			if reason == "" {
@@ -172,13 +196,13 @@ func (rt *orderedKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRul
 			for _, rule := range pending {
 				failuresByRule[rule.ID] = append(failuresByRule[rule.ID], fmt.Sprintf("%s unavailable: %s", entry.name, reason))
 			}
-			if _, err := entry.rt.Reconcile(nil); err != nil {
+			if _, err := reconcileKernelRuntimeEntryWithPluginCatalog(entry.rt, nil, catalog); err != nil {
 				log.Printf("kernel dataplane engine cleanup after unavailable (%s): %v", entry.name, err)
 			}
 			continue
 		}
 
-		engineResults, err := entry.rt.Reconcile(pending)
+		engineResults, err := reconcileKernelRuntimeEntryWithPluginCatalog(entry.rt, pending, catalog)
 		nextPending := make([]Rule, 0, len(pending))
 		runningCount := 0
 
@@ -198,8 +222,11 @@ func (rt *orderedKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRul
 			nextPending = append(nextPending, rule)
 		}
 
-		if runningCount > 0 {
+		pluginPipelineActive := kernelRuntimePluginPipelineHasActiveAttachments(entry.rt)
+		if runningCount > 0 || pluginPipelineActive {
 			assignedEntries[entry.name] = true
+		}
+		if runningCount > 0 {
 			assignedLogKeys[entry.name] = struct{}{}
 			rt.assignmentLog.Logf(entry.name, "kernel dataplane engine assigned: %s entries=%d", entry.name, runningCount)
 		}
@@ -232,18 +259,50 @@ func (rt *orderedKernelRuleRuntime) Reconcile(rules []Rule) (map[int64]kernelRul
 	return results, nil
 }
 
+func kernelRuntimePluginPipelineHasActiveAttachments(rt kernelRuleRuntime) bool {
+	runtime, ok := rt.(pluginPipelineRuntime)
+	if !ok || runtime == nil {
+		return false
+	}
+	snapshot := runtime.PluginSnapshot()
+	for _, state := range snapshot.Plugins {
+		if state.Mode == pluginRuntimeModeDataplane && (state.Attached || state.AttachmentCount > 0 || len(state.Attachments) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func reconcileKernelRuntimeEntryWithPluginCatalog(rt kernelRuleRuntime, rules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
+	if catalog != nil {
+		if withCatalog, ok := rt.(kernelRuleRuntimeWithPluginCatalog); ok {
+			return withCatalog.ReconcileWithPluginCatalog(rules, *catalog)
+		}
+	}
+	return rt.Reconcile(rules)
+}
+
 func (rt *orderedKernelRuleRuntime) ReconcileRetainingAssignments(retainedByEngine map[string][]Rule, newRules []Rule) (map[int64]kernelRuleApplyResult, error) {
+	return rt.reconcileRetainingAssignmentsWithOptionalPluginCatalog(retainedByEngine, newRules, nil)
+}
+
+func (rt *orderedKernelRuleRuntime) ReconcileRetainingAssignmentsWithPluginCatalog(retainedByEngine map[string][]Rule, newRules []Rule, catalog PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
+	return rt.reconcileRetainingAssignmentsWithOptionalPluginCatalog(retainedByEngine, newRules, &catalog)
+}
+
+func (rt *orderedKernelRuleRuntime) reconcileRetainingAssignmentsWithOptionalPluginCatalog(retainedByEngine map[string][]Rule, newRules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
+	entries := rt.entriesForCatalogLocked(catalog)
 	results := make(map[int64]kernelRuleApplyResult, len(newRules))
 	failuresByRule := make(map[int64][]string, len(newRules))
 	pending := append([]Rule(nil), newRules...)
-	assignedEntries := make(map[string]bool, len(rt.entries))
-	assignedLogKeys := make(map[string]struct{}, len(rt.entries))
-	fallbackLogKeys := make(map[string]struct{}, len(rt.entries))
+	assignedEntries := make(map[string]bool, len(entries))
+	assignedLogKeys := make(map[string]struct{}, len(entries))
+	fallbackLogKeys := make(map[string]struct{}, len(entries))
 
-	for _, entry := range rt.entries {
+	for _, entry := range entries {
 		fixed := cloneRuleSlice(retainedByEngine[entry.name])
 		if len(fixed) > 0 {
 			assignedEntries[entry.name] = true
@@ -264,7 +323,7 @@ func (rt *orderedKernelRuleRuntime) ReconcileRetainingAssignments(retainedByEngi
 			for _, rule := range pending {
 				failuresByRule[rule.ID] = append(failuresByRule[rule.ID], fmt.Sprintf("%s unavailable: %s", entry.name, reason))
 			}
-			if _, err := entry.rt.Reconcile(nil); err != nil {
+			if _, err := reconcileKernelRuntimeEntryWithPluginCatalog(entry.rt, nil, catalog); err != nil {
 				log.Printf("kernel dataplane engine cleanup after unavailable (%s): %v", entry.name, err)
 			}
 			continue
@@ -277,7 +336,7 @@ func (rt *orderedKernelRuleRuntime) ReconcileRetainingAssignments(retainedByEngi
 			continue
 		}
 
-		engineResults, err := entry.rt.Reconcile(request)
+		engineResults, err := reconcileKernelRuntimeEntryWithPluginCatalog(entry.rt, request, catalog)
 		runningCount := 0
 
 		for _, rule := range fixed {
@@ -404,6 +463,25 @@ func (rt *orderedKernelRuleRuntime) cleanupUnassignedLocked(assignedEntries map[
 			log.Printf("kernel dataplane engine cleanup after assignment (%s): %v", entry.name, cleanupErr)
 		}
 	}
+}
+
+func (rt *orderedKernelRuleRuntime) entriesForCatalogLocked(catalog *PluginCatalog) []orderedKernelRuntimeEntry {
+	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	if catalog == nil || !kernelPluginPipelineCatalogHasRuntimeHooks(*catalog, rt.cfg) {
+		return entries
+	}
+	out := make([]orderedKernelRuntimeEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.name == kernelEngineTC {
+			out = append(out, entry)
+		}
+	}
+	for _, entry := range entries {
+		if entry.name != kernelEngineTC {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 func (rt *orderedKernelRuleRuntime) selectLocked() (bool, string) {

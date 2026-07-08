@@ -29,6 +29,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"forward/internal/store"
 )
 
 const (
@@ -93,6 +95,7 @@ type egressNATIntegrationHarness struct {
 	WorkDir              string
 	ForwardBinary        string
 	ConfigPath           string
+	DBPath               string
 	HotRestartMarkerPath string
 	BPFStateRoot         string
 	RuntimeStateRoot     string
@@ -207,6 +210,61 @@ func TestEgressNATTCIntegration(t *testing.T) {
 			observedIP := runEgressNATIntegrationProbe(t, topology, proto)
 			if observedIP != egressNATUplinkAddr {
 				logForwardLogOnFailure(t, logPath)
+				t.Fatalf("%s backend observed source IP %q, want %q", proto, observedIP, egressNATUplinkAddr)
+			}
+		})
+	}
+}
+
+func TestPluginLANCoreGeneratedEgressNATTCIntegration(t *testing.T) {
+	if os.Getenv(egressNATTestEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux plugin-generated egress NAT integration test", egressNATTestEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+
+	harness := startEgressNATIntegrationHarnessWithConfig(t, "plugin-lan-core", enableLANCorePluginForEgressNATIntegration)
+	applyLANCoreEgressNATProfile(t, harness.APIBase, harness.Topology)
+	waitForEgressNATWorkerRunningStatus(t, harness.APIBase, harness.Topology, harness.LogPath, "")
+
+	for _, proto := range []string{"tcp", "udp"} {
+		proto := proto
+		t.Run(proto, func(t *testing.T) {
+			observedIP := runEgressNATIntegrationProbe(t, harness.Topology, proto)
+			if observedIP != egressNATUplinkAddr {
+				logForwardLogOnFailure(t, harness.LogPath)
+				t.Fatalf("%s backend observed source IP %q, want %q", proto, observedIP, egressNATUplinkAddr)
+			}
+		})
+	}
+}
+
+func TestPluginLANCoreResolvesWANCoreEgressNATTCIntegration(t *testing.T) {
+	if os.Getenv(egressNATTestEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux plugin-generated egress NAT integration test", egressNATTestEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+
+	harness := startEgressNATIntegrationHarnessWithConfig(t, "plugin-lan-wan-core", enableLANAndWANCorePluginsForEgressNATIntegration)
+	createWANCoreStatusForLANCoreEgressNAT(t, harness.DBPath, harness.Topology)
+	applyLANCoreEgressNATProfileResolvingWANRef(t, harness.APIBase, harness.Topology)
+	waitForEgressNATWorkerRunningStatus(t, harness.APIBase, harness.Topology, harness.LogPath, "")
+
+	for _, proto := range []string{"tcp", "udp"} {
+		proto := proto
+		t.Run(proto, func(t *testing.T) {
+			observedIP := runEgressNATIntegrationProbe(t, harness.Topology, proto)
+			if observedIP != egressNATUplinkAddr {
+				logForwardLogOnFailure(t, harness.LogPath)
 				t.Fatalf("%s backend observed source IP %q, want %q", proto, observedIP, egressNATUplinkAddr)
 			}
 		})
@@ -1101,6 +1159,11 @@ func restoreEgressNATDirectTopologyGRO(t *testing.T, topology egressNATIntegrati
 
 func startEgressNATIntegrationHarness(t *testing.T, name string) egressNATIntegrationHarness {
 	t.Helper()
+	return startEgressNATIntegrationHarnessWithConfig(t, name, nil)
+}
+
+func startEgressNATIntegrationHarnessWithConfig(t *testing.T, name string, configure func(*testing.T, string, string, string)) egressNATIntegrationHarness {
+	t.Helper()
 
 	repoRoot := findRepoRoot(t)
 	requireEmbeddedEBPFObjects(t, repoRoot)
@@ -1116,6 +1179,7 @@ func startEgressNATIntegrationHarness(t *testing.T, name string) egressNATIntegr
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("create work dir: %v", err)
 	}
+	dbPath := filepath.Join(workDir, "forward.db")
 	runtimeStateRoot := filepath.Join(runtimeDir, "runtime-state")
 	if err := os.MkdirAll(runtimeStateRoot, 0o755); err != nil {
 		t.Fatalf("create hot restart runtime state dir: %v", err)
@@ -1131,6 +1195,9 @@ func startEgressNATIntegrationHarness(t *testing.T, name string) egressNATIntegr
 		Expected:     ruleEngineKernel,
 		ExpectedKern: egressNATExpectedKernelEngine,
 	}, webPort)
+	if configure != nil {
+		configure(t, repoRoot, workDir, configPath)
+	}
 
 	logPath := filepath.Join(workDir, "forward-egress-nat-"+name+".log")
 	logFile, err := os.Create(logPath)
@@ -1169,9 +1236,66 @@ func startEgressNATIntegrationHarness(t *testing.T, name string) egressNATIntegr
 		WorkDir:              workDir,
 		ForwardBinary:        forwardBinary,
 		ConfigPath:           configPath,
+		DBPath:               dbPath,
 		HotRestartMarkerPath: hotRestartMarkerPath,
 		BPFStateRoot:         bpfStateRoot,
 		RuntimeStateRoot:     runtimeStateRoot,
+	}
+}
+
+func enableLANCorePluginForEgressNATIntegration(t *testing.T, repoRoot string, workDir string, configPath string) {
+	t.Helper()
+
+	pluginDir := filepath.Join(workDir, filepath.FromSlash(defaultPluginsDir), "lan_core")
+	copyDirForTest(t, filepath.Join(repoRoot, "examples", "plugins", "lan_core"), pluginDir)
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load egress nat integration config: %v", err)
+	}
+	enabled := true
+	cfg.PluginsEnabledSetting = &enabled
+	cfg.PluginsDir = defaultPluginsDir
+	if cfg.Experimental == nil {
+		cfg.Experimental = make(map[string]bool)
+	}
+	cfg.Experimental[experimentalFeatureKernelTCPreparedL2] = true
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal lan_core egress nat integration config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatalf("write lan_core egress nat integration config: %v", err)
+	}
+}
+
+func enableLANAndWANCorePluginsForEgressNATIntegration(t *testing.T, repoRoot string, workDir string, configPath string) {
+	t.Helper()
+
+	for _, pluginID := range []string{"lan_core", "wan_core"} {
+		pluginDir := filepath.Join(workDir, filepath.FromSlash(defaultPluginsDir), pluginID)
+		copyDirForTest(t, filepath.Join(repoRoot, "examples", "plugins", pluginID), pluginDir)
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load lan/wan core egress nat integration config: %v", err)
+	}
+	enabled := true
+	cfg.PluginsEnabledSetting = &enabled
+	cfg.PluginsDir = defaultPluginsDir
+	if cfg.Experimental == nil {
+		cfg.Experimental = make(map[string]bool)
+	}
+	cfg.Experimental[experimentalFeatureKernelTCPreparedL2] = true
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal lan/wan core egress nat integration config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatalf("write lan/wan core egress nat integration config: %v", err)
 	}
 }
 
@@ -1291,9 +1415,222 @@ func createEgressNATIntegrationEntryForScopeWithOptions(t *testing.T, apiBase st
 	}
 }
 
+func applyLANCoreEgressNATProfile(t *testing.T, apiBase string, topology egressNATIntegrationTopology) {
+	t.Helper()
+
+	payload := map[string]any{
+		"profile": map[string]any{
+			"lan_id":               "egress-nat-itest",
+			"bridge":               topology.BridgeIF,
+			"ports":                []string{topology.ChildHostIF},
+			"addresses":            []string{egressNATBridgeAddr + "/24"},
+			"wan_egress_interface": topology.UplinkHostIF,
+			"wan_egress_source_ip": egressNATUplinkAddr,
+			"auto_egress_nat":      true,
+			"protocol":             "tcp+udp",
+			"nat_type":             egressNATTypeSymmetric,
+			"mtu":                  1500,
+		},
+	}
+	data, err := json.Marshal(map[string]any{"payload": payload})
+	if err != nil {
+		t.Fatalf("marshal lan_core apply payload: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, apiBase+"/api/plugins/lan_core/actions/apply_network", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("build lan_core apply request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+egressNATTestToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("apply lan_core egress nat profile: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("apply lan_core egress nat profile unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+func createWANCoreStatusForLANCoreEgressNAT(t *testing.T, dbPath string, topology egressNATIntegrationTopology) {
+	t.Helper()
+
+	data := map[string]any{
+		"phase":                       "applied",
+		"wan_id":                      "egress-nat-itest",
+		"driver":                      "integration",
+		"driver_plugin":               "test",
+		"state":                       "up",
+		"usable":                      true,
+		"real_interface":              topology.UplinkHostIF,
+		"wan_interface":               topology.UplinkHostIF,
+		"vtap_interface":              topology.UplinkHostIF,
+		"forward_parent_interface":    topology.UplinkHostIF,
+		"egress_nat_parent_interface": topology.UplinkHostIF,
+		"ipv4":                        egressNATUplinkAddr,
+		"forward_core": map[string]any{
+			"mode":              "integration",
+			"parent_interface":  topology.UplinkHostIF,
+			"ingress_interface": topology.UplinkHostIF,
+		},
+	}
+	dataJSON, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal wan_core status fixture: %v", err)
+	}
+	canonical, err := canonicalPluginRecordJSON(dataJSON)
+	if err != nil {
+		t.Fatalf("canonicalize wan_core status fixture: %v", err)
+	}
+	db, err := initDB(dbPath)
+	if err != nil {
+		t.Fatalf("open egress nat integration db: %v", err)
+	}
+	defer db.Close()
+	item := store.PluginRecord{
+		PluginID:   "wan_core",
+		ResourceID: "status",
+		RecordKey:  "egress-nat-itest",
+		DataJSON:   canonical,
+		Enabled:    true,
+	}
+	if _, err := store.AddPluginRecord(db, &item); err != nil {
+		t.Fatalf("seed wan_core status fixture: %v", err)
+	}
+}
+
+func applyLANCoreEgressNATProfileResolvingWANRef(t *testing.T, apiBase string, topology egressNATIntegrationTopology) {
+	t.Helper()
+
+	payload := map[string]any{
+		"profile": map[string]any{
+			"lan_id":          "egress-nat-itest",
+			"bridge":          topology.BridgeIF,
+			"ports":           []string{topology.ChildHostIF},
+			"addresses":       []string{egressNATBridgeAddr + "/24"},
+			"wan_ref":         "egress-nat-itest",
+			"auto_egress_nat": true,
+			"protocol":        "tcp+udp",
+			"nat_type":        egressNATTypeSymmetric,
+			"mtu":             1500,
+		},
+	}
+	data, err := json.Marshal(map[string]any{"payload": payload})
+	if err != nil {
+		t.Fatalf("marshal lan_core wan-ref apply payload: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, apiBase+"/api/plugins/lan_core/actions/apply_network", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("build lan_core wan-ref apply request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+egressNATTestToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("apply lan_core wan-ref egress nat profile: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("apply lan_core wan-ref egress nat profile unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+func createPluginResourceRecordForEgressNATIntegration(t *testing.T, apiBase string, pluginID string, resourceID string, key string, data map[string]any) {
+	t.Helper()
+
+	payload, err := json.Marshal(map[string]any{
+		"key":     key,
+		"data":    data,
+		"enabled": true,
+	})
+	if err != nil {
+		t.Fatalf("marshal plugin resource record %s/%s/%s: %v", pluginID, resourceID, key, err)
+	}
+	req, err := http.NewRequest(http.MethodPost, apiBase+"/api/plugins/"+pluginID+"/resources/"+resourceID, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("build plugin resource record request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+egressNATTestToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("create plugin resource record %s/%s/%s: %v", pluginID, resourceID, key, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create plugin resource record %s/%s/%s unexpected status %d: %s", pluginID, resourceID, key, resp.StatusCode, string(body))
+	}
+}
+
 func waitForEgressNATIntegrationStatus(t *testing.T, apiBase string, topology egressNATIntegrationTopology, childInterface string) {
 	t.Helper()
 	_ = waitForEgressNATIntegrationRunningStatusWithKernelEngine(t, apiBase, topology, childInterface, egressNATExpectedKernelEngine)
+}
+
+func waitForEgressNATWorkerRunningStatus(t *testing.T, apiBase string, topology egressNATIntegrationTopology, logPath string, childInterface string) EgressNATStatus {
+	t.Helper()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(20 * time.Second)
+	var last *EgressNATStatus
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, apiBase+"/api/workers", nil)
+		if err != nil {
+			t.Fatalf("build list workers request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+egressNATTestToken)
+		resp, err := client.Do(req)
+		if err != nil {
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
+		var workers WorkerListResponse
+		err = json.NewDecoder(resp.Body).Decode(&workers)
+		resp.Body.Close()
+		if err != nil {
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
+		for _, worker := range workers.Workers {
+			if worker.Kind != workerKindEgressNAT {
+				continue
+			}
+			for _, item := range worker.EgressNATs {
+				if item.ParentInterface != topology.BridgeIF || item.ChildInterface != childInterface || item.OutInterface != topology.UplinkHostIF {
+					continue
+				}
+				current := item
+				last = &current
+				if item.Status != "running" || !item.Enabled {
+					continue
+				}
+				if item.EffectiveEngine != ruleEngineKernel {
+					t.Fatalf("effective egress nat engine = %q, want %q (kernel_reason=%q fallback=%q)", item.EffectiveEngine, ruleEngineKernel, item.KernelReason, item.FallbackReason)
+				}
+				if item.EffectiveKernelEngine != egressNATExpectedKernelEngine {
+					t.Fatalf("effective egress nat kernel engine = %q, want %q (kernel_reason=%q fallback=%q)", item.EffectiveKernelEngine, egressNATExpectedKernelEngine, item.KernelReason, item.FallbackReason)
+				}
+				if item.OutSourceIP != egressNATUplinkAddr {
+					t.Fatalf("effective egress nat out_source_ip = %q, want %q", item.OutSourceIP, egressNATUplinkAddr)
+				}
+				return item
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if last != nil {
+		logForwardLogOnFailure(t, logPath)
+		t.Fatalf("effective egress nat did not enter running/kernel tc state in time; last status=%q engine=%q kernel=%q kernel_reason=%q fallback=%q",
+			last.Status, last.EffectiveEngine, last.EffectiveKernelEngine, last.KernelReason, last.FallbackReason)
+	}
+	logForwardLogOnFailure(t, logPath)
+	t.Fatalf("effective egress nat did not appear in worker list in time for parent=%q child=%q out=%q", topology.BridgeIF, childInterface, topology.UplinkHostIF)
+	return EgressNATStatus{}
 }
 
 func listEgressNATIntegrationStatuses(t *testing.T, apiBase string) []egressNATIntegrationStatus {

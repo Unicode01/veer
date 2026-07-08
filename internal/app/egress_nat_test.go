@@ -452,6 +452,7 @@ func TestBuildEgressNATKernelCandidates(t *testing.T) {
 		OutInterface:    "eno1",
 		OutSourceIP:     "198.51.100.10",
 		Protocol:        "tcp+udp+icmp",
+		RedirectMode:    "vtap",
 		Enabled:         true,
 	}}, planner, 0, 0, &nextID)
 
@@ -475,6 +476,9 @@ func TestBuildEgressNATKernelCandidates(t *testing.T) {
 		}
 		if candidate.rule.kernelNATType != egressNATTypeSymmetric {
 			t.Fatalf("candidate.rule.kernelNATType = %q, want %q", candidate.rule.kernelNATType, egressNATTypeSymmetric)
+		}
+		if candidate.rule.kernelRedirectMode != egressNATRedirectModePreparedL2 {
+			t.Fatalf("candidate.rule.kernelRedirectMode = %q, want %q", candidate.rule.kernelRedirectMode, egressNATRedirectModePreparedL2)
 		}
 		natProtocols[candidate.rule.Protocol] = struct{}{}
 	}

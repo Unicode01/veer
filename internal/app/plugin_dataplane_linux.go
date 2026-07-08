@@ -233,6 +233,12 @@ func (rt *linuxPluginDataplaneRuntime) buildDesiredPlugins(catalog PluginCatalog
 		if plugin.Builtin || plugin.Status != pluginStatusActive {
 			continue
 		}
+		if ok, reason := pluginDataplaneStabilityAllowed(plugin, rt.cfg); !ok {
+			state := externalPluginRuntimeState()
+			state.Reason = reason
+			states[plugin.ID] = state
+			continue
+		}
 		item, state := buildDesiredPluginDataplane(plugin)
 		if len(item.attachments) == 0 || state.Error != "" {
 			states[plugin.ID] = state
