@@ -21,6 +21,10 @@ dist/
 !plugins/whmcs/forward/
 !plugins/whmcs/forward/**
 
+# local/operator plugin acceptance scripts
+scripts/test-plugin-*.sh
+scripts/lib-plugin-test-env.sh
+
 # logs and coverage
 *.log
 coverage.out

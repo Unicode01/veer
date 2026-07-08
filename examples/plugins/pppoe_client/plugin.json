@@ -5,10 +5,10 @@
   "version": "1.0.0",
   "kind": "pipeline",
   "stability": "stable",
-  "description": "PPPoE WAN control and TC tunnel plugin. The control script registers UI, resources, actions, eBPF objects, and TC hooks dynamically.",
+  "description": "PPPoE WAN control and TC tunnel plugin for managed WAN handoff and fvtap pipeline integration.",
   "control": {
     "main": "control.js",
-    "sha256": "b6966a7acae28dfa3d38caac47987f432025a711492debda0365e0bff732a18e",
+    "sha256": "75e440fe1312452fb0f338eaaef8a2404b7ed89a54bbb29d5627814aca86b64e",
     "permissions": ["crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "net.admin", "net.l2", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui"],
     "net_access": [
       {

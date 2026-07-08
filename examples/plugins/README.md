@@ -286,7 +286,15 @@ stable/preview 插件注册 object 或 UI 入口时必须声明 sha256。跨架�
 - `wan_core`：协议中立 WAN handoff 示例，消费标准化 session，创建 host veth 到 vtap 的接入。
 - `lan_core`：LAN bridge 和 synthetic Egress NAT plan 示例。
 - `vtolocal`：vtap 和本机接口/路由 handoff 示例。
-- `pppoe_client`：Goja + raw L2 PPPoE 控制面和 TC PPPoE 隧道插件；已提供 `test-control-node.js`、`test-blackbox-linux.sh` 和 `scripts/test-plugin-pppoe-linux.sh`。控制面自测覆盖 discovery、PAP/CHAP、IPv6CP、DHCPv6-PD、keepalive/redial、disconnect 和 tunnel map 写入；黑盒测试通过真实 `forward` 进程、HTTP 插件 API、rp-pppoe server/pppd AC、ping 和 iperf3 验证 TC 隧道真实流量。Linux 测试依赖 `ethtool` 并会准备 MTU/offload；生产使用前仍应在目标运营商/AC 上跑真实断线重拨、IPv4/IPv6/PD、长流稳定性和目标拓扑吞吐验收。
+- `pppoe_client`：Goja + raw L2 PPPoE 控制面和 TC PPPoE 隧道插件；插件目录内保留控制面自测和 Linux 黑盒脚本，覆盖 discovery、PAP/CHAP、IPv6CP、DHCPv6-PD、keepalive/redial、disconnect 和 tunnel map 写入。生产使用前仍应在目标运营商/AC 上跑真实断线重拨、IPv4/IPv6/PD、长流稳定性和目标拓扑吞吐验收。
+
+## 验收边界
+
+仓库只保留构建、打包和 manifest 校验脚本；长稳、性能、PPPoE 真实环境这类验收脚本按本地环境维护，不进入默认源码树。
+
+- 常规代码测试使用 `go test ./...` 和 `node --test internal/app/web_test/*.test.js`。
+- 示例插件发布前使用 `scripts/verify-example-plugin-manifests.sh` 和 `scripts/package-example-plugins.sh` 校验 slim manifest、control hash、runtime 注册和打包结果。
+- 涉及 netns、TC/XDP、PPPoE AC、吞吐和断线重拨的测试必须在目标 Linux/运营商环境单独验收，避免把一次性测试机脚本固化到项目入口。
 
 ## 编写建议
 
