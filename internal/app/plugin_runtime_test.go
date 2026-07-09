@@ -2194,6 +2194,202 @@ exports.onTimer = function () {
 	}
 }
 
+func TestPluginGojaControlRegistrationRejectsSideEffectAPIs(t *testing.T) {
+	cases := []struct {
+		name   string
+		script string
+	}{
+		{name: "kv_set", script: `kv.set('leak', {value: true});`},
+		{name: "resource_set", script: `resources.set('settings', 'alpha', {value: true});`},
+		{name: "plugin_resource_set", script: `plugins.resources.set('target_plugin', 'settings', 'alpha', {value: true});`},
+		{name: "plugin_action_call", script: `plugins.actions.call('target_plugin', 'apply', {});`},
+		{name: "ebpf_map_put", script: `ebpf.mapPut('bindings_v4', '01020304', '11121314');`},
+		{name: "timer_set_timeout", script: `timer.setTimeout('leak', 1000, {});`},
+		{name: "worker_call", script: `worker.call('bg', 'onWorker', {});`},
+		{name: "net_link_write", script: `net.link.ensureVeth({host: 'fwd0', peer: 'fwd1'});`},
+		{name: "net_l2_send", script: `net.l2.send({interface: 'fwd0', ethertype: 2048, payload: '00'});`},
+		{name: "net_udp_send", script: `net.udp.send({interface: 'fwd0', remote_ip: '223.5.5.5', remote_port: 53, payload: '00'});`},
+		{name: "secret_set", script: `secret.set('leak', 'value');`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js",
+    "permissions": [
+      "ebpf.map_write",
+      "kv",
+      "net.admin",
+      "net.l2",
+      "net.udp",
+      "plugin.action",
+      "plugin.resource",
+      "resource",
+      "secret",
+      "timer",
+      "worker"
+    ],
+    "resource_access": [{
+      "plugin": "target_plugin",
+      "resource": "settings",
+      "methods": ["create", "delete", "get", "list", "update"]
+    }],
+    "action_access": [{
+      "plugin": "target_plugin",
+      "actions": ["apply"]
+    }],
+    "net_access": [{
+      "interfaces": ["fwd*"],
+      "operations": [
+        "addr.write",
+        "l2",
+        "link.create",
+        "link.delete",
+        "link.master",
+        "link.offload",
+        "link.read",
+        "link.state",
+        "route.write",
+        "udp"
+      ]
+    }]
+  }
+}`)
+			writePluginControlScript(t, dir, "control_plugin", tc.script+"\nexports.onWorker = function () {};\n")
+			writeTestPlugin(t, dir, "target_plugin", `{
+  "api_version": "v1",
+  "id": "target_plugin",
+  "name": "Target Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "resources": [{
+    "id": "settings",
+    "methods": ["create", "delete", "get", "list", "update"],
+    "runtime_update": "manual"
+  }],
+  "actions": [{
+    "id": "apply",
+    "runtime_update": "manual"
+  }]
+}`)
+
+			db := openTestDB(t)
+			controller := &pluginControlMapControllerTest{}
+			rt := newPluginControlRuntime(db, &Config{PluginsDir: dir}, controller).(*gojaPluginControlRuntime)
+			rt.netAdmin = &pluginControlNetAdminTest{}
+			t.Cleanup(func() { _ = rt.Close() })
+
+			snapshot := rt.Reconcile(loadPluginCatalogWithState(&Config{PluginsDir: dir}, db))
+			state, ok := snapshot.stateFor("control_plugin")
+			if !ok || state.Error == "" {
+				t.Fatalf("runtime state = %+v, want registration error", state)
+			}
+			if !strings.Contains(state.Error, "unavailable during plugin registration") {
+				t.Fatalf("registration error = %q, want registration-phase permission error", state.Error)
+			}
+			var recordCount int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM plugin_records`).Scan(&recordCount); err != nil {
+				t.Fatalf("count plugin_records error = %v", err)
+			}
+			if recordCount != 0 {
+				t.Fatalf("plugin_records count = %d, want no registration side effects", recordCount)
+			}
+			if timers := rt.pluginTimerList("control_plugin"); len(timers) != 0 {
+				t.Fatalf("timers after failed registration = %+v, want none", timers)
+			}
+			if workers := rt.pluginWorkerList("control_plugin"); len(workers) != 0 {
+				t.Fatalf("workers after failed registration = %+v, want none", workers)
+			}
+			if len(controller.calls) != 0 {
+				t.Fatalf("map controller calls = %+v, want none", controller.calls)
+			}
+			if calls := rt.netAdmin.(*pluginControlNetAdminTest).calls; len(calls) != 0 {
+				t.Fatalf("net admin calls = %+v, want none", calls)
+			}
+		})
+	}
+}
+
+func TestPluginStateDisableInterruptsRunningControlHandler(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{
+    "id": "spin",
+    "runtime_update": "runtime_apply"
+  }],
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv"]
+  }
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onAction = function () {
+  kv.set('started', {value: true});
+  for (;;) {}
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	var plugin LoadedPlugin
+	for _, item := range catalog.Plugins {
+		if item.ID == "control_plugin" {
+			plugin = item
+			break
+		}
+	}
+	if plugin.ID == "" {
+		t.Fatalf("control_plugin not found in catalog %+v", catalog.Plugins)
+	}
+	action := pluginActionByIDForTest(t, plugin, "spin")
+	if !pluginControlVMExistsForTest(rt, "control_plugin") {
+		t.Fatal("control VM missing after initial reconcile")
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`))
+	}()
+	waitForPluginRecordForTest(t, db, "control_plugin", pluginControlKVResourceID, "started", 2*time.Second)
+
+	startedAt := time.Now()
+	if err := store.SetPluginEnabled(db, "control_plugin", false); err != nil {
+		t.Fatalf("SetPluginEnabled(control_plugin false) error = %v", err)
+	}
+	rt.Reconcile(loadPluginCatalogWithControlRegistrationAndState(cfg, db))
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("ApplyPluginAction(spin) error = nil, want interrupt error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ApplyPluginAction(spin) did not return promptly after plugin disable")
+	}
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("disable interrupt took %s, want prompt return", elapsed)
+	}
+	if pluginControlVMExistsForTest(rt, "control_plugin") {
+		t.Fatal("control VM still present after disabling running plugin")
+	}
+}
+
 func TestPluginCatalogFingerprintDetectsPluginFileChanges(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{PluginsDir: dir}

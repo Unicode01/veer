@@ -137,15 +137,17 @@ type pluginControlResult struct {
 }
 
 type pluginControlVM struct {
-	rt         *gojaPluginControlRuntime
-	pluginID   string
-	key        string
-	mode       string
-	workerName string
-	requests   chan pluginControlRequest
-	stop       chan struct{}
-	done       chan struct{}
-	stopOnce   sync.Once
+	rt             *gojaPluginControlRuntime
+	pluginID       string
+	key            string
+	mode           string
+	workerName     string
+	requests       chan pluginControlRequest
+	stop           chan struct{}
+	done           chan struct{}
+	stopOnce       sync.Once
+	currentMu      sync.Mutex
+	currentRuntime *goja.Runtime
 }
 
 type pluginControlWorkerKey struct {
@@ -625,13 +627,25 @@ func (vm *pluginControlVM) dispatch(plugin LoadedPlugin, event pluginControlEven
 }
 
 func (vm *pluginControlVM) loop() {
-	defer close(vm.done)
+	defer func() {
+		vm.setCurrentRuntime(nil)
+		close(vm.done)
+	}()
 	var host *pluginControlHost
 	for {
 		select {
 		case <-vm.stop:
 			return
+		default:
+		}
+		select {
+		case <-vm.stop:
+			return
 		case req := <-vm.requests:
+			if vm.stopped() {
+				vm.reply(req, pluginControlResult{err: errPluginRuntimeTargetNotLoaded})
+				return
+			}
 			if host == nil {
 				var err error
 				host, err = vm.init(req.plugin)
@@ -653,6 +667,7 @@ func (vm *pluginControlVM) init(plugin LoadedPlugin) (*pluginControlHost, error)
 		return nil, err
 	}
 	runtime := goja.New()
+	vm.setCurrentRuntime(runtime)
 	host := &pluginControlHost{
 		vm:                runtime,
 		db:                vm.rt.db,
@@ -723,12 +738,37 @@ func (vm *pluginControlVM) reply(req pluginControlRequest, result pluginControlR
 func (vm *pluginControlVM) stopVM() {
 	vm.stopOnce.Do(func() {
 		close(vm.stop)
+		vm.interruptCurrentRuntime("plugin control VM stopped")
 		select {
 		case <-vm.done:
 		case <-time.After(pluginControlExecutionLockTimeout):
 			log.Printf("plugin control VM %s/%s did not stop before timeout", vm.pluginID, vm.workerName)
 		}
 	})
+}
+
+func (vm *pluginControlVM) stopped() bool {
+	select {
+	case <-vm.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (vm *pluginControlVM) setCurrentRuntime(runtime *goja.Runtime) {
+	vm.currentMu.Lock()
+	vm.currentRuntime = runtime
+	vm.currentMu.Unlock()
+}
+
+func (vm *pluginControlVM) interruptCurrentRuntime(reason string) {
+	vm.currentMu.Lock()
+	runtime := vm.currentRuntime
+	vm.currentMu.Unlock()
+	if runtime != nil {
+		runtime.Interrupt(reason)
+	}
 }
 
 func withPluginControlTimeout(vm *goja.Runtime, fn func() error) error {
