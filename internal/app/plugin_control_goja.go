@@ -2432,7 +2432,7 @@ func (h *pluginControlHost) requiredTargetPluginResource(pluginID string, resour
 		h.runtime.mu.Unlock()
 	}
 	if !found {
-		catalog := loadPluginCatalogWithControlRegistration(h.cfg)
+		catalog := loadPluginCatalogWithControlRegistrationAndState(h.cfg, h.db)
 		for _, candidate := range catalog.Plugins {
 			if candidate.ID == pluginID {
 				plugin = candidate
@@ -2472,7 +2472,7 @@ func (h *pluginControlHost) requiredTargetPluginAction(pluginID string, actionID
 		h.runtime.mu.Unlock()
 	}
 	if !found {
-		catalog := loadPluginCatalogWithControlRegistration(h.cfg)
+		catalog := loadPluginCatalogWithControlRegistrationAndState(h.cfg, h.db)
 		for _, candidate := range catalog.Plugins {
 			if candidate.ID == pluginID {
 				plugin = candidate
