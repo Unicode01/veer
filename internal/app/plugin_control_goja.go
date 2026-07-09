@@ -488,6 +488,9 @@ func (rt *gojaPluginControlRuntime) getPluginControlVM(plugin LoadedPlugin, mode
 		old = existing
 	}
 	oldWorkers := rt.pluginControlWorkersLocked(plugin.ID)
+	if old != nil {
+		rt.clearPluginTimersLocked(plugin.ID)
+	}
 	vm := newPluginControlVM(rt, plugin.ID, key, mode, "")
 	rt.controlVMs[plugin.ID] = vm
 	rt.mu.Unlock()
@@ -3293,6 +3296,15 @@ func (rt *gojaPluginControlRuntime) clearPluginTimerLocked(key pluginControlTime
 func (rt *gojaPluginControlRuntime) cancelInactivePluginTimersLocked(active map[string]LoadedPlugin) {
 	for key := range rt.timers {
 		if _, ok := active[key.pluginID]; ok {
+			continue
+		}
+		rt.clearPluginTimerLocked(key)
+	}
+}
+
+func (rt *gojaPluginControlRuntime) clearPluginTimersLocked(pluginID string) {
+	for key := range rt.timers {
+		if key.pluginID != pluginID {
 			continue
 		}
 		rt.clearPluginTimerLocked(key)
