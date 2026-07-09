@@ -51,6 +51,8 @@ const (
 	pluginControlTimerRuntimeStatusOK  = "completed"
 )
 
+var errPluginControlDisabledByState = errors.New("plugin is disabled")
+
 var pluginControlReservedMapNames = map[string]string{
 	"tc_prog_chain_v4": "shared fvtap TC tail-call chain",
 	"tc_plugin_ctx_v4": "shared fvtap TC packet context",
@@ -330,6 +332,9 @@ func (rt *gojaPluginControlRuntime) ApplyPluginResourceData(plugin LoadedPlugin,
 	if rt == nil || rt.db == nil || plugin.controlMainPath == "" {
 		return errPluginRuntimeTargetNotLoaded
 	}
+	if err := rt.requirePluginEnabledForControl(plugin.ID); err != nil {
+		return err
+	}
 	rt.ensurePluginCatalogForControlEvents()
 	rt.registerPluginForControlEvents(plugin)
 	return rt.runPluginControl(plugin, pluginControlEvent{
@@ -342,6 +347,9 @@ func (rt *gojaPluginControlRuntime) ApplyPluginResourceData(plugin LoadedPlugin,
 func (rt *gojaPluginControlRuntime) ApplyPluginAction(plugin LoadedPlugin, action PluginAction, payload json.RawMessage) error {
 	if rt == nil || rt.db == nil || plugin.controlMainPath == "" {
 		return errPluginRuntimeTargetNotLoaded
+	}
+	if err := rt.requirePluginEnabledForControl(plugin.ID); err != nil {
+		return err
 	}
 	rt.ensurePluginCatalogForControlEvents()
 	rt.registerPluginForControlEvents(plugin)
@@ -411,6 +419,54 @@ func (rt *gojaPluginControlRuntime) registerPluginForControlEvents(plugin Loaded
 		return
 	}
 	rt.plugins[plugin.ID] = plugin
+}
+
+func (rt *gojaPluginControlRuntime) requirePluginEnabledForControl(pluginID string) error {
+	if rt == nil || rt.db == nil {
+		return nil
+	}
+	state, err := store.PluginStateOrNil(rt.db, pluginID)
+	if err != nil {
+		return fmt.Errorf("plugin %s state lookup failed: %w", pluginID, err)
+	}
+	if state == nil || state.Enabled {
+		return nil
+	}
+	rt.deactivatePluginControl(pluginID)
+	return fmt.Errorf("%w: %s", errPluginControlDisabledByState, pluginID)
+}
+
+func (rt *gojaPluginControlRuntime) deactivatePluginControl(pluginID string) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return
+	}
+	delete(rt.plugins, pluginID)
+	rt.clearPluginTimersLocked(pluginID)
+	vms := make([]*pluginControlVM, 0)
+	if vm := rt.controlVMs[pluginID]; vm != nil {
+		vms = append(vms, vm)
+		delete(rt.controlVMs, pluginID)
+	}
+	for key, vm := range rt.pluginWorkers {
+		if key.pluginID != pluginID {
+			continue
+		}
+		vms = append(vms, vm)
+		delete(rt.pluginWorkers, key)
+	}
+	if rt.snapshot.Plugins != nil {
+		rt.snapshot.Plugins[pluginID] = disabledPluginRuntimeState()
+	}
+	if rt.snapshot.Surfaces != nil {
+		delete(rt.snapshot.Surfaces, pluginID)
+	}
+	rt.mu.Unlock()
+	stopPluginControlVMs(vms)
 }
 
 func loadedPluginHasRuntimeSurface(plugin LoadedPlugin) bool {
@@ -3411,6 +3467,21 @@ func (rt *gojaPluginControlRuntime) firePluginTimer(key pluginControlTimerKey, g
 		rt.timers[key] = state
 	}
 	rt.mu.Unlock()
+
+	if timerErr := rt.requirePluginEnabledForControl(plugin.ID); timerErr != nil {
+		if errors.Is(timerErr, errPluginControlDisabledByState) {
+			return
+		}
+		log.Printf("plugin control timer %s/%s failed: %v", key.pluginID, key.name, timerErr)
+		_ = store.UpsertPluginRuntimeStatus(rt.db, store.PluginRuntimeStatus{
+			PluginID:   key.pluginID,
+			TargetType: pluginControlTimerRuntimeTarget,
+			TargetID:   key.name,
+			Status:     pluginControlTimerRuntimeStatusErr,
+			LastError:  timerErr.Error(),
+		})
+		return
+	}
 
 	timerErr := rt.runPluginControl(plugin, pluginControlEvent{Kind: "timer", Timer: &spec}, true)
 	if timerErr == nil {

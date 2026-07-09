@@ -2117,6 +2117,83 @@ exports.onTimer = function () {
 	}
 }
 
+func TestPluginGojaControlDisabledCurrentPluginStopsStaleEvents(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "resources": [{
+    "id": "settings",
+    "methods": ["list", "get", "create", "update", "delete"],
+    "runtime_update": "runtime_apply"
+  }],
+  "actions": [{
+    "id": "apply",
+    "runtime_update": "runtime_apply"
+  }],
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv", "timer"]
+  }
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onReconcile = function () {
+  timer.setInterval('stale_timer', 60000, {});
+};
+exports.onAction = function () {
+  kv.set('action_ran', {value: true});
+};
+exports.onResourceApply = function () {
+  kv.set('resource_ran', {value: true});
+};
+exports.onTimer = function () {
+  kv.set('timer_ran', {value: true});
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	plugin := loadTestPluginByID(t, cfg, "control_plugin")
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	rt.Reconcile(loadPluginCatalogWithControlRegistrationAndState(cfg, db))
+	if !pluginControlVMExistsForTest(rt, "control_plugin") {
+		t.Fatal("control VM missing after initial reconcile")
+	}
+	if timers := rt.pluginTimerList("control_plugin"); len(timers) != 1 || timers[0]["name"] != "stale_timer" {
+		t.Fatalf("timers after initial reconcile = %+v, want stale_timer", timers)
+	}
+	if err := store.SetPluginEnabled(db, "control_plugin", false); err != nil {
+		t.Fatalf("SetPluginEnabled(control_plugin false) error = %v", err)
+	}
+
+	firePluginTimerForTest(t, rt, "control_plugin", "stale_timer")
+	if pluginControlVMExistsForTest(rt, "control_plugin") {
+		t.Fatal("control VM still present after disabled timer event")
+	}
+	if timers := rt.pluginTimerList("control_plugin"); len(timers) != 0 {
+		t.Fatalf("timers after disabled timer event = %+v, want none", timers)
+	}
+	if err := rt.ApplyPluginAction(plugin, pluginActionByIDForTest(t, plugin, "apply"), json.RawMessage(`{}`)); err == nil || !strings.Contains(err.Error(), "plugin is disabled") {
+		t.Fatalf("ApplyPluginAction(disabled current plugin) error = %v, want disabled error", err)
+	}
+	if err := rt.ApplyPluginResourceData(plugin, pluginResourceByIDForTest(t, plugin, "settings"), []PluginResourceRecord{{
+		Key:     "alpha",
+		Enabled: true,
+		Data:    json.RawMessage(`{"name":"alpha"}`),
+	}}); err == nil || !strings.Contains(err.Error(), "plugin is disabled") {
+		t.Fatalf("ApplyPluginResourceData(disabled current plugin) error = %v, want disabled error", err)
+	}
+	for _, key := range []string{"timer_ran", "action_ran", "resource_ran"} {
+		if _, err := store.GetPluginRecord(db, "control_plugin", pluginControlKVResourceID, key); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("GetPluginRecord(%s) error = %v, want sql.ErrNoRows", key, err)
+		}
+	}
+}
+
 func TestPluginCatalogFingerprintDetectsPluginFileChanges(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{PluginsDir: dir}
