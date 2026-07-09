@@ -670,6 +670,31 @@
     return stage === 'post_lookup' || stage === 'next_forward' || priority > corePriority;
   }
 
+  function declaredHookPipelineStage(hook, corePriority) {
+    const stage = String(hook && hook.stage || '').toLowerCase();
+    const priority = typeof (hook && hook.priority) === 'number' ? hook.priority : 0;
+    if (stage === 'pre_forward' || stage === 'post_lookup' || stage === 'pre_reply' || stage === 'post_reply') return stage;
+    if (stage === 'forward') {
+      if (priority < corePriority) return 'pre_forward';
+      if (priority > corePriority) return 'post_lookup';
+      return '';
+    }
+    if (stage === 'reply') {
+      if (priority < corePriority) return 'pre_reply';
+      if (priority > corePriority) return 'post_reply';
+      return '';
+    }
+    return '';
+  }
+
+  function isDeclaredFVTapPipelineHook(hook, corePriority) {
+    const engine = String(hook && hook.engine || 'tc').toLowerCase();
+    const attach = String(hook && hook.attach || 'ingress').toLowerCase();
+    const mode = String(hook && hook.mode || '').toLowerCase();
+    if (engine !== 'tc' || attach === 'egress' || attach === 'none' || mode === 'control') return false;
+    return !!declaredHookPipelineStage(hook, corePriority);
+  }
+
   function pluginHookSegment(plugin, hook, currentPluginID) {
     const label = plugin && plugin.id || hook && hook.id || app.t('common.dash');
     return {
@@ -735,17 +760,18 @@
     const currentID = plugin && plugin.id || '';
     if (!currentID) return [];
     const data = Array.isArray(app.state.plugins.data) ? app.state.plugins.data : [];
+    const corePriority = pluginPipelineCorePriority();
     const all = [];
     data.forEach((candidate) => {
       const hooks = Array.isArray(candidate && candidate.hooks) ? candidate.hooks : [];
       hooks.forEach((hook) => {
+        if (!isDeclaredFVTapPipelineHook(hook, corePriority)) return;
         all.push({ plugin: candidate, hook });
       });
     });
     const current = all.filter((item) => item.plugin && item.plugin.id === currentID);
     if (!current.length) return [];
     const relevantKeys = new Set(current.map(hookGroupKey));
-    const corePriority = pluginPipelineCorePriority();
     const groups = [];
     const groupMap = new Map();
     all.forEach((item) => {
