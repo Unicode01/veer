@@ -994,6 +994,62 @@ func TestNormalizePluginHookAllowsPhysicalPipelineStages(t *testing.T) {
 	}
 }
 
+func TestKernelPluginPipelineKeepsXDPHooksRegistrationOnly(t *testing.T) {
+	enabled := true
+	cfg := &Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+	}
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:      "xdp_probe",
+			Name:    "XDP Probe",
+			Version: "0.1.0",
+			Kind:    "pipeline",
+		},
+		Objects: []PluginObject{{
+			ID:     "probe",
+			Path:   "probe.o",
+			Status: pluginObjectStatusVerified,
+			Programs: []PluginObjectProgram{{
+				ID:      "xdp_ingress",
+				Section: "xdp",
+				Type:    kernelEngineXDP,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:         "xdp-ingress",
+			Engine:     kernelEngineXDP,
+			Attach:     "ingress",
+			Stage:      "forward",
+			Priority:   10,
+			Program:    "probe:xdp_ingress",
+			Mode:       "observe",
+			Interfaces: []string{"lo"},
+		}},
+		Status: pluginStatusActive,
+	}
+	catalog := PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}}
+
+	if kernelPluginPipelineCatalogHasRuntimeHooks(catalog, cfg) {
+		t.Fatal("kernelPluginPipelineCatalogHasRuntimeHooks() = true, want false for xdp-only plugin")
+	}
+	desired, states := buildKernelPluginPipelineDesiredWithConfig(catalog, cfg, true)
+	if len(desired) != 0 {
+		t.Fatalf("desired = %+v, want no tc pipeline hooks for xdp-only plugin", desired)
+	}
+	state, ok := states["xdp_probe"]
+	if !ok {
+		t.Fatal("missing xdp_probe runtime state")
+	}
+	if state.Mode != pluginRuntimeModeRegistered || state.Attachable || state.Attached || state.AttachmentCount != 0 {
+		t.Fatalf("state = %+v, want registered non-attachable xdp hook", state)
+	}
+	if !strings.Contains(state.Reason, "xdp hooks are registration-only in the tc pipeline") {
+		t.Fatalf("state reason = %q, want xdp registration-only reason", state.Reason)
+	}
+}
+
 func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
 		t.Skipf("set %s=1 to run the privileged TC plugin pipeline smoke test", kernelPluginPipelineTestEnv)

@@ -247,6 +247,48 @@ func TestBuildDesiredPluginDataplaneSkipsAttachNone(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredPluginDataplaneKeepsXDPHooksRegistrationOnly(t *testing.T) {
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:      "xdp_probe",
+			Name:    "XDP Probe",
+			Version: "0.1.0",
+			Kind:    "pipeline",
+		},
+		Objects: []PluginObject{{
+			ID:     "probe",
+			Path:   "probe.o",
+			Status: pluginObjectStatusVerified,
+			Programs: []PluginObjectProgram{{
+				ID:      "xdp_ingress",
+				Section: "xdp",
+				Type:    kernelEngineXDP,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:         "xdp-ingress",
+			Engine:     kernelEngineXDP,
+			Attach:     "ingress",
+			Stage:      "forward",
+			Program:    "probe:xdp_ingress",
+			Mode:       "observe",
+			Interfaces: []string{"lo"},
+		}},
+		Status: pluginStatusActive,
+	}
+
+	item, state := buildDesiredPluginDataplane(plugin)
+	if len(item.attachments) != 0 {
+		t.Fatalf("attachments = %+v, want none for registration-only xdp hook", item.attachments)
+	}
+	if state.Mode != pluginRuntimeModeRegistered || state.Attachable || state.Attached || state.AttachmentCount != 0 {
+		t.Fatalf("state = %+v, want registered non-attachable xdp hook", state)
+	}
+	if !strings.Contains(state.Reason, "xdp dataplane plugins are not attached yet") {
+		t.Fatalf("state reason = %q, want xdp registration-only reason", state.Reason)
+	}
+}
+
 func tcPluginFilterPresent(t *testing.T, ifaceName, pluginID string) bool {
 	t.Helper()
 
