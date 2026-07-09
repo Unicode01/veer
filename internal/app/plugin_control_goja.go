@@ -2444,6 +2444,7 @@ func (h *pluginControlHost) requiredTargetPluginResource(pluginID string, resour
 	if !found || plugin.Builtin || plugin.Status != pluginStatusActive {
 		h.throwf("plugin %s is not active", pluginID)
 	}
+	h.requireTargetPluginEnabled(pluginID)
 	for _, resource := range plugin.Resources {
 		if resource.ID == resourceID {
 			return plugin, resource
@@ -2484,6 +2485,7 @@ func (h *pluginControlHost) requiredTargetPluginAction(pluginID string, actionID
 	if !found || plugin.Builtin || plugin.Status != pluginStatusActive {
 		h.throwf("plugin %s is not active", pluginID)
 	}
+	h.requireTargetPluginEnabled(pluginID)
 	for _, action := range plugin.Actions {
 		if action.ID == actionID {
 			return plugin, action
@@ -2491,6 +2493,19 @@ func (h *pluginControlHost) requiredTargetPluginAction(pluginID string, actionID
 	}
 	h.throwf("action %s/%s is not declared", pluginID, actionID)
 	return LoadedPlugin{}, PluginAction{}
+}
+
+func (h *pluginControlHost) requireTargetPluginEnabled(pluginID string) {
+	if h.db == nil {
+		return
+	}
+	state, err := store.PluginStateOrNil(h.db, pluginID)
+	if err != nil {
+		h.throwf("plugin %s state lookup failed: %v", pluginID, err)
+	}
+	if state != nil && !state.Enabled {
+		h.throwf("plugin %s is not active", pluginID)
+	}
 }
 
 func (h *pluginControlHost) requiredTokenArg(call goja.FunctionCall, index int, name string) string {
