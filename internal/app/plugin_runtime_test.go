@@ -4208,6 +4208,62 @@ exports.onAction = function () {
 	}
 }
 
+func TestPluginGojaControlPluginResourceSetRejectsDisabledTarget(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "source_plugin", `{
+  "api_version": "v1",
+  "id": "source_plugin",
+  "name": "Source Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{
+    "id": "apply",
+    "runtime_update": "runtime_apply"
+  }],
+  "control": {
+    "main": "control.js",
+    "permissions": ["plugin.resource"],
+    "resource_access": [{
+      "plugin": "target_plugin",
+      "resource": "settings",
+      "methods": ["create", "update", "get"]
+    }]
+  }
+}`)
+	writePluginControlScript(t, dir, "source_plugin", `
+exports.onAction = function () {
+  plugins.resources.set('target_plugin', 'settings', 'alpha', {name: 'alpha'});
+};
+`)
+	writeTestPlugin(t, dir, "target_plugin", `{
+  "api_version": "v1",
+  "id": "target_plugin",
+  "name": "Target Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "resources": [{
+    "id": "settings",
+    "methods": ["create", "update", "get"],
+    "runtime_update": "manual"
+  }]
+}`)
+
+	plugin := loadTestPluginByID(t, &Config{PluginsDir: dir}, "source_plugin")
+	db := openTestDB(t)
+	if err := store.SetPluginEnabled(db, "target_plugin", false); err != nil {
+		t.Fatalf("SetPluginEnabled(target_plugin false) error = %v", err)
+	}
+	rt := newPluginControlRuntime(db, &Config{PluginsDir: dir}, nil)
+	t.Cleanup(func() { _ = rt.Close() })
+	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "plugin target_plugin is not active") {
+		t.Fatalf("ApplyPluginAction() error = %v, want disabled target error", err)
+	}
+	if _, err := store.GetPluginRecord(db, "target_plugin", "settings", "alpha"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetPluginRecord(target settings/alpha) error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestPluginGojaControlPluginActionCallRequiresPermission(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "source_plugin", `{
@@ -4314,6 +4370,69 @@ exports.onAction = function () {
 	err := rt.ApplyPluginAction(plugin, pluginActionByIDForTest(t, plugin, "run"), json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "action access target_plugin/apply is not declared") {
 		t.Fatalf("ApplyPluginAction() error = %v, want action access error", err)
+	}
+	if _, err := store.GetPluginRecord(db, "target_plugin", pluginControlKVResourceID, "called"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetPluginRecord(target called) error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestPluginGojaControlPluginActionCallRejectsDisabledTarget(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "source_plugin", `{
+  "api_version": "v1",
+  "id": "source_plugin",
+  "name": "Source Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{
+    "id": "run",
+    "runtime_update": "runtime_apply"
+  }],
+  "control": {
+    "main": "control.js",
+    "permissions": ["plugin.action"],
+    "action_access": [{
+      "plugin": "target_plugin",
+      "actions": ["apply"]
+    }]
+  }
+}`)
+	writePluginControlScript(t, dir, "source_plugin", `
+exports.onAction = function () {
+  plugins.actions.call('target_plugin', 'apply', {value: 'alpha'});
+};
+`)
+	writeTestPlugin(t, dir, "target_plugin", `{
+  "api_version": "v1",
+  "id": "target_plugin",
+  "name": "Target Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{
+    "id": "apply",
+    "runtime_update": "runtime_apply"
+  }],
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv"]
+  }
+}`)
+	writePluginControlScript(t, dir, "target_plugin", `
+exports.onAction = function () {
+  kv.set('called', {value: true});
+};
+`)
+
+	plugin := loadTestPluginByID(t, &Config{PluginsDir: dir}, "source_plugin")
+	db := openTestDB(t)
+	if err := store.SetPluginEnabled(db, "target_plugin", false); err != nil {
+		t.Fatalf("SetPluginEnabled(target_plugin false) error = %v", err)
+	}
+	rt := newPluginControlRuntime(db, &Config{PluginsDir: dir}, nil)
+	t.Cleanup(func() { _ = rt.Close() })
+	err := rt.ApplyPluginAction(plugin, pluginActionByIDForTest(t, plugin, "run"), json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "plugin target_plugin is not active") {
+		t.Fatalf("ApplyPluginAction() error = %v, want disabled target error", err)
 	}
 	if _, err := store.GetPluginRecord(db, "target_plugin", pluginControlKVResourceID, "called"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetPluginRecord(target called) error = %v, want sql.ErrNoRows", err)
