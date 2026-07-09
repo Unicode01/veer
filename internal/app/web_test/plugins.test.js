@@ -79,6 +79,13 @@ function collectAttribute(node, name) {
   return parts.join('\n').trim();
 }
 
+function findNodes(node, predicate, out = []) {
+  if (!node) return out;
+  if (predicate(node)) out.push(node);
+  (node.childNodes || []).forEach((child) => findNodes(child, predicate, out));
+  return out;
+}
+
 function createHarness() {
   const notifications = [];
   const openedWindows = [];
@@ -95,11 +102,17 @@ function createHarness() {
     pluginsPagination: makeNode('div')
   };
   const translations = {
+    'common.actions': 'Actions',
     'common.dash': '-',
+    'common.disable': 'Disable',
+    'common.enable': 'Enable',
     'common.no': 'No',
     'common.noMatches': 'No matches.',
+    'common.processing': 'Processing...',
     'common.status': 'Status',
     'common.yes': 'Yes',
+    'errors.operationFailed': 'Operation failed: {{message}}',
+    'noun.plugin': 'Plugin',
     'plugins.catalog.meta': 'External plugin directory: {{dir}}; external plugin scan: {{enabled}}; external dataplane attach: {{attach}}',
     'plugins.chain.empty': 'TC path: legacy fvtap fast path; no external plugins are chained around fvtap core.',
     'plugins.chain.meta': 'TC pipeline: {{chain}}',
@@ -132,12 +145,14 @@ function createHarness() {
     'plugins.runtime.attachments': 'Attachments',
     'plugins.runtime.builtin': 'Built-in dataplane',
     'plugins.runtime.dataplane': 'Dataplane enabled',
+    'plugins.runtime.disabled': 'Disabled',
     'plugins.runtime.error': 'Runtime error',
     'plugins.runtime.invalid': 'Validation failed',
     'plugins.runtime.registered': 'Registered',
     'plugins.source': 'Source',
     'plugins.status.active': 'Loaded',
     'plugins.status.builtin': 'Built-in',
+    'plugins.status.disabled': 'Disabled',
     'plugins.status.error': 'Error',
     'plugins.chain.title': 'TC Pipeline',
     'plugins.chain.legacy': 'legacy fvtap',
@@ -173,7 +188,9 @@ function createHarness() {
     'plugins.link.node': 'Node',
     'plugins.ui.assets': 'Static Assets',
     'plugins.ui.emptyTitle': 'No Plugin Selected',
-    'plugins.ui.loadedMeta': '{{id}} / {{entry}}'
+    'plugins.ui.loadedMeta': '{{id}} / {{entry}}',
+    'toast.disabled': '{{item}} disabled.',
+    'toast.enabled': '{{item}} enabled.'
   };
 
   const app = {
@@ -477,6 +494,11 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
     .filter((node) => node.dataset && node.dataset.pluginId);
   assert.equal(detailButtons.length, 2);
   assert.deepEqual(detailButtons.map((node) => node.dataset.pluginId), ['fvtap', 'packet_observer']);
+  const toggleButtons = findNodes(app.el.pluginsBody, (node) => String(node.className || '').includes('btn-toggle-plugin'));
+  assert.equal(toggleButtons.length, 1);
+  assert.equal(toggleButtons[0].dataset.pluginId, 'packet_observer');
+  assert.equal(toggleButtons[0].dataset.enabled, '0');
+  assert.equal(collectText(toggleButtons[0]), 'Disable');
   assert.match(collectText(app.el.pluginsCatalogMeta), /Plugin Catalog/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /plugins\/runtime/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Dataplane No/);
@@ -487,6 +509,49 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   assert.match(collectText(app.el.pluginsChainMeta), /apply/);
   assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: pre_forward[slot 10 packet_observer.observe-ingress (priority=10)] -> fvtap core(priority=1000) -> fvtap apply/redirect');
   assert.deepEqual(app.lastTableVisibility, { tableId: 'pluginsTable', visible: true });
+});
+
+test('togglePluginEnabled updates persisted plugin state and refreshes catalog', async () => {
+  const app = createHarness();
+  const calls = [];
+  let renderCount = 0;
+  app.state.pendingRows = {};
+  app.isRowPending = function isRowPending(type, id) {
+    return !!app.state.pendingRows[type + ':' + id];
+  };
+  app.setRowPending = function setRowPending(type, id, pending) {
+    const key = type + ':' + id;
+    if (pending) app.state.pendingRows[key] = true;
+    else delete app.state.pendingRows[key];
+  };
+  app.renderPluginsTable = function renderPluginsTableForToggleTest() {
+    renderCount += 1;
+  };
+  app.apiCall = async function apiCall(method, reqPath, body) {
+    calls.push({
+      method,
+      reqPath,
+      body,
+      pending: app.isRowPending('plugin', 'packet_observer')
+    });
+    return { plugin_id: 'packet_observer', enabled: body.enabled };
+  };
+  app.loadPlugins = async function loadPluginsForToggleTest() {
+    calls.push({ method: 'LOAD_PLUGINS' });
+  };
+
+  await app.togglePluginEnabled('packet_observer', false);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), {
+    method: 'PUT',
+    reqPath: '/api/plugins/packet_observer/state',
+    body: { enabled: false },
+    pending: true
+  });
+  assert.deepEqual(calls[1], { method: 'LOAD_PLUGINS' });
+  assert.equal(app.isRowPending('plugin', 'packet_observer'), false);
+  assert.equal(renderCount, 2);
+  assert.deepEqual(app.__notifications, [{ type: 'success', message: 'Plugin disabled.' }]);
 });
 
 test('renderPluginsTable applies plugin search filter', () => {

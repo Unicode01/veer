@@ -1959,6 +1959,29 @@ func TestPluginStateAPIDisablesControlSurfaceAndRuntime(t *testing.T) {
     "entry": "index.html"
   }
 }`)
+	writeTestPlugin(t, dir, "lifecycle_plugin", `{
+  "api_version": "v1",
+  "id": "lifecycle_plugin",
+  "name": "Lifecycle Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv", "timer", "worker"]
+  }
+}`)
+	writePluginControlScript(t, dir, "lifecycle_plugin", `
+exports.onReconcile = function () {
+  timer.setTimeout('disable_leak', 5000, {});
+  worker.call('bg', 'onWorker', {});
+};
+exports.onWorker = function () {
+  return {ok: true};
+};
+exports.onTimer = function () {
+  kv.set('disable_timer_fired', {value: true});
+};
+`)
 
 	db := openTestDB(t)
 	cfg := &Config{
@@ -1976,6 +1999,15 @@ func TestPluginStateAPIDisablesControlSurfaceAndRuntime(t *testing.T) {
 	pm.reconcilePluginsForRuntime()
 	if !pluginControlVMExistsForTest(rt, "control_plugin") {
 		t.Fatal("control VM missing after initial reconcile")
+	}
+	if !pluginControlVMExistsForTest(rt, "lifecycle_plugin") {
+		t.Fatal("lifecycle control VM missing after initial reconcile")
+	}
+	if timers := rt.pluginTimerList("lifecycle_plugin"); len(timers) != 1 || timers[0]["name"] != "disable_leak" {
+		t.Fatalf("lifecycle timers after initial reconcile = %+v, want disable_leak", timers)
+	}
+	if workers := rt.pluginWorkerList("lifecycle_plugin"); len(workers) != 1 || workers[0]["name"] != "bg" {
+		t.Fatalf("lifecycle workers after initial reconcile = %+v, want bg worker", workers)
 	}
 
 	req := httptest.NewRequest(http.MethodPut, "/api/plugins/control_plugin/state", strings.NewReader(`{"enabled":false}`))
@@ -2035,6 +2067,47 @@ func TestPluginStateAPIDisablesControlSurfaceAndRuntime(t *testing.T) {
 	}
 	if !pluginControlVMExistsForTest(rt, "control_plugin") {
 		t.Fatal("control VM missing after plugin re-enable")
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/plugins/lifecycle_plugin/state", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable lifecycle plugin status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var lifecycleDisabled pluginStateTestResponse
+	if err := json.NewDecoder(rec.Body).Decode(&lifecycleDisabled); err != nil {
+		t.Fatalf("decode disabled lifecycle plugin state: %v", err)
+	}
+	if lifecycleDisabled.Enabled || lifecycleDisabled.Plugin.Status != pluginStatusDisabled || lifecycleDisabled.Plugin.Runtime.Mode != pluginRuntimeModeDisabled {
+		t.Fatalf("disabled lifecycle plugin response = %+v, want disabled runtime", lifecycleDisabled)
+	}
+	if pluginControlVMExistsForTest(rt, "lifecycle_plugin") {
+		t.Fatal("lifecycle control VM still present after plugin disable")
+	}
+	if timers := rt.pluginTimerList("lifecycle_plugin"); len(timers) != 0 {
+		t.Fatalf("lifecycle timers after disable = %+v, want none", timers)
+	}
+	if workers := rt.pluginWorkerList("lifecycle_plugin"); len(workers) != 0 {
+		t.Fatalf("lifecycle workers after disable = %+v, want none", workers)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/plugins/lifecycle_plugin/state", strings.NewReader(`{"enabled":true}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable lifecycle plugin status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !pluginControlVMExistsForTest(rt, "lifecycle_plugin") {
+		t.Fatal("lifecycle control VM missing after plugin re-enable")
+	}
+	if timers := rt.pluginTimerList("lifecycle_plugin"); len(timers) != 1 || timers[0]["name"] != "disable_leak" {
+		t.Fatalf("lifecycle timers after re-enable = %+v, want disable_leak", timers)
+	}
+	if workers := rt.pluginWorkerList("lifecycle_plugin"); len(workers) != 1 || workers[0]["name"] != "bg" {
+		t.Fatalf("lifecycle workers after re-enable = %+v, want bg worker", workers)
 	}
 }
 
