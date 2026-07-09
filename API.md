@@ -110,6 +110,9 @@ Content-Type: application/json
 - `GET /api/host-network`
 - `GET /api/tags`
 - `GET /api/plugins`
+- `POST /api/plugins/reload`
+- `GET /api/plugins/<id>/state`
+- `PUT /api/plugins/<id>/state`
 
 ### 规则
 
@@ -288,9 +291,10 @@ Content-Type: application/json
 
 字段说明：
 
-- `status`: `builtin` / `active` / `error`
+- `enabled`: 插件级开关状态。内置 `fvtap` 固定为 `true`，外部插件默认 `true`
+- `status`: `builtin` / `active` / `disabled` / `error`
 - `stability`: 插件稳定性等级；`lab` 只适合实验/示例，`preview` 适合受控环境试用，`stable` 表示预期生产可用，`deprecated` 表示不建议新部署。未声明时默认为 `lab`
-- `runtime`: 插件运行时状态；内置 `fvtap` 为 `mode=builtin` 且已挂载。默认配置下外部插件为 `mode=registered`，表示 slim manifest 已发现且 `control.js` runtime surface 已注册/校验，但未进入外部数据面；启用 `plugins_dataplane_enabled=true` 且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
+- `runtime`: 插件运行时状态；内置 `fvtap` 为 `mode=builtin` 且已挂载。禁用外部插件时为 `mode=disabled`，不会暴露 resource/action/UI/assets/hook/object surface，也不会保留 Goja VM、timer 或 worker。默认配置下外部插件为 `mode=registered`，表示 slim manifest 已发现且 `control.js` runtime surface 已注册/校验，但未进入外部数据面；启用 `plugins_dataplane_enabled=true` 且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
 - `runtime.core_priority`: 内置 `fvtap core` 的排序锚点，当前固定为 `1000`
 - `runtime.stability_levels`: 当前服务接受的插件稳定性枚举
 - `runtime.external_dataplane_attach`: 是否允许外部数据面插件。默认 `false`；为 `true` 时当前支持 TC `stage=forward/reply` hook 按 priority 进入内置 `fvtap` pipeline。没有实际可链入插件时，TC 热路径仍保持 legacy/dispatch，不额外进入 pipeline wrapper
@@ -309,6 +313,9 @@ Content-Type: application/json
 
 插件控制面数据接口：
 
+- `POST /api/plugins/reload`：手动重新扫描插件目录、执行 control registration/reconcile，并重新分发受影响的数据面。服务也会定期检查插件目录元数据指纹；插件增删、`plugin.json`、`control.js`、UI 或 eBPF object 文件变更后会自动触发相同的插件 runtime reconcile，并排队重建数据面分发
+- `GET /api/plugins/<id>/state`：读取外部插件的持久启用状态和当前 catalog 中的插件视图。内置 `fvtap` 不支持该接口
+- `PUT /api/plugins/<id>/state`：设置外部插件启用状态，请求体为 `{"enabled":true}` 或 `{"enabled":false}`。禁用会热卸载该插件 runtime surface，停止 Goja control VM、timer、worker，移除 TC pipeline hook，并停止该插件贡献的 `forward_rule_plans` / `egress_nat_plans` synthetic 规则；插件自身资源记录会保留，重新启用后继续使用
 - `GET /api/plugins/<id>/resources/<resource>`：列出 `control.js` 注册且允许 `list` 的资源记录，并返回该资源的 `runtime_status`。支持 `limit` 和 `offset` 查询参数，默认 `limit=1000`，最大 `limit=5000`；响应包含 `total/limit/offset/has_more`
 - `GET /api/plugins/<id>/resources/<resource>/<key>`：读取 `control.js` 注册且允许 `get` 的单条记录
 - `POST /api/plugins/<id>/resources/<resource>`：创建 `control.js` 注册且允许 `create` 的记录，请求体为 `{"key":"optional","data":{...},"enabled":true}`；未提供 `key` 时由服务生成。成功响应包含记录本身和该资源的 `runtime_status`
@@ -717,9 +724,11 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - 外部插件目录缺失不会报错
 - `plugins_enabled = false` 只关闭外部插件扫描，不隐藏内置 `fvtap`
 - `plugins_dataplane_enabled = false` 是默认值；设置为 `true` 后允许外部 TC `stage=forward/reply` 插件按 priority 进入内置 `fvtap` pipeline
+- 外部插件可通过 `PUT /api/plugins/<id>/state` 热启用/禁用；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC hook 和插件生成的 synthetic forward/Egress NAT plan
+- `POST /api/plugins/reload` 会手动重新扫描插件目录；正常运行时也会定期检测插件目录元数据指纹，插件文件增删改后自动 reconcile 并排队重建数据面分发
 - 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
 - 插件静态资源路径为 `/api/plugins/<id>/assets/`，同样需要 Bearer Token
-- `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC 对象围绕核心 `fvtap` priority 进入 forward/reply 的 core 前/后链。插件对象必须声明共享 `tc_prog_chain_v4` prog-array map，`max_entries` 至少为 45，并在处理后 tail-call 回对应 stage 的 continue slot；core 后插件读取匹配上下文时还需要声明共享 `tc_plugin_ctx_v4` map。`hooks.attach({interfaces})` 可让插件在无转发规则时显式请求接口 attachment，但只有显式接口上的 pre-core hook 会在无规则模式加载，不会自动挂所有接口。生产环境应只对可信对象启用
+- `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC 对象围绕核心 `fvtap` priority 进入 forward/reply 的 core 前/后链。插件对象必须声明共享 `tc_prog_chain_v4` prog-array map，`max_entries` 至少为 45，并在处理后 tail-call 回对应 stage 的 continue slot；core 后插件读取匹配上下文时还需要声明共享 `tc_plugin_ctx_v4` map。`hooks.attach({interfaces})` 可让插件在无转发规则时显式请求接口 attachment；无规则模式下 core 前和 core 后 hook 都可加载，但 core 后 hook 只能拿到清空的 `tc_plugin_ctx_v4`，不会有规则或 flow 匹配上下文。不会自动挂所有接口，生产环境应只对可信对象启用
 
 ## 2. 规则接口
 
