@@ -25,6 +25,23 @@ func packetObserverPluginSourceDirForPipelineTest(t *testing.T) string {
 	return filepath.Join(findRepoRoot(t), "examples", "plugins", "packet_observer")
 }
 
+func copyPacketObserverPluginForPipelineTest(t *testing.T, pluginsRoot string) string {
+	t.Helper()
+
+	sourceDir := packetObserverPluginSourceDirForPipelineTest(t)
+	if includeDir := filepath.Join(filepath.Dir(sourceDir), "include"); isDirForPipelineTest(includeDir) {
+		copyDirForTest(t, includeDir, filepath.Join(pluginsRoot, "include"))
+	}
+	pluginDir := filepath.Join(pluginsRoot, "packet_observer")
+	copyDirForTest(t, sourceDir, pluginDir)
+	return pluginDir
+}
+
+func isDirForPipelineTest(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func TestPreparedKernelRulesUseDispatchV4HonorsPluginPipeline(t *testing.T) {
 	transparent := []preparedKernelRule{{
 		spec:  kernelPreparedRuleSpec{Family: ipFamilyIPv4},
@@ -985,10 +1002,8 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Skip("root privileges are required")
 	}
 
-	sourceDir := packetObserverPluginSourceDirForPipelineTest(t)
 	pluginsRoot := t.TempDir()
-	pluginDir := filepath.Join(pluginsRoot, "packet_observer")
-	copyDirForTest(t, sourceDir, pluginDir)
+	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
@@ -1096,10 +1111,8 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitInterfaceWithoutRules(t *tes
 	}
 
 	topology := setupDataplanePerfTopology(t)
-	sourceDir := packetObserverPluginSourceDirForPipelineTest(t)
 	pluginsRoot := t.TempDir()
-	pluginDir := filepath.Join(pluginsRoot, "packet_observer")
-	copyDirForTest(t, sourceDir, pluginDir)
+	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
 	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
@@ -1159,10 +1172,8 @@ func TestKernelPluginPipelineRuntimeReconcilePluginsBootstrapsExplicitInterfaceW
 	}
 
 	topology := setupDataplanePerfTopology(t)
-	sourceDir := packetObserverPluginSourceDirForPipelineTest(t)
 	pluginsRoot := t.TempDir()
-	pluginDir := filepath.Join(pluginsRoot, "packet_observer")
-	copyDirForTest(t, sourceDir, pluginDir)
+	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
 	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 

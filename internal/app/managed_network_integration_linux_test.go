@@ -1139,6 +1139,9 @@ func readManagedNetworkDHCPv4ClientFrame(fd int) (managedNetworkDHCPv4Frame, err
 	for {
 		n, _, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
 			return managedNetworkDHCPv4Frame{}, err
 		}
 		frame, ok := parseManagedNetworkDHCPv4ClientFrame(buf[:n])

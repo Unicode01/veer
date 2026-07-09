@@ -70,7 +70,7 @@ ui.register({static_dir: 'ui', entry: 'index.html'});
 		PluginsDataplaneSetting: &enabled,
 		PluginsDir:              dir,
 	}
-	catalog := loadPluginCatalog(cfg)
+	catalog := loadPluginCatalogWithControlRegistration(cfg)
 	rt := newPluginDataplaneRuntime(cfg)
 	defer rt.Close()
 
