@@ -72,6 +72,18 @@ func assertReconcileCallPrefix(t *testing.T, got [][]Rule, want ...[]int64) {
 	}
 }
 
+func assertKernelRuntimeOnlyCleanupCalls(t *testing.T, got [][]Rule) {
+	t.Helper()
+	if len(got) == 0 {
+		t.Fatal("reconcile calls = none, want at least one cleanup call")
+	}
+	for i, call := range got {
+		if len(call) != 0 {
+			t.Fatalf("reconcile calls[%d] = %#v, want cleanup-only empty calls", i, call)
+		}
+	}
+}
+
 func TestOrderedKernelRuleRuntimeFallsBackToTC(t *testing.T) {
 	xdp := &mockKernelRuntime{
 		available: true,

@@ -124,6 +124,95 @@ func TestOrderedKernelRuntimePrefersTCWhenRuntimeTCPluginHooksActive(t *testing.
 	}
 }
 
+func TestOrderedKernelRuntimeDoesNotFallbackToXDPWhenRuntimeTCPluginHooksActive(t *testing.T) {
+	enabled := true
+	xdp := &mockKernelRuntime{
+		available: true,
+		reconcileResult: map[int64]kernelRuleApplyResult{
+			1: {Running: true, Engine: kernelEngineXDP},
+		},
+	}
+	tc := &mockKernelRuntime{
+		available: true,
+		reconcileResult: map[int64]kernelRuleApplyResult{
+			1: {Error: "tc attach failed"},
+		},
+	}
+	rt := &orderedKernelRuleRuntime{
+		cfg: &Config{
+			PluginsEnabledSetting:   &enabled,
+			PluginsDataplaneSetting: &enabled,
+		},
+		entries: []orderedKernelRuntimeEntry{
+			{name: kernelEngineXDP, rt: xdp},
+			{name: kernelEngineTC, rt: tc},
+		},
+	}
+
+	results, err := rt.ReconcileWithPluginCatalog([]Rule{{ID: 1, Enabled: true}}, PluginCatalog{
+		Plugins: []LoadedPlugin{builtinFVTapPlugin(), stableTCHookPluginForOrderTest()},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileWithPluginCatalog() error = %v", err)
+	}
+	result := results[1]
+	if result.Running || result.Engine == kernelEngineXDP || !strings.Contains(result.Error, "tc attach failed") {
+		t.Fatalf("rule result = %+v, want tc failure without xdp bypass", result)
+	}
+	assertKernelRuntimeOnlyCleanupCalls(t, xdp.reconcileCalls)
+	assertReconcileCallPrefix(t, tc.reconcileCalls, []int64{1})
+}
+
+func TestOrderedKernelRuntimeMigratesRetainedXDPAssignmentsWhenRuntimeTCPluginHooksActive(t *testing.T) {
+	enabled := true
+	xdp := &mockKernelRuntime{
+		available: true,
+		reconcileResult: map[int64]kernelRuleApplyResult{
+			1: {Running: true, Engine: kernelEngineXDP},
+		},
+		assignments: map[int64]string{1: kernelEngineXDP},
+	}
+	tc := &mockKernelRuntime{
+		available: true,
+		reconcileResult: map[int64]kernelRuleApplyResult{
+			1: {Running: true, Engine: kernelEngineTC},
+			2: {Running: true, Engine: kernelEngineTC},
+		},
+		assignments: map[int64]string{
+			1: kernelEngineTC,
+			2: kernelEngineTC,
+		},
+	}
+	rt := &orderedKernelRuleRuntime{
+		cfg: &Config{
+			PluginsEnabledSetting:   &enabled,
+			PluginsDataplaneSetting: &enabled,
+		},
+		entries: []orderedKernelRuntimeEntry{
+			{name: kernelEngineXDP, rt: xdp},
+			{name: kernelEngineTC, rt: tc},
+		},
+	}
+
+	results, err := rt.ReconcileRetainingAssignmentsWithPluginCatalog(
+		map[string][]Rule{
+			kernelEngineXDP: {{ID: 1, Enabled: true}},
+		},
+		[]Rule{{ID: 2, Enabled: true}},
+		PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), stableTCHookPluginForOrderTest()}},
+	)
+	if err != nil {
+		t.Fatalf("ReconcileRetainingAssignmentsWithPluginCatalog() error = %v", err)
+	}
+	for _, id := range []int64{1, 2} {
+		if result := results[id]; !result.Running || result.Engine != kernelEngineTC {
+			t.Fatalf("rule %d result = %+v, want migrated/running tc", id, result)
+		}
+	}
+	assertKernelRuntimeOnlyCleanupCalls(t, xdp.reconcileCalls)
+	assertReconcileCallPrefix(t, tc.reconcileCalls, []int64{1, 2})
+}
+
 func TestOrderedKernelRuntimeKeepsEngineOrderWhenPluginDataplaneDisabled(t *testing.T) {
 	disabled := false
 	xdp := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineXDP}
