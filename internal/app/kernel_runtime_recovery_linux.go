@@ -204,7 +204,7 @@ func (rt *xdpKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResult,
 			newAttachments = append(newAttachments, current)
 			continue
 		}
-		att, err := rt.attachProgramLocked(ifindex, prog, prog, oldAttachments)
+		att, err := rt.attachProgramLocked(ifindex, prog, prog, oldAttachments, xdpPreparedRulesNeedGenericOffloadGuard(rt.preparedRules))
 		if err != nil {
 			rt.discardAttachmentsLocked(createdAttachments)
 			return nil, fmt.Errorf("repair xdp attachment on ifindex %d: %w", ifindex, err)

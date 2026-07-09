@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +22,8 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
+	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -878,7 +882,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	newAttachments := make([]xdpAttachment, 0, len(requiredIfIndices))
 	attachStartedAt := time.Now()
 	for _, ifindex := range requiredIfIndices {
-		att, err := rt.attachProgramLocked(ifindex, pieces.prog, oldProg, oldAttachments)
+		att, err := rt.attachProgramLocked(ifindex, pieces.prog, oldProg, oldAttachments, xdpPreparedRulesNeedGenericOffloadGuard(prepared))
 		if err != nil {
 			rt.discardAttachmentsLocked(newAttachments)
 			coll.Close()
@@ -1464,7 +1468,7 @@ func (rt *xdpKernelRuleRuntime) attachmentsHealthyLocked(requiredIfIndices []int
 	return xdpAttachmentsHealthy(requiredIfIndices, rt.attachments, rt.programID)
 }
 
-func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Program, oldProg *ebpf.Program, oldAttachments []xdpAttachment) (xdpAttachment, error) {
+func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Program, oldProg *ebpf.Program, oldAttachments []xdpAttachment, genericOffloadGuard bool) (xdpAttachment, error) {
 	link, err := netlink.LinkByIndex(ifindex)
 	if err != nil {
 		return xdpAttachment{}, fmt.Errorf("resolve interface by index %d: %w", ifindex, err)
@@ -1474,6 +1478,11 @@ func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Prog
 	var errs []string
 	for _, flags := range order {
 		if err := netlink.LinkSetXdpFdWithFlags(link, prog.FD(), flags); err == nil {
+			if err := rt.ensureGenericAttachmentSafeLocked(link, ifindex, flags, genericOffloadGuard); err != nil {
+				_ = netlink.LinkSetXdpFdWithFlags(link, -1, flags)
+				errs = append(errs, fmt.Sprintf("%s=%v", xdpAttachFlagsLabel(flags), err))
+				continue
+			}
 			if len(errs) > 0 {
 				rt.stateLog.Logf("xdp dataplane attach: %s attached in %s mode after fallback (%s)",
 					xdpInterfaceLabel(ifindex),
@@ -1493,6 +1502,11 @@ func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Prog
 			switchErrs := make([]string, 0, len(order))
 			for _, flags := range order {
 				if err := netlink.LinkSetXdpFdWithFlags(link, prog.FD(), flags); err == nil {
+					if err := rt.ensureGenericAttachmentSafeLocked(link, ifindex, flags, genericOffloadGuard); err != nil {
+						_ = netlink.LinkSetXdpFdWithFlags(link, -1, flags)
+						switchErrs = append(switchErrs, fmt.Sprintf("retry %s=%v", xdpAttachFlagsLabel(flags), err))
+						continue
+					}
 					if len(errs) > 0 || len(switchErrs) > 0 {
 						details := append([]string{}, errs...)
 						details = append(details, switchErrs...)
@@ -1519,6 +1533,30 @@ func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Prog
 		errs = append(errs, "generic skipped: "+xdpGenericAttachmentExperimentalReason())
 	}
 	return xdpAttachment{}, errors.New(strings.Join(errs, "; "))
+}
+
+func (rt *xdpKernelRuleRuntime) ensureGenericAttachmentSafeLocked(link netlink.Link, ifindex int, flags int, guard bool) error {
+	if !guard || flags != nl.XDP_FLAGS_SKB_MODE {
+		return nil
+	}
+	if !xdpGenericOffloadGuardApplies(link) {
+		return nil
+	}
+	summary, err := disableXDPGenericUnsafeOffloads(link)
+	if err != nil {
+		return err
+	}
+	if summary != "" {
+		rt.stateLog.Logf("xdp dataplane attach: %s generic mode disabled unsafe offloads (%s)",
+			xdpInterfaceLabel(ifindex),
+			summary,
+		)
+	}
+	return nil
+}
+
+func xdpGenericOffloadGuardApplies(link netlink.Link) bool {
+	return xdpLinkIsVeth(link)
 }
 
 func (rt *xdpKernelRuleRuntime) discardAttachmentsLocked(attachments []xdpAttachment) {
@@ -1863,6 +1901,15 @@ func preparedXDPKernelRulesNeedFullConeNATMap(prepared []preparedXDPKernelRule) 
 	return false
 }
 
+func xdpPreparedRulesNeedGenericOffloadGuard(prepared []preparedXDPKernelRule) bool {
+	for _, item := range prepared {
+		if kernelRuleProtocol(item.rule.Protocol) == unix.IPPROTO_TCP {
+			return true
+		}
+	}
+	return false
+}
+
 func preparedXDPKernelRuleNeedsLocalMACGuard(item preparedXDPKernelRule) bool {
 	if isKernelEgressNATRule(item.rule) {
 		return false
@@ -2074,6 +2121,198 @@ func xdpPreferGenericAttach(link netlink.Link) bool {
 		return true
 	}
 	return link.Attrs().MasterIndex > 0
+}
+
+func disableXDPGenericUnsafeOffloads(link netlink.Link) (string, error) {
+	if link == nil || link.Attrs() == nil {
+		return "", fmt.Errorf("generic xdp offload guard: invalid link")
+	}
+	name := strings.TrimSpace(link.Attrs().Name)
+	if name == "" {
+		return "", fmt.Errorf("generic xdp offload guard: empty interface name")
+	}
+	if _, err := exec.LookPath("ethtool"); err != nil {
+		return "", fmt.Errorf("generic xdp offload guard requires ethtool: %w", err)
+	}
+	targets, err := xdpGenericOffloadTargets(link)
+	if err != nil {
+		return "", err
+	}
+
+	summaries := make([]string, 0, len(targets))
+	for _, target := range targets {
+		summary, err := disableXDPGenericUnsafeOffloadsOnTarget(target)
+		if err != nil {
+			return "", err
+		}
+		if summary != "" {
+			summaries = append(summaries, target.label()+": "+summary)
+		}
+	}
+	if len(summaries) == 0 {
+		return "", fmt.Errorf("generic xdp offload guard did not update any interface")
+	}
+	return strings.Join(summaries, "; "), nil
+}
+
+type xdpGenericOffloadTarget struct {
+	namespace string
+	ifName    string
+}
+
+func (target xdpGenericOffloadTarget) label() string {
+	if target.namespace != "" {
+		return target.namespace + "/" + target.ifName
+	}
+	return target.ifName
+}
+
+func xdpGenericOffloadTargets(link netlink.Link) ([]xdpGenericOffloadTarget, error) {
+	if link == nil || link.Attrs() == nil {
+		return nil, fmt.Errorf("generic xdp offload guard: invalid link")
+	}
+	name := strings.TrimSpace(link.Attrs().Name)
+	if name == "" {
+		return nil, fmt.Errorf("generic xdp offload guard: empty interface name")
+	}
+	targets := []xdpGenericOffloadTarget{{ifName: name}}
+	if !xdpLinkIsVeth(link) {
+		return targets, nil
+	}
+	peerTargets, err := xdpVethPeerOffloadTargets(link)
+	if err != nil {
+		return nil, err
+	}
+	return append(targets, peerTargets...), nil
+}
+
+func xdpVethPeerOffloadTargets(link netlink.Link) ([]xdpGenericOffloadTarget, error) {
+	if link == nil || link.Attrs() == nil {
+		return nil, fmt.Errorf("generic xdp offload guard: invalid veth link")
+	}
+	peerIndex, err := netlink.VethPeerIndex(&netlink.Veth{LinkAttrs: *link.Attrs()})
+	if err != nil {
+		return nil, fmt.Errorf("resolve veth peer for %s: %w", link.Attrs().Name, err)
+	}
+	if peerIndex <= 0 {
+		return nil, fmt.Errorf("resolve veth peer for %s: invalid peer ifindex %d", link.Attrs().Name, peerIndex)
+	}
+	if peer, err := netlink.LinkByIndex(peerIndex); err == nil && peer != nil && peer.Attrs() != nil {
+		return []xdpGenericOffloadTarget{{ifName: peer.Attrs().Name}}, nil
+	}
+	targets, err := xdpFindNamedNetnsLinksByIndex(peerIndex)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("generic xdp offload guard: veth peer ifindex %d for %s is not visible in the current or named network namespaces; use tc or disable peer offloads manually", peerIndex, link.Attrs().Name)
+	}
+	return targets, nil
+}
+
+func xdpFindNamedNetnsLinksByIndex(ifindex int) ([]xdpGenericOffloadTarget, error) {
+	entries, err := os.ReadDir("/var/run/netns")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list named network namespaces: %w", err)
+	}
+	targets := make([]xdpGenericOffloadTarget, 0, 1)
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Name())
+		if name == "" {
+			continue
+		}
+		ns, err := netns.GetFromName(name)
+		if err != nil {
+			continue
+		}
+		handle, err := netlink.NewHandleAt(ns)
+		_ = ns.Close()
+		if err != nil {
+			continue
+		}
+		links, err := handle.LinkList()
+		handle.Delete()
+		if err != nil {
+			continue
+		}
+		for _, link := range links {
+			if link == nil || link.Attrs() == nil || link.Attrs().Index != ifindex {
+				continue
+			}
+			targets = append(targets, xdpGenericOffloadTarget{namespace: name, ifName: link.Attrs().Name})
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].namespace != targets[j].namespace {
+			return targets[i].namespace < targets[j].namespace
+		}
+		return targets[i].ifName < targets[j].ifName
+	})
+	return targets, nil
+}
+
+func disableXDPGenericUnsafeOffloadsOnTarget(target xdpGenericOffloadTarget) (string, error) {
+	name := strings.TrimSpace(target.ifName)
+	if name == "" {
+		return "", fmt.Errorf("generic xdp offload guard: empty interface name")
+	}
+	applied := make([]string, 0, len(xdpGenericUnsafeOffloadFeatures))
+	skipped := make([]string, 0, 2)
+	for _, feature := range xdpGenericUnsafeOffloadFeatures {
+		args := []string{"-K", name, feature, "off"}
+		if target.namespace != "" {
+			args = append([]string{"netns", "exec", target.namespace, "ethtool"}, args...)
+			out, err := exec.Command("ip", args...).CombinedOutput()
+			if err == nil {
+				applied = append(applied, feature)
+				continue
+			}
+			text := strings.TrimSpace(string(out))
+			if text == "" {
+				text = err.Error()
+			}
+			if xdpGenericOffloadFeatureUnsupported(text) {
+				skipped = append(skipped, feature)
+				continue
+			}
+			return "", fmt.Errorf("disable %s on %s: %s", feature, target.label(), text)
+		}
+		out, err := exec.Command("ethtool", args...).CombinedOutput()
+		if err == nil {
+			applied = append(applied, feature)
+			continue
+		}
+		text := strings.TrimSpace(string(out))
+		if text == "" {
+			text = err.Error()
+		}
+		if xdpGenericOffloadFeatureUnsupported(text) {
+			skipped = append(skipped, feature)
+			continue
+		}
+		return "", fmt.Errorf("disable %s on %s: %s", feature, target.label(), text)
+	}
+	if len(applied) == 0 {
+		return "", fmt.Errorf("generic xdp offload guard could not disable any unsafe offload on %s", target.label())
+	}
+	summary := strings.Join(applied, ",")
+	if len(skipped) > 0 {
+		summary += "; skipped unsupported " + strings.Join(skipped, ",")
+	}
+	return summary, nil
+}
+
+var xdpGenericUnsafeOffloadFeatures = []string{"rx", "tx", "sg", "tso", "gso", "gro", "lro", "ufo"}
+
+func xdpGenericOffloadFeatureUnsupported(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "could not change any device features") ||
+		strings.Contains(lower, "not supported") ||
+		strings.Contains(lower, "operation not supported") ||
+		strings.Contains(lower, "no change")
 }
 
 func xdpAttachFlagsLabel(flags int) string {
