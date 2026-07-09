@@ -80,6 +80,7 @@ const (
 	managedNetworkDriftCheckEvery       = 10 * time.Second
 	managedNetworkSelfEventSuppressFor  = 2 * time.Second
 	managedNetworkLinkChangeSuppressFor = 10 * time.Second
+	pluginCatalogDriftCheckEvery        = 2 * time.Second
 )
 
 const forwardKernelMaintenanceIntervalEnv = "FORWARD_KERNEL_MAINTENANCE_INTERVAL_MS"
@@ -225,6 +226,8 @@ type ProcessManager struct {
 	dynamicEgressNATParents                        map[string]struct{}
 	managedRuntimeReloadAppliedFingerprint         string
 	managedRuntimeDriftCheckAt                     time.Time
+	pluginCatalogFingerprint                       string
+	pluginCatalogCheckAt                           time.Time
 	managedNetworkRuntime                          managedNetworkRuntime
 	managedNetworkInterfaces                       map[string]struct{}
 	ipv6Runtime                                    ipv6AssignmentRuntime
@@ -446,6 +449,7 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 	pm.pluginControlRuntime = newPluginControlRuntime(db, cfg, pm)
 	pm.pluginRuntime = newPluginDataplaneRuntime(cfg)
+	pm.refreshPluginCatalogFingerprint()
 
 	if pm.kernelRuntime != nil {
 		available, reason := pm.kernelRuntime.Available()
@@ -4311,6 +4315,7 @@ func (pm *ProcessManager) monitorLoop() {
 		recoverPressureFallbacks := false
 		pressureRecoveryLogLine := ""
 		checkManagedRuntimeDrift := false
+		checkPluginCatalogDrift := false
 		kernelAttachmentIssue := ""
 		kernelAttachmentRecovered := ""
 		attemptKernelAttachmentHeal := false
@@ -4345,6 +4350,10 @@ func (pm *ProcessManager) monitorLoop() {
 		if pm.managedRuntimeDriftCheckAt.IsZero() || now.Sub(pm.managedRuntimeDriftCheckAt) >= managedNetworkDriftCheckEvery {
 			checkManagedRuntimeDrift = true
 			pm.managedRuntimeDriftCheckAt = now
+		}
+		if pm.shouldCheckPluginCatalogDriftLocked(now) {
+			checkPluginCatalogDrift = true
+			pm.pluginCatalogCheckAt = now
 		}
 		if pm.kernelRuntime != nil && (pm.kernelDegradedHealAt.IsZero() || now.Sub(pm.kernelDegradedHealAt) >= kernelDegradedRebuildCooldown) {
 			checkKernelDegradedIdleRebuild = true
@@ -4616,6 +4625,9 @@ func (pm *ProcessManager) monitorLoop() {
 		}
 		if checkManagedRuntimeDrift {
 			pm.detectManagedNetworkRuntimeDrift()
+		}
+		if checkPluginCatalogDrift {
+			pm.detectPluginCatalogDrift()
 		}
 
 		for _, task := range staleControls {

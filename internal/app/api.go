@@ -278,8 +278,9 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			return
 		}
 		if pm != nil {
-			pm.redistributeWorkers()
 			pm.reconcilePluginsForRuntime()
+			pm.refreshPluginCatalogFingerprint()
+			pm.redistributeWorkers()
 			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
 			return
 		}

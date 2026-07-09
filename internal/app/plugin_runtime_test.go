@@ -2111,6 +2111,102 @@ exports.onTimer = function () {
 	}
 }
 
+func TestPluginCatalogFingerprintDetectsPluginFileChanges(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{PluginsDir: dir}
+
+	initial, err := buildPluginCatalogFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("buildPluginCatalogFingerprint(initial) error = %v", err)
+	}
+	writeTestPlugin(t, dir, "hot_plugin", `{
+  "api_version": "v1",
+  "id": "hot_plugin",
+  "name": "Hot Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js"
+  }
+}`)
+	added, err := buildPluginCatalogFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("buildPluginCatalogFingerprint(added) error = %v", err)
+	}
+	if added == initial {
+		t.Fatal("plugin catalog fingerprint did not change after adding plugin")
+	}
+
+	controlPath := filepath.Join(dir, "hot_plugin", "control.js")
+	if err := os.WriteFile(controlPath, []byte("exports.onReconcile = function () { return 'changed'; };\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(control.js) error = %v", err)
+	}
+	modified, err := buildPluginCatalogFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("buildPluginCatalogFingerprint(modified) error = %v", err)
+	}
+	if modified == added {
+		t.Fatal("plugin catalog fingerprint did not change after modifying plugin control script")
+	}
+
+	if err := os.RemoveAll(filepath.Join(dir, "hot_plugin")); err != nil {
+		t.Fatalf("RemoveAll(hot_plugin) error = %v", err)
+	}
+	removed, err := buildPluginCatalogFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("buildPluginCatalogFingerprint(removed) error = %v", err)
+	}
+	if removed == modified {
+		t.Fatal("plugin catalog fingerprint did not change after removing plugin")
+	}
+}
+
+func TestPluginCatalogDriftReconcilesRuntimeAndQueuesRedistribute(t *testing.T) {
+	dir := t.TempDir()
+	db := openTestDB(t)
+	cfg := &Config{PluginsDir: dir}
+	pm := &ProcessManager{
+		db:               db,
+		cfg:              cfg,
+		redistributeWake: make(chan struct{}, 1),
+	}
+	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	pm.pluginControlRuntime = rt
+	t.Cleanup(func() { _ = rt.Close() })
+
+	pm.refreshPluginCatalogFingerprint()
+	if pm.detectPluginCatalogDrift() {
+		t.Fatal("detectPluginCatalogDrift() = true before plugin directory changes")
+	}
+
+	writeTestPlugin(t, dir, "hot_plugin", `{
+  "api_version": "v1",
+  "id": "hot_plugin",
+  "name": "Hot Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js"
+  }
+}`)
+	writePluginControlScript(t, dir, "hot_plugin", `
+exports.onReconcile = function () {};
+`)
+
+	if !pm.detectPluginCatalogDrift() {
+		t.Fatal("detectPluginCatalogDrift() = false after plugin directory changes")
+	}
+	if !pluginControlVMExistsForTest(rt, "hot_plugin") {
+		t.Fatal("hot_plugin control VM missing after catalog drift reconcile")
+	}
+	pm.mu.Lock()
+	redistributePending := pm.redistributePending
+	pm.mu.Unlock()
+	if !redistributePending {
+		t.Fatal("redistributePending = false, want queued redistribute after plugin catalog drift")
+	}
+}
+
 func TestPluginActionRuntimeApplyReportsError(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "apply_plugin", `{
