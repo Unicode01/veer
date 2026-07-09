@@ -88,16 +88,18 @@ type PluginCatalogHotReload struct {
 }
 
 type PluginRuntimeCapabilities struct {
-	BuiltinPipelineID       string   `json:"builtin_pipeline_id"`
-	CorePriority            int      `json:"core_priority"`
-	ManifestDiscovery       bool     `json:"manifest_discovery"`
-	ObjectValidation        bool     `json:"object_validation"`
-	ProtectedAssets         bool     `json:"protected_assets"`
-	StabilityLevels         []string `json:"stability_levels"`
-	ExternalDataplaneAttach bool     `json:"external_dataplane_attach"`
-	SupportedEngines        []string `json:"supported_engines"`
-	SupportedHookModes      []string `json:"supported_hook_modes"`
-	Limitations             []string `json:"limitations,omitempty"`
+	BuiltinPipelineID        string   `json:"builtin_pipeline_id"`
+	CorePriority             int      `json:"core_priority"`
+	ManifestDiscovery        bool     `json:"manifest_discovery"`
+	ObjectValidation         bool     `json:"object_validation"`
+	ProtectedAssets          bool     `json:"protected_assets"`
+	StabilityLevels          []string `json:"stability_levels"`
+	ExternalDataplaneAttach  bool     `json:"external_dataplane_attach"`
+	ExternalDataplaneEngines []string `json:"external_dataplane_engines"`
+	RegistrationOnlyEngines  []string `json:"registration_only_engines,omitempty"`
+	SupportedEngines         []string `json:"supported_engines"`
+	SupportedHookModes       []string `json:"supported_hook_modes"`
+	Limitations              []string `json:"limitations,omitempty"`
 }
 
 type PluginRuntimeState struct {
@@ -370,15 +372,17 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 		externalDataplaneAttach = cfg.PluginsEnabled() && cfg.PluginsDataplaneEnabled()
 	}
 	return PluginRuntimeCapabilities{
-		BuiltinPipelineID:       "fvtap",
-		CorePriority:            pluginPipelineCorePriority,
-		ManifestDiscovery:       true,
-		ObjectValidation:        true,
-		ProtectedAssets:         true,
-		StabilityLevels:         []string{pluginStabilityLab, pluginStabilityPreview, pluginStabilityStable, pluginStabilityDeprecated},
-		ExternalDataplaneAttach: externalDataplaneAttach,
-		SupportedEngines:        []string{kernelEngineTC, kernelEngineXDP, "control"},
-		SupportedHookModes:      []string{"observe", "rewrite", "redirect", "drop", "control"},
+		BuiltinPipelineID:        "fvtap",
+		CorePriority:             pluginPipelineCorePriority,
+		ManifestDiscovery:        true,
+		ObjectValidation:         true,
+		ProtectedAssets:          true,
+		StabilityLevels:          []string{pluginStabilityLab, pluginStabilityPreview, pluginStabilityStable, pluginStabilityDeprecated},
+		ExternalDataplaneAttach:  externalDataplaneAttach,
+		ExternalDataplaneEngines: []string{kernelEngineTC},
+		RegistrationOnlyEngines:  []string{kernelEngineXDP},
+		SupportedEngines:         []string{kernelEngineTC, kernelEngineXDP, "control"},
+		SupportedHookModes:       []string{"observe", "rewrite", "redirect", "drop", "control"},
 		Limitations: []string{
 			"external dataplane loading is opt-in via plugins_dataplane_enabled and supports tc stage=forward/reply hooks ordered around the built-in fvtap core priority",
 			"tc pipeline plugin priority is compared with fvtap core priority 1000; lower priority runs before core lookup and higher priority runs after core lookup before apply/redirect on the selected packet direction",

@@ -138,6 +138,8 @@ function createHarness() {
     'plugins.catalog.dir': 'Dir',
     'plugins.catalog.scan': 'Scan',
     'plugins.catalog.dataplane': 'Dataplane',
+    'plugins.catalog.registrationOnly': 'Register only',
+    'plugins.catalog.registrationOnlyDetail': '{{engines}} is currently validated and displayed, but not attached as an external plugin hot-path engine.',
     'plugins.catalog.scanOn': 'Enabled',
     'plugins.catalog.scanOff': 'Off',
     'plugins.catalog.hotReload': 'Hot reload',
@@ -453,7 +455,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   app.state.plugins.catalog = {
     external_plugins_enabled: true,
     directory: 'plugins/runtime',
-    runtime: { external_dataplane_attach: false, core_priority: 1000 },
+    runtime: { external_dataplane_attach: false, external_dataplane_engines: ['tc'], registration_only_engines: ['xdp'], core_priority: 1000 },
     hot_reload: {
       enabled: true,
       check_interval_ms: 2000,
@@ -528,6 +530,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   assert.match(collectText(app.el.pluginsCatalogMeta), /Plugin Catalog/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /plugins\/runtime/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Dataplane No/);
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Register only XDP/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Hot reload Reloaded/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Fingerprint abcdef123456/);
   assert.match(app.el.pluginsCatalogMeta.title, /Plugin hot reload: Reloaded/);
