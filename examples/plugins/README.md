@@ -67,6 +67,8 @@ exports.onReconcile = function (ctx) {
 
 `control.main` 运行在 Goja 控制面，不进入 TC/XDP 热路径。每个插件默认有一个持久 Goja VM，`control.js` 顶层只在初始化或脚本变化后执行一次，顶层变量会在 handler 调用之间保留。
 
+Forward 会定期检查插件目录元数据指纹；插件增删、`plugin.json`、`control.js`、UI 或 eBPF object 文件变更后会自动触发插件 runtime reconcile，并排队重建受影响的数据面分发。需要立即生效时也可以调用 WebUI/接口里的插件 reload。
+
 可导出的常用 handler：
 
 ```js
