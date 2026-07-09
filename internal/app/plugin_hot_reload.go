@@ -13,6 +13,16 @@ import (
 
 const pluginHotReloadContentHashMaxBytes = pluginObjectMaxSize
 
+const (
+	pluginCatalogHotReloadResultSuccess   = "success"
+	pluginCatalogHotReloadResultError     = "error"
+	pluginCatalogHotReloadResultPartial   = "partial"
+	pluginCatalogHotReloadResultUnchanged = "unchanged"
+
+	pluginCatalogHotReloadSourceAuto   = "auto"
+	pluginCatalogHotReloadSourceManual = "manual"
+)
+
 func buildPluginCatalogFingerprint(cfg *Config) (string, error) {
 	if cfg != nil && !cfg.PluginsEnabled() {
 		return "plugins-disabled", nil
@@ -116,18 +126,26 @@ func buildPluginCatalogFingerprint(cfg *Config) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), firstErr
 }
 
-func (pm *ProcessManager) refreshPluginCatalogFingerprint() {
+func (pm *ProcessManager) refreshPluginCatalogFingerprint() error {
 	if pm == nil {
-		return
+		return nil
 	}
 	fingerprint, err := buildPluginCatalogFingerprint(pm.cfg)
+	now := time.Now()
 	pm.mu.Lock()
 	pm.pluginCatalogFingerprint = fingerprint
-	pm.pluginCatalogCheckAt = time.Now()
+	pm.pluginCatalogCheckAt = now
+	pm.pluginCatalogLastCheckResult = pluginCatalogHotReloadResultSuccess
+	pm.pluginCatalogLastCheckError = ""
+	if err != nil {
+		pm.pluginCatalogLastCheckResult = pluginCatalogHotReloadResultError
+		pm.pluginCatalogLastCheckError = err.Error()
+	}
 	pm.mu.Unlock()
 	if err != nil {
 		log.Printf("plugin hot reload: catalog fingerprint scan issue: %v", err)
 	}
+	return err
 }
 
 func (pm *ProcessManager) shouldCheckPluginCatalogDriftLocked(now time.Time) bool {
@@ -145,11 +163,20 @@ func (pm *ProcessManager) detectPluginCatalogDrift() bool {
 		return false
 	}
 	next, err := buildPluginCatalogFingerprint(pm.cfg)
+	now := time.Now()
+	checkResult := pluginCatalogHotReloadResultSuccess
+	checkError := ""
+	if err != nil {
+		checkResult = pluginCatalogHotReloadResultError
+		checkError = err.Error()
+	}
 	pm.mu.Lock()
 	previous := strings.TrimSpace(pm.pluginCatalogFingerprint)
 	if previous == "" {
 		pm.pluginCatalogFingerprint = next
-		pm.pluginCatalogCheckAt = time.Now()
+		pm.pluginCatalogCheckAt = now
+		pm.pluginCatalogLastCheckResult = checkResult
+		pm.pluginCatalogLastCheckError = checkError
 		pm.mu.Unlock()
 		if err != nil {
 			log.Printf("plugin hot reload: catalog fingerprint scan issue: %v", err)
@@ -157,12 +184,19 @@ func (pm *ProcessManager) detectPluginCatalogDrift() bool {
 		return false
 	}
 	if next == previous {
-		pm.pluginCatalogCheckAt = time.Now()
+		if err == nil {
+			checkResult = pluginCatalogHotReloadResultUnchanged
+		}
+		pm.pluginCatalogCheckAt = now
+		pm.pluginCatalogLastCheckResult = checkResult
+		pm.pluginCatalogLastCheckError = checkError
 		pm.mu.Unlock()
 		return false
 	}
 	pm.pluginCatalogFingerprint = next
-	pm.pluginCatalogCheckAt = time.Now()
+	pm.pluginCatalogCheckAt = now
+	pm.pluginCatalogLastCheckResult = checkResult
+	pm.pluginCatalogLastCheckError = checkError
 	shuttingDown := pm.shuttingDown
 	pm.mu.Unlock()
 
@@ -175,5 +209,69 @@ func (pm *ProcessManager) detectPluginCatalogDrift() bool {
 	log.Printf("plugin hot reload: plugin catalog changed; reconciling plugin runtime")
 	pm.reconcilePluginsForRuntime()
 	pm.requestRedistributeWorkers(0)
+	pm.markPluginCatalogReloadCompleted(pluginCatalogHotReloadSourceAuto, err)
 	return true
+}
+
+func (pm *ProcessManager) markPluginCatalogReloadCompleted(source string, err error) {
+	if pm == nil {
+		return
+	}
+	source = strings.TrimSpace(strings.ToLower(source))
+	if source == "" {
+		source = pluginCatalogHotReloadSourceAuto
+	}
+	result := pluginCatalogHotReloadResultSuccess
+	errText := ""
+	if err != nil {
+		result = pluginCatalogHotReloadResultPartial
+		errText = err.Error()
+	}
+	pm.mu.Lock()
+	pm.pluginCatalogLastReloadAt = time.Now()
+	pm.pluginCatalogLastReloadSource = source
+	pm.pluginCatalogLastReloadResult = result
+	pm.pluginCatalogLastReloadError = errText
+	pm.mu.Unlock()
+}
+
+func (pm *ProcessManager) snapshotPluginCatalogHotReloadStatus() *PluginCatalogHotReload {
+	if pm == nil {
+		return nil
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	enabled := true
+	if pm.cfg != nil {
+		enabled = pm.cfg.PluginsEnabled()
+	}
+	fingerprint := strings.TrimSpace(pm.pluginCatalogFingerprint)
+	return &PluginCatalogHotReload{
+		Enabled:              enabled,
+		CheckIntervalMS:      pluginCatalogDriftCheckEvery.Milliseconds(),
+		LastCheckAt:          pluginCatalogHotReloadTime(pm.pluginCatalogCheckAt),
+		LastCheckResult:      pm.pluginCatalogLastCheckResult,
+		LastCheckError:       pm.pluginCatalogLastCheckError,
+		LastReloadAt:         pluginCatalogHotReloadTime(pm.pluginCatalogLastReloadAt),
+		LastReloadSource:     pm.pluginCatalogLastReloadSource,
+		LastReloadResult:     pm.pluginCatalogLastReloadResult,
+		LastReloadError:      pm.pluginCatalogLastReloadError,
+		CatalogFingerprint:   fingerprint,
+		FingerprintShortHash: pluginCatalogFingerprintShortHash(fingerprint),
+	}
+}
+
+func pluginCatalogHotReloadTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func pluginCatalogFingerprintShortHash(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
 }

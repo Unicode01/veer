@@ -140,6 +140,17 @@ function createHarness() {
     'plugins.catalog.dataplane': 'Dataplane',
     'plugins.catalog.scanOn': 'Enabled',
     'plugins.catalog.scanOff': 'Off',
+    'plugins.catalog.hotReload': 'Hot reload',
+    'plugins.catalog.hotReloadDetail': 'Plugin hot reload: {{status}}',
+    'plugins.catalog.hotReloadIdle': 'Idle',
+    'plugins.catalog.hotReloadWatching': 'Watching',
+    'plugins.catalog.hotReloadReloaded': 'Reloaded',
+    'plugins.catalog.hotReloadPartial': 'Partial',
+    'plugins.catalog.hotReloadError': 'Error',
+    'plugins.catalog.hotReloadOff': 'Off',
+    'plugins.catalog.lastCheck': 'Checked',
+    'plugins.catalog.lastReload': 'Reloaded',
+    'plugins.catalog.fingerprint': 'Fingerprint',
     'plugins.runtime.attachable': 'Attachable',
     'plugins.runtime.attached': 'Attached',
     'plugins.runtime.attachments': 'Attachments',
@@ -439,7 +450,22 @@ function attachPluginHostChildFrame(app) {
 
 test('renderPluginsTable renders builtin and external plugin details', () => {
   const app = createHarness();
-  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins/runtime', runtime: { external_dataplane_attach: false, core_priority: 1000 } };
+  app.state.plugins.catalog = {
+    external_plugins_enabled: true,
+    directory: 'plugins/runtime',
+    runtime: { external_dataplane_attach: false, core_priority: 1000 },
+    hot_reload: {
+      enabled: true,
+      check_interval_ms: 2000,
+      last_check_at: '2026-07-09T01:02:03Z',
+      last_check_result: 'unchanged',
+      last_reload_at: '2026-07-09T01:03:04Z',
+      last_reload_source: 'auto',
+      last_reload_result: 'success',
+      catalog_fingerprint: 'abcdef1234567890',
+      fingerprint_short_hash: 'abcdef123456'
+    }
+  };
   app.state.plugins.data = [
     {
       id: 'fvtap',
@@ -502,6 +528,9 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   assert.match(collectText(app.el.pluginsCatalogMeta), /Plugin Catalog/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /plugins\/runtime/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Dataplane No/);
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Hot reload Reloaded/);
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Fingerprint abcdef123456/);
+  assert.match(app.el.pluginsCatalogMeta.title, /Plugin hot reload: Reloaded/);
   assert.match(collectText(app.el.pluginsChainMeta), /TC Pipeline/);
   assert.match(collectText(app.el.pluginsChainMeta), /1 chained/);
   assert.match(collectText(app.el.pluginsChainMeta), /pre x1/);

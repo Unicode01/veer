@@ -279,7 +279,8 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		if pm != nil {
 			pm.reconcilePluginsForRuntime()
-			pm.refreshPluginCatalogFingerprint()
+			err := pm.refreshPluginCatalogFingerprint()
+			pm.markPluginCatalogReloadCompleted(pluginCatalogHotReloadSourceManual, err)
 			pm.redistributeWorkers()
 			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
 			return

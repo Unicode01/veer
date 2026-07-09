@@ -69,7 +69,22 @@ type PluginCatalog struct {
 	ExternalPluginsEnabled bool                      `json:"external_plugins_enabled"`
 	Directory              string                    `json:"directory"`
 	Runtime                PluginRuntimeCapabilities `json:"runtime"`
+	HotReload              *PluginCatalogHotReload   `json:"hot_reload,omitempty"`
 	Plugins                []LoadedPlugin            `json:"plugins"`
+}
+
+type PluginCatalogHotReload struct {
+	Enabled              bool   `json:"enabled"`
+	CheckIntervalMS      int64  `json:"check_interval_ms"`
+	LastCheckAt          string `json:"last_check_at,omitempty"`
+	LastCheckResult      string `json:"last_check_result,omitempty"`
+	LastCheckError       string `json:"last_check_error,omitempty"`
+	LastReloadAt         string `json:"last_reload_at,omitempty"`
+	LastReloadSource     string `json:"last_reload_source,omitempty"`
+	LastReloadResult     string `json:"last_reload_result,omitempty"`
+	LastReloadError      string `json:"last_reload_error,omitempty"`
+	CatalogFingerprint   string `json:"catalog_fingerprint,omitempty"`
+	FingerprintShortHash string `json:"fingerprint_short_hash,omitempty"`
 }
 
 type PluginRuntimeCapabilities struct {
