@@ -68,6 +68,8 @@ case "$OUT_DIR" in
 		;;
 esac
 
+mkdir -p "$(dirname "$OUT_DIR")"
+
 if [ "${FORWARD_PLUGIN_PACKAGE_SKIP_BUILD:-0}" != "1" ]; then
 	PYTHON_BIN=$(find_python)
 	PLUGIN_LIST="${OUT_DIR}.plugins.$$"
@@ -179,7 +181,6 @@ PY
 
 FORWARD_PLUGIN_EXAMPLE_DIR="$TMP_DIR" sh "$ROOT_DIR/scripts/verify-example-plugin-manifests.sh" >/dev/null
 
-mkdir -p "$(dirname "$OUT_DIR")"
 rm -rf "$OUT_DIR"
 mv "$TMP_DIR" "$OUT_DIR"
 trap - EXIT INT TERM
