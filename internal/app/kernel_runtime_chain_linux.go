@@ -180,6 +180,7 @@ func (rt *orderedKernelRuleRuntime) reconcileWithOptionalPluginCatalog(rules []R
 	defer rt.mu.Unlock()
 
 	entries := rt.entriesForCatalogLocked(catalog)
+	cleanupEntries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
 	results := make(map[int64]kernelRuleApplyResult, len(rules))
 	failuresByRule := make(map[int64][]string, len(rules))
 	pending := append([]Rule(nil), rules...)
@@ -239,14 +240,14 @@ func (rt *orderedKernelRuleRuntime) reconcileWithOptionalPluginCatalog(rules []R
 		if len(pending) == 0 {
 			rt.assignmentLog.Retain(assignedLogKeys)
 			rt.engineFallbackLog.Retain(fallbackLogKeys)
-			rt.cleanupUnassignedLocked(assignedEntries)
+			rt.cleanupUnassignedLocked(cleanupEntries, assignedEntries)
 			return results, nil
 		}
 	}
 
 	rt.assignmentLog.Retain(assignedLogKeys)
 	rt.engineFallbackLog.Retain(fallbackLogKeys)
-	rt.cleanupUnassignedLocked(assignedEntries)
+	rt.cleanupUnassignedLocked(cleanupEntries, assignedEntries)
 
 	for _, rule := range pending {
 		failures := failuresByRule[rule.ID]
@@ -295,6 +296,8 @@ func (rt *orderedKernelRuleRuntime) reconcileRetainingAssignmentsWithOptionalPlu
 	defer rt.mu.Unlock()
 
 	entries := rt.entriesForCatalogLocked(catalog)
+	cleanupEntries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	retainedByEngine, newRules = retainedKernelAssignmentsForRuntimeEntries(entries, retainedByEngine, newRules)
 	results := make(map[int64]kernelRuleApplyResult, len(newRules))
 	failuresByRule := make(map[int64][]string, len(newRules))
 	pending := append([]Rule(nil), newRules...)
@@ -379,7 +382,7 @@ func (rt *orderedKernelRuleRuntime) reconcileRetainingAssignmentsWithOptionalPlu
 
 	rt.assignmentLog.Retain(assignedLogKeys)
 	rt.engineFallbackLog.Retain(fallbackLogKeys)
-	rt.cleanupUnassignedLocked(assignedEntries)
+	rt.cleanupUnassignedLocked(cleanupEntries, assignedEntries)
 
 	for _, rule := range pending {
 		failures := failuresByRule[rule.ID]
@@ -454,8 +457,8 @@ func (rt *orderedKernelRuleRuntime) Close() error {
 	return firstErr
 }
 
-func (rt *orderedKernelRuleRuntime) cleanupUnassignedLocked(assignedEntries map[string]bool) {
-	for _, entry := range rt.entries {
+func (rt *orderedKernelRuleRuntime) cleanupUnassignedLocked(entries []orderedKernelRuntimeEntry, assignedEntries map[string]bool) {
+	for _, entry := range entries {
 		if assignedEntries[entry.name] {
 			continue
 		}
@@ -476,12 +479,33 @@ func (rt *orderedKernelRuleRuntime) entriesForCatalogLocked(catalog *PluginCatal
 			out = append(out, entry)
 		}
 	}
-	for _, entry := range entries {
-		if entry.name != kernelEngineTC {
-			out = append(out, entry)
-		}
-	}
 	return out
+}
+
+func retainedKernelAssignmentsForRuntimeEntries(entries []orderedKernelRuntimeEntry, retainedByEngine map[string][]Rule, newRules []Rule) (map[string][]Rule, []Rule) {
+	if len(retainedByEngine) == 0 {
+		return retainedByEngine, newRules
+	}
+	selected := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		selected[entry.name] = struct{}{}
+	}
+	nextRetained := make(map[string][]Rule, len(retainedByEngine))
+	migrated := make([]Rule, 0)
+	for engine, rules := range retainedByEngine {
+		if _, ok := selected[engine]; ok {
+			nextRetained[engine] = cloneRuleSlice(rules)
+			continue
+		}
+		migrated = append(migrated, rules...)
+	}
+	if len(migrated) == 0 {
+		return nextRetained, newRules
+	}
+	nextRules := make([]Rule, 0, len(migrated)+len(newRules))
+	nextRules = append(nextRules, migrated...)
+	nextRules = append(nextRules, newRules...)
+	return nextRetained, nextRules
 }
 
 func (rt *orderedKernelRuleRuntime) selectLocked() (bool, string) {
