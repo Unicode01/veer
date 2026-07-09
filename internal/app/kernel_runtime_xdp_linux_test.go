@@ -181,6 +181,66 @@ func TestXDPPreferGenericAttach(t *testing.T) {
 	}
 }
 
+func TestXDPPreparedRulesNeedGenericOffloadGuard(t *testing.T) {
+	tcpRules := []preparedXDPKernelRule{{rule: Rule{Protocol: "tcp"}}}
+	if !xdpPreparedRulesNeedGenericOffloadGuard(tcpRules) {
+		t.Fatal("xdpPreparedRulesNeedGenericOffloadGuard(tcp) = false, want true")
+	}
+
+	udpRules := []preparedXDPKernelRule{{rule: Rule{Protocol: "udp"}}}
+	if xdpPreparedRulesNeedGenericOffloadGuard(udpRules) {
+		t.Fatal("xdpPreparedRulesNeedGenericOffloadGuard(udp) = true, want false")
+	}
+
+	icmpRules := []preparedXDPKernelRule{{rule: Rule{Protocol: "icmp"}}}
+	if xdpPreparedRulesNeedGenericOffloadGuard(icmpRules) {
+		t.Fatal("xdpPreparedRulesNeedGenericOffloadGuard(icmp) = true, want false")
+	}
+}
+
+func TestXDPGenericOffloadGuardAppliesOnlyToVeth(t *testing.T) {
+	if !xdpGenericOffloadGuardApplies(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Index: 1}}) {
+		t.Fatal("xdpGenericOffloadGuardApplies(veth) = false, want true")
+	}
+
+	if xdpGenericOffloadGuardApplies(&netlink.Device{LinkAttrs: netlink.LinkAttrs{Index: 2}}) {
+		t.Fatal("xdpGenericOffloadGuardApplies(device) = true, want false")
+	}
+
+	if xdpGenericOffloadGuardApplies(&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Index: 3}}) {
+		t.Fatal("xdpGenericOffloadGuardApplies(bridge) = true, want false")
+	}
+}
+
+func TestXDPGenericOffloadTargetLabels(t *testing.T) {
+	host := xdpGenericOffloadTarget{ifName: "eth0"}
+	if host.label() != "eth0" {
+		t.Fatalf("host target label = %q, want eth0", host.label())
+	}
+
+	netnsTarget := xdpGenericOffloadTarget{namespace: "ns0", ifName: "veth0"}
+	if netnsTarget.label() != "ns0/veth0" {
+		t.Fatalf("netns target label = %q, want ns0/veth0", netnsTarget.label())
+	}
+}
+
+func TestXDPGenericOffloadFeatureUnsupported(t *testing.T) {
+	for _, text := range []string{
+		"Could not change any device features",
+		"operation not supported",
+		"feature not supported",
+		"no change",
+	} {
+		if !xdpGenericOffloadFeatureUnsupported(text) {
+			t.Fatalf("xdpGenericOffloadFeatureUnsupported(%q) = false, want true", text)
+		}
+	}
+
+	if xdpGenericOffloadFeatureUnsupported("permission denied") {
+		t.Fatal("xdpGenericOffloadFeatureUnsupported(permission denied) = true, want false")
+	}
+}
+
 func TestKernelPreparedAddrIPv4Uint32(t *testing.T) {
 	addr, err := kernelPreparedAddrFromIP(net.ParseIP("198.51.100.20"), ipFamilyIPv4)
 	if err != nil {
