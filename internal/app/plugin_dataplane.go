@@ -230,15 +230,20 @@ func (pm *ProcessManager) pluginCatalogWithConfig(fallbackCfg *Config) PluginCat
 		if runtime, ok := pm.kernelRuntime.(pluginPipelineRuntime); ok {
 			mergePluginRuntimeSnapshot(&catalog, runtime.PluginSnapshot())
 			catalog = applyPluginStatesFromDB(catalog, pm.db)
+			catalog.HotReload = pm.snapshotPluginCatalogHotReloadStatus()
 			return catalog
 		}
 	}
 	if pm == nil || pm.pluginRuntime == nil {
+		if pm != nil {
+			catalog.HotReload = pm.snapshotPluginCatalogHotReloadStatus()
+		}
 		return catalog
 	}
 	snapshot := pm.pluginRuntime.Reconcile(catalog)
 	mergePluginRuntimeSnapshot(&catalog, snapshot)
 	catalog = applyPluginStatesFromDB(catalog, pm.db)
+	catalog.HotReload = pm.snapshotPluginCatalogHotReloadStatus()
 	return catalog
 }
 

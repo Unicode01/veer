@@ -228,6 +228,12 @@ type ProcessManager struct {
 	managedRuntimeDriftCheckAt                     time.Time
 	pluginCatalogFingerprint                       string
 	pluginCatalogCheckAt                           time.Time
+	pluginCatalogLastCheckResult                   string
+	pluginCatalogLastCheckError                    string
+	pluginCatalogLastReloadAt                      time.Time
+	pluginCatalogLastReloadSource                  string
+	pluginCatalogLastReloadResult                  string
+	pluginCatalogLastReloadError                   string
 	managedNetworkRuntime                          managedNetworkRuntime
 	managedNetworkInterfaces                       map[string]struct{}
 	ipv6Runtime                                    ipv6AssignmentRuntime

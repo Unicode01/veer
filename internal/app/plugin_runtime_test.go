@@ -2221,8 +2221,16 @@ func TestPluginCatalogDriftReconcilesRuntimeAndQueuesRedistribute(t *testing.T) 
 	t.Cleanup(func() { _ = rt.Close() })
 
 	pm.refreshPluginCatalogFingerprint()
+	status := pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || status.LastCheckAt == "" || status.LastCheckResult != pluginCatalogHotReloadResultSuccess {
+		t.Fatalf("initial hot reload status = %+v, want successful check", status)
+	}
 	if pm.detectPluginCatalogDrift() {
 		t.Fatal("detectPluginCatalogDrift() = true before plugin directory changes")
+	}
+	status = pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || status.LastCheckResult != pluginCatalogHotReloadResultUnchanged || status.LastCheckError != "" {
+		t.Fatalf("unchanged hot reload status = %+v, want unchanged without error", status)
 	}
 
 	writeTestPlugin(t, dir, "hot_plugin", `{
@@ -2250,6 +2258,17 @@ exports.onReconcile = function () {};
 	pm.mu.Unlock()
 	if !redistributePending {
 		t.Fatal("redistributePending = false, want queued redistribute after plugin catalog drift")
+	}
+	status = pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || status.LastReloadAt == "" || status.LastReloadSource != pluginCatalogHotReloadSourceAuto || status.LastReloadResult != pluginCatalogHotReloadResultSuccess {
+		t.Fatalf("changed hot reload status = %+v, want auto reload success", status)
+	}
+	if status.CatalogFingerprint == "" || status.FingerprintShortHash == "" || !strings.HasPrefix(status.CatalogFingerprint, status.FingerprintShortHash) {
+		t.Fatalf("hot reload fingerprint fields = %+v, want full and short hash", status)
+	}
+	catalog := pm.pluginCatalogWithConfig(cfg)
+	if catalog.HotReload == nil || catalog.HotReload.LastReloadSource != pluginCatalogHotReloadSourceAuto {
+		t.Fatalf("catalog hot reload status = %+v, want exposed auto reload status", catalog.HotReload)
 	}
 }
 

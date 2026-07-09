@@ -242,6 +242,17 @@ td {
     color: var(--text-muted);
 }
 
+.plugin-meta-item.is-warning {
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+    color: var(--warning-text);
+}
+
+.plugin-meta-item.is-warning .plugin-meta-item-label {
+    color: inherit;
+    opacity: 0.82;
+}
+
 .plugin-pipeline-chip {
     padding: 0 9px;
     font-weight: 750;

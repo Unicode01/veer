@@ -2040,14 +2040,18 @@ select.fwd-input {
     if (!el) return;
     const catalog = app.state.plugins.catalog || {};
     const runtime = catalog.runtime || {};
+    const hotReload = catalog.hot_reload || null;
+    const hotReloadInfo = pluginHotReloadInfo(hotReload);
     const enabled = catalog.external_plugins_enabled !== false;
     const attach = !!runtime.external_dataplane_attach;
     app.clearNode(el);
-    el.title = app.t('plugins.catalog.meta', {
+    const titleParts = [app.t('plugins.catalog.meta', {
       dir: catalog.directory || '',
       enabled: enabled ? app.t('common.yes') : app.t('common.no'),
       attach: attach ? app.t('common.yes') : app.t('common.no')
-    });
+    })];
+    if (hotReload) titleParts.push(app.t('plugins.catalog.hotReloadDetail', { status: hotReloadInfo.detail }));
+    el.title = titleParts.join('; ');
     el.appendChild(app.createNode('div', {
       className: 'plugin-meta-heading',
       children: [
@@ -2058,24 +2062,100 @@ select.fwd-input {
         })
       ]
     }));
-    el.appendChild(app.createNode('div', {
-      className: 'plugin-meta-items',
-      children: [
-        pluginMetaItem(app.t('plugins.catalog.dir'), catalog.directory || app.t('common.dash'), 'mono'),
-        pluginMetaItem(app.t('plugins.catalog.scan'), enabled ? app.t('common.yes') : app.t('common.no'), enabled ? 'ok' : 'muted'),
-        pluginMetaItem(app.t('plugins.catalog.dataplane'), attach ? app.t('common.yes') : app.t('common.no'), attach ? 'ok' : 'muted')
-      ]
-    }));
+    const items = [
+      pluginMetaItem(app.t('plugins.catalog.dir'), catalog.directory || app.t('common.dash'), 'mono'),
+      pluginMetaItem(app.t('plugins.catalog.scan'), enabled ? app.t('common.yes') : app.t('common.no'), enabled ? 'ok' : 'muted'),
+      pluginMetaItem(app.t('plugins.catalog.dataplane'), attach ? app.t('common.yes') : app.t('common.no'), attach ? 'ok' : 'muted')
+    ];
+    if (hotReload) {
+      items.push(pluginMetaItem(app.t('plugins.catalog.hotReload'), hotReloadInfo.text, hotReloadInfo.tone, hotReloadInfo.detail));
+      items.push(pluginMetaItem(app.t('plugins.catalog.lastCheck'), formatPluginHotReloadTimestamp(hotReload.last_check_at), hotReload.last_check_error ? 'warning' : 'muted'));
+      if (hotReload.last_reload_at) {
+        items.push(pluginMetaItem(app.t('plugins.catalog.lastReload'), formatPluginHotReloadTimestamp(hotReload.last_reload_at), hotReload.last_reload_error ? 'warning' : 'muted'));
+      }
+      if (hotReload.fingerprint_short_hash) {
+        items.push(pluginMetaItem(app.t('plugins.catalog.fingerprint'), hotReload.fingerprint_short_hash, 'mono', hotReload.catalog_fingerprint || hotReload.fingerprint_short_hash));
+      }
+    }
+    el.appendChild(app.createNode('div', { className: 'plugin-meta-items', children: items }));
   }
 
-  function pluginMetaItem(label, value, tone) {
+  function pluginMetaItem(label, value, tone, title) {
     return app.createNode('span', {
       className: 'plugin-meta-item' + (tone ? ' is-' + tone : ''),
+      title: title || '',
       children: [
         app.createNode('span', { className: 'plugin-meta-item-label', text: label }),
         app.createNode('span', { className: 'plugin-meta-item-value', text: value })
       ]
     });
+  }
+
+  function pluginHotReloadInfo(status) {
+    const item = status && typeof status === 'object' ? status : null;
+    if (!item || item.enabled === false) {
+      return {
+        text: app.t('plugins.catalog.hotReloadOff'),
+        tone: 'muted',
+        detail: app.t('plugins.catalog.hotReloadOff')
+      };
+    }
+    const checkError = String(item.last_check_error || '').trim();
+    const reloadError = String(item.last_reload_error || '').trim();
+    const reloadResult = String(item.last_reload_result || '').trim().toLowerCase();
+    const checkResult = String(item.last_check_result || '').trim().toLowerCase();
+    if (checkError || reloadError || checkResult === 'error') {
+      const detail = reloadError || checkError || app.t('plugins.catalog.hotReloadError');
+      return {
+        text: app.t('plugins.catalog.hotReloadError'),
+        tone: 'warning',
+        detail
+      };
+    }
+    if (reloadResult === 'partial') {
+      return {
+        text: app.t('plugins.catalog.hotReloadPartial'),
+        tone: 'warning',
+        detail: app.t('plugins.catalog.hotReloadPartial')
+      };
+    }
+    if (reloadResult === 'success') {
+      return {
+        text: app.t('plugins.catalog.hotReloadReloaded'),
+        tone: 'ok',
+        detail: app.t('plugins.catalog.hotReloadReloaded')
+      };
+    }
+    if (checkResult === 'unchanged' || checkResult === 'success') {
+      return {
+        text: app.t('plugins.catalog.hotReloadWatching'),
+        tone: 'ok',
+        detail: app.t('plugins.catalog.hotReloadWatching')
+      };
+    }
+    return {
+      text: app.t('plugins.catalog.hotReloadIdle'),
+      tone: 'muted',
+      detail: app.t('plugins.catalog.hotReloadIdle')
+    };
+  }
+
+  function formatPluginHotReloadTimestamp(value) {
+    const text = String(value || '').trim();
+    if (!text) return app.t('common.dash');
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) return text;
+    try {
+      return new Intl.DateTimeFormat(app.state.locale || undefined, {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      }).format(date);
+    } catch (_) {
+      return text;
+    }
   }
 
   function pluginPipelineChip(text, tone, title) {
