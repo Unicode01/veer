@@ -27,6 +27,16 @@ type pluginActionRequest struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
+type pluginStateWriteRequest struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+type pluginStateResponse struct {
+	PluginID string       `json:"plugin_id"`
+	Enabled  bool         `json:"enabled"`
+	Plugin   LoadedPlugin `json:"plugin"`
+}
+
 type pluginRecordResponse struct {
 	ID            int64                        `json:"id"`
 	Key           string                       `json:"key"`
@@ -82,6 +92,9 @@ func handlePluginAPIRoute(w http.ResponseWriter, r *http.Request, cfg *Config, d
 		return false
 	}
 	switch parts[1] {
+	case "state":
+		handlePluginStateAPI(w, r, cfg, db, pm, parts)
+		return true
 	case "resources":
 		handlePluginResourceAPI(w, r, cfg, db, pm, parts)
 		return true
@@ -93,6 +106,79 @@ func handlePluginAPIRoute(w http.ResponseWriter, r *http.Request, cfg *Config, d
 	}
 }
 
+func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, db *sql.DB, pm *ProcessManager, parts []string) {
+	if db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "plugin data store is unavailable"})
+		return
+	}
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	pluginID := strings.TrimSpace(strings.ToLower(parts[0]))
+	if !pluginIDPattern.MatchString(pluginID) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "plugin not found"})
+		return
+	}
+	if pluginID == "fvtap" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "built-in plugin cannot be disabled"})
+		return
+	}
+	if !externalPluginExists(cfg, pluginID) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "plugin not found"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, pluginStateResponseForID(cfg, db, pm, pluginID))
+	case http.MethodPut, http.MethodPost:
+		var req pluginStateWriteRequest
+		if err := decodeJSONRequestBody(w, r, &req, apiJSONBodyMaxBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.Enabled == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled is required"})
+			return
+		}
+		if err := store.SetPluginEnabled(db, pluginID, *req.Enabled); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if pm != nil {
+			pm.reconcilePluginsForRuntime()
+			pm.redistributeWorkers()
+		}
+		writeJSON(w, http.StatusOK, pluginStateResponseForID(cfg, db, pm, pluginID))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func externalPluginExists(cfg *Config, pluginID string) bool {
+	catalog := loadPluginCatalog(cfg)
+	for _, plugin := range catalog.Plugins {
+		if plugin.ID == pluginID && !plugin.Builtin {
+			return true
+		}
+	}
+	return false
+}
+
+func pluginStateResponseForID(cfg *Config, db *sql.DB, pm *ProcessManager, pluginID string) pluginStateResponse {
+	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
+	if pm != nil {
+		catalog = pm.pluginCatalogWithConfig(cfg)
+	}
+	for _, plugin := range catalog.Plugins {
+		if plugin.ID == pluginID {
+			return pluginStateResponse{PluginID: pluginID, Enabled: plugin.Enabled, Plugin: plugin}
+		}
+	}
+	return pluginStateResponse{PluginID: pluginID, Enabled: true}
+}
+
 func handlePluginResourceAPI(w http.ResponseWriter, r *http.Request, cfg *Config, db *sql.DB, pm *ProcessManager, parts []string) {
 	if db == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "plugin data store is unavailable"})
@@ -102,7 +188,7 @@ func handlePluginResourceAPI(w http.ResponseWriter, r *http.Request, cfg *Config
 		http.NotFound(w, r)
 		return
 	}
-	plugin, resource, ok := pluginResourceForRequest(w, cfg, pm, parts[0], parts[2])
+	plugin, resource, ok := pluginResourceForRequest(w, cfg, db, pm, parts[0], parts[2])
 	if !ok {
 		return
 	}
@@ -180,7 +266,7 @@ func handlePluginActionAPI(w http.ResponseWriter, r *http.Request, cfg *Config, 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	plugin, action, ok := pluginActionForRequest(w, cfg, pm, parts[0], parts[2])
+	plugin, action, ok := pluginActionForRequest(w, cfg, db, pm, parts[0], parts[2])
 	if !ok {
 		return
 	}
@@ -499,14 +585,14 @@ func handleDeletePluginRecord(w http.ResponseWriter, db *sql.DB, pm *ProcessMana
 	})
 }
 
-func pluginResourceForRequest(w http.ResponseWriter, cfg *Config, pm *ProcessManager, pluginID, resourceID string) (LoadedPlugin, PluginResource, bool) {
+func pluginResourceForRequest(w http.ResponseWriter, cfg *Config, db *sql.DB, pm *ProcessManager, pluginID, resourceID string) (LoadedPlugin, PluginResource, bool) {
 	pluginID = strings.TrimSpace(strings.ToLower(pluginID))
 	resourceID = strings.TrimSpace(strings.ToLower(resourceID))
 	if !pluginIDPattern.MatchString(pluginID) || !pluginTokenPattern.MatchString(resourceID) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return LoadedPlugin{}, PluginResource{}, false
 	}
-	plugin, ok := loadedPluginForControlAPI(cfg, pm, pluginID)
+	plugin, ok := loadedPluginForControlAPI(cfg, db, pm, pluginID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "plugin not found"})
 		return LoadedPlugin{}, PluginResource{}, false
@@ -520,14 +606,14 @@ func pluginResourceForRequest(w http.ResponseWriter, cfg *Config, pm *ProcessMan
 	return LoadedPlugin{}, PluginResource{}, false
 }
 
-func pluginActionForRequest(w http.ResponseWriter, cfg *Config, pm *ProcessManager, pluginID, actionID string) (LoadedPlugin, PluginAction, bool) {
+func pluginActionForRequest(w http.ResponseWriter, cfg *Config, db *sql.DB, pm *ProcessManager, pluginID, actionID string) (LoadedPlugin, PluginAction, bool) {
 	pluginID = strings.TrimSpace(strings.ToLower(pluginID))
 	actionID = strings.TrimSpace(strings.ToLower(actionID))
 	if !pluginIDPattern.MatchString(pluginID) || !pluginTokenPattern.MatchString(actionID) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return LoadedPlugin{}, PluginAction{}, false
 	}
-	plugin, ok := loadedPluginForControlAPI(cfg, pm, pluginID)
+	plugin, ok := loadedPluginForControlAPI(cfg, db, pm, pluginID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "plugin not found"})
 		return LoadedPlugin{}, PluginAction{}, false
@@ -541,8 +627,8 @@ func pluginActionForRequest(w http.ResponseWriter, cfg *Config, pm *ProcessManag
 	return LoadedPlugin{}, PluginAction{}, false
 }
 
-func loadedPluginForControlAPI(cfg *Config, pm *ProcessManager, pluginID string) (LoadedPlugin, bool) {
-	catalog := loadPluginCatalogWithControlRegistration(cfg)
+func loadedPluginForControlAPI(cfg *Config, db *sql.DB, pm *ProcessManager, pluginID string) (LoadedPlugin, bool) {
+	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
 	if pm != nil {
 		catalog = pm.pluginCatalogWithConfig(cfg)
 	}

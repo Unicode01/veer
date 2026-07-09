@@ -74,6 +74,12 @@ func loadPluginCatalogWithControlRegistration(cfg *Config) PluginCatalog {
 	return catalog
 }
 
+func loadPluginCatalogWithControlRegistrationAndState(cfg *Config, db store.RuleStore) PluginCatalog {
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginControlRegistrationSurfaces(&catalog, cfg)
+	return applyPluginStatesFromDB(catalog, db)
+}
+
 func applyPluginControlRegistrationSurfaces(catalog *PluginCatalog, cfg *Config) {
 	if catalog == nil {
 		return
@@ -223,6 +229,7 @@ func (pm *ProcessManager) pluginCatalogWithConfig(fallbackCfg *Config) PluginCat
 	if pm != nil {
 		if runtime, ok := pm.kernelRuntime.(pluginPipelineRuntime); ok {
 			mergePluginRuntimeSnapshot(&catalog, runtime.PluginSnapshot())
+			catalog = applyPluginStatesFromDB(catalog, pm.db)
 			return catalog
 		}
 	}
@@ -231,24 +238,30 @@ func (pm *ProcessManager) pluginCatalogWithConfig(fallbackCfg *Config) PluginCat
 	}
 	snapshot := pm.pluginRuntime.Reconcile(catalog)
 	mergePluginRuntimeSnapshot(&catalog, snapshot)
+	catalog = applyPluginStatesFromDB(catalog, pm.db)
 	return catalog
 }
 
 func (pm *ProcessManager) pluginCatalogWithControlSurface(cfg *Config) PluginCatalog {
 	if pm == nil || pm.pluginControlRuntime == nil {
-		catalog := loadPluginCatalogWithControlRegistration(cfg)
+		var db store.RuleStore
+		if pm != nil {
+			db = pm.db
+		}
+		catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
 		if pm == nil {
 			return catalog
 		}
 		return applyPluginHookBindingsFromDB(catalog, pm.db)
 	}
 
-	catalog := loadPluginCatalog(cfg)
+	catalog := loadPluginCatalogWithState(cfg, pm.db)
 	snapshot := pm.pluginControlRuntime.Snapshot()
 	if len(snapshot.Plugins) == 0 && len(snapshot.Surfaces) == 0 {
 		snapshot = pm.pluginControlRuntime.Reconcile(catalog)
 	}
 	applyPluginRuntimeSnapshot(&catalog, snapshot)
+	catalog = applyPluginStatesFromDB(catalog, pm.db)
 	return applyPluginHookBindingsFromDB(catalog, pm.db)
 }
 
@@ -273,10 +286,11 @@ func (pm *ProcessManager) reconcilePluginsForRuntime() pluginRuntimeSnapshot {
 	if pm == nil {
 		return pluginRuntimeSnapshot{}
 	}
-	catalog := loadPluginCatalog(pm.cfg)
+	catalog := loadPluginCatalogWithState(pm.cfg, pm.db)
 	if pm.pluginControlRuntime != nil {
 		controlSnapshot := pm.pluginControlRuntime.Reconcile(catalog)
 		applyPluginRuntimeSnapshot(&catalog, controlSnapshot)
+		catalog = applyPluginStatesFromDB(catalog, pm.db)
 		for _, plugin := range catalog.Plugins {
 			state, ok := controlSnapshot.stateFor(plugin.ID)
 			if !ok || state.Error == "" {
@@ -286,6 +300,7 @@ func (pm *ProcessManager) reconcilePluginsForRuntime() pluginRuntimeSnapshot {
 		}
 	} else {
 		applyPluginControlRegistrationSurfaces(&catalog, pm.cfg)
+		catalog = applyPluginStatesFromDB(catalog, pm.db)
 	}
 	refreshCorePlans := pluginCatalogHasActiveEgressNATPlansResource(catalog, pm.cfg) || pluginCatalogHasActiveForwardRulePlansResource(catalog, pm.cfg)
 	catalog = applyPluginHookBindingsFromDB(catalog, pm.db)
@@ -316,7 +331,7 @@ func (pm *ProcessManager) ApplyPluginResourceReconcileFromControl(plugin LoadedP
 		_ = markPluginRuntimeError(pm.db, plugin.ID, "resource", resource.ID, err)
 		return err
 	}
-	catalog := loadPluginCatalogWithControlRegistration(pm.cfg)
+	catalog := loadPluginCatalogWithControlRegistrationAndState(pm.cfg, pm.db)
 	refreshCorePlans := pluginCatalogHasActiveEgressNATPlansResource(catalog, pm.cfg) || pluginCatalogHasActiveForwardRulePlansResource(catalog, pm.cfg) || pluginResourceAffectsActiveCorePlans(plugin, resource, pm.cfg)
 	catalog = applyPluginHookBindingsFromDB(catalog, pm.db)
 	snapshot, redistributed := pm.reconcilePluginDataplaneForCatalog(catalog)

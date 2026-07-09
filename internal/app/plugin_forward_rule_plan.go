@@ -31,7 +31,7 @@ func loadActivePluginForwardRulePlanRecords(db sqlRuleStore, cfg *Config) ([]sto
 	if !pluginForwardRulePlansEnabled(cfg) {
 		return nil, nil
 	}
-	activePlugins := activePluginForwardRulePlanPluginIDs(cfg)
+	activePlugins := activePluginForwardRulePlanPluginIDs(db, cfg)
 	if len(activePlugins) == 0 {
 		return nil, nil
 	}
@@ -191,8 +191,8 @@ func pluginForwardRulePlansEnabled(cfg *Config) bool {
 	return cfg == nil || cfg.PluginsEnabled()
 }
 
-func activePluginForwardRulePlanPluginIDs(cfg *Config) map[string]struct{} {
-	catalog := loadPluginCatalogWithControlRegistration(cfg)
+func activePluginForwardRulePlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]struct{} {
+	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
 	out := make(map[string]struct{})
 	for _, plugin := range catalog.Plugins {
 		if pluginForwardRulePlansResourceActive(plugin, cfg) {
