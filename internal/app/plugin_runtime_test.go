@@ -2574,6 +2574,43 @@ exports.onAction = function () {
 	}
 }
 
+func TestPluginGojaControlScriptChangeClearsStaleTimers(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js",
+    "permissions": ["timer"]
+  }
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onReconcile = function () {
+  timer.setInterval('stale_timer', 60000, {version: 1});
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	rt.Reconcile(loadPluginCatalogWithState(cfg, db))
+	if timers := rt.pluginTimerList("control_plugin"); len(timers) != 1 || timers[0]["name"] != "stale_timer" {
+		t.Fatalf("timers after v1 reconcile = %+v, want stale_timer", timers)
+	}
+
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onReconcile = function () {};
+`)
+	rt.Reconcile(loadPluginCatalogWithState(cfg, db))
+	if timers := rt.pluginTimerList("control_plugin"); len(timers) != 0 {
+		t.Fatalf("timers after script change = %+v, want stale timers cleared", timers)
+	}
+}
+
 func TestPluginGojaWorkerKeepsPersistentStateAcrossCalls(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "control_plugin", `{
