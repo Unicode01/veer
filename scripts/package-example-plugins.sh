@@ -100,12 +100,47 @@ while IFS= read -r name; do
 	[ -n "$name" ] || continue
 	plugin_dir="$EXAMPLE_DIR/$name"
 	mkdir -p "$TMP_DIR/$name"
-	(cd "$plugin_dir" && tar -cf - .) | (cd "$TMP_DIR/$name" && tar -xf -)
+	"$PYTHON_BIN" - "$plugin_dir" "$TMP_DIR/$name" <<'PY'
+import pathlib
+import shutil
+import sys
+
+src = pathlib.Path(sys.argv[1]).resolve()
+dst = pathlib.Path(sys.argv[2]).resolve()
+
+ignored_dirs = {"__pycache__", ".pytest_cache", ".tmp", "node_modules"}
+
+def ignore_runtime_junk(_dir, names):
+    ignored = set()
+    for name in names:
+        if name in ignored_dirs:
+            ignored.add(name)
+            continue
+        if name.startswith("test-"):
+            ignored.add(name)
+            continue
+        if name.endswith((".test", ".log", ".tmp", ".bak", ".orig")):
+            ignored.add(name)
+    return ignored
+
+if dst.exists():
+    shutil.rmtree(dst)
+shutil.copytree(src, dst, ignore=ignore_runtime_junk, symlinks=True)
+PY
 done <"$PLUGIN_LIST"
 
 if [ -d "$EXAMPLE_DIR/include" ]; then
-	mkdir -p "$TMP_DIR/include"
-	(cd "$EXAMPLE_DIR/include" && tar -cf - .) | (cd "$TMP_DIR/include" && tar -xf -)
+	"$PYTHON_BIN" - "$EXAMPLE_DIR/include" "$TMP_DIR/include" <<'PY'
+import pathlib
+import shutil
+import sys
+
+src = pathlib.Path(sys.argv[1]).resolve()
+dst = pathlib.Path(sys.argv[2]).resolve()
+if dst.exists():
+    shutil.rmtree(dst)
+shutil.copytree(src, dst, symlinks=True)
+PY
 fi
 
 "$PYTHON_BIN" - "$TMP_DIR" <<'PY'
