@@ -674,6 +674,21 @@ test('plugin dataplane link rows hide virtual-interface-only control plugins', (
   assert.deepEqual(buttons.map((button) => button.textContent), ['pppoe_client', 'core', 'apply']);
 });
 
+test('plugin dataplane link rows ignore registration-only xdp hooks', () => {
+  const app = createHarness();
+  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins/runtime', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
+  const xdpOnly = {
+    id: 'xdp_probe',
+    name: 'XDP Probe',
+    kind: 'pipeline',
+    hooks: [{ id: 'xdp-ingress', engine: 'xdp', attach: 'ingress', stage: 'forward', priority: 20, program: 'probe:xdp_ingress', mode: 'observe', interfaces: ['eth0'] }],
+    runtime: { mode: 'registered', attachable: false, attached: false, reason: 'xdp hooks are registration-only in the tc pipeline' }
+  };
+  app.state.plugins.data = [xdpOnly];
+
+  assert.equal(app.__pluginLinkRowsForTest(xdpOnly).length, 0);
+});
+
 test('openPluginUI fetches protected asset and renders inline iframe', async () => {
   const app = createHarness();
   const calls = [];
