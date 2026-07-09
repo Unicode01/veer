@@ -304,15 +304,20 @@ func buildDesiredPluginDataplane(plugin LoadedPlugin) (pluginDataplaneDesiredPlu
 			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: attach=none", hook.ID))
 			continue
 		}
+		resolvedLinks := make(map[string]netlink.Link, len(hook.Interfaces))
+		for _, iface := range hook.Interfaces {
+			link, err := netlink.LinkByName(iface)
+			if err != nil {
+				return item, pluginRuntimeErrorState(fmt.Sprintf("resolve plugin hook interface %q for hook %s: %v", iface, hook.ID, err))
+			}
+			resolvedLinks[iface] = link
+		}
 		realPath, err := resolvePluginObjectRealPath(&plugin, object)
 		if err != nil {
 			return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s object path: %v", hook.ID, err))
 		}
 		for _, iface := range hook.Interfaces {
-			link, err := netlink.LinkByName(iface)
-			if err != nil {
-				return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s interface %q: %v", hook.ID, iface, err))
-			}
+			link := resolvedLinks[iface]
 			for _, attach := range attaches {
 				item.attachments = append(item.attachments, pluginTCAttachPlan{
 					PluginID:       plugin.ID,

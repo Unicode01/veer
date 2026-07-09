@@ -2586,13 +2586,17 @@ func dataplanePerfPluginPipelineCount() int {
 func setupDataplanePerfPluginPipeline(t *testing.T, workDir string, pluginsDir string, count int) {
 	t.Helper()
 
+	repoRoot := findRepoRoot(t)
+	pluginsRoot := filepath.Join(workDir, filepath.FromSlash(pluginsDir))
+	copyDirForTest(t, filepath.Join(repoRoot, "examples", "plugins", "include"), filepath.Join(pluginsRoot, "include"))
+
 	sourceDir := strings.TrimSpace(os.Getenv(dataplanePerfPluginSourceEnv))
 	if sourceDir == "" {
-		sourceDir = filepath.Join(findRepoRoot(t), "examples", "plugins", "packet_observer")
+		sourceDir = filepath.Join(repoRoot, "examples", "plugins", "packet_observer")
 	}
 	for i := 0; i < count; i++ {
 		pluginID := fmt.Sprintf("packet_observer_%02d", i+1)
-		pluginDir := filepath.Join(workDir, filepath.FromSlash(pluginsDir), pluginID)
+		pluginDir := filepath.Join(pluginsRoot, pluginID)
 		copyDirForTest(t, sourceDir, pluginDir)
 		writeDataplanePerfPluginManifest(t, filepath.Join(pluginDir, "plugin.json"), pluginID, 10+i)
 		compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
