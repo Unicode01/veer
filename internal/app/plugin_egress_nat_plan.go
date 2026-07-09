@@ -38,7 +38,7 @@ func loadActivePluginEgressNATPlanRecords(db sqlRuleStore, cfg *Config) ([]store
 	if !pluginEgressNATPlansEnabled(cfg) {
 		return nil, nil
 	}
-	activePlugins := activePluginEgressNATPlanPluginIDs(cfg)
+	activePlugins := activePluginEgressNATPlanPluginIDs(db, cfg)
 	if len(activePlugins) == 0 {
 		return nil, nil
 	}
@@ -163,8 +163,8 @@ func pluginEgressNATPlansEnabled(cfg *Config) bool {
 	return cfg == nil || cfg.PluginsEnabled()
 }
 
-func activePluginEgressNATPlanPluginIDs(cfg *Config) map[string]struct{} {
-	catalog := loadPluginCatalogWithControlRegistration(cfg)
+func activePluginEgressNATPlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]struct{} {
+	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
 	out := make(map[string]struct{})
 	for _, plugin := range catalog.Plugins {
 		if pluginEgressNATPlansResourceActive(plugin, cfg) {

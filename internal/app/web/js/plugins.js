@@ -11,6 +11,7 @@
     const status = String(plugin && plugin.status || '').toLowerCase();
     if (status === 'builtin') return { badge: 'kernel', text: app.t('plugins.status.builtin') };
     if (status === 'active') return { badge: 'running', text: app.t('plugins.status.active') };
+    if (status === 'disabled') return { badge: 'disabled', text: app.t('plugins.status.disabled') };
     if (status === 'error') return { badge: 'error', text: app.t('plugins.status.error') };
     return { badge: 'disabled', text: status || app.t('common.dash') };
   }
@@ -37,6 +38,7 @@
     if (value === 'builtin') return app.t('plugins.runtime.builtin');
     if (value === 'dataplane') return app.t('plugins.runtime.dataplane');
     if (value === 'control') return app.t('plugins.runtime.control');
+    if (value === 'disabled') return app.t('plugins.runtime.disabled');
     if (value === 'error') return app.t('plugins.runtime.error');
     if (value === 'registered') return app.t('plugins.runtime.registered');
     if (value === 'invalid') return app.t('plugins.runtime.invalid');
@@ -1055,6 +1057,28 @@
       text: app.t('plugins.open'),
       title: plugin.asset_base_path + plugin.ui.entry,
       dataset: { pluginId: plugin.id || '' }
+    });
+  }
+
+  function pluginActionsNode(plugin) {
+    if (!plugin || plugin.builtin || plugin.id === 'fvtap') return app.emptyCellNode('stat-muted');
+    const id = String(plugin.id || '').trim();
+    if (!id) return app.emptyCellNode('stat-muted');
+    const pending = app.isRowPending && app.isRowPending('plugin', id);
+    const enabled = plugin.enabled !== false && String(plugin.status || '').toLowerCase() !== 'disabled';
+    const willEnable = !enabled;
+    return app.createNode('button', {
+      className: 'mini-btn btn-toggle-plugin ' + (enabled ? 'btn-disable' : 'btn-enable') + (pending ? ' is-busy' : ''),
+      text: pending ? app.t('common.processing') : app.t(enabled ? 'common.disable' : 'common.enable'),
+      attrs: {
+        type: 'button',
+        disabled: pending ? 'disabled' : null,
+        'aria-busy': pending ? 'true' : 'false'
+      },
+      dataset: {
+        pluginId: id,
+        enabled: willEnable ? '1' : '0'
+      }
     });
   }
 
@@ -2191,12 +2215,18 @@ select.fwd-input {
     const fragment = document.createDocumentFragment();
     list.forEach((plugin) => {
       const tr = document.createElement('tr');
+      const pluginID = String(plugin && plugin.id || '').trim();
+      const pending = pluginID && app.isRowPending && app.isRowPending('plugin', pluginID);
       const info = pluginStatusInfo(plugin);
       const detailText = pluginDetailsPlainText(plugin);
       const nameTitle = [
         plugin.source ? app.t('plugins.source') + ': ' + plugin.source : '',
         plugin.description || ''
       ].filter(Boolean).join('\n');
+      if (pending) {
+        tr.className = 'row-pending';
+        tr.setAttribute('aria-busy', 'true');
+      }
 
       tr.appendChild(app.createCell(app.createNode('span', {
         className: 'stat-mono plugin-text-truncate',
@@ -2230,6 +2260,7 @@ select.fwd-input {
       tr.appendChild(app.createCell(plugin.kind ? app.createNode('span', { className: 'plugin-text-truncate', text: plugin.kind, title: plugin.kind }) : app.emptyCellNode('stat-muted'), 'plugin-cell-tight'));
       tr.appendChild(app.createCell(plugin.version ? app.createNode('span', { className: 'plugin-text-truncate', text: plugin.version, title: plugin.version }) : app.emptyCellNode('stat-muted'), 'plugin-cell-tight'));
       tr.appendChild(app.createCell(pluginUINode(plugin), 'plugin-cell-tight'));
+      tr.appendChild(app.createCell(pluginActionsNode(plugin), 'plugin-cell-tight'));
       fragment.appendChild(tr);
     });
 
@@ -2245,6 +2276,26 @@ select.fwd-input {
       app.renderPluginsTable();
     } catch (e) {
       if (e.message !== 'unauthorized') console.error('load plugins:', e);
+    }
+  };
+
+  app.togglePluginEnabled = async function togglePluginEnabled(pluginId, enabled) {
+    const id = String(pluginId || '').trim();
+    if (!id || id === 'fvtap') return;
+    if (app.isRowPending && app.isRowPending('plugin', id)) return;
+    const willEnable = !!enabled;
+    if (app.setRowPending) app.setRowPending('plugin', id, true);
+    app.renderPluginsTable();
+    try {
+      await app.apiCall('PUT', '/api/plugins/' + encodeURIComponent(id) + '/state', { enabled: willEnable });
+      await app.loadPlugins();
+      app.notify('success', app.t(willEnable ? 'toast.enabled' : 'toast.disabled', { item: app.t('noun.plugin') }));
+    } catch (e) {
+      const message = e && e.message ? e.message : String(e);
+      app.notify('error', app.t('errors.operationFailed', { message: message }));
+    } finally {
+      if (app.setRowPending) app.setRowPending('plugin', id, false);
+      app.renderPluginsTable();
     }
   };
 
@@ -2355,6 +2406,13 @@ select.fwd-input {
 
   if (document && typeof document.addEventListener === 'function') {
     document.addEventListener('click', (e) => {
+      const togglePlugin = e.target.closest && e.target.closest('.btn-toggle-plugin[data-plugin-id]');
+      if (togglePlugin) {
+        e.preventDefault();
+        e.stopPropagation();
+        app.togglePluginEnabled(togglePlugin.dataset.pluginId, togglePlugin.dataset.enabled === '1');
+        return;
+      }
       const trigger = e.target.closest && e.target.closest('.plugin-detail-trigger[data-plugin-id]');
       if (trigger) {
         e.preventDefault();

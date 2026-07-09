@@ -270,7 +270,7 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
 			return
 		}
-		writeJSON(w, http.StatusOK, loadPluginCatalogWithControlRegistration(cfg))
+		writeJSON(w, http.StatusOK, loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	}))
 	mux.HandleFunc("/api/plugins/reload", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -283,13 +283,13 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
 			return
 		}
-		writeJSON(w, http.StatusOK, loadPluginCatalogWithControlRegistration(cfg))
+		writeJSON(w, http.StatusOK, loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	}))
 	mux.Handle("/api/plugins/", authStaticMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if handlePluginAPIRoute(w, r, cfg, db, pm) {
 			return
 		}
-		handlePluginAsset(w, r, cfg, pm)
+		handlePluginAsset(w, r, cfg, db, pm)
 	})))
 	mux.HandleFunc("/api/rules/validate", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

@@ -366,7 +366,7 @@ func (rt *gojaPluginControlRuntime) ensurePluginCatalogForControlEvents() {
 	}
 	rt.mu.Unlock()
 
-	catalog := loadPluginCatalog(rt.cfg)
+	catalog := loadPluginCatalogWithState(rt.cfg, rt.db)
 	registeredByID := make(map[string]LoadedPlugin)
 	for _, plugin := range catalog.Plugins {
 		if plugin.Builtin || plugin.Status != pluginStatusActive || plugin.controlMainPath == "" {

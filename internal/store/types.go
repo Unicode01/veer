@@ -114,6 +114,13 @@ type PluginRecord struct {
 	UpdatedAt  string
 }
 
+type PluginState struct {
+	ID        int64
+	PluginID  string
+	Enabled   bool
+	UpdatedAt string
+}
+
 type PluginRuntimeStatus struct {
 	ID              int64
 	PluginID        string

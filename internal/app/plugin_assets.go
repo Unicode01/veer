@@ -1,6 +1,7 @@
 package app
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
@@ -91,7 +92,7 @@ func pluginUISHA256Required(plugin LoadedPlugin) bool {
 	}
 }
 
-func handlePluginAsset(w http.ResponseWriter, r *http.Request, cfg *Config, pm *ProcessManager) {
+func handlePluginAsset(w http.ResponseWriter, r *http.Request, cfg *Config, db *sql.DB, pm *ProcessManager) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -106,7 +107,7 @@ func handlePluginAsset(w http.ResponseWriter, r *http.Request, cfg *Config, pm *
 	}
 
 	id := parts[0]
-	catalog := loadPluginCatalogWithControlRegistration(cfg)
+	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
 	if pm != nil {
 		catalog = pm.pluginCatalogWithConfig(cfg)
 	}

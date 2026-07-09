@@ -71,6 +71,22 @@ func TestPluginForwardRulePlanRequiresActivePluginAndNoConflict(t *testing.T) {
 		t.Fatalf("disabled plugin rules=%+v warnings=%+v, want none", rules, warnings)
 	}
 
+	enabled := true
+	if err := store.SetPluginEnabled(db, "forward_orchestrator", false); err != nil {
+		t.Fatalf("SetPluginEnabled(false) error = %v", err)
+	}
+	nextID = 1
+	rules, warnings, err = loadPluginForwardRules(db, &Config{PluginsDir: pluginsDir, PluginsEnabledSetting: &enabled}, nil, nil, nil, &nextID)
+	if err != nil {
+		t.Fatalf("loadPluginForwardRules(disabled plugin state) error = %v", err)
+	}
+	if len(rules) != 0 || len(warnings) != 0 {
+		t.Fatalf("plugin-state disabled rules=%+v warnings=%+v, want none", rules, warnings)
+	}
+	if err := store.SetPluginEnabled(db, "forward_orchestrator", true); err != nil {
+		t.Fatalf("SetPluginEnabled(true) error = %v", err)
+	}
+
 	explicit := Rule{
 		ID:       7,
 		InIP:     "0.0.0.0",

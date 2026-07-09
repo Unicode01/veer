@@ -1941,6 +1941,103 @@ func TestPluginResourceAPIPluginReconcileReportsRuntimeError(t *testing.T) {
 	}
 }
 
+func TestPluginStateAPIDisablesControlSurfaceAndRuntime(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "resources": [{
+    "id": "settings",
+    "methods": ["list", "get", "create", "update", "delete"],
+    "runtime_update": "manual"
+  }],
+  "ui": {
+    "static_dir": "ui",
+    "entry": "index.html"
+  }
+}`)
+
+	db := openTestDB(t)
+	cfg := &Config{
+		WebBind:    "127.0.0.1",
+		WebPort:    8080,
+		WebToken:   "test-token",
+		PluginsDir: dir,
+	}
+	pm := &ProcessManager{db: db, cfg: cfg}
+	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	pm.pluginControlRuntime = rt
+	defer rt.Close()
+	handler := buildAPIHandler(cfg, db, pm)
+
+	pm.reconcilePluginsForRuntime()
+	if !pluginControlVMExistsForTest(rt, "control_plugin") {
+		t.Fatal("control VM missing after initial reconcile")
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/api/plugins/control_plugin/state", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable plugin status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	type pluginStateTestResponse struct {
+		PluginID string `json:"plugin_id"`
+		Enabled  bool   `json:"enabled"`
+		Plugin   struct {
+			Enabled       bool               `json:"enabled"`
+			Status        string             `json:"status"`
+			Runtime       PluginRuntimeState `json:"runtime"`
+			Resources     []PluginResource   `json:"resources"`
+			UI            *PluginUI          `json:"ui"`
+			AssetBasePath string             `json:"asset_base_path"`
+		} `json:"plugin"`
+	}
+	var disabled pluginStateTestResponse
+	if err := json.NewDecoder(rec.Body).Decode(&disabled); err != nil {
+		t.Fatalf("decode disabled plugin state: %v", err)
+	}
+	if disabled.Enabled || disabled.Plugin.Enabled || disabled.Plugin.Status != pluginStatusDisabled || disabled.Plugin.Runtime.Mode != pluginRuntimeModeDisabled {
+		t.Fatalf("disabled plugin response = %+v, want disabled runtime", disabled)
+	}
+	if len(disabled.Plugin.Resources) != 0 || disabled.Plugin.UI != nil || disabled.Plugin.AssetBasePath != "" {
+		t.Fatalf("disabled plugin surface leaked: resources=%+v ui=%+v asset=%q", disabled.Plugin.Resources, disabled.Plugin.UI, disabled.Plugin.AssetBasePath)
+	}
+	if pluginControlVMExistsForTest(rt, "control_plugin") {
+		t.Fatal("control VM still present after plugin disable")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/plugins/control_plugin/resources/settings", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("disabled plugin resource status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/plugins/control_plugin/state", strings.NewReader(`{"enabled":true}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable plugin status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var enabled pluginStateTestResponse
+	if err := json.NewDecoder(rec.Body).Decode(&enabled); err != nil {
+		t.Fatalf("decode enabled plugin state: %v", err)
+	}
+	if !enabled.Enabled || !enabled.Plugin.Enabled || enabled.Plugin.Status != pluginStatusActive || len(enabled.Plugin.Resources) != 1 || enabled.Plugin.UI == nil {
+		t.Fatalf("enabled plugin response = %+v, want active surface restored", enabled)
+	}
+	if !pluginControlVMExistsForTest(rt, "control_plugin") {
+		t.Fatal("control VM missing after plugin re-enable")
+	}
+}
+
 func TestPluginActionRuntimeApplyReportsError(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "apply_plugin", `{
@@ -8652,6 +8749,21 @@ func TestPluginEgressNATPlanRequiresActivePluginAndNoOverlap(t *testing.T) {
 		t.Fatalf("effective egress nats with plugins disabled = %+v, want none", items)
 	}
 
+	enabled := true
+	if err := store.SetPluginEnabled(db, "lan_core", false); err != nil {
+		t.Fatalf("SetPluginEnabled(lan_core false) error = %v", err)
+	}
+	items, err = loadEffectiveEnabledEgressNATItems(db, &Config{PluginsDir: pluginsDir, PluginsEnabledSetting: &enabled})
+	if err != nil {
+		t.Fatalf("loadEffectiveEnabledEgressNATItems(disabled plugin state) error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("effective egress nats with plugin state disabled = %+v, want none", items)
+	}
+	if err := store.SetPluginEnabled(db, "lan_core", true); err != nil {
+		t.Fatalf("SetPluginEnabled(lan_core true) error = %v", err)
+	}
+
 	explicit := EgressNAT{
 		ParentInterface: "brlan0",
 		OutInterface:    "fwdwan0",
@@ -11096,6 +11208,16 @@ func loadTestPluginByID(t *testing.T, cfg *Config, id string) LoadedPlugin {
 	}
 	t.Fatalf("plugin %s not found in catalog %+v", id, catalog.Plugins)
 	return LoadedPlugin{}
+}
+
+func pluginControlVMExistsForTest(rt *gojaPluginControlRuntime, pluginID string) bool {
+	if rt == nil {
+		return false
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	_, ok := rt.controlVMs[pluginID]
+	return ok
 }
 
 type pluginControlMapControllerTest struct {

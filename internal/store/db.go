@@ -145,6 +145,12 @@ var Schema = map[string][][2]string{
 		{"created_at", "TEXT NOT NULL DEFAULT ''"},
 		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
 	},
+	"plugin_states": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	},
 	"plugin_runtime_status": {
 		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
 		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
@@ -177,6 +183,7 @@ var SchemaIndexes = []IndexDefinition{
 	{Name: "idx_managed_network_reservations_network_id", Table: "managed_network_reservations", Columns: "managed_network_id"},
 	{Name: "idx_ipv6_assignments_enabled", Table: "ipv6_assignments", Columns: "enabled"},
 	{Name: "idx_plugin_records_scope", Table: "plugin_records", Columns: "plugin_id, resource_id"},
+	{Name: "idx_plugin_states_enabled", Table: "plugin_states", Columns: "enabled"},
 	{Name: "idx_plugin_runtime_status_scope", Table: "plugin_runtime_status", Columns: "plugin_id, target_type"},
 }
 
@@ -186,6 +193,7 @@ const (
 	ConstraintIndexManagedNetworkReservationNetworkMAC  = "ux_managed_network_reservations_network_mac"
 	ConstraintIndexManagedNetworkReservationNetworkIPv4 = "ux_managed_network_reservations_network_ipv4"
 	ConstraintIndexPluginRecordKey                      = "ux_plugin_records_key"
+	ConstraintIndexPluginStatePlugin                    = "ux_plugin_states_plugin"
 	ConstraintIndexPluginRuntimeStatusTarget            = "ux_plugin_runtime_status_target"
 )
 
@@ -237,6 +245,16 @@ var SchemaConstraintIndexes = []ConstraintIndexDefinition{
 			FROM plugin_records
 			WHERE trim(plugin_id) <> '' AND trim(resource_id) <> '' AND trim(record_key) <> ''
 			GROUP BY plugin_id, resource_id, record_key
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginStatePlugin,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginStatePlugin + ` ON plugin_states(plugin_id)`,
+		DuplicateProbe: `SELECT plugin_id
+			FROM plugin_states
+			WHERE trim(plugin_id) <> ''
+			GROUP BY plugin_id
 			HAVING COUNT(*) > 1
 			LIMIT 1`,
 	},

@@ -3,11 +3,15 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
+
+	"forward/internal/store"
 )
 
 const (
@@ -17,13 +21,15 @@ const (
 	pluginObjectMaxSize   = 16 << 20
 	pluginControlMaxSize  = 1 << 20
 
-	pluginStatusActive  = "active"
-	pluginStatusBuiltin = "builtin"
-	pluginStatusError   = "error"
+	pluginStatusActive   = "active"
+	pluginStatusBuiltin  = "builtin"
+	pluginStatusDisabled = "disabled"
+	pluginStatusError    = "error"
 
 	pluginRuntimeModeBuiltin    = "builtin"
 	pluginRuntimeModeDataplane  = "dataplane"
 	pluginRuntimeModeControl    = "control"
+	pluginRuntimeModeDisabled   = "disabled"
 	pluginRuntimeModeError      = "error"
 	pluginRuntimeModeRegistered = "registered"
 	pluginRuntimeModeInvalid    = "invalid"
@@ -218,6 +224,7 @@ type LoadedPlugin struct {
 	Resources         []PluginResource         `json:"resources,omitempty"`
 	Actions           []PluginAction           `json:"actions,omitempty"`
 	UI                *PluginUI                `json:"ui,omitempty"`
+	Enabled           bool                     `json:"enabled"`
 	Status            string                   `json:"status"`
 	Runtime           PluginRuntimeState       `json:"runtime"`
 	Error             string                   `json:"error,omitempty"`
@@ -259,6 +266,87 @@ func loadPluginCatalog(cfg *Config) PluginCatalog {
 		return a.ID < b.ID
 	})
 	return catalog
+}
+
+func loadPluginCatalogWithState(cfg *Config, db store.RuleStore) PluginCatalog {
+	return applyPluginStatesFromDB(loadPluginCatalog(cfg), db)
+}
+
+func applyPluginStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCatalog {
+	for i := range catalog.Plugins {
+		catalog.Plugins[i].Enabled = true
+		if catalog.Plugins[i].Builtin {
+			continue
+		}
+	}
+	if pluginRuleStoreIsNil(db) {
+		return catalog
+	}
+	states, err := store.GetPluginStates(db)
+	if err != nil {
+		logPluginStateLoadError(err)
+		return catalog
+	}
+	enabledByPlugin := make(map[string]bool, len(states))
+	for _, state := range states {
+		pluginID := strings.TrimSpace(strings.ToLower(state.PluginID))
+		if pluginID == "" {
+			continue
+		}
+		enabledByPlugin[pluginID] = state.Enabled
+	}
+	for i := range catalog.Plugins {
+		plugin := &catalog.Plugins[i]
+		if plugin.Builtin {
+			plugin.Enabled = true
+			continue
+		}
+		enabled, ok := enabledByPlugin[plugin.ID]
+		if !ok || enabled {
+			plugin.Enabled = true
+			continue
+		}
+		disableLoadedPlugin(plugin)
+	}
+	return catalog
+}
+
+func pluginRuleStoreIsNil(db store.RuleStore) bool {
+	if db == nil {
+		return true
+	}
+	value := reflect.ValueOf(db)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func logPluginStateLoadError(err error) {
+	if err != nil {
+		log.Printf("plugin state: load failed: %v", err)
+	}
+}
+
+func disableLoadedPlugin(plugin *LoadedPlugin) {
+	if plugin == nil || plugin.Builtin {
+		return
+	}
+	plugin.Enabled = false
+	plugin.Status = pluginStatusDisabled
+	plugin.Runtime = disabledPluginRuntimeState()
+	plugin.Error = ""
+	plugin.Capabilities = nil
+	plugin.VirtualInterfaces = nil
+	plugin.Objects = nil
+	plugin.Hooks = nil
+	plugin.Resources = nil
+	plugin.Actions = nil
+	plugin.UI = nil
+	plugin.staticDir = ""
+	plugin.AssetBasePath = ""
 }
 
 func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
@@ -312,6 +400,15 @@ func externalPluginRuntimeState() PluginRuntimeState {
 	}
 }
 
+func disabledPluginRuntimeState() PluginRuntimeState {
+	return PluginRuntimeState{
+		Mode:       pluginRuntimeModeDisabled,
+		Attachable: false,
+		Attached:   false,
+		Reason:     "plugin is disabled",
+	}
+}
+
 func invalidPluginRuntimeState() PluginRuntimeState {
 	return PluginRuntimeState{
 		Mode:       pluginRuntimeModeInvalid,
@@ -360,6 +457,7 @@ func builtinFVTapPlugin() LoadedPlugin {
 			{ID: "tc-reply", Engine: kernelEngineTC, Attach: "ingress", Stage: "reply", Priority: pluginPipelineCorePriority, Program: "builtin:forward-tc", Mode: "rewrite"},
 			{ID: "xdp-ingress", Engine: kernelEngineXDP, Attach: "ingress", Stage: "forward", Priority: 0, Program: "builtin:forward-xdp", Mode: "rewrite"},
 		},
+		Enabled: true,
 		Status:  pluginStatusBuiltin,
 		Runtime: builtinPluginRuntimeState(),
 	}
@@ -453,6 +551,7 @@ func loadPluginFromDir(rootDir, source string) (LoadedPlugin, error) {
 
 	plugin := LoadedPlugin{
 		PluginManifest: manifest,
+		Enabled:        true,
 		Status:         pluginStatusActive,
 		Runtime:        externalPluginRuntimeState(),
 		Source:         source,
@@ -491,6 +590,7 @@ func pluginLoadError(id, source, message string) LoadedPlugin {
 			Stability:  pluginStabilityLab,
 		},
 		Status:  pluginStatusError,
+		Enabled: true,
 		Runtime: invalidPluginRuntimeState(),
 		Error:   strings.TrimSpace(message),
 		Source:  source,
