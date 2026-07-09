@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const pluginHotReloadContentHashMaxBytes = pluginObjectMaxSize
+
 func buildPluginCatalogFingerprint(cfg *Config) (string, error) {
 	if cfg != nil && !cfg.PluginsEnabled() {
 		return "plugins-disabled", nil
@@ -90,6 +92,20 @@ func buildPluginCatalogFingerprint(cfg *Config) (string, error) {
 				}
 			} else {
 				fmt.Fprintf(h, "symlink-target path=%s target=%s\n", rel, target)
+			}
+		} else if mode.IsRegular() {
+			if info.Size() > pluginHotReloadContentHashMaxBytes {
+				fmt.Fprintf(h, "content-skip path=%s reason=size>%d\n", rel, pluginHotReloadContentHashMaxBytes)
+			} else {
+				sum, hashErr := sha256File(path)
+				if hashErr != nil {
+					fmt.Fprintf(h, "content-error path=%s err=%v\n", rel, hashErr)
+					if firstErr == nil {
+						firstErr = hashErr
+					}
+				} else {
+					fmt.Fprintf(h, "content-sha256 path=%s sha256=%s\n", rel, sum)
+				}
 			}
 		}
 		return nil

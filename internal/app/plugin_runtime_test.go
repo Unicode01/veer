@@ -2161,6 +2161,52 @@ func TestPluginCatalogFingerprintDetectsPluginFileChanges(t *testing.T) {
 	}
 }
 
+func TestPluginCatalogFingerprintDetectsContentChangesWithPreservedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{PluginsDir: dir}
+	writeTestPlugin(t, dir, "hot_plugin", `{
+  "api_version": "v1",
+  "id": "hot_plugin",
+  "name": "Hot Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js"
+  }
+}`)
+	controlPath := filepath.Join(dir, "hot_plugin", "control.js")
+	first := []byte("exports.version = 'one';\n")
+	second := []byte("exports.version = 'two';\n")
+	if len(first) != len(second) {
+		t.Fatalf("test fixture size mismatch: %d != %d", len(first), len(second))
+	}
+	fixedTime := time.Unix(1700000000, 123456789)
+	if err := os.WriteFile(controlPath, first, 0o644); err != nil {
+		t.Fatalf("WriteFile(control.js first) error = %v", err)
+	}
+	if err := os.Chtimes(controlPath, fixedTime, fixedTime); err != nil {
+		t.Fatalf("Chtimes(control.js first) error = %v", err)
+	}
+	before, err := buildPluginCatalogFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("buildPluginCatalogFingerprint(before) error = %v", err)
+	}
+
+	if err := os.WriteFile(controlPath, second, 0o644); err != nil {
+		t.Fatalf("WriteFile(control.js second) error = %v", err)
+	}
+	if err := os.Chtimes(controlPath, fixedTime, fixedTime); err != nil {
+		t.Fatalf("Chtimes(control.js second) error = %v", err)
+	}
+	after, err := buildPluginCatalogFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("buildPluginCatalogFingerprint(after) error = %v", err)
+	}
+	if after == before {
+		t.Fatal("plugin catalog fingerprint did not change after same-size content change with preserved mtime")
+	}
+}
+
 func TestPluginCatalogDriftReconcilesRuntimeAndQueuesRedistribute(t *testing.T) {
 	dir := t.TempDir()
 	db := openTestDB(t)
