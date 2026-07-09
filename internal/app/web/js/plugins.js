@@ -2044,6 +2044,8 @@ select.fwd-input {
     const hotReloadInfo = pluginHotReloadInfo(hotReload);
     const enabled = catalog.external_plugins_enabled !== false;
     const attach = !!runtime.external_dataplane_attach;
+    const attachEngines = pluginRuntimeEngineList(runtime.external_dataplane_engines);
+    const registrationOnlyEngines = pluginRuntimeEngineList(runtime.registration_only_engines);
     app.clearNode(el);
     const titleParts = [app.t('plugins.catalog.meta', {
       dir: catalog.directory || '',
@@ -2065,8 +2067,11 @@ select.fwd-input {
     const items = [
       pluginMetaItem(app.t('plugins.catalog.dir'), catalog.directory || app.t('common.dash'), 'mono'),
       pluginMetaItem(app.t('plugins.catalog.scan'), enabled ? app.t('common.yes') : app.t('common.no'), enabled ? 'ok' : 'muted'),
-      pluginMetaItem(app.t('plugins.catalog.dataplane'), attach ? app.t('common.yes') : app.t('common.no'), attach ? 'ok' : 'muted')
+      pluginMetaItem(app.t('plugins.catalog.dataplane'), attach ? (attachEngines || app.t('common.yes')) : app.t('common.no'), attach ? 'ok' : 'muted')
     ];
+    if (registrationOnlyEngines) {
+      items.push(pluginMetaItem(app.t('plugins.catalog.registrationOnly'), registrationOnlyEngines, 'muted', app.t('plugins.catalog.registrationOnlyDetail', { engines: registrationOnlyEngines })));
+    }
     if (hotReload) {
       items.push(pluginMetaItem(app.t('plugins.catalog.hotReload'), hotReloadInfo.text, hotReloadInfo.tone, hotReloadInfo.detail));
       items.push(pluginMetaItem(app.t('plugins.catalog.lastCheck'), formatPluginHotReloadTimestamp(hotReload.last_check_at), hotReload.last_check_error ? 'warning' : 'muted'));
@@ -2156,6 +2161,14 @@ select.fwd-input {
     } catch (_) {
       return text;
     }
+  }
+
+  function pluginRuntimeEngineList(value) {
+    if (!Array.isArray(value)) return '';
+    return value
+      .map((item) => String(item || '').trim().toUpperCase())
+      .filter(Boolean)
+      .join('/');
   }
 
   function pluginPipelineChip(text, tone, title) {

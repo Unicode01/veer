@@ -37,6 +37,12 @@ func TestLoadPluginCatalogIncludesBuiltinFVTap(t *testing.T) {
 	if catalog.Runtime.CorePriority != pluginPipelineCorePriority {
 		t.Fatalf("catalog runtime core priority = %d, want %d", catalog.Runtime.CorePriority, pluginPipelineCorePriority)
 	}
+	if got := strings.Join(catalog.Runtime.ExternalDataplaneEngines, ","); got != "tc" {
+		t.Fatalf("catalog runtime external dataplane engines = %q, want tc", got)
+	}
+	if got := strings.Join(catalog.Runtime.RegistrationOnlyEngines, ","); got != "xdp" {
+		t.Fatalf("catalog runtime registration-only engines = %q, want xdp", got)
+	}
 	if got := strings.Join(catalog.Runtime.StabilityLevels, ","); got != "lab,preview,stable,deprecated" {
 		t.Fatalf("catalog runtime stability levels = %q, want lab,preview,stable,deprecated", got)
 	}
