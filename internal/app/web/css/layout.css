@@ -370,6 +370,14 @@ section h2 {
     min-width: 0;
 }
 
+.section-heading-row > .section-heading-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
 .section-heading-row h2 {
     margin: 0;
     padding: 0;
@@ -587,6 +595,11 @@ section h2 {
 
     .section-heading-row .mini-btn {
         width: 100%;
+    }
+
+    .section-heading-row > .section-heading-actions {
+        width: 100%;
+        justify-content: flex-start;
     }
 
     .confirm-actions {

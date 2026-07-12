@@ -2588,11 +2588,11 @@ func setupDataplanePerfPluginPipeline(t *testing.T, workDir string, pluginsDir s
 
 	repoRoot := findRepoRoot(t)
 	pluginsRoot := filepath.Join(workDir, filepath.FromSlash(pluginsDir))
-	copyDirForTest(t, filepath.Join(repoRoot, "examples", "plugins", "include"), filepath.Join(pluginsRoot, "include"))
+	copyDirForTest(t, filepath.Join(repoRoot, "plugins", "include"), filepath.Join(pluginsRoot, "include"))
 
 	sourceDir := strings.TrimSpace(os.Getenv(dataplanePerfPluginSourceEnv))
 	if sourceDir == "" {
-		sourceDir = filepath.Join(repoRoot, "examples", "plugins", "packet_observer")
+		sourceDir = filepath.Join(repoRoot, "plugins", "packet_observer")
 	}
 	for i := 0; i < count; i++ {
 		pluginID := fmt.Sprintf("packet_observer_%02d", i+1)

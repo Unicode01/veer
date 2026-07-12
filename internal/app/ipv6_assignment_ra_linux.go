@@ -23,6 +23,7 @@ const (
 	ipv6RARouterLifetime      = 1800 * time.Second
 	ipv6RAValidLifetime       = 24 * time.Hour
 	ipv6RAPreferredLifetime   = 4 * time.Hour
+	ipv6RDNSSLifetime         = ipv6RARouterLifetime
 	ipv6RAAdvertisementPeriod = 30 * time.Second
 	ipv6RATroubleLogEvery     = 5 * time.Minute
 	ipv6NextHeaderICMPv6      = 58
@@ -109,6 +110,7 @@ func (adv *ipv6RouterAdvertiser) snapshot() ipv6AssignmentRAConfig {
 		Managed:         adv.config.Managed,
 		Prefixes:        append([]string(nil), adv.config.Prefixes...),
 		Routes:          append([]string(nil), adv.config.Routes...),
+		DNSServers:      append([]string(nil), adv.config.DNSServers...),
 	}
 }
 
@@ -445,6 +447,13 @@ func buildIPv6RouterAdvertisementPayload(state ipv6RouterAdvertisementState) ([]
 		}
 		body = append(body, buildIPv6RouteInfoOption(route, ipv6RARouterLifetime)...)
 	}
+	if len(state.Config.DNSServers) > 0 {
+		option, err := buildIPv6RDNSSOption(state.Config.DNSServers, ipv6RDNSSLifetime)
+		if err != nil {
+			return nil, err
+		}
+		body = append(body, option...)
+	}
 	if len(state.MAC) >= 6 {
 		body = append(body, buildIPv6SourceLLAOption(state.MAC)...)
 	}
@@ -542,6 +551,24 @@ func buildIPv6RouteInfoOption(prefix *net.IPNet, lifetime time.Duration) []byte 
 		copy(option[8:], prefix.IP.To16()[:prefixBytes])
 	}
 	return option
+}
+
+func buildIPv6RDNSSOption(servers []string, lifetime time.Duration) ([]byte, error) {
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	option := make([]byte, 8+16*len(servers))
+	option[0] = 25
+	option[1] = byte(len(option) / 8)
+	binary.BigEndian.PutUint32(option[4:8], uint32(lifetime/time.Second))
+	for i, server := range servers {
+		ip := net.ParseIP(server)
+		if ip == nil || ip.To4() != nil || ip.To16() == nil {
+			return nil, fmt.Errorf("invalid router advertisement DNS server %q", server)
+		}
+		copy(option[8+i*16:8+(i+1)*16], ip.To16())
+	}
+	return option, nil
 }
 
 func buildIPv6SourceLLAOption(mac net.HardwareAddr) []byte {

@@ -42,6 +42,12 @@ const (
 	pluginControlWorkerQueueSize       = 64
 	pluginControlMaxWorkersPerPlugin   = 16
 	pluginControlWorkerMaxPayloadBytes = 1 << 20
+	pluginControlWorkerMaxPending      = 256
+	pluginControlWorkerMaxPendingBytes = 16 << 20
+	pluginControlQueryMaxResultBytes   = 64 << 10
+	pluginControlUpgradeMaxStateBytes  = 256 << 10
+	pluginControlMaxCallStackDepth     = 512
+	pluginControlMaxNestedEvents       = 16
 	pluginControlTimerKindTimeout      = "timeout"
 	pluginControlTimerKindInterval     = "interval"
 	pluginControlTimerOperationSet     = "set"
@@ -54,15 +60,19 @@ const (
 var errPluginControlDisabledByState = errors.New("plugin is disabled")
 
 var pluginControlReservedMapNames = map[string]string{
-	"tc_prog_chain_v4": "shared fvtap TC tail-call chain",
-	"tc_plugin_ctx_v4": "shared fvtap TC packet context",
-	"xdp_prog_chain":   "shared XDP tail-call chain",
+	"tc_prog_chain_v4":        "shared fvtap TC tail-call chain",
+	"tc_plugin_config_v4":     "shared fvtap TC pipeline configuration",
+	"tc_plugin_interfaces_v4": "shared fvtap TC interface masks",
+	"tc_dispatch_scratch_v4":  "shared fvtap TC dispatch scratch",
+	"tc_plugin_ctx_v4":        "shared fvtap TC packet context",
+	"xdp_prog_chain":          "shared XDP tail-call chain",
 }
 
 type pluginControlRuntime interface {
 	pluginRuntimeDataApplier
 	Reconcile(catalog PluginCatalog) pluginRuntimeSnapshot
 	Snapshot() pluginRuntimeSnapshot
+	QueryPluginAction(plugin LoadedPlugin, action PluginAction, payload json.RawMessage) (any, error)
 	Close() error
 }
 
@@ -71,6 +81,10 @@ type pluginEBPFMapController interface {
 	PutPluginMapValue(pluginID string, objectID string, mapName string, key []byte, value []byte) error
 	DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error
 	ClearPluginMap(pluginID string, objectID string, mapName string) error
+}
+
+type pluginEBPFPerCPUMapController interface {
+	GetPluginMapPerCPUValues(pluginID string, objectID string, mapName string, key []byte) ([][]byte, error)
 }
 
 type pluginRuntimeDataApplierProvider interface {
@@ -89,8 +103,13 @@ type pluginResourceControlReconcileProvider interface {
 	ApplyPluginResourceReconcileFromControl(plugin LoadedPlugin, resource PluginResource) error
 }
 
+type pluginControlPostDataplaneReconciler interface {
+	ReapplyPluginRuntimeResourcesAfterDataplane(catalog PluginCatalog, snapshot pluginRuntimeSnapshot) map[string]error
+}
+
 type gojaPluginControlRuntime struct {
 	mu                   sync.Mutex
+	reconcileMu          sync.Mutex
 	db                   *sql.DB
 	cfg                  *Config
 	mapController        pluginEBPFMapController
@@ -99,12 +118,17 @@ type gojaPluginControlRuntime struct {
 	actionUpdateProvider pluginActionRuntimeUpdateProvider
 	l2Transport          pluginControlL2Transport
 	udpTransport         pluginControlUDPTransport
+	socketRegistry       *pluginControlSocketRegistry
 	netAdmin             pluginControlNetAdmin
 	snapshot             pluginRuntimeSnapshot
 	plugins              map[string]LoadedPlugin
 	timers               map[pluginControlTimerKey]pluginControlTimerState
 	controlVMs           map[string]*pluginControlVM
 	pluginWorkers        map[pluginControlWorkerKey]*pluginControlVM
+	syncCalls            map[string]map[string]int
+	queueMu              sync.Mutex
+	workerQueueUsage     map[string]*pluginControlWorkerQueueUsage
+	upgradeGates         map[string]*pluginControlUpgradeGate
 	closed               bool
 }
 
@@ -116,6 +140,11 @@ type pluginControlEvent struct {
 	Records  []PluginResourceRecord
 	Payload  json.RawMessage
 	Worker   *pluginControlWorkerEvent
+	Upgrade  *pluginControlUpgradeEvent
+	Reason   string
+
+	bypassUpgradeGate  bool
+	inheritUpgradeGate bool
 }
 
 type pluginControlWorkerEvent struct {
@@ -123,17 +152,38 @@ type pluginControlWorkerEvent struct {
 	Handler string
 }
 
+type pluginControlUpgradeEvent struct {
+	Phase       string
+	Scope       string
+	WorkerName  string
+	FromVersion string
+	ToVersion   string
+	State       any
+	Timers      []map[string]any
+	Sockets     []map[string]any
+}
+
 type pluginControlRequest struct {
 	plugin          LoadedPlugin
 	event           pluginControlEvent
 	optionalHandler bool
 	reply           chan pluginControlResult
+	state           *pluginControlRequestState
+	reservation     *pluginControlWorkerQueueReservation
+	upgradeLease    *pluginControlUpgradeLease
+}
+
+type pluginControlRequestState struct {
+	deadline   time.Time
+	canceled   chan struct{}
+	cancelOnce sync.Once
 }
 
 type pluginControlResult struct {
 	surface PluginRuntimeSurface
 	value   any
 	err     error
+	handled bool
 }
 
 type pluginControlVM struct {
@@ -142,12 +192,33 @@ type pluginControlVM struct {
 	key            string
 	mode           string
 	workerName     string
+	plugin         LoadedPlugin
 	requests       chan pluginControlRequest
 	stop           chan struct{}
 	done           chan struct{}
 	stopOnce       sync.Once
 	currentMu      sync.Mutex
 	currentRuntime *goja.Runtime
+	executing      bool
+	pendingMu      sync.Mutex
+	accepting      bool
+	pending        map[*pluginControlWorkerQueueReservation]*pluginControlRequestState
+	upgradeLeases  map[*pluginControlUpgradeLease]*pluginControlRequestState
+}
+
+type pluginControlWorkerQueueUsage struct {
+	PendingRequests     int
+	PendingBytes        int64
+	PeakPendingRequests int
+	PeakPendingBytes    int64
+	RejectedRequests    uint64
+}
+
+type pluginControlWorkerQueueReservation struct {
+	runtime  *gojaPluginControlRuntime
+	pluginID string
+	bytes    int64
+	once     sync.Once
 }
 
 type pluginControlWorkerKey struct {
@@ -170,8 +241,12 @@ type pluginControlHost struct {
 	surface           PluginRuntimeSurface
 	module            *goja.Object
 	registrationPhase bool
+	upgradePhase      bool
 	workerVM          bool
 	workerName        string
+	controlGeneration string
+	eventStack        []string
+	executionDeadline time.Time
 }
 
 type pluginControlTimerKey struct {
@@ -211,14 +286,34 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 		actionUpdateProvider: actionUpdateProvider,
 		l2Transport:          newPluginControlL2Transport(),
 		udpTransport:         newPluginControlUDPTransport(),
+		socketRegistry:       newPluginControlSocketRegistry(newPluginControlSocketTransport()),
 		netAdmin:             newPluginControlNetAdmin(),
 		timers:               make(map[pluginControlTimerKey]pluginControlTimerState),
 		controlVMs:           make(map[string]*pluginControlVM),
 		pluginWorkers:        make(map[pluginControlWorkerKey]*pluginControlVM),
+		syncCalls:            make(map[string]map[string]int),
+		workerQueueUsage:     make(map[string]*pluginControlWorkerQueueUsage),
+		upgradeGates:         make(map[string]*pluginControlUpgradeGate),
 	}
 }
 
+func pluginControlProcessManager(rt *gojaPluginControlRuntime) *ProcessManager {
+	if rt == nil {
+		return nil
+	}
+	pm, _ := rt.mapController.(*ProcessManager)
+	return pm
+}
+
 func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRuntimeSnapshot {
+	rt.reconcileMu.Lock()
+	defer rt.reconcileMu.Unlock()
+
+	rt.mu.Lock()
+	previousPlugins := cloneLoadedPluginMap(rt.plugins)
+	previousSurfaces := clonePluginRuntimeSurfaces(rt.snapshot.Surfaces)
+	rt.mu.Unlock()
+
 	activePlugins := make([]LoadedPlugin, 0, len(catalog.Plugins))
 	states := make(map[string]PluginRuntimeState)
 	surfaces := make(map[string]PluginRuntimeSurface)
@@ -242,17 +337,26 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 	for _, plugin := range activePlugins {
 		surface, err := rt.runPluginControlWithSurface(plugin, pluginControlEvent{Kind: "register"}, true)
 		if err != nil {
-			state := pluginRuntimeErrorState(err.Error())
-			state.Reason = "control script registration failed"
-			states[plugin.ID] = state
+			if preservePreviousPluginControlRuntime(plugin.ID, previousPlugins, previousSurfaces, registeredByID, surfaces) {
+				states[plugin.ID] = preservedPluginControlRuntimeState("control script registration failed; previous runtime preserved", err)
+			} else {
+				state := pluginRuntimeErrorState(err.Error())
+				state.Reason = "control script registration failed"
+				states[plugin.ID] = state
+			}
 			continue
 		}
 		registered := plugin
 		applyPluginRuntimeSurface(&registered, surface)
 		if registered.Status != pluginStatusActive {
-			state := pluginRuntimeErrorState(registered.Error)
-			state.Reason = "control script surface validation failed"
-			states[plugin.ID] = state
+			validationErr := fmt.Errorf("%s", strings.TrimSpace(registered.Error))
+			if preservePreviousPluginControlRuntime(plugin.ID, previousPlugins, previousSurfaces, registeredByID, surfaces) {
+				states[plugin.ID] = preservedPluginControlRuntimeState("control script surface validation failed; previous runtime preserved", validationErr)
+			} else {
+				state := pluginRuntimeErrorState(registered.Error)
+				state.Reason = "control script surface validation failed"
+				states[plugin.ID] = state
+			}
 			continue
 		}
 		surfaces[plugin.ID] = surface
@@ -268,6 +372,19 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 		registeredByID[plugin.ID] = registered
 	}
 
+	for pluginID, previous := range previousPlugins {
+		if _, stillActive := registeredByID[pluginID]; stillActive {
+			continue
+		}
+		rt.interruptPluginControlIfRunning(pluginID, "plugin deactivation requested")
+		if _, err := rt.runPluginControlWithSurface(previous, pluginControlEvent{Kind: "deactivate", Reason: "plugin disabled, removed, or no longer loadable"}, true); err != nil {
+			log.Printf("plugin control deactivate %s failed: %v", pluginID, err)
+		}
+		if rt.socketRegistry != nil {
+			rt.socketRegistry.ClosePlugin(pluginID)
+		}
+	}
+
 	rt.mu.Lock()
 	if rt.closed {
 		rt.mu.Unlock()
@@ -277,7 +394,11 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 	rt.cancelInactivePluginTimersLocked(registeredByID)
 	inactiveVMs := rt.inactivePluginControlVMsLocked(registeredByID)
 	rt.mu.Unlock()
+	if rt.socketRegistry != nil {
+		rt.socketRegistry.CloseInactive(registeredByID)
+	}
 	stopPluginControlVMs(inactiveVMs)
+	rt.clearInactivePluginControlWorkerQueueUsage(registeredByID)
 
 	for _, plugin := range registeredByID {
 		if _, failed := states[plugin.ID]; failed {
@@ -300,15 +421,31 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 	}
 
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
 	rt.snapshot = pluginRuntimeSnapshot{Plugins: states, Surfaces: surfaces}
-	return clonePluginRuntimeSnapshot(rt.snapshot)
+	rt.mu.Unlock()
+	return rt.Snapshot()
 }
 
 func (rt *gojaPluginControlRuntime) Snapshot() pluginRuntimeSnapshot {
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	return clonePluginRuntimeSnapshot(rt.snapshot)
+	snapshot := clonePluginRuntimeSnapshot(rt.snapshot)
+	workerPlugins := make([]string, 0)
+	for pluginID, plugin := range rt.plugins {
+		if pluginControlHasPermission(plugin, "worker") {
+			workerPlugins = append(workerPlugins, pluginID)
+		}
+	}
+	rt.mu.Unlock()
+	for _, pluginID := range workerPlugins {
+		state, ok := snapshot.Plugins[pluginID]
+		if !ok {
+			continue
+		}
+		queue := rt.pluginControlWorkerQueueSnapshot(pluginID)
+		state.WorkerQueue = &queue
+		snapshot.Plugins[pluginID] = state
+	}
+	return snapshot
 }
 
 func (rt *gojaPluginControlRuntime) Close() error {
@@ -316,6 +453,7 @@ func (rt *gojaPluginControlRuntime) Close() error {
 	rt.closed = true
 	rt.snapshot = pluginRuntimeSnapshot{}
 	rt.plugins = nil
+	rt.syncCalls = nil
 	for key, state := range rt.timers {
 		if state.timer != nil {
 			state.timer.Stop()
@@ -326,7 +464,13 @@ func (rt *gojaPluginControlRuntime) Close() error {
 	rt.controlVMs = nil
 	rt.pluginWorkers = nil
 	rt.mu.Unlock()
+	if rt.socketRegistry != nil {
+		rt.socketRegistry.CloseAll()
+	}
 	stopPluginControlVMs(vms)
+	rt.queueMu.Lock()
+	rt.workerQueueUsage = nil
+	rt.queueMu.Unlock()
 	return nil
 }
 
@@ -338,7 +482,7 @@ func (rt *gojaPluginControlRuntime) ApplyPluginResourceData(plugin LoadedPlugin,
 		return err
 	}
 	rt.ensurePluginCatalogForControlEvents()
-	rt.registerPluginForControlEvents(plugin)
+	plugin = rt.resolvePluginForControlEvents(plugin)
 	return rt.runPluginControl(plugin, pluginControlEvent{
 		Kind:     "resource_apply",
 		Resource: &resource,
@@ -354,7 +498,7 @@ func (rt *gojaPluginControlRuntime) ApplyPluginAction(plugin LoadedPlugin, actio
 		return err
 	}
 	rt.ensurePluginCatalogForControlEvents()
-	rt.registerPluginForControlEvents(plugin)
+	plugin = rt.resolvePluginForControlEvents(plugin)
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
@@ -363,6 +507,32 @@ func (rt *gojaPluginControlRuntime) ApplyPluginAction(plugin LoadedPlugin, actio
 		Action:  &action,
 		Payload: payload,
 	}, false)
+}
+
+func (rt *gojaPluginControlRuntime) QueryPluginAction(plugin LoadedPlugin, action PluginAction, payload json.RawMessage) (any, error) {
+	if rt == nil || rt.db == nil || plugin.controlMainPath == "" {
+		return nil, errPluginRuntimeTargetNotLoaded
+	}
+	if action.RuntimeUpdate != "runtime_query" {
+		return nil, fmt.Errorf("action %s is not a runtime query", action.ID)
+	}
+	if err := rt.requirePluginEnabledForControl(plugin.ID); err != nil {
+		return nil, err
+	}
+	rt.ensurePluginCatalogForControlEvents()
+	plugin = rt.resolvePluginForControlEvents(plugin)
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	result, err := rt.runPluginControlResult(plugin, pluginControlEvent{
+		Kind:    "action",
+		Action:  &action,
+		Payload: payload,
+	}, false)
+	if err != nil {
+		return nil, err
+	}
+	return result.value, nil
 }
 
 func (rt *gojaPluginControlRuntime) ensurePluginCatalogForControlEvents() {
@@ -376,7 +546,11 @@ func (rt *gojaPluginControlRuntime) ensurePluginCatalogForControlEvents() {
 	}
 	rt.mu.Unlock()
 
-	catalog := loadPluginCatalogWithState(rt.cfg, rt.db)
+	catalogCfg := rt.cfg
+	if pm, ok := rt.mapController.(*ProcessManager); ok && pm != nil {
+		catalogCfg, _ = pm.appliedPluginCatalogConfig(rt.cfg)
+	}
+	catalog := loadPluginCatalogWithState(catalogCfg, rt.db)
 	registeredByID := make(map[string]LoadedPlugin)
 	for _, plugin := range catalog.Plugins {
 		if plugin.Builtin || plugin.Status != pluginStatusActive || plugin.controlMainPath == "" {
@@ -405,22 +579,56 @@ func (rt *gojaPluginControlRuntime) ensurePluginCatalogForControlEvents() {
 	rt.cancelInactivePluginTimersLocked(registeredByID)
 	inactiveVMs := rt.inactivePluginControlVMsLocked(registeredByID)
 	rt.mu.Unlock()
+	if rt.socketRegistry != nil {
+		rt.socketRegistry.CloseInactive(registeredByID)
+	}
 	stopPluginControlVMs(inactiveVMs)
+	rt.clearInactivePluginControlWorkerQueueUsage(registeredByID)
 }
 
-func (rt *gojaPluginControlRuntime) registerPluginForControlEvents(plugin LoadedPlugin) {
+func (rt *gojaPluginControlRuntime) resolvePluginForControlEvents(plugin LoadedPlugin) LoadedPlugin {
+	_, catalogManaged := rt.mapController.(*ProcessManager)
+	key, keyErr := pluginControlVMKey(plugin, "control", "")
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
 	if rt.closed {
-		return
+		rt.mu.Unlock()
+		return plugin
 	}
 	if rt.plugins == nil {
 		rt.plugins = make(map[string]LoadedPlugin)
 	}
-	if existing, ok := rt.plugins[plugin.ID]; ok && loadedPluginHasRuntimeSurface(existing) && !loadedPluginHasRuntimeSurface(plugin) {
-		return
+	existing, exists := rt.plugins[plugin.ID]
+	vm := rt.controlVMs[plugin.ID]
+	if exists && vm != nil && (catalogManaged || (keyErr == nil && vm.key == key)) {
+		rt.mu.Unlock()
+		return existing
 	}
-	rt.plugins[plugin.ID] = plugin
+	rt.mu.Unlock()
+
+	if exists {
+		if catalogManaged {
+			plugin = existing
+		}
+		surface, err := rt.runPluginControlWithSurface(plugin, pluginControlEvent{Kind: "register"}, true)
+		if err != nil {
+			log.Printf("plugin control hot reload %s rejected; preserving previous runtime: %v", plugin.ID, err)
+			return existing
+		}
+		registered := plugin
+		applyPluginRuntimeSurface(&registered, surface)
+		if registered.Status != pluginStatusActive {
+			log.Printf("plugin control hot reload %s rejected; preserving previous runtime: %s", plugin.ID, registered.Error)
+			return existing
+		}
+		plugin = registered
+	}
+
+	rt.mu.Lock()
+	if !rt.closed {
+		rt.plugins[plugin.ID] = plugin
+	}
+	rt.mu.Unlock()
+	return plugin
 }
 
 func (rt *gojaPluginControlRuntime) requirePluginEnabledForControl(pluginID string) error {
@@ -468,7 +676,11 @@ func (rt *gojaPluginControlRuntime) deactivatePluginControl(pluginID string) {
 		delete(rt.snapshot.Surfaces, pluginID)
 	}
 	rt.mu.Unlock()
+	if rt.socketRegistry != nil {
+		rt.socketRegistry.ClosePlugin(pluginID)
+	}
 	stopPluginControlVMs(vms)
+	rt.clearPluginControlWorkerQueueUsage(pluginID)
 }
 
 func loadedPluginHasRuntimeSurface(plugin LoadedPlugin) bool {
@@ -487,15 +699,52 @@ func (rt *gojaPluginControlRuntime) runPluginControl(plugin LoadedPlugin, event 
 }
 
 func (rt *gojaPluginControlRuntime) runPluginControlWithSurface(plugin LoadedPlugin, event pluginControlEvent, optionalHandler bool) (PluginRuntimeSurface, error) {
-	vm, err := rt.getPluginControlVM(plugin, "", "")
-	if err != nil {
-		return PluginRuntimeSurface{}, err
-	}
-	result, err := vm.run(plugin, event, optionalHandler)
+	result, err := rt.runPluginControlResult(plugin, event, optionalHandler)
 	if err != nil {
 		return result.surface, err
 	}
 	return result.surface, nil
+}
+
+func (rt *gojaPluginControlRuntime) runPluginControlResult(plugin LoadedPlugin, event pluginControlEvent, optionalHandler bool) (pluginControlResult, error) {
+	if event.bypassUpgradeGate || event.inheritUpgradeGate || event.Kind == "register" {
+		vm, err := rt.getPluginControlVM(plugin, "", "")
+		if err != nil {
+			return pluginControlResult{}, err
+		}
+		return vm.run(plugin, event, optionalHandler)
+	}
+
+	deadline := time.Now().Add(pluginControlExecutionLockTimeout)
+	for {
+		outerLease, err := rt.acquirePluginControlUpgradeLease(plugin.ID, deadline, false)
+		if err != nil {
+			return pluginControlResult{}, err
+		}
+		rt.mu.Lock()
+		if current, ok := rt.plugins[plugin.ID]; ok {
+			plugin = current
+		}
+		vm := rt.controlVMs[plugin.ID]
+		rt.mu.Unlock()
+		key, keyErr := pluginControlVMKey(plugin, "control", "")
+		if keyErr == nil && vm != nil && vm.key == key {
+			event.inheritUpgradeGate = true
+			result, runErr := vm.run(plugin, event, optionalHandler)
+			outerLease.release()
+			return result, runErr
+		}
+		outerLease.release()
+		if keyErr != nil {
+			return pluginControlResult{}, keyErr
+		}
+		if !time.Now().Before(deadline) {
+			return pluginControlResult{}, fmt.Errorf("plugin control VM preparation timed out for %s", plugin.ID)
+		}
+		if _, err := rt.getPluginControlVM(plugin, "", ""); err != nil {
+			return pluginControlResult{}, err
+		}
+	}
 }
 
 func (rt *gojaPluginControlRuntime) getPluginControlVM(plugin LoadedPlugin, mode string, workerName string) (*pluginControlVM, error) {
@@ -507,7 +756,6 @@ func (rt *gojaPluginControlRuntime) getPluginControlVM(plugin LoadedPlugin, mode
 		return nil, err
 	}
 
-	var old *pluginControlVM
 	rt.mu.Lock()
 	if rt.closed {
 		rt.mu.Unlock()
@@ -524,55 +772,85 @@ func (rt *gojaPluginControlRuntime) getPluginControlVM(plugin LoadedPlugin, mode
 		if existing := rt.pluginWorkers[workerKey]; existing != nil && existing.key == key {
 			rt.mu.Unlock()
 			return existing, nil
-		} else if existing != nil {
-			old = existing
 		}
-		if old == nil && rt.pluginWorkerCountLocked(plugin.ID) >= pluginControlMaxWorkersPerPlugin {
+		if rt.pluginWorkers[workerKey] == nil && rt.pluginWorkerCountLocked(plugin.ID) >= pluginControlMaxWorkersPerPlugin {
 			rt.mu.Unlock()
 			return nil, fmt.Errorf("plugin worker limit reached: %d", pluginControlMaxWorkersPerPlugin)
 		}
-		vm := newPluginControlVM(rt, plugin.ID, key, mode, workerName)
-		rt.pluginWorkers[workerKey] = vm
-		rt.mu.Unlock()
-		if old != nil {
-			old.stopVM()
-		}
-		return vm, nil
-	}
-	if existing := rt.controlVMs[plugin.ID]; existing != nil && existing.key == key {
+	} else if existing := rt.controlVMs[plugin.ID]; existing != nil && existing.key == key {
 		rt.mu.Unlock()
 		return existing, nil
-	} else if existing != nil {
+	}
+	rt.mu.Unlock()
+
+	candidate := newPluginControlVMForPlugin(rt, plugin, key, mode, workerName)
+	registration, err := candidate.run(plugin, pluginControlEvent{Kind: "register", bypassUpgradeGate: true}, true)
+	if err != nil {
+		candidate.stopVM()
+		return nil, err
+	}
+	validated := plugin
+	applyPluginRuntimeSurface(&validated, registration.surface)
+	if validated.Status != pluginStatusActive {
+		candidate.stopVM()
+		return nil, fmt.Errorf("control script surface validation failed: %s", strings.TrimSpace(validated.Error))
+	}
+	candidate.plugin = validated
+
+	if mode != "worker" {
+		return rt.installPluginControlCandidate(validated, candidate)
+	}
+
+	var old *pluginControlVM
+	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		candidate.stopVM()
+		return nil, errPluginRuntimeTargetNotLoaded
+	}
+	workerKey := pluginControlWorkerKey{pluginID: plugin.ID, name: workerName}
+	if existing := rt.pluginWorkers[workerKey]; existing != nil && existing.key == key {
+		rt.mu.Unlock()
+		candidate.stopVM()
+		return existing, nil
+	} else {
 		old = existing
 	}
-	oldWorkers := rt.pluginControlWorkersLocked(plugin.ID)
-	if old != nil {
-		rt.clearPluginTimersLocked(plugin.ID)
+	if old == nil && rt.pluginWorkerCountLocked(plugin.ID) >= pluginControlMaxWorkersPerPlugin {
+		rt.mu.Unlock()
+		candidate.stopVM()
+		return nil, fmt.Errorf("plugin worker limit reached: %d", pluginControlMaxWorkersPerPlugin)
 	}
-	vm := newPluginControlVM(rt, plugin.ID, key, mode, "")
-	rt.controlVMs[plugin.ID] = vm
+	rt.pluginWorkers[workerKey] = candidate
 	rt.mu.Unlock()
 	if old != nil {
 		old.stopVM()
 	}
-	stopPluginControlVMs(oldWorkers)
-	return vm, nil
+	return candidate, nil
 }
 
 func newPluginControlVM(rt *gojaPluginControlRuntime, pluginID string, key string, mode string, workerName string) *pluginControlVM {
+	return newPluginControlVMForPlugin(rt, LoadedPlugin{PluginManifest: PluginManifest{ID: pluginID}}, key, mode, workerName)
+}
+
+func newPluginControlVMForPlugin(rt *gojaPluginControlRuntime, plugin LoadedPlugin, key string, mode string, workerName string) *pluginControlVM {
 	queueSize := pluginControlQueueSize
 	if mode == "worker" {
 		queueSize = pluginControlWorkerQueueSize
 	}
 	vm := &pluginControlVM{
-		rt:         rt,
-		pluginID:   pluginID,
-		key:        key,
-		mode:       mode,
-		workerName: workerName,
-		requests:   make(chan pluginControlRequest, queueSize),
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
+		rt:            rt,
+		pluginID:      plugin.ID,
+		key:           key,
+		mode:          mode,
+		workerName:    workerName,
+		plugin:        plugin,
+		requests:      make(chan pluginControlRequest, queueSize),
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
+		accepting:     true,
+		pending:       make(map[*pluginControlWorkerQueueReservation]*pluginControlRequestState),
+		upgradeLeases: make(map[*pluginControlUpgradeLease]*pluginControlRequestState),
 	}
 	go vm.loop()
 	return vm
@@ -580,48 +858,101 @@ func newPluginControlVM(rt *gojaPluginControlRuntime, pluginID string, key strin
 
 func (vm *pluginControlVM) run(plugin LoadedPlugin, event pluginControlEvent, optionalHandler bool) (pluginControlResult, error) {
 	reply := make(chan pluginControlResult, 1)
+	state := newPluginControlRequestState(pluginControlExecutionLockTimeout)
+	upgradeLease, err := vm.acquirePluginControlRequestLease(event, state.deadline)
+	if err != nil {
+		state.cancel()
+		return pluginControlResult{}, err
+	}
+	reservation, err := vm.reserveWorkerRequest(event, state)
+	if err != nil {
+		state.cancel()
+		upgradeLease.release()
+		return pluginControlResult{}, err
+	}
+	if err := vm.trackPluginControlUpgradeLease(upgradeLease, state); err != nil {
+		state.cancel()
+		vm.releaseWorkerRequest(reservation)
+		upgradeLease.release()
+		return pluginControlResult{}, err
+	}
 	req := pluginControlRequest{
 		plugin:          plugin,
 		event:           event,
 		optionalHandler: optionalHandler,
 		reply:           reply,
+		state:           state,
+		reservation:     reservation,
+		upgradeLease:    upgradeLease,
 	}
-	queueTimer := time.NewTimer(pluginControlExecutionLockTimeout)
+	queueTimer := newPluginControlRequestTimer(state.deadline)
 	select {
 	case vm.requests <- req:
 		queueTimer.Stop()
 	case <-vm.done:
 		queueTimer.Stop()
+		state.cancel()
+		vm.releasePluginControlRequest(reservation, upgradeLease)
 		return pluginControlResult{}, errPluginRuntimeTargetNotLoaded
 	case <-queueTimer.C:
+		state.cancel()
+		vm.releasePluginControlRequest(reservation, upgradeLease)
 		return pluginControlResult{}, fmt.Errorf("plugin control queue timed out for %s", vm.pluginID)
 	}
-	execTimer := time.NewTimer(pluginControlExecutionLockTimeout)
+	execTimer := newPluginControlRequestTimer(state.deadline)
 	defer execTimer.Stop()
 	select {
 	case result := <-reply:
 		return result, result.err
 	case <-vm.done:
+		state.cancel()
+		vm.releasePluginControlRequest(reservation, upgradeLease)
 		return pluginControlResult{}, errPluginRuntimeTargetNotLoaded
 	case <-execTimer.C:
+		state.cancel()
 		return pluginControlResult{}, fmt.Errorf("plugin control execution timed out for %s", vm.pluginID)
 	}
 }
 
 func (vm *pluginControlVM) dispatch(plugin LoadedPlugin, event pluginControlEvent, optionalHandler bool) error {
+	state := newPluginControlRequestState(pluginControlExecutionLockTimeout)
+	upgradeLease, err := vm.acquirePluginControlRequestLease(event, state.deadline)
+	if err != nil {
+		state.cancel()
+		return err
+	}
+	reservation, err := vm.reserveWorkerRequest(event, state)
+	if err != nil {
+		state.cancel()
+		upgradeLease.release()
+		return err
+	}
+	if err := vm.trackPluginControlUpgradeLease(upgradeLease, state); err != nil {
+		state.cancel()
+		vm.releaseWorkerRequest(reservation)
+		upgradeLease.release()
+		return err
+	}
 	req := pluginControlRequest{
 		plugin:          plugin,
 		event:           event,
 		optionalHandler: optionalHandler,
+		state:           state,
+		reservation:     reservation,
+		upgradeLease:    upgradeLease,
 	}
-	timer := time.NewTimer(pluginControlExecutionLockTimeout)
+	timer := newPluginControlRequestTimer(state.deadline)
 	defer timer.Stop()
 	select {
 	case vm.requests <- req:
 		return nil
 	case <-vm.done:
+		state.cancel()
+		vm.releasePluginControlRequest(reservation, upgradeLease)
 		return errPluginRuntimeTargetNotLoaded
 	case <-timer.C:
+		state.cancel()
+		vm.releasePluginControlRequest(reservation, upgradeLease)
 		return fmt.Errorf("plugin worker queue timed out for %s/%s", vm.pluginID, vm.workerName)
 	}
 }
@@ -642,23 +973,241 @@ func (vm *pluginControlVM) loop() {
 		case <-vm.stop:
 			return
 		case req := <-vm.requests:
-			if vm.stopped() {
-				vm.reply(req, pluginControlResult{err: errPluginRuntimeTargetNotLoaded})
+			stop := func() bool {
+				defer vm.releasePluginControlRequest(req.reservation, req.upgradeLease)
+				if vm.stopped() {
+					vm.reply(req, pluginControlResult{err: errPluginRuntimeTargetNotLoaded})
+					return true
+				}
+				if err := req.state.executionError(); err != nil {
+					vm.reply(req, pluginControlResult{err: fmt.Errorf("plugin control request for %s was discarded before execution: %w", vm.pluginID, err)})
+					return false
+				}
+				if host == nil {
+					var err error
+					host, err = vm.init(req.plugin)
+					if err != nil {
+						vm.reply(req, pluginControlResult{err: err})
+						return false
+					}
+				}
+				host.plugin = req.plugin
+				result := vm.runWithTimeout(host, req)
+				vm.reply(req, result)
+				return false
+			}()
+			if stop {
 				return
 			}
-			if host == nil {
-				var err error
-				host, err = vm.init(req.plugin)
-				if err != nil {
-					vm.reply(req, pluginControlResult{err: err})
-					continue
-				}
-			}
-			host.plugin = req.plugin
-			result := vm.runWithTimeout(host, req)
-			vm.reply(req, result)
 		}
 	}
+}
+
+func newPluginControlRequestState(timeout time.Duration) *pluginControlRequestState {
+	return &pluginControlRequestState{
+		deadline: time.Now().Add(timeout),
+		canceled: make(chan struct{}),
+	}
+}
+
+func (vm *pluginControlVM) reserveWorkerRequest(event pluginControlEvent, state *pluginControlRequestState) (*pluginControlWorkerQueueReservation, error) {
+	if event.Worker == nil {
+		return nil, nil
+	}
+	if vm == nil || vm.rt == nil {
+		return nil, errPluginRuntimeTargetNotLoaded
+	}
+	reservation, err := vm.rt.reservePluginControlWorkerQueue(vm.pluginID, len(event.Payload))
+	if err != nil {
+		return nil, err
+	}
+	vm.pendingMu.Lock()
+	if !vm.accepting {
+		vm.pendingMu.Unlock()
+		reservation.release()
+		return nil, errPluginRuntimeTargetNotLoaded
+	}
+	if vm.pending == nil {
+		vm.pending = make(map[*pluginControlWorkerQueueReservation]*pluginControlRequestState)
+	}
+	vm.pending[reservation] = state
+	vm.pendingMu.Unlock()
+	return reservation, nil
+}
+
+func (vm *pluginControlVM) releaseWorkerRequest(reservation *pluginControlWorkerQueueReservation) {
+	if reservation == nil {
+		return
+	}
+	vm.pendingMu.Lock()
+	delete(vm.pending, reservation)
+	vm.pendingMu.Unlock()
+	reservation.release()
+}
+
+func (vm *pluginControlVM) releasePluginControlRequest(reservation *pluginControlWorkerQueueReservation, lease *pluginControlUpgradeLease) {
+	vm.releaseWorkerRequest(reservation)
+	if lease == nil {
+		return
+	}
+	vm.pendingMu.Lock()
+	delete(vm.upgradeLeases, lease)
+	vm.pendingMu.Unlock()
+	lease.release()
+}
+
+func (vm *pluginControlVM) stopAcceptingWorkerRequests() {
+	vm.pendingMu.Lock()
+	vm.accepting = false
+	pending := vm.pending
+	vm.pending = nil
+	upgradeLeases := vm.upgradeLeases
+	vm.upgradeLeases = nil
+	vm.pendingMu.Unlock()
+	for reservation, state := range pending {
+		state.cancel()
+		reservation.release()
+	}
+	for lease, state := range upgradeLeases {
+		state.cancel()
+		lease.release()
+	}
+}
+
+func (rt *gojaPluginControlRuntime) reservePluginControlWorkerQueue(pluginID string, payloadBytes int) (*pluginControlWorkerQueueReservation, error) {
+	bytes := int64(payloadBytes)
+	if bytes < 0 {
+		bytes = 0
+	}
+	rt.queueMu.Lock()
+	defer rt.queueMu.Unlock()
+	if rt.workerQueueUsage == nil {
+		rt.workerQueueUsage = make(map[string]*pluginControlWorkerQueueUsage)
+	}
+	usage := rt.workerQueueUsage[pluginID]
+	if usage == nil {
+		usage = &pluginControlWorkerQueueUsage{}
+		rt.workerQueueUsage[pluginID] = usage
+	}
+	if usage.PendingRequests >= pluginControlWorkerMaxPending {
+		usage.RejectedRequests++
+		return nil, fmt.Errorf("plugin worker pending request limit reached: %d", pluginControlWorkerMaxPending)
+	}
+	if bytes > int64(pluginControlWorkerMaxPendingBytes)-usage.PendingBytes {
+		usage.RejectedRequests++
+		return nil, fmt.Errorf("plugin worker pending payload budget exceeded: %d bytes", pluginControlWorkerMaxPendingBytes)
+	}
+	usage.PendingRequests++
+	usage.PendingBytes += bytes
+	if usage.PendingRequests > usage.PeakPendingRequests {
+		usage.PeakPendingRequests = usage.PendingRequests
+	}
+	if usage.PendingBytes > usage.PeakPendingBytes {
+		usage.PeakPendingBytes = usage.PendingBytes
+	}
+	return &pluginControlWorkerQueueReservation{
+		runtime:  rt,
+		pluginID: pluginID,
+		bytes:    bytes,
+	}, nil
+}
+
+func (reservation *pluginControlWorkerQueueReservation) release() {
+	if reservation == nil || reservation.runtime == nil {
+		return
+	}
+	reservation.once.Do(func() {
+		reservation.runtime.releasePluginControlWorkerQueue(reservation.pluginID, reservation.bytes)
+	})
+}
+
+func (rt *gojaPluginControlRuntime) releasePluginControlWorkerQueue(pluginID string, bytes int64) {
+	rt.queueMu.Lock()
+	defer rt.queueMu.Unlock()
+	usage := rt.workerQueueUsage[pluginID]
+	if usage == nil {
+		return
+	}
+	if usage.PendingRequests > 0 {
+		usage.PendingRequests--
+	}
+	if bytes >= usage.PendingBytes {
+		usage.PendingBytes = 0
+	} else if bytes > 0 {
+		usage.PendingBytes -= bytes
+	}
+}
+
+func (rt *gojaPluginControlRuntime) pluginControlWorkerQueueSnapshot(pluginID string) PluginControlWorkerQueueState {
+	snapshot := PluginControlWorkerQueueState{
+		RequestLimit: pluginControlWorkerMaxPending,
+		ByteLimit:    pluginControlWorkerMaxPendingBytes,
+	}
+	if rt == nil {
+		return snapshot
+	}
+	rt.queueMu.Lock()
+	defer rt.queueMu.Unlock()
+	if usage := rt.workerQueueUsage[pluginID]; usage != nil {
+		snapshot.PendingRequests = usage.PendingRequests
+		snapshot.PendingBytes = usage.PendingBytes
+		snapshot.PeakPendingRequests = usage.PeakPendingRequests
+		snapshot.PeakPendingBytes = usage.PeakPendingBytes
+		snapshot.RejectedRequests = usage.RejectedRequests
+	}
+	return snapshot
+}
+
+func (rt *gojaPluginControlRuntime) clearPluginControlWorkerQueueUsage(pluginID string) {
+	if rt == nil {
+		return
+	}
+	rt.queueMu.Lock()
+	delete(rt.workerQueueUsage, pluginID)
+	rt.queueMu.Unlock()
+}
+
+func (rt *gojaPluginControlRuntime) clearInactivePluginControlWorkerQueueUsage(active map[string]LoadedPlugin) {
+	if rt == nil {
+		return
+	}
+	rt.queueMu.Lock()
+	for pluginID := range rt.workerQueueUsage {
+		if _, ok := active[pluginID]; !ok {
+			delete(rt.workerQueueUsage, pluginID)
+		}
+	}
+	rt.queueMu.Unlock()
+}
+
+func newPluginControlRequestTimer(deadline time.Time) *time.Timer {
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return time.NewTimer(remaining)
+}
+
+func (state *pluginControlRequestState) cancel() {
+	if state == nil {
+		return
+	}
+	state.cancelOnce.Do(func() { close(state.canceled) })
+}
+
+func (state *pluginControlRequestState) executionError() error {
+	if state == nil {
+		return nil
+	}
+	select {
+	case <-state.canceled:
+		return fmt.Errorf("request canceled")
+	default:
+	}
+	if !state.deadline.IsZero() && !time.Now().Before(state.deadline) {
+		return fmt.Errorf("request deadline exceeded")
+	}
+	return nil
 }
 
 func (vm *pluginControlVM) init(plugin LoadedPlugin) (*pluginControlHost, error) {
@@ -667,7 +1216,12 @@ func (vm *pluginControlVM) init(plugin LoadedPlugin) (*pluginControlHost, error)
 		return nil, err
 	}
 	runtime := goja.New()
+	runtime.SetMaxCallStackSize(pluginControlMaxCallStackDepth)
 	vm.setCurrentRuntime(runtime)
+	controlGeneration, err := pluginControlVMKey(plugin, "control", "")
+	if err != nil {
+		return nil, err
+	}
 	host := &pluginControlHost{
 		vm:                runtime,
 		db:                vm.rt.db,
@@ -681,6 +1235,7 @@ func (vm *pluginControlVM) init(plugin LoadedPlugin) (*pluginControlHost, error)
 		registrationPhase: true,
 		workerVM:          vm.mode == "worker",
 		workerName:        vm.workerName,
+		controlGeneration: controlGeneration,
 	}
 	if err := host.install(); err != nil {
 		return nil, err
@@ -710,9 +1265,18 @@ func (vm *pluginControlVM) init(plugin LoadedPlugin) (*pluginControlHost, error)
 
 func (vm *pluginControlVM) runWithTimeout(host *pluginControlHost, req pluginControlRequest) pluginControlResult {
 	var result pluginControlResult
-	err := withPluginControlTimeout(host.vm, func() error {
+	host.executionDeadline = time.Now().Add(pluginControlTimeout)
+	if req.state != nil && !req.state.deadline.IsZero() && req.state.deadline.Before(host.executionDeadline) {
+		host.executionDeadline = req.state.deadline
+	}
+	vm.setExecuting(true)
+	defer func() {
+		host.executionDeadline = time.Time{}
+		vm.setExecuting(false)
+	}()
+	err := withPluginControlDeadline(host.vm, host.executionDeadline, func() error {
 		var runErr error
-		result.surface, result.value, runErr = host.runEvent(req.event, req.optionalHandler)
+		result.surface, result.value, result.handled, runErr = host.runEvent(req.event, req.optionalHandler)
 		return runErr
 	})
 	if err != nil {
@@ -737,6 +1301,7 @@ func (vm *pluginControlVM) reply(req pluginControlRequest, result pluginControlR
 
 func (vm *pluginControlVM) stopVM() {
 	vm.stopOnce.Do(func() {
+		vm.stopAcceptingWorkerRequests()
 		close(vm.stop)
 		vm.interruptCurrentRuntime("plugin control VM stopped")
 		select {
@@ -762,6 +1327,22 @@ func (vm *pluginControlVM) setCurrentRuntime(runtime *goja.Runtime) {
 	vm.currentMu.Unlock()
 }
 
+func (vm *pluginControlVM) setExecuting(executing bool) {
+	vm.currentMu.Lock()
+	vm.executing = executing
+	vm.currentMu.Unlock()
+}
+
+func (vm *pluginControlVM) interruptIfRunning(reason string) {
+	vm.currentMu.Lock()
+	runtime := vm.currentRuntime
+	executing := vm.executing
+	vm.currentMu.Unlock()
+	if executing && runtime != nil {
+		runtime.Interrupt(reason)
+	}
+}
+
 func (vm *pluginControlVM) interruptCurrentRuntime(reason string) {
 	vm.currentMu.Lock()
 	runtime := vm.currentRuntime
@@ -772,8 +1353,16 @@ func (vm *pluginControlVM) interruptCurrentRuntime(reason string) {
 }
 
 func withPluginControlTimeout(vm *goja.Runtime, fn func() error) error {
+	return withPluginControlDeadline(vm, time.Now().Add(pluginControlTimeout), fn)
+}
+
+func withPluginControlDeadline(vm *goja.Runtime, deadline time.Time, fn func() error) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("plugin control script timed out")
+	}
 	interruptDone := make(chan struct{})
-	timer := time.AfterFunc(pluginControlTimeout, func() {
+	timer := time.AfterFunc(remaining, func() {
 		vm.Interrupt("plugin control script timed out")
 		close(interruptDone)
 	})
@@ -785,7 +1374,21 @@ func withPluginControlTimeout(vm *goja.Runtime, fn func() error) error {
 	return err
 }
 
-func (h *pluginControlHost) runEvent(event pluginControlEvent, optionalHandler bool) (PluginRuntimeSurface, any, error) {
+func (h *pluginControlHost) runEvent(event pluginControlEvent, optionalHandler bool) (PluginRuntimeSurface, any, bool, error) {
+	eventKey := pluginControlEventKey(event)
+	if len(h.eventStack) >= pluginControlMaxNestedEvents {
+		return h.surface, nil, false, fmt.Errorf("plugin control nested event limit reached: %d", pluginControlMaxNestedEvents)
+	}
+	for _, active := range h.eventStack {
+		if active == eventKey {
+			return h.surface, nil, false, fmt.Errorf("plugin control recursive event rejected: %s", eventKey)
+		}
+	}
+	h.eventStack = append(h.eventStack, eventKey)
+	defer func() {
+		h.eventStack = h.eventStack[:len(h.eventStack)-1]
+	}()
+
 	previousTimerEvent := h.timerEvent
 	previousTimerOps := h.timerOps
 	h.timerEvent = event.Timer
@@ -796,19 +1399,25 @@ func (h *pluginControlHost) runEvent(event pluginControlEvent, optionalHandler b
 	}()
 	handlerName := pluginControlHandlerName(event)
 	if handlerName == "" {
-		return h.surface, nil, nil
+		return h.surface, nil, false, nil
 	}
 	handlerValue := h.module.Get("exports").ToObject(h.vm).Get(handlerName)
 	if handlerValue == nil || goja.IsUndefined(handlerValue) || goja.IsNull(handlerValue) {
 		if optionalHandler {
-			return h.surface, nil, nil
+			return h.surface, nil, false, nil
 		}
-		return h.surface, nil, fmt.Errorf("%w: control script %s does not export %s", errPluginRuntimeTargetNotLoaded, h.plugin.Control.Main, handlerName)
+		return h.surface, nil, false, fmt.Errorf("%w: control script %s does not export %s", errPluginRuntimeTargetNotLoaded, h.plugin.Control.Main, handlerName)
 	}
 	handler, ok := goja.AssertFunction(handlerValue)
 	if !ok {
-		return h.surface, nil, fmt.Errorf("control export %s is not a function", handlerName)
+		return h.surface, nil, false, fmt.Errorf("control export %s is not a function", handlerName)
 	}
+	if event.Kind == "upgrade_probe" {
+		return h.surface, nil, true, nil
+	}
+	previousUpgradePhase := h.upgradePhase
+	h.upgradePhase = event.Kind == "upgrade_snapshot" || event.Kind == "upgrade_restore"
+	defer func() { h.upgradePhase = previousUpgradePhase }()
 	value, handlerErr := handler(goja.Undefined(), h.vm.ToValue(pluginControlContext(h.plugin, event)))
 	if handlerErr != nil {
 		handlerErr = fmt.Errorf("control handler %s failed: %w", handlerName, handlerErr)
@@ -816,21 +1425,57 @@ func (h *pluginControlHost) runEvent(event pluginControlEvent, optionalHandler b
 	timerOps := append([]pluginControlTimerOperation(nil), h.timerOps...)
 	if err := h.runtime.applyTimerOperations(h.plugin, timerOps); err != nil {
 		if handlerErr != nil {
-			return h.surface, nil, fmt.Errorf("%v; apply timer operations: %w", handlerErr, err)
+			return h.surface, nil, true, fmt.Errorf("%v; apply timer operations: %w", handlerErr, err)
 		}
-		return h.surface, nil, err
+		return h.surface, nil, true, err
 	}
 	if handlerErr != nil {
-		return h.surface, nil, handlerErr
+		return h.surface, nil, true, handlerErr
+	}
+	if event.Kind == "upgrade_snapshot" {
+		result, err := h.exportUpgradeState(value)
+		if err != nil {
+			return h.surface, nil, true, err
+		}
+		return h.surface, result, true, nil
 	}
 	if event.Kind == "worker" {
 		result, err := h.exportWorkerResult(value)
 		if err != nil {
-			return h.surface, nil, err
+			return h.surface, nil, true, err
 		}
-		return h.surface, result, nil
+		return h.surface, result, true, nil
 	}
-	return h.surface, nil, nil
+	if event.Kind == "action" && event.Action != nil && event.Action.RuntimeUpdate == "runtime_query" {
+		result, err := h.exportQueryResult(value)
+		if err != nil {
+			return h.surface, nil, true, err
+		}
+		return h.surface, result, true, nil
+	}
+	return h.surface, nil, true, nil
+}
+
+func (h *pluginControlHost) exportUpgradeState(value goja.Value) (any, error) {
+	if value == nil || goja.IsUndefined(value) {
+		return nil, nil
+	}
+	data, err := json.Marshal(value.Export())
+	if err != nil {
+		return nil, fmt.Errorf("upgrade snapshot is not JSON serializable: %w", err)
+	}
+	if len(data) > pluginControlUpgradeMaxStateBytes {
+		return nil, fmt.Errorf("upgrade snapshot exceeds %d bytes", pluginControlUpgradeMaxStateBytes)
+	}
+	return pluginControlDecodeUpgradeState(data)
+}
+
+func pluginControlDecodeUpgradeState(data []byte) (any, error) {
+	var state any
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("decode upgrade snapshot: %w", err)
+	}
+	return state, nil
 }
 
 func (h *pluginControlHost) exportWorkerResult(value goja.Value) (any, error) {
@@ -843,6 +1488,20 @@ func (h *pluginControlHost) exportWorkerResult(value goja.Value) (any, error) {
 	}
 	if len(data) > pluginControlWorkerMaxPayloadBytes {
 		return nil, fmt.Errorf("worker result exceeds %d bytes", pluginControlWorkerMaxPayloadBytes)
+	}
+	return pluginControlDecodeJSON(json.RawMessage(data)), nil
+}
+
+func (h *pluginControlHost) exportQueryResult(value goja.Value) (any, error) {
+	if value == nil || goja.IsUndefined(value) {
+		return nil, nil
+	}
+	data, err := json.Marshal(value.Export())
+	if err != nil {
+		return nil, fmt.Errorf("runtime query result is not JSON serializable: %w", err)
+	}
+	if len(data) > pluginControlQueryMaxResultBytes {
+		return nil, fmt.Errorf("runtime query result exceeds %d bytes", pluginControlQueryMaxResultBytes)
 	}
 	return pluginControlDecodeJSON(json.RawMessage(data)), nil
 }
@@ -863,7 +1522,14 @@ func pluginControlVMKey(plugin LoadedPlugin, mode string, workerName string) (st
 	if err != nil {
 		return "", err
 	}
-	return strings.Join([]string{mode, workerName, plugin.controlMainPath, sum, string(controlJSON)}, "\x00"), nil
+	return strings.Join([]string{
+		plugin.ID,
+		mode,
+		workerName,
+		sum,
+		plugin.sourceFingerprint,
+		string(controlJSON),
+	}, "\x00"), nil
 }
 
 func (rt *gojaPluginControlRuntime) applyRuntimeResourcesForReconcile(plugin LoadedPlugin) error {
@@ -911,6 +1577,33 @@ func (rt *gojaPluginControlRuntime) applyRuntimeResourcesForReconcile(plugin Loa
 	return nil
 }
 
+func (rt *gojaPluginControlRuntime) ReapplyPluginRuntimeResourcesAfterDataplane(catalog PluginCatalog, snapshot pluginRuntimeSnapshot) map[string]error {
+	if rt == nil {
+		return nil
+	}
+	rt.mu.Lock()
+	plugins := cloneLoadedPluginMap(rt.plugins)
+	rt.mu.Unlock()
+	failures := make(map[string]error)
+	for _, catalogPlugin := range catalog.Plugins {
+		plugin, ok := plugins[catalogPlugin.ID]
+		if !ok || len(plugin.Objects) == 0 {
+			continue
+		}
+		state, ok := snapshot.stateFor(plugin.ID)
+		if !ok || !state.Attached || strings.TrimSpace(state.Error) != "" {
+			continue
+		}
+		if err := rt.applyRuntimeResourcesForReconcile(plugin); err != nil {
+			failures[plugin.ID] = err
+		}
+	}
+	if len(failures) == 0 {
+		return nil
+	}
+	return failures
+}
+
 func readPluginControlScript(plugin LoadedPlugin) (string, error) {
 	if plugin.controlMainPath == "" {
 		return "", errPluginRuntimeTargetNotLoaded
@@ -947,6 +1640,20 @@ func pluginControlHandlerName(event pluginControlEvent) string {
 			return ""
 		}
 		return event.Worker.Handler
+	case "deactivate":
+		return "onDeactivate"
+	case "upgrade_snapshot":
+		return "onUpgradeSnapshot"
+	case "upgrade_restore":
+		return "onUpgradeRestore"
+	case "upgrade_probe":
+		if event.Upgrade == nil {
+			return ""
+		}
+		if event.Upgrade.Phase == "snapshot" {
+			return "onUpgradeSnapshot"
+		}
+		return "onUpgradeRestore"
 	default:
 		return "onReconcile"
 	}
@@ -1002,6 +1709,25 @@ func pluginControlContext(plugin LoadedPlugin, event pluginControlEvent) map[str
 		}
 		ctx["payload"] = pluginControlDecodeJSON(event.Payload)
 	}
+	if event.Kind == "deactivate" {
+		ctx["reason"] = event.Reason
+	}
+	if event.Upgrade != nil {
+		upgrade := map[string]any{
+			"protocol_version": 1,
+			"phase":            event.Upgrade.Phase,
+			"scope":            event.Upgrade.Scope,
+			"from_version":     event.Upgrade.FromVersion,
+			"to_version":       event.Upgrade.ToVersion,
+			"state":            event.Upgrade.State,
+			"timers":           event.Upgrade.Timers,
+			"sockets":          event.Upgrade.Sockets,
+		}
+		if event.Upgrade.WorkerName != "" {
+			upgrade["worker_name"] = event.Upgrade.WorkerName
+		}
+		ctx["upgrade"] = upgrade
+	}
 	return ctx
 }
 
@@ -1032,7 +1758,27 @@ func (h *pluginControlHost) install() error {
 	if err := pluginAPI.Set("virtualInterface", h.pluginRegisterVirtualInterface); err != nil {
 		return err
 	}
+	if err := pluginAPI.Set("pipelineNode", h.pluginRegisterPipelineNode); err != nil {
+		return err
+	}
+	if err := pluginAPI.Set("handoff", h.pluginRegisterHandoff); err != nil {
+		return err
+	}
 	if err := h.vm.Set("plugin", pluginAPI); err != nil {
+		return err
+	}
+
+	pipelineAPI := h.vm.NewObject()
+	if err := pipelineAPI.Set("node", h.pluginRegisterPipelineNode); err != nil {
+		return err
+	}
+	if err := pipelineAPI.Set("handoff", h.pluginRegisterHandoff); err != nil {
+		return err
+	}
+	if err := pipelineAPI.Set("attach", h.pipelineAttach); err != nil {
+		return err
+	}
+	if err := h.vm.Set("pipeline", pipelineAPI); err != nil {
 		return err
 	}
 
@@ -1108,6 +1854,9 @@ func (h *pluginControlHost) install() error {
 	if err := ebpfAPI.Set("mapGet", h.ebpfMapGet); err != nil {
 		return err
 	}
+	if err := ebpfAPI.Set("mapGetPerCPU", h.ebpfMapGetPerCPU); err != nil {
+		return err
+	}
 	if err := ebpfAPI.Set("mapDelete", h.ebpfMapDelete); err != nil {
 		return err
 	}
@@ -1167,6 +1916,41 @@ func (h *pluginControlHost) install() error {
 	if err := netAPI.Set("udp", udpAPI); err != nil {
 		return err
 	}
+	socketAPI := h.vm.NewObject()
+	if err := socketAPI.Set("open", h.socketOpen); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("listen", h.socketListen); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("accept", h.socketAccept); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("read", h.socketRead); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("write", h.socketWrite); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("close", h.socketClose); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("status", h.socketStatus); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("list", h.socketList); err != nil {
+		return err
+	}
+	if err := netAPI.Set("socket", socketAPI); err != nil {
+		return err
+	}
+	prefixAPI := h.vm.NewObject()
+	if err := prefixAPI.Set("subnet", h.netPrefixSubnet); err != nil {
+		return err
+	}
+	if err := netAPI.Set("prefix", prefixAPI); err != nil {
+		return err
+	}
 	linkAPI := h.vm.NewObject()
 	if err := linkAPI.Set("get", h.netLinkGet); err != nil {
 		return err
@@ -1178,6 +1962,12 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := linkAPI.Set("ensureVeth", h.netLinkEnsureVeth); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("ensureDummy", h.netLinkEnsureDummy); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("ensureMacvlan", h.netLinkEnsureMacvlan); err != nil {
 		return err
 	}
 	if err := linkAPI.Set("delete", h.netLinkDelete); err != nil {
@@ -1195,7 +1985,19 @@ func (h *pluginControlHost) install() error {
 	if err := linkAPI.Set("setMTU", h.netLinkSetMTU); err != nil {
 		return err
 	}
+	if err := linkAPI.Set("setARP", h.netLinkSetARP); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("setPromiscuous", h.netLinkSetPromiscuous); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("getOffloads", h.netLinkGetOffloads); err != nil {
+		return err
+	}
 	if err := linkAPI.Set("setOffloads", h.netLinkSetOffloads); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("setGSO", h.netLinkSetGSO); err != nil {
 		return err
 	}
 	if err := netAPI.Set("link", linkAPI); err != nil {
@@ -1250,6 +2052,9 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := workerAPI.Set("list", h.workerList); err != nil {
+		return err
+	}
+	if err := workerAPI.Set("stats", h.workerStats); err != nil {
 		return err
 	}
 	if err := h.vm.Set("worker", workerAPI); err != nil {
@@ -1357,17 +2162,32 @@ func (h *pluginControlHost) pluginRegisterAction(call goja.FunctionCall) goja.Va
 }
 
 func (h *pluginControlHost) pluginRegisterVirtualInterface(call goja.FunctionCall) goja.Value {
-	h.requireRegistrationPermission("plugin.register", "plugin.virtualInterface")
+	return h.pluginRegisterVirtualInterfaceWithDefault(call, "", "plugin.virtualInterface")
+}
+
+func (h *pluginControlHost) pluginRegisterPipelineNode(call goja.FunctionCall) goja.Value {
+	return h.pluginRegisterVirtualInterfaceWithDefault(call, "pipeline", "plugin.pipelineNode")
+}
+
+func (h *pluginControlHost) pluginRegisterHandoff(call goja.FunctionCall) goja.Value {
+	return h.pluginRegisterVirtualInterfaceWithDefault(call, "handoff", "plugin.handoff")
+}
+
+func (h *pluginControlHost) pluginRegisterVirtualInterfaceWithDefault(call goja.FunctionCall, defaultType string, api string) goja.Value {
+	h.requireRegistrationPermission("plugin.register", api)
 	var vif PluginVirtualInterface
 	if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
-		h.throwf("plugin.virtualInterface: spec is required")
+		h.throwf("%s: spec is required", api)
 	}
-	h.exportJSONValue(call.Arguments[0], &vif, "plugin.virtualInterface")
+	h.exportJSONValue(call.Arguments[0], &vif, api)
+	if strings.TrimSpace(vif.Type) == "" {
+		vif.Type = defaultType
+	}
 	if err := normalizePluginVirtualInterface(&vif); err != nil {
-		h.throwf("plugin.virtualInterface: %v", err)
+		h.throwf("%s: %v", api, err)
 	}
 	if pluginVirtualInterfaceIndex(h.surface.VirtualInterfaces, vif.ID) >= 0 {
-		h.throwf("plugin.virtualInterface: duplicate virtual interface %q", vif.ID)
+		h.throwf("%s: duplicate virtual interface %q", api, vif.ID)
 	}
 	h.surface.VirtualInterfaces = append(h.surface.VirtualInterfaces, vif)
 	return goja.Undefined()
@@ -1402,6 +2222,75 @@ func (h *pluginControlHost) hookAttach(call goja.FunctionCall) goja.Value {
 	}
 	if pluginHookIndex(h.surface.Hooks, hook.ID) >= 0 {
 		h.throwf("hooks.attach: duplicate hook %q", hook.ID)
+	}
+	h.surface.Hooks = append(h.surface.Hooks, hook)
+	return goja.Undefined()
+}
+
+type pluginControlPipelineAttachment struct {
+	ID         string   `json:"id"`
+	Pipeline   string   `json:"pipeline,omitempty"`
+	Direction  string   `json:"direction,omitempty"`
+	Engine     string   `json:"engine,omitempty"`
+	Attach     string   `json:"attach,omitempty"`
+	Priority   int      `json:"priority,omitempty"`
+	Program    string   `json:"program"`
+	Mode       string   `json:"mode,omitempty"`
+	Context    []string `json:"context,omitempty"`
+	Interfaces []string `json:"interfaces,omitempty"`
+}
+
+func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
+	h.requireRegistrationPermission("hook.attach", "pipeline.attach")
+	var spec pluginControlPipelineAttachment
+	if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+		h.throwf("pipeline.attach: spec is required")
+	}
+	h.exportJSONValue(call.Arguments[0], &spec, "pipeline.attach")
+	pipelineID := strings.TrimSpace(strings.ToLower(spec.Pipeline))
+	if pipelineID == "" {
+		pipelineID = "fvtap"
+	}
+	if pipelineID != "fvtap" {
+		h.throwf("pipeline.attach: only fvtap pipeline is supported, got %q", spec.Pipeline)
+	}
+	direction := strings.TrimSpace(strings.ToLower(spec.Direction))
+	switch direction {
+	case "forward", "reply":
+	default:
+		h.throwf("pipeline.attach: direction must be forward or reply")
+	}
+	hook := PluginHook{
+		ID:         spec.ID,
+		Engine:     spec.Engine,
+		Attach:     spec.Attach,
+		Stage:      direction,
+		Priority:   spec.Priority,
+		Program:    spec.Program,
+		Mode:       spec.Mode,
+		Context:    append([]string(nil), spec.Context...),
+		Interfaces: append([]string(nil), spec.Interfaces...),
+	}
+	if hook.Engine == "" {
+		hook.Engine = kernelEngineTC
+	}
+	if hook.Attach == "" {
+		hook.Attach = "ingress"
+	}
+	if err := normalizePluginHook(&hook); err != nil {
+		h.throwf("pipeline.attach: %v", err)
+	}
+	if hook.Engine != kernelEngineTC {
+		h.throwf("pipeline.attach: only tc hooks can join fvtap pipeline")
+	}
+	if hook.Attach != "ingress" && hook.Attach != "egress" && hook.Attach != "both" {
+		h.throwf("pipeline.attach: attach must be ingress, egress or both for fvtap pipeline hooks")
+	}
+	if hook.Priority == pluginPipelineCorePriority {
+		h.throwf("pipeline.attach: priority %d collides with fvtap core priority; use a lower value for pre-core or a higher value for post-core", pluginPipelineCorePriority)
+	}
+	if pluginHookIndex(h.surface.Hooks, hook.ID) >= 0 {
+		h.throwf("pipeline.attach: duplicate hook %q", hook.ID)
 	}
 	h.surface.Hooks = append(h.surface.Hooks, hook)
 	return goja.Undefined()
@@ -1752,6 +2641,8 @@ func (h *pluginControlHost) pluginResourceSet(call goja.FunctionCall) goja.Value
 		h.throwf("plugins.resources.set: %v", err)
 	}
 	if apply {
+		release := h.beginSynchronousPluginCall(plugin.ID, "resource "+resource.ID)
+		defer release()
 		if err := h.applyTargetPluginResourceRuntimeUpdate(plugin, resource); err != nil {
 			_ = markPluginRuntimeError(h.db, plugin.ID, "resource", resource.ID, err)
 			h.throwf("plugins.resources.set: apply %s/%s: %v", plugin.ID, resource.ID, err)
@@ -1798,6 +2689,8 @@ func (h *pluginControlHost) pluginResourceDelete(call goja.FunctionCall) goja.Va
 		h.throwf("plugins.resources.delete: %v", err)
 	}
 	if apply {
+		release := h.beginSynchronousPluginCall(plugin.ID, "resource "+resource.ID)
+		defer release()
 		if err := h.applyTargetPluginResourceRuntimeUpdate(plugin, resource); err != nil {
 			_ = markPluginRuntimeError(h.db, plugin.ID, "resource", resource.ID, err)
 			h.throwf("plugins.resources.delete: apply %s/%s: %v", plugin.ID, resource.ID, err)
@@ -1822,16 +2715,31 @@ func (h *pluginControlHost) pluginActionCall(call goja.FunctionCall) goja.Value 
 	if len(payload) > pluginActionMaxPayloadBytes(action) || !json.Valid(payload) {
 		h.throwf("plugins.actions.call: invalid action payload")
 	}
-	if err := h.applyTargetPluginActionRuntimeUpdate(plugin, action, payload); err != nil {
-		_ = markPluginRuntimeError(h.db, plugin.ID, "action", action.ID, err)
+	release := h.beginSynchronousPluginCall(plugin.ID, "action "+action.ID)
+	defer release()
+	var result any
+	var err error
+	if action.RuntimeUpdate == "runtime_query" {
+		result, err = h.runtime.QueryPluginAction(plugin, action, payload)
+	} else {
+		err = h.applyTargetPluginActionRuntimeUpdate(plugin, action, payload)
+	}
+	if err != nil {
+		if action.RuntimeUpdate != "runtime_query" {
+			_ = markPluginRuntimeError(h.db, plugin.ID, "action", action.ID, err)
+		}
 		h.throwf("plugins.actions.call: apply %s/%s: %v", plugin.ID, action.ID, err)
 	}
-	return h.vm.ToValue(map[string]any{
+	response := map[string]any{
 		"status":         "completed",
 		"plugin":         plugin.ID,
 		"action":         action.ID,
 		"runtime_update": action.RuntimeUpdate,
-	})
+	}
+	if result != nil {
+		response["result"] = result
+	}
+	return h.vm.ToValue(response)
 }
 
 func (h *pluginControlHost) applyTargetPluginResourceRuntimeUpdate(plugin LoadedPlugin, resource PluginResource) error {
@@ -1892,7 +2800,7 @@ func (h *pluginControlHost) applyCurrentPluginResourceRuntimeApply(plugin Loaded
 	var controlErr error
 	if h.runtime != nil && plugin.controlMainPath != "" {
 		if h.plugin.ID == plugin.ID {
-			_, _, controlErr = h.runEvent(pluginControlEvent{
+			_, _, _, controlErr = h.runEvent(pluginControlEvent{
 				Kind:     "resource_apply",
 				Resource: &resource,
 				Records:  records,
@@ -1964,7 +2872,7 @@ func (h *pluginControlHost) applyTargetPluginActionRuntimeUpdate(plugin LoadedPl
 
 func (h *pluginControlHost) targetPluginActionRuntimeUpdateAllowed(plugin LoadedPlugin, action PluginAction) error {
 	switch action.RuntimeUpdate {
-	case "plugin_reconcile", "runtime_apply":
+	case "plugin_reconcile", "runtime_apply", "runtime_query":
 		if ok, reason := pluginControlStabilityAllowed(plugin, h.cfg); !ok {
 			return fmt.Errorf("%s", reason)
 		}
@@ -2041,6 +2949,26 @@ func (h *pluginControlHost) ebpfMapGet(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(hex.EncodeToString(value))
 }
 
+func (h *pluginControlHost) ebpfMapGetPerCPU(call goja.FunctionCall) goja.Value {
+	h.requirePermission("ebpf.map_read")
+	controller, ok := h.mapController.(pluginEBPFPerCPUMapController)
+	if !ok || controller == nil {
+		h.throwf("ebpf.mapGetPerCPU: per-CPU eBPF map controller is unavailable")
+	}
+	objectID, mapName, key := h.ebpfMapDeleteArgs(call)
+	h.requirePluginObjectID(objectID, "ebpf.mapGetPerCPU")
+	h.requirePluginMap(mapName, "ebpf.mapGetPerCPU")
+	values, err := controller.GetPluginMapPerCPUValues(h.plugin.ID, objectID, mapName, key)
+	if err != nil {
+		h.throwf("ebpf.mapGetPerCPU: %v", err)
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, hex.EncodeToString(value))
+	}
+	return h.vm.ToValue(out)
+}
+
 func (h *pluginControlHost) ebpfMapDelete(call goja.FunctionCall) goja.Value {
 	h.requirePermission("ebpf.map_write")
 	if h.mapController == nil {
@@ -2111,9 +3039,10 @@ func (h *pluginControlHost) workerCall(call goja.FunctionCall) goja.Value {
 		h.throwf("worker.call: %v", err)
 	}
 	result, err := vm.run(h.plugin, pluginControlEvent{
-		Kind:    "worker",
-		Payload: payload,
-		Worker:  &pluginControlWorkerEvent{Name: name, Handler: handler},
+		Kind:               "worker",
+		Payload:            payload,
+		Worker:             &pluginControlWorkerEvent{Name: name, Handler: handler},
+		inheritUpgradeGate: true,
 	}, false)
 	if err != nil {
 		h.throwf("worker.call: %v", err)
@@ -2129,9 +3058,10 @@ func (h *pluginControlHost) workerDispatch(call goja.FunctionCall) goja.Value {
 		h.throwf("worker.dispatch: %v", err)
 	}
 	if err := vm.dispatch(h.plugin, pluginControlEvent{
-		Kind:    "worker",
-		Payload: payload,
-		Worker:  &pluginControlWorkerEvent{Name: name, Handler: handler},
+		Kind:               "worker",
+		Payload:            payload,
+		Worker:             &pluginControlWorkerEvent{Name: name, Handler: handler},
+		inheritUpgradeGate: true,
 	}, false); err != nil {
 		h.throwf("worker.dispatch: %v", err)
 	}
@@ -2144,6 +3074,17 @@ func (h *pluginControlHost) workerList(call goja.FunctionCall) goja.Value {
 		return h.vm.ToValue([]map[string]any(nil))
 	}
 	return h.vm.ToValue(h.runtime.pluginWorkerList(h.plugin.ID))
+}
+
+func (h *pluginControlHost) workerStats(call goja.FunctionCall) goja.Value {
+	h.requirePermission("worker")
+	if h.runtime == nil {
+		return h.vm.ToValue(pluginControlWorkerQueueSnapshotMap(PluginControlWorkerQueueState{
+			RequestLimit: pluginControlWorkerMaxPending,
+			ByteLimit:    pluginControlWorkerMaxPendingBytes,
+		}))
+	}
+	return h.vm.ToValue(pluginControlWorkerQueueSnapshotMap(h.runtime.pluginControlWorkerQueueSnapshot(h.plugin.ID)))
 }
 
 func (h *pluginControlHost) l2Send(call goja.FunctionCall) goja.Value {
@@ -2304,6 +3245,9 @@ func (h *pluginControlHost) cryptoRandomBytes(call goja.FunctionCall) goja.Value
 }
 
 func (h *pluginControlHost) cryptoSHA256File(call goja.FunctionCall) goja.Value {
+	if h.upgradePhase {
+		h.throwf("crypto.sha256File is unavailable during plugin upgrade snapshot/restore")
+	}
 	if !pluginControlHasPermission(h.plugin, "crypto") {
 		h.throwf("permission crypto is required")
 	}
@@ -2429,6 +3373,9 @@ func (h *pluginControlHost) logMessage(call goja.FunctionCall) string {
 }
 
 func (h *pluginControlHost) requirePermission(permission string) {
+	if h.upgradePhase {
+		h.throwf("permission %s is unavailable during plugin upgrade snapshot/restore", permission)
+	}
 	if h.registrationPhase && !pluginControlRegistrationPermissionAllowed(permission) {
 		h.throwf("permission %s is unavailable during plugin registration", permission)
 	}
@@ -2438,6 +3385,9 @@ func (h *pluginControlHost) requirePermission(permission string) {
 }
 
 func (h *pluginControlHost) requireRegistrationPermission(permission string, api string) {
+	if h.upgradePhase {
+		h.throwf("%s is unavailable during plugin upgrade snapshot/restore", api)
+	}
 	if !h.registrationPhase {
 		h.throwf("%s is only available during plugin registration", api)
 	}
@@ -2528,7 +3478,8 @@ func (h *pluginControlHost) requiredTargetPluginResource(pluginID string, resour
 		h.runtime.mu.Unlock()
 	}
 	if !found {
-		catalog := loadPluginCatalogWithControlRegistrationAndState(h.cfg, h.db)
+		catalogCfg := pluginCatalogConfigForProcess(pluginControlProcessManager(h.runtime), h.cfg)
+		catalog := loadPluginCatalogWithControlRegistrationAndState(catalogCfg, h.db)
 		for _, candidate := range catalog.Plugins {
 			if candidate.ID == pluginID {
 				plugin = candidate
@@ -2569,7 +3520,8 @@ func (h *pluginControlHost) requiredTargetPluginAction(pluginID string, actionID
 		h.runtime.mu.Unlock()
 	}
 	if !found {
-		catalog := loadPluginCatalogWithControlRegistrationAndState(h.cfg, h.db)
+		catalogCfg := pluginCatalogConfigForProcess(pluginControlProcessManager(h.runtime), h.cfg)
+		catalog := loadPluginCatalogWithControlRegistrationAndState(catalogCfg, h.db)
 		for _, candidate := range catalog.Plugins {
 			if candidate.ID == pluginID {
 				plugin = candidate
@@ -2862,7 +3814,7 @@ func (h *pluginControlHost) l2ExchangeRequest(call goja.FunctionCall) pluginCont
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlL2ExchangeRequest{
 		Send: h.l2SendRequestFromObject(obj),
-		Recv: h.l2RecvRequestFromObject(obj),
+		Recv: h.l2ExchangeRecvRequestFromObject(obj),
 	}
 	h.requireNetAccess("l2", req.Send.Interface, "net.l2.exchange")
 	h.requireNetAccess("l2", req.Recv.Interface, "net.l2.exchange")
@@ -2875,6 +3827,7 @@ func (h *pluginControlHost) l2ExchangeManyRequest(call goja.FunctionCall) plugin
 		Send: h.l2SendRequestFromObject(obj),
 		Recv: h.l2RecvManyRequestFromObject(obj),
 	}
+	req.Recv.Recv = h.l2ExchangeRecvRequestFromObject(obj)
 	h.requireNetAccess("l2", req.Send.Interface, "net.l2.exchangeMany")
 	h.requireNetAccess("l2", req.Recv.Recv.Interface, "net.l2.exchangeMany")
 	return req
@@ -2948,6 +3901,7 @@ func (h *pluginControlHost) l2RecvRequestFromObject(obj *goja.Object) pluginCont
 			h.throwf("net.l2.recv timeout_ms must be between 1 and %d", pluginControlL2MaxTimeout.Milliseconds())
 		}
 	}
+	timeout = h.boundedTransportTimeout(timeout, "net.l2.recv")
 	maxBytes := 2048
 	if raw := h.objectField(obj, "max_bytes"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
 		maxBytes = int(raw.ToInteger())
@@ -2991,6 +3945,20 @@ func (h *pluginControlHost) l2RecvRequestFromObject(obj *goja.Object) pluginCont
 	return req
 }
 
+func (h *pluginControlHost) l2ExchangeRecvRequestFromObject(obj *goja.Object) pluginControlL2RecvRequest {
+	req := h.l2RecvRequestFromObject(obj)
+	value := h.objectField(obj, "recv_ethertype")
+	if goja.IsUndefined(value) || goja.IsNull(value) {
+		return req
+	}
+	etherType, err := parsePluginControlEtherType(value)
+	if err != nil {
+		h.throwf("recv_ethertype: %v", err)
+	}
+	req.EtherType = etherType
+	return req
+}
+
 func (h *pluginControlHost) l2RecvManyRequestFromObject(obj *goja.Object) pluginControlL2RecvManyRequest {
 	maxFrames := 8
 	if raw := h.objectField(obj, "max_frames"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
@@ -3006,6 +3974,7 @@ func (h *pluginControlHost) l2RecvManyRequestFromObject(obj *goja.Object) plugin
 			h.throwf("net.l2.recvMany idle_timeout_ms must be between 1 and %d", pluginControlL2MaxTimeout.Milliseconds())
 		}
 	}
+	idleTimeout = h.boundedTransportTimeout(idleTimeout, "net.l2.recvMany")
 	return pluginControlL2RecvManyRequest{
 		Recv:        h.l2RecvRequestFromObject(obj),
 		MaxFrames:   maxFrames,
@@ -3225,11 +4194,11 @@ func (h *pluginControlHost) optionalPortObjectField(obj *goja.Object, fallback i
 		if goja.IsUndefined(raw) || goja.IsNull(raw) {
 			continue
 		}
-		port := int(raw.ToInteger())
-		if port < 0 || port > 65535 {
+		value := raw.ToInteger()
+		if value < 0 || value > 65535 {
 			h.throwf("%s must be between 0 and 65535", field)
 		}
-		return port
+		return int(value)
 	}
 	return fallback
 }
@@ -3241,6 +4210,20 @@ func (h *pluginControlHost) udpTimeoutObjectField(obj *goja.Object, field string
 		if timeout <= 0 || timeout > pluginControlUDPMaxTimeout {
 			h.throwf("net.udp timeout_ms must be between 1 and %d", pluginControlUDPMaxTimeout.Milliseconds())
 		}
+	}
+	return h.boundedTransportTimeout(timeout, "net.udp")
+}
+
+func (h *pluginControlHost) boundedTransportTimeout(timeout time.Duration, api string) time.Duration {
+	if h.executionDeadline.IsZero() {
+		return timeout
+	}
+	remaining := time.Until(h.executionDeadline)
+	if remaining <= time.Millisecond {
+		h.throwf("%s: plugin execution deadline exceeded", api)
+	}
+	if timeout > remaining {
+		return remaining
 	}
 	return timeout
 }
@@ -3483,6 +4466,12 @@ func (rt *gojaPluginControlRuntime) pluginControlWorkersLocked(pluginID string) 
 }
 
 func (rt *gojaPluginControlRuntime) firePluginTimer(key pluginControlTimerKey, generation uint64) {
+	upgradeLease, err := rt.acquirePluginControlUpgradeLease(key.pluginID, time.Time{}, false)
+	if err != nil {
+		return
+	}
+	defer upgradeLease.release()
+
 	rt.mu.Lock()
 	if rt.closed {
 		rt.mu.Unlock()
@@ -3523,7 +4512,11 @@ func (rt *gojaPluginControlRuntime) firePluginTimer(key pluginControlTimerKey, g
 		return
 	}
 
-	timerErr := rt.runPluginControl(plugin, pluginControlEvent{Kind: "timer", Timer: &spec}, true)
+	timerErr := rt.runPluginControl(plugin, pluginControlEvent{
+		Kind:               "timer",
+		Timer:              &spec,
+		inheritUpgradeGate: true,
+	}, true)
 	if timerErr == nil {
 		timerErr = rt.applyStaleRuntimeResourcesAfterTimer(plugin)
 	}
@@ -3656,12 +4649,46 @@ func (rt *gojaPluginControlRuntime) pluginWorkerList(pluginID string) []map[stri
 		if key.pluginID != pluginID {
 			continue
 		}
+		pendingRequests, pendingBytes := vm.workerQueuePending()
 		out = append(out, map[string]any{
-			"name": key.name,
-			"mode": vm.mode,
+			"name":             key.name,
+			"mode":             vm.mode,
+			"executing":        vm.isExecuting(),
+			"queue_depth":      len(vm.requests),
+			"queue_capacity":   cap(vm.requests),
+			"pending_requests": pendingRequests,
+			"pending_bytes":    pendingBytes,
 		})
 	}
 	return out
+}
+
+func (vm *pluginControlVM) workerQueuePending() (int, int64) {
+	vm.pendingMu.Lock()
+	defer vm.pendingMu.Unlock()
+	var bytes int64
+	for reservation := range vm.pending {
+		bytes += reservation.bytes
+	}
+	return len(vm.pending), bytes
+}
+
+func (vm *pluginControlVM) isExecuting() bool {
+	vm.currentMu.Lock()
+	defer vm.currentMu.Unlock()
+	return vm.executing
+}
+
+func pluginControlWorkerQueueSnapshotMap(snapshot PluginControlWorkerQueueState) map[string]any {
+	return map[string]any{
+		"pending_requests":      snapshot.PendingRequests,
+		"pending_bytes":         snapshot.PendingBytes,
+		"peak_pending_requests": snapshot.PeakPendingRequests,
+		"peak_pending_bytes":    snapshot.PeakPendingBytes,
+		"rejected_requests":     snapshot.RejectedRequests,
+		"request_limit":         snapshot.RequestLimit,
+		"byte_limit":            snapshot.ByteLimit,
+	}
 }
 
 func (h *pluginControlHost) bytesFromCryptoArg(value goja.Value) ([]byte, error) {

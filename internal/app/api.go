@@ -277,10 +277,25 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		var pluginIDs []string
+		if r.Body != nil && r.ContentLength != 0 {
+			var req struct {
+				PluginIDs []string `json:"plugin_ids"`
+			}
+			if err := decodeJSONRequestBody(w, r, &req, apiJSONBodyMaxBytes); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+				return
+			}
+			pluginIDs = req.PluginIDs
+		}
 		if pm != nil {
-			pm.reconcilePluginsForRuntime()
-			err := pm.refreshPluginCatalogFingerprint()
-			pm.markPluginCatalogReloadCompleted(pluginCatalogHotReloadSourceManual, err)
+			if err := pm.applyPluginCatalogUpdateSelection(pluginIDs); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{
+					"error":   err.Error(),
+					"catalog": pm.pluginCatalogWithConfig(cfg),
+				})
+				return
+			}
 			pm.redistributeWorkers()
 			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
 			return
@@ -2237,7 +2252,7 @@ func processManagerConfig(pm *ProcessManager) *Config {
 	if pm == nil {
 		return nil
 	}
-	return pm.cfg
+	return pluginCatalogConfigForProcess(pm, pm.cfg)
 }
 
 func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager) {

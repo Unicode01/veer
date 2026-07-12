@@ -19,26 +19,27 @@ const (
 )
 
 type ManagedNetwork struct {
-	ID                  int64
-	Name                string
-	BridgeMode          string
-	Bridge              string
-	BridgeMTU           int
-	BridgeVLANAware     bool
-	UplinkInterface     string
-	IPv4Enabled         bool
-	IPv4CIDR            string
-	IPv4Gateway         string
-	IPv4PoolStart       string
-	IPv4PoolEnd         string
-	IPv4DNSServers      string
-	IPv6Enabled         bool
-	IPv6ParentInterface string
-	IPv6ParentPrefix    string
-	IPv6AssignmentMode  string
-	AutoEgressNAT       bool
-	Remark              string
-	Enabled             bool
+	ID                        int64
+	Name                      string
+	BridgeMode                string
+	Bridge                    string
+	BridgeMTU                 int
+	BridgeVLANAware           bool
+	UplinkInterface           string
+	IPv4Enabled               bool
+	IPv4CIDR                  string
+	IPv4Gateway               string
+	IPv4PoolStart             string
+	IPv4PoolEnd               string
+	IPv4DNSServers            string
+	IPv6Enabled               bool
+	IPv6ParentInterface       string
+	IPv6ParentPrefix          string
+	IPv6AssignmentMode        string
+	AutoEgressNAT             bool
+	Remark                    string
+	Enabled                   bool
+	SkipIPv4AddressManagement bool
 }
 
 type ManagedNetworkReservation struct {

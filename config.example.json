@@ -8,7 +8,7 @@
   "managed_network_auto_repair": true,
   "plugins_enabled": true,
   "plugins_dataplane_enabled": false,
-  "plugins_dir": "plugins/runtime",
+  "plugins_dir": "plugins",
   "default_engine": "auto",
   "kernel_engine_order": [
     "tc"

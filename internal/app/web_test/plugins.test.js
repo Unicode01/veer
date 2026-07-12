@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 function makeNode(tagName, opts = {}) {
+  const classes = new Set(String(opts.className || '').split(/\s+/).filter(Boolean));
   const node = {
     tagName: String(tagName || 'div').toUpperCase(),
     className: opts.className || '',
@@ -17,6 +18,26 @@ function makeNode(tagName, opts = {}) {
     childNodes: [],
     parentNode: null,
     contentWindow: opts.contentWindow || null,
+    classList: {
+      add(...names) {
+        names.filter(Boolean).forEach((name) => classes.add(String(name)));
+        node.className = Array.from(classes).join(' ');
+      },
+      remove(...names) {
+        names.forEach((name) => classes.delete(String(name)));
+        node.className = Array.from(classes).join(' ');
+      },
+      contains(name) {
+        return classes.has(String(name));
+      },
+      toggle(name, force) {
+        const enabled = force === undefined ? !classes.has(String(name)) : !!force;
+        if (enabled) classes.add(String(name));
+        else classes.delete(String(name));
+        node.className = Array.from(classes).join(' ');
+        return enabled;
+      }
+    },
     appendChild(child) {
       if (!child) return child;
       if (child.__isFragment) {
@@ -99,6 +120,9 @@ function createHarness() {
     pluginUITitle: makeNode('h3'),
     pluginUIMeta: makeNode('p'),
     pluginUIFrame: makeNode('iframe'),
+    pluginUpdateSelectionBar: makeNode('div'),
+    pluginUpdateSelectionMeta: makeNode('span'),
+    applyPluginUpdateBtn: makeNode('button'),
     pluginsPagination: makeNode('div')
   };
   const translations = {
@@ -142,17 +166,32 @@ function createHarness() {
     'plugins.catalog.registrationOnlyDetail': '{{engines}} is currently validated and displayed, but not attached as an external plugin hot-path engine.',
     'plugins.catalog.scanOn': 'Enabled',
     'plugins.catalog.scanOff': 'Off',
-    'plugins.catalog.hotReload': 'Hot reload',
-    'plugins.catalog.hotReloadDetail': 'Plugin hot reload: {{status}}',
+    'plugins.catalog.hotReload': 'Update monitor',
+    'plugins.catalog.hotReloadDetail': 'Plugin update: {{status}}',
     'plugins.catalog.hotReloadIdle': 'Idle',
     'plugins.catalog.hotReloadWatching': 'Watching',
-    'plugins.catalog.hotReloadReloaded': 'Reloaded',
+    'plugins.catalog.hotReloadReloaded': 'Applied',
     'plugins.catalog.hotReloadPartial': 'Partial',
     'plugins.catalog.hotReloadError': 'Error',
     'plugins.catalog.hotReloadOff': 'Off',
+    'plugins.catalog.updateAvailable': 'Update available',
     'plugins.catalog.lastCheck': 'Checked',
-    'plugins.catalog.lastReload': 'Reloaded',
+    'plugins.catalog.lastReload': 'Applied',
     'plugins.catalog.fingerprint': 'Fingerprint',
+    'plugins.catalog.appliedFingerprint': 'Applied',
+    'plugins.catalog.detectedFingerprint': 'Pending',
+    'plugins.update.apply': 'Apply Update',
+    'plugins.update.applySelected': 'Apply Updates ({{count}})',
+    'plugins.update.applying': 'Applying',
+    'plugins.update.applied': 'Plugin update applied',
+    'plugins.update.appliedSelected': 'Applied {{count}} plugin updates',
+    'plugins.update.failed': 'Plugin update failed: {{message}}',
+    'plugins.update.detail': 'Applied {{applied}}; pending {{detected}}',
+    'plugins.update.selected': '{{count}} selected',
+    'plugins.update.selectModified': 'Update',
+    'plugins.update.selectAdded': 'Add',
+    'plugins.update.selectRemoved': 'Remove',
+    'plugins.update.rowDetail': 'Current {{applied}}; pending {{detected}}',
     'plugins.runtime.attachable': 'Attachable',
     'plugins.runtime.attached': 'Attached',
     'plugins.runtime.attachments': 'Attachments',
@@ -167,6 +206,7 @@ function createHarness() {
     'plugins.status.builtin': 'Built-in',
     'plugins.status.disabled': 'Disabled',
     'plugins.status.error': 'Error',
+    'plugins.status.pending': 'Pending add',
     'plugins.chain.title': 'TC Pipeline',
     'plugins.chain.legacy': 'legacy fvtap',
     'plugins.chain.none': 'No chain',
@@ -211,6 +251,7 @@ function createHarness() {
     __enablePluginTests: true,
     state: {
       locale: 'zh-CN',
+      activeRequests: 0,
       plugins: {
         data: [],
         catalog: null,
@@ -454,7 +495,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   const app = createHarness();
   app.state.plugins.catalog = {
     external_plugins_enabled: true,
-    directory: 'plugins/runtime',
+    directory: 'plugins',
     runtime: { external_dataplane_attach: false, external_dataplane_engines: ['tc'], registration_only_engines: ['xdp'], core_priority: 1000 },
     hot_reload: {
       enabled: true,
@@ -462,10 +503,14 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
       last_check_at: '2026-07-09T01:02:03Z',
       last_check_result: 'unchanged',
       last_reload_at: '2026-07-09T01:03:04Z',
-      last_reload_source: 'auto',
+      last_reload_source: 'manual',
       last_reload_result: 'success',
       catalog_fingerprint: 'abcdef1234567890',
-      fingerprint_short_hash: 'abcdef123456'
+      fingerprint_short_hash: 'abcdef123456',
+      applied_fingerprint: 'abcdef1234567890',
+      applied_fingerprint_short_hash: 'abcdef123456',
+      detected_fingerprint: 'abcdef1234567890',
+      detected_fingerprint_short_hash: 'abcdef123456'
     }
   };
   app.state.plugins.data = [
@@ -519,7 +564,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
     .flatMap((row) => row.childNodes || [])
     .flatMap((cell) => cell.childNodes || [])
     .flatMap((node) => node.childNodes || [])
-    .filter((node) => node.dataset && node.dataset.pluginId);
+    .filter((node) => String(node.className || '').includes('plugin-detail-trigger'));
   assert.equal(detailButtons.length, 2);
   assert.deepEqual(detailButtons.map((node) => node.dataset.pluginId), ['fvtap', 'packet_observer']);
   const toggleButtons = findNodes(app.el.pluginsBody, (node) => String(node.className || '').includes('btn-toggle-plugin'));
@@ -528,12 +573,12 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   assert.equal(toggleButtons[0].dataset.enabled, '0');
   assert.equal(collectText(toggleButtons[0]), 'Disable');
   assert.match(collectText(app.el.pluginsCatalogMeta), /Plugin Catalog/);
-  assert.match(collectText(app.el.pluginsCatalogMeta), /plugins\/runtime/);
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Dir plugins/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Dataplane No/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Register only XDP/);
-  assert.match(collectText(app.el.pluginsCatalogMeta), /Hot reload Reloaded/);
-  assert.match(collectText(app.el.pluginsCatalogMeta), /Fingerprint abcdef123456/);
-  assert.match(app.el.pluginsCatalogMeta.title, /Plugin hot reload: Reloaded/);
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Update monitor Applied/);
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Applied abcdef123456/);
+  assert.match(app.el.pluginsCatalogMeta.title, /Plugin update: Applied/);
   assert.match(collectText(app.el.pluginsChainMeta), /TC Pipeline/);
   assert.match(collectText(app.el.pluginsChainMeta), /1 chained/);
   assert.match(collectText(app.el.pluginsChainMeta), /pre x1/);
@@ -541,6 +586,139 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   assert.match(collectText(app.el.pluginsChainMeta), /apply/);
   assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: pre_forward[slot 10 packet_observer.observe-ingress (priority=10)] -> fvtap core(priority=1000) -> fvtap apply/redirect');
   assert.deepEqual(app.lastTableVisibility, { tableId: 'pluginsTable', visible: true });
+});
+
+test('plugin catalog exposes a pending update without applying it', () => {
+  const app = createHarness();
+  app.state.plugins.catalog = {
+    external_plugins_enabled: true,
+    directory: 'plugins',
+    runtime: {},
+    hot_reload: {
+      enabled: true,
+      update_available: true,
+      last_check_result: 'update_available',
+      applied_fingerprint: 'aaaaaaaaaaaaaaaa',
+      applied_fingerprint_short_hash: 'aaaaaaaaaaaa',
+      detected_fingerprint: 'bbbbbbbbbbbbbbbb',
+      detected_fingerprint_short_hash: 'bbbbbbbbbbbb',
+      updates: [{
+        plugin_id: 'packet_observer',
+        name: 'Packet Observer',
+        kind: 'pipeline',
+        change: 'modified',
+        applied_version: '1.0.0',
+        detected_version: '1.1.0'
+      }]
+    }
+  };
+  app.state.plugins.data = [{ id: 'packet_observer', name: 'Packet Observer', kind: 'pipeline', version: '1.0.0', status: 'active' }];
+
+  app.renderPluginsTable();
+
+  assert.equal(app.el.pluginUpdateSelectionBar.hidden, true);
+  assert.equal(app.el.applyPluginUpdateBtn.hidden, true);
+  const checkboxes = findNodes(app.el.pluginsBody, (node) => String(node.className || '').includes('plugin-update-checkbox'));
+  assert.equal(checkboxes.length, 1);
+  assert.equal(checkboxes[0].dataset.pluginId, 'packet_observer');
+  const updateChoices = findNodes(app.el.pluginsBody, (node) => String(node.className || '').split(/\s+/).includes('plugin-update-choice'));
+  assert.equal(updateChoices.length, 1);
+  assert.equal(String(updateChoices[0].className).includes('is-selected'), false);
+  assert.equal(findNodes(updateChoices[0], (node) => String(node.className || '').split(/\s+/).includes('plugin-update-check')).length, 1);
+  assert.equal(findNodes(updateChoices[0], (node) => String(node.className || '').split(/\s+/).includes('plugin-update-choice-label')).length, 1);
+  app.togglePluginUpdateSelection('packet_observer', true);
+  const selectedChoices = findNodes(app.el.pluginsBody, (node) => String(node.className || '').split(/\s+/).includes('plugin-update-choice'));
+  assert.equal(selectedChoices.length, 1);
+  assert.equal(String(selectedChoices[0].className).includes('is-selected'), true);
+  assert.equal(app.el.pluginUpdateSelectionBar.hidden, false);
+  assert.equal(app.el.applyPluginUpdateBtn.hidden, false);
+  assert.equal(app.el.applyPluginUpdateBtn.disabled, false);
+  assert.equal(app.el.applyPluginUpdateBtn.textContent, 'Apply Updates (1)');
+  assert.equal(app.el.applyPluginUpdateBtn.title, 'packet_observer');
+  assert.equal(app.el.pluginUpdateSelectionMeta.textContent, '1 selected');
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Update monitor Update available/);
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Applied aaaaaaaaaaaa/);
+  assert.match(collectText(app.el.pluginsCatalogMeta), /Pending bbbbbbbbbbbb/);
+});
+
+test('plugin catalog renders a pending addition as a selectable table row', () => {
+  const app = createHarness();
+  app.state.plugins.catalog = {
+    external_plugins_enabled: true,
+    directory: 'plugins',
+    runtime: {},
+    hot_reload: {
+      enabled: true,
+      update_available: true,
+      updates: [{
+        plugin_id: 'new_plugin',
+        source: 'new_plugin',
+        name: 'New Plugin',
+        kind: 'control',
+        change: 'added',
+        detected_version: '1.0.0'
+      }]
+    }
+  };
+
+  app.renderPluginsTable();
+
+  assert.match(collectText(app.el.pluginsBody), /new_plugin/);
+  assert.match(collectText(app.el.pluginsBody), /Pending add/);
+  assert.match(collectText(app.el.pluginsBody), /Add/);
+  const checkboxes = findNodes(app.el.pluginsBody, (node) => String(node.className || '').includes('plugin-update-checkbox'));
+  assert.equal(checkboxes.length, 1);
+  assert.equal(checkboxes[0].dataset.pluginId, 'new_plugin');
+  assert.equal(app.el.pluginUpdateSelectionBar.hidden, true);
+});
+
+test('plugin page panel creates its refresh control without row state dependencies', () => {
+  const app = createHarness();
+  const panel = app.__createPluginTabPanelForTest({
+    tabID: 'plugin-observe',
+    pluginID: 'packet_observer',
+    title: 'Observe',
+    entry: 'index.html'
+  });
+  const refresh = findNodes(panel, (node) => String(node.className || '').includes('btn-reload-plugin-page'));
+  assert.equal(refresh.length, 1);
+  assert.equal(refresh[0].dataset.pluginTab, 'plugin-observe');
+});
+
+test('applyPluginUpdate posts the pending catalog and reports completion', async () => {
+  const app = createHarness();
+  const calls = [];
+  app.state.plugins.catalog = {
+    external_plugins_enabled: true,
+    directory: 'plugins',
+    runtime: {},
+    hot_reload: {
+      enabled: true,
+      update_available: true,
+      updates: [{ plugin_id: 'packet_observer', change: 'modified', applied_version: '1.0.0', detected_version: '1.1.0' }]
+    }
+  };
+  app.state.plugins.data = [{ id: 'packet_observer', name: 'Packet Observer', version: '1.0.0', status: 'active' }];
+  app.apiCall = async (method, path, body) => {
+    calls.push({ method, path, body });
+    return {
+      external_plugins_enabled: true,
+      directory: 'plugins',
+      runtime: {},
+      hot_reload: { enabled: true, update_available: false, last_reload_result: 'success' },
+      plugins: []
+    };
+  };
+
+  app.renderPluginsTable();
+  app.togglePluginUpdateSelection('packet_observer', true);
+  await app.applyPluginUpdate();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ method: 'POST', path: '/api/plugins/reload', body: { plugin_ids: ['packet_observer'] } }]);
+  assert.equal(app.state.plugins.applyingUpdate, false);
+  assert.equal(app.state.plugins.catalog.hot_reload.update_available, false);
+  assert.equal(app.el.applyPluginUpdateBtn.hidden, true);
+  assert.deepEqual(app.__notifications, [{ type: 'success', message: 'Applied 1 plugin updates' }]);
 });
 
 test('togglePluginEnabled updates persisted plugin state and refreshes catalog', async () => {
@@ -588,7 +766,7 @@ test('togglePluginEnabled updates persisted plugin state and refreshes catalog',
 
 test('renderPluginsTable applies plugin search filter', () => {
   const app = createHarness();
-  app.state.plugins.catalog = { external_plugins_enabled: false, directory: 'plugins/runtime' };
+  app.state.plugins.catalog = { external_plugins_enabled: false, directory: 'plugins' };
   app.state.plugins.searchQuery = 'missing';
   app.state.plugins.data = [{ id: 'fvtap', status: 'builtin', name: 'Forward Virtual Tap' }];
 
@@ -601,7 +779,7 @@ test('renderPluginsTable applies plugin search filter', () => {
 
 test('renderPluginsTable places next-core chain entries after fvtap core', () => {
   const app = createHarness();
-  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins/runtime', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
+  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
   app.state.plugins.data = [
     { id: 'fvtap', status: 'builtin', name: 'Forward Virtual Tap', runtime: { mode: 'builtin', attachable: true, attached: true } },
     {
@@ -630,7 +808,7 @@ test('renderPluginsTable places next-core chain entries after fvtap core', () =>
 
 test('renderPluginsTable renders reply chain separately from forward chain', () => {
   const app = createHarness();
-  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins/runtime', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
+  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
   app.state.plugins.data = [
     { id: 'fvtap', status: 'builtin', name: 'Forward Virtual Tap', runtime: { mode: 'builtin', attachable: true, attached: true } },
     {
@@ -663,7 +841,7 @@ test('renderPluginsTable renders reply chain separately from forward chain', () 
 
 test('plugin dataplane link rows hide virtual-interface-only control plugins', () => {
   const app = createHarness();
-  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins/runtime', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
+  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
   const controlOnly = {
     id: 'wan_core',
     name: 'WAN Core',
@@ -683,7 +861,8 @@ test('plugin dataplane link rows hide virtual-interface-only control plugins', (
   const rows = app.__pluginLinkRowsForTest(pppoe);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].kind, 'Declared Chain');
-  assert.equal(rows[0].label, 'TC ingress forward eth1');
+  assert.equal(rows[0].label, 'TC ingress forward');
+  assert.equal(rows[0].segments[0].text, 'eth1');
   const current = rows[0].segments.find((segment) => segment.current);
   assert.equal(current.text, 'pppoe_client');
   assert.equal(current.detailTitle, 'pppoe_client.pppoe-forward');
@@ -703,12 +882,40 @@ test('plugin dataplane link rows hide virtual-interface-only control plugins', (
     (node.childNodes || []).forEach(walk);
   };
   walk(card);
-  assert.deepEqual(buttons.map((button) => button.textContent), ['pppoe_client', 'core', 'apply']);
+  assert.deepEqual(buttons.map((button) => button.textContent), ['eth1', 'pppoe_client', 'core', 'apply']);
+});
+
+test('plugin dataplane runtime link rows preserve bound hook interfaces', () => {
+  const app = createHarness();
+  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
+  const pppoe = {
+    id: 'pppoe_client',
+    name: 'PPPoE Client',
+    kind: 'pipeline',
+    hooks: [
+      { id: 'pppoe-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 20, interfaces: ['eth1'] },
+      { id: 'pppoe-egress', engine: 'tc', attach: 'egress', stage: 'forward', priority: 20, interfaces: ['fwdlocal0'] }
+    ],
+    runtime: {
+      mode: 'dataplane',
+      attachments: [
+        { hook_id: 'pppoe-ingress', engine: 'tc', attach: 'ingress', stage: 'pre_forward', interface: 'fvtap', priority: 20, chain_slot: 11, status: 'chained' },
+        { hook_id: 'pppoe-egress', engine: 'tc', attach: 'egress', stage: 'pre_forward', interface: 'fvtap', priority: 20, chain_slot: 10, status: 'chained' }
+      ]
+    }
+  };
+  app.state.plugins.data = [pppoe];
+
+  const rows = app.__pluginLinkRowsForTest(pppoe);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => row.label).sort())), ['TC egress forward', 'TC ingress forward']);
+  assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => row.segments[0].text).sort())), ['eth1', 'fwdlocal0']);
+  assert.ok(rows.every((row) => row.segments.some((segment) => segment.current && segment.text === 'pppoe_client')));
 });
 
 test('plugin dataplane link rows ignore registration-only xdp hooks', () => {
   const app = createHarness();
-  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins/runtime', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
+  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
   const xdpOnly = {
     id: 'xdp_probe',
     name: 'XDP Probe',
@@ -765,6 +972,9 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.toastError/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.t = function/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.onLocaleChange/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.recordPicker = function/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.collectionEditor = function/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.plugins = Object\.freeze/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /error_payload/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /runtime_status/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /runtime_error/);
@@ -783,6 +993,113 @@ test('plugin RPC data.list forwards pagination query params', () => {
   assert.match(source, /payload\.offset/);
   assert.match(source, /limit=/);
   assert.match(source, /offset=/);
+});
+
+test('plugin host cross-plugin resource reads enforce manifest grants', async () => {
+  const app = createHarness();
+  const calls = [];
+  app.state.plugins.data = [{
+    id: 'lan_core',
+    name: 'LAN Core',
+    asset_base_path: '/api/plugins/lan_core/assets/',
+    ui: { entry: 'index.html' },
+    control: {
+      resource_access: [{ plugin: 'wan_core', resource: 'status', methods: ['get', 'list'] }]
+    }
+  }];
+  app.__context.fetch = async function fetch() {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get(name) { return name === 'Content-Type' ? 'text/html' : ''; } },
+      text: async () => '<!doctype html><title>LAN Core</title>'
+    };
+  };
+  app.apiCall = async function apiCall(method, reqPath) {
+    calls.push({ method, reqPath });
+    return { records: [{ key: 'wan-a', data: { phase: 'applied' } }] };
+  };
+
+  await app.openPluginUI('lan_core');
+  const host = attachPluginHostChildFrame(app);
+  const result = await host.plugins.resources.list('wan_core', 'status', { limit: 32, offset: 0 });
+  assert.equal(result.records[0].key, 'wan-a');
+  assert.deepEqual(calls, [{ method: 'GET', reqPath: '/api/plugins/wan_core/resources/status?limit=32&offset=0' }]);
+
+  await assert.rejects(
+    host.plugins.resources.list('pppoe_client', 'sessions', { limit: 32 }),
+    /plugin resource access denied/
+  );
+  assert.equal(calls.length, 1);
+});
+
+test('core plugin pages use record pickers and structured route editors', () => {
+  const pluginRoot = path.join(__dirname, '..', '..', '..', 'plugins');
+  const wan = fs.readFileSync(path.join(pluginRoot, 'wan_core', 'ui', 'index.html'), 'utf8');
+  const lan = fs.readFileSync(path.join(pluginRoot, 'lan_core', 'ui', 'index.html'), 'utf8');
+  const local = fs.readFileSync(path.join(pluginRoot, 'vtolocal', 'ui', 'index.html'), 'utf8');
+  const pppoe = fs.readFileSync(path.join(pluginRoot, 'pppoe_client', 'ui', 'index.html'), 'utf8');
+  const router = fs.readFileSync(path.join(pluginRoot, 'router_wizard', 'ui', 'index.html'), 'utf8');
+
+  assert.match(wan, /F\.recordPicker/);
+  assert.match(wan, /F\.collectionEditor/);
+  assert.match(wan, /wanProfileField\.hidden = profilePicker\.keys\(\)\.length <= 1/);
+  assert.match(lan, /F\.recordPicker/);
+  assert.match(lan, /lanProfileField\.hidden = lanPicker\.keys\(\)\.length <= 1/);
+  assert.match(lan, /wanReferenceField\.hidden = wanPicker\.keys\(\)\.length <= 1/);
+  assert.match(local, /F\.recordPicker/);
+  assert.match(local, /F\.collectionEditor/);
+  assert.match(pppoe, /const action = active \? 'disconnect' : 'dial'/);
+  assert.match(pppoe, /setConfigurationLocked\(active \|\| redialing \|\| pending\)/);
+  assert.match(pppoe, /stats\.push\(\.\.\.trafficStats\(data\)\)/);
+  assert.doesNotMatch(pppoe, /'traffic\.title'/);
+  assert.doesNotMatch(pppoe, /const trafficBody/);
+  [wan, lan, local, router].forEach((source) => {
+    assert.match(source, /F\.setButtonState/);
+    assert.match(source, /'action\.update'/);
+    assert.match(source, /tone: 'danger'/);
+  });
+  assert.doesNotMatch(wan, /Routes JSON/);
+  assert.doesNotMatch(local, /Routes JSON/);
+});
+
+test('plugin table combines UI controls into a visible actions column', () => {
+  const cssPath = path.join(__dirname, '..', 'web', 'css', 'tables.css');
+  const source = fs.readFileSync(cssPath, 'utf8');
+  const widths = new Map();
+  const pattern = /#pluginsTable th:nth-child\((\d+)\),\s*#pluginsTable td:nth-child\(\1\)\s*\{\s*width:\s*(\d+)%/g;
+  for (const match of source.matchAll(pattern)) {
+    const column = Number(match[1]);
+    if (!widths.has(column)) widths.set(column, Number(match[2]));
+  }
+
+  assert.equal(widths.size, 6);
+  assert.equal(widths.get(6), 19);
+  assert.equal(Array.from(widths.values()).reduce((sum, width) => sum + width, 0), 100);
+  assert.match(source, /@media \(max-width: 720px\)[\s\S]*?#pluginsTable\s*\{\s*min-width:\s*880px/);
+  assert.match(source, /@media \(max-width: 720px\)[\s\S]*?#pluginsTable th:nth-child\(6\),\s*#pluginsTable td:nth-child\(6\)\s*\{\s*width:\s*22%/);
+});
+
+test('router wizard apply keeps the previous saved config available for rollback', () => {
+  const filePath = path.join(__dirname, '..', '..', '..', 'plugins', 'router_wizard', 'ui', 'index.html');
+  const source = fs.readFileSync(filePath, 'utf8');
+  const body = source.match(/async function applyRouter\(button\) \{([\s\S]*?)\n      \}/);
+  assert.ok(body, 'applyRouter function should exist');
+  assert.doesNotMatch(body[1], /saveConfig\s*\(/);
+  assert.match(body[1], /F\.action\('apply_router'/);
+});
+
+test('router wizard renders recovery steps without a raw status dump', () => {
+  const filePath = path.join(__dirname, '..', '..', '..', 'plugins', 'router_wizard', 'ui', 'index.html');
+  const source = fs.readFileSync(filePath, 'utf8');
+
+  assert.match(source, /lastStatus\.steps/);
+  assert.match(source, /lastStatus\.rollback_steps/);
+  assert.match(source, /lastStatus\.restore_steps/);
+  assert.match(source, /lastStatus\.restore_rollback_steps/);
+  assert.match(source, /appendStepGroup/);
+  assert.doesNotMatch(source, /JSON\.stringify\(value \|\| \{\}, null, 2\)/);
+  assert.doesNotMatch(source, /json\.raw/);
 });
 
 test('plugin host data.upsert only falls back to create on missing records', async () => {
@@ -887,6 +1204,50 @@ test('plugin host exposes locale helper and receives locale broadcasts', async (
   assert.equal(changedLocale, 'en-US');
   assert.equal(host.locale, 'en-US');
   assert.equal(host.t(messages, 'greeting', { name: 'Forward' }), 'Hello Forward');
+});
+
+test('plugin host button state distinguishes busy disabled and danger actions', async () => {
+  const app = createHarness();
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html' }
+  }];
+  app.__context.fetch = async function fetch() {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get(name) { return name === 'Content-Type' ? 'text/html' : ''; } },
+      text: async () => '<!doctype html><title>Plugin</title>'
+    };
+  };
+
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+  const button = host.button('Dial', null, true);
+  button.getBoundingClientRect = () => ({ width: 84 });
+
+  host.setButtonState(button, { label: 'Disconnecting', busy: true, tone: 'danger', state: 'disconnect' });
+  assert.equal(button.textContent, 'Disconnecting');
+  assert.equal(button.disabled, true);
+  assert.equal(button.dataset.state, 'disconnect');
+  assert.equal(button.style.minWidth, '84px');
+  assert.match(button.className, /is-busy/);
+  assert.match(button.className, /is-danger/);
+  assert.equal(button.getAttribute('aria-busy'), 'true');
+
+  host.setButtonState(button, { label: 'Dial', disabled: true, title: 'Unavailable' });
+  assert.equal(button.disabled, true);
+  assert.equal(button.title, 'Unavailable');
+  assert.equal(button.style.minWidth, '');
+  assert.doesNotMatch(button.className, /is-busy/);
+  assert.doesNotMatch(button.className, /is-danger/);
+  assert.equal(button.getAttribute('aria-busy'), 'false');
+
+  host.setButtonState(button, { label: 'Dial' });
+  assert.equal(button.disabled, false);
+  assert.equal(button.dataset.state, 'ready');
 });
 
 test('plugin iframe RPC returns runtime error payload and rejects plugin id mismatch', async () => {

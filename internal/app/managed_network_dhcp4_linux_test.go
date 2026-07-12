@@ -191,6 +191,56 @@ func TestBuildManagedNetworkDHCPv4ReplyPadsToBootPMinimumSize(t *testing.T) {
 	}
 }
 
+func TestBuildManagedNetworkDHCPv4ReplyIncludesDNSServersOption(t *testing.T) {
+	reply, err := buildManagedNetworkDHCPv4Reply(
+		managedNetworkDHCPv4Config{
+			ServerCIDR: "192.0.2.1/24",
+			ServerIP:   "192.0.2.1",
+			Gateway:    "192.0.2.1",
+			DNSServers: []string{"223.5.5.5", "1.1.1.1"},
+		},
+		parsedManagedNetworkDHCPv4Message{
+			XID:    0x01020304,
+			CHAddr: net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
+		},
+		dhcpv4MessageOffer,
+		"192.0.2.100",
+	)
+	if err != nil {
+		t.Fatalf("buildManagedNetworkDHCPv4Reply() error = %v", err)
+	}
+
+	options := reply[240:]
+	for offset := 0; offset < len(options); {
+		code := options[offset]
+		offset++
+		if code == 0 {
+			continue
+		}
+		if code == dhcpv4OptionEnd {
+			break
+		}
+		if offset >= len(options) {
+			t.Fatal("truncated DHCPv4 option length")
+		}
+		length := int(options[offset])
+		offset++
+		if offset+length > len(options) {
+			t.Fatal("truncated DHCPv4 option payload")
+		}
+		if code == dhcpv4OptionDNS {
+			got := options[offset : offset+length]
+			want := []byte{223, 5, 5, 5, 1, 1, 1, 1}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("DHCPv4 DNS option = %v, want %v", got, want)
+			}
+			return
+		}
+		offset += length
+	}
+	t.Fatal("DHCPv4 reply does not contain option 6")
+}
+
 func TestResolveManagedNetworkDHCPv4ListenInterfacesKeepsStickyDynamicChildWhenInventoryIsTransientlyEmpty(t *testing.T) {
 	oldLoad := loadInterfaceInfosForManagedNetworkDHCPv4Tests
 	oldLookup := lookupManagedNetworkDHCPv4InterfaceForTests

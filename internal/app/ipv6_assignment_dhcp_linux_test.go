@@ -91,3 +91,41 @@ func TestIPv6DHCPv6SocketFilter(t *testing.T) {
 		t.Fatalf("vm.Run(non-server destination) = %d, want 0", out)
 	}
 }
+
+func TestBuildDHCPv6ResponseIncludesRecursiveDNSServers(t *testing.T) {
+	t.Parallel()
+
+	response, err := buildDHCPv6Response(ipv6DHCPv6State{
+		DUID: []byte{0, 3, 0, 1, 2, 0, 0, 0, 0, 1},
+		Config: ipv6AssignmentDHCPv6Config{
+			TargetInterface: "br-lan",
+			Addresses:       []string{"2001:db8:100::10"},
+			DNSServers:      []string{"2001:4860:4860::8888", "2400:3200::1"},
+		},
+	}, parsedDHCPv6Message{
+		Type:     dhcpv6MessageSolicit,
+		TxID:     [3]byte{1, 2, 3},
+		ClientID: []byte{0, 3, 0, 1, 2, 0, 0, 0, 0, 2},
+		IAIDs:    [][]byte{{0, 0, 0, 7}},
+	}, dhcpv6MessageAdvertise)
+	if err != nil {
+		t.Fatalf("buildDHCPv6Response() error = %v", err)
+	}
+
+	options := response[4:]
+	var dns []byte
+	for len(options) >= 4 {
+		code := binary.BigEndian.Uint16(options[0:2])
+		length := int(binary.BigEndian.Uint16(options[2:4]))
+		if length > len(options)-4 {
+			t.Fatalf("invalid option length %d", length)
+		}
+		if code == dhcpv6OptionDNSServers {
+			dns = append([]byte(nil), options[4:4+length]...)
+		}
+		options = options[4+length:]
+	}
+	if len(dns) != 32 || !net.IP(dns[:16]).Equal(net.ParseIP("2001:4860:4860::8888")) || !net.IP(dns[16:]).Equal(net.ParseIP("2400:3200::1")) {
+		t.Fatalf("DHCPv6 DNS option = %v", dns)
+	}
+}

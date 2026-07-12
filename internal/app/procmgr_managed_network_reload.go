@@ -24,24 +24,25 @@ type managedNetworkRuntimeReloadFingerprint struct {
 }
 
 type managedNetworkRuntimeReloadFingerprintNetwork struct {
-	ID                  int64  `json:"id"`
-	BridgeMode          string `json:"bridge_mode,omitempty"`
-	Bridge              string `json:"bridge,omitempty"`
-	BridgeMTU           int    `json:"bridge_mtu,omitempty"`
-	BridgeVLANAware     bool   `json:"bridge_vlan_aware,omitempty"`
-	UplinkInterface     string `json:"uplink_interface,omitempty"`
-	IPv4Enabled         bool   `json:"ipv4_enabled,omitempty"`
-	IPv4CIDR            string `json:"ipv4_cidr,omitempty"`
-	IPv4Gateway         string `json:"ipv4_gateway,omitempty"`
-	IPv4PoolStart       string `json:"ipv4_pool_start,omitempty"`
-	IPv4PoolEnd         string `json:"ipv4_pool_end,omitempty"`
-	IPv4DNSServers      string `json:"ipv4_dns_servers,omitempty"`
-	IPv6Enabled         bool   `json:"ipv6_enabled,omitempty"`
-	IPv6ParentInterface string `json:"ipv6_parent_interface,omitempty"`
-	IPv6ParentPrefix    string `json:"ipv6_parent_prefix,omitempty"`
-	IPv6AssignmentMode  string `json:"ipv6_assignment_mode,omitempty"`
-	AutoEgressNAT       bool   `json:"auto_egress_nat,omitempty"`
-	Enabled             bool   `json:"enabled,omitempty"`
+	ID                        int64  `json:"id"`
+	BridgeMode                string `json:"bridge_mode,omitempty"`
+	Bridge                    string `json:"bridge,omitempty"`
+	BridgeMTU                 int    `json:"bridge_mtu,omitempty"`
+	BridgeVLANAware           bool   `json:"bridge_vlan_aware,omitempty"`
+	UplinkInterface           string `json:"uplink_interface,omitempty"`
+	IPv4Enabled               bool   `json:"ipv4_enabled,omitempty"`
+	IPv4CIDR                  string `json:"ipv4_cidr,omitempty"`
+	IPv4Gateway               string `json:"ipv4_gateway,omitempty"`
+	IPv4PoolStart             string `json:"ipv4_pool_start,omitempty"`
+	IPv4PoolEnd               string `json:"ipv4_pool_end,omitempty"`
+	IPv4DNSServers            string `json:"ipv4_dns_servers,omitempty"`
+	IPv6Enabled               bool   `json:"ipv6_enabled,omitempty"`
+	IPv6ParentInterface       string `json:"ipv6_parent_interface,omitempty"`
+	IPv6ParentPrefix          string `json:"ipv6_parent_prefix,omitempty"`
+	IPv6AssignmentMode        string `json:"ipv6_assignment_mode,omitempty"`
+	AutoEgressNAT             bool   `json:"auto_egress_nat,omitempty"`
+	Enabled                   bool   `json:"enabled,omitempty"`
+	SkipIPv4AddressManagement bool   `json:"skip_ipv4_address_management,omitempty"`
 }
 
 type managedNetworkRuntimeReloadFingerprintReservation struct {
@@ -51,13 +52,17 @@ type managedNetworkRuntimeReloadFingerprintReservation struct {
 }
 
 type managedNetworkRuntimeReloadFingerprintIPv6Assign struct {
-	ParentInterface string `json:"parent_interface,omitempty"`
-	TargetInterface string `json:"target_interface,omitempty"`
-	ParentPrefix    string `json:"parent_prefix,omitempty"`
-	AssignedPrefix  string `json:"assigned_prefix,omitempty"`
-	Address         string `json:"address,omitempty"`
-	PrefixLen       int    `json:"prefix_len,omitempty"`
-	Enabled         bool   `json:"enabled,omitempty"`
+	ParentInterface string   `json:"parent_interface,omitempty"`
+	TargetInterface string   `json:"target_interface,omitempty"`
+	ParentPrefix    string   `json:"parent_prefix,omitempty"`
+	AssignedPrefix  string   `json:"assigned_prefix,omitempty"`
+	Address         string   `json:"address,omitempty"`
+	PrefixLen       int      `json:"prefix_len,omitempty"`
+	Enabled         bool     `json:"enabled,omitempty"`
+	UpstreamRouted  bool     `json:"upstream_routed,omitempty"`
+	GatewayCIDR     string   `json:"gateway_cidr,omitempty"`
+	RejectPrefix    string   `json:"reject_prefix,omitempty"`
+	DNSServers      []string `json:"dns_servers,omitempty"`
 }
 
 type managedNetworkRuntimeReloadFingerprintEgressNAT struct {
@@ -100,24 +105,25 @@ func managedNetworkRuntimeReloadFingerprintNetworks(items []ManagedNetwork) []ma
 	for _, item := range items {
 		item = normalizeManagedNetwork(item)
 		out = append(out, managedNetworkRuntimeReloadFingerprintNetwork{
-			ID:                  item.ID,
-			BridgeMode:          item.BridgeMode,
-			Bridge:              item.Bridge,
-			BridgeMTU:           item.BridgeMTU,
-			BridgeVLANAware:     item.BridgeVLANAware,
-			UplinkInterface:     item.UplinkInterface,
-			IPv4Enabled:         item.IPv4Enabled,
-			IPv4CIDR:            item.IPv4CIDR,
-			IPv4Gateway:         item.IPv4Gateway,
-			IPv4PoolStart:       item.IPv4PoolStart,
-			IPv4PoolEnd:         item.IPv4PoolEnd,
-			IPv4DNSServers:      item.IPv4DNSServers,
-			IPv6Enabled:         item.IPv6Enabled,
-			IPv6ParentInterface: item.IPv6ParentInterface,
-			IPv6ParentPrefix:    item.IPv6ParentPrefix,
-			IPv6AssignmentMode:  item.IPv6AssignmentMode,
-			AutoEgressNAT:       item.AutoEgressNAT,
-			Enabled:             item.Enabled,
+			ID:                        item.ID,
+			BridgeMode:                item.BridgeMode,
+			Bridge:                    item.Bridge,
+			BridgeMTU:                 item.BridgeMTU,
+			BridgeVLANAware:           item.BridgeVLANAware,
+			UplinkInterface:           item.UplinkInterface,
+			IPv4Enabled:               item.IPv4Enabled,
+			IPv4CIDR:                  item.IPv4CIDR,
+			IPv4Gateway:               item.IPv4Gateway,
+			IPv4PoolStart:             item.IPv4PoolStart,
+			IPv4PoolEnd:               item.IPv4PoolEnd,
+			IPv4DNSServers:            item.IPv4DNSServers,
+			IPv6Enabled:               item.IPv6Enabled,
+			IPv6ParentInterface:       item.IPv6ParentInterface,
+			IPv6ParentPrefix:          item.IPv6ParentPrefix,
+			IPv6AssignmentMode:        item.IPv6AssignmentMode,
+			AutoEgressNAT:             item.AutoEgressNAT,
+			Enabled:                   item.Enabled,
+			SkipIPv4AddressManagement: item.skipIPv4AddressManagement,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -170,6 +176,10 @@ func managedNetworkRuntimeReloadFingerprintIPv6Assignments(items []IPv6Assignmen
 			Address:         strings.TrimSpace(item.Address),
 			PrefixLen:       item.PrefixLen,
 			Enabled:         item.Enabled,
+			UpstreamRouted:  item.upstreamRouted,
+			GatewayCIDR:     strings.TrimSpace(item.gatewayCIDR),
+			RejectPrefix:    strings.TrimSpace(item.rejectPrefix),
+			DNSServers:      append([]string(nil), item.dnsServers...),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -409,6 +419,7 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 		return "", nil, nil
 	}
 
+	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
 	managedNetworks, err := dbGetManagedNetworks(pm.db)
 	if err != nil {
 		return "", nil, fmt.Errorf("load managed networks: %w", err)
@@ -417,13 +428,26 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 	if err != nil {
 		return "", nil, fmt.Errorf("load managed network reservations: %w", err)
 	}
+	pluginDHCPv4PlanRecords, err := loadActivePluginDHCPv4PlanRecords(pm.db, pluginCfg)
+	if err != nil {
+		return "", nil, fmt.Errorf("load plugin dhcpv4 plans: %w", err)
+	}
+	pluginDHCPv4Networks, warnings := compilePluginDHCPv4PlansWithWarnings(pluginDHCPv4PlanRecords, managedNetworks)
+	if len(warnings) > 0 {
+		return "", nil, errors.New(strings.Join(warnings, "; "))
+	}
+	runtimeManagedNetworks := append(append([]ManagedNetwork(nil), managedNetworks...), pluginDHCPv4Networks...)
 	explicitEgressNATs, err := dbGetEgressNATs(pm.db)
 	if err != nil {
 		return "", nil, fmt.Errorf("load egress nats: %w", err)
 	}
-	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pm.cfg)
+	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pluginCfg)
 	if err != nil {
 		return "", nil, fmt.Errorf("load plugin egress nat plans: %w", err)
+	}
+	pluginIPv6AssignmentPlanRecords, err := loadActivePluginIPv6AssignmentPlanRecords(pm.db, pluginCfg)
+	if err != nil {
+		return "", nil, fmt.Errorf("load plugin ipv6 assignment plans: %w", err)
 	}
 	ipv6Assignments, err := loadIPv6AssignmentsForManagedNetworkReload(pm.db)
 	if err != nil {
@@ -440,6 +464,13 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 	effectiveIPv6Assignments := append([]IPv6Assignment(nil), ipv6Assignments...)
 	if len(managedNetworkCompiled.IPv6Assignments) > 0 {
 		effectiveIPv6Assignments = append(effectiveIPv6Assignments, managedNetworkCompiled.IPv6Assignments...)
+	}
+	if len(pluginIPv6AssignmentPlanRecords) > 0 {
+		pluginIPv6Assignments, warnings := compilePluginIPv6AssignmentPlansWithWarnings(pluginIPv6AssignmentPlanRecords, effectiveIPv6Assignments)
+		if len(warnings) > 0 {
+			return "", nil, errors.New(strings.Join(warnings, "; "))
+		}
+		effectiveIPv6Assignments = append(effectiveIPv6Assignments, pluginIPv6Assignments...)
 	}
 	if len(effectiveIPv6Assignments) > 0 {
 		hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces()
@@ -465,13 +496,13 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 	}
 
 	fingerprint := buildManagedNetworkRuntimeReloadFingerprint(
-		managedNetworks,
+		runtimeManagedNetworks,
 		managedNetworkReservations,
 		effectiveIPv6Assignments,
 		effectiveEgressNATs,
 		egressNATSnapshot.Infos,
 	)
-	touchedInterfaces := collectManagedNetworkRuntimeTouchedInterfaces(managedNetworks, effectiveIPv6Assignments, managedNetworkCompiled)
+	touchedInterfaces := collectManagedNetworkRuntimeTouchedInterfaces(runtimeManagedNetworks, effectiveIPv6Assignments, managedNetworkCompiled)
 	return fingerprint, touchedInterfaces, nil
 }
 
@@ -684,6 +715,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 
 	pm.redistributeMu.Lock()
 	defer pm.redistributeMu.Unlock()
+	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
 
 	managedNetworks, err := dbGetManagedNetworks(pm.db)
 	if err != nil {
@@ -694,14 +726,28 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		return fmt.Errorf("load managed network reservations: %w", err)
 	}
 	reloadIssues := make([]string, 0, 2)
+	pluginDHCPv4PlanRecords, err := loadActivePluginDHCPv4PlanRecords(pm.db, pluginCfg)
+	if err != nil {
+		return fmt.Errorf("load plugin dhcpv4 plans: %w", err)
+	}
+	pluginDHCPv4Networks, warnings := compilePluginDHCPv4PlansWithWarnings(pluginDHCPv4PlanRecords, managedNetworks)
+	for _, warning := range warnings {
+		log.Printf("plugin dhcpv4: %s", warning)
+		reloadIssues = append(reloadIssues, warning)
+	}
+	runtimeManagedNetworks := append(append([]ManagedNetwork(nil), managedNetworks...), pluginDHCPv4Networks...)
 
 	explicitEgressNATs, err := dbGetEgressNATs(pm.db)
 	if err != nil {
 		return fmt.Errorf("load egress nats: %w", err)
 	}
-	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pm.cfg)
+	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pluginCfg)
 	if err != nil {
 		return fmt.Errorf("load plugin egress nat plans: %w", err)
+	}
+	pluginIPv6AssignmentPlanRecords, err := loadActivePluginIPv6AssignmentPlanRecords(pm.db, pluginCfg)
+	if err != nil {
+		return fmt.Errorf("load plugin ipv6 assignment plans: %w", err)
 	}
 	ipv6Assignments, ipv6AssignmentLoadErr := loadIPv6AssignmentsForManagedNetworkReload(pm.db)
 	if ipv6AssignmentLoadErr != nil {
@@ -739,6 +785,13 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	if len(managedNetworkCompiled.IPv6Assignments) > 0 {
 		effectiveIPv6Assignments = append(effectiveIPv6Assignments, managedNetworkCompiled.IPv6Assignments...)
 	}
+	if len(pluginIPv6AssignmentPlanRecords) > 0 {
+		pluginIPv6Assignments, warnings := compilePluginIPv6AssignmentPlansWithWarnings(pluginIPv6AssignmentPlanRecords, effectiveIPv6Assignments)
+		for _, warning := range warnings {
+			log.Printf("plugin ipv6 assignment: %s", warning)
+		}
+		effectiveIPv6Assignments = append(effectiveIPv6Assignments, pluginIPv6Assignments...)
+	}
 	ipv6ResolutionWarnings := make([]string, 0)
 	if len(effectiveIPv6Assignments) > 0 {
 		if hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces(); err == nil {
@@ -757,10 +810,10 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		effectiveEgressNATs = append(effectiveEgressNATs, syntheticEgressNATs...)
 	}
 	dynamicEgressNATParents := collectDynamicEgressNATParentsWithSnapshot(effectiveEgressNATs, egressNATSnapshot)
-	managedNetworkInterfaces := cloneManagedNetworkInterfaceSet(managedNetworkCompiled.RedistributeIfaces)
-	reloadSummary := summarizeManagedNetworkRuntimeReload(managedNetworks, managedNetworkReservations, effectiveIPv6Assignments, syntheticEgressNATs)
-	reloadFingerprint := buildManagedNetworkRuntimeReloadFingerprint(managedNetworks, managedNetworkReservations, effectiveIPv6Assignments, effectiveEgressNATs, egressNATSnapshot.Infos)
-	pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, collectManagedNetworkRuntimeTouchedInterfaces(managedNetworks, effectiveIPv6Assignments, managedNetworkCompiled)...)
+	managedNetworkInterfaces := sliceToManagedNetworkInterfaceSet(collectManagedNetworkRuntimeTouchedInterfaces(runtimeManagedNetworks, effectiveIPv6Assignments, managedNetworkCompiled))
+	reloadSummary := summarizeManagedNetworkRuntimeReload(runtimeManagedNetworks, managedNetworkReservations, effectiveIPv6Assignments, syntheticEgressNATs)
+	reloadFingerprint := buildManagedNetworkRuntimeReloadFingerprint(runtimeManagedNetworks, managedNetworkReservations, effectiveIPv6Assignments, effectiveEgressNATs, egressNATSnapshot.Infos)
+	pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, collectManagedNetworkRuntimeTouchedInterfaces(runtimeManagedNetworks, effectiveIPv6Assignments, managedNetworkCompiled)...)
 
 	ipv6Interfaces, ipv6ConfiguredCount := collectIPv6AssignmentInterfaceNames(effectiveIPv6Assignments)
 	for name := range managedNetworkCompiled.RedistributeIfaces {
@@ -775,7 +828,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		ipv6AssignmentLoadErr == nil &&
 		egressNATSnapshot.Err == nil &&
 		len(ipv6ResolutionWarnings) == 0 &&
-		managedNetworkAddrReloadSkipCheck(managedNetworks, managedNetworkReservations) &&
+		managedNetworkAddrReloadSkipCheck(runtimeManagedNetworks, managedNetworkReservations) &&
 		pm.shouldSkipManagedNetworkAddrReload(reloadFingerprint) {
 		pm.mu.Lock()
 		pm.managedNetworkInterfaces = managedNetworkInterfaces
@@ -793,7 +846,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	}
 
 	if pm.managedNetworkRuntime != nil {
-		if err := pm.managedNetworkRuntime.Reconcile(managedNetworks, managedNetworkReservations); err != nil {
+		if err := pm.managedNetworkRuntime.Reconcile(runtimeManagedNetworks, managedNetworkReservations); err != nil {
 			log.Printf("managed network runtime reconcile: %v", err)
 			reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "managed network runtime reconcile", err)
 		}
@@ -1038,6 +1091,7 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 		return nil
 	}
 
+	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
 	rules, err := dbGetRules(pm.db)
 	if err != nil {
 		return fmt.Errorf("load rules: %w", err)
@@ -1051,7 +1105,7 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 		return fmt.Errorf("load sites: %w", err)
 	}
 	nextSyntheticRuleID := maxRuleID(rules) + 1
-	pluginForwardRules, _, err := loadPluginForwardRules(pm.db, pm.cfg, rules, sites, ranges, &nextSyntheticRuleID)
+	pluginForwardRules, _, err := loadPluginForwardRules(pm.db, pluginCfg, rules, sites, ranges, &nextSyntheticRuleID)
 	if err != nil {
 		return fmt.Errorf("load plugin forward rule plans: %w", err)
 	}

@@ -81,6 +81,9 @@
     pluginUIMeta: app.$('pluginUIMeta'),
     pluginUIFrame: app.$('pluginUIFrame'),
     closePluginUIBtn: app.$('closePluginUIBtn'),
+    pluginUpdateSelectionBar: app.$('pluginUpdateSelectionBar'),
+    pluginUpdateSelectionMeta: app.$('pluginUpdateSelectionMeta'),
+    applyPluginUpdateBtn: app.$('applyPluginUpdateBtn'),
     refreshPluginsBtn: app.$('refreshPluginsBtn'),
     pluginsPagination: app.$('pluginsPagination'),
     ruleStatsPagination: app.$('ruleStatsPagination'),
@@ -97,6 +100,8 @@
   app.state.managedNetworkReservationCandidates = app.state.managedNetworkReservationCandidates || { data: [], page: 1, pageSize: 10, searchQuery: '', selectedIPv4ByKey: {} };
   app.state.managedNetworkReservations = app.state.managedNetworkReservations || { data: [], sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
   app.state.plugins = app.state.plugins || { data: [], catalog: null, sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
+  app.state.plugins.selectedUpdateIDs = app.state.plugins.selectedUpdateIDs || {};
+  app.state.plugins.applyingUpdate = app.state.plugins.applyingUpdate === true;
   app.state.pendingRows = app.state.pendingRows || {};
   app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false, managedNetwork: false, managedNetworkReservation: false, egressNAT: false, ipv6Assignment: false };
   if (!Object.prototype.hasOwnProperty.call(app.state.pendingForms, 'managedNetwork')) app.state.pendingForms.managedNetwork = false;
@@ -597,7 +602,7 @@
 
     if (app.el.overviewRunningValue) app.el.overviewRunningValue.textContent = String(runningTotal);
     const busy = app.state.activeRequests > 0;
-    [app.el.refreshNowBtn, app.el.refreshWorkersBtn, app.el.emptyRefreshWorkersBtn, app.el.refreshPluginsBtn, app.el.repairManagedNetworkRuntimeBtn, app.el.reloadManagedNetworkRuntimeBtn].forEach((button) => {
+    [app.el.refreshNowBtn, app.el.refreshWorkersBtn, app.el.emptyRefreshWorkersBtn, app.el.applyPluginUpdateBtn, app.el.refreshPluginsBtn, app.el.repairManagedNetworkRuntimeBtn, app.el.reloadManagedNetworkRuntimeBtn].forEach((button) => {
       if (!button) return;
       button.disabled = busy;
       button.classList.toggle('is-busy', busy);

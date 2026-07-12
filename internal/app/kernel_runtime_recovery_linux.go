@@ -11,23 +11,15 @@ func (rt *linuxKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentH
 	rt.mu.Lock()
 	loaded := rt.coll != nil
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
+	attachmentRuleSets := effectiveKernelAttachmentRuleSets(preparedRules, rt.attachmentRuleSets.clone())
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	mode := rt.attachmentMode
 	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, preparedRules, mode, rt.pluginPipelineActive)
 	rt.mu.Unlock()
 
 	healthy := true
-	if len(preparedRules) > 0 {
-		forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(preparedRules)
-		healthy = kernelAttachmentsHealthy(
-			forwardIfRules,
-			replyIfRules,
-			attachments,
-			programs.forwardProg,
-			programs.replyProg,
-			programs.forwardProgV6,
-			programs.replyProgV6,
-		)
+	if attachmentRuleSets.hasTargets() {
+		healthy = kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, attachments, programs)
 	}
 	return []kernelAttachmentHealthSnapshot{{
 		Engine:        kernelEngineTC,
@@ -84,7 +76,8 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	if rt.coll == nil || rt.coll.Maps == nil || len(rt.preparedRules) == 0 {
+	attachmentRuleSets := effectiveKernelAttachmentRuleSets(rt.preparedRules, rt.attachmentRuleSets)
+	if rt.coll == nil || rt.coll.Maps == nil || !attachmentRuleSets.hasTargets() {
 		return nil, nil
 	}
 
@@ -93,26 +86,10 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 		return nil, err
 	}
 	programs := kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(rt.preparedRules), rt.attachmentMode)
-	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(rt.preparedRules)
-	if kernelAttachmentsHealthy(
-		forwardIfRules,
-		replyIfRules,
-		rt.attachments,
-		programs.forwardProg,
-		programs.replyProg,
-		programs.forwardProgV6,
-		programs.replyProgV6,
-	) {
+	if kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, rt.attachments, programs) {
 		return nil, nil
 	}
-	plans := desiredKernelAttachmentPlansDualStack(
-		forwardIfRules,
-		replyIfRules,
-		programs.forwardProg,
-		programs.replyProg,
-		programs.forwardProgV6,
-		programs.replyProgV6,
-	)
+	plans := desiredKernelAttachmentPlansForRuleSets(attachmentRuleSets, programs)
 	if len(plans) == 0 {
 		return nil, nil
 	}

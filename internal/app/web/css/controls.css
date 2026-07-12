@@ -30,6 +30,12 @@
     border-color: var(--warning-border);
 }
 
+.badge-warning {
+    background: var(--warning-bg);
+    color: var(--warning-text);
+    border-color: var(--warning-border);
+}
+
 .badge-disabled {
     background: var(--neutral-bg);
     color: var(--neutral-text);
@@ -434,6 +440,18 @@ th.sortable.tag-filtered {
     border: 2px solid rgba(37, 99, 235, 0.22);
     border-top-color: var(--primary);
     animation: spin 0.7s linear infinite;
+}
+
+.plugin-update-btn {
+    border-color: var(--primary);
+    background: var(--primary-soft);
+    color: var(--primary);
+}
+
+.plugin-update-btn:hover,
+.plugin-update-btn:focus {
+    background: var(--primary);
+    color: #ffffff;
 }
 
 .mini-btn-danger {

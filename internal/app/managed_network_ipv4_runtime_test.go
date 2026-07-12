@@ -171,6 +171,36 @@ func TestManagedIPv4NetworkRuntimeReconcileCreatesAndDeletesState(t *testing.T) 
 	}
 }
 
+func TestManagedIPv4NetworkRuntimeDHCPOnlyPlanDoesNotOwnGatewayAddress(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeManagedNetworkNetOps{}
+	rt := newManagedIPv4NetworkRuntime(ops)
+	item := ManagedNetwork{
+		ID:                        -7,
+		Name:                      "plugin lan_core/default",
+		BridgeMode:                managedNetworkBridgeModeExisting,
+		Bridge:                    "br-lan",
+		IPv4Enabled:               true,
+		IPv4CIDR:                  "192.168.50.1/24",
+		IPv4DNSServers:            "1.1.1.1",
+		Enabled:                   true,
+		skipIPv4AddressManagement: true,
+	}
+	if err := rt.Reconcile([]ManagedNetwork{item}, nil); err != nil {
+		t.Fatalf("Reconcile(DHCP-only) error = %v", err)
+	}
+	if len(ops.ensureDHCPv4) != 1 || len(ops.ensureAddresses) != 0 {
+		t.Fatalf("ensure DHCP=%+v addresses=%+v, want DHCP without address ownership", ops.ensureDHCPv4, ops.ensureAddresses)
+	}
+	if err := rt.Reconcile(nil, nil); err != nil {
+		t.Fatalf("Reconcile(nil) error = %v", err)
+	}
+	if len(ops.deleteDHCPv4) != 1 || len(ops.deleteAddresses) != 0 {
+		t.Fatalf("delete DHCP=%+v addresses=%+v, want listener cleanup without gateway deletion", ops.deleteDHCPv4, ops.deleteAddresses)
+	}
+}
+
 func TestManagedIPv4NetworkRuntimeSnapshotStatusRefreshesLiveDHCPState(t *testing.T) {
 	t.Parallel()
 

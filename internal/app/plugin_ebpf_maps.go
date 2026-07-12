@@ -15,6 +15,32 @@ func (pm *ProcessManager) GetPluginMapValue(pluginID string, objectID string, ma
 	return out, err
 }
 
+func (pm *ProcessManager) GetPluginMapPerCPUValues(pluginID string, objectID string, mapName string, key []byte) ([][]byte, error) {
+	if pm == nil {
+		return nil, errPluginRuntimeTargetNotLoaded
+	}
+	var notLoaded error
+	for _, candidate := range []any{pm.kernelRuntime, pm.pluginRuntime} {
+		controller, ok := candidate.(pluginEBPFPerCPUMapController)
+		if !ok || controller == nil {
+			continue
+		}
+		values, err := controller.GetPluginMapPerCPUValues(pluginID, objectID, mapName, key)
+		if err == nil {
+			return values, nil
+		}
+		if errors.Is(err, errPluginRuntimeTargetNotLoaded) {
+			notLoaded = err
+			continue
+		}
+		return nil, err
+	}
+	if notLoaded != nil {
+		return nil, notLoaded
+	}
+	return nil, errPluginRuntimeTargetNotLoaded
+}
+
 func (pm *ProcessManager) PutPluginMapValue(pluginID string, objectID string, mapName string, key []byte, value []byte) error {
 	return pm.withPluginMapController(func(controller pluginEBPFMapController) error {
 		return controller.PutPluginMapValue(pluginID, objectID, mapName, key, value)

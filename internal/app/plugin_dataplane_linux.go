@@ -70,11 +70,12 @@ type loadedPluginObject struct {
 }
 
 type loadedPluginObjectRef struct {
-	PluginID   string
-	ObjectID   string
-	ObjectPath string
-	spec       *ebpf.CollectionSpec
-	coll       *ebpf.Collection
+	PluginID     string
+	ObjectID     string
+	ObjectPath   string
+	ObjectSHA256 string
+	spec         *ebpf.CollectionSpec
+	coll         *ebpf.Collection
 }
 
 func (rt *linuxPluginDataplaneRuntime) Reconcile(catalog PluginCatalog) pluginRuntimeSnapshot {
@@ -410,7 +411,7 @@ func (rt *linuxPluginDataplaneRuntime) loadDesiredPlugin(item pluginDataplaneDes
 	objects := make(map[string]*loadedPluginObject)
 	states := make([]PluginAttachmentState, 0, len(item.attachments))
 	for _, plan := range item.attachments {
-		object, err := loadPluginObjectForAttach(objects, plan.ObjectPath)
+		object, err := loadPluginObjectForAttach(objects, plan.ObjectPath, plan.ObjectSHA256)
 		if err != nil {
 			cleanupLoadedPluginObjectCache(objects)
 			return loaded, states, err
@@ -441,11 +442,12 @@ func (rt *linuxPluginDataplaneRuntime) loadDesiredPlugin(item pluginDataplaneDes
 	for _, plan := range item.attachments {
 		if object := objects[plan.ObjectPath]; object != nil && object.coll != nil {
 			loaded.objects = append(loaded.objects, loadedPluginObjectRef{
-				PluginID:   plan.PluginID,
-				ObjectID:   plan.ObjectID,
-				ObjectPath: plan.ObjectPath,
-				spec:       object.spec,
-				coll:       object.coll,
+				PluginID:     plan.PluginID,
+				ObjectID:     plan.ObjectID,
+				ObjectPath:   plan.ObjectPath,
+				ObjectSHA256: plan.ObjectSHA256,
+				spec:         object.spec,
+				coll:         object.coll,
 			})
 		}
 	}
@@ -479,11 +481,11 @@ func cleanupLoadedPluginObjectCache(objects map[string]*loadedPluginObject) {
 	}
 }
 
-func loadPluginObjectForAttach(cache map[string]*loadedPluginObject, objectPath string) (*loadedPluginObject, error) {
+func loadPluginObjectForAttach(cache map[string]*loadedPluginObject, objectPath, expectedSHA256 string) (*loadedPluginObject, error) {
 	if object, ok := cache[objectPath]; ok {
 		return object, nil
 	}
-	spec, err := ebpf.LoadCollectionSpec(objectPath)
+	spec, err := loadVerifiedPluginObjectCollectionSpec(objectPath, expectedSHA256)
 	if err != nil {
 		return nil, fmt.Errorf("load plugin object spec %s: %w", objectPath, err)
 	}

@@ -12,5 +12,5 @@ build_if_present() {
 	fi
 }
 
-build_if_present "$ROOT_DIR/examples/plugins/packet_observer"
-build_if_present "$ROOT_DIR/examples/plugins/pppoe_client"
+build_if_present "$ROOT_DIR/plugins/packet_observer"
+build_if_present "$ROOT_DIR/plugins/pppoe_client"

@@ -98,6 +98,35 @@ func (rt *orderedKernelRuleRuntime) GetPluginMapValue(pluginID string, objectID 
 	return out, err
 }
 
+func (rt *orderedKernelRuleRuntime) GetPluginMapPerCPUValues(pluginID string, objectID string, mapName string, key []byte) ([][]byte, error) {
+	if rt == nil {
+		return nil, errPluginRuntimeTargetNotLoaded
+	}
+	rt.mu.Lock()
+	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	rt.mu.Unlock()
+	var notLoaded error
+	for _, entry := range entries {
+		controller, ok := entry.rt.(pluginEBPFPerCPUMapController)
+		if !ok || controller == nil {
+			continue
+		}
+		values, err := controller.GetPluginMapPerCPUValues(pluginID, objectID, mapName, key)
+		if err == nil {
+			return values, nil
+		}
+		if errors.Is(err, errPluginRuntimeTargetNotLoaded) {
+			notLoaded = err
+			continue
+		}
+		return nil, err
+	}
+	if notLoaded != nil {
+		return nil, notLoaded
+	}
+	return nil, errPluginRuntimeTargetNotLoaded
+}
+
 func (rt *orderedKernelRuleRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
 	return rt.withPluginMapController(func(controller pluginEBPFMapController) error {
 		return controller.DeletePluginMapValue(pluginID, objectID, mapName, key)

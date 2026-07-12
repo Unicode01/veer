@@ -526,10 +526,12 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) Kerne
 	applyKernelRuntimePressureView(&view, pressure)
 	applyKernelRuntimeObservabilityView(&view, obs)
 	preparedRules := append([]preparedKernelRule(nil), rt.preparedRules...)
+	attachmentRuleSets := rt.attachmentRuleSets.clone()
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	coll := rt.coll
 	mode := rt.attachmentMode
-	expectedAttachments := expectedKernelAttachmentsForPreparedRules(coll, preparedRules, mode)
+	attachmentRuleSets = effectiveKernelAttachmentRuleSets(preparedRules, attachmentRuleSets)
+	expectedAttachments := expectedKernelAttachmentsForRuleSets(coll, preparedRules, attachmentRuleSets, mode)
 	mapSnapshot, mapErr := snapshotKernelRuntimeMaps(coll, false, true)
 	rt.mu.Unlock()
 	defer mapSnapshot.Close()
@@ -537,7 +539,7 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) Kerne
 	view.Attachments = len(attachments)
 	view.AttachmentSummary = describeKernelAttachments(attachments)
 	view.AttachmentMode = tcAttachmentMode(attachments, mode)
-	if len(preparedRules) == 0 {
+	if !attachmentRuleSets.hasTargets() {
 		view.AttachmentsHealthy = true
 	} else {
 		view.AttachmentsHealthy = kernelExpectedAttachmentsHealthy(
@@ -653,6 +655,14 @@ func preparedKernelInterfaceRuleSets(prepared []preparedKernelRule) (map[int][]i
 		replyIfRules[item.outIfIndex] = append(replyIfRules[item.outIfIndex], item.rule.ID)
 	}
 	return forwardIfRules, replyIfRules
+}
+
+func effectiveKernelAttachmentRuleSets(prepared []preparedKernelRule, stored kernelAttachmentRuleSets) kernelAttachmentRuleSets {
+	if stored.hasTargets() {
+		return stored
+	}
+	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(prepared)
+	return kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules)
 }
 
 func describeKernelAttachments(attachments []kernelAttachment) string {
@@ -815,15 +825,12 @@ func kernelAttachmentKeys(expected []kernelAttachmentExpectation) []kernelAttach
 
 func expectedKernelAttachmentsForPreparedRules(coll *ebpf.Collection, prepared []preparedKernelRule, mode kernelTCAttachmentProgramMode) []kernelAttachmentExpectation {
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(prepared)
+	return expectedKernelAttachmentsForRuleSets(coll, prepared, kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules), mode)
+}
+
+func expectedKernelAttachmentsForRuleSets(coll *ebpf.Collection, prepared []preparedKernelRule, sets kernelAttachmentRuleSets, mode kernelTCAttachmentProgramMode) []kernelAttachmentExpectation {
 	programs := kernelAttachmentProgramsForPreparedRules(coll, prepared, mode, mode == kernelTCAttachmentProgramModePipelineV4)
-	return expectedKernelAttachments(desiredKernelAttachmentPlansDualStack(
-		forwardIfRules,
-		replyIfRules,
-		programs.forwardProg,
-		programs.replyProg,
-		programs.forwardProgV6,
-		programs.replyProgV6,
-	))
+	return expectedKernelAttachments(desiredKernelAttachmentPlansForRuleSets(sets, programs))
 }
 
 func kernelAttachmentObservationMatchesExpectation(observed kernelAttachmentObservation, expected kernelAttachmentExpectation) bool {
@@ -1874,14 +1881,20 @@ func applyKernelRuntimeMapBreakdown(view *KernelEngineRuntimeView, refs kernelRu
 }
 
 func kernelAttachmentsHealthy(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, attachments []kernelAttachment, forwardProg *ebpf.Program, replyProg *ebpf.Program, forwardProgV6 *ebpf.Program, replyProgV6 *ebpf.Program) bool {
-	expected := expectedKernelAttachments(desiredKernelAttachmentPlansDualStack(
-		forwardIfRules,
-		replyIfRules,
-		forwardProg,
-		replyProg,
-		forwardProgV6,
-		replyProgV6,
-	))
+	return kernelAttachmentsHealthyForRuleSets(
+		kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules),
+		attachments,
+		kernelAttachmentPrograms{
+			forwardProg:   forwardProg,
+			replyProg:     replyProg,
+			forwardProgV6: forwardProgV6,
+			replyProgV6:   replyProgV6,
+		},
+	)
+}
+
+func kernelAttachmentsHealthyForRuleSets(sets kernelAttachmentRuleSets, attachments []kernelAttachment, programs kernelAttachmentPrograms) bool {
+	expected := expectedKernelAttachments(desiredKernelAttachmentPlansForRuleSets(sets, programs))
 	keys := make([]kernelAttachmentKey, 0, len(expected))
 	for _, item := range expected {
 		keys = append(keys, item.key)

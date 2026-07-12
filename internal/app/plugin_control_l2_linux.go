@@ -56,9 +56,6 @@ func (linuxPluginControlL2Transport) Exchange(req pluginControlL2ExchangeRequest
 	if req.Send.Interface != req.Recv.Interface {
 		return pluginControlL2Frame{}, fmt.Errorf("send and receive interface must match")
 	}
-	if req.Send.EtherType != req.Recv.EtherType {
-		return pluginControlL2Frame{}, fmt.Errorf("send and receive ethertype must match")
-	}
 	fd, iface, err := openPluginControlL2RecvSocket(req.Recv)
 	if err != nil {
 		return pluginControlL2Frame{}, err
@@ -77,9 +74,6 @@ func (linuxPluginControlL2Transport) Exchange(req pluginControlL2ExchangeRequest
 func (linuxPluginControlL2Transport) ExchangeMany(req pluginControlL2ExchangeManyRequest) ([]pluginControlL2Frame, error) {
 	if req.Send.Interface != req.Recv.Recv.Interface {
 		return nil, fmt.Errorf("send and receive interface must match")
-	}
-	if req.Send.EtherType != req.Recv.Recv.EtherType {
-		return nil, fmt.Errorf("send and receive ethertype must match")
 	}
 	fd, iface, err := openPluginControlL2RecvSocket(req.Recv.Recv)
 	if err != nil {

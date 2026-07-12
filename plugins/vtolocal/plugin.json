@@ -1,0 +1,20 @@
+{
+  "api_version": "v1",
+  "id": "vtolocal",
+  "name": "VTap To Local",
+  "version": "1.1.0",
+  "kind": "control",
+  "stability": "stable",
+  "description": "Creates one Linux L3 boundary for host egress and fvtap reply injection without a veth peer.",
+  "control": {
+    "main": "control.js",
+    "sha256": "8a0ec7c25d7942f369b74d0c56c3f31d9dc707145392a82b65d0eedfba98587f",
+    "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
+    "net_access": [
+      {
+        "interfaces": ["fwd*", "local*", "vtolocal*"],
+        "operations": ["addr.write", "link.create", "link.delete", "route.write"]
+      }
+    ]
+  }
+}

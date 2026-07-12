@@ -230,6 +230,12 @@ func TestPluginLANCoreGeneratedEgressNATTCIntegration(t *testing.T) {
 	harness := startEgressNATIntegrationHarnessWithConfig(t, "plugin-lan-core", enableLANCorePluginForEgressNATIntegration)
 	applyLANCoreEgressNATProfile(t, harness.APIBase, harness.Topology)
 	waitForEgressNATWorkerRunningStatus(t, harness.APIBase, harness.Topology, harness.LogPath, "")
+	prepareManagedNetworkIntegrationClientNamespace(t, harness.Topology)
+	if err := runManagedNetworkDHCPv4ClientWithDNS(t, harness.Topology, egressNATClientAddr, egressNATClientAddr+"/24", egressNATBridgeAddr, managedNetworkIntegrationIPv4DNSServers); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatal(err)
+	}
+	seedEgressNATIntegrationNeighbor(t, harness.Topology)
 
 	for _, proto := range []string{"tcp", "udp"} {
 		proto := proto
@@ -258,6 +264,12 @@ func TestPluginLANCoreResolvesWANCoreEgressNATTCIntegration(t *testing.T) {
 	createWANCoreStatusForLANCoreEgressNAT(t, harness.DBPath, harness.Topology)
 	applyLANCoreEgressNATProfileResolvingWANRef(t, harness.APIBase, harness.Topology)
 	waitForEgressNATWorkerRunningStatus(t, harness.APIBase, harness.Topology, harness.LogPath, "")
+	prepareManagedNetworkIntegrationClientNamespace(t, harness.Topology)
+	if err := runManagedNetworkDHCPv4ClientWithDNS(t, harness.Topology, egressNATClientAddr, egressNATClientAddr+"/24", egressNATBridgeAddr, "223.5.5.5"); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatal(err)
+	}
+	seedEgressNATIntegrationNeighbor(t, harness.Topology)
 
 	for _, proto := range []string{"tcp", "udp"} {
 		proto := proto
@@ -1247,7 +1259,7 @@ func enableLANCorePluginForEgressNATIntegration(t *testing.T, repoRoot string, w
 	t.Helper()
 
 	pluginDir := filepath.Join(workDir, filepath.FromSlash(defaultPluginsDir), "lan_core")
-	copyDirForTest(t, filepath.Join(repoRoot, "examples", "plugins", "lan_core"), pluginDir)
+	copyDirForTest(t, filepath.Join(repoRoot, "plugins", "lan_core"), pluginDir)
 
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -1275,7 +1287,7 @@ func enableLANAndWANCorePluginsForEgressNATIntegration(t *testing.T, repoRoot st
 
 	for _, pluginID := range []string{"lan_core", "wan_core"} {
 		pluginDir := filepath.Join(workDir, filepath.FromSlash(defaultPluginsDir), pluginID)
-		copyDirForTest(t, filepath.Join(repoRoot, "examples", "plugins", pluginID), pluginDir)
+		copyDirForTest(t, filepath.Join(repoRoot, "plugins", pluginID), pluginDir)
 	}
 
 	cfg, err := loadConfig(configPath)
@@ -1427,6 +1439,11 @@ func applyLANCoreEgressNATProfile(t *testing.T, apiBase string, topology egressN
 			"wan_egress_interface": topology.UplinkHostIF,
 			"wan_egress_source_ip": egressNATUplinkAddr,
 			"auto_egress_nat":      true,
+			"dhcpv4_enabled":       true,
+			"dhcpv4_pool_start":    egressNATClientAddr,
+			"dhcpv4_pool_end":      egressNATClientAddr,
+			"dns_mode":             "manual",
+			"dns_servers":          []string{managedNetworkIntegrationIPv4DNSServers},
 			"protocol":             "tcp+udp",
 			"nat_type":             egressNATTypeSymmetric,
 			"mtu":                  1500,
@@ -1470,6 +1487,7 @@ func createWANCoreStatusForLANCoreEgressNAT(t *testing.T, dbPath string, topolog
 		"forward_parent_interface":    topology.UplinkHostIF,
 		"egress_nat_parent_interface": topology.UplinkHostIF,
 		"ipv4":                        egressNATUplinkAddr,
+		"dns_servers":                 []string{"223.5.5.5", "2001:4860:4860::8888"},
 		"forward_core": map[string]any{
 			"mode":              "integration",
 			"parent_interface":  topology.UplinkHostIF,
@@ -1506,15 +1524,19 @@ func applyLANCoreEgressNATProfileResolvingWANRef(t *testing.T, apiBase string, t
 
 	payload := map[string]any{
 		"profile": map[string]any{
-			"lan_id":          "egress-nat-itest",
-			"bridge":          topology.BridgeIF,
-			"ports":           []string{topology.ChildHostIF},
-			"addresses":       []string{egressNATBridgeAddr + "/24"},
-			"wan_ref":         "egress-nat-itest",
-			"auto_egress_nat": true,
-			"protocol":        "tcp+udp",
-			"nat_type":        egressNATTypeSymmetric,
-			"mtu":             1500,
+			"lan_id":            "egress-nat-itest",
+			"bridge":            topology.BridgeIF,
+			"ports":             []string{topology.ChildHostIF},
+			"addresses":         []string{egressNATBridgeAddr + "/24"},
+			"wan_ref":           "egress-nat-itest",
+			"auto_egress_nat":   true,
+			"dhcpv4_enabled":    true,
+			"dhcpv4_pool_start": egressNATClientAddr,
+			"dhcpv4_pool_end":   egressNATClientAddr,
+			"dns_mode":          "auto",
+			"protocol":          "tcp+udp",
+			"nat_type":          egressNATTypeSymmetric,
+			"mtu":               1500,
 		},
 	}
 	data, err := json.Marshal(map[string]any{"payload": payload})

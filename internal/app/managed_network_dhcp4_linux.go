@@ -393,6 +393,7 @@ type parsedManagedNetworkDHCPv4Message struct {
 	MessageType byte
 	RequestedIP net.IP
 	ServerID    net.IP
+	DNSServers  []net.IP
 	ClientID    []byte
 	RawPacket   []byte
 }
@@ -1087,6 +1088,12 @@ func parseManagedNetworkDHCPv4Message(packet []byte) (parsedManagedNetworkDHCPv4
 		case dhcpv4OptionServerID:
 			if len(value) == 4 {
 				msg.ServerID = net.IP(append([]byte(nil), value...))
+			}
+		case dhcpv4OptionDNS:
+			if len(value)%net.IPv4len == 0 {
+				for offset := 0; offset < len(value); offset += net.IPv4len {
+					msg.DNSServers = append(msg.DNSServers, net.IP(append([]byte(nil), value[offset:offset+net.IPv4len]...)))
+				}
 			}
 		case dhcpv4OptionClientID:
 			msg.ClientID = value

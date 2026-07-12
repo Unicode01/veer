@@ -944,12 +944,18 @@
                         <h2 data-i18n="plugins.title">Runtime Plugins</h2>
                         <p class="section-desc" data-i18n="plugins.desc">Manifest, object validation, TC pipeline chain, and runtime attachment status. External dataplane is off by default.</p>
                     </div>
-                    <button type="button" id="refreshPluginsBtn" class="mini-btn" data-i18n="plugins.refresh">Refresh Plugins</button>
+                    <div class="section-heading-actions">
+                        <button type="button" id="refreshPluginsBtn" class="mini-btn" data-i18n="plugins.refresh">Refresh Plugins</button>
+                    </div>
                 </div>
                 <div class="table-toolbar">
                     <div class="table-toolbar-main">
                         <input type="search" id="pluginsSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="pluginsTable" data-i18n-placeholder="search.plugins.placeholder" placeholder="Search plugin id, capability, object, hook...">
                         <p id="pluginsFilterMeta" class="table-meta"></p>
+                    </div>
+                    <div id="pluginUpdateSelectionBar" class="plugin-update-selection" hidden>
+                        <span id="pluginUpdateSelectionMeta" class="plugin-update-selection-meta"></span>
+                        <button type="button" id="applyPluginUpdateBtn" class="mini-btn plugin-update-btn" data-i18n="plugins.update.apply">Apply Update</button>
                     </div>
                 </div>
                 <section id="pluginUIPanel" class="plugin-ui-panel" hidden>
@@ -972,7 +978,6 @@
                                 <th class="sortable" data-table="plugins" data-sort="name" data-i18n="plugins.name">Name</th>
                                 <th class="sortable" data-table="plugins" data-sort="kind" data-i18n="plugins.kind">Kind</th>
                                 <th class="sortable" data-table="plugins" data-sort="version" data-i18n="plugins.version">Version</th>
-                                <th data-i18n="plugins.ui">UI</th>
                                 <th data-i18n="common.actions">Actions</th>
                             </tr>
                         </thead>

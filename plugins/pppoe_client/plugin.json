@@ -1,0 +1,38 @@
+{
+  "api_version": "v1",
+  "id": "pppoe_client",
+  "name": "PPPoE Client",
+  "version": "1.3.0",
+  "kind": "pipeline",
+  "stability": "stable",
+  "description": "PPPoE WAN control and TC pipeline plugin for fvtap integration.",
+  "control": {
+    "main": "control.js",
+    "sha256": "8861abce416da7256b8c6f25ec96a7e27a57c5e6e264ab06f9f5118cff84932d",
+    "permissions": ["crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "net.admin", "net.l2", "plugin.action", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui"],
+    "net_access": [
+      {
+        "interfaces": ["en*", "eth*", "fwd*", "lan*", "local*", "ppp*", "tap*", "veth*", "vmbr*", "wan*"],
+        "operations": ["l2", "link.offload", "link.read", "link.state"]
+      }
+    ],
+    "resource_access": [
+      {
+        "plugin": "wan_core",
+        "resource": "sessions",
+        "methods": ["create", "get", "update"]
+      },
+      {
+        "plugin": "wan_core",
+        "resource": "status",
+        "methods": ["get"]
+      }
+    ],
+    "action_access": [
+      {
+        "plugin": "wan_core",
+        "actions": ["prepare_handoff"]
+      }
+    ]
+  }
+}

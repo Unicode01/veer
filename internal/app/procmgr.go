@@ -226,7 +226,12 @@ type ProcessManager struct {
 	dynamicEgressNATParents                        map[string]struct{}
 	managedRuntimeReloadAppliedFingerprint         string
 	managedRuntimeDriftCheckAt                     time.Time
-	pluginCatalogFingerprint                       string
+	pluginCatalogUpdateMu                          sync.Mutex
+	pluginCatalogSourceDir                         string
+	pluginCatalogAppliedDir                        string
+	pluginCatalogAppliedFingerprint                string
+	pluginCatalogDetectedFingerprint               string
+	pluginCatalogPendingUpdates                    []PluginCatalogUpdate
 	pluginCatalogCheckAt                           time.Time
 	pluginCatalogLastCheckResult                   string
 	pluginCatalogLastCheckError                    string
@@ -453,9 +458,9 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		lastRangePlanLog:                     make(map[int64]string),
 		kernelMaintenanceEvery:               configuredKernelMaintenanceInterval(),
 	}
+	pm.initializePluginCatalogSnapshot()
 	pm.pluginControlRuntime = newPluginControlRuntime(db, cfg, pm)
 	pm.pluginRuntime = newPluginDataplaneRuntime(cfg)
-	pm.refreshPluginCatalogFingerprint()
 
 	if pm.kernelRuntime != nil {
 		available, reason := pm.kernelRuntime.Available()
@@ -835,6 +840,7 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 func (pm *ProcessManager) redistributeWorkers() {
 	pm.redistributeMu.Lock()
 	defer pm.redistributeMu.Unlock()
+	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
 
 	rules, err := dbGetRules(pm.db)
 	if err != nil {
@@ -852,7 +858,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		return
 	}
 	nextSyntheticRuleID := maxRuleID(rules) + 1
-	pluginForwardRules, warnings, err := loadPluginForwardRules(pm.db, pm.cfg, rules, sites, ranges, &nextSyntheticRuleID)
+	pluginForwardRules, warnings, err := loadPluginForwardRules(pm.db, pluginCfg, rules, sites, ranges, &nextSyntheticRuleID)
 	if err != nil {
 		log.Printf("load plugin forward rule plans: %v", err)
 		return
@@ -873,10 +879,20 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load managed network reservations: %v", err)
 		return
 	}
+	pluginDHCPv4PlanRecords, err := loadActivePluginDHCPv4PlanRecords(pm.db, pluginCfg)
+	if err != nil {
+		log.Printf("load plugin dhcpv4 plans: %v", err)
+		return
+	}
+	pluginDHCPv4Networks, warnings := compilePluginDHCPv4PlansWithWarnings(pluginDHCPv4PlanRecords, managedNetworks)
+	for _, warning := range warnings {
+		log.Printf("plugin dhcpv4: %s", warning)
+	}
+	runtimeManagedNetworks := append(append([]ManagedNetwork(nil), managedNetworks...), pluginDHCPv4Networks...)
 	managedRuntimeReloadFingerprint := ""
 	managedRuntimeReconcileOK := pm.managedNetworkRuntime == nil
 	if pm.managedNetworkRuntime != nil {
-		if err := pm.managedNetworkRuntime.Reconcile(managedNetworks, managedNetworkReservations); err != nil {
+		if err := pm.managedNetworkRuntime.Reconcile(runtimeManagedNetworks, managedNetworkReservations); err != nil {
 			log.Printf("managed network runtime reconcile: %v", err)
 		} else {
 			managedRuntimeReconcileOK = true
@@ -887,9 +903,14 @@ func (pm *ProcessManager) redistributeWorkers() {
 		log.Printf("load egress nats: %v", err)
 		return
 	}
-	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pm.cfg)
+	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pluginCfg)
 	if err != nil {
 		log.Printf("load plugin egress nat plans: %v", err)
+		return
+	}
+	pluginIPv6AssignmentPlanRecords, err := loadActivePluginIPv6AssignmentPlanRecords(pm.db, pluginCfg)
+	if err != nil {
+		log.Printf("load plugin ipv6 assignment plans: %v", err)
 		return
 	}
 	ipv6Assignments, ipv6AssignmentLoadErr := dbGetIPv6Assignments(pm.db)
@@ -914,6 +935,15 @@ func (pm *ProcessManager) redistributeWorkers() {
 	}
 	if len(managedNetworkCompiled.IPv6Assignments) > 0 {
 		ipv6Assignments = append(ipv6Assignments, managedNetworkCompiled.IPv6Assignments...)
+	}
+	if len(pluginIPv6AssignmentPlanRecords) > 0 {
+		pluginIPv6Assignments, warnings := compilePluginIPv6AssignmentPlansWithWarnings(pluginIPv6AssignmentPlanRecords, ipv6Assignments)
+		for _, warning := range warnings {
+			log.Printf("plugin ipv6 assignment: %s", warning)
+		}
+		if len(pluginIPv6Assignments) > 0 {
+			ipv6Assignments = append(ipv6Assignments, pluginIPv6Assignments...)
+		}
 	}
 	if len(managedNetworkCompiled.EgressNATs) > 0 {
 		egressNATs = append(egressNATs, managedNetworkCompiled.EgressNATs...)
@@ -961,7 +991,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		pm.ipv6AssignmentInterfaces = ipv6Interfaces
 		pm.mu.Unlock()
 		if managedRuntimeReconcileOK && ipv6RuntimeReconcileOK && egressNATSnapshot.Err == nil {
-			managedRuntimeReloadFingerprint = buildManagedNetworkRuntimeReloadFingerprint(managedNetworks, managedNetworkReservations, ipv6Assignments, egressNATs, egressNATSnapshot.Infos)
+			managedRuntimeReloadFingerprint = buildManagedNetworkRuntimeReloadFingerprint(runtimeManagedNetworks, managedNetworkReservations, ipv6Assignments, egressNATs, egressNATSnapshot.Infos)
 		}
 	}
 	planner := newRuleDataplanePlanner(pm.kernelRuntime, pm.cfg.DefaultEngine)
@@ -1097,7 +1127,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.rulePlans = rulePlans
 	pm.rangePlans = rangePlans
 	pm.egressNATPlans = egressNATPlans
-	pm.managedNetworkInterfaces = cloneManagedNetworkInterfaceSet(managedNetworkCompiled.RedistributeIfaces)
+	pm.managedNetworkInterfaces = sliceToManagedNetworkInterfaceSet(collectManagedNetworkRuntimeTouchedInterfaces(runtimeManagedNetworks, ipv6Assignments, managedNetworkCompiled))
 	pm.dynamicEgressNATParents = dynamicEgressNATParents
 	pm.managedRuntimeReloadAppliedFingerprint = managedRuntimeReloadFingerprint
 	pm.kernelRules = kernelAppliedRules
@@ -4141,6 +4171,7 @@ func (pm *ProcessManager) stopAll() {
 	if pm.kernelRuntime != nil {
 		logShutdownStep("stop kernel runtime", pm.kernelRuntime.Close)
 	}
+	pm.cleanupPluginCatalogSnapshot()
 
 	if pm.listener != nil {
 		logShutdownStep("close control listener", pm.listener.Close)

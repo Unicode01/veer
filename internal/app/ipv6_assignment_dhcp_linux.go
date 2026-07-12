@@ -30,6 +30,7 @@ const (
 	dhcpv6OptionServerID    = 2
 	dhcpv6OptionIANA        = 3
 	dhcpv6OptionIAAddr      = 5
+	dhcpv6OptionDNSServers  = 23
 	dhcpv6DUIDTypeLL        = 3
 	dhcpv6HWTypeEthernet    = 1
 	dhcpv6T1                = 1 * time.Hour
@@ -100,6 +101,7 @@ func (srv *ipv6DHCPv6Server) snapshot() ipv6AssignmentDHCPv6Config {
 	return ipv6AssignmentDHCPv6Config{
 		TargetInterface: srv.config.TargetInterface,
 		Addresses:       append([]string(nil), srv.config.Addresses...),
+		DNSServers:      append([]string(nil), srv.config.DNSServers...),
 	}
 }
 
@@ -290,6 +292,7 @@ func openIPv6DHCPv6Socket(config ipv6AssignmentDHCPv6Config) (ipv6DHCPv6State, i
 		Config: ipv6AssignmentDHCPv6Config{
 			TargetInterface: config.TargetInterface,
 			Addresses:       append([]string(nil), config.Addresses...),
+			DNSServers:      append([]string(nil), config.DNSServers...),
 		},
 	}, fd, nil
 }
@@ -444,6 +447,17 @@ func buildDHCPv6Response(state ipv6DHCPv6State, msg parsedDHCPv6Message, respons
 	out := []byte{responseType, msg.TxID[0], msg.TxID[1], msg.TxID[2]}
 	out = append(out, buildDHCPv6Option(dhcpv6OptionServerID, state.DUID)...)
 	out = append(out, buildDHCPv6Option(dhcpv6OptionClientID, msg.ClientID)...)
+	if len(state.Config.DNSServers) > 0 {
+		dnsPayload := make([]byte, 0, len(state.Config.DNSServers)*net.IPv6len)
+		for _, server := range state.Config.DNSServers {
+			ip := net.ParseIP(server)
+			if ip == nil || ip.To4() != nil || ip.To16() == nil {
+				return nil, fmt.Errorf("invalid dhcpv6 DNS server %q", server)
+			}
+			dnsPayload = append(dnsPayload, ip.To16()...)
+		}
+		out = append(out, buildDHCPv6Option(dhcpv6OptionDNSServers, dnsPayload)...)
+	}
 
 	iaids := msg.IAIDs
 	if len(iaids) == 0 {

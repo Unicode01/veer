@@ -52,11 +52,23 @@ type ipv6AssignmentRuntimePlan struct {
 	NeedsRADvertise   bool
 	ParentPrefixNet   *net.IPNet
 	AssignedPrefixNet *net.IPNet
+	GatewayCIDR       string
+	RejectPrefix      string
+	DNSServers        []string
 }
 
 type ipv6AssignmentRouteSpec struct {
 	Prefix          string
 	TargetInterface string
+}
+
+type ipv6AssignmentAddressSpec struct {
+	TargetInterface string
+	CIDR            string
+}
+
+type ipv6AssignmentRejectRouteSpec struct {
+	Prefix string
 }
 
 type ipv6AssignmentProxySpec struct {
@@ -69,11 +81,13 @@ type ipv6AssignmentRAConfig struct {
 	Managed         bool
 	Prefixes        []string
 	Routes          []string
+	DNSServers      []string
 }
 
 type ipv6AssignmentDHCPv6Config struct {
 	TargetInterface string
 	Addresses       []string
+	DNSServers      []string
 }
 
 type ipv6AssignmentNetOps interface {
@@ -83,6 +97,10 @@ type ipv6AssignmentNetOps interface {
 	EnsureIPv6ProxyNDPEnabled(parentInterface string) error
 	EnsureIPv6Route(spec ipv6AssignmentRouteSpec) error
 	DeleteIPv6Route(spec ipv6AssignmentRouteSpec) error
+	EnsureIPv6Address(spec ipv6AssignmentAddressSpec) error
+	DeleteIPv6Address(spec ipv6AssignmentAddressSpec) error
+	EnsureIPv6RejectRoute(spec ipv6AssignmentRejectRouteSpec) error
+	DeleteIPv6RejectRoute(spec ipv6AssignmentRejectRouteSpec) error
 	EnsureIPv6Proxy(spec ipv6AssignmentProxySpec) error
 	DeleteIPv6Proxy(spec ipv6AssignmentProxySpec) error
 	EnsureIPv6RA(config ipv6AssignmentRAConfig) error
@@ -100,6 +118,8 @@ type managedIPv6AssignmentRuntime struct {
 	mu               sync.Mutex
 	ops              ipv6AssignmentNetOps
 	routes           map[ipv6AssignmentRouteSpec]struct{}
+	addresses        map[ipv6AssignmentAddressSpec]struct{}
+	rejectRoutes     map[ipv6AssignmentRejectRouteSpec]struct{}
 	proxies          map[ipv6AssignmentProxySpec]struct{}
 	advertisements   map[string]ipv6AssignmentRAConfig
 	dhcpv6           map[string]ipv6AssignmentDHCPv6Config
@@ -114,6 +134,8 @@ func newManagedIPv6AssignmentRuntime(ops ipv6AssignmentNetOps) ipv6AssignmentRun
 	return &managedIPv6AssignmentRuntime{
 		ops:              ops,
 		routes:           make(map[ipv6AssignmentRouteSpec]struct{}),
+		addresses:        make(map[ipv6AssignmentAddressSpec]struct{}),
+		rejectRoutes:     make(map[ipv6AssignmentRejectRouteSpec]struct{}),
 		proxies:          make(map[ipv6AssignmentProxySpec]struct{}),
 		advertisements:   make(map[string]ipv6AssignmentRAConfig),
 		dhcpv6:           make(map[string]ipv6AssignmentDHCPv6Config),
@@ -228,6 +250,9 @@ func buildIPv6AssignmentRuntimePlan(item IPv6Assignment) (ipv6AssignmentRuntimeP
 		NeedsRADvertise:   intent.addressing == ipv6AssignmentAddressingSLAACRecommended,
 		ParentPrefixNet:   cloneIPv6Net(parentNet),
 		AssignedPrefixNet: cloneIPv6Net(assignedNet),
+		GatewayCIDR:       strings.TrimSpace(item.gatewayCIDR),
+		RejectPrefix:      strings.TrimSpace(item.rejectPrefix),
+		DNSServers:        append([]string(nil), item.dnsServers...),
 	}
 	if plan.NeedsProxyNDP {
 		plan.ProxyAddress = canonicalIPLiteral(assignedNet.IP)
@@ -287,6 +312,8 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 	defer rt.mu.Unlock()
 
 	desiredRoutes := make(map[ipv6AssignmentRouteSpec]struct{})
+	desiredAddresses := make(map[ipv6AssignmentAddressSpec]struct{})
+	desiredRejectRoutes := make(map[ipv6AssignmentRejectRouteSpec]struct{})
 	desiredProxies := make(map[ipv6AssignmentProxySpec]struct{})
 	desiredAdvertisements := make(map[string]ipv6AssignmentRAConfig)
 	desiredDHCPv6 := make(map[string]ipv6AssignmentDHCPv6Config)
@@ -330,6 +357,18 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 			AdvertisesRA:    plan.NeedsRADvertise || plan.Intent.kind == ipv6AssignmentIntentSingleAddress,
 			ServesDHCPv6:    plan.Intent.kind == ipv6AssignmentIntentSingleAddress,
 		}
+		if plan.GatewayCIDR != "" {
+			addressSpec := ipv6AssignmentAddressSpec{
+				TargetInterface: plan.TargetInterface,
+				CIDR:            plan.GatewayCIDR,
+			}
+			desiredAddresses[addressSpec] = struct{}{}
+			if err := rt.ops.EnsureIPv6Address(addressSpec); err != nil {
+				msg := fmt.Sprintf("assignment #%d gateway address %s on %s: %v", plan.ID, addressSpec.CIDR, addressSpec.TargetInterface, err)
+				errs = append(errs, msg)
+				appendIPv6AssignmentRuntimeError(desiredAssignmentErrors, plan.ID, fmt.Sprintf("gateway address %s on %s: %v", addressSpec.CIDR, addressSpec.TargetInterface, err))
+			}
+		}
 		routeSpec := ipv6AssignmentRouteSpec{
 			Prefix:          plan.AssignedPrefix,
 			TargetInterface: plan.TargetInterface,
@@ -340,10 +379,25 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 			errs = append(errs, msg)
 			appendIPv6AssignmentRuntimeError(desiredAssignmentErrors, plan.ID, fmt.Sprintf("route %s via %s: %v", routeSpec.Prefix, routeSpec.TargetInterface, err))
 		}
+		if plan.RejectPrefix != "" {
+			rejectSpec := ipv6AssignmentRejectRouteSpec{Prefix: plan.RejectPrefix}
+			desiredRejectRoutes[rejectSpec] = struct{}{}
+			if err := rt.ops.EnsureIPv6RejectRoute(rejectSpec); err != nil {
+				msg := fmt.Sprintf("assignment #%d reject unassigned prefix %s: %v", plan.ID, rejectSpec.Prefix, err)
+				errs = append(errs, msg)
+				appendIPv6AssignmentRuntimeError(desiredAssignmentErrors, plan.ID, fmt.Sprintf("reject unassigned prefix %s: %v", rejectSpec.Prefix, err))
+			}
+		}
 		if plan.NeedsRADvertise {
 			cfg := desiredAdvertisements[plan.TargetInterface]
 			cfg.TargetInterface = plan.TargetInterface
 			cfg.Prefixes = append(cfg.Prefixes, plan.AssignedPrefix)
+			desiredAdvertisements[plan.TargetInterface] = cfg
+		}
+		if len(plan.DNSServers) > 0 {
+			cfg := desiredAdvertisements[plan.TargetInterface]
+			cfg.TargetInterface = plan.TargetInterface
+			cfg.DNSServers = append(cfg.DNSServers, plan.DNSServers...)
 			desiredAdvertisements[plan.TargetInterface] = cfg
 		}
 		if plan.Intent.kind == ipv6AssignmentIntentSingleAddress {
@@ -355,6 +409,7 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 			cfg := desiredDHCPv6[plan.TargetInterface]
 			cfg.TargetInterface = plan.TargetInterface
 			cfg.Addresses = append(cfg.Addresses, canonicalIPLiteral(plan.AssignedPrefixNet.IP))
+			cfg.DNSServers = append(cfg.DNSServers, plan.DNSServers...)
 			desiredDHCPv6[plan.TargetInterface] = cfg
 		}
 		if !plan.NeedsProxyNDP {
@@ -400,6 +455,7 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 	}
 	for targetInterface, cfg := range desiredDHCPv6 {
 		cfg.Addresses = sortAndDedupeStrings(cfg.Addresses)
+		cfg.DNSServers = sortAndDedupeStrings(cfg.DNSServers)
 		raCfg := desiredAdvertisements[targetInterface]
 		raCfg.TargetInterface = targetInterface
 		raCfg.Managed = true
@@ -409,6 +465,7 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 	for targetInterface, cfg := range desiredAdvertisements {
 		cfg.Prefixes = sortAndDedupeStrings(cfg.Prefixes)
 		cfg.Routes = sortAndDedupeStrings(cfg.Routes)
+		cfg.DNSServers = sortAndDedupeStrings(cfg.DNSServers)
 		if err := rt.ops.EnsureIPv6RA(cfg); err != nil {
 			msg := fmt.Sprintf("advertise ipv6 on %s: %v", targetInterface, err)
 			errs = append(errs, msg)
@@ -429,6 +486,22 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 		}
 		if err := rt.ops.DeleteIPv6Route(route); err != nil {
 			errs = append(errs, fmt.Sprintf("remove ipv6 route %s via %s: %v", route.Prefix, route.TargetInterface, err))
+		}
+	}
+	for rejectRoute := range rt.rejectRoutes {
+		if _, ok := desiredRejectRoutes[rejectRoute]; ok {
+			continue
+		}
+		if err := rt.ops.DeleteIPv6RejectRoute(rejectRoute); err != nil {
+			errs = append(errs, fmt.Sprintf("remove ipv6 reject route %s: %v", rejectRoute.Prefix, err))
+		}
+	}
+	for address := range rt.addresses {
+		if _, ok := desiredAddresses[address]; ok {
+			continue
+		}
+		if err := rt.ops.DeleteIPv6Address(address); err != nil {
+			errs = append(errs, fmt.Sprintf("remove ipv6 gateway address %s on %s: %v", address.CIDR, address.TargetInterface, err))
 		}
 	}
 	for proxy := range rt.proxies {
@@ -457,6 +530,8 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 	}
 
 	rt.routes = desiredRoutes
+	rt.addresses = desiredAddresses
+	rt.rejectRoutes = desiredRejectRoutes
 	rt.proxies = desiredProxies
 	rt.advertisements = desiredAdvertisements
 	rt.dhcpv6 = desiredDHCPv6
@@ -559,8 +634,10 @@ func (rt *managedIPv6AssignmentRuntime) Close() error {
 	defer rt.mu.Unlock()
 
 	if preserver, ok := rt.ops.(ipv6AssignmentClosePreserver); ok && preserver.PreserveIPv6AssignmentStateOnClose() {
-		log.Printf("ipv6 assignment runtime: preserving applied state for hot restart (routes=%d proxies=%d ra=%d dhcpv6=%d)", len(rt.routes), len(rt.proxies), len(rt.advertisements), len(rt.dhcpv6))
+		log.Printf("ipv6 assignment runtime: preserving applied state for hot restart (routes=%d addresses=%d reject_routes=%d proxies=%d ra=%d dhcpv6=%d)", len(rt.routes), len(rt.addresses), len(rt.rejectRoutes), len(rt.proxies), len(rt.advertisements), len(rt.dhcpv6))
 		rt.routes = make(map[ipv6AssignmentRouteSpec]struct{})
+		rt.addresses = make(map[ipv6AssignmentAddressSpec]struct{})
+		rt.rejectRoutes = make(map[ipv6AssignmentRejectRouteSpec]struct{})
 		rt.proxies = make(map[ipv6AssignmentProxySpec]struct{})
 		rt.advertisements = make(map[string]ipv6AssignmentRAConfig)
 		rt.dhcpv6 = make(map[string]ipv6AssignmentDHCPv6Config)
@@ -580,6 +657,16 @@ func (rt *managedIPv6AssignmentRuntime) Close() error {
 			errs = append(errs, fmt.Sprintf("remove ipv6 route %s via %s: %v", route.Prefix, route.TargetInterface, err))
 		}
 	}
+	for rejectRoute := range rt.rejectRoutes {
+		if err := rt.ops.DeleteIPv6RejectRoute(rejectRoute); err != nil {
+			errs = append(errs, fmt.Sprintf("remove ipv6 reject route %s: %v", rejectRoute.Prefix, err))
+		}
+	}
+	for address := range rt.addresses {
+		if err := rt.ops.DeleteIPv6Address(address); err != nil {
+			errs = append(errs, fmt.Sprintf("remove ipv6 gateway address %s on %s: %v", address.CIDR, address.TargetInterface, err))
+		}
+	}
 	for targetInterface := range rt.advertisements {
 		if err := rt.ops.DeleteIPv6RA(targetInterface); err != nil {
 			errs = append(errs, fmt.Sprintf("remove router advertisement on %s: %v", targetInterface, err))
@@ -591,6 +678,8 @@ func (rt *managedIPv6AssignmentRuntime) Close() error {
 		}
 	}
 	rt.routes = make(map[ipv6AssignmentRouteSpec]struct{})
+	rt.addresses = make(map[ipv6AssignmentAddressSpec]struct{})
+	rt.rejectRoutes = make(map[ipv6AssignmentRejectRouteSpec]struct{})
 	rt.proxies = make(map[ipv6AssignmentProxySpec]struct{})
 	rt.advertisements = make(map[string]ipv6AssignmentRAConfig)
 	rt.dhcpv6 = make(map[string]ipv6AssignmentDHCPv6Config)

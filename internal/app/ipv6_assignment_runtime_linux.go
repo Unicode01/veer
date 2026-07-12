@@ -161,6 +161,48 @@ func (ops *linuxIPv6AssignmentNetOps) DeleteIPv6Route(spec ipv6AssignmentRouteSp
 	return nil
 }
 
+func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6Address(spec ipv6AssignmentAddressSpec) error {
+	link, addr, err := linuxIPv6AssignmentAddressFromSpec(spec)
+	if err != nil {
+		return err
+	}
+	return netlink.AddrReplace(link, addr)
+}
+
+func (ops *linuxIPv6AssignmentNetOps) DeleteIPv6Address(spec ipv6AssignmentAddressSpec) error {
+	link, addr, err := linuxIPv6AssignmentAddressFromSpec(spec)
+	if err != nil {
+		var linkNotFound netlink.LinkNotFoundError
+		if errors.As(err, &linkNotFound) {
+			return nil
+		}
+		return err
+	}
+	if err := netlink.AddrDel(link, addr); err != nil && !errors.Is(err, unix.EADDRNOTAVAIL) && !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	return nil
+}
+
+func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6RejectRoute(spec ipv6AssignmentRejectRouteSpec) error {
+	route, err := linuxIPv6AssignmentRejectRouteFromSpec(spec)
+	if err != nil {
+		return err
+	}
+	return netlink.RouteReplace(route)
+}
+
+func (ops *linuxIPv6AssignmentNetOps) DeleteIPv6RejectRoute(spec ipv6AssignmentRejectRouteSpec) error {
+	route, err := linuxIPv6AssignmentRejectRouteFromSpec(spec)
+	if err != nil {
+		return err
+	}
+	if err := netlink.RouteDel(route); err != nil && !errors.Is(err, unix.ESRCH) {
+		return err
+	}
+	return nil
+}
+
 func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6Proxy(spec ipv6AssignmentProxySpec) error {
 	neigh, err := linuxIPv6AssignmentProxyFromSpec(spec)
 	if err != nil {
@@ -212,6 +254,44 @@ func linuxIPv6AssignmentRouteFromSpec(spec ipv6AssignmentRouteSpec) (*netlink.Ro
 		Dst:       cloneIPv6Net(prefix),
 		Family:    unix.AF_INET6,
 		Protocol:  unix.RTPROT_STATIC,
+	}, nil
+}
+
+func linuxIPv6AssignmentAddressFromSpec(spec ipv6AssignmentAddressSpec) (netlink.Link, *netlink.Addr, error) {
+	targetInterface := strings.TrimSpace(spec.TargetInterface)
+	if targetInterface == "" {
+		return nil, nil, fmt.Errorf("target interface is required")
+	}
+	link, err := netlink.LinkByName(targetInterface)
+	if err != nil {
+		return nil, nil, err
+	}
+	addr, err := netlink.ParseAddr(strings.TrimSpace(spec.CIDR))
+	if err != nil || addr == nil || addr.IPNet == nil || addr.IPNet.IP == nil || addr.IPNet.IP.To4() != nil {
+		return nil, nil, fmt.Errorf("invalid ipv6 gateway cidr %q", spec.CIDR)
+	}
+	addr.Flags |= unix.IFA_F_NOPREFIXROUTE
+	return link, addr, nil
+}
+
+func linuxIPv6AssignmentRejectRouteFromSpec(spec ipv6AssignmentRejectRouteSpec) (*netlink.Route, error) {
+	prefixText := strings.TrimSpace(spec.Prefix)
+	_, prefix, err := net.ParseCIDR(prefixText)
+	if err != nil || prefix == nil || prefix.IP == nil || prefix.IP.To4() != nil {
+		return nil, fmt.Errorf("invalid ipv6 reject prefix %q", prefixText)
+	}
+	loopback, err := netlink.LinkByName("lo")
+	if err != nil {
+		return nil, fmt.Errorf("resolve loopback interface: %w", err)
+	}
+	return &netlink.Route{
+		LinkIndex: loopback.Attrs().Index,
+		Dst:       cloneIPv6Net(prefix),
+		Family:    unix.AF_INET6,
+		Table:     unix.RT_TABLE_MAIN,
+		Protocol:  unix.RTPROT_STATIC,
+		Priority:  1<<31 - 1,
+		Type:      unix.RTN_UNREACHABLE,
 	}, nil
 }
 
@@ -279,10 +359,10 @@ func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6RA(config ipv6AssignmentRAConfig
 		adv = newIPv6RouterAdvertiser(config)
 		ops.advertisers[config.TargetInterface] = adv
 		adv.start()
-		log.Printf("ipv6 assignment runtime: router advertisement enabled on %s (managed=%t prefixes=%v routes=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes)
+		log.Printf("ipv6 assignment runtime: router advertisement enabled on %s (managed=%t prefixes=%v routes=%v dns=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes, config.DNSServers)
 	} else {
 		adv.update(config)
-		log.Printf("ipv6 assignment runtime: router advertisement updated on %s (managed=%t prefixes=%v routes=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes)
+		log.Printf("ipv6 assignment runtime: router advertisement updated on %s (managed=%t prefixes=%v routes=%v dns=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes, config.DNSServers)
 	}
 	ops.mu.Unlock()
 	return nil
@@ -315,12 +395,12 @@ func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6DHCPv6(config ipv6AssignmentDHCP
 		ops.dhcpv6[config.TargetInterface] = server
 		ops.mu.Unlock()
 		server.start()
-		log.Printf("ipv6 assignment runtime: dhcpv6 enabled on %s (addresses=%v)", config.TargetInterface, config.Addresses)
+		log.Printf("ipv6 assignment runtime: dhcpv6 enabled on %s (addresses=%v dns=%v)", config.TargetInterface, config.Addresses, config.DNSServers)
 		return nil
 	}
 	server.update(config)
 	ops.mu.Unlock()
-	log.Printf("ipv6 assignment runtime: dhcpv6 updated on %s (addresses=%v)", config.TargetInterface, config.Addresses)
+	log.Printf("ipv6 assignment runtime: dhcpv6 updated on %s (addresses=%v dns=%v)", config.TargetInterface, config.Addresses, config.DNSServers)
 	return nil
 }
 

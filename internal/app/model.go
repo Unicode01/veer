@@ -112,26 +112,27 @@ type HostNetworkResponse struct {
 }
 
 type ManagedNetwork struct {
-	ID                  int64  `json:"id"`
-	Name                string `json:"name"`
-	BridgeMode          string `json:"bridge_mode"`
-	Bridge              string `json:"bridge"`
-	BridgeMTU           int    `json:"bridge_mtu"`
-	BridgeVLANAware     bool   `json:"bridge_vlan_aware"`
-	UplinkInterface     string `json:"uplink_interface"`
-	IPv4Enabled         bool   `json:"ipv4_enabled"`
-	IPv4CIDR            string `json:"ipv4_cidr"`
-	IPv4Gateway         string `json:"ipv4_gateway"`
-	IPv4PoolStart       string `json:"ipv4_pool_start"`
-	IPv4PoolEnd         string `json:"ipv4_pool_end"`
-	IPv4DNSServers      string `json:"ipv4_dns_servers"`
-	IPv6Enabled         bool   `json:"ipv6_enabled"`
-	IPv6ParentInterface string `json:"ipv6_parent_interface"`
-	IPv6ParentPrefix    string `json:"ipv6_parent_prefix"`
-	IPv6AssignmentMode  string `json:"ipv6_assignment_mode"`
-	AutoEgressNAT       bool   `json:"auto_egress_nat"`
-	Remark              string `json:"remark"`
-	Enabled             bool   `json:"enabled"`
+	ID                        int64  `json:"id"`
+	Name                      string `json:"name"`
+	BridgeMode                string `json:"bridge_mode"`
+	Bridge                    string `json:"bridge"`
+	BridgeMTU                 int    `json:"bridge_mtu"`
+	BridgeVLANAware           bool   `json:"bridge_vlan_aware"`
+	UplinkInterface           string `json:"uplink_interface"`
+	IPv4Enabled               bool   `json:"ipv4_enabled"`
+	IPv4CIDR                  string `json:"ipv4_cidr"`
+	IPv4Gateway               string `json:"ipv4_gateway"`
+	IPv4PoolStart             string `json:"ipv4_pool_start"`
+	IPv4PoolEnd               string `json:"ipv4_pool_end"`
+	IPv4DNSServers            string `json:"ipv4_dns_servers"`
+	IPv6Enabled               bool   `json:"ipv6_enabled"`
+	IPv6ParentInterface       string `json:"ipv6_parent_interface"`
+	IPv6ParentPrefix          string `json:"ipv6_parent_prefix"`
+	IPv6AssignmentMode        string `json:"ipv6_assignment_mode"`
+	AutoEgressNAT             bool   `json:"auto_egress_nat"`
+	Remark                    string `json:"remark"`
+	Enabled                   bool   `json:"enabled"`
+	skipIPv4AddressManagement bool
 }
 
 type ManagedNetworkStatus struct {
@@ -227,6 +228,10 @@ type IPv6Assignment struct {
 	DHCPv6ReplyCount     uint64 `json:"dhcpv6_reply_count,omitempty"`
 	RuntimeStatus        string `json:"runtime_status,omitempty"`
 	RuntimeDetail        string `json:"runtime_detail,omitempty"`
+	upstreamRouted       bool
+	gatewayCIDR          string
+	rejectPrefix         string
+	dnsServers           []string
 }
 
 type EgressNAT struct {
