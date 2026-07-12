@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VTap To Local</title>
+  <style>
+    .local-page { padding: 8px; }
+    .local-config-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      align-items: end;
+    }
+    .local-actions { justify-content: flex-end; gap: 8px; }
+    .local-section-title {
+      margin: 0;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .local-effective { display: grid; gap: 9px; }
+    .local-addresses { display: flex; flex-wrap: wrap; gap: 6px; }
+    .local-route-wrap { overflow-x: auto; }
+    @media (max-width: 720px) {
+      .local-config-grid { grid-template-columns: 1fr; }
+      .local-actions .fwd-button { flex: 1 1 auto; }
+    }
+  </style>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const messages = {
+        'zh-CN': {
+          'status.idle': '空闲',
+          'status.loading': '加载中',
+          'status.applying': '应用中',
+          'status.applied': '已应用',
+          'status.applyFailed': '应用失败',
+          'status.deleting': '拆除中',
+          'status.deleted': '已拆除',
+          'status.deleteFailed': '拆除失败',
+          'title': 'Pipeline To Local',
+          'desc': '创建一个系统可见的 Linux L3 边界，将本机流量双向接入插件 pipeline。',
+          'badge.netAdmin': 'net.admin',
+          'badge.dummy': 'dummy',
+          'stat.handoff': 'Handoff',
+          'stat.handoff.value': 'local0 <-> pipeline',
+          'stat.handoff.detail': '不创建 veth peer，同一个接口承担出站和回包注入边界。',
+          'stat.direction': '方向',
+          'stat.direction.value': 'egress / ingress',
+          'stat.direction.detail': '本机出站从 TC egress 进入 pipeline，回包注入接口 ingress。',
+          'stat.routesTop': '路由策略',
+          'stat.routesTop.value': '显式管理',
+          'stat.routesTop.detail': '只有页面中配置的地址和路由会由插件管理。',
+          'profile.title': '本地边界配置',
+          'profile.desc': '选择已有边界或新建配置；保存会立即更新 Linux 接口、地址和路由。',
+          'profile.new': '新建配置...',
+          'profile.newPlaceholder': '输入新配置名',
+          'lastStatus.title': '实际生效状态',
+          'field.profile': '配置',
+          'field.localInterface': '本地接口',
+          'field.mtu': 'MTU',
+          'field.addresses': '本地地址',
+          'field.routes': '静态路由',
+          'route.dst': '目标 CIDR',
+          'route.gateway': '网关',
+          'route.dev': '接口',
+          'route.src': '源地址',
+          'route.table': '路由表',
+          'route.metric': 'Metric',
+          'route.add': '添加路由',
+          'route.remove': '删除路由',
+          'route.empty': '没有静态路由。',
+          'action.apply': '保存并应用',
+          'action.update': '更新本地接口',
+          'action.load': '重新加载',
+          'action.teardown': '拆除',
+          'action.refresh': '刷新',
+          'hint.noRuntime': '当前本地接口尚未应用，无需拆除。',
+          'toast.applied': '本地边界配置已保存并应用。',
+          'toast.loaded': '配置已加载。',
+          'toast.deleted': '插件管理的本地边界已拆除。',
+          'empty.status': '当前配置还没有运行时状态。',
+          'error.keyRequired': '请输入新配置名。',
+          'error.routeDestination': '每条静态路由都必须填写目标 CIDR。',
+          'stat.phase': '阶段',
+          'stat.local': '本地接口',
+          'stat.mtu': 'MTU',
+          'stat.addresses': '地址',
+          'stat.routes': '路由',
+          'stat.managed': '插件创建',
+          'stat.updated': '更新时间',
+          'effective.addresses': '实际地址',
+          'effective.routes': '实际路由',
+          'value.yes': '是',
+          'value.no': '否'
+        },
+        'en-US': {
+          'status.idle': 'Idle',
+          'status.loading': 'Loading',
+          'status.applying': 'Applying',
+          'status.applied': 'Applied',
+          'status.applyFailed': 'Apply failed',
+          'status.deleting': 'Tearing down',
+          'status.deleted': 'Removed',
+          'status.deleteFailed': 'Teardown failed',
+          'title': 'Pipeline To Local',
+          'desc': 'Creates one system-visible Linux L3 boundary and connects host traffic bidirectionally to the plugin pipeline.',
+          'badge.netAdmin': 'net.admin',
+          'badge.dummy': 'dummy',
+          'stat.handoff': 'Handoff',
+          'stat.handoff.value': 'local0 <-> pipeline',
+          'stat.handoff.detail': 'No veth peer is created; one interface is used for outbound traffic and reply injection.',
+          'stat.direction': 'Direction',
+          'stat.direction.value': 'egress / ingress',
+          'stat.direction.detail': 'Host traffic enters at TC egress and replies are injected at interface ingress.',
+          'stat.routesTop': 'Route Policy',
+          'stat.routesTop.value': 'explicit',
+          'stat.routesTop.detail': 'Only addresses and routes configured on this page are managed.',
+          'profile.title': 'Local Boundary Profile',
+          'profile.desc': 'Select an existing boundary or create one. Saving immediately updates the Linux interface, addresses and routes.',
+          'profile.new': 'New profile...',
+          'profile.newPlaceholder': 'Enter a new profile name',
+          'lastStatus.title': 'Effective Runtime State',
+          'field.profile': 'Profile',
+          'field.localInterface': 'Local Interface',
+          'field.mtu': 'MTU',
+          'field.addresses': 'Local Addresses',
+          'field.routes': 'Static Routes',
+          'route.dst': 'Destination CIDR',
+          'route.gateway': 'Gateway',
+          'route.dev': 'Interface',
+          'route.src': 'Source Address',
+          'route.table': 'Table',
+          'route.metric': 'Metric',
+          'route.add': 'Add Route',
+          'route.remove': 'Remove Route',
+          'route.empty': 'No static routes.',
+          'action.apply': 'Save and Apply',
+          'action.update': 'Update Local Interface',
+          'action.load': 'Reload',
+          'action.teardown': 'Teardown',
+          'action.refresh': 'Refresh',
+          'hint.noRuntime': 'The local interface is not applied, so there is nothing to tear down.',
+          'toast.applied': 'Local boundary saved and applied.',
+          'toast.loaded': 'Profile loaded.',
+          'toast.deleted': 'Plugin-managed local boundary removed.',
+          'empty.status': 'This profile has no runtime state yet.',
+          'error.keyRequired': 'Enter a new profile name.',
+          'error.routeDestination': 'Every static route requires a destination CIDR.',
+          'stat.phase': 'Phase',
+          'stat.local': 'Local Interface',
+          'stat.mtu': 'MTU',
+          'stat.addresses': 'Addresses',
+          'stat.routes': 'Routes',
+          'stat.managed': 'Plugin Created',
+          'stat.updated': 'Updated',
+          'effective.addresses': 'Effective Addresses',
+          'effective.routes': 'Effective Routes',
+          'value.yes': 'yes',
+          'value.no': 'no'
+        }
+      };
+
+      const textBindings = [];
+      const attrBindings = [];
+      let statusKey = 'status.idle';
+      let records = { links: [], status: [] };
+      let lastStatusData = null;
+      let pendingButton = null;
+      let pendingLabel = '';
+      let applyButton = null;
+      let teardownButton = null;
+      let loadButton = null;
+      let refreshButton = null;
+
+      function T(key, params) { return F.t(messages, key, params); }
+      function bindText(node, key, params) {
+        node.textContent = T(key, params);
+        textBindings.push({ node, key, params });
+        return node;
+      }
+      function bindAttr(node, attr, key, params) {
+        node.setAttribute(attr, T(key, params));
+        attrBindings.push({ node, attr, key, params });
+        return node;
+      }
+      function textNode(tag, opts, key, params) { return bindText(F.h(tag, opts || {}), key, params); }
+      function i18nButton(key, handler, secondary) { return bindText(F.button(T(key), handler, secondary), key); }
+      function input(value, placeholder, type) {
+        return F.h('input', { className: F.classes.input, attrs: { type: type || 'text', value, placeholder } });
+      }
+      function field(labelKey, control) {
+        return F.h('label', { className: F.classes.field }, [textNode('span', null, labelKey), control]);
+      }
+      function i18nStat(labelKey, valueKey, detailKey) {
+        const node = F.h('div', { className: F.classes.stat }, [
+          textNode('span', { className: F.classes.statLabel }, labelKey),
+          textNode('span', { className: F.classes.statValue }, valueKey)
+        ]);
+        if (detailKey) bindAttr(node, 'title', detailKey);
+        return node;
+      }
+      function setStatus(key) {
+        statusKey = key;
+        status.textContent = T(key);
+      }
+      function setBusy(button, busy, text) {
+        pendingButton = busy ? button : null;
+        pendingLabel = busy && text ? text : '';
+        syncActionButtons();
+      }
+      function syncActionButtons() {
+        if (!applyButton) return;
+        const phase = String(lastStatusData && lastStatusData.phase || '').toLowerCase();
+        const applied = phase === 'applied';
+        const removable = !!lastStatusData && !['deleted', 'disabled'].includes(phase);
+        F.setButtonState(applyButton, {
+          label: applyButton === pendingButton ? pendingLabel : T(applied ? 'action.update' : 'action.apply'),
+          busy: applyButton === pendingButton,
+          disabled: !!pendingButton && applyButton !== pendingButton
+        });
+        F.setButtonState(teardownButton, {
+          label: teardownButton === pendingButton ? pendingLabel : T('action.teardown'),
+          busy: teardownButton === pendingButton,
+          disabled: !removable || (!!pendingButton && teardownButton !== pendingButton),
+          tone: 'danger',
+          title: removable ? '' : T('hint.noRuntime')
+        });
+        [loadButton, refreshButton].forEach(function (button) {
+          F.setButtonState(button, {
+            label: button === pendingButton ? pendingLabel : T(button === loadButton ? 'action.load' : 'action.refresh'),
+            busy: button === pendingButton,
+            disabled: !!pendingButton && button !== pendingButton
+          });
+        });
+      }
+      async function runButtonTask(button, busyText, task) {
+        if (pendingButton) return;
+        setBusy(button, true, busyText);
+        try {
+          await task();
+        } finally {
+          setBusy(button, false);
+          F.requestResize();
+        }
+      }
+      function recordData(resource, key) {
+        const record = records[resource].find(function (item) { return item && item.key === key; });
+        return record && record.data ? Object.assign({ updated_at: record.updated_at || '' }, record.data) : null;
+      }
+      function selectedKey() {
+        const key = profilePicker.value();
+        if (!key) throw new Error(T('error.keyRequired'));
+        return key;
+      }
+
+      const status = F.status(T('status.idle'));
+      const stateBody = F.h('div', { className: F.classes.stack });
+      const profilePicker = F.recordPicker({
+        newLabel: function () { return T('profile.new'); },
+        newPlaceholder: function () { return T('profile.newPlaceholder'); },
+        defaultKey: 'default'
+      });
+      const localInterface = input('fwdlocal0', 'fwdlocal0');
+      const mtu = input('1492', '1492', 'number');
+      const addresses = F.h('textarea', {
+        className: F.classes.input,
+        attrs: { rows: '3', placeholder: '192.0.2.2/32\n2001:db8::2/128' }
+      });
+      const routeEditor = F.collectionEditor({
+        columns: [
+          { key: 'dst', label: function () { return T('route.dst'); }, placeholder: '198.51.100.0/24', wide: true },
+          { key: 'gateway', label: function () { return T('route.gateway'); }, placeholder: '192.0.2.1' },
+          { key: 'dev', label: function () { return T('route.dev'); }, placeholder: 'fwdlocal0' },
+          { key: 'src', label: function () { return T('route.src'); }, placeholder: '192.0.2.2' },
+          { key: 'table', label: function () { return T('route.table'); }, type: 'number', min: 0, max: 2147483647, placeholder: '0' },
+          { key: 'metric', label: function () { return T('route.metric'); }, type: 'number', min: 0, max: 2147483647, placeholder: '0' }
+        ],
+        addLabel: function () { return '+ ' + T('route.add'); },
+        removeLabel: function () { return T('route.remove'); },
+        emptyLabel: function () { return T('route.empty'); }
+      });
+
+      function refreshI18n() {
+        textBindings.forEach(function (item) { item.node.textContent = T(item.key, item.params); });
+        attrBindings.forEach(function (item) { item.node.setAttribute(item.attr, T(item.key, item.params)); });
+        status.textContent = T(statusKey);
+        profilePicker.refreshLabels();
+        routeEditor.refreshLabels();
+        renderStatus();
+        F.requestResize();
+      }
+      F.onLocaleChange(refreshI18n);
+
+      function payload() {
+        const routes = routeEditor.values();
+        if (routes.some(function (route) { return !route.dst; })) throw new Error(T('error.routeDestination'));
+        return {
+          profile_key: selectedKey(),
+          local_interface: localInterface.value.trim() || 'fwdlocal0',
+          mtu: Number(mtu.value || 1492),
+          addresses: addresses.value.split(/[\s,]+/).map(function (item) { return item.trim(); }).filter(Boolean),
+          routes: routes
+        };
+      }
+
+      function resetForm() {
+        localInterface.value = 'fwdlocal0';
+        mtu.value = '1492';
+        addresses.value = '';
+        routeEditor.setValues([]);
+        lastStatusData = null;
+      }
+
+      function fillForm(key) {
+        const data = recordData('links', key) || {};
+        localInterface.value = data.local_interface || 'fwdlocal0';
+        mtu.value = data.mtu || 1492;
+        addresses.value = Array.isArray(data.addresses) ? data.addresses.join('\n') : '';
+        routeEditor.setValues(Array.isArray(data.routes) ? data.routes : []);
+        lastStatusData = recordData('status', key);
+      }
+
+      async function listResource(resource) {
+        const response = await F.data.list(resource, { limit: 32 });
+        return response && Array.isArray(response.records) ? response.records : [];
+      }
+
+      function preferredKey(preferred) {
+        if (preferred) return preferred;
+        const enabled = records.links.find(function (record) { return record && record.enabled !== false; });
+        if (enabled) return enabled.key;
+        const applied = records.status.find(function (record) {
+          const phase = String(record && record.data && record.data.phase || '');
+          return phase === 'applied' || phase === 'error';
+        });
+        if (applied) return applied.key;
+        return records.links[0] && records.links[0].key || records.status[0] && records.status[0].key || '';
+      }
+
+      async function refreshRecords(preferred) {
+        const values = await Promise.all(['links', 'status'].map(listResource));
+        records = { links: values[0], status: values[1] };
+        const keys = [];
+        values.forEach(function (items) {
+          items.forEach(function (record) { if (record && record.key && !keys.includes(record.key)) keys.push(record.key); });
+        });
+        const selected = preferredKey(preferred);
+        profilePicker.setKeys(keys, selected || 'default', keys.length === 0);
+        return profilePicker.value();
+      }
+
+      async function loadSelection(options) {
+        options = options || {};
+        setStatus('status.loading');
+        try {
+          const key = await refreshRecords(options.key || (profilePicker.isNew() ? '' : profilePicker.value()));
+          if (profilePicker.isNew()) resetForm(); else fillForm(key);
+          renderStatus();
+          setStatus('status.idle');
+          if (!options.silent) F.toast(T('toast.loaded'));
+        } catch (e) {
+          setStatus('status.idle');
+          if (!options.silent) F.toastError(e);
+          throw e;
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function saveAndApply(button) {
+        setBusy(button, true, T('status.applying'));
+        setStatus('status.applying');
+        try {
+          const data = payload();
+          await F.data.upsert('links', data.profile_key, data, { enabled: true });
+          await loadSelection({ key: data.profile_key, silent: true });
+          setStatus('status.applied');
+          F.toast(T('toast.applied'));
+        } catch (e) {
+          setStatus('status.applyFailed');
+          F.toastError(e);
+        } finally {
+          setBusy(button, false, T('action.apply'));
+          F.requestResize();
+        }
+      }
+
+      async function teardown(button) {
+        setBusy(button, true, T('status.deleting'));
+        setStatus('status.deleting');
+        try {
+          const data = payload();
+          await F.action('teardown', data);
+          await loadSelection({ key: data.profile_key, silent: true });
+          setStatus('status.deleted');
+          F.toast(T('toast.deleted'));
+        } catch (e) {
+          setStatus('status.deleteFailed');
+          F.toastError(e);
+        } finally {
+          setBusy(button, false, T('action.teardown'));
+          F.requestResize();
+        }
+      }
+
+      function renderRoutes(routes) {
+        routes = Array.isArray(routes) ? routes : [];
+        if (!routes.length) return null;
+        return F.h('div', { className: 'local-effective' }, [
+          textNode('h3', { className: 'local-section-title' }, 'effective.routes'),
+          F.h('div', { className: 'local-route-wrap' }, [F.table(
+            [T('route.dst'), T('route.gateway'), T('route.dev'), T('route.src'), T('route.table'), T('route.metric')],
+            routes.map(function (route) { return [route.dst, route.gateway, route.dev, route.src, route.table, route.metric]; })
+          )])
+        ]);
+      }
+
+      function renderStatus() {
+        stateBody.replaceChildren();
+        const data = lastStatusData;
+        if (!data) {
+          stateBody.appendChild(F.h('p', { className: F.classes.description, text: T('empty.status') }));
+          syncActionButtons();
+          return;
+        }
+        stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
+          F.stat(T('stat.phase'), data.phase || '-'),
+          F.stat(T('stat.local'), (data.local_interface || '-') + (data.local_ifindex ? ' #' + data.local_ifindex : '')),
+          F.stat(T('stat.mtu'), data.mtu || '-'),
+          F.stat(T('stat.addresses'), Array.isArray(data.addresses) ? data.addresses.length : 0),
+          F.stat(T('stat.routes'), Array.isArray(data.routes) ? data.routes.length : (data.route_count == null ? '-' : data.route_count)),
+          F.stat(T('stat.managed'), data.managed_link === true ? T('value.yes') : T('value.no')),
+          F.stat(T('stat.updated'), data.updated_at || '-')
+        ]));
+        if (Array.isArray(data.addresses) && data.addresses.length) {
+          stateBody.appendChild(F.h('div', { className: 'local-effective' }, [
+            textNode('h3', { className: 'local-section-title' }, 'effective.addresses'),
+            F.h('div', { className: 'local-addresses' }, data.addresses.map(function (value) { return F.badge(value); }))
+          ]));
+        }
+        const routes = renderRoutes(data.routes);
+        if (routes) stateBody.appendChild(routes);
+        syncActionButtons();
+      }
+
+      profilePicker.onChange(function (selection) {
+        if (selection.isNew) resetForm(); else fillForm(selection.key);
+        renderStatus();
+        setStatus('status.idle');
+        F.requestResize();
+      });
+
+      applyButton = i18nButton('action.apply', function () { saveAndApply(applyButton); });
+      teardownButton = i18nButton('action.teardown', function () { teardown(teardownButton); }, true);
+      loadButton = i18nButton('action.load', function () {
+        runButtonTask(loadButton, T('status.loading'), function () { return loadSelection({ silent: false }); }).catch(function () {});
+      }, true);
+      refreshButton = i18nButton('action.refresh', function () {
+        runButtonTask(refreshButton, T('status.loading'), function () { return loadSelection({ silent: true }); }).catch(function (e) { F.toastError(e); });
+      }, true);
+      syncActionButtons();
+      const page = F.h('main', { className: F.classes.page + ' local-page' }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                textNode('h1', { className: F.classes.title }, 'title'),
+                textNode('p', { className: F.classes.description }, 'desc')
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                bindText(F.badge(T('badge.netAdmin')), 'badge.netAdmin'),
+                bindText(F.badge(T('badge.dummy')), 'badge.dummy'),
+                status
+              ])
+            ])
+          ]),
+          F.h('div', { className: F.classes.grid }, [
+            i18nStat('stat.handoff', 'stat.handoff.value', 'stat.handoff.detail'),
+            i18nStat('stat.direction', 'stat.direction.value', 'stat.direction.detail'),
+            i18nStat('stat.routesTop', 'stat.routesTop.value', 'stat.routesTop.detail')
+          ]),
+          F.card([
+            textNode('h2', { className: F.classes.title }, 'profile.title'),
+            textNode('p', { className: F.classes.description }, 'profile.desc'),
+            F.h('div', { className: 'local-config-grid' }, [
+              field('field.profile', profilePicker.element),
+              field('field.localInterface', localInterface),
+              field('field.mtu', mtu)
+            ]),
+            field('field.addresses', addresses),
+            textNode('h3', { className: 'local-section-title' }, 'field.routes'),
+            routeEditor.element,
+            F.h('div', { className: F.classes.toolbar + ' local-actions' }, [
+              applyButton,
+              loadButton,
+              teardownButton,
+              refreshButton
+            ])
+          ]),
+          F.card([
+            textNode('h2', { className: F.classes.title }, 'lastStatus.title'),
+            stateBody
+          ])
+        ])
+      ]);
+
+      document.body.replaceChildren(page);
+      loadSelection({ silent: true }).catch(function (e) { F.toastError(e); }).finally(F.requestResize);
+    })();
+  </script>
+</body>
+</html>

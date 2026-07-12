@@ -253,17 +253,32 @@ func (pm *ProcessManager) pluginCatalogWithControlSurface(cfg *Config) PluginCat
 		if pm != nil {
 			db = pm.db
 		}
-		catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
+		catalogCfg := cfg
+		sourceDir := ""
+		if pm != nil {
+			catalogCfg, sourceDir = pm.appliedPluginCatalogConfig(cfg)
+		}
+		catalog := loadPluginCatalogWithControlRegistrationAndState(catalogCfg, db)
+		if sourceDir != "" {
+			catalog.Directory = sourceDir
+		}
 		if pm == nil {
 			return catalog
 		}
 		return applyPluginHookBindingsFromDB(catalog, pm.db)
 	}
 
-	catalog := loadPluginCatalogWithState(cfg, pm.db)
+	catalogCfg, sourceDir := pm.appliedPluginCatalogConfig(cfg)
+	catalog := loadPluginCatalogWithState(catalogCfg, pm.db)
+	catalog.Directory = sourceDir
 	snapshot := pm.pluginControlRuntime.Snapshot()
 	if len(snapshot.Plugins) == 0 && len(snapshot.Surfaces) == 0 {
-		snapshot = pm.pluginControlRuntime.Reconcile(catalog)
+		// This path is used by the initial dataplane reconcile while redistributeMu
+		// is held. Registration is side-effect free; persistent onReconcile handlers
+		// may synchronously request another redistribution and must run outside it.
+		applyPluginControlRegistrationSurfaces(&catalog, catalogCfg)
+		catalog = applyPluginStatesFromDB(catalog, pm.db)
+		return applyPluginHookBindingsFromDB(catalog, pm.db)
 	}
 	applyPluginRuntimeSnapshot(&catalog, snapshot)
 	catalog = applyPluginStatesFromDB(catalog, pm.db)
@@ -288,10 +303,22 @@ func (pm *ProcessManager) reconcilePluginDataplaneForCatalog(catalog PluginCatal
 }
 
 func (pm *ProcessManager) reconcilePluginsForRuntime() pluginRuntimeSnapshot {
+	snapshot, _ := pm.reconcilePluginsForRuntimeWithError()
+	return snapshot
+}
+
+func (pm *ProcessManager) reconcilePluginsForRuntimeWithError() (pluginRuntimeSnapshot, error) {
 	if pm == nil {
-		return pluginRuntimeSnapshot{}
+		return pluginRuntimeSnapshot{}, nil
 	}
-	catalog := loadPluginCatalogWithState(pm.cfg, pm.db)
+	catalogCfg, sourceDir := pm.appliedPluginCatalogConfig(pm.cfg)
+	catalog := loadPluginCatalogWithState(catalogCfg, pm.db)
+	catalog.Directory = sourceDir
+	return pm.reconcilePluginCatalogForRuntime(catalog)
+}
+
+func (pm *ProcessManager) reconcilePluginCatalogForRuntime(catalog PluginCatalog) (pluginRuntimeSnapshot, error) {
+	issues := make(map[string]string)
 	if pm.pluginControlRuntime != nil {
 		controlSnapshot := pm.pluginControlRuntime.Reconcile(catalog)
 		applyPluginRuntimeSnapshot(&catalog, controlSnapshot)
@@ -301,27 +328,47 @@ func (pm *ProcessManager) reconcilePluginsForRuntime() pluginRuntimeSnapshot {
 			if !ok || state.Error == "" {
 				continue
 			}
+			issues[plugin.ID] = state.Error
 			log.Printf("plugin control runtime: %s: %s", plugin.ID, state.Error)
 		}
 	} else {
 		applyPluginControlRegistrationSurfaces(&catalog, pm.cfg)
 		catalog = applyPluginStatesFromDB(catalog, pm.db)
 	}
-	refreshCorePlans := pluginCatalogHasActiveEgressNATPlansResource(catalog, pm.cfg) || pluginCatalogHasActiveForwardRulePlansResource(catalog, pm.cfg)
+	refreshCorePlans := pluginCatalogHasActiveEgressNATPlansResource(catalog, pm.cfg) || pluginCatalogHasActiveForwardRulePlansResource(catalog, pm.cfg) || pluginCatalogHasActiveDHCPv4PlansResource(catalog, pm.cfg)
 	catalog = applyPluginHookBindingsFromDB(catalog, pm.db)
 	snapshot, redistributed := pm.reconcilePluginDataplaneForCatalog(catalog)
+	if reconciler, ok := pm.pluginControlRuntime.(pluginControlPostDataplaneReconciler); ok {
+		for pluginID, err := range reconciler.ReapplyPluginRuntimeResourcesAfterDataplane(catalog, snapshot) {
+			issues[pluginID] = err.Error()
+			log.Printf("plugin post-dataplane runtime resource replay: %s: %v", pluginID, err)
+		}
+	}
 	for _, plugin := range catalog.Plugins {
 		state, ok := snapshot.stateFor(plugin.ID)
 		if !ok || state.Error == "" {
 			continue
 		}
+		issues[plugin.ID] = state.Error
 		log.Printf("plugin runtime: %s: %s", plugin.ID, state.Error)
 	}
 	pm.markPluginReconcileResourcesAfterRuntime(catalog, snapshot)
 	if refreshCorePlans && !redistributed {
 		pm.redistributeWorkers()
 	}
-	return snapshot
+	if len(issues) == 0 {
+		return snapshot, nil
+	}
+	ids := make([]string, 0, len(issues))
+	for id := range issues {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	messages := make([]string, 0, len(ids))
+	for _, id := range ids {
+		messages = append(messages, id+": "+issues[id])
+	}
+	return snapshot, fmt.Errorf("plugin runtime update failed: %s", strings.Join(messages, "; "))
 }
 
 func (pm *ProcessManager) ApplyPluginResourceReconcileFromControl(plugin LoadedPlugin, resource PluginResource) error {
@@ -336,8 +383,9 @@ func (pm *ProcessManager) ApplyPluginResourceReconcileFromControl(plugin LoadedP
 		_ = markPluginRuntimeError(pm.db, plugin.ID, "resource", resource.ID, err)
 		return err
 	}
-	catalog := loadPluginCatalogWithControlRegistrationAndState(pm.cfg, pm.db)
-	refreshCorePlans := pluginCatalogHasActiveEgressNATPlansResource(catalog, pm.cfg) || pluginCatalogHasActiveForwardRulePlansResource(catalog, pm.cfg) || pluginResourceAffectsActiveCorePlans(plugin, resource, pm.cfg)
+	catalogCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
+	catalog := loadPluginCatalogWithControlRegistrationAndState(catalogCfg, pm.db)
+	refreshCorePlans := pluginCatalogHasActiveEgressNATPlansResource(catalog, catalogCfg) || pluginCatalogHasActiveForwardRulePlansResource(catalog, catalogCfg) || pluginCatalogHasActiveDHCPv4PlansResource(catalog, catalogCfg) || pluginResourceAffectsActiveCorePlans(plugin, resource, catalogCfg)
 	catalog = applyPluginHookBindingsFromDB(catalog, pm.db)
 	snapshot, redistributed := pm.reconcilePluginDataplaneForCatalog(catalog)
 	for _, plugin := range catalog.Plugins {
@@ -402,6 +450,9 @@ func mergePluginRuntimeSnapshot(catalog *PluginCatalog, snapshot pluginRuntimeSn
 			continue
 		}
 		current := catalog.Plugins[i].Runtime
+		if next.WorkerQueue == nil {
+			next.WorkerQueue = current.WorkerQueue
+		}
 		if current.Mode == "" || current.Mode == pluginRuntimeModeRegistered || current.Mode == pluginRuntimeModeInvalid {
 			catalog.Plugins[i].Runtime = next
 			continue
@@ -502,6 +553,10 @@ func clonePluginRuntimeSnapshot(snapshot pluginRuntimeSnapshot) pluginRuntimeSna
 	out := pluginRuntimeSnapshot{Plugins: make(map[string]PluginRuntimeState, len(snapshot.Plugins))}
 	for id, state := range snapshot.Plugins {
 		state.Attachments = sortedPluginAttachmentStates(state.Attachments)
+		if state.WorkerQueue != nil {
+			queue := *state.WorkerQueue
+			state.WorkerQueue = &queue
+		}
 		out.Plugins[id] = state
 	}
 	if len(snapshot.Surfaces) > 0 {

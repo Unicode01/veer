@@ -1,0 +1,1385 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LAN Core</title>
+  <style>
+    .lan-page {
+      padding: 8px;
+    }
+    .lan-hero {
+      padding: 11px 12px;
+    }
+    .lan-hero .fwd-toolbar {
+      align-items: flex-start;
+    }
+    .lan-title-row {
+      min-width: 0;
+    }
+    .lan-badges {
+      justify-content: flex-end;
+    }
+    .lan-overview {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .lan-config-card {
+      display: grid;
+      gap: 12px;
+    }
+    .lan-config-card > * + * {
+      margin-top: 0;
+    }
+    .lan-section-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .lan-service-section {
+      grid-column: 1 / -1;
+    }
+    .lan-service-section .lan-form-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+    .lan-form-section {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 9px;
+      background: color-mix(in srgb, var(--fwd-surface-soft) 72%, transparent);
+    }
+    .lan-form-section > * + * {
+      margin-top: 10px;
+    }
+    .lan-section-title {
+      margin: 0;
+      color: var(--fwd-text);
+      font-size: 13px;
+      line-height: 1.25;
+      font-weight: 760;
+    }
+    .lan-form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 10px;
+      align-items: end;
+    }
+    .lan-field-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .lan-field-label > span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .lan-hint {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 999px;
+      color: var(--fwd-soft);
+      background: var(--fwd-surface);
+      font-size: 10px;
+      font-weight: 800;
+      cursor: help;
+    }
+    .lan-check-field {
+      min-height: 31px;
+      padding: 5px 8px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 8px;
+      background: var(--fwd-surface);
+    }
+    .lan-check-field label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .lan-check-field .fwd-input[type="checkbox"] {
+      flex: 0 0 auto;
+    }
+    .lan-protocols {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 31px;
+      padding: 5px 8px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 8px;
+      background: var(--fwd-surface);
+    }
+    .lan-protocols label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .lan-protocols .fwd-input[type="checkbox"] {
+      width: 30px;
+      min-width: 30px;
+      height: 18px;
+      min-height: 18px;
+    }
+    .lan-protocols .fwd-input[type="checkbox"]::before {
+      width: 12px;
+      height: 12px;
+    }
+    .lan-protocols .fwd-input[type="checkbox"]:checked::before {
+      transform: translateX(12px);
+    }
+    .lan-effective-list { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+    .lan-effective-row {
+      display: grid;
+      grid-template-columns: minmax(88px, 120px) minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+    }
+    .lan-effective-label {
+      padding-top: 3px;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .lan-runtime-note {
+      margin: 0;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .lan-actions {
+      justify-content: flex-end;
+      gap: 8px;
+      padding-top: 2px;
+    }
+    .lan-output-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .lan-output-card {
+      min-height: 68px;
+    }
+    .lan-traffic-table {
+      min-width: 0;
+      overflow-x: auto;
+    }
+    @media (max-width: 880px) {
+      .lan-section-grid,
+      .lan-output-grid,
+      .lan-overview {
+        grid-template-columns: 1fr;
+      }
+      .lan-service-section .lan-form-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+    @media (max-width: 620px) {
+      .lan-form-grid {
+        grid-template-columns: 1fr;
+      }
+      .lan-service-section .lan-form-grid {
+        grid-template-columns: 1fr;
+      }
+      .lan-actions .fwd-button {
+        flex: 1 1 auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const messages = {
+        'zh-CN': {
+          'status.idle': '空闲',
+          'status.saving': '保存中',
+          'status.saved': '已保存',
+          'status.saveFailed': '保存失败',
+          'status.applying': '应用中',
+          'status.applied': '已应用',
+          'status.applyFailed': '应用失败',
+          'status.disabling': '禁用中',
+          'status.disabled': '已禁用',
+          'status.disableFailed': '禁用失败',
+          'title': 'LAN Core',
+          'desc': '创建或管理 Linux bridge，记录托管 LAN 口，并将出站 NAT 与 WAN 下发的 IPv6 PD 接入核心运行时。',
+          'badge.netAdmin': 'net.admin',
+          'badge.bridge': 'bridge',
+          'stat.bridge': 'Bridge',
+          'stat.bridge.detail': '插件创建的系统可见 LAN bridge。',
+          'stat.ports': '端口',
+          'stat.ports.value': '自动检测',
+          'stat.ports.detail': '显示 Bridge 的全部实际成员；拆除时仍只移除本插件实际加入的端口。',
+          'stat.coreNat': '出站 NAT',
+          'stat.coreNat.value': '核心接入',
+          'stat.coreNat.detail': '核心运行时消费生成的出站 NAT 配置，不改写已保存规则。',
+          'profile.title': 'LAN 配置',
+          'profile.new': '新建 LAN...',
+          'profile.newPlaceholder': '输入新 LAN 名称',
+          'wan.title': 'WAN 出口',
+          'services.title': '地址服务',
+          'lastStatus.title': '最后状态',
+          'plan.title': '生成的核心配置',
+          'traffic.title': 'LAN 流量',
+          'traffic.desc': 'Bridge 统计表示进入或离开本机路由栈的 LAN 流量；成员口统计为各接口原始计数。',
+          'traffic.unavailable': '当前没有可用的 LAN 接口流量统计。',
+          'traffic.interface': '接口',
+          'traffic.packets': '{{count}} 个包',
+          'traffic.portStats': '实际成员口',
+          'field.lanID': 'LAN 配置',
+          'field.bridge': 'Bridge',
+          'field.ports': 'LAN 端口',
+          'field.addresses': '网关 CIDR',
+          'field.mtu': 'MTU',
+          'field.autoNat': '自动接入出站 NAT',
+          'field.autoIPv6PD': '自动下放 IPv6 PD',
+          'field.dhcpv4': '启用 DHCPv4',
+          'field.dnsMode': 'DNS 下发',
+          'field.dnsServers': '手动 DNS',
+          'field.poolStart': '地址池起点',
+          'field.poolEnd': '地址池终点',
+          'field.ipv6SubnetID': 'IPv6 子网编号',
+          'field.natType': 'NAT 类型',
+          'field.protocol': '协议',
+          'field.preserveBridge': '拆除时保留 Bridge',
+          'field.wanRef': 'WAN 会话',
+          'wan.manual': '手动输入 WAN 引用...',
+          'wan.manualPlaceholder': '输入 wan_core 记录名',
+          'field.egress': '出口接口',
+          'field.sourceIP': '源 IP',
+          'field.redirect': 'Redirect Mode',
+          'hint.bridge': 'Forward core 可见的 Linux bridge，例如 br-lan。',
+          'hint.ports': '需要由插件加入 Bridge 的接口，逗号分隔。状态区会另外显示 Bridge 的全部实际成员。',
+          'hint.addresses': '逗号分隔的 bridge 地址。',
+          'hint.autoNat': '只在 WAN 出口可解析时启用生成的出站 NAT 配置。',
+          'hint.autoIPv6PD': 'WAN Core 发布 PD 后，自动选择一个 /64 配置到 LAN，并启动路由与 RA。',
+          'hint.dhcpv4': '在现有 LAN bridge 上提供 DHCPv4；网关取第一个 IPv4 网关 CIDR。',
+          'hint.dnsMode': '自动继承 WAN Core DNS，或手动指定；禁用仅停止下发 DNS，不会关闭 DHCP。',
+          'hint.dnsServers': '逗号分隔 IPv4/IPv6 DNS；IPv4 通过 DHCPv4 Option 6，IPv6 通过 RA RDNSS/DHCPv6 下发。',
+          'hint.pool': '可选。留空时根据 LAN IPv4 网段自动选择地址池。',
+          'hint.ipv6SubnetID': '从 WAN 下发前缀中选择第几个 /64；单 LAN 通常保持 0。',
+          'hint.natType': 'symmetric 是默认路由器 NAT；full_cone 会允许外部复用已建立映射回连。',
+          'hint.protocol': '选择需要由出站 NAT 处理的四层协议。',
+          'hint.preserveBridge': '启用后拆除 LAN 时保留 Bridge；vmbr* 默认受保护。',
+          'hint.wanRef': '选择 wan_core 已发布的有效会话；只有特殊场景才手动输入。',
+          'hint.egress': '可选覆盖。留空时按 WAN Ref 从 wan_core 状态解析。',
+          'hint.sourceIP': '可选源 IP 覆盖。留空可继承 wan_core IPv4 metadata。',
+          'hint.redirect': '留空使用普通 TC。prepared_l2 只用于已验证的宿主命名空间 veth handoff peer。',
+          'action.save': '保存配置',
+          'action.load': '加载配置',
+          'action.apply': '应用网络',
+          'action.update': '更新网络',
+          'action.teardown': '拆除',
+          'action.refresh': '刷新状态',
+          'hint.noRuntime': '当前 LAN 尚未应用，无需拆除。',
+          'empty.status': '还没有已应用的 LAN 状态。',
+          'empty.plan': '还没有生成出站 NAT 配置。',
+          'empty.wans': '没有发现 WAN 会话，可手动输入引用。',
+          'error.keyRequired': '请输入新 LAN 名称。',
+          'error.protocolRequired': '至少选择一种协议。',
+          'toast.saved': 'LAN 配置已保存。',
+          'toast.loaded': 'LAN 配置已加载。',
+          'toast.applied': 'LAN bridge 已应用。',
+          'toast.disabled': 'LAN 网络已禁用。',
+          'stat.phase': '阶段',
+          'stat.statusBridge': 'Bridge',
+          'stat.statusPorts': '实际成员',
+          'stat.configuredPorts': '配置成员',
+          'stat.addresses': '网关地址',
+          'stat.managedPorts': '插件托管',
+          'stat.groCompat': '上行 MTU 适配',
+          'status.members': 'Bridge 成员',
+          'status.addresses': '网关地址',
+          'status.dns': '有效 DNS',
+          'stat.wanRef': 'WAN Ref',
+          'stat.statusMtu': 'MTU',
+          'stat.updated': '更新时间',
+          'stat.enabled': '启用',
+          'stat.parent': '父接口',
+          'stat.out': '出口',
+          'stat.source': '源 IP',
+          'stat.protocol': '协议',
+          'stat.natType': 'NAT 类型',
+          'stat.redirect': 'Redirect',
+          'stat.pdParent': 'WAN PD',
+          'stat.pdAssigned': 'LAN /64',
+          'stat.pdGateway': 'LAN / RA 接口',
+          'stat.dhcpv4': 'DHCPv4',
+          'stat.dnsMode': 'DNS 模式',
+          'stat.dnsServers': '有效 DNS',
+          'stat.pool': '地址池',
+          'stat.rxRate': '上行（RX）',
+          'stat.txRate': '下行（TX）',
+          'stat.rxTotal': '累计接收',
+          'stat.txTotal': '累计发送',
+          'value.symmetric': 'Symmetric',
+          'value.fullCone': 'Full Cone',
+          'value.yes': '是',
+          'value.no': '否',
+          'value.auto': '自动',
+          'value.dnsAuto': '自动继承',
+          'value.dnsManual': '手动指定',
+          'value.dnsDisabled': '不下发',
+          'value.groMembers': '{{count}} 个成员',
+          'value.notRequired': '无需'
+        },
+        'en-US': {
+          'status.idle': 'Idle',
+          'status.saving': 'Saving',
+          'status.saved': 'Saved',
+          'status.saveFailed': 'Save failed',
+          'status.applying': 'Applying',
+          'status.applied': 'Applied',
+          'status.applyFailed': 'Apply failed',
+          'status.disabling': 'Disabling',
+          'status.disabled': 'Disabled',
+          'status.disableFailed': 'Disable failed',
+          'title': 'LAN Core',
+          'desc': 'Creates or manages a Linux bridge, tracks LAN ports, and connects outbound NAT plus WAN delegated IPv6 prefixes to the core runtime.',
+          'badge.netAdmin': 'net.admin',
+          'badge.bridge': 'bridge',
+          'stat.bridge': 'Bridge',
+          'stat.bridge.detail': 'System-visible LAN bridge created by this plugin.',
+          'stat.ports': 'Ports',
+          'stat.ports.value': 'detected',
+          'stat.ports.detail': 'Shows every actual bridge member; teardown still detaches only ports attached by this plugin.',
+          'stat.coreNat': 'Outbound NAT',
+          'stat.coreNat.value': 'core handoff',
+          'stat.coreNat.detail': 'Core consumes the generated outbound NAT config at runtime without mutating saved rules.',
+          'profile.title': 'LAN Profile',
+          'profile.new': 'New LAN...',
+          'profile.newPlaceholder': 'Enter a new LAN name',
+          'wan.title': 'WAN Egress',
+          'services.title': 'Address Services',
+          'lastStatus.title': 'Last Status',
+          'plan.title': 'Generated Core Plans',
+          'traffic.title': 'LAN Traffic',
+          'traffic.desc': 'Bridge counters represent LAN traffic entering or leaving the host routing stack; member counters are raw per-interface totals.',
+          'traffic.unavailable': 'LAN interface traffic statistics are unavailable.',
+          'traffic.interface': 'Interface',
+          'traffic.packets': '{{count}} packets',
+          'traffic.portStats': 'Actual Member Ports',
+          'field.lanID': 'LAN Profile',
+          'field.bridge': 'Bridge',
+          'field.ports': 'LAN Ports',
+          'field.addresses': 'Gateway CIDRs',
+          'field.mtu': 'MTU',
+          'field.autoNat': 'Auto Outbound NAT',
+          'field.autoIPv6PD': 'Auto IPv6 PD',
+          'field.dhcpv4': 'Enable DHCPv4',
+          'field.dnsMode': 'DNS Distribution',
+          'field.dnsServers': 'Manual DNS',
+          'field.poolStart': 'Pool Start',
+          'field.poolEnd': 'Pool End',
+          'field.ipv6SubnetID': 'IPv6 Subnet Index',
+          'field.natType': 'NAT Type',
+          'field.protocol': 'Protocols',
+          'field.preserveBridge': 'Preserve Bridge on Teardown',
+          'field.wanRef': 'WAN Session',
+          'wan.manual': 'Enter WAN reference...',
+          'wan.manualPlaceholder': 'Enter wan_core record key',
+          'field.egress': 'Egress Interface',
+          'field.sourceIP': 'Source IP',
+          'field.redirect': 'Redirect Mode',
+          'hint.bridge': 'Linux bridge visible to Forward core, e.g. br-lan.',
+          'hint.ports': 'Comma-separated interfaces that this plugin should attach. Runtime status separately shows every actual bridge member.',
+          'hint.addresses': 'Comma-separated bridge addresses.',
+          'hint.autoNat': 'Enable generated outbound NAT only when WAN egress is known.',
+          'hint.autoIPv6PD': 'When WAN Core publishes a delegated prefix, select a /64 for this LAN and enable routing plus RA.',
+          'hint.dhcpv4': 'Serve DHCPv4 on the existing LAN bridge. The first IPv4 gateway CIDR supplies the server address.',
+          'hint.dnsMode': 'Inherit WAN Core DNS automatically, specify it manually, or stop distributing DNS while keeping DHCP enabled.',
+          'hint.dnsServers': 'Comma-separated IPv4/IPv6 DNS. IPv4 uses DHCPv4 Option 6; IPv6 uses RA RDNSS and DHCPv6.',
+          'hint.pool': 'Optional. Leave blank to derive a pool from the LAN IPv4 subnet.',
+          'hint.ipv6SubnetID': 'Select the /64 index inside the WAN delegated prefix. Keep 0 for a single LAN.',
+          'hint.natType': 'symmetric is the default router NAT; full_cone allows external peers to reuse an established mapping.',
+          'hint.protocol': 'Select the L4 protocols handled by outbound NAT.',
+          'hint.preserveBridge': 'Keep the bridge when tearing down this LAN. vmbr* bridges are protected by default.',
+          'hint.wanRef': 'Select a session published by wan_core. Enter a key manually only for special cases.',
+          'hint.egress': 'Optional override. Leave blank to resolve from wan_core status by WAN Ref.',
+          'hint.sourceIP': 'Optional source IP override. Blank can inherit wan_core IPv4 metadata.',
+          'hint.redirect': 'Leave blank for normal TC. Use prepared_l2 only for verified veth handoff peers in the host namespace.',
+          'action.save': 'Save Profile',
+          'action.load': 'Load Profile',
+          'action.apply': 'Apply Network',
+          'action.update': 'Update Network',
+          'action.teardown': 'Teardown',
+          'action.refresh': 'Refresh Status',
+          'hint.noRuntime': 'This LAN is not applied, so there is nothing to tear down.',
+          'empty.status': 'No applied LAN status yet.',
+          'empty.plan': 'No generated outbound NAT config yet.',
+          'empty.wans': 'No WAN session discovered. A reference can be entered manually.',
+          'error.keyRequired': 'Enter a new LAN name.',
+          'error.protocolRequired': 'Select at least one protocol.',
+          'toast.saved': 'LAN profile saved.',
+          'toast.loaded': 'LAN profile loaded.',
+          'toast.applied': 'LAN bridge applied.',
+          'toast.disabled': 'LAN network disabled.',
+          'stat.phase': 'Phase',
+          'stat.statusBridge': 'Bridge',
+          'stat.statusPorts': 'Actual Members',
+          'stat.configuredPorts': 'Configured Members',
+          'stat.addresses': 'Gateway Addresses',
+          'stat.managedPorts': 'Plugin Managed',
+          'stat.groCompat': 'Upload MTU Adaptation',
+          'status.members': 'Bridge Members',
+          'status.addresses': 'Gateway Addresses',
+          'status.dns': 'Effective DNS',
+          'stat.wanRef': 'WAN Ref',
+          'stat.statusMtu': 'MTU',
+          'stat.updated': 'Updated',
+          'stat.enabled': 'Enabled',
+          'stat.parent': 'Parent',
+          'stat.out': 'Out',
+          'stat.source': 'Source IP',
+          'stat.protocol': 'Protocols',
+          'stat.natType': 'NAT Type',
+          'stat.redirect': 'Redirect',
+          'stat.pdParent': 'WAN PD',
+          'stat.pdAssigned': 'LAN /64',
+          'stat.pdGateway': 'LAN / RA Interface',
+          'stat.dhcpv4': 'DHCPv4',
+          'stat.dnsMode': 'DNS Mode',
+          'stat.dnsServers': 'Effective DNS',
+          'stat.pool': 'Address Pool',
+          'stat.rxRate': 'Upload (RX)',
+          'stat.txRate': 'Download (TX)',
+          'stat.rxTotal': 'Received',
+          'stat.txTotal': 'Transmitted',
+          'value.symmetric': 'Symmetric',
+          'value.fullCone': 'Full Cone',
+          'value.yes': 'yes',
+          'value.no': 'no',
+          'value.auto': 'auto',
+          'value.dnsAuto': 'Auto inherit',
+          'value.dnsManual': 'Manual',
+          'value.dnsDisabled': 'Do not distribute',
+          'value.groMembers': '{{count}} members',
+          'value.notRequired': 'Not required'
+        }
+      };
+
+      const textBindings = [];
+      const attrBindings = [];
+      let statusKey = 'status.idle';
+      let lastStatusData = null;
+      let lastPlanData = null;
+      let lastIPv6PlanData = null;
+      let lastDHCPv4PlanData = null;
+      let trafficView = null;
+      let trafficSamples = {};
+      let trafficRequestSerial = 0;
+      let pendingButton = null;
+      let pendingLabel = '';
+      let saveButton = null;
+      let loadButton = null;
+      let applyButton = null;
+      let teardownButton = null;
+      let refreshButton = null;
+
+      function T(key, params) {
+        return F.t(messages, key, params);
+      }
+
+      function bindText(node, key, params) {
+        node.textContent = T(key, params);
+        textBindings.push({ node, key, params });
+        return node;
+      }
+
+      function bindPrefixedText(node, prefix, key, params) {
+        node.textContent = String(prefix || '') + T(key, params);
+        textBindings.push({ node, prefix: String(prefix || ''), key, params });
+        return node;
+      }
+
+      function bindAttr(node, attr, key, params) {
+        node.setAttribute(attr, T(key, params));
+        attrBindings.push({ node, attr, key, params });
+        return node;
+      }
+
+      function textNode(tag, opts, key, params) {
+        return bindText(F.h(tag, opts || {}), key, params);
+      }
+
+      function i18nButton(key, handler, secondary) {
+        return bindText(F.button(T(key), handler, secondary), key);
+      }
+
+      function setStatus(key) {
+        statusKey = key;
+        status.textContent = T(key);
+      }
+
+      function refreshI18n() {
+        textBindings.forEach((item) => {
+          item.node.textContent = (item.prefix || '') + T(item.key, item.params);
+        });
+        attrBindings.forEach((item) => {
+          item.node.setAttribute(item.attr, T(item.key, item.params));
+        });
+        status.textContent = T(statusKey);
+        lanPicker.refreshLabels();
+        wanPicker.refreshLabels();
+        renderStatus();
+        renderPlan();
+        renderTraffic();
+        F.requestResize();
+      }
+
+      const status = F.status(T('status.idle'));
+      const stateBody = F.h('div', { className: F.classes.stack });
+      const planBody = F.h('div', { className: F.classes.stack });
+      const trafficBody = F.h('div', { className: F.classes.stack });
+      let records = { profiles: [], status: [], plans: [], ipv6Plans: [], dhcpv4Plans: [] };
+      let wanRecords = [];
+      let lanProfileField = null;
+      let wanReferenceField = null;
+      const lanPicker = F.recordPicker({
+        newLabel: function () { return T('profile.new'); },
+        newPlaceholder: function () { return T('profile.newPlaceholder'); },
+        defaultKey: 'default'
+      });
+      const wanPicker = F.recordPicker({
+        newLabel: function () { return T('wan.manual'); },
+        newPlaceholder: function () { return T('wan.manualPlaceholder'); },
+        defaultKey: 'default'
+      });
+      const bridge = input('br-lan', 'br-lan');
+      const ports = input('', 'eth1, eth2, eth3');
+      const addresses = input('192.168.100.1/24', '192.168.100.1/24, fd00:100::1/64');
+      const mtu = input('1500', 'mtu', 'number');
+      const wanEgress = input('', 'eth0 / pppoe-wan / fwdvtap0');
+      const wanSource = input('', 'optional WAN source IP');
+      const redirectMode = input('', 'blank / prepared_l2');
+      const natType = select([['symmetric', 'value.symmetric'], ['full_cone', 'value.fullCone']]);
+      const autoNAT = checkbox(true);
+      const autoIPv6PD = checkbox(true);
+      const dhcpv4Enabled = checkbox(true);
+      const dnsMode = select([['auto', 'value.dnsAuto'], ['manual', 'value.dnsManual'], ['disabled', 'value.dnsDisabled']]);
+      const dnsServers = input('', '223.5.5.5, 2400:3200::1');
+      const dhcpv4PoolStart = input('', '192.168.100.100');
+      const dhcpv4PoolEnd = input('', '192.168.100.200');
+      let dnsServersField = null;
+      let dhcpv4PoolStartField = null;
+      let dhcpv4PoolEndField = null;
+      const ipv6SubnetID = input('0', '0', 'number');
+      ipv6SubnetID.min = '0';
+      ipv6SubnetID.max = '65535';
+      ipv6SubnetID.step = '1';
+      const preserveBridge = checkbox(false);
+      const protocolTCP = checkbox(true);
+      const protocolUDP = checkbox(true);
+      const protocolICMP = checkbox(false);
+      const protocolControl = F.h('div', { className: 'lan-protocols' }, [
+        F.h('label', null, [protocolTCP, F.h('span', { text: 'TCP' })]),
+        F.h('label', null, [protocolUDP, F.h('span', { text: 'UDP' })]),
+        F.h('label', null, [protocolICMP, F.h('span', { text: 'ICMP' })])
+      ]);
+      F.onLocaleChange(refreshI18n);
+
+      function input(value, placeholder, type) {
+        return F.h('input', {
+          className: F.classes.input,
+          attrs: { type: type || 'text', value, placeholder }
+        });
+      }
+
+      function checkbox(checked) {
+        return F.h('input', {
+          className: F.classes.input,
+          attrs: { type: 'checkbox', checked: !!checked }
+        });
+      }
+
+      function select(options) {
+        return F.h('select', { className: F.classes.input }, options.map((item) => {
+          const option = F.h('option', { text: T(item[1]), attrs: { value: item[0] } });
+          textBindings.push({ node: option, key: item[1] });
+          return option;
+        }));
+      }
+
+      function field(labelKey, control, hintKey) {
+        const labelChildren = [textNode('span', null, labelKey)];
+        if (hintKey) {
+          labelChildren.push(bindAttr(F.h('span', { className: 'lan-hint', text: '?' }), 'title', hintKey));
+        }
+        return F.h('label', { className: F.classes.field + ' lan-field' }, [
+          F.h('span', { className: 'lan-field-label' }, labelChildren),
+          control
+        ]);
+      }
+
+      function checkboxField(labelKey, control, hintKey) {
+        const label = F.h('label', null, [
+          control,
+          bindPrefixedText(F.h('span'), '', labelKey)
+        ]);
+        if (hintKey) bindAttr(label, 'title', hintKey);
+        return F.h('div', { className: F.classes.field + ' lan-check-field' }, [
+          label
+        ]);
+      }
+
+      function section(titleKey, children, extraClass) {
+        return F.h('section', { className: 'lan-form-section' + (extraClass ? ' ' + extraClass : '') }, [
+          textNode('h2', { className: 'lan-section-title' }, titleKey),
+          F.h('div', { className: 'lan-form-grid' }, children)
+        ]);
+      }
+
+      function actions(children) {
+        return F.h('div', { className: F.classes.toolbar + ' lan-actions' }, children);
+      }
+
+      function setBusy(button, busy, text) {
+        pendingButton = busy ? button : null;
+        pendingLabel = busy && text ? text : '';
+        syncActionButtons();
+      }
+
+      function syncActionButtons() {
+        if (!applyButton) return;
+        const phase = String(lastStatusData && lastStatusData.phase || '').toLowerCase();
+        const applied = phase === 'applied';
+        const removable = !!lastStatusData && !['disabled', 'deleted'].includes(phase);
+        [saveButton, loadButton, refreshButton].forEach(function (button) {
+          F.setButtonState(button, {
+            label: button === pendingButton ? pendingLabel : T(button === saveButton ? 'action.save' : (button === loadButton ? 'action.load' : 'action.refresh')),
+            busy: button === pendingButton,
+            disabled: !!pendingButton && button !== pendingButton
+          });
+        });
+        F.setButtonState(applyButton, {
+          label: applyButton === pendingButton ? pendingLabel : T(applied ? 'action.update' : 'action.apply'),
+          busy: applyButton === pendingButton,
+          disabled: !!pendingButton && applyButton !== pendingButton
+        });
+        F.setButtonState(teardownButton, {
+          label: teardownButton === pendingButton ? pendingLabel : T('action.teardown'),
+          busy: teardownButton === pendingButton,
+          disabled: !removable || (!!pendingButton && teardownButton !== pendingButton),
+          tone: 'danger',
+          title: removable ? '' : T('hint.noRuntime')
+        });
+      }
+
+      async function runButtonTask(button, busyText, task) {
+        if (pendingButton) return;
+        setBusy(button, true, busyText);
+        try {
+          await task();
+        } finally {
+          setBusy(button, false);
+          F.requestResize();
+        }
+      }
+
+      function key() {
+        const value = lanPicker.value();
+        if (!value) throw new Error(T('error.keyRequired'));
+        return value;
+      }
+
+      function wanKey() {
+        return wanPicker.value() || 'default';
+      }
+
+      function csv(value) {
+        return value.split(',').map((item) => item.trim()).filter(Boolean);
+      }
+
+      function payload() {
+        const protocols = [];
+        if (protocolTCP.checked) protocols.push('tcp');
+        if (protocolUDP.checked) protocols.push('udp');
+        if (protocolICMP.checked) protocols.push('icmp');
+        if (!protocols.length) throw new Error(T('error.protocolRequired'));
+        return {
+          key: key(),
+          lan_id: key(),
+          bridge: bridge.value.trim() || 'br-lan',
+          ports: csv(ports.value),
+          addresses: csv(addresses.value),
+          mtu: Number(mtu.value || 1500),
+          wan_ref: wanKey(),
+          wan_egress_interface: wanEgress.value.trim(),
+          wan_egress_source_ip: wanSource.value.trim(),
+          redirect_mode: redirectMode.value.trim(),
+          nat_type: natType.value || 'symmetric',
+          protocol: protocols.join('+'),
+          auto_egress_nat: autoNAT.checked,
+          auto_ipv6_pd: autoIPv6PD.checked,
+          dhcpv4_enabled: dhcpv4Enabled.checked,
+          dhcpv4_pool_start: dhcpv4PoolStart.value.trim(),
+          dhcpv4_pool_end: dhcpv4PoolEnd.value.trim(),
+          dns_mode: dnsMode.value || 'auto',
+          dns_servers: csv(dnsServers.value),
+          ipv6_subnet_id: Number(ipv6SubnetID.value || 0),
+          preserve_bridge: preserveBridge.checked
+        };
+      }
+
+      function resetForm() {
+        bridge.value = 'br-lan';
+        ports.value = '';
+        addresses.value = '192.168.100.1/24';
+        mtu.value = '1500';
+        const wanKeys = wanRecords.map(function (item) { return item.key; });
+        wanPicker.setKeys(wanKeys, wanKeys[0] || 'default', wanKeys.length === 0);
+        updateWANPickerVisibility();
+        wanEgress.value = '';
+        wanSource.value = '';
+        redirectMode.value = '';
+        natType.value = 'symmetric';
+        autoNAT.checked = true;
+        autoIPv6PD.checked = true;
+        dhcpv4Enabled.checked = true;
+        dnsMode.value = 'auto';
+        dnsServers.value = '';
+        dhcpv4PoolStart.value = '';
+        dhcpv4PoolEnd.value = '';
+        ipv6SubnetID.value = '0';
+        preserveBridge.checked = false;
+        protocolTCP.checked = true;
+        protocolUDP.checked = true;
+        protocolICMP.checked = false;
+        lastStatusData = null;
+        lastPlanData = null;
+        lastIPv6PlanData = null;
+        lastDHCPv4PlanData = null;
+        syncAddressServiceFields();
+      }
+
+      function recordData(resource, recordKey) {
+        const list = records[resource] || [];
+        const record = list.find(function (item) { return item && item.key === recordKey; });
+        return record && record.data ? Object.assign({ updated_at: record.updated_at || '' }, record.data) : null;
+      }
+
+      function fillForm(recordKey) {
+        const data = recordData('profiles', recordKey) || {};
+        bridge.value = data.bridge || data.bridge_interface || 'br-lan';
+        ports.value = Array.isArray(data.ports) ? data.ports.join(', ') : (data.ports || '');
+        addresses.value = Array.isArray(data.addresses) ? data.addresses.join(', ') : (data.addresses || data.ipv4_cidr || '192.168.100.1/24');
+        mtu.value = data.mtu || data.bridge_mtu || 1500;
+        const ref = data.wan_ref || data.wan || 'default';
+        const wanKeys = wanRecords.map(function (item) { return item.key; });
+        let selectedRef = ref;
+        if (!wanKeys.includes(ref)) {
+          if (ref !== 'default') wanKeys.push(ref);
+          else selectedRef = wanKeys.includes(wanPicker.value()) ? wanPicker.value() : (wanKeys[0] || ref);
+        }
+        wanPicker.setKeys(wanKeys, selectedRef, wanKeys.length === 0);
+        updateWANPickerVisibility();
+        wanEgress.value = data.wan_egress_interface || data.out_interface || '';
+        wanSource.value = data.wan_egress_source_ip || data.out_source_ip || '';
+        redirectMode.value = data.redirect_mode || data.egress_nat_redirect_mode || '';
+        natType.value = data.nat_type === 'full_cone' ? 'full_cone' : 'symmetric';
+        autoNAT.checked = data.auto_egress_nat !== false;
+        autoIPv6PD.checked = data.auto_ipv6_pd !== false;
+        dhcpv4Enabled.checked = data.dhcpv4_enabled === true;
+        dnsMode.value = ['auto', 'manual', 'disabled'].includes(data.dns_mode) ? data.dns_mode : 'auto';
+        dnsServers.value = Array.isArray(data.dns_servers) ? data.dns_servers.join(', ') : (data.dns_servers || '');
+        dhcpv4PoolStart.value = data.dhcpv4_pool_start || '';
+        dhcpv4PoolEnd.value = data.dhcpv4_pool_end || '';
+        ipv6SubnetID.value = data.ipv6_subnet_id == null ? '0' : String(data.ipv6_subnet_id);
+        preserveBridge.checked = data.preserve_bridge === true || String(bridge.value).toLowerCase().indexOf('vmbr') === 0;
+        const selected = new Set(String(data.protocol || 'tcp+udp').toLowerCase().split('+'));
+        protocolTCP.checked = selected.has('tcp');
+        protocolUDP.checked = selected.has('udp');
+        protocolICMP.checked = selected.has('icmp');
+        lastStatusData = recordData('status', recordKey);
+        lastPlanData = recordData('plans', recordKey);
+        lastIPv6PlanData = recordData('ipv6Plans', recordKey);
+        lastDHCPv4PlanData = recordData('dhcpv4Plans', recordKey);
+        syncAddressServiceFields();
+      }
+
+      async function listResource(resource) {
+        const response = await F.data.list(resource, { limit: 64 });
+        return response && Array.isArray(response.records) ? response.records : [];
+      }
+
+      async function refreshWANs(preferred) {
+        try {
+          const result = await F.plugins.resources.list('wan_core', 'status', { limit: 128 });
+          wanRecords = result && Array.isArray(result.records) ? result.records : [];
+        } catch (e) {
+          wanRecords = [];
+        }
+        const keys = wanRecords.map(function (item) { return item.key; });
+        const active = wanRecords.find(function (record) {
+          const data = record && record.data || {};
+          const phase = String(data.phase || data.state || '').toLowerCase();
+          return record && record.enabled !== false && data.usable !== false && ['applied', 'up', 'ready', 'active'].includes(phase);
+        });
+        let selected = preferred && keys.includes(preferred) ? preferred : (active ? active.key : (keys[0] || ''));
+        if (!selected && preferred) selected = preferred;
+        if (preferred && preferred !== 'default' && !keys.includes(preferred)) keys.push(preferred);
+        wanPicker.setKeys(keys, selected || 'default', keys.length === 0);
+        updateWANPickerVisibility();
+      }
+
+      function preferredProfile(preferred) {
+        if (preferred) return preferred;
+        const active = records.status.find(function (record) {
+          const phase = String(record && record.data && record.data.phase || '');
+          return phase === 'applied' || phase === 'error';
+        });
+        if (active) return active.key;
+        const enabled = records.profiles.find(function (record) { return record && record.enabled !== false; });
+        return enabled ? enabled.key : '';
+      }
+
+      function updateProfilePickerVisibility() {
+        if (!lanProfileField) return;
+        lanProfileField.hidden = lanPicker.keys().length <= 1;
+      }
+
+      function updateWANPickerVisibility() {
+        if (!wanReferenceField) return;
+        wanReferenceField.hidden = wanPicker.keys().length <= 1;
+      }
+
+      async function refreshRecords(preferred) {
+        const values = await Promise.all([
+          listResource('profiles'),
+          listResource('status'),
+          listResource('egress_nat_plans'),
+          listResource('ipv6_assignment_plans'),
+          listResource('dhcpv4_plans')
+        ]);
+        records = { profiles: values[0], status: values[1], plans: values[2], ipv6Plans: values[3], dhcpv4Plans: values[4] };
+        const keys = [];
+        values.forEach(function (items) {
+          items.forEach(function (record) { if (record && record.key && !keys.includes(record.key)) keys.push(record.key); });
+        });
+        const selected = preferredProfile(preferred);
+        lanPicker.setKeys(keys, selected || 'default', keys.length === 0);
+        updateProfilePickerVisibility();
+        return lanPicker.value();
+      }
+
+      async function saveProfile(options) {
+        options = options || {};
+        setStatus('status.saving');
+        try {
+          const p = payload();
+          await F.data.upsert('profiles', p.lan_id, p, { enabled: true });
+          await refreshRecords(p.lan_id);
+          fillForm(p.lan_id);
+          setStatus('status.saved');
+          if (!options.silent) F.toast(T('toast.saved'));
+          return p;
+        } catch (e) {
+          setStatus('status.saveFailed');
+          if (!options.silent) F.toastError(e);
+          throw e;
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function loadProfile(options) {
+        options = options || {};
+        try {
+          const selected = await refreshRecords(options.key || (lanPicker.isNew() ? '' : lanPicker.value()));
+          const current = recordData('profiles', selected);
+          const currentWAN = current && (current.wan_ref || current.wan) || 'default';
+          await refreshWANs(currentWAN);
+          if (lanPicker.isNew()) resetForm(); else fillForm(selected);
+          renderStatus();
+          renderPlan();
+          await loadTraffic({ key: selected, silent: true });
+          if (!options.silent) F.toast(T('toast.loaded'));
+        } catch (e) {
+          if (!options.silent) F.toastError(e);
+          throw e;
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function apply(button) {
+        setBusy(button, true, T('status.applying'));
+        setStatus('status.applying');
+        try {
+          const p = payload();
+          await F.action('apply_network', p);
+          await loadProfile({ key: p.lan_id, silent: true });
+          setStatus('status.applied');
+          F.toast(T('toast.applied'));
+        } catch (e) {
+          setStatus('status.applyFailed');
+          F.toastError(e);
+        } finally {
+          setBusy(button, false, T('action.apply'));
+          F.requestResize();
+        }
+      }
+
+      async function teardown(button) {
+        setBusy(button, true, T('status.disabling'));
+        setStatus('status.disabling');
+        try {
+          const p = payload();
+          await F.action('teardown', p);
+          await loadProfile({ key: p.lan_id, silent: true });
+          setStatus('status.disabled');
+          F.toast(T('toast.disabled'));
+        } catch (e) {
+          setStatus('status.disableFailed');
+          F.toastError(e);
+        } finally {
+          setBusy(button, false, T('action.teardown'));
+          F.requestResize();
+        }
+      }
+
+      function i18nStat(labelKey, value, detailKey, valueIsKey) {
+        const node = F.h('div', { className: F.classes.stat }, [
+          textNode('span', { className: F.classes.statLabel }, labelKey),
+          valueIsKey
+            ? textNode('span', { className: F.classes.statValue }, value)
+            : F.h('span', { className: F.classes.statValue, text: value == null || value === '' ? '-' : String(value) })
+        ]);
+        if (detailKey) bindAttr(node, 'title', detailKey);
+        return node;
+      }
+
+      function renderStatus() {
+        stateBody.replaceChildren();
+        if (!lastStatusData) {
+          stateBody.appendChild(F.h('p', {
+            className: F.classes.description,
+            text: T('empty.status')
+          }));
+          syncActionButtons();
+          return;
+        }
+        const data = lastStatusData;
+        const bridgeMembers = Array.isArray(data.bridge_members) ? data.bridge_members : (Array.isArray(data.ports) ? data.ports : []);
+        const configuredPorts = Array.isArray(data.configured_ports) ? data.configured_ports : (Array.isArray(data.ports) ? data.ports : []);
+        const memberGRO = data.member_gro || null;
+        stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
+          F.stat(T('stat.phase'), data.phase || '-'),
+          F.stat(T('stat.statusBridge'), data.bridge || '-'),
+          F.stat(T('stat.statusPorts'), bridgeMembers.length),
+          F.stat(T('stat.configuredPorts'), configuredPorts.length),
+          F.stat(T('stat.addresses'), Array.isArray(data.bridge_addresses) ? data.bridge_addresses.length : 0),
+          F.stat(T('stat.managedPorts'), Array.isArray(data.managed_ports) ? data.managed_ports.length : 0),
+          F.stat(T('stat.groCompat'), memberGRO ? (memberGRO.required ? T('value.groMembers', { count: Array.isArray(memberGRO.members) ? memberGRO.members.length : 0 }) : T('value.notRequired')) : '-'),
+          F.stat(T('stat.wanRef'), data.wan_ref || '-'),
+          F.stat(T('stat.dnsMode'), dnsModeLabel(data.dns && data.dns.mode)),
+          F.stat(T('stat.dnsServers'), data.dns && Array.isArray(data.dns.servers) ? data.dns.servers.length : 0),
+          F.stat(T('stat.statusMtu'), data.bridge_mtu || data.mtu || '-'),
+          F.stat(T('stat.updated'), data.updated_at || '-')
+        ]));
+        const addressesList = Array.isArray(data.bridge_addresses) ? data.bridge_addresses : [];
+        appendEffectiveRow(stateBody, 'status.members', bridgeMembers, memberBadge);
+        appendEffectiveRow(stateBody, 'status.addresses', addressesList);
+        const effectiveDNS = data.dns && Array.isArray(data.dns.servers) ? data.dns.servers : [];
+        appendEffectiveRow(stateBody, 'status.dns', effectiveDNS);
+        if (data.bridge_members_error) stateBody.appendChild(F.h('p', { className: 'lan-runtime-note', text: data.bridge_members_error }));
+        if (memberGRO && Array.isArray(memberGRO.errors) && memberGRO.errors.length) {
+          stateBody.appendChild(F.h('p', { className: 'lan-runtime-note', text: memberGRO.errors.join('; ') }));
+        }
+        if (data.last_error) stateBody.appendChild(F.h('p', { className: 'lan-runtime-note', text: data.last_error }));
+        syncActionButtons();
+      }
+
+      function appendEffectiveRow(parent, labelKey, values, renderValue) {
+        values = Array.isArray(values) ? values : [];
+        if (!values.length) return;
+        const badges = values.map(function (value) {
+          return renderValue ? renderValue(value) : F.badge(String(value || ''));
+        }).filter(Boolean);
+        if (!badges.length) return;
+        parent.appendChild(F.h('div', { className: 'lan-effective-row' }, [
+          textNode('span', { className: 'lan-effective-label' }, labelKey),
+          F.h('div', { className: 'lan-effective-list' }, badges)
+        ]));
+      }
+
+      function memberBadge(value) {
+        const member = value && typeof value === 'object' ? value : { name: String(value || '') };
+        const name = String(member.name || member.interface || '');
+        if (!name) return null;
+        const details = [];
+        if (member.kind) details.push(String(member.kind));
+        if (member.oper_state) details.push(String(member.oper_state));
+        if (member.configured === true) details.push(T('stat.configuredPorts'));
+        if (member.managed === true) details.push(T('stat.managedPorts'));
+        if (member.gro === false) details.push('GRO off');
+        const badge = F.badge(name);
+        if (details.length) badge.title = details.join(' / ');
+        return badge;
+      }
+
+      function renderPlan() {
+        planBody.replaceChildren();
+        if (!lastPlanData && !lastIPv6PlanData && !lastDHCPv4PlanData) {
+          planBody.appendChild(F.h('p', {
+            className: F.classes.description,
+            text: T('empty.plan')
+          }));
+          return;
+        }
+        if (lastDHCPv4PlanData) {
+          const data = lastDHCPv4PlanData;
+          const pool = [data.pool_start, data.pool_end].filter(Boolean).join(' - ') || T('value.auto');
+          const dns = Array.isArray(data.dns_servers) && data.dns_servers.length ? data.dns_servers.join(', ') : '-';
+          planBody.appendChild(F.h('div', { className: F.classes.grid }, [
+            F.stat(T('stat.dhcpv4'), data.enabled ? T('value.yes') : T('value.no')),
+            F.stat(T('stat.dnsMode'), dnsModeLabel(data.dns_mode)),
+            F.stat(T('stat.dnsServers'), dns),
+            F.stat(T('stat.pool'), pool)
+          ]));
+          if (data.note || data.last_error) {
+            planBody.appendChild(F.h('p', { className: 'lan-runtime-note', text: data.last_error || data.note }));
+          }
+        }
+        if (lastPlanData) {
+          const data = lastPlanData;
+          planBody.appendChild(F.h('div', { className: F.classes.grid }, [
+            F.stat(T('stat.enabled'), data.enabled ? T('value.yes') : T('value.no')),
+            F.stat(T('stat.parent'), data.parent_interface || '-'),
+            F.stat(T('stat.out'), data.out_interface || '-'),
+            F.stat(T('stat.source'), data.out_source_ip || '-'),
+            F.stat(T('stat.protocol'), data.protocol || '-'),
+            F.stat(T('stat.natType'), data.nat_type || '-'),
+            F.stat(T('stat.redirect'), data.redirect_mode || '-')
+          ]));
+          if (data.note || data.last_error) {
+            planBody.appendChild(F.h('p', { className: 'lan-runtime-note', text: data.last_error || data.note }));
+          }
+        }
+        if (lastIPv6PlanData) {
+          const data = lastIPv6PlanData;
+          planBody.appendChild(F.h('div', { className: F.classes.grid }, [
+            F.stat(T('stat.pdParent'), data.parent_prefix || '-'),
+            F.stat(T('stat.pdAssigned'), data.assigned_prefix || '-'),
+            F.stat(T('stat.pdGateway'), data.target_interface || '-'),
+            F.stat(T('stat.enabled'), data.enabled ? T('value.yes') : T('value.no'))
+          ]));
+          if (data.note || data.last_error) {
+            planBody.appendChild(F.h('p', { className: 'lan-runtime-note', text: data.last_error || data.note }));
+          }
+        }
+      }
+
+      function updateTraffic(data) {
+        if (!data || data.available !== true || !data.bridge) {
+          trafficView = { available: false, reason: data && data.reason || '' };
+          renderTraffic();
+          return;
+        }
+        const sampledAt = Math.max(0, Number(data.sampled_at_ms || Date.now()));
+        const profileKey = String(data.profile_key || 'default');
+        trafficView = {
+          available: true,
+          bridge: trafficLinkView(data.bridge, sampledAt, profileKey),
+          ports: (Array.isArray(data.ports) ? data.ports : []).map(function (link) {
+            return trafficLinkView(link, sampledAt, profileKey);
+          })
+        };
+        renderTraffic();
+      }
+
+      function dnsModeLabel(value) {
+        if (value === 'manual') return T('value.dnsManual');
+        if (value === 'disabled') return T('value.dnsDisabled');
+        if (value === 'auto') return T('value.dnsAuto');
+        return '-';
+      }
+
+      function trafficLinkView(link, sampledAt, profileKey) {
+        link = link || {};
+        const stats = link.statistics || null;
+        const view = {
+          name: String(link.name || '-'),
+          up: link.up === true,
+          oper_state: String(link.oper_state || ''),
+          error: String(link.error || ''),
+          statistics: stats
+        };
+        if (!stats) return view;
+        const sample = {
+          sampled_at_ms: sampledAt,
+          rx_packets: Math.max(0, Number(stats.rx_packets || 0)),
+          tx_packets: Math.max(0, Number(stats.tx_packets || 0)),
+          rx_bytes: Math.max(0, Number(stats.rx_bytes || 0)),
+          tx_bytes: Math.max(0, Number(stats.tx_bytes || 0)),
+          rx_errors: Math.max(0, Number(stats.rx_errors || 0)),
+          tx_errors: Math.max(0, Number(stats.tx_errors || 0)),
+          rx_dropped: Math.max(0, Number(stats.rx_dropped || 0)),
+          tx_dropped: Math.max(0, Number(stats.tx_dropped || 0))
+        };
+        const key = profileKey + '/' + view.name;
+        const previous = trafficSamples[key];
+        sample.rx_rate = null;
+        sample.tx_rate = null;
+        if (previous && sample.sampled_at_ms > previous.sampled_at_ms &&
+            sample.rx_bytes >= previous.rx_bytes && sample.tx_bytes >= previous.tx_bytes) {
+          const seconds = (sample.sampled_at_ms - previous.sampled_at_ms) / 1000;
+          sample.rx_rate = (sample.rx_bytes - previous.rx_bytes) / seconds;
+          sample.tx_rate = (sample.tx_bytes - previous.tx_bytes) / seconds;
+        }
+        trafficSamples[key] = sample;
+        Object.assign(view, sample);
+        return view;
+      }
+
+      function renderTraffic() {
+        trafficBody.replaceChildren();
+        if (!trafficView || trafficView.available !== true || !trafficView.bridge || !trafficView.bridge.statistics) {
+          trafficBody.appendChild(F.h('p', {
+            className: F.classes.description,
+            text: T('traffic.unavailable'),
+            title: trafficView && trafficView.reason || ''
+          }));
+          return;
+        }
+        const bridgeStats = trafficView.bridge;
+        trafficBody.appendChild(F.h('div', { className: F.classes.grid }, [
+          F.stat(T('stat.rxRate'), bridgeStats.rx_rate == null ? '-' : formatRate(bridgeStats.rx_rate)),
+          F.stat(T('stat.txRate'), bridgeStats.tx_rate == null ? '-' : formatRate(bridgeStats.tx_rate)),
+          F.stat(T('stat.rxTotal'), formatBytes(bridgeStats.rx_bytes), T('traffic.packets', { count: formatCount(bridgeStats.rx_packets) })),
+          F.stat(T('stat.txTotal'), formatBytes(bridgeStats.tx_bytes), T('traffic.packets', { count: formatCount(bridgeStats.tx_packets) }))
+        ]));
+        const portsWithStats = (trafficView.ports || []).filter(function (link) { return link && link.statistics; });
+        if (portsWithStats.length) {
+          trafficBody.appendChild(F.h('h3', { className: 'lan-section-title', text: T('traffic.portStats') }));
+          trafficBody.appendChild(F.h('div', { className: 'lan-traffic-table' }, [F.table(
+            [T('traffic.interface'), T('stat.rxRate'), T('stat.txRate'), T('stat.rxTotal'), T('stat.txTotal')],
+            portsWithStats.map(function (link) {
+              return [
+                link.name,
+                link.rx_rate == null ? '-' : formatRate(link.rx_rate),
+                link.tx_rate == null ? '-' : formatRate(link.tx_rate),
+                formatBytes(link.rx_bytes),
+                formatBytes(link.tx_bytes)
+              ];
+            })
+          )]));
+        }
+      }
+
+      function formatBytes(value) {
+        value = Math.max(0, Number(value || 0));
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+          value /= 1024;
+          index++;
+        }
+        const digits = index === 0 || value >= 100 ? 0 : (value >= 10 ? 1 : 2);
+        return value.toFixed(digits) + ' ' + units[index];
+      }
+
+      function formatRate(value) {
+        return formatBytes(value) + '/s';
+      }
+
+      function formatCount(value) {
+        return Math.max(0, Number(value || 0)).toLocaleString(F.locale === 'en-US' ? 'en-US' : 'zh-CN');
+      }
+
+      function loadTraffic(options) {
+        options = options || {};
+        const profileKey = options.key || (lanPicker.isNew() ? '' : lanPicker.value());
+        const serial = ++trafficRequestSerial;
+        return F.action('traffic_stats', { profile_key: profileKey || 'default' }).then(function (response) {
+          if (serial === trafficRequestSerial) updateTraffic(response && response.result ? response.result : null);
+        }).catch(function (error) {
+          if (serial === trafficRequestSerial) updateTraffic({ available: false, reason: F.errorText(error) });
+          if (!options.silent) F.toastError(error);
+        }).finally(function () {
+          F.requestResize();
+        });
+      }
+
+      async function loadStatus() {
+        try {
+          const values = await Promise.all([listResource('status'), listResource('egress_nat_plans'), listResource('ipv6_assignment_plans'), listResource('dhcpv4_plans')]);
+          records.status = values[0];
+          records.plans = values[1];
+          records.ipv6Plans = values[2];
+          records.dhcpv4Plans = values[3];
+          const current = key();
+          lastStatusData = recordData('status', current);
+          lastPlanData = recordData('plans', current);
+          lastIPv6PlanData = recordData('ipv6Plans', current);
+          lastDHCPv4PlanData = recordData('dhcpv4Plans', current);
+          renderStatus();
+          renderPlan();
+          await loadTraffic({ key: current, silent: true });
+        } catch (e) {
+          F.toastError(e);
+          throw e;
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      lanPicker.onChange(function (selection) {
+        if (selection.isNew) resetForm(); else fillForm(selection.key);
+        renderStatus();
+        renderPlan();
+        if (selection.isNew) updateTraffic({ available: false });
+        else loadTraffic({ key: selection.key, silent: true });
+        setStatus('status.idle');
+        F.requestResize();
+      });
+
+      function syncAddressServiceFields() {
+        const manual = dnsMode.value === 'manual';
+        if (dnsServersField) dnsServersField.hidden = !manual;
+        const dhcpEnabled = dhcpv4Enabled.checked;
+        if (dhcpv4PoolStartField) dhcpv4PoolStartField.hidden = !dhcpEnabled;
+        if (dhcpv4PoolEndField) dhcpv4PoolEndField.hidden = !dhcpEnabled;
+        F.requestResize();
+      }
+
+      dnsMode.addEventListener('change', syncAddressServiceFields);
+      dhcpv4Enabled.addEventListener('change', syncAddressServiceFields);
+
+      saveButton = i18nButton('action.save', function () {
+        runButtonTask(saveButton, T('status.saving'), function () { return saveProfile(); }).catch(function () {});
+      });
+      loadButton = i18nButton('action.load', function () {
+        runButtonTask(loadButton, T('action.load'), function () { return loadProfile({ silent: false }); }).catch(function () {});
+      }, true);
+      applyButton = i18nButton('action.apply', function () { apply(applyButton); });
+      teardownButton = i18nButton('action.teardown', function () { teardown(teardownButton); }, true);
+      refreshButton = i18nButton('action.refresh', function () {
+        runButtonTask(refreshButton, T('action.refresh'), function () { return loadStatus(); }).catch(function () {});
+      }, true);
+      syncActionButtons();
+      lanProfileField = field('field.lanID', lanPicker.element);
+      lanProfileField.hidden = true;
+      wanReferenceField = field('field.wanRef', wanPicker.element, 'hint.wanRef');
+      wanReferenceField.hidden = true;
+      dnsServersField = field('field.dnsServers', dnsServers, 'hint.dnsServers');
+      dhcpv4PoolStartField = field('field.poolStart', dhcpv4PoolStart, 'hint.pool');
+      dhcpv4PoolEndField = field('field.poolEnd', dhcpv4PoolEnd, 'hint.pool');
+      const page = F.h('main', { className: F.classes.page + ' lan-page' }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', { className: 'lan-title-row' }, [
+                textNode('h1', { className: F.classes.title }, 'title'),
+                textNode('p', { className: F.classes.description }, 'desc')
+              ]),
+              F.h('div', { className: F.classes.toolbar + ' lan-badges' }, [
+                bindText(F.badge(T('badge.netAdmin')), 'badge.netAdmin'),
+                bindText(F.badge(T('badge.bridge')), 'badge.bridge'),
+                status
+              ])
+            ])
+          ], { className: 'lan-hero' }),
+          F.h('div', { className: F.classes.grid + ' lan-overview' }, [
+            i18nStat('stat.bridge', 'br-lan', 'stat.bridge.detail'),
+            i18nStat('stat.ports', 'stat.ports.value', 'stat.ports.detail', true),
+            i18nStat('stat.coreNat', 'stat.coreNat.value', 'stat.coreNat.detail', true)
+          ]),
+          F.card([
+            F.h('div', { className: 'lan-section-grid' }, [
+              section('profile.title', [
+                lanProfileField,
+                field('field.bridge', bridge, 'hint.bridge'),
+                field('field.ports', ports, 'hint.ports'),
+                field('field.addresses', addresses, 'hint.addresses'),
+                field('field.mtu', mtu),
+                field('field.natType', natType, 'hint.natType'),
+                field('field.protocol', protocolControl, 'hint.protocol'),
+                checkboxField('field.autoNat', autoNAT, 'hint.autoNat'),
+                checkboxField('field.autoIPv6PD', autoIPv6PD, 'hint.autoIPv6PD'),
+                field('field.ipv6SubnetID', ipv6SubnetID, 'hint.ipv6SubnetID'),
+                checkboxField('field.preserveBridge', preserveBridge, 'hint.preserveBridge')
+              ]),
+              section('wan.title', [
+                wanReferenceField,
+                field('field.egress', wanEgress, 'hint.egress'),
+                field('field.sourceIP', wanSource, 'hint.sourceIP'),
+                field('field.redirect', redirectMode, 'hint.redirect')
+              ]),
+              section('services.title', [
+                checkboxField('field.dhcpv4', dhcpv4Enabled, 'hint.dhcpv4'),
+                field('field.dnsMode', dnsMode, 'hint.dnsMode'),
+                dnsServersField,
+                dhcpv4PoolStartField,
+                dhcpv4PoolEndField
+              ], 'lan-service-section')
+            ]),
+            actions([
+              saveButton,
+              loadButton,
+              applyButton,
+              teardownButton,
+              refreshButton
+            ])
+          ], { className: 'lan-config-card' }),
+          F.h('div', { className: 'lan-output-grid' }, [
+            F.card([
+              textNode('h2', { className: F.classes.title }, 'lastStatus.title'),
+              stateBody
+            ], { className: 'lan-output-card' }),
+            F.card([
+              textNode('h2', { className: F.classes.title }, 'plan.title'),
+              planBody
+            ], { className: 'lan-output-card' })
+          ]),
+          F.card([
+            F.h('div', null, [
+              textNode('h2', { className: F.classes.title }, 'traffic.title'),
+              textNode('p', { className: F.classes.description }, 'traffic.desc')
+            ]),
+            trafficBody
+          ])
+        ])
+      ]);
+
+      document.body.replaceChildren(page);
+      syncAddressServiceFields();
+      loadProfile({ silent: true }).catch(function (e) { F.toastError(e); }).finally(F.requestResize);
+      const trafficTimer = window.setInterval(function () {
+        if (document.visibilityState !== 'hidden' && !lanPicker.isNew()) {
+          loadTraffic({ key: lanPicker.value(), silent: true });
+        }
+      }, 5000);
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible' && !lanPicker.isNew()) {
+          loadTraffic({ key: lanPicker.value(), silent: true });
+        }
+      });
+      window.addEventListener('pagehide', function () {
+        window.clearInterval(trafficTimer);
+      });
+    })();
+  </script>
+</body>
+</html>

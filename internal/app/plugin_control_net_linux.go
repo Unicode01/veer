@@ -52,6 +52,15 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 	}
 	host, hostErr := netlink.LinkByName(hostName)
 	peer, peerErr := netlink.LinkByName(peerName)
+	created := false
+	cleanupCreated := func(cause error) (pluginControlNetVethResult, error) {
+		if created {
+			if cleanupLink, err := netlink.LinkByName(hostName); err == nil {
+				_ = netlink.LinkDel(cleanupLink)
+			}
+		}
+		return pluginControlNetVethResult{}, cause
+	}
 	hostMissing := pluginControlNetLinkNotFound(hostErr)
 	peerMissing := pluginControlNetLinkNotFound(peerErr)
 	if hostErr != nil && !hostMissing {
@@ -72,14 +81,15 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 		if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: attrs, PeerName: peerName}); err != nil {
 			return pluginControlNetVethResult{}, fmt.Errorf("create veth %s<->%s: %w", hostName, peerName, err)
 		}
+		created = true
 		var err error
 		host, err = netlink.LinkByName(hostName)
 		if err != nil {
-			return pluginControlNetVethResult{}, fmt.Errorf("resolve created host link %q: %w", hostName, err)
+			return cleanupCreated(fmt.Errorf("resolve created host link %q: %w", hostName, err))
 		}
 		peer, err = netlink.LinkByName(peerName)
 		if err != nil {
-			return pluginControlNetVethResult{}, fmt.Errorf("resolve created peer link %q: %w", peerName, err)
+			return cleanupCreated(fmt.Errorf("resolve created peer link %q: %w", peerName, err))
 		}
 	} else if host.Type() != "veth" || peer.Type() != "veth" {
 		return pluginControlNetVethResult{}, fmt.Errorf("existing links must both be veth devices")
@@ -89,18 +99,18 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 
 	if req.MTU > 0 {
 		if err := netlink.LinkSetMTU(host, req.MTU); err != nil {
-			return pluginControlNetVethResult{}, fmt.Errorf("set host mtu: %w", err)
+			return cleanupCreated(fmt.Errorf("set host mtu: %w", err))
 		}
 		if err := netlink.LinkSetMTU(peer, req.MTU); err != nil {
-			return pluginControlNetVethResult{}, fmt.Errorf("set peer mtu: %w", err)
+			return cleanupCreated(fmt.Errorf("set peer mtu: %w", err))
 		}
 	}
 	if req.Up {
 		if err := netlink.LinkSetUp(host); err != nil {
-			return pluginControlNetVethResult{}, fmt.Errorf("set host up: %w", err)
+			return cleanupCreated(fmt.Errorf("set host up: %w", err))
 		}
 		if err := netlink.LinkSetUp(peer); err != nil {
-			return pluginControlNetVethResult{}, fmt.Errorf("set peer up: %w", err)
+			return cleanupCreated(fmt.Errorf("set peer up: %w", err))
 		}
 	}
 
@@ -116,7 +126,7 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 	hostInfo.PeerIfIndex = peerInfo.IfIndex
 	peerInfo.PeerName = hostInfo.Name
 	peerInfo.PeerIfIndex = hostInfo.IfIndex
-	return pluginControlNetVethResult{Host: hostInfo, Peer: peerInfo}, nil
+	return pluginControlNetVethResult{Host: hostInfo, Peer: peerInfo, Created: created}, nil
 }
 
 func pluginControlNetValidateVethPeers(host netlink.Link, peer netlink.Link) error {
@@ -135,6 +145,164 @@ func pluginControlNetValidateVethPeers(host netlink.Link, peer netlink.Link) err
 		return fmt.Errorf("existing veth links %q and %q are not a pair", host.Attrs().Name, peer.Attrs().Name)
 	}
 	return nil
+}
+
+func (admin linuxPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return pluginControlNetDummyResult{}, fmt.Errorf("name is required")
+	}
+	created := false
+	link, err := netlink.LinkByName(name)
+	if pluginControlNetLinkNotFound(err) {
+		attrs := netlink.NewLinkAttrs()
+		attrs.Name = name
+		if req.MTU > 0 {
+			attrs.MTU = req.MTU
+		}
+		if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: attrs}); err != nil {
+			return pluginControlNetDummyResult{}, fmt.Errorf("create dummy %s: %w", name, err)
+		}
+		created = true
+		link, err = netlink.LinkByName(name)
+	}
+	if err != nil {
+		return pluginControlNetDummyResult{}, fmt.Errorf("resolve dummy %q: %w", name, err)
+	}
+	cleanupCreated := func(cause error) (pluginControlNetDummyResult, error) {
+		if created {
+			_ = netlink.LinkDel(link)
+		}
+		return pluginControlNetDummyResult{}, cause
+	}
+	if _, ok := link.(*netlink.Dummy); !ok || link.Type() != "dummy" {
+		return cleanupCreated(fmt.Errorf("existing link %q is %s, want dummy", name, link.Type()))
+	}
+	if req.MTU > 0 && link.Attrs().MTU != req.MTU {
+		if err := netlink.LinkSetMTU(link, req.MTU); err != nil {
+			return cleanupCreated(fmt.Errorf("set dummy mtu: %w", err))
+		}
+	}
+	if req.Up {
+		if err := netlink.LinkSetUp(link); err != nil {
+			return cleanupCreated(fmt.Errorf("set dummy up: %w", err))
+		}
+	}
+	info, err := admin.LinkGet(name)
+	if err != nil {
+		return cleanupCreated(err)
+	}
+	return pluginControlNetDummyResult{Link: info, Created: created}, nil
+}
+
+func (admin linuxPluginControlNetAdmin) LinkEnsureMacvlan(req pluginControlNetMacvlanRequest) (pluginControlNetMacvlanResult, error) {
+	name := strings.TrimSpace(req.Name)
+	parentName := strings.TrimSpace(req.Parent)
+	if name == "" || parentName == "" {
+		return pluginControlNetMacvlanResult{}, fmt.Errorf("name and parent are required")
+	}
+	parent, err := netlink.LinkByName(parentName)
+	if err != nil {
+		return pluginControlNetMacvlanResult{}, fmt.Errorf("resolve parent link %q: %w", parentName, err)
+	}
+	mode, err := pluginControlNetMacvlanMode(req.Mode)
+	if err != nil {
+		return pluginControlNetMacvlanResult{}, err
+	}
+	var hardwareAddr net.HardwareAddr
+	if strings.TrimSpace(req.MAC) != "" {
+		normalizedMAC, normalizeErr := normalizePluginControlUnicastMAC(req.MAC)
+		if normalizeErr != nil {
+			return pluginControlNetMacvlanResult{}, normalizeErr
+		}
+		hardwareAddr, _ = net.ParseMAC(normalizedMAC)
+	}
+
+	created := false
+	link, err := netlink.LinkByName(name)
+	if pluginControlNetLinkNotFound(err) {
+		attrs := netlink.NewLinkAttrs()
+		attrs.Name = name
+		attrs.ParentIndex = parent.Attrs().Index
+		if req.MTU > 0 {
+			attrs.MTU = req.MTU
+		}
+		if len(hardwareAddr) != 0 {
+			attrs.HardwareAddr = hardwareAddr
+		}
+		if err := netlink.LinkAdd(&netlink.Macvlan{LinkAttrs: attrs, Mode: mode}); err != nil {
+			return pluginControlNetMacvlanResult{}, fmt.Errorf("create macvlan %s on %s: %w", name, parentName, err)
+		}
+		created = true
+		link, err = netlink.LinkByName(name)
+	}
+	if err != nil {
+		return pluginControlNetMacvlanResult{}, fmt.Errorf("resolve macvlan %q: %w", name, err)
+	}
+	cleanupCreated := func(cause error) (pluginControlNetMacvlanResult, error) {
+		if created {
+			_ = netlink.LinkDel(link)
+		}
+		return pluginControlNetMacvlanResult{}, cause
+	}
+	macvlan, ok := link.(*netlink.Macvlan)
+	if !ok || link.Type() != "macvlan" {
+		return cleanupCreated(fmt.Errorf("existing link %q is %s, want macvlan", name, link.Type()))
+	}
+	if link.Attrs().ParentIndex != parent.Attrs().Index {
+		return cleanupCreated(fmt.Errorf("existing macvlan %q parent is %q, want %q", name, pluginControlNetLinkNameByIndex(link.Attrs().ParentIndex), parentName))
+	}
+	if macvlan.Mode != mode {
+		return cleanupCreated(fmt.Errorf("existing macvlan %q mode is %s, want %s", name, pluginControlNetMacvlanModeName(macvlan.Mode), pluginControlNetMacvlanModeName(mode)))
+	}
+	if len(hardwareAddr) != 0 && !strings.EqualFold(link.Attrs().HardwareAddr.String(), hardwareAddr.String()) {
+		return cleanupCreated(fmt.Errorf("existing macvlan %q mac is %s, want %s", name, link.Attrs().HardwareAddr, hardwareAddr))
+	}
+	if req.MTU > 0 && link.Attrs().MTU != req.MTU {
+		if err := netlink.LinkSetMTU(link, req.MTU); err != nil {
+			return cleanupCreated(fmt.Errorf("set macvlan mtu: %w", err))
+		}
+	}
+	if req.Up {
+		if err := netlink.LinkSetUp(link); err != nil {
+			return cleanupCreated(fmt.Errorf("set macvlan up: %w", err))
+		}
+	}
+	info, err := admin.LinkGet(name)
+	if err != nil {
+		return cleanupCreated(err)
+	}
+	return pluginControlNetMacvlanResult{Link: info, Created: created}, nil
+}
+
+func pluginControlNetMacvlanMode(value string) (netlink.MacvlanMode, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "bridge":
+		return netlink.MACVLAN_MODE_BRIDGE, nil
+	case "private":
+		return netlink.MACVLAN_MODE_PRIVATE, nil
+	case "vepa":
+		return netlink.MACVLAN_MODE_VEPA, nil
+	case "passthru":
+		return netlink.MACVLAN_MODE_PASSTHRU, nil
+	default:
+		return netlink.MACVLAN_MODE_DEFAULT, fmt.Errorf("unsupported macvlan mode %q", value)
+	}
+}
+
+func pluginControlNetMacvlanModeName(mode netlink.MacvlanMode) string {
+	switch mode {
+	case netlink.MACVLAN_MODE_BRIDGE:
+		return "bridge"
+	case netlink.MACVLAN_MODE_PRIVATE:
+		return "private"
+	case netlink.MACVLAN_MODE_VEPA:
+		return "vepa"
+	case netlink.MACVLAN_MODE_PASSTHRU:
+		return "passthru"
+	default:
+		return fmt.Sprintf("unknown(%d)", mode)
+	}
 }
 
 func (admin linuxPluginControlNetAdmin) LinkEnsureBridge(req pluginControlNetBridgeRequest) (pluginControlNetLinkInfo, error) {
@@ -247,6 +415,66 @@ func (linuxPluginControlNetAdmin) LinkSetMTU(name string, mtu int) error {
 	return netlink.LinkSetMTU(link, mtu)
 }
 
+func (admin linuxPluginControlNetAdmin) LinkSetARP(name string, enabled bool) (pluginControlNetLinkInfo, error) {
+	name = strings.TrimSpace(name)
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return pluginControlNetLinkInfo{}, err
+	}
+	if enabled {
+		err = netlink.LinkSetARPOn(link)
+	} else {
+		err = netlink.LinkSetARPOff(link)
+	}
+	if err != nil {
+		return pluginControlNetLinkInfo{}, err
+	}
+	return admin.LinkGet(name)
+}
+
+func (admin linuxPluginControlNetAdmin) LinkSetPromiscuous(name string, enabled bool) (pluginControlNetLinkInfo, error) {
+	name = strings.TrimSpace(name)
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return pluginControlNetLinkInfo{}, err
+	}
+	if enabled {
+		err = netlink.SetPromiscOn(link)
+	} else {
+		err = netlink.SetPromiscOff(link)
+	}
+	if err != nil {
+		return pluginControlNetLinkInfo{}, err
+	}
+	return admin.LinkGet(name)
+}
+
+func (linuxPluginControlNetAdmin) LinkGetOffloads(name string) (map[string]bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("interface is required")
+	}
+	if _, err := netlink.LinkByName(name); err != nil {
+		return nil, err
+	}
+	if _, err := exec.LookPath("ethtool"); err != nil {
+		return nil, fmt.Errorf("ethtool not found: %w", err)
+	}
+	out, err := exec.Command("ethtool", "-k", name).CombinedOutput()
+	if err != nil {
+		text := strings.TrimSpace(string(out))
+		if text == "" {
+			text = err.Error()
+		}
+		return nil, fmt.Errorf("ethtool -k %s failed: %s", name, text)
+	}
+	features := parsePluginControlOffloadFeatures(string(out))
+	if len(features) == 0 {
+		return nil, fmt.Errorf("ethtool -k %s returned no supported feature state", name)
+	}
+	return features, nil
+}
+
 func (linuxPluginControlNetAdmin) LinkSetOffloads(req pluginControlNetOffloadRequest) error {
 	name := strings.TrimSpace(req.Interface)
 	if name == "" {
@@ -286,6 +514,34 @@ func (linuxPluginControlNetAdmin) LinkSetOffloads(req pluginControlNetOffloadReq
 		return fmt.Errorf("ethtool -K %s failed: %s", name, text)
 	}
 	return nil
+}
+
+func (admin linuxPluginControlNetAdmin) LinkSetGSO(req pluginControlNetGSORequest) (pluginControlNetLinkInfo, error) {
+	name := strings.TrimSpace(req.Interface)
+	if name == "" {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("interface is required")
+	}
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return pluginControlNetLinkInfo{}, err
+	}
+	if req.MaxSize < 576 || req.MaxSize > 65536 {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("max_size must be between 576 and 65536")
+	}
+	if req.MaxSegs < 1 || req.MaxSegs > 65535 {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("max_segs must be between 1 and 65535")
+	}
+	previousMaxSize := int(link.Attrs().GSOMaxSize)
+	if err := netlink.LinkSetGSOMaxSize(link, req.MaxSize); err != nil {
+		return pluginControlNetLinkInfo{}, fmt.Errorf("set gso max size: %w", err)
+	}
+	if err := netlink.LinkSetGSOMaxSegs(link, req.MaxSegs); err != nil {
+		if previousMaxSize > 0 {
+			_ = netlink.LinkSetGSOMaxSize(link, previousMaxSize)
+		}
+		return pluginControlNetLinkInfo{}, fmt.Errorf("set gso max segments: %w", err)
+	}
+	return admin.LinkGet(name)
 }
 
 func (linuxPluginControlNetAdmin) AddrReplace(req pluginControlNetAddrRequest) error {
@@ -356,9 +612,25 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 		MTU:           attrs.MTU,
 		MAC:           attrs.HardwareAddr.String(),
 		Up:            attrs.Flags&net.FlagUp != 0,
+		ARP:           attrs.RawFlags&unix.IFF_NOARP == 0,
 		OperState:     attrs.OperState.String(),
 		Addresses:     addrTexts,
 		MasterIfIndex: attrs.MasterIndex,
+		Promiscuous:   attrs.Promisc > 0,
+		GSOMaxSize:    int(attrs.GSOMaxSize),
+		GSOMaxSegs:    int(attrs.GSOMaxSegs),
+	}
+	if attrs.Statistics != nil {
+		info.Statistics = &pluginControlNetLinkStatistics{
+			RXPackets: attrs.Statistics.RxPackets,
+			TXPackets: attrs.Statistics.TxPackets,
+			RXBytes:   attrs.Statistics.RxBytes,
+			TXBytes:   attrs.Statistics.TxBytes,
+			RXErrors:  attrs.Statistics.RxErrors,
+			TXErrors:  attrs.Statistics.TxErrors,
+			RXDropped: attrs.Statistics.RxDropped,
+			TXDropped: attrs.Statistics.TxDropped,
+		}
 	}
 	if attrs.ParentIndex > 0 {
 		info.Parent = pluginControlNetLinkNameByIndex(attrs.ParentIndex)

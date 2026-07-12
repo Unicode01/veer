@@ -82,6 +82,7 @@
     app.state.pollerId = setInterval(() => {
       if (document.hidden || app.shouldPauseAutoRefresh()) return;
       app.refreshDashboard({
+        includePlugins: app.state.activeTab === 'plugins',
         includeWorkers: true,
         includeStats: app.state.activeTab === 'diagnostics'
       });
@@ -186,6 +187,10 @@
 
   if (app.el.refreshPluginsBtn) {
     app.el.refreshPluginsBtn.addEventListener('click', () => app.loadPlugins());
+  }
+
+  if (app.el.applyPluginUpdateBtn) {
+    app.el.applyPluginUpdateBtn.addEventListener('click', () => app.applyPluginUpdate());
   }
 
   if (app.el.closePluginUIBtn) {
@@ -482,6 +487,7 @@
 
     if (!app.getToken()) return;
     app.refreshDashboard({
+      includePlugins: app.state.activeTab === 'plugins',
       includeWorkers: true,
       includeStats: app.state.activeTab === 'diagnostics'
     });

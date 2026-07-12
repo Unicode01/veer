@@ -69,14 +69,15 @@ type NetOps interface {
 }
 
 type IPv4Plan struct {
-	ID              int64
-	Name            string
-	BridgeMode      string
-	Bridge          string
-	UplinkInterface string
-	AddressSpec     IPv4AddressSpec
-	DHCPv4          DHCPv4Config
-	NeedsForwarding bool
+	ID                    int64
+	Name                  string
+	BridgeMode            string
+	Bridge                string
+	UplinkInterface       string
+	AddressSpec           IPv4AddressSpec
+	DHCPv4                DHCPv4Config
+	NeedsForwarding       bool
+	SkipAddressManagement bool
 }
 
 type IPv4Runtime struct {
@@ -160,7 +161,8 @@ func BuildIPv4Plan(item ManagedNetwork, reservations []ManagedNetworkReservation
 			DNSServers:      dnsServers,
 			Reservations:    buildManagedNetworkDHCPv4Reservations(reservations),
 		},
-		NeedsForwarding: strings.TrimSpace(item.UplinkInterface) != "",
+		NeedsForwarding:       strings.TrimSpace(item.UplinkInterface) != "",
+		SkipAddressManagement: item.SkipIPv4AddressManagement,
 	}, nil
 }
 
@@ -208,7 +210,7 @@ func (rt *IPv4Runtime) Reconcile(items []ManagedNetwork, reservations []ManagedN
 		}
 	}
 	markPlanError := func(id int64, detail string) {
-		if id <= 0 {
+		if id == 0 {
 			return
 		}
 		desiredStatus[id] = RuntimeStatus{
@@ -275,7 +277,9 @@ func (rt *IPv4Runtime) Reconcile(items []ManagedNetwork, reservations []ManagedN
 		plansByBridge[plan.Bridge] = plan
 		desiredBridges[plan.ID] = plan.Bridge
 		desiredInterfaces[plan.Bridge] = InterfaceSpecForItem(item)
-		desiredAddresses[plan.Bridge] = plan.AddressSpec
+		if !plan.SkipAddressManagement {
+			desiredAddresses[plan.Bridge] = plan.AddressSpec
+		}
 		desiredDHCPv4[plan.Bridge] = plan.DHCPv4
 		if plan.NeedsForwarding {
 			desiredForwarding[plan.Bridge] = struct{}{}

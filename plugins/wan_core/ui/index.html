@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WAN Core</title>
+  <style>
+    .wan-page { padding: 8px; }
+    .wan-config-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      align-items: end;
+    }
+    .wan-actions { justify-content: flex-end; gap: 8px; }
+    .wan-advanced {
+      padding-top: 2px;
+      border-top: 1px solid var(--fwd-border);
+    }
+    .wan-advanced > summary {
+      cursor: pointer;
+      color: var(--fwd-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .wan-advanced-body { display: grid; gap: 12px; padding-top: 10px; }
+    .wan-toggle-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .wan-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      padding: 5px 8px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 8px;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .wan-toggle .fwd-input { flex: 0 0 auto; }
+    .wan-effective { display: grid; gap: 9px; }
+    .wan-effective-title {
+      margin: 0;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .wan-addresses { display: flex; flex-wrap: wrap; gap: 6px; }
+    .wan-route-wrap { overflow-x: auto; }
+    @media (max-width: 760px) {
+      .wan-config-grid { grid-template-columns: 1fr; }
+      .wan-actions .fwd-button { flex: 1 1 auto; }
+    }
+  </style>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const messages = {
+        'zh-CN': {
+          'status.idle': '空闲',
+          'status.loading': '加载中',
+          'status.saving': '保存中',
+          'status.saved': '已保存',
+          'status.saveFailed': '保存失败',
+          'status.applying': '应用中',
+          'status.applied': '已应用',
+          'status.applyFailed': '应用失败',
+          'status.deleting': '拆除中',
+          'status.deleted': '已拆除',
+          'status.deleteFailed': '拆除失败',
+          'title': 'WAN Core',
+          'desc': '将协议插件发布的 WAN 会话映射到本机与 Forward 共用的 Linux L3 边界。',
+          'badge.netAdmin': 'net.admin',
+          'badge.forwardCore': 'forward_core',
+          'stat.input': '输入',
+          'stat.input.value': 'WAN 会话',
+          'stat.input.detail': '从协议插件发布的 sessions resource 消费。',
+          'stat.handoff': '边界',
+          'stat.handoff.value': '可选内部分段',
+          'stat.handoff.detail': '低 MTU 协议可使用内部 veth peer 接收内核已分段流量，不修改物理 LAN 的 GRO。',
+          'stat.core': '核心路径',
+          'stat.core.value': '规范化 L3',
+          'stat.core.detail': 'Forward Core 不处理 PPPoE 等 WAN 协议头。',
+          'profile.title': 'WAN 会话与边界',
+          'profile.desc': '已有 driver 会话会自动出现；新建配置仅用于预先准备或手动管理本地边界。',
+          'profile.new': '新建配置...',
+          'profile.newPlaceholder': '输入新配置名',
+          'advanced.title': '高级静态覆盖',
+          'advanced.desc': '这些值叠加在 driver 动态地址和路由上，通常保持为空。',
+          'lastStatus.title': '实际生效状态',
+          'field.wanID': '会话 / 配置',
+          'field.localInterface': '本地 WAN 边界',
+          'field.mtu': 'MTU',
+          'field.addresses': '额外本地地址',
+          'field.defaultV4': '安装 IPv4 默认路由',
+          'field.defaultV6': '安装 IPv6 默认路由',
+          'field.metricV4': 'IPv4 路由 Metric',
+          'field.metricV6': 'IPv6 路由 Metric',
+          'field.redirect': 'Egress NAT Redirect',
+          'field.routes': '额外静态路由',
+          'route.dst': '目标 CIDR',
+          'route.gateway': '网关',
+          'route.dev': '接口',
+          'route.src': '源地址',
+          'route.table': '路由表',
+          'route.metric': 'Metric',
+          'route.add': '添加路由',
+          'route.remove': '删除路由',
+          'route.empty': '没有额外静态路由。',
+          'action.save': '保存覆盖',
+          'action.load': '重新加载',
+          'action.apply': '应用',
+          'action.update': '更新边界',
+          'action.teardown': '拆除',
+          'action.refresh': '刷新',
+          'hint.noRuntime': '当前 WAN 边界尚未应用，无需拆除。',
+          'toast.saved': 'WAN 配置已保存。',
+          'toast.loaded': 'WAN 配置已加载。',
+          'toast.applied': 'WAN 边界已应用。',
+          'toast.deleted': 'WAN 边界已拆除。',
+          'empty.status': '当前配置还没有运行时状态。',
+          'error.keyRequired': '请输入新配置名。',
+          'error.routeDestination': '每条静态路由都必须填写目标 CIDR。',
+          'stat.phase': '阶段',
+          'stat.driver': 'Driver',
+          'stat.usable': '可用',
+          'stat.physical': '物理接口',
+          'stat.local': '本地接口',
+          'stat.pipeline': '协议管线',
+          'stat.noarp': 'NOARP 边界',
+          'stat.parent': 'Forward 父接口',
+          'stat.ipv4': 'IPv4',
+          'stat.ipv6': 'IPv6',
+          'stat.pd': 'PD',
+          'stat.routes': '路由',
+          'stat.updated': '更新时间',
+          'effective.addresses': '实际地址',
+          'effective.routes': '实际路由',
+          'value.yes': '是',
+          'value.no': '否'
+        },
+        'en-US': {
+          'status.idle': 'Idle',
+          'status.loading': 'Loading',
+          'status.saving': 'Saving',
+          'status.saved': 'Saved',
+          'status.saveFailed': 'Save failed',
+          'status.applying': 'Applying',
+          'status.applied': 'Applied',
+          'status.applyFailed': 'Apply failed',
+          'status.deleting': 'Tearing down',
+          'status.deleted': 'Removed',
+          'status.deleteFailed': 'Teardown failed',
+          'title': 'WAN Core',
+          'desc': 'Maps protocol-driver WAN sessions to a Linux L3 boundary shared by the host and Forward.',
+          'badge.netAdmin': 'net.admin',
+          'badge.forwardCore': 'forward_core',
+          'stat.input': 'Input',
+          'stat.input.value': 'WAN session',
+          'stat.input.detail': 'Consumes sessions published by protocol plugins.',
+          'stat.handoff': 'Boundary',
+          'stat.handoff.value': 'optional segmentation',
+          'stat.handoff.detail': 'Low-MTU protocols can consume kernel-segmented traffic on an internal veth peer without changing physical LAN GRO.',
+          'stat.core': 'Core Path',
+          'stat.core.value': 'normalized L3',
+          'stat.core.detail': 'Forward Core does not process PPPoE or other WAN protocol headers.',
+          'profile.title': 'WAN Session and Boundary',
+          'profile.desc': 'Driver sessions appear automatically. Create a profile only to prepare or manually manage a local boundary.',
+          'profile.new': 'New profile...',
+          'profile.newPlaceholder': 'Enter a new profile name',
+          'advanced.title': 'Advanced Static Overrides',
+          'advanced.desc': 'These values are added to dynamic driver addresses and routes and are normally left empty.',
+          'lastStatus.title': 'Effective Runtime State',
+          'field.wanID': 'Session / Profile',
+          'field.localInterface': 'Local WAN Boundary',
+          'field.mtu': 'MTU',
+          'field.addresses': 'Additional Local Addresses',
+          'field.defaultV4': 'Install IPv4 Default Route',
+          'field.defaultV6': 'Install IPv6 Default Route',
+          'field.metricV4': 'IPv4 Route Metric',
+          'field.metricV6': 'IPv6 Route Metric',
+          'field.redirect': 'Egress NAT Redirect',
+          'field.routes': 'Additional Static Routes',
+          'route.dst': 'Destination CIDR',
+          'route.gateway': 'Gateway',
+          'route.dev': 'Interface',
+          'route.src': 'Source Address',
+          'route.table': 'Table',
+          'route.metric': 'Metric',
+          'route.add': 'Add Route',
+          'route.remove': 'Remove Route',
+          'route.empty': 'No additional static routes.',
+          'action.save': 'Save Overrides',
+          'action.load': 'Reload',
+          'action.apply': 'Apply',
+          'action.update': 'Update Boundary',
+          'action.teardown': 'Teardown',
+          'action.refresh': 'Refresh',
+          'hint.noRuntime': 'This WAN boundary is not applied, so there is nothing to tear down.',
+          'toast.saved': 'WAN profile saved.',
+          'toast.loaded': 'WAN profile loaded.',
+          'toast.applied': 'WAN boundary applied.',
+          'toast.deleted': 'WAN boundary removed.',
+          'empty.status': 'This profile has no runtime state yet.',
+          'error.keyRequired': 'Enter a new profile name.',
+          'error.routeDestination': 'Every static route requires a destination CIDR.',
+          'stat.phase': 'Phase',
+          'stat.driver': 'Driver',
+          'stat.usable': 'Usable',
+          'stat.physical': 'Physical Interface',
+          'stat.local': 'Local Interface',
+          'stat.pipeline': 'Protocol Pipeline',
+          'stat.noarp': 'NOARP Boundary',
+          'stat.parent': 'Forward Parent',
+          'stat.ipv4': 'IPv4',
+          'stat.ipv6': 'IPv6',
+          'stat.pd': 'PD',
+          'stat.routes': 'Routes',
+          'stat.updated': 'Updated',
+          'effective.addresses': 'Effective Addresses',
+          'effective.routes': 'Effective Routes',
+          'value.yes': 'yes',
+          'value.no': 'no'
+        }
+      };
+
+      const textBindings = [];
+      const attrBindings = [];
+      let statusKey = 'status.idle';
+      let records = { profiles: [], sessions: [], status: [] };
+      let lastSessionData = null;
+      let lastStatusData = null;
+      let wanProfileField = null;
+      let pendingButton = null;
+      let pendingLabel = '';
+      let saveButton = null;
+      let loadButton = null;
+      let applyButton = null;
+      let teardownButton = null;
+      let refreshButton = null;
+
+      function T(key, params) { return F.t(messages, key, params); }
+      function bindText(node, key, params) {
+        node.textContent = T(key, params);
+        textBindings.push({ node, key, params });
+        return node;
+      }
+      function bindAttr(node, attr, key, params) {
+        node.setAttribute(attr, T(key, params));
+        attrBindings.push({ node, attr, key, params });
+        return node;
+      }
+      function textNode(tag, opts, key, params) { return bindText(F.h(tag, opts || {}), key, params); }
+      function i18nButton(key, handler, secondary) { return bindText(F.button(T(key), handler, secondary), key); }
+      function input(value, placeholder, type) {
+        return F.h('input', { className: F.classes.input, attrs: { type: type || 'text', value, placeholder } });
+      }
+      function checkbox(checked) {
+        const node = input('', '', 'checkbox');
+        node.checked = !!checked;
+        return node;
+      }
+      function field(labelKey, control) {
+        return F.h('label', { className: F.classes.field }, [textNode('span', null, labelKey), control]);
+      }
+      function i18nStat(labelKey, valueKey, detailKey) {
+        const node = F.h('div', { className: F.classes.stat }, [
+          textNode('span', { className: F.classes.statLabel }, labelKey),
+          textNode('span', { className: F.classes.statValue }, valueKey)
+        ]);
+        if (detailKey) bindAttr(node, 'title', detailKey);
+        return node;
+      }
+      function toggleField(labelKey, control) {
+        return F.h('label', { className: 'wan-toggle' }, [control, textNode('span', null, labelKey)]);
+      }
+      function setStatus(key) {
+        statusKey = key;
+        status.textContent = T(key);
+      }
+      function setBusy(button, busy, text) {
+        pendingButton = busy ? button : null;
+        pendingLabel = busy && text ? text : '';
+        syncActionButtons();
+      }
+      function runtimeActionState() {
+        const data = lastStatusData || lastSessionData || {};
+        const phase = String(data.phase || data.state || '').toLowerCase();
+        if (lastStatusData) {
+          return {
+            applied: phase === 'applied',
+            removable: !['', 'deleted', 'disabled', 'skipped'].includes(phase)
+          };
+        }
+        return {
+          applied: data.usable === true || ['up', 'ready', 'active'].includes(phase),
+          removable: !!lastSessionData && !['', 'deleted', 'disabled', 'down'].includes(phase)
+        };
+      }
+      function syncActionButtons() {
+        if (!applyButton) return;
+        const runtime = runtimeActionState();
+        [saveButton, loadButton, refreshButton].forEach(function (button) {
+          F.setButtonState(button, {
+            label: button === pendingButton ? pendingLabel : T(button === saveButton ? 'action.save' : (button === loadButton ? 'action.load' : 'action.refresh')),
+            busy: button === pendingButton,
+            disabled: !!pendingButton && button !== pendingButton
+          });
+        });
+        F.setButtonState(applyButton, {
+          label: applyButton === pendingButton ? pendingLabel : T(runtime.applied ? 'action.update' : 'action.apply'),
+          busy: applyButton === pendingButton,
+          disabled: !!pendingButton && applyButton !== pendingButton
+        });
+        F.setButtonState(teardownButton, {
+          label: teardownButton === pendingButton ? pendingLabel : T('action.teardown'),
+          busy: teardownButton === pendingButton,
+          disabled: !runtime.removable || (!!pendingButton && teardownButton !== pendingButton),
+          tone: 'danger',
+          title: runtime.removable ? '' : T('hint.noRuntime')
+        });
+      }
+      async function runButtonTask(button, busyText, task) {
+        if (pendingButton) return;
+        setBusy(button, true, busyText);
+        try {
+          await task();
+        } finally {
+          setBusy(button, false);
+          F.requestResize();
+        }
+      }
+      function recordData(resource, key) {
+        const record = records[resource].find(function (item) { return item && item.key === key; });
+        return record && record.data ? Object.assign({ updated_at: record.updated_at || '' }, record.data) : null;
+      }
+      function selectedKey() {
+        const key = profilePicker.value();
+        if (!key) throw new Error(T('error.keyRequired'));
+        return key;
+      }
+
+      const status = F.status(T('status.idle'));
+      const stateBody = F.h('div', { className: F.classes.stack });
+      const profilePicker = F.recordPicker({
+        newLabel: function () { return T('profile.new'); },
+        newPlaceholder: function () { return T('profile.newPlaceholder'); },
+        defaultKey: 'default'
+      });
+      const localInterface = input('fwdlocal0', 'fwdlocal0');
+      const mtu = input('1492', '1492', 'number');
+      const addresses = F.h('textarea', {
+        className: F.classes.input,
+        attrs: { rows: '3', placeholder: '198.51.100.2/32\n2001:db8::2/128' }
+      });
+      const installDefaultV4 = checkbox(false);
+      const installDefaultV6 = checkbox(false);
+      const metricV4 = input('0', '0', 'number');
+      const metricV6 = input('0', '0', 'number');
+      const redirectMode = F.h('select', { className: F.classes.input }, [
+        F.h('option', { text: 'TC', attrs: { value: '' } }),
+        F.h('option', { text: 'prepared_l2', attrs: { value: 'prepared_l2' } })
+      ]);
+      const routeEditor = F.collectionEditor({
+        columns: [
+          { key: 'dst', label: function () { return T('route.dst'); }, placeholder: '0.0.0.0/0', wide: true },
+          { key: 'gateway', label: function () { return T('route.gateway'); }, placeholder: '192.0.2.1' },
+          { key: 'dev', label: function () { return T('route.dev'); }, placeholder: 'fwdlocal0' },
+          { key: 'src', label: function () { return T('route.src'); }, placeholder: '198.51.100.2' },
+          { key: 'table', label: function () { return T('route.table'); }, type: 'number', min: 0, max: 2147483647, placeholder: '0' },
+          { key: 'metric', label: function () { return T('route.metric'); }, type: 'number', min: 0, max: 2147483647, placeholder: '0' }
+        ],
+        addLabel: function () { return '+ ' + T('route.add'); },
+        removeLabel: function () { return T('route.remove'); },
+        emptyLabel: function () { return T('route.empty'); }
+      });
+
+      function refreshI18n() {
+        textBindings.forEach(function (item) { item.node.textContent = T(item.key, item.params); });
+        attrBindings.forEach(function (item) { item.node.setAttribute(item.attr, T(item.key, item.params)); });
+        status.textContent = T(statusKey);
+        profilePicker.refreshLabels();
+        routeEditor.refreshLabels();
+        renderStatus();
+        F.requestResize();
+      }
+      F.onLocaleChange(refreshI18n);
+
+      function profilePayload() {
+        const routes = routeEditor.values();
+        if (routes.some(function (route) { return !route.dst; })) throw new Error(T('error.routeDestination'));
+        return {
+          wan_id: selectedKey(),
+          profile_key: selectedKey(),
+          local_interface: localInterface.value.trim() || 'fwdlocal0',
+          mtu: Number(mtu.value || 1492),
+          addresses: addresses.value.split(/[\s,]+/).map(function (item) { return item.trim(); }).filter(Boolean),
+          routes: routes,
+          install_default_route: installDefaultV4.checked,
+          install_default_route_v6: installDefaultV6.checked,
+          route_metric: Number(metricV4.value || 0),
+          route_metric_v6: Number(metricV6.value || 0),
+          egress_nat_redirect_mode: redirectMode.value
+        };
+      }
+
+      function resetForm(key) {
+        localInterface.value = 'fwdlocal0';
+        mtu.value = '1492';
+        addresses.value = '';
+        installDefaultV4.checked = false;
+        installDefaultV6.checked = false;
+        metricV4.value = '0';
+        metricV6.value = '0';
+        redirectMode.value = '';
+        routeEditor.setValues([]);
+        lastSessionData = key ? recordData('sessions', key) : null;
+        lastStatusData = key ? recordData('status', key) : null;
+      }
+
+      function fillForm(key) {
+        const profile = recordData('profiles', key) || {};
+        const session = recordData('sessions', key) || {};
+        localInterface.value = profile.local_interface || session.local_interface || 'fwdlocal0';
+        mtu.value = profile.mtu || session.mtu || 1492;
+        addresses.value = Array.isArray(profile.addresses) ? profile.addresses.join('\n') : '';
+        installDefaultV4.checked = profile.install_default_route === true;
+        installDefaultV6.checked = profile.install_default_route_v6 === true;
+        metricV4.value = profile.route_metric || 0;
+        metricV6.value = profile.route_metric_v6 || 0;
+        redirectMode.value = profile.egress_nat_redirect_mode || profile.redirect_mode || '';
+        routeEditor.setValues(Array.isArray(profile.routes) ? profile.routes : []);
+        lastSessionData = recordData('sessions', key);
+        lastStatusData = recordData('status', key);
+      }
+
+      async function listResource(resource) {
+        const response = await F.data.list(resource, { limit: 64 });
+        return response && Array.isArray(response.records) ? response.records : [];
+      }
+
+      function preferredKey(preferred) {
+        if (preferred) return preferred;
+        const usableSession = records.sessions.find(function (record) {
+          const data = record && record.data || {};
+          return record && record.enabled !== false && data.usable !== false && ['up', 'ready', 'active'].includes(String(data.state || '').toLowerCase());
+        });
+        if (usableSession) return usableSession.key;
+        const applied = records.status.find(function (record) {
+          const data = record && record.data || {};
+          return record && data.phase === 'applied';
+        });
+        if (applied) return applied.key;
+        const enabledProfile = records.profiles.find(function (record) { return record && record.enabled !== false; });
+        return enabledProfile ? enabledProfile.key : '';
+      }
+
+      function updateProfilePickerVisibility() {
+        if (!wanProfileField) return;
+        wanProfileField.hidden = profilePicker.keys().length <= 1;
+      }
+
+      async function refreshRecords(preferred) {
+        const values = await Promise.all(['profiles', 'sessions', 'status'].map(listResource));
+        records = { profiles: values[0], sessions: values[1], status: values[2] };
+        const keys = [];
+        values.forEach(function (items) {
+          items.forEach(function (record) { if (record && record.key && !keys.includes(record.key)) keys.push(record.key); });
+        });
+        const selected = preferredKey(preferred);
+        profilePicker.setKeys(keys, selected || 'default', keys.length === 0);
+        updateProfilePickerVisibility();
+        return profilePicker.value();
+      }
+
+      async function loadSelection(options) {
+        options = options || {};
+        setStatus('status.loading');
+        try {
+          const key = await refreshRecords(options.key || (profilePicker.isNew() ? '' : profilePicker.value()));
+          if (profilePicker.isNew()) {
+            resetForm('');
+          } else {
+            fillForm(key);
+          }
+          renderStatus();
+          setStatus('status.idle');
+          if (!options.silent) F.toast(T('toast.loaded'));
+        } catch (e) {
+          setStatus('status.idle');
+          if (!options.silent) F.toastError(e);
+          throw e;
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function saveProfile(options) {
+        options = options || {};
+        setStatus('status.saving');
+        try {
+          const data = profilePayload();
+          await F.data.upsert('profiles', data.profile_key, data, { enabled: true });
+          await refreshRecords(data.profile_key);
+          fillForm(data.profile_key);
+          setStatus('status.saved');
+          if (!options.silent) F.toast(T('toast.saved'));
+          return data;
+        } catch (e) {
+          setStatus('status.saveFailed');
+          if (!options.silent) F.toastError(e);
+          throw e;
+        } finally {
+          F.requestResize();
+        }
+      }
+
+      async function apply(button) {
+        setBusy(button, true, T('status.applying'));
+        setStatus('status.applying');
+        try {
+          const data = await saveProfile({ silent: true });
+          const session = recordData('sessions', data.profile_key);
+          await F.action(session ? 'apply_session' : 'prepare_handoff', data);
+          await loadSelection({ key: data.profile_key, silent: true });
+          setStatus('status.applied');
+          F.toast(T('toast.applied'));
+        } catch (e) {
+          setStatus('status.applyFailed');
+          F.toastError(e);
+        } finally {
+          setBusy(button, false, T('action.apply'));
+          F.requestResize();
+        }
+      }
+
+      async function teardown(button) {
+        setBusy(button, true, T('status.deleting'));
+        setStatus('status.deleting');
+        try {
+          const data = profilePayload();
+          await F.action('teardown', data);
+          await loadSelection({ key: data.profile_key, silent: true });
+          setStatus('status.deleted');
+          F.toast(T('toast.deleted'));
+        } catch (e) {
+          setStatus('status.deleteFailed');
+          F.toastError(e);
+        } finally {
+          setBusy(button, false, T('action.teardown'));
+          F.requestResize();
+        }
+      }
+
+      function renderEffectiveList(titleKey, values) {
+        values = Array.isArray(values) ? values.filter(Boolean) : [];
+        if (!values.length) return null;
+        return F.h('div', { className: 'wan-effective' }, [
+          textNode('h3', { className: 'wan-effective-title' }, titleKey),
+          F.h('div', { className: 'wan-addresses' }, values.map(function (value) { return F.badge(value); }))
+        ]);
+      }
+
+      function renderRoutes(routes) {
+        routes = Array.isArray(routes) ? routes : [];
+        if (!routes.length) return null;
+        return F.h('div', { className: 'wan-effective' }, [
+          textNode('h3', { className: 'wan-effective-title' }, 'effective.routes'),
+          F.h('div', { className: 'wan-route-wrap' }, [F.table(
+            [T('route.dst'), T('route.gateway'), T('route.dev'), T('route.src'), T('route.table'), T('route.metric')],
+            routes.map(function (route) {
+              return [route.dst, route.gateway, route.dev, route.src, route.table, route.metric];
+            })
+          )])
+        ]);
+      }
+
+      function renderStatus() {
+        stateBody.replaceChildren();
+        const data = lastStatusData || lastSessionData;
+        if (!data) {
+          stateBody.appendChild(F.h('p', { className: F.classes.description, text: T('empty.status') }));
+          syncActionButtons();
+          return;
+        }
+        const forward = data.forward_core || {};
+        stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
+          F.stat(T('stat.phase'), data.phase || data.state || '-'),
+          F.stat(T('stat.driver'), data.driver || '-'),
+          F.stat(T('stat.usable'), data.usable === true ? T('value.yes') : T('value.no')),
+          F.stat(T('stat.physical'), data.real_interface || data.physical_interface || '-'),
+          F.stat(T('stat.local'), (data.local_interface || '-') + (data.local_ifindex ? ' #' + data.local_ifindex : '')),
+          F.stat(T('stat.pipeline'), (data.pipeline_interface || '-') + (data.pipeline_ifindex ? ' #' + data.pipeline_ifindex : '')),
+          F.stat(T('stat.noarp'), data.handoff_mode === 'segmented_veth' ? (data.noarp_ready === true ? T('value.yes') : T('value.no')) : '-'),
+          F.stat(T('stat.parent'), forward.parent_interface || data.forward_parent_interface || '-'),
+          F.stat(T('stat.ipv4'), data.ipv4 || '-'),
+          F.stat(T('stat.ipv6'), data.ipv6 || data.ipv6_link_local || '-', [data.ipv6_link_local, data.ipv6_gateway].filter(Boolean).join(' / ')),
+          F.stat(T('stat.pd'), data.pd_prefix || '-'),
+          F.stat(T('stat.routes'), Array.isArray(data.routes) ? data.routes.length : (data.route_count == null ? '-' : data.route_count)),
+          F.stat(T('stat.updated'), data.updated_at || '-')
+        ]));
+        const addressBlock = renderEffectiveList('effective.addresses', data.addresses || [data.ipv4, data.ipv6, data.ipv6_link_local]);
+        const routeBlock = renderRoutes(data.routes);
+        if (addressBlock) stateBody.appendChild(addressBlock);
+        if (routeBlock) stateBody.appendChild(routeBlock);
+        syncActionButtons();
+      }
+
+      profilePicker.onChange(function (selection) {
+        if (selection.isNew) {
+          resetForm('');
+          renderStatus();
+          setStatus('status.idle');
+          F.requestResize();
+          return;
+        }
+        fillForm(selection.key);
+        renderStatus();
+        setStatus('status.idle');
+        F.requestResize();
+      });
+
+      saveButton = i18nButton('action.save', function () {
+        runButtonTask(saveButton, T('status.saving'), function () { return saveProfile(); }).catch(function () {});
+      });
+      loadButton = i18nButton('action.load', function () {
+        runButtonTask(loadButton, T('status.loading'), function () { return loadSelection({ silent: false }); }).catch(function () {});
+      }, true);
+      applyButton = i18nButton('action.apply', function () { apply(applyButton); });
+      teardownButton = i18nButton('action.teardown', function () { teardown(teardownButton); }, true);
+      refreshButton = i18nButton('action.refresh', function () {
+        runButtonTask(refreshButton, T('status.loading'), function () { return loadSelection({ silent: true }); }).catch(function (e) { F.toastError(e); });
+      }, true);
+      syncActionButtons();
+      wanProfileField = field('field.wanID', profilePicker.element);
+      wanProfileField.hidden = true;
+      const page = F.h('main', { className: F.classes.page + ' wan-page' }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                textNode('h1', { className: F.classes.title }, 'title'),
+                textNode('p', { className: F.classes.description }, 'desc')
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                bindText(F.badge(T('badge.netAdmin')), 'badge.netAdmin'),
+                bindText(F.badge(T('badge.forwardCore')), 'badge.forwardCore'),
+                status
+              ])
+            ])
+          ]),
+          F.h('div', { className: F.classes.grid }, [
+            i18nStat('stat.input', 'stat.input.value', 'stat.input.detail'),
+            i18nStat('stat.handoff', 'stat.handoff.value', 'stat.handoff.detail'),
+            i18nStat('stat.core', 'stat.core.value', 'stat.core.detail')
+          ]),
+          F.card([
+            textNode('h2', { className: F.classes.title }, 'profile.title'),
+            textNode('p', { className: F.classes.description }, 'profile.desc'),
+            F.h('div', { className: 'wan-config-grid' }, [
+              wanProfileField,
+              field('field.localInterface', localInterface),
+              field('field.mtu', mtu)
+            ]),
+            F.h('details', { className: 'wan-advanced' }, [
+              textNode('summary', null, 'advanced.title'),
+              F.h('div', { className: 'wan-advanced-body' }, [
+                textNode('p', { className: F.classes.description }, 'advanced.desc'),
+                field('field.addresses', addresses),
+                F.h('div', { className: 'wan-toggle-grid' }, [
+                  toggleField('field.defaultV4', installDefaultV4),
+                  toggleField('field.defaultV6', installDefaultV6)
+                ]),
+                F.h('div', { className: 'wan-config-grid' }, [
+                  field('field.metricV4', metricV4),
+                  field('field.metricV6', metricV6),
+                  field('field.redirect', redirectMode)
+                ]),
+                textNode('h3', { className: 'wan-effective-title' }, 'field.routes'),
+                routeEditor.element
+              ])
+            ]),
+            F.h('div', { className: F.classes.toolbar + ' wan-actions' }, [
+              saveButton,
+              loadButton,
+              applyButton,
+              teardownButton,
+              refreshButton
+            ])
+          ]),
+          F.card([
+            textNode('h2', { className: F.classes.title }, 'lastStatus.title'),
+            stateBody
+          ])
+        ])
+      ]);
+
+      document.body.replaceChildren(page);
+      loadSelection({ silent: true }).catch(function (e) { F.toastError(e); }).finally(F.requestResize);
+    })();
+  </script>
+</body>
+</html>

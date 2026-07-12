@@ -67,6 +67,51 @@ func TestLoadPluginCatalogIncludesBuiltinFVTap(t *testing.T) {
 	}
 }
 
+func TestPluginCatalogControlSurfaceUsesRegistrationOnlyWhenRuntimeSnapshotIsEmpty(t *testing.T) {
+	db := openTestDB(t)
+	runtime := &emptySnapshotPluginControlRuntimeTest{}
+	pm := &ProcessManager{
+		db:                   db,
+		cfg:                  &Config{PluginsDir: t.TempDir()},
+		pluginControlRuntime: runtime,
+	}
+	catalog := pm.pluginCatalogWithControlSurface(pm.cfg)
+	if runtime.reconcileCalls != 0 {
+		t.Fatalf("control runtime Reconcile calls = %d, want registration-only fallback", runtime.reconcileCalls)
+	}
+	if len(catalog.Plugins) != 1 || !catalog.Plugins[0].Builtin {
+		t.Fatalf("catalog plugins = %+v, want builtin fvtap", catalog.Plugins)
+	}
+}
+
+func TestLoadPluginCatalogSkipsNonPluginSubdirectories(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "include"), 0o755); err != nil {
+		t.Fatalf("Mkdir(include) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "include", "helper.h"), []byte("#pragma once\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(helper.h) error = %v", err)
+	}
+	writeTestPlugin(t, dir, "packet_observer", `{
+  "api_version": "v1",
+  "id": "packet_observer",
+  "name": "Packet Observer",
+  "version": "0.1.0"
+}`)
+
+	catalog := loadPluginCatalog(&Config{PluginsDir: dir})
+	if len(catalog.Plugins) != 2 {
+		t.Fatalf("plugin count = %d, want builtin plus one external plugin: %+v", len(catalog.Plugins), catalog.Plugins)
+	}
+	for _, plugin := range catalog.Plugins {
+		if strings.HasPrefix(plugin.ID, "invalid-") || plugin.Source == "include" {
+			t.Fatalf("catalog included non-plugin directory: %+v", plugin)
+		}
+	}
+}
+
 func TestLoadPluginCatalogLoadsExternalPlugin(t *testing.T) {
 	t.Parallel()
 
@@ -84,7 +129,7 @@ func TestLoadPluginCatalogLoadsExternalPlugin(t *testing.T) {
 }`)
 	writePluginControlScript(t, dir, "packet_observer", `
 plugin.capabilities(['observe', 'observe']);
-plugin.virtualInterface({id: 'vtap0', type: 'logical'});
+plugin.pipelineNode({id: 'vtap0'});
 ui.register({static_dir: 'ui', entry: 'index.html'});
 `)
 
@@ -107,6 +152,9 @@ ui.register({static_dir: 'ui', entry: 'index.html'});
 	}
 	if len(plugin.Capabilities) != 1 || plugin.Capabilities[0] != "observe" {
 		t.Fatalf("Capabilities = %#v, want deduplicated observe", plugin.Capabilities)
+	}
+	if len(plugin.VirtualInterfaces) != 1 || plugin.VirtualInterfaces[0].Type != "pipeline" {
+		t.Fatalf("VirtualInterfaces = %#v, want one pipeline node", plugin.VirtualInterfaces)
 	}
 }
 
@@ -756,6 +804,19 @@ ebpf.loadObject({id:'observer', path:'observer.o'});
 	}
 }
 
+func TestLoadVerifiedPluginObjectCollectionSpecRejectsChangedFile(t *testing.T) {
+	t.Parallel()
+
+	objectPath := filepath.Join(t.TempDir(), "plugin.o")
+	if err := os.WriteFile(objectPath, []byte("changed object"), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.o) error = %v", err)
+	}
+	_, err := loadVerifiedPluginObjectCollectionSpec(objectPath, testSHA256Hex("catalog object"))
+	if err == nil || !strings.Contains(err.Error(), "sha256 changed after catalog verification") {
+		t.Fatalf("loadVerifiedPluginObjectCollectionSpec() error = %v, want changed object rejection", err)
+	}
+}
+
 func TestLoadPluginCatalogRejectsStableControlWithoutSHA256(t *testing.T) {
 	t.Parallel()
 
@@ -1081,11 +1142,9 @@ ebpf.loadObject({
   sha256: '`+sum+`',
   programs: [{id: 'tc_ingress', section: 'tc/ingress', type: 'tc'}]
 });
-hooks.attach({
+pipeline.attach({
   id: 'observe-ingress',
-  engine: 'tc',
-  attach: 'ingress',
-  stage: 'forward',
+  direction: 'forward',
   priority: 10,
   program: 'observer:tc_ingress',
   mode: 'observe'
@@ -1110,6 +1169,44 @@ ui.register({static_dir: 'ui', entry: 'index.html'});
 	}
 	if len(object.Programs) != 1 || object.Programs[0].Type != kernelEngineTC || object.Programs[0].InstructionCount == 0 {
 		t.Fatalf("object programs = %+v, want parsed TC program with instructions", object.Programs)
+	}
+	if len(plugin.Hooks) != 1 {
+		t.Fatalf("hooks = %+v, want one pipeline hook", plugin.Hooks)
+	}
+	hook := plugin.Hooks[0]
+	if hook.Engine != kernelEngineTC || hook.Attach != "ingress" || hook.Stage != "forward" || hook.Priority != 10 {
+		t.Fatalf("pipeline hook = %+v, want tc ingress forward priority 10", hook)
+	}
+}
+
+func TestLoadPluginCatalogRejectsPipelineAttachCorePriorityCollision(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "bad_pipeline", `{
+  "api_version": "v1",
+  "id": "bad_pipeline",
+  "name": "Bad Pipeline",
+  "version": "0.1.0",
+  "kind": "pipeline",
+  "control": {"main": "control.js", "permissions": ["hook.attach"]}
+}`)
+	writePluginControlScript(t, dir, "bad_pipeline", `
+pipeline.attach({
+  id: 'core-collision',
+  direction: 'forward',
+  priority: 1000,
+  program: 'observer:tc_ingress'
+});
+`)
+
+	catalog := loadPluginCatalogWithControlRegistration(&Config{PluginsDir: dir})
+	if len(catalog.Plugins) != 2 {
+		t.Fatalf("plugin count = %d, want builtin + bad_pipeline", len(catalog.Plugins))
+	}
+	plugin := catalog.Plugins[1]
+	if plugin.Status != pluginStatusError || !strings.Contains(plugin.Error, "collides with fvtap core priority") {
+		t.Fatalf("plugin = %+v, want pipeline attach priority collision", plugin)
 	}
 }
 
@@ -1275,6 +1372,56 @@ func TestPluginAPIListsCatalogAndServesAssets(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "plugin asset ok") {
 		t.Fatalf("plugin asset body = %q, want test content", rec.Body.String())
+	}
+}
+
+func TestPluginRuntimeQueryReturnsTransientActionResult(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "query_plugin", `{
+  "api_version": "v1",
+  "id": "query_plugin",
+  "name": "Query Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js",
+    "permissions": ["plugin.register"]
+  }
+}`)
+	writePluginControlScript(t, dir, "query_plugin", `
+plugin.action({id: 'traffic_stats', runtime_update: 'runtime_query', max_payload_bytes: 1024});
+exports.onAction = function (ctx) {
+  return {profile_key: ctx.payload.profile_key, rx_bytes: 123, tx_bytes: 456};
+};
+`)
+
+	db := openTestDB(t)
+	cfg := &Config{WebToken: "test-token", PluginsDir: dir}
+	pm := &ProcessManager{db: db, cfg: cfg}
+	pm.pluginControlRuntime = newPluginControlRuntime(db, cfg, pm)
+	t.Cleanup(func() { _ = pm.pluginControlRuntime.Close() })
+	handler := buildAPIHandler(cfg, db, pm)
+	req := httptest.NewRequest(http.MethodPost, "/api/plugins/query_plugin/actions/traffic_stats", strings.NewReader(`{"payload":{"profile_key":"wan-a"}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST runtime query status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var response pluginActionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode runtime query response: %v", err)
+	}
+	result, ok := response.Result.(map[string]any)
+	if !ok || result["profile_key"] != "wan-a" || result["rx_bytes"] != float64(123) || result["tx_bytes"] != float64(456) {
+		t.Fatalf("runtime query result = %#v, want transient traffic values", response.Result)
+	}
+	status, err := store.PluginRuntimeStatusOrNil(db, "query_plugin", "action", "traffic_stats")
+	if err != nil {
+		t.Fatalf("PluginRuntimeStatusOrNil(runtime query) error = %v", err)
+	}
+	if status != nil {
+		t.Fatalf("runtime query status = %+v, want no persistent action status", status)
 	}
 }
 
@@ -2098,6 +2245,12 @@ exports.onTimer = function () {
 	if workers := rt.pluginWorkerList("lifecycle_plugin"); len(workers) != 0 {
 		t.Fatalf("lifecycle workers after disable = %+v, want none", workers)
 	}
+	rt.queueMu.Lock()
+	_, queueUsageLeaked := rt.workerQueueUsage["lifecycle_plugin"]
+	rt.queueMu.Unlock()
+	if queueUsageLeaked {
+		t.Fatal("lifecycle worker queue usage remained after plugin disable")
+	}
 
 	req = httptest.NewRequest(http.MethodPut, "/api/plugins/lifecycle_plugin/state", strings.NewReader(`{"enabled":true}`))
 	req.Header.Set("Authorization", "Bearer test-token")
@@ -2390,6 +2543,46 @@ exports.onAction = function () {
 	}
 }
 
+func TestPluginGojaControlRunsDeactivateHandler(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv"]
+  }
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onDeactivate = function (ctx) {
+  kv.set('deactivated', {reason: ctx.reason, kind: ctx.kind});
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	rt.Reconcile(loadPluginCatalogWithState(cfg, db))
+	if err := store.SetPluginEnabled(db, "control_plugin", false); err != nil {
+		t.Fatalf("SetPluginEnabled(false) error = %v", err)
+	}
+	rt.Reconcile(loadPluginCatalogWithState(cfg, db))
+
+	record, err := store.GetPluginRecord(db, "control_plugin", pluginControlKVResourceID, "deactivated")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(deactivated) error = %v", err)
+	}
+	for _, want := range []string{`"kind":"deactivate"`, `"reason":"plugin disabled, removed, or no longer loadable"`} {
+		if !strings.Contains(record.DataJSON, want) {
+			t.Fatalf("deactivated data = %s, missing %s", record.DataJSON, want)
+		}
+	}
+}
+
 func TestPluginCatalogFingerprintDetectsPluginFileChanges(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{PluginsDir: dir}
@@ -2486,7 +2679,66 @@ func TestPluginCatalogFingerprintDetectsContentChangesWithPreservedMetadata(t *t
 	}
 }
 
-func TestPluginCatalogDriftReconcilesRuntimeAndQueuesRedistribute(t *testing.T) {
+func TestPluginCatalogSnapshotPreservesContentFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "snapshot_plugin", `{
+  "api_version":"v1",
+  "id":"snapshot_plugin",
+  "name":"Snapshot Plugin",
+  "version":"1.0.0",
+  "kind":"control",
+  "control":{"main":"control.js"}
+}`)
+	writePluginControlScript(t, dir, "snapshot_plugin", `exports.onReconcile = function () {};`)
+	cfg := &Config{PluginsDir: dir}
+	sourceFingerprint, err := buildPluginCatalogFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("buildPluginCatalogFingerprint(source) error = %v", err)
+	}
+	snapshotDir, candidateFingerprint, err := snapshotPluginCatalogDirectory(cfg)
+	if err != nil {
+		t.Fatalf("snapshotPluginCatalogDirectory() error = %v", err)
+	}
+	t.Cleanup(func() { _ = removePluginCatalogSnapshot(snapshotDir) })
+	snapshotFingerprint, err := buildPluginCatalogFingerprint(&Config{PluginsDir: snapshotDir})
+	if err != nil {
+		t.Fatalf("buildPluginCatalogFingerprint(snapshot) error = %v", err)
+	}
+	if sourceFingerprint != candidateFingerprint || sourceFingerprint != snapshotFingerprint {
+		t.Fatalf("fingerprints source/candidate/snapshot = %q/%q/%q, want equal", sourceFingerprint, candidateFingerprint, snapshotFingerprint)
+	}
+}
+
+func TestPluginCatalogUpdatesBetweenDirsClassifiesChanges(t *testing.T) {
+	appliedDir := t.TempDir()
+	detectedDir := t.TempDir()
+	writeManifest := func(root, id, version string) {
+		writeTestPlugin(t, root, id, fmt.Sprintf(`{
+  "api_version":"v1",
+  "id":%q,
+  "name":%q,
+  "version":%q,
+  "kind":"control"
+}`, id, id, version))
+	}
+	writeManifest(appliedDir, "modified_plugin", "1.0.0")
+	writeManifest(appliedDir, "removed_plugin", "1.0.0")
+	writeManifest(appliedDir, "stable_plugin", "1.0.0")
+	writeManifest(detectedDir, "added_plugin", "1.0.0")
+	writeManifest(detectedDir, "modified_plugin", "2.0.0")
+	writeManifest(detectedDir, "stable_plugin", "1.0.0")
+
+	updates := pluginCatalogUpdatesBetweenDirs(appliedDir, detectedDir)
+	changes := make(map[string]string, len(updates))
+	for _, update := range updates {
+		changes[update.PluginID] = update.Change
+	}
+	if len(changes) != 3 || changes["added_plugin"] != pluginCatalogUpdateAdded || changes["modified_plugin"] != pluginCatalogUpdateModified || changes["removed_plugin"] != pluginCatalogUpdateRemoved {
+		t.Fatalf("plugin catalog updates = %+v, want added/modified/removed classifications", updates)
+	}
+}
+
+func TestPluginCatalogDriftWaitsForManualApply(t *testing.T) {
 	dir := t.TempDir()
 	db := openTestDB(t)
 	cfg := &Config{PluginsDir: dir}
@@ -2495,13 +2747,14 @@ func TestPluginCatalogDriftReconcilesRuntimeAndQueuesRedistribute(t *testing.T) 
 		cfg:              cfg,
 		redistributeWake: make(chan struct{}, 1),
 	}
+	pm.initializePluginCatalogSnapshot()
+	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
 	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
 	pm.pluginControlRuntime = rt
 	t.Cleanup(func() { _ = rt.Close() })
 
-	pm.refreshPluginCatalogFingerprint()
 	status := pm.snapshotPluginCatalogHotReloadStatus()
-	if status == nil || status.LastCheckAt == "" || status.LastCheckResult != pluginCatalogHotReloadResultSuccess {
+	if status == nil || status.UpdateAvailable || status.LastCheckAt == "" || status.LastCheckResult != pluginCatalogHotReloadResultSuccess {
 		t.Fatalf("initial hot reload status = %+v, want successful check", status)
 	}
 	if pm.detectPluginCatalogDrift() {
@@ -2529,25 +2782,245 @@ exports.onReconcile = function () {};
 	if !pm.detectPluginCatalogDrift() {
 		t.Fatal("detectPluginCatalogDrift() = false after plugin directory changes")
 	}
-	if !pluginControlVMExistsForTest(rt, "hot_plugin") {
-		t.Fatal("hot_plugin control VM missing after catalog drift reconcile")
+	if pluginControlVMExistsForTest(rt, "hot_plugin") {
+		t.Fatal("hot_plugin control VM exists before manual catalog apply")
 	}
 	pm.mu.Lock()
 	redistributePending := pm.redistributePending
 	pm.mu.Unlock()
-	if !redistributePending {
-		t.Fatal("redistributePending = false, want queued redistribute after plugin catalog drift")
+	if redistributePending {
+		t.Fatal("redistributePending = true before manual catalog apply")
 	}
 	status = pm.snapshotPluginCatalogHotReloadStatus()
-	if status == nil || status.LastReloadAt == "" || status.LastReloadSource != pluginCatalogHotReloadSourceAuto || status.LastReloadResult != pluginCatalogHotReloadResultSuccess {
-		t.Fatalf("changed hot reload status = %+v, want auto reload success", status)
+	if status == nil || !status.UpdateAvailable || status.LastCheckResult != pluginCatalogHotReloadResultPending || status.LastReloadAt != "" {
+		t.Fatalf("changed hot reload status = %+v, want pending manual update", status)
 	}
-	if status.CatalogFingerprint == "" || status.FingerprintShortHash == "" || !strings.HasPrefix(status.CatalogFingerprint, status.FingerprintShortHash) {
-		t.Fatalf("hot reload fingerprint fields = %+v, want full and short hash", status)
+	if status.AppliedFingerprint == "" || status.DetectedFingerprint == "" || status.AppliedFingerprint == status.DetectedFingerprint {
+		t.Fatalf("pending fingerprint fields = %+v, want distinct applied and detected hashes", status)
 	}
 	catalog := pm.pluginCatalogWithConfig(cfg)
-	if catalog.HotReload == nil || catalog.HotReload.LastReloadSource != pluginCatalogHotReloadSourceAuto {
-		t.Fatalf("catalog hot reload status = %+v, want exposed auto reload status", catalog.HotReload)
+	for _, plugin := range catalog.Plugins {
+		if plugin.ID == "hot_plugin" {
+			t.Fatalf("pending plugin unexpectedly visible in applied catalog: %+v", plugin)
+		}
+	}
+	runtimeCfg := processManagerConfig(pm)
+	if runtimeCfg == nil || runtimeCfg.PluginsDir == cfg.PluginsDir {
+		t.Fatalf("runtime plugin directory = %v, want private applied snapshot", runtimeCfg)
+	}
+	if externalPluginExists(cfg, pm, "hot_plugin") {
+		t.Fatal("pending plugin unexpectedly visible to plugin state API")
+	}
+
+	if err := pm.applyPluginCatalogUpdate(); err != nil {
+		t.Fatalf("applyPluginCatalogUpdate() error = %v", err)
+	}
+	if !pluginControlVMExistsForTest(rt, "hot_plugin") {
+		t.Fatal("hot_plugin control VM missing after manual catalog apply")
+	}
+	pm.mu.Lock()
+	redistributePending = pm.redistributePending
+	pm.mu.Unlock()
+	if !redistributePending {
+		t.Fatal("redistributePending = false after manual catalog apply")
+	}
+	status = pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || status.UpdateAvailable || status.LastReloadAt == "" || status.LastReloadSource != pluginCatalogHotReloadSourceManual || status.LastReloadResult != pluginCatalogHotReloadResultSuccess {
+		t.Fatalf("applied hot reload status = %+v, want manual reload success", status)
+	}
+	if status.AppliedFingerprint != status.DetectedFingerprint || status.CatalogFingerprint != status.AppliedFingerprint {
+		t.Fatalf("applied fingerprint fields = %+v, want matching hashes", status)
+	}
+	catalog = pm.pluginCatalogWithConfig(cfg)
+	if catalog.HotReload == nil || catalog.HotReload.LastReloadSource != pluginCatalogHotReloadSourceManual {
+		t.Fatalf("catalog hot reload status = %+v, want exposed manual reload status", catalog.HotReload)
+	}
+	found := false
+	for _, plugin := range catalog.Plugins {
+		found = found || plugin.ID == "hot_plugin"
+	}
+	if !found {
+		t.Fatal("hot_plugin missing from applied catalog after manual update")
+	}
+	if !externalPluginExists(cfg, pm, "hot_plugin") {
+		t.Fatal("hot_plugin missing from plugin state API after manual update")
+	}
+}
+
+func TestPluginCatalogManualApplyRejectsBrokenCandidateAndKeepsAppliedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	db := openTestDB(t)
+	cfg := &Config{PluginsDir: dir}
+	writeTestPlugin(t, dir, "stable_plugin", `{
+  "api_version": "v1",
+  "id": "stable_plugin",
+  "name": "Stable Plugin",
+  "version": "1.0.0",
+  "kind": "control",
+  "control": {"main": "control.js"}
+}`)
+	writePluginControlScript(t, dir, "stable_plugin", `exports.onReconcile = function () {};`)
+
+	pm := &ProcessManager{db: db, cfg: cfg, redistributeWake: make(chan struct{}, 1)}
+	pm.initializePluginCatalogSnapshot()
+	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
+	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	pm.pluginControlRuntime = rt
+	t.Cleanup(func() { _ = rt.Close() })
+	pm.reconcilePluginsForRuntime()
+	if !pluginControlVMExistsForTest(rt, "stable_plugin") {
+		t.Fatal("stable_plugin control VM missing before candidate update")
+	}
+
+	writeTestPlugin(t, dir, "stable_plugin", `{
+  "api_version": "v1",
+  "id": "stable_plugin",
+  "name": "Stable Plugin",
+  "version": "2.0.0",
+  "kind": "control",
+  "control": {"main": "control.js"}
+}`)
+	writePluginControlScript(t, dir, "stable_plugin", `exports.onReconcile = function () {`)
+	if !pm.detectPluginCatalogDrift() {
+		t.Fatal("detectPluginCatalogDrift() = false for broken candidate")
+	}
+	status := pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || len(status.Updates) != 1 || status.Updates[0].PluginID != "stable_plugin" || status.Updates[0].Change != pluginCatalogUpdateModified {
+		t.Fatalf("broken candidate updates = %+v, want one stable_plugin modification", status)
+	}
+	if err := pm.applyPluginCatalogUpdate(); err == nil {
+		t.Fatal("applyPluginCatalogUpdate() error = nil for broken candidate")
+	}
+	if !pluginControlVMExistsForTest(rt, "stable_plugin") {
+		t.Fatal("stable_plugin previous control VM was removed after rejected candidate")
+	}
+	status = pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || !status.UpdateAvailable || status.LastReloadResult != pluginCatalogHotReloadResultPartial || status.LastReloadError == "" {
+		t.Fatalf("rejected candidate status = %+v, want pending update with error", status)
+	}
+	catalog := pm.pluginCatalogWithConfig(cfg)
+	for _, plugin := range catalog.Plugins {
+		if plugin.ID == "stable_plugin" {
+			if plugin.Version != "1.0.0" || plugin.Status != pluginStatusActive {
+				t.Fatalf("applied plugin after rejected candidate = %+v, want active version 1.0.0", plugin)
+			}
+			return
+		}
+	}
+	t.Fatal("stable_plugin missing from applied catalog after rejected candidate")
+}
+
+func TestPluginCatalogManualApplyKeepsUnchangedControlVM(t *testing.T) {
+	dir := t.TempDir()
+	db := openTestDB(t)
+	cfg := &Config{PluginsDir: dir}
+	for _, id := range []string{"plugin_a", "plugin_b"} {
+		writeTestPlugin(t, dir, id, fmt.Sprintf(`{
+  "api_version":"v1",
+  "id":%q,
+  "name":%q,
+  "version":"1.0.0",
+  "kind":"control",
+  "control":{"main":"control.js"}
+}`, id, id))
+		writePluginControlScript(t, dir, id, `exports.onReconcile = function () {};`)
+	}
+
+	pm := &ProcessManager{db: db, cfg: cfg, redistributeWake: make(chan struct{}, 1)}
+	pm.initializePluginCatalogSnapshot()
+	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
+	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	pm.pluginControlRuntime = rt
+	t.Cleanup(func() { _ = rt.Close() })
+	pm.reconcilePluginsForRuntime()
+	rt.mu.Lock()
+	beforeA := rt.controlVMs["plugin_a"]
+	beforeB := rt.controlVMs["plugin_b"]
+	rt.mu.Unlock()
+	if beforeA == nil || beforeB == nil {
+		t.Fatalf("initial control VMs = %p/%p, want both", beforeA, beforeB)
+	}
+
+	writePluginControlScript(t, dir, "plugin_b", `
+var updated = true;
+exports.onReconcile = function () {};
+`)
+	if !pm.detectPluginCatalogDrift() {
+		t.Fatal("detectPluginCatalogDrift() = false after plugin_b change")
+	}
+	if err := pm.applyPluginCatalogUpdate(); err != nil {
+		t.Fatalf("applyPluginCatalogUpdate() error = %v", err)
+	}
+	rt.mu.Lock()
+	afterA := rt.controlVMs["plugin_a"]
+	afterB := rt.controlVMs["plugin_b"]
+	rt.mu.Unlock()
+	if afterA != beforeA {
+		t.Fatalf("unchanged plugin_a VM changed from %p to %p", beforeA, afterA)
+	}
+	if afterB == nil || afterB == beforeB {
+		t.Fatalf("changed plugin_b VM = %p, want replacement for %p", afterB, beforeB)
+	}
+}
+
+func TestPluginCatalogManualApplySelectionLeavesOtherUpdatesPending(t *testing.T) {
+	dir := t.TempDir()
+	db := openTestDB(t)
+	cfg := &Config{PluginsDir: dir}
+	writeVersion := func(id, version string) {
+		writeTestPlugin(t, dir, id, fmt.Sprintf(`{
+  "api_version":"v1",
+  "id":%q,
+  "name":%q,
+  "version":%q,
+  "kind":"control",
+  "control":{"main":"control.js"}
+}`, id, id, version))
+	}
+	for _, id := range []string{"plugin_a", "plugin_b"} {
+		writeVersion(id, "1.0.0")
+		writePluginControlScript(t, dir, id, `exports.onReconcile = function () {};`)
+	}
+
+	pm := &ProcessManager{db: db, cfg: cfg, redistributeWake: make(chan struct{}, 1)}
+	pm.initializePluginCatalogSnapshot()
+	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
+	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	pm.pluginControlRuntime = rt
+	t.Cleanup(func() { _ = rt.Close() })
+	pm.reconcilePluginsForRuntime()
+
+	writeVersion("plugin_a", "2.0.0")
+	writeVersion("plugin_b", "2.0.0")
+	if !pm.detectPluginCatalogDrift() {
+		t.Fatal("detectPluginCatalogDrift() = false after two plugin changes")
+	}
+	status := pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || len(status.Updates) != 2 || status.Updates[0].PluginID != "plugin_a" || status.Updates[1].PluginID != "plugin_b" {
+		t.Fatalf("pending plugin updates = %+v, want plugin_a and plugin_b", status)
+	}
+
+	if err := pm.applyPluginCatalogUpdateSelection([]string{"plugin_a"}); err != nil {
+		t.Fatalf("applyPluginCatalogUpdateSelection(plugin_a) error = %v", err)
+	}
+	versions := map[string]string{}
+	for _, plugin := range pm.pluginCatalogWithConfig(cfg).Plugins {
+		versions[plugin.ID] = plugin.Version
+	}
+	if versions["plugin_a"] != "2.0.0" || versions["plugin_b"] != "1.0.0" {
+		t.Fatalf("versions after selective apply = %+v, want plugin_a=2.0.0 plugin_b=1.0.0", versions)
+	}
+	status = pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || !status.UpdateAvailable || len(status.Updates) != 1 || status.Updates[0].PluginID != "plugin_b" {
+		t.Fatalf("remaining plugin updates = %+v, want only plugin_b", status)
+	}
+
+	if err := pm.applyPluginCatalogUpdateSelection([]string{"plugin_b"}); err != nil {
+		t.Fatalf("applyPluginCatalogUpdateSelection(plugin_b) error = %v", err)
+	}
+	status = pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || status.UpdateAvailable || len(status.Updates) != 0 || status.AppliedFingerprint != status.DetectedFingerprint {
+		t.Fatalf("hot reload status after final selective apply = %+v, want fully applied", status)
 	}
 }
 
@@ -2872,6 +3345,573 @@ exports.onAction = function () {
 	}
 }
 
+func TestPluginGojaControlRestartsPersistentVMWhenAssetChanges(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{
+    "id": "apply",
+    "runtime_update": "runtime_apply"
+  }],
+  "control": {
+    "main": "control.js",
+    "permissions": ["crypto", "kv", "ui"]
+  }
+}`)
+	uiDir := filepath.Join(dir, "control_plugin", "ui")
+	if err := os.MkdirAll(uiDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(ui) error = %v", err)
+	}
+	writeUI := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(uiDir, "index.html"), []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile(ui/index.html) error = %v", err)
+		}
+	}
+	writeUI("<p>asset-v1</p>\n")
+	writePluginControlScript(t, dir, "control_plugin", `
+var actionCount = 0;
+var assetHash = crypto.sha256File('ui/index.html');
+ui.register({static_dir: 'ui', entry: 'index.html', sha256: assetHash});
+exports.onAction = function () {
+  actionCount++;
+  kv.set('state', {asset_hash: assetHash, action_count: actionCount});
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	plugin := pluginByIDForTest(t, catalog, "control_plugin")
+	action := pluginActionByIDForTest(t, plugin, "apply")
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(asset v1) error = %v", err)
+	}
+
+	writeUI("<p>asset-v2</p>\n")
+	catalog = loadPluginCatalogWithState(cfg, db)
+	snapshot := rt.Reconcile(catalog)
+	if state, ok := snapshot.stateFor("control_plugin"); !ok || state.Error != "" {
+		t.Fatalf("asset reload state = %+v ok=%t, want active", state, ok)
+	}
+	applyPluginRuntimeSnapshot(&catalog, snapshot)
+	plugin = pluginByIDForTest(t, catalog, "control_plugin")
+	wantHash := testSHA256Hex("<p>asset-v2</p>\n")
+	if plugin.UI == nil || plugin.UI.SHA256 != wantHash || plugin.UI.ResolvedSHA256 != wantHash {
+		t.Fatalf("plugin UI = %+v, want updated hash %s", plugin.UI, wantHash)
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(asset v2) error = %v", err)
+	}
+	record, err := store.GetPluginRecord(db, "control_plugin", pluginControlKVResourceID, "state")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(state) error = %v", err)
+	}
+	for _, want := range []string{`"asset_hash":"` + wantHash + `"`, `"action_count":1`} {
+		if !strings.Contains(record.DataJSON, want) {
+			t.Fatalf("state data = %s, want %s", record.DataJSON, want)
+		}
+	}
+}
+
+func TestPluginGojaControlTransactionalUpgradePreservesStateTimersAndWorkers(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "upgrade_plugin", `{
+  "api_version": "v1",
+  "id": "upgrade_plugin",
+  "name": "Upgrade Plugin",
+  "version": "1.0.0",
+  "kind": "control",
+  "actions": [{"id": "apply", "runtime_update": "runtime_apply"}],
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv", "timer", "worker"]
+  }
+}`)
+	writeVersion := func(version int) {
+		t.Helper()
+		writePluginControlScript(t, dir, "upgrade_plugin", fmt.Sprintf(`
+var buildVersion = %d;
+var controlCalls = 0;
+var workerCalls = 0;
+exports.onReconcile = function () {
+  var timers = timer.list();
+  var found = false;
+  for (var i = 0; i < timers.length; i++) if (timers[i].name === 'preserved') found = true;
+  if (!found) timer.setTimeout('preserved', 3600000, {created_by: buildVersion});
+};
+exports.onAction = function (ctx) {
+  if (ctx.payload && ctx.payload.worker) {
+    var result = worker.call('stateful', 'onWorkerCall', {});
+    kv.set('worker_state', result);
+    return;
+  }
+  controlCalls = controlCalls + 1;
+  kv.set('control_state', {build: buildVersion, calls: controlCalls});
+};
+exports.onWorkerCall = function () {
+  workerCalls = workerCalls + 1;
+  return {build: buildVersion, calls: workerCalls};
+};
+exports.onUpgradeSnapshot = function (ctx) {
+  if (ctx.upgrade.scope === 'worker') return {calls: workerCalls};
+  return {calls: controlCalls};
+};
+exports.onUpgradeRestore = function (ctx) {
+  var state = ctx.upgrade.state || {calls: 0};
+  if (ctx.upgrade.scope === 'worker') workerCalls = state.calls || 0;
+  else controlCalls = state.calls || 0;
+};
+`, version))
+	}
+	writeVersion(1)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	plugin := pluginByIDForTest(t, catalog, "upgrade_plugin")
+	action := pluginActionByIDForTest(t, plugin, "apply")
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(control v1) error = %v", err)
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"worker":true}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(worker v1) error = %v", err)
+	}
+
+	timerKey := pluginControlTimerKey{pluginID: plugin.ID, name: "preserved"}
+	workerKey := pluginControlWorkerKey{pluginID: plugin.ID, name: "stateful"}
+	rt.mu.Lock()
+	beforeTimer, hasTimer := rt.timers[timerKey]
+	beforeWorker := rt.pluginWorkers[workerKey]
+	beforeControl := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+	if !hasTimer || beforeWorker == nil || beforeControl == nil {
+		t.Fatalf("pre-upgrade runtime timer=%t worker=%v control=%v", hasTimer, beforeWorker, beforeControl)
+	}
+
+	writeVersion(2)
+	catalog = loadPluginCatalogWithState(cfg, db)
+	snapshot := rt.Reconcile(catalog)
+	if state, ok := snapshot.stateFor(plugin.ID); !ok || state.Error != "" {
+		t.Fatalf("upgrade state = %+v ok=%t, want active", state, ok)
+	}
+	applyPluginRuntimeSnapshot(&catalog, snapshot)
+	plugin = pluginByIDForTest(t, catalog, plugin.ID)
+	action = pluginActionByIDForTest(t, plugin, "apply")
+
+	rt.mu.Lock()
+	afterTimer, timerPreserved := rt.timers[timerKey]
+	afterWorker := rt.pluginWorkers[workerKey]
+	afterControl := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+	if !timerPreserved || afterTimer.generation != beforeTimer.generation || afterTimer.timer != beforeTimer.timer {
+		t.Fatalf("timer changed across transaction: before=%+v after=%+v present=%t", beforeTimer, afterTimer, timerPreserved)
+	}
+	if afterWorker == nil || afterWorker == beforeWorker || afterWorker.key == beforeWorker.key {
+		t.Fatalf("worker VM was not transactionally replaced: before=%v after=%v", beforeWorker, afterWorker)
+	}
+	if afterControl == nil || afterControl == beforeControl || afterControl.key == beforeControl.key {
+		t.Fatalf("control VM was not transactionally replaced: before=%v after=%v", beforeControl, afterControl)
+	}
+
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(control v2) error = %v", err)
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"worker":true}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(worker v2) error = %v", err)
+	}
+	for key, wants := range map[string][]string{
+		"control_state": {`"build":2`, `"calls":2`},
+		"worker_state":  {`"build":2`, `"calls":2`},
+	} {
+		record, err := store.GetPluginRecord(db, plugin.ID, pluginControlKVResourceID, key)
+		if err != nil {
+			t.Fatalf("GetPluginRecord(%s) error = %v", key, err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(record.DataJSON, want) {
+				t.Fatalf("%s data = %s, missing %s", key, record.DataJSON, want)
+			}
+		}
+	}
+
+	writeVersion(3)
+	catalog = loadPluginCatalogWithState(cfg, db)
+	snapshot = rt.Reconcile(catalog)
+	if state, ok := snapshot.stateFor(plugin.ID); !ok || state.Error != "" {
+		t.Fatalf("second upgrade state = %+v ok=%t, want active", state, ok)
+	}
+	applyPluginRuntimeSnapshot(&catalog, snapshot)
+	plugin = pluginByIDForTest(t, catalog, plugin.ID)
+	action = pluginActionByIDForTest(t, plugin, "apply")
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(control v3) error = %v", err)
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"worker":true}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(worker v3) error = %v", err)
+	}
+	for key, wants := range map[string][]string{
+		"control_state": {`"build":3`, `"calls":3`},
+		"worker_state":  {`"build":3`, `"calls":3`},
+	} {
+		record, err := store.GetPluginRecord(db, plugin.ID, pluginControlKVResourceID, key)
+		if err != nil {
+			t.Fatalf("GetPluginRecord(%s) after second upgrade error = %v", key, err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(record.DataJSON, want) {
+				t.Fatalf("%s data after second upgrade = %s, missing %s", key, record.DataJSON, want)
+			}
+		}
+	}
+}
+
+func TestPluginGojaControlTransactionalUpgradeRollbackBlocksHostSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "upgrade_plugin", `{
+  "api_version": "v1",
+  "id": "upgrade_plugin",
+  "name": "Upgrade Plugin",
+  "version": "1.0.0",
+  "kind": "control",
+  "actions": [{"id": "apply", "runtime_update": "runtime_apply"}],
+  "control": {"main": "control.js", "permissions": ["kv"]}
+}`)
+	writePluginControlScript(t, dir, "upgrade_plugin", `
+var calls = 0;
+exports.onAction = function () { calls++; kv.set('state', {build: 1, calls: calls}); };
+exports.onUpgradeSnapshot = function () { return {calls: calls}; };
+exports.onUpgradeRestore = function () {};
+`)
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	plugin := pluginByIDForTest(t, catalog, "upgrade_plugin")
+	action := pluginActionByIDForTest(t, plugin, "apply")
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(v1) error = %v", err)
+	}
+	rt.mu.Lock()
+	oldVM := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+
+	writePluginControlScript(t, dir, "upgrade_plugin", `
+var calls = 0;
+exports.onAction = function () { calls++; kv.set('state', {build: 2, calls: calls}); };
+exports.onUpgradeRestore = function (ctx) {
+  kv.set('upgrade_side_effect', {unexpected: true});
+  calls = (ctx.upgrade.state || {}).calls || 0;
+};
+`)
+	failedCatalog := loadPluginCatalogWithState(cfg, db)
+	snapshot := rt.Reconcile(failedCatalog)
+	state, ok := snapshot.stateFor(plugin.ID)
+	if !ok || !strings.Contains(state.Reason, "previous runtime preserved") || !strings.Contains(state.Error, "unavailable during plugin upgrade") {
+		t.Fatalf("failed upgrade state = %+v ok=%t, want blocked side effect with old runtime preserved", state, ok)
+	}
+	rt.mu.Lock()
+	currentVM := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+	if currentVM != oldVM {
+		t.Fatalf("control VM changed after failed restore: old=%v current=%v", oldVM, currentVM)
+	}
+	if _, err := store.GetPluginRecord(db, plugin.ID, pluginControlKVResourceID, "upgrade_side_effect"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("upgrade side effect record error = %v, want sql.ErrNoRows", err)
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(after rollback) error = %v", err)
+	}
+	record, err := store.GetPluginRecord(db, plugin.ID, pluginControlKVResourceID, "state")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(state) error = %v", err)
+	}
+	for _, want := range []string{`"build":1`, `"calls":2`} {
+		if !strings.Contains(record.DataJSON, want) {
+			t.Fatalf("state data = %s, missing %s", record.DataJSON, want)
+		}
+	}
+}
+
+func TestPluginGojaControlRequestWaitingForUpgradeUsesCandidateVM(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "upgrade_plugin", `{
+  "api_version": "v1",
+  "id": "upgrade_plugin",
+  "name": "Upgrade Plugin",
+  "version": "1.0.0",
+  "kind": "control",
+  "actions": [{"id": "apply", "runtime_update": "runtime_apply"}],
+  "control": {"main": "control.js", "permissions": ["kv"]}
+}`)
+	writeVersion := func(version int) {
+		writePluginControlScript(t, dir, "upgrade_plugin", fmt.Sprintf(`
+var buildVersion = %d;
+var calls = 0;
+exports.onAction = function (ctx) {
+  if (ctx.payload && ctx.payload.slow) {
+    kv.set('started', {build: buildVersion});
+    var until = Date.now() + 150;
+    while (Date.now() < until) {}
+  }
+  calls++;
+  kv.set('last', {build: buildVersion, calls: calls});
+};
+exports.onUpgradeSnapshot = function () { return {calls: calls}; };
+exports.onUpgradeRestore = function (ctx) { calls = (ctx.upgrade.state || {}).calls || 0; };
+`, version))
+	}
+	writeVersion(1)
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	oldPlugin := pluginByIDForTest(t, catalog, "upgrade_plugin")
+	action := pluginActionByIDForTest(t, oldPlugin, "apply")
+
+	slowDone := make(chan error, 1)
+	go func() {
+		slowDone <- rt.ApplyPluginAction(oldPlugin, action, json.RawMessage(`{"slow":true}`))
+	}()
+	waitForPluginRecordForTest(t, db, oldPlugin.ID, pluginControlKVResourceID, "started", time.Second)
+	writeVersion(2)
+	upgradeCatalog := loadPluginCatalogWithState(cfg, db)
+	reconcileDone := make(chan pluginRuntimeSnapshot, 1)
+	go func() { reconcileDone <- rt.Reconcile(upgradeCatalog) }()
+	gate, err := rt.pluginControlUpgradeGate(oldPlugin.ID)
+	if err != nil {
+		t.Fatalf("pluginControlUpgradeGate() error = %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		gate.mu.Lock()
+		upgrading := gate.upgrading
+		gate.mu.Unlock()
+		if upgrading {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("upgrade did not enter quiescing state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	waitingDone := make(chan error, 1)
+	go func() {
+		waitingDone <- rt.ApplyPluginAction(oldPlugin, action, json.RawMessage(`{}`))
+	}()
+	if err := <-slowDone; err != nil {
+		t.Fatalf("slow v1 action error = %v", err)
+	}
+	snapshot := <-reconcileDone
+	if state, ok := snapshot.stateFor(oldPlugin.ID); !ok || state.Error != "" {
+		t.Fatalf("upgrade state = %+v ok=%t, want active", state, ok)
+	}
+	if err := <-waitingDone; err != nil {
+		t.Fatalf("action waiting through upgrade error = %v", err)
+	}
+	record, err := store.GetPluginRecord(db, oldPlugin.ID, pluginControlKVResourceID, "last")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(last) error = %v", err)
+	}
+	for _, want := range []string{`"build":2`, `"calls":2`} {
+		if !strings.Contains(record.DataJSON, want) {
+			t.Fatalf("last data = %s, missing %s", record.DataJSON, want)
+		}
+	}
+}
+
+func TestPluginGojaControlUpgradeRejectsCandidateWithoutRestoreHook(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "upgrade_plugin", `{
+  "api_version": "v1",
+  "id": "upgrade_plugin",
+  "name": "Upgrade Plugin",
+  "version": "1.0.0",
+  "kind": "control",
+  "actions": [{"id": "apply", "runtime_update": "runtime_apply"}],
+  "control": {"main": "control.js", "permissions": ["kv"]}
+}`)
+	writePluginControlScript(t, dir, "upgrade_plugin", `
+var calls = 0;
+exports.onAction = function () { calls++; kv.set('state', {build: 1, calls: calls}); };
+exports.onUpgradeSnapshot = function () { return {calls: calls}; };
+exports.onUpgradeRestore = function () {};
+`)
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	plugin := pluginByIDForTest(t, catalog, "upgrade_plugin")
+	action := pluginActionByIDForTest(t, plugin, "apply")
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(v1) error = %v", err)
+	}
+	rt.mu.Lock()
+	oldVM := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+
+	writePluginControlScript(t, dir, "upgrade_plugin", `
+var calls = 0;
+exports.onAction = function () { calls++; kv.set('state', {build: 2, calls: calls}); };
+`)
+	failedCatalog := loadPluginCatalogWithState(cfg, db)
+	snapshot := rt.Reconcile(failedCatalog)
+	state, ok := snapshot.stateFor(plugin.ID)
+	if !ok || !strings.Contains(state.Error, "does not export onUpgradeRestore") {
+		t.Fatalf("upgrade state = %+v ok=%t, want missing restore rejection", state, ok)
+	}
+	rt.mu.Lock()
+	currentVM := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+	if currentVM != oldVM {
+		t.Fatalf("control VM changed after missing restore rejection: old=%v current=%v", oldVM, currentVM)
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(after rejection) error = %v", err)
+	}
+	record, err := store.GetPluginRecord(db, plugin.ID, pluginControlKVResourceID, "state")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(state) error = %v", err)
+	}
+	for _, want := range []string{`"build":1`, `"calls":2`} {
+		if !strings.Contains(record.DataJSON, want) {
+			t.Fatalf("state data = %s, missing %s", record.DataJSON, want)
+		}
+	}
+}
+
+func TestPluginGojaControlBrokenHotReloadPreservesPreviousVM(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{
+    "id": "apply",
+    "runtime_update": "runtime_apply"
+  }],
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv"]
+  }
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+var calls = 0;
+exports.onAction = function () {
+  calls++;
+  kv.set('state', {version: 1, calls: calls});
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	plugin := pluginByIDForTest(t, catalog, "control_plugin")
+	action := pluginActionByIDForTest(t, plugin, "apply")
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(v1) error = %v", err)
+	}
+
+	writePluginControlScript(t, dir, "control_plugin", `exports.onAction = function () {`)
+	brokenCatalog := loadPluginCatalogWithState(cfg, db)
+	snapshot := rt.Reconcile(brokenCatalog)
+	state, ok := snapshot.stateFor("control_plugin")
+	if !ok || !strings.Contains(state.Reason, "previous runtime preserved") || state.Error == "" {
+		t.Fatalf("broken reload state = %+v, want previous runtime preserved error", state)
+	}
+	brokenPlugin := pluginByIDForTest(t, brokenCatalog, "control_plugin")
+	if err := rt.ApplyPluginAction(brokenPlugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(after broken reload) error = %v, want old VM", err)
+	}
+	record, err := store.GetPluginRecord(db, "control_plugin", pluginControlKVResourceID, "state")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(state) error = %v", err)
+	}
+	for _, want := range []string{`"version":1`, `"calls":2`} {
+		if !strings.Contains(record.DataJSON, want) {
+			t.Fatalf("state data = %s, missing %s", record.DataJSON, want)
+		}
+	}
+}
+
+func TestPluginGojaControlInvalidSurfaceHotReloadPreservesPreviousVM(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{"id": "apply", "runtime_update": "runtime_apply"}],
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv", "ui"]
+  }
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+var calls = 0;
+exports.onAction = function () {
+  calls++;
+  kv.set('state', {version: 1, calls: calls});
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	plugin := pluginByIDForTest(t, catalog, "control_plugin")
+	action := pluginActionByIDForTest(t, plugin, "apply")
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(v1) error = %v", err)
+	}
+
+	writePluginControlScript(t, dir, "control_plugin", `
+ui.register({static_dir: 'missing-ui', entry: 'index.html'});
+exports.onAction = function () { kv.set('state', {version: 2}); };
+`)
+	brokenCatalog := loadPluginCatalogWithState(cfg, db)
+	state, ok := rt.Reconcile(brokenCatalog).stateFor("control_plugin")
+	if !ok || state.Error == "" || !strings.Contains(state.Reason, "previous runtime preserved") {
+		t.Fatalf("invalid surface reload state = %+v, want previous runtime preserved", state)
+	}
+	if err := rt.ApplyPluginAction(pluginByIDForTest(t, brokenCatalog, "control_plugin"), action, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(after invalid surface reload) error = %v, want old VM", err)
+	}
+	record, err := store.GetPluginRecord(db, "control_plugin", pluginControlKVResourceID, "state")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(state) error = %v", err)
+	}
+	for _, want := range []string{`"version":1`, `"calls":2`} {
+		if !strings.Contains(record.DataJSON, want) {
+			t.Fatalf("state data = %s, missing %s", record.DataJSON, want)
+		}
+	}
+}
+
 func TestPluginGojaControlScriptChangeClearsStaleTimers(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "control_plugin", `{
@@ -2932,14 +3972,19 @@ var workerCount = 0;
 var workerGlobalAvailable = worker && typeof worker.list === 'function';
 exports.onAction = function () {
   mainCount++;
+  var queueStats = worker.stats();
   var first = worker.call('bg', 'onWorker', {step: 1});
   var second = worker.call('bg', 'onWorker', {step: 2});
+  var workers = worker.list();
   kv.set('worker_result', {
     main_count: mainCount,
     first_count: first.count,
     second_count: second.count,
     worker_name: second.worker,
-    worker_total: worker.list().length
+    worker_total: workers.length,
+    worker_queue_capacity: workers[0].queue_capacity,
+    worker_request_limit: queueStats.request_limit,
+    worker_byte_limit: queueStats.byte_limit
   });
 };
 exports.onWorker = function (ctx) {
@@ -2961,7 +4006,7 @@ exports.onWorker = function (ctx) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(worker_result) error = %v", err)
 	}
-	for _, want := range []string{`"main_count":2`, `"first_count":3`, `"second_count":4`, `"worker_name":"bg"`, `"worker_total":1`} {
+	for _, want := range []string{`"main_count":2`, `"first_count":3`, `"second_count":4`, `"worker_name":"bg"`, `"worker_total":1`, `"worker_queue_capacity":64`, `"worker_request_limit":256`, `"worker_byte_limit":16777216`} {
 		if !strings.Contains(record.DataJSON, want) {
 			t.Fatalf("worker_result data = %s, want %s", record.DataJSON, want)
 		}
@@ -3035,6 +4080,124 @@ exports.onWorker = function () {
 	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "worker.call payload exceeds") {
 		t.Fatalf("ApplyPluginAction() error = %v, want worker payload limit error", err)
+	}
+}
+
+func TestPluginGojaWorkerQueueEnforcesPerPluginByteBudget(t *testing.T) {
+	rt := newPluginControlRuntime(nil, &Config{}, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	reservations := make([]*pluginControlWorkerQueueReservation, 0, pluginControlWorkerMaxPendingBytes/pluginControlWorkerMaxPayloadBytes)
+	for len(reservations)*pluginControlWorkerMaxPayloadBytes < pluginControlWorkerMaxPendingBytes {
+		reservation, err := rt.reservePluginControlWorkerQueue("budget_plugin", pluginControlWorkerMaxPayloadBytes)
+		if err != nil {
+			t.Fatalf("reservePluginControlWorkerQueue(%d) error = %v", len(reservations), err)
+		}
+		reservations = append(reservations, reservation)
+	}
+	vm := newPluginControlVM(rt, "budget_plugin", "test", "worker", "blocked")
+	if err := vm.dispatch(LoadedPlugin{}, pluginControlEvent{
+		Kind:    "worker",
+		Payload: json.RawMessage(`{}`),
+		Worker:  &pluginControlWorkerEvent{Name: "blocked", Handler: "onWorker"},
+	}, false); err == nil || !strings.Contains(err.Error(), "payload budget exceeded") {
+		t.Fatalf("worker dispatch over byte budget error = %v, want payload budget error", err)
+	}
+	vm.stopVM()
+
+	snapshot := rt.pluginControlWorkerQueueSnapshot("budget_plugin")
+	if snapshot.PendingRequests != len(reservations) || snapshot.PendingBytes != pluginControlWorkerMaxPendingBytes || snapshot.RejectedRequests != 1 {
+		t.Fatalf("queue snapshot = %+v, want %d requests, %d bytes, 1 rejection", snapshot, len(reservations), pluginControlWorkerMaxPendingBytes)
+	}
+	rt.mu.Lock()
+	rt.plugins = map[string]LoadedPlugin{
+		"budget_plugin": {
+			PluginManifest: PluginManifest{
+				ID:      "budget_plugin",
+				Control: &PluginControl{Permissions: []string{"worker"}},
+			},
+		},
+	}
+	rt.snapshot = pluginRuntimeSnapshot{Plugins: map[string]PluginRuntimeState{
+		"budget_plugin": {Mode: pluginRuntimeModeControl},
+	}}
+	rt.mu.Unlock()
+	runtimeState := rt.Snapshot().Plugins["budget_plugin"]
+	if runtimeState.WorkerQueue == nil || *runtimeState.WorkerQueue != snapshot {
+		t.Fatalf("runtime worker queue = %+v, want %+v", runtimeState.WorkerQueue, snapshot)
+	}
+	reservations[0].release()
+	reservations[0].release()
+	replacement, err := rt.reservePluginControlWorkerQueue("budget_plugin", pluginControlWorkerMaxPayloadBytes)
+	if err != nil {
+		t.Fatalf("reserve after release error = %v", err)
+	}
+	for _, reservation := range reservations[1:] {
+		reservation.release()
+	}
+	replacement.release()
+
+	snapshot = rt.pluginControlWorkerQueueSnapshot("budget_plugin")
+	if snapshot.PendingRequests != 0 || snapshot.PendingBytes != 0 {
+		t.Fatalf("queue snapshot after release = %+v, want no pending usage", snapshot)
+	}
+	if snapshot.PeakPendingRequests != len(reservations) || snapshot.PeakPendingBytes != pluginControlWorkerMaxPendingBytes {
+		t.Fatalf("queue peak snapshot = %+v, want %d requests and %d bytes", snapshot, len(reservations), pluginControlWorkerMaxPendingBytes)
+	}
+}
+
+func TestPluginGojaWorkerQueueEnforcesPerPluginRequestBudget(t *testing.T) {
+	rt := newPluginControlRuntime(nil, &Config{}, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	reservations := make([]*pluginControlWorkerQueueReservation, 0, pluginControlWorkerMaxPending)
+	for i := 0; i < pluginControlWorkerMaxPending; i++ {
+		reservation, err := rt.reservePluginControlWorkerQueue("count_plugin", 0)
+		if err != nil {
+			t.Fatalf("reservePluginControlWorkerQueue(%d) error = %v", i, err)
+		}
+		reservations = append(reservations, reservation)
+	}
+	if _, err := rt.reservePluginControlWorkerQueue("count_plugin", 0); err == nil || !strings.Contains(err.Error(), "pending request limit reached") {
+		t.Fatalf("reserve over request budget error = %v, want request limit error", err)
+	}
+	snapshot := rt.pluginControlWorkerQueueSnapshot("count_plugin")
+	if snapshot.PendingRequests != pluginControlWorkerMaxPending || snapshot.RejectedRequests != 1 {
+		t.Fatalf("queue snapshot = %+v, want %d requests and 1 rejection", snapshot, pluginControlWorkerMaxPending)
+	}
+	for _, reservation := range reservations {
+		reservation.release()
+	}
+	if snapshot = rt.pluginControlWorkerQueueSnapshot("count_plugin"); snapshot.PendingRequests != 0 || snapshot.PendingBytes != 0 {
+		t.Fatalf("queue snapshot after release = %+v, want no pending usage", snapshot)
+	}
+}
+
+func TestPluginGojaWorkerQueueReservationReleasedWhenVMStops(t *testing.T) {
+	rt := newPluginControlRuntime(nil, &Config{}, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	vm := newPluginControlVM(rt, "stop_plugin", "test", "worker", "bg")
+	state := newPluginControlRequestState(time.Second)
+	reservation, err := vm.reserveWorkerRequest(pluginControlEvent{
+		Kind:    "worker",
+		Payload: json.RawMessage(`{"value":true}`),
+		Worker:  &pluginControlWorkerEvent{Name: "bg", Handler: "onWorker"},
+	}, state)
+	if err != nil {
+		t.Fatalf("reserveWorkerRequest() error = %v", err)
+	}
+	if reservation == nil {
+		t.Fatal("reserveWorkerRequest() returned nil reservation")
+	}
+	vm.stopVM()
+	reservation.release()
+
+	snapshot := rt.pluginControlWorkerQueueSnapshot("stop_plugin")
+	if snapshot.PendingRequests != 0 || snapshot.PendingBytes != 0 {
+		t.Fatalf("queue snapshot after VM stop = %+v, want no pending usage", snapshot)
+	}
+	if err := state.executionError(); err == nil || !strings.Contains(err.Error(), "request canceled") {
+		t.Fatalf("request state after VM stop error = %v, want cancellation", err)
 	}
 }
 
@@ -4979,6 +6142,63 @@ exports.onAction = function () {
 	}
 }
 
+func TestPluginGojaControlPluginActionCallRejectsCrossPluginCycle(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "plugin_a", `{
+  "api_version": "v1",
+  "id": "plugin_a",
+  "name": "Plugin A",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [
+    {"id": "start", "runtime_update": "runtime_apply"},
+    {"id": "resume", "runtime_update": "runtime_apply"}
+  ],
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv", "plugin.action"],
+    "action_access": [{"plugin": "plugin_b", "actions": ["bounce"]}]
+  }
+}`)
+	writePluginControlScript(t, dir, "plugin_a", `
+exports.onAction = function (ctx) {
+  if (ctx.action.id === 'start') return plugins.actions.call('plugin_b', 'bounce', {});
+  kv.set('unexpected_resume', {value: true});
+};
+`)
+	writeTestPlugin(t, dir, "plugin_b", `{
+  "api_version": "v1",
+  "id": "plugin_b",
+  "name": "Plugin B",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{"id": "bounce", "runtime_update": "runtime_apply"}],
+  "control": {
+    "main": "control.js",
+    "permissions": ["plugin.action"],
+    "action_access": [{"plugin": "plugin_a", "actions": ["resume"]}]
+  }
+}`)
+	writePluginControlScript(t, dir, "plugin_b", `
+exports.onAction = function () {
+  return plugins.actions.call('plugin_a', 'resume', {});
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil)
+	t.Cleanup(func() { _ = rt.Close() })
+	plugin := loadTestPluginByID(t, cfg, "plugin_a")
+	err := rt.ApplyPluginAction(plugin, pluginActionByIDForTest(t, plugin, "start"), json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "synchronous plugin call cycle rejected") || !strings.Contains(err.Error(), "plugin_b -> plugin_a -> plugin_b") {
+		t.Fatalf("ApplyPluginAction() error = %v, want A -> B -> A cycle rejection", err)
+	}
+	if _, err := store.GetPluginRecord(db, "plugin_a", pluginControlKVResourceID, "unexpected_resume"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetPluginRecord(unexpected_resume) error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestPluginGojaControlPluginActionCallAppliesTargetAction(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "source_plugin", `{
@@ -6492,6 +7712,50 @@ exports.onAction = function () {
 	}
 }
 
+func TestPluginGojaControlReadsPerCPUMapValues(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{
+    "id": "stats",
+    "runtime_update": "runtime_query"
+  }],
+  "control": {
+    "main": "control.js",
+    "permissions": ["ebpf.map_read"]
+  }
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onAction = function () {
+  return {values: ebpf.mapGetPerCPU('traffic_stats', '00000000')};
+};
+`)
+
+	plugin := loadTestPluginByID(t, &Config{PluginsDir: dir}, "control_plugin")
+	controller := &pluginControlMapControllerTest{perCPUValues: [][]byte{{0x01, 0x02}, {0xa0, 0xb0}}}
+	rt := newPluginControlRuntime(openTestDB(t), &Config{PluginsDir: dir}, controller).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	result, err := rt.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("QueryPluginAction() error = %v", err)
+	}
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("query result = %#v, want object", result)
+	}
+	values, ok := resultMap["values"].([]any)
+	if !ok || len(values) != 2 || values[0] != "0102" || values[1] != "a0b0" {
+		t.Fatalf("per-CPU values = %#v, want [0102 a0b0]", resultMap["values"])
+	}
+	if len(controller.calls) != 1 || controller.calls[0] != "getPerCPU:control_plugin::traffic_stats:00000000" {
+		t.Fatalf("map calls = %+v, want one per-CPU lookup", controller.calls)
+	}
+}
+
 func TestPluginGojaControlEBPFMapAPILegacyCallAllowsEmptyObject(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "control_plugin", `{
@@ -7288,12 +8552,26 @@ exports.onAction = function () {
   var frame = net.l2.exchange({
     interface: 'eth0',
     ethertype: '0x8863',
+    recv_ethertype: '0x8864',
     dst_mac: 'ff:ff:ff:ff:ff:ff',
     payload: '0109'
   });
   kv.set('exchange_result', {
     src: frame.src_mac,
     payload: frame.payload_hex
+  });
+  var frames = net.l2.exchangeMany({
+    interface: 'eth0',
+    ethertype: '0x8863',
+    recv_ethertype: '0x8864',
+    dst_mac: 'ff:ff:ff:ff:ff:ff',
+    payload: '01a7',
+    max_frames: 4,
+    idle_timeout_ms: 5
+  });
+  kv.set('exchange_many_result', {
+    count: frames.length,
+    ethertype: frames[0].ethertype
   });
 };
 `)
@@ -7305,7 +8583,7 @@ exports.onAction = function () {
 		recvFrame: pluginControlL2Frame{
 			Interface: "eth0",
 			IfIndex:   7,
-			EtherType: 0x8863,
+			EtherType: 0x8864,
 			DstMAC:    mustMACForTest(t, "02:00:00:00:00:01"),
 			SrcMAC:    mustMACForTest(t, "02:00:00:00:00:02"),
 			Payload:   []byte{0x07, 0x19},
@@ -7317,11 +8595,11 @@ exports.onAction = function () {
 		t.Fatalf("ApplyPluginAction() error = %v", err)
 	}
 	transport := rt.l2Transport.(*pluginControlL2TransportTest)
-	if len(transport.exchanges) != 1 {
-		t.Fatalf("l2 exchanges = %+v, want one exchange", transport.exchanges)
+	if len(transport.exchanges) != 2 {
+		t.Fatalf("l2 exchanges = %+v, want single and multi exchanges", transport.exchanges)
 	}
 	exchange := transport.exchanges[0]
-	if exchange.Send.Interface != "eth0" || exchange.Send.EtherType != 0x8863 || exchange.Recv.Timeout <= 0 {
+	if exchange.Send.Interface != "eth0" || exchange.Send.EtherType != 0x8863 || exchange.Recv.EtherType != 0x8864 || exchange.Recv.Timeout <= 0 {
 		t.Fatalf("exchange request = %+v, want eth0 L2 exchange request", exchange)
 	}
 	record, err := store.GetPluginRecord(db, "control_plugin", pluginControlKVResourceID, "exchange_result")
@@ -7331,6 +8609,19 @@ exports.onAction = function () {
 	for _, want := range []string{`"src":"02:00:00:00:00:02"`, `"payload":"0719"`} {
 		if !strings.Contains(record.DataJSON, want) {
 			t.Fatalf("exchange_result data = %s, want %s", record.DataJSON, want)
+		}
+	}
+	multi := transport.exchanges[1]
+	if multi.Send.EtherType != 0x8863 || multi.Recv.EtherType != 0x8864 {
+		t.Fatalf("exchangeMany request = %+v, want discovery send and session receive", multi)
+	}
+	multiRecord, err := store.GetPluginRecord(db, "control_plugin", pluginControlKVResourceID, "exchange_many_result")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(exchange_many_result) error = %v", err)
+	}
+	for _, want := range []string{`"count":1`, `"ethertype":"0x8864"`} {
+		if !strings.Contains(multiRecord.DataJSON, want) {
+			t.Fatalf("exchange_many_result data = %s, want %s", multiRecord.DataJSON, want)
 		}
 	}
 }
@@ -7560,6 +8851,9 @@ func TestPluginGojaControlNetAdminAPIUsesHostController(t *testing.T) {
     }, {
       "interfaces": ["fwd*"],
       "operations": ["addr.write", "link.create", "link.master", "link.offload", "link.read", "link.state", "route.write"]
+    }, {
+      "interfaces": ["eth*"],
+      "operations": ["link.read"]
     }]
   }
 }`)
@@ -7567,11 +8861,17 @@ func TestPluginGojaControlNetAdminAPIUsesHostController(t *testing.T) {
 exports.onAction = function () {
   var bridge = net.link.ensureBridge({name: 'brlan0', mtu: 1500, up: true});
   var pair = net.link.ensureVeth({host: 'fwdlocal0', peer: 'fwdvtap0', mtu: 1492, up: true});
+  var dummy = net.link.ensureDummy({name: 'fwddummy0', mtu: 1492, up: true});
+  var macvlan = net.link.ensureMacvlan({name: 'fwdppp0', parent: 'eth0', mode: 'bridge', mac: '02:00:00:00:30:01', mtu: 1492, up: true});
   var member = net.link.setMaster({link: 'fwdvtap0', master: bridge.name});
   net.addr.replace({interface: 'fwdlocal0', cidr: '169.254.77.1/30'});
   net.route.replace({dst: '0.0.0.0/0', dev: 'fwdlocal0', table: 100, metric: 10});
   net.link.setMTU('fwdvtap0', 1492);
+  var arp = net.link.setARP('fwdvtap0', false);
+  net.link.setPromiscuous('fwdvtap0', true);
   net.link.setOffloads('fwdvtap0', {tx: false, tso: false, gso: false, gro: false, sg: false});
+  var offloads = net.link.getOffloads('fwdvtap0');
+  var gso = net.link.setGSO('fwdvtap0', {max_size: 1492, max_segs: 1});
   net.link.setUp('fwdvtap0', true);
   var link = net.link.get('fwdvtap0');
   var links = net.link.list();
@@ -7580,8 +8880,16 @@ exports.onAction = function () {
     bridge: bridge.name,
     host: pair.host.name,
     peer: pair.peer.name,
+    dummy: dummy.link.name,
+    dummy_created: dummy.created,
+    macvlan: macvlan.link.name,
+    macvlan_created: macvlan.created,
     member_master: member.master_name,
     peer_ifindex: link.ifindex,
+    arp: arp.arp,
+    gro: offloads.gro,
+    gso_max_size: gso.gso_max_size,
+    gso_max_segs: gso.gso_max_segs,
     links: links.length
   });
 };
@@ -7599,11 +8907,17 @@ exports.onAction = function () {
 	wantCalls := []string{
 		"ensureBridge:brlan0:1500:true",
 		"ensureVeth:fwdlocal0:fwdvtap0:1492:true",
+		"ensureDummy:fwddummy0:1492:true",
+		"ensureMacvlan:fwdppp0:eth0:bridge:02:00:00:00:30:01:1492:true",
 		"setMaster:fwdvtap0:brlan0:true",
 		"addrReplace:fwdlocal0:169.254.77.1/30",
 		"routeReplace:0.0.0.0/0:fwdlocal0::100:10",
 		"setMTU:fwdvtap0:1492",
+		"setARP:fwdvtap0:false",
+		"setPromiscuous:fwdvtap0:true",
 		"setOffloads:fwdvtap0:gro=false,gso=false,sg=false,tso=false,tx=false",
+		"getOffloads:fwdvtap0",
+		"setGSO:fwdvtap0:1492:1",
 		"setUp:fwdvtap0:true",
 		"get:fwdvtap0",
 		"list",
@@ -7616,10 +8930,39 @@ exports.onAction = function () {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(events/last) error = %v", err)
 	}
-	for _, want := range []string{`"bridge":"brlan0"`, `"host":"fwdlocal0"`, `"peer":"fwdvtap0"`, `"member_master":"brlan0"`, `"peer_ifindex":102`, `"links":2`} {
+	for _, want := range []string{`"bridge":"brlan0"`, `"host":"fwdlocal0"`, `"peer":"fwdvtap0"`, `"dummy":"fwddummy0"`, `"dummy_created":true`, `"macvlan":"fwdppp0"`, `"macvlan_created":true`, `"member_master":"brlan0"`, `"peer_ifindex":102`, `"arp":false`, `"gro":false`, `"gso_max_size":1492`, `"gso_max_segs":1`, `"links":2`} {
 		if !strings.Contains(record.DataJSON, want) {
 			t.Fatalf("events/last data = %s, want %s", record.DataJSON, want)
 		}
+	}
+}
+
+func TestNormalizePluginControlUnicastMAC(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		input   string
+		want    string
+		wantErr string
+	}{
+		{name: "local unicast", input: "02-11-22-33-44-55", want: "02:11:22:33:44:55"},
+		{name: "global unicast", input: "00:11:22:33:44:55", want: "00:11:22:33:44:55"},
+		{name: "multicast", input: "01:00:5e:00:00:01", wantErr: "unicast"},
+		{name: "broadcast", input: "ff:ff:ff:ff:ff:ff", wantErr: "unicast"},
+		{name: "all zero", input: "00:00:00:00:00:00", wantErr: "all zero"},
+		{name: "invalid", input: "not-a-mac", wantErr: "6-byte"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := normalizePluginControlUnicastMAC(tc.input)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("normalizePluginControlUnicastMAC(%q) error = %v, want %q", tc.input, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("normalizePluginControlUnicastMAC(%q) = %q, %v, want %q, nil", tc.input, got, err, tc.want)
+			}
+		})
 	}
 }
 
@@ -7875,9 +9218,10 @@ func TestMergePluginRuntimeSnapshotPrefersDataplaneState(t *testing.T) {
 		PluginManifest: PluginManifest{ID: "mixed", Name: "Mixed", Version: "0.1.0", Kind: "pipeline"},
 		Status:         pluginStatusActive,
 		Runtime: PluginRuntimeState{
-			Mode:   pluginRuntimeModeControl,
-			Reason: "control script loaded",
-			Error:  "control warning",
+			Mode:        pluginRuntimeModeControl,
+			WorkerQueue: &PluginControlWorkerQueueState{PendingRequests: 2, PendingBytes: 1024, RequestLimit: pluginControlWorkerMaxPending, ByteLimit: pluginControlWorkerMaxPendingBytes},
+			Reason:      "control script loaded",
+			Error:       "control warning",
 		},
 	}}}
 	mergePluginRuntimeSnapshot(&catalog, pluginRuntimeSnapshot{Plugins: map[string]PluginRuntimeState{
@@ -7899,6 +9243,9 @@ func TestMergePluginRuntimeSnapshotPrefersDataplaneState(t *testing.T) {
 	}
 	if got.Error != "control warning" {
 		t.Fatalf("merged error = %q, want control warning preserved", got.Error)
+	}
+	if got.WorkerQueue == nil || got.WorkerQueue.PendingRequests != 2 || got.WorkerQueue.PendingBytes != 1024 {
+		t.Fatalf("merged worker queue = %+v, want control queue preserved", got.WorkerQueue)
 	}
 }
 
@@ -7934,6 +9281,83 @@ exports.onAction = function () {
 	}
 	if elapsed := time.Since(startedAt); elapsed > pluginControlTimeout+3*time.Second {
 		t.Fatalf("timeout elapsed = %s, want bounded runtime", elapsed)
+	}
+}
+
+func TestPluginGojaControlDiscardsCanceledQueuedRequest(t *testing.T) {
+	rt := newPluginControlRuntime(nil, &Config{}, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	vm := newPluginControlVM(rt, "expired_plugin", "test", "control", "")
+	t.Cleanup(vm.stopVM)
+	state := newPluginControlRequestState(time.Second)
+	state.cancel()
+	reply := make(chan pluginControlResult, 1)
+	vm.requests <- pluginControlRequest{
+		plugin: LoadedPlugin{PluginManifest: PluginManifest{ID: "expired_plugin"}},
+		event:  pluginControlEvent{Kind: "action"},
+		reply:  reply,
+		state:  state,
+	}
+	select {
+	case result := <-reply:
+		if result.err == nil || !strings.Contains(result.err.Error(), "discarded before execution") {
+			t.Fatalf("queued request error = %v, want discarded cancellation", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled queued request was not discarded promptly")
+	}
+}
+
+func TestPluginGojaControlQueuedRequestUsesOriginalDeadline(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "deadline_plugin", `{
+  "api_version": "v1",
+  "id": "deadline_plugin",
+  "name": "Deadline Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{"id": "slow", "runtime_update": "runtime_apply"}],
+  "control": {"main": "control.js", "permissions": ["kv"]}
+}`)
+	writePluginControlScript(t, dir, "deadline_plugin", `
+exports.onAction = function () {
+  var started = Date.now();
+  while (Date.now() - started < 500) {}
+  kv.set('late_side_effect', {value: true});
+};
+`)
+
+	cfg := &Config{PluginsDir: dir}
+	db := openTestDB(t)
+	plugin := loadTestPluginByID(t, cfg, "deadline_plugin")
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	vm, err := rt.getPluginControlVM(plugin, "", "")
+	if err != nil {
+		t.Fatalf("getPluginControlVM() error = %v", err)
+	}
+	state := newPluginControlRequestState(50 * time.Millisecond)
+	reply := make(chan pluginControlResult, 1)
+	vm.requests <- pluginControlRequest{
+		plugin: plugin,
+		event: pluginControlEvent{
+			Kind:   "action",
+			Action: &plugin.Actions[0],
+		},
+		reply: reply,
+		state: state,
+	}
+	select {
+	case result := <-reply:
+		if result.err == nil || !strings.Contains(result.err.Error(), "timed out") {
+			t.Fatalf("deadline request error = %v, want timeout", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deadline request did not return promptly")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := store.GetPluginRecord(db, "deadline_plugin", pluginControlKVResourceID, "late_side_effect"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetPluginRecord(late_side_effect) error = %v, want no late side effect", err)
 	}
 }
 
@@ -8038,28 +9462,29 @@ func TestPluginControlMainRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
-func TestExamplePacketObserverPluginManifest(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "packet_observer")
+func TestBundledPacketObserverPluginManifest(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "packet_observer")
 	rootDir := filepath.Join(t.TempDir(), "packet_observer")
 	copyDirForTest(t, sourceDir, rootDir)
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "include"), filepath.Join(filepath.Dir(rootDir), "include"))
 	compileBPFObjectFromSource(t, filepath.Join(rootDir, "packet_observer.bpf.c"), filepath.Join(rootDir, "packet_observer.o"))
 
 	plugin, err := loadPluginFromDir(rootDir, "packet_observer")
 	if err != nil {
-		t.Fatalf("load example plugin: %v", err)
+		t.Fatalf("load bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	if plugin.ID != "packet_observer" || plugin.Status != pluginStatusActive {
-		t.Fatalf("example plugin = %+v, want active packet_observer", plugin)
+		t.Fatalf("bundled plugin = %+v, want active packet_observer", plugin)
 	}
 	if plugin.Stability != pluginStabilityLab {
 		t.Fatalf("packet_observer stability = %q, want lab", plugin.Stability)
 	}
 	if len(plugin.Hooks) != 1 || plugin.Hooks[0].Engine != kernelEngineTC {
-		t.Fatalf("example plugin hooks = %+v, want one TC hook", plugin.Hooks)
+		t.Fatalf("bundled plugin hooks = %+v, want one TC hook", plugin.Hooks)
 	}
 	if len(plugin.Objects) != 1 || plugin.Objects[0].Status != pluginObjectStatusVerified {
-		t.Fatalf("example plugin objects = %+v, want one verified object", plugin.Objects)
+		t.Fatalf("bundled plugin objects = %+v, want one verified object", plugin.Objects)
 	}
 }
 
@@ -8241,18 +9666,18 @@ func TestApplyPluginHookBindingsFromDBDisabledRecordSuppressesManifestHook(t *te
 	}
 }
 
-func TestExampleVToLocalPluginManifest(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalPluginManifest(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	if plugin.ID != "vtolocal" || plugin.Status != pluginStatusActive {
-		t.Fatalf("vtolocal example plugin = %+v, want active vtolocal", plugin)
+		t.Fatalf("vtolocal bundled plugin = %+v, want active vtolocal", plugin)
 	}
 	if plugin.Stability != pluginStabilityStable {
 		t.Fatalf("vtolocal stability = %q, want stable", plugin.Stability)
@@ -8281,13 +9706,13 @@ func TestExampleVToLocalPluginManifest(t *testing.T) {
 	}
 }
 
-func TestExampleVToLocalApplyActionPersistsLinkAndArmsRepairTimer(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalApplyActionPersistsLinkAndArmsRepairTimer(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	action := pluginActionByIDForTest(t, plugin, "apply")
 
@@ -8301,10 +9726,8 @@ func TestExampleVToLocalApplyActionPersistsLinkAndArmsRepairTimer(t *testing.T) 
 
 	payload := json.RawMessage(`{
 	  "profile_key":"default",
-	  "host_interface":"fwdlocal0",
-	  "vtap_interface":"fwdvtap0",
-	  "host_addresses":["169.254.253.1/30"],
-	  "vtap_addresses":["169.254.253.2/30"],
+	  "local_interface":"fwdlocal0",
+	  "addresses":["169.254.253.1/32","2001:db8::1/128"],
 	  "mtu":1492
 	}`)
 	if err := rt.ApplyPluginAction(plugin, action, payload); err != nil {
@@ -8318,9 +9741,9 @@ func TestExampleVToLocalApplyActionPersistsLinkAndArmsRepairTimer(t *testing.T) 
 		t.Fatalf("vtolocal links/default Enabled = false, want true after action apply")
 	}
 	for _, want := range []string{
-		"ensureVeth:fwdlocal0:fwdvtap0:1492:true",
-		"addrReplace:fwdlocal0:169.254.253.1/30",
-		"addrReplace:fwdvtap0:169.254.253.2/30",
+		"ensureDummy:fwdlocal0:1492:true",
+		"addrReplace:fwdlocal0:169.254.253.1/32",
+		"addrReplace:fwdlocal0:2001:db8::1/128",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
@@ -8330,7 +9753,7 @@ func TestExampleVToLocalApplyActionPersistsLinkAndArmsRepairTimer(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetPluginRecord(vtolocal status/default) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"applied"`, `"host_interface":"fwdlocal0"`, `"vtap_interface":"fwdvtap0"`} {
+	for _, want := range []string{`"phase":"applied"`, `"local_interface":"fwdlocal0"`, `"managed_link":true`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("vtolocal status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -8340,18 +9763,18 @@ func TestExampleVToLocalApplyActionPersistsLinkAndArmsRepairTimer(t *testing.T) 
 	}
 }
 
-func TestExampleWANCorePluginManifest(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCorePluginManifest(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	if plugin.ID != "wan_core" || plugin.Status != pluginStatusActive {
-		t.Fatalf("wan_core example plugin = %+v, want active wan_core", plugin)
+		t.Fatalf("wan_core bundled plugin = %+v, want active wan_core", plugin)
 	}
 	if plugin.Stability != pluginStabilityStable {
 		t.Fatalf("wan_core stability = %q, want stable", plugin.Stability)
@@ -8365,15 +9788,15 @@ func TestExampleWANCorePluginManifest(t *testing.T) {
 	if plugin.UI == nil || plugin.UI.SHA256 == "" || plugin.UI.ResolvedSHA256 == "" || plugin.UI.SHA256 != plugin.UI.ResolvedSHA256 {
 		t.Fatalf("wan_core ui hashes = %+v, want matching non-empty hashes", plugin.UI)
 	}
-	if len(plugin.Resources) != 3 || len(plugin.Actions) != 2 || plugin.UI == nil {
+	if len(plugin.Resources) != 3 || len(plugin.Actions) != 3 || plugin.UI == nil {
 		t.Fatalf("wan_core resources/actions/ui = %d/%d/%+v, want complete example surface", len(plugin.Resources), len(plugin.Actions), plugin.UI)
 	}
 	assertPluginResourceMethodsForTest(t, plugin, "status", "get,list", "create,delete,get,list,update")
 	if len(plugin.Control.Permissions) != 5 || strings.Join(plugin.Control.Permissions, ",") != "net.admin,plugin.register,resource,timer,ui" {
 		t.Fatalf("wan_core permissions = %+v, want net.admin,plugin.register,resource,timer,ui", plugin.Control.Permissions)
 	}
-	if !pluginControlHasNetAccess(plugin, "link.create", "fwdwan0") || !pluginControlHasNetAccess(plugin, "addr.write", "fwdwan0") || !pluginControlHasNetAccess(plugin, "route.write", "fwdwan0") || !pluginControlHasNetAccess(plugin, "link.delete", "fwdwan0") {
-		t.Fatalf("wan_core net access = %+v, want fwd* create/address/route/delete access", plugin.Control.NetAccess)
+	if !pluginControlHasNetAccess(plugin, "link.create", "fwdwan0") || !pluginControlHasNetAccess(plugin, "addr.write", "fwdwan0") || !pluginControlHasNetAccess(plugin, "route.write", "fwdwan0") || !pluginControlHasNetAccess(plugin, "link.delete", "fwdwan0") || !pluginControlHasNetAccess(plugin, "link.state", "fwdwan0") {
+		t.Fatalf("wan_core net access = %+v, want fwd* create/address/route/delete/state access", plugin.Control.NetAccess)
 	}
 	if pluginControlHasNetAccess(plugin, "addr.write", "wan0") || pluginControlHasNetAccess(plugin, "link.delete", "wan0") {
 		t.Fatalf("wan_core net access = %+v, want no write/delete access on wan* physical-style names", plugin.Control.NetAccess)
@@ -8383,18 +9806,18 @@ func TestExampleWANCorePluginManifest(t *testing.T) {
 	}
 }
 
-func TestExampleLANCorePluginManifest(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCorePluginManifest(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	if plugin.ID != "lan_core" || plugin.Status != pluginStatusActive {
-		t.Fatalf("lan_core example plugin = %+v, want active lan_core", plugin)
+		t.Fatalf("lan_core bundled plugin = %+v, want active lan_core", plugin)
 	}
 	if plugin.Stability != pluginStabilityStable {
 		t.Fatalf("lan_core stability = %q, want stable", plugin.Stability)
@@ -8408,37 +9831,100 @@ func TestExampleLANCorePluginManifest(t *testing.T) {
 	if plugin.UI == nil || plugin.UI.SHA256 == "" || plugin.UI.ResolvedSHA256 == "" || plugin.UI.SHA256 != plugin.UI.ResolvedSHA256 {
 		t.Fatalf("lan_core ui hashes = %+v, want matching non-empty hashes", plugin.UI)
 	}
-	if len(plugin.Resources) != 3 || len(plugin.Actions) != 2 || plugin.UI == nil {
-		t.Fatalf("lan_core resources/actions/ui = %d/%d/%+v, want complete example surface", len(plugin.Resources), len(plugin.Actions), plugin.UI)
+	if len(plugin.Resources) != 5 || len(plugin.Actions) != 3 || plugin.UI == nil {
+		t.Fatalf("lan_core resources/actions/ui = %d/%d/%+v, want complete runtime surface", len(plugin.Resources), len(plugin.Actions), plugin.UI)
 	}
 	assertPluginResourceMethodsForTest(t, plugin, "status", "get,list", "create,delete,get,list,update")
 	assertPluginResourceMethodsForTest(t, plugin, "egress_nat_plans", "get,list", "create,delete,get,list,update")
+	assertPluginResourceMethodsForTest(t, plugin, "ipv6_assignment_plans", "get,list", "create,delete,get,list,update")
+	assertPluginResourceMethodsForTest(t, plugin, "dhcpv4_plans", "get,list", "create,delete,get,list,update")
 	if len(plugin.Control.Permissions) != 6 || strings.Join(plugin.Control.Permissions, ",") != "net.admin,plugin.register,plugin.resource,resource,timer,ui" {
 		t.Fatalf("lan_core permissions = %+v, want net.admin,plugin.register,plugin.resource,resource,timer,ui", plugin.Control.Permissions)
 	}
-	if len(plugin.Control.ResourceAccess) != 1 || plugin.Control.ResourceAccess[0].Plugin != "wan_core" || plugin.Control.ResourceAccess[0].Resource != "status" || strings.Join(plugin.Control.ResourceAccess[0].Methods, ",") != "get" {
-		t.Fatalf("lan_core resource access = %+v, want wan_core/status get", plugin.Control.ResourceAccess)
+	if len(plugin.Control.ResourceAccess) != 1 || plugin.Control.ResourceAccess[0].Plugin != "wan_core" || plugin.Control.ResourceAccess[0].Resource != "status" || strings.Join(plugin.Control.ResourceAccess[0].Methods, ",") != "get,list" {
+		t.Fatalf("lan_core resource access = %+v, want wan_core/status get,list", plugin.Control.ResourceAccess)
 	}
-	if !pluginControlHasNetAccess(plugin, "link.create", "brlan0") || !pluginControlHasNetAccess(plugin, "addr.write", "brlan0") || !pluginControlHasNetAccess(plugin, "link.read", "brlan0") || !pluginControlHasNetAccess(plugin, "link.create", "vmbr0") || !pluginControlHasNetAccess(plugin, "addr.write", "vmbr0") || !pluginControlHasNetAccess(plugin, "link.read", "vmbr0") || !pluginControlHasNetAccess(plugin, "link.master", "eth1") {
-		t.Fatalf("lan_core net access = %+v, want bridge create/address/read and member read/master access", plugin.Control.NetAccess)
+	if !pluginControlHasNetAccess(plugin, "link.create", "brlan0") || !pluginControlHasNetAccess(plugin, "addr.write", "brlan0") || !pluginControlHasNetAccess(plugin, "link.read", "brlan0") || !pluginControlHasNetAccess(plugin, "link.create", "vmbr0") || !pluginControlHasNetAccess(plugin, "addr.write", "vmbr0") || !pluginControlHasNetAccess(plugin, "link.read", "vmbr0") || !pluginControlHasNetAccess(plugin, "link.master", "eth1") || !pluginControlHasNetAccess(plugin, "link.offload", "eth1") {
+		t.Fatalf("lan_core net access = %+v, want bridge create/address/read and member read/master/offload access", plugin.Control.NetAccess)
 	}
 	if pluginControlHasNetAccess(plugin, "link.delete", "vmbr0") {
 		t.Fatalf("lan_core net access = %+v, want no link.delete on vmbr0", plugin.Control.NetAccess)
 	}
 }
 
-func TestExampleRouterWizardPluginManifest(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "router_wizard")
+func TestBundledLANCoreTrafficStatsQuery(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
+	rootDir := filepath.Join(t.TempDir(), "lan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "lan_core")
+	if err != nil {
+		t.Fatalf("load lan_core bundled plugin: %v", err)
+	}
+	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
+	action := pluginActionByIDForTest(t, plugin, "traffic_stats")
+	db := openTestDB(t)
+	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
+		PluginID:   "lan_core",
+		ResourceID: "profiles",
+		RecordKey:  "default",
+		DataJSON:   `{"bridge":"brlan0","ports":["eth1"]}`,
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("AddPluginRecord(lan_core profile) error = %v", err)
+	}
+	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
+		PluginID:   "lan_core",
+		ResourceID: "status",
+		RecordKey:  "default",
+		DataJSON:   `{"bridge":"brlan0","ports":[{"name":"eth1","ifindex":7,"managed":true}],"bridge_members":[{"name":"eth1","ifindex":7,"configured":true,"managed":true},{"name":"eth2","ifindex":8,"configured":false,"managed":false}]}`,
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("AddPluginRecord(lan_core status) error = %v", err)
+	}
+	controller := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
+		"brlan0": {
+			Name: "brlan0", IfIndex: 201, Kind: "bridge", Up: true, OperState: "up",
+			Statistics: &pluginControlNetLinkStatistics{RXPackets: 10, TXPackets: 20, RXBytes: 1000, TXBytes: 2000},
+		},
+		"eth1": {
+			Name: "eth1", IfIndex: 7, Kind: "device", Up: true, OperState: "up",
+			Statistics: &pluginControlNetLinkStatistics{RXPackets: 30, TXPackets: 40, RXBytes: 3000, TXBytes: 4000},
+		},
+		"eth2": {
+			Name: "eth2", IfIndex: 8, Kind: "device", Up: true, OperState: "up",
+			Statistics: &pluginControlNetLinkStatistics{RXPackets: 50, TXPackets: 60, RXBytes: 5000, TXBytes: 6000},
+		},
+	}}
+	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+	result, err := rt.QueryPluginAction(plugin, action, json.RawMessage(`{"profile_key":"default"}`))
+	if err != nil {
+		t.Fatalf("QueryPluginAction(lan_core traffic_stats) error = %v", err)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal LAN traffic result: %v", err)
+	}
+	for _, want := range []string{`"available":true`, `"name":"brlan0"`, `"rx_bytes":1000`, `"tx_bytes":2000`, `"name":"eth1"`, `"rx_bytes":3000`, `"tx_bytes":4000`, `"name":"eth2"`, `"rx_bytes":5000`, `"tx_bytes":6000`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("LAN traffic result = %s, missing %s", data, want)
+		}
+	}
+}
+
+func TestBundledRouterWizardPluginManifest(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "router_wizard")
 	rootDir := filepath.Join(t.TempDir(), "router_wizard")
 	copyDirForTest(t, sourceDir, rootDir)
 
 	plugin, err := loadPluginFromDir(rootDir, "router_wizard")
 	if err != nil {
-		t.Fatalf("load router_wizard example plugin: %v", err)
+		t.Fatalf("load router_wizard bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	if plugin.ID != "router_wizard" || plugin.Status != pluginStatusActive {
-		t.Fatalf("router_wizard example plugin = %+v, want active router_wizard", plugin)
+		t.Fatalf("router_wizard bundled plugin = %+v, want active router_wizard", plugin)
 	}
 	if plugin.Stability != pluginStabilityLab {
 		t.Fatalf("router_wizard stability = %q, want lab", plugin.Stability)
@@ -8469,19 +9955,99 @@ func TestExampleRouterWizardPluginManifest(t *testing.T) {
 	}
 	if !pluginControlHasActionAccess(plugin, "pppoe_client", "dial") ||
 		!pluginControlHasActionAccess(plugin, "wan_core", "apply_session") ||
+		!pluginControlHasActionAccess(plugin, "wan_core", "prepare_handoff") ||
 		!pluginControlHasActionAccess(plugin, "lan_core", "apply_network") ||
 		!pluginControlHasActionAccess(plugin, "vtolocal", "apply") {
 		t.Fatalf("router_wizard action access = %+v, want downstream orchestration actions", plugin.Control.ActionAccess)
 	}
 }
 
-func TestExampleLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledRouterWizardFailedUpdateRollsBackAndRestoresPreviousConfig(t *testing.T) {
+	pluginsDir := t.TempDir()
+	routerDir := filepath.Join(pluginsDir, "router_wizard")
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "router_wizard"), routerDir)
+	setTestPluginControlSHA(t, pluginsDir, "router_wizard")
+	writeTestPlugin(t, pluginsDir, "lan_core", `{
+  "api_version": "v1",
+  "id": "lan_core",
+  "name": "LAN Core Stub",
+  "version": "0.1.0",
+  "kind": "control",
+  "control": {
+    "main": "control.js",
+    "permissions": ["kv", "plugin.register"]
+  }
+}`)
+	writePluginControlScript(t, pluginsDir, "lan_core", `
+var calls = [];
+plugin.action({id: 'apply_network', runtime_update: 'runtime_apply'});
+plugin.action({id: 'teardown', runtime_update: 'runtime_apply'});
+exports.onAction = function (ctx) {
+  var id = String(ctx.payload && ctx.payload.lan_id || '');
+  calls.push(ctx.action.id + ':' + id);
+  kv.set('calls', {items: calls});
+  if (ctx.action.id === 'apply_network' && id === 'bad') throw new Error('injected LAN failure');
+};
+`)
+
+	cfg := &Config{PluginsDir: pluginsDir}
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	catalog := loadPluginCatalogWithState(cfg, db)
+	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
+	router := pluginByIDForTest(t, catalog, "router_wizard")
+	apply := pluginActionByIDForTest(t, router, "apply_router")
+
+	oldPayload := json.RawMessage(`{
+  "wan":{"mode":"existing","ref":"default","egress_interface":"eth0"},
+  "lan":{"id":"old","bridge":"br-old","ports":[],"addresses":["192.168.10.1/24"],"auto_egress_nat":false}
+}`)
+	if err := rt.ApplyPluginAction(router, apply, oldPayload); err != nil {
+		t.Fatalf("ApplyPluginAction(old config) error = %v", err)
+	}
+	badPayload := json.RawMessage(`{
+  "wan":{"mode":"existing","ref":"default","egress_interface":"eth0"},
+  "lan":{"id":"bad","bridge":"br-bad","ports":[],"addresses":["192.168.20.1/24"],"auto_egress_nat":false}
+}`)
+	err := rt.ApplyPluginAction(router, apply, badPayload)
+	if err == nil || !strings.Contains(err.Error(), "injected LAN failure") {
+		t.Fatalf("ApplyPluginAction(bad config) error = %v, want injected failure", err)
+	}
+
+	config, err := store.GetPluginRecord(db, "router_wizard", "config", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(router config) error = %v", err)
+	}
+	if !config.Enabled || !strings.Contains(config.DataJSON, `"id":"old"`) || strings.Contains(config.DataJSON, `"id":"bad"`) {
+		t.Fatalf("router config after rollback = enabled:%t data:%s, want previous old config", config.Enabled, config.DataJSON)
+	}
+	status, err := store.GetPluginRecord(db, "router_wizard", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(router status) error = %v", err)
+	}
+	for _, want := range []string{`"phase":"rolled_back"`, `"last_error":"plugins.actions.call:`, `injected LAN failure`, `"name":"lan_core.teardown"`, `"name":"lan_core.apply_network"`} {
+		if !strings.Contains(status.DataJSON, want) {
+			t.Fatalf("router status after rollback = %s, missing %s", status.DataJSON, want)
+		}
+	}
+	calls, err := store.GetPluginRecord(db, "lan_core", pluginControlKVResourceID, "calls")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan calls) error = %v", err)
+	}
+	wantOrder := `"items":["apply_network:old","apply_network:bad","teardown:bad","apply_network:old"]`
+	if !strings.Contains(calls.DataJSON, wantOrder) {
+		t.Fatalf("LAN call order = %s, want %s", calls.DataJSON, wantOrder)
+	}
+}
+
+func TestBundledLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	var action PluginAction
@@ -8498,6 +10064,7 @@ func TestExampleLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
 	db := openTestDB(t)
 	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
 	controller := &pluginControlNetAdminTest{
+		listNames: []string{"brlan0", "lanp0", "lanp1"},
 		getErrors: map[string]error{"brlan0": fmt.Errorf("link not found")},
 	}
 	rt.netAdmin = controller
@@ -8513,7 +10080,10 @@ func TestExampleLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
 	  "wan_egress_interface":"fwdwan0",
 	  "wan_egress_source_ip":"198.51.100.2",
 	  "protocol":"tcp+udp+icmp",
-	  "auto_egress_nat":true
+	  "auto_egress_nat":true,
+	  "dhcpv4_enabled":true,
+	  "dns_mode":"manual",
+	  "dns_servers":["223.5.5.5","2001:4860:4860::8888"]
 	}`)
 	if err := rt.ApplyPluginAction(plugin, action, payload); err != nil {
 		t.Fatalf("ApplyPluginAction(lan_core apply_network) error = %v", err)
@@ -8540,7 +10110,7 @@ func TestExampleLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(lan_core status/default) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"applied"`, `"bridge":"brlan0"`, `"bridge_created":true`, `"bridge_existing":false`, `"wan_ref":"default"`, `"parent_interface":"brlan0"`, `"out_interface":"fwdwan0"`} {
+	for _, want := range []string{`"phase":"applied"`, `"bridge":"brlan0"`, `"bridge_created":true`, `"bridge_existing":false`, `"configured_ports":["lanp0","lanp1"]`, `"bridge_members":[`, `"wan_ref":"default"`, `"parent_interface":"brlan0"`, `"out_interface":"fwdwan0"`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("lan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -8567,6 +10137,13 @@ func TestExampleLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
 	if effective[0].Protocol != "tcp+udp+icmp" {
 		t.Fatalf("effective egress nat protocol = %q, want tcp+udp+icmp", effective[0].Protocol)
 	}
+	dhcpv4Plan, err := store.GetPluginRecord(db, "lan_core", pluginDHCPv4PlansResourceID, "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan_core dhcpv4_plans/default) error = %v", err)
+	}
+	if !dhcpv4Plan.Enabled || !strings.Contains(dhcpv4Plan.DataJSON, `"dns_mode":"manual"`) || !strings.Contains(dhcpv4Plan.DataJSON, `"dns_servers":["223.5.5.5"]`) {
+		t.Fatalf("lan_core dhcpv4 plan = enabled:%t data:%s, want IPv4-only manual DNS", dhcpv4Plan.Enabled, dhcpv4Plan.DataJSON)
+	}
 	if timers := rt.pluginTimerList("lan_core"); len(timers) != 1 || timers[0]["name"] != "lan_repair" {
 		t.Fatalf("lan_core timers after action apply = %+v, want lan_repair interval", timers)
 	}
@@ -8585,15 +10162,108 @@ func TestExampleLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
 			t.Fatalf("lan_core status/default after repair = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
+
+	disabledDNSPayload := json.RawMessage(strings.Replace(string(payload), `"dns_mode":"manual"`, `"dns_mode":"disabled"`, 1))
+	if err := rt.ApplyPluginAction(plugin, action, disabledDNSPayload); err != nil {
+		t.Fatalf("ApplyPluginAction(lan_core disabled DNS) error = %v", err)
+	}
+	dhcpv4Plan, err = store.GetPluginRecord(db, "lan_core", pluginDHCPv4PlansResourceID, "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan_core disabled DNS plan) error = %v", err)
+	}
+	if !dhcpv4Plan.Enabled || !strings.Contains(dhcpv4Plan.DataJSON, `"dns_mode":"disabled"`) || !strings.Contains(dhcpv4Plan.DataJSON, `"dns_servers":[]`) {
+		t.Fatalf("lan_core disabled DNS plan = enabled:%t data:%s, want DHCP enabled without DNS", dhcpv4Plan.Enabled, dhcpv4Plan.DataJSON)
+	}
 }
 
-func TestExampleLANCoreApplyNetworkDeletesRemovedManagedBridgeAddress(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreRestoresLegacyGROAfterSegmentedWANAppears(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
+	}
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "wan_core"), filepath.Join(filepath.Dir(rootDir), "wan_core"))
+	action := pluginActionByIDForTest(t, plugin, "apply_network")
+
+	db := openTestDB(t)
+	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
+		PluginID:   "wan_core",
+		ResourceID: "status",
+		RecordKey:  "default",
+		DataJSON:   `{"phase":"applied","mtu":1492,"segmentation_ready":true,"egress_nat_parent_interface":"fwdlocal0","forward_core":{"segmentation_ready":true}}`,
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("AddPluginRecord(wan_core status/default) error = %v", err)
+	}
+	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
+		PluginID:   "lan_core",
+		ResourceID: "status",
+		RecordKey:  "default",
+		DataJSON: `{
+		  "phase":"applied",
+		  "bridge":"vmbr0",
+		  "bridge_created":false,
+		  "managed_ports":[],
+		  "addresses":["192.168.100.1/24"],
+		  "member_gro":{"required":true,"members":[{"name":"lanp0","original_gro":true,"restore_gro":true,"applied":true}]}
+		}`,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddPluginRecord(lan_core status/default) error = %v", err)
+	}
+
+	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{
+		listNames: []string{"vmbr0", "lanp0"},
+		offloads:  map[string]map[string]bool{"lanp0": {"gro": false}},
+		links: map[string]pluginControlNetLinkInfo{
+			"vmbr0": {Name: "vmbr0", IfIndex: 201, Kind: "bridge", MTU: 1500, Up: true, ARP: true},
+			"lanp0": {Name: "lanp0", IfIndex: 202, Kind: "device", MTU: 1500, Up: true, ARP: true, MasterName: "vmbr0", MasterIfIndex: 201},
+		},
+	}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	payload := json.RawMessage(`{
+	  "lan_id":"default",
+	  "bridge":"vmbr0",
+	  "ports":["lanp0"],
+	  "addresses":["192.168.100.1/24"],
+	  "mtu":1500,
+	  "wan_ref":"default",
+	  "wan_egress_interface":"fwdlocal0",
+	  "protocol":"tcp+udp",
+	  "auto_egress_nat":true
+	}`)
+	if err := rt.ApplyPluginAction(plugin, action, payload); err != nil {
+		t.Fatalf("ApplyPluginAction(lan_core apply_network) error = %v", err)
+	}
+	if !containsString(controller.calls, "setOffloads:lanp0:gro=true") || !controller.offloads["lanp0"]["gro"] {
+		t.Fatalf("LAN GRO state/calls = %t/%+v, want legacy GRO change restored", controller.offloads["lanp0"]["gro"], controller.calls)
+	}
+	if containsString(controller.calls, "setOffloads:lanp0:gro=false") {
+		t.Fatalf("net admin calls = %+v, want no physical LAN GRO disable with segmented WAN", controller.calls)
+	}
+	statusRecord, err := store.GetPluginRecord(db, "lan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan_core status/default) error = %v", err)
+	}
+	for _, want := range []string{`"segmentation_ready":true`, `"member_gro":{"applied":false`, `"members":[]`, `LAN GRO remains enabled`} {
+		if !strings.Contains(statusRecord.DataJSON, want) {
+			t.Fatalf("lan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
+		}
+	}
+}
+
+func TestBundledLANCoreApplyNetworkDeletesRemovedManagedBridgeAddress(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
+	rootDir := filepath.Join(t.TempDir(), "lan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "lan_core")
+	if err != nil {
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	action := pluginActionByIDForTest(t, plugin, "apply_network")
 
@@ -8639,13 +10309,13 @@ func TestExampleLANCoreApplyNetworkDeletesRemovedManagedBridgeAddress(t *testing
 	}
 }
 
-func TestExampleLANCoreApplyNetworkDeletesManagedBridgeAddressWhenBridgeChanges(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreApplyNetworkDeletesManagedBridgeAddressWhenBridgeChanges(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	action := pluginActionByIDForTest(t, plugin, "apply_network")
 
@@ -8682,13 +10352,13 @@ func TestExampleLANCoreApplyNetworkDeletesManagedBridgeAddressWhenBridgeChanges(
 	}
 }
 
-func TestExampleLANCoreApplyNetworkDetachesRemovedManagedPort(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreApplyNetworkDetachesRemovedManagedPort(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	action := pluginActionByIDForTest(t, plugin, "apply_network")
 
@@ -8737,13 +10407,13 @@ func TestExampleLANCoreApplyNetworkDetachesRemovedManagedPort(t *testing.T) {
 	}
 }
 
-func TestExampleLANCorePlanStaysDisabledWithoutWANEgress(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCorePlanStaysDisabledWithoutWANEgress(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	var action PluginAction
@@ -8787,13 +10457,13 @@ func TestExampleLANCorePlanStaysDisabledWithoutWANEgress(t *testing.T) {
 	}
 }
 
-func TestExampleLANCoreApplyNetworkAcceptsNestedProfileKey(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreApplyNetworkAcceptsNestedProfileKey(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	var action PluginAction
@@ -8840,13 +10510,13 @@ func TestExampleLANCoreApplyNetworkAcceptsNestedProfileKey(t *testing.T) {
 	}
 }
 
-func TestExampleLANCoreResourceApplyIsolatesInvalidProfile(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreResourceApplyIsolatesInvalidProfile(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "profiles")
 
@@ -8901,13 +10571,13 @@ func TestExampleLANCoreResourceApplyIsolatesInvalidProfile(t *testing.T) {
 	}
 }
 
-func TestExampleLANCoreDisabledProfileResourceDisablesEgressPlan(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreDisabledProfileResourceDisablesEgressPlan(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "profiles")
 
@@ -8960,13 +10630,13 @@ func TestExampleLANCoreDisabledProfileResourceDisablesEgressPlan(t *testing.T) {
 	}
 }
 
-func TestExampleLANCoreDisabledProfileKeepsRepairTimerForOtherEnabledProfiles(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreDisabledProfileKeepsRepairTimerForOtherEnabledProfiles(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "profiles")
 
@@ -8997,13 +10667,13 @@ func TestExampleLANCoreDisabledProfileKeepsRepairTimerForOtherEnabledProfiles(t 
 	}
 }
 
-func TestExampleLANCoreRepairTimerRecoversMissingPort(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreRepairTimerRecoversMissingPort(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "profiles")
 
@@ -9059,13 +10729,13 @@ func TestExampleLANCoreRepairTimerRecoversMissingPort(t *testing.T) {
 	}
 }
 
-func TestExampleLANCoreTeardownDisablesProfileAndRepairTimer(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreTeardownDisablesProfileAndRepairTimer(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "profiles")
 	action := pluginActionByIDForTest(t, plugin, "teardown")
@@ -9173,13 +10843,13 @@ func TestExampleLANCoreTeardownDisablesProfileAndRepairTimer(t *testing.T) {
 	}
 }
 
-func TestExampleLANCoreTeardownWithoutStatusDoesNotDeleteBridgeOrPorts(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreTeardownWithoutStatusDoesNotDeleteBridgeOrPorts(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 
@@ -9219,13 +10889,13 @@ func TestExampleLANCoreTeardownWithoutStatusDoesNotDeleteBridgeOrPorts(t *testin
 	}
 }
 
-func TestExampleLANCoreTeardownPreservesVMBridge(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreTeardownPreservesVMBridge(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "profiles")
 	action := pluginActionByIDForTest(t, plugin, "teardown")
@@ -9307,13 +10977,13 @@ func TestExampleLANCoreTeardownPreservesVMBridge(t *testing.T) {
 	}
 }
 
-func TestExampleLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "profiles")
 	action := pluginActionByIDForTest(t, plugin, "teardown")
@@ -9332,9 +11002,16 @@ func TestExampleLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
 
 	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
 	controller := &pluginControlNetAdminTest{
+		listNames: []string{"vmbr0", "lanp0", "lanp1"},
+		offloads: map[string]map[string]bool{
+			"lanp0": {"gro": true},
+			"lanp1": {"gro": true},
+		},
 		links: map[string]pluginControlNetLinkInfo{
 			"vmbr0": {Name: "vmbr0", IfIndex: 201, Kind: "bridge", MTU: 1500, MAC: "02:00:00:00:20:01", Up: true},
 			"lanp0": {Name: "lanp0", IfIndex: 202, Kind: "device", MTU: 1500, MAC: "02:00:00:00:20:02", Up: true,
+				MasterName: "vmbr0", MasterIfIndex: 201},
+			"lanp1": {Name: "lanp1", IfIndex: 203, Kind: "device", MTU: 1500, MAC: "02:00:00:00:20:03", Up: true,
 				MasterName: "vmbr0", MasterIfIndex: 201},
 		},
 	}
@@ -9358,6 +11035,16 @@ func TestExampleLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
 	if !strings.Contains(statusRecord.DataJSON, `"managed_ports":[]`) {
 		t.Fatalf("lan_core status/default = %s, want no managed ports for pre-existing vmbr member", statusRecord.DataJSON)
 	}
+	for _, want := range []string{`"bridge_members":[`, `"name":"lanp0"`, `"name":"lanp1"`, `"configured":false`} {
+		if !strings.Contains(statusRecord.DataJSON, want) {
+			t.Fatalf("lan_core status/default = %s, missing actual bridge member detail %s", statusRecord.DataJSON, want)
+		}
+	}
+	for _, name := range []string{"lanp0", "lanp1"} {
+		if !containsString(controller.calls, "setOffloads:"+name+":gro=false") || controller.offloads[name]["gro"] {
+			t.Fatalf("LAN member %s GRO state/calls = %t/%+v, want plugin-disabled GRO", name, controller.offloads[name]["gro"], controller.calls)
+		}
+	}
 
 	controller.calls = nil
 	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"key":"default"}`)); err != nil {
@@ -9365,6 +11052,11 @@ func TestExampleLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
 	}
 	if containsString(controller.calls, "clearMaster:lanp0") {
 		t.Fatalf("net admin calls = %+v, want pre-existing vmbr member preserved", controller.calls)
+	}
+	for _, name := range []string{"lanp0", "lanp1"} {
+		if !containsString(controller.calls, "setOffloads:"+name+":gro=true") || !controller.offloads[name]["gro"] {
+			t.Fatalf("LAN member %s GRO state/calls = %t/%+v, want restored GRO", name, controller.offloads[name]["gro"], controller.calls)
+		}
 	}
 	if !containsString(controller.calls, "addrDelete:vmbr0:192.168.100.1/24") {
 		t.Fatalf("net admin calls = %+v, missing managed vmbr address cleanup", controller.calls)
@@ -9374,13 +11066,13 @@ func TestExampleLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
 	}
 }
 
-func TestExampleLANCoreTeardownDisablesProfileWhenPortDetachFails(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "lan_core")
+func TestBundledLANCoreTeardownDisablesProfileWhenPortDetachFails(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 
@@ -9459,7 +11151,7 @@ func TestExampleLANCoreTeardownDisablesProfileWhenPortDetachFails(t *testing.T) 
 
 func TestPluginEgressNATPlanAppearsInEffectiveEgressNATItems(t *testing.T) {
 	pluginsDir := t.TempDir()
-	copyDirForTest(t, filepath.Join("..", "..", "examples", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
 	cfg := &Config{PluginsDir: pluginsDir}
 	db := openTestDB(t)
 	insertPluginEgressNATPlanForTest(t, db, "lan_core", "default", `{
@@ -9522,7 +11214,7 @@ func TestPluginEgressNATPlanAppearsInEffectiveEgressNATItems(t *testing.T) {
 
 func TestPluginEgressNATPlanRequiresActivePluginAndNoOverlap(t *testing.T) {
 	pluginsDir := t.TempDir()
-	copyDirForTest(t, filepath.Join("..", "..", "examples", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
 	cfg := &Config{PluginsDir: pluginsDir}
 	disabled := false
 	db := openTestDB(t)
@@ -9610,10 +11302,10 @@ func TestPluginEgressNATPlanAllowsLabPluginByDefault(t *testing.T) {
 func TestLANCoreActionRedistributesPluginEgressNATPlanToKernelRuntime(t *testing.T) {
 	pluginsDir := t.TempDir()
 	rootDir := filepath.Join(pluginsDir, "lan_core")
-	copyDirForTest(t, filepath.Join("..", "..", "examples", "plugins", "lan_core"), rootDir)
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "lan_core")
 	if err != nil {
-		t.Fatalf("load lan_core example plugin: %v", err)
+		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	var action PluginAction
@@ -9719,7 +11411,7 @@ func TestLANCoreActionRedistributesPluginEgressNATPlanToKernelRuntime(t *testing
 
 func TestPluginReconcileRedistributesGeneratedEgressNATPlans(t *testing.T) {
 	pluginsDir := t.TempDir()
-	copyDirForTest(t, filepath.Join("..", "..", "examples", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
 
 	oldLoad := loadInterfaceInfosForEgressNATTests
 	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
@@ -9808,8 +11500,8 @@ func TestPluginReconcileRedistributesGeneratedEgressNATPlans(t *testing.T) {
 
 func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 	pluginsDir := t.TempDir()
-	copyDirForTest(t, filepath.Join("..", "..", "examples", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
-	copyDirForTest(t, filepath.Join("..", "..", "examples", "plugins", "wan_core"), filepath.Join(pluginsDir, "wan_core"))
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
+	copyDirForTest(t, filepath.Join("..", "..", "plugins", "wan_core"), filepath.Join(pluginsDir, "wan_core"))
 
 	oldLoad := loadInterfaceInfosForEgressNATTests
 	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
@@ -9833,7 +11525,10 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 		  "ports":["lanp0"],
 		  "addresses":["192.168.100.1/24"],
 		  "wan_ref":"default",
-		  "auto_egress_nat":true
+		  "auto_egress_nat":true,
+		  "dhcpv4_enabled":true,
+		  "dns_mode":"auto",
+		  "ipv6_subnet_id":5
 		}`,
 		Enabled: true,
 	}); err != nil {
@@ -9847,7 +11542,9 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 		  "phase":"applied",
 		  "egress_nat_parent_interface":"fwdwan0",
 		  "forward_parent_interface":"fwdwan0",
-		  "ipv4":"198.51.100.2"
+		  "ipv4":"198.51.100.2",
+		  "pd_prefix":"2001:db8:120::/60",
+		  "dns_servers":["223.5.5.5","2001:4860:4860::8888"]
 		}`,
 		Enabled: true,
 	}
@@ -9860,6 +11557,8 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 		DefaultEngine: ruleEngineKernel,
 	}
 	kernelRuntime := &pluginRuntimeApplyTestRuntime{kernelSupported: true}
+	ipv6Runtime := &fakeIPv6AssignmentRuntime{}
+	managedRuntime := &fakeManagedNetworkRuntime{}
 	pm := &ProcessManager{
 		ruleWorkers:                          make(map[int]*WorkerInfo),
 		rangeWorkers:                         make(map[int]*WorkerInfo),
@@ -9871,6 +11570,8 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 		dynamicEgressNATParents:              make(map[string]struct{}),
 		managedNetworkInterfaces:             make(map[string]struct{}),
 		ipv6AssignmentInterfaces:             make(map[string]struct{}),
+		ipv6Runtime:                          ipv6Runtime,
+		managedNetworkRuntime:                managedRuntime,
 		kernelRuntime:                        kernelRuntime,
 		kernelRules:                          make(map[int64]bool),
 		kernelRanges:                         make(map[int64]bool),
@@ -9895,6 +11596,9 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 	if len(kernelRuntime.lastRules) != 2 {
 		t.Fatalf("kernel runtime rules after initial reconcile = %+v, want 2 synthetic egress nat rules", kernelRuntime.lastRules)
 	}
+	if len(managedRuntime.lastItems) != 1 || managedRuntime.lastItems[0].Bridge != "brlan0" || managedRuntime.lastItems[0].IPv4DNSServers != "223.5.5.5" || !managedRuntime.lastItems[0].skipIPv4AddressManagement {
+		t.Fatalf("managed runtime items = %+v, want one DHCP-only brlan0 plan", managedRuntime.lastItems)
+	}
 	for _, rule := range kernelRuntime.lastRules {
 		if !isKernelEgressNATRule(rule) || rule.OutInterface != "fwdwan0" {
 			t.Fatalf("kernel runtime initial rule = %+v, want fwdwan0 egress nat synthetic rule", rule)
@@ -9902,6 +11606,34 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 	}
 	if timers := controlRuntime.pluginTimerList("lan_core"); len(timers) != 1 {
 		t.Fatalf("lan_core timers after initial reconcile = %+v, want repair timer", timers)
+	}
+	ipv6PlanRecord, err := store.GetPluginRecord(db, "lan_core", "ipv6_assignment_plans", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan_core ipv6_assignment_plans/default) error = %v", err)
+	}
+	if !ipv6PlanRecord.Enabled || !strings.Contains(ipv6PlanRecord.DataJSON, `"parent_prefix":"2001:db8:120::/60"`) || !strings.Contains(ipv6PlanRecord.DataJSON, `"assigned_prefix":"2001:db8:120:5::/64"`) {
+		t.Fatalf("lan_core ipv6 assignment plan = %+v, want enabled selected /64", ipv6PlanRecord)
+	}
+	if !strings.Contains(ipv6PlanRecord.DataJSON, `"dns_servers":["2001:4860:4860::8888"]`) {
+		t.Fatalf("lan_core ipv6 assignment plan = %+v, want inherited IPv6 DNS", ipv6PlanRecord)
+	}
+	dhcpv4PlanRecord, err := store.GetPluginRecord(db, "lan_core", "dhcpv4_plans", "default")
+	if err != nil || !dhcpv4PlanRecord.Enabled || !strings.Contains(dhcpv4PlanRecord.DataJSON, `"dns_servers":["223.5.5.5"]`) {
+		t.Fatalf("lan_core dhcpv4 plan = %+v err=%v, want inherited IPv4 DNS", dhcpv4PlanRecord, err)
+	}
+	dhcpv4Records, err := loadActivePluginDHCPv4PlanRecords(db, cfg)
+	if err != nil {
+		t.Fatalf("loadActivePluginDHCPv4PlanRecords() error = %v", err)
+	}
+	dhcpv4Networks, dhcpv4Warnings := compilePluginDHCPv4PlansWithWarnings(dhcpv4Records, nil)
+	if len(dhcpv4Warnings) != 0 || len(dhcpv4Networks) != 1 || dhcpv4Networks[0].IPv4DNSServers != "223.5.5.5" || !dhcpv4Networks[0].skipIPv4AddressManagement {
+		t.Fatalf("compiled dhcpv4 networks=%+v warnings=%v", dhcpv4Networks, dhcpv4Warnings)
+	}
+	if len(ipv6Runtime.lastItems) != 1 || !ipv6Runtime.lastItems[0].upstreamRouted || ipv6Runtime.lastItems[0].gatewayCIDR != "2001:db8:120:5::1/60" {
+		t.Fatalf("ipv6 runtime items = %+v, want routed PD gateway assignment", ipv6Runtime.lastItems)
+	}
+	if strings.Join(ipv6Runtime.lastItems[0].dnsServers, ",") != "2001:4860:4860::8888" {
+		t.Fatalf("ipv6 runtime DNS = %+v", ipv6Runtime.lastItems[0].dnsServers)
 	}
 
 	wanStatus.Enabled = false
@@ -9919,8 +11651,13 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 	if len(kernelRuntime.lastRules) != 0 {
 		t.Fatalf("kernel runtime rules after WAN status disabled = %+v, want no synthetic egress nat rules", kernelRuntime.lastRules)
 	}
+	ipv6PlanRecord, err = store.GetPluginRecord(db, "lan_core", "ipv6_assignment_plans", "default")
+	if err != nil || ipv6PlanRecord.Enabled || len(ipv6Runtime.lastItems) != 0 {
+		t.Fatalf("ipv6 plan/runtime after WAN down = record:%+v items:%+v err:%v, want disabled and empty", ipv6PlanRecord, ipv6Runtime.lastItems, err)
+	}
 
 	wanStatus.Enabled = true
+	wanStatus.DataJSON = strings.Replace(wanStatus.DataJSON, `"223.5.5.5"`, `"1.1.1.1"`, 1)
 	if err := store.UpdatePluginRecord(db, &wanStatus); err != nil {
 		t.Fatalf("restore wan_core status: %v", err)
 	}
@@ -9935,15 +11672,21 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 	if len(kernelRuntime.lastRules) != 2 {
 		t.Fatalf("kernel runtime rules after WAN status restore = %+v, want 2 synthetic egress nat rules", kernelRuntime.lastRules)
 	}
+	if len(ipv6Runtime.lastItems) != 1 || ipv6Runtime.lastItems[0].AssignedPrefix != "2001:db8:120:5::/64" {
+		t.Fatalf("ipv6 runtime after WAN restore = %+v, want restored /64", ipv6Runtime.lastItems)
+	}
+	if len(managedRuntime.lastItems) != 1 || managedRuntime.lastItems[0].IPv4DNSServers != "1.1.1.1" {
+		t.Fatalf("managed runtime after WAN DNS change = %+v, want refreshed DNS", managedRuntime.lastItems)
+	}
 }
 
-func TestExampleWANCoreApplySessionCreatesForwardCoreHandoff(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreApplySessionCreatesForwardCoreHandoff(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
 	var action PluginAction
@@ -9974,14 +11717,15 @@ func TestExampleWANCoreApplySessionCreatesForwardCoreHandoff(t *testing.T) {
 	  "mtu":1492,
 	  "ipv4":"10.0.0.2",
 	  "ipv4_peer":"10.0.0.1",
+	  "ipv6":"2001:db8:abcd::10",
+	  "ipv6_addresses":[{"address":"2001:db8:abcd::10","preferred_lifetime":3600,"valid_lifetime":7200}],
 	  "ipv6_link_local":"fe80::1",
 	  "ipv6_peer_link_local":"fe80::2",
 	  "pd_prefix":"2001:db8:1234::/56",
 	  "dns_servers":["223.5.5.5"],
-	  "host_interface":"fwdlocal0",
-	  "vtap_interface":"fwdvtap0",
-	  "host_addresses":["169.254.253.1/30"],
-	  "vtap_addresses":["169.254.253.2/30"],
+	  "local_interface":"fwdlocal0",
+	  "install_default_route_v6":true,
+	  "addresses":["169.254.253.1/32"],
 	  "routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0","gateway":"10.0.0.1","table":100,"metric":10}]
 	}`)
 	if err := rt.ApplyPluginAction(plugin, action, payload); err != nil {
@@ -10002,11 +11746,13 @@ func TestExampleWANCoreApplySessionCreatesForwardCoreHandoff(t *testing.T) {
 		t.Fatalf("wan_core profiles/default Enabled = false, want true after action apply")
 	}
 	for _, want := range []string{
-		"ensureVeth:fwdlocal0:fwdvtap0:1492:true",
-		"addrReplace:fwdlocal0:169.254.253.1/30",
+		"ensureDummy:fwdlocal0:1492:true",
+		"addrReplace:fwdlocal0:169.254.253.1/32",
 		"addrReplace:fwdlocal0:10.0.0.2/32",
-		"addrReplace:fwdvtap0:169.254.253.2/30",
+		"addrReplace:fwdlocal0:2001:db8:abcd::10/128",
+		"addrReplace:fwdlocal0:fe80::1/64",
 		"routeReplace:0.0.0.0/0:fwdlocal0:10.0.0.1:100:10",
+		"routeReplace:::/0:fwdlocal0::0:0",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
@@ -10016,7 +11762,7 @@ func TestExampleWANCoreApplySessionCreatesForwardCoreHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"applied"`, `"driver":"external"`, `"parent_interface":"fwdlocal0"`, `"egress_nat_parent_interface":"fwdlocal0"`, `"egress_nat_redirect_mode":"prepared_l2"`, `"pd_prefix":"2001:db8:1234::/56"`} {
+	for _, want := range []string{`"phase":"applied"`, `"driver":"external"`, `"parent_interface":"fwdlocal0"`, `"egress_nat_parent_interface":"fwdlocal0"`, `"egress_nat_redirect_mode":""`, `"ipv6":"2001:db8:abcd::10"`, `"pd_prefix":"2001:db8:1234::/56"`} {
 		if !strings.Contains(record.DataJSON, want) {
 			t.Fatalf("wan_core status/default = %s, missing %s", record.DataJSON, want)
 		}
@@ -10026,13 +11772,325 @@ func TestExampleWANCoreApplySessionCreatesForwardCoreHandoff(t *testing.T) {
 	}
 }
 
-func TestExampleWANCoreResourceApplyArmsRepairTimer(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCorePrepareHandoffCreatesSegmentedDisabledStatus(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	plugin = pluginWithRuntimeSurfaceForTest(t, plugin)
+	var action PluginAction
+	for _, candidate := range plugin.Actions {
+		if candidate.ID == "prepare_handoff" {
+			action = candidate
+			break
+		}
+	}
+	if action.ID == "" {
+		t.Fatalf("prepare_handoff action not found in %+v", plugin.Actions)
+	}
+
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	payload := json.RawMessage(`{
+	  "wan_id":"default",
+	  "driver":"pppoe_client",
+	  "driver_plugin":"pppoe_client",
+	  "state":"prepared",
+	  "usable":false,
+	  "real_interface":"eth0",
+	  "wan_interface":"eth0",
+	  "mtu":1492,
+	  "local_interface":"fwdlocal0",
+	  "pipeline_interface":"fwdpipe0",
+	  "handoff_mode":"segmented_veth"
+	}`)
+	if err := rt.ApplyPluginAction(plugin, action, payload); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core prepare_handoff) error = %v", err)
+	}
+	for _, want := range []string{
+		"ensureVeth:fwdlocal0:fwdpipe0:1492:true",
+		"setARP:fwdlocal0:false",
+	} {
+		if !containsString(controller.calls, want) {
+			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
+		}
+	}
+	profileRecord, err := store.GetPluginRecord(db, "wan_core", "profiles", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core profiles/default) error = %v", err)
+	}
+	if !profileRecord.Enabled {
+		t.Fatalf("wan_core profiles/default Enabled = false, want true after handoff prepare")
+	}
+	statusRecord, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
+	}
+	if statusRecord.Enabled {
+		t.Fatalf("wan_core status/default Enabled = true, want false until usable session is applied")
+	}
+	for _, want := range []string{`"phase":"prepared"`, `"usable":false`, `"managed_link":true`, `"parent_interface":"fwdlocal0"`, `"pipeline_interface":"fwdpipe0"`, `"segmentation_ready":true`, `"noarp_ready":true`, `"original_arp":true`, `"arp_disabled_by_plugin":true`, `"mode":"segmented_veth"`} {
+		if !strings.Contains(statusRecord.DataJSON, want) {
+			t.Fatalf("wan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
+		}
+	}
+	if timers := rt.pluginTimerList("wan_core"); len(timers) != 0 {
+		t.Fatalf("wan_core timers after handoff prepare = %+v, want none before a usable session exists", timers)
+	}
+}
+
+func TestBundledWANCoreSegmentedHandoffKeepsARPOwnershipAcrossReconcile(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	action := pluginActionByIDForTest(t, plugin, "prepare_handoff")
+
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	payload := json.RawMessage(`{
+	  "wan_id":"default",
+	  "driver":"pppoe_client",
+	  "state":"prepared",
+	  "usable":false,
+	  "local_interface":"fwdlocal0",
+	  "pipeline_interface":"fwdpipe0",
+	  "handoff_mode":"segmented_veth",
+	  "mtu":1492
+	}`)
+	for i := 0; i < 2; i++ {
+		if err := rt.ApplyPluginAction(plugin, action, payload); err != nil {
+			t.Fatalf("ApplyPluginAction(wan_core prepare_handoff) #%d error = %v", i+1, err)
+		}
+	}
+	setARPCalls := 0
+	for _, call := range controller.calls {
+		if call == "setARP:fwdlocal0:false" {
+			setARPCalls++
+		}
+	}
+	if setARPCalls != 1 {
+		t.Fatalf("net admin calls = %+v, want one ARP disable across repeated reconcile", controller.calls)
+	}
+	statusRecord, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
+	}
+	for _, want := range []string{`"original_arp":true`, `"arp_disabled_by_plugin":true`, `"noarp_ready":true`, `"segmentation_ready":true`} {
+		if !strings.Contains(statusRecord.DataJSON, want) {
+			t.Fatalf("wan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
+		}
+	}
+
+	teardownAction := pluginActionByIDForTest(t, plugin, "teardown")
+	controller.calls = nil
+	if err := rt.ApplyPluginAction(plugin, teardownAction, payload); err != nil {
+		t.Fatalf("first ApplyPluginAction(wan_core teardown) error = %v", err)
+	}
+	if !containsString(controller.calls, "delete:fwdlocal0") {
+		t.Fatalf("net admin calls = %+v, want managed segmented pair delete", controller.calls)
+	}
+	controller.calls = nil
+	if err := rt.ApplyPluginAction(plugin, teardownAction, payload); err != nil {
+		t.Fatalf("second ApplyPluginAction(wan_core teardown) error = %v", err)
+	}
+	if containsString(controller.calls, "setARP:fwdlocal0:true") {
+		t.Fatalf("net admin calls = %+v, want no ARP restore after managed pair was deleted", controller.calls)
+	}
+	statusRecord, err = store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core status/default) after repeated teardown error = %v", err)
+	}
+	for _, want := range []string{`"phase":"deleted"`, `"arp_disabled_by_plugin":false`, `"noarp_ready":false`, `"cleanup_errors":[]`} {
+		if !strings.Contains(statusRecord.DataJSON, want) {
+			t.Fatalf("wan_core status/default after repeated teardown = %s, missing %s", statusRecord.DataJSON, want)
+		}
+	}
+}
+
+func TestBundledWANCoreSegmentedHandoffRestoresARPOnUnmanagedVeth(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	prepareAction := pluginActionByIDForTest(t, plugin, "prepare_handoff")
+	teardownAction := pluginActionByIDForTest(t, plugin, "teardown")
+
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
+		"fwdlocal0": {Name: "fwdlocal0", IfIndex: 101, Kind: "veth", MTU: 1492, Up: true, ARP: true},
+		"fwdpipe0":  {Name: "fwdpipe0", IfIndex: 102, Kind: "veth", MTU: 1492, Up: true, ARP: true},
+	}}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	payload := json.RawMessage(`{
+	  "wan_id":"default",
+	  "driver":"pppoe_client",
+	  "state":"prepared",
+	  "usable":false,
+	  "local_interface":"fwdlocal0",
+	  "pipeline_interface":"fwdpipe0",
+	  "handoff_mode":"segmented_veth",
+	  "mtu":1492
+	}`)
+	if err := rt.ApplyPluginAction(plugin, prepareAction, payload); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core prepare_handoff) error = %v", err)
+	}
+	controller.calls = nil
+	if err := rt.ApplyPluginAction(plugin, teardownAction, payload); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core teardown) error = %v", err)
+	}
+	if !containsString(controller.calls, "setARP:fwdlocal0:true") {
+		t.Fatalf("net admin calls = %+v, want ARP restored on reused veth", controller.calls)
+	}
+	if containsString(controller.calls, "delete:fwdlocal0") {
+		t.Fatalf("net admin calls = %+v, want reused veth preserved", controller.calls)
+	}
+	if !controller.links["fwdlocal0"].ARP {
+		t.Fatalf("reused veth ARP = false after teardown, want restored")
+	}
+	statusRecord, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
+	}
+	for _, want := range []string{`"arp_restored":true`, `"arp_disabled_by_plugin":false`, `"link_delete_skipped":true`} {
+		if !strings.Contains(statusRecord.DataJSON, want) {
+			t.Fatalf("wan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
+		}
+	}
+}
+
+func TestBundledWANCoreSegmentedHandoffCleansCreatedPairWhenARPSetupFails(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	action := pluginActionByIDForTest(t, plugin, "prepare_handoff")
+
+	rt := newPluginControlRuntime(openTestDB(t), &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{setARPErrors: map[string]error{"fwdlocal0": fmt.Errorf("operation not supported")}}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	err = rt.ApplyPluginAction(plugin, action, json.RawMessage(`{
+	  "wan_id":"default",
+	  "driver":"pppoe_client",
+	  "state":"prepared",
+	  "usable":false,
+	  "local_interface":"fwdlocal0",
+	  "pipeline_interface":"fwdpipe0",
+	  "handoff_mode":"segmented_veth",
+	  "mtu":1492
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "operation not supported") {
+		t.Fatalf("ApplyPluginAction(wan_core prepare_handoff) error = %v, want ARP setup failure", err)
+	}
+	for _, want := range []string{"ensureVeth:fwdlocal0:fwdpipe0:1492:true", "setARP:fwdlocal0:false", "delete:fwdlocal0"} {
+		if !containsString(controller.calls, want) {
+			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
+		}
+	}
+}
+
+func TestBundledWANCoreHandoffMigrationFailureRestoresPreviousBoundary(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	action := pluginActionByIDForTest(t, plugin, "apply_session")
+
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{
+	  "wan_id":"default",
+	  "driver":"external",
+	  "state":"up",
+	  "usable":true,
+	  "local_interface":"fwdlocal0",
+	  "handoff_mode":"direct",
+	  "mtu":1492,
+	  "addresses":["169.254.253.1/32"]
+	}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core direct apply_session) error = %v", err)
+	}
+	controller.calls = nil
+	controller.ensureVethErrors = map[string]error{"fwdlocal0": fmt.Errorf("temporary veth create failure")}
+	err = rt.ApplyPluginAction(plugin, action, json.RawMessage(`{
+	  "wan_id":"default",
+	  "driver":"pppoe_client",
+	  "state":"up",
+	  "usable":true,
+	  "local_interface":"fwdlocal0",
+	  "pipeline_interface":"fwdpipe0",
+	  "handoff_mode":"segmented_veth",
+	  "mtu":1492
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "previous WAN handoff restored") {
+		t.Fatalf("ApplyPluginAction(wan_core segmented migration) error = %v, want restored-boundary error", err)
+	}
+	for _, want := range []string{
+		"delete:fwdlocal0",
+		"ensureVeth:fwdlocal0:fwdpipe0:1492:true",
+		"ensureDummy:fwdlocal0:1492:true",
+		"addrReplace:fwdlocal0:169.254.253.1/32",
+	} {
+		if !containsString(controller.calls, want) {
+			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
+		}
+	}
+	if info := controller.links["fwdlocal0"]; info.Kind != "dummy" || !info.Up {
+		t.Fatalf("restored fwdlocal0 = %+v, want up dummy boundary", info)
+	}
+	if _, exists := controller.links["fwdpipe0"]; exists {
+		t.Fatalf("failed migration left fwdpipe0 behind: %+v", controller.links["fwdpipe0"])
+	}
+	statusRecord, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
+	}
+	for _, want := range []string{`"phase":"applied"`, `"handoff_mode":"direct"`, `"local_interface":"fwdlocal0"`, `"managed_link":true`} {
+		if !strings.Contains(statusRecord.DataJSON, want) {
+			t.Fatalf("wan_core status/default = %s, missing preserved state %s", statusRecord.DataJSON, want)
+		}
+	}
+}
+
+func TestBundledWANCoreResourceApplyArmsRepairTimer(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
@@ -10048,8 +12106,7 @@ func TestExampleWANCoreResourceApplyArmsRepairTimer(t *testing.T) {
 		  "wan_id":"default",
 		  "state":"up",
 		  "usable":true,
-		  "host_interface":"fwdlocal0",
-		  "vtap_interface":"fwdvtap0"
+		  "local_interface":"fwdlocal0"
 		}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, records); err != nil {
@@ -10061,13 +12118,13 @@ func TestExampleWANCoreResourceApplyArmsRepairTimer(t *testing.T) {
 	}
 }
 
-func TestExampleWANCoreResourceApplyIsolatesInvalidSession(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreResourceApplyIsolatesInvalidSession(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
@@ -10080,12 +12137,12 @@ func TestExampleWANCoreResourceApplyIsolatesInvalidSession(t *testing.T) {
 		{
 			Key:     "bad",
 			Enabled: true,
-			Data:    json.RawMessage(`{"state":"up","usable":true,"host_interface":"this-interface-name-is-too-long","vtap_interface":"fwdvtap0"}`),
+			Data:    json.RawMessage(`{"state":"up","usable":true,"local_interface":"this-interface-name-is-too-long"}`),
 		},
 		{
 			Key:     "good",
 			Enabled: true,
-			Data:    json.RawMessage(`{"state":"up","usable":true,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+			Data:    json.RawMessage(`{"state":"up","usable":true,"local_interface":"fwdlocal0"}`),
 		},
 	}
 	if err := rt.ApplyPluginResourceData(plugin, resource, records); err == nil || !strings.Contains(err.Error(), "failed to apply 1 WAN session record") {
@@ -10104,20 +12161,20 @@ func TestExampleWANCoreResourceApplyIsolatesInvalidSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/good) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"applied"`, `"wan_id":"good"`, `"host_interface":"fwdlocal0"`, `"vtap_interface":"fwdvtap0"`} {
+	for _, want := range []string{`"phase":"applied"`, `"wan_id":"good"`, `"local_interface":"fwdlocal0"`} {
 		if !strings.Contains(goodStatus.DataJSON, want) {
 			t.Fatalf("wan_core status/good = %s, missing %s", goodStatus.DataJSON, want)
 		}
 	}
 }
 
-func TestExampleWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
@@ -10126,7 +12183,7 @@ func TestExampleWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
 		PluginID:   "wan_core",
 		ResourceID: "status",
 		RecordKey:  "default",
-		DataJSON:   `{"phase":"applied","egress_nat_parent_interface":"fwdvtap0","forward_core":{"parent_interface":"fwdvtap0"}}`,
+		DataJSON:   `{"phase":"applied","egress_nat_parent_interface":"fwdlocal0","forward_core":{"parent_interface":"fwdlocal0"}}`,
 		Enabled:    true,
 	}); err != nil {
 		t.Fatalf("AddPluginRecord(wan_core status/default) error = %v", err)
@@ -10139,7 +12196,7 @@ func TestExampleWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
 	if err := rt.ApplyPluginResourceData(plugin, resource, []PluginResourceRecord{{
 		Key:     "default",
 		Enabled: false,
-		Data:    json.RawMessage(`{"state":"down","usable":false,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+		Data:    json.RawMessage(`{"state":"down","usable":false,"local_interface":"fwdlocal0"}`),
 	}}); err != nil {
 		t.Fatalf("ApplyPluginResourceData(wan_core disabled session) error = %v", err)
 	}
@@ -10150,7 +12207,7 @@ func TestExampleWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
 	if statusRecord.Enabled {
 		t.Fatalf("wan_core status/default enabled = true, want false after disabled session apply")
 	}
-	for _, want := range []string{`"phase":"disabled"`, `"usable":false`, `"host_interface":"fwdlocal0"`, `"vtap_interface":"fwdvtap0"`} {
+	for _, want := range []string{`"phase":"disabled"`, `"usable":false`, `"local_interface":"fwdlocal0"`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -10160,13 +12217,13 @@ func TestExampleWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
 	}
 }
 
-func TestExampleWANCoreDisabledSessionKeepsRepairTimerForOtherEnabledSessions(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreDisabledSessionKeepsRepairTimerForOtherEnabledSessions(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
@@ -10175,7 +12232,7 @@ func TestExampleWANCoreDisabledSessionKeepsRepairTimerForOtherEnabledSessions(t 
 		PluginID:   "wan_core",
 		ResourceID: "sessions",
 		RecordKey:  "other",
-		DataJSON:   `{"state":"up","usable":true,"host_interface":"fwdlocal1","vtap_interface":"fwdvtap1"}`,
+		DataJSON:   `{"state":"up","usable":true,"local_interface":"fwdlocal1"}`,
 		Enabled:    true,
 	}); err != nil {
 		t.Fatalf("AddPluginRecord(wan_core sessions/other) error = %v", err)
@@ -10188,7 +12245,7 @@ func TestExampleWANCoreDisabledSessionKeepsRepairTimerForOtherEnabledSessions(t 
 	if err := rt.ApplyPluginResourceData(plugin, resource, []PluginResourceRecord{{
 		Key:     "default",
 		Enabled: false,
-		Data:    json.RawMessage(`{"state":"down","usable":false,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+		Data:    json.RawMessage(`{"state":"down","usable":false,"local_interface":"fwdlocal0"}`),
 	}}); err != nil {
 		t.Fatalf("ApplyPluginResourceData(wan_core disabled session with other enabled) error = %v", err)
 	}
@@ -10197,13 +12254,13 @@ func TestExampleWANCoreDisabledSessionKeepsRepairTimerForOtherEnabledSessions(t 
 	}
 }
 
-func TestExampleWANCoreUnusableSessionDisablesPublishedStatus(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreUnusableSessionDisablesPublishedStatus(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
@@ -10215,7 +12272,7 @@ func TestExampleWANCoreUnusableSessionDisablesPublishedStatus(t *testing.T) {
 	if err := rt.ApplyPluginResourceData(plugin, resource, []PluginResourceRecord{{
 		Key:     "default",
 		Enabled: true,
-		Data:    json.RawMessage(`{"state":"down","usable":false,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+		Data:    json.RawMessage(`{"driver":"pppoe_client","state":"down","usable":false,"local_interface":"fwdlocal0","pipeline_interface":"fwdpipe0","handoff_mode":"segmented_veth"}`),
 	}}); err != nil {
 		t.Fatalf("ApplyPluginResourceData(wan_core unusable session) error = %v", err)
 	}
@@ -10226,25 +12283,28 @@ func TestExampleWANCoreUnusableSessionDisablesPublishedStatus(t *testing.T) {
 	if statusRecord.Enabled {
 		t.Fatalf("wan_core status/default enabled = true, want false for unusable session")
 	}
-	for _, want := range []string{`"phase":"skipped"`, `"reason":"wan session is not usable"`, `"usable":false`} {
+	for _, want := range []string{`"phase":"skipped"`, `"reason":"wan session is not usable"`, `"usable":false`, `"segmentation_ready":false`, `"noarp_ready":false`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
+	if strings.Contains(statusRecord.DataJSON, `"segmentation_ready":true`) {
+		t.Fatalf("wan_core status/default = %s, want no readiness before segmented handoff exists", statusRecord.DataJSON)
+	}
 }
 
-func TestExampleWANCoreRepairTimerRecoversVethFailure(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreRepairTimerRecoversDummyFailure(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
 	db := openTestDB(t)
-	sessionJSON := `{"wan_id":"default","state":"up","usable":true,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0","host_addresses":["169.254.253.1/30"],"vtap_addresses":["169.254.253.2/30"],"routes":[{"dst":"0.0.0.0/0","gateway":"169.254.253.2"}]}`
+	sessionJSON := `{"wan_id":"default","state":"up","usable":true,"local_interface":"fwdlocal0","addresses":["169.254.253.1/32"],"routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0"}]}`
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
 		PluginID:   "wan_core",
 		ResourceID: "sessions",
@@ -10257,7 +12317,7 @@ func TestExampleWANCoreRepairTimerRecoversVethFailure(t *testing.T) {
 
 	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
 	controller := &pluginControlNetAdminTest{
-		ensureVethErrors: map[string]error{"fwdlocal0": fmt.Errorf("temporary veth create failure")},
+		ensureDummyErrors: map[string]error{"fwdlocal0": fmt.Errorf("temporary dummy create failure")},
 	}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -10273,7 +12333,7 @@ func TestExampleWANCoreRepairTimerRecoversVethFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) failed apply error = %v", err)
 	}
-	for _, want := range []string{`"phase":"error"`, `"last_error":"net.link.ensureVeth: temporary veth create failure"`} {
+	for _, want := range []string{`"phase":"error"`, `"last_error":"net.link.ensureDummy: temporary dummy create failure"`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core failed status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -10285,13 +12345,13 @@ func TestExampleWANCoreRepairTimerRecoversVethFailure(t *testing.T) {
 		t.Fatalf("wan_core timers after failed apply = %+v, want one repair timer", timers)
 	}
 
-	controller.ensureVethErrors = nil
+	controller.ensureDummyErrors = nil
 	firePluginTimerForTest(t, rt, "wan_core", "wan_repair")
 	statusRecord, err = store.GetPluginRecord(db, "wan_core", "status", "default")
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) recovered error = %v", err)
 	}
-	for _, want := range []string{`"phase":"applied"`, `"host_interface":"fwdlocal0"`, `"vtap_interface":"fwdvtap0"`} {
+	for _, want := range []string{`"phase":"applied"`, `"local_interface":"fwdlocal0"`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core recovered status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -10305,19 +12365,19 @@ func TestExampleWANCoreRepairTimerRecoversVethFailure(t *testing.T) {
 	}
 }
 
-func TestExampleWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	sessionJSON := `{"wan_id":"default","state":"up","usable":true,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`
+	sessionJSON := `{"wan_id":"default","state":"up","usable":true,"local_interface":"fwdlocal0"}`
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
 		PluginID:   "wan_core",
 		ResourceID: "sessions",
@@ -10380,26 +12440,26 @@ func TestExampleWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) after repeated teardown error = %v", err)
 	}
-	for _, want := range []string{`"phase":"deleted"`, `"managed_link":true`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"previous wan_core status already deleted this plugin-managed veth pair"`} {
+	for _, want := range []string{`"phase":"deleted"`, `"managed_link":true`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"previous wan_core status already deleted this plugin-managed handoff"`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core status/default after repeated teardown = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
 }
 
-func TestExampleWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	sessionJSON := `{"wan_id":"default","state":"up","usable":true,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0","host_addresses":["169.254.253.1/30"],"vtap_addresses":["169.254.253.2/30"],"routes":[{"dst":"0.0.0.0/0","gateway":"169.254.253.2"}]}`
+	sessionJSON := `{"wan_id":"default","state":"up","usable":true,"local_interface":"fwdlocal0","addresses":["169.254.253.1/32"],"routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0"}]}`
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
 		PluginID:   "wan_core",
 		ResourceID: "sessions",
@@ -10432,9 +12492,8 @@ func TestExampleWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
 		t.Fatalf("ApplyPluginAction(wan_core teardown) error = %v", err)
 	}
 	for _, want := range []string{
-		"addrDelete:fwdlocal0:169.254.253.1/30",
-		"addrDelete:fwdvtap0:169.254.253.2/30",
-		"routeDelete:0.0.0.0/0:fwdlocal0:169.254.253.2:0:0",
+		"addrDelete:fwdlocal0:169.254.253.1/32",
+		"routeDelete:0.0.0.0/0:fwdlocal0::0:0",
 		"delete:fwdlocal0",
 	} {
 		if !containsString(controller.calls, want) {
@@ -10455,7 +12514,7 @@ func TestExampleWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
 	if statusRecord.Enabled {
 		t.Fatalf("wan_core status/default enabled = true, want false after failed physical delete")
 	}
-	for _, want := range []string{`"phase":"delete_failed"`, `"last_error":"net.link.delete: operation not permitted"`, `"host_interface":"fwdlocal0"`, `"managed_link":true`} {
+	for _, want := range []string{`"phase":"delete_failed"`, `"last_error":"net.link.delete: operation not permitted"`, `"local_interface":"fwdlocal0"`, `"managed_link":true`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -10465,18 +12524,18 @@ func TestExampleWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
 	}
 }
 
-func TestExampleWANCoreTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	sessionJSON := `{"wan_id":"default","state":"up","usable":true,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0","host_addresses":["169.254.253.1/30"],"vtap_addresses":["169.254.253.2/30"],"routes":[{"dst":"0.0.0.0/0","gateway":"169.254.253.2"}]}`
+	sessionJSON := `{"wan_id":"default","state":"up","usable":true,"local_interface":"fwdlocal0","addresses":["169.254.253.1/32"],"routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0"}]}`
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
 		PluginID:   "wan_core",
 		ResourceID: "sessions",
@@ -10496,9 +12555,8 @@ func TestExampleWANCoreTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *t
 		t.Fatalf("ApplyPluginAction(wan_core teardown without status) error = %v", err)
 	}
 	for _, forbidden := range []string{
-		"addrDelete:fwdlocal0:169.254.253.1/30",
-		"addrDelete:fwdvtap0:169.254.253.2/30",
-		"routeDelete:0.0.0.0/0:fwdlocal0:169.254.253.2:0:0",
+		"addrDelete:fwdlocal0:169.254.253.1/32",
+		"routeDelete:0.0.0.0/0:fwdlocal0::0:0",
 		"delete:fwdlocal0",
 	} {
 		if containsString(controller.calls, forbidden) {
@@ -10509,20 +12567,20 @@ func TestExampleWANCoreTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *t
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"deleted"`, `"managed_link":false`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"no previous wan_core status proves this veth pair was plugin-managed"`, `"cleanup_errors":[]`} {
+	for _, want := range []string{`"phase":"deleted"`, `"managed_link":false`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"no previous wan_core status proves this handoff was plugin-managed"`, `"cleanup_errors":[]`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
 }
 
-func TestExampleWANCoreResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
@@ -10534,7 +12592,7 @@ func TestExampleWANCoreResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
 	records := []PluginResourceRecord{{
 		Key:     "default",
 		Enabled: true,
-		Data:    json.RawMessage(`{"state":"up","usable":true,"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+		Data:    json.RawMessage(`{"state":"up","usable":true,"local_interface":"fwdlocal0"}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, records); err != nil {
 		t.Fatalf("first ApplyPluginResourceData(wan_core sessions) error = %v", err)
@@ -10555,13 +12613,13 @@ func TestExampleWANCoreResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
 	}
 }
 
-func TestExampleWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
@@ -10577,11 +12635,9 @@ func TestExampleWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *test
 		Data: json.RawMessage(`{
 		  "state":"up",
 		  "usable":true,
-		  "host_interface":"fwdlocal0",
-		  "vtap_interface":"fwdvtap0",
-		  "host_addresses":["169.254.253.1/30","169.254.253.5/30"],
-		  "vtap_addresses":["169.254.253.2/30"],
-		  "routes":[{"dst":"0.0.0.0/0","gateway":"169.254.253.2"}]
+		  "local_interface":"fwdlocal0",
+		  "addresses":["169.254.253.1/32","169.254.253.5/32"],
+		  "routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0"}]
 		}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, first); err != nil {
@@ -10595,10 +12651,8 @@ func TestExampleWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *test
 		Data: json.RawMessage(`{
 		  "state":"up",
 		  "usable":true,
-		  "host_interface":"fwdlocal0",
-		  "vtap_interface":"fwdvtap0",
-		  "host_addresses":["169.254.253.1/30"],
-		  "vtap_addresses":[],
+		  "local_interface":"fwdlocal0",
+		  "addresses":["169.254.253.1/32"],
 		  "routes":[]
 		}`),
 	}}
@@ -10606,9 +12660,8 @@ func TestExampleWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *test
 		t.Fatalf("second ApplyPluginResourceData(wan_core sessions) error = %v", err)
 	}
 	for _, want := range []string{
-		"addrDelete:fwdlocal0:169.254.253.5/30",
-		"addrDelete:fwdvtap0:169.254.253.2/30",
-		"routeDelete:0.0.0.0/0:fwdlocal0:169.254.253.2:0:0",
+		"addrDelete:fwdlocal0:169.254.253.5/32",
+		"routeDelete:0.0.0.0/0:fwdlocal0::0:0",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
@@ -10618,20 +12671,20 @@ func TestExampleWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *test
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
 	}
-	for _, want := range []string{`"cleanup_errors":[]`, `"host_addresses":["169.254.253.1/30"]`, `"routes":[]`} {
+	for _, want := range []string{`"cleanup_errors":[]`, `"addresses":["169.254.253.1/32"]`, `"routes":[]`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
 }
 
-func TestExampleWANCoreResourceApplyDeletesManagedVethWhenInterfaceChanges(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "wan_core")
+func TestBundledWANCoreResourceApplyDeletesManagedDummyWhenInterfaceChanges(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "wan_core")
 	if err != nil {
-		t.Fatalf("load wan_core example plugin: %v", err)
+		t.Fatalf("load wan_core bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
@@ -10647,10 +12700,8 @@ func TestExampleWANCoreResourceApplyDeletesManagedVethWhenInterfaceChanges(t *te
 		Data: json.RawMessage(`{
 		  "state":"up",
 		  "usable":true,
-		  "host_interface":"fwdold0",
-		  "vtap_interface":"fwdoldtap0",
-		  "host_addresses":["169.254.253.1/30"],
-		  "vtap_addresses":["169.254.253.2/30"]
+		  "local_interface":"fwdold0",
+		  "addresses":["169.254.253.1/32"]
 		}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, first); err != nil {
@@ -10664,10 +12715,8 @@ func TestExampleWANCoreResourceApplyDeletesManagedVethWhenInterfaceChanges(t *te
 		Data: json.RawMessage(`{
 		  "state":"up",
 		  "usable":true,
-		  "host_interface":"fwdlocal0",
-		  "vtap_interface":"fwdvtap0",
-		  "host_addresses":["169.254.253.1/30"],
-		  "vtap_addresses":["169.254.253.2/30"]
+		  "local_interface":"fwdlocal0",
+		  "addresses":["169.254.253.1/32"]
 		}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, second); err != nil {
@@ -10679,22 +12728,21 @@ func TestExampleWANCoreResourceApplyDeletesManagedVethWhenInterfaceChanges(t *te
 		}
 	}
 	for _, forbidden := range []string{
-		"addrDelete:fwdold0:169.254.253.1/30",
-		"addrDelete:fwdoldtap0:169.254.253.2/30",
+		"addrDelete:fwdold0:169.254.253.1/32",
 	} {
 		if containsString(controller.calls, forbidden) {
-			t.Fatalf("net admin calls = %+v, want old veth delete instead of stale cleanup call %s", controller.calls, forbidden)
+			t.Fatalf("net admin calls = %+v, want old dummy delete instead of stale cleanup call %s", controller.calls, forbidden)
 		}
 	}
 }
 
-func TestExampleVToLocalResourceApplyArmsRepairTimer(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalResourceApplyArmsRepairTimer(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
@@ -10708,8 +12756,7 @@ func TestExampleVToLocalResourceApplyArmsRepairTimer(t *testing.T) {
 		Enabled: true,
 		Data: json.RawMessage(`{
 		  "profile_key":"default",
-		  "host_interface":"fwdlocal0",
-		  "vtap_interface":"fwdvtap0"
+		  "local_interface":"fwdlocal0"
 		}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, records); err != nil {
@@ -10721,13 +12768,13 @@ func TestExampleVToLocalResourceApplyArmsRepairTimer(t *testing.T) {
 	}
 }
 
-func TestExampleVToLocalResourceApplyIsolatesInvalidLink(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalResourceApplyIsolatesInvalidLink(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
@@ -10740,12 +12787,12 @@ func TestExampleVToLocalResourceApplyIsolatesInvalidLink(t *testing.T) {
 		{
 			Key:     "bad",
 			Enabled: true,
-			Data:    json.RawMessage(`{"host_interface":"this-interface-name-is-too-long","vtap_interface":"fwdvtap0"}`),
+			Data:    json.RawMessage(`{"local_interface":"this-interface-name-is-too-long"}`),
 		},
 		{
 			Key:     "good",
 			Enabled: true,
-			Data:    json.RawMessage(`{"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+			Data:    json.RawMessage(`{"local_interface":"fwdlocal0"}`),
 		},
 	}
 	if err := rt.ApplyPluginResourceData(plugin, resource, records); err == nil || !strings.Contains(err.Error(), "failed to apply 1 VToLocal link record") {
@@ -10764,20 +12811,20 @@ func TestExampleVToLocalResourceApplyIsolatesInvalidLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(vtolocal status/good) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"applied"`, `"profile_key":"good"`, `"host_interface":"fwdlocal0"`, `"vtap_interface":"fwdvtap0"`} {
+	for _, want := range []string{`"phase":"applied"`, `"profile_key":"good"`, `"local_interface":"fwdlocal0"`} {
 		if !strings.Contains(goodStatus.DataJSON, want) {
 			t.Fatalf("vtolocal status/good = %s, missing %s", goodStatus.DataJSON, want)
 		}
 	}
 }
 
-func TestExampleVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
@@ -10786,7 +12833,7 @@ func TestExampleVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
 		PluginID:   "vtolocal",
 		ResourceID: "status",
 		RecordKey:  "default",
-		DataJSON:   `{"phase":"applied","egress_nat_parent_interface":"fwdvtap0"}`,
+		DataJSON:   `{"phase":"applied","local_interface":"fwdlocal0","managed_link":true}`,
 		Enabled:    true,
 	}); err != nil {
 		t.Fatalf("AddPluginRecord(vtolocal status/default) error = %v", err)
@@ -10799,7 +12846,7 @@ func TestExampleVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
 	if err := rt.ApplyPluginResourceData(plugin, resource, []PluginResourceRecord{{
 		Key:     "default",
 		Enabled: false,
-		Data:    json.RawMessage(`{"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+		Data:    json.RawMessage(`{"local_interface":"fwdlocal0"}`),
 	}}); err != nil {
 		t.Fatalf("ApplyPluginResourceData(vtolocal disabled link) error = %v", err)
 	}
@@ -10810,7 +12857,7 @@ func TestExampleVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
 	if statusRecord.Enabled {
 		t.Fatalf("vtolocal status/default enabled = true, want false after disabled link apply")
 	}
-	for _, want := range []string{`"phase":"disabled"`, `"host_interface":"fwdlocal0"`, `"vtap_interface":"fwdvtap0"`} {
+	for _, want := range []string{`"phase":"deleted"`, `"local_interface":"fwdlocal0"`, `"link_delete_skipped":false`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("vtolocal status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -10820,13 +12867,13 @@ func TestExampleVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
 	}
 }
 
-func TestExampleVToLocalDisabledLinkKeepsRepairTimerForOtherEnabledLinks(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalDisabledLinkKeepsRepairTimerForOtherEnabledLinks(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
@@ -10835,7 +12882,7 @@ func TestExampleVToLocalDisabledLinkKeepsRepairTimerForOtherEnabledLinks(t *test
 		PluginID:   "vtolocal",
 		ResourceID: "links",
 		RecordKey:  "other",
-		DataJSON:   `{"host_interface":"fwdlocal1","vtap_interface":"fwdvtap1"}`,
+		DataJSON:   `{"local_interface":"fwdlocal1"}`,
 		Enabled:    true,
 	}); err != nil {
 		t.Fatalf("AddPluginRecord(vtolocal links/other) error = %v", err)
@@ -10848,7 +12895,7 @@ func TestExampleVToLocalDisabledLinkKeepsRepairTimerForOtherEnabledLinks(t *test
 	if err := rt.ApplyPluginResourceData(plugin, resource, []PluginResourceRecord{{
 		Key:     "default",
 		Enabled: false,
-		Data:    json.RawMessage(`{"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+		Data:    json.RawMessage(`{"local_interface":"fwdlocal0"}`),
 	}}); err != nil {
 		t.Fatalf("ApplyPluginResourceData(vtolocal disabled link with other enabled) error = %v", err)
 	}
@@ -10857,18 +12904,18 @@ func TestExampleVToLocalDisabledLinkKeepsRepairTimerForOtherEnabledLinks(t *test
 	}
 }
 
-func TestExampleVToLocalRepairTimerRecoversVethFailure(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalRepairTimerRecoversDummyFailure(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
 	db := openTestDB(t)
-	linkJSON := `{"profile_key":"default","host_interface":"fwdlocal0","vtap_interface":"fwdvtap0","host_addresses":["169.254.253.1/30"],"vtap_addresses":["169.254.253.2/30"],"routes":[{"dst":"0.0.0.0/0","gateway":"169.254.253.2"}]}`
+	linkJSON := `{"profile_key":"default","local_interface":"fwdlocal0","addresses":["169.254.253.1/32"],"routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0"}]}`
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
 		PluginID:   "vtolocal",
 		ResourceID: "links",
@@ -10881,7 +12928,7 @@ func TestExampleVToLocalRepairTimerRecoversVethFailure(t *testing.T) {
 
 	rt := newPluginControlRuntime(db, &Config{PluginsDir: filepath.Dir(rootDir)}, nil).(*gojaPluginControlRuntime)
 	controller := &pluginControlNetAdminTest{
-		ensureVethErrors: map[string]error{"fwdlocal0": fmt.Errorf("temporary veth create failure")},
+		ensureDummyErrors: map[string]error{"fwdlocal0": fmt.Errorf("temporary dummy create failure")},
 	}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -10897,7 +12944,7 @@ func TestExampleVToLocalRepairTimerRecoversVethFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(vtolocal status/default) failed apply error = %v", err)
 	}
-	for _, want := range []string{`"phase":"error"`, `"last_error":"net.link.ensureVeth: temporary veth create failure"`} {
+	for _, want := range []string{`"phase":"error"`, `"last_error":"net.link.ensureDummy: temporary dummy create failure"`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("vtolocal failed status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -10909,13 +12956,13 @@ func TestExampleVToLocalRepairTimerRecoversVethFailure(t *testing.T) {
 		t.Fatalf("vtolocal timers after failed apply = %+v, want one repair timer", timers)
 	}
 
-	controller.ensureVethErrors = nil
+	controller.ensureDummyErrors = nil
 	firePluginTimerForTest(t, rt, "vtolocal", "vtolocal_repair")
 	statusRecord, err = store.GetPluginRecord(db, "vtolocal", "status", "default")
 	if err != nil {
 		t.Fatalf("GetPluginRecord(vtolocal status/default) recovered error = %v", err)
 	}
-	for _, want := range []string{`"phase":"applied"`, `"host_interface":"fwdlocal0"`, `"vtap_interface":"fwdvtap0"`} {
+	for _, want := range []string{`"phase":"applied"`, `"local_interface":"fwdlocal0"`, `"managed_link":true`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("vtolocal recovered status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -10929,19 +12976,19 @@ func TestExampleVToLocalRepairTimerRecoversVethFailure(t *testing.T) {
 	}
 }
 
-func TestExampleVToLocalTeardownDisablesLinkAndRepairTimer(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalTeardownDisablesLinkAndRepairTimer(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	linkJSON := `{"profile_key":"default","host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`
+	linkJSON := `{"profile_key":"default","local_interface":"fwdlocal0"}`
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
 		PluginID:   "vtolocal",
 		ResourceID: "links",
@@ -11004,26 +13051,26 @@ func TestExampleVToLocalTeardownDisablesLinkAndRepairTimer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(vtolocal status/default) after repeated teardown error = %v", err)
 	}
-	for _, want := range []string{`"phase":"deleted"`, `"managed_link":true`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"previous vtolocal status already deleted this plugin-managed veth pair"`} {
+	for _, want := range []string{`"phase":"deleted"`, `"managed_link":true`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"previous vtolocal status already deleted this plugin-managed dummy"`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("vtolocal status/default after repeated teardown = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
 }
 
-func TestExampleVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	linkJSON := `{"profile_key":"default","host_interface":"fwdlocal0","vtap_interface":"fwdvtap0","host_addresses":["169.254.253.1/30"],"vtap_addresses":["169.254.253.2/30"],"routes":[{"dst":"0.0.0.0/0","gateway":"169.254.253.2"}]}`
+	linkJSON := `{"profile_key":"default","local_interface":"fwdlocal0","addresses":["169.254.253.1/32"],"routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0"}]}`
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
 		PluginID:   "vtolocal",
 		ResourceID: "links",
@@ -11056,9 +13103,8 @@ func TestExampleVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
 		t.Fatalf("ApplyPluginAction(vtolocal teardown) error = %v", err)
 	}
 	for _, want := range []string{
-		"addrDelete:fwdlocal0:169.254.253.1/30",
-		"addrDelete:fwdvtap0:169.254.253.2/30",
-		"routeDelete:0.0.0.0/0:fwdlocal0:169.254.253.2:0:0",
+		"addrDelete:fwdlocal0:169.254.253.1/32",
+		"routeDelete:0.0.0.0/0:fwdlocal0::0:0",
 		"delete:fwdlocal0",
 	} {
 		if !containsString(controller.calls, want) {
@@ -11079,7 +13125,7 @@ func TestExampleVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
 	if statusRecord.Enabled {
 		t.Fatalf("vtolocal status/default enabled = true, want false after failed physical delete")
 	}
-	for _, want := range []string{`"phase":"delete_failed"`, `"last_error":"net.link.delete: operation not permitted"`, `"host_interface":"fwdlocal0"`, `"managed_link":true`} {
+	for _, want := range []string{`"phase":"delete_failed"`, `"last_error":"net.link.delete: operation not permitted"`, `"local_interface":"fwdlocal0"`, `"managed_link":true`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("vtolocal status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
@@ -11089,18 +13135,18 @@ func TestExampleVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
 	}
 }
 
-func TestExampleVToLocalTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	linkJSON := `{"profile_key":"default","host_interface":"fwdlocal0","vtap_interface":"fwdvtap0","host_addresses":["169.254.253.1/30"],"vtap_addresses":["169.254.253.2/30"],"routes":[{"dst":"0.0.0.0/0","gateway":"169.254.253.2"}]}`
+	linkJSON := `{"profile_key":"default","local_interface":"fwdlocal0","addresses":["169.254.253.1/32"],"routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0"}]}`
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
 		PluginID:   "vtolocal",
 		ResourceID: "links",
@@ -11120,9 +13166,8 @@ func TestExampleVToLocalTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *
 		t.Fatalf("ApplyPluginAction(vtolocal teardown without status) error = %v", err)
 	}
 	for _, forbidden := range []string{
-		"addrDelete:fwdlocal0:169.254.253.1/30",
-		"addrDelete:fwdvtap0:169.254.253.2/30",
-		"routeDelete:0.0.0.0/0:fwdlocal0:169.254.253.2:0:0",
+		"addrDelete:fwdlocal0:169.254.253.1/32",
+		"routeDelete:0.0.0.0/0:fwdlocal0::0:0",
 		"delete:fwdlocal0",
 	} {
 		if containsString(controller.calls, forbidden) {
@@ -11133,20 +13178,20 @@ func TestExampleVToLocalTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *
 	if err != nil {
 		t.Fatalf("GetPluginRecord(vtolocal status/default) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"deleted"`, `"managed_link":false`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"no previous vtolocal status proves this veth pair was plugin-managed"`, `"cleanup_errors":[]`} {
+	for _, want := range []string{`"phase":"deleted"`, `"managed_link":false`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"no previous vtolocal status proves this dummy was plugin-managed"`, `"cleanup_errors":[]`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("vtolocal status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
 }
 
-func TestExampleVToLocalResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
@@ -11158,7 +13203,7 @@ func TestExampleVToLocalResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
 	records := []PluginResourceRecord{{
 		Key:     "default",
 		Enabled: true,
-		Data:    json.RawMessage(`{"host_interface":"fwdlocal0","vtap_interface":"fwdvtap0"}`),
+		Data:    json.RawMessage(`{"local_interface":"fwdlocal0"}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, records); err != nil {
 		t.Fatalf("first ApplyPluginResourceData(vtolocal links) error = %v", err)
@@ -11179,13 +13224,13 @@ func TestExampleVToLocalResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
 	}
 }
 
-func TestExampleVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
@@ -11199,11 +13244,9 @@ func TestExampleVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *tes
 		Key:     "default",
 		Enabled: true,
 		Data: json.RawMessage(`{
-		  "host_interface":"fwdlocal0",
-		  "vtap_interface":"fwdvtap0",
-		  "host_addresses":["169.254.253.1/30","169.254.253.5/30"],
-		  "vtap_addresses":["169.254.253.2/30"],
-		  "routes":[{"dst":"0.0.0.0/0","gateway":"169.254.253.2"}]
+		  "local_interface":"fwdlocal0",
+		  "addresses":["169.254.253.1/32","169.254.253.5/32"],
+		  "routes":[{"dst":"0.0.0.0/0","dev":"fwdlocal0"}]
 		}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, first); err != nil {
@@ -11215,10 +13258,8 @@ func TestExampleVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *tes
 		Key:     "default",
 		Enabled: true,
 		Data: json.RawMessage(`{
-		  "host_interface":"fwdlocal0",
-		  "vtap_interface":"fwdvtap0",
-		  "host_addresses":["169.254.253.1/30"],
-		  "vtap_addresses":[],
+		  "local_interface":"fwdlocal0",
+		  "addresses":["169.254.253.1/32"],
 		  "routes":[]
 		}`),
 	}}
@@ -11226,9 +13267,8 @@ func TestExampleVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *tes
 		t.Fatalf("second ApplyPluginResourceData(vtolocal links) error = %v", err)
 	}
 	for _, want := range []string{
-		"addrDelete:fwdlocal0:169.254.253.5/30",
-		"addrDelete:fwdvtap0:169.254.253.2/30",
-		"routeDelete:0.0.0.0/0:fwdlocal0:169.254.253.2:0:0",
+		"addrDelete:fwdlocal0:169.254.253.5/32",
+		"routeDelete:0.0.0.0/0:fwdlocal0::0:0",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
@@ -11238,20 +13278,20 @@ func TestExampleVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *tes
 	if err != nil {
 		t.Fatalf("GetPluginRecord(vtolocal status/default) error = %v", err)
 	}
-	for _, want := range []string{`"cleanup_errors":[]`, `"host_addresses":["169.254.253.1/30"]`, `"routes":[]`} {
+	for _, want := range []string{`"cleanup_errors":[]`, `"addresses":["169.254.253.1/32"]`, `"routes":[]`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("vtolocal status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
 }
 
-func TestExampleVToLocalResourceApplyDeletesManagedVethWhenInterfaceChanges(t *testing.T) {
-	sourceDir := filepath.Join("..", "..", "examples", "plugins", "vtolocal")
+func TestBundledVToLocalResourceApplyDeletesManagedDummyWhenInterfaceChanges(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
 	plugin, err := loadPluginFromDir(rootDir, "vtolocal")
 	if err != nil {
-		t.Fatalf("load vtolocal example plugin: %v", err)
+		t.Fatalf("load vtolocal bundled plugin: %v", err)
 	}
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
@@ -11265,10 +13305,8 @@ func TestExampleVToLocalResourceApplyDeletesManagedVethWhenInterfaceChanges(t *t
 		Key:     "default",
 		Enabled: true,
 		Data: json.RawMessage(`{
-		  "host_interface":"fwdold0",
-		  "vtap_interface":"fwdoldtap0",
-		  "host_addresses":["169.254.253.1/30"],
-		  "vtap_addresses":["169.254.253.2/30"]
+		  "local_interface":"fwdold0",
+		  "addresses":["169.254.253.1/32"]
 		}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, first); err != nil {
@@ -11280,10 +13318,8 @@ func TestExampleVToLocalResourceApplyDeletesManagedVethWhenInterfaceChanges(t *t
 		Key:     "default",
 		Enabled: true,
 		Data: json.RawMessage(`{
-		  "host_interface":"fwdlocal0",
-		  "vtap_interface":"fwdvtap0",
-		  "host_addresses":["169.254.253.1/30"],
-		  "vtap_addresses":["169.254.253.2/30"]
+		  "local_interface":"fwdlocal0",
+		  "addresses":["169.254.253.1/32"]
 		}`),
 	}}
 	if err := rt.ApplyPluginResourceData(plugin, resource, second); err != nil {
@@ -11294,13 +13330,8 @@ func TestExampleVToLocalResourceApplyDeletesManagedVethWhenInterfaceChanges(t *t
 			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
 		}
 	}
-	for _, forbidden := range []string{
-		"addrDelete:fwdold0:169.254.253.1/30",
-		"addrDelete:fwdoldtap0:169.254.253.2/30",
-	} {
-		if containsString(controller.calls, forbidden) {
-			t.Fatalf("net admin calls = %+v, want old veth delete instead of stale cleanup call %s", controller.calls, forbidden)
-		}
+	if !containsString(controller.calls, "addrDelete:fwdold0:169.254.253.1/32") {
+		t.Fatalf("net admin calls = %+v, want old managed address cleanup before dummy delete", controller.calls)
 	}
 }
 
@@ -11446,6 +13477,17 @@ func pluginActionByIDForTest(t *testing.T, plugin LoadedPlugin, id string) Plugi
 	return PluginAction{}
 }
 
+func pluginByIDForTest(t *testing.T, catalog PluginCatalog, id string) LoadedPlugin {
+	t.Helper()
+	for _, plugin := range catalog.Plugins {
+		if plugin.ID == id {
+			return plugin
+		}
+	}
+	t.Fatalf("plugin %s not found in catalog %+v", id, catalog.Plugins)
+	return LoadedPlugin{}
+}
+
 func pluginWithRuntimeSurfaceForTest(t *testing.T, plugin LoadedPlugin) LoadedPlugin {
 	t.Helper()
 	if plugin.Builtin || plugin.Status != pluginStatusActive || plugin.controlMainPath == "" {
@@ -11473,6 +13515,35 @@ type pluginRuntimeApplyTestRuntime struct {
 
 type pluginDataplaneRuntimeTest struct {
 	snapshot pluginRuntimeSnapshot
+}
+
+type emptySnapshotPluginControlRuntimeTest struct {
+	reconcileCalls int
+}
+
+func (rt *emptySnapshotPluginControlRuntimeTest) ApplyPluginResourceData(LoadedPlugin, PluginResource, []PluginResourceRecord) error {
+	return nil
+}
+
+func (rt *emptySnapshotPluginControlRuntimeTest) ApplyPluginAction(LoadedPlugin, PluginAction, json.RawMessage) error {
+	return nil
+}
+
+func (rt *emptySnapshotPluginControlRuntimeTest) QueryPluginAction(LoadedPlugin, PluginAction, json.RawMessage) (any, error) {
+	return nil, nil
+}
+
+func (rt *emptySnapshotPluginControlRuntimeTest) Reconcile(PluginCatalog) pluginRuntimeSnapshot {
+	rt.reconcileCalls++
+	return pluginRuntimeSnapshot{}
+}
+
+func (rt *emptySnapshotPluginControlRuntimeTest) Snapshot() pluginRuntimeSnapshot {
+	return pluginRuntimeSnapshot{}
+}
+
+func (rt *emptySnapshotPluginControlRuntimeTest) Close() error {
+	return nil
 }
 
 func (rt pluginDataplaneRuntimeTest) Reconcile(PluginCatalog) pluginRuntimeSnapshot {
@@ -12013,7 +14084,8 @@ func pluginControlVMExistsForTest(rt *gojaPluginControlRuntime, pluginID string)
 }
 
 type pluginControlMapControllerTest struct {
-	calls []string
+	calls        []string
+	perCPUValues [][]byte
 }
 
 func (c *pluginControlMapControllerTest) ApplyPluginResourceReconcileFromControl(plugin LoadedPlugin, resource PluginResource) error {
@@ -12029,6 +14101,18 @@ func (c *pluginControlMapControllerTest) PutPluginMapValue(pluginID string, obje
 func (c *pluginControlMapControllerTest) GetPluginMapValue(pluginID string, objectID string, mapName string, key []byte) ([]byte, error) {
 	c.calls = append(c.calls, fmt.Sprintf("get:%s:%s:%s:%x", pluginID, objectID, mapName, key))
 	return make([]byte, 8), nil
+}
+
+func (c *pluginControlMapControllerTest) GetPluginMapPerCPUValues(pluginID string, objectID string, mapName string, key []byte) ([][]byte, error) {
+	c.calls = append(c.calls, fmt.Sprintf("getPerCPU:%s:%s:%s:%x", pluginID, objectID, mapName, key))
+	if c.perCPUValues == nil {
+		return [][]byte{make([]byte, 8)}, nil
+	}
+	out := make([][]byte, len(c.perCPUValues))
+	for i := range c.perCPUValues {
+		out[i] = append([]byte(nil), c.perCPUValues[i]...)
+	}
+	return out, nil
 }
 
 func (c *pluginControlMapControllerTest) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
@@ -12051,14 +14135,20 @@ func (c *pluginControlMapReconcileControllerTest) ApplyPluginResourceRuntimeUpda
 }
 
 type pluginControlNetAdminTest struct {
-	calls             []string
-	links             map[string]pluginControlNetLinkInfo
-	getErrors         map[string]error
-	ensureVethErrors  map[string]error
-	deleteErrors      map[string]error
-	setMasterErrors   map[string]error
-	clearMasterErrors map[string]error
-	setOffloadErrors  map[string]error
+	calls               []string
+	links               map[string]pluginControlNetLinkInfo
+	listNames           []string
+	offloads            map[string]map[string]bool
+	getOffloadErrors    map[string]error
+	getErrors           map[string]error
+	ensureVethErrors    map[string]error
+	ensureDummyErrors   map[string]error
+	ensureMacvlanErrors map[string]error
+	deleteErrors        map[string]error
+	setMasterErrors     map[string]error
+	clearMasterErrors   map[string]error
+	setARPErrors        map[string]error
+	setOffloadErrors    map[string]error
 }
 
 func (c *pluginControlNetAdminTest) LinkGet(name string) (pluginControlNetLinkInfo, error) {
@@ -12073,6 +14163,13 @@ func (c *pluginControlNetAdminTest) LinkGet(name string) (pluginControlNetLinkIn
 
 func (c *pluginControlNetAdminTest) LinkList() ([]pluginControlNetLinkInfo, error) {
 	c.calls = append(c.calls, "list")
+	if c.listNames != nil {
+		out := make([]pluginControlNetLinkInfo, 0, len(c.listNames))
+		for _, name := range c.listNames {
+			out = append(out, c.linkInfo(name))
+		}
+		return out, nil
+	}
 	return []pluginControlNetLinkInfo{
 		c.linkInfo("fwdlocal0"),
 		c.linkInfo("fwdvtap0"),
@@ -12098,13 +14195,56 @@ func (c *pluginControlNetAdminTest) LinkEnsureVeth(req pluginControlNetVethReque
 			return pluginControlNetVethResult{}, err
 		}
 	}
+	_, hostExisted := c.links[req.Host]
+	_, peerExisted := c.links[req.Peer]
 	host := c.linkInfo(req.Host)
 	peer := c.linkInfo(req.Peer)
+	host.Kind = "veth"
+	peer.Kind = "veth"
+	host.MTU = req.MTU
+	peer.MTU = req.MTU
+	host.Up = req.Up
+	peer.Up = req.Up
 	host.PeerName = peer.Name
 	host.PeerIfIndex = peer.IfIndex
 	peer.PeerName = host.Name
 	peer.PeerIfIndex = host.IfIndex
-	return pluginControlNetVethResult{Host: host, Peer: peer}, nil
+	c.updateLinkInfo(host)
+	c.updateLinkInfo(peer)
+	return pluginControlNetVethResult{Host: host, Peer: peer, Created: !hostExisted && !peerExisted}, nil
+}
+
+func (c *pluginControlNetAdminTest) LinkEnsureDummy(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	c.calls = append(c.calls, fmt.Sprintf("ensureDummy:%s:%d:%t", req.Name, req.MTU, req.Up))
+	if c.ensureDummyErrors != nil {
+		if err := c.ensureDummyErrors[req.Name]; err != nil {
+			return pluginControlNetDummyResult{}, err
+		}
+	}
+	_, existed := c.links[req.Name]
+	info := c.linkInfo(req.Name)
+	info.Kind = "dummy"
+	info.MTU = req.MTU
+	info.Up = req.Up
+	c.updateLinkInfo(info)
+	return pluginControlNetDummyResult{Link: info, Created: !existed}, nil
+}
+
+func (c *pluginControlNetAdminTest) LinkEnsureMacvlan(req pluginControlNetMacvlanRequest) (pluginControlNetMacvlanResult, error) {
+	c.calls = append(c.calls, fmt.Sprintf("ensureMacvlan:%s:%s:%s:%s:%d:%t", req.Name, req.Parent, req.Mode, req.MAC, req.MTU, req.Up))
+	if c.ensureMacvlanErrors != nil {
+		if err := c.ensureMacvlanErrors[req.Name]; err != nil {
+			return pluginControlNetMacvlanResult{}, err
+		}
+	}
+	info := c.linkInfo(req.Name)
+	info.Kind = "macvlan"
+	info.Parent = req.Parent
+	info.MAC = req.MAC
+	info.MTU = req.MTU
+	info.Up = req.Up
+	c.updateLinkInfo(info)
+	return pluginControlNetMacvlanResult{Link: info, Created: true}, nil
 }
 
 func (c *pluginControlNetAdminTest) LinkDelete(name string) error {
@@ -12112,6 +14252,13 @@ func (c *pluginControlNetAdminTest) LinkDelete(name string) error {
 	if c.deleteErrors != nil {
 		if err := c.deleteErrors[name]; err != nil {
 			return err
+		}
+	}
+	if c.links != nil {
+		peerName := c.links[name].PeerName
+		delete(c.links, name)
+		if peerName != "" {
+			delete(c.links, peerName)
 		}
 	}
 	return nil
@@ -12156,6 +14303,44 @@ func (c *pluginControlNetAdminTest) LinkSetMTU(name string, mtu int) error {
 	return nil
 }
 
+func (c *pluginControlNetAdminTest) LinkSetARP(name string, enabled bool) (pluginControlNetLinkInfo, error) {
+	c.calls = append(c.calls, fmt.Sprintf("setARP:%s:%t", name, enabled))
+	if c.setARPErrors != nil {
+		if err := c.setARPErrors[name]; err != nil {
+			return pluginControlNetLinkInfo{}, err
+		}
+	}
+	info := c.linkInfo(name)
+	info.ARP = enabled
+	c.updateLinkInfo(info)
+	return info, nil
+}
+
+func (c *pluginControlNetAdminTest) LinkSetPromiscuous(name string, enabled bool) (pluginControlNetLinkInfo, error) {
+	c.calls = append(c.calls, fmt.Sprintf("setPromiscuous:%s:%t", name, enabled))
+	info := c.linkInfo(name)
+	info.Promiscuous = enabled
+	c.updateLinkInfo(info)
+	return info, nil
+}
+
+func (c *pluginControlNetAdminTest) LinkGetOffloads(name string) (map[string]bool, error) {
+	c.calls = append(c.calls, "getOffloads:"+name)
+	if c.getOffloadErrors != nil {
+		if err := c.getOffloadErrors[name]; err != nil {
+			return nil, err
+		}
+	}
+	out := map[string]bool{"gro": false}
+	if features, ok := c.offloads[name]; ok {
+		out = make(map[string]bool, len(features))
+		for feature, enabled := range features {
+			out[feature] = enabled
+		}
+	}
+	return out, nil
+}
+
 func (c *pluginControlNetAdminTest) LinkSetOffloads(req pluginControlNetOffloadRequest) error {
 	features := make([]string, 0, len(req.Features))
 	for feature, enabled := range req.Features {
@@ -12168,7 +14353,27 @@ func (c *pluginControlNetAdminTest) LinkSetOffloads(req pluginControlNetOffloadR
 			return err
 		}
 	}
+	if c.offloads == nil {
+		c.offloads = make(map[string]map[string]bool)
+	}
+	current := c.offloads[req.Interface]
+	if current == nil {
+		current = make(map[string]bool)
+		c.offloads[req.Interface] = current
+	}
+	for feature, enabled := range req.Features {
+		current[feature] = enabled
+	}
 	return nil
+}
+
+func (c *pluginControlNetAdminTest) LinkSetGSO(req pluginControlNetGSORequest) (pluginControlNetLinkInfo, error) {
+	c.calls = append(c.calls, fmt.Sprintf("setGSO:%s:%d:%d", req.Interface, req.MaxSize, req.MaxSegs))
+	info := c.linkInfo(req.Interface)
+	info.GSOMaxSize = req.MaxSize
+	info.GSOMaxSegs = req.MaxSegs
+	c.updateLinkInfo(info)
+	return info, nil
 }
 
 func (c *pluginControlNetAdminTest) AddrReplace(req pluginControlNetAddrRequest) error {
@@ -12198,20 +14403,23 @@ func (c *pluginControlNetAdminTest) linkInfo(name string) pluginControlNetLinkIn
 		}
 	}
 	if name == "eth0" {
-		return pluginControlNetLinkInfo{Name: name, IfIndex: 7, Kind: "device", MTU: 1500, MAC: "02:00:00:00:00:01", Up: true}
+		return pluginControlNetLinkInfo{Name: name, IfIndex: 7, Kind: "device", MTU: 1500, MAC: "02:00:00:00:00:01", Up: true, ARP: true}
 	}
 	if name == "fwdlocal0" {
-		return pluginControlNetLinkInfo{Name: name, IfIndex: 101, Kind: "veth", MTU: 1492, MAC: "02:00:00:00:10:01", Up: true}
+		return pluginControlNetLinkInfo{Name: name, IfIndex: 101, Kind: "veth", MTU: 1492, MAC: "02:00:00:00:10:01", Up: true, ARP: true}
 	}
 	if name == "brlan0" {
-		return pluginControlNetLinkInfo{Name: name, IfIndex: 201, Kind: "bridge", MTU: 1500, MAC: "02:00:00:00:20:01", Up: true}
+		return pluginControlNetLinkInfo{Name: name, IfIndex: 201, Kind: "bridge", MTU: 1500, MAC: "02:00:00:00:20:01", Up: true, ARP: true}
 	}
-	return pluginControlNetLinkInfo{Name: name, IfIndex: 102, Kind: "veth", MTU: 1492, MAC: "02:00:00:00:10:02", Up: true}
+	return pluginControlNetLinkInfo{Name: name, IfIndex: 102, Kind: "veth", MTU: 1492, MAC: "02:00:00:00:10:02", Up: true, ARP: true}
 }
 
 func (c *pluginControlNetAdminTest) updateLinkInfo(info pluginControlNetLinkInfo) {
-	if c.links == nil || info.Name == "" {
+	if info.Name == "" {
 		return
+	}
+	if c.links == nil {
+		c.links = make(map[string]pluginControlNetLinkInfo)
 	}
 	c.links[info.Name] = info
 }

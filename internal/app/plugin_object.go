@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -63,7 +64,7 @@ func resolvePluginObjects(plugin *LoadedPlugin) error {
 			object.Error = "sha256 mismatch"
 			return fmt.Errorf("objects[%d]: sha256 mismatch", i)
 		}
-		if err := resolvePluginObjectSpec(object, realObjectPath); err != nil {
+		if err := resolvePluginObjectSpec(object, realObjectPath, got); err != nil {
 			object.Status = pluginObjectStatusError
 			object.Error = err.Error()
 			return fmt.Errorf("objects[%d]: %w", i, err)
@@ -108,8 +109,8 @@ func resolvePluginObjectRealPath(plugin *LoadedPlugin, object PluginObject) (str
 	return realObjectPath, nil
 }
 
-func resolvePluginObjectSpec(object *PluginObject, objectPath string) error {
-	spec, err := loadPluginObjectCollectionSpec(objectPath)
+func resolvePluginObjectSpec(object *PluginObject, objectPath, expectedSHA256 string) error {
+	spec, err := loadVerifiedPluginObjectCollectionSpec(objectPath, expectedSHA256)
 	if err != nil {
 		return fmt.Errorf("parse eBPF object: %w", err)
 	}
@@ -142,13 +143,30 @@ func resolvePluginObjectSpec(object *PluginObject, objectPath string) error {
 	return nil
 }
 
-func loadPluginObjectCollectionSpec(objectPath string) (*ebpf.CollectionSpec, error) {
-	file, err := os.Open(objectPath) // #nosec G304 -- objectPath is resolved through resolvePluginObjectRealPath before parsing.
+func loadVerifiedPluginObjectCollectionSpec(objectPath, expectedSHA256 string) (*ebpf.CollectionSpec, error) {
+	expectedSHA256 = strings.TrimSpace(strings.ToLower(expectedSHA256))
+	if expectedSHA256 == "" {
+		return nil, fmt.Errorf("verified sha256 is required")
+	}
+
+	file, err := os.Open(objectPath) // #nosec G304 -- callers pass a symlink-resolved path constrained to the plugin root.
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	return ebpf.LoadCollectionSpecFromReader(file)
+
+	data, err := io.ReadAll(io.LimitReader(file, pluginObjectMaxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > pluginObjectMaxSize {
+		return nil, fmt.Errorf("object exceeds %d bytes", pluginObjectMaxSize)
+	}
+	got := fmt.Sprintf("%x", sha256.Sum256(data))
+	if got != expectedSHA256 {
+		return nil, fmt.Errorf("sha256 changed after catalog verification: got %s, want %s", got, expectedSHA256)
+	}
+	return ebpf.LoadCollectionSpecFromReader(bytes.NewReader(data))
 }
 
 func pluginObjectProgramsFromSpec(spec *ebpf.CollectionSpec) []PluginObjectProgram {

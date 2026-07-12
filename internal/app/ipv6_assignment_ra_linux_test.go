@@ -162,6 +162,36 @@ func TestBuildIPv6RouterAdvertisementPayloadManagedRouteOnly(t *testing.T) {
 	}
 }
 
+func TestBuildIPv6RouterAdvertisementPayloadIncludesRDNSS(t *testing.T) {
+	t.Parallel()
+
+	payload, err := buildIPv6RouterAdvertisementPayload(ipv6RouterAdvertisementState{
+		MTU:   1500,
+		MAC:   net.HardwareAddr{0x02, 0, 0, 0, 0, 1},
+		SrcIP: net.ParseIP("fe80::1"),
+		DstIP: net.ParseIP("ff02::1"),
+		Config: ipv6AssignmentRAConfig{
+			TargetInterface: "br-lan",
+			Prefixes:        []string{"2001:db8:100::/64"},
+			DNSServers:      []string{"2001:4860:4860::8888", "2400:3200::1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildIPv6RouterAdvertisementPayload() error = %v", err)
+	}
+	options := parseIPv6RouterAdvertisementOptions(t, parseIPv6RouterAdvertisementBody(t, payload)[12:])
+	rdnss := findIPv6RouterAdvertisementOption(options, 25)
+	if len(rdnss) != 1 || len(rdnss[0]) != 40 || rdnss[0][1] != 5 {
+		t.Fatalf("RDNSS options = %v, want one 40-byte option", rdnss)
+	}
+	if got := binary.BigEndian.Uint32(rdnss[0][4:8]); got != uint32(ipv6RDNSSLifetime/time.Second) {
+		t.Fatalf("RDNSS lifetime = %d", got)
+	}
+	if !net.IP(rdnss[0][8:24]).Equal(net.ParseIP("2001:4860:4860::8888")) || !net.IP(rdnss[0][24:40]).Equal(net.ParseIP("2400:3200::1")) {
+		t.Fatalf("RDNSS addresses = %v, %v", net.IP(rdnss[0][8:24]), net.IP(rdnss[0][24:40]))
+	}
+}
+
 func parseIPv6RouterAdvertisementBody(t *testing.T, payload []byte) []byte {
 	t.Helper()
 	if len(payload) < 16 {

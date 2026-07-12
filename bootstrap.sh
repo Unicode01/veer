@@ -391,6 +391,7 @@ install_system_deps() {
             run_with_retry 3 3 "安装系统依赖" apt-get install -y --no-install-recommends \
                 ca-certificates \
                 curl \
+                ethtool \
                 git \
                 clang \
                 llvm \
@@ -404,6 +405,7 @@ install_system_deps() {
             run_with_retry 3 3 "安装系统依赖" dnf install -y \
                 ca-certificates \
                 curl \
+                ethtool \
                 git \
                 clang \
                 llvm \
@@ -417,6 +419,7 @@ install_system_deps() {
             run_with_retry 3 3 "安装系统依赖" yum install -y \
                 ca-certificates \
                 curl \
+                ethtool \
                 git \
                 clang \
                 llvm \

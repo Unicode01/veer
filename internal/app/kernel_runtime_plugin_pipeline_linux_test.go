@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf"
+	"github.com/vishvananda/netlink"
 )
 
 const kernelPluginPipelineTestEnv = "FORWARD_RUN_PLUGIN_PIPELINE_TEST"
@@ -22,7 +23,7 @@ func packetObserverPluginSourceDirForPipelineTest(t *testing.T) string {
 	if sourceDir := strings.TrimSpace(os.Getenv(dataplanePerfPluginSourceEnv)); sourceDir != "" {
 		return sourceDir
 	}
-	return filepath.Join(findRepoRoot(t), "examples", "plugins", "packet_observer")
+	return filepath.Join(findRepoRoot(t), "plugins", "packet_observer")
 }
 
 func copyPacketObserverPluginForPipelineTest(t *testing.T, pluginsRoot string) string {
@@ -250,6 +251,7 @@ func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t 
 		replyProg:                   &ebpf.Program{},
 		forwardDispatchProg:         &ebpf.Program{},
 		forwardPipelineProg:         &ebpf.Program{},
+		forwardEgressPipelineProg:   &ebpf.Program{},
 		forwardCoreProg:             &ebpf.Program{},
 		forwardPluginContinueProg:   &ebpf.Program{},
 		forwardPluginPostLookupProg: &ebpf.Program{},
@@ -258,6 +260,7 @@ func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t 
 		forwardEgressNATProg:        &ebpf.Program{},
 		replyDispatchProg:           &ebpf.Program{},
 		replyPipelineProg:           &ebpf.Program{},
+		replyEgressPipelineProg:     &ebpf.Program{},
 		replyCoreProg:               &ebpf.Program{},
 		replyPluginContinueProg:     &ebpf.Program{},
 		replyPluginPostReplyProg:    &ebpf.Program{},
@@ -265,6 +268,7 @@ func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t 
 		replyFullNATProg:            &ebpf.Program{},
 		progChainV4:                 &ebpf.Map{},
 		pluginConfigV4:              &ebpf.Map{},
+		pluginInterfacesV4:          &ebpf.Map{},
 		dispatchScratchV4:           &ebpf.Map{},
 		pluginCtxV4:                 &ebpf.Map{},
 	}
@@ -278,6 +282,9 @@ func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t 
 	}
 	if programs.replyProg != pieces.replyPipelineProg {
 		t.Fatal("reply program did not select the plugin pipeline wrapper")
+	}
+	if programs.forwardEgressProg != pieces.forwardEgressPipelineProg || programs.replyEgressProg != pieces.replyEgressPipelineProg {
+		t.Fatal("egress programs did not select the plugin pipeline wrappers")
 	}
 }
 
@@ -380,6 +387,77 @@ func TestKernelPluginPipelineExplicitInterfacesContributeAttachmentTargets(t *te
 	}
 	if !kernelPluginPipelineHasAttachmentTargets(forwardIfRules, replyIfRules) {
 		t.Fatal("kernelPluginPipelineHasAttachmentTargets = false, want true")
+	}
+	desired[0].hooks[0].InterfaceIndexes = []uint32{999}
+	desired, states, _, _ = kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
+	if len(desired[0].hooks[0].InterfaceIndexes) != 1 || desired[0].hooks[0].InterfaceIndexes[0] != uint32(lo.Index) {
+		t.Fatalf("resolved interface indexes = %+v, want stale indexes replaced with lo=%d", desired[0].hooks[0].InterfaceIndexes, lo.Index)
+	}
+}
+
+func TestKernelPluginPipelineEgressInterfaceUsesEgressAttachment(t *testing.T) {
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Fatalf("InterfaceByName(lo) error = %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "egress.o"), []byte("fake"), 0o644); err != nil {
+		t.Fatalf("WriteFile(egress.o) error = %v", err)
+	}
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:      "egress_stage",
+			Name:    "Egress stage",
+			Version: "0.1.0",
+			Kind:    "pipeline",
+		},
+		Objects: []PluginObject{{
+			ID:             "egress",
+			Path:           "egress.o",
+			Status:         pluginObjectStatusVerified,
+			ResolvedSHA256: "abc",
+			Programs: []PluginObjectProgram{{
+				ID:      "tc_forward",
+				Section: "tc/fvtap/forward",
+				Type:    kernelEngineTC,
+			}},
+		}},
+		Hooks: []PluginHook{{
+			ID:         "local-egress",
+			Engine:     kernelEngineTC,
+			Attach:     "egress",
+			Stage:      kernelPluginPipelineStageForward,
+			Priority:   pluginPipelineCorePriority - 10,
+			Program:    "egress:tc_forward",
+			Mode:       "transform",
+			Interfaces: []string{"lo"},
+		}},
+		Status:  pluginStatusActive,
+		rootDir: dir,
+	}
+
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states, targets := kernelPluginPipelineResolveExplicitAttachTargets(desired, states)
+	if len(states) != 0 || len(desired) != 1 {
+		t.Fatalf("desired=%+v states=%+v, want one valid egress plugin", desired, states)
+	}
+	if len(targets.ForwardIngress) != 0 || len(targets.ReplyIngress) != 0 || len(targets.ReplyEgress) != 0 {
+		t.Fatalf("targets=%+v, egress hook must not create ingress/reply targets", targets)
+	}
+	if _, ok := targets.ForwardEgress[lo.Index]; !ok {
+		t.Fatalf("ForwardEgress=%+v, want lo ifindex %d", targets.ForwardEgress, lo.Index)
+	}
+	forwardEgress := &ebpf.Program{}
+	plans := desiredKernelAttachmentPlansForRuleSets(targets, kernelAttachmentPrograms{forwardEgressProg: forwardEgress})
+	if len(plans) != 1 {
+		t.Fatalf("plans=%+v, want one egress attachment", plans)
+	}
+	plan := plans[0]
+	if plan.key.parent != netlink.HANDLE_MIN_EGRESS || plan.attach != kernelPluginPipelineAttachEgress {
+		t.Fatalf("plan=%+v, want TC egress parent", plan)
+	}
+	if plan.name != kernelForwardEgressPipelineProgramName || plan.prog != forwardEgress {
+		t.Fatalf("plan=%+v, want forward egress pipeline program", plan)
 	}
 }
 
@@ -977,6 +1055,35 @@ func TestKernelPluginPipelineObjectCacheKeySeparatesContextNeed(t *testing.T) {
 	}
 }
 
+func TestReusableKernelPluginPipelineObjectRequiresSameVerifiedObject(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	refs := []loadedPluginObjectRef{{
+		PluginID:     "stateful_plugin",
+		ObjectID:     "dataplane",
+		ObjectPath:   "/old/snapshot/dataplane.o",
+		ObjectSHA256: hash,
+		coll:         &ebpf.Collection{},
+	}}
+	plan := kernelPluginPipelineHookPlan{
+		PluginID:     "stateful_plugin",
+		ObjectID:     "dataplane",
+		ObjectPath:   "/new/snapshot/dataplane.o",
+		ObjectSHA256: strings.ToUpper(hash),
+	}
+	if got := reusableKernelPluginPipelineObject(refs, plan); got == nil || got.ObjectPath != refs[0].ObjectPath {
+		t.Fatalf("reusable object = %+v, want matching plugin/object/hash", got)
+	}
+
+	plan.ObjectSHA256 = strings.Repeat("b", 64)
+	if got := reusableKernelPluginPipelineObject(refs, plan); got != nil {
+		t.Fatalf("reusable object with changed hash = %+v, want nil", got)
+	}
+	plan.ObjectSHA256 = ""
+	if got := reusableKernelPluginPipelineObject(refs, plan); got != nil {
+		t.Fatalf("reusable object without verified hash = %+v, want nil", got)
+	}
+}
+
 func TestBuildKernelPluginPipelineDesiredRejectsHookLimitOverflow(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
@@ -1055,6 +1162,83 @@ func TestKernelPluginPipelineFingerprintIncludesCoreConfig(t *testing.T) {
 	enabled := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{Forward: true, Reply: true})
 	if disabled == enabled {
 		t.Fatalf("fingerprint did not change when core config changed: %s", disabled)
+	}
+}
+
+func TestKernelPluginPipelineFingerprintIncludesResolvedInterfaces(t *testing.T) {
+	desired := []kernelPluginPipelineDesiredPlugin{{
+		plugin: LoadedPlugin{PluginManifest: PluginManifest{ID: "scoped"}},
+		hooks: []kernelPluginPipelineHookPlan{{
+			PluginID:         "scoped",
+			HookID:           "pre",
+			Stage:            kernelPluginPipelineStagePreForward,
+			Priority:         pluginPipelineCorePriority - 1,
+			Interfaces:       []string{"tap0"},
+			InterfaceIndexes: []uint32{10},
+		}},
+	}}
+	first := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{})
+	desired[0].hooks[0].InterfaceIndexes = []uint32{11}
+	second := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{})
+	if first == second {
+		t.Fatalf("fingerprints are equal after ifindex change: %s", first)
+	}
+}
+
+func TestKernelPluginPipelineFingerprintUsesVerifiedObjectContentAcrossCatalogSnapshots(t *testing.T) {
+	desired := []kernelPluginPipelineDesiredPlugin{{
+		plugin: LoadedPlugin{PluginManifest: PluginManifest{ID: "pppoe_client"}},
+		hooks: []kernelPluginPipelineHookPlan{{
+			PluginID:       "pppoe_client",
+			HookID:         "pppoe-ingress",
+			ObjectID:       "pppoe_tunnel",
+			ObjectPath:     "/tmp/forward-plugin-catalog-a/pppoe_client/pppoe_tunnel.o",
+			ObjectSHA256:   strings.Repeat("a", 64),
+			ProgramRef:     "tc_tunnel",
+			ProgramSection: "tc/fvtap/pre_forward",
+			Stage:          kernelPluginPipelineStagePreForward,
+			Attach:         "ingress",
+			Mode:           "rewrite",
+			Priority:       20,
+		}},
+	}}
+	first := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{})
+	desired[0].hooks[0].ObjectPath = "/tmp/forward-plugin-catalog-b/pppoe_client/pppoe_tunnel.o"
+	second := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{})
+	if first != second {
+		t.Fatalf("fingerprint changed for identical verified object content: %s != %s", first, second)
+	}
+	desired[0].hooks[0].ObjectSHA256 = strings.Repeat("b", 64)
+	third := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{})
+	if second == third {
+		t.Fatalf("fingerprint did not change after object content changed: %s", second)
+	}
+}
+
+func TestBuildKernelPluginPipelineInterfaceMasksSeparatesScopedHooks(t *testing.T) {
+	programs := []loadedKernelPluginPipelineProgram{
+		{plan: kernelPluginPipelineHookPlan{PluginID: "global", HookID: "global-pre", Stage: kernelPluginPipelineStagePreForward}},
+		{plan: kernelPluginPipelineHookPlan{PluginID: "scoped", HookID: "scoped-pre", Stage: kernelPluginPipelineStagePreForward, Interfaces: []string{"tap10"}, InterfaceIndexes: []uint32{10}}},
+		{plan: kernelPluginPipelineHookPlan{PluginID: "scoped", HookID: "scoped-post", Stage: kernelPluginPipelineStagePostLookup, Interfaces: []string{"tap10", "tap20"}, InterfaceIndexes: []uint32{10, 20}}},
+		{plan: kernelPluginPipelineHookPlan{PluginID: "reply", HookID: "reply", Stage: kernelPluginPipelineStagePreReply, Interfaces: []string{"tap20"}, InterfaceIndexes: []uint32{20}}},
+		{plan: kernelPluginPipelineHookPlan{PluginID: "egress", HookID: "egress", Stage: kernelPluginPipelineStagePreForward, Attach: "egress", Interfaces: []string{"tap10"}, InterfaceIndexes: []uint32{10}}},
+	}
+	masks, err := buildKernelPluginPipelineInterfaceMasks(programs)
+	if err != nil {
+		t.Fatalf("buildKernelPluginPipelineInterfaceMasks() error = %v", err)
+	}
+	ingressGlobal := masks.globalByAttach[kernelPluginPipelineAttachIngress]
+	if ingressGlobal.PreForwardMask != 0b01 || ingressGlobal.PostLookupMask != 0 || ingressGlobal.PreReplyMask != 0 {
+		t.Fatalf("ingress global masks = %+v, want only pre-forward slot 0", ingressGlobal)
+	}
+	if got := masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: 10, Attach: kernelPluginPipelineAttachIngress}]; got.PreForwardMask != 0b10 || got.PostLookupMask != 0b1 || got.PreReplyMask != 0 {
+		t.Fatalf("ifindex 10 masks = %+v, want scoped pre/post hooks", got)
+	}
+	if got := masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: 20, Attach: kernelPluginPipelineAttachIngress}]; got.PreForwardMask != 0 || got.PostLookupMask != 0b1 || got.PreReplyMask != 0b1 {
+		t.Fatalf("ifindex 20 masks = %+v, want scoped post/reply hooks", got)
+	}
+	if got := masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: 10, Attach: kernelPluginPipelineAttachEgress}]; got.PreForwardMask != 0b100 || got.PostLookupMask != 0 || got.PreReplyMask != 0 {
+		t.Fatalf("ifindex 10 egress masks = %+v, want only egress pre-forward slot 2", got)
 	}
 }
 
@@ -1221,8 +1405,67 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	if config.ForwardCoreEnable != 1 || config.ReplyCoreEnable != 1 {
 		t.Fatalf("plugin core config = %+v, want forward/reply core enabled with prepared rules", config)
 	}
+	if config.ActiveBank != 1 || config.PreForwardGlobalMask != 1 {
+		t.Fatalf("plugin bank config = %+v, want initial inactive bank 1 with global pre-forward slot", config)
+	}
+	var pluginFD uint32
+	if err := pieces.progChainV4.Lookup(uint32(tcProgramChainIndexV4PluginBank1Base), &pluginFD); err != nil || pluginFD == 0 {
+		t.Fatalf("lookup bank 1 pre-forward plugin slot: fd=%d err=%v", pluginFD, err)
+	}
 	if _, ok := stateHasAttachmentProgram(state, "packet_observer:tc_pre_forward"); !ok {
 		t.Fatalf("plugin state attachments = %+v, want packet_observer:tc_pre_forward", state.Attachments)
+	}
+
+	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
+	results, err = rt.Reconcile([]Rule{rule})
+	if err != nil {
+		t.Fatalf("Reconcile(scoped hot update) error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("rule result after scoped hot update = %+v, want running tc", result)
+	}
+	pieces, err = lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		t.Fatalf("lookupKernelCollectionPieces(after hot update) error = %v", err)
+	}
+	if err := pieces.pluginConfigV4.Lookup(uint32(0), &config); err != nil {
+		t.Fatalf("lookup plugin config after hot update: %v", err)
+	}
+	if config.ActiveBank != 0 || config.PreForwardGlobalMask != 0 {
+		t.Fatalf("plugin config after hot update = %+v, want atomic switch to bank 0 with scoped hook", config)
+	}
+	clientInterface, err := net.InterfaceByName(topology.ClientHostIF)
+	if err != nil {
+		t.Fatalf("resolve scoped client interface: %v", err)
+	}
+	interfaceKey := kernelTCPluginInterfaceKeyV4{IfIndex: uint32(clientInterface.Index), Bank: config.ActiveBank}
+	var interfaceMask kernelTCPluginInterfaceValueV4
+	if err := pieces.pluginInterfacesV4.Lookup(interfaceKey, &interfaceMask); err != nil || interfaceMask.PreForwardMask != 1 {
+		t.Fatalf("scoped interface mask key=%+v value=%+v err=%v, want pre-forward bit 0", interfaceKey, interfaceMask, err)
+	}
+	pluginFD = 0
+	if err := pieces.progChainV4.Lookup(uint32(tcProgramChainIndexV4PluginBank1Base), &pluginFD); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("previous bank slot remains after hot-switch grace: fd=%d err=%v", pluginFD, err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "control.js"), []byte(`pipeline.attach({`), 0o644); err != nil {
+		t.Fatalf("write broken control.js: %v", err)
+	}
+	results, err = rt.Reconcile([]Rule{rule})
+	if err != nil {
+		t.Fatalf("Reconcile(broken plugin hot update) error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("rule result after broken plugin hot update = %+v, want retained running tc", result)
+	}
+	if err := pieces.pluginConfigV4.Lookup(uint32(0), &config); err != nil {
+		t.Fatalf("lookup plugin config after broken hot update: %v", err)
+	}
+	if config.ActiveBank != 0 || config.PreForwardCount != 1 {
+		t.Fatalf("plugin config after broken hot update = %+v, want previous bank 0 chain retained", config)
+	}
+	state, ok = rt.PluginSnapshot().stateFor("packet_observer")
+	if !ok || !state.Attached || state.Error == "" || !strings.Contains(state.Reason, "previous chain preserved") {
+		t.Fatalf("plugin state after broken hot update = %+v, want attached previous chain with reload error", state)
 	}
 
 	enabled = false
@@ -1305,6 +1548,114 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitInterfaceWithoutRules(t *tes
 	}
 	if state.Mode != pluginRuntimeModeDataplane || !state.Attached || state.AttachmentCount != 1 {
 		t.Fatalf("plugin state = %+v, want one chained dataplane attachment", state)
+	}
+
+	packetCount, err := findPluginLoadedMap(rt.pluginPipelineLoaded, "packet_observer", "packet_observer", "packet_count")
+	if err != nil {
+		t.Fatalf("find packet_count before core enable: %v", err)
+	}
+	possibleCPUs, err := ebpf.PossibleCPU()
+	if err != nil {
+		t.Fatalf("get possible CPUs: %v", err)
+	}
+	wantCounts := make([]uint64, possibleCPUs)
+	for cpu := range wantCounts {
+		wantCounts[cpu] = (uint64(1) << 48) + uint64(cpu+101)
+	}
+	if err := packetCount.Put(uint32(0), wantCounts); err != nil {
+		t.Fatalf("seed packet_count before core enable: %v", err)
+	}
+
+	seedDataplanePerfNeighbors(t, topology)
+	rule := Rule{
+		ID:               1,
+		InInterface:      topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     topology.BackendHostIF,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Transparent:      true,
+		Enabled:          true,
+		EnginePreference: ruleEngineKernel,
+	}
+	results, err = rt.Reconcile([]Rule{rule})
+	if err != nil {
+		t.Fatalf("Reconcile(core enable) error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("rule result after core enable = %+v, want running tc", result)
+	}
+	packetCount, err = findPluginLoadedMap(rt.pluginPipelineLoaded, "packet_observer", "packet_observer", "packet_count")
+	if err != nil {
+		t.Fatalf("find packet_count after core enable: %v", err)
+	}
+	var gotCounts []uint64
+	if err := packetCount.Lookup(uint32(0), &gotCounts); err != nil {
+		t.Fatalf("read packet_count after core enable: %v", err)
+	}
+	if len(gotCounts) != len(wantCounts) {
+		t.Fatalf("packet_count CPU values = %d, want %d", len(gotCounts), len(wantCounts))
+	}
+	for cpu := range wantCounts {
+		if gotCounts[cpu] < wantCounts[cpu] {
+			t.Fatalf("packet_count CPU %d = %d, want at least preserved sentinel %d", cpu, gotCounts[cpu], wantCounts[cpu])
+		}
+	}
+	if err := pieces.pluginConfigV4.Lookup(uint32(0), &config); err != nil {
+		t.Fatalf("lookup plugin config after core enable: %v", err)
+	}
+	if config.ForwardCoreEnable != 1 || config.ReplyCoreEnable != 1 {
+		t.Fatalf("plugin config after core enable = %+v, want forward/reply core enabled", config)
+	}
+}
+
+func TestKernelPluginPipelineRuntimeAttachesExplicitEgressInterfaceWithoutRules(t *testing.T) {
+	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
+		t.Skipf("set %s=1 to run the privileged TC plugin pipeline smoke test", kernelPluginPipelineTestEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+
+	topology := setupDataplanePerfTopology(t)
+	pluginsRoot := t.TempDir()
+	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
+	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
+	setControlScriptAttachForPipelineTest(t, pluginDir, "egress")
+	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
+
+	enabled := true
+	rt := newTCKernelRuleRuntime(&Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+		PluginsDir:              pluginsRoot,
+	})
+	defer rt.Close()
+
+	if _, err := rt.Reconcile(nil); err != nil {
+		t.Fatalf("Reconcile(nil) error = %v", err)
+	}
+	if len(rt.attachments) != 1 || rt.attachments[0].filter == nil {
+		t.Fatalf("attachments = %+v, want one egress filter", rt.attachments)
+	}
+	filter := rt.attachments[0].filter
+	if filter.Parent != netlink.HANDLE_MIN_EGRESS {
+		t.Fatalf("filter parent = %#x, want HANDLE_MIN_EGRESS %#x", filter.Parent, netlink.HANDLE_MIN_EGRESS)
+	}
+	if filter.Name != kernelForwardEgressPipelineProgramName {
+		t.Fatalf("filter name = %q, want %q", filter.Name, kernelForwardEgressPipelineProgramName)
+	}
+	link, err := netlink.LinkByName(topology.ClientHostIF)
+	if err != nil {
+		t.Fatalf("LinkByName(%s) error = %v", topology.ClientHostIF, err)
+	}
+	if _, ok := rt.attachmentRuleSets.ForwardEgress[link.Attrs().Index]; !ok {
+		t.Fatalf("attachmentRuleSets = %+v, want egress ifindex %d", rt.attachmentRuleSets, link.Attrs().Index)
+	}
+	if len(rt.attachmentRuleSets.ForwardIngress) != 0 || len(rt.attachmentRuleSets.ReplyIngress) != 0 || len(rt.attachmentRuleSets.ReplyEgress) != 0 {
+		t.Fatalf("attachmentRuleSets = %+v, egress plugin must not add other directions", rt.attachmentRuleSets)
 	}
 }
 
@@ -1461,17 +1812,30 @@ func assertKernelPluginPipelineClearedForTest(t *testing.T, pieces kernelCollect
 			t.Fatalf("lookup tc plugin chain slot %d error = %v, want ErrKeyNotExist", slot, err)
 		}
 	}
-	for i := 0; i < tcProgramChainV4PluginPreForwardMax; i++ {
-		assertMissing(tcProgramChainIndexV4PluginBase + i)
+	for bank := uint32(0); bank < 2; bank++ {
+		for _, stage := range []struct {
+			name  string
+			count int
+		}{
+			{name: kernelPluginPipelineStagePreForward, count: tcProgramChainV4PluginPreForwardMax},
+			{name: kernelPluginPipelineStagePostLookup, count: tcProgramChainV4PluginPostLookupMax},
+			{name: kernelPluginPipelineStagePreReply, count: tcProgramChainV4PluginPreReplyMax},
+			{name: kernelPluginPipelineStagePostReply, count: tcProgramChainV4PluginPostReplyMax},
+		} {
+			base, _ := kernelPluginPipelineBankStageBase(bank, stage.name)
+			for i := 0; i < stage.count; i++ {
+				assertMissing(base + i)
+			}
+		}
 	}
-	for i := 0; i < tcProgramChainV4PluginPostLookupMax; i++ {
-		assertMissing(tcProgramChainIndexV4PluginPostBase + i)
+	iterator := pieces.pluginInterfacesV4.Iterate()
+	var key kernelTCPluginInterfaceKeyV4
+	var value kernelTCPluginInterfaceValueV4
+	if iterator.Next(&key, &value) {
+		t.Fatalf("tc plugin interface map still contains key=%+v value=%+v", key, value)
 	}
-	for i := 0; i < tcProgramChainV4PluginPreReplyMax; i++ {
-		assertMissing(tcProgramChainIndexV4PluginReplyBase + i)
-	}
-	for i := 0; i < tcProgramChainV4PluginPostReplyMax; i++ {
-		assertMissing(tcProgramChainIndexV4PluginReplyPostBase + i)
+	if err := iterator.Err(); err != nil {
+		t.Fatalf("iterate tc plugin interface map: %v", err)
 	}
 }
 
@@ -1524,6 +1888,93 @@ func TestKernelPluginPipelineRuntimeNoRulePreCorePluginCanDropTraffic(t *testing
 
 	if output, err := runDataplanePerfPing(topology.ClientNS, dataplanePerfFrontAddr); err == nil {
 		t.Fatalf("ping succeeded after drop plugin attached, want traffic dropped\n%s", output)
+	}
+}
+
+func TestKernelPluginPipelineRuntimeScopesHooksPerInterface(t *testing.T) {
+	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
+		t.Skipf("set %s=1 to run the privileged TC plugin pipeline smoke test", kernelPluginPipelineTestEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ping"); err != nil {
+		t.Skip("ping command is required")
+	}
+
+	topology := setupDataplanePerfTopology(t)
+	if output, err := runDataplanePerfPing(topology.ClientNS, dataplanePerfFrontAddr); err != nil {
+		t.Fatalf("client baseline ping failed: %v\n%s", err, output)
+	}
+	if output, err := runDataplanePerfPing(topology.BackendNS, dataplanePerfBackendHost); err != nil {
+		t.Fatalf("backend baseline ping failed: %v\n%s", err, output)
+	}
+
+	pluginsRoot := t.TempDir()
+	observerDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
+	setControlScriptInterfacesForPipelineTest(t, observerDir, topology.BackendHostIF)
+	compileBPFObjectFromSource(t, filepath.Join(observerDir, "packet_observer.bpf.c"), filepath.Join(observerDir, "packet_observer.o"))
+	dropDir := filepath.Join(pluginsRoot, "drop_core")
+	if err := os.MkdirAll(dropDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(drop_core) error = %v", err)
+	}
+	writeDropCorePluginForTest(t, dropDir, topology.ClientHostIF)
+	compileBPFObjectFromSource(t, filepath.Join(dropDir, "drop_core.bpf.c"), filepath.Join(dropDir, "drop_core.o"))
+
+	enabled := true
+	rt := newTCKernelRuleRuntime(&Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+		PluginsDir:              pluginsRoot,
+	})
+	defer rt.Close()
+	if results, err := rt.Reconcile(nil); err != nil {
+		t.Fatalf("Reconcile(nil) error = %v", err)
+	} else if len(results) != 0 {
+		t.Fatalf("results = %+v, want no rule results", results)
+	}
+	if len(rt.attachments) != 2 {
+		t.Fatalf("attachments = %d, want both scoped interfaces", len(rt.attachments))
+	}
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		t.Fatalf("lookupKernelCollectionPieces() error = %v", err)
+	}
+	var config kernelTCPluginConfigV4
+	if err := pieces.pluginConfigV4.Lookup(uint32(0), &config); err != nil {
+		t.Fatalf("lookup plugin config: %v", err)
+	}
+	if config.PreForwardGlobalMask != 0 {
+		t.Fatalf("pre-forward global mask = %#x, want only scoped hooks", config.PreForwardGlobalMask)
+	}
+	lookupMask := func(ifindex int) kernelTCPluginInterfaceValueV4 {
+		t.Helper()
+		key := kernelTCPluginInterfaceKeyV4{IfIndex: uint32(ifindex), Bank: config.ActiveBank}
+		var value kernelTCPluginInterfaceValueV4
+		if err := pieces.pluginInterfacesV4.Lookup(key, &value); err != nil {
+			t.Fatalf("lookup interface mask %+v: %v", key, err)
+		}
+		return value
+	}
+	clientInterface, err := net.InterfaceByName(topology.ClientHostIF)
+	if err != nil {
+		t.Fatalf("resolve client host interface: %v", err)
+	}
+	backendInterface, err := net.InterfaceByName(topology.BackendHostIF)
+	if err != nil {
+		t.Fatalf("resolve backend host interface: %v", err)
+	}
+	clientMask := lookupMask(clientInterface.Index).PreForwardMask
+	backendMask := lookupMask(backendInterface.Index).PreForwardMask
+	if clientMask == 0 || backendMask == 0 || clientMask&backendMask != 0 {
+		t.Fatalf("scoped pre-forward masks client=%#x backend=%#x, want distinct non-zero slots", clientMask, backendMask)
+	}
+
+	if output, err := runDataplanePerfPing(topology.ClientNS, dataplanePerfFrontAddr); err == nil {
+		t.Fatalf("client ping succeeded with client-scoped drop hook\n%s", output)
+	}
+	if output, err := runDataplanePerfPing(topology.BackendNS, dataplanePerfBackendHost); err != nil {
+		t.Fatalf("backend ping was affected by client-scoped drop hook: %v\n%s", err, output)
 	}
 }
 
@@ -1867,6 +2318,25 @@ func setControlScriptInterfacesForPipelineTest(t *testing.T, pluginDir string, i
 	}
 }
 
+func setControlScriptAttachForPipelineTest(t *testing.T, pluginDir string, attach string) {
+	t.Helper()
+
+	controlPath := filepath.Join(pluginDir, "control.js")
+	data, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatalf("ReadFile(control.js) error = %v", err)
+	}
+	needle := "  direction: 'forward',\n"
+	replacement := needle + fmt.Sprintf("  attach: %q,\n", attach)
+	updated := strings.Replace(string(data), needle, replacement, 1)
+	if updated == string(data) {
+		t.Fatal("control.js does not contain a forward pipeline direction")
+	}
+	if err := os.WriteFile(controlPath, []byte(updated), 0o644); err != nil {
+		t.Fatalf("WriteFile(control.js) error = %v", err)
+	}
+}
+
 func jsStringListForPipelineTest(values ...string) string {
 	if len(values) == 0 {
 		return "[]"
@@ -1942,7 +2412,7 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 45,
+	.max_entries = 77,
 };
 
 SEC("tc/fvtap/pre_forward")
@@ -2031,7 +2501,7 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 45,
+	.max_entries = 77,
 };
 
 static __inline int redirect_with_l2(struct __sk_buff *skb, __u32 ifindex, const unsigned char *dst, const unsigned char *src)
@@ -2168,7 +2638,7 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 45,
+	.max_entries = 77,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
@@ -2270,7 +2740,7 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 45,
+	.max_entries = 77,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {

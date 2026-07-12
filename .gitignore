@@ -8,18 +8,14 @@ forward.db-wal
 
 # build artifacts
 .tmp/
-forward
-forward.exe
+/forward
+/forward.exe
 forward-linux-amd64
 forward-linux-arm64
 *.test
 internal/app/ebpf/*.o
-examples/plugins/**/*.o
+plugins/**/*.o
 dist/
-!plugins/
-!plugins/whmcs/
-!plugins/whmcs/forward/
-!plugins/whmcs/forward/**
 
 # local/operator plugin acceptance scripts
 scripts/test-plugin-*.sh

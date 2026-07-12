@@ -366,6 +366,9 @@ func rebaseIPv6PrefixWithinParent(storedParent *net.IPNet, currentParent *net.IP
 
 func resolveIPv6AssignmentForCurrentHost(item IPv6Assignment, ifaceByName map[string]HostNetworkInterface) (IPv6Assignment, bool, error) {
 	hydrateIPv6AssignmentCompatibilityFields(&item)
+	if item.upstreamRouted {
+		return item, false, nil
+	}
 	if len(ifaceByName) == 0 {
 		return item, false, nil
 	}

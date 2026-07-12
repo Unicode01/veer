@@ -21,84 +21,92 @@ import (
 )
 
 const (
-	kernelForwardProgramName                 = "forward_ingress"
-	kernelReplyProgramName                   = "reply_ingress"
-	kernelForwardProgramNameV6               = "forward_ingress_v6"
-	kernelReplyProgramNameV6                 = "reply_ingress_v6"
-	kernelForwardDispatchProgramName         = "forward_ingress_dispatch"
-	kernelForwardPipelineProgramName         = "forward_ingress_pipeline"
-	kernelForwardCoreProgramName             = "forward_ingress_v4_core"
-	kernelForwardPluginContinueProgramName   = "forward_ingress_v4_plugin_continue"
-	kernelForwardPluginPostLookupProgramName = "forward_ingress_v4_plugin_post_lookup_continue"
-	kernelForwardTransparentProgramName      = "forward_ingress_v4_transparent"
-	kernelForwardFullNATProgramName          = "forward_ingress_v4_fullnat"
-	kernelForwardFullNATExistingProgramName  = "forward_ingress_v4_fullnat_existing"
-	kernelForwardFullNATNewProgramName       = "forward_ingress_v4_fullnat_new"
-	kernelForwardEgressNATProgramName        = "forward_ingress_v4_egress_nat"
-	kernelReplyDispatchProgramName           = "reply_ingress_dispatch"
-	kernelReplyPipelineProgramName           = "reply_ingress_pipeline"
-	kernelReplyCoreProgramName               = "reply_ingress_v4_core"
-	kernelReplyPluginContinueProgramName     = "reply_ingress_v4_plugin_continue"
-	kernelReplyPluginPostReplyProgramName    = "reply_ingress_v4_plugin_post_reply_continue"
-	kernelReplyTransparentProgramName        = "reply_ingress_v4_transparent"
-	kernelReplyFullNATProgramName            = "reply_ingress_v4_fullnat"
-	kernelRulesMapName                       = kernelRulesMapNameV4
-	kernelFlowsMapName                       = kernelFlowsMapNameV4
-	kernelNatPortsMapName                    = kernelNatPortsMapNameV4
-	kernelIfParentMapName                    = "if_parent_v4"
-	kernelLocalIPv4MapName                   = "local_ipv4s_v4"
-	kernelLocalMACMapName                    = "local_macs"
-	kernelNATConfigMapName                   = "nat_config_v4"
-	kernelStatsMapName                       = "stats_v4"
-	kernelDiagMapName                        = "diag_v4"
-	kernelOccupancyMapName                   = "occupancy_v4"
-	kernelTCProgramChainMapName              = "tc_prog_chain_v4"
-	kernelTCPluginConfigMapName              = "tc_plugin_config_v4"
-	kernelTCDispatchScratchMapName           = "tc_dispatch_scratch_v4"
-	kernelTCPluginContextMapName             = "tc_plugin_ctx_v4"
-	kernelTCFlowsOldMapNameV4                = "flows_old_v4"
-	kernelTCFlowsOldMapNameV6                = "flows_old_v6"
-	kernelTCNatPortsOldMapNameV4             = "nat_ports_old_v4"
-	kernelTCNatPortsOldMapNameV6             = "nat_ports_old_v6"
-	kernelTCFlowMigrationStateMapName        = "tc_flow_migration_state"
-	kernelReplyFilterPrio                    = 10
-	kernelReplyFilterPrioV6                  = 11
-	kernelForwardFilterPrio                  = 20
-	kernelForwardFilterPrioV6                = 21
-	kernelForwardFilterHandle                = 10
-	kernelForwardFilterHandleV6              = 11
-	kernelReplyFilterHandle                  = 20
-	kernelReplyFilterHandleV6                = 21
-	kernelVerifierLogSize                    = 4 * 1024 * 1024
-	kernelTCPClosingGraceNS                  = 15 * 1000000000
-	kernelTCPUnrepliedTimeout                = 30 * 1000000000
-	kernelTCPFlowIdleTimeout                 = 10 * 60 * 1000000000
-	kernelICMPFlowIdleTimeout                = 30 * 1000000000
-	kernelUDPFlowIdleTimeout                 = 300 * 1000000000
-	kernelOrphanNATPruneLogEvery             = 10 * time.Minute
-	tcProgramChainIndexV4Transparent         = 0
-	tcProgramChainIndexV4FullNATForward      = 1
-	tcProgramChainIndexV4EgressNATForward    = 2
-	tcProgramChainIndexV4ReplyTransparent    = 3
-	tcProgramChainIndexV4ReplyFullNAT        = 4
-	tcProgramChainIndexV4FullNATExisting     = 5
-	tcProgramChainIndexV4FullNATNew          = 6
-	tcProgramChainIndexV4ForwardCore         = 7
-	tcProgramChainIndexV4PluginContinue      = 8
-	tcProgramChainIndexV4PluginPostLookup    = 9
-	tcProgramChainIndexV4PluginBase          = 10
-	tcProgramChainV4PluginPreForwardMax      = 8
-	tcProgramChainIndexV4PluginPostBase      = 18
-	tcProgramChainV4PluginPostLookupMax      = 8
-	tcProgramChainV4PluginTotalMax           = 14
-	tcProgramChainIndexV4ReplyCore           = 26
-	tcProgramChainIndexV4PluginPreReply      = 27
-	tcProgramChainIndexV4PluginPostReply     = 28
-	tcProgramChainIndexV4PluginReplyBase     = 29
-	tcProgramChainV4PluginPreReplyMax        = 8
-	tcProgramChainIndexV4PluginReplyPostBase = 37
-	tcProgramChainV4PluginPostReplyMax       = 8
-	tcProgramChainV4PluginReplyTotalMax      = 14
+	kernelForwardProgramName                      = "forward_ingress"
+	kernelReplyProgramName                        = "reply_ingress"
+	kernelForwardProgramNameV6                    = "forward_ingress_v6"
+	kernelReplyProgramNameV6                      = "reply_ingress_v6"
+	kernelForwardDispatchProgramName              = "forward_ingress_dispatch"
+	kernelForwardPipelineProgramName              = "forward_ingress_pipeline"
+	kernelForwardEgressPipelineProgramName        = "forward_egress_pipeline"
+	kernelForwardCoreProgramName                  = "forward_ingress_v4_core"
+	kernelForwardPluginContinueProgramName        = "forward_ingress_v4_plugin_continue"
+	kernelForwardPluginPostLookupProgramName      = "forward_ingress_v4_plugin_post_lookup_continue"
+	kernelForwardTransparentProgramName           = "forward_ingress_v4_transparent"
+	kernelForwardFullNATProgramName               = "forward_ingress_v4_fullnat"
+	kernelForwardFullNATExistingProgramName       = "forward_ingress_v4_fullnat_existing"
+	kernelForwardFullNATNewProgramName            = "forward_ingress_v4_fullnat_new"
+	kernelForwardEgressNATProgramName             = "forward_ingress_v4_egress_nat"
+	kernelReplyDispatchProgramName                = "reply_ingress_dispatch"
+	kernelReplyPipelineProgramName                = "reply_ingress_pipeline"
+	kernelReplyEgressPipelineProgramName          = "reply_egress_pipeline"
+	kernelReplyCoreProgramName                    = "reply_ingress_v4_core"
+	kernelReplyPluginContinueProgramName          = "reply_ingress_v4_plugin_continue"
+	kernelReplyPluginPostReplyProgramName         = "reply_ingress_v4_plugin_post_reply_continue"
+	kernelReplyTransparentProgramName             = "reply_ingress_v4_transparent"
+	kernelReplyFullNATProgramName                 = "reply_ingress_v4_fullnat"
+	kernelRulesMapName                            = kernelRulesMapNameV4
+	kernelFlowsMapName                            = kernelFlowsMapNameV4
+	kernelNatPortsMapName                         = kernelNatPortsMapNameV4
+	kernelIfParentMapName                         = "if_parent_v4"
+	kernelLocalIPv4MapName                        = "local_ipv4s_v4"
+	kernelLocalMACMapName                         = "local_macs"
+	kernelNATConfigMapName                        = "nat_config_v4"
+	kernelStatsMapName                            = "stats_v4"
+	kernelDiagMapName                             = "diag_v4"
+	kernelOccupancyMapName                        = "occupancy_v4"
+	kernelTCProgramChainMapName                   = "tc_prog_chain_v4"
+	kernelTCPluginConfigMapName                   = "tc_plugin_config_v4"
+	kernelTCPluginInterfacesMapName               = "tc_plugin_interfaces_v4"
+	kernelTCDispatchScratchMapName                = "tc_dispatch_scratch_v4"
+	kernelTCPluginContextMapName                  = "tc_plugin_ctx_v4"
+	kernelTCFlowsOldMapNameV4                     = "flows_old_v4"
+	kernelTCFlowsOldMapNameV6                     = "flows_old_v6"
+	kernelTCNatPortsOldMapNameV4                  = "nat_ports_old_v4"
+	kernelTCNatPortsOldMapNameV6                  = "nat_ports_old_v6"
+	kernelTCFlowMigrationStateMapName             = "tc_flow_migration_state"
+	kernelReplyFilterPrio                         = 10
+	kernelReplyFilterPrioV6                       = 11
+	kernelForwardFilterPrio                       = 20
+	kernelForwardFilterPrioV6                     = 21
+	kernelForwardFilterHandle                     = 10
+	kernelForwardFilterHandleV6                   = 11
+	kernelReplyFilterHandle                       = 20
+	kernelReplyFilterHandleV6                     = 21
+	kernelVerifierLogSize                         = 4 * 1024 * 1024
+	kernelTCPClosingGraceNS                       = 15 * 1000000000
+	kernelTCPUnrepliedTimeout                     = 30 * 1000000000
+	kernelTCPFlowIdleTimeout                      = 10 * 60 * 1000000000
+	kernelICMPFlowIdleTimeout                     = 30 * 1000000000
+	kernelUDPFlowIdleTimeout                      = 300 * 1000000000
+	kernelOrphanNATPruneLogEvery                  = 10 * time.Minute
+	tcProgramChainIndexV4Transparent              = 0
+	tcProgramChainIndexV4FullNATForward           = 1
+	tcProgramChainIndexV4EgressNATForward         = 2
+	tcProgramChainIndexV4ReplyTransparent         = 3
+	tcProgramChainIndexV4ReplyFullNAT             = 4
+	tcProgramChainIndexV4FullNATExisting          = 5
+	tcProgramChainIndexV4FullNATNew               = 6
+	tcProgramChainIndexV4ForwardCore              = 7
+	tcProgramChainIndexV4PluginContinue           = 8
+	tcProgramChainIndexV4PluginPostLookup         = 9
+	tcProgramChainIndexV4PluginBase               = 10
+	tcProgramChainV4PluginPreForwardMax           = 8
+	tcProgramChainIndexV4PluginPostBase           = 18
+	tcProgramChainV4PluginPostLookupMax           = 8
+	tcProgramChainV4PluginTotalMax                = 14
+	tcProgramChainIndexV4ReplyCore                = 26
+	tcProgramChainIndexV4PluginPreReply           = 27
+	tcProgramChainIndexV4PluginPostReply          = 28
+	tcProgramChainIndexV4PluginReplyBase          = 29
+	tcProgramChainV4PluginPreReplyMax             = 8
+	tcProgramChainIndexV4PluginReplyPostBase      = 37
+	tcProgramChainV4PluginPostReplyMax            = 8
+	tcProgramChainV4PluginReplyTotalMax           = 14
+	tcProgramChainIndexV4PluginBank1Base          = 45
+	tcProgramChainIndexV4PluginBank1PostBase      = 53
+	tcProgramChainIndexV4PluginBank1ReplyBase     = 61
+	tcProgramChainIndexV4PluginBank1ReplyPostBase = 69
+	tcProgramChainV4MaxEntries                    = 77
 )
 
 const (
@@ -266,6 +274,7 @@ type kernelCollectionPieces struct {
 	replyProgV6                 *ebpf.Program
 	forwardDispatchProg         *ebpf.Program
 	forwardPipelineProg         *ebpf.Program
+	forwardEgressPipelineProg   *ebpf.Program
 	forwardCoreProg             *ebpf.Program
 	forwardPluginContinueProg   *ebpf.Program
 	forwardPluginPostLookupProg *ebpf.Program
@@ -276,6 +285,7 @@ type kernelCollectionPieces struct {
 	forwardEgressNATProg        *ebpf.Program
 	replyDispatchProg           *ebpf.Program
 	replyPipelineProg           *ebpf.Program
+	replyEgressPipelineProg     *ebpf.Program
 	replyCoreProg               *ebpf.Program
 	replyPluginContinueProg     *ebpf.Program
 	replyPluginPostReplyProg    *ebpf.Program
@@ -283,6 +293,7 @@ type kernelCollectionPieces struct {
 	replyFullNATProg            *ebpf.Program
 	progChainV4                 *ebpf.Map
 	pluginConfigV4              *ebpf.Map
+	pluginInterfacesV4          *ebpf.Map
 	dispatchScratchV4           *ebpf.Map
 	pluginCtxV4                 *ebpf.Map
 	rulesV4                     *ebpf.Map
@@ -300,11 +311,13 @@ type kernelCollectionPieces struct {
 }
 
 type kernelAttachmentPrograms struct {
-	forwardProg   *ebpf.Program
-	replyProg     *ebpf.Program
-	forwardProgV6 *ebpf.Program
-	replyProgV6   *ebpf.Program
-	mode          kernelTCAttachmentProgramMode
+	forwardProg       *ebpf.Program
+	replyProg         *ebpf.Program
+	forwardEgressProg *ebpf.Program
+	replyEgressProg   *ebpf.Program
+	forwardProgV6     *ebpf.Program
+	replyProgV6       *ebpf.Program
+	mode              kernelTCAttachmentProgramMode
 }
 
 type kernelAttachmentPlan struct {
@@ -314,6 +327,8 @@ type kernelAttachmentPlan struct {
 	handleMinor uint16
 	name        string
 	prog        *ebpf.Program
+	reply       bool
+	attach      uint32
 }
 
 type preparedKernelRule struct {
@@ -484,49 +499,52 @@ func (ctx *kernelPrepareContext) resolveOutboundPath(outLink netlink.Link, rule 
 }
 
 type linuxKernelRuleRuntime struct {
-	mu                        sync.Mutex
-	cfg                       *Config
-	availableOnce             sync.Once
-	available                 bool
-	availableReason           string
-	rulesMapLimit             int
-	flowsMapLimit             int
-	natMapLimit               int
-	natPortMin                int
-	natPortMax                int
-	rulesMapCapacity          int
-	flowsMapCapacity          int
-	natMapCapacity            int
-	memlockOnce               sync.Once
-	memlockErr                error
-	coll                      *ebpf.Collection
-	attachments               []kernelAttachment
-	preparedRules             []preparedKernelRule
-	attachmentMode            kernelTCAttachmentProgramMode
-	lastSkipLog               map[string]struct{}
-	lastReconcileMode         string
-	degradedSource            string
-	stateLog                  kernelStateLogger
-	pressureState             kernelRuntimePressureState
-	observability             kernelRuntimeObservabilityState
-	maintenanceState          kernelAdaptiveMaintenanceState
-	orphanNATPruneLog         kernelCountLogState
-	statsCorrection           map[uint32]kernelRuleStats
-	flowPruneState            kernelFlowPruneState
-	oldFlowPruneState         kernelFlowPruneState
-	runtimeMapCounts          kernelRuntimeMapCountSnapshot
-	enableTrafficStats        bool
-	enableDiagnostics         bool
-	enableDiagVerbose         bool
-	enableRedirectNeighFast   bool
-	enablePreparedL2          bool
-	enableReplyL2Cache        bool
-	pluginPipelineEnabled     bool
-	pluginPipelineActive      bool
-	pluginPipelineLoaded      []loadedPluginObjectRef
-	pluginPipelineFingerprint string
-	pluginPipelineProgChain   *ebpf.Map
-	pluginRuntimeSnapshot     pluginRuntimeSnapshot
+	mu                           sync.Mutex
+	cfg                          *Config
+	availableOnce                sync.Once
+	available                    bool
+	availableReason              string
+	rulesMapLimit                int
+	flowsMapLimit                int
+	natMapLimit                  int
+	natPortMin                   int
+	natPortMax                   int
+	rulesMapCapacity             int
+	flowsMapCapacity             int
+	natMapCapacity               int
+	memlockOnce                  sync.Once
+	memlockErr                   error
+	coll                         *ebpf.Collection
+	attachments                  []kernelAttachment
+	preparedRules                []preparedKernelRule
+	attachmentRuleSets           kernelAttachmentRuleSets
+	attachmentMode               kernelTCAttachmentProgramMode
+	lastSkipLog                  map[string]struct{}
+	lastReconcileMode            string
+	degradedSource               string
+	stateLog                     kernelStateLogger
+	pressureState                kernelRuntimePressureState
+	observability                kernelRuntimeObservabilityState
+	maintenanceState             kernelAdaptiveMaintenanceState
+	orphanNATPruneLog            kernelCountLogState
+	statsCorrection              map[uint32]kernelRuleStats
+	flowPruneState               kernelFlowPruneState
+	oldFlowPruneState            kernelFlowPruneState
+	runtimeMapCounts             kernelRuntimeMapCountSnapshot
+	enableTrafficStats           bool
+	enableDiagnostics            bool
+	enableDiagVerbose            bool
+	enableRedirectNeighFast      bool
+	enablePreparedL2             bool
+	enableReplyL2Cache           bool
+	pluginPipelineEnabled        bool
+	pluginPipelineActive         bool
+	pluginPipelineLoaded         []loadedPluginObjectRef
+	pluginPipelineDesired        []kernelPluginPipelineDesiredPlugin
+	pluginPipelineFingerprint    string
+	pluginPipelineProgChain      *ebpf.Map
+	pluginPipelineBankSwitchedAt time.Time
+	pluginRuntimeSnapshot        pluginRuntimeSnapshot
 }
 
 func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
@@ -702,8 +720,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	var pluginCatalog PluginCatalog
 	var pluginDesired []kernelPluginPipelineDesiredPlugin
 	var pluginStates map[string]PluginRuntimeState
-	var pluginForwardIfRules map[int][]int64
-	var pluginReplyIfRules map[int][]int64
+	var pluginAttachmentTargets kernelAttachmentRuleSets
 	if rt.pluginPipelineEnabled {
 		if pluginCatalogOverride != nil {
 			pluginCatalog = *pluginCatalogOverride
@@ -718,6 +735,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 
 	prepareStartedAt := time.Now()
 	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2, rt.enableReplyL2Cache)
+	attachmentRuleSets := kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules)
 	reconcileMetrics.PrepareDuration = time.Since(prepareStartedAt)
 	reconcileMetrics.PreparedEntries = len(prepared)
 	rt.lastSkipLog = logKernelLineSetOnce(rt.lastSkipLog, skipLines)
@@ -728,12 +746,18 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		pluginDesired = kernelPluginPipelineFilterNoRulePlugins(pluginDesired)
 	}
 	if rt.pluginPipelineEnabled {
-		pluginDesired, pluginStates, pluginForwardIfRules, pluginReplyIfRules = kernelPluginPipelineResolveExplicitAttachRuleSets(pluginDesired, pluginStates)
+		if preserved, preservedStates, ok := rt.pluginPipelineDesiredForCatalogFailure(pluginCatalog, pluginDesired, pluginStates); ok {
+			pluginDesired = preserved
+			pluginStates = preservedStates
+			if len(prepared) == 0 {
+				pluginDesired = kernelPluginPipelineFilterNoRulePlugins(pluginDesired)
+			}
+		}
+		pluginDesired, pluginStates, pluginAttachmentTargets = kernelPluginPipelineResolveExplicitAttachTargets(pluginDesired, pluginStates)
 		rt.pluginPipelineActive = kernelPluginPipelineDesiredHasHooks(pluginDesired)
 	}
-	mergeKernelPluginPipelineAttachRuleSets(forwardIfRules, pluginForwardIfRules)
-	mergeKernelPluginPipelineAttachRuleSets(replyIfRules, pluginReplyIfRules)
-	pluginOnlyPipeline := len(prepared) == 0 && rt.pluginPipelineActive && kernelPluginPipelineHasAttachmentTargets(forwardIfRules, replyIfRules)
+	mergeKernelPluginPipelineAttachmentRuleSets(&attachmentRuleSets, pluginAttachmentTargets)
+	pluginOnlyPipeline := len(prepared) == 0 && rt.pluginPipelineActive && attachmentRuleSets.hasTargets()
 	if len(prepared) == 0 {
 		if pluginOnlyPipeline {
 			rt.stateLog.Logf("kernel dataplane reconcile: no prepared rules, using explicit plugin pipeline attachment(s)")
@@ -758,7 +782,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			return results, nil
 		}
 	}
-	samePrepared := rt.samePreparedRulesLocked(prepared, forwardIfRules, replyIfRules)
+	samePrepared := rt.samePreparedRulesLocked(prepared, attachmentRuleSets)
 	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
 	desiredLocalMACs := buildKernelLocalMACMap(prepared)
 	if localIPv4Err != nil && !samePrepared {
@@ -822,7 +846,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		)
 	}
 	if rt.canReconcileInPlaceLocked(desiredCapacities) && !preferFreshMapGrowth {
-		if err := rt.reconcileInPlaceLocked(prepared, forwardIfRules, replyIfRules, parentIfMap, desiredLocalIPv4s, desiredLocalMACs, pluginCatalog, pluginDesired, pluginStates, pluginOnlyPipeline, results, &reconcileMetrics); err == nil {
+		if err := rt.reconcileInPlaceLocked(prepared, attachmentRuleSets, parentIfMap, desiredLocalIPv4s, desiredLocalMACs, pluginCatalog, pluginDesired, pluginStates, pluginOnlyPipeline, results, &reconcileMetrics); err == nil {
 			return results, nil
 		} else {
 			log.Printf("kernel dataplane reconcile: in-place update unavailable, falling back to collection rebuild: %v", err)
@@ -1276,29 +1300,21 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	oldAttachments := append([]kernelAttachment(nil), rt.attachments...)
 	forwardReady := make(map[int]bool)
 	replyReady := make(map[int]bool)
-	attachmentPlans := desiredKernelAttachmentPlansDualStack(
-		forwardIfRules,
-		replyIfRules,
-		attachmentPrograms.forwardProg,
-		attachmentPrograms.replyProg,
-		attachmentPrograms.forwardProgV6,
-		attachmentPrograms.replyProgV6,
-	)
+	attachmentPlans := desiredKernelAttachmentPlansForRuleSets(attachmentRuleSets, attachmentPrograms)
 	newAttachments := make([]kernelAttachment, 0, len(attachmentPlans))
 	attachFailure := ""
 	attachStartedAt := time.Now()
 
 	for _, plan := range attachmentPlans {
-		ruleIDs := forwardIfRules[plan.ifindex]
-		if plan.name == kernelReplyProgramName || plan.name == kernelReplyProgramNameV6 {
-			ruleIDs = replyIfRules[plan.ifindex]
-		}
+		ruleIDs := attachmentRuleSets.rules(plan.reply, plan.attach)[plan.ifindex]
 		if err := rt.attachProgramLocked(&newAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
 			log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", plan.name, plan.ifindex, ruleIDs, err)
 			label := "forward"
-			switch plan.name {
-			case kernelReplyProgramName, kernelReplyProgramNameV6:
+			if plan.reply {
 				label = "reply"
+			}
+			if plan.attach == kernelPluginPipelineAttachEgress {
+				label += " egress"
 			}
 			for _, id := range ruleIDs {
 				results[id] = kernelRuleApplyResult{Error: fmt.Sprintf("attach %s program on ifindex %d: %v", label, plan.ifindex, err)}
@@ -1308,11 +1324,13 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			}
 			break
 		}
-		switch plan.name {
-		case kernelForwardProgramName, kernelForwardProgramNameV6:
-			forwardReady[plan.ifindex] = true
-		case kernelReplyProgramName, kernelReplyProgramNameV6:
+		if plan.attach != kernelPluginPipelineAttachIngress {
+			continue
+		}
+		if plan.reply {
 			replyReady[plan.ifindex] = true
+		} else {
+			forwardReady[plan.ifindex] = true
 		}
 	}
 	reconcileMetrics.AttachDuration = time.Since(attachStartedAt)
@@ -1390,6 +1408,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	rt.coll = coll
 	rt.attachments = newAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
+	rt.attachmentRuleSets = attachmentRuleSets.clone()
 	rt.attachmentMode = attachmentPrograms.mode
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
@@ -1849,6 +1868,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	)
 	rt.attachments = nil
 	rt.preparedRules = nil
+	rt.attachmentRuleSets = kernelAttachmentRuleSets{}
 	rt.rulesMapCapacity = 0
 	rt.flowsMapCapacity = 0
 	rt.natMapCapacity = 0
@@ -1877,6 +1897,7 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	clearKernelRuntimeMetadata(kernelEngineTC)
 	rt.attachments = nil
 	rt.preparedRules = nil
+	rt.attachmentRuleSets = kernelAttachmentRuleSets{}
 	rt.rulesMapCapacity = 0
 	rt.flowsMapCapacity = 0
 	rt.natMapCapacity = 0
@@ -1976,71 +1997,81 @@ func kernelAttachmentKeyForFilter(filter *netlink.BpfFilter) kernelAttachmentKey
 	}
 }
 
-func desiredKernelAttachmentPlansDualStack(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProg *ebpf.Program, replyProg *ebpf.Program, forwardProgV6 *ebpf.Program, replyProgV6 *ebpf.Program) []kernelAttachmentPlan {
-	plans := make([]kernelAttachmentPlan, 0, (len(forwardIfRules)+len(replyIfRules))*2)
-	for ifindex := range forwardIfRules {
-		plans = append(plans, kernelAttachmentPlan{
-			key: kernelAttachmentKey{
-				linkIndex: ifindex,
-				parent:    netlink.HANDLE_MIN_INGRESS,
-				priority:  kernelForwardFilterPrio,
-				handle:    netlink.MakeHandle(0, kernelForwardFilterHandle),
-			},
-			ifindex:     ifindex,
-			priority:    kernelForwardFilterPrio,
-			handleMinor: kernelForwardFilterHandle,
-			name:        kernelForwardProgramName,
-			prog:        forwardProg,
-		})
-		if forwardProgV6 != nil {
+func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, programs kernelAttachmentPrograms) []kernelAttachmentPlan {
+	targetCount := len(sets.ForwardIngress) + len(sets.ReplyIngress) + len(sets.ForwardEgress) + len(sets.ReplyEgress)
+	plans := make([]kernelAttachmentPlan, 0, targetCount*2)
+	appendPlans := func(targets map[int][]int64, reply bool, attach uint32, prog *ebpf.Program, progV6 *ebpf.Program) {
+		parent := uint32(netlink.HANDLE_MIN_INGRESS)
+		priority := uint16(kernelForwardFilterPrio)
+		priorityV6 := uint16(kernelForwardFilterPrioV6)
+		handle := uint16(kernelForwardFilterHandle)
+		handleV6 := uint16(kernelForwardFilterHandleV6)
+		name := kernelForwardProgramName
+		nameV6 := kernelForwardProgramNameV6
+		if attach == kernelPluginPipelineAttachEgress {
+			parent = netlink.HANDLE_MIN_EGRESS
+			name = kernelForwardEgressPipelineProgramName
+			nameV6 = ""
+			progV6 = nil
+		}
+		if reply {
+			priority = kernelReplyFilterPrio
+			priorityV6 = kernelReplyFilterPrioV6
+			handle = kernelReplyFilterHandle
+			handleV6 = kernelReplyFilterHandleV6
+			name = kernelReplyProgramName
+			nameV6 = kernelReplyProgramNameV6
+			if attach == kernelPluginPipelineAttachEgress {
+				name = kernelReplyEgressPipelineProgramName
+				nameV6 = ""
+				progV6 = nil
+			}
+		}
+		for ifindex := range targets {
 			plans = append(plans, kernelAttachmentPlan{
 				key: kernelAttachmentKey{
 					linkIndex: ifindex,
-					parent:    netlink.HANDLE_MIN_INGRESS,
-					priority:  kernelForwardFilterPrioV6,
-					handle:    netlink.MakeHandle(0, kernelForwardFilterHandleV6),
+					parent:    parent,
+					priority:  priority,
+					handle:    netlink.MakeHandle(0, handle),
 				},
 				ifindex:     ifindex,
-				priority:    kernelForwardFilterPrioV6,
-				handleMinor: kernelForwardFilterHandleV6,
-				name:        kernelForwardProgramNameV6,
-				prog:        forwardProgV6,
+				priority:    priority,
+				handleMinor: handle,
+				name:        name,
+				prog:        prog,
+				reply:       reply,
+				attach:      attach,
 			})
+			if progV6 != nil {
+				plans = append(plans, kernelAttachmentPlan{
+					key: kernelAttachmentKey{
+						linkIndex: ifindex,
+						parent:    parent,
+						priority:  priorityV6,
+						handle:    netlink.MakeHandle(0, handleV6),
+					},
+					ifindex:     ifindex,
+					priority:    priorityV6,
+					handleMinor: handleV6,
+					name:        nameV6,
+					prog:        progV6,
+					reply:       reply,
+					attach:      attach,
+				})
+			}
 		}
 	}
-	for ifindex := range replyIfRules {
-		plans = append(plans, kernelAttachmentPlan{
-			key: kernelAttachmentKey{
-				linkIndex: ifindex,
-				parent:    netlink.HANDLE_MIN_INGRESS,
-				priority:  kernelReplyFilterPrio,
-				handle:    netlink.MakeHandle(0, kernelReplyFilterHandle),
-			},
-			ifindex:     ifindex,
-			priority:    kernelReplyFilterPrio,
-			handleMinor: kernelReplyFilterHandle,
-			name:        kernelReplyProgramName,
-			prog:        replyProg,
-		})
-		if replyProgV6 != nil {
-			plans = append(plans, kernelAttachmentPlan{
-				key: kernelAttachmentKey{
-					linkIndex: ifindex,
-					parent:    netlink.HANDLE_MIN_INGRESS,
-					priority:  kernelReplyFilterPrioV6,
-					handle:    netlink.MakeHandle(0, kernelReplyFilterHandleV6),
-				},
-				ifindex:     ifindex,
-				priority:    kernelReplyFilterPrioV6,
-				handleMinor: kernelReplyFilterHandleV6,
-				name:        kernelReplyProgramNameV6,
-				prog:        replyProgV6,
-			})
-		}
-	}
+	appendPlans(sets.ForwardIngress, false, kernelPluginPipelineAttachIngress, programs.forwardProg, programs.forwardProgV6)
+	appendPlans(sets.ReplyIngress, true, kernelPluginPipelineAttachIngress, programs.replyProg, programs.replyProgV6)
+	appendPlans(sets.ForwardEgress, false, kernelPluginPipelineAttachEgress, programs.forwardEgressProg, nil)
+	appendPlans(sets.ReplyEgress, true, kernelPluginPipelineAttachEgress, programs.replyEgressProg, nil)
 	sort.Slice(plans, func(i, j int) bool {
 		if plans[i].ifindex != plans[j].ifindex {
 			return plans[i].ifindex < plans[j].ifindex
+		}
+		if plans[i].key.parent != plans[j].key.parent {
+			return plans[i].key.parent < plans[j].key.parent
 		}
 		if plans[i].priority != plans[j].priority {
 			return plans[i].priority < plans[j].priority
@@ -2048,6 +2079,18 @@ func desiredKernelAttachmentPlansDualStack(forwardIfRules map[int][]int64, reply
 		return plans[i].key.handle < plans[j].key.handle
 	})
 	return plans
+}
+
+func desiredKernelAttachmentPlansDualStack(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProg *ebpf.Program, replyProg *ebpf.Program, forwardProgV6 *ebpf.Program, replyProgV6 *ebpf.Program) []kernelAttachmentPlan {
+	return desiredKernelAttachmentPlansForRuleSets(
+		kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules),
+		kernelAttachmentPrograms{
+			forwardProg:   forwardProg,
+			replyProg:     replyProg,
+			forwardProgV6: forwardProgV6,
+			replyProgV6:   replyProgV6,
+		},
+	)
 }
 
 func diffPreparedKernelRules(oldItems []preparedKernelRule, nextItems []preparedKernelRule) (kernelDualStackRuleMapDiff, error) {
@@ -2513,7 +2556,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	return nil
 }
 
-func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, forwardIfRules map[int][]int64, replyIfRules map[int][]int64, parentIfMap map[uint32]uint32, localIPv4s map[uint32]uint8, localMACs map[uint32]kernelLocalMACValue, pluginCatalog PluginCatalog, pluginDesired []kernelPluginPipelineDesiredPlugin, pluginStates map[string]PluginRuntimeState, pluginOnlyPipeline bool, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
+func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, attachmentRuleSets kernelAttachmentRuleSets, parentIfMap map[uint32]uint32, localIPv4s map[uint32]uint8, localMACs map[uint32]kernelLocalMACValue, pluginCatalog PluginCatalog, pluginDesired []kernelPluginPipelineDesiredPlugin, pluginStates map[string]PluginRuntimeState, pluginOnlyPipeline bool, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
 	flowPurgeIDs := collectPreparedKernelRuleFlowPurgeIDs(rt.preparedRules, prepared)
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
 	if err != nil {
@@ -2533,14 +2576,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err != nil {
 		return err
 	}
-	plans := desiredKernelAttachmentPlansDualStack(
-		forwardIfRules,
-		replyIfRules,
-		attachmentPrograms.forwardProg,
-		attachmentPrograms.replyProg,
-		attachmentPrograms.forwardProgV6,
-		attachmentPrograms.replyProgV6,
-	)
+	plans := desiredKernelAttachmentPlansForRuleSets(attachmentRuleSets, attachmentPrograms)
 	if pluginOnlyPipeline {
 		attachmentReset = true
 	}
@@ -2561,8 +2597,8 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 
 	newAttachments := make([]kernelAttachment, 0, len(plans))
 	createdAttachments := make([]kernelAttachment, 0, len(plans))
-	forwardReady := make(map[int]bool, len(forwardIfRules))
-	replyReady := make(map[int]bool, len(replyIfRules))
+	forwardReady := make(map[int]bool, len(attachmentRuleSets.ForwardIngress))
+	replyReady := make(map[int]bool, len(attachmentRuleSets.ReplyIngress))
 	attachStartedAt := time.Now()
 
 	for _, plan := range plans {
@@ -2575,11 +2611,13 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 			}
 			newAttachments = append(newAttachments, createdAttachments[len(createdAttachments)-1])
 		}
-		switch plan.name {
-		case kernelForwardProgramName, kernelForwardProgramNameV6:
-			forwardReady[plan.ifindex] = true
-		case kernelReplyProgramName, kernelReplyProgramNameV6:
+		if plan.attach != kernelPluginPipelineAttachIngress {
+			continue
+		}
+		if plan.reply {
 			replyReady[plan.ifindex] = true
+		} else {
+			forwardReady[plan.ifindex] = true
 		}
 	}
 	attachDuration := time.Since(attachStartedAt)
@@ -2656,6 +2694,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	actualCapacities := rt.currentMapCapacitiesLocked()
 	rt.attachments = finalAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
+	rt.attachmentRuleSets = attachmentRuleSets.clone()
 	rt.attachmentMode = attachmentPrograms.mode
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
@@ -2788,6 +2827,9 @@ func (rt *linuxKernelRuleRuntime) deleteStaleAttachmentsLocked(oldAttachments, n
 }
 
 func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, ifindex int, parent uint32, priority uint16, handleMinor uint16, name string, prog *ebpf.Program) error {
+	if prog == nil {
+		return fmt.Errorf("tc program %q is unavailable", name)
+	}
 	if err := ensureClsactQdisc(ifindex); err != nil {
 		return err
 	}
@@ -2891,6 +2933,8 @@ func kernelAttachmentProgramsFromPieces(pieces kernelCollectionPieces, includeIP
 	if mode == kernelTCAttachmentProgramModePipelineV4 && kernelCollectionPiecesSupportPluginPipelineV4(pieces) {
 		programs.forwardProg = pieces.forwardPipelineProg
 		programs.replyProg = pieces.replyPipelineProg
+		programs.forwardEgressProg = pieces.forwardEgressPipelineProg
+		programs.replyEgressProg = pieces.replyEgressPipelineProg
 		programs.mode = kernelTCAttachmentProgramModePipelineV4
 	}
 	return programs
@@ -2910,15 +2954,18 @@ func kernelCollectionPiecesSupportDispatchV4(pieces kernelCollectionPieces) bool
 func kernelCollectionPiecesSupportPluginPipelineV4(pieces kernelCollectionPieces) bool {
 	return kernelCollectionPiecesSupportDispatchV4(pieces) &&
 		pieces.forwardPipelineProg != nil &&
+		pieces.forwardEgressPipelineProg != nil &&
 		pieces.forwardCoreProg != nil &&
 		pieces.forwardPluginContinueProg != nil &&
 		pieces.forwardPluginPostLookupProg != nil &&
 		pieces.replyPipelineProg != nil &&
+		pieces.replyEgressPipelineProg != nil &&
 		pieces.replyCoreProg != nil &&
 		pieces.replyPluginContinueProg != nil &&
 		pieces.replyPluginPostReplyProg != nil &&
 		pieces.dispatchScratchV4 != nil &&
 		pieces.pluginConfigV4 != nil &&
+		pieces.pluginInterfacesV4 != nil &&
 		pieces.pluginCtxV4 != nil
 }
 
@@ -3102,10 +3149,12 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 	}
 	hasAnyDispatchV4 := spec.Programs[kernelForwardDispatchProgramName] != nil ||
 		spec.Programs[kernelForwardPipelineProgramName] != nil ||
+		spec.Programs[kernelForwardEgressPipelineProgramName] != nil ||
 		spec.Programs[kernelForwardCoreProgramName] != nil ||
 		spec.Programs[kernelForwardPluginContinueProgramName] != nil ||
 		spec.Programs[kernelForwardPluginPostLookupProgramName] != nil ||
 		spec.Programs[kernelReplyPipelineProgramName] != nil ||
+		spec.Programs[kernelReplyEgressPipelineProgramName] != nil ||
 		spec.Programs[kernelReplyCoreProgramName] != nil ||
 		spec.Programs[kernelReplyPluginContinueProgramName] != nil ||
 		spec.Programs[kernelReplyPluginPostReplyProgramName] != nil ||
@@ -3140,10 +3189,12 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 		}
 	}
 	hasAnyPluginPipelineV4 := spec.Programs[kernelForwardPipelineProgramName] != nil ||
+		spec.Programs[kernelForwardEgressPipelineProgramName] != nil ||
 		spec.Programs[kernelForwardCoreProgramName] != nil ||
 		spec.Programs[kernelForwardPluginContinueProgramName] != nil ||
 		spec.Programs[kernelForwardPluginPostLookupProgramName] != nil ||
 		spec.Programs[kernelReplyPipelineProgramName] != nil ||
+		spec.Programs[kernelReplyEgressPipelineProgramName] != nil ||
 		spec.Programs[kernelReplyCoreProgramName] != nil ||
 		spec.Programs[kernelReplyPluginContinueProgramName] != nil ||
 		spec.Programs[kernelReplyPluginPostReplyProgramName] != nil ||
@@ -3152,10 +3203,12 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 	if hasAnyPluginPipelineV4 {
 		for _, name := range []string{
 			kernelForwardPipelineProgramName,
+			kernelForwardEgressPipelineProgramName,
 			kernelForwardCoreProgramName,
 			kernelForwardPluginContinueProgramName,
 			kernelForwardPluginPostLookupProgramName,
 			kernelReplyPipelineProgramName,
+			kernelReplyEgressPipelineProgramName,
 			kernelReplyCoreProgramName,
 			kernelReplyPluginContinueProgramName,
 			kernelReplyPluginPostReplyProgramName,
@@ -3220,6 +3273,7 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		replyProgV6:                 coll.Programs[kernelReplyProgramNameV6],
 		forwardDispatchProg:         coll.Programs[kernelForwardDispatchProgramName],
 		forwardPipelineProg:         coll.Programs[kernelForwardPipelineProgramName],
+		forwardEgressPipelineProg:   coll.Programs[kernelForwardEgressPipelineProgramName],
 		forwardCoreProg:             coll.Programs[kernelForwardCoreProgramName],
 		forwardPluginContinueProg:   coll.Programs[kernelForwardPluginContinueProgramName],
 		forwardPluginPostLookupProg: coll.Programs[kernelForwardPluginPostLookupProgramName],
@@ -3230,6 +3284,7 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		forwardEgressNATProg:        coll.Programs[kernelForwardEgressNATProgramName],
 		replyDispatchProg:           coll.Programs[kernelReplyDispatchProgramName],
 		replyPipelineProg:           coll.Programs[kernelReplyPipelineProgramName],
+		replyEgressPipelineProg:     coll.Programs[kernelReplyEgressPipelineProgramName],
 		replyCoreProg:               coll.Programs[kernelReplyCoreProgramName],
 		replyPluginContinueProg:     coll.Programs[kernelReplyPluginContinueProgramName],
 		replyPluginPostReplyProg:    coll.Programs[kernelReplyPluginPostReplyProgramName],
@@ -3237,6 +3292,7 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		replyFullNATProg:            coll.Programs[kernelReplyFullNATProgramName],
 		progChainV4:                 coll.Maps[kernelTCProgramChainMapName],
 		pluginConfigV4:              coll.Maps[kernelTCPluginConfigMapName],
+		pluginInterfacesV4:          coll.Maps[kernelTCPluginInterfacesMapName],
 		dispatchScratchV4:           coll.Maps[kernelTCDispatchScratchMapName],
 		pluginCtxV4:                 coll.Maps[kernelTCPluginContextMapName],
 		rulesV4:                     coll.Maps[kernelRulesMapNameV4],
@@ -3265,10 +3321,12 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 	}
 	hasAnyDispatchV4 := pieces.forwardDispatchProg != nil ||
 		pieces.forwardPipelineProg != nil ||
+		pieces.forwardEgressPipelineProg != nil ||
 		pieces.forwardCoreProg != nil ||
 		pieces.forwardPluginContinueProg != nil ||
 		pieces.forwardPluginPostLookupProg != nil ||
 		pieces.replyPipelineProg != nil ||
+		pieces.replyEgressPipelineProg != nil ||
 		pieces.replyCoreProg != nil ||
 		pieces.replyPluginContinueProg != nil ||
 		pieces.replyPluginPostReplyProg != nil ||
@@ -3283,19 +3341,23 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		pieces.progChainV4 != nil ||
 		pieces.dispatchScratchV4 != nil ||
 		pieces.pluginConfigV4 != nil ||
+		pieces.pluginInterfacesV4 != nil ||
 		pieces.pluginCtxV4 != nil
 	if hasAnyDispatchV4 && !kernelCollectionPiecesSupportDispatchV4(pieces) {
 		return kernelCollectionPieces{}, fmt.Errorf("kernel object has incomplete IPv4 dispatcher set")
 	}
 	hasAnyPluginPipelineV4 := pieces.forwardPipelineProg != nil ||
+		pieces.forwardEgressPipelineProg != nil ||
 		pieces.forwardCoreProg != nil ||
 		pieces.forwardPluginContinueProg != nil ||
 		pieces.forwardPluginPostLookupProg != nil ||
 		pieces.replyPipelineProg != nil ||
+		pieces.replyEgressPipelineProg != nil ||
 		pieces.replyCoreProg != nil ||
 		pieces.replyPluginContinueProg != nil ||
 		pieces.replyPluginPostReplyProg != nil ||
 		pieces.pluginConfigV4 != nil ||
+		pieces.pluginInterfacesV4 != nil ||
 		pieces.pluginCtxV4 != nil
 	if hasAnyPluginPipelineV4 && !kernelCollectionPiecesSupportPluginPipelineV4(pieces) {
 		return kernelCollectionPieces{}, fmt.Errorf("kernel object has incomplete IPv4 plugin pipeline set")
@@ -3721,7 +3783,7 @@ func reusablePreparedKernelRules(rule Rule, err error, previousByKey map[kernelR
 	return clonePreparedKernelRules(items), true
 }
 
-func (rt *linuxKernelRuleRuntime) samePreparedRulesLocked(next []preparedKernelRule, forwardIfRules map[int][]int64, replyIfRules map[int][]int64) bool {
+func (rt *linuxKernelRuleRuntime) samePreparedRulesLocked(next []preparedKernelRule, attachmentRuleSets kernelAttachmentRuleSets) bool {
 	if rt.coll == nil || len(rt.attachments) == 0 {
 		return false
 	}
@@ -3736,7 +3798,7 @@ func (rt *linuxKernelRuleRuntime) samePreparedRulesLocked(next []preparedKernelR
 			return false
 		}
 	}
-	return rt.attachmentsHealthyLocked(forwardIfRules, replyIfRules)
+	return rt.attachmentsHealthyLocked(attachmentRuleSets)
 }
 
 func desiredKernelTCAttachmentProgramMode(prepared []preparedKernelRule, pluginPipelineActive bool) kernelTCAttachmentProgramMode {
@@ -3831,20 +3893,12 @@ func buildKernelLocalMACMap(prepared []preparedKernelRule) map[uint32]kernelLoca
 	return out
 }
 
-func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(forwardIfRules map[int][]int64, replyIfRules map[int][]int64) bool {
+func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(attachmentRuleSets kernelAttachmentRuleSets) bool {
 	if rt.coll == nil {
 		return false
 	}
 	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, rt.preparedRules, rt.attachmentMode, rt.pluginPipelineActive)
-	return kernelAttachmentsHealthy(
-		forwardIfRules,
-		replyIfRules,
-		rt.attachments,
-		programs.forwardProg,
-		programs.replyProg,
-		programs.forwardProgV6,
-		programs.replyProgV6,
-	)
+	return kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, rt.attachments, programs)
 }
 
 func updateKernelMapEntries[K any, V any](m *ebpf.Map, keys []K, values []V) error {

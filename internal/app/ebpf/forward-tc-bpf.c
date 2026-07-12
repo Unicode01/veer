@@ -314,6 +314,12 @@ struct tc_dispatch_ctx_v4 {
 	struct flow_value_v4 flow_value;
 	struct rule_value_v4 rule_value;
 	__u32 plugin_chain_index;
+	__u32 plugin_pre_count;
+	__u32 plugin_post_count;
+	__u32 plugin_pre_mask;
+	__u32 plugin_post_mask;
+	__u32 plugin_chain_bank;
+	__u32 plugin_core_enable;
 	__u8 have_flow;
 	__u8 have_rule;
 	__u8 flow_bank;
@@ -327,6 +333,28 @@ struct tc_plugin_config_v4 {
 	__u32 post_reply_count;
 	__u32 forward_core_enable;
 	__u32 reply_core_enable;
+	__u32 active_bank;
+	__u32 pre_forward_global_mask;
+	__u32 post_lookup_global_mask;
+	__u32 pre_reply_global_mask;
+	__u32 post_reply_global_mask;
+	__u32 egress_pre_forward_global_mask;
+	__u32 egress_post_lookup_global_mask;
+	__u32 egress_pre_reply_global_mask;
+	__u32 egress_post_reply_global_mask;
+};
+
+struct tc_plugin_if_key_v4 {
+	__u32 ifindex;
+	__u32 bank;
+	__u32 attach;
+};
+
+struct tc_plugin_if_value_v4 {
+	__u32 pre_forward_mask;
+	__u32 post_lookup_mask;
+	__u32 pre_reply_mask;
+	__u32 post_reply_mask;
 };
 
 struct tc_plugin_ctx_v4 {
@@ -505,7 +533,7 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 45,
+	.max_entries = 77,
 };
 
 struct bpf_map_def SEC("maps") tc_dispatch_scratch_v4 = {
@@ -520,6 +548,13 @@ struct bpf_map_def SEC("maps") tc_plugin_config_v4 = {
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_plugin_config_v4),
 	.max_entries = 1,
+};
+
+struct bpf_map_def SEC("maps") tc_plugin_interfaces_v4 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(struct tc_plugin_if_key_v4),
+	.value_size = sizeof(struct tc_plugin_if_value_v4),
+	.max_entries = 4096,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
@@ -677,6 +712,10 @@ enum {
 	FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX = 8,
 	FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_BASE = 37,
 	FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX = 8,
+	FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_FORWARD_BASE = 45,
+	FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_LOOKUP_BASE = 53,
+	FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_REPLY_BASE = 61,
+	FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_REPLY_BASE = 69,
 };
 
 static __always_inline struct kernel_occupancy_value_v4 *lookup_kernel_occupancy(void);
@@ -717,6 +756,7 @@ static __always_inline struct bpf_fib_lookup *lookup_scratch_fib_v4(void);
 static __always_inline struct flow_key_v4 *lookup_scratch_flow_key_v4(void);
 static __always_inline struct tc_dispatch_ctx_v4 *lookup_tc_dispatch_scratch_v4(void);
 static __always_inline struct tc_plugin_ctx_v4 *lookup_tc_plugin_ctx_v4(void);
+static __always_inline struct tc_plugin_config_v4 *lookup_tc_plugin_config_v4(void);
 static __always_inline struct flow_value_v6 *lookup_scratch_flow_v6(void);
 static __always_inline struct flow_value_v6 *lookup_scratch_flow_aux_v6(void);
 static __always_inline struct packet_ctx_v6 *lookup_scratch_ctx_v6(void);
@@ -786,6 +826,84 @@ static __always_inline struct tc_plugin_config_v4 *lookup_tc_plugin_config_v4(vo
 	__u32 key = 0;
 
 	return bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
+}
+
+static __always_inline __u32 tc_plugin_count_mask_v4(__u32 count)
+{
+	if (count == 0)
+		return 0;
+	if (count >= 32)
+		return ~0U;
+	return (1U << count) - 1;
+}
+
+#define FORWARD_TC_PLUGIN_ATTACH_INGRESS 0
+#define FORWARD_TC_PLUGIN_ATTACH_EGRESS 1
+
+static __always_inline void capture_tc_plugin_dispatch_v4(struct __sk_buff *skb, struct tc_dispatch_ctx_v4 *dispatch, const struct tc_plugin_config_v4 *config, int reply, __u32 attach)
+{
+	struct tc_plugin_if_key_v4 key = {};
+	struct tc_plugin_if_value_v4 *scoped = 0;
+	__u32 pre_full;
+	__u32 post_full;
+
+	if (!dispatch)
+		return;
+	dispatch->plugin_chain_index = 0;
+	dispatch->plugin_pre_count = 0;
+	dispatch->plugin_post_count = 0;
+	dispatch->plugin_pre_mask = 0;
+	dispatch->plugin_post_mask = 0;
+	dispatch->plugin_chain_bank = 0;
+	dispatch->plugin_core_enable = 0;
+	if (!config)
+		return;
+
+	dispatch->plugin_chain_bank = config->active_bank & 1;
+	if (reply) {
+		dispatch->plugin_pre_count = config->pre_reply_count;
+		dispatch->plugin_post_count = config->post_reply_count;
+		if (attach == FORWARD_TC_PLUGIN_ATTACH_EGRESS) {
+			dispatch->plugin_pre_mask = config->egress_pre_reply_global_mask;
+			dispatch->plugin_post_mask = config->egress_post_reply_global_mask;
+		} else {
+			dispatch->plugin_pre_mask = config->pre_reply_global_mask;
+			dispatch->plugin_post_mask = config->post_reply_global_mask;
+		}
+		dispatch->plugin_core_enable = attach == FORWARD_TC_PLUGIN_ATTACH_INGRESS ? config->reply_core_enable : 0;
+	} else {
+		dispatch->plugin_pre_count = config->pre_forward_count;
+		dispatch->plugin_post_count = config->post_lookup_count;
+		if (attach == FORWARD_TC_PLUGIN_ATTACH_EGRESS) {
+			dispatch->plugin_pre_mask = config->egress_pre_forward_global_mask;
+			dispatch->plugin_post_mask = config->egress_post_lookup_global_mask;
+		} else {
+			dispatch->plugin_pre_mask = config->pre_forward_global_mask;
+			dispatch->plugin_post_mask = config->post_lookup_global_mask;
+		}
+		dispatch->plugin_core_enable = attach == FORWARD_TC_PLUGIN_ATTACH_INGRESS ? config->forward_core_enable : 0;
+	}
+
+	pre_full = tc_plugin_count_mask_v4(dispatch->plugin_pre_count);
+	post_full = tc_plugin_count_mask_v4(dispatch->plugin_post_count);
+	dispatch->plugin_pre_mask &= pre_full;
+	dispatch->plugin_post_mask &= post_full;
+	if (dispatch->plugin_pre_mask == pre_full && dispatch->plugin_post_mask == post_full)
+		return;
+
+	key.ifindex = skb->ifindex;
+	key.bank = dispatch->plugin_chain_bank;
+	key.attach = attach;
+	scoped = bpf_map_lookup_elem(&tc_plugin_interfaces_v4, &key);
+	if (!scoped)
+		return;
+	if (reply) {
+		dispatch->plugin_pre_mask |= scoped->pre_reply_mask & pre_full;
+		dispatch->plugin_post_mask |= scoped->post_reply_mask & post_full;
+	} else {
+		dispatch->plugin_pre_mask |= scoped->pre_forward_mask & pre_full;
+		dispatch->plugin_post_mask |= scoped->post_lookup_mask & post_full;
+	}
 }
 
 static __always_inline struct flow_value_v6 *lookup_scratch_flow_v6(void)
@@ -4248,13 +4366,12 @@ static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 
 static __always_inline int dispatch_forward_ingress_pipeline_core_v4(struct __sk_buff *skb)
 {
-	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 	struct tc_plugin_ctx_v4 *plugin_ctx = 0;
 
-	if (config && config->post_lookup_count > 0)
+	if (dispatch && dispatch->plugin_post_mask != 0)
 		plugin_ctx = lookup_tc_plugin_ctx_v4();
-	if (config && config->forward_core_enable == 0) {
+	if (dispatch && dispatch->plugin_core_enable == 0) {
 		if (dispatch) {
 			dispatch->have_flow = 0;
 			dispatch->have_rule = 0;
@@ -4262,48 +4379,57 @@ static __always_inline int dispatch_forward_ingress_pipeline_core_v4(struct __sk
 		}
 		if (plugin_ctx)
 			__builtin_memset(plugin_ctx, 0, sizeof(*plugin_ctx));
-		if (config->post_lookup_count > 0 && dispatch)
+		if (dispatch->plugin_post_mask != 0)
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE);
 		return TC_ACT_UNSPEC;
 	}
 	if (prepare_dispatch_forward_ingress_v4(skb, dispatch, plugin_ctx) != 0)
 		return TC_ACT_UNSPEC;
-	if (config && config->post_lookup_count > 0) {
+	if (dispatch->plugin_post_mask != 0) {
 		dispatch->plugin_chain_index = 0;
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE);
 	}
 	return dispatch_forward_ingress_v4_core_prepared(skb);
 }
 
-static __always_inline int dispatch_forward_ingress_pipeline_v4(struct __sk_buff *skb)
+static __always_inline int dispatch_forward_pipeline_v4(struct __sk_buff *skb, __u32 attach)
 {
 	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 
-	if (config && dispatch && (config->pre_forward_count > 0 || config->post_lookup_count > 0)) {
-		dispatch->plugin_chain_index = 0;
-		if (config->pre_forward_count > 0 || config->forward_core_enable == 0) {
+	if (dispatch)
+		capture_tc_plugin_dispatch_v4(skb, dispatch, config, 0, attach);
+	if (dispatch && (dispatch->plugin_pre_mask != 0 || dispatch->plugin_post_mask != 0)) {
+		if (dispatch->plugin_pre_mask != 0 || dispatch->plugin_core_enable == 0) {
 			clear_tc_plugin_ctx_v4();
 		}
-		if (config->pre_forward_count > 0) {
+		if (dispatch->plugin_pre_mask != 0) {
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE);
 		}
 		return dispatch_forward_ingress_pipeline_core_v4(skb);
 	}
+	if (dispatch && dispatch->plugin_core_enable == 0)
+		return TC_ACT_UNSPEC;
 	return dispatch_forward_ingress_v4(skb);
 }
 
 static __always_inline int dispatch_plugin_pre_forward_continue_v4(struct __sk_buff *skb)
 {
-	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 	__u32 index;
+	__u32 slot_base;
+	int i;
 
-	if (config && dispatch) {
-		index = dispatch->plugin_chain_index;
-		if (index < config->pre_forward_count && index < FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX) {
+	if (dispatch) {
+		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_FORWARD_BASE : FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE;
+#pragma unroll
+		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX; i++) {
+			index = dispatch->plugin_chain_index;
+			if (index >= dispatch->plugin_pre_count || index >= FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX)
+				break;
 			dispatch->plugin_chain_index = index + 1;
-			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE + index);
+			if ((dispatch->plugin_pre_mask & (1U << index)) != 0)
+				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
 		}
 	}
 	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_FORWARD_CORE);
@@ -4312,15 +4438,21 @@ static __always_inline int dispatch_plugin_pre_forward_continue_v4(struct __sk_b
 
 static __always_inline int dispatch_plugin_post_lookup_continue_v4(struct __sk_buff *skb)
 {
-	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 	__u32 index;
+	__u32 slot_base;
+	int i;
 
-	if (config && dispatch) {
-		index = dispatch->plugin_chain_index;
-		if (index < config->post_lookup_count && index < FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX) {
+	if (dispatch) {
+		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_LOOKUP_BASE : FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_BASE;
+#pragma unroll
+		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX; i++) {
+			index = dispatch->plugin_chain_index;
+			if (index >= dispatch->plugin_post_count || index >= FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX)
+				break;
 			dispatch->plugin_chain_index = index + 1;
-			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_BASE + index);
+			if ((dispatch->plugin_post_mask & (1U << index)) != 0)
+				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
 		}
 	}
 	return dispatch_forward_ingress_v4_core_prepared(skb);
@@ -4390,13 +4522,12 @@ static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
 
 static __always_inline int dispatch_reply_ingress_pipeline_core_v4(struct __sk_buff *skb)
 {
-	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 	struct tc_plugin_ctx_v4 *plugin_ctx = 0;
 
-	if (config && config->post_reply_count > 0)
+	if (dispatch && dispatch->plugin_post_mask != 0)
 		plugin_ctx = lookup_tc_plugin_ctx_v4();
-	if (config && config->reply_core_enable == 0) {
+	if (dispatch && dispatch->plugin_core_enable == 0) {
 		if (dispatch) {
 			dispatch->have_flow = 0;
 			dispatch->have_rule = 0;
@@ -4404,48 +4535,57 @@ static __always_inline int dispatch_reply_ingress_pipeline_core_v4(struct __sk_b
 		}
 		if (plugin_ctx)
 			__builtin_memset(plugin_ctx, 0, sizeof(*plugin_ctx));
-		if (config->post_reply_count > 0 && dispatch)
+		if (dispatch->plugin_post_mask != 0)
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE);
 		return TC_ACT_UNSPEC;
 	}
 	if (prepare_dispatch_reply_ingress_v4(skb, dispatch, plugin_ctx) != 0)
 		return TC_ACT_UNSPEC;
-	if (config && config->post_reply_count > 0) {
+	if (dispatch->plugin_post_mask != 0) {
 		dispatch->plugin_chain_index = 0;
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE);
 	}
 	return dispatch_reply_ingress_v4_core_prepared(skb);
 }
 
-static __always_inline int dispatch_reply_ingress_pipeline_v4(struct __sk_buff *skb)
+static __always_inline int dispatch_reply_pipeline_v4(struct __sk_buff *skb, __u32 attach)
 {
 	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 
-	if (config && dispatch && (config->pre_reply_count > 0 || config->post_reply_count > 0)) {
-		dispatch->plugin_chain_index = 0;
-		if (config->pre_reply_count > 0 || config->reply_core_enable == 0) {
+	if (dispatch)
+		capture_tc_plugin_dispatch_v4(skb, dispatch, config, 1, attach);
+	if (dispatch && (dispatch->plugin_pre_mask != 0 || dispatch->plugin_post_mask != 0)) {
+		if (dispatch->plugin_pre_mask != 0 || dispatch->plugin_core_enable == 0) {
 			clear_tc_plugin_ctx_v4();
 		}
-		if (config->pre_reply_count > 0) {
+		if (dispatch->plugin_pre_mask != 0) {
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_CONTINUE);
 		}
 		return dispatch_reply_ingress_pipeline_core_v4(skb);
 	}
+	if (dispatch && dispatch->plugin_core_enable == 0)
+		return TC_ACT_UNSPEC;
 	return dispatch_reply_ingress_v4(skb);
 }
 
 static __always_inline int dispatch_plugin_pre_reply_continue_v4(struct __sk_buff *skb)
 {
-	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 	__u32 index;
+	__u32 slot_base;
+	int i;
 
-	if (config && dispatch) {
-		index = dispatch->plugin_chain_index;
-		if (index < config->pre_reply_count && index < FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX) {
+	if (dispatch) {
+		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_REPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE;
+#pragma unroll
+		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX; i++) {
+			index = dispatch->plugin_chain_index;
+			if (index >= dispatch->plugin_pre_count || index >= FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX)
+				break;
 			dispatch->plugin_chain_index = index + 1;
-			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE + index);
+			if ((dispatch->plugin_pre_mask & (1U << index)) != 0)
+				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
 		}
 	}
 	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_REPLY_CORE);
@@ -4454,15 +4594,21 @@ static __always_inline int dispatch_plugin_pre_reply_continue_v4(struct __sk_buf
 
 static __always_inline int dispatch_plugin_post_reply_continue_v4(struct __sk_buff *skb)
 {
-	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
 	__u32 index;
+	__u32 slot_base;
+	int i;
 
-	if (config && dispatch) {
-		index = dispatch->plugin_chain_index;
-		if (index < config->post_reply_count && index < FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX) {
+	if (dispatch) {
+		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_REPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_BASE;
+#pragma unroll
+		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX; i++) {
+			index = dispatch->plugin_chain_index;
+			if (index >= dispatch->plugin_post_count || index >= FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX)
+				break;
 			dispatch->plugin_chain_index = index + 1;
-			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_BASE + index);
+			if ((dispatch->plugin_post_mask & (1U << index)) != 0)
+				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
 		}
 	}
 	return dispatch_reply_ingress_v4_core_prepared(skb);
@@ -4596,7 +4742,13 @@ int forward_ingress_dispatch(struct __sk_buff *skb)
 SEC("classifier/forward_ingress_pipeline")
 int forward_ingress_pipeline(struct __sk_buff *skb)
 {
-	return dispatch_forward_ingress_pipeline_v4(skb);
+	return dispatch_forward_pipeline_v4(skb, FORWARD_TC_PLUGIN_ATTACH_INGRESS);
+}
+
+SEC("classifier/forward_egress_pipeline")
+int forward_egress_pipeline(struct __sk_buff *skb)
+{
+	return dispatch_forward_pipeline_v4(skb, FORWARD_TC_PLUGIN_ATTACH_EGRESS);
 }
 
 SEC("classifier/forward_ingress_v4_core")
@@ -4620,7 +4772,13 @@ int forward_ingress_v4_plugin_post_lookup_continue(struct __sk_buff *skb)
 SEC("classifier/reply_ingress_pipeline")
 int reply_ingress_pipeline(struct __sk_buff *skb)
 {
-	return dispatch_reply_ingress_pipeline_v4(skb);
+	return dispatch_reply_pipeline_v4(skb, FORWARD_TC_PLUGIN_ATTACH_INGRESS);
+}
+
+SEC("classifier/reply_egress_pipeline")
+int reply_egress_pipeline(struct __sk_buff *skb)
+{
+	return dispatch_reply_pipeline_v4(skb, FORWARD_TC_PLUGIN_ATTACH_EGRESS);
 }
 
 SEC("classifier/reply_ingress_v4_core")

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultPluginsDir     = "plugins/runtime"
+	defaultPluginsDir     = "plugins"
 	pluginManifestFile    = "plugin.json"
 	pluginManifestMaxSize = 1 << 20
 	pluginObjectMaxSize   = 16 << 20
@@ -74,17 +74,35 @@ type PluginCatalog struct {
 }
 
 type PluginCatalogHotReload struct {
-	Enabled              bool   `json:"enabled"`
-	CheckIntervalMS      int64  `json:"check_interval_ms"`
-	LastCheckAt          string `json:"last_check_at,omitempty"`
-	LastCheckResult      string `json:"last_check_result,omitempty"`
-	LastCheckError       string `json:"last_check_error,omitempty"`
-	LastReloadAt         string `json:"last_reload_at,omitempty"`
-	LastReloadSource     string `json:"last_reload_source,omitempty"`
-	LastReloadResult     string `json:"last_reload_result,omitempty"`
-	LastReloadError      string `json:"last_reload_error,omitempty"`
-	CatalogFingerprint   string `json:"catalog_fingerprint,omitempty"`
-	FingerprintShortHash string `json:"fingerprint_short_hash,omitempty"`
+	Enabled                      bool                  `json:"enabled"`
+	CheckIntervalMS              int64                 `json:"check_interval_ms"`
+	UpdateAvailable              bool                  `json:"update_available"`
+	LastCheckAt                  string                `json:"last_check_at,omitempty"`
+	LastCheckResult              string                `json:"last_check_result,omitempty"`
+	LastCheckError               string                `json:"last_check_error,omitempty"`
+	LastReloadAt                 string                `json:"last_reload_at,omitempty"`
+	LastReloadSource             string                `json:"last_reload_source,omitempty"`
+	LastReloadResult             string                `json:"last_reload_result,omitempty"`
+	LastReloadError              string                `json:"last_reload_error,omitempty"`
+	CatalogFingerprint           string                `json:"catalog_fingerprint,omitempty"`
+	FingerprintShortHash         string                `json:"fingerprint_short_hash,omitempty"`
+	AppliedFingerprint           string                `json:"applied_fingerprint,omitempty"`
+	AppliedFingerprintShortHash  string                `json:"applied_fingerprint_short_hash,omitempty"`
+	DetectedFingerprint          string                `json:"detected_fingerprint,omitempty"`
+	DetectedFingerprintShortHash string                `json:"detected_fingerprint_short_hash,omitempty"`
+	Updates                      []PluginCatalogUpdate `json:"updates,omitempty"`
+}
+
+type PluginCatalogUpdate struct {
+	PluginID        string `json:"plugin_id"`
+	Source          string `json:"source,omitempty"`
+	Name            string `json:"name,omitempty"`
+	Kind            string `json:"kind,omitempty"`
+	Change          string `json:"change"`
+	AppliedVersion  string `json:"applied_version,omitempty"`
+	DetectedVersion string `json:"detected_version,omitempty"`
+	appliedSource   string
+	detectedSource  string
 }
 
 type PluginRuntimeCapabilities struct {
@@ -103,13 +121,24 @@ type PluginRuntimeCapabilities struct {
 }
 
 type PluginRuntimeState struct {
-	Mode            string                  `json:"mode"`
-	Attachable      bool                    `json:"attachable"`
-	Attached        bool                    `json:"attached"`
-	AttachmentCount int                     `json:"attachment_count,omitempty"`
-	Attachments     []PluginAttachmentState `json:"attachments,omitempty"`
-	Reason          string                  `json:"reason,omitempty"`
-	Error           string                  `json:"error,omitempty"`
+	Mode            string                         `json:"mode"`
+	Attachable      bool                           `json:"attachable"`
+	Attached        bool                           `json:"attached"`
+	AttachmentCount int                            `json:"attachment_count,omitempty"`
+	Attachments     []PluginAttachmentState        `json:"attachments,omitempty"`
+	WorkerQueue     *PluginControlWorkerQueueState `json:"worker_queue,omitempty"`
+	Reason          string                         `json:"reason,omitempty"`
+	Error           string                         `json:"error,omitempty"`
+}
+
+type PluginControlWorkerQueueState struct {
+	PendingRequests     int    `json:"pending_requests"`
+	PendingBytes        int64  `json:"pending_bytes"`
+	PeakPendingRequests int    `json:"peak_pending_requests"`
+	PeakPendingBytes    int64  `json:"peak_pending_bytes"`
+	RejectedRequests    uint64 `json:"rejected_requests"`
+	RequestLimit        int    `json:"request_limit"`
+	ByteLimit           int64  `json:"byte_limit"`
 }
 
 type PluginAttachmentState struct {
@@ -248,9 +277,10 @@ type LoadedPlugin struct {
 	Source            string                   `json:"source,omitempty"`
 	AssetBasePath     string                   `json:"asset_base_path,omitempty"`
 
-	rootDir         string
-	staticDir       string
-	controlMainPath string
+	rootDir           string
+	staticDir         string
+	controlMainPath   string
+	sourceFingerprint string
 }
 
 func loadPluginCatalog(cfg *Config) PluginCatalog {
@@ -384,14 +414,18 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 		SupportedEngines:         []string{kernelEngineTC, kernelEngineXDP, "control"},
 		SupportedHookModes:       []string{"observe", "rewrite", "redirect", "drop", "control"},
 		Limitations: []string{
-			"external dataplane loading is opt-in via plugins_dataplane_enabled and supports tc stage=forward/reply hooks ordered around the built-in fvtap core priority",
-			"tc pipeline plugin priority is compared with fvtap core priority 1000; lower priority runs before core lookup and higher priority runs after core lookup before apply/redirect on the selected packet direction",
-			"tc pipeline plugins must tail-call the shared tc_prog_chain_v4 continue slot after processing unless they intentionally return a final tc action",
+			"fvtap is a logical tc tail-call pipeline, not a Linux netdev; real interfaces are only attach targets or optional handoff adapters",
+			"external dataplane loading is opt-in via plugins_dataplane_enabled and supports tc pipeline.attach direction=forward/reply hooks ordered around the built-in fvtap core priority",
+			"tc pipeline plugin priority is compared with fvtap core priority 1000; lower priority runs before core lookup and higher priority runs after core lookup before apply/redirect on the selected packet direction; runtime maps that intent to the concrete pre/post chain",
+			"tc pipeline plugins are callable stages in the shared prog-array chain and must tail-call the shared continue slot after processing unless they intentionally return a final tc action",
 			"post_lookup and post_reply tc plugins may read the shared tc_plugin_ctx_v4 context after fvtap has parsed IPv4/L4 and matched a rule or flow",
+			"forward post-apply hooks are not available yet; pure eBPF WAN encapsulation after core NAT/rewrite still needs a dedicated post-apply stage or a Linux handoff adapter",
 			"control.main scripts run in persistent per-plugin Goja control VMs only; declared worker VMs can offload control tasks but never run in packet hot paths",
-			"control permissions gate kv/resource/secret/crypto/timer/worker/net.l2/net.udp/plugin.resource/ebpf map updates; registration APIs are only available during control script initialization",
+			"control permissions gate kv/resource/secret/crypto/timer/worker/net.l2/net.tcp/net.udp/plugin.resource/ebpf map updates; registration APIs are only available during control script initialization",
 			"plugin.resource is a two-step grant: the permission enables the API namespace and control.resource_access must explicitly allow each target plugin/resource/method",
 			"control timer and worker state is capped at 64 named timers and 16 named workers per plugin to avoid control-plane resource exhaustion",
+			"outstanding worker requests are capped per plugin at 256 requests and 16 MiB of payload across all worker queues and executions",
+			"persistent TCP/UDP sockets are host-owned and capped at 32 handles per plugin; transactional upgrades transfer compatible handles to the candidate VM, while cold replacement, plugin deactivation, and runtime shutdown close them",
 			"plugin dataplane mode is a trust contract for installed eBPF objects; keep external dataplane loading disabled unless the object source is trusted",
 			"plugin stability is declared by manifest.stability: lab is for examples/tests only, preview is suitable for controlled deployments, stable is expected to be production-ready, and deprecated should not be used for new deployments",
 			"lab, preview, and stable plugins can execute control scripts and join external tc dataplane when the corresponding global plugin switches are enabled; deprecated plugins are always blocked",
@@ -499,6 +533,15 @@ func scanExternalPlugins(pluginsDir string, seen map[string]struct{}) []LoadedPl
 		}
 		source := entry.Name()
 		rootDir := filepath.Join(pluginsDir, source)
+		manifestPath := filepath.Join(rootDir, pluginManifestFile)
+		if _, err := os.Lstat(manifestPath); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			errorIndex++
+			out = append(out, pluginLoadError(fmt.Sprintf("invalid-%d", errorIndex), source, fmt.Sprintf("stat manifest: %v", err)))
+			continue
+		}
 		plugin, err := loadPluginFromDir(rootDir, source)
 		if err != nil {
 			errorIndex++
@@ -530,6 +573,7 @@ func loadPluginFromDir(rootDir, source string) (LoadedPlugin, error) {
 	if err != nil {
 		return LoadedPlugin{}, fmt.Errorf("resolve plugin root: %w", err)
 	}
+	sourceFingerprint, _ := buildPluginDirectoryFingerprint(realRoot)
 	cleanManifest, err := filepath.Abs(manifestPath)
 	if err != nil {
 		return LoadedPlugin{}, fmt.Errorf("resolve manifest: %w", err)
@@ -569,12 +613,13 @@ func loadPluginFromDir(rootDir, source string) (LoadedPlugin, error) {
 	}
 
 	plugin := LoadedPlugin{
-		PluginManifest: manifest,
-		Enabled:        true,
-		Status:         pluginStatusActive,
-		Runtime:        externalPluginRuntimeState(),
-		Source:         source,
-		rootDir:        rootDir,
+		PluginManifest:    manifest,
+		Enabled:           true,
+		Status:            pluginStatusActive,
+		Runtime:           externalPluginRuntimeState(),
+		Source:            source,
+		rootDir:           rootDir,
+		sourceFingerprint: sourceFingerprint,
 	}
 	if plugin.Status == pluginStatusActive {
 		if err := resolvePluginControl(&plugin); err != nil {

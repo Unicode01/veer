@@ -77,6 +77,7 @@ type pluginActionResponse struct {
 	Status        string                       `json:"status"`
 	RuntimeUpdate string                       `json:"runtime_update"`
 	RuntimeStatus *pluginRuntimeStatusResponse `json:"runtime_status,omitempty"`
+	Result        any                          `json:"result,omitempty"`
 	RuntimeError  string                       `json:"runtime_error,omitempty"`
 	Error         string                       `json:"error,omitempty"`
 }
@@ -124,7 +125,7 @@ func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, d
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "built-in plugin cannot be disabled"})
 		return
 	}
-	if !externalPluginExists(cfg, pluginID) {
+	if !externalPluginExists(cfg, pm, pluginID) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "plugin not found"})
 		return
 	}
@@ -156,8 +157,8 @@ func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, d
 	}
 }
 
-func externalPluginExists(cfg *Config, pluginID string) bool {
-	catalog := loadPluginCatalog(cfg)
+func externalPluginExists(cfg *Config, pm *ProcessManager, pluginID string) bool {
+	catalog := loadPluginCatalog(pluginCatalogConfigForProcess(pm, cfg))
 	for _, plugin := range catalog.Plugins {
 		if plugin.ID == pluginID && !plugin.Builtin {
 			return true
@@ -281,6 +282,28 @@ func handlePluginActionAPI(w http.ResponseWriter, r *http.Request, cfg *Config, 
 	}
 	if len(req.Payload) > pluginActionMaxPayloadBytes(action) || !json.Valid(req.Payload) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action payload"})
+		return
+	}
+	if action.RuntimeUpdate == "runtime_query" {
+		result, err := queryPluginActionRuntime(pm, plugin, action, req.Payload)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, pluginActionResponse{
+				PluginID:      plugin.ID,
+				ActionID:      action.ID,
+				Status:        "error",
+				RuntimeUpdate: action.RuntimeUpdate,
+				RuntimeError:  err.Error(),
+				Error:         err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, pluginActionResponse{
+			PluginID:      plugin.ID,
+			ActionID:      action.ID,
+			Status:        "completed",
+			RuntimeUpdate: action.RuntimeUpdate,
+			Result:        result,
+		})
 		return
 	}
 

@@ -255,6 +255,10 @@ func isEgressNATAttachableChild(info InterfaceInfo) bool {
 	if strings.TrimSpace(info.Parent) == "" {
 		return false
 	}
+	// A physical device enslaved to a bridge is a valid ingress target. The
+	// single-target check treats devices with a parent as bridge scopes, so run
+	// it against a copy without the already-validated parent relationship.
+	info.Parent = ""
 	return isEgressNATSingleTargetInterface(info)
 }
 

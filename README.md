@@ -185,7 +185,7 @@ Authorization: Bearer <web_token>
 - `plugins_enabled`：是否扫描外部运行时插件 manifest；内置 `fvtap` 始终可见
 - `plugins_dataplane_enabled`：是否允许外部插件进入 TC 数据面；默认关闭，当前支持按 priority 围绕 `fvtap core` 排序的 forward/reply TC 链
 - `lab` / `preview` / `stable` 插件默认可执行控制脚本；进入外部 TC 数据面仍受 `plugins_dataplane_enabled` 控制；`deprecated` 插件始终禁用
-- `plugins_dir`：外部运行时插件目录，默认 `plugins/runtime`
+- `plugins_dir`：运行时插件目录，默认 `plugins`
 - `kernel_rules_map_limit`：内核规则 map 容量，`0` 表示自适应
 - `kernel_flows_map_limit`：内核 flow map 容量，`0` 表示自适应
 - `kernel_nat_ports_map_limit`：内核 NAT 端口 map 容量，`0` 表示自适应
@@ -276,13 +276,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 插件层
 
-插件层的详细说明放在 [examples/plugins/README.md](examples/plugins/README.md)。根 README 只保留关键边界：
-
-- 运行时插件目录默认是 `plugins/runtime`
-- `plugin.json` 只声明身份、稳定级别、权限和 `control.main`
-- 资源、动作、UI、eBPF object、hook 由 `control.js` 顶层注册
-- 外部 TC 数据面默认关闭；开启前必须确认插件可信、object hash 和目标内核能力
-- 控制面更新只影响 SQLite、Goja 和 eBPF map，不让 TC/XDP 热路径查询 Web API
+插件架构、开发接口和内置插件说明见 [PLUGIN.md](PLUGIN.md)。
 
 ## 平台与依赖
 
@@ -345,11 +339,11 @@ go build -o forward .
 sh scripts/build-ebpf.sh
 sh scripts/build-plugin-ebpf.sh
 sh scripts/build-all-ebpf.sh
-sh scripts/verify-example-plugin-manifests.sh
-sh scripts/package-example-plugins.sh
+sh scripts/verify-plugin-manifests.sh
+sh scripts/package-plugins.sh
 ```
 
-发布构建优先使用 `release.sh`。上面的脚本仅用于开发时单独重建 eBPF、校验示例插件或生成插件运行时包；插件细节见 [examples/plugins/README.md](examples/plugins/README.md)。
+发布构建优先使用 `release.sh`。上面的脚本仅用于开发时单独重建 eBPF、校验插件或生成插件运行时包。
 
 常规测试：
 
@@ -362,7 +356,7 @@ go test ./...
 WHMCS addon 插件源码位于：
 
 ```text
-plugins/whmcs/forward/
+whmcs/forward/
 ```
 
 部署到 WHMCS：

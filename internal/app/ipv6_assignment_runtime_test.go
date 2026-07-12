@@ -16,6 +16,10 @@ type fakeIPv6AssignmentNetOps struct {
 	proxyNDPEnable       []string
 	ensureRoutes         []ipv6AssignmentRouteSpec
 	deleteRoutes         []ipv6AssignmentRouteSpec
+	ensureAddresses      []ipv6AssignmentAddressSpec
+	deleteAddresses      []ipv6AssignmentAddressSpec
+	ensureRejectRoutes   []ipv6AssignmentRejectRouteSpec
+	deleteRejectRoutes   []ipv6AssignmentRejectRouteSpec
 	ensureProxies        []ipv6AssignmentProxySpec
 	deleteProxies        []ipv6AssignmentProxySpec
 	ensureRAs            []ipv6AssignmentRAConfig
@@ -69,6 +73,26 @@ func (ops *fakeIPv6AssignmentNetOps) EnsureIPv6Route(spec ipv6AssignmentRouteSpe
 
 func (ops *fakeIPv6AssignmentNetOps) DeleteIPv6Route(spec ipv6AssignmentRouteSpec) error {
 	ops.deleteRoutes = append(ops.deleteRoutes, spec)
+	return nil
+}
+
+func (ops *fakeIPv6AssignmentNetOps) EnsureIPv6Address(spec ipv6AssignmentAddressSpec) error {
+	ops.ensureAddresses = append(ops.ensureAddresses, spec)
+	return nil
+}
+
+func (ops *fakeIPv6AssignmentNetOps) DeleteIPv6Address(spec ipv6AssignmentAddressSpec) error {
+	ops.deleteAddresses = append(ops.deleteAddresses, spec)
+	return nil
+}
+
+func (ops *fakeIPv6AssignmentNetOps) EnsureIPv6RejectRoute(spec ipv6AssignmentRejectRouteSpec) error {
+	ops.ensureRejectRoutes = append(ops.ensureRejectRoutes, spec)
+	return nil
+}
+
+func (ops *fakeIPv6AssignmentNetOps) DeleteIPv6RejectRoute(spec ipv6AssignmentRejectRouteSpec) error {
+	ops.deleteRejectRoutes = append(ops.deleteRejectRoutes, spec)
 	return nil
 }
 
@@ -176,6 +200,53 @@ func TestBuildIPv6AssignmentRuntimePlanSingleAddressUsesProxyNDP(t *testing.T) {
 	}
 }
 
+func TestManagedIPv6AssignmentRuntimeReconcilesPluginRoutedPDState(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeIPv6AssignmentNetOps{}
+	rt := newManagedIPv6AssignmentRuntime(ops)
+	item := IPv6Assignment{
+		ID:              81,
+		ParentInterface: "fwdlocal0",
+		TargetInterface: "br-lan",
+		ParentPrefix:    "240e:390:6aad:d550::/60",
+		AssignedPrefix:  "240e:390:6aad:d555::/64",
+		Enabled:         true,
+		upstreamRouted:  true,
+		gatewayCIDR:     "240e:390:6aad:d555::1/60",
+		rejectPrefix:    "240e:390:6aad:d550::/60",
+		dnsServers:      []string{"2400:3200::1"},
+	}
+	if err := rt.Reconcile([]IPv6Assignment{item}); err != nil {
+		t.Fatalf("Reconcile(routed PD) error = %v", err)
+	}
+	if len(ops.ensureAddresses) != 1 || ops.ensureAddresses[0] != (ipv6AssignmentAddressSpec{TargetInterface: "br-lan", CIDR: "240e:390:6aad:d555::1/60"}) {
+		t.Fatalf("ensureAddresses = %+v", ops.ensureAddresses)
+	}
+	if len(ops.ensureRejectRoutes) != 1 || ops.ensureRejectRoutes[0].Prefix != "240e:390:6aad:d550::/60" {
+		t.Fatalf("ensureRejectRoutes = %+v", ops.ensureRejectRoutes)
+	}
+	if len(ops.ensureRoutes) != 1 || ops.ensureRoutes[0] != (ipv6AssignmentRouteSpec{Prefix: "240e:390:6aad:d555::/64", TargetInterface: "br-lan"}) {
+		t.Fatalf("ensureRoutes = %+v", ops.ensureRoutes)
+	}
+	if len(ops.ensureRAs) != 1 || len(ops.ensureRAs[0].Prefixes) != 1 || ops.ensureRAs[0].Prefixes[0] != "240e:390:6aad:d555::/64" {
+		t.Fatalf("ensureRAs = %+v", ops.ensureRAs)
+	}
+	if len(ops.ensureRAs[0].DNSServers) != 1 || ops.ensureRAs[0].DNSServers[0] != "2400:3200::1" {
+		t.Fatalf("ensureRAs DNS = %+v", ops.ensureRAs)
+	}
+	if len(ops.ensureProxies) != 0 {
+		t.Fatalf("ensureProxies = %+v, want none for routed PD", ops.ensureProxies)
+	}
+
+	if err := rt.Reconcile(nil); err != nil {
+		t.Fatalf("Reconcile(nil) error = %v", err)
+	}
+	if len(ops.deleteAddresses) != 1 || len(ops.deleteRejectRoutes) != 1 || len(ops.deleteRoutes) != 1 || len(ops.deleteRAs) != 1 {
+		t.Fatalf("cleanup addresses=%+v reject=%+v routes=%+v ra=%+v", ops.deleteAddresses, ops.deleteRejectRoutes, ops.deleteRoutes, ops.deleteRAs)
+	}
+}
+
 func TestBuildIPv6AssignmentRuntimePlanDelegatedPrefixUsesRouteOnly(t *testing.T) {
 	t.Parallel()
 
@@ -230,6 +301,7 @@ func TestManagedIPv6AssignmentRuntimeReconcileCleansUpRemovedState(t *testing.T)
 			ParentPrefix:    "2402:db8::/64",
 			AssignedPrefix:  "2402:db8::10/128",
 			Enabled:         true,
+			dnsServers:      []string{"2001:4860:4860::8888"},
 		},
 	}
 	if err := rt.Reconcile(items); err != nil {
@@ -258,6 +330,9 @@ func TestManagedIPv6AssignmentRuntimeReconcileCleansUpRemovedState(t *testing.T)
 	}
 	if len(ops.ensureDHCPv6) != 1 || ops.ensureDHCPv6[0].TargetInterface != "tap100i0" || len(ops.ensureDHCPv6[0].Addresses) != 1 || ops.ensureDHCPv6[0].Addresses[0] != "2402:db8::10" {
 		t.Fatalf("ensureDHCPv6 = %+v, want DHCPv6 for 2402:db8::10 on tap100i0", ops.ensureDHCPv6)
+	}
+	if len(ops.ensureDHCPv6[0].DNSServers) != 1 || ops.ensureDHCPv6[0].DNSServers[0] != "2001:4860:4860::8888" || len(ops.ensureRAs[0].DNSServers) != 1 {
+		t.Fatalf("DNS runtime configs: RA=%+v DHCPv6=%+v", ops.ensureRAs, ops.ensureDHCPv6)
 	}
 
 	ops.ensureRoutes = nil

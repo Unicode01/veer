@@ -13,6 +13,7 @@
     if (status === 'active') return { badge: 'running', text: app.t('plugins.status.active') };
     if (status === 'disabled') return { badge: 'disabled', text: app.t('plugins.status.disabled') };
     if (status === 'error') return { badge: 'error', text: app.t('plugins.status.error') };
+    if (status === 'pending') return { badge: 'warning', text: app.t('plugins.status.pending') };
     return { badge: 'disabled', text: status || app.t('common.dash') };
   }
 
@@ -516,10 +517,12 @@
     data.forEach((plugin) => {
       const runtime = plugin && plugin.runtime && typeof plugin.runtime === 'object' ? plugin.runtime : null;
       const attachments = runtime && Array.isArray(runtime.attachments) ? runtime.attachments : [];
+      const hooks = Array.isArray(plugin && plugin.hooks) ? plugin.hooks : [];
       attachments.forEach((attachment) => {
         out.push({
           pluginID: plugin && plugin.id || '',
           pluginName: plugin && plugin.name || '',
+          hook: hooks.find((hook) => hook && hook.id === attachment.hook_id) || null,
           attachment
         });
       });
@@ -529,11 +532,12 @@
 
   function attachmentGroupKey(item) {
     const attachment = item && item.attachment ? item.attachment : {};
+    const interfaces = pluginAttachmentInterfaces(item);
     return [
       String(attachment.engine || '').toLowerCase(),
       String(attachment.attach || '').toLowerCase(),
       attachmentDirection(attachment),
-      String(attachment.interface || '').toLowerCase()
+      interfaces.length ? interfaces.slice().sort().join(',').toLowerCase() : String(attachment.interface || '').toLowerCase()
     ].join('\x1f');
   }
 
@@ -543,13 +547,36 @@
     return [
       engine,
       attachment.attach || '',
-      attachmentDirection(attachment),
-      attachment.interface || ''
+      attachmentDirection(attachment)
     ].filter(Boolean).join(' ');
+  }
+
+  function pluginAttachmentInterfaces(item) {
+    const hook = item && item.hook ? item.hook : null;
+    return hook && Array.isArray(hook.interfaces)
+      ? hook.interfaces.map((value) => String(value || '').trim()).filter(Boolean)
+      : [];
+  }
+
+  function pluginInterfaceSegment(interfaces, pipelineInterface, attach, direction) {
+    const values = Array.isArray(interfaces) ? interfaces.filter(Boolean) : [];
+    const text = values.length ? values.join(',') : (pipelineInterface || app.t('plugins.link.unbound'));
+    return {
+      text,
+      title: values.length ? values.join(', ') : app.t('plugins.link.unbound'),
+      detailTitle: text,
+      detailRows: [
+        detailRow('Interfaces', values.length ? values.join(', ') : app.t('plugins.link.unbound')),
+        detailRow('Pipeline', pipelineInterface),
+        detailRow('Attach', attach),
+        detailRow(app.t('plugins.link.direction'), direction)
+      ].filter(Boolean)
+    };
   }
 
   function pluginAttachmentSegment(item, currentPluginID) {
     const attachment = item && item.attachment ? item.attachment : {};
+    const interfaces = pluginAttachmentInterfaces(item);
     const slot = attachmentChainSlot(attachment);
     const label = item.pluginID || attachment.hook_id || app.t('common.dash');
     return {
@@ -560,6 +587,7 @@
         attachment.stage,
         attachment.mode,
         attachment.program,
+        interfaces.length ? 'if=' + interfaces.join(',') : '',
         attachment.status,
         attachment.error ? app.t('plugins.error') + ': ' + attachment.error : ''
       ].filter(Boolean).join(' | '),
@@ -573,7 +601,8 @@
         detailRow('Attach', attachment.attach),
         detailRow('Stage', attachment.stage),
         detailRow('Mode', attachment.mode),
-        detailRow('Interface', attachment.interface),
+        detailRow('Interfaces', interfaces.length ? interfaces.join(', ') : ''),
+        detailRow('Pipeline', attachment.interface),
         detailRow('Program', attachment.program),
         detailRow('Status', attachment.status),
         detailRow('Priority', typeof attachment.priority === 'number' ? String(attachment.priority) : ''),
@@ -648,7 +677,12 @@
       return {
         kind: app.t('plugins.link.interfaceChain'),
         label: attachmentGroupLabel(group.sample),
-        segments: pre.map((item) => pluginAttachmentSegment(item, currentID))
+        segments: [pluginInterfaceSegment(
+          pluginAttachmentInterfaces(group.sample),
+          group.sample.attachment && group.sample.attachment.interface,
+          group.sample.attachment && group.sample.attachment.attach,
+          direction
+        )].concat(pre.map((item) => pluginAttachmentSegment(item, currentID)))
           .concat([pluginCoreSegment(direction, corePriority)])
           .concat(post.map((item) => pluginAttachmentSegment(item, currentID)))
           .concat([pluginApplySegment(direction)])
@@ -752,8 +786,7 @@
   function hookGroupLabel(item) {
     const hook = item && item.hook ? item.hook : {};
     const engine = hook.engine ? String(hook.engine).toUpperCase() : 'TC';
-    const interfaces = Array.isArray(hook.interfaces) && hook.interfaces.length ? hook.interfaces.join(',') : app.t('plugins.link.unbound');
-    return [engine, hook.attach || 'ingress', hookDirection(hook), interfaces].filter(Boolean).join(' ');
+    return [engine, hook.attach || 'ingress', hookDirection(hook)].filter(Boolean).join(' ');
   }
 
   function pluginDeclaredHookChainRows(plugin) {
@@ -797,7 +830,12 @@
       return {
         kind: app.t('plugins.link.declaredChain'),
         label: hookGroupLabel(group.sample),
-        segments: pre.map((item) => pluginHookSegment(item.plugin, item.hook, currentID))
+        segments: [pluginInterfaceSegment(
+          Array.isArray(group.sample.hook && group.sample.hook.interfaces) ? group.sample.hook.interfaces : [],
+          '',
+          group.sample.hook && group.sample.hook.attach,
+          direction
+        )].concat(pre.map((item) => pluginHookSegment(item.plugin, item.hook, currentID)))
           .concat([pluginCoreSegment(direction, corePriority)])
           .concat(post.map((item) => pluginHookSegment(item.plugin, item.hook, currentID)))
           .concat([pluginApplySegment(direction)])
@@ -1069,7 +1107,7 @@
   }
 
   function pluginUINode(plugin) {
-    if (!plugin.asset_base_path && (!plugin.ui || !plugin.ui.entry)) return app.emptyCellNode('stat-muted');
+    if (!plugin.asset_base_path && (!plugin.ui || !plugin.ui.entry)) return null;
     const text = plugin.ui && plugin.ui.entry ? plugin.ui.entry : app.t('plugins.ui.assets');
     if (!plugin.asset_base_path || !(plugin.ui && plugin.ui.entry)) {
       return app.createNode('span', {
@@ -1086,10 +1124,99 @@
     });
   }
 
+  function pendingPluginUpdates(status) {
+    const item = status && typeof status === 'object' ? status : {};
+    return Array.isArray(item.updates) ? item.updates.filter((update) => update && update.plugin_id) : [];
+  }
+
+  function pluginUpdateMap(status) {
+    const updates = new Map();
+    pendingPluginUpdates(status).forEach((update) => updates.set(String(update.plugin_id), update));
+    return updates;
+  }
+
+  function pluginRowsWithPendingUpdates(data, status) {
+    const updates = pluginUpdateMap(status);
+    const seen = new Set();
+    const rows = data.map((plugin) => {
+      const id = String(plugin && plugin.id || '');
+      seen.add(id);
+      const update = updates.get(id);
+      return update ? Object.assign({}, plugin, { _pendingUpdate: update }) : plugin;
+    });
+    updates.forEach((update, id) => {
+      if (seen.has(id)) return;
+      rows.push({
+        id: id,
+        name: update.name || id,
+        kind: update.kind || '',
+        version: update.detected_version || '',
+        source: update.source || '',
+        status: 'pending',
+        enabled: false,
+        runtime: { mode: 'pending', attachable: false, attached: false },
+        _pendingOnly: true,
+        _pendingUpdate: update
+      });
+    });
+    return rows;
+  }
+
+  function selectedPluginUpdateIDs() {
+    const selected = app.state.plugins.selectedUpdateIDs || {};
+    return Object.keys(selected).filter((id) => selected[id]).sort();
+  }
+
+  function pluginUpdateChoiceText(update) {
+    const change = String(update && update.change || '').toLowerCase();
+    if (change === 'added') return app.t('plugins.update.selectAdded');
+    if (change === 'removed') return app.t('plugins.update.selectRemoved');
+    return app.t('plugins.update.selectModified');
+  }
+
+  function pluginUpdateChoiceTitle(update) {
+    const applied = update && update.applied_version || app.t('common.dash');
+    const detected = update && update.detected_version || app.t('common.dash');
+    return app.t('plugins.update.rowDetail', { applied, detected });
+  }
+
+  function pluginUpdateSelectorNode(update) {
+    if (!update || !update.plugin_id) return null;
+    const id = String(update.plugin_id);
+    const applying = app.state.plugins.applyingUpdate === true;
+    const selected = !!(app.state.plugins.selectedUpdateIDs && app.state.plugins.selectedUpdateIDs[id]);
+    const input = app.createNode('input', {
+      className: 'plugin-update-checkbox',
+      attrs: {
+        type: 'checkbox',
+        checked: selected ? 'checked' : null,
+        disabled: applying ? 'disabled' : null,
+        'aria-label': pluginUpdateChoiceText(update)
+      },
+      dataset: { pluginId: id }
+    });
+    input.checked = selected;
+    return app.createNode('label', {
+      className: 'plugin-update-choice' + (selected ? ' is-selected' : '') + (applying ? ' is-disabled' : ''),
+      title: pluginUpdateChoiceTitle(update),
+      children: [
+        input,
+        app.createNode('span', {
+          className: 'plugin-update-check',
+          attrs: { 'aria-hidden': 'true' }
+        }),
+        app.createNode('span', {
+          className: 'plugin-update-choice-label',
+          text: pluginUpdateChoiceText(update)
+        })
+      ]
+    });
+  }
+
   function pluginActionsNode(plugin) {
-    if (!plugin || plugin.builtin || plugin.id === 'fvtap') return app.emptyCellNode('stat-muted');
+    if (!plugin || plugin.builtin || plugin.id === 'fvtap' || plugin._pendingOnly) return null;
     const id = String(plugin.id || '').trim();
-    if (!id) return app.emptyCellNode('stat-muted');
+    if (!id) return null;
     const pending = app.isRowPending && app.isRowPending('plugin', id);
     const enabled = plugin.enabled !== false && String(plugin.status || '').toLowerCase() !== 'disabled';
     const willEnable = !enabled;
@@ -1105,6 +1232,16 @@
         pluginId: id,
         enabled: willEnable ? '1' : '0'
       }
+    });
+  }
+
+  function pluginControlsNode(plugin) {
+    const controls = [pluginUpdateSelectorNode(plugin && plugin._pendingUpdate), pluginUINode(plugin), pluginActionsNode(plugin)].filter(Boolean);
+    if (!controls.length) return app.emptyCellNode('stat-muted');
+    if (controls.length === 1) return controls[0];
+    return app.createNode('div', {
+      className: 'plugin-table-actions',
+      children: controls
     });
   }
 
@@ -1127,8 +1264,9 @@
   --fwd-success-bg: #f0fdf4;
   --fwd-success-border: #86efac;
   --fwd-success-text: #15803d;
-  --fwd-page-wash-start: rgba(255, 255, 255, 0.92);
-  --fwd-page-wash-end: rgba(245, 246, 248, 0.92);
+  --fwd-danger: #dc2626;
+  --fwd-danger-hover: #b91c1c;
+  --fwd-danger-soft: rgba(220, 38, 38, 0.08);
   --fwd-radius: 10px;
   --fwd-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
   color-scheme: light;
@@ -1140,10 +1278,7 @@
 body.fwd-plugin-body,
 body {
   margin: 0;
-  background:
-    linear-gradient(180deg, var(--fwd-page-wash-start), var(--fwd-page-wash-end)),
-    radial-gradient(circle at 12% 0%, rgba(37, 99, 235, 0.08), transparent 32%),
-    var(--fwd-bg);
+  background: var(--fwd-bg);
   color: var(--fwd-text);
   font-size: 13px;
 }
@@ -1172,7 +1307,7 @@ body {
   padding: 8px 10px;
   border: 1px solid var(--fwd-border);
   border-radius: 8px;
-  background: linear-gradient(180deg, var(--fwd-surface), var(--fwd-surface-soft));
+  background: var(--fwd-surface-soft);
 }
 .fwd-stat-label { color: var(--fwd-soft); font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
 .fwd-stat-value {
@@ -1201,6 +1336,16 @@ body {
   background: var(--fwd-surface);
   color: var(--fwd-primary);
 }
+.fwd-button.is-danger {
+  border-color: var(--fwd-danger);
+  background: var(--fwd-danger);
+  color: #fff;
+}
+.fwd-button.secondary.is-danger {
+  border-color: color-mix(in srgb, var(--fwd-danger) 42%, var(--fwd-border));
+  background: var(--fwd-surface);
+  color: var(--fwd-danger);
+}
 .fwd-button:hover, .fwd-button:focus {
   transform: translateY(-1px);
   border-color: var(--fwd-primary-hover);
@@ -1211,8 +1356,33 @@ body {
   background: var(--fwd-primary-soft);
   color: var(--fwd-primary-hover);
 }
+.fwd-button.is-danger:hover, .fwd-button.is-danger:focus {
+  border-color: var(--fwd-danger-hover);
+  background: var(--fwd-danger-hover);
+  box-shadow: 0 6px 14px rgba(220, 38, 38, 0.16);
+}
+.fwd-button.secondary.is-danger:hover, .fwd-button.secondary.is-danger:focus {
+  border-color: var(--fwd-danger);
+  background: var(--fwd-danger-soft);
+  color: var(--fwd-danger-hover);
+}
 .fwd-button:active { transform: translateY(0); box-shadow: none; }
-.fwd-button:disabled { opacity: 0.58; cursor: wait; transform: none; box-shadow: none; }
+.fwd-button:disabled { opacity: 0.52; cursor: not-allowed; transform: none; box-shadow: none; }
+.fwd-button.is-busy:disabled { opacity: 0.76; cursor: wait; }
+.fwd-button.is-busy::after {
+  width: 11px;
+  height: 11px;
+  margin-left: 7px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  content: "";
+  animation: fwd-button-spin 0.7s linear infinite;
+}
+@keyframes fwd-button-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .fwd-button.is-busy::after { animation-duration: 1.4s; }
+}
 .fwd-badge {
   display: inline-flex; align-items: center; min-height: 21px; padding: 0 8px;
   border-radius: 999px; border: 1px solid var(--fwd-border);
@@ -1259,6 +1429,51 @@ body {
 .fwd-field { display: grid; gap: 6px; min-width: 0; }
 .fwd-field label,
 .fwd-field > span:first-child { color: var(--fwd-muted); font-size: 11px; font-weight: 650; }
+.fwd-record-picker { display: grid; gap: 6px; min-width: 0; }
+.fwd-record-picker > [hidden] { display: none; }
+.fwd-collection-editor { display: grid; gap: 8px; min-width: 0; }
+.fwd-collection-rows { display: grid; gap: 7px; min-width: 0; }
+.fwd-collection-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 7px;
+  min-width: 0;
+  padding: 8px 42px 8px 8px;
+  border: 1px solid var(--fwd-border);
+  border-radius: 8px;
+  background: var(--fwd-surface-soft);
+}
+.fwd-collection-field { display: grid; gap: 4px; min-width: 0; }
+.fwd-collection-field > span {
+  overflow: hidden;
+  color: var(--fwd-muted);
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fwd-collection-field.wide { grid-column: span 2; }
+.fwd-collection-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+.fwd-collection-empty {
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px dashed var(--fwd-border);
+  border-radius: 8px;
+  color: var(--fwd-soft);
+  font-size: 11px;
+}
+.fwd-collection-actions { display: flex; justify-content: flex-start; }
 .fwd-input {
   width: 100%;
   min-height: 31px;
@@ -1340,6 +1555,7 @@ select.fwd-input {
   .fwd-page { padding: 8px; }
   .fwd-grid { grid-template-columns: 1fr; }
   .fwd-toolbar { align-items: flex-start; }
+  .fwd-collection-field.wide { grid-column: span 1; }
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -1359,8 +1575,6 @@ select.fwd-input {
     --fwd-success-bg: rgba(34, 197, 94, 0.16);
     --fwd-success-border: rgba(74, 222, 128, 0.44);
     --fwd-success-text: #86efac;
-    --fwd-page-wash-start: rgba(17, 20, 24, 0.92);
-    --fwd-page-wash-end: rgba(17, 20, 24, 0.92);
     --fwd-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
     color-scheme: dark;
   }
@@ -1567,6 +1781,46 @@ select.fwd-input {
     if (typeof onClick === 'function') btn.addEventListener('click', onClick);
     return btn;
   };
+  host.setButtonState = function (button, state) {
+    if (!button) return button;
+    state = state || {};
+    var busy = state.busy === true;
+    var disabled = busy || state.disabled === true;
+    var busyWidth = 0;
+    if (busy && button.dataset && !button.dataset.fwdBusyWidth && typeof button.getBoundingClientRect === 'function') {
+      busyWidth = Math.ceil(Number(button.getBoundingClientRect().width) || 0);
+    }
+    if (state.label != null) button.textContent = String(state.label);
+    if (button.dataset) {
+      if (busy && !button.dataset.fwdBusyWidth && busyWidth > 0) {
+        button.dataset.fwdBusyWidth = String(busyWidth);
+        if (button.style) button.style.minWidth = busyWidth + 'px';
+      } else if (!busy && button.dataset.fwdBusyWidth) {
+        delete button.dataset.fwdBusyWidth;
+        if (button.style) button.style.minWidth = '';
+      }
+      button.dataset.state = String(state.state || (busy ? 'busy' : (disabled ? 'disabled' : 'ready')));
+    }
+    button.disabled = disabled;
+    button.hidden = state.hidden === true;
+    button.title = state.title == null ? '' : String(state.title);
+    if (typeof button.setAttribute === 'function') {
+      button.setAttribute('aria-busy', busy ? 'true' : 'false');
+      button.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    }
+    function toggleClass(name, enabled) {
+      if (button.classList && typeof button.classList.toggle === 'function') {
+        button.classList.toggle(name, enabled);
+        return;
+      }
+      var classes = String(button.className || '').split(/\\s+/).filter(Boolean).filter(function (item) { return item !== name; });
+      if (enabled) classes.push(name);
+      button.className = classes.join(' ');
+    }
+    toggleClass('is-busy', busy);
+    toggleClass('is-danger', state.tone === 'danger');
+    return button;
+  };
   host.badge = function (text, title) {
     return host.h('span', { className: host.classes.badge, text: text, title: title || '' });
   };
@@ -1647,6 +1901,213 @@ select.fwd-input {
       }))
     ]);
   };
+  host.recordPicker = function (options) {
+    options = options || {};
+    var newValue = options.newValue || '__forward_new_record__';
+    var keys = [];
+    var listeners = [];
+    var select = host.h('select', { className: host.classes.input });
+    var input = host.h('input', {
+      className: host.classes.input,
+      attrs: { type: 'text', placeholder: labelValue(options.newPlaceholder) }
+    });
+    var root = host.h('div', { className: 'fwd-record-picker' }, [select, input]);
+
+    function labelValue(value) {
+      return typeof value === 'function' ? String(value() || '') : String(value || '');
+    }
+    function uniqueKeys(values) {
+      var seen = {};
+      return (Array.isArray(values) ? values : []).map(function (value) {
+        return String(value == null ? '' : value).trim();
+      }).filter(function (value) {
+        if (!value || value === newValue || seen[value]) return false;
+        seen[value] = true;
+        return true;
+      }).sort();
+    }
+    function render(selected, forceNew) {
+      selected = String(selected == null ? '' : selected).trim();
+      select.replaceChildren();
+      keys.forEach(function (key) {
+        select.appendChild(host.h('option', { text: key, attrs: { value: key } }));
+      });
+      select.appendChild(host.h('option', {
+        text: labelValue(options.newLabel) || 'New...',
+        attrs: { value: newValue }
+      }));
+      if (!forceNew && selected && keys.indexOf(selected) >= 0) {
+        select.value = selected;
+        input.value = selected;
+        input.hidden = true;
+      } else {
+        select.value = newValue;
+        input.value = selected || labelValue(options.defaultKey);
+        input.hidden = false;
+      }
+      scheduleHeight();
+    }
+    function notifyChange() {
+      var detail = { key: api.value(), isNew: api.isNew() };
+      listeners.slice().forEach(function (listener) { listener(detail); });
+      scheduleHeight();
+    }
+    select.addEventListener('change', function () {
+      if (select.value === newValue) {
+        input.value = '';
+        input.hidden = false;
+        input.focus();
+      } else {
+        input.value = select.value;
+        input.hidden = true;
+      }
+      notifyChange();
+    });
+    input.addEventListener('input', scheduleHeight);
+
+    var api = {
+      element: root,
+      select: select,
+      input: input,
+      value: function () {
+        return select.value === newValue ? input.value.trim() : String(select.value || '').trim();
+      },
+      isNew: function () { return select.value === newValue; },
+      keys: function () { return keys.slice(); },
+      setKeys: function (values, selected, forceNew) {
+        keys = uniqueKeys(values);
+        render(selected, forceNew === true);
+      },
+      selectKey: function (key) {
+        key = String(key == null ? '' : key).trim();
+        render(key, keys.indexOf(key) < 0);
+      },
+      resetNew: function (suggestedKey) {
+        render(String(suggestedKey || ''), true);
+      },
+      refreshLabels: function () {
+        input.placeholder = labelValue(options.newPlaceholder);
+        render(api.value(), api.isNew());
+      },
+      onChange: function (listener) {
+        if (typeof listener === 'function') listeners.push(listener);
+        return api;
+      }
+    };
+    render(labelValue(options.defaultKey), true);
+    return api;
+  };
+  host.collectionEditor = function (options) {
+    options = options || {};
+    var columns = Array.isArray(options.columns) ? options.columns : [];
+    var entries = [];
+    var rows = host.h('div', { className: 'fwd-collection-rows' });
+    var empty = host.h('p', { className: 'fwd-collection-empty' });
+    var addButton = host.button('', function () { add({}); }, true);
+    var root = host.h('div', { className: 'fwd-collection-editor' }, [
+      rows,
+      empty,
+      host.h('div', { className: 'fwd-collection-actions' }, [addButton])
+    ]);
+
+    function labelValue(value) {
+      return typeof value === 'function' ? String(value() || '') : String(value || '');
+    }
+    function updateEmpty() {
+      empty.hidden = entries.length > 0;
+      empty.textContent = labelValue(options.emptyLabel) || 'No entries.';
+      addButton.textContent = labelValue(options.addLabel) || 'Add';
+      scheduleHeight();
+    }
+    function add(value) {
+      value = value && typeof value === 'object' ? value : {};
+      var inputs = {};
+      var fields = columns.map(function (column) {
+        var attrs = {
+          type: column.type || 'text',
+          value: value[column.key] == null ? '' : value[column.key],
+          placeholder: labelValue(column.placeholder),
+          'aria-label': labelValue(column.label) || column.key
+        };
+        ['min', 'max', 'step', 'inputmode'].forEach(function (name) {
+          if (column[name] != null) attrs[name] = column[name];
+        });
+        var input = host.h('input', { className: host.classes.input, attrs: attrs });
+        inputs[column.key] = input;
+        return host.h('label', {
+          className: 'fwd-collection-field' + (column.wide ? ' wide' : '')
+        }, [
+          host.h('span', { text: labelValue(column.label) || column.key, title: labelValue(column.label) || column.key }),
+          input
+        ]);
+      });
+      var remove = host.button(labelValue(options.removeText) || 'x', null, true);
+      remove.className += ' fwd-collection-remove';
+      remove.title = labelValue(options.removeLabel) || 'Remove';
+      remove.setAttribute('aria-label', remove.title);
+      var row = host.h('div', { className: 'fwd-collection-row' }, fields.concat([remove]));
+      var entry = { row: row, inputs: inputs, original: Object.assign({}, value), labels: fields, remove: remove };
+      remove.addEventListener('click', function () {
+        entries = entries.filter(function (item) { return item !== entry; });
+        if (row.parentNode) row.parentNode.removeChild(row);
+        updateEmpty();
+      });
+      entries.push(entry);
+      rows.appendChild(row);
+      updateEmpty();
+      return entry;
+    }
+    function values() {
+      return entries.map(function (entry) {
+        var out = Object.assign({}, entry.original);
+        var populated = false;
+        columns.forEach(function (column) {
+          var raw = String(entry.inputs[column.key].value == null ? '' : entry.inputs[column.key].value).trim();
+          if (!raw) {
+            delete out[column.key];
+            return;
+          }
+          populated = true;
+          out[column.key] = column.type === 'number' ? Number(raw) : raw;
+        });
+        return populated ? out : null;
+      }).filter(Boolean);
+    }
+    function setValues(next) {
+      entries = [];
+      rows.replaceChildren();
+      (Array.isArray(next) ? next : []).forEach(add);
+      updateEmpty();
+    }
+    function refreshLabels() {
+      entries.forEach(function (entry) {
+        columns.forEach(function (column, index) {
+          var label = labelValue(column.label) || column.key;
+          var span = entry.labels[index] && entry.labels[index].querySelector('span');
+          if (span) {
+            span.textContent = label;
+            span.title = label;
+          }
+          entry.inputs[column.key].placeholder = labelValue(column.placeholder);
+          entry.inputs[column.key].setAttribute('aria-label', label);
+        });
+        entry.remove.textContent = labelValue(options.removeText) || 'x';
+        entry.remove.title = labelValue(options.removeLabel) || 'Remove';
+        entry.remove.setAttribute('aria-label', entry.remove.title);
+      });
+      updateEmpty();
+    }
+    var api = {
+      element: root,
+      add: add,
+      setValues: setValues,
+      values: values,
+      refreshLabels: refreshLabels,
+      count: function () { return entries.length; }
+    };
+    updateEmpty();
+    return api;
+  };
   host.data = Object.freeze({
     list: function (resource, options) {
       options = options || {};
@@ -1673,6 +2134,22 @@ select.fwd-input {
     delete: function (resource, key) {
       return rpc('data.delete', { resource: resource, key: key });
     }
+  });
+  host.plugins = Object.freeze({
+    resources: Object.freeze({
+      list: function (plugin, resource, options) {
+        options = options || {};
+        return rpc('plugins.resources.list', {
+          plugin: plugin,
+          resource: resource,
+          limit: options.limit,
+          offset: options.offset
+        });
+      },
+      get: function (plugin, resource, key) {
+        return rpc('plugins.resources.get', { plugin: plugin, resource: resource, key: key });
+      }
+    })
   });
   host.action = function (name, payload) {
     return rpc('action', { action: name, payload: payload || {} });
@@ -1848,6 +2325,16 @@ select.fwd-input {
     return text;
   }
 
+  function pluginUIResourceAccessAllowed(sourcePluginID, targetPluginID, resourceID, method) {
+    const source = (app.state.plugins.data || []).find((plugin) => plugin && plugin.id === sourcePluginID);
+    const control = source && source.control && typeof source.control === 'object' ? source.control : null;
+    const grants = control && Array.isArray(control.resource_access) ? control.resource_access : [];
+    return grants.some((grant) => {
+      if (!grant || grant.plugin !== targetPluginID || grant.resource !== resourceID) return false;
+      return Array.isArray(grant.methods) && grant.methods.includes(method);
+    });
+  }
+
   async function callPluginRPCAPI(pluginId, op, payload) {
     payload = payload && typeof payload === 'object' ? payload : {};
     const id = encodeURIComponent(pluginRPCString(pluginId, 'plugin id'));
@@ -1878,6 +2365,24 @@ select.fwd-input {
     if (op === 'data.delete') {
       if (!key) throw new Error('key is required');
       return app.apiCall('DELETE', '/api/plugins/' + id + '/resources/' + resource + '/' + key);
+    }
+    if (op === 'plugins.resources.list' || op === 'plugins.resources.get') {
+      const targetPluginText = pluginRPCString(payload.plugin, 'target plugin id');
+      const targetResourceText = pluginRPCString(payload.resource, 'target resource id');
+      const method = op === 'plugins.resources.list' ? 'list' : 'get';
+      if (!pluginUIResourceAccessAllowed(pluginId, targetPluginText, targetResourceText, method)) {
+        throw new Error('plugin resource access denied');
+      }
+      const targetPlugin = encodeURIComponent(targetPluginText);
+      const targetResource = encodeURIComponent(targetResourceText);
+      if (method === 'list') {
+        const query = [];
+        if (payload.limit != null && payload.limit !== '') query.push('limit=' + encodeURIComponent(String(payload.limit)));
+        if (payload.offset != null && payload.offset !== '') query.push('offset=' + encodeURIComponent(String(payload.offset)));
+        return app.apiCall('GET', '/api/plugins/' + targetPlugin + '/resources/' + targetResource + (query.length ? '?' + query.join('&') : ''));
+      }
+      const targetKey = encodeURIComponent(pluginRPCString(payload.key, 'target resource key'));
+      return app.apiCall('GET', '/api/plugins/' + targetPlugin + '/resources/' + targetResource + '/' + targetKey);
     }
     if (op === 'action') {
       const action = encodeURIComponent(pluginRPCString(payload.action, 'action'));
@@ -2037,10 +2542,11 @@ select.fwd-input {
 
   function renderPluginCatalogMeta() {
     const el = app.el.pluginsCatalogMeta;
-    if (!el) return;
     const catalog = app.state.plugins.catalog || {};
     const runtime = catalog.runtime || {};
     const hotReload = catalog.hot_reload || null;
+    syncPluginUpdateButton(hotReload);
+    if (!el) return;
     const hotReloadInfo = pluginHotReloadInfo(hotReload);
     const enabled = catalog.external_plugins_enabled !== false;
     const attach = !!runtime.external_dataplane_attach;
@@ -2078,8 +2584,12 @@ select.fwd-input {
       if (hotReload.last_reload_at) {
         items.push(pluginMetaItem(app.t('plugins.catalog.lastReload'), formatPluginHotReloadTimestamp(hotReload.last_reload_at), hotReload.last_reload_error ? 'warning' : 'muted'));
       }
-      if (hotReload.fingerprint_short_hash) {
-        items.push(pluginMetaItem(app.t('plugins.catalog.fingerprint'), hotReload.fingerprint_short_hash, 'mono', hotReload.catalog_fingerprint || hotReload.fingerprint_short_hash));
+      const appliedHash = hotReload.applied_fingerprint_short_hash || hotReload.fingerprint_short_hash || '';
+      if (appliedHash) {
+        items.push(pluginMetaItem(app.t('plugins.catalog.appliedFingerprint'), appliedHash, 'mono', hotReload.applied_fingerprint || hotReload.catalog_fingerprint || appliedHash));
+      }
+      if (hotReload.update_available && hotReload.detected_fingerprint_short_hash) {
+        items.push(pluginMetaItem(app.t('plugins.catalog.detectedFingerprint'), hotReload.detected_fingerprint_short_hash, 'warning', hotReload.detected_fingerprint || hotReload.detected_fingerprint_short_hash));
       }
     }
     el.appendChild(app.createNode('div', { className: 'plugin-meta-items', children: items }));
@@ -2124,6 +2634,13 @@ select.fwd-input {
         detail: app.t('plugins.catalog.hotReloadPartial')
       };
     }
+    if (item.update_available === true || checkResult === 'update_available') {
+      return {
+        text: app.t('plugins.catalog.updateAvailable'),
+        tone: 'warning',
+        detail: app.t('plugins.catalog.updateAvailable')
+      };
+    }
     if (reloadResult === 'success') {
       return {
         text: app.t('plugins.catalog.hotReloadReloaded'),
@@ -2143,6 +2660,32 @@ select.fwd-input {
       tone: 'muted',
       detail: app.t('plugins.catalog.hotReloadIdle')
     };
+  }
+
+  function syncPluginUpdateButton(status) {
+    const button = app.el.applyPluginUpdateBtn;
+    const item = status && typeof status === 'object' ? status : {};
+    const updates = pendingPluginUpdates(item);
+    const available = new Set(updates.map((update) => String(update.plugin_id)));
+    const selected = app.state.plugins.selectedUpdateIDs || {};
+    Object.keys(selected).forEach((id) => {
+      if (!available.has(id)) delete selected[id];
+    });
+    app.state.plugins.selectedUpdateIDs = selected;
+    const selectedIDs = selectedPluginUpdateIDs();
+    const applying = app.state.plugins.applyingUpdate === true;
+    const visible = selectedIDs.length > 0 || applying;
+    if (app.el.pluginUpdateSelectionBar) app.el.pluginUpdateSelectionBar.hidden = !visible;
+    if (app.el.pluginUpdateSelectionMeta) {
+      app.el.pluginUpdateSelectionMeta.textContent = app.t('plugins.update.selected', { count: selectedIDs.length });
+    }
+    if (!button) return;
+    button.hidden = !visible;
+    button.disabled = applying || selectedIDs.length === 0 || app.state.activeRequests > 0;
+    button.classList.toggle('is-busy', applying);
+    button.setAttribute('aria-busy', applying ? 'true' : 'false');
+    button.textContent = app.t(applying ? 'plugins.update.applying' : 'plugins.update.applySelected', { count: selectedIDs.length });
+    button.title = selectedIDs.join(', ');
   }
 
   function formatPluginHotReloadTimestamp(value) {
@@ -2304,7 +2847,9 @@ select.fwd-input {
   app.renderPluginsTable = function renderPluginsTable() {
     const el = app.el;
     const st = app.state.plugins;
-    const data = Array.isArray(st.data) ? st.data : [];
+    const appliedData = Array.isArray(st.data) ? st.data : [];
+    const hotReload = st.catalog && st.catalog.hot_reload;
+    const data = pluginRowsWithPendingUpdates(appliedData, hotReload);
     let filteredList = data.slice();
     if (st.searchQuery) {
       filteredList = filteredList.filter((plugin) => app.matchesSearch(st.searchQuery, pluginSearchValues(plugin)));
@@ -2357,7 +2902,7 @@ select.fwd-input {
         children: [
           app.createStatusBadgeNode(info, ''),
           pluginStabilityBadgeNode(plugin),
-          app.createNode('button', {
+          plugin._pendingOnly ? null : app.createNode('button', {
             className: 'kernel-runtime-detail-trigger plugin-detail-trigger',
             text: app.t('plugins.details'),
             attrs: {
@@ -2377,9 +2922,18 @@ select.fwd-input {
         title: nameTitle
       }), 'plugin-cell-name'));
       tr.appendChild(app.createCell(plugin.kind ? app.createNode('span', { className: 'plugin-text-truncate', text: plugin.kind, title: plugin.kind }) : app.emptyCellNode('stat-muted'), 'plugin-cell-tight'));
-      tr.appendChild(app.createCell(plugin.version ? app.createNode('span', { className: 'plugin-text-truncate', text: plugin.version, title: plugin.version }) : app.emptyCellNode('stat-muted'), 'plugin-cell-tight'));
-      tr.appendChild(app.createCell(pluginUINode(plugin), 'plugin-cell-tight'));
-      tr.appendChild(app.createCell(pluginActionsNode(plugin), 'plugin-cell-tight'));
+      const update = plugin._pendingUpdate;
+      const appliedVersion = update && update.applied_version || plugin.version || '';
+      const detectedVersion = update && update.detected_version || '';
+      const versionText = appliedVersion && detectedVersion && appliedVersion !== detectedVersion
+        ? appliedVersion + ' -> ' + detectedVersion
+        : (detectedVersion || appliedVersion);
+      tr.appendChild(app.createCell(versionText ? app.createNode('span', {
+        className: 'plugin-text-truncate',
+        text: versionText,
+        title: update ? pluginUpdateChoiceTitle(update) : versionText
+      }) : app.emptyCellNode('stat-muted'), 'plugin-cell-tight'));
+      tr.appendChild(app.createCell(pluginControlsNode(plugin), 'plugin-cell-tight'));
       fragment.appendChild(tr);
     });
 
@@ -2395,6 +2949,41 @@ select.fwd-input {
       app.renderPluginsTable();
     } catch (e) {
       if (e.message !== 'unauthorized') console.error('load plugins:', e);
+    }
+  };
+
+  app.togglePluginUpdateSelection = function togglePluginUpdateSelection(pluginId, selected) {
+    const id = String(pluginId || '').trim();
+    if (!id || app.state.plugins.applyingUpdate) return;
+    const updates = pluginUpdateMap(app.state.plugins.catalog && app.state.plugins.catalog.hot_reload);
+    if (!updates.has(id)) return;
+    app.state.plugins.selectedUpdateIDs = app.state.plugins.selectedUpdateIDs || {};
+    if (selected) app.state.plugins.selectedUpdateIDs[id] = true;
+    else delete app.state.plugins.selectedUpdateIDs[id];
+    app.renderPluginsTable();
+  };
+
+  app.applyPluginUpdate = async function applyPluginUpdate() {
+    const hotReload = app.state.plugins.catalog && app.state.plugins.catalog.hot_reload;
+    const pluginIDs = selectedPluginUpdateIDs();
+    if (app.state.plugins.applyingUpdate || !hotReload || pluginIDs.length === 0) return;
+    app.state.plugins.applyingUpdate = true;
+    app.renderPluginsTable();
+    try {
+      const resp = await app.apiCall('POST', '/api/plugins/reload', { plugin_ids: pluginIDs });
+      app.state.plugins.catalog = resp || {};
+      app.state.plugins.data = Array.isArray(resp && resp.plugins) ? resp.plugins : [];
+      app.state.plugins.selectedUpdateIDs = {};
+      renderPluginPageTabs();
+      app.renderPluginsTable();
+      app.notify('success', app.t('plugins.update.appliedSelected', { count: pluginIDs.length }));
+    } catch (e) {
+      await app.loadPlugins();
+      const message = e && e.message ? e.message : String(e);
+      app.notify('error', app.t('plugins.update.failed', { message }));
+    } finally {
+      app.state.plugins.applyingUpdate = false;
+      app.renderPluginsTable();
     }
   };
 
@@ -2502,6 +3091,8 @@ select.fwd-input {
   if (app.__enablePluginTests) {
     app.__pluginLinkRowsForTest = pluginVirtualLinkItems;
     app.__createPluginLinkCardForTest = createPluginVirtualLinkCard;
+    app.__createPluginTabPanelForTest = createPluginTabPanel;
+    app.__decoratePluginHTMLForTest = decoratePluginHTML;
   }
 
   app.refreshLocalizedUI = (function wrapPluginLocalizedUI(original) {
@@ -2541,6 +3132,11 @@ select.fwd-input {
       }
       if (pluginDetailPopover && pluginDetailPopover.contains(e.target)) return;
       hidePluginPopover();
+    });
+    document.addEventListener('change', (e) => {
+      const checkbox = e.target.closest && e.target.closest('.plugin-update-checkbox[data-plugin-id]');
+      if (!checkbox) return;
+      app.togglePluginUpdateSelection(checkbox.dataset.pluginId, checkbox.checked);
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') hidePluginPopover();

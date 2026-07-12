@@ -1,0 +1,1063 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router</title>
+  <style>
+    .router-page { padding: 8px; }
+    .router-hero { padding: 11px 12px; }
+    .router-title { min-width: 0; }
+    .router-badges { justify-content: flex-end; }
+    .router-topology {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .router-node {
+      min-width: 0;
+      padding: 9px 10px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--fwd-surface-soft) 76%, transparent);
+    }
+    .router-node-label {
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 720;
+      line-height: 1.25;
+    }
+    .router-node-value {
+      margin-top: 3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--fwd-text);
+      font-size: 13px;
+      font-weight: 780;
+      line-height: 1.25;
+    }
+    .router-config-grid,
+    .router-output-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .router-section {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--fwd-surface-soft) 72%, transparent);
+    }
+    .router-section > * + * { margin-top: 10px; }
+    .router-section-title {
+      margin: 0;
+      color: var(--fwd-text);
+      font-size: 13px;
+      line-height: 1.25;
+      font-weight: 780;
+    }
+    .router-form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      align-items: end;
+    }
+    .router-field-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 680;
+    }
+    .router-field-label > span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .router-hint {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 999px;
+      color: var(--fwd-soft);
+      background: var(--fwd-surface);
+      font-size: 10px;
+      font-weight: 800;
+      cursor: help;
+    }
+    .router-check-field {
+      min-height: 31px;
+      padding: 5px 8px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 8px;
+      background: var(--fwd-surface);
+    }
+    .router-check-field label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .router-check-field span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .router-check-field .fwd-input[type="checkbox"] { flex: 0 0 auto; }
+    .router-multi-select {
+      position: relative;
+      width: 100%;
+      min-width: 0;
+    }
+    .router-multi-button {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      min-height: 31px;
+      padding: 5px 9px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 8px;
+      background: var(--fwd-surface);
+      color: var(--fwd-text);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 720;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color .12s ease, box-shadow .12s ease;
+    }
+    .router-multi-button:hover,
+    .router-multi-select.is-open .router-multi-button {
+      border-color: color-mix(in srgb, var(--fwd-accent) 45%, var(--fwd-border));
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--fwd-accent) 10%, transparent);
+    }
+    .router-multi-button::after {
+      content: "v";
+      flex: 0 0 auto;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 900;
+    }
+    .router-multi-value {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .router-multi-options {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 50;
+      display: grid;
+      gap: 4px;
+      width: 100%;
+      min-width: 150px;
+      padding: 6px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 9px;
+      background: var(--fwd-surface);
+      box-shadow: 0 12px 32px color-mix(in srgb, var(--fwd-shadow, #000) 16%, transparent);
+    }
+    .router-multi-options[hidden] {
+      display: none !important;
+    }
+    .router-multi-option {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      padding: 5px 6px;
+      border-radius: 7px;
+      color: var(--fwd-text);
+      font-size: 12px;
+      font-weight: 680;
+      cursor: pointer;
+      transition: background .12s ease, color .12s ease;
+    }
+    .router-multi-option:hover {
+      background: color-mix(in srgb, var(--fwd-accent) 10%, transparent);
+    }
+    .router-multi-option input {
+      flex: 0 0 auto;
+      margin: 0;
+    }
+    .router-mode-group[hidden] { display: none !important; }
+    .router-actions { justify-content: flex-end; gap: 8px; }
+    .router-step-list,
+    .router-status-list { display: grid; gap: 7px; }
+    .router-step-group { display: grid; gap: 6px; min-width: 0; }
+    .router-step-group + .router-step-group {
+      margin-top: 3px;
+      padding-top: 10px;
+      border-top: 1px solid var(--fwd-border);
+    }
+    .router-step-group-title {
+      margin: 0;
+      color: var(--fwd-muted);
+      font-size: 11px;
+      font-weight: 760;
+      text-transform: uppercase;
+    }
+    .router-step-group-list { display: grid; gap: 7px; }
+    .router-step,
+    .router-plugin-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.9fr) minmax(0, 1.5fr) auto;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      padding: 7px 8px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 8px;
+      background: var(--fwd-surface);
+    }
+    .router-step-main,
+    .router-plugin-main {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 720;
+    }
+    .router-step-detail,
+    .router-plugin-detail {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--fwd-muted);
+      font-size: 12px;
+    }
+    @media (max-width: 900px) {
+      .router-config-grid,
+      .router-output-grid,
+      .router-topology { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      .router-form-grid,
+      .router-step,
+      .router-plugin-row { grid-template-columns: 1fr; }
+      .router-actions .fwd-button { flex: 1 1 auto; }
+    }
+  </style>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const messages = {
+        'zh-CN': {
+          'status.idle': '空闲',
+          'status.saving': '保存中',
+          'status.saved': '已保存',
+          'status.loading': '加载中',
+          'status.applying': '应用中',
+          'status.applied': '已应用',
+          'status.failed': '失败',
+          'status.tearing': '拆除中',
+          'status.deleted': '已拆除',
+          'status.refreshing': '刷新中',
+          'title': 'Router',
+          'desc': '单 WAN / LAN 配置入口：WAN 选择系统已有出口或 PPPoE，LAN 创建 bridge 并生成 Egress NAT。',
+          'badge.control': 'control only',
+          'badge.single': 'single config',
+          'section.wan': 'WAN',
+          'section.lan': 'LAN',
+          'section.status': '状态摘要',
+          'section.steps': '最近执行步骤',
+          'section.downstream': '下游插件状态',
+          'steps.apply': '应用',
+          'steps.rollback': '回滚',
+          'steps.restore': '恢复原配置',
+          'steps.restoreRollback': '恢复失败回滚',
+          'topology.wan': 'WAN',
+          'topology.lan': 'LAN',
+          'topology.forward': 'Forward Core',
+          'field.wanMode': 'WAN 模式',
+          'field.egress': '出口接口',
+          'field.sourceIP': '出口源 IP',
+          'field.pppoeInterface': 'PPPoE 物理口',
+          'field.randomMac': '随机并固定 MAC',
+          'field.macAddress': '指定 MAC',
+          'field.username': 'PPPoE 用户名',
+          'field.password': 'PPPoE 密码',
+          'field.service': 'Service',
+          'field.auth': '认证',
+          'field.ipv6': '协商 IPv6',
+          'field.pd': '请求 DHCPv6-PD',
+          'field.tunnel': '安装 TC PPPoE 隧道',
+          'field.redial': '自动重拨',
+          'field.bridge': 'Bridge',
+          'field.ports': 'LAN 端口',
+          'field.addresses': '网关 CIDR',
+          'field.lanMtu': 'LAN MTU',
+          'field.autoNat': '自动 Egress NAT',
+          'field.dhcpv4': '启用 DHCPv4',
+          'field.dnsMode': 'DNS 下发',
+          'field.dnsServers': '手动 DNS',
+          'field.protocol': 'NAT 协议',
+          'field.natType': 'NAT 类型',
+          'field.redirect': 'Redirect Mode',
+          'protocol.none': '至少选择一个协议',
+          'hint.egress': '系统已有 WAN 时必填，例如 eth0、pppoe-wan。PPPoE 插件模式通常留空。',
+          'hint.sourceIP': '可选。需要指定 NAT 源地址时填写。',
+          'hint.pppoeTunnel': '实验 PPPoE TC 隧道。生产前需要真实线路验收。',
+          'hint.ports': '逗号分隔，例如 eth1, eth2, eth3。',
+          'hint.dhcpv4': '在 LAN bridge 上提供 DHCPv4，新配置默认开启。',
+          'hint.dnsMode': '自动继承 WAN DNS、手动指定，或不向 LAN 客户端下发 DNS。',
+          'hint.natType': 'symmetric 是默认路由器 NAT；full_cone 会允许外部复用已建立映射回连。',
+          'hint.redirect': '留空使用普通 TC。prepared_l2 只用于已验证 veth handoff peer。',
+          'action.save': '保存',
+          'action.load': '加载',
+          'action.apply': '应用',
+          'action.update': '更新路由器',
+          'action.teardown': '拆除',
+          'action.refresh': '刷新',
+          'hint.noRuntime': '当前路由器配置尚未应用，无需拆除。',
+          'toast.saved': '配置已保存。',
+          'toast.loaded': '配置已加载。',
+          'toast.applied': 'Router 编排已完成。',
+          'toast.deleted': 'Router 编排已拆除。',
+          'toast.defaultLoaded': '还没有保存配置，已使用默认值。',
+          'empty.status': '还没有状态。点击刷新或应用。',
+          'empty.steps': '还没有执行步骤。',
+          'stat.phase': '阶段',
+          'stat.mode': 'WAN',
+          'stat.lan': 'LAN',
+          'stat.egress': '出口',
+          'stat.updated': '更新',
+          'value.existing': '系统已有 WAN',
+          'value.pppoe': 'PPPoE 插件',
+          'value.symmetric': 'Symmetric',
+          'value.fullCone': 'Full Cone',
+          'value.dnsAuto': '自动继承',
+          'value.dnsManual': '手动指定',
+          'value.dnsDisabled': '不下发',
+          'value.ok': '成功',
+          'plugin.wan': 'wan_core',
+          'plugin.lan': 'lan_core',
+          'plugin.egress': 'egress_nat',
+          'plugin.pppoe': 'pppoe_client'
+        },
+        'en-US': {
+          'status.idle': 'Idle',
+          'status.saving': 'Saving',
+          'status.saved': 'Saved',
+          'status.loading': 'Loading',
+          'status.applying': 'Applying',
+          'status.applied': 'Applied',
+          'status.failed': 'Failed',
+          'status.tearing': 'Tearing down',
+          'status.deleted': 'Deleted',
+          'status.refreshing': 'Refreshing',
+          'title': 'Router',
+          'desc': 'Single WAN / LAN config entry: WAN uses an existing system egress or PPPoE, LAN creates a bridge and generated Egress NAT.',
+          'badge.control': 'control only',
+          'badge.single': 'single config',
+          'section.wan': 'WAN',
+          'section.lan': 'LAN',
+          'section.status': 'Status Summary',
+          'section.steps': 'Last Steps',
+          'section.downstream': 'Downstream Plugin Status',
+          'steps.apply': 'Apply',
+          'steps.rollback': 'Rollback',
+          'steps.restore': 'Restore Previous Config',
+          'steps.restoreRollback': 'Restore Rollback',
+          'topology.wan': 'WAN',
+          'topology.lan': 'LAN',
+          'topology.forward': 'Forward Core',
+          'field.wanMode': 'WAN Mode',
+          'field.egress': 'Egress Interface',
+          'field.sourceIP': 'Egress Source IP',
+          'field.pppoeInterface': 'PPPoE Physical Interface',
+          'field.randomMac': 'Random persistent MAC',
+          'field.macAddress': 'Manual MAC',
+          'field.username': 'PPPoE Username',
+          'field.password': 'PPPoE Password',
+          'field.service': 'Service',
+          'field.auth': 'Auth',
+          'field.ipv6': 'Negotiate IPv6',
+          'field.pd': 'Request DHCPv6-PD',
+          'field.tunnel': 'Install TC PPPoE tunnel',
+          'field.redial': 'Auto redial',
+          'field.bridge': 'Bridge',
+          'field.ports': 'LAN Ports',
+          'field.addresses': 'Gateway CIDRs',
+          'field.lanMtu': 'LAN MTU',
+          'field.autoNat': 'Auto Egress NAT',
+          'field.dhcpv4': 'Enable DHCPv4',
+          'field.dnsMode': 'DNS Distribution',
+          'field.dnsServers': 'Manual DNS',
+          'field.protocol': 'NAT Protocol',
+          'field.natType': 'NAT Type',
+          'field.redirect': 'Redirect Mode',
+          'protocol.none': 'Select at least one protocol',
+          'hint.egress': 'Required for existing WAN, e.g. eth0 or pppoe-wan. PPPoE plugin mode usually leaves it blank.',
+          'hint.sourceIP': 'Optional. Fill it only when NAT should use a specific source address.',
+          'hint.pppoeTunnel': 'Experimental PPPoE TC tunnel. Validate on the target ISP line before production use.',
+          'hint.ports': 'Comma-separated, e.g. eth1, eth2, eth3.',
+          'hint.dhcpv4': 'Serve DHCPv4 on the LAN bridge. New configurations enable it by default.',
+          'hint.dnsMode': 'Inherit WAN DNS automatically, specify it manually, or do not distribute DNS to LAN clients.',
+          'hint.natType': 'symmetric is the default router NAT; full_cone allows external peers to reuse an established mapping.',
+          'hint.redirect': 'Blank means normal TC. prepared_l2 is only for verified veth handoff peers.',
+          'action.save': 'Save',
+          'action.load': 'Load',
+          'action.apply': 'Apply',
+          'action.update': 'Update Router',
+          'action.teardown': 'Teardown',
+          'action.refresh': 'Refresh',
+          'hint.noRuntime': 'The router configuration is not applied, so there is nothing to tear down.',
+          'toast.saved': 'Config saved.',
+          'toast.loaded': 'Config loaded.',
+          'toast.applied': 'Router orchestration completed.',
+          'toast.deleted': 'Router orchestration torn down.',
+          'toast.defaultLoaded': 'No saved config yet; defaults are loaded.',
+          'empty.status': 'No status yet. Refresh or apply first.',
+          'empty.steps': 'No executed steps yet.',
+          'stat.phase': 'Phase',
+          'stat.mode': 'WAN',
+          'stat.lan': 'LAN',
+          'stat.egress': 'Egress',
+          'stat.updated': 'Updated',
+          'value.existing': 'Existing system WAN',
+          'value.pppoe': 'PPPoE plugin',
+          'value.symmetric': 'Symmetric',
+          'value.fullCone': 'Full Cone',
+          'value.dnsAuto': 'Auto inherit',
+          'value.dnsManual': 'Manual',
+          'value.dnsDisabled': 'Do not distribute',
+          'value.ok': 'OK',
+          'plugin.wan': 'wan_core',
+          'plugin.lan': 'lan_core',
+          'plugin.egress': 'egress_nat',
+          'plugin.pppoe': 'pppoe_client'
+        }
+      };
+
+      const CONFIG_KEY = 'default';
+      const textBindings = [];
+      const attrBindings = [];
+      let statusKey = 'status.idle';
+      let lastStatus = null;
+      let pendingButton = null;
+      let pendingLabel = '';
+      let saveButton = null;
+      let loadButton = null;
+      let applyButton = null;
+      let teardownButton = null;
+      let refreshButton = null;
+
+      function T(key, params) { return F.t(messages, key, params); }
+      function bindText(node, key, params) {
+        node.textContent = T(key, params);
+        textBindings.push({ node, key, params });
+        return node;
+      }
+      function bindAttr(node, attr, key, params) {
+        node.setAttribute(attr, T(key, params));
+        attrBindings.push({ node, attr, key, params });
+        return node;
+      }
+      function textNode(tag, opts, key, params) { return bindText(F.h(tag, opts || {}), key, params); }
+      function i18nButton(key, handler, secondary) { return bindText(F.button(T(key), handler, secondary), key); }
+      function setStatus(key) { statusKey = key; status.textContent = T(key); }
+
+      const status = F.status(T('status.idle'));
+      const topologyBody = F.h('div', { className: 'router-topology' });
+      const statusBody = F.h('div', { className: F.classes.stack });
+      const stepsBody = F.h('div', { className: 'router-step-list' });
+      const downstreamBody = F.h('div', { className: 'router-status-list' });
+
+      const wanMode = select([['existing', 'value.existing'], ['pppoe', 'value.pppoe']]);
+      const wanEgress = input('', 'eth0 / pppoe-wan');
+      const wanSource = input('', 'optional source IP');
+      const pppoeInterface = input('', 'eth0');
+      const pppoeRandomMac = checkbox(true);
+      const pppoeMacAddress = input('', '02:xx:xx:xx:xx:xx');
+      const pppoeUsername = input('', 'username');
+      const pppoePassword = input('', 'password', 'password');
+      const pppoeService = input('', 'optional');
+      const pppoeAuth = select([['pap', 'PAP'], ['chap', 'CHAP']]);
+      const pppoeIPv6 = checkbox(false);
+      const pppoePD = checkbox(false);
+      const pppoeTunnel = checkbox(true);
+      const pppoeRedial = checkbox(true);
+      const lanBridge = input('br-lan', 'br-lan');
+      const lanPorts = input('', 'eth1, eth2, eth3');
+      const lanAddresses = input('192.168.100.1/24', '192.168.100.1/24, fd00:100::1/64');
+      const lanMtu = input('1500', '1500', 'number');
+      const autoNAT = checkbox(true);
+      const lanDHCPv4 = checkbox(true);
+      const lanDNSMode = select([['auto', 'value.dnsAuto'], ['manual', 'value.dnsManual'], ['disabled', 'value.dnsDisabled']]);
+      const lanDNSServers = input('', '223.5.5.5, 2400:3200::1');
+      let lanDNSServersField = null;
+      const protocolOptions = [['tcp', 'TCP'], ['udp', 'UDP'], ['icmp', 'ICMP']];
+      const protocolChecks = {};
+      const protocolSummary = F.h('span', { className: 'router-multi-value' });
+      let protocolButton = null;
+      let protocolMenu = null;
+      const natProtocol = protocolMultiSelect();
+      const natType = select([['symmetric', 'value.symmetric'], ['full_cone', 'value.fullCone']]);
+      const redirectMode = input('', 'blank / prepared_l2');
+      F.onLocaleChange(refreshI18n);
+
+      function input(value, placeholder, type) {
+        return F.h('input', { className: F.classes.input, attrs: { type: type || 'text', value, placeholder } });
+      }
+      function checkbox(checked) {
+        return F.h('input', { className: F.classes.input, attrs: { type: 'checkbox', checked: !!checked } });
+      }
+      function select(options) {
+        return F.h('select', {
+          className: F.classes.input
+        }, options.map((item) => {
+            const labelKey = item[1];
+            const option = F.h('option', { text: T(labelKey), attrs: { value: item[0] } });
+            if (messages['en-US'][labelKey] || messages['zh-CN'][labelKey]) textBindings.push({ node: option, key: labelKey });
+            else option.textContent = labelKey;
+            return option;
+          }));
+      }
+      function protocolMultiSelect() {
+        protocolButton = F.h('button', { className: 'router-multi-button', attrs: { type: 'button', 'aria-expanded': 'false' } }, [protocolSummary]);
+        protocolMenu = F.h('div', { className: 'router-multi-options', attrs: { hidden: true } }, protocolOptions.map((item) => {
+          const check = F.h('input', { attrs: { type: 'checkbox', value: item[0], checked: true } });
+          protocolChecks[item[0]] = check;
+          check.addEventListener('change', function () {
+            if (!selectedProtocols().length) check.checked = true;
+            updateProtocolSummary();
+          });
+          return F.h('label', { className: 'router-multi-option' }, [
+            check,
+            F.h('span', { text: item[1] })
+          ]);
+        }));
+        const root = F.h('div', { className: 'router-multi-select' }, [protocolButton, protocolMenu]);
+        protocolButton.addEventListener('click', function (event) {
+          event.stopPropagation();
+          setProtocolMenuOpen(protocolMenu.hidden);
+        });
+        protocolMenu.addEventListener('click', function (event) { event.stopPropagation(); });
+        updateProtocolSummary();
+        return root;
+      }
+      function setProtocolMenuOpen(open) {
+        if (!protocolButton || !protocolMenu) return;
+        protocolMenu.hidden = !open;
+        protocolButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+        natProtocol.classList.toggle('is-open', !!open);
+      }
+      function closeProtocolMenu() {
+        setProtocolMenuOpen(false);
+      }
+      function selectedProtocols() {
+        return protocolOptions.filter((item) => protocolChecks[item[0]] && protocolChecks[item[0]].checked).map((item) => item[0]);
+      }
+      function protocolValue() {
+        const selected = selectedProtocols();
+        if (!selected.length) setProtocolValue('tcp+udp+icmp');
+        return selectedProtocols().join('+');
+      }
+      function setProtocolValue(value) {
+        const wanted = new Set(String(value || '').toLowerCase().split('+').map((item) => item.trim()).filter(Boolean));
+        let selected = 0;
+        protocolOptions.forEach((item) => {
+          const enabled = wanted.has(item[0]);
+          protocolChecks[item[0]].checked = enabled;
+          if (enabled) selected += 1;
+        });
+        if (!selected) {
+          protocolOptions.forEach((item) => { protocolChecks[item[0]].checked = true; });
+        }
+        updateProtocolSummary();
+      }
+      function updateProtocolSummary() {
+        const labels = protocolOptions.filter((item) => protocolChecks[item[0]] && protocolChecks[item[0]].checked).map((item) => item[1]);
+        protocolSummary.textContent = labels.length ? labels.join(' / ') : T('protocol.none');
+        protocolSummary.title = protocolValueTitle();
+      }
+      function protocolValueTitle() {
+        const selected = selectedProtocols();
+        return selected.length ? selected.join('+') : T('protocol.none');
+      }
+      document.addEventListener('click', closeProtocolMenu);
+      document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') closeProtocolMenu();
+      });
+      function csv(value) { return value.split(',').map((item) => item.trim()).filter(Boolean); }
+      function payload() {
+        const isPPPoE = wanMode.value === 'pppoe';
+        const data = {
+          wan: {
+            mode: wanMode.value,
+            source_ip: wanSource.value.trim(),
+            egress_interface: isPPPoE ? '' : wanEgress.value.trim()
+          },
+          lan: {
+            bridge: lanBridge.value.trim() || 'br-lan',
+            ports: csv(lanPorts.value),
+            addresses: csv(lanAddresses.value),
+            mtu: Number(lanMtu.value || 1500),
+            auto_egress_nat: autoNAT.checked,
+            dhcpv4_enabled: lanDHCPv4.checked,
+            dns_mode: lanDNSMode.value || 'auto',
+            dns_servers: csv(lanDNSServers.value),
+            protocol: protocolValue(),
+            nat_type: natType.value || 'symmetric',
+            redirect_mode: redirectMode.value.trim()
+          }
+        };
+        if (isPPPoE) {
+          data.wan.pppoe_interface = pppoeInterface.value.trim();
+          data.wan.mac_mode = pppoeRandomMac.checked ? 'random' : 'manual';
+          data.wan.mac_address = pppoeMacAddress.value.trim();
+          data.wan.username = pppoeUsername.value.trim();
+          data.wan.password = pppoePassword.value;
+          data.wan.service = pppoeService.value.trim();
+          data.wan.auth = pppoeAuth.value;
+          data.wan.negotiate_ipv6 = pppoeIPv6.checked;
+          data.wan.request_pd = pppoePD.checked;
+          data.wan.install_tunnel = pppoeTunnel.checked;
+          data.wan.auto_redial = pppoeRedial.checked;
+        }
+        return data;
+      }
+      function setBusy(button, busy, text) {
+        pendingButton = busy ? button : null;
+        pendingLabel = busy && text ? text : '';
+        syncActionButtons();
+      }
+      function routerRuntimeState() {
+        const phase = String(lastStatus && lastStatus.phase || '').toLowerCase();
+        const lan = lastStatus && lastStatus.downstream && lastStatus.downstream.lan_core || {};
+        const lanPhase = String(lan.phase || lan.state || '').toLowerCase();
+        return {
+          applied: phase === 'applied' || lanPhase === 'applied',
+          removable: !!lastStatus && !['', 'not_configured', 'deleted'].includes(phase)
+        };
+      }
+      function syncActionButtons() {
+        if (!applyButton) return;
+        const runtime = routerRuntimeState();
+        [saveButton, loadButton, refreshButton].forEach(function (button) {
+          F.setButtonState(button, {
+            label: button === pendingButton ? pendingLabel : T(button === saveButton ? 'action.save' : (button === loadButton ? 'action.load' : 'action.refresh')),
+            busy: button === pendingButton,
+            disabled: !!pendingButton && button !== pendingButton
+          });
+        });
+        F.setButtonState(applyButton, {
+          label: applyButton === pendingButton ? pendingLabel : T(runtime.applied ? 'action.update' : 'action.apply'),
+          busy: applyButton === pendingButton,
+          disabled: !!pendingButton && applyButton !== pendingButton
+        });
+        F.setButtonState(teardownButton, {
+          label: teardownButton === pendingButton ? pendingLabel : T('action.teardown'),
+          busy: teardownButton === pendingButton,
+          disabled: !runtime.removable || (!!pendingButton && teardownButton !== pendingButton),
+          tone: 'danger',
+          title: runtime.removable ? '' : T('hint.noRuntime')
+        });
+      }
+      async function runButtonTask(button, busyText, task) {
+        if (pendingButton) return;
+        setBusy(button, true, busyText);
+        try {
+          await task();
+        } finally {
+          setBusy(button, false);
+          F.requestResize();
+        }
+      }
+      function field(labelKey, control, hintKey) {
+        const labelChildren = [textNode('span', null, labelKey)];
+        if (hintKey) labelChildren.push(bindAttr(F.h('span', { className: 'router-hint', text: '?' }), 'title', hintKey));
+        return F.h('label', { className: F.classes.field }, [
+          F.h('span', { className: 'router-field-label' }, labelChildren),
+          control
+        ]);
+      }
+      function controlField(labelKey, control, hintKey) {
+        const labelChildren = [textNode('span', null, labelKey)];
+        if (hintKey) labelChildren.push(bindAttr(F.h('span', { className: 'router-hint', text: '?' }), 'title', hintKey));
+        return F.h('div', { className: F.classes.field }, [
+          F.h('span', { className: 'router-field-label' }, labelChildren),
+          control
+        ]);
+      }
+      function checkboxField(labelKey, control, hintKey) {
+        const label = F.h('label', null, [control, textNode('span', null, labelKey)]);
+        if (hintKey) bindAttr(label, 'title', hintKey);
+        return F.h('div', { className: F.classes.field + ' router-check-field' }, [label]);
+      }
+      function section(titleKey, children) {
+        return F.h('section', { className: 'router-section' }, [
+          textNode('h2', { className: 'router-section-title' }, titleKey),
+          F.h('div', { className: 'router-form-grid' }, children)
+        ]);
+      }
+      function refreshI18n() {
+        textBindings.forEach((item) => { item.node.textContent = T(item.key, item.params); });
+        attrBindings.forEach((item) => { item.node.setAttribute(item.attr, T(item.key, item.params)); });
+        status.textContent = T(statusKey);
+        renderStatus();
+        renderTopology();
+        updateModeVisibility();
+        updateProtocolSummary();
+        F.requestResize();
+      }
+
+      async function saveConfig(options) {
+        options = options || {};
+        setStatus('status.saving');
+        try {
+          await F.data.upsert('config', CONFIG_KEY, payload(), { enabled: true });
+          setStatus('status.saved');
+          if (!options.silent) F.toast(T('toast.saved'));
+        } catch (e) {
+          setStatus('status.failed');
+          if (!options.silent) F.toastError(e);
+          throw e;
+        } finally {
+          F.requestResize();
+        }
+      }
+      async function loadConfig(options) {
+        options = options || {};
+        setStatus('status.loading');
+        try {
+          const record = await F.data.get('config', CONFIG_KEY);
+          fillForm(record.data || {});
+          setStatus('status.saved');
+          if (!options.silent) F.toast(T('toast.loaded'));
+        } catch (e) {
+          if (e && e.status && e.status !== 404) {
+            setStatus('status.failed');
+            if (!options.silent) F.toastError(e);
+            throw e;
+          }
+          fillForm({});
+          setStatus('status.idle');
+          if (!options.silent) F.toast(T('toast.defaultLoaded'));
+        } finally {
+          F.requestResize();
+        }
+      }
+      function fillForm(data) {
+        const freshConfig = !data || Object.keys(data).length === 0;
+        const wan = data.wan || data;
+        const lan = data.lan || data;
+        wanMode.value = wan.mode || data.wan_mode || 'existing';
+        wanEgress.value = wan.egress_interface || data.wan_egress_interface || '';
+        wanSource.value = wan.source_ip || data.wan_egress_source_ip || '';
+        pppoeInterface.value = wan.pppoe_interface || data.pppoe_interface || '';
+        pppoeRandomMac.checked = (wan.mac_mode || data.pppoe_mac_mode || (wan.mac_address || data.pppoe_mac_address ? 'manual' : 'random')) !== 'manual';
+        pppoeMacAddress.value = wan.mac_address || data.pppoe_mac_address || '';
+        pppoeUsername.value = wan.username || data.pppoe_username || '';
+        pppoePassword.value = wan.password || data.pppoe_password || '';
+        pppoeService.value = wan.service || data.pppoe_service || '';
+        pppoeAuth.value = wan.auth || data.pppoe_auth || 'pap';
+        pppoeIPv6.checked = wan.negotiate_ipv6 === true || data.pppoe_negotiate_ipv6 === true;
+        pppoePD.checked = wan.request_pd === true || data.pppoe_request_pd === true;
+        pppoeTunnel.checked = wan.install_tunnel !== false && data.pppoe_install_tunnel !== false;
+        pppoeRedial.checked = wan.auto_redial !== false && data.pppoe_auto_redial !== false;
+        lanBridge.value = lan.bridge || data.lan_bridge || 'br-lan';
+        lanPorts.value = Array.isArray(lan.ports) ? lan.ports.join(', ') : (data.lan_ports || data.ports || '');
+        lanAddresses.value = Array.isArray(lan.addresses) ? lan.addresses.join(', ') : (data.lan_addresses || data.addresses || '192.168.100.1/24');
+        lanMtu.value = lan.mtu || data.lan_mtu || 1500;
+        autoNAT.checked = lan.auto_egress_nat !== false && data.auto_egress_nat !== false;
+        lanDHCPv4.checked = lan.dhcpv4_enabled === true || (freshConfig && data.dhcpv4_enabled !== false);
+        lanDNSMode.value = ['auto', 'manual', 'disabled'].includes(lan.dns_mode || data.dns_mode) ? (lan.dns_mode || data.dns_mode) : 'auto';
+        lanDNSServers.value = Array.isArray(lan.dns_servers) ? lan.dns_servers.join(', ') : (data.dns_servers || lan.dns_servers || '');
+        setProtocolValue(lan.protocol || data.egress_nat_protocol || data.protocol || 'tcp+udp+icmp');
+        natType.value = (lan.nat_type || data.egress_nat_type || data.nat_type) === 'full_cone' ? 'full_cone' : 'symmetric';
+        redirectMode.value = lan.redirect_mode || data.redirect_mode || '';
+        updateModeVisibility();
+        updateLANAddressingVisibility();
+      }
+
+      function updateLANAddressingVisibility() {
+        if (lanDNSServersField) lanDNSServersField.hidden = lanDNSMode.value !== 'manual';
+        F.requestResize();
+      }
+      async function loadStatusOnly() {
+        try {
+          const record = await F.data.get('status', CONFIG_KEY);
+          lastStatus = record.data || null;
+        } catch (e) {
+          lastStatus = null;
+        }
+        renderStatus();
+        renderTopology();
+        F.requestResize();
+      }
+      async function refreshStatus() {
+        setStatus('status.refreshing');
+        try {
+          lastStatus = await F.action('refresh_status', payload());
+          await loadStatusOnly();
+          setStatus('status.idle');
+        } catch (e) {
+          setStatus('status.failed');
+          F.toastError(e);
+        } finally {
+          F.requestResize();
+        }
+      }
+      async function applyRouter(button) {
+        setBusy(button, true, T('status.applying'));
+        setStatus('status.applying');
+        try {
+          lastStatus = await F.action('apply_router', payload());
+          await loadStatusOnly();
+          setStatus('status.applied');
+          F.toast(T('toast.applied'));
+        } catch (e) {
+          setStatus('status.failed');
+          F.toastError(e);
+          await loadStatusOnly();
+        } finally {
+          setBusy(button, false, T('action.apply'));
+          F.requestResize();
+        }
+      }
+      async function teardownRouter(button) {
+        setBusy(button, true, T('status.tearing'));
+        setStatus('status.tearing');
+        try {
+          lastStatus = await F.action('teardown_router', payload());
+          await loadStatusOnly();
+          setStatus('status.deleted');
+          F.toast(T('toast.deleted'));
+        } catch (e) {
+          setStatus('status.failed');
+          F.toastError(e);
+          await loadStatusOnly();
+        } finally {
+          setBusy(button, false, T('action.teardown'));
+          F.requestResize();
+        }
+      }
+      function renderTopology() {
+        topologyBody.replaceChildren();
+        topologyBody.appendChild(topologyNode(T('topology.wan'), wanMode.value === 'pppoe' ? T('value.pppoe') : (wanEgress.value.trim() || T('value.existing'))));
+        topologyBody.appendChild(topologyNode(T('topology.lan'), lanBridge.value.trim() || 'br-lan'));
+        topologyBody.appendChild(topologyNode(T('topology.forward'), 'Egress NAT'));
+      }
+      function topologyNode(label, value) {
+        return F.h('div', { className: 'router-node' }, [
+          F.h('div', { className: 'router-node-label', text: label }),
+          F.h('div', { className: 'router-node-value', text: value || '-' })
+        ]);
+      }
+      function renderStatus() {
+        statusBody.replaceChildren();
+        stepsBody.replaceChildren();
+        downstreamBody.replaceChildren();
+        if (!lastStatus) {
+          statusBody.appendChild(F.h('p', { className: F.classes.description, text: T('empty.status') }));
+          stepsBody.appendChild(F.h('p', { className: F.classes.description, text: T('empty.steps') }));
+          syncActionButtons();
+          return;
+        }
+        statusBody.appendChild(F.h('div', { className: F.classes.grid }, [
+          F.stat(T('stat.phase'), lastStatus.phase || '-'),
+          F.stat(T('stat.mode'), lastStatus.wan_mode || '-'),
+          F.stat(T('stat.lan'), [lastStatus.lan_id, lastStatus.lan_bridge].filter(Boolean).join(' / ') || '-'),
+          F.stat(T('stat.egress'), lastStatus.wan_egress_interface || '-'),
+          F.stat(T('stat.updated'), lastStatus.updated_at || '-')
+        ]));
+        const stepGroups = [
+          ['steps.apply', lastStatus.steps],
+          ['steps.rollback', lastStatus.rollback_steps],
+          ['steps.restore', lastStatus.restore_steps],
+          ['steps.restoreRollback', lastStatus.restore_rollback_steps]
+        ];
+        let hasSteps = false;
+        stepGroups.forEach(function (group) {
+          if (appendStepGroup(group[0], group[1])) hasSteps = true;
+        });
+        if (!hasSteps) {
+          stepsBody.appendChild(F.h('p', { className: F.classes.description, text: T('empty.steps') }));
+        }
+        const downstream = lastStatus.downstream || {};
+        downstreamBody.appendChild(pluginRow(T('plugin.wan'), downstream.wan_core));
+        downstreamBody.appendChild(pluginRow(T('plugin.lan'), downstream.lan_core));
+        downstreamBody.appendChild(pluginRow(T('plugin.egress'), downstream.egress_nat));
+        downstreamBody.appendChild(pluginRow(T('plugin.pppoe'), downstream.pppoe_link || downstream.pppoe_last));
+        syncActionButtons();
+      }
+      function pluginRow(label, item) {
+        item = item || {};
+        const phase = item.phase || 'not_configured';
+        const detail = [
+          item.interface || '',
+          item.parent_interface ? 'parent=' + item.parent_interface : '',
+          item.out_interface ? 'out=' + item.out_interface : '',
+          item.source_ip ? 'src=' + item.source_ip : '',
+          item.last_error || item.note || ''
+        ].filter(Boolean).join(' | ');
+        return F.h('div', { className: 'router-plugin-row' }, [
+          F.h('div', { className: 'router-plugin-main', text: label || '-' }),
+          F.h('div', { className: 'router-plugin-detail', text: detail || '-', attrs: { title: detail || '' } }),
+          F.status(phase)
+        ]);
+      }
+      function appendStepGroup(labelKey, values) {
+        const steps = Array.isArray(values) ? values : [];
+        if (!steps.length) return false;
+        const rows = steps.map(function (step) {
+          const detail = step.ok === false ? (step.error || '-') : (step.detail || T('value.ok'));
+          return F.h('div', { className: 'router-step' }, [
+            F.h('div', { className: 'router-step-main', text: step.name || '-' }),
+            F.h('div', { className: 'router-step-detail', text: detail, attrs: { title: step.error || step.detail || '' } }),
+            F.status(step.ok === false ? 'error' : 'ok')
+          ]);
+        });
+        stepsBody.appendChild(F.h('section', { className: 'router-step-group' }, [
+          F.h('h3', { className: 'router-step-group-title', text: T(labelKey) }),
+          F.h('div', { className: 'router-step-group-list' }, rows)
+        ]));
+        return true;
+      }
+      function updateModeVisibility() {
+        const isPPPoE = wanMode.value === 'pppoe';
+        existingFields.hidden = isPPPoE;
+        pppoeFields.hidden = !isPPPoE;
+        wanEgress.disabled = isPPPoE;
+        pppoeInterface.disabled = !isPPPoE;
+        pppoeRandomMac.disabled = !isPPPoE;
+        pppoeMacAddress.disabled = !isPPPoE || pppoeRandomMac.checked;
+        pppoeUsername.disabled = !isPPPoE;
+        pppoePassword.disabled = !isPPPoE;
+        pppoeService.disabled = !isPPPoE;
+        pppoeAuth.disabled = !isPPPoE;
+        pppoeIPv6.disabled = !isPPPoE;
+        pppoePD.disabled = !isPPPoE;
+        pppoeTunnel.disabled = !isPPPoE;
+        pppoeRedial.disabled = !isPPPoE;
+        renderTopology();
+        F.requestResize();
+      }
+
+      wanMode.addEventListener('change', updateModeVisibility);
+      pppoeRandomMac.addEventListener('change', updateModeVisibility);
+      [wanEgress, lanBridge].forEach((node) => node.addEventListener('input', renderTopology));
+      lanDNSMode.addEventListener('change', updateLANAddressingVisibility);
+
+      const existingFields = F.h('div', { className: 'router-form-grid router-mode-group' }, [
+        field('field.egress', wanEgress, 'hint.egress'),
+        field('field.sourceIP', wanSource, 'hint.sourceIP')
+      ]);
+      const pppoeFields = F.h('div', { className: 'router-form-grid router-mode-group' }, [
+        field('field.pppoeInterface', pppoeInterface),
+        checkboxField('field.randomMac', pppoeRandomMac),
+        field('field.macAddress', pppoeMacAddress),
+        field('field.username', pppoeUsername),
+        field('field.password', pppoePassword),
+        field('field.service', pppoeService),
+        field('field.auth', pppoeAuth),
+        checkboxField('field.tunnel', pppoeTunnel, 'hint.pppoeTunnel'),
+        checkboxField('field.redial', pppoeRedial),
+        checkboxField('field.ipv6', pppoeIPv6),
+        checkboxField('field.pd', pppoePD)
+      ]);
+      const wanSection = F.h('section', { className: 'router-section' }, [
+        textNode('h2', { className: 'router-section-title' }, 'section.wan'),
+        F.h('div', { className: 'router-form-grid' }, [
+          field('field.wanMode', wanMode)
+        ]),
+        existingFields,
+        pppoeFields
+      ]);
+      lanDNSServersField = field('field.dnsServers', lanDNSServers);
+      const lanSection = section('section.lan', [
+        field('field.bridge', lanBridge),
+        field('field.ports', lanPorts, 'hint.ports'),
+        field('field.addresses', lanAddresses),
+        field('field.lanMtu', lanMtu),
+        checkboxField('field.autoNat', autoNAT),
+        checkboxField('field.dhcpv4', lanDHCPv4, 'hint.dhcpv4'),
+        field('field.dnsMode', lanDNSMode, 'hint.dnsMode'),
+        lanDNSServersField,
+        controlField('field.protocol', natProtocol),
+        field('field.natType', natType, 'hint.natType'),
+        field('field.redirect', redirectMode, 'hint.redirect')
+      ]);
+      saveButton = i18nButton('action.save', function () {
+        runButtonTask(saveButton, T('status.saving'), function () { return saveConfig(); }).catch(function () {});
+      });
+      loadButton = i18nButton('action.load', function () {
+        runButtonTask(loadButton, T('status.loading'), function () { return loadConfig({ silent: false }); }).catch(function () {});
+      }, true);
+      applyButton = i18nButton('action.apply', function () { applyRouter(applyButton); });
+      teardownButton = i18nButton('action.teardown', function () { teardownRouter(teardownButton); }, true);
+      refreshButton = i18nButton('action.refresh', function () {
+        runButtonTask(refreshButton, T('status.refreshing'), refreshStatus).catch(function () {});
+      }, true);
+      syncActionButtons();
+      updateLANAddressingVisibility();
+      const page = F.h('main', { className: F.classes.page + ' router-page' }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', { className: 'router-title' }, [
+                textNode('h1', { className: F.classes.title }, 'title'),
+                textNode('p', { className: F.classes.description }, 'desc')
+              ]),
+              F.h('div', { className: F.classes.toolbar + ' router-badges' }, [
+                bindText(F.badge(T('badge.control')), 'badge.control'),
+                bindText(F.badge(T('badge.single')), 'badge.single'),
+                status
+              ])
+            ])
+          ], { className: 'router-hero' }),
+          F.card([topologyBody]),
+          F.card([
+            F.h('div', { className: 'router-config-grid' }, [wanSection, lanSection]),
+            F.h('div', { className: F.classes.toolbar + ' router-actions' }, [
+              saveButton,
+              loadButton,
+              applyButton,
+              teardownButton,
+              refreshButton
+            ])
+          ]),
+          F.h('div', { className: 'router-output-grid' }, [
+            F.card([textNode('h2', { className: F.classes.title }, 'section.status'), statusBody]),
+            F.card([textNode('h2', { className: F.classes.title }, 'section.steps'), stepsBody])
+          ]),
+          F.card([textNode('h2', { className: F.classes.title }, 'section.downstream'), downstreamBody])
+        ])
+      ]);
+
+      document.body.replaceChildren(page);
+      fillForm({});
+      updateModeVisibility();
+      Promise.all([
+        loadConfig({ silent: true }),
+        loadStatusOnly()
+      ]).catch(function (e) { F.toastError(e); }).finally(F.requestResize);
+    })();
+  </script>
+</body>
+</html>

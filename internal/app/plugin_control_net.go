@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/dop251/goja"
@@ -14,12 +15,18 @@ type pluginControlNetAdmin interface {
 	LinkList() ([]pluginControlNetLinkInfo, error)
 	LinkEnsureBridge(req pluginControlNetBridgeRequest) (pluginControlNetLinkInfo, error)
 	LinkEnsureVeth(req pluginControlNetVethRequest) (pluginControlNetVethResult, error)
+	LinkEnsureDummy(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error)
+	LinkEnsureMacvlan(req pluginControlNetMacvlanRequest) (pluginControlNetMacvlanResult, error)
 	LinkDelete(name string) error
 	LinkSetMaster(req pluginControlNetMasterRequest) (pluginControlNetLinkInfo, error)
 	LinkClearMaster(name string) (pluginControlNetLinkInfo, error)
 	LinkSetUp(name string, up bool) error
 	LinkSetMTU(name string, mtu int) error
+	LinkSetARP(name string, enabled bool) (pluginControlNetLinkInfo, error)
+	LinkSetPromiscuous(name string, enabled bool) (pluginControlNetLinkInfo, error)
+	LinkGetOffloads(name string) (map[string]bool, error)
 	LinkSetOffloads(req pluginControlNetOffloadRequest) error
+	LinkSetGSO(req pluginControlNetGSORequest) (pluginControlNetLinkInfo, error)
 	AddrReplace(req pluginControlNetAddrRequest) error
 	AddrDelete(req pluginControlNetAddrRequest) error
 	RouteReplace(req pluginControlNetRouteRequest) error
@@ -34,12 +41,28 @@ type pluginControlNetLinkInfo struct {
 	MTU           int
 	MAC           string
 	Up            bool
+	ARP           bool
 	OperState     string
 	Addresses     []string
 	PeerName      string
 	PeerIfIndex   int
 	MasterName    string
 	MasterIfIndex int
+	Promiscuous   bool
+	GSOMaxSize    int
+	GSOMaxSegs    int
+	Statistics    *pluginControlNetLinkStatistics
+}
+
+type pluginControlNetLinkStatistics struct {
+	RXPackets uint64
+	TXPackets uint64
+	RXBytes   uint64
+	TXBytes   uint64
+	RXErrors  uint64
+	TXErrors  uint64
+	RXDropped uint64
+	TXDropped uint64
 }
 
 type pluginControlNetVethRequest struct {
@@ -50,8 +73,34 @@ type pluginControlNetVethRequest struct {
 }
 
 type pluginControlNetVethResult struct {
-	Host pluginControlNetLinkInfo
-	Peer pluginControlNetLinkInfo
+	Host    pluginControlNetLinkInfo
+	Peer    pluginControlNetLinkInfo
+	Created bool
+}
+
+type pluginControlNetDummyRequest struct {
+	Name string
+	MTU  int
+	Up   bool
+}
+
+type pluginControlNetDummyResult struct {
+	Link    pluginControlNetLinkInfo
+	Created bool
+}
+
+type pluginControlNetMacvlanRequest struct {
+	Name   string
+	Parent string
+	Mode   string
+	MAC    string
+	MTU    int
+	Up     bool
+}
+
+type pluginControlNetMacvlanResult struct {
+	Link    pluginControlNetLinkInfo
+	Created bool
 }
 
 type pluginControlNetBridgeRequest struct {
@@ -84,6 +133,12 @@ type pluginControlNetRouteRequest struct {
 type pluginControlNetOffloadRequest struct {
 	Interface string
 	Features  map[string]bool
+}
+
+type pluginControlNetGSORequest struct {
+	Interface string
+	MaxSize   int
+	MaxSegs   int
 }
 
 func (h *pluginControlHost) netAdminOrThrow(operation string) pluginControlNetAdmin {
@@ -165,9 +220,112 @@ func (h *pluginControlHost) netLinkEnsureVeth(call goja.FunctionCall) goja.Value
 		h.throwf("net.link.ensureVeth: %v", err)
 	}
 	return h.vm.ToValue(map[string]any{
-		"host": pluginControlNetLinkInfoMap(result.Host),
-		"peer": pluginControlNetLinkInfoMap(result.Peer),
+		"host":    pluginControlNetLinkInfoMap(result.Host),
+		"peer":    pluginControlNetLinkInfoMap(result.Peer),
+		"created": result.Created,
 	})
+}
+
+func (h *pluginControlHost) netLinkEnsureDummy(call goja.FunctionCall) goja.Value {
+	admin := h.netAdminOrThrow("net.link.ensureDummy")
+	obj := h.requiredObjectArg(call, 0, "request")
+	req := pluginControlNetDummyRequest{
+		Name: h.firstStringObjectField(obj, "name", "interface", "link"),
+		MTU:  h.optionalIntObjectField(obj, 0, "mtu"),
+		Up:   true,
+	}
+	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+		req.Up = raw.ToBoolean()
+	}
+	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
+		h.throwf("net.link.ensureDummy: %v", err)
+	}
+	if req.MTU != 0 && (req.MTU < 576 || req.MTU > 65535) {
+		h.throwf("net.link.ensureDummy: mtu must be between 576 and 65535")
+	}
+	h.requireNetAccess("link.create", req.Name, "net.link.ensureDummy")
+	result, err := admin.LinkEnsureDummy(req)
+	if err != nil {
+		h.throwf("net.link.ensureDummy: %v", err)
+	}
+	return h.vm.ToValue(map[string]any{
+		"link":    pluginControlNetLinkInfoMap(result.Link),
+		"created": result.Created,
+	})
+}
+
+func (h *pluginControlHost) netLinkEnsureMacvlan(call goja.FunctionCall) goja.Value {
+	admin := h.netAdminOrThrow("net.link.ensureMacvlan")
+	obj := h.requiredObjectArg(call, 0, "request")
+	req := pluginControlNetMacvlanRequest{
+		Name:   h.firstStringObjectField(obj, "name", "interface", "link"),
+		Parent: h.firstStringObjectField(obj, "parent", "parent_interface", "physical_interface"),
+		Mode:   strings.ToLower(h.firstStringObjectField(obj, "mode")),
+		MAC:    h.firstStringObjectField(obj, "mac", "mac_address", "address"),
+		MTU:    h.optionalIntObjectField(obj, 0, "mtu"),
+		Up:     true,
+	}
+	if req.Mode == "" {
+		req.Mode = "bridge"
+	}
+	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+		req.Up = raw.ToBoolean()
+	}
+	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
+		h.throwf("net.link.ensureMacvlan: %v", err)
+	}
+	if err := validatePluginControlInterfaceName(req.Parent, "parent"); err != nil {
+		h.throwf("net.link.ensureMacvlan: %v", err)
+	}
+	if req.Name == req.Parent {
+		h.throwf("net.link.ensureMacvlan: name and parent must be different")
+	}
+	switch req.Mode {
+	case "bridge", "private", "vepa", "passthru":
+	default:
+		h.throwf("net.link.ensureMacvlan: mode must be bridge, private, vepa or passthru")
+	}
+	if req.MTU != 0 && (req.MTU < 576 || req.MTU > 65535) {
+		h.throwf("net.link.ensureMacvlan: mtu must be between 576 and 65535")
+	}
+	if req.MAC != "" {
+		normalized, err := normalizePluginControlUnicastMAC(req.MAC)
+		if err != nil {
+			h.throwf("net.link.ensureMacvlan: %v", err)
+		}
+		req.MAC = normalized
+	}
+	h.requireNetAccess("link.read", req.Parent, "net.link.ensureMacvlan")
+	h.requireNetAccess("link.create", req.Name, "net.link.ensureMacvlan")
+	result, err := admin.LinkEnsureMacvlan(req)
+	if err != nil {
+		h.throwf("net.link.ensureMacvlan: %v", err)
+	}
+	return h.vm.ToValue(map[string]any{
+		"link":    pluginControlNetLinkInfoMap(result.Link),
+		"created": result.Created,
+	})
+}
+
+func normalizePluginControlUnicastMAC(value string) (string, error) {
+	hardwareAddr, err := net.ParseMAC(strings.TrimSpace(value))
+	if err != nil || len(hardwareAddr) != 6 {
+		return "", fmt.Errorf("mac must be a 6-byte address")
+	}
+	if hardwareAddr[0]&1 != 0 {
+		return "", fmt.Errorf("mac must be a unicast address")
+	}
+	allZero := true
+	for _, part := range hardwareAddr {
+		if part != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return "", fmt.Errorf("mac must not be all zero")
+	}
+	return strings.ToLower(hardwareAddr.String()), nil
 }
 
 func (h *pluginControlHost) netLinkEnsureBridge(call goja.FunctionCall) goja.Value {
@@ -276,6 +434,36 @@ func (h *pluginControlHost) netLinkSetMTU(call goja.FunctionCall) goja.Value {
 	return goja.Undefined()
 }
 
+func (h *pluginControlHost) netLinkSetARP(call goja.FunctionCall) goja.Value {
+	admin := h.netAdminOrThrow("net.link.setARP")
+	name := h.requiredNetStringArg(call, 0, "name")
+	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
+		h.throwf("net.link.setARP: enabled is required")
+	}
+	enabled := call.Arguments[1].ToBoolean()
+	h.requireNetAccess("link.state", name, "net.link.setARP")
+	info, err := admin.LinkSetARP(name, enabled)
+	if err != nil {
+		h.throwf("net.link.setARP: %v", err)
+	}
+	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
+}
+
+func (h *pluginControlHost) netLinkSetPromiscuous(call goja.FunctionCall) goja.Value {
+	admin := h.netAdminOrThrow("net.link.setPromiscuous")
+	name := h.requiredNetStringArg(call, 0, "name")
+	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
+		h.throwf("net.link.setPromiscuous: enabled is required")
+	}
+	enabled := call.Arguments[1].ToBoolean()
+	h.requireNetAccess("link.state", name, "net.link.setPromiscuous")
+	info, err := admin.LinkSetPromiscuous(name, enabled)
+	if err != nil {
+		h.throwf("net.link.setPromiscuous: %v", err)
+	}
+	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
+}
+
 func (h *pluginControlHost) netLinkSetOffloads(call goja.FunctionCall) goja.Value {
 	admin := h.netAdminOrThrow("net.link.setOffloads")
 	name := h.requiredNetStringArg(call, 0, "name")
@@ -301,6 +489,45 @@ func (h *pluginControlHost) netLinkSetOffloads(call goja.FunctionCall) goja.Valu
 	return goja.Undefined()
 }
 
+func (h *pluginControlHost) netLinkGetOffloads(call goja.FunctionCall) goja.Value {
+	admin := h.netAdminOrThrow("net.link.getOffloads")
+	name := h.requiredNetStringArg(call, 0, "name")
+	h.requireNetAccess("link.read", name, "net.link.getOffloads")
+	features, err := admin.LinkGetOffloads(name)
+	if err != nil {
+		h.throwf("net.link.getOffloads: %v", err)
+	}
+	return h.vm.ToValue(features)
+}
+
+func (h *pluginControlHost) netLinkSetGSO(call goja.FunctionCall) goja.Value {
+	admin := h.netAdminOrThrow("net.link.setGSO")
+	name := h.requiredNetStringArg(call, 0, "name")
+	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
+		h.throwf("net.link.setGSO: limits are required")
+	}
+	obj := call.Arguments[1].ToObject(h.vm)
+	for _, key := range obj.Keys() {
+		if key != "max_size" && key != "max_segs" {
+			h.throwf("net.link.setGSO: unsupported limit %q", key)
+		}
+	}
+	maxSize := int(obj.Get("max_size").ToInteger())
+	maxSegs := int(obj.Get("max_segs").ToInteger())
+	if maxSize < 576 || maxSize > 65536 {
+		h.throwf("net.link.setGSO: max_size must be between 576 and 65536")
+	}
+	if maxSegs < 1 || maxSegs > 65535 {
+		h.throwf("net.link.setGSO: max_segs must be between 1 and 65535")
+	}
+	h.requireNetAccess("link.offload", name, "net.link.setGSO")
+	info, err := admin.LinkSetGSO(pluginControlNetGSORequest{Interface: name, MaxSize: maxSize, MaxSegs: maxSegs})
+	if err != nil {
+		h.throwf("net.link.setGSO: %v", err)
+	}
+	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
+}
+
 func isAllowedPluginControlOffloadFeature(name string) bool {
 	switch name {
 	case "rx", "tx", "sg", "tso", "ufo", "gso", "gro", "lro":
@@ -308,6 +535,36 @@ func isAllowedPluginControlOffloadFeature(name string) bool {
 	default:
 		return false
 	}
+}
+
+func parsePluginControlOffloadFeatures(output string) map[string]bool {
+	aliases := map[string]string{
+		"rx-checksumming":              "rx",
+		"tx-checksumming":              "tx",
+		"scatter-gather":               "sg",
+		"tcp-segmentation-offload":     "tso",
+		"udp-fragmentation-offload":    "ufo",
+		"generic-segmentation-offload": "gso",
+		"generic-receive-offload":      "gro",
+		"large-receive-offload":        "lro",
+	}
+	out := make(map[string]bool, len(aliases))
+	for _, line := range strings.Split(output, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		feature, ok := aliases[strings.TrimSpace(strings.ToLower(parts[0]))]
+		if !ok {
+			continue
+		}
+		state := strings.Fields(strings.TrimSpace(strings.ToLower(parts[1])))
+		if len(state) == 0 || (state[0] != "on" && state[0] != "off") {
+			continue
+		}
+		out[feature] = state[0] == "on"
+	}
+	return out
 }
 
 func (h *pluginControlHost) netAddrReplace(call goja.FunctionCall) goja.Value {
@@ -318,6 +575,34 @@ func (h *pluginControlHost) netAddrReplace(call goja.FunctionCall) goja.Value {
 		h.throwf("net.addr.replace: %v", err)
 	}
 	return goja.Undefined()
+}
+
+func (h *pluginControlHost) netPrefixSubnet(call goja.FunctionCall) goja.Value {
+	if h.upgradePhase {
+		h.throwf("net.prefix.subnet is unavailable during plugin upgrade snapshot/restore")
+	}
+	obj := h.requiredObjectArg(call, 0, "request")
+	prefixText := h.firstStringObjectField(obj, "prefix", "cidr", "parent_prefix")
+	if prefixText == "" {
+		h.throwf("net.prefix.subnet: prefix is required")
+	}
+	newLength := h.optionalIntObjectField(obj, -1, "new_length", "prefix_length", "length")
+	if newLength < 0 || newLength > 128 {
+		h.throwf("net.prefix.subnet: new_length must be between 0 and 128")
+	}
+	rawIndex := h.optionalIntObjectField(obj, 0, "index", "subnet_index")
+	if rawIndex < 0 {
+		h.throwf("net.prefix.subnet: index must not be negative")
+	}
+	_, parent, err := normalizeIPv6Prefix(prefixText)
+	if err != nil {
+		h.throwf("net.prefix.subnet: %v", err)
+	}
+	subnet, err := pluginIPv6SubnetByIndex(parent, newLength, uint64(rawIndex))
+	if err != nil {
+		h.throwf("net.prefix.subnet: %v", err)
+	}
+	return h.vm.ToValue(subnet.String())
 }
 
 func (h *pluginControlHost) netAddrDelete(call goja.FunctionCall) goja.Value {
@@ -460,7 +745,7 @@ func validatePluginControlInterfaceName(value string, field string) error {
 }
 
 func pluginControlNetLinkInfoMap(info pluginControlNetLinkInfo) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"name":           info.Name,
 		"ifindex":        info.IfIndex,
 		"kind":           info.Kind,
@@ -468,11 +753,28 @@ func pluginControlNetLinkInfoMap(info pluginControlNetLinkInfo) map[string]any {
 		"mtu":            info.MTU,
 		"mac":            info.MAC,
 		"up":             info.Up,
+		"arp":            info.ARP,
 		"oper_state":     info.OperState,
 		"addresses":      append([]string(nil), info.Addresses...),
 		"peer_name":      info.PeerName,
 		"peer_ifindex":   info.PeerIfIndex,
 		"master_name":    info.MasterName,
 		"master_ifindex": info.MasterIfIndex,
+		"promiscuous":    info.Promiscuous,
+		"gso_max_size":   info.GSOMaxSize,
+		"gso_max_segs":   info.GSOMaxSegs,
 	}
+	if info.Statistics != nil {
+		out["statistics"] = map[string]uint64{
+			"rx_packets": info.Statistics.RXPackets,
+			"tx_packets": info.Statistics.TXPackets,
+			"rx_bytes":   info.Statistics.RXBytes,
+			"tx_bytes":   info.Statistics.TXBytes,
+			"rx_errors":  info.Statistics.RXErrors,
+			"tx_errors":  info.Statistics.TXErrors,
+			"rx_dropped": info.Statistics.RXDropped,
+			"tx_dropped": info.Statistics.TXDropped,
+		}
+	}
+	return out
 }

@@ -24,6 +24,12 @@ func (rt *linuxKernelRuleRuntime) GetPluginMapValue(pluginID string, objectID st
 	return getPluginMapValueInRefs(rt.pluginPipelineLoaded, pluginID, objectID, mapName, key)
 }
 
+func (rt *linuxKernelRuleRuntime) GetPluginMapPerCPUValues(pluginID string, objectID string, mapName string, key []byte) ([][]byte, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return getPluginMapPerCPUValuesInRefs(rt.pluginPipelineLoaded, pluginID, objectID, mapName, key)
+}
+
 func (rt *linuxKernelRuleRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -46,6 +52,12 @@ func (rt *linuxPluginDataplaneRuntime) GetPluginMapValue(pluginID string, object
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return getPluginMapValueInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, key)
+}
+
+func (rt *linuxPluginDataplaneRuntime) GetPluginMapPerCPUValues(pluginID string, objectID string, mapName string, key []byte) ([][]byte, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return getPluginMapPerCPUValuesInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, key)
 }
 
 func (rt *linuxPluginDataplaneRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
@@ -100,6 +112,43 @@ func getPluginMapValueInRefs(refs []loadedPluginObjectRef, pluginID string, obje
 	return value, nil
 }
 
+func getPluginMapPerCPUValuesInRefs(refs []loadedPluginObjectRef, pluginID string, objectID string, mapName string, key []byte) ([][]byte, error) {
+	m, err := findPluginLoadedMap(refs, pluginID, objectID, mapName)
+	if err != nil {
+		return nil, err
+	}
+	if int(m.KeySize()) != len(key) {
+		return nil, fmt.Errorf("map %s key size = %d, want %d", mapName, len(key), m.KeySize())
+	}
+	switch m.Type() {
+	case ebpf.PerCPUArray, ebpf.PerCPUHash, ebpf.PerCPUCGroupStorage:
+	default:
+		return nil, fmt.Errorf("map %s type %s is not per-CPU", mapName, m.Type())
+	}
+	raw, err := m.LookupBytes(key)
+	if err != nil {
+		return nil, fmt.Errorf("get per-CPU map %s: %w", mapName, err)
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("get per-CPU map %s: %w", mapName, ebpf.ErrKeyNotExist)
+	}
+	possibleCPUs, err := ebpf.PossibleCPU()
+	if err != nil {
+		return nil, fmt.Errorf("get possible CPUs: %w", err)
+	}
+	valueSize := int(m.ValueSize())
+	stride := (valueSize + 7) &^ 7
+	if len(raw) != possibleCPUs*stride {
+		return nil, fmt.Errorf("map %s per-CPU value size = %d, want %d", mapName, len(raw), possibleCPUs*stride)
+	}
+	values := make([][]byte, possibleCPUs)
+	for cpu := 0; cpu < possibleCPUs; cpu++ {
+		start := cpu * stride
+		values[cpu] = append([]byte(nil), raw[start:start+valueSize]...)
+	}
+	return values, nil
+}
+
 func deletePluginMapValueInRefs(refs []loadedPluginObjectRef, pluginID string, objectID string, mapName string, key []byte) error {
 	m, err := findPluginLoadedMap(refs, pluginID, objectID, mapName)
 	if err != nil {
@@ -127,6 +176,29 @@ func clearPluginMapInRefs(refs []loadedPluginObjectRef, pluginID string, objectI
 	maxEntries := m.MaxEntries()
 	if maxEntries > pluginControlMapClearMaxEntries {
 		return fmt.Errorf("map %s max entries = %d exceeds clear limit %d; delete keys explicitly", mapName, maxEntries, pluginControlMapClearMaxEntries)
+	}
+	if m.Type() == ebpf.Array || m.Type() == ebpf.PerCPUArray {
+		var perCPUValues [][]byte
+		if m.Type() == ebpf.PerCPUArray {
+			possibleCPUs, err := ebpf.PossibleCPU()
+			if err != nil {
+				return fmt.Errorf("get possible CPUs: %w", err)
+			}
+			perCPUValues = make([][]byte, possibleCPUs)
+			for cpu := range perCPUValues {
+				perCPUValues[cpu] = make([]byte, valueSize)
+			}
+		}
+		for index := uint32(0); index < maxEntries; index++ {
+			var value any = make([]byte, valueSize)
+			if perCPUValues != nil {
+				value = perCPUValues
+			}
+			if err := m.Put(index, value); err != nil {
+				return fmt.Errorf("zero map %s index %d: %w", mapName, index, err)
+			}
+		}
+		return nil
 	}
 	key := make([]byte, keySize)
 	value := make([]byte, valueSize)

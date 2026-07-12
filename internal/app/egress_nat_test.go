@@ -251,23 +251,24 @@ func TestNormalizeEgressNATProtocolCanonicalizesCombinations(t *testing.T) {
 	}
 }
 
-func TestResolveEgressNATTargetInterfacesParentScopeFiltersPhysicalUplink(t *testing.T) {
+func TestResolveEgressNATTargetInterfacesParentScopeIncludesPhysicalLANAndFiltersUplink(t *testing.T) {
 	targets, err := resolveEgressNATTargetInterfaces(EgressNAT{
 		ParentInterface: "vmbr0",
 		OutInterface:    "eno1",
 	}, []InterfaceInfo{
 		{Name: "vmbr0", Kind: "bridge"},
 		{Name: "eno1", Parent: "vmbr0", Kind: "device"},
+		{Name: "eth0", Parent: "vmbr0", Kind: "device"},
 		{Name: "tap100i0", Parent: "vmbr0", Kind: "tuntap"},
 		{Name: "fwln100i0", Parent: "vmbr0", Kind: "veth"},
 	})
 	if err != nil {
 		t.Fatalf("resolveEgressNATTargetInterfaces() error = %v", err)
 	}
-	if len(targets) != 2 {
-		t.Fatalf("len(targets) = %d, want 2", len(targets))
+	if len(targets) != 3 {
+		t.Fatalf("len(targets) = %d, want 3", len(targets))
 	}
-	if targets[0].Name != "fwln100i0" || targets[1].Name != "tap100i0" {
+	if targets[0].Name != "eth0" || targets[1].Name != "fwln100i0" || targets[2].Name != "tap100i0" {
 		t.Fatalf("targets = %#v", targets)
 	}
 }

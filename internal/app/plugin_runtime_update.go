@@ -157,8 +157,24 @@ func applyPluginActionRuntimeUpdate(db *sql.DB, pm *ProcessManager, plugin Loade
 	}
 }
 
+func queryPluginActionRuntime(pm *ProcessManager, plugin LoadedPlugin, action PluginAction, payload json.RawMessage) (any, error) {
+	if action.RuntimeUpdate != "runtime_query" {
+		return nil, fmt.Errorf("action %s is not a runtime query", action.ID)
+	}
+	if ok, reason := pluginControlStabilityAllowed(plugin, processConfigForPluginRuntimeUpdate(pm)); !ok {
+		return nil, fmt.Errorf("%s", reason)
+	}
+	if pm == nil || pm.pluginControlRuntime == nil {
+		return nil, fmt.Errorf("plugin runtime query requires process manager")
+	}
+	return pm.pluginControlRuntime.QueryPluginAction(plugin, action, payload)
+}
+
 func pluginResourceAffectsActiveCorePlans(plugin LoadedPlugin, resource PluginResource, cfg *Config) bool {
-	return (pluginResourceAffectsCoreEgressNAT(resource) || pluginResourceAffectsCoreForwardRules(resource)) && pluginCoreResourceStabilityAllowed(plugin, cfg)
+	return (pluginResourceAffectsCoreEgressNAT(resource) ||
+		pluginResourceAffectsCoreForwardRules(resource) ||
+		pluginResourceAffectsCoreIPv6Assignments(resource) ||
+		pluginResourceAffectsCoreDHCPv4(resource)) && pluginCoreResourceStabilityAllowed(plugin, cfg)
 }
 
 func pluginResourceAffectsActiveCoreEgressNAT(plugin LoadedPlugin, resource PluginResource, cfg *Config) bool {
@@ -166,7 +182,10 @@ func pluginResourceAffectsActiveCoreEgressNAT(plugin LoadedPlugin, resource Plug
 }
 
 func pluginMayAffectActiveCorePlans(plugin LoadedPlugin, cfg *Config) bool {
-	return (pluginHasEgressNATPlansResource(plugin) || pluginHasForwardRulePlansResource(plugin)) && pluginCoreResourceStabilityAllowed(plugin, cfg)
+	return (pluginHasEgressNATPlansResource(plugin) ||
+		pluginHasForwardRulePlansResource(plugin) ||
+		pluginHasIPv6AssignmentPlansResource(plugin) ||
+		pluginHasDHCPv4PlansResource(plugin)) && pluginCoreResourceStabilityAllowed(plugin, cfg)
 }
 
 func pluginMayAffectActiveCoreEgressNAT(plugin LoadedPlugin, cfg *Config) bool {

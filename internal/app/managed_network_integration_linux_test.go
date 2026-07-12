@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,6 +40,7 @@ const (
 	managedNetworkIntegrationHelperExpectedIPv4Env = "FORWARD_MANAGED_NETWORK_HELPER_EXPECTED_IPV4"
 	managedNetworkIntegrationHelperExpectedCIDREnv = "FORWARD_MANAGED_NETWORK_HELPER_EXPECTED_CIDR"
 	managedNetworkIntegrationHelperGatewayEnv      = "FORWARD_MANAGED_NETWORK_HELPER_GATEWAY"
+	managedNetworkIntegrationHelperDNSServersEnv   = "FORWARD_MANAGED_NETWORK_HELPER_DNS_SERVERS"
 	managedNetworkIntegrationHelperRoleDHCPv4      = "dhcp4-client"
 	managedNetworkIntegrationIPv4CIDR              = "10.0.0.254/24"
 	managedNetworkIntegrationIPv4Gateway           = "10.0.0.254"
@@ -46,6 +48,7 @@ const (
 	managedNetworkIntegrationIPv4LeaseCIDR         = "10.0.0.10/24"
 	managedNetworkIntegrationIPv4PoolStart         = "10.0.0.100"
 	managedNetworkIntegrationIPv4PoolEnd           = "10.0.0.150"
+	managedNetworkIntegrationIPv4DNSServers        = "1.1.1.1"
 	managedNetworkIntegrationName                  = "managed-network-integration"
 	managedNetworkIntegrationIPv6Prefix64Parent    = "2001:db8:300::/60"
 	managedNetworkIntegrationIPv6Prefix64HostAddr  = "2001:db8:300::1"
@@ -535,6 +538,7 @@ func runManagedNetworkDHCPv4IntegrationHelper() error {
 	expectedIPv4 := strings.TrimSpace(os.Getenv(managedNetworkIntegrationHelperExpectedIPv4Env))
 	expectedCIDR := strings.TrimSpace(os.Getenv(managedNetworkIntegrationHelperExpectedCIDREnv))
 	gateway := strings.TrimSpace(os.Getenv(managedNetworkIntegrationHelperGatewayEnv))
+	expectedDNSServers := strings.Fields(strings.TrimSpace(os.Getenv(managedNetworkIntegrationHelperDNSServersEnv)))
 	if ifaceName == "" {
 		return errors.New("missing helper interface name")
 	}
@@ -556,12 +560,15 @@ func runManagedNetworkDHCPv4IntegrationHelper() error {
 	if expectedIP == nil || expectedIP.To4() == nil {
 		return fmt.Errorf("invalid expected ipv4 %q", expectedIPv4)
 	}
-	leaseIP, err := performManagedNetworkDHCPv4Handshake(*iface, expectedIP.To4(), 15*time.Second)
+	leaseIP, dnsServers, err := performManagedNetworkDHCPv4Handshake(*iface, expectedIP.To4(), 15*time.Second)
 	if err != nil {
 		return err
 	}
 	if !leaseIP.Equal(expectedIP.To4()) {
 		return fmt.Errorf("dhcpv4 lease = %s, want %s", leaseIP, expectedIPv4)
+	}
+	if got := canonicalManagedNetworkDHCPv4IPs(dnsServers); !slices.Equal(got, expectedDNSServers) {
+		return fmt.Errorf("dhcpv4 dns servers = %v, want %v", got, expectedDNSServers)
 	}
 	if err := ensureManagedNetworkIntegrationIPv4Address(ifaceName, expectedCIDR); err != nil {
 		return fmt.Errorf("install dhcpv4 address: %w", err)
@@ -737,7 +744,7 @@ func createManagedNetworkIntegrationNetworkWithIPv6Settings(t *testing.T, apiBas
 		IPv4CIDR:            managedNetworkIntegrationIPv4CIDR,
 		IPv4PoolStart:       managedNetworkIntegrationIPv4PoolStart,
 		IPv4PoolEnd:         managedNetworkIntegrationIPv4PoolEnd,
-		IPv4DNSServers:      "1.1.1.1",
+		IPv4DNSServers:      managedNetworkIntegrationIPv4DNSServers,
 		IPv6Enabled:         true,
 		IPv6ParentInterface: topology.UplinkHostIF,
 		IPv6ParentPrefix:    strings.TrimSpace(ipv6ParentPrefix),
@@ -866,6 +873,10 @@ func prepareManagedNetworkIntegrationClientNamespace(t *testing.T, topology egre
 }
 
 func runManagedNetworkDHCPv4Client(t *testing.T, topology egressNATIntegrationTopology, expectedIPv4 string, expectedCIDR string, gateway string) error {
+	return runManagedNetworkDHCPv4ClientWithDNS(t, topology, expectedIPv4, expectedCIDR, gateway, managedNetworkIntegrationIPv4DNSServers)
+}
+
+func runManagedNetworkDHCPv4ClientWithDNS(t *testing.T, topology egressNATIntegrationTopology, expectedIPv4 string, expectedCIDR string, gateway string, expectedDNSServers string) error {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -882,6 +893,7 @@ func runManagedNetworkDHCPv4Client(t *testing.T, topology egressNATIntegrationTo
 		managedNetworkIntegrationHelperExpectedIPv4Env+"="+expectedIPv4,
 		managedNetworkIntegrationHelperExpectedCIDREnv+"="+expectedCIDR,
 		managedNetworkIntegrationHelperGatewayEnv+"="+gateway,
+		managedNetworkIntegrationHelperDNSServersEnv+"="+strings.TrimSpace(expectedDNSServers),
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -963,10 +975,10 @@ func managedNetworkDHCPv4PacketCaptureFilter() []string {
 	return []string{"udp", "and", "(", "port", "67", "or", "port", "68", ")"}
 }
 
-func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP, timeout time.Duration) (net.IP, error) {
+func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP, timeout time.Duration) (net.IP, []net.IP, error) {
 	conn, err := openManagedNetworkDHCPv4ClientConn(iface.Name)
 	if err != nil {
-		return nil, fmt.Errorf("listen dhcpv4 client socket: %w", err)
+		return nil, nil, fmt.Errorf("listen dhcpv4 client socket: %w", err)
 	}
 	defer conn.Close()
 
@@ -977,7 +989,7 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 	for time.Now().Before(deadline) {
 		discover := buildManagedNetworkDHCPv4ClientPacket(xid, iface.HardwareAddr, dhcpv4MessageDiscover, nil, nil, clientID)
 		if _, err := conn.WriteToUDP(discover, &net.UDPAddr{IP: net.IPv4bcast, Port: dhcpv4ServerPort}); err != nil {
-			return nil, fmt.Errorf("send dhcpv4 discover: %w", err)
+			return nil, nil, fmt.Errorf("send dhcpv4 discover: %w", err)
 		}
 
 		offer, err := waitForManagedNetworkDHCPv4Response(conn, xid, iface.HardwareAddr, 2*time.Second)
@@ -985,7 +997,7 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		if offer.MessageType != dhcpv4MessageOffer {
 			continue
@@ -995,12 +1007,12 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 			continue
 		}
 		if expected := expectedIP.To4(); expected != nil && !leaseIP.Equal(expected) {
-			return nil, fmt.Errorf("dhcpv4 offer = %s, want %s", leaseIP, expected)
+			return nil, nil, fmt.Errorf("dhcpv4 offer = %s, want %s", leaseIP, expected)
 		}
 
 		request := buildManagedNetworkDHCPv4ClientPacket(xid, iface.HardwareAddr, dhcpv4MessageRequest, leaseIP, offer.ServerID, clientID)
 		if _, err := conn.WriteToUDP(request, &net.UDPAddr{IP: net.IPv4bcast, Port: dhcpv4ServerPort}); err != nil {
-			return nil, fmt.Errorf("send dhcpv4 request: %w", err)
+			return nil, nil, fmt.Errorf("send dhcpv4 request: %w", err)
 		}
 
 		for {
@@ -1009,20 +1021,30 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
 					break
 				}
-				return nil, err
+				return nil, nil, err
 			}
 			switch reply.MessageType {
 			case dhcpv4MessageAck:
 				if ip := reply.YIAddr.To4(); ip != nil {
-					return ip, nil
+					return ip, append([]net.IP(nil), reply.DNSServers...), nil
 				}
 			case dhcpv4MessageNak:
-				return nil, fmt.Errorf("dhcpv4 server returned nak")
+				return nil, nil, fmt.Errorf("dhcpv4 server returned nak")
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("timed out waiting for dhcpv4 lease on %s", iface.Name)
+	return nil, nil, fmt.Errorf("timed out waiting for dhcpv4 lease on %s", iface.Name)
+}
+
+func canonicalManagedNetworkDHCPv4IPs(values []net.IP) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if ip := value.To4(); ip != nil {
+			out = append(out, ip.String())
+		}
+	}
+	return out
 }
 
 type managedNetworkDHCPv4ClientConn struct {

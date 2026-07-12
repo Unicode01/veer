@@ -1,0 +1,1325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PPPoE Client</title>
+  <style>
+    .pppoe-page {
+      padding: 10px;
+    }
+    .pppoe-hero {
+      border-left: 3px solid var(--fwd-primary);
+    }
+    .pppoe-form {
+      display: grid;
+      gap: 10px;
+    }
+    .pppoe-section {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 9px;
+      background: color-mix(in srgb, var(--fwd-surface-soft) 72%, transparent);
+    }
+    .pppoe-section-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .pppoe-section-title {
+      margin: 0;
+      color: var(--fwd-text);
+      font-size: 12px;
+      font-weight: 760;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .pppoe-section-desc {
+      color: var(--fwd-soft);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .pppoe-field-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 9px;
+      align-items: end;
+    }
+    .pppoe-profile-picker {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+    .pppoe-profile-key[hidden] {
+      display: none;
+    }
+    .pppoe-toggle-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .pppoe-toggle-field {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 8px 10px;
+      border: 1px solid var(--fwd-border);
+      border-radius: 8px;
+      background: var(--fwd-surface);
+    }
+    .pppoe-toggle-field > span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pppoe-toggle-field .fwd-input[type="checkbox"] {
+      justify-self: end;
+    }
+    .pppoe-actions {
+      justify-content: flex-start;
+      padding-top: 2px;
+    }
+    .pppoe-actions .fwd-button {
+      min-width: 88px;
+    }
+    .pppoe-runtime-status[data-state="degraded"],
+    .pppoe-runtime-status[data-state="redialing"] {
+      border-color: #f6c453;
+      background: #fffbeb;
+      color: #a16207;
+    }
+    .pppoe-runtime-status[data-state="offline"],
+    .pppoe-runtime-status[data-state="unknown"] {
+      border-color: var(--fwd-border-strong);
+      background: var(--fwd-surface-soft);
+      color: var(--fwd-muted);
+    }
+    .pppoe-runtime-status[data-state="error"] {
+      border-color: #fca5a5;
+      background: #fef2f2;
+      color: #b91c1c;
+    }
+    @media (max-width: 720px) {
+      .pppoe-page {
+        padding: 8px;
+      }
+      .pppoe-section-head {
+        display: grid;
+      }
+      .pppoe-actions .fwd-button {
+        flex: 1 1 auto;
+      }
+    }
+    @media (prefers-color-scheme: dark) {
+      .pppoe-runtime-status[data-state="degraded"],
+      .pppoe-runtime-status[data-state="redialing"] {
+        border-color: rgba(250, 204, 21, 0.46);
+        background: rgba(161, 98, 7, 0.2);
+        color: #fde047;
+      }
+      .pppoe-runtime-status[data-state="error"] {
+        border-color: rgba(248, 113, 113, 0.48);
+        background: rgba(185, 28, 28, 0.2);
+        color: #fca5a5;
+      }
+    }
+  </style>
+</head>
+<body>
+  <script>
+    (function () {
+      const F = window.ForwardPluginHost;
+      if (!F) {
+        document.body.textContent = 'ForwardPluginHost is not available.';
+        return;
+      }
+
+      const messages = {
+        'zh-CN': {
+          'status.idle': '空闲',
+          'status.savingProfile': '保存配置中',
+          'status.profileSaved': '配置已保存',
+          'status.saveFailed': '保存失败',
+          'status.completed': '已完成',
+          'status.failed': '失败',
+          'status.dialing': '拨号中',
+          'status.dialed': '已拨号',
+          'status.dialFailed': '拨号失败',
+          'status.disconnecting': '断开中',
+          'status.disconnected': '已断开',
+          'status.disconnectFailed': '断开失败',
+          'status.discovering': '发现中',
+          'status.probing': '探测中',
+          'status.installingTunnel': '安装隧道中',
+          'title': 'PPPoE 客户端',
+          'desc': 'PPPoE 拨号、会话保持、IPv4/IPv6 协商和 TC pipeline 隧道，用于接入 WAN Core / fvtap。',
+          'badge.rawL2': 'raw L2',
+          'badge.goja': 'Goja',
+          'profile.title': '配置',
+          'profile.desc': '配置物理口、单个本地 L3 边界和协商参数。保存会持久化配置；动作直接使用当前表单值。',
+          'section.basic': '基础',
+          'section.basic.desc': '接口和认证信息',
+          'section.negotiation': '协商',
+          'section.negotiation.desc': 'PPP 和 WAN Core 同步',
+          'section.tunnel': '隧道 / Handoff',
+          'section.tunnel.desc': '物理口 ingress 与本地接口 egress 的双向 TC pipeline',
+          'field.profile': '配置',
+          'profile.new': '新建配置...',
+          'profile.newPlaceholder': '输入新配置名',
+          'error.profileRequired': '请输入新配置名。',
+          'field.interface': '接口',
+          'field.macMode': 'PPPoE MAC 模式',
+          'field.macAddress': '指定 MAC',
+          'field.username': '用户名',
+          'field.password': '密码',
+          'field.service': '服务名',
+          'field.auth': '认证',
+          'field.timeout': '超时',
+          'field.keepalive': 'Keepalive 毫秒',
+          'field.keepaliveFailures': '连续失败阈值',
+          'field.autoRedial': '自动重拨',
+          'field.ipv4': 'IPCP IPv4',
+          'field.ipv6': 'IPv6CP',
+          'field.pd': 'DHCPv6-PD',
+          'field.syncWan': '同步 WAN Core',
+          'field.applyWan': '应用 WAN Core',
+          'field.localInterface': '本地 L3 接口',
+          'field.tunnelMtu': '隧道 MTU',
+          'field.installTunnel': '安装隧道',
+          'field.prepareInterfaces': '准备接口',
+          'field.prepareLocalMtu': '设置本地接口 MTU',
+          'field.prepareWanMtu': '设置 WAN MTU',
+          'field.prepareOffloads': '关闭 offload',
+          'field.allowUnsafeOffloads': '忽略 offload 准备失败',
+          'action.save': '保存配置',
+          'action.load': '加载配置',
+          'action.discover': '发现',
+          'action.probe': '探测会话',
+          'action.tunnelProbe': '隧道探测',
+          'action.dial': '拨号',
+          'action.disconnect': '断开',
+          'action.refresh': '刷新状态',
+          'busy.discover': '发现中',
+          'busy.probe': '探测中',
+          'busy.tunnel': '安装隧道中',
+          'busy.dial': '拨号中',
+          'busy.disconnect': '断开中',
+          'busy.save': '保存中',
+          'busy.load': '加载中',
+          'busy.refresh': '刷新中',
+          'hint.connectedLock': '请先断开当前 PPPoE 会话，再修改配置或执行探测。',
+          'hint.redialingLock': '自动重拨正在进行，当前操作暂不可用。',
+          'hint.noSession': '当前没有可断开的 PPPoE 会话。',
+          'hint.profileLoading': '正在加载当前会话对应的配置，请稍候。',
+          'runtime.title': '当前状态',
+          'runtime.desc': '会话、流量、链路检测和自动重拨状态',
+          'traffic.packets': '{{count}} 个包',
+          'runtime.online': '在线',
+          'runtime.degraded': '检测异常',
+          'runtime.redialing': '重拨中',
+          'runtime.offline': '离线',
+          'runtime.unknown': '未知',
+          'runtime.error': '读取失败',
+          'emptyResult': '当前没有 PPPoE 会话。',
+          'stat.connection': '连接',
+          'stat.phase': '阶段',
+          'stat.interface': '接口',
+          'stat.parentInterface': '父接口',
+          'stat.localMac': '本地 MAC',
+          'stat.acMac': 'AC MAC',
+          'stat.session': '会话',
+          'stat.ipv4': 'IPv4',
+          'stat.ipv6': 'IPv6',
+          'stat.keepalive': 'Keepalive',
+          'stat.failures': '连续失败',
+          'stat.updated': '检测时间',
+          'stat.lcpAck': 'LCP ACK',
+          'stat.auth': '认证',
+          'stat.ipcp': 'IPCP',
+          'stat.ipv6cp': 'IPv6CP',
+          'stat.pd': 'PD',
+          'stat.tunnel': '隧道',
+          'stat.preparation': '接口准备',
+          'stat.lastRedial': '最近重拨',
+          'stat.redialTrigger': '重拨原因',
+          'stat.rxRate': '接收速率',
+          'stat.txRate': '发送速率',
+          'stat.rxTotal': '累计接收',
+          'stat.txTotal': '累计发送',
+          'value.ok': '正常',
+          'value.waiting': '等待检测',
+          'value.redialing': '重拨中',
+          'frames.title': '会话帧',
+          'frames.index': '#',
+          'frames.protocol': '协议',
+          'frames.event': '事件',
+          'frames.code': '代码',
+          'tags.title': 'PADO 标签',
+          'tags.type': '类型',
+          'tags.bytes': '字节',
+          'tags.text': '文本',
+          'toast.profileLoaded': '配置已加载。',
+          'toast.profileSaved': '配置已保存。',
+          'toast.discoveryDone': 'PADI/PADO discovery 已完成。',
+          'toast.tunnelDone': '隧道探测已完成。',
+          'toast.probeDone': '会话探测已完成。',
+          'toast.dialed': 'PPPoE 会话已打开。',
+          'toast.disconnected': 'PADT 已发送。'
+        },
+        'en-US': {
+          'status.idle': 'Idle',
+          'status.savingProfile': 'Saving profile',
+          'status.profileSaved': 'Profile saved',
+          'status.saveFailed': 'Save failed',
+          'status.completed': 'Completed',
+          'status.failed': 'Failed',
+          'status.dialing': 'Dialing',
+          'status.dialed': 'Dialed',
+          'status.dialFailed': 'Dial failed',
+          'status.disconnecting': 'Disconnecting',
+          'status.disconnected': 'Disconnected',
+          'status.disconnectFailed': 'Disconnect failed',
+          'status.discovering': 'Discovering',
+          'status.probing': 'Probing',
+          'status.installingTunnel': 'Installing Tunnel',
+          'title': 'PPPoE Client',
+          'desc': 'PPPoE dialing, keepalive, IPv4/IPv6 negotiation and TC pipeline tunneling for WAN Core / fvtap integration.',
+          'badge.rawL2': 'raw L2',
+          'badge.goja': 'Goja',
+          'profile.title': 'Profile',
+          'profile.desc': 'Configure the physical link, one local L3 boundary and negotiation. Save stores the profile; actions use current form values.',
+          'section.basic': 'Basic',
+          'section.basic.desc': 'Interface and credentials',
+          'section.negotiation': 'Negotiation',
+          'section.negotiation.desc': 'PPP and WAN-core synchronization',
+          'section.tunnel': 'Tunnel / Handoff',
+          'section.tunnel.desc': 'Bidirectional TC pipeline between physical ingress and local-interface egress',
+          'field.profile': 'Profile',
+          'profile.new': 'New profile...',
+          'profile.newPlaceholder': 'Enter a new profile name',
+          'error.profileRequired': 'Enter a new profile name.',
+          'field.interface': 'Interface',
+          'field.macMode': 'PPPoE MAC mode',
+          'field.macAddress': 'Manual MAC',
+          'field.username': 'Username',
+          'field.password': 'Password',
+          'field.service': 'Service',
+          'field.auth': 'Auth',
+          'field.timeout': 'Timeout',
+          'field.keepalive': 'Keepalive ms',
+          'field.keepaliveFailures': 'Failures before redial',
+          'field.autoRedial': 'Auto redial',
+          'field.ipv4': 'IPCP IPv4',
+          'field.ipv6': 'IPv6CP',
+          'field.pd': 'DHCPv6-PD',
+          'field.syncWan': 'Sync WAN Core',
+          'field.applyWan': 'Apply WAN Core',
+          'field.localInterface': 'Local L3 Interface',
+          'field.tunnelMtu': 'Tunnel MTU',
+          'field.installTunnel': 'Install Tunnel',
+          'field.prepareInterfaces': 'Prepare interfaces',
+          'field.prepareLocalMtu': 'Set Local MTU',
+          'field.prepareWanMtu': 'Set WAN MTU',
+          'field.prepareOffloads': 'Disable offloads',
+          'field.allowUnsafeOffloads': 'Ignore offload prep failure',
+          'action.save': 'Save Profile',
+          'action.load': 'Load Profile',
+          'action.discover': 'Discover',
+          'action.probe': 'Probe Session',
+          'action.tunnelProbe': 'Tunnel Probe',
+          'action.dial': 'Dial',
+          'action.disconnect': 'Disconnect',
+          'action.refresh': 'Refresh State',
+          'busy.discover': 'Discovering',
+          'busy.probe': 'Probing',
+          'busy.tunnel': 'Installing Tunnel',
+          'busy.dial': 'Dialing',
+          'busy.disconnect': 'Disconnecting',
+          'busy.save': 'Saving',
+          'busy.load': 'Loading',
+          'busy.refresh': 'Refreshing',
+          'hint.connectedLock': 'Disconnect the active PPPoE session before changing the profile or running probes.',
+          'hint.redialingLock': 'Automatic redial is in progress, so this action is temporarily unavailable.',
+          'hint.noSession': 'There is no active PPPoE session to disconnect.',
+          'hint.profileLoading': 'Loading the profile associated with the active session.',
+          'runtime.title': 'Current Status',
+          'runtime.desc': 'Session, traffic, link health and automatic redial state',
+          'traffic.packets': '{{count}} packets',
+          'runtime.online': 'Online',
+          'runtime.degraded': 'Link Check Failed',
+          'runtime.redialing': 'Redialing',
+          'runtime.offline': 'Offline',
+          'runtime.unknown': 'Unknown',
+          'runtime.error': 'Read Failed',
+          'emptyResult': 'There is no current PPPoE session.',
+          'stat.connection': 'Connection',
+          'stat.phase': 'Phase',
+          'stat.interface': 'Interface',
+          'stat.parentInterface': 'Parent Interface',
+          'stat.localMac': 'Local MAC',
+          'stat.acMac': 'AC MAC',
+          'stat.session': 'Session',
+          'stat.ipv4': 'IPv4',
+          'stat.ipv6': 'IPv6',
+          'stat.keepalive': 'Keepalive',
+          'stat.failures': 'Consecutive Failures',
+          'stat.updated': 'Last Check',
+          'stat.lcpAck': 'LCP ACK',
+          'stat.auth': 'Auth',
+          'stat.ipcp': 'IPCP',
+          'stat.ipv6cp': 'IPv6CP',
+          'stat.pd': 'PD',
+          'stat.tunnel': 'Tunnel',
+          'stat.preparation': 'Interface prep',
+          'stat.lastRedial': 'Last redial',
+          'stat.redialTrigger': 'Redial trigger',
+          'stat.rxRate': 'Receive Rate',
+          'stat.txRate': 'Transmit Rate',
+          'stat.rxTotal': 'Received',
+          'stat.txTotal': 'Transmitted',
+          'value.ok': 'OK',
+          'value.waiting': 'Waiting',
+          'value.redialing': 'Redialing',
+          'frames.title': 'Session Frames',
+          'frames.index': '#',
+          'frames.protocol': 'Protocol',
+          'frames.event': 'Event',
+          'frames.code': 'Code',
+          'tags.title': 'PADO Tags',
+          'tags.type': 'Type',
+          'tags.bytes': 'Bytes',
+          'tags.text': 'Text',
+          'toast.profileLoaded': 'Profile loaded.',
+          'toast.profileSaved': 'Profile saved.',
+          'toast.discoveryDone': 'PADI/PADO discovery completed.',
+          'toast.tunnelDone': 'Tunnel probe completed.',
+          'toast.probeDone': 'Session probe completed.',
+          'toast.dialed': 'PPPoE session is open.',
+          'toast.disconnected': 'PADT sent.'
+        }
+      };
+      const textBindings = [];
+      let statusKey = 'status.idle';
+      function T(key, params) {
+        return F.t(messages, key, params);
+      }
+      function bindText(node, key, params) {
+        node.textContent = T(key, params);
+        textBindings.push({ node, key, params });
+        return node;
+      }
+      function textNode(tag, opts, key, params) {
+        return bindText(F.h(tag, opts || {}), key, params);
+      }
+      function i18nButton(key, handler, secondary) {
+        const button = F.button(T(key), handler, secondary);
+        return bindText(button, key);
+      }
+      function setStatus(key) {
+        statusKey = key;
+        status.textContent = T(key);
+      }
+      function refreshI18n() {
+        textBindings.forEach((item) => {
+          item.node.textContent = T(item.key, item.params);
+        });
+        profileKey.placeholder = T('profile.newPlaceholder');
+        renderProfileOptions(profileSelect.value !== NEW_PROFILE_VALUE ? profileSelect.value : '');
+        status.textContent = T(statusKey);
+        renderState(lastStateRecord, lastKeepaliveRecord, lastRedialRecord);
+        F.requestResize();
+      }
+
+      const status = F.status(T('status.idle'));
+      const runtimeStatus = F.status(T('runtime.unknown'));
+      runtimeStatus.classList.add('pppoe-runtime-status');
+      runtimeStatus.dataset.state = 'unknown';
+      const stateBody = F.h('div', { className: F.classes.stack });
+      let lastStateRecord = null;
+      let lastKeepaliveRecord = null;
+      let lastRedialRecord = null;
+      let lastTrafficSample = null;
+      let trafficView = null;
+      let runtimeConnectionState = 'unknown';
+      let pendingAction = '';
+      let loadedProfileKey = '';
+      let saveButton = null;
+      let loadButton = null;
+      let discoverButton = null;
+      let probeButton = null;
+      let tunnelProbeButton = null;
+      let connectionButton = null;
+      let refreshButton = null;
+      let configurationLocked = false;
+      const NEW_PROFILE_VALUE = '__new_profile__';
+      const profileSelect = select([]);
+      const profileKey = input('', T('profile.newPlaceholder'));
+      profileKey.classList.add('pppoe-profile-key');
+      profileKey.hidden = true;
+      const profilePicker = F.h('div', { className: 'pppoe-profile-picker' }, [profileSelect, profileKey]);
+      const iface = input('', 'eth0 / vmbr0 / wan');
+      const macMode = select([
+        ['interface', 'Interface MAC'],
+        ['random', 'Random persistent MAC'],
+        ['manual', 'Manual MAC']
+      ]);
+      const macAddress = input('', '02:xx:xx:xx:xx:xx');
+      const username = input('', 'username');
+      const password = input('', 'password', 'password');
+      const service = input('', 'optional service name');
+      const auth = select([
+        ['pap', 'PAP'],
+        ['chap', 'CHAP'],
+        ['none', 'None']
+      ]);
+      const timeout = input('700', 'timeout ms', 'number');
+      const negotiateIPv4 = checkbox(true);
+      const negotiateIPv6 = checkbox(false);
+      const requestPD = checkbox(false);
+      const keepalive = input('15000', '0 disables keepalive', 'number');
+      const keepaliveFailures = input('5', '1-10', 'number');
+      let dhcpv6TimeoutMs = 5000;
+      let dhcpv6SettleMs = 2000;
+      let ipv6RATimeoutMs = 5000;
+      let keepaliveFailureGraceMs = 60000;
+      let keepaliveConfirmTimeoutMs = 5000;
+      let initialProfileResolved = false;
+      let profileKeyEdited = false;
+      let knownProfileKeys = [];
+      const autoRedial = checkbox(true);
+      const installTunnel = checkbox(true);
+      const localInterface = input('fwdlocal0', 'single local L3 boundary');
+      const tunnelMTU = input('1492', '576-1492', 'number');
+      const prepareInterfaces = checkbox(true);
+      const prepareLocalMTU = checkbox(true);
+      const prepareWanMTU = checkbox(false);
+      const prepareOffloads = checkbox(true);
+      const allowUnsafeOffloads = checkbox(false);
+      const wanCoreSync = checkbox(true);
+      const wanCoreApply = checkbox(true);
+      F.onLocaleChange(refreshI18n);
+
+      function input(value, placeholder, type) {
+        return F.h('input', {
+          className: F.classes.input,
+          attrs: {
+            type: type || 'text',
+            value,
+            placeholder
+          }
+        });
+      }
+
+      function select(options) {
+        const el = F.h('select', { className: F.classes.input });
+        options.forEach(([value, label]) => {
+          el.appendChild(F.h('option', { text: label, attrs: { value } }));
+        });
+        return el;
+      }
+
+      function checkbox(checked) {
+        return F.h('input', {
+          className: F.classes.input,
+          attrs: {
+            type: 'checkbox',
+            checked: !!checked
+          }
+        });
+      }
+
+      function renderProfileOptions(selectedKey) {
+        const typedKey = profileKey.value.trim();
+        profileSelect.replaceChildren();
+        knownProfileKeys.forEach(function (key) {
+          profileSelect.appendChild(F.h('option', { text: key, attrs: { value: key } }));
+        });
+        profileSelect.appendChild(F.h('option', {
+          text: T('profile.new'),
+          attrs: { value: NEW_PROFILE_VALUE }
+        }));
+        if (selectedKey && knownProfileKeys.includes(selectedKey)) {
+          profileSelect.value = selectedKey;
+          profileKey.value = selectedKey;
+          profileKey.hidden = true;
+        } else {
+          profileSelect.value = NEW_PROFILE_VALUE;
+          profileKey.value = selectedKey || typedKey || (knownProfileKeys.length ? '' : 'default');
+          profileKey.hidden = false;
+        }
+      }
+
+      async function refreshProfileOptions(preferredKey) {
+        const response = await F.data.list('profiles', { limit: 32 });
+        const records = response && Array.isArray(response.records) ? response.records : [];
+        knownProfileKeys = records
+          .filter(function (record) { return record && record.key; })
+          .map(function (record) { return String(record.key).trim(); })
+          .filter(Boolean)
+          .sort();
+        const current = preferredKey || (profileSelect.value !== NEW_PROFILE_VALUE ? profileSelect.value : '');
+        renderProfileOptions(current);
+        return records;
+      }
+
+      function requireProfileKey() {
+        const selected = profileSelect.value;
+        const key = selected && selected !== NEW_PROFILE_VALUE
+          ? selected
+          : profileKey.value.trim();
+        if (!key) throw new Error(T('error.profileRequired'));
+        return key;
+      }
+
+      function syncSelectedProfile(key) {
+        key = String(key || '').trim();
+        if (key && knownProfileKeys.includes(key)) {
+          profileSelect.value = key;
+          profileKey.value = key;
+          profileKey.hidden = true;
+          return;
+        }
+        profileSelect.value = NEW_PROFILE_VALUE;
+        profileKey.value = key;
+        profileKey.hidden = false;
+      }
+
+      function profilePayload() {
+        const payload = {
+          interface: iface.value.trim(),
+          mac_mode: macMode.value,
+          mac_address: macAddress.value.trim(),
+          username: username.value.trim(),
+          service: service.value.trim(),
+          auth: auth.value,
+          timeout_ms: Number(timeout.value || 700),
+          negotiate_ipv4: negotiateIPv4.checked,
+          negotiate_ipv6: negotiateIPv6.checked,
+          request_ipv6_address: negotiateIPv6.checked,
+          request_ipv6_router: negotiateIPv6.checked,
+          request_pd: requestPD.checked,
+          dhcpv6_timeout_ms: dhcpv6TimeoutMs,
+          dhcpv6_settle_ms: dhcpv6SettleMs,
+          ipv6_ra_timeout_ms: ipv6RATimeoutMs,
+          keepalive_interval_ms: Number(keepalive.value || 0),
+          keepalive_failure_threshold: Number(keepaliveFailures.value || 5),
+          keepalive_failure_grace_ms: keepaliveFailureGraceMs,
+          keepalive_confirm_timeout_ms: keepaliveConfirmTimeoutMs,
+          auto_redial: autoRedial.checked,
+          install_tunnel: installTunnel.checked,
+          local_interface: localInterface.value.trim(),
+          tunnel_mtu: Number(tunnelMTU.value || 1492),
+          prepare_interfaces: prepareInterfaces.checked,
+          prepare_local_mtu: prepareLocalMTU.checked,
+          prepare_wan_mtu: prepareWanMTU.checked,
+          prepare_offloads: prepareOffloads.checked,
+          allow_unsafe_offloads: allowUnsafeOffloads.checked,
+          wan_core_sync: wanCoreSync.checked,
+          wan_core_required: wanCoreSync.checked,
+          wan_core_apply: wanCoreApply.checked,
+          send_padt: true
+        };
+        if (password.value) payload.password = password.value;
+        return payload;
+      }
+
+      function setConfigurationLocked(locked) {
+        configurationLocked = !!locked;
+        [
+          profileSelect, profileKey, iface, macMode, username, password, service, auth, timeout,
+          negotiateIPv4, negotiateIPv6, requestPD, keepalive, keepaliveFailures, autoRedial,
+          installTunnel, localInterface, tunnelMTU, prepareInterfaces, prepareLocalMTU,
+          prepareWanMTU, prepareOffloads, allowUnsafeOffloads, wanCoreSync, wanCoreApply
+        ].forEach(function (control) { control.disabled = configurationLocked; });
+        updateMACFields();
+      }
+
+      function syncActionButtons() {
+        if (!connectionButton) return;
+        const data = lastStateRecord && lastStateRecord.data ? lastStateRecord.data : null;
+        const active = hasActiveSession(data);
+        const redialing = runtimeConnectionState === 'redialing';
+        const pending = !!pendingAction;
+        const activeProfileKey = String(data && (data.profile_key || data.wan_id) || '').trim();
+        const activeProfileReady = !active || !activeProfileKey || loadedProfileKey === activeProfileKey;
+        const lockHint = active ? T('hint.connectedLock') : (redialing ? T('hint.redialingLock') : '');
+        setConfigurationLocked(active || redialing || pending);
+
+        F.setButtonState(saveButton, {
+          label: T(pendingAction === 'save' ? 'busy.save' : 'action.save'),
+          busy: pendingAction === 'save',
+          disabled: active || redialing || (pending && pendingAction !== 'save'),
+          title: active || redialing ? lockHint : ''
+        });
+        F.setButtonState(loadButton, {
+          label: T(pendingAction === 'load' ? 'busy.load' : 'action.load'),
+          busy: pendingAction === 'load',
+          disabled: active || redialing || (pending && pendingAction !== 'load'),
+          title: active || redialing ? lockHint : ''
+        });
+        [
+          [discoverButton, 'discover', 'action.discover', 'busy.discover'],
+          [probeButton, 'probe_session', 'action.probe', 'busy.probe'],
+          [tunnelProbeButton, 'traffic_probe', 'action.tunnelProbe', 'busy.tunnel']
+        ].forEach(function (item) {
+          F.setButtonState(item[0], {
+            label: T(pendingAction === item[1] ? item[3] : item[2]),
+            busy: pendingAction === item[1],
+            disabled: active || redialing || (pending && pendingAction !== item[1]),
+            title: active || redialing ? lockHint : ''
+          });
+        });
+
+        const connectionAction = active ? 'disconnect' : 'dial';
+        const connectionBusy = pendingAction === 'dial' || pendingAction === 'disconnect';
+        let connectionLabel = T(active ? 'action.disconnect' : 'action.dial');
+        if (pendingAction === 'dial') connectionLabel = T('busy.dial');
+        if (pendingAction === 'disconnect') connectionLabel = T('busy.disconnect');
+        if (!connectionBusy && redialing) connectionLabel = T('runtime.redialing');
+        F.setButtonState(connectionButton, {
+          label: connectionLabel,
+          busy: connectionBusy || (!pending && redialing),
+          disabled: (!active && runtimeConnectionState === 'unknown') || (active && !activeProfileReady) || (pending && !connectionBusy),
+          tone: active ? 'danger' : '',
+          state: connectionAction,
+          title: active && !activeProfileReady ? T('hint.profileLoading') : (redialing && !active ? T('hint.redialingLock') : '')
+        });
+        F.setButtonState(refreshButton, {
+          label: T(pendingAction === 'refresh' ? 'busy.refresh' : 'action.refresh'),
+          busy: pendingAction === 'refresh',
+          disabled: pending && pendingAction !== 'refresh'
+        });
+      }
+
+      async function upsertResource(resource, key, data, options) {
+        return F.data.upsert(resource, key, data, options);
+      }
+
+      function renderState(record, keepaliveRecord, redialRecord) {
+        lastStateRecord = record || null;
+        lastKeepaliveRecord = keepaliveRecord || null;
+        lastRedialRecord = redialRecord || null;
+        stateBody.replaceChildren();
+        if (!record) {
+          setRuntimeStatus('offline');
+          stateBody.appendChild(F.h('p', {
+            className: F.classes.description,
+            text: T('emptyResult')
+          }));
+          F.requestResize();
+          syncActionButtons();
+          return;
+        }
+        const data = record.data || {};
+        const keepalive = matchingKeepalive(data, keepaliveRecord);
+        const keepaliveData = keepalive && keepalive.data ? keepalive.data : null;
+        const runtimeState = deriveRuntimeState(data, keepaliveData);
+        const active = hasActiveSession(data);
+        const failures = keepaliveData ? Number(keepaliveData.keepalive_failures || 0) : 0;
+        const threshold = keepaliveData ? Number(keepaliveData.keepalive_failure_threshold || 0) : 0;
+        const phase = keepaliveData && keepaliveData.phase ? keepaliveData.phase : (data.phase || '-');
+        const updatedAt = keepaliveData && keepaliveData.updated_at ? keepaliveData.updated_at : data.updated_at;
+        setRuntimeStatus(runtimeState, runtimeDetail(data, keepaliveData));
+        const stats = [
+          F.stat(T('stat.connection'), T('runtime.' + runtimeState), runtimeDetail(data, keepaliveData)),
+          F.stat(T('stat.ipv4'), data.ipcp && data.ipcp.address ? data.ipcp.address : '-'),
+          F.stat(T('stat.session'), sessionText(data)),
+          F.stat(T('stat.keepalive'), keepaliveText(active, keepaliveData), phase),
+          F.stat(T('stat.failures'), active && keepaliveData ? failures + '/' + (threshold || '-') : '-'),
+          F.stat(T('stat.interface'), data.interface || '-'),
+          F.stat(T('stat.auth'), data.auth_sent ? data.auth_method : (data.auth || '-')),
+          F.stat(T('stat.ipv6'), ipv6LinkText(data), ipv6LinkDetail(data)),
+          F.stat(T('stat.pd'), delegatedPrefix(data)),
+          F.stat(T('stat.tunnel'), data.tunnel && data.tunnel.mode ? data.tunnel.mode : '-',
+            data.tunnel && data.tunnel.prepared_l2_note ? data.tunnel.prepared_l2_note : ''),
+          F.stat(T('stat.updated'), formatTimestamp(updatedAt), phase)
+        ];
+        stats.push(...trafficStats(data));
+        const redial = redialRecord && redialRecord.data ? redialRecord.data : null;
+        if (redial) {
+          stats.push(F.stat(T('stat.lastRedial'), redial.phase || '-', redial.updated_at || ''));
+          stats.push(F.stat(T('stat.redialTrigger'), redial.trigger || '-', redial.error || ''));
+        }
+        stateBody.appendChild(F.h('div', { className: F.classes.grid }, stats));
+        if (Array.isArray(data.frames) && data.frames.length) {
+          stateBody.appendChild(F.card([
+            F.h('h2', { className: F.classes.title, text: T('frames.title') }),
+            F.table([T('frames.index'), T('frames.protocol'), T('frames.event'), T('frames.code')], data.frames.map((frame, index) => [
+              index + 1,
+              frame.protocol || '-',
+              frame.event || '-',
+              frame.code == null ? '-' : frame.code
+            ]))
+          ]));
+        }
+        if (Array.isArray(data.tags) && data.tags.length) {
+          stateBody.appendChild(F.card([
+            F.h('h2', { className: F.classes.title, text: T('tags.title') }),
+            F.table([T('tags.type'), T('tags.bytes'), T('tags.text')], data.tags.map((tag) => [
+              tag.type,
+              tag.bytes,
+              tag.text || '-'
+            ]))
+          ]));
+        }
+        F.requestResize();
+        syncActionButtons();
+      }
+
+      function updateTraffic(data) {
+        if (!data || data.available !== true) {
+          lastTrafficSample = null;
+          trafficView = { available: false, reason: data && data.reason || '' };
+          return;
+        }
+        const sample = {
+          profile_key: String(data.profile_key || ''),
+          session_id: Number(data.session_id || 0),
+          sampled_at_ms: Number(data.sampled_at_ms || Date.now()),
+          rx_packets: Math.max(0, Number(data.rx_packets || 0)),
+          tx_packets: Math.max(0, Number(data.tx_packets || 0)),
+          rx_bytes: Math.max(0, Number(data.rx_bytes || 0)),
+          tx_bytes: Math.max(0, Number(data.tx_bytes || 0))
+        };
+        let rxRate = null;
+        let txRate = null;
+        if (lastTrafficSample &&
+            lastTrafficSample.profile_key === sample.profile_key &&
+            lastTrafficSample.session_id === sample.session_id &&
+            sample.sampled_at_ms > lastTrafficSample.sampled_at_ms &&
+            sample.rx_bytes >= lastTrafficSample.rx_bytes &&
+            sample.tx_bytes >= lastTrafficSample.tx_bytes) {
+          const seconds = (sample.sampled_at_ms - lastTrafficSample.sampled_at_ms) / 1000;
+          rxRate = (sample.rx_bytes - lastTrafficSample.rx_bytes) / seconds;
+          txRate = (sample.tx_bytes - lastTrafficSample.tx_bytes) / seconds;
+        }
+        lastTrafficSample = sample;
+        trafficView = Object.assign({ available: true, rx_rate: rxRate, tx_rate: txRate }, sample);
+      }
+
+      function trafficStats(session) {
+        if (!trafficView || trafficView.available !== true) return [];
+        if (trafficView.session_id && session.session_id && trafficView.session_id !== Number(session.session_id)) return [];
+        if (trafficView.profile_key && session.profile_key && trafficView.profile_key !== String(session.profile_key)) return [];
+        return [
+          F.stat(T('stat.rxRate'), trafficView.rx_rate == null ? '-' : formatRate(trafficView.rx_rate)),
+          F.stat(T('stat.txRate'), trafficView.tx_rate == null ? '-' : formatRate(trafficView.tx_rate)),
+          F.stat(T('stat.rxTotal'), formatBytes(trafficView.rx_bytes), T('traffic.packets', { count: formatCount(trafficView.rx_packets) })),
+          F.stat(T('stat.txTotal'), formatBytes(trafficView.tx_bytes), T('traffic.packets', { count: formatCount(trafficView.tx_packets) }))
+        ];
+      }
+
+      function formatBytes(value) {
+        value = Math.max(0, Number(value || 0));
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+          value /= 1024;
+          index++;
+        }
+        const digits = index === 0 || value >= 100 ? 0 : (value >= 10 ? 1 : 2);
+        return value.toFixed(digits) + ' ' + units[index];
+      }
+
+      function formatRate(value) {
+        return formatBytes(value) + '/s';
+      }
+
+      function formatCount(value) {
+        return Math.max(0, Number(value || 0)).toLocaleString(F.locale === 'en-US' ? 'en-US' : 'zh-CN');
+      }
+
+      function hasActiveSession(data) {
+        return !!(data && data.session_id && data.lcp_ready === true && data.padt_sent !== true && data.phase !== 'disconnected');
+      }
+
+      function matchingKeepalive(session, record) {
+        if (!record || !record.data) return null;
+        const keepalive = record.data;
+        if (session.session_id && keepalive.session_id && Number(session.session_id) !== Number(keepalive.session_id)) return null;
+        if (session.profile_key && keepalive.profile_key && session.profile_key !== keepalive.profile_key) return null;
+        return record;
+      }
+
+      function deriveRuntimeState(session, keepalive) {
+        const sessionPhase = String(session && session.phase || '').toLowerCase();
+        const keepalivePhase = String(keepalive && keepalive.phase || '').toLowerCase();
+        if (!session || session.padt_sent === true || sessionPhase === 'disconnected' || sessionPhase === 'deactivated') return 'offline';
+        if (['redial_wait', 'redialing', 'redial_retry'].includes(keepalivePhase)) return 'redialing';
+        if (sessionPhase === 'handoff_error' || keepalivePhase === 'handoff_error') return 'error';
+        if (keepalive && keepalivePhase !== 'keepalive_ok' && keepalivePhase !== 'redial_ok') return 'degraded';
+        return hasActiveSession(session) ? 'online' : 'offline';
+      }
+
+      function runtimeDetail(session, keepalive) {
+        const parts = [];
+        if (session && session.phase) parts.push('session=' + session.phase);
+        if (keepalive && keepalive.phase) parts.push('keepalive=' + keepalive.phase);
+        const message = keepalive && (keepalive.redial_error || keepalive.message) || session && (session.handoff_error || session.message);
+        if (message) parts.push(String(message));
+        return parts.join(' / ');
+      }
+
+      function setRuntimeStatus(state, detail) {
+        state = ['online', 'degraded', 'redialing', 'offline', 'error'].includes(state) ? state : 'unknown';
+        runtimeConnectionState = state;
+        runtimeStatus.dataset.state = state;
+        runtimeStatus.textContent = T('runtime.' + state);
+        runtimeStatus.title = detail || '';
+        syncActionButtons();
+      }
+
+      function keepaliveText(active, keepalive) {
+        if (!active) return '-';
+        if (!keepalive) return T('value.waiting');
+        const phase = String(keepalive.phase || '').toLowerCase();
+        if (phase === 'keepalive_ok' || phase === 'redial_ok') return T('value.ok');
+        if (['redial_wait', 'redialing', 'redial_retry'].includes(phase)) return T('value.redialing');
+        const failures = Number(keepalive.keepalive_failures || 0);
+        const threshold = Number(keepalive.keepalive_failure_threshold || 0);
+        return failures ? failures + '/' + (threshold || '-') : (keepalive.phase || '-');
+      }
+
+      function sessionText(data) {
+        if (data.session_id_hex) return '0x' + data.session_id_hex;
+        const id = Number(data.session_id || 0);
+        return id ? '0x' + id.toString(16) : '-';
+      }
+
+      function ipv6LinkText(data) {
+        const ipv6cp = data && data.ipv6cp ? data.ipv6cp : {};
+        const ra = data && data.ipv6_ra ? data.ipv6_ra : {};
+        const dhcpv6 = data && data.dhcpv6_pd ? data.dhcpv6_pd : {};
+        const addresses = Array.isArray(dhcpv6.addresses) ? dhcpv6.addresses : [];
+        return dhcpv6.address || addresses[0] && addresses[0].address || ra.address || ipv6cp.link_local || ipv6cp.phase || '-';
+      }
+
+      function ipv6LinkDetail(data) {
+        const ipv6cp = data && data.ipv6cp ? data.ipv6cp : {};
+        const ra = data && data.ipv6_ra ? data.ipv6_ra : {};
+        const dhcpv6 = data && data.dhcpv6_pd ? data.dhcpv6_pd : {};
+        const parts = [];
+        if (ipv6cp.phase) parts.push('phase=' + ipv6cp.phase);
+        if (ipv6cp.link_local) parts.push('link-local=' + ipv6cp.link_local);
+        if (ipv6cp.peer_link_local) parts.push('peer=' + ipv6cp.peer_link_local);
+        if (ra.router) parts.push('router=' + ra.router);
+        if (ra.prefix) parts.push('prefix=' + ra.prefix);
+        if (Array.isArray(dhcpv6.dns_servers) && dhcpv6.dns_servers.length) parts.push('dns=' + dhcpv6.dns_servers.join(','));
+        return parts.join(' / ');
+      }
+
+      function delegatedPrefix(data) {
+        const pd = data && data.dhcpv6_pd ? data.dhcpv6_pd : {};
+        if (pd.prefix) return pd.prefix;
+        if (Array.isArray(pd.prefixes) && pd.prefixes.length) {
+          return pd.prefixes[0] && pd.prefixes[0].prefix || '-';
+        }
+        return '-';
+      }
+
+      function formatTimestamp(value) {
+        if (!value) return '-';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        return date.toLocaleString(F.locale === 'en-US' ? 'en-US' : 'zh-CN', {
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+      }
+
+      async function loadProfile(options) {
+        const silent = !!(options && options.silent === true);
+        try {
+          const key = options && options.key ? String(options.key).trim() : requireProfileKey();
+          const record = await F.data.get('profiles', key);
+          const data = record.data || {};
+          syncSelectedProfile(key);
+          iface.value = data.interface || '';
+          macMode.value = data.mac_mode || (data.mac_address ? 'manual' : 'interface');
+          macAddress.value = data.mac_address || data.mac || '';
+          username.value = data.username || '';
+          password.value = data.password === '__redacted__' ? '' : (data.password || '');
+          service.value = data.service || '';
+          auth.value = data.auth || 'pap';
+          timeout.value = data.timeout_ms || 700;
+          negotiateIPv4.checked = data.negotiate_ipv4 !== false;
+          negotiateIPv6.checked = !!data.negotiate_ipv6;
+          requestPD.checked = !!data.request_pd;
+          dhcpv6TimeoutMs = data.dhcpv6_timeout_ms == null ? 5000 : data.dhcpv6_timeout_ms;
+          dhcpv6SettleMs = data.dhcpv6_settle_ms == null ? 2000 : data.dhcpv6_settle_ms;
+          ipv6RATimeoutMs = data.ipv6_ra_timeout_ms == null ? 5000 : data.ipv6_ra_timeout_ms;
+          keepalive.value = data.keepalive_interval_ms == null ? 15000 : data.keepalive_interval_ms;
+          keepaliveFailures.value = data.keepalive_failure_threshold || 5;
+          keepaliveFailureGraceMs = data.keepalive_failure_grace_ms == null ? 60000 : data.keepalive_failure_grace_ms;
+          keepaliveConfirmTimeoutMs = data.keepalive_confirm_timeout_ms == null ? 5000 : data.keepalive_confirm_timeout_ms;
+          autoRedial.checked = data.auto_redial !== false;
+          installTunnel.checked = data.install_tunnel !== false;
+          localInterface.value = data.local_interface || 'fwdlocal0';
+          tunnelMTU.value = data.tunnel_mtu || data.local_mtu || data.mru || 1492;
+          prepareInterfaces.checked = data.prepare_interfaces !== false && data.prepare_tunnel_interfaces !== false;
+          prepareLocalMTU.checked = data.prepare_local_mtu !== false && data.set_local_mtu !== false;
+          prepareWanMTU.checked = !!(data.prepare_wan_mtu || data.set_wan_mtu);
+          prepareOffloads.checked = data.prepare_offloads !== false && data.disable_offloads !== false;
+          allowUnsafeOffloads.checked = !!(data.allow_unsafe_offloads || data.allow_offload_prepare_failure);
+          wanCoreSync.checked = data.wan_core_sync !== false;
+          wanCoreApply.checked = data.wan_core_apply !== false;
+          updateMACFields();
+          loadedProfileKey = key;
+          syncActionButtons();
+          if (!silent) F.toast(T('toast.profileLoaded'));
+          return true;
+        } catch (e) {
+          if (!silent) F.toastError(e);
+          return false;
+        }
+      }
+
+      async function loadInitialProfile() {
+        if (initialProfileResolved || profileKeyEdited) return;
+        initialProfileResolved = true;
+        let key = lastStateRecord && lastStateRecord.data && lastStateRecord.data.profile_key
+          ? String(lastStateRecord.data.profile_key).trim()
+          : '';
+        let records;
+        try {
+          records = await refreshProfileOptions(key);
+        } catch (e) {
+          return;
+        }
+        if (!key) {
+          const preferred = records.find(function (record) { return record && record.key === 'default'; }) || records[0];
+          key = preferred && preferred.key ? String(preferred.key).trim() : '';
+          renderProfileOptions(key);
+        }
+        if (!key || profileKeyEdited) return;
+        await loadProfile({ silent: true, key: key });
+      }
+
+      async function saveProfile() {
+        if (pendingAction) return;
+        pendingAction = 'save';
+        syncActionButtons();
+        setStatus('status.savingProfile');
+        try {
+          const key = requireProfileKey();
+          const payload = profilePayload();
+          await F.data.upsert('profiles', key, payload);
+          await refreshProfileOptions(key);
+          loadedProfileKey = key;
+          syncActionButtons();
+          setStatus('status.profileSaved');
+          F.toast(T('toast.profileSaved'));
+        } catch (e) {
+          setStatus('status.saveFailed');
+          F.toastError(e);
+        } finally {
+          pendingAction = '';
+          syncActionButtons();
+          F.requestResize();
+        }
+      }
+
+      async function loadSelectedProfile() {
+        if (pendingAction) return;
+        pendingAction = 'load';
+        syncActionButtons();
+        try {
+          await loadProfile({ silent: false });
+        } finally {
+          pendingAction = '';
+          syncActionButtons();
+          F.requestResize();
+        }
+      }
+
+      async function runAction(action, button, busyText, idleText) {
+        if (pendingAction) return;
+        pendingAction = action;
+        syncActionButtons();
+        setStatus(action === 'discover' ? 'status.discovering' : (action === 'traffic_probe' ? 'status.installingTunnel' : 'status.probing'));
+        try {
+          const payload = profilePayload();
+          payload.profile_key = requireProfileKey();
+          await F.action(action, payload);
+          await loadState();
+          setStatus('status.completed');
+          F.toast(action === 'discover' ? T('toast.discoveryDone') : (action === 'traffic_probe' ? T('toast.tunnelDone') : T('toast.probeDone')));
+        } catch (e) {
+          setStatus('status.failed');
+          F.toastError(e);
+        } finally {
+          pendingAction = '';
+          syncActionButtons();
+          F.requestResize();
+        }
+      }
+
+      let stateRefreshPromise = null;
+      function loadState(options) {
+        const silent = !!(options && options.silent === true);
+        if (stateRefreshPromise) return stateRefreshPromise;
+        const trafficRequest = F.action('traffic_stats', { profile_key: loadedProfileKey || '' }).then(function (response) {
+          return response && response.result ? response.result : null;
+        }).catch(function (error) {
+          return { available: false, reason: F.errorText(error) };
+        });
+        stateRefreshPromise = Promise.all([
+          F.data.list('sessions', { limit: 32 }),
+          trafficRequest
+        ]).then(function (values) {
+          const response = values[0];
+          const records = response && Array.isArray(response.records) ? response.records : [];
+          const byKey = {};
+          records.forEach(function (record) {
+            if (record && record.key) byKey[record.key] = record;
+          });
+          updateTraffic(values[1]);
+          renderState(byKey.last || null, byKey.keepalive || null, byKey.redial_last || null);
+        }).catch(function (error) {
+          updateTraffic({ available: false, reason: F.errorText(error) });
+          renderState(lastStateRecord, lastKeepaliveRecord, lastRedialRecord);
+          setRuntimeStatus('error', F.errorText(error));
+          if (!silent) F.toastError(error);
+        }).finally(function () {
+          stateRefreshPromise = null;
+        });
+        return stateRefreshPromise;
+      }
+
+      async function refreshState() {
+        if (pendingAction) return;
+        pendingAction = 'refresh';
+        syncActionButtons();
+        try {
+          await loadState({ silent: false });
+        } finally {
+          pendingAction = '';
+          syncActionButtons();
+          F.requestResize();
+        }
+      }
+
+      async function runConnectionAction() {
+        if (pendingAction || runtimeConnectionState === 'redialing') return;
+        const active = hasActiveSession(lastStateRecord && lastStateRecord.data);
+        const activeData = lastStateRecord && lastStateRecord.data || {};
+        const activeProfileKey = String(activeData.profile_key || activeData.wan_id || '').trim();
+        if (active && activeProfileKey && loadedProfileKey !== activeProfileKey) return;
+        const action = active ? 'disconnect' : 'dial';
+        let p;
+        try {
+          p = profilePayload();
+          p.profile_key = requireProfileKey();
+        } catch (e) {
+          F.toastError(e);
+          return;
+        }
+        p.send_padt = action === 'disconnect';
+        pendingAction = action;
+        syncActionButtons();
+        setStatus(action === 'disconnect' ? 'status.disconnecting' : 'status.dialing');
+        try {
+          await F.action(action, p);
+          if (action === 'dial') loadedProfileKey = p.profile_key;
+          await loadState();
+          setStatus(action === 'disconnect' ? 'status.disconnected' : 'status.dialed');
+          F.toast(T(action === 'disconnect' ? 'toast.disconnected' : 'toast.dialed'));
+        } catch (e) {
+          setStatus(action === 'disconnect' ? 'status.disconnectFailed' : 'status.dialFailed');
+          F.toastError(e);
+        } finally {
+          pendingAction = '';
+          syncActionButtons();
+          F.requestResize();
+        }
+      }
+
+      discoverButton = F.button('Discover', function () {
+        runAction('discover', discoverButton, 'busy.discover', 'action.discover');
+      });
+      bindText(discoverButton, 'action.discover');
+      probeButton = F.button(T('action.probe'), function () {
+        runAction('probe_session', probeButton, 'busy.probe', 'action.probe');
+      });
+      bindText(probeButton, 'action.probe');
+      tunnelProbeButton = F.button(T('action.tunnelProbe'), function () {
+        installTunnel.checked = true;
+        runAction('traffic_probe', tunnelProbeButton, 'busy.tunnel', 'action.tunnelProbe');
+      });
+      bindText(tunnelProbeButton, 'action.tunnelProbe');
+      connectionButton = F.button(T('action.dial'), runConnectionAction);
+      saveButton = i18nButton('action.save', saveProfile);
+      loadButton = i18nButton('action.load', loadSelectedProfile, true);
+      refreshButton = i18nButton('action.refresh', refreshState, true);
+      syncActionButtons();
+      profileSelect.addEventListener('change', function () {
+        profileKeyEdited = true;
+        if (profileSelect.value === NEW_PROFILE_VALUE) {
+          profileKey.value = '';
+          profileKey.hidden = false;
+          profileKey.focus();
+          F.requestResize();
+          return;
+        }
+        profileKey.value = profileSelect.value;
+        profileKey.hidden = true;
+        loadProfile({ key: profileSelect.value, silent: false }).finally(F.requestResize);
+      });
+      profileKey.addEventListener('input', function () {
+        profileKeyEdited = true;
+      });
+
+      const page = F.h('main', { className: F.classes.page + ' pppoe-page' }, [
+        F.stack([
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                textNode('h1', { className: F.classes.title }, 'title'),
+                textNode('p', { className: F.classes.description }, 'desc')
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                bindText(F.badge('raw L2'), 'badge.rawL2'),
+                bindText(F.badge('Goja'), 'badge.goja'),
+                status
+              ])
+            ])
+          ], { className: 'pppoe-hero' }),
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                textNode('h2', { className: F.classes.title }, 'profile.title'),
+                textNode('p', { className: F.classes.description }, 'profile.desc')
+              ]),
+              F.h('div', { className: F.classes.toolbar }, [
+                saveButton,
+                loadButton
+              ])
+            ]),
+            F.h('div', { className: 'pppoe-form' }, [
+              section('section.basic', 'section.basic.desc', [
+                F.h('div', { className: 'pppoe-field-grid' }, [
+                  field('field.profile', profilePicker),
+                  field('field.interface', iface),
+                  field('field.macMode', macMode),
+                  field('field.macAddress', macAddress),
+                  field('field.username', username),
+                  field('field.password', password),
+                  field('field.service', service),
+                  field('field.auth', auth),
+                  field('field.timeout', timeout),
+                  field('field.keepalive', keepalive),
+                  field('field.keepaliveFailures', keepaliveFailures)
+                ])
+              ]),
+              section('section.negotiation', 'section.negotiation.desc', [
+                F.h('div', { className: 'pppoe-toggle-grid' }, [
+                  toggleField('field.ipv4', negotiateIPv4),
+                  toggleField('field.ipv6', negotiateIPv6),
+                  toggleField('field.pd', requestPD),
+                  toggleField('field.autoRedial', autoRedial),
+                  toggleField('field.syncWan', wanCoreSync),
+                  toggleField('field.applyWan', wanCoreApply)
+                ])
+              ]),
+              section('section.tunnel', 'section.tunnel.desc', [
+                F.h('div', { className: 'pppoe-field-grid' }, [
+                  field('field.localInterface', localInterface),
+                  field('field.tunnelMtu', tunnelMTU)
+                ]),
+                F.h('div', { className: 'pppoe-toggle-grid' }, [
+                  toggleField('field.installTunnel', installTunnel),
+                  toggleField('field.prepareInterfaces', prepareInterfaces),
+                  toggleField('field.prepareLocalMtu', prepareLocalMTU),
+                  toggleField('field.prepareWanMtu', prepareWanMTU),
+                  toggleField('field.prepareOffloads', prepareOffloads),
+                  toggleField('field.allowUnsafeOffloads', allowUnsafeOffloads)
+                ])
+              ])
+            ]),
+            F.h('div', { className: F.classes.toolbar + ' pppoe-actions' }, [
+              discoverButton,
+              probeButton,
+              tunnelProbeButton,
+              connectionButton,
+              refreshButton
+            ])
+          ]),
+          F.card([
+            F.h('div', { className: F.classes.toolbar }, [
+              F.h('div', null, [
+                textNode('h2', { className: F.classes.title }, 'runtime.title'),
+                textNode('p', { className: F.classes.description }, 'runtime.desc')
+              ]),
+              runtimeStatus
+            ]),
+            stateBody
+          ])
+        ])
+      ]);
+
+      function field(labelKey, control) {
+        return F.h('label', { className: F.classes.field }, [
+          textNode('span', null, labelKey),
+          control
+        ]);
+      }
+
+      function toggleField(labelKey, control) {
+        return F.h('label', { className: F.classes.field + ' pppoe-toggle-field' }, [
+          textNode('span', { title: T(labelKey) }, labelKey),
+          control
+        ]);
+      }
+
+      function section(titleKey, descriptionKey, children) {
+        const body = Array.isArray(children) ? children : [children];
+        return F.h('section', { className: 'pppoe-section' }, [F.h('div', { className: 'pppoe-section-head' }, [
+            textNode('h3', { className: 'pppoe-section-title' }, titleKey),
+            textNode('span', { className: 'pppoe-section-desc' }, descriptionKey)
+          ])].concat(body));
+      }
+
+      function preparationSummary(prep) {
+        if (!prep || !prep.enabled) return '-';
+        const mtu = Array.isArray(prep.mtu) ? prep.mtu.length : 0;
+        const gso = Array.isArray(prep.gso) ? prep.gso.length : 0;
+        const offloads = Array.isArray(prep.offloads) ? prep.offloads.length : 0;
+        const warnings = Array.isArray(prep.warnings) ? prep.warnings.length : 0;
+        const parts = [];
+        if (mtu) parts.push('mtu ' + mtu);
+        if (gso) parts.push('gso ' + gso);
+        if (offloads) parts.push('offload ' + offloads);
+        if (warnings) parts.push('warn ' + warnings);
+        return parts.length ? parts.join(' / ') : 'enabled';
+      }
+
+      function updateMACFields() {
+        macAddress.disabled = macMode.value !== 'manual';
+      }
+
+      macMode.addEventListener('change', updateMACFields);
+
+      document.body.replaceChildren(page);
+      updateMACFields();
+      loadState().then(loadInitialProfile).finally(F.requestResize);
+      const stateRefreshTimer = window.setInterval(function () {
+        if (document.visibilityState !== 'hidden') loadState({ silent: true });
+      }, 5000);
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') loadState({ silent: true });
+      });
+      window.addEventListener('pagehide', function () {
+        window.clearInterval(stateRefreshTimer);
+      });
+    })();
+  </script>
+</body>
+</html>
