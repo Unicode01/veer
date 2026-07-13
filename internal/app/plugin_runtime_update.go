@@ -184,6 +184,15 @@ func pluginMayAffectActiveCorePlans(plugin LoadedPlugin, cfg *Config) bool {
 		pluginHasDHCPv4PlansResource(plugin)) && pluginCoreResourceStabilityAllowed(plugin, cfg)
 }
 
+func pluginCatalogMayAffectActiveCorePlans(catalog PluginCatalog, cfg *Config) bool {
+	for _, plugin := range catalog.Plugins {
+		if plugin.Status == pluginStatusActive && pluginMayAffectActiveCorePlans(plugin, cfg) {
+			return true
+		}
+	}
+	return false
+}
+
 func processConfigForPluginRuntimeUpdate(pm *ProcessManager) *Config {
 	if pm == nil {
 		return nil

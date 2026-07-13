@@ -335,7 +335,7 @@ func (pm *ProcessManager) reconcilePluginCatalogForRuntime(catalog PluginCatalog
 		applyPluginControlRegistrationSurfaces(&catalog, pm.cfg)
 		catalog = applyPluginStatesFromDB(catalog, pm.db)
 	}
-	refreshCorePlans := pluginCatalogHasActiveEgressNATPlansResource(catalog, pm.cfg) || pluginCatalogHasActiveForwardRulePlansResource(catalog, pm.cfg) || pluginCatalogHasActiveDHCPv4PlansResource(catalog, pm.cfg)
+	refreshCorePlans := pluginCatalogMayAffectActiveCorePlans(catalog, pm.cfg)
 	catalog = applyPluginHookBindingsFromDB(catalog, pm.db)
 	snapshot, redistributed := pm.reconcilePluginDataplaneForCatalog(catalog)
 	if reconciler, ok := pm.pluginControlRuntime.(pluginControlPostDataplaneReconciler); ok {
@@ -385,7 +385,7 @@ func (pm *ProcessManager) ApplyPluginResourceReconcileFromControl(plugin LoadedP
 	}
 	catalogCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
 	catalog := loadPluginCatalogWithControlRegistrationAndState(catalogCfg, pm.db)
-	refreshCorePlans := pluginCatalogHasActiveEgressNATPlansResource(catalog, catalogCfg) || pluginCatalogHasActiveForwardRulePlansResource(catalog, catalogCfg) || pluginCatalogHasActiveDHCPv4PlansResource(catalog, catalogCfg) || pluginResourceAffectsActiveCorePlans(plugin, resource, catalogCfg)
+	refreshCorePlans := pluginCatalogMayAffectActiveCorePlans(catalog, catalogCfg) || pluginResourceAffectsActiveCorePlans(plugin, resource, catalogCfg)
 	catalog = applyPluginHookBindingsFromDB(catalog, pm.db)
 	snapshot, redistributed := pm.reconcilePluginDataplaneForCatalog(catalog)
 	for _, plugin := range catalog.Plugins {

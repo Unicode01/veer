@@ -66,7 +66,7 @@ usage() {
                         失败时保留临时目录，默认 1
   VEER_SKIP_DEPS       设为 1 时跳过系统依赖安装
   VEER_SKIP_GO         设为 1 时跳过 Go 安装检查
-  VEER_INSTALL_PLUGINS 设为 1 时安装 bundled stable 插件，默认 0
+  VEER_INSTALL_PLUGINS 设为 1 时构建并安装 bundled stable 插件，默认 0
 
 兼容性:
   main 已发布的同名 FORWARD_* 变量仍可使用；同时设置时 VEER_* 优先。
@@ -917,7 +917,7 @@ clone_repo() {
 
 build_release() {
     cd "${FORWARD_REPO_DIR}"
-    bash ./release.sh "${GOARCH}"
+    VEER_BUILD_PLUGIN_BUNDLE="${FORWARD_INSTALL_PLUGINS}" bash ./release.sh "${GOARCH}"
     ok "构建完成"
 }
 

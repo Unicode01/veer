@@ -7,6 +7,27 @@ import (
 	"github.com/Unicode01/veer/internal/store"
 )
 
+func TestPluginCatalogMayAffectActiveCorePlansIncludesIPv6(t *testing.T) {
+	t.Parallel()
+
+	plugin := LoadedPlugin{
+		PluginManifest: PluginManifest{
+			ID:        "lan_core",
+			Stability: pluginStabilityStable,
+		},
+		Resources: []PluginResource{{ID: pluginIPv6AssignmentPlansResourceID}},
+		Status:    pluginStatusActive,
+	}
+	if !pluginCatalogMayAffectActiveCorePlans(PluginCatalog{Plugins: []LoadedPlugin{plugin}}, &Config{}) {
+		t.Fatal("active IPv6 assignment plan resource was not detected")
+	}
+
+	plugin.Status = pluginStatusDisabled
+	if pluginCatalogMayAffectActiveCorePlans(PluginCatalog{Plugins: []LoadedPlugin{plugin}}, &Config{}) {
+		t.Fatal("disabled IPv6 assignment plan resource was detected as active")
+	}
+}
+
 func TestPluginIPv6SubnetByIndexSelectsRequested64(t *testing.T) {
 	t.Parallel()
 
