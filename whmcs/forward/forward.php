@@ -926,11 +926,7 @@ function forward_get_csrf_token()
     }
 
     if (empty($_SESSION['forward_csrf_token'])) {
-        if (function_exists('random_bytes')) {
-            $_SESSION['forward_csrf_token'] = bin2hex(random_bytes(16));
-        } else {
-            $_SESSION['forward_csrf_token'] = md5(uniqid('forward', true));
-        }
+        $_SESSION['forward_csrf_token'] = bin2hex(random_bytes(16));
     }
 
     return (string) $_SESSION['forward_csrf_token'];
@@ -4741,7 +4737,9 @@ function forward_output_render($vars)
     $serverIp = htmlspecialchars(forward_format_ip_list($allServerIps), ENT_QUOTES, 'UTF-8');
     $adminServerOptionsHtml = forward_admin_server_select_html($adminServerOptions);
     $adminServerFilterHtml = forward_admin_server_filter_html($adminViewServerOptions);
-    $adminServerOptionsJs = json_encode($adminServerOptions, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $inlineJsonFlags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES |
+        JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
+    $adminServerOptionsJs = json_encode($adminServerOptions, $inlineJsonFlags);
     if ($adminServerOptionsJs === false) {
         $adminServerOptionsJs = '{}';
     }
@@ -4751,7 +4749,7 @@ function forward_output_render($vars)
     $outInterface = htmlspecialchars((string) ($settings['out_interface'] ?? ''), ENT_QUOTES, 'UTF-8');
     $adminListenPortRangeText = htmlspecialchars((string) $adminListenPortRange['text'], ENT_QUOTES, 'UTF-8');
     $csrfToken = htmlspecialchars(forward_get_csrf_token(), ENT_QUOTES, 'UTF-8');
-    $csrfTokenJs = json_encode(forward_get_csrf_token(), JSON_UNESCAPED_UNICODE);
+    $csrfTokenJs = json_encode(forward_get_csrf_token(), $inlineJsonFlags);
     $adminDefaultTransparentJs = json_encode(forward_is_enabled_value($settings['transparent_mode'] ?? 'off'));
     $legacyServerMapNotice = forward_has_legacy_server_ip_product_map($settings)
         ? '检测到旧版按产品映射入口 IP 配置，它已不再参与宿主机匹配。请将 server_ip_product_map 手动迁移到新的 server_ip_server_map。'

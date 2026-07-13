@@ -49,6 +49,7 @@ usage() {
                       CN 模式优先尝试的源码归档地址，默认空
   VEER_REF             拉取的 Git ref，默认 main
   VEER_GO_VERSION      安装的 Go 版本，默认 1.25.12
+  VEER_GO_SHA256       自定义 Go 版本/构建的官方 tar.gz SHA-256
   VEER_GO_REGION       Go 下载区域策略: auto/cn/global，默认 auto
   VEER_GO_BASE_URL     显式覆盖 Go 下载源前缀，例如 https://mirror.example.com/golang
   VEER_GO_CN_BASE_URL
@@ -104,6 +105,7 @@ FORWARD_REPO_ARCHIVE_URL="${VEER_REPO_ARCHIVE_URL:-${FORWARD_REPO_ARCHIVE_URL:-}
 FORWARD_REPO_ARCHIVE_URL_CN="${VEER_REPO_ARCHIVE_URL_CN:-${FORWARD_REPO_ARCHIVE_URL_CN:-}}"
 FORWARD_REF="${VEER_REF:-${FORWARD_REF:-main}}"
 FORWARD_GO_VERSION="${VEER_GO_VERSION:-${FORWARD_GO_VERSION:-1.25.12}}"
+FORWARD_GO_SHA256="${VEER_GO_SHA256:-${FORWARD_GO_SHA256:-}}"
 FORWARD_GO_REGION="${VEER_GO_REGION:-${FORWARD_GO_REGION:-auto}}"
 FORWARD_GO_BASE_URL="${VEER_GO_BASE_URL:-${FORWARD_GO_BASE_URL:-}}"
 FORWARD_GO_CN_BASE_URL="${VEER_GO_CN_BASE_URL:-${FORWARD_GO_CN_BASE_URL:-https://mirrors.aliyun.com/golang}}"
@@ -136,6 +138,92 @@ case "${FORWARD_INSTALL_PLUGINS}" in
         ;;
 esac
 
+bootstrap_workdir_marker_name=".veer-bootstrap-owned"
+bootstrap_workdir_marker_value="veer-bootstrap-workdir-v1"
+
+initialize_bootstrap_workdir() {
+    local requested="$1"
+    local existed=0
+    local resolved=""
+    local owner=""
+    local marker=""
+
+    if [[ -z "${requested}" || "${requested}" != /* ]]; then
+        fail "VEER_WORKDIR 必须是绝对路径: ${requested:-<empty>}"
+    fi
+    if [[ "${requested}" == *$'\n'* || "${requested}" == *$'\r'* || "${requested}" == *$'\t'* ]]; then
+        fail "VEER_WORKDIR 不能包含控制字符"
+    fi
+    case "${requested%/}" in
+        ""|/|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/var/tmp)
+            fail "拒绝使用系统目录作为 VEER_WORKDIR: ${requested}"
+            ;;
+    esac
+    if [[ -L "${requested}" ]]; then
+        fail "VEER_WORKDIR 不能是符号链接: ${requested}"
+    fi
+    if [[ -e "${requested}" ]]; then
+        existed=1
+        [[ -d "${requested}" ]] || fail "VEER_WORKDIR 不是目录: ${requested}"
+    else
+        mkdir -p -m 700 -- "${requested}"
+    fi
+
+    resolved="$(readlink -f -- "${requested}")" || fail "无法解析 VEER_WORKDIR: ${requested}"
+    [[ -n "${resolved}" && "${resolved}" != "/" ]] || fail "拒绝使用根目录作为 VEER_WORKDIR"
+    case "${resolved%/}" in
+        ""|/|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/var/tmp)
+            fail "VEER_WORKDIR 解析到了系统目录: ${requested} -> ${resolved}"
+            ;;
+    esac
+    owner="$(stat -c '%u' "${resolved}" 2>/dev/null || true)"
+    [[ "${owner}" == "${EUID}" ]] || fail "VEER_WORKDIR 必须归当前 root 用户所有: ${resolved}"
+
+    marker="${resolved}/${bootstrap_workdir_marker_name}"
+    if (( existed )) && [[ ! -f "${marker}" ]]; then
+        if [[ "${resolved}" != "/tmp/veer-bootstrap" ]]; then
+            fail "已有 VEER_WORKDIR 缺少所有权标记，拒绝清理: ${resolved}"
+        fi
+    fi
+    if [[ -L "${marker}" ]]; then
+        fail "VEER_WORKDIR 所有权标记不能是符号链接: ${marker}"
+    fi
+    if [[ -f "${marker}" ]]; then
+        [[ "$(<"${marker}")" == "${bootstrap_workdir_marker_value}" ]] || fail "VEER_WORKDIR 所有权标记无效: ${marker}"
+    else
+        printf '%s\n' "${bootstrap_workdir_marker_value}" >"${marker}"
+    fi
+    chmod 700 "${resolved}"
+    chmod 600 "${marker}"
+    FORWARD_WORKDIR="${resolved}"
+}
+
+assert_bootstrap_workdir_owned() {
+    local marker="${FORWARD_WORKDIR}/${bootstrap_workdir_marker_name}"
+    [[ -d "${FORWARD_WORKDIR}" && ! -L "${FORWARD_WORKDIR}" ]] || fail "bootstrap 工作目录已失效: ${FORWARD_WORKDIR}"
+    [[ -f "${marker}" && ! -L "${marker}" ]] || fail "bootstrap 工作目录缺少所有权标记: ${FORWARD_WORKDIR}"
+    [[ "$(<"${marker}")" == "${bootstrap_workdir_marker_value}" ]] || fail "bootstrap 工作目录所有权标记无效: ${FORWARD_WORKDIR}"
+}
+
+safe_remove_bootstrap_path() {
+    local path="${1:-}"
+    [[ -n "${path}" ]] || return 0
+    assert_bootstrap_workdir_owned
+    case "${path}" in
+        "${FORWARD_WORKDIR}"|"${FORWARD_WORKDIR}"/*)
+            rm -rf -- "${path}"
+            ;;
+        *)
+            fail "拒绝清理 bootstrap 工作目录之外的路径: ${path}"
+            ;;
+    esac
+}
+
+initialize_bootstrap_workdir "${FORWARD_WORKDIR}"
+FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
+FORWARD_GO_ROOT="${FORWARD_WORKDIR}/go"
+FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH:-amd64}.tar.gz"
+
 set_step() {
     CURRENT_STEP="$1"
     info "${CURRENT_STEP}..."
@@ -148,12 +236,14 @@ run_with_retry() {
     shift 3
 
     local try=1
+    local exit_code=0
     while true; do
         if "$@"; then
             return 0
+        else
+            exit_code=$?
         fi
 
-        local exit_code=$?
         if (( try >= attempts )); then
             fail "${description} 失败，已重试 ${attempts} 次 (exit=${exit_code})"
         fi
@@ -175,9 +265,10 @@ try_with_retry() {
     while true; do
         if "$@"; then
             return 0
+        else
+            exit_code=$?
         fi
 
-        exit_code=$?
         if (( try >= attempts )); then
             warn "${description} 失败，已重试 ${attempts} 次 (exit=${exit_code})"
             return "${exit_code}"
@@ -216,7 +307,7 @@ cleanup() {
             warn "bootstrap 失败，已保留临时目录: ${FORWARD_WORKDIR}"
             return
         fi
-        rm -rf "${FORWARD_WORKDIR}"
+        safe_remove_bootstrap_path "${FORWARD_WORKDIR}"
     fi
 }
 trap cleanup EXIT
@@ -784,7 +875,7 @@ resolve_go_download_urls() {
 fetch_repo_via_git() {
     local repo_url="$1"
 
-    rm -rf "${FORWARD_REPO_DIR}"
+    safe_remove_bootstrap_path "${FORWARD_REPO_DIR}"
     mkdir -p "${FORWARD_REPO_DIR}"
     git init -q "${FORWARD_REPO_DIR}"
     git -C "${FORWARD_REPO_DIR}" remote add origin "${repo_url}"
@@ -804,18 +895,60 @@ fetch_repo_via_archive() {
         return 1
     fi
 
-    rm -rf "${FORWARD_REPO_DIR}"
+    safe_remove_bootstrap_path "${FORWARD_REPO_DIR}"
     mkdir -p "${FORWARD_REPO_DIR}"
     if ! tar -C "${FORWARD_REPO_DIR}" --strip-components=1 -xzf "${archive_path}"; then
         rm -f "${archive_path}"
-        rm -rf "${FORWARD_REPO_DIR}"
+        safe_remove_bootstrap_path "${FORWARD_REPO_DIR}"
         return 1
     fi
     rm -f "${archive_path}"
 }
 
+expected_go_tarball_sha256() {
+    local configured=""
+    configured="$(printf '%s' "${FORWARD_GO_SHA256}" | tr '[:upper:]' '[:lower:]')"
+    if [[ -n "${configured}" ]]; then
+        if [[ ! "${configured}" =~ ^[a-f0-9]{64}$ ]]; then
+            return 1
+        fi
+        printf '%s\n' "${configured}"
+        return 0
+    fi
+
+    case "${FORWARD_GO_VERSION}/${GO_TARBALL_ARCH}" in
+        1.25.12/amd64)
+            printf '%s\n' '234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1'
+            ;;
+        1.25.12/arm64)
+            printf '%s\n' '8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+verify_go_tarball() {
+    local expected_sha256="$1"
+    local actual_sha256=""
+    actual_sha256="$(python3 - "${FORWARD_GO_TARBALL}" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+)" || return 1
+    [[ "${actual_sha256}" == "${expected_sha256}" ]]
+}
+
 download_go_tarball() {
     local filename="$1"
+    local expected_sha256=""
     local url=""
     local attempt_index=0
     local total_urls=0
@@ -827,13 +960,19 @@ download_go_tarball() {
     if (( total_urls == 0 )); then
         fail "未生成任何 Go 下载地址"
     fi
+    if ! expected_sha256="$(expected_go_tarball_sha256)"; then
+        fail "缺少 Go ${FORWARD_GO_VERSION} linux-${GO_TARBALL_ARCH} 的可信 SHA-256；自定义版本请设置 VEER_GO_SHA256"
+    fi
 
     for url in "${urls[@]}"; do
         attempt_index=$((attempt_index + 1))
         info "尝试下载 Go ${FORWARD_GO_VERSION} (${attempt_index}/${total_urls}): ${url}"
         if curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 -o "${FORWARD_GO_TARBALL}" "${url}"; then
-            ok "Go 下载完成: ${url}"
-            return 0
+            if verify_go_tarball "${expected_sha256}"; then
+                ok "Go 下载并通过 SHA-256 校验: ${url}"
+                return 0
+            fi
+            warn "Go 下载文件 SHA-256 不匹配，拒绝解压: ${url}"
         fi
         warn "Go 下载失败，尝试下一个源: ${url}"
         rm -f "${FORWARD_GO_TARBALL}"
@@ -862,7 +1001,7 @@ install_go_if_needed() {
 
     mkdir -p "${FORWARD_WORKDIR}"
     rm -f "${FORWARD_GO_TARBALL}"
-    rm -rf "${FORWARD_GO_ROOT}"
+    safe_remove_bootstrap_path "${FORWARD_GO_ROOT}"
     detect_go_download_region
     download_go_tarball "${filename}"
     tar -C "${FORWARD_WORKDIR}" -xzf "${FORWARD_GO_TARBALL}"
@@ -940,6 +1079,7 @@ main() {
     require_command curl
     require_command tar
     require_command git
+    require_command python3
     set_step "安装 Go"
     install_go_if_needed
     set_step "配置 Go 模块代理"
