@@ -169,15 +169,6 @@ func activePluginDHCPv4PlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]st
 	return out
 }
 
-func pluginCatalogHasActiveDHCPv4PlansResource(catalog PluginCatalog, cfg *Config) bool {
-	for _, plugin := range catalog.Plugins {
-		if pluginDHCPv4PlansResourceActive(plugin, cfg) {
-			return true
-		}
-	}
-	return false
-}
-
 func pluginDHCPv4PlansResourceActive(plugin LoadedPlugin, cfg *Config) bool {
 	return plugin.Status == pluginStatusActive && pluginHasDHCPv4PlansResource(plugin) && pluginCoreResourceStabilityAllowed(plugin, cfg)
 }

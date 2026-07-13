@@ -205,15 +205,6 @@ func activePluginForwardRulePlanPluginIDs(db sqlRuleStore, cfg *Config) map[stri
 	return out
 }
 
-func pluginCatalogHasActiveForwardRulePlansResource(catalog PluginCatalog, cfg *Config) bool {
-	for _, plugin := range catalog.Plugins {
-		if pluginForwardRulePlansResourceActive(plugin, cfg) {
-			return true
-		}
-	}
-	return false
-}
-
 func pluginForwardRulePlansResourceActive(plugin LoadedPlugin, cfg *Config) bool {
 	if plugin.Status != pluginStatusActive || !pluginHasForwardRulePlansResource(plugin) {
 		return false

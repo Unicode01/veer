@@ -172,15 +172,6 @@ func activePluginEgressNATPlanPluginIDs(db sqlRuleStore, cfg *Config) map[string
 	return out
 }
 
-func pluginCatalogHasActiveEgressNATPlansResource(catalog PluginCatalog, cfg *Config) bool {
-	for _, plugin := range catalog.Plugins {
-		if pluginEgressNATPlansResourceActive(plugin, cfg) {
-			return true
-		}
-	}
-	return false
-}
-
 func pluginEgressNATPlansResourceActive(plugin LoadedPlugin, cfg *Config) bool {
 	if plugin.Status != pluginStatusActive || !pluginHasEgressNATPlansResource(plugin) {
 		return false

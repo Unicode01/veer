@@ -99,6 +99,23 @@ func TestPluginsDefaultDisabledDoNotScanAndCoreAPIStaysAvailable(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("disabled plugin asset status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
+
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/plugins/disabled_plugin/state"},
+		{method: http.MethodGet, path: "/api/plugins/disabled_plugin/resources/settings"},
+		{method: http.MethodPost, path: "/api/plugins/disabled_plugin/actions/apply"},
+	} {
+		req := httptest.NewRequest(test.method, test.path, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status = %d, want %d", test.method, test.path, rec.Code, http.StatusNotFound)
+		}
+	}
 }
 
 func TestPluginsCanBeEnabledExplicitly(t *testing.T) {

@@ -88,7 +88,7 @@ func TestPluginRuntimeUpdateAcceptsLabEgressNATPlansWithoutProcessManager(t *tes
 	}
 }
 
-func TestPluginCatalogActiveEgressNATPlanAllowsLabByDefault(t *testing.T) {
+func TestPluginCatalogCorePlanDetectionAllowsLabByDefault(t *testing.T) {
 	catalog := PluginCatalog{Plugins: []LoadedPlugin{
 		{
 			PluginManifest: PluginManifest{
@@ -99,18 +99,18 @@ func TestPluginCatalogActiveEgressNATPlanAllowsLabByDefault(t *testing.T) {
 			Status:    pluginStatusActive,
 		},
 	}}
-	if !pluginCatalogHasActiveEgressNATPlansResource(catalog, pluginsEnabledTestConfig(&Config{})) {
-		t.Fatal("pluginCatalogHasActiveEgressNATPlansResource(default lab) = false, want true")
+	if !pluginCatalogMayAffectActiveCorePlans(catalog, pluginsEnabledTestConfig(&Config{})) {
+		t.Fatal("pluginCatalogMayAffectActiveCorePlans(default lab) = false, want true")
 	}
 
 	catalog.Plugins[0].Stability = pluginStabilityStable
-	if !pluginCatalogHasActiveEgressNATPlansResource(catalog, pluginsEnabledTestConfig(&Config{})) {
-		t.Fatal("pluginCatalogHasActiveEgressNATPlansResource(stable) = false, want true")
+	if !pluginCatalogMayAffectActiveCorePlans(catalog, pluginsEnabledTestConfig(&Config{})) {
+		t.Fatal("pluginCatalogMayAffectActiveCorePlans(stable) = false, want true")
 	}
 
 	catalog.Plugins[0].Status = pluginStatusError
-	if pluginCatalogHasActiveEgressNATPlansResource(catalog, pluginsEnabledTestConfig(&Config{})) {
-		t.Fatal("pluginCatalogHasActiveEgressNATPlansResource(inactive stable) = true, want false")
+	if pluginCatalogMayAffectActiveCorePlans(catalog, pluginsEnabledTestConfig(&Config{})) {
+		t.Fatal("pluginCatalogMayAffectActiveCorePlans(inactive stable) = true, want false")
 	}
 }
 

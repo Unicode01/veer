@@ -439,7 +439,7 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、读、�
 
 `release.sh` 和 `scripts/package-plugins.sh` 默认只把 stable 插件放入 `veer-plugins.tar.gz`。
 
-`bootstrap.sh` 和 `deploy.sh` 默认只安装 Veer 核心，不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会安装 bundled 插件；该开关只管理文件安装，插件运行和 TC 数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。
+`bootstrap.sh` 默认只构建和安装 Veer 核心，不执行 bundled 插件构建；`deploy.sh` 默认也不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled 插件；该开关不启用插件运行时，插件控制面和 TC 数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。直接运行 `release.sh` 时仍默认生成插件包，可用 `VEER_BUILD_PLUGIN_BUNDLE=0` 只构建核心发布物。
 
 ## 验收边界
 

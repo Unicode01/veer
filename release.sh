@@ -10,7 +10,7 @@
 # 产物直接输出到项目根目录:
 #   veer-linux-amd64
 #   veer-linux-arm64
-#   veer-plugins.tar.gz
+#   veer-plugins.tar.gz (VEER_BUILD_PLUGIN_BUNDLE=0 时不生成)
 #
 # 部署: 将 veer-linux-<arch> + deploy.sh 一起传到服务器执行即可
 # 注意: eBPF tc/xdp 对象会先在本地编译并 embed 进 Go 二进制，部署时无需额外携带 .o 文件
@@ -61,9 +61,18 @@ EBPF_XDP_OBJ="${EBPF_DIR}/forward-xdp-bpf.o"
 EBPF_XDP_STATS_OBJ="${EBPF_DIR}/forward-xdp-bpf-stats.o"
 BPF_CLANG="${BPF_CLANG:-clang}"
 BPF_EXTRA_CFLAGS="${BPF_EXTRA_CFLAGS:-}"
+BUILD_PLUGIN_BUNDLE="${VEER_BUILD_PLUGIN_BUNDLE:-1}"
 # Debian 5.10 rejects the TC object emitted at -O1 with a 9-frame verifier stack.
 # -O2 produces verifier-safe subprog layout without changing the source inputs.
 BPF_OLEVEL="${BPF_OLEVEL:-2}"
+
+case "${BUILD_PLUGIN_BUNDLE}" in
+    0|1)
+        ;;
+    *)
+        fail "VEER_BUILD_PLUGIN_BUNDLE 仅支持 0 或 1，当前值: ${BUILD_PLUGIN_BUNDLE}"
+        ;;
+esac
 
 if ! command -v go &>/dev/null; then
     fail "未找到 go 命令，请先安装 Go >= 1.21"
@@ -172,15 +181,19 @@ compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_OBJ}" "xdp"
 compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_STATS_OBJ}" "xdp-stats" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 
 # ---------- bundled plugins ----------
-info "编译 bundled plugin eBPF 对象..."
-sh "${PROJECT_DIR}/scripts/build-plugin-ebpf.sh"
-sh "${PROJECT_DIR}/scripts/verify-plugin-manifests.sh"
-go test ./internal/app -run '^TestBundledStablePluginCatalogIsValid$' -count=1
-VEER_PLUGIN_PACKAGE_SKIP_BUILD=1 sh "${PROJECT_DIR}/scripts/package-plugins.sh"
 PLUGIN_BUNDLE="${PROJECT_DIR}/veer-plugins.tar.gz"
 rm -f "${PLUGIN_BUNDLE}"
-tar -C "${PROJECT_DIR}/dist" -czf "${PLUGIN_BUNDLE}" plugins
-ok "bundled plugins => veer-plugins.tar.gz"
+if [[ "${BUILD_PLUGIN_BUNDLE}" == "1" ]]; then
+    info "编译 bundled plugin eBPF 对象..."
+    sh "${PROJECT_DIR}/scripts/build-plugin-ebpf.sh"
+    sh "${PROJECT_DIR}/scripts/verify-plugin-manifests.sh"
+    go test ./internal/app -run '^TestBundledStablePluginCatalogIsValid$' -count=1
+    VEER_PLUGIN_PACKAGE_SKIP_BUILD=1 sh "${PROJECT_DIR}/scripts/package-plugins.sh"
+    tar -C "${PROJECT_DIR}/dist" -czf "${PLUGIN_BUNDLE}" plugins
+    ok "bundled plugins => veer-plugins.tar.gz"
+else
+    info "跳过 bundled plugin 构建"
+fi
 
 # ---------- 编译 ----------
 for ARCH in "${TARGETS[@]}"; do
@@ -200,5 +213,7 @@ echo -e "${GREEN}构建完成。部署方法:${NC}"
 echo ""
 echo "  scp veer-linux-amd64 deploy.sh root@server:/tmp/"
 echo "  ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'"
-echo "  # 可选插件: 额外上传 veer-plugins.tar.gz，并设置 VEER_INSTALL_PLUGINS=1"
+if [[ "${BUILD_PLUGIN_BUNDLE}" == "1" ]]; then
+    echo "  # 可选插件: 额外上传 veer-plugins.tar.gz，并设置 VEER_INSTALL_PLUGINS=1"
+fi
 echo ""
