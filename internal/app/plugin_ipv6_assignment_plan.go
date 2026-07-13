@@ -287,7 +287,7 @@ func pluginIPv6GatewayCIDR(prefix *net.IPNet, displayPrefixLen int) (string, err
 }
 
 func pluginIPv6AssignmentPlansEnabled(cfg *Config) bool {
-	return cfg == nil || cfg.PluginsEnabled()
+	return cfg != nil && cfg.PluginsEnabled()
 }
 
 func activePluginIPv6AssignmentPlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]struct{} {

@@ -135,7 +135,7 @@ func TestLoadConfigAllowsDisablingWebUI(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDefaultsPluginsEnabled(t *testing.T) {
+func TestLoadConfigDefaultsPluginsDisabled(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -151,14 +151,36 @@ func TestLoadConfigDefaultsPluginsEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)
 	}
-	if !cfg.PluginsEnabled() {
-		t.Fatal("PluginsEnabled() = false, want true by default")
+	if cfg.PluginsEnabled() {
+		t.Fatal("PluginsEnabled() = true, want false by default")
 	}
 	if cfg.PluginsDir != defaultPluginsDir {
 		t.Fatalf("PluginsDir = %q, want %q", cfg.PluginsDir, defaultPluginsDir)
 	}
 	if cfg.PluginsDataplaneEnabled() {
 		t.Fatal("PluginsDataplaneEnabled() = true, want false by default")
+	}
+}
+
+func TestLoadConfigAllowsEnablingPlugins(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "web_port": 8080,
+  "web_token": "test-token",
+  "plugins_enabled": true
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if !cfg.PluginsEnabled() {
+		t.Fatal("PluginsEnabled() = false, want true when explicitly enabled")
 	}
 }
 

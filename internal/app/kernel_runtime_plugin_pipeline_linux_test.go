@@ -68,26 +68,23 @@ func TestNewTCKernelRuleRuntimeEnablesPluginPipelineFromConfig(t *testing.T) {
 	enabled := true
 	disabled := false
 
-	rt := newTCKernelRuleRuntime(&Config{
+	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
-		PluginsDataplaneSetting: &enabled,
-	})
+		PluginsDataplaneSetting: &enabled}))
 	if !rt.pluginPipelineEnabled {
 		t.Fatal("pluginPipelineEnabled = false, want true when external dataplane plugins are enabled")
 	}
 
-	rt = newTCKernelRuleRuntime(&Config{
+	rt = newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &disabled,
-		PluginsDataplaneSetting: &enabled,
-	})
+		PluginsDataplaneSetting: &enabled}))
 	if rt.pluginPipelineEnabled {
 		t.Fatal("pluginPipelineEnabled = true, want false when plugin scanning is disabled")
 	}
 
-	rt = newTCKernelRuleRuntime(&Config{
+	rt = newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
-		PluginsDataplaneSetting: &disabled,
-	})
+		PluginsDataplaneSetting: &disabled}))
 	if rt.pluginPipelineEnabled {
 		t.Fatal("pluginPipelineEnabled = true, want false when plugin dataplane loading is disabled")
 	}
@@ -98,10 +95,10 @@ func TestOrderedKernelRuntimePrefersTCWhenRuntimeTCPluginHooksActive(t *testing.
 	xdp := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineXDP}
 	tc := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineTC}
 	rt := &orderedKernelRuleRuntime{
-		cfg: &Config{
+		cfg: pluginsEnabledTestConfig(&Config{
 			PluginsEnabledSetting:   &enabled,
-			PluginsDataplaneSetting: &enabled,
-		},
+			PluginsDataplaneSetting: &enabled}),
+
 		entries: []orderedKernelRuntimeEntry{
 			{name: kernelEngineXDP, rt: xdp},
 			{name: kernelEngineTC, rt: tc},
@@ -140,10 +137,10 @@ func TestOrderedKernelRuntimeDoesNotFallbackToXDPWhenRuntimeTCPluginHooksActive(
 		},
 	}
 	rt := &orderedKernelRuleRuntime{
-		cfg: &Config{
+		cfg: pluginsEnabledTestConfig(&Config{
 			PluginsEnabledSetting:   &enabled,
-			PluginsDataplaneSetting: &enabled,
-		},
+			PluginsDataplaneSetting: &enabled}),
+
 		entries: []orderedKernelRuntimeEntry{
 			{name: kernelEngineXDP, rt: xdp},
 			{name: kernelEngineTC, rt: tc},
@@ -185,10 +182,10 @@ func TestOrderedKernelRuntimeMigratesRetainedXDPAssignmentsWhenRuntimeTCPluginHo
 		},
 	}
 	rt := &orderedKernelRuleRuntime{
-		cfg: &Config{
+		cfg: pluginsEnabledTestConfig(&Config{
 			PluginsEnabledSetting:   &enabled,
-			PluginsDataplaneSetting: &enabled,
-		},
+			PluginsDataplaneSetting: &enabled}),
+
 		entries: []orderedKernelRuntimeEntry{
 			{name: kernelEngineXDP, rt: xdp},
 			{name: kernelEngineTC, rt: tc},
@@ -219,9 +216,9 @@ func TestOrderedKernelRuntimeKeepsEngineOrderWhenPluginDataplaneDisabled(t *test
 	xdp := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineXDP}
 	tc := &orderedKernelRuntimeEntryTestRuntime{engine: kernelEngineTC}
 	rt := &orderedKernelRuleRuntime{
-		cfg: &Config{
-			PluginsDataplaneSetting: &disabled,
-		},
+		cfg: pluginsEnabledTestConfig(&Config{
+			PluginsDataplaneSetting: &disabled}),
+
 		entries: []orderedKernelRuntimeEntry{
 			{name: kernelEngineXDP, rt: xdp},
 			{name: kernelEngineTC, rt: tc},
@@ -849,10 +846,10 @@ func TestBuildKernelPluginPipelineDesiredForRuntimeAllowsLabByDefault(t *testing
 	catalog := PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}}
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
-		PluginsDataplaneSetting: &enabled,
-	}
+		PluginsDataplaneSetting: &enabled})
+
 	desired, states := buildKernelPluginPipelineDesiredForRuntime(catalog, cfg)
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no lab stability block", states)
@@ -1269,10 +1266,10 @@ func TestNormalizePluginHookAllowsPhysicalPipelineStages(t *testing.T) {
 
 func TestKernelPluginPipelineKeepsXDPHooksRegistrationOnly(t *testing.T) {
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
-		PluginsDataplaneSetting: &enabled,
-	}
+		PluginsDataplaneSetting: &enabled})
+
 	plugin := LoadedPlugin{
 		PluginManifest: PluginManifest{
 			ID:      "xdp_probe",
@@ -1336,11 +1333,11 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	}
+		PluginsDir:              pluginsRoot})
+
 	topology := setupDataplanePerfTopology(t)
 	seedDataplanePerfNeighbors(t, topology)
 
@@ -1505,11 +1502,11 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitInterfaceWithoutRules(t *tes
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	}
+		PluginsDir:              pluginsRoot})
+
 	rt := newTCKernelRuleRuntime(cfg)
 	defer rt.Close()
 
@@ -1627,11 +1624,10 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitEgressInterfaceWithoutRules(
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
-	rt := newTCKernelRuleRuntime(&Config{
+	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	})
+		PluginsDir:              pluginsRoot}))
 	defer rt.Close()
 
 	if _, err := rt.Reconcile(nil); err != nil {
@@ -1674,11 +1670,11 @@ func TestKernelPluginPipelineRuntimeReconcilePluginsBootstrapsExplicitInterfaceW
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	}
+		PluginsDir:              pluginsRoot})
+
 	rt := newTCKernelRuleRuntime(cfg)
 	defer rt.Close()
 
@@ -1748,11 +1744,11 @@ func TestKernelPluginPipelineRuntimeNoRulePostLookupPluginAttachesWithCoreDisabl
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "rule_observer.bpf.c"), filepath.Join(pluginDir, "rule_observer.o"))
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	}
+		PluginsDir:              pluginsRoot})
+
 	rt := newTCKernelRuleRuntime(cfg)
 	defer rt.Close()
 
@@ -1864,11 +1860,11 @@ func TestKernelPluginPipelineRuntimeNoRulePreCorePluginCanDropTraffic(t *testing
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "drop_core.bpf.c"), filepath.Join(pluginDir, "drop_core.o"))
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	}
+		PluginsDir:              pluginsRoot})
+
 	rt := newTCKernelRuleRuntime(cfg)
 	defer rt.Close()
 
@@ -1922,11 +1918,10 @@ func TestKernelPluginPipelineRuntimeScopesHooksPerInterface(t *testing.T) {
 	compileBPFObjectFromSource(t, filepath.Join(dropDir, "drop_core.bpf.c"), filepath.Join(dropDir, "drop_core.o"))
 
 	enabled := true
-	rt := newTCKernelRuleRuntime(&Config{
+	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	})
+		PluginsDir:              pluginsRoot}))
 	defer rt.Close()
 	if results, err := rt.Reconcile(nil); err != nil {
 		t.Fatalf("Reconcile(nil) error = %v", err)
@@ -2028,11 +2023,11 @@ func TestKernelPluginPipelineRuntimeNoRulePreCorePluginCanRedirectBetweenInterfa
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "redirect_core.bpf.c"), filepath.Join(pluginDir, "redirect_core.o"))
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	}
+		PluginsDir:              pluginsRoot})
+
 	rt := newTCKernelRuleRuntime(cfg)
 	defer rt.Close()
 
@@ -2070,11 +2065,11 @@ func TestKernelPluginPipelineRuntimeChainsPostLookupPlugin(t *testing.T) {
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "rule_observer.bpf.c"), filepath.Join(pluginDir, "rule_observer.o"))
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	}
+		PluginsDir:              pluginsRoot})
+
 	topology := setupDataplanePerfTopology(t)
 	seedDataplanePerfNeighbors(t, topology)
 
@@ -2158,11 +2153,11 @@ func TestKernelPluginPipelineRuntimeChainsPostReplyPlugin(t *testing.T) {
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "reply_observer.bpf.c"), filepath.Join(pluginDir, "reply_observer.o"))
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-	}
+		PluginsDir:              pluginsRoot})
+
 	topology := setupDataplanePerfTopology(t)
 	seedDataplanePerfNeighbors(t, topology)
 

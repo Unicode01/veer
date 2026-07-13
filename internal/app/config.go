@@ -123,7 +123,7 @@ func (cfg *Config) WebUIEnabled() bool {
 
 func (cfg *Config) PluginsEnabled() bool {
 	if cfg == nil || cfg.PluginsEnabledSetting == nil {
-		return true
+		return false
 	}
 	return *cfg.PluginsEnabledSetting
 }
