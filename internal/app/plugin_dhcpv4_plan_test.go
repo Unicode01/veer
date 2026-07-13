@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 func TestCompilePluginDHCPv4PlanBuildsDHCPOnlyManagedNetwork(t *testing.T) {

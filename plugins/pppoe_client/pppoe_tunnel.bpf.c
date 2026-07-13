@@ -1,4 +1,4 @@
-#include "../include/fvtap_plugin_helpers.h"
+#include "../include/veer_plugin_helpers.h"
 
 #ifndef BPF_MAP_TYPE_ARRAY
 #define BPF_MAP_TYPE_ARRAY 2
@@ -171,7 +171,7 @@ static int (*const bpf_skb_change_tail)(struct __sk_buff *skb, __u32 len, __u64 
 static int (*const bpf_skb_pull_data)(struct __sk_buff *skb, __u32 len) = (void *)BPF_FUNC_skb_pull_data;
 static int (*const bpf_skb_adjust_room)(struct __sk_buff *skb, __s32 len_diff, __u32 mode, __u64 flags) = (void *)BPF_FUNC_skb_adjust_room;
 
-FVTAP_DECLARE_PROG_CHAIN_V4();
+VEER_DECLARE_PROG_CHAIN_V4();
 
 struct bpf_map_def SEC("maps") pppoe_tunnel_config = {
 	.type = BPF_MAP_TYPE_ARRAY,
@@ -735,7 +735,7 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
 }
 
-SEC("tc/fvtap/pre_forward")
+SEC("tc/veer/pre_forward")
 int tc_tunnel(struct __sk_buff *skb)
 {
 	__u32 key = 0;
@@ -759,7 +759,7 @@ int tc_tunnel(struct __sk_buff *skb)
 	}
 
 next:
-	fvtap_continue_pre_forward(skb);
+	veer_continue_pre_forward(skb);
 	return TC_ACT_UNSPEC;
 }
 

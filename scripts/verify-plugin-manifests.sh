@@ -2,7 +2,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-PLUGIN_SOURCE_DIR=${FORWARD_PLUGIN_SOURCE_DIR:-"$ROOT_DIR/plugins"}
+PLUGIN_SOURCE_DIR=${VEER_PLUGIN_SOURCE_DIR:-"$ROOT_DIR/plugins"}
 
 find_python() {
 	if [ -n "${PYTHON:-}" ]; then
@@ -62,7 +62,7 @@ valid_control_permission = {
 }
 valid_resource_method = {"list", "get", "create", "update", "delete"}
 valid_net_operation = {"addr.write", "l2", "link.create", "link.delete", "link.master", "link.offload", "link.read", "link.state", "route.write", "tcp", "udp"}
-reserved_plugin_ids = {"fvtap"}
+reserved_plugin_ids = {"veer", "veer_core"}
 reserved_resource_ids = {"__kv", "__secret"}
 manifest_fields = {"api_version", "id", "name", "version", "description", "kind", "stability", "control"}
 runtime_owned_manifest_fields = {"builtin", "capabilities", "virtual_interfaces", "objects", "hooks", "resources", "actions", "ui", "metadata"}

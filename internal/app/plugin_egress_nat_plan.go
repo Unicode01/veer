@@ -6,7 +6,7 @@ import (
 	"hash/fnv"
 	"strings"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 const pluginEgressNATPlansResourceID = "egress_nat_plans"
@@ -59,11 +59,6 @@ func loadActivePluginEgressNATPlanRecords(db sqlRuleStore, cfg *Config) ([]store
 		return nil, nil
 	}
 	return filtered, nil
-}
-
-func compilePluginEgressNATPlans(records []store.PluginRecord, existing []EgressNAT, snapshot egressNATInterfaceSnapshot) []EgressNAT {
-	items, _ := compilePluginEgressNATPlansWithWarnings(records, existing, snapshot)
-	return items
 }
 
 func compilePluginEgressNATPlansWithWarnings(records []store.PluginRecord, existing []EgressNAT, snapshot egressNATInterfaceSnapshot) ([]EgressNAT, []string) {

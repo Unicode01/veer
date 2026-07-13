@@ -3,8 +3,8 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PLUGIN_SOURCE_DIR="$ROOT_DIR/plugins"
-OUT_DIR=${FORWARD_PLUGIN_PACKAGE_DIR:-"$ROOT_DIR/dist/plugins"}
-PACKAGE_STABILITY=${FORWARD_PLUGIN_PACKAGE_STABILITY:-"stable"}
+OUT_DIR=${VEER_PLUGIN_PACKAGE_DIR:-"$ROOT_DIR/dist/plugins"}
+PACKAGE_STABILITY=${VEER_PLUGIN_PACKAGE_STABILITY:-"stable"}
 TMP_DIR=
 PLUGIN_LIST=
 
@@ -37,7 +37,7 @@ import sys
 root = pathlib.Path(sys.argv[1])
 selector = str(sys.argv[2] or "").strip().lower()
 if not selector:
-    raise SystemExit("FORWARD_PLUGIN_PACKAGE_STABILITY cannot be empty")
+    raise SystemExit("VEER_PLUGIN_PACKAGE_STABILITY cannot be empty")
 if selector == "all":
     allowed = None
 else:
@@ -45,7 +45,7 @@ else:
     valid = {"lab", "preview", "stable", "deprecated"}
     unknown = sorted(allowed - valid)
     if unknown:
-        raise SystemExit("unknown plugin stability in FORWARD_PLUGIN_PACKAGE_STABILITY: " + ", ".join(unknown))
+        raise SystemExit("unknown plugin stability in VEER_PLUGIN_PACKAGE_STABILITY: " + ", ".join(unknown))
 
 for manifest_path in sorted(root.glob("*/plugin.json")):
     with manifest_path.open("r", encoding="utf-8") as fh:
@@ -56,7 +56,7 @@ for manifest_path in sorted(root.glob("*/plugin.json")):
     print(manifest_path.parent.name)
 PY
 	if [ ! -s "$out_file" ]; then
-		echo "no plugins match FORWARD_PLUGIN_PACKAGE_STABILITY=$PACKAGE_STABILITY" >&2
+		echo "no plugins match VEER_PLUGIN_PACKAGE_STABILITY=$PACKAGE_STABILITY" >&2
 		exit 1
 	fi
 }
@@ -70,7 +70,7 @@ esac
 
 mkdir -p "$(dirname "$OUT_DIR")"
 
-if [ "${FORWARD_PLUGIN_PACKAGE_SKIP_BUILD:-0}" != "1" ]; then
+if [ "${VEER_PLUGIN_PACKAGE_SKIP_BUILD:-0}" != "1" ]; then
 	PYTHON_BIN=$(find_python)
 	PLUGIN_LIST="${OUT_DIR}.plugins.$$"
 	rm -f "$PLUGIN_LIST"
@@ -179,7 +179,7 @@ for manifest_path in sorted(root.glob("*/plugin.json")):
             fh.write("\n")
 PY
 
-FORWARD_PLUGIN_SOURCE_DIR="$TMP_DIR" sh "$ROOT_DIR/scripts/verify-plugin-manifests.sh" >/dev/null
+VEER_PLUGIN_SOURCE_DIR="$TMP_DIR" sh "$ROOT_DIR/scripts/verify-plugin-manifests.sh" >/dev/null
 
 rm -rf "$OUT_DIR"
 mv "$TMP_DIR" "$OUT_DIR"

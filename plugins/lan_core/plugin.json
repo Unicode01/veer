@@ -8,7 +8,7 @@
   "description": "Protocol-neutral LAN adapter with bridge, DHCPv4, inherited or manual DNS distribution, Egress NAT, and routed WAN IPv6 delegated-prefix support.",
   "control": {
     "main": "control.js",
-    "sha256": "0f8163c03994c764c13312c49452aeb1fe1829e3ae19160c99cf8ea657b6268b",
+    "sha256": "cc33263bd79767b694692cf86525b09caa02735d126f6600acdc6c92424ed26d",
     "permissions": ["net.admin", "plugin.register", "plugin.resource", "resource", "timer", "ui"],
     "net_access": [
       {
@@ -22,6 +22,10 @@
       {
         "interfaces": ["en*", "eth*", "fw*", "lan*", "tap*", "veth*", "vmbr*"],
         "operations": ["link.master", "link.offload", "link.read"]
+      },
+      {
+        "interfaces": ["veer*"],
+        "operations": ["link.read"]
       }
     ],
     "resource_access": [

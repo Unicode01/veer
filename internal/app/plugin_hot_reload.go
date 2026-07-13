@@ -25,7 +25,7 @@ const (
 	pluginCatalogHotReloadSourceManual = "manual"
 
 	pluginCatalogSnapshotAttempts = 3
-	pluginCatalogSnapshotPrefix   = "forward-plugin-catalog-"
+	pluginCatalogSnapshotPrefix   = "veer-plugin-catalog-"
 
 	pluginCatalogUpdateAdded    = "added"
 	pluginCatalogUpdateModified = "modified"
@@ -426,7 +426,7 @@ func normalizePluginCatalogUpdateSelection(pluginIDs []string, updates []PluginC
 	seen := make(map[string]struct{}, len(pluginIDs))
 	for _, raw := range pluginIDs {
 		id := strings.TrimSpace(strings.ToLower(raw))
-		if !pluginIDPattern.MatchString(id) || id == "fvtap" {
+		if !pluginIDPattern.MatchString(id) || reservedBuiltinPluginID(id) {
 			return nil, fmt.Errorf("invalid plugin update id %q", raw)
 		}
 		if _, ok := available[id]; !ok {

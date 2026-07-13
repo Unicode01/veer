@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 const pluginIPv6AssignmentPlansResourceID = "ipv6_assignment_plans"

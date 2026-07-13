@@ -36,7 +36,7 @@ func newLinuxIPv6AssignmentNetOps() *linuxIPv6AssignmentNetOps {
 func (ops *linuxIPv6AssignmentNetOps) PreserveIPv6AssignmentStateOnClose() bool {
 	markerPath := kernelHotRestartMarkerPath()
 	if strings.TrimSpace(markerPath) == "" {
-		log.Printf("ipv6 assignment runtime: hot restart preserve disabled on close (%s is not set)", forwardHotRestartMarkerEnv)
+		log.Printf("ipv6 assignment runtime: hot restart preserve disabled on close (%s/%s is not set)", veerHotRestartMarkerEnv, forwardHotRestartMarkerEnv)
 		return false
 	}
 	if _, err := os.Stat(markerPath); err != nil {

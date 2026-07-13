@@ -2081,18 +2081,6 @@ func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, prog
 	return plans
 }
 
-func desiredKernelAttachmentPlansDualStack(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, forwardProg *ebpf.Program, replyProg *ebpf.Program, forwardProgV6 *ebpf.Program, replyProgV6 *ebpf.Program) []kernelAttachmentPlan {
-	return desiredKernelAttachmentPlansForRuleSets(
-		kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules),
-		kernelAttachmentPrograms{
-			forwardProg:   forwardProg,
-			replyProg:     replyProg,
-			forwardProgV6: forwardProgV6,
-			replyProgV6:   replyProgV6,
-		},
-	)
-}
-
 func diffPreparedKernelRules(oldItems []preparedKernelRule, nextItems []preparedKernelRule) (kernelDualStackRuleMapDiff, error) {
 	v4, err := diffPreparedKernelRulesV4(oldItems, nextItems)
 	if err != nil {

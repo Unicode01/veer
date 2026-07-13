@@ -1,7 +1,7 @@
-plugin.capabilities(['wan', 'local_route', 'forward_core_adapter', 'net_admin', 'control']);
+plugin.capabilities(['wan', 'local_route', 'veer_core_adapter', 'net_admin', 'control']);
 pipeline.handoff({
   id: 'wan0',
-  description: 'Linux L3 boundary shared by the system stack, Forward core and an optional segmented protocol pipeline.'
+  description: 'Linux L3 boundary shared by the system stack, Veer Core and an optional segmented protocol pipeline.'
 });
 plugin.resource({
   id: 'profiles',
@@ -21,7 +21,7 @@ plugin.resource({
 });
 plugin.resource({
   id: 'status',
-  description: 'Last applied WAN adapter state and forward_core handoff details.',
+  description: 'Last applied WAN adapter state and veer_core handoff details.',
   methods: ['list', 'get'],
   control_methods: ['list', 'get', 'create', 'update', 'delete'],
   runtime_update: 'manual',
@@ -49,7 +49,7 @@ plugin.action({
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
-  sha256: '2bfff6355c6379e1b943664a8bef5aab0ff8cdcf8e349cdf69dea04904697b0d',
+  sha256: '78ad01d23ea0edcda6ddeebd9acf8de0d584ac493106fd5eb9fbb01dcae32b56',
   page: 'wan',
   page_title: 'WAN'
 });
@@ -147,7 +147,7 @@ function teardownSession(plan) {
     noarp_ready: arpStillManaged && previousTeardown.noarp_ready === true,
     arp_restored: arpRestored && previousTeardown.arp_disabled_by_plugin === true,
     link_delete_skipped: deleteSkipped,
-    forward_core: forwardCoreHandoff(plan.profile, false)
+    veer_core: veerCoreHandoff(plan.profile, false)
   };
   if (deleteError) {
     status.phase = 'delete_failed';
@@ -250,7 +250,7 @@ function disableSessionRuntime(record) {
     noarp_ready: previousSegmentationReady
   };
   if (localInterface) {
-    status.forward_core = forwardCoreHandoff({
+    status.veer_core = veerCoreHandoff({
       local_interface: localInterface,
       pipeline_interface: plan.profile.pipeline_interface,
       handoff_mode: plan.profile.handoff_mode,
@@ -309,7 +309,7 @@ function applySession(plan) {
       arp_disabled_by_plugin: previous.arp_disabled_by_plugin === true,
       segmentation_ready: previousSegmentationReady,
       noarp_ready: previousSegmentationReady,
-      forward_core: forwardCoreHandoff(plan.profile, previousSegmentationReady)
+      veer_core: veerCoreHandoff(plan.profile, previousSegmentationReady)
     }, false);
     return;
   }
@@ -321,7 +321,7 @@ function applySession(plan) {
   cleanupErrors = cleanupErrors.concat(cleanupManagedState(previous, plan.profile));
   replaceAddrs(plan.profile.local_interface, plan.profile.addresses);
   replaceRoutes(plan.profile.local_interface, plan.profile.routes);
-  var handoff = forwardCoreHandoff(plan.profile, link.noarp_ready === true);
+  var handoff = veerCoreHandoff(plan.profile, link.noarp_ready === true);
 
   setRecordIfChanged('status', plan.key, {
     phase: 'applied',
@@ -361,8 +361,8 @@ function applySession(plan) {
     routes: plan.profile.routes,
     cleanup_errors: cleanupErrors,
     managed_link: link.created === true || sameManagedLink,
-    forward_core: handoff,
-    forward_parent_interface: handoff.parent_interface,
+    veer_core: handoff,
+    veer_parent_interface: handoff.parent_interface,
     egress_nat_parent_interface: handoff.egress_nat_interface,
     egress_nat_redirect_mode: handoff.egress_nat_redirect_mode,
     egress_nat_virtual_source_ip: false
@@ -462,8 +462,8 @@ function managedLinkChanged(previous, profile) {
 
 function previousHandoffMode(previous) {
   previous = previous || {};
-  var forwardCore = previous.forward_core || {};
-  var mode = lower(previous.handoff_mode || forwardCore.mode || '');
+  var veerCore = previous.veer_core || {};
+  var mode = lower(previous.handoff_mode || veerCore.mode || '');
   return mode === 'segmented_veth' || mode === 'vtap' ? 'segmented_veth' : 'direct';
 }
 
@@ -558,7 +558,7 @@ function prepareHandoff(plan) {
   var cleanupErrors = replacement.cleanup_errors;
   var link = replacement.link;
   var sameManagedLink = managedLinkProven(previous) && !managedLinkChanged(previous, plan.profile);
-  var handoff = forwardCoreHandoff(plan.profile, link.noarp_ready === true);
+  var handoff = veerCoreHandoff(plan.profile, link.noarp_ready === true);
   var status = {
     phase: cleanupErrors.length ? 'prepared_partial' : 'prepared',
     wan_id: plan.key,
@@ -584,7 +584,7 @@ function prepareHandoff(plan) {
     addresses: plan.profile.addresses,
     cleanup_errors: cleanupErrors,
     managed_link: link.created === true || sameManagedLink,
-    forward_core: handoff,
+    veer_core: handoff,
     note: 'The local boundary is prepared; WAN egress remains disabled until a usable session is applied.'
   };
   if (cleanupErrors.length) status.last_error = cleanupErrors.join('; ');
@@ -682,7 +682,7 @@ function restorePreviousARP(previous, errors) {
   }
 }
 
-function forwardCoreHandoff(profile, segmentationReady) {
+function veerCoreHandoff(profile, segmentationReady) {
   var segmented = profile.handoff_mode === 'segmented_veth';
   return {
     mode: segmented ? 'segmented_veth' : 'single_local_boundary',
@@ -694,8 +694,8 @@ function forwardCoreHandoff(profile, segmentationReady) {
     egress_nat_redirect_mode: profile.egress_nat_redirect_mode,
     segmentation_ready: segmented && segmentationReady === true,
     note: segmented
-      ? 'Forward/Egress NAT targets the local veth; the kernel segments GSO before the protocol plugin runs on the pipeline peer.'
-      : 'Forward/Egress NAT redirects L3 traffic to the local boundary; the protocol plugin handles its TC hooks.'
+      ? 'Veer/Egress NAT targets the local veth; the kernel segments GSO before the protocol plugin runs on the pipeline peer.'
+      : 'Veer/Egress NAT redirects L3 traffic to the local boundary; the protocol plugin handles its TC hooks.'
   };
 }
 
@@ -732,7 +732,7 @@ function normalizeSession(key, raw) {
 
 function normalizeProfile(key, session, raw) {
   raw = raw || {};
-  var localInterface = text(raw.local_interface || 'fwdlocal0');
+  var localInterface = text(raw.local_interface || 'veerlocal0');
   var handoffMode = normalizeHandoffMode(raw.handoff_mode || raw.pipeline_mode ||
     (lower(session.driver || raw.driver || raw.driver_plugin) === 'pppoe' || lower(raw.driver_plugin) === 'pppoe_client'
       ? 'segmented_veth'
@@ -787,7 +787,7 @@ function derivedPipelineInterface(localInterface, key) {
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   var suffix = ('00000000' + hash.toString(16)).slice(-8);
-  return 'fwdp' + suffix;
+  return 'veerp' + suffix;
 }
 
 function replaceAddrs(iface, addrs) {

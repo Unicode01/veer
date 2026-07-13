@@ -31,7 +31,7 @@ const SESSION_ID = 0x0010;
 const LOCAL_MAC = '02:00:00:00:00:01';
 const AC_MAC = '02:00:00:00:00:02';
 const LOCAL_BOUNDARY_MAC = '02:00:00:00:10:01';
-const PIPELINE_INTERFACE = 'fwdpipe0';
+const PIPELINE_INTERFACE = 'veerpipe0';
 const PIPELINE_BOUNDARY_MAC = '02:00:00:00:10:02';
 
 function main() {
@@ -55,6 +55,9 @@ function main() {
   testAutoRedialAfterKeepaliveTimeout();
   testRedialDiscoveryFailureRetriesWithoutOldKeepalive();
   testAutoRedialDoesNotMaskAuthFailure();
+  testDialIsIdempotentWhileSessionIsActive();
+  testQueuedSessionTimersCannotReviveDisconnectedSession();
+  testQueuedRedialCannotRunAfterDisconnect();
   testDisconnectClearsTunnelAndWANState();
   testTunnelConfigRuntimeApplyReplaysAndClearsMap();
   testTrafficProbeTimeoutFailsClosed();
@@ -95,7 +98,7 @@ function testRawL2RandomIdentityAndCleanup() {
     send_padt: false,
     keepalive_interval_ms: 1000,
     install_tunnel: true,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     pipeline_interface: PIPELINE_INTERFACE,
     prepare_interfaces: true,
     prepare_offloads: true,
@@ -112,7 +115,7 @@ function testRawL2RandomIdentityAndCleanup() {
   const session = h.resource('sessions', 'last').data;
   assert.strictEqual(session.tunnel_installed, true);
   assert.strictEqual(session.tunnel.wan_interface, 'eth0');
-  assert.strictEqual(session.tunnel.local_interface, 'fwdlocal0');
+  assert.strictEqual(session.tunnel.local_interface, 'veerlocal0');
   assert.strictEqual(session.tunnel.wan_src_mac, managed.mac_address, 'TC encapsulation should replace a stale WAN source MAC with the raw-L2 identity');
   assert.deepStrictEqual(h.resource('hook_bindings', 'pppoe-ingress').data.interfaces, ['eth0']);
   assert.deepStrictEqual(h.resource('hook_bindings', 'pppoe-egress').data.interfaces, [PIPELINE_INTERFACE]);
@@ -136,8 +139,13 @@ function testRegistration() {
   assert(h.state.capabilities.includes('pppoe'), 'pppoe capability should be registered');
   assert(h.state.virtualInterfaces.some((item) => item.id === 'pppoe0' && item.type === 'pipeline'), 'pppoe0 should be a logical pipeline node');
   assert(h.state.objects.some((item) => item.id === 'pppoe_tunnel'), 'pppoe_tunnel object should be registered');
+  const tunnelObject = h.state.objects.find((item) => item.id === 'pppoe_tunnel');
+  assert(tunnelObject.programs.some((item) => item.id === 'tc_tunnel' && item.type === 'tc'), 'TC tunnel program should be registered');
+  assert.strictEqual(tunnelObject.programs.length, 1, 'PPPoE should register only the TC tunnel program');
   assert(h.state.hooks.some((item) => item.id === 'pppoe-ingress' && item.attach === 'ingress'), 'physical ingress hook should be registered');
   assert(h.state.hooks.some((item) => item.id === 'pppoe-egress' && item.attach === 'ingress'), 'segmented pipeline ingress hook should be registered');
+  assert(!h.state.capabilities.includes('xdp'), 'PPPoE should not advertise the removed XDP receive path');
+  assert(!h.state.hooks.some((item) => item.engine === 'xdp'), 'PPPoE should not register an XDP hook');
   assert(h.state.actions.map((item) => item.id).includes('traffic_probe'), 'traffic_probe action should be registered');
   assert(h.state.actions.some((item) => item.id === 'traffic_stats' && item.runtime_update === 'runtime_query'), 'traffic_stats query action should be registered');
   assert.strictEqual(h.state.ui.page, 'pppoe', 'ui page should be registered');
@@ -152,7 +160,7 @@ function testReconcileRestoresOnlyActiveControlState() {
     keepalive_failure_threshold: 3,
     auto_redial: true,
     install_tunnel: true,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     pipeline_interface: PIPELINE_INTERFACE,
     wan_core_sync: false
   }, true);
@@ -225,7 +233,7 @@ function testKeepaliveRedialPreservesTunnelPreparation() {
     post_session_control_ms: 0,
     keepalive_interval_ms: 1000,
     auto_redial: true,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     pipeline_interface: PIPELINE_INTERFACE,
     prepare_interfaces: true,
     prepare_local_mtu: true,
@@ -262,7 +270,7 @@ function testRequiredWANCoreSyncFailsClosed() {
     negotiate_ipv6: false,
     send_padt: false,
     post_session_control_ms: 0,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     pipeline_interface: PIPELINE_INTERFACE,
     wan_core_sync: true,
     wan_core_required: true
@@ -300,7 +308,7 @@ function testPapIPv6PDTunnel() {
     auto_redial: true,
     send_padt: false,
     post_session_control_ms: 0,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     prepare_interfaces: true,
     prepare_local_mtu: true,
     prepare_wan_mtu: false,
@@ -345,9 +353,9 @@ function testPapIPv6PDTunnel() {
   assert.strictEqual(tunnelRecord.data.value_hex, tunnelPut.value, 'persisted tunnel config should match applied map value');
   assert(h.state.timers.has('tunnel_repair'), 'active tunnel config should arm repair timer');
   assert(h.state.timers.has('lcp_echo'), 'traffic_probe should arm keepalive when requested');
-  assert(h.state.netCalls.includes('setMTU:fwdlocal0:1492'), 'local boundary MTU should be prepared');
-  assert(h.state.netCalls.includes('setGSO:fwdlocal0:1492:1'), 'local boundary GSO must be segmented before TC encapsulation');
-  assert(h.state.netCalls.includes('setOffloads:fwdlocal0:gso=false,sg=false,tso=false'), 'local veth transmit aggregation should be disabled');
+  assert(h.state.netCalls.includes('setMTU:veerlocal0:1492'), 'local boundary MTU should be prepared');
+  assert(h.state.netCalls.includes('setGSO:veerlocal0:1492:1'), 'local boundary GSO must be segmented before TC encapsulation');
+  assert(h.state.netCalls.includes('setOffloads:veerlocal0:gso=false,sg=false,tso=false'), 'local veth transmit aggregation should be disabled');
   assert(h.state.netCalls.includes(`setOffloads:${PIPELINE_INTERFACE}:gro=false,lro=false`), 'pipeline peer receive aggregation should be disabled');
   assert(h.state.l2Exchanges.every((item) => !item.timeout_ms || item.timeout_ms <= 5000), 'long IPv6 deadlines must use bounded L2 receive windows');
 
@@ -378,7 +386,7 @@ function testIPCPDNSRejectFallsBack() {
     keepalive_interval_ms: 0,
     auto_redial: false,
     install_tunnel: false,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     pipeline_interface: PIPELINE_INTERFACE,
     wan_core_sync: false
   });
@@ -403,7 +411,7 @@ function testRADrivenIPv6WithoutIANA() {
     dhcpv6_settle_ms: 0,
     send_padt: false,
     post_session_control_ms: 0,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     wan_core_sync: true,
     wan_core_apply: true
   });
@@ -435,7 +443,7 @@ function testManualMACUsesRawL2WithoutNetdev() {
     request_pd: false,
     send_padt: false,
     post_session_control_ms: 0,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     pipeline_interface: PIPELINE_INTERFACE,
     prepare_interfaces: true,
     prepare_local_mtu: true,
@@ -850,7 +858,7 @@ function testRedialDiscoveryFailureRetriesWithoutOldKeepalive() {
     usable: true,
     session_id: SESSION_ID,
     ac_mac: AC_MAC,
-    local_interface: 'fwdlocal0'
+    local_interface: 'veerlocal0'
   }, true);
 
   h.context.exports.onTimer({timer: {name: 'lcp_echo', payload: {
@@ -873,7 +881,7 @@ function testRedialDiscoveryFailureRetriesWithoutOldKeepalive() {
     redial_clear_tunnel: true,
     redial_retry_initial_ms: 250,
     redial_retry_max_ms: 1000,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     wan_core_sync: true,
     wan_core_required: true,
     wan_core_apply: true,
@@ -951,6 +959,141 @@ function testDisconnectClearsTunnelAndWANState() {
   assert(!h.state.timers.has('tunnel_repair'), 'disconnect should clear tunnel repair timer');
 }
 
+function testDialIsIdempotentWhileSessionIsActive() {
+  const h = createHarness({auth: 'none', echoReplies: true});
+  const payload = {
+    interface: 'eth0',
+    auth: 'none',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: false,
+    negotiate_ipv6: false,
+    request_pd: false,
+    send_padt: false,
+    keepalive_interval_ms: 1000,
+    post_session_control_ms: 0,
+    wan_core_sync: false
+  };
+  runAction(h, 'dial', payload);
+  const first = h.resource('sessions', 'last').data;
+  const exchanges = h.state.l2Exchanges.length;
+
+  runAction(h, 'dial', {profile_key: 'default'});
+
+  const second = h.resource('sessions', 'last').data;
+  assert.strictEqual(h.state.l2Exchanges.length, exchanges, 'dial on an active profile must not start another discovery');
+  assert.strictEqual(second.session_id, first.session_id);
+  assert.strictEqual(second.session_generation, first.session_generation);
+  assert.match(first.session_generation, /^[0-9a-f]{16}$/);
+}
+
+function testQueuedSessionTimersCannotReviveDisconnectedSession() {
+  const h = createHarness({auth: 'none', echoReplies: true, terminateOnPADT: true});
+  runAction(h, 'dial', {
+    interface: 'eth0',
+    auth: 'none',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: false,
+    negotiate_ipv6: false,
+    request_pd: false,
+    send_padt: false,
+    keepalive_interval_ms: 1000,
+    post_session_control_ms: 1000,
+    wan_core_sync: false
+  });
+  const staleKeepalive = clone(h.state.timers.get('lcp_echo').payload);
+  const staleControl = clone(h.state.timers.get('session_control').payload);
+  assert(staleKeepalive.session_generation, 'keepalive must carry the active session generation');
+  assert.strictEqual(staleControl.session_generation, staleKeepalive.session_generation);
+
+  runAction(h, 'disconnect', {profile_key: 'default'});
+  const callsAfterDisconnect = h.state.l2Sends.length + h.state.l2Exchanges.length + h.state.l2Recvs.length;
+  h.context.exports.onTimer({timer: {name: 'lcp_echo', payload: staleKeepalive}});
+  h.context.exports.onTimer({timer: {name: 'session_control', payload: staleControl}});
+
+  const last = h.resource('sessions', 'last').data;
+  assert.strictEqual(last.phase, 'disconnected');
+  assert.strictEqual(last.desired_state, 'down');
+  assert.strictEqual(h.state.l2Sends.length + h.state.l2Exchanges.length + h.state.l2Recvs.length,
+    callsAfterDisconnect, 'queued session timers must exit before any L2 operation');
+  assert(!h.state.timers.has('lcp_echo'));
+  assert(!h.state.timers.has('session_control'));
+  assert(!h.state.timers.has('redial_retry'));
+
+  h.setResource('sessions', 'last', {
+    phase: 'session_probe',
+    profile_key: 'default',
+    session_id: SESSION_ID,
+    ac_mac: AC_MAC,
+    session_generation: 'ff'.repeat(8),
+    desired_state: 'up',
+    lcp_ready: true,
+    padt_sent: false
+  }, true);
+  h.context.exports.onTimer({timer: {name: 'lcp_echo', payload: staleKeepalive}});
+  assert.strictEqual(h.state.l2Sends.length + h.state.l2Exchanges.length + h.state.l2Recvs.length,
+    callsAfterDisconnect, 'a reused session id and AC MAC must still reject an older generation');
+}
+
+function testQueuedRedialCannotRunAfterDisconnect() {
+  const h = createHarness({auth: 'none', echoReplies: false});
+  h.setResource('sessions', 'last', {
+    phase: 'session_probe',
+    profile_key: 'default',
+    session_id: SESSION_ID,
+    ac_mac: AC_MAC,
+    lcp_ready: true
+  }, true);
+  h.setResource('wan_links', 'default', {
+    wan_id: 'default', state: 'up', usable: true, session_id: SESSION_ID, ac_mac: AC_MAC
+  }, true);
+  h.context.exports.onTimer({timer: {name: 'lcp_echo', payload: {
+    profile_key: 'default',
+    interface: 'eth0',
+    auth: 'none',
+    timeout_ms: 20,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: false,
+    negotiate_ipv6: false,
+    request_pd: false,
+    keepalive_interval_ms: 1000,
+    keepalive_failure_threshold: 1,
+    keepalive_failure_grace_ms: 0,
+    keepalive_confirm_timeout_ms: 20,
+    auto_redial: true,
+    redial_clear_tunnel: true,
+    redial_retry_initial_ms: 250,
+    session_id: SESSION_ID,
+    ac_mac: AC_MAC,
+    wan_core_sync: false
+  }}});
+  const staleRedial = clone(h.state.timers.get('redial_retry').payload);
+  assert(staleRedial.redial_generation, 'redial retry must carry a cancellation generation');
+
+  runAction(h, 'disconnect', {
+    profile_key: 'default',
+    interface: 'eth0',
+    auth: 'none',
+    disconnect_drain_ms: 0,
+    session_id: SESSION_ID,
+    ac_mac: AC_MAC,
+    wan_core_sync: false
+  });
+  const exchanges = h.state.l2Exchanges.length;
+  h.context.exports.onTimer({timer: {name: 'redial_retry', payload: staleRedial}});
+
+  assert.strictEqual(h.state.l2Exchanges.length, exchanges, 'queued redial must not send PADI after disconnect');
+  assert.strictEqual(h.resource('sessions', 'last').data.phase, 'disconnected');
+  assert(!h.state.timers.has('redial_retry'));
+}
+
 function testTunnelConfigRuntimeApplyReplaysAndClearsMap() {
   const h = createHarness({auth: 'pap', echoReplies: true});
   runAction(h, 'traffic_probe', {
@@ -966,7 +1109,7 @@ function testTunnelConfigRuntimeApplyReplaysAndClearsMap() {
     negotiate_ipv6: false,
     send_padt: false,
     post_session_control_ms: 0,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     pipeline_interface: PIPELINE_INTERFACE,
     wan_core_sync: false
   });
@@ -1006,7 +1149,7 @@ function testTrafficProbeTimeoutFailsClosed() {
     negotiate_ipv6: false,
     send_padt: false,
     post_session_control_ms: 0,
-    local_interface: 'fwdlocal0',
+    local_interface: 'veerlocal0',
     wan_core_sync: false
   }), /PADS timeout/);
   const session = h.resource('sessions', 'last').data;
@@ -1171,7 +1314,7 @@ function createHarness(options) {
             throw new Error(`unexpected plugin action ${plugin}/${action}`);
           }
           const key = String(payload.wan_id || payload.profile_key || payload.key || 'default');
-          const localInterface = String(payload.local_interface || 'fwdlocal0');
+          const localInterface = String(payload.local_interface || 'veerlocal0');
           const pipelineInterface = String(payload.pipeline_interface || PIPELINE_INTERFACE);
           state.links.set(localInterface, linkInfo(localInterface));
           state.links.set(pipelineInterface, linkInfo(pipelineInterface));
@@ -1185,7 +1328,7 @@ function createHarness(options) {
             pipeline_ifindex: linkInfo(pipelineInterface).ifindex,
             handoff_mode: 'segmented_veth',
             segmentation_ready: true,
-            forward_core: {
+            veer_core: {
               mode: 'segmented_veth',
               parent_interface: localInterface,
               tunnel_interface: pipelineInterface,
@@ -1510,8 +1653,8 @@ function discoveryCode(payloadHex) {
 
 function linkInfo(name) {
   if (name === 'eth0') return {name, ifindex: 7, kind: 'device', mtu: 1500, mac: LOCAL_MAC, up: true, promiscuous: false};
-  if (name === 'fwdlocal0') return {name, ifindex: 101, kind: 'veth', mtu: 1492, mac: LOCAL_BOUNDARY_MAC, up: true, promiscuous: false, peer_name: PIPELINE_INTERFACE, peer_ifindex: 102};
-  if (name === PIPELINE_INTERFACE) return {name, ifindex: 102, kind: 'veth', mtu: 1492, mac: PIPELINE_BOUNDARY_MAC, up: true, promiscuous: false, peer_name: 'fwdlocal0', peer_ifindex: 101};
+  if (name === 'veerlocal0') return {name, ifindex: 101, kind: 'veth', mtu: 1492, mac: LOCAL_BOUNDARY_MAC, up: true, promiscuous: false, peer_name: PIPELINE_INTERFACE, peer_ifindex: 102};
+  if (name === PIPELINE_INTERFACE) return {name, ifindex: 102, kind: 'veth', mtu: 1492, mac: PIPELINE_BOUNDARY_MAC, up: true, promiscuous: false, peer_name: 'veerlocal0', peer_ifindex: 101};
   return {name, ifindex: 200, kind: 'device', mtu: 1500, mac: '02:00:00:00:20:00', up: true, promiscuous: false};
 }
 

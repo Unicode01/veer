@@ -1,8 +1,8 @@
 <?php
 /**
- * WHMCS Forward 管理模块
+ * WHMCS Veer 管理模块
  *
- * 对接 forward 的规则接口，提供端口转发与共享建站管理。
+ * 对接 Veer 的规则接口，提供端口转发与共享建站管理。
  */
 
 if (!defined("WHMCS")) {
@@ -14,8 +14,8 @@ use WHMCS\Database\Capsule;
 function forward_config()
 {
     return [
-        'name' => 'Forward 管理',
-        'description' => '对接 forward 的规则接口，提供端口转发规则的后台与客户区管理。',
+        'name' => 'Veer 管理',
+        'description' => '对接 Veer 的规则接口，提供端口转发规则的后台与客户区管理。',
         'version' => '1.3.7',
         'author' => 'OpenAI Codex',
         'language' => 'chinese',
@@ -35,24 +35,24 @@ function forward_config()
                 'Default' => '',
             ],
             'api_endpoint' => [
-                'FriendlyName' => '默认 Forward API 地址',
+                'FriendlyName' => '默认 Veer API 地址',
                 'Type' => 'text',
                 'Size' => '50',
-                'Description' => '默认 Forward 控制端地址；未命中宿主机覆盖映射时使用，例如 http://127.0.0.1:8080',
+                'Description' => '默认 Veer 控制端地址；未命中宿主机覆盖映射时使用，例如 http://127.0.0.1:8080',
                 'Default' => 'http://127.0.0.1:8080',
             ],
             'api_token' => [
-                'FriendlyName' => '默认 Forward Bearer Token',
+                'FriendlyName' => '默认 Veer Bearer Token',
                 'Type' => 'password',
                 'Size' => '50',
-                'Description' => '对应 forward 配置里的 web_token；仅作为默认端点令牌，会以 Authorization: Bearer <token> 调用',
+                'Description' => '对应 Veer 配置里的 web_token；仅作为默认端点令牌，会以 Authorization: Bearer <token> 调用',
                 'Default' => '',
             ],
             'api_server_map' => [
                 'FriendlyName' => '宿主机覆盖端点映射',
                 'Type' => 'textarea',
                 'Rows' => '6',
-                'Description' => "可选，仅多宿主机/多 Forward 实例需要。每行按 WHMCS serverID 指定 API，格式如 3=https://forward-a.example.com；需要单独 Token 时写 3=https://forward-a.example.com|tokenA，未写 Token 则复用默认 Token",
+                'Description' => "可选，仅多宿主机/多 Veer 实例需要。每行按 WHMCS serverID 指定 API，格式如 3=https://veer-a.example.com；需要单独 Token 时写 3=https://veer-a.example.com|tokenA，未写 Token 则复用默认 Token",
                 'Default' => '',
             ],
             'skip_tls_verify' => [
@@ -340,7 +340,7 @@ function forward_activate()
             }
         }
 
-        return ['status' => 'success', 'description' => 'Forward 模块已成功安装。'];
+        return ['status' => 'success', 'description' => 'Veer 模块已成功安装。'];
     } catch (Exception $e) {
         return ['status' => 'error', 'description' => '模块安装失败：' . $e->getMessage()];
     }
@@ -348,7 +348,7 @@ function forward_activate()
 
 function forward_deactivate()
 {
-    return ['status' => 'success', 'description' => 'Forward 模块已停用，数据已保留。'];
+    return ['status' => 'success', 'description' => 'Veer 模块已停用，数据已保留。'];
 }
 
 function forward_get_module_settings()
@@ -603,7 +603,7 @@ function forward_get_api_target(array $settings, $serverId = 0)
     return [
         'key' => forward_api_target_key($endpoint, $token),
         'server_id' => $serverId,
-        'server_label' => $serverId > 0 ? forward_get_server_label($serverId) : '默认 Forward 端点',
+        'server_label' => $serverId > 0 ? forward_get_server_label($serverId) : '默认 Veer 端点',
         'endpoint' => $endpoint,
         'token' => $token,
         'skip_tls_verify' => $skipTlsVerify,
@@ -625,7 +625,7 @@ function forward_api_target_label(array $target)
     }
     return trim((string) ($target['server_label'] ?? '')) !== ''
         ? (string) $target['server_label']
-        : '默认 Forward 端点';
+        : '默认 Veer 端点';
 }
 
 function forward_collect_api_targets(array $settings, array $serverIds)
@@ -696,7 +696,7 @@ function forward_resolve_target_server_id(array $settings, $listenIp, $serverId 
     if ($serverId > 0) {
         $target = forward_get_api_target($settings, $serverId);
         if (!forward_api_target_enabled($target)) {
-            return ['success' => false, 'message' => '所选宿主机未配置 Forward 端点'];
+            return ['success' => false, 'message' => '所选宿主机未配置 Veer 端点'];
         }
         return ['success' => true, 'server_id' => $serverId];
     }
@@ -708,14 +708,14 @@ function forward_resolve_target_server_id(array $settings, $listenIp, $serverId 
     if ($inferredServerId > 0) {
         $target = forward_get_api_target($settings, $inferredServerId);
         if (!forward_api_target_enabled($target)) {
-            return ['success' => false, 'message' => '入口 IP 所属宿主机未配置 Forward 端点'];
+            return ['success' => false, 'message' => '入口 IP 所属宿主机未配置 Veer 端点'];
         }
         return ['success' => true, 'server_id' => $inferredServerId];
     }
 
     $target = forward_get_api_target($settings, 0);
     if (!forward_api_target_enabled($target) && forward_has_server_api_map($settings)) {
-        return ['success' => false, 'message' => '当前规则无法定位到可用的 Forward 端点，请检查 server_id 与入口 IP 映射'];
+        return ['success' => false, 'message' => '当前规则无法定位到可用的 Veer 端点，请检查 server_id 与入口 IP 映射'];
     }
     return ['success' => true, 'server_id' => 0];
 }
@@ -896,7 +896,7 @@ function forward_log($action, $request = null, $response = null, $processed = ''
         $moduleLogError = 'logModuleCall unavailable';
     }
 
-    $activityMessage = 'Forward module: ' . (string) $action;
+    $activityMessage = 'Veer module: ' . (string) $action;
     $responseText = forward_log_to_string($safeResponse);
     if ($responseText !== '') {
         $activityMessage .= ' | ' . substr($responseText, 0, 1000);
@@ -1903,7 +1903,7 @@ function forward_sync_quota_group_before_create(array $services, array $settings
     if (!empty($result['errors'])) {
         return [
             'success' => false,
-            'message' => '创建前同步当前产品远端配置失败，已取消创建以避免超过' . $resourceLabel . '上限。请稍后重试或联系管理员查看 Forward API 状态。',
+            'message' => '创建前同步当前产品远端配置失败，已取消创建以避免超过' . $resourceLabel . '上限。请稍后重试或联系管理员查看 Veer API 状态。',
             'summary' => $result,
         ];
     }
@@ -2124,16 +2124,16 @@ function forward_api_error_message($status, $response = '', $decoded = null)
     }
 
     if ($status === 401 || strtolower($message) === 'unauthorized') {
-        return 'Forward Bearer Token 认证失败：请确认 WHMCS 中填写的 Bearer Token 与 forward config.json 的 web_token 一致';
+        return 'Veer Bearer Token 认证失败：请确认 WHMCS 中填写的 Bearer Token 与 config.json 的 web_token 一致';
     }
     if ($status === 403) {
-        return 'Forward API 拒绝访问：请检查 Token 权限或反向代理访问控制';
+        return 'Veer API 拒绝访问：请检查 Token 权限或反向代理访问控制';
     }
     if ($message === '') {
         $message = 'HTTP ' . $status;
     }
 
-    return 'Forward API 返回 HTTP ' . $status . ': ' . $message;
+    return 'Veer API 返回 HTTP ' . $status . ': ' . $message;
 }
 
 function forward_call_api_target(array $target, $path, $method = 'GET', array $payload = null)
@@ -2143,10 +2143,10 @@ function forward_call_api_target(array $target, $path, $method = 'GET', array $p
     $skipTlsVerify = !empty($target['skip_tls_verify']);
 
     if ($endpoint === '') {
-        return ['success' => false, 'message' => '未配置 Forward API 地址'];
+        return ['success' => false, 'message' => '未配置 Veer API 地址'];
     }
     if ($token === '') {
-        return ['success' => false, 'message' => '未配置 Forward Bearer Token'];
+        return ['success' => false, 'message' => '未配置 Veer Bearer Token'];
     }
 
     $url = $endpoint . $path;
@@ -2213,7 +2213,7 @@ function forward_call_api($path, $method = 'GET', array $payload = null, $server
     $config = forward_get_module_settings();
     $target = forward_get_api_target($config, (int) $serverId);
     if (!forward_api_target_enabled($target)) {
-        return ['success' => false, 'message' => '未找到对应宿主机的 Forward 端点配置'];
+        return ['success' => false, 'message' => '未找到对应宿主机的 Veer 端点配置'];
     }
     return forward_call_api_target($target, $path, $method, $payload);
 }
@@ -2492,7 +2492,7 @@ function forward_get_local_rules($userId = null, $refreshRemote = true)
         if (forward_api_target_enabled($target)) {
             $remoteError = (string) ($remoteErrors[$remoteKey] ?? '');
         } elseif ($remoteId > 0) {
-            $remoteError = '当前宿主机未配置 Forward 端点';
+            $remoteError = '当前宿主机未配置 Veer 端点';
         }
         $remote = null;
         if (
@@ -2596,7 +2596,7 @@ function forward_get_local_rule($ruleId, $userId = null)
     if (forward_api_target_enabled($target)) {
         $remoteError = (string) ($remoteErrors[$remoteKey] ?? '');
     } elseif ($remoteId > 0) {
-        $remoteError = '当前宿主机未配置 Forward 端点';
+        $remoteError = '当前宿主机未配置 Veer 端点';
     }
     $remote = ($remoteId > 0 && forward_api_target_enabled($target) && isset($remoteMaps[$remoteKey][$remoteId]))
         ? $remoteMaps[$remoteKey][$remoteId]
@@ -3069,9 +3069,9 @@ function forward_update_rule(array $data, $userId = null)
             });
             $rolledBackRemote = forward_best_effort_remote_delete_resource('/api/rules', $remoteId, $targetServerId);
 
-            $message = '旧 Forward 端删除规则失败：' . $cleanup['message'];
+            $message = '旧 Veer 端删除规则失败：' . $cleanup['message'];
             $message .= $restoreLocal['success'] ? '；已回滚本地配置' : '；本地回滚失败：' . $restoreLocal['message'];
-            $message .= $rolledBackRemote ? '，并已清理新 Forward 端规则' : '，但新 Forward 端规则清理失败，请手动核对';
+            $message .= $rolledBackRemote ? '，并已清理新 Veer 端规则' : '，但新 Veer 端规则清理失败，请手动核对';
             return ['success' => false, 'message' => $message];
         }
     }
@@ -3338,7 +3338,7 @@ function forward_upsert_synced_rule(array $remoteRule, array $service)
 
     $ruleName = forward_remote_string($remoteRule, 'remark');
     if ($ruleName === '') {
-        $ruleName = 'Forward #' . $remoteId;
+        $ruleName = 'Veer #' . $remoteId;
     }
 
     $values = [
@@ -3577,7 +3577,7 @@ function forward_sync_client_service_bindings(array $services, array $settings, 
     if (!empty($result['errors'])) {
         return [
             'success' => false,
-            'message' => '当前服务同步失败，请稍后重试或联系管理员查看 Forward 端点状态',
+            'message' => '当前服务同步失败，请稍后重试或联系管理员查看 Veer 端点状态',
             'summary' => $result,
         ];
     }
@@ -3629,7 +3629,7 @@ function forward_get_local_sites($userId = null, $refreshRemote = true)
         if (forward_api_target_enabled($target)) {
             $remoteError = (string) ($remoteErrors[$remoteKey] ?? '');
         } elseif ($remoteId > 0) {
-            $remoteError = '当前宿主机未配置 Forward 端点';
+            $remoteError = '当前宿主机未配置 Veer 端点';
         }
         $remote = null;
         if (
@@ -3702,7 +3702,7 @@ function forward_get_local_site($siteId, $userId = null)
     if (forward_api_target_enabled($target)) {
         $remoteError = (string) ($remoteErrors[$remoteKey] ?? '');
     } elseif ($remoteId > 0) {
-        $remoteError = '当前宿主机未配置 Forward 端点';
+        $remoteError = '当前宿主机未配置 Veer 端点';
     }
     $remote = ($remoteId > 0 && forward_api_target_enabled($target) && isset($remoteMaps[$remoteKey][$remoteId]))
         ? $remoteMaps[$remoteKey][$remoteId]
@@ -4171,9 +4171,9 @@ function forward_update_site(array $data, $userId = null)
             });
             $rolledBackRemote = forward_best_effort_remote_delete_resource('/api/sites', $remoteId, $targetServerId);
 
-            $message = '旧 Forward 端删除站点失败：' . $cleanup['message'];
+            $message = '旧 Veer 端删除站点失败：' . $cleanup['message'];
             $message .= $restoreLocal['success'] ? '；已回滚本地配置' : '；本地回滚失败：' . $restoreLocal['message'];
-            $message .= $rolledBackRemote ? '，并已清理新 Forward 端站点' : '，但新 Forward 端站点清理失败，请手动核对';
+            $message .= $rolledBackRemote ? '，并已清理新 Veer 端站点' : '，但新 Veer 端站点清理失败，请手动核对';
             return ['success' => false, 'message' => $message];
         }
     }
@@ -4586,14 +4586,14 @@ function forward_handle_client_ajax()
     $settings = forward_get_module_settings();
     $enabled = forward_is_enabled_value($settings['enable_client_area'] ?? 'yes');
     if (!$enabled) {
-        forward_json_response(['success' => false, 'message' => 'Forward 功能当前未开放。']);
+        forward_json_response(['success' => false, 'message' => 'Veer 功能当前未开放。']);
     }
 
     $allowedProducts = forward_parse_allowed_product_ids($settings['allowed_product_ids'] ?? '');
     $allowedClientIps = forward_parse_allowed_client_ips($settings['allowed_client_ips'] ?? '');
     $services = forward_get_user_services($clientId, $allowedProducts, $allowedClientIps, ['Active'], forward_client_service_ip_family($settings));
     if (empty($services)) {
-        forward_json_response(['success' => false, 'message' => '您的产品当前未开放 Forward 规则管理。']);
+        forward_json_response(['success' => false, 'message' => '您的产品当前未开放 Veer 规则管理。']);
     }
 
     if (!forward_validate_csrf_token($_POST['csrf_token'] ?? '')) {
@@ -4660,10 +4660,10 @@ function forward_output($vars)
         forward_log('admin_output_error', $context, $e->getMessage(), $e->getTraceAsString());
 
         if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !empty($_POST['action'])) {
-            forward_json_response(['success' => false, 'message' => 'Forward 后台操作失败：' . $e->getMessage()]);
+            forward_json_response(['success' => false, 'message' => 'Veer 后台操作失败：' . $e->getMessage()]);
         }
 
-        forward_render_admin_error('Forward 后台加载失败', $e, $context);
+        forward_render_admin_error('Veer 后台加载失败', $e, $context);
     }
 }
 
@@ -5095,9 +5095,9 @@ HTML;
     echo '<div class="forward-addon">';
     echo '<div class="forward-admin">';
     echo '<div class="forward-admin__hero">';
-    echo '<div class="forward-admin__intro"><span class="forward-admin__eyebrow">Forward</span><h2>规则管理面板</h2><p>管理 forward 的入口规则，支持后台创建、编辑、启停和删除，并同步客户区可见数据。</p></div>';
+    echo '<div class="forward-admin__intro"><span class="forward-admin__eyebrow">Veer</span><h2>规则管理面板</h2><p>管理 Veer 的入口规则，支持后台创建、编辑、启停和删除，并同步客户区可见数据。</p></div>';
     echo '<div class="forward-admin__meta">';
-    echo '<div class="forward-admin__stat"><span class="forward-admin__stat-label">规则总数</span><span class="forward-admin__stat-value">' . count($rules) . '</span><span class="forward-admin__stat-note">本地已记录的 forward 端口规则</span></div>';
+    echo '<div class="forward-admin__stat"><span class="forward-admin__stat-label">规则总数</span><span class="forward-admin__stat-value">' . count($rules) . '</span><span class="forward-admin__stat-note">本地已记录的 Veer 端口规则</span></div>';
     echo '<div class="forward-admin__stat"><span class="forward-admin__stat-label">共享站点总数</span><span class="forward-admin__stat-value">' . count($sites) . '</span><span class="forward-admin__stat-note">80/443 共享建站配置</span></div>';
     echo '<div class="forward-admin__stat"><span class="forward-admin__stat-label">启用中</span><span class="forward-admin__stat-value">' . ($activeRuleCount + $activeSiteCount) . '</span><span class="forward-admin__stat-note">规则 ' . $activeRuleCount . ' / 站点 ' . $activeSiteCount . '</span></div>';
     echo '<div class="forward-admin__stat"><span class="forward-admin__stat-label">已停用</span><span class="forward-admin__stat-value">' . ($inactiveRuleCount + $inactiveSiteCount) . '</span><span class="forward-admin__stat-note">规则 ' . $inactiveRuleCount . ' / 站点 ' . $inactiveSiteCount . '</span></div>';
@@ -5106,7 +5106,7 @@ HTML;
     echo '</div>';
     echo '<div class="forward-admin__summary">';
     echo '<div class="forward-admin__summary-card"><span>入口 IP 池</span><code>' . $serverIp . '</code></div>';
-    echo '<div class="forward-admin__summary-card"><span>Forward 端点</span><strong>' . ($apiEndpoint !== '' ? $apiEndpoint : '-') . '</strong></div>';
+    echo '<div class="forward-admin__summary-card"><span>Veer 端点</span><strong>' . ($apiEndpoint !== '' ? $apiEndpoint : '-') . '</strong></div>';
     echo '<div class="forward-admin__summary-card"><span>默认标签</span><strong>' . ($defaultTag !== '' ? $defaultTag : '-') . '</strong></div>';
     echo '<div class="forward-admin__summary-card"><span>接口绑定</span><strong>入 ' . ($inInterface !== '' ? $inInterface : '-') . ' / 出 ' . ($outInterface !== '' ? $outInterface : '-') . '</strong></div>';
     echo '</div>';
@@ -5160,17 +5160,17 @@ HTML;
     echo '<input type="hidden" name="service_id" id="forward_admin_rule_service_id" value="0">';
     echo '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">';
     echo '<div class="form-group"><label for="forward_admin_rule_name">规则名称</label><input type="text" class="form-control" name="rule_name" id="forward_admin_rule_name" required></div>';
-    echo '<div class="form-group"><label for="forward_admin_rule_server_id">宿主机</label><select class="form-control" name="server_id" id="forward_admin_rule_server_id" required>' . $adminServerOptionsHtml . '</select><p class="help-block" id="forward_admin_rule_server_help">请选择要下发到哪个宿主机 / Forward 端，再选择入口 IP。</p></div>';
+    echo '<div class="form-group"><label for="forward_admin_rule_server_id">宿主机</label><select class="form-control" name="server_id" id="forward_admin_rule_server_id" required>' . $adminServerOptionsHtml . '</select><p class="help-block" id="forward_admin_rule_server_help">请选择要下发到哪个宿主机 / Veer 端，再选择入口 IP。</p></div>';
     echo '<div class="form-group"><label for="forward_admin_listen_ip">入口 IP</label><select class="form-control" name="listen_ip" id="forward_admin_listen_ip" required disabled><option value="">请先选择宿主机</option></select></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_internal_ip">目标 IP</label><input type="text" class="form-control" name="internal_ip" id="forward_admin_internal_ip" required></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_internal_port">目标端口</label><input type="number" class="form-control" name="internal_port" id="forward_admin_internal_port" min="1" max="65535" required></div></div></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_external_port">入口端口</label><input type="number" class="form-control" name="external_port" id="forward_admin_external_port" min="' . (int) $adminListenPortRange['min'] . '" max="' . (int) $adminListenPortRange['max'] . '" required><p class="help-block">允许范围：' . $adminListenPortRangeText . '</p></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_protocol">协议</label><select class="form-control" name="protocol" id="forward_admin_protocol" required>' . $protocolSelect . '</select></div></div></div>';
     echo '<div class="form-group"><input type="hidden" name="transparent" value="0"><label class="checkbox-inline"><input type="checkbox" name="transparent" id="forward_admin_rule_transparent" value="1"> 透传客户端源 IP</label><p class="help-block">开启后保留客户端真实源地址；当前仅支持 IPv4 入口与目标 IP 组合，关闭后可选填回源 IP。</p></div>';
-    echo '<div class="form-group" id="forward_admin_rule_source_wrap"><label for="forward_admin_rule_out_source_ip">回源 IP</label><input type="text" class="form-control" name="out_source_ip" id="forward_admin_rule_out_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Forward 宿主机上的本地 IP，且与目标 IP 地址族一致。</p></div>';
+    echo '<div class="form-group" id="forward_admin_rule_source_wrap"><label for="forward_admin_rule_out_source_ip">回源 IP</label><input type="text" class="form-control" name="out_source_ip" id="forward_admin_rule_out_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Veer 宿主机上的本地 IP，且与目标 IP 地址族一致。</p></div>';
     echo '<div class="form-group"><label for="forward_admin_product_name">产品名称</label><input type="text" class="form-control" name="product_name" id="forward_admin_product_name"></div>';
     echo '<div class="form-group"><label for="forward_admin_description">描述</label><textarea class="form-control" name="description" id="forward_admin_description" rows="3"></textarea></div>';
-    echo '<div class="alert alert-info" style="margin-bottom:0;">规则会写入 forward 的 <code>/api/rules</code>；多宿主机场景请先明确宿主机，再从该宿主机的入口 IP 池中选择。当前后台入口端口范围：<strong>' . $adminListenPortRangeText . '</strong>。</div>';
+    echo '<div class="alert alert-info" style="margin-bottom:0;">规则会写入 Veer 的 <code>/api/rules</code>；多宿主机场景请先明确宿主机，再从该宿主机的入口 IP 池中选择。当前后台入口端口范围：<strong>' . $adminListenPortRangeText . '</strong>。</div>';
     echo '</div><div class="modal-footer"><button type="button" class="btn btn-default" data-dismiss="modal">取消</button><button type="submit" class="btn btn-primary">保存</button></div></form>';
     echo '</div></div></div>';
 
@@ -5216,16 +5216,16 @@ HTML;
     echo '<input type="hidden" name="service_id" id="forward_admin_site_service_id" value="0">';
     echo '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">';
     echo '<div class="form-group"><label for="forward_admin_site_domain">域名</label><input type="text" class="form-control" name="domain" id="forward_admin_site_domain" placeholder="例如 app.example.com" required></div>';
-    echo '<div class="form-group"><label for="forward_admin_site_server_id">宿主机</label><select class="form-control" name="server_id" id="forward_admin_site_server_id" required>' . $adminServerOptionsHtml . '</select><p class="help-block" id="forward_admin_site_server_help">请选择要下发到哪个宿主机 / Forward 端，再选择入口 IP。</p></div>';
+    echo '<div class="form-group"><label for="forward_admin_site_server_id">宿主机</label><select class="form-control" name="server_id" id="forward_admin_site_server_id" required>' . $adminServerOptionsHtml . '</select><p class="help-block" id="forward_admin_site_server_help">请选择要下发到哪个宿主机 / Veer 端，再选择入口 IP。</p></div>';
     echo '<div class="form-group"><label for="forward_admin_site_listen_ip">入口 IP</label><select class="form-control" name="listen_ip" id="forward_admin_site_listen_ip" required disabled><option value="">请先选择宿主机</option></select></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_backend_ip">后端 IP</label><input type="text" class="form-control" name="backend_ip" id="forward_admin_site_backend_ip" required></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_product_name">产品名称</label><input type="text" class="form-control" name="product_name" id="forward_admin_site_product_name"></div></div></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_http_port">HTTP 端口</label><input type="number" class="form-control" name="backend_http_port" id="forward_admin_site_http_port" min="0" max="65535" value="80"></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_https_port">HTTPS 端口</label><input type="number" class="form-control" name="backend_https_port" id="forward_admin_site_https_port" min="0" max="65535" value="443"></div></div></div>';
     echo '<div class="form-group"><input type="hidden" name="transparent" value="0"><label class="checkbox-inline"><input type="checkbox" name="transparent" id="forward_admin_site_transparent" value="1"> 透传客户端源 IP</label><p class="help-block">开启后保留访客真实源地址；当前仅支持 IPv4 入口与目标 IP 组合，关闭后可选填回源 IP。</p></div>';
-    echo '<div class="form-group" id="forward_admin_site_source_wrap"><label for="forward_admin_site_backend_source_ip">回源 IP</label><input type="text" class="form-control" name="backend_source_ip" id="forward_admin_site_backend_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Forward 宿主机上的本地 IP，且与目标 IP 地址族一致。</p></div>';
+    echo '<div class="form-group" id="forward_admin_site_source_wrap"><label for="forward_admin_site_backend_source_ip">回源 IP</label><input type="text" class="form-control" name="backend_source_ip" id="forward_admin_site_backend_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Veer 宿主机上的本地 IP，且与目标 IP 地址族一致。</p></div>';
     echo '<div class="form-group"><label for="forward_admin_site_description">描述</label><textarea class="form-control" name="description" id="forward_admin_site_description" rows="3"></textarea></div>';
-    echo '<div class="alert alert-info" style="margin-bottom:0;">站点会写入 forward 的 <code>/api/sites</code>；多宿主机场景请先明确宿主机，再从该宿主机的入口 IP 池中选择，域名仍需唯一。</div>';
+    echo '<div class="alert alert-info" style="margin-bottom:0;">站点会写入 Veer 的 <code>/api/sites</code>；多宿主机场景请先明确宿主机，再从该宿主机的入口 IP 池中选择，域名仍需唯一。</div>';
     echo '</div><div class="modal-footer"><button type="button" class="btn btn-default" data-dismiss="modal">取消</button><button type="submit" class="btn btn-primary">保存</button></div></form>';
     echo '</div></div></div>';
 
@@ -5350,12 +5350,12 @@ HTML;
   function updateAdminServerHelp($help, serverId) {
     var option = adminServerOption(serverId);
     if (!option) {
-      $help.text('请选择要下发到哪个宿主机 / Forward 端，再选择入口 IP。');
+      $help.text('请选择要下发到哪个宿主机 / Veer 端，再选择入口 IP。');
       return;
     }
     var listenText = $.isArray(option.listen_ips) && option.listen_ips.length ? option.listen_ips.join(', ') : '未配置';
     var targetText = $.trim(String(option.target_label || '')) || '未配置';
-    $help.text('当前宿主机：' + (option.server_label || ('宿主机 #' + normalizeServerId(serverId))) + '；入口 IP：' + listenText + '；Forward 端：' + targetText);
+    $help.text('当前宿主机：' + (option.server_label || ('宿主机 #' + normalizeServerId(serverId))) + '；入口 IP：' + listenText + '；Veer 端：' + targetText);
   }
 
   function syncAdminRuleServer(selectedValue) {
@@ -5696,18 +5696,18 @@ function forward_clientarea($vars)
         forward_log('clientarea_output_error', $context, $e->getMessage(), $e->getTraceAsString());
 
         if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !empty($_POST['action'])) {
-            forward_json_response(['success' => false, 'message' => 'Forward 客户区操作失败：' . $e->getMessage()]);
+            forward_json_response(['success' => false, 'message' => 'Veer 客户区操作失败：' . $e->getMessage()]);
         }
 
         return [
-            'pagetitle' => 'Forward',
-            'breadcrumb' => ['index.php?m=forward' => 'Forward'],
+            'pagetitle' => 'Veer',
+            'breadcrumb' => ['index.php?m=forward' => 'Veer'],
             'templatefile' => 'clientarea_disabled',
             'requirelogin' => true,
             'vars' => [
                 'asset_url' => 'modules/addons/forward',
                 'modulelink' => $vars['modulelink'] ?? 'index.php?m=forward',
-                'message' => 'Forward 客户区加载失败：' . $e->getMessage(),
+                'message' => 'Veer 客户区加载失败：' . $e->getMessage(),
             ],
         ];
     }
@@ -5723,14 +5723,14 @@ function forward_clientarea_render($vars)
     $enabled = forward_is_enabled_value($settings['enable_client_area'] ?? ($vars['enable_client_area'] ?? 'yes'));
     if (!$enabled) {
         return [
-            'pagetitle' => 'Forward',
-            'breadcrumb' => ['index.php?m=forward' => 'Forward'],
+            'pagetitle' => 'Veer',
+            'breadcrumb' => ['index.php?m=forward' => 'Veer'],
             'templatefile' => 'clientarea_disabled',
             'requirelogin' => true,
             'vars' => [
                 'asset_url' => 'modules/addons/forward',
                 'modulelink' => $vars['modulelink'],
-                'message' => 'Forward 功能当前未开放。',
+                'message' => 'Veer 功能当前未开放。',
             ],
         ];
     }
@@ -5768,21 +5768,21 @@ function forward_clientarea_render($vars)
 
     if ($clientId > 0 && !$hasAccess) {
         return [
-            'pagetitle' => 'Forward',
-            'breadcrumb' => ['index.php?m=forward' => 'Forward'],
+            'pagetitle' => 'Veer',
+            'breadcrumb' => ['index.php?m=forward' => 'Veer'],
             'templatefile' => 'clientarea_disabled',
             'requirelogin' => true,
             'vars' => [
                 'asset_url' => 'modules/addons/forward',
                 'modulelink' => $vars['modulelink'],
-                'message' => '您的产品当前未开放 Forward 规则管理。',
+                'message' => '您的产品当前未开放 Veer 规则管理。',
             ],
         ];
     }
 
     return [
-        'pagetitle' => 'Forward 管理',
-        'breadcrumb' => ['index.php?m=forward' => 'Forward 管理'],
+        'pagetitle' => 'Veer 管理',
+        'breadcrumb' => ['index.php?m=forward' => 'Veer 管理'],
         'templatefile' => 'clientarea',
         'requirelogin' => true,
         'vars' => [

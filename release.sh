@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# NAT Forward - 交叉编译构建脚本
+# Veer - 交叉编译构建脚本
 #
 # 用法:
 #   ./release.sh              # 编译所有架构 (amd64 + arm64)
@@ -8,10 +8,11 @@
 #   ./release.sh arm64        # 仅编译 arm64
 #
 # 产物直接输出到项目根目录:
-#   forward-linux-amd64
-#   forward-linux-arm64
+#   veer-linux-amd64
+#   veer-linux-arm64
+#   veer-plugins.tar.gz
 #
-# 部署: 将 forward-linux-<arch> + deploy.sh 一起传到服务器执行即可
+# 部署: 将 veer-linux-<arch> + deploy.sh 一起传到服务器执行即可
 # 注意: eBPF tc/xdp 对象会先在本地编译并 embed 进 Go 二进制，部署时无需额外携带 .o 文件
 #
 set -euo pipefail
@@ -170,9 +171,20 @@ compile_bpf_object "${EBPF_TC_SRC}" "${EBPF_TC_STATS_OBJ}" "tc-stats" -DFORWARD_
 compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_OBJ}" "xdp"
 compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_STATS_OBJ}" "xdp-stats" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 
+# ---------- bundled plugins ----------
+info "编译 bundled plugin eBPF 对象..."
+sh "${PROJECT_DIR}/scripts/build-plugin-ebpf.sh"
+sh "${PROJECT_DIR}/scripts/verify-plugin-manifests.sh"
+go test ./internal/app -run '^TestBundledStablePluginCatalogIsValid$' -count=1
+VEER_PLUGIN_PACKAGE_SKIP_BUILD=1 sh "${PROJECT_DIR}/scripts/package-plugins.sh"
+PLUGIN_BUNDLE="${PROJECT_DIR}/veer-plugins.tar.gz"
+rm -f "${PLUGIN_BUNDLE}"
+tar -C "${PROJECT_DIR}/dist" -czf "${PLUGIN_BUNDLE}" plugins
+ok "bundled plugins => veer-plugins.tar.gz"
+
 # ---------- 编译 ----------
 for ARCH in "${TARGETS[@]}"; do
-    OUT="${PROJECT_DIR}/forward-linux-${ARCH}"
+    OUT="${PROJECT_DIR}/veer-linux-${ARCH}"
     info "编译 linux/${ARCH}..."
 
     NONCE=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
@@ -180,12 +192,12 @@ for ARCH in "${TARGETS[@]}"; do
         go build -ldflags="-s -w -X main.buildNonce=${NONCE}" -trimpath -o "$OUT" .
 
     SIZE=$(du -h "$OUT" | cut -f1)
-    ok "linux/${ARCH} => forward-linux-${ARCH} (${SIZE})"
+    ok "linux/${ARCH} => veer-linux-${ARCH} (${SIZE})"
 done
 
 echo ""
 echo -e "${GREEN}构建完成。部署方法:${NC}"
 echo ""
-echo "  scp forward-linux-amd64 deploy.sh root@server:/tmp/"
+echo "  scp veer-linux-amd64 veer-plugins.tar.gz deploy.sh root@server:/tmp/"
 echo "  ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'"
 echo ""

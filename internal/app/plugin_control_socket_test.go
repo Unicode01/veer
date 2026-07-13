@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 func TestPluginControlPersistentTCPSocketSurvivesHandlers(t *testing.T) {
@@ -305,7 +305,7 @@ func TestPluginManifestPersistentTCPPermission(t *testing.T) {
 		Control: &PluginControl{
 			Main:        "control.js",
 			Permissions: []string{"net.tcp"},
-			NetAccess:   []PluginNetAccess{{Interfaces: []string{"fwd*"}, Operations: []string{"tcp"}}},
+			NetAccess:   []PluginNetAccess{{Interfaces: []string{"veer*"}, Operations: []string{"tcp"}}},
 		},
 	}
 	if err := normalizePluginManifest(&manifest); err != nil {

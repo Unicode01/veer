@@ -1,5 +1,5 @@
 (function () {
-  const app = window.ForwardApp;
+  const app = window.VeerApp;
   if (!app) return;
 
   app.refreshRuleInterfaceSelectors = function refreshRuleInterfaceSelectors() {

@@ -1,7 +1,7 @@
 plugin.capabilities(['vtap', 'local_route', 'net_admin', 'control']);
 pipeline.handoff({
   id: 'vtolocal0',
-  description: 'Single Linux L3 boundary used by host routes and the bidirectional fvtap pipeline.'
+  description: 'Single Linux L3 boundary used by host routes and the bidirectional Veer pipeline.'
 });
 plugin.resource({
   id: 'links',
@@ -35,7 +35,7 @@ plugin.action({
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
-  sha256: '5206ac93c0ac3f92148af368a11cc1559d6821079c37a7028aabcf1e41c0cf08',
+  sha256: '99eb320f1e23eb8913bbe60428caa95eea2bac5e8f89ac580392da69d574d8a2',
   page: 'vtolocal',
   page_title: 'VToLocal'
 });
@@ -441,7 +441,7 @@ function isDefaultRoute(dst) {
 
 function normalizeProfile(key, raw) {
   raw = raw || {};
-  var localInterface = text(raw.local_interface || 'fwdlocal0');
+  var localInterface = text(raw.local_interface || 'veerlocal0');
   return {
     profile_key: key,
     local_interface: ifaceName(localInterface, 'local_interface'),

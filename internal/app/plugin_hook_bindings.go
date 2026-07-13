@@ -6,7 +6,7 @@ import (
 	"log"
 	"strings"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 const pluginHookBindingsResourceID = "hook_bindings"

@@ -8,7 +8,7 @@ ebpf.loadObject({
   path: 'packet_observer.o',
   description: 'Minimal TC pre_forward chain program used for plugin object validation.',
   programs: [
-    {id: 'tc_pre_forward', section: 'tc/fvtap/pre_forward', type: 'tc'}
+    {id: 'tc_pre_forward', section: 'tc/veer/pre_forward', type: 'tc'}
   ]
 });
 pipeline.attach({

@@ -6,7 +6,7 @@ import (
 	"math"
 	"strings"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 const pluginForwardRulePlansResourceID = "forward_rule_plans"

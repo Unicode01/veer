@@ -290,7 +290,7 @@ function createHarness() {
   };
 
   const windowRef = {
-    ForwardApp: app,
+    VeerApp: app,
     addEventListener() {},
     removeEventListener() {},
     innerWidth: 1280,

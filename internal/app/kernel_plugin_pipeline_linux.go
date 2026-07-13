@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	kernelPluginPipelineInterface       = "fvtap"
+	kernelPluginPipelineInterface       = builtinPluginPipelineID
 	kernelPluginPipelineStageForward    = "forward"
 	kernelPluginPipelineStageReply      = "reply"
 	kernelPluginPipelineStagePreForward = "pre_forward"
@@ -229,13 +229,6 @@ func (rt *linuxKernelRuleRuntime) ReconcilePlugins(catalog PluginCatalog) plugin
 		return clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
 	}
 	return rt.reconcilePluginPipelineLocked(catalog, pieces, desired, states, kernelPluginPipelineCoreConfig{Forward: !noPreparedRules, Reply: !noPreparedRules})
-}
-
-func (rt *linuxKernelRuleRuntime) reconcilePluginPipelineFromCatalogLocked(catalog PluginCatalog, pieces kernelCollectionPieces) pluginRuntimeSnapshot {
-	ensurePluginCatalogControlRegistration(&catalog, rt.cfg)
-	desired, states := buildKernelPluginPipelineDesiredForRuntime(catalog, rt.cfg)
-	core := kernelPluginPipelineCoreConfig{Forward: len(rt.preparedRules) > 0, Reply: len(rt.preparedRules) > 0}
-	return rt.reconcilePluginPipelineLocked(catalog, pieces, desired, states, core)
 }
 
 func (rt *linuxKernelRuleRuntime) reconcilePluginPipelineLocked(catalog PluginCatalog, pieces kernelCollectionPieces, desired []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState, core kernelPluginPipelineCoreConfig) pluginRuntimeSnapshot {
@@ -499,26 +492,6 @@ func cloneKernelPluginPipelineDesired(values []kernelPluginPipelineDesiredPlugin
 	return out
 }
 
-func kernelPluginPipelineCatalogHasDesiredHooks(catalog PluginCatalog) bool {
-	for _, plugin := range catalog.Plugins {
-		if plugin.Builtin || plugin.Status != pluginStatusActive {
-			continue
-		}
-		for _, hook := range plugin.Hooks {
-			_, supported, err := kernelPluginPipelineNormalizeStage(hook.Stage, hook.Priority)
-			if hook.Engine == kernelEngineTC &&
-				supported &&
-				err == nil &&
-				hook.Attach != "egress" &&
-				hook.Attach != "none" &&
-				hook.Mode != "control" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func kernelPluginPipelineDesiredHasHooks(desired []kernelPluginPipelineDesiredPlugin) bool {
 	for _, item := range desired {
 		if len(item.hooks) > 0 {
@@ -671,7 +644,7 @@ func kernelPluginPipelineNormalizeStage(stage string, priority int) (string, boo
 		if priority > pluginPipelineCorePriority {
 			return kernelPluginPipelineStagePostLookup, true, nil
 		}
-		return "", true, fmt.Errorf("stage=forward priority=%d collides with fvtap core priority %d; use a lower priority for pre-core hooks or a higher priority for next-core hooks", priority, pluginPipelineCorePriority)
+		return "", true, fmt.Errorf("stage=forward priority=%d collides with Veer Core priority %d; use a lower priority for pre-core hooks or a higher priority for next-core hooks", priority, pluginPipelineCorePriority)
 	case kernelPluginPipelineStageReply:
 		if priority < pluginPipelineCorePriority {
 			return kernelPluginPipelineStagePreReply, true, nil
@@ -679,7 +652,7 @@ func kernelPluginPipelineNormalizeStage(stage string, priority int) (string, boo
 		if priority > pluginPipelineCorePriority {
 			return kernelPluginPipelineStagePostReply, true, nil
 		}
-		return "", true, fmt.Errorf("stage=reply priority=%d collides with fvtap reply core priority %d; use a lower priority for pre-core hooks or a higher priority for next-core hooks", priority, pluginPipelineCorePriority)
+		return "", true, fmt.Errorf("stage=reply priority=%d collides with Veer Reply Core priority %d; use a lower priority for pre-core hooks or a higher priority for next-core hooks", priority, pluginPipelineCorePriority)
 	default:
 		return "", false, nil
 	}
@@ -723,7 +696,7 @@ func effectiveKernelPluginPipelineHookContext(values []string, stage string) ([]
 	if stage == kernelPluginPipelineStagePostLookup || stage == kernelPluginPipelineStagePostReply {
 		add(pluginHookContextTCPluginCtxV4)
 	} else if _, ok := seen[pluginHookContextTCPluginCtxV4]; ok {
-		return nil, fmt.Errorf("context %q is only available after fvtap core lookup", pluginHookContextTCPluginCtxV4)
+		return nil, fmt.Errorf("context %q is only available after Veer Core lookup", pluginHookContextTCPluginCtxV4)
 	}
 	sort.Strings(out)
 	return out, nil
@@ -903,7 +876,7 @@ func buildKernelPluginPipelineDesiredPlugin(plugin LoadedPlugin) (kernelPluginPi
 			return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s: %v", hook.ID, err))
 		}
 		if !supported {
-			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: use stage=forward or stage=reply with priority below or above fvtap core priority %d", hook.ID, pluginPipelineCorePriority))
+			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: use stage=forward or stage=reply with priority below or above Veer Core priority %d", hook.ID, pluginPipelineCorePriority))
 			continue
 		}
 		context, err := effectiveKernelPluginPipelineHookContext(hook.Context, stage)
@@ -911,7 +884,7 @@ func buildKernelPluginPipelineDesiredPlugin(plugin LoadedPlugin) (kernelPluginPi
 			return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s: %v", hook.ID, err))
 		}
 		if hook.Attach == "none" {
-			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: attach=none is not on the fvtap tc pipeline", hook.ID))
+			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: attach=none is not on the Veer tc pipeline", hook.ID))
 			continue
 		}
 		if hook.Mode == "control" {
@@ -959,7 +932,7 @@ func buildKernelPluginPipelineDesiredPlugin(plugin LoadedPlugin) (kernelPluginPi
 	}
 	if len(item.hooks) == 0 {
 		state := externalPluginRuntimeState()
-		state.Reason = fmt.Sprintf("no supported tc pipeline hook is declared; use stage=forward or stage=reply with priority below or above fvtap core priority %d", pluginPipelineCorePriority)
+		state.Reason = fmt.Sprintf("no supported tc pipeline hook is declared; use stage=forward or stage=reply with priority below or above Veer Core priority %d", pluginPipelineCorePriority)
 		if len(item.warnings) > 0 {
 			state.Reason += ": " + strings.Join(item.warnings, "; ")
 		}
@@ -1208,7 +1181,7 @@ func loadPluginObjectForPipeline(cache map[string]*loadedPluginObject, objectPat
 		return nil, fmt.Errorf("load plugin object spec %s: %w", objectPath, err)
 	}
 	if spec.Maps[kernelTCProgramChainMapName] == nil {
-		return nil, fmt.Errorf("plugin object %s must declare shared map %q for fvtap pipeline chaining", objectPath, kernelTCProgramChainMapName)
+		return nil, fmt.Errorf("plugin object %s must declare shared map %q for Veer pipeline chaining", objectPath, kernelTCProgramChainMapName)
 	}
 	if needsPluginCtx && spec.Maps[kernelTCPluginContextMapName] == nil {
 		return nil, fmt.Errorf("plugin object %s must declare shared map %q for context-aware pipeline hooks", objectPath, kernelTCPluginContextMapName)
@@ -1660,19 +1633,6 @@ func kernelPluginPipelineErrorAll(catalog PluginCatalog, message string, states 
 	return states
 }
 
-func kernelPluginPipelineErrorAllFromDesired(desired []kernelPluginPipelineDesiredPlugin, message string, states map[string]PluginRuntimeState) map[string]PluginRuntimeState {
-	if states == nil {
-		states = make(map[string]PluginRuntimeState)
-	}
-	for _, item := range desired {
-		if _, exists := states[item.plugin.ID]; exists {
-			continue
-		}
-		states[item.plugin.ID] = pluginRuntimeErrorState(message)
-	}
-	return states
-}
-
 func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState, core kernelPluginPipelineCoreConfig) string {
 	type fingerprintHook struct {
 		PluginID         string   `json:"plugin_id"`
@@ -1704,10 +1664,7 @@ func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, 
 		States []fingerprintState `json:"states,omitempty"`
 		Core   fingerprintCore    `json:"core"`
 	}{
-		Core: fingerprintCore{
-			Forward: core.Forward,
-			Reply:   core.Reply,
-		},
+		Core: fingerprintCore(core),
 	}
 	for _, item := range items {
 		for _, hook := range item.hooks {

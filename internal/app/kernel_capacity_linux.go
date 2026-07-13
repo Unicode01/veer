@@ -3,7 +3,7 @@
 package app
 
 import (
-	"forward/internal/kernelcap"
+	"github.com/Unicode01/veer/internal/kernelcap"
 	"github.com/cilium/ebpf"
 )
 

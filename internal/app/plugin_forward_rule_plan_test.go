@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 func TestPluginForwardRulePlanCompilesActivePluginRecord(t *testing.T) {
@@ -245,7 +245,7 @@ func writeForwardRulePlanPluginForTest(t *testing.T, pluginsDir, id string) {
 	writeTestPlugin(t, pluginsDir, id, `{
   "api_version": "v1",
   "id": "`+id+`",
-  "name": "Forward Orchestrator",
+  "name": "Rule Orchestrator",
   "version": "0.1.0",
   "kind": "control",
   "resources": [{

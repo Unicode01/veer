@@ -3,7 +3,7 @@ package app
 import (
 	"time"
 
-	"forward/internal/kernelcap"
+	"github.com/Unicode01/veer/internal/kernelcap"
 )
 
 type Rule struct {

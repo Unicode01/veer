@@ -4,15 +4,26 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
-    <title data-i18n="app.title">NAT Forward Manager</title>
+    <title data-i18n="app.title">Veer</title>
     <script>
         (function () {
-            var locale = localStorage.getItem('forward_locale');
+            function readSetting(key, legacyKey, fallback) {
+                var value = localStorage.getItem(key);
+                if (value !== null) return value;
+                value = localStorage.getItem(legacyKey);
+                if (value !== null) {
+                    localStorage.setItem(key, value);
+                    return value;
+                }
+                return fallback;
+            }
+
+            var locale = readSetting('veer_locale', 'forward_locale', '');
             if (locale === 'zh-CN' || locale === 'en-US') {
                 document.documentElement.lang = locale;
             }
 
-            var theme = localStorage.getItem('forward_theme') || 'system';
+            var theme = readSetting('veer_theme', 'forward_theme', 'system');
             var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
             var resolved = theme === 'light' || theme === 'dark' ? theme : (prefersDark ? 'dark' : 'light');
             document.documentElement.dataset.theme = resolved;
@@ -49,7 +60,7 @@
             <div class="header-inner">
                 <div class="header-title">
                     <h1>
-                        <span data-i18n="app.title">NAT Forward Manager</span>
+                        <span data-i18n="app.title">Veer</span>
                         <span id="masterVersion" class="master-version"></span>
                     </h1>
                 </div>

@@ -17,12 +17,12 @@
     .router-node {
       min-width: 0;
       padding: 9px 10px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 10px;
-      background: color-mix(in srgb, var(--fwd-surface-soft) 76%, transparent);
+      background: color-mix(in srgb, var(--veer-surface-soft) 76%, transparent);
     }
     .router-node-label {
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 720;
       line-height: 1.25;
@@ -32,7 +32,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      color: var(--fwd-text);
+      color: var(--veer-text);
       font-size: 13px;
       font-weight: 780;
       line-height: 1.25;
@@ -47,14 +47,14 @@
     .router-section {
       min-width: 0;
       padding: 10px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 10px;
-      background: color-mix(in srgb, var(--fwd-surface-soft) 72%, transparent);
+      background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
     }
     .router-section > * + * { margin-top: 10px; }
     .router-section-title {
       margin: 0;
-      color: var(--fwd-text);
+      color: var(--veer-text);
       font-size: 13px;
       line-height: 1.25;
       font-weight: 780;
@@ -71,7 +71,7 @@
       justify-content: space-between;
       gap: 8px;
       min-width: 0;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 680;
     }
@@ -87,10 +87,10 @@
       flex: 0 0 auto;
       width: 16px;
       height: 16px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 999px;
-      color: var(--fwd-soft);
-      background: var(--fwd-surface);
+      color: var(--veer-soft);
+      background: var(--veer-surface);
       font-size: 10px;
       font-weight: 800;
       cursor: help;
@@ -98,9 +98,9 @@
     .router-check-field {
       min-height: 31px;
       padding: 5px 8px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 8px;
-      background: var(--fwd-surface);
+      background: var(--veer-surface);
     }
     .router-check-field label {
       display: flex;
@@ -113,7 +113,7 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .router-check-field .fwd-input[type="checkbox"] { flex: 0 0 auto; }
+    .router-check-field .veer-input[type="checkbox"] { flex: 0 0 auto; }
     .router-multi-select {
       position: relative;
       width: 100%;
@@ -127,10 +127,10 @@
       width: 100%;
       min-height: 31px;
       padding: 5px 9px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 8px;
-      background: var(--fwd-surface);
-      color: var(--fwd-text);
+      background: var(--veer-surface);
+      color: var(--veer-text);
       font: inherit;
       font-size: 13px;
       font-weight: 720;
@@ -140,13 +140,13 @@
     }
     .router-multi-button:hover,
     .router-multi-select.is-open .router-multi-button {
-      border-color: color-mix(in srgb, var(--fwd-accent) 45%, var(--fwd-border));
-      box-shadow: 0 0 0 2px color-mix(in srgb, var(--fwd-accent) 10%, transparent);
+      border-color: color-mix(in srgb, var(--veer-accent) 45%, var(--veer-border));
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--veer-accent) 10%, transparent);
     }
     .router-multi-button::after {
       content: "v";
       flex: 0 0 auto;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 900;
     }
@@ -166,10 +166,10 @@
       width: 100%;
       min-width: 150px;
       padding: 6px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 9px;
-      background: var(--fwd-surface);
-      box-shadow: 0 12px 32px color-mix(in srgb, var(--fwd-shadow, #000) 16%, transparent);
+      background: var(--veer-surface);
+      box-shadow: 0 12px 32px color-mix(in srgb, var(--veer-shadow, #000) 16%, transparent);
     }
     .router-multi-options[hidden] {
       display: none !important;
@@ -181,14 +181,14 @@
       min-width: 0;
       padding: 5px 6px;
       border-radius: 7px;
-      color: var(--fwd-text);
+      color: var(--veer-text);
       font-size: 12px;
       font-weight: 680;
       cursor: pointer;
       transition: background .12s ease, color .12s ease;
     }
     .router-multi-option:hover {
-      background: color-mix(in srgb, var(--fwd-accent) 10%, transparent);
+      background: color-mix(in srgb, var(--veer-accent) 10%, transparent);
     }
     .router-multi-option input {
       flex: 0 0 auto;
@@ -202,11 +202,11 @@
     .router-step-group + .router-step-group {
       margin-top: 3px;
       padding-top: 10px;
-      border-top: 1px solid var(--fwd-border);
+      border-top: 1px solid var(--veer-border);
     }
     .router-step-group-title {
       margin: 0;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 760;
       text-transform: uppercase;
@@ -220,9 +220,9 @@
       align-items: center;
       min-width: 0;
       padding: 7px 8px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 8px;
-      background: var(--fwd-surface);
+      background: var(--veer-surface);
     }
     .router-step-main,
     .router-plugin-main {
@@ -239,7 +239,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 12px;
     }
     @media (max-width: 900px) {
@@ -251,16 +251,16 @@
       .router-form-grid,
       .router-step,
       .router-plugin-row { grid-template-columns: 1fr; }
-      .router-actions .fwd-button { flex: 1 1 auto; }
+      .router-actions .veer-button { flex: 1 1 auto; }
     }
   </style>
 </head>
 <body>
   <script>
     (function () {
-      const F = window.ForwardPluginHost;
+      const F = window.VeerPluginHost;
       if (!F) {
-        document.body.textContent = 'ForwardPluginHost is not available.';
+        document.body.textContent = 'VeerPluginHost is not available.';
         return;
       }
 
@@ -291,7 +291,7 @@
           'steps.restoreRollback': '恢复失败回滚',
           'topology.wan': 'WAN',
           'topology.lan': 'LAN',
-          'topology.forward': 'Forward Core',
+          'topology.forward': 'Veer Core',
           'field.wanMode': 'WAN 模式',
           'field.egress': '出口接口',
           'field.sourceIP': '出口源 IP',
@@ -384,7 +384,7 @@
           'steps.restoreRollback': 'Restore Rollback',
           'topology.wan': 'WAN',
           'topology.lan': 'LAN',
-          'topology.forward': 'Forward Core',
+          'topology.forward': 'Veer Core',
           'field.wanMode': 'WAN Mode',
           'field.egress': 'Egress Interface',
           'field.sourceIP': 'Egress Source IP',

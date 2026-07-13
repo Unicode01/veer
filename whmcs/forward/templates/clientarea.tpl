@@ -4,7 +4,7 @@
     <div class="forward-shell">
         <div class="forward-hero">
             <div class="forward-hero__main">
-                <span class="forward-kicker">Forward</span>
+                <span class="forward-kicker">Veer</span>
                 <h2 class="forward-hero__title">转发与共享建站</h2>
                 <p class="forward-hero__text">管理端口转发规则和 80/443 共享站点。</p>
             </div>
@@ -32,7 +32,7 @@
         {elseif !$has_access}
             <div class="forward-empty">
                 <h3>未开放</h3>
-                <p>您的产品暂未开放 Forward 功能。</p>
+                <p>您的产品暂未开放 Veer 功能。</p>
             </div>
         {else}
             <div class="forward-grid">

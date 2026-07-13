@@ -3,7 +3,7 @@ package app
 import (
 	"database/sql"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 type dbIndexDefinition = store.IndexDefinition

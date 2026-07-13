@@ -8,9 +8,9 @@
 <body>
   <script>
     (function () {
-      const F = window.ForwardPluginHost;
+      const F = window.VeerPluginHost;
       if (!F) {
-        document.body.textContent = 'ForwardPluginHost is not available.';
+        document.body.textContent = 'VeerPluginHost is not available.';
         return;
       }
 
@@ -29,7 +29,7 @@
           'badge.plugin': '插件 {{id}}',
           'badge.ui': 'UI {{version}}',
           'stat.stage': '阶段',
-          'stat.stage.detail': '在 fvtap core 查找前运行。',
+          'stat.stage.detail': '在 Veer Core 查找前运行。',
           'stat.engine': '引擎',
           'stat.engine.detail': '通过插件 pipeline 挂载。',
           'stat.action': '动作',
@@ -80,7 +80,7 @@
           'badge.plugin': 'plugin {{id}}',
           'badge.ui': 'ui {{version}}',
           'stat.stage': 'Stage',
-          'stat.stage.detail': 'Runs before fvtap core lookup.',
+          'stat.stage.detail': 'Runs before Veer Core lookup.',
           'stat.engine': 'Engine',
           'stat.engine.detail': 'Attached through the plugin pipeline.',
           'stat.action': 'Action',
@@ -188,7 +188,7 @@
       }
 
       const contractRows = [
-        ['contract.hook', 'tc/fvtap/pre_forward'],
+        ['contract.hook', 'tc/veer/pre_forward'],
         ['contract.mode', 'observe'],
         ['contract.priority', '10'],
         ['contract.program', 'packet_observer:tc_pre_forward'],

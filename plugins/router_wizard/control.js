@@ -350,7 +350,7 @@ function compactRecord(record) {
     enabled: record.enabled !== false,
     phase: phase || 'available',
     interface: text(data.interface || data.local_interface || data.wan_interface || data.bridge || data.out_interface || ''),
-    parent_interface: text(data.forward_parent_interface || data.egress_nat_parent_interface || data.parent_interface || ''),
+    parent_interface: text(data.veer_parent_interface || data.egress_nat_parent_interface || data.parent_interface || ''),
     out_interface: text(data.out_interface || (data.egress_nat_plan && data.egress_nat_plan.out_interface) || ''),
     source_ip: text(data.out_source_ip || data.ipv4 || data.wan_egress_source_ip || ''),
     last_error: text(data.last_error || data.error || ''),
@@ -421,7 +421,7 @@ function normalizeConfig(raw) {
       ref: token(wan.ref || raw.wan_ref || 'default'),
       egress_interface: optionalIfaceName(wan.egress_interface || raw.wan_egress_interface || raw.out_interface || ''),
       source_ip: text(wan.source_ip || raw.wan_egress_source_ip || raw.out_source_ip || ''),
-      local_interface: ifaceName(wan.local_interface || raw.wan_local_interface || 'fwdlocal0', 'WAN local interface'),
+      local_interface: ifaceName(wan.local_interface || raw.wan_local_interface || 'veerlocal0', 'WAN local interface'),
       mtu: intValue(wan.mtu || raw.wan_mtu || raw.mru, 576, 65535, 1492),
       pppoe: {
         interface: optionalIfaceName(firstDefined(pppoe.interface, wan.pppoe_interface, raw.pppoe_interface, raw.interface, '')),
@@ -557,9 +557,9 @@ function effectiveWANInterface(cfg, wanStatus, pppoeLink) {
   if (cfg.wan.egress_interface) return cfg.wan.egress_interface;
   var wanData = wanStatus && wanStatus.data ? wanStatus.data : {};
   var linkData = pppoeLink && pppoeLink.data ? pppoeLink.data : {};
-  var forwardCore = wanData.forward_core || {};
-  return text(wanData.egress_nat_parent_interface || forwardCore.egress_nat_interface ||
-    wanData.forward_parent_interface || forwardCore.parent_interface ||
+  var veerCore = wanData.veer_core || {};
+  return text(wanData.egress_nat_parent_interface || veerCore.egress_nat_interface ||
+    wanData.veer_parent_interface || veerCore.parent_interface ||
     wanData.local_interface || linkData.local_interface || linkData.wan_interface || '');
 }
 

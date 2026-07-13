@@ -1,4 +1,4 @@
-module forward
+module github.com/Unicode01/veer
 
 go 1.25.12
 

@@ -30,7 +30,7 @@ import (
 	"testing"
 	"time"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 const (
@@ -1484,11 +1484,11 @@ func createWANCoreStatusForLANCoreEgressNAT(t *testing.T, dbPath string, topolog
 		"real_interface":              topology.UplinkHostIF,
 		"wan_interface":               topology.UplinkHostIF,
 		"vtap_interface":              topology.UplinkHostIF,
-		"forward_parent_interface":    topology.UplinkHostIF,
+		"veer_parent_interface":       topology.UplinkHostIF,
 		"egress_nat_parent_interface": topology.UplinkHostIF,
 		"ipv4":                        egressNATUplinkAddr,
 		"dns_servers":                 []string{"223.5.5.5", "2001:4860:4860::8888"},
-		"forward_core": map[string]any{
+		"veer_core": map[string]any{
 			"mode":              "integration",
 			"parent_interface":  topology.UplinkHostIF,
 			"ingress_interface": topology.UplinkHostIF,
@@ -1558,34 +1558,6 @@ func applyLANCoreEgressNATProfileResolvingWANRef(t *testing.T, apiBase string, t
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("apply lan_core wan-ref egress nat profile unexpected status %d: %s", resp.StatusCode, string(body))
-	}
-}
-
-func createPluginResourceRecordForEgressNATIntegration(t *testing.T, apiBase string, pluginID string, resourceID string, key string, data map[string]any) {
-	t.Helper()
-
-	payload, err := json.Marshal(map[string]any{
-		"key":     key,
-		"data":    data,
-		"enabled": true,
-	})
-	if err != nil {
-		t.Fatalf("marshal plugin resource record %s/%s/%s: %v", pluginID, resourceID, key, err)
-	}
-	req, err := http.NewRequest(http.MethodPost, apiBase+"/api/plugins/"+pluginID+"/resources/"+resourceID, bytes.NewReader(payload))
-	if err != nil {
-		t.Fatalf("build plugin resource record request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+egressNATTestToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("create plugin resource record %s/%s/%s: %v", pluginID, resourceID, key, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create plugin resource record %s/%s/%s unexpected status %d: %s", pluginID, resourceID, key, resp.StatusCode, string(body))
 	}
 }
 

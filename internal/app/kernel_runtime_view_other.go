@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"forward/internal/kernelcap"
+	"github.com/Unicode01/veer/internal/kernelcap"
 )
 
 func snapshotKernelRuntimeEngines(rt kernelRuleRuntime) []KernelEngineRuntimeView {

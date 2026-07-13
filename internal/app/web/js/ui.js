@@ -1,10 +1,13 @@
 (function () {
-  const app = window.ForwardApp;
+  const app = window.VeerApp;
   if (!app) return;
 
   app.storageKeys = Object.assign({
-    activeTab: 'forward_active_tab'
+    activeTab: 'veer_active_tab'
   }, app.storageKeys || {});
+  app.legacyStorageKeys = Object.assign({
+    activeTab: 'forward_active_tab'
+  }, app.legacyStorageKeys || {});
 
   Object.assign(app.el, {
     toastStack: app.$('toastStack'),
@@ -92,7 +95,12 @@
     egressNATStatsPagination: app.$('egressNATStatsPagination')
   });
 
-  app.state.activeTab = app.state.activeTab || localStorage.getItem(app.storageKeys.activeTab) || 'rules';
+  let storedActiveTab = localStorage.getItem(app.storageKeys.activeTab);
+  if (storedActiveTab === null) {
+    storedActiveTab = localStorage.getItem(app.legacyStorageKeys.activeTab);
+    if (storedActiveTab !== null) localStorage.setItem(app.storageKeys.activeTab, storedActiveTab);
+  }
+  app.state.activeTab = app.state.activeTab || storedActiveTab || 'rules';
   if (app.state.activeTab === 'workers' || app.state.activeTab === 'rule-stats') {
     app.state.activeTab = 'diagnostics';
   }
@@ -701,7 +709,10 @@
 
     app.state.activeTab = tabId;
     app.updateOverviewVisibility(tabId);
-    if (opts.persist !== false) localStorage.setItem(app.storageKeys.activeTab, tabId);
+    if (opts.persist !== false) {
+      localStorage.setItem(app.storageKeys.activeTab, tabId);
+      localStorage.setItem(app.legacyStorageKeys.activeTab, tabId);
+    }
     if (opts.focus) nextTab.focus();
     app.closeDropdowns();
     if (!opts.skipLoad) app.handleTabLoad(tabId);

@@ -4,7 +4,7 @@ import (
 	"net"
 	"net/netip"
 
-	"forward/internal/netutil"
+	"github.com/Unicode01/veer/internal/netutil"
 )
 
 const (

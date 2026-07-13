@@ -11,7 +11,7 @@
     .lan-hero {
       padding: 11px 12px;
     }
-    .lan-hero .fwd-toolbar {
+    .lan-hero .veer-toolbar {
       align-items: flex-start;
     }
     .lan-title-row {
@@ -45,16 +45,16 @@
     .lan-form-section {
       min-width: 0;
       padding: 10px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 9px;
-      background: color-mix(in srgb, var(--fwd-surface-soft) 72%, transparent);
+      background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
     }
     .lan-form-section > * + * {
       margin-top: 10px;
     }
     .lan-section-title {
       margin: 0;
-      color: var(--fwd-text);
+      color: var(--veer-text);
       font-size: 13px;
       line-height: 1.25;
       font-weight: 760;
@@ -71,7 +71,7 @@
       justify-content: space-between;
       gap: 8px;
       min-width: 0;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 650;
     }
@@ -87,10 +87,10 @@
       flex: 0 0 auto;
       width: 16px;
       height: 16px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 999px;
-      color: var(--fwd-soft);
-      background: var(--fwd-surface);
+      color: var(--veer-soft);
+      background: var(--veer-surface);
       font-size: 10px;
       font-weight: 800;
       cursor: help;
@@ -98,16 +98,16 @@
     .lan-check-field {
       min-height: 31px;
       padding: 5px 8px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 8px;
-      background: var(--fwd-surface);
+      background: var(--veer-surface);
     }
     .lan-check-field label {
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    .lan-check-field .fwd-input[type="checkbox"] {
+    .lan-check-field .veer-input[type="checkbox"] {
       flex: 0 0 auto;
     }
     .lan-protocols {
@@ -116,29 +116,29 @@
       gap: 10px;
       min-height: 31px;
       padding: 5px 8px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 8px;
-      background: var(--fwd-surface);
+      background: var(--veer-surface);
     }
     .lan-protocols label {
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 650;
     }
-    .lan-protocols .fwd-input[type="checkbox"] {
+    .lan-protocols .veer-input[type="checkbox"] {
       width: 30px;
       min-width: 30px;
       height: 18px;
       min-height: 18px;
     }
-    .lan-protocols .fwd-input[type="checkbox"]::before {
+    .lan-protocols .veer-input[type="checkbox"]::before {
       width: 12px;
       height: 12px;
     }
-    .lan-protocols .fwd-input[type="checkbox"]:checked::before {
+    .lan-protocols .veer-input[type="checkbox"]:checked::before {
       transform: translateX(12px);
     }
     .lan-effective-list { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
@@ -150,13 +150,13 @@
     }
     .lan-effective-label {
       padding-top: 3px;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 650;
     }
     .lan-runtime-note {
       margin: 0;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       line-height: 1.45;
       overflow-wrap: anywhere;
@@ -195,7 +195,7 @@
       .lan-service-section .lan-form-grid {
         grid-template-columns: 1fr;
       }
-      .lan-actions .fwd-button {
+      .lan-actions .veer-button {
         flex: 1 1 auto;
       }
     }
@@ -204,9 +204,9 @@
 <body>
   <script>
     (function () {
-      const F = window.ForwardPluginHost;
+      const F = window.VeerPluginHost;
       if (!F) {
-        document.body.textContent = 'ForwardPluginHost is not available.';
+        document.body.textContent = 'VeerPluginHost is not available.';
         return;
       }
 
@@ -269,7 +269,7 @@
           'field.egress': '出口接口',
           'field.sourceIP': '源 IP',
           'field.redirect': 'Redirect Mode',
-          'hint.bridge': 'Forward core 可见的 Linux bridge，例如 br-lan。',
+          'hint.bridge': 'Veer Core 可见的 Linux bridge，例如 br-lan。',
           'hint.ports': '需要由插件加入 Bridge 的接口，逗号分隔。状态区会另外显示 Bridge 的全部实际成员。',
           'hint.addresses': '逗号分隔的 bridge 地址。',
           'hint.autoNat': '只在 WAN 出口可解析时启用生成的出站 NAT 配置。',
@@ -402,7 +402,7 @@
           'field.egress': 'Egress Interface',
           'field.sourceIP': 'Source IP',
           'field.redirect': 'Redirect Mode',
-          'hint.bridge': 'Linux bridge visible to Forward core, e.g. br-lan.',
+          'hint.bridge': 'Linux bridge visible to Veer Core, e.g. br-lan.',
           'hint.ports': 'Comma-separated interfaces that this plugin should attach. Runtime status separately shows every actual bridge member.',
           'hint.addresses': 'Comma-separated bridge addresses.',
           'hint.autoNat': 'Enable generated outbound NAT only when WAN egress is known.',
@@ -570,7 +570,7 @@
       const ports = input('', 'eth1, eth2, eth3');
       const addresses = input('192.168.100.1/24', '192.168.100.1/24, fd00:100::1/64');
       const mtu = input('1500', 'mtu', 'number');
-      const wanEgress = input('', 'eth0 / pppoe-wan / fwdvtap0');
+      const wanEgress = input('', 'eth0 / pppoe-wan / veervtap0');
       const wanSource = input('', 'optional WAN source IP');
       const redirectMode = input('', 'blank / prepared_l2');
       const natType = select([['symmetric', 'value.symmetric'], ['full_cone', 'value.fullCone']]);

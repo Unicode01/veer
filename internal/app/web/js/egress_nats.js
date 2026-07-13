@@ -1,5 +1,5 @@
-﻿(function () {
-  const app = window.ForwardApp;
+(function () {
+  const app = window.VeerApp;
   if (!app) return;
 
   function sortInterfacesByName(items) {

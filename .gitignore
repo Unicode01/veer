@@ -12,6 +12,11 @@ forward.db-wal
 /forward.exe
 forward-linux-amd64
 forward-linux-arm64
+/veer
+/veer.exe
+veer-linux-amd64
+veer-linux-arm64
+veer-plugins.tar.gz
 *.test
 internal/app/ebpf/*.o
 plugins/**/*.o
