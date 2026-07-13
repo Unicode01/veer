@@ -27,6 +27,45 @@ find_python() {
 	exit 1
 }
 
+normalize_package_output_dir() {
+	"$PYTHON_BIN" - "$ROOT_DIR" "$1" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+dist = (root / "dist").resolve()
+raw = pathlib.Path(sys.argv[2])
+output = (raw if raw.is_absolute() else pathlib.Path.cwd() / raw).resolve()
+
+try:
+    dist.relative_to(root)
+except ValueError:
+    raise SystemExit(f"refusing dist directory outside project root: {dist}")
+try:
+    output.relative_to(dist)
+except ValueError:
+    raise SystemExit(f"plugin package output must stay under {dist}: {output}")
+if output == dist:
+    raise SystemExit(f"refusing to replace the dist root: {output}")
+
+print(output.as_posix())
+PY
+}
+
+safe_remove_package_path() {
+	path=${1:-}
+	[ -n "$path" ] || return 0
+	case "$path" in
+		"$PACKAGE_DIST_DIR"/*)
+			rm -rf -- "$path"
+			;;
+		*)
+			echo "refusing cleanup outside package dist directory: $path" >&2
+			exit 1
+			;;
+	esac
+}
+
 write_plugin_list() {
 	out_file=$1
 	"$PYTHON_BIN" - "$PLUGIN_SOURCE_DIR" "$PACKAGE_STABILITY" >"$out_file" <<'PY'
@@ -61,20 +100,16 @@ PY
 	fi
 }
 
-case "$OUT_DIR" in
-	""|"/"|"$ROOT_DIR"|"$ROOT_DIR/"|"$PLUGIN_SOURCE_DIR"|"$PLUGIN_SOURCE_DIR/")
-		echo "refusing unsafe output directory: $OUT_DIR" >&2
-		exit 1
-		;;
-esac
+PYTHON_BIN=$(find_python)
+PACKAGE_DIST_DIR=$("$PYTHON_BIN" -c 'import pathlib, sys; print((pathlib.Path(sys.argv[1]).resolve() / "dist").resolve().as_posix())' "$ROOT_DIR")
+OUT_DIR=$(normalize_package_output_dir "$OUT_DIR")
 
 mkdir -p "$(dirname "$OUT_DIR")"
 
 if [ "${VEER_PLUGIN_PACKAGE_SKIP_BUILD:-0}" != "1" ]; then
-	PYTHON_BIN=$(find_python)
 	PLUGIN_LIST="${OUT_DIR}.plugins.$$"
 	rm -f "$PLUGIN_LIST"
-	trap 'rm -rf "$TMP_DIR" "$PLUGIN_LIST"' EXIT INT TERM
+	trap 'safe_remove_package_path "$TMP_DIR"; rm -f -- "$PLUGIN_LIST"' EXIT INT TERM
 	write_plugin_list "$PLUGIN_LIST"
 	while IFS= read -r plugin_name; do
 		[ -n "$plugin_name" ] || continue
@@ -85,15 +120,13 @@ if [ "${VEER_PLUGIN_PACKAGE_SKIP_BUILD:-0}" != "1" ]; then
 			(cd "$plugin_dir" && sh ./build.sh)
 		fi
 	done <"$PLUGIN_LIST"
-else
-	PYTHON_BIN=$(find_python)
 fi
 
 TMP_DIR="${OUT_DIR}.tmp.$$"
-rm -rf "$TMP_DIR"
+safe_remove_package_path "$TMP_DIR"
 PLUGIN_LIST="${OUT_DIR}.plugins.$$"
 rm -f "$PLUGIN_LIST"
-trap 'rm -rf "$TMP_DIR" "$PLUGIN_LIST"' EXIT INT TERM
+trap 'safe_remove_package_path "$TMP_DIR"; rm -f -- "$PLUGIN_LIST"' EXIT INT TERM
 mkdir -p "$TMP_DIR"
 
 write_plugin_list "$PLUGIN_LIST"
@@ -153,6 +186,11 @@ import sys
 
 root = pathlib.Path(sys.argv[1]).resolve()
 
+for path in sorted(root.rglob("*")):
+    if path.is_symlink():
+        raise SystemExit(f"plugin package cannot contain symlinks: {path}")
+    path.chmod(0o755 if path.is_dir() else 0o644)
+
 for manifest_path in sorted(root.glob("*/plugin.json")):
     plugin_dir = manifest_path.parent.resolve()
     with manifest_path.open("r", encoding="utf-8") as fh:
@@ -181,7 +219,7 @@ PY
 
 VEER_PLUGIN_SOURCE_DIR="$TMP_DIR" sh "$ROOT_DIR/scripts/verify-plugin-manifests.sh" >/dev/null
 
-rm -rf "$OUT_DIR"
+safe_remove_package_path "$OUT_DIR"
 mv "$TMP_DIR" "$OUT_DIR"
 trap - EXIT INT TERM
 rm -f "$PLUGIN_LIST"
