@@ -183,6 +183,96 @@ require_python3() {
     command -v python3 >/dev/null 2>&1 || fail "deploy.sh 需要 python3 来读写 config.json"
 }
 
+secure_private_file() {
+    local path="$1"
+    if [[ -L "${path}" ]]; then
+        fail "敏感文件不能是符号链接: ${path}"
+    fi
+    if [[ ! -e "${path}" ]]; then
+        return
+    fi
+    if [[ ! -f "${path}" ]]; then
+        fail "敏感路径不是普通文件: ${path}"
+    fi
+    chown root:root "${path}"
+    chmod 600 "${path}"
+}
+
+secure_runtime_secret_files() {
+    secure_private_file "${INSTALL_DIR}/config.json"
+    secure_private_file "${CONFIG_BACKUP_PATH}"
+    secure_private_file "${INSTALL_DIR}/forward.db"
+    secure_private_file "${INSTALL_DIR}/forward.db-wal"
+    secure_private_file "${INSTALL_DIR}/forward.db-shm"
+}
+
+validate_deploy_paths() {
+    python3 - "${INSTALL_DIR}" "${BPF_STATE_DIR}" "${RUNTIME_STATE_DIR}" <<'PY'
+import os
+import re
+import sys
+
+safe_path = re.compile(r"^/[A-Za-z0-9._/+:-]+$")
+critical = {
+    "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
+    "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys",
+    "/tmp", "/usr", "/var", "/var/tmp",
+}
+
+for label, value in zip(("INSTALL_DIR", "VEER_BPF_STATE_DIR", "VEER_RUNTIME_STATE_DIR"), sys.argv[1:]):
+    if not safe_path.fullmatch(value) or value.startswith("//") or os.path.normpath(value) != value:
+        raise SystemExit(f"{label} must be a normalized absolute path without whitespace or control characters: {value!r}")
+    if value in critical:
+        raise SystemExit(f"refusing system directory for {label}: {value}")
+    if os.path.islink(value):
+        raise SystemExit(f"{label} cannot be a symbolic link: {value}")
+    if os.path.exists(value) and not os.path.isdir(value):
+        raise SystemExit(f"{label} is not a directory: {value}")
+    resolved = os.path.realpath(value)
+    if resolved in critical:
+        raise SystemExit(f"refusing {label} resolving to system directory: {value} -> {resolved}")
+PY
+}
+
+safe_remove_install_path() {
+    local path="${1:-}"
+    [[ -n "${path}" ]] || return 0
+    case "${path}" in
+        "${INSTALL_DIR}"/*)
+            rm -rf -- "${path}"
+            ;;
+        *)
+            fail "拒绝清理安装目录之外的路径: ${path}"
+            ;;
+    esac
+}
+
+validate_plugin_install_dir() {
+    python3 - "${INSTALL_DIR}" "$1" <<'PY'
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]).absolute()
+target = pathlib.Path(sys.argv[2]).absolute()
+real_root = pathlib.Path(os.path.realpath(root))
+real_target = pathlib.Path(os.path.realpath(target))
+try:
+    relative = target.relative_to(root)
+    real_target.relative_to(real_root)
+except ValueError:
+    raise SystemExit(f"plugin install directory escapes INSTALL_DIR: {target}")
+if not relative.parts:
+    raise SystemExit("plugin install directory cannot equal INSTALL_DIR")
+
+current = root
+for part in relative.parts:
+    current /= part
+    if current.is_symlink():
+        raise SystemExit(f"plugin install path cannot contain symlinks: {current}")
+PY
+}
+
 validate_port() {
     local value="${1:-}"
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -322,7 +412,8 @@ prepare_legacy_installation() {
 
 backup_existing_installation() {
     if [[ -f "${INSTALL_DIR}/config.json" ]]; then
-        cp -f "${INSTALL_DIR}/config.json" "${CONFIG_BACKUP_PATH}"
+        rm -f "${CONFIG_BACKUP_PATH}"
+        install -m 600 "${INSTALL_DIR}/config.json" "${CONFIG_BACKUP_PATH}"
         CONFIG_BACKED_UP=true
     fi
     if [[ -f "${INSTALL_DIR}/veer" && ! -L "${INSTALL_DIR}/veer" ]]; then
@@ -355,14 +446,23 @@ configure_plugin_install_dir() {
             return
             ;;
     esac
+    if [[ ! "${configured}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
+        PLUGIN_INSTALL_DIR=""
+        warn "plugins_dir=${configured} 含有不安全字符，无法安装 bundled plugins"
+        return
+    fi
     PLUGIN_INSTALL_DIR="${INSTALL_DIR}/${configured%/}"
+    if ! validate_plugin_install_dir "${PLUGIN_INSTALL_DIR}"; then
+        PLUGIN_INSTALL_DIR=""
+        warn "plugins_dir=${configured} 未通过安装路径边界检查"
+    fi
 }
 
 restore_bundled_plugins() {
     if [[ "${PLUGIN_BUNDLE_APPLIED}" != "true" || -z "${PLUGIN_INSTALL_DIR}" ]]; then
         return
     fi
-    rm -rf "${PLUGIN_INSTALL_DIR}"
+    safe_remove_install_path "${PLUGIN_INSTALL_DIR}"
     if [[ "${PLUGIN_INSTALL_EXISTED}" == "true" && -d "${PLUGIN_BACKUP_DIR}" ]]; then
         mv "${PLUGIN_BACKUP_DIR}" "${PLUGIN_INSTALL_DIR}"
     fi
@@ -386,7 +486,7 @@ install_bundled_plugins() {
         return 1
     fi
 
-    rm -rf "${PLUGIN_STAGING_DIR}"
+    safe_remove_install_path "${PLUGIN_STAGING_DIR}"
     mkdir -p "${PLUGIN_STAGING_DIR}"
     if ! python3 - "${PLUGIN_BUNDLE_PATH}" "${PLUGIN_STAGING_DIR}" <<'PY'
 import json
@@ -398,13 +498,33 @@ archive_path = Path(sys.argv[1])
 target = Path(sys.argv[2])
 
 with tarfile.open(archive_path, "r:gz") as archive:
-    members = archive.getmembers()
-    for member in members:
+    members = []
+    seen = set()
+    total_size = 0
+    for member in archive:
+        members.append(member)
+        if len(members) > 4096:
+            raise SystemExit("plugin bundle contains too many entries")
         path = PurePosixPath(member.name)
         if path.is_absolute() or not path.parts or path.parts[0] != "plugins" or ".." in path.parts:
             raise SystemExit(f"unsafe plugin bundle path: {member.name}")
+        normalized = path.as_posix()
+        if normalized in seen:
+            raise SystemExit(f"duplicate plugin bundle path: {member.name}")
+        seen.add(normalized)
         if member.issym() or member.islnk() or member.isdev():
             raise SystemExit(f"unsupported plugin bundle entry: {member.name}")
+        if not member.isdir() and not member.isfile():
+            raise SystemExit(f"unsupported plugin bundle entry type: {member.name}")
+        if member.isfile():
+            if member.size < 0 or member.size > 64 * 1024 * 1024:
+                raise SystemExit(f"plugin bundle entry is too large: {member.name}")
+            total_size += member.size
+            if total_size > 256 * 1024 * 1024:
+                raise SystemExit("plugin bundle expands beyond 256 MiB")
+        member.mode = 0o755 if member.isdir() else 0o644
+        member.uid = member.gid = 0
+        member.uname = member.gname = "root"
     archive.extractall(target, members=members)
 
 plugin_root = target / "plugins"
@@ -428,14 +548,15 @@ if count == 0:
     raise SystemExit("plugin bundle contains no plugins")
 PY
     then
-        rm -rf "${PLUGIN_STAGING_DIR}"
+        safe_remove_install_path "${PLUGIN_STAGING_DIR}"
         return 1
     fi
 
-    rm -rf "${PLUGIN_BACKUP_DIR}"
+    safe_remove_install_path "${PLUGIN_BACKUP_DIR}"
     if [[ -d "${PLUGIN_INSTALL_DIR}" ]]; then
         cp -a "${PLUGIN_INSTALL_DIR}" "${PLUGIN_BACKUP_DIR}" || {
-            rm -rf "${PLUGIN_STAGING_DIR}" "${PLUGIN_BACKUP_DIR}"
+            safe_remove_install_path "${PLUGIN_STAGING_DIR}"
+            safe_remove_install_path "${PLUGIN_BACKUP_DIR}"
             return 1
         }
         PLUGIN_INSTALL_EXISTED=true
@@ -449,20 +570,22 @@ PY
         [[ -e "${source}" ]] || continue
         name="$(basename "${source}")"
         replacement="${PLUGIN_INSTALL_DIR}/.${name}.next.$$"
-        rm -rf "${replacement}"
+        safe_remove_install_path "${replacement}"
         cp -a "${source}" "${replacement}" || {
-            rm -rf "${PLUGIN_STAGING_DIR}" "${replacement}"
+            safe_remove_install_path "${PLUGIN_STAGING_DIR}"
+            safe_remove_install_path "${replacement}"
             restore_bundled_plugins
             return 1
         }
-        rm -rf "${PLUGIN_INSTALL_DIR:?}/${name}"
+        safe_remove_install_path "${PLUGIN_INSTALL_DIR:?}/${name}"
         mv "${replacement}" "${PLUGIN_INSTALL_DIR}/${name}" || {
-            rm -rf "${PLUGIN_STAGING_DIR}" "${replacement}"
+            safe_remove_install_path "${PLUGIN_STAGING_DIR}"
+            safe_remove_install_path "${replacement}"
             restore_bundled_plugins
             return 1
         }
     done
-    rm -rf "${PLUGIN_STAGING_DIR}"
+    safe_remove_install_path "${PLUGIN_STAGING_DIR}"
     ok "bundled plugins 已更新到 ${PLUGIN_INSTALL_DIR}"
 }
 
@@ -712,7 +835,8 @@ rollback_update() {
     fi
 
     if [[ "${CONFIG_BACKED_UP}" == "true" && -f "${CONFIG_BACKUP_PATH}" ]]; then
-        cp -f "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
+        rm -f "${INSTALL_DIR}/config.json"
+        install -m 600 "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
     fi
     restore_bundled_plugins
 
@@ -785,6 +909,7 @@ FILE_SIZE=$(du -h "$BINARY_PATH" | cut -f1)
 ok "找到二进制: $(basename "$BINARY_PATH") (${FILE_SIZE}) [${ARCH}]"
 
 require_python3
+validate_deploy_paths
 WEB_BIND="$(normalize_bind_value "$WEB_BIND")"
 WEB_UI_ENABLED="$(normalize_bool_json "$WEB_UI_ENABLED")" || fail "WEB_UI_ENABLED 仅支持 true/false/on/off/yes/no/1/0"
 validate_port "$WEB_PORT"
@@ -816,6 +941,7 @@ fi
 # ---------- 部署文件 ----------
 info "部署到 ${INSTALL_DIR}..."
 mkdir -p "$INSTALL_DIR"
+secure_runtime_secret_files
 
 if $HAS_EXISTING_INSTALL; then
     backup_existing_installation
@@ -827,18 +953,20 @@ if [[ ! -f "${INSTALL_DIR}/config.json" ]]; then
     log_explicit_config_overrides
     ok "配置文件已生成，并写入完整默认项"
 else
-    sync_config_file "${INSTALL_DIR}/config.json" "0.0.0.0"
+    sync_config_file "${INSTALL_DIR}/config.json" "127.0.0.1"
     eval "$(load_config_runtime_values "${INSTALL_DIR}/config.json")"
     log_explicit_config_overrides
     ok "配置文件已保留现有值，并补齐缺失默认项"
 fi
+secure_runtime_secret_files
 
 if [[ "${INSTALL_BUNDLED_PLUGINS}" == "1" ]]; then
     configure_plugin_install_dir
 fi
 if ! install_bundled_plugins; then
     if [[ "${CONFIG_BACKED_UP}" == "true" && -f "${CONFIG_BACKUP_PATH}" ]]; then
-        cp -f "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
+        rm -f "${INSTALL_DIR}/config.json"
+        install -m 600 "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
     fi
     fail "bundled plugin 安装失败，现有插件与配置已恢复"
 fi
@@ -880,6 +1008,7 @@ ExecStart=${INSTALL_DIR}/veer --config ${INSTALL_DIR}/config.json
 Restart=always
 RestartSec=3
 KillMode=process
+UMask=0077
 
 NoNewPrivileges=false
 ProtectSystem=strict

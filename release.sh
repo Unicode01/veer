@@ -37,9 +37,10 @@ run_with_retry() {
     while true; do
         if "$@"; then
             return 0
+        else
+            exit_code=$?
         fi
 
-        exit_code=$?
         if (( try >= attempts )); then
             fail "${description} 失败，已重试 ${attempts} 次 (exit=${exit_code})"
         fi

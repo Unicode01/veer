@@ -3,15 +3,17 @@ package app
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	udpCleanupInterval  = 30 * time.Second
-	udpNatIdleTimeout   = 120 * time.Second
-	tcpProxyBufferSize  = 128 * 1024
-	udpPacketBufferSize = 65535
-	udpSocketBufferSize = 4 * 1024 * 1024
+	udpCleanupInterval                  = 30 * time.Second
+	udpNatIdleTimeout                   = 120 * time.Second
+	tcpProxyBufferSize                  = 128 * 1024
+	udpPacketBufferSize                 = 65535
+	udpSocketBufferSize                 = 4 * 1024 * 1024
+	userspaceUDPNATMaxEntriesPerProcess = 1024
 
 	workerStatsActiveUpdateInterval = 1 * time.Second
 	workerStatsIdleUpdateInterval   = 5 * time.Second
@@ -30,7 +32,50 @@ var (
 			return new([udpPacketBufferSize]byte)
 		},
 	}
+	userspaceUDPNATBudget = udpNATEntryBudget{limit: userspaceUDPNATMaxEntriesPerProcess}
 )
+
+type udpNATEntryBudget struct {
+	active int64
+	limit  int64
+}
+
+func (b *udpNATEntryBudget) tryAcquire() bool {
+	if b == nil || b.limit <= 0 {
+		return false
+	}
+	for {
+		active := atomic.LoadInt64(&b.active)
+		if active >= b.limit {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&b.active, active, active+1) {
+			return true
+		}
+	}
+}
+
+func (b *udpNATEntryBudget) release() {
+	if b == nil {
+		return
+	}
+	for {
+		active := atomic.LoadInt64(&b.active)
+		if active <= 0 {
+			return
+		}
+		if atomic.CompareAndSwapInt64(&b.active, active, active-1) {
+			return
+		}
+	}
+}
+
+func (b *udpNATEntryBudget) activeEntries() int64 {
+	if b == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&b.active)
+}
 
 func getTCPProxyBuffer() []byte {
 	return tcpProxyBufferPool.Get().(*[tcpProxyBufferSize]byte)[:]

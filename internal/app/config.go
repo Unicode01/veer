@@ -43,6 +43,19 @@ type Config struct {
 }
 
 func loadConfig(path string) (*Config, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("config file must not be a symbolic link: %s", path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("config path is not a regular file: %s", path)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, fmt.Errorf("secure config permissions: %w", err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

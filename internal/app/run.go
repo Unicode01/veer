@@ -46,6 +46,8 @@ func computeBinaryHash() string {
 }
 
 func Main(buildNonce string) {
+	applySecureProcessUmask()
+
 	workerMode := flag.Bool("worker", false, "run in worker mode")
 	rangeWorkerMode := flag.Bool("range-worker", false, "run in range worker mode")
 	sharedProxyMode := flag.Bool("shared-proxy", false, "run as shared proxy")

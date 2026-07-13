@@ -832,26 +832,37 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 
 	natTable := make(map[string]*natEntry)
 	var mu sync.Mutex
-	removeEntryLocked := func(key string) {
+	removeEntryLocked := func(key string, expected *net.UDPConn) {
 		entry, ok := natTable[key]
 		if !ok {
+			return
+		}
+		if expected != nil && entry.conn != expected {
 			return
 		}
 		delete(natTable, key)
 		if st != nil {
 			atomic.AddInt64(&st.natTableSize, -1)
 		}
+		userspaceUDPNATBudget.release()
 		entry.conn.Close()
 	}
 	cleanupStaleEntries := func(now time.Time) {
 		mu.Lock()
 		for key, entry := range natTable {
 			if now.Sub(entry.lastActive) > udpNatIdleTimeout {
-				removeEntryLocked(key)
+				removeEntryLocked(key, entry.conn)
 			}
 		}
 		mu.Unlock()
 	}
+	defer func() {
+		mu.Lock()
+		for key, entry := range natTable {
+			removeEntryLocked(key, entry.conn)
+		}
+		mu.Unlock()
+	}()
 
 	nextCleanup := time.Now().Add(udpCleanupInterval)
 	if err := pc.SetReadDeadline(nextCleanup); err != nil {
@@ -900,6 +911,12 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 		mu.Unlock()
 
 		if !exists {
+			if !userspaceUDPNATBudget.tryAcquire() {
+				if st != nil {
+					atomic.AddInt64(&st.rejectedConns, 1)
+				}
+				continue
+			}
 			var outConn *net.UDPConn
 			if rule.Transparent {
 				outConn, err = dialTransparentUDP(srcAddr.IP, rule.OutInterface, targetAddr)
@@ -907,6 +924,7 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 				outConn, err = dialOutboundUDP(targetAddr, rule.OutInterface, rule.OutSourceIP)
 			}
 			if err != nil {
+				userspaceUDPNATBudget.release()
 				if st != nil {
 					atomic.AddInt64(&st.rejectedConns, 1)
 				}
@@ -939,7 +957,7 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 						rn, err := out.Read(retBuf)
 						if err != nil {
 							mu.Lock()
-							removeEntryLocked(natKey)
+							removeEntryLocked(natKey, out)
 							mu.Unlock()
 							return
 						}
@@ -949,7 +967,7 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 						if _, err := writeUDPWithReplyInfo(pc, retBuf[:rn], src, reply); err != nil {
 							log.Printf("rule %d: udp reply write: %v", rule.ID, err)
 							mu.Lock()
-							removeEntryLocked(natKey)
+							removeEntryLocked(natKey, out)
 							mu.Unlock()
 							return
 						}
@@ -961,6 +979,7 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 					}
 				}(srcAddr, replyInfo, outConn, key)
 			} else {
+				userspaceUDPNATBudget.release()
 				outConn.Close()
 			}
 		}
@@ -971,7 +990,7 @@ func serveUDP(ctx context.Context, pc *net.UDPConn, rule *Rule, st *ruleStats) e
 			}
 			log.Printf("rule %d: udp backend write: %v", rule.ID, err)
 			mu.Lock()
-			removeEntryLocked(key)
+			removeEntryLocked(key, entry.conn)
 			mu.Unlock()
 		}
 	}
