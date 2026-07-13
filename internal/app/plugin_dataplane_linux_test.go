@@ -65,11 +65,11 @@ ui.register({static_dir: 'ui', entry: 'index.html'});
 `)
 
 	enabled := true
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              dir,
-	}
+		PluginsDir:              dir})
+
 	catalog := loadPluginCatalogWithControlRegistration(cfg)
 	rt := newPluginDataplaneRuntime(cfg)
 	defer rt.Close()
@@ -142,7 +142,7 @@ func TestPluginDataplaneStabilityGateAllowsLabByDefault(t *testing.T) {
 		Status: pluginStatusActive,
 	}
 
-	ok, reason := pluginDataplaneStabilityAllowed(plugin, &Config{})
+	ok, reason := pluginDataplaneStabilityAllowed(plugin, pluginsEnabledTestConfig(&Config{}))
 	if !ok || reason != "" {
 		t.Fatalf("pluginDataplaneStabilityAllowed(lab default) = %t/%q, want allowed", ok, reason)
 	}
@@ -160,7 +160,7 @@ func TestPluginDataplaneStabilityGateBlocksDeprecated(t *testing.T) {
 		Status: pluginStatusActive,
 	}
 
-	ok, reason := pluginDataplaneStabilityAllowed(plugin, &Config{})
+	ok, reason := pluginDataplaneStabilityAllowed(plugin, pluginsEnabledTestConfig(&Config{}))
 	if ok || !strings.Contains(reason, "deprecated") {
 		t.Fatalf("pluginDataplaneStabilityAllowed(deprecated) = %t/%q, want blocked", ok, reason)
 	}
@@ -196,7 +196,7 @@ func TestBuildDesiredPluginsReportsMissingInterfaceForAllowedLabPlugin(t *testin
 		}},
 		Status: pluginStatusActive,
 	}
-	rt := &linuxPluginDataplaneRuntime{cfg: &Config{}}
+	rt := &linuxPluginDataplaneRuntime{cfg: pluginsEnabledTestConfig(&Config{})}
 
 	desired, states := rt.buildDesiredPlugins(PluginCatalog{Plugins: []LoadedPlugin{plugin}})
 	if len(desired) != 0 {

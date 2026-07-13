@@ -198,6 +198,7 @@ done
 echo ""
 echo -e "${GREEN}构建完成。部署方法:${NC}"
 echo ""
-echo "  scp veer-linux-amd64 veer-plugins.tar.gz deploy.sh root@server:/tmp/"
+echo "  scp veer-linux-amd64 deploy.sh root@server:/tmp/"
 echo "  ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'"
+echo "  # 可选插件: 额外上传 veer-plugins.tar.gz，并设置 VEER_INSTALL_PLUGINS=1"
 echo ""

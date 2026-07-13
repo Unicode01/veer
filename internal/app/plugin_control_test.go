@@ -91,7 +91,7 @@ func TestPluginControlStabilityGateAllowsSafeLabControl(t *testing.T) {
 		},
 	}
 
-	ok, reason := pluginControlStabilityAllowed(plugin, &Config{})
+	ok, reason := pluginControlStabilityAllowed(plugin, pluginsEnabledTestConfig(&Config{}))
 	if !ok || reason != "" {
 		t.Fatalf("pluginControlStabilityAllowed(safe lab) = %t/%q, want allowed", ok, reason)
 	}
@@ -110,7 +110,7 @@ func TestPluginControlStabilityGateAllowsPrivilegedLabByDefault(t *testing.T) {
 		},
 	}
 
-	ok, reason := pluginControlStabilityAllowed(plugin, &Config{})
+	ok, reason := pluginControlStabilityAllowed(plugin, pluginsEnabledTestConfig(&Config{}))
 	if !ok || reason != "" {
 		t.Fatalf("pluginControlStabilityAllowed(privileged lab default) = %t/%q, want allowed", ok, reason)
 	}
@@ -129,7 +129,7 @@ func TestPluginControlStabilityGateBlocksDeprecated(t *testing.T) {
 		},
 	}
 
-	ok, reason := pluginControlStabilityAllowed(plugin, &Config{})
+	ok, reason := pluginControlStabilityAllowed(plugin, pluginsEnabledTestConfig(&Config{}))
 	if ok || reason == "" {
 		t.Fatalf("pluginControlStabilityAllowed(deprecated) = %t/%q, want blocked", ok, reason)
 	}
@@ -139,7 +139,7 @@ func TestPluginControlReconcileAllowsPrivilegedLabByDefault(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, &Config{}, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
 	controlPath := filepath.Join(t.TempDir(), "control.js")
 	if err := os.WriteFile(controlPath, []byte(""), 0o644); err != nil {
 		t.Fatalf("WriteFile(control.js) error = %v", err)
@@ -216,7 +216,7 @@ exports.onAction = function () {
 };
 `)
 	transport := &pluginControlUDPTestTransport{}
-	rt := newPluginControlRuntime(db, &Config{}, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
 	rt.udpTransport = transport
 	plugin := LoadedPlugin{
 		PluginManifest: PluginManifest{
@@ -267,7 +267,7 @@ exports.onAction = function () {
   });
 };
 `)
-	rt := newPluginControlRuntime(db, &Config{}, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
 	rt.udpTransport = &pluginControlUDPTestTransport{}
 	plugin := LoadedPlugin{
 		PluginManifest: PluginManifest{

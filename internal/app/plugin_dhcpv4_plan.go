@@ -152,7 +152,7 @@ func pluginDHCPv4PlanRecordToItem(record store.PluginRecord, usedIDs map[int64]s
 }
 
 func pluginDHCPv4PlansEnabled(cfg *Config) bool {
-	return cfg == nil || cfg.PluginsEnabled()
+	return cfg != nil && cfg.PluginsEnabled()
 }
 
 func activePluginDHCPv4PlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]struct{} {

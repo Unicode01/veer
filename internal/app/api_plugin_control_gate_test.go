@@ -14,12 +14,12 @@ func TestPluginResourceAPIAllowsPrivilegedLabRuntimeApplyByDefault(t *testing.T)
 
 	db := openTestDB(t)
 	applyRuntime := &pluginRuntimeApplyTestRuntime{}
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		WebBind:    "127.0.0.1",
 		WebPort:    8080,
 		WebToken:   "test-token",
-		PluginsDir: dir,
-	}
+		PluginsDir: dir})
+
 	pm := &ProcessManager{cfg: cfg, kernelRuntime: applyRuntime}
 	handler := buildAPIHandler(cfg, db, pm)
 
@@ -44,12 +44,12 @@ func TestPluginActionAPIAllowsPrivilegedLabRuntimeApplyByDefault(t *testing.T) {
 
 	db := openTestDB(t)
 	applyRuntime := &pluginRuntimeApplyTestRuntime{}
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		WebBind:    "127.0.0.1",
 		WebPort:    8080,
 		WebToken:   "test-token",
-		PluginsDir: dir,
-	}
+		PluginsDir: dir})
+
 	pm := &ProcessManager{cfg: cfg, kernelRuntime: applyRuntime}
 	handler := buildAPIHandler(cfg, db, pm)
 
@@ -99,17 +99,17 @@ func TestPluginCatalogActiveEgressNATPlanAllowsLabByDefault(t *testing.T) {
 			Status:    pluginStatusActive,
 		},
 	}}
-	if !pluginCatalogHasActiveEgressNATPlansResource(catalog, &Config{}) {
+	if !pluginCatalogHasActiveEgressNATPlansResource(catalog, pluginsEnabledTestConfig(&Config{})) {
 		t.Fatal("pluginCatalogHasActiveEgressNATPlansResource(default lab) = false, want true")
 	}
 
 	catalog.Plugins[0].Stability = pluginStabilityStable
-	if !pluginCatalogHasActiveEgressNATPlansResource(catalog, &Config{}) {
+	if !pluginCatalogHasActiveEgressNATPlansResource(catalog, pluginsEnabledTestConfig(&Config{})) {
 		t.Fatal("pluginCatalogHasActiveEgressNATPlansResource(stable) = false, want true")
 	}
 
 	catalog.Plugins[0].Status = pluginStatusError
-	if pluginCatalogHasActiveEgressNATPlansResource(catalog, &Config{}) {
+	if pluginCatalogHasActiveEgressNATPlansResource(catalog, pluginsEnabledTestConfig(&Config{})) {
 		t.Fatal("pluginCatalogHasActiveEgressNATPlansResource(inactive stable) = true, want false")
 	}
 }
@@ -131,7 +131,7 @@ func TestPluginReconcileHandlesLabEgressNATPlanByDefault(t *testing.T) {
 }`)
 	pm := &ProcessManager{
 		db:  openTestDB(t),
-		cfg: &Config{PluginsDir: dir},
+		cfg: pluginsEnabledTestConfig(&Config{PluginsDir: dir}),
 	}
 
 	defer func() {

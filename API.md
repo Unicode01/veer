@@ -258,7 +258,7 @@ Content-Type: application/json
 
 ```json
 {
-  "external_plugins_enabled": true,
+  "external_plugins_enabled": false,
   "directory": "plugins",
   "runtime": {
     "builtin_pipeline_id": "veer",
@@ -306,10 +306,10 @@ Content-Type: application/json
 
 字段说明：
 
-- `enabled`: 插件级开关状态。内置 `veer_core` 固定为 `true`，外部插件默认 `true`
+- `enabled`: 插件级开关状态。内置 `veer_core` 固定为 `true`；只有全局 `plugins_enabled=true` 后才会发现外部插件，已发现外部插件的插件级状态默认 `true`
 - `status`: `builtin` / `active` / `disabled` / `error`
 - `stability`: 插件稳定性等级；`lab` 只适合实验/示例，`preview` 适合受控环境试用，`stable` 表示预期生产可用，`deprecated` 表示不建议新部署。未声明时默认为 `lab`
-- `runtime`: 插件运行时状态；内置 `veer_core` 为 `mode=builtin` 且已挂载。禁用外部插件时为 `mode=disabled`，不会暴露 resource/action/UI/assets/hook/object surface，也不会保留 Goja VM、timer 或 worker。默认配置下外部插件为 `mode=registered`，表示 slim manifest 已发现且 `control.js` runtime surface 已注册/校验，但未进入外部数据面；启用 `plugins_dataplane_enabled=true` 且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
+- `runtime`: 插件运行时状态；内置 `veer_core` 为 `mode=builtin` 且已挂载。全局默认 `plugins_enabled=false`，此时不会扫描外部插件，也不会暴露 resource/action/UI/assets/hook/object surface 或保留 Goja VM、timer、worker。手动启用外部插件但保持 `plugins_dataplane_enabled=false` 时，外部插件为 `mode=registered`；再启用插件数据面且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
 - `runtime.core_priority`: 内置 `Veer Core` 的排序锚点，当前固定为 `1000`
 - `runtime.stability_levels`: 当前服务接受的插件稳定性枚举
 - `runtime.external_dataplane_attach`: 是否允许外部数据面插件。默认 `false`；为 `true` 时当前支持 TC `stage=forward/reply` hook 按 priority 进入内置 `veer` pipeline。没有实际可链入插件时，TC 热路径仍保持 legacy/dispatch，不额外进入 pipeline wrapper
@@ -739,8 +739,8 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 - 默认外部插件目录为 `plugins`
 - 外部插件目录缺失不会报错
-- `plugins_enabled = false` 只关闭外部插件扫描，不隐藏内置 `veer_core`
-- `plugins_dataplane_enabled = false` 是默认值；设置为 `true` 后允许外部 TC `stage=forward/reply` 插件按 priority 进入内置 `veer` pipeline
+- `plugins_enabled = false` 是默认值，只关闭外部插件扫描和运行，不隐藏内置 `veer_core`；必须手动设为 `true` 才会启动外部插件控制面
+- `plugins_dataplane_enabled = false` 是默认值；同时将 `plugins_enabled` 和该项设为 `true` 后，才允许外部 TC `stage=forward/reply` 插件按 priority 进入内置 `veer` pipeline
 - 外部插件可通过 `PUT /api/plugins/<id>/state` 热启用/禁用；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
 - 插件源目录每 2 秒扫描一次，变化只标记待更新；`POST /api/plugins/reload` 才会校验并应用候选快照。应用失败时旧 control VM、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
 - 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`

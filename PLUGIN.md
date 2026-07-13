@@ -1,6 +1,6 @@
 # Veer 插件开发指南
 
-仓库的 `plugins/` 目录存放随项目维护的运行时插件。Veer 默认扫描 `plugins/<plugin_id>/`，每个插件使用独立子目录。
+仓库的 `plugins/` 目录存放随项目维护的运行时插件。Veer 默认关闭外部插件；手动设置 `plugins_enabled=true` 后扫描 `plugins/<plugin_id>/`，每个插件使用独立子目录。
 
 ## 基本结构
 
@@ -280,7 +280,7 @@ F.onLocaleChange(function () {
 
 ## TC 数据面插件
 
-启用 `plugins_dataplane_enabled=true` 后，使用 `pipeline.attach()` 注册 TC `direction=forward` 或 `direction=reply` 的可信插件可以进入内置 `veer` pipeline。默认没有实际插件链时，不会给热路径增加额外 lookup。
+同时启用 `plugins_enabled=true` 和 `plugins_dataplane_enabled=true` 后，使用 `pipeline.attach()` 注册 TC `direction=forward` 或 `direction=reply` 的可信插件可以进入内置 `veer` pipeline。没有实际插件链时，不会给热路径增加额外 lookup。
 
 `veer` 是逻辑 pipeline，不是 Linux netdev。它的作用是把宿主 TC dispatcher、插件 eBPF 程序和内置 Veer Core 编排成一条 tail-call chain：
 
@@ -439,6 +439,8 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、读、�
 
 `release.sh` 和 `scripts/package-plugins.sh` 默认只把 stable 插件放入 `veer-plugins.tar.gz`。
 
+`bootstrap.sh` 和 `deploy.sh` 默认只安装 Veer 核心，不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会安装 bundled 插件；该开关只管理文件安装，插件运行和 TC 数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。
+
 ## 验收边界
 
 仓库保留可重复的代码测试、插件构建、manifest 校验和 PPPoE namespace 黑盒脚本；依赖具体运营商、测试机或测速环境的长稳与性能脚本仍按本地环境维护，不进入默认源码树。
@@ -455,4 +457,4 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、读、�
 - UI 永远通过 `VeerPluginHost` 访问资源和动作，不假设能拿到 Web Token。
 - 慢任务、重试、拨号状态机放 worker 或 timer，不阻塞主控制 VM。
 - 热路径能力只放 eBPF object 和 map，配置更新通过控制面批量写 map，避免包路径查询 SQLite 或 HTTP。
-- 默认发布包不包含 `lab` 插件。手动部署 lab 插件前必须审查 manifest 权限，并用插件启用状态控制其控制面；进入 TC 数据面还必须显式开启 `plugins_dataplane_enabled`。
+- 默认发布包不包含 `lab` 插件。手动部署 lab 插件前必须审查 manifest 权限，并显式开启全局 `plugins_enabled`，再用插件级状态控制其控制面；进入 TC 数据面还必须显式开启 `plugins_dataplane_enabled`。

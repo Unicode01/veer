@@ -66,13 +66,14 @@ usage() {
                         失败时保留临时目录，默认 1
   VEER_SKIP_DEPS       设为 1 时跳过系统依赖安装
   VEER_SKIP_GO         设为 1 时跳过 Go 安装检查
+  VEER_INSTALL_PLUGINS 设为 1 时安装 bundled stable 插件，默认 0
 
 兼容性:
   main 已发布的同名 FORWARD_* 变量仍可使用；同时设置时 VEER_* 优先。
   FORWARD_SKIP_APT 仍作为旧版 FORWARD_SKIP_DEPS 的兼容别名。
 
 部署阶段透传给 deploy.sh 的常用环境变量:
-  INSTALL_DIR WEB_PORT WEB_TOKEN VEER_BPF_STATE_DIR VEER_RUNTIME_STATE_DIR
+  INSTALL_DIR WEB_PORT WEB_TOKEN VEER_BPF_STATE_DIR VEER_RUNTIME_STATE_DIR VEER_INSTALL_PLUGINS
 
 示例:
   bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})
@@ -120,11 +121,20 @@ if [[ -z "${FORWARD_SKIP_DEPS}" ]]; then
     FORWARD_SKIP_DEPS="${FORWARD_SKIP_APT:-0}"
 fi
 FORWARD_SKIP_GO="${VEER_SKIP_GO:-${FORWARD_SKIP_GO:-0}}"
+FORWARD_INSTALL_PLUGINS="${VEER_INSTALL_PLUGINS:-0}"
 FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
 FORWARD_GO_ROOT="${FORWARD_WORKDIR}/go"
 FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH:-amd64}.tar.gz"
 
 DEPLOY_ARGS=("$@")
+
+case "${FORWARD_INSTALL_PLUGINS}" in
+    0|1)
+        ;;
+    *)
+        fail "VEER_INSTALL_PLUGINS 仅支持 0 或 1，当前值: ${FORWARD_INSTALL_PLUGINS}"
+        ;;
+esac
 
 set_step() {
     CURRENT_STEP="$1"
@@ -913,7 +923,7 @@ build_release() {
 
 run_deploy() {
     cd "${FORWARD_REPO_DIR}"
-    bash ./deploy.sh "${DEPLOY_ARGS[@]}"
+    VEER_INSTALL_PLUGINS="${FORWARD_INSTALL_PLUGINS}" bash ./deploy.sh "${DEPLOY_ARGS[@]}"
 }
 
 main() {

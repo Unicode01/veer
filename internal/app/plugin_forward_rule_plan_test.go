@@ -29,7 +29,7 @@ func TestPluginForwardRulePlanCompilesActivePluginRecord(t *testing.T) {
 	}`, true)
 
 	nextID := int64(1)
-	rules, warnings, err := loadPluginForwardRules(db, &Config{PluginsDir: pluginsDir}, nil, nil, nil, &nextID)
+	rules, warnings, err := loadPluginForwardRules(db, pluginsEnabledTestConfig(&Config{PluginsDir: pluginsDir}), nil, nil, nil, &nextID)
 	if err != nil {
 		t.Fatalf("loadPluginForwardRules() error = %v", err)
 	}
@@ -63,7 +63,7 @@ func TestPluginForwardRulePlanRequiresActivePluginAndNoConflict(t *testing.T) {
 
 	disabled := false
 	nextID := int64(1)
-	rules, warnings, err := loadPluginForwardRules(db, &Config{PluginsDir: pluginsDir, PluginsEnabledSetting: &disabled}, nil, nil, nil, &nextID)
+	rules, warnings, err := loadPluginForwardRules(db, pluginsEnabledTestConfig(&Config{PluginsDir: pluginsDir, PluginsEnabledSetting: &disabled}), nil, nil, nil, &nextID)
 	if err != nil {
 		t.Fatalf("loadPluginForwardRules(disabled plugins) error = %v", err)
 	}
@@ -76,7 +76,7 @@ func TestPluginForwardRulePlanRequiresActivePluginAndNoConflict(t *testing.T) {
 		t.Fatalf("SetPluginEnabled(false) error = %v", err)
 	}
 	nextID = 1
-	rules, warnings, err = loadPluginForwardRules(db, &Config{PluginsDir: pluginsDir, PluginsEnabledSetting: &enabled}, nil, nil, nil, &nextID)
+	rules, warnings, err = loadPluginForwardRules(db, pluginsEnabledTestConfig(&Config{PluginsDir: pluginsDir, PluginsEnabledSetting: &enabled}), nil, nil, nil, &nextID)
 	if err != nil {
 		t.Fatalf("loadPluginForwardRules(disabled plugin state) error = %v", err)
 	}
@@ -97,7 +97,7 @@ func TestPluginForwardRulePlanRequiresActivePluginAndNoConflict(t *testing.T) {
 		Enabled:  true,
 	}
 	nextID = 8
-	rules, warnings, err = loadPluginForwardRules(db, &Config{PluginsDir: pluginsDir}, []Rule{explicit}, nil, nil, &nextID)
+	rules, warnings, err = loadPluginForwardRules(db, pluginsEnabledTestConfig(&Config{PluginsDir: pluginsDir}), []Rule{explicit}, nil, nil, &nextID)
 	if err != nil {
 		t.Fatalf("loadPluginForwardRules(conflict) error = %v", err)
 	}
@@ -132,10 +132,11 @@ func TestPluginForwardRulePlanRedistributesToKernelRuntime(t *testing.T) {
 	}`, true)
 
 	kernelRuntime := &pluginRuntimeApplyTestRuntime{kernelSupported: true}
-	pm := newPluginForwardRulePlanProcessManagerForTest(db, &Config{
+	pm := newPluginForwardRulePlanProcessManagerForTest(db, pluginsEnabledTestConfig(&Config{
 		PluginsDir:    pluginsDir,
-		DefaultEngine: ruleEngineKernel,
-	}, kernelRuntime)
+		DefaultEngine: ruleEngineKernel}),
+
+		kernelRuntime)
 
 	if err := applyPluginResourceRuntimeUpdate(db, pm, plugin, resource); err != nil {
 		t.Fatalf("applyPluginResourceRuntimeUpdate(forward_rule_plans) error = %v", err)
@@ -175,10 +176,10 @@ func TestPluginForwardRulePlanAppearsInEffectiveRuleAPIs(t *testing.T) {
 	  "engine_preference": "kernel"
 	}`, true)
 
-	cfg := &Config{
+	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsDir:    pluginsDir,
-		DefaultEngine: ruleEngineKernel,
-	}
+		DefaultEngine: ruleEngineKernel})
+
 	kernelRuntime := &pluginRuntimeApplyTestRuntime{kernelSupported: true}
 	pm := newPluginForwardRulePlanProcessManagerForTest(db, cfg, kernelRuntime)
 	pm.redistributeWorkers()

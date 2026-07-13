@@ -292,7 +292,7 @@ type LoadedPlugin struct {
 
 func loadPluginCatalog(cfg *Config) PluginCatalog {
 	pluginsDir := defaultPluginsDir
-	externalEnabled := true
+	externalEnabled := false
 	if cfg != nil {
 		pluginsDir = normalizePluginsDir(cfg.PluginsDir)
 		externalEnabled = cfg.PluginsEnabled()

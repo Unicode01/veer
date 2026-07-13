@@ -2,9 +2,11 @@
 #
 # Veer - Linux 部署脚本
 #
-# 用法: 将 veer-linux-<arch>、veer-plugins.tar.gz 与本脚本放在同一目录，然后:
+# 用法: 将 veer-linux-<arch> 与本脚本放在同一目录，然后:
 #   chmod +x deploy.sh && sudo ./deploy.sh
 #   chmod +x deploy.sh && sudo ./deploy.sh --no-inherit-stats
+# 如需安装 bundled stable 插件，再放入 veer-plugins.tar.gz 并设置:
+#   sudo env VEER_INSTALL_PLUGINS=1 ./deploy.sh
 #
 # 脚本会自动匹配当前系统架构查找二进制文件:
 #   x86_64  => veer-linux-amd64
@@ -45,6 +47,7 @@ usage() {
   READY_TIMEOUT_SECONDS  /readyz 就绪检查等待秒数，默认 120
   VEER_BPF_STATE_DIR      bpffs 状态目录，默认 /sys/fs/bpf/forward
   VEER_RUNTIME_STATE_DIR 热重启状态目录，默认 <INSTALL_DIR>/.kernel-state
+  VEER_INSTALL_PLUGINS   设为 1 时安装 bundled stable 插件，默认 0
   VEER_PLUGIN_BUNDLE_PATH bundled plugin 包路径，默认与 deploy.sh 同目录的 veer-plugins.tar.gz
 
 兼容性:
@@ -108,6 +111,7 @@ BINARY_BACKUP_PATH="${INSTALL_DIR}/veer.rollback"
 SERVICE_BACKUP_PATH="${SERVICE_FILE}.rollback"
 LEGACY_SERVICE_BACKUP_PATH="${LEGACY_SERVICE_FILE}.rollback"
 PLUGIN_BUNDLE_PATH="${VEER_PLUGIN_BUNDLE_PATH:-${SCRIPT_DIR}/veer-plugins.tar.gz}"
+INSTALL_BUNDLED_PLUGINS="${VEER_INSTALL_PLUGINS:-0}"
 PLUGIN_STAGING_DIR="${INSTALL_DIR}/.plugins.next.$$"
 PLUGIN_BACKUP_DIR="${INSTALL_DIR}/.plugins.rollback"
 PLUGIN_INSTALL_DIR=""
@@ -124,6 +128,14 @@ SERVICE_BACKED_UP=false
 LEGACY_SERVICE_BACKED_UP=false
 PLUGIN_BUNDLE_APPLIED=false
 PLUGIN_INSTALL_EXISTED=false
+
+case "${INSTALL_BUNDLED_PLUGINS}" in
+    0|1)
+        ;;
+    *)
+        fail "VEER_INSTALL_PLUGINS 仅支持 0 或 1，当前值: ${INSTALL_BUNDLED_PLUGINS}"
+        ;;
+esac
 
 cleanup_hot_restart_marker() {
     if [[ "${PRESERVE_HOT_RESTART_MARKERS_ON_EXIT}" == "1" ]]; then
@@ -339,9 +351,7 @@ configure_plugin_install_dir() {
     case "${configured}" in
         ""|.|/*|..|../*|*/..|*/../*)
             PLUGIN_INSTALL_DIR=""
-            if [[ -f "${PLUGIN_BUNDLE_PATH}" ]]; then
-                warn "plugins_dir=${configured:-<empty>} 不在安装目录内，跳过 bundled plugin 自动更新"
-            fi
+            warn "plugins_dir=${configured:-<empty>} 不在安装目录内，无法安装 bundled plugins"
             return
             ;;
     esac
@@ -364,12 +374,16 @@ install_bundled_plugins() {
     local name=""
     local replacement=""
 
-    if [[ ! -f "${PLUGIN_BUNDLE_PATH}" ]]; then
-        info "未携带 veer-plugins.tar.gz，保留现有插件目录"
+    if [[ "${INSTALL_BUNDLED_PLUGINS}" != "1" ]]; then
+        info "默认不安装 bundled plugins，现有插件目录保持不变"
         return
     fi
+    if [[ ! -f "${PLUGIN_BUNDLE_PATH}" ]]; then
+        warn "VEER_INSTALL_PLUGINS=1，但未找到插件包: ${PLUGIN_BUNDLE_PATH}"
+        return 1
+    fi
     if [[ -z "${PLUGIN_INSTALL_DIR}" ]]; then
-        return
+        return 1
     fi
 
     rm -rf "${PLUGIN_STAGING_DIR}"
@@ -587,6 +601,9 @@ hardcoded_defaults = OrderedDict([
     ("max_workers", 0),
     ("drain_timeout_hours", 24),
     ("managed_network_auto_repair", True),
+    ("plugins_enabled", False),
+    ("plugins_dataplane_enabled", False),
+    ("plugins_dir", "plugins"),
     ("default_engine", "auto"),
     ("kernel_engine_order", ["tc"]),
     ("kernel_rules_map_limit", 0),
@@ -816,7 +833,9 @@ else
     ok "配置文件已保留现有值，并补齐缺失默认项"
 fi
 
-configure_plugin_install_dir
+if [[ "${INSTALL_BUNDLED_PLUGINS}" == "1" ]]; then
+    configure_plugin_install_dir
+fi
 if ! install_bundled_plugins; then
     if [[ "${CONFIG_BACKED_UP}" == "true" && -f "${CONFIG_BACKUP_PATH}" ]]; then
         cp -f "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"

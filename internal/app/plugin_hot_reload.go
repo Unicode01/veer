@@ -33,7 +33,7 @@ const (
 )
 
 func buildPluginCatalogFingerprint(cfg *Config) (string, error) {
-	if cfg != nil && !cfg.PluginsEnabled() {
+	if cfg == nil || !cfg.PluginsEnabled() {
 		return "plugins-disabled", nil
 	}
 	root := normalizePluginsDir("")
@@ -149,6 +149,9 @@ func buildPluginDirectoryFingerprint(root string) (string, error) {
 }
 
 func snapshotPluginCatalogDirectory(cfg *Config) (string, string, error) {
+	if cfg == nil || !cfg.PluginsEnabled() {
+		return "", "plugins-disabled", nil
+	}
 	var lastErr error
 	for attempt := 0; attempt < pluginCatalogSnapshotAttempts; attempt++ {
 		before, err := buildPluginCatalogFingerprint(cfg)
@@ -159,15 +162,10 @@ func snapshotPluginCatalogDirectory(cfg *Config) (string, string, error) {
 		if err != nil {
 			return "", before, fmt.Errorf("create plugin catalog snapshot: %w", err)
 		}
-		if cfg == nil || cfg.PluginsEnabled() {
-			root := normalizePluginsDir("")
-			if cfg != nil {
-				root = normalizePluginsDir(cfg.PluginsDir)
-			}
-			if err := copyPluginCatalogDirectory(root, dir); err != nil {
-				_ = removePluginCatalogSnapshot(dir)
-				return "", before, err
-			}
+		root := normalizePluginsDir(cfg.PluginsDir)
+		if err := copyPluginCatalogDirectory(root, dir); err != nil {
+			_ = removePluginCatalogSnapshot(dir)
+			return "", before, err
 		}
 		after, err := buildPluginCatalogFingerprint(cfg)
 		if err != nil {
@@ -401,7 +399,8 @@ func externalPluginsBySourceInDir(dir string) map[string]LoadedPlugin {
 		return map[string]LoadedPlugin{}
 	}
 	plugins := make(map[string]LoadedPlugin)
-	for _, plugin := range loadPluginCatalog(&Config{PluginsDir: dir}).Plugins {
+	enabled := true
+	for _, plugin := range loadPluginCatalog(&Config{PluginsDir: dir, PluginsEnabledSetting: &enabled}).Plugins {
 		if plugin.Builtin || strings.TrimSpace(plugin.Source) == "" {
 			continue
 		}
@@ -469,7 +468,8 @@ func mergeSelectedPluginCatalogUpdates(appliedDir, detectedDir string, updates [
 	if strings.TrimSpace(appliedDir) == "" {
 		return "", "", fmt.Errorf("applied plugin catalog snapshot is unavailable; select all pending updates")
 	}
-	mergedDir, _, err := snapshotPluginCatalogDirectory(&Config{PluginsDir: appliedDir})
+	enabled := true
+	mergedDir, _, err := snapshotPluginCatalogDirectory(&Config{PluginsDir: appliedDir, PluginsEnabledSetting: &enabled})
 	if err != nil {
 		return "", "", fmt.Errorf("snapshot applied plugin catalog: %w", err)
 	}
@@ -835,7 +835,7 @@ func (pm *ProcessManager) snapshotPluginCatalogHotReloadStatus() *PluginCatalogH
 	}
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	enabled := true
+	enabled := false
 	if pm.cfg != nil {
 		enabled = pm.cfg.PluginsEnabled()
 	}

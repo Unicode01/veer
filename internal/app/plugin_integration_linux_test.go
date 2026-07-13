@@ -383,7 +383,7 @@ func TestPluginLANCoreResolvesWANCoreStatusLinuxIntegration(t *testing.T) {
 		sourceDir := filepath.Join(findRepoRoot(t), "plugins", pluginID)
 		copyDirForTest(t, sourceDir, filepath.Join(pluginsRoot, pluginID))
 	}
-	cfg := &Config{PluginsDir: pluginsRoot}
+	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: pluginsRoot})
 	wanPlugin, err := loadPluginFromDir(filepath.Join(pluginsRoot, "wan_core"), "wan_core")
 	if err != nil {
 		t.Fatalf("load wan_core bundled plugin: %v", err)
@@ -581,7 +581,7 @@ func loadPluginIntegrationControlRuntimeForTest(t *testing.T, pluginID string) (
 		t.Fatalf("load %s bundled plugin: %v", pluginID, err)
 	}
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, &Config{PluginsDir: pluginsRoot}, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: pluginsRoot}), nil).(*gojaPluginControlRuntime)
 	return plugin, db, rt
 }
 

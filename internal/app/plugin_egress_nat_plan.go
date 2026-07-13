@@ -155,7 +155,7 @@ func pluginEgressNATPlanRecordToItem(record store.PluginRecord, existing []Egres
 }
 
 func pluginEgressNATPlansEnabled(cfg *Config) bool {
-	return cfg == nil || cfg.PluginsEnabled()
+	return cfg != nil && cfg.PluginsEnabled()
 }
 
 func activePluginEgressNATPlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]struct{} {
