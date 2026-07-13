@@ -525,26 +525,37 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 	natTable := make(map[string]*natEntry)
 	var mu sync.Mutex
 
-	removeEntryLocked := func(key string) {
+	removeEntryLocked := func(key string, expected *net.UDPConn) {
 		entry, ok := natTable[key]
 		if !ok {
+			return
+		}
+		if expected != nil && entry.conn != expected {
 			return
 		}
 		delete(natTable, key)
 		if st != nil {
 			atomic.AddInt64(&st.natTableSize, -1)
 		}
+		userspaceUDPNATBudget.release()
 		entry.conn.Close()
 	}
 	cleanupStaleEntries := func(now time.Time) {
 		mu.Lock()
 		for key, entry := range natTable {
 			if now.Sub(entry.lastActive) > udpNatIdleTimeout {
-				removeEntryLocked(key)
+				removeEntryLocked(key, entry.conn)
 			}
 		}
 		mu.Unlock()
 	}
+	defer func() {
+		mu.Lock()
+		for key, entry := range natTable {
+			removeEntryLocked(key, entry.conn)
+		}
+		mu.Unlock()
+	}()
 
 	nextCleanup := time.Now().Add(udpCleanupInterval)
 	if err := udpConn.SetReadDeadline(nextCleanup); err != nil {
@@ -597,6 +608,12 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 		mu.Unlock()
 
 		if !exists {
+			if !userspaceUDPNATBudget.tryAcquire() {
+				if st != nil {
+					atomic.AddInt64(&st.rejectedConns, 1)
+				}
+				continue
+			}
 			var outConn *net.UDPConn
 			if pr.Transparent {
 				outConn, err = dialTransparentUDP(srcAddr.IP, pr.OutInterface, targetAddr)
@@ -604,6 +621,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 				outConn, err = dialOutboundUDP(targetAddr, pr.OutInterface, pr.OutSourceIP)
 			}
 			if err != nil {
+				userspaceUDPNATBudget.release()
 				if st != nil {
 					atomic.AddInt64(&st.rejectedConns, 1)
 				}
@@ -636,7 +654,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 						rn, err := out.Read(retBuf)
 						if err != nil {
 							mu.Lock()
-							removeEntryLocked(natKey)
+							removeEntryLocked(natKey, out)
 							mu.Unlock()
 							return
 						}
@@ -646,7 +664,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 						if _, err := writeUDPWithReplyInfo(udpConn, retBuf[:rn], src, reply); err != nil {
 							log.Printf("range %d: udp reply write port %d: %v", pr.ID, port, err)
 							mu.Lock()
-							removeEntryLocked(natKey)
+							removeEntryLocked(natKey, out)
 							mu.Unlock()
 							return
 						}
@@ -658,6 +676,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 					}
 				}(srcAddr, replyInfo, outConn, key)
 			} else {
+				userspaceUDPNATBudget.release()
 				outConn.Close()
 			}
 		}
@@ -668,7 +687,7 @@ func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<-
 			}
 			log.Printf("range %d: udp backend write port %d: %v", pr.ID, port, err)
 			mu.Lock()
-			removeEntryLocked(key)
+			removeEntryLocked(key, entry.conn)
 			mu.Unlock()
 		}
 	}

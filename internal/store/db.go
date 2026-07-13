@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 
@@ -271,24 +272,78 @@ var SchemaConstraintIndexes = []ConstraintIndexDefinition{
 }
 
 func InitDB(path string) (*sql.DB, error) {
+	if err := secureSQLiteDatabaseFiles(path, true); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_txlock=%s", path, dbBusyTimeoutMillis, dbTxLockMode))
 	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*sql.DB, error) {
+		_ = db.Close()
 		return nil, err
 	}
 
 	for table, cols := range Schema {
 		if err := EnsureTable(db, table, cols); err != nil {
-			return nil, fmt.Errorf("migrate table %s: %w", table, err)
+			return fail(fmt.Errorf("migrate table %s: %w", table, err))
 		}
 	}
 	if err := EnsureIndexes(db, SchemaIndexes); err != nil {
-		return nil, fmt.Errorf("migrate indexes: %w", err)
+		return fail(fmt.Errorf("migrate indexes: %w", err))
 	}
 	if err := EnsureConstraintIndexes(db, SchemaConstraintIndexes); err != nil {
-		return nil, fmt.Errorf("migrate constraint indexes: %w", err)
+		return fail(fmt.Errorf("migrate constraint indexes: %w", err))
+	}
+	if err := secureSQLiteDatabaseFiles(path, false); err != nil {
+		return fail(err)
 	}
 
 	return db, nil
+}
+
+func secureSQLiteDatabaseFiles(path string, createMain bool) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("database path must not be empty")
+	}
+	if path == ":memory:" || strings.HasPrefix(path, "file::memory:") {
+		return nil
+	}
+	if strings.HasPrefix(path, "file:") || strings.Contains(path, "?") {
+		return fmt.Errorf("database URI paths are not supported")
+	}
+
+	paths := []string{path, path + "-wal", path + "-shm"}
+	for index, current := range paths {
+		info, err := os.Lstat(current)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("inspect database file %s: %w", current, err)
+			}
+			if index != 0 || !createMain {
+				continue
+			}
+			file, err := os.OpenFile(current, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+			if err != nil {
+				return fmt.Errorf("create private database file %s: %w", current, err)
+			}
+			if err := file.Close(); err != nil {
+				return fmt.Errorf("close private database file %s: %w", current, err)
+			}
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("database file must not be a symbolic link: %s", current)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("database path is not a regular file: %s", current)
+		}
+		if err := os.Chmod(current, 0o600); err != nil {
+			return fmt.Errorf("secure database permissions for %s: %w", current, err)
+		}
+	}
+	return nil
 }
 
 // ensureTable 创建表（如不存在），然后对比已有列，补齐缺失列
