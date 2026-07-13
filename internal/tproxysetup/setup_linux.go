@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"forward/internal/ipcmd"
+	"github.com/Unicode01/veer/internal/ipcmd"
 )
 
 const (

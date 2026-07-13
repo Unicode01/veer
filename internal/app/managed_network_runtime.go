@@ -3,7 +3,7 @@ package app
 import (
 	"encoding/binary"
 	"fmt"
-	"forward/internal/managednet"
+	"github.com/Unicode01/veer/internal/managednet"
 	"hash/fnv"
 	"net"
 	"net/netip"

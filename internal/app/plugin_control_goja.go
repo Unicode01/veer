@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 
 	"github.com/dop251/goja"
 )
@@ -60,11 +60,11 @@ const (
 var errPluginControlDisabledByState = errors.New("plugin is disabled")
 
 var pluginControlReservedMapNames = map[string]string{
-	"tc_prog_chain_v4":        "shared fvtap TC tail-call chain",
-	"tc_plugin_config_v4":     "shared fvtap TC pipeline configuration",
-	"tc_plugin_interfaces_v4": "shared fvtap TC interface masks",
-	"tc_dispatch_scratch_v4":  "shared fvtap TC dispatch scratch",
-	"tc_plugin_ctx_v4":        "shared fvtap TC packet context",
+	"tc_prog_chain_v4":        "shared Veer TC tail-call chain",
+	"tc_plugin_config_v4":     "shared Veer TC pipeline configuration",
+	"tc_plugin_interfaces_v4": "shared Veer TC interface masks",
+	"tc_dispatch_scratch_v4":  "shared Veer TC dispatch scratch",
+	"tc_plugin_ctx_v4":        "shared Veer TC packet context",
 	"xdp_prog_chain":          "shared XDP tail-call chain",
 }
 
@@ -681,16 +681,6 @@ func (rt *gojaPluginControlRuntime) deactivatePluginControl(pluginID string) {
 	}
 	stopPluginControlVMs(vms)
 	rt.clearPluginControlWorkerQueueUsage(pluginID)
-}
-
-func loadedPluginHasRuntimeSurface(plugin LoadedPlugin) bool {
-	return len(plugin.Capabilities) > 0 ||
-		len(plugin.VirtualInterfaces) > 0 ||
-		len(plugin.Objects) > 0 ||
-		len(plugin.Hooks) > 0 ||
-		len(plugin.Resources) > 0 ||
-		len(plugin.Actions) > 0 ||
-		plugin.UI != nil
 }
 
 func (rt *gojaPluginControlRuntime) runPluginControl(plugin LoadedPlugin, event pluginControlEvent, optionalHandler bool) error {
@@ -2249,10 +2239,10 @@ func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
 	h.exportJSONValue(call.Arguments[0], &spec, "pipeline.attach")
 	pipelineID := strings.TrimSpace(strings.ToLower(spec.Pipeline))
 	if pipelineID == "" {
-		pipelineID = "fvtap"
+		pipelineID = builtinPluginPipelineID
 	}
-	if pipelineID != "fvtap" {
-		h.throwf("pipeline.attach: only fvtap pipeline is supported, got %q", spec.Pipeline)
+	if pipelineID != builtinPluginPipelineID {
+		h.throwf("pipeline.attach: only Veer pipeline is supported, got %q", spec.Pipeline)
 	}
 	direction := strings.TrimSpace(strings.ToLower(spec.Direction))
 	switch direction {
@@ -2281,13 +2271,13 @@ func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
 		h.throwf("pipeline.attach: %v", err)
 	}
 	if hook.Engine != kernelEngineTC {
-		h.throwf("pipeline.attach: only tc hooks can join fvtap pipeline")
+		h.throwf("pipeline.attach: only tc hooks can join the Veer pipeline")
 	}
 	if hook.Attach != "ingress" && hook.Attach != "egress" && hook.Attach != "both" {
-		h.throwf("pipeline.attach: attach must be ingress, egress or both for fvtap pipeline hooks")
+		h.throwf("pipeline.attach: attach must be ingress, egress or both for Veer pipeline hooks")
 	}
 	if hook.Priority == pluginPipelineCorePriority {
-		h.throwf("pipeline.attach: priority %d collides with fvtap core priority; use a lower value for pre-core or a higher value for post-core", pluginPipelineCorePriority)
+		h.throwf("pipeline.attach: priority %d collides with Veer Core priority; use a lower value for pre-core or a higher value for post-core", pluginPipelineCorePriority)
 	}
 	if pluginHookIndex(h.surface.Hooks, hook.ID) >= 0 {
 		h.throwf("pipeline.attach: duplicate hook %q", hook.ID)
@@ -4451,18 +4441,6 @@ func (rt *gojaPluginControlRuntime) pluginWorkerCountLocked(pluginID string) int
 		}
 	}
 	return count
-}
-
-func (rt *gojaPluginControlRuntime) pluginControlWorkersLocked(pluginID string) []*pluginControlVM {
-	out := make([]*pluginControlVM, 0)
-	for key, vm := range rt.pluginWorkers {
-		if key.pluginID != pluginID {
-			continue
-		}
-		out = append(out, vm)
-		delete(rt.pluginWorkers, key)
-	}
-	return out
 }
 
 func (rt *gojaPluginControlRuntime) firePluginTimer(key pluginControlTimerKey, generation uint64) {

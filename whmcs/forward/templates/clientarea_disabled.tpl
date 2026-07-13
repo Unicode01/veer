@@ -4,7 +4,7 @@
     <div class="forward-shell">
         <div class="forward-hero">
             <div class="forward-hero__main">
-                <span class="forward-kicker">Forward</span>
+                <span class="forward-kicker">Veer</span>
                 <h2 class="forward-hero__title">转发规则管理</h2>
                 <p class="forward-hero__text">当前页面不可用，但模块本身已加载。请检查账号权限或模块配置。</p>
             </div>

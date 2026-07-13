@@ -589,7 +589,7 @@ func pluginTCParent(attach string) uint32 {
 }
 
 func pluginTCFilterName(plan pluginTCAttachPlan) string {
-	value := "fwdplug_" + plan.PluginID + "_" + plan.HookID
+	value := "veerplug_" + plan.PluginID + "_" + plan.HookID
 	value = strings.NewReplacer(".", "_", ":", "_", "/", "_").Replace(value)
 	if len(value) > 63 {
 		return value[:63]

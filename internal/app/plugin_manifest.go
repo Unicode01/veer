@@ -51,8 +51,8 @@ func normalizePluginManifest(manifest *PluginManifest) error {
 	if !pluginIDPattern.MatchString(manifest.ID) {
 		return fmt.Errorf("id must match %s", pluginIDPattern.String())
 	}
-	if manifest.ID == "fvtap" {
-		return fmt.Errorf("id %q is reserved for the built-in pipeline", manifest.ID)
+	if reservedBuiltinPluginID(manifest.ID) {
+		return fmt.Errorf("id %q is reserved for the built-in Veer pipeline", manifest.ID)
 	}
 
 	manifest.Name = strings.TrimSpace(manifest.Name)
@@ -205,8 +205,8 @@ func normalizePluginResourceAccess(access []PluginResourceAccess) error {
 		if !pluginIDPattern.MatchString(item.Plugin) {
 			return fmt.Errorf("[%d].plugin must match %s", i, pluginIDPattern.String())
 		}
-		if item.Plugin == "fvtap" {
-			return fmt.Errorf("[%d].plugin %q is reserved for the built-in pipeline", i, item.Plugin)
+		if reservedBuiltinPluginID(item.Plugin) {
+			return fmt.Errorf("[%d].plugin %q is reserved for the built-in Veer pipeline", i, item.Plugin)
 		}
 		item.Resource = strings.TrimSpace(strings.ToLower(item.Resource))
 		if pluginControlReservedResourceID(item.Resource) {
@@ -273,8 +273,8 @@ func normalizePluginActionAccess(access []PluginActionAccess) error {
 		if !pluginIDPattern.MatchString(item.Plugin) {
 			return fmt.Errorf("[%d].plugin must match %s", i, pluginIDPattern.String())
 		}
-		if item.Plugin == "fvtap" {
-			return fmt.Errorf("[%d].plugin %q is reserved for the built-in pipeline", i, item.Plugin)
+		if reservedBuiltinPluginID(item.Plugin) {
+			return fmt.Errorf("[%d].plugin %q is reserved for the built-in Veer pipeline", i, item.Plugin)
 		}
 		actions, err := normalizePluginActionAccessActions(item.Actions)
 		if err != nil {
@@ -413,23 +413,6 @@ func normalizePluginNetOperations(values []string) ([]string, error) {
 	return out, nil
 }
 
-func normalizePluginResources(resources []PluginResource) error {
-	if len(resources) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(resources))
-	for i := range resources {
-		if err := normalizePluginResource(&resources[i]); err != nil {
-			return fmt.Errorf("resources[%d]: %w", i, err)
-		}
-		if _, exists := seen[resources[i].ID]; exists {
-			return fmt.Errorf("resources[%d]: duplicate id %q", i, resources[i].ID)
-		}
-		seen[resources[i].ID] = struct{}{}
-	}
-	return nil
-}
-
 func normalizePluginResource(resource *PluginResource) error {
 	resource.ID = strings.TrimSpace(strings.ToLower(resource.ID))
 	if pluginControlReservedResourceID(resource.ID) {
@@ -509,23 +492,6 @@ func normalizePluginResourceMethodsExplicit(values []string, label string) ([]st
 	return out, nil
 }
 
-func normalizePluginActions(actions []PluginAction) error {
-	if len(actions) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(actions))
-	for i := range actions {
-		if err := normalizePluginAction(&actions[i]); err != nil {
-			return fmt.Errorf("actions[%d]: %w", i, err)
-		}
-		if _, exists := seen[actions[i].ID]; exists {
-			return fmt.Errorf("actions[%d]: duplicate id %q", i, actions[i].ID)
-		}
-		seen[actions[i].ID] = struct{}{}
-	}
-	return nil
-}
-
 func normalizePluginAction(action *PluginAction) error {
 	action.ID = strings.TrimSpace(strings.ToLower(action.ID))
 	if !pluginTokenPattern.MatchString(action.ID) {
@@ -544,23 +510,6 @@ func normalizePluginAction(action *PluginAction) error {
 	}
 	if action.MaxPayloadBytes > pluginActionHardMaxPayloadBytes {
 		return fmt.Errorf("max_payload_bytes exceeds %d", pluginActionHardMaxPayloadBytes)
-	}
-	return nil
-}
-
-func normalizePluginObjects(objects []PluginObject) error {
-	if len(objects) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(objects))
-	for i := range objects {
-		if err := normalizePluginObject(&objects[i]); err != nil {
-			return fmt.Errorf("objects[%d]: %w", i, err)
-		}
-		if _, exists := seen[objects[i].ID]; exists {
-			return fmt.Errorf("objects[%d]: duplicate id %q", i, objects[i].ID)
-		}
-		seen[objects[i].ID] = struct{}{}
 	}
 	return nil
 }

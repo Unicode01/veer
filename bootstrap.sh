@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# forward - Linux 一键引导部署脚本
+# Veer - Linux 一键引导部署脚本
 #
 # 设计目标:
 #   1. 安装构建与部署依赖
@@ -9,9 +9,9 @@
 #   4. 调用 deploy.sh 完成安装 / 热更新
 #
 # 典型用法:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
-#   FORWARD_REF=main WEB_PORT=8080 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
-#   bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
+#   bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+#   VEER_REF=main WEB_PORT=8080 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 #
 # 说明:
 #   - 该脚本适合直接通过 GitHub Raw 分发
@@ -25,7 +25,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
-BOOTSTRAP_HINT_URL="https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh"
+BOOTSTRAP_HINT_URL="https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh"
 CURRENT_STEP="初始化"
 BOOTSTRAP_FAILED=0
 BOOTSTRAP_ERROR_REPORTED=0
@@ -41,39 +41,42 @@ usage() {
   bash <(curl -fsSL ${BOOTSTRAP_HINT_URL}) [-- deploy.sh 参数]
 
 常用环境变量:
-  FORWARD_REPO_URL     Git 仓库地址，默认 https://github.com/Unicode01/forward.git
-  FORWARD_REPO_URL_CN  CN 模式优先尝试的 Git 源，默认空
-  FORWARD_REPO_ARCHIVE_URL
+  VEER_REPO_URL        Git 仓库地址，默认 https://github.com/Unicode01/veer.git
+  VEER_REPO_URL_CN     CN 模式优先尝试的 Git 源，默认空
+  VEER_REPO_ARCHIVE_URL
                       显式覆盖源码归档地址，git 拉取失败时作为回退
-  FORWARD_REPO_ARCHIVE_URL_CN
+  VEER_REPO_ARCHIVE_URL_CN
                       CN 模式优先尝试的源码归档地址，默认空
-  FORWARD_REF          拉取的 Git ref，默认 main
-  FORWARD_GO_VERSION   安装的 Go 版本，默认 1.25.12
-  FORWARD_GO_REGION    Go 下载区域策略: auto/cn/global，默认 auto
-  FORWARD_GO_BASE_URL  显式覆盖 Go 下载源前缀，例如 https://mirror.example.com/golang
-  FORWARD_GO_CN_BASE_URL
+  VEER_REF             拉取的 Git ref，默认 main
+  VEER_GO_VERSION      安装的 Go 版本，默认 1.25.12
+  VEER_GO_REGION       Go 下载区域策略: auto/cn/global，默认 auto
+  VEER_GO_BASE_URL     显式覆盖 Go 下载源前缀，例如 https://mirror.example.com/golang
+  VEER_GO_CN_BASE_URL
                       CN 模式优先使用的 Go 镜像前缀，默认 https://mirrors.aliyun.com/golang
-  FORWARD_GOPROXY      显式覆盖 Go 模块代理，例如 https://goproxy.cn|direct
-  FORWARD_GOPROXY_CN   CN 模式默认模块代理，默认 https://goproxy.cn|direct
-  FORWARD_GOPROXY_GLOBAL
+  VEER_GOPROXY         显式覆盖 Go 模块代理，例如 https://goproxy.cn|direct
+  VEER_GOPROXY_CN      CN 模式默认模块代理，默认 https://goproxy.cn|direct
+  VEER_GOPROXY_GLOBAL
                       global 模式默认模块代理，默认 https://proxy.golang.org|direct
-  FORWARD_GOSUMDB      显式覆盖 Go 校验源，例如 sum.golang.google.cn
-  FORWARD_GOSUMDB_CN   CN 模式默认校验源，默认 sum.golang.google.cn
-  FORWARD_GOSUMDB_GLOBAL
+  VEER_GOSUMDB         显式覆盖 Go 校验源，例如 sum.golang.google.cn
+  VEER_GOSUMDB_CN      CN 模式默认校验源，默认 sum.golang.google.cn
+  VEER_GOSUMDB_GLOBAL
                       global 模式默认校验源，默认 sum.golang.org
-  FORWARD_WORKDIR      临时工作目录，默认 /tmp/forward-bootstrap
-  FORWARD_KEEP_WORKDIR_ON_ERROR
+  VEER_WORKDIR         临时工作目录，默认 /tmp/veer-bootstrap
+  VEER_KEEP_WORKDIR_ON_ERROR
                         失败时保留临时目录，默认 1
-  FORWARD_SKIP_DEPS    设为 1 时跳过系统依赖安装
-  FORWARD_SKIP_APT     兼容旧变量；等价于 FORWARD_SKIP_DEPS=1
-  FORWARD_SKIP_GO      设为 1 时跳过 Go 安装检查
+  VEER_SKIP_DEPS       设为 1 时跳过系统依赖安装
+  VEER_SKIP_GO         设为 1 时跳过 Go 安装检查
+
+兼容性:
+  main 已发布的同名 FORWARD_* 变量仍可使用；同时设置时 VEER_* 优先。
+  FORWARD_SKIP_APT 仍作为旧版 FORWARD_SKIP_DEPS 的兼容别名。
 
 部署阶段透传给 deploy.sh 的常用环境变量:
-  INSTALL_DIR WEB_PORT WEB_TOKEN FORWARD_BPF_STATE_DIR FORWARD_RUNTIME_STATE_DIR
+  INSTALL_DIR WEB_PORT WEB_TOKEN VEER_BPF_STATE_DIR VEER_RUNTIME_STATE_DIR
 
 示例:
   bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})
-  FORWARD_REF=v1.2.3 bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})
+  VEER_REF=v1.2.3 bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})
   bash <(curl -fsSL ${BOOTSTRAP_HINT_URL}) -- --no-inherit-stats
 EOF
 }
@@ -93,29 +96,30 @@ if [[ $EUID -ne 0 ]]; then
     fail "请使用 root 运行。建议先执行 sudo -i，再运行 bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})"
 fi
 
-FORWARD_REPO_URL="${FORWARD_REPO_URL:-https://github.com/Unicode01/forward.git}"
-FORWARD_REPO_URL_CN="${FORWARD_REPO_URL_CN:-}"
-FORWARD_REPO_ARCHIVE_URL="${FORWARD_REPO_ARCHIVE_URL:-}"
-FORWARD_REPO_ARCHIVE_URL_CN="${FORWARD_REPO_ARCHIVE_URL_CN:-}"
-FORWARD_REF="${FORWARD_REF:-main}"
-FORWARD_GO_VERSION="${FORWARD_GO_VERSION:-1.25.12}"
-FORWARD_GO_REGION="${FORWARD_GO_REGION:-auto}"
-FORWARD_GO_BASE_URL="${FORWARD_GO_BASE_URL:-}"
-FORWARD_GO_CN_BASE_URL="${FORWARD_GO_CN_BASE_URL:-https://mirrors.aliyun.com/golang}"
-FORWARD_GOPROXY="${FORWARD_GOPROXY:-}"
-FORWARD_GOPROXY_CN="${FORWARD_GOPROXY_CN:-https://goproxy.cn|direct}"
-FORWARD_GOPROXY_GLOBAL="${FORWARD_GOPROXY_GLOBAL:-https://proxy.golang.org|direct}"
-FORWARD_GOSUMDB="${FORWARD_GOSUMDB:-}"
-FORWARD_GOSUMDB_CN="${FORWARD_GOSUMDB_CN:-sum.golang.google.cn}"
-FORWARD_GOSUMDB_GLOBAL="${FORWARD_GOSUMDB_GLOBAL:-sum.golang.org}"
+FORWARD_REPO_URL="${VEER_REPO_URL:-${FORWARD_REPO_URL:-https://github.com/Unicode01/veer.git}}"
+FORWARD_LEGACY_REPO_URL="https://github.com/Unicode01/forward.git"
+FORWARD_REPO_URL_CN="${VEER_REPO_URL_CN:-${FORWARD_REPO_URL_CN:-}}"
+FORWARD_REPO_ARCHIVE_URL="${VEER_REPO_ARCHIVE_URL:-${FORWARD_REPO_ARCHIVE_URL:-}}"
+FORWARD_REPO_ARCHIVE_URL_CN="${VEER_REPO_ARCHIVE_URL_CN:-${FORWARD_REPO_ARCHIVE_URL_CN:-}}"
+FORWARD_REF="${VEER_REF:-${FORWARD_REF:-main}}"
+FORWARD_GO_VERSION="${VEER_GO_VERSION:-${FORWARD_GO_VERSION:-1.25.12}}"
+FORWARD_GO_REGION="${VEER_GO_REGION:-${FORWARD_GO_REGION:-auto}}"
+FORWARD_GO_BASE_URL="${VEER_GO_BASE_URL:-${FORWARD_GO_BASE_URL:-}}"
+FORWARD_GO_CN_BASE_URL="${VEER_GO_CN_BASE_URL:-${FORWARD_GO_CN_BASE_URL:-https://mirrors.aliyun.com/golang}}"
+FORWARD_GOPROXY="${VEER_GOPROXY:-${FORWARD_GOPROXY:-}}"
+FORWARD_GOPROXY_CN="${VEER_GOPROXY_CN:-${FORWARD_GOPROXY_CN:-https://goproxy.cn|direct}}"
+FORWARD_GOPROXY_GLOBAL="${VEER_GOPROXY_GLOBAL:-${FORWARD_GOPROXY_GLOBAL:-https://proxy.golang.org|direct}}"
+FORWARD_GOSUMDB="${VEER_GOSUMDB:-${FORWARD_GOSUMDB:-}}"
+FORWARD_GOSUMDB_CN="${VEER_GOSUMDB_CN:-${FORWARD_GOSUMDB_CN:-sum.golang.google.cn}}"
+FORWARD_GOSUMDB_GLOBAL="${VEER_GOSUMDB_GLOBAL:-${FORWARD_GOSUMDB_GLOBAL:-sum.golang.org}}"
 FORWARD_GO_EFFECTIVE_REGION=""
-FORWARD_WORKDIR="${FORWARD_WORKDIR:-/tmp/forward-bootstrap}"
-FORWARD_KEEP_WORKDIR_ON_ERROR="${FORWARD_KEEP_WORKDIR_ON_ERROR:-1}"
-FORWARD_SKIP_DEPS="${FORWARD_SKIP_DEPS:-}"
+FORWARD_WORKDIR="${VEER_WORKDIR:-${FORWARD_WORKDIR:-/tmp/veer-bootstrap}}"
+FORWARD_KEEP_WORKDIR_ON_ERROR="${VEER_KEEP_WORKDIR_ON_ERROR:-${FORWARD_KEEP_WORKDIR_ON_ERROR:-1}}"
+FORWARD_SKIP_DEPS="${VEER_SKIP_DEPS:-${FORWARD_SKIP_DEPS:-}}"
 if [[ -z "${FORWARD_SKIP_DEPS}" ]]; then
     FORWARD_SKIP_DEPS="${FORWARD_SKIP_APT:-0}"
 fi
-FORWARD_SKIP_GO="${FORWARD_SKIP_GO:-0}"
+FORWARD_SKIP_GO="${VEER_SKIP_GO:-${FORWARD_SKIP_GO:-0}}"
 FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
 FORWARD_GO_ROOT="${FORWARD_WORKDIR}/go"
 FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH:-amd64}.tar.gz"
@@ -457,7 +461,7 @@ normalize_go_region() {
             printf 'global'
             ;;
         *)
-            fail "FORWARD_GO_REGION 仅支持 auto/cn/global，当前值: ${1:-<empty>}"
+            fail "VEER_GO_REGION 仅支持 auto/cn/global，当前值: ${1:-<empty>}"
             ;;
     esac
 }
@@ -685,6 +689,9 @@ resolve_repo_fetch_urls() {
     if [[ -n "${FORWARD_REPO_URL}" ]] && ! array_contains "${FORWARD_REPO_URL}" "${urls[@]}"; then
         urls+=("${FORWARD_REPO_URL}")
     fi
+    if [[ "${FORWARD_REPO_URL}" == "https://github.com/Unicode01/veer.git" ]] && ! array_contains "${FORWARD_LEGACY_REPO_URL}" "${urls[@]}"; then
+        urls+=("${FORWARD_LEGACY_REPO_URL}")
+    fi
     if (( ${#urls[@]} == 0 )); then
         return 0
     fi
@@ -711,6 +718,19 @@ resolve_repo_archive_urls() {
 
     slug="$(github_repo_slug_from_url "${FORWARD_REPO_URL}" || true)"
     if [[ -n "${slug}" ]]; then
+        for url in \
+            "https://codeload.github.com/${slug}/tar.gz/refs/heads/${FORWARD_REF}" \
+            "https://codeload.github.com/${slug}/tar.gz/refs/tags/${FORWARD_REF}" \
+            "https://codeload.github.com/${slug}/tar.gz/${FORWARD_REF}"
+        do
+            if ! array_contains "${url}" "${urls[@]}"; then
+                urls+=("${url}")
+            fi
+        done
+    fi
+
+    if [[ "${FORWARD_REPO_URL}" == "https://github.com/Unicode01/veer.git" ]]; then
+        slug="Unicode01/forward"
         for url in \
             "https://codeload.github.com/${slug}/tar.gz/refs/heads/${FORWARD_REF}" \
             "https://codeload.github.com/${slug}/tar.gz/refs/tags/${FORWARD_REF}" \

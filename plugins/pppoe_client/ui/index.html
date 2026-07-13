@@ -9,7 +9,7 @@
       padding: 10px;
     }
     .pppoe-hero {
-      border-left: 3px solid var(--fwd-primary);
+      border-left: 3px solid var(--veer-primary);
     }
     .pppoe-form {
       display: grid;
@@ -19,9 +19,9 @@
       display: grid;
       gap: 8px;
       padding: 10px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 9px;
-      background: color-mix(in srgb, var(--fwd-surface-soft) 72%, transparent);
+      background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
     }
     .pppoe-section-head {
       display: flex;
@@ -31,14 +31,14 @@
     }
     .pppoe-section-title {
       margin: 0;
-      color: var(--fwd-text);
+      color: var(--veer-text);
       font-size: 12px;
       font-weight: 760;
       letter-spacing: 0.02em;
       text-transform: uppercase;
     }
     .pppoe-section-desc {
-      color: var(--fwd-soft);
+      color: var(--veer-soft);
       font-size: 11px;
       line-height: 1.4;
     }
@@ -67,23 +67,23 @@
       gap: 8px;
       min-height: 38px;
       padding: 8px 10px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 8px;
-      background: var(--fwd-surface);
+      background: var(--veer-surface);
     }
     .pppoe-toggle-field > span:first-child {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .pppoe-toggle-field .fwd-input[type="checkbox"] {
+    .pppoe-toggle-field .veer-input[type="checkbox"] {
       justify-self: end;
     }
     .pppoe-actions {
       justify-content: flex-start;
       padding-top: 2px;
     }
-    .pppoe-actions .fwd-button {
+    .pppoe-actions .veer-button {
       min-width: 88px;
     }
     .pppoe-runtime-status[data-state="degraded"],
@@ -94,9 +94,9 @@
     }
     .pppoe-runtime-status[data-state="offline"],
     .pppoe-runtime-status[data-state="unknown"] {
-      border-color: var(--fwd-border-strong);
-      background: var(--fwd-surface-soft);
-      color: var(--fwd-muted);
+      border-color: var(--veer-border-strong);
+      background: var(--veer-surface-soft);
+      color: var(--veer-muted);
     }
     .pppoe-runtime-status[data-state="error"] {
       border-color: #fca5a5;
@@ -110,7 +110,7 @@
       .pppoe-section-head {
         display: grid;
       }
-      .pppoe-actions .fwd-button {
+      .pppoe-actions .veer-button {
         flex: 1 1 auto;
       }
     }
@@ -132,9 +132,9 @@
 <body>
   <script>
     (function () {
-      const F = window.ForwardPluginHost;
+      const F = window.VeerPluginHost;
       if (!F) {
-        document.body.textContent = 'ForwardPluginHost is not available.';
+        document.body.textContent = 'VeerPluginHost is not available.';
         return;
       }
 
@@ -156,7 +156,7 @@
           'status.probing': '探测中',
           'status.installingTunnel': '安装隧道中',
           'title': 'PPPoE 客户端',
-          'desc': 'PPPoE 拨号、会话保持、IPv4/IPv6 协商和 TC pipeline 隧道，用于接入 WAN Core / fvtap。',
+          'desc': 'PPPoE 拨号、会话保持、IPv4/IPv6 协商和 TC 隧道，用于接入 WAN Core / veer。',
           'badge.rawL2': 'raw L2',
           'badge.goja': 'Goja',
           'profile.title': '配置',
@@ -166,7 +166,7 @@
           'section.negotiation': '协商',
           'section.negotiation.desc': 'PPP 和 WAN Core 同步',
           'section.tunnel': '隧道 / Handoff',
-          'section.tunnel.desc': '物理口 ingress 与本地接口 egress 的双向 TC pipeline',
+          'section.tunnel.desc': '物理 WAN 与本地 L3 边界之间的双向 TC 隧道',
           'field.profile': '配置',
           'profile.new': '新建配置...',
           'profile.newPlaceholder': '输入新配置名',
@@ -287,7 +287,7 @@
           'status.probing': 'Probing',
           'status.installingTunnel': 'Installing Tunnel',
           'title': 'PPPoE Client',
-          'desc': 'PPPoE dialing, keepalive, IPv4/IPv6 negotiation and TC pipeline tunneling for WAN Core / fvtap integration.',
+          'desc': 'PPPoE dialing, keepalive, IPv4/IPv6 negotiation and TC tunneling for WAN Core / veer integration.',
           'badge.rawL2': 'raw L2',
           'badge.goja': 'Goja',
           'profile.title': 'Profile',
@@ -297,7 +297,7 @@
           'section.negotiation': 'Negotiation',
           'section.negotiation.desc': 'PPP and WAN-core synchronization',
           'section.tunnel': 'Tunnel / Handoff',
-          'section.tunnel.desc': 'Bidirectional TC pipeline between physical ingress and local-interface egress',
+          'section.tunnel.desc': 'Bidirectional TC tunnel between the physical WAN and local L3 boundary',
           'field.profile': 'Profile',
           'profile.new': 'New profile...',
           'profile.newPlaceholder': 'Enter a new profile name',
@@ -492,7 +492,7 @@
       let knownProfileKeys = [];
       const autoRedial = checkbox(true);
       const installTunnel = checkbox(true);
-      const localInterface = input('fwdlocal0', 'single local L3 boundary');
+      const localInterface = input('veerlocal0', 'single local L3 boundary');
       const tunnelMTU = input('1492', '576-1492', 'number');
       const prepareInterfaces = checkbox(true);
       const prepareLocalMTU = checkbox(true);
@@ -962,7 +962,7 @@
           keepaliveConfirmTimeoutMs = data.keepalive_confirm_timeout_ms == null ? 5000 : data.keepalive_confirm_timeout_ms;
           autoRedial.checked = data.auto_redial !== false;
           installTunnel.checked = data.install_tunnel !== false;
-          localInterface.value = data.local_interface || 'fwdlocal0';
+          localInterface.value = data.local_interface || 'veerlocal0';
           tunnelMTU.value = data.tunnel_mtu || data.local_mtu || data.mru || 1492;
           prepareInterfaces.checked = data.prepare_interfaces !== false && data.prepare_tunnel_interfaces !== false;
           prepareLocalMTU.checked = data.prepare_local_mtu !== false && data.set_local_mtu !== false;

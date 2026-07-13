@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 const pluginDHCPv4PlansResourceID = "dhcpv4_plans"

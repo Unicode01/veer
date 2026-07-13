@@ -1,6 +1,6 @@
 package app
 
-import "forward/internal/netinfo"
+import "github.com/Unicode01/veer/internal/netinfo"
 
 var loadHostNetworkInterfacesForTests func() ([]HostNetworkInterface, error)
 

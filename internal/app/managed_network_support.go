@@ -3,7 +3,7 @@ package app
 import (
 	"net"
 
-	"forward/internal/managednet"
+	"github.com/Unicode01/veer/internal/managednet"
 
 	"github.com/vishvananda/netlink"
 )

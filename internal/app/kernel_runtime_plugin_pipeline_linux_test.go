@@ -109,7 +109,7 @@ func TestOrderedKernelRuntimePrefersTCWhenRuntimeTCPluginHooksActive(t *testing.
 	}
 
 	results, err := rt.ReconcileWithPluginCatalog([]Rule{{ID: 1, Enabled: true}}, PluginCatalog{
-		Plugins: []LoadedPlugin{builtinFVTapPlugin(), stableTCHookPluginForOrderTest()},
+		Plugins: []LoadedPlugin{builtinVeerPlugin(), stableTCHookPluginForOrderTest()},
 	})
 	if err != nil {
 		t.Fatalf("ReconcileWithPluginCatalog() error = %v", err)
@@ -151,7 +151,7 @@ func TestOrderedKernelRuntimeDoesNotFallbackToXDPWhenRuntimeTCPluginHooksActive(
 	}
 
 	results, err := rt.ReconcileWithPluginCatalog([]Rule{{ID: 1, Enabled: true}}, PluginCatalog{
-		Plugins: []LoadedPlugin{builtinFVTapPlugin(), stableTCHookPluginForOrderTest()},
+		Plugins: []LoadedPlugin{builtinVeerPlugin(), stableTCHookPluginForOrderTest()},
 	})
 	if err != nil {
 		t.Fatalf("ReconcileWithPluginCatalog() error = %v", err)
@@ -200,7 +200,7 @@ func TestOrderedKernelRuntimeMigratesRetainedXDPAssignmentsWhenRuntimeTCPluginHo
 			kernelEngineXDP: {{ID: 1, Enabled: true}},
 		},
 		[]Rule{{ID: 2, Enabled: true}},
-		PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), stableTCHookPluginForOrderTest()}},
+		PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), stableTCHookPluginForOrderTest()}},
 	)
 	if err != nil {
 		t.Fatalf("ReconcileRetainingAssignmentsWithPluginCatalog() error = %v", err)
@@ -229,7 +229,7 @@ func TestOrderedKernelRuntimeKeepsEngineOrderWhenPluginDataplaneDisabled(t *test
 	}
 
 	results, err := rt.ReconcileWithPluginCatalog([]Rule{{ID: 1, Enabled: true}}, PluginCatalog{
-		Plugins: []LoadedPlugin{builtinFVTapPlugin(), stableTCHookPluginForOrderTest()},
+		Plugins: []LoadedPlugin{builtinVeerPlugin(), stableTCHookPluginForOrderTest()},
 	})
 	if err != nil {
 		t.Fatalf("ReconcileWithPluginCatalog() error = %v", err)
@@ -307,7 +307,7 @@ func TestBuildKernelPluginPipelineDesiredAllowsInterfaceFreePreForward(t *testin
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{{
 				ID:      "tc_pre_forward",
-				Section: "tc/fvtap/pre_forward",
+				Section: "tc/veer/pre_forward",
 				Type:    kernelEngineTC,
 			}},
 		}},
@@ -324,7 +324,7 @@ func TestBuildKernelPluginPipelineDesiredAllowsInterfaceFreePreForward(t *testin
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no registered/error state", states)
 	}
@@ -359,8 +359,8 @@ func TestKernelPluginPipelineExplicitInterfacesContributeAttachmentTargets(t *te
 			Status:         pluginObjectStatusVerified,
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{
-				{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
-				{ID: "tc_pre_reply", Section: "tc/fvtap/pre_reply", Type: kernelEngineTC},
+				{ID: "tc_pre_forward", Section: "tc/veer/pre_forward", Type: kernelEngineTC},
+				{ID: "tc_pre_reply", Section: "tc/veer/pre_reply", Type: kernelEngineTC},
 			},
 		}},
 		Hooks: []PluginHook{
@@ -371,7 +371,7 @@ func TestKernelPluginPipelineExplicitInterfacesContributeAttachmentTargets(t *te
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	desired, states, forwardIfRules, replyIfRules := kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no interface resolution error", states)
@@ -389,7 +389,7 @@ func TestKernelPluginPipelineExplicitInterfacesContributeAttachmentTargets(t *te
 		t.Fatal("kernelPluginPipelineHasAttachmentTargets = false, want true")
 	}
 	desired[0].hooks[0].InterfaceIndexes = []uint32{999}
-	desired, states, _, _ = kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
+	desired, _, _, _ = kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
 	if len(desired[0].hooks[0].InterfaceIndexes) != 1 || desired[0].hooks[0].InterfaceIndexes[0] != uint32(lo.Index) {
 		t.Fatalf("resolved interface indexes = %+v, want stale indexes replaced with lo=%d", desired[0].hooks[0].InterfaceIndexes, lo.Index)
 	}
@@ -418,7 +418,7 @@ func TestKernelPluginPipelineEgressInterfaceUsesEgressAttachment(t *testing.T) {
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{{
 				ID:      "tc_forward",
-				Section: "tc/fvtap/forward",
+				Section: "tc/veer/forward",
 				Type:    kernelEngineTC,
 			}},
 		}},
@@ -436,7 +436,7 @@ func TestKernelPluginPipelineEgressInterfaceUsesEgressAttachment(t *testing.T) {
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	desired, states, targets := kernelPluginPipelineResolveExplicitAttachTargets(desired, states)
 	if len(states) != 0 || len(desired) != 1 {
 		t.Fatalf("desired=%+v states=%+v, want one valid egress plugin", desired, states)
@@ -480,11 +480,11 @@ func TestKernelPluginPipelineNoRuleFilterRequiresExplicitPreCoreHook(t *testing.
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{{
 				ID:      "tc_pre_forward",
-				Section: "tc/fvtap/pre_forward",
+				Section: "tc/veer/pre_forward",
 				Type:    kernelEngineTC,
 			}, {
 				ID:      "tc_post_lookup",
-				Section: "tc/fvtap/post_lookup",
+				Section: "tc/veer/post_lookup",
 				Type:    kernelEngineTC,
 			}},
 		}},
@@ -513,7 +513,7 @@ func TestKernelPluginPipelineNoRuleFilterRequiresExplicitPreCoreHook(t *testing.
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	desired, states, forwardIfRules, replyIfRules := kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no state error", states)
@@ -549,7 +549,7 @@ func TestKernelPluginPipelineInvalidExplicitInterfaceFiltersPlugin(t *testing.T)
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{{
 				ID:      "tc_pre_forward",
-				Section: "tc/fvtap/pre_forward",
+				Section: "tc/veer/pre_forward",
 				Type:    kernelEngineTC,
 			}},
 		}},
@@ -567,7 +567,7 @@ func TestKernelPluginPipelineInvalidExplicitInterfaceFiltersPlugin(t *testing.T)
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	desired, states, forwardIfRules, replyIfRules := kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
 	if len(desired) != 0 {
 		t.Fatalf("desired = %+v, want plugin filtered after interface resolution failure", desired)
@@ -599,8 +599,8 @@ func TestKernelPluginPipelineNoRuleFilterValidatesPostCoreInvalidInterface(t *te
 			Status:         pluginObjectStatusVerified,
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{
-				{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
-				{ID: "tc_post_lookup", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
+				{ID: "tc_pre_forward", Section: "tc/veer/pre_forward", Type: kernelEngineTC},
+				{ID: "tc_post_lookup", Section: "tc/veer/post_lookup", Type: kernelEngineTC},
 			},
 		}},
 		Hooks: []PluginHook{
@@ -611,7 +611,7 @@ func TestKernelPluginPipelineNoRuleFilterValidatesPostCoreInvalidInterface(t *te
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	desired = kernelPluginPipelineFilterNoRulePlugins(desired)
 	desired, states, forwardIfRules, replyIfRules := kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
 	if len(desired) != 0 {
@@ -644,8 +644,8 @@ func TestBuildKernelPluginPipelineDesiredMapsForwardPriorityAroundCore(t *testin
 			Status:         pluginObjectStatusVerified,
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{
-				{ID: "tc_before_core", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
-				{ID: "tc_after_core", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
+				{ID: "tc_before_core", Section: "tc/veer/pre_forward", Type: kernelEngineTC},
+				{ID: "tc_after_core", Section: "tc/veer/post_lookup", Type: kernelEngineTC},
 			},
 		}},
 		Hooks: []PluginHook{
@@ -656,7 +656,7 @@ func TestBuildKernelPluginPipelineDesiredMapsForwardPriorityAroundCore(t *testin
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no registered/error state", states)
 	}
@@ -689,8 +689,8 @@ func TestBuildKernelPluginPipelineDesiredMapsReplyPriorityAroundCore(t *testing.
 			Status:         pluginObjectStatusVerified,
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{
-				{ID: "tc_before_reply", Section: "tc/fvtap/pre_reply", Type: kernelEngineTC},
-				{ID: "tc_after_reply", Section: "tc/fvtap/post_reply", Type: kernelEngineTC},
+				{ID: "tc_before_reply", Section: "tc/veer/pre_reply", Type: kernelEngineTC},
+				{ID: "tc_after_reply", Section: "tc/veer/post_reply", Type: kernelEngineTC},
 			},
 		}},
 		Hooks: []PluginHook{
@@ -701,7 +701,7 @@ func TestBuildKernelPluginPipelineDesiredMapsReplyPriorityAroundCore(t *testing.
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no registered/error state", states)
 	}
@@ -741,7 +741,7 @@ func TestBuildKernelPluginPipelineDesiredRejectsForwardCorePriorityCollision(t *
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{{
 				ID:      "tc_forward",
-				Section: "tc/fvtap/pre_forward",
+				Section: "tc/veer/pre_forward",
 				Type:    kernelEngineTC,
 			}},
 		}},
@@ -758,12 +758,12 @@ func TestBuildKernelPluginPipelineDesiredRejectsForwardCorePriorityCollision(t *
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(desired) != 0 {
 		t.Fatalf("desired = %+v, want no hooks for core priority collision", desired)
 	}
 	state, ok := states["core_collision"]
-	if !ok || state.Error == "" || !strings.Contains(state.Error, "collides with fvtap core priority") {
+	if !ok || state.Error == "" || !strings.Contains(state.Error, "collides with Veer Core priority") {
 		t.Fatalf("state = %+v, want core priority collision error", state)
 	}
 }
@@ -786,8 +786,8 @@ func TestBuildKernelPluginPipelineDesiredAllowsPostLookup(t *testing.T) {
 			Status:         pluginObjectStatusVerified,
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{
-				{ID: "tc_post_lookup", Section: "tc/fvtap/post_lookup", Type: kernelEngineTC},
-				{ID: "tc_pre_forward", Section: "tc/fvtap/pre_forward", Type: kernelEngineTC},
+				{ID: "tc_post_lookup", Section: "tc/veer/post_lookup", Type: kernelEngineTC},
+				{ID: "tc_pre_forward", Section: "tc/veer/pre_forward", Type: kernelEngineTC},
 			},
 		}},
 		Hooks: []PluginHook{
@@ -798,7 +798,7 @@ func TestBuildKernelPluginPipelineDesiredAllowsPostLookup(t *testing.T) {
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no registered/error state", states)
 	}
@@ -830,7 +830,7 @@ func TestBuildKernelPluginPipelineDesiredForRuntimeAllowsLabByDefault(t *testing
 			ResolvedSHA256: "abc",
 			Programs: []PluginObjectProgram{{
 				ID:      "tc_pre_forward",
-				Section: "tc/fvtap/pre_forward",
+				Section: "tc/veer/pre_forward",
 				Type:    kernelEngineTC,
 			}},
 		}},
@@ -846,7 +846,7 @@ func TestBuildKernelPluginPipelineDesiredForRuntimeAllowsLabByDefault(t *testing
 		Status:  pluginStatusActive,
 		rootDir: dir,
 	}
-	catalog := PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}}
+	catalog := PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}}
 
 	enabled := true
 	cfg := &Config{
@@ -888,7 +888,7 @@ func TestBuildKernelPluginPipelineDesiredAllowsFirewallStyleMultiObjectContext(t
 				ResolvedSHA256: "pre",
 				Programs: []PluginObjectProgram{{
 					ID:      "tc_pre_filter",
-					Section: "tc/fvtap/pre_filter",
+					Section: "tc/veer/pre_filter",
 					Type:    kernelEngineTC,
 				}},
 			},
@@ -899,7 +899,7 @@ func TestBuildKernelPluginPipelineDesiredAllowsFirewallStyleMultiObjectContext(t
 				ResolvedSHA256: "post",
 				Programs: []PluginObjectProgram{{
 					ID:      "tc_post_filter",
-					Section: "tc/fvtap/post_filter",
+					Section: "tc/veer/post_filter",
 					Type:    kernelEngineTC,
 				}},
 			},
@@ -912,7 +912,7 @@ func TestBuildKernelPluginPipelineDesiredAllowsFirewallStyleMultiObjectContext(t
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no error state", states)
 	}
@@ -956,8 +956,8 @@ func TestBuildKernelPluginPipelineDesiredAllowsSameObjectPrePostContext(t *testi
 			Status:         pluginObjectStatusVerified,
 			ResolvedSHA256: "same-object",
 			Programs: []PluginObjectProgram{
-				{ID: "tc_pre_filter", Section: "tc/fvtap/pre_filter", Type: kernelEngineTC},
-				{ID: "tc_post_filter", Section: "tc/fvtap/post_filter", Type: kernelEngineTC},
+				{ID: "tc_pre_filter", Section: "tc/veer/pre_filter", Type: kernelEngineTC},
+				{ID: "tc_post_filter", Section: "tc/veer/post_filter", Type: kernelEngineTC},
 			},
 		}},
 		Hooks: []PluginHook{
@@ -968,7 +968,7 @@ func TestBuildKernelPluginPipelineDesiredAllowsSameObjectPrePostContext(t *testi
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(states) != 0 {
 		t.Fatalf("states = %+v, want no error state", states)
 	}
@@ -1011,7 +1011,7 @@ func TestBuildKernelPluginPipelineDesiredRejectsPreForwardPluginContext(t *testi
 			ResolvedSHA256: "pre",
 			Programs: []PluginObjectProgram{{
 				ID:      "tc_pre_filter",
-				Section: "tc/fvtap/pre_filter",
+				Section: "tc/veer/pre_filter",
 				Type:    kernelEngineTC,
 			}},
 		}},
@@ -1029,12 +1029,12 @@ func TestBuildKernelPluginPipelineDesiredRejectsPreForwardPluginContext(t *testi
 		rootDir: dir,
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(desired) != 0 {
 		t.Fatalf("desired = %+v, want rejected pre-core context", desired)
 	}
 	state, ok := states["bad_firewall"]
-	if !ok || state.Error == "" || !strings.Contains(state.Error, "only available after fvtap core lookup") {
+	if !ok || state.Error == "" || !strings.Contains(state.Error, "only available after Veer Core lookup") {
 		t.Fatalf("state = %+v, want pre-core context error", state)
 	}
 }
@@ -1103,7 +1103,7 @@ func TestBuildKernelPluginPipelineDesiredRejectsHookLimitOverflow(t *testing.T) 
 			ResolvedSHA256: "fake",
 			Programs: []PluginObjectProgram{{
 				ID:      "tc_pre_filter",
-				Section: "tc/fvtap/pre_filter",
+				Section: "tc/veer/pre_filter",
 				Type:    kernelEngineTC,
 			}},
 		}},
@@ -1122,7 +1122,7 @@ func TestBuildKernelPluginPipelineDesiredRejectsHookLimitOverflow(t *testing.T) 
 		})
 	}
 
-	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}})
+	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if len(desired) != 0 {
 		t.Fatalf("desired = %+v, want rejected hook overflow", desired)
 	}
@@ -1150,7 +1150,7 @@ func TestKernelPluginPipelineFingerprintIncludesCoreConfig(t *testing.T) {
 			ObjectID:       "observer",
 			ObjectPath:     "/tmp/observer.o",
 			ProgramRef:     "tc_observe",
-			ProgramSection: "tc/fvtap/pre_forward",
+			ProgramSection: "tc/veer/pre_forward",
 			Stage:          kernelPluginPipelineStagePreForward,
 			Attach:         "ingress",
 			Mode:           "observe",
@@ -1192,10 +1192,10 @@ func TestKernelPluginPipelineFingerprintUsesVerifiedObjectContentAcrossCatalogSn
 			PluginID:       "pppoe_client",
 			HookID:         "pppoe-ingress",
 			ObjectID:       "pppoe_tunnel",
-			ObjectPath:     "/tmp/forward-plugin-catalog-a/pppoe_client/pppoe_tunnel.o",
+			ObjectPath:     "/tmp/veer-plugin-catalog-a/pppoe_client/pppoe_tunnel.o",
 			ObjectSHA256:   strings.Repeat("a", 64),
 			ProgramRef:     "tc_tunnel",
-			ProgramSection: "tc/fvtap/pre_forward",
+			ProgramSection: "tc/veer/pre_forward",
 			Stage:          kernelPluginPipelineStagePreForward,
 			Attach:         "ingress",
 			Mode:           "rewrite",
@@ -1203,7 +1203,7 @@ func TestKernelPluginPipelineFingerprintUsesVerifiedObjectContentAcrossCatalogSn
 		}},
 	}}
 	first := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{})
-	desired[0].hooks[0].ObjectPath = "/tmp/forward-plugin-catalog-b/pppoe_client/pppoe_tunnel.o"
+	desired[0].hooks[0].ObjectPath = "/tmp/veer-plugin-catalog-b/pppoe_client/pppoe_tunnel.o"
 	second := kernelPluginPipelineFingerprint(desired, nil, kernelPluginPipelineCoreConfig{})
 	if first != second {
 		t.Fatalf("fingerprint changed for identical verified object content: %s != %s", first, second)
@@ -1302,7 +1302,7 @@ func TestKernelPluginPipelineKeepsXDPHooksRegistrationOnly(t *testing.T) {
 		}},
 		Status: pluginStatusActive,
 	}
-	catalog := PluginCatalog{Plugins: []LoadedPlugin{builtinFVTapPlugin(), plugin}}
+	catalog := PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}}
 
 	if kernelPluginPipelineCatalogHasRuntimeHooks(catalog, cfg) {
 		t.Fatal("kernelPluginPipelineCatalogHasRuntimeHooks() = true, want false for xdp-only plugin")
@@ -1382,7 +1382,7 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Fatalf("plugin state = %+v, want one chained dataplane attachment", state)
 	}
 	if len(state.Attachments) != 1 || state.Attachments[0].Interface != kernelPluginPipelineInterface || state.Attachments[0].Status != "chained" {
-		t.Fatalf("plugin attachments = %+v, want chained fvtap attachment", state.Attachments)
+		t.Fatalf("plugin attachments = %+v, want chained veer attachment", state.Attachments)
 	}
 	if state.Attachments[0].Stage != kernelPluginPipelineStagePreForward || state.Attachments[0].ChainSlot != tcProgramChainIndexV4PluginBase {
 		t.Fatalf("plugin attachment = %+v, want pre_forward slot %d", state.Attachments[0], tcProgramChainIndexV4PluginBase)
@@ -2377,7 +2377,7 @@ func writeDropCorePluginForTest(t *testing.T, pluginDir string, ifName string) {
 ebpf.loadObject({
   id: 'drop',
   path: 'drop_core.o',
-  programs: [{id: 'tc_drop', section: 'tc/fvtap/pre_forward', type: 'tc'}]
+  programs: [{id: 'tc_drop', section: 'tc/veer/pre_forward', type: 'tc'}]
 });
 hooks.attach({
   id: 'drop-ingress',
@@ -2415,7 +2415,7 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.max_entries = 77,
 };
 
-SEC("tc/fvtap/pre_forward")
+SEC("tc/veer/pre_forward")
 int tc_drop(struct __sk_buff *skb)
 {
 	return TC_ACT_SHOT;
@@ -2445,7 +2445,7 @@ func writeRedirectCorePluginForTest(t *testing.T, pluginDir string, spec redirec
 ebpf.loadObject({
   id: 'redirect',
   path: 'redirect_core.o',
-  programs: [{id: 'tc_redirect', section: 'tc/fvtap/pre_forward', type: 'tc'}]
+  programs: [{id: 'tc_redirect', section: 'tc/veer/pre_forward', type: 'tc'}]
 });
 hooks.attach({
   id: 'redirect-ingress',
@@ -2513,7 +2513,7 @@ static __inline int redirect_with_l2(struct __sk_buff *skb, __u32 ifindex, const
 	return bpf_redirect(ifindex, 0);
 }
 
-SEC("tc/fvtap/pre_forward")
+SEC("tc/veer/pre_forward")
 int tc_redirect(struct __sk_buff *skb)
 {
 	if (skb->ifindex == CLIENT_HOST_IFINDEX) {
@@ -2569,7 +2569,7 @@ func writePostLookupPluginForTest(t *testing.T, pluginDir string, ifNames ...str
 ebpf.loadObject({
   id: 'observer',
   path: 'rule_observer.o',
-  programs: [{id: 'tc_post_lookup', section: 'tc/fvtap/post_lookup', type: 'tc'}]
+  programs: [{id: 'tc_post_lookup', section: 'tc/veer/post_lookup', type: 'tc'}]
 });
 hooks.attach({
   id: 'after-rule',
@@ -2593,7 +2593,7 @@ typedef unsigned int __u32;
 #define BPF_FUNC_map_lookup_elem 1
 #define BPF_FUNC_tail_call 12
 #define TC_ACT_UNSPEC (-1)
-#define FVTAP_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE 9
+#define VEER_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE 9
 
 struct __sk_buff;
 
@@ -2648,14 +2648,14 @@ struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
 	.max_entries = 1,
 };
 
-SEC("tc/fvtap/post_lookup")
+SEC("tc/veer/post_lookup")
 int tc_post_lookup(struct __sk_buff *skb)
 {
 	__u32 key = 0;
 	struct tc_plugin_ctx_v4 *ctx = bpf_map_lookup_elem(&tc_plugin_ctx_v4, &key);
 	if (ctx && ctx->have_rule == 0)
 		return TC_ACT_UNSPEC;
-	bpf_tail_call(skb, &tc_prog_chain_v4, FVTAP_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE);
+	bpf_tail_call(skb, &tc_prog_chain_v4, VEER_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE);
 	return TC_ACT_UNSPEC;
 }
 
@@ -2672,7 +2672,7 @@ func writePostReplyPluginForTest(t *testing.T, pluginDir string) {
 ebpf.loadObject({
   id: 'observer',
   path: 'reply_observer.o',
-  programs: [{id: 'tc_post_reply', section: 'tc/fvtap/post_reply', type: 'tc'}]
+  programs: [{id: 'tc_post_reply', section: 'tc/veer/post_reply', type: 'tc'}]
 });
 hooks.attach({
   id: 'after-reply',
@@ -2695,7 +2695,7 @@ typedef unsigned int __u32;
 #define BPF_FUNC_map_lookup_elem 1
 #define BPF_FUNC_tail_call 12
 #define TC_ACT_UNSPEC (-1)
-#define FVTAP_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE 28
+#define VEER_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE 28
 
 struct __sk_buff;
 
@@ -2750,14 +2750,14 @@ struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
 	.max_entries = 1,
 };
 
-SEC("tc/fvtap/post_reply")
+SEC("tc/veer/post_reply")
 int tc_post_reply(struct __sk_buff *skb)
 {
 	__u32 key = 0;
 	struct tc_plugin_ctx_v4 *ctx = bpf_map_lookup_elem(&tc_plugin_ctx_v4, &key);
 	if (ctx && ctx->have_flow == 0)
 		return TC_ACT_UNSPEC;
-	bpf_tail_call(skb, &tc_prog_chain_v4, FVTAP_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE);
+	bpf_tail_call(skb, &tc_prog_chain_v4, VEER_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE);
 	return TC_ACT_UNSPEC;
 }
 

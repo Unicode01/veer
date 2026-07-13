@@ -1,13 +1,13 @@
 (function () {
-  const app = window.ForwardApp;
+  const app = window.VeerApp;
   if (!app) return;
 
   const colorSchemeQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
   app.translations = {
     'zh-CN': {
-      'app.title': 'NAT Forward Manager',
-      'app.subtitle': '在一个面板里统一管理转发规则、建站配置和 Worker 状态。',
+      'app.title': 'Veer',
+      'app.subtitle': '可编程 Linux 网络数据面与路由运行时。',
       'auth.title': '认证配置',
       'auth.description': '请输入 Bearer Token（config.json 的 web_token）继续。',
       'auth.tokenPlaceholder': '请输入 web_token',
@@ -389,20 +389,20 @@
       'plugins.catalog.appliedFingerprint': '已应用',
       'plugins.catalog.detectedFingerprint': '待应用',
       'plugins.chain.title': 'TC Pipeline',
-      'plugins.chain.empty': 'TC 路径：legacy fvtap 快路径；当前没有外部插件链入 fvtap core 前后。',
+      'plugins.chain.empty': 'TC 路径：legacy Veer 快路径；当前没有外部插件链入 Veer Core 前后。',
       'plugins.chain.meta': 'TC pipeline：{{chain}}',
       'plugins.chain.slot': 'slot {{slot}}',
       'plugins.chain.forwardPath': 'forward: {{chain}}',
       'plugins.chain.replyPath': 'reply: {{chain}}',
       'plugins.chain.preForward': 'pre_forward[{{chain}}]',
-      'plugins.chain.core': 'fvtap core(priority={{priority}})',
+      'plugins.chain.core': 'Veer Core(priority={{priority}})',
       'plugins.chain.postLookup': 'post_lookup[{{chain}}]',
-      'plugins.chain.apply': 'fvtap apply/redirect',
+      'plugins.chain.apply': 'Veer apply/redirect',
       'plugins.chain.preReply': 'pre_reply[{{chain}}]',
-      'plugins.chain.replyCore': 'fvtap reply core(priority={{priority}})',
+      'plugins.chain.replyCore': 'Veer Reply Core(priority={{priority}})',
       'plugins.chain.postReply': 'post_reply[{{chain}}]',
-      'plugins.chain.replyApply': 'fvtap reply rewrite',
-      'plugins.chain.legacy': 'legacy fvtap',
+      'plugins.chain.replyApply': 'Veer reply rewrite',
+      'plugins.chain.legacy': 'legacy Veer',
       'plugins.chain.none': '无外部链',
       'plugins.chain.chained': '{{count}} 个链路插件',
       'plugins.chain.preCompact': 'pre x{{count}}',
@@ -414,7 +414,7 @@
       'plugins.chain.postReplyCompact': 'r-post x{{count}}',
       'plugins.chain.replyApplyCompact': 'r-apply',
       'plugins.link.title': '插件数据面链路',
-      'plugins.link.desc': '显示当前插件实际挂载或声明接入 fvtap pipeline 的顺序，当前插件会高亮。',
+      'plugins.link.desc': '显示当前插件实际挂载或声明接入 Veer pipeline 的顺序，当前插件会高亮。',
       'plugins.link.count': '{{count}} 项',
       'plugins.link.interfaceChain': '接口链路',
       'plugins.link.declaredChain': '声明链路',
@@ -423,7 +423,7 @@
       'plugins.link.hook': 'Hook',
       'plugins.link.attachment': '挂载',
       'plugins.link.current': '当前插件',
-      'plugins.link.core': 'fvtap core',
+      'plugins.link.core': 'Veer Core',
       'plugins.link.apply': '应用/重写',
       'plugins.link.coreCompact': 'core',
       'plugins.link.replyCoreCompact': 'r-core',
@@ -772,8 +772,8 @@
       'validation.sourceIPEgressIPv4Only': '出向 NAT 的固定源 IP 当前仅支持 IPv4。'
     },
     'en-US': {
-      'app.title': 'NAT Forward Manager',
-      'app.subtitle': 'Manage forwarding rules, sites, and worker state from one panel.',
+      'app.title': 'Veer',
+      'app.subtitle': 'Programmable Linux networking dataplane and routing runtime.',
       'auth.title': 'Authentication',
       'auth.description': 'Enter the Bearer Token from config.json web_token to continue.',
       'auth.tokenPlaceholder': 'Enter web_token',
@@ -799,7 +799,7 @@
       'form.remark': 'Remark',
       'form.tag': 'Tag',
       'form.protocol': 'Protocol',
-      'form.engine': 'Forward Engine',
+      'form.engine': 'Forwarding Engine',
       'form.transparent': 'Transparent Source IP',
       'form.transparentShort': 'Transparent',
       'form.inInterface': 'Inbound Interface',
@@ -1155,20 +1155,20 @@
       'plugins.catalog.appliedFingerprint': 'Applied',
       'plugins.catalog.detectedFingerprint': 'Pending',
       'plugins.chain.title': 'TC Pipeline',
-      'plugins.chain.empty': 'TC path: legacy fvtap fast path; no external plugins are chained around fvtap core.',
+      'plugins.chain.empty': 'TC path: legacy Veer fast path; no external plugins are chained around Veer Core.',
       'plugins.chain.meta': 'TC pipeline: {{chain}}',
       'plugins.chain.slot': 'slot {{slot}}',
       'plugins.chain.forwardPath': 'forward: {{chain}}',
       'plugins.chain.replyPath': 'reply: {{chain}}',
       'plugins.chain.preForward': 'pre_forward[{{chain}}]',
-      'plugins.chain.core': 'fvtap core(priority={{priority}})',
+      'plugins.chain.core': 'Veer Core(priority={{priority}})',
       'plugins.chain.postLookup': 'post_lookup[{{chain}}]',
-      'plugins.chain.apply': 'fvtap apply/redirect',
+      'plugins.chain.apply': 'Veer apply/redirect',
       'plugins.chain.preReply': 'pre_reply[{{chain}}]',
-      'plugins.chain.replyCore': 'fvtap reply core(priority={{priority}})',
+      'plugins.chain.replyCore': 'Veer Reply Core(priority={{priority}})',
       'plugins.chain.postReply': 'post_reply[{{chain}}]',
-      'plugins.chain.replyApply': 'fvtap reply rewrite',
-      'plugins.chain.legacy': 'legacy fvtap',
+      'plugins.chain.replyApply': 'Veer reply rewrite',
+      'plugins.chain.legacy': 'legacy Veer',
       'plugins.chain.none': 'No chain',
       'plugins.chain.chained': '{{count}} chained',
       'plugins.chain.preCompact': 'pre x{{count}}',
@@ -1180,7 +1180,7 @@
       'plugins.chain.postReplyCompact': 'r-post x{{count}}',
       'plugins.chain.replyApplyCompact': 'r-apply',
       'plugins.link.title': 'Plugin Dataplane Chains',
-      'plugins.link.desc': 'Shows how this plugin is attached to the fvtap pipeline; the current plugin is highlighted.',
+      'plugins.link.desc': 'Shows how this plugin is attached to the Veer pipeline; the current plugin is highlighted.',
       'plugins.link.count': '{{count}} items',
       'plugins.link.interfaceChain': 'Interface Chain',
       'plugins.link.declaredChain': 'Declared Chain',
@@ -1189,7 +1189,7 @@
       'plugins.link.hook': 'Hook',
       'plugins.link.attachment': 'Attachment',
       'plugins.link.current': 'Current plugin',
-      'plugins.link.core': 'fvtap core',
+      'plugins.link.core': 'Veer Core',
       'plugins.link.apply': 'apply/rewrite',
       'plugins.link.coreCompact': 'core',
       'plugins.link.replyCoreCompact': 'r-core',
@@ -1540,9 +1540,14 @@
   };
 
   app.storageKeys = Object.assign({
+    locale: 'veer_locale',
+    theme: 'veer_theme'
+  }, app.storageKeys || {});
+
+  app.legacyStorageKeys = Object.assign({
     locale: 'forward_locale',
     theme: 'forward_theme'
-  }, app.storageKeys || {});
+  }, app.legacyStorageKeys || {});
 
   app.el.localeSelect = app.$('localeSelect');
   app.el.themeSelect = app.$('themeSelect');
@@ -1585,12 +1590,20 @@
   };
 
   app.getLocale = function getLocale() {
-    return app.normalizeLocale(localStorage.getItem(app.storageKeys.locale) || app.detectLocale());
+    const stored = localStorage.getItem(app.storageKeys.locale);
+    if (stored !== null) return app.normalizeLocale(stored);
+    const legacy = localStorage.getItem(app.legacyStorageKeys.locale);
+    if (legacy !== null) {
+      localStorage.setItem(app.storageKeys.locale, legacy);
+      return app.normalizeLocale(legacy);
+    }
+    return app.normalizeLocale(app.detectLocale());
   };
 
   app.setLocale = function setLocale(locale) {
     app.state.locale = app.normalizeLocale(locale);
     localStorage.setItem(app.storageKeys.locale, app.state.locale);
+    localStorage.setItem(app.legacyStorageKeys.locale, app.state.locale);
     document.documentElement.lang = app.state.locale;
     if (app.el.localeSelect) app.el.localeSelect.value = app.state.locale;
     app.refreshLocalizedUI();
@@ -1602,7 +1615,14 @@
   };
 
   app.getTheme = function getTheme() {
-    return app.normalizeTheme(localStorage.getItem(app.storageKeys.theme) || 'system');
+    const stored = localStorage.getItem(app.storageKeys.theme);
+    if (stored !== null) return app.normalizeTheme(stored);
+    const legacy = localStorage.getItem(app.legacyStorageKeys.theme);
+    if (legacy !== null) {
+      localStorage.setItem(app.storageKeys.theme, legacy);
+      return app.normalizeTheme(legacy);
+    }
+    return 'system';
   };
 
   app.applyTheme = function applyTheme(theme, persist) {
@@ -1611,6 +1631,7 @@
 
     if (persist !== false) {
       localStorage.setItem(app.storageKeys.theme, app.state.theme);
+      localStorage.setItem(app.legacyStorageKeys.theme, app.state.theme);
     }
 
     document.documentElement.dataset.theme = app.state.resolvedTheme;

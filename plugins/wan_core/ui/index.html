@@ -15,11 +15,11 @@
     .wan-actions { justify-content: flex-end; gap: 8px; }
     .wan-advanced {
       padding-top: 2px;
-      border-top: 1px solid var(--fwd-border);
+      border-top: 1px solid var(--veer-border);
     }
     .wan-advanced > summary {
       cursor: pointer;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 12px;
       font-weight: 700;
     }
@@ -35,17 +35,17 @@
       gap: 8px;
       min-height: 32px;
       padding: 5px 8px;
-      border: 1px solid var(--fwd-border);
+      border: 1px solid var(--veer-border);
       border-radius: 8px;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 650;
     }
-    .wan-toggle .fwd-input { flex: 0 0 auto; }
+    .wan-toggle .veer-input { flex: 0 0 auto; }
     .wan-effective { display: grid; gap: 9px; }
     .wan-effective-title {
       margin: 0;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 700;
     }
@@ -53,16 +53,16 @@
     .wan-route-wrap { overflow-x: auto; }
     @media (max-width: 760px) {
       .wan-config-grid { grid-template-columns: 1fr; }
-      .wan-actions .fwd-button { flex: 1 1 auto; }
+      .wan-actions .veer-button { flex: 1 1 auto; }
     }
   </style>
 </head>
 <body>
   <script>
     (function () {
-      const F = window.ForwardPluginHost;
+      const F = window.VeerPluginHost;
       if (!F) {
-        document.body.textContent = 'ForwardPluginHost is not available.';
+        document.body.textContent = 'VeerPluginHost is not available.';
         return;
       }
 
@@ -80,9 +80,9 @@
           'status.deleted': '已拆除',
           'status.deleteFailed': '拆除失败',
           'title': 'WAN Core',
-          'desc': '将协议插件发布的 WAN 会话映射到本机与 Forward 共用的 Linux L3 边界。',
+          'desc': '将协议插件发布的 WAN 会话映射到本机与 Veer 共用的 Linux L3 边界。',
           'badge.netAdmin': 'net.admin',
-          'badge.forwardCore': 'forward_core',
+          'badge.veerCore': 'veer_core',
           'stat.input': '输入',
           'stat.input.value': 'WAN 会话',
           'stat.input.detail': '从协议插件发布的 sessions resource 消费。',
@@ -91,7 +91,7 @@
           'stat.handoff.detail': '低 MTU 协议可使用内部 veth peer 接收内核已分段流量，不修改物理 LAN 的 GRO。',
           'stat.core': '核心路径',
           'stat.core.value': '规范化 L3',
-          'stat.core.detail': 'Forward Core 不处理 PPPoE 等 WAN 协议头。',
+          'stat.core.detail': 'Veer Core 不处理 PPPoE 等 WAN 协议头。',
           'profile.title': 'WAN 会话与边界',
           'profile.desc': '已有 driver 会话会自动出现；新建配置仅用于预先准备或手动管理本地边界。',
           'profile.new': '新建配置...',
@@ -139,7 +139,7 @@
           'stat.local': '本地接口',
           'stat.pipeline': '协议管线',
           'stat.noarp': 'NOARP 边界',
-          'stat.parent': 'Forward 父接口',
+          'stat.parent': 'Veer 父接口',
           'stat.ipv4': 'IPv4',
           'stat.ipv6': 'IPv6',
           'stat.pd': 'PD',
@@ -163,9 +163,9 @@
           'status.deleted': 'Removed',
           'status.deleteFailed': 'Teardown failed',
           'title': 'WAN Core',
-          'desc': 'Maps protocol-driver WAN sessions to a Linux L3 boundary shared by the host and Forward.',
+          'desc': 'Maps protocol-driver WAN sessions to a Linux L3 boundary shared by the host and Veer.',
           'badge.netAdmin': 'net.admin',
-          'badge.forwardCore': 'forward_core',
+          'badge.veerCore': 'veer_core',
           'stat.input': 'Input',
           'stat.input.value': 'WAN session',
           'stat.input.detail': 'Consumes sessions published by protocol plugins.',
@@ -174,7 +174,7 @@
           'stat.handoff.detail': 'Low-MTU protocols can consume kernel-segmented traffic on an internal veth peer without changing physical LAN GRO.',
           'stat.core': 'Core Path',
           'stat.core.value': 'normalized L3',
-          'stat.core.detail': 'Forward Core does not process PPPoE or other WAN protocol headers.',
+          'stat.core.detail': 'Veer Core does not process PPPoE or other WAN protocol headers.',
           'profile.title': 'WAN Session and Boundary',
           'profile.desc': 'Driver sessions appear automatically. Create a profile only to prepare or manually manage a local boundary.',
           'profile.new': 'New profile...',
@@ -222,7 +222,7 @@
           'stat.local': 'Local Interface',
           'stat.pipeline': 'Protocol Pipeline',
           'stat.noarp': 'NOARP Boundary',
-          'stat.parent': 'Forward Parent',
+          'stat.parent': 'Veer Parent',
           'stat.ipv4': 'IPv4',
           'stat.ipv6': 'IPv6',
           'stat.pd': 'PD',
@@ -358,7 +358,7 @@
         newPlaceholder: function () { return T('profile.newPlaceholder'); },
         defaultKey: 'default'
       });
-      const localInterface = input('fwdlocal0', 'fwdlocal0');
+      const localInterface = input('veerlocal0', 'veerlocal0');
       const mtu = input('1492', '1492', 'number');
       const addresses = F.h('textarea', {
         className: F.classes.input,
@@ -376,7 +376,7 @@
         columns: [
           { key: 'dst', label: function () { return T('route.dst'); }, placeholder: '0.0.0.0/0', wide: true },
           { key: 'gateway', label: function () { return T('route.gateway'); }, placeholder: '192.0.2.1' },
-          { key: 'dev', label: function () { return T('route.dev'); }, placeholder: 'fwdlocal0' },
+          { key: 'dev', label: function () { return T('route.dev'); }, placeholder: 'veerlocal0' },
           { key: 'src', label: function () { return T('route.src'); }, placeholder: '198.51.100.2' },
           { key: 'table', label: function () { return T('route.table'); }, type: 'number', min: 0, max: 2147483647, placeholder: '0' },
           { key: 'metric', label: function () { return T('route.metric'); }, type: 'number', min: 0, max: 2147483647, placeholder: '0' }
@@ -403,7 +403,7 @@
         return {
           wan_id: selectedKey(),
           profile_key: selectedKey(),
-          local_interface: localInterface.value.trim() || 'fwdlocal0',
+          local_interface: localInterface.value.trim() || 'veerlocal0',
           mtu: Number(mtu.value || 1492),
           addresses: addresses.value.split(/[\s,]+/).map(function (item) { return item.trim(); }).filter(Boolean),
           routes: routes,
@@ -416,7 +416,7 @@
       }
 
       function resetForm(key) {
-        localInterface.value = 'fwdlocal0';
+        localInterface.value = 'veerlocal0';
         mtu.value = '1492';
         addresses.value = '';
         installDefaultV4.checked = false;
@@ -432,7 +432,7 @@
       function fillForm(key) {
         const profile = recordData('profiles', key) || {};
         const session = recordData('sessions', key) || {};
-        localInterface.value = profile.local_interface || session.local_interface || 'fwdlocal0';
+        localInterface.value = profile.local_interface || session.local_interface || 'veerlocal0';
         mtu.value = profile.mtu || session.mtu || 1492;
         addresses.value = Array.isArray(profile.addresses) ? profile.addresses.join('\n') : '';
         installDefaultV4.checked = profile.install_default_route === true;
@@ -594,7 +594,7 @@
           syncActionButtons();
           return;
         }
-        const forward = data.forward_core || {};
+        const veerCore = data.veer_core || {};
         stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
           F.stat(T('stat.phase'), data.phase || data.state || '-'),
           F.stat(T('stat.driver'), data.driver || '-'),
@@ -603,7 +603,7 @@
           F.stat(T('stat.local'), (data.local_interface || '-') + (data.local_ifindex ? ' #' + data.local_ifindex : '')),
           F.stat(T('stat.pipeline'), (data.pipeline_interface || '-') + (data.pipeline_ifindex ? ' #' + data.pipeline_ifindex : '')),
           F.stat(T('stat.noarp'), data.handoff_mode === 'segmented_veth' ? (data.noarp_ready === true ? T('value.yes') : T('value.no')) : '-'),
-          F.stat(T('stat.parent'), forward.parent_interface || data.forward_parent_interface || '-'),
+          F.stat(T('stat.parent'), veerCore.parent_interface || data.veer_parent_interface || '-'),
           F.stat(T('stat.ipv4'), data.ipv4 || '-'),
           F.stat(T('stat.ipv6'), data.ipv6 || data.ipv6_link_local || '-', [data.ipv6_link_local, data.ipv6_gateway].filter(Boolean).join(' / ')),
           F.stat(T('stat.pd'), data.pd_prefix || '-'),
@@ -655,7 +655,7 @@
               ]),
               F.h('div', { className: F.classes.toolbar }, [
                 bindText(F.badge(T('badge.netAdmin')), 'badge.netAdmin'),
-                bindText(F.badge(T('badge.forwardCore')), 'badge.forwardCore'),
+                bindText(F.badge(T('badge.veerCore')), 'badge.veerCore'),
                 status
               ])
             ])

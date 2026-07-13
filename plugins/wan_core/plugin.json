@@ -8,11 +8,11 @@
   "description": "Protocol-neutral WAN adapter with direct and kernel-segmented Linux L3 handoff modes.",
   "control": {
     "main": "control.js",
-    "sha256": "56db782a4b5672abfe61b5fc2a77dcb9ac87fd3842d4a376dd5d4d1d93b1588a",
+    "sha256": "49fa1c7d653967d168065aecf0f833343990aa7690f5922d49e9718c5da21aab",
     "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
     "net_access": [
       {
-        "interfaces": ["fwd*"],
+        "interfaces": ["veer*"],
         "operations": ["addr.write", "link.create", "link.delete", "link.read", "link.state", "route.write"]
       }
     ]

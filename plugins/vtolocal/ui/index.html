@@ -15,7 +15,7 @@
     .local-actions { justify-content: flex-end; gap: 8px; }
     .local-section-title {
       margin: 0;
-      color: var(--fwd-muted);
+      color: var(--veer-muted);
       font-size: 11px;
       font-weight: 700;
     }
@@ -24,16 +24,16 @@
     .local-route-wrap { overflow-x: auto; }
     @media (max-width: 720px) {
       .local-config-grid { grid-template-columns: 1fr; }
-      .local-actions .fwd-button { flex: 1 1 auto; }
+      .local-actions .veer-button { flex: 1 1 auto; }
     }
   </style>
 </head>
 <body>
   <script>
     (function () {
-      const F = window.ForwardPluginHost;
+      const F = window.VeerPluginHost;
       if (!F) {
-        document.body.textContent = 'ForwardPluginHost is not available.';
+        document.body.textContent = 'VeerPluginHost is not available.';
         return;
       }
 
@@ -270,7 +270,7 @@
         newPlaceholder: function () { return T('profile.newPlaceholder'); },
         defaultKey: 'default'
       });
-      const localInterface = input('fwdlocal0', 'fwdlocal0');
+      const localInterface = input('veerlocal0', 'veerlocal0');
       const mtu = input('1492', '1492', 'number');
       const addresses = F.h('textarea', {
         className: F.classes.input,
@@ -280,7 +280,7 @@
         columns: [
           { key: 'dst', label: function () { return T('route.dst'); }, placeholder: '198.51.100.0/24', wide: true },
           { key: 'gateway', label: function () { return T('route.gateway'); }, placeholder: '192.0.2.1' },
-          { key: 'dev', label: function () { return T('route.dev'); }, placeholder: 'fwdlocal0' },
+          { key: 'dev', label: function () { return T('route.dev'); }, placeholder: 'veerlocal0' },
           { key: 'src', label: function () { return T('route.src'); }, placeholder: '192.0.2.2' },
           { key: 'table', label: function () { return T('route.table'); }, type: 'number', min: 0, max: 2147483647, placeholder: '0' },
           { key: 'metric', label: function () { return T('route.metric'); }, type: 'number', min: 0, max: 2147483647, placeholder: '0' }
@@ -306,7 +306,7 @@
         if (routes.some(function (route) { return !route.dst; })) throw new Error(T('error.routeDestination'));
         return {
           profile_key: selectedKey(),
-          local_interface: localInterface.value.trim() || 'fwdlocal0',
+          local_interface: localInterface.value.trim() || 'veerlocal0',
           mtu: Number(mtu.value || 1492),
           addresses: addresses.value.split(/[\s,]+/).map(function (item) { return item.trim(); }).filter(Boolean),
           routes: routes
@@ -314,7 +314,7 @@
       }
 
       function resetForm() {
-        localInterface.value = 'fwdlocal0';
+        localInterface.value = 'veerlocal0';
         mtu.value = '1492';
         addresses.value = '';
         routeEditor.setValues([]);
@@ -323,7 +323,7 @@
 
       function fillForm(key) {
         const data = recordData('links', key) || {};
-        localInterface.value = data.local_interface || 'fwdlocal0';
+        localInterface.value = data.local_interface || 'veerlocal0';
         mtu.value = data.mtu || 1492;
         addresses.value = Array.isArray(data.addresses) ? data.addresses.join('\n') : '';
         routeEditor.setValues(Array.isArray(data.routes) ? data.routes : []);

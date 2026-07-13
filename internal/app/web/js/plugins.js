@@ -1,5 +1,5 @@
 (function () {
-  const app = window.ForwardApp;
+  const app = window.VeerApp;
   if (!app) return;
 
   function listText(values) {
@@ -392,8 +392,8 @@
     const runtime = catalog.runtime || {};
     if (typeof runtime.core_priority === 'number' && Number.isFinite(runtime.core_priority)) return runtime.core_priority;
     const plugins = Array.isArray(app.state.plugins.data) ? app.state.plugins.data : [];
-    const fvtap = plugins.find((plugin) => plugin && plugin.id === 'fvtap');
-    const hooks = fvtap && Array.isArray(fvtap.hooks) ? fvtap.hooks : [];
+    const core = plugins.find((plugin) => plugin && plugin.id === 'veer_core');
+    const hooks = core && Array.isArray(core.hooks) ? core.hooks : [];
     const coreHook = hooks.find((hook) => hook && hook.engine === 'tc' && hook.attach === 'ingress' && hook.stage === 'forward');
     if (coreHook && typeof coreHook.priority === 'number' && Number.isFinite(coreHook.priority)) return coreHook.priority;
     return 1000;
@@ -721,7 +721,7 @@
     return '';
   }
 
-  function isDeclaredFVTapPipelineHook(hook, corePriority) {
+  function isDeclaredVeerPipelineHook(hook, corePriority) {
     const engine = String(hook && hook.engine || 'tc').toLowerCase();
     const attach = String(hook && hook.attach || 'ingress').toLowerCase();
     const mode = String(hook && hook.mode || '').toLowerCase();
@@ -798,7 +798,7 @@
     data.forEach((candidate) => {
       const hooks = Array.isArray(candidate && candidate.hooks) ? candidate.hooks : [];
       hooks.forEach((hook) => {
-        if (!isDeclaredFVTapPipelineHook(hook, corePriority)) return;
+        if (!isDeclaredVeerPipelineHook(hook, corePriority)) return;
         all.push({ plugin: candidate, hook });
       });
     });
@@ -1214,7 +1214,7 @@
   }
 
   function pluginActionsNode(plugin) {
-    if (!plugin || plugin.builtin || plugin.id === 'fvtap' || plugin._pendingOnly) return null;
+    if (!plugin || plugin.builtin || plugin.id === 'veer_core' || plugin._pendingOnly) return null;
     const id = String(plugin.id || '').trim();
     if (!id) return null;
     const pending = app.isRowPending && app.isRowPending('plugin', id);
@@ -1248,81 +1248,81 @@
   function pluginHostComponentCSS() {
     return `
 :root {
-  --fwd-bg: #f5f6f8;
-  --fwd-surface: #ffffff;
-  --fwd-surface-soft: #f8f9fb;
-  --fwd-surface-tint: #eef4ff;
-  --fwd-text: #1f2937;
-  --fwd-muted: #4b5563;
-  --fwd-soft: #6b7280;
-  --fwd-border: #d9dde3;
-  --fwd-border-strong: #c7ced8;
-  --fwd-primary: #2563eb;
-  --fwd-primary-hover: #1d4ed8;
-  --fwd-primary-soft: rgba(37, 99, 235, 0.08);
-  --fwd-focus: rgba(37, 99, 235, 0.14);
-  --fwd-success-bg: #f0fdf4;
-  --fwd-success-border: #86efac;
-  --fwd-success-text: #15803d;
-  --fwd-danger: #dc2626;
-  --fwd-danger-hover: #b91c1c;
-  --fwd-danger-soft: rgba(220, 38, 38, 0.08);
-  --fwd-radius: 10px;
-  --fwd-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+  --veer-bg: #f5f6f8;
+  --veer-surface: #ffffff;
+  --veer-surface-soft: #f8f9fb;
+  --veer-surface-tint: #eef4ff;
+  --veer-text: #1f2937;
+  --veer-muted: #4b5563;
+  --veer-soft: #6b7280;
+  --veer-border: #d9dde3;
+  --veer-border-strong: #c7ced8;
+  --veer-primary: #2563eb;
+  --veer-primary-hover: #1d4ed8;
+  --veer-primary-soft: rgba(37, 99, 235, 0.08);
+  --veer-focus: rgba(37, 99, 235, 0.14);
+  --veer-success-bg: #f0fdf4;
+  --veer-success-border: #86efac;
+  --veer-success-text: #15803d;
+  --veer-danger: #dc2626;
+  --veer-danger-hover: #b91c1c;
+  --veer-danger-soft: rgba(220, 38, 38, 0.08);
+  --veer-radius: 10px;
+  --veer-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
   color-scheme: light;
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 * {
   box-sizing: border-box;
 }
-body.fwd-plugin-body,
+body.veer-plugin-body,
 body {
   margin: 0;
-  background: var(--fwd-bg);
-  color: var(--fwd-text);
+  background: var(--veer-bg);
+  color: var(--veer-text);
   font-size: 13px;
 }
-.fwd-page { padding: 8px; }
-.fwd-stack { display: grid; gap: 8px; }
-.fwd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
-.fwd-card {
+.veer-page { padding: 8px; }
+.veer-stack { display: grid; gap: 8px; }
+.veer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+.veer-card {
   min-width: 0;
   padding: 10px;
-  border: 1px solid var(--fwd-border);
+  border: 1px solid var(--veer-border);
   border-radius: 9px;
   background: rgba(255, 255, 255, 0.94);
-  box-shadow: var(--fwd-shadow);
+  box-shadow: var(--veer-shadow);
 }
-.fwd-card + .fwd-card { margin-top: 0; }
-.fwd-card > * + * { margin-top: 8px; }
-.fwd-card > .fwd-toolbar + * { margin-top: 10px; }
-.fwd-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 7px; flex-wrap: wrap; }
-.fwd-title { margin: 0; font-size: 16px; line-height: 1.28; font-weight: 680; letter-spacing: -0.01em; }
-.fwd-desc { margin: 3px 0 0; color: var(--fwd-muted); line-height: 1.42; font-size: 12px; }
-.fwd-muted { color: var(--fwd-muted); }
-.fwd-stat {
+.veer-card + .veer-card { margin-top: 0; }
+.veer-card > * + * { margin-top: 8px; }
+.veer-card > .veer-toolbar + * { margin-top: 10px; }
+.veer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 7px; flex-wrap: wrap; }
+.veer-title { margin: 0; font-size: 16px; line-height: 1.28; font-weight: 680; letter-spacing: -0.01em; }
+.veer-desc { margin: 3px 0 0; color: var(--veer-muted); line-height: 1.42; font-size: 12px; }
+.veer-muted { color: var(--veer-muted); }
+.veer-stat {
   display: grid;
   gap: 3px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid var(--fwd-border);
+  border: 1px solid var(--veer-border);
   border-radius: 8px;
-  background: var(--fwd-surface-soft);
+  background: var(--veer-surface-soft);
 }
-.fwd-stat-label { color: var(--fwd-soft); font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
-.fwd-stat-value {
-  color: var(--fwd-text); font-size: 14px; font-weight: 720; line-height: 1.22;
+.veer-stat-label { color: var(--veer-soft); font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
+.veer-stat-value {
+  color: var(--veer-text); font-size: 14px; font-weight: 720; line-height: 1.22;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.fwd-button {
+.veer-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-height: 30px;
   padding: 0 11px;
-  border: 1px solid var(--fwd-primary);
+  border: 1px solid var(--veer-primary);
   border-radius: 8px;
-  background: var(--fwd-primary);
+  background: var(--veer-primary);
   color: #fff;
   font-size: 12px;
   font-weight: 650;
@@ -1331,45 +1331,45 @@ body {
   cursor: pointer;
   transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
-.fwd-button.secondary {
-  border-color: var(--fwd-border);
-  background: var(--fwd-surface);
-  color: var(--fwd-primary);
+.veer-button.secondary {
+  border-color: var(--veer-border);
+  background: var(--veer-surface);
+  color: var(--veer-primary);
 }
-.fwd-button.is-danger {
-  border-color: var(--fwd-danger);
-  background: var(--fwd-danger);
+.veer-button.is-danger {
+  border-color: var(--veer-danger);
+  background: var(--veer-danger);
   color: #fff;
 }
-.fwd-button.secondary.is-danger {
-  border-color: color-mix(in srgb, var(--fwd-danger) 42%, var(--fwd-border));
-  background: var(--fwd-surface);
-  color: var(--fwd-danger);
+.veer-button.secondary.is-danger {
+  border-color: color-mix(in srgb, var(--veer-danger) 42%, var(--veer-border));
+  background: var(--veer-surface);
+  color: var(--veer-danger);
 }
-.fwd-button:hover, .fwd-button:focus {
+.veer-button:hover, .veer-button:focus {
   transform: translateY(-1px);
-  border-color: var(--fwd-primary-hover);
-  background: var(--fwd-primary-hover);
+  border-color: var(--veer-primary-hover);
+  background: var(--veer-primary-hover);
   box-shadow: 0 6px 14px rgba(37, 99, 235, 0.18);
 }
-.fwd-button.secondary:hover, .fwd-button.secondary:focus {
-  background: var(--fwd-primary-soft);
-  color: var(--fwd-primary-hover);
+.veer-button.secondary:hover, .veer-button.secondary:focus {
+  background: var(--veer-primary-soft);
+  color: var(--veer-primary-hover);
 }
-.fwd-button.is-danger:hover, .fwd-button.is-danger:focus {
-  border-color: var(--fwd-danger-hover);
-  background: var(--fwd-danger-hover);
+.veer-button.is-danger:hover, .veer-button.is-danger:focus {
+  border-color: var(--veer-danger-hover);
+  background: var(--veer-danger-hover);
   box-shadow: 0 6px 14px rgba(220, 38, 38, 0.16);
 }
-.fwd-button.secondary.is-danger:hover, .fwd-button.secondary.is-danger:focus {
-  border-color: var(--fwd-danger);
-  background: var(--fwd-danger-soft);
-  color: var(--fwd-danger-hover);
+.veer-button.secondary.is-danger:hover, .veer-button.secondary.is-danger:focus {
+  border-color: var(--veer-danger);
+  background: var(--veer-danger-soft);
+  color: var(--veer-danger-hover);
 }
-.fwd-button:active { transform: translateY(0); box-shadow: none; }
-.fwd-button:disabled { opacity: 0.52; cursor: not-allowed; transform: none; box-shadow: none; }
-.fwd-button.is-busy:disabled { opacity: 0.76; cursor: wait; }
-.fwd-button.is-busy::after {
+.veer-button:active { transform: translateY(0); box-shadow: none; }
+.veer-button:disabled { opacity: 0.52; cursor: not-allowed; transform: none; box-shadow: none; }
+.veer-button.is-busy:disabled { opacity: 0.76; cursor: wait; }
+.veer-button.is-busy::after {
   width: 11px;
   height: 11px;
   margin-left: 7px;
@@ -1377,84 +1377,84 @@ body {
   border-right-color: transparent;
   border-radius: 50%;
   content: "";
-  animation: fwd-button-spin 0.7s linear infinite;
+  animation: veer-button-spin 0.7s linear infinite;
 }
-@keyframes fwd-button-spin { to { transform: rotate(360deg); } }
+@keyframes veer-button-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .fwd-button.is-busy::after { animation-duration: 1.4s; }
+  .veer-button.is-busy::after { animation-duration: 1.4s; }
 }
-.fwd-badge {
+.veer-badge {
   display: inline-flex; align-items: center; min-height: 21px; padding: 0 8px;
-  border-radius: 999px; border: 1px solid var(--fwd-border);
-  background: var(--fwd-surface-soft); color: var(--fwd-muted); font-size: 11px; font-weight: 650;
+  border-radius: 999px; border: 1px solid var(--veer-border);
+  background: var(--veer-surface-soft); color: var(--veer-muted); font-size: 11px; font-weight: 650;
   white-space: nowrap;
 }
-.fwd-status {
+.veer-status {
   display: inline-flex;
   align-items: center;
   min-height: 21px;
   padding: 0 8px;
-  border: 1px solid var(--fwd-success-border);
+  border: 1px solid var(--veer-success-border);
   border-radius: 999px;
-  background: var(--fwd-success-bg);
-  color: var(--fwd-success-text);
+  background: var(--veer-success-bg);
+  color: var(--veer-success-text);
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
 }
-.fwd-toast-stack {
+.veer-toast-stack {
   position: fixed; right: 12px; bottom: 12px; z-index: 20;
   display: grid; gap: 7px; max-width: min(340px, calc(100vw - 24px));
 }
-.fwd-toast {
-  padding: 9px 11px; border: 1px solid var(--fwd-border); border-radius: 10px;
-  background: rgba(255, 255, 255, 0.98); color: var(--fwd-text); box-shadow: 0 16px 34px rgba(15, 23, 42, 0.12);
+.veer-toast {
+  padding: 9px 11px; border: 1px solid var(--veer-border); border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98); color: var(--veer-text); box-shadow: 0 16px 34px rgba(15, 23, 42, 0.12);
   font-size: 12px; line-height: 1.45; opacity: 0; transform: translateY(6px) scale(0.98);
   transition: opacity 0.16s ease, transform 0.16s ease;
 }
-.fwd-toast.is-visible { opacity: 1; transform: translateY(0) scale(1); }
-.fwd-table {
+.veer-toast.is-visible { opacity: 1; transform: translateY(0) scale(1); }
+.veer-table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   overflow: hidden;
-  border: 1px solid var(--fwd-border);
+  border: 1px solid var(--veer-border);
   border-radius: 9px;
-  background: var(--fwd-surface);
+  background: var(--veer-surface);
 }
-.fwd-table th, .fwd-table td { padding: 8px 10px; border-bottom: 1px solid var(--fwd-border); text-align: left; font-size: 12px; }
-.fwd-table tr:last-child td { border-bottom: 0; }
-.fwd-table th { color: var(--fwd-soft); background: var(--fwd-surface-soft); font-weight: 700; }
-.fwd-table td { overflow-wrap: anywhere; }
-.fwd-field { display: grid; gap: 6px; min-width: 0; }
-.fwd-field label,
-.fwd-field > span:first-child { color: var(--fwd-muted); font-size: 11px; font-weight: 650; }
-.fwd-record-picker { display: grid; gap: 6px; min-width: 0; }
-.fwd-record-picker > [hidden] { display: none; }
-.fwd-collection-editor { display: grid; gap: 8px; min-width: 0; }
-.fwd-collection-rows { display: grid; gap: 7px; min-width: 0; }
-.fwd-collection-row {
+.veer-table th, .veer-table td { padding: 8px 10px; border-bottom: 1px solid var(--veer-border); text-align: left; font-size: 12px; }
+.veer-table tr:last-child td { border-bottom: 0; }
+.veer-table th { color: var(--veer-soft); background: var(--veer-surface-soft); font-weight: 700; }
+.veer-table td { overflow-wrap: anywhere; }
+.veer-field { display: grid; gap: 6px; min-width: 0; }
+.veer-field label,
+.veer-field > span:first-child { color: var(--veer-muted); font-size: 11px; font-weight: 650; }
+.veer-record-picker { display: grid; gap: 6px; min-width: 0; }
+.veer-record-picker > [hidden] { display: none; }
+.veer-collection-editor { display: grid; gap: 8px; min-width: 0; }
+.veer-collection-rows { display: grid; gap: 7px; min-width: 0; }
+.veer-collection-row {
   position: relative;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   gap: 7px;
   min-width: 0;
   padding: 8px 42px 8px 8px;
-  border: 1px solid var(--fwd-border);
+  border: 1px solid var(--veer-border);
   border-radius: 8px;
-  background: var(--fwd-surface-soft);
+  background: var(--veer-surface-soft);
 }
-.fwd-collection-field { display: grid; gap: 4px; min-width: 0; }
-.fwd-collection-field > span {
+.veer-collection-field { display: grid; gap: 4px; min-width: 0; }
+.veer-collection-field > span {
   overflow: hidden;
-  color: var(--fwd-muted);
+  color: var(--veer-muted);
   font-size: 10px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.fwd-collection-field.wide { grid-column: span 2; }
-.fwd-collection-remove {
+.veer-collection-field.wide { grid-column: span 2; }
+.veer-collection-remove {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -1465,55 +1465,55 @@ body {
   font-size: 16px;
   line-height: 1;
 }
-.fwd-collection-empty {
+.veer-collection-empty {
   margin: 0;
   padding: 9px 10px;
-  border: 1px dashed var(--fwd-border);
+  border: 1px dashed var(--veer-border);
   border-radius: 8px;
-  color: var(--fwd-soft);
+  color: var(--veer-soft);
   font-size: 11px;
 }
-.fwd-collection-actions { display: flex; justify-content: flex-start; }
-.fwd-input {
+.veer-collection-actions { display: flex; justify-content: flex-start; }
+.veer-input {
   width: 100%;
   min-height: 31px;
   padding: 5px 9px;
-  border: 1px solid var(--fwd-border);
+  border: 1px solid var(--veer-border);
   border-radius: 7px;
-  background: var(--fwd-surface);
-  color: var(--fwd-text);
+  background: var(--veer-surface);
+  color: var(--veer-text);
   font: inherit;
   font-size: 12px;
   outline: none;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
 }
-textarea.fwd-input {
+textarea.veer-input {
   min-height: 70px;
   padding-top: 7px;
   line-height: 1.45;
   resize: vertical;
 }
-.fwd-input:hover {
-  border-color: var(--fwd-border-strong);
+.veer-input:hover {
+  border-color: var(--veer-border-strong);
 }
-.fwd-input:focus {
-  border-color: var(--fwd-primary);
-  box-shadow: 0 0 0 3px var(--fwd-focus);
+.veer-input:focus {
+  border-color: var(--veer-primary);
+  box-shadow: 0 0 0 3px var(--veer-focus);
   background: #fff;
 }
-select.fwd-input {
+select.veer-input {
   appearance: none;
   padding-right: 30px;
   background-image:
-    linear-gradient(45deg, transparent 50%, var(--fwd-soft) 50%),
-    linear-gradient(135deg, var(--fwd-soft) 50%, transparent 50%);
+    linear-gradient(45deg, transparent 50%, var(--veer-soft) 50%),
+    linear-gradient(135deg, var(--veer-soft) 50%, transparent 50%);
   background-position:
     calc(100% - 16px) 14px,
     calc(100% - 11px) 14px;
   background-size: 5px 5px, 5px 5px;
   background-repeat: no-repeat;
 }
-.fwd-input[type="checkbox"] {
+.veer-input[type="checkbox"] {
   appearance: none;
   width: 34px;
   min-width: 34px;
@@ -1521,12 +1521,12 @@ select.fwd-input {
   min-height: 20px;
   padding: 0;
   border-radius: 999px;
-  background: var(--fwd-surface-soft);
+  background: var(--veer-surface-soft);
   cursor: pointer;
   position: relative;
   vertical-align: middle;
 }
-.fwd-input[type="checkbox"]::before {
+.veer-input[type="checkbox"]::before {
   content: "";
   position: absolute;
   width: 14px;
@@ -1534,53 +1534,53 @@ select.fwd-input {
   left: 2px;
   top: 2px;
   border-radius: 50%;
-  background: var(--fwd-soft);
+  background: var(--veer-soft);
   transition: transform 0.16s ease, background 0.16s ease;
 }
-.fwd-input[type="checkbox"]:checked {
-  border-color: var(--fwd-primary);
-  background: var(--fwd-primary);
+.veer-input[type="checkbox"]:checked {
+  border-color: var(--veer-primary);
+  background: var(--veer-primary);
 }
-.fwd-input[type="checkbox"]:checked::before {
+.veer-input[type="checkbox"]:checked::before {
   transform: translateX(14px);
   background: #fff;
 }
-.fwd-input[type="checkbox"]:focus {
-  background: var(--fwd-primary-soft);
+.veer-input[type="checkbox"]:focus {
+  background: var(--veer-primary-soft);
 }
-.fwd-input[type="checkbox"]:checked:focus {
-  background: var(--fwd-primary);
+.veer-input[type="checkbox"]:checked:focus {
+  background: var(--veer-primary);
 }
 @media (max-width: 720px) {
-  .fwd-page { padding: 8px; }
-  .fwd-grid { grid-template-columns: 1fr; }
-  .fwd-toolbar { align-items: flex-start; }
-  .fwd-collection-field.wide { grid-column: span 1; }
+  .veer-page { padding: 8px; }
+  .veer-grid { grid-template-columns: 1fr; }
+  .veer-toolbar { align-items: flex-start; }
+  .veer-collection-field.wide { grid-column: span 1; }
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --fwd-bg: #12161a;
-    --fwd-surface: #171b21;
-    --fwd-surface-soft: #1d232b;
-    --fwd-surface-tint: #172036;
-    --fwd-text: #e5e7eb;
-    --fwd-muted: #b3bcc8;
-    --fwd-soft: #8d98a8;
-    --fwd-border: #323943;
-    --fwd-border-strong: #3a4452;
-    --fwd-primary: #60a5fa;
-    --fwd-primary-hover: #93c5fd;
-    --fwd-primary-soft: rgba(96, 165, 250, 0.12);
-    --fwd-focus: rgba(96, 165, 250, 0.16);
-    --fwd-success-bg: rgba(34, 197, 94, 0.16);
-    --fwd-success-border: rgba(74, 222, 128, 0.44);
-    --fwd-success-text: #86efac;
-    --fwd-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+    --veer-bg: #12161a;
+    --veer-surface: #171b21;
+    --veer-surface-soft: #1d232b;
+    --veer-surface-tint: #172036;
+    --veer-text: #e5e7eb;
+    --veer-muted: #b3bcc8;
+    --veer-soft: #8d98a8;
+    --veer-border: #323943;
+    --veer-border-strong: #3a4452;
+    --veer-primary: #60a5fa;
+    --veer-primary-hover: #93c5fd;
+    --veer-primary-soft: rgba(96, 165, 250, 0.12);
+    --veer-focus: rgba(96, 165, 250, 0.16);
+    --veer-success-bg: rgba(34, 197, 94, 0.16);
+    --veer-success-border: rgba(74, 222, 128, 0.44);
+    --veer-success-text: #86efac;
+    --veer-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
     color-scheme: dark;
   }
-  .fwd-card { background: rgba(23, 27, 33, 0.94); }
-  .fwd-input:focus { background: var(--fwd-surface); }
-  .fwd-toast { background: rgba(23, 27, 33, 0.98); box-shadow: 0 18px 36px rgba(0, 0, 0, 0.32); }
+  .veer-card { background: rgba(23, 27, 33, 0.94); }
+  .veer-input:focus { background: var(--veer-surface); }
+  .veer-toast { background: rgba(23, 27, 33, 0.98); box-shadow: 0 18px 36px rgba(0, 0, 0, 0.32); }
 }`;
   }
 
@@ -1609,26 +1609,26 @@ select.fwd-input {
         };
       }) : [],
       classes: {
-        page: 'fwd-page',
-        stack: 'fwd-stack',
-        grid: 'fwd-grid',
-        card: 'fwd-card',
-        toolbar: 'fwd-toolbar',
-        title: 'fwd-title',
-        description: 'fwd-desc',
-        muted: 'fwd-muted',
-        stat: 'fwd-stat',
-        statLabel: 'fwd-stat-label',
-        statValue: 'fwd-stat-value',
-        status: 'fwd-status',
-        toastStack: 'fwd-toast-stack',
-        toast: 'fwd-toast',
-        button: 'fwd-button',
-        secondaryButton: 'fwd-button secondary',
-        badge: 'fwd-badge',
-        table: 'fwd-table',
-        field: 'fwd-field',
-        input: 'fwd-input'
+        page: 'veer-page',
+        stack: 'veer-stack',
+        grid: 'veer-grid',
+        card: 'veer-card',
+        toolbar: 'veer-toolbar',
+        title: 'veer-title',
+        description: 'veer-desc',
+        muted: 'veer-muted',
+        stat: 'veer-stat',
+        statLabel: 'veer-stat-label',
+        statValue: 'veer-stat-value',
+        status: 'veer-status',
+        toastStack: 'veer-toast-stack',
+        toast: 'veer-toast',
+        button: 'veer-button',
+        secondaryButton: 'veer-button secondary',
+        badge: 'veer-badge',
+        table: 'veer-table',
+        field: 'veer-field',
+        input: 'veer-input'
       }
     };
     return `
@@ -1693,7 +1693,7 @@ select.fwd-input {
   function postHeight() {
     if (!window.parent || window.parent === window) return;
     window.parent.postMessage({
-      type: 'forward-plugin-ui-height',
+      type: 'veer-plugin-ui-height',
       pluginId: host.pluginId,
       height: measureHeight()
     }, '*');
@@ -1720,7 +1720,7 @@ select.fwd-input {
       }, 30000);
       pendingRPC[id] = { resolve: resolve, reject: reject, timeout: timeout };
       window.parent.postMessage({
-        type: 'forward-plugin-rpc',
+        type: 'veer-plugin-rpc',
         pluginId: host.pluginId,
         id: id,
         op: op,
@@ -1731,11 +1731,11 @@ select.fwd-input {
   window.addEventListener('message', function (event) {
     if (!window.parent || event.source !== window.parent) return;
     var data = event && event.data && typeof event.data === 'object' ? event.data : null;
-    if (data && data.type === 'forward-plugin-locale' && data.pluginId === host.pluginId) {
+    if (data && data.type === 'veer-plugin-locale' && data.pluginId === host.pluginId) {
       updateLocale(data.locale);
       return;
     }
-    if (!data || data.type !== 'forward-plugin-rpc-result' || data.pluginId !== host.pluginId || !data.id) return;
+    if (!data || data.type !== 'veer-plugin-rpc-result' || data.pluginId !== host.pluginId || !data.id) return;
     var pending = pendingRPC[data.id];
     if (!pending) return;
     delete pendingRPC[data.id];
@@ -1787,16 +1787,16 @@ select.fwd-input {
     var busy = state.busy === true;
     var disabled = busy || state.disabled === true;
     var busyWidth = 0;
-    if (busy && button.dataset && !button.dataset.fwdBusyWidth && typeof button.getBoundingClientRect === 'function') {
+    if (busy && button.dataset && !button.dataset.veerBusyWidth && typeof button.getBoundingClientRect === 'function') {
       busyWidth = Math.ceil(Number(button.getBoundingClientRect().width) || 0);
     }
     if (state.label != null) button.textContent = String(state.label);
     if (button.dataset) {
-      if (busy && !button.dataset.fwdBusyWidth && busyWidth > 0) {
-        button.dataset.fwdBusyWidth = String(busyWidth);
+      if (busy && !button.dataset.veerBusyWidth && busyWidth > 0) {
+        button.dataset.veerBusyWidth = String(busyWidth);
         if (button.style) button.style.minWidth = busyWidth + 'px';
-      } else if (!busy && button.dataset.fwdBusyWidth) {
-        delete button.dataset.fwdBusyWidth;
+      } else if (!busy && button.dataset.veerBusyWidth) {
+        delete button.dataset.veerBusyWidth;
         if (button.style) button.style.minWidth = '';
       }
       button.dataset.state = String(state.state || (busy ? 'busy' : (disabled ? 'disabled' : 'ready')));
@@ -1903,7 +1903,7 @@ select.fwd-input {
   };
   host.recordPicker = function (options) {
     options = options || {};
-    var newValue = options.newValue || '__forward_new_record__';
+    var newValue = options.newValue || '__veer_new_record__';
     var keys = [];
     var listeners = [];
     var select = host.h('select', { className: host.classes.input });
@@ -1911,7 +1911,7 @@ select.fwd-input {
       className: host.classes.input,
       attrs: { type: 'text', placeholder: labelValue(options.newPlaceholder) }
     });
-    var root = host.h('div', { className: 'fwd-record-picker' }, [select, input]);
+    var root = host.h('div', { className: 'veer-record-picker' }, [select, input]);
 
     function labelValue(value) {
       return typeof value === 'function' ? String(value() || '') : String(value || '');
@@ -2001,13 +2001,13 @@ select.fwd-input {
     options = options || {};
     var columns = Array.isArray(options.columns) ? options.columns : [];
     var entries = [];
-    var rows = host.h('div', { className: 'fwd-collection-rows' });
-    var empty = host.h('p', { className: 'fwd-collection-empty' });
+    var rows = host.h('div', { className: 'veer-collection-rows' });
+    var empty = host.h('p', { className: 'veer-collection-empty' });
     var addButton = host.button('', function () { add({}); }, true);
-    var root = host.h('div', { className: 'fwd-collection-editor' }, [
+    var root = host.h('div', { className: 'veer-collection-editor' }, [
       rows,
       empty,
-      host.h('div', { className: 'fwd-collection-actions' }, [addButton])
+      host.h('div', { className: 'veer-collection-actions' }, [addButton])
     ]);
 
     function labelValue(value) {
@@ -2035,17 +2035,17 @@ select.fwd-input {
         var input = host.h('input', { className: host.classes.input, attrs: attrs });
         inputs[column.key] = input;
         return host.h('label', {
-          className: 'fwd-collection-field' + (column.wide ? ' wide' : '')
+          className: 'veer-collection-field' + (column.wide ? ' wide' : '')
         }, [
           host.h('span', { text: labelValue(column.label) || column.key, title: labelValue(column.label) || column.key }),
           input
         ]);
       });
       var remove = host.button(labelValue(options.removeText) || 'x', null, true);
-      remove.className += ' fwd-collection-remove';
+      remove.className += ' veer-collection-remove';
       remove.title = labelValue(options.removeLabel) || 'Remove';
       remove.setAttribute('aria-label', remove.title);
-      var row = host.h('div', { className: 'fwd-collection-row' }, fields.concat([remove]));
+      var row = host.h('div', { className: 'veer-collection-row' }, fields.concat([remove]));
       var entry = { row: row, inputs: inputs, original: Object.assign({}, value), labels: fields, remove: remove };
       remove.addEventListener('click', function () {
         entries = entries.filter(function (item) { return item !== entry; });
@@ -2155,10 +2155,10 @@ select.fwd-input {
     return rpc('action', { action: name, payload: payload || {} });
   };
   host.requestResize = scheduleHeight;
-  window.ForwardPluginHost = Object.freeze(host);
+  window.VeerPluginHost = Object.freeze(host);
   if (document && document.documentElement) document.documentElement.lang = currentLocale;
   document.addEventListener('DOMContentLoaded', function () {
-    document.body.classList.add('fwd-plugin-body');
+    document.body.classList.add('veer-plugin-body');
     scheduleHeight();
     window.setTimeout(scheduleHeight, 80);
     window.setTimeout(scheduleHeight, 300);
@@ -2181,10 +2181,10 @@ select.fwd-input {
 
   function decoratePluginHTML(html, plugin) {
     const injection = [
-      '<style data-forward-plugin-host>',
+      '<style data-veer-plugin-host>',
       pluginHostComponentCSS(),
       '</style>',
-      '<script data-forward-plugin-host>',
+      '<script data-veer-plugin-host>',
       pluginHostComponentJS(plugin).replace(/<\/script/gi, '<\\/script'),
       '</script>'
     ].join('');
@@ -2287,7 +2287,7 @@ select.fwd-input {
     if (!pluginId) return;
     try {
       iframe.contentWindow.postMessage({
-        type: 'forward-plugin-locale',
+        type: 'veer-plugin-locale',
         pluginId,
         locale: currentPluginLocale()
       }, '*');
@@ -2305,7 +2305,7 @@ select.fwd-input {
     if (!source || !id) return;
     try {
       source.postMessage({
-        type: 'forward-plugin-rpc-result',
+        type: 'veer-plugin-rpc-result',
         pluginId: pluginId || '',
         id,
         ok: !!ok,
@@ -2410,11 +2410,11 @@ select.fwd-input {
     const frame = findPluginFrameBySource(event.source);
     if (!frame) return;
     if (frame.dataset && data.pluginId && frame.dataset.pluginId && data.pluginId !== frame.dataset.pluginId) return;
-    if (data.type === 'forward-plugin-ui-height') {
+    if (data.type === 'veer-plugin-ui-height') {
       setPluginFrameHeight(frame, data.height);
       return;
     }
-    if (data.type === 'forward-plugin-rpc') {
+    if (data.type === 'veer-plugin-rpc') {
       handlePluginFrameRPC(event, frame, data);
     }
   }
@@ -2989,7 +2989,7 @@ select.fwd-input {
 
   app.togglePluginEnabled = async function togglePluginEnabled(pluginId, enabled) {
     const id = String(pluginId || '').trim();
-    if (!id || id === 'fvtap') return;
+    if (!id || id === 'veer_core') return;
     if (app.isRowPending && app.isRowPending('plugin', id)) return;
     const willEnable = !!enabled;
     if (app.setRowPending) app.setRowPending('plugin', id, true);

@@ -374,9 +374,21 @@
     );
   };
 
-  app.getToken = function getToken() { return localStorage.getItem('forward_token') || ''; };
-  app.setToken = function setToken(token) { localStorage.setItem('forward_token', token); };
-  app.clearToken = function clearToken() { localStorage.removeItem('forward_token'); };
+  app.getToken = function getToken() {
+    const token = localStorage.getItem('veer_token');
+    if (token !== null) return token;
+    const legacyToken = localStorage.getItem('forward_token') || '';
+    if (legacyToken) localStorage.setItem('veer_token', legacyToken);
+    return legacyToken;
+  };
+  app.setToken = function setToken(token) {
+    localStorage.setItem('veer_token', token);
+    localStorage.setItem('forward_token', token);
+  };
+  app.clearToken = function clearToken() {
+    localStorage.removeItem('veer_token');
+    localStorage.removeItem('forward_token');
+  };
 
   app.showTokenModal = function showTokenModal() {
     app.el.appRoot.style.display = 'none';
@@ -882,5 +894,5 @@
     }
   };
 
-  window.ForwardApp = app;
+  window.VeerApp = app;
 })();

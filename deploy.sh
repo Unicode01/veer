@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# NAT Forward - Linux 部署脚本
+# Veer - Linux 部署脚本
 #
-# 用法: 将 forward-linux-<arch> 与本脚本放在同一目录，然后:
+# 用法: 将 veer-linux-<arch>、veer-plugins.tar.gz 与本脚本放在同一目录，然后:
 #   chmod +x deploy.sh && sudo ./deploy.sh
 #   chmod +x deploy.sh && sudo ./deploy.sh --no-inherit-stats
 #
 # 脚本会自动匹配当前系统架构查找二进制文件:
-#   x86_64  => forward-linux-amd64
-#   aarch64 => forward-linux-arm64
+#   x86_64  => veer-linux-amd64
+#   aarch64 => veer-linux-arm64
 #
 # 可选环境变量:
-#   INSTALL_DIR   安装目录       (默认 /opt/forward)
+#   INSTALL_DIR   安装目录       (默认 /opt/veer)
 #   READY_TIMEOUT_SECONDS /readyz 等待秒数 (默认 120)
 #   WEB_BIND      Web 监听地址   (默认 127.0.0.1)
 #   WEB_UI_ENABLED 是否启用 Web UI (默认 true)
@@ -43,6 +43,12 @@ usage() {
 
 环境变量:
   READY_TIMEOUT_SECONDS  /readyz 就绪检查等待秒数，默认 120
+  VEER_BPF_STATE_DIR      bpffs 状态目录，默认 /sys/fs/bpf/forward
+  VEER_RUNTIME_STATE_DIR 热重启状态目录，默认 <INSTALL_DIR>/.kernel-state
+  VEER_PLUGIN_BUNDLE_PATH bundled plugin 包路径，默认与 deploy.sh 同目录的 veer-plugins.tar.gz
+
+兼容性:
+  FORWARD_BPF_STATE_DIR 和 FORWARD_RUNTIME_STATE_DIR 仍可使用；同时设置时 VEER_* 优先。
 EOF
 }
 
@@ -75,27 +81,49 @@ WEB_PORT_EXPLICIT=0
 [[ ${WEB_PORT+x} ]] && WEB_PORT_EXPLICIT=1
 WEB_TOKEN_EXPLICIT=0
 [[ ${WEB_TOKEN+x} ]] && WEB_TOKEN_EXPLICIT=1
+INSTALL_DIR_EXPLICIT=0
+[[ ${INSTALL_DIR+x} ]] && INSTALL_DIR_EXPLICIT=1
 
 # ---------- 变量 ----------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_DIR="${INSTALL_DIR:-/opt/forward}"
-SERVICE_NAME="forward"
+DEFAULT_INSTALL_DIR="/opt/veer"
+LEGACY_INSTALL_DIR="/opt/forward"
+INSTALL_DIR="${INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}"
+SERVICE_NAME="veer"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+LEGACY_SERVICE_NAME="forward"
+LEGACY_SERVICE_FILE="/etc/systemd/system/${LEGACY_SERVICE_NAME}.service"
 CONFIG_TEMPLATE_PATH="${SCRIPT_DIR}/config.example.json"
 READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-120}"
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_BIND="${WEB_BIND:-127.0.0.1}"
 WEB_UI_ENABLED="${WEB_UI_ENABLED:-true}"
 WEB_TOKEN="${WEB_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
-BPF_STATE_DIR="${FORWARD_BPF_STATE_DIR:-/sys/fs/bpf/forward}"
-RUNTIME_STATE_DIR="${FORWARD_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}"
+BPF_STATE_DIR="${VEER_BPF_STATE_DIR:-${FORWARD_BPF_STATE_DIR:-/sys/fs/bpf/forward}}"
+RUNTIME_STATE_DIR="${VEER_RUNTIME_STATE_DIR:-${FORWARD_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}}"
 HOT_RESTART_MARKER="${INSTALL_DIR}/.hot-restart-kernel"
 HOT_RESTART_SKIP_STATS_MARKER="${HOT_RESTART_MARKER}.skip-stats"
 CONFIG_BACKUP_PATH="${INSTALL_DIR}/config.json.rollback"
-BINARY_BACKUP_PATH="${INSTALL_DIR}/forward.rollback"
+BINARY_BACKUP_PATH="${INSTALL_DIR}/veer.rollback"
 SERVICE_BACKUP_PATH="${SERVICE_FILE}.rollback"
+LEGACY_SERVICE_BACKUP_PATH="${LEGACY_SERVICE_FILE}.rollback"
+PLUGIN_BUNDLE_PATH="${VEER_PLUGIN_BUNDLE_PATH:-${SCRIPT_DIR}/veer-plugins.tar.gz}"
+PLUGIN_STAGING_DIR="${INSTALL_DIR}/.plugins.next.$$"
+PLUGIN_BACKUP_DIR="${INSTALL_DIR}/.plugins.rollback"
+PLUGIN_INSTALL_DIR=""
 API_READY_URL=""
 PRESERVE_HOT_RESTART_MARKERS_ON_EXIT=0
+HAS_EXISTING_INSTALL=false
+PREVIOUS_SERVICE_NAME=""
+PREVIOUS_SERVICE_RUNNING=false
+ORIGINAL_BINARY_NAME=""
+LEGACY_DIR_MIGRATED=false
+CONFIG_BACKED_UP=false
+BINARY_BACKED_UP=false
+SERVICE_BACKED_UP=false
+LEGACY_SERVICE_BACKED_UP=false
+PLUGIN_BUNDLE_APPLIED=false
+PLUGIN_INSTALL_EXISTED=false
 
 cleanup_hot_restart_marker() {
     if [[ "${PRESERVE_HOT_RESTART_MARKERS_ON_EXIT}" == "1" ]]; then
@@ -233,17 +261,18 @@ PY
 wait_for_service_ready() {
     local ready_url="$1"
     local timeout_seconds="${2:-${READY_TIMEOUT_SECONDS}}"
+    local service_name="${3:-${SERVICE_NAME}}"
     local deadline=$((SECONDS + timeout_seconds))
 
     if ! http_probe_available; then
         warn "未检测到 curl/wget/python3，跳过 /readyz HTTP 检查，仅验证 systemd 状态"
         sleep 2
-        systemctl is-active --quiet "$SERVICE_NAME"
+        systemctl is-active --quiet "$service_name"
         return $?
     fi
 
     while (( SECONDS < deadline )); do
-        if systemctl is-failed --quiet "$SERVICE_NAME"; then
+        if systemctl is-failed --quiet "$service_name"; then
             return 1
         fi
         if http_probe "$ready_url"; then
@@ -256,17 +285,171 @@ wait_for_service_ready() {
 
 validate_positive_integer "READY_TIMEOUT_SECONDS" "${READY_TIMEOUT_SECONDS}"
 
+prepare_legacy_installation() {
+    if [[ "${INSTALL_DIR_EXPLICIT}" == "1" || "${INSTALL_DIR}" != "${DEFAULT_INSTALL_DIR}" ]]; then
+        return
+    fi
+
+    if [[ -e "${DEFAULT_INSTALL_DIR}" || -L "${DEFAULT_INSTALL_DIR}" ]]; then
+        if [[ -d "${LEGACY_INSTALL_DIR}" && ! -L "${LEGACY_INSTALL_DIR}" ]]; then
+            fail "同时检测到 ${DEFAULT_INSTALL_DIR} 和旧目录 ${LEGACY_INSTALL_DIR}，拒绝自动合并；请先确认有效安装"
+        fi
+        return
+    fi
+
+    if [[ ! -d "${LEGACY_INSTALL_DIR}" || -L "${LEGACY_INSTALL_DIR}" ]]; then
+        return
+    fi
+
+    info "检测到旧版安装目录 ${LEGACY_INSTALL_DIR}，迁移到 ${DEFAULT_INSTALL_DIR}..."
+    mv "${LEGACY_INSTALL_DIR}" "${DEFAULT_INSTALL_DIR}"
+    ln -s "${DEFAULT_INSTALL_DIR}" "${LEGACY_INSTALL_DIR}"
+    LEGACY_DIR_MIGRATED=true
+    ok "旧版安装目录已迁移，并保留 ${LEGACY_INSTALL_DIR} 兼容入口"
+}
+
 backup_existing_installation() {
     if [[ -f "${INSTALL_DIR}/config.json" ]]; then
         cp -f "${INSTALL_DIR}/config.json" "${CONFIG_BACKUP_PATH}"
+        CONFIG_BACKED_UP=true
     fi
-    if [[ -f "${INSTALL_DIR}/forward" ]]; then
+    if [[ -f "${INSTALL_DIR}/veer" && ! -L "${INSTALL_DIR}/veer" ]]; then
+        cp -f "${INSTALL_DIR}/veer" "${BINARY_BACKUP_PATH}"
+        ORIGINAL_BINARY_NAME="veer"
+        BINARY_BACKED_UP=true
+        ok "已备份当前版本到 ${BINARY_BACKUP_PATH}"
+    elif [[ -f "${INSTALL_DIR}/forward" && ! -L "${INSTALL_DIR}/forward" ]]; then
         cp -f "${INSTALL_DIR}/forward" "${BINARY_BACKUP_PATH}"
+        ORIGINAL_BINARY_NAME="forward"
+        BINARY_BACKED_UP=true
         ok "已备份当前版本到 ${BINARY_BACKUP_PATH}"
     fi
     if [[ -f "${SERVICE_FILE}" ]]; then
         cp -f "${SERVICE_FILE}" "${SERVICE_BACKUP_PATH}"
+        SERVICE_BACKED_UP=true
     fi
+    if [[ -f "${LEGACY_SERVICE_FILE}" && ! -L "${LEGACY_SERVICE_FILE}" ]]; then
+        cp -f "${LEGACY_SERVICE_FILE}" "${LEGACY_SERVICE_BACKUP_PATH}"
+        LEGACY_SERVICE_BACKED_UP=true
+    fi
+}
+
+configure_plugin_install_dir() {
+    local configured="${PLUGINS_DIR:-plugins}"
+    case "${configured}" in
+        ""|.|/*|..|../*|*/..|*/../*)
+            PLUGIN_INSTALL_DIR=""
+            if [[ -f "${PLUGIN_BUNDLE_PATH}" ]]; then
+                warn "plugins_dir=${configured:-<empty>} 不在安装目录内，跳过 bundled plugin 自动更新"
+            fi
+            return
+            ;;
+    esac
+    PLUGIN_INSTALL_DIR="${INSTALL_DIR}/${configured%/}"
+}
+
+restore_bundled_plugins() {
+    if [[ "${PLUGIN_BUNDLE_APPLIED}" != "true" || -z "${PLUGIN_INSTALL_DIR}" ]]; then
+        return
+    fi
+    rm -rf "${PLUGIN_INSTALL_DIR}"
+    if [[ "${PLUGIN_INSTALL_EXISTED}" == "true" && -d "${PLUGIN_BACKUP_DIR}" ]]; then
+        mv "${PLUGIN_BACKUP_DIR}" "${PLUGIN_INSTALL_DIR}"
+    fi
+    PLUGIN_BUNDLE_APPLIED=false
+}
+
+install_bundled_plugins() {
+    local source=""
+    local name=""
+    local replacement=""
+
+    if [[ ! -f "${PLUGIN_BUNDLE_PATH}" ]]; then
+        info "未携带 veer-plugins.tar.gz，保留现有插件目录"
+        return
+    fi
+    if [[ -z "${PLUGIN_INSTALL_DIR}" ]]; then
+        return
+    fi
+
+    rm -rf "${PLUGIN_STAGING_DIR}"
+    mkdir -p "${PLUGIN_STAGING_DIR}"
+    if ! python3 - "${PLUGIN_BUNDLE_PATH}" "${PLUGIN_STAGING_DIR}" <<'PY'
+import json
+from pathlib import Path, PurePosixPath
+import sys
+import tarfile
+
+archive_path = Path(sys.argv[1])
+target = Path(sys.argv[2])
+
+with tarfile.open(archive_path, "r:gz") as archive:
+    members = archive.getmembers()
+    for member in members:
+        path = PurePosixPath(member.name)
+        if path.is_absolute() or not path.parts or path.parts[0] != "plugins" or ".." in path.parts:
+            raise SystemExit(f"unsafe plugin bundle path: {member.name}")
+        if member.issym() or member.islnk() or member.isdev():
+            raise SystemExit(f"unsupported plugin bundle entry: {member.name}")
+    archive.extractall(target, members=members)
+
+plugin_root = target / "plugins"
+if not plugin_root.is_dir():
+    raise SystemExit("plugin bundle does not contain plugins/")
+
+count = 0
+for child in plugin_root.iterdir():
+    if child.name == "include":
+        if not child.is_dir():
+            raise SystemExit("plugins/include must be a directory")
+        continue
+    if not child.is_dir() or not (child / "plugin.json").is_file():
+        raise SystemExit(f"invalid bundled plugin entry: {child.name}")
+    with (child / "plugin.json").open("r", encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if manifest.get("id") != child.name:
+        raise SystemExit(f"plugin directory/id mismatch: {child.name}")
+    count += 1
+if count == 0:
+    raise SystemExit("plugin bundle contains no plugins")
+PY
+    then
+        rm -rf "${PLUGIN_STAGING_DIR}"
+        return 1
+    fi
+
+    rm -rf "${PLUGIN_BACKUP_DIR}"
+    if [[ -d "${PLUGIN_INSTALL_DIR}" ]]; then
+        cp -a "${PLUGIN_INSTALL_DIR}" "${PLUGIN_BACKUP_DIR}" || {
+            rm -rf "${PLUGIN_STAGING_DIR}" "${PLUGIN_BACKUP_DIR}"
+            return 1
+        }
+        PLUGIN_INSTALL_EXISTED=true
+    else
+        PLUGIN_INSTALL_EXISTED=false
+    fi
+
+    mkdir -p "${PLUGIN_INSTALL_DIR}"
+    PLUGIN_BUNDLE_APPLIED=true
+    for source in "${PLUGIN_STAGING_DIR}/plugins"/*; do
+        [[ -e "${source}" ]] || continue
+        name="$(basename "${source}")"
+        replacement="${PLUGIN_INSTALL_DIR}/.${name}.next.$$"
+        rm -rf "${replacement}"
+        cp -a "${source}" "${replacement}" || {
+            rm -rf "${PLUGIN_STAGING_DIR}" "${replacement}"
+            restore_bundled_plugins
+            return 1
+        }
+        rm -rf "${PLUGIN_INSTALL_DIR:?}/${name}"
+        mv "${replacement}" "${PLUGIN_INSTALL_DIR}/${name}" || {
+            rm -rf "${PLUGIN_STAGING_DIR}" "${replacement}"
+            restore_bundled_plugins
+            return 1
+        }
+    done
+    rm -rf "${PLUGIN_STAGING_DIR}"
+    ok "bundled plugins 已更新到 ${PLUGIN_INSTALL_DIR}"
 }
 
 sync_config_file() {
@@ -468,6 +651,7 @@ values = {
     "WEB_UI_ENABLED": "true" if data.get("web_ui_enabled", True) else "false",
     "WEB_PORT": str(data.get("web_port", 8080)),
     "WEB_TOKEN": str(data.get("web_token", "")),
+    "PLUGINS_DIR": str(data.get("plugins_dir", "plugins")),
 }
 
 for key, value in values.items():
@@ -500,23 +684,44 @@ rollback_update() {
     local rollback_ready_url="${API_READY_URL}"
 
     warn "${reason}"
-    if [[ ! -f "${BINARY_BACKUP_PATH}" ]]; then
-        fail "部署失败，且未找到旧版本备份；查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+    if [[ "${BINARY_BACKED_UP}" != "true" || ! -f "${BINARY_BACKUP_PATH}" ]]; then
+        fail "部署失败，且未找到本次部署生成的旧版本备份；查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
     fi
 
     warn "开始回滚到上一版本..."
-    if [[ -f "${CONFIG_BACKUP_PATH}" ]]; then
+    systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
+    if [[ "${PREVIOUS_SERVICE_NAME}" != "${SERVICE_NAME}" ]]; then
+        systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "${CONFIG_BACKED_UP}" == "true" && -f "${CONFIG_BACKUP_PATH}" ]]; then
         cp -f "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
     fi
-    cp -f "${BINARY_BACKUP_PATH}" "${INSTALL_DIR}/forward"
-    chmod 755 "${INSTALL_DIR}/forward"
-    if [[ -f "${SERVICE_BACKUP_PATH}" ]]; then
+    restore_bundled_plugins
+
+    rm -f "${INSTALL_DIR}/veer"
+    if [[ "${ORIGINAL_BINARY_NAME}" == "veer" ]]; then
+        cp -f "${BINARY_BACKUP_PATH}" "${INSTALL_DIR}/veer"
+        chmod 755 "${INSTALL_DIR}/veer"
+    elif [[ "${ORIGINAL_BINARY_NAME}" == "forward" && ! -f "${INSTALL_DIR}/forward" ]]; then
+        cp -f "${BINARY_BACKUP_PATH}" "${INSTALL_DIR}/forward"
+        chmod 755 "${INSTALL_DIR}/forward"
+    fi
+
+    if [[ "${SERVICE_BACKED_UP}" == "true" && -f "${SERVICE_BACKUP_PATH}" ]]; then
         cp -f "${SERVICE_BACKUP_PATH}" "${SERVICE_FILE}"
+    else
+        rm -f "${SERVICE_FILE}"
     fi
     systemctl daemon-reload
-    if ! systemctl restart "$SERVICE_NAME"; then
+
+    if [[ "${PREVIOUS_SERVICE_RUNNING}" != "true" || -z "${PREVIOUS_SERVICE_NAME}" ]]; then
+        fail "新版本部署失败，文件已回滚；部署前服务未运行，因此未自动启动旧版本"
+    fi
+
+    if ! systemctl restart "${PREVIOUS_SERVICE_NAME}"; then
         PRESERVE_HOT_RESTART_MARKERS_ON_EXIT=1
-        fail "回滚后的服务重启失败；查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+        fail "回滚后的服务重启失败；查看日志: journalctl -u ${PREVIOUS_SERVICE_NAME} -n 50 --no-pager"
     fi
     if [[ -f "${INSTALL_DIR}/config.json" ]]; then
         if rollback_env="$(load_config_runtime_values "${INSTALL_DIR}/config.json")"; then
@@ -527,11 +732,11 @@ rollback_update() {
         fi
     fi
     info "等待回滚后的服务通过 readyz 检查（超时 ${READY_TIMEOUT_SECONDS}s）..."
-    if wait_for_service_ready "${rollback_ready_url}" "${READY_TIMEOUT_SECONDS}"; then
+    if wait_for_service_ready "${rollback_ready_url}" "${READY_TIMEOUT_SECONDS}" "${PREVIOUS_SERVICE_NAME}"; then
         fail "新版本部署失败，已自动回滚到上一版本"
     fi
     PRESERVE_HOT_RESTART_MARKERS_ON_EXIT=1
-    fail "新版本部署失败，且回滚后的服务未能通过 readyz；查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+    fail "新版本部署失败，且回滚后的服务未能通过 readyz；查看日志: journalctl -u ${PREVIOUS_SERVICE_NAME} -n 50 --no-pager"
 }
 
 # ---------- 按架构查找二进制 ----------
@@ -544,6 +749,8 @@ esac
 
 BINARY_PATH=""
 for candidate in \
+    "${SCRIPT_DIR}/veer-linux-${GOARCH}" \
+    "${SCRIPT_DIR}/veer" \
     "${SCRIPT_DIR}/forward-linux-${GOARCH}" \
     "${SCRIPT_DIR}/forward" \
 ; do
@@ -554,7 +761,7 @@ for candidate in \
 done
 
 if [[ -z "$BINARY_PATH" ]]; then
-    fail "未找到二进制文件，需要以下任一文件与本脚本同目录:\n       forward-linux-${GOARCH}\n       forward"
+    fail "未找到二进制文件，需要以下任一文件与本脚本同目录:\n       veer-linux-${GOARCH}\n       veer\n       forward-linux-${GOARCH}（旧名兼容）\n       forward（旧名兼容）"
 fi
 
 FILE_SIZE=$(du -h "$BINARY_PATH" | cut -f1)
@@ -566,18 +773,25 @@ WEB_UI_ENABLED="$(normalize_bool_json "$WEB_UI_ENABLED")" || fail "WEB_UI_ENABLE
 validate_port "$WEB_PORT"
 
 # ---------- 识别现有安装 ----------
-HAS_EXISTING_INSTALL=false
-if [[ -f "${INSTALL_DIR}/forward" || -f "${INSTALL_DIR}/config.json" || -f "${SERVICE_FILE}" ]]; then
+prepare_legacy_installation
+
+if [[ -f "${INSTALL_DIR}/veer" || -f "${INSTALL_DIR}/forward" || -f "${INSTALL_DIR}/config.json" || -f "${SERVICE_FILE}" || -f "${LEGACY_SERVICE_FILE}" ]]; then
     HAS_EXISTING_INSTALL=true
 fi
 
 SERVICE_RUNNING=false
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    PREVIOUS_SERVICE_NAME="$SERVICE_NAME"
+    PREVIOUS_SERVICE_RUNNING=true
+    SERVICE_RUNNING=true
+elif systemctl is-active --quiet "$LEGACY_SERVICE_NAME" 2>/dev/null; then
+    PREVIOUS_SERVICE_NAME="$LEGACY_SERVICE_NAME"
+    PREVIOUS_SERVICE_RUNNING=true
     SERVICE_RUNNING=true
 fi
 
 if $SERVICE_RUNNING; then
-    info "检测到运行中的现有服务，将执行热更新（worker 与 kernel session 尽量不中断）"
+    info "检测到运行中的 ${PREVIOUS_SERVICE_NAME}.service，将迁移或热更新到 ${SERVICE_NAME}.service（worker 与 kernel session 尽量不中断）"
 elif $HAS_EXISTING_INSTALL; then
     info "检测到已有安装但服务当前未运行，将执行冷启动更新"
 fi
@@ -602,7 +816,15 @@ else
     ok "配置文件已保留现有值，并补齐缺失默认项"
 fi
 
-install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/forward"
+configure_plugin_install_dir
+if ! install_bundled_plugins; then
+    if [[ "${CONFIG_BACKED_UP}" == "true" && -f "${CONFIG_BACKUP_PATH}" ]]; then
+        cp -f "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
+    fi
+    fail "bundled plugin 安装失败，现有插件与配置已恢复"
+fi
+
+install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/veer"
 
 API_READY_URL="$(compute_ready_url "$WEB_BIND" "$WEB_PORT")"
 ok "文件部署完成"
@@ -622,17 +844,20 @@ info "配置 systemd 服务..."
 
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
-Description=NAT Forward Service
+Description=Veer Network Service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
+Environment=VEER_HOT_RESTART_MARKER=${HOT_RESTART_MARKER}
+Environment=VEER_BPF_STATE_DIR=${BPF_STATE_DIR}
+Environment=VEER_RUNTIME_STATE_DIR=${RUNTIME_STATE_DIR}
 Environment=FORWARD_HOT_RESTART_MARKER=${HOT_RESTART_MARKER}
 Environment=FORWARD_BPF_STATE_DIR=${BPF_STATE_DIR}
 Environment=FORWARD_RUNTIME_STATE_DIR=${RUNTIME_STATE_DIR}
-ExecStart=${INSTALL_DIR}/forward --config ${INSTALL_DIR}/config.json
+ExecStart=${INSTALL_DIR}/veer --config ${INSTALL_DIR}/config.json
 Restart=always
 RestartSec=3
 KillMode=process
@@ -673,8 +898,17 @@ if $SERVICE_RUNNING; then
     else
         rm -f "$HOT_RESTART_SKIP_STATS_MARKER"
     fi
-    if ! systemctl restart "$SERVICE_NAME"; then
-        rollback_update "热重启命令失败，正在回滚"
+    if [[ "${PREVIOUS_SERVICE_NAME}" == "${SERVICE_NAME}" ]]; then
+        if ! systemctl restart "$SERVICE_NAME"; then
+            rollback_update "热重启命令失败，正在回滚"
+        fi
+    else
+        if ! systemctl stop "${PREVIOUS_SERVICE_NAME}"; then
+            rollback_update "停止旧服务失败，正在回滚"
+        fi
+        if ! systemctl start "$SERVICE_NAME"; then
+            rollback_update "启动 Veer 服务失败，正在回滚"
+        fi
     fi
 else
     rm -f "$HOT_RESTART_SKIP_STATS_MARKER"
@@ -687,7 +921,7 @@ else
 fi
 
 info "等待服务通过 readyz 检查（超时 ${READY_TIMEOUT_SECONDS}s）..."
-if wait_for_service_ready "${API_READY_URL}" "${READY_TIMEOUT_SECONDS}"; then
+if wait_for_service_ready "${API_READY_URL}" "${READY_TIMEOUT_SECONDS}" "${SERVICE_NAME}"; then
     rm -f "$HOT_RESTART_MARKER"
     rm -f "$HOT_RESTART_SKIP_STATS_MARKER"
     if $SERVICE_RUNNING; then
@@ -703,6 +937,29 @@ else
     fi
     fail "服务在 ${READY_TIMEOUT_SECONDS} 秒内未通过 readyz 检查；查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
 fi
+
+# ---------- 旧名称兼容入口 ----------
+info "配置旧版路径与服务名兼容入口..."
+if [[ -e "${INSTALL_DIR}/forward" || -L "${INSTALL_DIR}/forward" ]]; then
+    rm -f "${INSTALL_DIR}/forward"
+fi
+ln -s "veer" "${INSTALL_DIR}/forward"
+
+if [[ -f "${LEGACY_SERVICE_FILE}" && ! -L "${LEGACY_SERVICE_FILE}" ]]; then
+    systemctl disable "${LEGACY_SERVICE_NAME}" >/dev/null 2>&1 || true
+fi
+rm -f "${LEGACY_SERVICE_FILE}"
+ln -s "$(basename "${SERVICE_FILE}")" "${LEGACY_SERVICE_FILE}"
+
+if [[ "${INSTALL_DIR}" == "${DEFAULT_INSTALL_DIR}" ]]; then
+    if [[ ! -e "${LEGACY_INSTALL_DIR}" && ! -L "${LEGACY_INSTALL_DIR}" ]]; then
+        ln -s "${DEFAULT_INSTALL_DIR}" "${LEGACY_INSTALL_DIR}"
+    elif [[ -L "${LEGACY_INSTALL_DIR}" && "$(readlink -f "${LEGACY_INSTALL_DIR}")" != "$(readlink -f "${DEFAULT_INSTALL_DIR}")" ]]; then
+        warn "${LEGACY_INSTALL_DIR} 已指向其他位置，未覆盖该路径"
+    fi
+fi
+systemctl daemon-reload
+ok "兼容入口已就绪: ${INSTALL_DIR}/forward, ${LEGACY_SERVICE_NAME}.service"
 
 # ---------- 防火墙 ----------
 if command -v ufw &>/dev/null; then
@@ -735,7 +992,7 @@ fi
 # ---------- 完成 ----------
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════${NC}"
-echo -e "${GREEN}       NAT Forward 部署完成${NC}"
+echo -e "${GREEN}       Veer 部署完成${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════${NC}"
 echo ""
 echo -e "  安装目录:  ${CYAN}${INSTALL_DIR}${NC}"
@@ -770,7 +1027,10 @@ echo -e "    停止服务:  ${CYAN}systemctl stop ${SERVICE_NAME}${NC}"
 echo ""
 echo -e "  卸载:"
 echo -e "    ${CYAN}systemctl stop ${SERVICE_NAME} && systemctl disable ${SERVICE_NAME}${NC}"
-echo -e "    ${CYAN}rm -f ${SERVICE_FILE} ${SERVICE_BACKUP_PATH} && systemctl daemon-reload${NC}"
+echo -e "    ${CYAN}rm -f ${SERVICE_FILE} ${LEGACY_SERVICE_FILE} ${SERVICE_BACKUP_PATH} ${LEGACY_SERVICE_BACKUP_PATH} && systemctl daemon-reload${NC}"
 echo -e "    ${CYAN}rm -rf ${BPF_STATE_DIR} ${RUNTIME_STATE_DIR}${NC}"
 echo -e "    ${CYAN}rm -rf ${INSTALL_DIR}${NC}"
+if [[ "${INSTALL_DIR}" == "${DEFAULT_INSTALL_DIR}" ]]; then
+    echo -e "    ${CYAN}rm -f ${LEGACY_INSTALL_DIR}${NC}"
+fi
 echo ""

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 func TestPluginIPv6SubnetByIndexSelectsRequested64(t *testing.T) {
@@ -34,7 +34,7 @@ func TestCompilePluginIPv6AssignmentPlanBuildsRoutedPDState(t *testing.T) {
 		ResourceID: pluginIPv6AssignmentPlansResourceID,
 		RecordKey:  "lan-a",
 		DataJSON: `{
-			"parent_interface":"fwdlocal0",
+			"parent_interface":"veerlocal0",
 			"target_interface":"br-lan",
 			"parent_prefix":"240e:390:6aad:d550::/60",
 			"assigned_prefix_length":64,
@@ -67,8 +67,8 @@ func TestCompilePluginIPv6AssignmentPlanBuildsRoutedPDState(t *testing.T) {
 	}
 
 	resolved, changed, err := resolveIPv6AssignmentForCurrentHost(item, map[string]HostNetworkInterface{
-		"fwdlocal0": {
-			Name: "fwdlocal0",
+		"veerlocal0": {
+			Name: "veerlocal0",
 			Addresses: []HostInterfaceAddress{{
 				Family: ipFamilyIPv6,
 				CIDR:   "2001:db8:ffff::/64",
@@ -109,7 +109,7 @@ func TestCompilePluginIPv6AssignmentPlanAcceptsMatchingExplicitSubnetIndex(t *te
 		PluginID:   "lan_core",
 		ResourceID: pluginIPv6AssignmentPlansResourceID,
 		RecordKey:  "lan-five",
-		DataJSON:   `{"parent_interface":"fwdlocal0","target_interface":"br-lan","parent_prefix":"240e:390:6aad:d550::/60","assigned_prefix":"240e:390:6aad:d555::/64","subnet_index":5,"upstream_routed":true,"enabled":true}`,
+		DataJSON:   `{"parent_interface":"veerlocal0","target_interface":"br-lan","parent_prefix":"240e:390:6aad:d550::/60","assigned_prefix":"240e:390:6aad:d555::/64","subnet_index":5,"upstream_routed":true,"enabled":true}`,
 		Enabled:    true,
 	}
 	items, warnings := compilePluginIPv6AssignmentPlansWithWarnings([]store.PluginRecord{record}, nil)
@@ -117,7 +117,7 @@ func TestCompilePluginIPv6AssignmentPlanAcceptsMatchingExplicitSubnetIndex(t *te
 		t.Fatalf("items=%+v warnings=%v, want matching explicit subnet index accepted", items, warnings)
 	}
 
-	record.DataJSON = `{"parent_interface":"fwdlocal0","target_interface":"br-lan","parent_prefix":"240e:390:6aad:d550::/60","assigned_prefix":"240e:390:6aad:d554::/64","subnet_index":5,"upstream_routed":true,"enabled":true}`
+	record.DataJSON = `{"parent_interface":"veerlocal0","target_interface":"br-lan","parent_prefix":"240e:390:6aad:d550::/60","assigned_prefix":"240e:390:6aad:d554::/64","subnet_index":5,"upstream_routed":true,"enabled":true}`
 	items, warnings = compilePluginIPv6AssignmentPlansWithWarnings([]store.PluginRecord{record}, nil)
 	if len(items) != 0 || len(warnings) != 1 {
 		t.Fatalf("items=%+v warnings=%v, want mismatched explicit subnet index rejected", items, warnings)

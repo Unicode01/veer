@@ -1,5 +1,5 @@
 (function () {
-  const app = window.ForwardApp;
+  const app = window.VeerApp;
   if (!app) return;
 
   Object.assign(app.el, {

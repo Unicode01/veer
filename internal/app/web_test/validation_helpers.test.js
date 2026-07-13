@@ -1182,7 +1182,7 @@ function createHarness() {
 
   const context = vm.createContext({
     window: {
-      ForwardApp: app,
+      VeerApp: app,
       setInterval() {
         return 1;
       },

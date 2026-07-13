@@ -27,8 +27,8 @@ func TestPluginInterfacePatternMatches(t *testing.T) {
 		{pattern: "veth*wan", iface: "veth123wan", want: true},
 		{pattern: "veth*wan", iface: "veth123wan0", want: false},
 		{pattern: "veth*wan", iface: "xveth123wan", want: false},
-		{pattern: "fwd*wan*", iface: "fwd0wan1", want: true},
-		{pattern: "fwd*wan*", iface: "wanfwd0", want: false},
+		{pattern: "veer*wan*", iface: "veer0wan1", want: true},
+		{pattern: "veer*wan*", iface: "wanveer0", want: false},
 		{pattern: "br*lan*", iface: "br0lan1", want: true},
 		{pattern: "br*lan*", iface: "br0", want: false},
 	}
@@ -51,21 +51,21 @@ func TestPluginControlHasNetAccessRequiresOperationAndPattern(t *testing.T) {
 		PluginManifest: PluginManifest{
 			Control: &PluginControl{
 				NetAccess: []PluginNetAccess{
-					{Interfaces: []string{"fwd*", "wan*"}, Operations: []string{"link.create", "addr.write"}},
+					{Interfaces: []string{"veer*", "wan*"}, Operations: []string{"link.create", "addr.write"}},
 					{Interfaces: []string{"eth*"}, Operations: []string{"link.read"}},
 				},
 			},
 		},
 	}
 
-	if !pluginControlHasNetAccess(plugin, "link.create", "fwdwan0") {
-		t.Fatal("pluginControlHasNetAccess(link.create, fwdwan0) = false, want true")
+	if !pluginControlHasNetAccess(plugin, "link.create", "veerwan0") {
+		t.Fatal("pluginControlHasNetAccess(link.create, veerwan0) = false, want true")
 	}
 	if !pluginControlHasNetAccess(plugin, "addr.write", "wan0") {
 		t.Fatal("pluginControlHasNetAccess(addr.write, wan0) = false, want true")
 	}
-	if pluginControlHasNetAccess(plugin, "link.delete", "fwdwan0") {
-		t.Fatal("pluginControlHasNetAccess(link.delete, fwdwan0) = true, want false")
+	if pluginControlHasNetAccess(plugin, "link.delete", "veerwan0") {
+		t.Fatal("pluginControlHasNetAccess(link.delete, veerwan0) = true, want false")
 	}
 	if pluginControlHasNetAccess(plugin, "link.create", "eth0") {
 		t.Fatal("pluginControlHasNetAccess(link.create, eth0) = true, want false")

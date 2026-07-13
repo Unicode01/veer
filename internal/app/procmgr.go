@@ -83,7 +83,10 @@ const (
 	pluginCatalogDriftCheckEvery        = 2 * time.Second
 )
 
-const forwardKernelMaintenanceIntervalEnv = "FORWARD_KERNEL_MAINTENANCE_INTERVAL_MS"
+const (
+	veerKernelMaintenanceIntervalEnv    = "VEER_KERNEL_MAINTENANCE_INTERVAL_MS"
+	forwardKernelMaintenanceIntervalEnv = "FORWARD_KERNEL_MAINTENANCE_INTERVAL_MS"
+)
 
 func nextWorkerRetryDelay(retryCount int) time.Duration {
 	if retryCount <= 1 {
@@ -196,7 +199,7 @@ func recordWorkerStatusError(wi *WorkerInfo, status IPCMessage) {
 }
 
 func configuredKernelMaintenanceInterval() time.Duration {
-	raw := strings.TrimSpace(os.Getenv(forwardKernelMaintenanceIntervalEnv))
+	raw := preferredEnvironmentValue(veerKernelMaintenanceIntervalEnv, forwardKernelMaintenanceIntervalEnv)
 	if raw == "" {
 		return kernelMaintenanceInterval
 	}

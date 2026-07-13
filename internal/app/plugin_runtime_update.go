@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 type PluginResourceRecord struct {
@@ -177,19 +177,11 @@ func pluginResourceAffectsActiveCorePlans(plugin LoadedPlugin, resource PluginRe
 		pluginResourceAffectsCoreDHCPv4(resource)) && pluginCoreResourceStabilityAllowed(plugin, cfg)
 }
 
-func pluginResourceAffectsActiveCoreEgressNAT(plugin LoadedPlugin, resource PluginResource, cfg *Config) bool {
-	return pluginResourceAffectsCoreEgressNAT(resource) && pluginCoreResourceStabilityAllowed(plugin, cfg)
-}
-
 func pluginMayAffectActiveCorePlans(plugin LoadedPlugin, cfg *Config) bool {
 	return (pluginHasEgressNATPlansResource(plugin) ||
 		pluginHasForwardRulePlansResource(plugin) ||
 		pluginHasIPv6AssignmentPlansResource(plugin) ||
 		pluginHasDHCPv4PlansResource(plugin)) && pluginCoreResourceStabilityAllowed(plugin, cfg)
-}
-
-func pluginMayAffectActiveCoreEgressNAT(plugin LoadedPlugin, cfg *Config) bool {
-	return pluginHasEgressNATPlansResource(plugin) && pluginCoreResourceStabilityAllowed(plugin, cfg)
 }
 
 func processConfigForPluginRuntimeUpdate(pm *ProcessManager) *Config {
@@ -204,10 +196,6 @@ func redistributePluginCorePlans(pm *ProcessManager, enabled bool) {
 		return
 	}
 	pm.redistributeWorkers()
-}
-
-func redistributePluginEgressNATPlans(pm *ProcessManager, enabled bool) {
-	redistributePluginCorePlans(pm, enabled)
 }
 
 func applyPluginResourceDataWithAppliers(appliers []pluginRuntimeDataApplier, plugin LoadedPlugin, resource PluginResource, records []PluginResourceRecord) error {

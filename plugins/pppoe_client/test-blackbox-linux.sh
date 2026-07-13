@@ -9,20 +9,26 @@ if [ "$(id -u)" != "0" ]; then
 	exit 1
 fi
 
-: "${FORWARD_PPPOE_BLACKBOX_SECONDS:=8}"
-: "${FORWARD_PPPOE_BLACKBOX_PARALLEL:=1}"
-: "${FORWARD_PPPOE_BLACKBOX_PORT:=0}"
-: "${FORWARD_PPPOE_BLACKBOX_TOKEN:=pppoe-blackbox-token}"
-: "${FORWARD_PPPOE_BLACKBOX_CAPTURE:=0}"
-: "${FORWARD_PPPOE_BLACKBOX_SETTLE_SECONDS:=0}"
+: "${VEER_PPPOE_BLACKBOX_SECONDS:=8}"
+: "${VEER_PPPOE_BLACKBOX_PARALLEL:=1}"
+: "${VEER_PPPOE_BLACKBOX_PORT:=0}"
+: "${VEER_PPPOE_BLACKBOX_TOKEN:=pppoe-blackbox-token}"
+: "${VEER_PPPOE_BLACKBOX_CAPTURE:=0}"
+: "${VEER_PPPOE_BLACKBOX_SETTLE_SECONDS:=0}"
+: "${VEER_PPPOE_BLACKBOX_RUN_IPERF:=1}"
+: "${VEER_PPPOE_BLACKBOX_TEST_IPV6:=0}"
+: "${VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE:=0}"
 
 missing=
-for tool in ip tc clang iperf3 pppd pppoe-server curl sed grep timeout ss ethtool; do
+for tool in ip tc clang pppd pppoe-server curl sed grep timeout ss ethtool; do
 	if ! command -v "$tool" >/dev/null 2>&1; then
 		missing="${missing:+$missing }$tool"
 	fi
 done
-if [ "$FORWARD_PPPOE_BLACKBOX_CAPTURE" = "1" ] && ! command -v tcpdump >/dev/null 2>&1; then
+if [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" = "1" ] && ! command -v iperf3 >/dev/null 2>&1; then
+	missing="${missing:+$missing }iperf3"
+fi
+if [ "$VEER_PPPOE_BLACKBOX_CAPTURE" = "1" ] && ! command -v tcpdump >/dev/null 2>&1; then
 	missing="${missing:+$missing }tcpdump"
 fi
 if [ -n "$missing" ]; then
@@ -30,30 +36,51 @@ if [ -n "$missing" ]; then
 	exit 1
 fi
 
-case "$FORWARD_PPPOE_BLACKBOX_SECONDS" in
+case "$VEER_PPPOE_BLACKBOX_SECONDS" in
 	''|*[!0-9]*|0)
-		echo "FORWARD_PPPOE_BLACKBOX_SECONDS must be a positive integer" >&2
+		echo "VEER_PPPOE_BLACKBOX_SECONDS must be a positive integer" >&2
 		exit 1
 		;;
 esac
-case "$FORWARD_PPPOE_BLACKBOX_PARALLEL" in
+case "$VEER_PPPOE_BLACKBOX_PARALLEL" in
 	''|*[!0-9]*|0)
-		echo "FORWARD_PPPOE_BLACKBOX_PARALLEL must be a positive integer" >&2
+		echo "VEER_PPPOE_BLACKBOX_PARALLEL must be a positive integer" >&2
+		exit 1
+		;;
+esac
+case "$VEER_PPPOE_BLACKBOX_RUN_IPERF" in
+	0|1) ;;
+	*)
+		echo "VEER_PPPOE_BLACKBOX_RUN_IPERF must be 0 or 1" >&2
+		exit 1
+		;;
+esac
+case "$VEER_PPPOE_BLACKBOX_TEST_IPV6" in
+	0|1) ;;
+	*)
+		echo "VEER_PPPOE_BLACKBOX_TEST_IPV6 must be 0 or 1" >&2
+		exit 1
+		;;
+esac
+case "$VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE" in
+	0|1) ;;
+	*)
+		echo "VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE must be 0 or 1" >&2
 		exit 1
 		;;
 esac
 
-if [ "$FORWARD_PPPOE_BLACKBOX_PORT" = "0" ]; then
-	FORWARD_PPPOE_BLACKBOX_PORT=$((18080 + ($$ % 1000)))
+if [ "$VEER_PPPOE_BLACKBOX_PORT" = "0" ]; then
+	VEER_PPPOE_BLACKBOX_PORT=$((18080 + ($$ % 1000)))
 fi
 
 suffix=$$
 server_ns="fwpppsrv$suffix"
 wan_host="wanbb0$suffix"
 wan_peer="wanbb1$suffix"
-local_if="fwdl${suffix}"
+local_if="veerl${suffix}"
 local_if=$(printf '%.15s' "$local_if")
-pipeline_if="fwdp${suffix}"
+pipeline_if="veerp${suffix}"
 pipeline_if=$(printf '%.15s' "$pipeline_if")
 lan_host="lanbb0${suffix}"
 lan_host=$(printf '%.15s' "$lan_host")
@@ -61,8 +88,8 @@ lan_peer="lanbb1${suffix}"
 lan_peer=$(printf '%.15s' "$lan_peer")
 lan_bridge="brbb${suffix}"
 lan_bridge=$(printf '%.15s' "$lan_bridge")
-work_dir=$(mktemp -d "${TMPDIR:-/tmp}/forward-pppoe-blackbox.XXXXXX")
-forward_pid=
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/veer-pppoe-blackbox.XXXXXX")
+veer_pid=
 pppoe_pid=
 iperf_pid=
 capture_pid=
@@ -76,7 +103,7 @@ cleanup() {
 	if [ -n "$capture_pid" ]; then kill "$capture_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_local_pid" ]; then kill "$capture_local_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_pipeline_pid" ]; then kill "$capture_pipeline_pid" 2>/dev/null || true; fi
-	if [ -n "$forward_pid" ]; then kill "$forward_pid" 2>/dev/null || true; fi
+	if [ -n "$veer_pid" ]; then kill "$veer_pid" 2>/dev/null || true; fi
 	if [ -n "$pppoe_pid" ]; then kill "$pppoe_pid" 2>/dev/null || true; fi
 	if [ -f "$work_dir/pppoe-server.pid" ]; then kill "$(cat "$work_dir/pppoe-server.pid")" 2>/dev/null || true; fi
 	pkill -f "[p]ppoe-server .*${wan_peer}" 2>/dev/null || true
@@ -87,7 +114,7 @@ cleanup() {
 	ip link del "$lan_bridge" 2>/dev/null || true
 	ip link del "$lan_host" 2>/dev/null || true
 	ip link del "$wan_host" 2>/dev/null || true
-	if [ "${FORWARD_PPPOE_BLACKBOX_KEEP_WORKDIR:-0}" = "1" ]; then
+	if [ "${VEER_PPPOE_BLACKBOX_KEEP_WORKDIR:-0}" = "1" ]; then
 		echo "keeping PPPoE blackbox work dir: $work_dir" >&2
 	else
 		rm -rf "$work_dir"
@@ -137,7 +164,7 @@ EOF
 		-L 8.8.8.8 \
 		-R 198.18.0.2 \
 		-N 1 \
-		-C forward-test-ac \
+		-C veer-test-ac \
 		-O "$work_dir/pppoe-server-options" \
 		-T 0 \
 		-X "$work_dir/pppoe-server.pid" \
@@ -154,24 +181,24 @@ EOF
 	exit 1
 }
 
-build_forward_binary() {
-	if [ -n "${FORWARD_BINARY:-}" ]; then
-		if [ ! -x "$FORWARD_BINARY" ]; then
-			echo "FORWARD_BINARY must point to an executable forward binary" >&2
+build_veer_binary() {
+	if [ -n "${VEER_BINARY:-}" ]; then
+		if [ ! -x "$VEER_BINARY" ]; then
+			echo "VEER_BINARY must point to an executable veer binary" >&2
 			exit 1
 		fi
 		return
 	fi
-	(cd "$ROOT_DIR" && go build -o "$work_dir/forward" .)
-	FORWARD_BINARY="$work_dir/forward"
+	(cd "$ROOT_DIR" && go build -o "$work_dir/veer" .)
+	VEER_BINARY="$work_dir/veer"
 }
 
-start_forward() {
+start_veer() {
 	cat >"$work_dir/config.json" <<EOF
 {
   "web_bind": "127.0.0.1",
-  "web_port": $FORWARD_PPPOE_BLACKBOX_PORT,
-  "web_token": "$FORWARD_PPPOE_BLACKBOX_TOKEN",
+  "web_port": $VEER_PPPOE_BLACKBOX_PORT,
+  "web_token": "$VEER_PPPOE_BLACKBOX_TOKEN",
   "plugins_enabled": true,
   "plugins_dataplane_enabled": true,
   "plugins_dir": "$work_dir/plugins",
@@ -180,22 +207,22 @@ start_forward() {
 EOF
 	(
 		cd "$work_dir"
-		exec "$FORWARD_BINARY" -config "$work_dir/config.json" >"$work_dir/forward.log" 2>&1
+		exec "$VEER_BINARY" -config "$work_dir/config.json" >"$work_dir/veer.log" 2>&1
 	) &
-	forward_pid=$!
+	veer_pid=$!
 	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
-		if ! kill -0 "$forward_pid" 2>/dev/null; then
-			echo "forward exited before API became ready" >&2
-			cat "$work_dir/forward.log" >&2
+		if ! kill -0 "$veer_pid" 2>/dev/null; then
+			echo "veer exited before API became ready" >&2
+			cat "$work_dir/veer.log" >&2
 			exit 1
 		fi
-		if curl -fsS -H "Authorization: Bearer $FORWARD_PPPOE_BLACKBOX_TOKEN" "http://127.0.0.1:$FORWARD_PPPOE_BLACKBOX_PORT/api/plugins" >/dev/null 2>&1; then
+		if curl -fsS -H "Authorization: Bearer $VEER_PPPOE_BLACKBOX_TOKEN" "http://127.0.0.1:$VEER_PPPOE_BLACKBOX_PORT/api/plugins" >/dev/null 2>&1; then
 			return
 		fi
 		sleep 0.2
 	done
-	echo "forward API did not become ready" >&2
-	cat "$work_dir/forward.log" >&2
+	echo "veer API did not become ready" >&2
+	cat "$work_dir/veer.log" >&2
 	exit 1
 }
 
@@ -204,10 +231,10 @@ api_post_plugin_action() {
 	api_action=$2
 	api_payload=$3
 	curl -sS --fail-with-body \
-		-H "Authorization: Bearer $FORWARD_PPPOE_BLACKBOX_TOKEN" \
+		-H "Authorization: Bearer $VEER_PPPOE_BLACKBOX_TOKEN" \
 		-H "Content-Type: application/json" \
 		-d "{\"payload\":$api_payload}" \
-		"http://127.0.0.1:$FORWARD_PPPOE_BLACKBOX_PORT/api/plugins/$api_plugin/actions/$api_action"
+		"http://127.0.0.1:$VEER_PPPOE_BLACKBOX_PORT/api/plugins/$api_plugin/actions/$api_action"
 }
 
 api_post_action() {
@@ -219,8 +246,8 @@ api_get_plugin_resource() {
 	api_resource=$2
 	api_key=$3
 	curl -sS --fail-with-body \
-		-H "Authorization: Bearer $FORWARD_PPPOE_BLACKBOX_TOKEN" \
-		"http://127.0.0.1:$FORWARD_PPPOE_BLACKBOX_PORT/api/plugins/$api_plugin/resources/$api_resource/$api_key"
+		-H "Authorization: Bearer $VEER_PPPOE_BLACKBOX_TOKEN" \
+		"http://127.0.0.1:$VEER_PPPOE_BLACKBOX_PORT/api/plugins/$api_plugin/resources/$api_resource/$api_key"
 }
 
 api_get_resource() {
@@ -256,7 +283,7 @@ wait_for_session_up() {
 	done
 	echo "PPPoE session did not become usable" >&2
 	cat "$work_dir/session.json" 2>/dev/null >&2 || true
-	cat "$work_dir/forward.log" >&2
+	cat "$work_dir/veer.log" >&2
 	exit 1
 }
 
@@ -271,7 +298,7 @@ wait_for_session_disconnected() {
 	done
 	echo "PPPoE session did not report disconnected state" >&2
 	cat "$work_dir/session-disconnect.json" 2>/dev/null >&2 || true
-	cat "$work_dir/forward.log" >&2
+	cat "$work_dir/veer.log" >&2
 	exit 1
 }
 
@@ -312,15 +339,15 @@ dump_dataplane_state() {
 			echo "=== captured WAN traffic: $(basename "$pcap") ==="
 			tcpdump -nn -e -vv -r "$pcap"
 		done
-		echo '=== forward log ==='
-		tail -200 "$work_dir/forward.log"
+		echo '=== veer log ==='
+		tail -200 "$work_dir/veer.log"
 	} >"$work_dir/dataplane-state.log" 2>&1
 	cat "$work_dir/dataplane-state.log" >&2
 	set -e
 }
 
 start_capture() {
-	if [ "$FORWARD_PPPOE_BLACKBOX_CAPTURE" != "1" ]; then return; fi
+	if [ "$VEER_PPPOE_BLACKBOX_CAPTURE" != "1" ]; then return; fi
 	capture_file=$1
 	tcpdump -U -i "$wan_host" -s 0 -w "$capture_file" >/dev/null 2>&1 &
 	capture_pid=$!
@@ -349,8 +376,8 @@ run_blackbox() {
 	copy_plugin
 	start_topology
 	start_pppoe_server
-	build_forward_binary
-	start_forward
+	build_veer_binary
+	start_veer
 
 	wan_payload=$(cat <<EOF
 {
@@ -379,6 +406,22 @@ EOF
 		exit 1
 	fi
 
+	negotiate_ipv6=false
+	if [ "$VEER_PPPOE_BLACKBOX_TEST_IPV6" = "1" ]; then negotiate_ipv6=true; fi
+	timer_fence_fields=
+	if [ "$VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE" = "1" ]; then
+		timer_fence_fields=$(cat <<'EOF'
+  "keepalive_interval_ms": 10,
+  "keepalive_failure_threshold": 1,
+  "keepalive_failure_grace_ms": 0,
+  "keepalive_confirm_timeout_ms": 100,
+  "auto_redial": true,
+  "redial_retry_initial_ms": 250,
+  "redial_retry_max_ms": 1000,
+  "disconnect_drain_ms": 500,
+EOF
+)
+	fi
 	payload=$(cat <<EOF
 {
   "interface": $(json_string "$wan_host"),
@@ -392,13 +435,16 @@ EOF
   "control_idle_timeout_ms": 10,
   "max_frames": 8,
   "negotiate_ipv4": true,
-  "negotiate_ipv6": false,
+  "negotiate_ipv6": $negotiate_ipv6,
+  "request_ipv6_address": false,
+  "request_ipv6_router": false,
   "request_pd": false,
   "prepare_interfaces": true,
   "sync_hook_bindings": true,
   "apply_hook_bindings": true,
   "send_padt": false,
   "post_session_control_ms": 200,
+$timer_fence_fields
   "decap_mode": "manual",
   "wan_core_sync": true,
   "wan_core_required": true,
@@ -411,6 +457,14 @@ EOF
 	api_get_plugin_resource wan_core status blackbox >"$work_dir/wan-status.json"
 	grep -q '"segmentation_ready":true' "$work_dir/wan-status.json"
 	grep -q '"noarp_ready":true' "$work_dir/wan-status.json"
+	if ip -details link show dev "$wan_host" | grep -q 'prog/xdp'; then
+		echo "PPPoE TC path unexpectedly attached XDP to $wan_host" >&2
+		exit 1
+	fi
+	if ip -details link show dev "$local_if" | grep -q 'prog/xdp'; then
+		echo "PPPoE TC path unexpectedly attached XDP to $local_if" >&2
+		exit 1
+	fi
 
 	ip -4 addr show dev "$local_if" | grep -q '198.18.0.2/32'
 	ip -4 route show dev "$local_if" | grep -q '8.8.8.8'
@@ -418,8 +472,10 @@ EOF
 	tc filter show dev "$wan_host" ingress | grep -q bpf
 	api_post_action traffic_stats '{"profile_key":"blackbox"}' >"$work_dir/traffic-before.json"
 	grep -q '"available":true' "$work_dir/traffic-before.json"
-	grep -q '"rx_bytes":0' "$work_dir/traffic-before.json"
-	grep -q '"tx_bytes":0' "$work_dir/traffic-before.json"
+	if [ "$VEER_PPPOE_BLACKBOX_TEST_IPV6" != "1" ]; then
+		grep -q '"rx_bytes":0' "$work_dir/traffic-before.json"
+		grep -q '"tx_bytes":0' "$work_dir/traffic-before.json"
+	fi
 
 	ip link add "$lan_host" type veth peer name "$lan_peer"
 	ip link set "$lan_host" up
@@ -446,8 +502,8 @@ EOF
 	grep -q '"segmentation_ready":true' "$work_dir/lan-status.json"
 	grep -q '"member_gro":{"applied":false' "$work_dir/lan-status.json"
 	assert_gro_enabled "$lan_host"
-	if [ "$FORWARD_PPPOE_BLACKBOX_SETTLE_SECONDS" != "0" ]; then
-		sleep "$FORWARD_PPPOE_BLACKBOX_SETTLE_SECONDS"
+	if [ "$VEER_PPPOE_BLACKBOX_SETTLE_SECONDS" != "0" ]; then
+		sleep "$VEER_PPPOE_BLACKBOX_SETTLE_SECONDS"
 	fi
 	start_capture "$work_dir/wan-data.pcap"
 	if ! ping -I "$local_if" -c 3 -W 2 8.8.8.8; then
@@ -456,13 +512,27 @@ EOF
 		exit 1
 	fi
 	ping -I "$local_if" -c 2 -W 2 -s 1400 8.8.8.8
+	if [ "$VEER_PPPOE_BLACKBOX_TEST_IPV6" = "1" ]; then
+		server_ppp=$(ip netns exec "$server_ns" ip -o link show | sed -n 's/^[0-9][0-9]*: \(ppp[0-9][0-9]*\):.*/\1/p' | head -n 1)
+		if [ -z "$server_ppp" ]; then
+			echo "PPPoE server has no PPP interface for IPv6 data test" >&2
+			dump_dataplane_state
+			exit 1
+		fi
+		ip netns exec "$server_ns" ip -6 addr replace 2001:db8:ffff::1/128 dev "$server_ppp" nodad
+		ip netns exec "$server_ns" ip -6 route replace 2001:db8:ffff::2/128 dev "$server_ppp"
+		ip -6 addr replace 2001:db8:ffff::2/128 dev "$local_if" nodad
+		ip -6 route replace 2001:db8:ffff::1/128 dev "$local_if" src 2001:db8:ffff::2
+		ping -6 -I "$local_if" -c 3 -W 2 2001:db8:ffff::1
+	fi
 
+	if [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" = "1" ]; then
 	iperf_port=$((56000 + ($$ % 1000)))
 	ip netns exec "$server_ns" iperf3 -s -B 8.8.8.8 -p "$iperf_port" --one-off >"$work_dir/iperf-server.log" 2>&1 &
 	iperf_pid=$!
 	sleep 0.3
 	ip netns exec "$server_ns" ss -ltnp "sport = :$iperf_port" >"$work_dir/iperf-listen.log" 2>&1 || true
-	if ! timeout "$((FORWARD_PPPOE_BLACKBOX_SECONDS + 15))" iperf3 -c 8.8.8.8 -B 198.18.0.2 -p "$iperf_port" --connect-timeout 3000 -t "$FORWARD_PPPOE_BLACKBOX_SECONDS" -P "$FORWARD_PPPOE_BLACKBOX_PARALLEL" >"$work_dir/iperf-client.log" 2>&1; then
+	if ! timeout "$((VEER_PPPOE_BLACKBOX_SECONDS + 15))" iperf3 -c 8.8.8.8 -B 198.18.0.2 -p "$iperf_port" --connect-timeout 3000 -t "$VEER_PPPOE_BLACKBOX_SECONDS" -P "$VEER_PPPOE_BLACKBOX_PARALLEL" >"$work_dir/iperf-client.log" 2>&1; then
 		stop_capture
 		dump_dataplane_state
 		cat "$work_dir/iperf-client.log" >&2 || true
@@ -490,6 +560,7 @@ EOF
 		exit 1
 	fi
 	iperf_pid=
+	fi
 	api_post_action traffic_stats '{"profile_key":"blackbox"}' >"$work_dir/traffic-after.json"
 	grep -q '"available":true' "$work_dir/traffic-after.json"
 	grep -Eq '"rx_bytes":[1-9][0-9]*' "$work_dir/traffic-after.json"
@@ -523,6 +594,15 @@ EOF
 	api_post_action disconnect "{\"profile_key\":\"blackbox\",\"interface\":$(json_string "$wan_host")}" >"$work_dir/disconnect-action.json"
 	wait_for_session_disconnected
 	wait_for_server_session_release
+	if [ "$VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE" = "1" ]; then
+		sleep 1
+		api_get_resource sessions last >"$work_dir/session-disconnect-settled.json"
+		grep -q '"phase":"disconnected"' "$work_dir/session-disconnect-settled.json"
+		if ip netns exec "$server_ns" ip -o link show 2>/dev/null | grep -Eq 'ppp[0-9]+:'; then
+			echo "queued PPPoE timer revived the manually disconnected session" >&2
+			exit 1
+		fi
+	fi
 	redial_ok=0
 	for attempt in 1 2 3 4 5; do
 		sleep 1
@@ -545,6 +625,15 @@ EOF
 	api_post_action disconnect "{\"profile_key\":\"blackbox\",\"interface\":$(json_string "$wan_host")}" >"$work_dir/redial-disconnect-action.json"
 	wait_for_session_disconnected
 	wait_for_server_session_release
+	if [ "$VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE" = "1" ]; then
+		sleep 1
+		api_get_resource sessions last >"$work_dir/redial-disconnect-settled.json"
+		grep -q '"phase":"disconnected"' "$work_dir/redial-disconnect-settled.json"
+		if ip netns exec "$server_ns" ip -o link show 2>/dev/null | grep -Eq 'ppp[0-9]+:'; then
+			echo "queued PPPoE timer revived the final disconnected session" >&2
+			exit 1
+		fi
+	fi
 	stop_capture
 	api_post_plugin_action wan_core teardown "{\"wan_id\":\"blackbox\",\"profile_key\":\"blackbox\",\"local_interface\":$(json_string "$local_if"),\"pipeline_interface\":$(json_string "$pipeline_if"),\"handoff_mode\":\"segmented_veth\"}" >"$work_dir/wan-teardown.json"
 	if ip link show dev "$local_if" >/dev/null 2>&1; then

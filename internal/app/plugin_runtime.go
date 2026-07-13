@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 const (
@@ -40,6 +40,9 @@ const (
 
 	pluginAPIVersionV1 = "v1"
 
+	builtinPluginID         = "veer_core"
+	builtinPluginPipelineID = "veer"
+
 	pluginPipelineCorePriority = 1000
 
 	pluginStabilityLab        = "lab"
@@ -58,6 +61,10 @@ const (
 
 	pluginHookContextTCPluginCtxV4 = "tc_plugin_ctx_v4"
 )
+
+func reservedBuiltinPluginID(id string) bool {
+	return id == builtinPluginID || id == builtinPluginPipelineID
+}
 
 var (
 	pluginIDPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -295,9 +302,9 @@ func loadPluginCatalog(cfg *Config) PluginCatalog {
 		ExternalPluginsEnabled: externalEnabled,
 		Directory:              pluginsDir,
 		Runtime:                pluginRuntimeCapabilities(cfg),
-		Plugins:                []LoadedPlugin{builtinFVTapPlugin()},
+		Plugins:                []LoadedPlugin{builtinVeerPlugin()},
 	}
-	seen := map[string]struct{}{"fvtap": {}}
+	seen := map[string]struct{}{builtinPluginID: {}, builtinPluginPipelineID: {}}
 	if !externalEnabled {
 		return catalog
 	}
@@ -402,7 +409,7 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 		externalDataplaneAttach = cfg.PluginsEnabled() && cfg.PluginsDataplaneEnabled()
 	}
 	return PluginRuntimeCapabilities{
-		BuiltinPipelineID:        "fvtap",
+		BuiltinPipelineID:        builtinPluginPipelineID,
 		CorePriority:             pluginPipelineCorePriority,
 		ManifestDiscovery:        true,
 		ObjectValidation:         true,
@@ -414,11 +421,11 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 		SupportedEngines:         []string{kernelEngineTC, kernelEngineXDP, "control"},
 		SupportedHookModes:       []string{"observe", "rewrite", "redirect", "drop", "control"},
 		Limitations: []string{
-			"fvtap is a logical tc tail-call pipeline, not a Linux netdev; real interfaces are only attach targets or optional handoff adapters",
-			"external dataplane loading is opt-in via plugins_dataplane_enabled and supports tc pipeline.attach direction=forward/reply hooks ordered around the built-in fvtap core priority",
-			"tc pipeline plugin priority is compared with fvtap core priority 1000; lower priority runs before core lookup and higher priority runs after core lookup before apply/redirect on the selected packet direction; runtime maps that intent to the concrete pre/post chain",
+			"veer is a logical tc tail-call pipeline, not a Linux netdev; real interfaces are only attach targets or optional handoff adapters",
+			"external dataplane loading is opt-in via plugins_dataplane_enabled and supports tc pipeline.attach direction=forward/reply hooks ordered around the built-in Veer Core priority",
+			"tc pipeline plugin priority is compared with Veer Core priority 1000; lower priority runs before core lookup and higher priority runs after core lookup before apply/redirect on the selected packet direction; runtime maps that intent to the concrete pre/post chain",
 			"tc pipeline plugins are callable stages in the shared prog-array chain and must tail-call the shared continue slot after processing unless they intentionally return a final tc action",
-			"post_lookup and post_reply tc plugins may read the shared tc_plugin_ctx_v4 context after fvtap has parsed IPv4/L4 and matched a rule or flow",
+			"post_lookup and post_reply tc plugins may read the shared tc_plugin_ctx_v4 context after Veer Core has parsed IPv4/L4 and matched a rule or flow",
 			"forward post-apply hooks are not available yet; pure eBPF WAN encapsulation after core NAT/rewrite still needs a dedicated post-apply stage or a Linux handoff adapter",
 			"control.main scripts run in persistent per-plugin Goja control VMs only; declared worker VMs can offload control tasks but never run in packet hot paths",
 			"control permissions gate kv/resource/secret/crypto/timer/worker/net.l2/net.tcp/net.udp/plugin.resource/ebpf map updates; registration APIs are only available during control script initialization",
@@ -429,9 +436,9 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 			"plugin dataplane mode is a trust contract for installed eBPF objects; keep external dataplane loading disabled unless the object source is trusted",
 			"plugin stability is declared by manifest.stability: lab is for examples/tests only, preview is suitable for controlled deployments, stable is expected to be production-ready, and deprecated should not be used for new deployments",
 			"lab, preview, and stable plugins can execute control scripts and join external tc dataplane when the corresponding global plugin switches are enabled; deprecated plugins are always blocked",
-			"xdp and non-fvtap tc hooks are registration-only until their dispatchers are added",
+			"xdp and non-Veer-pipeline tc hooks are registration-only until their dispatchers are added",
 			"plugin UI assets require the same API bearer token; prefer single-file UI assets or authenticated fetches",
-			"fvtap is the built-in forward pipeline and cannot be replaced by an external plugin manifest",
+			"veer is the built-in forward pipeline and cannot be replaced by an external plugin manifest",
 		},
 	}
 }
@@ -471,16 +478,16 @@ func invalidPluginRuntimeState() PluginRuntimeState {
 	}
 }
 
-func builtinFVTapPlugin() LoadedPlugin {
+func builtinVeerPlugin() LoadedPlugin {
 	return LoadedPlugin{
 		PluginManifest: PluginManifest{
 			APIVersion:  pluginAPIVersionV1,
-			ID:          "fvtap",
-			Name:        "Forward Virtual Tap",
+			ID:          builtinPluginID,
+			Name:        "Veer Core",
 			Version:     "builtin",
 			Kind:        "pipeline",
 			Stability:   pluginStabilityStable,
-			Description: "Built-in logical pipeline for the current forward TC/XDP dataplane.",
+			Description: "Built-in logical pipeline for the Veer TC/XDP dataplane.",
 		},
 		Builtin: true,
 		Capabilities: []string{
@@ -496,19 +503,19 @@ func builtinFVTapPlugin() LoadedPlugin {
 		},
 		VirtualInterfaces: []PluginVirtualInterface{
 			{
-				ID:          "fvtap",
+				ID:          builtinPluginPipelineID,
 				Type:        "pipeline",
 				Description: "Logical node representing the built-in NAT/forward dataplane.",
 			},
 		},
 		Objects: []PluginObject{
-			{ID: "forward-tc", Path: "builtin:forward-tc", Description: "Built-in TC object compiled into the service.", Status: pluginObjectStatusBuiltin},
-			{ID: "forward-xdp", Path: "builtin:forward-xdp", Description: "Built-in XDP object compiled into the service.", Status: pluginObjectStatusBuiltin},
+			{ID: "veer-tc", Path: "builtin:veer-tc", Description: "Built-in TC object compiled into Veer.", Status: pluginObjectStatusBuiltin},
+			{ID: "veer-xdp", Path: "builtin:veer-xdp", Description: "Built-in XDP object compiled into Veer.", Status: pluginObjectStatusBuiltin},
 		},
 		Hooks: []PluginHook{
-			{ID: "tc-ingress", Engine: kernelEngineTC, Attach: "ingress", Stage: "forward", Priority: pluginPipelineCorePriority, Program: "builtin:forward-tc", Mode: "rewrite"},
-			{ID: "tc-reply", Engine: kernelEngineTC, Attach: "ingress", Stage: "reply", Priority: pluginPipelineCorePriority, Program: "builtin:forward-tc", Mode: "rewrite"},
-			{ID: "xdp-ingress", Engine: kernelEngineXDP, Attach: "ingress", Stage: "forward", Priority: 0, Program: "builtin:forward-xdp", Mode: "rewrite"},
+			{ID: "tc-ingress", Engine: kernelEngineTC, Attach: "ingress", Stage: "forward", Priority: pluginPipelineCorePriority, Program: "builtin:veer-tc", Mode: "rewrite"},
+			{ID: "tc-reply", Engine: kernelEngineTC, Attach: "ingress", Stage: "reply", Priority: pluginPipelineCorePriority, Program: "builtin:veer-tc", Mode: "rewrite"},
+			{ID: "xdp-ingress", Engine: kernelEngineXDP, Attach: "ingress", Stage: "forward", Priority: 0, Program: "builtin:veer-xdp", Mode: "rewrite"},
 		},
 		Enabled: true,
 		Status:  pluginStatusBuiltin,

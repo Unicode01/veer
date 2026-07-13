@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 )
 
 type pluginRecordWriteRequest struct {
@@ -121,7 +121,7 @@ func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, d
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "plugin not found"})
 		return
 	}
-	if pluginID == "fvtap" {
+	if pluginID == builtinPluginID {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "built-in plugin cannot be disabled"})
 		return
 	}

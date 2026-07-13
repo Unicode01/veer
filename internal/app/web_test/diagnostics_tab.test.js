@@ -1,4 +1,4 @@
-﻿const test = require('node:test');
+const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -125,7 +125,7 @@ function createDiagnosticsHarness(savedTab) {
 
   const context = vm.createContext({
     window: {
-      ForwardApp: app,
+      VeerApp: app,
       innerWidth: 1024,
       innerHeight: 768,
       setInterval() { return 1; },

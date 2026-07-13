@@ -1,4 +1,4 @@
-#include "../include/fvtap_plugin_helpers.h"
+#include "../include/veer_plugin_helpers.h"
 
 #define BPF_MAP_TYPE_PERCPU_ARRAY 6
 #define BPF_FUNC_map_lookup_elem 1
@@ -14,16 +14,16 @@ struct bpf_map_def SEC("maps") packet_count = {
 	.max_entries = 1,
 };
 
-FVTAP_DECLARE_PROG_CHAIN_V4();
+VEER_DECLARE_PROG_CHAIN_V4();
 
-SEC("tc/fvtap/pre_forward")
+SEC("tc/veer/pre_forward")
 int tc_pre_forward(struct __sk_buff *skb)
 {
 	__u32 key = 0;
 	__u64 *value = bpf_map_lookup_elem(&packet_count, &key);
 	if (value)
 		*value += 1;
-	fvtap_continue_pre_forward(skb);
+	veer_continue_pre_forward(skb);
 	return TC_ACT_UNSPEC;
 }
 

@@ -2,7 +2,7 @@
 
 package app
 
-import "forward/internal/kernelcap"
+import "github.com/Unicode01/veer/internal/kernelcap"
 
 var detectKernelRuntimeCapabilities = kernelcap.DetectKernelCapabilities
 

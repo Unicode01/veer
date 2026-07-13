@@ -207,7 +207,7 @@ func TestManagedIPv6AssignmentRuntimeReconcilesPluginRoutedPDState(t *testing.T)
 	rt := newManagedIPv6AssignmentRuntime(ops)
 	item := IPv6Assignment{
 		ID:              81,
-		ParentInterface: "fwdlocal0",
+		ParentInterface: "veerlocal0",
 		TargetInterface: "br-lan",
 		ParentPrefix:    "240e:390:6aad:d550::/60",
 		AssignedPrefix:  "240e:390:6aad:d555::/64",

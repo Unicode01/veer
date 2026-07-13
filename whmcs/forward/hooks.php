@@ -1,6 +1,6 @@
 <?php
 /**
- * WHMCS Forward addon hooks.
+ * WHMCS Veer addon hooks.
  */
 
 if (!defined("WHMCS")) {

@@ -55,7 +55,7 @@ var TUNNEL_STATS_BUILD_NOTE = 'Per-packet tunnel counters are compiled out in th
 plugin.capabilities(['pppoe', 'raw_l2', 'control']);
 pipeline.node({
   id: 'pppoe0',
-  description: 'Logical PPPoE session node in the fvtap pipeline. This does not create a Linux netdev.'
+  description: 'Logical PPPoE session node in the Veer pipeline. This does not create a Linux netdev.'
 });
 ebpf.loadObject({
   id: 'pppoe_tunnel',
@@ -63,7 +63,7 @@ ebpf.loadObject({
   sha256: crypto.sha256File('pppoe_tunnel.o'),
   description: 'Bidirectional TC stage between a physical PPPoE interface and one local Linux L3 boundary.',
   programs: [
-    {id: 'tc_tunnel', section: 'tc/fvtap/pre_forward', type: 'tc'}
+    {id: 'tc_tunnel', section: 'tc/veer/pre_forward', type: 'tc'}
   ]
 });
 pipeline.attach({
@@ -118,7 +118,7 @@ plugin.resource({
 });
 plugin.resource({
   id: 'wan_links',
-  description: 'Normalized WAN session state exported for wan_core and forward_core handoff.',
+  description: 'Normalized WAN session state exported for wan_core and veer_core handoff.',
   methods: ['list', 'get', 'create', 'update', 'delete'],
   runtime_update: 'manual',
   max_records: 32,
@@ -300,6 +300,7 @@ exports.onTimer = function (ctx) {
   }
   if (ctx.timer.name !== 'lcp_echo') return;
   var payload = ctx.timer.payload || {};
+  if (!sessionTimerIsCurrent(payload)) return;
   var profile = loadProfile(payload);
   var sessionID = clampInt(payload.session_id, 1, 65535, 0);
   var peerMAC = macText(payload.ac_mac || payload.peer_mac || '');
@@ -315,6 +316,7 @@ exports.onTimer = function (ctx) {
       message: errorMessage(e)
     });
   }
+  if (!sessionTimerIsCurrent(payload)) return;
   var failures = clampInt(payload.keepalive_failures, 0, 1000000, 0);
   if (result.phase === 'keepalive_ok') {
     result.keepalive_failures = 0;
@@ -428,6 +430,7 @@ exports.onAction = function (ctx) {
   }
   if (action === 'dial') {
     timer.clear(REDIAL_RETRY_TIMER);
+    if (activeStoredSession(profile.profile_key)) return;
     if (!hasOwn(ctx.payload || {}, 'send_padt')) profile.send_padt = false;
     persistRuntimeProfile(profile);
     var dialSession = probeSession(profile);
@@ -928,9 +931,9 @@ function resolveTunnelBoundary(profile) {
     if (statusLocal && statusLocal !== localName) {
       throw new Error('wan_core local interface ' + statusLocal + ' does not match PPPoE local interface ' + localName);
     }
-    var forwardCore = status.forward_core || {};
-    pipelineName = optionalIfaceName(status.pipeline_interface || forwardCore.tunnel_interface || '', 'wan_core pipeline_interface');
-    if (pipelineName && status.segmentation_ready !== true && forwardCore.segmentation_ready !== true) {
+    var veerCore = status.veer_core || {};
+    pipelineName = optionalIfaceName(status.pipeline_interface || veerCore.tunnel_interface || '', 'wan_core pipeline_interface');
+    if (pipelineName && status.segmentation_ready !== true && veerCore.segmentation_ready !== true) {
       throw new Error('wan_core pipeline boundary is not ready for segmentation');
     }
   }
@@ -1593,6 +1596,7 @@ function persistRuntimeProfile(profile) {
   data.ipv6_ra_timeout_ms = profile.ipv6_ra_timeout_ms;
   delete data.session_id;
   delete data.ac_mac;
+  delete data.session_generation;
   delete data.keepalive_failures;
   resources.set('profiles', profile.profile_key, data, true);
 }
@@ -1610,6 +1614,15 @@ function resumeSessionTimers() {
   var active = last.lcp_ready === true && last.padt_sent !== true && last.session_id && last.ac_mac;
   var resumeRedial = redialResumePhase(last.phase);
   if (!active && !resumeRedial) return;
+
+  if (active && !timerGeneration(last.session_generation)) {
+    last = merge(last, {
+      session_generation: newTimerGeneration(),
+      desired_state: 'up',
+      updated_at: new Date().toISOString()
+    });
+    resources.set('sessions', 'last', last);
+  }
 
   var profile;
   try {
@@ -1635,6 +1648,7 @@ function resumeSessionTimers() {
     redial_attempted: true,
     redial_trigger: 'runtime_reconcile',
     redial_started_at: new Date().toISOString(),
+    redial_generation: timerGeneration(last.redial_generation),
     updated_at: new Date().toISOString()
   }, Math.max(1, clampInt(last.redial_next_attempt, 1, 1000000, 1)));
   recordRedialStatus(waiting, null);
@@ -1643,6 +1657,51 @@ function resumeSessionTimers() {
 function redialResumePhase(phase) {
   phase = lower(phase);
   return phase === 'redial_wait' || phase === 'redial_retry' || phase === 'redialing' || phase === 'handoff_error';
+}
+
+function newTimerGeneration() {
+  return crypto.randomBytes(8);
+}
+
+function timerGeneration(value) {
+  var generation = lower(text(value || ''));
+  return /^[0-9a-f]{16}$/.test(generation) ? generation : '';
+}
+
+function storedLastSession() {
+  var record = resources.get('sessions', 'last');
+  return record && record.data ? record.data : null;
+}
+
+function activeStoredSession(profileKey) {
+  var session = storedLastSession();
+  if (!session || session.desired_state === 'down' || session.lcp_ready !== true ||
+      session.padt_sent === true || !session.session_id || !session.ac_mac) {
+    return null;
+  }
+  var expectedKey = token(profileKey || 'default');
+  var currentKey = token(session.profile_key || session.wan_id || 'default');
+  return currentKey === expectedKey ? session : null;
+}
+
+function sessionTimerIsCurrent(payload) {
+  payload = payload || {};
+  var current = activeStoredSession(payload.profile_key || payload.profile || 'default');
+  if (!current) return false;
+  if (clampInt(current.session_id, 1, 65535, 0) !== clampInt(payload.session_id, 1, 65535, 0)) return false;
+  if (macText(current.ac_mac || current.peer_mac || '') !== macText(payload.ac_mac || payload.peer_mac || '')) return false;
+  return timerGeneration(current.session_generation) === timerGeneration(payload.session_generation);
+}
+
+function redialTimerIsCurrent(payload) {
+  payload = payload || {};
+  var current = storedLastSession();
+  if (!current || current.desired_state === 'down' || !redialResumePhase(current.phase)) return false;
+  var expectedKey = token(payload.profile_key || payload.profile || 'default');
+  var currentKey = token(current.profile_key || current.wan_id || 'default');
+  var generation = timerGeneration(payload.redial_generation);
+  return currentKey === expectedKey && generation !== '' &&
+    generation === timerGeneration(current.redial_generation);
 }
 
 function armKeepalive(profile, session, failures, failureStartedMs) {
@@ -1672,6 +1731,14 @@ function disconnectSession(profile, payload) {
   var sessionID = clampInt(payload.session_id || data.session_id, 1, 65535, 0);
   var peerMAC = macText(payload.ac_mac || data.ac_mac || '');
   if (!sessionID || !peerMAC) throw new Error('no stored or provided PPPoE session to disconnect');
+  var disconnecting = merge(data, {
+    phase: 'disconnecting',
+    desired_state: 'down',
+    lcp_ready: false,
+    redial_generation: '',
+    updated_at: new Date().toISOString()
+  });
+  resources.set('sessions', 'last', disconnecting);
   timer.clear('lcp_echo');
   timer.clear('session_control');
   timer.clear(REDIAL_RETRY_TIMER);
@@ -1696,7 +1763,7 @@ function disconnectSession(profile, payload) {
   }
   clearTunnelConfig();
   var cleanup = cleanupL2Identity(profile.profile_key, false);
-  var disconnected = merge(data, {
+  var disconnected = merge(disconnecting, {
     phase: 'disconnected',
     padt_sent: true,
     lcp_terminate_ack_sent: control.terminate_acks_sent > 0,
@@ -1710,6 +1777,10 @@ function disconnectSession(profile, payload) {
 
 function recordSession(profile, session) {
   session = session || {};
+  if (session.session_id && session.ac_mac) {
+    session.session_generation = timerGeneration(session.session_generation) || newTimerGeneration();
+    session.desired_state = 'up';
+  }
   resources.set('sessions', 'last', session);
   if (!session.session_id) {
     try {
@@ -1846,7 +1917,7 @@ function normalizedWANLink(profile, session) {
       preferred_mode: 'segmented_veth',
       local_interface: profile.local_interface || '',
       pipeline_interface: pipelineInterface,
-      forward_core_parent_interface: profile.local_interface || '',
+      veer_core_parent_interface: profile.local_interface || '',
       segmentation_ready: !!pipelineInterface,
       requires_kernel_tc_prepared_l2: false
     },
@@ -1910,6 +1981,7 @@ function redialAfterKeepaliveFailure(profile, keepaliveResult, previousSession) 
 }
 
 function serviceRedialRetryTimer(payload) {
+  if (!redialTimerIsCurrent(payload)) return;
   var profile = loadProfile(payload);
   var attempt = clampInt(payload.redial_attempt, 1, 1000000, 1);
   var base = {
@@ -1922,6 +1994,7 @@ function serviceRedialRetryTimer(payload) {
     auth: profile.auth,
     redial_attempted: true,
     redial_attempt: attempt,
+    redial_generation: timerGeneration(payload.redial_generation),
     redial_trigger: text(payload.redial_trigger || 'retry'),
     redial_started_at: text(payload.redial_started_at || new Date().toISOString()),
     updated_at: new Date().toISOString()
@@ -1993,6 +2066,10 @@ function redialSessionFailure(session) {
 }
 
 function scheduleRedialRetry(profile, result, attempt) {
+  result = merge(result || {}, {
+    desired_state: 'up',
+    redial_generation: timerGeneration(result && result.redial_generation) || newTimerGeneration()
+  });
   var delay = redialRetryDelay(profile, attempt);
   var payload = redialRetryTimerPayload(profile, attempt, result);
   timer.setTimeout(REDIAL_RETRY_TIMER, delay, payload);
@@ -2019,6 +2096,8 @@ function recordRedialStatus(result, session) {
     lcp_ready: false,
     tunnel_installed: false,
     redial_attempted: true,
+    desired_state: 'up',
+    redial_generation: timerGeneration(result.redial_generation),
     redial_attempt: result.redial_attempt || 0,
     redial_next_attempt: result.redial_next_attempt || 0,
     redial_retry_in_ms: result.redial_retry_in_ms || 0,
@@ -2178,13 +2257,15 @@ function keepaliveTimerPayload(profile, session, failures, failureStartedMs) {
     wan_core_apply: profile.wan_core_apply,
     wan_core_plugin: profile.wan_core_plugin,
     session_id: session.session_id,
-    ac_mac: session.ac_mac
+    ac_mac: session.ac_mac,
+    session_generation: timerGeneration(session.session_generation)
   };
 }
 
 function redialRetryTimerPayload(profile, attempt, result) {
   var payload = keepaliveTimerPayload(profile, {}, 0);
   payload.redial_attempt = attempt;
+  payload.redial_generation = timerGeneration(result && result.redial_generation);
   payload.redial_trigger = text(result && result.redial_trigger || 'retry');
   payload.redial_started_at = text(result && result.redial_started_at || new Date().toISOString());
   return payload;
@@ -2227,6 +2308,7 @@ function sessionControlTimerPayload(profile, session, remainingMs) {
     max_frames: profile.max_frames,
     session_id: session.session_id,
     ac_mac: session.ac_mac,
+    session_generation: timerGeneration(session.session_generation),
     remaining_ms: remainingMs,
     slice_ms: Math.min(500, Math.max(50, profile.timeout_ms))
   };
@@ -2527,6 +2609,7 @@ function ackPeerConfigureRequests(profile, peerMAC, sessionID, protocol) {
 }
 
 function serviceSessionControlTimer(payload) {
+  if (!sessionTimerIsCurrent(payload)) return;
   var profile = loadProfile(payload);
   resolveL2Identity(profile);
   var sessionID = clampInt(payload.session_id, 1, 65535, 0);
@@ -2540,6 +2623,7 @@ function serviceSessionControlTimer(payload) {
 
   var started = Date.now();
   var result = servicePPPControlWindow(profile, peerMAC, sessionID, slice, null);
+  if (!sessionTimerIsCurrent(payload)) return;
   var elapsed = Math.max(slice, Date.now() - started);
   var nextRemaining = Math.max(0, remaining - elapsed);
   result.remaining_ms = nextRemaining;

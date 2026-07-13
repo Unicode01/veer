@@ -5,14 +5,14 @@
   "version": "1.1.0",
   "kind": "control",
   "stability": "stable",
-  "description": "Creates one Linux L3 boundary for host egress and fvtap reply injection without a veth peer.",
+  "description": "Creates one Linux L3 boundary for host egress and Veer reply injection without a veth peer.",
   "control": {
     "main": "control.js",
-    "sha256": "8a0ec7c25d7942f369b74d0c56c3f31d9dc707145392a82b65d0eedfba98587f",
+    "sha256": "9f2599193de0ea3ef7fa0696390c2a6428227d879efeda94fe3062832f8b681d",
     "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
     "net_access": [
       {
-        "interfaces": ["fwd*", "local*", "vtolocal*"],
+        "interfaces": ["veer*", "local*", "vtolocal*"],
         "operations": ["addr.write", "link.create", "link.delete", "route.write"]
       }
     ]

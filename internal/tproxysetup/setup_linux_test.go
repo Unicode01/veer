@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"forward/internal/ipcmd"
+	"github.com/Unicode01/veer/internal/ipcmd"
 )
 
 func TestEnsureRoutingFallsBackAcrossCommandCandidates(t *testing.T) {

@@ -30,7 +30,7 @@ func TestPluginIPv6AssignmentPlanLinuxIntegration(t *testing.T) {
 	}
 
 	setPluginIPv6PlanIntegrationLinkUp(t, "lo")
-	parent := addPluginIPv6PlanIntegrationDummy(t, "fwdwan0")
+	parent := addPluginIPv6PlanIntegrationDummy(t, "veerwan0")
 	bridge := addPluginIPv6PlanIntegrationBridge(t, "br-lan")
 	addPluginIPv6PlanIntegrationAddress(t, bridge, "fe80::1/64")
 

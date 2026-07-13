@@ -138,19 +138,19 @@ function createHarness() {
     'errors.operationFailed': 'Operation failed: {{message}}',
     'noun.plugin': 'Plugin',
     'plugins.catalog.meta': 'External plugin directory: {{dir}}; external plugin scan: {{enabled}}; external dataplane attach: {{attach}}',
-    'plugins.chain.empty': 'TC path: legacy fvtap fast path; no external plugins are chained around fvtap core.',
+    'plugins.chain.empty': 'TC path: legacy Veer fast path; no external plugins are chained around Veer Core.',
     'plugins.chain.meta': 'TC pipeline: {{chain}}',
     'plugins.chain.slot': 'slot {{slot}}',
     'plugins.chain.forwardPath': 'forward: {{chain}}',
     'plugins.chain.replyPath': 'reply: {{chain}}',
     'plugins.chain.preForward': 'pre_forward[{{chain}}]',
-    'plugins.chain.core': 'fvtap core(priority={{priority}})',
+    'plugins.chain.core': 'Veer Core(priority={{priority}})',
     'plugins.chain.postLookup': 'post_lookup[{{chain}}]',
-    'plugins.chain.apply': 'fvtap apply/redirect',
+    'plugins.chain.apply': 'Veer apply/redirect',
     'plugins.chain.preReply': 'pre_reply[{{chain}}]',
-    'plugins.chain.replyCore': 'fvtap reply core(priority={{priority}})',
+    'plugins.chain.replyCore': 'Veer Reply Core(priority={{priority}})',
     'plugins.chain.postReply': 'post_reply[{{chain}}]',
-    'plugins.chain.replyApply': 'fvtap reply rewrite',
+    'plugins.chain.replyApply': 'Veer reply rewrite',
     'plugins.empty': 'No plugins matched.',
     'plugins.error': 'Error',
     'plugins.details': 'Details',
@@ -208,7 +208,7 @@ function createHarness() {
     'plugins.status.error': 'Error',
     'plugins.status.pending': 'Pending add',
     'plugins.chain.title': 'TC Pipeline',
-    'plugins.chain.legacy': 'legacy fvtap',
+    'plugins.chain.legacy': 'legacy Veer',
     'plugins.chain.none': 'No chain',
     'plugins.chain.chained': '{{count}} chained',
     'plugins.chain.preCompact': 'pre x{{count}}',
@@ -220,13 +220,13 @@ function createHarness() {
     'plugins.chain.postReplyCompact': 'r-post x{{count}}',
     'plugins.chain.replyApplyCompact': 'r-apply',
     'plugins.link.title': 'Plugin Dataplane Chains',
-    'plugins.link.desc': 'Shows how this plugin is attached to the fvtap pipeline; the current plugin is highlighted.',
+    'plugins.link.desc': 'Shows how this plugin is attached to the Veer pipeline; the current plugin is highlighted.',
     'plugins.link.count': '{{count}} items',
     'plugins.link.interfaceChain': 'Interface Chain',
     'plugins.link.declaredChain': 'Declared Chain',
     'plugins.link.unbound': 'unbound',
     'plugins.link.current': 'Current plugin',
-    'plugins.link.core': 'fvtap core',
+    'plugins.link.core': 'Veer Core',
     'plugins.link.apply': 'apply/rewrite',
     'plugins.link.coreCompact': 'core',
     'plugins.link.replyCoreCompact': 'r-core',
@@ -342,7 +342,7 @@ function createHarness() {
 
   const context = vm.createContext({
     window: {
-      ForwardApp: app,
+      VeerApp: app,
       addEventListener(type, handler) {
         if (!windowListeners[type]) windowListeners[type] = [];
         windowListeners[type].push(handler);
@@ -417,9 +417,9 @@ function createHarness() {
   return app;
 }
 
-function extractForwardPluginHostScript(srcdoc) {
-  const match = String(srcdoc || '').match(/<script data-forward-plugin-host>([\s\S]*?)<\/script>/);
-  assert.ok(match, 'decorated plugin HTML should include ForwardPluginHost script');
+function extractVeerPluginHostScript(srcdoc) {
+  const match = String(srcdoc || '').match(/<script data-veer-plugin-host>([\s\S]*?)<\/script>/);
+  assert.ok(match, 'decorated plugin HTML should include VeerPluginHost script');
   return match[1];
 }
 
@@ -487,8 +487,8 @@ function attachPluginHostChildFrame(app) {
     Node: function TestNode() {},
     console
   });
-  vm.runInContext(extractForwardPluginHostScript(app.el.pluginUIFrame.srcdoc), childContext, { filename: 'forward-plugin-host.js' });
-  return childContext.window.ForwardPluginHost;
+  vm.runInContext(extractVeerPluginHostScript(app.el.pluginUIFrame.srcdoc), childContext, { filename: 'veer-plugin-host.js' });
+  return childContext.window.VeerPluginHost;
 }
 
 test('renderPluginsTable renders builtin and external plugin details', () => {
@@ -515,15 +515,15 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   };
   app.state.plugins.data = [
     {
-      id: 'fvtap',
+      id: 'veer_core',
       status: 'builtin',
       runtime: { mode: 'builtin', attachable: true, attached: true },
-      name: 'Forward Virtual Tap',
+      name: 'Veer Core',
       kind: 'pipeline',
       version: 'builtin',
       capabilities: ['kernel_tc'],
-      objects: [{ id: 'forward-tc', path: 'builtin:forward-tc' }],
-      hooks: [{ id: 'tc-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 1000, program: 'builtin:forward-tc', mode: 'rewrite' }]
+      objects: [{ id: 'veer-tc', path: 'builtin:veer-tc' }],
+      hooks: [{ id: 'tc-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 1000, program: 'builtin:veer-tc', mode: 'rewrite' }]
     },
     {
       id: 'packet_observer',
@@ -533,7 +533,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
         attachable: true,
         attached: true,
         attachment_count: 1,
-        attachments: [{ hook_id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'pre_forward', interface: 'fvtap', program: 'observer:tc_ingress', priority: 10, chain_slot: 10, status: 'chained' }]
+        attachments: [{ hook_id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'pre_forward', interface: 'veer', program: 'observer:tc_ingress', priority: 10, chain_slot: 10, status: 'chained' }]
       },
       name: 'Packet Observer',
       kind: 'pipeline',
@@ -541,7 +541,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
       capabilities: ['observe'],
       virtual_interfaces: [{ id: 'vtap0', type: 'logical' }],
       objects: [{ id: 'observer', path: 'observer.o', programs: [{ id: 'tc_ingress', section: 'tc/ingress', type: 'tc' }] }],
-      hooks: [{ id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 10, program: 'observer.o:tc_ingress', mode: 'observe', interfaces: ['fvtap'] }],
+      hooks: [{ id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 10, program: 'observer.o:tc_ingress', mode: 'observe', interfaces: ['veer'] }],
       ui: { entry: 'index.html' },
       asset_base_path: '/api/plugins/packet_observer/assets/'
     }
@@ -550,7 +550,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   app.renderPluginsTable();
 
   const text = collectText(app.el.pluginsBody);
-  assert.match(text, /fvtap/);
+  assert.match(text, /veer/);
   assert.match(text, /packet_observer/);
   assert.match(text, /Loaded/);
   assert.match(text, /Details/);
@@ -566,7 +566,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
     .flatMap((node) => node.childNodes || [])
     .filter((node) => String(node.className || '').includes('plugin-detail-trigger'));
   assert.equal(detailButtons.length, 2);
-  assert.deepEqual(detailButtons.map((node) => node.dataset.pluginId), ['fvtap', 'packet_observer']);
+  assert.deepEqual(detailButtons.map((node) => node.dataset.pluginId), ['veer_core', 'packet_observer']);
   const toggleButtons = findNodes(app.el.pluginsBody, (node) => String(node.className || '').includes('btn-toggle-plugin'));
   assert.equal(toggleButtons.length, 1);
   assert.equal(toggleButtons[0].dataset.pluginId, 'packet_observer');
@@ -584,7 +584,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   assert.match(collectText(app.el.pluginsChainMeta), /pre x1/);
   assert.match(collectText(app.el.pluginsChainMeta), /core p1000/);
   assert.match(collectText(app.el.pluginsChainMeta), /apply/);
-  assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: pre_forward[slot 10 packet_observer.observe-ingress (priority=10)] -> fvtap core(priority=1000) -> fvtap apply/redirect');
+  assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: pre_forward[slot 10 packet_observer.observe-ingress (priority=10)] -> Veer Core(priority=1000) -> Veer apply/redirect');
   assert.deepEqual(app.lastTableVisibility, { tableId: 'pluginsTable', visible: true });
 });
 
@@ -768,7 +768,7 @@ test('renderPluginsTable applies plugin search filter', () => {
   const app = createHarness();
   app.state.plugins.catalog = { external_plugins_enabled: false, directory: 'plugins' };
   app.state.plugins.searchQuery = 'missing';
-  app.state.plugins.data = [{ id: 'fvtap', status: 'builtin', name: 'Forward Virtual Tap' }];
+  app.state.plugins.data = [{ id: 'veer_core', status: 'builtin', name: 'Veer Core' }];
 
   app.renderPluginsTable();
 
@@ -777,11 +777,11 @@ test('renderPluginsTable applies plugin search filter', () => {
   assert.deepEqual(app.lastTableVisibility, { tableId: 'pluginsTable', visible: false });
 });
 
-test('renderPluginsTable places next-core chain entries after fvtap core', () => {
+test('renderPluginsTable places next-core chain entries after Veer Core', () => {
   const app = createHarness();
   app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
   app.state.plugins.data = [
-    { id: 'fvtap', status: 'builtin', name: 'Forward Virtual Tap', runtime: { mode: 'builtin', attachable: true, attached: true } },
+    { id: 'veer_core', status: 'builtin', name: 'Veer Core', runtime: { mode: 'builtin', attachable: true, attached: true } },
     {
       id: 'rule_observer',
       status: 'active',
@@ -790,7 +790,7 @@ test('renderPluginsTable places next-core chain entries after fvtap core', () =>
         attachable: true,
         attached: true,
         attachment_count: 1,
-        attachments: [{ hook_id: 'after-core', engine: 'tc', attach: 'ingress', stage: 'post_lookup', interface: 'fvtap', program: 'observer:tc_post_lookup', priority: 1010, chain_slot: 18, status: 'chained', context: ['tc_plugin_ctx_v4'] }]
+        attachments: [{ hook_id: 'after-core', engine: 'tc', attach: 'ingress', stage: 'post_lookup', interface: 'veer', program: 'observer:tc_post_lookup', priority: 1010, chain_slot: 18, status: 'chained', context: ['tc_plugin_ctx_v4'] }]
       },
       name: 'Rule Observer'
     }
@@ -803,14 +803,14 @@ test('renderPluginsTable places next-core chain entries after fvtap core', () =>
   assert.match(collectText(app.el.pluginsChainMeta), /post x1/);
   assert.match(collectText(app.el.pluginsChainMeta), /core p1000/);
   assert.match(collectAttribute(app.el.pluginsBody, 'aria-label'), /tc_plugin_ctx_v4/);
-  assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: fvtap core(priority=1000) -> post_lookup[slot 18 rule_observer.after-core (priority=1010)] -> fvtap apply/redirect');
+  assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: Veer Core(priority=1000) -> post_lookup[slot 18 rule_observer.after-core (priority=1010)] -> Veer apply/redirect');
 });
 
 test('renderPluginsTable renders reply chain separately from forward chain', () => {
   const app = createHarness();
   app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
   app.state.plugins.data = [
-    { id: 'fvtap', status: 'builtin', name: 'Forward Virtual Tap', runtime: { mode: 'builtin', attachable: true, attached: true } },
+    { id: 'veer_core', status: 'builtin', name: 'Veer Core', runtime: { mode: 'builtin', attachable: true, attached: true } },
     {
       id: 'reply_observer',
       status: 'active',
@@ -820,8 +820,8 @@ test('renderPluginsTable renders reply chain separately from forward chain', () 
         attached: true,
         attachment_count: 2,
         attachments: [
-          { hook_id: 'before-reply', engine: 'tc', attach: 'ingress', stage: 'pre_reply', interface: 'fvtap', program: 'observer:tc_pre_reply', priority: 990, chain_slot: 29, status: 'chained' },
-          { hook_id: 'after-reply', engine: 'tc', attach: 'ingress', stage: 'post_reply', interface: 'fvtap', program: 'observer:tc_post_reply', priority: 1010, chain_slot: 37, status: 'chained', context: ['tc_plugin_ctx_v4'] }
+          { hook_id: 'before-reply', engine: 'tc', attach: 'ingress', stage: 'pre_reply', interface: 'veer', program: 'observer:tc_pre_reply', priority: 990, chain_slot: 29, status: 'chained' },
+          { hook_id: 'after-reply', engine: 'tc', attach: 'ingress', stage: 'post_reply', interface: 'veer', program: 'observer:tc_post_reply', priority: 1010, chain_slot: 37, status: 'chained', context: ['tc_plugin_ctx_v4'] }
         ]
       },
       name: 'Reply Observer'
@@ -836,7 +836,7 @@ test('renderPluginsTable renders reply chain separately from forward chain', () 
   assert.match(text, /r-core p1000/);
   assert.match(text, /r-post x1/);
   assert.match(text, /r-apply/);
-  assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: fvtap core(priority=1000) -> fvtap apply/redirect | reply: pre_reply[slot 29 reply_observer.before-reply (priority=990)] -> fvtap reply core(priority=1000) -> post_reply[slot 37 reply_observer.after-reply (priority=1010)] -> fvtap reply rewrite');
+  assert.equal(app.el.pluginsChainMeta.title, 'TC pipeline: forward: Veer Core(priority=1000) -> Veer apply/redirect | reply: pre_reply[slot 29 reply_observer.before-reply (priority=990)] -> Veer Reply Core(priority=1000) -> post_reply[slot 37 reply_observer.after-reply (priority=1010)] -> Veer reply rewrite');
 });
 
 test('plugin dataplane link rows hide virtual-interface-only control plugins', () => {
@@ -846,7 +846,7 @@ test('plugin dataplane link rows hide virtual-interface-only control plugins', (
     id: 'wan_core',
     name: 'WAN Core',
     kind: 'control',
-    virtual_interfaces: [{ id: 'fwdwan0', type: 'veth', description: 'local WAN handoff' }]
+    virtual_interfaces: [{ id: 'veerwan0', type: 'veth', description: 'local WAN handoff' }]
   };
   const pppoe = {
     id: 'pppoe_client',
@@ -894,13 +894,13 @@ test('plugin dataplane runtime link rows preserve bound hook interfaces', () => 
     kind: 'pipeline',
     hooks: [
       { id: 'pppoe-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 20, interfaces: ['eth1'] },
-      { id: 'pppoe-egress', engine: 'tc', attach: 'egress', stage: 'forward', priority: 20, interfaces: ['fwdlocal0'] }
+      { id: 'pppoe-egress', engine: 'tc', attach: 'egress', stage: 'forward', priority: 20, interfaces: ['veerlocal0'] }
     ],
     runtime: {
       mode: 'dataplane',
       attachments: [
-        { hook_id: 'pppoe-ingress', engine: 'tc', attach: 'ingress', stage: 'pre_forward', interface: 'fvtap', priority: 20, chain_slot: 11, status: 'chained' },
-        { hook_id: 'pppoe-egress', engine: 'tc', attach: 'egress', stage: 'pre_forward', interface: 'fvtap', priority: 20, chain_slot: 10, status: 'chained' }
+        { hook_id: 'pppoe-ingress', engine: 'tc', attach: 'ingress', stage: 'pre_forward', interface: 'veer', priority: 20, chain_slot: 11, status: 'chained' },
+        { hook_id: 'pppoe-egress', engine: 'tc', attach: 'egress', stage: 'pre_forward', interface: 'veer', priority: 20, chain_slot: 10, status: 'chained' }
       ]
     }
   };
@@ -909,7 +909,7 @@ test('plugin dataplane runtime link rows preserve bound hook interfaces', () => 
   const rows = app.__pluginLinkRowsForTest(pppoe);
   assert.equal(rows.length, 2);
   assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => row.label).sort())), ['TC egress forward', 'TC ingress forward']);
-  assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => row.segments[0].text).sort())), ['eth1', 'fwdlocal0']);
+  assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => row.segments[0].text).sort())), ['eth1', 'veerlocal0']);
   assert.ok(rows.every((row) => row.segments.some((segment) => segment.current && segment.text === 'pppoe_client')));
 });
 
@@ -959,8 +959,8 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
   assert.equal(app.el.pluginUIMeta.textContent, 'packet_observer / index.html');
   assert.equal(app.el.pluginUIFrame.src, 'about:blank');
   assert.equal(app.el.pluginUIFrame.getAttribute('sandbox'), 'allow-scripts allow-forms allow-popups');
-  assert.match(String(app.el.pluginUIFrame.srcdoc), /data-forward-plugin-host/);
-  assert.match(String(app.el.pluginUIFrame.srcdoc), /ForwardPluginHost/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /data-veer-plugin-host/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /VeerPluginHost/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.data/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /list: function \(resource, options\)/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /upsert: function \(resource, key, data, options\)/);
@@ -1192,7 +1192,7 @@ test('plugin host exposes locale helper and receives locale broadcasts', async (
   };
 
   assert.equal(host.locale, 'zh-CN');
-  assert.equal(host.t(messages, 'greeting', { name: 'Forward' }), '你好 Forward');
+  assert.equal(host.t(messages, 'greeting', { name: 'Veer' }), '你好 Veer');
 
   let changedLocale = '';
   host.onLocaleChange((locale) => {
@@ -1203,7 +1203,7 @@ test('plugin host exposes locale helper and receives locale broadcasts', async (
 
   assert.equal(changedLocale, 'en-US');
   assert.equal(host.locale, 'en-US');
-  assert.equal(host.t(messages, 'greeting', { name: 'Forward' }), 'Hello Forward');
+  assert.equal(host.t(messages, 'greeting', { name: 'Veer' }), 'Hello Veer');
 });
 
 test('plugin host button state distinguishes busy disabled and danger actions', async () => {
@@ -1285,7 +1285,7 @@ test('plugin iframe RPC returns runtime error payload and rejects plugin id mism
   handlers[0]({
     source: frameWindow,
     data: {
-      type: 'forward-plugin-rpc',
+      type: 'veer-plugin-rpc',
       pluginId: 'packet_observer',
       id: 'rpc-1',
       op: 'data.update',
@@ -1301,7 +1301,7 @@ test('plugin iframe RPC returns runtime error payload and rejects plugin id mism
   assert.equal(frameWindow.messages.length, 1);
   const response = frameWindow.messages[0].message;
   assert.equal(frameWindow.messages[0].targetOrigin, '*');
-  assert.equal(response.type, 'forward-plugin-rpc-result');
+  assert.equal(response.type, 'veer-plugin-rpc-result');
   assert.equal(response.pluginId, 'packet_observer');
   assert.equal(response.id, 'rpc-1');
   assert.equal(response.ok, false);
@@ -1313,7 +1313,7 @@ test('plugin iframe RPC returns runtime error payload and rejects plugin id mism
   handlers[0]({
     source: frameWindow,
     data: {
-      type: 'forward-plugin-rpc',
+      type: 'veer-plugin-rpc',
       pluginId: 'other_plugin',
       id: 'rpc-2',
       op: 'data.list',
@@ -1342,7 +1342,7 @@ test('plugin iframe RPC ignores foreign or malformed messages before API calls',
   handlers[0]({
     source: foreignWindow,
     data: {
-      type: 'forward-plugin-rpc',
+      type: 'veer-plugin-rpc',
       pluginId: 'packet_observer',
       id: 'rpc-foreign',
       op: 'data.list',
@@ -1352,7 +1352,7 @@ test('plugin iframe RPC ignores foreign or malformed messages before API calls',
   handlers[0]({
     source: frameWindow,
     data: {
-      type: 'forward-plugin-rpc',
+      type: 'veer-plugin-rpc',
       pluginId: 'packet_observer',
       op: 'data.list',
       payload: { resource: 'bindings' }
@@ -1361,7 +1361,7 @@ test('plugin iframe RPC ignores foreign or malformed messages before API calls',
   handlers[0]({
     source: frameWindow,
     data: {
-      type: 'forward-plugin-rpc',
+      type: 'veer-plugin-rpc',
       pluginId: 'packet_observer',
       id: 'x'.repeat(129),
       op: 'data.list',
@@ -1371,7 +1371,7 @@ test('plugin iframe RPC ignores foreign or malformed messages before API calls',
   handlers[0]({
     source: frameWindow,
     data: {
-      type: 'forward-plugin-rpc',
+      type: 'veer-plugin-rpc',
       pluginId: 'packet_observer',
       id: 'rpc-no-op',
       payload: { resource: 'bindings' }

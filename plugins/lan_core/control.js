@@ -69,7 +69,7 @@ plugin.action({
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
-  sha256: 'e4db897bd812bf38ba912877f87de4961d4ee0f84a3b5c5184a926202475b1a1',
+  sha256: 'a4d7bc4dbfa34fa8b04a1a8d658fb5c82c56cbfea14dd32586522e0c82b47991',
   page: 'lan',
   page_title: 'LAN'
 });
@@ -869,18 +869,18 @@ function resolveWanEgress(profile) {
     var record = plugins.resources.get(profile.wan_plugin, 'status', profile.wan_ref);
     if (record && record.enabled !== false && record.data) {
       var data = record.data || {};
-      var forwardCore = data.forward_core || {};
-      result.segmentation_ready = data.segmentation_ready === true || forwardCore.segmentation_ready === true;
-      result.handoff_mode = text(data.handoff_mode || forwardCore.mode || '');
-      result.redirect_mode = normalizeRedirectMode(data.egress_nat_redirect_mode || forwardCore.egress_nat_redirect_mode || '');
-      result.mtu = intValue(data.mtu || forwardCore.mtu, 0, 65535, result.mtu);
+      var veerCore = data.veer_core || {};
+      result.segmentation_ready = data.segmentation_ready === true || veerCore.segmentation_ready === true;
+      result.handoff_mode = text(data.handoff_mode || veerCore.mode || '');
+      result.redirect_mode = normalizeRedirectMode(data.egress_nat_redirect_mode || veerCore.egress_nat_redirect_mode || '');
+      result.mtu = intValue(data.mtu || veerCore.mtu, 0, 65535, result.mtu);
       result.pd_prefixes = Array.isArray(data.pd_prefixes) ? data.pd_prefixes : [];
       result.pd_prefix = text(data.pd_prefix || firstPrefixValue(result.pd_prefixes) || '');
-      result.dns_servers = dnsServerList(data.dns_servers || forwardCore.dns_servers || []);
+      result.dns_servers = dnsServerList(data.dns_servers || veerCore.dns_servers || []);
       result.source_ip = result.source_ip || ipAddress(data.ipv4 || firstArrayValue(data.host_addresses) || '');
       if (!result.interface) {
         result.phase = text(data.phase || '');
-        result.interface = optionalIfaceName(data.egress_nat_parent_interface || forwardCore.egress_nat_interface || data.forward_parent_interface || forwardCore.parent_interface || data.host_interface || '');
+        result.interface = optionalIfaceName(data.egress_nat_parent_interface || veerCore.egress_nat_interface || data.veer_parent_interface || veerCore.parent_interface || data.host_interface || '');
         result.source = 'wan_core';
       }
       if (!result.mtu) result.mtu = interfaceMTU(result.interface);

@@ -53,9 +53,21 @@
     let lastRulesData = [];
 
     // ---- Token ----
-    function getToken() { return localStorage.getItem('forward_token') || ''; }
-    function setToken(t) { localStorage.setItem('forward_token', t); }
-    function clearToken() { localStorage.removeItem('forward_token'); }
+    function getToken() {
+        var token = localStorage.getItem('veer_token');
+        if (token !== null) return token;
+        token = localStorage.getItem('forward_token') || '';
+        if (token) localStorage.setItem('veer_token', token);
+        return token;
+    }
+    function setToken(t) {
+        localStorage.setItem('veer_token', t);
+        localStorage.setItem('forward_token', t);
+    }
+    function clearToken() {
+        localStorage.removeItem('veer_token');
+        localStorage.removeItem('forward_token');
+    }
     function showTokenModal() {
         app.style.display = 'none';
         tokenModal.classList.add('active');

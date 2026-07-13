@@ -6,11 +6,11 @@ import (
 	"os/exec"
 	"syscall"
 
-	"forward/internal/ipcsec"
-	"forward/internal/managednet"
-	"forward/internal/procrun"
-	"forward/internal/socketio"
-	"forward/internal/tproxysetup"
+	"github.com/Unicode01/veer/internal/ipcsec"
+	"github.com/Unicode01/veer/internal/managednet"
+	"github.com/Unicode01/veer/internal/procrun"
+	"github.com/Unicode01/veer/internal/socketio"
+	"github.com/Unicode01/veer/internal/tproxysetup"
 )
 
 type udpReplyInfo = socketio.ReplyInfo

@@ -28,8 +28,8 @@ package app
 //   FORWARD_PERF_EXPERIMENTAL      (comma-separated experimental feature names)
 //   FORWARD_PERF_BINARY            (optional prebuilt forward binary; skips local go build)
 //   FORWARD_PERF_PLUGIN_SOURCE_DIR (optional packet_observer source dir when using a prebuilt binary outside the repo)
-//   FORWARD_PERF_PLUGIN_PIPELINE    (set to 1 to enable the sample TC fvtap plugin for tc mode)
-//   FORWARD_PERF_PLUGIN_PIPELINE_COUNT (sample TC fvtap plugin copies, default: 1, max: 8)
+//   FORWARD_PERF_PLUGIN_PIPELINE    (set to 1 to enable the sample TC veer plugin for tc mode)
+//   FORWARD_PERF_PLUGIN_PIPELINE_COUNT (sample TC veer plugin copies, default: 1, max: 8)
 //   FORWARD_RUN_PLUGIN_STABILITY_TEST (run plugin long-flow/new-flow stability gate)
 //   FORWARD_PLUGIN_STABILITY_SECONDS
 //   FORWARD_PLUGIN_STABILITY_LONG_CONNECTIONS

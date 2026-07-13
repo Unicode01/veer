@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"forward/internal/store"
+	"github.com/Unicode01/veer/internal/store"
 
 	"github.com/vishvananda/netlink"
 )
@@ -29,7 +29,7 @@ func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 	plugin, db, rt := loadPluginIntegrationControlRuntimeForTest(t, "wan_core")
 	defer rt.Close()
 
-	local := pluginIntegrationLinkName("fwdl")
+	local := pluginIntegrationLinkName("veerl")
 	defer deletePluginIntegrationLinkQuietly(t, local)
 
 	session := fmt.Sprintf(`{
@@ -55,7 +55,7 @@ func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 	}
 	assertPluginIntegrationDummy(t, local, 1400)
 	assertPluginIntegrationLinkHasCIDR(t, local, "169.254.240.1/32")
-	waitForPluginRecordContainingForTest(t, db, "wan_core", "status", "itest", 2*time.Second, `"phase":"applied"`, `"forward_parent_interface":`)
+	waitForPluginRecordContainingForTest(t, db, "wan_core", "status", "itest", 2*time.Second, `"phase":"applied"`, `"veer_parent_interface":`)
 
 	if err := deletePluginIntegrationLink(local); err != nil {
 		t.Fatalf("delete wan local dummy %s: %v", local, err)
@@ -117,7 +117,7 @@ func TestPluginVToLocalLinuxIntegration(t *testing.T) {
 	plugin, db, rt := loadPluginIntegrationControlRuntimeForTest(t, "vtolocal")
 	defer rt.Close()
 
-	local := pluginIntegrationLinkName("fwdl")
+	local := pluginIntegrationLinkName("veerl")
 	defer deletePluginIntegrationLinkQuietly(t, local)
 
 	link := fmt.Sprintf(`{
@@ -251,7 +251,7 @@ func TestPluginActionApplyPersistsAndRepairsLinuxIntegration(t *testing.T) {
 		plugin, db, rt := loadPluginIntegrationControlRuntimeForTest(t, "wan_core")
 		defer rt.Close()
 
-		local := pluginIntegrationLinkName("fwdl")
+		local := pluginIntegrationLinkName("veerl")
 		defer deletePluginIntegrationLinkQuietly(t, local)
 
 		action := pluginActionByIDForTest(t, plugin, "apply_session")
@@ -291,7 +291,7 @@ func TestPluginActionApplyPersistsAndRepairsLinuxIntegration(t *testing.T) {
 		plugin, db, rt := loadPluginIntegrationControlRuntimeForTest(t, "vtolocal")
 		defer rt.Close()
 
-		local := pluginIntegrationLinkName("fwdl")
+		local := pluginIntegrationLinkName("veerl")
 		defer deletePluginIntegrationLinkQuietly(t, local)
 
 		action := pluginActionByIDForTest(t, plugin, "apply")
@@ -396,7 +396,7 @@ func TestPluginLANCoreResolvesWANCoreStatusLinuxIntegration(t *testing.T) {
 	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
 	defer rt.Close()
 
-	wanLocal := pluginIntegrationLinkName("fwdl")
+	wanLocal := pluginIntegrationLinkName("veerl")
 	bridge := pluginIntegrationLinkName("brl")
 	port := pluginIntegrationLinkName("fwp")
 	portPeer := pluginIntegrationLinkName("fwq")

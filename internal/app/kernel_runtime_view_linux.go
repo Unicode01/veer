@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"forward/internal/kernelcap"
+	"github.com/Unicode01/veer/internal/kernelcap"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
@@ -821,11 +821,6 @@ func kernelAttachmentKeys(expected []kernelAttachmentExpectation) []kernelAttach
 		keys = append(keys, item.key)
 	}
 	return keys
-}
-
-func expectedKernelAttachmentsForPreparedRules(coll *ebpf.Collection, prepared []preparedKernelRule, mode kernelTCAttachmentProgramMode) []kernelAttachmentExpectation {
-	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(prepared)
-	return expectedKernelAttachmentsForRuleSets(coll, prepared, kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules), mode)
 }
 
 func expectedKernelAttachmentsForRuleSets(coll *ebpf.Collection, prepared []preparedKernelRule, sets kernelAttachmentRuleSets, mode kernelTCAttachmentProgramMode) []kernelAttachmentExpectation {
@@ -1878,19 +1873,6 @@ func applyKernelRuntimeMapBreakdown(view *KernelEngineRuntimeView, refs kernelRu
 		view.NATMapEntriesV6 = counts.natEntriesV6
 		view.NATMapCapacityV4, view.NATMapOldCapacityV4, view.NATMapCapacityV6, view.NATMapOldCapacityV6 = kernelRuntimeNATMapCapacityBreakdown(refs)
 	}
-}
-
-func kernelAttachmentsHealthy(forwardIfRules map[int][]int64, replyIfRules map[int][]int64, attachments []kernelAttachment, forwardProg *ebpf.Program, replyProg *ebpf.Program, forwardProgV6 *ebpf.Program, replyProgV6 *ebpf.Program) bool {
-	return kernelAttachmentsHealthyForRuleSets(
-		kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules),
-		attachments,
-		kernelAttachmentPrograms{
-			forwardProg:   forwardProg,
-			replyProg:     replyProg,
-			forwardProgV6: forwardProgV6,
-			replyProgV6:   replyProgV6,
-		},
-	)
 }
 
 func kernelAttachmentsHealthyForRuleSets(sets kernelAttachmentRuleSets, attachments []kernelAttachment, programs kernelAttachmentPrograms) bool {

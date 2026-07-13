@@ -21,6 +21,9 @@ import (
 )
 
 const (
+	veerHotRestartMarkerEnv                  = "VEER_HOT_RESTART_MARKER"
+	veerBPFStateDirEnv                       = "VEER_BPF_STATE_DIR"
+	veerRuntimeStateDirEnv                   = "VEER_RUNTIME_STATE_DIR"
 	forwardHotRestartMarkerEnv               = "FORWARD_HOT_RESTART_MARKER"
 	forwardBPFStateDirEnv                    = "FORWARD_BPF_STATE_DIR"
 	forwardRuntimeStateDirEnv                = "FORWARD_RUNTIME_STATE_DIR"
@@ -195,7 +198,7 @@ func kernelHotRestartXDPMetadataForHotRestart(attachments []xdpAttachment, objec
 }
 
 func kernelHotRestartMarkerPath() string {
-	return strings.TrimSpace(os.Getenv(forwardHotRestartMarkerEnv))
+	return preferredEnvironmentValue(veerHotRestartMarkerEnv, forwardHotRestartMarkerEnv)
 }
 
 func kernelTCObjectBytes(enableTrafficStats bool) ([]byte, string) {
@@ -329,7 +332,7 @@ func kernelHotRestartSkipStatsRequested() bool {
 }
 
 func kernelHotRestartStateRoot() string {
-	path := strings.TrimSpace(os.Getenv(forwardBPFStateDirEnv))
+	path := preferredEnvironmentValue(veerBPFStateDirEnv, forwardBPFStateDirEnv)
 	if path == "" {
 		path = defaultForwardBPFStateDir
 	}
@@ -337,7 +340,7 @@ func kernelHotRestartStateRoot() string {
 }
 
 func kernelMetadataStateRoot() string {
-	if path := strings.TrimSpace(os.Getenv(forwardRuntimeStateDirEnv)); path != "" {
+	if path := preferredEnvironmentValue(veerRuntimeStateDirEnv, forwardRuntimeStateDirEnv); path != "" {
 		return path
 	}
 	if markerPath := kernelHotRestartMarkerPath(); markerPath != "" {

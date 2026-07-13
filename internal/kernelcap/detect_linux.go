@@ -15,7 +15,7 @@ import (
 	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 
-	"forward/internal/ipcmd"
+	"github.com/Unicode01/veer/internal/ipcmd"
 )
 
 func DetectAdaptiveMapTotalMemory() uint64 {

@@ -1,6 +1,6 @@
-# forward
+# Veer
 
-`forward` 是一个面向虚拟机宿主机和二级路由场景的 NAT Forward 管理服务。它用 Go 编写，内置 Web UI、管理 API、SQLite 持久化和 Linux 内核 dataplane，可把端口转发、共享建站、端口范围、Egress NAT、托管网络、IPv6 分发和运行时诊断统一收敛到一个进程里管理。
+Veer 是一个面向虚拟机宿主机和二级路由场景的可编程 Linux 网络转发服务。它用 Go 编写，内置 Web UI、管理 API、SQLite 持久化和 Linux 内核 dataplane，可把端口转发、共享建站、端口范围、Egress NAT、托管网络、IPv6 分发和运行时诊断统一收敛到一个进程里管理。
 
 开发者 API 见 [API.md](./API.md)。
 
@@ -9,34 +9,36 @@
 Linux 服务器推荐直接使用一键引导脚本：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 ```
 
 如果 GitHub Raw 不通：
 
 ```bash
 tmpdir="$(mktemp -d)" && \
-curl -fsSL https://codeload.github.com/Unicode01/forward/tar.gz/refs/heads/main | tar -xzf - --strip-components=1 -C "$tmpdir" && \
+curl -fsSL https://codeload.github.com/Unicode01/veer/tar.gz/refs/heads/main | tar -xzf - --strip-components=1 -C "$tmpdir" && \
 bash "$tmpdir/bootstrap.sh"
 ```
 
 常用部署参数：
 
 ```bash
-FORWARD_REF=main bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
-WEB_BIND=0.0.0.0 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
-WEB_UI_ENABLED=false bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
-READY_TIMEOUT_SECONDS=180 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh)
-bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/forward/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
+VEER_REF=main bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+WEB_BIND=0.0.0.0 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+WEB_UI_ENABLED=false bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+READY_TIMEOUT_SECONDS=180 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
 `bootstrap.sh` 会安装依赖、拉取源码、执行 `release.sh` 构建，再调用 `deploy.sh` 安装或热更新。它支持 Debian/Ubuntu 的 `apt`，也支持 RHEL-compatible/Fedora 的 `dnf/yum`。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
+
+从更名前的 `main` 版本升级时，`deploy.sh` 会把默认目录 `/opt/forward` 迁移到 `/opt/veer`，将服务切换为 `veer.service`，并保留 `/opt/forward`、`forward` 二进制名和 `forward.service` 兼容入口。现有 `forward.db`、内核状态目录和配置文件不会改名；旧 `FORWARD_*` 部署变量仍可使用，同时设置时 `VEER_*` 优先。
 
 需要手动部署时：
 
 ```bash
 ./release.sh amd64
-scp forward-linux-amd64 deploy.sh root@server:/tmp/
+scp veer-linux-amd64 veer-plugins.tar.gz deploy.sh root@server:/tmp/
 ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 ```
 
@@ -55,7 +57,7 @@ http://127.0.0.1:8080/readyz
 
 ## 适用场景
 
-`forward` 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由，统一管理入口、出口和下联网络。
+Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由，统一管理入口、出口和下联网络。
 
 典型场景：
 
@@ -83,6 +85,7 @@ http://127.0.0.1:8080/readyz
 - SQLite 配置与状态持久化
 - Worker 热重载和 draining
 - TC/XDP 内核态热更新、状态观测和异常恢复
+- Goja 控制面与 TC eBPF pipeline 插件系统
 - WHMCS addon 插件
 
 ## 推荐部署
@@ -182,8 +185,8 @@ Authorization: Bearer <web_token>
 - `default_engine`：`auto`、`userspace`、`kernel`
 - `kernel_engine_order`：Linux 内核引擎尝试顺序；省略时默认 `["tc"]`
 - `managed_network_auto_repair`：托管网络链路变化后的自动修复
-- `plugins_enabled`：是否扫描外部运行时插件 manifest；内置 `fvtap` 始终可见
-- `plugins_dataplane_enabled`：是否允许外部插件进入 TC 数据面；默认关闭，当前支持按 priority 围绕 `fvtap core` 排序的 forward/reply TC 链
+- `plugins_enabled`：是否扫描外部运行时插件 manifest；内置 `veer_core` 始终可见
+- `plugins_dataplane_enabled`：是否允许外部插件进入 TC 数据面；默认关闭，当前支持按 priority 围绕 `Veer Core` 排序的 forward/reply TC 链
 - `lab` / `preview` / `stable` 插件默认可执行控制脚本；进入外部 TC 数据面仍受 `plugins_dataplane_enabled` 控制；`deprecated` 插件始终禁用
 - `plugins_dir`：运行时插件目录，默认 `plugins`
 - `kernel_rules_map_limit`：内核规则 map 容量，`0` 表示自适应
@@ -194,7 +197,7 @@ Authorization: Bearer <web_token>
 
 ## Dataplane
 
-`forward` 有三条主要 dataplane：
+Veer 有三条主要 dataplane：
 
 - `userspace`：兼容面最广，作为最终回退路径
 - `tc`：当前推荐的 Linux 内核主线路径
@@ -226,7 +229,7 @@ TC 与 XDP 选择建议：
 
 托管网络有两种模式：
 
-- `create`：由 `forward` 动态创建 bridge
+- `create`：由 Veer 动态创建 bridge
 - `existing`：托管宿主机已有 bridge
 
 当前能力：
@@ -276,7 +279,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 插件层
 
-插件架构、开发接口和内置插件说明见 [PLUGIN.md](PLUGIN.md)。
+`release.sh` 会打包 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件；`packet_observer` 与 `router_wizard` 仍是源码内的 lab 插件，不进入默认发布包。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
 
 ## 平台与依赖
 
@@ -310,7 +313,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 本地构建：
 
 ```bash
-go build -o forward .
+go build -o veer .
 ```
 
 交叉构建 Linux 二进制：
@@ -326,7 +329,7 @@ go build -o forward .
 ./release.sh arm64
 ```
 
-`release.sh` 会先编译并嵌入：
+`release.sh` 会先编译并嵌入 core eBPF 对象，同时生成 `veer-plugins.tar.gz` 作为 bundled stable 插件包：
 
 - `internal/app/ebpf/forward-tc-bpf.o`
 - `internal/app/ebpf/forward-tc-bpf-stats.o`
@@ -348,6 +351,7 @@ sh scripts/package-plugins.sh
 常规测试：
 
 ```bash
+sh scripts/build-all-ebpf.sh  # fresh clone 或清理过 .o 后先执行一次
 go test ./...
 ```
 
@@ -367,8 +371,8 @@ modules/addons/forward/
 
 最少配置：
 
-- `默认 Forward API 地址`
-- `默认 Forward Bearer Token`，对应 `config.json` 的 `web_token`
+- `默认 Veer API 地址`
+- `默认 Veer Bearer Token`，对应 `config.json` 的 `web_token`
 - `默认入口 IP`，或按宿主机配置 `server_ip_server_map`
 
 多宿主机场景建议配置：
@@ -384,7 +388,7 @@ modules/addons/forward/
 - 不要泄露 `web_token`
 - 管理面默认绑定 `127.0.0.1`，不要无保护暴露到公网
 - 如需远程管理，建议放在 VPN、堡垒机、反向代理鉴权或受限管理网后面
-- WHMCS 插件里的 Forward Bearer Token 与 `web_token` 是同一个认证语义
+- WHMCS 插件里的 Veer Bearer Token 与 `web_token` 是同一个认证语义
 
 ## License
 

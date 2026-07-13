@@ -3,7 +3,7 @@ package app
 import (
 	"sync"
 
-	"forward/internal/kernelcap"
+	"github.com/Unicode01/veer/internal/kernelcap"
 )
 
 const (

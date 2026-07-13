@@ -2234,7 +2234,7 @@ func xdpFindNamedNetnsLinksByIndex(ifindex int) ([]xdpGenericOffloadTarget, erro
 			continue
 		}
 		links, err := handle.LinkList()
-		handle.Delete()
+		handle.Close()
 		if err != nil {
 			continue
 		}
