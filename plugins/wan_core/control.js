@@ -1,4 +1,8 @@
 plugin.capabilities(['wan', 'local_route', 'veer_core_adapter', 'net_admin', 'control']);
+var MAIN_ROUTE_TABLE = 254;
+var AUTO_ROUTE_TABLE_BASE = 12000;
+var AUTO_ROUTE_SLOT_COUNT = 8000;
+var AUTO_RULE_PRIORITY_BASE = 10000;
 pipeline.handoff({
   id: 'wan0',
   description: 'Linux L3 boundary shared by the system stack, Veer Core and an optional segmented protocol pipeline.'
@@ -45,6 +49,13 @@ plugin.action({
   description: 'Delete the local WAN boundary when it is plugin-managed and mark the WAN adapter down.',
   runtime_update: 'runtime_apply',
   max_payload_bytes: 8192
+});
+plugin.service({
+  id: 'wan.adapter',
+  version: '1.0.0',
+  description: 'Protocol-neutral WAN session and Linux handoff service.',
+  actions: ['apply_session', 'prepare_handoff', 'teardown'],
+  resources: ['profiles', 'sessions', 'status']
 });
 ui.register({
   static_dir: 'ui',
@@ -94,7 +105,7 @@ exports.onAction = function (ctx) {
   var action = ctx.action && ctx.action.id;
   if (action === 'apply_session') {
     var plan = loadPlan(ctx.payload || {});
-    setRecordIfChanged('profiles', plan.key, plan.profile, true);
+    setRecordIfChanged('profiles', plan.key, storedProfile(plan, ctx.payload || {}), true);
     setRecordIfChanged('sessions', plan.key, plan.session, true);
     applySession(plan);
     armRepairTimer();
@@ -102,7 +113,7 @@ exports.onAction = function (ctx) {
   }
   if (action === 'prepare_handoff') {
     var preparePlan = loadPlan(ctx.payload || {});
-    setRecordIfChanged('profiles', preparePlan.key, preparePlan.profile, true);
+    setRecordIfChanged('profiles', preparePlan.key, storedProfile(preparePlan, ctx.payload || {}), true);
     return prepareHandoff(preparePlan);
   }
   if (action === 'teardown') {
@@ -287,6 +298,43 @@ function loadProfile(key) {
   return record && record.data ? record.data : {};
 }
 
+function storedProfile(plan, payload) {
+  payload = payload || {};
+  var inline = payload.session || payload.link || {};
+  var previous = loadProfile(plan.key);
+  var raw = merge(merge(previous, inline), payload);
+  var profile = {
+    profile_key: plan.key,
+    local_interface: plan.profile.local_interface,
+    pipeline_interface: plan.profile.pipeline_interface,
+    handoff_mode: plan.profile.handoff_mode,
+    mtu: plan.profile.mtu,
+    interface_preparation: plan.profile.interface_preparation,
+    addresses: cidrList(raw.addresses || raw.local_addresses || []),
+    routes: Array.isArray(raw.routes) ? raw.routes.slice() : [],
+    rules: Array.isArray(raw.rules) ? raw.rules.slice() : [],
+    neighbors: Array.isArray(raw.neighbors) ? raw.neighbors.slice() : [],
+    ipv6_route_table: plan.profile.ipv6_route_table,
+    ipv6_rule_priority: plan.profile.ipv6_rule_priority,
+    route_metric: plan.profile.route_metric,
+    route_metric_v6: plan.profile.route_metric_v6,
+    egress_nat_redirect_mode: plan.profile.egress_nat_redirect_mode
+  };
+  if (profileFieldSupplied(previous, inline, payload, 'install_default_route')) {
+    profile.install_default_route = plan.profile.install_default_route;
+  }
+  if (profileFieldSupplied(previous, inline, payload, 'install_default_route_v6')) {
+    profile.install_default_route_v6 = plan.profile.install_default_route_v6;
+  }
+  return profile;
+}
+
+function profileFieldSupplied(previous, inline, payload, name) {
+  return Object.prototype.hasOwnProperty.call(previous || {}, name) ||
+    Object.prototype.hasOwnProperty.call(inline || {}, name) ||
+    Object.prototype.hasOwnProperty.call(payload || {}, name);
+}
+
 function applySession(plan) {
   var previous = previousStatus(plan.key);
   if (!sessionUsable(plan.session)) {
@@ -320,7 +368,9 @@ function applySession(plan) {
   var sameManagedLink = managedLinkProven(previous) && !managedLinkChanged(previous, plan.profile);
   cleanupErrors = cleanupErrors.concat(cleanupManagedState(previous, plan.profile));
   replaceAddrs(plan.profile.local_interface, plan.profile.addresses);
+  replaceNeighbors(plan.profile.local_interface, plan.profile.neighbors);
   replaceRoutes(plan.profile.local_interface, plan.profile.routes);
+  replaceRules(plan.profile.rules);
   var handoff = veerCoreHandoff(plan.profile, link.noarp_ready === true);
 
   setRecordIfChanged('status', plan.key, {
@@ -345,6 +395,8 @@ function applySession(plan) {
     original_arp: link.original_arp,
     arp_disabled_by_plugin: link.arp_disabled_by_plugin === true,
     mtu: plan.profile.mtu,
+    interface_preparation_request: plan.profile.interface_preparation,
+    interface_preparation: link.interface_preparation,
     ipv4: plan.session.ipv4,
     ipv4_peer: plan.session.ipv4_peer,
     ipv6: plan.session.ipv6,
@@ -357,8 +409,14 @@ function applySession(plan) {
     pd_prefixes: plan.session.pd_prefixes,
     dns_servers: plan.session.dns_servers,
     route_count: plan.profile.routes.length,
+    rule_count: plan.profile.rules.length,
+    neighbor_count: plan.profile.neighbors.length,
     addresses: plan.profile.addresses,
     routes: plan.profile.routes,
+    rules: plan.profile.rules,
+    neighbors: plan.profile.neighbors,
+    ipv6_route_table: plan.profile.ipv6_route_table,
+    ipv6_rule_priority: plan.profile.ipv6_rule_priority,
     cleanup_errors: cleanupErrors,
     managed_link: link.created === true || sameManagedLink,
     veer_core: handoff,
@@ -379,8 +437,10 @@ function cleanupManagedState(previous, profile) {
   var errors = [];
   if (!managedLinkProven(previous)) return errors;
   if (managedLinkChanged(previous, profile)) return errors;
+  cleanupRemovedRules(previous.rules, profile.rules, errors);
   cleanupRemovedAddrs(previous.local_interface, previous.addresses, profile.local_interface, profile.addresses, errors);
   cleanupRemovedRoutes(previous.local_interface, previous.routes, profile.local_interface, profile.routes, errors);
+  cleanupRemovedNeighbors(previous.local_interface, previous.neighbors, profile.local_interface, profile.neighbors, errors);
   return errors;
 }
 
@@ -390,6 +450,7 @@ function cleanupManagedLinkReplacement(previous, profile) {
   if (!managedLinkChanged(previous, profile)) return result;
   var local = safeIfaceName(previous.local_interface || '');
   if (!local) return result;
+  cleanupRemovedRules(previous.rules, profile.rules, result.errors);
   if (!managedLinkProven(previous)) {
     restorePreviousARP(previous, result.errors);
     return result;
@@ -433,12 +494,17 @@ function rollbackPreviousHandoff(previous, nextProfile) {
     handoff_mode: mode,
     mtu: intValue(previous.mtu, 576, 65535, intValue(nextProfile && nextProfile.mtu, 576, 65535, 1492)),
     addresses: cidrList(previous.addresses || []),
-    routes: Array.isArray(previous.routes) ? previous.routes : []
+    routes: Array.isArray(previous.routes) ? previous.routes : [],
+    rules: Array.isArray(previous.rules) ? previous.rules : [],
+    neighbors: Array.isArray(previous.neighbors) ? previous.neighbors : [],
+    interface_preparation: normalizeInterfacePreparation(previous.interface_preparation_request, previous.mtu)
   };
   try {
     ensureHandoffLink(profile, previous);
     replaceAddrs(profile.local_interface, profile.addresses);
+    replaceNeighbors(profile.local_interface, profile.neighbors);
     replaceRoutes(profile.local_interface, profile.routes);
+    replaceRules(profile.rules);
     return '';
   } catch (e) {
     return errorMessage(e);
@@ -494,7 +560,9 @@ function teardownProfile(profile) {
     pipeline_interface: profile.pipeline_interface,
     handoff_mode: profile.handoff_mode,
     addresses: [],
-    routes: []
+    routes: [],
+    rules: [],
+    neighbors: []
   };
 }
 
@@ -509,8 +577,11 @@ function teardownPreviousState(previous, profile) {
     original_arp: previous.original_arp,
     arp_disabled_by_plugin: previous.arp_disabled_by_plugin === true,
     noarp_ready: previous.noarp_ready === true,
+    interface_preparation_request: previous.interface_preparation_request || null,
     addresses: Array.isArray(previous.addresses) ? previous.addresses : [],
-    routes: Array.isArray(previous.routes) ? previous.routes : []
+    routes: Array.isArray(previous.routes) ? previous.routes : [],
+    rules: Array.isArray(previous.rules) ? previous.rules : [],
+    neighbors: Array.isArray(previous.neighbors) ? previous.neighbors : []
   };
 }
 
@@ -542,6 +613,34 @@ function cleanupRemovedRoutes(previousDefaultDev, previousRoutes, nextDefaultDev
       net.route.delete(req);
     } catch (e) {
       errors.push('route ' + req.dst + ' dev ' + req.dev + ': ' + errorMessage(e));
+    }
+  }
+}
+
+function cleanupRemovedRules(previousRules, nextRules, errors) {
+  if (!Array.isArray(previousRules) || !previousRules.length) return;
+  var next = ruleSet(nextRules);
+  for (var i = 0; i < previousRules.length; i++) {
+    var req = ruleRequest(previousRules[i]);
+    if (!req || next[ruleKey(req)]) continue;
+    try {
+      net.rule.delete(req);
+    } catch (e) {
+      errors.push('rule priority ' + req.priority + ': ' + errorMessage(e));
+    }
+  }
+}
+
+function cleanupRemovedNeighbors(previousDefaultDev, previousNeighbors, nextDefaultDev, nextNeighbors, errors) {
+  if (!Array.isArray(previousNeighbors) || !previousNeighbors.length) return;
+  var next = neighborSet(nextDefaultDev, nextNeighbors);
+  for (var i = 0; i < previousNeighbors.length; i++) {
+    var req = neighborRequest(previousDefaultDev, previousNeighbors[i]);
+    if (!req || next[neighborKey(req)]) continue;
+    try {
+      net.neigh.delete(req);
+    } catch (e) {
+      errors.push('neighbor ' + req.ip + ' dev ' + req.interface + ': ' + errorMessage(e));
     }
   }
 }
@@ -581,6 +680,8 @@ function prepareHandoff(plan) {
     original_arp: link.original_arp,
     arp_disabled_by_plugin: link.arp_disabled_by_plugin === true,
     mtu: plan.profile.mtu,
+    interface_preparation_request: plan.profile.interface_preparation,
+    interface_preparation: link.interface_preparation,
     addresses: plan.profile.addresses,
     cleanup_errors: cleanupErrors,
     managed_link: link.created === true || sameManagedLink,
@@ -601,8 +702,10 @@ function ensureHandoffLink(profile, previous) {
       up: true
     });
     var arpState;
+    var interfacePreparation;
     try {
       arpState = ensureSegmentedLocalARP(pair, previous, profile);
+      interfacePreparation = prepareManagedHandoffInterfaces(profile, arpState.local, pair.peer);
     } catch (e) {
       if (pair.created === true) {
         try {
@@ -620,7 +723,8 @@ function ensureHandoffLink(profile, previous) {
       created: pair.created === true,
       noarp_ready: arpState.noarp_ready,
       original_arp: arpState.original_arp,
-      arp_disabled_by_plugin: arpState.arp_disabled_by_plugin
+      arp_disabled_by_plugin: arpState.arp_disabled_by_plugin,
+      interface_preparation: interfacePreparation
     };
   }
   var dummy = net.link.ensureDummy({
@@ -628,15 +732,55 @@ function ensureHandoffLink(profile, previous) {
     mtu: profile.mtu,
     up: true
   });
-  return {
-    mode: 'direct',
-    local: dummy.link,
-    pipeline: null,
-    created: dummy.created === true,
-    noarp_ready: false,
-    original_arp: dummy.link.arp,
-    arp_disabled_by_plugin: false
-  };
+  try {
+    return {
+      mode: 'direct',
+      local: dummy.link,
+      pipeline: null,
+      created: dummy.created === true,
+      noarp_ready: false,
+      original_arp: dummy.link.arp,
+      arp_disabled_by_plugin: false,
+      interface_preparation: prepareManagedHandoffInterfaces(profile, dummy.link, null)
+    };
+  } catch (e) {
+    if (dummy.created === true) {
+      try { net.link.delete(profile.local_interface); } catch (_) {}
+    }
+    throw e;
+  }
+}
+
+function prepareManagedHandoffInterfaces(profile, local, pipeline) {
+  var request = profile && profile.interface_preparation;
+  var result = {applied: false, local_gso: null, local_offloads: null, pipeline_offloads: null, warnings: []};
+  if (!request) return result;
+  if (request.local_gso && local && local.name) {
+    var gso = net.link.setGSO(local.name, request.local_gso);
+    result.local_gso = {
+      interface: local.name,
+      max_size: gso.gso_max_size || request.local_gso.max_size,
+      max_segs: gso.gso_max_segs || request.local_gso.max_segs
+    };
+  }
+  result.local_offloads = prepareManagedHandoffOffloads(request, local, request.local_offloads, 'local', result.warnings);
+  result.pipeline_offloads = prepareManagedHandoffOffloads(request, pipeline, request.pipeline_offloads, 'pipeline', result.warnings);
+  result.applied = true;
+  return result;
+}
+
+function prepareManagedHandoffOffloads(request, link, features, role, warnings) {
+  if (!features || !link || !link.name) return null;
+  try {
+    net.link.setOffloads(link.name, features);
+    return {interface: link.name, features: features};
+  } catch (e) {
+    if (!request.allow_unsafe_offloads) {
+      throw new Error('prepare WAN handoff ' + role + ' offloads on ' + link.name + ': ' + errorMessage(e));
+    }
+    warnings.push({interface: link.name, role: role, warning: errorMessage(e)});
+    return null;
+  }
 }
 
 function ensureSegmentedLocalARP(pair, previous, profile) {
@@ -713,6 +857,7 @@ function normalizeSession(key, raw) {
     usable: bool(raw.usable, true),
     real_interface: text(raw.real_interface || raw.interface || ''),
     wan_interface: text(raw.wan_interface || raw.real_interface || raw.interface || ''),
+    peer_mac: text(raw.peer_mac || raw.ac_mac || raw.wan_dst_mac || ''),
     ipv4: text(raw.ipv4 || raw.ipv4_address || ''),
     ipv4_peer: text(raw.ipv4_peer || raw.peer_ipv4 || raw.gateway || ''),
     ipv6: text(raw.ipv6 || raw.ipv6_address || (ipv6Addresses[0] && ipv6Addresses[0].address) || ''),
@@ -724,6 +869,7 @@ function normalizeSession(key, raw) {
     pd_prefix: text(raw.pd_prefix || (pdPrefixes[0] && pdPrefixes[0].prefix) || ''),
     pd_prefixes: pdPrefixes,
     dns_servers: dnsServers,
+    install_default_route_v6: bool(raw.install_default_route_v6, false),
     mtu: intValue(raw.mtu || raw.mru, 576, 65535, 1492),
     session_id: intValue(raw.session_id, 0, 65535, 0),
     updated_at: text(raw.updated_at || '')
@@ -744,31 +890,155 @@ function normalizeProfile(key, session, raw) {
   }
   var addresses = cidrList(raw.addresses || raw.local_addresses || []);
   var routes = Array.isArray(raw.routes) ? raw.routes.slice() : [];
+  var rules = Array.isArray(raw.rules) ? raw.rules.slice() : [];
+  var neighbors = Array.isArray(raw.neighbors) ? raw.neighbors.slice() : [];
+  var installDefaultRouteV6 = bool(raw.install_default_route_v6, session.install_default_route_v6);
+  var routingIdentity = allocateIPv6RoutingIdentity(key, raw);
   if (sessionUsable(session)) {
     addresses = appendCIDRUnique(addresses, ipv4HostCIDR(session.ipv4));
     addresses = appendCIDRUnique(addresses, ipv6HostCIDR(session.ipv6));
     addresses = appendCIDRUnique(addresses, ipv6LinkLocalCIDR(session.ipv6_link_local));
+    var ipv4PeerCIDR = ipv4HostCIDR(session.ipv4_peer);
+    if (handoffMode === 'segmented_veth' && session.ipv4 && ipv4PeerCIDR) {
+      routes = appendRouteUnique(routes, {dst: ipv4PeerCIDR, dev: localInterface, src: session.ipv4});
+    }
     if (bool(raw.install_default_route, false) && session.ipv4) {
       routes = appendRouteUnique(routes, {dst: '0.0.0.0/0', dev: localInterface, src: session.ipv4, metric: intValue(raw.route_metric, 0, 2147483647, 0)});
     }
-    if (bool(raw.install_default_route_v6, false) && session.ipv6) {
-      routes = appendRouteUnique(routes, {dst: '::/0', dev: localInterface, src: session.ipv6, metric: intValue(raw.route_metric_v6, 0, 2147483647, 0)});
+    if (installDefaultRouteV6) {
+      if (handoffMode === 'segmented_veth') {
+        var sourcePrefix = ipv6RouteSourcePrefix(session);
+        var gateway = text(session.ipv6_gateway || session.ipv6_peer_link_local || '');
+        if (!sourcePrefix || !gateway || !session.peer_mac) {
+          throw new Error('segmented IPv6 default route requires delegated/source prefix, IPv6 peer gateway and peer MAC');
+        }
+        routes = appendRouteUnique(routes, {
+          dst: '::/0', dev: localInterface, gateway: gateway, table: routingIdentity.table,
+          metric: intValue(raw.route_metric_v6, 0, 2147483647, 0)
+        });
+        rules = appendRuleUnique(rules, {
+          family: 'ipv6', priority: routingIdentity.priority, table: MAIN_ROUTE_TABLE, dst: sourcePrefix
+        });
+        rules = appendRuleUnique(rules, {
+          family: 'ipv6', priority: routingIdentity.priority + 1, table: routingIdentity.table, src: sourcePrefix
+        });
+        neighbors = appendNeighborUnique(neighbors, {
+          interface: localInterface, ip: gateway, mac: session.peer_mac, state: 'permanent'
+        });
+      } else if (session.ipv6) {
+        routes = appendRouteUnique(routes, {
+          dst: '::/0', dev: localInterface, src: session.ipv6,
+          metric: intValue(raw.route_metric_v6, 0, 2147483647, 0)
+        });
+      }
     }
   }
+  var mtu = intValue(raw.mtu || session.mtu, 576, 65535, 1492);
   return {
     profile_key: key,
     local_interface: ifaceName(localInterface, 'local_interface'),
     pipeline_interface: handoffMode === 'segmented_veth' ? ifaceName(pipelineInterface, 'pipeline_interface') : '',
     handoff_mode: handoffMode,
-    mtu: intValue(raw.mtu || session.mtu, 576, 65535, 1492),
+    mtu: mtu,
+    interface_preparation: normalizeInterfacePreparation(raw.interface_preparation, mtu),
     addresses: addresses,
     routes: routes,
+    rules: rules,
+    neighbors: neighbors,
+    ipv6_route_table: routingIdentity.table,
+    ipv6_rule_priority: routingIdentity.priority,
     install_default_route: bool(raw.install_default_route, false),
-    install_default_route_v6: bool(raw.install_default_route_v6, false),
+    install_default_route_v6: installDefaultRouteV6,
     route_metric: intValue(raw.route_metric, 0, 2147483647, 0),
     route_metric_v6: intValue(raw.route_metric_v6, 0, 2147483647, 0),
     egress_nat_redirect_mode: normalizeRedirectMode(raw.egress_nat_redirect_mode || raw.redirect_mode || '')
   };
+}
+
+function allocateIPv6RoutingIdentity(key, raw) {
+  var explicitTable = intValue(raw.ipv6_route_table || raw.route_table_v6, 1, 2147483647, 0);
+  var explicitPriority = intValue(raw.ipv6_rule_priority || raw.rule_priority_v6, 1, 32764, 0);
+  var usedTables = {};
+  var usedPriorities = {};
+  var records = (resources.list('profiles') || []).concat(resources.list('status') || []);
+  for (var i = 0; i < records.length; i++) {
+    var record = records[i];
+    if (!record || token(record.key || 'default') === token(key || 'default')) continue;
+    var data = record.data || {};
+    var table = intValue(data.ipv6_route_table || data.route_table_v6, 1, 2147483647, 0);
+    var priority = intValue(data.ipv6_rule_priority || data.rule_priority_v6, 1, 32764, 0);
+    if (table) usedTables[table] = true;
+    if (priority) {
+      usedPriorities[priority] = true;
+      usedPriorities[priority + 1] = true;
+    }
+  }
+  if (explicitTable && usedTables[explicitTable]) throw new Error('ipv6_route_table is already assigned to another WAN profile');
+  if (explicitPriority && (usedPriorities[explicitPriority] || usedPriorities[explicitPriority + 1])) {
+    throw new Error('ipv6_rule_priority overlaps another WAN profile');
+  }
+  if (explicitTable && explicitPriority) return {table: explicitTable, priority: explicitPriority};
+
+  var start = stableTokenHash(key) % AUTO_ROUTE_SLOT_COUNT;
+  for (var offset = 0; offset < AUTO_ROUTE_SLOT_COUNT; offset++) {
+    var slot = (start + offset) % AUTO_ROUTE_SLOT_COUNT;
+    var candidateTable = explicitTable || (AUTO_ROUTE_TABLE_BASE + slot);
+    var candidatePriority = explicitPriority || (AUTO_RULE_PRIORITY_BASE + slot * 2);
+    if (usedTables[candidateTable] || usedPriorities[candidatePriority] || usedPriorities[candidatePriority + 1]) continue;
+    return {table: candidateTable, priority: candidatePriority};
+  }
+  throw new Error('no free IPv6 WAN routing identity is available');
+}
+
+function stableTokenHash(value) {
+  value = token(value || 'default');
+  var hash = 2166136261;
+  for (var i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function ipv6RouteSourcePrefix(session) {
+  var value = text(session.pd_prefix || session.ipv6_prefix || '');
+  if (value) return value;
+  value = text(session.ipv6 || '');
+  return value ? value + '/128' : '';
+}
+
+function normalizeInterfacePreparation(value, mtu) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  var localGSO = null;
+  if (value.local_gso && typeof value.local_gso === 'object' && !Array.isArray(value.local_gso)) {
+    localGSO = {
+      max_size: intValue(value.local_gso.max_size, 576, 65536, intValue(mtu, 576, 65536, 1492)),
+      max_segs: intValue(value.local_gso.max_segs, 1, 65535, 1)
+    };
+  }
+  var localOffloads = normalizeOffloadSettings(value.local_offloads);
+  var pipelineOffloads = normalizeOffloadSettings(value.pipeline_offloads);
+  if (!localGSO && !localOffloads && !pipelineOffloads) return null;
+  return {
+    local_gso: localGSO,
+    local_offloads: localOffloads,
+    pipeline_offloads: pipelineOffloads,
+    allow_unsafe_offloads: bool(value.allow_unsafe_offloads, false)
+  };
+}
+
+function normalizeOffloadSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  var names = ['rx', 'tx', 'sg', 'tso', 'ufo', 'gso', 'gro', 'lro'];
+  var out = {};
+  var count = 0;
+  for (var i = 0; i < names.length; i++) {
+    var name = names[i];
+    if (!Object.prototype.hasOwnProperty.call(value, name)) continue;
+    out[name] = value[name] === true;
+    count++;
+  }
+  return count ? out : null;
 }
 
 function normalizeHandoffMode(value) {
@@ -803,6 +1073,20 @@ function replaceRoutes(defaultDev, routes) {
   }
 }
 
+function replaceRules(rules) {
+  for (var i = 0; i < rules.length; i++) {
+    var req = ruleRequest(rules[i]);
+    if (req) net.rule.replace(req);
+  }
+}
+
+function replaceNeighbors(defaultDev, neighbors) {
+  for (var i = 0; i < neighbors.length; i++) {
+    var req = neighborRequest(defaultDev, neighbors[i]);
+    if (req) net.neigh.replace(req);
+  }
+}
+
 function routeSet(defaultDev, routes) {
   var out = {};
   if (!Array.isArray(routes)) return out;
@@ -832,6 +1116,71 @@ function routeRequest(defaultDev, route) {
 
 function routeKey(req) {
   return [req.dst, req.dev, req.gateway || '', req.src || '', req.table || 0, req.metric || 0, req.scope || 0].join('|');
+}
+
+function ruleSet(rules) {
+  var out = {};
+  if (!Array.isArray(rules)) return out;
+  for (var i = 0; i < rules.length; i++) {
+    var req = ruleRequest(rules[i]);
+    if (req) out[ruleKey(req)] = true;
+  }
+  return out;
+}
+
+function ruleRequest(rule) {
+  rule = rule || {};
+  var priority = intValue(rule.priority || rule.pref, 1, 32765, 0);
+  var table = intValue(rule.table || rule.table_id, 1, 2147483647, 0);
+  if (!priority || !table) return null;
+  var req = {
+    family: lower(rule.family || ''),
+    priority: priority,
+    table: table,
+    src: text(rule.src || rule.source || rule.from || ''),
+    dst: text(rule.dst || rule.destination || rule.to || ''),
+    invert: rule.invert === true
+  };
+  var iif = safeIfaceName(rule.iif || rule.in_interface || '');
+  var oif = safeIfaceName(rule.oif || rule.out_interface || '');
+  if (iif) req.iif = iif;
+  if (oif) req.oif = oif;
+  if (rule.mark != null || rule.fwmark != null) req.mark = Number(rule.mark != null ? rule.mark : rule.fwmark) >>> 0;
+  if (rule.mask != null || rule.fwmask != null) req.mask = Number(rule.mask != null ? rule.mask : rule.fwmask) >>> 0;
+  return req;
+}
+
+function ruleKey(req) {
+  return [req.family || '', req.priority, req.table, req.src || '', req.dst || '', req.iif || '', req.oif || '',
+    req.mark == null ? '' : req.mark, req.mask == null ? '' : req.mask, req.invert === true ? 1 : 0].join('|');
+}
+
+function neighborSet(defaultDev, neighbors) {
+  var out = {};
+  if (!Array.isArray(neighbors)) return out;
+  for (var i = 0; i < neighbors.length; i++) {
+    var req = neighborRequest(defaultDev, neighbors[i]);
+    if (req) out[neighborKey(req)] = true;
+  }
+  return out;
+}
+
+function neighborRequest(defaultDev, neighbor) {
+  neighbor = neighbor || {};
+  var iface = safeIfaceName(neighbor.interface || neighbor.dev || defaultDev);
+  var ip = text(neighbor.ip || neighbor.address || '');
+  if (!iface || !ip) return null;
+  return {
+    interface: iface,
+    ip: ip,
+    mac: text(neighbor.mac || neighbor.lladdr || ''),
+    state: lower(neighbor.state || 'permanent'),
+    vlan: intValue(neighbor.vlan, 0, 4095, 0)
+  };
+}
+
+function neighborKey(req) {
+  return [req.interface, req.ip, req.mac || '', req.state || '', req.vlan || 0].join('|');
 }
 
 function cidrSet(values) {
@@ -948,6 +1297,32 @@ function appendRouteUnique(routes, route) {
     if (existing && routeKey(existing) === wanted) return out;
   }
   out.push(route);
+  return out;
+}
+
+function appendRuleUnique(rules, rule) {
+  var out = Array.isArray(rules) ? rules.slice() : [];
+  var wanted = ruleRequest(rule);
+  if (!wanted) return out;
+  var wantedKey = ruleKey(wanted);
+  for (var i = 0; i < out.length; i++) {
+    var existing = ruleRequest(out[i]);
+    if (existing && ruleKey(existing) === wantedKey) return out;
+  }
+  out.push(rule);
+  return out;
+}
+
+function appendNeighborUnique(neighbors, neighbor) {
+  var out = Array.isArray(neighbors) ? neighbors.slice() : [];
+  var wanted = neighborRequest(neighbor.interface || neighbor.dev || '', neighbor);
+  if (!wanted) return out;
+  var wantedKey = neighborKey(wanted);
+  for (var i = 0; i < out.length; i++) {
+    var existing = neighborRequest(neighbor.interface || neighbor.dev || '', out[i]);
+    if (existing && neighborKey(existing) === wantedKey) return out;
+  }
+  out.push(neighbor);
   return out;
 }
 

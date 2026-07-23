@@ -66,6 +66,13 @@ plugin.action({
   runtime_update: 'runtime_query',
   max_payload_bytes: 2048
 });
+plugin.service({
+  id: 'lan.adapter',
+  version: '1.0.0',
+  description: 'LAN bridge, addressing, DHCP and routed egress service.',
+  actions: ['apply_network', 'teardown', 'traffic_stats'],
+  resources: ['profiles', 'status', 'egress_nat_plans', 'ipv6_assignment_plans', 'dhcpv4_plans']
+});
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
@@ -354,6 +361,9 @@ function applyNetwork(plan) {
     mtu: profile.mtu,
     up: true
   });
+  if (profile.preserve_bridge && bridge.created === true) {
+    net.link.release(profile.bridge);
+  }
   var cleanupErrors = cleanupManagedBridgeState(previous, profile);
   cleanupManagedPorts(previous, profile, cleanupErrors);
   replaceAddrs(profile.bridge, profile.addresses);
@@ -846,6 +856,7 @@ function normalizeProfile(key, raw) {
 }
 
 function resolveWanEgress(profile) {
+  var explicitInterface = !!profile.wan_egress_interface;
   var result = {
     plugin: profile.wan_plugin,
     ref: profile.wan_ref,
@@ -857,7 +868,8 @@ function resolveWanEgress(profile) {
     pd_prefix: '',
     pd_prefixes: [],
     source: profile.wan_egress_interface ? 'profile' : 'wan_core',
-    resolved: !!profile.wan_egress_interface
+    resolved: explicitInterface,
+    available: explicitInterface
   };
   if (typeof plugins === 'undefined' || !plugins.resources || typeof plugins.resources.get !== 'function') {
     if (result.interface) return result;
@@ -866,18 +878,22 @@ function resolveWanEgress(profile) {
     return result;
   }
   try {
+    if (!plugins.services || typeof plugins.services.resolve !== 'function') {
+      throw new Error('plugins.services.resolve is unavailable');
+    }
+    var wanProvider = plugins.services.resolve({service: 'wan.adapter', version: '^1.0.0', provider: profile.wan_plugin});
+    var wanResources = wanProvider && wanProvider.service && wanProvider.service.resources;
+    if (!Array.isArray(wanResources) || wanResources.indexOf('status') < 0) {
+      throw new Error('WAN adapter service does not expose status');
+    }
     var record = plugins.resources.get(profile.wan_plugin, 'status', profile.wan_ref);
-    if (record && record.enabled !== false && record.data) {
+    if (record && record.data) {
       var data = record.data || {};
       var veerCore = data.veer_core || {};
       result.segmentation_ready = data.segmentation_ready === true || veerCore.segmentation_ready === true;
       result.handoff_mode = text(data.handoff_mode || veerCore.mode || '');
       result.redirect_mode = normalizeRedirectMode(data.egress_nat_redirect_mode || veerCore.egress_nat_redirect_mode || '');
       result.mtu = intValue(data.mtu || veerCore.mtu, 0, 65535, result.mtu);
-      result.pd_prefixes = Array.isArray(data.pd_prefixes) ? data.pd_prefixes : [];
-      result.pd_prefix = text(data.pd_prefix || firstPrefixValue(result.pd_prefixes) || '');
-      result.dns_servers = dnsServerList(data.dns_servers || veerCore.dns_servers || []);
-      result.source_ip = result.source_ip || ipAddress(data.ipv4 || firstArrayValue(data.host_addresses) || '');
       if (!result.interface) {
         result.phase = text(data.phase || '');
         result.interface = optionalIfaceName(data.egress_nat_parent_interface || veerCore.egress_nat_interface || data.veer_parent_interface || veerCore.parent_interface || data.host_interface || '');
@@ -885,6 +901,16 @@ function resolveWanEgress(profile) {
       }
       if (!result.mtu) result.mtu = interfaceMTU(result.interface);
       result.resolved = !!result.interface;
+      if (record.enabled === false) {
+        result.available = explicitInterface;
+        if (!result.available) result.last_error = 'WAN handoff is prepared but the WAN status is disabled';
+        return result;
+      }
+      result.available = true;
+      result.pd_prefixes = Array.isArray(data.pd_prefixes) ? data.pd_prefixes : [];
+      result.pd_prefix = text(data.pd_prefix || firstPrefixValue(result.pd_prefixes) || '');
+      result.dns_servers = dnsServerList(data.dns_servers || veerCore.dns_servers || []);
+      result.source_ip = result.source_ip || ipAddress(data.ipv4 || firstArrayValue(data.host_addresses) || '');
       if (!result.resolved) result.last_error = 'WAN status does not publish an egress interface';
       return result;
     }
@@ -960,6 +986,7 @@ function buildDHCPv4Plan(key, profile, wanEgress, dnsState) {
 
 function buildEgressNATPlan(key, profile, wanEgress) {
   wanEgress = wanEgress || resolveWanEgress(profile);
+  var available = wanEgress.available !== false;
   return {
     lan_id: key,
     source: 'lan_core',
@@ -972,10 +999,12 @@ function buildEgressNATPlan(key, profile, wanEgress) {
     protocol: profile.protocol,
     nat_type: profile.nat_type,
     redirect_mode: profile.redirect_mode || normalizeRedirectMode(wanEgress.redirect_mode || ''),
-    enabled: profile.auto_egress_nat && !!wanEgress.interface,
-    note: wanEgress.interface
+    enabled: profile.auto_egress_nat && available && !!wanEgress.interface,
+    note: wanEgress.interface && available
       ? 'Apply generated outbound NAT to core: parent_interface=LAN bridge, out_interface=WAN egress.'
-      : 'WAN egress interface is not set yet; keep generated outbound NAT disabled until wan_core publishes one.' + (wanEgress.last_error ? ' ' + wanEgress.last_error : '')
+      : (wanEgress.interface
+        ? 'WAN handoff exists but is not available; keep generated outbound NAT disabled until wan_core publishes an active status.'
+        : 'WAN egress interface is not set yet; keep generated outbound NAT disabled until wan_core publishes one.') + (wanEgress.last_error ? ' ' + wanEgress.last_error : '')
   };
 }
 

@@ -41,6 +41,14 @@ function main() {
   testProfilePersistenceFailsBeforeDialing();
   testRawL2RandomIdentityAndCleanup();
   testPapIPv6PDTunnel();
+  testDHCPv6RenewRebindAndRecovery();
+  testDHCPv6PartialIANAStatusKeepsPDLease();
+  testDHCPv6ReconcileRestoresLeaseTimerWithoutKeepalive();
+  testDHCPv6InvalidLeaseTimersFailClosed();
+  testAutoAuthNegotiatesPAP();
+  testAutoAuthNegotiatesCHAP();
+  testExplicitAuthMismatchFailsClosed();
+  testAutoAuthRejectsUnsupportedCHAPAlgorithm();
   testIPCPDNSRejectFallsBack();
   testRADrivenIPv6WithoutIANA();
   testKeepaliveRedialPreservesTunnelPreparation();
@@ -282,7 +290,7 @@ function testRequiredWANCoreSyncFailsClosed() {
   const link = h.resource('wan_links', 'default').data;
   assert.strictEqual(link.state, 'down');
   assert.strictEqual(link.usable, false);
-  const clear = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config' && item.value === '00'.repeat(48));
+  const clear = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config' && item.value === '00'.repeat(52));
   assert(clear, 'required WAN core failure should clear the tunnel map');
 }
 
@@ -320,6 +328,7 @@ function testPapIPv6PDTunnel() {
   const session = h.resource('sessions', 'last').data;
   assert.strictEqual(session.phase, 'session_probe');
   assert.strictEqual(session.session_id, SESSION_ID);
+  assert.match(session.lcp_magic, /^[0-9a-f]{8}$/);
   assert.strictEqual(session.lcp_ack, true);
   assert.strictEqual(session.auth_sent, true);
   assert.strictEqual(session.auth_method, 'pap');
@@ -342,33 +351,284 @@ function testPapIPv6PDTunnel() {
   assert.strictEqual(session.tunnel.pipeline_interface, PIPELINE_INTERFACE);
   assert.strictEqual(session.tunnel.decap_mode, 'auto');
 
-  const tunnelPut = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config' && item.value !== '00'.repeat(48));
+  const tunnelPut = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config' && item.value !== '00'.repeat(52));
   assert(tunnelPut, 'traffic_probe should install a non-zero tunnel config');
-  assert.strictEqual(tunnelPut.value.length, 96, 'tunnel config map value must stay ABI-sized');
+  assert.strictEqual(tunnelPut.value.length, 104, 'tunnel config map value must stay ABI-sized');
   assert.strictEqual(tunnelPut.value.slice(16, 24), '66000000', 'pipeline ifindex should be encoded after local ifindex');
   assert.strictEqual(tunnelPut.value.slice(36, 40), '0000', 'default tunnel config should prefer zero-copy decapsulation');
   assert.strictEqual(tunnelPut.value.slice(40, 44), 'a005', 'IPv4 TCP MSS clamp should default to 1440 for PPPoE MRU 1492 with TCP timestamps');
   const tunnelRecord = h.resource('tunnel_configs', 'active');
   assert.strictEqual(tunnelRecord.enabled, true, 'traffic_probe should persist active tunnel config');
   assert.strictEqual(tunnelRecord.data.value_hex, tunnelPut.value, 'persisted tunnel config should match applied map value');
+  assert.match(tunnelRecord.data.lcp_magic, /^[0-9a-f]{8}$/, 'active tunnel config should retain the negotiated LCP magic');
+  assert.strictEqual(tunnelPut.value.slice(-8), tunnelRecord.data.lcp_magic, 'eBPF tunnel config should include the local LCP magic');
   assert(h.state.timers.has('tunnel_repair'), 'active tunnel config should arm repair timer');
   assert(h.state.timers.has('lcp_echo'), 'traffic_probe should arm keepalive when requested');
-  assert(h.state.netCalls.includes('setMTU:veerlocal0:1492'), 'local boundary MTU should be prepared');
-  assert(h.state.netCalls.includes('setGSO:veerlocal0:1492:1'), 'local boundary GSO must be segmented before TC encapsulation');
-  assert(h.state.netCalls.includes('setOffloads:veerlocal0:gso=false,sg=false,tso=false'), 'local veth transmit aggregation should be disabled');
-  assert(h.state.netCalls.includes(`setOffloads:${PIPELINE_INTERFACE}:gro=false,lro=false`), 'pipeline peer receive aggregation should be disabled');
+  assert(!h.state.netCalls.some((item) => item.startsWith('setMTU:veerlocal0:') || item.startsWith('setGSO:veerlocal0:') ||
+    item.startsWith('setOffloads:veerlocal0:') || item.startsWith(`setOffloads:${PIPELINE_INTERFACE}:`)),
+  'PPPoE must not modify WAN Core-owned handoff interfaces directly');
   assert(h.state.l2Exchanges.every((item) => !item.timeout_ms || item.timeout_ms <= 5000), 'long IPv6 deadlines must use bounded L2 receive windows');
 
   const ingressBinding = h.resource('hook_bindings', 'pppoe-ingress').data;
   const egressBinding = h.resource('hook_bindings', 'pppoe-egress').data;
   assert.deepStrictEqual(ingressBinding.interfaces, ['eth0']);
   assert.deepStrictEqual(egressBinding.interfaces, [PIPELINE_INTERFACE]);
-  assert(h.state.pluginActionCalls.some((item) => item.plugin === 'wan_core' && item.action === 'prepare_handoff'), 'WAN Core handoff should be prepared before dialing');
+  const prepareCall = h.state.pluginActionCalls.find((item) => item.plugin === 'wan_core' && item.action === 'prepare_handoff');
+  assert(prepareCall, 'WAN Core handoff should be prepared before dialing');
+  assert.deepStrictEqual(prepareCall.payload.interface_preparation.local_gso, {max_size: 1492, max_segs: 1});
+  assert.deepStrictEqual(prepareCall.payload.interface_preparation.local_offloads, {sg: false, tso: false, gso: false});
+  assert.deepStrictEqual(prepareCall.payload.interface_preparation.pipeline_offloads, {gro: false, lro: false});
   const wanSync = h.pluginResource('wan_core', 'sessions', 'default');
   assert(wanSync, 'wan_core session handoff should be written through plugin.resource');
   assert.strictEqual(wanSync.data.driver, 'pppoe');
   assert.strictEqual(wanSync.data.usable, true);
   assert.strictEqual(wanSync.data.ipv6, '2001:db8:abcd::10');
+}
+
+function testDHCPv6RenewRebindAndRecovery() {
+  const options = {auth: 'pap', echoReplies: true, ipcpDNS: true, dhcpv6TimeoutTypes: []};
+  const h = createHarness(options);
+  runAction(h, 'traffic_probe', dhcpv6TestPayload());
+
+  let session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.dhcpv6_pd.renew_seconds, 1800);
+  assert.strictEqual(session.dhcpv6_pd.rebind_seconds, 2880);
+  assert.strictEqual(session.dhcpv6_pd.valid_seconds, 7200);
+  assert(h.state.timers.has('dhcpv6_lease'), 'active DHCPv6 binding should arm a lease timer');
+  assert(h.state.dhcpv6Messages.every((message) => !message.options.some((option) => option.code === 20)),
+    'client must not advertise Reconfigure Accept without implementing Reconfigure');
+
+  session.dhcpv6_pd.renew_at_ms = Date.now() - 1;
+  session.dhcpv6_pd.rebind_at_ms = Date.now() + 60000;
+  session.dhcpv6_pd.expires_at_ms = Date.now() + 120000;
+  h.setResource('sessions', 'last', session, true);
+  h.context.exports.onTimer({timer: {name: 'dhcpv6_lease', payload: clone(h.state.timers.get('dhcpv6_lease').payload)}});
+  session = h.resource('sessions', 'last').data;
+  assert.strictEqual(h.state.dhcpv6Messages[h.state.dhcpv6Messages.length - 1].message_type, 5);
+  assert.strictEqual(session.dhcpv6_pd.phase, 'renew_reply');
+  assert.strictEqual(session.dhcpv6_pd.renew_attempts, 0);
+  assert(h.state.timers.has('dhcpv6_lease'));
+
+  session.dhcpv6_pd.renew_at_ms = Date.now() - 2000;
+  session.dhcpv6_pd.rebind_at_ms = Date.now() - 1;
+  session.dhcpv6_pd.expires_at_ms = Date.now() + 120000;
+  h.setResource('sessions', 'last', session, true);
+  h.context.exports.onTimer({timer: {name: 'dhcpv6_lease', payload: clone(h.state.timers.get('dhcpv6_lease').payload)}});
+  session = h.resource('sessions', 'last').data;
+  const rebind = h.state.dhcpv6Messages[h.state.dhcpv6Messages.length - 1];
+  assert.strictEqual(rebind.message_type, 6);
+  assert(!rebind.options.some((option) => option.code === 2), 'Rebind must omit Server Identifier');
+  assert.strictEqual(session.dhcpv6_pd.phase, 'rebind_reply');
+
+  options.dhcpv6TimeoutTypes = [5];
+  session.dhcpv6_pd.renew_at_ms = Date.now() - 1;
+  session.dhcpv6_pd.rebind_at_ms = Date.now() + 60000;
+  session.dhcpv6_pd.expires_at_ms = Date.now() + 120000;
+  const retainedPrefix = session.dhcpv6_pd.prefix;
+  h.setResource('sessions', 'last', session, true);
+  h.context.exports.onTimer({timer: {name: 'dhcpv6_lease', payload: clone(h.state.timers.get('dhcpv6_lease').payload)}});
+  session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.dhcpv6_pd.phase, 'renew_retry');
+  assert.strictEqual(session.dhcpv6_pd.prefix, retainedPrefix, 'Renew timeout must retain a still-valid binding');
+  assert(session.dhcpv6_pd.next_retry_at_ms > Date.now());
+  assert(h.state.timers.has('dhcpv6_lease'));
+
+  options.dhcpv6TimeoutTypes = [1];
+  session.dhcpv6_pd.expires_at_ms = Date.now() - 1;
+  session.dhcpv6_pd.next_retry_at_ms = 0;
+  h.setResource('sessions', 'last', session, true);
+  h.context.exports.onTimer({timer: {name: 'dhcpv6_lease', payload: clone(h.state.timers.get('dhcpv6_lease').payload)}});
+  session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.dhcpv6_pd.phase, 'reacquire_retry');
+  assert.strictEqual(session.dhcpv6_pd.prefix, '', 'expired delegated prefix must fail closed');
+  assert.strictEqual(h.resource('wan_links', 'default').data.pd_prefix, '');
+
+  options.dhcpv6TimeoutTypes = [];
+  session.dhcpv6_pd.next_retry_at_ms = Date.now() - 1;
+  h.setResource('sessions', 'last', session, true);
+  h.context.exports.onTimer({timer: {name: 'dhcpv6_lease', payload: clone(h.state.timers.get('dhcpv6_lease').payload)}});
+  session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.dhcpv6_pd.phase, 'reply');
+  assert.strictEqual(session.dhcpv6_pd.prefix, '2001:db8:1234::/56');
+  assert.strictEqual(session.dhcpv6_pd.reacquire_attempts, 0);
+}
+
+function testDHCPv6PartialIANAStatusKeepsPDLease() {
+  const h = createHarness({auth: 'pap', echoReplies: true, dhcpv6NoAddress: true});
+  runAction(h, 'traffic_probe', dhcpv6TestPayload());
+
+  let session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.dhcpv6_pd.phase, 'reply');
+  assert.strictEqual(session.dhcpv6_pd.address, '');
+  assert.strictEqual(session.dhcpv6_pd.prefix, '2001:db8:1234::/56');
+  assert.strictEqual(session.dhcpv6_pd.partial_binding, true);
+  assert.deepStrictEqual(session.dhcpv6_pd.partial_ias, ['ia_na']);
+  assert.match(session.dhcpv6_pd.partial_reason, /NOADDRS-AVAIL/);
+  assert.strictEqual(session.dhcpv6_pd.ia_na_hex, '', 'failed IA_NA must not enter Renew');
+  assert.strictEqual(session.dhcpv6_pd.renew_seconds, 1800);
+  assert(h.state.timers.has('dhcpv6_lease'), 'a valid IA_PD must retain lease maintenance');
+  const request = h.state.dhcpv6Messages.find((message) => message.message_type === 3);
+  assert(request, 'partial Advertise must proceed to Request');
+  assert(!request.options.some((option) => option.code === 3), 'Request must not echo a failed IA_NA status');
+
+  session.dhcpv6_pd.renew_at_ms = Date.now() - 1;
+  session.dhcpv6_pd.rebind_at_ms = Date.now() + 60000;
+  session.dhcpv6_pd.expires_at_ms = Date.now() + 120000;
+  h.setResource('sessions', 'last', session, true);
+  h.context.exports.onTimer({timer: {name: 'dhcpv6_lease', payload: clone(h.state.timers.get('dhcpv6_lease').payload)}});
+  session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.dhcpv6_pd.phase, 'renew_reply');
+  assert.strictEqual(session.dhcpv6_pd.prefix, '2001:db8:1234::/56');
+  assert(h.state.timers.has('dhcpv6_lease'));
+}
+
+function testDHCPv6ReconcileRestoresLeaseTimerWithoutKeepalive() {
+  const h = createHarness({auth: 'pap', echoReplies: true});
+  runAction(h, 'traffic_probe', dhcpv6TestPayload({keepalive_interval_ms: 0}));
+  assert(!h.state.timers.has('lcp_echo'));
+  assert(h.state.timers.has('dhcpv6_lease'));
+
+  h.state.timers.clear();
+  h.context.exports.onReconcile();
+  assert(!h.state.timers.has('lcp_echo'));
+  assert(h.state.timers.has('dhcpv6_lease'), 'reconcile must restore DHCPv6 independently of LCP keepalive');
+
+  const staleLeaseTimer = clone(h.state.timers.get('dhcpv6_lease').payload);
+  const exchanges = h.state.dhcpv6Messages.length;
+  runAction(h, 'disconnect', {profile_key: 'default'});
+  assert(!h.state.timers.has('dhcpv6_lease'), 'disconnect must cancel DHCPv6 lease maintenance');
+  h.context.exports.onTimer({timer: {name: 'dhcpv6_lease', payload: staleLeaseTimer}});
+  assert.strictEqual(h.state.dhcpv6Messages.length, exchanges, 'queued lease timer must not revive a disconnected session');
+}
+
+function testDHCPv6InvalidLeaseTimersFailClosed() {
+  const h = createHarness({auth: 'pap', echoReplies: true, dhcpv6T1: 3000, dhcpv6T2: 2000});
+  runAction(h, 'traffic_probe', dhcpv6TestPayload());
+  const session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.dhcpv6_pd.phase, 'request_invalid_lease_timers');
+  assert.strictEqual(session.dhcpv6_pd.prefix, undefined);
+  assert.strictEqual(h.resource('wan_links', 'default').data.pd_prefix, '');
+  assert(h.state.timers.has('dhcpv6_lease'), 'invalid DHCPv6 reply should retry without redialing the PPPoE session');
+}
+
+function dhcpv6TestPayload(overrides) {
+  return Object.assign({
+    interface: 'eth0',
+    username: 'user',
+    password: 'pass',
+    auth: 'pap',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: true,
+    negotiate_ipv6: true,
+    ipv6_iid: '0011223344556677',
+    request_ipv6_address: true,
+    request_pd: true,
+    dhcpv6_timeout_ms: 8000,
+    ipv6_ra_timeout_ms: 8000,
+    dhcpv6_settle_ms: 0,
+    keepalive_interval_ms: 0,
+    auto_redial: true,
+    send_padt: false,
+    post_session_control_ms: 0,
+    local_interface: 'veerlocal0',
+    prepare_interfaces: true,
+    prepare_local_mtu: true,
+    prepare_wan_mtu: false,
+    prepare_offloads: true,
+    wan_core_sync: true,
+    wan_core_apply: true
+  }, overrides || {});
+}
+
+function testAutoAuthNegotiatesPAP() {
+  const h = createHarness({auth: 'pap', echoReplies: true});
+  runAction(h, 'dial', {
+    interface: 'eth0',
+    username: 'user',
+    password: 'pass',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: false,
+    negotiate_ipv6: false,
+    send_padt: false,
+    keepalive_interval_ms: 0,
+    wan_core_sync: false
+  });
+
+  const session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.auth, 'auto');
+  assert.strictEqual(session.peer_lcp_ack_sent, true);
+  assert.strictEqual(session.peer_auth_method, 'pap');
+  assert.strictEqual(session.auth_method, 'pap');
+  assert.strictEqual(session.auth_ok, true);
+  assert.strictEqual(session.lcp_ready, true);
+  assert.strictEqual(h.resource('profiles', 'default').data.auth, 'auto');
+}
+
+function testAutoAuthNegotiatesCHAP() {
+  const h = createHarness({auth: 'chap', echoReplies: true});
+  runAction(h, 'dial', {
+    interface: 'eth0',
+    username: 'chap-user',
+    password: 'chap-pass',
+    auth: 'auto',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: false,
+    negotiate_ipv6: false,
+    send_padt: false,
+    keepalive_interval_ms: 0,
+    wan_core_sync: false
+  });
+
+  const session = h.resource('sessions', 'last').data;
+  assert.strictEqual(session.peer_auth_method, 'chap');
+  assert.strictEqual(session.auth_method, 'chap');
+  assert.strictEqual(session.auth_ok, true);
+  assert.strictEqual(session.lcp_ready, true);
+}
+
+function testExplicitAuthMismatchFailsClosed() {
+  const h = createHarness({auth: 'chap'});
+  assert.throws(() => runAction(h, 'dial', {
+    interface: 'eth0',
+    username: 'user',
+    password: 'pass',
+    auth: 'pap',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: false,
+    negotiate_ipv6: false,
+    send_padt: false,
+    wan_core_sync: false
+  }), /peer requires chap authentication but profile auth is pap/);
+}
+
+function testAutoAuthRejectsUnsupportedCHAPAlgorithm() {
+  const h = createHarness({auth: 'chap-unsupported'});
+  assert.throws(() => runAction(h, 'dial', {
+    interface: 'eth0',
+    username: 'user',
+    password: 'pass',
+    auth: 'auto',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: false,
+    negotiate_ipv6: false,
+    send_padt: false,
+    wan_core_sync: false
+  }), /unsupported CHAP algorithm/);
 }
 
 function testIPCPDNSRejectFallsBack() {
@@ -668,7 +928,7 @@ function testDisabledAutoRedialHonorsFailureGrace() {
 
   assert(h.state.timers.has('lcp_echo'), 'disabled redial must keep probing during grace');
   assert.strictEqual(h.resource('wan_links', 'default').data.state, 'up');
-  assert(!h.state.mapPuts.some((item) => item.map === 'pppoe_tunnel_config' && item.value === '00'.repeat(48)),
+  assert(!h.state.mapPuts.some((item) => item.map === 'pppoe_tunnel_config' && item.value === '00'.repeat(52)),
     'one timeout must not clear the tunnel when auto redial is disabled');
 }
 
@@ -954,7 +1214,7 @@ function testDisconnectClearsTunnelAndWANState() {
   assert.strictEqual(wan.enabled, false);
   assert.strictEqual(wan.data.usable, false);
   assert.strictEqual(wan.data.phase, 'disconnected');
-  const clear = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config' && item.value === '00'.repeat(48));
+  const clear = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config' && item.value === '00'.repeat(52));
   assert(clear, 'disconnect should clear tunnel config');
   assert(!h.state.timers.has('tunnel_repair'), 'disconnect should clear tunnel repair timer');
 }
@@ -1127,11 +1387,19 @@ function testTunnelConfigRuntimeApplyReplaysAndClearsMap() {
   h.state.mapPuts.length = 0;
   h.context.exports.onResourceApply({
     resource: {id: 'tunnel_configs', runtime_update: 'runtime_apply'},
+    records: [{key: 'active', data: {value_hex: '11'.repeat(48)}, enabled: true}]
+  });
+  const migrated = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config');
+  assert.strictEqual(migrated.value, '11'.repeat(48) + '00'.repeat(4), 'legacy tunnel config should gain a zero LCP magic');
+
+  h.state.mapPuts.length = 0;
+  h.context.exports.onResourceApply({
+    resource: {id: 'tunnel_configs', runtime_update: 'runtime_apply'},
     records: []
   });
   const clear = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config');
   assert(clear, 'empty tunnel config apply should clear eBPF map');
-  assert.strictEqual(clear.value, '00'.repeat(48), 'empty tunnel config apply should write zero ABI value');
+  assert.strictEqual(clear.value, '00'.repeat(52), 'empty tunnel config apply should write zero ABI value');
 }
 
 function testTrafficProbeTimeoutFailsClosed() {
@@ -1195,6 +1463,7 @@ function createHarness(options) {
     hooks: [],
     resources: [],
     actions: [],
+    services: [],
     ui: null,
     records: new Map(),
     links: new Map(),
@@ -1208,6 +1477,7 @@ function createHarness(options) {
     l2Sends: [],
     l2Exchanges: [],
     l2Recvs: [],
+    dhcpv6Messages: [],
     netCalls: [],
     randomByte: 1,
     lastEchoIdentifier: null,
@@ -1227,7 +1497,8 @@ function createHarness(options) {
       pipelineNode(item) { state.virtualInterfaces.push(Object.assign({type: 'pipeline'}, clone(item))); },
       handoff(item) { state.virtualInterfaces.push(Object.assign({type: 'handoff'}, clone(item))); },
       resource(item) { state.resources.push(clone(item)); },
-      action(item) { state.actions.push(clone(item)); }
+      action(item) { state.actions.push(clone(item)); },
+      service(item) { state.services.push(clone(item)); }
     },
     pipeline: {
       node(item) { state.virtualInterfaces.push(Object.assign({type: 'pipeline'}, clone(item))); },
@@ -1328,6 +1599,13 @@ function createHarness(options) {
             pipeline_ifindex: linkInfo(pipelineInterface).ifindex,
             handoff_mode: 'segmented_veth',
             segmentation_ready: true,
+            interface_preparation: payload.interface_preparation ? {
+              applied: true,
+              local_gso: payload.interface_preparation.local_gso,
+              local_offloads: payload.interface_preparation.local_offloads,
+              pipeline_offloads: payload.interface_preparation.pipeline_offloads,
+              warnings: []
+            } : {applied: false, warnings: []},
             veer_core: {
               mode: 'segmented_veth',
               parent_interface: localInterface,
@@ -1337,6 +1615,26 @@ function createHarness(options) {
           };
           state.pluginRecords.set(`wan_core/status/${key}`, {data: clone(status), enabled: false});
           return clone(status);
+        }
+      },
+      services: {
+        resolve(request) {
+          if (!request || request.service !== 'wan.adapter' || request.provider !== 'wan_core') {
+            throw new Error('unexpected service resolution');
+          }
+          return {
+            plugin_id: 'wan_core',
+            service: {
+              id: 'wan.adapter', version: '1.0.0',
+              actions: ['apply_session', 'prepare_handoff', 'teardown'],
+              resources: ['profiles', 'sessions', 'status']
+            }
+          };
+        },
+        call(request) {
+          this.resolve(request);
+          const result = context.plugins.actions.call(request.provider, request.action, request.payload || {});
+          return {status: 'completed', plugin: request.provider, action: request.action, result};
         }
       }
     },
@@ -1514,7 +1812,19 @@ function handleExchangeMany(ctx, state, options, req) {
     return [];
   }
   if (parsed.protocol === PPP_LCP && cp.code === 1) {
-    const frames = [sessionFrame(ctx, PPP_LCP, ctx.cpPacket(2, cp.identifier, cp.data_hex))];
+    let authOption = '';
+    if (options.auth === 'pap' || options.auth === 'pap-reject') {
+      authOption = ctx.cpOptionHex(3, ctx.u16hex(PPP_PAP));
+    } else if (options.auth === 'chap') {
+      authOption = ctx.cpOptionHex(3, ctx.u16hex(PPP_CHAP) + '05');
+    } else if (options.auth === 'chap-unsupported') {
+      authOption = ctx.cpOptionHex(3, ctx.u16hex(PPP_CHAP) + '80');
+    }
+    const peerRequest = ctx.cpPacket(1, 0x31, ctx.cpOptionU16(1, 1492) + authOption);
+    const frames = [
+      sessionFrame(ctx, PPP_LCP, peerRequest),
+      sessionFrame(ctx, PPP_LCP, ctx.cpPacket(2, cp.identifier, cp.data_hex))
+    ];
     if (options.auth === 'chap') {
       frames.push(sessionFrame(ctx, PPP_CHAP, ctx.cpPacket(1, 0x42, '04aabbccdd' + ctx.stringHex('test-ac'))));
     }
@@ -1559,12 +1869,25 @@ function handleExchangeMany(ctx, state, options, req) {
     const packet = ctx.parseIPv6UDP(parsed.payload);
     assert(packet, 'DHCPv6 test path should send IPv6/UDP');
     const dhcp = ctx.parseDHCPv6(packet.payload_hex);
-    if (dhcp.message_type === 1 || !options.omitIANA) {
+    state.dhcpv6Messages.push(clone(dhcp));
+    assert(!dhcp.options.some((option) => option.code === 20), 'unsupported Reconfigure Accept must not be sent');
+    if (dhcp.message_type === 1 || (!options.omitIANA && !options.dhcpv6NoAddress)) {
       assert(dhcp.options.some((option) => option.code === 3), 'DHCPv6 should request IA_NA');
+    } else if (options.dhcpv6NoAddress) {
+      assert(!dhcp.options.some((option) => option.code === 3), 'failed IA_NA must be omitted after Solicit');
     }
     assert(dhcp.options.some((option) => option.code === 25), 'DHCPv6 should request IA_PD');
+    if (Array.isArray(options.dhcpv6TimeoutTypes) && options.dhcpv6TimeoutTypes.includes(dhcp.message_type)) return [];
     if (dhcp.message_type === 1) return [dhcpv6Frame(ctx, 2, dhcp.transaction_id, options)];
     if (dhcp.message_type === 3) return [dhcpv6Frame(ctx, 7, dhcp.transaction_id, options)];
+    if (dhcp.message_type === 5) {
+      assert(dhcp.options.some((option) => option.code === 2), 'Renew must include Server Identifier');
+      return [dhcpv6Frame(ctx, 7, dhcp.transaction_id, options)];
+    }
+    if (dhcp.message_type === 6) {
+      assert(!dhcp.options.some((option) => option.code === 2), 'Rebind must omit Server Identifier');
+      return [dhcpv6Frame(ctx, 7, dhcp.transaction_id, options)];
+    }
   }
   return [];
 }
@@ -1627,11 +1950,18 @@ function sessionFrame(ctx, protocol, payloadHex) {
 function dhcpv6Frame(ctx, messageType, xid, options) {
   const serverID = '00030001020000000002';
   const address = '20010db8abcd00000000000000000010';
-  const iaAddress = address + ctx.u32hex(3600) + ctx.u32hex(7200);
-  const iaNA = ctx.u32hex(1) + ctx.u32hex(0) + ctx.u32hex(0) + ctx.dhcpv6Option(5, iaAddress);
+  const preferred = options && options.dhcpv6PreferredLifetime || 3600;
+  const valid = options && options.dhcpv6ValidLifetime || 7200;
+  const t1 = options && options.dhcpv6T1 != null ? options.dhcpv6T1 : 1800;
+  const t2 = options && options.dhcpv6T2 != null ? options.dhcpv6T2 : 2880;
+  const iaAddress = address + ctx.u32hex(preferred) + ctx.u32hex(valid);
+  const iaNAData = options && options.dhcpv6NoAddress
+    ? ctx.dhcpv6Option(13, ctx.u16hex(2) + ctx.stringHex('NOADDRS-AVAIL'))
+    : ctx.dhcpv6Option(5, iaAddress);
+  const iaNA = ctx.u32hex(1) + ctx.u32hex(t1) + ctx.u32hex(t2) + iaNAData;
   const prefix = '20010db8123400000000000000000000';
-  const iaPrefix = ctx.u32hex(3600) + ctx.u32hex(7200) + '38' + prefix;
-  const iaPD = ctx.u32hex(1) + ctx.u32hex(0) + ctx.u32hex(0) + ctx.dhcpv6Option(26, iaPrefix);
+  const iaPrefix = ctx.u32hex(preferred) + ctx.u32hex(valid) + '38' + prefix;
+  const iaPD = ctx.u32hex(1) + ctx.u32hex(t1) + ctx.u32hex(t2) + ctx.dhcpv6Option(26, iaPrefix);
   const dns = '20014860486000000000000000008888' + '24003200000000000000000000000001';
   const iana = options && options.omitIANA ? '' : ctx.dhcpv6Option(3, iaNA);
   const payload = ctx.hexByte(messageType) + xid + ctx.dhcpv6Option(2, serverID) + iana + ctx.dhcpv6Option(25, iaPD) + ctx.dhcpv6Option(23, dns);

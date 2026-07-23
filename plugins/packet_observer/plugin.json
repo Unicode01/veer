@@ -6,6 +6,12 @@
   "kind": "pipeline",
   "stability": "lab",
   "description": "Example runtime plugin. The control script registers resources, actions, UI, eBPF objects, and hooks dynamically.",
+  "compatibility": {
+    "runtime": ">=1.0.0 <2.0.0",
+    "control_api_abi": 1,
+    "tc_pipeline_abi": 2,
+    "features": ["dataplane.tc_pipeline.v2"]
+  },
   "control": {
     "main": "control.js",
     "permissions": ["ebpf.load", "hook.attach", "kv", "plugin.register", "ui"]

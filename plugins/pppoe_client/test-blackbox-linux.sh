@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 PLUGIN_DIR="$ROOT_DIR/plugins/pppoe_client"
 
 if [ "$(id -u)" != "0" ]; then
@@ -18,9 +18,12 @@ fi
 : "${VEER_PPPOE_BLACKBOX_RUN_IPERF:=1}"
 : "${VEER_PPPOE_BLACKBOX_TEST_IPV6:=0}"
 : "${VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE:=0}"
+: "${VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL:=0}"
+: "${VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN:=0}"
+: "${VEER_PPPOE_BLACKBOX_SYSTEMD:=auto}"
 
 missing=
-for tool in ip tc clang pppd pppoe-server curl sed grep timeout ss ethtool; do
+for tool in ip tc clang pppd pppoe-server curl sed grep timeout ss ethtool pkill; do
 	if ! command -v "$tool" >/dev/null 2>&1; then
 		missing="${missing:+$missing }$tool"
 	fi
@@ -69,6 +72,36 @@ case "$VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE" in
 		exit 1
 		;;
 esac
+case "$VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL" in
+	0|1) ;;
+	*)
+		echo "VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL must be 0 or 1" >&2
+		exit 1
+		;;
+esac
+if [ "$VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE" = "1" ] && [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" = "1" ]; then
+	echo "timer-fence and iperf are separate tests; set VEER_PPPOE_BLACKBOX_RUN_IPERF=0" >&2
+	exit 1
+fi
+if [ "$VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL" = "1" ]; then
+	if [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" = "1" ] || [ "$VEER_PPPOE_BLACKBOX_TEST_IPV6" = "1" ] || [ "$VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE" = "1" ]; then
+		echo "auto-redial is a separate IPv4 test; disable iperf, IPv6, and timer-fence" >&2
+		exit 1
+	fi
+fi
+case "$VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN" in
+	''|*[!0-9]*)
+		echo "VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN must be a non-negative integer" >&2
+		exit 1
+		;;
+esac
+case "$VEER_PPPOE_BLACKBOX_SYSTEMD" in
+	auto|0|1) ;;
+	*)
+		echo "VEER_PPPOE_BLACKBOX_SYSTEMD must be auto, 0, or 1" >&2
+		exit 1
+		;;
+esac
 
 if [ "$VEER_PPPOE_BLACKBOX_PORT" = "0" ]; then
 	VEER_PPPOE_BLACKBOX_PORT=$((18080 + ($$ % 1000)))
@@ -90,11 +123,13 @@ lan_bridge="brbb${suffix}"
 lan_bridge=$(printf '%.15s' "$lan_bridge")
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/veer-pppoe-blackbox.XXXXXX")
 veer_pid=
+veer_unit=
 pppoe_pid=
 iperf_pid=
 capture_pid=
 capture_local_pid=
 capture_pipeline_pid=
+capture_server_pid=
 capture_file=
 
 cleanup() {
@@ -103,6 +138,12 @@ cleanup() {
 	if [ -n "$capture_pid" ]; then kill "$capture_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_local_pid" ]; then kill "$capture_local_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_pipeline_pid" ]; then kill "$capture_pipeline_pid" 2>/dev/null || true; fi
+	if [ -n "$capture_server_pid" ]; then kill "$capture_server_pid" 2>/dev/null || true; fi
+	if [ -n "$veer_unit" ]; then
+		systemctl stop "$veer_unit" >/dev/null 2>&1 || true
+		systemctl reset-failed "$veer_unit" >/dev/null 2>&1 || true
+		veer_pid=
+	fi
 	if [ -n "$veer_pid" ]; then kill "$veer_pid" 2>/dev/null || true; fi
 	if [ -n "$pppoe_pid" ]; then kill "$pppoe_pid" 2>/dev/null || true; fi
 	if [ -f "$work_dir/pppoe-server.pid" ]; then kill "$(cat "$work_dir/pppoe-server.pid")" 2>/dev/null || true; fi
@@ -121,6 +162,20 @@ cleanup() {
 	fi
 }
 trap cleanup EXIT INT TERM
+
+use_systemd_veer() {
+	case "$VEER_PPPOE_BLACKBOX_SYSTEMD" in
+		0) return 1 ;;
+		1)
+			command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+			return
+			;;
+	esac
+	command -v systemd-run >/dev/null 2>&1 &&
+		command -v systemctl >/dev/null 2>&1 &&
+		[ -d /run/systemd/system ] &&
+		systemctl show-environment >/dev/null 2>&1
+}
 
 copy_plugin() {
 	mkdir -p "$work_dir/plugins"
@@ -153,8 +208,8 @@ start_pppoe_server() {
 noauth
 mtu 1492
 mru 1492
-lcp-echo-interval 0
-lcp-echo-failure 0
+lcp-echo-interval 2
+lcp-echo-failure 5
 nodefaultroute
 noipdefault
 debug
@@ -205,11 +260,42 @@ start_veer() {
   "default_engine": "auto"
 }
 EOF
-	(
-		cd "$work_dir"
-		exec "$VEER_BINARY" -config "$work_dir/config.json" >"$work_dir/veer.log" 2>&1
-	) &
-	veer_pid=$!
+	if use_systemd_veer; then
+		veer_unit="veer-pppoe-blackbox-$suffix.service"
+		if ! systemd-run \
+			--unit="$veer_unit" \
+			--property=Delegate=yes \
+			--property=KillMode=control-group \
+			--property=TimeoutStopSec=5s \
+			--service-type=exec \
+			--collect \
+			--quiet \
+			/bin/sh -c 'cd "$1" && exec "$2" -config "$3" >"$4" 2>&1' \
+			veer-pppoe-blackbox "$work_dir" "$VEER_BINARY" "$work_dir/config.json" "$work_dir/veer.log"; then
+			echo "failed to start Veer in an isolated transient systemd service" >&2
+			exit 1
+		fi
+		for _ in 1 2 3 4 5 6 7 8 9 10; do
+			veer_pid=$(systemctl show -p MainPID --value "$veer_unit" 2>/dev/null || true)
+			case "$veer_pid" in
+				''|0|*[!0-9]*) sleep 0.1 ;;
+				*) break ;;
+			esac
+		done
+		case "$veer_pid" in
+			''|0|*[!0-9]*)
+				echo "transient Veer service did not publish a main PID" >&2
+				systemctl status "$veer_unit" --no-pager >&2 || true
+				exit 1
+				;;
+		esac
+	else
+		(
+			cd "$work_dir"
+			exec "$VEER_BINARY" -config "$work_dir/config.json" >"$work_dir/veer.log" 2>&1
+		) &
+		veer_pid=$!
+	fi
 	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
 		if ! kill -0 "$veer_pid" 2>/dev/null; then
 			echo "veer exited before API became ready" >&2
@@ -315,15 +401,53 @@ wait_for_server_session_release() {
 	exit 1
 }
 
+test_automatic_redial() {
+	api_get_resource sessions last >"$work_dir/session-before-auto-redial.json"
+	previous_generation=$(sed -n 's/.*"session_generation":"\([^"]*\)".*/\1/p' "$work_dir/session-before-auto-redial.json" | head -n 1)
+	if [ -z "$previous_generation" ]; then
+		echo "PPPoE session has no generation before automatic redial test" >&2
+		dump_dataplane_state
+		exit 1
+	fi
+	if ! ip netns exec "$server_ns" pkill -TERM -x pppd; then
+		echo "failed to terminate the PPPoE server session for automatic redial" >&2
+		dump_dataplane_state
+		exit 1
+	fi
+
+	attempt=0
+	while [ "$attempt" -lt 80 ]; do
+		attempt=$((attempt + 1))
+		if api_get_resource sessions last >"$work_dir/session-auto-redial.json" 2>/dev/null; then
+			generation=$(sed -n 's/.*"session_generation":"\([^"]*\)".*/\1/p' "$work_dir/session-auto-redial.json" | head -n 1)
+			if [ -n "$generation" ] && [ "$generation" != "$previous_generation" ] && session_is_up "$work_dir/session-auto-redial.json"; then
+				if api_get_resource sessions redial_last >"$work_dir/auto-redial-status.json" 2>/dev/null && grep -q '"phase":"redial_ok"' "$work_dir/auto-redial-status.json"; then
+					cp "$work_dir/session-auto-redial.json" "$work_dir/session.json"
+					if ping -I "$local_if" -c 3 -W 2 8.8.8.8; then
+						return
+					fi
+					break
+				fi
+			fi
+		fi
+		sleep 0.25
+	done
+	echo "PPPoE automatic redial did not establish a new usable session" >&2
+	dump_dataplane_state
+	exit 1
+}
+
 dump_dataplane_state() {
 	set +e
 	api_post_action debug_stats '{}' >"$work_dir/debug-stats-action.json" 2>&1
 	api_get_resource sessions debug_stats >"$work_dir/debug-stats.json" 2>&1
 	{
 		echo '=== links ==='
-		ip -d link show dev "$local_if"
-		ip -d link show dev "$pipeline_if"
-		ip -d link show dev "$wan_host"
+		ip -s -s -d link show dev "$local_if"
+		ip -s -s -d link show dev "$pipeline_if"
+		ip -s -s -d link show dev "$wan_host"
+		echo '=== server links ==='
+		ip netns exec "$server_ns" ip -s -s -d link show
 		echo '=== routes ==='
 		ip -4 route show dev "$local_if"
 		echo '=== segmented pipeline ingress ==='
@@ -349,26 +473,32 @@ dump_dataplane_state() {
 start_capture() {
 	if [ "$VEER_PPPOE_BLACKBOX_CAPTURE" != "1" ]; then return; fi
 	capture_file=$1
-	tcpdump -U -i "$wan_host" -s 0 -w "$capture_file" >/dev/null 2>&1 &
+	tcpdump -U -i "$wan_host" -s "$VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN" -w "$capture_file" >/dev/null 2>&1 &
 	capture_pid=$!
-	tcpdump -U -i "$local_if" -s 0 -w "${capture_file%.pcap}-local.pcap" >/dev/null 2>&1 &
+	tcpdump -U -i "$local_if" -s "$VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN" -w "${capture_file%.pcap}-local.pcap" >/dev/null 2>&1 &
 	capture_local_pid=$!
-	tcpdump -U -i "$pipeline_if" -s 0 -w "${capture_file%.pcap}-pipeline.pcap" >/dev/null 2>&1 &
+	tcpdump -U -i "$pipeline_if" -s "$VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN" -w "${capture_file%.pcap}-pipeline.pcap" >/dev/null 2>&1 &
 	capture_pipeline_pid=$!
+	server_capture_if=$(ip netns exec "$server_ns" ip -o link show | sed -n 's/^[0-9][0-9]*: \(ppp[0-9][0-9]*\):.*/\1/p' | head -n 1)
+	if [ -n "$server_capture_if" ]; then
+		ip netns exec "$server_ns" tcpdump -U -i "$server_capture_if" -s "$VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN" -w "${capture_file%.pcap}-server-ppp.pcap" >/dev/null 2>&1 &
+		capture_server_pid=$!
+	fi
 	sleep 0.3
 }
 
 stop_capture() {
-	if [ -z "$capture_pid$capture_local_pid$capture_pipeline_pid" ]; then return; fi
-	for pid in "$capture_pid" "$capture_local_pid" "$capture_pipeline_pid"; do
+	if [ -z "$capture_pid$capture_local_pid$capture_pipeline_pid$capture_server_pid" ]; then return; fi
+	for pid in "$capture_pid" "$capture_local_pid" "$capture_pipeline_pid" "$capture_server_pid"; do
 		if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
 	done
-	for pid in "$capture_pid" "$capture_local_pid" "$capture_pipeline_pid"; do
+	for pid in "$capture_pid" "$capture_local_pid" "$capture_pipeline_pid" "$capture_server_pid"; do
 		if [ -n "$pid" ]; then wait "$pid" 2>/dev/null || true; fi
 	done
 	capture_pid=
 	capture_local_pid=
 	capture_pipeline_pid=
+	capture_server_pid=
 }
 
 run_blackbox() {
@@ -408,9 +538,9 @@ EOF
 
 	negotiate_ipv6=false
 	if [ "$VEER_PPPOE_BLACKBOX_TEST_IPV6" = "1" ]; then negotiate_ipv6=true; fi
-	timer_fence_fields=
+	keepalive_test_fields=
 	if [ "$VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE" = "1" ]; then
-		timer_fence_fields=$(cat <<'EOF'
+		keepalive_test_fields=$(cat <<'EOF'
   "keepalive_interval_ms": 10,
   "keepalive_failure_threshold": 1,
   "keepalive_failure_grace_ms": 0,
@@ -419,6 +549,17 @@ EOF
   "redial_retry_initial_ms": 250,
   "redial_retry_max_ms": 1000,
   "disconnect_drain_ms": 500,
+EOF
+)
+	elif [ "$VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL" = "1" ]; then
+		keepalive_test_fields=$(cat <<'EOF'
+  "keepalive_interval_ms": 250,
+  "keepalive_failure_threshold": 2,
+  "keepalive_failure_grace_ms": 500,
+  "keepalive_confirm_timeout_ms": 250,
+  "auto_redial": true,
+  "redial_retry_initial_ms": 250,
+  "redial_retry_max_ms": 1000,
 EOF
 )
 	fi
@@ -444,7 +585,7 @@ EOF
   "apply_hook_bindings": true,
   "send_padt": false,
   "post_session_control_ms": 200,
-$timer_fence_fields
+$keepalive_test_fields
   "decap_mode": "manual",
   "wan_core_sync": true,
   "wan_core_required": true,
@@ -525,6 +666,9 @@ EOF
 		ip -6 route replace 2001:db8:ffff::1/128 dev "$local_if" src 2001:db8:ffff::2
 		ping -6 -I "$local_if" -c 3 -W 2 2001:db8:ffff::1
 	fi
+	if [ "$VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL" = "1" ]; then
+		test_automatic_redial
+	fi
 
 	if [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" = "1" ]; then
 	iperf_port=$((56000 + ($$ % 1000)))
@@ -543,6 +687,17 @@ EOF
 		exit 1
 	fi
 	cat "$work_dir/iperf-client.log"
+	if [ "$VEER_PPPOE_BLACKBOX_PARALLEL" -gt 1 ]; then
+		zero_intervals=$(grep -Ec '^\[SUM\].*0\.00 Bytes[[:space:]]+0\.00 bits/sec' "$work_dir/iperf-client.log" || true)
+	else
+		zero_intervals=$(grep -Ec '^\[[[:space:]]*[0-9]+\].*0\.00 Bytes[[:space:]]+0\.00 bits/sec' "$work_dir/iperf-client.log" || true)
+	fi
+	if [ "$zero_intervals" -gt 1 ]; then
+		stop_capture
+		dump_dataplane_state
+		echo "iperf3 observed $zero_intervals zero-throughput interval(s)" >&2
+		exit 1
+	fi
 	stop_capture
 	for _ in 1 2 3 4 5 6 7 8 9 10; do
 		if ! kill -0 "$iperf_pid" 2>/dev/null; then
@@ -621,7 +776,10 @@ EOF
 		exit 1
 	fi
 	wait_for_session_up
-	ping -I "$local_if" -c 3 -W 2 8.8.8.8
+	if ! ping -I "$local_if" -c 3 -W 2 8.8.8.8; then
+		dump_dataplane_state
+		exit 1
+	fi
 	api_post_action disconnect "{\"profile_key\":\"blackbox\",\"interface\":$(json_string "$wan_host")}" >"$work_dir/redial-disconnect-action.json"
 	wait_for_session_disconnected
 	wait_for_server_session_release

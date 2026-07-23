@@ -472,6 +472,7 @@
       const password = input('', 'password', 'password');
       const service = input('', 'optional service name');
       const auth = select([
+        ['auto', 'Auto (PAP / CHAP)'],
         ['pap', 'PAP'],
         ['chap', 'CHAP'],
         ['none', 'None']
@@ -848,9 +849,16 @@
       function deriveRuntimeState(session, keepalive) {
         const sessionPhase = String(session && session.phase || '').toLowerCase();
         const keepalivePhase = String(keepalive && keepalive.phase || '').toLowerCase();
+        const dhcpv6 = session && session.dhcpv6_pd ? session.dhcpv6_pd : null;
+        const dhcpv6Phase = String(dhcpv6 && dhcpv6.phase || '').toLowerCase();
+        const hasDHCPv6Binding = !!(dhcpv6 && (dhcpv6.address || dhcpv6.prefix ||
+          Array.isArray(dhcpv6.addresses) && dhcpv6.addresses.length ||
+          Array.isArray(dhcpv6.prefixes) && dhcpv6.prefixes.length));
         if (!session || session.padt_sent === true || sessionPhase === 'disconnected' || sessionPhase === 'deactivated') return 'offline';
         if (['redial_wait', 'redialing', 'redial_retry'].includes(keepalivePhase)) return 'redialing';
         if (sessionPhase === 'handoff_error' || keepalivePhase === 'handoff_error') return 'error';
+        if (dhcpv6 && !hasDHCPv6Binding &&
+          (dhcpv6Phase.includes('retry') || dhcpv6Phase.includes('error') || dhcpv6Phase.includes('timeout'))) return 'degraded';
         if (keepalive && keepalivePhase !== 'keepalive_ok' && keepalivePhase !== 'redial_ok') return 'degraded';
         return hasActiveSession(session) ? 'online' : 'offline';
       }
@@ -859,7 +867,11 @@
         const parts = [];
         if (session && session.phase) parts.push('session=' + session.phase);
         if (keepalive && keepalive.phase) parts.push('keepalive=' + keepalive.phase);
-        const message = keepalive && (keepalive.redial_error || keepalive.message) || session && (session.handoff_error || session.message);
+        const dhcpv6 = session && session.dhcpv6_pd ? session.dhcpv6_pd : null;
+        if (dhcpv6 && dhcpv6.phase) parts.push('dhcpv6=' + dhcpv6.phase);
+        const message = keepalive && (keepalive.redial_error || keepalive.message) ||
+          dhcpv6 && (dhcpv6.last_renew_error || dhcpv6.partial_reason || dhcpv6.message || dhcpv6.status_message) ||
+          session && (session.handoff_error || session.message);
         if (message) parts.push(String(message));
         return parts.join(' / ');
       }
@@ -908,6 +920,12 @@
         if (ipv6cp.peer_link_local) parts.push('peer=' + ipv6cp.peer_link_local);
         if (ra.router) parts.push('router=' + ra.router);
         if (ra.prefix) parts.push('prefix=' + ra.prefix);
+        if (dhcpv6.phase) parts.push('dhcpv6=' + dhcpv6.phase);
+        if (dhcpv6.renew_at) parts.push('renew=' + formatTimestamp(dhcpv6.renew_at));
+        if (dhcpv6.rebind_at) parts.push('rebind=' + formatTimestamp(dhcpv6.rebind_at));
+        if (dhcpv6.expires_at) parts.push('expires=' + formatTimestamp(dhcpv6.expires_at));
+        if (dhcpv6.partial_reason) parts.push('partial=' + dhcpv6.partial_reason);
+        if (dhcpv6.last_renew_error) parts.push('error=' + dhcpv6.last_renew_error);
         if (Array.isArray(dhcpv6.dns_servers) && dhcpv6.dns_servers.length) parts.push('dns=' + dhcpv6.dns_servers.join(','));
         return parts.join(' / ');
       }
@@ -948,7 +966,7 @@
           username.value = data.username || '';
           password.value = data.password === '__redacted__' ? '' : (data.password || '');
           service.value = data.service || '';
-          auth.value = data.auth || 'pap';
+          auth.value = data.auth || 'auto';
           timeout.value = data.timeout_ms || 700;
           negotiateIPv4.checked = data.negotiate_ipv4 !== false;
           negotiateIPv6.checked = !!data.negotiate_ipv6;

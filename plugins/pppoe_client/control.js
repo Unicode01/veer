@@ -17,12 +17,19 @@ var PPP_PAP = 0xc023;
 var PPP_CHAP = 0xc223;
 var PPP_IPCP = 0x8021;
 var PPP_IPV6CP = 0x8057;
+var LCP_OPTION_AUTH_PROTOCOL = 3;
+var CHAP_ALGORITHM_MD5 = 5;
 var TUNNEL_CONFIG_RESOURCE = 'tunnel_configs';
 var TUNNEL_CONFIG_KEY = 'active';
 var TUNNEL_REPAIR_TIMER = 'tunnel_repair';
 var REDIAL_RETRY_TIMER = 'redial_retry';
-var TUNNEL_CONFIG_HEX_BYTES = 48;
+var DHCPV6_LEASE_TIMER = 'dhcpv6_lease';
+var LEGACY_TUNNEL_CONFIG_HEX_BYTES = 48;
+var TUNNEL_CONFIG_HEX_BYTES = 52;
 var MAX_L2_RECV_TIMEOUT_MS = 5000;
+var MAX_TIMER_DELAY_MS = 86399999;
+var DHCPV6_RETRY_MIN_MS = 1000;
+var DHCPV6_RETRY_MAX_MS = 300000;
 var L2_IDENTITY_RESOURCE = 'l2_identities';
 var DEFAULT_KEEPALIVE_FAILURE_THRESHOLD = 5;
 var DEFAULT_KEEPALIVE_FAILURE_GRACE_MS = 60000;
@@ -34,6 +41,8 @@ var IPV6CP_OPTION_INTERFACE_ID = 1;
 var DHCPV6_SOLICIT = 1;
 var DHCPV6_ADVERTISE = 2;
 var DHCPV6_REQUEST = 3;
+var DHCPV6_RENEW = 5;
+var DHCPV6_REBIND = 6;
 var DHCPV6_REPLY = 7;
 var DHCPV6_OPT_CLIENTID = 1;
 var DHCPV6_OPT_SERVERID = 2;
@@ -41,8 +50,8 @@ var DHCPV6_OPT_IA_NA = 3;
 var DHCPV6_OPT_IAADDR = 5;
 var DHCPV6_OPT_ORO = 6;
 var DHCPV6_OPT_ELAPSED_TIME = 8;
+var DHCPV6_OPT_STATUS_CODE = 13;
 var DHCPV6_OPT_DNS_SERVERS = 23;
-var DHCPV6_OPT_RECONF_ACCEPT = 20;
 var DHCPV6_OPT_IA_PD = 25;
 var DHCPV6_OPT_IAPREFIX = 26;
 var DHCPV6_OPT_CLIENT_FQDN = 39;
@@ -181,6 +190,13 @@ plugin.action({
   runtime_update: 'runtime_query',
   max_payload_bytes: 1024
 });
+plugin.service({
+  id: 'pppoe.client',
+  version: '1.0.0',
+  description: 'PPPoE discovery, authentication, session and tunnel control service.',
+  actions: ['discover', 'probe_session', 'traffic_probe', 'dial', 'disconnect', 'clear_state', 'debug_stats', 'traffic_stats'],
+  resources: ['hook_bindings', 'profiles', 'l2_identities', 'sessions', 'wan_links', 'tunnel_configs']
+});
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
@@ -216,6 +232,7 @@ exports.onDeactivate = function () {
   timer.clear('lcp_echo');
   timer.clear('session_control');
   timer.clear(REDIAL_RETRY_TIMER);
+  timer.clear(DHCPV6_LEASE_TIMER);
   timer.clear(TUNNEL_REPAIR_TIMER);
   var failures = [];
   try {
@@ -298,6 +315,10 @@ exports.onTimer = function (ctx) {
     serviceRedialRetryTimer(ctx.timer.payload || {});
     return;
   }
+  if (ctx.timer.name === DHCPV6_LEASE_TIMER) {
+    serviceDHCPv6LeaseTimer(ctx.timer.payload || {});
+    return;
+  }
   if (ctx.timer.name !== 'lcp_echo') return;
   var payload = ctx.timer.payload || {};
   if (!sessionTimerIsCurrent(payload)) return;
@@ -357,6 +378,7 @@ exports.onTimer = function (ctx) {
           result = redialAfterKeepaliveFailure(profile, result, payload);
         } else if (profile.redial_clear_tunnel) {
           timer.clear('lcp_echo');
+          timer.clear(DHCPV6_LEASE_TIMER);
           clearTunnelConfig();
           markWANLinkDown(profile, payload, result.phase);
         } else {
@@ -384,6 +406,7 @@ exports.onAction = function (ctx) {
     timer.clear('lcp_echo');
     timer.clear('session_control');
     timer.clear(REDIAL_RETRY_TIMER);
+    timer.clear(DHCPV6_LEASE_TIMER);
     timer.clear(TUNNEL_REPAIR_TIMER);
     clearTunnelConfig();
     cleanupL2Identity(clearKey, true);
@@ -426,6 +449,7 @@ exports.onAction = function (ctx) {
     requireInstalledTunnel(tunnelSession);
     armSessionControl(profile, tunnelSession);
     armKeepalive(profile, tunnelSession);
+    armDHCPv6Lease(profile, tunnelSession);
     return;
   }
   if (action === 'dial') {
@@ -437,6 +461,7 @@ exports.onAction = function (ctx) {
     recordSession(profile, dialSession);
     armSessionControl(profile, dialSession);
     armKeepalive(profile, dialSession);
+    armDHCPv6Lease(profile, dialSession);
     return;
   }
   if (action === 'disconnect') {
@@ -467,7 +492,10 @@ function loadProfile(payload) {
   profile.password = resolveProfilePassword(profile);
   profile.service = text(profile.service || '');
   profile.ac_name = text(profile.ac_name || '');
-  profile.auth = lower(profile.auth || 'pap');
+  profile.auth = lower(profile.auth || 'auto');
+  if (profile.auth !== 'auto' && profile.auth !== 'pap' && profile.auth !== 'chap' && profile.auth !== 'none') {
+    throw new Error('auth must be auto, pap, chap or none');
+  }
   profile.timeout_ms = clampInt(profile.timeout_ms, 50, 5000, 700);
   profile.control_ack_timeout_ms = clampInt(
     firstDefined(profile.control_ack_timeout_ms, profile.ack_exchange_timeout_ms),
@@ -771,8 +799,11 @@ function probeSession(profile) {
     service_name: firstTagText(pado, TAG_SERVICE_NAME),
     session_id: pads.session_id,
     session_id_hex: u16hex(pads.session_id),
+    lcp_magic: frames.lcp_magic,
     lcp_ack: frames.lcp_ack,
     lcp_ready: lcpReadyForNetworkCP(profile, frames),
+    peer_lcp_ack_sent: frames.peer_lcp_ack_sent,
+    peer_auth_method: frames.peer_auth_method,
     auth_sent: frames.auth_sent,
     auth_method: frames.auth_method,
     auth_ok: frames.auth_ok,
@@ -790,12 +821,13 @@ function probeSession(profile) {
 
 function prepareWANCoreTunnelBoundary(profile) {
   if (!profile.install_tunnel || !profile.wan_core_sync) return null;
-  if (typeof plugins === 'undefined' || !plugins.actions || typeof plugins.actions.call !== 'function') {
+  if (typeof plugins === 'undefined' || !plugins.services || typeof plugins.services.call !== 'function') {
     if (profile.wan_core_required) {
-      throw new Error('prepare WAN core handoff: plugins.actions.call is unavailable');
+      throw new Error('prepare WAN core handoff: plugins.services.call is unavailable');
     }
     return null;
   }
+  var interfacePreparation = wanCoreInterfacePreparation(profile);
   var payload = {
     key: profile.wan_id,
     wan_id: profile.wan_id,
@@ -809,13 +841,28 @@ function prepareWANCoreTunnelBoundary(profile) {
     local_interface: profile.local_interface,
     pipeline_interface: profile.pipeline_interface,
     handoff_mode: 'segmented_veth',
-    mtu: profile.mru
+    mtu: tunnelInterfaceMTU(profile),
+    interface_preparation: interfacePreparation
   };
   try {
-    var status = plugins.actions.call(profile.wan_core_plugin, 'prepare_handoff', payload) || {};
+    requireWANCoreServiceEndpoint(profile, 'resources', 'status');
+    var actionResponse = plugins.services.call({
+      service: 'wan.adapter', version: '^1.0.0', provider: profile.wan_core_plugin,
+      action: 'prepare_handoff', payload: payload
+    }) || {};
+    var statusRecord = plugins.resources.get(profile.wan_core_plugin, 'status', profile.wan_id);
+    var status = statusRecord && statusRecord.data ? statusRecord.data : (actionResponse.result || {});
+    if (!status || !status.local_interface) {
+      throw new Error('WAN core did not publish prepared handoff status');
+    }
     if (status.pipeline_interface) {
       profile.pipeline_interface = optionalIfaceName(status.pipeline_interface, 'wan_core pipeline_interface');
     }
+    if (interfacePreparation && (!status.interface_preparation || status.interface_preparation.applied !== true)) {
+      throw new Error('WAN core did not apply requested interface preparation');
+    }
+    profile.wan_core_prepared_interfaces = status.handoff_mode === 'segmented_veth' &&
+      !!status.local_interface && !!status.pipeline_interface;
     return status;
   } catch (e) {
     if (profile.wan_core_required || !profile.pipeline_interface) {
@@ -824,6 +871,23 @@ function prepareWANCoreTunnelBoundary(profile) {
     log.info('WAN core handoff preparation deferred: ' + errorMessage(e));
     return null;
   }
+}
+
+function tunnelInterfaceMTU(profile) {
+  return clampInt(firstDefined(profile.tunnel_mtu, profile.local_mtu, profile.mru), 576, 1492, 1492);
+}
+
+function wanCoreInterfacePreparation(profile) {
+  if (!profile.prepare_interfaces) return null;
+  var tunnelMTU = tunnelInterfaceMTU(profile);
+  var request = {
+    local_gso: profile.prepare_gso ? {max_size: tunnelMTU, max_segs: 1} : null,
+    local_offloads: profile.prepare_offloads ? {sg: false, tso: false, gso: false} : null,
+    pipeline_offloads: profile.prepare_offloads ? {gro: false, lro: false} : null,
+    allow_unsafe_offloads: profile.allow_unsafe_offloads === true
+  };
+  if (!request.local_gso && !request.local_offloads && !request.pipeline_offloads) return null;
+  return request;
 }
 
 function installTunnel(profile, padsFrame, sessionID) {
@@ -864,7 +928,8 @@ function installTunnel(profile, padsFrame, sessionID) {
     local_src_mac: localSrcMAC,
     local_dst_mac: localDstMAC,
     wan_src_mac: wanSrcMAC,
-    wan_dst_mac: wanDstMAC
+    wan_dst_mac: wanDstMAC,
+    lcp_magic: profile.lcp_magic
   });
   var tunnelRecord = {
     object: 'pppoe_tunnel',
@@ -881,6 +946,7 @@ function installTunnel(profile, padsFrame, sessionID) {
     local_dst_mac: localDstMAC,
     wan_src_mac: wanSrcMAC,
     wan_dst_mac: wanDstMAC,
+    lcp_magic: normalizeLCPMagicHex(profile.lcp_magic),
     session_id: sessionID,
     flags: flags,
     mss_clamp_v4: profile.mss_clamp_v4,
@@ -911,6 +977,7 @@ function installTunnel(profile, padsFrame, sessionID) {
     local_dst_mac: localDstMAC,
     wan_src_mac: wanSrcMAC,
     wan_dst_mac: wanDstMAC,
+    lcp_magic: normalizeLCPMagicHex(profile.lcp_magic),
     mss_clamp_v4: profile.mss_clamp_v4,
     mss_clamp_v6: profile.mss_clamp_v6,
     interface_preparation: interfacePreparation,
@@ -924,6 +991,7 @@ function resolveTunnelBoundary(profile) {
   var pipelineName = optionalIfaceName(profile.pipeline_interface || '', 'pipeline_interface');
   if (!pipelineName && profile.wan_core_sync && typeof plugins !== 'undefined' && plugins.resources &&
       typeof plugins.resources.get === 'function') {
+    requireWANCoreServiceEndpoint(profile, 'resources', 'status');
     var record = plugins.resources.get(profile.wan_core_plugin, 'status', token(profile.wan_id || profile.profile_key));
     // A prepared WAN boundary is intentionally disabled until PPPoE succeeds.
     var status = record && record.data ? record.data : {};
@@ -985,22 +1053,24 @@ function syncTunnelHookBindings(profile, boundary) {
 }
 
 function prepareTunnelInterfaces(profile, boundary) {
-  var result = {enabled: false, mtu: [], gso: [], offloads: [], warnings: []};
+  var result = {enabled: false, delegated_to_wan_core: false, mtu: [], gso: [], offloads: [], warnings: []};
   if (!profile.prepare_interfaces) return result;
   result.enabled = true;
 
   var local = boundary && boundary.local ? boundary.local.name : (profile.local_interface || '');
   var pipelineInterface = boundary && boundary.pipeline ? boundary.pipeline.name : '';
   var wan = profile.wan_interface || profile.interface || '';
-  var tunnelMTU = clampInt(firstDefined(profile.tunnel_mtu, profile.local_mtu, profile.mru), 576, 1492, 1492);
+  var tunnelMTU = tunnelInterfaceMTU(profile);
   var preparedMTU = {};
   var preparedOffloads = {};
+  var delegated = profile.wan_core_prepared_interfaces === true;
+  result.delegated_to_wan_core = delegated;
 
-  if (profile.prepare_local_mtu) {
+  if (profile.prepare_local_mtu && !delegated) {
     prepareTunnelMTU(result, preparedMTU, local, 'local', tunnelMTU);
     prepareTunnelMTU(result, preparedMTU, pipelineInterface, 'pipeline', tunnelMTU);
   }
-  if (profile.prepare_gso && local) {
+  if (profile.prepare_gso && local && !delegated) {
     var gso = net.link.setGSO(local, {max_size: tunnelMTU, max_segs: 1});
     result.gso.push({
       interface: local,
@@ -1013,8 +1083,10 @@ function prepareTunnelInterfaces(profile, boundary) {
     prepareTunnelMTU(result, preparedMTU, wan, 'wan', tunnelMTU);
   }
   if (profile.prepare_offloads) {
-    prepareTunnelOffloads(profile, result, preparedOffloads, local, 'local', {sg: false, tso: false, gso: false});
-    prepareTunnelOffloads(profile, result, preparedOffloads, pipelineInterface, 'pipeline', {gro: false, lro: false});
+    if (!delegated) {
+      prepareTunnelOffloads(profile, result, preparedOffloads, local, 'local', {sg: false, tso: false, gso: false});
+      prepareTunnelOffloads(profile, result, preparedOffloads, pipelineInterface, 'pipeline', {gro: false, lro: false});
+    }
     if (profile.prepare_wan_offloads) {
       prepareTunnelOffloads(profile, result, preparedOffloads, wan, 'wan', {tx: false, sg: false, tso: false, gso: false, gro: false});
     }
@@ -1134,14 +1206,25 @@ function tunnelConfigValueHex(data) {
     + macHex(data.local_src_mac || '00:00:00:00:00:00')
     + macHex(data.local_dst_mac || '00:00:00:00:00:00')
     + macHex(data.wan_src_mac || '00:00:00:00:00:00')
-    + macHex(data.wan_dst_mac || '00:00:00:00:00:00');
+    + macHex(data.wan_dst_mac || '00:00:00:00:00:00')
+    + normalizeLCPMagicHex(data.lcp_magic);
 }
 
 function normalizeTunnelConfigValueHex(value) {
   value = lower(value).replace(/^0x/i, '').replace(/[^0-9a-f]/g, '');
+  if (value.length === LEGACY_TUNNEL_CONFIG_HEX_BYTES * 2) {
+    return value + repeatHex('00', TUNNEL_CONFIG_HEX_BYTES - LEGACY_TUNNEL_CONFIG_HEX_BYTES);
+  }
   if (value.length !== TUNNEL_CONFIG_HEX_BYTES * 2) {
     throw new Error('tunnel config value_hex must be ' + TUNNEL_CONFIG_HEX_BYTES + ' bytes');
   }
+  return value;
+}
+
+function normalizeLCPMagicHex(value) {
+  value = lower(value || '').replace(/^0x/i, '').replace(/[^0-9a-f]/g, '');
+  if (!value) return repeatHex('00', 4);
+  if (value.length !== 8) throw new Error('LCP magic must be 4 bytes');
   return value;
 }
 
@@ -1393,8 +1476,23 @@ function findDiscoveryFrame(frames, wantCode, hostUniq, peerMAC, acName) {
 
 function runSessionProbe(profile, peerMAC, sessionID, localMAC) {
 	var identifier = randomByte();
-	var lcpRequest = cpPacket(1, identifier, cpOptionU16(1, profile.mru) + cpOptionHex(5, crypto.randomBytes(4)));
-  var out = {items: [], lcp_ack: false, auth_sent: false, auth_method: '', auth_ok: false, ipcp: null, ipv6cp: null, dhcpv6_pd: null};
+	var lcpMagic = crypto.randomBytes(4);
+	profile.lcp_magic = normalizeLCPMagicHex(lcpMagic);
+	var lcpRequest = cpPacket(1, identifier, cpOptionU16(1, profile.mru) + cpOptionHex(5, profile.lcp_magic));
+  var out = {
+    items: [],
+    lcp_ack: false,
+    peer_lcp_ack_sent: false,
+    auth_required: false,
+    peer_auth_method: '',
+    auth_sent: false,
+    auth_method: '',
+    auth_ok: false,
+    ipcp: null,
+    ipv6cp: null,
+    dhcpv6_pd: null,
+    lcp_magic: profile.lcp_magic
+  };
 	var firstFrames = exchangePPPControlFrames(profile, peerMAC, sessionID, PPP_LCP, lcpRequest, profile.timeout_ms, profile.max_frames);
 	if (!firstFrames.length) {
 		out.items.push({protocol: 'lcp', event: 'timeout'});
@@ -1439,11 +1537,8 @@ function runSessionProbe(profile, peerMAC, sessionID, localMAC) {
 }
 
 function lcpReadyForNetworkCP(profile, out) {
-  if (out.auth_ok) return true;
-  if (!out.lcp_ack) return false;
-  if (!profile.username) return true;
-  if (profile.auth !== 'pap' && profile.auth !== 'chap') return true;
-  return false;
+  if (!out.lcp_ack || !out.peer_lcp_ack_sent) return false;
+  return !out.auth_required || out.auth_ok === true;
 }
 
 function processSessionFrame(profile, peerMAC, sessionID, frame, ourLCPID, out) {
@@ -1466,31 +1561,26 @@ function handlePPPFrame(profile, peerMAC, sessionID, parsed, ourLCPID, out) {
     var lcp = parseCP(parsed.payload);
     out.items.push({protocol: 'lcp', code: lcp.code, identifier: lcp.identifier, length: lcp.length});
     if (lcp.code === 1) {
+      recordPeerAuthenticationRequirement(profile, lcp, out);
       var nextLCPFrames = exchangePPPControlFrames(profile, peerMAC, sessionID, PPP_LCP, cpPacket(2, lcp.identifier, lcp.data_hex), profile.timeout_ms, profile.max_frames);
+      out.peer_lcp_ack_sent = true;
       out.items.push({protocol: 'lcp', event: 'configure_ack_sent', identifier: lcp.identifier});
       if (nextLCPFrames.length) {
         processSessionFrames(profile, peerMAC, sessionID, nextLCPFrames, ourLCPID, out);
       }
+      maybeSendPAP(profile, peerMAC, sessionID, ourLCPID, out);
     } else if (lcp.code === 2 && lcp.identifier === ourLCPID) {
       out.lcp_ack = true;
       out.items.push({protocol: 'lcp', event: 'local_configure_ack'});
-      if (profile.auth === 'pap' && profile.username && !out.auth_sent) {
-        var papFrames = sendPAPFrames(profile, peerMAC, sessionID);
-        out.auth_sent = true;
-        out.auth_method = 'pap';
-        if (!papFrames.length) {
-          out.items.push({protocol: 'pap', event: 'timeout'});
-        } else {
-          processSessionFrames(profile, peerMAC, sessionID, papFrames, ourLCPID, out);
-        }
-      }
+      maybeSendPAP(profile, peerMAC, sessionID, ourLCPID, out);
     }
     return;
   }
   if (parsed.protocol === PPP_CHAP) {
     var chap = parseCP(parsed.payload);
     out.items.push({protocol: 'chap', code: chap.code, identifier: chap.identifier, length: chap.length});
-    if (chap.code === 1 && profile.auth === 'chap' && profile.username && profile.password && !out.auth_sent) {
+    if (chap.code === 1 && authenticationMethod(profile, out, 'chap') === 'chap' && !out.auth_sent) {
+      requireAuthenticationCredentials(profile, 'chap');
       var chapFrames = sendCHAPResponseFrames(profile, peerMAC, sessionID, chap);
       out.auth_sent = true;
       out.auth_method = 'chap';
@@ -1519,6 +1609,75 @@ function handlePPPFrame(profile, peerMAC, sessionID, parsed, ourLCPID, out) {
     return;
   }
   out.items.push({protocol: '0x' + u16hex(parsed.protocol), length: parsed.payload.length / 2});
+}
+
+function recordPeerAuthenticationRequirement(profile, lcp, out) {
+  var options = parseCPOptions(lcp.data_hex);
+  var requirement = null;
+  for (var i = 0; i < options.length; i++) {
+    if (options[i].type !== LCP_OPTION_AUTH_PROTOCOL) continue;
+    if (requirement !== null) throw new Error('peer LCP contains multiple authentication protocol options');
+    requirement = parseLCPAuthenticationOption(options[i]);
+  }
+  if (requirement === null) {
+    if (!out.auth_required) out.peer_auth_method = 'none';
+    return;
+  }
+  if (profile.auth !== 'auto' && profile.auth !== requirement.method) {
+    throw new Error('peer requires ' + requirement.method + ' authentication but profile auth is ' + profile.auth);
+  }
+  out.auth_required = true;
+  out.peer_auth_method = requirement.method;
+  out.auth_method = requirement.method;
+  requireAuthenticationCredentials(profile, requirement.method);
+  out.items.push({protocol: 'lcp', event: 'authentication_required', method: requirement.method});
+}
+
+function parseLCPAuthenticationOption(option) {
+  var bytes = hexToBytes(option && option.value_hex || '');
+  if (bytes.length < 2) throw new Error('peer LCP authentication protocol option is malformed');
+  var protocol = u16(bytes, 0);
+  if (protocol === PPP_PAP) {
+    if (bytes.length !== 2) throw new Error('peer PAP authentication protocol option is malformed');
+    return {method: 'pap', protocol: protocol};
+  }
+  if (protocol === PPP_CHAP) {
+    if (bytes.length !== 3) throw new Error('peer CHAP authentication protocol option is malformed');
+    if (bytes[2] !== CHAP_ALGORITHM_MD5) {
+      throw new Error('peer requires unsupported CHAP algorithm ' + bytes[2]);
+    }
+    return {method: 'chap', protocol: protocol, algorithm: bytes[2]};
+  }
+  throw new Error('peer requires unsupported authentication protocol 0x' + u16hex(protocol));
+}
+
+function authenticationMethod(profile, out, observedMethod) {
+  if (out.auth_required) return out.peer_auth_method;
+  if (profile.auth === 'auto' && observedMethod) {
+    out.auth_required = true;
+    out.peer_auth_method = observedMethod;
+    out.auth_method = observedMethod;
+    return observedMethod;
+  }
+  return profile.auth;
+}
+
+function requireAuthenticationCredentials(profile, method) {
+  if (!profile.username) throw new Error(method + ' authentication requires username');
+  if (method === 'chap' && !profile.password) throw new Error('chap authentication requires password');
+}
+
+function maybeSendPAP(profile, peerMAC, sessionID, ourLCPID, out) {
+  if (!out.lcp_ack || !out.peer_lcp_ack_sent || out.auth_sent || !out.auth_required || out.peer_auth_method !== 'pap') return;
+  requireAuthenticationCredentials(profile, 'pap');
+  var papFrames = sendPAPFrames(profile, peerMAC, sessionID);
+  out.auth_sent = true;
+  out.auth_method = 'pap';
+  if (!papFrames.length) {
+    out.items.push({protocol: 'pap', event: 'timeout'});
+  } else {
+    processSessionFrames(profile, peerMAC, sessionID, papFrames, ourLCPID, out);
+  }
 }
 
 function drainPeerControlAfterAuth(profile, peerMAC, sessionID, out) {
@@ -1605,6 +1764,7 @@ function resumeSessionTimers() {
   timer.clear('lcp_echo');
   timer.clear('session_control');
   timer.clear(REDIAL_RETRY_TIMER);
+  timer.clear(DHCPV6_LEASE_TIMER);
   var lastRecord = resources.get('sessions', 'last');
   var last = lastRecord && lastRecord.data ? lastRecord.data : null;
   if (!last) return;
@@ -1635,9 +1795,11 @@ function resumeSessionTimers() {
   }
 
   if (active) {
-    if (!profile.keepalive_interval_ms) return;
-    timer.setTimeout('lcp_echo', Math.min(250, profile.keepalive_interval_ms),
-      keepaliveTimerPayload(profile, last, 0));
+    armDHCPv6Lease(profile, last);
+    if (profile.keepalive_interval_ms) {
+      timer.setTimeout('lcp_echo', Math.min(250, profile.keepalive_interval_ms),
+        keepaliveTimerPayload(profile, last, 0));
+    }
     return;
   }
   if (!resumeRedial) return;
@@ -1725,12 +1887,280 @@ function armSessionControl(profile, session) {
   timer.setTimeout('session_control', 10, payload);
 }
 
+function armDHCPv6Lease(profile, session) {
+  timer.clear(DHCPV6_LEASE_TIMER);
+  if (!dhcpv6LeaseRequested(profile) || !session || session.padt_sent === true ||
+      session.lcp_ready !== true || !session.session_id || !session.ac_mac) return;
+  var lease = session.dhcpv6_pd || {};
+  if (lease.lease_timer_error) return;
+  var now = Date.now();
+  var deadline = dhcpv6NextTimerDeadline(lease, now);
+  if (!deadline) {
+    if (dhcpv6LeaseHasBinding(lease)) return;
+    deadline = now + dhcpv6RetryDelayMs(lease.reacquire_attempts || 0);
+  }
+  var delay = Math.max(10, Math.min(MAX_TIMER_DELAY_MS, deadline - now));
+  timer.setTimeout(DHCPV6_LEASE_TIMER, delay, dhcpv6LeaseTimerPayload(profile, session));
+}
+
+function dhcpv6LeaseRequested(profile) {
+  return profile && profile.dhcpv6_request === true &&
+    (profile.request_ipv6_address === true || profile.request_pd === true);
+}
+
+function dhcpv6NextTimerDeadline(lease, now) {
+  var retry = normalizeTimestampMs(lease && lease.next_retry_at_ms, 0);
+  if (retry > now) return retry;
+  var renew = normalizeTimestampMs(lease && lease.renew_at_ms, 0);
+  var rebind = normalizeTimestampMs(lease && lease.rebind_at_ms, 0);
+  var expires = normalizeTimestampMs(lease && lease.expires_at_ms, 0);
+  if (renew > now) return renew;
+  if (rebind > now && dhcpv6LeaseHasBinding(lease)) return now + 10;
+  if (expires > now && dhcpv6LeaseHasBinding(lease)) return now + 10;
+  if (expires && expires <= now) return now + 10;
+  return 0;
+}
+
+function dhcpv6LeaseTimerPayload(profile, session) {
+  var payload = keepaliveTimerPayload(profile, session, 0);
+  payload.local_mac = session.local_mac || profile.mac_address || '';
+  return payload;
+}
+
+function serviceDHCPv6LeaseTimer(payload) {
+  if (!sessionTimerIsCurrent(payload)) return;
+  var session = storedLastSession();
+  if (!session) return;
+  var profile;
+  try {
+    profile = loadProfile(payload);
+    prepareL2Identity(profile);
+  } catch (e) {
+    recordDHCPv6LeaseFailure(null, session, 'prepare', errorMessage(e));
+    return;
+  }
+  if (!dhcpv6LeaseRequested(profile)) return;
+  var lease = session.dhcpv6_pd || {};
+  var now = Date.now();
+  var retry = normalizeTimestampMs(lease.next_retry_at_ms, 0);
+  if (retry > now) {
+    armDHCPv6Lease(profile, session);
+    return;
+  }
+  var expires = normalizeTimestampMs(lease.expires_at_ms, 0);
+  var rebind = normalizeTimestampMs(lease.rebind_at_ms, 0);
+  var renew = normalizeTimestampMs(lease.renew_at_ms, 0);
+  var mode = 'reacquire';
+  if (dhcpv6LeaseHasBinding(lease) && (!expires || now < expires)) {
+    if (rebind && now >= rebind) mode = 'rebind';
+    else if (!renew || now >= renew) mode = lease.server_id ? 'renew' : 'rebind';
+    else {
+      armDHCPv6Lease(profile, session);
+      return;
+    }
+  }
+
+  var result;
+  try {
+    if (mode === 'reacquire') {
+      result = requestDHCPv6PD(profile, session.ac_mac, session.session_id,
+        session.local_mac || profile.mac_address || payload.local_mac);
+    } else {
+      result = renewDHCPv6Lease(profile, session, mode);
+    }
+  } catch (e) {
+    recordDHCPv6LeaseFailure(profile, session, mode, errorMessage(e));
+    return;
+  }
+  if (!sessionTimerIsCurrent(payload)) return;
+  if (!dhcpv6LeaseSatisfiesProfile(profile, result)) {
+    recordDHCPv6LeaseFailure(profile, session, mode,
+      result && (result.status_message || result.message || result.phase) || 'DHCPv6 exchange returned no usable binding');
+    return;
+  }
+  result.phase = mode === 'renew' ? 'renew_reply' : (mode === 'rebind' ? 'rebind_reply' : 'reply');
+  result.next_retry_at_ms = 0;
+  result.next_retry_at = '';
+  result.last_renew_error = '';
+  result.renew_attempts = 0;
+  result.rebind_attempts = 0;
+  result.reacquire_attempts = 0;
+  var updated = merge(session, {
+    dhcpv6_pd: result,
+    updated_at: new Date().toISOString()
+  });
+  resources.set('sessions', 'last', updated);
+  var link = publishWANLink(profile, updated);
+  if (profile.wan_core_required && !wanCoreSyncSucceeded(link && link.wan_core_sync)) {
+    updated.dhcpv6_pd.wan_core_sync_error = link && link.wan_core_sync &&
+      (link.wan_core_sync.error || link.wan_core_sync.reason || link.wan_core_sync.status) || 'WAN core sync failed';
+    resources.set('sessions', 'last', updated);
+  }
+  armDHCPv6Lease(profile, updated);
+}
+
+function renewDHCPv6Lease(profile, session, mode) {
+  var previous = session.dhcpv6_pd || {};
+  var clientID = previous.client_id || dhcpv6ClientIDValue(session.local_mac || profile.mac_address || '02:00:00:00:00:01');
+  var serverID = previous.server_id || '';
+  if (mode === 'renew' && !serverID) mode = 'rebind';
+  if (!previous.ia_na_hex && !previous.ia_pd_hex) {
+    throw new Error('DHCPv6 lease has no IA binding to renew');
+  }
+  var xid = crypto.randomBytes(3);
+  var request = mode === 'renew'
+    ? dhcpv6Renew(xid, clientID, serverID, previous.ia_na_hex, previous.ia_pd_hex)
+    : dhcpv6Rebind(xid, clientID, previous.ia_na_hex, previous.ia_pd_hex);
+  var src = previous.source_address || linkLocalFromIID(profile.ipv6_iid || crypto.randomBytes(8));
+  var frame = exchangeDHCPv6(profile, session.ac_mac, session.session_id, src, 'ff02::1:2', request, xid);
+  if (frame === null) return {phase: mode + '_timeout', transaction_id: xid};
+  var parsed = parseDHCPv6ReplyFrame(frame, xid);
+  if (parsed.error) return parsed.error;
+  if (parsed.reply.message_type !== DHCPV6_REPLY) {
+    return {phase: mode + '_unexpected_message', message_type: parsed.reply.message_type, transaction_id: xid};
+  }
+  var status = dhcpv6TopLevelStatus(parsed.reply.options);
+  if (status && status.code !== 0) {
+    return {phase: mode + '_status_error', status_code: status.code, status_message: status.message, transaction_id: xid};
+  }
+  var leased = dhcpv6LeaseData(parsed.reply.options);
+  var result = stampDHCPv6Lease({
+    phase: mode + '_reply',
+    transaction_id: xid,
+    server_id: firstDHCPv6OptionHex(parsed.reply.options, DHCPV6_OPT_SERVERID) || serverID,
+    client_id: clientID,
+    iaid: profile.dhcpv6_iaid,
+    source_address: src,
+    address: leased.address || '',
+    addresses: leased.addresses,
+    prefix: leased.prefix || '',
+    prefixes: leased.prefixes,
+    dns_servers: leased.dns_servers.length ? leased.dns_servers : (previous.dns_servers || []),
+    ia_na_hex: leased.addresses.length ? leased.ia_na_hex : '',
+    ia_pd_hex: leased.prefixes.length ? leased.ia_pd_hex : '',
+    ia_states: leased.ia_states,
+    ia_statuses: mergeDHCPv6IAStatuses(leased.ia_statuses, previous.ia_statuses),
+    renewed_at: new Date().toISOString()
+  }, Date.now());
+  annotateDHCPv6PartialBinding(profile, result);
+  if (!dhcpv6IAIDsMatch(profile, result.ia_states)) {
+    return {phase: mode + '_iaid_mismatch', transaction_id: xid};
+  }
+  return result;
+}
+
+function dhcpv6IAIDsMatch(profile, states) {
+  states = Array.isArray(states) ? states : [];
+  for (var i = 0; i < states.length; i++) {
+    if (Number(states[i].iaid) !== Number(profile.dhcpv6_iaid)) return false;
+  }
+  return true;
+}
+
+function dhcpv6LeaseHasBinding(lease) {
+  return !!(lease && ((Array.isArray(lease.addresses) && lease.addresses.length) ||
+    (Array.isArray(lease.prefixes) && lease.prefixes.length)));
+}
+
+function dhcpv6LeaseSatisfiesProfile(profile, lease) {
+  if (!lease || lease.lease_timer_error) return false;
+  var addresses = Array.isArray(lease.addresses) ? lease.addresses : [];
+  var prefixes = Array.isArray(lease.prefixes) ? lease.prefixes : [];
+  if (profile.request_pd && !prefixes.length) return false;
+  if (profile.request_ipv6_address && !addresses.length &&
+      !(profile.request_pd && prefixes.length && dhcpv6IAStatusError(lease, 'ia_na'))) return false;
+  return dhcpv6LeaseHasBinding(lease);
+}
+
+function recordDHCPv6LeaseFailure(profile, session, mode, message) {
+  if (!session) return;
+  if (!profile) {
+    try {
+      profile = loadProfile({profile_key: session.profile_key || session.wan_id || 'default'});
+    } catch (e) {
+      log.info('DHCPv6 lease retry deferred: ' + message);
+      return;
+    }
+  }
+  var now = Date.now();
+  var lease = merge(session.dhcpv6_pd || {}, {
+    phase: mode + '_retry',
+    last_renew_error: message,
+    last_renew_error_at: new Date(now).toISOString()
+  });
+  var counter = mode === 'renew' ? 'renew_attempts' : (mode === 'rebind' ? 'rebind_attempts' : 'reacquire_attempts');
+  lease[counter] = clampInt(lease[counter], 0, 1000000, 0) + 1;
+  var expires = normalizeTimestampMs(lease.expires_at_ms, 0);
+  if (expires && now >= expires) lease = expiredDHCPv6Lease(lease, message);
+  var retryAt = now + dhcpv6RetryDelayMs(lease[counter]);
+  var boundary = mode === 'renew' ? normalizeTimestampMs(lease.rebind_at_ms, 0) : normalizeTimestampMs(lease.expires_at_ms, 0);
+  if (boundary > now && retryAt > boundary) retryAt = boundary;
+  lease.next_retry_at_ms = retryAt;
+  lease.next_retry_at = new Date(retryAt).toISOString();
+  var updated = merge(session, {dhcpv6_pd: lease, updated_at: new Date().toISOString()});
+  resources.set('sessions', 'last', updated);
+  if (!dhcpv6LeaseHasBinding(lease)) publishWANLink(profile, updated);
+  armDHCPv6Lease(profile, updated);
+}
+
+function expiredDHCPv6Lease(lease, message) {
+  return merge(lease, {
+    phase: 'reacquire_retry',
+    address: '',
+    addresses: [],
+    prefix: '',
+    prefixes: [],
+    advertise_addresses: [],
+    advertise_prefixes: [],
+    dns_servers: [],
+    ia_na_hex: '',
+    ia_pd_hex: '',
+    ia_states: [],
+    renew_seconds: 0,
+    rebind_seconds: 0,
+    valid_seconds: 0,
+    renew_at_ms: 0,
+    rebind_at_ms: 0,
+    expires_at_ms: 0,
+    renew_at: '',
+    rebind_at: '',
+    expires_at: '',
+    expired_at: new Date().toISOString(),
+    last_renew_error: message
+  });
+}
+
+function dhcpv6RetryDelayMs(attempt) {
+  attempt = clampInt(attempt, 0, 30, 0);
+  var exponent = Math.max(0, Math.min(8, attempt));
+  return Math.min(DHCPV6_RETRY_MAX_MS, DHCPV6_RETRY_MIN_MS * Math.pow(2, exponent));
+}
+
 function disconnectSession(profile, payload) {
   var record = resources.get('sessions', 'last');
   var data = record && record.data ? record.data : {};
   var sessionID = clampInt(payload.session_id || data.session_id, 1, 65535, 0);
   var peerMAC = macText(payload.ac_mac || data.ac_mac || '');
-  if (!sessionID || !peerMAC) throw new Error('no stored or provided PPPoE session to disconnect');
+  if (!sessionID || !peerMAC) {
+    timer.clear('lcp_echo');
+    timer.clear('session_control');
+    timer.clear(REDIAL_RETRY_TIMER);
+    timer.clear(DHCPV6_LEASE_TIMER);
+    clearTunnelConfig();
+    var idleCleanup = cleanupL2Identity(profile.profile_key, false);
+    var alreadyDisconnected = merge(data, {
+      phase: 'disconnected',
+      desired_state: 'down',
+      lcp_ready: false,
+      padt_sent: false,
+      disconnect_noop: true,
+      l2_identity_cleanup: idleCleanup,
+      updated_at: new Date().toISOString()
+    });
+    resources.set('sessions', 'last', alreadyDisconnected);
+    markWANLinkDown(profile, alreadyDisconnected, 'disconnected');
+    return alreadyDisconnected;
+  }
   var disconnecting = merge(data, {
     phase: 'disconnecting',
     desired_state: 'down',
@@ -1742,6 +2172,7 @@ function disconnectSession(profile, payload) {
   timer.clear('lcp_echo');
   timer.clear('session_control');
   timer.clear(REDIAL_RETRY_TIMER);
+  timer.clear(DHCPV6_LEASE_TIMER);
   var started = Date.now();
   var frames = sendPADT(profile, peerMAC, sessionID, profile.disconnect_drain_ms);
   var control = newPPPControlWindowResult(profile.disconnect_drain_ms);
@@ -1907,10 +2338,11 @@ function normalizedWANLink(profile, session) {
     ipv6_addresses: ipv6Addresses,
     ipv6_link_local: ipv6cp.link_local || '',
     ipv6_peer_link_local: ipv6cp.peer_link_local || '',
-    ipv6_gateway: ipv6RA.router || '',
+    ipv6_gateway: ipv6RA.router || ipv6cp.peer_link_local || '',
     ipv6_prefix: ipv6RA.prefix || '',
     pd_prefix: dhcpv6PD.prefix || (pdPrefixes[0] && pdPrefixes[0].prefix) || '',
     pd_prefixes: pdPrefixes,
+    install_default_route_v6: !!(dhcpv6PD.prefix || (pdPrefixes[0] && pdPrefixes[0].prefix) || session.ipv6),
     dns_servers: uniqueTextValues((ipcp.dns_servers || []).concat(dhcpv6PD.dns_servers || []).concat(ipv6RA.dns_servers || [])),
     tunnel: session.tunnel || null,
     handoff: {
@@ -1931,6 +2363,7 @@ function syncWANCore(profile, link) {
     return {status: 'skipped', reason: 'plugin.resource API is unavailable'};
   }
   try {
+    requireWANCoreServiceEndpoint(profile, 'resources', 'sessions');
     plugins.resources.set(profile.wan_core_plugin, 'sessions', link.wan_id, link, link.usable === true, profile.wan_core_apply);
     return {
       status: 'synced',
@@ -1951,10 +2384,25 @@ function syncWANCore(profile, link) {
   }
 }
 
+function requireWANCoreServiceEndpoint(profile, endpointKind, endpointID) {
+  if (typeof plugins === 'undefined' || !plugins.services || typeof plugins.services.resolve !== 'function') {
+    throw new Error('plugins.services.resolve is unavailable');
+  }
+  var provider = plugins.services.resolve({
+    service: 'wan.adapter', version: '^1.0.0', provider: profile.wan_core_plugin
+  });
+  var endpoints = provider && provider.service && provider.service[endpointKind];
+  if (!Array.isArray(endpoints) || endpoints.indexOf(endpointID) < 0) {
+    throw new Error('WAN adapter service does not expose ' + endpointKind + ' endpoint ' + endpointID);
+  }
+  return provider.service;
+}
+
 function redialAfterKeepaliveFailure(profile, keepaliveResult, previousSession) {
   timer.clear('lcp_echo');
   timer.clear('session_control');
   timer.clear(REDIAL_RETRY_TIMER);
+  timer.clear(DHCPV6_LEASE_TIMER);
   var base = merge(keepaliveResult, {
     redial_attempted: true,
     redial_started_at: new Date().toISOString(),
@@ -2016,6 +2464,7 @@ function attemptRedial(profile, base, attempt) {
     recordSession(profile, session);
     armSessionControl(profile, session);
     armKeepalive(profile, session, 0);
+    armDHCPv6Lease(profile, session);
     timer.clear(REDIAL_RETRY_TIMER);
     return merge(base, {
       phase: 'redial_ok',
@@ -2555,11 +3004,17 @@ function requestDHCPv6PD(profile, peerMAC, sessionID, localMAC) {
     transaction_id: reply.transaction_id,
     server_id: firstDHCPv6OptionHex(reply.options, DHCPV6_OPT_SERVERID)
   }, offered);
+  var offerStatus = dhcpv6TopLevelStatus(reply.options);
+  if (offerStatus && offerStatus.code !== 0) {
+    return merge(result, {phase: 'advertise_status_error', status_code: offerStatus.code, status_message: offerStatus.message});
+  }
   if (reply.message_type !== DHCPV6_ADVERTISE || !profile.dhcpv6_request) return result;
 
   var serverID = firstDHCPv6OptionHex(reply.options, DHCPV6_OPT_SERVERID);
-  var iaNA = firstDHCPv6OptionHex(reply.options, DHCPV6_OPT_IA_NA);
-  var iaPD = firstDHCPv6OptionHex(reply.options, DHCPV6_OPT_IA_PD);
+  var iaNA = offered.ia_na_hex;
+  var iaPD = offered.ia_pd_hex;
+  if (!offered.addresses.length && dhcpv6IAStatusError(offered, 'ia_na')) iaNA = '';
+  if (!offered.prefixes.length && dhcpv6IAStatusError(offered, 'ia_pd')) iaPD = '';
   if (!serverID || (!iaNA && !iaPD)) return merge(result, {phase: 'advertise_incomplete'});
   var requestXID = crypto.randomBytes(3);
   var request = dhcpv6Request(requestXID, clientID, serverID, iaNA, iaPD);
@@ -2568,20 +3023,113 @@ function requestDHCPv6PD(profile, peerMAC, sessionID, localMAC) {
   var parsedRequestReply = parseDHCPv6ReplyFrame(requestFrame, requestXID);
   if (parsedRequestReply.error) return merge(result, parsedRequestReply.error);
   var finalReply = parsedRequestReply.reply;
+  if (finalReply.message_type !== DHCPV6_REPLY) {
+    return merge(result, {phase: 'request_unexpected_message', request_message_type: finalReply.message_type});
+  }
+  var finalStatus = dhcpv6TopLevelStatus(finalReply.options);
+  if (finalStatus && finalStatus.code !== 0) {
+    return merge(result, {phase: 'request_status_error', status_code: finalStatus.code, status_message: finalStatus.message});
+  }
   var leased = dhcpv6LeaseData(finalReply.options);
-  return {
+  var boundAddresses = leased.addresses.length ? leased.addresses : offered.addresses;
+  var boundPrefixes = leased.prefixes.length ? leased.prefixes : offered.prefixes;
+  var bound = stampDHCPv6Lease({
     phase: dhcpv6MessagePhase(finalReply.message_type),
     transaction_id: finalReply.transaction_id,
     advertise_transaction_id: reply.transaction_id,
     server_id: firstDHCPv6OptionHex(finalReply.options, DHCPV6_OPT_SERVERID) || serverID,
-    address: leased.address || offered.address || '',
-    addresses: leased.addresses.length ? leased.addresses : offered.addresses,
+    client_id: clientID,
+    iaid: profile.dhcpv6_iaid,
+    source_address: src,
+    address: boundAddresses.length ? boundAddresses[0].address : '',
+    addresses: boundAddresses,
     advertise_addresses: offered.addresses,
-    prefix: leased.prefix || offered.prefix || '',
-    prefixes: leased.prefixes.length ? leased.prefixes : offered.prefixes,
+    prefix: boundPrefixes.length ? boundPrefixes[0].prefix : '',
+    prefixes: boundPrefixes,
     advertise_prefixes: offered.prefixes,
-    dns_servers: leased.dns_servers.length ? leased.dns_servers : offered.dns_servers
-  };
+    dns_servers: leased.dns_servers.length ? leased.dns_servers : offered.dns_servers,
+    ia_na_hex: boundAddresses.length ? (leased.ia_na_hex || offered.ia_na_hex || '') : '',
+    ia_pd_hex: boundPrefixes.length ? (leased.ia_pd_hex || offered.ia_pd_hex || '') : '',
+    ia_states: mergeDHCPv6IAStates(leased.ia_states, offered.ia_states),
+    ia_statuses: mergeDHCPv6IAStatuses(leased.ia_statuses, offered.ia_statuses),
+    renew_attempts: 0,
+    rebind_attempts: 0,
+    last_renew_error: ''
+  }, Date.now());
+  annotateDHCPv6PartialBinding(profile, bound);
+  if (!dhcpv6IAIDsMatch(profile, bound.ia_states)) {
+    return {
+      phase: 'request_iaid_mismatch',
+      transaction_id: finalReply.transaction_id,
+      server_id: bound.server_id,
+      client_id: clientID,
+      message: 'DHCPv6 Reply IAID does not match the requested IAID'
+    };
+  }
+  if (bound.lease_timer_error) {
+    return {
+      phase: 'request_invalid_lease_timers',
+      transaction_id: finalReply.transaction_id,
+      server_id: bound.server_id,
+      client_id: clientID,
+      message: bound.lease_timer_error
+    };
+  }
+  return bound;
+}
+
+function mergeDHCPv6IAStates(primary, fallback) {
+  primary = Array.isArray(primary) ? primary : [];
+  fallback = Array.isArray(fallback) ? fallback : [];
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < primary.length; i++) {
+    if (!primary[i] || seen[primary[i].type]) continue;
+    seen[primary[i].type] = true;
+    out.push(primary[i]);
+  }
+  for (var j = 0; j < fallback.length; j++) {
+    if (!fallback[j] || seen[fallback[j].type]) continue;
+    seen[fallback[j].type] = true;
+    out.push(fallback[j]);
+  }
+  return out;
+}
+
+function mergeDHCPv6IAStatuses(primary, fallback) {
+  primary = Array.isArray(primary) ? primary : [];
+  fallback = Array.isArray(fallback) ? fallback : [];
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < primary.length; i++) {
+    if (!primary[i] || seen[primary[i].type]) continue;
+    seen[primary[i].type] = true;
+    out.push(primary[i]);
+  }
+  for (var j = 0; j < fallback.length; j++) {
+    if (!fallback[j] || seen[fallback[j].type]) continue;
+    seen[fallback[j].type] = true;
+    out.push(fallback[j]);
+  }
+  return out;
+}
+
+function annotateDHCPv6PartialBinding(profile, lease) {
+  var missing = [];
+  if (profile.request_ipv6_address && (!Array.isArray(lease.addresses) || !lease.addresses.length)) missing.push('ia_na');
+  if (profile.request_pd && (!Array.isArray(lease.prefixes) || !lease.prefixes.length)) missing.push('ia_pd');
+  lease.partial_binding = missing.length > 0 && dhcpv6LeaseHasBinding(lease);
+  lease.partial_ias = missing;
+  lease.partial_reason = '';
+  if (lease.partial_binding) {
+    var reasons = [];
+    for (var i = 0; i < missing.length; i++) {
+      var status = dhcpv6IAStatusError(lease, missing[i]);
+      reasons.push(missing[i] + (status ? ': ' + (status.message || ('status ' + status.code)) : ' unavailable'));
+    }
+    lease.partial_reason = reasons.join('; ');
+  }
+  return lease;
 }
 
 function ackPeerConfigureRequests(profile, peerMAC, sessionID, protocol) {
@@ -3203,25 +3751,35 @@ function dhcpv6Solicit(xid, clientIDValue, iaid, requestAddress, requestPD) {
   var clientID = dhcpv6Option(DHCPV6_OPT_CLIENTID, clientIDValue);
   var elapsed = dhcpv6Option(DHCPV6_OPT_ELAPSED_TIME, '0000');
   var oro = dhcpv6ORO();
-  var reconfigure = dhcpv6Option(DHCPV6_OPT_RECONF_ACCEPT, '');
   var fqdn = dhcpv6ClientFQDN('OpenWrt');
   var identities = '';
   if (requestAddress) identities += dhcpv6Option(DHCPV6_OPT_IA_NA, u32hex(iaid) + u32hex(0) + u32hex(0));
   if (requestPD) identities += dhcpv6Option(DHCPV6_OPT_IA_PD, u32hex(iaid) + u32hex(0) + u32hex(0));
-  return hexByte(DHCPV6_SOLICIT) + xid + elapsed + oro + clientID + reconfigure + fqdn + identities;
+  return hexByte(DHCPV6_SOLICIT) + xid + elapsed + oro + clientID + fqdn + identities;
 }
 
 function dhcpv6Request(xid, clientIDValue, serverIDValue, iaNAValue, iaPDValue) {
+  return dhcpv6StatefulRequest(DHCPV6_REQUEST, xid, clientIDValue, serverIDValue, iaNAValue, iaPDValue);
+}
+
+function dhcpv6Renew(xid, clientIDValue, serverIDValue, iaNAValue, iaPDValue) {
+  return dhcpv6StatefulRequest(DHCPV6_RENEW, xid, clientIDValue, serverIDValue, iaNAValue, iaPDValue);
+}
+
+function dhcpv6Rebind(xid, clientIDValue, iaNAValue, iaPDValue) {
+  return dhcpv6StatefulRequest(DHCPV6_REBIND, xid, clientIDValue, '', iaNAValue, iaPDValue);
+}
+
+function dhcpv6StatefulRequest(messageType, xid, clientIDValue, serverIDValue, iaNAValue, iaPDValue) {
   var clientID = dhcpv6Option(DHCPV6_OPT_CLIENTID, clientIDValue);
-  var serverID = dhcpv6Option(DHCPV6_OPT_SERVERID, serverIDValue);
+  var serverID = serverIDValue ? dhcpv6Option(DHCPV6_OPT_SERVERID, serverIDValue) : '';
   var elapsed = dhcpv6Option(DHCPV6_OPT_ELAPSED_TIME, '0000');
   var oro = dhcpv6ORO();
-  var reconfigure = dhcpv6Option(DHCPV6_OPT_RECONF_ACCEPT, '');
   var fqdn = dhcpv6ClientFQDN('OpenWrt');
   var identities = '';
   if (iaNAValue) identities += dhcpv6Option(DHCPV6_OPT_IA_NA, iaNAValue);
   if (iaPDValue) identities += dhcpv6Option(DHCPV6_OPT_IA_PD, iaPDValue);
-  return hexByte(DHCPV6_REQUEST) + xid + elapsed + oro + clientID + serverID + reconfigure + fqdn + identities;
+  return hexByte(messageType) + xid + elapsed + oro + clientID + serverID + fqdn + identities;
 }
 
 function dhcpv6Option(code, valueHex) {
@@ -3297,8 +3855,161 @@ function dhcpv6LeaseData(options) {
     addresses: addresses,
     prefix: prefixes.length ? prefixes[0].prefix : '',
     prefixes: prefixes,
-    dns_servers: dhcpv6DNSServers(options)
+    dns_servers: dhcpv6DNSServers(options),
+    ia_na_hex: firstDHCPv6OptionHex(options, DHCPV6_OPT_IA_NA),
+    ia_pd_hex: firstDHCPv6OptionHex(options, DHCPV6_OPT_IA_PD),
+    ia_states: dhcpv6IAStates(options),
+    ia_statuses: dhcpv6IAStatuses(options)
   };
+}
+
+function dhcpv6IAStates(options) {
+  var out = [];
+  for (var i = 0; i < options.length; i++) {
+    var option = options[i];
+    if (option.code !== DHCPV6_OPT_IA_NA && option.code !== DHCPV6_OPT_IA_PD) continue;
+    var bytes = hexToBytes(option.value_hex);
+    if (bytes.length < 12) continue;
+    var valid = [];
+    var preferred = [];
+    var nested = option.options || [];
+    for (var j = 0; j < nested.length; j++) {
+      var nestedBytes = hexToBytes(nested[j].value_hex);
+      if (option.code === DHCPV6_OPT_IA_NA && nested[j].code === DHCPV6_OPT_IAADDR && nestedBytes.length >= 24) {
+        preferred.push(u32(nestedBytes, 16));
+        valid.push(u32(nestedBytes, 20));
+      }
+      if (option.code === DHCPV6_OPT_IA_PD && nested[j].code === DHCPV6_OPT_IAPREFIX && nestedBytes.length >= 25) {
+        preferred.push(u32(nestedBytes, 0));
+        valid.push(u32(nestedBytes, 4));
+      }
+    }
+    out.push({
+      type: option.code === DHCPV6_OPT_IA_NA ? 'ia_na' : 'ia_pd',
+      code: option.code,
+      iaid: u32(bytes, 0),
+      t1: u32(bytes, 4),
+      t2: u32(bytes, 8),
+      preferred_lifetime: minimumDHCPv6Lifetime(preferred),
+      valid_lifetime: minimumDHCPv6Lifetime(valid),
+      value_hex: option.value_hex
+    });
+  }
+  return out;
+}
+
+function minimumDHCPv6Lifetime(values) {
+  var found = false;
+  var minimum = 0xffffffff;
+  for (var i = 0; i < values.length; i++) {
+    var value = Number(values[i]);
+    if (!isFinite(value) || value < 0) continue;
+    found = true;
+    if (value < minimum) minimum = value;
+  }
+  return found ? minimum : 0;
+}
+
+function dhcpv6LeaseTiming(lease) {
+  var states = Array.isArray(lease && lease.ia_states) ? lease.ia_states : [];
+  var renew = [];
+  var rebind = [];
+  var expires = [];
+  for (var i = 0; i < states.length; i++) {
+    var valid = Number(states[i].valid_lifetime || 0);
+    if (!isFinite(valid) || valid <= 0) continue;
+    var t1 = Number(states[i].t1 || 0);
+    var t2 = Number(states[i].t2 || 0);
+    if (!t1 && valid !== 0xffffffff) t1 = Math.max(1, Math.floor(valid / 2));
+    if (!t2 && valid !== 0xffffffff) t2 = Math.max(t1 + 1, Math.floor(valid * 4 / 5));
+    if (t1 > 0 && t2 > 0 && t1 > t2) {
+      return {error: states[i].type + ' has T1 greater than T2'};
+    }
+    if (valid !== 0xffffffff && ((t1 > 0 && t1 >= valid) || (t2 > 0 && t2 >= valid))) {
+      return {error: states[i].type + ' has renewal timers outside its valid lifetime'};
+    }
+    if (t1 > 0) renew.push(t1);
+    if (t2 > 0) rebind.push(t2);
+    if (valid !== 0xffffffff) expires.push(valid);
+  }
+  if (!states.length || (!renew.length && !rebind.length && !expires.length)) {
+    return {renew_seconds: 0, rebind_seconds: 0, valid_seconds: 0};
+  }
+  return {
+    renew_seconds: minimumPositiveNumber(renew),
+    rebind_seconds: minimumPositiveNumber(rebind),
+    valid_seconds: minimumPositiveNumber(expires)
+  };
+}
+
+function minimumPositiveNumber(values) {
+  var value = 0;
+  for (var i = 0; i < values.length; i++) {
+    var next = Number(values[i]);
+    if (!isFinite(next) || next <= 0) continue;
+    if (!value || next < value) value = next;
+  }
+  return value;
+}
+
+function stampDHCPv6Lease(lease, acquiredMs) {
+  lease = lease || {};
+  acquiredMs = normalizeTimestampMs(acquiredMs, Date.now());
+  var timing = dhcpv6LeaseTiming(lease);
+  lease.lease_acquired_ms = acquiredMs;
+  lease.lease_acquired_at = new Date(acquiredMs).toISOString();
+  lease.renew_seconds = timing.renew_seconds || 0;
+  lease.rebind_seconds = timing.rebind_seconds || 0;
+  lease.valid_seconds = timing.valid_seconds || 0;
+  lease.renew_at_ms = lease.renew_seconds ? leaseDeadlineMs(acquiredMs, lease.renew_seconds) : 0;
+  lease.rebind_at_ms = lease.rebind_seconds ? leaseDeadlineMs(acquiredMs, lease.rebind_seconds) : 0;
+  lease.expires_at_ms = lease.valid_seconds ? leaseDeadlineMs(acquiredMs, lease.valid_seconds) : 0;
+  lease.renew_at = lease.renew_at_ms ? new Date(lease.renew_at_ms).toISOString() : '';
+  lease.rebind_at = lease.rebind_at_ms ? new Date(lease.rebind_at_ms).toISOString() : '';
+  lease.expires_at = lease.expires_at_ms ? new Date(lease.expires_at_ms).toISOString() : '';
+  lease.lease_timer_error = timing.error || '';
+  return lease;
+}
+
+function leaseDeadlineMs(acquiredMs, seconds) {
+  var value = acquiredMs + Number(seconds) * 1000;
+  if (!isFinite(value) || value > 9007199254740991) return 9007199254740991;
+  return Math.floor(value);
+}
+
+function dhcpv6TopLevelStatus(options) {
+  for (var i = 0; i < options.length; i++) {
+    if (options[i].code === DHCPV6_OPT_STATUS_CODE) {
+      var bytes = hexToBytes(options[i].value_hex);
+      if (bytes.length < 2) return {code: -1, message: 'truncated status option'};
+      return {code: u16(bytes, 0), message: hexToString(bytesToHex(bytes.slice(2)))};
+    }
+  }
+  return null;
+}
+
+function dhcpv6IAStatuses(options) {
+  var out = [];
+  for (var i = 0; i < options.length; i++) {
+    var option = options[i];
+    if (option.code !== DHCPV6_OPT_IA_NA && option.code !== DHCPV6_OPT_IA_PD) continue;
+    var status = dhcpv6TopLevelStatus(option.options || []);
+    if (!status) continue;
+    out.push({
+      type: option.code === DHCPV6_OPT_IA_NA ? 'ia_na' : 'ia_pd',
+      code: status.code,
+      message: status.message
+    });
+  }
+  return out;
+}
+
+function dhcpv6IAStatusError(lease, type) {
+  var statuses = Array.isArray(lease && lease.ia_statuses) ? lease.ia_statuses : [];
+  for (var i = 0; i < statuses.length; i++) {
+    if (statuses[i] && statuses[i].type === type && Number(statuses[i].code) !== 0) return statuses[i];
+  }
+  return null;
 }
 
 function dhcpv6Addresses(options) {
