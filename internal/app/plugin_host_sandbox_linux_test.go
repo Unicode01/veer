@@ -156,12 +156,6 @@ func TestPluginHostLinuxSandboxIdentityAndCgroup(t *testing.T) {
 		client.Close()
 		t.Fatalf("Max open files limit = %q, want 64", line)
 	}
-	cgroupRoot, err := pluginHostCgroupRootPath()
-	if err != nil {
-		client.Close()
-		t.Fatal(err)
-	}
-	cgroupPath := filepath.Join(cgroupRoot, "veer-plugins-"+strconv.Itoa(os.Getpid()), plugin.ID)
 	if degraded := client.ResourceError(); degraded != "" {
 		if !strings.Contains(degraded, "memory.oom.group") {
 			client.Close()
@@ -169,6 +163,12 @@ func TestPluginHostLinuxSandboxIdentityAndCgroup(t *testing.T) {
 		}
 		t.Logf("optional cgroup OOM grouping unavailable: %s", degraded)
 	}
+	cgroupRoot, err := pluginHostCgroupRootPath()
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	cgroupPath := filepath.Join(cgroupRoot, "veer-plugins-"+strconv.Itoa(os.Getpid()), plugin.ID)
 	cgroupData, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
 	if err != nil {
 		client.Close()
