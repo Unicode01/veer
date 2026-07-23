@@ -1,0 +1,33 @@
+name: Veer plugin
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VEER_REPOSITORY: Unicode01/veer
+  VEER_RELEASE_TAG: v1.0.0
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install eBPF build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev python3
+      - name: Download Veer and plugin SDK
+        run: |
+          base="https://github.com/${VEER_REPOSITORY}/releases/download/${VEER_RELEASE_TAG}"
+          curl --fail --location --silent --show-error --output veer "${base}/veer-linux-amd64"
+          curl --fail --location --silent --show-error --output veer-plugin-sdk.tar.gz "${base}/veer-plugin-sdk.tar.gz"
+          chmod +x veer
+          tar -xzf veer-plugin-sdk.tar.gz
+      - name: Verify plugin
+        env:
+          VEER_BIN: ${{ github.workspace }}/veer
+        run: sh veer-plugin-sdk/sdk/plugin/ci/verify.sh .

@@ -1,0 +1,38 @@
+name: Plugin release gates
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install eBPF build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev python3 shellcheck
+      - name: Verify deployment scripts
+        run: |
+          sh scripts/verify-platform-support.sh
+          shellcheck -x bootstrap.sh deploy.sh release.sh scripts/*.sh plugins/*/*.sh
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      - name: Run portable plugin release gate
+        run: sh scripts/verify-plugin-release.sh portable

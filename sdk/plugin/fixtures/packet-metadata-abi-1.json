@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "introduced_contract_version": 5,
+  "abi": 1,
+  "binding_limit": 16,
+  "namespace_limit": 32,
+  "payload_max_bytes": 64,
+  "supported_access": ["read", "read_write"],
+  "shared_maps": [
+    "tc_packet_meta_generation_v4",
+    "tc_packet_meta_generation_v6",
+    "tc_packet_meta_v4",
+    "tc_packet_meta_v6"
+  ],
+  "private_maps": ["tc_packet_meta_bindings_v1"],
+  "structs": [
+    "veer_packet_metadata_binding_v1",
+    "veer_packet_metadata_value_v1"
+  ]
+}

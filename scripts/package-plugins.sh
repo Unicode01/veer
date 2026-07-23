@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 PLUGIN_SOURCE_DIR="$ROOT_DIR/plugins"
 OUT_DIR=${VEER_PLUGIN_PACKAGE_DIR:-"$ROOT_DIR/dist/plugins"}
 PACKAGE_STABILITY=${VEER_PLUGIN_PACKAGE_STABILITY:-"stable"}

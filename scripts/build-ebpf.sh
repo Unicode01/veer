@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 : "${BPF_CLANG:=clang}"
 : "${BPF_EXTRA_CFLAGS:=}"
 
@@ -58,7 +58,8 @@ build_core() {
 	src=$1
 	out=$2
 	shift 2
-	# shellcheck disable=SC2086
+	# arch_include_flags and BPF_EXTRA_CFLAGS intentionally expand to argument lists.
+	# shellcheck disable=SC2046,SC2086
 	"$BPF_CLANG" -O2 -g -target bpf -D__TARGET_ARCH_"$(target_arch)" -I"$EBPF_DIR/include" $(arch_include_flags) $BPF_EXTRA_CFLAGS "$@" -c "$src" -o "$out"
 	if command -v llvm-strip >/dev/null 2>&1; then
 		llvm-strip -g "$out" || true
@@ -71,3 +72,4 @@ build_core "$EBPF_DIR/forward-tc-bpf.c" "$EBPF_DIR/forward-tc-bpf.o"
 build_core "$EBPF_DIR/forward-tc-bpf.c" "$EBPF_DIR/forward-tc-bpf-stats.o" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 build_core "$EBPF_DIR/forward-xdp-bpf.c" "$EBPF_DIR/forward-xdp-bpf.o"
 build_core "$EBPF_DIR/forward-xdp-bpf.c" "$EBPF_DIR/forward-xdp-bpf-stats.o" -DFORWARD_ENABLE_TRAFFIC_STATS=1
+build_core "$EBPF_DIR/plugin-xdp-dispatcher-bpf.c" "$EBPF_DIR/plugin-xdp-dispatcher-bpf.o"

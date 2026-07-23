@@ -1,0 +1,2964 @@
+{
+  "version": 6,
+  "runtime": {
+    "api_version": "v1",
+    "runtime_version": "1.0.0",
+    "control_api_abi": 1,
+    "tc_pipeline_abi": 2,
+    "core_priority": 1000,
+    "resource_limits": {
+      "objects_per_plugin": 16,
+      "capabilities_per_plugin": 128,
+      "programs_per_plugin": 128,
+      "maps_per_plugin": 128,
+      "hooks_per_plugin": 128,
+      "resources_per_plugin": 64,
+      "actions_per_plugin": 64,
+      "services_per_plugin": 64,
+      "virtual_interfaces_per_plugin": 64,
+      "instructions_per_program": 262144,
+      "instructions_per_plugin": 1048576,
+      "map_memory_bytes": 67108864,
+      "plugin_map_memory_bytes": 268435456,
+      "global_map_memory_bytes": 1073741824,
+      "plugin_database_bytes": 268435456,
+      "global_database_bytes": 2147483648,
+      "blob_objects_per_plugin": 1024,
+      "blob_object_bytes": 67108864,
+      "plugin_blob_bytes": 268435456,
+      "global_blob_bytes": 2147483648,
+      "control_memory_bytes": 536870912,
+      "global_control_memory_bytes": 2147483648,
+      "control_process_memory_bytes": 234881024,
+      "control_pids": 64,
+      "global_control_pids": 512,
+      "control_cpu_percent": 200
+    },
+    "features": [
+      "control.goja.v1",
+      "control.modules.v1",
+      "control.action_schema.v1",
+      "control.blobs.v1",
+      "control.cross_plugin_events.v1",
+      "control.durable_events.v1",
+      "control.event_schema.v1",
+      "control.events.v1",
+      "control.hot_reload",
+      "control.http_client.v1",
+      "control.metrics.v1",
+      "control.net_admin",
+      "control.net_offloads.v1",
+      "control.dns_client.v1",
+      "control.net_events.v1",
+      "control.net_leases.v1",
+      "control.net_multipath.v1",
+      "control.netns_provider.v1",
+      "control.netns_scoped.v1",
+      "control.net_policy.v1",
+      "control.net_transactions.v1",
+      "control.durable_operations.v1",
+      "control.tuntap_provider.v1",
+      "control.plugin_interop",
+      "control.typed_services.v1",
+      "control.process_isolation.v1",
+      "control.raw_l2",
+      "control.resource_schema.v1",
+      "control.resource_limits.v1",
+      "control.resource_transactions.v1",
+      "control.secrets.aead.v1",
+      "control.socket_events.v1",
+      "control.sockets",
+      "control.workers",
+      "dataplane.packet_metadata.v1",
+      "dataplane.tc_pipeline.v2",
+      "dataplane.hook_order.v1",
+      "dataplane.xdp_pipeline.v1",
+      "ebpf.bounded_reads.v1",
+      "ebpf.map_transactions.v1",
+      "ebpf.ring_push.v1",
+      "ebpf.private_maps",
+      "ebpf.map_state.v1",
+      "ebpf.map_migration.v1",
+      "ebpf.object_variants.v1",
+      "plans.core.v1",
+      "ui.assets.v1",
+      "ui.bridge.v1"
+    ]
+  },
+  "tc_pipeline": {
+    "program_array_entries": 111,
+    "stage_hook_limit": 8,
+    "direction_hook_limit": 14,
+    "directions": [
+      "forward",
+      "reply"
+    ],
+    "phases": [
+      "around_core",
+      "after_apply"
+    ],
+    "hook_stages": [
+      "forward",
+      "reply",
+      "pre_forward",
+      "post_lookup",
+      "post_apply",
+      "pre_reply",
+      "post_reply",
+      "post_reply_apply"
+    ],
+    "attaches": [
+      "ingress",
+      "egress",
+      "both"
+    ]
+  },
+  "packet_metadata": {
+    "abi": 1,
+    "binding_limit": 16,
+    "namespace_limit": 32,
+    "payload_max_bytes": 64,
+    "supported_access": [
+      "read",
+      "read_write"
+    ],
+    "requires_tc": true,
+    "generation_isolated": true
+  },
+  "xdp_pipeline": {
+    "program_array_entries": 24,
+    "hook_limit": 8,
+    "hook_stages": [
+      "pre_forward",
+      "forward"
+    ],
+    "attaches": [
+      "ingress"
+    ],
+    "requires_interfaces": true
+  },
+  "event_bus": {
+    "max_subscriptions": 64,
+    "default_queue_size": 64,
+    "max_queue_size": 256,
+    "max_payload_bytes": 65536,
+    "max_access_entries": 64,
+    "max_access_topics": 256,
+    "durable_max_attempts": 16,
+    "durable_per_plugin_records": 2048,
+    "durable_global_records": 16384,
+    "system_topics": [
+      "net.link",
+      "net.addr",
+      "net.neigh",
+      "net.route",
+      "resource.changed",
+      "plugin.lifecycle"
+    ]
+  },
+  "schemas": {
+    "draft": "2020-12",
+    "max_bytes": 65536,
+    "max_version": 1000000
+  },
+  "ring_buffers": {
+    "max_subscriptions": 16,
+    "default_queue_size": 16,
+    "max_queue_size": 64,
+    "default_batch_records": 64,
+    "max_batch_records": 128,
+    "default_batch_bytes": 65536,
+    "max_batch_bytes": 262144,
+    "default_poll_timeout_ms": 500,
+    "max_poll_timeout_ms": 1000,
+    "plugin_pending_byte_limit": 16777216
+  },
+  "operations": {
+    "max_records_per_plugin": 1024,
+    "max_field_bytes": 262144,
+    "max_plugin_bytes": 67108864,
+    "default_list_limit": 100,
+    "max_list_limit": 500,
+    "max_retry_delay_ms": 604800000,
+    "statuses": [
+      "pending",
+      "running",
+      "retry_wait",
+      "completed",
+      "failed",
+      "cancelled"
+    ]
+  },
+  "control": {
+    "host_protocol_abi": 1,
+    "max_calls_per_event": 4096,
+    "max_json_depth": 64,
+    "max_request_bytes": 20971520,
+    "max_response_bytes": 75497472,
+    "capabilities": [
+      {
+        "method": "blob.abort",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.begin",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.commit",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.delete",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.list",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.put",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.read",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.stat",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.verify",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "blob.write",
+        "permissions": [
+          "blob"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "crypto.md5",
+        "permissions": [
+          "crypto"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "crypto.randomBytes",
+        "permissions": [
+          "crypto"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "crypto.sha256File",
+        "permissions": [
+          "crypto"
+        ],
+        "phases": [
+          "registration",
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.loadObject",
+        "permissions": [
+          "ebpf.load"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.mapClear",
+        "permissions": [
+          "ebpf.map_write"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.mapDelete",
+        "permissions": [
+          "ebpf.map_write"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.mapGet",
+        "permissions": [
+          "ebpf.map_read"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.mapGetPerCPU",
+        "permissions": [
+          "ebpf.map_read"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.mapPut",
+        "permissions": [
+          "ebpf.map_write"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.mapScan",
+        "permissions": [
+          "ebpf.map_read"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.mapTransaction",
+        "permissions": [
+          "ebpf.map_write"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.ringRead",
+        "permissions": [
+          "ebpf.map_read"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.ringStats",
+        "permissions": [
+          "ebpf.map_read"
+        ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.ringSubscribe",
+        "permissions": [
+          "ebpf.load",
+          "ebpf.map_read",
+          "worker"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "events.deadLetters",
+        "permissions": [
+          "event"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "events.discard",
+        "permissions": [
+          "event"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "events.publish",
+        "permissions": [
+          "event"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "events.retry",
+        "permissions": [
+          "event"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "events.stats",
+        "permissions": [
+          "event"
+        ],
+        "phases": [
+          "registration",
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "events.subscribe",
+        "permissions": [
+          "event",
+          "worker"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "hooks.attach",
+        "permissions": [
+          "hook.attach"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "kv.delete",
+        "permissions": [
+          "kv"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "kv.get",
+        "permissions": [
+          "kv"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "kv.list",
+        "permissions": [
+          "kv"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "kv.set",
+        "permissions": [
+          "kv"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "log.debug",
+        "phases": [
+          "registration",
+          "runtime",
+          "migration",
+          "dataplane_migration",
+          "upgrade"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "log.error",
+        "phases": [
+          "registration",
+          "runtime",
+          "migration",
+          "dataplane_migration",
+          "upgrade"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "log.info",
+        "phases": [
+          "registration",
+          "runtime",
+          "migration",
+          "dataplane_migration",
+          "upgrade"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "log.warn",
+        "phases": [
+          "registration",
+          "runtime",
+          "migration",
+          "dataplane_migration",
+          "upgrade"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "metrics.clear",
+        "permissions": [
+          "metrics"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "metrics.counter",
+        "permissions": [
+          "metrics"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "metrics.delete",
+        "permissions": [
+          "metrics"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "metrics.gauge",
+        "permissions": [
+          "metrics"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "metrics.list",
+        "permissions": [
+          "metrics"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.addr.delete",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.addr.replace",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.dns.lookup",
+        "permissions": [
+          "net.dns"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.http.request",
+        "permissions": [
+          "net.http"
+        ],
+        "conditional_permissions": [
+          "net.dns",
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.l2.exchange",
+        "permissions": [
+          "net.l2"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.l2.exchangeMany",
+        "permissions": [
+          "net.l2"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.l2.recv",
+        "permissions": [
+          "net.l2"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.l2.recvMany",
+        "permissions": [
+          "net.l2"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.l2.send",
+        "permissions": [
+          "net.l2"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.lease.list",
+        "permissions": [
+          "net.admin"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.lease.restore",
+        "permissions": [
+          "net.admin"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.clearMaster",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.delete",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.ensureBridge",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.ensureDummy",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.ensureMacvlan",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.ensureVLAN",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.ensureVRF",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.ensureVeth",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.get",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.getOffloads",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.list",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.owned",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.release",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.setARP",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.setGSO",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.setMTU",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.setMaster",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.setOffloads",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.setPromiscuous",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.setUp",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.namespace.delete",
+        "permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.namespace.ensure",
+        "permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.namespace.get",
+        "permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.namespace.list",
+        "permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.namespace.owned",
+        "permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.namespace.release",
+        "permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.neigh.delete",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.neigh.replace",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.neigh.transaction",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.prefix.subnet",
+        "phases": [
+          "registration",
+          "runtime",
+          "migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.route.delete",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.route.replace",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.route.transaction",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.rule.delete",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.rule.replace",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.rule.transaction",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.accept",
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.close",
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.list",
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.listen",
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.open",
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.read",
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.status",
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.unwatch",
+        "permissions": [
+          "worker"
+        ],
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.watch",
+        "permissions": [
+          "worker"
+        ],
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.watchList",
+        "permissions": [
+          "worker"
+        ],
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.socket.write",
+        "any_permissions": [
+          "net.tcp",
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.tuntap.close",
+        "permissions": [
+          "net.tuntap"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.tuntap.ensure",
+        "permissions": [
+          "net.tuntap"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.tuntap.list",
+        "permissions": [
+          "net.tuntap"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.tuntap.owned",
+        "permissions": [
+          "net.tuntap"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.tuntap.read",
+        "permissions": [
+          "net.tuntap"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.tuntap.write",
+        "permissions": [
+          "net.tuntap"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.udp.exchange",
+        "permissions": [
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.udp.recv",
+        "permissions": [
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.udp.send",
+        "permissions": [
+          "net.udp"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.begin",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.cancel",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.checkpoint",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.claim",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.complete",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.fail",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.get",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.getByKey",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.list",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.remove",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.retry",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "operations.stats",
+        "permissions": [
+          "operation"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "pipeline.attach",
+        "permissions": [
+          "hook.attach"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "pipeline.handoff",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "pipeline.node",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugin.action",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugin.capabilities",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugin.handoff",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugin.host",
+        "phases": [
+          "registration",
+          "runtime",
+          "migration",
+          "dataplane_migration",
+          "upgrade"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugin.pipelineNode",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugin.resource",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugin.service",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugin.virtualInterface",
+        "permissions": [
+          "plugin.register"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.actions.call",
+        "permissions": [
+          "plugin.action"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.resources.delete",
+        "permissions": [
+          "plugin.resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.resources.get",
+        "permissions": [
+          "plugin.resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.resources.list",
+        "permissions": [
+          "plugin.resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.resources.set",
+        "permissions": [
+          "plugin.resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.resources.transaction",
+        "permissions": [
+          "plugin.resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.services.call",
+        "permissions": [
+          "plugin.action"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.services.list",
+        "any_permissions": [
+          "plugin.action",
+          "plugin.resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "plugins.services.resolve",
+        "any_permissions": [
+          "plugin.action",
+          "plugin.resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "resources.delete",
+        "permissions": [
+          "resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "resources.get",
+        "permissions": [
+          "resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "resources.list",
+        "permissions": [
+          "resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "resources.set",
+        "permissions": [
+          "resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "resources.transaction",
+        "permissions": [
+          "resource"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "secret.delete",
+        "permissions": [
+          "secret"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "secret.get",
+        "permissions": [
+          "secret"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "secret.set",
+        "permissions": [
+          "secret"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "timer.clear",
+        "permissions": [
+          "timer"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "timer.list",
+        "permissions": [
+          "timer"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "timer.setInterval",
+        "permissions": [
+          "timer"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "timer.setTimeout",
+        "permissions": [
+          "timer"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ui.register",
+        "permissions": [
+          "ui"
+        ],
+        "phases": [
+          "registration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "worker.call",
+        "permissions": [
+          "worker"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "worker.dispatch",
+        "permissions": [
+          "worker"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "worker.list",
+        "permissions": [
+          "worker"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "worker.stats",
+        "permissions": [
+          "worker"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      }
+    ]
+  },
+  "control_methods": [
+    "blob.abort",
+    "blob.begin",
+    "blob.commit",
+    "blob.delete",
+    "blob.list",
+    "blob.put",
+    "blob.read",
+    "blob.stat",
+    "blob.verify",
+    "blob.write",
+    "crypto.md5",
+    "crypto.randomBytes",
+    "crypto.sha256File",
+    "ebpf.loadObject",
+    "ebpf.mapClear",
+    "ebpf.mapDelete",
+    "ebpf.mapGet",
+    "ebpf.mapGetPerCPU",
+    "ebpf.mapPut",
+    "ebpf.mapScan",
+    "ebpf.mapTransaction",
+    "ebpf.ringRead",
+    "ebpf.ringStats",
+    "ebpf.ringSubscribe",
+    "events.deadLetters",
+    "events.discard",
+    "events.publish",
+    "events.retry",
+    "events.stats",
+    "events.subscribe",
+    "hooks.attach",
+    "kv.delete",
+    "kv.get",
+    "kv.list",
+    "kv.set",
+    "log.debug",
+    "log.error",
+    "log.info",
+    "log.warn",
+    "metrics.clear",
+    "metrics.counter",
+    "metrics.delete",
+    "metrics.gauge",
+    "metrics.list",
+    "net.addr.delete",
+    "net.addr.replace",
+    "net.dns.lookup",
+    "net.http.request",
+    "net.l2.exchange",
+    "net.l2.exchangeMany",
+    "net.l2.recv",
+    "net.l2.recvMany",
+    "net.l2.send",
+    "net.lease.list",
+    "net.lease.restore",
+    "net.link.clearMaster",
+    "net.link.delete",
+    "net.link.ensureBridge",
+    "net.link.ensureDummy",
+    "net.link.ensureMacvlan",
+    "net.link.ensureVLAN",
+    "net.link.ensureVRF",
+    "net.link.ensureVeth",
+    "net.link.get",
+    "net.link.getOffloads",
+    "net.link.list",
+    "net.link.owned",
+    "net.link.release",
+    "net.link.setARP",
+    "net.link.setGSO",
+    "net.link.setMTU",
+    "net.link.setMaster",
+    "net.link.setOffloads",
+    "net.link.setPromiscuous",
+    "net.link.setUp",
+    "net.namespace.delete",
+    "net.namespace.ensure",
+    "net.namespace.get",
+    "net.namespace.list",
+    "net.namespace.owned",
+    "net.namespace.release",
+    "net.neigh.delete",
+    "net.neigh.replace",
+    "net.neigh.transaction",
+    "net.prefix.subnet",
+    "net.route.delete",
+    "net.route.replace",
+    "net.route.transaction",
+    "net.rule.delete",
+    "net.rule.replace",
+    "net.rule.transaction",
+    "net.socket.accept",
+    "net.socket.close",
+    "net.socket.list",
+    "net.socket.listen",
+    "net.socket.open",
+    "net.socket.read",
+    "net.socket.status",
+    "net.socket.unwatch",
+    "net.socket.watch",
+    "net.socket.watchList",
+    "net.socket.write",
+    "net.tuntap.close",
+    "net.tuntap.ensure",
+    "net.tuntap.list",
+    "net.tuntap.owned",
+    "net.tuntap.read",
+    "net.tuntap.write",
+    "net.udp.exchange",
+    "net.udp.recv",
+    "net.udp.send",
+    "operations.begin",
+    "operations.cancel",
+    "operations.checkpoint",
+    "operations.claim",
+    "operations.complete",
+    "operations.fail",
+    "operations.get",
+    "operations.getByKey",
+    "operations.list",
+    "operations.remove",
+    "operations.retry",
+    "operations.stats",
+    "pipeline.attach",
+    "pipeline.handoff",
+    "pipeline.node",
+    "plugin.action",
+    "plugin.capabilities",
+    "plugin.handoff",
+    "plugin.host",
+    "plugin.pipelineNode",
+    "plugin.resource",
+    "plugin.service",
+    "plugin.virtualInterface",
+    "plugins.actions.call",
+    "plugins.resources.delete",
+    "plugins.resources.get",
+    "plugins.resources.list",
+    "plugins.resources.set",
+    "plugins.resources.transaction",
+    "plugins.services.call",
+    "plugins.services.list",
+    "plugins.services.resolve",
+    "resources.delete",
+    "resources.get",
+    "resources.list",
+    "resources.set",
+    "resources.transaction",
+    "secret.delete",
+    "secret.get",
+    "secret.set",
+    "timer.clear",
+    "timer.list",
+    "timer.setInterval",
+    "timer.setTimeout",
+    "ui.register",
+    "worker.call",
+    "worker.dispatch",
+    "worker.list",
+    "worker.stats"
+  ]
+}
