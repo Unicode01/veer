@@ -58,10 +58,13 @@
 #define ETH_P_PPP_SES 0x8864
 #define PPP_IP 0x0021
 #define PPP_IPV6 0x0057
+#define PPP_LCP 0xc021
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
 #define PPPOE_TUNNEL_FLAG_MANUAL_DECAP 0x2
 #define PPPOE_ACT_CONTINUE (-2)
+#define LCP_ECHO_REQUEST 9
+#define LCP_ECHO_REPLY 10
 #define TCP_FLAG_SYN 0x02
 #define TCPOPT_EOL 0
 #define TCPOPT_NOP 1
@@ -80,6 +83,13 @@ struct pppoe_ppp_hdr {
 	__u16 session_id;
 	__u16 length;
 	__u16 protocol;
+} __attribute__((packed));
+
+struct ppp_lcp_echo_hdr {
+	__u8 code;
+	__u8 identifier;
+	__u16 length;
+	__u8 magic[4];
 } __attribute__((packed));
 
 struct ipv4_min_hdr {
@@ -136,6 +146,7 @@ struct pppoe_tunnel_config {
 	__u8 local_dst_mac[6];
 	__u8 wan_src_mac[6];
 	__u8 wan_dst_mac[6];
+	__u8 lcp_magic[4];
 };
 
 struct pppoe_traffic_stats {
@@ -655,6 +666,35 @@ static __always_inline int encap_l3_to_pppoe(struct __sk_buff *skb, struct pppoe
 	return encap_known_l3_to_pppoe(skb, cfg, l3_len, ppp_proto);
 }
 
+static __always_inline int reply_lcp_echo_request(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg,
+	const struct pppoe_ppp_hdr *hdr)
+{
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ppp_lcp_echo_hdr *lcp = data + 14 + sizeof(*hdr);
+	__u8 reply_code = LCP_ECHO_REPLY;
+	__u16 ppp_len = ntohs16(hdr->length);
+	__u16 lcp_len;
+	int act;
+
+	if (hdr->protocol != htons16(PPP_LCP))
+		return TC_ACT_UNSPEC;
+	if ((void *)(lcp + 1) > data_end || ppp_len < 2 + sizeof(*lcp))
+		return TC_ACT_UNSPEC;
+	lcp_len = ntohs16(lcp->length);
+	if (lcp->code != LCP_ECHO_REQUEST || lcp_len < sizeof(*lcp) || lcp_len > ppp_len - 2)
+		return TC_ACT_UNSPEC;
+	if (bpf_skb_store_bytes(skb, 14 + sizeof(*hdr), &reply_code, sizeof(reply_code), 0) < 0)
+		return TC_ACT_SHOT;
+	if (bpf_skb_store_bytes(skb, 14 + sizeof(*hdr) + 4, cfg->lcp_magic, sizeof(cfg->lcp_magic), 0) < 0)
+		return TC_ACT_SHOT;
+	if (store_eth(skb, cfg->wan_dst_mac, cfg->wan_src_mac, ETH_P_PPP_SES) < 0)
+		return TC_ACT_SHOT;
+
+	act = bpf_redirect(cfg->wan_ifindex, 0);
+	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
+}
+
 static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg)
 {
 	void *data = (void *)(long)skb->data;
@@ -682,6 +722,8 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 	if (hdr.ver_type != 0x11 || hdr.code != 0 || ntohs16(hdr.session_id) != cfg->session_id)
 		return TC_ACT_UNSPEC;
 	bump_tunnel_stat(4);
+	if (hdr.protocol == htons16(PPP_LCP))
+		return reply_lcp_echo_request(skb, cfg, &hdr);
 	if (hdr.protocol == htons16(PPP_IP)) {
 		eth_proto = ETH_P_IP;
 #if PPPOE_DECAP_ADJ_L3_FLAGS

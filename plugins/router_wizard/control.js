@@ -1,5 +1,15 @@
 var CONFIG_RESOURCE = 'config';
 var CONFIG_KEY = 'default';
+var ROUTER_OPERATION_KEY = 'router_default';
+var ROUTER_APPLY_OPERATION = 'router.apply';
+var ROUTER_TEARDOWN_OPERATION = 'router.teardown';
+var ROUTER_RECOVERY_TIMER = 'router_operation_recovery';
+var SERVICE_BY_PLUGIN = {
+  wan_core: 'wan.adapter',
+  lan_core: 'lan.adapter',
+  pppoe_client: 'pppoe.client',
+  vtolocal: 'local.handoff'
+};
 
 plugin.capabilities(['router_wizard', 'orchestration', 'wan_lan', 'control']);
 plugin.resource({
@@ -38,6 +48,13 @@ plugin.action({
   runtime_update: 'runtime_apply',
   max_payload_bytes: 8192
 });
+plugin.service({
+  id: 'router.orchestrator',
+  version: '1.0.0',
+  description: 'Transactional WAN and LAN router orchestration service.',
+  actions: ['apply_router', 'teardown_router', 'refresh_status'],
+  resources: ['config', 'status']
+});
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
@@ -46,6 +63,7 @@ ui.register({
 });
 
 exports.onReconcile = function () {
+  resumeRouterOperations();
   var cfg = storedConfig();
   if (!cfg) {
     setRecordIfChanged('status', CONFIG_KEY, refreshStatus(defaultConfig(), 'not_configured', []), false);
@@ -56,8 +74,14 @@ exports.onReconcile = function () {
 };
 
 exports.onDeactivate = function () {
+  cancelActiveRouterOperation('router wizard deactivated');
   var cfg = storedConfig();
-  if (cfg) teardownRouter(cfg);
+  if (cfg) teardownRouterAttempt(cfg);
+};
+
+exports.onTimer = function (ctx) {
+  if (!ctx.timer || ctx.timer.name !== ROUTER_RECOVERY_TIMER) return;
+  resumeRouterOperations();
 };
 
 exports.onAction = function (ctx) {
@@ -76,6 +100,18 @@ exports.onAction = function (ctx) {
 function applyRouter(payload) {
   var cfg = loadConfigFromPayload(payload);
   var previous = storedConfigRecord();
+  var operation = operations.begin({
+    key: ROUTER_OPERATION_KEY,
+    kind: ROUTER_APPLY_OPERATION,
+    input: {config: cfg, previous: previous},
+    state: {phase: 'pending'},
+    restart: true
+  });
+  armRouterOperationRecovery();
+  return runRouterOperation(operation);
+}
+
+function applyRouterAttempt(cfg, previous) {
   var steps = [];
   var compensations = [];
   try {
@@ -140,6 +176,18 @@ function applyRouterConfig(cfg, steps, compensations) {
 
 function teardownRouter(payload) {
   var cfg = loadConfigFromPayload(payload);
+  var operation = operations.begin({
+    key: ROUTER_OPERATION_KEY,
+    kind: ROUTER_TEARDOWN_OPERATION,
+    input: {config: cfg},
+    state: {phase: 'pending'},
+    restart: true
+  });
+  armRouterOperationRecovery();
+  return runRouterOperation(operation);
+}
+
+function teardownRouterAttempt(cfg) {
   var steps = [];
   setRecordIfChanged(CONFIG_RESOURCE, CONFIG_KEY, cfg, false);
 
@@ -160,6 +208,87 @@ function teardownRouter(payload) {
   setRecordIfChanged('status', CONFIG_KEY, status, false);
   if (failed) throw new Error(firstFailedStepMessage(steps));
   return status;
+}
+
+function runRouterOperation(operation) {
+  if (!operation || !operation.id) throw new Error('router operation is unavailable');
+  if (!operation.resumable) return operation.result || refreshStatus(defaultConfig(), operation.status || 'idle', []);
+  var claimed = operations.claim(operation.id, operation.revision);
+  try {
+    var input = claimed.input || {};
+    var result;
+    if (claimed.kind === ROUTER_APPLY_OPERATION) {
+      result = applyRouterAttempt(normalizeConfig(input.config || {}), input.previous || null);
+    } else if (claimed.kind === ROUTER_TEARDOWN_OPERATION) {
+      result = teardownRouterAttempt(normalizeConfig(input.config || {}));
+    } else {
+      throw new Error('unsupported router operation kind ' + claimed.kind);
+    }
+    var completed = operations.complete(claimed.id, claimed.revision, result || {});
+    settleRouterOperationRecovery();
+    return completed.result || result;
+  } catch (error) {
+    var current = operations.get(claimed.id);
+    if (current && current.status === 'running') {
+      try {
+        operations.fail(current.id, current.revision, {
+          phase: 'failed',
+          state: {failed_at: now(), error: errorMessage(error)},
+          error: errorMessage(error)
+        });
+      } catch (journalError) {
+        throw new Error(errorMessage(error) + '; persist router operation failure: ' + errorMessage(journalError));
+      }
+    }
+    settleRouterOperationRecovery();
+    throw error;
+  }
+}
+
+function resumeRouterOperations() {
+  var pending = operations.list({resumable: true, limit: 8});
+  if (!pending.length) {
+    settleRouterOperationRecovery();
+    return;
+  }
+  armRouterOperationRecovery();
+  for (var i = 0; i < pending.length; i++) {
+    if (pending[i].key !== ROUTER_OPERATION_KEY) continue;
+    try {
+      runRouterOperation(pending[i]);
+    } catch (error) {
+      log.warn('router operation recovery failed: ' + errorMessage(error));
+    }
+  }
+  settleRouterOperationRecovery();
+}
+
+function armRouterOperationRecovery() {
+  timer.setInterval(ROUTER_RECOVERY_TIMER, 2000, {});
+}
+
+function settleRouterOperationRecovery() {
+  var active = operations.list({limit: 8}).some(function (operation) {
+    return operation.key === ROUTER_OPERATION_KEY &&
+      (operation.status === 'pending' || operation.status === 'running' || operation.status === 'retry_wait');
+  });
+  if (!active) timer.clear(ROUTER_RECOVERY_TIMER);
+}
+
+function cancelActiveRouterOperation(reason) {
+  var operation = operations.getByKey(ROUTER_OPERATION_KEY);
+  if (!operation || (operation.status !== 'pending' && operation.status !== 'running')) return;
+  try {
+    var claimed = operations.claim(operation.id, operation.revision);
+    operations.cancel(claimed.id, claimed.revision, {
+      phase: 'cancelled',
+      state: {cancelled_at: now()},
+      error: reason || 'cancelled'
+    });
+  } catch (error) {
+    log.warn('cancel router operation failed: ' + errorMessage(error));
+  }
+  settleRouterOperationRecovery();
 }
 
 function runStep(steps, name, fn) {
@@ -283,6 +412,7 @@ function readPluginRecord(pluginID, resourceID, key) {
     return unavailableRecord('plugins.resources is unavailable');
   }
   try {
+    requireServiceEndpoint(pluginID, 'resources', resourceID);
     var records = plugins.resources.list(pluginID, resourceID, {limit: 128, offset: 0}) || [];
     for (var i = 0; i < records.length; i++) {
       if (records[i] && records[i].key === key) return records[i];
@@ -361,10 +491,31 @@ function compactRecord(record) {
 }
 
 function callAction(pluginID, actionID, payload) {
-  if (typeof plugins === 'undefined' || !plugins.actions || typeof plugins.actions.call !== 'function') {
-    throw new Error('plugins.actions.call is unavailable');
+  if (typeof plugins === 'undefined' || !plugins.services || typeof plugins.services.call !== 'function') {
+    throw new Error('plugins.services.call is unavailable');
   }
-  return plugins.actions.call(pluginID, actionID, payload || {});
+  var service = requireServiceEndpoint(pluginID, 'actions', actionID);
+  return plugins.services.call({
+    service: service.id,
+    version: '^1.0.0',
+    provider: pluginID,
+    action: actionID,
+    payload: payload || {}
+  });
+}
+
+function requireServiceEndpoint(pluginID, endpointKind, endpointID) {
+  var serviceID = SERVICE_BY_PLUGIN[pluginID];
+  if (!serviceID) throw new Error('no typed service is declared for plugin ' + pluginID);
+  if (typeof plugins === 'undefined' || !plugins.services || typeof plugins.services.resolve !== 'function') {
+    throw new Error('plugins.services.resolve is unavailable');
+  }
+  var provider = plugins.services.resolve({service: serviceID, version: '^1.0.0', provider: pluginID});
+  var endpoints = provider && provider.service && provider.service[endpointKind];
+  if (!Array.isArray(endpoints) || endpoints.indexOf(endpointID) < 0) {
+    throw new Error('service ' + serviceID + ' from ' + pluginID + ' does not expose ' + endpointKind + ' endpoint ' + endpointID);
+  }
+  return provider.service;
 }
 
 function loadConfigFromPayload(payload) {

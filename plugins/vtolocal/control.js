@@ -32,6 +32,13 @@ plugin.action({
   runtime_update: 'runtime_apply',
   max_payload_bytes: 4096
 });
+plugin.service({
+  id: 'local.handoff',
+  version: '1.0.0',
+  description: 'Linux-local L3 handoff and route service.',
+  actions: ['apply', 'teardown'],
+  resources: ['links', 'status']
+});
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
