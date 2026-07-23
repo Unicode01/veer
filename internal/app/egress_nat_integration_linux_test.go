@@ -34,33 +34,35 @@ import (
 )
 
 const (
-	egressNATTestEnableEnv        = "FORWARD_RUN_EGRESS_NAT_TEST"
-	egressNATXDPTestEnableEnv     = "FORWARD_RUN_EGRESS_NAT_XDP_TEST"
-	egressNATHelperEnv            = "FORWARD_EGRESS_NAT_HELPER"
-	egressNATHelperRoleEnv        = "FORWARD_EGRESS_NAT_HELPER_ROLE"
-	egressNATHelperProtocolEnv    = "FORWARD_EGRESS_NAT_PROTOCOL"
-	egressNATHelperListenAddrEnv  = "FORWARD_EGRESS_NAT_LISTEN_ADDR"
-	egressNATHelperTargetAddrEnv  = "FORWARD_EGRESS_NAT_TARGET_ADDR"
-	egressNATHelperLocalAddrEnv   = "FORWARD_EGRESS_NAT_LOCAL_ADDR"
-	egressNATHelperObservedEnv    = "FORWARD_EGRESS_NAT_OBSERVED_FILE"
-	egressNATHelperObservedFmtEnv = "FORWARD_EGRESS_NAT_OBSERVED_FORMAT"
-	egressNATTestToken            = dataplanePerfToken
-	egressNATBridgeAddr           = "198.18.0.1"
-	egressNATClientAddr           = "198.18.0.2"
-	egressNATUplinkAddr           = "198.19.0.1"
-	egressNATBackendAddr          = "198.19.0.2"
-	egressNATProbePort            = 24001
-	egressNATProbePortAlt1        = 24003
-	egressNATProbePortAlt2        = 24005
-	egressNATForwardProbePort     = 24002
-	egressNATMappingLocalPort     = 35001
-	egressNATHelperReadyLine      = "READY"
-	egressNATHelperRoleBackend    = "backend"
-	egressNATHelperRoleClient     = "client"
-	egressNATObservedFmtHost      = "host"
-	egressNATObservedFmtHostPort  = "hostport"
-	egressNATExpectedKernelEngine = kernelEngineTC
-	egressNATExpectedXDPKernel    = kernelEngineXDP
+	egressNATTestEnableEnv         = "FORWARD_RUN_EGRESS_NAT_TEST"
+	egressNATXDPTestEnableEnv      = "FORWARD_RUN_EGRESS_NAT_XDP_TEST"
+	egressNATHelperEnv             = "FORWARD_EGRESS_NAT_HELPER"
+	egressNATHelperRoleEnv         = "FORWARD_EGRESS_NAT_HELPER_ROLE"
+	egressNATHelperProtocolEnv     = "FORWARD_EGRESS_NAT_PROTOCOL"
+	egressNATHelperListenAddrEnv   = "FORWARD_EGRESS_NAT_LISTEN_ADDR"
+	egressNATHelperTargetAddrEnv   = "FORWARD_EGRESS_NAT_TARGET_ADDR"
+	egressNATHelperLocalAddrEnv    = "FORWARD_EGRESS_NAT_LOCAL_ADDR"
+	egressNATHelperObservedEnv     = "FORWARD_EGRESS_NAT_OBSERVED_FILE"
+	egressNATHelperObservedFmtEnv  = "FORWARD_EGRESS_NAT_OBSERVED_FORMAT"
+	egressNATHelperStreamCyclesEnv = "FORWARD_EGRESS_NAT_STREAM_CYCLES"
+	egressNATTestToken             = dataplanePerfToken
+	egressNATBridgeAddr            = "198.18.0.1"
+	egressNATClientAddr            = "198.18.0.2"
+	egressNATUplinkAddr            = "198.19.0.1"
+	egressNATBackendAddr           = "198.19.0.2"
+	egressNATProbePort             = 24001
+	egressNATProbePortAlt1         = 24003
+	egressNATProbePortAlt2         = 24005
+	egressNATForwardProbePort      = 24002
+	egressNATMappingLocalPort      = 35001
+	egressNATProbePayload          = "egress-nat-probe"
+	egressNATHelperReadyLine       = "READY"
+	egressNATHelperRoleBackend     = "backend"
+	egressNATHelperRoleClient      = "client"
+	egressNATObservedFmtHost       = "host"
+	egressNATObservedFmtHostPort   = "hostport"
+	egressNATExpectedKernelEngine  = kernelEngineTC
+	egressNATExpectedXDPKernel     = kernelEngineXDP
 )
 
 type egressNATIntegrationTopology struct {
@@ -213,6 +215,163 @@ func TestEgressNATTCIntegration(t *testing.T) {
 				t.Fatalf("%s backend observed source IP %q, want %q", proto, observedIP, egressNATUplinkAddr)
 			}
 		})
+	}
+}
+
+func TestEgressNATTCActiveTCPRefreshesBothFlowEntries(t *testing.T) {
+	if os.Getenv(egressNATTestEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+
+	t.Setenv(egressNATHelperStreamCyclesEnv, "240")
+	topology := setupEgressNATIntegrationTopology(t)
+	seedEgressNATIntegrationNeighbor(t, topology)
+
+	rt := newTCKernelRuleRuntime(&Config{})
+	defer rt.Close()
+	rule := buildEgressNATSyntheticRule(EgressNAT{
+		ID:              1,
+		ParentInterface: topology.BridgeIF,
+		OutInterface:    topology.UplinkHostIF,
+		OutSourceIP:     egressNATUplinkAddr,
+		Protocol:        "tcp",
+		NATType:         egressNATTypeSymmetric,
+		Enabled:         true,
+	}, topology.ChildHostIF, 1, "tcp")
+	results, err := rt.Reconcile([]Rule{rule})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("egress NAT result = %+v, want running tc", result)
+	}
+
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		t.Fatalf("lookupKernelCollectionPieces() error = %v", err)
+	}
+	if pieces.flowsV4 == nil {
+		t.Fatal("TC flows_v4 map is unavailable")
+	}
+
+	targetAddr := net.JoinHostPort(egressNATBackendAddr, strconv.Itoa(egressNATProbePort))
+	observedFile := filepath.Join(t.TempDir(), "observed-stream.txt")
+	backendCmd, backendLogs := startEgressNATBackendHelperInNamespace(t, topology.BackendNS, "tcp", targetAddr, observedFile)
+	t.Cleanup(func() {
+		if backendCmd != nil && backendCmd.ProcessState == nil {
+			stopDataplanePerfHelper(t, backendCmd)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	clientCmd := exec.CommandContext(ctx, "ip", "netns", "exec", topology.ClientNS, os.Args[0], "-test.run", "TestEgressNATIntegrationHelperProcess", "-test.v=false")
+	clientCmd.Env = append(os.Environ(),
+		egressNATHelperEnv+"=1",
+		egressNATHelperRoleEnv+"="+egressNATHelperRoleClient,
+		egressNATHelperProtocolEnv+"=tcp",
+		egressNATHelperTargetAddrEnv+"="+targetAddr,
+	)
+	var clientLogs bytes.Buffer
+	clientCmd.Stdout = &clientLogs
+	clientCmd.Stderr = &clientLogs
+	if err := clientCmd.Start(); err != nil {
+		t.Fatalf("start streaming client helper: %v", err)
+	}
+	t.Cleanup(func() {
+		if clientCmd.Process != nil && clientCmd.ProcessState == nil {
+			_ = clientCmd.Process.Kill()
+		}
+	})
+
+	type flowEntry struct {
+		key   tcFlowKeyV4
+		value tcFlowValueV4
+	}
+	readPair := func() (flowEntry, flowEntry, bool, error) {
+		var front flowEntry
+		var reply flowEntry
+		frontFound := false
+		replyFound := false
+		iter := pieces.flowsV4.Iterate()
+		var key tcFlowKeyV4
+		var value tcFlowValueV4
+		for iter.Next(&key, &value) {
+			if value.RuleID != uint32(rule.ID) || value.Flags&kernelFlowFlagEgressNAT == 0 || key.Proto != syscall.IPPROTO_TCP {
+				continue
+			}
+			entry := flowEntry{key: key, value: value}
+			if value.Flags&kernelFlowFlagFrontEntry != 0 {
+				front = entry
+				frontFound = true
+			} else {
+				reply = entry
+				replyFound = true
+			}
+		}
+		return front, reply, frontFound && replyFound, iter.Err()
+	}
+
+	var front flowEntry
+	var reply flowEntry
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var found bool
+		front, reply, found, err = readPair()
+		if err != nil {
+			t.Fatalf("read egress NAT flow pair: %v", err)
+		}
+		if found && front.value.Flags&kernelFlowFlagReplySeen != 0 && reply.value.Flags&kernelFlowFlagReplySeen != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("active egress NAT flow pair was not established: front=%+v reply=%+v\nclient logs:\n%s\nbackend logs:\n%s", front, reply, clientLogs.String(), backendLogs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	initialLastSeen := max(front.value.LastSeenNS, reply.value.LastSeenNS)
+	front.value.LastSeenNS = 1
+	reply.value.LastSeenNS = 1
+	if err := pieces.flowsV4.Put(front.key, front.value); err != nil {
+		t.Fatalf("age egress NAT front flow: %v", err)
+	}
+	if err := pieces.flowsV4.Put(reply.key, reply.value); err != nil {
+		t.Fatalf("age egress NAT reply flow: %v", err)
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		var found bool
+		front, reply, found, err = readPair()
+		if err != nil {
+			t.Fatalf("read refreshed egress NAT flow pair: %v", err)
+		}
+		if found && front.value.LastSeenNS > initialLastSeen && reply.value.LastSeenNS > initialLastSeen {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("active traffic did not refresh both egress NAT flow entries: front=%+v reply=%+v", front, reply)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := clientCmd.Wait(); err != nil {
+		t.Fatalf("streaming client helper failed: %v\nclient logs:\n%s\nbackend logs:\n%s", err, clientLogs.String(), backendLogs.String())
+	}
+	waitForEgressNATHelperExit(t, backendCmd, "tcp-stream", backendLogs.String())
+	data, err := os.ReadFile(observedFile)
+	if err != nil {
+		t.Fatalf("read streaming observed peer: %v", err)
+	}
+	if observed := strings.TrimSpace(string(data)); observed != egressNATUplinkAddr {
+		t.Fatalf("streaming backend observed source IP %q, want %q", observed, egressNATUplinkAddr)
 	}
 }
 
@@ -819,6 +978,10 @@ func runEgressNATBackendHelper() error {
 	listenAddr := strings.TrimSpace(os.Getenv(egressNATHelperListenAddrEnv))
 	observedFile := strings.TrimSpace(os.Getenv(egressNATHelperObservedEnv))
 	observedFormat := strings.TrimSpace(os.Getenv(egressNATHelperObservedFmtEnv))
+	streamCycles, err := egressNATHelperStreamCycles()
+	if err != nil {
+		return err
+	}
 	if listenAddr == "" {
 		return errors.New("missing backend listen address")
 	}
@@ -883,9 +1046,23 @@ func runEgressNATBackendHelper() error {
 			return err
 		}
 		buf := make([]byte, 128)
-		n, err := conn.Read(buf)
+		var n int
+		if streamCycles > 0 {
+			n, err = io.ReadFull(conn, buf[:len(egressNATProbePayload)])
+		} else {
+			n, err = conn.Read(buf)
+		}
 		if err != nil {
 			return err
+		}
+		if streamCycles > 0 {
+			for range streamCycles {
+				if _, err := io.Copy(conn, bytes.NewReader(buf[:n])); err != nil {
+					return err
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			return nil
 		}
 		_, err = conn.Write(buf[:n])
 		return err
@@ -899,8 +1076,12 @@ func runEgressNATClientHelper() error {
 	if targetAddr == "" {
 		return errors.New("missing client target address")
 	}
+	streamCycles, err := egressNATHelperStreamCycles()
+	if err != nil {
+		return err
+	}
 
-	payload := []byte("egress-nat-probe")
+	payload := []byte(egressNATProbePayload)
 	dialer := net.Dialer{Timeout: 10 * time.Second}
 	switch proto {
 	case "icmp":
@@ -978,7 +1159,7 @@ func runEgressNATClientHelper() error {
 		}
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-		if _, err := conn.Write(payload); err != nil {
+		if _, err := io.Copy(conn, bytes.NewReader(payload)); err != nil {
 			return err
 		}
 		buf := make([]byte, len(payload))
@@ -1000,6 +1181,17 @@ func runEgressNATClientHelper() error {
 			return err
 		}
 		buf := make([]byte, len(payload))
+		if streamCycles > 0 {
+			for range streamCycles {
+				if _, err := io.ReadFull(conn, buf); err != nil {
+					return err
+				}
+				if !bytes.Equal(buf, payload) {
+					return fmt.Errorf("tcp stream echo mismatch: got %q want %q", string(buf), string(payload))
+				}
+			}
+			return nil
+		}
 		if _, err := io.ReadFull(conn, buf); err != nil {
 			return err
 		}
@@ -1008,6 +1200,18 @@ func runEgressNATClientHelper() error {
 		}
 		return nil
 	}
+}
+
+func egressNATHelperStreamCycles() (int, error) {
+	raw := strings.TrimSpace(os.Getenv(egressNATHelperStreamCyclesEnv))
+	if raw == "" {
+		return 0, nil
+	}
+	cycles, err := strconv.Atoi(raw)
+	if err != nil || cycles < 1 || cycles > 10000 {
+		return 0, fmt.Errorf("%s must be between 1 and 10000", egressNATHelperStreamCyclesEnv)
+	}
+	return cycles, nil
 }
 
 func setupEgressNATIntegrationTopology(t *testing.T) egressNATIntegrationTopology {

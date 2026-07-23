@@ -23,6 +23,7 @@ type pluginControlL2Transport interface {
 }
 
 type pluginControlL2SendRequest struct {
+	Namespace string
 	Interface string
 	EtherType uint16
 	DstMAC    [6]byte
@@ -32,6 +33,7 @@ type pluginControlL2SendRequest struct {
 }
 
 type pluginControlL2RecvRequest struct {
+	Namespace         string
 	Interface         string
 	EtherType         uint16
 	Timeout           time.Duration
@@ -63,6 +65,7 @@ type pluginControlL2RecvManyRequest struct {
 }
 
 type pluginControlL2Frame struct {
+	Namespace string
 	Interface string
 	IfIndex   int
 	EtherType uint16

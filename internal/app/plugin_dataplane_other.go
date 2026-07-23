@@ -3,6 +3,9 @@
 package app
 
 func newPluginDataplaneRuntime(cfg *Config) pluginDataplaneRuntime {
+	if cfg == nil || !cfg.PluginsEnabled() {
+		return disabledPluginDataplaneRuntime{}
+	}
 	return &unsupportedPluginDataplaneRuntime{cfg: cfg}
 }
 

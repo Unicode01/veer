@@ -47,14 +47,28 @@ func computeBinaryHash() string {
 
 func Main(buildNonce string) {
 	applySecureProcessUmask()
+	if handled, err := runPluginPackageCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
+		if err != nil {
+			log.Fatalf("plugin package command: %v", err)
+		}
+		return
+	}
 
 	workerMode := flag.Bool("worker", false, "run in worker mode")
 	rangeWorkerMode := flag.Bool("range-worker", false, "run in range worker mode")
 	sharedProxyMode := flag.Bool("shared-proxy", false, "run as shared proxy")
+	pluginHostMode := flag.Bool("plugin-host", false, "run isolated plugin control host")
 	workerIndex := flag.Int("id", 0, "worker slot index")
 	sockPath := flag.String("sock", "", "unix socket path")
 	configPath := flag.String("config", "config.json", "config file path")
 	flag.Parse()
+
+	if *pluginHostMode {
+		if err := runPluginHostProcess(); err != nil {
+			log.Fatalf("plugin host: %v", err)
+		}
+		return
+	}
 
 	if *workerMode {
 		if *sockPath == "" {
@@ -91,6 +105,18 @@ func Main(buildNonce string) {
 	if features := cfg.EnabledExperimentalFeatures(); len(features) > 0 {
 		log.Printf("experimental features enabled: %s", strings.Join(features, ", "))
 	}
+
+	phaseStartedAt = time.Now()
+	restoreResult, err := recoverPendingPluginStateRestore("forward.db", cfg.PluginsDir)
+	if err != nil {
+		log.Fatalf("recover plugin state restore: %v", err)
+	}
+	if restoreResult.Applied {
+		log.Printf("plugin state restore %s applied", restoreResult.ID)
+	} else if restoreResult.Failed {
+		log.Printf("plugin state restore %s was rolled back: %s", restoreResult.ID, restoreResult.Error)
+	}
+	logStartupPhase("plugin state restore recovery", phaseStartedAt, startupStartedAt)
 
 	phaseStartedAt = time.Now()
 	db, err := initDB("forward.db")

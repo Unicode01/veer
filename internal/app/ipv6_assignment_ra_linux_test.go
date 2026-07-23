@@ -79,6 +79,46 @@ func TestIPv6RouterSolicitationSocketFilter(t *testing.T) {
 	}
 }
 
+func TestIPv6RouterAdvertiserUpdateOnlyTriggersOnChange(t *testing.T) {
+	t.Parallel()
+
+	prefixes := []string{"2001:db8:100::/64"}
+	config := ipv6AssignmentRAConfig{
+		TargetInterface: "br-lan",
+		Prefixes:        prefixes,
+		DNSServers:      []string{"2001:4860:4860::8888"},
+	}
+	advertiser := newIPv6RouterAdvertiser(config)
+	prefixes[0] = "2001:db8:bad::/64"
+	if got := advertiser.snapshot().Prefixes[0]; got != "2001:db8:100::/64" {
+		t.Fatalf("new advertiser retained caller-owned prefix slice: %q", got)
+	}
+
+	if advertiser.update(advertiser.snapshot()) {
+		t.Fatal("equivalent router advertisement update reported a change")
+	}
+	select {
+	case <-advertiser.wakeCh:
+		t.Fatal("equivalent router advertisement update triggered an immediate send")
+	default:
+	}
+
+	changed := advertiser.snapshot()
+	changed.DNSServers[0] = "2400:3200::1"
+	if !advertiser.update(changed) {
+		t.Fatal("changed router advertisement update was ignored")
+	}
+	select {
+	case <-advertiser.wakeCh:
+	default:
+		t.Fatal("changed router advertisement update did not trigger an immediate send")
+	}
+	changed.DNSServers[0] = "2001:db8::bad"
+	if got := advertiser.snapshot().DNSServers[0]; got != "2400:3200::1" {
+		t.Fatalf("router advertisement update retained caller-owned DNS slice: %q", got)
+	}
+}
+
 func TestBuildIPv6RouterAdvertisementPayloadIncludesAutonomousPrefixInfo(t *testing.T) {
 	t.Parallel()
 

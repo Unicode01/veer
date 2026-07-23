@@ -28,8 +28,10 @@ package app
 //   FORWARD_PERF_EXPERIMENTAL      (comma-separated experimental feature names)
 //   FORWARD_PERF_BINARY            (optional prebuilt forward binary; skips local go build)
 //   FORWARD_PERF_PLUGIN_SOURCE_DIR (optional packet_observer source dir when using a prebuilt binary outside the repo)
+//   FORWARD_PERF_PLUGINS_ENABLED   (enable plugin control/dataplane gates without installing a hook)
 //   FORWARD_PERF_PLUGIN_PIPELINE    (set to 1 to enable the sample TC veer plugin for tc mode)
 //   FORWARD_PERF_PLUGIN_PIPELINE_COUNT (sample TC veer plugin copies, default: 1, max: 8)
+//   FORWARD_PERF_PLUGIN_WORKLOAD    (noop, observer, or firewall; default: observer)
 //   FORWARD_RUN_PLUGIN_STABILITY_TEST (run plugin long-flow/new-flow stability gate)
 //   FORWARD_PLUGIN_STABILITY_SECONDS
 //   FORWARD_PLUGIN_STABILITY_LONG_CONNECTIONS
@@ -94,8 +96,10 @@ const (
 	dataplanePerfExperimentalEnv = "FORWARD_PERF_EXPERIMENTAL"
 	dataplanePerfBinaryEnv       = "FORWARD_PERF_BINARY"
 	dataplanePerfPluginSourceEnv = "FORWARD_PERF_PLUGIN_SOURCE_DIR"
+	dataplanePerfPluginsEnv      = "FORWARD_PERF_PLUGINS_ENABLED"
 	dataplanePerfPluginEnv       = "FORWARD_PERF_PLUGIN_PIPELINE"
 	dataplanePerfPluginCountEnv  = "FORWARD_PERF_PLUGIN_PIPELINE_COUNT"
+	dataplanePerfPluginWorkEnv   = "FORWARD_PERF_PLUGIN_WORKLOAD"
 	pluginStabilityEnableEnv     = "FORWARD_RUN_PLUGIN_STABILITY_TEST"
 	pluginStabilitySecondsEnv    = "FORWARD_PLUGIN_STABILITY_SECONDS"
 	pluginStabilityLongConnEnv   = "FORWARD_PLUGIN_STABILITY_LONG_CONNECTIONS"
@@ -2553,12 +2557,18 @@ func writeDataplanePerfConfig(t *testing.T, path string, mode dataplanePerfMode,
 		cfg.Experimental[experimentalFeatureKernelTCDiag] = true
 	}
 	pluginPipelineCount := dataplanePerfPluginPipelineCount()
-	if pluginPipelineCount > 0 && mode.ExpectedKern == kernelEngineTC {
+	if (envBool(dataplanePerfPluginsEnv) || pluginPipelineCount > 0) && mode.ExpectedKern == kernelEngineTC {
 		enabled := true
 		cfg.PluginsEnabledSetting = &enabled
 		cfg.PluginsDataplaneSetting = &enabled
 		cfg.PluginsDir = defaultPluginsDir
-		setupDataplanePerfPluginPipeline(t, filepath.Dir(path), cfg.PluginsDir, pluginPipelineCount)
+		pluginsRoot := filepath.Join(filepath.Dir(path), filepath.FromSlash(cfg.PluginsDir))
+		if err := os.MkdirAll(pluginsRoot, 0o755); err != nil {
+			t.Fatalf("create empty perf plugin directory: %v", err)
+		}
+		if pluginPipelineCount > 0 {
+			setupDataplanePerfPluginPipeline(t, filepath.Dir(path), cfg.PluginsDir, pluginPipelineCount)
+		}
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -2599,9 +2609,115 @@ func setupDataplanePerfPluginPipeline(t *testing.T, workDir string, pluginsDir s
 		pluginDir := filepath.Join(pluginsRoot, pluginID)
 		copyDirForTest(t, sourceDir, pluginDir)
 		writeDataplanePerfPluginManifest(t, filepath.Join(pluginDir, "plugin.json"), pluginID, 10+i)
+		writeDataplanePerfPluginWorkload(t, pluginDir)
 		compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 	}
 }
+
+func writeDataplanePerfPluginWorkload(t *testing.T, pluginDir string) {
+	t.Helper()
+	var source string
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(dataplanePerfPluginWorkEnv))) {
+	case "", "observer":
+		return
+	case "noop":
+		source = dataplanePerfNoopPluginSource
+	case "firewall":
+		source = dataplanePerfFirewallPluginSource
+	default:
+		t.Fatalf("%s must be noop, observer, or firewall", dataplanePerfPluginWorkEnv)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "packet_observer.bpf.c"), []byte(source), 0o644); err != nil {
+		t.Fatalf("write perf plugin workload: %v", err)
+	}
+}
+
+const dataplanePerfNoopPluginSource = `#include "../include/veer_plugin_helpers.h"
+
+struct __sk_buff;
+
+VEER_DECLARE_PROG_CHAIN_V4();
+
+SEC("tc/veer/pre_forward")
+int tc_pre_forward(struct __sk_buff *skb)
+{
+	veer_continue_pre_forward(skb);
+	return TC_ACT_UNSPEC;
+}
+
+char __license[] SEC("license") = "GPL";
+`
+
+const dataplanePerfFirewallPluginSource = `#include "../include/veer_plugin_helpers.h"
+
+#define BPF_MAP_TYPE_HASH 1
+
+struct __sk_buff;
+
+struct firewall_key {
+	__u8 family;
+	__u8 protocol;
+	__u16 dest_port;
+};
+
+struct bpf_map_def SEC("maps") firewall_rules = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(struct firewall_key),
+	.value_size = sizeof(__u8),
+	.max_entries = 256,
+};
+
+VEER_DECLARE_PROG_CHAIN_V4();
+
+static __always_inline int firewall_packet_key(struct __sk_buff *skb, struct firewall_key *key)
+{
+	struct veer_packet pkt = {};
+	struct veer_l2_info l2 = {};
+	struct veer_l4_ports ports = {};
+
+	if (!key || !veer_packet_from_skb(skb, &pkt) || !veer_parse_l2(&pkt, &l2))
+		return 0;
+	if (l2.protocol == VEER_ETH_P_IP) {
+		struct veer_ipv4hdr *ip = veer_ipv4_from_l2(&pkt, &l2);
+
+		if (!ip || !veer_ipv4_l4_ports(&pkt, ip, &ports))
+			return 0;
+		key->family = 4;
+		key->protocol = ip->protocol;
+		key->dest_port = ports.dest;
+		return 1;
+	}
+	if (l2.protocol == VEER_ETH_P_IPV6) {
+		struct veer_ipv6hdr *ip = veer_ipv6_from_l2(&pkt, &l2);
+		__u8 protocol = 0;
+
+		if (!ip || !veer_ipv6_l4(&pkt, ip, &protocol) || !veer_ipv6_l4_ports(&pkt, ip, &ports))
+			return 0;
+		key->family = 6;
+		key->protocol = protocol;
+		key->dest_port = ports.dest;
+		return 1;
+	}
+	return 0;
+}
+
+SEC("tc/veer/pre_forward")
+int tc_pre_forward(struct __sk_buff *skb)
+{
+	struct firewall_key key = {};
+	__u8 *action;
+
+	if (firewall_packet_key(skb, &key)) {
+		action = veer_bpf_map_lookup_elem(&firewall_rules, &key);
+		if (action && *action)
+			return TC_ACT_SHOT;
+	}
+	veer_continue_pre_forward(skb);
+	return TC_ACT_UNSPEC;
+}
+
+char __license[] SEC("license") = "GPL";
+`
 
 func writeDataplanePerfPluginManifest(t *testing.T, path string, pluginID string, priority int) {
 	t.Helper()

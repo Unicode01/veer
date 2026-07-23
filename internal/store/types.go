@@ -121,6 +121,17 @@ type PluginState struct {
 	UpdatedAt string
 }
 
+type PluginLog struct {
+	ID         int64
+	PluginID   string
+	Level      string
+	Message    string
+	FieldsJSON string
+	Event      string
+	Worker     string
+	CreatedAt  string
+}
+
 type PluginRuntimeStatus struct {
 	ID              int64
 	PluginID        string
@@ -131,6 +142,80 @@ type PluginRuntimeStatus struct {
 	AppliedRevision int64
 	LastError       string
 	UpdatedAt       string
+}
+
+type PluginResourceSchemaState struct {
+	ID            int64
+	PluginID      string
+	ResourceID    string
+	SchemaVersion int
+	SchemaDigest  string
+	Status        string
+	TransactionID string
+	UpdatedAt     string
+}
+
+type PluginResourceMigration struct {
+	ID                    int64
+	TransactionID         string
+	PluginID              string
+	ResourceID            string
+	PreviousSchemaExists  bool
+	PreviousSchemaVersion int
+	PreviousSchemaDigest  string
+	RecordsJSON           string
+	RuntimeStatusJSON     string
+	CreatedAt             string
+}
+
+type PluginOwnedResource struct {
+	ID           int64
+	PluginID     string
+	ResourceType string
+	ResourceKey  string
+	MetadataJSON string
+	CreatedAt    string
+	UpdatedAt    string
+}
+
+type PluginNetTransaction struct {
+	ID            int64
+	TransactionID string
+	PluginID      string
+	Kind          string
+	StateJSON     string
+	StartedCount  int
+	CreatedAt     string
+	UpdatedAt     string
+}
+
+type PluginOperation struct {
+	ID                int64
+	OperationID       string
+	PluginID          string
+	OperationKey      string
+	Kind              string
+	Status            string
+	Phase             string
+	InputJSON         string
+	StateJSON         string
+	ResultJSON        string
+	ErrorJSON         string
+	Attempts          int
+	Revision          int64
+	NextAttemptUnixMS int64
+	CreatedAt         string
+	UpdatedAt         string
+}
+
+type PluginAuditLog struct {
+	ID          int64
+	PluginID    string
+	Operation   string
+	Actor       string
+	Outcome     string
+	DetailsJSON string
+	CreatedAt   string
 }
 
 type RuleFilter struct {

@@ -107,8 +107,9 @@ type kernelHotRestartTCAttachment struct {
 }
 
 type kernelHotRestartXDPAttachment struct {
-	Ifindex int `json:"ifindex"`
-	Flags   int `json:"flags"`
+	Ifindex   int    `json:"ifindex"`
+	Flags     int    `json:"flags"`
+	ProgramID uint32 `json:"program_id,omitempty"`
 }
 
 func kernelHotRestartTCMetadata(attachments []kernelAttachment, objectHash string) kernelHotRestartMetadata {

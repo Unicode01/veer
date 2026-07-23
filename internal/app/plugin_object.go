@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -14,10 +15,24 @@ import (
 )
 
 func resolvePluginObjects(plugin *LoadedPlugin) error {
+	architecture := strings.TrimSpace(plugin.objectArchitecture)
+	if architecture == "" {
+		architecture = runtime.GOARCH
+	}
 	for i := range plugin.Objects {
 		object := &plugin.Objects[i]
 		if strings.HasPrefix(object.Path, "builtin:") {
 			return fmt.Errorf("objects[%d]: builtin objects are reserved for internal plugins", i)
+		}
+		if err := validatePluginObjectArtifacts(plugin, *object); err != nil {
+			object.Status = pluginObjectStatusError
+			object.Error = err.Error()
+			return fmt.Errorf("objects[%d]: %w", i, err)
+		}
+		if err := selectPluginObjectVariant(object, architecture); err != nil {
+			object.Status = pluginObjectStatusError
+			object.Error = err.Error()
+			return fmt.Errorf("objects[%d]: %w", i, err)
 		}
 		object.Status = ""
 		object.Error = ""
@@ -64,7 +79,7 @@ func resolvePluginObjects(plugin *LoadedPlugin) error {
 			object.Error = "sha256 mismatch"
 			return fmt.Errorf("objects[%d]: sha256 mismatch", i)
 		}
-		if err := resolvePluginObjectSpec(object, realObjectPath, got); err != nil {
+		if err := resolvePluginObjectSpec(object, realObjectPath, got, plugin.resourceLimits); err != nil {
 			object.Status = pluginObjectStatusError
 			object.Error = err.Error()
 			return fmt.Errorf("objects[%d]: %w", i, err)
@@ -72,6 +87,82 @@ func resolvePluginObjects(plugin *LoadedPlugin) error {
 		object.Status = pluginObjectStatusVerified
 	}
 	return nil
+}
+
+type pluginObjectArtifact struct {
+	Label  string
+	Path   string
+	SHA256 string
+}
+
+func validatePluginObjectArtifacts(plugin *LoadedPlugin, object PluginObject) error {
+	artifacts := make([]pluginObjectArtifact, 0, len(object.Variants)+1)
+	if strings.TrimSpace(object.Path) != "" {
+		artifacts = append(artifacts, pluginObjectArtifact{Label: "fallback", Path: object.Path, SHA256: object.SHA256})
+	}
+	for _, variant := range object.Variants {
+		artifacts = append(artifacts, pluginObjectArtifact{
+			Label:  "variant " + variant.Architecture,
+			Path:   variant.Path,
+			SHA256: variant.SHA256,
+		})
+	}
+	for _, artifact := range artifacts {
+		candidate := object
+		candidate.Path = artifact.Path
+		candidate.SHA256 = artifact.SHA256
+		candidate.Variants = nil
+		if pluginObjectSHA256Required(*plugin, candidate) && candidate.SHA256 == "" {
+			return fmt.Errorf("%s sha256 is required for stable or preview external objects", artifact.Label)
+		}
+		realPath, err := resolvePluginObjectRealPath(plugin, candidate)
+		if err != nil {
+			return fmt.Errorf("%s path escapes plugin root", artifact.Label)
+		}
+		info, err := os.Stat(realPath)
+		if err != nil {
+			return fmt.Errorf("%s: %w", artifact.Label, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("%s path is a directory", artifact.Label)
+		}
+		if info.Size() > pluginObjectMaxSize {
+			return fmt.Errorf("%s exceeds %d bytes", artifact.Label, pluginObjectMaxSize)
+		}
+		got, err := sha256File(realPath)
+		if err != nil {
+			return fmt.Errorf("hash %s: %w", artifact.Label, err)
+		}
+		if candidate.SHA256 != "" && got != candidate.SHA256 {
+			return fmt.Errorf("%s sha256 mismatch", artifact.Label)
+		}
+		if err := resolvePluginObjectSpec(&candidate, realPath, got, plugin.resourceLimits); err != nil {
+			return fmt.Errorf("%s: %w", artifact.Label, err)
+		}
+	}
+	return nil
+}
+
+func selectPluginObjectVariant(object *PluginObject, architecture string) error {
+	if object == nil {
+		return fmt.Errorf("object is nil")
+	}
+	object.SelectedArch = ""
+	architecture = normalizePluginObjectArchitecture(architecture)
+	for _, variant := range object.Variants {
+		if normalizePluginObjectArchitecture(variant.Architecture) != architecture {
+			continue
+		}
+		object.Path = variant.Path
+		object.SHA256 = variant.SHA256
+		object.SelectedArch = architecture
+		return nil
+	}
+	if strings.TrimSpace(object.Path) != "" {
+		object.SelectedArch = "fallback"
+		return nil
+	}
+	return fmt.Errorf("no eBPF object variant is available for architecture %s", architecture)
 }
 
 func pluginObjectSHA256Required(plugin LoadedPlugin, object PluginObject) bool {
@@ -109,13 +200,24 @@ func resolvePluginObjectRealPath(plugin *LoadedPlugin, object PluginObject) (str
 	return realObjectPath, nil
 }
 
-func resolvePluginObjectSpec(object *PluginObject, objectPath, expectedSHA256 string) error {
+func resolvePluginObjectSpec(object *PluginObject, objectPath, expectedSHA256 string, limits PluginResourceLimits) error {
 	spec, err := loadVerifiedPluginObjectCollectionSpec(objectPath, expectedSHA256)
 	if err != nil {
 		return fmt.Errorf("parse eBPF object: %w", err)
 	}
 	object.ProgramCount = len(spec.Programs)
 	object.MapCount = len(spec.Maps)
+	if limits.ObjectsPerPlugin == 0 {
+		limits = pluginResourceLimitsFromConfig(nil)
+	}
+	usage, err := pluginObjectResourceUsageFromSpec(spec, limits)
+	if err != nil {
+		return fmt.Errorf("resource budget: %w", err)
+	}
+	object.ResourceUsage = usage
+	if err := validatePluginObjectStateMapSpecs(object.StateMaps, spec); err != nil {
+		return err
+	}
 
 	discoveredPrograms := pluginObjectProgramsFromSpec(spec)
 	if len(object.Programs) == 0 {
@@ -143,24 +245,52 @@ func resolvePluginObjectSpec(object *PluginObject, objectPath, expectedSHA256 st
 	return nil
 }
 
+func validatePluginObjectStateMapSpecs(contracts []PluginObjectStateMap, spec *ebpf.CollectionSpec) error {
+	if len(contracts) == 0 {
+		return nil
+	}
+	if spec == nil {
+		return fmt.Errorf("state map validation requires an eBPF collection spec")
+	}
+	for _, contract := range contracts {
+		if contract.Policy != pluginObjectMapPreserve && contract.Policy != pluginObjectMapMigrate {
+			continue
+		}
+		mapSpec := spec.Maps[contract.Name]
+		if mapSpec == nil {
+			return fmt.Errorf("state map %q with policy %s is not present in the object", contract.Name, contract.Policy)
+		}
+		if !pluginObjectMapTypeSupportsStatePreservation(mapSpec.Type) {
+			return fmt.Errorf("state map %q with policy %s uses unsupported map type %s", contract.Name, contract.Policy, mapSpec.Type)
+		}
+	}
+	return nil
+}
+
+func pluginObjectMapTypeSupportsStatePreservation(mapType ebpf.MapType) bool {
+	switch mapType {
+	case ebpf.Hash,
+		ebpf.Array,
+		ebpf.PerCPUHash,
+		ebpf.PerCPUArray,
+		ebpf.LRUHash,
+		ebpf.LRUCPUHash,
+		ebpf.LPMTrie:
+		return true
+	default:
+		return false
+	}
+}
+
 func loadVerifiedPluginObjectCollectionSpec(objectPath, expectedSHA256 string) (*ebpf.CollectionSpec, error) {
 	expectedSHA256 = strings.TrimSpace(strings.ToLower(expectedSHA256))
 	if expectedSHA256 == "" {
 		return nil, fmt.Errorf("verified sha256 is required")
 	}
 
-	file, err := os.Open(objectPath) // #nosec G304 -- callers pass a symlink-resolved path constrained to the plugin root.
+	data, _, err := readBoundedRegularFileAtPath(objectPath, pluginObjectMaxSize, true)
 	if err != nil {
 		return nil, err
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(io.LimitReader(file, pluginObjectMaxSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > pluginObjectMaxSize {
-		return nil, fmt.Errorf("object exceeds %d bytes", pluginObjectMaxSize)
 	}
 	got := fmt.Sprintf("%x", sha256.Sum256(data))
 	if got != expectedSHA256 {
@@ -228,7 +358,16 @@ func pluginObjectProgramKind(program *ebpf.ProgramSpec) string {
 }
 
 func sha256File(filePath string) (string, error) {
-	file, err := os.Open(filePath) // #nosec G304 -- plugin object paths are symlink-resolved and checked against the plugin root first.
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(filepath.Dir(absPath))
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.Base(absPath))
 	if err != nil {
 		return "", err
 	}
@@ -254,6 +393,7 @@ func validatePluginHookProgramRefs(plugin *LoadedPlugin) error {
 		objects[object.ID] = object
 		objects[object.Path] = object
 	}
+	objectEngines := make(map[string]string, len(plugin.Objects))
 	for i, hook := range plugin.Hooks {
 		if hook.Engine == "control" || strings.HasPrefix(hook.Program, "builtin:") {
 			continue
@@ -273,6 +413,10 @@ func validatePluginHookProgramRefs(plugin *LoadedPlugin) error {
 		if hook.Engine != program.Type {
 			return fmt.Errorf("hooks[%d]: program %q type = %q, want hook engine %q", i, programRef, program.Type, hook.Engine)
 		}
+		if previous := objectEngines[object.ID]; previous != "" && previous != hook.Engine {
+			return fmt.Errorf("hooks[%d]: object %q is shared by %s and %s hooks; split cross-engine programs into separate objects so private map ownership remains deterministic", i, object.ID, previous, hook.Engine)
+		}
+		objectEngines[object.ID] = hook.Engine
 	}
 	return nil
 }

@@ -17,12 +17,14 @@ import (
 
 const (
 	kernelPluginPipelineInterface       = builtinPluginPipelineID
-	kernelPluginPipelineStageForward    = "forward"
-	kernelPluginPipelineStageReply      = "reply"
-	kernelPluginPipelineStagePreForward = "pre_forward"
-	kernelPluginPipelineStagePostLookup = "post_lookup"
-	kernelPluginPipelineStagePreReply   = "pre_reply"
-	kernelPluginPipelineStagePostReply  = "post_reply"
+	kernelPluginPipelineStageForward    = pluginPipelineDirectionForward
+	kernelPluginPipelineStageReply      = pluginPipelineDirectionReply
+	kernelPluginPipelineStagePreForward = pluginPipelineStagePreForward
+	kernelPluginPipelineStagePostLookup = pluginPipelineStagePostLookup
+	kernelPluginPipelineStagePostApply  = pluginPipelineStagePostApply
+	kernelPluginPipelineStagePreReply   = pluginPipelineStagePreReply
+	kernelPluginPipelineStagePostReply  = pluginPipelineStagePostReply
+	kernelPluginPipelineStageReplyApply = pluginPipelineStageReplyApply
 	kernelPluginPipelineUpdateGrace     = 25 * time.Millisecond
 	kernelPluginPipelineAttachIngress   = uint32(0)
 	kernelPluginPipelineAttachEgress    = uint32(1)
@@ -44,6 +46,29 @@ type kernelTCPluginConfigV4 struct {
 	EgressPostLookupGlobalMask uint32
 	EgressPreReplyGlobalMask   uint32
 	EgressPostReplyGlobalMask  uint32
+	PostApplyCount             uint32
+	PostReplyApplyCount        uint32
+	PostApplyGlobalMask        uint32
+	PostReplyApplyGlobalMask   uint32
+	EgressPostApplyGlobalMask  uint32
+	EgressReplyApplyGlobalMask uint32
+	PreForwardMetadataMask     uint32
+	PostLookupMetadataMask     uint32
+	PostApplyMetadataMask      uint32
+	PreReplyMetadataMask       uint32
+	PostReplyMetadataMask      uint32
+	ReplyApplyMetadataMask     uint32
+}
+
+type kernelTCPluginMetricValue struct {
+	PacketsV4        uint64
+	BytesV4          uint64
+	ContinuedV4      uint64
+	TailCallMissesV4 uint64
+	PacketsV6        uint64
+	BytesV6          uint64
+	ContinuedV6      uint64
+	TailCallMissesV6 uint64
 }
 
 type kernelTCPluginInterfaceKeyV4 struct {
@@ -57,6 +82,8 @@ type kernelTCPluginInterfaceValueV4 struct {
 	PostLookupMask uint32
 	PreReplyMask   uint32
 	PostReplyMask  uint32
+	PostApplyMask  uint32
+	ReplyApplyMask uint32
 }
 
 type kernelPluginPipelineInterfaceMasks struct {
@@ -157,6 +184,7 @@ type kernelPluginPipelineHookPlan struct {
 	ObjectID         string
 	ObjectPath       string
 	ObjectSHA256     string
+	ObjectStateMaps  []PluginObjectStateMap
 	ProgramRef       string
 	ProgramSection   string
 	Stage            string
@@ -166,6 +194,10 @@ type kernelPluginPipelineHookPlan struct {
 	Interfaces       []string
 	InterfaceIndexes []uint32
 	Priority         int
+	Before           []string
+	After            []string
+	Order            int
+	PacketMetadata   []kernelPluginPacketMetadataBinding
 }
 
 type loadedKernelPluginPipelineProgram struct {
@@ -176,7 +208,131 @@ type loadedKernelPluginPipelineProgram struct {
 func (rt *linuxKernelRuleRuntime) PluginSnapshot() pluginRuntimeSnapshot {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
+	snapshot := clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
+	if rt.coll != nil {
+		populateKernelPluginMetrics(snapshot, rt.coll.Maps[kernelTCPluginMetricsMapName])
+	}
+	return snapshot
+}
+
+func populateKernelPluginMetrics(snapshot pluginRuntimeSnapshot, metricsMap *ebpf.Map) {
+	if metricsMap == nil || len(snapshot.Plugins) == 0 {
+		return
+	}
+	possibleCPUs, err := kernelPossibleCPUCount()
+	if err != nil {
+		return
+	}
+	cache := make(map[uint32]kernelTCPluginMetricValue)
+	for pluginID, state := range snapshot.Plugins {
+		changed := false
+		for i := range state.Attachments {
+			key, ok := kernelPluginMetricKey(state.Attachments[i])
+			if !ok {
+				continue
+			}
+			value, found := cache[key]
+			if !found {
+				perCPU := make([]kernelTCPluginMetricValue, possibleCPUs)
+				if err := metricsMap.Lookup(key, &perCPU); err != nil {
+					continue
+				}
+				value = aggregateKernelPluginMetricValues(perCPU)
+				cache[key] = value
+			}
+			state.Attachments[i].Metrics = pluginAttachmentMetricsFromKernel(value, state.Attachments[i].Mode)
+			changed = true
+		}
+		if changed {
+			snapshot.Plugins[pluginID] = state
+		}
+	}
+}
+
+func kernelPluginMetricKey(attachment PluginAttachmentState) (uint32, bool) {
+	metricBase := 0
+	chainBase := 0
+	switch attachment.Stage {
+	case kernelPluginPipelineStagePreForward:
+		metricBase = tcPluginMetricPreForwardBase
+		chainBase = tcProgramChainIndexV4PluginBase
+	case kernelPluginPipelineStagePostLookup:
+		metricBase = tcPluginMetricPostLookupBase
+		chainBase = tcProgramChainIndexV4PluginPostBase
+	case kernelPluginPipelineStagePostApply:
+		metricBase = tcPluginMetricPostApplyBase
+		chainBase = tcProgramChainIndexV4PluginApplyBase
+	case kernelPluginPipelineStagePreReply:
+		metricBase = tcPluginMetricPreReplyBase
+		chainBase = tcProgramChainIndexV4PluginReplyBase
+	case kernelPluginPipelineStagePostReply:
+		metricBase = tcPluginMetricPostReplyBase
+		chainBase = tcProgramChainIndexV4PluginReplyPostBase
+	case kernelPluginPipelineStageReplyApply:
+		metricBase = tcPluginMetricReplyApplyBase
+		chainBase = tcProgramChainIndexV4PluginReplyApplyBase
+	default:
+		return 0, false
+	}
+	index := attachment.ChainSlot - chainBase
+	if index < 0 || index >= tcPluginMetricStageWidth {
+		return 0, false
+	}
+	return uint32(metricBase + index), true
+}
+
+func aggregateKernelPluginMetricValues(values []kernelTCPluginMetricValue) kernelTCPluginMetricValue {
+	var total kernelTCPluginMetricValue
+	for _, value := range values {
+		total.PacketsV4 += value.PacketsV4
+		total.BytesV4 += value.BytesV4
+		total.ContinuedV4 += value.ContinuedV4
+		total.TailCallMissesV4 += value.TailCallMissesV4
+		total.PacketsV6 += value.PacketsV6
+		total.BytesV6 += value.BytesV6
+		total.ContinuedV6 += value.ContinuedV6
+		total.TailCallMissesV6 += value.TailCallMissesV6
+	}
+	return total
+}
+
+func pluginAttachmentMetricsFromKernel(value kernelTCPluginMetricValue, mode string) *PluginAttachmentMetrics {
+	dropMode := strings.EqualFold(strings.TrimSpace(mode), "drop")
+	ipv4 := pluginPacketMetrics(value.PacketsV4, value.BytesV4, value.ContinuedV4, value.TailCallMissesV4, dropMode)
+	ipv6 := pluginPacketMetrics(value.PacketsV6, value.BytesV6, value.ContinuedV6, value.TailCallMissesV6, dropMode)
+	total := pluginPacketMetrics(
+		value.PacketsV4+value.PacketsV6,
+		value.BytesV4+value.BytesV6,
+		value.ContinuedV4+value.ContinuedV6,
+		value.TailCallMissesV4+value.TailCallMissesV6,
+		dropMode,
+	)
+	return &PluginAttachmentMetrics{Total: total, IPv4: ipv4, IPv6: ipv6}
+}
+
+func pluginPacketMetrics(packets, bytes, continued, misses uint64, dropMode bool) PluginPacketMetrics {
+	terminal := packets
+	if continued >= terminal {
+		terminal = 0
+	} else {
+		terminal -= continued
+	}
+	if misses >= terminal {
+		terminal = 0
+	} else {
+		terminal -= misses
+	}
+	metrics := PluginPacketMetrics{
+		Packets:          packets,
+		Bytes:            bytes,
+		ContinuedPackets: continued,
+		TailCallMisses:   misses,
+		TerminalPackets:  terminal,
+	}
+	if dropMode {
+		metrics.DroppedPackets = terminal
+	}
+	return metrics
 }
 
 func (rt *linuxKernelRuleRuntime) ReconcilePlugins(catalog PluginCatalog) pluginRuntimeSnapshot {
@@ -455,6 +611,10 @@ func (rt *linuxKernelRuleRuntime) pluginPipelineDesiredForCatalogFailure(catalog
 			continue
 		}
 		if _, stillDesired := currentIDs[pluginID]; !stillDesired {
+			if state, ok := states[pluginID]; ok && state.Error != "" {
+				failures[pluginID] = state.Error
+				continue
+			}
 			return nil, states, false
 		}
 	}
@@ -484,9 +644,13 @@ func cloneKernelPluginPipelineDesired(values []kernelPluginPipelineDesiredPlugin
 		out[i].hooks = make([]kernelPluginPipelineHookPlan, len(item.hooks))
 		for j, hook := range item.hooks {
 			out[i].hooks[j] = hook
+			out[i].hooks[j].Before = append([]string(nil), hook.Before...)
+			out[i].hooks[j].After = append([]string(nil), hook.After...)
 			out[i].hooks[j].Context = append([]string(nil), hook.Context...)
 			out[i].hooks[j].Interfaces = append([]string(nil), hook.Interfaces...)
 			out[i].hooks[j].InterfaceIndexes = append([]uint32(nil), hook.InterfaceIndexes...)
+			out[i].hooks[j].ObjectStateMaps = append([]PluginObjectStateMap(nil), hook.ObjectStateMaps...)
+			out[i].hooks[j].PacketMetadata = cloneKernelPluginPacketMetadataBindings(hook.PacketMetadata)
 		}
 	}
 	return out
@@ -536,8 +700,10 @@ func kernelPluginPipelineHookRunnableWithoutRules(plan kernelPluginPipelineHookP
 	switch plan.Stage {
 	case kernelPluginPipelineStagePreForward,
 		kernelPluginPipelineStagePostLookup,
+		kernelPluginPipelineStagePostApply,
 		kernelPluginPipelineStagePreReply,
-		kernelPluginPipelineStagePostReply:
+		kernelPluginPipelineStagePostReply,
+		kernelPluginPipelineStageReplyApply:
 		return true
 	default:
 		return false
@@ -577,13 +743,13 @@ func kernelPluginPipelineResolveExplicitAttachTargets(desired []kernelPluginPipe
 				}
 				for _, attach := range kernelPluginPipelinePlanAttachDirections(hook.Attach) {
 					switch hook.Stage {
-					case kernelPluginPipelineStagePreForward, kernelPluginPipelineStagePostLookup:
+					case kernelPluginPipelineStagePreForward, kernelPluginPipelineStagePostLookup, kernelPluginPipelineStagePostApply:
 						if attach == kernelPluginPipelineAttachEgress {
 							itemTargets.ForwardEgress[iface.Index] = nil
 						} else {
 							itemTargets.ForwardIngress[iface.Index] = nil
 						}
-					case kernelPluginPipelineStagePreReply, kernelPluginPipelineStagePostReply:
+					case kernelPluginPipelineStagePreReply, kernelPluginPipelineStagePostReply, kernelPluginPipelineStageReplyApply:
 						if attach == kernelPluginPipelineAttachEgress {
 							itemTargets.ReplyEgress[iface.Index] = nil
 						} else {
@@ -633,10 +799,14 @@ func kernelPluginPipelineNormalizeStage(stage string, priority int) (string, boo
 		return kernelPluginPipelineStagePreForward, true, nil
 	case kernelPluginPipelineStagePostLookup:
 		return kernelPluginPipelineStagePostLookup, true, nil
+	case kernelPluginPipelineStagePostApply:
+		return kernelPluginPipelineStagePostApply, true, nil
 	case kernelPluginPipelineStagePreReply:
 		return kernelPluginPipelineStagePreReply, true, nil
 	case kernelPluginPipelineStagePostReply:
 		return kernelPluginPipelineStagePostReply, true, nil
+	case kernelPluginPipelineStageReplyApply:
+		return kernelPluginPipelineStageReplyApply, true, nil
 	case kernelPluginPipelineStageForward:
 		if priority < pluginPipelineCorePriority {
 			return kernelPluginPipelineStagePreForward, true, nil
@@ -664,10 +834,14 @@ func kernelPluginPipelineStageRank(stage string) int {
 		return 0
 	case kernelPluginPipelineStagePostLookup:
 		return 1
-	case kernelPluginPipelineStagePreReply:
+	case kernelPluginPipelineStagePostApply:
 		return 2
-	case kernelPluginPipelineStagePostReply:
+	case kernelPluginPipelineStagePreReply:
 		return 3
+	case kernelPluginPipelineStagePostReply:
+		return 4
+	case kernelPluginPipelineStageReplyApply:
+		return 5
 	default:
 		return 99
 	}
@@ -693,10 +867,14 @@ func effectiveKernelPluginPipelineHookContext(values []string, stage string) ([]
 		}
 		add(value)
 	}
-	if stage == kernelPluginPipelineStagePostLookup || stage == kernelPluginPipelineStagePostReply {
+	if stage == kernelPluginPipelineStagePostLookup || stage == kernelPluginPipelineStagePostApply ||
+		stage == kernelPluginPipelineStagePostReply || stage == kernelPluginPipelineStageReplyApply {
 		add(pluginHookContextTCPluginCtxV4)
+		add(pluginHookContextTCPluginCtxV6)
 	} else if _, ok := seen[pluginHookContextTCPluginCtxV4]; ok {
 		return nil, fmt.Errorf("context %q is only available after Veer Core lookup", pluginHookContextTCPluginCtxV4)
+	} else if _, ok := seen[pluginHookContextTCPluginCtxV6]; ok {
+		return nil, fmt.Errorf("context %q is only available after Veer Core lookup", pluginHookContextTCPluginCtxV6)
 	}
 	sort.Strings(out)
 	return out, nil
@@ -713,14 +891,27 @@ func kernelPluginPipelineHookNeedsContext(plan kernelPluginPipelineHookPlan, con
 
 func kernelPluginPipelineObjectCacheKey(objectPath string, needsPluginCtx bool) string {
 	if needsPluginCtx {
-		return objectPath + "\x00" + pluginHookContextTCPluginCtxV4
+		return objectPath + "\x00" + pluginHookContextTCPluginCtxV4 + "+" + pluginHookContextTCPluginCtxV6
 	}
 	return objectPath + "\x00"
+}
+
+func kernelPluginPipelineObjectCacheKeyWithMetadata(pluginID, objectID, objectPath string, needsPluginCtx bool, bindings []kernelPluginPacketMetadataBinding) string {
+	key := kernelPluginPipelineObjectCacheKey(objectPath, needsPluginCtx)
+	if len(bindings) == 0 {
+		return key
+	}
+	payload, _ := json.Marshal(bindings)
+	sum := sha256.Sum256(payload)
+	return key + "\x00metadata:" + pluginID + "/" + objectID + ":" + fmt.Sprintf("%x", sum[:])
 }
 
 func kernelPluginPipelineLess(a, b kernelPluginPipelineHookPlan) bool {
 	if ar, br := kernelPluginPipelineStageRank(a.Stage), kernelPluginPipelineStageRank(b.Stage); ar != br {
 		return ar < br
+	}
+	if a.Order != b.Order {
+		return a.Order < b.Order
 	}
 	if a.Priority != b.Priority {
 		return a.Priority < b.Priority
@@ -729,6 +920,47 @@ func kernelPluginPipelineLess(a, b kernelPluginPipelineHookPlan) bool {
 		return a.PluginID < b.PluginID
 	}
 	return a.HookID < b.HookID
+}
+
+func applyKernelPluginPipelineOrdering(desired []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState) ([]kernelPluginPipelineDesiredPlugin, map[string]PluginRuntimeState) {
+	for len(desired) > 0 {
+		nodes := make([]pluginHookOrderNode, 0)
+		for _, item := range desired {
+			for _, hook := range item.hooks {
+				nodes = append(nodes, pluginHookOrderNode{
+					PluginID: hook.PluginID, HookID: hook.HookID, Stage: hook.Stage, Priority: hook.Priority,
+					Before: hook.Before, After: hook.After,
+				})
+			}
+		}
+		order, invalid := resolvePluginHookOrder(nodes)
+		if len(invalid) == 0 {
+			for i := range desired {
+				for j := range desired[i].hooks {
+					key := pluginHookOrderKey(desired[i].hooks[j].PluginID, desired[i].hooks[j].HookID)
+					desired[i].hooks[j].Order = order[key]
+				}
+				sort.Slice(desired[i].hooks, func(left, right int) bool {
+					return kernelPluginPipelineLess(desired[i].hooks[left], desired[i].hooks[right])
+				})
+			}
+			return desired, states
+		}
+		filtered := make([]kernelPluginPipelineDesiredPlugin, 0, len(desired))
+		for _, item := range desired {
+			message, rejected := invalid[item.plugin.ID]
+			if !rejected {
+				filtered = append(filtered, item)
+				continue
+			}
+			states[item.plugin.ID] = pluginRuntimeErrorState(message)
+		}
+		if len(filtered) == len(desired) {
+			break
+		}
+		desired = filtered
+	}
+	return desired, states
 }
 
 func buildKernelPluginPipelineDesired(catalog PluginCatalog) ([]kernelPluginPipelineDesiredPlugin, map[string]PluginRuntimeState) {
@@ -742,12 +974,8 @@ func buildKernelPluginPipelineDesiredForRuntime(catalog PluginCatalog, cfg *Conf
 func buildKernelPluginPipelineDesiredWithConfig(catalog PluginCatalog, cfg *Config, enforceStability bool) ([]kernelPluginPipelineDesiredPlugin, map[string]PluginRuntimeState) {
 	states := make(map[string]PluginRuntimeState)
 	desired := make([]kernelPluginPipelineDesiredPlugin, 0, len(catalog.Plugins))
-	preForwardHooks := 0
-	postLookupHooks := 0
-	preReplyHooks := 0
-	postReplyHooks := 0
 	for _, plugin := range catalog.Plugins {
-		if plugin.Builtin || plugin.Status != pluginStatusActive {
+		if plugin.Builtin || plugin.Status != pluginStatusActive || !pluginHasHookEngine(plugin, kernelEngineTC) {
 			continue
 		}
 		if enforceStability {
@@ -763,19 +991,33 @@ func buildKernelPluginPipelineDesiredWithConfig(catalog PluginCatalog, cfg *Conf
 			states[plugin.ID] = state
 			continue
 		}
+		desired = append(desired, item)
+	}
+	desired, states = applyKernelPluginPacketMetadataBindings(desired, states)
+	desired, states = applyKernelPluginPipelineOrdering(desired, states)
+	preForwardHooks := 0
+	postLookupHooks := 0
+	postApplyHooks := 0
+	preReplyHooks := 0
+	postReplyHooks := 0
+	replyApplyHooks := 0
+	for _, item := range desired {
 		for _, hook := range item.hooks {
 			switch hook.Stage {
 			case kernelPluginPipelineStagePreForward:
 				preForwardHooks++
 			case kernelPluginPipelineStagePostLookup:
 				postLookupHooks++
+			case kernelPluginPipelineStagePostApply:
+				postApplyHooks++
 			case kernelPluginPipelineStagePreReply:
 				preReplyHooks++
 			case kernelPluginPipelineStagePostReply:
 				postReplyHooks++
+			case kernelPluginPipelineStageReplyApply:
+				replyApplyHooks++
 			}
 		}
-		desired = append(desired, item)
 	}
 	if preForwardHooks > tcProgramChainV4PluginPreForwardMax {
 		errState := pluginRuntimeErrorState(fmt.Sprintf("too many pre-core tc plugin hooks: %d > %d", preForwardHooks, tcProgramChainV4PluginPreForwardMax))
@@ -786,6 +1028,13 @@ func buildKernelPluginPipelineDesiredWithConfig(catalog PluginCatalog, cfg *Conf
 	}
 	if postLookupHooks > tcProgramChainV4PluginPostLookupMax {
 		errState := pluginRuntimeErrorState(fmt.Sprintf("too many next-core tc plugin hooks: %d > %d", postLookupHooks, tcProgramChainV4PluginPostLookupMax))
+		for _, item := range desired {
+			states[item.plugin.ID] = errState
+		}
+		return nil, states
+	}
+	if postApplyHooks > tcProgramChainV4PluginPostApplyMax {
+		errState := pluginRuntimeErrorState(fmt.Sprintf("too many post-apply tc plugin hooks: %d > %d", postApplyHooks, tcProgramChainV4PluginPostApplyMax))
 		for _, item := range desired {
 			states[item.plugin.ID] = errState
 		}
@@ -805,15 +1054,22 @@ func buildKernelPluginPipelineDesiredWithConfig(catalog PluginCatalog, cfg *Conf
 		}
 		return nil, states
 	}
-	if preForwardHooks+postLookupHooks > tcProgramChainV4PluginTotalMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many total tc plugin hooks: %d > %d", preForwardHooks+postLookupHooks, tcProgramChainV4PluginTotalMax))
+	if replyApplyHooks > tcProgramChainV4PluginPostReplyApplyMax {
+		errState := pluginRuntimeErrorState(fmt.Sprintf("too many reply post-apply tc plugin hooks: %d > %d", replyApplyHooks, tcProgramChainV4PluginPostReplyApplyMax))
 		for _, item := range desired {
 			states[item.plugin.ID] = errState
 		}
 		return nil, states
 	}
-	if preReplyHooks+postReplyHooks > tcProgramChainV4PluginReplyTotalMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many total reply tc plugin hooks: %d > %d", preReplyHooks+postReplyHooks, tcProgramChainV4PluginReplyTotalMax))
+	if preForwardHooks+postLookupHooks+postApplyHooks > tcProgramChainV4PluginTotalMax {
+		errState := pluginRuntimeErrorState(fmt.Sprintf("too many total tc plugin hooks: %d > %d", preForwardHooks+postLookupHooks+postApplyHooks, tcProgramChainV4PluginTotalMax))
+		for _, item := range desired {
+			states[item.plugin.ID] = errState
+		}
+		return nil, states
+	}
+	if preReplyHooks+postReplyHooks+replyApplyHooks > tcProgramChainV4PluginReplyTotalMax {
+		errState := pluginRuntimeErrorState(fmt.Sprintf("too many total reply tc plugin hooks: %d > %d", preReplyHooks+postReplyHooks+replyApplyHooks, tcProgramChainV4PluginReplyTotalMax))
 		for _, item := range desired {
 			states[item.plugin.ID] = errState
 		}
@@ -868,7 +1124,6 @@ func buildKernelPluginPipelineDesiredPlugin(plugin LoadedPlugin) (kernelPluginPi
 			continue
 		}
 		if hook.Engine != kernelEngineTC {
-			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: %s hooks are registration-only in the tc pipeline", hook.ID, hook.Engine))
 			continue
 		}
 		stage, supported, err := kernelPluginPipelineNormalizeStage(hook.Stage, hook.Priority)
@@ -915,19 +1170,23 @@ func buildKernelPluginPipelineDesiredPlugin(plugin LoadedPlugin) (kernelPluginPi
 			attach = "ingress"
 		}
 		item.hooks = append(item.hooks, kernelPluginPipelineHookPlan{
-			PluginID:       plugin.ID,
-			HookID:         hook.ID,
-			ObjectID:       object.ID,
-			ObjectPath:     realPath,
-			ObjectSHA256:   object.ResolvedSHA256,
-			ProgramRef:     programRef,
-			ProgramSection: program.Section,
-			Stage:          stage,
-			Attach:         attach,
-			Mode:           hook.Mode,
-			Context:        context,
-			Interfaces:     append([]string(nil), hook.Interfaces...),
-			Priority:       hook.Priority,
+			PluginID:        plugin.ID,
+			HookID:          hook.ID,
+			ObjectID:        object.ID,
+			ObjectPath:      realPath,
+			ObjectSHA256:    object.ResolvedSHA256,
+			ObjectStateMaps: append([]PluginObjectStateMap(nil), object.StateMaps...),
+			ProgramRef:      programRef,
+			ProgramSection:  program.Section,
+			Stage:           stage,
+			Attach:          attach,
+			Mode:            hook.Mode,
+			Context:         context,
+			Interfaces:      append([]string(nil), hook.Interfaces...),
+			Priority:        hook.Priority,
+			Before:          append([]string(nil), hook.Before...),
+			After:           append([]string(nil), hook.After...),
+			PacketMetadata:  kernelPluginPacketMetadataBindings(hook.PacketMetadata),
 		})
 	}
 	if len(item.hooks) == 0 {
@@ -955,13 +1214,15 @@ func (rt *linuxKernelRuleRuntime) loadKernelPluginPipelinePrograms(desired []ker
 
 	objectCache := make(map[string]*loadedPluginObject)
 	objectNeedsContext := kernelPluginPipelineObjectContextNeeds(desired)
+	objectMetadata := kernelPluginObjectMetadataBindings(desired)
 	failedPlugins := make(map[string]string)
 	programs := make([]loadedKernelPluginPipelineProgram, 0, len(desired))
 	for _, item := range desired {
 		for _, plan := range item.hooks {
 			needsPluginCtx := objectNeedsContext[plan.ObjectPath]
-			previous := reusableKernelPluginPipelineObject(rt.pluginPipelineLoaded, plan)
-			object, err := loadPluginObjectForPipeline(objectCache, plan.ObjectPath, plan.ObjectSHA256, pieces, needsPluginCtx, previous)
+			metadataBindings := objectMetadata[kernelPluginObjectMetadataKey(plan.PluginID, plan.ObjectID, plan.ObjectPath)]
+			previous, unchanged := previousKernelPluginPipelineObject(rt.pluginPipelineLoaded, plan)
+			object, err := loadPluginObjectForPipeline(objectCache, plan.PluginID, plan.ObjectID, plan.ObjectPath, plan.ObjectSHA256, pieces, needsPluginCtx, metadataBindings, plan.ObjectStateMaps, previous, unchanged)
 			if err != nil {
 				failedPlugins[plan.PluginID] = err.Error()
 				break
@@ -996,8 +1257,10 @@ func (rt *linuxKernelRuleRuntime) loadKernelPluginPipelinePrograms(desired []ker
 	attachmentsByPlugin := make(map[string][]PluginAttachmentState)
 	preForwardIndex := 0
 	postLookupIndex := 0
+	postApplyIndex := 0
 	preReplyIndex := 0
 	postReplyIndex := 0
+	replyApplyIndex := 0
 	for _, item := range programs {
 		slot := 0
 		switch item.plan.Stage {
@@ -1007,26 +1270,36 @@ func (rt *linuxKernelRuleRuntime) loadKernelPluginPipelinePrograms(desired []ker
 		case kernelPluginPipelineStagePostLookup:
 			slot = tcProgramChainIndexV4PluginPostBase + postLookupIndex
 			postLookupIndex++
+		case kernelPluginPipelineStagePostApply:
+			slot = tcProgramChainIndexV4PluginApplyBase + postApplyIndex
+			postApplyIndex++
 		case kernelPluginPipelineStagePreReply:
 			slot = tcProgramChainIndexV4PluginReplyBase + preReplyIndex
 			preReplyIndex++
 		case kernelPluginPipelineStagePostReply:
 			slot = tcProgramChainIndexV4PluginReplyPostBase + postReplyIndex
 			postReplyIndex++
+		case kernelPluginPipelineStageReplyApply:
+			slot = tcProgramChainIndexV4PluginReplyApplyBase + replyApplyIndex
+			replyApplyIndex++
 		}
 		countByPlugin[item.plan.PluginID]++
 		attachmentsByPlugin[item.plan.PluginID] = append(attachmentsByPlugin[item.plan.PluginID], PluginAttachmentState{
-			HookID:    item.plan.HookID,
-			Engine:    kernelEngineTC,
-			Attach:    item.plan.Attach,
-			Stage:     item.plan.Stage,
-			Interface: kernelPluginPipelineInterface,
-			Program:   item.plan.ObjectID + ":" + item.plan.ProgramRef,
-			Mode:      item.plan.Mode,
-			Context:   append([]string(nil), item.plan.Context...),
-			Priority:  item.plan.Priority,
-			ChainSlot: slot,
-			Status:    "chained",
+			HookID:         item.plan.HookID,
+			Engine:         kernelEngineTC,
+			Attach:         item.plan.Attach,
+			Stage:          item.plan.Stage,
+			Interface:      kernelPluginPipelineInterface,
+			Program:        item.plan.ObjectID + ":" + item.plan.ProgramRef,
+			Mode:           item.plan.Mode,
+			Context:        append([]string(nil), item.plan.Context...),
+			Priority:       item.plan.Priority,
+			Before:         append([]string(nil), item.plan.Before...),
+			After:          append([]string(nil), item.plan.After...),
+			Order:          item.plan.Order,
+			PacketMetadata: pluginPacketMetadataBindingsForState(item.plan.PacketMetadata),
+			ChainSlot:      slot,
+			Status:         "chained",
 		})
 	}
 	for _, item := range desired {
@@ -1050,7 +1323,9 @@ func (rt *linuxKernelRuleRuntime) loadKernelPluginPipelinePrograms(desired []ker
 
 	refs := make([]loadedPluginObjectRef, 0, len(objectCache))
 	for _, item := range programs {
-		object, ok := objectCache[kernelPluginPipelineObjectCacheKey(item.plan.ObjectPath, objectNeedsContext[item.plan.ObjectPath])]
+		metadataBindings := objectMetadata[kernelPluginObjectMetadataKey(item.plan.PluginID, item.plan.ObjectID, item.plan.ObjectPath)]
+		cacheKey := kernelPluginPipelineObjectCacheKeyWithMetadata(item.plan.PluginID, item.plan.ObjectID, item.plan.ObjectPath, objectNeedsContext[item.plan.ObjectPath], metadataBindings)
+		object, ok := objectCache[cacheKey]
 		if !ok || object == nil || object.coll == nil {
 			continue
 		}
@@ -1059,6 +1334,8 @@ func (rt *linuxKernelRuleRuntime) loadKernelPluginPipelinePrograms(desired []ker
 			ObjectID:     item.plan.ObjectID,
 			ObjectPath:   item.plan.ObjectPath,
 			ObjectSHA256: item.plan.ObjectSHA256,
+			StateMaps:    append([]PluginObjectStateMap(nil), item.plan.ObjectStateMaps...),
+			Migrations:   append([]PluginEBPFStateMigration(nil), object.migrations...),
 			spec:         object.spec,
 			coll:         object.coll,
 		})
@@ -1084,7 +1361,8 @@ func kernelPluginPipelineObjectContextNeeds(desired []kernelPluginPipelineDesire
 	out := make(map[string]bool)
 	for _, item := range desired {
 		for _, hook := range item.hooks {
-			if kernelPluginPipelineHookNeedsContext(hook, pluginHookContextTCPluginCtxV4) {
+			if kernelPluginPipelineHookNeedsContext(hook, pluginHookContextTCPluginCtxV4) ||
+				kernelPluginPipelineHookNeedsContext(hook, pluginHookContextTCPluginCtxV6) {
 				out[hook.ObjectPath] = true
 			} else if _, ok := out[hook.ObjectPath]; !ok {
 				out[hook.ObjectPath] = false
@@ -1116,31 +1394,33 @@ func cleanupUnusedPluginObjectCollections(cache map[string]*loadedPluginObject, 
 	}
 }
 
-func reusableKernelPluginPipelineObject(refs []loadedPluginObjectRef, plan kernelPluginPipelineHookPlan) *loadedPluginObjectRef {
+func previousKernelPluginPipelineObject(refs []loadedPluginObjectRef, plan kernelPluginPipelineHookPlan) (*loadedPluginObjectRef, bool) {
 	hash := strings.TrimSpace(strings.ToLower(plan.ObjectSHA256))
-	if hash == "" {
-		return nil
-	}
 	for i := range refs {
 		ref := &refs[i]
 		if ref.PluginID != plan.PluginID || ref.ObjectID != plan.ObjectID {
 			continue
 		}
-		if strings.TrimSpace(strings.ToLower(ref.ObjectSHA256)) != hash || ref.coll == nil {
+		if ref.coll == nil {
 			continue
 		}
-		return ref
+		unchanged := hash != "" && strings.TrimSpace(strings.ToLower(ref.ObjectSHA256)) == hash &&
+			pluginObjectStateMapsEqual(ref.StateMaps, plan.ObjectStateMaps)
+		return ref, unchanged
 	}
-	return nil
+	return nil, false
 }
 
-func pluginPipelineMapReplacements(spec *ebpf.CollectionSpec, shared map[string]*ebpf.Map, previous *loadedPluginObjectRef) (map[string]*ebpf.Map, error) {
+func pluginPipelineMapReplacements(spec *ebpf.CollectionSpec, shared map[string]*ebpf.Map, stateMaps []PluginObjectStateMap, previous *loadedPluginObjectRef, unchanged bool) (map[string]*ebpf.Map, error) {
 	replacements := make(map[string]*ebpf.Map, len(shared))
 	for name, m := range shared {
 		replacements[name] = m
 	}
 	if previous == nil || previous.coll == nil {
 		return replacements, nil
+	}
+	if !unchanged {
+		return pluginPipelineVersionedMapReplacements(spec, replacements, stateMaps, previous)
 	}
 
 	names := make([]string, 0, len(previous.coll.Maps))
@@ -1165,14 +1445,56 @@ func pluginPipelineMapReplacements(spec *ebpf.CollectionSpec, shared map[string]
 	return replacements, nil
 }
 
-func loadPluginObjectForPipeline(cache map[string]*loadedPluginObject, objectPath, expectedSHA256 string, pieces kernelCollectionPieces, needsPluginCtx bool, previous *loadedPluginObjectRef) (*loadedPluginObject, error) {
+func pluginPipelineVersionedMapReplacements(spec *ebpf.CollectionSpec, replacements map[string]*ebpf.Map, stateMaps []PluginObjectStateMap, previous *loadedPluginObjectRef) (map[string]*ebpf.Map, error) {
+	previousContracts := make(map[string]PluginObjectStateMap, len(previous.StateMaps))
+	for _, contract := range previous.StateMaps {
+		previousContracts[contract.Name] = contract
+	}
+	nextContracts := make(map[string]PluginObjectStateMap, len(stateMaps))
+	for _, contract := range stateMaps {
+		nextContracts[contract.Name] = contract
+	}
+	for name, oldContract := range previousContracts {
+		if oldContract.Policy != pluginObjectMapPreserve && oldContract.Policy != pluginObjectMapMigrate {
+			continue
+		}
+		nextContract, ok := nextContracts[name]
+		if !ok {
+			if pluginStateMapMigrationRollbackAllowed(oldContract, previousContracts, nextContracts) {
+				continue
+			}
+			return nil, fmt.Errorf("preserved state map %q was removed from the object contract; declare policy=reset to acknowledge state loss", name)
+		}
+		if nextContract.Policy == pluginObjectMapReset {
+			continue
+		}
+		if nextContract.SchemaVersion != oldContract.SchemaVersion {
+			if nextContract.Policy == pluginObjectMapMigrate {
+				continue
+			}
+			return nil, fmt.Errorf("preserved state map %q schema changed from %d to %d; declare policy=reset or keep a compatible schema version", name, oldContract.SchemaVersion, nextContract.SchemaVersion)
+		}
+		oldMap := previous.coll.Maps[name]
+		nextSpec := spec.Maps[name]
+		if oldMap == nil || nextSpec == nil {
+			return nil, fmt.Errorf("preserve state map %q: map is missing from an object version", name)
+		}
+		if err := nextSpec.Compatible(oldMap); err != nil {
+			return nil, fmt.Errorf("preserve state map %q schema version %d: %w", name, nextContract.SchemaVersion, err)
+		}
+		replacements[name] = oldMap
+	}
+	return replacements, nil
+}
+
+func loadPluginObjectForPipeline(cache map[string]*loadedPluginObject, pluginID, objectID, objectPath, expectedSHA256 string, pieces kernelCollectionPieces, needsPluginCtx bool, metadataBindings []kernelPluginPacketMetadataBinding, stateMaps []PluginObjectStateMap, previous *loadedPluginObjectRef, unchanged bool) (*loadedPluginObject, error) {
 	if pieces.progChainV4 == nil {
 		return nil, fmt.Errorf("tc program chain map is unavailable")
 	}
-	cacheKey := kernelPluginPipelineObjectCacheKey(objectPath, needsPluginCtx)
+	cacheKey := kernelPluginPipelineObjectCacheKeyWithMetadata(pluginID, objectID, objectPath, needsPluginCtx, metadataBindings)
 	if object, ok := cache[cacheKey]; ok {
-		if needsPluginCtx && object.spec.Maps[kernelTCPluginContextMapName] == nil {
-			return nil, fmt.Errorf("plugin object %s must declare shared map %q for context-aware pipeline hooks", objectPath, kernelTCPluginContextMapName)
+		if needsPluginCtx && (object.spec.Maps[kernelTCPluginContextMapName] == nil || object.spec.Maps[kernelTCPluginContextMapNameV6] == nil) {
+			return nil, fmt.Errorf("plugin object %s must declare shared maps %q and %q for context-aware pipeline hooks", objectPath, kernelTCPluginContextMapName, kernelTCPluginContextMapNameV6)
 		}
 		return object, nil
 	}
@@ -1183,28 +1505,58 @@ func loadPluginObjectForPipeline(cache map[string]*loadedPluginObject, objectPat
 	if spec.Maps[kernelTCProgramChainMapName] == nil {
 		return nil, fmt.Errorf("plugin object %s must declare shared map %q for Veer pipeline chaining", objectPath, kernelTCProgramChainMapName)
 	}
-	if needsPluginCtx && spec.Maps[kernelTCPluginContextMapName] == nil {
-		return nil, fmt.Errorf("plugin object %s must declare shared map %q for context-aware pipeline hooks", objectPath, kernelTCPluginContextMapName)
+	chainSpec := spec.Maps[kernelTCProgramChainMapName]
+	if chainSpec.Type != ebpf.ProgramArray || chainSpec.MaxEntries < tcProgramChainV4MaxEntries {
+		return nil, fmt.Errorf("plugin object %s declares incompatible shared map %q: type=%s max_entries=%d, want program array with at least %d entries", objectPath, kernelTCProgramChainMapName, chainSpec.Type, chainSpec.MaxEntries, tcProgramChainV4MaxEntries)
+	}
+	if needsPluginCtx && (spec.Maps[kernelTCPluginContextMapName] == nil || spec.Maps[kernelTCPluginContextMapNameV6] == nil) {
+		return nil, fmt.Errorf("plugin object %s must declare shared maps %q and %q for context-aware pipeline hooks", objectPath, kernelTCPluginContextMapName, kernelTCPluginContextMapNameV6)
+	}
+	if len(metadataBindings) > 0 {
+		if err := validateKernelPluginPacketMetadataObjectSpec(spec, objectPath); err != nil {
+			return nil, err
+		}
+		if pieces.packetMetadataGenerationV4 == nil || pieces.packetMetadataGenerationV6 == nil || pieces.packetMetadataV4 == nil || pieces.packetMetadataV6 == nil {
+			return nil, fmt.Errorf("tc packet metadata maps are unavailable")
+		}
 	}
 	sharedMaps := map[string]*ebpf.Map{
 		kernelTCProgramChainMapName: pieces.progChainV4,
 	}
 	if needsPluginCtx {
-		if pieces.pluginCtxV4 == nil {
-			return nil, fmt.Errorf("tc plugin context map is unavailable")
+		if pieces.pluginCtxV4 == nil || pieces.pluginCtxV6 == nil {
+			return nil, fmt.Errorf("tc plugin context maps are unavailable")
 		}
 		sharedMaps[kernelTCPluginContextMapName] = pieces.pluginCtxV4
+		sharedMaps[kernelTCPluginContextMapNameV6] = pieces.pluginCtxV6
 	}
-	replacements, err := pluginPipelineMapReplacements(spec, sharedMaps, previous)
+	if len(metadataBindings) > 0 {
+		sharedMaps[kernelTCPacketMetadataGenerationMapNameV4] = pieces.packetMetadataGenerationV4
+		sharedMaps[kernelTCPacketMetadataGenerationMapNameV6] = pieces.packetMetadataGenerationV6
+		sharedMaps[kernelTCPacketMetadataMapNameV4] = pieces.packetMetadataV4
+		sharedMaps[kernelTCPacketMetadataMapNameV6] = pieces.packetMetadataV6
+	}
+	replacements, err := pluginPipelineMapReplacements(spec, sharedMaps, stateMaps, previous, unchanged)
 	if err != nil {
 		return nil, fmt.Errorf("load plugin object %s: %w", objectPath, err)
 	}
+	migrations, err := planPluginObjectStateMigrations(pluginID, objectID, stateMaps, previous)
+	if err != nil {
+		return nil, fmt.Errorf("load plugin object %s: %w", objectPath, err)
+	}
+	delete(replacements, kernelTCPacketMetadataBindingsMapName)
 	coll, err := ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(replacements))
 	if err != nil {
 		logKernelVerifierDetails(err)
 		return nil, fmt.Errorf("load plugin object %s: %w", objectPath, err)
 	}
-	object := &loadedPluginObject{path: objectPath, spec: spec, coll: coll}
+	if len(metadataBindings) > 0 {
+		if err := populateKernelPluginPacketMetadataBindings(coll.Maps[kernelTCPacketMetadataBindingsMapName], metadataBindings); err != nil {
+			coll.Close()
+			return nil, fmt.Errorf("load plugin object %s packet metadata bindings: %w", objectPath, err)
+		}
+	}
+	object := &loadedPluginObject{path: objectPath, spec: spec, coll: coll, migrations: migrations}
 	cache[cacheKey] = object
 	return object, nil
 }
@@ -1212,18 +1564,24 @@ func loadPluginObjectForPipeline(cache map[string]*loadedPluginObject, objectPat
 func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs []loadedKernelPluginPipelineProgram, core kernelPluginPipelineCoreConfig) (uint32, error) {
 	preForward := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
 	postLookup := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
+	postApply := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
 	preReply := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
 	postReply := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
+	replyApply := make([]loadedKernelPluginPipelineProgram, 0, len(programs))
 	for _, item := range programs {
 		switch item.plan.Stage {
 		case kernelPluginPipelineStagePreForward:
 			preForward = append(preForward, item)
 		case kernelPluginPipelineStagePostLookup:
 			postLookup = append(postLookup, item)
+		case kernelPluginPipelineStagePostApply:
+			postApply = append(postApply, item)
 		case kernelPluginPipelineStagePreReply:
 			preReply = append(preReply, item)
 		case kernelPluginPipelineStagePostReply:
 			postReply = append(postReply, item)
+		case kernelPluginPipelineStageReplyApply:
+			replyApply = append(replyApply, item)
 		default:
 			return 0, fmt.Errorf("unsupported plugin stage %q", item.plan.Stage)
 		}
@@ -1234,8 +1592,11 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 	if len(postLookup) > tcProgramChainV4PluginPostLookupMax {
 		return 0, fmt.Errorf("too many post_lookup plugin programs: %d > %d", len(postLookup), tcProgramChainV4PluginPostLookupMax)
 	}
-	if len(preForward)+len(postLookup) > tcProgramChainV4PluginTotalMax {
-		return 0, fmt.Errorf("too many total plugin programs: %d > %d", len(preForward)+len(postLookup), tcProgramChainV4PluginTotalMax)
+	if len(postApply) > tcProgramChainV4PluginPostApplyMax {
+		return 0, fmt.Errorf("too many post_apply plugin programs: %d > %d", len(postApply), tcProgramChainV4PluginPostApplyMax)
+	}
+	if len(preForward)+len(postLookup)+len(postApply) > tcProgramChainV4PluginTotalMax {
+		return 0, fmt.Errorf("too many total plugin programs: %d > %d", len(preForward)+len(postLookup)+len(postApply), tcProgramChainV4PluginTotalMax)
 	}
 	if len(preReply) > tcProgramChainV4PluginPreReplyMax {
 		return 0, fmt.Errorf("too many pre_reply plugin programs: %d > %d", len(preReply), tcProgramChainV4PluginPreReplyMax)
@@ -1243,10 +1604,13 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 	if len(postReply) > tcProgramChainV4PluginPostReplyMax {
 		return 0, fmt.Errorf("too many post_reply plugin programs: %d > %d", len(postReply), tcProgramChainV4PluginPostReplyMax)
 	}
-	if len(preReply)+len(postReply) > tcProgramChainV4PluginReplyTotalMax {
-		return 0, fmt.Errorf("too many total reply plugin programs: %d > %d", len(preReply)+len(postReply), tcProgramChainV4PluginReplyTotalMax)
+	if len(replyApply) > tcProgramChainV4PluginPostReplyApplyMax {
+		return 0, fmt.Errorf("too many post_reply_apply plugin programs: %d > %d", len(replyApply), tcProgramChainV4PluginPostReplyApplyMax)
 	}
-	if pieces.progChainV4 == nil || pieces.pluginConfigV4 == nil || pieces.pluginInterfacesV4 == nil {
+	if len(preReply)+len(postReply)+len(replyApply) > tcProgramChainV4PluginReplyTotalMax {
+		return 0, fmt.Errorf("too many total reply plugin programs: %d > %d", len(preReply)+len(postReply)+len(replyApply), tcProgramChainV4PluginReplyTotalMax)
+	}
+	if pieces.progChainV4 == nil || pieces.pluginConfigV4 == nil || pieces.pluginInterfacesV4 == nil || pieces.pluginMetrics == nil {
 		return 0, fmt.Errorf("tc plugin pipeline maps are incomplete")
 	}
 
@@ -1290,10 +1654,16 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 	if err := installStage(postLookup, kernelPluginPipelineStagePostLookup, tcProgramChainV4PluginPostLookupMax); err != nil {
 		return 0, err
 	}
+	if err := installStage(postApply, kernelPluginPipelineStagePostApply, tcProgramChainV4PluginPostApplyMax); err != nil {
+		return 0, err
+	}
 	if err := installStage(preReply, kernelPluginPipelineStagePreReply, tcProgramChainV4PluginPreReplyMax); err != nil {
 		return 0, err
 	}
 	if err := installStage(postReply, kernelPluginPipelineStagePostReply, tcProgramChainV4PluginPostReplyMax); err != nil {
+		return 0, err
+	}
+	if err := installStage(replyApply, kernelPluginPipelineStageReplyApply, tcProgramChainV4PluginPostReplyApplyMax); err != nil {
 		return 0, err
 	}
 	for scope, value := range masks.byInterface {
@@ -1320,11 +1690,42 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 		EgressPostLookupGlobalMask: egressGlobal.PostLookupMask,
 		EgressPreReplyGlobalMask:   egressGlobal.PreReplyMask,
 		EgressPostReplyGlobalMask:  egressGlobal.PostReplyMask,
+		PostApplyCount:             uint32(len(postApply)),
+		PostReplyApplyCount:        uint32(len(replyApply)),
+		PostApplyGlobalMask:        ingressGlobal.PostApplyMask,
+		PostReplyApplyGlobalMask:   ingressGlobal.ReplyApplyMask,
+		EgressPostApplyGlobalMask:  egressGlobal.PostApplyMask,
+		EgressReplyApplyGlobalMask: egressGlobal.ReplyApplyMask,
+		PreForwardMetadataMask:     kernelPluginStageMetadataMask(preForward),
+		PostLookupMetadataMask:     kernelPluginStageMetadataMask(postLookup),
+		PostApplyMetadataMask:      kernelPluginStageMetadataMask(postApply),
+		PreReplyMetadataMask:       kernelPluginStageMetadataMask(preReply),
+		PostReplyMetadataMask:      kernelPluginStageMetadataMask(postReply),
+		ReplyApplyMetadataMask:     kernelPluginStageMetadataMask(replyApply),
+	}
+	if err := clearKernelPluginMetrics(pieces.pluginMetrics); err != nil {
+		return 0, fmt.Errorf("reset tc plugin metrics before chain switch: %w", err)
 	}
 	if err := syncKernelPluginConfigV4(pieces.pluginConfigV4, next); err != nil {
 		return 0, err
 	}
+	if err := clearKernelPluginMetrics(pieces.pluginMetrics); err != nil {
+		log.Printf("kernel plugin pipeline metrics: reset after chain switch failed: %v", err)
+	}
 	return inactiveBank, nil
+}
+
+func kernelPluginStageMetadataMask(items []loadedKernelPluginPipelineProgram) uint32 {
+	var mask uint32
+	for index, item := range items {
+		if index >= 32 {
+			break
+		}
+		if len(item.plan.PacketMetadata) > 0 {
+			mask |= uint32(1) << uint32(index)
+		}
+	}
+	return mask
 }
 
 func buildKernelPluginPipelineInterfaceMasks(programs []loadedKernelPluginPipelineProgram) (kernelPluginPipelineInterfaceMasks, error) {
@@ -1381,10 +1782,14 @@ func setKernelPluginPipelineStageMask(value *kernelTCPluginInterfaceValueV4, sta
 		value.PreForwardMask |= bit
 	case kernelPluginPipelineStagePostLookup:
 		value.PostLookupMask |= bit
+	case kernelPluginPipelineStagePostApply:
+		value.PostApplyMask |= bit
 	case kernelPluginPipelineStagePreReply:
 		value.PreReplyMask |= bit
 	case kernelPluginPipelineStagePostReply:
 		value.PostReplyMask |= bit
+	case kernelPluginPipelineStageReplyApply:
+		value.ReplyApplyMask |= bit
 	}
 }
 
@@ -1395,10 +1800,14 @@ func kernelPluginPipelineBankStageBase(bank uint32, stage string) (int, error) {
 			return tcProgramChainIndexV4PluginBase, nil
 		case kernelPluginPipelineStagePostLookup:
 			return tcProgramChainIndexV4PluginPostBase, nil
+		case kernelPluginPipelineStagePostApply:
+			return tcProgramChainIndexV4PluginApplyBase, nil
 		case kernelPluginPipelineStagePreReply:
 			return tcProgramChainIndexV4PluginReplyBase, nil
 		case kernelPluginPipelineStagePostReply:
 			return tcProgramChainIndexV4PluginReplyPostBase, nil
+		case kernelPluginPipelineStageReplyApply:
+			return tcProgramChainIndexV4PluginReplyApplyBase, nil
 		}
 	} else {
 		switch stage {
@@ -1406,10 +1815,14 @@ func kernelPluginPipelineBankStageBase(bank uint32, stage string) (int, error) {
 			return tcProgramChainIndexV4PluginBank1Base, nil
 		case kernelPluginPipelineStagePostLookup:
 			return tcProgramChainIndexV4PluginBank1PostBase, nil
+		case kernelPluginPipelineStagePostApply:
+			return tcProgramChainIndexV4PluginBank1ApplyBase, nil
 		case kernelPluginPipelineStagePreReply:
 			return tcProgramChainIndexV4PluginBank1ReplyBase, nil
 		case kernelPluginPipelineStagePostReply:
 			return tcProgramChainIndexV4PluginBank1ReplyPostBase, nil
+		case kernelPluginPipelineStageReplyApply:
+			return tcProgramChainIndexV4PluginBank1ReplyApplyBase, nil
 		}
 	}
 	return 0, fmt.Errorf("unsupported plugin stage %q", stage)
@@ -1450,8 +1863,10 @@ func clearKernelPluginPipelineBank(pieces kernelCollectionPieces, bank uint32) e
 		}{
 			{name: kernelPluginPipelineStagePreForward, count: tcProgramChainV4PluginPreForwardMax},
 			{name: kernelPluginPipelineStagePostLookup, count: tcProgramChainV4PluginPostLookupMax},
+			{name: kernelPluginPipelineStagePostApply, count: tcProgramChainV4PluginPostApplyMax},
 			{name: kernelPluginPipelineStagePreReply, count: tcProgramChainV4PluginPreReplyMax},
 			{name: kernelPluginPipelineStagePostReply, count: tcProgramChainV4PluginPostReplyMax},
+			{name: kernelPluginPipelineStageReplyApply, count: tcProgramChainV4PluginPostReplyApplyMax},
 		} {
 			base, _ := kernelPluginPipelineBankStageBase(bank, stage.name)
 			for i := 0; i < stage.count; i++ {
@@ -1480,7 +1895,7 @@ func clearKernelPluginPipelinePrograms(pieces kernelCollectionPieces) error {
 		if err := pieces.pluginConfigV4.Lookup(uint32(0), &current); err != nil {
 			errs = append(errs, fmt.Sprintf("lookup tc plugin config: %v", err))
 		} else {
-			hadActiveChain = current.PreForwardCount > 0 || current.PostLookupCount > 0 || current.PreReplyCount > 0 || current.PostReplyCount > 0
+			hadActiveChain = current.PreForwardCount > 0 || current.PostLookupCount > 0 || current.PostApplyCount > 0 || current.PreReplyCount > 0 || current.PostReplyCount > 0 || current.PostReplyApplyCount > 0
 		}
 	}
 	empty := kernelTCPluginConfigV4{ActiveBank: (current.ActiveBank & 1) ^ 1}
@@ -1511,6 +1926,23 @@ func syncKernelPluginConfigV4(m *ebpf.Map, value kernelTCPluginConfigV4) error {
 	key := uint32(0)
 	if err := m.Put(key, value); err != nil {
 		return fmt.Errorf("sync tc plugin config: %w", err)
+	}
+	return nil
+}
+
+func clearKernelPluginMetrics(m *ebpf.Map) error {
+	if m == nil {
+		return fmt.Errorf("tc plugin metrics map is nil")
+	}
+	possibleCPUs, err := kernelPossibleCPUCount()
+	if err != nil {
+		return err
+	}
+	zero := make([]kernelTCPluginMetricValue, possibleCPUs)
+	for key := uint32(0); key < tcPluginMetricMaxEntries; key++ {
+		if err := m.Put(key, zero); err != nil {
+			return fmt.Errorf("clear metric key %d: %w", key, err)
+		}
 	}
 	return nil
 }
@@ -1635,19 +2067,24 @@ func kernelPluginPipelineErrorAll(catalog PluginCatalog, message string, states 
 
 func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState, core kernelPluginPipelineCoreConfig) string {
 	type fingerprintHook struct {
-		PluginID         string   `json:"plugin_id"`
-		HookID           string   `json:"hook_id"`
-		ObjectID         string   `json:"object_id"`
-		ObjectPath       string   `json:"object_path"`
-		ObjectSHA256     string   `json:"object_sha256,omitempty"`
-		ProgramRef       string   `json:"program_ref"`
-		ProgramSection   string   `json:"program_section"`
-		Stage            string   `json:"stage"`
-		Mode             string   `json:"mode"`
-		Context          []string `json:"context,omitempty"`
-		Interfaces       []string `json:"interfaces,omitempty"`
-		InterfaceIndexes []uint32 `json:"interface_indexes,omitempty"`
-		Priority         int      `json:"priority"`
+		PluginID         string                              `json:"plugin_id"`
+		HookID           string                              `json:"hook_id"`
+		ObjectID         string                              `json:"object_id"`
+		ObjectPath       string                              `json:"object_path"`
+		ObjectSHA256     string                              `json:"object_sha256,omitempty"`
+		ObjectStateMaps  []PluginObjectStateMap              `json:"object_state_maps,omitempty"`
+		ProgramRef       string                              `json:"program_ref"`
+		ProgramSection   string                              `json:"program_section"`
+		Stage            string                              `json:"stage"`
+		Mode             string                              `json:"mode"`
+		Context          []string                            `json:"context,omitempty"`
+		Interfaces       []string                            `json:"interfaces,omitempty"`
+		InterfaceIndexes []uint32                            `json:"interface_indexes,omitempty"`
+		Priority         int                                 `json:"priority"`
+		Before           []string                            `json:"before,omitempty"`
+		After            []string                            `json:"after,omitempty"`
+		Order            int                                 `json:"order"`
+		PacketMetadata   []kernelPluginPacketMetadataBinding `json:"packet_metadata,omitempty"`
 	}
 	type fingerprintState struct {
 		ID     string `json:"id"`
@@ -1678,6 +2115,7 @@ func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, 
 				ObjectID:         hook.ObjectID,
 				ObjectPath:       kernelPluginPipelineFingerprintObjectPath(hook),
 				ObjectSHA256:     hook.ObjectSHA256,
+				ObjectStateMaps:  append([]PluginObjectStateMap(nil), hook.ObjectStateMaps...),
 				ProgramRef:       hook.ProgramRef,
 				ProgramSection:   hook.ProgramSection,
 				Stage:            hook.Stage,
@@ -1686,6 +2124,10 @@ func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, 
 				Interfaces:       interfaces,
 				InterfaceIndexes: interfaceIndexes,
 				Priority:         hook.Priority,
+				Before:           append([]string(nil), hook.Before...),
+				After:            append([]string(nil), hook.After...),
+				Order:            hook.Order,
+				PacketMetadata:   cloneKernelPluginPacketMetadataBindings(hook.PacketMetadata),
 			})
 		}
 	}
@@ -1698,8 +2140,8 @@ func kernelPluginPipelineFingerprint(items []kernelPluginPipelineDesiredPlugin, 
 		if ar, br := kernelPluginPipelineStageRank(a.Stage), kernelPluginPipelineStageRank(b.Stage); ar != br {
 			return ar < br
 		}
-		if a.Priority != b.Priority {
-			return a.Priority < b.Priority
+		if a.Order != b.Order {
+			return a.Order < b.Order
 		}
 		if a.PluginID != b.PluginID {
 			return a.PluginID < b.PluginID

@@ -49,6 +49,7 @@ func detectKernelCapabilities() KernelCapabilities {
 	caps.BPFMapPerCPUArray = detectMapType("BPF per-CPU array map", ebpf.PerCPUArray)
 	caps.BPFMapProgArray = detectMapType("BPF program array map", ebpf.ProgramArray)
 	caps.BPFMapDevMapHash = detectMapType("BPF devmap hash map", ebpf.DevMapHash)
+	caps.BPFMapRingBuf = detectMapType("BPF ring buffer map", ebpf.RingBuf)
 	caps.BPFSchedCLS = detectProgramType("TC sched_cls eBPF program", ebpf.SchedCLS)
 	caps.BPFXDP = detectProgramType("XDP eBPF program", ebpf.XDP)
 	caps.Netlink = detectNetlinkCapabilities()

@@ -230,6 +230,8 @@ type ProcessManager struct {
 	managedRuntimeReloadAppliedFingerprint         string
 	managedRuntimeDriftCheckAt                     time.Time
 	pluginCatalogUpdateMu                          sync.Mutex
+	pluginPackageMu                                sync.Mutex
+	pluginProbationCheckAt                         time.Time
 	pluginCatalogSourceDir                         string
 	pluginCatalogAppliedDir                        string
 	pluginCatalogAppliedFingerprint                string
@@ -339,6 +341,7 @@ type ProcessManager struct {
 	monitorDone                                    chan struct{}
 	managedRuntimeReloadDone                       chan struct{}
 	redistributeDone                               chan struct{}
+	pluginRepositoryRefreshDone                    chan struct{}
 	lastRulePlanLog                                map[int64]string
 	lastRangePlanLog                               map[int64]string
 	lastPlannerSummary                             string
@@ -418,6 +421,21 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	if err != nil {
 		return nil, err
 	}
+	if err := recoverPluginPackageStateIfPresent(cfg, db); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(sockPath)
+		return nil, fmt.Errorf("recover plugin package state: %w", err)
+	}
+	if err := recoverPendingPluginResourceMigrations(db); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(sockPath)
+		return nil, fmt.Errorf("recover plugin resource migrations: %w", err)
+	}
+	if err := recoverPendingPluginNetTransactions(db, newPluginControlNetAdmin()); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(sockPath)
+		return nil, fmt.Errorf("recover plugin network transactions: %w", err)
+	}
 
 	pm := &ProcessManager{
 		ruleWorkers:                          make(map[int]*WorkerInfo),
@@ -457,12 +475,29 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		monitorDone:                          make(chan struct{}),
 		managedRuntimeReloadDone:             make(chan struct{}),
 		redistributeDone:                     make(chan struct{}),
+		pluginRepositoryRefreshDone:          make(chan struct{}),
 		lastRulePlanLog:                      make(map[int64]string),
 		lastRangePlanLog:                     make(map[int64]string),
 		kernelMaintenanceEvery:               configuredKernelMaintenanceInterval(),
 	}
 	pm.initializePluginCatalogSnapshot()
 	pm.pluginControlRuntime = newPluginControlRuntime(db, cfg, pm)
+	if control, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime); ok {
+		secrets, err := control.requirePluginSecretStore()
+		if err != nil {
+			_ = pm.pluginControlRuntime.Close()
+			_ = ln.Close()
+			_ = os.Remove(sockPath)
+			return nil, fmt.Errorf("initialize plugin secret store: %w", err)
+		}
+		catalog := loadPluginCatalogWithControlRegistrationAndState(pluginCatalogConfigForProcess(pm, cfg), db)
+		if err := secrets.migratePluginSecrets(catalog); err != nil {
+			_ = pm.pluginControlRuntime.Close()
+			_ = ln.Close()
+			_ = os.Remove(sockPath)
+			return nil, fmt.Errorf("migrate plugin secrets: %w", err)
+		}
+	}
 	pm.pluginRuntime = newPluginDataplaneRuntime(cfg)
 
 	if pm.kernelRuntime != nil {
@@ -478,6 +513,11 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	go pm.monitorLoop()
 	go pm.managedRuntimeReloadLoop()
 	go pm.redistributeLoop()
+	if cfg != nil && cfg.PluginsEnabled() {
+		go pm.pluginRepositoryRefreshLoop()
+	} else {
+		close(pm.pluginRepositoryRefreshDone)
+	}
 	pm.startKernelNetlinkMonitor()
 
 	return pm, nil
@@ -4158,6 +4198,7 @@ func (pm *ProcessManager) updateTransparentRouting(enabledRules []Rule, enabledR
 
 func (pm *ProcessManager) stopAll() {
 	pm.beginShutdown()
+	pm.markPluginPackageProbationsCleanShutdown()
 	pm.stopKernelNetlinkMonitor()
 	if pm.ipv6Runtime != nil {
 		logShutdownStep("stop ipv6 assignment runtime", pm.ipv6Runtime.Close)
@@ -4297,6 +4338,7 @@ func (pm *ProcessManager) waitForBackgroundLoops(timeout time.Duration) {
 	monitorDone := pm.monitorDone
 	managedRuntimeReloadDone := pm.managedRuntimeReloadDone
 	redistributeDone := pm.redistributeDone
+	pluginRepositoryRefreshDone := pm.pluginRepositoryRefreshDone
 	pm.mu.Unlock()
 
 	items := []struct {
@@ -4306,6 +4348,7 @@ func (pm *ProcessManager) waitForBackgroundLoops(timeout time.Duration) {
 		{name: "monitor", ch: monitorDone},
 		{name: "managed-network-reload", ch: managedRuntimeReloadDone},
 		{name: "redistribute", ch: redistributeDone},
+		{name: "plugin-repository-refresh", ch: pluginRepositoryRefreshDone},
 	}
 	for _, item := range items {
 		if !waitForStopChannel(item.ch, timeout) {
@@ -4356,6 +4399,7 @@ func (pm *ProcessManager) monitorLoop() {
 		pressureRecoveryLogLine := ""
 		checkManagedRuntimeDrift := false
 		checkPluginCatalogDrift := false
+		checkPluginProbations := false
 		kernelAttachmentIssue := ""
 		kernelAttachmentRecovered := ""
 		attemptKernelAttachmentHeal := false
@@ -4394,6 +4438,10 @@ func (pm *ProcessManager) monitorLoop() {
 		if pm.shouldCheckPluginCatalogDriftLocked(now) {
 			checkPluginCatalogDrift = true
 			pm.pluginCatalogCheckAt = now
+		}
+		if pm.pluginProbationCheckAt.IsZero() || now.Sub(pm.pluginProbationCheckAt) >= pluginPackageProbationCheckEvery {
+			checkPluginProbations = true
+			pm.pluginProbationCheckAt = now
 		}
 		if pm.kernelRuntime != nil && (pm.kernelDegradedHealAt.IsZero() || now.Sub(pm.kernelDegradedHealAt) >= kernelDegradedRebuildCooldown) {
 			checkKernelDegradedIdleRebuild = true
@@ -4668,6 +4716,9 @@ func (pm *ProcessManager) monitorLoop() {
 		}
 		if checkPluginCatalogDrift {
 			pm.detectPluginCatalogDrift()
+		}
+		if checkPluginProbations {
+			pm.checkPluginPackageProbations(now)
 		}
 
 		for _, task := range staleControls {

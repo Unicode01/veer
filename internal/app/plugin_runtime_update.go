@@ -84,7 +84,12 @@ func applyPluginResourceRuntimeUpdate(db *sql.DB, pm *ProcessManager, plugin Loa
 			_ = markPluginRuntimeError(db, plugin.ID, "resource", resource.ID, err)
 			return err
 		}
-		records, err := loadPluginResourceRecords(db, plugin, resource)
+		secrets, secretErr := pluginSecretStoreForRequest(db, pm)
+		if secretErr != nil {
+			_ = markPluginRuntimeError(db, plugin.ID, "resource", resource.ID, secretErr)
+			return secretErr
+		}
+		records, err := loadPluginResourceRecordsWithSecretStore(db, secrets, plugin, resource)
 		if err != nil {
 			_ = markPluginRuntimeError(db, plugin.ID, "resource", resource.ID, err)
 			return err
@@ -104,6 +109,9 @@ func applyPluginResourceRuntimeUpdate(db *sql.DB, pm *ProcessManager, plugin Loa
 }
 
 func applyPluginActionRuntimeUpdate(db *sql.DB, pm *ProcessManager, plugin LoadedPlugin, action PluginAction, payload json.RawMessage) error {
+	if err := validatePluginActionRequest(action, payload); err != nil {
+		return err
+	}
 	cfg := processConfigForPluginRuntimeUpdate(pm)
 	refreshCorePlans := pluginMayAffectActiveCorePlans(plugin, cfg)
 	switch action.RuntimeUpdate {
@@ -280,10 +288,19 @@ func (pm *ProcessManager) ApplyPluginActionRuntimeUpdate(plugin LoadedPlugin, ac
 	return applyPluginActionRuntimeUpdate(pm.db, pm, plugin, action, payload)
 }
 
-func loadPluginResourceRecords(db *sql.DB, plugin LoadedPlugin, resource PluginResource) ([]PluginResourceRecord, error) {
+func loadPluginResourceRecordsWithSecretStore(db *sql.DB, secrets *pluginSecretStore, plugin LoadedPlugin, resource PluginResource) ([]PluginResourceRecord, error) {
 	items, err := store.GetPluginRecords(db, plugin.ID, resource.ID)
 	if err != nil {
 		return nil, err
+	}
+	if len(resource.SecretFields) > 0 {
+		if secrets == nil {
+			return nil, fmt.Errorf("plugin secret store is unavailable")
+		}
+		items, err = secrets.decryptRecords(items, resource)
+		if err != nil {
+			return nil, err
+		}
 	}
 	out := make([]PluginResourceRecord, 0, len(items))
 	for _, item := range items {

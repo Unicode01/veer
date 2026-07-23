@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Unicode01/veer/internal/store"
@@ -60,12 +62,20 @@ const (
 var errPluginControlDisabledByState = errors.New("plugin is disabled")
 
 var pluginControlReservedMapNames = map[string]string{
-	"tc_prog_chain_v4":        "shared Veer TC tail-call chain",
-	"tc_plugin_config_v4":     "shared Veer TC pipeline configuration",
-	"tc_plugin_interfaces_v4": "shared Veer TC interface masks",
-	"tc_dispatch_scratch_v4":  "shared Veer TC dispatch scratch",
-	"tc_plugin_ctx_v4":        "shared Veer TC packet context",
-	"xdp_prog_chain":          "shared XDP tail-call chain",
+	"tc_prog_chain_v4":             "shared Veer TC tail-call chain",
+	"tc_plugin_config_v4":          "shared Veer TC pipeline configuration",
+	"tc_plugin_interfaces_v4":      "shared Veer TC interface masks",
+	"tc_dispatch_scratch_v4":       "shared Veer TC dispatch scratch",
+	"tc_dispatch_scratch_v6":       "shared Veer TC IPv6 dispatch scratch",
+	"tc_plugin_ctx_v4":             "shared Veer TC packet context",
+	"tc_plugin_ctx_v6":             "shared Veer TC IPv6 packet context",
+	"tc_plugin_metrics":            "shared Veer TC plugin metrics",
+	"tc_packet_meta_bindings_v1":   "host-managed Veer packet metadata bindings",
+	"tc_packet_meta_generation_v4": "shared Veer IPv4 packet metadata generation",
+	"tc_packet_meta_generation_v6": "shared Veer IPv6 packet metadata generation",
+	"tc_packet_meta_v4":            "shared Veer IPv4 packet metadata",
+	"tc_packet_meta_v6":            "shared Veer IPv6 packet metadata",
+	"xdp_prog_chain":               "shared XDP tail-call chain",
 }
 
 type pluginControlRuntime interface {
@@ -74,6 +84,32 @@ type pluginControlRuntime interface {
 	Snapshot() pluginRuntimeSnapshot
 	QueryPluginAction(plugin LoadedPlugin, action PluginAction, payload json.RawMessage) (any, error)
 	Close() error
+}
+
+type disabledPluginControlRuntime struct{}
+
+func (disabledPluginControlRuntime) Reconcile(PluginCatalog) pluginRuntimeSnapshot {
+	return pluginRuntimeSnapshot{}
+}
+
+func (disabledPluginControlRuntime) Snapshot() pluginRuntimeSnapshot {
+	return pluginRuntimeSnapshot{}
+}
+
+func (disabledPluginControlRuntime) ApplyPluginResourceData(LoadedPlugin, PluginResource, []PluginResourceRecord) error {
+	return errPluginRuntimeTargetNotLoaded
+}
+
+func (disabledPluginControlRuntime) ApplyPluginAction(LoadedPlugin, PluginAction, json.RawMessage) error {
+	return errPluginRuntimeTargetNotLoaded
+}
+
+func (disabledPluginControlRuntime) QueryPluginAction(LoadedPlugin, PluginAction, json.RawMessage) (any, error) {
+	return nil, errPluginRuntimeTargetNotLoaded
+}
+
+func (disabledPluginControlRuntime) Close() error {
+	return nil
 }
 
 type pluginEBPFMapController interface {
@@ -119,6 +155,7 @@ type gojaPluginControlRuntime struct {
 	l2Transport          pluginControlL2Transport
 	udpTransport         pluginControlUDPTransport
 	socketRegistry       *pluginControlSocketRegistry
+	networkBroker        pluginControlNetworkBroker
 	netAdmin             pluginControlNetAdmin
 	snapshot             pluginRuntimeSnapshot
 	plugins              map[string]LoadedPlugin
@@ -129,22 +166,63 @@ type gojaPluginControlRuntime struct {
 	queueMu              sync.Mutex
 	workerQueueUsage     map[string]*pluginControlWorkerQueueUsage
 	upgradeGates         map[string]*pluginControlUpgradeGate
+	eventMu              sync.Mutex
+	eventSubscriptions   map[string]*pluginControlEventSubscriptionRuntime
+	eventSequence        atomic.Uint64
+	ringMu               sync.Mutex
+	ringSubscriptions    map[string]*pluginRingSubscriptionRuntime
+	ringPendingBytes     map[string]int64
+	circuitMu            sync.Mutex
+	controlCircuits      map[string]*pluginControlCircuitRuntime
+	logMu                sync.Mutex
+	pluginLogs           map[string]*pluginLogBuffer
+	pluginLogSequence    uint64
+	logPersistence       *pluginLogPersistence
+	metricMu             sync.Mutex
+	pluginMetrics        map[string]map[string]pluginMetricSeries
+	secretStore          *pluginSecretStore
+	secretStoreErr       error
+	blobMu               sync.Mutex
+	blobStore            *pluginBlobStore
+	migrationMu          sync.Mutex
+	migrationTransaction string
+	migrationDeferred    bool
 	closed               bool
 }
 
 type pluginControlEvent struct {
-	Kind     string
-	Resource *PluginResource
-	Action   *PluginAction
-	Timer    *pluginControlTimerSpec
-	Records  []PluginResourceRecord
-	Payload  json.RawMessage
-	Worker   *pluginControlWorkerEvent
-	Upgrade  *pluginControlUpgradeEvent
-	Reason   string
+	Kind          string
+	Resource      *PluginResource
+	Migration     *pluginControlResourceMigrationEvent
+	EBPFMigration *pluginControlEBPFStateMigrationEvent
+	Action        *PluginAction
+	Timer         *pluginControlTimerSpec
+	Records       []PluginResourceRecord
+	Payload       json.RawMessage
+	Worker        *pluginControlWorkerEvent
+	Upgrade       *pluginControlUpgradeEvent
+	BusEvent      *pluginControlBusEvent
+	SocketEvent   *pluginControlSocketEvent
+	Reason        string
 
 	bypassUpgradeGate  bool
 	inheritUpgradeGate bool
+}
+
+type pluginControlResourceMigrationEvent struct {
+	FromVersion int
+	ToVersion   int
+	FromDigest  string
+	ToDigest    string
+}
+
+type pluginControlEBPFStateMigrationEvent struct {
+	PluginEBPFStateMigration
+	ProtocolVersion int
+	Batch           int
+	Cursor          string
+	MaxEntries      int
+	MaxBytes        int
 }
 
 type pluginControlWorkerEvent struct {
@@ -187,23 +265,29 @@ type pluginControlResult struct {
 }
 
 type pluginControlVM struct {
-	rt             *gojaPluginControlRuntime
-	pluginID       string
-	key            string
-	mode           string
-	workerName     string
-	plugin         LoadedPlugin
-	requests       chan pluginControlRequest
-	stop           chan struct{}
-	done           chan struct{}
-	stopOnce       sync.Once
-	currentMu      sync.Mutex
-	currentRuntime *goja.Runtime
-	executing      bool
-	pendingMu      sync.Mutex
-	accepting      bool
-	pending        map[*pluginControlWorkerQueueReservation]*pluginControlRequestState
-	upgradeLeases  map[*pluginControlUpgradeLease]*pluginControlRequestState
+	rt               *gojaPluginControlRuntime
+	pluginID         string
+	key              string
+	mode             string
+	workerName       string
+	plugin           LoadedPlugin
+	requests         chan pluginControlRequest
+	stop             chan struct{}
+	done             chan struct{}
+	stopOnce         sync.Once
+	currentMu        sync.Mutex
+	currentRuntime   *goja.Runtime
+	currentHost      *pluginHostClient
+	executing        bool
+	hostEverStarted  bool
+	hostRestartCount uint64
+	hostFailureCount int
+	hostRestartAfter time.Time
+	hostLastError    string
+	pendingMu        sync.Mutex
+	accepting        bool
+	pending          map[*pluginControlWorkerQueueReservation]*pluginControlRequestState
+	upgradeLeases    map[*pluginControlUpgradeLease]*pluginControlRequestState
 }
 
 type pluginControlWorkerQueueUsage struct {
@@ -227,27 +311,33 @@ type pluginControlWorkerKey struct {
 }
 
 type pluginControlHost struct {
-	vm                *goja.Runtime
-	db                *sql.DB
-	cfg               *Config
-	runtime           *gojaPluginControlRuntime
-	plugin            LoadedPlugin
-	mapController     pluginEBPFMapController
-	l2Transport       pluginControlL2Transport
-	udpTransport      pluginControlUDPTransport
-	netAdmin          pluginControlNetAdmin
-	timerOps          []pluginControlTimerOperation
-	timerEvent        *pluginControlTimerSpec
-	surface           PluginRuntimeSurface
-	module            *goja.Object
-	registrationPhase bool
-	upgradePhase      bool
-	workerVM          bool
-	workerName        string
-	controlGeneration string
-	eventStack        []string
-	executionDeadline time.Time
+	vm                          *goja.Runtime
+	db                          *sql.DB
+	cfg                         *Config
+	runtime                     *gojaPluginControlRuntime
+	plugin                      LoadedPlugin
+	mapController               pluginEBPFMapController
+	l2Transport                 pluginControlL2Transport
+	udpTransport                pluginControlUDPTransport
+	netAdmin                    pluginControlNetAdmin
+	timerOps                    []pluginControlTimerOperation
+	timerEvent                  *pluginControlTimerSpec
+	surface                     PluginRuntimeSurface
+	module                      *goja.Object
+	registrationPhase           bool
+	upgradePhase                bool
+	migrationPhase              bool
+	ebpfMigrationPhase          bool
+	resourceMutationTransaction string
+	workerVM                    bool
+	workerName                  string
+	controlGeneration           string
+	eventStack                  []string
+	executionDeadline           time.Time
+	remoteEventInvoker          pluginControlRemoteEventInvoker
 }
+
+type pluginControlRemoteEventInvoker func(event pluginControlEvent, optionalHandler bool) (PluginRuntimeSurface, any, bool, error)
 
 type pluginControlTimerKey struct {
 	pluginID string
@@ -274,10 +364,15 @@ type pluginControlTimerOperation struct {
 }
 
 func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMapController) pluginControlRuntime {
+	if cfg == nil || !cfg.PluginsEnabled() {
+		return disabledPluginControlRuntime{}
+	}
 	provider, _ := mapController.(pluginRuntimeDataApplierProvider)
 	updateProvider, _ := mapController.(pluginResourceRuntimeUpdateProvider)
 	actionUpdateProvider, _ := mapController.(pluginActionRuntimeUpdateProvider)
-	return &gojaPluginControlRuntime{
+	secretStore, secretStoreErr := newPluginSecretStore(db)
+	socketTransport := newPluginControlSocketTransport()
+	runtime := &gojaPluginControlRuntime{
 		db:                   db,
 		cfg:                  cfg,
 		mapController:        mapController,
@@ -286,7 +381,8 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 		actionUpdateProvider: actionUpdateProvider,
 		l2Transport:          newPluginControlL2Transport(),
 		udpTransport:         newPluginControlUDPTransport(),
-		socketRegistry:       newPluginControlSocketRegistry(newPluginControlSocketTransport()),
+		socketRegistry:       newPluginControlSocketRegistry(socketTransport),
+		networkBroker:        newPluginControlNetworkBroker(socketTransport),
 		netAdmin:             newPluginControlNetAdmin(),
 		timers:               make(map[pluginControlTimerKey]pluginControlTimerState),
 		controlVMs:           make(map[string]*pluginControlVM),
@@ -294,7 +390,17 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 		syncCalls:            make(map[string]map[string]int),
 		workerQueueUsage:     make(map[string]*pluginControlWorkerQueueUsage),
 		upgradeGates:         make(map[string]*pluginControlUpgradeGate),
+		eventSubscriptions:   make(map[string]*pluginControlEventSubscriptionRuntime),
+		ringSubscriptions:    make(map[string]*pluginRingSubscriptionRuntime),
+		ringPendingBytes:     make(map[string]int64),
+		controlCircuits:      make(map[string]*pluginControlCircuitRuntime),
+		pluginLogs:           make(map[string]*pluginLogBuffer),
+		pluginMetrics:        make(map[string]map[string]pluginMetricSeries),
+		secretStore:          secretStore,
+		secretStoreErr:       secretStoreErr,
 	}
+	runtime.logPersistence = newPluginLogPersistence(db)
+	return runtime
 }
 
 func pluginControlProcessManager(rt *gojaPluginControlRuntime) *ProcessManager {
@@ -305,9 +411,44 @@ func pluginControlProcessManager(rt *gojaPluginControlRuntime) *ProcessManager {
 	return pm
 }
 
+func (rt *gojaPluginControlRuntime) pluginBlobStoreOrCreate() (*pluginBlobStore, error) {
+	if rt == nil {
+		return nil, errPluginRuntimeTargetNotLoaded
+	}
+	rt.blobMu.Lock()
+	defer rt.blobMu.Unlock()
+	if rt.blobStore != nil {
+		return rt.blobStore, nil
+	}
+	rt.mu.Lock()
+	closed := rt.closed
+	rt.mu.Unlock()
+	if closed {
+		return nil, errPluginRuntimeTargetNotLoaded
+	}
+	store, err := newPluginBlobStore(rt.cfg)
+	if err != nil {
+		return nil, err
+	}
+	rt.blobStore = store
+	return store, nil
+}
+
+func (rt *gojaPluginControlRuntime) currentPluginBlobStore() *pluginBlobStore {
+	if rt == nil {
+		return nil
+	}
+	rt.blobMu.Lock()
+	store := rt.blobStore
+	rt.blobMu.Unlock()
+	return store
+}
+
 func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRuntimeSnapshot {
 	rt.reconcileMu.Lock()
 	defer rt.reconcileMu.Unlock()
+
+	_, implicitMigrationTransaction, migrationTransactionErr := rt.beginImplicitPluginResourceMigrationTransaction()
 
 	rt.mu.Lock()
 	previousPlugins := cloneLoadedPluginMap(rt.plugins)
@@ -317,7 +458,8 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 	activePlugins := make([]LoadedPlugin, 0, len(catalog.Plugins))
 	states := make(map[string]PluginRuntimeState)
 	surfaces := make(map[string]PluginRuntimeSurface)
-	for _, plugin := range catalog.Plugins {
+	for _, index := range pluginCatalogExecutionIndexes(catalog) {
+		plugin := catalog.Plugins[index]
 		if plugin.Builtin || plugin.Status != pluginStatusActive || plugin.controlMainPath == "" {
 			continue
 		}
@@ -330,11 +472,37 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 			}
 			continue
 		}
+		if !rt.cfg.PluginsIsolationEnabled() && rt.cfg.PluginMinimumSandboxLevel() != pluginSandboxLevelNone {
+			reason := fmt.Sprintf("plugins_isolation=false cannot satisfy required sandbox level %s", rt.cfg.PluginMinimumSandboxLevel())
+			states[plugin.ID] = PluginRuntimeState{
+				Mode:       pluginRuntimeModeError,
+				Attachable: false,
+				Attached:   false,
+				Reason:     "plugin sandbox admission failed",
+				Error:      reason,
+			}
+			continue
+		}
 		activePlugins = append(activePlugins, plugin)
 	}
 
 	registeredByID := make(map[string]LoadedPlugin, len(activePlugins))
+	registrationFailures := make(map[string]string)
 	for _, plugin := range activePlugins {
+		if migrationTransactionErr != nil {
+			state := pluginRuntimeErrorState(migrationTransactionErr.Error())
+			state.Reason = "resource migration transaction initialization failed"
+			states[plugin.ID] = state
+			registrationFailures[plugin.ID] = migrationTransactionErr.Error()
+			continue
+		}
+		if reason := pluginRequiredDependencyFailure(plugin, registrationFailures); reason != "" {
+			state := pluginRuntimeErrorState(reason)
+			state.Reason = "required dependency control registration failed"
+			states[plugin.ID] = state
+			registrationFailures[plugin.ID] = reason
+			continue
+		}
 		surface, err := rt.runPluginControlWithSurface(plugin, pluginControlEvent{Kind: "register"}, true)
 		if err != nil {
 			if preservePreviousPluginControlRuntime(plugin.ID, previousPlugins, previousSurfaces, registeredByID, surfaces) {
@@ -343,6 +511,7 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 				state := pluginRuntimeErrorState(err.Error())
 				state.Reason = "control script registration failed"
 				states[plugin.ID] = state
+				registrationFailures[plugin.ID] = err.Error()
 			}
 			continue
 		}
@@ -356,6 +525,7 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 				state := pluginRuntimeErrorState(registered.Error)
 				state.Reason = "control script surface validation failed"
 				states[plugin.ID] = state
+				registrationFailures[plugin.ID] = registered.Error
 			}
 			continue
 		}
@@ -367,12 +537,37 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 				Attached:   false,
 				Reason:     reason,
 			}
+			registrationFailures[plugin.ID] = reason
+			continue
+		}
+		if rt.secretStoreErr != nil {
+			state := pluginRuntimeErrorState(rt.secretStoreErr.Error())
+			state.Reason = "plugin secret store initialization failed"
+			states[plugin.ID] = state
+			registrationFailures[plugin.ID] = rt.secretStoreErr.Error()
+			continue
+		}
+		if rt.secretStore != nil {
+			if err := rt.secretStore.migratePluginSecretsForPlugin(registered); err != nil {
+				state := pluginRuntimeErrorState(err.Error())
+				state.Reason = "plugin secret migration failed"
+				states[plugin.ID] = state
+				registrationFailures[plugin.ID] = err.Error()
+				continue
+			}
+		}
+		if err := rt.ensurePluginResourceSchemas(registered); err != nil {
+			state := pluginRuntimeErrorState(err.Error())
+			state.Reason = "plugin resource schema migration failed"
+			states[plugin.ID] = state
+			registrationFailures[plugin.ID] = err.Error()
 			continue
 		}
 		registeredByID[plugin.ID] = registered
 	}
 
-	for pluginID, previous := range previousPlugins {
+	for _, previous := range pluginMapExecutionOrder(previousPlugins, true) {
+		pluginID := previous.ID
 		if _, stillActive := registeredByID[pluginID]; stillActive {
 			continue
 		}
@@ -383,11 +578,27 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 		if rt.socketRegistry != nil {
 			rt.socketRegistry.ClosePlugin(pluginID)
 		}
+		if store := rt.currentPluginBlobStore(); store != nil {
+			store.AbortPlugin(pluginID)
+		}
+	}
+	for pluginID, err := range rt.cleanupInactivePluginOwnedResources(registeredByID) {
+		log.Printf("plugin owned resource cleanup %s failed: %v", pluginID, err)
+		if _, active := registeredByID[pluginID]; active {
+			continue
+		}
+		state := pluginRuntimeErrorState(err.Error())
+		state.Reason = "plugin owned resource cleanup failed"
+		states[pluginID] = state
+		registrationFailures[pluginID] = err.Error()
 	}
 
 	rt.mu.Lock()
 	if rt.closed {
 		rt.mu.Unlock()
+		if implicitMigrationTransaction {
+			_ = rt.RollbackPluginResourceMigrationTransaction()
+		}
 		return pluginRuntimeSnapshot{}
 	}
 	rt.plugins = registeredByID
@@ -397,11 +608,31 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 	if rt.socketRegistry != nil {
 		rt.socketRegistry.CloseInactive(registeredByID)
 	}
+	if store := rt.currentPluginBlobStore(); store != nil {
+		for pluginID := range previousPlugins {
+			if _, active := registeredByID[pluginID]; !active {
+				store.AbortPlugin(pluginID)
+			}
+		}
+	}
 	stopPluginControlVMs(inactiveVMs)
 	rt.clearInactivePluginControlWorkerQueueUsage(registeredByID)
+	rt.clearInactivePluginMetrics(registeredByID)
 
-	for _, plugin := range registeredByID {
+	runtimeFailures := make(map[string]string)
+	for _, plugin := range activePlugins {
+		plugin, registered := registeredByID[plugin.ID]
+		if !registered {
+			continue
+		}
 		if _, failed := states[plugin.ID]; failed {
+			continue
+		}
+		if reason := pluginRequiredDependencyFailure(plugin, runtimeFailures); reason != "" {
+			state := pluginRuntimeErrorState(reason)
+			state.Reason = "required dependency reconcile failed"
+			states[plugin.ID] = state
+			runtimeFailures[plugin.ID] = reason
 			continue
 		}
 		state := PluginRuntimeState{
@@ -413,16 +644,40 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 		if _, err := rt.runPluginControlWithSurface(plugin, pluginControlEvent{Kind: "reconcile"}, true); err != nil {
 			state = pluginRuntimeErrorState(err.Error())
 			state.Reason = "control script reconcile failed"
-		} else if err := rt.applyRuntimeResourcesForReconcile(plugin); err != nil {
-			state = pluginRuntimeErrorState(err.Error())
-			state.Reason = "control script runtime resource reconcile failed"
+		} else if len(plugin.Objects) == 0 {
+			if err := rt.applyRuntimeResourcesForReconcile(plugin); err != nil {
+				state = pluginRuntimeErrorState(err.Error())
+				state.Reason = "control script runtime resource reconcile failed"
+			}
 		}
 		states[plugin.ID] = state
+		if state.Mode == pluginRuntimeModeError {
+			runtimeFailures[plugin.ID] = state.Error
+		}
+	}
+	if implicitMigrationTransaction {
+		var migrationErr error
+		if len(registrationFailures) > 0 || len(runtimeFailures) > 0 {
+			migrationErr = rt.RollbackPluginResourceMigrationTransaction()
+		} else {
+			migrationErr = rt.CommitPluginResourceMigrationTransaction()
+		}
+		if migrationErr != nil {
+			for _, plugin := range activePlugins {
+				state := pluginRuntimeErrorState(migrationErr.Error())
+				state.Reason = "plugin resource migration finalization failed"
+				states[plugin.ID] = state
+			}
+		}
 	}
 
 	rt.mu.Lock()
 	rt.snapshot = pluginRuntimeSnapshot{Plugins: states, Surfaces: surfaces}
 	rt.mu.Unlock()
+	rt.reconcilePluginControlCircuits(previousPlugins, registeredByID)
+	rt.reconcilePluginEventSubscriptions(registeredByID)
+	rt.stopAllPluginRingSubscriptions()
+	rt.publishPluginLifecycleChanges(previousPlugins, registeredByID)
 	return rt.Snapshot()
 }
 
@@ -445,6 +700,43 @@ func (rt *gojaPluginControlRuntime) Snapshot() pluginRuntimeSnapshot {
 		state.WorkerQueue = &queue
 		snapshot.Plugins[pluginID] = state
 	}
+	for pluginID := range snapshot.Plugins {
+		state := snapshot.Plugins[pluginID]
+		events := rt.pluginEventBusSnapshot(pluginID)
+		if events.SubscriptionCount > 0 || pluginControlHasPermission(rt.pluginByID(pluginID), "event") {
+			state.EventBus = &events
+			snapshot.Plugins[pluginID] = state
+		}
+		rings := rt.pluginRingBusSnapshot(pluginID)
+		if rings.SubscriptionCount > 0 || len(rt.pluginByID(pluginID).RingSubscriptions) > 0 {
+			state = snapshot.Plugins[pluginID]
+			state.RingBuffers = &rings
+			snapshot.Plugins[pluginID] = state
+		}
+		health := rt.pluginControlHealthSnapshot(pluginID)
+		if health.Calls > 0 || health.Rejected > 0 || rt.pluginByID(pluginID).Control != nil {
+			state = snapshot.Plugins[pluginID]
+			state.ControlHealth = &health
+		}
+		isolation := rt.pluginHostIsolationSnapshot(pluginID)
+		state.Isolation = &isolation
+		state.Metrics = rt.pluginMetricSnapshot(pluginID)
+		if rt.db != nil {
+			if pluginControlHasPermission(rt.pluginByID(pluginID), "operation") {
+				if operations, err := pluginOperationRuntimeSnapshot(rt.db, pluginID); err == nil {
+					state.Operations = &operations
+				} else {
+					log.Printf("plugin operation snapshot %s failed: %v", pluginID, err)
+				}
+			}
+			if leases, err := pluginOwnedResourceLeaseStates(rt.db, pluginID); err == nil {
+				state.Leases = leases
+			} else {
+				log.Printf("plugin resource lease snapshot %s failed: %v", pluginID, err)
+			}
+		}
+		snapshot.Plugins[pluginID] = state
+	}
 	return snapshot
 }
 
@@ -464,8 +756,22 @@ func (rt *gojaPluginControlRuntime) Close() error {
 	rt.controlVMs = nil
 	rt.pluginWorkers = nil
 	rt.mu.Unlock()
+	rt.stopAllPluginEventSubscriptions()
+	rt.stopAllPluginRingSubscriptions()
+	rt.clearAllPluginControlCircuits()
+	if rt.logPersistence != nil && !rt.logPersistence.closeAndFlush(pluginLogPersistTimeout) {
+		log.Printf("plugin log persistence shutdown timed out")
+	}
+	rt.clearAllPluginLogs()
+	rt.clearAllPluginMetrics()
 	if rt.socketRegistry != nil {
 		rt.socketRegistry.CloseAll()
+	}
+	if store := rt.currentPluginBlobStore(); store != nil {
+		_ = store.Close()
+	}
+	if provider, ok := rt.netAdmin.(pluginControlNetworkProvider); ok {
+		provider.TunTapCloseAll("")
 	}
 	stopPluginControlVMs(vms)
 	rt.queueMu.Lock()
@@ -502,6 +808,9 @@ func (rt *gojaPluginControlRuntime) ApplyPluginAction(plugin LoadedPlugin, actio
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
+	if err := validatePluginActionRequest(action, payload); err != nil {
+		return err
+	}
 	return rt.runPluginControl(plugin, pluginControlEvent{
 		Kind:    "action",
 		Action:  &action,
@@ -524,12 +833,18 @@ func (rt *gojaPluginControlRuntime) QueryPluginAction(plugin LoadedPlugin, actio
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
+	if err := validatePluginActionRequest(action, payload); err != nil {
+		return nil, err
+	}
 	result, err := rt.runPluginControlResult(plugin, pluginControlEvent{
 		Kind:    "action",
 		Action:  &action,
 		Payload: payload,
 	}, false)
 	if err != nil {
+		return nil, err
+	}
+	if err := validatePluginActionResponse(action, result.value); err != nil {
 		return nil, err
 	}
 	return result.value, nil
@@ -676,11 +991,18 @@ func (rt *gojaPluginControlRuntime) deactivatePluginControl(pluginID string) {
 		delete(rt.snapshot.Surfaces, pluginID)
 	}
 	rt.mu.Unlock()
+	rt.stopPluginEventSubscriptions(pluginID)
+	rt.stopPluginRingSubscriptions(pluginID)
+	rt.clearPluginControlCircuits(pluginID)
 	if rt.socketRegistry != nil {
 		rt.socketRegistry.ClosePlugin(pluginID)
 	}
+	if store := rt.currentPluginBlobStore(); store != nil {
+		store.AbortPlugin(pluginID)
+	}
 	stopPluginControlVMs(vms)
 	rt.clearPluginControlWorkerQueueUsage(pluginID)
+	rt.clearPluginMetrics(pluginID)
 }
 
 func (rt *gojaPluginControlRuntime) runPluginControl(plugin LoadedPlugin, event pluginControlEvent, optionalHandler bool) error {
@@ -949,6 +1271,7 @@ func (vm *pluginControlVM) dispatch(plugin LoadedPlugin, event pluginControlEven
 
 func (vm *pluginControlVM) loop() {
 	defer func() {
+		vm.clearCurrentHost()
 		vm.setCurrentRuntime(nil)
 		close(vm.done)
 	}()
@@ -973,16 +1296,50 @@ func (vm *pluginControlVM) loop() {
 					vm.reply(req, pluginControlResult{err: fmt.Errorf("plugin control request for %s was discarded before execution: %w", vm.pluginID, err)})
 					return false
 				}
+				invocation, err := vm.rt.beginPluginControlInvocation(req.plugin, req.event, time.Now())
+				if err != nil {
+					vm.reply(req, pluginControlResult{err: err})
+					return false
+				}
 				if host == nil {
 					var err error
-					host, err = vm.init(req.plugin)
+					if vm.isolationEnabled() {
+						if err = vm.pluginHostRestartAllowed(time.Now()); err == nil {
+							host, err = vm.initRemote(req.plugin)
+							if err == nil {
+								vm.notePluginHostStarted()
+							} else {
+								vm.notePluginHostFailure(err)
+							}
+						}
+					} else {
+						host, err = vm.init(req.plugin)
+					}
 					if err != nil {
+						vm.rt.finishPluginControlInvocation(invocation, err, time.Now())
+						vm.rt.appendPluginLog(pluginControlFailureLogEntry(req.plugin.ID, vm.workerName, req.event, err))
 						vm.reply(req, pluginControlResult{err: err})
 						return false
 					}
 				}
 				host.plugin = req.plugin
-				result := vm.runWithTimeout(host, req)
+				var result pluginControlResult
+				if vm.isolationEnabled() {
+					result = vm.runRemoteWithTimeout(host, req)
+				} else {
+					result = vm.runWithTimeout(host, req)
+				}
+				if pluginHostFatalError(result.err) {
+					vm.clearCurrentHost()
+					host = nil
+					vm.notePluginHostFailure(result.err)
+				} else if vm.isolationEnabled() {
+					vm.notePluginHostSuccess()
+				}
+				vm.rt.finishPluginControlInvocation(invocation, result.err, time.Now())
+				if result.err != nil {
+					vm.rt.appendPluginLog(pluginControlFailureLogEntry(req.plugin.ID, vm.workerName, req.event, result.err))
+				}
 				vm.reply(req, result)
 				return false
 			}()
@@ -1007,7 +1364,11 @@ func (vm *pluginControlVM) reserveWorkerRequest(event pluginControlEvent, state 
 	if vm == nil || vm.rt == nil {
 		return nil, errPluginRuntimeTargetNotLoaded
 	}
-	reservation, err := vm.rt.reservePluginControlWorkerQueue(vm.pluginID, len(event.Payload))
+	payloadBytes := len(event.Payload)
+	if event.SocketEvent != nil {
+		payloadBytes += len(event.SocketEvent.Payload)
+	}
+	reservation, err := vm.rt.reservePluginControlWorkerQueue(vm.pluginID, payloadBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1205,9 +1566,28 @@ func (vm *pluginControlVM) init(plugin LoadedPlugin) (*pluginControlHost, error)
 	if err != nil {
 		return nil, err
 	}
+	host, err := vm.newControlHost(plugin, true)
+	if err != nil {
+		return nil, err
+	}
+	runtime := host.vm
+	err = withPluginControlTimeout(runtime, func() error {
+		_, runErr := runtime.RunScript(plugin.Control.Main, source)
+		return runErr
+	})
+	host.registrationPhase = false
+	if err != nil {
+		return nil, fmt.Errorf("run control script %s: %w", plugin.Control.Main, err)
+	}
+	return host, nil
+}
+
+func (vm *pluginControlVM) newControlHost(plugin LoadedPlugin, trackRuntime bool) (*pluginControlHost, error) {
 	runtime := goja.New()
 	runtime.SetMaxCallStackSize(pluginControlMaxCallStackDepth)
-	vm.setCurrentRuntime(runtime)
+	if trackRuntime {
+		vm.setCurrentRuntime(runtime)
+	}
 	controlGeneration, err := pluginControlVMKey(plugin, "control", "")
 	if err != nil {
 		return nil, err
@@ -1242,13 +1622,14 @@ func (vm *pluginControlVM) init(plugin LoadedPlugin) (*pluginControlHost, error)
 		return nil, err
 	}
 	host.module = module
-	err = withPluginControlTimeout(runtime, func() error {
-		_, runErr := runtime.RunScript(plugin.Control.Main, source)
-		return runErr
-	})
-	host.registrationPhase = false
+	mainModuleID, err := pluginControlMainModuleID(plugin)
 	if err != nil {
-		return nil, fmt.Errorf("run control script %s: %w", plugin.Control.Main, err)
+		return nil, err
+	}
+	if err := installPluginControlModuleLoader(runtime, mainModuleID, module, func(referrer, request string) (pluginControlModuleSource, error) {
+		return resolvePluginControlModule(plugin, referrer, request)
+	}); err != nil {
+		return nil, err
 	}
 	return host, nil
 }
@@ -1297,7 +1678,8 @@ func (vm *pluginControlVM) stopVM() {
 		select {
 		case <-vm.done:
 		case <-time.After(pluginControlExecutionLockTimeout):
-			log.Printf("plugin control VM %s/%s did not stop before timeout", vm.pluginID, vm.workerName)
+			log.Printf("plugin control VM %s/%s did not stop before timeout",
+				strconv.QuoteToASCII(vm.pluginID), strconv.QuoteToASCII(vm.workerName))
 		}
 	})
 }
@@ -1326,8 +1708,12 @@ func (vm *pluginControlVM) setExecuting(executing bool) {
 func (vm *pluginControlVM) interruptIfRunning(reason string) {
 	vm.currentMu.Lock()
 	runtime := vm.currentRuntime
+	host := vm.currentHost
 	executing := vm.executing
 	vm.currentMu.Unlock()
+	if executing && host != nil {
+		host.Interrupt(reason)
+	}
 	if executing && runtime != nil {
 		runtime.Interrupt(reason)
 	}
@@ -1336,7 +1722,11 @@ func (vm *pluginControlVM) interruptIfRunning(reason string) {
 func (vm *pluginControlVM) interruptCurrentRuntime(reason string) {
 	vm.currentMu.Lock()
 	runtime := vm.currentRuntime
+	host := vm.currentHost
 	vm.currentMu.Unlock()
+	if host != nil {
+		host.Interrupt(reason)
+	}
 	if runtime != nil {
 		runtime.Interrupt(reason)
 	}
@@ -1391,13 +1781,18 @@ func (h *pluginControlHost) runEvent(event pluginControlEvent, optionalHandler b
 	if handlerName == "" {
 		return h.surface, nil, false, nil
 	}
-	handlerValue := h.module.Get("exports").ToObject(h.vm).Get(handlerName)
-	if handlerValue == nil || goja.IsUndefined(handlerValue) || goja.IsNull(handlerValue) {
+	exportsValue := h.module.Get("exports")
+	var exportsObject *goja.Object
+	if exportsValue != nil && !goja.IsUndefined(exportsValue) && !goja.IsNull(exportsValue) {
+		exportsObject = exportsValue.ToObject(h.vm)
+	}
+	if exportsObject == nil || !pluginHostObjectOwns(exportsObject, handlerName) {
 		if optionalHandler {
 			return h.surface, nil, false, nil
 		}
 		return h.surface, nil, false, fmt.Errorf("%w: control script %s does not export %s", errPluginRuntimeTargetNotLoaded, h.plugin.Control.Main, handlerName)
 	}
+	handlerValue := exportsObject.Get(handlerName)
 	handler, ok := goja.AssertFunction(handlerValue)
 	if !ok {
 		return h.surface, nil, false, fmt.Errorf("control export %s is not a function", handlerName)
@@ -1406,13 +1801,31 @@ func (h *pluginControlHost) runEvent(event pluginControlEvent, optionalHandler b
 		return h.surface, nil, true, nil
 	}
 	previousUpgradePhase := h.upgradePhase
+	previousMigrationPhase := h.migrationPhase
+	previousEBPFMigrationPhase := h.ebpfMigrationPhase
+	previousResourceMutationTransaction := h.resourceMutationTransaction
 	h.upgradePhase = event.Kind == "upgrade_snapshot" || event.Kind == "upgrade_restore"
-	defer func() { h.upgradePhase = previousUpgradePhase }()
+	h.migrationPhase = event.Kind == "resource_migrate"
+	h.ebpfMigrationPhase = event.Kind == "ebpf_state_migrate"
+	h.resourceMutationTransaction = ""
+	if event.Kind == "reconcile" && h.runtime != nil {
+		h.resourceMutationTransaction = h.runtime.currentPluginResourceMigrationTransaction()
+	}
+	defer func() {
+		h.upgradePhase = previousUpgradePhase
+		h.migrationPhase = previousMigrationPhase
+		h.ebpfMigrationPhase = previousEBPFMigrationPhase
+		h.resourceMutationTransaction = previousResourceMutationTransaction
+	}()
 	value, handlerErr := handler(goja.Undefined(), h.vm.ToValue(pluginControlContext(h.plugin, event)))
 	if handlerErr != nil {
 		handlerErr = fmt.Errorf("control handler %s failed: %w", handlerName, handlerErr)
 	}
 	timerOps := append([]pluginControlTimerOperation(nil), h.timerOps...)
+	var interrupted *goja.InterruptedError
+	if errors.As(handlerErr, &interrupted) {
+		return h.surface, nil, true, handlerErr
+	}
 	if err := h.runtime.applyTimerOperations(h.plugin, timerOps); err != nil {
 		if handlerErr != nil {
 			return h.surface, nil, true, fmt.Errorf("%v; apply timer operations: %w", handlerErr, err)
@@ -1424,6 +1837,20 @@ func (h *pluginControlHost) runEvent(event pluginControlEvent, optionalHandler b
 	}
 	if event.Kind == "upgrade_snapshot" {
 		result, err := h.exportUpgradeState(value)
+		if err != nil {
+			return h.surface, nil, true, err
+		}
+		return h.surface, result, true, nil
+	}
+	if event.Kind == "resource_migrate" {
+		result, err := h.exportResourceMigrationResult(value, event.Resource)
+		if err != nil {
+			return h.surface, nil, true, err
+		}
+		return h.surface, result, true, nil
+	}
+	if event.Kind == "ebpf_state_migrate" {
+		result, err := h.exportEBPFStateMigrationResult(value)
 		if err != nil {
 			return h.surface, nil, true, err
 		}
@@ -1458,6 +1885,17 @@ func (h *pluginControlHost) exportUpgradeState(value goja.Value) (any, error) {
 		return nil, fmt.Errorf("upgrade snapshot exceeds %d bytes", pluginControlUpgradeMaxStateBytes)
 	}
 	return pluginControlDecodeUpgradeState(data)
+}
+
+func (h *pluginControlHost) exportEBPFStateMigrationResult(value goja.Value) (pluginEBPFStateMigrationResult, error) {
+	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		return pluginEBPFStateMigrationResult{}, fmt.Errorf("eBPF state migration handler must return progress")
+	}
+	data, err := json.Marshal(value.Export())
+	if err != nil {
+		return pluginEBPFStateMigrationResult{}, fmt.Errorf("eBPF state migration result is not JSON serializable: %w", err)
+	}
+	return decodePluginEBPFStateMigrationResult(data)
 }
 
 func pluginControlDecodeUpgradeState(data []byte) (any, error) {
@@ -1532,7 +1970,7 @@ func (rt *gojaPluginControlRuntime) applyRuntimeResourcesForReconcile(plugin Loa
 			continue
 		}
 		current := resource
-		records, err := loadPluginResourceRecords(rt.db, plugin, current)
+		records, err := loadPluginResourceRecordsWithSecretStore(rt.db, rt.secretStore, plugin, current)
 		if err != nil {
 			_ = markPluginRuntimeError(rt.db, plugin.ID, "resource", current.ID, err)
 			failures = append(failures, current.ID+": "+err.Error())
@@ -1574,6 +2012,7 @@ func (rt *gojaPluginControlRuntime) ReapplyPluginRuntimeResourcesAfterDataplane(
 	rt.mu.Lock()
 	plugins := cloneLoadedPluginMap(rt.plugins)
 	rt.mu.Unlock()
+	rt.reconcilePluginRingSubscriptions(plugins, snapshot)
 	failures := make(map[string]error)
 	for _, catalogPlugin := range catalog.Plugins {
 		plugin, ok := plugins[catalogPlugin.ID]
@@ -1598,19 +2037,21 @@ func readPluginControlScript(plugin LoadedPlugin) (string, error) {
 	if plugin.controlMainPath == "" {
 		return "", errPluginRuntimeTargetNotLoaded
 	}
-	info, err := os.Stat(plugin.controlMainPath)
-	if err != nil {
-		return "", fmt.Errorf("control.main: %w", err)
+	var data []byte
+	var err error
+	if plugin.Control != nil && plugin.rootDir != "" && plugin.Control.Main != "" {
+		data, _, err = readPluginRootedRegularFile(plugin.rootDir, plugin.Control.Main, pluginControlMaxSize)
+	} else {
+		data, _, err = readBoundedRegularFileAtPath(plugin.controlMainPath, pluginControlMaxSize, true)
 	}
-	if info.IsDir() {
-		return "", fmt.Errorf("control.main is a directory")
-	}
-	if info.Size() > pluginControlMaxSize {
-		return "", fmt.Errorf("control.main exceeds %d bytes", pluginControlMaxSize)
-	}
-	data, err := os.ReadFile(plugin.controlMainPath) // #nosec G304 -- controlMainPath is symlink-resolved and checked against plugin root at load time.
 	if err != nil {
 		return "", fmt.Errorf("read control.main: %w", err)
+	}
+	if plugin.Control != nil && plugin.Control.ResolvedSHA256 != "" {
+		got := fmt.Sprintf("%x", sha256.Sum256(data))
+		if got != plugin.Control.ResolvedSHA256 {
+			return "", fmt.Errorf("control.main sha256 changed after catalog verification: got %s, want %s", got, plugin.Control.ResolvedSHA256)
+		}
 	}
 	return string(data), nil
 }
@@ -1621,11 +2062,25 @@ func pluginControlHandlerName(event pluginControlEvent) string {
 		return ""
 	case "resource_apply":
 		return "onResourceApply"
+	case "resource_migrate":
+		return "onResourceMigrate"
+	case "ebpf_state_migrate":
+		return "onEBPFStateMigrate"
 	case "action":
 		return "onAction"
 	case "timer":
 		return "onTimer"
 	case "worker":
+		if event.Worker == nil {
+			return ""
+		}
+		return event.Worker.Handler
+	case "event":
+		if event.Worker == nil {
+			return ""
+		}
+		return event.Worker.Handler
+	case "socket":
 		if event.Worker == nil {
 			return ""
 		}
@@ -1675,10 +2130,34 @@ func pluginControlContext(plugin LoadedPlugin, event pluginControlEvent) map[str
 		}
 		ctx["records"] = records
 	}
+	if event.Migration != nil {
+		ctx["migration"] = map[string]any{
+			"from_version": event.Migration.FromVersion,
+			"to_version":   event.Migration.ToVersion,
+			"from_digest":  event.Migration.FromDigest,
+			"to_digest":    event.Migration.ToDigest,
+		}
+	}
+	if event.EBPFMigration != nil {
+		ctx["ebpf_migration"] = map[string]any{
+			"protocol_version":    event.EBPFMigration.ProtocolVersion,
+			"object_id":           event.EBPFMigration.ObjectID,
+			"source_map":          event.EBPFMigration.SourceMap,
+			"target_map":          event.EBPFMigration.TargetMap,
+			"from_schema_version": event.EBPFMigration.FromSchemaVersion,
+			"to_schema_version":   event.EBPFMigration.ToSchemaVersion,
+			"batch":               event.EBPFMigration.Batch,
+			"cursor":              event.EBPFMigration.Cursor,
+			"max_entries":         event.EBPFMigration.MaxEntries,
+			"max_bytes":           event.EBPFMigration.MaxBytes,
+		}
+	}
 	if event.Action != nil {
 		ctx["action"] = map[string]any{
-			"id":             event.Action.ID,
-			"runtime_update": event.Action.RuntimeUpdate,
+			"id":                      event.Action.ID,
+			"runtime_update":          event.Action.RuntimeUpdate,
+			"request_schema_version":  event.Action.RequestSchemaVersion,
+			"response_schema_version": event.Action.ResponseSchemaVersion,
 		}
 		ctx["payload"] = pluginControlDecodeJSON(event.Payload)
 	}
@@ -1698,6 +2177,30 @@ func pluginControlContext(plugin LoadedPlugin, event pluginControlEvent) map[str
 			"handler": event.Worker.Handler,
 		}
 		ctx["payload"] = pluginControlDecodeJSON(event.Payload)
+	}
+	if event.BusEvent != nil {
+		busEvent := map[string]any{
+			"topic":          event.BusEvent.Topic,
+			"subscription":   event.BusEvent.SubscriptionID,
+			"sequence":       event.BusEvent.Sequence,
+			"published_at":   event.BusEvent.PublishedAt,
+			"source_plugin":  event.BusEvent.SourcePlugin,
+			"target_plugin":  event.BusEvent.TargetPlugin,
+			"resource":       event.BusEvent.ResourceID,
+			"schema_version": event.BusEvent.SchemaVersion,
+			"payload":        pluginControlDecodeJSON(event.BusEvent.Payload),
+		}
+		if event.BusEvent.Durable {
+			busEvent["delivery"] = "durable"
+			busEvent["delivery_id"] = event.BusEvent.DeliveryID
+			busEvent["attempt"] = event.BusEvent.DeliveryAttempt
+		} else {
+			busEvent["delivery"] = "volatile"
+		}
+		ctx["event"] = busEvent
+	}
+	if event.SocketEvent != nil {
+		ctx["socket"] = pluginControlSocketEventObject(*event.SocketEvent)
 	}
 	if event.Kind == "deactivate" {
 		ctx["reason"] = event.Reason
@@ -1727,7 +2230,6 @@ func pluginControlDecodeJSON(raw json.RawMessage) any {
 	}
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
 		return string(raw)
 	}
@@ -1736,6 +2238,9 @@ func pluginControlDecodeJSON(raw json.RawMessage) any {
 
 func (h *pluginControlHost) install() error {
 	pluginAPI := h.vm.NewObject()
+	if err := pluginAPI.Set("host", h.pluginHostInfo); err != nil {
+		return err
+	}
 	if err := pluginAPI.Set("capabilities", h.pluginRegisterCapabilities); err != nil {
 		return err
 	}
@@ -1743,6 +2248,9 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := pluginAPI.Set("action", h.pluginRegisterAction); err != nil {
+		return err
+	}
+	if err := pluginAPI.Set("service", h.pluginRegisterService); err != nil {
 		return err
 	}
 	if err := pluginAPI.Set("virtualInterface", h.pluginRegisterVirtualInterface); err != nil {
@@ -1802,6 +2310,9 @@ func (h *pluginControlHost) install() error {
 	if err := resources.Set("list", h.resourceList); err != nil {
 		return err
 	}
+	if err := resources.Set("transaction", h.resourceTransaction); err != nil {
+		return err
+	}
 	if err := h.vm.Set("resources", resources); err != nil {
 		return err
 	}
@@ -1820,6 +2331,9 @@ func (h *pluginControlHost) install() error {
 	if err := pluginResourcesAPI.Set("delete", h.pluginResourceDelete); err != nil {
 		return err
 	}
+	if err := pluginResourcesAPI.Set("transaction", h.pluginResourceTransaction); err != nil {
+		return err
+	}
 	if err := pluginsAPI.Set("resources", pluginResourcesAPI); err != nil {
 		return err
 	}
@@ -1828,6 +2342,19 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := pluginsAPI.Set("actions", pluginActionsAPI); err != nil {
+		return err
+	}
+	pluginServicesAPI := h.vm.NewObject()
+	if err := pluginServicesAPI.Set("list", h.pluginServiceList); err != nil {
+		return err
+	}
+	if err := pluginServicesAPI.Set("resolve", h.pluginServiceResolve); err != nil {
+		return err
+	}
+	if err := pluginServicesAPI.Set("call", h.pluginServiceCall); err != nil {
+		return err
+	}
+	if err := pluginsAPI.Set("services", pluginServicesAPI); err != nil {
 		return err
 	}
 	if err := h.vm.Set("plugins", pluginsAPI); err != nil {
@@ -1841,16 +2368,31 @@ func (h *pluginControlHost) install() error {
 	if err := ebpfAPI.Set("mapPut", h.ebpfMapPut); err != nil {
 		return err
 	}
+	if err := ebpfAPI.Set("mapTransaction", h.ebpfMapTransaction); err != nil {
+		return err
+	}
 	if err := ebpfAPI.Set("mapGet", h.ebpfMapGet); err != nil {
 		return err
 	}
 	if err := ebpfAPI.Set("mapGetPerCPU", h.ebpfMapGetPerCPU); err != nil {
 		return err
 	}
+	if err := ebpfAPI.Set("mapScan", h.ebpfMapScan); err != nil {
+		return err
+	}
 	if err := ebpfAPI.Set("mapDelete", h.ebpfMapDelete); err != nil {
 		return err
 	}
 	if err := ebpfAPI.Set("mapClear", h.ebpfMapClear); err != nil {
+		return err
+	}
+	if err := ebpfAPI.Set("ringRead", h.ebpfRingRead); err != nil {
+		return err
+	}
+	if err := ebpfAPI.Set("ringSubscribe", h.ebpfRingSubscribe); err != nil {
+		return err
+	}
+	if err := ebpfAPI.Set("ringStats", h.ebpfRingStats); err != nil {
 		return err
 	}
 	if err := h.vm.Set("ebpf", ebpfAPI); err != nil {
@@ -1931,7 +2473,30 @@ func (h *pluginControlHost) install() error {
 	if err := socketAPI.Set("list", h.socketList); err != nil {
 		return err
 	}
+	if err := socketAPI.Set("watch", h.socketWatch); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("unwatch", h.socketUnwatch); err != nil {
+		return err
+	}
+	if err := socketAPI.Set("watchList", h.socketWatchList); err != nil {
+		return err
+	}
 	if err := netAPI.Set("socket", socketAPI); err != nil {
+		return err
+	}
+	httpAPI := h.vm.NewObject()
+	if err := httpAPI.Set("request", h.httpRequest); err != nil {
+		return err
+	}
+	if err := netAPI.Set("http", httpAPI); err != nil {
+		return err
+	}
+	dnsAPI := h.vm.NewObject()
+	if err := dnsAPI.Set("lookup", h.dnsLookup); err != nil {
+		return err
+	}
+	if err := netAPI.Set("dns", dnsAPI); err != nil {
 		return err
 	}
 	prefixAPI := h.vm.NewObject()
@@ -1939,6 +2504,60 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := netAPI.Set("prefix", prefixAPI); err != nil {
+		return err
+	}
+	leaseAPI := h.vm.NewObject()
+	if err := leaseAPI.Set("list", h.netLeaseList); err != nil {
+		return err
+	}
+	if err := leaseAPI.Set("restore", h.netLeaseRestore); err != nil {
+		return err
+	}
+	if err := netAPI.Set("lease", leaseAPI); err != nil {
+		return err
+	}
+	namespaceAPI := h.vm.NewObject()
+	if err := namespaceAPI.Set("get", h.netNamespaceGet); err != nil {
+		return err
+	}
+	if err := namespaceAPI.Set("list", h.netNamespaceList); err != nil {
+		return err
+	}
+	if err := namespaceAPI.Set("ensure", h.netNamespaceEnsure); err != nil {
+		return err
+	}
+	if err := namespaceAPI.Set("delete", h.netNamespaceDelete); err != nil {
+		return err
+	}
+	if err := namespaceAPI.Set("release", h.netNamespaceRelease); err != nil {
+		return err
+	}
+	if err := namespaceAPI.Set("owned", h.netNamespaceOwned); err != nil {
+		return err
+	}
+	if err := netAPI.Set("namespace", namespaceAPI); err != nil {
+		return err
+	}
+	tunTapAPI := h.vm.NewObject()
+	if err := tunTapAPI.Set("ensure", h.netTunTapEnsure); err != nil {
+		return err
+	}
+	if err := tunTapAPI.Set("close", h.netTunTapClose); err != nil {
+		return err
+	}
+	if err := tunTapAPI.Set("read", h.netTunTapRead); err != nil {
+		return err
+	}
+	if err := tunTapAPI.Set("write", h.netTunTapWrite); err != nil {
+		return err
+	}
+	if err := tunTapAPI.Set("list", h.netTunTapList); err != nil {
+		return err
+	}
+	if err := tunTapAPI.Set("owned", h.netTunTapOwned); err != nil {
+		return err
+	}
+	if err := netAPI.Set("tuntap", tunTapAPI); err != nil {
 		return err
 	}
 	linkAPI := h.vm.NewObject()
@@ -1960,7 +2579,19 @@ func (h *pluginControlHost) install() error {
 	if err := linkAPI.Set("ensureMacvlan", h.netLinkEnsureMacvlan); err != nil {
 		return err
 	}
+	if err := linkAPI.Set("ensureVLAN", h.netLinkEnsureVLAN); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("ensureVRF", h.netLinkEnsureVRF); err != nil {
+		return err
+	}
 	if err := linkAPI.Set("delete", h.netLinkDelete); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("release", h.netLinkRelease); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("owned", h.netLinkOwned); err != nil {
 		return err
 	}
 	if err := linkAPI.Set("setMaster", h.netLinkSetMaster); err != nil {
@@ -2010,7 +2641,38 @@ func (h *pluginControlHost) install() error {
 	if err := routeAPI.Set("delete", h.netRouteDelete); err != nil {
 		return err
 	}
+	if err := routeAPI.Set("transaction", h.netRouteTransaction); err != nil {
+		return err
+	}
 	if err := netAPI.Set("route", routeAPI); err != nil {
+		return err
+	}
+
+	ruleAPI := h.vm.NewObject()
+	if err := ruleAPI.Set("replace", h.netRuleReplace); err != nil {
+		return err
+	}
+	if err := ruleAPI.Set("delete", h.netRuleDelete); err != nil {
+		return err
+	}
+	if err := ruleAPI.Set("transaction", h.netRuleTransaction); err != nil {
+		return err
+	}
+	if err := netAPI.Set("rule", ruleAPI); err != nil {
+		return err
+	}
+
+	neighAPI := h.vm.NewObject()
+	if err := neighAPI.Set("replace", h.netNeighReplace); err != nil {
+		return err
+	}
+	if err := neighAPI.Set("delete", h.netNeighDelete); err != nil {
+		return err
+	}
+	if err := neighAPI.Set("transaction", h.netNeighTransaction); err != nil {
+		return err
+	}
+	if err := netAPI.Set("neigh", neighAPI); err != nil {
 		return err
 	}
 	if err := h.vm.Set("net", netAPI); err != nil {
@@ -2051,6 +2713,90 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 
+	eventsAPI := h.vm.NewObject()
+	if err := eventsAPI.Set("subscribe", h.eventSubscribe); err != nil {
+		return err
+	}
+	if err := eventsAPI.Set("publish", h.eventPublish); err != nil {
+		return err
+	}
+	if err := eventsAPI.Set("stats", h.eventStats); err != nil {
+		return err
+	}
+	if err := eventsAPI.Set("deadLetters", h.eventDeadLetters); err != nil {
+		return err
+	}
+	if err := eventsAPI.Set("retry", h.eventRetry); err != nil {
+		return err
+	}
+	if err := eventsAPI.Set("discard", h.eventDiscard); err != nil {
+		return err
+	}
+	if err := h.vm.Set("events", eventsAPI); err != nil {
+		return err
+	}
+
+	operationsAPI := h.vm.NewObject()
+	if err := operationsAPI.Set("begin", h.operationBegin); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("get", h.operationGet); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("getByKey", h.operationGetByKey); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("list", h.operationList); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("claim", h.operationClaim); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("checkpoint", h.operationCheckpoint); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("complete", h.operationComplete); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("retry", h.operationRetry); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("fail", h.operationFail); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("cancel", h.operationCancel); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("remove", h.operationRemove); err != nil {
+		return err
+	}
+	if err := operationsAPI.Set("stats", h.operationStats); err != nil {
+		return err
+	}
+	if err := h.vm.Set("operations", operationsAPI); err != nil {
+		return err
+	}
+
+	metricsAPI := h.vm.NewObject()
+	if err := metricsAPI.Set("counter", h.metricCounter); err != nil {
+		return err
+	}
+	if err := metricsAPI.Set("gauge", h.metricGauge); err != nil {
+		return err
+	}
+	if err := metricsAPI.Set("delete", h.metricDelete); err != nil {
+		return err
+	}
+	if err := metricsAPI.Set("clear", h.metricClear); err != nil {
+		return err
+	}
+	if err := metricsAPI.Set("list", h.metricList); err != nil {
+		return err
+	}
+	if err := h.vm.Set("metrics", metricsAPI); err != nil {
+		return err
+	}
+
 	cryptoAPI := h.vm.NewObject()
 	if err := cryptoAPI.Set("md5", h.cryptoMD5); err != nil {
 		return err
@@ -2079,6 +2825,41 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 
+	blobAPI := h.vm.NewObject()
+	if err := blobAPI.Set("begin", h.blobBegin); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("write", h.blobWrite); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("commit", h.blobCommit); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("abort", h.blobAbort); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("put", h.blobPut); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("read", h.blobRead); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("stat", h.blobStat); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("list", h.blobList); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("delete", h.blobDelete); err != nil {
+		return err
+	}
+	if err := blobAPI.Set("verify", h.blobVerify); err != nil {
+		return err
+	}
+	if err := h.vm.Set("blob", blobAPI); err != nil {
+		return err
+	}
+
 	logAPI := h.vm.NewObject()
 	if err := logAPI.Set("info", h.logInfo); err != nil {
 		return err
@@ -2086,7 +2867,32 @@ func (h *pluginControlHost) install() error {
 	if err := logAPI.Set("error", h.logError); err != nil {
 		return err
 	}
+	if err := logAPI.Set("warn", h.logWarn); err != nil {
+		return err
+	}
+	if err := logAPI.Set("debug", h.logDebug); err != nil {
+		return err
+	}
 	return h.vm.Set("log", logAPI)
+}
+
+func (h *pluginControlHost) pluginHostInfo(goja.FunctionCall) goja.Value {
+	env := currentPluginHostEnvironment()
+	features := append([]string(nil), pluginRuntimeFeatures...)
+	availability := currentPluginHostFeatureAvailability()
+	return h.vm.ToValue(map[string]any{
+		"runtime_version":    env.RuntimeVersion,
+		"control_api_abi":    env.ControlAPIABI,
+		"tc_pipeline_abi":    env.TCPipelineABI,
+		"os":                 env.OS,
+		"arch":               env.Arch,
+		"kernel_release":     env.KernelRelease,
+		"core_priority":      pluginPipelineCorePriority,
+		"features":           features,
+		"available_features": availability.Available,
+		"feature_status":     availability.Status,
+		"resource_limits":    pluginResourceLimitsFromConfig(h.cfg),
+	})
 }
 
 func (h *pluginControlHost) pluginRegisterCapabilities(call goja.FunctionCall) goja.Value {
@@ -2113,6 +2919,7 @@ func (h *pluginControlHost) pluginRegisterCapabilities(call goja.FunctionCall) g
 	if err != nil {
 		h.throwf("plugin.capabilities: %v", err)
 	}
+	h.requirePluginRegistrationCapacity("capabilities", len(normalized), h.pluginResourceLimits().CapabilitiesPerPlugin)
 	h.surface.Capabilities = normalized
 	return goja.Undefined()
 }
@@ -2130,6 +2937,7 @@ func (h *pluginControlHost) pluginRegisterResource(call goja.FunctionCall) goja.
 	if pluginResourceIndex(h.surface.Resources, resource.ID) >= 0 {
 		h.throwf("plugin.resource: duplicate resource %q", resource.ID)
 	}
+	h.requirePluginRegistrationCapacity("resources", len(h.surface.Resources)+1, h.pluginResourceLimits().ResourcesPerPlugin)
 	h.surface.Resources = append(h.surface.Resources, resource)
 	return goja.Undefined()
 }
@@ -2147,6 +2955,7 @@ func (h *pluginControlHost) pluginRegisterAction(call goja.FunctionCall) goja.Va
 	if pluginActionIndex(h.surface.Actions, action.ID) >= 0 {
 		h.throwf("plugin.action: duplicate action %q", action.ID)
 	}
+	h.requirePluginRegistrationCapacity("actions", len(h.surface.Actions)+1, h.pluginResourceLimits().ActionsPerPlugin)
 	h.surface.Actions = append(h.surface.Actions, action)
 	return goja.Undefined()
 }
@@ -2179,6 +2988,7 @@ func (h *pluginControlHost) pluginRegisterVirtualInterfaceWithDefault(call goja.
 	if pluginVirtualInterfaceIndex(h.surface.VirtualInterfaces, vif.ID) >= 0 {
 		h.throwf("%s: duplicate virtual interface %q", api, vif.ID)
 	}
+	h.requirePluginRegistrationCapacity("virtual interfaces", len(h.surface.VirtualInterfaces)+1, h.pluginResourceLimits().VirtualIfacesPerPlugin)
 	h.surface.VirtualInterfaces = append(h.surface.VirtualInterfaces, vif)
 	return goja.Undefined()
 }
@@ -2196,6 +3006,7 @@ func (h *pluginControlHost) ebpfLoadObject(call goja.FunctionCall) goja.Value {
 	if pluginObjectIndex(h.surface.Objects, object.ID) >= 0 {
 		h.throwf("ebpf.loadObject: duplicate object %q", object.ID)
 	}
+	h.requirePluginRegistrationCapacity("objects", len(h.surface.Objects)+1, h.pluginResourceLimits().ObjectsPerPlugin)
 	h.surface.Objects = append(h.surface.Objects, object)
 	return goja.Undefined()
 }
@@ -2213,6 +3024,7 @@ func (h *pluginControlHost) hookAttach(call goja.FunctionCall) goja.Value {
 	if pluginHookIndex(h.surface.Hooks, hook.ID) >= 0 {
 		h.throwf("hooks.attach: duplicate hook %q", hook.ID)
 	}
+	h.requirePluginRegistrationCapacity("hooks", len(h.surface.Hooks)+1, h.pluginResourceLimits().HooksPerPlugin)
 	h.surface.Hooks = append(h.surface.Hooks, hook)
 	return goja.Undefined()
 }
@@ -2221,6 +3033,7 @@ type pluginControlPipelineAttachment struct {
 	ID         string   `json:"id"`
 	Pipeline   string   `json:"pipeline,omitempty"`
 	Direction  string   `json:"direction,omitempty"`
+	Phase      string   `json:"phase,omitempty"`
 	Engine     string   `json:"engine,omitempty"`
 	Attach     string   `json:"attach,omitempty"`
 	Priority   int      `json:"priority,omitempty"`
@@ -2250,11 +3063,24 @@ func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
 	default:
 		h.throwf("pipeline.attach: direction must be forward or reply")
 	}
+	phase := strings.TrimSpace(strings.ToLower(spec.Phase))
+	stage := direction
+	switch phase {
+	case "", "around_core":
+	case "after_apply":
+		if direction == "reply" {
+			stage = "post_reply_apply"
+		} else {
+			stage = "post_apply"
+		}
+	default:
+		h.throwf("pipeline.attach: phase must be around_core or after_apply")
+	}
 	hook := PluginHook{
 		ID:         spec.ID,
 		Engine:     spec.Engine,
 		Attach:     spec.Attach,
-		Stage:      direction,
+		Stage:      stage,
 		Priority:   spec.Priority,
 		Program:    spec.Program,
 		Mode:       spec.Mode,
@@ -2276,12 +3102,13 @@ func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
 	if hook.Attach != "ingress" && hook.Attach != "egress" && hook.Attach != "both" {
 		h.throwf("pipeline.attach: attach must be ingress, egress or both for Veer pipeline hooks")
 	}
-	if hook.Priority == pluginPipelineCorePriority {
+	if phase != "after_apply" && hook.Priority == pluginPipelineCorePriority {
 		h.throwf("pipeline.attach: priority %d collides with Veer Core priority; use a lower value for pre-core or a higher value for post-core", pluginPipelineCorePriority)
 	}
 	if pluginHookIndex(h.surface.Hooks, hook.ID) >= 0 {
 		h.throwf("pipeline.attach: duplicate hook %q", hook.ID)
 	}
+	h.requirePluginRegistrationCapacity("hooks", len(h.surface.Hooks)+1, h.pluginResourceLimits().HooksPerPlugin)
 	h.surface.Hooks = append(h.surface.Hooks, hook)
 	return goja.Undefined()
 }
@@ -2325,8 +3152,26 @@ func (h *pluginControlHost) exportJSONValue(value goja.Value, out any, api strin
 	if err != nil {
 		h.throwf("%s: %v", api, err)
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
 		h.throwf("%s: %v", api, err)
+	}
+}
+
+func (h *pluginControlHost) pluginResourceLimits() PluginResourceLimits {
+	if h != nil {
+		if h.plugin.resourceLimits.ObjectsPerPlugin > 0 {
+			return h.plugin.resourceLimits
+		}
+		return pluginResourceLimitsFromConfig(h.cfg)
+	}
+	return pluginResourceLimitsFromConfig(nil)
+}
+
+func (h *pluginControlHost) requirePluginRegistrationCapacity(resource string, value, limit int) {
+	if value > limit {
+		h.throwf("plugin resource budget: %s = %d exceeds limit %d", resource, value, limit)
 	}
 }
 
@@ -2398,7 +3243,19 @@ func (h *pluginControlHost) kvSet(call goja.FunctionCall) goja.Value {
 	if len(dataJSON) > pluginControlMaxKVRecordBytes {
 		h.throwf("kv.set: value exceeds %d bytes", pluginControlMaxKVRecordBytes)
 	}
-	if err := upsertPluginControlRecord(h.db, h.plugin.ID, pluginControlKVResourceID, key, dataJSON, true, pluginControlMaxKVRecords); err != nil {
+	resource := PluginResource{ID: pluginControlKVResourceID}
+	if err := h.preparePluginResourceMutation(h.plugin, resource); err != nil {
+		h.throwf("kv.set: %v", err)
+	}
+	tx, err := h.db.Begin()
+	if err != nil {
+		h.throwf("kv.set: %v", err)
+	}
+	defer tx.Rollback()
+	if err := upsertPluginControlRecord(tx, h.plugin.ID, pluginControlKVResourceID, key, dataJSON, true, pluginControlMaxKVRecords, h.resourceMutationTransaction, pluginResourceLimitsFromConfig(h.cfg)); err != nil {
+		h.throwf("kv.set: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
 		h.throwf("kv.set: %v", err)
 	}
 	return goja.Undefined()
@@ -2407,7 +3264,11 @@ func (h *pluginControlHost) kvSet(call goja.FunctionCall) goja.Value {
 func (h *pluginControlHost) kvDelete(call goja.FunctionCall) goja.Value {
 	h.requirePermission("kv")
 	key := h.requiredTokenArg(call, 0, "key")
-	if err := store.DeletePluginRecord(h.db, h.plugin.ID, pluginControlKVResourceID, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	resource := PluginResource{ID: pluginControlKVResourceID}
+	if err := h.preparePluginResourceMutation(h.plugin, resource); err != nil {
+		h.throwf("kv.delete: %v", err)
+	}
+	if err := deletePluginControlRecord(h.db, h.plugin.ID, pluginControlKVResourceID, key, h.resourceMutationTransaction); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		h.throwf("kv.delete: %v", err)
 	}
 	return goja.Undefined()
@@ -2437,6 +3298,7 @@ func (h *pluginControlHost) resourceGet(call goja.FunctionCall) goja.Value {
 	if err != nil {
 		h.throwf("resources.get: %v", err)
 	}
+	*record = h.decryptPluginRecord(*record, resource, "resources.get")
 	return h.valueFromRecord(*record)
 }
 
@@ -2447,6 +3309,9 @@ func (h *pluginControlHost) resourceSet(call goja.FunctionCall) goja.Value {
 	if len(call.Arguments) < 3 {
 		h.throwf("resources.set: value is required")
 	}
+	if err := h.preparePluginResourceMutation(h.plugin, resource); err != nil {
+		h.throwf("resources.set: %v", err)
+	}
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.throwf("resources.set: %v", err)
@@ -2455,6 +3320,10 @@ func (h *pluginControlHost) resourceSet(call goja.FunctionCall) goja.Value {
 	existing, err := store.GetPluginRecord(tx, h.plugin.ID, resource.ID, key)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		h.throwf("resources.set: %v", err)
+	}
+	if existing != nil {
+		decrypted := h.decryptPluginRecord(*existing, resource, "resources.set")
+		existing = &decrypted
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		if !pluginResourceControlAllows(resource, "create") {
@@ -2475,7 +3344,8 @@ func (h *pluginControlHost) resourceSet(call goja.FunctionCall) goja.Value {
 	if !apply && existing != nil && existing.DataJSON == dataJSON && existing.Enabled == enabled {
 		return goja.Undefined()
 	}
-	if err := upsertPluginControlRecord(tx, h.plugin.ID, resource.ID, key, dataJSON, enabled, pluginResourceMaxRecords(resource)); err != nil {
+	storedDataJSON := h.encryptPluginRecordData(h.plugin.ID, resource, key, dataJSON, "resources.set")
+	if err := upsertPluginControlRecord(tx, h.plugin.ID, resource.ID, key, storedDataJSON, enabled, pluginResourceMaxRecords(resource), h.resourceMutationTransaction, pluginResourceLimitsFromConfig(h.cfg)); err != nil {
 		h.throwf("resources.set: %v", err)
 	}
 	if err := markPluginResourceMutation(tx, h.plugin, resource); err != nil {
@@ -2484,6 +3354,7 @@ func (h *pluginControlHost) resourceSet(call goja.FunctionCall) goja.Value {
 	if err := tx.Commit(); err != nil {
 		h.throwf("resources.set: %v", err)
 	}
+	h.runtime.publishPluginResourceChanged(h.plugin.ID, h.plugin, resource, "set", key)
 	if apply {
 		if err := h.applyTargetPluginResourceRuntimeUpdate(h.plugin, resource); err != nil {
 			_ = markPluginRuntimeError(h.db, h.plugin.ID, "resource", resource.ID, err)
@@ -2504,11 +3375,17 @@ func (h *pluginControlHost) resourceDelete(call goja.FunctionCall) goja.Value {
 	if !pluginResourceControlAllows(resource, "delete") {
 		h.throwf("resources.delete: resource %s does not allow delete", resource.ID)
 	}
+	if err := h.preparePluginResourceMutation(h.plugin, resource); err != nil {
+		h.throwf("resources.delete: %v", err)
+	}
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.throwf("resources.delete: %v", err)
 	}
 	defer tx.Rollback()
+	if err := h.ensurePluginResourceMutationAllowed(tx, h.plugin, resource); err != nil {
+		h.throwf("resources.delete: %v", err)
+	}
 	if err := store.DeletePluginRecord(tx, h.plugin.ID, resource.ID, key); err != nil {
 		if errors.Is(err, sql.ErrNoRows) && !apply {
 			return goja.Undefined()
@@ -2523,6 +3400,7 @@ func (h *pluginControlHost) resourceDelete(call goja.FunctionCall) goja.Value {
 	if err := tx.Commit(); err != nil {
 		h.throwf("resources.delete: %v", err)
 	}
+	h.runtime.publishPluginResourceChanged(h.plugin.ID, h.plugin, resource, "delete", key)
 	if apply {
 		if err := h.applyTargetPluginResourceRuntimeUpdate(h.plugin, resource); err != nil {
 			_ = markPluginRuntimeError(h.db, h.plugin.ID, "resource", resource.ID, err)
@@ -2543,6 +3421,7 @@ func (h *pluginControlHost) resourceList(call goja.FunctionCall) goja.Value {
 	if err != nil {
 		h.throwf("resources.list: %v", err)
 	}
+	records = h.decryptPluginRecords(records, resource, "resources.list")
 	return h.vm.ToValue(h.recordsForScript(records))
 }
 
@@ -2563,6 +3442,7 @@ func (h *pluginControlHost) pluginResourceGet(call goja.FunctionCall) goja.Value
 	if err != nil {
 		h.throwf("plugins.resources.get: %v", err)
 	}
+	*record = h.decryptPluginRecord(*record, resource, "plugins.resources.get")
 	return h.valueFromRecordWithResource(*record, resource, true)
 }
 
@@ -2580,6 +3460,7 @@ func (h *pluginControlHost) pluginResourceList(call goja.FunctionCall) goja.Valu
 	if err != nil {
 		h.throwf("plugins.resources.list: %v", err)
 	}
+	records = h.decryptPluginRecords(records, resource, "plugins.resources.list")
 	return h.vm.ToValue(h.recordsForScriptWithResource(records, resource, true))
 }
 
@@ -2600,6 +3481,9 @@ func (h *pluginControlHost) pluginResourceSet(call goja.FunctionCall) goja.Value
 		apply = call.Arguments[5].ToBoolean()
 	}
 	plugin, resource := h.requiredTargetPluginResource(targetPluginID, resourceID)
+	if err := h.preparePluginResourceMutation(plugin, resource); err != nil {
+		h.throwf("plugins.resources.set: %v", err)
+	}
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.throwf("plugins.resources.set: %v", err)
@@ -2608,6 +3492,10 @@ func (h *pluginControlHost) pluginResourceSet(call goja.FunctionCall) goja.Value
 	existing, err := store.GetPluginRecord(tx, plugin.ID, resource.ID, key)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		h.throwf("plugins.resources.set: %v", err)
+	}
+	if existing != nil {
+		decrypted := h.decryptPluginRecord(*existing, resource, "plugins.resources.set")
+		existing = &decrypted
 	}
 	method := "update"
 	if existing == nil {
@@ -2621,7 +3509,8 @@ func (h *pluginControlHost) pluginResourceSet(call goja.FunctionCall) goja.Value
 	if !apply && existing != nil && existing.DataJSON == dataJSON && existing.Enabled == enabled {
 		return h.valueFromRecordWithResource(*existing, resource, true)
 	}
-	if err := upsertPluginControlRecord(tx, plugin.ID, resource.ID, key, dataJSON, enabled, pluginResourceMaxRecords(resource)); err != nil {
+	storedDataJSON := h.encryptPluginRecordData(plugin.ID, resource, key, dataJSON, "plugins.resources.set")
+	if err := upsertPluginControlRecord(tx, plugin.ID, resource.ID, key, storedDataJSON, enabled, pluginResourceMaxRecords(resource), h.resourceMutationTransaction, pluginResourceLimitsFromConfig(h.cfg)); err != nil {
 		h.throwf("plugins.resources.set: %v", err)
 	}
 	if err := markPluginResourceMutation(tx, plugin, resource); err != nil {
@@ -2630,6 +3519,7 @@ func (h *pluginControlHost) pluginResourceSet(call goja.FunctionCall) goja.Value
 	if err := tx.Commit(); err != nil {
 		h.throwf("plugins.resources.set: %v", err)
 	}
+	h.runtime.publishPluginResourceChanged(h.plugin.ID, plugin, resource, "set", key)
 	if apply {
 		release := h.beginSynchronousPluginCall(plugin.ID, "resource "+resource.ID)
 		defer release()
@@ -2642,6 +3532,7 @@ func (h *pluginControlHost) pluginResourceSet(call goja.FunctionCall) goja.Value
 	if err != nil {
 		h.throwf("plugins.resources.set: %v", err)
 	}
+	*record = h.decryptPluginRecord(*record, resource, "plugins.resources.set")
 	return h.valueFromRecordWithResource(*record, resource, true)
 }
 
@@ -2659,11 +3550,17 @@ func (h *pluginControlHost) pluginResourceDelete(call goja.FunctionCall) goja.Va
 	if !pluginResourceAllows(resource, "delete") {
 		h.throwf("plugins.resources.delete: resource %s/%s does not allow delete", plugin.ID, resource.ID)
 	}
+	if err := h.preparePluginResourceMutation(plugin, resource); err != nil {
+		h.throwf("plugins.resources.delete: %v", err)
+	}
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.throwf("plugins.resources.delete: %v", err)
 	}
 	defer tx.Rollback()
+	if err := h.ensurePluginResourceMutationAllowed(tx, plugin, resource); err != nil {
+		h.throwf("plugins.resources.delete: %v", err)
+	}
 	if err := store.DeletePluginRecord(tx, plugin.ID, resource.ID, key); err != nil {
 		if errors.Is(err, sql.ErrNoRows) && !apply {
 			return h.vm.ToValue(map[string]any{"status": "not_found"})
@@ -2678,6 +3575,7 @@ func (h *pluginControlHost) pluginResourceDelete(call goja.FunctionCall) goja.Va
 	if err := tx.Commit(); err != nil {
 		h.throwf("plugins.resources.delete: %v", err)
 	}
+	h.runtime.publishPluginResourceChanged(h.plugin.ID, plugin, resource, "delete", key)
 	if apply {
 		release := h.beginSynchronousPluginCall(plugin.ID, "resource "+resource.ID)
 		defer release()
@@ -2694,42 +3592,11 @@ func (h *pluginControlHost) pluginActionCall(call goja.FunctionCall) goja.Value 
 	targetPluginID := h.requiredTokenArg(call, 0, "plugin")
 	actionID := h.requiredTokenArg(call, 1, "action")
 	plugin, action := h.requiredTargetPluginAction(targetPluginID, actionID)
-	if plugin.ID == h.plugin.ID {
-		h.throwf("plugins.actions.call: self action calls are not supported")
-	}
-	h.requirePluginActionAccess(plugin.ID, action.ID, "plugins.actions.call")
 	payload := json.RawMessage(`{}`)
 	if len(call.Arguments) > 2 && !goja.IsUndefined(call.Arguments[2]) && !goja.IsNull(call.Arguments[2]) {
 		payload = json.RawMessage(h.jsonFromValue(call.Arguments[2]))
 	}
-	if len(payload) > pluginActionMaxPayloadBytes(action) || !json.Valid(payload) {
-		h.throwf("plugins.actions.call: invalid action payload")
-	}
-	release := h.beginSynchronousPluginCall(plugin.ID, "action "+action.ID)
-	defer release()
-	var result any
-	var err error
-	if action.RuntimeUpdate == "runtime_query" {
-		result, err = h.runtime.QueryPluginAction(plugin, action, payload)
-	} else {
-		err = h.applyTargetPluginActionRuntimeUpdate(plugin, action, payload)
-	}
-	if err != nil {
-		if action.RuntimeUpdate != "runtime_query" {
-			_ = markPluginRuntimeError(h.db, plugin.ID, "action", action.ID, err)
-		}
-		h.throwf("plugins.actions.call: apply %s/%s: %v", plugin.ID, action.ID, err)
-	}
-	response := map[string]any{
-		"status":         "completed",
-		"plugin":         plugin.ID,
-		"action":         action.ID,
-		"runtime_update": action.RuntimeUpdate,
-	}
-	if result != nil {
-		response["result"] = result
-	}
-	return h.vm.ToValue(response)
+	return h.vm.ToValue(h.invokePluginAction(plugin, action, payload, "plugins.actions.call"))
 }
 
 func (h *pluginControlHost) applyTargetPluginResourceRuntimeUpdate(plugin LoadedPlugin, resource PluginResource) error {
@@ -2759,7 +3626,7 @@ func (h *pluginControlHost) applyTargetPluginResourceRuntimeUpdate(plugin Loaded
 	case "plugin_reconcile":
 		return fmt.Errorf("plugin_reconcile runtime update requires process manager")
 	case "runtime_apply":
-		records, err := loadPluginResourceRecords(h.db, plugin, resource)
+		records, err := loadPluginResourceRecordsWithSecretStore(h.db, h.runtime.secretStore, plugin, resource)
 		if err != nil {
 			return err
 		}
@@ -2783,18 +3650,23 @@ func (h *pluginControlHost) targetPluginRuntimeUpdateAllowed(plugin LoadedPlugin
 }
 
 func (h *pluginControlHost) applyCurrentPluginResourceRuntimeApply(plugin LoadedPlugin, resource PluginResource) error {
-	records, err := loadPluginResourceRecords(h.db, plugin, resource)
+	records, err := loadPluginResourceRecordsWithSecretStore(h.db, h.runtime.secretStore, plugin, resource)
 	if err != nil {
 		return err
 	}
 	var controlErr error
 	if h.runtime != nil && plugin.controlMainPath != "" {
 		if h.plugin.ID == plugin.ID {
-			_, _, _, controlErr = h.runEvent(pluginControlEvent{
+			event := pluginControlEvent{
 				Kind:     "resource_apply",
 				Resource: &resource,
 				Records:  records,
-			}, false)
+			}
+			if h.remoteEventInvoker != nil {
+				_, _, _, controlErr = h.remoteEventInvoker(event, false)
+			} else {
+				_, _, _, controlErr = h.runEvent(event, false)
+			}
 		} else {
 			_, controlErr = h.runtime.runPluginControlWithSurface(plugin, pluginControlEvent{
 				Kind:     "resource_apply",
@@ -2957,6 +3829,123 @@ func (h *pluginControlHost) ebpfMapGetPerCPU(call goja.FunctionCall) goja.Value 
 		out = append(out, hex.EncodeToString(value))
 	}
 	return h.vm.ToValue(out)
+}
+
+type pluginControlMapScanOptions struct {
+	Cursor   string `json:"cursor,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+	MaxBytes int    `json:"max_bytes,omitempty"`
+}
+
+func (h *pluginControlHost) ebpfMapScan(call goja.FunctionCall) goja.Value {
+	h.requirePermission("ebpf.map_read")
+	controller, ok := h.mapController.(pluginEBPFMapScanController)
+	if !ok || controller == nil {
+		h.throwf("ebpf.mapScan: eBPF map scan controller is unavailable")
+	}
+	objectID, mapName, optionsValue := h.ebpfBoundedReadArgs(call, "ebpf.mapScan")
+	h.requirePluginObjectID(objectID, "ebpf.mapScan")
+	h.requirePluginMap(mapName, "ebpf.mapScan")
+	var options pluginControlMapScanOptions
+	h.exportJSONValue(optionsValue, &options, "ebpf.mapScan")
+	if options.Limit == 0 {
+		options.Limit = pluginControlMapScanDefaultEntries
+	}
+	if options.Limit < 1 || options.Limit > pluginControlMapScanMaxEntries {
+		h.throwf("ebpf.mapScan: limit must be between 1 and %d", pluginControlMapScanMaxEntries)
+	}
+	if options.MaxBytes == 0 {
+		options.MaxBytes = pluginControlMapScanDefaultBytes
+	}
+	if options.MaxBytes < 1 || options.MaxBytes > pluginControlMapScanMaxBytes {
+		h.throwf("ebpf.mapScan: max_bytes must be between 1 and %d", pluginControlMapScanMaxBytes)
+	}
+	var cursor []byte
+	if strings.TrimSpace(options.Cursor) != "" {
+		var err error
+		cursor, err = decodePluginControlHexBytes(options.Cursor)
+		if err != nil {
+			h.throwf("ebpf.mapScan cursor: %v", err)
+		}
+	}
+	result, err := controller.ScanPluginMap(h.plugin.ID, objectID, mapName, pluginEBPFMapScanRequest{
+		Cursor: cursor, Limit: options.Limit, MaxBytes: options.MaxBytes,
+	})
+	if err != nil {
+		h.throwf("ebpf.mapScan: %v", err)
+	}
+	entries := make([]map[string]any, 0, len(result.Entries))
+	for _, entry := range result.Entries {
+		entries = append(entries, map[string]any{
+			"key": hex.EncodeToString(entry.Key), "value": hex.EncodeToString(entry.Value),
+		})
+	}
+	return h.vm.ToValue(map[string]any{
+		"entries": entries,
+		"cursor":  hex.EncodeToString(result.Cursor),
+		"done":    result.Done,
+	})
+}
+
+type pluginControlRingReadOptions struct {
+	MaxRecords int   `json:"max_records,omitempty"`
+	MaxBytes   int   `json:"max_bytes,omitempty"`
+	TimeoutMS  int64 `json:"timeout_ms,omitempty"`
+}
+
+func (h *pluginControlHost) ebpfRingRead(call goja.FunctionCall) goja.Value {
+	h.requirePermission("ebpf.map_read")
+	controller, ok := h.mapController.(pluginEBPFRingReadController)
+	if !ok || controller == nil {
+		h.throwf("ebpf.ringRead: eBPF ring buffer controller is unavailable")
+	}
+	objectID, mapName, optionsValue := h.ebpfBoundedReadArgs(call, "ebpf.ringRead")
+	h.requirePluginObjectID(objectID, "ebpf.ringRead")
+	h.requirePluginMap(mapName, "ebpf.ringRead")
+	if err := pluginRingReadConflictError(h.plugin, objectID, mapName); err != nil {
+		h.throwf("ebpf.ringRead: %v", err)
+	}
+	var options pluginControlRingReadOptions
+	h.exportJSONValue(optionsValue, &options, "ebpf.ringRead")
+	if options.MaxRecords == 0 {
+		options.MaxRecords = pluginControlRingDefaultRecords
+	}
+	if options.MaxRecords < 1 || options.MaxRecords > pluginControlRingMaxRecords {
+		h.throwf("ebpf.ringRead: max_records must be between 1 and %d", pluginControlRingMaxRecords)
+	}
+	if options.MaxBytes == 0 {
+		options.MaxBytes = pluginControlRingDefaultBytes
+	}
+	if options.MaxBytes < 1 || options.MaxBytes > pluginControlRingMaxBytes {
+		h.throwf("ebpf.ringRead: max_bytes must be between 1 and %d", pluginControlRingMaxBytes)
+	}
+	if options.TimeoutMS == 0 {
+		options.TimeoutMS = 1000
+	}
+	if options.TimeoutMS < 1 || options.TimeoutMS > 15000 {
+		h.throwf("ebpf.ringRead: timeout_ms must be between 1 and 15000")
+	}
+	timeout := h.boundedTransportTimeout(time.Duration(options.TimeoutMS)*time.Millisecond, "ebpf.ringRead")
+	result, err := controller.ReadPluginRingBuffer(h.plugin.ID, objectID, mapName, pluginEBPFRingReadRequest{
+		MaxRecords: options.MaxRecords, MaxBytes: options.MaxBytes, TimeoutMS: max(1, timeout.Milliseconds()),
+	})
+	if err != nil {
+		h.throwf("ebpf.ringRead: %v", err)
+	}
+	records := make([]map[string]any, 0, len(result.Records))
+	for _, record := range result.Records {
+		records = append(records, map[string]any{
+			"data": hex.EncodeToString(record.RawSample), "size": len(record.RawSample), "remaining": record.Remaining,
+		})
+	}
+	return h.vm.ToValue(map[string]any{
+		"records":         records,
+		"bytes":           result.Bytes,
+		"dropped_records": result.DroppedRecords,
+		"remaining":       result.Remaining,
+		"timed_out":       result.TimedOut,
+		"limit_reached":   result.LimitReached,
+	})
 }
 
 func (h *pluginControlHost) ebpfMapDelete(call goja.FunctionCall) goja.Value {
@@ -3181,6 +4170,9 @@ func (h *pluginControlHost) udpRecv(call goja.FunctionCall) goja.Value {
 	if err != nil {
 		h.throwf("net.udp.recv: %v", err)
 	}
+	if datagram.RemoteAddr != nil {
+		h.requireNetEndpointAccess("udp", req.Interface, "", datagram.RemoteAddr.IP, datagram.RemoteAddr.Port, "net.udp.recv")
+	}
 	return h.vm.ToValue(h.udpDatagramObject(datagram))
 }
 
@@ -3196,6 +4188,9 @@ func (h *pluginControlHost) udpExchange(call goja.FunctionCall) goja.Value {
 	}
 	if err != nil {
 		h.throwf("net.udp.exchange: %v", err)
+	}
+	if datagram.RemoteAddr != nil {
+		h.requireNetEndpointAccess("udp", req.Send.Interface, "", datagram.RemoteAddr.IP, datagram.RemoteAddr.Port, "net.udp.exchange")
 	}
 	return h.vm.ToValue(h.udpDatagramObject(datagram))
 }
@@ -3235,6 +4230,12 @@ func (h *pluginControlHost) cryptoRandomBytes(call goja.FunctionCall) goja.Value
 }
 
 func (h *pluginControlHost) cryptoSHA256File(call goja.FunctionCall) goja.Value {
+	if h.migrationPhase {
+		h.throwf("crypto.sha256File is unavailable during plugin resource migration")
+	}
+	if h.ebpfMigrationPhase {
+		h.throwf("crypto.sha256File is unavailable during eBPF state migration")
+	}
 	if h.upgradePhase {
 		h.throwf("crypto.sha256File is unavailable during plugin upgrade snapshot/restore")
 	}
@@ -3309,7 +4310,8 @@ func (h *pluginControlHost) secretGet(call goja.FunctionCall) goja.Value {
 	if err != nil {
 		h.throwf("secret.get: %v", err)
 	}
-	return h.vm.ToValue(pluginControlDecodeJSON(json.RawMessage(record.DataJSON)))
+	decrypted := h.decryptPluginRecord(*record, PluginResource{ID: pluginControlSecretResourceID}, "secret.get")
+	return h.vm.ToValue(pluginControlDecodeJSON(json.RawMessage(decrypted.DataJSON)))
 }
 
 func (h *pluginControlHost) secretSet(call goja.FunctionCall) goja.Value {
@@ -3322,7 +4324,20 @@ func (h *pluginControlHost) secretSet(call goja.FunctionCall) goja.Value {
 	if len(dataJSON) > pluginControlMaxSecretBytes {
 		h.throwf("secret.set: value exceeds %d bytes", pluginControlMaxSecretBytes)
 	}
-	if err := upsertPluginControlRecord(h.db, h.plugin.ID, pluginControlSecretResourceID, key, dataJSON, true, pluginControlMaxSecrets); err != nil {
+	resource := PluginResource{ID: pluginControlSecretResourceID}
+	if err := h.preparePluginResourceMutation(h.plugin, resource); err != nil {
+		h.throwf("secret.set: %v", err)
+	}
+	dataJSON = h.encryptPluginRecordData(h.plugin.ID, resource, key, dataJSON, "secret.set")
+	tx, err := h.db.Begin()
+	if err != nil {
+		h.throwf("secret.set: %v", err)
+	}
+	defer tx.Rollback()
+	if err := upsertPluginControlRecord(tx, h.plugin.ID, pluginControlSecretResourceID, key, dataJSON, true, pluginControlMaxSecrets, h.resourceMutationTransaction, pluginResourceLimitsFromConfig(h.cfg)); err != nil {
+		h.throwf("secret.set: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
 		h.throwf("secret.set: %v", err)
 	}
 	return goja.Undefined()
@@ -3331,40 +4346,45 @@ func (h *pluginControlHost) secretSet(call goja.FunctionCall) goja.Value {
 func (h *pluginControlHost) secretDelete(call goja.FunctionCall) goja.Value {
 	h.requirePermission("secret")
 	key := h.requiredTokenArg(call, 0, "key")
-	if err := store.DeletePluginRecord(h.db, h.plugin.ID, pluginControlSecretResourceID, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	resource := PluginResource{ID: pluginControlSecretResourceID}
+	if err := h.preparePluginResourceMutation(h.plugin, resource); err != nil {
+		h.throwf("secret.delete: %v", err)
+	}
+	if err := deletePluginControlRecord(h.db, h.plugin.ID, pluginControlSecretResourceID, key, h.resourceMutationTransaction); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		h.throwf("secret.delete: %v", err)
 	}
 	return goja.Undefined()
 }
 
 func (h *pluginControlHost) logInfo(call goja.FunctionCall) goja.Value {
-	log.Printf("plugin %s: %s", h.plugin.ID, h.logMessage(call))
+	h.writePluginLog("info", call)
 	return goja.Undefined()
 }
 
 func (h *pluginControlHost) logError(call goja.FunctionCall) goja.Value {
-	log.Printf("plugin %s error: %s", h.plugin.ID, h.logMessage(call))
+	h.writePluginLog("error", call)
 	return goja.Undefined()
 }
 
-func (h *pluginControlHost) logMessage(call goja.FunctionCall) string {
-	parts := make([]string, 0, len(call.Arguments))
-	for _, arg := range call.Arguments {
-		if goja.IsUndefined(arg) {
-			continue
-		}
-		parts = append(parts, arg.String())
-	}
-	message := strings.Join(parts, " ")
-	if len(message) > pluginControlMaxLogMessageBytes {
-		return message[:pluginControlMaxLogMessageBytes] + "...<truncated>"
-	}
-	return message
+func (h *pluginControlHost) logWarn(call goja.FunctionCall) goja.Value {
+	h.writePluginLog("warn", call)
+	return goja.Undefined()
+}
+
+func (h *pluginControlHost) logDebug(call goja.FunctionCall) goja.Value {
+	h.writePluginLog("debug", call)
+	return goja.Undefined()
 }
 
 func (h *pluginControlHost) requirePermission(permission string) {
+	if h.migrationPhase {
+		h.throwf("permission %s is unavailable during plugin resource migration", permission)
+	}
 	if h.upgradePhase {
 		h.throwf("permission %s is unavailable during plugin upgrade snapshot/restore", permission)
+	}
+	if h.ebpfMigrationPhase && permission != "ebpf.map_read" && permission != "ebpf.map_write" {
+		h.throwf("permission %s is unavailable during eBPF state migration", permission)
 	}
 	if h.registrationPhase && !pluginControlRegistrationPermissionAllowed(permission) {
 		h.throwf("permission %s is unavailable during plugin registration", permission)
@@ -3375,8 +4395,14 @@ func (h *pluginControlHost) requirePermission(permission string) {
 }
 
 func (h *pluginControlHost) requireRegistrationPermission(permission string, api string) {
+	if h.migrationPhase {
+		h.throwf("%s is unavailable during plugin resource migration", api)
+	}
 	if h.upgradePhase {
 		h.throwf("%s is unavailable during plugin upgrade snapshot/restore", api)
+	}
+	if h.ebpfMigrationPhase {
+		h.throwf("%s is unavailable during eBPF state migration", api)
 	}
 	if !h.registrationPhase {
 		h.throwf("%s is only available during plugin registration", api)
@@ -3386,7 +4412,7 @@ func (h *pluginControlHost) requireRegistrationPermission(permission string, api
 
 func pluginControlRegistrationPermissionAllowed(permission string) bool {
 	switch permission {
-	case "plugin.register", "ebpf.load", "hook.attach", "ui":
+	case "plugin.register", "ebpf.load", "event", "hook.attach", "ui":
 		return true
 	default:
 		return false
@@ -3754,6 +4780,24 @@ func (h *pluginControlHost) ebpfMapClearArgs(call goja.FunctionCall) (string, st
 	return objectID, mapName
 }
 
+func (h *pluginControlHost) ebpfBoundedReadArgs(call goja.FunctionCall, api string) (string, string, goja.Value) {
+	if len(call.Arguments) != 2 && len(call.Arguments) != 3 {
+		h.throwf("%s requires map/options or object/map/options", api)
+	}
+	offset := 0
+	objectID := ""
+	if len(call.Arguments) == 3 {
+		objectID = h.requiredTokenArg(call, 0, "object")
+		offset = 1
+	}
+	mapName := h.requiredMapNameArg(call, offset, "map")
+	options := call.Arguments[offset+1]
+	if goja.IsUndefined(options) || goja.IsNull(options) || options.ToObject(h.vm) == nil {
+		h.throwf("%s options must be an object", api)
+	}
+	return objectID, mapName, options
+}
+
 func (h *pluginControlHost) timerSpecFromCall(call goja.FunctionCall, kind string) pluginControlTimerSpec {
 	name := h.requiredTokenArg(call, 0, "timer")
 	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
@@ -3782,6 +4826,7 @@ func (h *pluginControlHost) timerSpecFromCall(call goja.FunctionCall, kind strin
 func (h *pluginControlHost) l2SendRequest(call goja.FunctionCall) pluginControlL2SendRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := h.l2SendRequestFromObject(obj)
+	req.Namespace = h.requirePluginNetworkNamespace(req.Namespace, "net.l2.send")
 	h.requireNetAccess("l2", req.Interface, "net.l2.send")
 	return req
 }
@@ -3789,6 +4834,7 @@ func (h *pluginControlHost) l2SendRequest(call goja.FunctionCall) pluginControlL
 func (h *pluginControlHost) l2RecvRequest(call goja.FunctionCall) pluginControlL2RecvRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := h.l2RecvRequestFromObject(obj)
+	req.Namespace = h.requirePluginNetworkNamespace(req.Namespace, "net.l2.recv")
 	h.requireNetAccess("l2", req.Interface, "net.l2.recv")
 	return req
 }
@@ -3796,6 +4842,7 @@ func (h *pluginControlHost) l2RecvRequest(call goja.FunctionCall) pluginControlL
 func (h *pluginControlHost) l2RecvManyRequest(call goja.FunctionCall) pluginControlL2RecvManyRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := h.l2RecvManyRequestFromObject(obj)
+	req.Recv.Namespace = h.requirePluginNetworkNamespace(req.Recv.Namespace, "net.l2.recvMany")
 	h.requireNetAccess("l2", req.Recv.Interface, "net.l2.recvMany")
 	return req
 }
@@ -3805,6 +4852,11 @@ func (h *pluginControlHost) l2ExchangeRequest(call goja.FunctionCall) pluginCont
 	req := pluginControlL2ExchangeRequest{
 		Send: h.l2SendRequestFromObject(obj),
 		Recv: h.l2ExchangeRecvRequestFromObject(obj),
+	}
+	req.Send.Namespace = h.requirePluginNetworkNamespace(req.Send.Namespace, "net.l2.exchange")
+	req.Recv.Namespace = h.requirePluginNetworkNamespace(req.Recv.Namespace, "net.l2.exchange")
+	if req.Send.Namespace != req.Recv.Namespace {
+		h.throwf("net.l2.exchange: send and receive namespace must match")
 	}
 	h.requireNetAccess("l2", req.Send.Interface, "net.l2.exchange")
 	h.requireNetAccess("l2", req.Recv.Interface, "net.l2.exchange")
@@ -3818,6 +4870,11 @@ func (h *pluginControlHost) l2ExchangeManyRequest(call goja.FunctionCall) plugin
 		Recv: h.l2RecvManyRequestFromObject(obj),
 	}
 	req.Recv.Recv = h.l2ExchangeRecvRequestFromObject(obj)
+	req.Send.Namespace = h.requirePluginNetworkNamespace(req.Send.Namespace, "net.l2.exchangeMany")
+	req.Recv.Recv.Namespace = h.requirePluginNetworkNamespace(req.Recv.Recv.Namespace, "net.l2.exchangeMany")
+	if req.Send.Namespace != req.Recv.Recv.Namespace {
+		h.throwf("net.l2.exchangeMany: send and receive namespace must match")
+	}
 	h.requireNetAccess("l2", req.Send.Interface, "net.l2.exchangeMany")
 	h.requireNetAccess("l2", req.Recv.Recv.Interface, "net.l2.exchangeMany")
 	return req
@@ -3826,14 +4883,20 @@ func (h *pluginControlHost) l2ExchangeManyRequest(call goja.FunctionCall) plugin
 func (h *pluginControlHost) udpSendRequest(call goja.FunctionCall) pluginControlUDPSendRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := h.udpSendRequestFromObject(obj)
+	req.Namespace = h.requirePluginNetworkNamespace(req.Namespace, "net.udp.send")
 	h.requireNetAccess("udp", req.Interface, "net.udp.send")
+	h.requireNetEndpointAccess("udp", req.Interface, "", req.RemoteIP, req.RemotePort, "net.udp.send")
 	return req
 }
 
 func (h *pluginControlHost) udpRecvRequest(call goja.FunctionCall) pluginControlUDPRecvRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := h.udpRecvRequestFromObject(obj)
+	req.Namespace = h.requirePluginNetworkNamespace(req.Namespace, "net.udp.recv")
 	h.requireNetAccess("udp", req.Interface, "net.udp.recv")
+	if req.HasRemoteFilter {
+		h.requireNetEndpointAccess("udp", req.Interface, "", req.RemoteIP, req.RemotePort, "net.udp.recv")
+	}
 	return req
 }
 
@@ -3844,6 +4907,8 @@ func (h *pluginControlHost) udpExchangeRequest(call goja.FunctionCall) pluginCon
 		Send: send,
 		Recv: h.udpRecvRequestFromObjectWithDefaults(obj, send.Interface, send.LocalIP, send.LocalPort, false, false),
 	}
+	req.Send.Namespace = h.requirePluginNetworkNamespace(req.Send.Namespace, "net.udp.exchange")
+	req.Recv.Namespace = h.requirePluginNetworkNamespace(req.Recv.Namespace, "net.udp.exchange")
 	if req.Recv.RemoteIP == nil {
 		req.Recv.RemoteIP = req.Send.RemoteIP
 	}
@@ -3854,7 +4919,11 @@ func (h *pluginControlHost) udpExchangeRequest(call goja.FunctionCall) pluginCon
 	if req.Send.Interface != req.Recv.Interface {
 		h.throwf("net.udp.exchange: send and receive interface must match")
 	}
+	if req.Send.Namespace != req.Recv.Namespace {
+		h.throwf("net.udp.exchange: send and receive namespace must match")
+	}
 	h.requireNetAccess("udp", req.Send.Interface, "net.udp.exchange")
+	h.requireNetEndpointAccess("udp", req.Send.Interface, "", req.Send.RemoteIP, req.Send.RemotePort, "net.udp.exchange")
 	return req
 }
 
@@ -3864,6 +4933,7 @@ func (h *pluginControlHost) l2SendRequestFromObject(obj *goja.Object) pluginCont
 		h.throwf("net.l2.send: payload exceeds %d bytes", pluginControlL2MaxPayloadBytes)
 	}
 	req := pluginControlL2SendRequest{
+		Namespace: h.netNamespaceObjectField(obj, "net.l2"),
 		Interface: h.requiredStringObjectField(obj, "interface"),
 		EtherType: h.requiredEtherTypeObjectField(obj, "ethertype"),
 		DstMAC:    h.requiredMACObjectField(obj, "dst_mac"),
@@ -3900,6 +4970,7 @@ func (h *pluginControlHost) l2RecvRequestFromObject(obj *goja.Object) pluginCont
 		}
 	}
 	req := pluginControlL2RecvRequest{
+		Namespace: h.netNamespaceObjectField(obj, "net.l2"),
 		Interface: h.requiredStringObjectField(obj, "interface"),
 		EtherType: h.requiredEtherTypeObjectField(obj, "ethertype"),
 		Timeout:   timeout,
@@ -3978,6 +5049,7 @@ func (h *pluginControlHost) udpSendRequestFromObject(obj *goja.Object) pluginCon
 		h.throwf("net.udp.send: payload exceeds %d bytes", pluginControlUDPMaxPayloadBytes)
 	}
 	return pluginControlUDPSendRequest{
+		Namespace:  h.netNamespaceObjectField(obj, "net.udp"),
 		Interface:  h.requiredUDPInterfaceObjectField(obj, "interface"),
 		LocalIP:    h.optionalIPObjectField(obj, "local_ip", "bind_ip", "source_ip"),
 		LocalPort:  h.optionalPortObjectField(obj, 0, "local_port", "bind_port", "source_port"),
@@ -4010,6 +5082,7 @@ func (h *pluginControlHost) udpRecvRequestFromObjectWithDefaults(obj *goja.Objec
 		h.throwf("net.udp.recv: local_port is required")
 	}
 	req := pluginControlUDPRecvRequest{
+		Namespace: h.netNamespaceObjectField(obj, "net.udp"),
 		Interface: h.optionalUDPInterfaceObjectField(obj, defaultInterface, "interface"),
 		LocalIP:   h.optionalIPObjectFieldWithDefault(obj, defaultLocalIP, "local_ip", "bind_ip"),
 		LocalPort: localPort,
@@ -4036,6 +5109,7 @@ func (h *pluginControlHost) l2FrameValue(frame pluginControlL2Frame) goja.Value 
 
 func (h *pluginControlHost) l2FrameObject(frame pluginControlL2Frame) map[string]any {
 	return map[string]any{
+		"namespace":   normalizePluginControlNamespace(frame.Namespace),
 		"interface":   frame.Interface,
 		"ifindex":     frame.IfIndex,
 		"ethertype":   fmt.Sprintf("0x%04x", frame.EtherType),
@@ -4048,6 +5122,7 @@ func (h *pluginControlHost) l2FrameObject(frame pluginControlL2Frame) map[string
 
 func (h *pluginControlHost) udpResultObject(result pluginControlUDPResult) map[string]any {
 	out := map[string]any{
+		"namespace": result.Namespace,
 		"interface": result.Interface,
 		"bytes":     result.Bytes,
 	}
@@ -4066,6 +5141,7 @@ func (h *pluginControlHost) udpResultObject(result pluginControlUDPResult) map[s
 
 func (h *pluginControlHost) udpDatagramObject(datagram pluginControlUDPDatagram) map[string]any {
 	out := map[string]any{
+		"namespace":   datagram.Namespace,
 		"interface":   datagram.Interface,
 		"payload_hex": hex.EncodeToString(datagram.Payload),
 		"bytes":       len(datagram.Payload),
@@ -4545,7 +5621,7 @@ func (rt *gojaPluginControlRuntime) applyStaleRuntimeResourcesAfterTimer(plugin 
 		if !pluginRuntimeStatusNeedsRecovery(status) {
 			continue
 		}
-		records, err := loadPluginResourceRecords(rt.db, plugin, current)
+		records, err := loadPluginResourceRecordsWithSecretStore(rt.db, rt.secretStore, plugin, current)
 		if err != nil {
 			_ = markPluginRuntimeError(rt.db, plugin.ID, "resource", current.ID, err)
 			failures = append(failures, current.ID+": "+err.Error())
@@ -4713,8 +5789,45 @@ func numericByte(value any) (byte, bool) {
 			return 0, false
 		}
 		return byte(typed), true
+	case int8:
+		if typed < 0 {
+			return 0, false
+		}
+		return byte(typed), true
+	case int16:
+		if typed < 0 || typed > 255 {
+			return 0, false
+		}
+		return byte(typed), true
+	case int32:
+		if typed < 0 || typed > 255 {
+			return 0, false
+		}
+		return byte(typed), true
 	case int64:
 		if typed < 0 || typed > 255 {
+			return 0, false
+		}
+		return byte(typed), true
+	case uint:
+		if typed > 255 {
+			return 0, false
+		}
+		return byte(typed), true
+	case uint8:
+		return typed, true
+	case uint16:
+		if typed > 255 {
+			return 0, false
+		}
+		return byte(typed), true
+	case uint32:
+		if typed > 255 {
+			return 0, false
+		}
+		return byte(typed), true
+	case uint64:
+		if typed > 255 {
 			return 0, false
 		}
 		return byte(typed), true
@@ -4723,6 +5836,12 @@ func numericByte(value any) (byte, bool) {
 			return 0, false
 		}
 		return byte(typed), true
+	case json.Number:
+		parsed, err := strconv.ParseUint(string(typed), 10, 8)
+		if err != nil {
+			return 0, false
+		}
+		return byte(parsed), true
 	default:
 		return 0, false
 	}
@@ -4780,16 +5899,23 @@ func (h *pluginControlHost) throwf(format string, args ...any) {
 	panic(h.vm.NewTypeError(fmt.Sprintf(format, args...)))
 }
 
-func upsertPluginControlRecord(db store.RuleStore, pluginID string, resourceID string, recordKey string, dataJSON string, enabled bool, maxRecords int) error {
-	_, err := store.GetPluginRecord(db, pluginID, resourceID, recordKey)
+func upsertPluginControlRecord(db store.RuleStore, pluginID string, resourceID string, recordKey string, dataJSON string, enabled bool, maxRecords int, transactionID string, limits PluginResourceLimits) error {
+	if err := store.EnsurePluginResourceMutationAllowedForTransaction(db, pluginID, resourceID, transactionID); err != nil {
+		return err
+	}
+	previous, err := store.GetPluginRecord(db, pluginID, resourceID, recordKey)
 	if err == nil {
-		return store.UpdatePluginRecord(db, &store.PluginRecord{
+		next := store.PluginRecord{
 			PluginID:   pluginID,
 			ResourceID: resourceID,
 			RecordKey:  recordKey,
 			DataJSON:   dataJSON,
 			Enabled:    enabled,
-		})
+		}
+		if err := ensurePluginRecordStorageQuota(db, pluginID, previous, next, limits); err != nil {
+			return err
+		}
+		return store.UpdatePluginRecord(db, &next)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -4803,13 +5929,17 @@ func upsertPluginControlRecord(db store.RuleStore, pluginID string, resourceID s
 			return fmt.Errorf("resource record limit reached")
 		}
 	}
-	_, err = store.AddPluginRecord(db, &store.PluginRecord{
+	next := store.PluginRecord{
 		PluginID:   pluginID,
 		ResourceID: resourceID,
 		RecordKey:  recordKey,
 		DataJSON:   dataJSON,
 		Enabled:    enabled,
-	})
+	}
+	if err := ensurePluginRecordStorageQuota(db, pluginID, nil, next, limits); err != nil {
+		return err
+	}
+	_, err = store.AddPluginRecord(db, &next)
 	if store.SQLiteUniqueConstraintIndexName(err) == store.ConstraintIndexPluginRecordKey {
 		return store.UpdatePluginRecord(db, &store.PluginRecord{
 			PluginID:   pluginID,
@@ -4820,6 +5950,21 @@ func upsertPluginControlRecord(db store.RuleStore, pluginID string, resourceID s
 		})
 	}
 	return err
+}
+
+func deletePluginControlRecord(db *sql.DB, pluginID string, resourceID string, recordKey string, transactionID string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := store.EnsurePluginResourceMutationAllowedForTransaction(tx, pluginID, resourceID, transactionID); err != nil {
+		return err
+	}
+	if err := store.DeletePluginRecord(tx, pluginID, resourceID, recordKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func decodePluginControlHexBytes(value string) ([]byte, error) {

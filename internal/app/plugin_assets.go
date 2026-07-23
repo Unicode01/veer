@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -56,17 +57,11 @@ func resolvePluginAssets(plugin *LoadedPlugin) error {
 		if !pathWithinRoot(realStatic, realEntry) {
 			return fmt.Errorf("ui.entry escapes static_dir")
 		}
-		entryInfo, err := os.Stat(realEntry)
+		data, _, err := readPluginRootedRegularFile(realStatic, plugin.UI.Entry, pluginPackageMaxEntryBytes)
 		if err != nil {
 			return fmt.Errorf("ui.entry: %w", err)
 		}
-		if entryInfo.IsDir() {
-			return fmt.Errorf("ui.entry is a directory")
-		}
-		got, err := sha256File(realEntry)
-		if err != nil {
-			return fmt.Errorf("hash ui.entry: %w", err)
-		}
+		got := fmt.Sprintf("%x", sha256.Sum256(data))
 		plugin.UI.ResolvedSHA256 = got
 		if pluginUISHA256Required(*plugin) && plugin.UI.SHA256 == "" {
 			return fmt.Errorf("ui.sha256 is required for stable or preview UI entry files")
@@ -134,8 +129,7 @@ func pluginAssetHandler(prefix, staticDir string) http.Handler {
 }
 
 type pluginStaticFileSystem struct {
-	root     string
-	realRoot string
+	root string
 }
 
 func newPluginStaticFileSystem(root string) pluginStaticFileSystem {
@@ -143,11 +137,7 @@ func newPluginStaticFileSystem(root string) pluginStaticFileSystem {
 	if err != nil {
 		absRoot = root
 	}
-	realRoot, err := filepath.EvalSymlinks(absRoot)
-	if err != nil {
-		realRoot = absRoot
-	}
-	return pluginStaticFileSystem{root: absRoot, realRoot: realRoot}
+	return pluginStaticFileSystem{root: absRoot}
 }
 
 func (p pluginStaticFileSystem) Open(name string) (http.File, error) {
@@ -155,16 +145,16 @@ func (p pluginStaticFileSystem) Open(name string) (http.File, error) {
 	if cleanName == "." {
 		cleanName = ""
 	}
-	filePath := filepath.Join(p.root, filepath.FromSlash(cleanName))
-	realPath, err := filepath.EvalSymlinks(filePath)
+	root, err := os.OpenRoot(p.root)
 	if err != nil {
 		return nil, err
 	}
-	if !pathWithinRoot(p.realRoot, realPath) {
-		return nil, os.ErrPermission
+	defer root.Close()
+	nativeName := filepath.FromSlash(cleanName)
+	if nativeName == "" {
+		nativeName = "."
 	}
-
-	file, err := os.Open(realPath)
+	file, err := root.Open(nativeName)
 	if err != nil {
 		return nil, err
 	}
@@ -177,12 +167,7 @@ func (p pluginStaticFileSystem) Open(name string) (http.File, error) {
 		return file, nil
 	}
 
-	indexPath := filepath.Join(realPath, "index.html")
-	if !pathWithinRoot(p.realRoot, indexPath) {
-		_ = file.Close()
-		return nil, os.ErrPermission
-	}
-	index, err := os.Open(indexPath)
+	index, err := root.Open(filepath.Join(nativeName, "index.html"))
 	if err != nil {
 		_ = file.Close()
 		return nil, os.ErrNotExist

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -60,7 +61,7 @@ type ipv6DHCPv6Server struct {
 
 func newIPv6DHCPv6Server(config ipv6AssignmentDHCPv6Config) *ipv6DHCPv6Server {
 	return &ipv6DHCPv6Server{
-		config:    config,
+		config:    cloneIPv6AssignmentDHCPv6Config(config),
 		stopCh:    make(chan struct{}),
 		doneCh:    make(chan struct{}),
 		currentFD: -1,
@@ -71,13 +72,30 @@ func (srv *ipv6DHCPv6Server) start() {
 	go srv.run()
 }
 
-func (srv *ipv6DHCPv6Server) update(config ipv6AssignmentDHCPv6Config) {
+func cloneIPv6AssignmentDHCPv6Config(config ipv6AssignmentDHCPv6Config) ipv6AssignmentDHCPv6Config {
+	config.Addresses = append([]string(nil), config.Addresses...)
+	config.DNSServers = append([]string(nil), config.DNSServers...)
+	return config
+}
+
+func ipv6AssignmentDHCPv6ConfigsEqual(a, b ipv6AssignmentDHCPv6Config) bool {
+	return a.TargetInterface == b.TargetInterface &&
+		slices.Equal(a.Addresses, b.Addresses) &&
+		slices.Equal(a.DNSServers, b.DNSServers)
+}
+
+func (srv *ipv6DHCPv6Server) update(config ipv6AssignmentDHCPv6Config) bool {
 	if srv == nil {
-		return
+		return false
 	}
 	srv.mu.Lock()
-	srv.config = config
+	if ipv6AssignmentDHCPv6ConfigsEqual(srv.config, config) {
+		srv.mu.Unlock()
+		return false
+	}
+	srv.config = cloneIPv6AssignmentDHCPv6Config(config)
 	srv.mu.Unlock()
+	return true
 }
 
 func (srv *ipv6DHCPv6Server) stop() {
@@ -98,11 +116,7 @@ func (srv *ipv6DHCPv6Server) stop() {
 func (srv *ipv6DHCPv6Server) snapshot() ipv6AssignmentDHCPv6Config {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	return ipv6AssignmentDHCPv6Config{
-		TargetInterface: srv.config.TargetInterface,
-		Addresses:       append([]string(nil), srv.config.Addresses...),
-		DNSServers:      append([]string(nil), srv.config.DNSServers...),
-	}
+	return cloneIPv6AssignmentDHCPv6Config(srv.config)
 }
 
 func (srv *ipv6DHCPv6Server) run() {

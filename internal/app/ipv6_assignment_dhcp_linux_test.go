@@ -10,6 +10,35 @@ import (
 	"golang.org/x/net/bpf"
 )
 
+func TestIPv6DHCPv6ServerUpdateOnlyAppliesChanges(t *testing.T) {
+	t.Parallel()
+
+	addresses := []string{"2001:db8::10"}
+	config := ipv6AssignmentDHCPv6Config{
+		TargetInterface: "br-lan",
+		Addresses:       addresses,
+		DNSServers:      []string{"2001:4860:4860::8888"},
+	}
+	server := newIPv6DHCPv6Server(config)
+	addresses[0] = "2001:db8::bad"
+	if got := server.snapshot().Addresses[0]; got != "2001:db8::10" {
+		t.Fatalf("new DHCPv6 server retained caller-owned address slice: %q", got)
+	}
+
+	if server.update(server.snapshot()) {
+		t.Fatal("equivalent DHCPv6 update reported a change")
+	}
+	changed := server.snapshot()
+	changed.DNSServers[0] = "2400:3200::1"
+	if !server.update(changed) {
+		t.Fatal("changed DHCPv6 update was ignored")
+	}
+	changed.DNSServers[0] = "2001:db8::bad"
+	if got := server.snapshot().DNSServers[0]; got != "2400:3200::1" {
+		t.Fatalf("DHCPv6 update retained caller-owned DNS slice: %q", got)
+	}
+}
+
 func TestParseIPv6DHCPv6Frame(t *testing.T) {
 	t.Parallel()
 

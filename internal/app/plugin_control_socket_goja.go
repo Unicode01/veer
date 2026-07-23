@@ -19,18 +19,23 @@ func (h *pluginControlHost) socketOpen(call goja.FunctionCall) goja.Value {
 	interfaceName := h.requiredUDPInterfaceObjectField(obj, "interface")
 	localIP := h.optionalIPObjectField(obj, "local_ip", "bind_ip", "source_ip")
 	remoteIP := h.requiredIPObjectField(obj, "remote_ip", "peer_ip", "dst_ip")
+	remotePort := h.requiredPortObjectField(obj, "remote_port", "peer_port", "dst_port", "port")
 	resolvedNetwork, err := pluginControlSocketResolveNetwork(network, localIP, remoteIP)
 	if err != nil {
 		h.throwf("%s: %v", api, err)
 	}
 	h.requireSocketNetworkAccess(resolvedNetwork, interfaceName, api)
+	_, operation := pluginControlSocketPermission(resolvedNetwork)
+	h.requireNetEndpointAccess(operation, interfaceName, "", remoteIP, remotePort, api)
+	namespace := h.requirePluginNetworkNamespace(h.netNamespaceObjectField(obj, api), api)
 	req := pluginControlSocketOpenRequest{
 		Network:    resolvedNetwork,
+		Namespace:  namespace,
 		Interface:  interfaceName,
 		LocalIP:    localIP,
 		LocalPort:  h.optionalPortObjectField(obj, 0, "local_port", "bind_port", "source_port"),
 		RemoteIP:   remoteIP,
-		RemotePort: h.requiredPortObjectField(obj, "remote_port", "peer_port", "dst_port", "port"),
+		RemotePort: remotePort,
 		Timeout:    h.socketTimeoutObjectField(obj, api),
 		KeepAlive:  h.socketKeepAliveObjectField(obj, api),
 		NoDelay:    h.socketNoDelayObjectField(obj),
@@ -54,8 +59,10 @@ func (h *pluginControlHost) socketListen(call goja.FunctionCall) goja.Value {
 		h.throwf("%s: %v", api, err)
 	}
 	h.requireSocketNetworkAccess(resolvedNetwork, interfaceName, api)
+	namespace := h.requirePluginNetworkNamespace(h.netNamespaceObjectField(obj, api), api)
 	req := pluginControlSocketListenRequest{
 		Network:   resolvedNetwork,
+		Namespace: namespace,
 		Interface: interfaceName,
 		LocalIP:   localIP,
 		LocalPort: h.requiredPortObjectField(obj, "local_port", "bind_port", "port"),
@@ -85,6 +92,16 @@ func (h *pluginControlHost) socketAccept(call goja.FunctionCall) goja.Value {
 	if timedOut {
 		return h.vm.ToValue(map[string]any{"timeout": true})
 	}
+	remoteIP, remotePort, ok := pluginControlSocketRemoteEndpoint(accepted.RemoteAddr)
+	if !ok {
+		_, _ = registry.Close(h.plugin.ID, h.controlGeneration, accepted.Handle)
+		h.throwf("%s: accepted socket returned an invalid remote endpoint", api)
+	}
+	_, operation := pluginControlSocketPermission(accepted.Network)
+	if _, accessErr := pluginControlNetEndpointPolicyFor(h.plugin, operation, accepted.Interface, "", remoteIP, remotePort); accessErr != nil {
+		_, _ = registry.Close(h.plugin.ID, h.controlGeneration, accepted.Handle)
+		h.throwf("%s: %v", api, accessErr)
+	}
 	return h.vm.ToValue(pluginControlSocketInfoObject(accepted))
 }
 
@@ -93,7 +110,7 @@ func (h *pluginControlHost) socketRead(call goja.FunctionCall) goja.Value {
 	registry := h.socketRegistryOrThrow(api)
 	obj := h.requiredObjectArg(call, 0, "request")
 	handle := h.requiredStringObjectField(obj, "handle")
-	h.socketInfoForAccess(registry, handle, api)
+	info := h.socketInfoForAccess(registry, handle, api)
 	maxBytes := 64 << 10
 	if raw := h.objectField(obj, "max_bytes"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
 		value := raw.ToInteger()
@@ -105,6 +122,18 @@ func (h *pluginControlHost) socketRead(call goja.FunctionCall) goja.Value {
 	result, err := registry.Read(h.plugin.ID, h.controlGeneration, handle, maxBytes, h.socketTimeoutObjectField(obj, api))
 	if err != nil {
 		h.throwf("%s: %v", api, err)
+	}
+	if result.RemoteAddr != nil {
+		remoteIP, remotePort, ok := pluginControlSocketRemoteEndpoint(result.RemoteAddr.String())
+		if !ok {
+			_, _ = registry.Close(h.plugin.ID, h.controlGeneration, handle)
+			h.throwf("%s: datagram socket returned an invalid remote endpoint", api)
+		}
+		_, operation := pluginControlSocketPermission(info.Network)
+		if _, accessErr := pluginControlNetEndpointPolicyFor(h.plugin, operation, info.Interface, "", remoteIP, remotePort); accessErr != nil {
+			_, _ = registry.Close(h.plugin.ID, h.controlGeneration, handle)
+			h.throwf("%s: %v", api, accessErr)
+		}
 	}
 	out := map[string]any{
 		"payload_hex": hex.EncodeToString(result.Payload),
@@ -137,6 +166,8 @@ func (h *pluginControlHost) socketWrite(call goja.FunctionCall) goja.Value {
 			h.throwf("%s: %v", api, err)
 		}
 		remoteAddr = &net.UDPAddr{IP: remoteIP, Port: remotePort}
+		_, operation := pluginControlSocketPermission(info.Network)
+		h.requireNetEndpointAccess(operation, info.Interface, "", remoteIP, remotePort, api)
 	}
 	result, err := registry.Write(h.plugin.ID, h.controlGeneration, handle, pluginControlSocketWriteRequest{
 		Payload:    payload,
@@ -187,7 +218,82 @@ func (h *pluginControlHost) socketList(call goja.FunctionCall) goja.Value {
 		if !pluginControlHasPermission(h.plugin, permission) || !pluginControlHasNetAccess(h.plugin, operation, info.Interface) {
 			continue
 		}
+		if info.Namespace != "host" && (!pluginControlHasPermission(h.plugin, "net.namespace") || !pluginControlHasNamespaceAccess(h.plugin, info.Namespace)) {
+			continue
+		}
 		out = append(out, pluginControlSocketInfoObject(info))
+	}
+	return h.vm.ToValue(out)
+}
+
+func (h *pluginControlHost) socketWatch(call goja.FunctionCall) goja.Value {
+	const api = "net.socket.watch"
+	h.requirePermission("worker")
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	h.socketInfoForAccess(registry, handle, api)
+	worker, err := pluginPathToken(h.requiredStringObjectField(obj, "worker"))
+	if err != nil {
+		h.throwf("%s: worker: %v", api, err)
+	}
+	handler := strings.TrimSpace(h.requiredStringObjectField(obj, "handler"))
+	if !validPluginControlHandlerName(handler) {
+		h.throwf("%s: handler contains invalid handler name", api)
+	}
+	maxBytes := pluginControlSocketWatchDefaultBytes
+	if raw := h.objectField(obj, "max_bytes"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+		value := raw.ToInteger()
+		if value < 1 || value > pluginControlSocketMaxPayload {
+			h.throwf("%s: max_bytes must be between 1 and %d", api, pluginControlSocketMaxPayload)
+		}
+		maxBytes = int(value)
+	}
+	info, err := registry.Watch(h.plugin.ID, h.controlGeneration, handle, pluginControlSocketWatchSpec{
+		Worker: worker, Handler: handler, MaxBytes: maxBytes,
+	}, h.runtime.deliverPluginControlSocketEvent)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	return h.vm.ToValue(pluginControlSocketWatchInfoObject(info))
+}
+
+func (h *pluginControlHost) socketUnwatch(call goja.FunctionCall) goja.Value {
+	const api = "net.socket.unwatch"
+	h.requirePermission("worker")
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	if info, err := registry.Info(h.plugin.ID, h.controlGeneration, handle); err == nil {
+		h.requireSocketInfoAccess(info, api)
+	} else if !errors.Is(err, errPluginControlSocketNotFound) {
+		h.throwf("%s: %v", api, err)
+	}
+	stopped, err := registry.Unwatch(h.plugin.ID, h.controlGeneration, handle)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	return h.vm.ToValue(map[string]any{"stopped": stopped})
+}
+
+func (h *pluginControlHost) socketWatchList(call goja.FunctionCall) goja.Value {
+	const api = "net.socket.watchList"
+	h.requirePermission("worker")
+	registry := h.socketRegistryOrThrow(api)
+	h.requireAnySocketPermission(api)
+	infos := registry.List(h.plugin.ID, h.controlGeneration)
+	out := make([]map[string]any, 0)
+	for _, info := range infos {
+		if info.Watch == nil {
+			continue
+		}
+		permission, operation := pluginControlSocketPermission(info.Network)
+		if !pluginControlHasPermission(h.plugin, permission) || !pluginControlHasNetAccess(h.plugin, operation, info.Interface) {
+			continue
+		}
+		out = append(out, map[string]any{
+			"handle": info.Handle, "watch": pluginControlSocketWatchInfoObject(*info.Watch),
+		})
 	}
 	return h.vm.ToValue(out)
 }
@@ -210,6 +316,7 @@ func (h *pluginControlHost) socketInfoForAccess(registry *pluginControlSocketReg
 
 func (h *pluginControlHost) requireSocketInfoAccess(info pluginControlSocketInfo, api string) {
 	h.requireSocketNetworkAccess(info.Network, info.Interface, api)
+	h.requirePluginNetworkNamespace(info.Namespace, api)
 }
 
 func (h *pluginControlHost) requireSocketNetworkAccess(network string, interfaceName string, api string) {
@@ -304,6 +411,7 @@ func pluginControlSocketInfoObject(info pluginControlSocketInfo) map[string]any 
 		"handle":        info.Handle,
 		"network":       info.Network,
 		"kind":          info.Kind,
+		"namespace":     normalizePluginControlNamespace(info.Namespace),
 		"interface":     info.Interface,
 		"state":         info.State,
 		"bytes_read":    info.BytesRead,
@@ -316,6 +424,9 @@ func pluginControlSocketInfoObject(info pluginControlSocketInfo) map[string]any 
 	if info.LastError != "" {
 		out["last_error"] = info.LastError
 	}
+	if info.Watch != nil {
+		out["watch"] = pluginControlSocketWatchInfoObject(*info.Watch)
+	}
 	if !info.LastReadAt.IsZero() {
 		out["last_read_at"] = info.LastReadAt.UTC().Format(time.RFC3339Nano)
 	}
@@ -324,6 +435,20 @@ func pluginControlSocketInfoObject(info pluginControlSocketInfo) map[string]any 
 	}
 	pluginControlSocketAddrStringObject(out, "local", info.LocalAddr)
 	pluginControlSocketAddrStringObject(out, "remote", info.RemoteAddr)
+	return out
+}
+
+func pluginControlSocketWatchInfoObject(info pluginControlSocketWatchInfo) map[string]any {
+	out := map[string]any{
+		"worker": info.Worker, "handler": info.Handler, "max_bytes": info.MaxBytes,
+		"events": info.Events, "rejected": info.Rejected,
+	}
+	if !info.LastEventAt.IsZero() {
+		out["last_event_at"] = info.LastEventAt.UTC().Format(time.RFC3339Nano)
+	}
+	if info.LastError != "" {
+		out["last_error"] = info.LastError
+	}
 	return out
 }
 

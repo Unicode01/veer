@@ -18,6 +18,21 @@ func newPluginControlSocketTransport() pluginControlSocketTransport {
 }
 
 func (linuxPluginControlSocketTransport) Dial(ctx context.Context, req pluginControlSocketOpenRequest) (net.Conn, error) {
+	namespace := normalizePluginControlNamespace(req.Namespace)
+	if namespace != "host" {
+		req.Namespace = "host"
+		var conn net.Conn
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			conn, operationErr = (linuxPluginControlSocketTransport{}).Dial(ctx, req)
+			return operationErr
+		})
+		if err != nil && conn != nil {
+			_ = conn.Close()
+			conn = nil
+		}
+		return conn, err
+	}
 	dialer := net.Dialer{
 		Control:   bindPluginControlSocketToDevice(req.Interface),
 		KeepAlive: req.KeepAlive,
@@ -43,6 +58,21 @@ func (linuxPluginControlSocketTransport) Dial(ctx context.Context, req pluginCon
 }
 
 func (linuxPluginControlSocketTransport) Listen(ctx context.Context, req pluginControlSocketListenRequest) (pluginControlDeadlineListener, error) {
+	namespace := normalizePluginControlNamespace(req.Namespace)
+	if namespace != "host" {
+		req.Namespace = "host"
+		var listener pluginControlDeadlineListener
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			listener, operationErr = (linuxPluginControlSocketTransport{}).Listen(ctx, req)
+			return operationErr
+		})
+		if err != nil && listener != nil {
+			_ = listener.Close()
+			listener = nil
+		}
+		return listener, err
+	}
 	lc := net.ListenConfig{Control: bindPluginControlSocketToDevice(req.Interface)}
 	listener, err := lc.Listen(ctx, req.Network, pluginControlSocketAddress(req.LocalIP, req.LocalPort))
 	if err != nil {
@@ -57,6 +87,21 @@ func (linuxPluginControlSocketTransport) Listen(ctx context.Context, req pluginC
 }
 
 func (linuxPluginControlSocketTransport) ListenPacket(ctx context.Context, req pluginControlSocketListenRequest) (net.PacketConn, error) {
+	namespace := normalizePluginControlNamespace(req.Namespace)
+	if namespace != "host" {
+		req.Namespace = "host"
+		var packet net.PacketConn
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			packet, operationErr = (linuxPluginControlSocketTransport{}).ListenPacket(ctx, req)
+			return operationErr
+		})
+		if err != nil && packet != nil {
+			_ = packet.Close()
+			packet = nil
+		}
+		return packet, err
+	}
 	lc := net.ListenConfig{Control: bindPluginControlSocketToDevice(req.Interface)}
 	return lc.ListenPacket(ctx, req.Network, pluginControlSocketAddress(req.LocalIP, req.LocalPort))
 }

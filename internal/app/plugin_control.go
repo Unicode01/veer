@@ -1,8 +1,10 @@
 package app
 
 import (
+	"crypto/sha256"
 	"fmt"
-	"os"
+	"net"
+	"net/netip"
 	"path/filepath"
 	"strings"
 )
@@ -10,6 +12,13 @@ import (
 func resolvePluginControl(plugin *LoadedPlugin) error {
 	if plugin == nil || plugin.Control == nil || plugin.Control.Main == "" {
 		return nil
+	}
+	data, _, err := readPluginRootedRegularFile(plugin.rootDir, plugin.Control.Main, pluginControlMaxSize)
+	if err != nil {
+		if pluginPathEscapesRoot(err) {
+			return fmt.Errorf("control.main escapes plugin root")
+		}
+		return fmt.Errorf("control.main: %w", err)
 	}
 	mainPath := filepath.Join(plugin.rootDir, filepath.FromSlash(plugin.Control.Main))
 	cleanRoot, err := filepath.Abs(plugin.rootDir)
@@ -34,20 +43,7 @@ func resolvePluginControl(plugin *LoadedPlugin) error {
 	if !pathWithinRoot(realRoot, realMain) {
 		return fmt.Errorf("control.main escapes plugin root")
 	}
-	info, err := os.Stat(realMain)
-	if err != nil {
-		return fmt.Errorf("control.main: %w", err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("control.main is a directory")
-	}
-	if info.Size() > pluginControlMaxSize {
-		return fmt.Errorf("control.main exceeds %d bytes", pluginControlMaxSize)
-	}
-	got, err := sha256File(realMain)
-	if err != nil {
-		return fmt.Errorf("hash control.main: %w", err)
-	}
+	got := fmt.Sprintf("%x", sha256.Sum256(data))
 	plugin.Control.ResolvedSHA256 = got
 	if pluginControlSHA256Required(*plugin) && plugin.Control.SHA256 == "" {
 		return fmt.Errorf("control.sha256 is required for stable or preview control scripts")
@@ -117,6 +113,23 @@ func pluginControlHasActionAccess(plugin LoadedPlugin, targetPluginID string, ac
 	return false
 }
 
+func pluginControlHasEventAccess(plugin LoadedPlugin, sourcePluginID string, topic string) bool {
+	if plugin.Control == nil || !pluginControlHasPermission(plugin, "plugin.event") {
+		return false
+	}
+	for _, access := range plugin.Control.EventAccess {
+		if access.Plugin != sourcePluginID {
+			continue
+		}
+		for _, prefix := range access.TopicPrefixes {
+			if pluginEventTopicWithinPrefix(topic, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func pluginControlStabilityAllowed(plugin LoadedPlugin, cfg *Config) (bool, string) {
 	stability := strings.TrimSpace(strings.ToLower(plugin.Stability))
 	if stability == "" {
@@ -173,6 +186,123 @@ func pluginControlHasNetAccess(plugin LoadedPlugin, operation string, interfaceN
 	return false
 }
 
+type pluginControlNetEndpointPolicy struct {
+	Authorized bool
+	AnyIP      bool
+	Prefixes   []netip.Prefix
+}
+
+func pluginControlNetEndpointPolicyFor(plugin LoadedPlugin, operation, interfaceName, host string, ip net.IP, port int) (pluginControlNetEndpointPolicy, error) {
+	policy := pluginControlNetEndpointPolicy{}
+	if plugin.Control == nil {
+		return policy, fmt.Errorf("network access %s on interface %s is not declared", operation, interfaceName)
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	for _, access := range plugin.Control.NetAccess {
+		if !pluginNetAccessHasOperation(access, operation) || !pluginNetAccessMatchesInterface(access, interfaceName) {
+			continue
+		}
+		if !pluginNetAccessMatchesRemoteHost(access, host) || !pluginNetAccessMatchesRemotePort(access, port) {
+			continue
+		}
+		policy.Authorized = true
+		if len(access.RemoteCIDRs) == 0 {
+			policy.AnyIP = true
+			policy.Prefixes = nil
+			break
+		}
+		for _, value := range access.RemoteCIDRs {
+			prefix, err := netip.ParsePrefix(value)
+			if err == nil {
+				policy.Prefixes = append(policy.Prefixes, prefix)
+			}
+		}
+	}
+	if !policy.Authorized {
+		return policy, fmt.Errorf("network endpoint access %s on interface %s for %s is not declared", operation, interfaceName, pluginControlNetEndpointLabel(host, ip, port))
+	}
+	if ip != nil && !policy.AllowsIP(ip) {
+		return policy, fmt.Errorf("network endpoint access %s on interface %s for %s is outside remote_cidrs", operation, interfaceName, pluginControlNetEndpointLabel(host, ip, port))
+	}
+	return policy, nil
+}
+
+func (policy pluginControlNetEndpointPolicy) AllowsIP(ip net.IP) bool {
+	if !policy.Authorized || ip == nil {
+		return false
+	}
+	if policy.AnyIP {
+		return true
+	}
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	for _, prefix := range policy.Prefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func pluginNetAccessMatchesInterface(access PluginNetAccess, interfaceName string) bool {
+	for _, pattern := range access.Interfaces {
+		if pluginInterfacePatternMatches(pattern, interfaceName) {
+			return true
+		}
+	}
+	return false
+}
+
+func pluginNetAccessMatchesRemoteHost(access PluginNetAccess, host string) bool {
+	if len(access.RemoteHosts) == 0 {
+		return true
+	}
+	if host == "" {
+		return false
+	}
+	for _, pattern := range access.RemoteHosts {
+		if pattern == "*" || pattern == host {
+			return true
+		}
+		if strings.HasPrefix(pattern, "*.") {
+			suffix := pattern[1:]
+			if len(host) > len(suffix) && strings.HasSuffix(host, suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pluginNetAccessMatchesRemotePort(access PluginNetAccess, port int) bool {
+	if len(access.RemotePorts) == 0 {
+		return true
+	}
+	for _, allowed := range access.RemotePorts {
+		if allowed == port {
+			return true
+		}
+	}
+	return false
+}
+
+func pluginControlNetEndpointLabel(host string, ip net.IP, port int) string {
+	value := host
+	if ip != nil {
+		value = ip.String()
+	}
+	if value == "" {
+		value = "<unspecified>"
+	}
+	if port > 0 {
+		return net.JoinHostPort(value, fmt.Sprintf("%d", port))
+	}
+	return value
+}
+
 func pluginControlHasAnyNetAccess(plugin LoadedPlugin, operation string) bool {
 	if plugin.Control == nil {
 		return false
@@ -183,6 +313,27 @@ func pluginControlHasAnyNetAccess(plugin LoadedPlugin, operation string) bool {
 		}
 	}
 	return false
+}
+
+func pluginControlHasNamespaceAccess(plugin LoadedPlugin, namespace string) bool {
+	if plugin.Control == nil {
+		return false
+	}
+	namespace = normalizePluginControlNamespace(namespace)
+	for _, pattern := range plugin.Control.NamespaceAccess {
+		if pluginInterfacePatternMatches(pattern, namespace) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizePluginControlNamespace(namespace string) string {
+	namespace = strings.TrimSpace(strings.ToLower(namespace))
+	if namespace == "" {
+		return "host"
+	}
+	return namespace
 }
 
 func pluginNetAccessHasOperation(access PluginNetAccess, operation string) bool {

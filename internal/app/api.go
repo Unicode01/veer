@@ -165,6 +165,9 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			"ready":  ready,
 		})
 	})
+	mux.HandleFunc("/metrics", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPrometheusMetrics(w, r, cfg, db, pm)
+	}))
 
 	webUIEnabled := cfg.WebUIEnabled()
 	webSub, _ := fs.Sub(webFS, "web")
@@ -272,7 +275,14 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	}))
-	mux.HandleFunc("/api/plugins/reload", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/plugin-sdk-contract", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, currentPluginSDKAPIContract())
+	}))
+	mux.HandleFunc("/api/plugins/reload", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -290,6 +300,7 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		if pm != nil {
 			if err := pm.applyPluginCatalogUpdateSelection(pluginIDs); err != nil {
+				recordPluginAudit(db, "", "catalog.reload", "api", "error", map[string]any{"plugin_ids": pluginIDs, "error": err.Error()})
 				writeJSON(w, http.StatusInternalServerError, map[string]any{
 					"error":   err.Error(),
 					"catalog": pm.pluginCatalogWithConfig(cfg),
@@ -297,10 +308,87 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 				return
 			}
 			pm.redistributeWorkers()
+			recordPluginAudit(db, "", "catalog.reload", "api", "success", map[string]any{"plugin_ids": pluginIDs})
 			writeJSON(w, http.StatusOK, pm.pluginCatalogWithConfig(cfg))
 			return
 		}
 		writeJSON(w, http.StatusOK, loadPluginCatalogWithControlRegistrationAndState(cfg, db))
+	}))
+	mux.HandleFunc("/api/plugin-packages/stage", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageStageAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-packages/apply", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageApplyAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-packages/apply-batch", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageBatchApplyAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-packages/history", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageHistoryAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-packages/provenance", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageProvenanceAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-packages/probations", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageProbationsAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-packages/probation-groups", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageProbationGroupsAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-packages/rollback", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageRollbackAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-packages/uninstall", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginPackageUninstallAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-trust", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginTrustAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-repositories", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginRepositoriesAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-repositories/catalog", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginRepositoryCatalogAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-repositories/refresh", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginRepositoryRefreshAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-repositories/stage", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginRepositoryStageAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-repositories/plan", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginRepositoryPlanAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-repository-policies", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginRepositoryPoliciesAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-repositories/updates", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginRepositoryUpdatesAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-audit", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginAuditAPI(w, r, db)
+	}))
+	mux.HandleFunc("/api/plugin-event-dead-letters", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginEventDeadLettersAPI(w, r, db)
+	}))
+	mux.HandleFunc("/api/plugin-event-dead-letters/retry", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginEventDeadLetterRetryAPI(w, r, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-event-dead-letters/discard", pluginAdminMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginEventDeadLetterDiscardAPI(w, r, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-secrets", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handlePluginSecretsAPI(w, r, cfg, db, pm)
+	}))
+	mux.HandleFunc("/api/plugin-admin/status", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{
+			"configured": cfg.PluginAdminAPIEnabled(),
+			"authorized": authorizedPluginAdminRequest(cfg, r),
+		})
 	}))
 	mux.Handle("/api/plugins/", authStaticMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if handlePluginAPIRoute(w, r, cfg, db, pm) {
@@ -497,6 +585,38 @@ func authMiddleware(cfg *Config, next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		next(w, r)
 	}
+}
+
+const pluginAdminTokenHeader = "X-Veer-Plugin-Admin"
+
+func pluginAdminMiddleware(cfg *Config, next http.HandlerFunc) http.HandlerFunc {
+	return authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		if !requirePluginAdminRequest(w, r, cfg) {
+			return
+		}
+		next(w, r)
+	})
+}
+
+func requirePluginAdminRequest(w http.ResponseWriter, r *http.Request, cfg *Config) bool {
+	if cfg == nil || !cfg.PluginAdminAPIEnabled() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "plugin administration API is disabled; configure plugin_admin_token"})
+		return false
+	}
+	if !authorizedPluginAdminRequest(cfg, r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "plugin administrator authorization is required"})
+		return false
+	}
+	return true
+}
+
+func authorizedPluginAdminRequest(cfg *Config, r *http.Request) bool {
+	if cfg == nil || r == nil {
+		return false
+	}
+	expected := strings.TrimSpace(cfg.PluginAdminToken)
+	provided := strings.TrimSpace(r.Header.Get(pluginAdminTokenHeader))
+	return expected != "" && provided != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 }
 
 func authStaticMiddleware(cfg *Config, next http.Handler) http.Handler {
