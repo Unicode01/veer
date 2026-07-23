@@ -2,6 +2,15 @@
   const app = window.VeerApp;
   if (!app) return;
 
+  const pluginUIRPCMaxInflight = 32;
+  const pluginUIRPCMaxPayloadBytes = 2 * 1024 * 1024;
+  const pluginUIRPCMaxPendingBytes = 4 * 1024 * 1024;
+  const pluginUIRPCRateWindowMs = 10 * 1000;
+  const pluginUIRPCRateLimit = 120;
+  const pluginUIAssetTextMaxBytes = 1024 * 1024;
+  const pluginUIAssetDataMaxBytes = 4 * 1024 * 1024;
+  const pluginFrameRPCStates = new WeakMap();
+
   function listText(values) {
     if (!Array.isArray(values) || values.length === 0) return '';
     return values.filter(Boolean).join(', ');
@@ -102,9 +111,60 @@
       hook && typeof hook.priority === 'number' ? 'priority=' + hook.priority : '',
       hook && hook.program,
       hook && hook.mode,
+      hook && Array.isArray(hook.before) && hook.before.length ? 'before=' + hook.before.join(',') : '',
+      hook && Array.isArray(hook.after) && hook.after.length ? 'after=' + hook.after.join(',') : '',
+      pluginPacketMetadataDetail(hook && hook.packet_metadata),
       hook && Array.isArray(hook.context) && hook.context.length ? 'ctx=' + hook.context.join(',') : '',
       hook && Array.isArray(hook.interfaces) && hook.interfaces.length ? 'if=' + hook.interfaces.join(',') : ''
     ].filter(Boolean).join(' | ');
+  }
+
+  function pluginPacketMetadataDetail(bindings) {
+    if (!Array.isArray(bindings) || !bindings.length) return '';
+    return 'metadata=' + bindings.map((binding) => [
+      's' + String(binding && binding.slot != null ? binding.slot : 0),
+      binding && binding.namespace,
+      binding && binding.schema_version ? 'v' + binding.schema_version : '',
+      binding && binding.max_bytes ? String(binding.max_bytes) + 'B' : '',
+      binding && binding.access
+    ].filter(Boolean).join(':')).join(',');
+  }
+
+  function pluginMetricNumber(value) {
+    const number = Number(value || 0);
+    if (!Number.isFinite(number)) return app.t('common.dash');
+    try {
+      return new Intl.NumberFormat(app.state.locale || undefined, { maximumFractionDigits: 3 }).format(number);
+    } catch (_) {
+      return String(number);
+    }
+  }
+
+  function pluginMetricIdentity(metric) {
+    const name = String(metric && metric.name || '').trim() || app.t('plugins.metrics.title');
+    const labels = metric && metric.labels && typeof metric.labels === 'object' ? metric.labels : {};
+    const entries = Object.keys(labels).sort().map((key) => key + '=' + String(labels[key]));
+    return entries.length ? name + '{' + entries.join(', ') + '}' : name;
+  }
+
+  function pluginMetricDetail(metric) {
+    return [
+      metric && metric.type,
+      pluginMetricNumber(metric && metric.value),
+      metric && metric.updated_at
+    ].filter(Boolean).join(' | ');
+  }
+
+  function pluginAttachmentMetricDetail(attachment) {
+    const total = attachment && attachment.metrics && attachment.metrics.total;
+    if (!total || typeof total !== 'object') return '';
+    return [
+      app.t('plugins.metrics.packets') + '=' + pluginMetricNumber(total.packets),
+      app.t('plugins.metrics.bytes') + '=' + pluginMetricNumber(total.bytes),
+      app.t('plugins.metrics.continued') + '=' + pluginMetricNumber(total.continued_packets),
+      app.t('plugins.metrics.terminal') + '=' + pluginMetricNumber(total.terminal_packets),
+      Number(total.tail_call_misses || 0) ? app.t('plugins.metrics.misses') + '=' + pluginMetricNumber(total.tail_call_misses) : ''
+    ].filter(Boolean).join(' / ');
   }
 
   function pluginAttachmentDetail(attachment) {
@@ -117,7 +177,9 @@
       attachment && attachment.program,
       attachmentPriorityParts(attachment).join(' | '),
       attachment && Array.isArray(attachment.context) && attachment.context.length ? 'ctx=' + attachment.context.join(',') : '',
+      pluginPacketMetadataDetail(attachment && attachment.packet_metadata),
       attachment && attachment.filter_handle,
+      pluginAttachmentMetricDetail(attachment),
       attachment && attachment.error ? app.t('plugins.error') + ': ' + attachment.error : ''
     ].filter(Boolean).join(' | ');
   }
@@ -131,6 +193,7 @@
     const objects = Array.isArray(item.objects) ? item.objects : [];
     const hooks = Array.isArray(item.hooks) ? item.hooks : [];
     const attachments = runtime && Array.isArray(runtime.attachments) ? runtime.attachments : [];
+    const metrics = runtime && Array.isArray(runtime.metrics) ? runtime.metrics : [];
     const sections = [];
 
     sections.push({
@@ -188,6 +251,13 @@
       });
     }
 
+    if (metrics.length) {
+      sections.push({
+        title: app.t('plugins.metrics.title'),
+        rows: metrics.map((metric) => detailRow(pluginMetricIdentity(metric), pluginMetricDetail(metric))).filter(Boolean)
+      });
+    }
+
     return sections.filter((section) => section.rows && section.rows.length);
   }
 
@@ -240,6 +310,21 @@
   function pluginDetailContent(plugin) {
     const item = plugin || {};
     const info = pluginStatusInfo(item);
+    const manageButton = !item.builtin && item.id && item.id !== 'veer_core'
+      ? app.createNode('button', {
+          className: 'plugin-detail-close plugin-detail-manage',
+          text: app.t('plugins.manager.action'),
+          attrs: { type: 'button' }
+        })
+      : null;
+    if (manageButton && typeof manageButton.addEventListener === 'function') {
+      manageButton.addEventListener('click', () => {
+        hidePluginPopover();
+        if (typeof app.openPluginManager === 'function') {
+          app.openPluginManager('plugin', { pluginID: item.id, tab: 'overview' });
+        }
+      });
+    }
     const closeButton = app.createNode('button', {
       className: 'plugin-detail-close',
       text: app.t('plugins.detail.close'),
@@ -276,8 +361,9 @@
             children: [
               pluginStabilityBadgeNode(item),
               app.createStatusBadgeNode(info, ''),
+              manageButton,
               closeButton
-            ]
+            ].filter(Boolean)
           })
         ]
       }),
@@ -405,6 +491,9 @@
       parts.push((attachment.filter_handle ? 'tc_prio=' : 'priority=') + attachment.priority);
     }
     const slot = attachmentChainSlot(attachment);
+    if (typeof attachment.order === 'number' && Number.isFinite(attachment.order)) {
+      parts.push('order=' + attachment.order);
+    }
     if (slot > 0) parts.push('chain_slot=' + slot);
     return parts;
   }
@@ -445,8 +534,8 @@
         object.description,
         Array.isArray(object.programs) ? object.programs.map((program) => [program.id, program.section, program.type].filter(Boolean).join(' ')).join(' ') : ''
       ].filter(Boolean).join(' ')).join(' '),
-      hooks.map((hook) => [hook.id, hook.engine, hook.attach, hook.stage, hook.program, hook.mode, Array.isArray(hook.context) ? hook.context.join(' ') : ''].filter(Boolean).join(' ')).join(' '),
-      attachments.map((attachment) => [attachment.hook_id, attachment.engine, attachment.attach, attachment.stage, attachment.interface, attachment.program, attachment.status, Array.isArray(attachment.context) ? attachment.context.join(' ') : '', String(attachment.chain_slot || ''), String(attachment.priority || '')].filter(Boolean).join(' ')).join(' '),
+      hooks.map((hook) => [hook.id, hook.engine, hook.attach, hook.stage, hook.program, hook.mode, Array.isArray(hook.before) ? hook.before.join(' ') : '', Array.isArray(hook.after) ? hook.after.join(' ') : '', pluginPacketMetadataDetail(hook.packet_metadata), Array.isArray(hook.context) ? hook.context.join(' ') : ''].filter(Boolean).join(' ')).join(' '),
+      attachments.map((attachment) => [attachment.hook_id, attachment.engine, attachment.attach, attachment.stage, attachment.interface, attachment.program, attachment.status, Array.isArray(attachment.before) ? attachment.before.join(' ') : '', Array.isArray(attachment.after) ? attachment.after.join(' ') : '', pluginPacketMetadataDetail(attachment.packet_metadata), Array.isArray(attachment.context) ? attachment.context.join(' ') : '', String(attachment.order ?? ''), String(attachment.chain_slot || ''), String(attachment.priority || '')].filter(Boolean).join(' ')).join(' '),
       virtualInterfaces.map((vif) => [vif.id, vif.type, vif.description].filter(Boolean).join(' ')).join(' ')
     ];
   }
@@ -606,6 +695,10 @@
         detailRow('Program', attachment.program),
         detailRow('Status', attachment.status),
         detailRow('Priority', typeof attachment.priority === 'number' ? String(attachment.priority) : ''),
+        detailRow('Before', Array.isArray(attachment.before) && attachment.before.length ? attachment.before.join(', ') : ''),
+        detailRow('After', Array.isArray(attachment.after) && attachment.after.length ? attachment.after.join(', ') : ''),
+        detailRow('Resolved order', typeof attachment.order === 'number' ? String(attachment.order) : ''),
+        detailRow('Packet metadata', pluginPacketMetadataDetail(attachment.packet_metadata)),
         detailRow('Slot', slot > 0 ? String(slot) : ''),
         detailRow('Context', Array.isArray(attachment.context) && attachment.context.length ? attachment.context.join(', ') : ''),
         detailRow(app.t('plugins.error'), attachment.error)
@@ -753,6 +846,9 @@
         detailRow('Interfaces', hook && Array.isArray(hook.interfaces) && hook.interfaces.length ? hook.interfaces.join(', ') : app.t('plugins.link.unbound')),
         detailRow('Program', hook && hook.program),
         detailRow('Priority', typeof (hook && hook.priority) === 'number' ? String(hook.priority) : ''),
+        detailRow('Before', hook && Array.isArray(hook.before) && hook.before.length ? hook.before.join(', ') : ''),
+        detailRow('After', hook && Array.isArray(hook.after) && hook.after.length ? hook.after.join(', ') : ''),
+        detailRow('Packet metadata', pluginPacketMetadataDetail(hook && hook.packet_metadata)),
         detailRow('Context', hook && Array.isArray(hook.context) && hook.context.length ? hook.context.join(', ') : '')
       ].filter(Boolean)
     };
@@ -1590,6 +1686,11 @@ select.veer-input {
       pluginId: plugin && plugin.id || '',
       pluginName: plugin && plugin.name || '',
       locale: app.state.locale || 'zh-CN',
+      rpcLimits: {
+        max_inflight: pluginUIRPCMaxInflight,
+        max_payload_bytes: pluginUIRPCMaxPayloadBytes,
+        max_pending_bytes: pluginUIRPCMaxPendingBytes
+      },
       resources: Array.isArray(plugin && plugin.resources) ? plugin.resources.map(function (resource) {
         return {
           id: resource && resource.id || '',
@@ -1597,7 +1698,10 @@ select.veer-input {
           methods: Array.isArray(resource && resource.methods) ? resource.methods.slice() : [],
           runtime_update: resource && resource.runtime_update || '',
           max_records: resource && resource.max_records || 0,
-          max_record_bytes: resource && resource.max_record_bytes || 0
+          max_record_bytes: resource && resource.max_record_bytes || 0,
+          schema_version: resource && resource.schema_version || 1,
+          schema: resource && resource.schema || null,
+          schema_digest: resource && resource.schema_digest || ''
         };
       }) : [],
       actions: Array.isArray(plugin && plugin.actions) ? plugin.actions.map(function (action) {
@@ -1605,7 +1709,13 @@ select.veer-input {
           id: action && action.id || '',
           description: action && action.description || '',
           runtime_update: action && action.runtime_update || '',
-          max_payload_bytes: action && action.max_payload_bytes || 0
+          max_payload_bytes: action && action.max_payload_bytes || 0,
+          request_schema_version: action && action.request_schema_version || 1,
+          request_schema: action && action.request_schema || null,
+          request_schema_digest: action && action.request_schema_digest || '',
+          response_schema_version: action && action.response_schema_version || 1,
+          response_schema: action && action.response_schema || null,
+          response_schema_digest: action && action.response_schema_digest || ''
         };
       }) : [],
       classes: {
@@ -1706,26 +1816,78 @@ select.veer-input {
     });
   }
   var rpcSeq = 0;
-  var pendingRPC = {};
+  var rpcEpoch = Date.now().toString(36) + ':' + Math.random().toString(36).slice(2);
+  var pendingRPC = Object.create(null);
+  var pendingRPCCount = 0;
+  var pendingRPCBytes = 0;
+  function utf8ByteLength(value) {
+    value = String(value == null ? '' : value);
+    var bytes = 0;
+    for (var i = 0; i < value.length; i++) {
+      var code = value.charCodeAt(i);
+      if (code < 0x80) bytes += 1;
+      else if (code < 0x800) bytes += 2;
+      else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else bytes += 3;
+    }
+    return bytes;
+  }
+  function rpcError(message, status) {
+    var error = new Error(message);
+    error.status = status || 0;
+    return error;
+  }
+  function releasePendingRPC(id) {
+    var pending = pendingRPC[id];
+    if (!pending) return null;
+    delete pendingRPC[id];
+    pendingRPCCount = Math.max(0, pendingRPCCount - 1);
+    pendingRPCBytes = Math.max(0, pendingRPCBytes - pending.bytes);
+    if (pending.timeout) window.clearTimeout(pending.timeout);
+    return pending;
+  }
   function rpc(op, payload) {
     if (!window.parent || window.parent === window) {
       return Promise.reject(new Error('plugin host bridge is unavailable'));
     }
-    var id = host.pluginId + ':' + (++rpcSeq);
+    payload = payload || {};
+    var encoded;
+    try {
+      encoded = JSON.stringify({ op: op, payload: payload });
+    } catch (error) {
+      return Promise.reject(rpcError('plugin host request must be JSON serializable', 400));
+    }
+    var bytes = utf8ByteLength(encoded);
+    if (bytes > host.rpcLimits.max_payload_bytes) {
+      return Promise.reject(rpcError('plugin host request exceeds the payload limit', 413));
+    }
+    if (pendingRPCCount >= host.rpcLimits.max_inflight || pendingRPCBytes + bytes > host.rpcLimits.max_pending_bytes) {
+      return Promise.reject(rpcError('plugin host request queue is full', 429));
+    }
+    var id = host.pluginId + ':' + rpcEpoch + ':' + (++rpcSeq);
     return new Promise(function (resolve, reject) {
       var timeout = window.setTimeout(function () {
-        if (!pendingRPC[id]) return;
-        delete pendingRPC[id];
-        reject(new Error('plugin host request timed out'));
+        var pending = releasePendingRPC(id);
+        if (!pending) return;
+        pending.reject(rpcError('plugin host request timed out', 504));
       }, 30000);
-      pendingRPC[id] = { resolve: resolve, reject: reject, timeout: timeout };
-      window.parent.postMessage({
-        type: 'veer-plugin-rpc',
-        pluginId: host.pluginId,
-        id: id,
-        op: op,
-        payload: payload || {}
-      }, '*');
+      pendingRPC[id] = { resolve: resolve, reject: reject, timeout: timeout, bytes: bytes };
+      pendingRPCCount++;
+      pendingRPCBytes += bytes;
+      try {
+        window.parent.postMessage({
+          type: 'veer-plugin-rpc',
+          pluginId: host.pluginId,
+          id: id,
+          op: op,
+          payload: payload
+        }, '*');
+      } catch (error) {
+        releasePendingRPC(id);
+        reject(error);
+      }
     });
   }
   window.addEventListener('message', function (event) {
@@ -1736,10 +1898,8 @@ select.veer-input {
       return;
     }
     if (!data || data.type !== 'veer-plugin-rpc-result' || data.pluginId !== host.pluginId || !data.id) return;
-    var pending = pendingRPC[data.id];
+    var pending = releasePendingRPC(data.id);
     if (!pending) return;
-    delete pendingRPC[data.id];
-    if (pending.timeout) window.clearTimeout(pending.timeout);
     if (data.ok) {
       pending.resolve(data.result);
     } else {
@@ -2151,6 +2311,42 @@ select.veer-input {
       }
     })
   });
+  function appendAssetElement(element) {
+    var parent = document.head || document.body || document.documentElement;
+    if (!parent || !parent.appendChild) throw new Error('plugin document cannot attach an asset');
+    parent.appendChild(element);
+    scheduleHeight();
+    return element;
+  }
+  host.assets = Object.freeze({
+    text: function (path) {
+      return rpc('asset.text', { path: path });
+    },
+    json: function (path) {
+      return rpc('asset.json', { path: path });
+    },
+    style: function (path, options) {
+      options = options || {};
+      return rpc('asset.style', { path: path }).then(function (source) {
+        var element = document.createElement('style');
+        element.setAttribute('data-veer-plugin-asset', String(path));
+        if (options.media) element.setAttribute('media', String(options.media));
+        element.textContent = String(source || '');
+        return appendAssetElement(element);
+      });
+    },
+    script: function (path) {
+      return rpc('asset.script', { path: path }).then(function (source) {
+        var element = document.createElement('script');
+        element.setAttribute('data-veer-plugin-asset', String(path));
+        element.textContent = String(source || '') + '\\n//# sourceURL=veer-plugin://' + host.pluginId + '/' + String(path);
+        return appendAssetElement(element);
+      });
+    },
+    dataURL: function (path) {
+      return rpc('asset.data_url', { path: path });
+    }
+  });
   host.action = function (name, payload) {
     return rpc('action', { action: name, payload: payload || {} });
   };
@@ -2179,7 +2375,15 @@ select.veer-input {
 })();`;
   }
 
+  const pluginFrameSandbox = 'allow-scripts';
+  const pluginFrameCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'; navigate-to 'none'";
+  const pluginFrameCSPAttribute = pluginFrameCSP.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
   function decoratePluginHTML(html, plugin) {
+    const securityPrefix = [
+      '<meta http-equiv="Content-Security-Policy" content="' + pluginFrameCSPAttribute + '">',
+      '<meta name="referrer" content="no-referrer">'
+    ].join('');
     const injection = [
       '<style data-veer-plugin-host>',
       pluginHostComponentCSS(),
@@ -2188,10 +2392,19 @@ select.veer-input {
       pluginHostComponentJS(plugin).replace(/<\/script/gi, '<\\/script'),
       '</script>'
     ].join('');
+    let decorated;
     if (/<head(\s[^>]*)?>/i.test(html)) {
-      return html.replace(/<head(\s[^>]*)?>/i, (match) => match + injection);
+      decorated = html.replace(/<head(\s[^>]*)?>/i, (match) => match + injection);
+    } else if (/<html(\s[^>]*)?>/i.test(html)) {
+      decorated = html.replace(/<html(\s[^>]*)?>/i, (match) => match + '<head>' + injection + '</head>');
+    } else {
+      decorated = '<head>' + injection + '</head>' + html;
     }
-    return injection + html;
+    const doctype = decorated.match(/^(\uFEFF?\s*<!doctype[^>]*>)/i);
+    if (doctype) {
+      return doctype[1] + securityPrefix + decorated.slice(doctype[1].length);
+    }
+    return securityPrefix + decorated;
   }
 
   function setPluginUIPanelLoading(plugin, entry) {
@@ -2204,7 +2417,6 @@ select.veer-input {
       app.el.pluginUIFrame.title = plugin.name || plugin.id || 'Plugin UI';
       preparePluginFrame(app.el.pluginUIFrame, plugin, entry);
       app.el.pluginUIFrame.src = 'about:blank';
-      app.el.pluginUIFrame.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups');
     }
     if (typeof panel.scrollIntoView === 'function') panel.scrollIntoView({ block: 'nearest' });
     return true;
@@ -2229,7 +2441,8 @@ select.veer-input {
 
   async function fetchDecoratedPluginHTML(plugin, entry) {
     const basePath = String(plugin && plugin.asset_base_path || '').trim();
-    const url = basePath + entry;
+    const entryPath = normalizePluginUIAssetPath(entry);
+    const url = basePath + entryPath.encoded;
     const resp = await fetch(url, {
       headers: { Authorization: 'Bearer ' + app.getToken() }
     });
@@ -2239,13 +2452,14 @@ select.veer-input {
       throw new Error('unauthorized');
     }
     if (!resp.ok) throw new Error(resp.statusText || String(resp.status));
-    const contentType = resp.headers.get('Content-Type') || 'text/html; charset=utf-8';
     const raw = await resp.text();
-    return contentType.toLowerCase().includes('text/html') ? decoratePluginHTML(raw, plugin) : raw;
+    return decoratePluginHTML(raw, plugin);
   }
 
   function preparePluginFrame(iframe, plugin, entry) {
     if (!iframe) return;
+    pluginFrameRPCStates.delete(iframe);
+    securePluginFrame(iframe);
     iframe.style.height = '';
     if (iframe.dataset) {
       iframe.dataset.pluginFrame = '1';
@@ -2255,6 +2469,14 @@ select.veer-input {
     iframe.onload = function () {
       postPluginFrameLocale(iframe);
     };
+  }
+
+  function securePluginFrame(iframe) {
+    if (!iframe || typeof iframe.setAttribute !== 'function') return;
+    iframe.setAttribute('sandbox', pluginFrameSandbox);
+    iframe.setAttribute('referrerpolicy', 'no-referrer');
+    iframe.setAttribute('csp', pluginFrameCSP);
+    iframe.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; payment 'none'; usb 'none'; serial 'none'; bluetooth 'none'; clipboard-read 'none'; clipboard-write 'none'");
   }
 
   function setPluginFrameHeight(iframe, height) {
@@ -2325,6 +2547,177 @@ select.veer-input {
     return text;
   }
 
+  function pluginUTF8ByteLength(value) {
+    value = String(value == null ? '' : value);
+    let bytes = 0;
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      if (code < 0x80) bytes += 1;
+      else if (code < 0x800) bytes += 2;
+      else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else bytes += 3;
+    }
+    return bytes;
+  }
+
+  function pluginRPCFailure(message, status, code) {
+    const error = new Error(message);
+    error.status = status || 0;
+    error.payload = { error: message, code: code || 'plugin_ui_rpc_error' };
+    return error;
+  }
+
+  function pluginFrameRPCState(frame) {
+    let state = pluginFrameRPCStates.get(frame);
+    if (!state) {
+      state = { inflight: 0, pendingBytes: 0, ids: new Set(), calls: [] };
+      pluginFrameRPCStates.set(frame, state);
+    }
+    return state;
+  }
+
+  function admitPluginFrameRPC(frame, data) {
+    let encoded;
+    try {
+      encoded = JSON.stringify({ op: data.op, payload: data.payload || {} });
+    } catch (error) {
+      throw pluginRPCFailure('plugin UI request must be JSON serializable', 400, 'plugin_ui_rpc_invalid');
+    }
+    const bytes = pluginUTF8ByteLength(encoded);
+    if (bytes > pluginUIRPCMaxPayloadBytes) {
+      throw pluginRPCFailure('plugin UI request exceeds the payload limit', 413, 'plugin_ui_rpc_payload_limit');
+    }
+    const state = pluginFrameRPCState(frame);
+    if (state.ids.has(data.id)) {
+      throw pluginRPCFailure('duplicate plugin UI request id', 409, 'plugin_ui_rpc_duplicate');
+    }
+    const now = Date.now();
+    state.calls = state.calls.filter((at) => now - at < pluginUIRPCRateWindowMs);
+    if (state.calls.length >= pluginUIRPCRateLimit) {
+      throw pluginRPCFailure('plugin UI request rate limit reached', 429, 'plugin_ui_rpc_rate_limit');
+    }
+    if (state.inflight >= pluginUIRPCMaxInflight || state.pendingBytes + bytes > pluginUIRPCMaxPendingBytes) {
+      throw pluginRPCFailure('plugin UI request queue is full', 429, 'plugin_ui_rpc_queue_full');
+    }
+    state.calls.push(now);
+    state.inflight++;
+    state.pendingBytes += bytes;
+    state.ids.add(data.id);
+    let released = false;
+    return function release() {
+      if (released) return;
+      released = true;
+      state.inflight = Math.max(0, state.inflight - 1);
+      state.pendingBytes = Math.max(0, state.pendingBytes - bytes);
+      state.ids.delete(data.id);
+    };
+  }
+
+  function normalizePluginUIAssetPath(value) {
+    const assetPath = pluginRPCString(value, 'asset path');
+    if (assetPath.length > 1024 || assetPath.includes('\\') || assetPath.startsWith('/') || /[\u0000-\u001f\u007f]/.test(assetPath)) {
+      throw pluginRPCFailure('asset path must be a bounded plugin-relative path', 400, 'plugin_ui_asset_path');
+    }
+    const segments = assetPath.split('/');
+    if (segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+      throw pluginRPCFailure('asset path must not contain empty or traversal segments', 400, 'plugin_ui_asset_path');
+    }
+    return {
+      value: assetPath,
+      encoded: segments.map((segment) => encodeURIComponent(segment)).join('/'),
+      extension: segments[segments.length - 1].toLowerCase().split('.').pop()
+    };
+  }
+
+  function pluginUIAssetMIME(response) {
+    return String(response.headers && response.headers.get ? response.headers.get('Content-Type') || '' : '')
+      .split(';')[0].trim().toLowerCase();
+  }
+
+  function pluginUIAssetTypeAllowed(op, mime, extension) {
+    if (op === 'asset.text') {
+      return mime.startsWith('text/') || ['json', 'js', 'mjs', 'css', 'svg', 'xml'].includes(extension) ||
+        ['application/json', 'application/javascript', 'application/xml', 'image/svg+xml'].includes(mime);
+    }
+    if (op === 'asset.json') return extension === 'json' && (!mime || mime === 'application/json' || mime === 'text/json' || mime === 'text/plain');
+    if (op === 'asset.style') return extension === 'css' && (!mime || mime === 'text/css' || mime === 'text/plain');
+    if (op === 'asset.script') {
+      return ['js', 'mjs'].includes(extension) && (!mime || ['text/javascript', 'application/javascript', 'text/ecmascript', 'application/ecmascript', 'text/plain'].includes(mime));
+    }
+    if (op === 'asset.data_url') return mime.startsWith('image/');
+    return false;
+  }
+
+  function pluginUIAssetContentLength(response) {
+    const raw = String(response.headers && response.headers.get ? response.headers.get('Content-Length') || '' : '').trim();
+    if (!/^\d+$/.test(raw)) return 0;
+    return Number(raw);
+  }
+
+  function pluginArrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 32768) {
+      const chunk = bytes.subarray(offset, Math.min(offset + 32768, bytes.length));
+      for (let i = 0; i < chunk.length; i++) binary += String.fromCharCode(chunk[i]);
+    }
+    return btoa(binary);
+  }
+
+  async function fetchPluginUIAsset(pluginId, op, rawPath) {
+    const plugin = (app.state.plugins.data || []).find((item) => item && item.id === pluginId);
+    const expectedBase = '/api/plugins/' + encodeURIComponent(pluginId) + '/assets/';
+    const basePath = String(plugin && plugin.asset_base_path || '').trim();
+    if (!plugin || basePath !== expectedBase) {
+      throw pluginRPCFailure('plugin UI assets are unavailable', 404, 'plugin_ui_asset_unavailable');
+    }
+    const assetPath = normalizePluginUIAssetPath(rawPath);
+    const response = await fetch(basePath + assetPath.encoded, {
+      headers: { Authorization: 'Bearer ' + app.getToken() }
+    });
+    if (response.status === 401) {
+      app.clearToken();
+      app.showTokenModal();
+      throw pluginRPCFailure('unauthorized', 401, 'unauthorized');
+    }
+    if (!response.ok) {
+      throw pluginRPCFailure(response.statusText || 'plugin UI asset request failed', response.status || 500, 'plugin_ui_asset_fetch');
+    }
+    const mime = pluginUIAssetMIME(response);
+    if (!pluginUIAssetTypeAllowed(op, mime, assetPath.extension)) {
+      throw pluginRPCFailure('plugin UI asset type is not allowed for ' + op, 415, 'plugin_ui_asset_type');
+    }
+    const maxBytes = op === 'asset.data_url' ? pluginUIAssetDataMaxBytes : pluginUIAssetTextMaxBytes;
+    const contentLength = pluginUIAssetContentLength(response);
+    if (contentLength > maxBytes) {
+      throw pluginRPCFailure('plugin UI asset exceeds the size limit', 413, 'plugin_ui_asset_size');
+    }
+    if (op === 'asset.data_url') {
+      if (typeof response.arrayBuffer !== 'function') {
+        throw pluginRPCFailure('plugin UI asset response is not readable', 500, 'plugin_ui_asset_response');
+      }
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > maxBytes) {
+        throw pluginRPCFailure('plugin UI asset exceeds the size limit', 413, 'plugin_ui_asset_size');
+      }
+      return 'data:' + mime + ';base64,' + pluginArrayBufferToBase64(buffer);
+    }
+    const source = await response.text();
+    if (pluginUTF8ByteLength(source) > maxBytes) {
+      throw pluginRPCFailure('plugin UI asset exceeds the size limit', 413, 'plugin_ui_asset_size');
+    }
+    if (op === 'asset.json') {
+      try {
+        return JSON.parse(source);
+      } catch (error) {
+        throw pluginRPCFailure('plugin UI JSON asset is invalid', 422, 'plugin_ui_asset_json');
+      }
+    }
+    return source;
+  }
+
   function pluginUIResourceAccessAllowed(sourcePluginID, targetPluginID, resourceID, method) {
     const source = (app.state.plugins.data || []).find((plugin) => plugin && plugin.id === sourcePluginID);
     const control = source && source.control && typeof source.control === 'object' ? source.control : null;
@@ -2338,6 +2731,9 @@ select.veer-input {
   async function callPluginRPCAPI(pluginId, op, payload) {
     payload = payload && typeof payload === 'object' ? payload : {};
     const id = encodeURIComponent(pluginRPCString(pluginId, 'plugin id'));
+    if (op === 'asset.text' || op === 'asset.json' || op === 'asset.style' || op === 'asset.script' || op === 'asset.data_url') {
+      return fetchPluginUIAsset(pluginId, op, payload.path);
+    }
     const resource = payload.resource != null ? encodeURIComponent(pluginRPCString(payload.resource, 'resource')) : '';
     const key = payload.key != null && payload.key !== '' ? encodeURIComponent(pluginRPCString(payload.key, 'key')) : '';
     if (op === 'data.list') {
@@ -2396,11 +2792,15 @@ select.veer-input {
     if (!pluginId || data.pluginId !== pluginId) return;
     if (typeof data.id !== 'string' || data.id.length < 1 || data.id.length > 128) return;
     if (typeof data.op !== 'string' || data.op.length < 1 || data.op.length > 64) return;
+    let release;
     try {
+      release = admitPluginFrameRPC(frame, data);
       const result = await callPluginRPCAPI(pluginId, data.op, data.payload);
       postPluginRPCResult(event.source, pluginId, data.id, true, result, '');
     } catch (e) {
       postPluginRPCResult(event.source, pluginId, data.id, false, null, e.message || String(e), e.payload || null, e.status || 0);
+    } finally {
+      if (release) release();
     }
   }
 
@@ -2461,7 +2861,7 @@ select.veer-input {
         pluginId: page.pluginID,
         pluginEntry: page.entry
       },
-      attrs: { sandbox: 'allow-scripts allow-forms allow-popups' }
+      attrs: { sandbox: pluginFrameSandbox, referrerpolicy: 'no-referrer', csp: pluginFrameCSP }
     }));
 
     const section = app.createNode('section', {
@@ -2970,7 +3370,7 @@ select.veer-input {
     app.state.plugins.applyingUpdate = true;
     app.renderPluginsTable();
     try {
-      const resp = await app.apiCall('POST', '/api/plugins/reload', { plugin_ids: pluginIDs });
+      const resp = await (typeof app.pluginAdminAPICall === 'function' ? app.pluginAdminAPICall : app.apiCall)('POST', '/api/plugins/reload', { plugin_ids: pluginIDs });
       app.state.plugins.catalog = resp || {};
       app.state.plugins.data = Array.isArray(resp && resp.plugins) ? resp.plugins : [];
       app.state.plugins.selectedUpdateIDs = {};
@@ -2995,7 +3395,7 @@ select.veer-input {
     if (app.setRowPending) app.setRowPending('plugin', id, true);
     app.renderPluginsTable();
     try {
-      await app.apiCall('PUT', '/api/plugins/' + encodeURIComponent(id) + '/state', { enabled: willEnable });
+      await (typeof app.pluginAdminAPICall === 'function' ? app.pluginAdminAPICall : app.apiCall)('PUT', '/api/plugins/' + encodeURIComponent(id) + '/state', { enabled: willEnable });
       await app.loadPlugins();
       app.notify('success', app.t(willEnable ? 'toast.enabled' : 'toast.disabled', { item: app.t('noun.plugin') }));
     } catch (e) {
@@ -3073,6 +3473,7 @@ select.veer-input {
 
   app.closePluginUI = function closePluginUI() {
     if (app.el.pluginUIFrame) {
+      pluginFrameRPCStates.delete(app.el.pluginUIFrame);
       app.el.pluginUIFrame.srcdoc = '';
       app.el.pluginUIFrame.src = 'about:blank';
       app.el.pluginUIFrame.style.height = '';
@@ -3093,6 +3494,7 @@ select.veer-input {
     app.__createPluginLinkCardForTest = createPluginVirtualLinkCard;
     app.__createPluginTabPanelForTest = createPluginTabPanel;
     app.__decoratePluginHTMLForTest = decoratePluginHTML;
+    app.__pluginDetailsPlainTextForTest = pluginDetailsPlainText;
   }
 
   app.refreshLocalizedUI = (function wrapPluginLocalizedUI(original) {

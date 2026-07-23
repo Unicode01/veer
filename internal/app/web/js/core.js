@@ -390,6 +390,48 @@
     localStorage.removeItem('forward_token');
   };
 
+	app.getPluginAdminToken = function getPluginAdminToken() {
+		try {
+			return sessionStorage.getItem('veer_plugin_admin_token') || '';
+		} catch (_) {
+			return '';
+		}
+	};
+	app.setPluginAdminToken = function setPluginAdminToken(token) {
+		try {
+			const value = String(token || '').trim();
+			if (value) sessionStorage.setItem('veer_plugin_admin_token', value);
+			else sessionStorage.removeItem('veer_plugin_admin_token');
+		} catch (_) {}
+	};
+	app.clearPluginAdminToken = function clearPluginAdminToken() {
+		app.setPluginAdminToken('');
+	};
+	app.pluginAdminAPICall = async function pluginAdminAPICall(method, path, body) {
+		const headers = {
+			Authorization: 'Bearer ' + app.getToken(),
+			'Content-Type': 'application/json'
+		};
+		const adminToken = app.getPluginAdminToken();
+		if (adminToken) headers['X-Veer-Plugin-Admin'] = adminToken;
+		const opts = { method, headers };
+		if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+		const resp = await fetch(path, opts);
+		if (resp.status === 401) {
+			app.clearToken();
+			app.showTokenModal();
+			throw new Error('unauthorized');
+		}
+		const payload = await resp.json().catch(() => ({ error: resp.statusText }));
+		if (!resp.ok) {
+			const error = new Error(payload.error || resp.statusText);
+			error.payload = payload;
+			error.status = resp.status;
+			throw error;
+		}
+		return payload;
+	};
+
   app.showTokenModal = function showTokenModal() {
     app.el.appRoot.style.display = 'none';
     app.el.tokenModal.classList.add('active');

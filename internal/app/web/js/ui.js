@@ -87,6 +87,17 @@
     pluginUpdateSelectionBar: app.$('pluginUpdateSelectionBar'),
     pluginUpdateSelectionMeta: app.$('pluginUpdateSelectionMeta'),
     applyPluginUpdateBtn: app.$('applyPluginUpdateBtn'),
+    pluginManagerModal: app.$('pluginManagerModal'),
+    pluginManagerTitle: app.$('pluginManagerTitle'),
+    pluginManagerMeta: app.$('pluginManagerMeta'),
+    pluginManagerNav: app.$('pluginManagerNav'),
+    pluginManagerBody: app.$('pluginManagerBody'),
+    closePluginManagerBtn: app.$('closePluginManagerBtn'),
+    managePluginRepositoriesBtn: app.$('managePluginRepositoriesBtn'),
+    installPluginPackageBtn: app.$('installPluginPackageBtn'),
+    managePluginTrustBtn: app.$('managePluginTrustBtn'),
+    viewPluginAuditBtn: app.$('viewPluginAuditBtn'),
+    managePluginSecretsBtn: app.$('managePluginSecretsBtn'),
     refreshPluginsBtn: app.$('refreshPluginsBtn'),
     pluginsPagination: app.$('pluginsPagination'),
     ruleStatsPagination: app.$('ruleStatsPagination'),
@@ -110,6 +121,22 @@
   app.state.plugins = app.state.plugins || { data: [], catalog: null, sortKey: '', sortAsc: true, page: 1, pageSize: 10 };
   app.state.plugins.selectedUpdateIDs = app.state.plugins.selectedUpdateIDs || {};
   app.state.plugins.applyingUpdate = app.state.plugins.applyingUpdate === true;
+  app.state.plugins.manager = app.state.plugins.manager || {
+    open: false,
+    view: '',
+    pluginID: '',
+    tab: '',
+    busy: false,
+    stage: null,
+    trustKeys: [],
+    auditLogs: [],
+    auditPluginID: '',
+    auditHasMore: false,
+    history: [],
+    logs: null,
+    logLevel: '',
+    secrets: null
+  };
   app.state.pendingRows = app.state.pendingRows || {};
   app.state.pendingForms = app.state.pendingForms || { rule: false, site: false, range: false, managedNetwork: false, managedNetworkReservation: false, egressNAT: false, ipv6Assignment: false };
   if (!Object.prototype.hasOwnProperty.call(app.state.pendingForms, 'managedNetwork')) app.state.pendingForms.managedNetwork = false;
