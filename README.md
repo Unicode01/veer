@@ -31,7 +31,7 @@ VEER_INSTALL_PLUGINS=1 bash <(curl -fsSL https://raw.githubusercontent.com/Unico
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
-`bootstrap.sh` 会安装依赖、拉取源码、执行 `release.sh` 构建，再调用 `deploy.sh` 安装或热更新。默认只构建和安装 Veer 核心；设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled stable 插件。它支持 Debian/Ubuntu 的 `apt`，也支持 RHEL-compatible/Fedora 的 `dnf/yum`。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
+`bootstrap.sh` 会安装依赖、拉取源码、执行 `release.sh` 构建，再调用 `deploy.sh` 安装或热更新。默认只构建和安装 Veer 核心；设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled stable 插件。它支持 `apt`、`dnf/yum`、`apk` 以及 systemd/OpenRC。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
 
 从更名前的 `main` 版本升级时，`deploy.sh` 会把默认目录 `/opt/forward` 迁移到 `/opt/veer`，将服务切换为 `veer.service`，并保留 `/opt/forward`、`forward` 二进制名和 `forward.service` 兼容入口。现有 `forward.db`、内核状态目录和配置文件不会改名；旧 `FORWARD_*` 部署变量仍可使用，同时设置时 `VEER_*` 优先。
 
@@ -190,6 +190,11 @@ Authorization: Bearer <web_token>
 - `managed_network_auto_repair`：托管网络链路变化后的自动修复
 - `plugins_enabled`：是否扫描并运行外部插件；默认关闭，必须手动设为 `true` 才会启动外部插件控制面；内置 `veer_core` 始终可见
 - `plugins_dataplane_enabled`：是否允许外部插件进入 TC 数据面；默认关闭，当前支持按 priority 围绕 `Veer Core` 排序的 forward/reply TC 链
+- `plugins_isolation`：是否让每个插件控制 VM 和命名 Worker 运行在独立子进程；默认开启，仅受信任的本地调试才应关闭
+- `plugins_min_sandbox_level`：插件 Host 最低隔离等级，允许 `none`、`minimal`、`partial`、`full`；默认 `full`，达不到时在执行插件 JavaScript 前拒绝启动
+- `plugins_require_signed_packages`：是否只允许包管理器应用受信任发布者签名的插件包；默认开启，开发环境可显式关闭后再审批未签名包
+- `plugin_admin_token`：插件安装、信任、启停和热加载使用的独立高权限令牌；留空时相关写 API 禁用，非空时必须不同于 `web_token`
+- `plugins_max_installed` / `plugins_max_staged` / `plugins_storage_limit_mb`：插件安装数、暂存数和插件持久状态总量上限；`plugins_repository_refresh_minutes` 控制启用插件后 TUF 元数据的后台刷新周期
 - `plugins_enabled=true` 时，`lab` / `preview` / `stable` 插件可执行控制脚本；进入外部 TC 数据面仍需同时开启 `plugins_dataplane_enabled`；`deprecated` 插件始终禁用
 - `plugins_dir`：运行时插件目录，默认 `plugins`
 - `kernel_rules_map_limit`：内核规则 map 容量，`0` 表示自适应
@@ -292,9 +297,12 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 - Ubuntu 22.04+
 - RHEL-compatible 9+
 - Fedora 38+
+- Alpine 3.19+
 - Proxmox VE 7+，更推荐 PVE 8+
 
-最终以宿主机实际内核版本和 eBPF 能力为准，不只看发行版版本号。旧内核可能只能运行用户态路径，或无法稳定使用内核 dataplane。
+最终以宿主机实际内核版本和 eBPF 能力为准，不只看发行版版本号。旧内核可能只能运行用户态路径，或无法稳定使用内核 dataplane。默认 full 插件沙箱还要求 cgroup v2 提供 `cpu`、`memory`、`pids` controller；不满足时核心仍可运行，但外部插件会被拒绝启动。
+
+托管网络的运行时桥使用 netlink，跨上述发行版可用；“持久化桥”目前只写 `/etc/network/interfaces`。RHEL/Fedora 默认使用 NetworkManager 时，应由 `nmcli` 或发行版网络配置管理宿主桥。
 
 构建要求：
 
@@ -332,7 +340,7 @@ go build -o veer .
 ./release.sh arm64
 ```
 
-`release.sh` 会先编译并嵌入 core eBPF 对象，同时生成 `veer-plugins.tar.gz` 作为 bundled stable 插件包：
+`release.sh` 会先编译并嵌入 core eBPF 对象，同时生成可选的 `veer-plugins.tar.gz` 和独立开发者产物 `veer-plugin-sdk.tar.gz`：
 
 - `internal/app/ebpf/forward-tc-bpf.o`
 - `internal/app/ebpf/forward-tc-bpf-stats.o`
@@ -357,6 +365,8 @@ sh scripts/package-plugins.sh
 sh scripts/build-all-ebpf.sh  # fresh clone 或清理过 .o 后先执行一次
 go test ./...
 ```
+
+插件发布使用 `sh scripts/verify-plugin-release.sh portable`；root Linux 的完整验收与性能门槛见 [PLUGIN.md](PLUGIN.md#验收边界)。
 
 ## WHMCS 插件
 
