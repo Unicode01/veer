@@ -15,7 +15,7 @@
 #
 # 说明:
 #   - 该脚本适合直接通过 GitHub Raw 分发
-#   - 支持 Debian 11+、Ubuntu 22.04+、RHEL-compatible 9+ 与 Fedora 38+
+#   - 支持 Debian 11+、Ubuntu 22.04+、RHEL-compatible 9+、Fedora 38+ 与 Alpine 3.19+
 #   - 最终仍以实际内核版本为准
 #
 set -Eeuo pipefail
@@ -68,6 +68,7 @@ usage() {
   VEER_SKIP_DEPS       设为 1 时跳过系统依赖安装
   VEER_SKIP_GO         设为 1 时跳过 Go 安装检查
   VEER_INSTALL_PLUGINS 设为 1 时构建并安装 bundled stable 插件，默认 0
+  VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
 
 兼容性:
   main 已发布的同名 FORWARD_* 变量仍可使用；同时设置时 VEER_* 优先。
@@ -166,7 +167,8 @@ initialize_bootstrap_workdir() {
         existed=1
         [[ -d "${requested}" ]] || fail "VEER_WORKDIR 不是目录: ${requested}"
     else
-        mkdir -p -m 700 -- "${requested}"
+        mkdir -p -- "${requested}"
+        chmod 700 -- "${requested}"
     fi
 
     resolved="$(readlink -f -- "${requested}")" || fail "无法解析 VEER_WORKDIR: ${requested}"
@@ -446,6 +448,11 @@ require_supported_distro() {
                 fail "仅支持 Fedora 38+，当前为 Fedora ${VERSION_ID:-unknown}"
             fi
             ;;
+        alpine)
+            if ! version_ge "${VERSION_ID:-0}" "3.19"; then
+                fail "仅支持 Alpine 3.19+，当前为 Alpine ${VERSION_ID:-unknown}"
+            fi
+            ;;
         *)
             if os_id_like_contains rhel || os_id_like_contains centos; then
                 if (( $(os_major_version "${VERSION_ID:-0}") < 9 )); then
@@ -456,7 +463,7 @@ require_supported_distro() {
                     fail "仅支持 Fedora-like 38+，当前为 ${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-unknown}}"
                 fi
             else
-                fail "当前仅支持 Debian 11+、Ubuntu 22.04+、RHEL-compatible 9+ 与 Fedora 38+，检测到: ${ID:-unknown} ${VERSION_ID:-unknown}"
+                fail "当前仅支持 Debian 11+、Ubuntu 22.04+、RHEL-compatible 9+、Fedora 38+ 与 Alpine 3.19+，检测到: ${ID:-unknown} ${VERSION_ID:-unknown}"
             fi
             ;;
     esac
@@ -477,7 +484,11 @@ detect_package_manager() {
         printf 'yum'
         return 0
     fi
-    fail "未找到受支持的包管理器: apt-get/dnf/yum"
+    if command -v apk >/dev/null 2>&1; then
+        printf 'apk'
+        return 0
+    fi
+    fail "未找到受支持的包管理器: apt-get/dnf/yum/apk"
 }
 
 install_system_deps() {
@@ -495,13 +506,20 @@ install_system_deps() {
             run_with_retry 3 3 "apt-get update" apt-get update
             run_with_retry 3 3 "安装系统依赖" apt-get install -y --no-install-recommends \
                 ca-certificates \
+                bash \
+                coreutils \
                 curl \
                 ethtool \
+                findutils \
                 git \
+                iproute2 \
                 clang \
                 llvm \
                 linux-libc-dev \
+                nftables \
+                procps \
                 python3 \
+                util-linux \
                 xz-utils \
                 tar
             ;;
@@ -509,13 +527,21 @@ install_system_deps() {
             run_with_retry 3 3 "刷新 dnf 元数据" dnf -y makecache --refresh
             run_with_retry 3 3 "安装系统依赖" dnf install -y \
                 ca-certificates \
+                bash \
+                coreutils \
                 curl \
                 ethtool \
+                findutils \
                 git \
+                iproute \
                 clang \
                 llvm \
                 kernel-headers \
+                nftables \
+                policycoreutils \
+                procps-ng \
                 python3 \
+                util-linux \
                 xz \
                 tar
             ;;
@@ -523,15 +549,48 @@ install_system_deps() {
             run_with_retry 3 3 "刷新 yum 元数据" yum -y makecache
             run_with_retry 3 3 "安装系统依赖" yum install -y \
                 ca-certificates \
+                bash \
+                coreutils \
                 curl \
                 ethtool \
+                findutils \
                 git \
+                iproute \
                 clang \
                 llvm \
                 kernel-headers \
+                nftables \
+                policycoreutils \
+                procps-ng \
                 python3 \
+                util-linux \
                 xz \
                 tar
+            ;;
+        apk)
+            run_with_retry 3 3 "安装 Alpine 系统依赖" apk add --no-cache \
+                bash \
+                ca-certificates \
+                clang \
+                coreutils \
+                curl \
+                ethtool \
+                findutils \
+                gawk \
+                git \
+                grep \
+                iproute2 \
+                linux-headers \
+                llvm \
+                musl-dev \
+                nftables \
+                openrc \
+                procps \
+                python3 \
+                sed \
+                tar \
+                util-linux \
+                xz
             ;;
         *)
             fail "未处理的包管理器: ${package_manager}"
@@ -539,6 +598,61 @@ install_system_deps() {
     esac
 
     ok "系统依赖安装完成"
+}
+
+require_runtime_environment() {
+    local missing=()
+    local command_name=""
+    local service_manager="${VEER_SERVICE_MANAGER:-auto}"
+    local controllers=""
+
+    for command_name in bash curl tar git python3 clang ip ethtool nft mount mountpoint sysctl install readlink; do
+        if ! command -v "${command_name}" >/dev/null 2>&1; then
+            missing+=("${command_name}")
+        fi
+    done
+    if (( ${#missing[@]} > 0 )); then
+        fail "系统依赖不完整，缺少命令: ${missing[*]}"
+    fi
+
+    service_manager="$(printf '%s' "${service_manager}" | tr '[:upper:]' '[:lower:]')"
+    case "${service_manager}" in
+        auto)
+            if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+                service_manager="systemd"
+            elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1 && command -v supervise-daemon >/dev/null 2>&1 && [[ -d /run/openrc ]]; then
+                service_manager="openrc"
+            else
+                fail "未检测到正在运行的 systemd 或 OpenRC；容器/chroot 中不能执行完整部署"
+            fi
+            ;;
+        systemd)
+            if ! command -v systemctl >/dev/null 2>&1 || [[ ! -d /run/systemd/system ]]; then
+                fail "VEER_SERVICE_MANAGER=systemd，但 systemd 不是当前运行中的服务管理器"
+            fi
+            ;;
+        openrc)
+            for command_name in rc-service rc-update supervise-daemon; do
+                command -v "${command_name}" >/dev/null 2>&1 || fail "VEER_SERVICE_MANAGER=openrc，缺少命令: ${command_name}"
+            done
+            [[ -d /run/openrc ]] || fail "VEER_SERVICE_MANAGER=openrc，但 OpenRC 运行时目录不可用"
+            ;;
+        *)
+            fail "VEER_SERVICE_MANAGER 仅支持 auto/systemd/openrc，当前值: ${VEER_SERVICE_MANAGER:-}"
+            ;;
+    esac
+    ok "运行环境预检通过: service_manager=${service_manager}"
+
+    if [[ -r /sys/fs/cgroup/cgroup.controllers ]]; then
+        controllers="$(< /sys/fs/cgroup/cgroup.controllers)"
+        for command_name in cpu memory pids; do
+            if [[ " ${controllers} " != *" ${command_name} "* ]]; then
+                warn "cgroup v2 缺少 ${command_name} controller，默认 full 插件沙箱可能不可用"
+            fi
+        done
+    else
+        warn "未检测到 cgroup v2，默认 full 插件沙箱将不可用"
+    fi
 }
 
 current_go_version() {
@@ -1076,10 +1190,7 @@ main() {
     set_step "安装系统依赖"
     install_system_deps
     set_step "检查基础工具"
-    require_command curl
-    require_command tar
-    require_command git
-    require_command python3
+    require_runtime_environment
     set_step "安装 Go"
     install_go_if_needed
     set_step "配置 Go 模块代理"
