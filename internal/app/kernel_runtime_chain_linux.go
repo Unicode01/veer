@@ -19,6 +19,7 @@ type orderedKernelRuleRuntime struct {
 	mu                sync.Mutex
 	cfg               *Config
 	entries           []orderedKernelRuntimeEntry
+	xdpPlugins        *kernelXDPPluginPipelineRuntime
 	assignmentLog     kernelKeyedStateLogger
 	engineFallbackLog kernelKeyedStateLogger
 }
@@ -38,8 +39,9 @@ func newOrderedKernelRuleRuntime(order []string, cfg *Config) kernelRuleRuntime 
 		return staticUnavailableKernelRuleRuntime{reason: "no supported kernel dataplane engines configured"}
 	}
 	return &orderedKernelRuleRuntime{
-		cfg:     cfg,
-		entries: entries,
+		cfg:        cfg,
+		entries:    entries,
+		xdpPlugins: newKernelXDPPluginPipelineRuntime(cfg),
 	}
 }
 
@@ -52,37 +54,73 @@ func (rt *orderedKernelRuleRuntime) Available() (bool, string) {
 func (rt *orderedKernelRuleRuntime) ReconcilePlugins(catalog PluginCatalog) pluginRuntimeSnapshot {
 	rt.mu.Lock()
 	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	xdpPlugins := rt.xdpPlugins
 	rt.mu.Unlock()
 
+	snapshots := make([]pluginRuntimeSnapshot, 0, 2)
 	for _, entry := range entries {
 		runtime, ok := entry.rt.(pluginPipelineRuntime)
 		if !ok || runtime == nil {
 			continue
 		}
-		return runtime.ReconcilePlugins(catalog)
+		snapshots = append(snapshots, runtime.ReconcilePlugins(catalog))
 	}
-	return kernelPluginPipelineManifestOnlySnapshot(catalog)
+	if xdpPlugins != nil {
+		snapshots = append(snapshots, xdpPlugins.Reconcile(catalog))
+	}
+	return combinePluginDataplaneSnapshots(catalog, snapshots...)
 }
 
 func (rt *orderedKernelRuleRuntime) PluginSnapshot() pluginRuntimeSnapshot {
 	rt.mu.Lock()
 	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	xdpPlugins := rt.xdpPlugins
 	rt.mu.Unlock()
 
+	snapshots := make([]pluginRuntimeSnapshot, 0, 2)
 	for _, entry := range entries {
 		runtime, ok := entry.rt.(pluginPipelineRuntime)
 		if !ok || runtime == nil {
 			continue
 		}
-		return runtime.PluginSnapshot()
+		snapshots = append(snapshots, runtime.PluginSnapshot())
 	}
-	return pluginRuntimeSnapshot{}
+	if xdpPlugins != nil {
+		snapshots = append(snapshots, xdpPlugins.Snapshot())
+	}
+	return combinePluginDataplaneSnapshots(PluginCatalog{}, snapshots...)
 }
 
 func (rt *orderedKernelRuleRuntime) PutPluginMapValue(pluginID string, objectID string, mapName string, key []byte, value []byte) error {
 	return rt.withPluginMapController(func(controller pluginEBPFMapController) error {
 		return controller.PutPluginMapValue(pluginID, objectID, mapName, key, value)
 	})
+}
+
+func (rt *orderedKernelRuleRuntime) TransactionPluginMaps(pluginID string, request pluginEBPFMapTransactionRequest) error {
+	if rt == nil {
+		return errPluginRuntimeTargetNotLoaded
+	}
+	var notLoaded error
+	for _, candidate := range rt.pluginMapCandidates() {
+		controller, ok := candidate.(pluginEBPFMapTransactionController)
+		if !ok || controller == nil {
+			continue
+		}
+		err := controller.TransactionPluginMaps(pluginID, request)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errPluginRuntimeTargetNotLoaded) {
+			notLoaded = err
+			continue
+		}
+		return err
+	}
+	if notLoaded != nil {
+		return notLoaded
+	}
+	return errPluginRuntimeTargetNotLoaded
 }
 
 func (rt *orderedKernelRuleRuntime) GetPluginMapValue(pluginID string, objectID string, mapName string, key []byte) ([]byte, error) {
@@ -102,12 +140,9 @@ func (rt *orderedKernelRuleRuntime) GetPluginMapPerCPUValues(pluginID string, ob
 	if rt == nil {
 		return nil, errPluginRuntimeTargetNotLoaded
 	}
-	rt.mu.Lock()
-	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
-	rt.mu.Unlock()
 	var notLoaded error
-	for _, entry := range entries {
-		controller, ok := entry.rt.(pluginEBPFPerCPUMapController)
+	for _, candidate := range rt.pluginMapCandidates() {
+		controller, ok := candidate.(pluginEBPFPerCPUMapController)
 		if !ok || controller == nil {
 			continue
 		}
@@ -127,6 +162,58 @@ func (rt *orderedKernelRuleRuntime) GetPluginMapPerCPUValues(pluginID string, ob
 	return nil, errPluginRuntimeTargetNotLoaded
 }
 
+func (rt *orderedKernelRuleRuntime) ScanPluginMap(pluginID string, objectID string, mapName string, request pluginEBPFMapScanRequest) (pluginEBPFMapScanResult, error) {
+	if rt == nil {
+		return pluginEBPFMapScanResult{}, errPluginRuntimeTargetNotLoaded
+	}
+	var notLoaded error
+	for _, candidate := range rt.pluginMapCandidates() {
+		controller, ok := candidate.(pluginEBPFMapScanController)
+		if !ok || controller == nil {
+			continue
+		}
+		result, err := controller.ScanPluginMap(pluginID, objectID, mapName, request)
+		if err == nil {
+			return result, nil
+		}
+		if errors.Is(err, errPluginRuntimeTargetNotLoaded) {
+			notLoaded = err
+			continue
+		}
+		return pluginEBPFMapScanResult{}, err
+	}
+	if notLoaded != nil {
+		return pluginEBPFMapScanResult{}, notLoaded
+	}
+	return pluginEBPFMapScanResult{}, errPluginRuntimeTargetNotLoaded
+}
+
+func (rt *orderedKernelRuleRuntime) ReadPluginRingBuffer(pluginID string, objectID string, mapName string, request pluginEBPFRingReadRequest) (pluginEBPFRingReadResult, error) {
+	if rt == nil {
+		return pluginEBPFRingReadResult{}, errPluginRuntimeTargetNotLoaded
+	}
+	var notLoaded error
+	for _, candidate := range rt.pluginMapCandidates() {
+		controller, ok := candidate.(pluginEBPFRingReadController)
+		if !ok || controller == nil {
+			continue
+		}
+		result, err := controller.ReadPluginRingBuffer(pluginID, objectID, mapName, request)
+		if err == nil {
+			return result, nil
+		}
+		if errors.Is(err, errPluginRuntimeTargetNotLoaded) {
+			notLoaded = err
+			continue
+		}
+		return pluginEBPFRingReadResult{}, err
+	}
+	if notLoaded != nil {
+		return pluginEBPFRingReadResult{}, notLoaded
+	}
+	return pluginEBPFRingReadResult{}, errPluginRuntimeTargetNotLoaded
+}
+
 func (rt *orderedKernelRuleRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
 	return rt.withPluginMapController(func(controller pluginEBPFMapController) error {
 		return controller.DeletePluginMapValue(pluginID, objectID, mapName, key)
@@ -143,13 +230,9 @@ func (rt *orderedKernelRuleRuntime) withPluginMapController(fn func(pluginEBPFMa
 	if rt == nil {
 		return errPluginRuntimeTargetNotLoaded
 	}
-	rt.mu.Lock()
-	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
-	rt.mu.Unlock()
-
 	var notLoaded error
-	for _, entry := range entries {
-		controller, ok := entry.rt.(pluginEBPFMapController)
+	for _, candidate := range rt.pluginMapCandidates() {
+		controller, ok := candidate.(pluginEBPFMapController)
 		if !ok || controller == nil {
 			continue
 		}
@@ -167,6 +250,22 @@ func (rt *orderedKernelRuleRuntime) withPluginMapController(fn func(pluginEBPFMa
 		return notLoaded
 	}
 	return errPluginRuntimeTargetNotLoaded
+}
+
+func (rt *orderedKernelRuleRuntime) pluginMapCandidates() []any {
+	if rt == nil {
+		return nil
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]any, 0, len(rt.entries)+1)
+	for _, entry := range rt.entries {
+		out = append(out, entry.rt)
+	}
+	if rt.xdpPlugins != nil {
+		out = append(out, rt.xdpPlugins)
+	}
+	return out
 }
 
 func (rt *orderedKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
@@ -207,6 +306,10 @@ func (rt *orderedKernelRuleRuntime) ReconcileWithPluginCatalog(rules []Rule, cat
 func (rt *orderedKernelRuleRuntime) reconcileWithOptionalPluginCatalog(rules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if catalog != nil && rt.xdpPlugins != nil {
+		xdpCatalog := *catalog
+		defer rt.xdpPlugins.Reconcile(xdpCatalog)
+	}
 
 	entries := rt.entriesForCatalogLocked(catalog)
 	cleanupEntries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
@@ -323,6 +426,10 @@ func (rt *orderedKernelRuleRuntime) ReconcileRetainingAssignmentsWithPluginCatal
 func (rt *orderedKernelRuleRuntime) reconcileRetainingAssignmentsWithOptionalPluginCatalog(retainedByEngine map[string][]Rule, newRules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if catalog != nil && rt.xdpPlugins != nil {
+		xdpCatalog := *catalog
+		defer rt.xdpPlugins.Reconcile(xdpCatalog)
+	}
 
 	entries := rt.entriesForCatalogLocked(catalog)
 	cleanupEntries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
@@ -457,6 +564,11 @@ func (rt *orderedKernelRuleRuntime) Maintain() error {
 			return err
 		}
 	}
+	if rt.xdpPlugins != nil {
+		if err := rt.xdpPlugins.Maintain(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -483,6 +595,11 @@ func (rt *orderedKernelRuleRuntime) Close() error {
 			firstErr = err
 		}
 	}
+	if rt.xdpPlugins != nil {
+		if err := rt.xdpPlugins.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
@@ -499,7 +616,7 @@ func (rt *orderedKernelRuleRuntime) cleanupUnassignedLocked(entries []orderedKer
 
 func (rt *orderedKernelRuleRuntime) entriesForCatalogLocked(catalog *PluginCatalog) []orderedKernelRuntimeEntry {
 	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
-	if catalog == nil || !kernelPluginPipelineCatalogHasRuntimeHooks(*catalog, rt.cfg) {
+	if catalog == nil || (!kernelPluginPipelineCatalogHasRuntimeHooks(*catalog, rt.cfg) && !kernelXDPPluginCatalogHasRuntimeHooks(*catalog, rt.cfg)) {
 		return entries
 	}
 	out := make([]orderedKernelRuntimeEntry, 0, len(entries))

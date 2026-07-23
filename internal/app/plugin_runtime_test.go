@@ -37,11 +37,11 @@ func TestLoadPluginCatalogDefaultsToBuiltinVeerOnly(t *testing.T) {
 	if catalog.Runtime.CorePriority != pluginPipelineCorePriority {
 		t.Fatalf("catalog runtime core priority = %d, want %d", catalog.Runtime.CorePriority, pluginPipelineCorePriority)
 	}
-	if got := strings.Join(catalog.Runtime.ExternalDataplaneEngines, ","); got != "tc" {
-		t.Fatalf("catalog runtime external dataplane engines = %q, want tc", got)
+	if got := strings.Join(catalog.Runtime.ExternalDataplaneEngines, ","); got != "tc,xdp" {
+		t.Fatalf("catalog runtime external dataplane engines = %q, want tc,xdp", got)
 	}
-	if got := strings.Join(catalog.Runtime.RegistrationOnlyEngines, ","); got != "xdp" {
-		t.Fatalf("catalog runtime registration-only engines = %q, want xdp", got)
+	if len(catalog.Runtime.RegistrationOnlyEngines) != 0 {
+		t.Fatalf("catalog runtime registration-only engines = %v, want none", catalog.Runtime.RegistrationOnlyEngines)
 	}
 	if got := strings.Join(catalog.Runtime.StabilityLevels, ","); got != "lab,preview,stable,deprecated" {
 		t.Fatalf("catalog runtime stability levels = %q, want lab,preview,stable,deprecated", got)
@@ -109,6 +109,33 @@ func TestBundledStablePluginCatalogIsValid(t *testing.T) {
 		if plugin.Status != pluginStatusActive || plugin.Error != "" || plugin.Runtime.Mode == pluginRuntimeModeInvalid || plugin.Runtime.Mode == pluginRuntimeModeError {
 			t.Errorf("stable bundled plugin %q is not loadable: status=%s mode=%s error=%q reason=%q", plugin.ID, plugin.Status, plugin.Runtime.Mode, plugin.Error, plugin.Runtime.Reason)
 		}
+	}
+}
+
+func TestPluginControlRejectsInProcessRuntimeWhenSandboxIsRequired(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "sandbox_required", `{
+  "api_version":"v1",
+  "id":"sandbox_required",
+  "name":"Sandbox Required",
+  "version":"1.0.0",
+  "kind":"control",
+  "stability":"lab",
+  "control":{"main":"control.js","permissions":["plugin.register"]}
+}`)
+	writePluginControlScript(t, dir, "sandbox_required", `throw new Error("control script must not execute");`)
+	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
+	cfg.PluginsMinSandboxLevel = pluginSandboxLevelFull
+	db := openTestDB(t)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = runtime.Close() })
+	snapshot := runtime.Reconcile(loadPluginCatalogWithState(cfg, db))
+	state, ok := snapshot.Plugins["sandbox_required"]
+	if !ok || state.Mode != pluginRuntimeModeError || state.Reason != "plugin sandbox admission failed" {
+		t.Fatalf("sandbox admission state = %+v", state)
+	}
+	if !strings.Contains(state.Error, "plugins_isolation=false") || strings.Contains(state.Error, "control script must not execute") {
+		t.Fatalf("sandbox admission error = %q", state.Error)
 	}
 }
 
@@ -969,6 +996,30 @@ func TestLoadPluginCatalogAllowsLabControlWithoutSHA256(t *testing.T) {
 	}
 }
 
+func TestReadPluginControlScriptRejectsChangeAfterCatalogVerification(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "changed_control", `{
+  "api_version": "v1",
+  "id": "changed_control",
+  "name": "Changed Control",
+  "version": "0.1.0",
+  "kind": "control",
+  "stability": "lab",
+  "control": {"main": "control.js"}
+}`)
+	writePluginControlScript(t, dir, "changed_control", `exports.value = "catalog";`)
+	plugin, err := loadPluginFromDir(filepath.Join(dir, "changed_control"), "changed_control")
+	if err != nil {
+		t.Fatalf("loadPluginFromDir() error = %v", err)
+	}
+	writePluginControlScript(t, dir, "changed_control", `exports.value = "changed";`)
+	if _, err := readPluginControlScript(plugin); err == nil || !strings.Contains(err.Error(), "sha256 changed after catalog verification") {
+		t.Fatalf("readPluginControlScript() error = %v, want changed control rejection", err)
+	}
+}
+
 func TestLoadPluginCatalogRejectsStableUIWithoutSHA256(t *testing.T) {
 	t.Parallel()
 
@@ -1166,7 +1217,7 @@ ebpf.loadObject({id:'observer', path:'observer.o'});
 		t.Fatalf("plugin count = %d, want builtin + too_big", len(catalog.Plugins))
 	}
 	plugin := catalog.Plugins[1]
-	if plugin.Status != pluginStatusError || !strings.Contains(plugin.Error, "object exceeds") {
+	if plugin.Status != pluginStatusError || !strings.Contains(plugin.Error, "exceeds") {
 		t.Fatalf("plugin = %+v, want oversized object error", plugin)
 	}
 }
@@ -1211,6 +1262,14 @@ pipeline.attach({
   program: 'observer:tc_ingress',
   mode: 'observe'
 });
+pipeline.attach({
+  id: 'observe-reply-final',
+  direction: 'reply',
+  phase: 'after_apply',
+  priority: 20,
+  program: 'observer:tc_ingress',
+  mode: 'observe'
+});
 ui.register({static_dir: 'ui', entry: 'index.html'});
 `)
 
@@ -1232,12 +1291,16 @@ ui.register({static_dir: 'ui', entry: 'index.html'});
 	if len(object.Programs) != 1 || object.Programs[0].Type != kernelEngineTC || object.Programs[0].InstructionCount == 0 {
 		t.Fatalf("object programs = %+v, want parsed TC program with instructions", object.Programs)
 	}
-	if len(plugin.Hooks) != 1 {
-		t.Fatalf("hooks = %+v, want one pipeline hook", plugin.Hooks)
+	if len(plugin.Hooks) != 2 {
+		t.Fatalf("hooks = %+v, want two pipeline hooks", plugin.Hooks)
 	}
 	hook := plugin.Hooks[0]
 	if hook.Engine != kernelEngineTC || hook.Attach != "ingress" || hook.Stage != "forward" || hook.Priority != 10 {
 		t.Fatalf("pipeline hook = %+v, want tc ingress forward priority 10", hook)
+	}
+	afterApply := plugin.Hooks[1]
+	if afterApply.Engine != kernelEngineTC || afterApply.Attach != "ingress" || afterApply.Stage != "post_reply_apply" || afterApply.Priority != 20 {
+		t.Fatalf("after-apply hook = %+v, want tc ingress post_reply_apply priority 20", afterApply)
 	}
 }
 
@@ -1595,8 +1658,12 @@ func TestPluginResourceAPIStoresRecordsAndMarksPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(data_plugin bindings/alpha) after missing secret error = %v", err)
 	}
-	if !strings.Contains(stored.DataJSON, `"password":"new-secret"`) {
-		t.Fatalf("stored data after missing secret = %s, want preserved password", stored.DataJSON)
+	if strings.Contains(stored.DataJSON, "new-secret") || !strings.Contains(stored.DataJSON, pluginSecretEnvelopeField) {
+		t.Fatalf("stored data after missing secret is not encrypted: %s", stored.DataJSON)
+	}
+	decryptedStored := decryptPluginRecordWithNewStoreForTest(t, db, *stored, pluginResourceByIDForTest(t, loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "data_plugin"), "bindings"))
+	if !strings.Contains(decryptedStored.DataJSON, `"password":"new-secret"`) {
+		t.Fatalf("decrypted data after missing secret = %s, want preserved password", decryptedStored.DataJSON)
 	}
 
 	req = httptest.NewRequest(http.MethodPut, "/api/plugins/data_plugin/resources/bindings/alpha", strings.NewReader(`{"data":{"name":"alpha4","password":"__redacted__"},"enabled":false}`))
@@ -1610,8 +1677,12 @@ func TestPluginResourceAPIStoresRecordsAndMarksPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(data_plugin bindings/alpha) after redacted secret error = %v", err)
 	}
-	if !strings.Contains(stored.DataJSON, `"password":"new-secret"`) {
-		t.Fatalf("stored data after redacted secret = %s, want preserved password", stored.DataJSON)
+	if strings.Contains(stored.DataJSON, "new-secret") || !strings.Contains(stored.DataJSON, pluginSecretEnvelopeField) {
+		t.Fatalf("stored data after redacted secret is not encrypted: %s", stored.DataJSON)
+	}
+	decryptedStored = decryptPluginRecordWithNewStoreForTest(t, db, *stored, pluginResourceByIDForTest(t, loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "data_plugin"), "bindings"))
+	if !strings.Contains(decryptedStored.DataJSON, `"password":"new-secret"`) {
+		t.Fatalf("decrypted data after redacted secret = %s, want preserved password", decryptedStored.DataJSON)
 	}
 
 	req = httptest.NewRequest(http.MethodPut, "/api/plugins/data_plugin/resources/bindings/alpha", strings.NewReader(`{"data":{"name":"alpha5","password":""},"enabled":false}`))
@@ -1625,8 +1696,12 @@ func TestPluginResourceAPIStoresRecordsAndMarksPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(data_plugin bindings/alpha) after clear secret error = %v", err)
 	}
-	if !strings.Contains(stored.DataJSON, `"password":""`) || strings.Contains(stored.DataJSON, "new-secret") {
-		t.Fatalf("stored data after clearing secret = %s, want explicit empty password", stored.DataJSON)
+	if strings.Contains(stored.DataJSON, "new-secret") || !strings.Contains(stored.DataJSON, pluginSecretEnvelopeField) {
+		t.Fatalf("stored data after clearing secret is not encrypted: %s", stored.DataJSON)
+	}
+	decryptedStored = decryptPluginRecordWithNewStoreForTest(t, db, *stored, pluginResourceByIDForTest(t, loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "data_plugin"), "bindings"))
+	if !strings.Contains(decryptedStored.DataJSON, `"password":""`) || strings.Contains(decryptedStored.DataJSON, "new-secret") {
+		t.Fatalf("decrypted data after clearing secret = %s, want explicit empty password", decryptedStored.DataJSON)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/plugins/data_plugin/resources/readonly", strings.NewReader(`{"data":{"name":"denied"}}`))
@@ -2232,6 +2307,7 @@ exports.onTimer = function () {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/plugins/control_plugin/state", strings.NewReader(`{"enabled":false}`))
 	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set(pluginAdminTokenHeader, "test-plugin-admin")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -2273,6 +2349,7 @@ exports.onTimer = function () {
 
 	req = httptest.NewRequest(http.MethodPut, "/api/plugins/control_plugin/state", strings.NewReader(`{"enabled":true}`))
 	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set(pluginAdminTokenHeader, "test-plugin-admin")
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -2291,6 +2368,7 @@ exports.onTimer = function () {
 
 	req = httptest.NewRequest(http.MethodPut, "/api/plugins/lifecycle_plugin/state", strings.NewReader(`{"enabled":false}`))
 	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set(pluginAdminTokenHeader, "test-plugin-admin")
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -2321,6 +2399,7 @@ exports.onTimer = function () {
 
 	req = httptest.NewRequest(http.MethodPut, "/api/plugins/lifecycle_plugin/state", strings.NewReader(`{"enabled":true}`))
 	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set(pluginAdminTokenHeader, "test-plugin-admin")
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -2773,6 +2852,52 @@ func TestPluginCatalogSnapshotPreservesContentFingerprint(t *testing.T) {
 	}
 	if sourceFingerprint != candidateFingerprint || sourceFingerprint != snapshotFingerprint {
 		t.Fatalf("fingerprints source/candidate/snapshot = %q/%q/%q, want equal", sourceFingerprint, candidateFingerprint, snapshotFingerprint)
+	}
+}
+
+func TestPluginCatalogSnapshotFailureDisablesExternalPlugins(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), "plugins-not-directory")
+	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: root})
+	pm := &ProcessManager{cfg: cfg, db: openTestDB(t), redistributeWake: make(chan struct{}, 1)}
+	pm.initializePluginCatalogSnapshot()
+	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
+
+	status := pm.snapshotPluginCatalogHotReloadStatus()
+	if status == nil || status.LastCheckResult != pluginCatalogHotReloadResultError || status.LastCheckError == "" {
+		t.Fatalf("hot reload status = %+v, want snapshot error", status)
+	}
+	runtimeCfg, sourceDir := pm.appliedPluginCatalogConfig(cfg)
+	if runtimeCfg.PluginsEnabled() || runtimeCfg.PluginsDataplaneEnabled() {
+		t.Fatalf("runtime plugin settings = control:%t dataplane:%t, want fail-closed", runtimeCfg.PluginsEnabled(), runtimeCfg.PluginsDataplaneEnabled())
+	}
+	if sourceDir != root {
+		t.Fatalf("source directory = %q, want %q", sourceDir, root)
+	}
+
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestPlugin(t, root, "recovered_plugin", `{
+  "api_version":"v1",
+  "id":"recovered_plugin",
+  "name":"Recovered Plugin",
+  "version":"1.0.0",
+  "kind":"control"
+}`)
+	if err := pm.applyPluginCatalogUpdate(); err != nil {
+		t.Fatalf("applyPluginCatalogUpdate() after snapshot recovery error = %v", err)
+	}
+	runtimeCfg, _ = pm.appliedPluginCatalogConfig(cfg)
+	if !runtimeCfg.PluginsEnabled() || runtimeCfg.PluginsDir == root {
+		t.Fatalf("recovered runtime config = %+v, want enabled private snapshot", runtimeCfg)
 	}
 }
 
@@ -4714,6 +4839,95 @@ exports.onResourceApply = function (ctx) {
 	}
 }
 
+func TestPluginGojaControlReconcileDefersDataplaneRuntimeApplyResources(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "dataplane_plugin")
+	writeTestPlugin(t, dir, "dataplane_plugin", `{
+  "api_version": "v1",
+  "id": "dataplane_plugin",
+  "name": "Dataplane Plugin",
+  "version": "0.1.0",
+  "kind": "pipeline",
+  "stability": "lab",
+  "control": {
+    "main": "control.js",
+    "permissions": ["ebpf.load", "kv", "plugin.register", "resource"]
+  }
+}`)
+	objectPath := compileTestBPFObject(t, pluginDir, "observer.o")
+	sum, err := sha256File(objectPath)
+	if err != nil {
+		t.Fatalf("sha256File(observer.o) error = %v", err)
+	}
+	writePluginControlScript(t, dir, "dataplane_plugin", `
+ebpf.loadObject({
+  id: 'observer',
+  path: 'observer.o',
+  sha256: '`+sum+`',
+  programs: [{id: 'tc_ingress', section: 'tc/ingress', type: 'tc'}]
+});
+plugin.resource({
+  id: 'settings',
+  methods: ['list', 'get', 'create', 'update'],
+  runtime_update: 'runtime_apply'
+});
+exports.onResourceApply = function (ctx) {
+  kv.set('reconciled_resource', {
+    resource: ctx.resource.id,
+    count: ctx.records.length
+  });
+};
+`)
+	setTestPluginControlSHA(t, dir, "dataplane_plugin")
+
+	db := openTestDB(t)
+	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
+		PluginID:   "dataplane_plugin",
+		ResourceID: "settings",
+		RecordKey:  "alpha",
+		DataJSON:   `{"name":"alpha"}`,
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("AddPluginRecord(settings/alpha) error = %v", err)
+	}
+
+	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
+	runtime := newPluginControlRuntime(db, cfg, nil)
+	t.Cleanup(func() { _ = runtime.Close() })
+	controlRuntime, ok := runtime.(*gojaPluginControlRuntime)
+	if !ok {
+		t.Fatal("plugin control runtime is not Goja-backed")
+	}
+	catalog := loadPluginCatalog(cfg)
+	snapshot := runtime.Reconcile(catalog)
+	if state, ok := snapshot.stateFor("dataplane_plugin"); !ok || state.Error != "" {
+		t.Fatalf("dataplane_plugin reconcile state = %+v ok=%t, want clean deferred state", state, ok)
+	}
+	if _, err := store.GetPluginRecord(db, "dataplane_plugin", pluginControlKVResourceID, "reconciled_resource"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetPluginRecord(reconciled_resource) before dataplane error = %v, want sql.ErrNoRows", err)
+	}
+
+	failures := controlRuntime.ReapplyPluginRuntimeResourcesAfterDataplane(catalog, pluginRuntimeSnapshot{
+		Plugins: map[string]PluginRuntimeState{
+			"dataplane_plugin": {
+				Mode:       pluginRuntimeModeDataplane,
+				Attachable: true,
+				Attached:   true,
+			},
+		},
+	})
+	if len(failures) != 0 {
+		t.Fatalf("post-dataplane resource failures = %v", failures)
+	}
+	record, err := store.GetPluginRecord(db, "dataplane_plugin", pluginControlKVResourceID, "reconciled_resource")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(reconciled_resource) after dataplane error = %v", err)
+	}
+	if !strings.Contains(record.DataJSON, `"resource":"settings"`) || !strings.Contains(record.DataJSON, `"count":1`) {
+		t.Fatalf("reconciled_resource data = %s, want deferred settings apply", record.DataJSON)
+	}
+}
+
 func TestPluginGojaControlReconcileSkipsEmptyRuntimeApplyResourceWithoutStatus(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "control_plugin", `{
@@ -5007,11 +5221,12 @@ exports.onAction = function () {
 		if err != nil {
 			t.Fatalf("GetPluginRecord(settings/%s) error = %v", tc.key, err)
 		}
-		if !strings.Contains(record.DataJSON, tc.password) {
-			t.Fatalf("settings/%s = %s, missing preserved %s", tc.key, record.DataJSON, tc.password)
+		if strings.Contains(record.DataJSON, tc.password) || !strings.Contains(record.DataJSON, pluginSecretEnvelopeField) {
+			t.Fatalf("settings/%s raw storage is not encrypted: %s", tc.key, record.DataJSON)
 		}
-		if !strings.Contains(record.DataJSON, tc.username) {
-			t.Fatalf("settings/%s = %s, missing updated %s", tc.key, record.DataJSON, tc.username)
+		decrypted := decryptPluginRecordForTest(t, rt, *record, pluginResourceByIDForTest(t, plugin, "settings"))
+		if !strings.Contains(decrypted.DataJSON, tc.password) || !strings.Contains(decrypted.DataJSON, tc.username) {
+			t.Fatalf("settings/%s decrypted = %s, want %s and %s", tc.key, decrypted.DataJSON, tc.password, tc.username)
 		}
 	}
 }
@@ -6863,8 +7078,13 @@ exports.onAction = function () {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(target settings/alpha) error = %v", err)
 	}
-	if !strings.Contains(target.DataJSON, `"password":"new-secret"`) {
-		t.Fatalf("target settings/alpha = %s, want stored unredacted password", target.DataJSON)
+	if strings.Contains(target.DataJSON, "new-secret") || !strings.Contains(target.DataJSON, pluginSecretEnvelopeField) {
+		t.Fatalf("target settings/alpha raw storage is not encrypted: %s", target.DataJSON)
+	}
+	targetPlugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "target_plugin")
+	decryptedTarget := decryptPluginRecordForTest(t, rt, *target, pluginResourceByIDForTest(t, targetPlugin, "settings"))
+	if !strings.Contains(decryptedTarget.DataJSON, `"password":"new-secret"`) {
+		t.Fatalf("target settings/alpha decrypted = %s, want new-secret", decryptedTarget.DataJSON)
 	}
 }
 
@@ -6964,11 +7184,13 @@ exports.onAction = function () {
 		if err != nil {
 			t.Fatalf("GetPluginRecord(target settings/%s) error = %v", tc.key, err)
 		}
-		if !strings.Contains(record.DataJSON, tc.password) {
-			t.Fatalf("target settings/%s = %s, missing preserved %s", tc.key, record.DataJSON, tc.password)
+		if strings.Contains(record.DataJSON, tc.password) || !strings.Contains(record.DataJSON, pluginSecretEnvelopeField) {
+			t.Fatalf("target settings/%s raw storage is not encrypted: %s", tc.key, record.DataJSON)
 		}
-		if !strings.Contains(record.DataJSON, tc.username) {
-			t.Fatalf("target settings/%s = %s, missing updated %s", tc.key, record.DataJSON, tc.username)
+		targetPlugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "target_plugin")
+		decrypted := decryptPluginRecordForTest(t, rt, *record, pluginResourceByIDForTest(t, targetPlugin, "settings"))
+		if !strings.Contains(decrypted.DataJSON, tc.password) || !strings.Contains(decrypted.DataJSON, tc.username) {
+			t.Fatalf("target settings/%s decrypted = %s, want %s and %s", tc.key, decrypted.DataJSON, tc.password, tc.username)
 		}
 	}
 }
@@ -7820,6 +8042,109 @@ exports.onAction = function () {
 	}
 	if len(controller.calls) != 1 || controller.calls[0] != "getPerCPU:control_plugin::traffic_stats:00000000" {
 		t.Fatalf("map calls = %+v, want one per-CPU lookup", controller.calls)
+	}
+}
+
+func TestPluginGojaControlReadsBoundedMapScanAndRingBuffer(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "actions": [{"id":"stats","runtime_update":"runtime_query"}],
+  "control": {"main":"control.js","permissions":["ebpf.map_read"]}
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onAction = function () {
+  return {
+    scan: ebpf.mapScan('flow_stats', {cursor:'0102', limit:2, max_bytes:128}),
+    ring: ebpf.ringRead('events', {max_records:4, max_bytes:512, timeout_ms:3000})
+  };
+};
+`)
+
+	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
+	controller := &pluginControlMapControllerTest{
+		scanResult: pluginEBPFMapScanResult{
+			Entries: []pluginEBPFMapScanEntry{{Key: []byte{0x02}, Value: []byte{0xaa, 0xbb}}},
+			Cursor:  []byte{0x02},
+		},
+		ringResult: pluginEBPFRingReadResult{
+			Records:        []pluginEBPFRingRecord{{RawSample: []byte{0x10, 0x20, 0x30}, Remaining: 7}},
+			Bytes:          3,
+			Remaining:      7,
+			LimitReached:   true,
+			DroppedRecords: 1,
+		},
+	}
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	result, err := rt.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("QueryPluginAction() error = %v", err)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	for _, want := range []string{
+		`"entries":[{"key":"02","value":"aabb"}]`,
+		`"cursor":"02"`,
+		`"records":[{"data":"102030","remaining":7,"size":3}]`,
+		`"dropped_records":1`,
+		`"limit_reached":true`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("result = %s, want %s", raw, want)
+		}
+	}
+	if len(controller.calls) != 2 {
+		t.Fatalf("controller calls = %+v, want scan and ring", controller.calls)
+	}
+	if controller.calls[0] != "scan:control_plugin::flow_stats:0102:2:128" {
+		t.Fatalf("scan call = %q", controller.calls[0])
+	}
+	if controller.calls[1] != "ring:control_plugin::events:4:512:3000" {
+		t.Fatalf("ring call = %q", controller.calls[1])
+	}
+}
+
+func TestPluginGojaControlRejectsUnboundedMapAndRingReads(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version":"v1",
+  "id":"control_plugin",
+  "name":"Control Plugin",
+  "version":"0.1.0",
+  "kind":"control",
+  "actions":[{"id":"stats","runtime_update":"runtime_query"}],
+  "control":{"main":"control.js","permissions":["ebpf.map_read"]}
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onAction = function (ctx) {
+  if (ctx.payload.kind === 'scan') return ebpf.mapScan('stats', {limit:257});
+  return ebpf.ringRead('events', {max_bytes:1048577, timeout_ms:1});
+};
+`)
+	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
+	controller := &pluginControlMapControllerTest{}
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*gojaPluginControlRuntime)
+	t.Cleanup(func() { _ = rt.Close() })
+	for _, test := range []struct {
+		payload string
+		want    string
+	}{
+		{`{"kind":"scan"}`, "ebpf.mapScan: limit must be between 1 and 256"},
+		{`{"kind":"ring"}`, "ebpf.ringRead: max_bytes must be between 1 and 1048576"},
+	} {
+		if _, err := rt.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(test.payload)); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("QueryPluginAction(%s) error = %v, want %q", test.payload, err, test.want)
+		}
+	}
+	if len(controller.calls) != 0 {
+		t.Fatalf("controller calls = %+v, want none", controller.calls)
 	}
 }
 
@@ -8920,7 +9245,7 @@ func TestPluginGojaControlNetAdminAPIUsesHostController(t *testing.T) {
       "operations": ["addr.write", "link.create", "link.master", "link.offload", "link.read", "link.state", "route.write"]
     }, {
       "interfaces": ["eth*"],
-      "operations": ["link.read"]
+      "operations": ["link.read", "neigh.write", "rule.write"]
     }]
   }
 }`)
@@ -8930,9 +9255,14 @@ exports.onAction = function () {
   var pair = net.link.ensureVeth({host: 'veerlocal0', peer: 'veervtap0', mtu: 1492, up: true});
   var dummy = net.link.ensureDummy({name: 'veerdummy0', mtu: 1492, up: true});
   var macvlan = net.link.ensureMacvlan({name: 'veerppp0', parent: 'eth0', mode: 'bridge', mac: '02:00:00:00:30:01', mtu: 1492, up: true});
+  var vlan = net.link.ensureVLAN({name: 'veervlan0', parent: 'eth0', vlan_id: 120, protocol: '802.1q', mtu: 1500, up: true});
+  var vrf = net.link.ensureVRF({name: 'veervrf0', table: 120, up: true});
+  net.link.setMaster({link: vlan.link.name, master: vrf.link.name});
   var member = net.link.setMaster({link: 'veervtap0', master: bridge.name});
   net.addr.replace({interface: 'veerlocal0', cidr: '169.254.77.1/30'});
   net.route.replace({dst: '0.0.0.0/0', dev: 'veerlocal0', table: 100, metric: 10});
+  net.rule.replace({family: 'ipv4', priority: 1000, table: 100, src: '192.0.2.0/24', mark: 17, mask: 255, iif: 'eth0'});
+  net.neigh.replace({interface: 'eth0', ip: '192.0.2.1', mac: '02:00:00:00:40:01', state: 'permanent'});
   net.link.setMTU('veervtap0', 1492);
   var arp = net.link.setARP('veervtap0', false);
   net.link.setPromiscuous('veervtap0', true);
@@ -8951,6 +9281,8 @@ exports.onAction = function () {
     dummy_created: dummy.created,
     macvlan: macvlan.link.name,
     macvlan_created: macvlan.created,
+    vlan_id: vlan.link.vlan_id,
+    vrf_table: vrf.link.vrf_table,
     member_master: member.master_name,
     peer_ifindex: link.ifindex,
     arp: arp.arp,
@@ -8976,9 +9308,16 @@ exports.onAction = function () {
 		"ensureVeth:veerlocal0:veervtap0:1492:true",
 		"ensureDummy:veerdummy0:1492:true",
 		"ensureMacvlan:veerppp0:eth0:bridge:02:00:00:00:30:01:1492:true",
+		"ensureVLAN:veervlan0:eth0:120:802.1q:1500:true",
+		"ensureVRF:veervrf0:120:true",
+		"setMaster:veervlan0:veervrf0:true",
 		"setMaster:veervtap0:brlan0:true",
 		"addrReplace:veerlocal0:169.254.77.1/30",
 		"routeReplace:0.0.0.0/0:veerlocal0::100:10",
+		"ruleSnapshot:ipv4|1000|100|192.0.2.0/24||17|255|true|eth0||false",
+		"ruleReplace:ipv4:1000:100:192.0.2.0/24::17:255:eth0::false",
+		"neighSnapshot:eth0|192.0.2.1|0",
+		"neighReplace:eth0:192.0.2.1:02:00:00:00:40:01:permanent:0",
 		"setMTU:veervtap0:1492",
 		"setARP:veervtap0:false",
 		"setPromiscuous:veervtap0:true",
@@ -8990,14 +9329,20 @@ exports.onAction = function () {
 		"list",
 		"clearMaster:veervtap0",
 	}
-	if strings.Join(controller.calls, "|") != strings.Join(wantCalls, "|") {
-		t.Fatalf("net admin calls = %+v, want %+v", controller.calls, wantCalls)
+	next := 0
+	for _, call := range controller.calls {
+		if next < len(wantCalls) && call == wantCalls[next] {
+			next++
+		}
+	}
+	if next != len(wantCalls) {
+		t.Fatalf("net admin calls = %+v, missing ordered suffix %+v", controller.calls, wantCalls[next:])
 	}
 	record, err := store.GetPluginRecord(db, "control_plugin", "events", "last")
 	if err != nil {
 		t.Fatalf("GetPluginRecord(events/last) error = %v", err)
 	}
-	for _, want := range []string{`"bridge":"brlan0"`, `"host":"veerlocal0"`, `"peer":"veervtap0"`, `"dummy":"veerdummy0"`, `"dummy_created":true`, `"macvlan":"veerppp0"`, `"macvlan_created":true`, `"member_master":"brlan0"`, `"peer_ifindex":102`, `"arp":false`, `"gro":false`, `"gso_max_size":1492`, `"gso_max_segs":1`, `"links":2`} {
+	for _, want := range []string{`"bridge":"brlan0"`, `"host":"veerlocal0"`, `"peer":"veervtap0"`, `"dummy":"veerdummy0"`, `"dummy_created":true`, `"macvlan":"veerppp0"`, `"macvlan_created":true`, `"vlan_id":120`, `"vrf_table":120`, `"member_master":"brlan0"`, `"peer_ifindex":102`, `"arp":false`, `"gro":false`, `"gso_max_size":1492`, `"gso_max_segs":1`, `"links":2`} {
 		if !strings.Contains(record.DataJSON, want) {
 			t.Fatalf("events/last data = %s, want %s", record.DataJSON, want)
 		}
@@ -10038,7 +10383,7 @@ func TestBundledRouterWizardFailedUpdateRollsBackAndRestoresPreviousConfig(t *te
   "api_version": "v1",
   "id": "lan_core",
   "name": "LAN Core Stub",
-  "version": "0.1.0",
+  "version": "1.3.0",
   "kind": "control",
   "control": {
     "main": "control.js",
@@ -10049,6 +10394,14 @@ func TestBundledRouterWizardFailedUpdateRollsBackAndRestoresPreviousConfig(t *te
 var calls = [];
 plugin.action({id: 'apply_network', runtime_update: 'runtime_apply'});
 plugin.action({id: 'teardown', runtime_update: 'runtime_apply'});
+plugin.resource({id: 'status', methods: ['list', 'get'], runtime_update: 'manual'});
+plugin.resource({id: 'egress_nat_plans', methods: ['list', 'get'], runtime_update: 'manual'});
+plugin.service({
+  id: 'lan.adapter',
+  version: '1.0.0',
+  actions: ['apply_network', 'teardown'],
+  resources: ['status', 'egress_nat_plans']
+});
 exports.onAction = function (ctx) {
   var id = String(ctx.payload && ctx.payload.lan_id || '');
   calls.push(ctx.action.id + ':' + id);
@@ -10093,7 +10446,7 @@ exports.onAction = function (ctx) {
 	if err != nil {
 		t.Fatalf("GetPluginRecord(router status) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"rolled_back"`, `"last_error":"plugins.actions.call:`, `injected LAN failure`, `"name":"lan_core.teardown"`, `"name":"lan_core.apply_network"`} {
+	for _, want := range []string{`"phase":"rolled_back"`, `"last_error":"plugins.services.call:`, `injected LAN failure`, `"name":"lan_core.teardown"`, `"name":"lan_core.apply_network"`} {
 		if !strings.Contains(status.DataJSON, want) {
 			t.Fatalf("router status after rollback = %s, missing %s", status.DataJSON, want)
 		}
@@ -10280,7 +10633,6 @@ func TestBundledLANCoreRestoresLegacyGROAfterSegmentedWANAppears(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddPluginRecord(lan_core status/default) error = %v", err)
 	}
-
 	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
 	controller := &pluginControlNetAdminTest{
 		listNames: []string{"vmbr0", "lanp0"},
@@ -10300,7 +10652,6 @@ func TestBundledLANCoreRestoresLegacyGROAfterSegmentedWANAppears(t *testing.T) {
 	  "addresses":["192.168.100.1/24"],
 	  "mtu":1500,
 	  "wan_ref":"default",
-	  "wan_egress_interface":"veerlocal0",
 	  "protocol":"tcp+udp",
 	  "auto_egress_nat":true
 	}`)
@@ -10321,6 +10672,60 @@ func TestBundledLANCoreRestoresLegacyGROAfterSegmentedWANAppears(t *testing.T) {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("lan_core status/default = %s, missing %s", statusRecord.DataJSON, want)
 		}
+	}
+
+	wanStatus, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
+	}
+	wanStatus.Enabled = false
+	wanStatus.DataJSON = `{
+	  "phase":"prepared",
+	  "mtu":1492,
+	  "segmentation_ready":true,
+	  "egress_nat_parent_interface":"veerlocal0",
+	  "ipv4":"203.0.113.10",
+	  "dns_servers":["223.5.5.5","2001:db8::53"],
+	  "pd_prefix":"2001:db8:100::/60",
+	  "veer_core":{"segmentation_ready":true,"egress_nat_interface":"veerlocal0"}
+	}`
+	if err := store.UpdatePluginRecord(db, wanStatus); err != nil {
+		t.Fatalf("UpdatePluginRecord(wan_core prepared status/default) error = %v", err)
+	}
+	controller.calls = nil
+	if err := rt.ApplyPluginAction(plugin, action, payload); err != nil {
+		t.Fatalf("ApplyPluginAction(lan_core prepared WAN) error = %v", err)
+	}
+	if containsString(controller.calls, "setOffloads:lanp0:gro=false") || !controller.offloads["lanp0"]["gro"] {
+		t.Fatalf("LAN GRO state/calls with prepared WAN = %t/%+v, want GRO preserved", controller.offloads["lanp0"]["gro"], controller.calls)
+	}
+	statusRecord, err = store.GetPluginRecord(db, "lan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan_core status/default) after prepared WAN error = %v", err)
+	}
+	for _, want := range []string{`"available":false`, `"interface":"veerlocal0"`, `"segmentation_ready":true`, `LAN GRO remains enabled`} {
+		if !strings.Contains(statusRecord.DataJSON, want) {
+			t.Fatalf("lan_core status/default with prepared WAN = %s, missing %s", statusRecord.DataJSON, want)
+		}
+	}
+	for _, forbidden := range []string{"203.0.113.10", "223.5.5.5", "2001:db8::53", "2001:db8:100::/60"} {
+		if strings.Contains(statusRecord.DataJSON, forbidden) {
+			t.Fatalf("lan_core status/default with prepared WAN = %s, leaked dynamic value %s", statusRecord.DataJSON, forbidden)
+		}
+	}
+	egressPlan, err := store.GetPluginRecord(db, "lan_core", pluginEgressNATPlansResourceID, "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan_core egress_nat_plans/default) error = %v", err)
+	}
+	if egressPlan.Enabled || !strings.Contains(egressPlan.DataJSON, `"enabled":false`) {
+		t.Fatalf("lan_core egress plan with prepared WAN = enabled:%t data:%s, want fail-closed", egressPlan.Enabled, egressPlan.DataJSON)
+	}
+	ipv6Plan, err := store.GetPluginRecord(db, "lan_core", pluginIPv6AssignmentPlansResourceID, "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan_core ipv6_assignment_plans/default) error = %v", err)
+	}
+	if ipv6Plan.Enabled || !strings.Contains(ipv6Plan.DataJSON, `"enabled":false`) {
+		t.Fatalf("lan_core IPv6 plan with prepared WAN = enabled:%t data:%s, want fail-closed", ipv6Plan.Enabled, ipv6Plan.DataJSON)
 	}
 }
 
@@ -11172,6 +11577,12 @@ func TestBundledLANCoreTeardownDisablesProfileWhenPortDetachFails(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("AddPluginRecord(lan_core status/default) error = %v", err)
 	}
+	if err := store.AddPluginOwnedResource(db, store.PluginOwnedResource{
+		PluginID: "lan_core", ResourceType: pluginOwnedResourceTypeLink, ResourceKey: "brlan0",
+		MetadataJSON: `{"name":"brlan0","kind":"bridge","ifindex":201,"mac":"02:00:00:00:20:01"}`,
+	}); err != nil {
+		t.Fatalf("AddPluginOwnedResource(lan_core brlan0) error = %v", err)
+	}
 
 	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
 	controller := &pluginControlNetAdminTest{
@@ -11400,7 +11811,7 @@ func TestLANCoreActionRedistributesPluginEgressNATPlanToKernelRuntime(t *testing
 	}()
 
 	db := openTestDB(t)
-	cfg := pluginsEnabledTestConfig(&Config{
+	cfg := isolatedPluginsTestConfig(&Config{
 		PluginsDir:    pluginsDir,
 		DefaultEngine: ruleEngineKernel})
 
@@ -11702,6 +12113,25 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 	if strings.Join(ipv6Runtime.lastItems[0].dnsServers, ",") != "2001:4860:4860::8888" {
 		t.Fatalf("ipv6 runtime DNS = %+v", ipv6Runtime.lastItems[0].dnsServers)
 	}
+	egressPlanRecord, err := store.GetPluginRecord(db, "lan_core", "egress_nat_plans", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(lan_core egress_nat_plans/default) before unchanged repair error = %v", err)
+	}
+	stableRevisions := map[string]int64{
+		"egress_nat_plans":      egressPlanRecord.Revision,
+		"dhcpv4_plans":          dhcpv4PlanRecord.Revision,
+		"ipv6_assignment_plans": ipv6PlanRecord.Revision,
+	}
+	firePluginTimerForTest(t, controlRuntime, "lan_core", "lan_repair")
+	for resourceID, wantRevision := range stableRevisions {
+		record, err := store.GetPluginRecord(db, "lan_core", resourceID, "default")
+		if err != nil {
+			t.Fatalf("GetPluginRecord(lan_core %s/default) after unchanged repair error = %v", resourceID, err)
+		}
+		if record.Revision != wantRevision {
+			t.Fatalf("lan_core %s/default revision after unchanged repair = %d, want %d", resourceID, record.Revision, wantRevision)
+		}
+	}
 
 	wanStatus.Enabled = false
 	if err := store.UpdatePluginRecord(db, &wanStatus); err != nil {
@@ -11819,23 +12249,372 @@ func TestBundledWANCoreApplySessionCreatesVeerCoreHandoff(t *testing.T) {
 		"addrReplace:veerlocal0:2001:db8:abcd::10/128",
 		"addrReplace:veerlocal0:fe80::1/64",
 		"routeReplace:0.0.0.0/0:veerlocal0:10.0.0.1:100:10",
-		"routeReplace:::/0:veerlocal0::0:0",
+		"routeReplace:::/0:veerlocal0::254:0",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
+		}
+	}
+	for _, call := range controller.calls {
+		if strings.HasPrefix(call, "ruleReplace:") || strings.HasPrefix(call, "neighReplace:") {
+			t.Fatalf("direct WAN net admin calls = %+v, want no policy rule or static neighbor requirement", controller.calls)
 		}
 	}
 	record, err := store.GetPluginRecord(db, "wan_core", "status", "default")
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
 	}
-	for _, want := range []string{`"phase":"applied"`, `"driver":"external"`, `"parent_interface":"veerlocal0"`, `"egress_nat_parent_interface":"veerlocal0"`, `"egress_nat_redirect_mode":""`, `"ipv6":"2001:db8:abcd::10"`, `"pd_prefix":"2001:db8:1234::/56"`} {
+	for _, want := range []string{`"phase":"applied"`, `"driver":"external"`, `"parent_interface":"veerlocal0"`, `"egress_nat_parent_interface":"veerlocal0"`, `"egress_nat_redirect_mode":""`, `"ipv6":"2001:db8:abcd::10"`, `"pd_prefix":"2001:db8:1234::/56"`, `"rule_count":0`, `"neighbor_count":0`} {
 		if !strings.Contains(record.DataJSON, want) {
 			t.Fatalf("wan_core status/default = %s, missing %s", record.DataJSON, want)
 		}
 	}
 	if timers := rt.pluginTimerList("wan_core"); len(timers) != 1 || timers[0]["name"] != "wan_repair" {
 		t.Fatalf("wan_core timers after action apply = %+v, want wan_repair interval", timers)
+	}
+}
+
+func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	applyAction := pluginActionByIDForTest(t, plugin, "apply_session")
+	teardownAction := pluginActionByIDForTest(t, plugin, "teardown")
+
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	apply := func(ipv4, peer string) {
+		t.Helper()
+		payload := fmt.Sprintf(`{
+		  "wan_id":"default",
+		  "driver":"pppoe_client",
+		  "state":"up",
+		  "usable":true,
+		  "local_interface":"veerlocal0",
+		  "pipeline_interface":"veerpipe0",
+		  "handoff_mode":"segmented_veth",
+		  "ipv4":%q,
+		  "ipv4_peer":%q
+		}`, ipv4, peer)
+		if err := rt.ApplyPluginAction(plugin, applyAction, json.RawMessage(payload)); err != nil {
+			t.Fatalf("ApplyPluginAction(wan_core segmented IPv4 %s) error = %v", ipv4, err)
+		}
+	}
+
+	apply("10.77.0.2", "10.77.0.1")
+	if want := "routeReplace:10.77.0.1/32:veerlocal0::254:0"; !containsString(controller.calls, want) {
+		t.Fatalf("initial segmented IPv4 calls = %+v, missing %s", controller.calls, want)
+	}
+	status, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
+	}
+	for _, want := range []string{`"route_count":1`, `"dst":"10.77.0.1/32"`, `"src":"10.77.0.2"`} {
+		if !strings.Contains(status.DataJSON, want) {
+			t.Fatalf("initial wan_core status = %s, missing %s", status.DataJSON, want)
+		}
+	}
+	profile, err := store.GetPluginRecord(db, "wan_core", "profiles", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core profiles/default) error = %v", err)
+	}
+	if strings.Contains(profile.DataJSON, "10.77.0.") {
+		t.Fatalf("stored wan_core profile = %s, want no session-derived peer route", profile.DataJSON)
+	}
+
+	controller.calls = nil
+	apply("10.77.0.3", "10.77.0.254")
+	for _, want := range []string{
+		"routeDelete:10.77.0.1/32:veerlocal0::254:0",
+		"routeReplace:10.77.0.254/32:veerlocal0::254:0",
+	} {
+		if !containsString(controller.calls, want) {
+			t.Fatalf("changed segmented IPv4 calls = %+v, missing %s", controller.calls, want)
+		}
+	}
+
+	controller.calls = nil
+	if err := rt.ApplyPluginAction(plugin, teardownAction, json.RawMessage(`{"key":"default"}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core segmented IPv4 teardown) error = %v", err)
+	}
+	if want := "routeDelete:10.77.0.254/32:veerlocal0::254:0"; !containsString(controller.calls, want) {
+		t.Fatalf("segmented IPv4 teardown calls = %+v, missing %s", controller.calls, want)
+	}
+}
+
+func TestBundledWANCoreSegmentedIPv6PolicyRoutingLifecycle(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	applyAction := pluginActionByIDForTest(t, plugin, "apply_session")
+	teardownAction := pluginActionByIDForTest(t, plugin, "teardown")
+
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	const enabledPayload = `{
+	  "wan_id":"default",
+	  "driver":"pppoe_client",
+	  "driver_plugin":"pppoe_client",
+	  "state":"up",
+	  "usable":true,
+	  "real_interface":"eth0",
+	  "wan_interface":"eth0",
+	  "local_interface":"veerlocal0",
+	  "pipeline_interface":"veerpipe0",
+	  "handoff_mode":"segmented_veth",
+	  "mtu":1492,
+	  "ipv6":"2001:db8:100::2",
+	  "ipv6_link_local":"fe80::1",
+	  "ipv6_peer_link_local":"fe80::2",
+	  "pd_prefix":"2001:db8:120::/60",
+	  "peer_mac":"02:00:00:00:00:02",
+	  "install_default_route_v6":true,
+	  "ipv6_route_table":12001,
+	  "ipv6_rule_priority":10001
+	}`
+	if err := rt.ApplyPluginAction(plugin, applyAction, json.RawMessage(enabledPayload)); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core segmented IPv6 apply_session) error = %v", err)
+	}
+	for _, want := range []string{
+		"routeReplace:::/0:veerlocal0:fe80::2:12001:0",
+		"ruleReplace:ipv6:10001:254::2001:db8:120::/60:0:0:::false",
+		"ruleReplace:ipv6:10002:12001:2001:db8:120::/60::0:0:::false",
+		"neighReplace:veerlocal0:fe80::2:02:00:00:00:00:02:permanent:0",
+	} {
+		if !containsString(controller.calls, want) {
+			t.Fatalf("segmented IPv6 net admin calls = %+v, missing %s", controller.calls, want)
+		}
+	}
+	status, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core status/default) error = %v", err)
+	}
+	for _, want := range []string{`"ipv6_route_table":12001`, `"ipv6_rule_priority":10001`, `"rule_count":2`, `"neighbor_count":1`} {
+		if !strings.Contains(status.DataJSON, want) {
+			t.Fatalf("wan_core segmented status = %s, missing %s", status.DataJSON, want)
+		}
+	}
+	profile, err := store.GetPluginRecord(db, "wan_core", "profiles", "default")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core profiles/default) error = %v", err)
+	}
+	for _, want := range []string{`"addresses":[]`, `"routes":[]`, `"rules":[]`, `"neighbors":[]`} {
+		if !strings.Contains(profile.DataJSON, want) {
+			t.Fatalf("wan_core stored profile = %s, missing static-only field %s", profile.DataJSON, want)
+		}
+	}
+	for _, derived := range []string{"2001:db8:100::2", "2001:db8:120::/60", "fe80::2", "02:00:00:00:00:02"} {
+		if strings.Contains(profile.DataJSON, derived) {
+			t.Fatalf("wan_core stored profile = %s, leaked derived runtime value %s", profile.DataJSON, derived)
+		}
+	}
+
+	controller.calls = nil
+	disabledPayload := strings.Replace(enabledPayload, `"install_default_route_v6":true`, `"install_default_route_v6":false`, 1)
+	if err := rt.ApplyPluginAction(plugin, applyAction, json.RawMessage(disabledPayload)); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core disable IPv6 policy) error = %v", err)
+	}
+	if got := countStringsWithPrefix(controller.calls, "ruleDelete:"); got != 2 {
+		t.Fatalf("wan_core policy disable calls = %+v, rule deletes = %d, want 2", controller.calls, got)
+	}
+	if got := countStringsWithPrefix(controller.calls, "neighDelete:"); got != 1 {
+		t.Fatalf("wan_core policy disable calls = %+v, neighbor deletes = %d, want 1", controller.calls, got)
+	}
+	if got := countStringsWithPrefix(controller.calls, "routeDelete:::/0:veerlocal0:fe80::2:12001:0"); got != 1 {
+		t.Fatalf("wan_core policy disable calls = %+v, default route deletes = %d, want 1", controller.calls, got)
+	}
+
+	if err := rt.ApplyPluginAction(plugin, applyAction, json.RawMessage(enabledPayload)); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core re-enable IPv6 policy) error = %v", err)
+	}
+	controller.calls = nil
+	if err := rt.ApplyPluginAction(plugin, teardownAction, json.RawMessage(`{"wan_id":"default"}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core teardown IPv6 policy) error = %v", err)
+	}
+	if got := countStringsWithPrefix(controller.calls, "ruleDelete:"); got != 2 {
+		t.Fatalf("wan_core teardown calls = %+v, rule deletes = %d, want 2", controller.calls, got)
+	}
+	if got := countStringsWithPrefix(controller.calls, "neighDelete:"); got != 1 {
+		t.Fatalf("wan_core teardown calls = %+v, neighbor deletes = %d, want 1", controller.calls, got)
+	}
+	if !containsString(controller.calls, "delete:veerlocal0") {
+		t.Fatalf("wan_core teardown calls = %+v, want managed veth deletion", controller.calls)
+	}
+}
+
+func TestBundledWANCorePreparedHandoffHonorsDriverIPv6Policy(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	prepareAction := pluginActionByIDForTest(t, plugin, "prepare_handoff")
+	sessionsResource := pluginResourceByIDForTest(t, plugin, "sessions")
+
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	controller := &pluginControlNetAdminTest{}
+	rt.netAdmin = controller
+	t.Cleanup(func() { _ = rt.Close() })
+
+	if err := rt.ApplyPluginAction(plugin, prepareAction, json.RawMessage(`{
+	  "wan_id":"driver",
+	  "driver":"pppoe_client",
+	  "state":"prepared",
+	  "usable":false,
+	  "local_interface":"veerdriver0",
+	  "pipeline_interface":"veerpipe0",
+	  "handoff_mode":"segmented_veth",
+	  "mtu":1492
+	}`)); err != nil {
+		t.Fatalf("ApplyPluginAction(wan_core prepare driver handoff) error = %v", err)
+	}
+	profile, err := store.GetPluginRecord(db, "wan_core", "profiles", "driver")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(wan_core profiles/driver) error = %v", err)
+	}
+	if strings.Contains(profile.DataJSON, `"install_default_route_v6"`) {
+		t.Fatalf("prepared wan_core profile = %s, want absent optional IPv6 route override", profile.DataJSON)
+	}
+	var identity struct {
+		Table    int `json:"ipv6_route_table"`
+		Priority int `json:"ipv6_rule_priority"`
+	}
+	if err := json.Unmarshal([]byte(profile.DataJSON), &identity); err != nil {
+		t.Fatalf("decode wan_core profiles/driver: %v", err)
+	}
+	if identity.Table == 0 || identity.Priority == 0 {
+		t.Fatalf("prepared wan_core profile identity = %+v, want stable routing slot", identity)
+	}
+
+	controller.calls = nil
+	records := []PluginResourceRecord{{
+		Key:     "driver",
+		Enabled: true,
+		Data: json.RawMessage(`{
+		  "wan_id":"driver",
+		  "driver":"pppoe_client",
+		  "state":"up",
+		  "usable":true,
+		  "ipv6":"2001:db8:300::2",
+		  "ipv6_link_local":"fe80::10",
+		  "ipv6_peer_link_local":"fe80::20",
+		  "pd_prefix":"2001:db8:330::/56",
+		  "peer_mac":"02:00:00:00:00:20",
+		  "install_default_route_v6":true
+		}`),
+	}}
+	if err := rt.ApplyPluginResourceData(plugin, sessionsResource, records); err != nil {
+		t.Fatalf("ApplyPluginResourceData(wan_core PPPoE driver session) error = %v", err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("routeReplace:::/0:veerdriver0:fe80::20:%d:0", identity.Table),
+		fmt.Sprintf("ruleReplace:ipv6:%d:254::2001:db8:330::/56:0:0:::false", identity.Priority),
+		fmt.Sprintf("ruleReplace:ipv6:%d:%d:2001:db8:330::/56::0:0:::false", identity.Priority+1, identity.Table),
+		"neighReplace:veerdriver0:fe80::20:02:00:00:00:00:20:permanent:0",
+	} {
+		if !containsString(controller.calls, want) {
+			t.Fatalf("wan_core driver session calls = %+v, missing %s", controller.calls, want)
+		}
+	}
+}
+
+func TestBundledWANCoreAllocatesDistinctIPv6PolicySlots(t *testing.T) {
+	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
+	rootDir := filepath.Join(t.TempDir(), "wan_core")
+	copyDirForTest(t, sourceDir, rootDir)
+	plugin, err := loadPluginFromDir(rootDir, "wan_core")
+	if err != nil {
+		t.Fatalf("load wan_core bundled plugin: %v", err)
+	}
+	action := pluginActionByIDForTest(t, plugin, "apply_session")
+
+	db := openTestDB(t)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt.netAdmin = &pluginControlNetAdminTest{}
+	t.Cleanup(func() { _ = rt.Close() })
+
+	for index, wanID := range []string{"primary", "backup"} {
+		payload := fmt.Sprintf(`{
+		  "wan_id":%q,
+		  "driver":"pppoe_client",
+		  "state":"up",
+		  "usable":true,
+		  "local_interface":"veerwan%d",
+		  "pipeline_interface":"veerpipe%d",
+		  "handoff_mode":"segmented_veth",
+		  "ipv6":"2001:db8:%d::2",
+		  "ipv6_peer_link_local":"fe80::%d",
+		  "pd_prefix":"2001:db8:%d00::/56",
+		  "peer_mac":"02:00:00:00:00:0%d",
+		  "install_default_route_v6":true
+		}`, wanID, index, index, index+1, index+2, index+1, index+2)
+		if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(payload)); err != nil {
+			t.Fatalf("ApplyPluginAction(wan_core %s auto policy) error = %v", wanID, err)
+		}
+	}
+
+	type policyIdentity struct {
+		Table    int `json:"ipv6_route_table"`
+		Priority int `json:"ipv6_rule_priority"`
+	}
+	identities := make(map[string]policyIdentity, 2)
+	for _, wanID := range []string{"primary", "backup"} {
+		record, err := store.GetPluginRecord(db, "wan_core", "profiles", wanID)
+		if err != nil {
+			t.Fatalf("GetPluginRecord(wan_core profiles/%s) error = %v", wanID, err)
+		}
+		var identity policyIdentity
+		if err := json.Unmarshal([]byte(record.DataJSON), &identity); err != nil {
+			t.Fatalf("decode wan_core profiles/%s: %v", wanID, err)
+		}
+		if identity.Table < 12000 || identity.Priority < 10000 {
+			t.Fatalf("wan_core profiles/%s identity = %+v, want auto policy slot", wanID, identity)
+		}
+		identities[wanID] = identity
+	}
+	primary, backup := identities["primary"], identities["backup"]
+	if primary.Table == backup.Table || primary.Priority == backup.Priority || primary.Priority+1 == backup.Priority || backup.Priority+1 == primary.Priority {
+		t.Fatalf("wan_core auto policy identities overlap: primary=%+v backup=%+v", primary, backup)
+	}
+
+	conflict := fmt.Sprintf(`{
+	  "wan_id":"conflict",
+	  "driver":"pppoe_client",
+	  "state":"up",
+	  "usable":true,
+	  "local_interface":"veerwan2",
+	  "pipeline_interface":"veerpipe2",
+	  "handoff_mode":"segmented_veth",
+	  "ipv6":"2001:db8:2::2",
+	  "ipv6_peer_link_local":"fe80::4",
+	  "pd_prefix":"2001:db8:200::/56",
+	  "peer_mac":"02:00:00:00:00:04",
+	  "install_default_route_v6":true,
+	  "ipv6_route_table":%d,
+	  "ipv6_rule_priority":30000
+	}`, primary.Table)
+	err = rt.ApplyPluginAction(plugin, action, json.RawMessage(conflict))
+	if err == nil || !strings.Contains(err.Error(), "ipv6_route_table is already assigned") {
+		t.Fatalf("ApplyPluginAction(wan_core conflicting policy) error = %v, want table conflict", err)
 	}
 }
 
@@ -12560,7 +13339,7 @@ func TestBundledWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
 	}
 	for _, want := range []string{
 		"addrDelete:veerlocal0:169.254.253.1/32",
-		"routeDelete:0.0.0.0/0:veerlocal0::0:0",
+		"routeDelete:0.0.0.0/0:veerlocal0::254:0",
 		"delete:veerlocal0",
 	} {
 		if !containsString(controller.calls, want) {
@@ -12623,7 +13402,7 @@ func TestBundledWANCoreTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *t
 	}
 	for _, forbidden := range []string{
 		"addrDelete:veerlocal0:169.254.253.1/32",
-		"routeDelete:0.0.0.0/0:veerlocal0::0:0",
+		"routeDelete:0.0.0.0/0:veerlocal0::254:0",
 		"delete:veerlocal0",
 	} {
 		if containsString(controller.calls, forbidden) {
@@ -12728,7 +13507,7 @@ func TestBundledWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *test
 	}
 	for _, want := range []string{
 		"addrDelete:veerlocal0:169.254.253.5/32",
-		"routeDelete:0.0.0.0/0:veerlocal0::0:0",
+		"routeDelete:0.0.0.0/0:veerlocal0::254:0",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
@@ -12905,9 +13684,17 @@ func TestBundledVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddPluginRecord(vtolocal status/default) error = %v", err)
 	}
+	if err := store.AddPluginOwnedResource(db, store.PluginOwnedResource{
+		PluginID: "vtolocal", ResourceType: pluginOwnedResourceTypeLink, ResourceKey: "veerlocal0",
+		MetadataJSON: `{"name":"veerlocal0","kind":"dummy","ifindex":101,"mac":"02:00:00:00:10:01"}`,
+	}); err != nil {
+		t.Fatalf("AddPluginOwnedResource(vtolocal veerlocal0) error = %v", err)
+	}
 
 	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
-	rt.netAdmin = &pluginControlNetAdminTest{}
+	rt.netAdmin = &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
+		"veerlocal0": {Name: "veerlocal0", IfIndex: 101, Kind: "dummy", MTU: 1492, MAC: "02:00:00:00:10:01", Up: true, ARP: true},
+	}}
 	t.Cleanup(func() { _ = rt.Close() })
 
 	if err := rt.ApplyPluginResourceData(plugin, resource, []PluginResourceRecord{{
@@ -13171,7 +13958,7 @@ func TestBundledVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
 	}
 	for _, want := range []string{
 		"addrDelete:veerlocal0:169.254.253.1/32",
-		"routeDelete:0.0.0.0/0:veerlocal0::0:0",
+		"routeDelete:0.0.0.0/0:veerlocal0::254:0",
 		"delete:veerlocal0",
 	} {
 		if !containsString(controller.calls, want) {
@@ -13234,7 +14021,7 @@ func TestBundledVToLocalTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *
 	}
 	for _, forbidden := range []string{
 		"addrDelete:veerlocal0:169.254.253.1/32",
-		"routeDelete:0.0.0.0/0:veerlocal0::0:0",
+		"routeDelete:0.0.0.0/0:veerlocal0::254:0",
 		"delete:veerlocal0",
 	} {
 		if containsString(controller.calls, forbidden) {
@@ -13335,7 +14122,7 @@ func TestBundledVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *tes
 	}
 	for _, want := range []string{
 		"addrDelete:veerlocal0:169.254.253.5/32",
-		"routeDelete:0.0.0.0/0:veerlocal0::0:0",
+		"routeDelete:0.0.0.0/0:veerlocal0::254:0",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("net admin calls = %+v, missing %s", controller.calls, want)
@@ -14007,6 +14794,7 @@ func testPluginManifestAndRegistrationPrelude(t *testing.T, manifest string) (st
   (surface.virtual_interfaces || []).forEach(function (item) { plugin.virtualInterface(item); });
   (surface.resources || []).forEach(function (item) { plugin.resource(item); });
   (surface.actions || []).forEach(function (item) { plugin.action(item); });
+  (surface.services || []).forEach(function (item) { plugin.service(item); });
   (surface.objects || []).forEach(function (item) { ebpf.loadObject(item); });
   (surface.hooks || []).forEach(function (item) { hooks.attach(item); });
   if (surface.ui) {
@@ -14018,7 +14806,7 @@ func testPluginManifestAndRegistrationPrelude(t *testing.T, manifest string) (st
 }
 
 func testPluginSurfaceNeedsGenericRegister(surface map[string]any) bool {
-	for _, field := range []string{"capabilities", "virtual_interfaces", "resources", "actions"} {
+	for _, field := range []string{"capabilities", "virtual_interfaces", "resources", "actions", "services"} {
 		if _, ok := surface[field]; ok {
 			return true
 		}
@@ -14143,6 +14931,10 @@ func pluginControlVMExistsForTest(rt *gojaPluginControlRuntime, pluginID string)
 type pluginControlMapControllerTest struct {
 	calls        []string
 	perCPUValues [][]byte
+	scanResult   pluginEBPFMapScanResult
+	ringResult   pluginEBPFRingReadResult
+	scanErr      error
+	ringErr      error
 }
 
 func (c *pluginControlMapControllerTest) ApplyPluginResourceReconcileFromControl(plugin LoadedPlugin, resource PluginResource) error {
@@ -14172,6 +14964,35 @@ func (c *pluginControlMapControllerTest) GetPluginMapPerCPUValues(pluginID strin
 	return out, nil
 }
 
+func (c *pluginControlMapControllerTest) ScanPluginMap(pluginID string, objectID string, mapName string, request pluginEBPFMapScanRequest) (pluginEBPFMapScanResult, error) {
+	c.calls = append(c.calls, fmt.Sprintf("scan:%s:%s:%s:%x:%d:%d", pluginID, objectID, mapName, request.Cursor, request.Limit, request.MaxBytes))
+	if c.scanErr != nil {
+		return pluginEBPFMapScanResult{}, c.scanErr
+	}
+	result := pluginEBPFMapScanResult{Done: c.scanResult.Done, Cursor: append([]byte(nil), c.scanResult.Cursor...)}
+	for _, entry := range c.scanResult.Entries {
+		result.Entries = append(result.Entries, pluginEBPFMapScanEntry{
+			Key: append([]byte(nil), entry.Key...), Value: append([]byte(nil), entry.Value...),
+		})
+	}
+	return result, nil
+}
+
+func (c *pluginControlMapControllerTest) ReadPluginRingBuffer(pluginID string, objectID string, mapName string, request pluginEBPFRingReadRequest) (pluginEBPFRingReadResult, error) {
+	c.calls = append(c.calls, fmt.Sprintf("ring:%s:%s:%s:%d:%d:%d", pluginID, objectID, mapName, request.MaxRecords, request.MaxBytes, request.TimeoutMS))
+	if c.ringErr != nil {
+		return pluginEBPFRingReadResult{}, c.ringErr
+	}
+	result := c.ringResult
+	result.Records = make([]pluginEBPFRingRecord, 0, len(c.ringResult.Records))
+	for _, record := range c.ringResult.Records {
+		result.Records = append(result.Records, pluginEBPFRingRecord{
+			RawSample: append([]byte(nil), record.RawSample...), Remaining: record.Remaining,
+		})
+	}
+	return result, nil
+}
+
 func (c *pluginControlMapControllerTest) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
 	c.calls = append(c.calls, fmt.Sprintf("delete:%s:%s:%s:%x", pluginID, objectID, mapName, key))
 	return nil
@@ -14197,6 +15018,9 @@ type pluginControlNetAdminTest struct {
 	clearMasterErrors   map[string]error
 	setARPErrors        map[string]error
 	setOffloadErrors    map[string]error
+	routeSnapshots      map[string][]pluginControlNetRouteState
+	ruleSnapshots       map[string][]pluginControlNetRuleState
+	neighSnapshots      map[string][]pluginControlNetNeighState
 }
 
 func (c *pluginControlNetAdminTest) LinkGet(name string) (pluginControlNetLinkInfo, error) {
@@ -14207,6 +15031,23 @@ func (c *pluginControlNetAdminTest) LinkGet(name string) (pluginControlNetLinkIn
 		}
 	}
 	return c.linkInfo(name), nil
+}
+
+func (c *pluginControlNetAdminTest) LinkLookup(name string) (pluginControlNetLinkInfo, bool, error) {
+	if c.getErrors != nil {
+		if err := c.getErrors[name]; err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return pluginControlNetLinkInfo{}, false, nil
+			}
+			return pluginControlNetLinkInfo{}, false, err
+		}
+	}
+	if c.links != nil {
+		if info, ok := c.links[name]; ok {
+			return info, true, nil
+		}
+	}
+	return c.linkInfo(name), true, nil
 }
 
 func (c *pluginControlNetAdminTest) LinkList() ([]pluginControlNetLinkInfo, error) {
@@ -14226,10 +15067,15 @@ func (c *pluginControlNetAdminTest) LinkList() ([]pluginControlNetLinkInfo, erro
 
 func (c *pluginControlNetAdminTest) LinkEnsureBridge(req pluginControlNetBridgeRequest) (pluginControlNetLinkInfo, error) {
 	c.calls = append(c.calls, fmt.Sprintf("ensureBridge:%s:%d:%t", req.Name, req.MTU, req.Up))
+	_, existed := c.links[req.Name]
 	info := c.linkInfo(req.Name)
 	info.MTU = req.MTU
 	info.Up = req.Up
+	info.Created = !existed
 	c.updateLinkInfo(info)
+	if !existed && c.getErrors != nil {
+		delete(c.getErrors, req.Name)
+	}
 	return info, nil
 }
 
@@ -14259,6 +15105,10 @@ func (c *pluginControlNetAdminTest) LinkEnsureVeth(req pluginControlNetVethReque
 	peer.PeerIfIndex = host.IfIndex
 	c.updateLinkInfo(host)
 	c.updateLinkInfo(peer)
+	if !hostExisted && !peerExisted && c.getErrors != nil {
+		delete(c.getErrors, req.Host)
+		delete(c.getErrors, req.Peer)
+	}
 	return pluginControlNetVethResult{Host: host, Peer: peer, Created: !hostExisted && !peerExisted}, nil
 }
 
@@ -14275,6 +15125,9 @@ func (c *pluginControlNetAdminTest) LinkEnsureDummy(req pluginControlNetDummyReq
 	info.MTU = req.MTU
 	info.Up = req.Up
 	c.updateLinkInfo(info)
+	if !existed && c.getErrors != nil {
+		delete(c.getErrors, req.Name)
+	}
 	return pluginControlNetDummyResult{Link: info, Created: !existed}, nil
 }
 
@@ -14292,7 +15145,35 @@ func (c *pluginControlNetAdminTest) LinkEnsureMacvlan(req pluginControlNetMacvla
 	info.MTU = req.MTU
 	info.Up = req.Up
 	c.updateLinkInfo(info)
+	if c.getErrors != nil {
+		delete(c.getErrors, req.Name)
+	}
 	return pluginControlNetMacvlanResult{Link: info, Created: true}, nil
+}
+
+func (c *pluginControlNetAdminTest) LinkEnsureVLAN(req pluginControlNetVLANRequest) (pluginControlNetVLANResult, error) {
+	c.calls = append(c.calls, fmt.Sprintf("ensureVLAN:%s:%s:%d:%s:%d:%t", req.Name, req.Parent, req.VLANID, req.Protocol, req.MTU, req.Up))
+	_, existed := c.links[req.Name]
+	info := c.linkInfo(req.Name)
+	info.Kind = "vlan"
+	info.Parent = req.Parent
+	info.VLANID = req.VLANID
+	info.VLANProtocol = req.Protocol
+	info.MTU = req.MTU
+	info.Up = req.Up
+	c.updateLinkInfo(info)
+	return pluginControlNetVLANResult{Link: info, Created: !existed}, nil
+}
+
+func (c *pluginControlNetAdminTest) LinkEnsureVRF(req pluginControlNetVRFRequest) (pluginControlNetVRFResult, error) {
+	c.calls = append(c.calls, fmt.Sprintf("ensureVRF:%s:%d:%t", req.Name, req.Table, req.Up))
+	_, existed := c.links[req.Name]
+	info := c.linkInfo(req.Name)
+	info.Kind = "vrf"
+	info.VRFTable = req.Table
+	info.Up = req.Up
+	c.updateLinkInfo(info)
+	return pluginControlNetVRFResult{Link: info, Created: !existed}, nil
 }
 
 func (c *pluginControlNetAdminTest) LinkDelete(name string) error {
@@ -14343,11 +15224,17 @@ func (c *pluginControlNetAdminTest) LinkClearMaster(name string) (pluginControlN
 
 func (c *pluginControlNetAdminTest) LinkSetUp(name string, up bool) error {
 	c.calls = append(c.calls, fmt.Sprintf("setUp:%s:%t", name, up))
+	info := c.linkInfo(name)
+	info.Up = up
+	c.updateLinkInfo(info)
 	return nil
 }
 
 func (c *pluginControlNetAdminTest) LinkSetMTU(name string, mtu int) error {
 	c.calls = append(c.calls, fmt.Sprintf("setMTU:%s:%d", name, mtu))
+	info := c.linkInfo(name)
+	info.MTU = mtu
+	c.updateLinkInfo(info)
 	return nil
 }
 
@@ -14426,11 +15313,40 @@ func (c *pluginControlNetAdminTest) LinkSetGSO(req pluginControlNetGSORequest) (
 
 func (c *pluginControlNetAdminTest) AddrReplace(req pluginControlNetAddrRequest) error {
 	c.calls = append(c.calls, fmt.Sprintf("addrReplace:%s:%s", req.Interface, req.CIDR))
+	info := c.linkInfo(req.Interface)
+	present := false
+	for _, address := range info.Addresses {
+		present = present || address == req.CIDR
+	}
+	if !present {
+		info.Addresses = append(info.Addresses, req.CIDR)
+	}
+	c.updateLinkInfo(info)
 	return nil
 }
 
 func (c *pluginControlNetAdminTest) AddrDelete(req pluginControlNetAddrRequest) error {
 	c.calls = append(c.calls, fmt.Sprintf("addrDelete:%s:%s", req.Interface, req.CIDR))
+	info := c.linkInfo(req.Interface)
+	addresses := make([]string, 0, len(info.Addresses))
+	for _, address := range info.Addresses {
+		if address != req.CIDR {
+			addresses = append(addresses, address)
+		}
+	}
+	info.Addresses = addresses
+	c.updateLinkInfo(info)
+	return nil
+}
+
+func (c *pluginControlNetAdminTest) RouteSnapshot(req pluginControlNetRouteRequest) ([]pluginControlNetRouteState, error) {
+	key := pluginControlNetRouteLeaseKey(req)
+	c.calls = append(c.calls, "routeSnapshot:"+key)
+	return clonePluginControlNetRouteStates(c.routeSnapshots[key]), nil
+}
+
+func (c *pluginControlNetAdminTest) RouteRestore(states []pluginControlNetRouteState) error {
+	c.calls = append(c.calls, fmt.Sprintf("routeRestore:%d", len(states)))
 	return nil
 }
 
@@ -14441,6 +15357,48 @@ func (c *pluginControlNetAdminTest) RouteReplace(req pluginControlNetRouteReques
 
 func (c *pluginControlNetAdminTest) RouteDelete(req pluginControlNetRouteRequest) error {
 	c.calls = append(c.calls, fmt.Sprintf("routeDelete:%s:%s:%s:%d:%d", req.Dst, req.Dev, req.Gateway, req.Table, req.Metric))
+	return nil
+}
+
+func (c *pluginControlNetAdminTest) RuleSnapshot(req pluginControlNetRuleRequest) ([]pluginControlNetRuleState, error) {
+	key := pluginControlNetRuleLeaseKey(req)
+	c.calls = append(c.calls, "ruleSnapshot:"+key)
+	return append([]pluginControlNetRuleState(nil), c.ruleSnapshots[key]...), nil
+}
+
+func (c *pluginControlNetAdminTest) RuleRestore(states []pluginControlNetRuleState) error {
+	c.calls = append(c.calls, fmt.Sprintf("ruleRestore:%d", len(states)))
+	return nil
+}
+
+func (c *pluginControlNetAdminTest) RuleReplace(req pluginControlNetRuleRequest) error {
+	c.calls = append(c.calls, fmt.Sprintf("ruleReplace:%s:%d:%d:%s:%s:%d:%d:%s:%s:%t", req.Family, req.Priority, req.Table, req.Src, req.Dst, req.Mark, req.Mask, req.IIF, req.OIF, req.Invert))
+	return nil
+}
+
+func (c *pluginControlNetAdminTest) RuleDelete(req pluginControlNetRuleRequest) error {
+	c.calls = append(c.calls, "ruleDelete:"+pluginControlNetRuleLeaseKey(req))
+	return nil
+}
+
+func (c *pluginControlNetAdminTest) NeighSnapshot(req pluginControlNetNeighRequest) ([]pluginControlNetNeighState, error) {
+	key := pluginControlNetNeighLeaseKey(req)
+	c.calls = append(c.calls, "neighSnapshot:"+key)
+	return append([]pluginControlNetNeighState(nil), c.neighSnapshots[key]...), nil
+}
+
+func (c *pluginControlNetAdminTest) NeighRestore(states []pluginControlNetNeighState) error {
+	c.calls = append(c.calls, fmt.Sprintf("neighRestore:%d", len(states)))
+	return nil
+}
+
+func (c *pluginControlNetAdminTest) NeighReplace(req pluginControlNetNeighRequest) error {
+	c.calls = append(c.calls, fmt.Sprintf("neighReplace:%s:%s:%s:%s:%d", req.Interface, req.IP, req.MAC, req.State, req.VLAN))
+	return nil
+}
+
+func (c *pluginControlNetAdminTest) NeighDelete(req pluginControlNetNeighRequest) error {
+	c.calls = append(c.calls, "neighDelete:"+pluginControlNetNeighLeaseKey(req))
 	return nil
 }
 
@@ -14479,6 +15437,16 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func countStringsWithPrefix(values []string, prefix string) int {
+	count := 0
+	for _, value := range values {
+		if strings.HasPrefix(value, prefix) {
+			count++
+		}
+	}
+	return count
 }
 
 func insertPluginEgressNATPlanForTest(t *testing.T, db *sql.DB, pluginID, key, dataJSON string, enabled bool) {
@@ -14580,4 +15548,30 @@ func copyDirForTest(t *testing.T, src, dst string) {
 			t.Fatalf("WriteFile(%s) error = %v", dstPath, err)
 		}
 	}
+}
+
+func decryptPluginRecordForTest(t *testing.T, runtime pluginControlRuntime, record store.PluginRecord, resource PluginResource) store.PluginRecord {
+	t.Helper()
+	rt, ok := runtime.(*gojaPluginControlRuntime)
+	if !ok || rt.secretStore == nil {
+		t.Fatal("plugin secret store is unavailable in test runtime")
+	}
+	decrypted, err := rt.secretStore.decryptRecord(record, resource)
+	if err != nil {
+		t.Fatalf("decrypt plugin record %s/%s/%s: %v", record.PluginID, record.ResourceID, record.RecordKey, err)
+	}
+	return decrypted
+}
+
+func decryptPluginRecordWithNewStoreForTest(t *testing.T, db *sql.DB, record store.PluginRecord, resource PluginResource) store.PluginRecord {
+	t.Helper()
+	secrets, err := newPluginSecretStore(db)
+	if err != nil {
+		t.Fatalf("open plugin secret store: %v", err)
+	}
+	decrypted, err := secrets.decryptRecord(record, resource)
+	if err != nil {
+		t.Fatalf("decrypt plugin record %s/%s/%s: %v", record.PluginID, record.ResourceID, record.RecordKey, err)
+	}
+	return decrypted
 }

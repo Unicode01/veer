@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,7 @@ type pluginControlDeadlineListener interface {
 
 type pluginControlSocketOpenRequest struct {
 	Network    string
+	Namespace  string
 	Interface  string
 	LocalIP    net.IP
 	LocalPort  int
@@ -52,6 +54,7 @@ type pluginControlSocketOpenRequest struct {
 
 type pluginControlSocketListenRequest struct {
 	Network   string
+	Namespace string
 	Interface string
 	LocalIP   net.IP
 	LocalPort int
@@ -80,6 +83,7 @@ type pluginControlSocketInfo struct {
 	Handle       string
 	Network      string
 	Kind         string
+	Namespace    string
 	Interface    string
 	LocalAddr    string
 	RemoteAddr   string
@@ -91,6 +95,7 @@ type pluginControlSocketInfo struct {
 	BytesRead    uint64
 	BytesWritten uint64
 	LastError    string
+	Watch        *pluginControlSocketWatchInfo
 }
 
 type pluginControlSocketOwner struct {
@@ -118,11 +123,13 @@ type pluginControlSocketEntry struct {
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 	metaMu  sync.Mutex
+	watchMu sync.Mutex
 
 	owner         pluginControlSocketOwner
 	handle        string
 	network       string
 	kind          string
+	namespace     string
 	interfaceName string
 	parentHandle  string
 	conn          net.Conn
@@ -138,6 +145,7 @@ type pluginControlSocketEntry struct {
 	lastError     string
 	eof           bool
 	closeOnce     sync.Once
+	watch         *pluginControlSocketWatchRuntime
 }
 
 func newPluginControlSocketRegistry(transport pluginControlSocketTransport) *pluginControlSocketRegistry {
@@ -211,6 +219,19 @@ func pluginControlSocketAddress(ip net.IP, port int) string {
 	return net.JoinHostPort(host, fmt.Sprintf("%d", port))
 }
 
+func pluginControlSocketRemoteEndpoint(value string) (net.IP, int, bool) {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil {
+		return nil, 0, false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	port, err := strconv.Atoi(portText)
+	if ip == nil || err != nil || port < 1 || port > 65535 {
+		return nil, 0, false
+	}
+	return ip, port, true
+}
+
 func (r *pluginControlSocketRegistry) Open(pluginID string, generation string, req pluginControlSocketOpenRequest) (pluginControlSocketInfo, error) {
 	if r == nil || r.transport == nil {
 		return pluginControlSocketInfo{}, fmt.Errorf("persistent socket transport is unavailable")
@@ -236,6 +257,7 @@ func (r *pluginControlSocketRegistry) Open(pluginID string, generation string, r
 		owner:         reservation.owner,
 		network:       req.Network,
 		kind:          "connection",
+		namespace:     normalizePluginControlNamespace(req.Namespace),
 		interfaceName: req.Interface,
 		conn:          conn,
 		keepAlive:     req.KeepAlive,
@@ -274,6 +296,7 @@ func (r *pluginControlSocketRegistry) Listen(pluginID string, generation string,
 	entry := &pluginControlSocketEntry{
 		owner:         reservation.owner,
 		network:       req.Network,
+		namespace:     normalizePluginControlNamespace(req.Namespace),
 		interfaceName: req.Interface,
 		keepAlive:     req.KeepAlive,
 		noDelay:       req.NoDelay,
@@ -304,12 +327,19 @@ func (r *pluginControlSocketRegistry) Listen(pluginID string, generation string,
 }
 
 func (r *pluginControlSocketRegistry) Accept(pluginID string, generation string, handle string, timeout time.Duration) (pluginControlSocketInfo, bool, error) {
+	return r.accept(pluginID, generation, handle, timeout, false)
+}
+
+func (r *pluginControlSocketRegistry) accept(pluginID string, generation string, handle string, timeout time.Duration, watched bool) (pluginControlSocketInfo, bool, error) {
 	entry, err := r.entry(pluginID, generation, handle)
 	if err != nil {
 		return pluginControlSocketInfo{}, false, err
 	}
 	if entry.listener == nil {
 		return pluginControlSocketInfo{}, false, fmt.Errorf("socket %s is not a TCP listener", handle)
+	}
+	if !watched && entry.watching() {
+		return pluginControlSocketInfo{}, false, fmt.Errorf("socket %s is watched; accepts are delivered to its worker", handle)
 	}
 	reservation, err := r.reserve(pluginID, generation)
 	if err != nil {
@@ -340,10 +370,20 @@ func (r *pluginControlSocketRegistry) Accept(pluginID string, generation string,
 		_ = conn.Close()
 		return pluginControlSocketInfo{}, false, err
 	}
+	remoteAddr := conn.RemoteAddr()
+	if remoteAddr == nil {
+		_ = conn.Close()
+		return pluginControlSocketInfo{}, false, fmt.Errorf("accepted socket returned no remote endpoint")
+	}
+	if _, _, ok := pluginControlSocketRemoteEndpoint(remoteAddr.String()); !ok {
+		_ = conn.Close()
+		return pluginControlSocketInfo{}, false, fmt.Errorf("accepted socket returned an invalid remote endpoint")
+	}
 	accepted := &pluginControlSocketEntry{
 		owner:         reservation.owner,
 		network:       entry.network,
 		kind:          "connection",
+		namespace:     entry.namespace,
 		interfaceName: entry.interfaceName,
 		parentHandle:  entry.handle,
 		conn:          conn,
@@ -361,12 +401,19 @@ func (r *pluginControlSocketRegistry) Accept(pluginID string, generation string,
 }
 
 func (r *pluginControlSocketRegistry) Read(pluginID string, generation string, handle string, maxBytes int, timeout time.Duration) (pluginControlSocketReadResult, error) {
+	return r.read(pluginID, generation, handle, maxBytes, timeout, false)
+}
+
+func (r *pluginControlSocketRegistry) read(pluginID string, generation string, handle string, maxBytes int, timeout time.Duration, watched bool) (pluginControlSocketReadResult, error) {
 	entry, err := r.entry(pluginID, generation, handle)
 	if err != nil {
 		return pluginControlSocketReadResult{}, err
 	}
 	if entry.listener != nil {
 		return pluginControlSocketReadResult{}, fmt.Errorf("socket %s is a listener", handle)
+	}
+	if !watched && entry.watching() {
+		return pluginControlSocketReadResult{}, fmt.Errorf("socket %s is watched; reads are delivered to its worker", handle)
 	}
 	entry.readMu.Lock()
 	defer entry.readMu.Unlock()
@@ -400,6 +447,18 @@ func (r *pluginControlSocketRegistry) Read(pluginID string, generation string, h
 		}
 		entry.markError(err)
 		return pluginControlSocketReadResult{}, err
+	}
+	if entry.packet != nil {
+		if remote == nil {
+			err = fmt.Errorf("datagram socket returned no remote endpoint")
+		} else if _, _, ok := pluginControlSocketRemoteEndpoint(remote.String()); !ok {
+			err = fmt.Errorf("datagram socket returned an invalid remote endpoint")
+		}
+		if err != nil {
+			entry.markError(err)
+			_, _ = r.Close(pluginID, generation, handle)
+			return pluginControlSocketReadResult{}, err
+		}
 	}
 	payload := append([]byte(nil), buf[:n]...)
 	entry.markRead(n)
@@ -550,6 +609,23 @@ func (r *pluginControlSocketRegistry) TransferPluginGeneration(plugin LoadedPlug
 		}
 		if !pluginControlHasNetAccess(plugin, operation, info.Interface) {
 			return 0, fmt.Errorf("socket %s is no longer allowed on interface %s for %s", info.Handle, info.Interface, operation)
+		}
+		if strings.TrimSpace(info.RemoteAddr) != "" {
+			remoteIP, remotePort, ok := pluginControlSocketRemoteEndpoint(info.RemoteAddr)
+			if !ok {
+				return 0, fmt.Errorf("socket %s has an invalid remote endpoint", info.Handle)
+			}
+			if _, err := pluginControlNetEndpointPolicyFor(plugin, operation, info.Interface, "", remoteIP, remotePort); err != nil {
+				return 0, fmt.Errorf("socket %s remote endpoint is no longer allowed: %w", info.Handle, err)
+			}
+		}
+		if info.Namespace != "host" {
+			if !pluginControlHasPermission(plugin, "net.namespace") || !pluginControlHasNamespaceAccess(plugin, info.Namespace) {
+				return 0, fmt.Errorf("socket %s is no longer allowed in namespace %s", info.Handle, info.Namespace)
+			}
+		}
+		if info.Watch != nil && !pluginControlHasPermission(plugin, "worker") {
+			return 0, fmt.Errorf("socket %s watcher requires retained worker permission", info.Handle)
 		}
 		entries = append(entries, entry)
 	}
@@ -704,10 +780,11 @@ func (r *pluginControlSocketRegistry) entry(pluginID string, generation string, 
 	handle = strings.TrimSpace(handle)
 	r.mu.Lock()
 	entry := r.entries[handle]
-	r.mu.Unlock()
 	if entry == nil || entry.owner != owner {
+		r.mu.Unlock()
 		return nil, errPluginControlSocketNotFound
 	}
+	r.mu.Unlock()
 	return entry, nil
 }
 
@@ -732,6 +809,7 @@ func newPluginControlSocketHandle() (string, error) {
 }
 
 func (entry *pluginControlSocketEntry) info() pluginControlSocketInfo {
+	watch := entry.watchInfo()
 	entry.metaMu.Lock()
 	defer entry.metaMu.Unlock()
 	state := "open"
@@ -744,6 +822,7 @@ func (entry *pluginControlSocketEntry) info() pluginControlSocketInfo {
 		Handle:       entry.handle,
 		Network:      entry.network,
 		Kind:         entry.kind,
+		Namespace:    normalizePluginControlNamespace(entry.namespace),
 		Interface:    entry.interfaceName,
 		ParentHandle: entry.parentHandle,
 		State:        state,
@@ -753,6 +832,7 @@ func (entry *pluginControlSocketEntry) info() pluginControlSocketInfo {
 		BytesRead:    entry.bytesRead,
 		BytesWritten: entry.bytesWritten,
 		LastError:    entry.lastError,
+		Watch:        watch,
 	}
 	if entry.conn != nil {
 		if addr := entry.conn.LocalAddr(); addr != nil {
@@ -808,6 +888,7 @@ func (entry *pluginControlSocketEntry) markEOF() {
 func (entry *pluginControlSocketEntry) close() error {
 	var closeErr error
 	entry.closeOnce.Do(func() {
+		entry.stopWatch()
 		switch {
 		case entry.conn != nil:
 			closeErr = entry.conn.Close()

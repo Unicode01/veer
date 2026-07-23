@@ -17,6 +17,27 @@ func TestLoadEmbeddedKernelCollectionSpecValidates(t *testing.T) {
 		if err := validateKernelCollectionSpec(spec); err != nil {
 			t.Fatalf("validateKernelCollectionSpec(loadEmbeddedKernelCollectionSpec(%t)) error = %v", enableTrafficStats, err)
 		}
+		chain := spec.Maps[kernelTCProgramChainMapName]
+		if chain == nil || chain.Type != ebpf.ProgramArray || chain.MaxEntries != tcProgramChainV4MaxEntries {
+			t.Fatalf("embedded tc chain (stats=%t) = %+v, want %d-entry program array", enableTrafficStats, chain, tcProgramChainV4MaxEntries)
+		}
+		for _, name := range []string{
+			kernelForwardPipelineProgramNameV6,
+			kernelForwardEgressPipelineProgramNameV6,
+			kernelReplyPipelineProgramNameV6,
+			kernelReplyEgressPipelineProgramNameV6,
+		} {
+			if spec.Programs[name] == nil {
+				t.Fatalf("embedded tc object (stats=%t) is missing ABI v2 program %q", enableTrafficStats, name)
+			}
+		}
+		if spec.Maps[kernelTCDispatchScratchMapNameV6] == nil || spec.Maps[kernelTCPluginContextMapNameV6] == nil {
+			t.Fatalf("embedded tc object (stats=%t) is missing IPv6 pipeline context maps", enableTrafficStats)
+		}
+		metrics := spec.Maps[kernelTCPluginMetricsMapName]
+		if metrics == nil || metrics.Type != ebpf.PerCPUArray || metrics.MaxEntries != tcPluginMetricMaxEntries || metrics.ValueSize != 64 {
+			t.Fatalf("embedded tc object (stats=%t) plugin metrics = %+v, want %d-entry per-CPU array with 64-byte values", enableTrafficStats, metrics, tcPluginMetricMaxEntries)
+		}
 	}
 }
 

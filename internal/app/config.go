@@ -18,28 +18,40 @@ const (
 	experimentalFeatureKernelTCPreparedL2        = "kernel_tc_prepared_l2"
 	experimentalFeatureKernelTCReplyL2Cache      = "kernel_tc_reply_l2_cache"
 	insecureDefaultWebToken                      = "change-me-to-a-secure-token"
+	insecureDefaultPluginAdminToken              = "change-me-to-a-separate-plugin-admin-token"
 )
 
 type Config struct {
-	WebPort                  int             `json:"web_port"`
-	WebBind                  string          `json:"web_bind"`
-	WebUIEnabledSetting      *bool           `json:"web_ui_enabled,omitempty"`
-	WebToken                 string          `json:"web_token"`
-	MaxWorkers               int             `json:"max_workers"`
-	DrainTimeoutHours        int             `json:"drain_timeout_hours"`
-	ManagedNetworkAutoRepair *bool           `json:"managed_network_auto_repair,omitempty"`
-	PluginsEnabledSetting    *bool           `json:"plugins_enabled,omitempty"`
-	PluginsDataplaneSetting  *bool           `json:"plugins_dataplane_enabled,omitempty"`
-	PluginsDir               string          `json:"plugins_dir"`
-	DefaultEngine            string          `json:"default_engine"`
-	KernelEngineOrder        []string        `json:"kernel_engine_order"`
-	KernelRulesMapLimit      int             `json:"kernel_rules_map_limit"`
-	KernelFlowsMapLimit      int             `json:"kernel_flows_map_limit"`
-	KernelNATMapLimit        int             `json:"kernel_nat_ports_map_limit"`
-	KernelNATPortMin         int             `json:"kernel_nat_port_min"`
-	KernelNATPortMax         int             `json:"kernel_nat_port_max"`
-	Experimental             map[string]bool `json:"experimental_features"`
-	Tags                     []string        `json:"tags"`
+	WebPort                         int                       `json:"web_port"`
+	WebBind                         string                    `json:"web_bind"`
+	WebUIEnabledSetting             *bool                     `json:"web_ui_enabled,omitempty"`
+	WebToken                        string                    `json:"web_token"`
+	PluginAdminToken                string                    `json:"plugin_admin_token,omitempty"`
+	MaxWorkers                      int                       `json:"max_workers"`
+	DrainTimeoutHours               int                       `json:"drain_timeout_hours"`
+	ManagedNetworkAutoRepair        *bool                     `json:"managed_network_auto_repair,omitempty"`
+	PluginsEnabledSetting           *bool                     `json:"plugins_enabled,omitempty"`
+	PluginsDataplaneSetting         *bool                     `json:"plugins_dataplane_enabled,omitempty"`
+	PluginsIsolationSetting         *bool                     `json:"plugins_isolation,omitempty"`
+	PluginsMinSandboxLevel          string                    `json:"plugins_min_sandbox_level,omitempty"`
+	PluginsRequireSigned            *bool                     `json:"plugins_require_signed_packages,omitempty"`
+	PluginsDir                      string                    `json:"plugins_dir"`
+	PluginsMaxInstalled             int                       `json:"plugins_max_installed"`
+	PluginsMaxStaged                int                       `json:"plugins_max_staged"`
+	PluginsStorageLimitMB           int                       `json:"plugins_storage_limit_mb"`
+	PluginsRepositoryRefreshMinutes int                       `json:"plugins_repository_refresh_minutes"`
+	PluginsResourceLimits           PluginResourceLimitConfig `json:"plugins_resource_limits,omitempty"`
+	DefaultEngine                   string                    `json:"default_engine"`
+	KernelEngineOrder               []string                  `json:"kernel_engine_order"`
+	KernelRulesMapLimit             int                       `json:"kernel_rules_map_limit"`
+	KernelFlowsMapLimit             int                       `json:"kernel_flows_map_limit"`
+	KernelNATMapLimit               int                       `json:"kernel_nat_ports_map_limit"`
+	KernelNATPortMin                int                       `json:"kernel_nat_port_min"`
+	KernelNATPortMax                int                       `json:"kernel_nat_port_max"`
+	Experimental                    map[string]bool           `json:"experimental_features"`
+	Tags                            []string                  `json:"tags"`
+
+	pluginHostTestMode bool
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -69,11 +81,18 @@ func loadConfig(path string) (*Config, error) {
 	}
 	cfg.WebBind = normalizeWebBind(cfg.WebBind)
 	cfg.WebToken = strings.TrimSpace(cfg.WebToken)
+	cfg.PluginAdminToken = strings.TrimSpace(cfg.PluginAdminToken)
 	if cfg.WebToken == "" {
 		return nil, fmt.Errorf("web_token must not be empty")
 	}
 	if cfg.WebToken == insecureDefaultWebToken {
 		return nil, fmt.Errorf("web_token must not use the example placeholder value")
+	}
+	if cfg.PluginAdminToken == insecureDefaultPluginAdminToken {
+		return nil, fmt.Errorf("plugin_admin_token must not use the example placeholder value")
+	}
+	if cfg.PluginAdminToken != "" && cfg.PluginAdminToken == cfg.WebToken {
+		return nil, fmt.Errorf("plugin_admin_token must differ from web_token")
 	}
 	if cfg.MaxWorkers < 0 {
 		cfg.MaxWorkers = 0
@@ -82,6 +101,21 @@ func loadConfig(path string) (*Config, error) {
 		cfg.DrainTimeoutHours = 24
 	}
 	cfg.PluginsDir = normalizePluginsDir(cfg.PluginsDir)
+	cfg.PluginsMinSandboxLevel = strings.ToLower(strings.TrimSpace(cfg.PluginsMinSandboxLevel))
+	if cfg.PluginsMinSandboxLevel == "" {
+		cfg.PluginsMinSandboxLevel = pluginSandboxLevelFull
+	}
+	if !validPluginSandboxLevel(cfg.PluginsMinSandboxLevel) {
+		return nil, fmt.Errorf("plugins_min_sandbox_level must be one of none, minimal, partial, full")
+	}
+	cfg.PluginsMaxInstalled = normalizeBoundedConfigValue(cfg.PluginsMaxInstalled, 128, 1, 1024)
+	cfg.PluginsMaxStaged = normalizeBoundedConfigValue(cfg.PluginsMaxStaged, 32, 1, 256)
+	cfg.PluginsStorageLimitMB = normalizeBoundedConfigValue(cfg.PluginsStorageLimitMB, 2048, 256, 65536)
+	cfg.PluginsRepositoryRefreshMinutes = normalizeBoundedConfigValue(cfg.PluginsRepositoryRefreshMinutes, 360, 15, 10080)
+	cfg.PluginsResourceLimits, err = normalizePluginResourceLimitConfig(cfg.PluginsResourceLimits)
+	if err != nil {
+		return nil, err
+	}
 	cfg.KernelRulesMapLimit = normalizeKernelRulesMapLimit(cfg.KernelRulesMapLimit)
 	cfg.KernelFlowsMapLimit = normalizeKernelFlowsMapLimit(cfg.KernelFlowsMapLimit)
 	cfg.KernelNATMapLimit = normalizeKernelNATMapLimit(cfg.KernelNATMapLimit)
@@ -96,6 +130,19 @@ func loadConfig(path string) (*Config, error) {
 	cfg.KernelEngineOrder = normalizeKernelEngineOrder(cfg.KernelEngineOrder)
 	cfg.Experimental = normalizeExperimentalFeatures(cfg.Experimental)
 	return &cfg, nil
+}
+
+func normalizeBoundedConfigValue(value, fallback, minimum, maximum int) int {
+	if value == 0 {
+		return fallback
+	}
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
 
 func normalizeWebBind(value string) string {
@@ -146,6 +193,50 @@ func (cfg *Config) PluginsDataplaneEnabled() bool {
 		return false
 	}
 	return *cfg.PluginsDataplaneSetting
+}
+
+func (cfg *Config) PluginsIsolationEnabled() bool {
+	if cfg == nil || cfg.PluginsIsolationSetting == nil {
+		return true
+	}
+	return *cfg.PluginsIsolationSetting
+}
+
+func (cfg *Config) PluginMinimumSandboxLevel() string {
+	if cfg != nil && cfg.pluginHostTestMode {
+		return pluginSandboxLevelMinimal
+	}
+	if cfg == nil {
+		return pluginSandboxLevelFull
+	}
+	level := strings.ToLower(strings.TrimSpace(cfg.PluginsMinSandboxLevel))
+	if level == "" {
+		return pluginSandboxLevelFull
+	}
+	if !validPluginSandboxLevel(level) {
+		return pluginSandboxLevelFull
+	}
+	return level
+}
+
+func (cfg *Config) PluginsRequireSignedPackages() bool {
+	if cfg == nil || cfg.PluginsRequireSigned == nil {
+		return true
+	}
+	return *cfg.PluginsRequireSigned
+}
+
+func validPluginSandboxLevel(level string) bool {
+	switch level {
+	case pluginSandboxLevelNone, pluginSandboxLevelMinimal, pluginSandboxLevelPartial, pluginSandboxLevelFull:
+		return true
+	default:
+		return false
+	}
+}
+
+func (cfg *Config) PluginAdminAPIEnabled() bool {
+	return cfg != nil && strings.TrimSpace(cfg.PluginAdminToken) != ""
 }
 
 func normalizePluginsDir(value string) string {

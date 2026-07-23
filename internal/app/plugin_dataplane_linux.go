@@ -24,6 +24,9 @@ const (
 )
 
 func newPluginDataplaneRuntime(cfg *Config) pluginDataplaneRuntime {
+	if cfg == nil || !cfg.PluginsEnabled() {
+		return disabledPluginDataplaneRuntime{}
+	}
 	return &linuxPluginDataplaneRuntime{cfg: cfg, loaded: make(map[string]*loadedPluginDataplane)}
 }
 
@@ -64,9 +67,10 @@ type pluginTCAttachPlan struct {
 }
 
 type loadedPluginObject struct {
-	path string
-	spec *ebpf.CollectionSpec
-	coll *ebpf.Collection
+	path       string
+	spec       *ebpf.CollectionSpec
+	coll       *ebpf.Collection
+	migrations []PluginEBPFStateMigration
 }
 
 type loadedPluginObjectRef struct {
@@ -74,6 +78,8 @@ type loadedPluginObjectRef struct {
 	ObjectID     string
 	ObjectPath   string
 	ObjectSHA256 string
+	StateMaps    []PluginObjectStateMap
+	Migrations   []PluginEBPFStateMigration
 	spec         *ebpf.CollectionSpec
 	coll         *ebpf.Collection
 }
@@ -207,11 +213,11 @@ func pluginTCFilterExists(filter *netlink.BpfFilter) bool {
 	if filter == nil {
 		return false
 	}
-	link, err := netlink.LinkByIndex(filter.LinkIndex)
+	link, err := pluginControlNetLinkByIndex(filter.LinkIndex)
 	if err != nil {
 		return false
 	}
-	filters, err := netlink.FilterList(link, filter.Parent)
+	filters, err := pluginTCFilterList(link, filter.Parent)
 	if err != nil {
 		return false
 	}
@@ -274,7 +280,7 @@ func buildDesiredPluginDataplane(plugin LoadedPlugin) (pluginDataplaneDesiredPlu
 			continue
 		}
 		if hook.Engine != kernelEngineTC {
-			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped: %s dataplane plugins are not attached yet", hook.ID, hook.Engine))
+			item.warnings = append(item.warnings, fmt.Sprintf("hook %s skipped by direct tc runtime: %s hooks require the ordered kernel pipeline", hook.ID, hook.Engine))
 			continue
 		}
 		if hook.Mode != "observe" {
@@ -307,7 +313,7 @@ func buildDesiredPluginDataplane(plugin LoadedPlugin) (pluginDataplaneDesiredPlu
 		}
 		resolvedLinks := make(map[string]netlink.Link, len(hook.Interfaces))
 		for _, iface := range hook.Interfaces {
-			link, err := netlink.LinkByName(iface)
+			link, err := pluginControlNetLinkByName(iface)
 			if err != nil {
 				return item, pluginRuntimeErrorState(fmt.Sprintf("resolve plugin hook interface %q for hook %s: %v", iface, hook.ID, err))
 			}
@@ -556,11 +562,11 @@ func attachPluginTCProgram(plan pluginTCAttachPlan, prog *ebpf.Program) (*netlin
 }
 
 func ensurePluginTCFilterSlotAvailable(plan pluginTCAttachPlan, name string) error {
-	link, err := netlink.LinkByIndex(plan.IfIndex)
+	link, err := pluginControlNetLinkByIndex(plan.IfIndex)
 	if err != nil {
 		return err
 	}
-	filters, err := netlink.FilterList(link, pluginTCParent(plan.Attach))
+	filters, err := pluginTCFilterList(link, pluginTCParent(plan.Attach))
 	if err != nil {
 		return err
 	}
@@ -579,6 +585,12 @@ func ensurePluginTCFilterSlotAvailable(plan pluginTCAttachPlan, name string) err
 		return fmt.Errorf("tc filter priority/handle slot already used by %q", bpf.Name)
 	}
 	return nil
+}
+
+func pluginTCFilterList(link netlink.Link, parent uint32) ([]netlink.Filter, error) {
+	return pluginControlNetRetryDump(func() ([]netlink.Filter, error) {
+		return netlink.FilterList(link, parent)
+	})
 }
 
 func pluginTCParent(attach string) uint32 {

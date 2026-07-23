@@ -21,6 +21,7 @@ type pluginControlUDPTransport interface {
 }
 
 type pluginControlUDPSendRequest struct {
+	Namespace  string
 	Interface  string
 	LocalIP    net.IP
 	LocalPort  int
@@ -31,6 +32,7 @@ type pluginControlUDPSendRequest struct {
 }
 
 type pluginControlUDPRecvRequest struct {
+	Namespace       string
 	Interface       string
 	LocalIP         net.IP
 	LocalPort       int
@@ -47,6 +49,7 @@ type pluginControlUDPExchangeRequest struct {
 }
 
 type pluginControlUDPResult struct {
+	Namespace  string
 	Interface  string
 	LocalAddr  *net.UDPAddr
 	RemoteAddr *net.UDPAddr
@@ -54,6 +57,7 @@ type pluginControlUDPResult struct {
 }
 
 type pluginControlUDPDatagram struct {
+	Namespace  string
 	Interface  string
 	LocalAddr  *net.UDPAddr
 	RemoteAddr *net.UDPAddr

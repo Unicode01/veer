@@ -247,7 +247,7 @@ func TestBuildDesiredPluginDataplaneSkipsAttachNone(t *testing.T) {
 	}
 }
 
-func TestBuildDesiredPluginDataplaneKeepsXDPHooksRegistrationOnly(t *testing.T) {
+func TestBuildDesiredPluginDataplaneDelegatesXDPHooksToOrderedKernelPipeline(t *testing.T) {
 	plugin := LoadedPlugin{
 		PluginManifest: PluginManifest{
 			ID:      "xdp_probe",
@@ -279,13 +279,13 @@ func TestBuildDesiredPluginDataplaneKeepsXDPHooksRegistrationOnly(t *testing.T) 
 
 	item, state := buildDesiredPluginDataplane(plugin)
 	if len(item.attachments) != 0 {
-		t.Fatalf("attachments = %+v, want none for registration-only xdp hook", item.attachments)
+		t.Fatalf("attachments = %+v, want none from direct tc runtime", item.attachments)
 	}
 	if state.Mode != pluginRuntimeModeRegistered || state.Attachable || state.Attached || state.AttachmentCount != 0 {
-		t.Fatalf("state = %+v, want registered non-attachable xdp hook", state)
+		t.Fatalf("state = %+v, want ordered-pipeline delegation state", state)
 	}
-	if !strings.Contains(state.Reason, "xdp dataplane plugins are not attached yet") {
-		t.Fatalf("state reason = %q, want xdp registration-only reason", state.Reason)
+	if !strings.Contains(state.Reason, "xdp hooks require the ordered kernel pipeline") {
+		t.Fatalf("state reason = %q, want ordered kernel pipeline reason", state.Reason)
 	}
 }
 

@@ -2,8 +2,11 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -133,5 +136,64 @@ func TestPluginsCanBeEnabledExplicitly(t *testing.T) {
 	}
 	if len(catalog.Plugins) != 2 || catalog.Plugins[1].ID != "enabled_plugin" {
 		t.Fatalf("catalog plugins = %+v, want builtin plus enabled_plugin", catalog.Plugins)
+	}
+}
+
+func TestPluginsDefaultDisabledDoNotInitializeControlOrDataplaneState(t *testing.T) {
+	root := t.TempDir()
+	pluginsDir := filepath.Join(root, "plugins")
+	databasePath := filepath.Join(root, "forward.db")
+	db, err := initDB(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cfg := &Config{PluginsDir: pluginsDir, WebToken: "test-token"}
+
+	control := newPluginControlRuntime(db, cfg, nil)
+	if _, ok := control.(disabledPluginControlRuntime); !ok {
+		t.Fatalf("disabled control runtime type = %T, want disabledPluginControlRuntime", control)
+	}
+	if snapshot := control.Reconcile(loadPluginCatalog(cfg)); len(snapshot.Plugins) != 0 || len(snapshot.Surfaces) != 0 {
+		t.Fatalf("disabled control runtime snapshot = %+v", snapshot)
+	}
+	if err := control.ApplyPluginAction(LoadedPlugin{}, PluginAction{}, nil); !errors.Is(err, errPluginRuntimeTargetNotLoaded) {
+		t.Fatalf("disabled control action error = %v", err)
+	}
+	if err := control.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dataplane := newPluginDataplaneRuntime(cfg)
+	if _, ok := dataplane.(disabledPluginDataplaneRuntime); !ok {
+		t.Fatalf("disabled dataplane runtime type = %T, want disabledPluginDataplaneRuntime", dataplane)
+	}
+	if snapshot := dataplane.Reconcile(loadPluginCatalog(cfg)); len(snapshot.Plugins) != 0 || len(snapshot.Surfaces) != 0 {
+		t.Fatalf("disabled dataplane runtime snapshot = %+v", snapshot)
+	}
+	if err := dataplane.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		pluginsDir,
+		pluginsDir + pluginPackageStateSuffix,
+		databasePath + pluginSecretKeyFileSuffix,
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("plugins-disabled initialization created %s: %v", path, err)
+		}
+	}
+
+	pm := &ProcessManager{db: db, cfg: cfg, pluginControlRuntime: control}
+	req := httptest.NewRequest(http.MethodGet, "/api/plugin-secrets", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	buildAPIHandler(cfg, db, pm).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("explicit plugin secret status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Lstat(databasePath + pluginSecretKeyFileSuffix); err != nil {
+		t.Fatalf("explicit plugin secret request did not initialize the keyring: %v", err)
 	}
 }

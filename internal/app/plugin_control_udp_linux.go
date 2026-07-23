@@ -19,6 +19,18 @@ func newPluginControlUDPTransport() pluginControlUDPTransport {
 type linuxPluginControlUDPTransport struct{}
 
 func (linuxPluginControlUDPTransport) Send(req pluginControlUDPSendRequest) (pluginControlUDPResult, error) {
+	namespace := normalizePluginControlNamespace(req.Namespace)
+	if namespace != "host" {
+		req.Namespace = "host"
+		var result pluginControlUDPResult
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			result, operationErr = (linuxPluginControlUDPTransport{}).Send(req)
+			return operationErr
+		})
+		result.Namespace = namespace
+		return result, err
+	}
 	conn, remote, err := listenPluginControlUDP(req.Interface, req.LocalIP, req.LocalPort, req.RemoteIP, req.RemotePort)
 	if err != nil {
 		return pluginControlUDPResult{}, err
@@ -32,6 +44,7 @@ func (linuxPluginControlUDPTransport) Send(req pluginControlUDPSendRequest) (plu
 		return pluginControlUDPResult{}, err
 	}
 	return pluginControlUDPResult{
+		Namespace:  namespace,
 		Interface:  req.Interface,
 		LocalAddr:  conn.LocalAddr().(*net.UDPAddr),
 		RemoteAddr: remote,
@@ -40,6 +53,18 @@ func (linuxPluginControlUDPTransport) Send(req pluginControlUDPSendRequest) (plu
 }
 
 func (linuxPluginControlUDPTransport) Recv(req pluginControlUDPRecvRequest) (pluginControlUDPDatagram, error) {
+	namespace := normalizePluginControlNamespace(req.Namespace)
+	if namespace != "host" {
+		req.Namespace = "host"
+		var datagram pluginControlUDPDatagram
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			datagram, operationErr = (linuxPluginControlUDPTransport{}).Recv(req)
+			return operationErr
+		})
+		datagram.Namespace = namespace
+		return datagram, err
+	}
 	conn, _, err := listenPluginControlUDP(req.Interface, req.LocalIP, req.LocalPort, req.RemoteIP, req.RemotePort)
 	if err != nil {
 		return pluginControlUDPDatagram{}, err
@@ -49,6 +74,22 @@ func (linuxPluginControlUDPTransport) Recv(req pluginControlUDPRecvRequest) (plu
 }
 
 func (linuxPluginControlUDPTransport) Exchange(req pluginControlUDPExchangeRequest) (pluginControlUDPDatagram, error) {
+	namespace := normalizePluginControlNamespace(req.Send.Namespace)
+	if normalizePluginControlNamespace(req.Recv.Namespace) != namespace {
+		return pluginControlUDPDatagram{}, fmt.Errorf("send and receive namespace must match")
+	}
+	if namespace != "host" {
+		req.Send.Namespace = "host"
+		req.Recv.Namespace = "host"
+		var datagram pluginControlUDPDatagram
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			datagram, operationErr = (linuxPluginControlUDPTransport{}).Exchange(req)
+			return operationErr
+		})
+		datagram.Namespace = namespace
+		return datagram, err
+	}
 	conn, remote, err := listenPluginControlUDP(req.Send.Interface, req.Send.LocalIP, req.Send.LocalPort, req.Send.RemoteIP, req.Send.RemotePort)
 	if err != nil {
 		return pluginControlUDPDatagram{}, err
@@ -124,6 +165,7 @@ func recvPluginControlUDPDatagram(conn *net.UDPConn, req pluginControlUDPRecvReq
 		}
 		payload := append([]byte(nil), buf[:n]...)
 		return pluginControlUDPDatagram{
+			Namespace:  normalizePluginControlNamespace(req.Namespace),
 			Interface:  req.Interface,
 			LocalAddr:  conn.LocalAddr().(*net.UDPAddr),
 			RemoteAddr: remote,

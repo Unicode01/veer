@@ -5,6 +5,7 @@ config.json
 forward.db
 forward.db-shm
 forward.db-wal
+*.veer-secrets.key
 
 # build artifacts
 .tmp/
@@ -17,6 +18,7 @@ forward-linux-arm64
 veer-linux-amd64
 veer-linux-arm64
 veer-plugins.tar.gz
+veer-plugin-sdk.tar.gz
 *.test
 internal/app/ebpf/*.o
 plugins/**/*.o
@@ -29,6 +31,7 @@ scripts/lib-plugin-test-env.sh
 # logs and coverage
 *.log
 coverage.out
+test-results/
 
 # editor / IDE
 .idea/

@@ -44,6 +44,10 @@ func buildPluginCatalogFingerprint(cfg *Config) (string, error) {
 }
 
 func buildPluginDirectoryFingerprint(root string) (string, error) {
+	return buildPluginDirectoryFingerprintWithSkip(root, nil)
+}
+
+func buildPluginDirectoryFingerprintWithSkip(root string, skip func(string, os.DirEntry) bool) (string, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return "plugins-dir-error:" + root + ":" + err.Error(), err
@@ -94,6 +98,12 @@ func buildPluginDirectoryFingerprint(root string) (string, error) {
 			return nil
 		}
 		if rel == "." {
+			return nil
+		}
+		if skip != nil && skip(rel, entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		info, infoErr := entry.Info()
@@ -549,7 +559,7 @@ func (pm *ProcessManager) initializePluginCatalogSnapshot() {
 	}
 	pm.mu.Unlock()
 	if err != nil {
-		log.Printf("plugin update monitor: initialize applied snapshot failed; using source directory directly: %v", err)
+		log.Printf("plugin update monitor: initialize applied snapshot failed; external plugins remain disabled until a manual reload succeeds: %v", err)
 	}
 }
 
@@ -576,6 +586,7 @@ func (pm *ProcessManager) appliedPluginCatalogConfig(fallback *Config) (*Config,
 	}
 	out := *base
 	sourceDir := normalizePluginsDir(out.PluginsDir)
+	disableExternalPlugins := false
 	if pm != nil {
 		pm.mu.Lock()
 		if pm.pluginCatalogSourceDir != "" {
@@ -583,8 +594,15 @@ func (pm *ProcessManager) appliedPluginCatalogConfig(fallback *Config) (*Config,
 		}
 		if pm.pluginCatalogAppliedDir != "" {
 			out.PluginsDir = pm.pluginCatalogAppliedDir
+		} else if out.PluginsEnabled() && pm.pluginCatalogLastCheckResult == pluginCatalogHotReloadResultError && pm.pluginCatalogLastCheckError != "" {
+			disableExternalPlugins = true
 		}
 		pm.mu.Unlock()
+	}
+	if disableExternalPlugins {
+		disabled := false
+		out.PluginsEnabledSetting = &disabled
+		out.PluginsDataplaneSetting = &disabled
 	}
 	return &out, sourceDir
 }

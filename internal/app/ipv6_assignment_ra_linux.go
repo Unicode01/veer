@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -52,7 +53,7 @@ type ipv6RouterAdvertiser struct {
 
 func newIPv6RouterAdvertiser(config ipv6AssignmentRAConfig) *ipv6RouterAdvertiser {
 	return &ipv6RouterAdvertiser{
-		config:      config,
+		config:      cloneIPv6AssignmentRAConfig(config),
 		stopCh:      make(chan struct{}),
 		wakeCh:      make(chan struct{}, 1),
 		doneCh:      make(chan struct{}),
@@ -66,14 +67,34 @@ func (adv *ipv6RouterAdvertiser) start() {
 	go adv.listenForRouterSolicitations()
 }
 
-func (adv *ipv6RouterAdvertiser) update(config ipv6AssignmentRAConfig) {
+func cloneIPv6AssignmentRAConfig(config ipv6AssignmentRAConfig) ipv6AssignmentRAConfig {
+	config.Prefixes = append([]string(nil), config.Prefixes...)
+	config.Routes = append([]string(nil), config.Routes...)
+	config.DNSServers = append([]string(nil), config.DNSServers...)
+	return config
+}
+
+func ipv6AssignmentRAConfigsEqual(a, b ipv6AssignmentRAConfig) bool {
+	return a.TargetInterface == b.TargetInterface &&
+		a.Managed == b.Managed &&
+		slices.Equal(a.Prefixes, b.Prefixes) &&
+		slices.Equal(a.Routes, b.Routes) &&
+		slices.Equal(a.DNSServers, b.DNSServers)
+}
+
+func (adv *ipv6RouterAdvertiser) update(config ipv6AssignmentRAConfig) bool {
 	if adv == nil {
-		return
+		return false
 	}
 	adv.mu.Lock()
-	adv.config = config
+	if ipv6AssignmentRAConfigsEqual(adv.config, config) {
+		adv.mu.Unlock()
+		return false
+	}
+	adv.config = cloneIPv6AssignmentRAConfig(config)
 	adv.mu.Unlock()
 	adv.trigger()
+	return true
 }
 
 func (adv *ipv6RouterAdvertiser) trigger() {
@@ -105,13 +126,7 @@ func (adv *ipv6RouterAdvertiser) stop() {
 func (adv *ipv6RouterAdvertiser) snapshot() ipv6AssignmentRAConfig {
 	adv.mu.Lock()
 	defer adv.mu.Unlock()
-	return ipv6AssignmentRAConfig{
-		TargetInterface: adv.config.TargetInterface,
-		Managed:         adv.config.Managed,
-		Prefixes:        append([]string(nil), adv.config.Prefixes...),
-		Routes:          append([]string(nil), adv.config.Routes...),
-		DNSServers:      append([]string(nil), adv.config.DNSServers...),
-	}
+	return cloneIPv6AssignmentRAConfig(adv.config)
 }
 
 func (adv *ipv6RouterAdvertiser) run() {

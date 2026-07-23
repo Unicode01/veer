@@ -163,6 +163,105 @@ var Schema = map[string][][2]string{
 		{"last_error", "TEXT NOT NULL DEFAULT ''"},
 		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
 	},
+	"plugin_resource_schemas": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"resource_id", "TEXT NOT NULL DEFAULT ''"},
+		{"schema_version", "INTEGER NOT NULL DEFAULT 1"},
+		{"schema_digest", "TEXT NOT NULL DEFAULT ''"},
+		{"status", "TEXT NOT NULL DEFAULT 'active'"},
+		{"transaction_id", "TEXT NOT NULL DEFAULT ''"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	},
+	"plugin_resource_migrations": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"transaction_id", "TEXT NOT NULL DEFAULT ''"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"resource_id", "TEXT NOT NULL DEFAULT ''"},
+		{"previous_schema_exists", "INTEGER NOT NULL DEFAULT 0"},
+		{"previous_schema_version", "INTEGER NOT NULL DEFAULT 0"},
+		{"previous_schema_digest", "TEXT NOT NULL DEFAULT ''"},
+		{"records_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"runtime_status_json", "TEXT NOT NULL DEFAULT ''"},
+		{"created_at", "TEXT NOT NULL DEFAULT ''"},
+	},
+	"plugin_owned_resources": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"resource_type", "TEXT NOT NULL DEFAULT ''"},
+		{"resource_key", "TEXT NOT NULL DEFAULT ''"},
+		{"metadata_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"created_at", "TEXT NOT NULL DEFAULT ''"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	},
+	"plugin_net_transactions": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"transaction_id", "TEXT NOT NULL DEFAULT ''"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"kind", "TEXT NOT NULL DEFAULT ''"},
+		{"state_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"started_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"created_at", "TEXT NOT NULL DEFAULT ''"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	},
+	"plugin_audit_logs": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"operation", "TEXT NOT NULL DEFAULT ''"},
+		{"actor", "TEXT NOT NULL DEFAULT 'system'"},
+		{"outcome", "TEXT NOT NULL DEFAULT ''"},
+		{"details_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"created_at", "TEXT NOT NULL DEFAULT ''"},
+	},
+	"plugin_logs": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"level", "TEXT NOT NULL DEFAULT 'info'"},
+		{"message", "TEXT NOT NULL DEFAULT ''"},
+		{"fields_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"event", "TEXT NOT NULL DEFAULT ''"},
+		{"worker", "TEXT NOT NULL DEFAULT ''"},
+		{"created_at", "TEXT NOT NULL DEFAULT ''"},
+	},
+	"plugin_event_deliveries": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"delivery_id", "TEXT NOT NULL DEFAULT ''"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"subscription_id", "TEXT NOT NULL DEFAULT ''"},
+		{"topic", "TEXT NOT NULL DEFAULT ''"},
+		{"sequence", "INTEGER NOT NULL DEFAULT 0"},
+		{"published_at", "TEXT NOT NULL DEFAULT ''"},
+		{"source_plugin", "TEXT NOT NULL DEFAULT ''"},
+		{"target_plugin", "TEXT NOT NULL DEFAULT ''"},
+		{"resource_id", "TEXT NOT NULL DEFAULT ''"},
+		{"schema_version", "INTEGER NOT NULL DEFAULT 1"},
+		{"payload_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"attempts", "INTEGER NOT NULL DEFAULT 0"},
+		{"max_attempts", "INTEGER NOT NULL DEFAULT 1"},
+		{"next_attempt_unix_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"status", "TEXT NOT NULL DEFAULT 'pending'"},
+		{"last_error", "TEXT NOT NULL DEFAULT ''"},
+		{"created_at", "TEXT NOT NULL DEFAULT ''"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	},
+	"plugin_operations": {
+		{"id", "INTEGER PRIMARY KEY AUTOINCREMENT"},
+		{"operation_id", "TEXT NOT NULL DEFAULT ''"},
+		{"plugin_id", "TEXT NOT NULL DEFAULT ''"},
+		{"operation_key", "TEXT NOT NULL DEFAULT ''"},
+		{"kind", "TEXT NOT NULL DEFAULT ''"},
+		{"status", "TEXT NOT NULL DEFAULT 'pending'"},
+		{"phase", "TEXT NOT NULL DEFAULT ''"},
+		{"input_json", "TEXT NOT NULL DEFAULT 'null'"},
+		{"state_json", "TEXT NOT NULL DEFAULT 'null'"},
+		{"result_json", "TEXT NOT NULL DEFAULT 'null'"},
+		{"error_json", "TEXT NOT NULL DEFAULT 'null'"},
+		{"attempts", "INTEGER NOT NULL DEFAULT 0"},
+		{"revision", "INTEGER NOT NULL DEFAULT 1"},
+		{"next_attempt_unix_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"created_at", "TEXT NOT NULL DEFAULT ''"},
+		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
+	},
 }
 
 var SchemaIndexes = []IndexDefinition{
@@ -186,6 +285,17 @@ var SchemaIndexes = []IndexDefinition{
 	{Name: "idx_plugin_records_scope", Table: "plugin_records", Columns: "plugin_id, resource_id"},
 	{Name: "idx_plugin_states_enabled", Table: "plugin_states", Columns: "enabled"},
 	{Name: "idx_plugin_runtime_status_scope", Table: "plugin_runtime_status", Columns: "plugin_id, target_type"},
+	{Name: "idx_plugin_resource_schemas_scope", Table: "plugin_resource_schemas", Columns: "plugin_id, resource_id"},
+	{Name: "idx_plugin_resource_migrations_transaction", Table: "plugin_resource_migrations", Columns: "transaction_id"},
+	{Name: "idx_plugin_owned_resources_plugin", Table: "plugin_owned_resources", Columns: "plugin_id, resource_type"},
+	{Name: "idx_plugin_net_transactions_plugin", Table: "plugin_net_transactions", Columns: "plugin_id, id"},
+	{Name: "idx_plugin_audit_logs_scope", Table: "plugin_audit_logs", Columns: "plugin_id, id"},
+	{Name: "idx_plugin_logs_scope", Table: "plugin_logs", Columns: "plugin_id, id"},
+	{Name: "idx_plugin_logs_level", Table: "plugin_logs", Columns: "plugin_id, level, id"},
+	{Name: "idx_plugin_event_deliveries_due", Table: "plugin_event_deliveries", Columns: "plugin_id, subscription_id, status, next_attempt_unix_ms, id"},
+	{Name: "idx_plugin_event_deliveries_source", Table: "plugin_event_deliveries", Columns: "source_plugin, id"},
+	{Name: "idx_plugin_operations_state", Table: "plugin_operations", Columns: "plugin_id, status, next_attempt_unix_ms, id"},
+	{Name: "idx_plugin_operations_kind", Table: "plugin_operations", Columns: "plugin_id, kind, id"},
 }
 
 const (
@@ -196,6 +306,13 @@ const (
 	ConstraintIndexPluginRecordKey                      = "ux_plugin_records_key"
 	ConstraintIndexPluginStatePlugin                    = "ux_plugin_states_plugin"
 	ConstraintIndexPluginRuntimeStatusTarget            = "ux_plugin_runtime_status_target"
+	ConstraintIndexPluginResourceSchemaScope            = "ux_plugin_resource_schemas_scope"
+	ConstraintIndexPluginResourceMigrationScope         = "ux_plugin_resource_migrations_scope"
+	ConstraintIndexPluginOwnedResourceKey               = "ux_plugin_owned_resources_key"
+	ConstraintIndexPluginNetTransactionID               = "ux_plugin_net_transactions_id"
+	ConstraintIndexPluginEventDeliveryID                = "ux_plugin_event_deliveries_id"
+	ConstraintIndexPluginOperationID                    = "ux_plugin_operations_id"
+	ConstraintIndexPluginOperationKey                   = "ux_plugin_operations_key"
 )
 
 var SchemaConstraintIndexes = []ConstraintIndexDefinition{
@@ -266,6 +383,76 @@ var SchemaConstraintIndexes = []ConstraintIndexDefinition{
 			FROM plugin_runtime_status
 			WHERE trim(plugin_id) <> '' AND trim(target_type) <> '' AND trim(target_id) <> ''
 			GROUP BY plugin_id, target_type, target_id
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginResourceSchemaScope,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginResourceSchemaScope + ` ON plugin_resource_schemas(plugin_id, resource_id)`,
+		DuplicateProbe: `SELECT printf('%s:%s', plugin_id, resource_id)
+			FROM plugin_resource_schemas
+			WHERE trim(plugin_id) <> '' AND trim(resource_id) <> ''
+			GROUP BY plugin_id, resource_id
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginResourceMigrationScope,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginResourceMigrationScope + ` ON plugin_resource_migrations(plugin_id, resource_id)`,
+		DuplicateProbe: `SELECT printf('%s:%s', plugin_id, resource_id)
+			FROM plugin_resource_migrations
+			WHERE trim(plugin_id) <> '' AND trim(resource_id) <> ''
+			GROUP BY plugin_id, resource_id
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginOwnedResourceKey,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginOwnedResourceKey + ` ON plugin_owned_resources(resource_type, resource_key)`,
+		DuplicateProbe: `SELECT printf('%s:%s', resource_type, resource_key)
+			FROM plugin_owned_resources
+			WHERE trim(resource_type) <> '' AND trim(resource_key) <> ''
+			GROUP BY resource_type, resource_key
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginNetTransactionID,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginNetTransactionID + ` ON plugin_net_transactions(transaction_id)`,
+		DuplicateProbe: `SELECT transaction_id
+			FROM plugin_net_transactions
+			WHERE trim(transaction_id) <> ''
+			GROUP BY transaction_id
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginEventDeliveryID,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginEventDeliveryID + ` ON plugin_event_deliveries(delivery_id)`,
+		DuplicateProbe: `SELECT delivery_id
+			FROM plugin_event_deliveries
+			WHERE trim(delivery_id) <> ''
+			GROUP BY delivery_id
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginOperationID,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginOperationID + ` ON plugin_operations(operation_id)`,
+		DuplicateProbe: `SELECT operation_id
+			FROM plugin_operations
+			WHERE trim(operation_id) <> ''
+			GROUP BY operation_id
+			HAVING COUNT(*) > 1
+			LIMIT 1`,
+	},
+	{
+		Name:      ConstraintIndexPluginOperationKey,
+		CreateSQL: `CREATE UNIQUE INDEX IF NOT EXISTS ` + ConstraintIndexPluginOperationKey + ` ON plugin_operations(plugin_id, operation_key)`,
+		DuplicateProbe: `SELECT printf('%s:%s', plugin_id, operation_key)
+			FROM plugin_operations
+			WHERE trim(plugin_id) <> '' AND trim(operation_key) <> ''
+			GROUP BY plugin_id, operation_key
 			HAVING COUNT(*) > 1
 			LIMIT 1`,
 	},

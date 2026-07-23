@@ -285,6 +285,11 @@ func (rt *gojaPluginControlRuntime) installPluginControlCandidate(plugin LoadedP
 	rt.mu.Unlock()
 
 	if old != nil {
+		if store := rt.currentPluginBlobStore(); store != nil {
+			store.AbortGeneration(plugin.ID, old.key)
+		}
+	}
+	if old != nil {
 		old.stopVM()
 	}
 	for _, worker := range preparedWorkers {
@@ -314,6 +319,11 @@ func (rt *gojaPluginControlRuntime) commitColdPluginControlReplacement(plugin Lo
 	rt.mu.Unlock()
 	if old != nil && rt.socketRegistry != nil {
 		rt.socketRegistry.ClosePluginGeneration(plugin.ID, old.key)
+	}
+	if old != nil {
+		if store := rt.currentPluginBlobStore(); store != nil {
+			store.AbortGeneration(plugin.ID, old.key)
+		}
 	}
 	if old != nil {
 		old.stopVM()
@@ -518,13 +528,16 @@ func preservePreviousPluginControlRuntime(
 		return true
 	}
 	surfaces[pluginID] = PluginRuntimeSurface{
-		Capabilities:      append([]string(nil), previous.Capabilities...),
-		VirtualInterfaces: append([]PluginVirtualInterface(nil), previous.VirtualInterfaces...),
-		Objects:           append([]PluginObject(nil), previous.Objects...),
-		Hooks:             append([]PluginHook(nil), previous.Hooks...),
-		Resources:         append([]PluginResource(nil), previous.Resources...),
-		Actions:           append([]PluginAction(nil), previous.Actions...),
-		UI:                clonePluginUI(previous.UI),
+		Capabilities:       append([]string(nil), previous.Capabilities...),
+		VirtualInterfaces:  append([]PluginVirtualInterface(nil), previous.VirtualInterfaces...),
+		Objects:            append([]PluginObject(nil), previous.Objects...),
+		Hooks:              clonePluginHooks(previous.Hooks),
+		Resources:          append([]PluginResource(nil), previous.Resources...),
+		Actions:            append([]PluginAction(nil), previous.Actions...),
+		Services:           clonePluginServices(previous.Services),
+		EventSubscriptions: append([]PluginEventSubscription(nil), previous.EventSubscriptions...),
+		RingSubscriptions:  append([]PluginRingSubscription(nil), previous.RingSubscriptions...),
+		UI:                 clonePluginUI(previous.UI),
 	}
 	return true
 }
@@ -553,9 +566,13 @@ func preservedPluginControlRuntimeState(reason string, err error) PluginRuntimeS
 
 func pluginControlEventKey(event pluginControlEvent) string {
 	switch event.Kind {
-	case "resource_apply":
+	case "resource_apply", "resource_migrate":
 		if event.Resource != nil {
 			return event.Kind + ":" + event.Resource.ID
+		}
+	case "ebpf_state_migrate":
+		if event.EBPFMigration != nil {
+			return event.Kind + ":" + event.EBPFMigration.ObjectID + ":" + event.EBPFMigration.SourceMap + ":" + event.EBPFMigration.TargetMap
 		}
 	case "action":
 		if event.Action != nil {

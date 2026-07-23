@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,6 +180,204 @@ exports.onAction = function () {
 	buf := make([]byte, 1)
 	if _, err := peer.Read(buf); !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
 		t.Fatalf("peer read after deactivate error = %v, want closed connection", err)
+	}
+}
+
+func TestPluginControlSocketWatchDeliversTCPDataToPersistentWorker(t *testing.T) {
+	db := openTestDB(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "socket_watch"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(socket_watch) error = %v", err)
+	}
+	writePluginControlScript(t, dir, "socket_watch", `
+var socketHandle = '';
+exports.onAction = function () {
+  var opened = net.socket.open({network: 'tcp4', interface: 'eth0', remote_ip: '198.51.100.10', remote_port: 179});
+  socketHandle = opened.handle;
+  net.socket.watch({handle: socketHandle, worker: 'wire', handler: 'onWireData', max_bytes: 4096});
+};
+exports.onWireData = function (ctx) {
+  kv.set('wire', {type: ctx.socket.type, payload: ctx.socket.payload_hex, worker: ctx.worker.name});
+  net.socket.write({handle: ctx.socket.socket.handle, payload_hex: 'cc'});
+};
+`)
+	transport := newPluginControlSocketTestTransport()
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt.socketRegistry = newPluginControlSocketRegistry(transport)
+	t.Cleanup(func() { _ = rt.Close() })
+	plugin := testPersistentSocketPlugin(dir, "socket_watch", []string{"net.tcp", "kv", "worker"}, []string{"tcp"})
+	if err := rt.ApplyPluginAction(plugin, PluginAction{ID: "watch"}, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction() error = %v", err)
+	}
+	peer := transport.nextPeer(t)
+	if _, err := peer.Write([]byte{0xaa, 0xbb}); err != nil {
+		t.Fatalf("peer.Write() error = %v", err)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("peer.SetReadDeadline() error = %v", err)
+	}
+	reply := make([]byte, 1)
+	if _, err := io.ReadFull(peer, reply); err != nil {
+		t.Fatalf("peer reply error = %v", err)
+	}
+	if reply[0] != 0xcc {
+		t.Fatalf("peer reply = %x, want cc", reply)
+	}
+	wire := waitPluginControlKVDataForTest(t, db, plugin.ID, "wire")
+	if wire["type"] != "data" || wire["payload"] != "aabb" || wire["worker"] != "wire" {
+		t.Fatalf("wire event = %+v", wire)
+	}
+	generation := pluginControlGenerationForTest(t, plugin)
+	deadline := time.Now().Add(3 * time.Second)
+	var infos []pluginControlSocketInfo
+	for {
+		infos = rt.socketRegistry.List(plugin.ID, generation)
+		if len(infos) == 1 && infos[0].Watch != nil && infos[0].Watch.Events == 1 {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("watched socket info = %+v", infos)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := rt.socketRegistry.Read(plugin.ID, generation, infos[0].Handle, 1, time.Millisecond); err == nil || !strings.Contains(err.Error(), "is watched") {
+		t.Fatalf("manual read while watched error = %v", err)
+	}
+}
+
+func TestPluginControlSocketWatchAcceptsAndWatchesChildConnection(t *testing.T) {
+	db := openTestDB(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "socket_service"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(socket_service) error = %v", err)
+	}
+	writePluginControlScript(t, dir, "socket_service", `
+exports.onAction = function () {
+  var listener = net.socket.listen({network: 'tcp4', interface: 'eth0', local_ip: '127.0.0.1', local_port: 179});
+  kv.set('listener', {addr: listener.local_addr});
+  net.socket.watch({handle: listener.handle, worker: 'service', handler: 'onAccept'});
+};
+exports.onAccept = function (ctx) {
+  kv.set('accepted', {parent: ctx.socket.socket.handle, child: ctx.socket.accepted.handle});
+  net.socket.watch({handle: ctx.socket.accepted.handle, worker: 'service', handler: 'onClientData'});
+};
+exports.onClientData = function (ctx) {
+  kv.set('client', {payload: ctx.socket.payload_hex, parent: ctx.socket.socket.parent_handle});
+};
+`)
+	transport := newPluginControlSocketTestTransport()
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt.socketRegistry = newPluginControlSocketRegistry(transport)
+	t.Cleanup(func() { _ = rt.Close() })
+	plugin := testPersistentSocketPlugin(dir, "socket_service", []string{"net.tcp", "kv", "worker"}, []string{"tcp"})
+	if err := rt.ApplyPluginAction(plugin, PluginAction{ID: "listen"}, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction() error = %v", err)
+	}
+	listener := pluginControlKVDataForTest(t, db, plugin.ID, "listener")
+	client, err := net.DialTimeout("tcp4", listener["addr"].(string), time.Second)
+	if err != nil {
+		t.Fatalf("DialTimeout() error = %v", err)
+	}
+	defer client.Close()
+	waitPluginControlKVDataForTest(t, db, plugin.ID, "accepted")
+	if _, err := client.Write([]byte{0x10, 0x20}); err != nil {
+		t.Fatalf("client.Write() error = %v", err)
+	}
+	data := waitPluginControlKVDataForTest(t, db, plugin.ID, "client")
+	if data["payload"] != "1020" || strings.TrimSpace(fmt.Sprint(data["parent"])) == "" {
+		t.Fatalf("client event = %+v", data)
+	}
+}
+
+func TestPluginControlSocketWatchRejectsDatagramWithoutClosingListener(t *testing.T) {
+	transport := newPluginControlSocketTestTransport()
+	registry := newPluginControlSocketRegistry(transport)
+	defer registry.CloseAll()
+	listener, err := registry.Listen("udp_watch", "generation-a", pluginControlSocketListenRequest{
+		Network: "udp4", Interface: "eth0", LocalIP: net.ParseIP("127.0.0.1"), LocalPort: 5353,
+	})
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	delivered := make(chan pluginControlSocketEvent, 1)
+	var attempts atomic.Int32
+	if _, err := registry.Watch("udp_watch", "generation-a", listener.Handle, pluginControlSocketWatchSpec{
+		Worker: "udp", Handler: "onDatagram", MaxBytes: 128,
+	}, func(_ pluginControlSocketOwner, _ pluginControlSocketWatchSpec, event pluginControlSocketEvent) error {
+		if attempts.Add(1) == 1 {
+			return fmt.Errorf("%w: denied test peer", errPluginControlSocketEventRejected)
+		}
+		delivered <- event
+		return nil
+	}); err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	client, err := net.Dial("udp4", listener.LocalAddr)
+	if err != nil {
+		t.Fatalf("Dial(udp4) error = %v", err)
+	}
+	defer client.Close()
+	if _, err := client.Write([]byte{0x01}); err != nil {
+		t.Fatalf("first datagram error = %v", err)
+	}
+	if _, err := client.Write([]byte{0x02}); err != nil {
+		t.Fatalf("second datagram error = %v", err)
+	}
+	select {
+	case event := <-delivered:
+		if string(event.Payload) != "\x02" {
+			t.Fatalf("delivered payload = %x, want 02", event.Payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("allowed datagram was not delivered")
+	}
+	info, err := registry.Info("udp_watch", "generation-a", listener.Handle)
+	if err != nil || info.Watch == nil || info.Watch.Rejected != 1 {
+		t.Fatalf("listener after rejection = %+v/%v", info, err)
+	}
+}
+
+func TestPluginControlSocketWatchTransfersWithGeneration(t *testing.T) {
+	transport := newPluginControlSocketTestTransport()
+	registry := newPluginControlSocketRegistry(transport)
+	defer registry.CloseAll()
+	info, err := registry.Open("watch_upgrade", "generation-a", pluginControlSocketOpenRequest{
+		Network: "tcp4", Interface: "eth0", RemoteIP: net.ParseIP("198.51.100.1"), RemotePort: 179, Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	peer := transport.nextPeer(t)
+	owners := make(chan pluginControlSocketOwner, 1)
+	if _, err := registry.Watch("watch_upgrade", "generation-a", info.Handle, pluginControlSocketWatchSpec{
+		Worker: "wire", Handler: "onWire", MaxBytes: 64,
+	}, func(owner pluginControlSocketOwner, _ pluginControlSocketWatchSpec, _ pluginControlSocketEvent) error {
+		owners <- owner
+		return nil
+	}); err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	plugin := LoadedPlugin{PluginManifest: PluginManifest{ID: "watch_upgrade", Control: &PluginControl{
+		Permissions: []string{"net.tcp", "worker"},
+		NetAccess:   []PluginNetAccess{{Interfaces: []string{"eth0"}, Operations: []string{"tcp"}}},
+	}}}
+	if transferred, err := registry.TransferPluginGeneration(plugin, "generation-a", "generation-b"); err != nil || transferred != 1 {
+		t.Fatalf("TransferPluginGeneration() = %d/%v", transferred, err)
+	}
+	if _, err := peer.Write([]byte{0x42}); err != nil {
+		t.Fatalf("peer.Write() error = %v", err)
+	}
+	select {
+	case owner := <-owners:
+		if owner.generation != "generation-b" {
+			t.Fatalf("watch event generation = %q", owner.generation)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("transferred watcher did not deliver data")
+	}
+	transferred, err := registry.Info("watch_upgrade", "generation-b", info.Handle)
+	if err != nil || transferred.Watch == nil {
+		t.Fatalf("transferred socket = %+v/%v", transferred, err)
 	}
 }
 
@@ -589,6 +788,202 @@ func TestPluginControlSocketGenerationTransferRejectsPendingOpenWithoutInvalidat
 	}
 }
 
+func TestPluginControlSocketRejectsMalformedRuntimeRemoteEndpoints(t *testing.T) {
+	t.Run("accept", func(t *testing.T) {
+		client, peer := net.Pipe()
+		defer peer.Close()
+		listener := &pluginControlSocketTestListener{conn: &pluginControlSocketRemoteAddrConn{
+			Conn: client, remote: pluginControlSocketTestAddr("not-an-ip-endpoint"),
+		}}
+		transport := &pluginControlSocketEndpointTestTransport{listener: listener}
+		registry := newPluginControlSocketRegistry(transport)
+		defer registry.CloseAll()
+		opened, err := registry.Listen("endpoint_plugin", "generation-a", pluginControlSocketListenRequest{
+			Network: "tcp4", Interface: "eth0", LocalIP: net.ParseIP("127.0.0.1"), LocalPort: 179,
+		})
+		if err != nil {
+			t.Fatalf("Listen() error = %v", err)
+		}
+		if _, _, err := registry.Accept("endpoint_plugin", "generation-a", opened.Handle, time.Second); err == nil || !strings.Contains(err.Error(), "invalid remote endpoint") {
+			t.Fatalf("Accept() error = %v, want malformed endpoint rejection", err)
+		}
+		if got := registry.List("endpoint_plugin", "generation-a"); len(got) != 1 || got[0].Handle != opened.Handle {
+			t.Fatalf("sockets after rejected Accept() = %+v, want only listener", got)
+		}
+	})
+
+	t.Run("datagram read", func(t *testing.T) {
+		packet := &pluginControlSocketTestPacketConn{remote: pluginControlSocketTestAddr("bad-peer")}
+		transport := &pluginControlSocketEndpointTestTransport{packet: packet}
+		registry := newPluginControlSocketRegistry(transport)
+		defer registry.CloseAll()
+		opened, err := registry.Listen("endpoint_plugin", "generation-a", pluginControlSocketListenRequest{
+			Network: "udp4", Interface: "eth0", LocalIP: net.ParseIP("127.0.0.1"), LocalPort: 5353,
+		})
+		if err != nil {
+			t.Fatalf("ListenPacket() error = %v", err)
+		}
+		if _, err := registry.Read("endpoint_plugin", "generation-a", opened.Handle, 64, time.Second); err == nil || !strings.Contains(err.Error(), "invalid remote endpoint") {
+			t.Fatalf("Read() error = %v, want malformed endpoint rejection", err)
+		}
+		if got := registry.List("endpoint_plugin", "generation-a"); len(got) != 0 {
+			t.Fatalf("sockets after rejected datagram = %+v, want closed socket", got)
+		}
+		if !packet.isClosed() {
+			t.Fatal("malformed datagram socket was not closed")
+		}
+	})
+
+	t.Run("generation transfer", func(t *testing.T) {
+		client, peer := net.Pipe()
+		defer peer.Close()
+		conn := &pluginControlSocketRemoteAddrConn{
+			Conn: client, remote: &net.TCPAddr{IP: net.ParseIP("198.51.100.1"), Port: 179},
+		}
+		transport := &pluginControlSocketEndpointTestTransport{dial: conn}
+		registry := newPluginControlSocketRegistry(transport)
+		defer registry.CloseAll()
+		opened, err := registry.Open("endpoint_plugin", "generation-a", pluginControlSocketOpenRequest{
+			Network: "tcp4", Interface: "eth0", RemoteIP: net.ParseIP("198.51.100.1"), RemotePort: 179, Timeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		conn.remote = pluginControlSocketTestAddr("corrupt-endpoint")
+		plugin := LoadedPlugin{PluginManifest: PluginManifest{ID: "endpoint_plugin", Control: &PluginControl{
+			Permissions: []string{"net.tcp"},
+			NetAccess:   []PluginNetAccess{{Interfaces: []string{"eth0"}, Operations: []string{"tcp"}}},
+		}}}
+		if _, err := registry.TransferPluginGeneration(plugin, "generation-a", "generation-b"); err == nil || !strings.Contains(err.Error(), "invalid remote endpoint") {
+			t.Fatalf("TransferPluginGeneration() error = %v, want malformed endpoint rejection", err)
+		}
+		if _, err := registry.Info("endpoint_plugin", "generation-a", opened.Handle); err != nil {
+			t.Fatalf("old generation lost socket after rejected transfer: %v", err)
+		}
+		if _, err := registry.Info("endpoint_plugin", "generation-b", opened.Handle); !errors.Is(err, errPluginControlSocketNotFound) {
+			t.Fatalf("new generation acquired rejected socket: %v", err)
+		}
+	})
+}
+
+type pluginControlSocketTestAddr string
+
+func (addr pluginControlSocketTestAddr) Network() string { return "test" }
+func (addr pluginControlSocketTestAddr) String() string  { return string(addr) }
+
+type pluginControlSocketRemoteAddrConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (conn *pluginControlSocketRemoteAddrConn) RemoteAddr() net.Addr { return conn.remote }
+
+type pluginControlSocketTestListener struct {
+	mu     sync.Mutex
+	conn   net.Conn
+	closed bool
+}
+
+func (listener *pluginControlSocketTestListener) Accept() (net.Conn, error) {
+	listener.mu.Lock()
+	defer listener.mu.Unlock()
+	if listener.closed || listener.conn == nil {
+		return nil, net.ErrClosed
+	}
+	conn := listener.conn
+	listener.conn = nil
+	return conn, nil
+}
+
+func (listener *pluginControlSocketTestListener) Close() error {
+	listener.mu.Lock()
+	defer listener.mu.Unlock()
+	listener.closed = true
+	if listener.conn != nil {
+		err := listener.conn.Close()
+		listener.conn = nil
+		return err
+	}
+	return nil
+}
+
+func (*pluginControlSocketTestListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 179}
+}
+
+func (*pluginControlSocketTestListener) SetDeadline(time.Time) error { return nil }
+
+type pluginControlSocketTestPacketConn struct {
+	mu     sync.Mutex
+	remote net.Addr
+	closed bool
+}
+
+func (conn *pluginControlSocketTestPacketConn) ReadFrom(payload []byte) (int, net.Addr, error) {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if conn.closed {
+		return 0, nil, net.ErrClosed
+	}
+	if len(payload) == 0 {
+		return 0, conn.remote, nil
+	}
+	payload[0] = 0x42
+	return 1, conn.remote, nil
+}
+
+func (*pluginControlSocketTestPacketConn) WriteTo(payload []byte, _ net.Addr) (int, error) {
+	return len(payload), nil
+}
+
+func (conn *pluginControlSocketTestPacketConn) Close() error {
+	conn.mu.Lock()
+	conn.closed = true
+	conn.mu.Unlock()
+	return nil
+}
+
+func (*pluginControlSocketTestPacketConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5353}
+}
+
+func (*pluginControlSocketTestPacketConn) SetDeadline(time.Time) error      { return nil }
+func (*pluginControlSocketTestPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (*pluginControlSocketTestPacketConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (conn *pluginControlSocketTestPacketConn) isClosed() bool {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	return conn.closed
+}
+
+type pluginControlSocketEndpointTestTransport struct {
+	dial     net.Conn
+	listener pluginControlDeadlineListener
+	packet   net.PacketConn
+}
+
+func (transport *pluginControlSocketEndpointTestTransport) Dial(context.Context, pluginControlSocketOpenRequest) (net.Conn, error) {
+	if transport.dial == nil {
+		return nil, errors.New("test dial is unavailable")
+	}
+	return transport.dial, nil
+}
+
+func (transport *pluginControlSocketEndpointTestTransport) Listen(context.Context, pluginControlSocketListenRequest) (pluginControlDeadlineListener, error) {
+	if transport.listener == nil {
+		return nil, errors.New("test listener is unavailable")
+	}
+	return transport.listener, nil
+}
+
+func (transport *pluginControlSocketEndpointTestTransport) ListenPacket(context.Context, pluginControlSocketListenRequest) (net.PacketConn, error) {
+	if transport.packet == nil {
+		return nil, errors.New("test packet listener is unavailable")
+	}
+	return transport.packet, nil
+}
+
 type pluginControlSocketTestTransport struct {
 	mu       sync.Mutex
 	peers    chan net.Conn
@@ -605,11 +1000,17 @@ func (transport *pluginControlSocketTestTransport) Dial(ctx context.Context, req
 		return transport.dialFunc(ctx, req)
 	}
 	client, peer := net.Pipe()
+	var remote net.Addr
+	if pluginControlSocketIsUDP(req.Network) {
+		remote = &net.UDPAddr{IP: append(net.IP(nil), req.RemoteIP...), Port: req.RemotePort}
+	} else {
+		remote = &net.TCPAddr{IP: append(net.IP(nil), req.RemoteIP...), Port: req.RemotePort}
+	}
 	transport.mu.Lock()
 	transport.dials = append(transport.dials, req)
 	transport.mu.Unlock()
 	transport.peers <- peer
-	return client, nil
+	return &pluginControlSocketRemoteAddrConn{Conn: client, remote: remote}, nil
 }
 
 func (*pluginControlSocketTestTransport) Listen(_ context.Context, req pluginControlSocketListenRequest) (pluginControlDeadlineListener, error) {
@@ -698,4 +1099,25 @@ func pluginControlKVDataForTest(t *testing.T, db *sql.DB, pluginID string, key s
 		t.Fatalf("Unmarshal(%s) error = %v", key, err)
 	}
 	return out
+}
+
+func waitPluginControlKVDataForTest(t *testing.T, db *sql.DB, pluginID string, key string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		record, err := store.GetPluginRecord(db, pluginID, pluginControlKVResourceID, key)
+		if err == nil {
+			var out map[string]any
+			if err := json.Unmarshal([]byte(record.DataJSON), &out); err != nil {
+				t.Fatalf("Unmarshal(%s) error = %v", key, err)
+			}
+			return out
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("GetPluginRecord(%s) error = %v", key, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("plugin KV %s/%s was not written", pluginID, key)
+	return nil
 }

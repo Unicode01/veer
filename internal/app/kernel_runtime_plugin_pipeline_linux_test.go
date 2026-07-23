@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
@@ -249,25 +250,38 @@ func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t 
 		forwardDispatchProg:         &ebpf.Program{},
 		forwardPipelineProg:         &ebpf.Program{},
 		forwardEgressPipelineProg:   &ebpf.Program{},
+		forwardPipelineProgV6:       &ebpf.Program{},
+		forwardEgressPipelineProgV6: &ebpf.Program{},
 		forwardCoreProg:             &ebpf.Program{},
 		forwardPluginContinueProg:   &ebpf.Program{},
 		forwardPluginPostLookupProg: &ebpf.Program{},
+		forwardPluginPostApplyProg:  &ebpf.Program{},
 		forwardTransparentProg:      &ebpf.Program{},
 		forwardFullNATProg:          &ebpf.Program{},
 		forwardEgressNATProg:        &ebpf.Program{},
 		replyDispatchProg:           &ebpf.Program{},
 		replyPipelineProg:           &ebpf.Program{},
 		replyEgressPipelineProg:     &ebpf.Program{},
+		replyPipelineProgV6:         &ebpf.Program{},
+		replyEgressPipelineProgV6:   &ebpf.Program{},
 		replyCoreProg:               &ebpf.Program{},
 		replyPluginContinueProg:     &ebpf.Program{},
 		replyPluginPostReplyProg:    &ebpf.Program{},
+		replyPluginPostApplyProg:    &ebpf.Program{},
 		replyTransparentProg:        &ebpf.Program{},
 		replyFullNATProg:            &ebpf.Program{},
 		progChainV4:                 &ebpf.Map{},
 		pluginConfigV4:              &ebpf.Map{},
 		pluginInterfacesV4:          &ebpf.Map{},
 		dispatchScratchV4:           &ebpf.Map{},
+		dispatchScratchV6:           &ebpf.Map{},
 		pluginCtxV4:                 &ebpf.Map{},
+		pluginCtxV6:                 &ebpf.Map{},
+		pluginMetrics:               &ebpf.Map{},
+		packetMetadataGenerationV4:  &ebpf.Map{},
+		packetMetadataGenerationV6:  &ebpf.Map{},
+		packetMetadataV4:            &ebpf.Map{},
+		packetMetadataV6:            &ebpf.Map{},
 	}
 
 	programs := kernelAttachmentProgramsFromPieces(pieces, false, kernelTCAttachmentProgramModePipelineV4)
@@ -282,6 +296,91 @@ func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t 
 	}
 	if programs.forwardEgressProg != pieces.forwardEgressPipelineProg || programs.replyEgressProg != pieces.replyEgressPipelineProg {
 		t.Fatal("egress programs did not select the plugin pipeline wrappers")
+	}
+	if programs.forwardProgV6 != pieces.forwardPipelineProgV6 || programs.replyProgV6 != pieces.replyPipelineProgV6 {
+		t.Fatal("IPv6 ingress programs did not select the plugin pipeline wrappers")
+	}
+	if programs.forwardEgressProgV6 != pieces.forwardEgressPipelineProgV6 || programs.replyEgressProgV6 != pieces.replyEgressPipelineProgV6 {
+		t.Fatal("IPv6 egress programs did not select the plugin pipeline wrappers")
+	}
+}
+
+func TestTCPluginPipelineABIV2SlotLayoutHasNoOverlap(t *testing.T) {
+	owners := make(map[int]string, tcProgramChainV4MaxEntries)
+	claim := func(name string, base, count int) {
+		t.Helper()
+		for slot := base; slot < base+count; slot++ {
+			if slot < 0 || slot >= tcProgramChainV4MaxEntries {
+				t.Fatalf("%s claims slot %d outside [0,%d)", name, slot, tcProgramChainV4MaxEntries)
+			}
+			if previous := owners[slot]; previous != "" {
+				t.Fatalf("slot %d is shared by %s and %s", slot, previous, name)
+			}
+			owners[slot] = name
+		}
+	}
+
+	claim("core-forward", tcProgramChainIndexV4Transparent, 10)
+	claim("bank0-pre-reply", tcProgramChainIndexV4PluginReplyBase, tcProgramChainV4PluginPreReplyMax)
+	claim("bank0-post-reply", tcProgramChainIndexV4PluginReplyPostBase, tcProgramChainV4PluginPostReplyMax)
+	claim("reply-control", tcProgramChainIndexV4ReplyCore, 3)
+	claim("bank0-pre-forward", tcProgramChainIndexV4PluginBase, tcProgramChainV4PluginPreForwardMax)
+	claim("bank0-post-lookup", tcProgramChainIndexV4PluginPostBase, tcProgramChainV4PluginPostLookupMax)
+	claim("bank1-pre-forward", tcProgramChainIndexV4PluginBank1Base, tcProgramChainV4PluginPreForwardMax)
+	claim("bank1-post-lookup", tcProgramChainIndexV4PluginBank1PostBase, tcProgramChainV4PluginPostLookupMax)
+	claim("bank1-pre-reply", tcProgramChainIndexV4PluginBank1ReplyBase, tcProgramChainV4PluginPreReplyMax)
+	claim("bank1-post-reply", tcProgramChainIndexV4PluginBank1ReplyPostBase, tcProgramChainV4PluginPostReplyMax)
+	claim("apply-control", tcProgramChainIndexV4PluginPostApply, 2)
+	claim("bank0-post-apply", tcProgramChainIndexV4PluginApplyBase, tcProgramChainV4PluginPostApplyMax)
+	claim("bank1-post-apply", tcProgramChainIndexV4PluginBank1ApplyBase, tcProgramChainV4PluginPostApplyMax)
+	claim("bank0-reply-apply", tcProgramChainIndexV4PluginReplyApplyBase, tcProgramChainV4PluginPostReplyApplyMax)
+	claim("bank1-reply-apply", tcProgramChainIndexV4PluginBank1ReplyApplyBase, tcProgramChainV4PluginPostReplyApplyMax)
+
+	if len(owners) != tcProgramChainV4MaxEntries {
+		t.Fatalf("ABI v2 slot coverage = %d, want %d", len(owners), tcProgramChainV4MaxEntries)
+	}
+	if tcProgramChainV4PluginTotalMax > 14 || tcProgramChainV4PluginReplyTotalMax > 14 {
+		t.Fatalf("plugin hook totals exceed the tail-call depth budget: forward=%d reply=%d", tcProgramChainV4PluginTotalMax, tcProgramChainV4PluginReplyTotalMax)
+	}
+}
+
+func TestKernelPluginMetricKeyMapsEveryPipelineStage(t *testing.T) {
+	tests := []struct {
+		stage     string
+		chainBase int
+		metricKey uint32
+	}{
+		{kernelPluginPipelineStagePreForward, tcProgramChainIndexV4PluginBase, tcPluginMetricPreForwardBase},
+		{kernelPluginPipelineStagePostLookup, tcProgramChainIndexV4PluginPostBase, tcPluginMetricPostLookupBase},
+		{kernelPluginPipelineStagePostApply, tcProgramChainIndexV4PluginApplyBase, tcPluginMetricPostApplyBase},
+		{kernelPluginPipelineStagePreReply, tcProgramChainIndexV4PluginReplyBase, tcPluginMetricPreReplyBase},
+		{kernelPluginPipelineStagePostReply, tcProgramChainIndexV4PluginReplyPostBase, tcPluginMetricPostReplyBase},
+		{kernelPluginPipelineStageReplyApply, tcProgramChainIndexV4PluginReplyApplyBase, tcPluginMetricReplyApplyBase},
+	}
+	for _, test := range tests {
+		for index := 0; index < tcPluginMetricStageWidth; index++ {
+			got, ok := kernelPluginMetricKey(PluginAttachmentState{Stage: test.stage, ChainSlot: test.chainBase + index})
+			if !ok || got != test.metricKey+uint32(index) {
+				t.Fatalf("kernelPluginMetricKey(%s, %d) = (%d, %t), want (%d, true)", test.stage, test.chainBase+index, got, ok, test.metricKey+uint32(index))
+			}
+		}
+	}
+	if _, ok := kernelPluginMetricKey(PluginAttachmentState{Stage: "unknown", ChainSlot: 1}); ok {
+		t.Fatal("kernelPluginMetricKey(unknown) succeeded")
+	}
+	if _, ok := kernelPluginMetricKey(PluginAttachmentState{Stage: kernelPluginPipelineStagePreForward, ChainSlot: tcProgramChainIndexV4PluginBase + tcPluginMetricStageWidth}); ok {
+		t.Fatal("kernelPluginMetricKey(out-of-range slot) succeeded")
+	}
+}
+
+func TestPluginPacketMetricsClassifiesTerminalPackets(t *testing.T) {
+	got := pluginPacketMetrics(20, 2048, 12, 3, true)
+	if got.Packets != 20 || got.Bytes != 2048 || got.ContinuedPackets != 12 || got.TailCallMisses != 3 || got.TerminalPackets != 5 || got.DroppedPackets != 5 {
+		t.Fatalf("pluginPacketMetrics() = %+v", got)
+	}
+	got = pluginPacketMetrics(2, 128, 4, 1, false)
+	if got.TerminalPackets != 0 || got.DroppedPackets != 0 {
+		t.Fatalf("pluginPacketMetrics(inconsistent snapshot) = %+v, want clamped zero terminal count", got)
 	}
 }
 
@@ -455,6 +554,40 @@ func TestKernelPluginPipelineEgressInterfaceUsesEgressAttachment(t *testing.T) {
 	}
 	if plan.name != kernelForwardEgressPipelineProgramName || plan.prog != forwardEgress {
 		t.Fatalf("plan=%+v, want forward egress pipeline program", plan)
+	}
+}
+
+func TestKernelPluginPipelinePlansDualStackIngressAndEgress(t *testing.T) {
+	programs := kernelAttachmentPrograms{
+		forwardProg:         &ebpf.Program{},
+		forwardProgV6:       &ebpf.Program{},
+		forwardEgressProg:   &ebpf.Program{},
+		forwardEgressProgV6: &ebpf.Program{},
+	}
+	sets := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: nil},
+		ForwardEgress:  map[int][]int64{20: nil},
+	}
+	plans := desiredKernelAttachmentPlansForRuleSets(sets, programs)
+	if len(plans) != 4 {
+		t.Fatalf("plans = %+v, want IPv4/IPv6 ingress and egress attachments", plans)
+	}
+	want := map[string]bool{
+		kernelForwardProgramName:                 false,
+		kernelForwardProgramNameV6:               false,
+		kernelForwardEgressPipelineProgramName:   false,
+		kernelForwardEgressPipelineProgramNameV6: false,
+	}
+	for _, plan := range plans {
+		if _, ok := want[plan.name]; !ok {
+			t.Fatalf("unexpected dual-stack attachment plan: %+v", plan)
+		}
+		want[plan.name] = true
+	}
+	for name, found := range want {
+		if !found {
+			t.Fatalf("dual-stack attachment plan is missing %q", name)
+		}
 	}
 }
 
@@ -714,8 +847,8 @@ func TestBuildKernelPluginPipelineDesiredMapsReplyPriorityAroundCore(t *testing.
 	if desired[0].hooks[1].HookID != "after-reply-core" || desired[0].hooks[1].Stage != kernelPluginPipelineStagePostReply {
 		t.Fatalf("second hook = %+v, want after-reply-core mapped to post_reply", desired[0].hooks[1])
 	}
-	if len(desired[0].hooks[1].Context) != 1 || desired[0].hooks[1].Context[0] != pluginHookContextTCPluginCtxV4 {
-		t.Fatalf("post_reply context = %+v, want %s", desired[0].hooks[1].Context, pluginHookContextTCPluginCtxV4)
+	if len(desired[0].hooks[1].Context) != 2 || desired[0].hooks[1].Context[0] != pluginHookContextTCPluginCtxV4 || desired[0].hooks[1].Context[1] != pluginHookContextTCPluginCtxV6 {
+		t.Fatalf("post_reply context = %+v, want dual-stack plugin contexts", desired[0].hooks[1].Context)
 	}
 }
 
@@ -927,8 +1060,8 @@ func TestBuildKernelPluginPipelineDesiredAllowsFirewallStyleMultiObjectContext(t
 	if post.HookID != "post-core" || post.ObjectID != "firewall_post" || post.Stage != kernelPluginPipelineStagePostLookup {
 		t.Fatalf("post hook = %+v, want firewall_post post_lookup", post)
 	}
-	if len(post.Context) != 1 || post.Context[0] != pluginHookContextTCPluginCtxV4 {
-		t.Fatalf("post context = %+v, want %s", post.Context, pluginHookContextTCPluginCtxV4)
+	if len(post.Context) != 2 || post.Context[0] != pluginHookContextTCPluginCtxV4 || post.Context[1] != pluginHookContextTCPluginCtxV6 {
+		t.Fatalf("post context = %+v, want dual-stack plugin contexts", post.Context)
 	}
 	if pre.ObjectPath == post.ObjectPath {
 		t.Fatalf("object paths should be distinct for firewall pre/post hooks: pre=%q post=%q", pre.ObjectPath, post.ObjectPath)
@@ -980,8 +1113,8 @@ func TestBuildKernelPluginPipelineDesiredAllowsSameObjectPrePostContext(t *testi
 	if len(pre.Context) != 0 {
 		t.Fatalf("pre context = %+v, want empty", pre.Context)
 	}
-	if len(post.Context) != 1 || post.Context[0] != pluginHookContextTCPluginCtxV4 {
-		t.Fatalf("post context = %+v, want %s", post.Context, pluginHookContextTCPluginCtxV4)
+	if len(post.Context) != 2 || post.Context[0] != pluginHookContextTCPluginCtxV4 || post.Context[1] != pluginHookContextTCPluginCtxV6 {
+		t.Fatalf("post context = %+v, want dual-stack plugin contexts", post.Context)
 	}
 	if kernelPluginPipelineObjectCacheKey(pre.ObjectPath, kernelPluginPipelineHookNeedsContext(pre, pluginHookContextTCPluginCtxV4)) ==
 		kernelPluginPipelineObjectCacheKey(post.ObjectPath, kernelPluginPipelineHookNeedsContext(post, pluginHookContextTCPluginCtxV4)) {
@@ -1052,32 +1185,95 @@ func TestKernelPluginPipelineObjectCacheKeySeparatesContextNeed(t *testing.T) {
 	}
 }
 
-func TestReusableKernelPluginPipelineObjectRequiresSameVerifiedObject(t *testing.T) {
+func TestPreviousKernelPluginPipelineObjectTracksDefinitionChanges(t *testing.T) {
 	hash := strings.Repeat("a", 64)
+	stateMaps := []PluginObjectStateMap{{Name: "sessions", Policy: pluginObjectMapPreserve, SchemaVersion: 1}}
 	refs := []loadedPluginObjectRef{{
 		PluginID:     "stateful_plugin",
 		ObjectID:     "dataplane",
 		ObjectPath:   "/old/snapshot/dataplane.o",
 		ObjectSHA256: hash,
+		StateMaps:    stateMaps,
 		coll:         &ebpf.Collection{},
 	}}
 	plan := kernelPluginPipelineHookPlan{
-		PluginID:     "stateful_plugin",
-		ObjectID:     "dataplane",
-		ObjectPath:   "/new/snapshot/dataplane.o",
-		ObjectSHA256: strings.ToUpper(hash),
+		PluginID:        "stateful_plugin",
+		ObjectID:        "dataplane",
+		ObjectPath:      "/new/snapshot/dataplane.o",
+		ObjectSHA256:    strings.ToUpper(hash),
+		ObjectStateMaps: append([]PluginObjectStateMap(nil), stateMaps...),
 	}
-	if got := reusableKernelPluginPipelineObject(refs, plan); got == nil || got.ObjectPath != refs[0].ObjectPath {
-		t.Fatalf("reusable object = %+v, want matching plugin/object/hash", got)
+	got, unchanged := previousKernelPluginPipelineObject(refs, plan)
+	if got == nil || got.ObjectPath != refs[0].ObjectPath || !unchanged {
+		t.Fatalf("previous object = %+v unchanged=%t, want matching definition", got, unchanged)
 	}
 
 	plan.ObjectSHA256 = strings.Repeat("b", 64)
-	if got := reusableKernelPluginPipelineObject(refs, plan); got != nil {
-		t.Fatalf("reusable object with changed hash = %+v, want nil", got)
+	got, unchanged = previousKernelPluginPipelineObject(refs, plan)
+	if got == nil || unchanged {
+		t.Fatalf("previous object with changed hash = %+v unchanged=%t, want migratable previous object", got, unchanged)
 	}
-	plan.ObjectSHA256 = ""
-	if got := reusableKernelPluginPipelineObject(refs, plan); got != nil {
-		t.Fatalf("reusable object without verified hash = %+v, want nil", got)
+	plan.ObjectSHA256 = strings.ToUpper(hash)
+	plan.ObjectStateMaps[0].SchemaVersion = 2
+	got, unchanged = previousKernelPluginPipelineObject(refs, plan)
+	if got == nil || unchanged {
+		t.Fatalf("previous object with changed state contract = %+v unchanged=%t, want migration path", got, unchanged)
+	}
+}
+
+func TestPluginPipelineVersionedMapReplacementsRequireExplicitReset(t *testing.T) {
+	previous := &loadedPluginObjectRef{
+		StateMaps: []PluginObjectStateMap{{Name: "sessions", Policy: pluginObjectMapPreserve, SchemaVersion: 1}},
+		coll:      &ebpf.Collection{Maps: map[string]*ebpf.Map{}},
+	}
+	if _, err := pluginPipelineVersionedMapReplacements(&ebpf.CollectionSpec{}, map[string]*ebpf.Map{}, nil, previous); err == nil || !strings.Contains(err.Error(), "declare policy=reset") {
+		t.Fatalf("removed state map error = %v, want explicit reset requirement", err)
+	}
+	changed := []PluginObjectStateMap{{Name: "sessions", Policy: pluginObjectMapPreserve, SchemaVersion: 2}}
+	if _, err := pluginPipelineVersionedMapReplacements(&ebpf.CollectionSpec{}, map[string]*ebpf.Map{}, changed, previous); err == nil || !strings.Contains(err.Error(), "schema changed from 1 to 2") {
+		t.Fatalf("changed state map error = %v, want schema transition rejection", err)
+	}
+	reset := []PluginObjectStateMap{{Name: "sessions", Policy: pluginObjectMapReset}}
+	got, err := pluginPipelineVersionedMapReplacements(&ebpf.CollectionSpec{}, map[string]*ebpf.Map{}, reset, previous)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("explicit reset replacements = %v, error = %v", got, err)
+	}
+}
+
+func TestPluginPipelineVersionedMapReplacementsReuseCompatibleStateMapFD(t *testing.T) {
+	stateMap := newPluginMapAPITestMap(t, &ebpf.MapSpec{
+		Name: "sessions", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16,
+	})
+	key := uint32(7)
+	value := uint64(99)
+	if err := stateMap.Put(key, value); err != nil {
+		t.Fatalf("seed state map: %v", err)
+	}
+	contract := []PluginObjectStateMap{{Name: "sessions", Policy: pluginObjectMapPreserve, SchemaVersion: 1}}
+	previous := &loadedPluginObjectRef{
+		StateMaps: contract,
+		coll:      &ebpf.Collection{Maps: map[string]*ebpf.Map{"sessions": stateMap}},
+	}
+	nextSpec := &ebpf.CollectionSpec{Maps: map[string]*ebpf.MapSpec{
+		"sessions": {Name: "sessions", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16},
+	}}
+	replacements, err := pluginPipelineVersionedMapReplacements(nextSpec, map[string]*ebpf.Map{}, contract, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacements["sessions"] != stateMap {
+		t.Fatalf("replacement map = %p, want previous FD %p", replacements["sessions"], stateMap)
+	}
+	var got uint64
+	if err := replacements["sessions"].Lookup(key, &got); err != nil || got != value {
+		t.Fatalf("preserved state value = %d, error = %v, want %d", got, err, value)
+	}
+
+	incompatible := &ebpf.CollectionSpec{Maps: map[string]*ebpf.MapSpec{
+		"sessions": {Name: "sessions", Type: ebpf.Hash, KeySize: 4, ValueSize: 16, MaxEntries: 16},
+	}}
+	if _, err := pluginPipelineVersionedMapReplacements(incompatible, map[string]*ebpf.Map{}, contract, previous); err == nil || !strings.Contains(err.Error(), "preserve state map") {
+		t.Fatalf("incompatible state map error = %v", err)
 	}
 }
 
@@ -1219,16 +1415,19 @@ func TestBuildKernelPluginPipelineInterfaceMasksSeparatesScopedHooks(t *testing.
 		{plan: kernelPluginPipelineHookPlan{PluginID: "scoped", HookID: "scoped-post", Stage: kernelPluginPipelineStagePostLookup, Interfaces: []string{"tap10", "tap20"}, InterfaceIndexes: []uint32{10, 20}}},
 		{plan: kernelPluginPipelineHookPlan{PluginID: "reply", HookID: "reply", Stage: kernelPluginPipelineStagePreReply, Interfaces: []string{"tap20"}, InterfaceIndexes: []uint32{20}}},
 		{plan: kernelPluginPipelineHookPlan{PluginID: "egress", HookID: "egress", Stage: kernelPluginPipelineStagePreForward, Attach: "egress", Interfaces: []string{"tap10"}, InterfaceIndexes: []uint32{10}}},
+		{plan: kernelPluginPipelineHookPlan{PluginID: "apply", HookID: "global-apply", Stage: kernelPluginPipelineStagePostApply}},
+		{plan: kernelPluginPipelineHookPlan{PluginID: "apply", HookID: "scoped-apply", Stage: kernelPluginPipelineStagePostApply, Interfaces: []string{"tap10"}, InterfaceIndexes: []uint32{10}}},
+		{plan: kernelPluginPipelineHookPlan{PluginID: "reply", HookID: "reply-apply", Stage: kernelPluginPipelineStageReplyApply, Attach: "egress", Interfaces: []string{"tap20"}, InterfaceIndexes: []uint32{20}}},
 	}
 	masks, err := buildKernelPluginPipelineInterfaceMasks(programs)
 	if err != nil {
 		t.Fatalf("buildKernelPluginPipelineInterfaceMasks() error = %v", err)
 	}
 	ingressGlobal := masks.globalByAttach[kernelPluginPipelineAttachIngress]
-	if ingressGlobal.PreForwardMask != 0b01 || ingressGlobal.PostLookupMask != 0 || ingressGlobal.PreReplyMask != 0 {
-		t.Fatalf("ingress global masks = %+v, want only pre-forward slot 0", ingressGlobal)
+	if ingressGlobal.PreForwardMask != 0b01 || ingressGlobal.PostLookupMask != 0 || ingressGlobal.PreReplyMask != 0 || ingressGlobal.PostApplyMask != 0b01 {
+		t.Fatalf("ingress global masks = %+v, want pre-forward and post-apply slot 0", ingressGlobal)
 	}
-	if got := masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: 10, Attach: kernelPluginPipelineAttachIngress}]; got.PreForwardMask != 0b10 || got.PostLookupMask != 0b1 || got.PreReplyMask != 0 {
+	if got := masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: 10, Attach: kernelPluginPipelineAttachIngress}]; got.PreForwardMask != 0b10 || got.PostLookupMask != 0b1 || got.PreReplyMask != 0 || got.PostApplyMask != 0b10 {
 		t.Fatalf("ifindex 10 masks = %+v, want scoped pre/post hooks", got)
 	}
 	if got := masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: 20, Attach: kernelPluginPipelineAttachIngress}]; got.PreForwardMask != 0 || got.PostLookupMask != 0b1 || got.PreReplyMask != 0b1 {
@@ -1237,14 +1436,19 @@ func TestBuildKernelPluginPipelineInterfaceMasksSeparatesScopedHooks(t *testing.
 	if got := masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: 10, Attach: kernelPluginPipelineAttachEgress}]; got.PreForwardMask != 0b100 || got.PostLookupMask != 0 || got.PreReplyMask != 0 {
 		t.Fatalf("ifindex 10 egress masks = %+v, want only egress pre-forward slot 2", got)
 	}
+	if got := masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: 20, Attach: kernelPluginPipelineAttachEgress}]; got.ReplyApplyMask != 0b1 {
+		t.Fatalf("ifindex 20 egress masks = %+v, want reply apply slot 0", got)
+	}
 }
 
 func TestNormalizePluginHookAllowsPhysicalPipelineStages(t *testing.T) {
 	for _, stage := range []string{
 		kernelPluginPipelineStagePreForward,
 		kernelPluginPipelineStagePostLookup,
+		kernelPluginPipelineStagePostApply,
 		kernelPluginPipelineStagePreReply,
 		kernelPluginPipelineStagePostReply,
+		kernelPluginPipelineStageReplyApply,
 	} {
 		hook := PluginHook{
 			ID:       "hook-" + strings.ReplaceAll(stage, "_", "-"),
@@ -1264,7 +1468,7 @@ func TestNormalizePluginHookAllowsPhysicalPipelineStages(t *testing.T) {
 	}
 }
 
-func TestKernelPluginPipelineKeepsXDPHooksRegistrationOnly(t *testing.T) {
+func TestKernelPluginPipelineDelegatesXDPHooksToDispatcher(t *testing.T) {
 	enabled := true
 	cfg := pluginsEnabledTestConfig(&Config{
 		PluginsEnabledSetting:   &enabled,
@@ -1308,15 +1512,11 @@ func TestKernelPluginPipelineKeepsXDPHooksRegistrationOnly(t *testing.T) {
 	if len(desired) != 0 {
 		t.Fatalf("desired = %+v, want no tc pipeline hooks for xdp-only plugin", desired)
 	}
-	state, ok := states["xdp_probe"]
-	if !ok {
-		t.Fatal("missing xdp_probe runtime state")
+	if _, ok := states["xdp_probe"]; ok {
+		t.Fatalf("tc pipeline emitted xdp runtime state = %+v, want xdp dispatcher ownership", states["xdp_probe"])
 	}
-	if state.Mode != pluginRuntimeModeRegistered || state.Attachable || state.Attached || state.AttachmentCount != 0 {
-		t.Fatalf("state = %+v, want registered non-attachable xdp hook", state)
-	}
-	if !strings.Contains(state.Reason, "xdp hooks are registration-only in the tc pipeline") {
-		t.Fatalf("state reason = %q, want xdp registration-only reason", state.Reason)
+	if !kernelXDPPluginCatalogHasRuntimeHooks(catalog, cfg) {
+		t.Fatal("kernelXDPPluginCatalogHasRuntimeHooks() = false, want true")
 	}
 }
 
@@ -1412,6 +1612,14 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	if _, ok := stateHasAttachmentProgram(state, "packet_observer:tc_pre_forward"); !ok {
 		t.Fatalf("plugin state attachments = %+v, want packet_observer:tc_pre_forward", state.Attachments)
 	}
+	if observed := runXDPFullNATIntegrationProbe(t, topology, "tcp", dataplanePerfFrontPort, dataplanePerfBackendPort); observed != dataplanePerfClientAddr {
+		t.Fatalf("initial transparent plugin probe observed source %q, want %q", observed, dataplanePerfClientAddr)
+	}
+	state, _ = rt.PluginSnapshot().stateFor("packet_observer")
+	metricAttachment, ok := stateHasAttachmentProgram(state, "packet_observer:tc_pre_forward")
+	if !ok || metricAttachment.Metrics == nil || metricAttachment.Metrics.IPv4.Packets == 0 {
+		t.Fatalf("initial plugin attachment metrics = %+v, want observed IPv4 packets", metricAttachment.Metrics)
+	}
 
 	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
 	results, err = rt.Reconcile([]Rule{rule})
@@ -1444,6 +1652,20 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	if err := pieces.progChainV4.Lookup(uint32(tcProgramChainIndexV4PluginBank1Base), &pluginFD); !errors.Is(err, ebpf.ErrKeyNotExist) {
 		t.Fatalf("previous bank slot remains after hot-switch grace: fd=%d err=%v", pluginFD, err)
 	}
+	state, _ = rt.PluginSnapshot().stateFor("packet_observer")
+	metricAttachment, ok = stateHasAttachmentProgram(state, "packet_observer:tc_pre_forward")
+	if !ok || metricAttachment.Metrics == nil || metricAttachment.Metrics.IPv4.Packets != 0 {
+		t.Fatalf("plugin metrics after chain generation switch = %+v, want reset IPv4 counters", metricAttachment.Metrics)
+	}
+	if observed := runXDPFullNATIntegrationProbe(t, topology, "tcp", dataplanePerfFrontPort, dataplanePerfBackendPort); observed != dataplanePerfClientAddr {
+		t.Fatalf("updated transparent plugin probe observed source %q, want %q", observed, dataplanePerfClientAddr)
+	}
+	state, _ = rt.PluginSnapshot().stateFor("packet_observer")
+	metricAttachment, _ = stateHasAttachmentProgram(state, "packet_observer:tc_pre_forward")
+	if metricAttachment.Metrics == nil || metricAttachment.Metrics.Total.Packets == 0 {
+		t.Fatalf("updated plugin attachment metrics = %+v, want observed packets", metricAttachment.Metrics)
+	}
+	packetsBeforeFailedUpdate := metricAttachment.Metrics.Total.Packets
 	if err := os.WriteFile(filepath.Join(pluginDir, "control.js"), []byte(`pipeline.attach({`), 0o644); err != nil {
 		t.Fatalf("write broken control.js: %v", err)
 	}
@@ -1463,6 +1685,10 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	state, ok = rt.PluginSnapshot().stateFor("packet_observer")
 	if !ok || !state.Attached || state.Error == "" || !strings.Contains(state.Reason, "previous chain preserved") {
 		t.Fatalf("plugin state after broken hot update = %+v, want attached previous chain with reload error", state)
+	}
+	metricAttachment, _ = stateHasAttachmentProgram(state, "packet_observer:tc_pre_forward")
+	if metricAttachment.Metrics == nil || metricAttachment.Metrics.Total.Packets < packetsBeforeFailedUpdate {
+		t.Fatalf("plugin metrics after failed chain update = %+v, want previous generation counters preserved", metricAttachment.Metrics)
 	}
 
 	enabled = false
@@ -1485,6 +1711,461 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Fatalf("lookupKernelCollectionPieces(after disabling plugins with active rule) error = %v", err)
 	}
 	assertKernelPluginPipelineClearedForTest(t, pieces)
+}
+
+func TestKernelPluginPipelineRuntimePreservesDeclaredMapAcrossObjectUpgrade(t *testing.T) {
+	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
+		t.Skipf("set %s=1 to run the privileged TC plugin pipeline map upgrade test", kernelPluginPipelineTestEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+
+	pluginsRoot := t.TempDir()
+	copyDirForTest(t, filepath.Join(findRepoRoot(t), "plugins", "include"), filepath.Join(pluginsRoot, "include"))
+	pluginDir := filepath.Join(pluginsRoot, "stateful_map")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(pluginDir, "stateful_map.bpf.c")
+	objectPath := filepath.Join(pluginDir, "stateful_map.o")
+	writeStatefulPipelinePluginForTest(t, pluginDir, pluginObjectMapPreserve, 1)
+	writeStatefulPipelineBPFForTest(t, sourcePath, 1)
+	compileBPFObjectFromSource(t, sourcePath, objectPath)
+
+	enabled := true
+	cfg := pluginsEnabledTestConfig(&Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+		PluginsDir:              pluginsRoot,
+	})
+	topology := setupDataplanePerfTopology(t)
+	seedDataplanePerfNeighbors(t, topology)
+	rt := newTCKernelRuleRuntime(cfg)
+	defer rt.Close()
+	rule := Rule{
+		ID:               1,
+		InInterface:      topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     topology.BackendHostIF,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Transparent:      true,
+		Enabled:          true,
+		EnginePreference: ruleEngineKernel,
+	}
+	if results, err := rt.Reconcile([]Rule{rule}); err != nil || !results[rule.ID].Running {
+		t.Fatalf("initial reconcile result = %+v, error = %v", results[rule.ID], err)
+	}
+	oldRef := kernelPluginPipelineObjectRefForTest(t, rt, "stateful_map", "dataplane")
+	oldHash := oldRef.ObjectSHA256
+	oldMap := oldRef.coll.Maps["sessions"]
+	key := uint32(7)
+	want := uint64(0x1122334455667788)
+	if err := oldMap.Put(key, want); err != nil {
+		t.Fatalf("seed old session map: %v", err)
+	}
+
+	writeStatefulPipelineBPFForTest(t, sourcePath, 2)
+	compileBPFObjectFromSource(t, sourcePath, objectPath)
+	if results, err := rt.Reconcile([]Rule{rule}); err != nil || !results[rule.ID].Running {
+		t.Fatalf("object upgrade reconcile result = %+v, error = %v", results[rule.ID], err)
+	}
+	newRef := kernelPluginPipelineObjectRefForTest(t, rt, "stateful_map", "dataplane")
+	if newRef.ObjectSHA256 == oldHash {
+		t.Fatalf("object hash did not change across compiled program upgrade: %s", oldHash)
+	}
+	var got uint64
+	if err := newRef.coll.Maps["sessions"].Lookup(key, &got); err != nil || got != want {
+		t.Fatalf("state after object upgrade = %#x, error = %v, want %#x", got, err, want)
+	}
+
+	writeStatefulPipelinePluginForTest(t, pluginDir, pluginObjectMapPreserve, 2)
+	if results, err := rt.Reconcile([]Rule{rule}); err != nil || !results[rule.ID].Running {
+		t.Fatalf("incompatible schema reconcile result = %+v, error = %v", results[rule.ID], err)
+	}
+	state, ok := rt.PluginSnapshot().stateFor("stateful_map")
+	if !ok || state.Error == "" || !strings.Contains(state.Reason, "previous chain preserved") {
+		t.Fatalf("state after incompatible schema = %+v, want retained chain error", state)
+	}
+	retained := kernelPluginPipelineObjectRefForTest(t, rt, "stateful_map", "dataplane")
+	got = 0
+	if err := retained.coll.Maps["sessions"].Lookup(key, &got); err != nil || got != want {
+		t.Fatalf("state after rejected schema upgrade = %#x, error = %v, want %#x", got, err, want)
+	}
+
+	writeStatefulPipelinePluginForTest(t, pluginDir, pluginObjectMapReset, 0)
+	if results, err := rt.Reconcile([]Rule{rule}); err != nil || !results[rule.ID].Running {
+		t.Fatalf("explicit reset reconcile result = %+v, error = %v", results[rule.ID], err)
+	}
+	resetRef := kernelPluginPipelineObjectRefForTest(t, rt, "stateful_map", "dataplane")
+	got = 0
+	if err := resetRef.coll.Maps["sessions"].Lookup(key, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("state map lookup after explicit reset = %#x, error = %v, want missing key", got, err)
+	}
+}
+
+func TestKernelPluginPipelineRuntimeMigratesStateMapAndRollsBackToPreservedSource(t *testing.T) {
+	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
+		t.Skipf("set %s=1 to run the privileged TC plugin pipeline map migration test", kernelPluginPipelineTestEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+
+	pluginsRoot := t.TempDir()
+	copyDirForTest(t, filepath.Join(findRepoRoot(t), "plugins", "include"), filepath.Join(pluginsRoot, "include"))
+	pluginDir := filepath.Join(pluginsRoot, "migrating_map")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(pluginDir, "migrating_map.bpf.c")
+	objectPath := filepath.Join(pluginDir, "migrating_map.o")
+	writeMigratingPipelinePluginForTest(t, pluginDir, 1)
+	writeMigratingPipelineBPFForTest(t, sourcePath, 1)
+	compileBPFObjectFromSource(t, sourcePath, objectPath)
+
+	enabled := true
+	cfg := pluginsEnabledTestConfig(&Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+		PluginsDir:              pluginsRoot,
+	})
+	topology := setupDataplanePerfTopology(t)
+	seedDataplanePerfNeighbors(t, topology)
+	rt := newTCKernelRuleRuntime(cfg)
+	defer rt.Close()
+	rule := Rule{
+		ID: 1, InInterface: topology.ClientHostIF, InIP: dataplanePerfFrontAddr, InPort: dataplanePerfFrontPort,
+		OutInterface: topology.BackendHostIF, OutIP: dataplanePerfBackendAddr, OutPort: dataplanePerfBackendPort,
+		Protocol: "tcp", Transparent: true, Enabled: true, EnginePreference: ruleEngineKernel,
+	}
+	if results, err := rt.Reconcile([]Rule{rule}); err != nil || !results[rule.ID].Running {
+		t.Fatalf("initial reconcile result = %+v, error = %v", results[rule.ID], err)
+	}
+	v1Ref := kernelPluginPipelineObjectRefForTest(t, rt, "migrating_map", "dataplane")
+	key := uint32(7)
+	wantV1 := uint64(0x1122334455667788)
+	if err := v1Ref.coll.Maps["sessions_v1"].Put(key, wantV1); err != nil {
+		t.Fatalf("seed v1 session map: %v", err)
+	}
+
+	writeMigratingPipelinePluginForTest(t, pluginDir, 2)
+	writeMigratingPipelineBPFForTest(t, sourcePath, 2)
+	compileBPFObjectFromSource(t, sourcePath, objectPath)
+	if results, err := rt.Reconcile([]Rule{rule}); err != nil || !results[rule.ID].Running {
+		t.Fatalf("migration candidate reconcile result = %+v, error = %v", results[rule.ID], err)
+	}
+	v2Ref := kernelPluginPipelineObjectRefForTest(t, rt, "migrating_map", "dataplane")
+	var gotV1 uint64
+	if err := v2Ref.coll.Maps["sessions_v1"].Lookup(key, &gotV1); err != nil || gotV1 != wantV1 {
+		t.Fatalf("preserved v1 state = %#x, error = %v, want %#x", gotV1, err, wantV1)
+	}
+	pending := rt.PendingPluginEBPFStateMigrations()
+	if len(pending) != 1 || pending[0].SourceMap != "sessions_v1" || pending[0].TargetMap != "sessions_v2" {
+		t.Fatalf("pending migrations = %+v", pending)
+	}
+	type sessionV2 struct {
+		Value  uint64
+		Marker uint64
+	}
+	wantV2 := sessionV2{Value: wantV1, Marker: 2}
+	if err := v2Ref.coll.Maps["sessions_v2"].Put(key, wantV2); err != nil {
+		t.Fatalf("write migrated v2 state: %v", err)
+	}
+	var gotV2 sessionV2
+	if err := v2Ref.coll.Maps["sessions_v2"].Lookup(key, &gotV2); err != nil || gotV2 != wantV2 {
+		t.Fatalf("migrated v2 state = %+v, error = %v, want %+v", gotV2, err, wantV2)
+	}
+	if observed := runXDPFullNATIntegrationProbe(t, topology, "tcp", dataplanePerfFrontPort, dataplanePerfBackendPort); observed != dataplanePerfClientAddr {
+		t.Fatalf("traffic through migration candidate observed source %q, want %q", observed, dataplanePerfClientAddr)
+	}
+	rt.CompletePluginEBPFStateMigrations(pending)
+	if remaining := rt.PendingPluginEBPFStateMigrations(); len(remaining) != 0 {
+		t.Fatalf("completed migration remains pending: %+v", remaining)
+	}
+
+	writeMigratingPipelinePluginForTest(t, pluginDir, 1)
+	writeMigratingPipelineBPFForTest(t, sourcePath, 1)
+	compileBPFObjectFromSource(t, sourcePath, objectPath)
+	if results, err := rt.Reconcile([]Rule{rule}); err != nil || !results[rule.ID].Running {
+		t.Fatalf("rollback reconcile result = %+v, error = %v", results[rule.ID], err)
+	}
+	rollbackRef := kernelPluginPipelineObjectRefForTest(t, rt, "migrating_map", "dataplane")
+	gotV1 = 0
+	if err := rollbackRef.coll.Maps["sessions_v1"].Lookup(key, &gotV1); err != nil || gotV1 != wantV1 {
+		t.Fatalf("v1 state after rollback = %#x, error = %v, want %#x", gotV1, err, wantV1)
+	}
+	if rollbackRef.coll.Maps["sessions_v2"] != nil {
+		t.Fatal("v2 candidate map remained loaded after rollback")
+	}
+	if observed := runXDPFullNATIntegrationProbe(t, topology, "tcp", dataplanePerfFrontPort, dataplanePerfBackendPort); observed != dataplanePerfClientAddr {
+		t.Fatalf("traffic after migration rollback observed source %q, want %q", observed, dataplanePerfClientAddr)
+	}
+}
+
+func TestKernelPluginPipelineRuntimeIPv6PostApplyForwardsTraffic(t *testing.T) {
+	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
+		t.Skipf("set %s=1 to run the privileged TC plugin pipeline smoke test", kernelPluginPipelineTestEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+
+	pluginsRoot := t.TempDir()
+	pluginDir := filepath.Join(pluginsRoot, "post_apply_observer")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(post_apply_observer) error = %v", err)
+	}
+	writePostApplyObserverPluginForTest(t, pluginDir)
+	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "post_apply_observer.bpf.c"), filepath.Join(pluginDir, "post_apply_observer.o"))
+
+	topology := setupDataplanePerfTopology(t)
+	seedDataplanePerfNeighbors(t, topology)
+	seedTCIPv6IntegrationNeighbors(t, topology)
+	enabled := true
+	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+		PluginsDir:              pluginsRoot,
+	}))
+	defer rt.Close()
+
+	rule := Rule{
+		ID:               1,
+		InInterface:      topology.ClientHostIF,
+		InIP:             tcIPv6IntegrationFrontAddr,
+		InPort:           tcIPv6IntegrationFrontPort,
+		OutInterface:     topology.BackendHostIF,
+		OutIP:            tcIPv6IntegrationBackendAddr,
+		OutSourceIP:      tcIPv6IntegrationBackendHost,
+		OutPort:          tcIPv6IntegrationBackendPort,
+		Protocol:         "tcp",
+		Enabled:          true,
+		EnginePreference: ruleEngineKernel,
+		Remark:           "plugin-ipv6-post-apply",
+		Tag:              "test",
+	}
+	ipv4Rule := Rule{
+		ID:               2,
+		InInterface:      topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     topology.BackendHostIF,
+		OutIP:            dataplanePerfBackendAddr,
+		OutSourceIP:      dataplanePerfBackendHost,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Enabled:          true,
+		EnginePreference: ruleEngineKernel,
+		Remark:           "plugin-ipv4-post-apply",
+		Tag:              "test",
+	}
+	results, err := rt.Reconcile([]Rule{rule, ipv4Rule})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("rule result = %+v, want running tc", result)
+	}
+	if result := results[ipv4Rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("IPv4 rule result = %+v, want running tc", result)
+	}
+	state, ok := rt.PluginSnapshot().stateFor("post_apply_observer")
+	if !ok || !state.Attached || state.AttachmentCount != 2 {
+		t.Fatalf("plugin state = %+v, want forward and reply post-apply attachments", state)
+	}
+	if attachment, ok := stateHasAttachmentProgram(state, "observer:tc_post_apply"); !ok || attachment.Stage != kernelPluginPipelineStagePostApply || attachment.ChainSlot != tcProgramChainIndexV4PluginApplyBase {
+		t.Fatalf("plugin attachments = %+v, want post_apply slot %d", state.Attachments, tcProgramChainIndexV4PluginApplyBase)
+	}
+	if attachment, ok := stateHasAttachmentProgram(state, "observer:tc_reply_apply"); !ok || attachment.Stage != kernelPluginPipelineStageReplyApply || attachment.ChainSlot != tcProgramChainIndexV4PluginReplyApplyBase {
+		t.Fatalf("plugin attachments = %+v, want post_reply_apply slot %d", state.Attachments, tcProgramChainIndexV4PluginReplyApplyBase)
+	}
+
+	if err := runTCIPv6IntegrationProbePorts(t, topology, "tcp", tcIPv6IntegrationFrontPort, tcIPv6IntegrationBackendPort); err != nil {
+		t.Fatalf("IPv6 full-NAT traffic through post-apply plugin failed: %v", err)
+	}
+	if observed := runXDPFullNATIntegrationProbe(t, topology, "tcp", dataplanePerfFrontPort, dataplanePerfBackendPort); observed != dataplanePerfBackendHost {
+		t.Fatalf("IPv4 full-NAT backend observed source %q, want %q", observed, dataplanePerfBackendHost)
+	}
+	countMap, err := findPluginLoadedMap(rt.pluginPipelineLoaded, "post_apply_observer", "observer", "post_apply_counts")
+	if err != nil {
+		t.Fatalf("find post_apply_counts: %v", err)
+	}
+	possibleCPUs, err := ebpf.PossibleCPU()
+	if err != nil {
+		t.Fatalf("get possible CPUs: %v", err)
+	}
+	type postApplyCounts struct {
+		IPv4ForwardRedirect uint64
+		IPv6ForwardRedirect uint64
+		IPv4ReplyRedirect   uint64
+		IPv6ReplyRedirect   uint64
+	}
+	values := make([]postApplyCounts, possibleCPUs)
+	if err := countMap.Lookup(uint32(0), &values); err != nil {
+		t.Fatalf("read post_apply_counts: %v", err)
+	}
+	var ipv6ForwardRedirects uint64
+	var ipv6ReplyRedirects uint64
+	for _, value := range values {
+		ipv6ForwardRedirects += value.IPv6ForwardRedirect
+		ipv6ReplyRedirects += value.IPv6ReplyRedirect
+	}
+	var ipv4ForwardRedirects uint64
+	var ipv4ReplyRedirects uint64
+	for _, value := range values {
+		ipv4ForwardRedirects += value.IPv4ForwardRedirect
+		ipv4ReplyRedirects += value.IPv4ReplyRedirect
+	}
+	if ipv4ForwardRedirects == 0 || ipv4ReplyRedirects == 0 || ipv6ForwardRedirects == 0 || ipv6ReplyRedirects == 0 {
+		t.Fatalf("post_apply_counts = %+v, want IPv4/IPv6 forward and reply redirect observations", values)
+	}
+	snapshot := rt.PluginSnapshot()
+	state, ok = snapshot.stateFor("post_apply_observer")
+	if !ok {
+		t.Fatalf("plugin snapshot after traffic = %+v, want post_apply_observer", snapshot)
+	}
+	for _, program := range []string{"observer:tc_post_apply", "observer:tc_reply_apply"} {
+		attachment, found := stateHasAttachmentProgram(state, program)
+		if !found || attachment.Metrics == nil {
+			t.Fatalf("attachment %s = %+v, want host metrics", program, attachment)
+		}
+		if attachment.Metrics.IPv4.Packets == 0 || attachment.Metrics.IPv6.Packets == 0 {
+			t.Fatalf("attachment %s metrics = %+v, want IPv4 and IPv6 packets", program, attachment.Metrics)
+		}
+		if attachment.Metrics.IPv4.ContinuedPackets == 0 || attachment.Metrics.IPv6.ContinuedPackets == 0 {
+			t.Fatalf("attachment %s metrics = %+v, want IPv4 and IPv6 continuation", program, attachment.Metrics)
+		}
+		if attachment.Metrics.Total.TailCallMisses != 0 || attachment.Metrics.Total.TerminalPackets != 0 {
+			t.Fatalf("attachment %s metrics = %+v, want no misses or terminal packets", program, attachment.Metrics)
+		}
+	}
+}
+
+func TestKernelPluginPipelineRuntimePacketMetadataAcrossPluginsDualStack(t *testing.T) {
+	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
+		t.Skipf("set %s=1 to run the privileged TC packet metadata test", kernelPluginPipelineTestEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+
+	pluginsRoot := t.TempDir()
+	producerDir, consumerDir := writePacketMetadataPluginPairForTest(t, pluginsRoot)
+	compileBPFObjectFromSource(t, filepath.Join(producerDir, "metadata_producer.bpf.c"), filepath.Join(producerDir, "metadata_producer.o"))
+	compileBPFObjectFromSource(t, filepath.Join(consumerDir, "metadata_consumer.bpf.c"), filepath.Join(consumerDir, "metadata_consumer.o"))
+
+	topology := setupDataplanePerfTopology(t)
+	seedDataplanePerfNeighbors(t, topology)
+	seedTCIPv6IntegrationNeighbors(t, topology)
+	enabled := true
+	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
+		PluginsEnabledSetting:   &enabled,
+		PluginsDataplaneSetting: &enabled,
+		PluginsDir:              pluginsRoot,
+	}))
+	defer rt.Close()
+
+	ipv4Rule := Rule{
+		ID: 1, InInterface: topology.ClientHostIF, InIP: dataplanePerfFrontAddr, InPort: dataplanePerfFrontPort,
+		OutInterface: topology.BackendHostIF, OutIP: dataplanePerfBackendAddr, OutSourceIP: dataplanePerfBackendHost,
+		OutPort: dataplanePerfBackendPort, Protocol: "tcp", Enabled: true, EnginePreference: ruleEngineKernel,
+		Remark: "plugin-metadata-v4", Tag: "test",
+	}
+	ipv6Rule := Rule{
+		ID: 2, InInterface: topology.ClientHostIF, InIP: tcIPv6IntegrationFrontAddr, InPort: tcIPv6IntegrationFrontPort,
+		OutInterface: topology.BackendHostIF, OutIP: tcIPv6IntegrationBackendAddr, OutSourceIP: tcIPv6IntegrationBackendHost,
+		OutPort: tcIPv6IntegrationBackendPort, Protocol: "tcp", Enabled: true, EnginePreference: ruleEngineKernel,
+		Remark: "plugin-metadata-v6", Tag: "test",
+	}
+	results, err := rt.Reconcile([]Rule{ipv4Rule, ipv6Rule})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	for _, rule := range []Rule{ipv4Rule, ipv6Rule} {
+		if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+			t.Fatalf("rule %d result = %+v, want running tc", rule.ID, result)
+		}
+	}
+
+	producerState, producerOK := rt.PluginSnapshot().stateFor("metadata_producer")
+	consumerState, consumerOK := rt.PluginSnapshot().stateFor("metadata_consumer")
+	if !producerOK || !consumerOK || !producerState.Attached || !consumerState.Attached {
+		t.Fatalf("plugin states producer=%+v consumer=%+v", producerState, consumerState)
+	}
+	producerAttachment, producerAttached := stateHasAttachmentProgram(producerState, "producer:tc_produce")
+	consumerAttachment, consumerAttached := stateHasAttachmentProgram(consumerState, "consumer:tc_consume")
+	if !producerAttached || !consumerAttached || producerAttachment.ChainSlot != tcProgramChainIndexV4PluginBase || consumerAttachment.ChainSlot != tcProgramChainIndexV4PluginBase+1 {
+		t.Fatalf("metadata attachment order producer=%+v consumer=%+v", producerAttachment, consumerAttachment)
+	}
+
+	pieces, err := lookupKernelCollectionPieces(rt.coll)
+	if err != nil {
+		t.Fatalf("lookupKernelCollectionPieces() error = %v", err)
+	}
+	var config kernelTCPluginConfigV4
+	if err := pieces.pluginConfigV4.Lookup(uint32(0), &config); err != nil {
+		t.Fatalf("lookup plugin config: %v", err)
+	}
+	if config.PreForwardMetadataMask != 0x3 {
+		t.Fatalf("pre-forward metadata mask = %#x, want %#x", config.PreForwardMetadataMask, uint32(0x3))
+	}
+
+	producerRef := kernelPluginPipelineObjectRefForTest(t, rt, "metadata_producer", "producer")
+	consumerRef := kernelPluginPipelineObjectRefForTest(t, rt, "metadata_consumer", "consumer")
+	for name, check := range map[string]struct {
+		ref    loadedPluginObjectRef
+		access uint8
+	}{
+		"producer": {ref: producerRef, access: kernelPluginPacketMetadataAccessRead | kernelPluginPacketMetadataAccessWrite},
+		"consumer": {ref: consumerRef, access: kernelPluginPacketMetadataAccessRead},
+	} {
+		bindingMap := check.ref.coll.Maps[kernelTCPacketMetadataBindingsMapName]
+		var binding kernelTCPluginMetadataBindingV1
+		if bindingMap == nil || bindingMap.Lookup(uint32(0), &binding) != nil {
+			t.Fatalf("%s metadata binding map is unavailable", name)
+		}
+		if binding.NamespaceSlot != 0 || binding.SchemaVersion != 2 || binding.MaxBytes != 8 || binding.Access != check.access {
+			t.Fatalf("%s metadata binding = %+v", name, binding)
+		}
+	}
+
+	if observed := runXDPFullNATIntegrationProbe(t, topology, "tcp", dataplanePerfFrontPort, dataplanePerfBackendPort); observed != dataplanePerfBackendHost {
+		t.Fatalf("IPv4 metadata pipeline observed source %q, want %q", observed, dataplanePerfBackendHost)
+	}
+	if err := runTCIPv6IntegrationProbePorts(t, topology, "tcp", tcIPv6IntegrationFrontPort, tcIPv6IntegrationBackendPort); err != nil {
+		t.Fatalf("IPv6 metadata pipeline traffic failed: %v", err)
+	}
+
+	countMap := consumerRef.coll.Maps["metadata_observed"]
+	if countMap == nil {
+		t.Fatal("consumer metadata_observed map is unavailable")
+	}
+	possibleCPUs, err := ebpf.PossibleCPU()
+	if err != nil {
+		t.Fatalf("get possible CPUs: %v", err)
+	}
+	type metadataObserved struct {
+		IPv4    uint64
+		IPv6    uint64
+		Invalid uint64
+	}
+	values := make([]metadataObserved, possibleCPUs)
+	if err := countMap.Lookup(uint32(0), &values); err != nil {
+		t.Fatalf("read metadata_observed: %v", err)
+	}
+	var total metadataObserved
+	for _, value := range values {
+		total.IPv4 += value.IPv4
+		total.IPv6 += value.IPv6
+		total.Invalid += value.Invalid
+	}
+	if total.IPv4 == 0 || total.IPv6 == 0 {
+		t.Fatalf("metadata observations = %+v, want IPv4 and IPv6 payloads", total)
+	}
 }
 
 func TestKernelPluginPipelineRuntimeAttachesExplicitInterfaceWithoutRules(t *testing.T) {
@@ -1633,15 +2314,27 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitEgressInterfaceWithoutRules(
 	if _, err := rt.Reconcile(nil); err != nil {
 		t.Fatalf("Reconcile(nil) error = %v", err)
 	}
-	if len(rt.attachments) != 1 || rt.attachments[0].filter == nil {
-		t.Fatalf("attachments = %+v, want one egress filter", rt.attachments)
+	if len(rt.attachments) != 2 || rt.attachments[0].filter == nil || rt.attachments[1].filter == nil {
+		t.Fatalf("attachments = %+v, want IPv4 and IPv6 egress filters", rt.attachments)
 	}
-	filter := rt.attachments[0].filter
-	if filter.Parent != netlink.HANDLE_MIN_EGRESS {
-		t.Fatalf("filter parent = %#x, want HANDLE_MIN_EGRESS %#x", filter.Parent, netlink.HANDLE_MIN_EGRESS)
+	wantNames := map[string]bool{
+		kernelForwardEgressPipelineProgramName:   false,
+		kernelForwardEgressPipelineProgramNameV6: false,
 	}
-	if filter.Name != kernelForwardEgressPipelineProgramName {
-		t.Fatalf("filter name = %q, want %q", filter.Name, kernelForwardEgressPipelineProgramName)
+	for _, attachment := range rt.attachments {
+		filter := attachment.filter
+		if filter.Parent != netlink.HANDLE_MIN_EGRESS {
+			t.Fatalf("filter parent = %#x, want HANDLE_MIN_EGRESS %#x", filter.Parent, netlink.HANDLE_MIN_EGRESS)
+		}
+		if _, ok := wantNames[filter.Name]; !ok {
+			t.Fatalf("unexpected egress filter name %q", filter.Name)
+		}
+		wantNames[filter.Name] = true
+	}
+	for name, found := range wantNames {
+		if !found {
+			t.Fatalf("missing egress filter %q", name)
+		}
 	}
 	link, err := netlink.LinkByName(topology.ClientHostIF)
 	if err != nil {
@@ -1928,8 +2621,8 @@ func TestKernelPluginPipelineRuntimeScopesHooksPerInterface(t *testing.T) {
 	} else if len(results) != 0 {
 		t.Fatalf("results = %+v, want no rule results", results)
 	}
-	if len(rt.attachments) != 2 {
-		t.Fatalf("attachments = %d, want both scoped interfaces", len(rt.attachments))
+	if len(rt.attachments) != 4 {
+		t.Fatalf("attachments = %d, want dual-stack filters on both scoped interfaces", len(rt.attachments))
 	}
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
 	if err != nil {
@@ -2230,6 +2923,196 @@ func TestKernelPluginPipelineRuntimeChainsPostReplyPlugin(t *testing.T) {
 	}
 }
 
+func TestKernelPluginPipelineRuntimePersistsReplyFlowSnapshotState(t *testing.T) {
+	if os.Getenv(kernelPluginPipelineTestEnv) != "1" {
+		t.Skipf("set %s=1 to run the privileged TC plugin pipeline smoke test", kernelPluginPipelineTestEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+
+	for _, tc := range []struct {
+		name        string
+		transparent bool
+	}{
+		{name: "transparent", transparent: true},
+		{name: "full-nat", transparent: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pluginsRoot := t.TempDir()
+			pluginDir := filepath.Join(pluginsRoot, "reply_observer")
+			if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(reply_observer) error = %v", err)
+			}
+			writePostReplyPluginForTest(t, pluginDir)
+			compileBPFObjectFromSource(t, filepath.Join(pluginDir, "reply_observer.bpf.c"), filepath.Join(pluginDir, "reply_observer.o"))
+
+			enabled := true
+			cfg := pluginsEnabledTestConfig(&Config{
+				PluginsEnabledSetting:   &enabled,
+				PluginsDataplaneSetting: &enabled,
+				PluginsDir:              pluginsRoot})
+
+			topology := setupDataplanePerfTopology(t)
+			seedDataplanePerfNeighbors(t, topology)
+			backendCmd, backendLogs := startDataplanePerfBackend(t, topology)
+			defer stopDataplanePerfHelper(t, backendCmd)
+
+			rt := newTCKernelRuleRuntime(cfg)
+			defer rt.Close()
+
+			rule := Rule{
+				ID:               1,
+				InInterface:      topology.ClientHostIF,
+				InIP:             dataplanePerfFrontAddr,
+				InPort:           dataplanePerfFrontPort,
+				OutInterface:     topology.BackendHostIF,
+				OutIP:            dataplanePerfBackendAddr,
+				OutPort:          dataplanePerfBackendPort,
+				Protocol:         "tcp",
+				Transparent:      tc.transparent,
+				Enabled:          true,
+				EnginePreference: ruleEngineKernel,
+				Remark:           "plugin-reply-flow-state",
+				Tag:              "test",
+			}
+			if !tc.transparent {
+				rule.OutSourceIP = dataplanePerfBackendHost
+			}
+			results, err := rt.Reconcile([]Rule{rule})
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+				t.Fatalf("rule result = %+v, want running tc", result)
+			}
+			if rt.attachmentMode != kernelTCAttachmentProgramModePipelineV4 {
+				t.Fatalf("attachmentMode = %q, want %q", rt.attachmentMode, kernelTCAttachmentProgramModePipelineV4)
+			}
+
+			pieces, err := lookupKernelCollectionPieces(rt.coll)
+			if err != nil {
+				t.Fatalf("lookupKernelCollectionPieces() error = %v", err)
+			}
+			statsMap := rt.coll.Maps[kernelStatsMapName]
+			if pieces.flowsV4 == nil || statsMap == nil {
+				t.Fatalf("runtime maps are incomplete: flows=%v stats=%v", pieces.flowsV4, statsMap)
+			}
+
+			type clientResult struct {
+				result dataplanePerfClientResult
+				err    error
+			}
+			clientCh := make(chan clientResult, 1)
+			go func() {
+				result, err := runDataplanePerfClientBenchmarkRaw(topology.ClientNS, 1, 1, 16<<10, 4<<10, 6)
+				clientCh <- clientResult{result: result, err: err}
+			}()
+
+			fullNAT := !tc.transparent
+			flowKey, flowValue, assertionErr := waitForKernelPluginReplyFlowV4(
+				pieces.flowsV4,
+				uint32(rule.ID),
+				fullNAT,
+				2*time.Second,
+				func(value tcFlowValueV4) bool {
+					return value.Flags&kernelFlowFlagReplySeen != 0 &&
+						value.Flags&kernelFlowFlagCounted != 0 &&
+						value.LastSeenNS != 0
+				},
+			)
+			if assertionErr == nil {
+				stats, found, lookupErr := lookupKernelStatsValue(statsMap, uint32(rule.ID))
+				if lookupErr != nil {
+					assertionErr = lookupErr
+				} else if !found || stats.TCPActiveConns != 1 {
+					assertionErr = fmt.Errorf("initial TCPActiveConns = %d (found=%t), want 1", stats.TCPActiveConns, found)
+				}
+			}
+
+			initialLastSeen := flowValue.LastSeenNS
+			if assertionErr == nil {
+				flowValue.LastSeenNS = 0
+				if err := pieces.flowsV4.Put(flowKey, flowValue); err != nil {
+					assertionErr = fmt.Errorf("clear reply flow last_seen_ns: %w", err)
+				}
+			}
+			if assertionErr == nil {
+				_, refreshed, waitErr := waitForKernelPluginReplyFlowV4(
+					pieces.flowsV4,
+					uint32(rule.ID),
+					fullNAT,
+					2*time.Second,
+					func(value tcFlowValueV4) bool {
+						return value.Flags&kernelFlowFlagReplySeen != 0 && value.LastSeenNS > initialLastSeen
+					},
+				)
+				if waitErr != nil {
+					assertionErr = fmt.Errorf("reply flow did not refresh after another packet: %w", waitErr)
+				} else if refreshed.LastSeenNS == 0 {
+					assertionErr = errors.New("reply flow last_seen_ns remained zero")
+				}
+			}
+			if assertionErr == nil {
+				time.Sleep(250 * time.Millisecond)
+				stats, found, lookupErr := lookupKernelStatsValue(statsMap, uint32(rule.ID))
+				if lookupErr != nil {
+					assertionErr = lookupErr
+				} else if !found || stats.TCPActiveConns != 1 {
+					assertionErr = fmt.Errorf("TCPActiveConns after repeated replies = %d (found=%t), want 1", stats.TCPActiveConns, found)
+				}
+			}
+
+			client := <-clientCh
+			if client.err != nil {
+				t.Fatalf("steady TCP client failed: %v\nbackend logs:\n%s", client.err, backendLogs.String())
+			}
+			if client.result.PayloadBytes <= 0 {
+				t.Fatalf("steady TCP client transferred no payload: %+v", client.result)
+			}
+			if assertionErr != nil {
+				t.Fatalf("reply flow state assertion failed: %v\nbackend logs:\n%s", assertionErr, backendLogs.String())
+			}
+		})
+	}
+}
+
+func waitForKernelPluginReplyFlowV4(flows *ebpf.Map, ruleID uint32, fullNAT bool, timeout time.Duration, accept func(tcFlowValueV4) bool) (tcFlowKeyV4, tcFlowValueV4, error) {
+	deadline := time.Now().Add(timeout)
+	var lastKey tcFlowKeyV4
+	var lastValue tcFlowValueV4
+	var found bool
+	for {
+		iter := flows.Iterate()
+		var key tcFlowKeyV4
+		var value tcFlowValueV4
+		for iter.Next(&key, &value) {
+			if value.RuleID != ruleID || value.Flags&kernelFlowFlagFrontEntry != 0 {
+				continue
+			}
+			if (value.Flags&kernelFlowFlagFullNAT != 0) != fullNAT {
+				continue
+			}
+			lastKey = key
+			lastValue = value
+			found = true
+			if accept == nil || accept(value) {
+				return key, value, nil
+			}
+		}
+		if err := iter.Err(); err != nil {
+			return tcFlowKeyV4{}, tcFlowValueV4{}, fmt.Errorf("iterate reply flows: %w", err)
+		}
+		if !time.Now().Before(deadline) {
+			if found {
+				return lastKey, lastValue, fmt.Errorf("timed out waiting for reply flow state: key=%+v value=%+v", lastKey, lastValue)
+			}
+			return tcFlowKeyV4{}, tcFlowValueV4{}, fmt.Errorf("timed out waiting for reply flow for rule %d", ruleID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func runDataplanePerfPing(netns string, target string) (string, error) {
 	cmd := exec.Command("ip", "netns", "exec", netns, "ping", "-c", "1", "-W", "2", target)
 	output, err := cmd.CombinedOutput()
@@ -2366,6 +3249,161 @@ func writeControlRegisteredPipelinePluginForTest(t *testing.T, pluginDir string,
 	}
 }
 
+func writeStatefulPipelinePluginForTest(t *testing.T, pluginDir string, policy string, schemaVersion int) {
+	t.Helper()
+	stateContract := fmt.Sprintf(`{name: 'sessions', policy: %q}`, policy)
+	if policy == pluginObjectMapPreserve {
+		stateContract = fmt.Sprintf(`{name: 'sessions', policy: %q, schema_version: %d}`, policy, schemaVersion)
+	}
+	writeControlRegisteredPipelinePluginForTest(t, pluginDir, "stateful_map", "Stateful Map", fmt.Sprintf(`
+plugin.capabilities(['stateful', 'tc']);
+ebpf.loadObject({
+  id: 'dataplane',
+  path: 'stateful_map.o',
+  state_maps: [%s],
+  programs: [{id: 'tc_stateful', section: 'tc/veer/pre_forward', type: 'tc'}]
+});
+pipeline.attach({
+  id: 'stateful-ingress',
+  direction: 'forward',
+  priority: 10,
+  program: 'dataplane:tc_stateful',
+  mode: 'observe',
+  interfaces: []
+});
+`, stateContract))
+}
+
+func writeStatefulPipelineBPFForTest(t *testing.T, sourcePath string, increment int) {
+	t.Helper()
+	source := fmt.Sprintf(`#include "../include/veer_plugin_helpers.h"
+
+#define BPF_MAP_TYPE_HASH 1
+
+struct __sk_buff;
+
+struct bpf_map_def SEC("maps") sessions = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u64),
+	.max_entries = 16,
+};
+
+VEER_DECLARE_PROG_CHAIN_V4();
+
+SEC("tc/veer/pre_forward")
+int tc_stateful(struct __sk_buff *skb)
+{
+	__u32 key = 0;
+	__u64 *value = veer_bpf_map_lookup_elem(&sessions, &key);
+	if (value)
+		*value += %d;
+	veer_continue_pre_forward(skb);
+	return TC_ACT_UNSPEC;
+}
+
+char __license[] SEC("license") = "GPL";
+`, increment)
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Fatalf("write stateful BPF source: %v", err)
+	}
+}
+
+func writeMigratingPipelinePluginForTest(t *testing.T, pluginDir string, version int) {
+	t.Helper()
+	stateMaps := `[{name:'sessions_v1', policy:'preserve', schema_version:1}]`
+	if version == 2 {
+		stateMaps = `[
+  {name:'sessions_v1', policy:'preserve', schema_version:1},
+  {name:'sessions_v2', policy:'migrate', schema_version:2, migrate_from:'sessions_v1'}
+]`
+	}
+	writeControlRegisteredPipelinePluginForTest(t, pluginDir, "migrating_map", "Migrating Map", fmt.Sprintf(`
+plugin.capabilities(['stateful', 'tc']);
+ebpf.loadObject({
+  id:'dataplane', path:'migrating_map.o', state_maps:%s,
+  programs:[{id:'tc_stateful', section:'tc/veer/pre_forward', type:'tc'}]
+});
+pipeline.attach({
+  id:'stateful-ingress', direction:'forward', priority:10,
+  program:'dataplane:tc_stateful', mode:'observe', interfaces:[]
+});
+exports.onReconcile = function () {};
+`, stateMaps))
+}
+
+func writeMigratingPipelineBPFForTest(t *testing.T, sourcePath string, version int) {
+	t.Helper()
+	v2Map := ""
+	v2Logic := ""
+	if version == 2 {
+		v2Map = `
+struct session_v2 { __u64 value; __u64 marker; };
+struct bpf_map_def SEC("maps") sessions_v2 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct session_v2),
+	.max_entries = 16,
+};
+`
+		v2Logic = `
+	struct session_v2 *next = veer_bpf_map_lookup_elem(&sessions_v2, &key);
+	if (next && current) {
+		next->value += 1;
+		*current = next->value;
+	} else if (current) {
+		*current += 1;
+	}
+`
+	} else {
+		v2Logic = `
+	if (current)
+		*current += 1;
+`
+	}
+	source := fmt.Sprintf(`#include "../include/veer_plugin_helpers.h"
+
+#define BPF_MAP_TYPE_HASH 1
+
+struct __sk_buff;
+
+struct bpf_map_def SEC("maps") sessions_v1 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u64),
+	.max_entries = 16,
+};
+%s
+VEER_DECLARE_PROG_CHAIN_V4();
+
+SEC("tc/veer/pre_forward")
+int tc_stateful(struct __sk_buff *skb)
+{
+	__u32 key = 0;
+	__u64 *current = veer_bpf_map_lookup_elem(&sessions_v1, &key);
+%s
+	veer_continue_pre_forward(skb);
+	return TC_ACT_UNSPEC;
+}
+
+char __license[] SEC("license") = "GPL";
+`, v2Map, v2Logic)
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Fatalf("write migrating BPF source: %v", err)
+	}
+}
+
+func kernelPluginPipelineObjectRefForTest(t *testing.T, rt *linuxKernelRuleRuntime, pluginID, objectID string) loadedPluginObjectRef {
+	t.Helper()
+	for _, ref := range rt.pluginPipelineLoaded {
+		if ref.PluginID == pluginID && ref.ObjectID == objectID && ref.coll != nil {
+			return ref
+		}
+	}
+	t.Fatalf("loaded plugin object %s/%s not found: %+v", pluginID, objectID, rt.pluginPipelineLoaded)
+	return loadedPluginObjectRef{}
+}
+
 func writeDropCorePluginForTest(t *testing.T, pluginDir string, ifName string) {
 	t.Helper()
 	writeControlRegisteredPipelinePluginForTest(t, pluginDir, "drop_core", "Drop Core", fmt.Sprintf(`plugin.capabilities(['drop', 'tc']);
@@ -2407,7 +3445,7 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 77,
+	.max_entries = 111,
 };
 
 SEC("tc/veer/pre_forward")
@@ -2496,7 +3534,7 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 77,
+	.max_entries = 111,
 };
 
 static __inline int redirect_with_l2(struct __sk_buff *skb, __u32 ifindex, const unsigned char *dst, const unsigned char *src)
@@ -2556,6 +3594,232 @@ func controlScriptInterfacesPropertyForPipelineTest(ifNames ...string) string {
 		return ""
 	}
 	return "  interfaces: " + jsStringListForPipelineTest(ifNames...) + ",\n"
+}
+
+func writePacketMetadataPluginPairForTest(t *testing.T, pluginsRoot string) (string, string) {
+	t.Helper()
+	producerDir := filepath.Join(pluginsRoot, "metadata_producer")
+	consumerDir := filepath.Join(pluginsRoot, "metadata_consumer")
+	header := filepath.Join(findRepoRoot(t), "plugins", "include", "veer_plugin_helpers.h")
+	for _, dir := range []string{producerDir, consumerDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+		copyFile(t, header, filepath.Join(dir, "veer_plugin_helpers.h"))
+	}
+
+	writeControlRegisteredPipelinePluginForTest(t, producerDir, "metadata_producer", "Metadata Producer", `
+plugin.capabilities(['packet-metadata', 'tc']);
+ebpf.loadObject({
+  id: 'producer', path: 'metadata_producer.o',
+  programs: [{id: 'tc_produce', section: 'tc/veer/pre_forward', type: 'tc'}]
+});
+hooks.attach({
+  id: 'produce', engine: 'tc', attach: 'ingress', stage: 'pre_forward', priority: 20,
+  program: 'producer:tc_produce', mode: 'rewrite',
+  packet_metadata: [{slot: 0, namespace: 'metadata_producer/classification', schema_version: 2, max_bytes: 8, access: 'read_write'}]
+});
+`)
+	writeControlRegisteredPipelinePluginForTest(t, consumerDir, "metadata_consumer", "Metadata Consumer", `
+plugin.capabilities(['packet-metadata', 'tc']);
+ebpf.loadObject({
+  id: 'consumer', path: 'metadata_consumer.o',
+  programs: [{id: 'tc_consume', section: 'tc/veer/pre_forward', type: 'tc'}]
+});
+hooks.attach({
+  id: 'consume', engine: 'tc', attach: 'ingress', stage: 'pre_forward', priority: 10,
+  after: ['metadata_producer/produce'], program: 'consumer:tc_consume', mode: 'observe',
+  packet_metadata: [{slot: 0, namespace: 'metadata_producer/classification', schema_version: 2, max_bytes: 8, access: 'read'}]
+});
+`)
+
+	const producerSource = `#include "veer_plugin_helpers.h"
+
+#define METADATA_MAGIC 0x56454552
+
+struct metadata_payload {
+	__u32 magic;
+	__u8 family;
+	__u8 flags;
+	__u16 reserved;
+};
+
+VEER_DECLARE_PROG_CHAIN_V4();
+VEER_DECLARE_PACKET_METADATA();
+
+SEC("tc/veer/pre_forward")
+int tc_produce(struct __sk_buff *skb)
+{
+	struct veer_packet_metadata_value_v1 *metadata = veer_packet_metadata_write_begin_for_skb(skb, 0);
+	struct metadata_payload *payload;
+
+	if (metadata) {
+		payload = (struct metadata_payload *)metadata->payload;
+		payload->magic = METADATA_MAGIC;
+		payload->family = (__u8)veer_packet_family(skb);
+		payload->flags = 1;
+		payload->reserved = 0;
+		veer_packet_metadata_commit(metadata, sizeof(*payload));
+	}
+	veer_continue_pre_forward(skb);
+	return TC_ACT_UNSPEC;
+}
+
+char __license[] SEC("license") = "GPL";
+`
+	const consumerSource = `#include "veer_plugin_helpers.h"
+
+#define METADATA_MAGIC 0x56454552
+
+struct metadata_payload {
+	__u32 magic;
+	__u8 family;
+	__u8 flags;
+	__u16 reserved;
+};
+
+struct metadata_observed {
+	__u64 ipv4;
+	__u64 ipv6;
+	__u64 invalid;
+};
+
+VEER_DECLARE_PROG_CHAIN_V4();
+VEER_DECLARE_PACKET_METADATA();
+
+struct bpf_map_def SEC("maps") metadata_observed = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct metadata_observed),
+	.max_entries = 1,
+};
+
+SEC("tc/veer/pre_forward")
+int tc_consume(struct __sk_buff *skb)
+{
+	__u32 key = 0;
+	int family = veer_packet_family(skb);
+	struct metadata_observed *observed = veer_bpf_map_lookup_elem(&metadata_observed, &key);
+	struct veer_packet_metadata_value_v1 *metadata = veer_packet_metadata_read_for_skb(skb, 0);
+	struct metadata_payload *payload = metadata ? (struct metadata_payload *)metadata->payload : 0;
+
+	if (observed) {
+		if (!metadata || metadata->payload_len != sizeof(*payload) || payload->magic != METADATA_MAGIC || payload->family != family || payload->flags != 1)
+			observed->invalid++;
+		else if (family == VEER_PACKET_FAMILY_IPV4)
+			observed->ipv4++;
+		else if (family == VEER_PACKET_FAMILY_IPV6)
+			observed->ipv6++;
+		else
+			observed->invalid++;
+	}
+	veer_continue_pre_forward(skb);
+	return TC_ACT_UNSPEC;
+}
+
+char __license[] SEC("license") = "GPL";
+`
+	if err := os.WriteFile(filepath.Join(producerDir, "metadata_producer.bpf.c"), []byte(producerSource), 0o644); err != nil {
+		t.Fatalf("write metadata producer source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(consumerDir, "metadata_consumer.bpf.c"), []byte(consumerSource), 0o644); err != nil {
+		t.Fatalf("write metadata consumer source: %v", err)
+	}
+	return producerDir, consumerDir
+}
+
+func writePostApplyObserverPluginForTest(t *testing.T, pluginDir string) {
+	t.Helper()
+	writeControlRegisteredPipelinePluginForTest(t, pluginDir, "post_apply_observer", "Post Apply Observer", `plugin.capabilities(['observe', 'tc']);
+ebpf.loadObject({
+  id: 'observer',
+  path: 'post_apply_observer.o',
+  programs: [
+    {id: 'tc_post_apply', section: 'tc/veer/post_apply', type: 'tc'},
+    {id: 'tc_reply_apply', section: 'tc/veer/post_reply_apply', type: 'tc'}
+  ]
+});
+pipeline.attach({
+  id: 'after-forward-apply',
+  direction: 'forward',
+  phase: 'after_apply',
+  priority: 10,
+  program: 'observer:tc_post_apply',
+  mode: 'observe'
+});
+pipeline.attach({
+  id: 'after-reply-apply',
+  direction: 'reply',
+  phase: 'after_apply',
+  priority: 10,
+  program: 'observer:tc_reply_apply',
+  mode: 'observe'
+});
+`)
+	repoRoot := findRepoRoot(t)
+	copyFile(t, filepath.Join(repoRoot, "plugins", "include", "veer_plugin_helpers.h"), filepath.Join(pluginDir, "veer_plugin_helpers.h"))
+	const source = `#include "veer_plugin_helpers.h"
+
+struct post_apply_counts {
+	__u64 ipv4_forward_redirect;
+	__u64 ipv6_forward_redirect;
+	__u64 ipv4_reply_redirect;
+	__u64 ipv6_reply_redirect;
+};
+
+VEER_DECLARE_PROG_CHAIN_V4();
+VEER_DECLARE_PLUGIN_CONTEXTS();
+
+struct bpf_map_def SEC("maps") post_apply_counts = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct post_apply_counts),
+	.max_entries = 1,
+};
+
+SEC("tc/veer/post_apply")
+int tc_post_apply(struct __sk_buff *skb)
+{
+	__u32 key = 0;
+	struct post_apply_counts *counts = veer_bpf_map_lookup_elem(&post_apply_counts, &key);
+
+	if (counts && veer_packet_family(skb) == VEER_PACKET_FAMILY_IPV6) {
+		struct tc_plugin_ctx_v6 *ctx = veer_lookup_plugin_ctx_v6_for_skb(skb);
+		if (ctx && ctx->have_rule && ctx->final_action == TC_ACT_REDIRECT)
+			counts->ipv6_forward_redirect++;
+	} else if (counts) {
+		struct tc_plugin_ctx_v4 *ctx = veer_lookup_plugin_ctx_v4_for_skb(skb);
+		if (ctx && ctx->have_rule && ctx->final_action == TC_ACT_REDIRECT)
+			counts->ipv4_forward_redirect++;
+	}
+	veer_continue_post_apply(skb);
+	return TC_ACT_UNSPEC;
+}
+
+SEC("tc/veer/post_reply_apply")
+int tc_reply_apply(struct __sk_buff *skb)
+{
+	__u32 key = 0;
+	struct post_apply_counts *counts = veer_bpf_map_lookup_elem(&post_apply_counts, &key);
+
+	if (counts && veer_packet_family(skb) == VEER_PACKET_FAMILY_IPV6) {
+		struct tc_plugin_ctx_v6 *ctx = veer_lookup_plugin_ctx_v6_for_skb(skb);
+		if (ctx && ctx->have_flow && ctx->final_action == TC_ACT_REDIRECT)
+			counts->ipv6_reply_redirect++;
+	} else if (counts) {
+		struct tc_plugin_ctx_v4 *ctx = veer_lookup_plugin_ctx_v4_for_skb(skb);
+		if (ctx && ctx->have_flow && ctx->final_action == TC_ACT_REDIRECT)
+			counts->ipv4_reply_redirect++;
+	}
+	veer_continue_reply_apply(skb);
+	return TC_ACT_UNSPEC;
+}
+
+char __license[] SEC("license") = "GPL";
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "post_apply_observer.bpf.c"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile(post_apply_observer.bpf.c) error = %v", err)
+	}
 }
 
 func writePostLookupPluginForTest(t *testing.T, pluginDir string, ifNames ...string) {
@@ -2624,6 +3888,34 @@ struct tc_plugin_ctx_v4 {
 	__u16 client_port;
 	__u16 nat_port;
 	__u16 pad1;
+	int final_action;
+};
+
+struct tc_plugin_ctx_v6 {
+	__u32 ifindex;
+	__u32 rule_id;
+	__u32 out_ifindex;
+	__u16 src_port;
+	__u16 dst_port;
+	__u16 backend_port;
+	__u16 rule_flags;
+	__u8 proto;
+	__u8 rule_wildcard_addr;
+	__u8 have_rule;
+	__u8 have_flow;
+	__u8 direction;
+	__u8 pad[3];
+	__u8 src_addr[16];
+	__u8 dst_addr[16];
+	__u8 backend_addr[16];
+	__u8 nat_addr[16];
+	__u8 front_addr[16];
+	__u8 client_addr[16];
+	__u16 front_port;
+	__u16 client_port;
+	__u16 nat_port;
+	__u16 pad1;
+	int final_action;
 };
 
 static void *(*const bpf_map_lookup_elem)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
@@ -2633,13 +3925,20 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 77,
+	.max_entries = 111,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_plugin_ctx_v4),
+	.max_entries = 1,
+};
+
+struct bpf_map_def SEC("maps") tc_plugin_ctx_v6 = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct tc_plugin_ctx_v6),
 	.max_entries = 1,
 };
 
@@ -2726,6 +4025,34 @@ struct tc_plugin_ctx_v4 {
 	__u16 client_port;
 	__u16 nat_port;
 	__u16 pad1;
+	int final_action;
+};
+
+struct tc_plugin_ctx_v6 {
+	__u32 ifindex;
+	__u32 rule_id;
+	__u32 out_ifindex;
+	__u16 src_port;
+	__u16 dst_port;
+	__u16 backend_port;
+	__u16 rule_flags;
+	__u8 proto;
+	__u8 rule_wildcard_addr;
+	__u8 have_rule;
+	__u8 have_flow;
+	__u8 direction;
+	__u8 pad[3];
+	__u8 src_addr[16];
+	__u8 dst_addr[16];
+	__u8 backend_addr[16];
+	__u8 nat_addr[16];
+	__u8 front_addr[16];
+	__u8 client_addr[16];
+	__u16 front_port;
+	__u16 client_port;
+	__u16 nat_port;
+	__u16 pad1;
+	int final_action;
 };
 
 static void *(*const bpf_map_lookup_elem)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
@@ -2735,13 +4062,20 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
-	.max_entries = 77,
+	.max_entries = 111,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_ctx_v4 = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_plugin_ctx_v4),
+	.max_entries = 1,
+};
+
+struct bpf_map_def SEC("maps") tc_plugin_ctx_v6 = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct tc_plugin_ctx_v6),
 	.max_entries = 1,
 };
 

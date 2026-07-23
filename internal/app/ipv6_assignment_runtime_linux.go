@@ -361,8 +361,12 @@ func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6RA(config ipv6AssignmentRAConfig
 		adv.start()
 		log.Printf("ipv6 assignment runtime: router advertisement enabled on %s (managed=%t prefixes=%v routes=%v dns=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes, config.DNSServers)
 	} else {
-		adv.update(config)
-		log.Printf("ipv6 assignment runtime: router advertisement updated on %s (managed=%t prefixes=%v routes=%v dns=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes, config.DNSServers)
+		changed := adv.update(config)
+		ops.mu.Unlock()
+		if changed {
+			log.Printf("ipv6 assignment runtime: router advertisement updated on %s (managed=%t prefixes=%v routes=%v dns=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes, config.DNSServers)
+		}
+		return nil
 	}
 	ops.mu.Unlock()
 	return nil
@@ -398,9 +402,11 @@ func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6DHCPv6(config ipv6AssignmentDHCP
 		log.Printf("ipv6 assignment runtime: dhcpv6 enabled on %s (addresses=%v dns=%v)", config.TargetInterface, config.Addresses, config.DNSServers)
 		return nil
 	}
-	server.update(config)
+	changed := server.update(config)
 	ops.mu.Unlock()
-	log.Printf("ipv6 assignment runtime: dhcpv6 updated on %s (addresses=%v dns=%v)", config.TargetInterface, config.Addresses, config.DNSServers)
+	if changed {
+		log.Printf("ipv6 assignment runtime: dhcpv6 updated on %s (addresses=%v dns=%v)", config.TargetInterface, config.Addresses, config.DNSServers)
+	}
 	return nil
 }
 

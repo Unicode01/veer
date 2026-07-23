@@ -63,8 +63,8 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 	linkUpdates := make(chan netlink.LinkUpdate, 16)
 	addrUpdates := make(chan netlink.AddrUpdate, 16)
 	neighUpdates := make(chan netlink.NeighUpdate, 32)
+	routeUpdates := make(chan netlink.RouteUpdate, 32)
 
-	linkReady := false
 	if err := netlink.LinkSubscribeWithOptions(linkUpdates, stop, netlink.LinkSubscribeOptions{
 		ErrorCallback: func(err error) {
 			if err != nil {
@@ -78,11 +78,9 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		},
 	}); err != nil {
 		log.Printf("kernel dataplane netlink: link monitor unavailable: %v", err)
-	} else {
-		linkReady = true
+		linkUpdates = nil
 	}
 
-	addrReady := false
 	if err := netlink.AddrSubscribeWithOptions(addrUpdates, stop, netlink.AddrSubscribeOptions{
 		ErrorCallback: func(err error) {
 			if err != nil {
@@ -96,11 +94,9 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		},
 	}); err != nil {
 		log.Printf("kernel dataplane netlink: address monitor unavailable: %v", err)
-	} else {
-		addrReady = true
+		addrUpdates = nil
 	}
 
-	neighReady := false
 	if err := netlink.NeighSubscribeWithOptions(neighUpdates, stop, netlink.NeighSubscribeOptions{
 		ErrorCallback: func(err error) {
 			if err != nil {
@@ -114,11 +110,29 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		},
 	}); err != nil {
 		log.Printf("kernel dataplane netlink: neighbor monitor unavailable: %v", err)
-	} else {
-		neighReady = true
+		neighUpdates = nil
 	}
 
-	if !linkReady && !addrReady && !neighReady {
+	if err := netlink.RouteSubscribeWithOptions(routeUpdates, stop, netlink.RouteSubscribeOptions{
+		ErrorCallback: func(err error) {
+			if err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				log.Printf("kernel dataplane netlink: route monitor error: %v", err)
+			}
+		},
+	}); err != nil {
+		log.Printf("kernel dataplane netlink: route monitor unavailable: %v", err)
+		routeUpdates = nil
+	}
+
+	allClosed := func() bool {
+		return linkUpdates == nil && addrUpdates == nil && neighUpdates == nil && routeUpdates == nil
+	}
+	if allClosed() {
 		return
 	}
 
@@ -129,7 +143,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		case update, ok := <-linkUpdates:
 			if !ok {
 				linkUpdates = nil
-				if addrUpdates == nil && neighUpdates == nil {
+				if allClosed() {
 					return
 				}
 				continue
@@ -138,13 +152,14 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 				if !pm.shouldHandleKernelNetlinkLinkUpdate(update) {
 					continue
 				}
+				pm.publishPluginSystemEvent(pluginEventTopicNetLink, "", "", pluginNetlinkLinkEventPayload(update))
 				pm.handleIPv6AssignmentLinkUpdate(update)
 				pm.handleKernelNetlinkRecoveryTrigger(kernelNetlinkRecoveryTriggerFromLinkUpdate(update))
 			}
 		case update, ok := <-addrUpdates:
 			if !ok {
 				addrUpdates = nil
-				if linkUpdates == nil && neighUpdates == nil {
+				if allClosed() {
 					return
 				}
 				continue
@@ -152,15 +167,17 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 			if !isVisibleInterfaceIP(update.LinkAddress.IP) {
 				continue
 			}
+			pm.publishPluginSystemEvent(pluginEventTopicNetAddr, "", "", pluginNetlinkAddrEventPayload(update))
 			pm.handleIPv6AssignmentAddrUpdate(update)
 		case update, ok := <-neighUpdates:
 			if !ok {
 				neighUpdates = nil
-				if linkUpdates == nil && addrUpdates == nil {
+				if allClosed() {
 					return
 				}
 				continue
 			}
+			pm.publishPluginSystemEvent(pluginEventTopicNetNeigh, "", "", pluginNetlinkNeighEventPayload(update))
 			switch update.Family {
 			case unix.AF_INET, unix.AF_INET6:
 				pm.handleKernelNetlinkRecoveryTrigger(kernelNetlinkRecoveryTriggerFromNeighUpdate("neighbor", update))
@@ -169,8 +186,179 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 			default:
 				pm.handleKernelNetlinkRecoveryTrigger(kernelNetlinkRecoveryTriggerFromNeighUpdate("neighbor", update))
 			}
+		case update, ok := <-routeUpdates:
+			if !ok {
+				routeUpdates = nil
+				if allClosed() {
+					return
+				}
+				continue
+			}
+			if update.Type != unix.RTM_NEWROUTE && update.Type != unix.RTM_DELROUTE {
+				continue
+			}
+			pm.publishPluginSystemEvent(pluginEventTopicNetRoute, "", "", pluginNetlinkRouteEventPayload(update))
 		}
 	}
+}
+
+func pluginNetlinkLinkEventPayload(update netlink.LinkUpdate) map[string]any {
+	payload := map[string]any{
+		"operation": "update",
+		"ifindex":   int(update.IfInfomsg.Index),
+	}
+	if update.Header.Type == unix.RTM_DELLINK {
+		payload["operation"] = "delete"
+	}
+	if update.Link == nil || update.Link.Attrs() == nil {
+		return payload
+	}
+	attrs := update.Link.Attrs()
+	payload["ifindex"] = attrs.Index
+	payload["name"] = attrs.Name
+	payload["type"] = update.Link.Type()
+	payload["master_index"] = attrs.MasterIndex
+	payload["parent_index"] = attrs.ParentIndex
+	payload["admin_up"] = attrs.RawFlags&unix.IFF_UP != 0
+	payload["lower_up"] = attrs.RawFlags&unix.IFF_LOWER_UP != 0
+	payload["oper_state"] = strings.ToLower(attrs.OperState.String())
+	return payload
+}
+
+func pluginNetlinkAddrEventPayload(update netlink.AddrUpdate) map[string]any {
+	operation := "delete"
+	if update.NewAddr {
+		operation = "update"
+	}
+	payload := map[string]any{
+		"operation": operation,
+		"ifindex":   update.LinkIndex,
+		"address":   update.LinkAddress.String(),
+		"flags":     update.Flags,
+		"scope":     update.Scope,
+	}
+	if link, err := netlink.LinkByIndex(update.LinkIndex); err == nil && link != nil && link.Attrs() != nil {
+		payload["interface"] = link.Attrs().Name
+	}
+	return payload
+}
+
+func pluginNetlinkNeighEventPayload(update netlink.NeighUpdate) map[string]any {
+	operation := "update"
+	if update.Type == unix.RTM_DELNEIGH {
+		operation = "delete"
+	}
+	payload := map[string]any{
+		"operation":    operation,
+		"ifindex":      update.LinkIndex,
+		"master_index": update.MasterIndex,
+		"family":       update.Family,
+		"state":        update.State,
+		"type":         update.Type,
+	}
+	if update.IP != nil {
+		payload["ip"] = update.IP.String()
+	}
+	if update.HardwareAddr != nil {
+		payload["mac"] = update.HardwareAddr.String()
+	}
+	if link, err := netlink.LinkByIndex(update.LinkIndex); err == nil && link != nil && link.Attrs() != nil {
+		payload["interface"] = link.Attrs().Name
+	}
+	return payload
+}
+
+func pluginNetlinkRouteEventPayload(update netlink.RouteUpdate) map[string]any {
+	operation := "update"
+	if update.Type == unix.RTM_DELROUTE {
+		operation = "delete"
+	}
+	payload := map[string]any{
+		"operation": operation,
+		"family":    update.Family,
+		"table":     update.Table,
+		"protocol":  int(update.Protocol),
+		"scope":     int(update.Scope),
+		"type":      update.Route.Type,
+		"priority":  update.Priority,
+		"flags":     update.Flags,
+		"nl_flags":  update.NlFlags,
+		"tos":       update.Tos,
+	}
+	if update.Dst != nil {
+		payload["destination"] = update.Dst.String()
+	} else {
+		switch update.Family {
+		case unix.AF_INET:
+			payload["destination"] = "0.0.0.0/0"
+		case unix.AF_INET6:
+			payload["destination"] = "::/0"
+		}
+	}
+	if update.Src != nil {
+		payload["source"] = update.Src.String()
+	}
+	if update.Gw != nil {
+		payload["gateway"] = update.Gw.String()
+	}
+	if update.MTU > 0 {
+		payload["mtu"] = update.MTU
+	}
+
+	interfaceNames := make([]string, 0, 1+len(update.MultiPath))
+	seenNames := make(map[string]struct{}, cap(interfaceNames))
+	resolutionComplete := true
+	addInterface := func(index int) string {
+		if index <= 0 {
+			resolutionComplete = false
+			return ""
+		}
+		link, err := netlink.LinkByIndex(index)
+		if err != nil || link == nil || link.Attrs() == nil || strings.TrimSpace(link.Attrs().Name) == "" {
+			resolutionComplete = false
+			return ""
+		}
+		name := strings.TrimSpace(link.Attrs().Name)
+		if _, exists := seenNames[name]; !exists {
+			seenNames[name] = struct{}{}
+			interfaceNames = append(interfaceNames, name)
+		}
+		return name
+	}
+	if update.LinkIndex > 0 {
+		payload["ifindex"] = update.LinkIndex
+		if name := addInterface(update.LinkIndex); name != "" {
+			payload["interface"] = name
+		}
+	}
+	if len(update.MultiPath) > 0 {
+		paths := make([]map[string]any, 0, len(update.MultiPath))
+		for _, nextHop := range update.MultiPath {
+			if nextHop == nil {
+				resolutionComplete = false
+				continue
+			}
+			path := map[string]any{
+				"ifindex": nextHop.LinkIndex,
+				"hops":    nextHop.Hops,
+				"flags":   nextHop.Flags,
+			}
+			if name := addInterface(nextHop.LinkIndex); name != "" {
+				path["interface"] = name
+			}
+			if nextHop.Gw != nil {
+				path["gateway"] = nextHop.Gw.String()
+			}
+			paths = append(paths, path)
+		}
+		payload["multipath"] = paths
+	}
+	if len(interfaceNames) == 0 {
+		resolutionComplete = false
+	}
+	payload["interfaces"] = interfaceNames
+	payload["interface_resolution_complete"] = resolutionComplete
+	return payload
 }
 
 func collectIPv6AssignmentRelatedInterfaceNames(link netlink.Link) []string {

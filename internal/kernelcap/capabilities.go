@@ -39,6 +39,7 @@ type KernelCapabilities struct {
 	BPFMapPerCPUArray CapabilityCheck     `json:"bpf_map_percpu_array"`
 	BPFMapProgArray   CapabilityCheck     `json:"bpf_map_prog_array"`
 	BPFMapDevMapHash  CapabilityCheck     `json:"bpf_map_devmap_hash"`
+	BPFMapRingBuf     CapabilityCheck     `json:"bpf_map_ringbuf"`
 	BPFSchedCLS       CapabilityCheck     `json:"bpf_sched_cls"`
 	BPFXDP            CapabilityCheck     `json:"bpf_xdp"`
 	TCAttach          CapabilityCheck     `json:"tc_attach"`

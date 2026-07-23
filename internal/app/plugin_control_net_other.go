@@ -14,6 +14,10 @@ func (unsupportedPluginControlNetAdmin) LinkGet(string) (pluginControlNetLinkInf
 	return pluginControlNetLinkInfo{}, fmt.Errorf("net.admin is supported only on linux")
 }
 
+func (unsupportedPluginControlNetAdmin) LinkLookup(string) (pluginControlNetLinkInfo, bool, error) {
+	return pluginControlNetLinkInfo{}, false, fmt.Errorf("net.admin is supported only on linux")
+}
+
 func (unsupportedPluginControlNetAdmin) LinkList() ([]pluginControlNetLinkInfo, error) {
 	return nil, fmt.Errorf("net.admin is supported only on linux")
 }
@@ -32,6 +36,14 @@ func (unsupportedPluginControlNetAdmin) LinkEnsureDummy(pluginControlNetDummyReq
 
 func (unsupportedPluginControlNetAdmin) LinkEnsureMacvlan(pluginControlNetMacvlanRequest) (pluginControlNetMacvlanResult, error) {
 	return pluginControlNetMacvlanResult{}, fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) LinkEnsureVLAN(pluginControlNetVLANRequest) (pluginControlNetVLANResult, error) {
+	return pluginControlNetVLANResult{}, fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) LinkEnsureVRF(pluginControlNetVRFRequest) (pluginControlNetVRFResult, error) {
+	return pluginControlNetVRFResult{}, fmt.Errorf("net.admin is supported only on linux")
 }
 
 func (unsupportedPluginControlNetAdmin) LinkDelete(string) error {
@@ -82,10 +94,50 @@ func (unsupportedPluginControlNetAdmin) AddrDelete(pluginControlNetAddrRequest) 
 	return fmt.Errorf("net.admin is supported only on linux")
 }
 
+func (unsupportedPluginControlNetAdmin) RouteSnapshot(pluginControlNetRouteRequest) ([]pluginControlNetRouteState, error) {
+	return nil, fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) RouteRestore([]pluginControlNetRouteState) error {
+	return fmt.Errorf("net.admin is supported only on linux")
+}
+
 func (unsupportedPluginControlNetAdmin) RouteReplace(pluginControlNetRouteRequest) error {
 	return fmt.Errorf("net.admin is supported only on linux")
 }
 
 func (unsupportedPluginControlNetAdmin) RouteDelete(pluginControlNetRouteRequest) error {
+	return fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) RuleSnapshot(pluginControlNetRuleRequest) ([]pluginControlNetRuleState, error) {
+	return nil, fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) RuleRestore([]pluginControlNetRuleState) error {
+	return fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) RuleReplace(pluginControlNetRuleRequest) error {
+	return fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) RuleDelete(pluginControlNetRuleRequest) error {
+	return fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) NeighSnapshot(pluginControlNetNeighRequest) ([]pluginControlNetNeighState, error) {
+	return nil, fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) NeighRestore([]pluginControlNetNeighState) error {
+	return fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) NeighReplace(pluginControlNetNeighRequest) error {
+	return fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) NeighDelete(pluginControlNetNeighRequest) error {
 	return fmt.Errorf("net.admin is supported only on linux")
 }

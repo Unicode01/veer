@@ -102,6 +102,9 @@ func handlePluginAPIRoute(w http.ResponseWriter, r *http.Request, cfg *Config, d
 	case "actions":
 		handlePluginActionAPI(w, r, cfg, db, pm, parts)
 		return true
+	case "logs":
+		handlePluginLogsAPI(w, r, cfg, db, pm, parts)
+		return true
 	default:
 		return false
 	}
@@ -134,6 +137,9 @@ func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, d
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, pluginStateResponseForID(cfg, db, pm, pluginID))
 	case http.MethodPut, http.MethodPost:
+		if !requirePluginAdminRequest(w, r, cfg) {
+			return
+		}
 		var req pluginStateWriteRequest
 		if err := decodeJSONRequestBody(w, r, &req, apiJSONBodyMaxBytes); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -151,6 +157,7 @@ func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, d
 			pm.reconcilePluginsForRuntime()
 			pm.redistributeWorkers()
 		}
+		recordPluginAudit(db, pluginID, "plugin.state", "api", "success", map[string]any{"enabled": *req.Enabled})
 		writeJSON(w, http.StatusOK, pluginStateResponseForID(cfg, db, pm, pluginID))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -210,14 +217,14 @@ func handlePluginResourceAPI(w http.ResponseWriter, r *http.Request, cfg *Config
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "resource does not allow list"})
 				return
 			}
-			handleListPluginRecords(w, r, db, plugin, resource)
+			handleListPluginRecords(w, r, db, pm, plugin, resource)
 			return
 		}
 		if !pluginResourceAllows(resource, "get") {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "resource does not allow get"})
 			return
 		}
-		handleGetPluginRecord(w, db, plugin, resource, recordKey)
+		handleGetPluginRecord(w, db, pm, plugin, resource, recordKey)
 	case http.MethodPost:
 		if recordKey != "" {
 			http.NotFound(w, r)
@@ -280,8 +287,8 @@ func handlePluginActionAPI(w http.ResponseWriter, r *http.Request, cfg *Config, 
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`{}`)
 	}
-	if len(req.Payload) > pluginActionMaxPayloadBytes(action) || !json.Valid(req.Payload) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action payload"})
+	if err := validatePluginActionRequest(action, req.Payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if action.RuntimeUpdate == "runtime_query" {
@@ -358,7 +365,7 @@ type pluginRecordListPage struct {
 	Offset int
 }
 
-func handleListPluginRecords(w http.ResponseWriter, r *http.Request, db *sql.DB, plugin LoadedPlugin, resource PluginResource) {
+func handleListPluginRecords(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *ProcessManager, plugin LoadedPlugin, resource PluginResource) {
 	page, err := pluginRecordListPageFromQuery(r.URL.Query())
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -370,6 +377,11 @@ func handleListPluginRecords(w http.ResponseWriter, r *http.Request, db *sql.DB,
 		return
 	}
 	records, err := store.GetPluginRecordsPage(db, plugin.ID, resource.ID, page.Limit, page.Offset)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	records, err = decryptPluginRecordsForRequest(db, pm, records, resource)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -395,7 +407,7 @@ func handleListPluginRecords(w http.ResponseWriter, r *http.Request, db *sql.DB,
 	})
 }
 
-func handleGetPluginRecord(w http.ResponseWriter, db *sql.DB, plugin LoadedPlugin, resource PluginResource, recordKey string) {
+func handleGetPluginRecord(w http.ResponseWriter, db *sql.DB, pm *ProcessManager, plugin LoadedPlugin, resource PluginResource, recordKey string) {
 	item, err := store.GetPluginRecord(db, plugin.ID, resource.ID, recordKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -405,6 +417,12 @@ func handleGetPluginRecord(w http.ResponseWriter, db *sql.DB, plugin LoadedPlugi
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	decrypted, err := decryptPluginRecordForRequest(db, pm, *item, resource)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	item = &decrypted
 	writeJSON(w, http.StatusOK, pluginRecordResponseFromStore(*item, resource))
 }
 
@@ -429,6 +447,11 @@ func handleCreatePluginRecord(w http.ResponseWriter, r *http.Request, db *sql.DB
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	storedDataJSON, err := encryptPluginRecordDataForRequest(db, pm, plugin.ID, resource, recordKey, dataJSON)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -440,6 +463,10 @@ func handleCreatePluginRecord(w http.ResponseWriter, r *http.Request, db *sql.DB
 		return
 	}
 	defer tx.Rollback()
+	if err := store.EnsurePluginResourceMutationAllowed(tx, plugin.ID, resource.ID); err != nil {
+		writePluginResourceMutationError(w, err)
+		return
+	}
 
 	count, err := store.CountPluginRecords(tx, plugin.ID, resource.ID)
 	if err != nil {
@@ -455,8 +482,12 @@ func handleCreatePluginRecord(w http.ResponseWriter, r *http.Request, db *sql.DB
 		PluginID:   plugin.ID,
 		ResourceID: resource.ID,
 		RecordKey:  recordKey,
-		DataJSON:   dataJSON,
+		DataJSON:   storedDataJSON,
 		Enabled:    enabled,
+	}
+	if err := ensurePluginRecordStorageQuota(tx, plugin.ID, nil, item, pluginResourceLimitsForProcessManager(pm)); err != nil {
+		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+		return
 	}
 	if _, err := store.AddPluginRecord(tx, &item); err != nil {
 		if store.SQLiteUniqueConstraintIndexName(err) == store.ConstraintIndexPluginRecordKey {
@@ -475,10 +506,19 @@ func handleCreatePluginRecord(w http.ResponseWriter, r *http.Request, db *sql.DB
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	decryptedCreated, err := decryptPluginRecordForRequest(db, pm, *created, resource)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	created = &decryptedCreated
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	pm.publishPluginSystemEvent(pluginEventTopicResourceChanged, plugin.ID, resource.ID, map[string]any{
+		"plugin_id": plugin.ID, "resource_id": resource.ID, "operation": "create", "key": recordKey, "revision": created.Revision,
+	})
 	resp := pluginRecordMutationResponse(db, pm, plugin, resource, *created)
 	if resp.RuntimeError != "" {
 		writeJSON(w, http.StatusInternalServerError, resp)
@@ -499,6 +539,10 @@ func handleUpdatePluginRecord(w http.ResponseWriter, r *http.Request, db *sql.DB
 		return
 	}
 	defer tx.Rollback()
+	if err := store.EnsurePluginResourceMutationAllowed(tx, plugin.ID, resource.ID); err != nil {
+		writePluginResourceMutationError(w, err)
+		return
+	}
 
 	existing, err := store.GetPluginRecord(tx, plugin.ID, resource.ID, recordKey)
 	if err != nil {
@@ -509,6 +553,13 @@ func handleUpdatePluginRecord(w http.ResponseWriter, r *http.Request, db *sql.DB
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	storedExisting := *existing
+	decryptedExisting, err := decryptPluginRecordForRequest(db, pm, *existing, resource)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	existing = &decryptedExisting
 	dataJSON, err := pluginRecordDataJSONForUpdate(req.Data, resource, existing.DataJSON)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -539,6 +590,15 @@ func handleUpdatePluginRecord(w http.ResponseWriter, r *http.Request, db *sql.DB
 		DataJSON:   dataJSON,
 		Enabled:    enabled,
 	}
+	item.DataJSON, err = encryptPluginRecordDataForRequest(db, pm, plugin.ID, resource, recordKey, item.DataJSON)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := ensurePluginRecordStorageQuota(tx, plugin.ID, &storedExisting, item, pluginResourceLimitsForProcessManager(pm)); err != nil {
+		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := store.UpdatePluginRecord(tx, &item); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "record not found"})
@@ -556,10 +616,19 @@ func handleUpdatePluginRecord(w http.ResponseWriter, r *http.Request, db *sql.DB
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	decryptedUpdated, err := decryptPluginRecordForRequest(db, pm, *updated, resource)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	updated = &decryptedUpdated
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	pm.publishPluginSystemEvent(pluginEventTopicResourceChanged, plugin.ID, resource.ID, map[string]any{
+		"plugin_id": plugin.ID, "resource_id": resource.ID, "operation": "update", "key": recordKey, "revision": updated.Revision,
+	})
 	resp := pluginRecordMutationResponse(db, pm, plugin, resource, *updated)
 	if resp.RuntimeError != "" {
 		writeJSON(w, http.StatusInternalServerError, resp)
@@ -575,6 +644,10 @@ func handleDeletePluginRecord(w http.ResponseWriter, db *sql.DB, pm *ProcessMana
 		return
 	}
 	defer tx.Rollback()
+	if err := store.EnsurePluginResourceMutationAllowed(tx, plugin.ID, resource.ID); err != nil {
+		writePluginResourceMutationError(w, err)
+		return
+	}
 
 	if err := store.DeletePluginRecord(tx, plugin.ID, resource.ID, recordKey); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -592,6 +665,9 @@ func handleDeletePluginRecord(w http.ResponseWriter, db *sql.DB, pm *ProcessMana
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	pm.publishPluginSystemEvent(pluginEventTopicResourceChanged, plugin.ID, resource.ID, map[string]any{
+		"plugin_id": plugin.ID, "resource_id": resource.ID, "operation": "delete", "key": recordKey,
+	})
 	status, runtimeErr := applyPluginResourceRuntimeUpdateStatus(db, pm, plugin, resource)
 	if runtimeErr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -606,6 +682,14 @@ func handleDeletePluginRecord(w http.ResponseWriter, db *sql.DB, pm *ProcessMana
 		"status":         "deleted",
 		"runtime_status": status,
 	})
+}
+
+func writePluginResourceMutationError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	if pluginResourceMigrationErrorIsPending(err) {
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
 func pluginResourceForRequest(w http.ResponseWriter, cfg *Config, db *sql.DB, pm *ProcessManager, pluginID, resourceID string) (LoadedPlugin, PluginResource, bool) {
@@ -686,6 +770,9 @@ func pluginRecordDataJSON(raw json.RawMessage, resource PluginResource) (string,
 	}
 	if len(out) > pluginResourceMaxRecordBytes(resource) {
 		return "", fmt.Errorf("data exceeds resource max_record_bytes")
+	}
+	if err := validatePluginResourceData(resource, []byte(out)); err != nil {
+		return "", err
 	}
 	return out, nil
 }

@@ -20,6 +20,11 @@ func newPluginControlL2Transport() pluginControlL2Transport {
 type linuxPluginControlL2Transport struct{}
 
 func (linuxPluginControlL2Transport) Send(req pluginControlL2SendRequest) error {
+	namespace := normalizePluginControlNamespace(req.Namespace)
+	if namespace != "host" {
+		req.Namespace = "host"
+		return linuxPluginRunInNamespace(namespace, func() error { return (linuxPluginControlL2Transport{}).Send(req) })
+	}
 	iface, src, err := resolvePluginControlL2Send(req)
 	if err != nil {
 		return err
@@ -35,6 +40,18 @@ func (linuxPluginControlL2Transport) Send(req pluginControlL2SendRequest) error 
 }
 
 func (linuxPluginControlL2Transport) Recv(req pluginControlL2RecvRequest) (pluginControlL2Frame, error) {
+	namespace := normalizePluginControlNamespace(req.Namespace)
+	if namespace != "host" {
+		req.Namespace = "host"
+		var frame pluginControlL2Frame
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			frame, operationErr = (linuxPluginControlL2Transport{}).Recv(req)
+			return operationErr
+		})
+		frame.Namespace = namespace
+		return frame, err
+	}
 	fd, iface, err := openPluginControlL2RecvSocket(req)
 	if err != nil {
 		return pluginControlL2Frame{}, err
@@ -44,6 +61,20 @@ func (linuxPluginControlL2Transport) Recv(req pluginControlL2RecvRequest) (plugi
 }
 
 func (linuxPluginControlL2Transport) RecvMany(req pluginControlL2RecvManyRequest) ([]pluginControlL2Frame, error) {
+	namespace := normalizePluginControlNamespace(req.Recv.Namespace)
+	if namespace != "host" {
+		req.Recv.Namespace = "host"
+		var frames []pluginControlL2Frame
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			frames, operationErr = (linuxPluginControlL2Transport{}).RecvMany(req)
+			return operationErr
+		})
+		for i := range frames {
+			frames[i].Namespace = namespace
+		}
+		return frames, err
+	}
 	fd, iface, err := openPluginControlL2RecvSocket(req.Recv)
 	if err != nil {
 		return nil, err
@@ -53,6 +84,22 @@ func (linuxPluginControlL2Transport) RecvMany(req pluginControlL2RecvManyRequest
 }
 
 func (linuxPluginControlL2Transport) Exchange(req pluginControlL2ExchangeRequest) (pluginControlL2Frame, error) {
+	namespace := normalizePluginControlNamespace(req.Send.Namespace)
+	if normalizePluginControlNamespace(req.Recv.Namespace) != namespace {
+		return pluginControlL2Frame{}, fmt.Errorf("send and receive namespace must match")
+	}
+	if namespace != "host" {
+		req.Send.Namespace = "host"
+		req.Recv.Namespace = "host"
+		var frame pluginControlL2Frame
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			frame, operationErr = (linuxPluginControlL2Transport{}).Exchange(req)
+			return operationErr
+		})
+		frame.Namespace = namespace
+		return frame, err
+	}
 	if req.Send.Interface != req.Recv.Interface {
 		return pluginControlL2Frame{}, fmt.Errorf("send and receive interface must match")
 	}
@@ -72,6 +119,24 @@ func (linuxPluginControlL2Transport) Exchange(req pluginControlL2ExchangeRequest
 }
 
 func (linuxPluginControlL2Transport) ExchangeMany(req pluginControlL2ExchangeManyRequest) ([]pluginControlL2Frame, error) {
+	namespace := normalizePluginControlNamespace(req.Send.Namespace)
+	if normalizePluginControlNamespace(req.Recv.Recv.Namespace) != namespace {
+		return nil, fmt.Errorf("send and receive namespace must match")
+	}
+	if namespace != "host" {
+		req.Send.Namespace = "host"
+		req.Recv.Recv.Namespace = "host"
+		var frames []pluginControlL2Frame
+		err := linuxPluginRunInNamespace(namespace, func() error {
+			var operationErr error
+			frames, operationErr = (linuxPluginControlL2Transport{}).ExchangeMany(req)
+			return operationErr
+		})
+		for i := range frames {
+			frames[i].Namespace = namespace
+		}
+		return frames, err
+	}
 	if req.Send.Interface != req.Recv.Recv.Interface {
 		return nil, fmt.Errorf("send and receive interface must match")
 	}
@@ -189,6 +254,7 @@ func recvPluginControlL2Frame(fd int, iface *net.Interface, req pluginControlL2R
 		frame := append([]byte(nil), buf[:nread]...)
 		payload := append([]byte(nil), buf[14:nread]...)
 		return pluginControlL2Frame{
+			Namespace: normalizePluginControlNamespace(req.Namespace),
 			Interface: req.Interface,
 			IfIndex:   iface.Index,
 			EtherType: etherType,
@@ -264,6 +330,7 @@ func recvManyPluginControlL2Frames(fd int, iface *net.Interface, req pluginContr
 		frame := append([]byte(nil), buf[:nread]...)
 		payload := append([]byte(nil), buf[14:nread]...)
 		frames = append(frames, pluginControlL2Frame{
+			Namespace: normalizePluginControlNamespace(req.Recv.Namespace),
 			Interface: req.Recv.Interface,
 			IfIndex:   iface.Index,
 			EtherType: etherType,

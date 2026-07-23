@@ -24,6 +24,7 @@ func detectKernelCapabilities() KernelCapabilities {
 		BPFMapPerCPUArray: check,
 		BPFMapProgArray:   check,
 		BPFMapDevMapHash:  check,
+		BPFMapRingBuf:     check,
 		BPFSchedCLS:       check,
 		BPFXDP:            check,
 		TCAttach:          check,
