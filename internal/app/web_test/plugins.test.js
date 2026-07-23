@@ -405,6 +405,9 @@ function createHarness() {
         app.revokedBlobURL = url;
       }
     },
+    btoa(value) {
+      return Buffer.from(String(value), 'binary').toString('base64');
+    },
     console
   });
 
@@ -460,19 +463,20 @@ function attachPluginHostChildFrame(app) {
   };
   app.el.pluginUIFrame.contentWindow = childWindow;
 
+  const childHead = makeNode('head');
+  const childBody = makeNode('body');
+  childBody.scrollHeight = 0;
+  childBody.offsetHeight = 0;
+  const childDocumentElement = makeNode('html');
+  childDocumentElement.scrollHeight = 0;
+  childDocumentElement.offsetHeight = 0;
+
   const childContext = vm.createContext({
     window: childWindow,
     document: {
-      body: {
-        classList: { add() {} },
-        appendChild() {},
-        scrollHeight: 0,
-        offsetHeight: 0
-      },
-      documentElement: {
-        scrollHeight: 0,
-        offsetHeight: 0
-      },
+      head: childHead,
+      body: childBody,
+      documentElement: childDocumentElement,
       addEventListener() {},
       createElement(tagName) {
         return makeNode(tagName);
@@ -485,6 +489,9 @@ function attachPluginHostChildFrame(app) {
       }
     },
     Node: function TestNode() {},
+    btoa(value) {
+      return Buffer.from(String(value), 'binary').toString('base64');
+    },
     console
   });
   vm.runInContext(extractVeerPluginHostScript(app.el.pluginUIFrame.srcdoc), childContext, { filename: 'veer-plugin-host.js' });
@@ -496,7 +503,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   app.state.plugins.catalog = {
     external_plugins_enabled: true,
     directory: 'plugins',
-    runtime: { external_dataplane_attach: false, external_dataplane_engines: ['tc'], registration_only_engines: ['xdp'], core_priority: 1000 },
+    runtime: { external_dataplane_attach: false, external_dataplane_engines: ['tc', 'xdp'], registration_only_engines: [], core_priority: 1000 },
     hot_reload: {
       enabled: true,
       check_interval_ms: 2000,
@@ -533,7 +540,12 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
         attachable: true,
         attached: true,
         attachment_count: 1,
-        attachments: [{ hook_id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'pre_forward', interface: 'veer', program: 'observer:tc_ingress', priority: 10, chain_slot: 10, status: 'chained' }]
+        attachments: [{
+          hook_id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'pre_forward', interface: 'veer',
+          program: 'observer:tc_ingress', priority: 10, before: ['firewall/filter'], after: ['pppoe_client/decap'],
+          packet_metadata: [{slot: 0, namespace: 'packet_observer/classification', schema_version: 1, max_bytes: 16, access: 'read_write'}],
+          order: 2, chain_slot: 10, status: 'chained'
+        }]
       },
       name: 'Packet Observer',
       kind: 'pipeline',
@@ -541,7 +553,12 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
       capabilities: ['observe'],
       virtual_interfaces: [{ id: 'vtap0', type: 'logical' }],
       objects: [{ id: 'observer', path: 'observer.o', programs: [{ id: 'tc_ingress', section: 'tc/ingress', type: 'tc' }] }],
-      hooks: [{ id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 10, program: 'observer.o:tc_ingress', mode: 'observe', interfaces: ['veer'] }],
+      hooks: [{
+        id: 'observe-ingress', engine: 'tc', attach: 'ingress', stage: 'forward', priority: 10,
+        before: ['firewall/filter'], after: ['pppoe_client/decap'],
+        packet_metadata: [{slot: 0, namespace: 'packet_observer/classification', schema_version: 1, max_bytes: 16, access: 'read_write'}],
+        program: 'observer.o:tc_ingress', mode: 'observe', interfaces: ['veer']
+      }],
       ui: { entry: 'index.html' },
       asset_base_path: '/api/plugins/packet_observer/assets/'
     }
@@ -559,6 +576,10 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   const detailLabels = collectAttribute(app.el.pluginsBody, 'aria-label');
   assert.match(detailLabels, /Objects/i);
   assert.match(detailLabels, /Hooks/i);
+  assert.match(detailLabels, /before=firewall\/filter/);
+  assert.match(detailLabels, /after=pppoe_client\/decap/);
+  assert.match(detailLabels, /order=2/);
+  assert.match(detailLabels, /metadata=s0:packet_observer\/classification:v1:16B:read_write/);
   assert.match(detailLabels, /chain_slot=10/);
   const detailButtons = app.el.pluginsBody.childNodes
     .flatMap((row) => row.childNodes || [])
@@ -575,7 +596,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
   assert.match(collectText(app.el.pluginsCatalogMeta), /Plugin Catalog/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Dir plugins/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Dataplane No/);
-  assert.match(collectText(app.el.pluginsCatalogMeta), /Register only XDP/);
+  assert.doesNotMatch(collectText(app.el.pluginsCatalogMeta), /Register only/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Update monitor Applied/);
   assert.match(collectText(app.el.pluginsCatalogMeta), /Applied abcdef123456/);
   assert.match(app.el.pluginsCatalogMeta.title, /Plugin update: Applied/);
@@ -777,6 +798,27 @@ test('renderPluginsTable applies plugin search filter', () => {
   assert.deepEqual(app.lastTableVisibility, { tableId: 'pluginsTable', visible: false });
 });
 
+test('plugin details include compact host and custom metrics', () => {
+  const app = createHarness();
+  const text = app.__pluginDetailsPlainTextForTest({
+    id: 'metric_plugin',
+    status: 'active',
+    runtime: {
+      mode: 'dataplane', attachable: true, attached: true, attachment_count: 1,
+      attachments: [{
+        hook_id: 'observe', engine: 'tc', attach: 'ingress', stage: 'post_apply', status: 'chained',
+        metrics: {total: {packets: 10, bytes: 640, continued_packets: 10, terminal_packets: 0, tail_call_misses: 0}}
+      }],
+      metrics: [{name: 'sessions', type: 'gauge', value: 2, labels: {wan: 'wan0'}}]
+    }
+  });
+
+  assert.match(text, /packets=10/);
+  assert.match(text, /bytes=640/);
+  assert.match(text, /sessions\{wan=wan0\}/);
+  assert.match(text, /gauge \| 2/);
+});
+
 test('renderPluginsTable places next-core chain entries after Veer Core', () => {
   const app = createHarness();
   app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
@@ -913,7 +955,7 @@ test('plugin dataplane runtime link rows preserve bound hook interfaces', () => 
   assert.ok(rows.every((row) => row.segments.some((segment) => segment.current && segment.text === 'pppoe_client')));
 });
 
-test('plugin dataplane link rows ignore registration-only xdp hooks', () => {
+test('plugin dataplane link rows render attached xdp hooks', () => {
   const app = createHarness();
   app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
   const xdpOnly = {
@@ -921,11 +963,21 @@ test('plugin dataplane link rows ignore registration-only xdp hooks', () => {
     name: 'XDP Probe',
     kind: 'pipeline',
     hooks: [{ id: 'xdp-ingress', engine: 'xdp', attach: 'ingress', stage: 'forward', priority: 20, program: 'probe:xdp_ingress', mode: 'observe', interfaces: ['eth0'] }],
-    runtime: { mode: 'registered', attachable: false, attached: false, reason: 'xdp hooks are registration-only in the tc pipeline' }
+    runtime: {
+      mode: 'dataplane',
+      attachable: true,
+      attached: true,
+      attachments: [
+        { hook_id: 'xdp-ingress', engine: 'xdp', attach: 'ingress', stage: 'pre_forward', interface: 'eth0', priority: 20, chain_slot: 8, status: 'chained' }
+      ]
+    }
   };
   app.state.plugins.data = [xdpOnly];
 
-  assert.equal(app.__pluginLinkRowsForTest(xdpOnly).length, 0);
+  const rows = app.__pluginLinkRowsForTest(xdpOnly);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].label, 'XDP ingress forward');
+  assert.ok(rows[0].segments.some((segment) => segment.current && segment.text === 'xdp_probe'));
 });
 
 test('openPluginUI fetches protected asset and renders inline iframe', async () => {
@@ -935,30 +987,40 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
     id: 'packet_observer',
     name: 'Packet Observer',
     asset_base_path: '/api/plugins/packet_observer/assets/',
-    ui: { entry: 'index.html' }
+    ui: { entry: 'nested/page #1.html' }
   }];
   app.__context.fetch = async function fetch(url, opts) {
     calls.push({ url, authorization: opts.headers.Authorization });
     return {
       ok: true,
       status: 200,
-      headers: { get(name) { return name === 'Content-Type' ? 'text/html' : ''; } },
-      text: async () => '<!doctype html><title>Plugin</title>'
+      headers: { get(name) { return name === 'Content-Type' ? 'text/plain' : ''; } },
+      text: async () => '<!doctype html><script data-plugin-prehead>window.pluginRan = true;</script><head><title>Plugin</title></head>'
     };
   };
 
   await app.openPluginUI('packet_observer');
 
   assert.deepEqual(calls, [{
-    url: '/api/plugins/packet_observer/assets/index.html',
+    url: '/api/plugins/packet_observer/assets/nested/page%20%231.html',
     authorization: 'Bearer test-token'
   }]);
   assert.equal(app.__openedWindows.length, 0);
   assert.equal(app.el.pluginUIPanel.hidden, false);
   assert.equal(app.el.pluginUITitle.textContent, 'Packet Observer');
-  assert.equal(app.el.pluginUIMeta.textContent, 'packet_observer / index.html');
+  assert.equal(app.el.pluginUIMeta.textContent, 'packet_observer / nested/page #1.html');
   assert.equal(app.el.pluginUIFrame.src, 'about:blank');
-  assert.equal(app.el.pluginUIFrame.getAttribute('sandbox'), 'allow-scripts allow-forms allow-popups');
+  assert.equal(app.el.pluginUIFrame.getAttribute('sandbox'), 'allow-scripts');
+  assert.equal(app.el.pluginUIFrame.getAttribute('referrerpolicy'), 'no-referrer');
+  assert.match(app.el.pluginUIFrame.getAttribute('csp'), /connect-src 'none'/);
+  assert.match(app.el.pluginUIFrame.getAttribute('csp'), /form-action 'none'/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /http-equiv="Content-Security-Policy"/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /navigate-to 'none'/);
+  assert.ok(
+    String(app.el.pluginUIFrame.srcdoc).indexOf('http-equiv="Content-Security-Policy"') <
+      String(app.el.pluginUIFrame.srcdoc).indexOf('data-plugin-prehead'),
+    'the host CSP must precede plugin-controlled executable content'
+  );
   assert.match(String(app.el.pluginUIFrame.srcdoc), /data-veer-plugin-host/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /VeerPluginHost/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.data/);
@@ -975,6 +1037,9 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.recordPicker = function/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.collectionEditor = function/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.plugins = Object\.freeze/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.assets = Object\.freeze/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /max_inflight/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /pendingRPCBytes/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /error_payload/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /runtime_status/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /runtime_error/);
@@ -984,6 +1049,186 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
   app.closePluginUI();
 
   assert.equal(app.el.pluginUIPanel.hidden, true);
+});
+
+test('plugin host loads bounded same-plugin text json style script and image assets', async () => {
+  const app = createHarness();
+  const calls = [];
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html' }
+  }];
+  app.__context.fetch = async function fetch(url, opts) {
+    calls.push({ url, authorization: opts.headers.Authorization });
+    if (url.endsWith('index.html')) {
+      return response('text/html; charset=utf-8', '<!doctype html><title>Plugin</title>');
+    }
+    if (url.endsWith('assets/info.txt')) return response('text/plain; charset=utf-8', 'hello');
+    if (url.endsWith('assets/config.json')) return response('application/json', '{"enabled":true}');
+    if (url.endsWith('assets/plugin.css')) return response('text/css', '.plugin { color: red; }');
+    if (url.endsWith('assets/plugin.js')) return response('text/javascript', 'window.pluginAssetLoaded = true;');
+    if (url.endsWith('assets/icon.png')) {
+      const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+      return response('image/png', '', bytes.buffer);
+    }
+    return { ok: false, status: 404, statusText: 'not found', headers: { get() { return ''; } }, text: async () => '' };
+  };
+
+  function response(contentType, body, buffer) {
+    const length = buffer ? buffer.byteLength : Buffer.byteLength(body);
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          if (String(name).toLowerCase() === 'content-type') return contentType;
+          if (String(name).toLowerCase() === 'content-length') return String(length);
+          return '';
+        }
+      },
+      text: async () => body,
+      arrayBuffer: async () => buffer
+    };
+  }
+
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+
+  assert.equal(await host.assets.text('assets/info.txt'), 'hello');
+  assert.deepEqual(JSON.parse(JSON.stringify(await host.assets.json('assets/config.json'))), { enabled: true });
+  const style = await host.assets.style('assets/plugin.css', { media: 'screen' });
+  assert.equal(style.tagName, 'STYLE');
+  assert.equal(style.getAttribute('media'), 'screen');
+  assert.equal(style.textContent, '.plugin { color: red; }');
+  assert.equal(style.parentNode.tagName, 'HEAD');
+  const script = await host.assets.script('assets/plugin.js');
+  assert.equal(script.tagName, 'SCRIPT');
+  assert.match(script.textContent, /window\.pluginAssetLoaded = true/);
+  assert.match(script.textContent, /sourceURL=veer-plugin:\/\/packet_observer\/assets\/plugin\.js/);
+  assert.equal(script.parentNode.tagName, 'HEAD');
+  assert.equal(await host.assets.dataURL('assets/icon.png'), 'data:image/png;base64,iVBORw==');
+  assert.ok(calls.every((call) => call.authorization === 'Bearer test-token'));
+});
+
+test('plugin asset bridge rejects traversal mismatched types invalid JSON and oversized files', async () => {
+  const app = createHarness();
+  let fetchCalls = 0;
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html' }
+  }];
+  app.__context.fetch = async function fetch(url) {
+    fetchCalls += 1;
+    if (url.endsWith('index.html')) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get(name) { return String(name).toLowerCase() === 'content-type' ? 'text/html' : ''; } },
+        text: async () => '<!doctype html><title>Plugin</title>'
+      };
+    }
+    const isLarge = url.endsWith('large.txt');
+    const contentType = url.endsWith('.json') ? 'application/json' : 'text/css';
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          if (String(name).toLowerCase() === 'content-type') return contentType;
+          if (String(name).toLowerCase() === 'content-length') return isLarge ? String(1024 * 1024 + 1) : '';
+          return '';
+        }
+      },
+      text: async () => isLarge ? '' : '{broken'
+    };
+  };
+
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+  const afterEntry = fetchCalls;
+  await assert.rejects(host.assets.text('../secret.txt'), (error) => error.status === 400);
+  assert.equal(fetchCalls, afterEntry);
+  await assert.rejects(host.assets.script('assets/not-script.css'), (error) => error.status === 415);
+  await assert.rejects(host.assets.json('assets/broken.json'), (error) => error.status === 422);
+  await assert.rejects(host.assets.text('assets/large.txt'), (error) => error.status === 413);
+});
+
+test('plugin host and parent both enforce RPC queue payload and rate limits', async () => {
+  const app = createHarness();
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html' }
+  }];
+  app.__context.fetch = async function fetch() {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get(name) { return String(name).toLowerCase() === 'content-type' ? 'text/html' : ''; } },
+      text: async () => '<!doctype html><title>Plugin</title>'
+    };
+  };
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+
+  app.apiCall = () => new Promise(() => {});
+  const pending = Array.from({ length: host.rpcLimits.max_inflight }, (_, index) => host.action('hold', { index }));
+  assert.equal(pending.length, 32);
+  await assert.rejects(host.action('overflow'), (error) => error.status === 429);
+
+  const frameWindow = {
+    messages: [],
+    postMessage(message) {
+      this.messages.push(message);
+    }
+  };
+  app.closePluginUI();
+  app.el.pluginUIFrame.dataset.pluginFrame = '1';
+  app.el.pluginUIFrame.dataset.pluginId = 'packet_observer';
+  app.el.pluginUIFrame.contentWindow = frameWindow;
+  const handler = app.__windowListeners.message[0];
+  let apiCalls = 0;
+  app.apiCall = async function apiCall() {
+    apiCalls += 1;
+    return {};
+  };
+
+  handler({
+    source: frameWindow,
+    data: {
+      type: 'veer-plugin-rpc',
+      pluginId: 'packet_observer',
+      id: 'oversized',
+      op: 'action',
+      payload: { action: 'test', payload: { value: 'x'.repeat(2 * 1024 * 1024 + 1) } }
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(frameWindow.messages.at(-1).status, 413);
+  assert.equal(frameWindow.messages.at(-1).error_payload.code, 'plugin_ui_rpc_payload_limit');
+  assert.equal(apiCalls, 0);
+
+  for (let index = 0; index <= 120; index++) {
+    handler({
+      source: frameWindow,
+      data: {
+        type: 'veer-plugin-rpc',
+        pluginId: 'packet_observer',
+        id: 'rate-' + index,
+        op: 'action',
+        payload: { action: 'test', payload: { index } }
+      }
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(apiCalls, 120);
+  assert.equal(frameWindow.messages.at(-1).status, 429);
+  assert.equal(frameWindow.messages.at(-1).error_payload.code, 'plugin_ui_rpc_rate_limit');
 });
 
 test('plugin RPC data.list forwards pagination query params', () => {

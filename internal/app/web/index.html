@@ -30,7 +30,7 @@
             document.documentElement.style.colorScheme = resolved;
         })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20260409-2">
+    <link rel="stylesheet" href="style.css?v=20260714-1">
 </head>
 <body>
     <div id="tokenModal" class="modal">
@@ -52,6 +52,21 @@
                 <button type="button" id="confirmCancelBtn" class="btn-cancel">Cancel</button>
                 <button type="button" id="confirmSubmitBtn">Confirm</button>
             </div>
+        </div>
+    </div>
+
+    <div id="pluginManagerModal" class="modal plugin-manager-modal" aria-hidden="true">
+        <div class="modal-content plugin-manager-dialog" role="dialog" aria-modal="true" aria-labelledby="pluginManagerTitle" aria-describedby="pluginManagerMeta">
+            <div class="plugin-manager-header">
+                <div class="plugin-manager-heading">
+                    <p class="section-kicker" data-i18n="plugins.manager.kicker">Plugin Management</p>
+                    <h2 id="pluginManagerTitle" data-i18n="plugins.manager.title">Manage Plugins</h2>
+                    <p id="pluginManagerMeta" class="section-desc"></p>
+                </div>
+                <button type="button" id="closePluginManagerBtn" class="plugin-manager-close" data-i18n-title="common.close" aria-label="Close">&times;</button>
+            </div>
+            <div id="pluginManagerNav" class="plugin-manager-nav" hidden></div>
+            <div id="pluginManagerBody" class="plugin-manager-body"></div>
         </div>
     </div>
 
@@ -956,6 +971,11 @@
                         <p class="section-desc" data-i18n="plugins.desc">Manifest, object validation, TC pipeline chain, and runtime attachment status. External dataplane is off by default.</p>
                     </div>
                     <div class="section-heading-actions">
+                        <button type="button" id="managePluginRepositoriesBtn" class="mini-btn" data-i18n="plugins.repository.title">Plugin Repositories</button>
+                        <button type="button" id="installPluginPackageBtn" class="mini-btn" data-i18n="plugins.package.install">Install Package</button>
+                        <button type="button" id="managePluginTrustBtn" class="mini-btn" data-i18n="plugins.trust.title">Trust Keys</button>
+                        <button type="button" id="viewPluginAuditBtn" class="mini-btn" data-i18n="plugins.audit.title">Audit</button>
+                        <button type="button" id="managePluginSecretsBtn" class="mini-btn" data-i18n="plugins.secrets.title">Secrets</button>
                         <button type="button" id="refreshPluginsBtn" class="mini-btn" data-i18n="plugins.refresh">Refresh Plugins</button>
                     </div>
                 </div>
@@ -978,7 +998,7 @@
                         </div>
                         <button type="button" id="closePluginUIBtn" class="mini-btn" data-i18n="plugins.ui.close">Close</button>
                     </div>
-                    <iframe id="pluginUIFrame" class="plugin-ui-frame" title="Plugin UI" sandbox="allow-scripts allow-forms allow-popups"></iframe>
+                    <iframe id="pluginUIFrame" class="plugin-ui-frame" title="Plugin UI" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
                 </section>
                 <div class="table-scroll">
                     <table id="pluginsTable">
@@ -1180,8 +1200,8 @@
     </div>
 
     <script defer src="js/core.js?v=20260408-3"></script>
-    <script defer src="js/i18n.js?v=20260424-1"></script>
-    <script defer src="js/ui.js?v=20260424-1"></script>
+    <script defer src="js/i18n.js?v=20260714-3"></script>
+    <script defer src="js/ui.js?v=20260714-1"></script>
     <script defer src="js/rules.js?v=20260410-1"></script>
     <script defer src="js/sites.js?v=20260407-2"></script>
     <script defer src="js/ranges.js?v=20260407-4"></script>
@@ -1189,7 +1209,8 @@
     <script defer src="js/ipv6_assignments.js?v=20260408-6"></script>
     <script defer src="js/managed_networks.js?v=20260422-1"></script>
     <script defer src="js/workers.js?v=20260407-5"></script>
-    <script defer src="js/plugins.js?v=20260704-1"></script>
+    <script defer src="js/plugins.js?v=20260714-1"></script>
+    <script defer src="js/plugin_manager.js?v=20260714-3"></script>
     <script defer src="js/stats.js?v=20260422-1"></script>
     <script defer src="js/init.js?v=20260424-1"></script>
 </body>
