@@ -206,7 +206,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: var(--shadow-soft);
-    z-index: 2000;
+    z-index: var(--z-popover);
     overflow-y: auto;
     overscroll-behavior: contain;
 }

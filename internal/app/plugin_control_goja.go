@@ -3114,11 +3114,14 @@ func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
 }
 
 type pluginControlUIRegistration struct {
-	StaticDir string `json:"static_dir"`
-	Entry     string `json:"entry"`
-	SHA256    string `json:"sha256"`
-	Page      string `json:"page"`
-	PageTitle string `json:"page_title"`
+	StaticDir      string                   `json:"static_dir"`
+	Entry          string                   `json:"entry"`
+	SHA256         string                   `json:"sha256"`
+	Page           string                   `json:"page"`
+	PageTitle      string                   `json:"page_title"`
+	Resources      []PluginUIResourceAccess `json:"resources"`
+	Actions        []string                 `json:"actions"`
+	ResourceAccess []PluginResourceAccess   `json:"resource_access"`
 }
 
 func (h *pluginControlHost) uiRegister(call goja.FunctionCall) goja.Value {
@@ -3129,11 +3132,14 @@ func (h *pluginControlHost) uiRegister(call goja.FunctionCall) goja.Value {
 	}
 	h.exportJSONValue(call.Arguments[0], &spec, "ui.register")
 	ui := PluginUI{
-		StaticDir: spec.StaticDir,
-		Entry:     spec.Entry,
-		Page:      spec.Page,
-		PageTitle: spec.PageTitle,
-		SHA256:    spec.SHA256,
+		StaticDir:      spec.StaticDir,
+		Entry:          spec.Entry,
+		Page:           spec.Page,
+		PageTitle:      spec.PageTitle,
+		SHA256:         spec.SHA256,
+		Resources:      spec.Resources,
+		Actions:        spec.Actions,
+		ResourceAccess: spec.ResourceAccess,
 	}
 	if err := normalizePluginUI(&ui); err != nil {
 		h.throwf("ui.register: %v", err)

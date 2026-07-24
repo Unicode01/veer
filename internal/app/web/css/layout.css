@@ -48,6 +48,12 @@
     --neutral-bg: #f3f4f6;
     --neutral-border: #d1d5db;
     --neutral-text: #6b7280;
+    --z-modal: 1000;
+    --z-plugin-manager: 1100;
+    --z-popover: 1200;
+    --z-confirm-modal: 1300;
+    --z-auth-modal: 1400;
+    --z-toast: 1500;
     --menu-shadow: 0 18px 40px rgba(15, 23, 42, 0.14);
 }
 
@@ -134,7 +140,7 @@ select {
     position: fixed;
     inset: 0;
     background: var(--modal-overlay);
-    z-index: 1000;
+    z-index: var(--z-modal);
     justify-content: center;
     align-items: center;
     padding: 24px;
@@ -142,6 +148,14 @@ select {
 
 .modal.active {
     display: flex;
+}
+
+.confirm-modal {
+    z-index: var(--z-confirm-modal);
+}
+
+.auth-modal {
+    z-index: var(--z-auth-modal);
 }
 
 .modal-content {
@@ -467,7 +481,7 @@ section h2 {
     position: fixed;
     top: 18px;
     right: 18px;
-    z-index: 1200;
+    z-index: var(--z-toast);
     display: flex;
     flex-direction: column;
     gap: 10px;

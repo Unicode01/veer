@@ -1681,6 +1681,7 @@ select.veer-input {
   }
 
   function pluginHostComponentJS(plugin) {
+    const grantedActions = new Set(Array.isArray(plugin && plugin.ui && plugin.ui.actions) ? plugin.ui.actions : []);
     const host = {
       version: 'v1',
       pluginId: plugin && plugin.id || '',
@@ -1692,10 +1693,11 @@ select.veer-input {
         max_pending_bytes: pluginUIRPCMaxPendingBytes
       },
       resources: Array.isArray(plugin && plugin.resources) ? plugin.resources.map(function (resource) {
+        const methods = pluginUIOwnResourceMethods(plugin, resource && resource.id);
         return {
           id: resource && resource.id || '',
           description: resource && resource.description || '',
-          methods: Array.isArray(resource && resource.methods) ? resource.methods.slice() : [],
+          methods: methods,
           runtime_update: resource && resource.runtime_update || '',
           max_records: resource && resource.max_records || 0,
           max_record_bytes: resource && resource.max_record_bytes || 0,
@@ -1703,8 +1705,10 @@ select.veer-input {
           schema: resource && resource.schema || null,
           schema_digest: resource && resource.schema_digest || ''
         };
-      }) : [],
-      actions: Array.isArray(plugin && plugin.actions) ? plugin.actions.map(function (action) {
+      }).filter(function (resource) { return resource.id && resource.methods.length > 0; }) : [],
+      actions: Array.isArray(plugin && plugin.actions) ? plugin.actions.filter(function (action) {
+        return action && grantedActions.has(action.id);
+      }).map(function (action) {
         return {
           id: action && action.id || '',
           description: action && action.description || '',
@@ -2718,8 +2722,45 @@ select.veer-input {
     return source;
   }
 
-  function pluginUIResourceAccessAllowed(sourcePluginID, targetPluginID, resourceID, method) {
-    const source = (app.state.plugins.data || []).find((plugin) => plugin && plugin.id === sourcePluginID);
+  function pluginUIByID(pluginID) {
+    return (app.state.plugins.data || []).find((plugin) => plugin && plugin.id === pluginID) || null;
+  }
+
+  function pluginUIOwnResourceMethods(plugin, resourceID) {
+    const ui = plugin && plugin.ui && typeof plugin.ui === 'object' ? plugin.ui : null;
+    const grants = ui && Array.isArray(ui.resources) ? ui.resources : [];
+    const grant = grants.find((item) => item && item.resource === resourceID);
+    const resources = Array.isArray(plugin && plugin.resources) ? plugin.resources : [];
+    const resource = resources.find((item) => item && item.id === resourceID);
+    const exposed = resource && Array.isArray(resource.methods) ? resource.methods : [];
+    return grant && Array.isArray(grant.methods) ? grant.methods.filter((method) => exposed.includes(method)) : [];
+  }
+
+  function pluginUIOwnResourceAccessAllowed(pluginID, resourceID, method) {
+    return pluginUIOwnResourceMethods(pluginUIByID(pluginID), resourceID).includes(method);
+  }
+
+  function pluginUIActionAccessAllowed(pluginID, actionID) {
+    const plugin = pluginUIByID(pluginID);
+    const ui = plugin && plugin.ui && typeof plugin.ui === 'object' ? plugin.ui : null;
+    const registered = Array.isArray(plugin && plugin.actions) ? plugin.actions : [];
+    return !!(ui && Array.isArray(ui.actions) && ui.actions.includes(actionID) &&
+      registered.some((action) => action && action.id === actionID));
+  }
+
+  function pluginUICrossResourceAccessAllowed(sourcePluginID, targetPluginID, resourceID, method) {
+    const source = pluginUIByID(sourcePluginID);
+    const ui = source && source.ui && typeof source.ui === 'object' ? source.ui : null;
+    const uiGrants = ui && Array.isArray(ui.resource_access) ? ui.resource_access : [];
+    const uiAllowed = uiGrants.some((grant) => {
+      if (!grant || grant.plugin !== targetPluginID || grant.resource !== resourceID) return false;
+      return Array.isArray(grant.methods) && grant.methods.includes(method);
+    });
+    if (!uiAllowed) return false;
+    const target = pluginUIByID(targetPluginID);
+    const targetResources = Array.isArray(target && target.resources) ? target.resources : [];
+    const targetResource = targetResources.find((resource) => resource && resource.id === resourceID);
+    if (!targetResource || !Array.isArray(targetResource.methods) || !targetResource.methods.includes(method)) return false;
     const control = source && source.control && typeof source.control === 'object' ? source.control : null;
     const grants = control && Array.isArray(control.resource_access) ? control.resource_access : [];
     return grants.some((grant) => {
@@ -2734,31 +2775,47 @@ select.veer-input {
     if (op === 'asset.text' || op === 'asset.json' || op === 'asset.style' || op === 'asset.script' || op === 'asset.data_url') {
       return fetchPluginUIAsset(pluginId, op, payload.path);
     }
-    const resource = payload.resource != null ? encodeURIComponent(pluginRPCString(payload.resource, 'resource')) : '';
+    const resourceText = payload.resource != null ? pluginRPCString(payload.resource, 'resource') : '';
+    const resource = resourceText ? encodeURIComponent(resourceText) : '';
     const key = payload.key != null && payload.key !== '' ? encodeURIComponent(pluginRPCString(payload.key, 'key')) : '';
     if (op === 'data.list') {
+      if (!pluginUIOwnResourceAccessAllowed(pluginId, resourceText, 'list')) {
+        throw pluginRPCFailure('plugin UI resource capability denied', 403, 'plugin_ui_capability_denied');
+      }
       const query = [];
       if (payload.limit != null && payload.limit !== '') query.push('limit=' + encodeURIComponent(String(payload.limit)));
       if (payload.offset != null && payload.offset !== '') query.push('offset=' + encodeURIComponent(String(payload.offset)));
       return app.apiCall('GET', '/api/plugins/' + id + '/resources/' + resource + (query.length ? '?' + query.join('&') : ''));
     }
     if (op === 'data.get') {
+      if (!pluginUIOwnResourceAccessAllowed(pluginId, resourceText, 'get')) {
+        throw pluginRPCFailure('plugin UI resource capability denied', 403, 'plugin_ui_capability_denied');
+      }
       if (!key) throw new Error('key is required');
       return app.apiCall('GET', '/api/plugins/' + id + '/resources/' + resource + '/' + key);
     }
     if (op === 'data.create') {
+      if (!pluginUIOwnResourceAccessAllowed(pluginId, resourceText, 'create')) {
+        throw pluginRPCFailure('plugin UI resource capability denied', 403, 'plugin_ui_capability_denied');
+      }
       const body = { data: payload.data };
       if (payload.key != null && payload.key !== '') body.key = payload.key;
       if (payload.enabled != null) body.enabled = !!payload.enabled;
       return app.apiCall('POST', '/api/plugins/' + id + '/resources/' + resource, body);
     }
     if (op === 'data.update') {
+      if (!pluginUIOwnResourceAccessAllowed(pluginId, resourceText, 'update')) {
+        throw pluginRPCFailure('plugin UI resource capability denied', 403, 'plugin_ui_capability_denied');
+      }
       if (!key) throw new Error('key is required');
       const body = { data: payload.data };
       if (payload.enabled != null) body.enabled = !!payload.enabled;
       return app.apiCall('PUT', '/api/plugins/' + id + '/resources/' + resource + '/' + key, body);
     }
     if (op === 'data.delete') {
+      if (!pluginUIOwnResourceAccessAllowed(pluginId, resourceText, 'delete')) {
+        throw pluginRPCFailure('plugin UI resource capability denied', 403, 'plugin_ui_capability_denied');
+      }
       if (!key) throw new Error('key is required');
       return app.apiCall('DELETE', '/api/plugins/' + id + '/resources/' + resource + '/' + key);
     }
@@ -2766,8 +2823,8 @@ select.veer-input {
       const targetPluginText = pluginRPCString(payload.plugin, 'target plugin id');
       const targetResourceText = pluginRPCString(payload.resource, 'target resource id');
       const method = op === 'plugins.resources.list' ? 'list' : 'get';
-      if (!pluginUIResourceAccessAllowed(pluginId, targetPluginText, targetResourceText, method)) {
-        throw new Error('plugin resource access denied');
+      if (!pluginUICrossResourceAccessAllowed(pluginId, targetPluginText, targetResourceText, method)) {
+        throw pluginRPCFailure('plugin UI cross-plugin resource capability denied', 403, 'plugin_ui_capability_denied');
       }
       const targetPlugin = encodeURIComponent(targetPluginText);
       const targetResource = encodeURIComponent(targetResourceText);
@@ -2781,7 +2838,11 @@ select.veer-input {
       return app.apiCall('GET', '/api/plugins/' + targetPlugin + '/resources/' + targetResource + '/' + targetKey);
     }
     if (op === 'action') {
-      const action = encodeURIComponent(pluginRPCString(payload.action, 'action'));
+      const actionText = pluginRPCString(payload.action, 'action');
+      if (!pluginUIActionAccessAllowed(pluginId, actionText)) {
+        throw pluginRPCFailure('plugin UI action capability denied', 403, 'plugin_ui_capability_denied');
+      }
+      const action = encodeURIComponent(actionText);
       return app.apiCall('POST', '/api/plugins/' + id + '/actions/' + action, { payload: payload.payload || {} });
     }
     throw new Error('unsupported plugin operation');
@@ -3292,11 +3353,20 @@ select.veer-input {
         tr.setAttribute('aria-busy', 'true');
       }
 
-      tr.appendChild(app.createCell(app.createNode('span', {
-        className: 'stat-mono plugin-text-truncate',
-        text: plugin.id || app.t('common.dash'),
-        title: plugin.id || ''
-      }), 'plugin-cell-id'));
+      tr.appendChild(app.createCell(app.createNode('div', {
+        className: 'plugin-identity',
+        title: nameTitle,
+        children: [
+          app.createNode('span', {
+            className: 'plugin-identity-name plugin-text-truncate',
+            text: plugin.name || plugin.id || app.t('common.dash')
+          }),
+          plugin.name && plugin.id ? app.createNode('span', {
+            className: 'plugin-identity-id stat-mono plugin-text-truncate',
+            text: plugin.id
+          }) : null
+        ].filter(Boolean)
+      }), 'plugin-cell-name'));
       tr.appendChild(app.createCell(app.createNode('div', {
         className: 'plugin-status-compact',
         children: [
@@ -3316,12 +3386,6 @@ select.veer-input {
           })
         ].filter(Boolean)
       }), 'plugin-cell-status'));
-      tr.appendChild(app.createCell(app.createNode('span', {
-        className: 'plugin-text-truncate',
-        text: plugin.name || app.t('common.dash'),
-        title: nameTitle
-      }), 'plugin-cell-name'));
-      tr.appendChild(app.createCell(plugin.kind ? app.createNode('span', { className: 'plugin-text-truncate', text: plugin.kind, title: plugin.kind }) : app.emptyCellNode('stat-muted'), 'plugin-cell-tight'));
       const update = plugin._pendingUpdate;
       const appliedVersion = update && update.applied_version || plugin.version || '';
       const detectedVersion = update && update.detected_version || '';

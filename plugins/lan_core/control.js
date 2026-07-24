@@ -78,7 +78,18 @@ ui.register({
   entry: 'index.html',
   sha256: 'a4d7bc4dbfa34fa8b04a1a8d658fb5c82c56cbfea14dd32586522e0c82b47991',
   page: 'lan',
-  page_title: 'LAN'
+  page_title: 'LAN',
+  resources: [
+    {resource: 'profiles', methods: ['list', 'create', 'update']},
+    {resource: 'status', methods: ['list']},
+    {resource: 'egress_nat_plans', methods: ['list']},
+    {resource: 'ipv6_assignment_plans', methods: ['list']},
+    {resource: 'dhcpv4_plans', methods: ['list']}
+  ],
+  actions: ['apply_network', 'teardown', 'traffic_stats'],
+  resource_access: [
+    {plugin: 'wan_core', resource: 'status', methods: ['list']}
+  ]
 });
 
 exports.onReconcile = function () {

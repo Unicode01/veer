@@ -44,7 +44,12 @@ ui.register({
   entry: 'index.html',
   sha256: '99eb320f1e23eb8913bbe60428caa95eea2bac5e8f89ac580392da69d574d8a2',
   page: 'vtolocal',
-  page_title: 'VToLocal'
+  page_title: 'VToLocal',
+  resources: [
+    {resource: 'links', methods: ['list', 'create', 'update']},
+    {resource: 'status', methods: ['list']}
+  ],
+  actions: ['teardown']
 });
 
 exports.onReconcile = function () {

@@ -93,7 +93,9 @@ ui.register({
   static_dir: "ui",
   entry: "index.html",
   page: "my_plugin",
-  page_title: "My Plugin"
+  page_title: "My Plugin",
+  resources: [{resource: "profiles", methods: ["list", "get", "create", "update"]}],
+  actions: ["apply"]
 });
 
 exports.onReconcile = function (ctx) {
@@ -463,9 +465,14 @@ ui.register({
   static_dir: "ui",
   entry: "index.html",
   page: "observe",
-  page_title: "Observe"
+  page_title: "Observe",
+  resources: [{resource: "bindings", methods: ["list", "create", "delete"]}],
+  actions: ["apply"],
+  resource_access: [{plugin: "wan_core", resource: "status", methods: ["list"]}]
 });
 ```
+
+`resources` 和 `actions` 是 iframe 页面可调用的本插件最小权限；省略即拒绝对应 RPC。声明必须是已注册 resource/action 的子集。`resource_access` 只允许跨插件 `list/get`，并且还必须是 manifest `control.resource_access` 的子集。该契约对应 `ui.capabilities.v1`。
 
 发布方用第三个参数携带契约版本：
 
@@ -540,7 +547,7 @@ async function saveProfile() {
 - `VeerPluginHost.errorText(error)`
 - `VeerPluginHost.requestResize()`
 
-跨插件 UI 读取只开放 `list/get`，并复用调用方 manifest 的 `control.resource_access` 白名单。iframe 不能借此访问未授权插件资源，也不开放跨插件写入；编排写操作仍通过 Goja `plugins.resources` / `plugins.actions` 完成。
+跨插件 UI 读取只开放 `list/get`，并同时检查 `ui.register().resource_access` 与调用方 manifest 的 `control.resource_access` 白名单。iframe 不能借此访问未授权插件资源，也不开放跨插件写入；编排写操作仍通过 Goja `plugins.resources` / `plugins.actions` 完成。
 
 宿主还注入基础组件和 class 名，例如 `host.card()`、`host.button()`、`host.table()`、`host.recordPicker()`、`host.collectionEditor()`、`veer-card`、`veer-button`、`veer-table`。`recordPicker` 用于已有记录/新建记录切换，`collectionEditor` 用于路由等结构化数组，避免页面要求用户手写内部 key 或原始 JSON。
 

@@ -147,6 +147,20 @@ declare global {
     sha256?: string;
     page: string;
     page_title: string;
+    resources?: VeerUIResourceAccess[];
+    actions?: string[];
+    resource_access?: VeerUICrossPluginResourceAccess[];
+  }
+
+  interface VeerUIResourceAccess {
+    resource: string;
+    methods: VeerResourceMethod[];
+  }
+
+  interface VeerUICrossPluginResourceAccess {
+    plugin: string;
+    resource: string;
+    methods: Array<'list' | 'get'>;
   }
 
   interface VeerPluginAPI {

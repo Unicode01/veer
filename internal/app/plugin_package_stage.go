@@ -436,6 +436,17 @@ func pluginPrivilegeSummary(plugin LoadedPlugin) ([]string, string) {
 			entries = append(entries, "namespace:"+pattern)
 		}
 	}
+	if plugin.UI != nil {
+		for _, access := range plugin.UI.Resources {
+			entries = append(entries, "ui-resource:"+access.Resource+":"+strings.Join(access.Methods, ","))
+		}
+		for _, action := range plugin.UI.Actions {
+			entries = append(entries, "ui-action:"+action)
+		}
+		for _, access := range plugin.UI.ResourceAccess {
+			entries = append(entries, "ui-cross-resource:"+access.Plugin+"/"+access.Resource+":"+strings.Join(access.Methods, ","))
+		}
+	}
 	for _, object := range plugin.Objects {
 		hash := object.ResolvedSHA256
 		if hash == "" {

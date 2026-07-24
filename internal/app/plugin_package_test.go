@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1099,6 +1100,38 @@ func TestPluginPrivilegeSummaryIncludesNamespaceScope(t *testing.T) {
 	additions := pluginPrivilegeAdditions(baseEntries, candidateEntries)
 	if len(additions) != 1 || additions[0] != "namespace:veer-*" {
 		t.Fatalf("namespace privilege additions = %v", additions)
+	}
+}
+
+func TestPluginPrivilegeSummaryIncludesUICapabilities(t *testing.T) {
+	base := LoadedPlugin{UI: &PluginUI{
+		Resources: []PluginUIResourceAccess{{Resource: "profiles", Methods: []string{"list"}}},
+		Actions:   []string{"refresh"},
+		ResourceAccess: []PluginResourceAccess{{
+			Plugin: "wan_core", Resource: "status", Methods: []string{"list"},
+		}},
+	}}
+	baseEntries, baseDigest := pluginPrivilegeSummary(base)
+	for _, want := range []string{
+		"ui-resource:profiles:list",
+		"ui-action:refresh",
+		"ui-cross-resource:wan_core/status:list",
+	} {
+		if !slices.Contains(baseEntries, want) {
+			t.Fatalf("privilege entries = %v, want %q", baseEntries, want)
+		}
+	}
+
+	candidate := base
+	candidate.UI = clonePluginUI(base.UI)
+	candidate.UI.Actions = append(candidate.UI.Actions, "apply")
+	candidateEntries, candidateDigest := pluginPrivilegeSummary(candidate)
+	if candidateDigest == baseDigest {
+		t.Fatal("wider UI action access did not change privilege digest")
+	}
+	additions := pluginPrivilegeAdditions(baseEntries, candidateEntries)
+	if len(additions) != 1 || additions[0] != "ui-action:apply" {
+		t.Fatalf("UI privilege additions = %v", additions)
 	}
 }
 

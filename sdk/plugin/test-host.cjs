@@ -172,6 +172,45 @@ function normalizeTokenList(values, label, limit = 64) {
   return [...new Set(values.map((value) => token(value, label)).filter(Boolean))].sort();
 }
 
+function normalizeUIResourceAccess(values, crossPlugin = false) {
+  const field = crossPlugin ? 'resource_access' : 'resources';
+  if (values == null) return [];
+  if (!Array.isArray(values) || values.length > 64) throw new Error(`ui.register ${field} must be an array with at most 64 entries`);
+  const seen = new Set();
+  return values.map((raw, index) => {
+    const item = cloneJSON(raw || {});
+    const allowedFields = new Set(crossPlugin ? ['plugin', 'resource', 'methods'] : ['resource', 'methods']);
+    for (const name of Object.keys(item)) {
+      if (!allowedFields.has(name)) throw new Error(`ui.register ${field}[${index}] contains unknown field ${name}`);
+    }
+    const resource = token(item.resource, `ui.register ${field}[${index}].resource`);
+    const methods = normalizeMethods(item.methods);
+    const allowed = crossPlugin ? new Set(['list', 'get']) : new Set(['list', 'get', 'create', 'update', 'delete']);
+    if (methods.length === 0 || methods.some((method) => !allowed.has(method))) {
+      throw new Error(`ui.register ${field}[${index}].methods are invalid`);
+    }
+    const plugin = crossPlugin ? token(item.plugin, `ui.register resource_access[${index}].plugin`) : '';
+    const key = `${plugin}\0${resource}`;
+    if (seen.has(key)) throw new Error(`ui.register duplicate resource access ${plugin ? `${plugin}/` : ''}${resource}`);
+    seen.add(key);
+    const normalized = { resource, methods: methods.sort() };
+    if (plugin) normalized.plugin = plugin;
+    return normalized;
+  }).sort((left, right) => `${left.plugin || ''}/${left.resource}`.localeCompare(`${right.plugin || ''}/${right.resource}`));
+}
+
+function normalizeUIRegistration(spec) {
+  const item = cloneJSON(spec || {});
+  const allowedFields = new Set(['static_dir', 'entry', 'sha256', 'page', 'page_title', 'resources', 'actions', 'resource_access']);
+  for (const field of Object.keys(item)) {
+    if (!allowedFields.has(field)) throw new Error(`ui.register contains unknown field ${field}`);
+  }
+  item.resources = normalizeUIResourceAccess(item.resources);
+  item.actions = normalizeTokenList(item.actions, 'ui.register actions');
+  item.resource_access = normalizeUIResourceAccess(item.resource_access, true);
+  return item;
+}
+
 function semanticVersion(value, label) {
   const normalized = String(value || '').trim();
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.test(normalized)) {
@@ -445,6 +484,7 @@ class VeerPluginTestHost {
 	this.context.require = this.#createRequire(mainModuleID);
     const script = new vm.Script(source, { filename: controlPath, displayErrors: true });
     script.runInContext(this.context, { timeout: this.timeoutMs, displayErrors: true });
+    this.#validateUI();
     this.#validateServices();
     this.exports = this.context.module.exports;
     if (!this.exports || (typeof this.exports !== 'object' && typeof this.exports !== 'function')) {
@@ -805,7 +845,7 @@ class VeerPluginTestHost {
         register: (spec) => {
           this.#requirePermission('ui', 'ui.register', true);
           if (this.surface.ui) throw new Error('ui.register duplicate registration');
-          this.surface.ui = cloneJSON(spec || {});
+          this.surface.ui = normalizeUIRegistration(spec);
         },
       }),
       kv: Object.freeze({
@@ -948,6 +988,38 @@ class VeerPluginTestHost {
     const adapter = this.adapters[api];
     if (typeof adapter !== 'function') throw new Error(`${api} requires an explicit test adapter`);
     return cloneJSON(adapter(...cloneJSON(args), this));
+  }
+
+  #validateUI() {
+    const ui = this.surface.ui;
+    if (!ui) return;
+    for (const access of ui.resources) {
+      const resource = this.resourceContracts.get(access.resource);
+      if (!resource) throw new Error(`ui.resources references undeclared resource ${access.resource}`);
+      for (const method of access.methods) {
+        if (!resource.methods.includes(method)) {
+          throw new Error(`ui.resources method ${method} is not exposed by resource ${access.resource}`);
+        }
+      }
+    }
+    for (const action of ui.actions) {
+      if (!this.actionContracts.has(action)) throw new Error(`ui.actions references undeclared action ${action}`);
+    }
+    const controlAccess = this.manifest.control && Array.isArray(this.manifest.control.resource_access)
+      ? this.manifest.control.resource_access
+      : [];
+    for (const access of ui.resource_access) {
+      for (const method of access.methods) {
+        const granted = controlAccess.some((item) => {
+          if (!item || String(item.plugin || '').trim().toLowerCase() !== access.plugin ||
+              String(item.resource || '').trim().toLowerCase() !== access.resource) return false;
+          return normalizeMethods(item.methods).includes(method);
+        });
+        if (!granted) {
+          throw new Error(`ui.resource_access ${access.plugin}/${access.resource} method ${method} is not granted by control.resource_access`);
+        }
+      }
+    }
   }
 
   #validateServices() {

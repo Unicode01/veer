@@ -2,14 +2,14 @@
   "api_version": "v1",
   "id": "router_wizard",
   "name": "Router Wizard",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "kind": "control",
   "stability": "lab",
   "description": "Single WAN/LAN router configuration page. It owns no dataplane program and only calls explicitly granted plugin resources/actions.",
   "compatibility": {
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
-    "features": ["control.durable_operations.v1", "control.plugin_interop", "control.typed_services.v1", "ui.bridge.v1"]
+    "features": ["control.durable_operations.v1", "control.plugin_interop", "control.typed_services.v1", "ui.bridge.v1", "ui.capabilities.v1"]
   },
   "dependencies": [
     {

@@ -202,7 +202,12 @@ ui.register({
   entry: 'index.html',
   sha256: crypto.sha256File('ui/index.html'),
   page: 'pppoe',
-  page_title: 'PPPoE'
+  page_title: 'PPPoE',
+  resources: [
+    {resource: 'profiles', methods: ['list', 'get', 'create', 'update']},
+    {resource: 'sessions', methods: ['list']}
+  ],
+  actions: ['discover', 'probe_session', 'traffic_probe', 'dial', 'disconnect', 'traffic_stats']
 });
 
 exports.onUpgradeSnapshot = function () {

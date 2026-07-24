@@ -62,7 +62,13 @@ ui.register({
   entry: 'index.html',
   sha256: '78ad01d23ea0edcda6ddeebd9acf8de0d584ac493106fd5eb9fbb01dcae32b56',
   page: 'wan',
-  page_title: 'WAN'
+  page_title: 'WAN',
+  resources: [
+    {resource: 'profiles', methods: ['list', 'create', 'update']},
+    {resource: 'sessions', methods: ['list']},
+    {resource: 'status', methods: ['list']}
+  ],
+  actions: ['apply_session', 'prepare_handoff', 'teardown']
 });
 
 exports.onReconcile = function () {

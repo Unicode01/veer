@@ -5,6 +5,7 @@
   const packageArchivePath = '/api/plugin-packages/stage';
   const auditPageSize = 50;
 	const deadLetterPageSize = 100;
+  const managerAdvancedViews = new Set(['advanced', 'repositories', 'trust', 'audit', 'dead-letters', 'secrets', 'access']);
   let managerFocusReturn = null;
 
   function managerState() {
@@ -131,6 +132,37 @@
     });
   }
 
+  function managerMenu(items) {
+    return app.createNode('div', {
+      className: 'plugin-manager-menu',
+      children: (items || []).map((item) => {
+        const button = app.createNode('button', {
+          className: 'plugin-manager-menu-item',
+          attrs: { type: 'button' },
+          children: [
+            app.createNode('span', { text: item.label }),
+            app.createNode('span', { className: 'plugin-manager-menu-open', text: app.t('plugins.manager.open'), attrs: { 'aria-hidden': 'true' } })
+          ]
+        });
+        button.addEventListener('click', item.open);
+        return button;
+      })
+    });
+  }
+
+  function managerDisclosure(title, children, tone) {
+    return app.createNode('details', {
+      className: 'plugin-manager-disclosure' + (tone ? ' is-' + tone : ''),
+      children: [
+        app.createNode('summary', { text: title }),
+        app.createNode('div', {
+          className: 'plugin-manager-disclosure-body',
+          children: (children || []).filter(Boolean)
+        })
+      ]
+    });
+  }
+
   function managerFacts(rows) {
     const facts = app.createNode('dl', { className: 'plugin-manager-facts' });
     (rows || []).filter((row) => row && row.value !== '' && row.value != null).forEach((row) => {
@@ -214,13 +246,8 @@
 
   function managerGlobalNav() {
     return [
-	  { id: 'repositories', label: app.t('plugins.repository.title') },
-      { id: 'install', label: app.t('plugins.package.install') },
-      { id: 'trust', label: app.t('plugins.trust.title') },
-      { id: 'audit', label: app.t('plugins.audit.title') },
-	  { id: 'dead-letters', label: app.t('plugins.deadLetters.title') },
-	  { id: 'secrets', label: app.t('plugins.secrets.title') },
-	  { id: 'access', label: app.t('plugins.admin.title') }
+	  { id: 'install', label: app.t('plugins.catalog.add') },
+	  { id: 'advanced', label: app.t('plugins.manager.advanced') }
     ];
   }
 
@@ -242,7 +269,9 @@
     if (!nav) return;
     app.clearNode(nav);
     const items = state.view === 'plugin' ? managerPluginNav() : managerGlobalNav();
-    const active = state.view === 'plugin' ? state.tab : state.view;
+    const active = state.view === 'plugin'
+      ? state.tab
+      : (managerAdvancedViews.has(state.view) ? 'advanced' : state.view);
     items.forEach((item) => {
       nav.appendChild(managerButton(item.label, 'plugin-manager-nav-btn' + (item.id === active ? ' is-active' : ''), () => {
         if (state.view === 'plugin') app.openPluginManager('plugin', { pluginID: state.pluginID, tab: item.id });
@@ -250,6 +279,25 @@
       }, { disabled: !!state.busy }));
     });
     nav.hidden = false;
+  }
+
+  function managerRenderAdvanced() {
+    managerSetHeader(app.t('plugins.manager.advanced'), '');
+    managerRender(app.createNode('div', {
+      className: 'plugin-manager-stack',
+      children: [
+        managerSection(app.t('plugins.manager.security'), [managerMenu([
+          { label: app.t('plugins.trust.title'), open: () => app.openPluginManager('trust') },
+          { label: app.t('plugins.secrets.title'), open: () => app.openPluginManager('secrets') },
+          { label: app.t('plugins.admin.title'), open: () => app.openPluginManager('access') }
+        ])]),
+        managerSection(app.t('plugins.manager.operationsAndAudit'), [managerMenu([
+          { label: app.t('plugins.audit.title'), open: () => app.openPluginManager('audit') },
+          { label: app.t('plugins.deadLetters.title'), open: () => app.openPluginManager('dead-letters') }
+        ])])
+      ]
+    }));
+    managerFocusInitial();
   }
 
   function managerOpenShell() {
@@ -1759,15 +1807,19 @@
       isolation.last_error
     ].filter(Boolean).join(' | ') : '';
     managerSetHeader(plugin.name || plugin.id, [plugin.id, plugin.version].filter(Boolean).join(' / '));
-    const facts = managerFacts([
-      { label: 'ID', value: plugin.id, mono: true },
+    const summaryFacts = managerFacts([
       { label: app.t('common.status'), value: managerRuntimeStatus(plugin) },
       { label: app.t('plugins.version'), value: plugin.version || app.t('common.dash') },
       { label: app.t('plugins.stability'), value: plugin.stability || app.t('common.dash') },
+      { label: app.t('plugins.manager.health'), value: health.status || app.t('common.dash') },
+      { label: app.t('plugins.error'), value: plugin.error || runtime.error || '' },
+      { label: app.t('plugins.detail.reason'), value: runtime.reason || '' }
+    ]);
+    const technicalFacts = managerFacts([
+      { label: 'ID', value: plugin.id, mono: true },
       { label: app.t('plugins.kind'), value: plugin.kind || app.t('common.dash') },
       { label: app.t('plugins.source'), value: plugin.source || app.t('common.dash'), mono: true },
       { label: app.t('plugins.runtime.attachments'), value: String(Number(runtime.attachment_count || 0)) },
-      { label: app.t('plugins.manager.health'), value: health.status || app.t('common.dash') },
       { label: app.t('plugins.manager.calls'), value: String(Number(health.calls || 0)) },
       { label: app.t('plugins.manager.failures'), value: String(Number(health.failures || 0)) },
       { label: app.t('plugins.manager.openCircuits'), value: String(Number(health.open_circuits || 0)) },
@@ -1778,9 +1830,7 @@
       { label: app.t('plugins.manager.leases'), value: String(leases.length), title: leaseDetail },
       isolation ? { label: app.t('plugins.manager.isolation'), value: isolation.enabled ? (app.t('common.yes') + (isolation.sandbox_level ? ' · ' + app.t('plugins.manager.sandbox.' + isolation.sandbox_level) : '')) : app.t('common.no'), title: isolationDetail } : null,
       isolation ? { label: app.t('plugins.manager.hostProcesses'), value: String(Number(isolation.process_count || 0)) + ' / ' + app.t('plugins.manager.restarts') + ' ' + String(Number(isolation.restart_count || 0)), title: isolationDetail } : null,
-      isolation ? { label: app.t('plugins.manager.hostMemory'), value: app.formatBytes(Number(isolation.rss_bytes || 0)), title: isolationDetail } : null,
-      { label: app.t('plugins.error'), value: plugin.error || runtime.error || '' },
-      { label: app.t('plugins.detail.reason'), value: runtime.reason || '' }
+      isolation ? { label: app.t('plugins.manager.hostMemory'), value: app.formatBytes(Number(isolation.rss_bytes || 0)), title: isolationDetail } : null
     ]);
     const purge = app.createNode('input', { attrs: { type: 'checkbox' } });
     const force = app.createNode('input', { attrs: { type: 'checkbox' } });
@@ -1808,7 +1858,12 @@
     });
     managerRender(app.createNode('div', {
       className: 'plugin-manager-stack',
-	  children: [managerSection(app.t('plugins.manager.overview'), [facts]), managerRenderProbation(state.probation, state.probationGroup), danger].filter(Boolean)
+	  children: [
+        managerSection(app.t('plugins.manager.overview'), [summaryFacts]),
+        managerRenderProbation(state.probation, state.probationGroup),
+        managerDisclosure(app.t('plugins.manager.technicalDetails'), [technicalFacts]),
+        managerDisclosure(app.t('plugins.manager.maintenance'), [danger], 'danger')
+      ].filter(Boolean)
     }));
   }
 
@@ -2031,6 +2086,10 @@
 	  managerLoadRepositories();
 	  return;
 	}
+    if (state.view === 'advanced') {
+      managerRenderAdvanced();
+      return;
+    }
     if (state.view === 'install') {
 	  if (managerActiveStages().length) managerRenderStageReview();
       else managerRenderPackageInput();
@@ -2105,6 +2164,7 @@
   function managerHandleKeydown(event) {
     const state = managerState();
     if (!state.open) return;
+    if (app.el.confirmModal && app.el.confirmModal.classList.contains('active')) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       app.closePluginManager();
@@ -2124,11 +2184,8 @@
     }
   }
 
-  if (app.el.managePluginRepositoriesBtn) app.el.managePluginRepositoriesBtn.addEventListener('click', () => app.openPluginManager('repositories'));
-  if (app.el.installPluginPackageBtn) app.el.installPluginPackageBtn.addEventListener('click', () => app.openPluginManager('install'));
-  if (app.el.managePluginTrustBtn) app.el.managePluginTrustBtn.addEventListener('click', () => app.openPluginManager('trust'));
-  if (app.el.viewPluginAuditBtn) app.el.viewPluginAuditBtn.addEventListener('click', () => app.openPluginManager('audit'));
-  if (app.el.managePluginSecretsBtn) app.el.managePluginSecretsBtn.addEventListener('click', () => app.openPluginManager('secrets'));
+  if (app.el.addPluginBtn) app.el.addPluginBtn.addEventListener('click', () => app.openPluginManager('install'));
+  if (app.el.managePluginsAdvancedBtn) app.el.managePluginsAdvancedBtn.addEventListener('click', () => app.openPluginManager('advanced'));
   if (app.el.closePluginManagerBtn) app.el.closePluginManagerBtn.addEventListener('click', () => app.closePluginManager());
   if (app.el.pluginManagerModal) {
     app.el.pluginManagerModal.addEventListener('click', (event) => {
@@ -2151,6 +2208,7 @@
       if (!state.open) return;
       managerRenderNav();
 	  if (state.view === 'repositories') managerRenderRepositories();
+	  else if (state.view === 'advanced') managerRenderAdvanced();
 	  else if (state.view === 'install') managerActiveStages().length ? managerRenderStageReview() : managerRenderPackageInput();
       else if (state.view === 'trust') managerRenderTrust();
       else if (state.view === 'audit') managerRenderAudit();

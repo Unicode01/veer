@@ -37,7 +37,11 @@ ui.register({
   static_dir: 'ui',
   entry: 'index.html',
   page: 'observe',
-  page_title: 'Observe'
+  page_title: 'Observe',
+  resources: [
+    {resource: 'bindings', methods: ['list', 'create', 'delete']}
+  ],
+  actions: ['apply']
 });
 
 exports.onReconcile = function () {

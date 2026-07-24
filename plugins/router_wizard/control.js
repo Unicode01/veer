@@ -59,7 +59,12 @@ ui.register({
   static_dir: 'ui',
   entry: 'index.html',
   page: 'router',
-  page_title: 'Router'
+  page_title: 'Router',
+  resources: [
+    {resource: 'config', methods: ['get', 'create', 'update']},
+    {resource: 'status', methods: ['get']}
+  ],
+  actions: ['apply_router', 'teardown_router', 'refresh_status']
 });
 
 exports.onReconcile = function () {

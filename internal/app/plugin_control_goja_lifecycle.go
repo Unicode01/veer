@@ -547,6 +547,17 @@ func clonePluginUI(value *PluginUI) *PluginUI {
 		return nil
 	}
 	out := *value
+	out.Resources = make([]PluginUIResourceAccess, len(value.Resources))
+	for i, access := range value.Resources {
+		out.Resources[i] = access
+		out.Resources[i].Methods = append([]string(nil), access.Methods...)
+	}
+	out.Actions = append([]string(nil), value.Actions...)
+	out.ResourceAccess = make([]PluginResourceAccess, len(value.ResourceAccess))
+	for i, access := range value.ResourceAccess {
+		out.ResourceAccess[i] = access
+		out.ResourceAccess[i].Methods = append([]string(nil), access.Methods...)
+	}
 	return &out
 }
 
