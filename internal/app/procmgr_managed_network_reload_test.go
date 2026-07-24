@@ -393,11 +393,12 @@ func TestManagedRuntimeReloadLoopAppliesQueuedReload(t *testing.T) {
 		t.Fatalf("dbAddManagedNetwork() error = %v", err)
 	}
 
+	autoRepairDisabled := false
 	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
 	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
 	pm := &ProcessManager{
 		db:                       db,
-		cfg:                      &Config{DefaultEngine: ruleEngineAuto},
+		cfg:                      &Config{DefaultEngine: ruleEngineAuto, ManagedNetworkAutoRepair: &autoRepairDisabled},
 		managedNetworkRuntime:    fakeManagedRuntime,
 		ipv6Runtime:              fakeIPv6Runtime,
 		shutdownCh:               make(chan struct{}),
@@ -464,11 +465,12 @@ func TestManagedRuntimeReloadLoopLinkChangeExtendsInterfaceSuppression(t *testin
 		t.Fatalf("dbAddManagedNetwork() error = %v", err)
 	}
 
+	autoRepairDisabled := false
 	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
 	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
 	pm := &ProcessManager{
 		db:                                db,
-		cfg:                               &Config{DefaultEngine: ruleEngineAuto},
+		cfg:                               &Config{DefaultEngine: ruleEngineAuto, ManagedNetworkAutoRepair: &autoRepairDisabled},
 		managedNetworkRuntime:             fakeManagedRuntime,
 		ipv6Runtime:                       fakeIPv6Runtime,
 		shutdownCh:                        make(chan struct{}),
@@ -528,10 +530,11 @@ func TestManagedRuntimeReloadLoopDropsQueuedSuppressedLinkChangeReload(t *testin
 		source: "link_change",
 		names:  []string{"tap100i0", "vmbr1"},
 	}
+	autoRepairDisabled := false
 	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
 	pm := &ProcessManager{
 		db:                                db,
-		cfg:                               &Config{DefaultEngine: ruleEngineAuto},
+		cfg:                               &Config{DefaultEngine: ruleEngineAuto, ManagedNetworkAutoRepair: &autoRepairDisabled},
 		managedNetworkRuntime:             fakeManagedRuntime,
 		ipv6Runtime:                       fakeIPv6Runtime,
 		shutdownCh:                        make(chan struct{}),
