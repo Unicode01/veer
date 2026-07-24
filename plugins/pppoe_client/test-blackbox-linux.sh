@@ -262,6 +262,8 @@ start_veer() {
 EOF
 	if use_systemd_veer; then
 		veer_unit="veer-pppoe-blackbox-$suffix.service"
+		# Positional parameters are intentionally expanded by the child shell.
+		# shellcheck disable=SC2016
 		if ! systemd-run \
 			--unit="$veer_unit" \
 			--property=Delegate=yes \
