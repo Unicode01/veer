@@ -82,7 +82,8 @@
       "ebpf.object_variants.v1",
       "plans.core.v1",
       "ui.assets.v1",
-      "ui.bridge.v1"
+      "ui.bridge.v1",
+      "ui.capabilities.v1"
     ]
   },
   "tc_pipeline": {

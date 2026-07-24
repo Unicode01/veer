@@ -523,12 +523,20 @@ type PluginNetAccess struct {
 }
 
 type PluginUI struct {
-	StaticDir      string `json:"static_dir,omitempty"`
-	Entry          string `json:"entry,omitempty"`
-	Page           string `json:"page,omitempty"`
-	PageTitle      string `json:"page_title,omitempty"`
-	SHA256         string `json:"sha256,omitempty"`
-	ResolvedSHA256 string `json:"resolved_sha256,omitempty"`
+	StaticDir      string                   `json:"static_dir,omitempty"`
+	Entry          string                   `json:"entry,omitempty"`
+	Page           string                   `json:"page,omitempty"`
+	PageTitle      string                   `json:"page_title,omitempty"`
+	SHA256         string                   `json:"sha256,omitempty"`
+	ResolvedSHA256 string                   `json:"resolved_sha256,omitempty"`
+	Resources      []PluginUIResourceAccess `json:"resources,omitempty"`
+	Actions        []string                 `json:"actions,omitempty"`
+	ResourceAccess []PluginResourceAccess   `json:"resource_access,omitempty"`
+}
+
+type PluginUIResourceAccess struct {
+	Resource string   `json:"resource"`
+	Methods  []string `json:"methods,omitempty"`
 }
 
 type LoadedPlugin struct {

@@ -176,12 +176,7 @@ func applyPluginRuntimeSurface(plugin *LoadedPlugin, surface PluginRuntimeSurfac
 	plugin.Services = clonePluginServices(surface.Services)
 	plugin.EventSubscriptions = append([]PluginEventSubscription(nil), surface.EventSubscriptions...)
 	plugin.RingSubscriptions = append([]PluginRingSubscription(nil), surface.RingSubscriptions...)
-	if surface.UI != nil {
-		ui := *surface.UI
-		plugin.UI = &ui
-	} else {
-		plugin.UI = nil
-	}
+	plugin.UI = clonePluginUI(surface.UI)
 	finalizePluginRuntimeSurface(plugin)
 }
 
@@ -217,6 +212,14 @@ func finalizePluginRuntimeSurface(plugin *LoadedPlugin) {
 		return
 	}
 	if err := validatePluginRingSubscriptions(plugin); err != nil {
+		plugin.Status = pluginStatusError
+		plugin.Runtime = invalidPluginRuntimeState()
+		plugin.Error = err.Error()
+		plugin.staticDir = ""
+		plugin.AssetBasePath = ""
+		return
+	}
+	if err := validatePluginUIAccess(plugin); err != nil {
 		plugin.Status = pluginStatusError
 		plugin.Runtime = invalidPluginRuntimeState()
 		plugin.Error = err.Error()
@@ -871,11 +874,46 @@ func clonePluginRuntimeSurface(surface PluginRuntimeSurface) PluginRuntimeSurfac
 		EventSubscriptions: append([]PluginEventSubscription(nil), surface.EventSubscriptions...),
 		RingSubscriptions:  append([]PluginRingSubscription(nil), surface.RingSubscriptions...),
 	}
-	if surface.UI != nil {
-		ui := *surface.UI
-		out.UI = &ui
-	}
+	out.UI = clonePluginUI(surface.UI)
 	return out
+}
+
+func validatePluginUIAccess(plugin *LoadedPlugin) error {
+	if plugin == nil || plugin.UI == nil {
+		return nil
+	}
+	resources := make(map[string]PluginResource, len(plugin.Resources))
+	for _, resource := range plugin.Resources {
+		resources[resource.ID] = resource
+	}
+	for _, access := range plugin.UI.Resources {
+		resource, ok := resources[access.Resource]
+		if !ok {
+			return fmt.Errorf("ui.resources references undeclared resource %q", access.Resource)
+		}
+		for _, method := range access.Methods {
+			if !pluginResourceAllows(resource, method) {
+				return fmt.Errorf("ui.resources method %s is not exposed by resource %q", method, access.Resource)
+			}
+		}
+	}
+	actions := make(map[string]struct{}, len(plugin.Actions))
+	for _, action := range plugin.Actions {
+		actions[action.ID] = struct{}{}
+	}
+	for _, action := range plugin.UI.Actions {
+		if _, ok := actions[action]; !ok {
+			return fmt.Errorf("ui.actions references undeclared action %q", action)
+		}
+	}
+	for _, access := range plugin.UI.ResourceAccess {
+		for _, method := range access.Methods {
+			if !pluginControlHasResourceAccess(*plugin, access.Plugin, access.Resource, method) {
+				return fmt.Errorf("ui.resource_access %s/%s method %s is not granted by control.resource_access", access.Plugin, access.Resource, method)
+			}
+		}
+	}
+	return nil
 }
 
 func clonePluginHooks(hooks []PluginHook) []PluginHook {

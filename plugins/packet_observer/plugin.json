@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "packet_observer",
   "name": "Packet Observer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "kind": "pipeline",
   "stability": "lab",
   "description": "Example runtime plugin. The control script registers resources, actions, UI, eBPF objects, and hooks dynamically.",
@@ -10,7 +10,7 @@
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
     "tc_pipeline_abi": 2,
-    "features": ["dataplane.tc_pipeline.v2"]
+    "features": ["dataplane.tc_pipeline.v2", "ui.capabilities.v1"]
   },
   "control": {
     "main": "control.js",

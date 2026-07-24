@@ -566,6 +566,7 @@ test('renderPluginsTable renders builtin and external plugin details', () => {
 
   app.renderPluginsTable();
 
+  assert.ok(app.el.pluginsBody.childNodes.every((row) => row.childNodes.length === 4));
   const text = collectText(app.el.pluginsBody);
   assert.match(text, /veer/);
   assert.match(text, /packet_observer/);
@@ -1163,7 +1164,8 @@ test('plugin host and parent both enforce RPC queue payload and rate limits', as
     id: 'packet_observer',
     name: 'Packet Observer',
     asset_base_path: '/api/plugins/packet_observer/assets/',
-    ui: { entry: 'index.html' }
+    actions: [{ id: 'hold' }, { id: 'overflow' }, { id: 'test' }],
+    ui: { entry: 'index.html', actions: ['hold', 'overflow', 'test'] }
   }];
   app.__context.fetch = async function fetch() {
     return {
@@ -1240,6 +1242,63 @@ test('plugin RPC data.list forwards pagination query params', () => {
   assert.match(source, /offset=/);
 });
 
+test('plugin host exposes and executes only explicitly granted UI capabilities', async () => {
+  const app = createHarness();
+  const calls = [];
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    resources: [
+      { id: 'bindings', methods: ['list', 'get', 'create', 'update', 'delete'] },
+      { id: 'internal_status', methods: ['list', 'get'] }
+    ],
+    actions: [{ id: 'apply' }, { id: 'clear_state' }],
+    ui: {
+      entry: 'index.html',
+      resources: [{ resource: 'bindings', methods: ['list'] }],
+      actions: ['apply']
+    }
+  }];
+  app.__context.fetch = async function fetch() {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get(name) { return name === 'Content-Type' ? 'text/html' : ''; } },
+      text: async () => '<!doctype html><title>Plugin</title>'
+    };
+  };
+  app.apiCall = async function apiCall(method, reqPath) {
+    calls.push({ method, reqPath });
+    return { ok: true, records: [] };
+  };
+
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+  assert.deepEqual(JSON.parse(JSON.stringify(host.resources)), [{
+    id: 'bindings',
+    description: '',
+    methods: ['list'],
+    runtime_update: '',
+    max_records: 0,
+    max_record_bytes: 0,
+    schema_version: 1,
+    schema: null,
+    schema_digest: ''
+  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(host.actions)).map((action) => action.id), ['apply']);
+
+  await host.data.list('bindings');
+  await host.action('apply');
+  await assert.rejects(host.data.get('bindings', 'default'), (error) => error.status === 403 && error.payload.code === 'plugin_ui_capability_denied');
+  await assert.rejects(host.data.list('internal_status'), (error) => error.status === 403 && error.payload.code === 'plugin_ui_capability_denied');
+  await assert.rejects(host.action('clear_state'), (error) => error.status === 403 && error.payload.code === 'plugin_ui_capability_denied');
+  assert.deepEqual(calls, [
+    { method: 'GET', reqPath: '/api/plugins/packet_observer/resources/bindings' },
+    { method: 'POST', reqPath: '/api/plugins/packet_observer/actions/apply' }
+  ]);
+});
+
 test('plugin host cross-plugin resource reads enforce manifest grants', async () => {
   const app = createHarness();
   const calls = [];
@@ -1247,10 +1306,16 @@ test('plugin host cross-plugin resource reads enforce manifest grants', async ()
     id: 'lan_core',
     name: 'LAN Core',
     asset_base_path: '/api/plugins/lan_core/assets/',
-    ui: { entry: 'index.html' },
+    ui: {
+      entry: 'index.html',
+      resource_access: [{ plugin: 'wan_core', resource: 'status', methods: ['list'] }]
+    },
     control: {
       resource_access: [{ plugin: 'wan_core', resource: 'status', methods: ['get', 'list'] }]
     }
+  }, {
+    id: 'wan_core',
+    resources: [{ id: 'status', methods: ['list', 'get'] }]
   }];
   app.__context.fetch = async function fetch() {
     return {
@@ -1271,9 +1336,15 @@ test('plugin host cross-plugin resource reads enforce manifest grants', async ()
   assert.equal(result.records[0].key, 'wan-a');
   assert.deepEqual(calls, [{ method: 'GET', reqPath: '/api/plugins/wan_core/resources/status?limit=32&offset=0' }]);
 
+  app.state.plugins.data[0].control.resource_access[0].methods = ['get'];
+  await assert.rejects(
+    host.plugins.resources.list('wan_core', 'status', { limit: 32 }),
+    /plugin UI cross-plugin resource capability denied/
+  );
+
   await assert.rejects(
     host.plugins.resources.list('pppoe_client', 'sessions', { limit: 32 }),
-    /plugin resource access denied/
+    /plugin UI cross-plugin resource capability denied/
   );
   assert.equal(calls.length, 1);
 });
@@ -1308,7 +1379,7 @@ test('core plugin pages use record pickers and structured route editors', () => 
   assert.doesNotMatch(local, /Routes JSON/);
 });
 
-test('plugin table combines UI controls into a visible actions column', () => {
+test('plugin table keeps routine plugin information in four stable columns', () => {
   const cssPath = path.join(__dirname, '..', 'web', 'css', 'tables.css');
   const source = fs.readFileSync(cssPath, 'utf8');
   const widths = new Map();
@@ -1318,11 +1389,11 @@ test('plugin table combines UI controls into a visible actions column', () => {
     if (!widths.has(column)) widths.set(column, Number(match[2]));
   }
 
-  assert.equal(widths.size, 6);
-  assert.equal(widths.get(6), 19);
+  assert.equal(widths.size, 4);
+  assert.equal(widths.get(1), 30);
+  assert.equal(widths.get(4), 32);
   assert.equal(Array.from(widths.values()).reduce((sum, width) => sum + width, 0), 100);
-  assert.match(source, /@media \(max-width: 720px\)[\s\S]*?#pluginsTable\s*\{\s*min-width:\s*880px/);
-  assert.match(source, /@media \(max-width: 720px\)[\s\S]*?#pluginsTable th:nth-child\(6\),\s*#pluginsTable td:nth-child\(6\)\s*\{\s*width:\s*22%/);
+  assert.match(source, /@media \(max-width: 720px\)[\s\S]*?#pluginsTable\s*\{\s*min-width:\s*760px/);
 });
 
 test('router wizard apply keeps the previous saved config available for rollback', () => {
@@ -1354,7 +1425,11 @@ test('plugin host data.upsert only falls back to create on missing records', asy
     id: 'packet_observer',
     name: 'Packet Observer',
     asset_base_path: '/api/plugins/packet_observer/assets/',
-    ui: { entry: 'index.html' }
+    resources: [{ id: 'bindings', methods: ['create', 'update'] }],
+    ui: {
+      entry: 'index.html',
+      resources: [{ resource: 'bindings', methods: ['create', 'update'] }]
+    }
   }];
   app.__context.fetch = async function fetch() {
     return {
@@ -1497,6 +1572,11 @@ test('plugin host button state distinguishes busy disabled and danger actions', 
 
 test('plugin iframe RPC returns runtime error payload and rejects plugin id mismatch', async () => {
   const app = createHarness();
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    resources: [{ id: 'bindings', methods: ['update'] }],
+    ui: { resources: [{ resource: 'bindings', methods: ['update'] }] }
+  }];
   const frameWindow = {
     messages: [],
     postMessage(message, targetOrigin) {

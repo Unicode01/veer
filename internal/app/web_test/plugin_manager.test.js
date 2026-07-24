@@ -92,22 +92,21 @@ function createHarness() {
   const calls = [];
   const notifications = [];
   const elements = {
+    confirmModal: makeNode('div'),
     pluginManagerModal: makeNode('div'),
     pluginManagerTitle: makeNode('h2'),
     pluginManagerMeta: makeNode('p'),
     pluginManagerNav: makeNode('div'),
     pluginManagerBody: makeNode('div'),
     closePluginManagerBtn: makeNode('button'),
-    managePluginRepositoriesBtn: makeNode('button'),
-    installPluginPackageBtn: makeNode('button'),
-    managePluginTrustBtn: makeNode('button'),
-    viewPluginAuditBtn: makeNode('button'),
-    managePluginSecretsBtn: makeNode('button')
+    addPluginBtn: makeNode('button'),
+    managePluginsAdvancedBtn: makeNode('button')
   };
   let apiHandler = async () => ({});
   let rawHandler = async () => ({ ok: true, status: 201, statusText: 'Created', json: async () => ({}) });
   let confirmResult = true;
 	let pluginAdminToken = 'test-plugin-admin';
+  const documentListeners = {};
   const document = {
     activeElement: null,
     createElement: makeNode,
@@ -116,7 +115,10 @@ function createHarness() {
       node.textContent = String(text || '');
       return node;
     },
-    addEventListener() {}
+    addEventListener(type, handler) {
+      if (!documentListeners[type]) documentListeners[type] = [];
+      documentListeners[type].push(handler);
+    }
   };
   const app = {
     __enablePluginTests: true,
@@ -269,6 +271,7 @@ function createHarness() {
   app.__setAPIHandler = (handler) => { apiHandler = handler; };
   app.__setRawHandler = (handler) => { rawHandler = handler; };
   app.__setConfirmResult = (value) => { confirmResult = value; };
+  app.__documentListeners = documentListeners;
   return app;
 }
 
@@ -772,6 +775,57 @@ test('mutating operations lock modal dismissal and authentication closes it forc
   assert.equal(app.showedTokenModal, true);
 });
 
+test('plugin manager ignores escape while a confirmation modal is active', () => {
+  const app = createHarness();
+  const state = app.state.plugins.manager;
+  app.openPluginManager('secrets');
+  app.el.confirmModal.classList.add('active');
+  const handler = app.__documentListeners.keydown[0];
+  assert.equal(typeof handler, 'function');
+  handler({key: 'Escape', preventDefault() {}});
+  assert.equal(state.open, true);
+
+  app.el.confirmModal.classList.remove('active');
+  handler({key: 'Escape', preventDefault() {}});
+  assert.equal(state.open, false);
+});
+
+test('plugin manager keeps routine navigation separate from advanced operations', async () => {
+  const app = createHarness();
+  await app.el.managePluginsAdvancedBtn.dispatch('click');
+
+  assert.equal(app.state.plugins.manager.view, 'advanced');
+  const navText = descendantText(app.el.pluginManagerNav);
+  assert.match(navText, /plugins\.catalog\.add/);
+  assert.match(navText, /plugins\.manager\.advanced/);
+  assert.doesNotMatch(navText, /plugins\.trust\.title|plugins\.audit\.title|plugins\.secrets\.title/);
+
+  const bodyText = descendantText(app.el.pluginManagerBody);
+  assert.doesNotMatch(bodyText, /plugins\.package\.install|plugins\.repository\.title/);
+  assert.match(bodyText, /plugins\.trust\.title/);
+  assert.match(bodyText, /plugins\.audit\.title/);
+  assert.match(bodyText, /plugins\.deadLetters\.title/);
+  assert.match(bodyText, /plugins\.secrets\.title/);
+  assert.match(bodyText, /plugins\.admin\.title/);
+});
+
+test('add plugin opens local package installation without loading a repository', async () => {
+  const app = createHarness();
+  await app.el.addPluginBtn.dispatch('click');
+
+  assert.equal(app.state.plugins.manager.view, 'install');
+  const text = descendantText(app.el.pluginManagerBody);
+  assert.match(text, /plugins\.package\.archive|plugins\.package\.signature/);
+  assert.doesNotMatch(text, /plugins\.repository\.metadataURL|plugins\.repository\.targetsURL|plugins\.repository\.root/);
+  assert.deepEqual(app.__calls, []);
+});
+
+test('plugin manager menu reserves persistent focus styling for keyboard focus', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'css', 'tables.css'), 'utf8');
+  assert.match(css, /\.plugin-manager-menu-item:hover,\s*\.plugin-manager-menu-item:focus-visible/);
+  assert.doesNotMatch(css, /\.plugin-manager-menu-item:hover,\s*\.plugin-manager-menu-item:focus\s*\{/);
+});
+
 test('plugin overview exposes isolated host health and package probation', async () => {
   const app = createHarness();
   app.state.plugins.data[0].runtime.isolation = {
@@ -806,6 +860,8 @@ test('plugin overview exposes isolated host health and package probation', async
   }]);
   await app.__pluginManagerLoadOverviewForTest('demo');
   const text = descendantText(app.el.pluginManagerBody);
+  assert.ok(findDescendant(app.el.pluginManagerBody, (node) => node.tagName === 'SUMMARY' && node.textContent === 'plugins.manager.technicalDetails'));
+  assert.ok(findDescendant(app.el.pluginManagerBody, (node) => node.tagName === 'SUMMARY' && node.textContent === 'plugins.manager.maintenance'));
   assert.match(text, /plugins\.manager\.isolation/);
   assert.match(text, /plugins\.manager\.hostProcesses/);
   assert.match(text, /2 \/ plugins\.manager\.restarts 3/);

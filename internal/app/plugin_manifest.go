@@ -1228,7 +1228,52 @@ func normalizePluginUI(ui *PluginUI) error {
 	if ui.SHA256 != "" && !pluginHashPattern.MatchString(ui.SHA256) {
 		return fmt.Errorf("sha256 must be a lowercase 64-character hex digest")
 	}
+	if err := normalizePluginUIResourceAccess(ui.Resources); err != nil {
+		return fmt.Errorf("resources: %w", err)
+	}
+	if len(ui.Actions) > 0 {
+		actions, err := normalizePluginActionAccessActions(ui.Actions)
+		if err != nil {
+			return fmt.Errorf("actions: %w", err)
+		}
+		ui.Actions = actions
+	}
+	if err := normalizePluginResourceAccess(ui.ResourceAccess); err != nil {
+		return fmt.Errorf("resource_access: %w", err)
+	}
+	for i, access := range ui.ResourceAccess {
+		for _, method := range access.Methods {
+			if method != "list" && method != "get" {
+				return fmt.Errorf("resource_access[%d].methods: cross-plugin UI access supports only list and get", i)
+			}
+		}
+	}
 	ui.ResolvedSHA256 = ""
+	return nil
+}
+
+func normalizePluginUIResourceAccess(access []PluginUIResourceAccess) error {
+	seen := make(map[string]struct{}, len(access))
+	for i := range access {
+		item := &access[i]
+		item.Resource = strings.TrimSpace(strings.ToLower(item.Resource))
+		if pluginControlReservedResourceID(item.Resource) {
+			return fmt.Errorf("[%d].resource %q is reserved for plugin control internals", i, item.Resource)
+		}
+		if !pluginTokenPattern.MatchString(item.Resource) {
+			return fmt.Errorf("[%d].resource must match %s", i, pluginTokenPattern.String())
+		}
+		methods, err := normalizePluginResourceAccessMethods(item.Methods)
+		if err != nil {
+			return fmt.Errorf("[%d].methods: %w", i, err)
+		}
+		item.Methods = methods
+		if _, exists := seen[item.Resource]; exists {
+			return fmt.Errorf("[%d]: duplicate resource access %s", i, item.Resource)
+		}
+		seen[item.Resource] = struct{}{}
+	}
+	sort.Slice(access, func(i, j int) bool { return access[i].Resource < access[j].Resource })
 	return nil
 }
 

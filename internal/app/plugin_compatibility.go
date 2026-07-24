@@ -60,6 +60,7 @@ var pluginRuntimeFeatures = []string{
 	"plans.core.v1",
 	"ui.assets.v1",
 	"ui.bridge.v1",
+	"ui.capabilities.v1",
 }
 
 type pluginHostEnvironment struct {

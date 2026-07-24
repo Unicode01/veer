@@ -620,6 +620,42 @@ exports.onReconcile = function () {};
   assert.throws(() => createTestHost({pluginDir: invalidDir}), /references undeclared action missing/);
 });
 
+test('test host normalizes and validates least-privilege UI capabilities', (t) => {
+  const manifest = testManifest('ui_capabilities');
+  manifest.control.permissions.push('ui', 'plugin.resource');
+  manifest.control.resource_access = [{plugin: 'wan_core', resource: 'status', methods: ['get', 'list']}];
+  const pluginDir = writePlugin(t, manifest, `
+plugin.resource({id: 'profiles', methods: ['list', 'get', 'create', 'update'], runtime_update: 'manual'});
+plugin.action({id: 'apply', runtime_update: 'runtime_apply'});
+ui.register({
+  static_dir: 'ui', entry: 'index.html', page: 'test', page_title: 'Test',
+  resources: [{resource: 'profiles', methods: ['update', 'list']}],
+  actions: ['apply'],
+  resource_access: [{plugin: 'wan_core', resource: 'status', methods: ['list']}]
+});
+exports.onReconcile = function () {};
+`, {'ui/index.html': '<!doctype html>'});
+  const ui = createTestHost({pluginDir}).snapshot().surface.ui;
+  assert.deepEqual(ui.resources, [{resource: 'profiles', methods: ['list', 'update']}]);
+  assert.deepEqual(ui.actions, ['apply']);
+  assert.deepEqual(ui.resource_access, [{plugin: 'wan_core', resource: 'status', methods: ['list']}]);
+
+  const undeclaredDir = writePlugin(t, manifest, `
+ui.register({static_dir: 'ui', entry: 'index.html', resources: [{resource: 'missing', methods: ['list']}]});
+exports.onReconcile = function () {};
+`, {'ui/index.html': '<!doctype html>'});
+  assert.throws(() => createTestHost({pluginDir: undeclaredDir}), /ui\.resources references undeclared resource missing/);
+
+  const escalationDir = writePlugin(t, manifest, `
+ui.register({
+  static_dir: 'ui', entry: 'index.html',
+  resource_access: [{plugin: 'wan_core', resource: 'status', methods: ['delete']}]
+});
+exports.onReconcile = function () {};
+`, {'ui/index.html': '<!doctype html>'});
+  assert.throws(() => createTestHost({pluginDir: escalationDir}), /resource_access\[0\]\.methods are invalid/);
+});
+
 test('test host exposes adapter-backed typed service discovery and calls', (t) => {
   const manifest = testManifest('service_consumer');
   manifest.control.permissions.push('plugin.action', 'plugin.resource');
