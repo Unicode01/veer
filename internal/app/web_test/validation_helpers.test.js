@@ -1174,10 +1174,17 @@ function createHarness() {
   const documentRef = {
     hidden: false,
     activeElement: null,
+    listeners: {},
     querySelectorAll() {
       return [];
     },
-    addEventListener() {}
+    addEventListener(type, handler) {
+      if (!this.listeners[type]) this.listeners[type] = [];
+      this.listeners[type].push(handler);
+    },
+    dispatchEvent(event) {
+      (this.listeners[event.type] || []).forEach((handler) => handler(event));
+    }
   };
 
   const context = vm.createContext({
@@ -2737,6 +2744,46 @@ test('toggleItem shows translated not-found issue in toast', async () => {
   await app.toggleItem('rule', 9);
 
   assert.equal(notifications.at(-1).message, 'Operation failed: The rule no longer exists.');
+});
+
+test('toggleItem ignores unsupported item types without issuing an API request', async () => {
+  const { app } = createHarness();
+  let calls = 0;
+  app.apiCall = async () => {
+    calls += 1;
+  };
+
+  await app.toggleItem(undefined, NaN);
+
+  assert.equal(calls, 0);
+});
+
+test('plugin-style enable button is ignored by the generic item click handler', () => {
+  const { app, documentRef } = createHarness();
+  const calls = [];
+  app.toggleItem = (...args) => calls.push(args);
+  const button = {
+    className: 'mini-btn btn-toggle-plugin btn-disable',
+    dataset: { pluginId: 'packet_observer', enabled: '0' },
+    closest(selector) {
+      const matchesClass = selector.includes('.btn-enable') || selector.includes('.btn-disable');
+      const matchesType = !selector.includes('[data-type]') || Object.prototype.hasOwnProperty.call(this.dataset, 'type');
+      const matchesID = !selector.includes('[data-id]') || Object.prototype.hasOwnProperty.call(this.dataset, 'id');
+      return matchesClass && matchesType && matchesID ? this : null;
+    },
+    click() {
+      documentRef.dispatchEvent({
+        type: 'click',
+        target: this,
+        preventDefault() {},
+        stopPropagation() {}
+      });
+    }
+  };
+
+  button.click();
+
+  assert.deepEqual(calls, []);
 });
 
 test('toggleItem shows translated invalid-id issue in toast', async () => {

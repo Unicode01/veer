@@ -50,11 +50,16 @@ func TestPluginTrustRotationRevokesOldSigner(t *testing.T) {
 	digest := sha256.Sum256(archive)
 	message := append([]byte(pluginPackageSignatureDomain), digest[:]...)
 	oldSignature := base64.StdEncoding.EncodeToString(ed25519.Sign(oldPrivate, message))
-	if _, err := manager.Stage(bytes.NewReader(archive), oldKey.ID, oldSignature); err == nil {
-		t.Fatal("revoked signer unexpectedly staged a package")
+	oldStage, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, pluginPackageSignature{
+		SignerID: oldKey.ID, PublicKey: oldKey.PublicKey, Signature: oldSignature,
+	})))
+	if err != nil || oldStage.PublisherStatus != pluginPackagePublisherRevoked || oldStage.Trusted {
+		t.Fatalf("revoked publisher stage = %+v, err=%v", oldStage, err)
 	}
 	newSignature := base64.StdEncoding.EncodeToString(ed25519.Sign(newPrivate, message))
-	if _, err := manager.Stage(bytes.NewReader(archive), newKey.ID, newSignature); err != nil {
+	if _, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, pluginPackageSignature{
+		SignerID: newKey.ID, PublicKey: newKey.PublicKey, Signature: newSignature,
+	}))); err != nil {
 		t.Fatalf("replacement signer stage: %v", err)
 	}
 	if _, err := manager.AddTrustKey(PluginTrustKeyRequest{Name: "Revive Old", PublicKey: oldKey.PublicKey}); err == nil {

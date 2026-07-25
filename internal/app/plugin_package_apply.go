@@ -19,17 +19,11 @@ func (m *pluginPackageManager) ApplyStage(request PluginPackageApplyRequest) (Pl
 	if stage.DeferredRelationships {
 		return PluginPackageOperationResult{}, fmt.Errorf("plugin stage defers relationship validation and must be applied as part of a batch")
 	}
-	if stage.RequiresTrustedPublisher && !stage.Trusted {
-		return PluginPackageOperationResult{}, fmt.Errorf("dataplane plugin packages require a trusted publisher or TUF repository")
-	}
 	if err := m.ensurePluginPackageMutationAllowed([]string{stage.PluginID}); err != nil {
 		return PluginPackageOperationResult{}, err
 	}
-	if !stage.Trusted && m.cfg.PluginsRequireSignedPackages() {
-		return PluginPackageOperationResult{}, fmt.Errorf("plugin package is unsigned and plugins_require_signed_packages is enabled")
-	}
-	if !stage.Trusted && !request.AllowUnsigned {
-		return PluginPackageOperationResult{}, fmt.Errorf("plugin package is unsigned; explicit allow_unsigned approval is required")
+	if err := m.validatePluginPackageSourceApproval(stage, request); err != nil {
+		return PluginPackageOperationResult{}, err
 	}
 	if len(stage.PrivilegeAdditions) > 0 && strings.TrimSpace(request.ApprovedPrivilegeDigest) != stage.PrivilegeDigest {
 		return PluginPackageOperationResult{}, fmt.Errorf("plugin privilege expansion requires approval digest %s", stage.PrivilegeDigest)
@@ -70,6 +64,16 @@ func (m *pluginPackageManager) ApplyStage(request PluginPackageApplyRequest) (Pl
 	if pluginRuntimeSurfaceDigest(pluginRuntimeSurfaceFromLoaded(candidate)) != stage.RuntimeSurfaceDigest {
 		return PluginPackageOperationResult{}, fmt.Errorf("plugin runtime surface changed after staging")
 	}
+	rememberedPublishers, err := m.rememberPluginPackagePublishers([]pluginPackagePublisherApproval{{stage: stage, request: request}})
+	if err != nil {
+		return PluginPackageOperationResult{}, err
+	}
+	keepRememberedPublishers := false
+	defer func() {
+		if !keepRememberedPublishers {
+			m.rollbackRememberedPluginPublishers(rememberedPublishers, "plugin package apply failed")
+		}
+	}()
 
 	tx, err := m.prepareInstallTransaction(stage, current)
 	if err != nil {
@@ -79,6 +83,7 @@ func (m *pluginPackageManager) ApplyStage(request PluginPackageApplyRequest) (Pl
 	if err != nil {
 		return PluginPackageOperationResult{}, err
 	}
+	keepRememberedPublishers = true
 	_ = removePluginPackageManagedPath(m.stateRoot, stage.stageDir)
 	result := PluginPackageOperationResult{
 		PluginID:       stage.PluginID,

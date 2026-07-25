@@ -37,7 +37,7 @@ func TestPluginTrustScopeAllowsOnlyDeclaredPluginAndPermissions(t *testing.T) {
 		ID: "vendor_router", Version: "1.0.0", Stability: pluginStabilityStable,
 		Permissions: []string{"plugin.register"}, Control: `exports.onReconcile = function () {};`,
 	})
-	stage, err := stageSignedPluginPackageForTrustScopeTest(manager, key, privateKey, allowed)
+	stage, err := stageSignedPluginPackageForTrustScopeTest(t, manager, key, privateKey, allowed)
 	if err != nil {
 		t.Fatalf("stage allowed package: %v", err)
 	}
@@ -49,25 +49,19 @@ func TestPluginTrustScopeAllowsOnlyDeclaredPluginAndPermissions(t *testing.T) {
 		ID: "other_router", Version: "1.0.0", Stability: pluginStabilityStable,
 		Permissions: []string{"plugin.register"}, Control: `exports.onReconcile = function () {};`,
 	})
-	if _, err := stageSignedPluginPackageForTrustScopeTest(manager, key, privateKey, wrongID); err == nil || !strings.Contains(err.Error(), "not authorized for plugin other_router") {
-		t.Fatalf("wrong plugin scope error = %v", err)
-	}
+	assertPluginPackagePublisherScopeMismatch(t, manager, key, privateKey, wrongID)
 
 	wrongPermission := buildPluginPackageForTest(t, pluginPackageTestSpec{
 		ID: "vendor_router", Version: "1.1.0", Stability: pluginStabilityStable,
 		Permissions: []string{"kv", "plugin.register"}, Control: `exports.onReconcile = function () {};`,
 	})
-	if _, err := stageSignedPluginPackageForTrustScopeTest(manager, key, privateKey, wrongPermission); err == nil || !strings.Contains(err.Error(), "not authorized for permission kv") {
-		t.Fatalf("wrong permission scope error = %v", err)
-	}
+	assertPluginPackagePublisherScopeMismatch(t, manager, key, privateKey, wrongPermission)
 
 	wrongStability := buildPluginPackageForTest(t, pluginPackageTestSpec{
 		ID: "vendor_router", Version: "1.1.0", Stability: pluginStabilityPreview,
 		Permissions: []string{"plugin.register"}, Control: `exports.onReconcile = function () {};`,
 	})
-	if _, err := stageSignedPluginPackageForTrustScopeTest(manager, key, privateKey, wrongStability); err == nil || !strings.Contains(err.Error(), "not authorized for preview stability") {
-		t.Fatalf("wrong stability scope error = %v", err)
-	}
+	assertPluginPackagePublisherScopeMismatch(t, manager, key, privateKey, wrongStability)
 }
 
 func TestPluginTrustScopeRejectsDataplaneTier(t *testing.T) {
@@ -139,7 +133,7 @@ func TestPluginTrustKeyRotationInheritsAndCannotBroadenScope(t *testing.T) {
 	}
 }
 
-func TestPluginPackageStageRejectsSignerScopeMutation(t *testing.T) {
+func TestPluginPackageStageUsesCurrentSignerScope(t *testing.T) {
 	manager := newPluginPackageManagerForTest(t)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -153,7 +147,7 @@ func TestPluginPackageStageRejectsSignerScopeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "vendor_router", Version: "1.0.0"})
-	stage, err := stageSignedPluginPackageForTrustScopeTest(manager, key, privateKey, archive)
+	stage, err := stageSignedPluginPackageForTrustScopeTest(t, manager, key, privateKey, archive)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +155,12 @@ func TestPluginPackageStageRejectsSignerScopeMutation(t *testing.T) {
 	if err := writePluginPackageJSONAtomic(filepath.Join(manager.stateRoot, "trust", key.ID+".json"), key, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.LoadStage(stage.ID); err == nil || !strings.Contains(err.Error(), "signer scope changed") {
-		t.Fatalf("mutated signer scope error = %v", err)
+	loaded, err := manager.LoadStage(stage.ID)
+	if err != nil {
+		t.Fatalf("LoadStage() after scope update: %v", err)
+	}
+	if !loaded.Trusted || !equalPluginTrustScopes(loaded.SignerScope, key.Scope) {
+		t.Fatalf("stage signer scope = %+v, want current %+v", loaded.SignerScope, key.Scope)
 	}
 }
 
@@ -180,8 +178,27 @@ func TestNormalizePluginTrustScopeRejectsEmptyAndInvalidValues(t *testing.T) {
 	}
 }
 
-func stageSignedPluginPackageForTrustScopeTest(manager *pluginPackageManager, key PluginTrustKey, privateKey ed25519.PrivateKey, archive []byte) (PluginPackageStage, error) {
+func stageSignedPluginPackageForTrustScopeTest(t testing.TB, manager *pluginPackageManager, key PluginTrustKey, privateKey ed25519.PrivateKey, archive []byte) (PluginPackageStage, error) {
+	t.Helper()
 	digest := sha256.Sum256(archive)
 	signature := ed25519.Sign(privateKey, append([]byte(pluginPackageSignatureDomain), digest[:]...))
-	return manager.Stage(bytes.NewReader(archive), key.ID, base64.StdEncoding.EncodeToString(signature))
+	return manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, pluginPackageSignature{
+		SignerID: key.ID, PublicKey: key.PublicKey, Signature: base64.StdEncoding.EncodeToString(signature),
+	})))
+}
+
+func assertPluginPackagePublisherScopeMismatch(t *testing.T, manager *pluginPackageManager, key PluginTrustKey, privateKey ed25519.PrivateKey, archive []byte) {
+	t.Helper()
+	stage, err := stageSignedPluginPackageForTrustScopeTest(t, manager, key, privateKey, archive)
+	if err != nil {
+		t.Fatalf("stage scope-mismatched package: %v", err)
+	}
+	if !stage.Signed || stage.Trusted || stage.PublisherStatus != pluginPackagePublisherScopeMismatch {
+		t.Fatalf("scope-mismatched stage = %+v", stage)
+	}
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{
+		StageID: stage.ID, ApprovedPrivilegeDigest: stage.PrivilegeDigest,
+	}); err == nil || !strings.Contains(err.Error(), "approve_publisher") {
+		t.Fatalf("scope-mismatched apply error = %v", err)
+	}
 }

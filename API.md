@@ -401,8 +401,8 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `GET /api/plugin-admin/status`：返回 `configured` 和当前请求的 `authorized`，用于 WebUI 校验当前标签页提供的 `X-Veer-Plugin-Admin`。该接口本身只要求普通 Bearer Token
 - 下列写接口均同时要求 Bearer Token 和 `X-Veer-Plugin-Admin`；只读 history/probation/audit/trust/secret 状态接口仍只要求 Bearer Token
 
-- `POST /api/plugin-packages/stage`：上传插件 `.tar.gz` 并执行有界解包、manifest/control/UI/object、兼容性、依赖、签名和权限差异预检。请求体是原始 archive，最大 32 MiB，不是 JSON；签名包用 `X-Veer-Plugin-Signer` 和 `X-Veer-Plugin-Signature` 请求头传入 `veer plugin sign` sidecar 中的 `signer_id` 和 `signature`。成功返回一次性 `stage.id`、候选版本、签名状态、权限摘要、新增权限、依赖/冲突和运行时表面；stage 24 小时后过期，预检本身不会替换运行中插件。联合升级时传 `?defer_relationships=true`，仍会执行包、签名、权限、Goja surface 和宿主兼容性校验，但把依赖/冲突的最终判断延迟到批量应用
-- `POST /api/plugin-packages/apply`：应用已预检候选，请求体为 `{"stage_id":"...","approved_privilege_digest":"...","allow_unsigned":false}`。未签名包必须显式设置 `allow_unsigned=true`；存在新增权限时必须原样回传本次 stage 的 `privilege_digest`。服务会再次校验源版本、候选指纹和权限表面，避免 stage 后被替换
+- `POST /api/plugin-packages/stage`：上传由 `veer plugin sign` 生成的单文件 `.veerpkg`，或未签名的 `.tar.gz`，并执行有界解包、manifest/control/UI/object、兼容性、依赖、签名和权限差异预检。请求体是原始包字节，不是 JSON；payload 最大 32 MiB，`.veerpkg` 只允许固定的 `package.tar.gz` 与 `signature.json` 成员。服务端从容器内验证 payload SHA256、Ed25519 签名、signer ID 和公钥，外置的 `X-Veer-Plugin-Signer`、`X-Veer-Plugin-Public-Key`、`X-Veer-Plugin-Signature` 会被拒绝。未知、已撤销或超出授权范围的发布者不会阻止预检，但应用时需要明确批准。成功返回一次性 `stage.id`、候选版本、`signed/trusted/publisher_status`、发布者指纹、权限摘要、新增权限、依赖/冲突和运行时表面；stage 24 小时后过期，预检本身不会替换运行中插件。联合升级时传 `?defer_relationships=true`，仍会执行包、签名、权限、Goja surface 和宿主兼容性校验，但把依赖/冲突的最终判断延迟到批量应用
+- `POST /api/plugin-packages/apply`：应用已预检候选，请求体为 `{"stage_id":"...","approved_privilege_digest":"...","approve_unsigned":false,"approve_publisher":false,"remember_publisher":false}`。允许未签名包的开发策略下，未签名候选必须设置 `approve_unsigned=true`；有效签名但发布者未知、已撤销或超出授权范围时必须设置 `approve_publisher=true`。`remember_publisher=true` 仅适用于首次出现且签名有效的发布者，会在同一安装操作中按当前插件 ID、权限、执行层级和稳定级别创建最小信任范围；应用失败会移除该新建记录。存在新增权限时必须原样回传本次 stage 的 `privilege_digest`。服务会再次校验源版本、候选指纹、签名和权限表面，避免 stage 后被替换
 - `POST /api/plugin-packages/apply-batch`：原子应用 1 至 16 个候选，请求体为 `{"stages":[<apply request>,...]}`。服务拒绝重复插件，统一解析最终 catalog 的版本依赖、冲突、循环和宿主兼容性，再通过持久 batch journal 切换全部目录；整批只执行一次 runtime reconcile 和一次 Worker 分发。运行时、资源 migration 或任一目录切换失败会恢复整批旧版本；重启恢复会依据 journal 阶段整批回滚或完成提交。`defer_relationships` stage 不能通过单包 `/apply` 应用
 - `GET /api/plugin-packages/history?plugin_id=<id>`：读取某插件最多 10 项本地包历史，用于审计和回滚
 - `GET /api/plugin-packages/provenance?plugin_id=<id>`：读取已安装包的来源、仓库 target、channel、TUF metadata version 和 archive SHA256。`status` 为 `trusted/revoked/target_unavailable/repository_unavailable/metadata_unavailable` 之一；该状态用于阻止后续替换并告警，不会自动卸载运行中插件
@@ -410,7 +410,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `GET /api/plugin-packages/probation-groups?group_id=<id>&plugin_id=<id>`：读取批量候选观察组、完整成员、组级恢复次数和最近失败。观察组通过或恢复前，组成员不能被单独安装、回滚或卸载，防止覆盖整组恢复依据
 - `POST /api/plugin-packages/rollback`：准备历史版本回滚，请求体为 `{"plugin_id":"...","history_id":"..."}`。成功返回新的 stage；调用方仍须通过 `/api/plugin-packages/apply` 完成权限确认和应用
 - `POST /api/plugin-packages/uninstall`：卸载插件，请求体为 `{"plugin_id":"...","force":false,"purge_data":false}`。默认保留插件记录和历史；`purge_data=true` 会删除插件资源、状态和 Secret 数据；存在必需依赖者时必须显式 `force=true`
-- `GET /api/plugin-trust`：列出 Ed25519 发布者公钥、`active/revoked` 状态及可选 `scope`。`POST /api/plugin-trust` 用 `{"name":"...","public_key":"base64-or-hex","replaces":"optional-old-key-id","scope":{"plugin_ids":["vendor_*"],"permissions":["plugin.register","ui"],"execution_tiers":["control"],"stabilities":["stable","preview"]}}` 添加或原子轮换；范围字段为空表示该维度不限制，整个 `scope` 省略表示全局发布者。轮换省略 `scope` 时继承旧范围，显式范围只能保持或收窄。`DELETE /api/plugin-trust` 用 `{"id":"..."}` 撤销。撤销记录不会物理删除，只影响后续签名预检，不会自动卸载已有插件
+- `GET /api/plugin-trust`：列出 Ed25519 发布者公钥、`active/revoked` 状态及可选 `scope`。信任用于识别后续包并免去重复的陌生发布者确认，不是安装前置条件。`POST /api/plugin-trust` 用 `{"name":"...","public_key":"base64-or-hex","replaces":"optional-old-key-id","scope":{"plugin_ids":["vendor_*"],"permissions":["plugin.register","ui"],"permissions_restricted":true,"execution_tiers":["control"],"stabilities":["stable","preview"]}}` 添加或原子轮换；范围字段为空表示该维度不限制，`permissions_restricted=true` 可把空权限列表明确限制为零权限，整个 `scope` 省略表示全局发布者。轮换省略 `scope` 时继承旧范围，显式范围只能保持或收窄。`DELETE /api/plugin-trust` 用 `{"id":"..."}` 撤销。撤销记录不会物理删除，后续签名显示为 `publisher_status=revoked` 并要求当前安装明确批准，不会自动卸载已有插件
 - `GET /api/plugin-audit?plugin_id=<id>&limit=<n>&before_id=<id>`：读取持久化插件审计记录，最新记录优先。`limit` 为 `1..500`，使用当前页最后一项的 `id` 作为 `before_id` 向前翻页
 - `GET /api/plugin-event-dead-letters?plugin_id=<optional>&limit=<n>&before_id=<id>`：跨插件读取 durable 事件死信，最新记录优先。`plugin_id` 为空时返回全部插件，`limit` 为 `1..500`，使用当前页最后一项的数字 `id` 作为 `before_id` 向前翻页；返回项包含原始 `delivery_id/topic/payload`、订阅、来源、尝试次数和最近错误
 - `POST /api/plugin-event-dead-letters/retry`：把指定死信恢复为 pending，请求体为 `{"plugin_id":"...","delivery_id":"..."}`。该操作要求插件管理员权限，复用原 delivery 和 payload，不重新发布事件，并写入审计日志
@@ -421,7 +421,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `POST /api/plugin-repositories/stage`：用 `{"repository_id":"...","plugin_id":"...","version":"optional","defer_relationships":false}` 从已验证 target 创建单个 stage
 - `POST /api/plugin-repositories/plan`：用 `{"repository_id":"...","plugin_id":"...","version":"optional"}` 回溯求解完整必需依赖闭包并创建最多 16 个 stage。满足全部约束的已安装版本会列入 `reused`；最终仍需把返回 stages 的权限摘要交给 `/api/plugin-packages/apply-batch` 原子应用
 - `GET /api/plugin-repository-policies`：列出每插件仓库策略；`PUT` 用 `{"plugin_id":"...","repository_id":"...","channel":"stable","pinned_version":"optional-exact-semver","hold":false}` 创建或替换，`DELETE` 用 `{"plugin_id":"..."}` 清除。pin 和 hold 同时约束根插件与依赖求解；写操作要求插件管理员权限。有策略引用时对应仓库不能删除
-- `GET /api/plugin-repositories/updates`：基于已验证的缓存 catalog 返回已安装插件的 `current_version/available_version/status/policy/provenance`、`execution_tier` 和 `requires_trusted_publisher`。`status` 包括 `current/update_available/held/pinned/revoked/unavailable/metadata_unavailable`；该接口不联网、不下载且不自动应用
+- `GET /api/plugin-repositories/updates`：基于已验证的缓存 catalog 返回已安装插件的 `current_version/available_version/status/policy/provenance` 和 `execution_tier`。`status` 包括 `current/update_available/held/pinned/revoked/unavailable/metadata_unavailable`；该接口不联网、不下载且不自动应用
 - `plugins_enabled=true` 时宿主每 `plugins_repository_refresh_minutes` 分钟在独立后台循环刷新所有 TUF 仓库，默认 360、范围 15 至 10080。刷新只更新 metadata/catalog/撤销状态，不创建 stage；插件系统关闭时不启动该循环
 - 包管理全局数量和磁盘配额由 `plugins_max_installed`、`plugins_max_staged`、`plugins_storage_limit_mb` 控制。超限前会清理最旧且未被 probation 引用的历史；仍不足时写接口返回冲突/参数错误，不影响运行中的插件
 
@@ -839,7 +839,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - `plugins_dataplane_enabled = false` 是默认值；同时将 `plugins_enabled` 和该项设为 `true` 后，才允许外部 TC `stage=forward/reply` 插件按 priority 进入内置 `veer` pipeline
 - `plugins_isolation = true` 是默认值；主控制 VM 与每个命名 Worker 使用独立持久子进程。仅受信任的本地调试才应关闭该项
 - `plugins_min_sandbox_level = "full"` 是默认值；Host 或硬资源限制达不到要求时会在执行控制脚本前拒绝插件。旧内核/Windows 调试必须显式降低该值
-- `plugins_require_signed_packages = true` 是默认值；包管理器不会接受 `allow_unsigned` 覆盖，只有受信任签名包和历史回滚可以应用
+- `plugins_require_signed_packages = true` 是默认值；包管理器不会接受 `approve_unsigned` 覆盖，但任何携带自包含公钥且签名有效的 v2 包都可在审核发布者状态后应用，不要求预先写入 trust store；受校验历史和 TUF target 同样可应用
 - 外部插件可通过 `PUT /api/plugins/<id>/state` 热启用/禁用；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
 - 插件源目录每 2 秒扫描一次，变化只标记待更新；`POST /api/plugins/reload` 才会校验并应用候选快照。应用失败时旧 control VM、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
 - 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`

@@ -2,6 +2,7 @@ package app
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"crypto/ed25519"
@@ -41,7 +42,7 @@ func TestPluginPackageStageRejectsUnavailableRequiredHostFeature(t *testing.T) {
 			Features: []string{"dataplane.tc_pipeline.v2"},
 		},
 	})
-	if _, err := manager.Stage(bytes.NewReader(archive), "", ""); err == nil ||
+	if _, err := manager.Stage(bytes.NewReader(archive)); err == nil ||
 		!strings.Contains(err.Error(), "plugin candidate host preflight failed") ||
 		!strings.Contains(err.Error(), "test TC attach unavailable") {
 		t.Fatalf("Stage() host preflight error = %v", err)
@@ -56,23 +57,23 @@ func TestPluginPackageUnsignedInstallAndPrivilegeApproval(t *testing.T) {
 		Permissions: []string{"kv", "plugin.register"},
 		Control:     `exports.onReconcile = function () {};`,
 	})
-	stage, err := manager.Stage(bytes.NewReader(archive), "", "")
+	stage, err := manager.Stage(bytes.NewReader(archive))
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}
 	if stage.Trusted || stage.Signed || len(stage.PrivilegeAdditions) == 0 {
 		t.Fatalf("stage trust/privileges = %+v", stage)
 	}
-	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, ApprovedPrivilegeDigest: stage.PrivilegeDigest}); err == nil || !strings.Contains(err.Error(), "allow_unsigned") {
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, ApprovedPrivilegeDigest: stage.PrivilegeDigest}); err == nil || !strings.Contains(err.Error(), "approve_unsigned") {
 		t.Fatalf("ApplyStage(unsigned) error = %v", err)
 	}
-	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true}); err == nil || !strings.Contains(err.Error(), "approval digest") {
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true}); err == nil || !strings.Contains(err.Error(), "approval digest") {
 		t.Fatalf("ApplyStage(unapproved) error = %v", err)
 	}
 	result, err := manager.ApplyStage(PluginPackageApplyRequest{
 		StageID:                 stage.ID,
 		ApprovedPrivilegeDigest: stage.PrivilegeDigest,
-		AllowUnsigned:           true,
+		ApproveUnsigned:         true,
 	})
 	if err != nil {
 		t.Fatalf("ApplyStage() error = %v", err)
@@ -86,25 +87,233 @@ func TestPluginPackageUnsignedInstallAndPrivilegeApproval(t *testing.T) {
 	}
 }
 
-func TestPluginPackageDataplaneAlwaysRequiresTrustedPublisher(t *testing.T) {
+func TestPluginPackageUnknownSignedDataplaneCanBeApproved(t *testing.T) {
 	manager := newPluginPackageManagerForTest(t)
-	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{
-		ID: "unsigned_dataplane", Version: "1.0.0",
-		Permissions: []string{"ebpf.load", "plugin.register"},
-		Control:     `exports.onReconcile = function () {};`,
-	})
-	stage, err := manager.Stage(bytes.NewReader(archive), "", "")
+	requireSigned := true
+	manager.cfg.PluginsRequireSigned = &requireSigned
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stage.ExecutionTier != pluginPackageExecutionTierDataplane || !stage.RequiresTrustedPublisher {
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{
+		ID: "first_seen_dataplane", Version: "1.0.0",
+		Permissions: []string{"ebpf.load", "plugin.register"},
+		Control:     `exports.onReconcile = function () {};`,
+	})
+	stage, err := manager.Stage(bytes.NewReader(signPluginPackageArchiveForTest(t, publicKey, privateKey, archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.ExecutionTier != pluginPackageExecutionTierDataplane || !stage.Signed || stage.Trusted || stage.PublisherStatus != pluginPackagePublisherUnknown {
 		t.Fatalf("dataplane stage trust classification = %+v", stage)
 	}
-	_, err = manager.ApplyStage(PluginPackageApplyRequest{
-		StageID: stage.ID, AllowUnsigned: true, ApprovedPrivilegeDigest: stage.PrivilegeDigest,
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{
+		StageID: stage.ID, ApprovedPrivilegeDigest: stage.PrivilegeDigest,
+	}); err == nil || !strings.Contains(err.Error(), "approve_publisher") {
+		t.Fatalf("unapproved publisher error = %v", err)
+	}
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{
+		StageID: stage.ID, ApprovePublisher: true, ApprovedPrivilegeDigest: stage.PrivilegeDigest,
+	}); err != nil {
+		t.Fatalf("approved first-seen publisher: %v", err)
+	}
+}
+
+func TestPluginPackageInstallCanRememberFirstSeenPublisher(t *testing.T) {
+	manager := newPluginPackageManagerForTest(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{
+		ID: "remembered_plugin", Version: "1.0.0", Stability: pluginStabilityStable,
+		Permissions: []string{"plugin.register"}, Control: `exports.onReconcile = function () {};`,
 	})
-	if err == nil || !strings.Contains(err.Error(), "trusted publisher or TUF repository") {
-		t.Fatalf("unsigned dataplane apply error = %v", err)
+	stage, err := manager.Stage(bytes.NewReader(signPluginPackageArchiveForTest(t, publicKey, privateKey, archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{
+		StageID: stage.ID, ApprovedPrivilegeDigest: stage.PrivilegeDigest,
+		ApprovePublisher: true, RememberPublisher: true,
+	}); err != nil {
+		t.Fatalf("ApplyStage(remember publisher): %v", err)
+	}
+	keys, err := manager.ListTrustKeys()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("remembered trust keys = %+v, err=%v", keys, err)
+	}
+	key := keys[0]
+	if key.ID != stage.SignerID || key.Scope == nil ||
+		!slices.Equal(key.Scope.PluginIDs, []string{"remembered_plugin"}) ||
+		!slices.Equal(key.Scope.Permissions, []string{"plugin.register"}) ||
+		!key.Scope.PermissionsRestricted ||
+		!slices.Equal(key.Scope.ExecutionTiers, []string{pluginPackageExecutionTierControl}) ||
+		!slices.Equal(key.Scope.Stabilities, []string{pluginStabilityStable}) {
+		t.Fatalf("remembered publisher scope = %+v", key)
+	}
+}
+
+func TestPluginPackageRememberedZeroPermissionPublisherDoesNotAuthorizeNewPermissions(t *testing.T) {
+	manager := newPluginPackageManagerForTest(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "zero_permission", Version: "1.0.0"})
+	stage, err := manager.Stage(bytes.NewReader(signPluginPackageArchiveForTest(t, publicKey, privateKey, archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{
+		StageID: stage.ID, ApprovePublisher: true, RememberPublisher: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := manager.ListTrustKeys()
+	if err != nil || len(keys) != 1 || keys[0].Scope == nil || !keys[0].Scope.PermissionsRestricted || len(keys[0].Scope.Permissions) != 0 {
+		t.Fatalf("zero-permission remembered scope = %+v, err=%v", keys, err)
+	}
+
+	update := buildPluginPackageForTest(t, pluginPackageTestSpec{
+		ID: "zero_permission", Version: "2.0.0", Permissions: []string{"kv"},
+		Control: `exports.onReconcile = function () {};`,
+	})
+	updateStage, err := manager.Stage(bytes.NewReader(signPluginPackageArchiveForTest(t, publicKey, privateKey, update)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updateStage.Trusted || updateStage.PublisherStatus != pluginPackagePublisherScopeMismatch {
+		t.Fatalf("permission-expanding update stage = %+v", updateStage)
+	}
+}
+
+func TestPluginPackageRememberPublisherRollsBackWhenApplyFails(t *testing.T) {
+	manager := newPluginPackageManagerForTest(t)
+	manager.runtimeApply = func(string) (bool, error) { return false, errors.New("injected publisher apply failure") }
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "failed_remember", Version: "1.0.0"})
+	stage, err := manager.Stage(bytes.NewReader(signPluginPackageArchiveForTest(t, publicKey, privateKey, archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{
+		StageID: stage.ID, ApprovePublisher: true, RememberPublisher: true,
+	}); err == nil || !strings.Contains(err.Error(), "injected publisher apply failure") {
+		t.Fatalf("ApplyStage(failing remembered publisher) error = %v", err)
+	}
+	keys, err := manager.ListTrustKeys()
+	if err != nil || len(keys) != 0 {
+		t.Fatalf("trust keys after failed apply = %+v, err=%v", keys, err)
+	}
+}
+
+func TestPluginPackageStageBecomesTrustedWhenPublisherIsRememberedLater(t *testing.T) {
+	manager := newPluginPackageManagerForTest(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "later_trusted", Version: "1.0.0"})
+	stage, err := manager.Stage(bytes.NewReader(signPluginPackageArchiveForTest(t, publicKey, privateKey, archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.Trusted || stage.PublisherStatus != pluginPackagePublisherUnknown {
+		t.Fatalf("first-seen stage = %+v", stage)
+	}
+	if _, err := manager.AddTrustKey(PluginTrustKeyRequest{
+		Name: "Later Trusted", PublicKey: stage.SignerPublicKey,
+		Scope: &PluginTrustScope{PluginIDs: []string{stage.PluginID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := manager.LoadStage(stage.ID)
+	if err != nil || !loaded.Trusted || loaded.PublisherStatus != pluginPackagePublisherTrusted {
+		t.Fatalf("stage after adding trust = %+v, err=%v", loaded, err)
+	}
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID}); err != nil {
+		t.Fatalf("ApplyStage(after adding trust): %v", err)
+	}
+}
+
+func TestPluginPackageStageRejectsMismatchedPublisherIdentity(t *testing.T) {
+	manager := newPluginPackageManagerForTest(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "mismatched_publisher", Version: "1.0.0"})
+	signature := signPluginPackageForTest(publicKey, privateKey, archive)
+	signature.PublicKey = base64.StdEncoding.EncodeToString(otherPublicKey)
+	if _, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, signature))); err == nil || !strings.Contains(err.Error(), "signer identity is invalid") {
+		t.Fatalf("mismatched signer id/public key error = %v", err)
+	}
+	signature.SignerID = pluginTrustKeyID(otherPublicKey)
+	if _, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, signature))); err == nil || !strings.Contains(err.Error(), "signature verification failed") {
+		t.Fatalf("mismatched signature/public key error = %v", err)
+	}
+}
+
+func TestPluginPackageStageRejectsV1SignatureDomain(t *testing.T) {
+	manager := newPluginPackageManagerForTest(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "legacy_signature", Version: "1.0.0"})
+	digest := sha256.Sum256(archive)
+	legacySignature := ed25519.Sign(privateKey, append([]byte("veer-plugin-package-v1\x00"), digest[:]...))
+	if _, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, pluginPackageSignature{
+		SignerID:  pluginTrustKeyID(publicKey),
+		PublicKey: base64.StdEncoding.EncodeToString(publicKey),
+		Signature: base64.StdEncoding.EncodeToString(legacySignature),
+	}))); err == nil || !strings.Contains(err.Error(), "signature verification failed") {
+		t.Fatalf("v1 signature domain error = %v", err)
+	}
+}
+
+func TestPluginPackageBatchRememberPublisherAggregatesMinimalScope(t *testing.T) {
+	manager := newPluginPackageManagerForTest(t)
+	manager.suppressProbation = true
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make([]PluginPackageApplyRequest, 0, 2)
+	for _, spec := range []pluginPackageTestSpec{
+		{ID: "batch_signed_a", Version: "1.0.0", Stability: pluginStabilityStable, Permissions: []string{"kv"}, Control: `exports.onReconcile = function () {};`},
+		{ID: "batch_signed_b", Version: "1.0.0", Stability: pluginStabilityStable, Permissions: []string{"plugin.register"}, Control: `exports.onReconcile = function () {};`},
+	} {
+		archive := buildPluginPackageForTest(t, spec)
+		stage, err := manager.StageWithDeferredRelationships(bytes.NewReader(signPluginPackageArchiveForTest(t, publicKey, privateKey, archive)), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, PluginPackageApplyRequest{
+			StageID: stage.ID, ApprovedPrivilegeDigest: stage.PrivilegeDigest,
+			ApprovePublisher: true, RememberPublisher: true,
+		})
+	}
+	if _, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: requests}); err != nil {
+		t.Fatalf("ApplyBatch(remember publisher): %v", err)
+	}
+	keys, err := manager.ListTrustKeys()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("batch remembered keys = %+v, err=%v", keys, err)
+	}
+	wantPlugins := []string{"batch_signed_a", "batch_signed_b"}
+	wantPermissions := []string{"kv", "plugin.register"}
+	if keys[0].Scope == nil || !slices.Equal(keys[0].Scope.PluginIDs, wantPlugins) ||
+		!slices.Equal(keys[0].Scope.Permissions, wantPermissions) {
+		t.Fatalf("batch remembered publisher scope = %+v", keys[0].Scope)
 	}
 }
 
@@ -125,11 +334,13 @@ func TestPluginPackageTrustedDataplaneCanBeInstalled(t *testing.T) {
 	})
 	digest := sha256.Sum256(archive)
 	signature := ed25519.Sign(privateKey, append([]byte(pluginPackageSignatureDomain), digest[:]...))
-	stage, err := manager.Stage(bytes.NewReader(archive), trustKey.ID, base64.StdEncoding.EncodeToString(signature))
+	stage, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, pluginPackageSignature{
+		SignerID: trustKey.ID, PublicKey: trustKey.PublicKey, Signature: base64.StdEncoding.EncodeToString(signature),
+	})))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !stage.Trusted || stage.ExecutionTier != pluginPackageExecutionTierDataplane || !stage.RequiresTrustedPublisher {
+	if !stage.Trusted || stage.PublisherStatus != pluginPackagePublisherTrusted || stage.ExecutionTier != pluginPackageExecutionTierDataplane {
 		t.Fatalf("trusted dataplane stage = %+v", stage)
 	}
 	if _, err := manager.ApplyStage(PluginPackageApplyRequest{
@@ -161,14 +372,14 @@ exports.onAction = function (ctx) { return ctx.payload; };
 
 	_, err := manager.Stage(bytes.NewReader(buildPluginPackageForTest(t, pluginPackageTestSpec{
 		ID: "schema_upgrade", Version: "1.1.0", Permissions: []string{"plugin.register"}, Control: control(1, "string"),
-	})), "", "")
+	})))
 	if err == nil || !strings.Contains(err.Error(), "schema changed without increasing schema_version 1") {
 		t.Fatalf("same-version action contract stage error = %v", err)
 	}
 
 	stage, err := manager.Stage(bytes.NewReader(buildPluginPackageForTest(t, pluginPackageTestSpec{
 		ID: "schema_upgrade", Version: "1.1.0", Permissions: []string{"plugin.register"}, Control: control(2, "string"),
-	})), "", "")
+	})))
 	if err != nil {
 		t.Fatalf("versioned action contract stage: %v", err)
 	}
@@ -192,14 +403,14 @@ exports.onAction = function () {};
 
 	_, err := manager.Stage(bytes.NewReader(buildPluginPackageForTest(t, pluginPackageTestSpec{
 		ID: "service_upgrade", Version: "1.1.0", Permissions: []string{"plugin.register"}, Control: control("1.0.0", 2048),
-	})), "", "")
+	})))
 	if err == nil || !strings.Contains(err.Error(), "contract changed without increasing service version 1.0.0") {
 		t.Fatalf("same-version service contract stage error = %v", err)
 	}
 
 	stage, err := manager.Stage(bytes.NewReader(buildPluginPackageForTest(t, pluginPackageTestSpec{
 		ID: "service_upgrade", Version: "1.1.0", Permissions: []string{"plugin.register"}, Control: control("1.1.0", 2048),
-	})), "", "")
+	})))
 	if err != nil {
 		t.Fatalf("versioned service contract stage: %v", err)
 	}
@@ -216,8 +427,8 @@ func TestPluginPackageManagerRejectsUnsignedPackageByPolicy(t *testing.T) {
 		ID: "unsigned_policy", Version: "1.0.0",
 	}))
 	_, err := manager.ApplyStage(PluginPackageApplyRequest{
-		StageID:       stage.ID,
-		AllowUnsigned: true,
+		StageID:         stage.ID,
+		ApproveUnsigned: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "plugins_require_signed_packages") {
 		t.Fatalf("unsigned policy error = %v", err)
@@ -238,7 +449,9 @@ func TestPluginPackageSignedInstallUsesTrustStore(t *testing.T) {
 	digest := sha256.Sum256(archive)
 	message := append([]byte(pluginPackageSignatureDomain), digest[:]...)
 	signature := ed25519.Sign(privateKey, message)
-	stage, err := manager.Stage(bytes.NewReader(archive), trustKey.ID, base64.StdEncoding.EncodeToString(signature))
+	stage, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, pluginPackageSignature{
+		SignerID: trustKey.ID, PublicKey: trustKey.PublicKey, Signature: base64.StdEncoding.EncodeToString(signature),
+	})))
 	if err != nil {
 		t.Fatalf("Stage(signed) error = %v", err)
 	}
@@ -251,7 +464,9 @@ func TestPluginPackageSignedInstallUsesTrustStore(t *testing.T) {
 
 	badSignature := append([]byte(nil), signature...)
 	badSignature[0] ^= 0xff
-	if _, err := manager.Stage(bytes.NewReader(archive), trustKey.ID, base64.StdEncoding.EncodeToString(badSignature)); err == nil || !strings.Contains(err.Error(), "signature verification failed") {
+	if _, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, pluginPackageSignature{
+		SignerID: trustKey.ID, PublicKey: trustKey.PublicKey, Signature: base64.StdEncoding.EncodeToString(badSignature),
+	}))); err == nil || !strings.Contains(err.Error(), "signature verification failed") {
 		t.Fatalf("Stage(bad signature) error = %v", err)
 	}
 	keys, err := manager.ListTrustKeys()
@@ -278,7 +493,7 @@ func TestPluginPackageUpdateFailureRestoresSourceAndRuntime(t *testing.T) {
 	installPluginPackageForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "rollback_plugin", Version: "1.0.0"}))
 	stage := stagePluginPackageForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "rollback_plugin", Version: "2.0.0"}))
 	failRuntime = true
-	_, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true})
+	_, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true})
 	if err == nil || !strings.Contains(err.Error(), "injected runtime failure") {
 		t.Fatalf("ApplyStage(failing update) error = %v", err)
 	}
@@ -307,10 +522,10 @@ func TestPluginPackageBatchAppliesDependentUpdatesAtomically(t *testing.T) {
 	consumer := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{
 		ID: "batch_consumer", Version: "2.0.0", Dependencies: []PluginDependency{{ID: "batch_dependency", Version: ">=2.0.0 <3.0.0"}},
 	}))
-	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: dependency.ID, AllowUnsigned: true}); err == nil || !strings.Contains(err.Error(), "part of a batch") {
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: dependency.ID, ApproveUnsigned: true}); err == nil || !strings.Contains(err.Error(), "part of a batch") {
 		t.Fatalf("ApplyStage(deferred) error = %v", err)
 	}
-	if _, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{{StageID: dependency.ID, AllowUnsigned: true}}}); err == nil || !strings.Contains(err.Error(), "batch_consumer") {
+	if _, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{{StageID: dependency.ID, ApproveUnsigned: true}}}); err == nil || !strings.Contains(err.Error(), "batch_consumer") {
 		t.Fatalf("ApplyBatch(incomplete dependency update) error = %v", err)
 	}
 
@@ -323,8 +538,8 @@ func TestPluginPackageBatchAppliesDependentUpdatesAtomically(t *testing.T) {
 		return true, nil
 	}
 	result, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{
-		{StageID: dependency.ID, AllowUnsigned: true},
-		{StageID: consumer.ID, AllowUnsigned: true},
+		{StageID: dependency.ID, ApproveUnsigned: true},
+		{StageID: consumer.ID, ApproveUnsigned: true},
 	}})
 	if err != nil {
 		t.Fatalf("ApplyBatch() error = %v", err)
@@ -368,7 +583,7 @@ func TestPluginPackageBatchProbationRecoversDependencyGroupAtomically(t *testing
 		return true, nil
 	}
 	result, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{
-		{StageID: dependency.ID, AllowUnsigned: true}, {StageID: consumer.ID, AllowUnsigned: true},
+		{StageID: dependency.ID, ApproveUnsigned: true}, {StageID: consumer.ID, ApproveUnsigned: true},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -413,7 +628,7 @@ func TestPluginPackageBatchProbationRemovesNewInstallsDuringRecovery(t *testing.
 	added := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "group_added", Version: "1.0.0"}))
 	manager.runtimeApplyBatch = func([]string) (bool, error) { return true, nil }
 	result, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{
-		{StageID: existing.ID, AllowUnsigned: true}, {StageID: added.ID, AllowUnsigned: true},
+		{StageID: existing.ID, ApproveUnsigned: true}, {StageID: added.ID, ApproveUnsigned: true},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -445,7 +660,7 @@ func TestPluginPackageBatchProbationRecoveryFailureKeepsWholeCandidateGroup(t *t
 	requests := make([]PluginPackageApplyRequest, 0, 2)
 	for _, pluginID := range []string{"group_retry_a", "group_retry_b"} {
 		stage := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: pluginID, Version: "2.0.0"}))
-		requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true})
+		requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true})
 	}
 	runtimeCalls := 0
 	manager.runtimeApplyBatch = func([]string) (bool, error) {
@@ -501,7 +716,7 @@ func TestPluginPackageBatchProbationRecoveryJournalCompletesAfterRestart(t *test
 	requests := make([]PluginPackageApplyRequest, 0, 2)
 	for _, pluginID := range []string{"group_crash_a", "group_crash_b"} {
 		stage := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: pluginID, Version: "2.0.0"}))
-		requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true})
+		requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true})
 	}
 	manager.runtimeApplyBatch = func([]string) (bool, error) { return true, nil }
 	result, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: requests})
@@ -542,12 +757,12 @@ func TestPluginPackageProbationGroupBlocksMemberMutation(t *testing.T) {
 	manager.suppressProbation = false
 	stage := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "group_locked", Version: "2.0.0"}))
 	manager.runtimeApplyBatch = func([]string) (bool, error) { return true, nil }
-	result, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{{StageID: stage.ID, AllowUnsigned: true}}})
+	result, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{{StageID: stage.ID, ApproveUnsigned: true}}})
 	if err != nil || result.Plugins[0].Probation == nil {
 		t.Fatalf("batch result = %+v, err=%v", result, err)
 	}
 	next := stagePluginPackageForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "group_locked", Version: "3.0.0"}))
-	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: next.ID, AllowUnsigned: true}); err == nil || !strings.Contains(err.Error(), "probation group") {
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: next.ID, ApproveUnsigned: true}); err == nil || !strings.Contains(err.Error(), "probation group") {
 		t.Fatalf("ApplyStage(group member) error = %v", err)
 	}
 	if _, err := manager.Uninstall(PluginPackageUninstallRequest{PluginID: "group_locked"}); err == nil || !strings.Contains(err.Error(), "probation group") {
@@ -565,7 +780,7 @@ func TestPluginPackageProbationGroupPassesOnlyAfterEveryMember(t *testing.T) {
 	requests := make([]PluginPackageApplyRequest, 0, 2)
 	for _, pluginID := range []string{"group_pass_a", "group_pass_b"} {
 		stage := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: pluginID, Version: "2.0.0"}))
-		requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true})
+		requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true})
 	}
 	manager.runtimeApplyBatch = func([]string) (bool, error) { return true, nil }
 	result, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: requests})
@@ -596,7 +811,7 @@ func TestPluginPackageBatchRuntimeFailureRestoresEveryPlugin(t *testing.T) {
 	stages := make([]PluginPackageApplyRequest, 0, 2)
 	for _, pluginID := range []string{"batch_restore_a", "batch_restore_b"} {
 		stage := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: pluginID, Version: "2.0.0"}))
-		stages = append(stages, PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true})
+		stages = append(stages, PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true})
 	}
 	runtimeCalls := 0
 	manager.runtimeApplyBatch = func([]string) (bool, error) {
@@ -645,7 +860,7 @@ func TestPluginPackageBatchRecoversEveryJournalPhase(t *testing.T) {
 			requests := make([]PluginPackageApplyRequest, 0, 2)
 			for _, pluginID := range []string{"batch_recover_a", "batch_recover_b"} {
 				stage := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: pluginID, Version: "2.0.0"}))
-				requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true})
+				requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true})
 			}
 			candidates, err := manager.validatePluginPackageBatchRequest(PluginPackageBatchApplyRequest{Stages: requests})
 			if err != nil {
@@ -752,7 +967,7 @@ func TestPluginPackageBatchJournalWriteFailuresRemainAtomic(t *testing.T) {
 			stages := make([]PluginPackageApplyRequest, 0, 2)
 			for _, pluginID := range []string{"batch_fault_a", "batch_fault_b"} {
 				stage := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: pluginID, Version: "2.0.0"}))
-				stages = append(stages, PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true})
+				stages = append(stages, PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true})
 			}
 			runtimeCalls := 0
 			manager.runtimeApplyBatch = func([]string) (bool, error) {
@@ -805,7 +1020,7 @@ func TestPluginPackageBatchCopyFailureDoesNotTouchInstalledSources(t *testing.T)
 		}
 		return nil
 	}
-	if _, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{{StageID: stage.ID, AllowUnsigned: true}}}); err == nil || !strings.Contains(err.Error(), "disk full") {
+	if _, err := manager.ApplyBatch(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{{StageID: stage.ID, ApproveUnsigned: true}}}); err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("ApplyBatch(copy failure) error = %v", err)
 	}
 	plugin, err := manager.loadCurrentPlugin("batch_disk_full")
@@ -842,7 +1057,7 @@ func TestPluginPackageBatchRecoveryCoordinatesResourceMigration(t *testing.T) {
 				t.Fatal(err)
 			}
 			stage := stagePluginPackageDeferredForTest(t, manager, buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "batch_migration", Version: "2.0.0"}))
-			candidates, err := manager.validatePluginPackageBatchRequest(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{{StageID: stage.ID, AllowUnsigned: true}}})
+			candidates, err := manager.validatePluginPackageBatchRequest(PluginPackageBatchApplyRequest{Stages: []PluginPackageApplyRequest{{StageID: stage.ID, ApproveUnsigned: true}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1034,10 +1249,10 @@ func TestPluginPackagePermissionExpansionRequiresNewApproval(t *testing.T) {
 	if len(stage.PrivilegeAdditions) != 1 || stage.PrivilegeAdditions[0] != "permission:secret" {
 		t.Fatalf("privilege additions = %+v", stage.PrivilegeAdditions)
 	}
-	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true, ApprovedPrivilegeDigest: strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "approval digest") {
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true, ApprovedPrivilegeDigest: strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "approval digest") {
 		t.Fatalf("ApplyStage(wrong approval) error = %v", err)
 	}
-	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true, ApprovedPrivilegeDigest: stage.PrivilegeDigest}); err != nil {
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true, ApprovedPrivilegeDigest: stage.PrivilegeDigest}); err != nil {
 		t.Fatalf("ApplyStage(approved) error = %v", err)
 	}
 }
@@ -1174,7 +1389,7 @@ func TestPluginPackageRejectsUnsafeTarEntries(t *testing.T) {
 				payload = []byte("x")
 			}
 			archive := buildRawPluginArchiveForTest(t, []tar.Header{tt.header}, [][]byte{payload})
-			if _, err := manager.Stage(bytes.NewReader(archive), "", ""); err == nil || !strings.Contains(err.Error(), tt.want) {
+			if _, err := manager.Stage(bytes.NewReader(archive)); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Stage() error = %v, want %q", err, tt.want)
 			}
 		})
@@ -1480,7 +1695,7 @@ func TestPluginPackageStageIntegrityAndBounds(t *testing.T) {
 			{Name: "duplicate/plugin.json", Typeflag: tar.TypeReg, Mode: 0o644, Size: 2},
 		}
 		archive := buildRawPluginArchiveForTest(t, headers, [][]byte{nil, []byte("{}"), []byte("{}")})
-		if _, err := manager.Stage(bytes.NewReader(archive), "", ""); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
+		if _, err := manager.Stage(bytes.NewReader(archive)); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
 			t.Fatalf("Stage(duplicate entry) error = %v", err)
 		}
 	})
@@ -1488,13 +1703,13 @@ func TestPluginPackageStageIntegrityAndBounds(t *testing.T) {
 	t.Run("archive size", func(t *testing.T) {
 		manager := newPluginPackageManagerForTest(t)
 		reader := io.LimitReader(pluginPackageZeroReader{}, pluginPackageMaxArchiveBytes+1)
-		if _, err := manager.Stage(reader, "", ""); err == nil || !strings.Contains(err.Error(), "archive exceeds") {
+		if _, err := manager.Stage(reader); err == nil || !strings.Contains(err.Error(), "archive exceeds") {
 			t.Fatalf("Stage(oversize archive) error = %v", err)
 		}
 	})
 }
 
-func TestPluginPackageSignedStageRequiresSignerToRemainTrusted(t *testing.T) {
+func TestPluginPackageSignedStageReportsRevokedPublisherWithoutBlockingReview(t *testing.T) {
 	manager := newPluginPackageManagerForTest(t)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -1507,15 +1722,27 @@ func TestPluginPackageSignedStageRequiresSignerToRemainTrusted(t *testing.T) {
 	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "removed_signer", Version: "1.0.0"})
 	digest := sha256.Sum256(archive)
 	signature := ed25519.Sign(privateKey, append([]byte(pluginPackageSignatureDomain), digest[:]...))
-	stage, err := manager.Stage(bytes.NewReader(archive), key.ID, base64.StdEncoding.EncodeToString(signature))
+	stage, err := manager.Stage(bytes.NewReader(buildSignedPluginPackageForTest(t, archive, pluginPackageSignature{
+		SignerID: key.ID, PublicKey: key.PublicKey, Signature: base64.StdEncoding.EncodeToString(signature),
+	})))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.DeleteTrustKey(key.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.LoadStage(stage.ID); err == nil || !strings.Contains(err.Error(), "not trusted") {
-		t.Fatalf("LoadStage(after trust removal) error = %v", err)
+	loaded, err := manager.LoadStage(stage.ID)
+	if err != nil {
+		t.Fatalf("LoadStage(after publisher revocation): %v", err)
+	}
+	if loaded.Trusted || loaded.PublisherStatus != pluginPackagePublisherRevoked {
+		t.Fatalf("stage after publisher revocation = %+v", loaded)
+	}
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID}); err == nil || !strings.Contains(err.Error(), "approve_publisher") {
+		t.Fatalf("unapproved revoked publisher error = %v", err)
+	}
+	if _, err := manager.ApplyStage(PluginPackageApplyRequest{StageID: stage.ID, ApprovePublisher: true}); err != nil {
+		t.Fatalf("manually approved revoked publisher: %v", err)
 	}
 }
 
@@ -1743,7 +1970,7 @@ func buildRawPluginArchiveForTest(t *testing.T, headers []tar.Header, payloads [
 
 func stagePluginPackageForTest(t *testing.T, manager *pluginPackageManager, archive []byte) PluginPackageStage {
 	t.Helper()
-	stage, err := manager.Stage(bytes.NewReader(archive), "", "")
+	stage, err := manager.Stage(bytes.NewReader(archive))
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}
@@ -1752,7 +1979,7 @@ func stagePluginPackageForTest(t *testing.T, manager *pluginPackageManager, arch
 
 func stagePluginPackageDeferredForTest(t *testing.T, manager *pluginPackageManager, archive []byte) PluginPackageStage {
 	t.Helper()
-	stage, err := manager.StageWithDeferredRelationships(bytes.NewReader(archive), "", "", true)
+	stage, err := manager.StageWithDeferredRelationships(bytes.NewReader(archive), true)
 	if err != nil {
 		t.Fatalf("StageWithDeferredRelationships() error = %v", err)
 	}
@@ -1765,12 +1992,68 @@ func installPluginPackageForTest(t *testing.T, manager *pluginPackageManager, ar
 	result, err := manager.ApplyStage(PluginPackageApplyRequest{
 		StageID:                 stage.ID,
 		ApprovedPrivilegeDigest: stage.PrivilegeDigest,
-		AllowUnsigned:           true,
+		ApproveUnsigned:         true,
 	})
 	if err != nil {
 		t.Fatalf("ApplyStage() error = %v", err)
 	}
 	return result
+}
+
+func signPluginPackageForTest(publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey, archive []byte) pluginPackageSignature {
+	digest := sha256.Sum256(archive)
+	signature := ed25519.Sign(privateKey, append([]byte(pluginPackageSignatureDomain), digest[:]...))
+	return pluginPackageSignature{
+		SignerID: pluginTrustKeyID(publicKey), PublicKey: base64.StdEncoding.EncodeToString(publicKey),
+		Signature: base64.StdEncoding.EncodeToString(signature),
+	}
+}
+
+func signPluginPackageArchiveForTest(t testing.TB, publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey, archive []byte) []byte {
+	t.Helper()
+	return buildSignedPluginPackageForTest(t, archive, signPluginPackageForTest(publicKey, privateKey, archive))
+}
+
+func buildSignedPluginPackageForTest(t testing.TB, archive []byte, signature pluginPackageSignature) []byte {
+	t.Helper()
+	digest := sha256.Sum256(archive)
+	metadata := pluginPackageSignatureFile{
+		Version: pluginPackageSignatureFileVersion, SignerID: signature.SignerID,
+		PublicKey: signature.PublicKey, ArchiveSHA256: hex.EncodeToString(digest[:]),
+		Signature: signature.Signature, CreatedAt: "2026-01-01T00:00:00Z",
+	}
+	return buildPluginPackageContainerForTest(t, archive, metadata)
+}
+
+func buildPluginPackageContainerForTest(t testing.TB, archive []byte, metadata pluginPackageSignatureFile) []byte {
+	t.Helper()
+	metadataData, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	for _, entry := range []struct {
+		name string
+		data []byte
+	}{
+		{name: pluginPackageContainerArchiveName, data: archive},
+		{name: pluginPackageContainerSignatureName, data: metadataData},
+	} {
+		header := &zip.FileHeader{Name: entry.name, Method: zip.Store}
+		header.SetMode(0o644)
+		entryWriter, err := writer.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entryWriter.Write(entry.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
 }
 
 func pluginPackageProvenanceForTest(pluginID, version, digestByte string) *PluginPackageProvenance {

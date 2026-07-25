@@ -8,11 +8,6 @@ import (
 	"sync"
 )
 
-const (
-	pluginPackageSignerHeader    = "X-Veer-Plugin-Signer"
-	pluginPackageSignatureHeader = "X-Veer-Plugin-Signature"
-)
-
 var pluginPackageFallbackMu sync.Mutex
 
 func handlePluginPackageStageAPI(w http.ResponseWriter, r *http.Request, cfg *Config, db *sql.DB, pm *ProcessManager) {
@@ -20,9 +15,15 @@ func handlePluginPackageStageAPI(w http.ResponseWriter, r *http.Request, cfg *Co
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if r.ContentLength > pluginPackageMaxArchiveBytes {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("plugin package exceeds %d bytes", pluginPackageMaxArchiveBytes)})
+	if r.ContentLength > pluginPackageMaxContainerBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("plugin package exceeds %d bytes", pluginPackageMaxContainerBytes)})
 		return
+	}
+	for _, header := range []string{"X-Veer-Plugin-Signer", "X-Veer-Plugin-Public-Key", "X-Veer-Plugin-Signature"} {
+		if strings.TrimSpace(r.Header.Get(header)) != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "detached plugin signatures are not supported; upload a signed .veerpkg package"})
+			return
+		}
 	}
 	unlock := lockPluginPackageOperations(pm)
 	defer unlock()
@@ -31,7 +32,7 @@ func handlePluginPackageStageAPI(w http.ResponseWriter, r *http.Request, cfg *Co
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, pluginPackageMaxArchiveBytes+1)
+	r.Body = http.MaxBytesReader(w, r.Body, pluginPackageMaxContainerBytes+1)
 	deferredRelationships := false
 	if raw := strings.TrimSpace(r.URL.Query().Get("defer_relationships")); raw != "" {
 		if raw != "true" && raw != "false" {
@@ -40,7 +41,7 @@ func handlePluginPackageStageAPI(w http.ResponseWriter, r *http.Request, cfg *Co
 		}
 		deferredRelationships = raw == "true"
 	}
-	stage, err := manager.StageWithDeferredRelationships(r.Body, r.Header.Get(pluginPackageSignerHeader), r.Header.Get(pluginPackageSignatureHeader), deferredRelationships)
+	stage, err := manager.StageWithDeferredRelationships(r.Body, deferredRelationships)
 	if err != nil {
 		recordPluginAudit(db, "", "package.stage", "api", "error", map[string]any{"error": err.Error()})
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

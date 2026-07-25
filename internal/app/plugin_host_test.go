@@ -711,7 +711,7 @@ plugin.action({id: 'apply', runtime_update: 'none'});
 exports.onReconcile = function () {};
 `,
 	})
-	stage, err := manager.Stage(bytes.NewReader(archive), "", "")
+	stage, err := manager.Stage(bytes.NewReader(archive))
 	if err != nil {
 		t.Fatalf("Stage() error = %v", err)
 	}

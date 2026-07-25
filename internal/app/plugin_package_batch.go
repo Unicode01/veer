@@ -40,6 +40,20 @@ func (m *pluginPackageManager) ApplyBatch(request PluginPackageBatchApplyRequest
 	if err := m.validatePluginPackageBatchCatalog(candidates); err != nil {
 		return PluginPackageBatchOperationResult{}, err
 	}
+	publisherApprovals := make([]pluginPackagePublisherApproval, 0, len(candidates))
+	for _, candidate := range candidates {
+		publisherApprovals = append(publisherApprovals, pluginPackagePublisherApproval{stage: candidate.stage, request: candidate.request})
+	}
+	rememberedPublishers, err := m.rememberPluginPackagePublishers(publisherApprovals)
+	if err != nil {
+		return PluginPackageBatchOperationResult{}, err
+	}
+	keepRememberedPublishers := false
+	defer func() {
+		if !keepRememberedPublishers {
+			m.rollbackRememberedPluginPublishers(rememberedPublishers, "plugin package batch apply failed")
+		}
+	}()
 	tx, err := m.preparePluginPackageBatchTransaction(candidates)
 	if err != nil {
 		return PluginPackageBatchOperationResult{}, err
@@ -48,6 +62,7 @@ func (m *pluginPackageManager) ApplyBatch(request PluginPackageBatchApplyRequest
 	if err != nil {
 		return PluginPackageBatchOperationResult{}, err
 	}
+	keepRememberedPublishers = true
 	return result, nil
 }
 
@@ -72,14 +87,8 @@ func (m *pluginPackageManager) validatePluginPackageBatchRequest(request PluginP
 			return nil, fmt.Errorf("plugin package batch contains more than one candidate for %s", stage.PluginID)
 		}
 		seenPlugins[stage.PluginID] = struct{}{}
-		if stage.RequiresTrustedPublisher && !stage.Trusted {
-			return nil, fmt.Errorf("dataplane plugin package %s requires a trusted publisher or TUF repository", stage.PluginID)
-		}
-		if !stage.Trusted && m.cfg.PluginsRequireSignedPackages() {
-			return nil, fmt.Errorf("plugin package %s is unsigned and plugins_require_signed_packages is enabled", stage.PluginID)
-		}
-		if !stage.Trusted && !applyRequest.AllowUnsigned {
-			return nil, fmt.Errorf("plugin package %s is unsigned; explicit allow_unsigned approval is required", stage.PluginID)
+		if err := m.validatePluginPackageSourceApproval(stage, applyRequest); err != nil {
+			return nil, fmt.Errorf("plugin package %s: %w", stage.PluginID, err)
 		}
 		if len(stage.PrivilegeAdditions) > 0 && strings.TrimSpace(applyRequest.ApprovedPrivilegeDigest) != stage.PrivilegeDigest {
 			return nil, fmt.Errorf("plugin %s privilege expansion requires approval digest %s", stage.PluginID, stage.PrivilegeDigest)

@@ -10,7 +10,7 @@ const (
 	pluginPackageMaxEntries               = 2048
 	pluginPackageStageLifetime            = 24 * time.Hour
 	pluginPackageHistoryLimit             = 10
-	pluginPackageSignatureDomain          = "veer-plugin-package-v1\x00"
+	pluginPackageSignatureDomain          = "veer-plugin-package-v2\x00"
 	pluginPackageStateSuffix              = ".veer-state"
 	pluginPackageStageMetadataFile        = "stage.json"
 	pluginPackageHistoryMetadataFile      = "history.json"
@@ -24,53 +24,68 @@ const (
 	pluginPackageBatchMaxStages           = 16
 	pluginPackageExecutionTierControl     = "control"
 	pluginPackageExecutionTierDataplane   = "dataplane"
+	pluginPackagePublisherNone            = "none"
+	pluginPackagePublisherUnknown         = "unknown"
+	pluginPackagePublisherTrusted         = "trusted"
+	pluginPackagePublisherRevoked         = "revoked"
+	pluginPackagePublisherScopeMismatch   = "scope_mismatch"
 )
 
+type pluginPackageSignature struct {
+	SignerID  string
+	PublicKey string
+	Signature string
+}
+
 type PluginPackageStage struct {
-	ID                       string                   `json:"id"`
-	PluginID                 string                   `json:"plugin_id"`
-	Name                     string                   `json:"name"`
-	Version                  string                   `json:"version"`
-	ExistingVersion          string                   `json:"existing_version,omitempty"`
-	ExistingFingerprint      string                   `json:"existing_fingerprint,omitempty"`
-	ArchiveSHA256            string                   `json:"archive_sha256"`
-	CandidateFingerprint     string                   `json:"candidate_fingerprint"`
-	Signed                   bool                     `json:"signed"`
-	Trusted                  bool                     `json:"trusted"`
-	SignerID                 string                   `json:"signer_id,omitempty"`
-	SignerName               string                   `json:"signer_name,omitempty"`
-	SignerScope              *PluginTrustScope        `json:"signer_scope,omitempty"`
-	ExecutionTier            string                   `json:"execution_tier"`
-	RequiresTrustedPublisher bool                     `json:"requires_trusted_publisher"`
-	PrivilegeDigest          string                   `json:"privilege_digest"`
-	PrivilegeAdditions       []string                 `json:"privilege_additions,omitempty"`
-	AffectedPlugins          []string                 `json:"affected_plugins,omitempty"`
-	HistoryID                string                   `json:"history_id,omitempty"`
-	CreatedAt                string                   `json:"created_at"`
-	ExpiresAt                string                   `json:"expires_at"`
-	Compatibility            *PluginCompatibility     `json:"compatibility,omitempty"`
-	Dependencies             []PluginDependency       `json:"dependencies,omitempty"`
-	Conflicts                []PluginConflict         `json:"conflicts,omitempty"`
-	Permissions              []string                 `json:"permissions,omitempty"`
-	RuntimeSurface           PluginRuntimeSurface     `json:"runtime_surface"`
-	RuntimeSurfaceDigest     string                   `json:"runtime_surface_digest"`
-	DeferredRelationships    bool                     `json:"deferred_relationships,omitempty"`
-	TrustSource              string                   `json:"trust_source,omitempty"`
-	RepositoryID             string                   `json:"repository_id,omitempty"`
-	RepositoryTarget         string                   `json:"repository_target,omitempty"`
-	RepositoryChannel        string                   `json:"repository_channel,omitempty"`
-	RepositoryVersion        int64                    `json:"repository_metadata_version,omitempty"`
-	Provenance               *PluginPackageProvenance `json:"provenance,omitempty"`
-	archivePath              string
-	candidateDir             string
-	stageDir                 string
-	signature                string
+	ID                    string                   `json:"id"`
+	PluginID              string                   `json:"plugin_id"`
+	Name                  string                   `json:"name"`
+	Version               string                   `json:"version"`
+	ExistingVersion       string                   `json:"existing_version,omitempty"`
+	ExistingFingerprint   string                   `json:"existing_fingerprint,omitempty"`
+	ArchiveSHA256         string                   `json:"archive_sha256"`
+	CandidateFingerprint  string                   `json:"candidate_fingerprint"`
+	Signed                bool                     `json:"signed"`
+	Trusted               bool                     `json:"trusted"`
+	SignerID              string                   `json:"signer_id,omitempty"`
+	SignerName            string                   `json:"signer_name,omitempty"`
+	SignerPublicKey       string                   `json:"signer_public_key,omitempty"`
+	PublisherStatus       string                   `json:"publisher_status"`
+	SignerScope           *PluginTrustScope        `json:"signer_scope,omitempty"`
+	ExecutionTier         string                   `json:"execution_tier"`
+	Stability             string                   `json:"stability"`
+	PrivilegeDigest       string                   `json:"privilege_digest"`
+	PrivilegeAdditions    []string                 `json:"privilege_additions,omitempty"`
+	AffectedPlugins       []string                 `json:"affected_plugins,omitempty"`
+	HistoryID             string                   `json:"history_id,omitempty"`
+	CreatedAt             string                   `json:"created_at"`
+	ExpiresAt             string                   `json:"expires_at"`
+	Compatibility         *PluginCompatibility     `json:"compatibility,omitempty"`
+	Dependencies          []PluginDependency       `json:"dependencies,omitempty"`
+	Conflicts             []PluginConflict         `json:"conflicts,omitempty"`
+	Permissions           []string                 `json:"permissions,omitempty"`
+	RuntimeSurface        PluginRuntimeSurface     `json:"runtime_surface"`
+	RuntimeSurfaceDigest  string                   `json:"runtime_surface_digest"`
+	DeferredRelationships bool                     `json:"deferred_relationships,omitempty"`
+	TrustSource           string                   `json:"trust_source,omitempty"`
+	RepositoryID          string                   `json:"repository_id,omitempty"`
+	RepositoryTarget      string                   `json:"repository_target,omitempty"`
+	RepositoryChannel     string                   `json:"repository_channel,omitempty"`
+	RepositoryVersion     int64                    `json:"repository_metadata_version,omitempty"`
+	Provenance            *PluginPackageProvenance `json:"provenance,omitempty"`
+	archivePath           string
+	candidateDir          string
+	stageDir              string
+	signature             string
 }
 
 type PluginPackageApplyRequest struct {
 	StageID                 string `json:"stage_id"`
 	ApprovedPrivilegeDigest string `json:"approved_privilege_digest,omitempty"`
-	AllowUnsigned           bool   `json:"allow_unsigned,omitempty"`
+	ApproveUnsigned         bool   `json:"approve_unsigned,omitempty"`
+	ApprovePublisher        bool   `json:"approve_publisher,omitempty"`
+	RememberPublisher       bool   `json:"remember_publisher,omitempty"`
 }
 
 type PluginPackageBatchApplyRequest struct {
@@ -204,10 +219,11 @@ type PluginTrustKeyRequest struct {
 }
 
 type PluginTrustScope struct {
-	PluginIDs      []string `json:"plugin_ids,omitempty"`
-	Permissions    []string `json:"permissions,omitempty"`
-	ExecutionTiers []string `json:"execution_tiers,omitempty"`
-	Stabilities    []string `json:"stabilities,omitempty"`
+	PluginIDs             []string `json:"plugin_ids,omitempty"`
+	Permissions           []string `json:"permissions,omitempty"`
+	PermissionsRestricted bool     `json:"permissions_restricted,omitempty"`
+	ExecutionTiers        []string `json:"execution_tiers,omitempty"`
+	Stabilities           []string `json:"stabilities,omitempty"`
 }
 
 type pluginPackageTransaction struct {

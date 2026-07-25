@@ -18,11 +18,11 @@ type pluginPackageStageRecord struct {
 	Signature string             `json:"signature,omitempty"`
 }
 
-func (m *pluginPackageManager) Stage(reader io.Reader, signerID, signature string) (PluginPackageStage, error) {
-	return m.StageWithDeferredRelationships(reader, signerID, signature, false)
+func (m *pluginPackageManager) Stage(reader io.Reader) (PluginPackageStage, error) {
+	return m.StageWithDeferredRelationships(reader, false)
 }
 
-func (m *pluginPackageManager) StageWithDeferredRelationships(reader io.Reader, signerID, signature string, deferredRelationships bool) (PluginPackageStage, error) {
+func (m *pluginPackageManager) StageWithDeferredRelationships(reader io.Reader, deferredRelationships bool) (PluginPackageStage, error) {
 	if err := m.enforcePluginPackageStageQuota(); err != nil {
 		return PluginPackageStage{}, err
 	}
@@ -41,12 +41,35 @@ func (m *pluginPackageManager) StageWithDeferredRelationships(reader io.Reader, 
 		}
 	}()
 
-	archivePath := filepath.Join(stageDir, "package.tar.gz")
-	archiveDigest, _, err := writeBoundedPluginArchive(reader, archivePath)
+	uploadPath := filepath.Join(stageDir, "upload")
+	uploadDigest, uploadBytes, err := writeBoundedPluginPackageFile(reader, uploadPath, pluginPackageMaxContainerBytes, "plugin package upload")
 	if err != nil {
 		return PluginPackageStage{}, err
 	}
-	key, trusted, err := m.verifyArchiveSignature(archiveDigest, signerID, signature)
+	archivePath := filepath.Join(stageDir, pluginPackageContainerArchiveName)
+	container, err := isPluginPackageContainer(uploadPath)
+	if err != nil {
+		return PluginPackageStage{}, err
+	}
+	archiveDigest := uploadDigest
+	signature := pluginPackageSignature{}
+	if container {
+		archiveDigest, signature, err = extractPluginPackageContainer(uploadPath, archivePath)
+		if err != nil {
+			return PluginPackageStage{}, err
+		}
+		if err := os.Remove(uploadPath); err != nil {
+			return PluginPackageStage{}, err
+		}
+	} else {
+		if uploadBytes > pluginPackageMaxArchiveBytes {
+			return PluginPackageStage{}, fmt.Errorf("plugin package archive exceeds %d bytes", pluginPackageMaxArchiveBytes)
+		}
+		if err := os.Rename(uploadPath, archivePath); err != nil {
+			return PluginPackageStage{}, err
+		}
+	}
+	verifiedSignature, err := m.verifyArchiveSignature(archiveDigest, signature)
 	if err != nil {
 		return PluginPackageStage{}, err
 	}
@@ -62,11 +85,7 @@ func (m *pluginPackageManager) StageWithDeferredRelationships(reader io.Reader, 
 	if filepath.Base(candidateDir) != candidate.ID {
 		return PluginPackageStage{}, fmt.Errorf("plugin package directory %q does not match manifest id %q", filepath.Base(candidateDir), candidate.ID)
 	}
-	if trusted {
-		if err := validatePluginTrustKeyScope(key, candidate); err != nil {
-			return PluginPackageStage{}, err
-		}
-	}
+	trusted, publisherStatus := pluginPackagePublisherState(verifiedSignature, candidate)
 	if previous == nil {
 		if err := m.enforcePluginPackageInstalledQuota(1); err != nil {
 			return PluginPackageStage{}, err
@@ -90,46 +109,48 @@ func (m *pluginPackageManager) StageWithDeferredRelationships(reader io.Reader, 
 	additions := pluginPrivilegeAdditions(previousPrivileges, privileges)
 	now := time.Now().UTC()
 	trustSource := "unsigned"
-	if trusted {
+	if verifiedSignature.Signed {
 		trustSource = "signature"
 	}
 	stage := PluginPackageStage{
-		ID:                       stageID,
-		PluginID:                 candidate.ID,
-		Name:                     candidate.Name,
-		Version:                  candidate.Version,
-		ExistingVersion:          existingVersion,
-		ExistingFingerprint:      existingFingerprint,
-		ArchiveSHA256:            archiveDigest,
-		CandidateFingerprint:     fingerprint,
-		Signed:                   strings.TrimSpace(signerID) != "" || strings.TrimSpace(signature) != "",
-		Trusted:                  trusted,
-		ExecutionTier:            pluginPackageExecutionTier(candidate),
-		RequiresTrustedPublisher: pluginPackageRequiresTrustedPublisher(candidate),
-		PrivilegeDigest:          privilegeDigest,
-		PrivilegeAdditions:       additions,
-		AffectedPlugins:          affected,
-		CreatedAt:                now.Format(time.RFC3339Nano),
-		ExpiresAt:                now.Add(pluginPackageStageLifetime).Format(time.RFC3339Nano),
-		Compatibility:            clonePluginCompatibility(candidate.Compatibility),
-		Dependencies:             append([]PluginDependency(nil), candidate.Dependencies...),
-		Conflicts:                append([]PluginConflict(nil), candidate.Conflicts...),
-		RuntimeSurface:           runtimeSurface,
-		RuntimeSurfaceDigest:     runtimeSurfaceDigest,
-		DeferredRelationships:    deferredRelationships,
-		TrustSource:              trustSource,
-		archivePath:              archivePath,
-		candidateDir:             candidateDir,
-		stageDir:                 stageDir,
-		signature:                strings.TrimSpace(signature),
+		ID:                    stageID,
+		PluginID:              candidate.ID,
+		Name:                  candidate.Name,
+		Version:               candidate.Version,
+		ExistingVersion:       existingVersion,
+		ExistingFingerprint:   existingFingerprint,
+		ArchiveSHA256:         archiveDigest,
+		CandidateFingerprint:  fingerprint,
+		Signed:                verifiedSignature.Signed,
+		Trusted:               trusted,
+		SignerID:              verifiedSignature.SignerID,
+		SignerPublicKey:       verifiedSignature.PublicKey,
+		PublisherStatus:       publisherStatus,
+		ExecutionTier:         pluginPackageExecutionTier(candidate),
+		Stability:             candidate.Stability,
+		PrivilegeDigest:       privilegeDigest,
+		PrivilegeAdditions:    additions,
+		AffectedPlugins:       affected,
+		CreatedAt:             now.Format(time.RFC3339Nano),
+		ExpiresAt:             now.Add(pluginPackageStageLifetime).Format(time.RFC3339Nano),
+		Compatibility:         clonePluginCompatibility(candidate.Compatibility),
+		Dependencies:          append([]PluginDependency(nil), candidate.Dependencies...),
+		Conflicts:             append([]PluginConflict(nil), candidate.Conflicts...),
+		RuntimeSurface:        runtimeSurface,
+		RuntimeSurfaceDigest:  runtimeSurfaceDigest,
+		DeferredRelationships: deferredRelationships,
+		TrustSource:           trustSource,
+		archivePath:           archivePath,
+		candidateDir:          candidateDir,
+		stageDir:              stageDir,
+		signature:             strings.TrimSpace(signature.Signature),
 	}
 	if candidate.Control != nil {
 		stage.Permissions = append([]string(nil), candidate.Control.Permissions...)
 	}
-	if trusted {
-		stage.SignerID = key.ID
-		stage.SignerName = key.Name
-		stage.SignerScope = clonePluginTrustScope(key.Scope)
+	if verifiedSignature.TrustKey != nil {
+		stage.SignerName = verifiedSignature.TrustKey.Name
+		stage.SignerScope = clonePluginTrustScope(verifiedSignature.TrustKey.Scope)
 	}
 	if err := writePluginPackageJSONAtomic(filepath.Join(stageDir, pluginPackageStageMetadataFile), pluginPackageStageRecord{Stage: stage, Signature: stage.signature}, false); err != nil {
 		return PluginPackageStage{}, err
@@ -137,7 +158,7 @@ func (m *pluginPackageManager) StageWithDeferredRelationships(reader io.Reader, 
 	cleanup = false
 	recordPluginAudit(m.db, stage.PluginID, "package.stage", "system", "success", map[string]any{
 		"stage_id": stage.ID, "version": stage.Version, "signed": stage.Signed, "trusted": stage.Trusted,
-		"signer_id": stage.SignerID, "privilege_additions": stage.PrivilegeAdditions,
+		"signer_id": stage.SignerID, "publisher_status": stage.PublisherStatus, "privilege_additions": stage.PrivilegeAdditions,
 	})
 	return stage, nil
 }
@@ -164,7 +185,7 @@ func (m *pluginPackageManager) LoadStage(stageID string) (PluginPackageStage, er
 		return PluginPackageStage{}, fmt.Errorf("plugin package stage %s has expired", stageID)
 	}
 	stage.stageDir = stageDir
-	stage.archivePath = filepath.Join(stageDir, "package.tar.gz")
+	stage.archivePath = filepath.Join(stageDir, pluginPackageContainerArchiveName)
 	stage.candidateDir = filepath.Join(stageDir, "extracted", stage.PluginID)
 	stage.signature = record.Signature
 	if stage.HistoryID == "" {
@@ -189,26 +210,35 @@ func (m *pluginPackageManager) LoadStage(stageID string) (PluginPackageStage, er
 			return PluginPackageStage{}, err
 		}
 		stage.Trusted = true
+		stage.PublisherStatus = pluginPackagePublisherNone
 	} else if stage.Trusted && !stage.Signed && stage.HistoryID == "" {
 		return PluginPackageStage{}, fmt.Errorf("plugin package stage has an unverified trust source")
 	} else if stage.HistoryID == "" && stage.Provenance != nil {
 		return PluginPackageStage{}, fmt.Errorf("local plugin stage cannot carry repository provenance")
 	}
-	var signerKey *PluginTrustKey
+	if stage.RepositoryID == "" && stage.HistoryID == "" {
+		if stage.Signed && stage.TrustSource != "signature" {
+			return PluginPackageStage{}, fmt.Errorf("signed plugin package stage has an invalid trust source")
+		}
+		if !stage.Signed && stage.TrustSource != "unsigned" {
+			return PluginPackageStage{}, fmt.Errorf("unsigned plugin package stage has an invalid trust source")
+		}
+	} else if stage.HistoryID != "" {
+		stage.PublisherStatus = pluginPackagePublisherNone
+	}
+	var verifiedSignature pluginPackageVerifiedSignature
 	if stage.Signed {
-		key, trusted, err := m.verifyArchiveSignature(stage.ArchiveSHA256, stage.SignerID, stage.signature)
-		if err != nil || !trusted || key.ID != stage.SignerID {
-			if err == nil {
-				err = fmt.Errorf("signer is no longer trusted")
-			}
+		verifiedSignature, err = m.verifyArchiveSignature(stage.ArchiveSHA256, pluginPackageSignature{
+			SignerID: stage.SignerID, PublicKey: stage.SignerPublicKey, Signature: stage.signature,
+		})
+		if err != nil {
 			return PluginPackageStage{}, err
 		}
-		stage.Trusted = true
-		stage.SignerName = key.Name
-		if !equalPluginTrustScopes(stage.SignerScope, key.Scope) {
-			return PluginPackageStage{}, fmt.Errorf("plugin package signer scope changed after staging")
+		if !verifiedSignature.Signed || verifiedSignature.SignerID != stage.SignerID || verifiedSignature.PublicKey != stage.SignerPublicKey {
+			return PluginPackageStage{}, fmt.Errorf("plugin package stage signer identity changed")
 		}
-		signerKey = &key
+	} else if stage.SignerID != "" || stage.SignerPublicKey != "" || stage.signature != "" {
+		return PluginPackageStage{}, fmt.Errorf("unsigned plugin package stage contains signer metadata")
 	}
 	fingerprint, err := buildPluginDirectoryFingerprint(stage.candidateDir)
 	if err != nil || fingerprint != stage.CandidateFingerprint {
@@ -218,12 +248,19 @@ func (m *pluginPackageManager) LoadStage(stageID string) (PluginPackageStage, er
 	if err != nil {
 		return PluginPackageStage{}, err
 	}
-	if signerKey != nil {
-		if err := validatePluginTrustKeyScope(*signerKey, candidate); err != nil {
-			return PluginPackageStage{}, err
+	if stage.Signed {
+		stage.Trusted, stage.PublisherStatus = pluginPackagePublisherState(verifiedSignature, candidate)
+		stage.SignerName = ""
+		stage.SignerScope = nil
+		if verifiedSignature.TrustKey != nil {
+			stage.SignerName = verifiedSignature.TrustKey.Name
+			stage.SignerScope = clonePluginTrustScope(verifiedSignature.TrustKey.Scope)
 		}
+	} else if stage.RepositoryID == "" && stage.HistoryID == "" {
+		stage.Trusted = false
+		stage.PublisherStatus = pluginPackagePublisherNone
 	}
-	if stage.ExecutionTier != pluginPackageExecutionTier(candidate) || stage.RequiresTrustedPublisher != pluginPackageRequiresTrustedPublisher(candidate) {
+	if stage.ExecutionTier != pluginPackageExecutionTier(candidate) || stage.Stability != candidate.Stability {
 		return PluginPackageStage{}, fmt.Errorf("plugin package stage execution trust metadata changed")
 	}
 	_, privilegeDigest := pluginPrivilegeSummary(candidate)
@@ -483,8 +520,20 @@ func pluginPackageExecutionTier(plugin LoadedPlugin) string {
 	return pluginPackageExecutionTierControl
 }
 
-func pluginPackageRequiresTrustedPublisher(plugin LoadedPlugin) bool {
-	return pluginPackageExecutionTier(plugin) == pluginPackageExecutionTierDataplane
+func pluginPackagePublisherState(signature pluginPackageVerifiedSignature, plugin LoadedPlugin) (bool, string) {
+	if !signature.Signed {
+		return false, pluginPackagePublisherNone
+	}
+	if signature.TrustKey == nil {
+		return false, pluginPackagePublisherUnknown
+	}
+	if signature.TrustKey.Status == pluginTrustStatusRevoked {
+		return false, pluginPackagePublisherRevoked
+	}
+	if err := validatePluginTrustKeyScope(*signature.TrustKey, plugin); err != nil {
+		return false, pluginPackagePublisherScopeMismatch
+	}
+	return true, pluginPackagePublisherTrusted
 }
 
 func pluginPrivilegeAdditions(previous, candidate []string) []string {

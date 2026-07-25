@@ -62,13 +62,13 @@ func TestPluginPackageCLIEndToEnd(t *testing.T) {
 		}
 	}
 
-	signaturePath := filepath.Join(root, "cli-plugin.sig")
-	signed := runPluginPackageCLIForTest(t, "sign", "--archive", archiveA, "--private-key", privateKey, "--signature", signaturePath)
+	signedPath := filepath.Join(root, "cli-plugin.veerpkg")
+	signed := runPluginPackageCLIForTest(t, "sign", "--archive", archiveA, "--private-key", privateKey, "--output", signedPath)
 	var signInfo map[string]any
-	if err := json.Unmarshal(signed, &signInfo); err != nil || signInfo["signer_id"] != keyInfo["signer_id"] {
+	if err := json.Unmarshal(signed, &signInfo); err != nil || signInfo["signer_id"] != keyInfo["signer_id"] || signInfo["package"] != signedPath {
 		t.Fatalf("sign result = %s, err=%v", signed, err)
 	}
-	verified := runPluginPackageCLIForTest(t, "verify", "--archive", archiveA, "--signature", signaturePath, "--public-key", publicKey)
+	verified := runPluginPackageCLIForTest(t, "verify", "--package", signedPath, "--public-key", publicKey)
 	var verifyInfo map[string]any
 	if err := json.Unmarshal(verified, &verifyInfo); err != nil || verifyInfo["verified"] != true || verifyInfo["plugin_id"] != "cli_plugin" {
 		t.Fatalf("verify result = %s, err=%v", verified, err)
@@ -77,24 +77,39 @@ func TestPluginPackageCLIEndToEnd(t *testing.T) {
 	otherPrivate := filepath.Join(root, "other.key")
 	otherPublic := filepath.Join(root, "other.pub")
 	runPluginPackageCLIForTest(t, "keygen", "--private-key", otherPrivate, "--public-key", otherPublic)
-	if _, err := runPluginPackageCLIWithError("verify", "--archive", archiveA, "--signature", signaturePath, "--public-key", otherPublic); err == nil || !strings.Contains(err.Error(), "signer id") {
+	if _, err := runPluginPackageCLIWithError("verify", "--package", signedPath, "--public-key", otherPublic); err == nil || !strings.Contains(err.Error(), "signer id") {
 		t.Fatalf("verify with wrong public key error = %v", err)
 	}
 
-	var sidecar pluginPackageSignatureFile
-	if err := readPluginPackageCLIJSONFile(signaturePath, &sidecar); err != nil {
+	extractedArchive := filepath.Join(root, "signed-payload.tar.gz")
+	_, candidate, err := extractPluginPackageContainer(signedPath, extractedArchive)
+	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := base64.StdEncoding.DecodeString(sidecar.Signature)
+	if candidate.PublicKey != keyInfo["public_key"] || candidate.SignerID != keyInfo["signer_id"] {
+		t.Fatalf("signed package identity = %+v, keygen=%+v", candidate, keyInfo)
+	}
+	metadata := pluginPackageSignatureFile{
+		Version: 1, SignerID: candidate.SignerID, PublicKey: candidate.PublicKey,
+		ArchiveSHA256: infoA.ArchiveSHA256, Signature: candidate.Signature, CreatedAt: "2026-01-01T00:00:00Z",
+	}
+	if err := os.WriteFile(signedPath, buildPluginPackageContainerForTest(t, dataA, metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runPluginPackageCLIWithError("verify", "--package", signedPath, "--public-key", publicKey); err == nil || !strings.Contains(err.Error(), "version is unsupported") {
+		t.Fatalf("verify with v1 metadata error = %v", err)
+	}
+	metadata.Version = pluginPackageSignatureFileVersion
+	signature, err := base64.StdEncoding.DecodeString(metadata.Signature)
 	if err != nil {
 		t.Fatal(err)
 	}
 	signature[0] ^= 0xff
-	sidecar.Signature = base64.StdEncoding.EncodeToString(signature)
-	if err := writePluginPackageCLIJSONFile(signaturePath, sidecar, true, 0o644); err != nil {
+	metadata.Signature = base64.StdEncoding.EncodeToString(signature)
+	if err := os.WriteFile(signedPath, buildPluginPackageContainerForTest(t, dataA, metadata), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runPluginPackageCLIWithError("verify", "--archive", archiveA, "--signature", signaturePath, "--public-key", publicKey); err == nil || !strings.Contains(err.Error(), "verification failed") {
+	if _, err := runPluginPackageCLIWithError("verify", "--package", signedPath, "--public-key", publicKey); err == nil || !strings.Contains(err.Error(), "verification failed") {
 		t.Fatalf("verify with tampered signature error = %v", err)
 	}
 }
@@ -112,6 +127,14 @@ func TestPluginPackageCLIRejectsUnsafeInputs(t *testing.T) {
 	insideOutput := filepath.Join(source, "package.tar.gz")
 	if _, err := runPluginPackageCLIWithError("pack", "--source", source, "--output", insideOutput); err == nil || !strings.Contains(err.Error(), "outside the source") {
 		t.Fatalf("pack inside source error = %v", err)
+	}
+	archive := filepath.Join(root, "unsigned.tar.gz")
+	runPluginPackageCLIForTest(t, "pack", "--source", source, "--output", archive)
+	privateKey := filepath.Join(root, "publisher.key")
+	publicKey := filepath.Join(root, "publisher.pub")
+	runPluginPackageCLIForTest(t, "keygen", "--private-key", privateKey, "--public-key", publicKey)
+	if _, err := runPluginPackageCLIWithError("sign", "--archive", archive, "--private-key", privateKey, "--output", filepath.Join(root, "legacy.sig")); err == nil || !strings.Contains(err.Error(), ".veerpkg extension") {
+		t.Fatalf("sign with non-.veerpkg output error = %v", err)
 	}
 	if err := os.Symlink(filepath.Join(source, "plugin.json"), filepath.Join(source, "manifest-link")); err == nil {
 		if _, err := runPluginPackageCLIWithError("pack", "--source", source, "--output", filepath.Join(root, "unsafe.tar.gz")); err == nil || !strings.Contains(err.Error(), "symbolic link") {

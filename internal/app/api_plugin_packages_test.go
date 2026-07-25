@@ -104,6 +104,71 @@ func TestPluginPackageMutationsAreDisabledWithoutAdminToken(t *testing.T) {
 	}
 }
 
+func TestPluginPackageApplyAPIRejectsLegacyApprovalField(t *testing.T) {
+	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
+	handler := buildAPIHandler(cfg, openTestDB(t), nil)
+	rec := performPluginPackageAPIRequest(t, handler, http.MethodPost, "/api/plugin-packages/apply", []byte(`{
+  "stage_id": "0123456789abcdef0123456789abcdef",
+  "allow_unsigned": true
+}`))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid request body") {
+		t.Fatalf("legacy apply field status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPluginPackageAPIStagesFirstSeenSignedPublisherWithoutPretrust(t *testing.T) {
+	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
+	requireSigned := true
+	cfg.PluginsRequireSigned = &requireSigned
+	handler := buildAPIHandler(cfg, openTestDB(t), nil)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "api_first_seen", Version: "1.0.0"})
+	signature := signPluginPackageForTest(publicKey, privateKey, archive)
+	signedPackage := buildSignedPluginPackageForTest(t, archive, signature)
+	req := httptest.NewRequest(http.MethodPost, "/api/plugin-packages/stage", bytes.NewReader(signedPackage))
+	req.Header.Set("Authorization", "Bearer package-token")
+	req.Header.Set(pluginAdminTokenHeader, "test-plugin-admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("stage first-seen publisher status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var stage PluginPackageStage
+	decodePluginPackageAPIResponse(t, rec, &stage)
+	if !stage.Signed || stage.Trusted || stage.PublisherStatus != pluginPackagePublisherUnknown || stage.SignerPublicKey != signature.PublicKey {
+		t.Fatalf("first-seen API stage = %+v", stage)
+	}
+
+	rec = performPluginPackageAPIRequest(t, handler, http.MethodPost, "/api/plugin-packages/apply", mustPluginPackageJSON(t, PluginPackageApplyRequest{StageID: stage.ID}))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "approve_publisher") {
+		t.Fatalf("unapproved publisher apply status = %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = performPluginPackageAPIRequest(t, handler, http.MethodPost, "/api/plugin-packages/apply", mustPluginPackageJSON(t, PluginPackageApplyRequest{
+		StageID: stage.ID, ApprovePublisher: true,
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approved publisher apply status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPluginPackageAPIRejectsDetachedSignatureHeaders(t *testing.T) {
+	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
+	handler := buildAPIHandler(cfg, openTestDB(t), nil)
+	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "detached_signature", Version: "1.0.0"})
+	req := httptest.NewRequest(http.MethodPost, "/api/plugin-packages/stage", bytes.NewReader(archive))
+	req.Header.Set("Authorization", "Bearer package-token")
+	req.Header.Set(pluginAdminTokenHeader, "test-plugin-admin")
+	req.Header.Set("X-Veer-Plugin-Signature", "legacy-sidecar")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), ".veerpkg") {
+		t.Fatalf("detached signature status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestPluginPackageBatchAPIEndToEnd(t *testing.T) {
 	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
@@ -119,7 +184,7 @@ func TestPluginPackageBatchAPIEndToEnd(t *testing.T) {
 		if !stage.DeferredRelationships {
 			t.Fatalf("stage %s did not defer relationships", pluginID)
 		}
-		requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, AllowUnsigned: true})
+		requests = append(requests, PluginPackageApplyRequest{StageID: stage.ID, ApproveUnsigned: true})
 	}
 	rec := performPluginPackageAPIRequest(t, handler, http.MethodPost, "/api/plugin-packages/apply-batch", mustPluginPackageJSON(t, PluginPackageBatchApplyRequest{Stages: requests}))
 	if rec.Code != http.StatusOK {
@@ -211,7 +276,7 @@ func TestPluginPackageAPIEndToEnd(t *testing.T) {
 		}
 		var stage PluginPackageStage
 		decodePluginPackageAPIResponse(t, rec, &stage)
-		apply := PluginPackageApplyRequest{StageID: stage.ID, ApprovedPrivilegeDigest: stage.PrivilegeDigest, AllowUnsigned: true}
+		apply := PluginPackageApplyRequest{StageID: stage.ID, ApprovedPrivilegeDigest: stage.PrivilegeDigest, ApproveUnsigned: true}
 		rec = performPluginPackageAPIRequest(t, handler, http.MethodPost, "/api/plugin-packages/apply", mustPluginPackageJSON(t, apply))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("apply %s status = %d: %s", version, rec.Code, rec.Body.String())
