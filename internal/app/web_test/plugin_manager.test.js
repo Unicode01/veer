@@ -298,8 +298,10 @@ function stagedPackage(overrides = {}) {
     version: '2.0.0',
     existing_version: '1.0.0',
     archive_sha256: 'a'.repeat(64),
-    trusted: false,
-    signed: false,
+		trusted: false,
+		signed: false,
+		publisher_status: 'none',
+		stability: 'stable',
     privilege_digest: 'b'.repeat(64),
     privilege_additions: ['permission:net.admin'],
     permissions: ['net.admin'],
@@ -315,44 +317,28 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-test('signature sidecar parser accepts CLI format and rejects malformed input', async () => {
-  const app = createHarness();
-  const valid = await app.__pluginManagerReadSignatureForTest({
-    text: async () => JSON.stringify({ version: 1, signer_id: 'a'.repeat(32), signature: 'signature-data' })
-  });
-  assert.deepEqual(JSON.parse(JSON.stringify(valid)), { signerID: 'a'.repeat(32), signature: 'signature-data' });
-  await assert.rejects(
-    app.__pluginManagerReadSignatureForTest({ text: async () => '{bad json' }),
-    /plugins\.package\.signatureInvalid/
-  );
-  await assert.rejects(
-    app.__pluginManagerReadSignatureForTest({ text: async () => JSON.stringify({ version: 2, signer_id: 'bad', signature: '' }) }),
-    /plugins\.package\.signatureInvalid/
-  );
-});
-
-test('package staging sends archive bytes and trusted signer headers', async () => {
+test('package staging sends one self-contained package without detached signature headers', async () => {
   const app = createHarness();
   const stage = stagedPackage({ trusted: true, signed: true, privilege_additions: [] });
-  const archive = { type: 'application/gzip', name: 'demo.tar.gz' };
+	const packageFile = { type: 'application/zip', name: 'demo.veerpkg' };
   let rawRequest;
   app.__setRawHandler(async (requestPath, options) => {
     rawRequest = { path: requestPath, options };
     return { ok: true, status: 201, statusText: 'Created', json: async () => stage };
   });
   app.openPluginManager('install');
-  const result = await app.stagePluginPackage(archive, {
-    text: async () => JSON.stringify({ version: 1, signer_id: 'c'.repeat(32), signature: 'signed-value' })
-  });
+	const result = await app.stagePluginPackage(packageFile);
 
   assert.equal(result.plugin_id, 'demo');
   assert.equal(rawRequest.path, '/api/plugin-packages/stage');
   assert.equal(rawRequest.options.method, 'POST');
-  assert.equal(rawRequest.options.body, archive);
+	assert.equal(rawRequest.options.body, packageFile);
   assert.equal(rawRequest.options.headers.Authorization, 'Bearer test-token');
 	assert.equal(rawRequest.options.headers['X-Veer-Plugin-Admin'], 'test-plugin-admin');
-  assert.equal(rawRequest.options.headers['X-Veer-Plugin-Signer'], 'c'.repeat(32));
-  assert.equal(rawRequest.options.headers['X-Veer-Plugin-Signature'], 'signed-value');
+	assert.equal(rawRequest.options.headers['Content-Type'], 'application/zip');
+	assert.equal(rawRequest.options.headers['X-Veer-Plugin-Signer'], undefined);
+	assert.equal(rawRequest.options.headers['X-Veer-Plugin-Public-Key'], undefined);
+	assert.equal(rawRequest.options.headers['X-Veer-Plugin-Signature'], undefined);
   assert.equal(app.state.plugins.manager.busy, false);
   assert.equal(app.state.plugins.manager.stage.id, stage.id);
 });
@@ -368,22 +354,25 @@ test('plugin admin access status uses the session-scoped admin request path', as
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(app.__calls[0].pluginAdminToken, 'test-plugin-admin');
 	assert.equal(app.state.plugins.manager.adminStatus.authorized, true);
+	const tokenInput = findDescendant(app.el.pluginManagerBody, (node) => node.attributes.type === 'password');
+	assert.ok(tokenInput);
+	assert.equal(tokenInput.attributes.name, 'veer-plugin-admin-token');
+	assert.equal(tokenInput.attributes.autocomplete, 'new-password');
+	assert.equal(tokenInput.attributes['data-1p-ignore'], 'true');
+	assert.equal(tokenInput.attributes['data-lpignore'], 'true');
+	assert.equal(tokenInput.attributes['data-bwignore'], 'true');
 });
 
-test('batch staging defers relationships and matches CLI signature names', async () => {
+test('batch staging accepts mixed signed and unsigned package files without sidecar matching', async () => {
   const app = createHarness();
-  const archives = [
-    { type: 'application/gzip', name: 'dependency.tar.gz' },
-    { type: 'application/gzip', name: 'consumer.tar.gz' }
-  ];
-  const signatures = [
-    { name: 'consumer.tar.gz.sig', text: async () => JSON.stringify({ version: 1, signer_id: 'd'.repeat(32), signature: 'consumer-signature' }) },
-    { name: 'dependency.tar.gz.sig', text: async () => JSON.stringify({ version: 1, signer_id: 'e'.repeat(32), signature: 'dependency-signature' }) }
+	const packages = [
+	{ type: 'application/zip', name: 'dependency.veerpkg' },
+	{ type: 'application/gzip', name: 'consumer.tar.gz' }
   ];
   const rawCalls = [];
   app.__setRawHandler(async (requestPath, options) => {
     rawCalls.push({ path: requestPath, options });
-    const dependency = options.body.name === 'dependency.tar.gz';
+	const dependency = options.body.name === 'dependency.veerpkg';
     return {
       ok: true,
       status: 201,
@@ -398,39 +387,32 @@ test('batch staging defers relationships and matches CLI signature names', async
     };
   });
   app.openPluginManager('install');
-  const stages = await app.stagePluginPackages(archives, signatures);
+	const stages = await app.stagePluginPackages(packages);
 
   assert.equal(stages.length, 2);
   assert.equal(rawCalls.length, 2);
   assert.ok(rawCalls.every((call) => call.path === '/api/plugin-packages/stage?defer_relationships=true'));
-  assert.equal(rawCalls[0].options.headers['X-Veer-Plugin-Signature'], 'dependency-signature');
-  assert.equal(rawCalls[1].options.headers['X-Veer-Plugin-Signature'], 'consumer-signature');
+	assert.deepEqual(rawCalls.map((call) => call.options.body.name), ['dependency.veerpkg', 'consumer.tar.gz']);
+	assert.ok(rawCalls.every((call) => !call.options.headers['X-Veer-Plugin-Signature']));
   assert.equal(app.state.plugins.manager.stage, null);
   assert.equal(app.state.plugins.manager.stages.length, 2);
 });
 
-test('batch signature selection rejects unmatched sidecars', () => {
-  const app = createHarness();
-  assert.throws(() => app.__pluginManagerMatchSignaturesForTest(
-    [{ name: 'one.tar.gz' }, { name: 'two.tar.gz' }],
-    [{ name: 'other.tar.gz.sig' }]
-  ), /plugins\.package\.signatureUnmatched/);
-});
-
-test('staged package approval requires unsigned and privilege acknowledgements', () => {
-  const app = createHarness();
-  const stage = stagedPackage();
-  assert.equal(app.__pluginManagerStageApprovedForTest(stage, {}), false);
-  assert.equal(app.__pluginManagerStageApprovedForTest(stage, { approveUnsigned: true }), false);
-  assert.equal(app.__pluginManagerStageApprovedForTest(stage, { approveUnsigned: true, approvePrivileges: true }), true);
-  assert.equal(app.__pluginManagerStageApprovedForTest(stagedPackage({ trusted: true, privilege_additions: [] }), {}), true);
+test('staged package approval only blocks unsigned policy and privilege expansion', () => {
+	const app = createHarness();
+	const stage = stagedPackage();
+	assert.equal(app.__pluginManagerStageApprovedForTest(stage, {}), false);
+	assert.equal(app.__pluginManagerStageApprovedForTest(stage, { approvePrivileges: true }), true);
+	assert.equal(app.__pluginManagerStageApprovedForTest(stagedPackage({ signed: true, publisher_status: 'unknown', privilege_additions: [] }), {}), true);
+	assert.equal(app.__pluginManagerStageApprovedForTest(stagedPackage({ trusted: true, privilege_additions: [] }), {}), true);
 });
 
 test('signed-package policy cannot be bypassed by unsigned approval', () => {
   const app = createHarness();
   app.state.plugins.catalog = { runtime: { require_signed_packages: true } };
   const stage = stagedPackage({ privilege_additions: [] });
-  assert.equal(app.__pluginManagerStageApprovedForTest(stage, { approveUnsigned: true }), false);
+	assert.equal(app.__pluginManagerStageApprovedForTest(stage, {}), false);
+	assert.equal(app.__pluginManagerStageApprovedForTest(stagedPackage({ signed: true, publisher_status: 'unknown', privilege_additions: [] }), {}), true);
   assert.equal(app.__pluginManagerStageApprovedForTest(stagedPackage({ trusted: true, privilege_additions: [] }), {}), true);
 });
 
@@ -440,8 +422,7 @@ test('package apply submits stage digest and explicit unsigned approval', async 
   state.open = true;
   state.view = 'install';
   state.stage = stagedPackage();
-  state.approveUnsigned = true;
-  state.approvePrivileges = true;
+	state.approvePrivileges = true;
   app.__setAPIHandler(async (method, requestPath) => {
     assert.equal(method, 'POST');
     assert.equal(requestPath, '/api/plugin-packages/apply');
@@ -453,10 +434,57 @@ test('package apply submits stage digest and explicit unsigned approval', async 
   assert.deepEqual(plain(call.body), {
     stage_id: state.stage.id,
     approved_privilege_digest: state.stage.privilege_digest,
-    allow_unsigned: true
+		approve_unsigned: true,
+		approve_publisher: false,
+		remember_publisher: false
   });
   assert.equal(app.state.plugins.data[0].version, '2.0.0');
-  assert.equal(app.state.plugins.manager.open, false);
+	assert.equal(app.state.plugins.manager.open, false);
+});
+
+test('first-seen signed publisher can install once or be remembered from review', async () => {
+	const app = createHarness();
+	const state = app.state.plugins.manager;
+	state.open = true;
+	state.view = 'install';
+	state.stage = stagedPackage({
+		signed: true,
+		trusted: false,
+		publisher_status: 'unknown',
+		signer_id: 'c'.repeat(32),
+		signer_public_key: 'publisher-key',
+		privilege_additions: []
+	});
+	state.rememberPublishers = true;
+	app.__setAPIHandler(async () => ({ plugin_id: 'demo', catalog: { plugins: [] } }));
+
+	await app.applyStagedPluginPackage();
+	assert.deepEqual(plain(app.__calls[0].body), {
+		stage_id: state.stage.id,
+		approved_privilege_digest: '',
+		approve_unsigned: false,
+		approve_publisher: true,
+		remember_publisher: true
+	});
+});
+
+test('first-seen publisher review shows inline warning and optional ongoing trust', () => {
+	const app = createHarness();
+	const state = app.state.plugins.manager;
+	state.open = true;
+	state.view = 'install';
+	state.stage = stagedPackage({
+		signed: true,
+		trusted: false,
+		publisher_status: 'unknown',
+		signer_id: 'd'.repeat(32),
+		privilege_additions: []
+	});
+	app.__pluginManagerRenderStageForTest();
+	const text = descendantText(app.el.pluginManagerBody);
+	assert.match(text, /plugins\.package\.publisherUnknownWarning/);
+	assert.match(text, /plugins\.package\.rememberPublisher/);
+	assert.doesNotMatch(text, /plugins\.package\.unsignedBlocked/);
 });
 
 test('batch apply submits per-stage approvals to the atomic endpoint', async () => {
@@ -469,8 +497,7 @@ test('batch apply submits per-stage approvals to the atomic endpoint', async () 
     stagedPackage({ id: '1'.repeat(32), plugin_id: 'dependency' }),
     stagedPackage({ id: '2'.repeat(32), plugin_id: 'consumer', trusted: true, privilege_additions: [] })
   ];
-  state.approveUnsigned = true;
-  state.approvePrivileges = true;
+	state.approvePrivileges = true;
   app.__setAPIHandler(async (method, requestPath) => {
     assert.equal(method, 'POST');
     assert.equal(requestPath, '/api/plugin-packages/apply-batch');
@@ -480,10 +507,10 @@ test('batch apply submits per-stage approvals to the atomic endpoint', async () 
   await app.applyStagedPluginPackages();
   assert.deepEqual(plain(app.__calls[0].body), {
     stages: [
-      { stage_id: '1'.repeat(32), approved_privilege_digest: 'b'.repeat(64), allow_unsigned: true },
-      { stage_id: '2'.repeat(32), approved_privilege_digest: '', allow_unsigned: false }
-    ]
-  });
+			{ stage_id: '1'.repeat(32), approved_privilege_digest: 'b'.repeat(64), approve_unsigned: true, approve_publisher: false, remember_publisher: false },
+			{ stage_id: '2'.repeat(32), approved_privilege_digest: '', approve_unsigned: false, approve_publisher: false, remember_publisher: false }
+		]
+	});
   assert.equal(app.state.plugins.manager.open, false);
 });
 
@@ -615,6 +642,68 @@ test('trust key add sends normalized publisher scope', async () => {
   await app.addPluginTrustKey(key.name, key.public_key, '', key.scope);
   assert.equal(state.trustKeys.length, 1);
   assert.deepEqual(plain(state.trustKeys[0].scope), key.scope);
+});
+
+test('publisher management lists remembered keys without a manual add form', async () => {
+	const app = createHarness();
+	app.__setAPIHandler(async (method, requestPath) => {
+		assert.equal(method, 'GET');
+		assert.equal(requestPath, '/api/plugin-trust');
+		return [];
+	});
+	app.openPluginManager('trust');
+	await new Promise((resolve) => setImmediate(resolve));
+	const text = descendantText(app.el.pluginManagerBody);
+	assert.match(text, /plugins\.trust\.empty/);
+	assert.doesNotMatch(text, /plugins\.trust\.addTitle/);
+});
+
+test('publisher management collapses and paginates revoked history', async () => {
+	const app = createHarness();
+	const state = app.state.plugins.manager;
+	const revoked = Array.from({ length: 25 }, (_, index) => {
+		const number = index + 1;
+		return {
+			id: 'revoked-' + String(number).padStart(2, '0'),
+			name: 'Revoked ' + String(number).padStart(2, '0'),
+			public_key: 'key-' + number,
+			status: 'revoked',
+			created_at: '2026-06-01T00:00:00Z',
+			revoked_at: '2026-07-' + String(number).padStart(2, '0') + 'T00:00:00Z'
+		};
+	});
+	app.__setAPIHandler(async (method, requestPath) => {
+		assert.equal(method, 'GET');
+		assert.equal(requestPath, '/api/plugin-trust');
+		return [{
+			id: 'active-key', name: 'Active Publisher', public_key: 'active-public-key',
+			status: 'active', created_at: '2026-07-25T00:00:00Z'
+		}].concat(revoked);
+	});
+
+	app.openPluginManager('trust');
+	await new Promise((resolve) => setImmediate(resolve));
+
+	let text = descendantText(app.el.pluginManagerBody);
+	let history = findDescendant(app.el.pluginManagerBody, (node) => node.tagName === 'DETAILS');
+	assert.match(text, /Active Publisher/);
+	assert.match(text, /Revoked 25/);
+	assert.doesNotMatch(text, /Revoked 15/);
+	assert.ok(history);
+	assert.equal(history.open, false);
+
+	history.open = true;
+	await history.dispatch('toggle');
+	const next = findDescendant(history, (node) => node.tagName === 'BUTTON' && node.textContent === 'pagination.next');
+	assert.ok(next);
+	await next.dispatch('click');
+
+	text = descendantText(app.el.pluginManagerBody);
+	history = findDescendant(app.el.pluginManagerBody, (node) => node.tagName === 'DETAILS');
+	assert.equal(state.trustRevokedPage, 2);
+	assert.match(text, /Revoked 15/);
+	assert.doesNotMatch(text, /Revoked 25/);
+	assert.equal(history.open, true);
 });
 
 test('audit view filters by plugin and paginates with before_id', async () => {
@@ -815,7 +904,12 @@ test('add plugin opens local package installation without loading a repository',
 
   assert.equal(app.state.plugins.manager.view, 'install');
   const text = descendantText(app.el.pluginManagerBody);
-  assert.match(text, /plugins\.package\.archive|plugins\.package\.signature/);
+	assert.match(text, /plugins\.package\.archive/);
+	assert.doesNotMatch(text, /plugins\.package\.signature/);
+	const packageInput = findDescendant(app.el.pluginManagerBody, (node) => node.attributes.type === 'file');
+	assert.ok(packageInput);
+	assert.match(packageInput.attributes.accept, /\.veerpkg/);
+	assert.doesNotMatch(packageInput.attributes.accept, /\.sig/);
   assert.doesNotMatch(text, /plugins\.repository\.metadataURL|plugins\.repository\.targetsURL|plugins\.repository\.root/);
   assert.deepEqual(app.__calls, []);
 });

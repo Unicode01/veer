@@ -5,6 +5,7 @@
   const packageArchivePath = '/api/plugin-packages/stage';
   const auditPageSize = 50;
 	const deadLetterPageSize = 100;
+  const trustPageSize = 10;
   const managerAdvancedViews = new Set(['advanced', 'repositories', 'trust', 'audit', 'dead-letters', 'secrets', 'access']);
   let managerFocusReturn = null;
 
@@ -13,6 +14,9 @@
     app.state.plugins.manager = app.state.plugins.manager || {};
     const state = app.state.plugins.manager;
     if (!Array.isArray(state.trustKeys)) state.trustKeys = [];
+    if (!Number.isInteger(state.trustActivePage) || state.trustActivePage < 1) state.trustActivePage = 1;
+    if (!Number.isInteger(state.trustRevokedPage) || state.trustRevokedPage < 1) state.trustRevokedPage = 1;
+    if (typeof state.trustRevokedOpen !== 'boolean') state.trustRevokedOpen = false;
     if (!Array.isArray(state.auditLogs)) state.auditLogs = [];
 	if (!Array.isArray(state.deadLetters)) state.deadLetters = [];
     if (!Array.isArray(state.history)) state.history = [];
@@ -338,27 +342,22 @@
   function managerRenderPackageInput() {
     const state = managerState();
     managerSetHeader(app.t('plugins.package.installTitle'), app.t('plugins.package.installMeta'));
-    const archive = app.createNode('input', {
+    const packageInput = app.createNode('input', {
       className: 'plugin-manager-file',
-	  attrs: { type: 'file', accept: '.tar.gz,.tgz,application/gzip', required: true, multiple: 'multiple' }
-    });
-    const signature = app.createNode('input', {
-      className: 'plugin-manager-file',
-	  attrs: { type: 'file', accept: '.sig,.json,application/json', multiple: 'multiple' }
+	  attrs: { type: 'file', accept: '.veerpkg,.tar.gz,.tgz,application/zip,application/gzip', required: true, multiple: 'multiple' }
     });
     const stageButton = managerButton(app.t('plugins.package.stage'), '', async () => {
-	  const archiveFiles = Array.from(archive.files || []);
-	  const signatureFiles = Array.from(signature.files || []);
-	  if (!archiveFiles.length) {
+	  const packageFiles = Array.from(packageInput.files || []);
+	  if (!packageFiles.length) {
         app.notify('error', app.t('plugins.package.archiveRequired'));
-        archive.focus();
+        packageInput.focus();
         return;
       }
-	  if (archiveFiles.length > 16) {
+	  if (packageFiles.length > 16) {
 		app.notify('error', app.t('plugins.package.batchLimit'));
 		return;
 	  }
-	  await app.stagePluginPackages(archiveFiles, signatureFiles, stageButton);
+	  await app.stagePluginPackages(packageFiles, stageButton);
     }, { disabled: !!state.busy });
     const form = app.createNode('div', {
       className: 'plugin-manager-form',
@@ -366,8 +365,7 @@
         app.createNode('div', {
           className: 'plugin-manager-form-grid',
           children: [
-            managerField(app.t('plugins.package.archive'), archive, app.t('plugins.package.archiveHint'), true),
-            managerField(app.t('plugins.package.signature'), signature, app.t('plugins.package.signatureHint'), true)
+			managerField(app.t('plugins.package.archive'), packageInput, app.t('plugins.package.archiveHint'), true)
           ]
         }),
         managerNotice(app.t('plugins.package.stageHint')),
@@ -377,35 +375,6 @@
     managerRender(form);
     managerFocusInitial();
   }
-
-  async function managerReadSignatureSidecar(file) {
-    if (!file) return {};
-    const raw = typeof file.text === 'function' ? await file.text() : String(file);
-    let value;
-    try {
-      value = JSON.parse(raw);
-    } catch (_) {
-      throw new Error(app.t('plugins.package.signatureInvalid'));
-    }
-    const signerID = String(value && value.signer_id || '').trim().toLowerCase();
-    const signature = String(value && value.signature || '').trim();
-    if (Number(value && value.version) !== 1 || !/^[a-f0-9]{32}$/.test(signerID) || !signature) {
-      throw new Error(app.t('plugins.package.signatureInvalid'));
-    }
-    return { signerID, signature };
-  }
-
-	function managerMatchSignatureFiles(archives, signatures) {
-		const selected = Array.isArray(signatures) ? signatures.filter(Boolean) : [];
-		if (!selected.length) return archives.map(() => null);
-		if (archives.length === 1 && selected.length === 1) return [selected[0]];
-		const byName = new Map();
-		selected.forEach((file) => byName.set(String(file.name || '').toLowerCase(), file));
-		const matched = archives.map((archive) => byName.get((String(archive.name || '') + '.sig').toLowerCase()) || null);
-		const matchedFiles = new Set(matched.filter(Boolean));
-		if (matchedFiles.size !== selected.length) throw new Error(app.t('plugins.package.signatureUnmatched'));
-		return matched;
-	}
 
   async function managerRawRequest(method, path, body, headers) {
     const requestHeaders = Object.assign({ Authorization: 'Bearer ' + app.getToken() }, headers || {});
@@ -449,7 +418,17 @@
 		const status = state.adminStatus || {};
 		managerSetHeader(app.t('plugins.admin.title'), app.t('plugins.admin.meta'));
 		const tokenInput = app.createNode('input', {
-			attrs: { type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: app.t('plugins.admin.placeholder') }
+			attrs: {
+				type: 'password',
+				name: 'veer-plugin-admin-token',
+				autocomplete: 'new-password',
+				spellcheck: 'false',
+				placeholder: app.t('plugins.admin.placeholder'),
+				'data-1p-ignore': 'true',
+				'data-lpignore': 'true',
+				'data-bwignore': 'true',
+				'data-form-type': 'other'
+			}
 		});
 		const unlockButton = managerButton(app.t('plugins.admin.unlock'), '', async () => {
 			const token = String(tokenInput.value || '').trim();
@@ -547,6 +526,38 @@
     ].join(' / ');
   }
 
+	function managerStageIsUnsigned(stage) {
+		return !!stage && !stage.signed && !stage.trusted;
+	}
+
+	function managerStageNeedsPublisherApproval(stage) {
+		return !!stage && !!stage.signed && !stage.trusted;
+	}
+
+	function managerStageCanRememberPublisher(stage) {
+		return managerStageNeedsPublisherApproval(stage) && stage.publisher_status === 'unknown';
+	}
+
+	function managerStageSignatureText(stage) {
+		if (stage && stage.history_id) return app.t('plugins.package.trustedHistory');
+		if (stage && stage.trust_source === 'tuf') return app.t('plugins.package.repositoryVerified');
+		if (!stage || !stage.signed) return app.t('plugins.package.unsigned');
+		if (stage.trusted) return app.t('plugins.package.trusted');
+		switch (String(stage.publisher_status || 'unknown')) {
+		case 'revoked': return app.t('plugins.package.publisherRevoked');
+		case 'scope_mismatch': return app.t('plugins.package.publisherScopeMismatch');
+		default: return app.t('plugins.package.publisherUnknown');
+		}
+	}
+
+	function managerPublisherWarningKey(stage) {
+		switch (String(stage && stage.publisher_status || 'unknown')) {
+		case 'revoked': return 'plugins.package.publisherRevokedWarning';
+		case 'scope_mismatch': return 'plugins.package.publisherScopeWarning';
+		default: return 'plugins.package.publisherUnknownWarning';
+		}
+	}
+
   function managerRenderStageReview() {
     const state = managerState();
 	const activeStages = managerActiveStages();
@@ -565,18 +576,19 @@
     const conflicts = Array.isArray(stage.conflicts) ? stage.conflicts.map(managerConflictText).filter(Boolean) : [];
     const permissions = Array.isArray(stage.permissions) ? stage.permissions : [];
     const affected = Array.isArray(stage.affected_plugins) ? stage.affected_plugins : [];
-    const needsUnsigned = !stage.trusted;
+		const needsUnsigned = managerStageIsUnsigned(stage);
+		const needsPublisherApproval = managerStageNeedsPublisherApproval(stage);
     const needsPrivileges = privilegeAdditions.length > 0;
     const facts = managerFacts([
       { label: app.t('plugins.manager.plugin'), value: [stage.name, stage.plugin_id].filter(Boolean).join(' / ') },
       { label: app.t('plugins.package.operation'), value: managerStageOperation(stage) },
       { label: app.t('plugins.version'), value: stage.version || app.t('common.dash') },
       { label: app.t('plugins.package.currentVersion'), value: stage.existing_version || app.t('plugins.package.notInstalled') },
-      { label: app.t('plugins.package.signatureState'), value: stage.history_id ? app.t('plugins.package.trustedHistory') : (stage.trusted ? app.t('plugins.package.trusted') : app.t('plugins.package.unsigned')) },
-	  { label: app.t('plugins.package.executionTier'), value: app.t('plugins.package.executionTier.' + String(stage.execution_tier || 'control')) },
-      { label: app.t('plugins.package.trustedPublisherRequired'), value: stage.requires_trusted_publisher ? app.t('common.yes') : app.t('common.no') },
-      { label: app.t('plugins.package.signer'), value: stage.signer_name ? stage.signer_name + ' / ' + stage.signer_id : app.t('common.dash'), mono: !!stage.signer_id },
-	  stage.signer_id ? { label: app.t('plugins.trust.scope'), value: managerTrustScopeSummary(stage.signer_scope), title: managerTrustScopeDetail(stage.signer_scope) } : null,
+			{ label: app.t('plugins.package.signatureState'), value: managerStageSignatureText(stage) },
+			{ label: app.t('plugins.package.executionTier'), value: app.t('plugins.package.executionTier.' + String(stage.execution_tier || 'control')) },
+			{ label: app.t('plugins.stability'), value: stage.stability || app.t('common.dash') },
+			{ label: app.t('plugins.package.signer'), value: stage.signer_id ? [stage.signer_name, stage.signer_id].filter(Boolean).join(' / ') : app.t('common.dash'), mono: !!stage.signer_id },
+			stage.signer_scope ? { label: app.t('plugins.trust.scope'), value: managerTrustScopeSummary(stage.signer_scope), title: managerTrustScopeDetail(stage.signer_scope) } : null,
       { label: app.t('plugins.package.expires'), value: managerFormatDate(stage.expires_at) },
       { label: 'SHA256', value: managerShortText(stage.archive_sha256, 28), title: stage.archive_sha256, mono: true },
       { label: app.t('plugins.package.compatibility'), value: managerCompatibilityText(stage.compatibility) || app.t('common.dash') },
@@ -591,7 +603,8 @@
     if (dependencies.length) sections.push(managerSection(app.t('plugins.package.dependencies'), [managerList(dependencies)]));
     if (conflicts.length) sections.push(managerSection(app.t('plugins.package.conflicts'), [managerList(conflicts)]));
     if (affected.length) sections.push(managerSection(app.t('plugins.package.affected'), [managerList(affected)]));
-    if (needsUnsigned) sections.push(managerNotice(app.t(managerRequiresSignedPackages() ? 'plugins.package.unsignedBlocked' : 'plugins.package.unsignedWarning'), 'warning'));
+		if (needsUnsigned) sections.push(managerNotice(app.t(managerRequiresSignedPackages() ? 'plugins.package.unsignedBlocked' : 'plugins.package.unsignedWarning'), 'warning'));
+		if (needsPublisherApproval) sections.push(managerNotice(app.t(managerPublisherWarningKey(stage)), 'warning'));
     if (needsPrivileges) {
       sections.push(managerSection(app.t('plugins.package.privilegeAdditions'), [
         managerList(privilegeAdditions),
@@ -600,17 +613,16 @@
     }
 
     const approvals = [];
-    if (needsUnsigned && !managerRequiresSignedPackages()) {
-      const input = app.createNode('input', { attrs: { type: 'checkbox' } });
-      input.checked = !!state.approveUnsigned;
-      input.addEventListener('change', () => {
-        state.approveUnsigned = !!input.checked;
-        applyButton.disabled = !managerStageApproved(stage, state) || state.busy;
-      });
-      approvals.push(app.createNode('label', {
-        className: 'plugin-manager-approval',
-        children: [input, app.createNode('span', { text: app.t('plugins.package.approveUnsigned') })]
-      }));
+		if (managerStageCanRememberPublisher(stage)) {
+			const input = app.createNode('input', { attrs: { type: 'checkbox' } });
+			input.checked = !!state.rememberPublishers;
+			input.addEventListener('change', () => {
+				state.rememberPublishers = !!input.checked;
+			});
+			approvals.push(app.createNode('label', {
+				className: 'plugin-manager-approval',
+				children: [input, app.createNode('span', { text: app.t('plugins.package.rememberPublisher') })]
+			}));
     }
     if (needsPrivileges) {
       const input = app.createNode('input', { attrs: { type: 'checkbox' } });
@@ -642,13 +654,15 @@
 	function managerRenderBatchStageReview(stages) {
 		const state = managerState();
 		managerSetHeader(app.t('plugins.package.batchReviewTitle'), app.t('plugins.package.batchReviewMeta', { count: stages.length }));
-		const needsUnsigned = stages.some((stage) => !stage.trusted);
+		const needsUnsigned = stages.some(managerStageIsUnsigned);
+		const needsPublisherApproval = stages.some(managerStageNeedsPublisherApproval);
+		const canRememberPublishers = stages.some(managerStageCanRememberPublisher);
 		const needsPrivileges = stages.some((stage) => Array.isArray(stage.privilege_additions) && stage.privilege_additions.length);
 		const rows = stages.map((stage) => [
 			app.createNode('code', { className: 'plugin-manager-mono', text: stage.plugin_id || '' }),
 			app.createNode('span', { text: managerStageOperation(stage) }),
 			app.createNode('span', { text: stage.version || app.t('common.dash') }),
-			app.createNode('span', { text: stage.trusted ? app.t('plugins.package.trusted') : app.t('plugins.package.unsigned') }),
+			app.createNode('span', { text: managerStageSignatureText(stage) }),
 			app.createNode('span', { text: String(Array.isArray(stage.privilege_additions) ? stage.privilege_additions.length : 0) }),
 			app.createNode('span', { text: String(Array.isArray(stage.dependencies) ? stage.dependencies.length : 0) })
 		]);
@@ -661,20 +675,20 @@
 			sections.push(managerSection(app.t('plugins.repository.reused'), [managerList(repositoryPlan.reused.map((item) => item.plugin_id + ' ' + item.version))]));
 		}
 		if (needsUnsigned) sections.push(managerNotice(app.t(managerRequiresSignedPackages() ? 'plugins.package.batchUnsignedBlocked' : 'plugins.package.batchUnsignedWarning'), 'warning'));
+		if (needsPublisherApproval) sections.push(managerNotice(app.t('plugins.package.batchPublisherWarning'), 'warning'));
 		if (needsPrivileges) sections.push(managerNotice(app.t('plugins.package.batchPrivilegeWarning'), 'warning'));
 
 		const approvals = [];
 		let applyButton;
-		if (needsUnsigned && !managerRequiresSignedPackages()) {
+		if (canRememberPublishers) {
 			const input = app.createNode('input', { attrs: { type: 'checkbox' } });
-			input.checked = !!state.approveUnsigned;
+			input.checked = !!state.rememberPublishers;
 			input.addEventListener('change', () => {
-				state.approveUnsigned = !!input.checked;
-				applyButton.disabled = !managerStagesApproved(stages, state) || state.busy;
+				state.rememberPublishers = !!input.checked;
 			});
 			approvals.push(app.createNode('label', {
 				className: 'plugin-manager-approval',
-				children: [input, app.createNode('span', { text: app.t('plugins.package.approveUnsignedBatch') })]
+				children: [input, app.createNode('span', { text: app.t('plugins.package.rememberPublishersBatch') })]
 			}));
 		}
 		if (needsPrivileges) {
@@ -704,8 +718,7 @@
 
   function managerStageApproved(stage, state) {
     const additions = Array.isArray(stage && stage.privilege_additions) ? stage.privilege_additions : [];
-    if (stage && !stage.trusted && managerRequiresSignedPackages()) return false;
-    if (stage && !stage.trusted && !state.approveUnsigned) return false;
+		if (managerStageIsUnsigned(stage) && managerRequiresSignedPackages()) return false;
     if (additions.length && !state.approvePrivileges) return false;
     return true;
   }
@@ -721,7 +734,7 @@
 		state.stages = [];
 		state.repositoryPlan = null;
 		state.installReturnView = '';
-		state.approveUnsigned = false;
+		state.rememberPublishers = false;
 		state.approvePrivileges = false;
 		if (returnToRepositories) {
 			state.view = 'repositories';
@@ -732,23 +745,20 @@
 		managerRenderPackageInput();
 	}
 
-  app.stagePluginPackage = async function stagePluginPackage(archiveFile, signatureFile, button) {
+  app.stagePluginPackage = async function stagePluginPackage(packageFile, button) {
     const state = managerState();
-    if (state.busy || !archiveFile) return null;
+    if (state.busy || !packageFile) return null;
     state.busy = true;
     managerRenderNav();
     managerSetButtonBusy(button, true, app.t('plugins.package.staging'), app.t('plugins.package.stage'));
     try {
-      const sidecar = await managerReadSignatureSidecar(signatureFile);
-      const headers = { 'Content-Type': archiveFile.type || 'application/gzip' };
-      if (sidecar.signerID) headers['X-Veer-Plugin-Signer'] = sidecar.signerID;
-      if (sidecar.signature) headers['X-Veer-Plugin-Signature'] = sidecar.signature;
-      const stage = await managerRawRequest('POST', packageArchivePath, archiveFile, headers);
+	  const headers = { 'Content-Type': packageFile.type || 'application/octet-stream' };
+	  const stage = await managerRawRequest('POST', packageArchivePath, packageFile, headers);
       state.stage = stage;
 	  state.stages = [stage];
 	  state.repositoryPlan = null;
 	  state.installReturnView = '';
-      state.approveUnsigned = false;
+		state.rememberPublishers = false;
       state.approvePrivileges = false;
       managerRenderStageReview();
       return stage;
@@ -763,30 +773,26 @@
     }
   };
 
-	app.stagePluginPackages = async function stagePluginPackages(archiveFiles, signatureFiles, button) {
+	app.stagePluginPackages = async function stagePluginPackages(packageFiles, button) {
 		const state = managerState();
-		const archives = Array.isArray(archiveFiles) ? archiveFiles.filter(Boolean) : [];
-		if (state.busy || !archives.length || archives.length > 16) return null;
+		const packages = Array.isArray(packageFiles) ? packageFiles.filter(Boolean) : [];
+		if (state.busy || !packages.length || packages.length > 16) return null;
 		state.busy = true;
 		managerRenderNav();
-		managerSetButtonBusy(button, true, app.t('plugins.package.stagingBatch', { count: archives.length }), app.t('plugins.package.stage'));
+		managerSetButtonBusy(button, true, app.t('plugins.package.stagingBatch', { count: packages.length }), app.t('plugins.package.stage'));
 		try {
-			const matchedSignatures = managerMatchSignatureFiles(archives, signatureFiles);
 			const stages = [];
-			for (let index = 0; index < archives.length; index += 1) {
-				const archiveFile = archives[index];
-				const sidecar = await managerReadSignatureSidecar(matchedSignatures[index]);
-				const headers = { 'Content-Type': archiveFile.type || 'application/gzip' };
-				if (sidecar.signerID) headers['X-Veer-Plugin-Signer'] = sidecar.signerID;
-				if (sidecar.signature) headers['X-Veer-Plugin-Signature'] = sidecar.signature;
-				const path = packageArchivePath + (archives.length > 1 ? '?defer_relationships=true' : '');
-				stages.push(await managerRawRequest('POST', path, archiveFile, headers));
+			for (let index = 0; index < packages.length; index += 1) {
+				const packageFile = packages[index];
+				const headers = { 'Content-Type': packageFile.type || 'application/octet-stream' };
+				const path = packageArchivePath + (packages.length > 1 ? '?defer_relationships=true' : '');
+				stages.push(await managerRawRequest('POST', path, packageFile, headers));
 			}
 			state.stages = stages;
 			state.stage = stages.length === 1 ? stages[0] : null;
 			state.repositoryPlan = null;
 			state.installReturnView = '';
-			state.approveUnsigned = false;
+			state.rememberPublishers = false;
 			state.approvePrivileges = false;
 			managerRenderStageReview();
 			return stages;
@@ -796,7 +802,7 @@
 		} finally {
 			state.busy = false;
 			managerRenderNav();
-			managerSetButtonBusy(button, false, app.t('plugins.package.stagingBatch', { count: archives.length }), app.t('plugins.package.stage'));
+			managerSetButtonBusy(button, false, app.t('plugins.package.stagingBatch', { count: packages.length }), app.t('plugins.package.stage'));
 			if (state.open && state.view === 'install' && managerActiveStages().length) managerRenderStageReview();
 		}
 	};
@@ -812,7 +818,9 @@
       const result = await managerAPIRequest('POST', '/api/plugin-packages/apply', {
         stage_id: stage.id,
         approved_privilege_digest: Array.isArray(stage.privilege_additions) && stage.privilege_additions.length ? stage.privilege_digest : '',
-        allow_unsigned: !stage.trusted && !!state.approveUnsigned
+		approve_unsigned: managerStageIsUnsigned(stage),
+		approve_publisher: managerStageNeedsPublisherApproval(stage),
+		remember_publisher: managerStageCanRememberPublisher(stage) && !!state.rememberPublishers
       });
       if (result && result.catalog) {
         app.state.plugins.catalog = result.catalog;
@@ -846,7 +854,9 @@
 				stages: stages.map((stage) => ({
 					stage_id: stage.id,
 					approved_privilege_digest: Array.isArray(stage.privilege_additions) && stage.privilege_additions.length ? stage.privilege_digest : '',
-					allow_unsigned: !stage.trusted && !!state.approveUnsigned
+					approve_unsigned: managerStageIsUnsigned(stage),
+					approve_publisher: managerStageNeedsPublisherApproval(stage),
+					remember_publisher: managerStageCanRememberPublisher(stage) && !!state.rememberPublishers
 				}))
 			});
 			if (result && result.catalog) {
@@ -1262,7 +1272,7 @@
 			state.stages = stages;
 			state.stage = stages.length === 1 ? stages[0] : null;
 			state.installReturnView = 'repositories';
-			state.approveUnsigned = false;
+			state.rememberPublishers = false;
 			state.approvePrivileges = false;
 			state.view = 'install';
 		} catch (error) {
@@ -1276,107 +1286,144 @@
 		}
 	}
 
-  function managerRenderTrust() {
+  function managerTrustPage(state, key, items) {
+    const total = items.length;
+    const totalPages = Math.max(1, Math.ceil(total / trustPageSize));
+    const page = Math.min(Math.max(1, Number(state[key]) || 1), totalPages);
+    const offset = (page - 1) * trustPageSize;
+    state[key] = page;
+    return {
+      items: items.slice(offset, offset + trustPageSize),
+      page,
+      totalPages,
+      total,
+      start: total ? offset + 1 : 0,
+      end: Math.min(offset + trustPageSize, total)
+    };
+  }
+
+  function managerTrustPagination(state, key, pageInfo) {
+    if (!pageInfo || pageInfo.totalPages <= 1) return null;
+    const goToPage = (page) => {
+      state[key] = page;
+      managerRenderTrust(true);
+    };
+    return app.createNode('div', {
+      className: 'table-pagination plugin-manager-trust-pagination',
+      children: [
+        app.createNode('div', {
+          className: 'table-pagination-summary',
+          text: app.t('pagination.summary', { start: pageInfo.start, end: pageInfo.end, total: pageInfo.total })
+        }),
+        app.createNode('div', {
+          className: 'table-pagination-actions',
+          children: [
+            managerButton(app.t('pagination.previous'), 'pagination-btn', () => goToPage(pageInfo.page - 1), { disabled: pageInfo.page <= 1 }),
+            app.createNode('span', {
+              className: 'pagination-page-label',
+              text: app.t('pagination.page', { page: pageInfo.page, totalPages: pageInfo.totalPages })
+            }),
+            managerButton(app.t('pagination.next'), 'pagination-btn', () => goToPage(pageInfo.page + 1), { disabled: pageInfo.page >= pageInfo.totalPages })
+          ]
+        })
+      ]
+    });
+  }
+
+  function managerTrustActiveRow(state, key) {
+	const remove = managerButton(app.t('plugins.trust.revoke'), 'mini-btn plugin-manager-danger-btn', () => app.deletePluginTrustKey(key), { disabled: !!state.busy });
+    return [
+      app.createNode('span', { text: key.name || app.t('common.dash') }),
+      app.createNode('code', { className: 'plugin-manager-mono', text: key.id || '', title: key.id || '' }),
+      app.createNode('code', { className: 'plugin-manager-mono', text: managerShortText(key.public_key, 30), title: key.public_key || '' }),
+	  app.createNode('span', { text: managerTrustScopeSummary(key.scope), title: managerTrustScopeDetail(key.scope) }),
+      app.createNode('span', { text: managerFormatDate(key.created_at) }),
+      remove
+    ];
+  }
+
+  function managerTrustRevokedRow(key) {
+    return [
+      app.createNode('span', { text: key.name || app.t('common.dash') }),
+      app.createNode('code', { className: 'plugin-manager-mono', text: key.id || '', title: key.id || '' }),
+      app.createNode('code', { className: 'plugin-manager-mono', text: managerShortText(key.public_key, 30), title: key.public_key || '' }),
+	  app.createNode('span', { text: managerTrustScopeSummary(key.scope), title: managerTrustScopeDetail(key.scope) }),
+      app.createNode('span', { text: managerFormatDate(key.revoked_at) }),
+      app.createNode('code', {
+        className: 'plugin-manager-mono',
+        text: key.replaced_by || app.t('common.dash'),
+        title: key.replaced_by ? app.t('plugins.trust.replacedBy', { id: key.replaced_by }) : ''
+      })
+    ];
+  }
+
+  function managerRenderTrust(preserveScroll) {
     const state = managerState();
     managerSetHeader(app.t('plugins.trust.title'), app.t('plugins.trust.meta'));
-    const nameInput = app.createNode('input', {
-      attrs: { type: 'text', maxlength: '128', autocomplete: 'off', spellcheck: 'false' }
+    const activeKeys = state.trustKeys.filter((key) => key && key.status !== 'revoked').sort((left, right) => {
+      return String(left.name || left.id || '').localeCompare(String(right.name || right.id || ''));
     });
-    const keyInput = app.createNode('textarea', {
-      attrs: { rows: '3', autocomplete: 'off', spellcheck: 'false' }
+    const revokedKeys = state.trustKeys.filter((key) => key && key.status === 'revoked').sort((left, right) => {
+      return String(right.revoked_at || '').localeCompare(String(left.revoked_at || '')) || String(left.id || '').localeCompare(String(right.id || ''));
     });
-	const pluginIDsInput = app.createNode('input', {
-	  attrs: { type: 'text', maxlength: '2048', autocomplete: 'off', spellcheck: 'false', placeholder: 'vendor_*, exact_plugin' }
-	});
-	const permissionsInput = app.createNode('input', {
-	  attrs: { type: 'text', maxlength: '4096', autocomplete: 'off', spellcheck: 'false', placeholder: 'plugin.register, resource, ui' }
-	});
-	const executionTierSelect = app.createNode('select');
-	[
-	  ['', app.t('plugins.trust.scopeAny')],
-	  ['control', app.t('plugins.trust.scopeControl')],
-	  ['dataplane', app.t('plugins.trust.scopeDataplane')]
-	].forEach((item) => executionTierSelect.appendChild(app.createNode('option', { text: item[1], attrs: { value: item[0] } })));
-	const stabilitiesInput = app.createNode('input', {
-	  attrs: { type: 'text', maxlength: '256', autocomplete: 'off', spellcheck: 'false', placeholder: 'stable, preview' }
-	});
-	const replaceSelect = app.createNode('select');
-	replaceSelect.appendChild(app.createNode('option', { text: app.t('plugins.trust.noReplacement'), attrs: { value: '' } }));
-	state.trustKeys.filter((key) => key && key.status === 'active').forEach((key) => {
-	  replaceSelect.appendChild(app.createNode('option', { text: (key.name || key.id) + ' · ' + managerShortText(key.id, 18), attrs: { value: key.id } }));
-	});
-    const addButton = managerButton(app.t('plugins.trust.add'), '', () => {
-	  const scope = managerTrustScopeFromValues(pluginIDsInput.value, permissionsInput.value, executionTierSelect.value, stabilitiesInput.value);
-	  app.addPluginTrustKey(nameInput.value, keyInput.value, replaceSelect.value, scope, addButton);
-    }, { disabled: !!state.busy });
-    const form = managerSection(app.t('plugins.trust.addTitle'), [
-      app.createNode('div', {
-        className: 'plugin-manager-form-grid',
-        children: [
-          managerField(app.t('plugins.trust.name'), nameInput, '', false),
-		  managerField(app.t('plugins.trust.replaces'), replaceSelect, app.t('plugins.trust.replacesHint'), false),
-          managerField(app.t('plugins.trust.publicKey'), keyInput, app.t('plugins.trust.publicKeyHint'), true),
-		  managerField(app.t('plugins.trust.scopePlugins'), pluginIDsInput, app.t('plugins.trust.scopePluginsHint'), true),
-		  managerField(app.t('plugins.trust.scopePermissions'), permissionsInput, app.t('plugins.trust.scopePermissionsHint'), true),
-		  managerField(app.t('plugins.trust.scopeTier'), executionTierSelect, app.t('plugins.trust.scopeTierHint'), false),
-		  managerField(app.t('plugins.trust.scopeStabilities'), stabilitiesInput, app.t('plugins.trust.scopeStabilitiesHint'), false)
-        ]
-      }),
-      app.createNode('div', { className: 'plugin-manager-inline-actions', children: [addButton] })
-    ]);
-    let list;
+    const activePage = managerTrustPage(state, 'trustActivePage', activeKeys);
+    const revokedPage = managerTrustPage(state, 'trustRevokedPage', revokedKeys);
+    const sections = [];
+
     if (!state.trustKeys.length) {
-      list = managerEmpty(app.t('plugins.trust.empty'));
+      sections.push(managerSection(app.t('plugins.trust.activeList'), [managerEmpty(app.t('plugins.trust.empty'))]));
     } else {
-      const rows = state.trustKeys.map((key) => {
-		const revoked = key.status === 'revoked';
-		const remove = managerButton(app.t('plugins.trust.revoke'), 'mini-btn plugin-manager-danger-btn', () => app.deletePluginTrustKey(key), { disabled: !!state.busy || revoked });
-        return [
-          app.createNode('span', { text: key.name || app.t('common.dash') }),
-          app.createNode('code', { className: 'plugin-manager-mono', text: key.id || '', title: key.id || '' }),
-          app.createNode('code', { className: 'plugin-manager-mono', text: managerShortText(key.public_key, 30), title: key.public_key || '' }),
-		  app.createNode('span', { text: managerTrustScopeSummary(key.scope), title: managerTrustScopeDetail(key.scope) }),
-		  app.createNode('span', { text: revoked ? app.t('plugins.trust.revoked') : app.t('plugins.trust.active'), title: key.replaced_by ? app.t('plugins.trust.replacedBy', { id: key.replaced_by }) : '' }),
-          app.createNode('span', { text: managerFormatDate(key.created_at) }),
-          remove
-        ];
-      });
-      list = managerTable([
+      const activeList = activePage.total
+        ? managerTable([
         app.t('plugins.trust.name'),
         app.t('plugins.trust.keyID'),
         app.t('plugins.trust.publicKey'),
-		app.t('plugins.trust.scope'),
-		app.t('common.status'),
+		  app.t('plugins.trust.scope'),
         app.t('plugins.manager.createdAt'),
         app.t('common.actions')
-      ], rows);
+          ], activePage.items.map((key) => managerTrustActiveRow(state, key)))
+        : managerEmpty(app.t('plugins.trust.activeEmpty'));
+      sections.push(managerSection(app.t('plugins.trust.activeList'), [
+        activeList,
+        managerTrustPagination(state, 'trustActivePage', activePage)
+      ]));
     }
+
+    if (revokedPage.total) {
+      const history = managerDisclosure(app.t('plugins.trust.revokedHistory', { count: revokedPage.total }), [
+        managerTable([
+          app.t('plugins.trust.name'),
+          app.t('plugins.trust.keyID'),
+          app.t('plugins.trust.publicKey'),
+		  app.t('plugins.trust.scope'),
+          app.t('plugins.trust.revokedAt'),
+          app.t('plugins.trust.replacement')
+        ], revokedPage.items.map(managerTrustRevokedRow)),
+        managerTrustPagination(state, 'trustRevokedPage', revokedPage)
+      ]);
+      history.classList.add('plugin-manager-trust-history');
+      history.open = state.trustRevokedOpen;
+      history.addEventListener('toggle', () => {
+        state.trustRevokedOpen = !!history.open;
+      });
+      sections.push(history);
+    }
+    const scrollTop = preserveScroll && app.el.pluginManagerBody ? app.el.pluginManagerBody.scrollTop : 0;
     managerRender(app.createNode('div', {
       className: 'plugin-manager-stack',
-      children: [form, managerSection(app.t('plugins.trust.list'), [list])]
+	  children: sections
     }));
+    if (preserveScroll && app.el.pluginManagerBody) app.el.pluginManagerBody.scrollTop = scrollTop;
     managerFocusInitial();
-  }
-
-  function managerTrustScopeTokens(value) {
-	return Array.from(new Set(String(value || '').split(/[\s,]+/).map((item) => item.trim().toLowerCase()).filter(Boolean))).sort();
-  }
-
-  function managerTrustScopeFromValues(pluginIDs, permissions, executionTier, stabilities) {
-	const scope = {
-	  plugin_ids: managerTrustScopeTokens(pluginIDs),
-	  permissions: managerTrustScopeTokens(permissions),
-	  execution_tiers: managerTrustScopeTokens(executionTier),
-	  stabilities: managerTrustScopeTokens(stabilities)
-	};
-	return Object.values(scope).some((values) => values.length) ? scope : null;
   }
 
   function managerTrustScopeDetail(scope) {
 	if (!scope || typeof scope !== 'object') return app.t('plugins.trust.scopeGlobalDetail');
+	const permissions = Array.isArray(scope.permissions) ? scope.permissions : [];
+	const permissionsRestricted = !!scope.permissions_restricted || permissions.length > 0;
 	return [
 	  Array.isArray(scope.plugin_ids) && scope.plugin_ids.length ? app.t('plugins.trust.scopePlugins') + ': ' + scope.plugin_ids.join(', ') : '',
-	  Array.isArray(scope.permissions) && scope.permissions.length ? app.t('plugins.trust.scopePermissions') + ': ' + scope.permissions.join(', ') : '',
+	  permissionsRestricted ? app.t('plugins.trust.scopePermissions') + ': ' + (permissions.length ? permissions.join(', ') : app.t('plugins.trust.scopeNoPermissions')) : '',
 	  Array.isArray(scope.execution_tiers) && scope.execution_tiers.length ? app.t('plugins.trust.scopeTier') + ': ' + scope.execution_tiers.join(', ') : '',
 	  Array.isArray(scope.stabilities) && scope.stabilities.length ? app.t('plugins.trust.scopeStabilities') + ': ' + scope.stabilities.join(', ') : ''
 	].filter(Boolean).join('\n') || app.t('plugins.trust.scopeGlobalDetail');
@@ -1384,9 +1431,10 @@
 
   function managerTrustScopeSummary(scope) {
 	if (!scope || typeof scope !== 'object') return app.t('plugins.trust.scopeGlobal');
-	const count = ['plugin_ids', 'permissions', 'execution_tiers', 'stabilities'].reduce((total, key) => {
+	let count = ['plugin_ids', 'permissions', 'execution_tiers', 'stabilities'].reduce((total, key) => {
 	  return total + (Array.isArray(scope[key]) ? scope[key].length : 0);
 	}, 0);
+	if (scope.permissions_restricted && (!Array.isArray(scope.permissions) || !scope.permissions.length)) count += 1;
 	return count ? app.t('plugins.trust.scopeRestricted', { count }) : app.t('plugins.trust.scopeGlobal');
   }
 
@@ -2009,7 +2057,7 @@
       state.tab = '';
       state.stage = stage;
 	  state.stages = [stage];
-      state.approveUnsigned = false;
+		state.rememberPublishers = false;
       state.approvePrivileges = false;
       managerRenderNav();
       managerRenderStageReview();
@@ -2078,7 +2126,7 @@
 	  state.stages = [];
 	  state.repositoryPlan = null;
 	  state.installReturnView = '';
-      state.approveUnsigned = false;
+		state.rememberPublishers = false;
       state.approvePrivileges = false;
     }
     managerRenderNav();
@@ -2096,6 +2144,9 @@
       return;
     }
     if (state.view === 'trust') {
+      state.trustActivePage = 1;
+      state.trustRevokedPage = 1;
+      state.trustRevokedOpen = false;
       managerLoadTrust();
       return;
     }
@@ -2222,10 +2273,8 @@
   })(app.refreshLocalizedUI);
 
   if (app.__enablePluginTests) {
-    app.__pluginManagerReadSignatureForTest = managerReadSignatureSidecar;
     app.__pluginManagerStageApprovedForTest = managerStageApproved;
 	app.__pluginManagerStagesApprovedForTest = managerStagesApproved;
-	app.__pluginManagerMatchSignaturesForTest = managerMatchSignatureFiles;
     app.__pluginManagerRenderStageForTest = managerRenderStageReview;
     app.__pluginManagerLoadAuditForTest = managerLoadAudit;
 	app.__pluginManagerLoadDeadLettersForTest = managerLoadDeadLetters;

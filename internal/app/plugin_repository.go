@@ -248,7 +248,7 @@ func (m *pluginPackageManager) stagePluginRepositoryTarget(
 	if err != nil {
 		return PluginPackageStage{}, fmt.Errorf("download repository target: %w", err)
 	}
-	stage, err := m.StageWithDeferredRelationships(bytes.NewReader(archive), "", "", deferredRelationships)
+	stage, err := m.StageWithDeferredRelationships(bytes.NewReader(archive), deferredRelationships)
 	if err != nil {
 		return PluginPackageStage{}, err
 	}

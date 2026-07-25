@@ -435,12 +435,15 @@
   app.showTokenModal = function showTokenModal() {
     app.el.appRoot.style.display = 'none';
     app.el.tokenModal.classList.add('active');
+    app.el.tokenInput.disabled = false;
     app.el.tokenInput.value = '';
     app.el.tokenInput.focus();
   };
 
   app.hideTokenModal = function hideTokenModal() {
     app.el.tokenModal.classList.remove('active');
+    app.el.tokenInput.value = '';
+    app.el.tokenInput.disabled = true;
     app.el.appRoot.style.display = 'block';
   };
 

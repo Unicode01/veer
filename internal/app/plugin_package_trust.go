@@ -38,6 +38,13 @@ const (
 	pluginTrustScopeMaxItems = 128
 )
 
+type pluginPackageVerifiedSignature struct {
+	Signed    bool
+	SignerID  string
+	PublicKey string
+	TrustKey  *PluginTrustKey
+}
+
 func newPluginPackageManager(cfg *Config, db *sql.DB, pm *ProcessManager) (*pluginPackageManager, error) {
 	pluginsDir := normalizePluginsDir("")
 	if cfg != nil {
@@ -330,11 +337,13 @@ func normalizePluginTrustScope(scope *PluginTrustScope) (*PluginTrustScope, erro
 		return nil, err
 	}
 	sort.Strings(pluginIDs)
-	if len(pluginIDs) == 0 && len(permissions) == 0 && len(executionTiers) == 0 && len(stabilities) == 0 {
+	permissionsRestricted := scope.PermissionsRestricted || len(permissions) > 0
+	if len(pluginIDs) == 0 && !permissionsRestricted && len(executionTiers) == 0 && len(stabilities) == 0 {
 		return nil, fmt.Errorf("trust scope must contain at least one restriction")
 	}
 	return &PluginTrustScope{
-		PluginIDs: pluginIDs, Permissions: permissions, ExecutionTiers: executionTiers, Stabilities: stabilities,
+		PluginIDs: pluginIDs, Permissions: permissions, PermissionsRestricted: permissionsRestricted,
+		ExecutionTiers: executionTiers, Stabilities: stabilities,
 	}, nil
 }
 
@@ -364,10 +373,11 @@ func clonePluginTrustScope(scope *PluginTrustScope) *PluginTrustScope {
 		return nil
 	}
 	return &PluginTrustScope{
-		PluginIDs:      append([]string(nil), scope.PluginIDs...),
-		Permissions:    append([]string(nil), scope.Permissions...),
-		ExecutionTiers: append([]string(nil), scope.ExecutionTiers...),
-		Stabilities:    append([]string(nil), scope.Stabilities...),
+		PluginIDs:             append([]string(nil), scope.PluginIDs...),
+		Permissions:           append([]string(nil), scope.Permissions...),
+		PermissionsRestricted: scope.PermissionsRestricted,
+		ExecutionTiers:        append([]string(nil), scope.ExecutionTiers...),
+		Stabilities:           append([]string(nil), scope.Stabilities...),
 	}
 }
 
@@ -377,6 +387,7 @@ func equalPluginTrustScopes(left, right *PluginTrustScope) bool {
 	}
 	return equalPluginTrustStringLists(left.PluginIDs, right.PluginIDs) &&
 		equalPluginTrustStringLists(left.Permissions, right.Permissions) &&
+		pluginTrustPermissionsRestricted(left) == pluginTrustPermissionsRestricted(right) &&
 		equalPluginTrustStringLists(left.ExecutionTiers, right.ExecutionTiers) &&
 		equalPluginTrustStringLists(left.Stabilities, right.Stabilities)
 }
@@ -401,9 +412,32 @@ func pluginTrustScopeContains(outer, inner *PluginTrustScope) bool {
 		return false
 	}
 	return pluginTrustPluginPatternsContain(outer.PluginIDs, inner.PluginIDs) &&
-		pluginTrustValuesContain(outer.Permissions, inner.Permissions) &&
+		pluginTrustPermissionsContain(outer, inner) &&
 		pluginTrustValuesContain(outer.ExecutionTiers, inner.ExecutionTiers) &&
 		pluginTrustValuesContain(outer.Stabilities, inner.Stabilities)
+}
+
+func pluginTrustPermissionsRestricted(scope *PluginTrustScope) bool {
+	return scope != nil && (scope.PermissionsRestricted || len(scope.Permissions) > 0)
+}
+
+func pluginTrustPermissionsContain(outer, inner *PluginTrustScope) bool {
+	if !pluginTrustPermissionsRestricted(outer) {
+		return true
+	}
+	if !pluginTrustPermissionsRestricted(inner) {
+		return false
+	}
+	allowed := make(map[string]struct{}, len(outer.Permissions))
+	for _, value := range outer.Permissions {
+		allowed[value] = struct{}{}
+	}
+	for _, value := range inner.Permissions {
+		if _, ok := allowed[value]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func pluginTrustValuesContain(outer, inner []string) bool {
@@ -473,7 +507,7 @@ func validatePluginTrustKeyScope(key PluginTrustKey, plugin LoadedPlugin) error 
 	if len(scope.ExecutionTiers) > 0 && !pluginTrustValueAllowed(scope.ExecutionTiers, tier) {
 		return fmt.Errorf("trusted signer %s is not authorized for %s execution tier", key.ID, tier)
 	}
-	if len(scope.Permissions) > 0 && plugin.Control != nil {
+	if pluginTrustPermissionsRestricted(scope) && plugin.Control != nil {
 		for _, permission := range plugin.Control.Permissions {
 			if !pluginTrustValueAllowed(scope.Permissions, permission) {
 				return fmt.Errorf("trusted signer %s is not authorized for permission %s", key.ID, permission)
@@ -492,48 +526,60 @@ func pluginTrustValueAllowed(values []string, candidate string) bool {
 	return false
 }
 
-func (m *pluginPackageManager) verifyArchiveSignature(archiveDigest, signerID, signature string) (PluginTrustKey, bool, error) {
+func (m *pluginPackageManager) verifyArchiveSignature(archiveDigest string, candidate pluginPackageSignature) (pluginPackageVerifiedSignature, error) {
+	signerID := candidate.SignerID
+	publicKeyValue := candidate.PublicKey
+	signature := candidate.Signature
 	signerID = strings.TrimSpace(strings.ToLower(signerID))
+	publicKeyValue = strings.TrimSpace(publicKeyValue)
 	signature = strings.TrimSpace(signature)
-	if signerID == "" && signature == "" {
-		return PluginTrustKey{}, false, nil
+	if signerID == "" && publicKeyValue == "" && signature == "" {
+		return pluginPackageVerifiedSignature{}, nil
 	}
-	if signerID == "" || signature == "" {
-		return PluginTrustKey{}, false, fmt.Errorf("both signer id and signature are required")
+	if signerID == "" || publicKeyValue == "" || signature == "" {
+		return pluginPackageVerifiedSignature{}, fmt.Errorf("signer id, public key, and signature are all required")
+	}
+	publicKey, err := decodePluginTrustPublicKey(publicKeyValue)
+	if err != nil {
+		return pluginPackageVerifiedSignature{}, err
+	}
+	if len(signerID) != 32 || pluginTrustKeyID(publicKey) != signerID {
+		return pluginPackageVerifiedSignature{}, fmt.Errorf("plugin package signer id does not match its public key")
+	}
+	signatureBytes, err := decodePluginPackageSignature(signature)
+	if err != nil {
+		return pluginPackageVerifiedSignature{}, err
+	}
+	digestBytes, err := hex.DecodeString(archiveDigest)
+	if err != nil || len(digestBytes) != sha256.Size {
+		return pluginPackageVerifiedSignature{}, fmt.Errorf("invalid plugin archive digest")
+	}
+	message := append([]byte(pluginPackageSignatureDomain), digestBytes...)
+	if !ed25519.Verify(publicKey, message, signatureBytes) {
+		return pluginPackageVerifiedSignature{}, fmt.Errorf("plugin package signature verification failed")
+	}
+	identity := pluginPackageVerifiedSignature{
+		Signed: true, SignerID: signerID, PublicKey: base64.StdEncoding.EncodeToString(publicKey),
 	}
 	var key PluginTrustKey
 	if err := readPluginPackageJSON(filepath.Join(m.stateRoot, "trust", signerID+".json"), &key); err != nil {
 		if os.IsNotExist(err) {
-			return PluginTrustKey{}, false, fmt.Errorf("plugin signer %s is not trusted", signerID)
+			return identity, nil
 		}
-		return PluginTrustKey{}, false, err
+		return pluginPackageVerifiedSignature{}, err
 	}
 	if key.Status == "" {
 		key.Status = pluginTrustStatusActive
 	}
+	trustedPublicKey, err := decodePluginTrustPublicKey(key.PublicKey)
+	if err != nil || pluginTrustKeyID(trustedPublicKey) != signerID || key.ID != signerID || !ed25519.PublicKey(publicKey).Equal(trustedPublicKey) {
+		return pluginPackageVerifiedSignature{}, fmt.Errorf("trusted signer %s failed integrity validation", signerID)
+	}
 	if err := validatePluginTrustKeyState(key); err != nil {
-		return PluginTrustKey{}, false, err
+		return pluginPackageVerifiedSignature{}, err
 	}
-	if key.Status != pluginTrustStatusActive {
-		return PluginTrustKey{}, false, fmt.Errorf("plugin signer %s is revoked and not trusted", signerID)
-	}
-	publicKey, err := decodePluginTrustPublicKey(key.PublicKey)
-	if err != nil || pluginTrustKeyID(publicKey) != signerID || key.ID != signerID {
-		return PluginTrustKey{}, false, fmt.Errorf("trusted signer %s failed integrity validation", signerID)
-	}
-	signatureBytes, err := decodePluginPackageSignature(signature)
-	if err != nil {
-		return PluginTrustKey{}, false, err
-	}
-	digestBytes, err := hex.DecodeString(archiveDigest)
-	if err != nil || len(digestBytes) != sha256.Size {
-		return PluginTrustKey{}, false, fmt.Errorf("invalid plugin archive digest")
-	}
-	message := append([]byte(pluginPackageSignatureDomain), digestBytes...)
-	if !ed25519.Verify(publicKey, message, signatureBytes) {
-		return PluginTrustKey{}, false, fmt.Errorf("plugin package signature verification failed")
-	}
-	return key, true, nil
+	identity.TrustKey = &key
+	return identity, nil
 }
 
 func decodePluginTrustPublicKey(value string) (ed25519.PublicKey, error) {

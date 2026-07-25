@@ -822,6 +822,7 @@ td {
 
 .plugin-manager-header {
     display: flex;
+    flex: 0 0 auto;
     align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
@@ -873,6 +874,7 @@ td {
 
 .plugin-manager-nav {
     display: flex;
+    flex: 0 0 auto;
     align-items: center;
     gap: 6px;
     padding: 8px 14px;
@@ -903,7 +905,8 @@ td {
 }
 
 .plugin-manager-body {
-    min-height: 128px;
+    flex: 1 1 auto;
+    min-height: 0;
     padding: 12px 14px 14px;
     overflow-x: hidden;
     overflow-y: auto;

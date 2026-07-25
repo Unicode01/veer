@@ -19,19 +19,18 @@ const (
 )
 
 type PluginRepositoryUpdateStatus struct {
-	PluginID                 string                  `json:"plugin_id"`
-	CurrentVersion           string                  `json:"current_version"`
-	AvailableVersion         string                  `json:"available_version,omitempty"`
-	RepositoryID             string                  `json:"repository_id,omitempty"`
-	Channel                  string                  `json:"channel,omitempty"`
-	PinnedVersion            string                  `json:"pinned_version,omitempty"`
-	Hold                     bool                    `json:"hold"`
-	Status                   string                  `json:"status"`
-	Reason                   string                  `json:"reason,omitempty"`
-	ExecutionTier            string                  `json:"execution_tier"`
-	RequiresTrustedPublisher bool                    `json:"requires_trusted_publisher"`
-	ProvenanceStatus         string                  `json:"provenance_status,omitempty"`
-	Target                   *PluginRepositoryTarget `json:"target,omitempty"`
+	PluginID         string                  `json:"plugin_id"`
+	CurrentVersion   string                  `json:"current_version"`
+	AvailableVersion string                  `json:"available_version,omitempty"`
+	RepositoryID     string                  `json:"repository_id,omitempty"`
+	Channel          string                  `json:"channel,omitempty"`
+	PinnedVersion    string                  `json:"pinned_version,omitempty"`
+	Hold             bool                    `json:"hold"`
+	Status           string                  `json:"status"`
+	Reason           string                  `json:"reason,omitempty"`
+	ExecutionTier    string                  `json:"execution_tier"`
+	ProvenanceStatus string                  `json:"provenance_status,omitempty"`
+	Target           *PluginRepositoryTarget `json:"target,omitempty"`
 }
 
 type PluginRepositoryRefreshResult struct {
@@ -68,9 +67,8 @@ func (m *pluginPackageManager) ListRepositoryUpdates() ([]PluginRepositoryUpdate
 		origin, hasOrigin := provenance[pluginID]
 		status := PluginRepositoryUpdateStatus{
 			PluginID: pluginID, CurrentVersion: plugin.Version,
-			Status:                   pluginRepositoryUpdateUnavailable,
-			ExecutionTier:            pluginPackageExecutionTier(plugin),
-			RequiresTrustedPublisher: pluginPackageRequiresTrustedPublisher(plugin),
+			Status:        pluginRepositoryUpdateUnavailable,
+			ExecutionTier: pluginPackageExecutionTier(plugin),
 		}
 		if hasOrigin {
 			status.RepositoryID = origin.RepositoryID

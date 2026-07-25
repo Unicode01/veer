@@ -25,17 +25,8 @@ import (
 )
 
 const (
-	pluginPackageSignatureFileVersion = 1
-	pluginPackageCLIKeyMaxBytes       = 64 << 10
+	pluginPackageCLIKeyMaxBytes = 64 << 10
 )
-
-type pluginPackageSignatureFile struct {
-	Version       int    `json:"version"`
-	SignerID      string `json:"signer_id"`
-	ArchiveSHA256 string `json:"archive_sha256"`
-	Signature     string `json:"signature"`
-	CreatedAt     string `json:"created_at"`
-}
 
 type pluginPackageCLIArchiveInfo struct {
 	PluginID      string `json:"plugin_id"`
@@ -105,8 +96,8 @@ func writePluginPackageCLIUsage(w io.Writer) {
 	fmt.Fprintln(w, "  veer plugin backup --database FILE --plugins-dir DIR --output FILE")
 	fmt.Fprintln(w, "  veer plugin restore (--archive FILE | --status | --retry | --cancel) [--database FILE] [--plugins-dir DIR]")
 	fmt.Fprintln(w, "  veer plugin keygen --private-key FILE --public-key FILE")
-	fmt.Fprintln(w, "  veer plugin sign --archive FILE --private-key FILE [--signature FILE]")
-	fmt.Fprintln(w, "  veer plugin verify --archive FILE --signature FILE --public-key FILE")
+	fmt.Fprintln(w, "  veer plugin sign --archive FILE --private-key FILE [--output FILE]")
+	fmt.Fprintln(w, "  veer plugin verify --package FILE --public-key FILE")
 	fmt.Fprintln(w, "  veer plugin repository init|add|revoke|publish|rotate-key|status [options]")
 }
 
@@ -182,8 +173,8 @@ func runPluginPackageSignCLI(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	archivePath := flags.String("archive", "", "plugin .tar.gz archive")
 	privatePath := flags.String("private-key", "", "Ed25519 private key path")
-	signaturePath := flags.String("signature", "", "signature sidecar path")
-	force := flags.Bool("force", false, "replace an existing regular signature file")
+	outputPath := flags.String("output", "", "signed .veerpkg output path")
+	force := flags.Bool("force", false, "replace an existing regular output file")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -202,30 +193,38 @@ func runPluginPackageSignCLI(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	publicKey := privateKey.Public().(ed25519.PublicKey)
+	publicKeyText := base64.StdEncoding.EncodeToString(publicKey)
 	digestBytes, _ := hex.DecodeString(archive.ArchiveSHA256)
 	signature := ed25519.Sign(privateKey, append([]byte(pluginPackageSignatureDomain), digestBytes...))
-	sidecar := pluginPackageSignatureFile{
-		Version: pluginPackageSignatureFileVersion, SignerID: pluginTrustKeyID(publicKey), ArchiveSHA256: archive.ArchiveSHA256,
+	metadata := pluginPackageSignatureFile{
+		Version: pluginPackageSignatureFileVersion, SignerID: pluginTrustKeyID(publicKey), PublicKey: publicKeyText, ArchiveSHA256: archive.ArchiveSHA256,
 		Signature: base64.StdEncoding.EncodeToString(signature), CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	target := strings.TrimSpace(*signaturePath)
+	target := strings.TrimSpace(*outputPath)
 	if target == "" {
-		target = *archivePath + ".sig"
+		target = defaultSignedPluginPackagePath(archive.Archive)
 	}
-	if err := writePluginPackageCLIJSONFile(target, sidecar, *force, 0o644); err != nil {
+	target, err = filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(filepath.Ext(target), ".veerpkg") {
+		return fmt.Errorf("signed plugin package output must use the .veerpkg extension")
+	}
+	containerBytes, err := writePluginPackageContainer(archive.Archive, target, metadata, *force)
+	if err != nil {
 		return err
 	}
 	return writePluginPackageCLIJSON(stdout, map[string]any{
 		"plugin_id": archive.PluginID, "version": archive.Version, "archive_sha256": archive.ArchiveSHA256,
-		"signer_id": sidecar.SignerID, "public_key": base64.StdEncoding.EncodeToString(publicKey), "signature_file": target,
+		"signer_id": metadata.SignerID, "public_key": publicKeyText, "package": target, "bytes": containerBytes,
 	})
 }
 
 func runPluginPackageVerifyCLI(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("plugin verify", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	archivePath := flags.String("archive", "", "plugin .tar.gz archive")
-	signaturePath := flags.String("signature", "", "signature sidecar path")
+	packagePath := flags.String("package", "", "signed .veerpkg package")
 	publicPath := flags.String("public-key", "", "trusted Ed25519 public key path")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -233,39 +232,73 @@ func runPluginPackageVerifyCLI(args []string, stdout, stderr io.Writer) error {
 		}
 		return err
 	}
-	if flags.NArg() != 0 || strings.TrimSpace(*archivePath) == "" || strings.TrimSpace(*signaturePath) == "" || strings.TrimSpace(*publicPath) == "" {
-		return fmt.Errorf("plugin verify requires --archive, --signature, and --public-key")
+	if flags.NArg() != 0 || strings.TrimSpace(*packagePath) == "" || strings.TrimSpace(*publicPath) == "" {
+		return fmt.Errorf("plugin verify requires --package and --public-key")
 	}
-	archive, err := inspectPluginPackageArchive(*archivePath)
+	absPackage, _, packageInfo, err := readPluginCLIRegularFile(*packagePath, pluginPackageMaxContainerBytes)
 	if err != nil {
 		return err
 	}
-	var sidecar pluginPackageSignatureFile
-	if err := readPluginPackageCLIJSONFile(*signaturePath, &sidecar); err != nil {
-		return fmt.Errorf("read signature: %w", err)
+	container, err := isPluginPackageContainer(absPackage)
+	if err != nil {
+		return err
 	}
-	if sidecar.Version != pluginPackageSignatureFileVersion || sidecar.ArchiveSHA256 != archive.ArchiveSHA256 {
-		return fmt.Errorf("plugin package signature metadata does not match the archive")
+	if !container {
+		return fmt.Errorf("plugin verify requires a signed .veerpkg package")
+	}
+	tempRoot, err := os.MkdirTemp("", "veer-plugin-signed-verify-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempRoot)
+	archivePath := filepath.Join(tempRoot, pluginPackageContainerArchiveName)
+	archiveDigest, candidate, err := extractPluginPackageContainer(absPackage, archivePath)
+	if err != nil {
+		return err
+	}
+	archive, err := inspectPluginPackageArchive(archivePath)
+	if err != nil {
+		return err
+	}
+	if archive.ArchiveSHA256 != archiveDigest {
+		return fmt.Errorf("signed plugin package payload changed during validation")
 	}
 	publicKey, err := loadPluginPackagePublicKey(*publicPath)
 	if err != nil {
 		return err
 	}
-	if pluginTrustKeyID(publicKey) != sidecar.SignerID {
+	packagePublicKey, err := decodePluginTrustPublicKey(candidate.PublicKey)
+	if err != nil {
+		return fmt.Errorf("signed plugin package public key: %w", err)
+	}
+	if pluginTrustKeyID(publicKey) != candidate.SignerID || !publicKey.Equal(packagePublicKey) {
 		return fmt.Errorf("plugin package signer id does not match the trusted public key")
 	}
-	signature, err := decodePluginPackageSignature(sidecar.Signature)
+	signature, err := decodePluginPackageSignature(candidate.Signature)
 	if err != nil {
 		return err
 	}
-	digestBytes, _ := hex.DecodeString(archive.ArchiveSHA256)
+	digestBytes, _ := hex.DecodeString(archiveDigest)
 	if !ed25519.Verify(publicKey, append([]byte(pluginPackageSignatureDomain), digestBytes...), signature) {
 		return fmt.Errorf("plugin package signature verification failed")
 	}
 	return writePluginPackageCLIJSON(stdout, map[string]any{
 		"verified": true, "plugin_id": archive.PluginID, "version": archive.Version,
-		"archive_sha256": archive.ArchiveSHA256, "signer_id": sidecar.SignerID,
+		"archive_sha256": archive.ArchiveSHA256, "signer_id": candidate.SignerID,
+		"package": absPackage, "bytes": packageInfo.Size(),
 	})
+}
+
+func defaultSignedPluginPackagePath(archivePath string) string {
+	lower := strings.ToLower(archivePath)
+	switch {
+	case strings.HasSuffix(lower, ".tar.gz"):
+		return archivePath[:len(archivePath)-len(".tar.gz")] + ".veerpkg"
+	case strings.HasSuffix(lower, ".tgz"):
+		return archivePath[:len(archivePath)-len(".tgz")] + ".veerpkg"
+	default:
+		return archivePath + ".veerpkg"
+	}
 }
 
 func validatePluginPackageSource(source string) (LoadedPlugin, error) {

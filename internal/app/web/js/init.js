@@ -1,6 +1,7 @@
 (function () {
   const app = window.VeerApp;
   if (!app) return;
+  const itemToggleTypes = new Set(['rule', 'site', 'range']);
 
   function rerenderByType(type) {
     if (type === 'rule') app.renderRulesTable();
@@ -90,6 +91,7 @@
   };
 
   app.toggleItem = async function toggleItem(type, id) {
+    if (!itemToggleTypes.has(type)) return;
     if (app.isRowPending(type, id)) return;
     const source = app.state[type + 's'] && app.state[type + 's'].data
       ? app.state[type + 's'].data.find((item) => item.id === id)
@@ -582,9 +584,10 @@
       return;
     }
 
-    const toggle = e.target.closest('.btn-enable, .btn-disable');
+    const toggle = e.target.closest('.btn-enable[data-type][data-id], .btn-disable[data-type][data-id]');
     if (toggle) {
-      app.toggleItem(toggle.dataset.type, parseInt(toggle.dataset.id, 10));
+      const type = toggle.dataset.type;
+      if (itemToggleTypes.has(type)) app.toggleItem(type, parseInt(toggle.dataset.id, 10));
       return;
     }
 

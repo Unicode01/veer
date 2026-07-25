@@ -192,7 +192,7 @@ Authorization: Bearer <web_token>
 - `plugins_dataplane_enabled`：是否允许外部插件进入 TC 数据面；默认关闭，当前支持按 priority 围绕 `Veer Core` 排序的 forward/reply TC 链
 - `plugins_isolation`：是否让每个插件控制 VM 和命名 Worker 运行在独立子进程；默认开启，仅受信任的本地调试才应关闭
 - `plugins_min_sandbox_level`：插件 Host 最低隔离等级，允许 `none`、`minimal`、`partial`、`full`；默认 `full`，达不到时在执行插件 JavaScript 前拒绝启动
-- `plugins_require_signed_packages`：是否只允许包管理器应用受信任发布者签名的插件包；默认开启，开发环境可显式关闭后再审批未签名包
+- `plugins_require_signed_packages`：是否要求插件包带可独立验证的 Ed25519 签名；默认开启。首次出现的发布者可直接在安装审核中确认，无需预先维护信任列表；开发环境可显式关闭后审批未签名包
 - `plugin_admin_token`：插件安装、信任、启停和热加载使用的独立高权限令牌；留空时相关写 API 禁用，非空时必须不同于 `web_token`
 - `plugins_max_installed` / `plugins_max_staged` / `plugins_storage_limit_mb`：插件安装数、暂存数和插件持久状态总量上限；`plugins_repository_refresh_minutes` 控制启用插件后 TUF 元数据的后台刷新周期
 - `plugins_enabled=true` 时，`lab` / `preview` / `stable` 插件可执行控制脚本；进入外部 TC 数据面仍需同时开启 `plugins_dataplane_enabled`；`deprecated` 插件始终禁用

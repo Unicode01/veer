@@ -1021,18 +1021,18 @@ Veer 可执行文件内置与服务端安装器共用格式和安全边界的打
 veer plugin pack --source ./plugins/my_plugin --output ./dist/my_plugin-1.0.0.tar.gz
 veer plugin keygen --private-key ./publisher.key --public-key ./publisher.pub
 veer plugin sign --archive ./dist/my_plugin-1.0.0.tar.gz --private-key ./publisher.key
-veer plugin verify --archive ./dist/my_plugin-1.0.0.tar.gz --signature ./dist/my_plugin-1.0.0.tar.gz.sig --public-key ./publisher.pub
+veer plugin verify --package ./dist/my_plugin-1.0.0.veerpkg --public-key ./publisher.pub
 veer plugin backup --database ./forward.db --plugins-dir ./plugins --output ./plugin-state.tar.gz
 veer plugin restore --archive ./plugin-state.tar.gz --database ./forward.db --plugins-dir ./plugins
 ```
 
-`pack` 会执行 manifest、control hash、Goja 注册、路径、文件类型、条目数和大小校验，并生成确定性 `tar.gz`。`sign` 使用 Ed25519 对带 Veer domain 的 archive SHA256 签名，签名写入独立 JSON sidecar；输出中的 `signer_id` 与服务端 trust store 使用同一公钥标识。`verify` 必须显式提供受信公钥，只验证包自带签名不等于建立信任。
+`pack` 会执行 manifest、control hash、Goja 注册、路径、文件类型、条目数和大小校验，并生成确定性 `tar.gz`。`sign` 使用 Ed25519 对带 Veer v2 domain 的 archive SHA256 签名，默认输出同名 `.veerpkg`；该单文件容器只包含不可变的 `package.tar.gz` 和 `signature.json`，可直接发布或上传，不再生成独立 `.sig`。安装端会限制容器成员、数量、压缩方式和大小，再校验 payload 摘要、签名及发布者密钥指纹；外置签名和旧 sidecar 请求头不再接受。`verify` 要求显式提供预期公钥，用于确认包内公钥就是操作者信任的那一把；签名有效本身不等于已建立长期信任。未签名的本地 `.tar.gz` 仍可预检，但受 `plugins_require_signed_packages` 策略约束。
 
-`plugins_require_signed_packages=true` 是默认包准入策略。此时 `allow_unsigned` 不能覆盖签名要求；只有由当前 active trust key 验证通过的包或受校验历史回滚才能应用。需要调试本地未签名包时必须显式关闭该策略，原有的逐次未签名审批和权限扩张摘要仍然生效。
+`plugins_require_signed_packages=true` 是默认包准入策略。此时 `approve_unsigned` 不能覆盖签名要求，但签名有效的首次发布者不需要预先进入 trust store：WebUI 会显示密钥指纹、权限和风险，管理员确认后即可只安装当前候选。需要调试本地未签名包时必须显式关闭该策略；未签名确认和权限扩张摘要仍分别生效。
 
-信任键可以限制 `plugin_ids`（精确 ID 或尾部 `*` 前缀）、`permissions`、`execution_tiers`（`control/dataplane`）和 `stabilities`。签名通过后、stage 写入前以及 apply 重新加载候选后都会复核范围；因此被限制为 `vendor_*`/`control` 的发布者不能借有效签名发布其他命名空间或 eBPF 插件。无 `scope` 的旧键保持全局信任兼容。密钥轮换默认继承范围，显式新范围只能收窄；需要扩大权限时应单独添加新键并重新审核，而不是借轮换隐式升级。
+信任键可以限制 `plugin_ids`（精确 ID 或尾部 `*` 前缀）、`permissions`、`execution_tiers`（`control/dataplane`）和 `stabilities`；`permissions_restricted=true` 允许把空权限列表明确锁定为零权限。有效签名位于范围内时显示为已信任；超出范围时仍可人工批准当前候选，但不会隐式扩大原范围。安装审核中的“记住发布者”会按当前候选自动生成最小范围，同一批次由同一密钥签署的包会合并各自最小范围。密钥轮换默认继承范围，显式新范围只能收窄；需要扩大长期授权时应单独审核，而不是借轮换隐式升级。
 
-私钥由 `keygen` 以 PKCS#8 PEM 和 `0600` 权限创建。生产发布应离线保存私钥，只把 `publisher.pub` 导入目标 Veer 的 trust store；安装时仍会重新执行完整候选校验、依赖检查和权限差异审批。
+私钥由 `keygen` 以 PKCS#8 PEM 和 `0600` 权限创建。生产发布应离线保存私钥，并通过独立渠道公布公钥指纹供用户核对。用户可以在首次安装审核中选择只批准当前包，或记住该发布者对此插件的后续更新；两种路径都会重新执行完整候选校验、依赖检查和权限差异审批。
 
 需要维护可更新插件源时使用内置 TUF 仓库工具：
 
@@ -1045,6 +1045,8 @@ veer plugin repository rotate-key --directory ./private-repository --role root
 veer plugin repository status --directory ./private-repository
 ```
 
+私有仓库的 target 已由 TUF 元数据签名，因此 `repository add` 继续接收 `pack` 生成的原始 `.tar.gz`；`.veerpkg` 用于不经过 TUF 仓库的单文件签名分发。
+
 客户端为每个已安装插件提供独立仓库策略：仓库 ID、`stable/preview` channel、可选精确 SemVer pin 和 hold。pin 会同时约束直接安装和依赖求解；hold 会保留当前已安装版本，即使它只是其他插件的依赖也不能被替换。策略不会自动执行升级，WebUI 只生成经过完整依赖求解和权限复核的候选 stage。`plugins_enabled=true` 时，宿主按 `plugins_repository_refresh_minutes`（默认 360 分钟）在独立后台循环刷新 TUF 元数据和撤销状态；插件关闭时不启动该循环，刷新永远不会下载或运行 target。
 
 workspace 是 `0700` 私有发布目录，包含 Ed25519 私钥、不可变包缓存、版本状态和恢复 journal；只有其中的 `public/` 是静态 TUF 输出。不同用户运行的 nginx 无法穿透该私有父目录，生产部署应在持有 workspace 的发布进程完成 `publish` 后，把完整 `public/` 原子同步到独立 Web 根目录，不能放宽私钥目录权限或逐文件覆盖在线仓库。`add/revoke/publish/rotate-key/status` 使用跨进程独占锁；publish 和 key rotation 在进程中断后会按持久 journal 幂等恢复。
@@ -1053,7 +1055,7 @@ workspace 是 `0700` 私有发布目录，包含 Ed25519 私钥、不可变包�
 
 插件包安装、应用、回滚、卸载、信任密钥变更、Secret keyring 轮换、插件启停和代码热加载除了 `Authorization: Bearer <web_token>`，还要求 `X-Veer-Plugin-Admin: <plugin_admin_token>`。两个 token 必须不同；`plugin_admin_token` 为空时这些高权限 API 禁用，读取 catalog、历史、日志和审计不受影响。WebUI 只把插件管理员 token 保存在当前标签页的 `sessionStorage`。
 
-trust store 不物理删除发布者记录。撤销后状态变为 `revoked`，旧签名立即不能再 stage/apply；添加新公钥时可设置 `replaces`，持久 rotation journal 会先确保新键存在，再把旧键写成 `revoked/replaced_by`，断电后启动恢复会幂等完成。
+trust store 不物理删除发布者记录。撤销后状态变为 `revoked`，该密钥签署的新包会在审核中显示高风险且不能从安装流程重新建立长期信任，但插件管理员仍可明确批准当前候选；添加新公钥时可设置 `replaces`，持久 rotation journal 会先确保新键存在，再把旧键写成 `revoked/replaced_by`，断电后启动恢复会幂等完成。
 
 `backup` 使用 SQLite `VACUUM INTO` 创建一致性快照，并把数据库、Secret keyring、插件目录和 `plugins.veer-state` 写入带逐文件 SHA256 的有界归档。`restore` 只验证并暂存恢复请求，不在线替换运行中的数据库；服务下次启动会在打开 SQLite 前按 journal 切换四类状态，失败时恢复旧状态。用 `veer plugin restore --status|--retry|--cancel` 管理待处理请求。
 

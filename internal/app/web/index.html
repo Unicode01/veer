@@ -37,7 +37,7 @@
         <div class="modal-content">
             <h2 data-i18n="auth.title">Authentication</h2>
             <p data-i18n="auth.description">Enter the Bearer Token from config.json web_token to continue.</p>
-            <input type="password" id="tokenInput" data-i18n-placeholder="auth.tokenPlaceholder" placeholder="Enter web_token" spellcheck="false" autocapitalize="off" autocomplete="current-password">
+            <input type="password" id="tokenInput" name="veer-web-token" data-i18n-placeholder="auth.tokenPlaceholder" placeholder="Enter web_token" spellcheck="false" autocapitalize="off" autocomplete="new-password" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" disabled>
             <button id="tokenSubmit" data-i18n="auth.confirm">Continue</button>
         </div>
     </div>
@@ -978,7 +978,7 @@
                 </div>
                 <div class="table-toolbar">
                     <div class="table-toolbar-main">
-                        <input type="search" id="pluginsSearchInput" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" enterkeyhint="search" aria-controls="pluginsTable" data-i18n-placeholder="search.plugins.placeholder" placeholder="Search plugin name or ID...">
+                        <input type="search" id="pluginsSearchInput" name="veer-plugin-filter" class="table-search" spellcheck="false" autocapitalize="off" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" enterkeyhint="search" aria-controls="pluginsTable" data-i18n-placeholder="search.plugins.placeholder" placeholder="Search plugin name or ID...">
                         <p id="pluginsFilterMeta" class="table-meta"></p>
                     </div>
                     <div id="pluginUpdateSelectionBar" class="plugin-update-selection" hidden>
@@ -1194,8 +1194,8 @@
         </div>
     </div>
 
-    <script defer src="js/core.js?v=20260408-3"></script>
-    <script defer src="js/i18n.js?v=20260724-3"></script>
+    <script defer src="js/core.js?v=20260724-1"></script>
+    <script defer src="js/i18n.js?v=20260725-2"></script>
     <script defer src="js/ui.js?v=20260724-2"></script>
     <script defer src="js/rules.js?v=20260410-1"></script>
     <script defer src="js/sites.js?v=20260407-2"></script>
@@ -1205,8 +1205,8 @@
     <script defer src="js/managed_networks.js?v=20260422-1"></script>
     <script defer src="js/workers.js?v=20260407-5"></script>
     <script defer src="js/plugins.js?v=20260724-2"></script>
-    <script defer src="js/plugin_manager.js?v=20260724-4"></script>
+    <script defer src="js/plugin_manager.js?v=20260725-2"></script>
     <script defer src="js/stats.js?v=20260422-1"></script>
-    <script defer src="js/init.js?v=20260424-1"></script>
+    <script defer src="js/init.js?v=20260724-1"></script>
 </body>
 </html>

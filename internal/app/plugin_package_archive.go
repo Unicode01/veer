@@ -15,13 +15,13 @@ import (
 
 const pluginPackageTarTypeLegacyRegular byte = 0
 
-func writeBoundedPluginArchive(reader io.Reader, destination string) (string, int64, error) {
-	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+func writeBoundedPluginPackageFile(reader io.Reader, destination string, maxBytes int64, label string) (string, int64, error) {
+	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- destination is a private manager staging path.
 	if err != nil {
 		return "", 0, err
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(reader, pluginPackageMaxArchiveBytes+1))
+	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(reader, maxBytes+1))
 	closeErr := file.Close()
 	if copyErr != nil {
 		return "", written, copyErr
@@ -30,10 +30,10 @@ func writeBoundedPluginArchive(reader io.Reader, destination string) (string, in
 		return "", written, closeErr
 	}
 	if written == 0 {
-		return "", 0, fmt.Errorf("plugin package archive is empty")
+		return "", 0, fmt.Errorf("%s is empty", label)
 	}
-	if written > pluginPackageMaxArchiveBytes {
-		return "", written, fmt.Errorf("plugin package archive exceeds %d bytes", pluginPackageMaxArchiveBytes)
+	if written > maxBytes {
+		return "", written, fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), written, nil
 }
