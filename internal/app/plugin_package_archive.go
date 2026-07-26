@@ -159,11 +159,36 @@ func normalizePluginPackageEntryName(value string) (string, error) {
 		return "", fmt.Errorf("plugin package entry %q is not a canonical relative path", value)
 	}
 	for _, component := range strings.Split(clean, "/") {
-		if component == "" || component == "." || component == ".." || len(component) > 255 {
+		if !portablePluginPackagePathComponent(component) {
 			return "", fmt.Errorf("plugin package entry %q has an invalid path component", value)
 		}
 	}
 	return clean, nil
+}
+
+func portablePluginPackagePathComponent(component string) bool {
+	if component == "" || component == "." || component == ".." || len(component) > 255 ||
+		strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") ||
+		strings.ContainsAny(component, `<>:"|?*`) {
+		return false
+	}
+	for _, char := range component {
+		if char < 0x20 {
+			return false
+		}
+	}
+	base := component
+	if index := strings.IndexByte(base, '.'); index >= 0 {
+		base = base[:index]
+	}
+	switch upper := strings.ToUpper(base); upper {
+	case "CON", "PRN", "AUX", "NUL", "CLOCK$":
+		return false
+	default:
+		return len(upper) != 4 ||
+			(upper[:3] != "COM" && upper[:3] != "LPT") ||
+			upper[3] < '1' || upper[3] > '9'
+	}
 }
 
 func copyPluginDirectoryStrict(source, destination string) error {

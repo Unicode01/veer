@@ -29,26 +29,30 @@ type IPRouteCapabilities struct {
 }
 
 type KernelCapabilities struct {
-	OS                string              `json:"os"`
-	Arch              string              `json:"arch"`
-	KernelRelease     string              `json:"kernel_release,omitempty"`
-	BPFMapArray       CapabilityCheck     `json:"bpf_map_array"`
-	BPFMapHash        CapabilityCheck     `json:"bpf_map_hash"`
-	BPFMapLRUHash     CapabilityCheck     `json:"bpf_map_lru_hash"`
-	BPFMapPerCPUHash  CapabilityCheck     `json:"bpf_map_percpu_hash"`
-	BPFMapPerCPUArray CapabilityCheck     `json:"bpf_map_percpu_array"`
-	BPFMapProgArray   CapabilityCheck     `json:"bpf_map_prog_array"`
-	BPFMapDevMapHash  CapabilityCheck     `json:"bpf_map_devmap_hash"`
-	BPFMapRingBuf     CapabilityCheck     `json:"bpf_map_ringbuf"`
-	BPFSchedCLS       CapabilityCheck     `json:"bpf_sched_cls"`
-	BPFXDP            CapabilityCheck     `json:"bpf_xdp"`
-	TCAttach          CapabilityCheck     `json:"tc_attach"`
-	XDPGenericAttach  CapabilityCheck     `json:"xdp_generic_attach"`
-	TC                CapabilityCheck     `json:"tc"`
-	XDPGeneric        CapabilityCheck     `json:"xdp_generic"`
-	Netlink           NetlinkCapabilities `json:"netlink"`
-	IPRoute           IPRouteCapabilities `json:"ip_route"`
-	Warnings          []string            `json:"warnings,omitempty"`
+	OS                 string              `json:"os"`
+	Arch               string              `json:"arch"`
+	KernelRelease      string              `json:"kernel_release,omitempty"`
+	BPFMapArray        CapabilityCheck     `json:"bpf_map_array"`
+	BPFMapHash         CapabilityCheck     `json:"bpf_map_hash"`
+	BPFMapLRUHash      CapabilityCheck     `json:"bpf_map_lru_hash"`
+	BPFMapPerCPUHash   CapabilityCheck     `json:"bpf_map_percpu_hash"`
+	BPFMapPerCPUArray  CapabilityCheck     `json:"bpf_map_percpu_array"`
+	BPFMapProgArray    CapabilityCheck     `json:"bpf_map_prog_array"`
+	BPFMapDevMapHash   CapabilityCheck     `json:"bpf_map_devmap_hash"`
+	BPFMapRingBuf      CapabilityCheck     `json:"bpf_map_ringbuf"`
+	BPFSchedCLS        CapabilityCheck     `json:"bpf_sched_cls"`
+	BPFXDP             CapabilityCheck     `json:"bpf_xdp"`
+	BPFNetfilter       CapabilityCheck     `json:"bpf_netfilter"`
+	BPFNetfilterDynptr CapabilityCheck     `json:"bpf_netfilter_dynptr"`
+	TCAttach           CapabilityCheck     `json:"tc_attach"`
+	XDPGenericAttach   CapabilityCheck     `json:"xdp_generic_attach"`
+	NetfilterAttach    CapabilityCheck     `json:"netfilter_attach"`
+	TC                 CapabilityCheck     `json:"tc"`
+	XDPGeneric         CapabilityCheck     `json:"xdp_generic"`
+	Netfilter          CapabilityCheck     `json:"netfilter"`
+	Netlink            NetlinkCapabilities `json:"netlink"`
+	IPRoute            IPRouteCapabilities `json:"ip_route"`
+	Warnings           []string            `json:"warnings,omitempty"`
 }
 
 var (
@@ -97,6 +101,9 @@ func kernelCapabilityWarnings(caps KernelCapabilities) []string {
 	}
 	if !caps.XDPGenericAttach.Available && caps.XDPGenericAttach.Reason != "" {
 		warnings = append(warnings, "xdp generic attach probe unavailable: "+caps.XDPGenericAttach.Reason)
+	}
+	if !caps.Netfilter.Available {
+		warnings = append(warnings, "netfilter plugin dataplane unavailable: "+caps.Netfilter.Reason)
 	}
 	if !caps.Netlink.RouteSocket.Available {
 		warnings = append(warnings, "netlink route socket unavailable: "+caps.Netlink.RouteSocket.Reason)

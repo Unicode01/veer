@@ -357,7 +357,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `runtime.minimum_sandbox_level`: 控制插件执行前要求的最低 Host 隔离等级；默认 `full`
 - `runtime.require_signed_packages`: 包管理器是否拒绝所有未签名候选；默认 `true`
 - `runtime.stability_levels`: 当前服务接受的插件稳定性枚举
-- `runtime.external_dataplane_attach`: 是否允许外部数据面插件。默认 `false`；为 `true` 时当前支持 TC `direction=forward/reply` hook 按 priority 进入内置 `veer` pipeline，并可用 `phase=after_apply` 在 core rewrite/checksum 后、最终 redirect 前运行。没有实际可链入插件时，TC 热路径仍保持 legacy/dispatch，不额外进入 pipeline wrapper
+- `runtime.external_dataplane_attach`: 是否允许外部数据面插件。默认 `false`；为 `true` 时支持 TC `direction=forward/reply` Hook、显式接口 XDP ingress Hook 和宿主编排的原生 Netfilter Hook。没有实际 TC/XDP Hook 时，接口热路径保持原有实现；没有 Netfilter Hook 时不会创建对应 object/link
 - `runtime.tc_pipeline`: 当前 TC ABI 的机器可读契约。ABI v2 使用 111-entry prog-array，每个 concrete stage 最多 8 个 Hook，每个方向跨三个 stage 合计最多 14 个 Hook
 - `runtime.xdp_pipeline`: XDP 前置链契约。使用 24-entry prog-array，最多 8 个 Hook，仅支持显式接口上的 ingress `pre_forward`/pre-core `forward`
 - `actions[].request_schema_version/request_schema/request_schema_digest`：Action 请求的 Draft 2020-12 JSON Schema 契约；HTTP 和插件间调用会在执行 handler 前校验。未声明 Schema 时版本默认为 `1`
@@ -370,9 +370,9 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `ui.sha256`: `control.js` 通过 `ui.register()` 注册的 UI 入口完整性值。`stable` / `preview` 插件注册 `ui.entry` 时必须提供该字段且匹配入口文件内容；`lab` 可省略，但服务仍会计算并返回 `ui.resolved_sha256` 供审计
 - `asset_base_path`: 插件注册 `ui.static_dir` 后生成的静态资源路径，需要 Bearer Token
 - `ui.page` / `ui.page_title`: 可选的 Web UI 顶部分页 ID 和标题，由 `ui.register({page, page_title})` 注册；前端会自动创建插件页并内嵌加载 `ui.entry`
-- `hooks`: `control.js` 通过 `hooks.attach()` 注册的 dataplane hook。开启外部数据面后，`engine=tc` 的 `stage=forward/reply` 逻辑 Hook，或显式 concrete stage Hook，会被加载到 `tc_prog_chain_v4`。`priority < runtime.core_priority` 进入 core 前链，`priority > runtime.core_priority` 进入 core 后链，等于 core priority 会被拒绝；`pipeline.attach({phase:"after_apply"})` 映射到 `post_apply/post_reply_apply`。插件程序执行后必须 tail-call 到对应 stage 的内置 continue slot，除非它明确返回最终 TC action。`engine=xdp` 只接受显式接口上的 ingress `pre_forward`/pre-core Hook，最多 8 个，使用独立双 bank Dispatcher 和共享 `xdp_prog_chain`；插件调用 XDP continue slot 后进入下一 Hook，链尾 `XDP_PASS` 继续进入 TC。目标接口已有 XDP 程序时拒绝挂载，不会替换第三方或现有 Veer XDP Core
+- `hooks`: `control.js` 通过 `hooks.attach()` 注册的 dataplane hook。开启外部数据面后，`engine=tc` 的 `stage=forward/reply` 逻辑 Hook，或显式 concrete stage Hook，会被加载到 `tc_prog_chain_v4`。`priority < runtime.core_priority` 进入 core 前链，`priority > runtime.core_priority` 进入 core 后链，等于 core priority 会被拒绝；`pipeline.attach({phase:"after_apply"})` 映射到 `post_apply/post_reply_apply`。插件程序执行后必须 tail-call 到对应 stage 的内置 continue slot，除非它明确返回最终 TC action。`engine=xdp` 只接受显式接口上的 ingress `pre_forward`/pre-core Hook，最多 8 个，使用独立双 bank Dispatcher 和共享 `xdp_prog_chain`；插件调用 XDP continue slot 后进入下一 Hook，链尾 `XDP_PASS` 继续进入 TC。目标接口已有 XDP 程序时拒绝挂载，不会替换第三方或现有 Veer XDP Core。`engine=netfilter` 使用 `family/hook/phase/namespace` 声明原生 Netfilter placement，宿主自动持有 `bpf_link`；`family=inet` 展开成 IPv4/IPv6 两条 link，接口范围由插件程序和私有 ifindex map 判断，不接受 `interfaces` 或 TC `stage/attach`
 - `hooks[].interfaces`: 可选的真实 Linux 接口名列表。留空或省略时，插件只随已有 forward/egress 规则触发的 `veer` attachment 运行；填写后，即使没有转发规则，TC runtime 也会把 pipeline 挂到这些接口上。无规则模式会禁用内置 forward/reply core，把 pipeline 作为纯插件高速链运行；core 后 Hook 仍可运行，但只能拿到按当前地址族清空的 `tc_plugin_ctx_v4/tc_plugin_ctx_v6`，不会有规则或 flow 匹配上下文。不会自动挂载所有接口；接口不存在会让该插件本轮进入 error。程序排序使用全局 chain，但运行时会按 ifindex 和 attach 方向生成阶段掩码；声明 `interfaces` 的 Hook 只会在对应白名单内执行
-- `runtime.attachments[].priority`: 插件注册 Hook 的排序优先级。`runtime.attachments[].stage` 是 `pre_forward/post_lookup/post_apply/pre_reply/post_reply/post_reply_apply` 之一；`runtime.attachments[].chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot
+- `runtime.attachments[].priority`: 插件注册 Hook 的排序优先级。TC attachment 的 `stage` 是 `pre_forward/post_lookup/post_apply/pre_reply/post_reply/post_reply_apply` 之一，`chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot；Netfilter attachment 通过 `family/netfilter_hook/phase/namespace` 和 `filter_handle=bpf_link:priority=...` 描述原生 link
 - `hooks[].before/hooks[].after`：同一 concrete stage 内的全限定 `plugin_id/hook_id` 拓扑约束。运行时在 reconcile 阶段检测缺失目标、跨 stage 引用和循环，并把最终顺序反映到 `runtime.attachments[].order/chain_slot`；该能力不增加每包热路径开销
 - `hooks[].packet_metadata[]`：可选 TC packet metadata ABI v1 binding。字段为 `slot`（object 本地 `0..15`）、`namespace`（`owner_plugin/name`）、`schema_version`、`max_bytes`（最多 64）和 `access=read|read_write`。只有 namespace owner 可写；所有读写方必须声明相同 schema/长度。宿主最多编排 32 个 namespace，并用双栈 per-CPU generation 阻止跨包陈旧读取。解析后的 binding 会同步到 `runtime.attachments[].packet_metadata`
 - core 后插件如需读取规则匹配上下文，必须在对象里同时声明共享 `tc_plugin_ctx_v4` 和 `tc_plugin_ctx_v6` per-CPU array map；服务会替换为内置稳定 map，并只让插件读取当前包地址族对应的上下文
@@ -836,21 +836,21 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - 默认外部插件目录为 `plugins`
 - 外部插件目录缺失不会报错
 - `plugins_enabled = false` 是默认值，只关闭外部插件扫描和运行，不隐藏内置 `veer_core`；必须手动设为 `true` 才会启动外部插件控制面
-- `plugins_dataplane_enabled = false` 是默认值；同时将 `plugins_enabled` 和该项设为 `true` 后，才允许外部 TC `stage=forward/reply` 插件按 priority 进入内置 `veer` pipeline
+- `plugins_dataplane_enabled = false` 是默认值；同时将 `plugins_enabled` 和该项设为 `true` 后，才允许外部 TC/XDP 插件进入接口 pipeline，或由宿主加载 Netfilter 原生 Hook link
 - `plugins_isolation = true` 是默认值；主控制 VM 与每个命名 Worker 使用独立持久子进程。仅受信任的本地调试才应关闭该项
 - `plugins_min_sandbox_level = "full"` 是默认值；Host 或硬资源限制达不到要求时会在执行控制脚本前拒绝插件。旧内核/Windows 调试必须显式降低该值
 - `plugins_require_signed_packages = true` 是默认值；包管理器不会接受 `approve_unsigned` 覆盖，但任何携带自包含公钥且签名有效的 v2 包都可在审核发布者状态后应用，不要求预先写入 trust store；受校验历史和 TUF target 同样可应用
-- 外部插件可通过 `PUT /api/plugins/<id>/state` 热启用/禁用；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
+- 外部插件可通过 `PUT /api/plugins/<id>/state` 热启用/禁用；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC/XDP/Netfilter Hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
 - 插件源目录每 2 秒扫描一次，变化只标记待更新；`POST /api/plugins/reload` 才会校验并应用候选快照。应用失败时旧 control VM、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
 - 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
 - 插件静态资源路径为 `/api/plugins/<id>/assets/`，同样需要 Bearer Token
-- `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC 对象进入 forward/reply 的 core 前、core 后或 after-apply 链。ABI v2 插件对象必须声明共享 `tc_prog_chain_v4` prog-array map，`max_entries` 至少为 111，并在处理后 tail-call 回对应 stage 的 continue slot；读取匹配上下文时还需要同时声明共享 `tc_plugin_ctx_v4` 与 `tc_plugin_ctx_v6` map。`hooks.attach({interfaces})` 可让插件在无转发规则时显式请求接口 attachment；无规则模式下 core 前和 core 后 Hook 都可加载，但 core 后 Hook 只能拿到清空的地址族上下文。不会自动挂所有接口，生产环境应只对可信对象启用
+- `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC/XDP/Netfilter object 按各自 placement 契约加载。TC ABI v2 对象必须声明共享 `tc_prog_chain_v4`，Netfilter object 则直接挂原生 `bpf_link`，不使用 TC prog-array。不会自动挂载未声明的接口、Hook 或 namespace，生产环境应只对可信对象启用
 
 ### 1.5 获取插件 SDK 契约
 
 `GET /api/plugin-sdk-contract`
 
-返回当前二进制生成的版本化控制 API、feature、资源限制、事件总线、持久 operation 以及 TC/XDP pipeline 契约。contract v6 的 `control.capabilities` 逐方法返回 `permissions`、`any_permissions`、`conditional_permissions`、`phases`、`contexts`、`max_request_bytes` 和 `max_response_bytes`；`operations` 返回 operation 状态集合与数量、字段、总存储和重试上限；`control_methods` 是由同一注册表生成的兼容列表。`tc_pipeline` 描述 ABI v2 的方向与 stage，`xdp_pipeline` 描述 24-entry prog-array、8 Hook 上限、仅 ingress 且必须显式接口的约束。该接口需要 Bearer Token，只支持 `GET`；第三方安装器可在 stage 前比较 `runtime.control_api_abi`、`runtime.tc_pipeline_abi` 和 `runtime.features`。本地 CI 可用 `veer plugin contract --check sdk/plugin/api-contract.json` 对同一结构做严格校验。
+返回当前二进制生成的版本化控制 API、feature、资源限制、事件总线、持久 operation 以及 TC/XDP/Netfilter pipeline 契约。contract v7 的 `control.capabilities` 逐方法返回 `permissions`、`any_permissions`、`conditional_permissions`、`phases`、`contexts`、`max_request_bytes` 和 `max_response_bytes`；`operations` 返回 operation 状态集合与数量、字段、总存储和重试上限；`control_methods` 是由同一注册表生成的兼容列表。`tc_pipeline` 描述 ABI v2 的方向与 stage，`xdp_pipeline` 描述 24-entry prog-array、8 Hook 上限、仅 ingress 且必须显式接口的约束，`netfilter_pipeline` 描述 family、原生 Hook、语义 phase、namespace scope 和 placement 上限。该接口需要 Bearer Token，只支持 `GET`；第三方安装器可在 stage 前比较 `runtime.control_api_abi`、`runtime.tc_pipeline_abi` 和 `runtime.features`。本地 CI 可用 `veer plugin contract --check sdk/plugin/api-contract.json` 对同一结构做严格校验。
 
 ## 2. 规则接口
 

@@ -10,7 +10,9 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/features"
+	"github.com/cilium/ebpf/link"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
@@ -52,10 +54,15 @@ func detectKernelCapabilities() KernelCapabilities {
 	caps.BPFMapRingBuf = detectMapType("BPF ring buffer map", ebpf.RingBuf)
 	caps.BPFSchedCLS = detectProgramType("TC sched_cls eBPF program", ebpf.SchedCLS)
 	caps.BPFXDP = detectProgramType("XDP eBPF program", ebpf.XDP)
+	caps.BPFNetfilter = detectProgramType("Netfilter eBPF program", ebpf.Netfilter)
+	caps.BPFNetfilterDynptr = detectKernelBTFFunction(
+		"Netfilter skb dynptr kfunc", "bpf_dynptr_from_skb",
+	)
 	caps.Netlink = detectNetlinkCapabilities()
 	caps.IPRoute = detectIPRouteCapabilities()
 	caps.TCAttach = detectTCAttachCapability(caps.BPFSchedCLS, caps.Netlink.LinkList)
 	caps.XDPGenericAttach = detectXDPGenericAttachCapability(caps.BPFXDP, caps.Netlink.LinkList)
+	caps.NetfilterAttach = detectNetfilterAttachCapability(caps.BPFNetfilter)
 	caps.TC = combineCapability(
 		"TC dataplane",
 		caps.BPFMapArray,
@@ -84,8 +91,65 @@ func detectKernelCapabilities() KernelCapabilities {
 		caps.Netlink.LinkList,
 		caps.Netlink.RouteList,
 	)
+	caps.Netfilter = combineCapability(
+		"Netfilter plugin dataplane",
+		caps.BPFNetfilter,
+		caps.NetfilterAttach,
+	)
 	caps.Warnings = kernelCapabilityWarnings(caps)
 	return caps
+}
+
+func detectKernelBTFFunction(label, name string) CapabilityCheck {
+	spec, err := btf.LoadKernelSpec()
+	if err != nil {
+		return unavailableCapability(label+" BTF", err)
+	}
+	var function *btf.Func
+	if err := spec.TypeByName(name, &function); err != nil || function == nil {
+		if err == nil {
+			err = btf.ErrNotFound
+		}
+		return unavailableCapability(label, err)
+	}
+	return CapabilityCheck{Available: true}
+}
+
+func detectNetfilterAttachCapability(programCheck CapabilityCheck) CapabilityCheck {
+	if !programCheck.Available {
+		return combineCapability("Netfilter attach probe", programCheck)
+	}
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name:       "veer_nf_probe",
+		Type:       ebpf.Netfilter,
+		AttachType: ebpf.AttachNetfilter,
+		Instructions: asm.Instructions{
+			asm.Mov.Imm(asm.R0, 1), // NF_ACCEPT
+			asm.Return(),
+		},
+		License: "GPL",
+	})
+	if err != nil {
+		return unavailableCapability("Netfilter attach program", err)
+	}
+	defer prog.Close()
+
+	attached, err := link.AttachNetfilter(link.NetfilterOptions{
+		Program:        prog,
+		ProtocolFamily: link.NetfilterProtoIPv4,
+		Hook:           link.NetfilterInetLocalOut,
+		Priority:       -12345,
+	})
+	if err != nil {
+		if errors.Is(err, unix.EBUSY) {
+			return CapabilityCheck{Available: true}
+		}
+		return unavailableCapability("Netfilter link attach", err)
+	}
+	if err := attached.Close(); err != nil {
+		return unavailableCapability("Netfilter link cleanup", err)
+	}
+	return CapabilityCheck{Available: true}
 }
 
 func detectXDPGenericAttachCapability(programCheck CapabilityCheck, linkListCheck CapabilityCheck) CapabilityCheck {

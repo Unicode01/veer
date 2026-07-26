@@ -920,6 +920,7 @@ func normalizePluginObject(object *PluginObject) error {
 	object.Description = strings.TrimSpace(object.Description)
 
 	seenPrograms := make(map[string]struct{}, len(object.Programs))
+	dataplaneEngine := ""
 	for i := range object.Programs {
 		if err := normalizePluginObjectProgram(&object.Programs[i]); err != nil {
 			return fmt.Errorf("programs[%d]: %w", i, err)
@@ -928,6 +929,17 @@ func normalizePluginObject(object *PluginObject) error {
 			return fmt.Errorf("programs[%d]: duplicate id %q", i, object.Programs[i].ID)
 		}
 		seenPrograms[object.Programs[i].ID] = struct{}{}
+		programEngine := object.Programs[i].Type
+		if programEngine == "control" {
+			continue
+		}
+		if dataplaneEngine == "" {
+			dataplaneEngine = programEngine
+			continue
+		}
+		if programEngine != dataplaneEngine {
+			return fmt.Errorf("programs[%d]: one object cannot mix %s and %s dataplane programs; split them into separate objects", i, dataplaneEngine, programEngine)
+		}
 	}
 	if len(object.StateMaps) > pluginObjectStateMapLimit {
 		return fmt.Errorf("state_maps exceed the limit of %d", pluginObjectStateMapLimit)
@@ -1040,7 +1052,7 @@ func normalizePluginObjectProgram(program *PluginObjectProgram) error {
 		program.Type = kernelEngineTC
 	}
 	if !validPluginObjectProgramType(program.Type) {
-		return fmt.Errorf("type must be one of tc, xdp, control")
+		return fmt.Errorf("type must be one of tc, xdp, netfilter, control")
 	}
 	return nil
 }
@@ -1068,11 +1080,11 @@ func normalizePluginHook(hook *PluginHook) error {
 	}
 	hook.Engine = strings.TrimSpace(strings.ToLower(hook.Engine))
 	if !validPluginHookEngine(hook.Engine) {
-		return fmt.Errorf("engine must be one of tc, xdp, control")
+		return fmt.Errorf("engine must be one of tc, xdp, netfilter, control")
 	}
 	hook.Attach = strings.TrimSpace(strings.ToLower(hook.Attach))
 	if hook.Attach == "" {
-		if hook.Engine == "control" {
+		if hook.Engine == "control" || hook.Engine == pluginEngineNetfilter {
 			hook.Attach = "none"
 		} else {
 			hook.Attach = "ingress"
@@ -1082,11 +1094,26 @@ func normalizePluginHook(hook *PluginHook) error {
 		return fmt.Errorf("attach must be one of ingress, egress, both, none")
 	}
 	hook.Stage = strings.TrimSpace(strings.ToLower(hook.Stage))
-	if !pluginTokenPattern.MatchString(hook.Stage) {
-		return fmt.Errorf("stage must match %s", pluginTokenPattern.String())
-	}
-	if hook.Engine != "control" && !validPluginDataplaneHookStage(hook.Stage) {
-		return fmt.Errorf("stage must be one of forward, reply, pre_forward, post_lookup, post_apply, pre_reply, post_reply, post_reply_apply")
+	if hook.Engine == pluginEngineNetfilter {
+		if hook.Attach != "none" {
+			return fmt.Errorf("netfilter hooks do not use attach targets; omit attach or use none")
+		}
+		if hook.Stage != "" {
+			return fmt.Errorf("netfilter hooks use hook and phase instead of stage")
+		}
+		if err := normalizePluginNetfilterPlacement(hook); err != nil {
+			return err
+		}
+	} else {
+		if !pluginTokenPattern.MatchString(hook.Stage) {
+			return fmt.Errorf("stage must match %s", pluginTokenPattern.String())
+		}
+		if hook.Engine != "control" && !validPluginDataplaneHookStage(hook.Stage) {
+			return fmt.Errorf("stage must be one of forward, reply, pre_forward, post_lookup, post_apply, pre_reply, post_reply, post_reply_apply")
+		}
+		if hook.Family != "" || hook.NetfilterHook != "" || hook.Phase != "" || hook.Namespace != "" {
+			return fmt.Errorf("family, hook, phase, and namespace are only available to netfilter hooks")
+		}
 	}
 	if hook.Priority < -100000 || hook.Priority > 100000 {
 		return fmt.Errorf("priority out of range")
@@ -1106,7 +1133,7 @@ func normalizePluginHook(hook *PluginHook) error {
 	hook.After = after
 	hook.Program = strings.TrimSpace(hook.Program)
 	if hook.Engine != "control" && hook.Program == "" {
-		return fmt.Errorf("program is required for tc/xdp hooks")
+		return fmt.Errorf("program is required for tc/xdp/netfilter hooks")
 	}
 	if strings.Contains(hook.Program, "\x00") || len(hook.Program) > 160 {
 		return fmt.Errorf("program contains invalid characters")
@@ -1132,6 +1159,9 @@ func normalizePluginHook(hook *PluginHook) error {
 		}
 	}
 	hook.Context = context
+	if len(context) > 0 && hook.Engine != kernelEngineTC {
+		return fmt.Errorf("context is only available to tc hooks")
+	}
 	packetMetadata, err := normalizePluginPacketMetadataBindings(hook.PacketMetadata)
 	if err != nil {
 		return err
@@ -1145,6 +1175,53 @@ func normalizePluginHook(hook *PluginHook) error {
 		return err
 	}
 	hook.Interfaces = interfaces
+	if hook.Engine == pluginEngineNetfilter && len(interfaces) > 0 {
+		return fmt.Errorf("netfilter hooks are namespace-scoped; match input/output interfaces inside the plugin program")
+	}
+	return nil
+}
+
+func normalizePluginNetfilterPlacement(hook *PluginHook) error {
+	hook.Family = strings.TrimSpace(strings.ToLower(hook.Family))
+	if hook.Family == "" {
+		hook.Family = "inet"
+	}
+	switch hook.Family {
+	case "inet", "ipv4", "ipv6":
+	default:
+		return fmt.Errorf("family must be one of inet, ipv4, ipv6")
+	}
+
+	hook.NetfilterHook = strings.NewReplacer("-", "_", " ", "_").Replace(strings.TrimSpace(strings.ToLower(hook.NetfilterHook)))
+	switch hook.NetfilterHook {
+	case "prerouting", "pre_routing":
+		hook.NetfilterHook = "prerouting"
+	case "input", "local_in":
+		hook.NetfilterHook = "input"
+	case "forward":
+	case "output", "local_out":
+		hook.NetfilterHook = "output"
+	case "postrouting", "post_routing":
+		hook.NetfilterHook = "postrouting"
+	default:
+		return fmt.Errorf("hook must be one of prerouting, input, forward, output, postrouting")
+	}
+
+	hook.Phase = strings.TrimSpace(strings.ToLower(hook.Phase))
+	if hook.Phase == "" {
+		hook.Phase = "filter"
+	}
+	switch hook.Phase {
+	case "early", "raw", "mangle", "dstnat", "filter", "security", "srcnat", "late":
+	default:
+		return fmt.Errorf("phase must be one of early, raw, mangle, dstnat, filter, security, srcnat, late")
+	}
+
+	namespace, err := validatePluginControlNamespaceName(hook.Namespace, true)
+	if err != nil {
+		return fmt.Errorf("namespace: %w", err)
+	}
+	hook.Namespace = namespace
 	return nil
 }
 
@@ -1345,7 +1422,7 @@ func validPluginStability(value string) bool {
 
 func validPluginHookEngine(value string) bool {
 	switch value {
-	case kernelEngineTC, kernelEngineXDP, "control":
+	case kernelEngineTC, kernelEngineXDP, pluginEngineNetfilter, "control":
 		return true
 	default:
 		return false
@@ -1354,7 +1431,7 @@ func validPluginHookEngine(value string) bool {
 
 func validPluginObjectProgramType(value string) bool {
 	switch value {
-	case kernelEngineTC, kernelEngineXDP, "control":
+	case kernelEngineTC, kernelEngineXDP, pluginEngineNetfilter, "control":
 		return true
 	default:
 		return false

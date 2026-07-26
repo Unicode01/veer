@@ -163,6 +163,62 @@ exports.onReconcile = function () {
 	assertNoPluginResourceMigrations(t, db)
 }
 
+func TestPluginResourceMigrationAllowsReconcileRuntimeApplyWrites(t *testing.T) {
+	dir := t.TempDir()
+	db := openTestDB(t)
+	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
+	writeTestPlugin(t, dir, "migration_runtime_apply", `{
+  "api_version":"v1","id":"migration_runtime_apply","name":"Migration Runtime Apply","version":"1.0.0","kind":"control",
+  "control":{"main":"control.js","permissions":["plugin.register","resource"]}
+}`)
+	writePluginControlScript(t, dir, "migration_runtime_apply", `
+plugin.resource({id:"desired",methods:["list"],control_methods:["list","get","create","update","delete"],runtime_update:"runtime_apply"});
+plugin.resource({id:"status",methods:["list"],control_methods:["list","get","create","update","delete"],runtime_update:"manual"});
+exports.onReconcile = function () {};
+exports.onResourceApply = function (ctx) {
+  if (ctx.resource && ctx.resource.id === "desired") {
+    resources.set("status", "active", {applied:true}, true, false);
+  }
+};
+`)
+	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
+		PluginID: "migration_runtime_apply", ResourceID: "desired", RecordKey: "active", DataJSON: `{"enabled":true}`, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	defer runtime.Close()
+	if err := runtime.BeginPluginResourceMigrationTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := runtime.Reconcile(loadPluginCatalogWithState(cfg, db))
+	state, ok := snapshot.stateFor("migration_runtime_apply")
+	if !ok || state.Error != "" {
+		t.Fatalf("runtime_apply during migration state = %+v, found=%t", state, ok)
+	}
+	status, err := store.GetPluginRecord(db, "migration_runtime_apply", "status", "active")
+	if err != nil || status.DataJSON != `{"applied":true}` {
+		t.Fatalf("runtime_apply status record = %+v, err=%v", status, err)
+	}
+	for _, resourceID := range []string{"desired", "status"} {
+		schema, err := store.PluginResourceSchemaStateOrNil(db, "migration_runtime_apply", resourceID)
+		if err != nil || schema == nil || schema.Status != "pending" || schema.TransactionID == "" {
+			t.Fatalf("pending schema %s = %+v, err=%v", resourceID, schema, err)
+		}
+	}
+	if err := runtime.CommitPluginResourceMigrationTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	for _, resourceID := range []string{"desired", "status"} {
+		schema, err := store.PluginResourceSchemaStateOrNil(db, "migration_runtime_apply", resourceID)
+		if err != nil || schema == nil || schema.Status != "active" || schema.TransactionID != "" {
+			t.Fatalf("committed schema %s = %+v, err=%v", resourceID, schema, err)
+		}
+	}
+	assertNoPluginResourceMigrations(t, db)
+}
+
 func TestPluginResourceSchemaChangeRequiresVersionBump(t *testing.T) {
 	dir := t.TempDir()
 	db := openTestDB(t)

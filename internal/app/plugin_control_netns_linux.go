@@ -356,6 +356,11 @@ func linuxPluginOpenTunTap(req pluginControlNetTunTapRequest) (int, pluginContro
 }
 
 func linuxPluginRunInNamespace(name string, fn func() error) error {
+	_, err := linuxPluginRunInNamespaceWithIdentity(name, fn)
+	return err
+}
+
+func linuxPluginRunInNamespaceWithIdentity(name string, fn func() error) (pluginControlNetNamespaceIdentity, error) {
 	runtime.LockOSThread()
 	safeToUnlock := true
 	defer func() {
@@ -365,31 +370,35 @@ func linuxPluginRunInNamespace(name string, fn func() error) error {
 	}()
 	current, err := netns.Get()
 	if err != nil {
-		return fmt.Errorf("capture current namespace: %w", err)
+		return pluginControlNetNamespaceIdentity{}, fmt.Errorf("capture current namespace: %w", err)
 	}
 	defer current.Close()
 	target, err := netns.GetFromName(name)
 	if err != nil {
-		return fmt.Errorf("open namespace %s: %w", name, err)
+		return pluginControlNetNamespaceIdentity{}, fmt.Errorf("open namespace %s: %w", name, err)
 	}
 	defer target.Close()
+	identity, err := linuxPluginNamespaceIdentity(target)
+	if err != nil {
+		return pluginControlNetNamespaceIdentity{}, fmt.Errorf("inspect namespace %s: %w", name, err)
+	}
 	if err := netns.Set(target); err != nil {
-		return fmt.Errorf("enter namespace %s: %w", name, err)
+		return pluginControlNetNamespaceIdentity{}, fmt.Errorf("enter namespace %s: %w", name, err)
 	}
 	safeToUnlock = false
 	operationErr := fn()
 	restoreErr := netns.Set(current)
 	safeToUnlock = restoreErr == nil
 	if operationErr != nil && restoreErr != nil {
-		return fmt.Errorf("%v; restore current namespace: %w", operationErr, restoreErr)
+		return identity, fmt.Errorf("%v; restore current namespace: %w", operationErr, restoreErr)
 	}
 	if operationErr != nil {
-		return operationErr
+		return identity, operationErr
 	}
 	if restoreErr != nil {
-		return fmt.Errorf("restore current namespace: %w", restoreErr)
+		return identity, fmt.Errorf("restore current namespace: %w", restoreErr)
 	}
-	return nil
+	return identity, nil
 }
 
 func (admin *linuxPluginControlNetAdmin) TunTapClose(owner string, req pluginControlNetTunTapCloseRequest) error {

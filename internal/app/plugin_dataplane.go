@@ -16,6 +16,10 @@ type pluginDataplaneRuntime interface {
 	Close() error
 }
 
+type pluginDataplaneHealthRuntime interface {
+	PluginDataplaneHealthy() bool
+}
+
 type disabledPluginDataplaneRuntime struct{}
 
 func (disabledPluginDataplaneRuntime) Reconcile(PluginCatalog) pluginRuntimeSnapshot {
@@ -302,7 +306,11 @@ func (pm *ProcessManager) pluginCatalogWithConfig(fallbackCfg *Config) PluginCat
 	catalog := pm.pluginCatalogWithControlSurface(cfg)
 	if pm != nil {
 		if runtime, ok := pm.kernelRuntime.(pluginPipelineRuntime); ok {
-			mergePluginRuntimeSnapshot(&catalog, runtime.PluginSnapshot())
+			snapshots := []pluginRuntimeSnapshot{runtime.PluginSnapshot()}
+			if pm.pluginRuntime != nil {
+				snapshots = append(snapshots, pm.pluginRuntime.Snapshot())
+			}
+			mergePluginRuntimeSnapshot(&catalog, completePluginRuntimeSnapshot(catalog, combinePluginDataplaneSnapshots(catalog, snapshots...)))
 			catalog = applyPluginStatesFromDB(catalog, pm.db)
 			catalog.HotReload = pm.snapshotPluginCatalogHotReloadStatus()
 			return catalog
@@ -363,17 +371,47 @@ func (pm *ProcessManager) reconcilePluginDataplaneForCatalog(catalog PluginCatal
 	if pm == nil {
 		return pluginRuntimeSnapshot{}, false
 	}
+	snapshots := make([]pluginRuntimeSnapshot, 0, 2)
+	redistributed := false
 	if runtime, ok := pm.kernelRuntime.(pluginPipelineRuntime); ok {
 		if _, ok := pm.kernelRuntime.(kernelRuleRuntimeWithPluginCatalog); ok {
 			pm.redistributeWorkers()
-			return completePluginRuntimeSnapshot(catalog, runtime.PluginSnapshot()), true
+			snapshots = append(snapshots, runtime.PluginSnapshot())
+			redistributed = true
+		} else {
+			snapshots = append(snapshots, runtime.ReconcilePlugins(catalog))
 		}
-		return completePluginRuntimeSnapshot(catalog, runtime.ReconcilePlugins(catalog)), false
 	}
 	if pm.pluginRuntime != nil {
-		return completePluginRuntimeSnapshot(catalog, pm.pluginRuntime.Reconcile(catalog)), false
+		independentCatalog := catalog
+		if _, ordered := pm.kernelRuntime.(pluginPipelineRuntime); ordered {
+			independentCatalog = pluginCatalogWithHookEngines(catalog, pluginEngineNetfilter)
+		}
+		snapshots = append(snapshots, pm.pluginRuntime.Reconcile(independentCatalog))
 	}
-	return pluginManifestOnlyRuntimeSnapshot(catalog), false
+	if len(snapshots) == 0 {
+		return pluginManifestOnlyRuntimeSnapshot(catalog), redistributed
+	}
+	return completePluginRuntimeSnapshot(catalog, combinePluginDataplaneSnapshots(catalog, snapshots...)), redistributed
+}
+
+func pluginCatalogWithHookEngines(catalog PluginCatalog, engines ...string) PluginCatalog {
+	allowed := make(map[string]struct{}, len(engines))
+	for _, engine := range engines {
+		allowed[engine] = struct{}{}
+	}
+	out := catalog
+	out.Plugins = append([]LoadedPlugin(nil), catalog.Plugins...)
+	for i := range out.Plugins {
+		hooks := make([]PluginHook, 0, len(out.Plugins[i].Hooks))
+		for _, hook := range out.Plugins[i].Hooks {
+			if _, ok := allowed[hook.Engine]; ok {
+				hooks = append(hooks, hook)
+			}
+		}
+		out.Plugins[i].Hooks = clonePluginHooks(hooks)
+	}
+	return out
 }
 
 func (pm *ProcessManager) reconcilePluginsForRuntime() pluginRuntimeSnapshot {
@@ -419,7 +457,7 @@ func (pm *ProcessManager) reconcilePluginCatalogForRuntime(catalog PluginCatalog
 			if !ok || state.Error == "" {
 				continue
 			}
-			issues[plugin.ID] = state.Error
+			recordPluginRuntimeIssue(issues, plugin.ID, state.Error)
 			log.Printf("plugin control runtime: %s: %s", plugin.ID, state.Error)
 		}
 	} else {
@@ -436,22 +474,23 @@ func (pm *ProcessManager) reconcilePluginCatalogForRuntime(catalog PluginCatalog
 		migrator, ok := pm.pluginControlRuntime.(pluginControlEBPFStateMigrator)
 		if !ok || migrator == nil {
 			for _, migration := range pendingMigrations {
-				issues[migration.PluginID] = "plugin control runtime does not support eBPF state migration"
+				recordPluginRuntimeIssue(issues, migration.PluginID, "plugin control runtime does not support eBPF state migration")
 			}
 			migrationFailed = true
 		} else {
 			var failures map[string]error
 			completedMigrations, failures = migrator.ApplyPluginEBPFStateMigrations(catalog, snapshot, pendingMigrations)
 			for pluginID, err := range failures {
-				issues[pluginID] = err.Error()
+				recordPluginRuntimeIssue(issues, pluginID, err.Error())
 				log.Printf("plugin eBPF state migration: %s: %v", pluginID, err)
 				migrationFailed = true
 			}
 		}
 	}
 	if reconciler, ok := pm.pluginControlRuntime.(pluginControlPostDataplaneReconciler); ok && !migrationFailed {
-		for pluginID, err := range reconciler.ReapplyPluginRuntimeResourcesAfterDataplane(catalog, snapshot) {
-			issues[pluginID] = err.Error()
+		replayCatalog := pluginCatalogWithoutRuntimeIssues(catalog, issues)
+		for pluginID, err := range reconciler.ReapplyPluginRuntimeResourcesAfterDataplane(replayCatalog, snapshot) {
+			recordPluginRuntimeIssue(issues, pluginID, err.Error())
 			log.Printf("plugin post-dataplane runtime resource replay: %s: %v", pluginID, err)
 		}
 	}
@@ -460,7 +499,7 @@ func (pm *ProcessManager) reconcilePluginCatalogForRuntime(catalog PluginCatalog
 		if !ok || state.Error == "" {
 			continue
 		}
-		issues[plugin.ID] = state.Error
+		recordPluginRuntimeIssue(issues, plugin.ID, state.Error)
 		log.Printf("plugin runtime: %s: %s", plugin.ID, state.Error)
 	}
 	if len(issues) == 0 {
@@ -481,7 +520,7 @@ func (pm *ProcessManager) reconcilePluginCatalogForRuntime(catalog PluginCatalog
 	}
 	if migrationRuntime != nil && migrationOwned {
 		if err := migrationRuntime.RollbackPluginResourceMigrationTransaction(); err != nil {
-			issues["resource_migration"] = err.Error()
+			recordPluginRuntimeIssue(issues, "resource_migration", err.Error())
 		}
 		migrationFinished = true
 	}
@@ -499,6 +538,27 @@ func (pm *ProcessManager) reconcilePluginCatalogForRuntime(catalog PluginCatalog
 		messages = append(messages, id+": "+issues[id])
 	}
 	return snapshot, fmt.Errorf("plugin runtime update failed: %s", strings.Join(messages, "; "))
+}
+
+func recordPluginRuntimeIssue(issues map[string]string, pluginID, message string) {
+	if issues == nil || strings.TrimSpace(pluginID) == "" || strings.TrimSpace(message) == "" {
+		return
+	}
+	issues[pluginID] = joinPluginRuntimeText(issues[pluginID], message)
+}
+
+func pluginCatalogWithoutRuntimeIssues(catalog PluginCatalog, issues map[string]string) PluginCatalog {
+	if len(issues) == 0 {
+		return catalog
+	}
+	out := catalog
+	out.Plugins = make([]LoadedPlugin, 0, len(catalog.Plugins))
+	for _, plugin := range catalog.Plugins {
+		if strings.TrimSpace(issues[plugin.ID]) == "" {
+			out.Plugins = append(out.Plugins, plugin)
+		}
+	}
+	return out
 }
 
 func pendingPluginEBPFStateMigrationsForProcess(pm *ProcessManager) ([]pluginEBPFStateMigrationRuntime, []PluginEBPFStateMigration) {
@@ -725,6 +785,10 @@ func uniquePluginAttachmentStates(states []PluginAttachmentState) []PluginAttach
 			state.Attach,
 			state.Stage,
 			state.Interface,
+			state.Family,
+			state.NetfilterHook,
+			state.Phase,
+			state.Namespace,
 			state.Program,
 			strconv.Itoa(state.ChainSlot),
 		}, "\x00")
@@ -791,6 +855,18 @@ func sortedPluginAttachmentStates(states []PluginAttachmentState) []PluginAttach
 		}
 		if out[i].HookID != out[j].HookID {
 			return out[i].HookID < out[j].HookID
+		}
+		if out[i].Family != out[j].Family {
+			return out[i].Family < out[j].Family
+		}
+		if out[i].NetfilterHook != out[j].NetfilterHook {
+			return out[i].NetfilterHook < out[j].NetfilterHook
+		}
+		if out[i].Phase != out[j].Phase {
+			return out[i].Phase < out[j].Phase
+		}
+		if out[i].Namespace != out[j].Namespace {
+			return out[i].Namespace < out[j].Namespace
 		}
 		return out[i].Program < out[j].Program
 	})

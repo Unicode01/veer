@@ -37,8 +37,8 @@ func TestLoadPluginCatalogDefaultsToBuiltinVeerOnly(t *testing.T) {
 	if catalog.Runtime.CorePriority != pluginPipelineCorePriority {
 		t.Fatalf("catalog runtime core priority = %d, want %d", catalog.Runtime.CorePriority, pluginPipelineCorePriority)
 	}
-	if got := strings.Join(catalog.Runtime.ExternalDataplaneEngines, ","); got != "tc,xdp" {
-		t.Fatalf("catalog runtime external dataplane engines = %q, want tc,xdp", got)
+	if got := strings.Join(catalog.Runtime.ExternalDataplaneEngines, ","); got != "tc,xdp,netfilter" {
+		t.Fatalf("catalog runtime external dataplane engines = %q, want tc,xdp,netfilter", got)
 	}
 	if len(catalog.Runtime.RegistrationOnlyEngines) != 0 {
 		t.Fatalf("catalog runtime registration-only engines = %v, want none", catalog.Runtime.RegistrationOnlyEngines)

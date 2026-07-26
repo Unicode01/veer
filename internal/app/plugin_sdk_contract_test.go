@@ -262,6 +262,13 @@ func assertPluginSDKTextContract(t *testing.T, contract pluginSDKAPIContract) {
 			t.Fatalf("SDK TypeScript contract is missing pipeline value %q", value)
 		}
 	}
+	for _, values := range [][]string{contract.NetfilterPipeline.Families, contract.NetfilterPipeline.Hooks, contract.NetfilterPipeline.Phases} {
+		for _, value := range values {
+			if !strings.Contains(string(types), "'"+value+"'") {
+				t.Fatalf("SDK TypeScript contract is missing Netfilter value %q", value)
+			}
+		}
+	}
 
 	helpersPath := filepath.Join("..", "..", "plugins", "include", "veer_plugin_helpers.h")
 	helpers, err := os.ReadFile(helpersPath)
@@ -279,6 +286,8 @@ func assertPluginSDKTextContract(t *testing.T, contract pluginSDKAPIContract) {
 		fmt.Sprintf("#define VEER_PACKET_METADATA_BINDING_MAX_ENTRIES %d", contract.PacketMetadata.BindingLimit),
 		fmt.Sprintf("#define VEER_PACKET_METADATA_MAX_NAMESPACES %d", contract.PacketMetadata.NamespaceLimit),
 		fmt.Sprintf("#define VEER_PACKET_METADATA_PAYLOAD_BYTES %d", contract.PacketMetadata.PayloadMaxBytes),
+		"#define VEER_NF_ACCEPT 1",
+		"#define VEER_NF_DROP 0",
 	}
 	for _, define := range defines {
 		if !strings.Contains(string(helpers), define) {

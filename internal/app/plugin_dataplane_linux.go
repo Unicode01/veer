@@ -27,15 +27,23 @@ func newPluginDataplaneRuntime(cfg *Config) pluginDataplaneRuntime {
 	if cfg == nil || !cfg.PluginsEnabled() {
 		return disabledPluginDataplaneRuntime{}
 	}
-	return &linuxPluginDataplaneRuntime{cfg: cfg, loaded: make(map[string]*loadedPluginDataplane)}
+	return &linuxPluginDataplaneRuntime{
+		cfg:       cfg,
+		loaded:    make(map[string]*loadedPluginDataplane),
+		netfilter: newKernelNetfilterPluginPipelineRuntime(cfg),
+	}
 }
 
 type linuxPluginDataplaneRuntime struct {
+	operationMu sync.RWMutex
 	mu          sync.Mutex
 	cfg         *Config
 	fingerprint string
 	loaded      map[string]*loadedPluginDataplane
 	snapshot    pluginRuntimeSnapshot
+	netfilter   *kernelNetfilterPluginPipelineRuntime
+	combinedMu  sync.Mutex
+	combined    pluginRuntimeSnapshot
 }
 
 type loadedPluginDataplane struct {
@@ -85,6 +93,21 @@ type loadedPluginObjectRef struct {
 }
 
 func (rt *linuxPluginDataplaneRuntime) Reconcile(catalog PluginCatalog) pluginRuntimeSnapshot {
+	rt.operationMu.Lock()
+	defer rt.operationMu.Unlock()
+	direct := rt.reconcileDirectTC(catalog)
+	netfilter := kernelPluginPipelineManifestOnlySnapshot(catalog)
+	if rt.netfilter != nil {
+		netfilter = rt.netfilter.Reconcile(catalog)
+	}
+	combined := completePluginRuntimeSnapshot(catalog, combinePluginDataplaneSnapshots(catalog, direct, netfilter))
+	rt.combinedMu.Lock()
+	rt.combined = clonePluginRuntimeSnapshot(combined)
+	rt.combinedMu.Unlock()
+	return combined
+}
+
+func (rt *linuxPluginDataplaneRuntime) reconcileDirectTC(catalog PluginCatalog) pluginRuntimeSnapshot {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
@@ -148,12 +171,64 @@ func (rt *linuxPluginDataplaneRuntime) Reconcile(catalog PluginCatalog) pluginRu
 }
 
 func (rt *linuxPluginDataplaneRuntime) Snapshot() pluginRuntimeSnapshot {
+	rt.combinedMu.Lock()
+	defer rt.combinedMu.Unlock()
+	return clonePluginRuntimeSnapshot(rt.combined)
+}
+
+func (rt *linuxPluginDataplaneRuntime) PluginDataplaneHealthy() bool {
+	if rt == nil {
+		return true
+	}
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
+
+	rt.mu.Lock()
+	directHealthy := rt.loadedAttachmentsHealthyLocked()
+	rt.mu.Unlock()
+	if !directHealthy || rt.netfilter == nil {
+		return directHealthy
+	}
+
+	rt.netfilter.mu.Lock()
+	defer rt.netfilter.mu.Unlock()
+	if len(rt.netfilter.desired) == 0 {
+		return true
+	}
+	if kernelNetfilterPluginAttachmentsStaged(rt.netfilter.attachments) {
+		return false
+	}
+	return rt.netfilter.attachmentsHealthyLocked(rt.netfilter.desired)
+}
+
+func (rt *linuxPluginDataplaneRuntime) directSnapshot() pluginRuntimeSnapshot {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return clonePluginRuntimeSnapshot(rt.snapshot)
 }
 
 func (rt *linuxPluginDataplaneRuntime) Close() error {
+	rt.operationMu.Lock()
+	defer rt.operationMu.Unlock()
+	var failures []string
+	if err := rt.closeDirectTC(); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if rt.netfilter != nil {
+		if err := rt.netfilter.Close(); err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
+	rt.combinedMu.Lock()
+	rt.combined = pluginRuntimeSnapshot{}
+	rt.combinedMu.Unlock()
+	if len(failures) > 0 {
+		return fmt.Errorf("plugin dataplane cleanup: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func (rt *linuxPluginDataplaneRuntime) closeDirectTC() error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.cleanupLocked()

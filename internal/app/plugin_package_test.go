@@ -1709,6 +1709,34 @@ func TestPluginPackageStageIntegrityAndBounds(t *testing.T) {
 	})
 }
 
+func TestNormalizePluginPackageEntryNameRejectsNonPortablePaths(t *testing.T) {
+	for _, value := range []string{
+		"0:/0",
+		"C:/escape",
+		"plugin/file:stream",
+		"plugin/NUL",
+		"plugin/con.txt",
+		"plugin/COM1.log",
+		"plugin/LPT9",
+		"plugin/trailing.",
+		"plugin/trailing ",
+		"plugin/control\x1fbyte",
+	} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			if normalized, err := normalizePluginPackageEntryName(value); err == nil {
+				t.Fatalf("normalizePluginPackageEntryName(%q) = %q, want error", value, normalized)
+			}
+		})
+	}
+	for _, value := range []string{"plugin/plugin.json", "plugin/ui/index.html", "plugin/com10.txt", "plugin/null.txt"} {
+		t.Run("valid_"+value, func(t *testing.T) {
+			if normalized, err := normalizePluginPackageEntryName(value); err != nil || normalized != value {
+				t.Fatalf("normalizePluginPackageEntryName(%q) = %q, %v", value, normalized, err)
+			}
+		})
+	}
+}
+
 func TestPluginPackageSignedStageReportsRevokedPublisherWithoutBlockingReview(t *testing.T) {
 	manager := newPluginPackageManagerForTest(t)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)

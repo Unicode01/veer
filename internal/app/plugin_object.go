@@ -352,6 +352,8 @@ func pluginObjectProgramKind(program *ebpf.ProgramSpec) string {
 		return kernelEngineTC
 	case ebpf.XDP:
 		return kernelEngineXDP
+	case ebpf.Netfilter:
+		return pluginEngineNetfilter
 	default:
 		return "control"
 	}

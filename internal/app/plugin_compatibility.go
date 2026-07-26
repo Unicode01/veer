@@ -50,6 +50,8 @@ var pluginRuntimeFeatures = []string{
 	"dataplane.tc_pipeline.v2",
 	"dataplane.hook_order.v1",
 	"dataplane.xdp_pipeline.v1",
+	"dataplane.netfilter_pipeline.v1",
+	"dataplane.netfilter_skb_dynptr.v1",
 	"ebpf.bounded_reads.v1",
 	"ebpf.map_transactions.v1",
 	"ebpf.ring_push.v1",

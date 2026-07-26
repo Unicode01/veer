@@ -4400,6 +4400,7 @@ func (pm *ProcessManager) monitorLoop() {
 		checkManagedRuntimeDrift := false
 		checkPluginCatalogDrift := false
 		checkPluginProbations := false
+		repairPluginDataplane := false
 		kernelAttachmentIssue := ""
 		kernelAttachmentRecovered := ""
 		attemptKernelAttachmentHeal := false
@@ -4619,6 +4620,11 @@ func (pm *ProcessManager) monitorLoop() {
 				nextKernelAttachmentHealState(pm.lastKernelAttachmentIssue, pm.kernelAttachmentHealAt, now, kernelAttachmentIssue)
 			pm.mu.Unlock()
 		}
+		if checkKernelAttachments {
+			if health, ok := pm.pluginRuntime.(pluginDataplaneHealthRuntime); ok && !health.PluginDataplaneHealthy() {
+				repairPluginDataplane = true
+			}
+		}
 		if attemptKernelAttachmentHeal && runtime != nil {
 			healResults, healErr := healKernelAttachments(runtime)
 			if healErr != nil {
@@ -4710,6 +4716,13 @@ func (pm *ProcessManager) monitorLoop() {
 		if kernelDegradedIdleRebuildReason != "" {
 			log.Printf("kernel dataplane self-heal: %s; rebuilding kernel dataplane now", kernelDegradedIdleRebuildReason)
 			pm.requestRedistributeWorkers(0)
+		}
+		if repairPluginDataplane {
+			if _, err := pm.reconcilePluginsForRuntimeWithError(); err != nil {
+				log.Printf("plugin dataplane self-heal failed: %v", err)
+			} else {
+				log.Printf("plugin dataplane self-heal: reconciled unhealthy attachments")
+			}
 		}
 		if checkManagedRuntimeDrift {
 			pm.detectManagedNetworkRuntimeDrift()

@@ -224,7 +224,7 @@ veer plugin contract --output ./api-contract.json
 veer plugin contract --types-output ./methods.d.ts
 ```
 
-`GET /api/plugin-sdk-contract` 返回运行中二进制生成的同一份权威契约。契约摘要按 canonical JSON 计算；控制方法、feature、资源限制或 pipeline ABI 发生漂移时，仓库契约测试和 `contract --check` 都会失败。contract v6 的 `control.capabilities` 为每个 Host 方法声明必需/任一/条件权限、可调用阶段、主 VM/Worker 范围以及隔离 IPC 请求和响应上限；`operations` 公开持久 operation 的状态和配额，`control_methods` 作为简单工具兼容列表保留，并由同一注册表生成。
+`GET /api/plugin-sdk-contract` 返回运行中二进制生成的同一份权威契约。契约摘要按 canonical JSON 计算；控制方法、feature、资源限制或 pipeline ABI 发生漂移时，仓库契约测试和 `contract --check` 都会失败。contract v7 的 `control.capabilities` 为每个 Host 方法声明必需/任一/条件权限、可调用阶段、主 VM/Worker 范围以及隔离 IPC 请求和响应上限；`netfilter_pipeline` 声明原生 Hook placement 契约，`operations` 公开持久 operation 的状态和配额，`control_methods` 作为简单工具兼容列表保留，并由同一注册表生成。
 
 ### 兼容与 ABI 演进
 
@@ -741,9 +741,46 @@ Veer 使用独立最小 Dispatcher，不改写实验性的 Forward XDP NAT objec
 
 没有 XDP Hook、插件被禁用或插件系统关闭时，Dispatcher 会从接口完全卸载，不给无插件热路径增加 lookup。接口删除后，同名接口重建会按新 ifindex 重新挂载；崩溃恢复同时核对原进程 start-time 和 XDP program ID，绝不根据旧 ifindex 盲目删除其他程序。对象内容更新可继承兼容的 `state_maps`；Hook、模式、优先级或接口范围变化失败时不会隐形保留旧链。
 
-同一个 eBPF object 不能同时承载 TC 和 XDP Hook。跨引擎插件应拆成两个 object，使私有 map 的 ownership 和 Goja map API 目标保持唯一；需要同步配置时由控制面使用 map transaction 分别更新。
+同一个 eBPF object 不能同时承载 TC、XDP 或 Netfilter 中的多个数据面引擎。跨引擎插件应按引擎拆分 object，使私有 map 的 ownership 和 Goja map API 目标保持唯一；需要同步配置时由控制面使用 map transaction 分别更新。
 
 `dataplane.xdp_pipeline.v1` 表示宿主具备 XDP program、prog-array 和接口枚举基础能力。它不保证每块网卡支持 native XDP，最终 attach mode 和冲突仍以运行时 attachment 状态为准。
+
+## Netfilter 数据面插件
+
+Netfilter 插件使用 `hooks.attach()` 声明原生协议栈挂载位置，由 Veer 创建和持有 `bpf_link`。它不是 vtap，也不创建 netdev、Dispatcher 或共享 tail-call map；插件不应自行执行挂载命令。
+
+```js
+ebpf.loadObject({
+  id: "firewall",
+  path: "firewall.o",
+  sha256: crypto.sha256File("firewall.o"),
+  programs: [{id: "filter", section: "netfilter/filter", type: "netfilter"}],
+  state_maps: [{name: "rules", policy: "preserve", schema_version: 1}]
+});
+
+hooks.attach({
+  id: "forward-filter",
+  engine: "netfilter",
+  family: "inet",
+  hook: "forward",
+  phase: "filter",
+  namespace: "host",
+  priority: 100,
+  program: "firewall:filter",
+  mode: "drop"
+});
+```
+
+- `family=inet` 展开成共享同一 object/map 的 IPv4、IPv6 两条 link；也可只选 `ipv4` 或 `ipv6`。
+- `hook` 支持 `prerouting/input/forward/output/postrouting`，`phase` 支持 `early/raw/mangle/dstnat/filter/security/srcnat/late`。同一 `namespace/family/hook/phase` 最多 8 个 Hook，按 `priority`、插件 ID、Hook ID 稳定排序；`before/after` 可覆盖默认顺序。
+- 同一 placement 的插件通过原生 Netfilter priority 构成逻辑链。程序返回 `VEER_NF_ACCEPT` 后继续执行后续插件、nftables 和系统 Hook；返回 `VEER_NF_DROP` 立即终止。无需也不能调用 TC/XDP continue helper。
+- Netfilter Hook 是 namespace 级而不是接口级。接口范围必须由 BPF 程序读取 `nf_hook_state.in/out` 的 ifindex，并结合本插件私有 map 判断；Goja 可用 `ebpf.mapPut()` 或 `ebpf.mapTransaction()` 热更新范围。不要把接口名写死进 object。
+- 命名 namespace Hook 还要求 manifest 声明 `net.namespace`，并由 `control.namespace_access` 精确授权名称或模式；该权限只允许注册已授权 placement，不会在注册阶段执行 namespace 操作。
+- Netfilter context 应使用目标内核 BTF 和 CO-RE 声明编译。`plugins/include/veer_plugin_helpers.h` 提供 verdict 常量，但不会复制易漂移的内核结构定义。
+- 没有 Netfilter Hook、插件数据面关闭或插件被禁用时，不加载 object/link，也不改变 TC/XDP 热路径。namespace 同名重建后，下一次 reconcile 会按新 namespace identity 重新挂载。
+- 规则、接口和地址变更应优先通过兼容的 `state_maps` 更新，不需要换 link。内核不支持该 link 类型的原子 program update 时，object 代码更新使用 staging priority 两阶段切换；候选加载失败会保留旧 link，但成功换链的极短窗口可能同时存在旧、新程序。会做非幂等 rewrite/NAT 的插件应把频繁变化放进 map，并在维护窗口升级程序代码。
+
+`dataplane.netfilter_pipeline.v1` 只表示宿主通过了 Netfilter program 和原生 link attach 探测，不表示能够完整复刻 nftables 的 conntrack、NAT expression 或全部 helper。需要通过 skb dynptr 读取包内容的插件还应检查 `dataplane.netfilter_skb_dynptr.v1`；不读取包体的简单 Netfilter 插件不受该 kfunc 可用性限制。生产插件仍须在目标内核上验证 verifier、BTF/kfunc 和协议行为。
 
 ## 网络管理权限
 
