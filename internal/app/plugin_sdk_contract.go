@@ -12,20 +12,21 @@ import (
 	"strings"
 )
 
-const pluginSDKContractVersion = 6
+const pluginSDKContractVersion = 7
 
 type pluginSDKAPIContract struct {
-	Version        int                              `json:"version"`
-	Runtime        pluginSDKRuntimeContract         `json:"runtime"`
-	TCPipeline     PluginTCPipelineCapabilities     `json:"tc_pipeline"`
-	PacketMetadata PluginPacketMetadataCapabilities `json:"packet_metadata"`
-	XDPPipeline    PluginXDPPipelineCapabilities    `json:"xdp_pipeline"`
-	EventBus       pluginSDKEventBusContract        `json:"event_bus"`
-	Schemas        pluginSDKSchemaContract          `json:"schemas"`
-	RingBuffers    pluginSDKRingContract            `json:"ring_buffers"`
-	Operations     pluginSDKOperationContract       `json:"operations"`
-	Control        pluginSDKControlContract         `json:"control"`
-	ControlMethods []string                         `json:"control_methods"`
+	Version           int                                 `json:"version"`
+	Runtime           pluginSDKRuntimeContract            `json:"runtime"`
+	TCPipeline        PluginTCPipelineCapabilities        `json:"tc_pipeline"`
+	PacketMetadata    PluginPacketMetadataCapabilities    `json:"packet_metadata"`
+	XDPPipeline       PluginXDPPipelineCapabilities       `json:"xdp_pipeline"`
+	NetfilterPipeline PluginNetfilterPipelineCapabilities `json:"netfilter_pipeline"`
+	EventBus          pluginSDKEventBusContract           `json:"event_bus"`
+	Schemas           pluginSDKSchemaContract             `json:"schemas"`
+	RingBuffers       pluginSDKRingContract               `json:"ring_buffers"`
+	Operations        pluginSDKOperationContract          `json:"operations"`
+	Control           pluginSDKControlContract            `json:"control"`
+	ControlMethods    []string                            `json:"control_methods"`
 }
 
 type pluginSDKControlContract struct {
@@ -102,9 +103,10 @@ func currentPluginSDKAPIContract() pluginSDKAPIContract {
 			ResourceLimits: pluginResourceLimitsFromConfig(nil),
 			Features:       append([]string(nil), pluginRuntimeFeatures...),
 		},
-		TCPipeline:     capabilities.TCPipeline,
-		PacketMetadata: capabilities.PacketMetadata,
-		XDPPipeline:    capabilities.XDPPipeline,
+		TCPipeline:        capabilities.TCPipeline,
+		PacketMetadata:    capabilities.PacketMetadata,
+		XDPPipeline:       capabilities.XDPPipeline,
+		NetfilterPipeline: capabilities.NetfilterPipeline,
 		EventBus: pluginSDKEventBusContract{
 			MaxSubscriptions:        pluginEventMaxSubscriptions,
 			DefaultQueueSize:        pluginEventDefaultQueueSize,

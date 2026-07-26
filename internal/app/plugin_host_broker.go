@@ -117,8 +117,8 @@ func (h *pluginControlHost) runRemoteEvent(
 	h.upgradePhase = event.Kind == "upgrade_snapshot" || event.Kind == "upgrade_restore"
 	h.migrationPhase = event.Kind == "resource_migrate"
 	h.ebpfMigrationPhase = event.Kind == "ebpf_state_migrate"
-	h.resourceMutationTransaction = ""
-	if event.Kind == "reconcile" {
+	h.resourceMutationTransaction = event.resourceMutationTransaction
+	if event.Kind == "reconcile" && h.resourceMutationTransaction == "" {
 		h.resourceMutationTransaction = h.runtime.currentPluginResourceMigrationTransaction()
 	}
 	defer func() {

@@ -119,3 +119,45 @@ func (rt *kernelXDPPluginPipelineRuntime) CompletePluginEBPFStateMigrations(comp
 	completePluginEBPFStateMigrations(rt.loaded, completed)
 	rt.mu.Unlock()
 }
+
+func (rt *linuxPluginDataplaneRuntime) PendingPluginEBPFStateMigrations() []PluginEBPFStateMigration {
+	if rt == nil {
+		return nil
+	}
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
+	rt.mu.Lock()
+	refs := make([]loadedPluginObjectRef, 0)
+	for _, loaded := range rt.loaded {
+		if loaded != nil {
+			refs = append(refs, loaded.objects...)
+		}
+	}
+	rt.mu.Unlock()
+	if rt.netfilter != nil {
+		rt.netfilter.mu.Lock()
+		refs = append(refs, rt.netfilter.loaded...)
+		rt.netfilter.mu.Unlock()
+	}
+	return pendingPluginEBPFStateMigrations(refs)
+}
+
+func (rt *linuxPluginDataplaneRuntime) CompletePluginEBPFStateMigrations(completed []PluginEBPFStateMigration) {
+	if rt == nil || len(completed) == 0 {
+		return
+	}
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
+	rt.mu.Lock()
+	for _, loaded := range rt.loaded {
+		if loaded != nil {
+			completePluginEBPFStateMigrations(loaded.objects, completed)
+		}
+	}
+	rt.mu.Unlock()
+	if rt.netfilter != nil {
+		rt.netfilter.mu.Lock()
+		completePluginEBPFStateMigrations(rt.netfilter.loaded, completed)
+		rt.netfilter.mu.Unlock()
+	}
+}

@@ -482,7 +482,7 @@ test('test host loads bundled control-plane plugins without compatibility shims'
 test('test host exposes every versioned control API method', (t) => {
   const pluginDir = writePlugin(t, testManifest('api_contract'), `exports.onReconcile = function () {};`);
   const host = createTestHost({ pluginDir });
-  assert.equal(apiContract.version, 6);
+  assert.equal(apiContract.version, 7);
   assert.equal(apiContract.runtime.api_version, 'v1');
   assert.equal(apiContract.runtime.tc_pipeline_abi, 2);
   assert.equal(apiContract.runtime.core_priority, 1000);
@@ -493,6 +493,11 @@ test('test host exposes every versioned control API method', (t) => {
   assert.deepEqual(apiContract.tc_pipeline.phases, ['around_core', 'after_apply']);
   assert.ok(apiContract.tc_pipeline.hook_stages.includes('post_apply'));
   assert.ok(apiContract.tc_pipeline.hook_stages.includes('post_reply_apply'));
+  assert.equal(apiContract.netfilter_pipeline.hook_limit, 8);
+  assert.equal(apiContract.netfilter_pipeline.group_limit, 64);
+  assert.deepEqual(apiContract.netfilter_pipeline.families, ['inet', 'ipv4', 'ipv6']);
+  assert.ok(apiContract.netfilter_pipeline.hooks.includes('forward'));
+  assert.ok(apiContract.netfilter_pipeline.phases.includes('filter'));
   assert.equal(apiContract.packet_metadata.abi, 1);
   assert.equal(apiContract.packet_metadata.binding_limit, 16);
   assert.equal(apiContract.packet_metadata.namespace_limit, 32);

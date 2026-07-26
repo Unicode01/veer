@@ -51,6 +51,10 @@ const (
 	pluginTCPipelineDirectionHookLimit   = 14
 	pluginXDPPipelineProgramArrayEntries = 24
 	pluginXDPPipelineHookLimit           = 8
+	pluginNetfilterPipelineHookLimit     = 8
+	pluginNetfilterPipelineGroupLimit    = 64
+
+	pluginEngineNetfilter = "netfilter"
 
 	pluginPipelineDirectionForward = "forward"
 	pluginPipelineDirectionReply   = "reply"
@@ -150,34 +154,35 @@ type PluginCatalogUpdate struct {
 }
 
 type PluginRuntimeCapabilities struct {
-	BuiltinPipelineID        string                             `json:"builtin_pipeline_id"`
-	RuntimeVersion           string                             `json:"runtime_version"`
-	ControlAPIABI            int                                `json:"control_api_abi"`
-	TCPipelineABI            int                                `json:"tc_pipeline_abi"`
-	HostOS                   string                             `json:"host_os"`
-	HostArch                 string                             `json:"host_arch"`
-	KernelRelease            string                             `json:"kernel_release,omitempty"`
-	Features                 []string                           `json:"features"`
-	AvailableFeatures        []string                           `json:"available_features"`
-	FeatureStatus            map[string]PluginHostFeatureStatus `json:"feature_status"`
-	CorePriority             int                                `json:"core_priority"`
-	ManifestDiscovery        bool                               `json:"manifest_discovery"`
-	ObjectValidation         bool                               `json:"object_validation"`
-	ProtectedAssets          bool                               `json:"protected_assets"`
-	MinimumSandboxLevel      string                             `json:"minimum_sandbox_level"`
-	RequireSignedPackages    bool                               `json:"require_signed_packages"`
-	StabilityLevels          []string                           `json:"stability_levels"`
-	ExternalDataplaneAttach  bool                               `json:"external_dataplane_attach"`
-	ExternalDataplaneEngines []string                           `json:"external_dataplane_engines"`
-	RegistrationOnlyEngines  []string                           `json:"registration_only_engines,omitempty"`
-	SupportedEngines         []string                           `json:"supported_engines"`
-	SupportedHookModes       []string                           `json:"supported_hook_modes"`
-	TCPipeline               PluginTCPipelineCapabilities       `json:"tc_pipeline"`
-	PacketMetadata           PluginPacketMetadataCapabilities   `json:"packet_metadata"`
-	XDPPipeline              PluginXDPPipelineCapabilities      `json:"xdp_pipeline"`
-	ResourceLimits           PluginResourceLimits               `json:"resource_limits"`
-	ResourceUsage            PluginResourceUsage                `json:"resource_usage"`
-	Limitations              []string                           `json:"limitations,omitempty"`
+	BuiltinPipelineID        string                              `json:"builtin_pipeline_id"`
+	RuntimeVersion           string                              `json:"runtime_version"`
+	ControlAPIABI            int                                 `json:"control_api_abi"`
+	TCPipelineABI            int                                 `json:"tc_pipeline_abi"`
+	HostOS                   string                              `json:"host_os"`
+	HostArch                 string                              `json:"host_arch"`
+	KernelRelease            string                              `json:"kernel_release,omitempty"`
+	Features                 []string                            `json:"features"`
+	AvailableFeatures        []string                            `json:"available_features"`
+	FeatureStatus            map[string]PluginHostFeatureStatus  `json:"feature_status"`
+	CorePriority             int                                 `json:"core_priority"`
+	ManifestDiscovery        bool                                `json:"manifest_discovery"`
+	ObjectValidation         bool                                `json:"object_validation"`
+	ProtectedAssets          bool                                `json:"protected_assets"`
+	MinimumSandboxLevel      string                              `json:"minimum_sandbox_level"`
+	RequireSignedPackages    bool                                `json:"require_signed_packages"`
+	StabilityLevels          []string                            `json:"stability_levels"`
+	ExternalDataplaneAttach  bool                                `json:"external_dataplane_attach"`
+	ExternalDataplaneEngines []string                            `json:"external_dataplane_engines"`
+	RegistrationOnlyEngines  []string                            `json:"registration_only_engines,omitempty"`
+	SupportedEngines         []string                            `json:"supported_engines"`
+	SupportedHookModes       []string                            `json:"supported_hook_modes"`
+	TCPipeline               PluginTCPipelineCapabilities        `json:"tc_pipeline"`
+	PacketMetadata           PluginPacketMetadataCapabilities    `json:"packet_metadata"`
+	XDPPipeline              PluginXDPPipelineCapabilities       `json:"xdp_pipeline"`
+	NetfilterPipeline        PluginNetfilterPipelineCapabilities `json:"netfilter_pipeline"`
+	ResourceLimits           PluginResourceLimits                `json:"resource_limits"`
+	ResourceUsage            PluginResourceUsage                 `json:"resource_usage"`
+	Limitations              []string                            `json:"limitations,omitempty"`
 }
 
 type PluginHostFeatureStatus struct {
@@ -201,6 +206,16 @@ type PluginXDPPipelineCapabilities struct {
 	HookStages          []string `json:"hook_stages"`
 	Attaches            []string `json:"attaches"`
 	RequiresInterfaces  bool     `json:"requires_interfaces"`
+}
+
+type PluginNetfilterPipelineCapabilities struct {
+	HookLimit           int      `json:"hook_limit"`
+	GroupLimit          int      `json:"group_limit"`
+	Families            []string `json:"families"`
+	Hooks               []string `json:"hooks"`
+	Phases              []string `json:"phases"`
+	NamespaceScoped     bool     `json:"namespace_scoped"`
+	InterfaceMatchScope bool     `json:"interface_match_scope"`
 }
 
 type PluginPacketMetadataCapabilities struct {
@@ -296,6 +311,10 @@ type PluginAttachmentState struct {
 	Attach         string                        `json:"attach"`
 	Stage          string                        `json:"stage,omitempty"`
 	Interface      string                        `json:"interface"`
+	Family         string                        `json:"family,omitempty"`
+	NetfilterHook  string                        `json:"netfilter_hook,omitempty"`
+	Phase          string                        `json:"phase,omitempty"`
+	Namespace      string                        `json:"namespace,omitempty"`
 	Program        string                        `json:"program"`
 	Mode           string                        `json:"mode"`
 	Context        []string                      `json:"context,omitempty"`
@@ -422,7 +441,11 @@ type PluginHook struct {
 	ID             string                        `json:"id"`
 	Engine         string                        `json:"engine"`
 	Attach         string                        `json:"attach,omitempty"`
-	Stage          string                        `json:"stage"`
+	Stage          string                        `json:"stage,omitempty"`
+	Family         string                        `json:"family,omitempty"`
+	NetfilterHook  string                        `json:"hook,omitempty"`
+	Phase          string                        `json:"phase,omitempty"`
+	Namespace      string                        `json:"namespace,omitempty"`
 	Priority       int                           `json:"priority,omitempty"`
 	Before         []string                      `json:"before,omitempty"`
 	After          []string                      `json:"after,omitempty"`
@@ -720,9 +743,9 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 		RequireSignedPackages:    cfg.PluginsRequireSignedPackages(),
 		StabilityLevels:          []string{pluginStabilityLab, pluginStabilityPreview, pluginStabilityStable, pluginStabilityDeprecated},
 		ExternalDataplaneAttach:  externalDataplaneAttach,
-		ExternalDataplaneEngines: []string{kernelEngineTC, kernelEngineXDP},
+		ExternalDataplaneEngines: []string{kernelEngineTC, kernelEngineXDP, pluginEngineNetfilter},
 		RegistrationOnlyEngines:  nil,
-		SupportedEngines:         []string{kernelEngineTC, kernelEngineXDP, "control"},
+		SupportedEngines:         []string{kernelEngineTC, kernelEngineXDP, pluginEngineNetfilter, "control"},
 		SupportedHookModes:       []string{"observe", "rewrite", "redirect", "drop", "control"},
 		TCPipeline: PluginTCPipelineCapabilities{
 			ProgramArrayEntries: pluginTCPipelineProgramArrayEntries,
@@ -758,6 +781,15 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 			Attaches:            []string{"ingress"},
 			RequiresInterfaces:  true,
 		},
+		NetfilterPipeline: PluginNetfilterPipelineCapabilities{
+			HookLimit:           pluginNetfilterPipelineHookLimit,
+			GroupLimit:          pluginNetfilterPipelineGroupLimit,
+			Families:            []string{"inet", "ipv4", "ipv6"},
+			Hooks:               []string{"prerouting", "input", "forward", "output", "postrouting"},
+			Phases:              []string{"early", "raw", "mangle", "dstnat", "filter", "security", "srcnat", "late"},
+			NamespaceScoped:     true,
+			InterfaceMatchScope: false,
+		},
 		ResourceLimits: pluginResourceLimitsFromConfig(cfg),
 		Limitations: []string{
 			"veer is a logical tc tail-call pipeline, not a Linux netdev; real interfaces are only attach targets or optional handoff adapters",
@@ -776,6 +808,7 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 			"plugin stability is declared by manifest.stability: lab is for examples/tests only, preview is suitable for controlled deployments, stable is expected to be production-ready, and deprecated should not be used for new deployments",
 			"lab, preview, and stable plugins can execute control scripts and join external tc dataplane when the corresponding global plugin switches are enabled; deprecated plugins are always blocked",
 			"xdp plugins run only on explicit ingress interfaces before the tc pipeline; Veer refuses to replace an existing XDP program on the same interface",
+			"netfilter plugins use host-owned native hook links scoped by network namespace, protocol family, hook, and semantic phase; interface matching is implemented by the plugin program",
 			"plugin UI assets require the same API bearer token; prefer single-file UI assets or authenticated fetches",
 			"veer is the built-in forward pipeline and cannot be replaced by an external plugin manifest",
 		},

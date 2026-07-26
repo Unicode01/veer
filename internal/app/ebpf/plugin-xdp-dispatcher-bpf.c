@@ -129,7 +129,8 @@ static __always_inline void xdp_plugin_metric_miss(__u32 index)
 		metric->tail_call_misses++;
 }
 
-static __always_inline int dispatch_xdp_plugin_continue(struct xdp_md *xdp)
+SEC("xdp/veer_plugin_continue")
+int veer_xdp_plugin_continue(struct xdp_md *xdp)
 {
 	struct xdp_plugin_dispatch *dispatch = xdp_plugin_dispatch_state();
 	__u32 slot_base;
@@ -154,7 +155,6 @@ static __always_inline int dispatch_xdp_plugin_continue(struct xdp_md *xdp)
 	}
 	return XDP_PASS;
 }
-
 SEC("xdp/veer_plugin_dispatch")
 int veer_xdp_plugin_dispatch(struct xdp_md *xdp)
 {
@@ -186,13 +186,7 @@ int veer_xdp_plugin_dispatch(struct xdp_md *xdp)
 	if (dispatch->mask == 0)
 		return XDP_PASS;
 	bpf_tail_call(xdp, &xdp_prog_chain, VEER_XDP_PLUGIN_CONTINUE_SLOT);
-	return dispatch_xdp_plugin_continue(xdp);
-}
-
-SEC("xdp/veer_plugin_continue")
-int veer_xdp_plugin_continue(struct xdp_md *xdp)
-{
-	return dispatch_xdp_plugin_continue(xdp);
+	return XDP_PASS;
 }
 
 char _license[] SEC("license") = "GPL";

@@ -23,6 +23,9 @@ func FuzzNormalizePluginPackageEntryName(f *testing.F) {
 		"/absolute",
 		"plugin\\windows",
 		"plugin/\x00invalid",
+		"0:/0",
+		"plugin/file:stream",
+		"plugin/NUL",
 	} {
 		f.Add(seed)
 	}

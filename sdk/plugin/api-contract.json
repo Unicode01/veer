@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -73,6 +73,8 @@
       "dataplane.tc_pipeline.v2",
       "dataplane.hook_order.v1",
       "dataplane.xdp_pipeline.v1",
+      "dataplane.netfilter_pipeline.v1",
+      "dataplane.netfilter_skb_dynptr.v1",
       "ebpf.bounded_reads.v1",
       "ebpf.map_transactions.v1",
       "ebpf.ring_push.v1",
@@ -137,6 +139,34 @@
       "ingress"
     ],
     "requires_interfaces": true
+  },
+  "netfilter_pipeline": {
+    "hook_limit": 8,
+    "group_limit": 64,
+    "families": [
+      "inet",
+      "ipv4",
+      "ipv6"
+    ],
+    "hooks": [
+      "prerouting",
+      "input",
+      "forward",
+      "output",
+      "postrouting"
+    ],
+    "phases": [
+      "early",
+      "raw",
+      "mangle",
+      "dstnat",
+      "filter",
+      "security",
+      "srcnat",
+      "late"
+    ],
+    "namespace_scoped": true,
+    "interface_match_scope": false
   },
   "event_bus": {
     "max_subscriptions": 64,

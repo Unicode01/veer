@@ -84,7 +84,7 @@ declare global {
   interface VeerObjectProgramSpec {
     id: string;
     section: string;
-    type?: string;
+    type?: 'tc' | 'xdp' | 'netfilter' | 'control' | string;
     attach_type?: string;
   }
 
@@ -105,9 +105,13 @@ declare global {
 
   interface VeerHookSpec {
     id: string;
-    engine?: 'tc' | 'xdp' | string;
-    attach?: 'ingress' | 'egress' | string;
-    stage: 'pre_forward' | 'post_lookup' | 'post_apply' | 'pre_reply' | 'post_reply' | 'post_reply_apply' | string;
+    engine?: 'tc' | 'xdp' | 'netfilter' | 'control' | string;
+    attach?: 'ingress' | 'egress' | 'both' | 'none' | string;
+    stage?: 'pre_forward' | 'post_lookup' | 'post_apply' | 'pre_reply' | 'post_reply' | 'post_reply_apply' | string;
+    family?: 'inet' | 'ipv4' | 'ipv6';
+    hook?: 'prerouting' | 'input' | 'forward' | 'output' | 'postrouting';
+    phase?: 'early' | 'raw' | 'mangle' | 'dstnat' | 'filter' | 'security' | 'srcnat' | 'late';
+    namespace?: 'host' | string;
     priority?: number;
     before?: string[];
     after?: string[];

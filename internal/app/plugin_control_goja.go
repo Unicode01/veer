@@ -205,8 +205,9 @@ type pluginControlEvent struct {
 	SocketEvent   *pluginControlSocketEvent
 	Reason        string
 
-	bypassUpgradeGate  bool
-	inheritUpgradeGate bool
+	bypassUpgradeGate           bool
+	inheritUpgradeGate          bool
+	resourceMutationTransaction string
 }
 
 type pluginControlResourceMigrationEvent struct {
@@ -1807,8 +1808,8 @@ func (h *pluginControlHost) runEvent(event pluginControlEvent, optionalHandler b
 	h.upgradePhase = event.Kind == "upgrade_snapshot" || event.Kind == "upgrade_restore"
 	h.migrationPhase = event.Kind == "resource_migrate"
 	h.ebpfMigrationPhase = event.Kind == "ebpf_state_migrate"
-	h.resourceMutationTransaction = ""
-	if event.Kind == "reconcile" && h.runtime != nil {
+	h.resourceMutationTransaction = event.resourceMutationTransaction
+	if event.Kind == "reconcile" && h.resourceMutationTransaction == "" && h.runtime != nil {
 		h.resourceMutationTransaction = h.runtime.currentPluginResourceMigrationTransaction()
 	}
 	defer func() {
@@ -1965,6 +1966,7 @@ func (rt *gojaPluginControlRuntime) applyRuntimeResourcesForReconcile(plugin Loa
 		return nil
 	}
 	failures := make([]string, 0)
+	migrationTransaction := rt.currentPluginResourceMigrationTransaction()
 	for _, resource := range plugin.Resources {
 		if resource.RuntimeUpdate != "runtime_apply" {
 			continue
@@ -1986,9 +1988,10 @@ func (rt *gojaPluginControlRuntime) applyRuntimeResourcesForReconcile(plugin Loa
 			continue
 		}
 		err = rt.runPluginControl(plugin, pluginControlEvent{
-			Kind:     "resource_apply",
-			Resource: &current,
-			Records:  records,
+			Kind:                        "resource_apply",
+			Resource:                    &current,
+			Records:                     records,
+			resourceMutationTransaction: migrationTransaction,
 		}, false)
 		if err != nil {
 			_ = markPluginRuntimeError(rt.db, plugin.ID, "resource", current.ID, err)
@@ -3020,6 +3023,10 @@ func (h *pluginControlHost) hookAttach(call goja.FunctionCall) goja.Value {
 	h.exportJSONValue(call.Arguments[0], &hook, "hooks.attach")
 	if err := normalizePluginHook(&hook); err != nil {
 		h.throwf("hooks.attach: %v", err)
+	}
+	if hook.Engine == pluginEngineNetfilter && hook.Namespace != "host" {
+		h.requireDeclaredPermission("net.namespace")
+		h.requireNamespaceAccess(hook.Namespace, "hooks.attach")
 	}
 	if pluginHookIndex(h.surface.Hooks, hook.ID) >= 0 {
 		h.throwf("hooks.attach: duplicate hook %q", hook.ID)
@@ -4395,6 +4402,12 @@ func (h *pluginControlHost) requirePermission(permission string) {
 	if h.registrationPhase && !pluginControlRegistrationPermissionAllowed(permission) {
 		h.throwf("permission %s is unavailable during plugin registration", permission)
 	}
+	if !pluginControlHasPermission(h.plugin, permission) {
+		h.throwf("permission %s is required", permission)
+	}
+}
+
+func (h *pluginControlHost) requireDeclaredPermission(permission string) {
 	if !pluginControlHasPermission(h.plugin, permission) {
 		h.throwf("permission %s is required", permission)
 	}

@@ -657,7 +657,7 @@ func applyKernelXDPPluginOrdering(desired []kernelXDPPluginDesiredPlugin, states
 
 func pluginHasHookEngine(plugin LoadedPlugin, engine string) bool {
 	for _, hook := range plugin.Hooks {
-		if hook.Engine == engine && hook.Attach != "none" && hook.Mode != "control" {
+		if hook.Engine == engine && hook.Mode != "control" && (engine == pluginEngineNetfilter || hook.Attach != "none") {
 			return true
 		}
 	}

@@ -284,12 +284,16 @@ func TestPluginRuntimeCapabilitiesExposeCompatibilityContract(t *testing.T) {
 	if caps.XDPPipeline.ProgramArrayEntries != pluginXDPPipelineProgramArrayEntries || caps.XDPPipeline.HookLimit != pluginXDPPipelineHookLimit || !caps.XDPPipeline.RequiresInterfaces {
 		t.Fatalf("xdp pipeline contract = %+v", caps.XDPPipeline)
 	}
+	if caps.NetfilterPipeline.HookLimit != pluginNetfilterPipelineHookLimit || caps.NetfilterPipeline.GroupLimit != pluginNetfilterPipelineGroupLimit || !caps.NetfilterPipeline.NamespaceScoped || caps.NetfilterPipeline.InterfaceMatchScope {
+		t.Fatalf("netfilter pipeline contract = %+v", caps.NetfilterPipeline)
+	}
 	for _, feature := range []string{
 		"control.process_isolation.v1",
 		"control.resource_schema.v1",
 		"control.resource_transactions.v1",
 		"dataplane.tc_pipeline.v2",
 		"dataplane.xdp_pipeline.v1",
+		"dataplane.netfilter_pipeline.v1",
 		"ebpf.map_migration.v1",
 	} {
 		if !containsString(caps.Features, feature) {
@@ -403,6 +407,74 @@ func TestPluginHostPreflightInfersPrivateMapRequirements(t *testing.T) {
 	availability = currentPluginHostFeatureAvailability()
 	if !availability.Status["ebpf.map_transactions.v1"].Available {
 		t.Fatalf("map transaction availability = %+v", availability.Status["ebpf.map_transactions.v1"])
+	}
+}
+
+func TestPluginHostPreflightAllowsNetfilterMapsWithoutSchedCLS(t *testing.T) {
+	original := detectPluginHostKernelCapabilities
+	t.Cleanup(func() { detectPluginHostKernelCapabilities = original })
+	available := kernelcap.CapabilityCheck{Available: true}
+	detectPluginHostKernelCapabilities = func() kernelcap.KernelCapabilities {
+		return kernelcap.KernelCapabilities{
+			OS:                 "linux",
+			BPFMapArray:        available,
+			BPFMapHash:         available,
+			BPFMapPerCPUHash:   available,
+			BPFMapPerCPUArray:  available,
+			BPFMapProgArray:    available,
+			BPFSchedCLS:        kernelcap.CapabilityCheck{Reason: "sched_cls unavailable"},
+			BPFNetfilter:       available,
+			BPFNetfilterDynptr: available,
+			NetfilterAttach:    available,
+		}
+	}
+	plugin := relationshipTestPlugin("netfilter_maps", "1.0.0")
+	plugin.Control = &PluginControl{Permissions: []string{"ebpf.map_write"}}
+	plugin.Hooks = []PluginHook{{
+		ID: "filter", Engine: pluginEngineNetfilter, Family: "ipv4", NetfilterHook: "output", Phase: "filter", Namespace: "host",
+		Program: "dataplane:filter", Mode: "drop",
+	}}
+	if err := checkPluginHostPrerequisites(plugin); err != nil {
+		t.Fatalf("Netfilter map preflight unexpectedly depends on sched_cls: %v", err)
+	}
+	availability := currentPluginHostFeatureAvailability()
+	if !availability.Status["ebpf.private_maps"].Available || !availability.Status["dataplane.netfilter_pipeline.v1"].Available {
+		t.Fatalf("feature availability = %+v", availability.Status)
+	}
+}
+
+func TestPluginHostPreflightSeparatesNetfilterAttachFromSKBDynptr(t *testing.T) {
+	original := detectPluginHostKernelCapabilities
+	t.Cleanup(func() { detectPluginHostKernelCapabilities = original })
+	available := kernelcap.CapabilityCheck{Available: true}
+	detectPluginHostKernelCapabilities = func() kernelcap.KernelCapabilities {
+		return kernelcap.KernelCapabilities{
+			OS:                 "linux",
+			BPFNetfilter:       available,
+			BPFNetfilterDynptr: kernelcap.CapabilityCheck{Reason: "skb dynptr kfunc unavailable"},
+			NetfilterAttach:    available,
+		}
+	}
+
+	plugin := relationshipTestPlugin("simple_netfilter", "1.0.0")
+	plugin.Hooks = []PluginHook{{
+		ID: "counter", Engine: pluginEngineNetfilter, Family: "inet", NetfilterHook: "forward", Phase: "filter", Namespace: "host",
+		Program: "dataplane:counter", Mode: "observe",
+	}}
+	if err := checkPluginHostPrerequisites(plugin); err != nil {
+		t.Fatalf("simple Netfilter plugin unexpectedly requires skb dynptr: %v", err)
+	}
+	availability := currentPluginHostFeatureAvailability()
+	if !availability.Status["dataplane.netfilter_pipeline.v1"].Available {
+		t.Fatalf("Netfilter attach availability = %+v", availability.Status["dataplane.netfilter_pipeline.v1"])
+	}
+	if state := availability.Status["dataplane.netfilter_skb_dynptr.v1"]; state.Available || !strings.Contains(state.Reason, "skb dynptr kfunc unavailable") {
+		t.Fatalf("Netfilter skb dynptr availability = %+v", state)
+	}
+
+	plugin.Compatibility = &PluginCompatibility{Features: []string{"dataplane.netfilter_skb_dynptr.v1"}}
+	if err := checkPluginHostPrerequisites(plugin); err == nil || !strings.Contains(err.Error(), "dataplane.netfilter_skb_dynptr.v1") {
+		t.Fatalf("explicit skb dynptr prerequisite error = %v", err)
 	}
 }
 

@@ -47,7 +47,7 @@ func applyPluginHookBindingsFromDB(catalog PluginCatalog, db *sql.DB) PluginCata
 			if _, disabled := bindings.Disabled[hookID]; disabled {
 				continue
 			}
-			if interfaces, ok := bindings.Interfaces[hookID]; ok {
+			if interfaces, ok := bindings.Interfaces[hookID]; ok && hook.Engine != pluginEngineNetfilter {
 				hook.Interfaces = interfaces
 			}
 			hooks = append(hooks, hook)

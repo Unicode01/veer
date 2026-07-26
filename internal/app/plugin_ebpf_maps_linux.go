@@ -122,36 +122,48 @@ func (rt *kernelXDPPluginPipelineRuntime) ClearPluginMap(pluginID string, object
 }
 
 func (rt *linuxPluginDataplaneRuntime) PutPluginMapValue(pluginID string, objectID string, mapName string, key []byte, value []byte) error {
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return putPluginMapValueInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, key, value)
 }
 
 func (rt *linuxPluginDataplaneRuntime) TransactionPluginMaps(pluginID string, request pluginEBPFMapTransactionRequest) error {
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return transactPluginMapsInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, request)
 }
 
 func (rt *linuxPluginDataplaneRuntime) GetPluginMapValue(pluginID string, objectID string, mapName string, key []byte) ([]byte, error) {
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return getPluginMapValueInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, key)
 }
 
 func (rt *linuxPluginDataplaneRuntime) GetPluginMapPerCPUValues(pluginID string, objectID string, mapName string, key []byte) ([][]byte, error) {
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return getPluginMapPerCPUValuesInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, key)
 }
 
 func (rt *linuxPluginDataplaneRuntime) ScanPluginMap(pluginID string, objectID string, mapName string, request pluginEBPFMapScanRequest) (pluginEBPFMapScanResult, error) {
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return scanPluginMapInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, request)
 }
 
 func (rt *linuxPluginDataplaneRuntime) ReadPluginRingBuffer(pluginID string, objectID string, mapName string, request pluginEBPFRingReadRequest) (pluginEBPFRingReadResult, error) {
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
 	rt.mu.Lock()
 	m, err := clonePluginMapInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName)
 	rt.mu.Unlock()
@@ -163,26 +175,39 @@ func (rt *linuxPluginDataplaneRuntime) ReadPluginRingBuffer(pluginID string, obj
 }
 
 func (rt *linuxPluginDataplaneRuntime) DeletePluginMapValue(pluginID string, objectID string, mapName string, key []byte) error {
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return deletePluginMapValueInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName, key)
 }
 
 func (rt *linuxPluginDataplaneRuntime) ClearPluginMap(pluginID string, objectID string, mapName string) error {
+	rt.operationMu.RLock()
+	defer rt.operationMu.RUnlock()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return clearPluginMapInRefs(rt.loadedPluginObjectRefsLocked(pluginID), pluginID, objectID, mapName)
 }
 
 func (rt *linuxPluginDataplaneRuntime) loadedPluginObjectRefsLocked(pluginID string) []loadedPluginObjectRef {
-	if rt == nil || rt.loaded == nil {
+	if rt == nil {
 		return nil
 	}
-	loaded := rt.loaded[pluginID]
-	if loaded == nil {
-		return nil
+	var refs []loadedPluginObjectRef
+	if loaded := rt.loaded[pluginID]; loaded != nil {
+		refs = append(refs, loaded.objects...)
 	}
-	return loaded.objects
+	if rt.netfilter != nil {
+		rt.netfilter.mu.Lock()
+		for _, ref := range rt.netfilter.loaded {
+			if ref.PluginID == pluginID {
+				refs = append(refs, ref)
+			}
+		}
+		rt.netfilter.mu.Unlock()
+	}
+	return refs
 }
 
 func putPluginMapValueInRefs(refs []loadedPluginObjectRef, pluginID string, objectID string, mapName string, key []byte, value []byte) error {

@@ -45,6 +45,8 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 			"control.tuntap_provider.v1",
 			"dataplane.tc_pipeline.v2",
 			"dataplane.xdp_pipeline.v1",
+			"dataplane.netfilter_pipeline.v1",
+			"dataplane.netfilter_skb_dynptr.v1",
 			"ebpf.bounded_reads.v1",
 			"ebpf.map_transactions.v1",
 			"ebpf.private_maps",
@@ -63,6 +65,16 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 		caps.BPFMapProgArray,
 		caps.Netlink.LinkList,
 	)
+	status["dataplane.netfilter_pipeline.v1"] = pluginHostFeatureStatusFromChecks(
+		"Netfilter plugin pipeline",
+		caps.BPFNetfilter,
+		caps.NetfilterAttach,
+	)
+	status["dataplane.netfilter_skb_dynptr.v1"] = pluginHostFeatureStatusFromChecks(
+		"Netfilter skb dynptr access",
+		caps.BPFNetfilter,
+		caps.BPFNetfilterDynptr,
+	)
 	mapStatus := pluginHostFeatureStatusFromChecks(
 		"eBPF private maps",
 		caps.BPFMapArray,
@@ -70,7 +82,6 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 		caps.BPFMapPerCPUHash,
 		caps.BPFMapPerCPUArray,
 		caps.BPFMapProgArray,
-		caps.BPFSchedCLS,
 	)
 	status["ebpf.private_maps"] = mapStatus
 	status["ebpf.map_state.v1"] = mapStatus
@@ -193,6 +204,8 @@ func pluginRequiredHostFeatures(plugin LoadedPlugin) []string {
 			required["dataplane.tc_pipeline.v2"] = struct{}{}
 		} else if hook.Engine == kernelEngineXDP {
 			required["dataplane.xdp_pipeline.v1"] = struct{}{}
+		} else if hook.Engine == pluginEngineNetfilter {
+			required["dataplane.netfilter_pipeline.v1"] = struct{}{}
 		}
 	}
 	if len(plugin.Services) > 0 {
