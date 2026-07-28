@@ -15,11 +15,6 @@ import (
 
 type udpReplyInfo = socketio.ReplyInfo
 
-const (
-	controlSocketDirName  = ipcsec.ControlSocketDirName
-	controlSocketFileName = ipcsec.ControlSocketFileName
-)
-
 var transparentRoutingLastErrorProvider = tproxysetup.LastError
 
 func controlTransparent(clientIP net.IP, outIface string) func(network, address string, c syscall.RawConn) error {
@@ -75,16 +70,8 @@ func udpReplyKey(src *net.UDPAddr, reply udpReplyInfo) string {
 	return socketio.ReplyKey(src, reply)
 }
 
-func udpReplyInfoHasSourceIP(info udpReplyInfo) bool {
-	return socketio.ReplyInfoHasSourceIP(info)
-}
-
 func controlBindToDevice(iface string) func(network, address string, c syscall.RawConn) error {
 	return socketio.ControlBindToDevice(iface)
-}
-
-func resolveDialSourceIP(sourceIP string) (net.IP, error) {
-	return socketio.ResolveDialSourceIP(sourceIP)
 }
 
 func configureOutboundTCPDialer(dialer *net.Dialer, outIface, sourceIP string) error {

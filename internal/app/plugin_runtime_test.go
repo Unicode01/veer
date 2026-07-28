@@ -9685,13 +9685,15 @@ exports.onAction = function () {
 `)
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt.executionTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { _ = rt.Close() })
 	startedAt := time.Now()
 	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("ApplyPluginAction() error = %v, want timeout", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed > pluginControlTimeout+3*time.Second {
+	if elapsed := time.Since(startedAt); elapsed > rt.executionTimeout+time.Second {
 		t.Fatalf("timeout elapsed = %s, want bounded runtime", elapsed)
 	}
 }

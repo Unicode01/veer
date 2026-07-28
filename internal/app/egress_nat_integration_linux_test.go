@@ -387,6 +387,7 @@ func TestPluginLANCoreGeneratedEgressNATTCIntegration(t *testing.T) {
 	}
 
 	harness := startEgressNATIntegrationHarnessWithConfig(t, "plugin-lan-core", enableLANCorePluginForEgressNATIntegration)
+	waitForEgressNATIntegrationPluginAction(t, harness.APIBase, harness.Cmd, harness.LogPath, "lan_core", "apply_network")
 	applyLANCoreEgressNATProfile(t, harness.APIBase, harness.Topology)
 	waitForEgressNATWorkerRunningStatus(t, harness.APIBase, harness.Topology, harness.LogPath, "")
 	prepareManagedNetworkIntegrationClientNamespace(t, harness.Topology)
@@ -420,6 +421,7 @@ func TestPluginLANCoreResolvesWANCoreEgressNATTCIntegration(t *testing.T) {
 	}
 
 	harness := startEgressNATIntegrationHarnessWithConfig(t, "plugin-lan-wan-core", enableLANAndWANCorePluginsForEgressNATIntegration)
+	waitForEgressNATIntegrationPluginAction(t, harness.APIBase, harness.Cmd, harness.LogPath, "lan_core", "apply_network")
 	createWANCoreStatusForLANCoreEgressNAT(t, harness.DBPath, harness.Topology)
 	applyLANCoreEgressNATProfileResolvingWANRef(t, harness.APIBase, harness.Topology)
 	waitForEgressNATWorkerRunningStatus(t, harness.APIBase, harness.Topology, harness.LogPath, "")
@@ -1469,13 +1471,7 @@ func enableLANCorePluginForEgressNATIntegration(t *testing.T, repoRoot string, w
 	if err != nil {
 		t.Fatalf("load egress nat integration config: %v", err)
 	}
-	enabled := true
-	cfg.PluginsEnabledSetting = &enabled
-	cfg.PluginsDir = defaultPluginsDir
-	if cfg.Experimental == nil {
-		cfg.Experimental = make(map[string]bool)
-	}
-	cfg.Experimental[experimentalFeatureKernelTCPreparedL2] = true
+	configureNestedEgressNATPluginRuntime(cfg)
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -1498,13 +1494,7 @@ func enableLANAndWANCorePluginsForEgressNATIntegration(t *testing.T, repoRoot st
 	if err != nil {
 		t.Fatalf("load lan/wan core egress nat integration config: %v", err)
 	}
-	enabled := true
-	cfg.PluginsEnabledSetting = &enabled
-	cfg.PluginsDir = defaultPluginsDir
-	if cfg.Experimental == nil {
-		cfg.Experimental = make(map[string]bool)
-	}
-	cfg.Experimental[experimentalFeatureKernelTCPreparedL2] = true
+	configureNestedEgressNATPluginRuntime(cfg)
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -1513,6 +1503,19 @@ func enableLANAndWANCorePluginsForEgressNATIntegration(t *testing.T, repoRoot st
 	if err := os.WriteFile(configPath, data, 0o644); err != nil {
 		t.Fatalf("write lan/wan core egress nat integration config: %v", err)
 	}
+}
+
+func configureNestedEgressNATPluginRuntime(cfg *Config) {
+	enabled := true
+	cfg.PluginsEnabledSetting = &enabled
+	cfg.PluginsDir = defaultPluginsDir
+	// The nested Veer process shares a cgroup with its parent test process.
+	// Dedicated privileged tests enforce full sandbox and cgroup isolation.
+	cfg.PluginsMinSandboxLevel = pluginSandboxLevelPartial
+	if cfg.Experimental == nil {
+		cfg.Experimental = make(map[string]bool)
+	}
+	cfg.Experimental[experimentalFeatureKernelTCPreparedL2] = true
 }
 
 func seedEgressNATIntegrationNeighbor(t *testing.T, topology egressNATIntegrationTopology) {
@@ -1567,6 +1570,75 @@ func waitForEgressNATIntegrationAPI(t *testing.T, apiBase string, cmd *exec.Cmd,
 	}
 	logForwardLogOnFailure(t, logPath)
 	t.Fatalf("api %s not ready in time", apiBase)
+}
+
+func waitForEgressNATIntegrationPluginAction(t *testing.T, apiBase string, cmd *exec.Cmd, logPath string, pluginID string, actionID string) {
+	t.Helper()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(15 * time.Second)
+	lastObservation := "plugin catalog was not available"
+	for time.Now().Before(deadline) {
+		if cmd != nil && cmd.Process != nil {
+			if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+				logForwardLogOnFailure(t, logPath)
+				t.Fatalf("forward process exited before plugin action became ready: %v", err)
+			}
+		}
+		req, err := http.NewRequest(http.MethodGet, apiBase+"/api/plugins", nil)
+		if err != nil {
+			t.Fatalf("build plugin catalog request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+egressNATTestToken)
+		resp, err := client.Do(req)
+		if err == nil && resp != nil {
+			var catalog struct {
+				Plugins []struct {
+					ID      string `json:"id"`
+					Enabled bool   `json:"enabled"`
+					Status  string `json:"status"`
+					Error   string `json:"error"`
+					Runtime struct {
+						Mode   string `json:"mode"`
+						Reason string `json:"reason"`
+						Error  string `json:"error"`
+					} `json:"runtime"`
+					Actions []struct {
+						ID string `json:"id"`
+					} `json:"actions"`
+				} `json:"plugins"`
+			}
+			decodeErr := json.NewDecoder(resp.Body).Decode(&catalog)
+			resp.Body.Close()
+			if decodeErr != nil {
+				lastObservation = fmt.Sprintf("HTTP %d catalog decode failed: %v", resp.StatusCode, decodeErr)
+			} else if resp.StatusCode != http.StatusOK {
+				lastObservation = fmt.Sprintf("plugin catalog returned HTTP %d", resp.StatusCode)
+			} else {
+				lastObservation = fmt.Sprintf("plugin %s was absent from %d catalog entries", pluginID, len(catalog.Plugins))
+				for _, plugin := range catalog.Plugins {
+					if plugin.ID != pluginID {
+						continue
+					}
+					lastObservation = fmt.Sprintf(
+						"status=%q enabled=%t error=%q runtime_mode=%q runtime_reason=%q runtime_error=%q actions=%d",
+						plugin.Status, plugin.Enabled, plugin.Error, plugin.Runtime.Mode, plugin.Runtime.Reason, plugin.Runtime.Error, len(plugin.Actions),
+					)
+					if plugin.Status != pluginStatusActive {
+						break
+					}
+					for _, action := range plugin.Actions {
+						if action.ID == actionID {
+							return
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	logForwardLogOnFailure(t, logPath)
+	t.Fatalf("plugin action %s/%s was not ready in time: %s", pluginID, actionID, lastObservation)
 }
 
 func makeShortEgressNATTestDir(t *testing.T) string {

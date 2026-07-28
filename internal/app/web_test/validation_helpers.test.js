@@ -1187,15 +1187,19 @@ function createHarness() {
     }
   };
 
+  const intervals = [];
+  const registerInterval = (handler) => {
+    intervals.push(handler);
+    return intervals.length;
+  };
   const context = vm.createContext({
     window: {
       VeerApp: app,
-      setInterval() {
-        return 1;
-      },
+      setInterval: registerInterval,
       clearInterval() {},
       addEventListener() {}
     },
+    setInterval: registerInterval,
     document: documentRef,
     console
   });
@@ -1239,7 +1243,7 @@ function createHarness() {
   };
   app.populateEgressNATSourceIPSelect = function populateEgressNATSourceIPSelect() {};
 
-  return { app, elements, notifications, documentRef };
+  return { app, elements, notifications, documentRef, intervals };
 }
 
 test('translateValidationMessage covers batch-required message', () => {
@@ -2730,6 +2734,37 @@ test('shouldPauseAutoRefresh returns false when no transient interaction is acti
   documentRef.activeElement = null;
 
   assert.equal(app.shouldPauseAutoRefresh(), false);
+});
+
+test('polling refreshes only the active tab and skips overlapping ticks', async () => {
+  const { app, intervals } = createHarness();
+  const calls = [];
+  const resolvers = [];
+  app.getToken = () => 'token';
+  app.state.activeTab = 'sites';
+  app.refreshDashboard = (options) => {
+    calls.push(options);
+    return new Promise((resolve) => resolvers.push(resolve));
+  };
+
+  app.startPolling();
+  const tick = intervals.at(-1);
+  const first = tick();
+  const overlapping = tick();
+
+  assert.equal(calls.length, 1);
+  assert.equal(overlapping, first);
+  assert.equal(calls[0].activeTabOnly, true);
+  assert.equal(calls[0].activeTab, 'sites');
+
+  resolvers.shift()();
+  await first;
+  await Promise.resolve();
+
+  const second = tick();
+  assert.equal(calls.length, 2);
+  resolvers.shift()();
+  await second;
 });
 
 test('toggleItem shows translated not-found issue in toast', async () => {

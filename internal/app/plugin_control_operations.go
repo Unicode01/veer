@@ -644,24 +644,18 @@ func pluginOperationResumable(item store.PluginOperation, nowUnixMS int64) bool 
 	}
 }
 
-func pluginOperationRuntimeSnapshot(db store.RuleStore, pluginID string) (PluginOperationRuntimeState, error) {
-	counts, err := store.PluginOperationStatusCounts(db, pluginID)
+func pluginOperationRuntimeSnapshots(db store.RuleStore, pluginIDs []string) (map[string]PluginOperationRuntimeState, error) {
+	summaries, err := store.PluginOperationSummaries(db, pluginIDs, time.Now().UnixMilli())
 	if err != nil {
-		return PluginOperationRuntimeState{}, err
+		return nil, err
 	}
-	total := 0
-	for _, count := range counts {
-		total += count
+	out := make(map[string]PluginOperationRuntimeState, len(summaries))
+	for pluginID, summary := range summaries {
+		out[pluginID] = PluginOperationRuntimeState{
+			Total: summary.Total, Resumable: summary.Resumable, Bytes: summary.Bytes, ByStatus: summary.ByStatus,
+		}
 	}
-	resumable, err := store.CountResumablePluginOperations(db, pluginID, time.Now().UnixMilli())
-	if err != nil {
-		return PluginOperationRuntimeState{}, err
-	}
-	bytesUsed, err := store.PluginOperationStorageBytes(db, pluginID)
-	if err != nil {
-		return PluginOperationRuntimeState{}, err
-	}
-	return PluginOperationRuntimeState{Total: total, Resumable: resumable, Bytes: bytesUsed, ByStatus: counts}, nil
+	return out, nil
 }
 
 func isLowerHex(value string) bool {

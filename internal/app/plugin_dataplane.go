@@ -100,7 +100,12 @@ func loadPluginCatalogWithControlRegistration(cfg *Config) PluginCatalog {
 func loadPluginCatalogWithControlRegistrationAndState(cfg *Config, db store.RuleStore) PluginCatalog {
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginControlRegistrationSurfaces(&catalog, cfg)
-	return applyPluginStatesFromDB(catalog, db)
+	return resolvePluginCatalogAfterRuntimeSurfaces(catalog)
+}
+
+func resolvePluginCatalogAfterRuntimeSurfaces(catalog PluginCatalog) PluginCatalog {
+	clearPluginResolutionErrors(&catalog)
+	return resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
 }
 
 func applyPluginControlRegistrationSurfaces(catalog *PluginCatalog, cfg *Config) {
@@ -311,7 +316,7 @@ func (pm *ProcessManager) pluginCatalogWithConfig(fallbackCfg *Config) PluginCat
 				snapshots = append(snapshots, pm.pluginRuntime.Snapshot())
 			}
 			mergePluginRuntimeSnapshot(&catalog, completePluginRuntimeSnapshot(catalog, combinePluginDataplaneSnapshots(catalog, snapshots...)))
-			catalog = applyPluginStatesFromDB(catalog, pm.db)
+			catalog = resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 			catalog.HotReload = pm.snapshotPluginCatalogHotReloadStatus()
 			return catalog
 		}
@@ -324,7 +329,7 @@ func (pm *ProcessManager) pluginCatalogWithConfig(fallbackCfg *Config) PluginCat
 	}
 	snapshot := pm.pluginRuntime.Reconcile(catalog)
 	mergePluginRuntimeSnapshot(&catalog, snapshot)
-	catalog = applyPluginStatesFromDB(catalog, pm.db)
+	catalog = resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 	catalog.HotReload = pm.snapshotPluginCatalogHotReloadStatus()
 	return catalog
 }
@@ -359,11 +364,11 @@ func (pm *ProcessManager) pluginCatalogWithControlSurface(cfg *Config) PluginCat
 		// is held. Registration is side-effect free; persistent onReconcile handlers
 		// may synchronously request another redistribution and must run outside it.
 		applyPluginControlRegistrationSurfaces(&catalog, catalogCfg)
-		catalog = applyPluginStatesFromDB(catalog, pm.db)
+		catalog = resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 		return applyPluginHookBindingsFromDB(catalog, pm.db)
 	}
 	applyPluginRuntimeSnapshot(&catalog, snapshot)
-	catalog = applyPluginStatesFromDB(catalog, pm.db)
+	catalog = resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 	return applyPluginHookBindingsFromDB(catalog, pm.db)
 }
 

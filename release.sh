@@ -52,7 +52,46 @@ run_with_retry() {
     done
 }
 
+go_version_at_least() {
+    local current="${1#go}"
+    local required="${2#go}"
+    local current_major current_minor current_patch current_suffix
+    local required_major required_minor required_patch
+
+    [[ "${current}" == devel* ]] && return 0
+    if [[ ! "${current}" =~ ^([0-9]+)\.([0-9]+)(\.([0-9]+))?([a-z].*)?$ ]]; then
+        return 1
+    fi
+    current_major="${BASH_REMATCH[1]}"
+    current_minor="${BASH_REMATCH[2]}"
+    current_patch="${BASH_REMATCH[4]:-0}"
+    current_suffix="${BASH_REMATCH[5]:-}"
+
+    if [[ ! "${required}" =~ ^([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
+        return 1
+    fi
+    required_major="${BASH_REMATCH[1]}"
+    required_minor="${BASH_REMATCH[2]}"
+    required_patch="${BASH_REMATCH[4]:-0}"
+
+    if (( current_major != required_major )); then
+        (( current_major > required_major ))
+        return
+    fi
+    if (( current_minor != required_minor )); then
+        (( current_minor > required_minor ))
+        return
+    fi
+    if (( current_patch != required_patch )); then
+        (( current_patch > required_patch ))
+        return
+    fi
+    [[ -z "${current_suffix}" ]]
+}
+
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MIN_GO_VERSION="$(awk '$1 == "go" { print $2; exit }' "${PROJECT_DIR}/go.mod")"
+[[ -n "${MIN_GO_VERSION}" ]] || fail "无法从 go.mod 读取最低 Go 版本"
 EBPF_DIR="${PROJECT_DIR}/internal/app/ebpf"
 EBPF_INC="${EBPF_DIR}/include"
 EBPF_TC_SRC="${EBPF_DIR}/forward-tc-bpf.c"
@@ -88,7 +127,11 @@ case "${BUILD_PLUGIN_SDK}" in
 esac
 
 if ! command -v go &>/dev/null; then
-    fail "未找到 go 命令，请先安装 Go >= 1.21"
+    fail "未找到 go 命令，请先安装 Go >= ${MIN_GO_VERSION}"
+fi
+GO_VERSION="$(go env GOVERSION 2>/dev/null || true)"
+if ! go_version_at_least "${GO_VERSION}" "${MIN_GO_VERSION}"; then
+    fail "Go ${MIN_GO_VERSION} 或更高版本是必需的，当前版本: ${GO_VERSION:-unknown}"
 fi
 ok "Go: $(go version)"
 if [[ -n "${GOPROXY:-}" ]]; then

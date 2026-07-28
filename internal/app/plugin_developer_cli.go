@@ -263,11 +263,27 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
+	nextCommands := make([][]string, 0, 3)
+	if pluginKind == "pipeline" {
+		nextCommands = append(nextCommands, []string{"veer", "plugin", "build", "--source", absTarget, "--architectures", "all"})
+		targetArchitecture := normalizePluginObjectArchitecture(runtime.GOARCH)
+		if targetArchitecture != "amd64" && targetArchitecture != "arm64" && targetArchitecture != "arm" {
+			targetArchitecture = "amd64"
+		}
+		nextCommands = append(nextCommands, []string{
+			"veer", "plugin", "test", "--source", absTarget,
+			"--os", "linux", "--architecture", targetArchitecture, "--kernel", "6.6.0", "--format", "text",
+		})
+	} else {
+		nextCommands = append(nextCommands, []string{"veer", "plugin", "test", "--source", absTarget, "--format", "text"})
+	}
+	nextCommands = append(nextCommands, []string{"veer", "plugin", "pack", "--source", absTarget})
 	return writePluginPackageCLIJSON(stdout, map[string]any{
-		"plugin_id": pluginID,
-		"kind":      pluginKind,
-		"directory": absTarget,
-		"files":     paths,
+		"plugin_id":     pluginID,
+		"kind":          pluginKind,
+		"directory":     absTarget,
+		"files":         paths,
+		"next_commands": nextCommands,
 	})
 }
 
@@ -282,6 +298,7 @@ func runPluginLintCLI(args []string, stdout, stderr io.Writer, registration bool
 	targetOS := flags.String("os", runtime.GOOS, "target operating system")
 	targetArch := flags.String("architecture", runtime.GOARCH, "target architecture")
 	targetKernel := flags.String("kernel", "", "target kernel release")
+	outputFormat := flags.String("format", "json", "output format: json or text")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -290,6 +307,10 @@ func runPluginLintCLI(args []string, stdout, stderr io.Writer, registration bool
 	}
 	if flags.NArg() != 0 || strings.TrimSpace(*source) == "" {
 		return fmt.Errorf("%s requires --source and no positional arguments", name)
+	}
+	format, err := pluginDeveloperOutputFormat(*outputFormat)
+	if err != nil {
+		return err
 	}
 	absSource, err := filepath.Abs(*source)
 	if err != nil {
@@ -376,7 +397,7 @@ func runPluginLintCLI(args []string, stdout, stderr io.Writer, registration bool
 	if err != nil {
 		return err
 	}
-	return writePluginPackageCLIJSON(stdout, pluginDeveloperLintResult{
+	result := pluginDeveloperLintResult{
 		PluginID:           plugin.ID,
 		Version:            plugin.Version,
 		Kind:               plugin.Kind,
@@ -394,7 +415,54 @@ func runPluginLintCLI(args []string, stdout, stderr io.Writer, registration bool
 		ResourceCount:      len(plugin.Resources),
 		ActionCount:        len(plugin.Actions),
 		Checks:             checks,
-	})
+	}
+	return writePluginDeveloperLintResult(stdout, result, format)
+}
+
+func pluginDeveloperOutputFormat(value string) (string, error) {
+	format := strings.TrimSpace(strings.ToLower(value))
+	switch format {
+	case "json", "text":
+		return format, nil
+	default:
+		return "", fmt.Errorf("output format must be json or text")
+	}
+}
+
+func writePluginDeveloperLintResult(w io.Writer, result pluginDeveloperLintResult, format string) error {
+	if format == "json" {
+		return writePluginPackageCLIJSON(w, result)
+	}
+	if _, err := fmt.Fprintf(w, "Plugin: %s %s (%s, %s)\n", result.PluginID, result.Version, result.Kind, result.Stability); err != nil {
+		return err
+	}
+	for _, check := range result.Checks {
+		status := strings.ToUpper(check.Status)
+		if status == "PASSED" {
+			status = "PASS"
+		}
+		if _, err := fmt.Fprintf(w, "%-6s %s", status, check.ID); err != nil {
+			return err
+		}
+		if check.Detail != "" {
+			if _, err := fmt.Fprintf(w, " - %s", check.Detail); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+	}
+	if result.Registration {
+		if _, err := fmt.Fprintf(w, "Surface: %d object(s), %d hook(s), %d resource(s), %d action(s)\n",
+			result.ObjectCount, result.HookCount, result.ResourceCount, result.ActionCount); err != nil {
+			return err
+		}
+	} else if _, err := fmt.Fprintln(w, "Runtime surface: not evaluated (run plugin test)"); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "Control API ABI: %d\nContract SHA-256: %s\n", result.ControlAPIABI, result.ContractSHA256)
+	return err
 }
 
 func validatePluginConformanceABI(plugin LoadedPlugin) error {
@@ -507,6 +575,10 @@ func pluginDeveloperScaffold(id, name, kind string) (PluginManifest, string, str
 		Kind:        kind,
 		Stability:   pluginStabilityLab,
 		Description: "Veer plugin.",
+		Compatibility: &PluginCompatibility{
+			Runtime:       ">=1.0.0 <2.0.0",
+			ControlAPIABI: pluginControlAPIABI,
+		},
 		Control: &PluginControl{
 			Main:        "control.js",
 			Permissions: []string{"metrics"},
@@ -515,14 +587,10 @@ func pluginDeveloperScaffold(id, name, kind string) (PluginManifest, string, str
 	control := "exports.onReconcile = function () {\n  metrics.counter('reconciles_total');\n};\n"
 	bpf := ""
 	if kind == "pipeline" {
-		manifest.Compatibility = &PluginCompatibility{
-			Runtime:       ">=1.0.0 <2.0.0",
-			ControlAPIABI: pluginControlAPIABI,
-			TCPipelineABI: pluginTCPipelineABI,
-			OS:            []string{"linux"},
-			Architectures: []string{"amd64", "arm64", "arm"},
-			Features:      []string{"dataplane.tc_pipeline.v2", "ebpf.object_variants.v1"},
-		}
+		manifest.Compatibility.TCPipelineABI = pluginTCPipelineABI
+		manifest.Compatibility.OS = []string{"linux"}
+		manifest.Compatibility.Architectures = []string{"amd64", "arm64", "arm"}
+		manifest.Compatibility.Features = []string{"dataplane.tc_pipeline.v2", "ebpf.object_variants.v1"}
 		manifest.Control.Permissions = []string{"ebpf.load", "hook.attach", "metrics", "plugin.register"}
 		control = `plugin.capabilities(['tc']);
 ebpf.loadObject({

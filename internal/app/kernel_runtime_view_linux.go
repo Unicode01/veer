@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Unicode01/veer/internal/kernelcap"
@@ -18,10 +19,11 @@ import (
 )
 
 const (
-	kernelRuntimeMapCountCacheTTL       = 2 * time.Second
-	kernelRuntimeMapDetailCacheTTL      = 10 * time.Second
-	kernelRuntimeInterfaceLabelCacheTTL = 30 * time.Second
-	kernelRuntimeMapCountBatchSize      = 4096
+	kernelRuntimeMapCountCacheTTL         = 2 * time.Second
+	kernelRuntimeMapDetailCacheTTL        = 10 * time.Second
+	kernelRuntimeInterfaceLabelCacheTTL   = 30 * time.Second
+	kernelRuntimeInterfaceCachePruneEvery = 64
+	kernelRuntimeMapCountBatchSize        = 4096
 )
 
 type kernelRuntimeMapCountSnapshot struct {
@@ -69,6 +71,7 @@ type kernelRuntimeInterfaceLabelCacheEntry struct {
 }
 
 var kernelRuntimeInterfaceLabelCache sync.Map
+var kernelRuntimeInterfaceLabelCacheStores atomic.Uint64
 var kernelRuntimeBatchLookupSupport sync.Map
 
 func cloneKernelRuntimeMap(m *ebpf.Map, label string) (*ebpf.Map, error) {
@@ -750,6 +753,7 @@ func kernelRuntimeInterfaceLabel(ifindex int) string {
 	}
 	link, err := netlink.LinkByIndex(ifindex)
 	if err != nil || link == nil || link.Attrs() == nil {
+		kernelRuntimeInterfaceLabelCache.Delete(ifindex)
 		return fmt.Sprintf("ifindex=%d", ifindex)
 	}
 	label := fmt.Sprintf("%s(%d)", link.Attrs().Name, ifindex)
@@ -757,7 +761,20 @@ func kernelRuntimeInterfaceLabel(ifindex int) string {
 		label:     label,
 		sampledAt: now,
 	})
+	if kernelRuntimeInterfaceLabelCacheStores.Add(1)%kernelRuntimeInterfaceCachePruneEvery == 0 {
+		pruneKernelRuntimeInterfaceLabelCache(now)
+	}
 	return label
+}
+
+func pruneKernelRuntimeInterfaceLabelCache(now time.Time) {
+	kernelRuntimeInterfaceLabelCache.Range(func(key, value any) bool {
+		entry, ok := value.(kernelRuntimeInterfaceLabelCacheEntry)
+		if !ok || now.Sub(entry.sampledAt) >= kernelRuntimeInterfaceLabelCacheTTL {
+			kernelRuntimeInterfaceLabelCache.Delete(key)
+		}
+		return true
+	})
 }
 
 func kernelAttachmentProgramLabel(handle uint32, priority uint16) string {

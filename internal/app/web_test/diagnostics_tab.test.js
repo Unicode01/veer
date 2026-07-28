@@ -171,6 +171,46 @@ test('activateTab loads diagnostics workers and stats', () => {
   assert.equal(statsLoads, 1);
 });
 
+test('refreshDashboard only loads the active fixed tab', async () => {
+  const { app } = createDiagnosticsHarness('rules');
+  const calls = [];
+  app.loadRules = () => { calls.push('rules'); };
+  app.loadSites = () => { calls.push('sites'); };
+  app.loadWorkers = () => { calls.push('workers'); };
+  app.loadAllStats = () => { calls.push('stats'); };
+
+  await app.refreshDashboard({ activeTabOnly: true, activeTab: 'rules' });
+
+  assert.deepEqual(calls, ['rules']);
+});
+
+test('managed network tab refresh includes related data and switch context', async () => {
+  const { app } = createDiagnosticsHarness('rules');
+  const calls = [];
+  app.loadManagedNetworks = () => { calls.push('networks'); };
+  app.loadManagedNetworkReservations = () => { calls.push('reservations'); };
+  app.loadHostNetwork = () => { calls.push('host-network'); };
+
+  await app.refreshDashboard({
+    activeTabOnly: true,
+    activeTab: 'managed-networks',
+    includeContext: true
+  });
+
+  assert.deepEqual(calls, ['networks', 'reservations', 'host-network']);
+});
+
+test('dynamic plugin tab refreshes plugin runtime state without reloading all pages', async () => {
+  const { app } = createDiagnosticsHarness('rules');
+  const calls = [];
+  app.loadPlugins = () => { calls.push('plugins'); };
+  app.loadRules = () => { calls.push('rules'); };
+
+  await app.refreshDashboard({ activeTabOnly: true, activeTab: 'plugin-observe' });
+
+  assert.deepEqual(calls, ['plugins']);
+});
+
 test('activateTab hides overview outside main data pages', () => {
   const { app } = createDiagnosticsHarness('rules');
 

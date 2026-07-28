@@ -40,7 +40,7 @@ func (vm *pluginControlVM) initRemote(plugin LoadedPlugin) (*pluginControlHost, 
 
 func (vm *pluginControlVM) runRemoteWithTimeout(host *pluginControlHost, req pluginControlRequest) pluginControlResult {
 	var result pluginControlResult
-	host.executionDeadline = time.Now().Add(pluginControlTimeout)
+	host.executionDeadline = time.Now().Add(vm.rt.handlerTimeout())
 	if req.state != nil && !req.state.deadline.IsZero() && req.state.deadline.Before(host.executionDeadline) {
 		host.executionDeadline = req.state.deadline
 	}
@@ -60,15 +60,15 @@ func (vm *pluginControlVM) runRemoteEvent(host *pluginControlHost, event pluginC
 	}
 	deadline := host.executionDeadline
 	if deadline.IsZero() {
-		deadline = time.Now().Add(pluginControlTimeout)
+		deadline = time.Now().Add(vm.rt.handlerTimeout())
 	}
 	return host.runRemoteEvent(event, optionalHandler, func(request pluginHostEventRequest) (pluginHostEventResponse, error) {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return pluginHostEventResponse{}, fmt.Errorf("isolated plugin handler deadline exceeded")
 		}
-		if remaining > pluginControlTimeout {
-			remaining = pluginControlTimeout
+		if timeout := vm.rt.handlerTimeout(); remaining > timeout {
+			remaining = timeout
 		}
 		request.TimeoutMS = max(1, remaining.Milliseconds())
 		return client.runEvent(request, host, deadline, nested)

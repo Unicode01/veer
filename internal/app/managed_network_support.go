@@ -104,12 +104,6 @@ func loadManagedNetworkPVEBridgeBindings() ([]managedNetworkPVEBridgeBinding, er
 	})
 }
 
-func loadManagedNetworkPVEGuestNICs() ([]managedNetworkPVEGuestNIC, error) {
-	return managednet.LoadPVEGuestNICs(managednet.RepairOptions{
-		LoadPVEConfigs: loadManagedNetworkPVEConfigsForTests,
-	})
-}
-
 func loadManagedNetworkPVEConfigsFromGlobs(patterns []string) (map[string]string, error) {
 	return managednet.LoadPVEConfigsFromGlobs(patterns)
 }
@@ -187,14 +181,6 @@ func parseManagedNetworkPVEGuestNICs(vmid string, content string) []managedNetwo
 
 func enrichManagedNetworkDiscoveredMACsWithPVEGuestNICs(items []managedNetworkDiscoveredMAC, nics []managedNetworkPVEGuestNIC) []managedNetworkDiscoveredMAC {
 	return managednet.EnrichDiscoveredMACsWithPVEGuestNICs(items, nics)
-}
-
-func discoverManagedNetworkReservationFDBMACs(networks []ManagedNetwork, infos []InterfaceInfo) ([]managedNetworkDiscoveredMAC, error) {
-	return managednet.DiscoverReservationFDBMACs(toManagedNetManagedNetworks(networks), toManagedNetInterfaceInfos(infos))
-}
-
-func discoverManagedNetworkReservationObservedIPv4s(discovered []managedNetworkDiscoveredMAC, networks []ManagedNetwork) (map[string][]string, error) {
-	return managednet.DiscoverReservationObservedIPv4s(discovered, toManagedNetManagedNetworks(networks))
 }
 
 func collectManagedNetworkObservedIPv4sForNetwork(network ManagedNetwork, bridgeIndex int, memberIndexes map[int]struct{}, hostMACs map[string]struct{}, interestedMACs map[string]struct{}, neighbors []netlink.Neigh) map[string][]string {

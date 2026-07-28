@@ -494,3 +494,27 @@ func TestCountXDPKernelRuntimeMapEntryDetailsCountsV4OldBank(t *testing.T) {
 		t.Fatalf("countXDPKernelRuntimeMapEntryDetails() flows = %+v, want flows_v4=2 flows=2", counts)
 	}
 }
+
+func TestPruneKernelRuntimeInterfaceLabelCacheRemovesExpiredEntries(t *testing.T) {
+	const (
+		staleKey = 1_000_001
+		freshKey = 1_000_002
+	)
+	defer kernelRuntimeInterfaceLabelCache.Delete(staleKey)
+	defer kernelRuntimeInterfaceLabelCache.Delete(freshKey)
+	now := time.Now()
+	kernelRuntimeInterfaceLabelCache.Store(staleKey, kernelRuntimeInterfaceLabelCacheEntry{
+		label: "stale", sampledAt: now.Add(-kernelRuntimeInterfaceLabelCacheTTL),
+	})
+	kernelRuntimeInterfaceLabelCache.Store(freshKey, kernelRuntimeInterfaceLabelCacheEntry{
+		label: "fresh", sampledAt: now.Add(-kernelRuntimeInterfaceLabelCacheTTL / 2),
+	})
+
+	pruneKernelRuntimeInterfaceLabelCache(now)
+	if _, ok := kernelRuntimeInterfaceLabelCache.Load(staleKey); ok {
+		t.Fatal("expired interface label cache entry was retained")
+	}
+	if _, ok := kernelRuntimeInterfaceLabelCache.Load(freshKey); !ok {
+		t.Fatal("fresh interface label cache entry was removed")
+	}
+}

@@ -42,10 +42,6 @@ func applyKernelMapCapacitiesWithOccupancy(spec *ebpf.CollectionSpec, rulesConfi
 	)
 }
 
-func setKernelCollectionMapCapacity(spec *ebpf.CollectionSpec, name string, capacity int, required bool, label string) error {
-	return kernelcap.SetCollectionMapCapacity(spec, name, capacity, required, label)
-}
-
 func kernelMapReusableWithCapacity(m *ebpf.Map, desiredLimit int) bool {
 	return kernelcap.MapReusableWithCapacity(m, desiredLimit)
 }

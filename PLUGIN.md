@@ -2,6 +2,27 @@
 
 仓库的 `plugins/` 目录存放随项目维护的运行时插件。Veer 默认关闭外部插件；手动设置 `plugins_enabled=true` 后扫描 `plugins/<plugin_id>/`，每个插件使用独立子目录。
 
+## 快速开始
+
+控制面插件从创建到可安装包只需要：
+
+```text
+veer plugin init --id my_plugin --kind control --directory ./my_plugin
+veer plugin test --source ./my_plugin --format text
+veer plugin pack --source ./my_plugin
+```
+
+数据面插件先构建 eBPF object；后续重建已有输出时显式加 `--force`：
+
+```text
+veer plugin init --id my_pipeline --kind pipeline --directory ./my_pipeline
+veer plugin build --source ./my_pipeline --architectures all
+veer plugin test --source ./my_pipeline --os linux --architecture amd64 --kernel 6.6.0 --format text
+veer plugin pack --source ./my_pipeline
+```
+
+`plugin init` 的 JSON 结果会返回按当前插件类型生成的 `next_commands`。`lint/test` 默认保留适合自动化处理的 JSON，开发时使用 `--format text` 可直接查看逐项检查结果。
+
 ## 基本结构
 
 最小插件通常包含：
@@ -218,7 +239,7 @@ console.log(host.snapshot());
 发布前使用运行时自带 conformance 命令。`test` 会执行目标环境兼容检查、两次独立 Goja 注册并比较 surface digest，再完成一次确定性打包/解包回读；stable 控制插件必须显式声明当前 `control_api_abi`，stable 数据面插件还必须声明 `tc_pipeline_abi`。
 
 ```text
-veer plugin test --source ./plugins/my_plugin --os linux --architecture arm64 --kernel 6.6.0
+veer plugin test --source ./plugins/my_plugin --os linux --architecture arm64 --kernel 6.6.0 --format text
 veer plugin contract --check ./sdk/plugin/api-contract.json
 veer plugin contract --output ./api-contract.json
 veer plugin contract --types-output ./methods.d.ts
@@ -1108,10 +1129,10 @@ trust store 不物理删除发布者记录。撤销后状态变为 `revoked`，�
 
 `scripts/verify-plugin-release.sh` 是插件 v1 的权威发布门禁，分层执行，不能用普通 `go test ./...` 的环境性 skip 代替特权验收：
 
-- `portable`：在 Linux CI 重建 core/插件 eBPF，并执行全部 Go、Race、WebUI、SDK、TypeScript contract、manifest/package round-trip、`govulncheck` 和七个短时 fuzz target；非 Linux 本地运行只校验已有插件 object，不能替代 Linux CI。GitHub Actions 对 `main`、`dev` 和 PR 强制执行这一层。
-- `privileged`：在 root Linux 上执行真实 netns、TUN/TAP、netlink ownership/crash recovery、隔离进程/cgroup/OOM、WAN/LAN/vtolocal、IPv6 plan、Egress NAT、完整双向 TC chain、XDP dispatcher、XDP-to-TC，以及 PPPoE IPv4/IPv6、手动重拨、自动重拨和 timer fence 黑盒；指定测试出现任何 skip 即失败。
+- `portable`：在 Linux CI 重建 core/插件 eBPF，并执行全部 Go、Race、WebUI 单元测试与 Chromium desktop/mobile 回归、SDK、TypeScript contract、manifest/package round-trip、`govulncheck` 和七个短时 fuzz target；非 Linux 本地运行只校验已有插件 object，不能替代 Linux CI。GitHub Actions 对 `main`、`dev` 和 PR 强制执行这一层。
+- `privileged`：在 root Linux 上执行真实 netns、TUN/TAP、netlink ownership/crash recovery、隔离进程/cgroup/OOM、WAN/LAN/vtolocal、IPv6 plan、Egress NAT、完整双向 TC chain、XDP dispatcher、XDP-to-TC、Netfilter IPv4/IPv6 accept/drop、nftables 共存、Hook 排序、热更新回退和 namespace 重建恢复，以及 PPPoE IPv4/IPv6、手动重拨、自动重拨和 timer fence 黑盒；指定测试出现任何 skip 即失败。
 - `stability`：至少 120 秒同时维持 64 条长连接中的 16 条活跃流，并持续创建 32 条一批的新连接；任一旧流中断、新流创建失败、TC runtime 失效或测试被 skip 都失败。目标运营商上的 PPPoE 仍需额外运行 24 至 48 小时，覆盖强制断线、重拨、IPv4、IPv6CP、DHCPv6-PD 和业务长流。
-- `performance`：每个 TC profile 都与紧邻执行的独立 disabled baseline 配对，逐轮交替先后顺序并取至少三组配对比值中位数，避免共享宿主的分钟级漂移污染全局 baseline。插件开启但无 Hook 相对关闭插件吞吐不得低于 95%；单个 no-op、observer 或 firewall Hook 不得低于 90%；2/4/8 个 no-op Hook 不得低于 80%。XDP Dispatcher 零 Hook 相对 plain pass 额外成本不得高于 30 ns，每个 no-op Hook 的增量不得高于 75 ns。阈值可为明确记录的目标硬件基线收紧，不能在发布时临时放宽。
+- `performance`：每个 TC profile 都与紧邻执行的独立 disabled baseline 配对，逐轮交替先后顺序并取至少三组配对比值中位数，避免共享宿主的分钟级漂移污染全局 baseline。插件开启但无 Hook 相对关闭插件吞吐不得低于 95%；单个 no-op、observer 或 firewall Hook 不得低于 90%；2/4/8 个 no-op Hook 不得低于 80%。XDP Dispatcher 零 Hook 相对 plain pass 额外成本不得高于 30 ns，每个 no-op Hook 的增量不得高于 75 ns。Netfilter 使用前后 baseline 的中值验证 1/4/8 Hook，默认均不得低于 80%，可通过 `VEER_PLUGIN_RELEASE_NETFILTER_RATIO` 对目标硬件收紧。阈值可为明确记录的目标硬件基线收紧，不能在发布时临时放宽。
 
 发布候选在特权 Linux 上执行 `sh scripts/verify-plugin-release.sh all`。脚本会主动检查 root、工具、关键 PASS 记录和所有 skip，并在结束后清理测试产物；目标运营商 PPPoE 长测结果单独进入发布记录，不伪装成可在 namespace 内证明的项目测试。
 

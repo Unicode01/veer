@@ -76,18 +76,37 @@
     return false;
   };
 
+  app.runAutoRefresh = function runAutoRefresh() {
+    if (document.hidden || app.shouldPauseAutoRefresh()) return null;
+    if (app.state.pollRefreshInFlight) return app.state.pollRefreshInFlight;
+
+    let refresh;
+    try {
+      refresh = Promise.resolve(app.refreshDashboard({
+        activeTabOnly: true,
+        activeTab: app.state.activeTab
+      }));
+    } catch (e) {
+      console.error('auto refresh:', e);
+      return null;
+    }
+
+    app.state.pollRefreshInFlight = refresh;
+    const clear = () => {
+      if (app.state.pollRefreshInFlight === refresh) app.state.pollRefreshInFlight = null;
+    };
+    refresh.then(clear, (e) => {
+      console.error('auto refresh:', e);
+      clear();
+    });
+    return refresh;
+  };
+
   app.startPolling = function startPolling() {
     app.stopPolling();
     if (!app.getToken() || document.hidden) return;
 
-    app.state.pollerId = setInterval(() => {
-      if (document.hidden || app.shouldPauseAutoRefresh()) return;
-      app.refreshDashboard({
-        includePlugins: app.state.activeTab === 'plugins',
-        includeWorkers: true,
-        includeStats: app.state.activeTab === 'diagnostics'
-      });
-    }, 5000);
+    app.state.pollerId = setInterval(() => app.runAutoRefresh(), 5000);
   };
 
   app.toggleItem = async function toggleItem(type, id) {
@@ -174,12 +193,12 @@
 
   if (app.el.refreshNowBtn) {
     app.el.refreshNowBtn.addEventListener('click', () => {
-    app.refreshDashboard({
-      includeMeta: true,
-      includePlugins: true,
-      includeWorkers: true,
-      includeStats: app.state.activeTab === 'diagnostics'
-    });
+      app.refreshDashboard({
+        includeMeta: true,
+        includePlugins: true,
+        includeWorkers: true,
+        includeStats: app.state.activeTab === 'diagnostics'
+      });
     });
   }
 
@@ -488,11 +507,7 @@
     }
 
     if (!app.getToken()) return;
-    app.refreshDashboard({
-      includePlugins: app.state.activeTab === 'plugins',
-      includeWorkers: true,
-      includeStats: app.state.activeTab === 'diagnostics'
-    });
+    app.runAutoRefresh();
     app.startPolling();
   });
 
@@ -1245,12 +1260,12 @@
     if (typeof app.setIPv6AssignmentFormAdd === 'function') app.setIPv6AssignmentFormAdd();
     app.activateTab(app.state.activeTab, { persist: false, skipLoad: true });
 
-      app.refreshDashboard({
-        includeMeta: true,
-        includePlugins: true,
-        includeWorkers: true,
-        includeStats: app.state.activeTab === 'diagnostics'
-      });
+    app.refreshDashboard({
+      includeMeta: true,
+      includePlugins: true,
+      includeWorkers: true,
+      includeStats: app.state.activeTab === 'diagnostics'
+    });
 
     app.startPolling();
   };

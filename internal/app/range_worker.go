@@ -28,7 +28,7 @@ type rangeBinding struct {
 func startRangeBinding(workerIndex int, pr PortRange, st *ruleStats) (*rangeBinding, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	closeSet := &closerSet{}
-	bound, failed, firstErr, wg := startRangeForwarder(ctx, &pr, st, closeSet)
+	bound, failed, wg, firstErr := startRangeForwarder(ctx, &pr, st, closeSet)
 	if bound == 0 {
 		cancel()
 		closeSet.CloseAll()
@@ -387,7 +387,7 @@ func runRangeWorker(workerIndex int, sockPath string) {
 
 // startRangeForwarder binds all ports in the range, counts successes/failures,
 // and returns the counts plus a WaitGroup that completes when all serve goroutines exit.
-func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, closeSet *closerSet) (bound int, failed int, firstErr error, wg *sync.WaitGroup) {
+func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, closeSet *closerSet) (bound int, failed int, wg *sync.WaitGroup, firstErr error) {
 	wg = &sync.WaitGroup{}
 
 	ports := pr.EndPort - pr.StartPort + 1
@@ -400,7 +400,7 @@ func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, clos
 	}
 	totalBinds := ports * perPort
 	if totalBinds == 0 {
-		return 0, 0, nil, wg
+		return 0, 0, wg, nil
 	}
 
 	bindCh := make(chan error, totalBinds)
@@ -433,7 +433,7 @@ func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, clos
 		}
 	}
 
-	return bound, failed, firstErr, wg
+	return bound, failed, wg, firstErr
 }
 func runRangeTCPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<- error, st *ruleStats, closeSet *closerSet) {
 	lc := net.ListenConfig{}

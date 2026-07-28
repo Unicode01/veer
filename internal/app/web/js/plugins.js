@@ -104,10 +104,16 @@
   }
 
   function pluginHookDetail(hook) {
+    const engine = String(hook && hook.engine || '').toLowerCase();
+    const netfilter = engine === 'netfilter';
     return [
-      hook && hook.engine ? String(hook.engine).toUpperCase() : '',
-      hook && hook.attach,
-      hook && hook.stage,
+      engine ? engine.toUpperCase() : '',
+      netfilter && hook && hook.family ? 'family=' + hook.family : '',
+      netfilter && hook && hook.hook ? 'hook=' + hook.hook : '',
+      netfilter && hook && hook.phase ? 'phase=' + hook.phase : '',
+      netfilter && hook && hook.namespace ? 'namespace=' + hook.namespace : '',
+      !netfilter && hook && hook.attach,
+      !netfilter && hook && hook.stage,
       hook && typeof hook.priority === 'number' ? 'priority=' + hook.priority : '',
       hook && hook.program,
       hook && hook.mode,
@@ -168,17 +174,23 @@
   }
 
   function pluginAttachmentDetail(attachment) {
+    const engine = String(attachment && attachment.engine || '').toLowerCase();
+    const netfilter = engine === 'netfilter';
     return [
-      attachment && attachment.engine ? String(attachment.engine).toUpperCase() : '',
-      attachment && attachment.attach,
-      attachment && attachment.stage,
-      attachment && attachment.interface,
+      engine ? engine.toUpperCase() : '',
+      netfilter && attachment && attachment.family ? 'family=' + attachment.family : '',
+      netfilter && attachment && attachment.netfilter_hook ? 'hook=' + attachment.netfilter_hook : '',
+      netfilter && attachment && attachment.phase ? 'phase=' + attachment.phase : '',
+      netfilter && attachment && attachment.namespace ? 'namespace=' + attachment.namespace : '',
+      !netfilter && attachment && attachment.attach,
+      !netfilter && attachment && attachment.stage,
+      !netfilter && attachment && attachment.interface,
       attachment && attachment.status,
       attachment && attachment.program,
       attachmentPriorityParts(attachment).join(' | '),
       attachment && Array.isArray(attachment.context) && attachment.context.length ? 'ctx=' + attachment.context.join(',') : '',
       pluginPacketMetadataDetail(attachment && attachment.packet_metadata),
-      attachment && attachment.filter_handle,
+      attachment && attachment.filter_handle ? (netfilter ? 'kernel=' : '') + attachment.filter_handle : '',
       pluginAttachmentMetricDetail(attachment),
       attachment && attachment.error ? app.t('plugins.error') + ': ' + attachment.error : ''
     ].filter(Boolean).join(' | ');
@@ -488,7 +500,8 @@
   function attachmentPriorityParts(attachment) {
     const parts = [];
     if (typeof attachment.priority === 'number') {
-      parts.push((attachment.filter_handle ? 'tc_prio=' : 'priority=') + attachment.priority);
+      const engine = String(attachment.engine || '').toLowerCase();
+      parts.push((engine === 'tc' && attachment.filter_handle ? 'tc_prio=' : 'priority=') + attachment.priority);
     }
     const slot = attachmentChainSlot(attachment);
     if (typeof attachment.order === 'number' && Number.isFinite(attachment.order)) {
@@ -534,8 +547,8 @@
         object.description,
         Array.isArray(object.programs) ? object.programs.map((program) => [program.id, program.section, program.type].filter(Boolean).join(' ')).join(' ') : ''
       ].filter(Boolean).join(' ')).join(' '),
-      hooks.map((hook) => [hook.id, hook.engine, hook.attach, hook.stage, hook.program, hook.mode, Array.isArray(hook.before) ? hook.before.join(' ') : '', Array.isArray(hook.after) ? hook.after.join(' ') : '', pluginPacketMetadataDetail(hook.packet_metadata), Array.isArray(hook.context) ? hook.context.join(' ') : ''].filter(Boolean).join(' ')).join(' '),
-      attachments.map((attachment) => [attachment.hook_id, attachment.engine, attachment.attach, attachment.stage, attachment.interface, attachment.program, attachment.status, Array.isArray(attachment.before) ? attachment.before.join(' ') : '', Array.isArray(attachment.after) ? attachment.after.join(' ') : '', pluginPacketMetadataDetail(attachment.packet_metadata), Array.isArray(attachment.context) ? attachment.context.join(' ') : '', String(attachment.order ?? ''), String(attachment.chain_slot || ''), String(attachment.priority || '')].filter(Boolean).join(' ')).join(' '),
+      hooks.map((hook) => [hook.id, hook.engine, hook.attach, hook.stage, hook.family, hook.hook, hook.phase, hook.namespace, hook.program, hook.mode, Array.isArray(hook.before) ? hook.before.join(' ') : '', Array.isArray(hook.after) ? hook.after.join(' ') : '', pluginPacketMetadataDetail(hook.packet_metadata), Array.isArray(hook.context) ? hook.context.join(' ') : ''].filter(Boolean).join(' ')).join(' '),
+      attachments.map((attachment) => [attachment.hook_id, attachment.engine, attachment.attach, attachment.stage, attachment.interface, attachment.family, attachment.netfilter_hook, attachment.phase, attachment.namespace, attachment.program, attachment.status, attachment.filter_handle, Array.isArray(attachment.before) ? attachment.before.join(' ') : '', Array.isArray(attachment.after) ? attachment.after.join(' ') : '', pluginPacketMetadataDetail(attachment.packet_metadata), Array.isArray(attachment.context) ? attachment.context.join(' ') : '', String(attachment.order ?? ''), String(attachment.chain_slot || ''), String(attachment.priority || '')].filter(Boolean).join(' ')).join(' '),
       virtualInterfaces.map((vif) => [vif.id, vif.type, vif.description].filter(Boolean).join(' ')).join(' ')
     ];
   }
@@ -668,11 +681,16 @@
     const interfaces = pluginAttachmentInterfaces(item);
     const slot = attachmentChainSlot(attachment);
     const label = item.pluginID || attachment.hook_id || app.t('common.dash');
+    const netfilter = String(attachment.engine || '').toLowerCase() === 'netfilter';
     return {
       text: label,
       title: [
         item.pluginName || item.pluginID,
         attachment.hook_id,
+        netfilter && attachment.family ? 'family=' + attachment.family : '',
+        netfilter && attachment.netfilter_hook ? 'hook=' + attachment.netfilter_hook : '',
+        netfilter && attachment.phase ? 'phase=' + attachment.phase : '',
+        netfilter && attachment.namespace ? 'namespace=' + attachment.namespace : '',
         attachment.stage,
         attachment.mode,
         attachment.program,
@@ -687,14 +705,19 @@
         detailRow('Plugin', item.pluginName || item.pluginID),
         detailRow('Hook', attachment.hook_id),
         detailRow('Engine', attachment.engine ? String(attachment.engine).toUpperCase() : ''),
-        detailRow('Attach', attachment.attach),
-        detailRow('Stage', attachment.stage),
+        detailRow('Family', netfilter ? attachment.family : ''),
+        detailRow('Netfilter Hook', netfilter ? attachment.netfilter_hook : ''),
+        detailRow('Phase', netfilter ? attachment.phase : ''),
+        detailRow('Namespace', netfilter ? attachment.namespace : ''),
+        detailRow('Attach', netfilter ? '' : attachment.attach),
+        detailRow('Stage', netfilter ? '' : attachment.stage),
         detailRow('Mode', attachment.mode),
-        detailRow('Interfaces', interfaces.length ? interfaces.join(', ') : ''),
-        detailRow('Pipeline', attachment.interface),
+        detailRow('Interfaces', !netfilter && interfaces.length ? interfaces.join(', ') : ''),
+        detailRow('Pipeline', netfilter ? '' : attachment.interface),
         detailRow('Program', attachment.program),
         detailRow('Status', attachment.status),
         detailRow('Priority', typeof attachment.priority === 'number' ? String(attachment.priority) : ''),
+        detailRow('Kernel attachment', netfilter ? attachment.filter_handle : ''),
         detailRow('Before', Array.isArray(attachment.before) && attachment.before.length ? attachment.before.join(', ') : ''),
         detailRow('After', Array.isArray(attachment.after) && attachment.after.length ? attachment.after.join(', ') : ''),
         detailRow('Resolved order', typeof attachment.order === 'number' ? String(attachment.order) : ''),
@@ -740,7 +763,7 @@
   function pluginAttachmentChainRows(plugin) {
     const currentID = plugin && plugin.id || '';
     if (!currentID) return [];
-    const all = pluginRuntimeAttachmentItems();
+    const all = pluginRuntimeAttachmentItems().filter((item) => String(item && item.attachment && item.attachment.engine || '').toLowerCase() !== 'netfilter');
     const current = all.filter((item) => item.pluginID === currentID);
     if (!current.length) return [];
     const relevantKeys = new Set(current.map(attachmentGroupKey));
@@ -781,6 +804,67 @@
           .concat([pluginApplySegment(direction)])
       };
     });
+  }
+
+  function netfilterPlacementKey(item) {
+    const attachment = item && item.attachment ? item.attachment : {};
+    return [
+      String(attachment.namespace || attachment.interface || 'host').toLowerCase(),
+      String(attachment.family || 'inet').toLowerCase(),
+      String(attachment.netfilter_hook || attachment.attach || '').toLowerCase(),
+      String(attachment.phase || attachment.stage || '').toLowerCase()
+    ].join('\x1f');
+  }
+
+  function netfilterPlacementLabel(item) {
+    const attachment = item && item.attachment ? item.attachment : {};
+    return [
+      attachment.namespace || attachment.interface || 'host',
+      attachment.family || 'inet',
+      attachment.netfilter_hook || attachment.attach,
+      attachment.phase || attachment.stage
+    ].filter(Boolean).join(' / ');
+  }
+
+  function compareNetfilterAttachmentItems(a, b) {
+    const aa = a && a.attachment ? a.attachment : {};
+    const ba = b && b.attachment ? b.attachment : {};
+    const ao = typeof aa.order === 'number' ? aa.order : 9999;
+    const bo = typeof ba.order === 'number' ? ba.order : 9999;
+    if (ao !== bo) return ao - bo;
+    return comparePluginAttachmentItems(a, b);
+  }
+
+  function pluginNetfilterPlacementRows(plugin) {
+    const currentID = plugin && plugin.id || '';
+    if (!currentID) return [];
+    const all = pluginRuntimeAttachmentItems().filter((item) => String(item && item.attachment && item.attachment.engine || '').toLowerCase() === 'netfilter');
+    const current = all.filter((item) => item.pluginID === currentID);
+    if (!current.length) return [];
+    const relevantKeys = new Set(current.map(netfilterPlacementKey));
+    const groups = [];
+    const groupMap = new Map();
+    all.forEach((item) => {
+      const key = netfilterPlacementKey(item);
+      if (!relevantKeys.has(key)) return;
+      let group = groupMap.get(key);
+      if (!group) {
+        group = { key, sample: item, items: [] };
+        groupMap.set(key, group);
+        groups.push(group);
+      }
+      group.items.push(item);
+    });
+    groups.sort((a, b) => {
+      const al = netfilterPlacementLabel(a.sample);
+      const bl = netfilterPlacementLabel(b.sample);
+      return al < bl ? -1 : al > bl ? 1 : 0;
+    });
+    return groups.map((group) => ({
+      kind: app.t('plugins.link.netfilterPlacement'),
+      label: netfilterPlacementLabel(group.sample),
+      segments: group.items.sort(compareNetfilterAttachmentItems).map((item) => pluginAttachmentSegment(item, currentID))
+    }));
   }
 
   function hookDirection(hook) {
@@ -943,7 +1027,8 @@
     const item = plugin || {};
 
     const chains = pluginAttachmentChainRows(item);
-    if (chains.length) return chains;
+    const netfilterPlacements = pluginNetfilterPlacementRows(item);
+    if (chains.length || netfilterPlacements.length) return chains.concat(netfilterPlacements);
     const declaredChains = pluginDeclaredHookChainRows(item);
     if (declaredChains.length) return declaredChains;
 
@@ -2380,7 +2465,7 @@ select.veer-input {
   }
 
   const pluginFrameSandbox = 'allow-scripts';
-  const pluginFrameCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'; navigate-to 'none'";
+  const pluginFrameCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'";
   const pluginFrameCSPAttribute = pluginFrameCSP.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 
   function decoratePluginHTML(html, plugin) {
@@ -3510,7 +3595,7 @@ select.veer-input {
     const iframe = panel.querySelector ? panel.querySelector('.plugin-page-frame') : null;
     if (!iframe) return;
     const opts = options || {};
-    if (!opts.force && panel.dataset.loaded === '1') return;
+    if (!opts.force && (panel.dataset.loaded === '1' || panel.dataset.loaded === 'loading')) return;
     panel.dataset.loaded = 'loading';
     setPluginPageLoadingState(page.tabID, true);
     try {
@@ -3573,10 +3658,11 @@ select.veer-input {
   app.handleTabLoad = (function wrapPluginPageTabLoad(original) {
     return function handleTabLoadWithPluginPages(target) {
       if (String(target || '').indexOf('plugin-') === 0) {
-        app.loadPluginPageForTab(target);
-        return;
+        const refresh = typeof original === 'function' ? original(target) : Promise.resolve();
+        return Promise.resolve(refresh).then(() => app.loadPluginPageForTab(target));
       }
-      if (typeof original === 'function') original(target);
+      if (typeof original === 'function') return original(target);
+      return Promise.resolve();
     };
   })(app.handleTabLoad);
 

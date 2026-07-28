@@ -224,6 +224,7 @@ function createHarness() {
     'plugins.link.count': '{{count}} items',
     'plugins.link.interfaceChain': 'Interface Chain',
     'plugins.link.declaredChain': 'Declared Chain',
+    'plugins.link.netfilterPlacement': 'Netfilter Placement',
     'plugins.link.unbound': 'unbound',
     'plugins.link.current': 'Current plugin',
     'plugins.link.core': 'Veer Core',
@@ -707,6 +708,51 @@ test('plugin page panel creates its refresh control without row state dependenci
   assert.equal(refresh[0].dataset.pluginTab, 'plugin-observe');
 });
 
+test('plugin page ignores a duplicate load while its first request is pending', async () => {
+  const app = createHarness();
+  const plugin = {
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html', page: 'observe', page_title: 'Observe' }
+  };
+  app.state.plugins.data = [plugin];
+  const panel = app.__createPluginTabPanelForTest({
+    tabID: 'plugin-observe',
+    pluginID: plugin.id,
+    title: 'Observe',
+    entry: plugin.ui.entry,
+    plugin
+  });
+  const iframe = findNodes(panel, (node) => String(node.className || '').includes('plugin-page-frame'))[0];
+  const refresh = findNodes(panel, (node) => String(node.className || '').includes('btn-reload-plugin-page'))[0];
+  panel.querySelector = (selector) => selector.includes('plugin-page-frame') ? iframe : refresh;
+  app.__context.document.getElementById = (id) => id === 'tab-plugin-observe' ? panel : null;
+
+  let completeFetch;
+  let fetchCalls = 0;
+  app.__context.fetch = () => {
+    fetchCalls += 1;
+    return new Promise((resolve) => {
+      completeFetch = () => resolve({
+        ok: true,
+        status: 200,
+        headers: { get(name) { return name === 'Content-Type' ? 'text/html; charset=utf-8' : ''; } },
+        text: async () => '<!doctype html><title>Observe</title>'
+      });
+    });
+  };
+
+  const first = app.loadPluginPageForTab('plugin-observe');
+  const duplicate = app.loadPluginPageForTab('plugin-observe');
+
+  assert.equal(fetchCalls, 1);
+  await duplicate;
+  completeFetch();
+  await first;
+  assert.equal(panel.dataset.loaded, '1');
+});
+
 test('applyPluginUpdate posts the pending catalog and reports completion', async () => {
   const app = createHarness();
   const calls = [];
@@ -981,6 +1027,67 @@ test('plugin dataplane link rows render attached xdp hooks', () => {
   assert.ok(rows[0].segments.some((segment) => segment.current && segment.text === 'xdp_probe'));
 });
 
+test('plugin dataplane link rows render native netfilter placements without Veer core', () => {
+  const app = createHarness();
+  app.state.plugins.catalog = { external_plugins_enabled: true, directory: 'plugins', runtime: { external_dataplane_attach: true, core_priority: 1000 } };
+  const counter = {
+    id: 'nf_counter',
+    name: 'Netfilter Counter',
+    kind: 'pipeline',
+    hooks: [{ id: 'count', engine: 'netfilter', family: 'inet', hook: 'forward', phase: 'filter', namespace: 'host', priority: 20, program: 'counter:nf_count' }],
+    runtime: {
+      mode: 'dataplane',
+      attachable: true,
+      attached: true,
+      attachment_count: 1,
+      attachments: [{
+        hook_id: 'count', engine: 'netfilter', family: 'ipv4', netfilter_hook: 'forward', phase: 'filter', namespace: 'host',
+        attach: 'forward', stage: 'filter', interface: 'host', priority: 20, order: 1, program: 'counter:nf_count',
+        filter_handle: 'bpf_link:priority=5', status: 'attached'
+      }]
+    }
+  };
+  const dropper = {
+    id: 'nf_dropper',
+    name: 'Netfilter Dropper',
+    kind: 'pipeline',
+    runtime: {
+      mode: 'dataplane',
+      attachable: true,
+      attached: true,
+      attachment_count: 1,
+      attachments: [{
+        hook_id: 'drop', engine: 'netfilter', family: 'ipv4', netfilter_hook: 'forward', phase: 'filter', namespace: 'host',
+        attach: 'forward', stage: 'filter', interface: 'host', priority: 10, order: 0, program: 'dropper:nf_drop',
+        filter_handle: 'bpf_link:priority=4', status: 'attached'
+      }]
+    }
+  };
+  app.state.plugins.data = [counter, dropper];
+
+  const rows = app.__pluginLinkRowsForTest(counter);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, 'Netfilter Placement');
+  assert.equal(rows[0].label, 'host / ipv4 / forward / filter');
+  assert.deepEqual(JSON.parse(JSON.stringify(rows[0].segments.map((segment) => segment.text))), ['nf_dropper', 'nf_counter']);
+  assert.equal(rows[0].segments.some((segment) => segment.core || segment.apply), false);
+  const current = rows[0].segments.find((segment) => segment.current);
+  assert.ok(current.detailRows.some((row) => row.label === 'Family' && row.value === 'ipv4'));
+  assert.ok(current.detailRows.some((row) => row.label === 'Netfilter Hook' && row.value === 'forward'));
+  assert.ok(current.detailRows.some((row) => row.label === 'Phase' && row.value === 'filter'));
+  assert.ok(current.detailRows.some((row) => row.label === 'Namespace' && row.value === 'host'));
+  assert.ok(current.detailRows.some((row) => row.label === 'Kernel attachment' && row.value === 'bpf_link:priority=5'));
+
+  app.renderPluginsTable();
+  const details = collectAttribute(app.el.pluginsBody, 'aria-label');
+  assert.match(details, /family=inet/);
+  assert.match(details, /hook=forward/);
+  assert.match(details, /phase=filter/);
+  assert.match(details, /namespace=host/);
+  assert.match(details, /kernel=bpf_link:priority=5/);
+  assert.doesNotMatch(details, /tc_prio=20/);
+});
+
 test('openPluginUI fetches protected asset and renders inline iframe', async () => {
   const app = createHarness();
   const calls = [];
@@ -1016,7 +1123,7 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
   assert.match(app.el.pluginUIFrame.getAttribute('csp'), /connect-src 'none'/);
   assert.match(app.el.pluginUIFrame.getAttribute('csp'), /form-action 'none'/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /http-equiv="Content-Security-Policy"/);
-  assert.match(String(app.el.pluginUIFrame.srcdoc), /navigate-to 'none'/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /base-uri 'none'/);
   assert.ok(
     String(app.el.pluginUIFrame.srcdoc).indexOf('http-equiv="Content-Security-Policy"') <
       String(app.el.pluginUIFrame.srcdoc).indexOf('data-plugin-prehead'),

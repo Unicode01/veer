@@ -148,6 +148,7 @@ type gojaPluginControlRuntime struct {
 	reconcileMu          sync.Mutex
 	db                   *sql.DB
 	cfg                  *Config
+	executionTimeout     time.Duration
 	mapController        pluginEBPFMapController
 	dataApplierProvider  pluginRuntimeDataApplierProvider
 	updateProvider       pluginResourceRuntimeUpdateProvider
@@ -376,6 +377,7 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 	runtime := &gojaPluginControlRuntime{
 		db:                   db,
 		cfg:                  cfg,
+		executionTimeout:     pluginControlTimeout,
 		mapController:        mapController,
 		dataApplierProvider:  provider,
 		updateProvider:       updateProvider,
@@ -410,6 +412,13 @@ func pluginControlProcessManager(rt *gojaPluginControlRuntime) *ProcessManager {
 	}
 	pm, _ := rt.mapController.(*ProcessManager)
 	return pm
+}
+
+func (rt *gojaPluginControlRuntime) handlerTimeout() time.Duration {
+	if rt != nil && rt.executionTimeout > 0 {
+		return rt.executionTimeout
+	}
+	return pluginControlTimeout
 }
 
 func (rt *gojaPluginControlRuntime) pluginBlobStoreOrCreate() (*pluginBlobStore, error) {
@@ -686,7 +695,9 @@ func (rt *gojaPluginControlRuntime) Snapshot() pluginRuntimeSnapshot {
 	rt.mu.Lock()
 	snapshot := clonePluginRuntimeSnapshot(rt.snapshot)
 	workerPlugins := make([]string, 0)
+	plugins := make(map[string]LoadedPlugin, len(rt.plugins))
 	for pluginID, plugin := range rt.plugins {
+		plugins[pluginID] = plugin
 		if pluginControlHasPermission(plugin, "worker") {
 			workerPlugins = append(workerPlugins, pluginID)
 		}
@@ -701,21 +712,43 @@ func (rt *gojaPluginControlRuntime) Snapshot() pluginRuntimeSnapshot {
 		state.WorkerQueue = &queue
 		snapshot.Plugins[pluginID] = state
 	}
+	pluginIDs := make([]string, 0, len(snapshot.Plugins))
+	operationPluginIDs := make([]string, 0, len(snapshot.Plugins))
 	for pluginID := range snapshot.Plugins {
+		pluginIDs = append(pluginIDs, pluginID)
+		if pluginControlHasPermission(plugins[pluginID], "operation") {
+			operationPluginIDs = append(operationPluginIDs, pluginID)
+		}
+	}
+	var operationStates map[string]PluginOperationRuntimeState
+	var leaseStates map[string][]PluginResourceLeaseState
+	if rt.db != nil {
+		var err error
+		operationStates, err = pluginOperationRuntimeSnapshots(rt.db, operationPluginIDs)
+		if err != nil {
+			log.Printf("plugin operation snapshot failed: %v", err)
+		}
+		leaseStates, err = pluginOwnedResourceLeaseStatesByPlugin(rt.db, pluginIDs)
+		if err != nil {
+			log.Printf("plugin resource lease snapshot failed: %v", err)
+		}
+	}
+	for pluginID := range snapshot.Plugins {
+		plugin := plugins[pluginID]
 		state := snapshot.Plugins[pluginID]
 		events := rt.pluginEventBusSnapshot(pluginID)
-		if events.SubscriptionCount > 0 || pluginControlHasPermission(rt.pluginByID(pluginID), "event") {
+		if events.SubscriptionCount > 0 || pluginControlHasPermission(plugin, "event") {
 			state.EventBus = &events
 			snapshot.Plugins[pluginID] = state
 		}
 		rings := rt.pluginRingBusSnapshot(pluginID)
-		if rings.SubscriptionCount > 0 || len(rt.pluginByID(pluginID).RingSubscriptions) > 0 {
+		if rings.SubscriptionCount > 0 || len(plugin.RingSubscriptions) > 0 {
 			state = snapshot.Plugins[pluginID]
 			state.RingBuffers = &rings
 			snapshot.Plugins[pluginID] = state
 		}
 		health := rt.pluginControlHealthSnapshot(pluginID)
-		if health.Calls > 0 || health.Rejected > 0 || rt.pluginByID(pluginID).Control != nil {
+		if health.Calls > 0 || health.Rejected > 0 || plugin.Control != nil {
 			state = snapshot.Plugins[pluginID]
 			state.ControlHealth = &health
 		}
@@ -723,17 +756,11 @@ func (rt *gojaPluginControlRuntime) Snapshot() pluginRuntimeSnapshot {
 		state.Isolation = &isolation
 		state.Metrics = rt.pluginMetricSnapshot(pluginID)
 		if rt.db != nil {
-			if pluginControlHasPermission(rt.pluginByID(pluginID), "operation") {
-				if operations, err := pluginOperationRuntimeSnapshot(rt.db, pluginID); err == nil {
-					state.Operations = &operations
-				} else {
-					log.Printf("plugin operation snapshot %s failed: %v", pluginID, err)
-				}
+			if operations, ok := operationStates[pluginID]; ok {
+				state.Operations = &operations
 			}
-			if leases, err := pluginOwnedResourceLeaseStates(rt.db, pluginID); err == nil {
+			if leases, ok := leaseStates[pluginID]; ok {
 				state.Leases = leases
-			} else {
-				log.Printf("plugin resource lease snapshot %s failed: %v", pluginID, err)
 			}
 		}
 		snapshot.Plugins[pluginID] = state
@@ -1637,7 +1664,7 @@ func (vm *pluginControlVM) newControlHost(plugin LoadedPlugin, trackRuntime bool
 
 func (vm *pluginControlVM) runWithTimeout(host *pluginControlHost, req pluginControlRequest) pluginControlResult {
 	var result pluginControlResult
-	host.executionDeadline = time.Now().Add(pluginControlTimeout)
+	host.executionDeadline = time.Now().Add(vm.rt.handlerTimeout())
 	if req.state != nil && !req.state.deadline.IsZero() && req.state.deadline.Before(host.executionDeadline) {
 		host.executionDeadline = req.state.deadline
 	}

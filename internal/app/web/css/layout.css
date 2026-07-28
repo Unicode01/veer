@@ -450,6 +450,12 @@ section h2 {
     white-space: nowrap;
 }
 
+.overview-meta-item.is-error {
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+    color: var(--warning-text);
+}
+
 .overview-grid {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -517,6 +523,12 @@ section h2 {
     border-color: var(--danger-border);
     background: var(--danger-bg);
     color: var(--danger-text);
+}
+
+.toast-warning {
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+    color: var(--warning-text);
 }
 
 .toast-info {

@@ -208,6 +208,13 @@ type PluginOperation struct {
 	UpdatedAt         string
 }
 
+type PluginOperationSummary struct {
+	Total     int
+	Resumable int
+	Bytes     int64
+	ByStatus  map[string]int
+}
+
 type PluginAuditLog struct {
 	ID          int64
 	PluginID    string
