@@ -19,11 +19,6 @@ const (
 	kernelAdaptiveMapTargetUsagePct = kernelcap.AdaptiveMapTargetUsagePct
 )
 
-const (
-	kernelAdaptiveMapMemoryTierSmall = kernelcap.AdaptiveMapMemoryTierSmall
-	kernelAdaptiveMapMemoryTierLarge = kernelcap.AdaptiveMapMemoryTierLarge
-)
-
 type kernelAdaptiveMapProfile struct {
 	totalMemoryBytes   uint64
 	flowsBaseLimit     int
@@ -68,20 +63,8 @@ func kernelAdaptiveMapProfileName(profile kernelAdaptiveMapProfile) string {
 	return kernelcap.AdaptiveMapProfileName(toKernelCapAdaptiveMapProfile(profile))
 }
 
-func formatKernelAdaptiveMapTotalMemory(total uint64) string {
-	return kernelcap.FormatAdaptiveMapTotalMemory(total)
-}
-
 func kernelAdaptiveMapProfileLogFields(profile kernelAdaptiveMapProfile) string {
 	return kernelcap.AdaptiveMapProfileLogFields(toKernelCapAdaptiveMapProfile(profile))
-}
-
-func kernelAdaptiveFlowsMapBaseLimit() int {
-	return currentKernelAdaptiveMapProfile().flowsBaseLimit
-}
-
-func kernelAdaptiveNATMapBaseLimit() int {
-	return currentKernelAdaptiveMapProfile().natBaseLimit
 }
 
 func kernelAdaptiveEgressNATAutoMapFloor() int {
@@ -116,20 +99,8 @@ func effectiveKernelNATMapLimit(configuredLimit int, requestedEntries int) int {
 	return kernelcap.EffectiveNATMapLimit(configuredLimit, requestedEntries, toKernelCapAdaptiveMapProfile(currentKernelAdaptiveMapProfile()))
 }
 
-func adaptiveKernelMapLimit(requestedEntries int, base int, max int) int {
-	return kernelcap.AdaptiveMapLimit(requestedEntries, base, max)
-}
-
 func adaptiveKernelMapLimitForLiveEntries(entries int, base int, max int) int {
 	return kernelcap.AdaptiveMapLimitForLiveEntries(entries, base, max)
-}
-
-func requestedEntriesForTargetUsage(entries int, targetUsagePct int, max int) int {
-	return kernelcap.RequestedEntriesForTargetUsage(entries, targetUsagePct, max)
-}
-
-func scaleKernelRequestedEntries(requestedEntries int, factor int, max int) int {
-	return kernelcap.ScaleRequestedEntries(requestedEntries, factor, max)
 }
 
 func kernelRulesMapCapacityMode(configuredLimit int) string {
@@ -142,10 +113,6 @@ func kernelFlowsMapCapacityMode(configuredLimit int) string {
 
 func kernelNATMapCapacityMode(configuredLimit int) string {
 	return kernelcap.NATMapCapacityMode(configuredLimit)
-}
-
-func kernelMapCapacityMode(limit int) string {
-	return kernelcap.MapCapacityMode(limit)
 }
 
 func kernelRulesCapacityReason(configuredLimit int, requestedEntries int) string {

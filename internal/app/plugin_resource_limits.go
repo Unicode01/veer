@@ -343,20 +343,18 @@ func applyPluginDatabaseResourceUsage(catalog *PluginCatalog, db store.RuleStore
 		return
 	}
 	limits := catalog.Runtime.ResourceLimits
-	global, err := store.GetGlobalPluginRecordStorageUsage(db)
-	if err == nil {
-		catalog.Runtime.ResourceUsage.DatabaseRecords = global.Records
-		catalog.Runtime.ResourceUsage.DatabaseBytes = global.Bytes
+	usageByPlugin, global, err := store.GetPluginRecordStorageUsages(db)
+	if err != nil {
+		return
 	}
+	catalog.Runtime.ResourceUsage.DatabaseRecords = global.Records
+	catalog.Runtime.ResourceUsage.DatabaseBytes = global.Bytes
 	for i := range catalog.Plugins {
 		plugin := &catalog.Plugins[i]
 		if plugin.Builtin || plugin.ID == "" {
 			continue
 		}
-		usage, err := store.GetPluginRecordStorageUsage(db, plugin.ID)
-		if err != nil {
-			continue
-		}
+		usage := usageByPlugin[plugin.ID]
 		if plugin.ResourceUsage == nil {
 			plugin.ResourceUsage = &PluginResourceUsage{}
 		}

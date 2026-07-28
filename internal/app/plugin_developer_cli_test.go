@@ -21,10 +21,24 @@ func TestPluginDeveloperCLIInitLintAndTest(t *testing.T) {
 	if initialized["plugin_id"] != "sample_control" || initialized["kind"] != "control" {
 		t.Fatalf("init output = %+v", initialized)
 	}
+	if commands, ok := initialized["next_commands"].([]any); !ok || len(commands) != 2 {
+		t.Fatalf("init next commands = %#v", initialized["next_commands"])
+	}
 	for _, name := range []string{pluginManifestFile, "control.js"} {
 		if info, err := os.Stat(filepath.Join(target, name)); err != nil || !info.Mode().IsRegular() {
 			t.Fatalf("generated %s info = %+v, error = %v", name, info, err)
 		}
+	}
+	manifestData, err := os.ReadFile(filepath.Join(target, pluginManifestFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest PluginManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Compatibility == nil || manifest.Compatibility.Runtime == "" || manifest.Compatibility.ControlAPIABI != pluginControlAPIABI {
+		t.Fatalf("generated control compatibility = %+v", manifest.Compatibility)
 	}
 	for _, command := range []string{"lint", "test"} {
 		result := runPluginPackageCLIForTest(t, command, "--source", target)
@@ -44,6 +58,19 @@ func TestPluginDeveloperCLIInitLintAndTest(t *testing.T) {
 		if len(checked.ContractSHA256) != 64 || checked.ControlAPIABI != pluginControlAPIABI {
 			t.Fatalf("%s SDK contract result = %+v", command, checked)
 		}
+	}
+	textOutput := string(runPluginPackageCLIForTest(t, "test", "--source", target, "--format", "text"))
+	for _, expected := range []string{"Plugin: sample_control 0.1.0", "PASS   manifest", "PASS   registration", "Control API ABI: 1"} {
+		if !strings.Contains(textOutput, expected) {
+			t.Fatalf("text test output missing %q:\n%s", expected, textOutput)
+		}
+	}
+	lintText := string(runPluginPackageCLIForTest(t, "lint", "--source", target, "--format", "text"))
+	if !strings.Contains(lintText, "Runtime surface: not evaluated (run plugin test)") || strings.Contains(lintText, "Surface: 0 object") {
+		t.Fatalf("lint text output does not explain registration boundary:\n%s", lintText)
+	}
+	if _, err := runPluginPackageCLIWithError("test", "--source", target, "--format", "yaml"); err == nil || !strings.Contains(err.Error(), "json or text") {
+		t.Fatalf("invalid output format error = %v", err)
 	}
 	if _, err := runPluginPackageCLIWithError("init", "--id", "sample_control", "--directory", target); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("repeat init error = %v", err)
@@ -87,10 +114,19 @@ func TestPluginDeveloperCLIInitPipelineCopiesSDK(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(t.TempDir(), "sample_pipeline")
-	runPluginPackageCLIForTest(t,
+	initOutput := runPluginPackageCLIForTest(t,
 		"init", "--id", "sample_pipeline", "--kind", "pipeline", "--directory", target,
 		"--sdk-include", filepath.Join(repoRoot, "plugins", "include"),
 	)
+	var initialized struct {
+		NextCommands [][]string `json:"next_commands"`
+	}
+	if err := json.Unmarshal(initOutput, &initialized); err != nil || len(initialized.NextCommands) != 3 {
+		t.Fatalf("pipeline init next commands = %#v, error = %v", initialized.NextCommands, err)
+	}
+	if command := strings.Join(initialized.NextCommands[1], " "); !strings.Contains(command, "--os linux") || !strings.Contains(command, "--kernel 6.6.0") {
+		t.Fatalf("pipeline test next command = %q", command)
+	}
 	for _, name := range []string{pluginManifestFile, "control.js", "main.bpf.c", filepath.Join("include", "veer_plugin_helpers.h")} {
 		if info, err := os.Stat(filepath.Join(target, name)); err != nil || !info.Mode().IsRegular() {
 			t.Fatalf("generated %s info = %+v, error = %v", name, info, err)

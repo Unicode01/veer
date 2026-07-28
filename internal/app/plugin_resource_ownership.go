@@ -1452,16 +1452,20 @@ func pluginOwnedResourceViews(db store.RuleStore, pluginID string) ([]map[string
 	return out, nil
 }
 
-func pluginOwnedResourceLeaseStates(db store.RuleStore, pluginID string) ([]PluginResourceLeaseState, error) {
-	items, err := store.GetPluginOwnedResources(db, pluginID)
+func pluginOwnedResourceLeaseStatesByPlugin(db store.RuleStore, pluginIDs []string) (map[string][]PluginResourceLeaseState, error) {
+	itemsByPlugin, err := store.GetPluginOwnedResourcesByPluginIDs(db, pluginIDs)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]PluginResourceLeaseState, 0, len(items))
-	for _, item := range items {
-		out = append(out, PluginResourceLeaseState{
-			Type: item.ResourceType, Key: item.ResourceKey, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
-		})
+	out := make(map[string][]PluginResourceLeaseState, len(itemsByPlugin))
+	for pluginID, items := range itemsByPlugin {
+		leases := make([]PluginResourceLeaseState, 0, len(items))
+		for _, item := range items {
+			leases = append(leases, PluginResourceLeaseState{
+				Type: item.ResourceType, Key: item.ResourceKey, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+			})
+		}
+		out[pluginID] = leases
 	}
 	return out, nil
 }

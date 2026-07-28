@@ -201,12 +201,6 @@ func (rt *linuxPluginDataplaneRuntime) PluginDataplaneHealthy() bool {
 	return rt.netfilter.attachmentsHealthyLocked(rt.netfilter.desired)
 }
 
-func (rt *linuxPluginDataplaneRuntime) directSnapshot() pluginRuntimeSnapshot {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	return clonePluginRuntimeSnapshot(rt.snapshot)
-}
-
 func (rt *linuxPluginDataplaneRuntime) Close() error {
 	rt.operationMu.Lock()
 	defer rt.operationMu.Unlock()

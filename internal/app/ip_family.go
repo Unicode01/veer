@@ -2,7 +2,6 @@ package app
 
 import (
 	"net"
-	"net/netip"
 
 	"github.com/Unicode01/veer/internal/netutil"
 )
@@ -25,16 +24,8 @@ func parseIPLiteral(value string) net.IP {
 	return netutil.ParseIPLiteral(value)
 }
 
-func parseIPLiteralAddr(value string) (netip.Addr, bool) {
-	return netutil.ParseIPLiteralAddr(value)
-}
-
 func canonicalIPLiteral(ip net.IP) string {
 	return netutil.CanonicalIPLiteral(ip)
-}
-
-func ipLiteralFamilyFromAddr(addr netip.Addr) string {
-	return netutil.IPLiteralFamilyFromAddr(addr)
 }
 
 func ipLiteralFamily(value string) string {
@@ -81,10 +72,6 @@ func udpListenNetworkForIP(bindIP string) string {
 	return netutil.UDPListenNetworkForIP(bindIP)
 }
 
-func udpNetworkForIP(ip net.IP) string {
-	return netutil.UDPNetworkForIP(ip)
-}
-
 func ipv4BytesToUint32(ip net.IP) uint32 {
 	return netutil.IPv4BytesToUint32(ip)
 }
@@ -95,10 +82,6 @@ func kernelFamilyLabel(family string) string {
 
 func normalizeKernelFamilyIP(ip net.IP, family string) net.IP {
 	return netutil.NormalizeKernelFamilyIP(ip, family)
-}
-
-func zeroKernelFamilyIP(family string) net.IP {
-	return netutil.ZeroKernelFamilyIP(family)
 }
 
 func parseKernelExplicitIP(text string, family string) (net.IP, error) {

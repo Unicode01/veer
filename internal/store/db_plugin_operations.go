@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 )
 
 const pluginOperationAccountingOverheadBytes = 128
@@ -155,6 +156,60 @@ func PluginOperationStorageBytes(db RuleStore, pluginID string) (int64, error) {
 		length(CAST(result_json AS BLOB)) + length(CAST(error_json AS BLOB)) + ?
 	), 0) FROM plugin_operations WHERE plugin_id = ?`, pluginOperationAccountingOverheadBytes, pluginID).Scan(&bytes)
 	return bytes, err
+}
+
+func PluginOperationSummaries(db RuleStore, pluginIDs []string, nowUnixMS int64) (map[string]PluginOperationSummary, error) {
+	pluginIDs = normalizeNonEmptyStringValues(pluginIDs)
+	out := make(map[string]PluginOperationSummary, len(pluginIDs))
+	for _, pluginID := range pluginIDs {
+		out[pluginID] = PluginOperationSummary{ByStatus: make(map[string]int)}
+	}
+	for start := 0; start < len(pluginIDs); start += dbByIDQueryChunkSize {
+		end := min(start+dbByIDQueryChunkSize, len(pluginIDs))
+		chunk := pluginIDs[start:end]
+		args := []interface{}{nowUnixMS, pluginOperationAccountingOverheadBytes}
+		args = append(args, dbStringArgs(chunk)...)
+		rows, err := db.Query(fmt.Sprintf(`SELECT plugin_id, status, COUNT(*),
+			COALESCE(SUM(CASE WHEN status IN ('pending', 'running') OR
+				(status = 'retry_wait' AND next_attempt_unix_ms <= ?) THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(
+				length(CAST(operation_id AS BLOB)) + length(CAST(operation_key AS BLOB)) +
+				length(CAST(kind AS BLOB)) + length(CAST(phase AS BLOB)) +
+				length(CAST(input_json AS BLOB)) + length(CAST(state_json AS BLOB)) +
+				length(CAST(result_json AS BLOB)) + length(CAST(error_json AS BLOB)) + ?
+			), 0)
+			FROM plugin_operations
+			WHERE plugin_id IN (%s)
+			GROUP BY plugin_id, status`, dbSQLPlaceholders(len(chunk))), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var (
+				pluginID  string
+				status    string
+				count     int
+				resumable int
+				bytes     int64
+			)
+			if err := rows.Scan(&pluginID, &status, &count, &resumable, &bytes); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			summary := out[pluginID]
+			summary.Total += count
+			summary.Resumable += resumable
+			summary.Bytes += bytes
+			summary.ByStatus[status] += count
+			out[pluginID] = summary
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 func PluginOperationStoredBytes(item PluginOperation) int64 {

@@ -586,7 +586,7 @@ EOF
   "sync_hook_bindings": true,
   "apply_hook_bindings": true,
   "send_padt": false,
-  "post_session_control_ms": 200,
+  "post_session_control_ms": 5000,
 $keepalive_test_fields
   "decap_mode": "manual",
   "wan_core_sync": true,

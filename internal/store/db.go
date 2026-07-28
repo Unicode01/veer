@@ -774,6 +774,28 @@ func normalizePositiveInt64Values(values []int64) []int64 {
 	return out
 }
 
+func normalizeNonEmptyStringValues(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -819,6 +841,14 @@ func QueryProtocolMapByIDs(db RuleStore, queryFmt string, ids []int64, normalize
 }
 
 func dbInt64Args(values []int64) []interface{} {
+	args := make([]interface{}, 0, len(values))
+	for _, value := range values {
+		args = append(args, value)
+	}
+	return args
+}
+
+func dbStringArgs(values []string) []interface{} {
 	args := make([]interface{}, 0, len(values))
 	for _, value := range values {
 		args = append(args, value)

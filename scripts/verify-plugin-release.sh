@@ -97,6 +97,13 @@ validate_positive_integer() {
 	[ "$value" -gt 0 ] || fail "$name must be a positive integer"
 }
 
+validate_ratio() {
+	name=$1
+	value=$2
+	awk -v value="$value" 'BEGIN { if (value !~ /^[0-9]+([.][0-9]+)?$/ || value <= 0 || value > 1) exit 1 }' || \
+		fail "$name must be greater than 0 and no greater than 1"
+}
+
 median_file() {
 	sort -n "$1" | awk '{ values[NR] = $1 } END { if (NR == 0) exit 1; if (NR % 2) print values[(NR + 1) / 2]; else print (values[NR / 2] + values[NR / 2 + 1]) / 2 }'
 }
@@ -110,15 +117,19 @@ assert_minimum() {
 }
 
 run_portable() {
-	for command_name in go node npx sh tar cmp govulncheck; do
+	for command_name in go node npm npx sh tar cmp govulncheck; do
 		require_command "$command_name"
 	done
 	new_temp_dir
+
+	log "Go module integrity"
+	(cd "$ROOT_DIR" && go mod verify && go mod tidy -diff)
 
 	prepare_portable_ebpf
 
 	log "deployment platform scripts"
 	sh "$ROOT_DIR/scripts/verify-platform-support.sh"
+	sh "$ROOT_DIR/scripts/clean-dev-artifacts.sh" --dry-run
 
 	log "build Veer conformance binary"
 	verify_binary="$TMP_DIR/veer-plugin-verify"
@@ -138,6 +149,9 @@ run_portable() {
 
 	log "WebUI Node tests"
 	(cd "$ROOT_DIR" && node --test internal/app/web_test/*.test.js)
+
+	log "WebUI browser tests"
+	(cd "$ROOT_DIR" && npm run test:web:e2e)
 
 	log "plugin SDK Node tests"
 	(cd "$ROOT_DIR" && node --test sdk/plugin/test-host.test.cjs)
@@ -219,14 +233,24 @@ run_portable() {
 
 run_privileged() {
 	require_linux_root
+	require_command nft
 	new_temp_dir
 	log "build eBPF objects for privileged integration"
 	sh "$ROOT_DIR/scripts/build-all-ebpf.sh"
+	log "build privileged integration binary"
+	privileged_binary="$TMP_DIR/veer-plugin-privileged.test"
+	go test -c -o "$privileged_binary" ./internal/app
 
 	privileged_log="$TMP_DIR/privileged.log"
-	privileged_pattern='^(TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls|TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxSupportsConcurrentHosts|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe|TestPluginHostIsolationContainsMemoryExhaustion|TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker|TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall|TestCleanupOrphanPluginHostCgroups|TestCleanupOrphanPluginHostFilesystemRoots|TestLinuxPluginScopedNamespaceNetworkAPIs|TestEgressNATTCActiveTCPRefreshesBothFlowEntries|TestPlugin(NetPolicyProviderLinuxIntegration|NetPolicyTransactionsLinuxIntegration|MultipathRouteLinuxIntegration|NamespaceTunTapLinuxIntegration|NamespaceTunTapCrashRecoveryLinuxIntegration|NetTransactionCrashRecoveryLinuxIntegration|WANCoreLinuxIntegration|VToLocalLinuxIntegration|LANCoreLinuxIntegration|ActionApplyPersistsAndRepairsLinuxIntegration|LANCoreResolvesWANCoreStatusLinuxIntegration|ControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration|ControlNetEnsureMacvlanLinuxIntegration|ControlNetSetGSOLinuxIntegration|ControlNetAddrReplaceIdempotentLinuxIntegration|DataplaneRuntimeAttachesTCObservePlugin|IPv6AssignmentPlanLinuxIntegration|LANCoreGeneratedEgressNATTCIntegration|LANCoreResolvesWANCoreEgressNATTCIntegration)|TestKernelPluginPipelineRuntime.*|TestKernelXDPPluginPipelineChainHotUpdateAndConflict|TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL|TestOrderedKernelRuntimeChainsXDPIntoTCPlugin)$'
-	run_no_skips "privileged plugin integration" "$privileged_log" \
-		env \
+	privileged_pattern='^(TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls|TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxSupportsConcurrentHosts|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe|TestPluginHostIsolationContainsMemoryExhaustion|TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker|TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall|TestCleanupOrphanPluginHostCgroups|TestCleanupOrphanPluginHostFilesystemRoots|TestLinuxPluginScopedNamespaceNetworkAPIs|TestEgressNATTCActiveTCPRefreshesBothFlowEntries|TestPlugin(NetPolicyProviderLinuxIntegration|NetPolicyTransactionsLinuxIntegration|MultipathRouteLinuxIntegration|NamespaceTunTapLinuxIntegration|NamespaceTunTapCrashRecoveryLinuxIntegration|NetTransactionCrashRecoveryLinuxIntegration|WANCoreLinuxIntegration|VToLocalLinuxIntegration|LANCoreLinuxIntegration|ActionApplyPersistsAndRepairsLinuxIntegration|LANCoreResolvesWANCoreStatusLinuxIntegration|ControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration|ControlNetEnsureMacvlanLinuxIntegration|ControlNetSetGSOLinuxIntegration|ControlNetAddrReplaceIdempotentLinuxIntegration|DataplaneRuntimeAttachesTCObservePlugin|IPv6AssignmentPlanLinuxIntegration|LANCoreGeneratedEgressNATTCIntegration|LANCoreResolvesWANCoreEgressNATTCIntegration)|TestKernelPluginPipelineRuntime.*|TestKernelXDPPluginPipelineChainHotUpdateAndConflict|TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL|TestKernelNetfilterPlugin(PipelineIntegration|PriorityIntegration|NamespaceRecreateIntegration|InitialMissingNamespaceRecoversIntegration)|TestOrderedKernelRuntimeChainsXDPIntoTCPlugin)$'
+	env_command=$(command -v env)
+	set -- \
+		"$env_command" \
+		"HOME=${HOME:-/root}" \
+		"PATH=$PATH" \
+		"GOPATH=$(go env GOPATH)" \
+		"GOMODCACHE=$(go env GOMODCACHE)" \
+		"GOCACHE=$(go env GOCACHE)" \
 		FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 \
 		FORWARD_RUN_PLUGIN_DATAPLANE_TEST=1 \
 		FORWARD_RUN_PLUGIN_PIPELINE_TEST=1 \
@@ -234,8 +258,18 @@ run_privileged() {
 		FORWARD_RUN_EGRESS_NAT_TEST=1 \
 		VEER_RUN_PLUGIN_NETNS_SCOPED_TESTS=1 \
 		VEER_RUN_XDP_PLUGIN_TESTS=1 \
+		VEER_RUN_NETFILTER_PLUGIN_TEST=1 \
 		VEER_PLUGIN_OOM_TEST=1 \
-		go test -v ./internal/app -run "$privileged_pattern" -count=1 -timeout=30m
+		"$privileged_binary" \
+		-test.v -test.run "$privileged_pattern" -test.count=1 -test.timeout=30m
+	if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+		set -- systemd-run --quiet --wait --pipe --collect \
+			--property=Delegate=yes \
+			--property=Type=exec \
+			--property="WorkingDirectory=$ROOT_DIR" \
+			"$@"
+	fi
+	run_no_skips "privileged plugin integration" "$privileged_log" "$@"
 
 	for required_test in \
 		TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls \
@@ -269,6 +303,10 @@ run_privileged() {
 		TestKernelPluginPipelineRuntimePersistsReplyFlowSnapshotState \
 		TestKernelXDPPluginPipelineChainHotUpdateAndConflict \
 		TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL \
+		TestKernelNetfilterPluginPipelineIntegration \
+		TestKernelNetfilterPluginPriorityIntegration \
+		TestKernelNetfilterPluginNamespaceRecreateIntegration \
+		TestKernelNetfilterPluginInitialMissingNamespaceRecoversIntegration \
 		TestOrderedKernelRuntimeChainsXDPIntoTCPlugin
 	do
 		require_test_pass "$privileged_log" "$required_test"
@@ -475,8 +513,20 @@ run_xdp_performance() {
 	done
 }
 
+run_netfilter_performance() {
+	netfilter_log="$TMP_DIR/netfilter-performance.log"
+	run_no_skips "Netfilter plugin performance" "$netfilter_log" \
+		env \
+		VEER_RUN_NETFILTER_PLUGIN_TEST=1 \
+		VEER_RUN_NETFILTER_PLUGIN_PERF=1 \
+		VEER_NETFILTER_PLUGIN_MIN_RATIO="$netfilter_hook_ratio" \
+		go test -v ./internal/app -run '^TestKernelNetfilterPluginPerformance$' -count=1 -timeout=10m
+	require_test_pass "$netfilter_log" TestKernelNetfilterPluginPerformance
+}
+
 run_performance() {
 	require_linux_root
+	require_command iperf3
 	new_temp_dir
 	perf_samples=${VEER_PLUGIN_RELEASE_PERF_SAMPLES:-3}
 	perf_steady_seconds=${VEER_PLUGIN_RELEASE_PERF_SECONDS:-6}
@@ -485,8 +535,10 @@ run_performance() {
 	perf_curve_ratio=${VEER_PLUGIN_RELEASE_PERF_CURVE_RATIO:-0.80}
 	xdp_zero_max_ns=${VEER_PLUGIN_RELEASE_XDP_ZERO_MAX_NS:-30}
 	xdp_hook_max_ns=${VEER_PLUGIN_RELEASE_XDP_HOOK_MAX_NS:-75}
+	netfilter_hook_ratio=${VEER_PLUGIN_RELEASE_NETFILTER_RATIO:-0.80}
 	validate_positive_integer VEER_PLUGIN_RELEASE_PERF_SAMPLES "$perf_samples"
 	validate_positive_integer VEER_PLUGIN_RELEASE_PERF_SECONDS "$perf_steady_seconds"
+	validate_ratio VEER_PLUGIN_RELEASE_NETFILTER_RATIO "$netfilter_hook_ratio"
 	[ "$perf_samples" -ge 3 ] || fail "performance gate requires at least three samples"
 	[ $((perf_samples % 2)) -eq 1 ] || fail "performance sample count must be odd"
 	[ "$perf_steady_seconds" -ge 5 ] || fail "performance sample duration must be at least five seconds"
@@ -498,6 +550,7 @@ run_performance() {
 
 	run_tc_performance
 	run_xdp_performance
+	run_netfilter_performance
 }
 
 case "$PROFILE" in

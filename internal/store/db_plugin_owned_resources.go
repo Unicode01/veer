@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 )
 
 const pluginOwnedResourceColumns = `id, plugin_id, resource_type, resource_key, metadata_json, created_at, updated_at`
@@ -78,6 +79,39 @@ func GetPluginOwnedResources(db RuleStore, pluginID string) ([]PluginOwnedResour
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func GetPluginOwnedResourcesByPluginIDs(db RuleStore, pluginIDs []string) (map[string][]PluginOwnedResource, error) {
+	pluginIDs = normalizeNonEmptyStringValues(pluginIDs)
+	out := make(map[string][]PluginOwnedResource, len(pluginIDs))
+	for _, pluginID := range pluginIDs {
+		out[pluginID] = []PluginOwnedResource{}
+	}
+	for start := 0; start < len(pluginIDs); start += dbByIDQueryChunkSize {
+		end := min(start+dbByIDQueryChunkSize, len(pluginIDs))
+		chunk := pluginIDs[start:end]
+		rows, err := db.Query(fmt.Sprintf(
+			`SELECT %s FROM plugin_owned_resources WHERE plugin_id IN (%s) ORDER BY plugin_id, id ASC`,
+			pluginOwnedResourceColumns, dbSQLPlaceholders(len(chunk)),
+		), dbStringArgs(chunk)...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			item, err := scanPluginOwnedResource(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[item.PluginID] = append(out[item.PluginID], item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 func DeletePluginOwnedResource(db RuleStore, pluginID, resourceType, resourceKey string) error {

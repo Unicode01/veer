@@ -86,13 +86,16 @@ else:
     if unknown:
         raise SystemExit("unknown plugin stability in VEER_PLUGIN_PACKAGE_STABILITY: " + ", ".join(unknown))
 
+selected = []
 for manifest_path in sorted(root.glob("*/plugin.json")):
     with manifest_path.open("r", encoding="utf-8") as fh:
         manifest = json.load(fh)
     stability = str(manifest.get("stability") or "lab").strip().lower() or "lab"
     if allowed is not None and stability not in allowed:
         continue
-    print(manifest_path.parent.name)
+    selected.append(manifest_path.parent.name)
+
+sys.stdout.buffer.write("".join(name + "\n" for name in selected).encode("utf-8"))
 PY
 	if [ ! -s "$out_file" ]; then
 		echo "no plugins match VEER_PLUGIN_PACKAGE_STABILITY=$PACKAGE_STABILITY" >&2

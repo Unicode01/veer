@@ -177,6 +177,43 @@ func GetPluginRecordsByResource(db RuleStore, resourceID string) ([]PluginRecord
 	return out, rows.Err()
 }
 
+func GetPluginRecordsByPluginIDs(db RuleStore, pluginIDs []string, resourceID string) (map[string][]PluginRecord, error) {
+	pluginIDs = normalizeNonEmptyStringValues(pluginIDs)
+	out := make(map[string][]PluginRecord, len(pluginIDs))
+	for _, pluginID := range pluginIDs {
+		out[pluginID] = []PluginRecord{}
+	}
+	for start := 0; start < len(pluginIDs); start += dbByIDQueryChunkSize {
+		end := min(start+dbByIDQueryChunkSize, len(pluginIDs))
+		chunk := pluginIDs[start:end]
+		args := dbStringArgs(chunk)
+		args = append(args, resourceID)
+		rows, err := db.Query(
+			`SELECT `+pluginRecordColumns+` FROM plugin_records
+			 WHERE plugin_id IN (`+dbSQLPlaceholders(len(chunk))+`) AND resource_id = ?
+			 ORDER BY plugin_id ASC, id ASC`,
+			args...,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			item, err := scanPluginRecord(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[item.PluginID] = append(out[item.PluginID], item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 func GetAllPluginRecords(db RuleStore) ([]PluginRecord, error) {
 	rows, err := db.Query(`SELECT ` + pluginRecordColumns + ` FROM plugin_records ORDER BY id ASC`)
 	if err != nil {
@@ -208,6 +245,62 @@ func GetPluginRecordStorageUsage(db RuleStore, pluginID string) (PluginRecordSto
 
 func GetGlobalPluginRecordStorageUsage(db RuleStore) (PluginRecordStorageUsage, error) {
 	return getPluginRecordStorageUsage(db, ``)
+}
+
+func GetPluginRecordStorageUsages(db RuleStore) (map[string]PluginRecordStorageUsage, PluginRecordStorageUsage, error) {
+	byPlugin := make(map[string]PluginRecordStorageUsage)
+	var global PluginRecordStorageUsage
+	queries := []struct {
+		query    string
+		overhead int
+	}{
+		{
+			query: `SELECT plugin_id, COUNT(*), COALESCE(SUM(
+				length(CAST(plugin_id AS BLOB)) +
+				length(CAST(resource_id AS BLOB)) +
+				length(CAST(record_key AS BLOB)) +
+				length(CAST(data_json AS BLOB)) + ?
+			), 0) FROM plugin_records GROUP BY plugin_id`,
+			overhead: pluginRecordAccountingOverheadBytes,
+		},
+		{
+			query: `SELECT plugin_id, COUNT(*), COALESCE(SUM(
+				length(CAST(operation_id AS BLOB)) + length(CAST(operation_key AS BLOB)) +
+				length(CAST(kind AS BLOB)) + length(CAST(phase AS BLOB)) +
+				length(CAST(input_json AS BLOB)) + length(CAST(state_json AS BLOB)) +
+				length(CAST(result_json AS BLOB)) + length(CAST(error_json AS BLOB)) + ?
+			), 0) FROM plugin_operations GROUP BY plugin_id`,
+			overhead: pluginOperationAccountingOverheadBytes,
+		},
+	}
+	for _, item := range queries {
+		rows, err := db.Query(item.query, item.overhead)
+		if err != nil {
+			return nil, PluginRecordStorageUsage{}, err
+		}
+		for rows.Next() {
+			var (
+				pluginID string
+				usage    PluginRecordStorageUsage
+			)
+			if err := rows.Scan(&pluginID, &usage.Records, &usage.Bytes); err != nil {
+				rows.Close()
+				return nil, PluginRecordStorageUsage{}, err
+			}
+			current := byPlugin[pluginID]
+			current.Records += usage.Records
+			current.Bytes += usage.Bytes
+			byPlugin[pluginID] = current
+			global.Records += usage.Records
+			global.Bytes += usage.Bytes
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, PluginRecordStorageUsage{}, err
+		}
+		rows.Close()
+	}
+	return byPlugin, global, nil
 }
 
 func getPluginRecordStorageUsage(db RuleStore, where string, args ...interface{}) (PluginRecordStorageUsage, error) {

@@ -23,6 +23,8 @@ veer-plugin-sdk.tar.gz
 internal/app/ebpf/*.o
 plugins/**/*.o
 dist/
+node_modules/
+playwright-report/
 
 # local/operator plugin acceptance scripts
 scripts/test-plugin-*.sh

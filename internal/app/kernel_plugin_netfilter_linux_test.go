@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 const kernelNetfilterPluginTestEnv = "VEER_RUN_NETFILTER_PLUGIN_TEST"
 const kernelNetfilterPluginPerfTestEnv = "VEER_RUN_NETFILTER_PLUGIN_PERF"
+const kernelNetfilterPluginPerfMinRatioEnv = "VEER_NETFILTER_PLUGIN_MIN_RATIO"
 
 func TestKernelNetfilterPluginPipelineIntegration(t *testing.T) {
 	if os.Getenv(kernelNetfilterPluginTestEnv) != "1" {
@@ -450,9 +452,30 @@ func TestKernelNetfilterPluginPerformance(t *testing.T) {
 	applyHooks(0)
 	baselineAfter := measure("baseline-after")
 	baseline := (baselineBefore.BitsPerSecond + baselineAfter.BitsPerSecond) / 2
-	if baseline <= 0 || results[8].BitsPerSecond < baseline*0.5 {
-		t.Fatalf("8-hook throughput %.2f Gbps is below 50%% of %.2f Gbps baseline", results[8].BitsPerSecond/1e9, baseline/1e9)
+	if baseline <= 0 {
+		t.Fatalf("invalid Netfilter baseline %.2f Gbps", baseline/1e9)
 	}
+	minimumRatio := kernelNetfilterPluginPerformanceMinimumRatio(t)
+	for _, hooks := range []int{1, 4, 8} {
+		ratio := results[hooks].BitsPerSecond / baseline
+		t.Logf("%d-hook paired baseline ratio: %.4f (minimum %.4f)", hooks, ratio, minimumRatio)
+		if ratio < minimumRatio {
+			t.Fatalf("%d-hook throughput %.2f Gbps is %.2f%% of %.2f Gbps baseline, below %.2f%%", hooks, results[hooks].BitsPerSecond/1e9, ratio*100, baseline/1e9, minimumRatio*100)
+		}
+	}
+}
+
+func kernelNetfilterPluginPerformanceMinimumRatio(t *testing.T) float64 {
+	t.Helper()
+	value := strings.TrimSpace(os.Getenv(kernelNetfilterPluginPerfMinRatioEnv))
+	if value == "" {
+		return 0.8
+	}
+	ratio, err := strconv.ParseFloat(value, 64)
+	if err != nil || ratio <= 0 || ratio > 1 {
+		t.Fatalf("%s must be greater than 0 and no greater than 1, got %q", kernelNetfilterPluginPerfMinRatioEnv, value)
+	}
+	return ratio
 }
 
 type kernelNetfilterIPerfResult struct {

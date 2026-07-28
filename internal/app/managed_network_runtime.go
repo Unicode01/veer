@@ -37,10 +37,6 @@ func newManagedIPv4NetworkRuntime(ops managedNetworkNetOps) managedNetworkRuntim
 	}
 }
 
-func managedNetworkInterfaceSpecForItem(item ManagedNetwork) managedNetworkInterfaceSpec {
-	return managednet.InterfaceSpecForItem(toManagednetManagedNetwork(item))
-}
-
 func buildManagedNetworkIPv4Plan(item ManagedNetwork, reservations []ManagedNetworkReservation) (managedNetworkIPv4Plan, error) {
 	return managednet.BuildIPv4Plan(toManagednetManagedNetwork(item), toManagednetManagedNetworkReservations(reservations))
 }

@@ -142,12 +142,14 @@
   app.state.forms.managedNetwork = app.state.forms.managedNetwork || { mode: 'add', sourceId: 0 };
   app.state.forms.managedNetworkReservation = app.state.forms.managedNetworkReservation || { mode: 'add', sourceId: 0 };
   app.state.lastSyncAt = app.state.lastSyncAt || 0;
+  app.state.requestFailures = app.state.requestFailures || {};
   app.state.confirmResolver = null;
   app.state.confirmFocusReturn = null;
   app.state.activeRequests = app.state.activeRequests || 0;
   app.state.pageVisible = typeof app.state.pageVisible === 'boolean' ? app.state.pageVisible : !document.hidden;
   app.state.activeDropdown = app.state.activeDropdown || null;
   app.state.dropdownPositionScheduled = false;
+  app.state.pollRefreshInFlight = app.state.pollRefreshInFlight || null;
 
   app.paginationConfig = {
     rules: { container: app.el.rulesPagination, pageSizes: [10, 20, 50], render: () => app.renderRulesTable() },
@@ -466,30 +468,69 @@
     });
   };
 
+  function appendDashboardLoader(tasks, name) {
+    if (typeof app[name] === 'function') tasks.push(app[name]());
+  }
+
+  app.refreshActiveTab = function refreshActiveTab(tabId, options) {
+    const target = String(tabId || app.state.activeTab || 'rules');
+    const opts = options || {};
+    const tasks = [];
+
+    if (target === 'rules') appendDashboardLoader(tasks, 'loadRules');
+    else if (target === 'sites') appendDashboardLoader(tasks, 'loadSites');
+    else if (target === 'ranges') appendDashboardLoader(tasks, 'loadRanges');
+    else if (target === 'managed-networks') {
+      appendDashboardLoader(tasks, 'loadManagedNetworks');
+      appendDashboardLoader(tasks, 'loadManagedNetworkReservations');
+      if (opts.includeContext) appendDashboardLoader(tasks, 'loadHostNetwork');
+    } else if (target === 'egress-nats') appendDashboardLoader(tasks, 'loadEgressNATs');
+    else if (target === 'ipv6-assignments') {
+      appendDashboardLoader(tasks, 'loadIPv6Assignments');
+      if (opts.includeContext) appendDashboardLoader(tasks, 'loadHostNetwork');
+    } else if (target === 'plugins' || target.indexOf('plugin-') === 0) {
+      appendDashboardLoader(tasks, 'loadPlugins');
+    } else if (target === 'diagnostics') {
+      appendDashboardLoader(tasks, 'loadWorkers');
+      appendDashboardLoader(tasks, 'loadAllStats');
+    }
+
+    return Promise.all(tasks);
+  };
+
   app.refreshDashboard = function refreshDashboard(options) {
     const opts = Object.assign({
+      activeTabOnly: false,
+      activeTab: '',
+      includeContext: false,
       includeMeta: false,
       includePlugins: false,
       includeWorkers: app.state.activeTab === 'diagnostics',
       includeStats: app.state.activeTab === 'diagnostics'
     }, options || {});
 
+    if (opts.activeTabOnly) {
+      return app.refreshActiveTab(opts.activeTab || app.state.activeTab, {
+        includeContext: opts.includeContext
+      });
+    }
+
     const tasks = [];
     if (opts.includeMeta) {
-    if (typeof app.loadInterfaces === 'function') tasks.push(app.loadInterfaces());
-      if (typeof app.loadHostNetwork === 'function') tasks.push(app.loadHostNetwork());
-      if (typeof app.loadTags === 'function') tasks.push(app.loadTags());
+      appendDashboardLoader(tasks, 'loadInterfaces');
+      appendDashboardLoader(tasks, 'loadHostNetwork');
+      appendDashboardLoader(tasks, 'loadTags');
     }
-    if (typeof app.loadRules === 'function') tasks.push(app.loadRules());
-    if (typeof app.loadSites === 'function') tasks.push(app.loadSites());
-    if (typeof app.loadRanges === 'function') tasks.push(app.loadRanges());
-    if (typeof app.loadManagedNetworks === 'function') tasks.push(app.loadManagedNetworks());
-    if (typeof app.loadManagedNetworkReservations === 'function') tasks.push(app.loadManagedNetworkReservations());
-    if (typeof app.loadEgressNATs === 'function') tasks.push(app.loadEgressNATs());
-    if (typeof app.loadIPv6Assignments === 'function') tasks.push(app.loadIPv6Assignments());
-    if (opts.includePlugins && typeof app.loadPlugins === 'function') tasks.push(app.loadPlugins());
-    if (opts.includeWorkers && typeof app.loadWorkers === 'function') tasks.push(app.loadWorkers());
-    if (opts.includeStats && typeof app.loadAllStats === 'function') tasks.push(app.loadAllStats());
+    appendDashboardLoader(tasks, 'loadRules');
+    appendDashboardLoader(tasks, 'loadSites');
+    appendDashboardLoader(tasks, 'loadRanges');
+    appendDashboardLoader(tasks, 'loadManagedNetworks');
+    appendDashboardLoader(tasks, 'loadManagedNetworkReservations');
+    appendDashboardLoader(tasks, 'loadEgressNATs');
+    appendDashboardLoader(tasks, 'loadIPv6Assignments');
+    if (opts.includePlugins) appendDashboardLoader(tasks, 'loadPlugins');
+    if (opts.includeWorkers) appendDashboardLoader(tasks, 'loadWorkers');
+    if (opts.includeStats) appendDashboardLoader(tasks, 'loadAllStats');
     return Promise.all(tasks);
   };
 
@@ -620,6 +661,50 @@
     config.render();
   };
 
+  function requestFailureKey(method, path) {
+    if (String(method || '').toUpperCase() !== 'GET') return '';
+    const requestPath = String(path || '').trim();
+    if (!requestPath) return '';
+    return 'GET ' + requestPath.split(/[?#]/, 1)[0];
+  }
+
+  function requestFailureEntries() {
+    return Object.values(app.state.requestFailures || {})
+      .sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
+  }
+
+  app.recordRequestFailure = function recordRequestFailure(method, path, error) {
+    const key = requestFailureKey(method, path);
+    if (!key || (error && error.message === 'unauthorized')) return;
+
+    const failures = app.state.requestFailures || {};
+    const firstFailure = Object.keys(failures).length === 0;
+    const message = String(error && error.message || error || app.t('common.unknown')).trim().slice(0, 240);
+    failures[key] = {
+      key: key,
+      path: key.slice(4),
+      message: message || app.t('common.unknown'),
+      at: Date.now()
+    };
+    const keys = Object.keys(failures);
+    if (keys.length > 16) {
+      keys.sort((left, right) => Number(failures[left].at || 0) - Number(failures[right].at || 0));
+      keys.slice(0, keys.length - 16).forEach((oldKey) => delete failures[oldKey]);
+    }
+    app.state.requestFailures = failures;
+    if (firstFailure && typeof app.notify === 'function') {
+      app.notify('warning', app.t('overview.syncFailedToast', { message: failures[key].message }));
+    }
+    app.renderOverview();
+  };
+
+  app.clearRequestFailure = function clearRequestFailure(method, path) {
+    const key = requestFailureKey(method, path);
+    if (!key || !app.state.requestFailures || !Object.prototype.hasOwnProperty.call(app.state.requestFailures, key)) return;
+    delete app.state.requestFailures[key];
+    app.renderOverview();
+  };
+
   app.renderOverview = function renderOverview() {
     if (app.el.overviewRulesValue) app.el.overviewRulesValue.textContent = String((app.state.rules.data || []).length);
     if (app.el.overviewSitesValue) app.el.overviewSitesValue.textContent = String((app.state.sites.data || []).length);
@@ -647,12 +732,22 @@
       button.setAttribute('aria-busy', busy ? 'true' : 'false');
     });
     if (app.el.lastSyncLabel) {
+      const failures = requestFailureEntries();
+      const showFailure = !busy && failures.length > 0;
+      app.el.lastSyncLabel.classList.toggle('is-error', showFailure);
       if (busy) {
         app.el.lastSyncLabel.textContent = app.t('overview.syncing');
+        app.el.lastSyncLabel.title = '';
+      } else if (showFailure) {
+        app.el.lastSyncLabel.textContent = app.t('overview.syncFailed', { count: failures.length });
+        app.el.lastSyncLabel.title = failures.slice(0, 8)
+          .map((failure) => failure.path + ': ' + failure.message)
+          .join('\n');
       } else {
         app.el.lastSyncLabel.textContent = app.state.lastSyncAt
           ? app.t('overview.lastSync', { time: app.formatClock(app.state.lastSyncAt) })
           : app.t('overview.awaitingSync');
+        app.el.lastSyncLabel.title = '';
       }
     }
   };
@@ -696,13 +791,11 @@
   };
 
   app.handleTabLoad = function handleTabLoad(target) {
-    if (target === 'managed-networks' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
-    if (target === 'ipv6-assignments' && typeof app.loadHostNetwork === 'function') app.loadHostNetwork();
-    if (target === 'plugins' && typeof app.loadPlugins === 'function') app.loadPlugins();
-    if (target === 'diagnostics') {
-      if (typeof app.loadWorkers === 'function') app.loadWorkers();
-      if (typeof app.loadAllStats === 'function') app.loadAllStats();
-    }
+    return app.refreshDashboard({
+      activeTabOnly: true,
+      activeTab: target,
+      includeContext: true
+    });
   };
 
   app.updateOverviewVisibility = function updateOverviewVisibility(tabId) {
@@ -949,7 +1042,12 @@
       app.state.activeRequests++;
       app.renderOverview();
       try {
-        return await original(method, path, body);
+        const result = await original(method, path, body);
+        app.clearRequestFailure(method, path);
+        return result;
+      } catch (error) {
+        app.recordRequestFailure(method, path, error);
+        throw error;
       } finally {
         app.state.activeRequests = Math.max(0, app.state.activeRequests - 1);
         app.renderOverview();

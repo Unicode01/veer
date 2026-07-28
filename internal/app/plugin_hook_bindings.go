@@ -27,17 +27,24 @@ func applyPluginHookBindingsFromDB(catalog PluginCatalog, db *sql.DB) PluginCata
 	if db == nil {
 		return catalog
 	}
+	pluginIDs := make([]string, 0, len(catalog.Plugins))
+	for i := range catalog.Plugins {
+		plugin := catalog.Plugins[i]
+		if !plugin.Builtin && plugin.Status == pluginStatusActive && pluginHasResource(plugin, pluginHookBindingsResourceID) {
+			pluginIDs = append(pluginIDs, plugin.ID)
+		}
+	}
+	recordsByPlugin, err := store.GetPluginRecordsByPluginIDs(db, pluginIDs, pluginHookBindingsResourceID)
+	if err != nil {
+		log.Printf("plugin hook bindings: batch load failed: %v", err)
+		return catalog
+	}
 	for i := range catalog.Plugins {
 		plugin := &catalog.Plugins[i]
 		if plugin.Builtin || plugin.Status != pluginStatusActive || !pluginHasResource(*plugin, pluginHookBindingsResourceID) {
 			continue
 		}
-		records, err := store.GetPluginRecords(db, plugin.ID, pluginHookBindingsResourceID)
-		if err != nil {
-			log.Printf("plugin hook bindings: load %s/%s failed: %v", plugin.ID, pluginHookBindingsResourceID, err)
-			continue
-		}
-		bindings := pluginHookBindingsFromRecords(plugin.ID, records)
+		bindings := pluginHookBindingsFromRecords(plugin.ID, recordsByPlugin[plugin.ID])
 		if len(bindings.Interfaces) == 0 && len(bindings.Disabled) == 0 {
 			continue
 		}

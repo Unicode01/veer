@@ -88,8 +88,8 @@ func runPluginPackageCLI(args []string, stdout, stderr io.Writer) (bool, error) 
 func writePluginPackageCLIUsage(w io.Writer) {
 	fmt.Fprintln(w, "Veer plugin tools:")
 	fmt.Fprintln(w, "  veer plugin init --id ID [--name NAME] [--kind control|pipeline] [--directory DIR]")
-	fmt.Fprintln(w, "  veer plugin lint --source DIR")
-	fmt.Fprintln(w, "  veer plugin test --source DIR")
+	fmt.Fprintln(w, "  veer plugin lint --source DIR [--format json|text]")
+	fmt.Fprintln(w, "  veer plugin test --source DIR [--format json|text]")
 	fmt.Fprintln(w, "  veer plugin contract [--check FILE | --output FILE | --types-output FILE] [--force]")
 	fmt.Fprintln(w, "  veer plugin build --source DIR [--architectures amd64,arm64,arm] [--output-dir build]")
 	fmt.Fprintln(w, "  veer plugin pack --source DIR [--output FILE]")
@@ -640,45 +640,6 @@ func writePluginCLIFileExclusive(path string, data []byte, mode os.FileMode) err
 		return closeErr
 	}
 	return os.Chmod(absPath, mode)
-}
-
-func writePluginPackageCLIJSONFile(path string, value any, force bool, mode os.FileMode) error {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	if existing, err := os.Lstat(absPath); err == nil {
-		if !force || existing.Mode()&os.ModeSymlink != 0 || !existing.Mode().IsRegular() {
-			return fmt.Errorf("output file already exists")
-		}
-		if err := os.Remove(absPath); err != nil {
-			return err
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	return writePluginCLIFileExclusive(absPath, data, mode)
-}
-
-func readPluginPackageCLIJSONFile(path string, target any) error {
-	_, data, _, err := readPluginCLIRegularFile(path, 1<<20)
-	if err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("metadata contains trailing JSON")
-	}
-	return nil
 }
 
 func writePluginPackageCLIJSON(w io.Writer, value any) error {

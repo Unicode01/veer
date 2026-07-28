@@ -6,7 +6,6 @@ import (
 	"github.com/Unicode01/veer/internal/store"
 )
 
-type dbIndexDefinition = store.IndexDefinition
 type dbConstraintIndexDefinition = store.ConstraintIndexDefinition
 type sqlRuleStore = store.RuleStore
 
@@ -32,20 +31,8 @@ func ensureTable(db *sql.DB, table string, columns [][2]string) error {
 	return store.EnsureTable(db, table, columns)
 }
 
-func ensureIndexes(db *sql.DB, indexes []dbIndexDefinition) error {
-	return store.EnsureIndexes(db, indexes)
-}
-
-func ensureIndex(db *sql.DB, index dbIndexDefinition) error {
-	return store.EnsureIndex(db, index)
-}
-
 func ensureConstraintIndexes(db *sql.DB, indexes []dbConstraintIndexDefinition) error {
 	return store.EnsureConstraintIndexes(db, indexes)
-}
-
-func ensureConstraintIndex(db *sql.DB, index dbConstraintIndexDefinition) error {
-	return store.EnsureConstraintIndex(db, index)
 }
 
 func dbIndexExists(db *sql.DB, name string) (bool, error) {
@@ -739,10 +726,6 @@ func dbUpdateManagedNetworkReservation(db sqlRuleStore, item *ManagedNetworkRese
 
 func dbDeleteManagedNetworkReservation(db sqlRuleStore, id int64) error {
 	return store.DeleteManagedNetworkReservation(db, id)
-}
-
-func dbDeleteManagedNetworkReservationsByManagedNetworkID(db sqlRuleStore, managedNetworkID int64) error {
-	return store.DeleteManagedNetworkReservationsByManagedNetworkID(db, managedNetworkID)
 }
 
 func dbGetManagedNetworkReservations(db sqlRuleStore) ([]ManagedNetworkReservation, error) {
