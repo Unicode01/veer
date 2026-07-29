@@ -111,6 +111,10 @@ func normalizeManagedNetworkIPv4Pool(startValue string, endValue string, serverI
 	if compareManagedNetworkIPv4(startIP, endIP) > 0 {
 		return "", "", fmt.Errorf("ipv4_pool_start must be less than or equal to ipv4_pool_end")
 	}
+	poolSize := uint64(managedNetworkIPv4LiteralToUint32(endIP)) - uint64(managedNetworkIPv4LiteralToUint32(startIP)) + 1
+	if poolSize > MaxDHCPv4PoolAddresses {
+		return "", "", fmt.Errorf("ipv4 pool cannot contain more than %d addresses", MaxDHCPv4PoolAddresses)
+	}
 	if startIP == serverIP || endIP == serverIP || ipRangeContainsManagedNetworkIPv4(startIP, endIP, serverIP) {
 		return "", "", fmt.Errorf("ipv4 pool must not include the gateway address")
 	}

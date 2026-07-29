@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestManagedNetworkDHCPv4AllocateLeaseHonorsReservationOutsidePool(t *testing.T) {
@@ -74,6 +76,92 @@ func TestManagedNetworkDHCPv4AllocateLeaseSkipsReservedPoolAddress(t *testing.T)
 	}
 }
 
+func TestManagedNetworkDHCPv4OfferUsesShortHoldUntilAcknowledged(t *testing.T) {
+	t.Parallel()
+
+	srv := newManagedNetworkDHCPv4Server(managedNetworkDHCPv4Config{})
+	config := managedNetworkDHCPv4Config{
+		PoolStart: "192.0.2.100",
+		PoolEnd:   "192.0.2.110",
+	}
+	msg := parsedManagedNetworkDHCPv4Message{ClientID: []byte("client-a")}
+	beforeOffer := time.Now()
+	if _, err := srv.offerLease(config, msg); err != nil {
+		t.Fatalf("offerLease() error = %v", err)
+	}
+	srv.mu.Lock()
+	offerExpiry := srv.leases[managedNetworkDHCPv4ClientKey(msg)].ExpiresAt
+	srv.mu.Unlock()
+	if remaining := offerExpiry.Sub(beforeOffer); remaining < dhcpv4OfferHoldTime-time.Second || remaining > dhcpv4OfferHoldTime+time.Second {
+		t.Fatalf("offer hold = %v, want about %v", remaining, dhcpv4OfferHoldTime)
+	}
+	invalidRequest := msg
+	invalidRequest.RequestedIP = net.ParseIP("192.0.2.200").To4()
+	if _, err := srv.ackLease(config, invalidRequest); err == nil {
+		t.Fatal("ackLease() error = nil for out-of-pool request")
+	}
+	srv.mu.Lock()
+	expiryAfterNAK := srv.leases[managedNetworkDHCPv4ClientKey(msg)].ExpiresAt
+	srv.mu.Unlock()
+	if !expiryAfterNAK.Equal(offerExpiry) {
+		t.Fatal("rejected DHCPv4 request extended the pending offer")
+	}
+
+	beforeACK := time.Now()
+	if _, err := srv.ackLease(config, msg); err != nil {
+		t.Fatalf("ackLease() error = %v", err)
+	}
+	srv.mu.Lock()
+	ackExpiry := srv.leases[managedNetworkDHCPv4ClientKey(msg)].ExpiresAt
+	srv.mu.Unlock()
+	if remaining := ackExpiry.Sub(beforeACK); remaining < dhcpv4LeaseTime-time.Second || remaining > dhcpv4LeaseTime+time.Second {
+		t.Fatalf("acknowledged lease = %v, want about %v", remaining, dhcpv4LeaseTime)
+	}
+}
+
+func TestManagedNetworkDHCPv4LeaseCleanupIsRateLimited(t *testing.T) {
+	t.Parallel()
+
+	srv := newManagedNetworkDHCPv4Server(managedNetworkDHCPv4Config{})
+	now := time.Now()
+	srv.leases["expired"] = managedNetworkDHCPv4Lease{ClientKey: "expired", IP: "192.0.2.10", ExpiresAt: now.Add(-time.Second)}
+	srv.ipOwners["192.0.2.10"] = "expired"
+	srv.lastLeaseCleanupAt = now
+
+	srv.cleanupExpiredLeasesLocked(now.Add(dhcpv4LeaseCleanupEvery / 2))
+	if _, exists := srv.leases["expired"]; !exists {
+		t.Fatal("lease cleanup ran again inside its rate limit")
+	}
+	srv.cleanupExpiredLeasesLocked(now.Add(dhcpv4LeaseCleanupEvery))
+	if _, exists := srv.leases["expired"]; exists {
+		t.Fatal("expired lease remained after the cleanup interval")
+	}
+	if owner := srv.ipOwners["192.0.2.10"]; owner != "" {
+		t.Fatalf("expired lease owner = %q, want empty", owner)
+	}
+}
+
+func TestManagedNetworkDHCPv4RejectsNewLeaseAtHardLimit(t *testing.T) {
+	t.Parallel()
+
+	srv := newManagedNetworkDHCPv4Server(managedNetworkDHCPv4Config{})
+	srv.leases = make(map[string]managedNetworkDHCPv4Lease, dhcpv4MaxActiveLeases)
+	expiresAt := time.Now().Add(time.Hour)
+	for index := 0; index < dhcpv4MaxActiveLeases; index++ {
+		key := fmt.Sprintf("client-%d", index)
+		srv.leases[key] = managedNetworkDHCPv4Lease{ClientKey: key, IP: "192.0.2.10", ExpiresAt: expiresAt}
+	}
+	srv.lastLeaseCleanupAt = time.Now()
+
+	_, err := srv.offerLease(managedNetworkDHCPv4Config{
+		PoolStart: "10.0.0.1",
+		PoolEnd:   "10.0.255.254",
+	}, parsedManagedNetworkDHCPv4Message{ClientID: []byte("new-client")})
+	if err == nil || !strings.Contains(err.Error(), "active lease limit reached") {
+		t.Fatalf("offerLease() error = %v, want active lease limit", err)
+	}
+}
+
 func TestManagedNetworkDHCPv4ConfigsEqual(t *testing.T) {
 	base := managedNetworkDHCPv4Config{
 		Bridge:          "vmbr1",
@@ -111,6 +199,29 @@ func TestManagedNetworkDHCPv4ConfigsEqual(t *testing.T) {
 	}}
 	if managedNetworkDHCPv4ConfigsEqual(base, changedReservation) {
 		t.Fatal("managedNetworkDHCPv4ConfigsEqual() = true, want false after reservation change")
+	}
+}
+
+func TestManagedNetworkDHCPv4LogThrottleIgnoresAlternatingText(t *testing.T) {
+	t.Parallel()
+
+	srv := newManagedNetworkDHCPv4Server(managedNetworkDHCPv4Config{Bridge: "vmbr0"})
+	srv.logIssue("first")
+	srv.logSeenMessage("first")
+	srv.mu.Lock()
+	issueLogAt := srv.lastIssueLogAt
+	seenLogAt := srv.lastSeenLogAt
+	srv.mu.Unlock()
+
+	srv.logIssue("second")
+	srv.logSeenMessage("second")
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !srv.lastIssueLogAt.Equal(issueLogAt) || !srv.lastSeenLogAt.Equal(seenLogAt) {
+		t.Fatal("alternating message text bypassed DHCPv4 log throttle")
+	}
+	if srv.lastIssueText != "second" || srv.lastSeenText != "second" {
+		t.Fatal("suppressed DHCPv4 log did not retain current runtime detail")
 	}
 }
 
@@ -239,6 +350,65 @@ func TestBuildManagedNetworkDHCPv4ReplyIncludesDNSServersOption(t *testing.T) {
 		offset += length
 	}
 	t.Fatal("DHCPv4 reply does not contain option 6")
+}
+
+func TestParseManagedNetworkDHCPv4MessageRejectsTruncatedOptions(t *testing.T) {
+	t.Parallel()
+
+	packet := make([]byte, 240)
+	packet[0] = dhcpv4BootRequest
+	packet[1] = dhcpv4HWTypeEthernet
+	packet[2] = 6
+	binary.BigEndian.PutUint32(packet[236:240], dhcpv4MagicCookie)
+	packet = append(packet, dhcpv4OptionMessageType, 1)
+	if _, err := parseManagedNetworkDHCPv4Message(packet); err == nil {
+		t.Fatal("parseManagedNetworkDHCPv4Message() error = nil, want truncated option rejection")
+	}
+	if _, err := parseManagedNetworkDHCPv4Message(make([]byte, dhcpv4MaxMessageSize+1)); err == nil {
+		t.Fatal("parseManagedNetworkDHCPv4Message() error = nil, want oversized message rejection")
+	}
+
+	for length := 0; length <= len(packet); length++ {
+		_, _ = parseManagedNetworkDHCPv4Message(packet[:length])
+	}
+}
+
+func TestBuildManagedNetworkDHCPv4ReplyRejectsOversizedHardwareAddress(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildManagedNetworkDHCPv4Reply(managedNetworkDHCPv4Config{
+		ServerCIDR: "192.0.2.1/24",
+		ServerIP:   "192.0.2.1",
+		Gateway:    "192.0.2.1",
+	}, parsedManagedNetworkDHCPv4Message{
+		CHAddr: make(net.HardwareAddr, 17),
+	}, dhcpv4MessageOffer, "192.0.2.100")
+	if err == nil {
+		t.Fatal("buildManagedNetworkDHCPv4Reply() error = nil, want hardware address bound")
+	}
+}
+
+func FuzzParseManagedNetworkDHCPv4Message(f *testing.F) {
+	f.Add(make([]byte, 240))
+	f.Add([]byte{dhcpv4BootRequest, dhcpv4HWTypeEthernet, 6})
+	valid := make([]byte, 240)
+	valid[0] = dhcpv4BootRequest
+	valid[1] = dhcpv4HWTypeEthernet
+	valid[2] = 6
+	binary.BigEndian.PutUint32(valid[236:240], dhcpv4MagicCookie)
+	valid = append(valid, dhcpv4OptionMessageType, 1, dhcpv4MessageDiscover, dhcpv4OptionEnd)
+	f.Add(valid)
+	f.Fuzz(func(t *testing.T, packet []byte) {
+		_, _ = parseManagedNetworkDHCPv4Message(packet)
+	})
+}
+
+func FuzzParseManagedNetworkDHCPv4Frame(f *testing.F) {
+	f.Add(make([]byte, 14+20+8+240))
+	f.Add([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	f.Fuzz(func(t *testing.T, frame []byte) {
+		_, _ = parseManagedNetworkDHCPv4Frame(frame)
+	})
 }
 
 func TestResolveManagedNetworkDHCPv4ListenInterfacesKeepsStickyDynamicChildWhenInventoryIsTransientlyEmpty(t *testing.T) {

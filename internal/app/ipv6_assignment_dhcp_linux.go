@@ -39,6 +39,10 @@ const (
 	dhcpv6PreferredLifetime = 4 * time.Hour
 	dhcpv6ValidLifetime     = 24 * time.Hour
 	dhcpv6TroubleLogEvery   = 5 * time.Minute
+	dhcpv6MaxDUIDLength     = 128
+	dhcpv6MaxIAIDs          = 16
+	dhcpv6MaxMessageSize    = 1232
+	dhcpv6MaxRequestSize    = 2048
 	ipv6NextHeaderUDP       = 17
 )
 
@@ -53,8 +57,10 @@ type ipv6DHCPv6Server struct {
 	listeningSince time.Time
 	lastIssueText  string
 	lastIssueAt    time.Time
+	lastIssueLogAt time.Time
 	lastSeenText   string
 	lastSeenAt     time.Time
+	lastSeenLogAt  time.Time
 	replyTotal     uint64
 	lastReplyAt    time.Time
 }
@@ -209,10 +215,17 @@ func (srv *ipv6DHCPv6Server) logIssue(text string) {
 		return
 	}
 	now := time.Now()
-	if text != srv.lastIssueText || srv.lastIssueAt.IsZero() || now.Sub(srv.lastIssueAt) >= dhcpv6TroubleLogEvery {
-		srv.lastIssueText = text
-		srv.lastIssueAt = now
-		log.Printf("ipv6 assignment dhcpv6 on %s: %s", srv.snapshot().TargetInterface, text)
+	srv.mu.Lock()
+	srv.lastIssueText = text
+	srv.lastIssueAt = now
+	shouldLog := srv.lastIssueLogAt.IsZero() || now.Sub(srv.lastIssueLogAt) >= dhcpv6TroubleLogEvery
+	if shouldLog {
+		srv.lastIssueLogAt = now
+	}
+	targetInterface := srv.config.TargetInterface
+	srv.mu.Unlock()
+	if shouldLog {
+		log.Printf("ipv6 assignment dhcpv6 on %s: %s", targetInterface, text)
 	}
 }
 
@@ -221,10 +234,17 @@ func (srv *ipv6DHCPv6Server) logSeenMessage(text string) {
 		return
 	}
 	now := time.Now()
-	if text != srv.lastSeenText || srv.lastSeenAt.IsZero() || now.Sub(srv.lastSeenAt) >= time.Second {
-		srv.lastSeenText = text
-		srv.lastSeenAt = now
-		log.Printf("ipv6 assignment dhcpv6 on %s: %s", srv.snapshot().TargetInterface, text)
+	srv.mu.Lock()
+	srv.lastSeenText = text
+	srv.lastSeenAt = now
+	shouldLog := srv.lastSeenLogAt.IsZero() || now.Sub(srv.lastSeenLogAt) >= time.Second
+	if shouldLog {
+		srv.lastSeenLogAt = now
+	}
+	targetInterface := srv.config.TargetInterface
+	srv.mu.Unlock()
+	if shouldLog {
+		log.Printf("ipv6 assignment dhcpv6 on %s: %s", targetInterface, text)
 	}
 }
 
@@ -321,42 +341,65 @@ func buildIPv6DHCPv6SocketFilter() []bpf.Instruction {
 }
 
 type parsedDHCPv6Message struct {
-	Type      byte
-	TxID      [3]byte
-	ClientID  []byte
-	ServerID  []byte
-	IAIDs     [][]byte
-	RawPacket []byte
+	Type     byte
+	TxID     [3]byte
+	ClientID []byte
+	ServerID []byte
+	IAIDs    [][]byte
 }
 
 func parseDHCPv6Message(packet []byte) (parsedDHCPv6Message, error) {
 	if len(packet) < 4 {
 		return parsedDHCPv6Message{}, fmt.Errorf("short dhcpv6 message")
 	}
-	msg := parsedDHCPv6Message{
-		Type:      packet[0],
-		RawPacket: append([]byte(nil), packet...),
+	if len(packet) > dhcpv6MaxRequestSize {
+		return parsedDHCPv6Message{}, fmt.Errorf("dhcpv6 message too large: %d", len(packet))
 	}
+	msg := parsedDHCPv6Message{Type: packet[0]}
 	copy(msg.TxID[:], packet[1:4])
 	options := packet[4:]
-	for len(options) >= 4 {
+	seenClientID := false
+	seenServerID := false
+	seenIAIDs := make(map[[4]byte]struct{})
+	for len(options) > 0 {
+		if len(options) < 4 {
+			return parsedDHCPv6Message{}, fmt.Errorf("truncated dhcpv6 option header")
+		}
 		code := binary.BigEndian.Uint16(options[0:2])
 		length := int(binary.BigEndian.Uint16(options[2:4]))
 		options = options[4:]
 		if length > len(options) {
 			return parsedDHCPv6Message{}, fmt.Errorf("invalid dhcpv6 option length")
 		}
-		value := append([]byte(nil), options[:length]...)
+		value := options[:length]
 		options = options[length:]
 		switch code {
 		case dhcpv6OptionClientID:
-			msg.ClientID = value
-		case dhcpv6OptionServerID:
-			msg.ServerID = value
-		case dhcpv6OptionIANA:
-			if len(value) >= 12 {
-				msg.IAIDs = append(msg.IAIDs, append([]byte(nil), value[:4]...))
+			if seenClientID || len(value) == 0 || len(value) > dhcpv6MaxDUIDLength {
+				return parsedDHCPv6Message{}, fmt.Errorf("invalid dhcpv6 client id")
 			}
+			seenClientID = true
+			msg.ClientID = append([]byte(nil), value...)
+		case dhcpv6OptionServerID:
+			if seenServerID || len(value) == 0 || len(value) > dhcpv6MaxDUIDLength {
+				return parsedDHCPv6Message{}, fmt.Errorf("invalid dhcpv6 server id")
+			}
+			seenServerID = true
+			msg.ServerID = append([]byte(nil), value...)
+		case dhcpv6OptionIANA:
+			if len(value) < 12 {
+				return parsedDHCPv6Message{}, fmt.Errorf("invalid dhcpv6 IA_NA option length")
+			}
+			var iaid [4]byte
+			copy(iaid[:], value[:4])
+			if _, exists := seenIAIDs[iaid]; exists {
+				return parsedDHCPv6Message{}, fmt.Errorf("duplicate dhcpv6 IAID")
+			}
+			if len(msg.IAIDs) >= dhcpv6MaxIAIDs {
+				return parsedDHCPv6Message{}, fmt.Errorf("too many dhcpv6 IA_NA options")
+			}
+			seenIAIDs[iaid] = struct{}{}
+			msg.IAIDs = append(msg.IAIDs, append([]byte(nil), iaid[:]...))
 		}
 	}
 	return msg, nil
@@ -374,7 +417,7 @@ func dhcpv6SocketNeedsReopen(state ipv6DHCPv6State) bool {
 }
 
 func readIPv6DHCPv6Frame(fd int) (ipv6DHCPv6Frame, error) {
-	buf := make([]byte, 2048)
+	buf := make([]byte, dhcpv6MaxRequestSize)
 	for {
 		n, _, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
@@ -401,12 +444,16 @@ func parseIPv6DHCPv6Frame(frame []byte) (ipv6DHCPv6Frame, bool) {
 	if ipv6Header[6] != ipv6NextHeaderUDP {
 		return ipv6DHCPv6Frame{}, false
 	}
+	payloadLen := int(binary.BigEndian.Uint16(ipv6Header[4:6]))
+	if payloadLen < 8+4 || payloadLen > len(ipv6Header)-40 {
+		return ipv6DHCPv6Frame{}, false
+	}
 	srcIP := net.IP(append([]byte(nil), ipv6Header[8:24]...))
 	dstIP := net.IP(append([]byte(nil), ipv6Header[24:40]...))
 	if !dstIP.Equal(dhcpv6AllServersAndRelays.To16()) {
 		return ipv6DHCPv6Frame{}, false
 	}
-	udp := ipv6Header[40:]
+	udp := ipv6Header[40 : 40+payloadLen]
 	if len(udp) < 8 {
 		return ipv6DHCPv6Frame{}, false
 	}
@@ -414,7 +461,7 @@ func parseIPv6DHCPv6Frame(frame []byte) (ipv6DHCPv6Frame, bool) {
 		return ipv6DHCPv6Frame{}, false
 	}
 	udpLen := int(binary.BigEndian.Uint16(udp[4:6]))
-	if udpLen < 8 || udpLen > len(udp) {
+	if udpLen < 8+4 || udpLen != len(udp) {
 		return ipv6DHCPv6Frame{}, false
 	}
 	return ipv6DHCPv6Frame{
@@ -458,9 +505,22 @@ func buildDHCPv6Response(state ipv6DHCPv6State, msg parsedDHCPv6Message, respons
 	if len(state.Config.Addresses) == 0 {
 		return nil, fmt.Errorf("no assigned /128 address available")
 	}
+	if len(state.DUID) == 0 || len(state.DUID) > dhcpv6MaxDUIDLength || len(msg.ClientID) == 0 || len(msg.ClientID) > dhcpv6MaxDUIDLength {
+		return nil, fmt.Errorf("invalid dhcpv6 DUID length")
+	}
+	if len(msg.IAIDs) > dhcpv6MaxIAIDs {
+		return nil, fmt.Errorf("too many dhcpv6 IA_NA options")
+	}
 	out := []byte{responseType, msg.TxID[0], msg.TxID[1], msg.TxID[2]}
-	out = append(out, buildDHCPv6Option(dhcpv6OptionServerID, state.DUID)...)
-	out = append(out, buildDHCPv6Option(dhcpv6OptionClientID, msg.ClientID)...)
+	var err error
+	out, err = appendDHCPv6Option(out, dhcpv6OptionServerID, state.DUID, dhcpv6MaxMessageSize)
+	if err != nil {
+		return nil, err
+	}
+	out, err = appendDHCPv6Option(out, dhcpv6OptionClientID, msg.ClientID, dhcpv6MaxMessageSize)
+	if err != nil {
+		return nil, err
+	}
 	if len(state.Config.DNSServers) > 0 {
 		dnsPayload := make([]byte, 0, len(state.Config.DNSServers)*net.IPv6len)
 		for _, server := range state.Config.DNSServers {
@@ -470,7 +530,10 @@ func buildDHCPv6Response(state ipv6DHCPv6State, msg parsedDHCPv6Message, respons
 			}
 			dnsPayload = append(dnsPayload, ip.To16()...)
 		}
-		out = append(out, buildDHCPv6Option(dhcpv6OptionDNSServers, dnsPayload)...)
+		out, err = appendDHCPv6Option(out, dhcpv6OptionDNSServers, dnsPayload, dhcpv6MaxMessageSize)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	iaids := msg.IAIDs
@@ -478,6 +541,9 @@ func buildDHCPv6Response(state ipv6DHCPv6State, msg parsedDHCPv6Message, respons
 		iaids = [][]byte{{0, 0, 0, 0}}
 	}
 	for _, iaid := range iaids {
+		if len(iaid) != 4 {
+			return nil, fmt.Errorf("invalid dhcpv6 IAID length")
+		}
 		iana := make([]byte, 12)
 		copy(iana[:4], iaid)
 		binary.BigEndian.PutUint32(iana[4:8], uint32(dhcpv6T1/time.Second))
@@ -491,19 +557,34 @@ func buildDHCPv6Response(state ipv6DHCPv6State, msg parsedDHCPv6Message, respons
 			copy(addrOption[:16], ip.To16())
 			binary.BigEndian.PutUint32(addrOption[16:20], uint32(dhcpv6PreferredLifetime/time.Second))
 			binary.BigEndian.PutUint32(addrOption[20:24], uint32(dhcpv6ValidLifetime/time.Second))
-			iana = append(iana, buildDHCPv6Option(dhcpv6OptionIAAddr, addrOption)...)
+			maxIANAValueSize := dhcpv6MaxMessageSize - len(out) - 4
+			iana, err = appendDHCPv6Option(iana, dhcpv6OptionIAAddr, addrOption, maxIANAValueSize)
+			if err != nil {
+				return nil, err
+			}
 		}
-		out = append(out, buildDHCPv6Option(dhcpv6OptionIANA, iana)...)
+		out, err = appendDHCPv6Option(out, dhcpv6OptionIANA, iana, dhcpv6MaxMessageSize)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
 
-func buildDHCPv6Option(code uint16, value []byte) []byte {
-	out := make([]byte, 4+len(value))
-	binary.BigEndian.PutUint16(out[0:2], code)
-	binary.BigEndian.PutUint16(out[2:4], uint16(len(value)))
-	copy(out[4:], value)
-	return out
+func appendDHCPv6Option(dst []byte, code uint16, value []byte, maxSize int) ([]byte, error) {
+	if len(value) > 0xffff {
+		return nil, fmt.Errorf("dhcpv6 option %d is too large: %d", code, len(value))
+	}
+	optionSize := 4 + len(value)
+	if maxSize < 0 || len(dst) > maxSize || optionSize > maxSize-len(dst) {
+		return nil, fmt.Errorf("dhcpv6 response exceeds %d bytes", dhcpv6MaxMessageSize)
+	}
+	start := len(dst)
+	dst = append(dst, make([]byte, optionSize)...)
+	binary.BigEndian.PutUint16(dst[start:start+2], code)
+	binary.BigEndian.PutUint16(dst[start+2:start+4], uint16(len(value)))
+	copy(dst[start+4:], value)
+	return dst, nil
 }
 
 func buildDHCPv6DUID(mac net.HardwareAddr) []byte {

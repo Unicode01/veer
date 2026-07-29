@@ -20,6 +20,7 @@ func TestIsIPv6RouterSolicitationFrame(t *testing.T) {
 
 	ipv6Header := frame[14:]
 	ipv6Header[0] = 0x60
+	binary.BigEndian.PutUint16(ipv6Header[4:6], 8)
 	ipv6Header[6] = ipv6NextHeaderICMPv6
 	ipv6Header[7] = ipv6RAHopLimit
 
@@ -116,6 +117,71 @@ func TestIPv6RouterAdvertiserUpdateOnlyTriggersOnChange(t *testing.T) {
 	changed.DNSServers[0] = "2001:db8::bad"
 	if got := advertiser.snapshot().DNSServers[0]; got != "2400:3200::1" {
 		t.Fatalf("router advertisement update retained caller-owned DNS slice: %q", got)
+	}
+}
+
+func TestIPv6RouterSolicitationTriggerIsCoalesced(t *testing.T) {
+	t.Parallel()
+
+	adv := newIPv6RouterAdvertiser(ipv6AssignmentRAConfig{TargetInterface: "br-lan"})
+	if !adv.triggerRouterSolicitation() {
+		t.Fatal("first router solicitation did not trigger an advertisement")
+	}
+	select {
+	case <-adv.rsWakeCh:
+	default:
+		t.Fatal("first router solicitation did not queue an advertisement")
+	}
+	if adv.triggerRouterSolicitation() {
+		t.Fatal("router solicitation bypassed pending-request coalescing")
+	}
+	select {
+	case <-adv.rsWakeCh:
+		t.Fatal("coalesced router solicitation queued another advertisement")
+	default:
+	}
+	adv.clearRouterSolicitationPending()
+	if !adv.triggerRouterSolicitation() {
+		t.Fatal("router solicitation remained blocked after pending send completed")
+	}
+}
+
+func TestIPv6RouterSolicitationDelayUsesLastSendAttempt(t *testing.T) {
+	t.Parallel()
+
+	adv := newIPv6RouterAdvertiser(ipv6AssignmentRAConfig{TargetInterface: "br-lan"})
+	now := time.Now()
+	if delay := adv.routerSolicitationDelay(now); delay != 0 {
+		t.Fatalf("initial router solicitation delay = %s, want 0", delay)
+	}
+	adv.mu.Lock()
+	adv.lastSendAttempt = now
+	adv.mu.Unlock()
+	if delay := adv.routerSolicitationDelay(now.Add(time.Second)); delay != 2*time.Second {
+		t.Fatalf("rate-limited router solicitation delay = %s, want 2s", delay)
+	}
+	if delay := adv.routerSolicitationDelay(now.Add(ipv6RAMinSolicitedInterval)); delay != 0 {
+		t.Fatalf("expired router solicitation delay = %s, want 0", delay)
+	}
+}
+
+func TestIPv6RouterSolicitationLogThrottleIgnoresAlternatingText(t *testing.T) {
+	t.Parallel()
+
+	adv := newIPv6RouterAdvertiser(ipv6AssignmentRAConfig{TargetInterface: "br-lan"})
+	adv.logRouterSolicitationIssue("first")
+	adv.mu.Lock()
+	logAt := adv.lastRSIssueLogAt
+	adv.mu.Unlock()
+
+	adv.logRouterSolicitationIssue("second")
+	adv.mu.Lock()
+	defer adv.mu.Unlock()
+	if !adv.lastRSIssueLogAt.Equal(logAt) {
+		t.Fatal("alternating message text bypassed router solicitation log throttle")
+	}
+	if adv.lastRSIssue != "second" {
+		t.Fatal("suppressed router solicitation log did not retain current runtime detail")
 	}
 }
 
@@ -232,6 +298,19 @@ func TestBuildIPv6RouterAdvertisementPayloadIncludesRDNSS(t *testing.T) {
 	}
 }
 
+func TestBuildIPv6RDNSSOptionRejectsTooManyServers(t *testing.T) {
+	t.Parallel()
+
+	servers := []string{
+		"2001:db8::1", "2001:db8::2", "2001:db8::3",
+		"2001:db8::4", "2001:db8::5", "2001:db8::6",
+		"2001:db8::7", "2001:db8::8", "2001:db8::9",
+	}
+	if _, err := buildIPv6RDNSSOption(servers, ipv6RDNSSLifetime); err == nil {
+		t.Fatal("buildIPv6RDNSSOption() error = nil, want DNS server limit")
+	}
+}
+
 func parseIPv6RouterAdvertisementBody(t *testing.T, payload []byte) []byte {
 	t.Helper()
 	if len(payload) < 16 {
@@ -273,4 +352,12 @@ func findIPv6RouterAdvertisementOption(options [][]byte, optionType byte) [][]by
 		matches = append(matches, option)
 	}
 	return matches
+}
+
+func FuzzIsIPv6RouterSolicitationFrame(f *testing.F) {
+	f.Add(make([]byte, 14+40+8))
+	f.Add([]byte{0x33, 0x33, 0, 0, 0, 2})
+	f.Fuzz(func(t *testing.T, frame []byte) {
+		_ = isIPv6RouterSolicitationFrame(frame)
+	})
 }

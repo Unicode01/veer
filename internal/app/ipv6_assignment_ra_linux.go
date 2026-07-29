@@ -19,16 +19,18 @@ import (
 )
 
 const (
-	ipv6RAHopLimit            = 255
-	ipv6RACurHopLimit         = 64
-	ipv6RARouterLifetime      = 1800 * time.Second
-	ipv6RAValidLifetime       = 24 * time.Hour
-	ipv6RAPreferredLifetime   = 4 * time.Hour
-	ipv6RDNSSLifetime         = ipv6RARouterLifetime
-	ipv6RAAdvertisementPeriod = 30 * time.Second
-	ipv6RATroubleLogEvery     = 5 * time.Minute
-	ipv6NextHeaderICMPv6      = 58
-	icmpv6TypeRouterSolicit   = 133
+	ipv6RAHopLimit             = 255
+	ipv6RACurHopLimit          = 64
+	ipv6RARouterLifetime       = 1800 * time.Second
+	ipv6RAValidLifetime        = 24 * time.Hour
+	ipv6RAPreferredLifetime    = 4 * time.Hour
+	ipv6RDNSSLifetime          = ipv6RARouterLifetime
+	ipv6RAAdvertisementPeriod  = 30 * time.Second
+	ipv6RAMinSolicitedInterval = 3 * time.Second
+	ipv6RATroubleLogEvery      = 5 * time.Minute
+	ipv6RAMaxRDNSSServers      = 8
+	ipv6NextHeaderICMPv6       = 58
+	icmpv6TypeRouterSolicit    = 133
 )
 
 var ipv6AllNodesLinkLocal = net.ParseIP("ff02::1")
@@ -38,17 +40,23 @@ type ipv6RouterAdvertiser struct {
 	config           ipv6AssignmentRAConfig
 	stopCh           chan struct{}
 	wakeCh           chan struct{}
+	rsWakeCh         chan struct{}
 	doneCh           chan struct{}
 	rsDoneCh         chan struct{}
 	currentRSFD      int
 	rsListeningSince time.Time
 	lastIssueText    string
 	lastIssueAt      time.Time
+	lastIssueLogAt   time.Time
 	lastRSIssue      string
 	lastRSIssueAt    time.Time
+	lastRSIssueLogAt time.Time
 	lastRSSeenAt     time.Time
+	lastRSSeenLogAt  time.Time
+	rsSendPending    bool
 	sendCount        uint64
 	lastSendAt       time.Time
+	lastSendAttempt  time.Time
 }
 
 func newIPv6RouterAdvertiser(config ipv6AssignmentRAConfig) *ipv6RouterAdvertiser {
@@ -56,6 +64,7 @@ func newIPv6RouterAdvertiser(config ipv6AssignmentRAConfig) *ipv6RouterAdvertise
 		config:      cloneIPv6AssignmentRAConfig(config),
 		stopCh:      make(chan struct{}),
 		wakeCh:      make(chan struct{}, 1),
+		rsWakeCh:    make(chan struct{}, 1),
 		doneCh:      make(chan struct{}),
 		rsDoneCh:    make(chan struct{}),
 		currentRSFD: -1,
@@ -107,6 +116,42 @@ func (adv *ipv6RouterAdvertiser) trigger() {
 	}
 }
 
+func (adv *ipv6RouterAdvertiser) triggerRouterSolicitation() bool {
+	if adv == nil {
+		return false
+	}
+	adv.mu.Lock()
+	if adv.rsSendPending {
+		adv.mu.Unlock()
+		return false
+	}
+	adv.rsSendPending = true
+	adv.mu.Unlock()
+	select {
+	case adv.rsWakeCh <- struct{}{}:
+		return true
+	default:
+		adv.clearRouterSolicitationPending()
+		return false
+	}
+}
+
+func (adv *ipv6RouterAdvertiser) clearRouterSolicitationPending() {
+	adv.mu.Lock()
+	adv.rsSendPending = false
+	adv.mu.Unlock()
+}
+
+func (adv *ipv6RouterAdvertiser) routerSolicitationDelay(now time.Time) time.Duration {
+	adv.mu.Lock()
+	lastAttempt := adv.lastSendAttempt
+	adv.mu.Unlock()
+	if lastAttempt.IsZero() || !now.Before(lastAttempt.Add(ipv6RAMinSolicitedInterval)) {
+		return 0
+	}
+	return lastAttempt.Add(ipv6RAMinSolicitedInterval).Sub(now)
+}
+
 func (adv *ipv6RouterAdvertiser) stop() {
 	if adv == nil {
 		return
@@ -134,6 +179,45 @@ func (adv *ipv6RouterAdvertiser) run() {
 
 	ticker := time.NewTicker(ipv6RAAdvertisementPeriod)
 	defer ticker.Stop()
+	var rsTimer *time.Timer
+	var rsTimerCh <-chan time.Time
+	stopRSTimer := func() {
+		if rsTimer == nil {
+			return
+		}
+		if !rsTimer.Stop() {
+			select {
+			case <-rsTimer.C:
+			default:
+			}
+		}
+		rsTimerCh = nil
+	}
+	defer stopRSTimer()
+	completePendingRS := func() {
+		stopRSTimer()
+		select {
+		case <-adv.rsWakeCh:
+		default:
+		}
+		adv.clearRouterSolicitationPending()
+	}
+	schedulePendingRS := func(now time.Time) bool {
+		delay := adv.routerSolicitationDelay(now)
+		if delay <= 0 {
+			adv.send()
+			adv.clearRouterSolicitationPending()
+			return false
+		}
+		if rsTimer == nil {
+			rsTimer = time.NewTimer(delay)
+		} else {
+			stopRSTimer()
+			rsTimer.Reset(delay)
+		}
+		rsTimerCh = rsTimer.C
+		return true
+	}
 
 	adv.send()
 	for {
@@ -142,8 +226,14 @@ func (adv *ipv6RouterAdvertiser) run() {
 			return
 		case <-adv.wakeCh:
 			adv.send()
+			completePendingRS()
+		case <-adv.rsWakeCh:
+			schedulePendingRS(time.Now())
+		case now := <-rsTimerCh:
+			schedulePendingRS(now)
 		case <-ticker.C:
 			adv.send()
+			completePendingRS()
 		}
 	}
 }
@@ -208,15 +298,19 @@ func (adv *ipv6RouterAdvertiser) listenForRouterSolicitations() {
 				}
 				if isIPv6RouterSolicitationFrame(buf[:n]) {
 					now := time.Now()
-					if adv.lastRSSeenAt.IsZero() || now.Sub(adv.lastRSSeenAt) >= time.Second {
-						adv.lastRSSeenAt = now
-						log.Printf("ipv6 assignment router solicitation received on %s", state.IfName)
-					}
 					adv.mu.Lock()
+					adv.lastRSSeenAt = now
+					shouldLog := adv.lastRSSeenLogAt.IsZero() || now.Sub(adv.lastRSSeenLogAt) >= time.Second
+					if shouldLog {
+						adv.lastRSSeenLogAt = now
+					}
 					adv.lastRSIssue = ""
 					adv.lastRSIssueAt = time.Time{}
 					adv.mu.Unlock()
-					adv.trigger()
+					if shouldLog {
+						log.Printf("ipv6 assignment router solicitation received on %s", state.IfName)
+					}
+					adv.triggerRouterSolicitation()
 				}
 			}
 		}()
@@ -233,28 +327,44 @@ func (adv *ipv6RouterAdvertiser) logRouterSolicitationIssue(text string) {
 		return
 	}
 	now := time.Now()
-	if text != adv.lastRSIssue || adv.lastRSIssueAt.IsZero() || now.Sub(adv.lastRSIssueAt) >= ipv6RATroubleLogEvery {
-		adv.lastRSIssue = text
-		adv.lastRSIssueAt = now
-		log.Printf("ipv6 assignment router solicitation listener on %s: %s", adv.snapshot().TargetInterface, text)
+	adv.mu.Lock()
+	adv.lastRSIssue = text
+	adv.lastRSIssueAt = now
+	shouldLog := adv.lastRSIssueLogAt.IsZero() || now.Sub(adv.lastRSIssueLogAt) >= ipv6RATroubleLogEvery
+	if shouldLog {
+		adv.lastRSIssueLogAt = now
+	}
+	targetInterface := adv.config.TargetInterface
+	adv.mu.Unlock()
+	if shouldLog {
+		log.Printf("ipv6 assignment router solicitation listener on %s: %s", targetInterface, text)
 	}
 }
 
 func (adv *ipv6RouterAdvertiser) send() {
 	config := adv.snapshot()
+	adv.mu.Lock()
+	adv.lastSendAttempt = time.Now()
+	adv.mu.Unlock()
 	if err := sendIPv6RouterAdvertisement(config); err != nil {
 		now := time.Now()
 		text := err.Error()
-		if text != adv.lastIssueText || adv.lastIssueAt.IsZero() || now.Sub(adv.lastIssueAt) >= ipv6RATroubleLogEvery {
-			adv.lastIssueText = text
-			adv.lastIssueAt = now
+		adv.mu.Lock()
+		adv.lastIssueText = text
+		adv.lastIssueAt = now
+		shouldLog := adv.lastIssueLogAt.IsZero() || now.Sub(adv.lastIssueLogAt) >= ipv6RATroubleLogEvery
+		if shouldLog {
+			adv.lastIssueLogAt = now
+		}
+		adv.mu.Unlock()
+		if shouldLog {
 			log.Printf("ipv6 assignment router advertisement on %s: %v", config.TargetInterface, err)
 		}
 		return
 	}
+	adv.mu.Lock()
 	adv.lastIssueText = ""
 	adv.lastIssueAt = time.Time{}
-	adv.mu.Lock()
 	adv.sendCount++
 	adv.lastSendAt = time.Now()
 	adv.mu.Unlock()
@@ -417,7 +527,11 @@ func isIPv6RouterSolicitationFrame(frame []byte) bool {
 	if ipv6Header[7] != ipv6RAHopLimit {
 		return false
 	}
-	icmp := ipv6Header[40:]
+	payloadLen := int(binary.BigEndian.Uint16(ipv6Header[4:6]))
+	if payloadLen < 8 || payloadLen > len(ipv6Header)-40 {
+		return false
+	}
+	icmp := ipv6Header[40 : 40+payloadLen]
 	return len(icmp) >= 8 && icmp[0] == icmpv6TypeRouterSolicit && icmp[1] == 0
 }
 
@@ -571,6 +685,9 @@ func buildIPv6RouteInfoOption(prefix *net.IPNet, lifetime time.Duration) []byte 
 func buildIPv6RDNSSOption(servers []string, lifetime time.Duration) ([]byte, error) {
 	if len(servers) == 0 {
 		return nil, nil
+	}
+	if len(servers) > ipv6RAMaxRDNSSServers {
+		return nil, fmt.Errorf("router advertisement cannot contain more than %d DNS servers", ipv6RAMaxRDNSSServers)
 	}
 	option := make([]byte, 8+16*len(servers))
 	option[0] = 25
