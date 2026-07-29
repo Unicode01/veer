@@ -117,6 +117,41 @@ func TestBuildManagedNetworkIPv4PlanDerivesGatewayAndPool(t *testing.T) {
 	}
 }
 
+func TestBuildManagedNetworkIPv4PlanRejectsTooManyDNSServers(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildManagedNetworkIPv4Plan(ManagedNetwork{
+		ID:             1,
+		Name:           "lab",
+		Bridge:         "vmbr0",
+		IPv4Enabled:    true,
+		IPv4CIDR:       "192.0.2.1/24",
+		IPv4DNSServers: "192.0.2.2,192.0.2.3,192.0.2.4,192.0.2.5,192.0.2.6,192.0.2.7,192.0.2.8,192.0.2.9,192.0.2.10",
+		Enabled:        true,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot contain more than 8 addresses") {
+		t.Fatalf("buildManagedNetworkIPv4Plan() error = %v, want DNS server limit", err)
+	}
+}
+
+func TestBuildManagedNetworkIPv4PlanRejectsOversizedDHCPPool(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildManagedNetworkIPv4Plan(ManagedNetwork{
+		ID:            1,
+		Name:          "lab",
+		Bridge:        "vmbr0",
+		IPv4Enabled:   true,
+		IPv4CIDR:      "10.0.0.1/8",
+		IPv4PoolStart: "10.1.0.1",
+		IPv4PoolEnd:   "10.2.0.1",
+		Enabled:       true,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot contain more than 65536 addresses") {
+		t.Fatalf("buildManagedNetworkIPv4Plan() error = %v, want DHCP pool size limit", err)
+	}
+}
+
 func TestManagedIPv4NetworkRuntimeReconcileCreatesAndDeletesState(t *testing.T) {
 	t.Parallel()
 

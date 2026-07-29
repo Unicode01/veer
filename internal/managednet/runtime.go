@@ -9,6 +9,12 @@ import (
 	"sync"
 )
 
+const (
+	managedNetworkMaxIPv4DNSServers = 8
+	// MaxDHCPv4PoolAddresses bounds runtime lease memory and worst-case pool scans.
+	MaxDHCPv4PoolAddresses = 1 << 16
+)
+
 type Runtime interface {
 	Reconcile(items []ManagedNetwork, reservations []ManagedNetworkReservation) error
 	SnapshotStatus() map[int64]RuntimeStatus
@@ -536,6 +542,9 @@ func normalizeManagedNetworkIPv4DNSServers(value string) ([]string, error) {
 		}
 		seen[normalized] = struct{}{}
 		out = append(out, normalized)
+		if len(out) > managedNetworkMaxIPv4DNSServers {
+			return nil, fmt.Errorf("ipv4_dns_servers cannot contain more than %d addresses", managedNetworkMaxIPv4DNSServers)
+		}
 	}
 	sort.Strings(out)
 	return out, nil

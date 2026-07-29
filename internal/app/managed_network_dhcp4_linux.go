@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/Unicode01/veer/internal/hotrestart"
 	"hash/fnv"
 	"log"
 	"net"
@@ -17,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unicode01/veer/internal/hotrestart"
+	"github.com/Unicode01/veer/internal/managednet"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
@@ -25,6 +26,7 @@ import (
 const (
 	dhcpv4ClientPort          = 68
 	dhcpv4ServerPort          = 67
+	dhcpv4BootRequest         = 1
 	dhcpv4BootReply           = 2
 	dhcpv4HWTypeEthernet      = 1
 	dhcpv4MagicCookie         = 0x63825363
@@ -49,12 +51,16 @@ const (
 	dhcpv4MessageRelease  = 7
 	dhcpv4MessageInform   = 8
 
-	dhcpv4LeaseTime       = 24 * time.Hour
-	dhcpv4RenewTime       = 12 * time.Hour
-	dhcpv4RebindTime      = 21 * time.Hour
-	dhcpv4TroubleLogEvery = 5 * time.Minute
-	dhcpv4MinMessageSize  = 300
-	ipv4ProtocolUDP       = 17
+	dhcpv4OfferHoldTime     = 60 * time.Second
+	dhcpv4LeaseTime         = 24 * time.Hour
+	dhcpv4RenewTime         = 12 * time.Hour
+	dhcpv4RebindTime        = 21 * time.Hour
+	dhcpv4LeaseCleanupEvery = time.Second
+	dhcpv4TroubleLogEvery   = 5 * time.Minute
+	dhcpv4MinMessageSize    = 300
+	dhcpv4MaxMessageSize    = 2048
+	dhcpv4MaxActiveLeases   = managednet.MaxDHCPv4PoolAddresses
+	ipv4ProtocolUDP         = 17
 )
 
 var (
@@ -90,21 +96,24 @@ const (
 )
 
 type managedNetworkDHCPv4Server struct {
-	mu             sync.Mutex
-	config         managedNetworkDHCPv4Config
-	stopCh         chan struct{}
-	doneCh         chan struct{}
-	currentFDs     []int
-	stickyIfaces   []string
-	listeningSince time.Time
-	leases         map[string]managedNetworkDHCPv4Lease
-	ipOwners       map[string]string
-	lastIssueText  string
-	lastIssueAt    time.Time
-	lastSeenText   string
-	lastSeenAt     time.Time
-	replyTotal     uint64
-	lastReplyAt    time.Time
+	mu                 sync.Mutex
+	config             managedNetworkDHCPv4Config
+	stopCh             chan struct{}
+	doneCh             chan struct{}
+	currentFDs         []int
+	stickyIfaces       []string
+	listeningSince     time.Time
+	leases             map[string]managedNetworkDHCPv4Lease
+	ipOwners           map[string]string
+	lastLeaseCleanupAt time.Time
+	lastIssueText      string
+	lastIssueAt        time.Time
+	lastIssueLogAt     time.Time
+	lastSeenText       string
+	lastSeenAt         time.Time
+	lastSeenLogAt      time.Time
+	replyTotal         uint64
+	lastReplyAt        time.Time
 }
 
 type linuxManagedNetworkNetOps struct {
@@ -387,7 +396,6 @@ type parsedManagedNetworkDHCPv4Message struct {
 	Flags       uint16
 	CIAddr      net.IP
 	YIAddr      net.IP
-	SIAddr      net.IP
 	GIAddr      net.IP
 	CHAddr      net.HardwareAddr
 	MessageType byte
@@ -395,7 +403,6 @@ type parsedManagedNetworkDHCPv4Message struct {
 	ServerID    net.IP
 	DNSServers  []net.IP
 	ClientID    []byte
-	RawPacket   []byte
 }
 
 func newManagedNetworkDHCPv4Server(config managedNetworkDHCPv4Config) *managedNetworkDHCPv4Server {
@@ -655,10 +662,17 @@ func (srv *managedNetworkDHCPv4Server) logIssue(text string) {
 		return
 	}
 	now := time.Now()
-	if text != srv.lastIssueText || srv.lastIssueAt.IsZero() || now.Sub(srv.lastIssueAt) >= dhcpv4TroubleLogEvery {
-		srv.lastIssueText = text
-		srv.lastIssueAt = now
-		log.Printf("managed network dhcpv4 on %s: %s", srv.snapshot().Bridge, text)
+	srv.mu.Lock()
+	srv.lastIssueText = text
+	srv.lastIssueAt = now
+	shouldLog := srv.lastIssueLogAt.IsZero() || now.Sub(srv.lastIssueLogAt) >= dhcpv4TroubleLogEvery
+	if shouldLog {
+		srv.lastIssueLogAt = now
+	}
+	bridge := srv.config.Bridge
+	srv.mu.Unlock()
+	if shouldLog {
+		log.Printf("managed network dhcpv4 on %s: %s", bridge, text)
 	}
 }
 
@@ -667,10 +681,17 @@ func (srv *managedNetworkDHCPv4Server) logSeenMessage(text string) {
 		return
 	}
 	now := time.Now()
-	if text != srv.lastSeenText || srv.lastSeenAt.IsZero() || now.Sub(srv.lastSeenAt) >= time.Second {
-		srv.lastSeenText = text
-		srv.lastSeenAt = now
-		log.Printf("managed network dhcpv4 on %s: %s", srv.snapshot().Bridge, text)
+	srv.mu.Lock()
+	srv.lastSeenText = text
+	srv.lastSeenAt = now
+	shouldLog := srv.lastSeenLogAt.IsZero() || now.Sub(srv.lastSeenLogAt) >= time.Second
+	if shouldLog {
+		srv.lastSeenLogAt = now
+	}
+	bridge := srv.config.Bridge
+	srv.mu.Unlock()
+	if shouldLog {
+		log.Printf("managed network dhcpv4 on %s: %s", bridge, text)
 	}
 }
 
@@ -881,7 +902,7 @@ func resolveManagedNetworkDHCPv4ListenInterfacesWithInfos(config managedNetworkD
 }
 
 func readManagedNetworkDHCPv4Frame(fd int) (managedNetworkDHCPv4Frame, error) {
-	buf := make([]byte, 2048)
+	buf := make([]byte, dhcpv4MaxMessageSize)
 	for {
 		n, _, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
@@ -939,7 +960,7 @@ func (srv *managedNetworkDHCPv4Server) handleMessage(state managedNetworkDHCPv4S
 	if err != nil {
 		return false, err
 	}
-	if msg.HType != dhcpv4HWTypeEthernet || msg.HLen < 6 || len(msg.CHAddr) < 6 {
+	if msg.Op != dhcpv4BootRequest || msg.HType != dhcpv4HWTypeEthernet || msg.HLen != 6 || len(msg.CHAddr) != 6 {
 		return false, nil
 	}
 	if msg.GIAddr != nil && !msg.GIAddr.Equal(net.IPv4zero) {
@@ -1034,17 +1055,18 @@ func parseManagedNetworkDHCPv4Message(packet []byte) (parsedManagedNetworkDHCPv4
 	if len(packet) < 240 {
 		return parsedManagedNetworkDHCPv4Message{}, fmt.Errorf("short dhcpv4 message")
 	}
+	if len(packet) > dhcpv4MaxMessageSize {
+		return parsedManagedNetworkDHCPv4Message{}, fmt.Errorf("dhcpv4 message too large: %d", len(packet))
+	}
 	msg := parsedManagedNetworkDHCPv4Message{
-		Op:        packet[0],
-		HType:     packet[1],
-		HLen:      packet[2],
-		XID:       binary.BigEndian.Uint32(packet[4:8]),
-		Flags:     binary.BigEndian.Uint16(packet[10:12]),
-		CIAddr:    net.IP(append([]byte(nil), packet[12:16]...)),
-		YIAddr:    net.IP(append([]byte(nil), packet[16:20]...)),
-		SIAddr:    net.IP(append([]byte(nil), packet[20:24]...)),
-		GIAddr:    net.IP(append([]byte(nil), packet[24:28]...)),
-		RawPacket: append([]byte(nil), packet...),
+		Op:     packet[0],
+		HType:  packet[1],
+		HLen:   packet[2],
+		XID:    binary.BigEndian.Uint32(packet[4:8]),
+		Flags:  binary.BigEndian.Uint16(packet[10:12]),
+		CIAddr: net.IP(append([]byte(nil), packet[12:16]...)),
+		YIAddr: net.IP(append([]byte(nil), packet[16:20]...)),
+		GIAddr: net.IP(append([]byte(nil), packet[24:28]...)),
 	}
 	hlen := int(msg.HLen)
 	if hlen > 16 {
@@ -1074,7 +1096,7 @@ func parseManagedNetworkDHCPv4Message(packet []byte) (parsedManagedNetworkDHCPv4
 		if length > len(options) {
 			return parsedManagedNetworkDHCPv4Message{}, fmt.Errorf("invalid dhcpv4 option length")
 		}
-		value := append([]byte(nil), options[:length]...)
+		value := options[:length]
 		options = options[length:]
 		switch code {
 		case dhcpv4OptionMessageType:
@@ -1096,13 +1118,16 @@ func parseManagedNetworkDHCPv4Message(packet []byte) (parsedManagedNetworkDHCPv4
 				}
 			}
 		case dhcpv4OptionClientID:
-			msg.ClientID = value
+			msg.ClientID = append([]byte(nil), value...)
 		}
 	}
 	return msg, nil
 }
 
 func buildManagedNetworkDHCPv4Reply(config managedNetworkDHCPv4Config, msg parsedManagedNetworkDHCPv4Message, responseType byte, leaseIP string) ([]byte, error) {
+	if len(msg.CHAddr) > 16 {
+		return nil, fmt.Errorf("invalid dhcpv4 client hardware address length: %d", len(msg.CHAddr))
+	}
 	serverIP := parseIPLiteral(config.ServerIP).To4()
 	if serverIP == nil {
 		return nil, fmt.Errorf("invalid dhcpv4 server ip %q", config.ServerIP)
@@ -1326,6 +1351,13 @@ func (srv *managedNetworkDHCPv4Server) allocateLease(config managedNetworkDHCPv4
 
 	now := time.Now()
 	srv.cleanupExpiredLeasesLocked(now)
+	if _, exists := srv.leases[clientKey]; !exists && len(srv.leases) >= dhcpv4MaxActiveLeases {
+		return "", fmt.Errorf("dhcpv4 active lease limit reached: %d", dhcpv4MaxActiveLeases)
+	}
+	leaseLifetime := dhcpv4OfferHoldTime
+	if strict {
+		leaseLifetime = dhcpv4LeaseTime
+	}
 
 	start := managedNetworkIPv4LiteralToUint32(config.PoolStart)
 	end := managedNetworkIPv4LiteralToUint32(config.PoolEnd)
@@ -1338,14 +1370,14 @@ func (srv *managedNetworkDHCPv4Server) allocateLease(config managedNetworkDHCPv4
 		if strict && requested != "" && requested != reservedIP {
 			return "", errDHCPv4NAK
 		}
-		srv.storeLeaseLocked(clientKey, reservedIP, now)
+		srv.storeLeaseLocked(clientKey, reservedIP, now, leaseLifetime)
 		return reservedIP, nil
 	}
 	if lease, ok := srv.leases[clientKey]; ok && lease.IP != "" {
 		if ip := parseIPLiteral(lease.IP).To4(); ip != nil {
 			value := managedNetworkIPv4ToUint32(ip)
 			if value >= start && value <= end && !managedNetworkDHCPv4IPReserved(config, lease.IP) {
-				srv.storeLeaseLocked(clientKey, lease.IP, now)
+				leaseIP := lease.IP
 				if strict {
 					requested := managedNetworkDHCPv4RequestedIP(msg)
 					if requested != "" && requested != lease.IP {
@@ -1358,10 +1390,11 @@ func (srv *managedNetworkDHCPv4Server) allocateLease(config managedNetworkDHCPv4
 						if requestedValue := managedNetworkIPv4LiteralToUint32(requested); requestedValue < start || requestedValue > end {
 							return "", errDHCPv4NAK
 						}
-						srv.storeLeaseLocked(clientKey, requested, now)
+						leaseIP = requested
 					}
 				}
-				return srv.leases[clientKey].IP, nil
+				srv.storeLeaseLocked(clientKey, leaseIP, now, leaseLifetime)
+				return leaseIP, nil
 			}
 		}
 		srv.deleteLeaseLocked(clientKey)
@@ -1379,7 +1412,7 @@ func (srv *managedNetworkDHCPv4Server) allocateLease(config managedNetworkDHCPv4
 		if owner := srv.ipOwners[requested]; owner != "" && owner != clientKey {
 			return "", errDHCPv4NAK
 		}
-		srv.storeLeaseLocked(clientKey, requested, now)
+		srv.storeLeaseLocked(clientKey, requested, now, leaseLifetime)
 		return requested, nil
 	}
 
@@ -1388,7 +1421,7 @@ func (srv *managedNetworkDHCPv4Server) allocateLease(config managedNetworkDHCPv4
 		if requestedValue >= start && requestedValue <= end {
 			if !managedNetworkDHCPv4IPReserved(config, requested) {
 				if owner := srv.ipOwners[requested]; owner == "" || owner == clientKey {
-					srv.storeLeaseLocked(clientKey, requested, now)
+					srv.storeLeaseLocked(clientKey, requested, now, leaseLifetime)
 					return requested, nil
 				}
 			}
@@ -1407,7 +1440,7 @@ func (srv *managedNetworkDHCPv4Server) allocateLease(config managedNetworkDHCPv4
 		if owner != "" && owner != clientKey {
 			continue
 		}
-		srv.storeLeaseLocked(clientKey, ip, now)
+		srv.storeLeaseLocked(clientKey, ip, now, leaseLifetime)
 		return ip, nil
 	}
 	if strict {
@@ -1416,9 +1449,12 @@ func (srv *managedNetworkDHCPv4Server) allocateLease(config managedNetworkDHCPv4
 	return "", fmt.Errorf("dhcpv4 pool is exhausted")
 }
 
-func (srv *managedNetworkDHCPv4Server) storeLeaseLocked(clientKey string, ip string, now time.Time) {
+func (srv *managedNetworkDHCPv4Server) storeLeaseLocked(clientKey string, ip string, now time.Time, lifetime time.Duration) {
 	if clientKey == "" || strings.TrimSpace(ip) == "" {
 		return
+	}
+	if lifetime <= 0 {
+		lifetime = dhcpv4OfferHoldTime
 	}
 	if current, ok := srv.leases[clientKey]; ok && current.IP != "" && current.IP != ip && srv.ipOwners[current.IP] == clientKey {
 		delete(srv.ipOwners, current.IP)
@@ -1430,7 +1466,7 @@ func (srv *managedNetworkDHCPv4Server) storeLeaseLocked(clientKey string, ip str
 	srv.leases[clientKey] = managedNetworkDHCPv4Lease{
 		ClientKey: clientKey,
 		IP:        ip,
-		ExpiresAt: now.Add(dhcpv4LeaseTime),
+		ExpiresAt: now.Add(lifetime),
 	}
 	srv.ipOwners[ip] = clientKey
 }
@@ -1490,6 +1526,10 @@ func (srv *managedNetworkDHCPv4Server) releaseLease(msg parsedManagedNetworkDHCP
 }
 
 func (srv *managedNetworkDHCPv4Server) cleanupExpiredLeasesLocked(now time.Time) {
+	if !srv.lastLeaseCleanupAt.IsZero() && !now.Before(srv.lastLeaseCleanupAt) && now.Sub(srv.lastLeaseCleanupAt) < dhcpv4LeaseCleanupEvery {
+		return
+	}
+	srv.lastLeaseCleanupAt = now
 	for clientKey, lease := range srv.leases {
 		if lease.ExpiresAt.IsZero() || now.Before(lease.ExpiresAt) {
 			continue
