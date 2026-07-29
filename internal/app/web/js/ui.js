@@ -873,7 +873,7 @@
       if (app.el.confirmModal && app.el.confirmModal.classList.contains('active')) {
         app.closeConfirmModal(false);
       }
-      original();
+      return original.apply(app, arguments);
     };
   })(app.showTokenModal);
 

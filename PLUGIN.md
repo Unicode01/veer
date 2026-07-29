@@ -566,7 +566,10 @@ async function saveProfile() {
 - `VeerPluginHost.toast(message)`
 - `VeerPluginHost.toastError(error)`
 - `VeerPluginHost.errorText(error)`
+- `VeerPluginHost.confirm({title, message, confirmText, cancelText, danger})`
 - `VeerPluginHost.requestResize()`
+
+删除记录、拆除链路、断开会话等破坏性操作应先调用 `confirm()`。确认框由父 WebUI 的统一浮层渲染；只有当前可见的插件页面可以请求，且同一时刻最多打开一个。插件仍不能创建浏览器原生弹窗或向宿主注入 HTML。
 
 跨插件 UI 读取只开放 `list/get`，并同时检查 `ui.register().resource_access` 与调用方 manifest 的 `control.resource_access` 白名单。iframe 不能借此访问未授权插件资源，也不开放跨插件写入；编排写操作仍通过 Goja `plugins.resources` / `plugins.actions` 完成。
 

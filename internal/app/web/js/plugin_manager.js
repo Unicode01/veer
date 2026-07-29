@@ -386,7 +386,7 @@
       const response = await fetch(path, { method, headers: requestHeaders, body });
       if (response.status === 401) {
         app.clearToken();
-        app.showTokenModal();
+        app.showTokenModal({ rejected: true });
         throw new Error('unauthorized');
       }
       let payload = {};
@@ -955,6 +955,14 @@
 		if (existing) {
 			actions.unshift(managerButton(app.t('plugins.repository.policy.remove'), 'plugin-manager-danger-btn', async () => {
 				if (state.busy) return;
+				const confirmed = await app.confirmAction({
+					title: app.t('plugins.repository.policy.removeTitle'),
+					message: app.t('plugins.repository.policy.removeConfirm', { id: pluginID }),
+					confirmText: app.t('plugins.repository.policy.remove'),
+					cancelText: app.t('common.cancel'),
+					danger: true
+				});
+				if (!confirmed) return;
 				state.busy = true;
 				managerRenderNav();
 				try {

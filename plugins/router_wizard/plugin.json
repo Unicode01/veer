@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "router_wizard",
   "name": "Router Wizard",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "kind": "control",
   "stability": "lab",
   "description": "Single WAN/LAN router configuration page. It owns no dataplane program and only calls explicitly granted plugin resources/actions.",

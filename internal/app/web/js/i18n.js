@@ -13,6 +13,7 @@
       'auth.tokenPlaceholder': '请输入 web_token',
       'auth.confirm': '确认',
       'auth.logout': '退出',
+      'auth.tokenRejected': 'Token 无效或已过期，请重新输入。',
       'toolbar.language': '语言',
       'toolbar.theme': '主题',
       'locale.zh-CN': '简体中文',
@@ -588,6 +589,8 @@
 	  'plugins.repository.policy.saved': '{{id}} 的更新策略已保存。',
 	  'plugins.repository.policy.saveFailed': '保存更新策略失败：{{message}}',
 	  'plugins.repository.policy.remove': '清除策略',
+	  'plugins.repository.policy.removeTitle': '确认清除更新策略',
+	  'plugins.repository.policy.removeConfirm': '将清除 {{id}} 的固定版本、更新通道和暂停更新设置，后续恢复跟随插件源默认策略。',
 	  'plugins.repository.policy.removed': '{{id}} 的更新策略已清除。',
 	  'plugins.repository.policy.removeFailed': '清除更新策略失败：{{message}}',
       'plugins.package.install': '安装插件包',
@@ -1027,6 +1030,7 @@
       'toast.deleted': '{{item}}已删除。',
       'toast.enabled': '{{item}}已启用。',
       'toast.disabled': '{{item}}已禁用。',
+      'toast.refreshed': '{{item}}已刷新。',
       'toast.loggedOut': '已退出登录。',
       'validation.required': '此字段必填。',
       'validation.invalidID': 'ID 无效。',
@@ -1118,6 +1122,7 @@
       'auth.tokenPlaceholder': 'Enter web_token',
       'auth.confirm': 'Continue',
       'auth.logout': 'Logout',
+      'auth.tokenRejected': 'The token is invalid or expired. Enter it again.',
       'toolbar.language': 'Language',
       'toolbar.theme': 'Theme',
       'locale.zh-CN': '简体中文',
@@ -1693,6 +1698,8 @@
 	  'plugins.repository.policy.saved': 'The update policy for {{id}} was saved.',
 	  'plugins.repository.policy.saveFailed': 'Saving the update policy failed: {{message}}',
 	  'plugins.repository.policy.remove': 'Clear Policy',
+	  'plugins.repository.policy.removeTitle': 'Clear update policy?',
+	  'plugins.repository.policy.removeConfirm': 'This clears the pinned version, update channel, and hold settings for {{id}}. Repository defaults will apply afterward.',
 	  'plugins.repository.policy.removed': 'The update policy for {{id}} was cleared.',
 	  'plugins.repository.policy.removeFailed': 'Clearing the update policy failed: {{message}}',
       'plugins.package.install': 'Install Package',
@@ -2132,6 +2139,7 @@
       'toast.deleted': '{{item}} deleted.',
       'toast.enabled': '{{item}} enabled.',
       'toast.disabled': '{{item}} disabled.',
+      'toast.refreshed': '{{item}} refreshed.',
       'toast.loggedOut': 'Signed out.',
       'validation.required': 'This field is required.',
       'validation.invalidID': 'The ID is invalid.',
@@ -2480,19 +2488,24 @@
   };
 
   app.stopPolling = function stopPolling() {
+    if (app.state.pollRefreshCycle) app.state.pollRefreshCycle.cancelled = true;
     if (app.state.pollerId) {
       clearInterval(app.state.pollerId);
       app.state.pollerId = 0;
     }
   };
 
-  app.showTokenModal = function showTokenModal() {
+  app.showTokenModal = function showTokenModal(options) {
+    const wasActive = app.el.tokenModal.classList.contains('active');
     app.stopPolling();
     app.el.appRoot.style.display = 'none';
     app.el.tokenModal.classList.add('active');
     app.el.tokenInput.disabled = false;
     app.el.tokenInput.value = '';
     app.el.tokenInput.focus();
+    if (options && options.rejected && !wasActive && typeof app.notify === 'function') {
+      app.notify('error', app.t('auth.tokenRejected'));
+    }
   };
 
   app.compareValues = function compareValues(a, b) {

@@ -1985,7 +1985,8 @@
     }
   };
 
-  app.loadCurrentConns = async function loadCurrentConns() {
+  app.loadCurrentConns = async function loadCurrentConns(options) {
+    const opts = options || {};
     try {
       const snapshot = await app.apiCall('GET', '/api/stats/current-conns');
       applyCurrentConnsSnapshot(snapshot || {});
@@ -1993,8 +1994,17 @@
       app.renderSiteStatsTable();
       app.renderRangeStatsTable();
       app.renderEgressNATStatsTable();
+      if (opts.notify) app.notify('success', app.t('toast.refreshed', { item: app.t('stats.currentConns') }));
+      return true;
     } catch (e) {
-      if (e.message !== 'unauthorized') console.error('load current conns:', e);
+      if (e.message !== 'unauthorized') {
+        console.error('load current conns:', e);
+        if (opts.notify) app.notify('error', app.t('errors.actionFailed', {
+          action: app.t('stats.refreshCurrentConns'),
+          message: app.translateValidationMessage(e.message)
+        }));
+      }
+      return false;
     }
   };
 

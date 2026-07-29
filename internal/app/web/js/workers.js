@@ -348,7 +348,8 @@
     app.renderOverview();
   };
 
-  app.loadWorkers = async function loadWorkers() {
+  app.loadWorkers = async function loadWorkers(options) {
+    const opts = options || {};
     try {
       const resp = await app.apiCall('GET', '/api/workers');
       app.state.workers.masterHash = resp.binary_hash || '';
@@ -361,8 +362,17 @@
       }
 
       app.renderWorkersTable();
+      if (opts.notify) app.notify('success', app.t('toast.refreshed', { item: app.t('workers.title') }));
+      return true;
     } catch (e) {
-      if (e.message !== 'unauthorized') console.error('load workers:', e);
+      if (e.message !== 'unauthorized') {
+        console.error('load workers:', e);
+        if (opts.notify) app.notify('error', app.t('errors.actionFailed', {
+          action: app.t('workers.refresh'),
+          message: app.translateValidationMessage(e.message)
+        }));
+      }
+      return false;
     }
   };
 })();

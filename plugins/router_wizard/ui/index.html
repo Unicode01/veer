@@ -331,8 +331,11 @@
           'action.apply': '应用',
           'action.update': '更新路由器',
           'action.teardown': '拆除',
+          'action.cancel': '取消',
           'action.refresh': '刷新',
           'hint.noRuntime': '当前路由器配置尚未应用，无需拆除。',
+          'confirm.teardownTitle': '确认拆除路由器',
+          'confirm.teardownMessage': '将按编排顺序停止 LAN、WAN 和关联转发配置，期间网络会中断，是否继续？',
           'toast.saved': '配置已保存。',
           'toast.loaded': '配置已加载。',
           'toast.applied': 'Router 编排已完成。',
@@ -424,8 +427,11 @@
           'action.apply': 'Apply',
           'action.update': 'Update Router',
           'action.teardown': 'Teardown',
+          'action.cancel': 'Cancel',
           'action.refresh': 'Refresh',
           'hint.noRuntime': 'The router configuration is not applied, so there is nothing to tear down.',
+          'confirm.teardownTitle': 'Teardown router?',
+          'confirm.teardownMessage': 'This stops LAN, WAN, and related forwarding configuration in orchestration order and interrupts connectivity.',
           'toast.saved': 'Config saved.',
           'toast.loaded': 'Config loaded.',
           'toast.applied': 'Router orchestration completed.',
@@ -841,6 +847,19 @@
         }
       }
       async function teardownRouter(button) {
+        try {
+          const confirmed = await F.confirm({
+            title: T('confirm.teardownTitle'),
+            message: T('confirm.teardownMessage'),
+            confirmText: T('action.teardown'),
+            cancelText: T('action.cancel'),
+            danger: true
+          });
+          if (!confirmed) return;
+        } catch (e) {
+          F.toastError(e);
+          return;
+        }
         setBusy(button, true, T('status.tearing'));
         setStatus('status.tearing');
         try {

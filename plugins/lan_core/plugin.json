@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "lan_core",
   "name": "LAN Core",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "kind": "control",
   "stability": "stable",
   "description": "Protocol-neutral LAN adapter with bridge, DHCPv4, inherited or manual DNS distribution, Egress NAT, and routed WAN IPv6 delegated-prefix support.",
@@ -20,7 +20,7 @@
   ],
   "control": {
     "main": "control.js",
-    "sha256": "1398be91a2f705a07738a10b118a1d7306665cc6dcab2795fda594bfc1a97351",
+    "sha256": "f39a8e3a5eaaf475dfa20931bc7a715bb4526973562aa02e88811b7318ad0ef9",
     "permissions": ["net.admin", "plugin.register", "plugin.resource", "resource", "timer", "ui"],
     "net_access": [
       {

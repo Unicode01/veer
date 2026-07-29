@@ -57,7 +57,10 @@
           'action.apply': '应用运行时',
           'action.create': '创建记录',
           'action.delete': '删除',
+          'action.cancel': '取消',
           'action.refresh': '刷新',
+          'confirm.deleteTitle': '确认删除记录',
+          'confirm.deleteMessage': '将删除记录 {{key}}，此操作无法撤销。',
           'records.empty': '还没有记录。创建一条记录用于测试宿主持久化。',
           'records.count': '{{count}} 条记录',
           'records.revision': '版本 {{revision}}',
@@ -108,7 +111,10 @@
           'action.apply': 'Apply runtime',
           'action.create': 'Create record',
           'action.delete': 'Delete',
+          'action.cancel': 'Cancel',
           'action.refresh': 'Refresh',
+          'confirm.deleteTitle': 'Delete record?',
+          'confirm.deleteMessage': 'Record {{key}} will be deleted. This action cannot be undone.',
           'records.empty': 'No records yet. Create one to test host-side persistence.',
           'records.count': '{{count}} record{{suffix}}',
           'records.revision': 'rev {{revision}}',
@@ -243,6 +249,19 @@
         recordsCache.forEach(function (record) {
           const data = record.data || {};
           const removeButton = i18nButton('action.delete', async function () {
+            try {
+              const confirmed = await F.confirm({
+                title: T('confirm.deleteTitle'),
+                message: T('confirm.deleteMessage', { key: record.key }),
+                confirmText: T('action.delete'),
+                cancelText: T('action.cancel'),
+                danger: true
+              });
+              if (!confirmed) return;
+            } catch (e) {
+              F.toastError(e);
+              return;
+            }
             setBusy(removeButton, true, T('status.deleting'));
             try {
               await F.data.delete('bindings', record.key);

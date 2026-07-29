@@ -10,6 +10,7 @@ const pluginPageHTML = `<!doctype html>
       <div class="veer-actions">
         <button id="shrink" type="button">Shrink</button>
         <button id="grow" type="button">Grow</button>
+        <button id="confirm" type="button">Confirm</button>
       </div>
       <div id="resizable" style="height: 480px"></div>
     </section>
@@ -22,6 +23,18 @@ const pluginPageHTML = `<!doctype html>
     document.getElementById('grow').addEventListener('click', function () {
       document.getElementById('resizable').style.height = '480px';
       if (window.VeerPluginHost) window.VeerPluginHost.requestResize();
+    });
+    document.getElementById('confirm').addEventListener('click', function () {
+      window.fixtureConfirmResult = 'pending';
+      window.VeerPluginHost.confirm({
+        title: 'Plugin confirmation',
+        message: 'Confirm from sandbox',
+        confirmText: 'Proceed',
+        cancelText: 'Cancel',
+        danger: true
+      }).then(function (confirmed) {
+        window.fixtureConfirmResult = confirmed;
+      });
     });
   </script>
 </body>
@@ -252,9 +265,22 @@ test('dashboard shell localizes cleanly and plugin details stay usable', async (
   expect(overlap.popover.top).toBeGreaterThanOrEqual(0);
   expect(overlap.popover.right).toBeLessThanOrEqual(overlap.viewport.width);
   expect(overlap.popover.bottom).toBeLessThanOrEqual(overlap.viewport.height);
+
+  const paused = await page.evaluate(() => window.VeerApp.runAutoRefresh() === null);
+  expect(paused).toBe(true);
+  await expect(popover).toBeVisible();
+
+  await popover.locator('.plugin-detail-close').last().click();
+  const resumed = await page.evaluate(async () => {
+    const refresh = window.VeerApp.runAutoRefresh();
+    if (!refresh) return false;
+    await refresh;
+    return true;
+  });
+  expect(resumed).toBe(true);
 });
 
-test('background load failures stay visible until the endpoint recovers', async ({ page }, testInfo) => {
+test('background load failures stay visible and recover outside the active tab', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
   await page.route('**/api/rules', async (route) => {
     await route.fulfill({
@@ -270,12 +296,61 @@ test('background load failures stay visible until the endpoint recovers', async 
   await expect(syncLabel).toHaveAttribute('title', /\/api\/rules: fixture sync failure/);
   await expect(page.locator('#toastStack')).toContainText('fixture sync failure');
 
+  await page.locator('[data-tab="sites"]').click();
   await page.unroute('**/api/rules');
-  await page.evaluate(() => window.VeerApp.loadRules());
+  await page.evaluate(async () => {
+    const app = window.VeerApp;
+    Object.values(app.state.requestFailures).forEach((failure) => {
+      failure.at = Date.now() - 5000;
+    });
+    await app.runAutoRefresh();
+  });
   await expect(syncLabel).not.toHaveClass(/is-error/);
   await expect(syncLabel).toHaveAttribute('title', '');
 
   browserErrors.set(page, []);
+});
+
+test('in-flight polling waits for an opened floating layer before applying data', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  await page.locator('[data-tab="plugins"]').click();
+  await page.evaluate(() => window.VeerApp.stopPolling());
+  await expect.poll(() => page.evaluate(() => window.VeerApp.state.pollRefreshInFlight === null)).toBe(true);
+
+  let releaseResponse;
+  let markRequestStarted;
+  const requestStarted = new Promise((resolve) => { markRequestStarted = resolve; });
+  await page.route('**/api/plugins', async (route) => {
+    markRequestStarted();
+    await new Promise((resolve) => { releaseResponse = resolve; });
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json; charset=utf-8',
+      body: JSON.stringify(pluginCatalog)
+    });
+  });
+
+  await page.evaluate(() => {
+    window.__inflightPoll = window.VeerApp.runAutoRefresh();
+  });
+  await requestStarted;
+
+  const trigger = page.locator('.plugin-detail-trigger[data-plugin-id="nf_counter"]');
+  await trigger.click();
+  const popover = page.locator('#pluginRuntimeTooltip');
+  await expect(popover).toBeVisible();
+
+  releaseResponse();
+  await page.waitForTimeout(250);
+  await expect.poll(() => page.evaluate(() => window.VeerApp.state.pollRefreshInFlight !== null)).toBe(true);
+  await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+  await expect(popover).toBeVisible();
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+
+  await popover.locator('.plugin-detail-close').last().click();
+  await expect(popover).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.VeerApp.state.pollRefreshInFlight === null)).toBe(true);
+  await page.unroute('**/api/plugins');
 });
 
 test('plugin page renders Netfilter placement and resizes in both directions', async ({ page }, testInfo) => {
@@ -304,6 +379,23 @@ test('plugin page renders Netfilter placement and resizes in both directions', a
 
   await frameBody.locator('#grow').click();
   await expect.poll(async () => (await frame.boundingBox()).height).toBeGreaterThan(450);
+});
+
+test('plugin page confirmation uses the parent overlay and returns the result', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  await page.locator('[data-tab="plugin-firewall"]').click();
+
+  const frame = page.frameLocator('#tab-plugin-firewall .plugin-page-frame');
+  await frame.locator('#confirm').click();
+  const confirm = page.locator('#confirmModal');
+  await expect(confirm).toBeVisible();
+  await expect(page.locator('#confirmTitle')).toHaveText('Plugin confirmation');
+  await expect(page.locator('#confirmMessage')).toHaveText('Confirm from sandbox');
+  await expect(page.locator('#confirmSubmitBtn')).toHaveClass(/is-danger/);
+
+  await page.locator('#confirmCancelBtn').click();
+  await expect(confirm).toBeHidden();
+  await expect.poll(() => frame.locator('body').evaluate(() => window.fixtureConfirmResult)).toBe(false);
 });
 
 test('confirmation dialog stays above plugin management', async ({ page }, testInfo) => {

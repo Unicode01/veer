@@ -1197,6 +1197,7 @@ function createHarness() {
       VeerApp: app,
       setInterval: registerInterval,
       clearInterval() {},
+      setTimeout,
       addEventListener() {}
     },
     setInterval: registerInterval,
@@ -2729,11 +2730,54 @@ test('shouldPauseAutoRefresh returns true while picker input is focused', () => 
   assert.equal(app.shouldPauseAutoRefresh(), true);
 });
 
+test('shouldPauseAutoRefresh returns true while a floating detail layer is open', () => {
+  const { app, documentRef } = createHarness();
+  documentRef.querySelector = (selector) => selector === '.kernel-runtime-floating-tooltip.is-visible:not([hidden])' ? {} : null;
+
+  assert.equal(app.shouldPauseAutoRefresh(), true);
+});
+
 test('shouldPauseAutoRefresh returns false when no transient interaction is active', () => {
   const { app, documentRef } = createHarness();
   documentRef.activeElement = null;
 
   assert.equal(app.shouldPauseAutoRefresh(), false);
+});
+
+test('awaitAutoRefreshResume holds an in-flight response until interaction ends', async () => {
+  const { app, documentRef } = createHarness();
+  let floatingLayerOpen = true;
+  documentRef.querySelector = (selector) => (
+    selector === '.kernel-runtime-floating-tooltip.is-visible:not([hidden])' && floatingLayerOpen ? {} : null
+  );
+  const context = { id: 1, cancelled: false };
+  let resumed = false;
+
+  const waiting = app.awaitAutoRefreshResume(context).then(() => { resumed = true; });
+  await Promise.resolve();
+  assert.equal(resumed, false);
+
+  floatingLayerOpen = false;
+  await waiting;
+  assert.equal(resumed, true);
+});
+
+test('retryFailedDataLoads retries only stale known failures and deduplicates loaders', async () => {
+  const { app } = createHarness();
+  const calls = [];
+  const stale = Date.now() - 5000;
+  app.state.requestFailures = {
+    'GET /api/rules': { path: '/api/rules', at: stale },
+    'GET /api/rules?page=2': { path: '/api/rules', at: stale - 1 },
+    'GET /api/sites': { path: '/api/sites', at: Date.now() },
+    'GET /api/plugins/example/ui': { path: '/api/plugins/example/ui', at: stale }
+  };
+  app.loadRules = async () => calls.push('rules');
+  app.loadSites = async () => calls.push('sites');
+
+  await app.retryFailedDataLoads();
+
+  assert.deepEqual(calls, ['rules']);
 });
 
 test('polling refreshes only the active tab and skips overlapping ticks', async () => {
