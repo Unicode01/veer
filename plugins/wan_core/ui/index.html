@@ -123,8 +123,11 @@
           'action.apply': '应用',
           'action.update': '更新边界',
           'action.teardown': '拆除',
+          'action.cancel': '取消',
           'action.refresh': '刷新',
           'hint.noRuntime': '当前 WAN 边界尚未应用，无需拆除。',
+          'confirm.teardownTitle': '确认拆除 WAN 边界',
+          'confirm.teardownMessage': '将停止当前 WAN 边界并移除其托管的接口、地址和路由，是否继续？',
           'toast.saved': 'WAN 配置已保存。',
           'toast.loaded': 'WAN 配置已加载。',
           'toast.applied': 'WAN 边界已应用。',
@@ -206,8 +209,11 @@
           'action.apply': 'Apply',
           'action.update': 'Update Boundary',
           'action.teardown': 'Teardown',
+          'action.cancel': 'Cancel',
           'action.refresh': 'Refresh',
           'hint.noRuntime': 'This WAN boundary is not applied, so there is nothing to tear down.',
+          'confirm.teardownTitle': 'Teardown WAN boundary?',
+          'confirm.teardownMessage': 'This stops the current WAN boundary and removes its managed interfaces, addresses, and routes.',
           'toast.saved': 'WAN profile saved.',
           'toast.loaded': 'WAN profile loaded.',
           'toast.applied': 'WAN boundary applied.',
@@ -546,6 +552,19 @@
       }
 
       async function teardown(button) {
+        try {
+          const confirmed = await F.confirm({
+            title: T('confirm.teardownTitle'),
+            message: T('confirm.teardownMessage'),
+            confirmText: T('action.teardown'),
+            cancelText: T('action.cancel'),
+            danger: true
+          });
+          if (!confirmed) return;
+        } catch (e) {
+          F.toastError(e);
+          return;
+        }
         setBusy(button, true, T('status.deleting'));
         setStatus('status.deleting');
         try {

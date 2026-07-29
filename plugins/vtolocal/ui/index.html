@@ -83,8 +83,11 @@
           'action.update': '更新本地接口',
           'action.load': '重新加载',
           'action.teardown': '拆除',
+          'action.cancel': '取消',
           'action.refresh': '刷新',
           'hint.noRuntime': '当前本地接口尚未应用，无需拆除。',
+          'confirm.teardownTitle': '确认拆除本地边界',
+          'confirm.teardownMessage': '将移除插件托管的本地接口、地址和路由，是否继续？',
           'toast.applied': '本地边界配置已保存并应用。',
           'toast.loaded': '配置已加载。',
           'toast.deleted': '插件管理的本地边界已拆除。',
@@ -148,8 +151,11 @@
           'action.update': 'Update Local Interface',
           'action.load': 'Reload',
           'action.teardown': 'Teardown',
+          'action.cancel': 'Cancel',
           'action.refresh': 'Refresh',
           'hint.noRuntime': 'The local interface is not applied, so there is nothing to tear down.',
+          'confirm.teardownTitle': 'Teardown local boundary?',
+          'confirm.teardownMessage': 'This removes the plugin-managed local interface, addresses, and routes.',
           'toast.applied': 'Local boundary saved and applied.',
           'toast.loaded': 'Profile loaded.',
           'toast.deleted': 'Plugin-managed local boundary removed.',
@@ -396,6 +402,19 @@
       }
 
       async function teardown(button) {
+        try {
+          const confirmed = await F.confirm({
+            title: T('confirm.teardownTitle'),
+            message: T('confirm.teardownMessage'),
+            confirmText: T('action.teardown'),
+            cancelText: T('action.cancel'),
+            danger: true
+          });
+          if (!confirmed) return;
+        } catch (e) {
+          F.toastError(e);
+          return;
+        }
         setBusy(button, true, T('status.deleting'));
         setStatus('status.deleting');
         try {

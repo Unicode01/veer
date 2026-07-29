@@ -91,6 +91,7 @@ function makeNode(tagName) {
 function createHarness() {
   const calls = [];
   const notifications = [];
+  const confirmations = [];
   const elements = {
     confirmModal: makeNode('div'),
     pluginManagerModal: makeNode('div'),
@@ -239,7 +240,8 @@ function createHarness() {
 	  calls.push({ method, path: requestPath, body, pluginAdminToken });
 	  return apiHandler(method, requestPath, body);
 	},
-    async confirmAction() {
+    async confirmAction(options) {
+      confirmations.push(options || {});
       return confirmResult;
     },
     notify(type, message) {
@@ -268,6 +270,7 @@ function createHarness() {
   vm.runInContext(source, context, { filename: 'plugin_manager.js' });
   app.__calls = calls;
   app.__notifications = notifications;
+  app.__confirmations = confirmations;
   app.__setAPIHandler = (handler) => { apiHandler = handler; };
   app.__setRawHandler = (handler) => { rawHandler = handler; };
   app.__setConfirmResult = (value) => { confirmResult = value; };
@@ -545,6 +548,46 @@ test('repository manager loads only the selected catalog and renders provenance 
   const text = descendantText(app.el.pluginManagerBody);
   assert.match(text, /plugins\.repository\.provenanceWarning/);
   assert.match(text, /security advisory/);
+});
+
+test('repository policy removal requires confirmation before deleting', async () => {
+  const app = createHarness();
+  const state = app.state.plugins.manager;
+  state.open = true;
+  state.view = 'repositories';
+  state.repositories = [{ id: 'repo', name: 'Repository', channel: 'stable', target_count: 1 }];
+  state.selectedRepositoryID = 'repo';
+  state.repositoryPolicies = [{ plugin_id: 'demo', repository_id: 'repo', channel: 'stable', pinned_version: '1.0.0', hold: true }];
+  state.repositoryUpdates = [{ plugin_id: 'demo', current_version: '1.0.0', status: 'held' }];
+  state.repositoryPolicyPluginID = 'demo';
+  state.repositoryCatalog = { repository_id: 'repo', targets: [] };
+  app.__setAPIHandler(async (method, requestPath, body) => {
+    if (method === 'DELETE' && requestPath === '/api/plugin-repository-policies') {
+      assert.deepEqual(plain(body), { plugin_id: 'demo' });
+      return { status: 'deleted' };
+    }
+    if (method === 'GET' && requestPath === '/api/plugin-repositories') return state.repositories;
+    if (method === 'GET' && requestPath === '/api/plugin-packages/provenance') return [];
+    if (method === 'GET' && requestPath === '/api/plugin-repository-policies') return [];
+    if (method === 'GET' && requestPath === '/api/plugin-repositories/updates') return [];
+    if (method === 'GET' && requestPath === '/api/plugin-repositories/catalog?repository_id=repo') return { repository_id: 'repo', targets: [] };
+    throw new Error('unexpected request ' + method + ' ' + requestPath);
+  });
+
+  app.refreshLocalizedUI();
+  const remove = findDescendant(app.el.pluginManagerBody, (node) => node.tagName === 'BUTTON' && node.textContent === 'plugins.repository.policy.remove');
+  assert.ok(remove, 'policy remove button should be rendered');
+
+  app.__setConfirmResult(false);
+  await remove.dispatch('click');
+  assert.equal(app.__calls.length, 0);
+  assert.equal(app.__confirmations.length, 1);
+  assert.equal(app.__confirmations[0].danger, true);
+
+  app.__setConfirmResult(true);
+  await remove.dispatch('click');
+  assert.equal(app.__calls[0].method, 'DELETE');
+  assert.equal(app.__notifications.at(-1).type, 'success');
 });
 
 test('repository dependency plan enters the existing atomic approval flow', async () => {

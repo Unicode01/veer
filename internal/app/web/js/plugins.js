@@ -10,6 +10,7 @@
   const pluginUIAssetTextMaxBytes = 1024 * 1024;
   const pluginUIAssetDataMaxBytes = 4 * 1024 * 1024;
   const pluginFrameRPCStates = new WeakMap();
+  let pluginUIConfirmFrame = null;
 
   function listText(values) {
     if (!Array.isArray(values) || values.length === 0) return '';
@@ -2439,6 +2440,16 @@ select.veer-input {
   host.action = function (name, payload) {
     return rpc('action', { action: name, payload: payload || {} });
   };
+  host.confirm = function (options) {
+    options = options || {};
+    return rpc('ui.confirm', {
+      title: options.title,
+      message: options.message,
+      confirmText: options.confirmText,
+      cancelText: options.cancelText,
+      danger: options.danger === true
+    }).then(function (confirmed) { return confirmed === true; });
+  };
   host.requestResize = scheduleHeight;
   window.VeerPluginHost = Object.freeze(host);
   if (document && document.documentElement) document.documentElement.lang = currentLocale;
@@ -2537,7 +2548,7 @@ select.veer-input {
     });
     if (resp.status === 401) {
       app.clearToken();
-      app.showTokenModal();
+      app.showTokenModal({ rejected: true });
       throw new Error('unauthorized');
     }
     if (!resp.ok) throw new Error(resp.statusText || String(resp.status));
@@ -2547,6 +2558,7 @@ select.veer-input {
 
   function preparePluginFrame(iframe, plugin, entry) {
     if (!iframe) return;
+    cancelPluginFrameConfirm(iframe);
     pluginFrameRPCStates.delete(iframe);
     securePluginFrame(iframe);
     iframe.style.height = '';
@@ -2585,6 +2597,21 @@ select.veer-input {
       }
     }
     return null;
+  }
+
+  function pluginFrameCanPrompt(frame) {
+    if (!frame) return false;
+    if (frame === app.el.pluginUIFrame) {
+      return !!(app.el.pluginUIPanel && !app.el.pluginUIPanel.hidden);
+    }
+    if (typeof frame.closest !== 'function') return false;
+    const panel = frame.closest('.plugin-page-tab-content');
+    return !!(panel && !panel.hidden && panel.classList && panel.classList.contains('active'));
+  }
+
+  function cancelPluginFrameConfirm(frame) {
+    if (!frame || pluginUIConfirmFrame !== frame) return;
+    if (typeof app.closeConfirmModal === 'function') app.closeConfirmModal(false);
   }
 
   function currentPluginLocale() {
@@ -2656,6 +2683,50 @@ select.veer-input {
     error.status = status || 0;
     error.payload = { error: message, code: code || 'plugin_ui_rpc_error' };
     return error;
+  }
+
+  function pluginUIConfirmText(value, label, maxLength, fallback, required) {
+    if (value == null || value === '') {
+      if (required && !fallback) {
+        throw pluginRPCFailure(label + ' is required', 400, 'plugin_ui_confirm_invalid');
+      }
+      return fallback || '';
+    }
+    if (typeof value !== 'string') {
+      throw pluginRPCFailure(label + ' must be a string', 400, 'plugin_ui_confirm_invalid');
+    }
+    const text = value.trim();
+    if ((required && !text) || text.length > maxLength) {
+      throw pluginRPCFailure(label + ' is invalid', 400, 'plugin_ui_confirm_invalid');
+    }
+    return text || fallback || '';
+  }
+
+  async function showPluginUIConfirm(pluginId, frame, payload) {
+    if (!pluginFrameCanPrompt(frame)) {
+      throw pluginRPCFailure('plugin UI confirmation requires a visible plugin page', 409, 'plugin_ui_confirm_hidden');
+    }
+    if (pluginUIConfirmFrame || (app.state && app.state.confirmResolver)) {
+      throw pluginRPCFailure('another confirmation is already open', 409, 'plugin_ui_confirm_busy');
+    }
+    if (typeof app.confirmAction !== 'function') {
+      throw pluginRPCFailure('plugin UI confirmation is unavailable', 503, 'plugin_ui_confirm_unavailable');
+    }
+    const plugin = pluginUIByID(pluginId);
+    const fallbackTitle = String(plugin && (plugin.name || plugin.id) || pluginId || 'Plugin');
+    const options = {
+      title: pluginUIConfirmText(payload.title, 'confirmation title', 120, fallbackTitle, false),
+      message: pluginUIConfirmText(payload.message, 'confirmation message', 1000, '', true),
+      confirmText: pluginUIConfirmText(payload.confirmText, 'confirmation button', 64, app.t('common.confirm'), false),
+      cancelText: pluginUIConfirmText(payload.cancelText, 'cancel button', 64, app.t('common.cancel'), false),
+      danger: payload.danger === true
+    };
+    pluginUIConfirmFrame = frame;
+    try {
+      return !!(await app.confirmAction(options));
+    } finally {
+      if (pluginUIConfirmFrame === frame) pluginUIConfirmFrame = null;
+    }
   }
 
   function pluginFrameRPCState(frame) {
@@ -2768,7 +2839,7 @@ select.veer-input {
     });
     if (response.status === 401) {
       app.clearToken();
-      app.showTokenModal();
+      app.showTokenModal({ rejected: true });
       throw pluginRPCFailure('unauthorized', 401, 'unauthorized');
     }
     if (!response.ok) {
@@ -2854,9 +2925,10 @@ select.veer-input {
     });
   }
 
-  async function callPluginRPCAPI(pluginId, op, payload) {
+  async function callPluginRPCAPI(pluginId, op, payload, frame) {
     payload = payload && typeof payload === 'object' ? payload : {};
     const id = encodeURIComponent(pluginRPCString(pluginId, 'plugin id'));
+    if (op === 'ui.confirm') return showPluginUIConfirm(pluginId, frame, payload);
     if (op === 'asset.text' || op === 'asset.json' || op === 'asset.style' || op === 'asset.script' || op === 'asset.data_url') {
       return fetchPluginUIAsset(pluginId, op, payload.path);
     }
@@ -2941,7 +3013,7 @@ select.veer-input {
     let release;
     try {
       release = admitPluginFrameRPC(frame, data);
-      const result = await callPluginRPCAPI(pluginId, data.op, data.payload);
+      const result = await callPluginRPCAPI(pluginId, data.op, data.payload, frame);
       postPluginRPCResult(event.source, pluginId, data.id, true, result, '');
     } catch (e) {
       postPluginRPCResult(event.source, pluginId, data.id, false, null, e.message || String(e), e.payload || null, e.status || 0);
@@ -3046,7 +3118,11 @@ select.veer-input {
     });
     Array.from(document.querySelectorAll('.plugin-page-tab-content')).forEach((panel) => {
       const tabID = String(panel.id || '').replace(/^tab-/, '');
-      if (!pageIDs.has(tabID)) panel.remove();
+      if (!pageIDs.has(tabID)) {
+        const frame = typeof panel.querySelector === 'function' ? panel.querySelector('iframe[data-plugin-frame="1"]') : null;
+        cancelPluginFrameConfirm(frame);
+        panel.remove();
+      }
     });
 
     const tabAnchor = document.querySelector('.tab[data-tab="diagnostics"]');
@@ -3489,15 +3565,25 @@ select.veer-input {
     el.pluginsBody.appendChild(fragment);
   };
 
-  app.loadPlugins = async function loadPlugins() {
+  app.loadPlugins = async function loadPlugins(options) {
+    const opts = options || {};
     try {
       const resp = await app.apiCall('GET', '/api/plugins');
       app.state.plugins.catalog = resp || {};
       app.state.plugins.data = Array.isArray(resp && resp.plugins) ? resp.plugins : [];
       renderPluginPageTabs();
       app.renderPluginsTable();
+      if (opts.notify) app.notify('success', app.t('toast.refreshed', { item: app.t('plugins.title') }));
+      return true;
     } catch (e) {
-      if (e.message !== 'unauthorized') console.error('load plugins:', e);
+      if (e.message !== 'unauthorized') {
+        console.error('load plugins:', e);
+        if (opts.notify) app.notify('error', app.t('errors.actionFailed', {
+          action: app.t('plugins.refresh'),
+          message: app.translateValidationMessage(e.message)
+        }));
+      }
+      return false;
     }
   };
 
@@ -3622,6 +3708,7 @@ select.veer-input {
 
   app.closePluginUI = function closePluginUI() {
     if (app.el.pluginUIFrame) {
+      cancelPluginFrameConfirm(app.el.pluginUIFrame);
       pluginFrameRPCStates.delete(app.el.pluginUIFrame);
       app.el.pluginUIFrame.srcdoc = '';
       app.el.pluginUIFrame.src = 'about:blank';

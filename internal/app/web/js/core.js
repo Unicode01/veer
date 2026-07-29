@@ -419,7 +419,7 @@
 		const resp = await fetch(path, opts);
 		if (resp.status === 401) {
 			app.clearToken();
-			app.showTokenModal();
+			app.showTokenModal({ rejected: true });
 			throw new Error('unauthorized');
 		}
 		const payload = await resp.json().catch(() => ({ error: resp.statusText }));
@@ -448,6 +448,9 @@
   };
 
   app.apiCall = async function apiCall(method, path, body) {
+    const pollContext = String(method || '').toUpperCase() === 'GET'
+      ? app.state.pollRequestContext || null
+      : null;
     const opts = {
       method,
       headers: {
@@ -459,7 +462,7 @@
     const resp = await fetch(path, opts);
     if (resp.status === 401) {
       app.clearToken();
-      app.showTokenModal();
+      app.showTokenModal({ rejected: true });
       throw new Error('unauthorized');
     }
     if (!resp.ok) {
@@ -469,7 +472,11 @@
       error.status = resp.status;
       throw error;
     }
-    return resp.json();
+    const payload = await resp.json();
+    if (pollContext && typeof app.awaitAutoRefreshResume === 'function') {
+      await app.awaitAutoRefreshResume(pollContext);
+    }
+    return payload;
   };
 
   app.compareValues = function compareValues(a, b) {

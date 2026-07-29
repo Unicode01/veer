@@ -202,7 +202,10 @@
           'action.tunnelProbe': '隧道探测',
           'action.dial': '拨号',
           'action.disconnect': '断开',
+          'action.cancel': '取消',
           'action.refresh': '刷新状态',
+          'confirm.disconnectTitle': '确认断开 PPPoE',
+          'confirm.disconnectMessage': '将向当前会话 {{profile}} 发送 PADT 并停止隧道，是否继续？',
           'busy.discover': '发现中',
           'busy.probe': '探测中',
           'busy.tunnel': '安装隧道中',
@@ -333,7 +336,10 @@
           'action.tunnelProbe': 'Tunnel Probe',
           'action.dial': 'Dial',
           'action.disconnect': 'Disconnect',
+          'action.cancel': 'Cancel',
           'action.refresh': 'Refresh State',
+          'confirm.disconnectTitle': 'Disconnect PPPoE?',
+          'confirm.disconnectMessage': 'This sends PADT for session {{profile}} and stops its tunnel.',
           'busy.discover': 'Discovering',
           'busy.probe': 'Probing',
           'busy.tunnel': 'Installing Tunnel',
@@ -1139,6 +1145,21 @@
         } catch (e) {
           F.toastError(e);
           return;
+        }
+        if (active) {
+          try {
+            const confirmed = await F.confirm({
+              title: T('confirm.disconnectTitle'),
+              message: T('confirm.disconnectMessage', { profile: p.profile_key }),
+              confirmText: T('action.disconnect'),
+              cancelText: T('action.cancel'),
+              danger: true
+            });
+            if (!confirmed) return;
+          } catch (e) {
+            F.toastError(e);
+            return;
+          }
         }
         p.send_padt = action === 'disconnect';
         pendingAction = action;

@@ -2,6 +2,31 @@
   const app = window.VeerApp;
   if (!app) return;
   const itemToggleTypes = new Set(['rule', 'site', 'range']);
+  const requestFailureLoaders = Object.freeze({
+    '/api/interfaces': 'loadInterfaces',
+    '/api/host-network': 'loadHostNetwork',
+    '/api/tags': 'loadTags',
+    '/api/rules': 'loadRules',
+    '/api/sites': 'loadSites',
+    '/api/ranges': 'loadRanges',
+    '/api/managed-networks': 'loadManagedNetworks',
+    '/api/managed-networks/runtime-status': 'loadManagedNetworkRuntimeStatus',
+    '/api/managed-network-reservation-candidates': 'loadManagedNetworkReservationCandidates',
+    '/api/managed-network-reservations': 'loadManagedNetworkReservations',
+    '/api/egress-nats': 'loadEgressNATs',
+    '/api/ipv6-assignments': 'loadIPv6Assignments',
+    '/api/plugins': 'loadPlugins',
+    '/api/workers': 'loadWorkers',
+    '/api/kernel/runtime': 'loadKernelRuntime',
+    '/api/rules/stats': 'loadRuleStats',
+    '/api/sites/stats': 'loadSiteStats',
+    '/api/ranges/stats': 'loadRangeStats',
+    '/api/egress-nats/stats': 'loadEgressNATStats',
+    '/api/stats/current-conns': 'loadCurrentConns'
+  });
+  const requestFailureRetryDelayMS = 4000;
+  const requestFailureRetryLimit = 3;
+  const autoRefreshResumeCheckMS = 100;
 
   function rerenderByType(type) {
     if (type === 'rule') app.renderRulesTable();
@@ -63,6 +88,10 @@
   app.shouldPauseAutoRefresh = function shouldPauseAutoRefresh() {
     if (app.state.activeDropdown) return true;
     if (app.el.egressNATProtocolMenu && !app.el.egressNATProtocolMenu.hidden) return true;
+    if (typeof document.querySelector === 'function' &&
+      document.querySelector('.kernel-runtime-floating-tooltip.is-visible:not([hidden])')) {
+      return true;
+    }
     if (app.el.confirmModal && app.el.confirmModal.classList && typeof app.el.confirmModal.classList.contains === 'function' &&
       app.el.confirmModal.classList.contains('active')) {
       return true;
@@ -76,24 +105,82 @@
     return false;
   };
 
+  app.awaitAutoRefreshResume = function awaitAutoRefreshResume(context) {
+    if (!context || context.cancelled || !app.shouldPauseAutoRefresh()) return Promise.resolve();
+    return new Promise((resolve) => {
+      const check = () => {
+        if (context.cancelled || !app.shouldPauseAutoRefresh()) {
+          resolve();
+          return;
+        }
+        window.setTimeout(check, autoRefreshResumeCheckMS);
+      };
+      check();
+    });
+  };
+
+  function runWithPollRequestContext(context, callback) {
+    app.state.pollRequestContext = context;
+    try {
+      return callback();
+    } finally {
+      if (app.state.pollRequestContext === context) app.state.pollRequestContext = null;
+    }
+  }
+
+  app.retryFailedDataLoads = function retryFailedDataLoads() {
+    const now = Date.now();
+    const loaderNames = [];
+    const selected = new Set();
+    const failures = Object.values(app.state.requestFailures || {})
+      .sort((left, right) => Number(left.at || 0) - Number(right.at || 0));
+
+    failures.some((failure) => {
+      const loaderName = requestFailureLoaders[String(failure && failure.path || '')];
+      const lastAttemptAt = Number(failure && (failure.retryAt || failure.at) || 0);
+      if (!loaderName || selected.has(loaderName) || now - lastAttemptAt < requestFailureRetryDelayMS || typeof app[loaderName] !== 'function') {
+        return false;
+      }
+      failure.retryAt = now;
+      selected.add(loaderName);
+      loaderNames.push(loaderName);
+      return loaderNames.length >= requestFailureRetryLimit;
+    });
+
+    return Promise.all(loaderNames.map((loaderName) => Promise.resolve()
+      .then(() => app[loaderName]())
+      .catch((error) => console.error('retry failed data load:', error))));
+  };
+
   app.runAutoRefresh = function runAutoRefresh() {
     if (document.hidden || app.shouldPauseAutoRefresh()) return null;
     if (app.state.pollRefreshInFlight) return app.state.pollRefreshInFlight;
 
+    const context = {
+      id: Number(app.state.pollRefreshSequence || 0) + 1,
+      cancelled: false
+    };
+    app.state.pollRefreshSequence = context.id;
+    app.state.pollRefreshCycle = context;
     let refresh;
     try {
-      refresh = Promise.resolve(app.refreshDashboard({
+      refresh = Promise.resolve(runWithPollRequestContext(context, () => app.refreshDashboard({
         activeTabOnly: true,
         activeTab: app.state.activeTab
-      }));
+      })));
     } catch (e) {
+      context.cancelled = true;
+      if (app.state.pollRefreshCycle === context) app.state.pollRefreshCycle = null;
       console.error('auto refresh:', e);
       return null;
     }
 
+    refresh = refresh.then(() => runWithPollRequestContext(context, () => app.retryFailedDataLoads()));
     app.state.pollRefreshInFlight = refresh;
     const clear = () => {
       if (app.state.pollRefreshInFlight === refresh) app.state.pollRefreshInFlight = null;
+      context.cancelled = true;
+      if (app.state.pollRefreshCycle === context) app.state.pollRefreshCycle = null;
     };
     refresh.then(clear, (e) => {
       console.error('auto refresh:', e);
@@ -203,11 +290,11 @@
   }
 
   if (app.el.refreshWorkersBtn) {
-    app.el.refreshWorkersBtn.addEventListener('click', () => app.loadWorkers());
+    app.el.refreshWorkersBtn.addEventListener('click', () => app.loadWorkers({ notify: true }));
   }
 
   if (app.el.refreshPluginsBtn) {
-    app.el.refreshPluginsBtn.addEventListener('click', () => app.loadPlugins());
+    app.el.refreshPluginsBtn.addEventListener('click', () => app.loadPlugins({ notify: true }));
   }
 
   if (app.el.applyPluginUpdateBtn) {
@@ -221,11 +308,11 @@
   }
 
   (app.el.refreshCurrentConnsBtns || []).forEach((button) => {
-    button.addEventListener('click', () => app.loadCurrentConns());
+    button.addEventListener('click', () => app.loadCurrentConns({ notify: true }));
   });
 
   if (app.el.emptyRefreshWorkersBtn) {
-    app.el.emptyRefreshWorkersBtn.addEventListener('click', () => app.loadWorkers());
+    app.el.emptyRefreshWorkersBtn.addEventListener('click', () => app.loadWorkers({ notify: true }));
   }
 
   if (app.el.emptyAddRuleBtn) {

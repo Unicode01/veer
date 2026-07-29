@@ -291,8 +291,11 @@
           'action.apply': '应用网络',
           'action.update': '更新网络',
           'action.teardown': '拆除',
+          'action.cancel': '取消',
           'action.refresh': '刷新状态',
           'hint.noRuntime': '当前 LAN 尚未应用，无需拆除。',
+          'confirm.teardownTitle': '确认拆除 LAN 网络',
+          'confirm.teardownMessage': '将停止 LAN 地址服务、移除插件托管的端口和转发配置，是否继续？',
           'empty.status': '还没有已应用的 LAN 状态。',
           'empty.plan': '还没有生成出站 NAT 配置。',
           'empty.wans': '没有发现 WAN 会话，可手动输入引用。',
@@ -424,8 +427,11 @@
           'action.apply': 'Apply Network',
           'action.update': 'Update Network',
           'action.teardown': 'Teardown',
+          'action.cancel': 'Cancel',
           'action.refresh': 'Refresh Status',
           'hint.noRuntime': 'This LAN is not applied, so there is nothing to tear down.',
+          'confirm.teardownTitle': 'Teardown LAN network?',
+          'confirm.teardownMessage': 'This stops LAN address services and removes plugin-managed ports and forwarding configuration.',
           'empty.status': 'No applied LAN status yet.',
           'empty.plan': 'No generated outbound NAT config yet.',
           'empty.wans': 'No WAN session discovered. A reference can be entered manually.',
@@ -942,6 +948,19 @@
       }
 
       async function teardown(button) {
+        try {
+          const confirmed = await F.confirm({
+            title: T('confirm.teardownTitle'),
+            message: T('confirm.teardownMessage'),
+            confirmText: T('action.teardown'),
+            cancelText: T('action.cancel'),
+            danger: true
+          });
+          if (!confirmed) return;
+        } catch (e) {
+          F.toastError(e);
+          return;
+        }
         setBusy(button, true, T('status.disabling'));
         setStatus('status.disabling');
         try {

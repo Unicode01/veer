@@ -1138,6 +1138,7 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
   assert.match(String(app.el.pluginUIFrame.srcdoc), /limit: options\.limit/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /offset: options\.offset/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.action/);
+  assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.confirm/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.errorText/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.toastError/);
   assert.match(String(app.el.pluginUIFrame.srcdoc), /host\.t = function/);
@@ -1347,6 +1348,89 @@ test('plugin RPC data.list forwards pagination query params', () => {
   assert.match(source, /payload\.offset/);
   assert.match(source, /limit=/);
   assert.match(source, /offset=/);
+});
+
+test('plugin host delegates bounded confirmations to the visible parent modal', async () => {
+  const app = createHarness();
+  const confirmations = [];
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html' }
+  }];
+  app.__context.fetch = async function fetch() {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get(name) { return String(name).toLowerCase() === 'content-type' ? 'text/html' : ''; } },
+      text: async () => '<!doctype html><title>Plugin</title>'
+    };
+  };
+  app.confirmAction = async function confirmAction(options) {
+    confirmations.push(options);
+    return true;
+  };
+
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+  assert.equal(await host.confirm({
+    title: 'Delete record?',
+    message: 'This cannot be undone.',
+    confirmText: 'Delete',
+    cancelText: 'Cancel',
+    danger: true
+  }), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(confirmations)), [{
+    title: 'Delete record?',
+    message: 'This cannot be undone.',
+    confirmText: 'Delete',
+    cancelText: 'Cancel',
+    danger: true
+  }]);
+
+  await assert.rejects(
+    host.confirm({ message: 'x'.repeat(1001) }),
+    (error) => error.status === 400 && error.payload.code === 'plugin_ui_confirm_invalid'
+  );
+  app.el.pluginUIPanel.hidden = true;
+  await assert.rejects(
+    host.confirm({ message: 'Hidden prompt' }),
+    (error) => error.status === 409 && error.payload.code === 'plugin_ui_confirm_hidden'
+  );
+});
+
+test('plugin host rejects concurrent confirmations instead of replacing the active modal', async () => {
+  const app = createHarness();
+  let resolveConfirmation;
+  app.state.plugins.data = [{
+    id: 'packet_observer',
+    name: 'Packet Observer',
+    asset_base_path: '/api/plugins/packet_observer/assets/',
+    ui: { entry: 'index.html' }
+  }];
+  app.__context.fetch = async function fetch() {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get(name) { return String(name).toLowerCase() === 'content-type' ? 'text/html' : ''; } },
+      text: async () => '<!doctype html><title>Plugin</title>'
+    };
+  };
+  app.confirmAction = function confirmAction() {
+    return new Promise((resolve) => { resolveConfirmation = resolve; });
+  };
+
+  await app.openPluginUI('packet_observer');
+  const host = attachPluginHostChildFrame(app);
+  const first = host.confirm({ message: 'First confirmation' });
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    host.confirm({ message: 'Second confirmation' }),
+    (error) => error.status === 409 && error.payload.code === 'plugin_ui_confirm_busy'
+  );
+  resolveConfirmation(false);
+  assert.equal(await first, false);
 });
 
 test('plugin host exposes and executes only explicitly granted UI capabilities', async () => {

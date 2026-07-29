@@ -122,6 +122,13 @@ declare global {
     toast(message: string, timeout?: number): HTMLElement;
     errorText(error: unknown, fallback?: string): string;
     toastError(error: unknown, timeout?: number): HTMLElement;
+    confirm(options: {
+      title?: string;
+      message: string;
+      confirmText?: string;
+      cancelText?: string;
+      danger?: boolean;
+    }): Promise<boolean>;
     requestResize(): void;
     data: {
       list<T = unknown>(resource: string, options?: { limit?: number; offset?: number }): Promise<{ records: VeerPluginUIRecord<T>[]; runtime_status?: unknown }>;
