@@ -222,11 +222,21 @@ func TestManagedIPv4NetworkRuntimeDHCPOnlyPlanDoesNotOwnGatewayAddress(t *testin
 		Enabled:                   true,
 		skipIPv4AddressManagement: true,
 	}
-	if err := rt.Reconcile([]ManagedNetwork{item}, nil); err != nil {
+	reservation := ManagedNetworkReservation{
+		ID:               -8,
+		ManagedNetworkID: item.ID,
+		MACAddress:       "02:00:00:00:00:10",
+		IPv4Address:      "192.168.50.10",
+		Remark:           "plugin reservation",
+	}
+	if err := rt.Reconcile([]ManagedNetwork{item}, []ManagedNetworkReservation{reservation}); err != nil {
 		t.Fatalf("Reconcile(DHCP-only) error = %v", err)
 	}
 	if len(ops.ensureDHCPv4) != 1 || len(ops.ensureAddresses) != 0 {
 		t.Fatalf("ensure DHCP=%+v addresses=%+v, want DHCP without address ownership", ops.ensureDHCPv4, ops.ensureAddresses)
+	}
+	if got := ops.ensureDHCPv4[0].Reservations; len(got) != 1 || got[0].MACAddress != reservation.MACAddress || got[0].IPv4Address != reservation.IPv4Address {
+		t.Fatalf("DHCP reservations = %+v, want synthetic reservation %+v", got, reservation)
 	}
 	if err := rt.Reconcile(nil, nil); err != nil {
 		t.Fatalf("Reconcile(nil) error = %v", err)

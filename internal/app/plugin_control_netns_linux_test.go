@@ -116,6 +116,28 @@ func TestLinuxPluginScopedNamespaceNetworkAPIs(t *testing.T) {
 	if states, err := admin.NeighSnapshot(neighbor); err != nil || len(states) != 1 {
 		t.Fatalf("scoped neighbor snapshot = %+v err=%v", states, err)
 	}
+	reader, ok := admin.(pluginControlNetReadAdmin)
+	if !ok {
+		t.Fatal("scoped net.admin controller does not expose read-only inventory")
+	}
+	neighbors, err := reader.NeighList(pluginControlNetReadRequest{
+		Namespace: namespace,
+		Interface: dummyName,
+		Family:    "ipv4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundNeighbor := false
+	for _, item := range neighbors {
+		if item.Namespace == namespace && item.Interface == dummyName && item.IP == neighbor.IP && strings.EqualFold(item.MAC, neighbor.MAC) && item.Family == "ipv4" {
+			foundNeighbor = true
+			break
+		}
+	}
+	if !foundNeighbor {
+		t.Fatalf("scoped neighbor inventory = %+v, want %s on %s", neighbors, neighbor.IP, dummyName)
+	}
 
 	registry := newPluginControlSocketRegistry(newPluginControlSocketTransport())
 	t.Cleanup(func() { registry.CloseAll() })
@@ -189,6 +211,49 @@ func TestLinuxPluginScopedNamespaceNetworkAPIs(t *testing.T) {
 		t.Fatal("timed out waiting for scoped L2 frame")
 	}
 
+	bridgeName := "vnsbr0"
+	bridge, err := admin.LinkEnsureBridge(pluginControlNetBridgeRequest{Namespace: namespace, Name: bridgeName, MTU: 1500, Up: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bridge.Namespace != namespace {
+		t.Fatalf("scoped bridge namespace = %q, want %q", bridge.Namespace, namespace)
+	}
+	if _, err := admin.LinkSetMaster(pluginControlNetMasterRequest{Namespace: namespace, Link: "vnsb0", Master: bridgeName, Up: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l2.Send(pluginControlL2SendRequest{
+		Namespace: namespace,
+		Interface: "vnsa0",
+		EtherType: 0x88b5,
+		DstMAC:    [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		Payload:   []byte("veer-netns-fdb"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fdbDeadline := time.Now().Add(2 * time.Second)
+	for {
+		entries, err := reader.BridgeFDBList(pluginControlNetReadRequest{Namespace: namespace, Interface: bridgeName})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, item := range entries {
+			if item.Namespace == namespace && item.Interface == "vnsb0" && item.Bridge == bridgeName && strings.EqualFold(item.MAC, veth.Host.MAC) {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(fdbDeadline) {
+			t.Fatalf("scoped bridge FDB inventory = %+v, want learned %s on vnsb0", entries, veth.Host.MAC)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
 	if err := admin.NeighDelete(neighbor); err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +267,9 @@ func TestLinuxPluginScopedNamespaceNetworkAPIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := admin.LinkDelete("vnsa0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.LinkDelete(bridgeName); err != nil {
 		t.Fatal(err)
 	}
 	if err := admin.LinkDelete(dummyName); err != nil {

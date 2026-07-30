@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Unicode01/veer/internal/netservice"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/vishvananda/netlink"
@@ -719,25 +720,25 @@ func kernelXDPPluginTestFrame(dst, src []byte, marker byte) []byte {
 }
 
 func sendAndReceiveKernelXDPPluginTestFrame(sendIfIndex, receiveIfIndex int, frame []byte) error {
-	receiveFD, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htonsUnix(unix.ETH_P_ALL)))
+	receiveFD, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(netservice.Htons(unix.ETH_P_ALL)))
 	if err != nil {
 		return err
 	}
 	defer unix.Close(receiveFD)
-	if err := unix.Bind(receiveFD, &unix.SockaddrLinklayer{Protocol: htonsUnix(unix.ETH_P_ALL), Ifindex: receiveIfIndex}); err != nil {
+	if err := unix.Bind(receiveFD, &unix.SockaddrLinklayer{Protocol: netservice.Htons(unix.ETH_P_ALL), Ifindex: receiveIfIndex}); err != nil {
 		return err
 	}
 	if err := unix.SetsockoptTimeval(receiveFD, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 2}); err != nil {
 		return err
 	}
-	sendFD, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htonsUnix(unix.ETH_P_ALL)))
+	sendFD, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(netservice.Htons(unix.ETH_P_ALL)))
 	if err != nil {
 		return err
 	}
 	defer unix.Close(sendFD)
 	var addr [8]byte
 	copy(addr[:], frame[:6])
-	if err := unix.Sendto(sendFD, frame, 0, &unix.SockaddrLinklayer{Protocol: htonsUnix(unix.ETH_P_ALL), Ifindex: sendIfIndex, Halen: 6, Addr: addr}); err != nil {
+	if err := unix.Sendto(sendFD, frame, 0, &unix.SockaddrLinklayer{Protocol: netservice.Htons(unix.ETH_P_ALL), Ifindex: sendIfIndex, Halen: 6, Addr: addr}); err != nil {
 		return err
 	}
 	buffer := make([]byte, 2048)

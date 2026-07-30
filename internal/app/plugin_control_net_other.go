@@ -141,3 +141,11 @@ func (unsupportedPluginControlNetAdmin) NeighReplace(pluginControlNetNeighReques
 func (unsupportedPluginControlNetAdmin) NeighDelete(pluginControlNetNeighRequest) error {
 	return fmt.Errorf("net.admin is supported only on linux")
 }
+
+func (unsupportedPluginControlNetAdmin) NeighList(pluginControlNetReadRequest) ([]pluginControlNetNeighborInfo, error) {
+	return nil, fmt.Errorf("net.admin is supported only on linux")
+}
+
+func (unsupportedPluginControlNetAdmin) BridgeFDBList(pluginControlNetReadRequest) ([]pluginControlNetFDBInfo, error) {
+	return nil, fmt.Errorf("net.admin is supported only on linux")
+}

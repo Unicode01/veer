@@ -912,26 +912,44 @@ func (pm *ProcessManager) redistributeWorkers() {
 	if len(pluginForwardRules) > 0 {
 		rules = append(rules, pluginForwardRules...)
 	}
-	managedNetworks, err := dbGetManagedNetworks(pm.db)
+	networkPlan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{})
 	if err != nil {
-		log.Printf("load managed networks: %v", err)
+		log.Printf("load effective network plan: %v", err)
 		return
 	}
-	managedNetworkReservations, err := dbGetManagedNetworkReservations(pm.db)
-	if err != nil {
-		log.Printf("load managed network reservations: %v", err)
-		return
-	}
-	pluginDHCPv4PlanRecords, err := loadActivePluginDHCPv4PlanRecords(pm.db, pluginCfg)
-	if err != nil {
-		log.Printf("load plugin dhcpv4 plans: %v", err)
-		return
-	}
-	pluginDHCPv4Networks, warnings := compilePluginDHCPv4PlansWithWarnings(pluginDHCPv4PlanRecords, managedNetworks)
-	for _, warning := range warnings {
+	for _, warning := range networkPlan.Warnings.DHCPv4 {
 		log.Printf("plugin dhcpv4: %s", warning)
 	}
-	runtimeManagedNetworks := append(append([]ManagedNetwork(nil), managedNetworks...), pluginDHCPv4Networks...)
+	for _, warning := range networkPlan.Warnings.ManagedNetwork {
+		log.Printf("managed network runtime: %s", warning)
+	}
+	for _, warning := range networkPlan.Warnings.EgressNAT {
+		log.Printf("plugin egress nat: %s", warning)
+	}
+	for _, warning := range networkPlan.Warnings.IPv6Assignment {
+		log.Printf("plugin ipv6 assignment: %s", warning)
+	}
+	for _, warning := range networkPlan.Warnings.IPv6Resolution {
+		log.Printf("managed network runtime: %s", warning)
+	}
+	if networkPlan.IPv6ResolutionErr != nil {
+		log.Printf("managed network runtime: %v", networkPlan.IPv6ResolutionErr)
+	}
+
+	runtimeManagedNetworks := networkPlan.RuntimeManagedNetworks
+	managedNetworkReservations := networkPlan.Reservations
+	ipv6Assignments := networkPlan.IPv6Assignments
+	egressNATs := networkPlan.EgressNATs
+	egressNATSnapshot := networkPlan.InterfaceSnapshot
+	managedNetworkCompiled := networkPlan.ManagedCompilation
+	ipv6AssignmentLoadErr := networkPlan.IPv6LoadErr
+	if ipv6AssignmentLoadErr != nil {
+		log.Printf("load ipv6 assignments: %v", ipv6AssignmentLoadErr)
+	}
+	if networkPlan.RequiresInterfaceData && egressNATSnapshot.Err != nil {
+		log.Printf("managed network runtime: interface inventory unavailable: %v", egressNATSnapshot.Err)
+	}
+
 	managedRuntimeReloadFingerprint := ""
 	managedRuntimeReconcileOK := pm.managedNetworkRuntime == nil
 	if pm.managedNetworkRuntime != nil {
@@ -941,78 +959,9 @@ func (pm *ProcessManager) redistributeWorkers() {
 			managedRuntimeReconcileOK = true
 		}
 	}
-	egressNATs, err := dbGetEgressNATs(pm.db)
-	if err != nil {
-		log.Printf("load egress nats: %v", err)
-		return
-	}
-	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pluginCfg)
-	if err != nil {
-		log.Printf("load plugin egress nat plans: %v", err)
-		return
-	}
-	pluginIPv6AssignmentPlanRecords, err := loadActivePluginIPv6AssignmentPlanRecords(pm.db, pluginCfg)
-	if err != nil {
-		log.Printf("load plugin ipv6 assignment plans: %v", err)
-		return
-	}
-	ipv6Assignments, ipv6AssignmentLoadErr := dbGetIPv6Assignments(pm.db)
-	if ipv6AssignmentLoadErr != nil {
-		log.Printf("load ipv6 assignments: %v", ipv6AssignmentLoadErr)
-	}
-	egressNATSnapshot := egressNATInterfaceSnapshot{}
-	var dynamicEgressNATParents map[string]struct{}
-	needsManagedNetworkCompilation := len(managedNetworks) > 0
-	if len(egressNATs) > 0 || needsManagedNetworkCompilation || len(pluginEgressNATPlanRecords) > 0 {
-		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
-	}
-	if (needsManagedNetworkCompilation || len(pluginEgressNATPlanRecords) > 0) && egressNATSnapshot.Err != nil {
-		log.Printf("managed network runtime: interface inventory unavailable: %v", egressNATSnapshot.Err)
-	}
-	egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
-	managedNetworkCompiled := compileManagedNetworkRuntime(managedNetworks, ipv6Assignments, egressNATs, egressNATSnapshot.Infos)
-	if len(managedNetworkCompiled.Warnings) > 0 {
-		for _, warning := range managedNetworkCompiled.Warnings {
-			log.Printf("managed network runtime: %s", warning)
-		}
-	}
-	if len(managedNetworkCompiled.IPv6Assignments) > 0 {
-		ipv6Assignments = append(ipv6Assignments, managedNetworkCompiled.IPv6Assignments...)
-	}
-	if len(pluginIPv6AssignmentPlanRecords) > 0 {
-		pluginIPv6Assignments, warnings := compilePluginIPv6AssignmentPlansWithWarnings(pluginIPv6AssignmentPlanRecords, ipv6Assignments)
-		for _, warning := range warnings {
-			log.Printf("plugin ipv6 assignment: %s", warning)
-		}
-		if len(pluginIPv6Assignments) > 0 {
-			ipv6Assignments = append(ipv6Assignments, pluginIPv6Assignments...)
-		}
-	}
-	if len(managedNetworkCompiled.EgressNATs) > 0 {
-		egressNATs = append(egressNATs, managedNetworkCompiled.EgressNATs...)
-	}
-	if len(pluginEgressNATPlanRecords) > 0 {
-		pluginEgressNATs, warnings := compilePluginEgressNATPlansWithWarnings(pluginEgressNATPlanRecords, egressNATs, egressNATSnapshot)
-		for _, warning := range warnings {
-			log.Printf("plugin egress nat: %s", warning)
-		}
-		if len(pluginEgressNATs) > 0 {
-			egressNATs = append(egressNATs, pluginEgressNATs...)
-		}
-	}
-	if len(ipv6Assignments) > 0 {
-		if hostIfaces, err := loadIPv6AssignmentHostNetworkInterfaces(); err == nil {
-			resolvedAssignments, resolveWarnings := resolveIPv6AssignmentsForCurrentHost(ipv6Assignments, buildHostNetworkInterfaceMap(hostIfaces))
-			ipv6Assignments = resolvedAssignments
-			for _, warning := range resolveWarnings {
-				log.Printf("managed network runtime: %s", warning)
-			}
-		} else {
-			log.Printf("managed network runtime: load host interfaces for ipv6 resolution: %v", err)
-		}
-	}
-	dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
-	if ipv6AssignmentLoadErr == nil {
+	dynamicEgressNATParents := collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
+	ipv6RuntimePlanReady := ipv6AssignmentLoadErr == nil && networkPlan.IPv6ResolutionErr == nil
+	if ipv6RuntimePlanReady {
 		ipv6RuntimeReconcileOK := pm.ipv6Runtime == nil
 		if pm.ipv6Runtime != nil {
 			if err := pm.ipv6Runtime.Reconcile(ipv6Assignments); err != nil {

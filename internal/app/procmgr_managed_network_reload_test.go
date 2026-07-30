@@ -1422,6 +1422,58 @@ func TestReloadManagedNetworkRuntimeOnlyAddrChangeDoesNotSkipIPv6ParentPrefixRot
 	}
 }
 
+func TestReloadManagedNetworkRuntimeOnlyPreservesIPv6RuntimeWhenHostInventoryFails(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := dbAddIPv6Assignment(db, &IPv6Assignment{
+		ParentInterface: "eno1",
+		TargetInterface: "tap100i0",
+		ParentPrefix:    "240e:390:7681:a470::/64",
+		AssignedPrefix:  "240e:390:7681:a470::10/128",
+		Enabled:         true,
+	}); err != nil {
+		t.Fatalf("dbAddIPv6Assignment() error = %v", err)
+	}
+
+	oldHostLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return nil, errors.New("inventory unavailable")
+	}
+	t.Cleanup(func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldHostLoad
+	})
+
+	fakeManagedRuntime := &fakeManagedNetworkRuntime{}
+	fakeIPv6Runtime := &fakeIPv6AssignmentRuntime{}
+	pm := &ProcessManager{
+		db:                        db,
+		cfg:                       &Config{DefaultEngine: ruleEngineAuto},
+		managedNetworkRuntime:     fakeManagedRuntime,
+		ipv6Runtime:               fakeIPv6Runtime,
+		ipv6AssignmentsConfigured: true,
+		ipv6AssignmentInterfaces: map[string]struct{}{
+			"eno1":     {},
+			"tap100i0": {},
+		},
+	}
+
+	if err := pm.reloadManagedNetworkRuntimeOnly(); err != nil {
+		t.Fatalf("reloadManagedNetworkRuntimeOnly() error = %v", err)
+	}
+	if fakeIPv6Runtime.reconcileCalls != 0 {
+		t.Fatalf("ipv6 runtime reconcileCalls = %d, want no unresolved plan applied", fakeIPv6Runtime.reconcileCalls)
+	}
+	if !pm.ipv6AssignmentsConfigured {
+		t.Fatal("ipv6AssignmentsConfigured = false, want previous state preserved")
+	}
+	if _, ok := pm.ipv6AssignmentInterfaces["tap100i0"]; !ok {
+		t.Fatalf("ipv6AssignmentInterfaces = %+v, want previous interface tracking preserved", pm.ipv6AssignmentInterfaces)
+	}
+	status := pm.snapshotManagedNetworkRuntimeReloadStatus()
+	if status.LastResult != "partial" || !strings.Contains(status.LastError, "resolve ipv6 assignments") {
+		t.Fatalf("reload status = %+v, want partial host inventory failure", status)
+	}
+}
+
 func TestDetectManagedNetworkRuntimeDriftQueuesReloadWhenIPv6ParentPrefixRotates(t *testing.T) {
 	db := openTestDB(t)
 

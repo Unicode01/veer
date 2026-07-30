@@ -7,12 +7,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/Unicode01/veer/internal/netservice"
 )
 
 const (
 	managedNetworkMaxIPv4DNSServers = 8
 	// MaxDHCPv4PoolAddresses bounds runtime lease memory and worst-case pool scans.
-	MaxDHCPv4PoolAddresses = 1 << 16
+	MaxDHCPv4PoolAddresses = netservice.MaxDHCPv4PoolAddresses
 )
 
 type Runtime interface {
@@ -32,23 +34,8 @@ type IPv4AddressSpec struct {
 	CIDR          string
 }
 
-type DHCPv4Reservation struct {
-	MACAddress  string
-	IPv4Address string
-	Remark      string
-}
-
-type DHCPv4Config struct {
-	Bridge          string
-	UplinkInterface string
-	ServerCIDR      string
-	ServerIP        string
-	Gateway         string
-	PoolStart       string
-	PoolEnd         string
-	DNSServers      []string
-	Reservations    []DHCPv4Reservation
-}
+type DHCPv4Reservation = netservice.DHCPv4Reservation
+type DHCPv4Config = netservice.DHCPv4Config
 
 type InterfaceSpec struct {
 	Name            string
@@ -57,11 +44,7 @@ type InterfaceSpec struct {
 	BridgeVLANAware bool
 }
 
-type DHCPv4RuntimeState struct {
-	Status     string
-	Detail     string
-	ReplyCount uint64
-}
+type DHCPv4RuntimeState = netservice.DHCPv4RuntimeState
 
 type NetOps interface {
 	EnsureIPv4ForwardingEnabled() error
@@ -238,7 +221,7 @@ func (rt *IPv4Runtime) Reconcile(items []ManagedNetwork, reservations []ManagedN
 	}
 
 	for _, item := range reservations {
-		if item.ManagedNetworkID <= 0 {
+		if item.ManagedNetworkID == 0 {
 			continue
 		}
 		reservationsByNetwork[item.ManagedNetworkID] = append(reservationsByNetwork[item.ManagedNetworkID], item)

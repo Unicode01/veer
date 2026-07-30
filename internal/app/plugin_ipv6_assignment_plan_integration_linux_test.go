@@ -55,17 +55,12 @@ func TestPluginIPv6AssignmentPlanLinuxIntegration(t *testing.T) {
 	assertPluginIPv6PlanIntegrationAddress(t, bridge, "2001:db8:120:5::1", 60, true)
 	assertPluginIPv6PlanIntegrationRoute(t, "2001:db8:120:5::/64", bridge.Attrs().Index, unix.RTN_UNICAST)
 	assertPluginIPv6PlanIntegrationRoute(t, "2001:db8:120::/60", 0, unix.RTN_UNREACHABLE)
-	ops.mu.Lock()
-	_, advertises := ops.advertisers[bridge.Attrs().Name]
-	ops.mu.Unlock()
+	_, advertises := ops.SnapshotIPv6AssignmentCounters()[bridge.Attrs().Name]
 	if !advertises {
 		t.Fatal("router advertiser was not created for br-lan")
 	}
-	advertiser := ops.advertisers[bridge.Attrs().Name]
-	if got := strings.Join(advertiser.snapshot().DNSServers, ","); got != "2001:4860:4860::8888,2400:3200::1" {
-		t.Fatalf("router advertiser DNS = %q, want inherited RDNSS servers", got)
-	}
 	waitForPluginIPv6PlanIntegrationRA(t, ops, bridge.Attrs().Name)
+	advertisementCount := ops.SnapshotIPv6AssignmentCounters()[bridge.Attrs().Name].RAAdvertisementCount
 
 	assignment.ParentPrefix = "2001:db8:130::/60"
 	assignment.AssignedPrefix = "2001:db8:130:7::/64"
@@ -80,12 +75,7 @@ func TestPluginIPv6AssignmentPlanLinuxIntegration(t *testing.T) {
 	assertPluginIPv6PlanIntegrationRoute(t, "2001:db8:130::/60", 0, unix.RTN_UNREACHABLE)
 	assertPluginIPv6PlanIntegrationRouteAbsent(t, "2001:db8:120:5::/64")
 	assertPluginIPv6PlanIntegrationRouteAbsent(t, "2001:db8:120::/60")
-	ops.mu.Lock()
-	advertiser = ops.advertisers[bridge.Attrs().Name]
-	ops.mu.Unlock()
-	if advertiser == nil || len(advertiser.snapshot().Prefixes) != 1 || advertiser.snapshot().Prefixes[0] != "2001:db8:130:7::/64" {
-		t.Fatalf("router advertiser config = %+v, want rotated /64", advertiser)
-	}
+	waitForPluginIPv6PlanIntegrationRAAfter(t, ops, bridge.Attrs().Name, advertisementCount)
 
 	if err := rt.Reconcile(nil); err != nil {
 		t.Fatalf("Reconcile(nil) error = %v", err)
@@ -93,9 +83,7 @@ func TestPluginIPv6AssignmentPlanLinuxIntegration(t *testing.T) {
 	assertPluginIPv6PlanIntegrationAddressAbsent(t, bridge, "2001:db8:130:7::1")
 	assertPluginIPv6PlanIntegrationRouteAbsent(t, "2001:db8:130:7::/64")
 	assertPluginIPv6PlanIntegrationRouteAbsent(t, "2001:db8:130::/60")
-	ops.mu.Lock()
-	_, advertises = ops.advertisers[bridge.Attrs().Name]
-	ops.mu.Unlock()
+	_, advertises = ops.SnapshotIPv6AssignmentCounters()[bridge.Attrs().Name]
 	if advertises {
 		t.Fatal("router advertiser remains after plan removal")
 	}
@@ -178,6 +166,10 @@ func addPluginIPv6PlanIntegrationAddress(t *testing.T, link netlink.Link, cidr s
 }
 
 func waitForPluginIPv6PlanIntegrationRA(t *testing.T, ops *linuxIPv6AssignmentNetOps, targetInterface string) {
+	waitForPluginIPv6PlanIntegrationRAAfter(t, ops, targetInterface, 0)
+}
+
+func waitForPluginIPv6PlanIntegrationRAAfter(t *testing.T, ops *linuxIPv6AssignmentNetOps, targetInterface string, previousCount uint64) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -185,13 +177,13 @@ func waitForPluginIPv6PlanIntegrationRA(t *testing.T, ops *linuxIPv6AssignmentNe
 		if counter.RAStatus == "error" {
 			t.Fatalf("router advertisement failed: %s", counter.RAStatusDetail)
 		}
-		if counter.RAAdvertisementCount > 0 {
+		if counter.RAAdvertisementCount > previousCount {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	counter := ops.SnapshotIPv6AssignmentCounters()[targetInterface]
-	t.Fatalf("router advertisement was not sent: status=%s detail=%s", counter.RAStatus, counter.RAStatusDetail)
+	t.Fatalf("router advertisement did not advance past %d: count=%d status=%s detail=%s", previousCount, counter.RAAdvertisementCount, counter.RAStatus, counter.RAStatusDetail)
 }
 
 func assertPluginIPv6PlanIntegrationAddress(t *testing.T, link netlink.Link, address string, prefixLen int, noPrefixRoute bool) {

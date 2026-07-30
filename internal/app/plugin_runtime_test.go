@@ -9503,6 +9503,74 @@ exports.onAction = function () {
 	}
 }
 
+func TestPluginGojaControlReadsBoundedNeighborAndFDBInventory(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "control_plugin", `{
+  "api_version": "v1",
+  "id": "control_plugin",
+  "name": "Control Plugin",
+  "version": "0.1.0",
+  "kind": "control",
+  "resources": [{"id":"events","methods":["get","create","update"]}],
+  "actions": [{"id":"apply","runtime_update":"runtime_apply"}],
+  "control": {
+    "main": "control.js",
+    "permissions": ["resource", "net.admin"],
+    "net_access": [{
+      "interfaces": ["br-test"],
+      "operations": ["bridge.fdb.read", "neigh.read"]
+    }]
+  }
+}`)
+	writePluginControlScript(t, dir, "control_plugin", `
+exports.onAction = function () {
+  var neigh = net.neigh.list({interface: 'br-test', family: 'ipv4', limit: 1});
+  var fdb = net.bridge.fdb.list({interface: 'br-test', limit: 1});
+	resources.set('events', 'inventory', {
+		neigh_count: neigh.items.length,
+		neigh_ip: neigh.items[0] ? neigh.items[0].ip : '',
+		neigh_namespace: neigh.items[0] ? neigh.items[0].namespace : '',
+		neigh_truncated: neigh.truncated,
+		fdb_count: fdb.items.length,
+		fdb_mac: fdb.items[0] ? fdb.items[0].mac : '',
+		fdb_namespace: fdb.items[0] ? fdb.items[0].namespace : '',
+		fdb_truncated: fdb.truncated
+	});
+};
+`)
+
+	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
+	db := openTestDB(t)
+	admin := &pluginControlNetAdminTest{
+		neighbors: []pluginControlNetNeighborInfo{
+			{Interface: "br-test", IP: "192.0.2.2", MAC: "02:00:00:00:00:02", Family: "ipv4", State: "reachable"},
+			{Interface: "br-test", IP: "192.0.2.3", MAC: "02:00:00:00:00:03", Family: "ipv4", State: "stale"},
+		},
+		fdbEntries: []pluginControlNetFDBInfo{
+			{Interface: "tap1", Bridge: "br-test", MAC: "02:00:00:00:00:01", State: "reachable"},
+			{Interface: "tap2", Bridge: "br-test", MAC: "02:00:00:00:00:02", State: "stale"},
+		},
+	}
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt.netAdmin = admin
+	t.Cleanup(func() { _ = rt.Close() })
+	if err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ApplyPluginAction() error = %v", err)
+	}
+	record, err := store.GetPluginRecord(db, "control_plugin", "events", "inventory")
+	if err != nil {
+		t.Fatalf("GetPluginRecord(events/inventory) error = %v", err)
+	}
+	for _, want := range []string{`"neigh_count":1`, `"neigh_ip":"192.0.2.2"`, `"neigh_namespace":"host"`, `"neigh_truncated":true`, `"fdb_count":1`, `"fdb_mac":"02:00:00:00:00:01"`, `"fdb_namespace":"host"`, `"fdb_truncated":true`} {
+		if !strings.Contains(record.DataJSON, want) {
+			t.Fatalf("events/inventory data = %s, want %s", record.DataJSON, want)
+		}
+	}
+	if got := strings.Join(admin.calls, ","); !strings.Contains(got, "neigh-list:br-test:ipv4") || !strings.Contains(got, "fdb-list:br-test") {
+		t.Fatalf("network inventory calls = %s", got)
+	}
+}
+
 func TestPluginGojaControlRejectsMissingNetAdminPermission(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "control_plugin", `{
@@ -15023,6 +15091,8 @@ type pluginControlNetAdminTest struct {
 	routeSnapshots      map[string][]pluginControlNetRouteState
 	ruleSnapshots       map[string][]pluginControlNetRuleState
 	neighSnapshots      map[string][]pluginControlNetNeighState
+	neighbors           []pluginControlNetNeighborInfo
+	fdbEntries          []pluginControlNetFDBInfo
 }
 
 func (c *pluginControlNetAdminTest) LinkGet(name string) (pluginControlNetLinkInfo, error) {
@@ -15402,6 +15472,16 @@ func (c *pluginControlNetAdminTest) NeighReplace(req pluginControlNetNeighReques
 func (c *pluginControlNetAdminTest) NeighDelete(req pluginControlNetNeighRequest) error {
 	c.calls = append(c.calls, "neighDelete:"+pluginControlNetNeighLeaseKey(req))
 	return nil
+}
+
+func (c *pluginControlNetAdminTest) NeighList(req pluginControlNetReadRequest) ([]pluginControlNetNeighborInfo, error) {
+	c.calls = append(c.calls, "neigh-list:"+req.Interface+":"+req.Family)
+	return append([]pluginControlNetNeighborInfo(nil), c.neighbors...), nil
+}
+
+func (c *pluginControlNetAdminTest) BridgeFDBList(req pluginControlNetReadRequest) ([]pluginControlNetFDBInfo, error) {
+	c.calls = append(c.calls, "fdb-list:"+req.Interface)
+	return append([]pluginControlNetFDBInfo(nil), c.fdbEntries...), nil
 }
 
 func (c *pluginControlNetAdminTest) linkInfo(name string) pluginControlNetLinkInfo {

@@ -303,6 +303,27 @@ plugin.resource({
 - `runtime_apply`：触发资源级运行时应用，通常进入 `exports.onResourceApply(ctx)` 或宿主 runtime update。
 - 动作可使用 `runtime_query`：执行 `exports.onAction(ctx)` 并把 JSON 返回值放进 HTTP 响应的 `result`，不写 action runtime status、不触发 core 重分发，适合流量、链路和设备状态快照。返回值最大 64 KiB。
 
+需要复用核心网络能力时，使用约定资源而不是直接修改 Veer 全局配置表：`forward_rule_plans` 编排端口转发，`egress_nat_plans` 编排 Egress NAT，`dhcpv4_plans` 在已有 LAN bridge 上启用 DHCPv4，`ipv6_assignment_plans` 编排 IPv6 路由、网关地址、RA 与 DHCPv6。这些记录只生成带稳定负数 ID 的 synthetic runtime，不复制到核心业务表；插件禁用或记录失活后会随下一次 runtime apply 撤销。
+
+`dhcpv4_plans` 支持 `bridge/ipv4_cidr/gateway/pool_start/pool_end/dns_servers/reservations/remark/enabled`。固定租约写在同一 plan 内：
+
+```js
+resources.set('dhcpv4_plans', 'lan0', {
+  bridge: 'br-lan',
+  ipv4_cidr: '192.168.50.1/24',
+  gateway: '192.168.50.1',
+  pool_start: '192.168.50.100',
+  pool_end: '192.168.50.200',
+  dns_servers: ['192.168.50.1'],
+  reservations: [
+    {mac_address: '02:00:00:00:00:10', ipv4_address: '192.168.50.10', remark: 'vm'}
+  ],
+  enabled: true
+}, true, true);
+```
+
+MAC 和 IPv4 会先规范化；租约地址必须位于 `ipv4_cidr` 内，且不能占用网关、网络地址或广播地址。同一 plan 内 MAC 与 IP 都不能重复。显式托管网络优先占用 bridge，冲突的插件 plan 会被跳过并写入 runtime warning。
+
 Action 可以分别声明请求和响应的 Draft 2020-12 JSON Schema：
 
 ```js
@@ -808,7 +829,7 @@ hooks.attach({
 
 ## 网络管理权限
 
-`net.admin`、`net.l2`、`net.tcp`、`net.udp`、`net.http`、`net.dns` 和 `net.tuntap` 是两段式授权：既要在 `control.permissions` 声明总权限，也要在 `control.net_access` 声明可操作接口模式和操作。命名 namespace 内的操作还必须声明 `net.namespace` 和 `control.namespace_access`；其中 `host` 表示初始 namespace，命名 namespace 支持显式名称或 `*` 通配模式。`net.udp` 提供 `send`、`recv`、`exchange`，Linux 下会按声明接口尝试绑定设备，适合控制面探测、协商和轻量 L4 管理流量；`net.tcp` 用于下文的宿主持久 socket。数据面隧道仍应放在 TC/eBPF。
+`net.admin`、`net.l2`、`net.tcp`、`net.udp`、`net.http`、`net.dns` 和 `net.tuntap` 是两段式授权：既要在 `control.permissions` 声明总权限，也要在 `control.net_access` 声明可操作接口模式和操作。命名 namespace 内的操作还必须声明 `net.namespace` 和 `control.namespace_access`；其中 `host` 表示初始 namespace，命名 namespace 支持显式名称或 `*` 通配模式。邻居表与 bridge FDB 读取分别使用 `neigh.read` 和 `bridge.fdb.read`，不会隐式获得写权限。`net.udp` 提供 `send`、`recv`、`exchange`，Linux 下会按声明接口尝试绑定设备，适合控制面探测、协商和轻量 L4 管理流量；`net.tcp` 用于下文的宿主持久 socket。数据面隧道仍应放在 TC/eBPF。
 
 每条 `net_access` 可用 `remote_hosts`、`remote_cidrs` 和 `remote_ports` 进一步收窄 `http`、`dns`、`tcp` 或 `udp` 的远端。三个字段都省略时保持“不限制远端”的兼容语义；只要填写某一字段，请求就必须同时满足该字段。域名支持精确值、`*` 或仅位于最左侧的 `*.example.com`，CIDR 同时支持 IPv4/IPv6，端口为 `1..65535`。原始 TCP/UDP API 只接受 IP，因此不能用 `remote_hosts` 授权。宿主会在连接前、重定向、UDP 回包、TCP accept 和 socket 热更新时重新检查 endpoint；无法解析的远端地址按拒绝处理。
 
@@ -861,6 +882,15 @@ hooks.attach({
 接口名运行时仍会校验长度和非法字符。生产插件应尽量只授权自己创建的接口前缀；物理口需要逐项显式授权。
 
 `net.link.get()` 和 `net.link.list()` 在 Linux 下返回的 link 对象包含 `statistics`，其中有 `rx_packets/tx_packets/rx_bytes/tx_bytes/rx_errors/tx_errors/rx_dropped/tx_dropped`。读取由 netlink 完成，不会给数据面增加指令；TC redirect 到 dummy 等路径可能绕过该 netdev 的驱动计数，这类逻辑隧道应改读自己的 eBPF 计数。`net.link.getOffloads(iface)` 通过 `ethtool -k` 返回 `rx/tx/sg/tso/ufo/gso/gro/lro` 当前布尔状态，可在修改前记录并在 teardown 时精确恢复。
+
+`net.neigh.list({interface,family,namespace,limit})` 返回指定接口的 IPv4/IPv6 邻居，`net.bridge.fdb.list({interface,namespace,limit})` 返回指定 bridge 或 bridge port 可见的 FDB。两者都要求显式接口名，默认最多 1024 条、上限 4096 条，返回 `{items,truncated}`；达到上限时调用方应把结果视为截断快照。示例：
+
+```js
+var neighbors = net.neigh.list({interface: 'br-lan', family: 'all', limit: 1024});
+var fdb = net.bridge.fdb.list({interface: 'br-lan', limit: 1024});
+```
+
+邻居项包含 `namespace/interface/ip/mac/family/state/vlan/flags/flags_ext/type`，FDB 项包含 `namespace/interface/bridge/mac/state/vlan/flags/flags_ext/type`。读取使用 netlink 控制面快照，不进入数据面热路径；命名 namespace 仍需 `net.namespace` 与对应 `namespace_access`。
 
 ### 受控 network namespace 与 TUN/TAP
 

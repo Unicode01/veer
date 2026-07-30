@@ -5,6 +5,8 @@ import (
 	"net"
 	"strings"
 	"testing"
+
+	"github.com/Unicode01/veer/internal/netservice"
 )
 
 type fakeIPv6AssignmentNetOps struct {
@@ -380,6 +382,41 @@ func TestManagedIPv6AssignmentRuntimeReconcileCleansUpRemovedState(t *testing.T)
 	}
 }
 
+func TestManagedIPv6AssignmentRuntimePreservesStateWhenHostInventoryFails(t *testing.T) {
+	oldLoad := loadHostNetworkInterfacesForIPv6AssignmentTests
+	loadHostNetworkInterfacesForIPv6AssignmentTests = func() ([]HostNetworkInterface, error) {
+		return nil, errors.New("inventory unavailable")
+	}
+	t.Cleanup(func() {
+		loadHostNetworkInterfacesForIPv6AssignmentTests = oldLoad
+	})
+
+	ops := &fakeIPv6AssignmentNetOps{}
+	rt, ok := newManagedIPv6AssignmentRuntime(ops).(*managedIPv6AssignmentRuntime)
+	if !ok || rt == nil {
+		t.Fatal("newManagedIPv6AssignmentRuntime() did not return managed runtime")
+	}
+	reconcileIPv6RuntimeStateForTest(t, rt)
+
+	err := rt.Reconcile([]IPv6Assignment{{
+		ID:              1,
+		ParentInterface: "vmbr0",
+		TargetInterface: "tap100i0",
+		ParentPrefix:    "2402:db8::/64",
+		AssignedPrefix:  "2402:db8::10/128",
+		Enabled:         true,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "load host interfaces for ipv6 resolution: inventory unavailable") {
+		t.Fatalf("Reconcile() error = %v, want host inventory failure", err)
+	}
+	if len(ops.deleteRoutes) != 0 || len(ops.deleteProxies) != 0 || len(ops.deleteRAs) != 0 || len(ops.deleteDHCPv6) != 0 {
+		t.Fatalf("transient inventory failure removed applied state: routes=%+v proxies=%+v ra=%+v dhcpv6=%+v", ops.deleteRoutes, ops.deleteProxies, ops.deleteRAs, ops.deleteDHCPv6)
+	}
+	if stats := rt.SnapshotStats(); len(stats) != 1 {
+		t.Fatalf("SnapshotStats() = %+v, want previously applied state", stats)
+	}
+}
+
 func TestManagedIPv6AssignmentRuntimeReconcileFollowsCurrentParentPrefix(t *testing.T) {
 	oldLoad := loadHostNetworkInterfacesForTests
 	loadHostNetworkInterfacesForTests = func() ([]HostNetworkInterface, error) {
@@ -687,10 +724,7 @@ func TestManagedIPv6AssignmentRuntimeCloseRemovesAppliedState(t *testing.T) {
 	if !ok || rt == nil {
 		t.Fatal("newManagedIPv6AssignmentRuntime() did not return managed runtime")
 	}
-	rt.routes[ipv6AssignmentRouteSpec{Prefix: "2402:db8::10/128", TargetInterface: "tap100i0"}] = struct{}{}
-	rt.proxies[ipv6AssignmentProxySpec{ParentInterface: "vmbr0", Address: "2402:db8::10"}] = struct{}{}
-	rt.advertisements["tap100i0"] = ipv6AssignmentRAConfig{TargetInterface: "tap100i0", Routes: []string{"2402:db8::/64"}}
-	rt.dhcpv6["tap100i0"] = ipv6AssignmentDHCPv6Config{TargetInterface: "tap100i0", Addresses: []string{"2402:db8::10"}}
+	reconcileIPv6RuntimeStateForTest(t, rt)
 
 	if err := rt.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -717,10 +751,7 @@ func TestManagedIPv6AssignmentRuntimeClosePreservesAppliedStateOnHotRestart(t *t
 	if !ok || rt == nil {
 		t.Fatal("newManagedIPv6AssignmentRuntime() did not return managed runtime")
 	}
-	rt.routes[ipv6AssignmentRouteSpec{Prefix: "2402:db8::10/128", TargetInterface: "tap100i0"}] = struct{}{}
-	rt.proxies[ipv6AssignmentProxySpec{ParentInterface: "vmbr0", Address: "2402:db8::10"}] = struct{}{}
-	rt.advertisements["tap100i0"] = ipv6AssignmentRAConfig{TargetInterface: "tap100i0", Routes: []string{"2402:db8::/64"}}
-	rt.dhcpv6["tap100i0"] = ipv6AssignmentDHCPv6Config{TargetInterface: "tap100i0", Addresses: []string{"2402:db8::10"}}
+	reconcileIPv6RuntimeStateForTest(t, rt)
 
 	if err := rt.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -737,8 +768,8 @@ func TestManagedIPv6AssignmentRuntimeClosePreservesAppliedStateOnHotRestart(t *t
 	if len(ops.deleteDHCPv6) != 0 {
 		t.Fatalf("deleteDHCPv6 = %+v, want none while preserving hot restart state", ops.deleteDHCPv6)
 	}
-	if len(rt.routes) != 0 || len(rt.proxies) != 0 || len(rt.advertisements) != 0 || len(rt.dhcpv6) != 0 {
-		t.Fatalf("runtime state not cleared after preserve close: routes=%d proxies=%d ra=%d dhcp=%d", len(rt.routes), len(rt.proxies), len(rt.advertisements), len(rt.dhcpv6))
+	if stats := rt.SnapshotStats(); len(stats) != 0 {
+		t.Fatalf("runtime state not cleared after preserve close: %+v", stats)
 	}
 }
 
@@ -760,19 +791,39 @@ func TestManagedIPv6AssignmentRuntimeSnapshotStatsMapsInterfaceCountersToAssignm
 	if !ok || rt == nil {
 		t.Fatal("newManagedIPv6AssignmentRuntime() did not return managed runtime")
 	}
-	rt.assignmentStates = map[int64]ipv6AssignmentRuntimeEntryState{
-		1: {
+	if err := rt.inner.Reconcile([]netservice.IPv6AssignmentPlan{
+		{
+			ID:              1,
+			ParentInterface: "vmbr0",
 			TargetInterface: "tap100i0",
-			AdvertisesRA:    true,
-			ServesDHCPv6:    true,
+			ParentPrefix:    "2402:db8::/64",
+			AssignedPrefix:  "2402:db8::10/128",
+			AssignedAddress: "2402:db8::10",
+			ProxyAddress:    "2402:db8::10",
+			NeedsForwarding: true,
+			NeedsProxyNDP:   true,
+			NeedsRA:         true,
+			IsSingleAddress: true,
 		},
-		2: {
+		{
+			ID:              2,
+			ParentInterface: "vmbr0",
 			TargetInterface: "tap100i0",
-			AdvertisesRA:    true,
+			ParentPrefix:    "2402:db8::/48",
+			AssignedPrefix:  "2402:db8:0:1::/64",
+			NeedsForwarding: true,
+			NeedsRA:         true,
 		},
-		3: {
+		{
+			ID:              3,
+			ParentInterface: "vmbr1",
 			TargetInterface: "tap200i0",
+			ParentPrefix:    "2402:db8:1::/48",
+			AssignedPrefix:  "2402:db8:1:1::/64",
+			NeedsForwarding: true,
 		},
+	}, nil); err != nil {
+		t.Fatalf("seed runtime state: %v", err)
 	}
 
 	stats := rt.SnapshotStats()
@@ -784,6 +835,27 @@ func TestManagedIPv6AssignmentRuntimeSnapshotStatsMapsInterfaceCountersToAssignm
 	}
 	if stats[3].RAAdvertisementCount != 0 || stats[3].DHCPv6ReplyCount != 0 {
 		t.Fatalf("stats[3] = %+v, want zero counters for route-only assignment", stats[3])
+	}
+}
+
+func reconcileIPv6RuntimeStateForTest(t *testing.T, rt *managedIPv6AssignmentRuntime) {
+	t.Helper()
+	if err := rt.inner.Reconcile([]netservice.IPv6AssignmentPlan{
+		{
+			ID:              1,
+			ParentInterface: "vmbr0",
+			TargetInterface: "tap100i0",
+			ParentPrefix:    "2402:db8::/64",
+			AssignedPrefix:  "2402:db8::10/128",
+			AssignedAddress: "2402:db8::10",
+			ProxyAddress:    "2402:db8::10",
+			NeedsForwarding: true,
+			NeedsProxyNDP:   true,
+			NeedsRA:         true,
+			IsSingleAddress: true,
+		},
+	}, nil); err != nil {
+		t.Fatalf("seed runtime state: %v", err)
 	}
 }
 

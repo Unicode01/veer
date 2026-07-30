@@ -10,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
+	"github.com/Unicode01/veer/internal/netservice"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -21,16 +21,11 @@ func newIPv6AssignmentRuntime() ipv6AssignmentRuntime {
 }
 
 type linuxIPv6AssignmentNetOps struct {
-	mu          sync.Mutex
-	advertisers map[string]*ipv6RouterAdvertiser
-	dhcpv6      map[string]*ipv6DHCPv6Server
+	services *netservice.IPv6Manager
 }
 
 func newLinuxIPv6AssignmentNetOps() *linuxIPv6AssignmentNetOps {
-	return &linuxIPv6AssignmentNetOps{
-		advertisers: make(map[string]*ipv6RouterAdvertiser),
-		dhcpv6:      make(map[string]*ipv6DHCPv6Server),
-	}
+	return &linuxIPv6AssignmentNetOps{services: netservice.NewIPv6Manager()}
 }
 
 func (ops *linuxIPv6AssignmentNetOps) PreserveIPv6AssignmentStateOnClose() bool {
@@ -51,43 +46,10 @@ func (ops *linuxIPv6AssignmentNetOps) PreserveIPv6AssignmentStateOnClose() bool 
 }
 
 func (ops *linuxIPv6AssignmentNetOps) SnapshotIPv6AssignmentCounters() map[string]ipv6AssignmentRuntimeCounter {
-	if ops == nil {
+	if ops == nil || ops.services == nil {
 		return nil
 	}
-
-	ops.mu.Lock()
-	advertisers := make(map[string]*ipv6RouterAdvertiser, len(ops.advertisers))
-	for targetInterface, adv := range ops.advertisers {
-		advertisers[targetInterface] = adv
-	}
-	servers := make(map[string]*ipv6DHCPv6Server, len(ops.dhcpv6))
-	for targetInterface, srv := range ops.dhcpv6 {
-		servers[targetInterface] = srv
-	}
-	ops.mu.Unlock()
-
-	if len(advertisers) == 0 && len(servers) == 0 {
-		return nil
-	}
-
-	counters := make(map[string]ipv6AssignmentRuntimeCounter, len(advertisers)+len(servers))
-	for targetInterface, adv := range advertisers {
-		counter := counters[targetInterface]
-		status := adv.snapshotStatus()
-		counter.RAAdvertisementCount = status.SendCount
-		counter.RAStatus = status.Status
-		counter.RAStatusDetail = status.Detail
-		counters[targetInterface] = counter
-	}
-	for targetInterface, srv := range servers {
-		counter := counters[targetInterface]
-		status := srv.snapshotStatus()
-		counter.DHCPv6ReplyCount = status.ReplyCount
-		counter.DHCPv6Status = status.Status
-		counter.DHCPv6StatusDetail = status.Detail
-		counters[targetInterface] = counter
-	}
-	return counters
+	return ops.services.Snapshot()
 }
 
 func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6ForwardingEnabled() error {
@@ -350,78 +312,29 @@ func writeLinuxIPv6Sysctl(path string, value string) error {
 }
 
 func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6RA(config ipv6AssignmentRAConfig) error {
-	if ops == nil {
+	if ops == nil || ops.services == nil {
 		return nil
 	}
-	ops.mu.Lock()
-	adv := ops.advertisers[config.TargetInterface]
-	if adv == nil {
-		adv = newIPv6RouterAdvertiser(config)
-		ops.advertisers[config.TargetInterface] = adv
-		adv.start()
-		log.Printf("ipv6 assignment runtime: router advertisement enabled on %s (managed=%t prefixes=%v routes=%v dns=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes, config.DNSServers)
-	} else {
-		changed := adv.update(config)
-		ops.mu.Unlock()
-		if changed {
-			log.Printf("ipv6 assignment runtime: router advertisement updated on %s (managed=%t prefixes=%v routes=%v dns=%v)", config.TargetInterface, config.Managed, config.Prefixes, config.Routes, config.DNSServers)
-		}
-		return nil
-	}
-	ops.mu.Unlock()
-	return nil
+	return ops.services.EnsureRA(config)
 }
 
 func (ops *linuxIPv6AssignmentNetOps) DeleteIPv6RA(targetInterface string) error {
-	if ops == nil {
+	if ops == nil || ops.services == nil {
 		return nil
 	}
-	ops.mu.Lock()
-	adv := ops.advertisers[targetInterface]
-	if adv != nil {
-		delete(ops.advertisers, targetInterface)
-	}
-	ops.mu.Unlock()
-	if adv != nil {
-		adv.stop()
-	}
-	return nil
+	return ops.services.DeleteRA(targetInterface)
 }
 
 func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6DHCPv6(config ipv6AssignmentDHCPv6Config) error {
-	if ops == nil {
+	if ops == nil || ops.services == nil {
 		return nil
 	}
-	ops.mu.Lock()
-	server := ops.dhcpv6[config.TargetInterface]
-	if server == nil {
-		server = newIPv6DHCPv6Server(config)
-		ops.dhcpv6[config.TargetInterface] = server
-		ops.mu.Unlock()
-		server.start()
-		log.Printf("ipv6 assignment runtime: dhcpv6 enabled on %s (addresses=%v dns=%v)", config.TargetInterface, config.Addresses, config.DNSServers)
-		return nil
-	}
-	changed := server.update(config)
-	ops.mu.Unlock()
-	if changed {
-		log.Printf("ipv6 assignment runtime: dhcpv6 updated on %s (addresses=%v dns=%v)", config.TargetInterface, config.Addresses, config.DNSServers)
-	}
-	return nil
+	return ops.services.EnsureDHCPv6(config)
 }
 
 func (ops *linuxIPv6AssignmentNetOps) DeleteIPv6DHCPv6(targetInterface string) error {
-	if ops == nil {
+	if ops == nil || ops.services == nil {
 		return nil
 	}
-	ops.mu.Lock()
-	server := ops.dhcpv6[targetInterface]
-	if server != nil {
-		delete(ops.dhcpv6, targetInterface)
-	}
-	ops.mu.Unlock()
-	if server != nil {
-		server.stop()
-	}
-	return nil
+	return ops.services.DeleteDHCPv6(targetInterface)
 }

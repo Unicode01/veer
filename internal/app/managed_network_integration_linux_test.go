@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Unicode01/veer/internal/netservice"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
@@ -982,13 +983,13 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 	}
 	defer conn.Close()
 
-	clientID := append([]byte{dhcpv4HWTypeEthernet}, append([]byte(nil), iface.HardwareAddr...)...)
+	clientID := append([]byte{netservice.DHCPv4HardwareTypeEthernet}, append([]byte(nil), iface.HardwareAddr...)...)
 	xid := uint32(time.Now().UnixNano())
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		discover := buildManagedNetworkDHCPv4ClientPacket(xid, iface.HardwareAddr, dhcpv4MessageDiscover, nil, nil, clientID)
-		if _, err := conn.WriteToUDP(discover, &net.UDPAddr{IP: net.IPv4bcast, Port: dhcpv4ServerPort}); err != nil {
+		discover := buildManagedNetworkDHCPv4ClientPacket(xid, iface.HardwareAddr, netservice.DHCPv4MessageDiscover, nil, nil, clientID)
+		if _, err := conn.WriteToUDP(discover, &net.UDPAddr{IP: net.IPv4bcast, Port: netservice.DHCPv4ServerPort}); err != nil {
 			return nil, nil, fmt.Errorf("send dhcpv4 discover: %w", err)
 		}
 
@@ -999,7 +1000,7 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 			}
 			return nil, nil, err
 		}
-		if offer.MessageType != dhcpv4MessageOffer {
+		if offer.MessageType != netservice.DHCPv4MessageOffer {
 			continue
 		}
 		leaseIP := offer.YIAddr.To4()
@@ -1010,8 +1011,8 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 			return nil, nil, fmt.Errorf("dhcpv4 offer = %s, want %s", leaseIP, expected)
 		}
 
-		request := buildManagedNetworkDHCPv4ClientPacket(xid, iface.HardwareAddr, dhcpv4MessageRequest, leaseIP, offer.ServerID, clientID)
-		if _, err := conn.WriteToUDP(request, &net.UDPAddr{IP: net.IPv4bcast, Port: dhcpv4ServerPort}); err != nil {
+		request := buildManagedNetworkDHCPv4ClientPacket(xid, iface.HardwareAddr, netservice.DHCPv4MessageRequest, leaseIP, offer.ServerID, clientID)
+		if _, err := conn.WriteToUDP(request, &net.UDPAddr{IP: net.IPv4bcast, Port: netservice.DHCPv4ServerPort}); err != nil {
 			return nil, nil, fmt.Errorf("send dhcpv4 request: %w", err)
 		}
 
@@ -1024,11 +1025,11 @@ func performManagedNetworkDHCPv4Handshake(iface net.Interface, expectedIP net.IP
 				return nil, nil, err
 			}
 			switch reply.MessageType {
-			case dhcpv4MessageAck:
+			case netservice.DHCPv4MessageAck:
 				if ip := reply.YIAddr.To4(); ip != nil {
 					return ip, append([]net.IP(nil), reply.DNSServers...), nil
 				}
-			case dhcpv4MessageNak:
+			case netservice.DHCPv4MessageNak:
 				return nil, nil, fmt.Errorf("dhcpv4 server returned nak")
 			}
 		}
@@ -1106,7 +1107,7 @@ func openManagedNetworkDHCPv4ClientConn(ifaceName string) (*managedNetworkDHCPv4
 		_ = pc.Close()
 		return nil, fmt.Errorf("unexpected dhcpv4 packet conn type %T", pc)
 	}
-	_, recvFD, err := openPacketListenerSocket(ifaceName, 2*time.Second, buildManagedNetworkDHCPv4ClientSocketFilter())
+	_, recvFD, err := netservice.OpenPacketListenerSocket(ifaceName, 2*time.Second, buildManagedNetworkDHCPv4ClientSocketFilter())
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -1123,27 +1124,27 @@ func (managedNetworkDHCPv4TimeoutError) Error() string   { return "i/o timeout" 
 func (managedNetworkDHCPv4TimeoutError) Timeout() bool   { return true }
 func (managedNetworkDHCPv4TimeoutError) Temporary() bool { return true }
 
-func waitForManagedNetworkDHCPv4Response(conn *managedNetworkDHCPv4ClientConn, xid uint32, hwAddr net.HardwareAddr, timeout time.Duration) (parsedManagedNetworkDHCPv4Message, error) {
+func waitForManagedNetworkDHCPv4Response(conn *managedNetworkDHCPv4ClientConn, xid uint32, hwAddr net.HardwareAddr, timeout time.Duration) (netservice.DHCPv4Message, error) {
 	if conn == nil || conn.recv < 0 {
-		return parsedManagedNetworkDHCPv4Message{}, fmt.Errorf("dhcpv4 client receiver unavailable")
+		return netservice.DHCPv4Message{}, fmt.Errorf("dhcpv4 client receiver unavailable")
 	}
 	tv := unix.NsecToTimeval(timeout.Nanoseconds())
 	if err := unix.SetsockoptTimeval(conn.recv, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
-		return parsedManagedNetworkDHCPv4Message{}, err
+		return netservice.DHCPv4Message{}, err
 	}
 	for {
 		frame, err := readManagedNetworkDHCPv4ClientFrame(conn.recv)
 		if err != nil {
 			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-				return parsedManagedNetworkDHCPv4Message{}, managedNetworkDHCPv4TimeoutError{}
+				return netservice.DHCPv4Message{}, managedNetworkDHCPv4TimeoutError{}
 			}
-			return parsedManagedNetworkDHCPv4Message{}, err
+			return netservice.DHCPv4Message{}, err
 		}
-		msg, err := parseManagedNetworkDHCPv4Message(frame.Payload)
+		msg, err := netservice.ParseDHCPv4Message(frame.Payload)
 		if err != nil {
 			continue
 		}
-		if msg.Op != dhcpv4BootReply {
+		if msg.Op != netservice.DHCPv4BootReply {
 			continue
 		}
 		if msg.XID != xid {
@@ -1156,7 +1157,7 @@ func waitForManagedNetworkDHCPv4Response(conn *managedNetworkDHCPv4ClientConn, x
 	}
 }
 
-func readManagedNetworkDHCPv4ClientFrame(fd int) (managedNetworkDHCPv4Frame, error) {
+func readManagedNetworkDHCPv4ClientFrame(fd int) (netservice.DHCPv4Frame, error) {
 	buf := make([]byte, 2048)
 	for {
 		n, _, err := unix.Recvfrom(fd, buf, 0)
@@ -1164,7 +1165,7 @@ func readManagedNetworkDHCPv4ClientFrame(fd int) (managedNetworkDHCPv4Frame, err
 			if errors.Is(err, unix.EINTR) {
 				continue
 			}
-			return managedNetworkDHCPv4Frame{}, err
+			return netservice.DHCPv4Frame{}, err
 		}
 		frame, ok := parseManagedNetworkDHCPv4ClientFrame(buf[:n])
 		if ok {
@@ -1173,39 +1174,39 @@ func readManagedNetworkDHCPv4ClientFrame(fd int) (managedNetworkDHCPv4Frame, err
 	}
 }
 
-func parseManagedNetworkDHCPv4ClientFrame(frame []byte) (managedNetworkDHCPv4Frame, bool) {
+func parseManagedNetworkDHCPv4ClientFrame(frame []byte) (netservice.DHCPv4Frame, bool) {
 	if len(frame) < 14+20+8+240 {
-		return managedNetworkDHCPv4Frame{}, false
+		return netservice.DHCPv4Frame{}, false
 	}
 	if binary.BigEndian.Uint16(frame[12:14]) != 0x0800 {
-		return managedNetworkDHCPv4Frame{}, false
+		return netservice.DHCPv4Frame{}, false
 	}
 	ipHeader := frame[14:]
 	if version := ipHeader[0] >> 4; version != 4 {
-		return managedNetworkDHCPv4Frame{}, false
+		return netservice.DHCPv4Frame{}, false
 	}
 	ihl := int(ipHeader[0]&0x0f) * 4
 	if ihl < 20 || len(ipHeader) < ihl+8 {
-		return managedNetworkDHCPv4Frame{}, false
+		return netservice.DHCPv4Frame{}, false
 	}
-	if ipHeader[9] != ipv4ProtocolUDP {
-		return managedNetworkDHCPv4Frame{}, false
+	if ipHeader[9] != netservice.IPv4ProtocolUDP {
+		return netservice.DHCPv4Frame{}, false
 	}
 	totalLen := int(binary.BigEndian.Uint16(ipHeader[2:4]))
 	if totalLen < ihl+8 || totalLen > len(ipHeader) {
-		return managedNetworkDHCPv4Frame{}, false
+		return netservice.DHCPv4Frame{}, false
 	}
 	udp := ipHeader[ihl:totalLen]
-	if binary.BigEndian.Uint16(udp[0:2]) != dhcpv4ServerPort || binary.BigEndian.Uint16(udp[2:4]) != dhcpv4ClientPort {
-		return managedNetworkDHCPv4Frame{}, false
+	if binary.BigEndian.Uint16(udp[0:2]) != netservice.DHCPv4ServerPort || binary.BigEndian.Uint16(udp[2:4]) != netservice.DHCPv4ClientPort {
+		return netservice.DHCPv4Frame{}, false
 	}
 	udpLen := int(binary.BigEndian.Uint16(udp[4:6]))
 	if udpLen < 8 || udpLen > len(udp) {
-		return managedNetworkDHCPv4Frame{}, false
+		return netservice.DHCPv4Frame{}, false
 	}
 	srcIP := net.IP(append([]byte(nil), ipHeader[12:16]...))
 	dstIP := net.IP(append([]byte(nil), ipHeader[16:20]...))
-	return managedNetworkDHCPv4Frame{
+	return netservice.DHCPv4Frame{
 		SrcMAC:  append(net.HardwareAddr(nil), frame[6:12]...),
 		SrcIP:   srcIP,
 		DstIP:   dstIP,
@@ -1214,37 +1215,37 @@ func parseManagedNetworkDHCPv4ClientFrame(frame []byte) (managedNetworkDHCPv4Fra
 }
 
 func buildManagedNetworkDHCPv4ClientSocketFilter() []bpf.Instruction {
-	return buildPacketSocketEqualityFilter([]packetSocketEqualityCheck{
-		{Offset: packetSocketEtherTypeOffset, Size: 2, Value: 0x0800},
-		{Offset: packetSocketIPv4ProtocolOffset, Size: 1, Value: ipv4ProtocolUDP},
-		{Offset: packetSocketIPv4UDPSourcePortOffset, Size: 2, Value: dhcpv4ServerPort},
-		{Offset: packetSocketIPv4UDPDestPortOffset, Size: 2, Value: dhcpv4ClientPort},
+	return netservice.BuildPacketSocketEqualityFilter([]netservice.PacketSocketEqualityCheck{
+		{Offset: 12, Size: 2, Value: 0x0800},
+		{Offset: 14 + 9, Size: 1, Value: netservice.IPv4ProtocolUDP},
+		{Offset: 14 + 20, Size: 2, Value: netservice.DHCPv4ServerPort},
+		{Offset: 14 + 22, Size: 2, Value: netservice.DHCPv4ClientPort},
 	})
 }
 
 func buildManagedNetworkDHCPv4ClientPacket(xid uint32, hwAddr net.HardwareAddr, messageType byte, requestedIP net.IP, serverID net.IP, clientID []byte) []byte {
 	out := make([]byte, 240)
 	out[0] = 1
-	out[1] = dhcpv4HWTypeEthernet
+	out[1] = netservice.DHCPv4HardwareTypeEthernet
 	out[2] = 6
 	out[3] = 0
 	binaryBigEndianPutUint32(out[4:8], xid)
 	binaryBigEndianPutUint16(out[10:12], 0x8000)
 	copy(out[28:34], hwAddr)
-	binaryBigEndianPutUint32(out[236:240], dhcpv4MagicCookie)
-	out = append(out, buildManagedNetworkDHCPv4Option(dhcpv4OptionMessageType, []byte{messageType})...)
+	binaryBigEndianPutUint32(out[236:240], netservice.DHCPv4MagicCookie)
+	out = append(out, netservice.BuildDHCPv4Option(netservice.DHCPv4OptionMessageType, []byte{messageType})...)
 	if len(clientID) > 0 {
-		out = append(out, buildManagedNetworkDHCPv4Option(dhcpv4OptionClientID, clientID)...)
+		out = append(out, netservice.BuildDHCPv4Option(netservice.DHCPv4OptionClientID, clientID)...)
 	}
 	if ip := requestedIP.To4(); ip != nil && !ip.Equal(net.IPv4zero) {
-		out = append(out, buildManagedNetworkDHCPv4Option(dhcpv4OptionRequestedIP, ip)...)
+		out = append(out, netservice.BuildDHCPv4Option(netservice.DHCPv4OptionRequestedIP, ip)...)
 	}
 	if ip := serverID.To4(); ip != nil && !ip.Equal(net.IPv4zero) {
-		out = append(out, buildManagedNetworkDHCPv4Option(dhcpv4OptionServerID, ip)...)
+		out = append(out, netservice.BuildDHCPv4Option(netservice.DHCPv4OptionServerID, ip)...)
 	}
-	out = append(out, dhcpv4OptionEnd)
-	if len(out) < dhcpv4MinMessageSize {
-		out = append(out, make([]byte, dhcpv4MinMessageSize-len(out))...)
+	out = append(out, netservice.DHCPv4OptionEnd)
+	if len(out) < netservice.DHCPv4MinMessageSize {
+		out = append(out, make([]byte, netservice.DHCPv4MinMessageSize-len(out))...)
 	}
 	return out
 }

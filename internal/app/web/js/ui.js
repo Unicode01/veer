@@ -673,9 +673,25 @@
       .sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
   }
 
+  function isMissingPluginResourceRecord(method, path, error) {
+    if (String(method || '').toUpperCase() !== 'GET' || Number(error && error.status) !== 404) return false;
+    const segments = String(path || '').trim().split(/[?#]/, 1)[0].split('/').filter(Boolean);
+    if (segments.length !== 6 || segments[0] !== 'api' || segments[1] !== 'plugins' || segments[3] !== 'resources') {
+      return false;
+    }
+    const payload = error && error.payload && typeof error.payload === 'object' ? error.payload : {};
+    const code = String(payload.code || '').trim().toLowerCase();
+    const message = String(payload.error || (error && error.message) || '').trim().toLowerCase();
+    return code === 'plugin_resource_record_not_found' || message === 'record not found';
+  }
+
   app.recordRequestFailure = function recordRequestFailure(method, path, error) {
     const key = requestFailureKey(method, path);
     if (!key || (error && error.message === 'unauthorized')) return;
+    if (isMissingPluginResourceRecord(method, path, error)) {
+      app.clearRequestFailure(method, path);
+      return;
+    }
 
     const failures = app.state.requestFailures || {};
     const firstFailure = Object.keys(failures).length === 0;

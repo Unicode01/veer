@@ -15,6 +15,8 @@
     "blob.stat",
     "blob.verify",
     "blob.write",
+	"net.bridge.fdb.list",
+	"net.neigh.list",
     "net.socket.unwatch",
     "net.socket.watch",
     "net.socket.watchList",

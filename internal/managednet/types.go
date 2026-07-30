@@ -4,6 +4,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/netinfo"
 	"github.com/vishvananda/netlink"
 )
 
@@ -50,12 +51,7 @@ type ManagedNetworkReservation struct {
 	Remark           string
 }
 
-type InterfaceInfo struct {
-	Name   string
-	Addrs  []string
-	Parent string
-	Kind   string
-}
+type InterfaceInfo = netinfo.InterfaceInfo
 
 type ReservationCandidate struct {
 	ManagedNetworkID          int64

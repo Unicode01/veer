@@ -285,6 +285,38 @@ func (admin *scopedPluginControlNetAdmin) NeighDelete(req pluginControlNetNeighR
 	return admin.run(func(base pluginControlNetAdmin) error { return base.NeighDelete(req) })
 }
 
+func (admin *scopedPluginControlNetAdmin) NeighList(req pluginControlNetReadRequest) (out []pluginControlNetNeighborInfo, err error) {
+	err = admin.run(func(base pluginControlNetAdmin) error {
+		reader, ok := base.(pluginControlNetReadAdmin)
+		if !ok {
+			return fmt.Errorf("read-only network inventory is unavailable")
+		}
+		var callErr error
+		out, callErr = reader.NeighList(req)
+		return callErr
+	})
+	for i := range out {
+		out[i].Namespace = admin.namespace
+	}
+	return out, err
+}
+
+func (admin *scopedPluginControlNetAdmin) BridgeFDBList(req pluginControlNetReadRequest) (out []pluginControlNetFDBInfo, err error) {
+	err = admin.run(func(base pluginControlNetAdmin) error {
+		reader, ok := base.(pluginControlNetReadAdmin)
+		if !ok {
+			return fmt.Errorf("read-only network inventory is unavailable")
+		}
+		var callErr error
+		out, callErr = reader.BridgeFDBList(req)
+		return callErr
+	})
+	for i := range out {
+		out[i].Namespace = admin.namespace
+	}
+	return out, err
+}
+
 func normalizePluginControlRequestNamespace(value string) (string, error) {
 	namespace := normalizePluginControlNamespace(value)
 	if namespace == "host" {

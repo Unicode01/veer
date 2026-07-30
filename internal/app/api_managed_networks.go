@@ -10,13 +10,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Unicode01/veer/internal/managednet"
 )
 
 const (
-	managedNetworkBridgeModeCreate            = "create"
-	managedNetworkBridgeModeExisting          = "existing"
-	managedNetworkIPv6AssignmentModeSingle128 = "single_128"
-	managedNetworkIPv6AssignmentModePrefix64  = "prefix_64"
+	managedNetworkBridgeModeCreate            = managednet.BridgeModeCreate
+	managedNetworkBridgeModeExisting          = managednet.BridgeModeExisting
+	managedNetworkIPv6AssignmentModeSingle128 = managednet.IPv6AssignmentModeSingle128
+	managedNetworkIPv6AssignmentModePrefix64  = managednet.IPv6AssignmentModePrefix64
 )
 
 var loadInterfaceInfosForManagedNetworkPreviewTests func() ([]InterfaceInfo, error)

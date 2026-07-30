@@ -1087,6 +1087,147 @@ func (admin linuxPluginControlNetAdmin) NeighDelete(req pluginControlNetNeighReq
 	return nil
 }
 
+func (linuxPluginControlNetAdmin) NeighList(req pluginControlNetReadRequest) ([]pluginControlNetNeighborInfo, error) {
+	link, err := pluginControlNetLinkByName(strings.TrimSpace(req.Interface))
+	if err != nil {
+		return nil, err
+	}
+	family := unix.AF_UNSPEC
+	switch req.Family {
+	case "ipv4":
+		family = unix.AF_INET
+	case "ipv6":
+		family = unix.AF_INET6
+	}
+	neighbors, err := pluginControlNetRetryDump(func() ([]netlink.Neigh, error) {
+		return netlink.NeighList(link.Attrs().Index, family)
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]pluginControlNetNeighborInfo, 0, len(neighbors))
+	for _, neighbor := range neighbors {
+		if neighbor.IP == nil {
+			continue
+		}
+		familyName, err := pluginControlNetAddressFamilyName(neighbor.Family)
+		if err != nil {
+			continue
+		}
+		out = append(out, pluginControlNetNeighborInfo{
+			Interface: req.Interface,
+			IP:        neighbor.IP.String(),
+			MAC:       neighbor.HardwareAddr.String(),
+			Family:    familyName,
+			State:     pluginControlNetReadableNeighStateName(neighbor.State),
+			VLAN:      neighbor.Vlan,
+			Flags:     neighbor.Flags,
+			FlagsExt:  neighbor.FlagsExt,
+			Type:      neighbor.Type,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Family != out[j].Family {
+			return out[i].Family < out[j].Family
+		}
+		return out[i].IP < out[j].IP
+	})
+	return out, nil
+}
+
+func (linuxPluginControlNetAdmin) BridgeFDBList(req pluginControlNetReadRequest) ([]pluginControlNetFDBInfo, error) {
+	target, err := pluginControlNetLinkByName(strings.TrimSpace(req.Interface))
+	if err != nil {
+		return nil, err
+	}
+	links, err := pluginControlNetRetryDump(netlink.LinkList)
+	if err != nil {
+		return nil, err
+	}
+	linkByIndex := make(map[int]netlink.Link, len(links))
+	for _, link := range links {
+		if link != nil && link.Attrs() != nil {
+			linkByIndex[link.Attrs().Index] = link
+		}
+	}
+	entries, err := pluginControlNetRetryDump(func() ([]netlink.Neigh, error) {
+		return netlink.NeighListExecute(netlink.Ndmsg{Family: unix.AF_BRIDGE})
+	})
+	if err != nil {
+		return nil, err
+	}
+	targetIndex := target.Attrs().Index
+	targetIsBridge := strings.EqualFold(strings.TrimSpace(target.Type()), "bridge")
+	out := make([]pluginControlNetFDBInfo, 0)
+	for _, entry := range entries {
+		entryLink := linkByIndex[entry.LinkIndex]
+		if entryLink == nil || entryLink.Attrs() == nil {
+			continue
+		}
+		masterIndex := entry.MasterIndex
+		if masterIndex <= 0 {
+			masterIndex = entryLink.Attrs().MasterIndex
+		}
+		if targetIsBridge {
+			if masterIndex != targetIndex && entry.LinkIndex != targetIndex {
+				continue
+			}
+		} else if entry.LinkIndex != targetIndex {
+			continue
+		}
+		bridgeName := ""
+		if master := linkByIndex[masterIndex]; master != nil && master.Attrs() != nil {
+			bridgeName = strings.TrimSpace(master.Attrs().Name)
+		}
+		out = append(out, pluginControlNetFDBInfo{
+			Interface: strings.TrimSpace(entryLink.Attrs().Name),
+			Bridge:    bridgeName,
+			MAC:       entry.HardwareAddr.String(),
+			State:     pluginControlNetReadableNeighStateName(entry.State),
+			VLAN:      entry.Vlan,
+			Flags:     entry.Flags,
+			FlagsExt:  entry.FlagsExt,
+			Type:      entry.Type,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Interface != out[j].Interface {
+			return out[i].Interface < out[j].Interface
+		}
+		if out[i].VLAN != out[j].VLAN {
+			return out[i].VLAN < out[j].VLAN
+		}
+		return out[i].MAC < out[j].MAC
+	})
+	return out, nil
+}
+
+func pluginControlNetReadableNeighStateName(value int) string {
+	states := []struct {
+		value int
+		name  string
+	}{
+		{unix.NUD_INCOMPLETE, "incomplete"},
+		{unix.NUD_REACHABLE, "reachable"},
+		{unix.NUD_STALE, "stale"},
+		{unix.NUD_DELAY, "delay"},
+		{unix.NUD_PROBE, "probe"},
+		{unix.NUD_FAILED, "failed"},
+		{unix.NUD_NOARP, "noarp"},
+		{unix.NUD_PERMANENT, "permanent"},
+	}
+	parts := make([]string, 0, 2)
+	for _, state := range states {
+		if value&state.value != 0 {
+			parts = append(parts, state.name)
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, "|")
+}
+
 func pluginControlNetNeigh(req pluginControlNetNeighRequest) (*netlink.Neigh, error) {
 	link, ip, family, err := pluginControlNetNeighTarget(req)
 	if err != nil {

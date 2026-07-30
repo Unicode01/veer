@@ -741,7 +741,7 @@ func normalizePluginNetOperations(values []string) ([]string, error) {
 			continue
 		}
 		if !validPluginNetOperation(value) {
-			return nil, fmt.Errorf("operation %q must be one of addr.write, dns, http, l2, link.create, link.delete, link.master, link.offload, link.read, link.state, neigh.write, route.write, rule.write, tcp, tuntap, udp", value)
+			return nil, fmt.Errorf("operation %q must be one of addr.write, bridge.fdb.read, dns, http, l2, link.create, link.delete, link.master, link.offload, link.read, link.state, neigh.read, neigh.write, route.write, rule.write, tcp, tuntap, udp", value)
 		}
 		if _, ok := seen[value]; ok {
 			continue
@@ -1519,7 +1519,7 @@ func validPluginDataplaneHookStage(value string) bool {
 
 func validPluginNetOperation(value string) bool {
 	switch value {
-	case "addr.write", "dns", "http", "l2", "link.create", "link.delete", "link.master", "link.offload", "link.read", "link.state", "neigh.write", "route.write", "rule.write", "tcp", "tuntap", "udp":
+	case "addr.write", "bridge.fdb.read", "dns", "http", "l2", "link.create", "link.delete", "link.master", "link.offload", "link.read", "link.state", "neigh.read", "neigh.write", "route.write", "rule.write", "tcp", "tuntap", "udp":
 		return true
 	default:
 		return false

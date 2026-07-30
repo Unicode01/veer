@@ -15,6 +15,8 @@ import (
 const (
 	linuxInterfaceNameMaxBytes       = 15
 	pluginControlNetMaxRouteNexthops = 64
+	pluginControlNetReadDefaultLimit = 1024
+	pluginControlNetReadMaxLimit     = 4096
 )
 
 type pluginControlNetAdmin interface {
@@ -51,6 +53,11 @@ type pluginControlNetAdmin interface {
 	NeighRestore(states []pluginControlNetNeighState) error
 	NeighReplace(req pluginControlNetNeighRequest) error
 	NeighDelete(req pluginControlNetNeighRequest) error
+}
+
+type pluginControlNetReadAdmin interface {
+	NeighList(req pluginControlNetReadRequest) ([]pluginControlNetNeighborInfo, error)
+	BridgeFDBList(req pluginControlNetReadRequest) ([]pluginControlNetFDBInfo, error)
 }
 
 type pluginControlNetLinkInfo struct {
@@ -281,6 +288,37 @@ type pluginControlNetNeighState struct {
 	Type        int                          `json:"type,omitempty"`
 }
 
+type pluginControlNetReadRequest struct {
+	Namespace string
+	Interface string
+	Family    string
+}
+
+type pluginControlNetNeighborInfo struct {
+	Namespace string
+	Interface string
+	IP        string
+	MAC       string
+	Family    string
+	State     string
+	VLAN      int
+	Flags     int
+	FlagsExt  int
+	Type      int
+}
+
+type pluginControlNetFDBInfo struct {
+	Namespace string
+	Interface string
+	Bridge    string
+	MAC       string
+	State     string
+	VLAN      int
+	Flags     int
+	FlagsExt  int
+	Type      int
+}
+
 type pluginControlNetOffloadRequest struct {
 	Namespace string
 	Interface string
@@ -310,6 +348,15 @@ func (h *pluginControlHost) netAdminInNamespaceOrThrow(namespace, operation stri
 		h.throwf("%s: %v", operation, err)
 	}
 	return scoped
+}
+
+func (h *pluginControlHost) netReadAdminInNamespaceOrThrow(namespace, operation string) pluginControlNetReadAdmin {
+	admin := h.netAdminInNamespaceOrThrow(namespace, operation)
+	reader, ok := admin.(pluginControlNetReadAdmin)
+	if !ok {
+		h.throwf("%s: read-only network inventory is unavailable", operation)
+	}
+	return reader
 }
 
 func (h *pluginControlHost) requirePluginNetworkNamespace(namespace, operation string) string {
@@ -1535,6 +1582,75 @@ func (h *pluginControlHost) netNeighDelete(call goja.FunctionCall) goja.Value {
 	return goja.Undefined()
 }
 
+func (h *pluginControlHost) netNeighList(call goja.FunctionCall) goja.Value {
+	const api = "net.neigh.list"
+	req, limit := h.netReadRequest(call, api, true)
+	h.requireNetAccess("neigh.read", req.Interface, api)
+	items, err := h.netReadAdminInNamespaceOrThrow(req.Namespace, api).NeighList(req)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	truncated := len(items) > limit
+	if truncated {
+		items = items[:limit]
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		item.Namespace = normalizePluginControlNamespace(req.Namespace)
+		out = append(out, pluginControlNetNeighborInfoMap(item))
+	}
+	return h.vm.ToValue(map[string]any{"items": out, "truncated": truncated})
+}
+
+func (h *pluginControlHost) netBridgeFDBList(call goja.FunctionCall) goja.Value {
+	const api = "net.bridge.fdb.list"
+	req, limit := h.netReadRequest(call, api, false)
+	h.requireNetAccess("bridge.fdb.read", req.Interface, api)
+	items, err := h.netReadAdminInNamespaceOrThrow(req.Namespace, api).BridgeFDBList(req)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	truncated := len(items) > limit
+	if truncated {
+		items = items[:limit]
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		item.Namespace = normalizePluginControlNamespace(req.Namespace)
+		out = append(out, pluginControlNetFDBInfoMap(item))
+	}
+	return h.vm.ToValue(map[string]any{"items": out, "truncated": truncated})
+}
+
+func (h *pluginControlHost) netReadRequest(call goja.FunctionCall, operation string, allowFamily bool) (pluginControlNetReadRequest, int) {
+	obj := h.requiredObjectArg(call, 0, "request")
+	req := pluginControlNetReadRequest{
+		Namespace: h.netNamespaceObjectField(obj, operation),
+		Interface: h.firstStringObjectField(obj, "interface", "dev", "link"),
+	}
+	if err := validatePluginControlInterfaceName(req.Interface, "interface"); err != nil {
+		h.throwf("%s: %v", operation, err)
+	}
+	if allowFamily {
+		req.Family = strings.ToLower(h.optionalStringObjectField(obj, "family"))
+		switch req.Family {
+		case "", "all":
+			req.Family = "all"
+		case "ipv4", "inet", "4":
+			req.Family = "ipv4"
+		case "ipv6", "inet6", "6":
+			req.Family = "ipv6"
+		default:
+			h.throwf("%s: family must be all, ipv4, or ipv6", operation)
+		}
+	}
+	limit := h.optionalIntObjectField(obj, pluginControlNetReadDefaultLimit, "limit")
+	if limit < 1 || limit > pluginControlNetReadMaxLimit {
+		h.throwf("%s: limit must be between 1 and %d", operation, pluginControlNetReadMaxLimit)
+	}
+	return req, limit
+}
+
 func (h *pluginControlHost) requireRouteNetAccess(req pluginControlNetRouteRequest, operation string) {
 	interfaces := pluginControlNetRouteInterfaces(req)
 	if len(interfaces) == 0 {
@@ -1803,4 +1919,33 @@ func pluginControlNetLinkInfoMap(info pluginControlNetLinkInfo) map[string]any {
 		}
 	}
 	return out
+}
+
+func pluginControlNetNeighborInfoMap(info pluginControlNetNeighborInfo) map[string]any {
+	return map[string]any{
+		"namespace": info.Namespace,
+		"interface": info.Interface,
+		"ip":        info.IP,
+		"mac":       info.MAC,
+		"family":    info.Family,
+		"state":     info.State,
+		"vlan":      info.VLAN,
+		"flags":     info.Flags,
+		"flags_ext": info.FlagsExt,
+		"type":      info.Type,
+	}
+}
+
+func pluginControlNetFDBInfoMap(info pluginControlNetFDBInfo) map[string]any {
+	return map[string]any{
+		"namespace": info.Namespace,
+		"interface": info.Interface,
+		"bridge":    info.Bridge,
+		"mac":       info.MAC,
+		"state":     info.State,
+		"vlan":      info.VLAN,
+		"flags":     info.Flags,
+		"flags_ext": info.FlagsExt,
+		"type":      info.Type,
+	}
 }
