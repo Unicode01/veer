@@ -18,25 +18,9 @@ func loadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
 		return nil, err
 	}
 
-	out := make([]HostNetworkInterface, 0, len(items))
-	for _, item := range items {
-		addresses := make([]HostInterfaceAddress, 0, len(item.Addresses))
-		for _, addr := range item.Addresses {
-			addresses = append(addresses, HostInterfaceAddress{
-				Family:    addr.Family,
-				IP:        addr.IP,
-				CIDR:      addr.CIDR,
-				PrefixLen: addr.PrefixLen,
-			})
-		}
-		out = append(out, HostNetworkInterface{
-			Name:             item.Name,
-			Kind:             item.Kind,
-			Parent:           item.Parent,
-			DefaultIPv4Route: item.DefaultIPv4Route,
-			DefaultIPv6Route: item.DefaultIPv6Route,
-			Addresses:        addresses,
-		})
+	out := append([]HostNetworkInterface(nil), items...)
+	for i := range out {
+		out[i].Addresses = append([]HostInterfaceAddress(nil), out[i].Addresses...)
 	}
 	return out, nil
 }
@@ -58,14 +42,9 @@ func loadInterfaceInfos() ([]InterfaceInfo, error) {
 		return nil, err
 	}
 
-	out := make([]InterfaceInfo, 0, len(items))
-	for _, item := range items {
-		out = append(out, InterfaceInfo{
-			Name:   item.Name,
-			Addrs:  append([]string(nil), item.Addrs...),
-			Parent: item.Parent,
-			Kind:   item.Kind,
-		})
+	out := append([]InterfaceInfo(nil), items...)
+	for i := range out {
+		out[i].Addrs = append([]string(nil), out[i].Addrs...)
 	}
 	return out, nil
 }

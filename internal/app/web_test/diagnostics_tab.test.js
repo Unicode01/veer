@@ -156,6 +156,45 @@ test('ui migrates removed worker and stats tabs to diagnostics', () => {
   }
 });
 
+test('missing plugin resource records do not count as dashboard sync failures', () => {
+  const { app } = createDiagnosticsHarness('rules');
+  const recordPath = '/api/plugins/router_wizard/resources/config/default';
+  app.state.requestFailures['GET ' + recordPath] = {
+    key: 'GET ' + recordPath,
+    path: recordPath,
+    message: 'record not found',
+    at: Date.now()
+  };
+  const error = new Error('record not found');
+  error.status = 404;
+  error.payload = { error: 'record not found' };
+
+  app.recordRequestFailure('GET', recordPath, error);
+
+  assert.deepEqual(Object.keys(app.state.requestFailures), []);
+});
+
+test('plugin collection and endpoint failures still count as dashboard sync failures', () => {
+  const { app } = createDiagnosticsHarness('rules');
+  const missingRecord = new Error('record not found');
+  missingRecord.status = 404;
+  missingRecord.payload = { error: 'record not found' };
+  const missingPlugin = new Error('plugin not found');
+  missingPlugin.status = 404;
+  missingPlugin.payload = { error: 'plugin not found' };
+
+  app.recordRequestFailure('GET', '/api/plugins/router_wizard/resources/config', missingRecord);
+  app.recordRequestFailure('GET', '/api/plugins/router_wizard/resources/config/default', missingPlugin);
+
+  assert.deepEqual(
+    Object.keys(app.state.requestFailures).sort(),
+    [
+      'GET /api/plugins/router_wizard/resources/config',
+      'GET /api/plugins/router_wizard/resources/config/default'
+    ]
+  );
+});
+
 test('activateTab loads diagnostics workers and stats', () => {
   const { app, storage } = createDiagnosticsHarness('rules');
   let workerLoads = 0;

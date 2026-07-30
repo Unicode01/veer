@@ -50,6 +50,7 @@ declare global {
     "metrics.list": typeof metrics.list;
     "net.addr.delete": typeof net.addr.delete;
     "net.addr.replace": typeof net.addr.replace;
+    "net.bridge.fdb.list": typeof net.bridge.fdb.list;
     "net.dns.lookup": typeof net.dns.lookup;
     "net.http.request": typeof net.http.request;
     "net.l2.exchange": typeof net.l2.exchange;
@@ -86,6 +87,7 @@ declare global {
     "net.namespace.owned": typeof net.namespace.owned;
     "net.namespace.release": typeof net.namespace.release;
     "net.neigh.delete": typeof net.neigh.delete;
+    "net.neigh.list": typeof net.neigh.list;
     "net.neigh.replace": typeof net.neigh.replace;
     "net.neigh.transaction": typeof net.neigh.transaction;
     "net.prefix.subnet": typeof net.prefix.subnet;

@@ -133,7 +133,8 @@ func mustBuildPluginHostControlCapabilities() []pluginHostControlCapability {
 		"net.link.owned", "net.link.setMaster", "net.link.clearMaster", "net.link.setUp", "net.link.setMTU",
 		"net.link.setARP", "net.link.setPromiscuous", "net.link.getOffloads", "net.link.setOffloads", "net.link.setGSO",
 		"net.addr.replace", "net.addr.delete", "net.route.replace", "net.route.delete", "net.route.transaction",
-		"net.rule.replace", "net.rule.delete", "net.rule.transaction", "net.neigh.replace", "net.neigh.delete", "net.neigh.transaction",
+		"net.rule.replace", "net.rule.delete", "net.rule.transaction", "net.neigh.list", "net.neigh.replace", "net.neigh.delete", "net.neigh.transaction",
+		"net.bridge.fdb.list",
 	}, pluginHostCapabilityOptions{permissions: []string{"net.admin"}, conditionalPermissions: namespaceConditional})
 
 	add([]string{"timer.setTimeout", "timer.setInterval", "timer.clear", "timer.list"}, pluginHostCapabilityOptions{permissions: []string{"timer"}})

@@ -1,6 +1,6 @@
 //go:build linux
 
-package app
+package netservice
 
 import (
 	"fmt"
@@ -94,6 +94,8 @@ type packetSocketEqualityCheck struct {
 	Value  uint32
 }
 
+type PacketSocketEqualityCheck = packetSocketEqualityCheck
+
 func buildPacketSocketEqualityFilter(checks []packetSocketEqualityCheck) []bpf.Instruction {
 	if len(checks) == 0 {
 		return []bpf.Instruction{bpf.RetConstant{Val: packetSocketAcceptBytes}}
@@ -115,6 +117,10 @@ func buildPacketSocketEqualityFilter(checks []packetSocketEqualityCheck) []bpf.I
 		bpf.RetConstant{Val: 0},
 	)
 	return insts
+}
+
+func BuildPacketSocketEqualityFilter(checks []PacketSocketEqualityCheck) []bpf.Instruction {
+	return buildPacketSocketEqualityFilter(checks)
 }
 
 func attachPacketSocketFilter(fd int, insts []bpf.Instruction) error {
@@ -179,6 +185,10 @@ func openPacketListenerSocket(interfaceName string, timeout time.Duration, filte
 		return nil, -1, err
 	}
 	return iface, fd, nil
+}
+
+func OpenPacketListenerSocket(interfaceName string, timeout time.Duration, filter []bpf.Instruction) (*net.Interface, int, error) {
+	return openPacketListenerSocket(interfaceName, timeout, filter)
 }
 
 func openIPv6PacketListenerSocket(interfaceName string, timeout time.Duration, filter []bpf.Instruction) (*net.Interface, int, error) {

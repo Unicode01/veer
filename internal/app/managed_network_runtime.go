@@ -1,20 +1,18 @@
 package app
 
 import (
-	"encoding/binary"
 	"fmt"
-	"github.com/Unicode01/veer/internal/managednet"
 	"hash/fnv"
 	"net"
-	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/Unicode01/veer/internal/managednet"
 )
 
 type managedNetworkRuntimeStatus = managednet.RuntimeStatus
 type managedNetworkIPv4AddressSpec = managednet.IPv4AddressSpec
-type managedNetworkDHCPv4Reservation = managednet.DHCPv4Reservation
 type managedNetworkDHCPv4Config = managednet.DHCPv4Config
 type managedNetworkInterfaceSpec = managednet.InterfaceSpec
 type managedNetworkDHCPv4RuntimeState = managednet.DHCPv4RuntimeState
@@ -55,18 +53,6 @@ func normalizeManagedNetworkIPv4Literal(value string) (string, error) {
 
 func isManagedNetworkIPv4ReservedHost(ip net.IP, network net.IP, mask net.IPMask) bool {
 	return managednet.IsReservedIPv4Host(ip, network, mask)
-}
-
-func managedNetworkIPv4LiteralToUint32(text string) uint32 {
-	return managedNetworkIPv4ToUint32(parseIPLiteral(text))
-}
-
-func managedNetworkIPv4ToUint32(ip net.IP) uint32 {
-	return ipv4BytesToUint32(ip)
-}
-
-func uint32ToIPv4(value uint32) net.IP {
-	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
 }
 
 func (rt *managedNetworkRuntimeAdapter) Reconcile(items []ManagedNetwork, reservations []ManagedNetworkReservation) error {
@@ -178,18 +164,8 @@ type managedNetworkChildTarget struct {
 }
 
 type managedNetworkUsedIPv6PrefixIndex struct {
-	mode     string
-	exact128 map[[16]byte]struct{}
-	exact64  map[[16]byte]struct{}
-	broader  []*net.IPNet
-	narrower []*net.IPNet
-	generic  []*net.IPNet
+	inner *managednet.IPv6PrefixIndex
 }
-
-var (
-	managedNetworkIPv6FullMask     = net.CIDRMask(128, 128)
-	managedNetworkIPv6Prefix64Mask = net.CIDRMask(64, 128)
-)
 
 func compileManagedNetworkRuntime(managedNetworks []ManagedNetwork, explicitIPv6 []IPv6Assignment, explicitEgressNATs []EgressNAT, infos []InterfaceInfo) managedNetworkRuntimeCompilation {
 	if len(managedNetworks) == 0 {
@@ -437,32 +413,6 @@ func collectManagedNetworkRedistributeInterfaces(items []ManagedNetwork) map[str
 		return nil
 	}
 	return out
-}
-
-func collectManagedNetworkChildInterfaces(bridge string, uplink string, infos []InterfaceInfo) []InterfaceInfo {
-	bridge = strings.TrimSpace(bridge)
-	uplink = strings.TrimSpace(uplink)
-	if bridge == "" || len(infos) == 0 {
-		return nil
-	}
-
-	children := make([]InterfaceInfo, 0)
-	for _, info := range infos {
-		if strings.TrimSpace(info.Parent) != bridge {
-			continue
-		}
-		if uplink != "" && strings.EqualFold(strings.TrimSpace(info.Name), uplink) {
-			continue
-		}
-		if !isEgressNATAttachableChild(info) {
-			continue
-		}
-		children = append(children, info)
-	}
-	slices.SortFunc(children, func(a, b InterfaceInfo) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return children
 }
 
 func collectManagedNetworkIPv6TargetNamesFromInventory(bridge string, uplink string, inventory managedNetworkInterfaceInventory) []string {
@@ -857,233 +807,41 @@ func managedNetworkPrefixAddress(prefixText string) string {
 }
 
 func managedNetworkIPv6PrefixOverlaps(prefix *net.IPNet, used []*net.IPNet) bool {
-	for _, current := range used {
-		if ipv6PrefixesOverlap(prefix, current) {
-			return true
-		}
-	}
-	return false
+	return managednet.IPv6PrefixOverlapsAny(prefix, used)
 }
 
 func newManagedNetworkUsedIPv6PrefixIndex(mode string, used []*net.IPNet) *managedNetworkUsedIPv6PrefixIndex {
-	return newManagedNetworkUsedIPv6PrefixIndexWithCapacity(mode, used, 0)
+	return &managedNetworkUsedIPv6PrefixIndex{inner: managednet.NewIPv6PrefixIndex(mode, used)}
 }
 
 func newManagedNetworkUsedIPv6PrefixIndexWithCapacity(mode string, used []*net.IPNet, additionalExact int) *managedNetworkUsedIPv6PrefixIndex {
-	index := &managedNetworkUsedIPv6PrefixIndex{mode: mode}
-	if additionalExact > 0 {
-		exactCapacity := len(used) + additionalExact
-		switch mode {
-		case managedNetworkIPv6AssignmentModeSingle128:
-			index.exact128 = make(map[[16]byte]struct{}, exactCapacity)
-		case managedNetworkIPv6AssignmentModePrefix64:
-			index.exact64 = make(map[[16]byte]struct{}, exactCapacity)
-		}
-	}
-	for _, prefix := range used {
-		index.add(prefix)
-	}
-	return index
+	return &managedNetworkUsedIPv6PrefixIndex{inner: managednet.NewIPv6PrefixIndexWithCapacity(mode, used, additionalExact)}
 }
 
 func (index *managedNetworkUsedIPv6PrefixIndex) add(prefix *net.IPNet) {
-	if index == nil || prefix == nil {
+	if index == nil || index.inner == nil {
 		return
 	}
-	ones, bits := prefix.Mask.Size()
-	if bits != 128 || ones < 0 {
-		index.generic = append(index.generic, prefix)
-		return
-	}
-	switch index.mode {
-	case managedNetworkIPv6AssignmentModeSingle128:
-		if ones == 128 {
-			key, ok := managedNetworkIPv6AddressKey(prefix.IP)
-			if !ok {
-				index.generic = append(index.generic, prefix)
-				return
-			}
-			if index.exact128 == nil {
-				index.exact128 = make(map[[16]byte]struct{})
-			}
-			index.exact128[key] = struct{}{}
-			return
-		}
-		if ones < 128 {
-			index.broader = append(index.broader, prefix)
-			return
-		}
-	case managedNetworkIPv6AssignmentModePrefix64:
-		if ones == 64 {
-			key, ok := managedNetworkIPv6AddressKey(prefix.IP)
-			if !ok {
-				index.generic = append(index.generic, prefix)
-				return
-			}
-			if index.exact64 == nil {
-				index.exact64 = make(map[[16]byte]struct{})
-			}
-			index.exact64[key] = struct{}{}
-			return
-		}
-		if ones < 64 {
-			index.broader = append(index.broader, prefix)
-			return
-		}
-		if ones > 64 {
-			index.narrower = append(index.narrower, prefix)
-			return
-		}
-	}
-	index.generic = append(index.generic, prefix)
+	index.inner.Add(prefix)
 }
 
 func (index *managedNetworkUsedIPv6PrefixIndex) overlaps(prefix *net.IPNet, used []*net.IPNet) bool {
-	if index == nil || prefix == nil {
+	if index == nil || index.inner == nil {
 		return managedNetworkIPv6PrefixOverlaps(prefix, used)
 	}
-	ones, bits := prefix.Mask.Size()
-	if bits != 128 || ones < 0 {
-		return managedNetworkIPv6PrefixOverlaps(prefix, used)
-	}
-
-	switch index.mode {
-	case managedNetworkIPv6AssignmentModeSingle128:
-		if ones != 128 {
-			return managedNetworkIPv6PrefixOverlaps(prefix, used)
-		}
-		if key, ok := managedNetworkIPv6AddressKey(prefix.IP); ok {
-			if _, exists := index.exact128[key]; exists {
-				return true
-			}
-		}
-		for _, current := range index.broader {
-			if current.Contains(prefix.IP) {
-				return true
-			}
-		}
-	case managedNetworkIPv6AssignmentModePrefix64:
-		if ones != 64 {
-			return managedNetworkIPv6PrefixOverlaps(prefix, used)
-		}
-		if key, ok := managedNetworkIPv6AddressKey(prefix.IP); ok {
-			if _, exists := index.exact64[key]; exists {
-				return true
-			}
-		}
-		for _, current := range index.broader {
-			if current.Contains(prefix.IP) {
-				return true
-			}
-		}
-		for _, current := range index.narrower {
-			if prefix.Contains(current.IP) {
-				return true
-			}
-		}
-	default:
-		return managedNetworkIPv6PrefixOverlaps(prefix, used)
-	}
-
-	for _, current := range index.generic {
-		if ipv6PrefixesOverlap(prefix, current) {
-			return true
-		}
-	}
-	return false
-}
-
-func managedNetworkIPv6AddressKey(ip net.IP) ([16]byte, bool) {
-	var key [16]byte
-	if len(ip) < net.IPv6len {
-		return key, false
-	}
-	copy(key[:], ip[len(ip)-net.IPv6len:])
-	return key, true
+	return index.inner.Overlaps(prefix, used)
 }
 
 func allocateManagedNetworkIPv6Prefix(network ManagedNetwork, childName string, parentPrefix *net.IPNet, usedPrefixes []*net.IPNet, usedPrefixIndex *managedNetworkUsedIPv6PrefixIndex) (string, *net.IPNet, error) {
-	if parentPrefix == nil {
-		return "", nil, fmt.Errorf("parent prefix is required")
+	var index *managednet.IPv6PrefixIndex
+	if usedPrefixIndex != nil {
+		index = usedPrefixIndex.inner
 	}
-	hashValue := managedNetworkHash(network.ID, childName)
-	for probe := 0; probe < 4096; probe++ {
-		value := hashValue + uint64(probe)
-		var (
-			prefixText string
-			prefixNet  *net.IPNet
-			err        error
-		)
-		switch network.IPv6AssignmentMode {
-		case managedNetworkIPv6AssignmentModeSingle128:
-			prefixText, prefixNet, err = allocateManagedNetworkSingleIPv6(parentPrefix, value)
-		case managedNetworkIPv6AssignmentModePrefix64:
-			prefixText, prefixNet, err = allocateManagedNetworkDelegatedIPv6Prefix(parentPrefix, value)
-		default:
-			return "", nil, fmt.Errorf("unsupported ipv6 assignment mode %q", network.IPv6AssignmentMode)
-		}
-		if err != nil {
-			return "", nil, err
-		}
-		if !usedPrefixIndex.overlaps(prefixNet, usedPrefixes) {
-			return prefixText, prefixNet, nil
-		}
-	}
-	return "", nil, fmt.Errorf("no free ipv6 allocation slot remains inside %s", parentPrefix.String())
+	return managednet.AllocateIPv6Prefix(network.IPv6AssignmentMode, parentPrefix, managedNetworkHash(network.ID, childName), usedPrefixes, index)
 }
 
 func allocateManagedNetworkSingleIPv6(parentPrefix *net.IPNet, hashValue uint64) (string, *net.IPNet, error) {
-	if parentPrefix == nil {
-		return "", nil, fmt.Errorf("parent prefix is required")
-	}
-	ones, bits := parentPrefix.Mask.Size()
-	if ones < 0 || bits != 128 || ones >= 128 {
-		return "", nil, fmt.Errorf("parent prefix must leave room for /128 assignments")
-	}
-
-	hostBits := 128 - ones
-	value := hashValue
-	if hostBits <= 64 {
-		mask := managedNetworkBitMask(hostBits)
-		value &= mask
-		if hostBits > 1 && value == 0 {
-			value = 1
-		}
-	}
-
-	ip := applyManagedNetworkLowBits(parentPrefix.IP, value, ones, 128)
-	prefix := &net.IPNet{IP: ip, Mask: managedNetworkIPv6FullMask}
-	return managedNetworkPrefixText(ip, "/128"), prefix, nil
-}
-
-func allocateManagedNetworkDelegatedIPv6Prefix(parentPrefix *net.IPNet, hashValue uint64) (string, *net.IPNet, error) {
-	if parentPrefix == nil {
-		return "", nil, fmt.Errorf("parent prefix is required")
-	}
-	ones, bits := parentPrefix.Mask.Size()
-	if ones < 0 || bits != 128 {
-		return "", nil, fmt.Errorf("parent prefix must be a valid IPv6 prefix")
-	}
-	if ones >= 64 {
-		return "", nil, fmt.Errorf("parent prefix must be shorter than /64 for prefix_64 mode")
-	}
-
-	subnetBits := 64 - ones
-	value := hashValue & managedNetworkBitMask(subnetBits)
-	ip := applyManagedNetworkHighBits(parentPrefix.IP, value, ones, 64)
-	ip = ip.Mask(managedNetworkIPv6Prefix64Mask)
-	prefix := &net.IPNet{IP: ip, Mask: managedNetworkIPv6Prefix64Mask}
-	return managedNetworkPrefixText(ip, "/64"), prefix, nil
-}
-
-func managedNetworkPrefixText(ip net.IP, suffix string) string {
-	if key, ok := managedNetworkIPv6AddressKey(ip); ok {
-		var buf [48]byte
-		out := netip.AddrFrom16(key).AppendTo(buf[:0])
-		out = append(out, suffix...)
-		return string(out)
-	}
-	return canonicalIPLiteral(ip) + suffix
+	return managednet.AllocateSingleIPv6(parentPrefix, hashValue)
 }
 
 func buildManagedNetworkAutoEgressNAT(network ManagedNetwork, ifaceByName map[string]InterfaceInfo, existing []EgressNAT) (EgressNAT, string) {
@@ -1133,110 +891,4 @@ func managedNetworkHash(networkID int64, key string) uint64 {
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(strings.TrimSpace(key)))
 	return h.Sum64()
-}
-
-func managedNetworkBitMask(bits int) uint64 {
-	switch {
-	case bits <= 0:
-		return 0
-	case bits >= 64:
-		return ^uint64(0)
-	default:
-		return (uint64(1) << bits) - 1
-	}
-}
-
-func applyManagedNetworkLowBits(baseIP net.IP, value uint64, prefixLen int, totalBits int) net.IP {
-	if totalBits == 128 {
-		if ip := applyManagedNetworkLowBitsIPv6(baseIP, value, prefixLen); len(ip) == net.IPv6len {
-			return ip
-		}
-	}
-	ip := append(net.IP(nil), baseIP.Mask(net.CIDRMask(prefixLen, totalBits))...)
-	if len(ip) != net.IPv6len {
-		ip = append(net.IP(nil), baseIP.To16()...)
-	}
-	for i := 0; i < 64; i++ {
-		bitPos := totalBits - 1 - i
-		if bitPos < prefixLen {
-			break
-		}
-		managedNetworkSetBit(ip, bitPos, (value>>i)&1 == 1)
-	}
-	return ip
-}
-
-func applyManagedNetworkLowBitsIPv6(baseIP net.IP, value uint64, prefixLen int) net.IP {
-	ip := baseIP.To16()
-	if len(ip) != net.IPv6len {
-		return nil
-	}
-
-	out := append(net.IP(nil), ip...)
-	switch {
-	case prefixLen <= 0:
-		for i := range out {
-			out[i] = 0
-		}
-	case prefixLen < 128:
-		fullBytes := prefixLen / 8
-		remBits := prefixLen % 8
-		if remBits != 0 {
-			out[fullBytes] &= byte(0xff << (8 - remBits))
-			fullBytes++
-		}
-		for i := fullBytes; i < len(out); i++ {
-			out[i] = 0
-		}
-	}
-
-	var low [8]byte
-	binary.BigEndian.PutUint64(low[:], value)
-	if prefixLen <= 64 {
-		copy(out[8:], low[:])
-		return out
-	}
-	if prefixLen >= 128 {
-		return out
-	}
-
-	keepBits := prefixLen - 64
-	keepBytes := keepBits / 8
-	keepRemainder := keepBits % 8
-	target := out[8:]
-	if keepRemainder == 0 {
-		copy(target[keepBytes:], low[keepBytes:])
-		return out
-	}
-
-	mask := byte(0xff << (8 - keepRemainder))
-	target[keepBytes] = (target[keepBytes] & mask) | (low[keepBytes] &^ mask)
-	copy(target[keepBytes+1:], low[keepBytes+1:])
-	return out
-}
-
-func applyManagedNetworkHighBits(baseIP net.IP, value uint64, prefixLen int, targetPrefixLen int) net.IP {
-	ip := append(net.IP(nil), baseIP.Mask(net.CIDRMask(prefixLen, 128))...)
-	if len(ip) != net.IPv6len {
-		ip = append(net.IP(nil), baseIP.To16()...)
-	}
-	availableBits := targetPrefixLen - prefixLen
-	for i := 0; i < availableBits && i < 64; i++ {
-		bitPos := targetPrefixLen - 1 - i
-		managedNetworkSetBit(ip, bitPos, (value>>i)&1 == 1)
-	}
-	return ip
-}
-
-func managedNetworkSetBit(ip net.IP, bitPos int, on bool) {
-	if len(ip) != net.IPv6len || bitPos < 0 || bitPos >= 128 {
-		return
-	}
-	byteIndex := bitPos / 8
-	bitIndex := 7 - (bitPos % 8)
-	if on {
-		ip[byteIndex] |= 1 << bitIndex
-		return
-	}
-	ip[byteIndex] &^= 1 << bitIndex
 }

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Unicode01/veer/internal/netservice"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/net/icmp"
@@ -455,7 +456,7 @@ func runIPv6AssignmentIntegrationHelper() error {
 		return err
 	}
 
-	dhcpConn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified, Port: dhcpv6ClientPort})
+	dhcpConn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified, Port: netservice.DHCPv6ClientPort})
 	if err != nil {
 		return fmt.Errorf("listen dhcpv6 client socket: %w", err)
 	}
@@ -479,7 +480,7 @@ func runIPv6AssignmentIntegrationHelper() error {
 	if err := waitForManagedIPv6RouterAdvertisement(icmpConn, icmpPacketConn, iface.Index, 15*time.Second); err != nil {
 		return err
 	}
-	clientID := buildDHCPv6DUID(iface.HardwareAddr)
+	clientID := netservice.BuildDHCPv6DUID(iface.HardwareAddr)
 	iaid := [4]byte{0x46, 0x57, 0x36, 0x34}
 	reply, err := performIPv6AssignmentDHCPv6Handshake(dhcpConn, *iface, srcIP, clientID, iaid, 15*time.Second)
 	if err != nil {
@@ -598,7 +599,7 @@ func sendIPv6AssignmentRouterSolicitation(iface net.Interface, srcIP net.IP) err
 	}
 
 	body := make([]byte, 4)
-	body = append(body, buildIPv6SourceLLAOption(iface.HardwareAddr)...)
+	body = append(body, netservice.BuildIPv6SourceLLAOption(iface.HardwareAddr)...)
 	payload, err := (&icmp.Message{
 		Type: ipv6.ICMPTypeRouterSolicitation,
 		Code: 0,
@@ -617,12 +618,12 @@ func sendIPv6AssignmentRouterSolicitation(iface net.Interface, srcIP net.IP) err
 	ipv6Header[0] = 0x60
 	binary.BigEndian.PutUint16(ipv6Header[4:6], uint16(len(payload)))
 	ipv6Header[6] = 58
-	ipv6Header[7] = ipv6RAHopLimit
+	ipv6Header[7] = netservice.IPv6RAHopLimit
 	copy(ipv6Header[8:24], src)
 	copy(ipv6Header[24:40], dst)
 	copy(frame[14+40:], payload)
 
-	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htonsUnix(unix.ETH_P_IPV6)))
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(netservice.Htons(unix.ETH_P_IPV6)))
 	if err != nil {
 		return fmt.Errorf("open router solicitation packet socket: %w", err)
 	}
@@ -632,7 +633,7 @@ func sendIPv6AssignmentRouterSolicitation(iface net.Interface, srcIP net.IP) err
 	copy(addr[:], []byte{0x33, 0x33, 0x00, 0x00, 0x00, 0x02})
 	if err := unix.Sendto(fd, frame, 0, &unix.SockaddrLinklayer{
 		Ifindex:  iface.Index,
-		Protocol: htonsUnix(unix.ETH_P_IPV6),
+		Protocol: netservice.Htons(unix.ETH_P_IPV6),
 		Halen:    6,
 		Addr:     addr,
 	}); err != nil {
@@ -1649,8 +1650,8 @@ func performIPv6AssignmentDHCPv6Handshake(conn *net.UDPConn, iface net.Interface
 	deadline := time.Now().Add(timeout)
 
 	solicitTxID := [3]byte{0x10, 0x20, 0x30}
-	solicit := buildIPv6AssignmentDHCPv6Message(dhcpv6MessageSolicit, solicitTxID, clientID, nil, iaid)
-	advertise, err := exchangeIPv6AssignmentDHCPv6(conn, iface, srcIP, solicit, dhcpv6MessageAdvertise, solicitTxID, deadline)
+	solicit := buildIPv6AssignmentDHCPv6Message(netservice.DHCPv6MessageSolicit, solicitTxID, clientID, nil, iaid)
+	advertise, err := exchangeIPv6AssignmentDHCPv6(conn, iface, srcIP, solicit, netservice.DHCPv6MessageAdvertise, solicitTxID, deadline)
 	if err != nil {
 		return parsedIPv6AssignmentDHCPv6Response{}, err
 	}
@@ -1659,8 +1660,8 @@ func performIPv6AssignmentDHCPv6Handshake(conn *net.UDPConn, iface net.Interface
 	}
 
 	requestTxID := [3]byte{0x10, 0x20, 0x31}
-	request := buildIPv6AssignmentDHCPv6Message(dhcpv6MessageRequest, requestTxID, clientID, advertise.ServerID, iaid)
-	reply, err := exchangeIPv6AssignmentDHCPv6(conn, iface, srcIP, request, dhcpv6MessageReply, requestTxID, deadline)
+	request := buildIPv6AssignmentDHCPv6Message(netservice.DHCPv6MessageRequest, requestTxID, clientID, advertise.ServerID, iaid)
+	reply, err := exchangeIPv6AssignmentDHCPv6(conn, iface, srcIP, request, netservice.DHCPv6MessageReply, requestTxID, deadline)
 	if err != nil {
 		return parsedIPv6AssignmentDHCPv6Response{}, err
 	}
@@ -1669,7 +1670,7 @@ func performIPv6AssignmentDHCPv6Handshake(conn *net.UDPConn, iface net.Interface
 
 func exchangeIPv6AssignmentDHCPv6(conn *net.UDPConn, iface net.Interface, srcIP net.IP, request []byte, wantType byte, wantTxID [3]byte, deadline time.Time) (parsedIPv6AssignmentDHCPv6Response, error) {
 	for time.Now().Before(deadline) {
-		if err := sendIPv6AssignmentDHCPv6Frame(iface, srcIP, dhcpv6AllServersAndRelays, request); err != nil {
+		if err := sendIPv6AssignmentDHCPv6Frame(iface, srcIP, netservice.DHCPv6AllServersAndRelays(), request); err != nil {
 			return parsedIPv6AssignmentDHCPv6Response{}, fmt.Errorf("send dhcpv6 message: %w", err)
 		}
 		stepDeadline := time.Now().Add(1 * time.Second)
@@ -1695,7 +1696,7 @@ func sendIPv6AssignmentDHCPv6Frame(iface net.Interface, srcIP net.IP, dstIP net.
 	if err != nil {
 		return err
 	}
-	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htonsUnix(unix.ETH_P_IPV6)))
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(netservice.Htons(unix.ETH_P_IPV6)))
 	if err != nil {
 		return err
 	}
@@ -1705,7 +1706,7 @@ func sendIPv6AssignmentDHCPv6Frame(iface net.Interface, srcIP net.IP, dstIP net.
 	copy(addr[:], []byte{0x33, 0x33, 0x00, 0x01, 0x00, 0x02})
 	return unix.Sendto(fd, frame, 0, &unix.SockaddrLinklayer{
 		Ifindex:  iface.Index,
-		Protocol: htonsUnix(unix.ETH_P_IPV6),
+		Protocol: netservice.Htons(unix.ETH_P_IPV6),
 		Halen:    6,
 		Addr:     addr,
 	})
@@ -1743,8 +1744,8 @@ func buildIPv6AssignmentDHCPv6Frame(iface net.Interface, srcIP net.IP, dstIP net
 	copy(ipv6Header[24:40], dst)
 
 	udp := frame[14+40:]
-	binary.BigEndian.PutUint16(udp[0:2], dhcpv6ClientPort)
-	binary.BigEndian.PutUint16(udp[2:4], dhcpv6ServerPort)
+	binary.BigEndian.PutUint16(udp[0:2], netservice.DHCPv6ClientPort)
+	binary.BigEndian.PutUint16(udp[2:4], netservice.DHCPv6ServerPort)
 	binary.BigEndian.PutUint16(udp[4:6], uint16(udpLen))
 	copy(udp[8:], payload)
 	binary.BigEndian.PutUint16(udp[6:8], udpChecksumIPv6(src, dst, udp))
@@ -1805,18 +1806,26 @@ func waitForIPv6AssignmentDHCPv6Response(conn *net.UDPConn, deadline time.Time, 
 
 func buildIPv6AssignmentDHCPv6Message(msgType byte, txID [3]byte, clientID []byte, serverID []byte, iaid [4]byte) []byte {
 	out := []byte{msgType, txID[0], txID[1], txID[2]}
-	out = append(out, buildDHCPv6Option(dhcpv6OptionClientID, clientID)...)
+	out = append(out, mustBuildIPv6AssignmentDHCPv6Option(netservice.DHCPv6OptionClientID, clientID)...)
 	if len(serverID) > 0 {
-		out = append(out, buildDHCPv6Option(dhcpv6OptionServerID, serverID)...)
+		out = append(out, mustBuildIPv6AssignmentDHCPv6Option(netservice.DHCPv6OptionServerID, serverID)...)
 	}
 	iana := make([]byte, 12)
 	copy(iana[:4], iaid[:])
-	out = append(out, buildDHCPv6Option(dhcpv6OptionIANA, iana)...)
+	out = append(out, mustBuildIPv6AssignmentDHCPv6Option(netservice.DHCPv6OptionIANA, iana)...)
 	return out
 }
 
+func mustBuildIPv6AssignmentDHCPv6Option(code uint16, value []byte) []byte {
+	option, err := netservice.BuildDHCPv6Option(code, value)
+	if err != nil {
+		panic(err)
+	}
+	return option
+}
+
 func parseIPv6AssignmentDHCPv6Response(packet []byte) (parsedIPv6AssignmentDHCPv6Response, error) {
-	msg, err := parseDHCPv6Message(packet)
+	msg, err := netservice.ParseDHCPv6Message(packet)
 	if err != nil {
 		return parsedIPv6AssignmentDHCPv6Response{}, err
 	}
@@ -1836,7 +1845,7 @@ func parseIPv6AssignmentDHCPv6Response(packet []byte) (parsedIPv6AssignmentDHCPv
 		}
 		value := options[:length]
 		options = options[length:]
-		if code != dhcpv6OptionIANA || len(value) < 12 {
+		if code != netservice.DHCPv6OptionIANA || len(value) < 12 {
 			continue
 		}
 		nested := value[12:]
@@ -1849,7 +1858,7 @@ func parseIPv6AssignmentDHCPv6Response(packet []byte) (parsedIPv6AssignmentDHCPv
 			}
 			nestedValue := nested[:nestedLength]
 			nested = nested[nestedLength:]
-			if nestedCode != dhcpv6OptionIAAddr || len(nestedValue) < 24 {
+			if nestedCode != netservice.DHCPv6OptionIAAddr || len(nestedValue) < 24 {
 				continue
 			}
 			ip := net.IP(append([]byte(nil), nestedValue[:16]...))

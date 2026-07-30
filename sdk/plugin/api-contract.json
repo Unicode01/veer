@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -942,6 +942,24 @@
         "max_response_bytes": 75497472
       },
       {
+        "method": "net.bridge.fdb.list",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
         "method": "net.dns.lookup",
         "permissions": [
           "net.dns"
@@ -1550,6 +1568,24 @@
       },
       {
         "method": "net.neigh.delete",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.neigh.list",
         "permissions": [
           "net.admin"
         ],
@@ -2877,6 +2913,7 @@
     "metrics.list",
     "net.addr.delete",
     "net.addr.replace",
+    "net.bridge.fdb.list",
     "net.dns.lookup",
     "net.http.request",
     "net.l2.exchange",
@@ -2913,6 +2950,7 @@
     "net.namespace.owned",
     "net.namespace.release",
     "net.neigh.delete",
+    "net.neigh.list",
     "net.neigh.replace",
     "net.neigh.transaction",
     "net.prefix.subnet",

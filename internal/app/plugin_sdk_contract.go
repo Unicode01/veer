@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const pluginSDKContractVersion = 7
+const pluginSDKContractVersion = 8
 
 type pluginSDKAPIContract struct {
 	Version           int                                 `json:"version"`

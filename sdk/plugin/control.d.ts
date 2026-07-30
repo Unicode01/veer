@@ -736,6 +736,55 @@ declare global {
     vlan?: number;
   }
 
+  interface VeerNetInventoryRequest extends VeerNetRequest {
+    interface: string;
+    limit?: number;
+  }
+
+  interface VeerNetNeighListRequest extends VeerNetInventoryRequest {
+    family?: 'all' | 'ipv4' | 'ipv6' | '4' | '6' | 'inet' | 'inet6';
+  }
+
+  interface VeerNetNeighborInfo {
+    namespace: string;
+    interface: string;
+    ip: string;
+    mac: string;
+    family: 'ipv4' | 'ipv6';
+    state: string;
+    vlan: number;
+    flags: number;
+    flags_ext: number;
+    type: number;
+  }
+
+  interface VeerNetFDBInfo {
+    namespace: string;
+    interface: string;
+    bridge: string;
+    mac: string;
+    state: string;
+    vlan: number;
+    flags: number;
+    flags_ext: number;
+    type: number;
+  }
+
+  interface VeerNetInventoryResult<T> {
+    items: T[];
+    truncated: boolean;
+  }
+
+  interface VeerNetNeighAPI extends VeerNetMutationAPI<VeerNetNeighRequest> {
+    list(request: VeerNetNeighListRequest): VeerNetInventoryResult<VeerNetNeighborInfo>;
+  }
+
+  interface VeerNetBridgeAPI {
+    fdb: {
+      list(request: VeerNetInventoryRequest): VeerNetInventoryResult<VeerNetFDBInfo>;
+    };
+  }
+
   interface VeerNetTransactionOperation<T extends VeerNetRequest = VeerNetRequest> {
     op: 'replace' | 'delete';
     request: T;
@@ -960,7 +1009,8 @@ declare global {
     addr: VeerNetAddrAPI;
     route: VeerNetMutationAPI<VeerNetRouteRequest>;
     rule: VeerNetMutationAPI<VeerNetRuleRequest>;
-    neigh: VeerNetMutationAPI<VeerNetNeighRequest>;
+    neigh: VeerNetNeighAPI;
+    bridge: VeerNetBridgeAPI;
   }
 
   interface VeerEBPFAPI {

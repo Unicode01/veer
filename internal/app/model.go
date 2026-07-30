@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/Unicode01/veer/internal/kernelcap"
+	"github.com/Unicode01/veer/internal/netinfo"
 )
 
 type Rule struct {
@@ -84,28 +85,9 @@ type IPCMessage struct {
 	BinaryHash     string             `json:"binary_hash,omitempty"`
 }
 
-type InterfaceInfo struct {
-	Name   string   `json:"name"`
-	Addrs  []string `json:"addrs"`
-	Parent string   `json:"parent,omitempty"`
-	Kind   string   `json:"kind,omitempty"`
-}
-
-type HostInterfaceAddress struct {
-	Family    string `json:"family"`
-	IP        string `json:"ip"`
-	CIDR      string `json:"cidr"`
-	PrefixLen int    `json:"prefix_len"`
-}
-
-type HostNetworkInterface struct {
-	Name             string                 `json:"name"`
-	Kind             string                 `json:"kind,omitempty"`
-	Parent           string                 `json:"parent,omitempty"`
-	DefaultIPv4Route bool                   `json:"default_ipv4_route,omitempty"`
-	DefaultIPv6Route bool                   `json:"default_ipv6_route,omitempty"`
-	Addresses        []HostInterfaceAddress `json:"addresses,omitempty"`
-}
+type InterfaceInfo = netinfo.InterfaceInfo
+type HostInterfaceAddress = netinfo.HostInterfaceAddress
+type HostNetworkInterface = netinfo.HostNetworkInterface
 
 type HostNetworkResponse struct {
 	Interfaces []HostNetworkInterface `json:"interfaces"`

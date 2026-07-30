@@ -80,3 +80,64 @@ func TestCompilePluginDHCPv4PlanRejectsMoreThanEightDNSServers(t *testing.T) {
 		t.Fatalf("items=%+v warnings=%v, want DNS count rejection", items, warnings)
 	}
 }
+
+func TestCompilePluginDHCPv4PlanBuildsReservations(t *testing.T) {
+	t.Parallel()
+
+	record := store.PluginRecord{
+		PluginID:   "lan_core",
+		ResourceID: pluginDHCPv4PlansResourceID,
+		RecordKey:  "reserved",
+		DataJSON:   `{"bridge":"br-lan","ipv4_cidr":"192.168.50.1/24","pool_start":"192.168.50.100","pool_end":"192.168.50.200","reservations":[{"mac_address":"02-00-00-00-00-02","ipv4_address":"192.168.50.20","remark":"vm 2"},{"mac_address":"02:00:00:00:00:01","ipv4_address":"192.168.50.10"}],"enabled":true}`,
+		Enabled:    true,
+	}
+
+	networks, reservations, warnings := compilePluginDHCPv4PlansAndReservationsWithWarnings([]store.PluginRecord{record}, nil)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(networks) != 1 || len(reservations) != 2 {
+		t.Fatalf("networks=%+v reservations=%+v", networks, reservations)
+	}
+	if reservations[0].ManagedNetworkID != networks[0].ID || reservations[1].ManagedNetworkID != networks[0].ID {
+		t.Fatalf("reservation ownership = %+v, want network %d", reservations, networks[0].ID)
+	}
+	if reservations[0].MACAddress != "02:00:00:00:00:01" || reservations[0].IPv4Address != "192.168.50.10" {
+		t.Fatalf("first reservation = %+v, want normalized and sorted", reservations[0])
+	}
+	if reservations[1].Remark != "vm 2" || reservations[0].ID >= 0 || reservations[1].ID >= 0 {
+		t.Fatalf("reservations = %+v, want deterministic synthetic records", reservations)
+	}
+}
+
+func TestCompilePluginDHCPv4PlanRejectsInvalidReservations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		items    string
+		contains string
+	}{
+		{name: "duplicate mac", items: `[{"mac_address":"02:00:00:00:00:01","ipv4_address":"192.168.50.10"},{"mac_address":"02:00:00:00:00:01","ipv4_address":"192.168.50.11"}]`, contains: "duplicates"},
+		{name: "duplicate ip", items: `[{"mac_address":"02:00:00:00:00:01","ipv4_address":"192.168.50.10"},{"mac_address":"02:00:00:00:00:02","ipv4_address":"192.168.50.10"}]`, contains: "duplicates"},
+		{name: "outside subnet", items: `[{"mac_address":"02:00:00:00:00:01","ipv4_address":"192.168.51.10"}]`, contains: "inside ipv4_cidr"},
+		{name: "gateway", items: `[{"mac_address":"02:00:00:00:00:01","ipv4_address":"192.168.50.1"}]`, contains: "gateway address"},
+		{name: "broadcast", items: `[{"mac_address":"02:00:00:00:00:01","ipv4_address":"192.168.50.255"}]`, contains: "usable host"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			record := store.PluginRecord{
+				PluginID:   "lan_core",
+				ResourceID: pluginDHCPv4PlansResourceID,
+				RecordKey:  tc.name,
+				DataJSON:   `{"bridge":"br-lan","ipv4_cidr":"192.168.50.1/24","reservations":` + tc.items + `,"enabled":true}`,
+				Enabled:    true,
+			}
+			networks, reservations, warnings := compilePluginDHCPv4PlansAndReservationsWithWarnings([]store.PluginRecord{record}, nil)
+			if len(networks) != 0 || len(reservations) != 0 || len(warnings) != 1 || !strings.Contains(warnings[0], tc.contains) {
+				t.Fatalf("networks=%+v reservations=%+v warnings=%v", networks, reservations, warnings)
+			}
+		})
+	}
+}

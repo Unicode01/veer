@@ -170,6 +170,45 @@ exports.onAction = function () {
   assert.deepEqual(host.action('apply'), {status: 'completed', operations: 1});
 });
 
+test('test host scopes read-only neighbor and bridge FDB inventory', (t) => {
+  const manifest = testManifest('sdk_net_inventory');
+  manifest.control.net_access = [{
+    interfaces: ['test*'],
+    operations: ['neigh.read', 'bridge.fdb.read'],
+  }];
+  const pluginDir = writePlugin(t, manifest, `
+plugin.action({id: 'apply', runtime_update: 'runtime_query'});
+exports.onReconcile = function () {};
+exports.onAction = function () {
+  return {
+    neigh: net.neigh.list({interface: 'test0', family: 'ipv4', limit: 10}),
+    fdb: net.bridge.fdb.list({interface: 'testbr0', limit: 20})
+  };
+};
+`);
+  const host = createTestHost({
+    pluginDir,
+    adapters: {
+      'net.neigh.list': () => ({items: [{interface: 'test0', ip: '192.0.2.2'}], truncated: false}),
+      'net.bridge.fdb.list': () => ({items: [{interface: 'test1', mac: '02:00:00:00:00:01'}], truncated: false}),
+    },
+  });
+
+  assert.deepEqual(host.action('apply'), {
+    neigh: {items: [{interface: 'test0', ip: '192.0.2.2'}], truncated: false},
+    fdb: {items: [{interface: 'test1', mac: '02:00:00:00:00:01'}], truncated: false},
+  });
+
+  manifest.control.net_access = [{interfaces: ['test*'], operations: ['neigh.read']}];
+  const deniedDir = writePlugin(t, manifest, `
+plugin.action({id: 'apply', runtime_update: 'runtime_query'});
+exports.onReconcile = function () {};
+exports.onAction = function () { return net.bridge.fdb.list({interface: 'testbr0'}); };
+`);
+  const denied = createTestHost({pluginDir: deniedDir, adapters: {'net.bridge.fdb.list': () => ({items: [], truncated: false})}});
+  assert.throws(() => denied.action('apply'), /net_access bridge\.fdb\.read for interface testbr0 is not declared/);
+});
+
 test('test host brokers HTTP and DNS through explicit scoped adapters', (t) => {
   const manifest = testManifest('sdk_clients');
   manifest.control.permissions.push('net.http', 'net.dns');
@@ -482,7 +521,7 @@ test('test host loads bundled control-plane plugins without compatibility shims'
 test('test host exposes every versioned control API method', (t) => {
   const pluginDir = writePlugin(t, testManifest('api_contract'), `exports.onReconcile = function () {};`);
   const host = createTestHost({ pluginDir });
-  assert.equal(apiContract.version, 7);
+  assert.equal(apiContract.version, 8);
   assert.equal(apiContract.runtime.api_version, 'v1');
   assert.equal(apiContract.runtime.tc_pipeline_abi, 2);
   assert.equal(apiContract.runtime.core_priority, 1000);

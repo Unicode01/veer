@@ -2324,7 +2324,7 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitEgressInterfaceWithoutRules(
 	for _, attachment := range rt.attachments {
 		filter := attachment.filter
 		if filter.Parent != netlink.HANDLE_MIN_EGRESS {
-			t.Fatalf("filter parent = %#x, want HANDLE_MIN_EGRESS %#x", filter.Parent, netlink.HANDLE_MIN_EGRESS)
+			t.Fatalf("filter parent = %#x, want HANDLE_MIN_EGRESS %#x", filter.Parent, uint32(netlink.HANDLE_MIN_EGRESS))
 		}
 		if _, ok := wantNames[filter.Name]; !ok {
 			t.Fatalf("unexpected egress filter name %q", filter.Name)

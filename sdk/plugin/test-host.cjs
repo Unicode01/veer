@@ -732,6 +732,22 @@ class VeerPluginTestHost {
       neighAccess(request);
       return this.#adapter(`net.neigh.${name}`, [request]);
     };
+    const inventoryMethod = (api, operation, allowFamily = false) => (request = {}) => {
+      this.#requirePermission('net.admin', api);
+      scopedNamespace(request, api);
+      const interfaceName = String(request.interface || request.dev || request.link || '').trim();
+      if (!interfaceName) throw new Error(`${api}: interface is required`);
+      this.#requireNetAccess(operation, interfaceName);
+      const limit = Number(request.limit == null ? 1024 : request.limit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 4096) throw new Error(`${api}: limit must be between 1 and 4096`);
+      if (allowFamily) {
+        const family = String(request.family || 'all').trim().toLowerCase();
+        if (!['all', 'ipv4', 'ipv6', '4', '6', 'inet', 'inet6'].includes(family)) {
+          throw new Error(`${api}: family must be all, ipv4, or ipv6`);
+        }
+      }
+      return this.#adapter(api, [request]);
+    };
     const netTransactionMethod = (group, validateAccess) => (operations) => {
       this.#requirePermission('net.admin', `net.${group}.transaction`);
       if (!Array.isArray(operations) || operations.length < 1 || operations.length > 128) {
@@ -977,7 +993,11 @@ class VeerPluginTestHost {
         addr: Object.freeze({ replace: addrMethod('replace'), delete: addrMethod('delete') }),
         route: Object.freeze({ replace: routeMethod('replace'), delete: routeMethod('delete'), transaction: netTransactionMethod('route', routeAccess) }),
         rule: Object.freeze({ replace: ruleMethod('replace'), delete: ruleMethod('delete'), transaction: netTransactionMethod('rule', ruleAccess) }),
-        neigh: Object.freeze({ replace: neighMethod('replace'), delete: neighMethod('delete'), transaction: netTransactionMethod('neigh', neighAccess) }),
+        neigh: Object.freeze({
+          list: inventoryMethod('net.neigh.list', 'neigh.read', true),
+          replace: neighMethod('replace'), delete: neighMethod('delete'), transaction: netTransactionMethod('neigh', neighAccess),
+        }),
+        bridge: Object.freeze({fdb: Object.freeze({list: inventoryMethod('net.bridge.fdb.list', 'bridge.fdb.read')})}),
       }),
       log: Object.freeze(Object.fromEntries(['debug', 'info', 'warn', 'error'].map((level) => [level, (...values) => this.#log(level, values)]))),
     };

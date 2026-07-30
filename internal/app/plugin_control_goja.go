@@ -2693,6 +2693,9 @@ func (h *pluginControlHost) install() error {
 	}
 
 	neighAPI := h.vm.NewObject()
+	if err := neighAPI.Set("list", h.netNeighList); err != nil {
+		return err
+	}
 	if err := neighAPI.Set("replace", h.netNeighReplace); err != nil {
 		return err
 	}
@@ -2703,6 +2706,17 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := netAPI.Set("neigh", neighAPI); err != nil {
+		return err
+	}
+	bridgeAPI := h.vm.NewObject()
+	fdbAPI := h.vm.NewObject()
+	if err := fdbAPI.Set("list", h.netBridgeFDBList); err != nil {
+		return err
+	}
+	if err := bridgeAPI.Set("fdb", fdbAPI); err != nil {
+		return err
+	}
+	if err := netAPI.Set("bridge", bridgeAPI); err != nil {
 		return err
 	}
 	if err := h.vm.Set("net", netAPI); err != nil {
