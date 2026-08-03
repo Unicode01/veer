@@ -146,6 +146,7 @@
   app.state.confirmResolver = null;
   app.state.confirmFocusReturn = null;
   app.state.activeRequests = app.state.activeRequests || 0;
+  app.state.syncFailureRetrying = app.state.syncFailureRetrying === true;
   app.state.pageVisible = typeof app.state.pageVisible === 'boolean' ? app.state.pageVisible : !document.hidden;
   app.state.activeDropdown = app.state.activeDropdown || null;
   app.state.dropdownPositionScheduled = false;
@@ -673,6 +674,229 @@
       .sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
   }
 
+  function retryableRequestFailures(failures) {
+    const loaders = app.requestFailureLoaders || {};
+    return (failures || []).filter((failure) => {
+      const loaderName = loaders[String(failure && failure.path || '')];
+      return !!loaderName && typeof app[loaderName] === 'function';
+    });
+  }
+
+  let syncFailurePopover = null;
+
+  function ensureSyncFailurePopover() {
+    if (syncFailurePopover) return syncFailurePopover;
+    syncFailurePopover = app.createNode('div', {
+      className: 'kernel-runtime-floating-tooltip overview-sync-popover',
+      attrs: {
+        id: 'overviewSyncPopover',
+        role: 'dialog',
+        'aria-label': app.t('overview.syncFailuresTitle'),
+        hidden: true
+      }
+    });
+    document.body.appendChild(syncFailurePopover);
+    return syncFailurePopover;
+  }
+
+  function positionSyncFailurePopover() {
+    if (!syncFailurePopover || syncFailurePopover.hidden || !app.el.lastSyncLabel) return;
+
+    const margin = 12;
+    const offset = 8;
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const triggerRect = app.el.lastSyncLabel.getBoundingClientRect();
+    const spaceBelow = Math.max(0, viewportHeight - triggerRect.bottom - offset - margin);
+    const spaceAbove = Math.max(0, triggerRect.top - offset - margin);
+    const preferBelow = spaceBelow >= 180 || spaceBelow >= spaceAbove;
+    const availableHeight = preferBelow ? spaceBelow : spaceAbove;
+
+    const viewportMaxHeight = Math.max(80, viewportHeight - margin * 2);
+    syncFailurePopover.style.maxHeight = Math.min(320, viewportMaxHeight, Math.max(120, availableHeight)) + 'px';
+    syncFailurePopover.style.left = '0px';
+    syncFailurePopover.style.top = '0px';
+
+    const popoverRect = syncFailurePopover.getBoundingClientRect();
+    let left = triggerRect.right - popoverRect.width;
+    left = Math.min(Math.max(left, margin), Math.max(margin, viewportWidth - popoverRect.width - margin));
+
+    let top = preferBelow ? triggerRect.bottom + offset : triggerRect.top - popoverRect.height - offset;
+    if (top < margin) top = margin;
+    if (top + popoverRect.height > viewportHeight - margin) {
+      top = Math.max(margin, viewportHeight - popoverRect.height - margin);
+    }
+
+    syncFailurePopover.style.left = Math.round(left) + 'px';
+    syncFailurePopover.style.top = Math.round(top) + 'px';
+  }
+
+  function hideSyncFailurePopover(options) {
+    const opts = options || {};
+    if (app.el.lastSyncLabel) app.el.lastSyncLabel.setAttribute('aria-expanded', 'false');
+    if (!syncFailurePopover) return;
+    syncFailurePopover.classList.remove('is-visible');
+    syncFailurePopover.hidden = true;
+    app.clearNode(syncFailurePopover);
+    if (opts.restoreFocus && app.el.lastSyncLabel && !app.el.lastSyncLabel.disabled) {
+      app.el.lastSyncLabel.focus();
+    }
+  }
+
+  function renderSyncFailurePopover() {
+    const failures = requestFailureEntries();
+    if (!failures.length) {
+      hideSyncFailurePopover();
+      return;
+    }
+
+    const popover = ensureSyncFailurePopover();
+    const retrying = app.state.syncFailureRetrying === true;
+    const retryableFailures = retryableRequestFailures(failures);
+    const closeButton = app.createNode('button', {
+      className: 'mini-btn',
+      text: app.t('common.close'),
+      attrs: { type: 'button' }
+    });
+    closeButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      hideSyncFailurePopover({ restoreFocus: true });
+    });
+
+    const retryButton = retryableFailures.length
+      ? app.createNode('button', {
+        className: 'mini-btn' + (retrying ? ' is-busy' : ''),
+        text: app.t(retrying ? 'overview.syncRetrying' : 'common.retry'),
+        attrs: { type: 'button', 'aria-busy': retrying ? 'true' : 'false' },
+        disabled: retrying
+      })
+      : null;
+    if (retryButton) {
+      retryButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        app.retryRequestFailures();
+      });
+    }
+
+    app.clearNode(popover);
+    app.appendNodeContent(popover, [
+      app.createNode('div', {
+        className: 'overview-sync-popover-header',
+        children: [
+          app.createNode('div', {
+            children: [
+              app.createNode('span', {
+                className: 'overview-sync-popover-title',
+                text: app.t('overview.syncFailed', { count: failures.length })
+              }),
+              app.createNode('span', {
+                className: 'overview-sync-popover-hint',
+                text: app.t(retryableFailures.length ? 'overview.syncFailuresHint' : 'overview.syncFailuresManualHint')
+              })
+            ]
+          }),
+          closeButton
+        ]
+      }),
+      app.createNode('div', {
+        className: 'overview-sync-failure-list',
+        attrs: { role: 'list' },
+        children: failures.map((failure) => app.createNode('div', {
+          className: 'overview-sync-failure',
+          attrs: { role: 'listitem' },
+          children: [
+            app.createNode('span', {
+              className: 'overview-sync-failure-path',
+              text: failure.path || app.t('common.unknown')
+            }),
+            app.createNode('span', {
+              className: 'overview-sync-failure-message',
+              text: failure.message || app.t('common.unknown')
+            })
+          ]
+        }))
+      }),
+      retryableFailures.length ? app.createNode('div', {
+        className: 'overview-sync-popover-actions',
+        children: [retryButton]
+      }) : null
+    ].filter(Boolean));
+
+    popover.setAttribute('aria-label', app.t('overview.syncFailuresTitle'));
+    popover.hidden = false;
+    popover.classList.add('is-visible');
+    app.el.lastSyncLabel.setAttribute('aria-expanded', 'true');
+    positionSyncFailurePopover();
+  }
+
+  app.toggleSyncFailurePopover = function toggleSyncFailurePopover() {
+    if (!app.el.lastSyncLabel || app.el.lastSyncLabel.disabled) return;
+    if (syncFailurePopover && !syncFailurePopover.hidden) {
+      hideSyncFailurePopover();
+      return;
+    }
+    renderSyncFailurePopover();
+  };
+
+  app.retryRequestFailures = async function retryRequestFailures() {
+    const failures = requestFailureEntries();
+    if (app.state.syncFailureRetrying || !retryableRequestFailures(failures).length) return;
+    app.state.syncFailureRetrying = true;
+    renderSyncFailurePopover();
+
+    try {
+      if (typeof app.retryFailedDataLoads === 'function') {
+        await app.retryFailedDataLoads({ force: true, limit: 16 });
+      } else {
+        await app.refreshDashboard({ includeMeta: true, includePlugins: true, includeWorkers: true, includeStats: true });
+      }
+    } finally {
+      app.state.syncFailureRetrying = false;
+      const remaining = requestFailureEntries().length;
+      app.renderOverview();
+      if (remaining) {
+        renderSyncFailurePopover();
+        app.notify('warning', app.t('overview.syncRetryRemaining', { count: remaining }));
+      } else {
+        hideSyncFailurePopover();
+        app.notify('success', app.t('overview.syncRestored'));
+      }
+    }
+  };
+
+  if (app.el.lastSyncLabel) {
+    app.el.lastSyncLabel.addEventListener('click', (event) => {
+      event.stopPropagation();
+      app.toggleSyncFailurePopover();
+    });
+    app.el.lastSyncLabel.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        app.toggleSyncFailurePopover();
+      } else if (event.key === 'Escape') {
+        hideSyncFailurePopover();
+      }
+    });
+  }
+
+  window.addEventListener('resize', positionSyncFailurePopover);
+  document.addEventListener('scroll', positionSyncFailurePopover, true);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') hideSyncFailurePopover();
+  });
+  document.addEventListener('click', (event) => {
+    if (!syncFailurePopover || syncFailurePopover.hidden) return;
+    if (app.el.lastSyncLabel && app.el.lastSyncLabel.contains(event.target)) return;
+    if (syncFailurePopover.contains(event.target)) return;
+    hideSyncFailurePopover();
+  });
+  document.addEventListener('focusin', (event) => {
+    if (!syncFailurePopover || syncFailurePopover.hidden) return;
+    if (app.el.lastSyncLabel && app.el.lastSyncLabel.contains(event.target)) return;
+    if (syncFailurePopover.contains(event.target)) return;
+    hideSyncFailurePopover();
+  });
+
   function isMissingPluginResourceRecord(method, path, error) {
     if (String(method || '').toUpperCase() !== 'GET' || Number(error && error.status) !== 404) return false;
     const segments = String(path || '').trim().split(/[?#]/, 1)[0].split('/').filter(Boolean);
@@ -709,7 +933,10 @@
     }
     app.state.requestFailures = failures;
     if (firstFailure && typeof app.notify === 'function') {
-      app.notify('warning', app.t('overview.syncFailedToast', { message: failures[key].message }));
+      const retryable = retryableRequestFailures([failures[key]]).length > 0;
+      app.notify('warning', app.t(retryable ? 'overview.syncFailedToast' : 'overview.syncFailedManualToast', {
+        message: failures[key].message
+      }));
     }
     app.renderOverview();
   };
@@ -751,19 +978,28 @@
       const failures = requestFailureEntries();
       const showFailure = !busy && failures.length > 0;
       app.el.lastSyncLabel.classList.toggle('is-error', showFailure);
+      app.el.lastSyncLabel.disabled = !showFailure;
       if (busy) {
         app.el.lastSyncLabel.textContent = app.t('overview.syncing');
         app.el.lastSyncLabel.title = '';
       } else if (showFailure) {
         app.el.lastSyncLabel.textContent = app.t('overview.syncFailed', { count: failures.length });
-        app.el.lastSyncLabel.title = failures.slice(0, 8)
-          .map((failure) => failure.path + ': ' + failure.message)
-          .join('\n');
+        app.el.lastSyncLabel.title = '';
+        app.el.lastSyncLabel.setAttribute('aria-controls', 'overviewSyncPopover');
+        app.el.lastSyncLabel.setAttribute('aria-haspopup', 'dialog');
+        app.el.lastSyncLabel.setAttribute('aria-label', app.t('overview.syncFailed', { count: failures.length }) + '. ' + app.t('overview.syncFailuresTitle'));
       } else {
         app.el.lastSyncLabel.textContent = app.state.lastSyncAt
           ? app.t('overview.lastSync', { time: app.formatClock(app.state.lastSyncAt) })
           : app.t('overview.awaitingSync');
         app.el.lastSyncLabel.title = '';
+        app.el.lastSyncLabel.removeAttribute('aria-controls');
+        app.el.lastSyncLabel.removeAttribute('aria-haspopup');
+        app.el.lastSyncLabel.removeAttribute('aria-label');
+        hideSyncFailurePopover();
+      }
+      if (!busy && failures.length && syncFailurePopover && !syncFailurePopover.hidden && !app.state.syncFailureRetrying) {
+        renderSyncFailurePopover();
       }
     }
   };
