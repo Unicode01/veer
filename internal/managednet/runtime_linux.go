@@ -135,9 +135,19 @@ func (ops *linuxNetOps) DeleteManagedNetworkIPv4Address(spec IPv4AddressSpec) er
 		return err
 	}
 	if err := netlink.AddrDel(link, addr); err != nil {
-		return nil
+		if managedNetworkIPv4AddressDeleteErrorIsAbsent(err) {
+			return nil
+		}
+		return err
 	}
 	return nil
+}
+
+func managedNetworkIPv4AddressDeleteErrorIsAbsent(err error) bool {
+	return errors.Is(err, unix.ESRCH) ||
+		errors.Is(err, unix.ENOENT) ||
+		errors.Is(err, unix.ENODEV) ||
+		errors.Is(err, unix.EADDRNOTAVAIL)
 }
 
 func (ops *linuxNetOps) EnsureManagedNetworkDHCPv4(config DHCPv4Config) error {

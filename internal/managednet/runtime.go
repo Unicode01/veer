@@ -73,7 +73,7 @@ type IPv4Runtime struct {
 	mu                   sync.Mutex
 	ops                  NetOps
 	preserveStateOnClose func() bool
-	addresses            map[string]IPv4AddressSpec
+	addresses            map[IPv4AddressSpec]struct{}
 	dhcpv4               map[string]DHCPv4Config
 	bridges              map[int64]string
 	status               map[int64]RuntimeStatus
@@ -86,7 +86,7 @@ func NewIPv4Runtime(ops NetOps, preserveStateOnClose func() bool) *IPv4Runtime {
 	return &IPv4Runtime{
 		ops:                  ops,
 		preserveStateOnClose: preserveStateOnClose,
-		addresses:            make(map[string]IPv4AddressSpec),
+		addresses:            make(map[IPv4AddressSpec]struct{}),
 		dhcpv4:               make(map[string]DHCPv4Config),
 		bridges:              make(map[int64]string),
 		status:               make(map[int64]RuntimeStatus),
@@ -179,7 +179,8 @@ func (rt *IPv4Runtime) Reconcile(items []ManagedNetwork, reservations []ManagedN
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	desiredAddresses := make(map[string]IPv4AddressSpec)
+	desiredAddresses := make(map[IPv4AddressSpec]struct{})
+	addressApplyFailed := make(map[string]struct{})
 	desiredDHCPv4 := make(map[string]DHCPv4Config)
 	desiredBridges := make(map[int64]string)
 	desiredForwarding := make(map[string]struct{})
@@ -267,7 +268,7 @@ func (rt *IPv4Runtime) Reconcile(items []ManagedNetwork, reservations []ManagedN
 		desiredBridges[plan.ID] = plan.Bridge
 		desiredInterfaces[plan.Bridge] = InterfaceSpecForItem(item)
 		if !plan.SkipAddressManagement {
-			desiredAddresses[plan.Bridge] = plan.AddressSpec
+			desiredAddresses[plan.AddressSpec] = struct{}{}
 		}
 		desiredDHCPv4[plan.Bridge] = plan.DHCPv4
 		if plan.NeedsForwarding {
@@ -281,7 +282,12 @@ func (rt *IPv4Runtime) Reconcile(items []ManagedNetwork, reservations []ManagedN
 	for name, spec := range desiredInterfaces {
 		if err := rt.ops.EnsureManagedNetworkInterface(spec); err != nil {
 			errs = append(errs, fmt.Sprintf("ensure managed interface %s: %v", name, err))
-			delete(desiredAddresses, name)
+			for address := range desiredAddresses {
+				if address.InterfaceName == name {
+					delete(desiredAddresses, address)
+				}
+			}
+			addressApplyFailed[name] = struct{}{}
 			delete(desiredDHCPv4, name)
 			delete(desiredForwarding, name)
 			markBridgeError(name, fmt.Sprintf("ensure managed interface %s: %v", name, err))
@@ -307,10 +313,11 @@ func (rt *IPv4Runtime) Reconcile(items []ManagedNetwork, reservations []ManagedN
 		}
 	}
 
-	for bridge, spec := range desiredAddresses {
+	for spec := range desiredAddresses {
 		if err := rt.ops.EnsureManagedNetworkIPv4Address(spec); err != nil {
-			errs = append(errs, fmt.Sprintf("configure ipv4 address on %s: %v", bridge, err))
-			markBridgeError(bridge, fmt.Sprintf("configure ipv4 address on %s: %v", bridge, err))
+			errs = append(errs, fmt.Sprintf("configure ipv4 address on %s: %v", spec.InterfaceName, err))
+			markBridgeError(spec.InterfaceName, fmt.Sprintf("configure ipv4 address on %s: %v", spec.InterfaceName, err))
+			addressApplyFailed[spec.InterfaceName] = struct{}{}
 		}
 	}
 	for bridge, config := range desiredDHCPv4 {
@@ -357,14 +364,20 @@ func (rt *IPv4Runtime) Reconcile(items []ManagedNetwork, reservations []ManagedN
 		}
 		if err := rt.ops.DeleteManagedNetworkDHCPv4(config.Bridge); err != nil {
 			errs = append(errs, fmt.Sprintf("remove dhcpv4 on %s: %v", bridge, err))
+			desiredDHCPv4[bridge] = config
 		}
 	}
-	for bridge, spec := range rt.addresses {
-		if _, ok := desiredAddresses[bridge]; ok {
+	for spec := range rt.addresses {
+		if _, ok := desiredAddresses[spec]; ok {
+			continue
+		}
+		if _, failed := addressApplyFailed[spec.InterfaceName]; failed {
+			desiredAddresses[spec] = struct{}{}
 			continue
 		}
 		if err := rt.ops.DeleteManagedNetworkIPv4Address(spec); err != nil {
-			errs = append(errs, fmt.Sprintf("remove ipv4 address on %s: %v", bridge, err))
+			errs = append(errs, fmt.Sprintf("remove ipv4 address on %s: %v", spec.InterfaceName, err))
+			desiredAddresses[spec] = struct{}{}
 		}
 	}
 
@@ -440,23 +453,23 @@ func (rt *IPv4Runtime) Close() error {
 	for _, config := range rt.dhcpv4 {
 		dhcpv4 = append(dhcpv4, config)
 	}
-	addresses := make(map[string]IPv4AddressSpec, len(rt.addresses))
+	addresses := make(map[IPv4AddressSpec]struct{}, len(rt.addresses))
 	if !preserveAddresses {
-		for bridge, spec := range rt.addresses {
-			addresses[bridge] = spec
+		for spec := range rt.addresses {
+			addresses[spec] = struct{}{}
 		}
 	}
 	rt.dhcpv4 = make(map[string]DHCPv4Config)
-	rt.addresses = make(map[string]IPv4AddressSpec)
+	rt.addresses = make(map[IPv4AddressSpec]struct{})
 	rt.bridges = make(map[int64]string)
 	rt.status = make(map[int64]RuntimeStatus)
 	rt.mu.Unlock()
 
 	errs := closeDHCPv4Configs(rt.ops, dhcpv4)
 	if !preserveAddresses {
-		for bridge, spec := range addresses {
+		for spec := range addresses {
 			if err := rt.ops.DeleteManagedNetworkIPv4Address(spec); err != nil {
-				errs = append(errs, fmt.Sprintf("remove ipv4 address on %s: %v", bridge, err))
+				errs = append(errs, fmt.Sprintf("remove ipv4 address on %s: %v", spec.InterfaceName, err))
 			}
 		}
 	}

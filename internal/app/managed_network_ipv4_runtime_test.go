@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,8 @@ type fakeManagedNetworkNetOps struct {
 	deleteDHCPv4Mu       sync.Mutex
 	deleteDHCPv4Active   int
 	deleteDHCPv4Max      int
+	ensureAddressErr     error
+	deleteErr            error
 }
 
 func (ops *fakeManagedNetworkNetOps) EnsureIPv4ForwardingEnabled() error {
@@ -39,12 +42,12 @@ func (ops *fakeManagedNetworkNetOps) EnsureManagedNetworkInterface(spec managedN
 
 func (ops *fakeManagedNetworkNetOps) EnsureManagedNetworkIPv4Address(spec managedNetworkIPv4AddressSpec) error {
 	ops.ensureAddresses = append(ops.ensureAddresses, spec)
-	return nil
+	return ops.ensureAddressErr
 }
 
 func (ops *fakeManagedNetworkNetOps) DeleteManagedNetworkIPv4Address(spec managedNetworkIPv4AddressSpec) error {
 	ops.deleteAddresses = append(ops.deleteAddresses, spec)
-	return nil
+	return ops.deleteErr
 }
 
 func (ops *fakeManagedNetworkNetOps) EnsureManagedNetworkDHCPv4(config managedNetworkDHCPv4Config) error {
@@ -70,7 +73,7 @@ func (ops *fakeManagedNetworkNetOps) DeleteManagedNetworkDHCPv4(bridge string) e
 		}()
 		time.Sleep(ops.deleteDHCPv4Delay)
 	}
-	return nil
+	return ops.deleteErr
 }
 
 func (ops *fakeManagedNetworkNetOps) SnapshotManagedNetworkDHCPv4States() map[string]managedNetworkDHCPv4RuntimeState {
@@ -203,6 +206,83 @@ func TestManagedIPv4NetworkRuntimeReconcileCreatesAndDeletesState(t *testing.T) 
 	}
 	if len(ops.deleteAddresses) != 1 || ops.deleteAddresses[0].InterfaceName != "vmbr0" {
 		t.Fatalf("deleteAddresses = %+v, want vmbr0 address removal", ops.deleteAddresses)
+	}
+}
+
+func TestManagedIPv4NetworkRuntimeRetriesFailedDeletes(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeManagedNetworkNetOps{}
+	rt := newManagedIPv4NetworkRuntime(ops)
+	if err := rt.Reconcile([]ManagedNetwork{{
+		ID:          1,
+		Name:        "lab",
+		Bridge:      "vmbr0",
+		IPv4Enabled: true,
+		IPv4CIDR:    "192.0.2.1/24",
+		Enabled:     true,
+	}}, nil); err != nil {
+		t.Fatalf("Reconcile(create) error = %v", err)
+	}
+
+	ops.deleteErr = errors.New("temporary delete failure")
+	if err := rt.Reconcile(nil, nil); err == nil || !strings.Contains(err.Error(), "temporary delete failure") {
+		t.Fatalf("Reconcile(failed delete) error = %v", err)
+	}
+	if len(ops.deleteDHCPv4) != 1 || len(ops.deleteAddresses) != 1 {
+		t.Fatalf("failed delete calls = dhcpv4:%v addresses:%v, want one each", ops.deleteDHCPv4, ops.deleteAddresses)
+	}
+
+	ops.deleteErr = nil
+	if err := rt.Reconcile(nil, nil); err != nil {
+		t.Fatalf("Reconcile(retry delete) error = %v", err)
+	}
+	if len(ops.deleteDHCPv4) != 2 || len(ops.deleteAddresses) != 2 {
+		t.Fatalf("retried delete calls = dhcpv4:%v addresses:%v, want two each", ops.deleteDHCPv4, ops.deleteAddresses)
+	}
+	if err := rt.Reconcile(nil, nil); err != nil {
+		t.Fatalf("Reconcile(after delete) error = %v", err)
+	}
+	if len(ops.deleteDHCPv4) != 2 || len(ops.deleteAddresses) != 2 {
+		t.Fatalf("completed deletes were retried: dhcpv4:%v addresses:%v", ops.deleteDHCPv4, ops.deleteAddresses)
+	}
+}
+
+func TestManagedIPv4NetworkRuntimeReplacesChangedAddressAfterNewAddressIsReady(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeManagedNetworkNetOps{}
+	rt := newManagedIPv4NetworkRuntime(ops)
+	item := ManagedNetwork{
+		ID:          1,
+		Name:        "lab",
+		Bridge:      "vmbr0",
+		IPv4Enabled: true,
+		IPv4CIDR:    "192.0.2.1/24",
+		Enabled:     true,
+	}
+	if err := rt.Reconcile([]ManagedNetwork{item}, nil); err != nil {
+		t.Fatalf("Reconcile(initial) error = %v", err)
+	}
+
+	item.IPv4CIDR = "198.51.100.1/24"
+	ops.ensureAddressErr = errors.New("temporary address apply failure")
+	if err := rt.Reconcile([]ManagedNetwork{item}, nil); err == nil || !strings.Contains(err.Error(), "temporary address apply failure") {
+		t.Fatalf("Reconcile(failed replacement) error = %v", err)
+	}
+	if len(ops.deleteAddresses) != 0 {
+		t.Fatalf("old address deleted before replacement was ready: %+v", ops.deleteAddresses)
+	}
+
+	ops.ensureAddressErr = nil
+	if err := rt.Reconcile([]ManagedNetwork{item}, nil); err != nil {
+		t.Fatalf("Reconcile(replacement) error = %v", err)
+	}
+	if len(ops.deleteAddresses) != 1 || ops.deleteAddresses[0].CIDR != "192.0.2.1/24" {
+		t.Fatalf("deleted addresses = %+v, want old 192.0.2.1/24", ops.deleteAddresses)
+	}
+	if got := ops.ensureAddresses[len(ops.ensureAddresses)-1].CIDR; got != "198.51.100.1/24" {
+		t.Fatalf("last ensured address = %q, want replacement", got)
 	}
 }
 
