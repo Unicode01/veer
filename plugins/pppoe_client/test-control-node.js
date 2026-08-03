@@ -355,8 +355,8 @@ function testPapIPv6PDTunnel() {
   assert(tunnelPut, 'traffic_probe should install a non-zero tunnel config');
   assert.strictEqual(tunnelPut.value.length, 104, 'tunnel config map value must stay ABI-sized');
   assert.strictEqual(tunnelPut.value.slice(16, 24), '66000000', 'pipeline ifindex should be encoded after local ifindex');
-  assert.strictEqual(tunnelPut.value.slice(36, 40), '0000', 'default tunnel config should prefer zero-copy decapsulation');
-  assert.strictEqual(tunnelPut.value.slice(40, 44), 'a005', 'IPv4 TCP MSS clamp should default to 1440 for PPPoE MRU 1492 with TCP timestamps');
+  assert.strictEqual(tunnelPut.value.slice(36, 40), '0000', 'default tunnel config should prefer automatic decapsulation');
+  assert.strictEqual(tunnelPut.value.slice(40, 44), 'ac05', 'IPv4 TCP MSS clamp should default to 1452 for PPPoE MRU 1492');
   const tunnelRecord = h.resource('tunnel_configs', 'active');
   assert.strictEqual(tunnelRecord.enabled, true, 'traffic_probe should persist active tunnel config');
   assert.strictEqual(tunnelRecord.data.value_hex, tunnelPut.value, 'persisted tunnel config should match applied map value');
