@@ -31,24 +31,14 @@ type pluginDHCPv4PlanReservation struct {
 }
 
 func loadActivePluginDHCPv4PlanRecords(db sqlRuleStore, cfg *Config) ([]store.PluginRecord, error) {
+	return loadActivePluginDHCPv4PlanRecordsWithCatalog(db, cfg, nil)
+}
+
+func loadActivePluginDHCPv4PlanRecordsWithCatalog(db sqlRuleStore, cfg *Config, catalog *PluginCatalog) ([]store.PluginRecord, error) {
 	if !pluginDHCPv4PlansEnabled(cfg) {
 		return nil, nil
 	}
-	activePlugins := activePluginDHCPv4PlanPluginIDs(db, cfg)
-	if len(activePlugins) == 0 {
-		return nil, nil
-	}
-	records, err := store.GetPluginRecordsByResource(db, pluginDHCPv4PlansResourceID)
-	if err != nil {
-		return nil, err
-	}
-	filtered := records[:0]
-	for _, record := range records {
-		if _, ok := activePlugins[record.PluginID]; ok {
-			filtered = append(filtered, record)
-		}
-	}
-	return filtered, nil
+	return loadActivePluginCoreResourceRecords(db, cfg, catalog, pluginDHCPv4PlansResourceID, pluginDHCPv4PlansResourceActive)
 }
 
 func compilePluginDHCPv4PlansWithWarnings(records []store.PluginRecord, existing []ManagedNetwork) ([]ManagedNetwork, []string) {
@@ -226,20 +216,6 @@ func compilePluginDHCPv4Reservations(pluginID, key string, managedNetworkID int6
 
 func pluginDHCPv4PlansEnabled(cfg *Config) bool {
 	return cfg != nil && cfg.PluginsEnabled()
-}
-
-func activePluginDHCPv4PlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]struct{} {
-	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
-	out := make(map[string]struct{})
-	for _, plugin := range catalog.Plugins {
-		if pluginDHCPv4PlansResourceActive(plugin, cfg) {
-			out[plugin.ID] = struct{}{}
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func pluginDHCPv4PlansResourceActive(plugin LoadedPlugin, cfg *Config) bool {

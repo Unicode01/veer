@@ -419,9 +419,16 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 		return "", nil, nil
 	}
 
-	plan, err := loadEffectiveNetworkPlan(pm.db, pluginCatalogConfigForProcess(pm, pm.cfg), effectiveNetworkPlanLoadOptions{
+	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
+	var pluginCatalog *PluginCatalog
+	if pluginCfg != nil && pluginCfg.PluginsEnabled() {
+		catalog := pm.pluginCatalogWithControlSurface(pm.cfg)
+		pluginCatalog = &catalog
+	}
+	plan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{
 		LoadIPv6Assignments:    loadIPv6AssignmentsForManagedNetworkReload,
 		ForceInterfaceSnapshot: true,
+		PluginCatalog:          pluginCatalog,
 	})
 	if err != nil {
 		return "", nil, err
@@ -662,8 +669,15 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 
 	pm.redistributeMu.Lock()
 	defer pm.redistributeMu.Unlock()
-	plan, err := loadEffectiveNetworkPlan(pm.db, pluginCatalogConfigForProcess(pm, pm.cfg), effectiveNetworkPlanLoadOptions{
+	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
+	var pluginCatalog *PluginCatalog
+	if (pluginCfg != nil && pluginCfg.PluginsEnabled()) || pm.kernelRuntime != nil {
+		catalog := pm.pluginCatalogWithControlSurface(pm.cfg)
+		pluginCatalog = &catalog
+	}
+	plan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{
 		LoadIPv6Assignments: loadIPv6AssignmentsForManagedNetworkReload,
+		PluginCatalog:       pluginCatalog,
 	})
 	if err != nil {
 		return err
@@ -788,7 +802,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		return nil
 	}
 
-	if err := pm.reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs, syntheticEgressNATs, dynamicEgressNATParents, egressNATSnapshot); err != nil {
+	if err := pm.reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs, syntheticEgressNATs, dynamicEgressNATParents, egressNATSnapshot, pluginCatalog); err != nil {
 		return err
 	}
 	if reloadErr == nil {
@@ -988,7 +1002,7 @@ func summarizeManagedRuntimeReloadInterfaces(src map[string]struct{}) string {
 	return strings.Join(items, ",")
 }
 
-func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs []EgressNAT, autoEgressNATs []EgressNAT, dynamicEgressNATParents map[string]struct{}, snapshot egressNATInterfaceSnapshot) error {
+func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs []EgressNAT, autoEgressNATs []EgressNAT, dynamicEgressNATParents map[string]struct{}, snapshot egressNATInterfaceSnapshot, pluginCatalog *PluginCatalog) error {
 	if pm == nil || pm.kernelRuntime == nil || pm.cfg == nil {
 		return nil
 	}
@@ -1007,7 +1021,7 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 		return fmt.Errorf("load sites: %w", err)
 	}
 	nextSyntheticRuleID := maxRuleID(rules) + 1
-	pluginForwardRules, _, err := loadPluginForwardRules(pm.db, pluginCfg, rules, sites, ranges, &nextSyntheticRuleID)
+	pluginForwardRules, _, err := loadPluginForwardRulesWithCatalog(pm.db, pluginCfg, pluginCatalog, rules, sites, ranges, &nextSyntheticRuleID)
 	if err != nil {
 		return fmt.Errorf("load plugin forward rule plans: %w", err)
 	}
@@ -1086,9 +1100,12 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 	}
 
 	activeRetryCandidates := retryCandidates
-	pluginCatalog := pm.pluginCatalogWithControlSurface(pm.cfg)
+	if pluginCatalog == nil {
+		catalog := pm.pluginCatalogWithControlSurface(pm.cfg)
+		pluginCatalog = &catalog
+	}
 	for {
-		results, err := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeRetryCandidates, &pluginCatalog)
+		results, err := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeRetryCandidates, pluginCatalog)
 		if err != nil && (len(activeRetryCandidates) == 0 || totalRetainedKernelAssignments(retainedByEngine) > 0) {
 			return err
 		}

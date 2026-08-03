@@ -884,6 +884,11 @@ func (pm *ProcessManager) redistributeWorkers() {
 	pm.redistributeMu.Lock()
 	defer pm.redistributeMu.Unlock()
 	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
+	var pluginCatalogSnapshot *PluginCatalog
+	if pluginCfg != nil && pluginCfg.PluginsEnabled() {
+		catalog := pm.pluginCatalogWithControlSurface(pm.cfg)
+		pluginCatalogSnapshot = &catalog
+	}
 
 	rules, err := dbGetRules(pm.db)
 	if err != nil {
@@ -901,7 +906,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		return
 	}
 	nextSyntheticRuleID := maxRuleID(rules) + 1
-	pluginForwardRules, warnings, err := loadPluginForwardRules(pm.db, pluginCfg, rules, sites, ranges, &nextSyntheticRuleID)
+	pluginForwardRules, warnings, err := loadPluginForwardRulesWithCatalog(pm.db, pluginCfg, pluginCatalogSnapshot, rules, sites, ranges, &nextSyntheticRuleID)
 	if err != nil {
 		log.Printf("load plugin forward rule plans: %v", err)
 		return
@@ -912,7 +917,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 	if len(pluginForwardRules) > 0 {
 		rules = append(rules, pluginForwardRules...)
 	}
-	networkPlan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{})
+	networkPlan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{PluginCatalog: pluginCatalogSnapshot})
 	if err != nil {
 		log.Printf("load effective network plan: %v", err)
 		return
@@ -1029,10 +1034,10 @@ func (pm *ProcessManager) redistributeWorkers() {
 	activeKernelCandidateBuf = activeKernelCandidates[:0]
 	activeKernelRuleBuf := make([]Rule, 0, len(activeKernelCandidates))
 	if pm.kernelRuntime != nil {
-		var pluginCatalog PluginCatalog
 		kernelWithPluginCatalog, usePluginCatalog := pm.kernelRuntime.(kernelRuleRuntimeWithPluginCatalog)
-		if usePluginCatalog {
-			pluginCatalog = pm.pluginCatalogWithControlSurface(pm.cfg)
+		if usePluginCatalog && pluginCatalogSnapshot == nil {
+			catalog := pm.pluginCatalogWithControlSurface(pm.cfg)
+			pluginCatalogSnapshot = &catalog
 		}
 		for {
 			activeKernelRules := kernelCandidateRulesInto(activeKernelRuleBuf, activeKernelCandidates)
@@ -1040,7 +1045,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 			var results map[int64]kernelRuleApplyResult
 			var err error
 			if usePluginCatalog {
-				results, err = kernelWithPluginCatalog.ReconcileWithPluginCatalog(activeKernelRules, pluginCatalog)
+				results, err = kernelWithPluginCatalog.ReconcileWithPluginCatalog(activeKernelRules, *pluginCatalogSnapshot)
 			} else {
 				results, err = pm.kernelRuntime.Reconcile(activeKernelRules)
 			}

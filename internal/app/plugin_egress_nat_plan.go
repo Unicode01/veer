@@ -35,30 +35,14 @@ func loadPluginEgressNATPlans(db sqlRuleStore, cfg *Config, existing []EgressNAT
 }
 
 func loadActivePluginEgressNATPlanRecords(db sqlRuleStore, cfg *Config) ([]store.PluginRecord, error) {
+	return loadActivePluginEgressNATPlanRecordsWithCatalog(db, cfg, nil)
+}
+
+func loadActivePluginEgressNATPlanRecordsWithCatalog(db sqlRuleStore, cfg *Config, catalog *PluginCatalog) ([]store.PluginRecord, error) {
 	if !pluginEgressNATPlansEnabled(cfg) {
 		return nil, nil
 	}
-	activePlugins := activePluginEgressNATPlanPluginIDs(db, cfg)
-	if len(activePlugins) == 0 {
-		return nil, nil
-	}
-	records, err := store.GetPluginRecordsByResource(db, pluginEgressNATPlansResourceID)
-	if err != nil {
-		return nil, err
-	}
-	if len(records) == 0 {
-		return nil, nil
-	}
-	filtered := records[:0]
-	for _, record := range records {
-		if _, ok := activePlugins[record.PluginID]; ok {
-			filtered = append(filtered, record)
-		}
-	}
-	if len(filtered) == 0 {
-		return nil, nil
-	}
-	return filtered, nil
+	return loadActivePluginCoreResourceRecords(db, cfg, catalog, pluginEgressNATPlansResourceID, pluginEgressNATPlansResourceActive)
 }
 
 func compilePluginEgressNATPlansWithWarnings(records []store.PluginRecord, existing []EgressNAT, snapshot egressNATInterfaceSnapshot) ([]EgressNAT, []string) {
@@ -156,20 +140,6 @@ func pluginEgressNATPlanRecordToItem(record store.PluginRecord, existing []Egres
 
 func pluginEgressNATPlansEnabled(cfg *Config) bool {
 	return cfg != nil && cfg.PluginsEnabled()
-}
-
-func activePluginEgressNATPlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]struct{} {
-	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
-	out := make(map[string]struct{})
-	for _, plugin := range catalog.Plugins {
-		if pluginEgressNATPlansResourceActive(plugin, cfg) {
-			out[plugin.ID] = struct{}{}
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func pluginEgressNATPlansResourceActive(plugin LoadedPlugin, cfg *Config) bool {

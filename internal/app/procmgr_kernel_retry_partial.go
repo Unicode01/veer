@@ -429,6 +429,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	result.cooldownSummary = summarizeKernelNetlinkOwnerRetryCooldownSourceCounts(cooldownSummaryCounts)
 	result.cooldownScope = summarizeKernelIncrementalRetryOwnerScope(cooldownOwners)
 	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
+	pluginCatalog := pm.pluginCatalogWithControlSurface(pm.cfg)
 
 	rules, err := dbGetRules(pm.db)
 	if err != nil {
@@ -449,7 +450,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		return result
 	}
 	nextSyntheticRuleID := maxRuleID(rules) + 1
-	pluginForwardRules, _, err := loadPluginForwardRules(pm.db, pluginCfg, rules, sites, ranges, &nextSyntheticRuleID)
+	pluginForwardRules, _, err := loadPluginForwardRulesWithCatalog(pm.db, pluginCfg, &pluginCatalog, rules, sites, ranges, &nextSyntheticRuleID)
 	if err != nil {
 		result.handled = false
 		result.detail = fmt.Sprintf("load plugin forward rule plans: %v", err)
@@ -464,7 +465,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		result.detail = fmt.Sprintf("load egress nats: %v", err)
 		return result
 	}
-	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecords(pm.db, pluginCfg)
+	pluginEgressNATPlanRecords, err := loadActivePluginEgressNATPlanRecordsWithCatalog(pm.db, pluginCfg, &pluginCatalog)
 	if err != nil {
 		result.handled = false
 		result.detail = fmt.Sprintf("load plugin egress nat plans: %v", err)
@@ -697,7 +698,6 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	}
 
 	activeRetryCandidates := retryCandidates
-	pluginCatalog := pm.pluginCatalogWithControlSurface(pm.cfg)
 	for {
 		results, err := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeRetryCandidates, &pluginCatalog)
 		if err != nil {
