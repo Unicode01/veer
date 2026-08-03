@@ -450,10 +450,98 @@ section h2 {
     white-space: nowrap;
 }
 
+.overview-sync-status {
+    appearance: none;
+    cursor: default;
+}
+
 .overview-meta-item.is-error {
     border-color: var(--warning-border);
     background: var(--warning-bg);
     color: var(--warning-text);
+}
+
+.overview-sync-status.is-error {
+    cursor: pointer;
+}
+
+.overview-sync-status.is-error:hover,
+.overview-sync-status.is-error:focus-visible {
+    border-color: var(--warning-text);
+}
+
+.kernel-runtime-floating-tooltip.overview-sync-popover {
+    width: min(400px, calc(100vw - 24px));
+    max-width: min(400px, calc(100vw - 24px));
+    max-height: min(320px, calc(100vh - 24px));
+    padding: 10px;
+    border-radius: 8px;
+    pointer-events: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.overview-sync-popover-header,
+.overview-sync-popover-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.overview-sync-popover-header {
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.overview-sync-popover-title {
+    display: block;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.overview-sync-popover-hint {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.overview-sync-failure-list {
+    display: grid;
+    gap: 7px;
+    margin: 9px 0;
+}
+
+.overview-sync-failure {
+    display: grid;
+    gap: 2px;
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-muted);
+}
+
+.overview-sync-failure-path {
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.overview-sync-failure-message {
+    color: var(--warning-text);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.overview-sync-popover-actions {
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    justify-content: flex-end;
 }
 
 .overview-grid {

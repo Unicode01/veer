@@ -280,6 +280,19 @@ test('dashboard shell localizes cleanly and plugin details stay usable', async (
   expect(resumed).toBe(true);
 });
 
+test('manual dashboard refresh reports successful completion', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  const refreshButton = page.locator('#refreshNowBtn');
+  await expect(refreshButton).toBeEnabled();
+  await refreshButton.click();
+
+  const message = await page.evaluate(() => window.VeerApp.t('toast.refreshed', {
+    item: window.VeerApp.t('overview.title')
+  }));
+  await expect(page.locator('#toastStack')).toContainText(message);
+  await expect(refreshButton).toBeEnabled();
+});
+
 test('background load failures stay visible and recover outside the active tab', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
   await page.route('**/api/rules', async (route) => {
@@ -293,8 +306,35 @@ test('background load failures stay visible and recover outside the active tab',
   await page.evaluate(() => window.VeerApp.loadRules());
   const syncLabel = page.locator('#lastSyncLabel');
   await expect(syncLabel).toHaveClass(/is-error/);
-  await expect(syncLabel).toHaveAttribute('title', /\/api\/rules: fixture sync failure/);
+  await expect(syncLabel).toBeEnabled();
+  await expect(syncLabel).toHaveAttribute('title', '');
   await expect(page.locator('#toastStack')).toContainText('fixture sync failure');
+
+  await syncLabel.click();
+  const syncPopover = page.locator('#overviewSyncPopover');
+  await expect(syncPopover).toBeVisible();
+  await expect(syncPopover).toContainText('/api/rules');
+  await expect(syncPopover).toContainText('fixture sync failure');
+  const placement = await page.evaluate(() => {
+    const trigger = document.getElementById('lastSyncLabel').getBoundingClientRect();
+    const popover = document.getElementById('overviewSyncPopover').getBoundingClientRect();
+    return {
+      overlaps: trigger.left < popover.right && trigger.right > popover.left && trigger.top < popover.bottom && trigger.bottom > popover.top,
+      left: popover.left,
+      top: popover.top,
+      right: popover.right,
+      bottom: popover.bottom,
+      width: window.innerWidth,
+      height: window.innerHeight
+    };
+  });
+  expect(placement.overlaps).toBe(false);
+  expect(placement.left).toBeGreaterThanOrEqual(0);
+  expect(placement.top).toBeGreaterThanOrEqual(0);
+  expect(placement.right).toBeLessThanOrEqual(placement.width);
+  expect(placement.bottom).toBeLessThanOrEqual(placement.height);
+  await syncPopover.locator('.overview-sync-popover-header button').click();
+  await expect(syncPopover).toBeHidden();
 
   await page.locator('[data-tab="sites"]').click();
   await page.unroute('**/api/rules');
@@ -307,6 +347,85 @@ test('background load failures stay visible and recover outside the active tab',
   });
   await expect(syncLabel).not.toHaveClass(/is-error/);
   await expect(syncLabel).toHaveAttribute('title', '');
+
+  browserErrors.set(page, []);
+});
+
+test('sync failure details support an immediate retry', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  await page.evaluate(() => window.VeerApp.stopPolling());
+  let requestCount = 0;
+  let markRetryStarted;
+  let releaseRetry;
+  const retryStarted = new Promise((resolve) => { markRetryStarted = resolve; });
+  await page.route('**/api/rules', async (route) => {
+    requestCount += 1;
+    if (requestCount > 1) {
+      markRetryStarted();
+      await new Promise((resolve) => { releaseRetry = resolve; });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify([])
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json; charset=utf-8',
+      body: JSON.stringify({ error: 'retry fixture failure' })
+    });
+  });
+
+  await page.evaluate(() => window.VeerApp.loadRules());
+  const syncLabel = page.locator('#lastSyncLabel');
+  await syncLabel.click();
+  const syncPopover = page.locator('#overviewSyncPopover');
+  await expect(syncPopover).toBeVisible();
+
+  await syncPopover.locator('.overview-sync-popover-actions button').click();
+  await retryStarted;
+  const retryButton = syncPopover.locator('.overview-sync-popover-actions button');
+  await expect(syncPopover).toBeVisible();
+  await expect(retryButton).toBeDisabled();
+  await expect(retryButton).toHaveClass(/is-busy/);
+  releaseRetry();
+  await expect(syncPopover).toBeHidden();
+  await expect(syncLabel).not.toHaveClass(/is-error/);
+  const recoveredText = await page.evaluate(() => window.VeerApp.t('overview.syncRestored'));
+  await expect(page.locator('#toastStack')).toContainText(recoveredText);
+  await expectNoPageOverflow(page);
+  await page.unroute('**/api/rules');
+
+  browserErrors.set(page, []);
+});
+
+test('non-replayable plugin failures show guidance without a retry action', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  const resourcePath = '/api/plugins/example/resources/config/default';
+  await page.route('**' + resourcePath, async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json; charset=utf-8',
+      body: JSON.stringify({ error: 'plugin resource unavailable' })
+    });
+  });
+
+  await page.evaluate(async (path) => {
+    try {
+      await window.VeerApp.apiCall('GET', path);
+    } catch (_) {}
+  }, resourcePath);
+
+  await page.locator('#lastSyncLabel').click();
+  const syncPopover = page.locator('#overviewSyncPopover');
+  await expect(syncPopover).toBeVisible();
+  await expect(syncPopover).toContainText('plugin resource unavailable');
+  await expect(syncPopover.locator('.overview-sync-popover-actions')).toHaveCount(0);
+  const manualHint = await page.evaluate(() => window.VeerApp.t('overview.syncFailuresManualHint'));
+  await expect(syncPopover).toContainText(manualHint);
+  await syncPopover.locator('.overview-sync-popover-header button').click();
+  await page.unroute('**' + resourcePath);
 
   browserErrors.set(page, []);
 });

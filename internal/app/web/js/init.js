@@ -24,6 +24,7 @@
     '/api/egress-nats/stats': 'loadEgressNATStats',
     '/api/stats/current-conns': 'loadCurrentConns'
   });
+  app.requestFailureLoaders = requestFailureLoaders;
   const requestFailureRetryDelayMS = 4000;
   const requestFailureRetryLimit = 3;
   const autoRefreshResumeCheckMS = 100;
@@ -128,23 +129,25 @@
     }
   }
 
-  app.retryFailedDataLoads = function retryFailedDataLoads() {
+  app.retryFailedDataLoads = function retryFailedDataLoads(options) {
+    const opts = options || {};
     const now = Date.now();
     const loaderNames = [];
     const selected = new Set();
+    const limit = Math.max(1, Number.isFinite(Number(opts.limit)) ? Number(opts.limit) : requestFailureRetryLimit);
     const failures = Object.values(app.state.requestFailures || {})
       .sort((left, right) => Number(left.at || 0) - Number(right.at || 0));
 
     failures.some((failure) => {
       const loaderName = requestFailureLoaders[String(failure && failure.path || '')];
       const lastAttemptAt = Number(failure && (failure.retryAt || failure.at) || 0);
-      if (!loaderName || selected.has(loaderName) || now - lastAttemptAt < requestFailureRetryDelayMS || typeof app[loaderName] !== 'function') {
+      if (!loaderName || selected.has(loaderName) || (!opts.force && now - lastAttemptAt < requestFailureRetryDelayMS) || typeof app[loaderName] !== 'function') {
         return false;
       }
       failure.retryAt = now;
       selected.add(loaderName);
       loaderNames.push(loaderName);
-      return loaderNames.length >= requestFailureRetryLimit;
+      return loaderNames.length >= limit;
     });
 
     return Promise.all(loaderNames.map((loaderName) => Promise.resolve()
@@ -279,13 +282,17 @@
   }
 
   if (app.el.refreshNowBtn) {
-    app.el.refreshNowBtn.addEventListener('click', () => {
-      app.refreshDashboard({
+    app.el.refreshNowBtn.addEventListener('click', async () => {
+      if (app.state.activeRequests > 0) return;
+      await app.refreshDashboard({
         includeMeta: true,
         includePlugins: true,
         includeWorkers: true,
         includeStats: app.state.activeTab === 'diagnostics'
       });
+      if (app.getToken() && Object.keys(app.state.requestFailures || {}).length === 0) {
+        app.notify('success', app.t('toast.refreshed', { item: app.t('overview.title') }));
+      }
     });
   }
 

@@ -2780,6 +2780,24 @@ test('retryFailedDataLoads retries only stale known failures and deduplicates lo
   assert.deepEqual(calls, ['rules']);
 });
 
+test('retryFailedDataLoads can immediately retry all known failures on demand', async () => {
+  const { app } = createHarness();
+  const calls = [];
+  const now = Date.now();
+  app.state.requestFailures = {
+    'GET /api/rules': { path: '/api/rules', at: now },
+    'GET /api/sites': { path: '/api/sites', at: now },
+    'GET /api/ranges': { path: '/api/ranges', at: now }
+  };
+  app.loadRules = async () => calls.push('rules');
+  app.loadSites = async () => calls.push('sites');
+  app.loadRanges = async () => calls.push('ranges');
+
+  await app.retryFailedDataLoads({ force: true, limit: 16 });
+
+  assert.deepEqual(calls.sort(), ['ranges', 'rules', 'sites']);
+});
+
 test('polling refreshes only the active tab and skips overlapping ticks', async () => {
   const { app, intervals } = createHarness();
   const calls = [];
