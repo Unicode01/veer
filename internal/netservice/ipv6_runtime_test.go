@@ -27,6 +27,7 @@ type fakeIPv6RuntimeOps struct {
 	acceptRAErrors       map[string]error
 	ensureRAErrors       map[string]error
 	counters             map[string]IPv6RuntimeCounter
+	deleteErr            error
 }
 
 func (ops *fakeIPv6RuntimeOps) EnsureIPv6ForwardingEnabled() error {
@@ -56,7 +57,7 @@ func (ops *fakeIPv6RuntimeOps) EnsureIPv6Route(spec IPv6RouteSpec) error {
 
 func (ops *fakeIPv6RuntimeOps) DeleteIPv6Route(spec IPv6RouteSpec) error {
 	ops.deleteRoutes = append(ops.deleteRoutes, spec)
-	return nil
+	return ops.deleteErr
 }
 
 func (ops *fakeIPv6RuntimeOps) EnsureIPv6Address(spec IPv6AddressSpec) error {
@@ -66,7 +67,7 @@ func (ops *fakeIPv6RuntimeOps) EnsureIPv6Address(spec IPv6AddressSpec) error {
 
 func (ops *fakeIPv6RuntimeOps) DeleteIPv6Address(spec IPv6AddressSpec) error {
 	ops.deleteAddresses = append(ops.deleteAddresses, spec)
-	return nil
+	return ops.deleteErr
 }
 
 func (ops *fakeIPv6RuntimeOps) EnsureIPv6RejectRoute(spec IPv6RejectRouteSpec) error {
@@ -76,7 +77,7 @@ func (ops *fakeIPv6RuntimeOps) EnsureIPv6RejectRoute(spec IPv6RejectRouteSpec) e
 
 func (ops *fakeIPv6RuntimeOps) DeleteIPv6RejectRoute(spec IPv6RejectRouteSpec) error {
 	ops.deleteRejectRoutes = append(ops.deleteRejectRoutes, spec)
-	return nil
+	return ops.deleteErr
 }
 
 func (ops *fakeIPv6RuntimeOps) EnsureIPv6Proxy(spec IPv6ProxySpec) error {
@@ -86,7 +87,7 @@ func (ops *fakeIPv6RuntimeOps) EnsureIPv6Proxy(spec IPv6ProxySpec) error {
 
 func (ops *fakeIPv6RuntimeOps) DeleteIPv6Proxy(spec IPv6ProxySpec) error {
 	ops.deleteProxies = append(ops.deleteProxies, spec)
-	return nil
+	return ops.deleteErr
 }
 
 func (ops *fakeIPv6RuntimeOps) EnsureIPv6RA(config RAConfig) error {
@@ -96,7 +97,7 @@ func (ops *fakeIPv6RuntimeOps) EnsureIPv6RA(config RAConfig) error {
 
 func (ops *fakeIPv6RuntimeOps) DeleteIPv6RA(name string) error {
 	ops.deleteRAs = append(ops.deleteRAs, name)
-	return nil
+	return ops.deleteErr
 }
 
 func (ops *fakeIPv6RuntimeOps) EnsureIPv6DHCPv6(config DHCPv6Config) error {
@@ -106,7 +107,7 @@ func (ops *fakeIPv6RuntimeOps) EnsureIPv6DHCPv6(config DHCPv6Config) error {
 
 func (ops *fakeIPv6RuntimeOps) DeleteIPv6DHCPv6(name string) error {
 	ops.deleteDHCPv6 = append(ops.deleteDHCPv6, name)
-	return nil
+	return ops.deleteErr
 }
 
 func (ops *fakeIPv6RuntimeOps) SnapshotIPv6AssignmentCounters() map[string]IPv6RuntimeCounter {
@@ -179,6 +180,40 @@ func TestIPv6AssignmentRuntimeReconcileAndRemoveState(t *testing.T) {
 	}
 	if len(ops.deleteRoutes) != 2 || len(ops.deleteAddresses) != 1 || len(ops.deleteRejectRoutes) != 1 || len(ops.deleteProxies) != 1 || !slices.Equal(ops.deleteRAs, []string{"lan0"}) || !slices.Equal(ops.deleteDHCPv6, []string{"lan0"}) {
 		t.Fatalf("cleanup = routes:%v addresses:%v rejects:%v proxies:%v ra:%v dhcpv6:%v", ops.deleteRoutes, ops.deleteAddresses, ops.deleteRejectRoutes, ops.deleteProxies, ops.deleteRAs, ops.deleteDHCPv6)
+	}
+}
+
+func TestIPv6AssignmentRuntimeRetriesFailedDeletes(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeIPv6RuntimeOps{}
+	rt := NewIPv6AssignmentRuntime(ops)
+	if err := rt.Reconcile(testIPv6RuntimePlans(), nil); err != nil {
+		t.Fatalf("Reconcile(create) error = %v", err)
+	}
+
+	ops.deleteErr = errors.New("temporary delete failure")
+	if err := rt.Reconcile(nil, nil); err == nil || !strings.Contains(err.Error(), "temporary delete failure") {
+		t.Fatalf("Reconcile(failed delete) error = %v", err)
+	}
+	assertIPv6DeleteCallCounts(t, ops, 2, 1, 1, 1, 1, 1)
+
+	ops.deleteErr = nil
+	if err := rt.Reconcile(nil, nil); err != nil {
+		t.Fatalf("Reconcile(retry delete) error = %v", err)
+	}
+	assertIPv6DeleteCallCounts(t, ops, 4, 2, 2, 2, 2, 2)
+
+	if err := rt.Reconcile(nil, nil); err != nil {
+		t.Fatalf("Reconcile(after delete) error = %v", err)
+	}
+	assertIPv6DeleteCallCounts(t, ops, 4, 2, 2, 2, 2, 2)
+}
+
+func assertIPv6DeleteCallCounts(t *testing.T, ops *fakeIPv6RuntimeOps, routes, addresses, rejects, proxies, ras, dhcpv6 int) {
+	t.Helper()
+	if len(ops.deleteRoutes) != routes || len(ops.deleteAddresses) != addresses || len(ops.deleteRejectRoutes) != rejects || len(ops.deleteProxies) != proxies || len(ops.deleteRAs) != ras || len(ops.deleteDHCPv6) != dhcpv6 {
+		t.Fatalf("delete calls = routes:%d addresses:%d rejects:%d proxies:%d ra:%d dhcpv6:%d, want %d/%d/%d/%d/%d/%d", len(ops.deleteRoutes), len(ops.deleteAddresses), len(ops.deleteRejectRoutes), len(ops.deleteProxies), len(ops.deleteRAs), len(ops.deleteDHCPv6), routes, addresses, rejects, proxies, ras, dhcpv6)
 	}
 }
 

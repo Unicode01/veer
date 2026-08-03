@@ -308,6 +308,7 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		if _, ok := desiredRoutes[route]; !ok {
 			if err := rt.ops.DeleteIPv6Route(route); err != nil {
 				errs = append(errs, fmt.Sprintf("remove ipv6 route %s via %s: %v", route.Prefix, route.TargetInterface, err))
+				desiredRoutes[route] = struct{}{}
 			}
 		}
 	}
@@ -315,6 +316,7 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		if _, ok := desiredRejectRoutes[reject]; !ok {
 			if err := rt.ops.DeleteIPv6RejectRoute(reject); err != nil {
 				errs = append(errs, fmt.Sprintf("remove ipv6 reject route %s: %v", reject.Prefix, err))
+				desiredRejectRoutes[reject] = struct{}{}
 			}
 		}
 	}
@@ -322,6 +324,7 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		if _, ok := desiredAddresses[address]; !ok {
 			if err := rt.ops.DeleteIPv6Address(address); err != nil {
 				errs = append(errs, fmt.Sprintf("remove ipv6 gateway address %s on %s: %v", address.CIDR, address.TargetInterface, err))
+				desiredAddresses[address] = struct{}{}
 			}
 		}
 	}
@@ -329,6 +332,7 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		if _, ok := desiredProxies[proxy]; !ok {
 			if err := rt.ops.DeleteIPv6Proxy(proxy); err != nil {
 				errs = append(errs, fmt.Sprintf("remove proxy ndp %s on %s: %v", proxy.Address, proxy.ParentInterface, err))
+				desiredProxies[proxy] = struct{}{}
 			}
 		}
 	}
@@ -336,6 +340,7 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		if _, ok := desiredAdvertisements[target]; !ok {
 			if err := rt.ops.DeleteIPv6RA(target); err != nil {
 				errs = append(errs, fmt.Sprintf("remove router advertisement on %s: %v", target, err))
+				desiredAdvertisements[target] = rt.advertisements[target]
 			}
 		}
 	}
@@ -343,6 +348,7 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		if _, ok := desiredDHCPv6[target]; !ok {
 			if err := rt.ops.DeleteIPv6DHCPv6(target); err != nil {
 				errs = append(errs, fmt.Sprintf("remove dhcpv6 on %s: %v", target, err))
+				desiredDHCPv6[target] = rt.dhcpv6[target]
 			}
 		}
 	}
