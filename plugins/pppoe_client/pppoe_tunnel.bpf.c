@@ -40,8 +40,11 @@
 #define PPPOE_DECAP_ADJ_MODE BPF_ADJ_ROOM_MAC
 #endif
 
-#ifndef PPPOE_DECAP_ADJ_BASE_FLAGS
+#ifndef PPPOE_ENCAP_ADJ_FLAGS
 #define PPPOE_ENCAP_ADJ_FLAGS BPF_F_ADJ_ROOM_NO_CSUM_RESET
+#endif
+
+#ifndef PPPOE_DECAP_ADJ_BASE_FLAGS
 #define PPPOE_DECAP_ADJ_BASE_FLAGS (BPF_F_ADJ_ROOM_FIXED_GSO | BPF_F_ADJ_ROOM_NO_CSUM_RESET)
 #endif
 
@@ -298,12 +301,16 @@ static __always_inline int store_eth(struct __sk_buff *skb, const __u8 *dst, con
 
 static __always_inline int mac_addr_eq(const __u8 *a, const __u8 *b)
 {
-#pragma clang loop unroll(full)
-	for (int i = 0; i < 6; i++) {
-		if (a[i] != b[i])
-			return 0;
-	}
-	return 1;
+	__u32 a32;
+	__u32 b32;
+	__u16 a16;
+	__u16 b16;
+
+	__builtin_memcpy(&a32, a, sizeof(a32));
+	__builtin_memcpy(&b32, b, sizeof(b32));
+	__builtin_memcpy(&a16, a + sizeof(a32), sizeof(a16));
+	__builtin_memcpy(&b16, b + sizeof(b32), sizeof(b16));
+	return a32 == b32 && a16 == b16;
 }
 
 static __always_inline int store_pppoe_hdr(struct __sk_buff *skb, const struct pppoe_ppp_hdr *hdr)
@@ -442,6 +449,11 @@ static __always_inline int rewrite_ipv4_dst(struct __sk_buff *skb, const struct 
 
 static __always_inline int clamp_tcp_mss_v4(struct __sk_buff *skb, __u16 clamp)
 {
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ethhdr *eth = data;
+	struct ipv4_min_hdr *linear_iph;
+	struct tcp_min_hdr *linear_tcph;
 	struct ipv4_min_hdr iph = {};
 	struct tcp_min_hdr tcph = {};
 	__u16 old_mss_be = 0;
@@ -454,6 +466,24 @@ static __always_inline int clamp_tcp_mss_v4(struct __sk_buff *skb, __u16 clamp)
 
 	if (!clamp)
 		return 0;
+	if ((void *)(eth + 1) <= data_end) {
+		if (eth->h_proto != htons16(ETH_P_IP))
+			return 0;
+		linear_iph = data + l3_off;
+		if ((void *)(linear_iph + 1) <= data_end) {
+			if (linear_iph->ver_ihl != 0x45 || linear_iph->protocol != IPPROTO_TCP)
+				return 0;
+			if ((ntohs16(linear_iph->frag_off) & 0x3fff) != 0)
+				return 0;
+			linear_tcph = data + l4_off;
+			if ((void *)(linear_tcph + 1) <= data_end) {
+				if ((linear_tcph->flags & TCP_FLAG_SYN) == 0)
+					return 0;
+				tcp_hdr_len = ((int)(linear_tcph->doff_res >> 4)) << 2;
+				goto scan_options;
+			}
+		}
+	}
 	if (bpf_skb_load_bytes(skb, l3_off, &iph, sizeof(iph)) < 0)
 		return 0;
 	if (iph.ver_ihl != 0x45 || iph.protocol != IPPROTO_TCP)
@@ -465,6 +495,8 @@ static __always_inline int clamp_tcp_mss_v4(struct __sk_buff *skb, __u16 clamp)
 	if ((tcph.flags & TCP_FLAG_SYN) == 0)
 		return 0;
 	tcp_hdr_len = ((int)(tcph.doff_res >> 4)) << 2;
+
+scan_options:
 	if (tcp_hdr_len <= (int)sizeof(tcph) || tcp_hdr_len > 60)
 		return 0;
 
@@ -563,7 +595,28 @@ static __always_inline int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __
 		}
 	}
 #pragma clang loop unroll(disable)
-	for (int i = 0; i < 187; i++) {
+	for (int i = 0; i < 24; i++) {
+		void *src = data + 22 + copied;
+		void *dst = data + 14 + copied;
+
+		if (copied + 64 > l3_len)
+			break;
+		if (src + 64 > data_end || dst + 64 > data_end) {
+			bump_tunnel_stat(13);
+			return -1;
+		}
+		__builtin_memcpy(dst, src, 8);
+		__builtin_memcpy(dst + 8, src + 8, 8);
+		__builtin_memcpy(dst + 16, src + 16, 8);
+		__builtin_memcpy(dst + 24, src + 24, 8);
+		__builtin_memcpy(dst + 32, src + 32, 8);
+		__builtin_memcpy(dst + 40, src + 40, 8);
+		__builtin_memcpy(dst + 48, src + 48, 8);
+		__builtin_memcpy(dst + 56, src + 56, 8);
+		copied += 64;
+	}
+#pragma clang loop unroll(disable)
+	for (int i = 0; i < 7; i++) {
 		void *src = data + 22 + copied;
 		void *dst = data + 14 + copied;
 
@@ -742,7 +795,9 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 		return TC_ACT_UNSPEC;
 	l3_len = ppp_len - 2;
 
-	if ((cfg->flags & PPPOE_TUNNEL_FLAG_MANUAL_DECAP) != 0) {
+	/* The helper rejects PPP session skb protocols before removing MAC room. */
+	if ((cfg->flags & PPPOE_TUNNEL_FLAG_MANUAL_DECAP) != 0 ||
+		(skb->protocol != htons16(ETH_P_IP) && skb->protocol != htons16(ETH_P_IPV6))) {
 		if (compact_pppoe_payload_to_l3(skb, l3_len) < 0) {
 			bump_tunnel_stat(11);
 			return TC_ACT_SHOT;

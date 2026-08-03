@@ -589,7 +589,7 @@ function loadProfile(payload) {
     throw new Error('decap_mode must be manual or auto');
   }
   profile.manual_decap = profile.decap_mode === 'manual';
-  profile.mss_clamp_v4 = clampInt(firstDefined(profile.mss_clamp_v4, profile.tcp_mss_v4, profile.mss_clamp), 0, 65535, Math.max(profile.mru - 52, 536));
+  profile.mss_clamp_v4 = clampInt(firstDefined(profile.mss_clamp_v4, profile.tcp_mss_v4, profile.mss_clamp), 0, 65535, Math.max(profile.mru - 40, 536));
   profile.mss_clamp_v6 = clampInt(firstDefined(profile.mss_clamp_v6, profile.tcp_mss_v6), 0, 65535, Math.max(profile.mru - 60, 1220));
   profile.send_padt = bool(profile.send_padt, true);
   profile.local_interface = optionalIfaceName(profile.local_interface || '', 'local_interface');

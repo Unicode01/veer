@@ -21,6 +21,7 @@ fi
 : "${VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL:=0}"
 : "${VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN:=0}"
 : "${VEER_PPPOE_BLACKBOX_SYSTEMD:=auto}"
+: "${VEER_PPPOE_BLACKBOX_DECAP_MODE:=auto}"
 
 missing=
 for tool in ip tc clang pppd pppoe-server curl sed grep timeout ss ethtool pkill; do
@@ -99,6 +100,13 @@ case "$VEER_PPPOE_BLACKBOX_SYSTEMD" in
 	auto|0|1) ;;
 	*)
 		echo "VEER_PPPOE_BLACKBOX_SYSTEMD must be auto, 0, or 1" >&2
+		exit 1
+		;;
+esac
+case "$VEER_PPPOE_BLACKBOX_DECAP_MODE" in
+	auto|manual) ;;
+	*)
+		echo "VEER_PPPOE_BLACKBOX_DECAP_MODE must be auto or manual" >&2
 		exit 1
 		;;
 esac
@@ -209,7 +217,7 @@ noauth
 mtu 1492
 mru 1492
 lcp-echo-interval 2
-lcp-echo-failure 5
+lcp-echo-failure 30
 nodefaultroute
 noipdefault
 debug
@@ -588,7 +596,7 @@ EOF
   "send_padt": false,
   "post_session_control_ms": 5000,
 $keepalive_test_fields
-  "decap_mode": "manual",
+  "decap_mode": $(json_string "$VEER_PPPOE_BLACKBOX_DECAP_MODE"),
   "wan_core_sync": true,
   "wan_core_required": true,
   "wan_core_apply": true
