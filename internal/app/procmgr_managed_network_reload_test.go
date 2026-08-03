@@ -244,7 +244,7 @@ func TestReconcileManagedNetworkAutoEgressNATsReturnsRetainedOnlyKernelError(t *
 		},
 	}
 
-	err = pm.reconcileManagedNetworkAutoEgressNATs(nil, nil, nil, egressNATInterfaceSnapshot{})
+	err = pm.reconcileManagedNetworkAutoEgressNATs(nil, nil, nil, egressNATInterfaceSnapshot{}, nil)
 	if !errors.Is(err, retainedErr) {
 		t.Fatalf("reconcileManagedNetworkAutoEgressNATs() error = %v, want %v", err, retainedErr)
 	}

@@ -103,6 +103,47 @@ func loadPluginCatalogWithControlRegistrationAndState(cfg *Config, db store.Rule
 	return resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 }
 
+func loadActivePluginCoreResourceRecords(db sqlRuleStore, cfg *Config, catalog *PluginCatalog, resourceID string, active func(LoadedPlugin, *Config) bool) ([]store.PluginRecord, error) {
+	var records []store.PluginRecord
+	recordsLoaded := false
+	if catalog == nil {
+		var err error
+		records, err = store.GetPluginRecordsByResource(db, resourceID)
+		if err != nil || len(records) == 0 {
+			return records, err
+		}
+		recordsLoaded = true
+		loaded := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
+		catalog = &loaded
+	}
+	activePlugins := make(map[string]struct{}, len(catalog.Plugins))
+	for _, plugin := range catalog.Plugins {
+		if active != nil && active(plugin, cfg) {
+			activePlugins[plugin.ID] = struct{}{}
+		}
+	}
+	if len(activePlugins) == 0 {
+		return nil, nil
+	}
+	if !recordsLoaded {
+		var err error
+		records, err = store.GetPluginRecordsByResource(db, resourceID)
+		if err != nil || len(records) == 0 {
+			return records, err
+		}
+	}
+	filtered := records[:0]
+	for _, record := range records {
+		if _, ok := activePlugins[record.PluginID]; ok {
+			filtered = append(filtered, record)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, nil
+	}
+	return filtered, nil
+}
+
 func resolvePluginCatalogAfterRuntimeSurfaces(catalog PluginCatalog) PluginCatalog {
 	clearPluginResolutionErrors(&catalog)
 	return resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())

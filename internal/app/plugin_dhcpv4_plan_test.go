@@ -7,6 +7,76 @@ import (
 	"github.com/Unicode01/veer/internal/store"
 )
 
+func TestActivePluginCoreResourceRecordsUseProvidedCatalogSnapshot(t *testing.T) {
+	db := openTestDB(t)
+	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: t.TempDir()})
+	pluginID := "router_orchestrator"
+	resources := []string{
+		pluginDHCPv4PlansResourceID,
+		pluginEgressNATPlansResourceID,
+		pluginIPv6AssignmentPlansResourceID,
+		pluginForwardRulePlansResourceID,
+	}
+	pluginResources := make([]PluginResource, 0, len(resources))
+	for _, resourceID := range resources {
+		pluginResources = append(pluginResources, PluginResource{ID: resourceID})
+		if _, err := store.AddPluginRecord(db, &store.PluginRecord{
+			PluginID:   pluginID,
+			ResourceID: resourceID,
+			RecordKey:  "default",
+			DataJSON:   `{}`,
+			Enabled:    true,
+		}); err != nil {
+			t.Fatalf("AddPluginRecord(%s) error = %v", resourceID, err)
+		}
+	}
+	catalog := PluginCatalog{Plugins: []LoadedPlugin{{
+		PluginManifest: PluginManifest{ID: pluginID, Stability: pluginStabilityStable},
+		Resources:      pluginResources,
+		Status:         pluginStatusActive,
+	}}}
+
+	loaders := []struct {
+		name string
+		load func() ([]store.PluginRecord, error)
+	}{
+		{name: "dhcpv4", load: func() ([]store.PluginRecord, error) {
+			return loadActivePluginDHCPv4PlanRecordsWithCatalog(db, cfg, &catalog)
+		}},
+		{name: "egress_nat", load: func() ([]store.PluginRecord, error) {
+			return loadActivePluginEgressNATPlanRecordsWithCatalog(db, cfg, &catalog)
+		}},
+		{name: "ipv6_assignment", load: func() ([]store.PluginRecord, error) {
+			return loadActivePluginIPv6AssignmentPlanRecordsWithCatalog(db, cfg, &catalog)
+		}},
+		{name: "forward_rule", load: func() ([]store.PluginRecord, error) {
+			return loadActivePluginForwardRulePlanRecordsWithCatalog(db, cfg, &catalog)
+		}},
+	}
+	for _, loader := range loaders {
+		records, err := loader.load()
+		if err != nil {
+			t.Fatalf("load %s records: %v", loader.name, err)
+		}
+		if len(records) != 1 || records[0].PluginID != pluginID {
+			t.Fatalf("%s records = %+v, want supplied catalog plugin", loader.name, records)
+		}
+	}
+
+	records, err := loadActivePluginDHCPv4PlanRecords(db, cfg)
+	if err != nil {
+		t.Fatalf("load DHCPv4 records from disk catalog: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("disk catalog unexpectedly resolved synthetic plugin: %+v", records)
+	}
+
+	records, err = loadActivePluginDHCPv4PlanRecordsWithCatalog(nil, cfg, &PluginCatalog{})
+	if err != nil || len(records) != 0 {
+		t.Fatalf("empty catalog records = %+v, error = %v", records, err)
+	}
+}
+
 func TestCompilePluginDHCPv4PlanBuildsDHCPOnlyManagedNetwork(t *testing.T) {
 	t.Parallel()
 

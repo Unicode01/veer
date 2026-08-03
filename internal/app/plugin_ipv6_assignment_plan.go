@@ -29,24 +29,14 @@ type pluginIPv6AssignmentPlan struct {
 }
 
 func loadActivePluginIPv6AssignmentPlanRecords(db sqlRuleStore, cfg *Config) ([]store.PluginRecord, error) {
+	return loadActivePluginIPv6AssignmentPlanRecordsWithCatalog(db, cfg, nil)
+}
+
+func loadActivePluginIPv6AssignmentPlanRecordsWithCatalog(db sqlRuleStore, cfg *Config, catalog *PluginCatalog) ([]store.PluginRecord, error) {
 	if !pluginIPv6AssignmentPlansEnabled(cfg) {
 		return nil, nil
 	}
-	activePlugins := activePluginIPv6AssignmentPlanPluginIDs(db, cfg)
-	if len(activePlugins) == 0 {
-		return nil, nil
-	}
-	records, err := store.GetPluginRecordsByResource(db, pluginIPv6AssignmentPlansResourceID)
-	if err != nil {
-		return nil, err
-	}
-	filtered := records[:0]
-	for _, record := range records {
-		if _, ok := activePlugins[record.PluginID]; ok {
-			filtered = append(filtered, record)
-		}
-	}
-	return filtered, nil
+	return loadActivePluginCoreResourceRecords(db, cfg, catalog, pluginIPv6AssignmentPlansResourceID, pluginIPv6AssignmentPlansResourceActive)
 }
 
 func compilePluginIPv6AssignmentPlansWithWarnings(records []store.PluginRecord, existing []IPv6Assignment) ([]IPv6Assignment, []string) {
@@ -288,20 +278,6 @@ func pluginIPv6GatewayCIDR(prefix *net.IPNet, displayPrefixLen int) (string, err
 
 func pluginIPv6AssignmentPlansEnabled(cfg *Config) bool {
 	return cfg != nil && cfg.PluginsEnabled()
-}
-
-func activePluginIPv6AssignmentPlanPluginIDs(db sqlRuleStore, cfg *Config) map[string]struct{} {
-	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
-	out := make(map[string]struct{})
-	for _, plugin := range catalog.Plugins {
-		if pluginIPv6AssignmentPlansResourceActive(plugin, cfg) {
-			out[plugin.ID] = struct{}{}
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func pluginIPv6AssignmentPlansResourceActive(plugin LoadedPlugin, cfg *Config) bool {

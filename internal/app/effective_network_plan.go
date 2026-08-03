@@ -33,6 +33,7 @@ type effectiveNetworkPlan struct {
 type effectiveNetworkPlanLoadOptions struct {
 	LoadIPv6Assignments    func(sqlRuleStore) ([]IPv6Assignment, error)
 	ForceInterfaceSnapshot bool
+	PluginCatalog          *PluginCatalog
 }
 
 func loadEffectiveNetworkPlan(db *sql.DB, cfg *Config, options effectiveNetworkPlanLoadOptions) (effectiveNetworkPlan, error) {
@@ -53,7 +54,7 @@ func loadEffectiveNetworkPlan(db *sql.DB, cfg *Config, options effectiveNetworkP
 	}
 	plan.Reservations = reservations
 
-	dhcpv4Records, err := loadActivePluginDHCPv4PlanRecords(db, cfg)
+	dhcpv4Records, err := loadActivePluginDHCPv4PlanRecordsWithCatalog(db, cfg, options.PluginCatalog)
 	if err != nil {
 		return plan, fmt.Errorf("load plugin dhcpv4 plans: %w", err)
 	}
@@ -66,11 +67,11 @@ func loadEffectiveNetworkPlan(db *sql.DB, cfg *Config, options effectiveNetworkP
 	if err != nil {
 		return plan, fmt.Errorf("load egress nats: %w", err)
 	}
-	egressNATRecords, err := loadActivePluginEgressNATPlanRecords(db, cfg)
+	egressNATRecords, err := loadActivePluginEgressNATPlanRecordsWithCatalog(db, cfg, options.PluginCatalog)
 	if err != nil {
 		return plan, fmt.Errorf("load plugin egress nat plans: %w", err)
 	}
-	ipv6Records, err := loadActivePluginIPv6AssignmentPlanRecords(db, cfg)
+	ipv6Records, err := loadActivePluginIPv6AssignmentPlanRecordsWithCatalog(db, cfg, options.PluginCatalog)
 	if err != nil {
 		return plan, fmt.Errorf("load plugin ipv6 assignment plans: %w", err)
 	}
