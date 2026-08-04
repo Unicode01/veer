@@ -28,10 +28,6 @@ type pluginIPv6AssignmentPlan struct {
 	Enabled           bool     `json:"enabled"`
 }
 
-func loadActivePluginIPv6AssignmentPlanRecords(db sqlRuleStore, cfg *Config) ([]store.PluginRecord, error) {
-	return loadActivePluginIPv6AssignmentPlanRecordsWithCatalog(db, cfg, nil)
-}
-
 func loadActivePluginIPv6AssignmentPlanRecordsWithCatalog(db sqlRuleStore, cfg *Config, catalog *PluginCatalog) ([]store.PluginRecord, error) {
 	if !pluginIPv6AssignmentPlansEnabled(cfg) {
 		return nil, nil

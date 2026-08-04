@@ -27,10 +27,6 @@ type pluginForwardRulePlan struct {
 	EnginePreference string `json:"engine_preference"`
 }
 
-func loadActivePluginForwardRulePlanRecords(db sqlRuleStore, cfg *Config) ([]store.PluginRecord, error) {
-	return loadActivePluginForwardRulePlanRecordsWithCatalog(db, cfg, nil)
-}
-
 func loadActivePluginForwardRulePlanRecordsWithCatalog(db sqlRuleStore, cfg *Config, catalog *PluginCatalog) ([]store.PluginRecord, error) {
 	if !pluginForwardRulePlansEnabled(cfg) {
 		return nil, nil
