@@ -93,6 +93,68 @@ func TestLoadConfigNormalizesWebBind(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRequiresStrongTokensForRemoteManagement(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		webToken   string
+		adminToken string
+		wantField  string
+	}{
+		{name: "weak web token", webToken: "short-token", wantField: "web_token"},
+		{name: "weak plugin admin token", webToken: "0123456789abcdefghijklmn", adminToken: "short-admin", wantField: "plugin_admin_token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			data := `{"web_bind":"0.0.0.0","web_token":"` + tt.webToken + `","plugin_admin_token":"` + tt.adminToken + `"}`
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), tt.wantField) || !strings.Contains(err.Error(), "24 characters") {
+				t.Fatalf("loadConfig() error = %v, want strong %s error", err, tt.wantField)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAcceptsStrongTokensForRemoteManagement(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "web_bind": "0.0.0.0",
+  "web_token": "0123456789abcdefghijklmn",
+  "plugin_admin_token": "zyxwvutsrqponmlkjihgfedc"
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+}
+
+func TestLoadConfigRejectsUnusableManagementTokens(t *testing.T) {
+	t.Parallel()
+
+	for _, data := range []string{
+		`{"web_token":"token with spaces"}`,
+		`{"web_token":" leading-token"}`,
+		`{"web_token":"test-token","plugin_admin_token":"admin-token\u0080"}`,
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "whitespace or control") {
+			t.Fatalf("loadConfig(%s) error = %v, want whitespace/control error", data, err)
+		}
+	}
+}
+
 func TestLoadConfigDefaultsWebUIEnabled(t *testing.T) {
 	t.Parallel()
 

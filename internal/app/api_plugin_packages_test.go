@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,7 +18,7 @@ import (
 func TestPluginPackageAPIsRequireAuthentication(t *testing.T) {
 	cfg := &Config{WebToken: "package-token", PluginsDir: t.TempDir()}
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
-	for _, test := range []struct {
+	for index, test := range []struct {
 		method string
 		path   string
 	}{
@@ -49,6 +50,7 @@ func TestPluginPackageAPIsRequireAuthentication(t *testing.T) {
 		{http.MethodPost, "/api/plugin-event-dead-letters/discard"},
 	} {
 		req := httptest.NewRequest(test.method, test.path, strings.NewReader(`{}`))
+		req.RemoteAddr = fmt.Sprintf("192.0.2.%d:1234", index+1)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {

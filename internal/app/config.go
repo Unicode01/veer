@@ -6,6 +6,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -19,6 +21,7 @@ const (
 	experimentalFeatureKernelTCReplyL2Cache      = "kernel_tc_reply_l2_cache"
 	insecureDefaultWebToken                      = "change-me-to-a-secure-token"
 	insecureDefaultPluginAdminToken              = "change-me-to-a-separate-plugin-admin-token"
+	remoteManagementMinimumTokenCharacters       = 24
 )
 
 type Config struct {
@@ -80,6 +83,14 @@ func loadConfig(path string) (*Config, error) {
 		cfg.WebPort = 8080
 	}
 	cfg.WebBind = normalizeWebBind(cfg.WebBind)
+	if err := validateConfiguredManagementToken("web_token", cfg.WebToken); err != nil {
+		return nil, err
+	}
+	if cfg.PluginAdminToken != "" {
+		if err := validateConfiguredManagementToken("plugin_admin_token", cfg.PluginAdminToken); err != nil {
+			return nil, err
+		}
+	}
 	cfg.WebToken = strings.TrimSpace(cfg.WebToken)
 	cfg.PluginAdminToken = strings.TrimSpace(cfg.PluginAdminToken)
 	if cfg.WebToken == "" {
@@ -93,6 +104,14 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.PluginAdminToken != "" && cfg.PluginAdminToken == cfg.WebToken {
 		return nil, fmt.Errorf("plugin_admin_token must differ from web_token")
+	}
+	if apiBindExposesRemoteClients(&cfg) {
+		if utf8.RuneCountInString(cfg.WebToken) < remoteManagementMinimumTokenCharacters {
+			return nil, fmt.Errorf("web_token must contain at least %d characters when web_bind exposes remote clients", remoteManagementMinimumTokenCharacters)
+		}
+		if cfg.PluginAdminToken != "" && utf8.RuneCountInString(cfg.PluginAdminToken) < remoteManagementMinimumTokenCharacters {
+			return nil, fmt.Errorf("plugin_admin_token must contain at least %d characters when web_bind exposes remote clients", remoteManagementMinimumTokenCharacters)
+		}
 	}
 	if cfg.MaxWorkers < 0 {
 		cfg.MaxWorkers = 0
@@ -130,6 +149,15 @@ func loadConfig(path string) (*Config, error) {
 	cfg.KernelEngineOrder = normalizeKernelEngineOrder(cfg.KernelEngineOrder)
 	cfg.Experimental = normalizeExperimentalFeatures(cfg.Experimental)
 	return &cfg, nil
+}
+
+func validateConfiguredManagementToken(name, value string) error {
+	if strings.IndexFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) >= 0 {
+		return fmt.Errorf("%s must not contain whitespace or control characters", name)
+	}
+	return nil
 }
 
 func normalizeBoundedConfigValue(value, fallback, minimum, maximum int) int {

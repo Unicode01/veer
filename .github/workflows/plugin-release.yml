@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: "24"
       - name: Install eBPF build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev python3 shellcheck
+        run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev php-cli python3 shellcheck
       - name: Install WebUI browser test dependencies
         run: |
           npm ci
@@ -36,6 +36,10 @@ jobs:
         run: |
           sh scripts/verify-platform-support.sh
           shellcheck -x bootstrap.sh deploy.sh release.sh scripts/*.sh plugins/*/*.sh
+          php -l whmcs/forward/forward.php
+          php -l whmcs/forward/hooks.php
+      - name: Audit WebUI dependencies
+        run: npm audit --audit-level=high
       - name: Install Go analysis tools
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4

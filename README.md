@@ -31,6 +31,8 @@ VEER_INSTALL_PLUGINS=1 bash <(curl -fsSL https://raw.githubusercontent.com/Unico
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
+`WEB_BIND=0.0.0.0` 会让管理面接受远程连接，但 Veer 本身只提供 HTTP。仅应在受信管理网或 VPN 内使用；公网访问应保持 Veer 监听回环地址，并由启用 TLS 与访问控制的反向代理转发。非回环监听要求 `web_token`（以及非空的 `plugin_admin_token`）至少 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。
+
 `bootstrap.sh` 会安装依赖、拉取源码、执行 `release.sh` 构建，再调用 `deploy.sh` 安装或热更新。默认只构建和安装 Veer 核心；设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled stable 插件。它支持 `apt`、`dnf/yum`、`apk` 以及 systemd/OpenRC。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
 
 从更名前的 `main` 版本升级时，`deploy.sh` 会把默认目录 `/opt/forward` 迁移到 `/opt/veer`，将服务切换为 `veer.service`，并保留 `/opt/forward`、`forward` 二进制名和 `forward.service` 兼容入口。现有 `forward.db`、内核状态目录和配置文件不会改名；旧 `FORWARD_*` 部署变量仍可使用，同时设置时 `VEER_*` 优先。
@@ -401,6 +403,7 @@ modules/addons/forward/
 - 不要泄露 `web_token`
 - 管理面默认绑定 `127.0.0.1`，不要无保护暴露到公网
 - 如需远程管理，建议放在 VPN、堡垒机、反向代理鉴权或受限管理网后面
+- 部署脚本仅在首次交互安装时显示新生成的管理令牌；升级或非交互执行会隐藏令牌，避免写入自动化日志
 - WHMCS 插件里的 Veer Bearer Token 与 `web_token` 是同一个认证语义
 
 ## License

@@ -18,8 +18,8 @@
 #   WEB_BIND      Web 监听地址   (默认 127.0.0.1)
 #   WEB_UI_ENABLED 是否启用 Web UI (默认 true)
 #   WEB_PORT      Web 管理端口   (默认 8080)
-#   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成)
-#   PLUGIN_ADMIN_TOKEN 插件高权限 Token，对应 plugin_admin_token (首次安装默认独立随机生成)
+#   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成；远程监听至少 24 个字符)
+#   PLUGIN_ADMIN_TOKEN 插件高权限 Token，对应 plugin_admin_token (首次安装默认独立随机生成；远程监听至少 24 个字符)
 #   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
 #
 set -euo pipefail
@@ -578,11 +578,21 @@ validate_positive_integer() {
 }
 
 is_loopback_bind() {
-    case "${1:-}" in
-        127.0.0.1|::1|localhost)
+    local value="${1:-}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ "${value}" == \[*\] && "${#value}" -gt 2 ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    case "${value,,}" in
+        ""|::1|localhost|localhost.)
             return 0
             ;;
     esac
+    if [[ "${value}" =~ ^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] &&
+        (( 10#${BASH_REMATCH[1]} <= 255 && 10#${BASH_REMATCH[2]} <= 255 && 10#${BASH_REMATCH[3]} <= 255 )); then
+        return 0
+    fi
     return 1
 }
 
@@ -892,11 +902,14 @@ sync_config_file() {
     FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN}" \
     python3 - "$config_path" <<'PY'
 from collections import OrderedDict
+import ipaddress
 import json
 import os
 import sys
+import unicodedata
 
 PLACEHOLDER_WEB_TOKEN = "change-me-to-a-secure-token"
+REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS = 24
 
 config_path = sys.argv[1]
 config_exists = os.path.exists(config_path)
@@ -1060,6 +1073,39 @@ if result["web_token"] == PLACEHOLDER_WEB_TOKEN:
     raise SystemExit("web_token 不能使用示例占位值 change-me-to-a-secure-token")
 if result.get("plugin_admin_token", "") == result["web_token"]:
     raise SystemExit("plugin_admin_token 必须与 web_token 不同")
+
+
+def validate_management_token(name: str, value: str):
+    if any(character.isspace() or unicodedata.category(character) == "Cc" for character in value):
+        raise SystemExit(f"{name} 不能包含空白或控制字符")
+
+
+def bind_exposes_remote_clients(value: str) -> bool:
+    value = value.strip()
+    if not value:
+        return False
+    if value.startswith("[") and value.endswith("]") and len(value) > 2:
+        value = value[1:-1]
+    if value.lower() in ("localhost", "localhost."):
+        return False
+    try:
+        return not ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return True
+
+
+validate_management_token("web_token", result["web_token"])
+if result.get("plugin_admin_token", ""):
+    validate_management_token("plugin_admin_token", result["plugin_admin_token"])
+if bind_exposes_remote_clients(result["web_bind"]):
+    if len(result["web_token"]) < REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS:
+        raise SystemExit(
+            f"web_bind 暴露远程管理面时，web_token 至少需要 {REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS} 个字符"
+        )
+    if result.get("plugin_admin_token", "") and len(result["plugin_admin_token"]) < REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS:
+        raise SystemExit(
+            f"web_bind 暴露远程管理面时，plugin_admin_token 至少需要 {REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS} 个字符"
+        )
 
 for key, value in current.items():
     if key not in result:
@@ -1374,6 +1420,9 @@ service_reload_manager
 ok "兼容入口已就绪: ${INSTALL_DIR}/forward, $(service_label "${LEGACY_SERVICE_NAME}")"
 
 # ---------- 防火墙 ----------
+if ! is_loopback_bind "$WEB_BIND"; then
+    warn "管理面 web_bind=${WEB_BIND} 使用明文 HTTP；仅应暴露到受信管理网/VPN，公网访问请在前置代理终止 TLS 并限制来源"
+fi
 if command -v ufw &>/dev/null; then
     info "配置 UFW 防火墙规则..."
     if is_loopback_bind "$WEB_BIND"; then
@@ -1432,11 +1481,20 @@ else
 fi
 echo -e "  就绪探针:  ${CYAN}${API_READY_URL}${NC}"
 echo -e "  就绪超时:  ${CYAN}${READY_TIMEOUT_SECONDS}s${NC}"
-echo -e "  Bearer Token (web_token): ${YELLOW}${WEB_TOKEN}${NC}"
-if [[ -n "${PLUGIN_ADMIN_TOKEN}" ]]; then
-	echo -e "  Plugin Admin Token:       ${YELLOW}${PLUGIN_ADMIN_TOKEN}${NC}"
+if [[ "${CONFIG_BACKED_UP}" != "true" && -t 1 ]]; then
+    echo -e "  Bearer Token (web_token): ${YELLOW}${WEB_TOKEN}${NC}"
+    if [[ -n "${PLUGIN_ADMIN_TOKEN}" ]]; then
+	    echo -e "  Plugin Admin Token:       ${YELLOW}${PLUGIN_ADMIN_TOKEN}${NC}"
+    else
+	    echo -e "  Plugin Admin API:         ${YELLOW}disabled${NC}"
+    fi
 else
-	echo -e "  Plugin Admin API:         ${YELLOW}disabled${NC}"
+    echo -e "  Bearer Token (web_token): ${YELLOW}[hidden; stored in config.json]${NC}"
+    if [[ -n "${PLUGIN_ADMIN_TOKEN}" ]]; then
+        echo -e "  Plugin Admin Token:       ${YELLOW}[hidden; stored in config.json]${NC}"
+    else
+	    echo -e "  Plugin Admin API:         ${YELLOW}disabled${NC}"
+    fi
 fi
 echo ""
 echo -e "  服务管理:"

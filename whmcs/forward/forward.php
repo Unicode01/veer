@@ -16,7 +16,7 @@ function forward_config()
     return [
         'name' => 'Veer 管理',
         'description' => '对接 Veer 的规则接口，提供端口转发规则的后台与客户区管理。',
-        'version' => '1.3.7',
+        'version' => '1.3.8',
         'author' => 'OpenAI Codex',
         'language' => 'chinese',
         'fields' => [
@@ -38,7 +38,7 @@ function forward_config()
                 'FriendlyName' => '默认 Veer API 地址',
                 'Type' => 'text',
                 'Size' => '50',
-                'Description' => '默认 Veer 控制端地址；未命中宿主机覆盖映射时使用，例如 http://127.0.0.1:8080',
+                'Description' => '默认 Veer 控制端地址；仅支持 HTTP(S)。远程连接必须使用 HTTPS，本机可使用 http://127.0.0.1:8080',
                 'Default' => 'http://127.0.0.1:8080',
             ],
             'api_token' => [
@@ -2132,15 +2132,39 @@ function forward_api_error_message($status, $response = '', $decoded = null)
     return 'Veer API 返回 HTTP ' . $status . ': ' . $message;
 }
 
+function forward_validate_api_endpoint($endpoint)
+{
+    $endpoint = rtrim(trim((string) $endpoint), '/');
+    if ($endpoint === '' || preg_match('/[\x00-\x20\x7f]/', $endpoint)) {
+        return ['success' => false, 'message' => 'Veer API 地址无效'];
+    }
+
+    $parts = @parse_url($endpoint);
+    $scheme = is_array($parts) ? strtolower((string) ($parts['scheme'] ?? '')) : '';
+    $host = is_array($parts) ? trim((string) ($parts['host'] ?? '')) : '';
+    if (!is_array($parts) || !in_array($scheme, ['http', 'https'], true) || $host === '') {
+        return ['success' => false, 'message' => 'Veer API 地址必须是完整的 HTTP(S) URL'];
+    }
+    if (isset($parts['user']) || isset($parts['pass']) || isset($parts['query']) || isset($parts['fragment'])) {
+        return ['success' => false, 'message' => 'Veer API 地址不能包含用户信息、查询参数或片段'];
+    }
+    if (isset($parts['port']) && ((int) $parts['port'] < 1 || (int) $parts['port'] > 65535)) {
+        return ['success' => false, 'message' => 'Veer API 地址端口无效'];
+    }
+
+    return ['success' => true, 'endpoint' => $endpoint];
+}
+
 function forward_call_api_target(array $target, $path, $method = 'GET', array $payload = null)
 {
-    $endpoint = rtrim((string) ($target['endpoint'] ?? ''), '/');
+    $endpointValidation = forward_validate_api_endpoint($target['endpoint'] ?? '');
+    if (empty($endpointValidation['success'])) {
+        return $endpointValidation;
+    }
+    $endpoint = $endpointValidation['endpoint'];
     $token = trim((string) ($target['token'] ?? ''));
     $skipTlsVerify = !empty($target['skip_tls_verify']);
 
-    if ($endpoint === '') {
-        return ['success' => false, 'message' => '未配置 Veer API 地址'];
-    }
     if ($token === '') {
         return ['success' => false, 'message' => '未配置 Veer Bearer Token'];
     }
@@ -2153,10 +2177,15 @@ function forward_call_api_target(array $target, $path, $method = 'GET', array $p
     ];
 
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, strtoupper($method));
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, !$skipTlsVerify);
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $skipTlsVerify ? 0 : 2);
+    if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTP') && defined('CURLPROTO_HTTPS')) {
+        curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    }
 
     if ($payload !== null) {
         $json = json_encode($payload, JSON_UNESCAPED_UNICODE);
@@ -2172,18 +2201,34 @@ function forward_call_api_target(array $target, $path, $method = 'GET', array $p
 
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 
-    $response = curl_exec($ch);
+    $maxResponseBytes = 4 * 1024 * 1024;
+    $response = '';
+    $responseTooLarge = false;
+    curl_setopt($ch, CURLOPT_WRITEFUNCTION, function ($handle, $chunk) use (&$response, &$responseTooLarge, $maxResponseBytes) {
+        $chunkLength = strlen($chunk);
+        if (strlen($response) > $maxResponseBytes - $chunkLength) {
+            $responseTooLarge = true;
+            return 0;
+        }
+        $response .= $chunk;
+        return $chunkLength;
+    });
+    $curlResult = curl_exec($ch);
     $errno = curl_errno($ch);
     $error = curl_error($ch);
     $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
+    if ($responseTooLarge) {
+        forward_log('api_response_too_large', ['url' => $url, 'method' => $method], ['limit' => $maxResponseBytes]);
+        return ['success' => false, 'message' => 'Veer API 响应超过安全大小限制'];
+    }
     if ($errno) {
         forward_log('api_curl_error', ['url' => $url, 'method' => $method], $error);
         return ['success' => false, 'message' => 'API 调用失败: ' . $error];
     }
 
-    if ($response === false || $response === '') {
+    if ($curlResult === false || $response === '') {
         return ($status >= 200 && $status < 300)
             ? ['success' => true, 'data' => null]
             : ['success' => false, 'message' => forward_api_error_message($status, '')];
@@ -2742,8 +2787,35 @@ function forward_validate_rule_input(array $data, array $settings, $isClient = f
     ];
 }
 
-function forward_create_rule(array $data, $userId = 0, $isClient = false)
+function forward_with_client_creation_lock($userId, callable $callback)
 {
+    $userId = (int) $userId;
+    if ($userId <= 0) {
+        return ['success' => false, 'message' => '无效的客户账号'];
+    }
+
+    try {
+        return Capsule::connection()->transaction(function () use ($userId, $callback) {
+            $client = Capsule::table('tblclients')->where('id', $userId)->lockForUpdate()->first();
+            if (!$client) {
+                return ['success' => false, 'message' => '客户账号不存在'];
+            }
+            return $callback();
+        });
+    } catch (Throwable $e) {
+        forward_log('client_creation_lock_error', ['user_id' => $userId], $e->getMessage());
+        return ['success' => false, 'message' => '创建请求暂时无法完成，请稍后重试'];
+    }
+}
+
+function forward_create_rule(array $data, $userId = 0, $isClient = false, $quotaLocked = false)
+{
+    if ($isClient && !$quotaLocked) {
+        return forward_with_client_creation_lock($userId, function () use ($data, $userId, $isClient) {
+            return forward_create_rule($data, $userId, $isClient, true);
+        });
+    }
+
     $settings = forward_get_module_settings();
     $clientPermissions = forward_client_permissions($settings);
     $service = null;
@@ -3850,8 +3922,14 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
     ];
 }
 
-function forward_create_site(array $data, $userId = 0, $isClient = false)
+function forward_create_site(array $data, $userId = 0, $isClient = false, $quotaLocked = false)
 {
+    if ($isClient && !$quotaLocked) {
+        return forward_with_client_creation_lock($userId, function () use ($data, $userId, $isClient) {
+            return forward_create_site($data, $userId, $isClient, true);
+        });
+    }
+
     $settings = forward_get_module_settings();
     $clientPermissions = forward_client_permissions($settings);
     $service = null;
@@ -5694,7 +5772,7 @@ function forward_clientarea($vars)
         forward_log('clientarea_output_error', $context, $e->getMessage(), $e->getTraceAsString());
 
         if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && !empty($_POST['action'])) {
-            forward_json_response(['success' => false, 'message' => 'Veer 客户区操作失败：' . $e->getMessage()]);
+            forward_json_response(['success' => false, 'message' => 'Veer 客户区操作失败，请稍后重试或联系管理员']);
         }
 
         return [
@@ -5705,7 +5783,7 @@ function forward_clientarea($vars)
             'vars' => [
                 'asset_url' => 'modules/addons/forward',
                 'modulelink' => $vars['modulelink'] ?? 'index.php?m=forward',
-                'message' => 'Veer 客户区加载失败：' . $e->getMessage(),
+                'message' => 'Veer 客户区加载失败，请稍后重试或联系管理员。',
             ],
         ];
     }

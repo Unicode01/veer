@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,7 +27,21 @@ const (
 	apiServerWriteTimeout      = 30 * time.Second
 	apiServerIdleTimeout       = 120 * time.Second
 	apiServerMaxHeaderBytes    = 1 << 20
+	apiAuthFailureLimit        = 10
+	apiAuthFailureWindow       = time.Minute
+	apiAuthFailureMaxClients   = 4096
 )
+
+type apiAuthFailureEntry struct {
+	failures    int
+	windowStart time.Time
+}
+
+type apiAuthFailureLimiter struct {
+	mu      sync.Mutex
+	entries map[string]apiAuthFailureEntry
+	now     func() time.Time
+}
 
 type ruleSetEnabledRequest struct {
 	ID      int64 `json:"id"`
@@ -113,6 +128,9 @@ const maxStatsPageSize = 500
 
 func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) (*http.Server, error) {
 	addr := apiListenAddr(cfg)
+	if apiBindExposesRemoteClients(cfg) {
+		log.Printf("SECURITY WARNING: management API %s is exposed over plaintext HTTP; restrict it to a trusted network or place it behind TLS", addr)
+	}
 	handler := buildAPIHandler(cfg, db, pm)
 	server := &http.Server{
 		Addr:              addr,
@@ -534,7 +552,7 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		handleListCurrentConns(w, r, db, pm)
 	}))
-	return securityHeadersMiddleware(mux)
+	return securityHeadersMiddleware(authFailureLimitMiddleware(cfg, mux))
 }
 
 func apiListenAddr(cfg *Config) string {
@@ -555,23 +573,136 @@ func apiBindExposesRemoteClients(cfg *Config) bool {
 		bind = normalizeWebBind(cfg.WebBind)
 	}
 	bind = strings.ToLower(strings.TrimSpace(bind))
-	switch bind {
-	case "", "127.0.0.1", "::1", "localhost":
+	if bind == "localhost" || bind == "localhost." {
 		return false
-	default:
-		return true
 	}
+	if ip := net.ParseIP(bind); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return true
 }
 
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func newAPIAuthFailureLimiter() *apiAuthFailureLimiter {
+	return &apiAuthFailureLimiter{
+		entries: make(map[string]apiAuthFailureEntry),
+		now:     time.Now,
+	}
+}
+
+func (l *apiAuthFailureLimiter) allowFailure(client string) (bool, time.Duration) {
+	if l == nil {
+		return true, 0
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry, ok := l.entries[client]
+	if ok && !now.Before(entry.windowStart.Add(apiAuthFailureWindow)) {
+		delete(l.entries, client)
+		entry = apiAuthFailureEntry{}
+		ok = false
+	}
+	if ok && entry.failures >= apiAuthFailureLimit {
+		return false, entry.windowStart.Add(apiAuthFailureWindow).Sub(now)
+	}
+	if !ok {
+		if len(l.entries) >= apiAuthFailureMaxClients {
+			l.pruneExpiredLocked(now)
+		}
+		if len(l.entries) >= apiAuthFailureMaxClients {
+			return false, apiAuthFailureWindow
+		}
+		entry.windowStart = now
+	}
+	entry.failures++
+	l.entries[client] = entry
+	return true, 0
+}
+
+func (l *apiAuthFailureLimiter) reset(client string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	delete(l.entries, client)
+	l.mu.Unlock()
+}
+
+func (l *apiAuthFailureLimiter) pruneExpiredLocked(now time.Time) {
+	for client, entry := range l.entries {
+		if !now.Before(entry.windowStart.Add(apiAuthFailureWindow)) {
+			delete(l.entries, client)
+		}
+	}
+}
+
+func authFailureLimitMiddleware(cfg *Config, next http.Handler) http.Handler {
+	limiter := newAPIAuthFailureLimiter()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !apiCredentialProtectedPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		client := apiAuthClientKey(r)
+		if authorizedAPIRequest(cfg, r) {
+			limiter.reset(client)
+			next.ServeHTTP(w, r)
+			return
+		}
+		if allowed, retryAfter := limiter.allowFailure(client); !allowed {
+			writeAPIAuthRateLimit(w, retryAfter)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func apiCredentialProtectedPath(path string) bool {
+	return path == "/metrics" || path == "/api" || strings.HasPrefix(path, "/api/")
+}
+
+func apiAuthClientKey(r *http.Request) string {
+	if r == nil {
+		return "unknown"
+	}
+	value := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
+		}
+		return host
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return ip.String()
+	}
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func writeAPIAuthRateLimit(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many authentication attempts"})
 }
 
 func authMiddleware(cfg *Config, next http.HandlerFunc) http.HandlerFunc {
