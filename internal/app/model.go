@@ -39,6 +39,7 @@ type Site struct {
 	BackendSourceIP string `json:"backend_source_ip"`
 	BackendHTTP     int    `json:"backend_http_port"`
 	BackendHTTPS    int    `json:"backend_https_port"`
+	QUIC            bool   `json:"quic"`
 	Tag             string `json:"tag"`
 	Enabled         bool   `json:"enabled"`
 	Transparent     bool   `json:"transparent"`

@@ -497,6 +497,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   "backend_source_ip": "",
   "backend_http_port": 80,
   "backend_https_port": 443,
+  "quic": true,
   "tag": "vm",
   "enabled": true,
   "transparent": false,
@@ -1007,6 +1008,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   "backend_source_ip": "",
   "backend_http_port": 80,
   "backend_https_port": 443,
+  "quic": true,
   "tag": "vm",
   "transparent": false
 }
@@ -1016,6 +1018,9 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 - 必填：`domain`、`backend_ip`
 - `backend_http_port` 和 `backend_https_port` 至少一个非 `0`
+- `quic` 默认 `false`；设为 `true` 时 `backend_https_port` 必须非 `0`
+- QUIC 使用入口 UDP `443`，复用 `backend_https_port` 作为后端 UDP 端口，并与普通 UDP 规则/范围参与监听冲突校验
+- QUIC 路由支持 v1/v2 Initial SNI；Veer 原样转发数据报，不终止 TLS。ECH、连接迁移，以及同一客户端端点复用多条连接时的未知 CID 轮换当前不保证可用
 - `listen_ip` 为空时默认 `0.0.0.0`
 - `transparent = true` 时必须省略 `backend_source_ip`
 - 创建后默认 `enabled = true`

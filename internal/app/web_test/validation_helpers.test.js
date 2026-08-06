@@ -108,6 +108,7 @@ function createHarness() {
     'errors.deleteFailed': 'Delete failed: {{message}}',
     'validation.ruleNotFound': 'The rule no longer exists.',
     'validation.siteNotFound': 'The site no longer exists.',
+    'validation.siteQUICRequiresHTTPS': 'An HTTPS backend port is required when QUIC is enabled.',
     'validation.rangeNotFound': 'The range mapping no longer exists.',
     'validation.egressNATNotFound': 'The egress NAT takeover no longer exists.',
     'validation.egressNATRequired': 'Select the parent interface and outbound interface.',
@@ -308,6 +309,7 @@ function createHarness() {
     siteBackendSourceIP: createInput('siteBackendSourceIP'),
     siteBackendHTTP: createInput('siteBackendHTTP'),
     siteBackendHTTPS: createInput('siteBackendHTTPS'),
+    siteQUIC: createInput('siteQUIC'),
     siteTransparent: createInput('siteTransparent'),
     siteTransparentWarning: createInput('siteTransparentWarning'),
     editRangeId: createInput('editRangeId'),
@@ -510,6 +512,7 @@ function createHarness() {
       siteListenIP: elements.siteListenIP,
       siteBackendSourceIP: elements.siteBackendSourceIP,
       siteTransparent: elements.siteTransparent,
+      siteQUIC: elements.siteQUIC,
       siteBackendIP: elements.siteBackendIP,
       siteTransparentWarning: elements.siteTransparentWarning,
       siteForm: elements.siteForm,
@@ -1312,6 +1315,21 @@ test('applySiteValidationIssues reuses aggregated toast summary', () => {
   assert.equal(elements.siteDomain.focused, true);
   assert.equal(elements.siteDomain.errorMessage, 'This field is required.');
   assert.equal(elements.siteBackendIP.errorMessage, 'This field is required.');
+});
+
+test('applySiteValidationIssues highlights QUIC and HTTPS together', () => {
+  const { app, elements, notifications } = createHarness();
+
+  app.applySiteValidationIssues([{
+    scope: 'create',
+    field: 'site',
+    message: 'backend_https_port is required when quic is enabled'
+  }]);
+
+  assert.equal(elements.siteQUIC.focused, true);
+  assert.equal(elements.siteQUIC.errorMessage, 'An HTTPS backend port is required when QUIC is enabled.');
+  assert.equal(elements.siteBackendHTTPS.errorMessage, 'An HTTPS backend port is required when QUIC is enabled.');
+  assert.equal(notifications.at(-1).message, 'An HTTPS backend port is required when QUIC is enabled.');
 });
 
 test('applyRangeValidationIssues reuses aggregated toast summary', () => {

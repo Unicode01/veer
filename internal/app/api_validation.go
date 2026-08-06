@@ -95,7 +95,7 @@ func detectProjectedConflicts(ruleStates []projectedRuleState, siteStates []proj
 }
 
 func buildProjectedListeners(ruleStates []projectedRuleState, siteStates []projectedSiteState, rangeStates []projectedRangeState) []projectedListener {
-	listeners := make([]projectedListener, 0, len(ruleStates)+len(siteStates)*2+len(rangeStates))
+	listeners := make([]projectedListener, 0, len(ruleStates)+len(siteStates)*3+len(rangeStates))
 	for _, state := range ruleStates {
 		if !state.Rule.Enabled {
 			continue
@@ -148,6 +148,21 @@ func buildProjectedListeners(ruleStates []projectedRuleState, siteStates []proje
 				endPort:      443,
 				protocolMask: ruleProtocolMask("tcp"),
 				label:        describeSiteConflict(state, "https"),
+			})
+		}
+		if state.Site.QUIC {
+			listeners = append(listeners, projectedListener{
+				kind:         "site",
+				scope:        scope,
+				index:        index,
+				id:           id,
+				field:        field,
+				iface:        state.Site.ListenIface,
+				ip:           state.Site.ListenIP,
+				startPort:    443,
+				endPort:      443,
+				protocolMask: ruleProtocolMask("udp"),
+				label:        describeSiteConflict(state, "quic"),
 			})
 		}
 	}
@@ -320,14 +335,18 @@ func describeSiteConflict(state projectedSiteState, kind string) string {
 		iface = "*"
 	}
 	port := 80
-	if kind == "https" {
+	protocol := "TCP"
+	if kind == "https" || kind == "quic" {
 		port = 443
+	}
+	if kind == "quic" {
+		protocol = "UDP"
 	}
 	switch state.ContentScope {
 	case "create":
-		return fmt.Sprintf("create[%d] site %s %s:%d [TCP] domain=%s", state.ContentIndex, iface, state.Site.ListenIP, port, strings.ToLower(state.Site.Domain))
+		return fmt.Sprintf("create[%d] site %s %s:%d [%s] domain=%s", state.ContentIndex, iface, state.Site.ListenIP, port, protocol, strings.ToLower(state.Site.Domain))
 	default:
-		return fmt.Sprintf("site #%d %s %s:%d [TCP] domain=%s", state.Site.ID, iface, state.Site.ListenIP, port, strings.ToLower(state.Site.Domain))
+		return fmt.Sprintf("site #%d %s %s:%d [%s] domain=%s", state.Site.ID, iface, state.Site.ListenIP, port, protocol, strings.ToLower(state.Site.Domain))
 	}
 }
 

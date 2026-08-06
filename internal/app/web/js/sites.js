@@ -63,6 +63,7 @@
     app.refreshSiteBackendSourceIPOptions(site.backend_source_ip);
     app.$('siteBackendHTTP').value = site.backend_http_port || '';
     app.$('siteBackendHTTPS').value = site.backend_https_port || '';
+    el.siteQUIC.checked = !!site.quic;
     app.$('siteTransparent').checked = !!site.transparent;
     app.updateSiteTransparentWarning();
     el.siteFormTitle.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -83,6 +84,7 @@
     app.refreshSiteBackendSourceIPOptions(site.backend_source_ip);
     app.$('siteBackendHTTP').value = site.backend_http_port || '';
     app.$('siteBackendHTTPS').value = site.backend_https_port || '';
+    el.siteQUIC.checked = !!site.quic;
     app.$('siteTransparent').checked = !!site.transparent;
     app.updateSiteTransparentWarning();
     el.siteFormTitle.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -108,12 +110,14 @@
       backend_source_ip: app.el.siteBackendSourceIP,
       backend_http_port: app.$('siteBackendHTTP'),
       backend_https_port: app.$('siteBackendHTTPS'),
+      quic: app.el.siteQUIC,
       transparent: app.$('siteTransparent'),
       tag: app.$('siteTag')
     };
     if (map[field]) return [map[field]];
     if (msg === 'domain and backend_ip are required') return [app.$('siteDomain'), app.$('siteBackendIP')];
     if (msg === 'at least one of backend_http_port or backend_https_port is required') return [app.$('siteBackendHTTP'), app.$('siteBackendHTTPS')];
+    if (msg === 'backend_https_port is required when quic is enabled') return [app.el.siteQUIC, app.$('siteBackendHTTPS')];
     if (msg === 'transparent mode currently supports only IPv4 rules') return [app.$('siteTransparent')];
     if (msg.indexOf('listen_interface ') === 0) return [app.el.siteListenIfacePicker || app.el.siteListenIface];
     if (msg.indexOf('listen_ip ') === 0) return [app.el.siteListenIP];
@@ -156,6 +160,7 @@
       return 2;
     }
     if (key === 'transparent') return site.transparent ? 1 : 0;
+    if (key === 'quic') return site.quic ? 1 : 0;
     return site[key];
   };
 
@@ -176,6 +181,7 @@
         site.backend_source_ip,
         site.backend_http_port,
         site.backend_https_port,
+        site.quic ? 'QUIC HTTP/3 UDP 443' : '',
         site.runtime_error,
         app.statusInfo(site.status, site.enabled).text
       ]));
@@ -223,6 +229,9 @@
       tr.appendChild(app.createCell(app.createEndpointNode(site.backend_ip, site.backend_source_ip)));
       tr.appendChild(app.createCell(site.backend_http_port || app.emptyCellNode('inline')));
       tr.appendChild(app.createCell(site.backend_https_port || app.emptyCellNode('inline')));
+      tr.appendChild(app.createCell(site.quic
+        ? app.createBadgeNode('badge-running', app.t('common.yes'))
+        : app.emptyCellNode()));
       tr.appendChild(app.createCell(site.transparent
         ? app.createBadgeNode('badge-running', app.t('common.yes'))
         : app.emptyCellNode()));

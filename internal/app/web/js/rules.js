@@ -439,6 +439,7 @@
       'must use a usable host address': app.t('validation.managedNetworkReservationHostRequired'),
       'domain and backend_ip are required': app.t('validation.siteRequired'),
       'at least one of backend_http_port or backend_https_port is required': app.t('validation.sitePortsRequired'),
+      'backend_https_port is required when quic is enabled': app.t('validation.siteQUICRequiresHTTPS'),
       'in_ip, start_port, end_port, out_ip are required': app.t('validation.rangeRequired'),
       'start_port must be <= end_port': app.t('validation.rangeOrder'),
       'parent_interface, child_interface, out_interface are required': app.t('validation.egressNATRequired'),

@@ -1577,7 +1577,7 @@ tr.row-pending td {
 #rulesTable td:nth-child(12),
 #rangesTable td:nth-child(10),
 #rulesTable td:nth-child(13),
-#sitesTable td:nth-child(9),
+#sitesTable td:nth-child(10),
 #rangesTable td:nth-child(12) {
     white-space: nowrap;
 }

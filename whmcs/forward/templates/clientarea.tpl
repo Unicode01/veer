@@ -1,4 +1,4 @@
-<link rel="stylesheet" href="{$asset_url|escape:'html'}/assets/client.css?v=1.3.7">
+<link rel="stylesheet" href="{$asset_url|escape:'html'}/assets/client.css?v=1.3.9">
 
 <div class="forward-client">
     <div class="forward-shell">
@@ -256,6 +256,7 @@
                                                 HTTP:{if $site.backend_http_port > 0}{$site.backend_http_port|escape:'html'}{else}关{/if}
                                                 /
                                                 HTTPS:{if $site.backend_https_port > 0}{$site.backend_https_port|escape:'html'}{else}关{/if}
+                                                / QUIC:{if $site.quic}开{else}关{/if}
                                             </div>
                                             <div class="forward-rule-meta">
                                                 {if $site.transparent}
@@ -288,6 +289,7 @@
                                                     data-backend-ip="{$site.backend_ip|escape:'html'}"
                                                     data-http-port="{$site.backend_http_port|escape:'html'}"
                                                     data-https-port="{$site.backend_https_port|escape:'html'}"
+                                                    data-quic="{if $site.quic}1{else}0{/if}"
                                                     data-description="{$site.description|escape:'html'}"
                                                 >编辑</button>
                                                 <button type="button" class="btn btn-xs btn-danger forward-delete-site-btn" data-id="{$site.id|escape:'html'}">删除</button>
@@ -507,6 +509,12 @@
                                 {if !$client_site_can_edit_backend_ports}
                                     <p class="help-block forward-help">后端端口由管理员策略锁定，新增站点默认使用 80/443。</p>
                                 {/if}
+                                <div class="form-group">
+                                    <input type="hidden" name="quic" value="0">
+                                    <label class="checkbox-inline" for="forward_site_add_quic">
+                                        <input type="checkbox" id="forward_site_add_quic" name="quic" value="1"> QUIC / HTTP/3 (UDP 443)
+                                    </label>
+                                </div>
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label for="forward_site_add_desc">描述</label>
                                     <textarea class="form-control forward-control" id="forward_site_add_desc" name="description" rows="3" maxlength="2000" {if !$client_site_can_edit_description}readonly{/if}></textarea>
@@ -572,6 +580,12 @@
                                 {if !$client_site_can_edit_backend_ports}
                                     <p class="help-block forward-help">后端端口由管理员策略锁定，会保留当前值。</p>
                                 {/if}
+                                <div class="form-group">
+                                    <input type="hidden" name="quic" value="0">
+                                    <label class="checkbox-inline" for="forward_site_edit_quic">
+                                        <input type="checkbox" id="forward_site_edit_quic" name="quic" value="1"> QUIC / HTTP/3 (UDP 443)
+                                    </label>
+                                </div>
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label for="forward_site_edit_desc">描述</label>
                                     <textarea class="form-control forward-control" id="forward_site_edit_desc" name="description" rows="3" maxlength="2000" {if !$client_site_can_edit_description}readonly{/if}></textarea>
@@ -915,6 +929,11 @@
             showNotice('warning', 'HTTP 和 HTTPS 端口至少启用一个。');
             return false;
         }
+        if ($form.find('input[name="quic"]:checked').length && httpsPort === 0) {
+            showNotice('warning', '启用 QUIC 时必须配置 HTTPS 后端端口。');
+            $form.find('input[name="backend_https_port"]').focus();
+            return false;
+        }
         return true;
     }
 
@@ -1008,6 +1027,7 @@
         syncSelectedService();
         $('#forward_site_add_http').val('80');
         $('#forward_site_add_https').val('443');
+        $('#forward_site_add_quic').prop('checked', false);
         $('#forwardSiteAddModal').modal('show');
     });
 
@@ -1207,6 +1227,7 @@
         $('#forward_site_edit_ip').val(backendIp);
         $('#forward_site_edit_http').val($(this).data('http-port'));
         $('#forward_site_edit_https').val($(this).data('https-port'));
+        $('#forward_site_edit_quic').prop('checked', !!$(this).data('quic'));
         $('#forward_site_edit_desc').val($(this).data('description'));
         $('#forwardSiteEditModal').modal('show');
     });

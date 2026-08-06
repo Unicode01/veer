@@ -282,7 +282,7 @@
         <div id="tab-sites" class="tab-content" role="tabpanel" aria-labelledby="tab-sites-button">
             <section class="add-rule">
                 <h2 id="siteFormTitle" data-i18n="site.form.title.add">Add Site</h2>
-                <p class="section-desc" data-i18n="site.form.desc">Share ports 80/443 across multiple domains and route by HTTP Host or TLS SNI.</p>
+                <p class="section-desc" data-i18n="site.form.desc">Share TCP ports 80/443 across domains, with optional QUIC/HTTP/3 on UDP 443.</p>
                 <form id="siteForm">
                     <input type="hidden" id="editSiteId" value="">
                     <div class="form-row">
@@ -335,6 +335,12 @@
                             <label data-i18n="site.form.backendHTTPS">Backend HTTPS Port</label>
                             <input type="number" id="siteBackendHTTPS" min="0" max="65535" inputmode="numeric" data-i18n-placeholder="site.form.backendHTTPS.placeholder" placeholder="443 (0 disables)">
                         </div>
+                        <div class="form-group form-group-checkbox">
+                            <label>
+                                <input type="checkbox" id="siteQUIC">
+                                <span data-i18n="site.form.quic">QUIC / HTTP/3 (UDP 443)</span>
+                            </label>
+                        </div>
                     </div>
                     <div class="form-row">
                         <div class="form-group form-actions">
@@ -365,6 +371,7 @@
                                 <th class="sortable" data-table="sites" data-sort="backend_ip" data-i18n="site.form.backendIP">Backend IP</th>
                                 <th class="sortable" data-table="sites" data-sort="backend_http_port" data-i18n="site.list.httpPort">HTTP Port</th>
                                 <th class="sortable" data-table="sites" data-sort="backend_https_port" data-i18n="site.list.httpsPort">HTTPS Port</th>
+                                <th class="sortable" data-table="sites" data-sort="quic" data-i18n="site.list.quic">QUIC</th>
                                 <th class="sortable" data-table="sites" data-sort="transparent" data-i18n="form.transparentShort">Transparent</th>
                                 <th class="sortable" data-table="sites" data-sort="status" data-i18n="common.status">Status</th>
                                 <th data-i18n="common.actions">Actions</th>
@@ -1194,11 +1201,11 @@
         </div>
     </div>
 
-    <script defer src="js/core.js?v=20260729-1"></script>
-    <script defer src="js/i18n.js?v=20260802-1"></script>
+    <script defer src="js/core.js?v=20260806-1"></script>
+    <script defer src="js/i18n.js?v=20260806-1"></script>
     <script defer src="js/ui.js?v=20260802-1"></script>
-    <script defer src="js/rules.js?v=20260410-1"></script>
-    <script defer src="js/sites.js?v=20260407-2"></script>
+    <script defer src="js/rules.js?v=20260806-1"></script>
+    <script defer src="js/sites.js?v=20260806-1"></script>
     <script defer src="js/ranges.js?v=20260407-4"></script>
     <script defer src="js/egress_nats.js?v=20260407-2"></script>
     <script defer src="js/ipv6_assignments.js?v=20260408-6"></script>
@@ -1207,6 +1214,6 @@
     <script defer src="js/plugins.js?v=20260729-1"></script>
     <script defer src="js/plugin_manager.js?v=20260729-1"></script>
     <script defer src="js/stats.js?v=20260729-1"></script>
-    <script defer src="js/init.js?v=20260802-1"></script>
+    <script defer src="js/init.js?v=20260806-1"></script>
 </body>
 </html>
