@@ -16,7 +16,7 @@ function forward_config()
     return [
         'name' => 'Veer 管理',
         'description' => '对接 Veer 的规则接口，提供端口转发规则的后台与客户区管理。',
-        'version' => '1.3.8',
+        'version' => '1.3.9',
         'author' => 'OpenAI Codex',
         'language' => 'chinese',
         'fields' => [
@@ -298,6 +298,7 @@ function forward_activate()
                 $table->string('backend_source_ip', 45)->default('');
                 $table->integer('backend_http_port')->default(80);
                 $table->integer('backend_https_port')->default(443);
+                $table->boolean('quic')->default(false);
                 $table->string('tag', 100)->default('');
                 $table->boolean('transparent')->default(false);
                 $table->boolean('service_suspended')->default(false);
@@ -325,7 +326,8 @@ function forward_activate()
                 'backend_source_ip' => function ($table) { $table->string('backend_source_ip', 45)->default('')->after('backend_ip'); },
                 'backend_http_port' => function ($table) { $table->integer('backend_http_port')->default(80)->after('backend_source_ip'); },
                 'backend_https_port' => function ($table) { $table->integer('backend_https_port')->default(443)->after('backend_http_port'); },
-                'tag' => function ($table) { $table->string('tag', 100)->default('')->after('backend_https_port'); },
+                'quic' => function ($table) { $table->boolean('quic')->default(false)->after('backend_https_port'); },
+                'tag' => function ($table) { $table->string('tag', 100)->default('')->after('quic'); },
                 'transparent' => function ($table) { $table->boolean('transparent')->default(false)->after('tag'); },
                 'service_suspended' => function ($table) { $table->boolean('service_suspended')->default(false)->after('transparent'); },
                 'status' => function ($table) { $table->string('status', 20)->default('active')->after('service_suspended'); },
@@ -814,6 +816,11 @@ function forward_ensure_runtime_schema()
         if (Capsule::schema()->hasTable('mod_forward_sites') && !Capsule::schema()->hasColumn('mod_forward_sites', 'backend_source_ip')) {
             Capsule::schema()->table('mod_forward_sites', function ($table) {
                 $table->string('backend_source_ip', 45)->default('')->after('backend_ip');
+            });
+        }
+        if (Capsule::schema()->hasTable('mod_forward_sites') && !Capsule::schema()->hasColumn('mod_forward_sites', 'quic')) {
+            Capsule::schema()->table('mod_forward_sites', function ($table) {
+                $table->boolean('quic')->default(false)->after('backend_https_port');
             });
         }
         if (Capsule::schema()->hasTable('mod_forward_sites') && !Capsule::schema()->hasColumn('mod_forward_sites', 'service_suspended')) {
@@ -2470,6 +2477,7 @@ function forward_build_site_payload_from_site(array $site, $remoteId = 0)
         'backend_source_ip' => $site['backend_source_ip'],
         'backend_http_port' => $site['backend_http_port'],
         'backend_https_port' => $site['backend_https_port'],
+        'quic' => $site['quic'],
         'tag' => $site['tag'],
         'transparent' => $site['transparent'],
     ];
@@ -2489,6 +2497,7 @@ function forward_build_site_payload_from_record($record, $remoteId = null)
         'backend_source_ip' => forward_data_get($record, 'backend_source_ip', ''),
         'backend_http_port' => (int) forward_data_get($record, 'backend_http_port', 0),
         'backend_https_port' => (int) forward_data_get($record, 'backend_https_port', 0),
+        'quic' => (bool) forward_data_get($record, 'quic', false),
         'tag' => forward_data_get($record, 'tag', ''),
         'transparent' => (bool) forward_data_get($record, 'transparent', false),
     ], $remoteId === null ? forward_get_site_remote_id($record) : $remoteId);
@@ -3490,6 +3499,7 @@ function forward_upsert_synced_site(array $remoteSite, array $service)
         'backend_source_ip' => $backendSourceIp['value'],
         'backend_http_port' => forward_remote_int($remoteSite, 'backend_http_port', 80),
         'backend_https_port' => forward_remote_int($remoteSite, 'backend_https_port', 443),
+        'quic' => forward_remote_enabled(['enabled' => forward_remote_field($remoteSite, 'quic', false)]) ? 1 : 0,
         'tag' => forward_remote_string($remoteSite, 'tag'),
         'transparent' => forward_remote_enabled(['enabled' => forward_remote_field($remoteSite, 'transparent', false)]) ? 1 : 0,
         'status' => forward_remote_enabled($remoteSite) ? 'active' : 'inactive',
@@ -3725,6 +3735,7 @@ function forward_get_local_sites($userId = null, $refreshRemote = true)
             'backend_source_ip' => $row->backend_source_ip ?: '',
             'backend_http_port' => (int) $row->backend_http_port,
             'backend_https_port' => (int) $row->backend_https_port,
+            'quic' => (bool) ($row->quic ?? false),
             'tag' => $row->tag ?: '',
             'transparent' => (bool) $row->transparent,
             'status' => $row->status,
@@ -3794,6 +3805,7 @@ function forward_get_local_site($siteId, $userId = null)
         'backend_source_ip' => $row->backend_source_ip ?: '',
         'backend_http_port' => (int) $row->backend_http_port,
         'backend_https_port' => (int) $row->backend_https_port,
+        'quic' => (bool) ($row->quic ?? false),
         'tag' => $row->tag ?: '',
         'transparent' => (bool) $row->transparent,
         'status' => $row->status,
@@ -3832,6 +3844,7 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
         'tag' => trim((string) ($settings['default_tag'] ?? '')),
         'transparent' => forward_is_enabled_value($settings['transparent_mode'] ?? 'off'),
         'backend_source_ip' => '',
+        'quic' => false,
     ], $defaults);
     $listenIps = $allowedListenIps !== null ? array_values(array_unique($allowedListenIps)) : forward_get_all_server_ips($settings);
     if (empty($listenIps)) {
@@ -3863,6 +3876,10 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
     }
     if ($backendHttpPort === 0 && $backendHttpsPort === 0) {
         return ['success' => false, 'message' => 'HTTP 和 HTTPS 端口至少启用一个'];
+    }
+    $quic = forward_resolve_checkbox_value($data, 'quic', !empty($defaults['quic']));
+    if ($quic && $backendHttpsPort === 0) {
+        return ['success' => false, 'message' => '启用 QUIC 时必须配置 HTTPS 后端端口'];
     }
 
     $transparent = forward_resolve_checkbox_value($data, 'transparent', !empty($defaults['transparent']));
@@ -3914,6 +3931,7 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
             'backend_source_ip' => $backendSourceIP,
             'backend_http_port' => $backendHttpPort,
             'backend_https_port' => $backendHttpsPort,
+            'quic' => $quic,
             'tag' => trim((string) ($data['tag'] ?? $defaults['tag'])),
             'transparent' => $transparent,
             'description' => $description,
@@ -4030,6 +4048,7 @@ function forward_create_site(array $data, $userId = 0, $isClient = false, $quota
             'backend_source_ip' => $site['backend_source_ip'],
             'backend_http_port' => $site['backend_http_port'],
             'backend_https_port' => $site['backend_https_port'],
+            'quic' => $site['quic'] ? 1 : 0,
             'tag' => $site['tag'],
             'transparent' => $site['transparent'] ? 1 : 0,
             'status' => 'active',
@@ -4133,6 +4152,7 @@ function forward_update_site(array $data, $userId = null)
             'tag' => $existing->tag ?: trim((string) ($settings['default_tag'] ?? '')),
             'transparent' => (bool) $existing->transparent,
             'backend_source_ip' => $existing->backend_source_ip ?: '',
+            'quic' => (bool) ($existing->quic ?? false),
         ]
     );
     if (!$validated['success']) {
@@ -4163,6 +4183,7 @@ function forward_update_site(array $data, $userId = null)
         'backend_source_ip' => $site['backend_source_ip'],
         'backend_http_port' => $site['backend_http_port'],
         'backend_https_port' => $site['backend_https_port'],
+        'quic' => $site['quic'] ? 1 : 0,
         'tag' => $site['tag'],
         'transparent' => $site['transparent'] ? 1 : 0,
         'description' => $site['description'],
@@ -4181,6 +4202,7 @@ function forward_update_site(array $data, $userId = null)
         'backend_source_ip' => $existing->backend_source_ip ?: '',
         'backend_http_port' => (int) $existing->backend_http_port,
         'backend_https_port' => (int) $existing->backend_https_port,
+        'quic' => !empty($existing->quic) ? 1 : 0,
         'tag' => $existing->tag ?: '',
         'transparent' => !empty($existing->transparent) ? 1 : 0,
         'status' => $existing->status ?: 'active',
@@ -5263,6 +5285,7 @@ HTML;
             $siteJson = htmlspecialchars(json_encode($site, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8');
             $backendHttp = (int) $site['backend_http_port'] > 0 ? ('HTTP:' . (int) $site['backend_http_port']) : 'HTTP:关闭';
             $backendHttps = (int) $site['backend_https_port'] > 0 ? ('HTTPS:' . (int) $site['backend_https_port']) : 'HTTPS:关闭';
+            $backendQuic = !empty($site['quic']) ? 'QUIC:开启' : 'QUIC:关闭';
             $siteSourceMeta = !empty($site['transparent'])
                 ? '源地址：透传'
                 : (!empty($site['backend_source_ip']) ? ('回源 IP：' . $site['backend_source_ip']) : '回源 IP：自动');
@@ -5270,7 +5293,7 @@ HTML;
             echo '<td>' . (int) $site['id'] . '</td>';
             echo '<td><strong>' . htmlspecialchars($site['domain'], ENT_QUOTES, 'UTF-8') . '</strong><br><small>' . htmlspecialchars($site['server_label'] ?: '-', ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($site['listen_endpoint'], ENT_QUOTES, 'UTF-8') . '</td>';
-            echo '<td>' . htmlspecialchars($site['backend_ip'], ENT_QUOTES, 'UTF-8') . ' <small>(' . htmlspecialchars($backendHttp . '，' . $backendHttps, ENT_QUOTES, 'UTF-8') . ')</small><br><small>' . htmlspecialchars($siteSourceMeta, ENT_QUOTES, 'UTF-8') . '</small></td>';
+            echo '<td>' . htmlspecialchars($site['backend_ip'], ENT_QUOTES, 'UTF-8') . ' <small>(' . htmlspecialchars($backendHttp . '，' . $backendHttps . '，' . $backendQuic, ENT_QUOTES, 'UTF-8') . ')</small><br><small>' . htmlspecialchars($siteSourceMeta, ENT_QUOTES, 'UTF-8') . '</small></td>';
             echo '<td>' . htmlspecialchars($site['tag'] ?: '-', ENT_QUOTES, 'UTF-8') . '</td>';
             echo '<td><span class="label forward-admin-status label-' . htmlspecialchars($site['status_class'], ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($site['status_text'], ENT_QUOTES, 'UTF-8') . '</span></td>';
             echo '<td>' . (int) $site['user_id'] . '</td>';
@@ -5298,6 +5321,7 @@ HTML;
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_product_name">产品名称</label><input type="text" class="form-control" name="product_name" id="forward_admin_site_product_name"></div></div></div>';
     echo '<div class="row"><div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_http_port">HTTP 端口</label><input type="number" class="form-control" name="backend_http_port" id="forward_admin_site_http_port" min="0" max="65535" value="80"></div></div>';
     echo '<div class="col-sm-6"><div class="form-group"><label for="forward_admin_site_https_port">HTTPS 端口</label><input type="number" class="form-control" name="backend_https_port" id="forward_admin_site_https_port" min="0" max="65535" value="443"></div></div></div>';
+    echo '<div class="form-group"><input type="hidden" name="quic" value="0"><label class="checkbox-inline"><input type="checkbox" name="quic" id="forward_admin_site_quic" value="1"> QUIC / HTTP/3 (UDP 443)</label></div>';
     echo '<div class="form-group"><input type="hidden" name="transparent" value="0"><label class="checkbox-inline"><input type="checkbox" name="transparent" id="forward_admin_site_transparent" value="1"> 透传客户端源 IP</label><p class="help-block">开启后保留访客真实源地址；当前仅支持 IPv4 入口与目标 IP 组合，关闭后可选填回源 IP。</p></div>';
     echo '<div class="form-group" id="forward_admin_site_source_wrap"><label for="forward_admin_site_backend_source_ip">回源 IP</label><input type="text" class="form-control" name="backend_source_ip" id="forward_admin_site_backend_source_ip" placeholder="留空表示自动选择"><p class="help-block">仅在关闭透传时生效，必须填写 Veer 宿主机上的本地 IP，且与目标 IP 地址族一致。</p></div>';
     echo '<div class="form-group"><label for="forward_admin_site_description">描述</label><textarea class="form-control" name="description" id="forward_admin_site_description" rows="3"></textarea></div>';
@@ -5525,6 +5549,7 @@ HTML;
     $('#forward_admin_site_server_id').val('');
     $('#forward_admin_site_http_port').val('80');
     $('#forward_admin_site_https_port').val('443');
+    $('#forward_admin_site_quic').prop('checked', false);
     $('#forward_admin_site_transparent').prop('checked', adminDefaultTransparent);
     syncAdminTransparentSource('#forward_admin_site_transparent', '#forward_admin_site_backend_source_ip', '#forward_admin_site_source_wrap', '');
     $('#forwardAdminSiteModalTitle').text('添加共享站点');
@@ -5599,6 +5624,7 @@ HTML;
     $('#forward_admin_site_backend_ip').val(site.backend_ip || '');
     $('#forward_admin_site_http_port').val(site.backend_http_port || 0);
     $('#forward_admin_site_https_port').val(site.backend_https_port || 0);
+    $('#forward_admin_site_quic').prop('checked', !!site.quic);
     $('#forward_admin_site_transparent').prop('checked', !!site.transparent);
     syncAdminTransparentSource('#forward_admin_site_transparent', '#forward_admin_site_backend_source_ip', '#forward_admin_site_source_wrap', site.backend_source_ip || '');
     $('#forward_admin_site_product_name').val(site.product_name || '');
@@ -5724,6 +5750,11 @@ HTML;
     e.preventDefault();
     var $form = $(this);
     var $submit = $form.find('button[type="submit"]');
+    if ($('#forward_admin_site_quic').prop('checked') && (parseInt($('#forward_admin_site_https_port').val(), 10) || 0) === 0) {
+      showAdminNotice('warning', '启用 QUIC 时必须配置 HTTPS 后端端口');
+      $('#forward_admin_site_https_port').focus();
+      return;
+    }
     var formData = $form.serializeArray();
     formData.push({name: 'action', value: $('#forward_admin_site_id').val() ? 'edit_site' : 'add_site'});
     setAdminButtonLoading($submit, true, '保存中...');

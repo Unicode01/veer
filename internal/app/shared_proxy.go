@@ -41,7 +41,9 @@ func runSharedProxy(sockPath string) {
 	sp := &sharedProxyEngine{
 		httpRoutes:        make(map[string]string),
 		httpsRoutes:       make(map[string]string),
+		quicRoutes:        make(map[string]string),
 		listeners:         make(map[string]*managedListener),
+		quicListeners:     make(map[string]*managedQUICListener),
 		domainSiteID:      make(map[string]int64),
 		domainStats:       make(map[string]*siteStats),
 		domainSourceIP:    make(map[string]string),
@@ -257,6 +259,13 @@ type managedListener struct {
 	cancel   context.CancelFunc
 }
 
+type managedQUICListener struct {
+	iface  string
+	addr   string
+	conn   *net.UDPConn
+	cancel context.CancelFunc
+}
+
 func listenerKey(iface, addr string) string {
 	return iface + "\x00" + addr
 }
@@ -321,7 +330,9 @@ type sharedProxyEngine struct {
 	mu                sync.RWMutex
 	httpRoutes        map[string]string // domain -> ip:port
 	httpsRoutes       map[string]string // domain -> ip:port
+	quicRoutes        map[string]string // domain -> ip:port
 	listeners         map[string]*managedListener
+	quicListeners     map[string]*managedQUICListener
 	domainSiteID      map[string]int64      // domain -> site ID
 	domainStats       map[string]*siteStats // domain -> stats
 	domainSourceIP    map[string]string     // domain -> backend source IPv4
@@ -507,8 +518,11 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 	// Build new route tables
 	newHTTP := make(map[string]string)
 	newHTTPS := make(map[string]string)
+	newQUIC := make(map[string]string)
 	neededListeners := make(map[string]managedListener)
+	neededQUICListeners := make(map[string]managedQUICListener)
 	listenerSiteIDs := make(map[string]map[int64]struct{})
+	quicListenerSiteIDs := make(map[string]map[int64]struct{})
 
 	newSiteID := make(map[string]int64)
 	newStats := make(map[string]*siteStats)
@@ -519,6 +533,14 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 		if ids == nil {
 			ids = make(map[int64]struct{})
 			listenerSiteIDs[key] = ids
+		}
+		ids[siteID] = struct{}{}
+	}
+	addQUICListenerSiteID := func(key string, siteID int64) {
+		ids := quicListenerSiteIDs[key]
+		if ids == nil {
+			ids = make(map[int64]struct{})
+			quicListenerSiteIDs[key] = ids
 		}
 		ids[siteID] = struct{}{}
 	}
@@ -547,10 +569,18 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 			neededListeners[key] = managedListener{iface: s.ListenIface, addr: addr}
 			addListenerSiteID(key, s.ID)
 		}
+		if s.QUIC && s.BackendHTTPS > 0 {
+			newQUIC[domain] = net.JoinHostPort(s.BackendIP, fmt.Sprintf("%d", s.BackendHTTPS))
+			addr := net.JoinHostPort(s.ListenIP, "443")
+			key := listenerKey(s.ListenIface, addr)
+			neededQUICListeners[key] = managedQUICListener{iface: s.ListenIface, addr: addr}
+			addQUICListenerSiteID(key, s.ID)
+		}
 	}
 
 	sp.httpRoutes = newHTTP
 	sp.httpsRoutes = newHTTPS
+	sp.quicRoutes = newQUIC
 	sp.domainSiteID = newSiteID
 	sp.domainStats = newStats
 	sp.domainSourceIP = newSourceIP
@@ -569,6 +599,18 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 				log.Printf("shared proxy: stopped listener %s on %s", ml.addr, ml.iface)
 			} else {
 				log.Printf("shared proxy: stopped listener %s", ml.addr)
+			}
+		}
+	}
+	for key, ml := range sp.quicListeners {
+		if _, ok := neededQUICListeners[key]; !ok {
+			ml.cancel()
+			ml.conn.Close()
+			delete(sp.quicListeners, key)
+			if ml.iface != "" {
+				log.Printf("shared proxy: stopped QUIC listener %s on %s", ml.addr, ml.iface)
+			} else {
+				log.Printf("shared proxy: stopped QUIC listener %s", ml.addr)
 			}
 		}
 	}
@@ -610,11 +652,38 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 		}
 	}
 
+	// QUIC uses UDP 443 and therefore needs a listener separate from HTTPS/TCP.
+	for key, spec := range neededQUICListeners {
+		if _, exists := sp.quicListeners[key]; exists {
+			continue
+		}
+		udpConn, err := listenSharedProxyQUIC(parentCtx, spec.iface, spec.addr)
+		if err != nil {
+			for siteID := range quicListenerSiteIDs[key] {
+				failedSiteIDs[siteID] = struct{}{}
+			}
+			if spec.iface != "" {
+				failedListeners = append(failedListeners, fmt.Sprintf("UDP %s via %s", spec.addr, spec.iface))
+			} else {
+				failedListeners = append(failedListeners, "UDP "+spec.addr)
+			}
+			continue
+		}
+		ctx, cancel := context.WithCancel(parentCtx)
+		sp.quicListeners[key] = &managedQUICListener{iface: spec.iface, addr: spec.addr, conn: udpConn, cancel: cancel}
+		go sp.serveQUIC(ctx, udpConn, spec.addr)
+		if spec.iface != "" {
+			log.Printf("shared proxy: listening for QUIC on %s via %s", spec.addr, spec.iface)
+		} else {
+			log.Printf("shared proxy: listening for QUIC on %s", spec.addr)
+		}
+	}
+
 	sort.Strings(failedListeners)
 	return sharedProxyApplyResult{
 		failedSiteIDs:       sortedInt64SetKeys(failedSiteIDs),
 		failedListeners:     failedListeners,
-		activeListenerCount: len(sp.listeners),
+		activeListenerCount: len(sp.listeners) + len(sp.quicListeners),
 	}
 }
 
@@ -625,6 +694,11 @@ func (sp *sharedProxyEngine) closeAll() {
 		ml.cancel()
 		ml.listener.Close()
 		delete(sp.listeners, key)
+	}
+	for key, ml := range sp.quicListeners {
+		ml.cancel()
+		ml.conn.Close()
+		delete(sp.quicListeners, key)
 	}
 }
 

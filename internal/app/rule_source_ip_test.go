@@ -52,6 +52,85 @@ func TestRuleOutSourceIPPersistsInDB(t *testing.T) {
 	}
 }
 
+func TestSiteQUICPersistsInDB(t *testing.T) {
+	db := openTestDB(t)
+	input := Site{
+		Domain:       "quic.example.test",
+		ListenIP:     "0.0.0.0",
+		BackendIP:    "192.0.2.10",
+		BackendHTTPS: 9443,
+		QUIC:         true,
+		Enabled:      true,
+	}
+	id, err := dbAddSite(db, &input)
+	if err != nil {
+		t.Fatalf("add site: %v", err)
+	}
+	got, err := dbGetSite(db, id)
+	if err != nil {
+		t.Fatalf("get site: %v", err)
+	}
+	if !got.QUIC {
+		t.Fatal("site QUIC = false, want true")
+	}
+
+	got.QUIC = false
+	if err := dbUpdateSite(db, got); err != nil {
+		t.Fatalf("update site: %v", err)
+	}
+	updated, err := dbGetSite(db, id)
+	if err != nil {
+		t.Fatalf("get updated site: %v", err)
+	}
+	if updated.QUIC {
+		t.Fatal("updated site QUIC = true, want false")
+	}
+}
+
+func TestInitDBMigratesSiteQUICDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-forward.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE sites (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		domain TEXT NOT NULL DEFAULT '',
+		listen_ip TEXT NOT NULL DEFAULT '0.0.0.0',
+		listen_iface TEXT NOT NULL DEFAULT '',
+		backend_ip TEXT NOT NULL DEFAULT '',
+		backend_source_ip TEXT NOT NULL DEFAULT '',
+		backend_http INTEGER NOT NULL DEFAULT 0,
+		backend_https INTEGER NOT NULL DEFAULT 0,
+		tag TEXT NOT NULL DEFAULT '',
+		enabled INTEGER NOT NULL DEFAULT 1,
+		transparent INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		legacy.Close()
+		t.Fatalf("create legacy sites table: %v", err)
+	}
+	if _, err := legacy.Exec(`INSERT INTO sites (domain, backend_ip, backend_https) VALUES ('legacy.example.test', '192.0.2.10', 443)`); err != nil {
+		legacy.Close()
+		t.Fatalf("insert legacy site: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	db, err := initDB(path)
+	if err != nil {
+		t.Fatalf("migrate legacy database: %v", err)
+	}
+	defer db.Close()
+	site, err := dbGetSite(db, 1)
+	if err != nil {
+		t.Fatalf("get migrated site: %v", err)
+	}
+	if site.QUIC {
+		t.Fatal("migrated site QUIC = true, want default false")
+	}
+}
+
 func TestListRulesIncludesOutSourceIP(t *testing.T) {
 	db := openTestDB(t)
 

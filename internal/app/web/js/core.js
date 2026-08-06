@@ -45,6 +45,7 @@
       siteBackendSourceIP: $('siteBackendSourceIP'),
       siteBackendSourceIPOptions: $('siteBackendSourceIPOptions'),
       siteTransparent: $('siteTransparent'),
+      siteQUIC: $('siteQUIC'),
       siteBackendIP: $('siteBackendIP'),
       siteTransparentWarning: $('siteTransparentWarning'),
 

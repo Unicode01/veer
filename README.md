@@ -68,7 +68,7 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 
 - Proxmox VE、KVM、Linux bridge、veth/tap 等宿主机网络
 - 公网端口、端口段转发到 VM 或容器
-- 多台 VM 共享宿主机 `80/443`，按域名回源
+- 多台 VM 共享宿主机 TCP `80/443`，并可选共享 UDP `443` 的 QUIC/HTTP/3，按域名回源
 - 下联 bridge 的 IPv4 DHCP、静态保留、IPv6 分发和 Egress NAT
 - `userspace / TC / XDP` 多 dataplane 转发与自动回退
 
@@ -77,7 +77,7 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 核心功能：
 
 - 单端口转发：TCP、UDP、TCP+UDP
-- 共享站点：HTTP/HTTPS 共享入口，按域名转发到不同后端
+- 共享站点：HTTP/HTTPS 共享入口，可选 QUIC/HTTP/3，按域名转发到不同后端
 - 端口范围：连续端口区间映射到指定后端
 - Egress NAT：按父接口、子接口、出接口、源地址管理出向 NAT
 - 托管网络：创建或托管 existing bridge，维护 IPv4 DHCP、保留地址、自动 Egress NAT
@@ -92,6 +92,8 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 - TC/XDP 内核态热更新、状态观测和异常恢复
 - Goja 控制面与 TC eBPF pipeline 插件系统
 - WHMCS addon 插件
+
+共享站点的 QUIC 开关默认关闭。启用后，Veer 会监听同一入口 IP 的 UDP `443`，从 QUIC v1/v2 Initial 中解析 TLS SNI，再把原始数据报转发到 `backend_https_port`；Veer 不终止 TLS，也不替后端校验证书。启用前需确认防火墙允许 UDP `443`、后端在该端口提供 QUIC/HTTP/3，且没有普通 UDP 规则或端口范围占用该监听地址。ECH 隐藏实际 SNI、QUIC 连接迁移，以及同一客户端端点复用多条连接时的未知 CID 轮换目前不在支持范围内。
 
 ## 推荐部署
 

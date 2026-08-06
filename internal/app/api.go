@@ -1619,6 +1619,9 @@ func normalizeAndValidateSite(site Site, requireID bool, knownIfaces map[string]
 	if site.BackendHTTP == 0 && site.BackendHTTPS == 0 {
 		return site, "at least one of backend_http_port or backend_https_port is required"
 	}
+	if site.QUIC && site.BackendHTTPS == 0 {
+		return site, "backend_https_port is required when quic is enabled"
+	}
 	if site.ListenIface != "" {
 		if _, ok := knownIfaces[site.ListenIface]; !ok {
 			return site, "listen_interface does not exist on this host"

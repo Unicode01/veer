@@ -65,6 +65,7 @@ var Schema = map[string][][2]string{
 		{"backend_source_ip", "TEXT NOT NULL DEFAULT ''"},
 		{"backend_http", "INTEGER NOT NULL DEFAULT 0"},
 		{"backend_https", "INTEGER NOT NULL DEFAULT 0"},
+		{"quic", "INTEGER NOT NULL DEFAULT 0"},
 		{"tag", "TEXT NOT NULL DEFAULT ''"},
 		{"enabled", "INTEGER NOT NULL DEFAULT 1"},
 		{"transparent", "INTEGER NOT NULL DEFAULT 0"},

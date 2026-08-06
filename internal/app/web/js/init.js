@@ -933,6 +933,13 @@
       app.focusFirstError(app.el.siteForm);
       return;
     }
+    if (app.el.siteQUIC.checked && httpsPort === 0) {
+      app.setFieldError(app.el.siteQUIC, app.t('validation.siteQUICRequiresHTTPS'));
+      app.setFieldError(app.$('siteBackendHTTPS'), app.t('validation.siteQUICRequiresHTTPS'));
+      app.notify('error', app.t('validation.siteQUICRequiresHTTPS'));
+      app.focusFirstError(app.el.siteForm);
+      return;
+    }
 
     const site = {
       domain: app.$('siteDomain').value.trim(),
@@ -942,6 +949,7 @@
       backend_source_ip: app.$('siteTransparent').checked ? '' : app.el.siteBackendSourceIP.value,
       backend_http_port: httpPort,
       backend_https_port: httpsPort,
+      quic: app.el.siteQUIC.checked,
       tag: app.$('siteTag').value,
       transparent: app.$('siteTransparent').checked
     };

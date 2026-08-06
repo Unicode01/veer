@@ -26,6 +26,7 @@ type Site struct {
 	BackendSourceIP string
 	BackendHTTP     int
 	BackendHTTPS    int
+	QUIC            bool
 	Tag             string
 	Enabled         bool
 	Transparent     bool

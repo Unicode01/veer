@@ -65,6 +65,53 @@ func TestPrepareSiteCreateRejectsConflictWithEnabledRange(t *testing.T) {
 	}
 }
 
+func TestPrepareSiteCreateRejectsQUICConflictWithUDPRule(t *testing.T) {
+	db := openValidationTestDB(t)
+
+	if _, err := dbAddRule(db, &Rule{
+		InIP:     "0.0.0.0",
+		InPort:   443,
+		OutIP:    "192.0.2.20",
+		OutPort:  8443,
+		Protocol: "udp",
+		Enabled:  true,
+	}); err != nil {
+		t.Fatalf("dbAddRule() error = %v", err)
+	}
+
+	_, issues, err := prepareSiteCreate(db, Site{
+		Domain:       "quic.example.com",
+		ListenIP:     "0.0.0.0",
+		BackendIP:    "192.0.2.10",
+		BackendHTTPS: 9443,
+		QUIC:         true,
+	})
+	if err != nil {
+		t.Fatalf("prepareSiteCreate() error = %v", err)
+	}
+	if !hasValidationMessage(issues, "listener conflicts with rule #1 * 0.0.0.0:443 [UDP]") {
+		t.Fatalf("prepareSiteCreate() issues = %#v, want UDP listener conflict", issues)
+	}
+}
+
+func TestPrepareSiteCreateRequiresHTTPSForQUIC(t *testing.T) {
+	db := openValidationTestDB(t)
+
+	_, issues, err := prepareSiteCreate(db, Site{
+		Domain:      "quic.example.com",
+		ListenIP:    "0.0.0.0",
+		BackendIP:   "192.0.2.10",
+		BackendHTTP: 8080,
+		QUIC:        true,
+	})
+	if err != nil {
+		t.Fatalf("prepareSiteCreate() error = %v", err)
+	}
+	if !hasValidationMessage(issues, "backend_https_port is required when quic is enabled") {
+		t.Fatalf("prepareSiteCreate() issues = %#v, want HTTPS requirement", issues)
+	}
+}
+
 func TestPrepareSiteCreateAllowsSharedListenerButRejectsDuplicateHTTPDomain(t *testing.T) {
 	db := openValidationTestDB(t)
 
