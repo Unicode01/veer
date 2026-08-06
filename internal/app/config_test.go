@@ -93,30 +93,30 @@ func TestLoadConfigNormalizesWebBind(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRequiresStrongTokensForRemoteManagement(t *testing.T) {
+func TestLoadConfigAllowsLegacyShortTokensForRemoteManagement(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		webToken   string
-		adminToken string
-		wantField  string
-	}{
-		{name: "weak web token", webToken: "short-token", wantField: "web_token"},
-		{name: "weak plugin admin token", webToken: "0123456789abcdefghijklmn", adminToken: "short-admin", wantField: "plugin_admin_token"},
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "web_bind": "0.0.0.0",
+  "web_token": "short-token",
+  "plugin_admin_token": "short-admin"
+}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, "config.json")
-			data := `{"web_bind":"0.0.0.0","web_token":"` + tt.webToken + `","plugin_admin_token":"` + tt.adminToken + `"}`
-			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), tt.wantField) || !strings.Contains(err.Error(), "24 characters") {
-				t.Fatalf("loadConfig() error = %v, want strong %s error", err, tt.wantField)
-			}
-		})
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v, want legacy tokens accepted", err)
+	}
+	warnings := remoteManagementTokenWarnings(cfg)
+	if len(warnings) != 2 {
+		t.Fatalf("remoteManagementTokenWarnings() = %v, want two warnings", warnings)
+	}
+	for _, field := range []string{"web_token", "plugin_admin_token"} {
+		if !strings.Contains(strings.Join(warnings, "\n"), field) {
+			t.Fatalf("remoteManagementTokenWarnings() = %v, want %s warning", warnings, field)
+		}
 	}
 }
 
@@ -131,8 +131,20 @@ func TestLoadConfigAcceptsStrongTokensForRemoteManagement(t *testing.T) {
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadConfig(path); err != nil {
+	cfg, err := loadConfig(path)
+	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if warnings := remoteManagementTokenWarnings(cfg); len(warnings) != 0 {
+		t.Fatalf("remoteManagementTokenWarnings() = %v, want none", warnings)
+	}
+}
+
+func TestRemoteManagementTokenWarningsIgnoreLoopback(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{WebBind: "127.0.0.1", WebToken: "short-token", PluginAdminToken: "short-admin"}
+	if warnings := remoteManagementTokenWarnings(cfg); len(warnings) != 0 {
+		t.Fatalf("remoteManagementTokenWarnings() = %v, want none", warnings)
 	}
 }
 

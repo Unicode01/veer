@@ -105,14 +105,6 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.PluginAdminToken != "" && cfg.PluginAdminToken == cfg.WebToken {
 		return nil, fmt.Errorf("plugin_admin_token must differ from web_token")
 	}
-	if apiBindExposesRemoteClients(&cfg) {
-		if utf8.RuneCountInString(cfg.WebToken) < remoteManagementMinimumTokenCharacters {
-			return nil, fmt.Errorf("web_token must contain at least %d characters when web_bind exposes remote clients", remoteManagementMinimumTokenCharacters)
-		}
-		if cfg.PluginAdminToken != "" && utf8.RuneCountInString(cfg.PluginAdminToken) < remoteManagementMinimumTokenCharacters {
-			return nil, fmt.Errorf("plugin_admin_token must contain at least %d characters when web_bind exposes remote clients", remoteManagementMinimumTokenCharacters)
-		}
-	}
 	if cfg.MaxWorkers < 0 {
 		cfg.MaxWorkers = 0
 	}
@@ -158,6 +150,27 @@ func validateConfiguredManagementToken(name, value string) error {
 		return fmt.Errorf("%s must not contain whitespace or control characters", name)
 	}
 	return nil
+}
+
+func remoteManagementTokenWarnings(cfg *Config) []string {
+	if cfg == nil || !apiBindExposesRemoteClients(cfg) {
+		return nil
+	}
+
+	warnings := make([]string, 0, 2)
+	if utf8.RuneCountInString(cfg.WebToken) < remoteManagementMinimumTokenCharacters {
+		warnings = append(warnings, fmt.Sprintf(
+			"web_token contains fewer than %d characters while web_bind exposes remote clients; accepted for compatibility, but rotating to a generated token is recommended",
+			remoteManagementMinimumTokenCharacters,
+		))
+	}
+	if cfg.PluginAdminToken != "" && utf8.RuneCountInString(cfg.PluginAdminToken) < remoteManagementMinimumTokenCharacters {
+		warnings = append(warnings, fmt.Sprintf(
+			"plugin_admin_token contains fewer than %d characters while web_bind exposes remote clients; accepted for compatibility, but rotating to a generated token is recommended",
+			remoteManagementMinimumTokenCharacters,
+		))
+	}
+	return warnings
 }
 
 func normalizeBoundedConfigValue(value, fallback, minimum, maximum int) int {

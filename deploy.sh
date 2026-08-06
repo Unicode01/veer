@@ -18,8 +18,8 @@
 #   WEB_BIND      Web 监听地址   (默认 127.0.0.1)
 #   WEB_UI_ENABLED 是否启用 Web UI (默认 true)
 #   WEB_PORT      Web 管理端口   (默认 8080)
-#   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成；远程监听至少 24 个字符)
-#   PLUGIN_ADMIN_TOKEN 插件高权限 Token，对应 plugin_admin_token (首次安装默认独立随机生成；远程监听至少 24 个字符)
+#   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成；新远程配置至少 24 个字符)
+#   PLUGIN_ADMIN_TOKEN 插件高权限 Token，对应 plugin_admin_token (首次安装默认独立随机生成；新远程配置至少 24 个字符)
 #   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
 #
 set -euo pipefail
@@ -109,6 +109,7 @@ WEB_BIND="${WEB_BIND:-127.0.0.1}"
 WEB_UI_ENABLED="${WEB_UI_ENABLED:-true}"
 WEB_TOKEN="${WEB_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
 PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
+REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS=24
 BPF_STATE_DIR="${VEER_BPF_STATE_DIR:-${FORWARD_BPF_STATE_DIR:-/sys/fs/bpf/forward}}"
 RUNTIME_STATE_DIR="${VEER_RUNTIME_STATE_DIR:-${FORWARD_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}}"
 HOT_RESTART_MARKER="${INSTALL_DIR}/.hot-restart-kernel"
@@ -1098,11 +1099,28 @@ validate_management_token("web_token", result["web_token"])
 if result.get("plugin_admin_token", ""):
     validate_management_token("plugin_admin_token", result["plugin_admin_token"])
 if bind_exposes_remote_clients(result["web_bind"]):
-    if len(result["web_token"]) < REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS:
+    previous_bind = get_current_string("web_bind") if config_exists else None
+    previous_bind_exposed_remote_clients = bind_exposes_remote_clients(previous_bind or "127.0.0.1")
+    previous_web_token = get_current_string("web_token") if config_exists else None
+    previous_plugin_admin_token = get_current_string("plugin_admin_token") if config_exists else None
+    web_token_changed = explicit_keys["web_token"] and result["web_token"] != previous_web_token
+    plugin_admin_token_changed = (
+        explicit_keys["plugin_admin_token"]
+        and result.get("plugin_admin_token", "") != (previous_plugin_admin_token or "")
+    )
+    enforce_new_remote_policy = not config_exists or not previous_bind_exposed_remote_clients
+    if (
+        len(result["web_token"]) < REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS
+        and (enforce_new_remote_policy or web_token_changed)
+    ):
         raise SystemExit(
             f"web_bind 暴露远程管理面时，web_token 至少需要 {REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS} 个字符"
         )
-    if result.get("plugin_admin_token", "") and len(result["plugin_admin_token"]) < REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS:
+    if (
+        result.get("plugin_admin_token", "")
+        and len(result["plugin_admin_token"]) < REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS
+        and (enforce_new_remote_policy or plugin_admin_token_changed)
+    ):
         raise SystemExit(
             f"web_bind 暴露远程管理面时，plugin_admin_token 至少需要 {REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS} 个字符"
         )
@@ -1161,6 +1179,18 @@ log_explicit_config_overrides() {
     overrides="$(printf '%s' "$overrides" | sed 's/^[[:space:]]*//')"
     if [[ -n "$overrides" ]]; then
         info "本次部署通过环境变量覆盖配置项: ${overrides}"
+    fi
+}
+
+warn_short_remote_management_tokens() {
+    if is_loopback_bind "$WEB_BIND"; then
+        return
+    fi
+    if (( ${#WEB_TOKEN} < REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS )); then
+        warn "现有 web_token 少于 ${REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS} 个字符；为兼容升级已保留，建议后续轮换为部署脚本生成的随机令牌"
+    fi
+    if [[ -n "${PLUGIN_ADMIN_TOKEN}" ]] && (( ${#PLUGIN_ADMIN_TOKEN} < REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS )); then
+        warn "现有 plugin_admin_token 少于 ${REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS} 个字符；为兼容升级已保留，建议后续轮换为独立随机令牌"
     fi
 }
 
@@ -1312,6 +1342,7 @@ else
     log_explicit_config_overrides
     ok "配置文件已保留现有值，并补齐缺失默认项"
 fi
+warn_short_remote_management_tokens
 secure_runtime_secret_files
 
 if [[ "${INSTALL_BUNDLED_PLUGINS}" == "1" ]]; then

@@ -35,6 +35,7 @@ jobs:
       - name: Verify deployment scripts
         run: |
           sh scripts/verify-platform-support.sh
+          python3 scripts/verify-deploy-config-policy.py
           shellcheck -x bootstrap.sh deploy.sh release.sh scripts/*.sh plugins/*/*.sh
           php -l whmcs/forward/forward.php
           php -l whmcs/forward/hooks.php
