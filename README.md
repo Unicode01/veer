@@ -31,7 +31,7 @@ VEER_INSTALL_PLUGINS=1 bash <(curl -fsSL https://raw.githubusercontent.com/Unico
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
-`WEB_BIND=0.0.0.0` 会让管理面接受远程连接，但 Veer 本身只提供 HTTP。仅应在受信管理网或 VPN 内使用；公网访问应保持 Veer 监听回环地址，并由启用 TLS 与访问控制的反向代理转发。非回环监听要求 `web_token`（以及非空的 `plugin_admin_token`）至少 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。
+`WEB_BIND=0.0.0.0` 会让管理面接受远程连接，但 Veer 本身只提供 HTTP。仅应在受信管理网或 VPN 内使用；公网访问应保持 Veer 监听回环地址，并由启用 TLS 与访问控制的反向代理转发。新建非回环配置、首次从回环地址改为远程监听，或在远程监听下显式更换令牌时，`web_token`（以及非空的 `plugin_admin_token`）至少需要 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。已有远程监听配置中的短令牌会为兼容升级而保留并输出警告，不会阻断部署；建议安排轮换，但不要在未同步更新 WHMCS/API 客户端时直接更换。
 
 `bootstrap.sh` 会安装依赖、拉取源码、执行 `release.sh` 构建，再调用 `deploy.sh` 安装或热更新。默认只构建和安装 Veer 核心；设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled stable 插件。它支持 `apt`、`dnf/yum`、`apk` 以及 systemd/OpenRC。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
 

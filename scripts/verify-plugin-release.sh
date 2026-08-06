@@ -117,7 +117,7 @@ assert_minimum() {
 }
 
 run_portable() {
-	for command_name in go node npm npx sh tar cmp govulncheck; do
+	for command_name in go node npm npx python3 sh tar cmp govulncheck; do
 		require_command "$command_name"
 	done
 	new_temp_dir
@@ -129,6 +129,7 @@ run_portable() {
 
 	log "deployment platform scripts"
 	sh "$ROOT_DIR/scripts/verify-platform-support.sh"
+	python3 "$ROOT_DIR/scripts/verify-deploy-config-policy.py"
 	sh "$ROOT_DIR/scripts/clean-dev-artifacts.sh" --dry-run
 
 	log "build Veer conformance binary"

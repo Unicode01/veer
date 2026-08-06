@@ -101,6 +101,9 @@ func Main(buildNonce string) {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	for _, warning := range remoteManagementTokenWarnings(cfg) {
+		log.Printf("security warning: %s", warning)
+	}
 	logStartupPhase("load config", phaseStartedAt, startupStartedAt)
 	if features := cfg.EnabledExperimentalFeatures(); len(features) > 0 {
 		log.Printf("experimental features enabled: %s", strings.Join(features, ", "))
