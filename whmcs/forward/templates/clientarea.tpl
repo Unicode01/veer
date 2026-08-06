@@ -512,7 +512,7 @@
                                 <div class="form-group">
                                     <input type="hidden" name="quic" value="0">
                                     <label class="checkbox-inline" for="forward_site_add_quic">
-                                        <input type="checkbox" id="forward_site_add_quic" name="quic" value="1"> QUIC / HTTP/3 (UDP 443)
+                                        <input type="checkbox" id="forward_site_add_quic" name="quic" value="1"> HTTP/3 (UDP 443)
                                     </label>
                                 </div>
                                 <div class="form-group" style="margin-bottom:0;">
@@ -583,7 +583,7 @@
                                 <div class="form-group">
                                     <input type="hidden" name="quic" value="0">
                                     <label class="checkbox-inline" for="forward_site_edit_quic">
-                                        <input type="checkbox" id="forward_site_edit_quic" name="quic" value="1"> QUIC / HTTP/3 (UDP 443)
+                                        <input type="checkbox" id="forward_site_edit_quic" name="quic" value="1"> HTTP/3 (UDP 443)
                                     </label>
                                 </div>
                                 <div class="form-group" style="margin-bottom:0;">
