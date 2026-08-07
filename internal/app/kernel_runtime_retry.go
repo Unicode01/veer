@@ -125,8 +125,7 @@ func samePreparedKernelRuleFlowContinuity(a, b preparedKernelRule) bool {
 	if !sameKernelRuleDataplaneConfig(a.rule, b.rule) ||
 		a.inIfIndex != b.inIfIndex ||
 		a.outIfIndex != b.outIfIndex ||
-		!sameKernelReplyIfIndexes(a.replyIfIndexes, b.replyIfIndexes) ||
-		!sameKernelIfParentMappings(a.replyIfParents, b.replyIfParents) ||
+		!kernelReplyAttachmentsPreserveFlowContinuity(a.replyIfIndexes, b.replyIfIndexes, a.replyIfParents, b.replyIfParents) ||
 		a.ingressMAC != b.ingressMAC ||
 		!sameKernelPreparedRuleSpec(a.spec, b.spec) ||
 		a.key != b.key {
@@ -139,6 +138,36 @@ func samePreparedKernelRuleFlowContinuity(a, b preparedKernelRule) bool {
 	left.Flags &^= kernelRuleFlagTrafficStats
 	right.Flags &^= kernelRuleFlagTrafficStats
 	return left == right
+}
+
+func kernelReplyAttachmentsPreserveFlowContinuity(previousIndexes, nextIndexes []int, previousParents, nextParents []kernelIfParentMapping) bool {
+	// Adding a bridge member only expands reply coverage; existing flows remain
+	// valid as long as every attachment and parent mapping they used still exists.
+	for _, previous := range previousIndexes {
+		found := false
+		for _, next := range nextIndexes {
+			if previous == next {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	for _, previous := range previousParents {
+		found := false
+		for _, next := range nextParents {
+			if previous == next {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func sameKernelReplyIfIndexes(a, b []int) bool {

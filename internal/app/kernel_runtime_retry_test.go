@@ -540,6 +540,103 @@ func TestCollectPreparedKernelRuleFlowPurgeIDsIgnoresMetadataOnlyChanges(t *test
 	}
 }
 
+func TestCollectPreparedKernelRuleFlowPurgeIDsPreservesFlowsForAddedReplyAttachment(t *testing.T) {
+	base := preparedKernelRule{
+		rule: Rule{
+			ID:           42,
+			InInterface:  "vmbr0",
+			InIP:         "198.51.100.10",
+			InPort:       20022,
+			OutInterface: "vmbr1",
+			OutIP:        "192.0.2.6",
+			OutPort:      22,
+			Protocol:     "tcp",
+		},
+		inIfIndex:      2,
+		outIfIndex:     3,
+		replyIfIndexes: []int{3, 55},
+		replyIfParents: []kernelIfParentMapping{{ifindex: 55, parentIfIndex: 3}},
+		key: tcRuleKeyV4{
+			IfIndex: 2,
+			DstAddr: 1,
+			DstPort: 20022,
+			Proto:   6,
+		},
+		value: tcRuleValueV4{
+			RuleID:      42,
+			BackendAddr: 2,
+			BackendPort: 22,
+			OutIfIndex:  3,
+		},
+	}
+
+	next := base
+	next.replyIfIndexes = []int{3, 55, 66}
+	next.replyIfParents = []kernelIfParentMapping{
+		{ifindex: 55, parentIfIndex: 3},
+		{ifindex: 66, parentIfIndex: 3},
+	}
+
+	if got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{base}, []preparedKernelRule{next}); len(got) != 0 {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want no purge ids when reply coverage expands", got)
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeIDsPurgesFlowsForRemovedOrReparentedReplyAttachment(t *testing.T) {
+	base := preparedKernelRule{
+		rule: Rule{
+			ID:           43,
+			InInterface:  "vmbr0",
+			InIP:         "198.51.100.10",
+			InPort:       20022,
+			OutInterface: "vmbr1",
+			OutIP:        "192.0.2.6",
+			OutPort:      22,
+			Protocol:     "tcp",
+		},
+		inIfIndex:      2,
+		outIfIndex:     3,
+		replyIfIndexes: []int{3, 55, 66},
+		replyIfParents: []kernelIfParentMapping{
+			{ifindex: 55, parentIfIndex: 3},
+			{ifindex: 66, parentIfIndex: 3},
+		},
+		key: tcRuleKeyV4{
+			IfIndex: 2,
+			DstAddr: 1,
+			DstPort: 20022,
+			Proto:   6,
+		},
+		value: tcRuleValueV4{
+			RuleID:      43,
+			BackendAddr: 2,
+			BackendPort: 22,
+			OutIfIndex:  3,
+		},
+	}
+
+	removed := base
+	removed.replyIfIndexes = []int{3, 55}
+	removed.replyIfParents = []kernelIfParentMapping{{ifindex: 55, parentIfIndex: 3}}
+	reparented := base
+	reparented.replyIfParents = []kernelIfParentMapping{
+		{ifindex: 55, parentIfIndex: 3},
+		{ifindex: 66, parentIfIndex: 4},
+	}
+
+	for name, next := range map[string]preparedKernelRule{
+		"removed":    removed,
+		"reparented": reparented,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{base}, []preparedKernelRule{next})
+			if _, ok := got[43]; !ok {
+				t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want rule 43 purged", got)
+			}
+		})
+	}
+}
+
 func TestCollectPreparedKernelRuleFlowPurgeIDsMarksRemovedAndChangedRules(t *testing.T) {
 	unchangedOld := preparedKernelRule{
 		rule:  Rule{ID: 51, Protocol: "tcp"},
