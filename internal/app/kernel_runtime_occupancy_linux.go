@@ -22,7 +22,15 @@ type kernelFlowLiveStateSnapshot struct {
 	ByRuleID    map[uint32]kernelStatsValueV4
 	UsedNATV4   map[kernelNATReservationOwnerV4]struct{}
 	UsedNATV6   map[kernelNATReservationOwnerV6]struct{}
+	NATByBank   kernelNATBankUsage
 	FlowEntries int
+}
+
+type kernelNATBankUsage struct {
+	activeV4 map[kernelNATReservationOwnerV4]struct{}
+	oldV4    map[kernelNATReservationOwnerV4]struct{}
+	activeV6 map[kernelNATReservationOwnerV6]struct{}
+	oldV6    map[kernelNATReservationOwnerV6]struct{}
 }
 
 type kernelNATReservationOwnerV4 struct {
