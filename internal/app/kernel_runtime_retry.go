@@ -122,22 +122,13 @@ func samePreparedKernelRuleDataplaneIgnoringRuleID(a, b preparedKernelRule) bool
 }
 
 func samePreparedKernelRuleFlowContinuity(a, b preparedKernelRule) bool {
-	if !sameKernelRuleDataplaneConfig(a.rule, b.rule) ||
-		a.inIfIndex != b.inIfIndex ||
-		a.outIfIndex != b.outIfIndex ||
-		!kernelReplyAttachmentsPreserveFlowContinuity(a.replyIfIndexes, b.replyIfIndexes, a.replyIfParents, b.replyIfParents) ||
-		a.ingressMAC != b.ingressMAC ||
-		!sameKernelPreparedRuleSpec(a.spec, b.spec) ||
-		a.key != b.key {
+	if a.rule.ID != b.rule.ID ||
+		!kernelReplyAttachmentsPreserveFlowContinuity(a.replyIfIndexes, b.replyIfIndexes, a.replyIfParents, b.replyIfParents) {
 		return false
 	}
-	left := a.value
-	right := b.value
-	left.RuleID = 0
-	right.RuleID = 0
-	left.Flags &^= kernelRuleFlagTrafficStats
-	right.Flags &^= kernelRuleFlagTrafficStats
-	return left == right
+	left, leftErr := preparedKernelRuleFlowRevision(a)
+	right, rightErr := preparedKernelRuleFlowRevision(b)
+	return leftErr == nil && rightErr == nil && left != 0 && left == right
 }
 
 func kernelReplyAttachmentsPreserveFlowContinuity(previousIndexes, nextIndexes []int, previousParents, nextParents []kernelIfParentMapping) bool {
@@ -168,6 +159,15 @@ func kernelReplyAttachmentsPreserveFlowContinuity(previousIndexes, nextIndexes [
 		}
 	}
 	return true
+}
+
+func samePreparedXDPKernelRuleFlowContinuity(a, b preparedXDPKernelRule) bool {
+	if a.rule.ID != b.rule.ID {
+		return false
+	}
+	left, leftErr := preparedXDPKernelRuleFlowRevision(a)
+	right, rightErr := preparedXDPKernelRuleFlowRevision(b)
+	return leftErr == nil && rightErr == nil && left != 0 && left == right
 }
 
 func sameKernelReplyIfIndexes(a, b []int) bool {

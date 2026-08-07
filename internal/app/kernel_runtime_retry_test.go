@@ -677,7 +677,7 @@ func TestCollectPreparedKernelRuleFlowPurgeIDsMarksRemovedAndChangedRules(t *tes
 	}
 }
 
-func TestCollectPreparedKernelRuleFlowPurgeIDsIgnoresSyntheticRuleIDDrift(t *testing.T) {
+func TestCollectPreparedKernelRuleFlowPurgeIDsPurgesWhenRuleIDChanges(t *testing.T) {
 	oldRule := preparedKernelRule{
 		rule: Rule{
 			ID:               62,
@@ -700,8 +700,43 @@ func TestCollectPreparedKernelRuleFlowPurgeIDsIgnoresSyntheticRuleIDDrift(t *tes
 	newRule.rule.ID = 72
 	newRule.value.RuleID = 72
 
-	if got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{oldRule}, []preparedKernelRule{newRule}); len(got) != 0 {
-		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want no purge ids when only synthetic rule ids drift", got)
+	got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{oldRule}, []preparedKernelRule{newRule})
+	if len(got) != 1 {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want only old rule id", got)
+	}
+	if _, ok := got[62]; !ok {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want old rule id 62", got)
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeTargetsUsesOldRevision(t *testing.T) {
+	oldRule := preparedKernelRule{
+		rule:  Rule{ID: 63, Protocol: "tcp"},
+		key:   tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 20022, Proto: 6},
+		value: tcRuleValueV4{RuleID: 63, BackendAddr: 2, BackendPort: 22, OutIfIndex: 3},
+	}
+	newRule := oldRule
+	newRule.value.BackendAddr = 3
+
+	oldRevision, err := preparedKernelRuleFlowRevision(oldRule)
+	if err != nil {
+		t.Fatalf("preparedKernelRuleFlowRevision(old) error = %v", err)
+	}
+	newRevision, err := preparedKernelRuleFlowRevision(newRule)
+	if err != nil {
+		t.Fatalf("preparedKernelRuleFlowRevision(new) error = %v", err)
+	}
+	if oldRevision == newRevision {
+		t.Fatalf("old/new revisions are both %#x, want contract change", oldRevision)
+	}
+
+	got := collectPreparedKernelRuleFlowPurgeTargets([]preparedKernelRule{oldRule}, []preparedKernelRule{newRule})
+	want := kernelFlowPurgeTarget{RuleID: 63, RuleRevision: oldRevision}
+	if len(got) != 1 {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want one target", got)
+	}
+	if _, ok := got[want]; !ok {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want %#v", got, want)
 	}
 }
 

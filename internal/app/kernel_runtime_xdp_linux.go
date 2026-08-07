@@ -90,6 +90,7 @@ type xdpRuleValueV4 struct {
 	NATAddr     uint32
 	SrcMAC      [6]byte
 	DstMAC      [6]byte
+	Revision    uint64
 }
 
 type xdpRuleValueV6 struct {
@@ -101,6 +102,7 @@ type xdpRuleValueV6 struct {
 	NATAddr     [16]byte
 	SrcMAC      [6]byte
 	DstMAC      [6]byte
+	Revision    uint64
 }
 
 type xdpFlowValueV4 struct {
@@ -117,6 +119,8 @@ type xdpFlowValueV4 struct {
 	ClientMAC        [6]byte
 	LastSeenNS       uint64
 	FrontCloseSeenNS uint64
+	RuleRevision     uint64
+	SessionID        uint64
 }
 
 type preparedXDPKernelRule struct {
@@ -208,6 +212,7 @@ type xdpKernelRuleRuntime struct {
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPruneState     kernelFlowPruneState
 	oldFlowPruneState  kernelFlowPruneState
+	natPruneState      kernelNATPruneState
 	runtimeMapCounts   kernelRuntimeMapCountSnapshot
 }
 
@@ -494,7 +499,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	}
 	if rt.coll != nil && rt.coll.Maps != nil {
 		if !preferFreshMapGrowth {
-			existingMigrationFlags, flowStateErr := xdpEffectiveOldFlowMigrationFlagsFromCollection(rt.coll)
+			existingMigrationFlags, flowStateErr := xdpOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefsFromCollection(rt.coll))
 			if flowStateErr != nil {
 				msg := fmt.Sprintf("inspect xdp old-bank flow state: %v", flowStateErr)
 				if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -919,8 +924,24 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		}
 		results[item.rule.ID] = kernelRuleApplyResult{Running: true, Engine: kernelEngineXDP}
 	}
+	flowPurgeTargets := collectPreparedXDPKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
+	purgeCorrections := map[uint32]kernelRuleStats{}
+	purgedFlows := 0
+	if len(flowPurgeTargets) > 0 {
+		flowPurgeStartedAt := time.Now()
+		purgeCorrections, purgedFlows, err = purgeKernelFlowsForTargets(kernelRuntimeMapRefsFromCollection(coll), flowPurgeTargets, true)
+		reconcileMetrics.FlowPurgeDuration = time.Since(flowPurgeStartedAt)
+		if err != nil {
+			log.Printf("xdp dataplane reconcile: purge stale xdp flow state after rebuild failed: %v", err)
+			purgeCorrections = map[uint32]kernelRuleStats{}
+			purgedFlows = 0
+		} else if syncErr := syncKernelOccupancyMapFromCollectionExact(coll, useNATMaps); syncErr != nil {
+			log.Printf("xdp dataplane reconcile: resync xdp occupancy counters after rebuild purge failed: %v", syncErr)
+		}
+	}
 	reconcileMetrics.AppliedEntries = len(prepared)
 	reconcileMetrics.Upserts = len(prepared)
+	reconcileMetrics.FlowPurgeDeleted = purgedFlows
 	reconcileMetrics.Detaches = xdpAttachmentDeleteCount(oldAttachments, newAttachments)
 
 	rt.stateLog.Logf("xdp dataplane reconcile: applied %d/%d kernel entry(s) attachments=%d mode=%s",
@@ -950,12 +971,17 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	}
 	rt.flowPruneState.reset()
 	rt.oldFlowPruneState.reset()
+	rt.natPruneState = kernelNATPruneState{}
 	rt.lastReconcileMode = "rebuild"
 	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if hotRestartState != nil {
 		rt.statsCorrection = hotRestartStatsCorrection
+	}
+	if purgedFlows > 0 {
+		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
+		log.Printf("xdp dataplane reconcile: purged %d stale xdp flow entry(s) for %d changed rule revision(s)", purgedFlows, len(flowPurgeTargets))
 	}
 	if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
 		log.Printf("xdp dataplane runtime metadata: write xdp runtime metadata failed: %v", err)
@@ -1002,6 +1028,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	v4Budget, v6Budget := rt.flowMaintenanceBudgetsLocked(refs)
 	flowPruneState := rt.flowPruneState
 	oldFlowPruneState := rt.oldFlowPruneState
+	natPruneState := rt.natPruneState.clone()
 	statsCorrection := cloneKernelStatsCorrections(rt.statsCorrection)
 	rt.mu.Unlock()
 	defer mapSnapshot.Close()
@@ -1075,13 +1102,6 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		}
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
-	if currentFlags, err := xdpOldFlowMigrationFlagsFromRuntimeMapRefs(refs); err != nil {
-		log.Printf("xdp dataplane maintenance: inspect old-bank flow state failed: %v", err)
-	} else if refs.xdpFlowMigrationState != nil {
-		if err := refs.xdpFlowMigrationState.Put(uint32(0), currentFlags); err != nil {
-			log.Printf("xdp dataplane maintenance: update flow migration state failed: %v", err)
-		}
-	}
 	mergeKernelStatsCorrections(statsCorrection, corrections)
 	if runFull {
 		if refs.hasFlows() || refs.hasNAT() || mapSnapshot.stats != nil {
@@ -1100,8 +1120,15 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 				}
 				deleted := 0
 				natEntries := 0
-				for _, natMap := range []*ebpf.Map{refs.natV4, refs.natOldV4} {
-					itemRemaining, itemDeleted, natErr := pruneOrphanKernelNATReservations(natMap, live.UsedNATV4)
+				for _, item := range []struct {
+					m         *ebpf.Map
+					previous  map[kernelNATReservationOwnerV4]struct{}
+					storeNext func(map[kernelNATReservationOwnerV4]struct{})
+				}{
+					{refs.natV4, natPruneState.activeV4, func(next map[kernelNATReservationOwnerV4]struct{}) { natPruneState.activeV4 = next }},
+					{refs.natOldV4, natPruneState.oldV4, func(next map[kernelNATReservationOwnerV4]struct{}) { natPruneState.oldV4 = next }},
+				} {
+					itemRemaining, itemDeleted, next, natErr := pruneOrphanKernelNATReservations(item.m, live.UsedNATV4, item.previous)
 					if natErr != nil {
 						fullSuccess = false
 						log.Printf("xdp dataplane maintenance: prune orphan xdp nat reservations failed: %v", natErr)
@@ -1109,11 +1136,19 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 						natEntries = 0
 						break
 					}
+					item.storeNext(next)
 					natEntries += itemRemaining
 					deleted += itemDeleted
 				}
-				for _, natMap := range []*ebpf.Map{refs.natV6, refs.natOldV6} {
-					itemRemaining, itemDeleted, natErr := pruneOrphanKernelNATReservationsV6(natMap, live.UsedNATV6)
+				for _, item := range []struct {
+					m         *ebpf.Map
+					previous  map[kernelNATReservationOwnerV6]struct{}
+					storeNext func(map[kernelNATReservationOwnerV6]struct{})
+				}{
+					{refs.natV6, natPruneState.activeV6, func(next map[kernelNATReservationOwnerV6]struct{}) { natPruneState.activeV6 = next }},
+					{refs.natOldV6, natPruneState.oldV6, func(next map[kernelNATReservationOwnerV6]struct{}) { natPruneState.oldV6 = next }},
+				} {
+					itemRemaining, itemDeleted, next, natErr := pruneOrphanKernelNATReservationsV6(item.m, live.UsedNATV6, item.previous)
 					if natErr != nil {
 						fullSuccess = false
 						log.Printf("xdp dataplane maintenance: prune orphan xdp IPv6 nat reservations failed: %v", natErr)
@@ -1121,6 +1156,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 						natEntries = 0
 						break
 					}
+					item.storeNext(next)
 					natEntries += itemRemaining
 					deleted += itemDeleted
 				}
@@ -1151,6 +1187,7 @@ done:
 	}
 	rt.flowPruneState = flowPruneState
 	rt.oldFlowPruneState = oldFlowPruneState
+	rt.natPruneState = natPruneState
 	rt.statsCorrection = statsCorrection
 	if runFull {
 		rt.maintenanceState.observeFull(pressureActive, fullSuccess, driftDetected)
@@ -1194,7 +1231,7 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	existingMigrationFlags, err := xdpEffectiveOldFlowMigrationFlagsFromCollection(rt.coll)
+	existingMigrationFlags, err := xdpOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefsFromCollection(rt.coll))
 	if err != nil {
 		log.Printf("xdp dataplane hot restart: inspect old-bank flow state failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
@@ -1358,6 +1395,7 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 	rt.natMapCapacity = kernelRuntimeNATMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	rt.flowPruneState.reset()
 	rt.oldFlowPruneState.reset()
+	rt.natPruneState = kernelNATPruneState{}
 	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
@@ -1803,13 +1841,6 @@ func configureXDPFlowMigrationState(pieces xdpCollectionPieces, flags uint32) er
 		return fmt.Errorf("update xdp flow migration state: %w", err)
 	}
 	return nil
-}
-
-func xdpEffectiveOldFlowMigrationFlagsFromCollection(coll *ebpf.Collection) (uint32, error) {
-	if coll == nil || coll.Maps == nil {
-		return 0, nil
-	}
-	return xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefsFromCollection(coll))
 }
 
 func xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(refs kernelRuntimeMapRefs) (uint32, error) {
@@ -2473,6 +2504,18 @@ func prepareXDPKernelRules(rules []Rule, opts xdpPrepareOptions, previous []prep
 			results[rule.ID] = kernelRuleApplyResult{Error: err.Error()}
 			continue
 		}
+		revisionErr := error(nil)
+		for i := range items {
+			if err := assignPreparedXDPKernelRuleRevision(&items[i]); err != nil {
+				revisionErr = err
+				break
+			}
+		}
+		if revisionErr != nil {
+			skipLogger.Add(rule, revisionErr)
+			results[rule.ID] = kernelRuleApplyResult{Error: revisionErr.Error()}
+			continue
+		}
 		prepared = append(prepared, items...)
 		for _, item := range items {
 			forwardIfRules[item.inIfIndex] = append(forwardIfRules[item.inIfIndex], rule.ID)
@@ -2493,6 +2536,56 @@ func groupPreparedXDPKernelRulesByMatchKey(items []preparedXDPKernelRule) map[ke
 		grouped[kernelRuleMatchKeyFor(item.rule)] = append(grouped[kernelRuleMatchKeyFor(item.rule)], item)
 	}
 	return grouped
+}
+
+func collectPreparedXDPKernelRuleFlowPurgeTargets(oldItems []preparedXDPKernelRule, nextItems []preparedXDPKernelRule) map[kernelFlowPurgeTarget]struct{} {
+	if len(oldItems) == 0 {
+		return nil
+	}
+	oldByKey := groupPreparedXDPKernelRulesByMatchKey(oldItems)
+	nextByKey := groupPreparedXDPKernelRulesByMatchKey(nextItems)
+	var targets map[kernelFlowPurgeTarget]struct{}
+	for key, oldGroup := range oldByKey {
+		if preparedXDPKernelRuleGroupsEqualBy(oldGroup, nextByKey[key], samePreparedXDPKernelRuleFlowContinuity) {
+			continue
+		}
+		for _, item := range oldGroup {
+			if item.rule.ID <= 0 || item.rule.ID > int64(^uint32(0)) {
+				continue
+			}
+			revision, err := preparedXDPKernelRuleFlowRevision(item)
+			if err != nil || revision == 0 {
+				continue
+			}
+			if targets == nil {
+				targets = make(map[kernelFlowPurgeTarget]struct{})
+			}
+			targets[kernelFlowPurgeTarget{RuleID: uint32(item.rule.ID), RuleRevision: revision}] = struct{}{}
+		}
+	}
+	return targets
+}
+
+func preparedXDPKernelRuleGroupsEqualBy(a []preparedXDPKernelRule, b []preparedXDPKernelRule, equal func(preparedXDPKernelRule, preparedXDPKernelRule) bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	matched := make([]bool, len(b))
+	for _, left := range a {
+		found := false
+		for i, right := range b {
+			if matched[i] || !equal(left, right) {
+				continue
+			}
+			matched[i] = true
+			found = true
+			break
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func reusablePreparedXDPKernelRules(rule Rule, err error, previousByKey map[kernelRuleMatchKey][]preparedXDPKernelRule, allowTransientReuse bool) ([]preparedXDPKernelRule, bool) {

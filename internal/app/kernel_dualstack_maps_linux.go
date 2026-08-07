@@ -4,6 +4,8 @@ package app
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"strings"
 )
@@ -16,6 +18,26 @@ const (
 	kernelFlowsMapNameV6    = "flows_v6"
 	kernelNatPortsMapNameV6 = "nat_ports_v6"
 )
+
+const kernelRuleFlowContractFlags = kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT | kernelRuleFlagPassthrough | kernelRuleFlagFullCone
+
+type kernelRuleFlowContractV4 struct {
+	Key         tcRuleKeyV4
+	BackendAddr uint32
+	BackendPort uint16
+	Flags       uint16
+	OutIfIndex  uint32
+	NATAddr     uint32
+}
+
+type kernelRuleFlowContractV6 struct {
+	Key         tcRuleKeyV6
+	BackendAddr [16]byte
+	BackendPort uint16
+	Flags       uint16
+	OutIfIndex  uint32
+	NATAddr     [16]byte
+}
 
 type tcRuleKeyV6 struct {
 	IfIndex uint32
@@ -34,6 +56,7 @@ type tcRuleValueV6 struct {
 	NATAddr     [16]byte
 	SrcMAC      [6]byte
 	DstMAC      [6]byte
+	Revision    uint64
 }
 
 type tcFlowKeyV6 struct {
@@ -61,6 +84,8 @@ type tcFlowValueV6 struct {
 	Pad              uint32
 	LastSeenNS       uint64
 	FrontCloseSeenNS uint64
+	RuleRevision     uint64
+	SessionID        uint64
 }
 
 type tcNATPortKeyV6 struct {
@@ -144,7 +169,129 @@ func encodePreparedKernelRuleV6(item preparedKernelRule) (tcRuleKeyV6, tcRuleVal
 			NATAddr:     item.spec.NATAddr,
 			SrcMAC:      item.value.SrcMAC,
 			DstMAC:      item.value.DstMAC,
+			Revision:    item.value.Revision,
 		}, nil
+}
+
+func kernelRuleFlowRevisionV4(key tcRuleKeyV4, backendAddr uint32, backendPort uint16, flags uint16, outIfIndex uint32, natAddr uint32) (uint64, error) {
+	return hashKernelRuleFlowContract(kernelRuleFlowContractV4{
+		Key:         key,
+		BackendAddr: backendAddr,
+		BackendPort: backendPort,
+		Flags:       flags & kernelRuleFlowContractFlags,
+		OutIfIndex:  outIfIndex,
+		NATAddr:     natAddr,
+	})
+}
+
+func kernelRuleFlowRevisionV6(key tcRuleKeyV6, backendAddr [16]byte, backendPort uint16, flags uint16, outIfIndex uint32, natAddr [16]byte) (uint64, error) {
+	return hashKernelRuleFlowContract(kernelRuleFlowContractV6{
+		Key:         key,
+		BackendAddr: backendAddr,
+		BackendPort: backendPort,
+		Flags:       flags & kernelRuleFlowContractFlags,
+		OutIfIndex:  outIfIndex,
+		NATAddr:     natAddr,
+	})
+}
+
+func hashKernelRuleFlowContract(value any) (uint64, error) {
+	var payload bytes.Buffer
+	if err := binary.Write(&payload, binary.LittleEndian, value); err != nil {
+		return 0, fmt.Errorf("encode kernel flow contract: %w", err)
+	}
+	sum := sha256.Sum256(payload.Bytes())
+	revision := binary.LittleEndian.Uint64(sum[:8])
+	if revision == 0 {
+		revision = 1
+	}
+	return revision, nil
+}
+
+func assignPreparedKernelRuleRevision(item *preparedKernelRule) error {
+	if item == nil {
+		return nil
+	}
+	switch kernelPreparedRuleFamily(*item) {
+	case ipFamilyIPv6:
+		key, value, err := encodePreparedKernelRuleV6(*item)
+		if err != nil {
+			return err
+		}
+		revision, err := kernelRuleFlowRevisionV6(key, value.BackendAddr, value.BackendPort, value.Flags, value.OutIfIndex, value.NATAddr)
+		if err != nil {
+			return err
+		}
+		item.value.Revision = revision
+	default:
+		revision, err := kernelRuleFlowRevisionV4(item.key, item.value.BackendAddr, item.value.BackendPort, item.value.Flags, item.value.OutIfIndex, item.value.NATAddr)
+		if err != nil {
+			return err
+		}
+		item.value.Revision = revision
+	}
+	return nil
+}
+
+func preparedKernelRuleFlowRevision(item preparedKernelRule) (uint64, error) {
+	if item.value.Revision != 0 {
+		return item.value.Revision, nil
+	}
+	if err := assignPreparedKernelRuleRevision(&item); err != nil {
+		return 0, err
+	}
+	return item.value.Revision, nil
+}
+
+func kernelRuleFlowContractFlagsFromXDP(flags uint16) uint16 {
+	var normalized uint16
+	if flags&xdpRuleFlagFullNAT != 0 {
+		normalized |= kernelRuleFlagFullNAT
+	}
+	if flags&xdpRuleFlagEgressNAT != 0 {
+		normalized |= kernelRuleFlagEgressNAT
+	}
+	if flags&xdpRuleFlagFullCone != 0 {
+		normalized |= kernelRuleFlagFullCone
+	}
+	return normalized
+}
+
+func assignPreparedXDPKernelRuleRevision(item *preparedXDPKernelRule) error {
+	if item == nil {
+		return nil
+	}
+	switch xdpPreparedRuleFamily(*item) {
+	case ipFamilyIPv6:
+		revision, err := kernelRuleFlowRevisionV6(item.keyV6, item.valueV6.BackendAddr, item.valueV6.BackendPort, kernelRuleFlowContractFlagsFromXDP(item.valueV6.Flags), item.valueV6.OutIfIndex, item.valueV6.NATAddr)
+		if err != nil {
+			return err
+		}
+		item.valueV6.Revision = revision
+	default:
+		revision, err := kernelRuleFlowRevisionV4(item.keyV4, item.valueV4.BackendAddr, item.valueV4.BackendPort, kernelRuleFlowContractFlagsFromXDP(item.valueV4.Flags), item.valueV4.OutIfIndex, item.valueV4.NATAddr)
+		if err != nil {
+			return err
+		}
+		item.valueV4.Revision = revision
+	}
+	return nil
+}
+
+func preparedXDPKernelRuleFlowRevision(item preparedXDPKernelRule) (uint64, error) {
+	if xdpPreparedRuleFamily(item) == ipFamilyIPv6 && item.valueV6.Revision != 0 {
+		return item.valueV6.Revision, nil
+	}
+	if xdpPreparedRuleFamily(item) == ipFamilyIPv4 && item.valueV4.Revision != 0 {
+		return item.valueV4.Revision, nil
+	}
+	if err := assignPreparedXDPKernelRuleRevision(&item); err != nil {
+		return 0, err
+	}
+	if xdpPreparedRuleFamily(item) == ipFamilyIPv6 {
+		return item.valueV6.Revision, nil
+	}
+	return item.valueV4.Revision, nil
 }
 
 func compareKernelPreparedAddr(a, b kernelPreparedAddr) int {

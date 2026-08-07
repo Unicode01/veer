@@ -82,7 +82,8 @@ func TestLoadEmbeddedKernelCollectionsSmoke(t *testing.T) {
 
 			coll, err := ebpf.NewCollectionWithOptions(smokeSpec, kernelCollectionOptions(nil))
 			if err != nil {
-				t.Fatalf("load embedded %s collection into kernel: %v", tc.name, err)
+				logKernelVerifierDetails(err)
+				t.Fatalf("load embedded %s collection into kernel: %+v", tc.name, err)
 			}
 			coll.Close()
 		})

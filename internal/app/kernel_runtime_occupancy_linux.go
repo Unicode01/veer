@@ -20,9 +20,19 @@ type kernelOccupancyValueV4 struct {
 
 type kernelFlowLiveStateSnapshot struct {
 	ByRuleID    map[uint32]kernelStatsValueV4
-	UsedNATV4   map[tcNATPortKeyV4]struct{}
-	UsedNATV6   map[tcNATPortKeyV6]struct{}
+	UsedNATV4   map[kernelNATReservationOwnerV4]struct{}
+	UsedNATV6   map[kernelNATReservationOwnerV6]struct{}
 	FlowEntries int
+}
+
+type kernelNATReservationOwnerV4 struct {
+	Key       tcNATPortKeyV4
+	SessionID uint64
+}
+
+type kernelNATReservationOwnerV6 struct {
+	Key       tcNATPortKeyV6
+	SessionID uint64
 }
 
 func newKernelFlowLiveStateSnapshot(includeNAT bool) kernelFlowLiveStateSnapshot {
@@ -30,8 +40,8 @@ func newKernelFlowLiveStateSnapshot(includeNAT bool) kernelFlowLiveStateSnapshot
 		ByRuleID: make(map[uint32]kernelStatsValueV4),
 	}
 	if includeNAT {
-		out.UsedNATV4 = make(map[tcNATPortKeyV4]struct{})
-		out.UsedNATV6 = make(map[tcNATPortKeyV6]struct{})
+		out.UsedNATV4 = make(map[kernelNATReservationOwnerV4]struct{})
+		out.UsedNATV6 = make(map[kernelNATReservationOwnerV6]struct{})
 	}
 	return out
 }

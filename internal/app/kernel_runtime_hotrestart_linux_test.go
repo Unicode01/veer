@@ -285,7 +285,7 @@ func TestLoadTCKernelHotRestartStatePromotesActiveMapsToOldBank(t *testing.T) {
 		Name:       kernelNatPortsMapName,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 64,
 	})
 	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
@@ -353,7 +353,7 @@ func TestLoadTCKernelHotRestartStateKeepsExistingTCBanks(t *testing.T) {
 		Name:       kernelNatPortsMapName,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 64,
 	})
 	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
@@ -367,7 +367,7 @@ func TestLoadTCKernelHotRestartStateKeepsExistingTCBanks(t *testing.T) {
 		Name:       kernelTCNatPortsOldMapNameV4,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 32,
 	})
 	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
@@ -486,13 +486,28 @@ func TestTCEffectiveOldFlowMigrationFlagsFromRuntimeMapRefsUsesMigrationState(t 
 		ValueSize:  4,
 		MaxEntries: 1,
 	})
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 8,
+	})
 
 	want := uint32(tcFlowMigrationFlagV4Old)
 	if err := flowState.Put(uint32(0), want); err != nil {
 		t.Fatalf("flowState.Put() error = %v", err)
 	}
 
-	flags, err := tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{tcFlowMigrationState: flowState})
+	refs := kernelRuntimeMapRefs{tcFlowMigrationState: flowState, flowsOldV4: flowsOld}
+	exact, err := tcOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
+	if err != nil {
+		t.Fatalf("tcOldFlowMigrationFlagsFromRuntimeMapRefs() error = %v", err)
+	}
+	if exact != 0 {
+		t.Fatalf("exact flags = %#x, want 0 for empty old bank", exact)
+	}
+	flags, err := tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
 	if err != nil {
 		t.Fatalf("tcEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs() error = %v", err)
 	}
@@ -520,14 +535,14 @@ func TestKernelRuntimeMapCapacityUsesTCMigrationState(t *testing.T) {
 		Name:       kernelNatPortsMapName,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 40,
 	})
 	natOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
 		Name:       kernelTCNatPortsOldMapNameV4,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 20,
 	})
 	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
@@ -655,7 +670,7 @@ func TestLoadXDPKernelHotRestartStatePromotesActiveIPv6NATMapsToOldBank(t *testi
 		Name:       kernelNatPortsMapNameV6,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV6{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 32,
 	})
 	stats := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
@@ -785,7 +800,7 @@ func TestLoadXDPKernelHotRestartStateRejectsOrphanOldNATBank(t *testing.T) {
 		Name:       kernelTCNatPortsOldMapNameV4,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 32,
 	})
 	if err := pinKernelHotRestartMaps(kernelEngineXDP, map[string]*ebpf.Map{
@@ -907,13 +922,28 @@ func TestXDPEffectiveOldFlowMigrationFlagsFromRuntimeMapRefsUsesMigrationState(t
 		ValueSize:  4,
 		MaxEntries: 1,
 	})
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(xdpFlowValueV4{})),
+		MaxEntries: 8,
+	})
 
 	want := uint32(xdpFlowMigrationFlagV4Old)
 	if err := flowState.Put(uint32(0), want); err != nil {
 		t.Fatalf("flowState.Put() error = %v", err)
 	}
 
-	flags, err := xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(kernelRuntimeMapRefs{xdpFlowMigrationState: flowState})
+	refs := kernelRuntimeMapRefs{xdpFlowMigrationState: flowState, flowsOldV4: flowsOld}
+	exact, err := xdpOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
+	if err != nil {
+		t.Fatalf("xdpOldFlowMigrationFlagsFromRuntimeMapRefs() error = %v", err)
+	}
+	if exact != 0 {
+		t.Fatalf("exact flags = %#x, want 0 for empty old bank", exact)
+	}
+	flags, err := xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs(refs)
 	if err != nil {
 		t.Fatalf("xdpEffectiveOldFlowMigrationFlagsFromRuntimeMapRefs() error = %v", err)
 	}
@@ -941,14 +971,14 @@ func TestKernelRuntimeFlowMapCapacityUsesXDPMigrationState(t *testing.T) {
 		Name:       kernelNatPortsMapName,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 40,
 	})
 	natOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
 		Name:       kernelTCNatPortsOldMapNameV4,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 20,
 	})
 	flowState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
