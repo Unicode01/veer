@@ -1640,47 +1640,14 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					driftDetected = !kernelStatsCorrectionsEqual(statsCorrection, exact)
 					syncKernelLiveStatsCorrections(statsCorrection, exact)
 				}
-				deleted := 0
-				natEntries := 0
-				for _, item := range []struct {
-					m         *ebpf.Map
-					previous  map[kernelNATReservationOwnerV4]struct{}
-					storeNext func(map[kernelNATReservationOwnerV4]struct{})
-				}{
-					{refs.natV4, natPruneState.activeV4, func(next map[kernelNATReservationOwnerV4]struct{}) { natPruneState.activeV4 = next }},
-					{refs.natOldV4, natPruneState.oldV4, func(next map[kernelNATReservationOwnerV4]struct{}) { natPruneState.oldV4 = next }},
-				} {
-					itemRemaining, itemDeleted, next, natErr := pruneOrphanKernelNATReservations(item.m, live.UsedNATV4, item.previous)
-					if natErr != nil {
-						fullSuccess = false
-						log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
-						deleted = 0
-						natEntries = 0
-						break
-					}
-					item.storeNext(next)
-					natEntries += itemRemaining
-					deleted += itemDeleted
-				}
-				for _, item := range []struct {
-					m         *ebpf.Map
-					previous  map[kernelNATReservationOwnerV6]struct{}
-					storeNext func(map[kernelNATReservationOwnerV6]struct{})
-				}{
-					{refs.natV6, natPruneState.activeV6, func(next map[kernelNATReservationOwnerV6]struct{}) { natPruneState.activeV6 = next }},
-					{refs.natOldV6, natPruneState.oldV6, func(next map[kernelNATReservationOwnerV6]struct{}) { natPruneState.oldV6 = next }},
-				} {
-					itemRemaining, itemDeleted, next, natErr := pruneOrphanKernelNATReservationsV6(item.m, live.UsedNATV6, item.previous)
-					if natErr != nil {
-						fullSuccess = false
-						log.Printf("kernel dataplane maintenance: prune orphan tc IPv6 nat reservations failed: %v", natErr)
-						deleted = 0
-						natEntries = 0
-						break
-					}
-					item.storeNext(next)
-					natEntries += itemRemaining
-					deleted += itemDeleted
+				natEntries, deleted, nextNATPruneState, natErr := pruneOrphanKernelNATBanks(refs, live.NATByBank, natPruneState)
+				if natErr != nil {
+					fullSuccess = false
+					log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
+					natEntries = 0
+					deleted = 0
+				} else {
+					natPruneState = nextNATPruneState
 				}
 				if fullSuccess && deleted > 0 {
 					driftDetected = true

@@ -392,12 +392,14 @@ func mergeKernelLiveStateSnapshot(dst *kernelFlowLiveStateSnapshot, src kernelFl
 }
 
 func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includeNAT bool) (kernelFlowLiveStateSnapshot, error) {
-	out := newKernelFlowLiveStateSnapshot(includeNAT)
+	// Runtime snapshots retain owners by bank; avoid also keeping a duplicate aggregate owner set.
+	out := newKernelFlowLiveStateSnapshot(false)
 	if refs.flowsV4 != nil {
 		live, err := snapshotKernelLiveStateFromFlows(refs.rulesV4, refs.flowsV4, includeNAT)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
+		out.NATByBank.activeV4 = live.UsedNATV4
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV4 != nil {
@@ -405,6 +407,7 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
+		out.NATByBank.oldV4 = live.UsedNATV4
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsV6 != nil {
@@ -412,6 +415,7 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
+		out.NATByBank.activeV6 = live.UsedNATV6
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV6 != nil {
@@ -419,18 +423,21 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
+		out.NATByBank.oldV6 = live.UsedNATV6
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	return out, nil
 }
 
 func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includeNAT bool) (kernelFlowLiveStateSnapshot, error) {
-	out := newKernelFlowLiveStateSnapshot(includeNAT)
+	// Runtime snapshots retain owners by bank; avoid also keeping a duplicate aggregate owner set.
+	out := newKernelFlowLiveStateSnapshot(false)
 	if refs.flowsV4 != nil {
 		live, err := snapshotXDPKernelLiveStateFromFlows(refs.rulesV4, refs.flowsV4, includeNAT)
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
+		out.NATByBank.activeV4 = live.UsedNATV4
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV4 != nil {
@@ -438,6 +445,7 @@ func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, inc
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
+		out.NATByBank.oldV4 = live.UsedNATV4
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsV6 != nil {
@@ -445,6 +453,7 @@ func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, inc
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
+		out.NATByBank.activeV6 = live.UsedNATV6
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV6 != nil {
@@ -452,6 +461,7 @@ func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, inc
 		if err != nil {
 			return kernelFlowLiveStateSnapshot{}, err
 		}
+		out.NATByBank.oldV6 = live.UsedNATV6
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	return out, nil
@@ -874,6 +884,50 @@ func pruneOrphanKernelNATReservationsV6(natPortsMap *ebpf.Map, used map[kernelNA
 		next = nil
 	}
 	return remaining, deleted, next, nil
+}
+
+func pruneOrphanKernelNATBanks(refs kernelRuntimeMapRefs, used kernelNATBankUsage, state kernelNATPruneState) (int, int, kernelNATPruneState, error) {
+	nextState := state.clone()
+	natEntries := 0
+	deleted := 0
+
+	for _, item := range []struct {
+		m         *ebpf.Map
+		used      map[kernelNATReservationOwnerV4]struct{}
+		previous  map[kernelNATReservationOwnerV4]struct{}
+		storeNext func(map[kernelNATReservationOwnerV4]struct{})
+	}{
+		{refs.natV4, used.activeV4, nextState.activeV4, func(next map[kernelNATReservationOwnerV4]struct{}) { nextState.activeV4 = next }},
+		{refs.natOldV4, used.oldV4, nextState.oldV4, func(next map[kernelNATReservationOwnerV4]struct{}) { nextState.oldV4 = next }},
+	} {
+		remaining, itemDeleted, next, err := pruneOrphanKernelNATReservations(item.m, item.used, item.previous)
+		if err != nil {
+			return 0, 0, state, err
+		}
+		item.storeNext(next)
+		natEntries += remaining
+		deleted += itemDeleted
+	}
+
+	for _, item := range []struct {
+		m         *ebpf.Map
+		used      map[kernelNATReservationOwnerV6]struct{}
+		previous  map[kernelNATReservationOwnerV6]struct{}
+		storeNext func(map[kernelNATReservationOwnerV6]struct{})
+	}{
+		{refs.natV6, used.activeV6, nextState.activeV6, func(next map[kernelNATReservationOwnerV6]struct{}) { nextState.activeV6 = next }},
+		{refs.natOldV6, used.oldV6, nextState.oldV6, func(next map[kernelNATReservationOwnerV6]struct{}) { nextState.oldV6 = next }},
+	} {
+		remaining, itemDeleted, next, err := pruneOrphanKernelNATReservationsV6(item.m, item.used, item.previous)
+		if err != nil {
+			return 0, 0, state, err
+		}
+		item.storeNext(next)
+		natEntries += remaining
+		deleted += itemDeleted
+	}
+
+	return natEntries, deleted, nextState, nil
 }
 
 func kernelRuleStatsFromValue(value kernelStatsValueV4) kernelRuleStats {

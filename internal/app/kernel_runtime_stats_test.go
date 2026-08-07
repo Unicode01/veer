@@ -555,8 +555,11 @@ func TestSnapshotXDPKernelLiveStateFromRuntimeMapRefsCountsV4Flows(t *testing.T)
 	if got := live.ByRuleID[7]; got.TCPActiveConns != 1 || got.UDPNatEntries != 0 || got.ICMPNatEntries != 0 {
 		t.Fatalf("live.ByRuleID[7] = %+v, want tcp=1", got)
 	}
-	if len(live.UsedNATV4) != 1 {
-		t.Fatalf("len(live.UsedNATV4) = %d, want 1", len(live.UsedNATV4))
+	if len(live.NATByBank.activeV4) != 1 {
+		t.Fatalf("len(live.NATByBank.activeV4) = %d, want 1", len(live.NATByBank.activeV4))
+	}
+	if live.UsedNATV4 != nil {
+		t.Fatalf("runtime snapshot retained duplicate aggregate NAT owners: %d", len(live.UsedNATV4))
 	}
 }
 
@@ -1029,5 +1032,282 @@ func TestDeleteStaleKernelFlowDeletesFullConeFront(t *testing.T) {
 		t.Fatalf("countKernelNATMapEntries() error = %v", err)
 	} else if count != 0 {
 		t.Fatalf("countKernelNATMapEntries() = %d, want 0", count)
+	}
+}
+
+func TestPruneOrphanKernelNATBanksIsolatesIPv4Ownership(t *testing.T) {
+	engines := []struct {
+		name string
+		xdp  bool
+	}{
+		{name: "tc"},
+		{name: "xdp", xdp: true},
+	}
+	for _, engine := range engines {
+		for _, liveBank := range []string{"active", "old"} {
+			t.Run(engine.name+"/"+liveBank, func(t *testing.T) {
+				flowValueSize := uint32(unsafe.Sizeof(tcFlowValueV4{}))
+				if engine.xdp {
+					flowValueSize = uint32(unsafe.Sizeof(xdpFlowValueV4{}))
+				}
+				newFlowMap := func(name string) *ebpf.Map {
+					return newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+						Name:       name,
+						Type:       ebpf.Hash,
+						KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+						ValueSize:  flowValueSize,
+						MaxEntries: 16,
+					})
+				}
+				newNATMap := func(name string) *ebpf.Map {
+					return newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+						Name:       name,
+						Type:       ebpf.Hash,
+						KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
+						ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
+						MaxEntries: 16,
+					})
+				}
+
+				activeFlows := newFlowMap("active_flow_v4")
+				oldFlows := newFlowMap("old_flow_v4")
+				activeNAT := newNATMap("active_nat_v4")
+				oldNAT := newNATMap("old_nat_v4")
+				flowKey := tcFlowKeyV4{
+					IfIndex: 9,
+					SrcAddr: 1,
+					DstAddr: 2,
+					SrcPort: 443,
+					DstPort: 32000,
+					Proto:   unix.IPPROTO_TCP,
+				}
+				const sessionID = uint64(0x101010101)
+				flowValue := tcFlowValueV4{
+					RuleID:       101,
+					Flags:        kernelFlowFlagFullNAT | kernelFlowFlagCounted | kernelFlowFlagReplySeen,
+					NATAddr:      3,
+					NATPort:      32000,
+					LastSeenNS:   1,
+					RuleRevision: 10101,
+					SessionID:    sessionID,
+				}
+				liveFlows := activeFlows
+				if liveBank == "old" {
+					liveFlows = oldFlows
+				}
+				if engine.xdp {
+					if err := liveFlows.Put(flowKey, xdpFlowValueV4{
+						RuleID:       flowValue.RuleID,
+						Flags:        flowValue.Flags,
+						NATAddr:      flowValue.NATAddr,
+						NATPort:      flowValue.NATPort,
+						LastSeenNS:   flowValue.LastSeenNS,
+						RuleRevision: flowValue.RuleRevision,
+						SessionID:    flowValue.SessionID,
+					}); err != nil {
+						t.Fatalf("put xdp flow: %v", err)
+					}
+				} else if err := liveFlows.Put(flowKey, flowValue); err != nil {
+					t.Fatalf("put tc flow: %v", err)
+				}
+
+				natKey := tcNATPortKeyV4{IfIndex: flowKey.IfIndex, NATAddr: flowValue.NATAddr, NATPort: flowValue.NATPort, Proto: flowKey.Proto}
+				natValue := tcNATPortValue{RuleID: flowValue.RuleID, SessionID: sessionID}
+				for _, natMap := range []*ebpf.Map{activeNAT, oldNAT} {
+					if err := natMap.Put(natKey, natValue); err != nil {
+						t.Fatalf("put nat reservation: %v", err)
+					}
+				}
+
+				refs := kernelRuntimeMapRefs{
+					flowsV4:    activeFlows,
+					flowsOldV4: oldFlows,
+					natV4:      activeNAT,
+					natOldV4:   oldNAT,
+				}
+				var live kernelFlowLiveStateSnapshot
+				var err error
+				if engine.xdp {
+					live, err = snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs, true)
+				} else {
+					live, err = snapshotKernelLiveStateFromRuntimeMapRefs(refs, true)
+				}
+				if err != nil {
+					t.Fatalf("snapshot live state: %v", err)
+				}
+				if got, want := len(live.NATByBank.activeV4), 0; liveBank == "active" {
+					want = 1
+					if got != want {
+						t.Fatalf("active bank used owners = %d, want %d", got, want)
+					}
+				} else if got != want {
+					t.Fatalf("active bank used owners = %d, want %d", got, want)
+				}
+				if got, want := len(live.NATByBank.oldV4), 0; liveBank == "old" {
+					want = 1
+					if got != want {
+						t.Fatalf("old bank used owners = %d, want %d", got, want)
+					}
+				} else if got != want {
+					t.Fatalf("old bank used owners = %d, want %d", got, want)
+				}
+
+				natEntries, deleted, state, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
+				if err != nil {
+					t.Fatalf("first bank prune: %v", err)
+				}
+				if natEntries != 2 || deleted != 0 {
+					t.Fatalf("first bank prune entries/deleted = %d/%d, want 2/0", natEntries, deleted)
+				}
+				natEntries, deleted, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, state)
+				if err != nil {
+					t.Fatalf("second bank prune: %v", err)
+				}
+				if natEntries != 1 || deleted != 1 {
+					t.Fatalf("second bank prune entries/deleted = %d/%d, want 1/1", natEntries, deleted)
+				}
+				activeCount, err := countKernelNATMapEntries(activeNAT)
+				if err != nil {
+					t.Fatalf("count active NAT: %v", err)
+				}
+				oldCount, err := countKernelNATMapEntries(oldNAT)
+				if err != nil {
+					t.Fatalf("count old NAT: %v", err)
+				}
+				if liveBank == "active" && (activeCount != 1 || oldCount != 0) {
+					t.Fatalf("active/old NAT counts = %d/%d, want 1/0", activeCount, oldCount)
+				}
+				if liveBank == "old" && (activeCount != 0 || oldCount != 1) {
+					t.Fatalf("active/old NAT counts = %d/%d, want 0/1", activeCount, oldCount)
+				}
+			})
+		}
+	}
+}
+
+func TestPruneOrphanKernelNATBanksIsolatesIPv6Ownership(t *testing.T) {
+	for _, snapshotKind := range []string{"tc", "xdp"} {
+		for _, liveBank := range []string{"active", "old"} {
+			t.Run(snapshotKind+"/"+liveBank, func(t *testing.T) {
+				newFlowMap := func(name string) *ebpf.Map {
+					return newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+						Name:       name,
+						Type:       ebpf.Hash,
+						KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV6{})),
+						ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV6{})),
+						MaxEntries: 16,
+					})
+				}
+				newNATMap := func(name string) *ebpf.Map {
+					return newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+						Name:       name,
+						Type:       ebpf.Hash,
+						KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV6{})),
+						ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
+						MaxEntries: 16,
+					})
+				}
+
+				activeFlows := newFlowMap("active_flow_v6")
+				oldFlows := newFlowMap("old_flow_v6")
+				activeNAT := newNATMap("active_nat_v6")
+				oldNAT := newNATMap("old_nat_v6")
+				flowKey := tcFlowKeyV6{
+					IfIndex: 11,
+					SrcAddr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 1},
+					DstAddr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 2},
+					SrcPort: 443,
+					DstPort: 33000,
+					Proto:   unix.IPPROTO_TCP,
+				}
+				const sessionID = uint64(0x202020202)
+				flowValue := tcFlowValueV6{
+					RuleID:       202,
+					Flags:        kernelFlowFlagFullNAT | kernelFlowFlagCounted | kernelFlowFlagReplySeen,
+					NATAddr:      [16]byte{0x20, 0x01, 0x0d, 0xb8, 3},
+					NATPort:      33000,
+					LastSeenNS:   1,
+					RuleRevision: 20202,
+					SessionID:    sessionID,
+				}
+				liveFlows := activeFlows
+				if liveBank == "old" {
+					liveFlows = oldFlows
+				}
+				if err := liveFlows.Put(flowKey, flowValue); err != nil {
+					t.Fatalf("put IPv6 flow: %v", err)
+				}
+
+				natKey := tcNATPortKeyV6{IfIndex: flowKey.IfIndex, NATAddr: flowValue.NATAddr, NATPort: flowValue.NATPort, Proto: flowKey.Proto}
+				natValue := tcNATPortValue{RuleID: flowValue.RuleID, SessionID: sessionID}
+				for _, natMap := range []*ebpf.Map{activeNAT, oldNAT} {
+					if err := natMap.Put(natKey, natValue); err != nil {
+						t.Fatalf("put IPv6 NAT reservation: %v", err)
+					}
+				}
+
+				refs := kernelRuntimeMapRefs{
+					flowsV6:    activeFlows,
+					flowsOldV6: oldFlows,
+					natV6:      activeNAT,
+					natOldV6:   oldNAT,
+				}
+				var live kernelFlowLiveStateSnapshot
+				var err error
+				if snapshotKind == "xdp" {
+					live, err = snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs, true)
+				} else {
+					live, err = snapshotKernelLiveStateFromRuntimeMapRefs(refs, true)
+				}
+				if err != nil {
+					t.Fatalf("snapshot IPv6 live state: %v", err)
+				}
+				if got, want := len(live.NATByBank.activeV6), 0; liveBank == "active" {
+					want = 1
+					if got != want {
+						t.Fatalf("active IPv6 bank used owners = %d, want %d", got, want)
+					}
+				} else if got != want {
+					t.Fatalf("active IPv6 bank used owners = %d, want %d", got, want)
+				}
+				if got, want := len(live.NATByBank.oldV6), 0; liveBank == "old" {
+					want = 1
+					if got != want {
+						t.Fatalf("old IPv6 bank used owners = %d, want %d", got, want)
+					}
+				} else if got != want {
+					t.Fatalf("old IPv6 bank used owners = %d, want %d", got, want)
+				}
+
+				natEntries, deleted, state, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
+				if err != nil {
+					t.Fatalf("first IPv6 bank prune: %v", err)
+				}
+				if natEntries != 2 || deleted != 0 {
+					t.Fatalf("first IPv6 bank prune entries/deleted = %d/%d, want 2/0", natEntries, deleted)
+				}
+				natEntries, deleted, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, state)
+				if err != nil {
+					t.Fatalf("second IPv6 bank prune: %v", err)
+				}
+				if natEntries != 1 || deleted != 1 {
+					t.Fatalf("second IPv6 bank prune entries/deleted = %d/%d, want 1/1", natEntries, deleted)
+				}
+				activeCount, err := countKernelNATMapEntriesV6(activeNAT)
+				if err != nil {
+					t.Fatalf("count active IPv6 NAT: %v", err)
+				}
+				oldCount, err := countKernelNATMapEntriesV6(oldNAT)
+				if err != nil {
+					t.Fatalf("count old IPv6 NAT: %v", err)
+				}
+				if liveBank == "active" && (activeCount != 1 || oldCount != 0) {
+					t.Fatalf("active/old IPv6 NAT counts = %d/%d, want 1/0", activeCount, oldCount)
+				}
+				if liveBank == "old" && (activeCount != 0 || oldCount != 1) {
+					t.Fatalf("active/old IPv6 NAT counts = %d/%d, want 0/1", activeCount, oldCount)
+				}
+			})
+		}
 	}
 }
