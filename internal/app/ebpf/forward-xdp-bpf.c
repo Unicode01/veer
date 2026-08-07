@@ -64,6 +64,7 @@ struct rule_value_v4 {
 	__u32 nat_addr;
 	__u8 src_mac[ETH_ALEN];
 	__u8 dst_mac[ETH_ALEN];
+	__u64 revision;
 };
 
 struct flow_key_v4 {
@@ -90,6 +91,8 @@ struct flow_value_v4 {
 	__u8 client_mac[ETH_ALEN];
 	__u64 last_seen_ns;
 	__u64 front_close_seen_ns;
+	__u64 rule_revision;
+	__u64 session_id;
 };
 
 struct nat_port_key_v4 {
@@ -102,6 +105,8 @@ struct nat_port_key_v4 {
 
 struct nat_port_value_v4 {
 	__u32 rule_id;
+	__u32 pad;
+	__u64 session_id;
 };
 
 struct rule_key_v6 {
@@ -121,6 +126,7 @@ struct rule_value_v6 {
 	__u8 nat_addr[16];
 	__u8 src_mac[ETH_ALEN];
 	__u8 dst_mac[ETH_ALEN];
+	__u64 revision;
 };
 
 struct flow_key_v6 {
@@ -148,6 +154,8 @@ struct flow_value_v6 {
 	__u32 pad;
 	__u64 last_seen_ns;
 	__u64 front_close_seen_ns;
+	__u64 rule_revision;
+	__u64 session_id;
 };
 
 struct nat_port_key_v6 {
@@ -160,6 +168,8 @@ struct nat_port_key_v6 {
 
 struct nat_port_value_v6 {
 	__u32 rule_id;
+	__u32 pad;
+	__u64 session_id;
 };
 
 union flow_nat_key_v4 {
@@ -326,6 +336,7 @@ struct xdp_dispatch_ctx_v6 {
 #define FORWARD_FLOW_FLAG_COUNTED 0x20
 #define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0x40
 #define FORWARD_FLOW_FLAG_FULL_CONE 0x80
+#define FORWARD_FLOW_FLAG_REPLY_CLOSING 0x100
 #define FORWARD_RULE_FLAG_FULL_NAT 0x1
 #define FORWARD_RULE_FLAG_BRIDGE_L2 0x2
 #define FORWARD_RULE_FLAG_BRIDGE_INGRESS_L2 0x4
@@ -360,6 +371,23 @@ struct xdp_dispatch_ctx_v6 {
 #define FORWARD_TCP_FLAG_SYN 0x02
 #define FORWARD_TCP_FLAG_RST 0x04
 #define FORWARD_TCP_FLAG_ACK 0x10
+
+static __always_inline __u64 new_flow_session_id(void)
+{
+	__u64 session_id = ((__u64)bpf_get_prandom_u32() << 32) | (__u64)bpf_get_prandom_u32();
+
+	return session_id ? session_id : 1;
+}
+
+static __always_inline int flow_matches_rule_v4(const struct flow_value_v4 *flow, const struct rule_value_v4 *rule)
+{
+	return flow && rule && flow->rule_id == rule->rule_id && flow->rule_revision == rule->revision;
+}
+
+static __always_inline int flow_matches_rule_v6(const struct flow_value_v6 *flow, const struct rule_value_v6 *rule)
+{
+	return flow && rule && flow->rule_id == rule->rule_id && flow->rule_revision == rule->revision;
+}
 #define FORWARD_XDP_FLOW_BANK_ACTIVE 0
 #define FORWARD_XDP_FLOW_BANK_OLD 1
 #define FORWARD_XDP_FLOW_MIGRATION_V4_OLD 0x1
@@ -999,6 +1027,42 @@ static __always_inline int delete_nat_port_v6_in_bank(__u8 bank, const struct na
 	return bpf_map_delete_elem(&nat_ports_v6, key);
 }
 
+static __always_inline int delete_flow_v4_session_in_bank(__u8 bank, const struct flow_key_v4 *key, __u64 session_id)
+{
+	struct flow_value_v4 *current = lookup_flow_v4_in_bank(bank, key);
+
+	if (!current || current->session_id != session_id)
+		return -1;
+	return delete_flow_v4_in_bank(bank, key);
+}
+
+static __always_inline int delete_flow_v6_session_in_bank(__u8 bank, const struct flow_key_v6 *key, __u64 session_id)
+{
+	struct flow_value_v6 *current = lookup_flow_v6_in_bank(bank, key);
+
+	if (!current || current->session_id != session_id)
+		return -1;
+	return delete_flow_v6_in_bank(bank, key);
+}
+
+static __always_inline int delete_nat_port_v4_session_in_bank(__u8 bank, const struct nat_port_key_v4 *key, __u64 session_id)
+{
+	struct nat_port_value_v4 *current = lookup_nat_port_v4_in_bank(bank, key);
+
+	if (!current || current->session_id != session_id)
+		return -1;
+	return delete_nat_port_v4_in_bank(bank, key);
+}
+
+static __always_inline int delete_nat_port_v6_session_in_bank(__u8 bank, const struct nat_port_key_v6 *key, __u64 session_id)
+{
+	struct nat_port_value_v6 *current = lookup_nat_port_v6_in_bank(bank, key);
+
+	if (!current || current->session_id != session_id)
+		return -1;
+	return delete_nat_port_v6_in_bank(bank, key);
+}
+
 static __always_inline int load_packet_macs(struct xdp_md *xdp, __u8 dst_mac[ETH_ALEN], __u8 src_mac[ETH_ALEN])
 {
 #ifdef BPF_FUNC_xdp_load_bytes
@@ -1410,6 +1474,88 @@ static __always_inline int is_initial_tcp_syn_v6(const struct packet_ctx_v6 *ctx
 	return ctx->tcp_flags == FORWARD_TCP_FLAG_SYN;
 }
 
+static __always_inline int tcp_packet_is_rst(__u8 proto, __u8 tcp_flags)
+{
+	return proto == IPPROTO_TCP && (tcp_flags & FORWARD_TCP_FLAG_RST) != 0;
+}
+
+static __always_inline int tcp_packet_has_fin(__u8 proto, __u8 tcp_flags)
+{
+	return proto == IPPROTO_TCP && (tcp_flags & FORWARD_TCP_FLAG_FIN) != 0;
+}
+
+static __always_inline int tcp_flow_close_complete(__u16 flow_flags, __u8 proto, __u8 tcp_flags)
+{
+	return proto == IPPROTO_TCP &&
+		tcp_flags == FORWARD_TCP_FLAG_ACK &&
+		(flow_flags & (FORWARD_FLOW_FLAG_FRONT_CLOSING | FORWARD_FLOW_FLAG_REPLY_CLOSING)) ==
+			(FORWARD_FLOW_FLAG_FRONT_CLOSING | FORWARD_FLOW_FLAG_REPLY_CLOSING);
+}
+
+static __always_inline void mark_tcp_flow_closing_v4(struct flow_value_v4 *flow, __u16 direction, __u64 now)
+{
+	__u16 old_flags;
+
+	if (!flow)
+		return;
+	old_flags = flow->flags;
+	flow->flags |= direction;
+	if ((old_flags & direction) == 0 &&
+		(flow->front_close_seen_ns == 0 ||
+		 (flow->flags & (FORWARD_FLOW_FLAG_FRONT_CLOSING | FORWARD_FLOW_FLAG_REPLY_CLOSING)) ==
+			(FORWARD_FLOW_FLAG_FRONT_CLOSING | FORWARD_FLOW_FLAG_REPLY_CLOSING)))
+		flow->front_close_seen_ns = now;
+	flow->last_seen_ns = now;
+}
+
+static __always_inline void mark_tcp_flow_closing_v6(struct flow_value_v6 *flow, __u16 direction, __u64 now)
+{
+	__u16 old_flags;
+
+	if (!flow)
+		return;
+	old_flags = flow->flags;
+	flow->flags |= direction;
+	if ((old_flags & direction) == 0 &&
+		(flow->front_close_seen_ns == 0 ||
+		 (flow->flags & (FORWARD_FLOW_FLAG_FRONT_CLOSING | FORWARD_FLOW_FLAG_REPLY_CLOSING)) ==
+			(FORWARD_FLOW_FLAG_FRONT_CLOSING | FORWARD_FLOW_FLAG_REPLY_CLOSING)))
+		flow->front_close_seen_ns = now;
+	flow->last_seen_ns = now;
+}
+
+#define FORWARD_TCP_CLOSE_NONE 0
+#define FORWARD_TCP_CLOSE_UPDATE 1
+#define FORWARD_TCP_CLOSE_DELETE 2
+
+static __always_inline int update_tcp_flow_pair_close_v4(struct flow_value_v4 *front, struct flow_value_v4 *reply, __u8 proto, __u8 tcp_flags, __u16 direction, __u64 now)
+{
+	if (tcp_packet_is_rst(proto, tcp_flags))
+		return FORWARD_TCP_CLOSE_DELETE;
+	if (tcp_packet_has_fin(proto, tcp_flags)) {
+		mark_tcp_flow_closing_v4(front, direction, now);
+		mark_tcp_flow_closing_v4(reply, direction, now);
+		return FORWARD_TCP_CLOSE_UPDATE;
+	}
+	if (reply && tcp_flow_close_complete(reply->flags, proto, tcp_flags))
+		return FORWARD_TCP_CLOSE_DELETE;
+	return FORWARD_TCP_CLOSE_NONE;
+}
+
+static __always_inline int update_tcp_flow_pair_close_v6(struct flow_value_v6 *front, struct flow_value_v6 *reply, __u8 proto, __u8 tcp_flags, __u16 direction, __u64 now)
+{
+	if (tcp_packet_is_rst(proto, tcp_flags))
+		return FORWARD_TCP_CLOSE_DELETE;
+	if (tcp_packet_has_fin(proto, tcp_flags)) {
+		mark_tcp_flow_closing_v6(front, direction, now);
+		mark_tcp_flow_closing_v6(reply, direction, now);
+		return FORWARD_TCP_CLOSE_UPDATE;
+	}
+	if (reply && tcp_flow_close_complete(reply->flags, proto, tcp_flags))
+		return FORWARD_TCP_CLOSE_DELETE;
+	return FORWARD_TCP_CLOSE_NONE;
+}
+
 static __always_inline int is_local_ipv4(__u32 addr)
 {
 	__u32 key = addr;
@@ -1634,7 +1780,7 @@ static __always_inline void build_front_flow_key_from_value_v6(const struct flow
 	key->pad[2] = 0;
 }
 
-static __always_inline void init_fullnat_front_value(struct flow_value_v4 *front_value, const struct rule_value_v4 *rule, const struct packet_ctx *ctx, __u32 in_ifindex, __u16 nat_port)
+static __always_inline void init_fullnat_front_value(struct flow_value_v4 *front_value, const struct rule_value_v4 *rule, const struct packet_ctx *ctx, __u32 in_ifindex, __u16 nat_port, __u64 session_id)
 {
 	front_value->rule_id = rule->rule_id;
 	front_value->front_addr = ctx->dst_addr;
@@ -1645,9 +1791,11 @@ static __always_inline void init_fullnat_front_value(struct flow_value_v4 *front
 	front_value->client_port = ctx->src_port;
 	front_value->nat_port = nat_port;
 	front_value->flags = FORWARD_FLOW_FLAG_FULL_NAT | FORWARD_FLOW_FLAG_FRONT_ENTRY;
+	front_value->rule_revision = rule->revision;
+	front_value->session_id = session_id;
 }
 
-static __always_inline void init_fullnat_front_value_v6(struct flow_value_v6 *front_value, const struct rule_value_v6 *rule, const struct packet_ctx_v6 *ctx, __u32 in_ifindex, __u16 nat_port)
+static __always_inline void init_fullnat_front_value_v6(struct flow_value_v6 *front_value, const struct rule_value_v6 *rule, const struct packet_ctx_v6 *ctx, __u32 in_ifindex, __u16 nat_port, __u64 session_id)
 {
 	front_value->rule_id = rule->rule_id;
 	copy_ipv6_addr(front_value->front_addr, ctx->dst_addr);
@@ -1661,6 +1809,8 @@ static __always_inline void init_fullnat_front_value_v6(struct flow_value_v6 *fr
 	front_value->pad = 0;
 	front_value->last_seen_ns = 0;
 	front_value->front_close_seen_ns = 0;
+	front_value->rule_revision = rule->revision;
+	front_value->session_id = session_id;
 }
 
 static __always_inline void init_fullnat_reply_value(struct flow_value_v4 *reply_value, const struct flow_value_v4 *front_value, __u64 now)
@@ -1797,10 +1947,11 @@ static __always_inline int try_reserve_nat_port(__u32 candidate, struct nat_port
 	return -1;
 }
 
-static __always_inline int reserve_nat_port_fullcone(const struct rule_value_v4 *rule, const struct packet_ctx *ctx, struct nat_port_key_v4 *nat_key, __u16 *nat_port)
+static __always_inline int reserve_nat_port_fullcone(const struct rule_value_v4 *rule, const struct packet_ctx *ctx, struct nat_port_key_v4 *nat_key, __u16 *nat_port, __u64 session_id)
 {
 	struct nat_port_value_v4 nat_value = {
 		.rule_id = rule->rule_id,
+		.session_id = session_id,
 	};
 	__u32 seed;
 	__u32 port_min = 0;
@@ -2551,14 +2702,10 @@ static __always_inline void delete_fullnat_state(const struct flow_key_v4 *reply
 	struct flow_key_v4 front_key = {};
 	struct nat_port_key_v4 nat_key = {};
 	int full_cone = is_full_cone_flow(reply_value);
+	int reply_deleted;
 
-	if ((reply_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
-		if (proto == IPPROTO_TCP)
-			drop_rule_tcp_active(reply_value->rule_id);
-		else if (is_datagram_proto(proto))
-			drop_rule_datagram_nat(reply_value->rule_id, proto);
-	}
-
+	if (!reply_key || !reply_value)
+		return;
 	if (full_cone) {
 		front_key.ifindex = reply_value->in_ifindex;
 		front_key.src_addr = reply_value->client_addr;
@@ -2569,45 +2716,55 @@ static __always_inline void delete_fullnat_state(const struct flow_key_v4 *reply
 	} else {
 		build_front_flow_key_from_value(reply_value, proto, &front_key);
 	}
-	if (delete_flow_v4_in_bank(flow_bank, &front_key) == 0)
+	if (delete_flow_v4_session_in_bank(flow_bank, &front_key, reply_value->session_id) == 0)
 		drop_kernel_flow_occupancy();
-	if (delete_flow_v4_in_bank(flow_bank, reply_key) == 0)
+	reply_deleted = delete_flow_v4_session_in_bank(flow_bank, reply_key, reply_value->session_id) == 0;
+	if (reply_deleted)
 		drop_kernel_flow_occupancy();
-	if (full_cone && reply_key) {
-		nat_key.ifindex = reply_key->ifindex;
-		nat_key.nat_addr = reply_value->nat_addr;
-		nat_key.nat_port = reply_value->nat_port;
-		nat_key.proto = proto;
-		if (delete_nat_port_v4_in_bank(flow_bank, &nat_key) == 0)
-			drop_kernel_nat_occupancy();
+	if (reply_deleted && (reply_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
+		if (proto == IPPROTO_TCP)
+			drop_rule_tcp_active(reply_value->rule_id);
+		else if (is_datagram_proto(proto))
+			drop_rule_datagram_nat(reply_value->rule_id, proto);
 	}
+	nat_key.ifindex = reply_key->ifindex;
+	nat_key.nat_addr = reply_value->nat_addr;
+	nat_key.nat_port = reply_value->nat_port;
+	nat_key.proto = proto;
+	if (delete_nat_port_v4_session_in_bank(flow_bank, &nat_key, reply_value->session_id) == 0)
+		drop_kernel_nat_occupancy();
 }
 
 static __always_inline void delete_fullnat_state_v6(const struct flow_key_v6 *reply_key, const struct flow_value_v6 *reply_value, __u8 proto, __u8 flow_bank)
 {
 	struct flow_key_v6 front_key = {};
 	struct nat_port_key_v6 nat_key = {};
+	int reply_deleted;
 
-	if ((reply_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
+	if (!reply_key || !reply_value)
+		return;
+	build_front_flow_key_from_value_v6(reply_value, proto, &front_key);
+	if ((reply_value->flags & FORWARD_FLOW_FLAG_FULL_CONE) != 0) {
+		__builtin_memset(front_key.dst_addr, 0, sizeof(front_key.dst_addr));
+		front_key.dst_port = 0;
+	}
+	if (delete_flow_v6_session_in_bank(flow_bank, &front_key, reply_value->session_id) == 0)
+		drop_kernel_flow_occupancy();
+	reply_deleted = delete_flow_v6_session_in_bank(flow_bank, reply_key, reply_value->session_id) == 0;
+	if (reply_deleted)
+		drop_kernel_flow_occupancy();
+	if (reply_deleted && (reply_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
 		if (proto == IPPROTO_TCP)
 			drop_rule_tcp_active(reply_value->rule_id);
 		else if (is_datagram_proto(proto))
 			drop_rule_datagram_nat(reply_value->rule_id, proto);
 	}
-
-	build_front_flow_key_from_value_v6(reply_value, proto, &front_key);
-	if (delete_flow_v6_in_bank(flow_bank, &front_key) == 0)
-		drop_kernel_flow_occupancy();
-	if (delete_flow_v6_in_bank(flow_bank, reply_key) == 0)
-		drop_kernel_flow_occupancy();
-	if (reply_key) {
-		nat_key.ifindex = reply_key->ifindex;
-		copy_ipv6_addr(nat_key.nat_addr, reply_value->nat_addr);
-		nat_key.nat_port = reply_value->nat_port;
-		nat_key.proto = proto;
-		if (delete_nat_port_v6_in_bank(flow_bank, &nat_key) == 0)
-			drop_kernel_nat_occupancy();
-	}
+	nat_key.ifindex = reply_key->ifindex;
+	copy_ipv6_addr(nat_key.nat_addr, reply_value->nat_addr);
+	nat_key.nat_port = reply_value->nat_port;
+	nat_key.proto = proto;
+	if (delete_nat_port_v6_session_in_bank(flow_bank, &nat_key, reply_value->session_id) == 0)
+		drop_kernel_nat_occupancy();
 }
 
 static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const struct packet_ctx *ctx, const struct flow_key_v4 *flow_key, const struct flow_value_v4 *flow, __u8 flow_bank)
@@ -2616,6 +2773,7 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 	__u64 now = 0;
 	int update_flow = 0;
 	int count_tcp_now = 0;
+	int close_complete = 0;
 	int redirect_ifindex = 0;
 
 	if (!flow_value)
@@ -2624,10 +2782,11 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 	if (ctx->proto == IPPROTO_UDP) {
 		now = bpf_ktime_get_ns();
 		if (flow_value->last_seen_ns == 0 || now < flow_value->last_seen_ns || (now - flow_value->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
-			if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
-				drop_rule_udp_nat(flow_value->rule_id);
-			if (delete_flow_v4_in_bank(flow_bank, flow_key) == 0)
+			if (delete_flow_v4_session_in_bank(flow_bank, flow_key, flow_value->session_id) == 0) {
+				if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
+					drop_rule_udp_nat(flow_value->rule_id);
 				drop_kernel_flow_occupancy();
+			}
 			return XDP_PASS;
 		}
 		if ((now - flow_value->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
@@ -2636,28 +2795,25 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 		}
 	} else {
 		now = bpf_ktime_get_ns();
-		if ((flow_value->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
+		if (tcp_packet_is_rst(ctx->proto, ctx->tcp_flags)) {
+			close_complete = 1;
+		} else if ((flow_value->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
 			flow_value->flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
+			flow_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
 			flow_value->last_seen_ns = now;
-			if (!ctx->closing) {
-				flow_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
-				count_tcp_now = 1;
-				update_flow = 1;
-			}
-		} else if (!ctx->closing && (flow_value->last_seen_ns == 0 || now < flow_value->last_seen_ns || (now - flow_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+			count_tcp_now = 1;
+			update_flow = 1;
+		} else if (!tcp_packet_has_fin(ctx->proto, ctx->tcp_flags) &&
+			!tcp_flow_close_complete(flow_value->flags, ctx->proto, ctx->tcp_flags) &&
+			(flow_value->last_seen_ns == 0 || now < flow_value->last_seen_ns || (now - flow_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
 		}
-		if (ctx->closing) {
-			flow_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-			if (flow_value->front_close_seen_ns == 0)
-				flow_value->front_close_seen_ns = now;
-			flow_value->last_seen_ns = now;
-			if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
-				drop_rule_tcp_active(flow_value->rule_id);
-				flow_value->flags &= ~FORWARD_FLOW_FLAG_COUNTED;
-			}
+		if (!close_complete && tcp_packet_has_fin(ctx->proto, ctx->tcp_flags)) {
+			mark_tcp_flow_closing_v4(flow_value, FORWARD_FLOW_FLAG_REPLY_CLOSING, now);
 			update_flow = 1;
+		} else if (!close_complete && tcp_flow_close_complete(flow_value->flags, ctx->proto, ctx->tcp_flags)) {
+			close_complete = 1;
 		}
 	}
 
@@ -2676,7 +2832,17 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 	if (rewrite_l4_snat(xdp, ctx, flow_value->front_addr, flow_value->front_port) < 0)
 		return XDP_ABORTED;
 	xdp_diag_redirect_invoked();
-	return xdp_redirect_ifindex((__u32)redirect_ifindex);
+	{
+		int action = xdp_redirect_ifindex((__u32)redirect_ifindex);
+
+		if (close_complete && action == XDP_REDIRECT &&
+			delete_flow_v4_session_in_bank(flow_bank, flow_key, flow_value->session_id) == 0) {
+			drop_kernel_flow_occupancy();
+			if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
+				drop_rule_tcp_active(flow_value->rule_id);
+		}
+		return action;
+	}
 }
 
 static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 in_ifindex, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
@@ -2690,6 +2856,9 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 	int new_session = 0;
 	int count_udp_now = 0;
 	int close_complete = 0;
+	__u64 close_session_id = 0;
+	__u32 close_rule_id = 0;
+	__u16 close_flags = 0;
 	int redirect_ifindex = 0;
 
 	if (local_dst_mac_mismatch(xdp, in_ifindex, ctx->rule_wildcard_addr))
@@ -2705,11 +2874,30 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 	flow_key.proto = ctx->proto;
 
 	flow = lookup_flow_v4_active_or_old(&flow_key, &flow_bank);
+	if (flow && !flow_matches_rule_v4(flow, rule)) {
+		__u64 stale_session_id = flow->session_id;
+		__u32 stale_rule_id = flow->rule_id;
+		__u16 stale_flags = flow->flags;
+
+		if (delete_flow_v4_session_in_bank(flow_bank, &flow_key, stale_session_id) < 0)
+			return XDP_DROP;
+		drop_kernel_flow_occupancy();
+		if ((stale_flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
+			if (ctx->proto == IPPROTO_UDP)
+				drop_rule_udp_nat(stale_rule_id);
+			else
+				drop_rule_tcp_active(stale_rule_id);
+		}
+		flow = 0;
+		flow_bank = FORWARD_XDP_FLOW_BANK_ACTIVE;
+	}
 	if (!flow) {
 		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
 			return XDP_DROP;
 		now = bpf_ktime_get_ns();
 		flow_value->rule_id = rule->rule_id;
+		flow_value->rule_revision = rule->revision;
+		flow_value->session_id = new_flow_session_id();
 		flow_value->front_addr = ctx->dst_addr;
 		flow_value->front_port = ctx->dst_port;
 		flow_value->in_ifindex = in_ifindex;
@@ -2731,13 +2919,16 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 	} else if (ctx->proto == IPPROTO_UDP) {
 		now = bpf_ktime_get_ns();
 		if (flow->last_seen_ns == 0 || now < flow->last_seen_ns || (now - flow->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
+			if (delete_flow_v4_session_in_bank(flow_bank, &flow_key, flow->session_id) < 0)
+				return XDP_DROP;
 			if ((flow->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
 				drop_rule_udp_nat(flow->rule_id);
-			if (delete_flow_v4_in_bank(flow_bank, &flow_key) == 0)
-				drop_kernel_flow_occupancy();
+			drop_kernel_flow_occupancy();
 			__builtin_memset(flow_value, 0, sizeof(*flow_value));
 			now = bpf_ktime_get_ns();
 			flow_value->rule_id = rule->rule_id;
+			flow_value->rule_revision = rule->revision;
+			flow_value->session_id = new_flow_session_id();
 			flow_value->front_addr = ctx->dst_addr;
 			flow_value->front_port = ctx->dst_port;
 			flow_value->in_ifindex = in_ifindex;
@@ -2757,14 +2948,19 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 		}
 	} else {
 		now = bpf_ktime_get_ns();
-		if (ctx->closing) {
+		if (tcp_packet_is_rst(ctx->proto, ctx->tcp_flags)) {
+			close_session_id = flow->session_id;
+			close_rule_id = flow->rule_id;
+			close_flags = flow->flags;
+			close_complete = 1;
+		} else if (tcp_packet_has_fin(ctx->proto, ctx->tcp_flags)) {
 			*flow_value = *flow;
-			flow_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-			if (flow_value->front_close_seen_ns == 0)
-				flow_value->front_close_seen_ns = now;
-			flow_value->last_seen_ns = now;
+			mark_tcp_flow_closing_v4(flow_value, FORWARD_FLOW_FLAG_FRONT_CLOSING, now);
 			update_flow = 1;
-		} else if ((flow->flags & FORWARD_FLOW_FLAG_FRONT_CLOSING) != 0 && ctx->tcp_flags == FORWARD_TCP_FLAG_ACK) {
+		} else if (tcp_flow_close_complete(flow->flags, ctx->proto, ctx->tcp_flags)) {
+			close_session_id = flow->session_id;
+			close_rule_id = flow->rule_id;
+			close_flags = flow->flags;
 			close_complete = 1;
 		} else if (flow->last_seen_ns == 0 || now < flow->last_seen_ns || (now - flow->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 			*flow_value = *flow;
@@ -2795,8 +2991,12 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 	{
 		int action = xdp_redirect_ifindex((__u32)redirect_ifindex);
 
-		if (close_complete && action == XDP_REDIRECT && delete_flow_v4_in_bank(flow_bank, &flow_key) == 0)
+		if (close_complete && action == XDP_REDIRECT &&
+			delete_flow_v4_session_in_bank(flow_bank, &flow_key, close_session_id) == 0) {
 			drop_kernel_flow_occupancy();
+			if ((close_flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
+				drop_rule_tcp_active(close_rule_id);
+		}
 		return action;
 	}
 }
@@ -2814,6 +3014,7 @@ static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct
 	int update_reply = 0;
 	int count_tcp_now = 0;
 	int redirect_ifindex = 0;
+	int close_complete = 0;
 
 	if (!reply_value || !front_value)
 		return XDP_DROP;
@@ -2837,7 +3038,8 @@ static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct
 		build_front_flow_key_from_value(reply_value, ctx->proto, &front_key);
 	}
 	front_flow = lookup_flow_v4_in_bank(flow_bank, &front_key);
-	if (full_cone ? is_full_cone_front_flow(front_flow) : is_fullnat_front_flow(front_flow)) {
+	if ((full_cone ? is_full_cone_front_flow(front_flow) : is_fullnat_front_flow(front_flow)) &&
+		front_flow->session_id == reply_value->session_id) {
 		*front_value = *front_flow;
 	} else {
 		*front_value = *reply_value;
@@ -2862,30 +3064,45 @@ static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct
 			reply_value->last_seen_ns = now;
 			update_reply = 1;
 		}
-	} else if (!ctx->closing) {
+	} else if (tcp_packet_is_rst(ctx->proto, ctx->tcp_flags)) {
+		close_complete = 1;
+	} else {
+		int close_action;
+
 		if ((reply_value->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
 			reply_value->flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
 			reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
 			reply_value->last_seen_ns = now;
 			update_reply = 1;
 			count_tcp_now = 1;
-		} else if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
-			reply_value->last_seen_ns = now;
-			update_reply = 1;
 		}
-
 		if ((front_value->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
 			front_value->flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
 			front_value->last_seen_ns = now;
 			update_front = 1;
-		} else if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
-			front_value->last_seen_ns = now;
+		}
+
+		close_action = update_tcp_flow_pair_close_v4(front_value, reply_value, ctx->proto, ctx->tcp_flags, FORWARD_FLOW_FLAG_REPLY_CLOSING, now);
+		if (close_action == FORWARD_TCP_CLOSE_UPDATE) {
 			update_front = 1;
+			update_reply = 1;
+		} else if (close_action == FORWARD_TCP_CLOSE_DELETE) {
+			close_complete = 1;
+		} else {
+			if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
+				reply_value->last_seen_ns = now;
+				update_reply = 1;
+			}
+			if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
+				front_value->last_seen_ns = now;
+				update_front = 1;
+			}
 		}
 	}
 
 	if (update_front) {
-		if (update_flow_v4_in_bank(flow_bank, &front_key, front_value, BPF_ANY) < 0) {
+		if (update_flow_v4_in_bank(flow_bank, &front_key, front_value,
+			recreated_front ? BPF_NOEXIST : BPF_ANY) < 0) {
 			xdp_diag_flow_update_fail();
 			return XDP_DROP;
 		}
@@ -2918,15 +3135,20 @@ static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct
 		xdp_diag_rewrite_fail();
 		return XDP_ABORTED;
 	}
-	if (ctx->closing)
-		delete_fullnat_state(reply_key, reply_value, ctx->proto, flow_bank);
 	xdp_diag_redirect_invoked();
-	return xdp_redirect_ifindex((__u32)redirect_ifindex);
+	{
+		int action = xdp_redirect_ifindex((__u32)redirect_ifindex);
+
+		if (close_complete && action == XDP_REDIRECT)
+			delete_fullnat_state(reply_key, reply_value, ctx->proto, flow_bank);
+		return action;
+	}
 }
 
 static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xdp, __u32 in_ifindex, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
 {
 	union flow_nat_key_v4 reply_or_nat = {};
+	struct flow_key_v4 close_reply_key = {};
 	struct flow_value_v4 *front_value = lookup_xdp_flow_scratch_v4();
 	struct flow_value_v4 *reply_value = lookup_xdp_flow_aux_scratch_v4();
 	struct flow_value_v4 *front_flow;
@@ -2934,6 +3156,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 	struct nat_port_value_v4 nat_value = {};
 	struct redirect_target_v4 target = {};
 	__u64 now = bpf_ktime_get_ns();
+	__u64 session_id = new_flow_session_id();
 	__u16 nat_port = 0;
 	int created_front = 0;
 	int created_reply = 0;
@@ -2942,6 +3165,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 	int new_session = 0;
 	int count_udp_now = 0;
 	int redirect_ifindex = 0;
+	int close_complete = 0;
 	__u8 flow_bank = FORWARD_XDP_FLOW_BANK_ACTIVE;
 
 	if (!front_value || !reply_value)
@@ -2952,6 +3176,11 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 
 	build_full_cone_front_flow_key(in_ifindex, ctx, &reply_or_nat.flow);
 	front_flow = lookup_flow_v4_active_or_old(&reply_or_nat.flow, &flow_bank);
+	if (is_full_cone_front_flow(front_flow) && !flow_matches_rule_v4(front_flow, rule)) {
+		if (delete_flow_v4_session_in_bank(flow_bank, &reply_or_nat.flow, front_flow->session_id) == 0)
+			drop_kernel_flow_occupancy();
+		return XDP_DROP;
+	}
 	if (front_flow && !is_egress_nat_flow(front_flow))
 		return XDP_PASS;
 	if (is_full_cone_front_flow(front_flow)) {
@@ -2962,7 +3191,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 
 		build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_or_nat.flow);
 		reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_or_nat.flow);
-		if (is_full_cone_reply_flow(reply_flow)) {
+		if (is_full_cone_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) {
 			*reply_value = *reply_flow;
 		} else {
 			init_fullnat_reply_value(reply_value, front_value, now);
@@ -2971,7 +3200,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 				reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
 				count_udp_now = 1;
 			}
-			if (update_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, reply_value, BPF_ANY) < 0) {
+			if (update_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, reply_value, BPF_NOEXIST) < 0) {
 				xdp_diag_flow_update_fail();
 				return XDP_DROP;
 			}
@@ -2981,12 +3210,12 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 	} else {
 		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
 			return XDP_DROP;
-		if (reserve_nat_port_fullcone(rule, ctx, &reply_or_nat.nat, &nat_port) < 0) {
+		if (reserve_nat_port_fullcone(rule, ctx, &reply_or_nat.nat, &nat_port, session_id) < 0) {
 			xdp_diag_nat_reserve_fail();
 			return XDP_DROP;
 		}
 
-		init_fullnat_front_value(front_value, rule, ctx, in_ifindex, nat_port);
+		init_fullnat_front_value(front_value, rule, ctx, in_ifindex, nat_port, session_id);
 		front_value->front_addr = 0;
 		front_value->front_port = 0;
 		store_packet_macs_v4(xdp, front_value);
@@ -2999,14 +3228,14 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 		}
 		front_value->last_seen_ns = now;
 		if (update_flow_v4_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.flow, front_value, BPF_NOEXIST) < 0) {
-			delete_nat_port_v4_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.nat);
-			drop_kernel_nat_occupancy();
+			if (delete_nat_port_v4_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
+				drop_kernel_nat_occupancy();
 
 			build_full_cone_front_flow_key(in_ifindex, ctx, &reply_or_nat.flow);
 			front_flow = lookup_flow_v4_active_or_old(&reply_or_nat.flow, &flow_bank);
 			if (front_flow && !is_egress_nat_flow(front_flow))
 				return XDP_PASS;
-			if (!is_full_cone_front_flow(front_flow))
+			if (!is_full_cone_front_flow(front_flow) || !flow_matches_rule_v4(front_flow, rule))
 				return XDP_DROP;
 			*front_value = *front_flow;
 			if (front_value->nat_addr == 0)
@@ -3019,30 +3248,35 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 		}
 
 		build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_or_nat.flow);
-		init_fullnat_reply_value(reply_value, front_value, now);
-		reply_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT | FORWARD_FLOW_FLAG_FULL_CONE;
-		if (is_datagram_proto(ctx->proto)) {
-			reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
-			count_udp_now = 1;
-		}
-		if (update_flow_v4_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.flow, reply_value, BPF_ANY) < 0) {
-			if (created_front) {
-				build_full_cone_front_flow_key(in_ifindex, ctx, &reply_or_nat.flow);
-				if (delete_flow_v4_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.flow) == 0)
-					drop_kernel_flow_occupancy();
+		reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_or_nat.flow);
+		if (is_full_cone_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) {
+			*reply_value = *reply_flow;
+		} else {
+			init_fullnat_reply_value(reply_value, front_value, now);
+			reply_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT | FORWARD_FLOW_FLAG_FULL_CONE;
+			if (is_datagram_proto(ctx->proto)) {
+				reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
+				count_udp_now = 1;
 			}
-			reply_or_nat.nat.ifindex = rule->out_ifindex;
-			reply_or_nat.nat.nat_addr = front_value->nat_addr;
-			reply_or_nat.nat.nat_port = front_value->nat_port;
-			reply_or_nat.nat.proto = ctx->proto;
-			reply_or_nat.nat.pad = 0;
-			if (delete_nat_port_v4_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.nat) == 0)
-				drop_kernel_nat_occupancy();
-			xdp_diag_flow_update_fail();
-			return XDP_DROP;
+			if (update_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, reply_value, BPF_NOEXIST) < 0) {
+				if (created_front) {
+					build_full_cone_front_flow_key(in_ifindex, ctx, &reply_or_nat.flow);
+					if (delete_flow_v4_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.flow, session_id) == 0)
+						drop_kernel_flow_occupancy();
+					reply_or_nat.nat.ifindex = rule->out_ifindex;
+					reply_or_nat.nat.nat_addr = front_value->nat_addr;
+					reply_or_nat.nat.nat_port = front_value->nat_port;
+					reply_or_nat.nat.proto = ctx->proto;
+					reply_or_nat.nat.pad = 0;
+					if (delete_nat_port_v4_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
+						drop_kernel_nat_occupancy();
+				}
+				xdp_diag_flow_update_fail();
+				return XDP_DROP;
+			}
+			created_reply = 1;
+			bump_kernel_flow_occupancy();
 		}
-		created_reply = 1;
-		bump_kernel_flow_occupancy();
 	}
 
 	if (is_datagram_proto(ctx->proto)) {
@@ -3054,26 +3288,23 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 			reply_value->last_seen_ns = now;
 			update_reply = 1;
 		}
-	} else if (ctx->closing) {
-		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-		if (front_value->front_close_seen_ns == 0)
-			front_value->front_close_seen_ns = now;
-		front_value->last_seen_ns = now;
-		update_front = 1;
-
-		reply_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-		if (reply_value->front_close_seen_ns == 0)
-			reply_value->front_close_seen_ns = now;
-		reply_value->last_seen_ns = now;
-		update_reply = 1;
 	} else {
-		if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
-			front_value->last_seen_ns = now;
+		int close_action = update_tcp_flow_pair_close_v4(front_value, reply_value, ctx->proto, ctx->tcp_flags, FORWARD_FLOW_FLAG_FRONT_CLOSING, now);
+
+		if (close_action == FORWARD_TCP_CLOSE_UPDATE) {
 			update_front = 1;
-		}
-		if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
-			reply_value->last_seen_ns = now;
 			update_reply = 1;
+		} else if (close_action == FORWARD_TCP_CLOSE_DELETE) {
+			close_complete = 1;
+		} else {
+			if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+				front_value->last_seen_ns = now;
+				update_front = 1;
+			}
+			if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+				reply_value->last_seen_ns = now;
+				update_reply = 1;
+			}
 		}
 	}
 
@@ -3098,6 +3329,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 		reply_or_nat.nat.proto = ctx->proto;
 		reply_or_nat.nat.pad = 0;
 		nat_value.rule_id = rule->rule_id;
+		nat_value.session_id = front_value->session_id;
 		if (update_nat_port_v4_in_bank(flow_bank, &reply_or_nat.nat, &nat_value, BPF_NOEXIST) == 0)
 			bump_kernel_nat_occupancy();
 	}
@@ -3107,6 +3339,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 		bump_rule_datagram_nat(rule->rule_id, ctx->proto);
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
+	build_reply_flow_key_from_front(rule, front_value, ctx->proto, &close_reply_key);
 
 	target.ifindex = rule->out_ifindex;
 	target.src_addr = front_value->nat_addr;
@@ -3123,7 +3356,13 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 		return XDP_ABORTED;
 	}
 	xdp_diag_redirect_invoked();
-	return xdp_redirect_ifindex((__u32)redirect_ifindex);
+	{
+		int action = xdp_redirect_ifindex((__u32)redirect_ifindex);
+
+		if (close_complete && action == XDP_REDIRECT)
+			delete_fullnat_state(&close_reply_key, reply_value, ctx->proto, flow_bank);
+		return action;
+	}
 }
 
 static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_ifindex, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *existing_front)
@@ -3136,6 +3375,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 	struct flow_value_v4 *front_flow = (struct flow_value_v4 *)existing_front;
 	struct flow_value_v4 *reply_flow;
 	__u64 now = bpf_ktime_get_ns();
+	__u64 session_id = new_flow_session_id();
 	__u32 seed = 0;
 	__u32 port_min = 0;
 	__u32 port_range = 0;
@@ -3149,6 +3389,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 	int new_session = 0;
 	int count_udp_now = 0;
 	int redirect_ifindex = 0;
+	int close_complete = 0;
 	__u8 flow_bank = FORWARD_XDP_FLOW_BANK_ACTIVE;
 
 	if (is_full_cone_egress_nat_rule(rule))
@@ -3163,6 +3404,11 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 		flow_bank = dispatch->flow_bank;
 	if (!is_fullnat_front_flow(front_flow))
 		flow_bank = FORWARD_XDP_FLOW_BANK_ACTIVE;
+	if (is_fullnat_front_flow(front_flow) && !flow_matches_rule_v4(front_flow, rule)) {
+		if (delete_flow_v4_session_in_bank(flow_bank, &front_key, front_flow->session_id) == 0)
+			drop_kernel_flow_occupancy();
+		return XDP_DROP;
+	}
 	if (is_egress_nat_rule(rule) && front_flow && !is_egress_nat_flow(front_flow))
 		return XDP_PASS;
 	if (is_fullnat_front_flow(front_flow)) {
@@ -3174,7 +3420,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 
 		build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_key);
 		reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_key);
-		if (is_fullnat_reply_flow(reply_flow)) {
+		if (is_fullnat_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) {
 			*reply_value = *reply_flow;
 		} else {
 			init_fullnat_reply_value(reply_value, front_value, now);
@@ -3182,7 +3428,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 				reply_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT;
 			if (is_datagram_proto(ctx->proto))
 				reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
-			if (update_flow_v4_in_bank(flow_bank, &reply_key, reply_value, BPF_ANY) < 0) {
+			if (update_flow_v4_in_bank(flow_bank, &reply_key, reply_value, BPF_NOEXIST) < 0) {
 				xdp_diag_flow_update_fail();
 				return XDP_DROP;
 			}
@@ -3207,7 +3453,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 	if ((__u32)preferred_port >= port_min && (__u32)preferred_port < (port_min + port_range)) {
 		__builtin_memset(front_value, 0, sizeof(*front_value));
 		__builtin_memset(reply_value, 0, sizeof(*reply_value));
-		init_fullnat_front_value(front_value, rule, ctx, in_ifindex, preferred_port);
+		init_fullnat_front_value(front_value, rule, ctx, in_ifindex, preferred_port, session_id);
 		store_packet_macs_v4(xdp, front_value);
 		if (is_egress_nat_rule(rule))
 			front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT;
@@ -3236,9 +3482,9 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 				flow_bank = FORWARD_XDP_FLOW_BANK_ACTIVE;
 				goto have_session;
 			}
-			delete_flow_v4_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_key);
+			delete_flow_v4_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_key, session_id);
 			front_flow = lookup_flow_v4_active_or_old(&front_key, &flow_bank);
-			if (is_fullnat_front_flow(front_flow)) {
+			if (is_fullnat_front_flow(front_flow) && flow_matches_rule_v4(front_flow, rule)) {
 				*front_value = *front_flow;
 				if (front_value->nat_addr == 0)
 					front_value->nat_addr = rule->nat_addr;
@@ -3246,7 +3492,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 					front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT;
 				build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_key);
 				reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_key);
-				if (is_fullnat_reply_flow(reply_flow)) {
+				if (is_fullnat_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) {
 					*reply_value = *reply_flow;
 					goto have_session;
 				}
@@ -3255,7 +3501,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 					reply_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT;
 				if (is_datagram_proto(ctx->proto))
 					reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
-				if (update_flow_v4_in_bank(flow_bank, &reply_key, reply_value, BPF_ANY) < 0) {
+				if (update_flow_v4_in_bank(flow_bank, &reply_key, reply_value, BPF_NOEXIST) < 0) {
 					xdp_diag_flow_update_fail();
 					return XDP_DROP;
 				}
@@ -3274,7 +3520,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 		if (nat_port != preferred_port) { \
 			__builtin_memset(front_value, 0, sizeof(*front_value)); \
 			__builtin_memset(reply_value, 0, sizeof(*reply_value)); \
-			init_fullnat_front_value(front_value, rule, ctx, in_ifindex, nat_port); \
+			init_fullnat_front_value(front_value, rule, ctx, in_ifindex, nat_port, session_id); \
 			store_packet_macs_v4(xdp, front_value); \
 			if (is_egress_nat_rule(rule)) \
 				front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT; \
@@ -3301,9 +3547,9 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 					flow_bank = FORWARD_XDP_FLOW_BANK_ACTIVE; \
 					goto have_session; \
 				} \
-				delete_flow_v4_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_key); \
+				delete_flow_v4_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_key, session_id); \
 				front_flow = lookup_flow_v4_active_or_old(&front_key, &flow_bank); \
-				if (is_fullnat_front_flow(front_flow)) { \
+				if (is_fullnat_front_flow(front_flow) && flow_matches_rule_v4(front_flow, rule)) { \
 					*front_value = *front_flow; \
 					if (front_value->nat_addr == 0) \
 						front_value->nat_addr = rule->nat_addr; \
@@ -3311,7 +3557,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 						front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT; \
 					build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_key); \
 					reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_key); \
-					if (is_fullnat_reply_flow(reply_flow)) { \
+					if (is_fullnat_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) { \
 						*reply_value = *reply_flow; \
 						goto have_session; \
 					} \
@@ -3320,7 +3566,7 @@ static __always_inline int handle_fullnat_forward(struct xdp_md *xdp, __u32 in_i
 						reply_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT; \
 					if (is_datagram_proto(ctx->proto)) \
 						reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED; \
-					if (update_flow_v4_in_bank(flow_bank, &reply_key, reply_value, BPF_ANY) < 0) { \
+					if (update_flow_v4_in_bank(flow_bank, &reply_key, reply_value, BPF_NOEXIST) < 0) { \
 						xdp_diag_flow_update_fail(); \
 						return XDP_DROP; \
 					} \
@@ -3349,26 +3595,23 @@ have_session:
 			reply_value->last_seen_ns = now;
 			update_reply = 1;
 		}
-	} else if (ctx->closing) {
-		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-		if (front_value->front_close_seen_ns == 0)
-			front_value->front_close_seen_ns = now;
-		front_value->last_seen_ns = now;
-		update_front = 1;
-
-		reply_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-		if (reply_value->front_close_seen_ns == 0)
-			reply_value->front_close_seen_ns = now;
-		reply_value->last_seen_ns = now;
-		update_reply = 1;
 	} else {
-		if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
-			front_value->last_seen_ns = now;
+		int close_action = update_tcp_flow_pair_close_v4(front_value, reply_value, ctx->proto, ctx->tcp_flags, FORWARD_FLOW_FLAG_FRONT_CLOSING, now);
+
+		if (close_action == FORWARD_TCP_CLOSE_UPDATE) {
 			update_front = 1;
-		}
-		if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
-			reply_value->last_seen_ns = now;
 			update_reply = 1;
+		} else if (close_action == FORWARD_TCP_CLOSE_DELETE) {
+			close_complete = 1;
+		} else {
+			if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+				front_value->last_seen_ns = now;
+				update_front = 1;
+			}
+			if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+				reply_value->last_seen_ns = now;
+				update_reply = 1;
+			}
 		}
 	}
 
@@ -3412,7 +3655,13 @@ have_session:
 		}
 	}
 	xdp_diag_redirect_invoked();
-	return xdp_redirect_ifindex((__u32)redirect_ifindex);
+	{
+		int action = xdp_redirect_ifindex((__u32)redirect_ifindex);
+
+		if (close_complete && action == XDP_REDIRECT)
+			delete_fullnat_state(&reply_key, reply_value, ctx->proto, flow_bank);
+		return action;
+	}
 }
 
 static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const struct packet_ctx_v6 *ctx, const struct flow_key_v6 *reply_key, const struct flow_value_v6 *flow, __u8 flow_bank)
@@ -3427,6 +3676,7 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 	int update_reply = 0;
 	int count_tcp_now = 0;
 	int redirect_ifindex = 0;
+	int close_complete = 0;
 
 	if (!front_key || !reply_value || !front_value)
 		return XDP_DROP;
@@ -3440,7 +3690,7 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 
 	build_front_flow_key_from_value_v6(reply_value, ctx->proto, front_key);
 	front_flow = lookup_flow_v6_in_bank(flow_bank, front_key);
-	if (is_fullnat_front_flow_v6(front_flow)) {
+	if (is_fullnat_front_flow_v6(front_flow) && front_flow->session_id == reply_value->session_id) {
 		*front_value = *front_flow;
 	} else {
 		*front_value = *reply_value;
@@ -3459,30 +3709,45 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 			reply_value->last_seen_ns = now;
 			update_reply = 1;
 		}
-	} else if (!ctx->closing) {
+	} else if (tcp_packet_is_rst(ctx->proto, ctx->tcp_flags)) {
+		close_complete = 1;
+	} else {
+		int close_action;
+
 		if ((reply_value->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
 			reply_value->flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
 			reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
 			reply_value->last_seen_ns = now;
 			update_reply = 1;
 			count_tcp_now = 1;
-		} else if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
-			reply_value->last_seen_ns = now;
-			update_reply = 1;
 		}
-
 		if ((front_value->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0) {
 			front_value->flags |= FORWARD_FLOW_FLAG_REPLY_SEEN;
 			front_value->last_seen_ns = now;
 			update_front = 1;
-		} else if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
-			front_value->last_seen_ns = now;
+		}
+
+		close_action = update_tcp_flow_pair_close_v6(front_value, reply_value, ctx->proto, ctx->tcp_flags, FORWARD_FLOW_FLAG_REPLY_CLOSING, now);
+		if (close_action == FORWARD_TCP_CLOSE_UPDATE) {
 			update_front = 1;
+			update_reply = 1;
+		} else if (close_action == FORWARD_TCP_CLOSE_DELETE) {
+			close_complete = 1;
+		} else {
+			if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
+				reply_value->last_seen_ns = now;
+				update_reply = 1;
+			}
+			if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
+				front_value->last_seen_ns = now;
+				update_front = 1;
+			}
 		}
 	}
 
 	if (update_front) {
-		if (update_flow_v6_in_bank(flow_bank, front_key, front_value, BPF_ANY) < 0)
+		if (update_flow_v6_in_bank(flow_bank, front_key, front_value,
+			created_front ? BPF_NOEXIST : BPF_ANY) < 0)
 			return XDP_DROP;
 		if (created_front)
 			bump_kernel_flow_occupancy();
@@ -3503,9 +3768,13 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 		return XDP_ABORTED;
 	if (rewrite_l4_dnat_v6(xdp, ctx, reply_value->client_addr, reply_value->client_port) < 0)
 		return XDP_ABORTED;
-	if (ctx->closing)
-		delete_fullnat_state_v6(reply_key, reply_value, ctx->proto, flow_bank);
-	return xdp_redirect_ifindex((__u32)redirect_ifindex);
+	{
+		int action = xdp_redirect_ifindex((__u32)redirect_ifindex);
+
+		if (close_complete && action == XDP_REDIRECT)
+			delete_fullnat_state_v6(reply_key, reply_value, ctx->proto, flow_bank);
+		return action;
+	}
 }
 
 static __attribute__((noinline)) int ensure_fullnat_existing_session_v6(const struct packet_ctx_v6 *ctx, const struct rule_value_v6 *rule, const struct flow_value_v6 *front_flow, __u8 flow_bank, __u64 now)
@@ -3527,7 +3796,7 @@ static __attribute__((noinline)) int ensure_fullnat_existing_session_v6(const st
 
 	build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, reply_key);
 	reply_flow = lookup_flow_v6_in_bank(flow_bank, reply_key);
-	if (is_fullnat_reply_flow_v6(reply_flow)) {
+	if (is_fullnat_reply_flow_v6(reply_flow) && reply_flow->session_id == front_value->session_id) {
 		*reply_value = *reply_flow;
 		return state;
 	}
@@ -3535,7 +3804,7 @@ static __attribute__((noinline)) int ensure_fullnat_existing_session_v6(const st
 	init_fullnat_reply_value_v6(reply_value, front_value, now);
 	if (ctx->proto == IPPROTO_UDP)
 		reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
-	if (update_flow_v6_in_bank(flow_bank, reply_key, reply_value, BPF_ANY) < 0)
+	if (update_flow_v6_in_bank(flow_bank, reply_key, reply_value, BPF_NOEXIST) < 0)
 		return -1;
 
 	state |= FORWARD_FULLNAT_STATE_CREATED_REPLY;
@@ -3552,8 +3821,10 @@ static __attribute__((noinline)) int try_create_fullnat_session_v6(struct xdp_md
 	struct flow_value_v6 *reply_value = lookup_xdp_flow_aux_scratch_v6();
 	struct flow_value_v6 *front_flow;
 	struct nat_port_key_v6 nat_key = {};
+	__u64 session_id = new_flow_session_id();
 	struct nat_port_value_v6 nat_value = {
 		.rule_id = rule->rule_id,
+		.session_id = session_id,
 	};
 	__u8 flow_bank = FORWARD_XDP_FLOW_BANK_ACTIVE;
 	__u8 state = 0;
@@ -3571,10 +3842,10 @@ static __attribute__((noinline)) int try_create_fullnat_session_v6(struct xdp_md
 	bump_kernel_nat_occupancy();
 
 	build_front_flow_key_v6(xdp->ingress_ifindex, ctx, front_key);
-	init_fullnat_front_value_v6(front_value, rule, ctx, xdp->ingress_ifindex, nat_port);
+	init_fullnat_front_value_v6(front_value, rule, ctx, xdp->ingress_ifindex, nat_port, session_id);
 	if (load_packet_macs(xdp, front_value->front_mac, front_value->client_mac) < 0) {
-		delete_nat_port_v6_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &nat_key);
-		drop_kernel_nat_occupancy();
+		if (delete_nat_port_v6_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+			drop_kernel_nat_occupancy();
 		return -1;
 	}
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
@@ -3591,8 +3862,8 @@ static __attribute__((noinline)) int try_create_fullnat_session_v6(struct xdp_md
 
 	build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, reply_key);
 	if (update_flow_v6_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, reply_key, reply_value, BPF_NOEXIST) < 0) {
-		delete_nat_port_v6_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &nat_key);
-		drop_kernel_nat_occupancy();
+		if (delete_nat_port_v6_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+			drop_kernel_nat_occupancy();
 		return -2;
 	}
 	if (update_flow_v6_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, front_key, front_value, BPF_NOEXIST) == 0) {
@@ -3604,11 +3875,11 @@ static __attribute__((noinline)) int try_create_fullnat_session_v6(struct xdp_md
 		return state;
 	}
 
-	delete_flow_v6_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, reply_key);
-	if (delete_nat_port_v6_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &nat_key) == 0)
+	delete_flow_v6_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, reply_key, session_id);
+	if (delete_nat_port_v6_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
 		drop_kernel_nat_occupancy();
 	front_flow = lookup_flow_v6_active_or_old(front_key, &flow_bank);
-	if (!is_fullnat_front_flow_v6(front_flow))
+	if (!is_fullnat_front_flow_v6(front_flow) || !flow_matches_rule_v6(front_flow, rule))
 		return -2;
 
 	return ensure_fullnat_existing_session_v6(ctx, rule, front_flow, flow_bank, now);
@@ -3633,6 +3904,11 @@ static __always_inline int prepare_fullnat_forward_v6(struct xdp_md *xdp, const 
 
 	build_front_flow_key_v6(xdp->ingress_ifindex, ctx, front_key);
 	front_flow = lookup_flow_v6_active_or_old(front_key, &flow_bank);
+	if (is_fullnat_front_flow_v6(front_flow) && !flow_matches_rule_v6(front_flow, rule)) {
+		if (delete_flow_v6_session_in_bank(flow_bank, front_key, front_flow->session_id) == 0)
+			drop_kernel_flow_occupancy();
+		return -1;
+	}
 	if (is_fullnat_front_flow_v6(front_flow)) {
 		state = ensure_fullnat_existing_session_v6(ctx, rule, front_flow, flow_bank, now);
 		if (state >= 0 && flow_bank_out) {
@@ -3704,6 +3980,7 @@ static __always_inline int finalize_fullnat_forward_v6(struct xdp_md *xdp, const
 	__u64 now = bpf_ktime_get_ns();
 	__u8 update_front = 0;
 	__u8 update_reply = 0;
+	int close_complete = 0;
 
 	if (!front_key || !reply_key || !front_value || !reply_value)
 		return XDP_DROP;
@@ -3719,28 +3996,25 @@ static __always_inline int finalize_fullnat_forward_v6(struct xdp_md *xdp, const
 			reply_value->last_seen_ns = now;
 			update_reply = 1;
 		}
-	} else if (ctx->closing) {
-		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-		if (front_value->front_close_seen_ns == 0)
-			front_value->front_close_seen_ns = now;
-		front_value->last_seen_ns = now;
-		update_front = 1;
-
-		reply_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-		if (reply_value->front_close_seen_ns == 0)
-			reply_value->front_close_seen_ns = now;
-		reply_value->last_seen_ns = now;
-		update_reply = 1;
 	} else {
-		if ((state & FORWARD_FULLNAT_STATE_CREATED_FRONT) == 0 &&
-			(front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
-			front_value->last_seen_ns = now;
+		int close_action = update_tcp_flow_pair_close_v6(front_value, reply_value, ctx->proto, ctx->tcp_flags, FORWARD_FLOW_FLAG_FRONT_CLOSING, now);
+
+		if (close_action == FORWARD_TCP_CLOSE_UPDATE) {
 			update_front = 1;
-		}
-		if ((state & FORWARD_FULLNAT_STATE_CREATED_REPLY) == 0 &&
-			(reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
-			reply_value->last_seen_ns = now;
 			update_reply = 1;
+		} else if (close_action == FORWARD_TCP_CLOSE_DELETE) {
+			close_complete = 1;
+		} else {
+			if ((state & FORWARD_FULLNAT_STATE_CREATED_FRONT) == 0 &&
+				(front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+				front_value->last_seen_ns = now;
+				update_front = 1;
+			}
+			if ((state & FORWARD_FULLNAT_STATE_CREATED_REPLY) == 0 &&
+				(reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+				reply_value->last_seen_ns = now;
+				update_reply = 1;
+			}
 		}
 	}
 
@@ -3771,7 +4045,14 @@ static __always_inline int finalize_fullnat_forward_v6(struct xdp_md *xdp, const
 		return XDP_ABORTED;
 	if (rewrite_l4_dnat_v6(xdp, ctx, rule->backend_addr, rule->backend_port) < 0)
 		return XDP_ABORTED;
-	return xdp_redirect_ifindex((__u32)redirect_ifindex);
+	build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, reply_key);
+	{
+		int action = xdp_redirect_ifindex((__u32)redirect_ifindex);
+
+		if (close_complete && action == XDP_REDIRECT)
+			delete_fullnat_state_v6(reply_key, reply_value, ctx->proto, flow_bank);
+		return action;
+	}
 }
 
 static __always_inline int handle_fullnat_forward_v6(struct xdp_md *xdp, const struct packet_ctx_v6 *ctx, const struct rule_value_v6 *rule, __u8 existing_flow_bank)

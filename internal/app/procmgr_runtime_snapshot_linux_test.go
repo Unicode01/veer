@@ -192,13 +192,13 @@ func TestSnapshotKernelRuntimeSharedForceRefreshBypassesKernelPressureTTL(t *tes
 		Name:       kernelNatPortsMapNameV4,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 1,
 	})
 	if err := flows.Put(tcFlowKeyV4{IfIndex: 1}, tcFlowValueV4{RuleID: 1}); err != nil {
 		t.Fatalf("flows.Put() error = %v", err)
 	}
-	if err := nat.Put(tcNATPortKeyV4{IfIndex: 1}, uint32(1)); err != nil {
+	if err := nat.Put(tcNATPortKeyV4{IfIndex: 1}, tcNATPortValue{RuleID: 1, SessionID: 1}); err != nil {
 		t.Fatalf("nat.Put() error = %v", err)
 	}
 

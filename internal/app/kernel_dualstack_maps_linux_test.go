@@ -90,17 +90,20 @@ func TestKernelDualstackMapStructSizes(t *testing.T) {
 	if got := unsafe.Sizeof(tcRuleKeyV4{}); got != 12 {
 		t.Fatalf("sizeof(tcRuleKeyV4) = %d, want 12", got)
 	}
-	if got := unsafe.Sizeof(tcRuleValueV4{}); got != 44 {
-		t.Fatalf("sizeof(tcRuleValueV4) = %d, want 44", got)
+	if got := unsafe.Sizeof(tcRuleValueV4{}); got != 56 {
+		t.Fatalf("sizeof(tcRuleValueV4) = %d, want 56", got)
 	}
 	if got := unsafe.Sizeof(tcFlowKeyV4{}); got != 20 {
 		t.Fatalf("sizeof(tcFlowKeyV4) = %d, want 20", got)
 	}
-	if got := unsafe.Sizeof(tcFlowValueV4{}); got != 48 {
-		t.Fatalf("sizeof(tcFlowValueV4) = %d, want 48", got)
+	if got := unsafe.Sizeof(tcFlowValueV4{}); got != 64 {
+		t.Fatalf("sizeof(tcFlowValueV4) = %d, want 64", got)
 	}
 	if got := unsafe.Sizeof(tcNATPortKeyV4{}); got != 12 {
 		t.Fatalf("sizeof(tcNATPortKeyV4) = %d, want 12", got)
+	}
+	if got := unsafe.Sizeof(tcNATPortValue{}); got != 16 {
+		t.Fatalf("sizeof(tcNATPortValue) = %d, want 16", got)
 	}
 	if got := unsafe.Sizeof(kernelLocalMACValue{}); got != 8 {
 		t.Fatalf("sizeof(kernelLocalMACValue) = %d, want 8", got)
@@ -108,17 +111,26 @@ func TestKernelDualstackMapStructSizes(t *testing.T) {
 	if got := unsafe.Sizeof(tcRuleKeyV6{}); got != 24 {
 		t.Fatalf("sizeof(tcRuleKeyV6) = %d, want 24", got)
 	}
-	if got := unsafe.Sizeof(tcRuleValueV6{}); got != 56 {
-		t.Fatalf("sizeof(tcRuleValueV6) = %d, want 56", got)
+	if got := unsafe.Sizeof(tcRuleValueV6{}); got != 64 {
+		t.Fatalf("sizeof(tcRuleValueV6) = %d, want 64", got)
 	}
 	if got := unsafe.Sizeof(tcFlowKeyV6{}); got != 44 {
 		t.Fatalf("sizeof(tcFlowKeyV6) = %d, want 44", got)
 	}
-	if got := unsafe.Sizeof(tcFlowValueV6{}); got != 96 {
-		t.Fatalf("sizeof(tcFlowValueV6) = %d, want 96", got)
+	if got := unsafe.Sizeof(tcFlowValueV6{}); got != 112 {
+		t.Fatalf("sizeof(tcFlowValueV6) = %d, want 112", got)
 	}
 	if got := unsafe.Sizeof(tcNATPortKeyV6{}); got != 24 {
 		t.Fatalf("sizeof(tcNATPortKeyV6) = %d, want 24", got)
+	}
+	if got := unsafe.Sizeof(xdpRuleValueV4{}); got != 40 {
+		t.Fatalf("sizeof(xdpRuleValueV4) = %d, want 40", got)
+	}
+	if got := unsafe.Sizeof(xdpRuleValueV6{}); got != 64 {
+		t.Fatalf("sizeof(xdpRuleValueV6) = %d, want 64", got)
+	}
+	if got := unsafe.Sizeof(xdpFlowValueV4{}); got != 72 {
+		t.Fatalf("sizeof(xdpFlowValueV4) = %d, want 72", got)
 	}
 	if got := binary.Size(kernelOccupancyValueV4{}); got != 32 {
 		t.Fatalf("binary.Size(kernelOccupancyValueV4) = %d, want 32", got)
@@ -160,6 +172,45 @@ func TestKernelPreparedRuleFamilyFallsBackToRuleIPs(t *testing.T) {
 	}
 	if got := kernelPreparedRuleFamily(item); got != ipFamilyIPv6 {
 		t.Fatalf("kernelPreparedRuleFamily() = %q, want %q", got, ipFamilyIPv6)
+	}
+}
+
+func TestPreparedXDPKernelRuleFlowRevisionNormalizesXDPFlags(t *testing.T) {
+	base := preparedXDPKernelRule{
+		rule:  Rule{ID: 17, Protocol: "udp"},
+		spec:  kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+		keyV4: tcRuleKeyV4{IfIndex: 3, DstAddr: 0xc0000201, DstPort: 443, Proto: 17},
+		valueV4: xdpRuleValueV4{
+			RuleID:      17,
+			BackendAddr: 0xc0000202,
+			BackendPort: 8443,
+			Flags:       xdpRuleFlagFullNAT | xdpRuleFlagEgressNAT,
+			OutIfIndex:  4,
+			NATAddr:     0xc0000203,
+		},
+	}
+	if err := assignPreparedXDPKernelRuleRevision(&base); err != nil {
+		t.Fatalf("assignPreparedXDPKernelRuleRevision(base) error = %v", err)
+	}
+
+	nonFlowChange := base
+	nonFlowChange.valueV4.Revision = 0
+	nonFlowChange.valueV4.Flags |= xdpRuleFlagBridgeL2 | xdpRuleFlagBridgeIngressL2 | xdpRuleFlagTrafficStats | xdpRuleFlagPreparedL2
+	if err := assignPreparedXDPKernelRuleRevision(&nonFlowChange); err != nil {
+		t.Fatalf("assignPreparedXDPKernelRuleRevision(non-flow flags) error = %v", err)
+	}
+	if nonFlowChange.valueV4.Revision != base.valueV4.Revision {
+		t.Fatalf("non-flow XDP flags changed revision from %#x to %#x", base.valueV4.Revision, nonFlowChange.valueV4.Revision)
+	}
+
+	fullCone := base
+	fullCone.valueV4.Revision = 0
+	fullCone.valueV4.Flags |= xdpRuleFlagFullCone
+	if err := assignPreparedXDPKernelRuleRevision(&fullCone); err != nil {
+		t.Fatalf("assignPreparedXDPKernelRuleRevision(full-cone) error = %v", err)
+	}
+	if fullCone.valueV4.Revision == base.valueV4.Revision {
+		t.Fatalf("full-cone XDP flag kept revision %#x, want flow contract change", base.valueV4.Revision)
 	}
 }
 

@@ -31,6 +31,7 @@ static long (*const bpf_redirect_neigh)(__u32 ifindex, void *params, int plen, _
 static long (*const bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, int plen, __u32 flags) = (void *)BPF_FUNC_fib_lookup;
 static long (*const bpf_tail_call)(void *ctx, void *prog_array_map, __u32 index) = (void *)BPF_FUNC_tail_call;
 static __u64 (*const bpf_ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
+static __u32 (*const bpf_get_prandom_u32)(void) = (void *)BPF_FUNC_get_prandom_u32;
 #ifdef BPF_FUNC_xdp_load_bytes
 static long (*const bpf_xdp_load_bytes)(struct xdp_md *xdp, __u32 offset, void *buf, __u32 len) = (void *)BPF_FUNC_xdp_load_bytes;
 #endif

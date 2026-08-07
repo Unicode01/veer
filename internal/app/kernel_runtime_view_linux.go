@@ -1209,7 +1209,7 @@ func countKernelNATMapEntriesV6(m *ebpf.Map) (int, error) {
 func countKernelNATMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
 	cursor := ebpf.MapBatchCursor{}
 	keys := make([]tcNATPortKeyV4, kernelRuntimeMapCountBatchSize)
-	values := make([]uint32, kernelRuntimeMapCountBatchSize)
+	values := make([]tcNATPortValue, kernelRuntimeMapCountBatchSize)
 	count := 0
 	for {
 		n, err := m.BatchLookup(&cursor, keys, values, nil)
@@ -1229,7 +1229,7 @@ func countKernelNATMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
 func countKernelNATMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
 	cursor := ebpf.MapBatchCursor{}
 	keys := make([]tcNATPortKeyV6, kernelRuntimeMapCountBatchSize)
-	values := make([]uint32, kernelRuntimeMapCountBatchSize)
+	values := make([]tcNATPortValue, kernelRuntimeMapCountBatchSize)
 	count := 0
 	for {
 		n, err := m.BatchLookup(&cursor, keys, values, nil)
@@ -1250,7 +1250,7 @@ func countKernelNATMapEntriesIter(m *ebpf.Map) (int, error) {
 	iter := m.Iterate()
 	count := 0
 	var key tcNATPortKeyV4
-	var value uint32
+	var value tcNATPortValue
 	for iter.Next(&key, &value) {
 		count++
 	}
@@ -1261,7 +1261,7 @@ func countKernelNATMapEntriesIterV6(m *ebpf.Map) (int, error) {
 	iter := m.Iterate()
 	count := 0
 	var key tcNATPortKeyV6
-	var value uint32
+	var value tcNATPortValue
 	for iter.Next(&key, &value) {
 		count++
 	}

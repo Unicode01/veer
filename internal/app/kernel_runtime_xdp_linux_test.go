@@ -562,10 +562,10 @@ func TestXDPExactNATEntriesForPreservationUsesExactCountWhenCacheIsZero(t *testi
 		Name:       kernelNatPortsMapName,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 16,
 	})
-	if err := nat.Put(tcNATPortKeyV4{IfIndex: 3, NATAddr: 4, NATPort: 5, Proto: unix.IPPROTO_UDP}, uint32(1)); err != nil {
+	if err := nat.Put(tcNATPortKeyV4{IfIndex: 3, NATAddr: 4, NATPort: 5, Proto: unix.IPPROTO_UDP}, tcNATPortValue{RuleID: 1, SessionID: 1}); err != nil {
 		t.Fatalf("nat.Put() error = %v", err)
 	}
 
@@ -580,10 +580,10 @@ func TestXDPRuntimeNATStateForDecisionUsesExactCountWhenCacheIsZero(t *testing.T
 		Name:       kernelNatPortsMapName,
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(tcNATPortKeyV4{})),
-		ValueSize:  4,
+		ValueSize:  uint32(unsafe.Sizeof(tcNATPortValue{})),
 		MaxEntries: 16,
 	})
-	if err := nat.Put(tcNATPortKeyV4{IfIndex: 3, NATAddr: 4, NATPort: 5, Proto: unix.IPPROTO_UDP}, uint32(1)); err != nil {
+	if err := nat.Put(tcNATPortKeyV4{IfIndex: 3, NATAddr: 4, NATPort: 5, Proto: unix.IPPROTO_UDP}, tcNATPortValue{RuleID: 1, SessionID: 1}); err != nil {
 		t.Fatalf("nat.Put() error = %v", err)
 	}
 
