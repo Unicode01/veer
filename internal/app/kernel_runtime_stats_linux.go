@@ -1574,23 +1574,30 @@ func deleteStaleKernelFlow(_ *ebpf.Map, flowsMap, natPortsMap *ebpf.Map, stale s
 }
 
 func deleteKernelFlowSession(flowsMap, natPortsMap *ebpf.Map, stale staleKernelFlow, corrections map[uint32]kernelRuleStats, requireExactValue bool) int {
+	deleted, err := deleteKernelFlowSessionWithError(flowsMap, natPortsMap, stale, corrections, requireExactValue)
+	if err != nil {
+		log.Printf("kernel dataplane maintenance: delete stale flow session failed: proto=%d ifindex=%d src=%d dst=%d sport=%d dport=%d err=%v",
+			stale.key.Proto, stale.key.IfIndex, stale.key.SrcAddr, stale.key.DstAddr, stale.key.SrcPort, stale.key.DstPort, err)
+	}
+	return deleted
+}
+
+func deleteKernelFlowSessionWithError(flowsMap, natPortsMap *ebpf.Map, stale staleKernelFlow, corrections map[uint32]kernelRuleStats, requireExactValue bool) (int, error) {
 	current, ok, err := lookupKernelFlowValue(flowsMap, stale.key)
 	if err != nil {
-		log.Printf("kernel dataplane maintenance: revalidate stale flow failed: proto=%d ifindex=%d sport=%d dport=%d err=%v", stale.key.Proto, stale.key.IfIndex, stale.key.SrcPort, stale.key.DstPort, err)
-		return 0
+		return 0, fmt.Errorf("revalidate stale flow: %w", err)
 	}
 	if !ok || current.RuleID != stale.value.RuleID || current.RuleRevision != stale.value.RuleRevision || current.SessionID != stale.value.SessionID {
-		return 0
+		return 0, nil
 	}
 	if requireExactValue && current != stale.value {
-		return 0
+		return 0, nil
 	}
 	if err := flowsMap.Delete(stale.key); err != nil {
-		if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			log.Printf("kernel dataplane maintenance: delete stale flow failed: proto=%d ifindex=%d src=%d dst=%d sport=%d dport=%d err=%v",
-				stale.key.Proto, stale.key.IfIndex, stale.key.SrcAddr, stale.key.DstAddr, stale.key.SrcPort, stale.key.DstPort, err)
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, nil
 		}
-		return 0
+		return 0, fmt.Errorf("delete stale flow: %w", err)
 	}
 
 	deleted := 1
@@ -1607,9 +1614,10 @@ func deleteKernelFlowSession(flowsMap, natPortsMap *ebpf.Map, stale staleKernelF
 	}
 
 	if current.Flags&kernelFlowFlagFullNAT == 0 {
-		return deleted
+		return deleted, nil
 	}
 
+	var deleteErrs []error
 	if current.Flags&kernelFlowFlagFrontEntry == 0 {
 		frontKey := tcFlowKeyV4{
 			IfIndex: current.InIfIndex,
@@ -1623,11 +1631,14 @@ func deleteKernelFlowSession(flowsMap, natPortsMap *ebpf.Map, stale staleKernelF
 			frontKey.DstAddr = 0
 			frontKey.DstPort = 0
 		}
-		if pair, pairOK, pairErr := lookupKernelFlowValue(flowsMap, frontKey); pairErr == nil && pairOK && pair.SessionID == current.SessionID {
+		pair, pairOK, pairErr := lookupKernelFlowValue(flowsMap, frontKey)
+		if pairErr != nil {
+			deleteErrs = append(deleteErrs, fmt.Errorf("lookup stale front flow: %w", pairErr))
+		} else if pairOK && pair.SessionID == current.SessionID {
 			if err := flowsMap.Delete(frontKey); err == nil {
 				deleted++
 			} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
-				log.Printf("kernel dataplane maintenance: delete stale front flow failed: proto=%d ifindex=%d sport=%d dport=%d err=%v", frontKey.Proto, frontKey.IfIndex, frontKey.SrcPort, frontKey.DstPort, err)
+				deleteErrs = append(deleteErrs, fmt.Errorf("delete stale front flow: %w", err))
 			}
 		}
 		deleteStaleKernelNATReservation(natPortsMap, tcNATPortKeyV4{
@@ -1637,7 +1648,7 @@ func deleteKernelFlowSession(flowsMap, natPortsMap *ebpf.Map, stale staleKernelF
 			Proto:   stale.key.Proto,
 		}, current.SessionID)
 	}
-	return deleted
+	return deleted, errors.Join(deleteErrs...)
 }
 
 func deleteStaleKernelFlowV6(_ *ebpf.Map, flowsMap, natPortsMap *ebpf.Map, stale staleKernelFlowV6, corrections map[uint32]kernelRuleStats) int {
@@ -1645,27 +1656,35 @@ func deleteStaleKernelFlowV6(_ *ebpf.Map, flowsMap, natPortsMap *ebpf.Map, stale
 }
 
 func deleteKernelFlowSessionV6(flowsMap, natPortsMap *ebpf.Map, stale staleKernelFlowV6, corrections map[uint32]kernelRuleStats, requireExactValue bool) int {
+	deleted, err := deleteKernelFlowSessionV6WithError(flowsMap, natPortsMap, stale, corrections, requireExactValue)
+	if err != nil {
+		log.Printf("kernel dataplane maintenance: delete stale IPv6 flow session failed: proto=%d ifindex=%d sport=%d dport=%d err=%v", stale.key.Proto, stale.key.IfIndex, stale.key.SrcPort, stale.key.DstPort, err)
+	}
+	return deleted
+}
+
+func deleteKernelFlowSessionV6WithError(flowsMap, natPortsMap *ebpf.Map, stale staleKernelFlowV6, corrections map[uint32]kernelRuleStats, requireExactValue bool) (int, error) {
 	var current tcFlowValueV6
 	if flowsMap == nil {
-		return 0
+		return 0, nil
 	}
 	if err := flowsMap.Lookup(stale.key, &current); err != nil {
-		if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			log.Printf("kernel dataplane maintenance: revalidate stale IPv6 flow failed: proto=%d ifindex=%d sport=%d dport=%d err=%v", stale.key.Proto, stale.key.IfIndex, stale.key.SrcPort, stale.key.DstPort, err)
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, nil
 		}
-		return 0
+		return 0, fmt.Errorf("revalidate stale IPv6 flow: %w", err)
 	}
 	if current.RuleID != stale.value.RuleID || current.RuleRevision != stale.value.RuleRevision || current.SessionID != stale.value.SessionID {
-		return 0
+		return 0, nil
 	}
 	if requireExactValue && current != stale.value {
-		return 0
+		return 0, nil
 	}
 	if err := flowsMap.Delete(stale.key); err != nil {
-		if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			log.Printf("kernel dataplane maintenance: delete stale IPv6 flow failed: proto=%d ifindex=%d sport=%d dport=%d err=%v", stale.key.Proto, stale.key.IfIndex, stale.key.SrcPort, stale.key.DstPort, err)
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, nil
 		}
-		return 0
+		return 0, fmt.Errorf("delete stale IPv6 flow: %w", err)
 	}
 
 	deleted := 1
@@ -1682,9 +1701,10 @@ func deleteKernelFlowSessionV6(flowsMap, natPortsMap *ebpf.Map, stale staleKerne
 	}
 
 	if current.Flags&kernelFlowFlagFullNAT == 0 {
-		return deleted
+		return deleted, nil
 	}
 
+	var deleteErrs []error
 	if current.Flags&kernelFlowFlagFrontEntry == 0 {
 		frontKey := tcFlowKeyV6{
 			IfIndex: current.InIfIndex,
@@ -1699,11 +1719,15 @@ func deleteKernelFlowSessionV6(flowsMap, natPortsMap *ebpf.Map, stale staleKerne
 			frontKey.DstPort = 0
 		}
 		var pair tcFlowValueV6
-		if err := flowsMap.Lookup(frontKey, &pair); err == nil && pair.SessionID == current.SessionID {
+		if err := flowsMap.Lookup(frontKey, &pair); err != nil {
+			if !errors.Is(err, ebpf.ErrKeyNotExist) {
+				deleteErrs = append(deleteErrs, fmt.Errorf("lookup stale IPv6 front flow: %w", err))
+			}
+		} else if pair.SessionID == current.SessionID {
 			if err := flowsMap.Delete(frontKey); err == nil {
 				deleted++
 			} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
-				log.Printf("kernel dataplane maintenance: delete stale IPv6 front flow failed: proto=%d ifindex=%d sport=%d dport=%d err=%v", frontKey.Proto, frontKey.IfIndex, frontKey.SrcPort, frontKey.DstPort, err)
+				deleteErrs = append(deleteErrs, fmt.Errorf("delete stale IPv6 front flow: %w", err))
 			}
 		}
 		deleteStaleKernelNATReservationV6(natPortsMap, tcNATPortKeyV6{
@@ -1713,7 +1737,7 @@ func deleteKernelFlowSessionV6(flowsMap, natPortsMap *ebpf.Map, stale staleKerne
 			Proto:   stale.key.Proto,
 		}, current.SessionID)
 	}
-	return deleted
+	return deleted, errors.Join(deleteErrs...)
 }
 
 func lookupKernelFlowValue(flowsMap *ebpf.Map, key tcFlowKeyV4) (tcFlowValueV4, bool, error) {

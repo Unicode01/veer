@@ -53,11 +53,77 @@ func (rt *orderedKernelRuleRuntime) retainedKernelEgressNATCandidates(item Egres
 	return nil, false
 }
 
+func (rt *orderedKernelRuleRuntime) snapshotKernelCandidateRules() []Rule {
+	rt.mu.Lock()
+	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	rt.mu.Unlock()
+
+	var out []Rule
+	for _, entry := range entries {
+		snapshotter, ok := entry.rt.(kernelRuleIDSnapshotRuntime)
+		if !ok || snapshotter == nil {
+			continue
+		}
+		out = append(out, snapshotter.snapshotKernelCandidateRules()...)
+	}
+	return out
+}
+
+func (rt *linuxKernelRuleRuntime) snapshotKernelCandidateRules() []Rule {
+	rt.mu.Lock()
+	items := preparedKernelCandidateRules(rt.preparedRules)
+	rt.mu.Unlock()
+	if len(items) > 0 {
+		return items
+	}
+	if !kernelHotRestartStateExists(kernelEngineTC) {
+		return nil
+	}
+	return readKernelHotRestartCandidateRules(kernelEngineTC)
+}
+
+func (rt *xdpKernelRuleRuntime) snapshotKernelCandidateRules() []Rule {
+	rt.mu.Lock()
+	items := preparedXDPKernelCandidateRules(rt.preparedRules)
+	rt.mu.Unlock()
+	if len(items) > 0 {
+		return items
+	}
+	if !kernelHotRestartStateExists(kernelEngineXDP) {
+		return nil
+	}
+	return readKernelHotRestartCandidateRules(kernelEngineXDP)
+}
+
+func preparedKernelCandidateRules(items []preparedKernelRule) []Rule {
+	out := make([]Rule, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.rule)
+	}
+	return out
+}
+
+func preparedXDPKernelCandidateRules(items []preparedXDPKernelRule) []Rule {
+	out := make([]Rule, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.rule)
+	}
+	return out
+}
+
+func (rt *linuxKernelRuleRuntime) hotRestartMetadataWithRuleState(meta kernelHotRestartMetadata) kernelHotRestartMetadata {
+	return kernelHotRestartMetadataWithRuleState(meta, preparedKernelCandidateRules(rt.preparedRules), rt.flowPurgeRetry.snapshot())
+}
+
+func (rt *xdpKernelRuleRuntime) hotRestartMetadataWithRuleState(meta kernelHotRestartMetadata) kernelHotRestartMetadata {
+	return kernelHotRestartMetadataWithRuleState(meta, preparedXDPKernelCandidateRules(rt.preparedRules), rt.flowPurgeRetry.snapshot())
+}
+
 func (rt *linuxKernelRuleRuntime) retainedKernelRuleCandidates(rule Rule) ([]Rule, bool) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	items := collectPreparedKernelOwnerRules(rt.preparedRules, workerKindRule, rule.ID)
+	items := collectPreparedKernelRulesForOwner(rt.preparedRules, rule)
 	if !activeOwnerRulesMatchRule(items, rule) {
 		return nil, false
 	}
@@ -90,7 +156,7 @@ func (rt *xdpKernelRuleRuntime) retainedKernelRuleCandidates(rule Rule) ([]Rule,
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	items := collectPreparedXDPOwnerRules(rt.preparedRules, workerKindRule, rule.ID)
+	items := collectPreparedXDPRulesForOwner(rt.preparedRules, rule)
 	if !activeOwnerRulesMatchRule(items, rule) {
 		return nil, false
 	}
@@ -113,7 +179,7 @@ func (rt *xdpKernelRuleRuntime) retainedKernelEgressNATCandidates(item EgressNAT
 }
 
 func collectPreparedKernelOwnerRules(prepared []preparedKernelRule, kind string, ownerID int64) []Rule {
-	if len(prepared) == 0 || ownerID <= 0 {
+	if len(prepared) == 0 || ownerID == 0 {
 		return nil
 	}
 	out := make([]Rule, 0)
@@ -126,13 +192,41 @@ func collectPreparedKernelOwnerRules(prepared []preparedKernelRule, kind string,
 	return out
 }
 
+func collectPreparedKernelRulesForOwner(prepared []preparedKernelRule, rule Rule) []Rule {
+	if len(prepared) == 0 {
+		return nil
+	}
+	out := make([]Rule, 0)
+	for _, item := range prepared {
+		if kernelRuleLogKind(item.rule) != workerKindRule || !kernelRuleStableOwnerMatches(item.rule, rule) {
+			continue
+		}
+		out = append(out, item.rule)
+	}
+	return out
+}
+
 func collectPreparedXDPOwnerRules(prepared []preparedXDPKernelRule, kind string, ownerID int64) []Rule {
-	if len(prepared) == 0 || ownerID <= 0 {
+	if len(prepared) == 0 || ownerID == 0 {
 		return nil
 	}
 	out := make([]Rule, 0)
 	for _, item := range prepared {
 		if kernelRuleLogKind(item.rule) != kind || kernelRuleLogOwnerID(item.rule) != ownerID {
+			continue
+		}
+		out = append(out, item.rule)
+	}
+	return out
+}
+
+func collectPreparedXDPRulesForOwner(prepared []preparedXDPKernelRule, rule Rule) []Rule {
+	if len(prepared) == 0 {
+		return nil
+	}
+	out := make([]Rule, 0)
+	for _, item := range prepared {
+		if kernelRuleLogKind(item.rule) != workerKindRule || !kernelRuleStableOwnerMatches(item.rule, rule) {
 			continue
 		}
 		out = append(out, item.rule)

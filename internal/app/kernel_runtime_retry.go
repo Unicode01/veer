@@ -2,9 +2,12 @@
 
 package app
 
+import "strings"
+
 type kernelRuleMatchKey struct {
 	kind               string
 	ownerID            int64
+	ownerKey           string
 	inInterface        string
 	inIP               string
 	inPort             int
@@ -36,14 +39,20 @@ func sameKernelRuleDataplaneConfig(a, b Rule) bool {
 
 func sameKernelRuleOwnerDataplaneConfig(a, b Rule) bool {
 	return kernelRuleLogKind(a) == kernelRuleLogKind(b) &&
-		kernelRuleLogOwnerID(a) == kernelRuleLogOwnerID(b) &&
+		kernelRuleStableOwnerMatches(a, b) &&
 		sameKernelRuleDataplaneConfig(a, b)
 }
 
 func kernelRuleMatchKeyFor(rule Rule) kernelRuleMatchKey {
+	ownerID := kernelRuleLogOwnerID(rule)
+	ownerKey := strings.TrimSpace(rule.kernelOwnerKey)
+	if ownerKey != "" {
+		ownerID = 0
+	}
 	return kernelRuleMatchKey{
 		kind:               kernelRuleLogKind(rule),
-		ownerID:            kernelRuleLogOwnerID(rule),
+		ownerID:            ownerID,
+		ownerKey:           ownerKey,
 		inInterface:        rule.InInterface,
 		inIP:               rule.InIP,
 		inPort:             rule.InPort,

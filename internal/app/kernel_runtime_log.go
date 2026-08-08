@@ -239,7 +239,7 @@ func kernelRuleLogKind(rule Rule) string {
 }
 
 func kernelRuleLogOwnerID(rule Rule) int64 {
-	if rule.kernelLogOwnerID > 0 {
+	if rule.kernelLogOwnerID != 0 {
 		return rule.kernelLogOwnerID
 	}
 	return rule.ID

@@ -210,6 +210,7 @@ type xdpKernelRuleRuntime struct {
 	observability      kernelRuntimeObservabilityState
 	maintenanceState   kernelAdaptiveMaintenanceState
 	statsCorrection    map[uint32]kernelRuleStats
+	flowPurgeRetry     kernelFlowPurgeRetryState
 	flowPruneState     kernelFlowPruneState
 	oldFlowPruneState  kernelFlowPruneState
 	natPruneState      kernelNATPruneState
@@ -311,6 +312,9 @@ func (rt *xdpKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
 func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.coll == nil && kernelHotRestartStateExists(kernelEngineXDP) {
+		rt.flowPurgeRetry.add(readKernelHotRestartFlowPurgeTargets(kernelEngineXDP))
+	}
 
 	reconcileStartedAt := time.Now()
 	reconcileMetrics := kernelReconcileMetrics{RequestEntries: len(rules)}
@@ -925,18 +929,23 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		results[item.rule.ID] = kernelRuleApplyResult{Running: true, Engine: kernelEngineXDP}
 	}
 	flowPurgeTargets := collectPreparedXDPKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
+	rt.flowPurgeRetry.add(flowPurgeTargets)
+	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	purgeCorrections := map[uint32]kernelRuleStats{}
 	purgedFlows := 0
-	if len(flowPurgeTargets) > 0 {
+	if len(flowPurgeAttempt) > 0 {
 		flowPurgeStartedAt := time.Now()
-		purgeCorrections, purgedFlows, err = purgeKernelFlowsForTargets(kernelRuntimeMapRefsFromCollection(coll), flowPurgeTargets, true)
+		purgeCorrections, purgedFlows, err = rt.flowPurgeRetry.run(nil, func(targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
+			return purgeKernelFlowsForTargets(kernelRuntimeMapRefsFromCollection(coll), targets, true)
+		})
 		reconcileMetrics.FlowPurgeDuration = time.Since(flowPurgeStartedAt)
 		if err != nil {
-			log.Printf("xdp dataplane reconcile: purge stale xdp flow state after rebuild failed: %v", err)
-			purgeCorrections = map[uint32]kernelRuleStats{}
-			purgedFlows = 0
-		} else if syncErr := syncKernelOccupancyMapFromCollectionExact(coll, useNATMaps); syncErr != nil {
-			log.Printf("xdp dataplane reconcile: resync xdp occupancy counters after rebuild purge failed: %v", syncErr)
+			log.Printf("xdp dataplane reconcile: purge stale xdp flow state after rebuild incomplete; retry queued for %d target(s): %v", len(flowPurgeAttempt), err)
+		}
+		if purgedFlows > 0 || err != nil {
+			if syncErr := syncKernelOccupancyMapFromCollectionExact(coll, useNATMaps); syncErr != nil {
+				log.Printf("xdp dataplane reconcile: resync xdp occupancy counters after rebuild purge failed: %v", syncErr)
+			}
 		}
 	}
 	reconcileMetrics.AppliedEntries = len(prepared)
@@ -981,7 +990,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	}
 	if purgedFlows > 0 {
 		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
-		log.Printf("xdp dataplane reconcile: purged %d stale xdp flow entry(s) for %d changed rule revision(s)", purgedFlows, len(flowPurgeTargets))
+		log.Printf("xdp dataplane reconcile: purged %d stale xdp flow entry(s) for %d changed rule revision(s)", purgedFlows, len(flowPurgeAttempt))
 	}
 	if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
 		log.Printf("xdp dataplane runtime metadata: write xdp runtime metadata failed: %v", err)
@@ -1016,6 +1025,12 @@ func (rt *xdpKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error)
 func (rt *xdpKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
 	rt.mu.Lock()
+	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
+	if pendingFlowPurgeErr != nil {
+		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}, pendingFlowPurgeErr)
+		rt.mu.Unlock()
+		return pendingFlowPurgeErr
+	}
 	pressureActive := rt.pressureState.active
 	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
 	mapSnapshot, err := snapshotKernelRuntimeMaps(rt.coll, runFull, false)
@@ -1053,7 +1068,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	v4ActiveBudget, v4OldBudget := splitFamilyBudget(v4Budget, refs.flowsV4 != nil, refs.flowsOldV4 != nil)
 	v6ActiveBudget, v6OldBudget := splitFamilyBudget(v6Budget, refs.flowsV6 != nil, refs.flowsOldV6 != nil)
 	corrections := map[uint32]kernelRuleStats{}
-	pruneMetrics := kernelFlowPruneMetrics{}
+	pruneMetrics := kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}
 	var maintainErr error
 	fullSuccess := true
 	driftDetected := false
@@ -1248,7 +1263,7 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 	}
 	if err := writeKernelHotRestartMetadata(
 		kernelEngineXDP,
-		kernelHotRestartXDPMetadataForHotRestart(rt.attachments, objectHash, rt.prepareOptions.enableTrafficStats),
+		rt.hotRestartMetadataWithRuleState(kernelHotRestartXDPMetadataForHotRestart(rt.attachments, objectHash, rt.prepareOptions.enableTrafficStats)),
 	); err != nil {
 		clearKernelHotRestartState(kernelEngineXDP)
 		log.Printf("xdp dataplane hot restart: write xdp metadata failed, falling back to full cleanup: %v", err)
@@ -1269,6 +1284,7 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.lastReconcileMode = ""
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
+	rt.flowPurgeRetry.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -1297,6 +1313,7 @@ func (rt *xdpKernelRuleRuntime) cleanupLocked() {
 	rt.lastReconcileMode = ""
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
+	rt.flowPurgeRetry.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
