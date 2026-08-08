@@ -584,6 +584,7 @@ type linuxKernelRuleRuntime struct {
 	maintenanceState             kernelAdaptiveMaintenanceState
 	orphanNATPruneLog            kernelCountLogState
 	statsCorrection              map[uint32]kernelRuleStats
+	flowPurgeRetry               kernelFlowPurgeRetryState
 	flowPruneState               kernelFlowPruneState
 	oldFlowPruneState            kernelFlowPruneState
 	natPruneState                kernelNATPruneState
@@ -760,6 +761,9 @@ func (rt *linuxKernelRuleRuntime) ReconcileWithPluginCatalog(rules []Rule, catal
 func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, pluginCatalogOverride *PluginCatalog) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.coll == nil && kernelHotRestartStateExists(kernelEngineTC) {
+		rt.flowPurgeRetry.add(readKernelHotRestartFlowPurgeTargets(kernelEngineTC))
+	}
 
 	reconcileStartedAt := time.Now()
 	reconcileMetrics := kernelReconcileMetrics{RequestEntries: len(rules)}
@@ -1472,18 +1476,23 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	}
 
 	flowPurgeTargets := collectPreparedKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
+	rt.flowPurgeRetry.add(flowPurgeTargets)
+	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	purgeCorrections := map[uint32]kernelRuleStats{}
 	purgedFlows := 0
-	if len(flowPurgeTargets) > 0 {
+	if len(flowPurgeAttempt) > 0 {
 		flowPurgeStartedAt := time.Now()
-		purgeCorrections, purgedFlows, err = purgeKernelFlowsForTargets(kernelRuntimeMapRefsFromCollection(coll), flowPurgeTargets, false)
+		purgeCorrections, purgedFlows, err = rt.flowPurgeRetry.run(nil, func(targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
+			return purgeKernelFlowsForTargets(kernelRuntimeMapRefsFromCollection(coll), targets, false)
+		})
 		reconcileMetrics.FlowPurgeDuration = time.Since(flowPurgeStartedAt)
 		if err != nil {
-			log.Printf("kernel dataplane reconcile: purge stale tc flow state after rebuild failed: %v", err)
-			purgeCorrections = map[uint32]kernelRuleStats{}
-			purgedFlows = 0
-		} else if syncErr := syncKernelOccupancyMapFromCollectionExact(coll, true); syncErr != nil {
-			log.Printf("kernel dataplane reconcile: resync tc occupancy counters after rebuild purge failed: %v", syncErr)
+			log.Printf("kernel dataplane reconcile: purge stale tc flow state after rebuild incomplete; retry queued for %d target(s): %v", len(flowPurgeAttempt), err)
+		}
+		if purgedFlows > 0 || err != nil {
+			if syncErr := syncKernelOccupancyMapFromCollectionExact(coll, true); syncErr != nil {
+				log.Printf("kernel dataplane reconcile: resync tc occupancy counters after rebuild purge failed: %v", syncErr)
+			}
 		}
 	}
 	reconcileMetrics.AppliedEntries = len(prepared)
@@ -1527,7 +1536,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	}
 	if purgedFlows > 0 {
 		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
-		log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed rule revision(s)", purgedFlows, len(flowPurgeTargets))
+		log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed rule revision(s)", purgedFlows, len(flowPurgeAttempt))
 	}
 	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed: %v", err)
@@ -1562,6 +1571,12 @@ func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, erro
 func (rt *linuxKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
 	rt.mu.Lock()
+	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
+	if pendingFlowPurgeErr != nil {
+		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}, pendingFlowPurgeErr)
+		rt.mu.Unlock()
+		return pendingFlowPurgeErr
+	}
 	pressureActive := rt.pressureState.active
 	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
 	mapSnapshot, err := snapshotKernelRuntimeMaps(rt.coll, runFull, false)
@@ -1613,7 +1628,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	v4ActiveBudget, v4OldBudget := splitBankBudget(v4Budget, refs.flowsV4 != nil, refs.flowsOldV4 != nil)
 	v6ActiveBudget, v6OldBudget := splitBankBudget(v6Budget, refs.flowsV6 != nil, refs.flowsOldV6 != nil)
 	corrections := map[uint32]kernelRuleStats{}
-	pruneMetrics := kernelFlowPruneMetrics{}
+	pruneMetrics := kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}
 	var maintainErr error
 	fullSuccess := true
 	driftDetected := false
@@ -1928,7 +1943,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	}
 	if err := writeKernelHotRestartMetadata(
 		kernelEngineTC,
-		kernelHotRestartTCMetadataForHotRestart(rt.attachments, objectHash, rt.enableTrafficStats),
+		rt.hotRestartMetadataWithRuleState(kernelHotRestartTCMetadataForHotRestart(rt.attachments, objectHash, rt.enableTrafficStats)),
 	); err != nil {
 		clearKernelHotRestartState(kernelEngineTC)
 		log.Printf("kernel dataplane hot restart: write tc metadata failed, falling back to full cleanup: %v", err)
@@ -1950,6 +1965,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.lastReconcileMode = ""
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
+	rt.flowPurgeRetry.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -1979,6 +1995,7 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.lastReconcileMode = ""
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
+	rt.flowPurgeRetry.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -2450,6 +2467,7 @@ func purgeKernelFlowsForTargets(refs kernelRuntimeMapRefs, targets map[kernelFlo
 		return corrections, 0, nil
 	}
 	deleted := 0
+	var purgeErrs []error
 	for _, item := range []struct {
 		flows *ebpf.Map
 		nat   *ebpf.Map
@@ -2458,11 +2476,11 @@ func purgeKernelFlowsForTargets(refs kernelRuntimeMapRefs, targets map[kernelFlo
 		{refs.flowsOldV4, refs.natOldV4},
 	} {
 		itemCorrections, itemDeleted, err := purgeKernelFlowsForTargetsV4(item.flows, item.nat, targets, xdp)
-		if err != nil {
-			return nil, 0, err
-		}
 		mergeKernelStatsCorrections(corrections, itemCorrections)
 		deleted += itemDeleted
+		if err != nil {
+			purgeErrs = append(purgeErrs, err)
+		}
 	}
 	for _, item := range []struct {
 		flows *ebpf.Map
@@ -2472,13 +2490,13 @@ func purgeKernelFlowsForTargets(refs kernelRuntimeMapRefs, targets map[kernelFlo
 		{refs.flowsOldV6, refs.natOldV6},
 	} {
 		itemCorrections, itemDeleted, err := purgeKernelFlowsForTargetsV6(item.flows, item.nat, targets)
-		if err != nil {
-			return nil, 0, err
-		}
 		mergeKernelStatsCorrections(corrections, itemCorrections)
 		deleted += itemDeleted
+		if err != nil {
+			purgeErrs = append(purgeErrs, err)
+		}
 	}
-	return corrections, deleted, nil
+	return corrections, deleted, errors.Join(purgeErrs...)
 }
 
 func kernelFlowMatchesPurgeTargets(value tcFlowValueV4, targets map[kernelFlowPurgeTarget]struct{}) bool {
@@ -2518,10 +2536,15 @@ func purgeKernelFlowsForTargetsV4(flowsMap, natPortsMap *ebpf.Map, targets map[k
 		return nil, 0, fmt.Errorf("iterate kernel IPv4 flows map for targeted purge: %w", err)
 	}
 	deleted := 0
+	var deleteErrs []error
 	for _, item := range orderKernelFlowPurgeCandidates(stale) {
-		deleted += deleteKernelFlowSession(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionWithError(flowsMap, natPortsMap, item, corrections, false)
+		deleted += itemDeleted
+		if err != nil {
+			deleteErrs = append(deleteErrs, err)
+		}
 	}
-	return corrections, deleted, nil
+	return corrections, deleted, errors.Join(deleteErrs...)
 }
 
 func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
@@ -2542,19 +2565,28 @@ func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[k
 		return nil, 0, fmt.Errorf("iterate kernel IPv6 flows map for targeted purge: %w", err)
 	}
 	deleted := 0
+	var deleteErrs []error
 	for _, item := range stale {
 		if item.value.Flags&kernelFlowFlagFrontEntry != 0 {
 			continue
 		}
-		deleted += deleteKernelFlowSessionV6(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, natPortsMap, item, corrections, false)
+		deleted += itemDeleted
+		if err != nil {
+			deleteErrs = append(deleteErrs, err)
+		}
 	}
 	for _, item := range stale {
 		if item.value.Flags&kernelFlowFlagFrontEntry == 0 {
 			continue
 		}
-		deleted += deleteKernelFlowSessionV6(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, natPortsMap, item, corrections, false)
+		deleted += itemDeleted
+		if err != nil {
+			deleteErrs = append(deleteErrs, err)
+		}
 	}
-	return corrections, deleted, nil
+	return corrections, deleted, errors.Join(deleteErrs...)
 }
 
 func orderKernelFlowPurgeCandidates(stale []staleKernelFlow) []staleKernelFlow {
@@ -2875,18 +2907,25 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
+	rt.flowPurgeRetry.add(flowPurgeTargets)
+	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	flowPurgeDeleted := 0
 	flowPurgeDuration := time.Duration(0)
-	if len(flowPurgeTargets) > 0 {
+	if len(flowPurgeAttempt) > 0 {
 		flowPurgeStartedAt := time.Now()
-		corrections, deleted, purgeErr := purgeKernelFlowsForTargets(kernelRuntimeMapRefsFromCollection(rt.coll), flowPurgeTargets, false)
+		corrections, deleted, purgeErr := rt.flowPurgeRetry.run(nil, func(targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
+			return purgeKernelFlowsForTargets(kernelRuntimeMapRefsFromCollection(rt.coll), targets, false)
+		})
 		flowPurgeDuration = time.Since(flowPurgeStartedAt)
-		if purgeErr != nil {
-			log.Printf("kernel dataplane reconcile: purge stale tc flow state after in-place update failed: %v", purgeErr)
-		} else if deleted > 0 {
+		if deleted > 0 {
 			flowPurgeDeleted = deleted
 			mergeKernelStatsCorrections(rt.statsCorrection, corrections)
-			log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed rule revision(s)", deleted, len(flowPurgeTargets))
+			log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed rule revision(s)", deleted, len(flowPurgeAttempt))
+		}
+		if purgeErr != nil {
+			log.Printf("kernel dataplane reconcile: purge stale tc flow state after in-place update incomplete; retry queued for %d target(s): %v", len(flowPurgeAttempt), purgeErr)
+		}
+		if deleted > 0 || purgeErr != nil {
 			if syncErr := syncKernelOccupancyMapFromCollectionExact(rt.coll, true); syncErr != nil {
 				log.Printf("kernel dataplane reconcile: resync tc occupancy counters after in-place purge failed: %v", syncErr)
 			}

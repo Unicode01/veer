@@ -133,6 +133,7 @@ func pluginForwardRulePlanRecordToRule(record store.PluginRecord, existingRules 
 	}
 	normalized.ID = id
 	normalized.Enabled = true
+	normalized.kernelOwnerKey = pluginForwardRuleOwnerKey(pluginID, key)
 
 	ruleStates := projectExistingRuleStates(existingRules)
 	ruleStates = append(ruleStates, projectedRuleState{
@@ -146,6 +147,10 @@ func pluginForwardRulePlanRecordToRule(record store.PluginRecord, existingRules 
 		return Rule{}, fmt.Sprintf("%s: skip forward rule plan: %s", scope, summarizeRuleIssues(issues))
 	}
 	return normalized, ""
+}
+
+func pluginForwardRuleOwnerKey(pluginID, key string) string {
+	return "plugin_forward_rule:" + strings.TrimSpace(pluginID) + "\x00" + strings.TrimSpace(key)
 }
 
 func allocatePluginForwardSyntheticRuleID(nextID *int64, usedIDs map[int64]struct{}) (int64, error) {

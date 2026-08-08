@@ -46,6 +46,9 @@ func TestPluginForwardRulePlanCompilesActivePluginRecord(t *testing.T) {
 	if rule.InIP != "0.0.0.0" || rule.InPort != 18080 || rule.OutIP != "198.51.100.10" || rule.OutPort != 80 || rule.Protocol != "tcp+udp" || rule.EnginePreference != ruleEngineKernel || !rule.Enabled {
 		t.Fatalf("rule = %+v, want normalized plugin plan", rule)
 	}
+	if got, want := rule.kernelOwnerKey, pluginForwardRuleOwnerKey("forward_orchestrator", "web"); got != want {
+		t.Fatalf("kernel owner key = %q, want %q", got, want)
+	}
 }
 
 func TestPluginForwardRulePlanRequiresActivePluginAndNoConflict(t *testing.T) {

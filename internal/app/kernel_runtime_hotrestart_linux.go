@@ -83,15 +83,41 @@ type kernelHotRestartMapDescriptor struct {
 }
 
 type kernelHotRestartMetadata struct {
-	FormatVersion   int                             `json:"format_version,omitempty"`
-	Engine          string                          `json:"engine"`
-	ObjectHash      string                          `json:"object_hash,omitempty"`
-	CompatMode      string                          `json:"compat_mode,omitempty"`
-	CompatToken     string                          `json:"compat_token,omitempty"`
-	OwnerPID        int                             `json:"owner_pid,omitempty"`
-	OwnerStartTicks uint64                          `json:"owner_start_ticks,omitempty"`
-	TCAttachments   []kernelHotRestartTCAttachment  `json:"tc_attachments,omitempty"`
-	XDPAttachments  []kernelHotRestartXDPAttachment `json:"xdp_attachments,omitempty"`
+	FormatVersion     int                                   `json:"format_version,omitempty"`
+	Engine            string                                `json:"engine"`
+	ObjectHash        string                                `json:"object_hash,omitempty"`
+	CompatMode        string                                `json:"compat_mode,omitempty"`
+	CompatToken       string                                `json:"compat_token,omitempty"`
+	OwnerPID          int                                   `json:"owner_pid,omitempty"`
+	OwnerStartTicks   uint64                                `json:"owner_start_ticks,omitempty"`
+	TCAttachments     []kernelHotRestartTCAttachment        `json:"tc_attachments,omitempty"`
+	XDPAttachments    []kernelHotRestartXDPAttachment       `json:"xdp_attachments,omitempty"`
+	CandidateRules    []kernelHotRestartCandidateRule       `json:"candidate_rules,omitempty"`
+	PendingFlowPurges []kernelHotRestartFlowPurgeDescriptor `json:"pending_flow_purges,omitempty"`
+}
+
+type kernelHotRestartCandidateRule struct {
+	RuleID             uint32 `json:"rule_id"`
+	OwnerKind          string `json:"owner_kind"`
+	OwnerID            int64  `json:"owner_id"`
+	OwnerKey           string `json:"owner_key,omitempty"`
+	InInterface        string `json:"in_interface,omitempty"`
+	InIP               string `json:"in_ip,omitempty"`
+	InPort             int    `json:"in_port,omitempty"`
+	OutInterface       string `json:"out_interface,omitempty"`
+	OutIP              string `json:"out_ip,omitempty"`
+	OutSourceIP        string `json:"out_source_ip,omitempty"`
+	OutPort            int    `json:"out_port,omitempty"`
+	Protocol           string `json:"protocol"`
+	Transparent        bool   `json:"transparent,omitempty"`
+	KernelMode         string `json:"kernel_mode,omitempty"`
+	KernelNATType      string `json:"kernel_nat_type,omitempty"`
+	KernelRedirectMode string `json:"kernel_redirect_mode,omitempty"`
+}
+
+type kernelHotRestartFlowPurgeDescriptor struct {
+	RuleID       uint32 `json:"rule_id"`
+	RuleRevision uint64 `json:"rule_revision,omitempty"`
 }
 
 type kernelHotRestartValidationOptions struct {
@@ -216,6 +242,115 @@ func kernelHotRestartTCMetadataForHotRestart(attachments []kernelAttachment, obj
 func kernelHotRestartXDPMetadataForHotRestart(attachments []xdpAttachment, objectHash string, enableTrafficStats bool) kernelHotRestartMetadata {
 	meta := kernelHotRestartXDPMetadata(attachments, objectHash)
 	return kernelHotRestartMetadataWithABI(meta, kernelXDPHotRestartCompatToken(enableTrafficStats))
+}
+
+func kernelHotRestartMetadataWithRuleState(meta kernelHotRestartMetadata, rules []Rule, pending map[kernelFlowPurgeTarget]struct{}) kernelHotRestartMetadata {
+	byID := make(map[uint32]kernelHotRestartCandidateRule, len(rules))
+	for _, rule := range rules {
+		if !validKernelDataplaneRuleID(rule.ID) {
+			continue
+		}
+		id := uint32(rule.ID)
+		if _, exists := byID[id]; exists {
+			continue
+		}
+		byID[id] = kernelHotRestartCandidateRule{
+			RuleID:             id,
+			OwnerKind:          kernelRuleLogKind(rule),
+			OwnerID:            kernelRuleLogOwnerID(rule),
+			OwnerKey:           strings.TrimSpace(rule.kernelOwnerKey),
+			InInterface:        rule.InInterface,
+			InIP:               rule.InIP,
+			InPort:             rule.InPort,
+			OutInterface:       rule.OutInterface,
+			OutIP:              rule.OutIP,
+			OutSourceIP:        rule.OutSourceIP,
+			OutPort:            rule.OutPort,
+			Protocol:           rule.Protocol,
+			Transparent:        rule.Transparent,
+			KernelMode:         rule.kernelMode,
+			KernelNATType:      rule.kernelNATType,
+			KernelRedirectMode: rule.kernelRedirectMode,
+		}
+	}
+	ids := make([]uint32, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	meta.CandidateRules = make([]kernelHotRestartCandidateRule, 0, len(ids))
+	for _, id := range ids {
+		meta.CandidateRules = append(meta.CandidateRules, byID[id])
+	}
+
+	meta.PendingFlowPurges = make([]kernelHotRestartFlowPurgeDescriptor, 0, len(pending))
+	for target := range pending {
+		if target.RuleID == 0 {
+			continue
+		}
+		meta.PendingFlowPurges = append(meta.PendingFlowPurges, kernelHotRestartFlowPurgeDescriptor(target))
+	}
+	sort.Slice(meta.PendingFlowPurges, func(i, j int) bool {
+		if meta.PendingFlowPurges[i].RuleID != meta.PendingFlowPurges[j].RuleID {
+			return meta.PendingFlowPurges[i].RuleID < meta.PendingFlowPurges[j].RuleID
+		}
+		return meta.PendingFlowPurges[i].RuleRevision < meta.PendingFlowPurges[j].RuleRevision
+	})
+	return meta
+}
+
+func kernelCandidateRulesFromHotRestartMetadata(meta kernelHotRestartMetadata) []Rule {
+	if len(meta.CandidateRules) == 0 {
+		return nil
+	}
+	out := make([]Rule, 0, len(meta.CandidateRules))
+	seen := make(map[uint32]struct{}, len(meta.CandidateRules))
+	for _, item := range meta.CandidateRules {
+		if item.RuleID == 0 || strings.TrimSpace(item.OwnerKind) == "" || strings.TrimSpace(item.Protocol) == "" {
+			continue
+		}
+		if _, exists := seen[item.RuleID]; exists {
+			continue
+		}
+		seen[item.RuleID] = struct{}{}
+		out = append(out, Rule{
+			ID:                 int64(item.RuleID),
+			InInterface:        item.InInterface,
+			InIP:               item.InIP,
+			InPort:             item.InPort,
+			OutInterface:       item.OutInterface,
+			OutIP:              item.OutIP,
+			OutSourceIP:        item.OutSourceIP,
+			OutPort:            item.OutPort,
+			Protocol:           item.Protocol,
+			Enabled:            true,
+			Transparent:        item.Transparent,
+			kernelLogKind:      strings.TrimSpace(item.OwnerKind),
+			kernelLogOwnerID:   item.OwnerID,
+			kernelOwnerKey:     strings.TrimSpace(item.OwnerKey),
+			kernelMode:         item.KernelMode,
+			kernelNATType:      item.KernelNATType,
+			kernelRedirectMode: item.KernelRedirectMode,
+		})
+	}
+	return out
+}
+
+func kernelFlowPurgeTargetsFromHotRestartMetadata(meta kernelHotRestartMetadata) map[kernelFlowPurgeTarget]struct{} {
+	if len(meta.PendingFlowPurges) == 0 {
+		return nil
+	}
+	out := make(map[kernelFlowPurgeTarget]struct{}, len(meta.PendingFlowPurges))
+	for _, item := range meta.PendingFlowPurges {
+		if item.RuleID == 0 {
+			continue
+		}
+		out[kernelFlowPurgeTarget(item)] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func kernelHotRestartMarkerPath() string {
@@ -470,6 +605,22 @@ func readKernelHotRestartMetadata(engine string) (kernelHotRestartMetadata, erro
 		return kernelHotRestartMetadata{}, err
 	}
 	return meta, nil
+}
+
+func readKernelHotRestartCandidateRules(engine string) []Rule {
+	meta, err := readKernelHotRestartMetadata(engine)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(meta.Engine), strings.TrimSpace(engine)) {
+		return nil
+	}
+	return kernelCandidateRulesFromHotRestartMetadata(meta)
+}
+
+func readKernelHotRestartFlowPurgeTargets(engine string) map[kernelFlowPurgeTarget]struct{} {
+	meta, err := readKernelHotRestartMetadata(engine)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(meta.Engine), strings.TrimSpace(engine)) {
+		return nil
+	}
+	return kernelFlowPurgeTargetsFromHotRestartMetadata(meta)
 }
 
 func readKernelRuntimeMetadata(engine string) (kernelHotRestartMetadata, error) {

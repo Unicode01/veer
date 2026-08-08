@@ -48,6 +48,10 @@ type kernelHandoffRetentionRuntime interface {
 	retainedKernelEgressNATCandidates(item EgressNAT) ([]Rule, bool)
 }
 
+type kernelRuleIDSnapshotRuntime interface {
+	snapshotKernelCandidateRules() []Rule
+}
+
 type kernelRetainedAssignmentRuntime interface {
 	ReconcileRetainingAssignments(retainedByEngine map[string][]Rule, newRules []Rule) (map[int64]kernelRuleApplyResult, error)
 }

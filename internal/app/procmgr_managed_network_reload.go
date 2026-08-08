@@ -1064,6 +1064,9 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 		&nextSyntheticID,
 		snapshot,
 	)
+	if err := stabilizeKernelCandidateRuleIDs(autoCandidates, snapshotKernelCandidateRules(pm.kernelRuntime)); err != nil {
+		return fmt.Errorf("stabilize managed network egress nat kernel rule ids: %w", err)
+	}
 	autoCandidateOwners := ownerSetFromKernelCandidates(autoCandidates)
 	desiredByOwner := mergeKernelCandidateGroups(retainedDesiredByOwner, groupKernelCandidatesByOwner(autoCandidates))
 	egressNATPlans := mergeManagedNetworkReloadEgressNATPlans(currentEgressNATPlans, autoPlans)

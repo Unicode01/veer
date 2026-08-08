@@ -25,6 +25,7 @@ type Rule struct {
 
 	kernelLogKind      string
 	kernelLogOwnerID   int64
+	kernelOwnerKey     string
 	kernelMode         string
 	kernelNATType      string
 	kernelRedirectMode string

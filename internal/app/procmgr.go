@@ -1029,6 +1029,10 @@ func (pm *ProcessManager) redistributeWorkers() {
 	allKernelCandidates := make([]kernelCandidateRule, 0, len(candidates)+len(egressNATCandidates))
 	allKernelCandidates = append(allKernelCandidates, candidates...)
 	allKernelCandidates = append(allKernelCandidates, egressNATCandidates...)
+	if err := stabilizeKernelCandidateRuleIDs(allKernelCandidates, snapshotKernelCandidateRules(pm.kernelRuntime)); err != nil {
+		log.Printf("kernel dataplane planner: stabilize candidate rule ids: %v", err)
+		return
+	}
 	activeKernelCandidateBuf := make([]kernelCandidateRule, 0, len(allKernelCandidates))
 	activeKernelCandidates := filterActiveKernelCandidatesInto(activeKernelCandidateBuf, allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 	activeKernelCandidateBuf = activeKernelCandidates[:0]
@@ -1672,7 +1676,7 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 	maxRuleID := int64(0)
 	ruleCandidateCapacity := 0
 	for _, rule := range rules {
-		if rule.ID > maxRuleID {
+		if validKernelDataplaneRuleID(rule.ID) && rule.ID > maxRuleID {
 			maxRuleID = rule.ID
 		}
 		if !rule.Enabled {
@@ -1702,7 +1706,7 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 		for idx, proto := range variants {
 			item := rule
 			item.Protocol = proto
-			if idx > 0 {
+			if idx > 0 || !validKernelDataplaneRuleID(item.ID) {
 				id, err := allocateSyntheticKernelRuleID(&nextSyntheticID)
 				if err != nil {
 					acc.Add(ruleDataplanePlan{

@@ -590,6 +590,11 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	allKernelCandidates := make([]kernelCandidateRule, 0, len(candidates)+len(egressNATCandidates))
 	allKernelCandidates = append(allKernelCandidates, candidates...)
 	allKernelCandidates = append(allKernelCandidates, egressNATCandidates...)
+	if err := stabilizeKernelCandidateRuleIDs(allKernelCandidates, snapshotKernelCandidateRules(pm.kernelRuntime)); err != nil {
+		result.handled = false
+		result.detail = fmt.Sprintf("stabilize kernel candidate rule ids: %v", err)
+		return result
+	}
 	activeCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 	matchedActiveLinkCandidates := filterLinkTriggeredActiveKernelCandidates(
 		trigger,
@@ -1519,7 +1524,7 @@ func retainedKernelCandidatesMatchDesired(retained []Rule, desired []kernelCandi
 	matchedDesired := make([]bool, len(desiredRules))
 
 	for _, item := range retained {
-		if item.kernelLogKind != owner.kind || item.kernelLogOwnerID != owner.id {
+		if kernelRuleLogKind(item) != owner.kind {
 			return false
 		}
 		matched := false
@@ -1527,7 +1532,7 @@ func retainedKernelCandidatesMatchDesired(retained []Rule, desired []kernelCandi
 			if matchedDesired[idx] {
 				continue
 			}
-			if !sameRetainedKernelRuleDataplaneIgnoringID(item, want) {
+			if !kernelRuleStableOwnerMatches(item, want) || !sameRetainedKernelRuleDataplaneIgnoringID(item, want) {
 				continue
 			}
 			matchedDesired[idx] = true
@@ -1554,8 +1559,7 @@ func sameRetainedKernelRuleDataplaneIgnoringID(a Rule, b Rule) bool {
 		a.kernelMode == b.kernelMode &&
 		a.kernelNATType == b.kernelNATType &&
 		a.kernelRedirectMode == b.kernelRedirectMode &&
-		a.kernelLogKind == b.kernelLogKind &&
-		a.kernelLogOwnerID == b.kernelLogOwnerID
+		kernelRuleLogKind(a) == kernelRuleLogKind(b)
 }
 
 func reconcileIncrementalKernelRetry(runtime kernelRuleRuntime, retainedByEngine map[string][]Rule, retryCandidates []kernelCandidateRule, pluginCatalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
