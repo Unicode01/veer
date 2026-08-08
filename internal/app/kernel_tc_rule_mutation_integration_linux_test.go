@@ -19,6 +19,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cilium/ebpf"
+	"github.com/vishvananda/netlink"
 )
 
 // Linux usage:
@@ -248,6 +251,152 @@ func TestTCKernelRuleMutationHotRestartKeepsEstablishedTCPConnection(t *testing.
 	}
 }
 
+func TestTCKernelRuleMutationHotRestartKeepsEstablishedTCPConnectionAcrossBridgePathPromotion(t *testing.T) {
+	baseBinary := requireTCRuleMutationIntegrationBinary(t)
+	if _, err := exec.LookPath("bridge"); err != nil {
+		t.Skip("bridge command is required")
+	}
+
+	harness := startTCRuleMutationHarness(t, baseBinary, "hot-restart-bridge-promotion")
+	bridgeName, backendMAC := setupTCRuleMutationBackendBridge(t, harness.Topology)
+	t.Cleanup(func() {
+		stopForwardProcessTree(t, harness.Cmd)
+	})
+	rule := createTCRuleMutationRule(t, harness.APIBase, harness.Topology, Rule{
+		InInterface:      harness.Topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     bridgeName,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Remark:           "tc-rule-mutation-hot-restart-bridge-promotion",
+		Tag:              "tc-rule-mutation",
+		Transparent:      true,
+		EnginePreference: ruleEngineKernel,
+	})
+
+	assertTCRuleMutationBridgePath(t, bridgeName, harness.Topology.BackendHostIF, rule.Rule, false)
+	if !hasTCRuleMutationReplyFilter(t, bridgeName) {
+		t.Fatalf("bridge %q has no fallback reply attachment before hot restart", bridgeName)
+	}
+
+	client := startTCRuleMutationSteadyClientWithDuration(
+		t,
+		harness.Topology.ClientNS,
+		net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort)),
+		2*tcRuleMutationRestartSteadyDuration,
+	)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+
+	if err := os.WriteFile(harness.HotRestartMarkerPath, []byte("1"), 0o644); err != nil {
+		stopTCRuleMutationSteadyClient(t, client)
+		t.Fatalf("write hot restart marker: %v", err)
+	}
+
+	restartTCRuleMutationForwardAfterStop(t, &harness, func() {
+		mustRunDataplanePerfCmd(t, "bridge", "link", "set", "dev", harness.Topology.BackendHostIF, "learning", "on")
+		mustRunDataplanePerfCmd(t, "bridge", "fdb", "replace", backendMAC, "dev", harness.Topology.BackendHostIF, "master", "static")
+	})
+	waitForTCRuleMutationRuleRunning(t, harness.APIBase, rule.ID)
+	assertTCRuleMutationBridgePath(t, bridgeName, harness.Topology.BackendHostIF, rule.Rule, true)
+	if hasTCRuleMutationReplyFilter(t, bridgeName) {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("bridge %q retained the predecessor reply attachment after fast-path handoff", bridgeName)
+	}
+
+	stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+	if err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("steady client failed across bridge path promotion: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))); err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("post-restart probe failed: %v", err)
+	}
+}
+
+func TestTCKernelRuleMutationHotRestartKeepsEstablishedTCPConnectionAcrossBridgePathFallback(t *testing.T) {
+	baseBinary := requireTCRuleMutationIntegrationBinary(t)
+	if _, err := exec.LookPath("bridge"); err != nil {
+		t.Skip("bridge command is required")
+	}
+
+	harness := startTCRuleMutationHarness(t, baseBinary, "hot-restart-bridge-fallback")
+	bridgeName, backendMAC := setupTCRuleMutationBackendBridge(t, harness.Topology)
+	t.Cleanup(func() {
+		stopForwardProcessTree(t, harness.Cmd)
+	})
+	mustRunDataplanePerfCmd(t, "bridge", "link", "set", "dev", harness.Topology.BackendHostIF, "learning", "on")
+	mustRunDataplanePerfCmd(t, "bridge", "fdb", "replace", backendMAC, "dev", harness.Topology.BackendHostIF, "master", "static")
+	rule := createTCRuleMutationRule(t, harness.APIBase, harness.Topology, Rule{
+		InInterface:      harness.Topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     bridgeName,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Remark:           "tc-rule-mutation-hot-restart-bridge-fallback",
+		Tag:              "tc-rule-mutation",
+		Transparent:      true,
+		EnginePreference: ruleEngineKernel,
+	})
+
+	assertTCRuleMutationBridgePath(t, bridgeName, harness.Topology.BackendHostIF, rule.Rule, true)
+	if !hasTCRuleMutationReplyFilter(t, harness.Topology.BackendHostIF) {
+		t.Fatalf("bridge member %q has no direct reply attachment before hot restart", harness.Topology.BackendHostIF)
+	}
+
+	client := startTCRuleMutationSteadyClientWithDuration(
+		t,
+		harness.Topology.ClientNS,
+		net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort)),
+		2*tcRuleMutationRestartSteadyDuration,
+	)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+
+	if err := os.WriteFile(harness.HotRestartMarkerPath, []byte("1"), 0o644); err != nil {
+		stopTCRuleMutationSteadyClient(t, client)
+		t.Fatalf("write hot restart marker: %v", err)
+	}
+
+	restartTCRuleMutationForwardAfterStop(t, &harness, func() {
+		rewriteTCRuleMutationFlowAsLegacyMemberKey(t, harness.BPFStateRoot, rule.ID, bridgeName, harness.Topology.BackendHostIF)
+		mustRunDataplanePerfCmd(t, "bridge", "link", "set", "dev", harness.Topology.BackendHostIF, "learning", "off")
+		runDataplanePerfCmd("bridge", "fdb", "del", backendMAC, "dev", harness.Topology.BackendHostIF, "master")
+	})
+	waitForTCRuleMutationRuleRunning(t, harness.APIBase, rule.ID)
+	assertTCRuleMutationBridgePath(t, bridgeName, harness.Topology.BackendHostIF, rule.Rule, false)
+	if !hasTCRuleMutationReplyFilter(t, bridgeName) {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("bridge %q has no fallback reply attachment after hot restart", bridgeName)
+	}
+	if !hasTCRuleMutationReplyFilter(t, harness.Topology.BackendHostIF) {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("bridge member %q has no reply attachment for predecessor flow keys after fallback", harness.Topology.BackendHostIF)
+	}
+
+	stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+	if err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("steady client failed across bridge path fallback: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))); err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("post-restart probe failed: %v", err)
+	}
+}
+
 func TestTCKernelRuleMutationHotRestartKeepsEstablishedFullNATTCPConnection(t *testing.T) {
 	baseBinary := requireTCRuleMutationIntegrationBinary(t)
 
@@ -466,6 +615,131 @@ func startTCRuleMutationHarness(t *testing.T, baseBinary string, name string) tc
 		HotRestartMarkerPath: hotRestartMarkerPath,
 		BPFStateRoot:         bpfStateRoot,
 		RuntimeStateRoot:     runtimeStateRoot,
+	}
+}
+
+func setupTCRuleMutationBackendBridge(t *testing.T, topology dataplanePerfTopology) (string, string) {
+	t.Helper()
+
+	bridgeName := truncateIfName("fwbr" + strconv.Itoa(os.Getpid()%100000))
+	backendMAC := mustReadDataplanePerfNetnsMAC(t, topology.BackendNS, topology.BackendNSIF)
+	runDataplanePerfCmd("ip", "link", "del", bridgeName)
+	t.Cleanup(func() {
+		runDataplanePerfCmd("ip", "link", "set", topology.BackendHostIF, "nomaster")
+		runDataplanePerfCmd("ip", "link", "del", bridgeName)
+	})
+
+	mustRunDataplanePerfCmd(t, "ip", "link", "add", bridgeName, "type", "bridge")
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", bridgeName, "up")
+	mustRunDataplanePerfCmd(t, "ip", "addr", "del", dataplanePerfBackendHost+"/24", "dev", topology.BackendHostIF)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.BackendHostIF, "master", bridgeName)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.BackendHostIF, "up")
+	mustRunDataplanePerfCmd(t, "ip", "addr", "add", dataplanePerfBackendHost+"/24", "dev", bridgeName)
+	mustRunDataplanePerfCmd(t, "ip", "route", "replace", dataplanePerfBackendAddr+"/32", "dev", bridgeName, "src", dataplanePerfBackendHost)
+	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", dataplanePerfBackendAddr, "lladdr", backendMAC, "dev", bridgeName, "nud", "permanent")
+	mustRunDataplanePerfCmd(t, "bridge", "link", "set", "dev", topology.BackendHostIF, "learning", "off")
+	runDataplanePerfCmd("bridge", "fdb", "del", backendMAC, "dev", topology.BackendHostIF, "master")
+
+	return bridgeName, backendMAC
+}
+
+func assertTCRuleMutationBridgePath(t *testing.T, bridgeName string, memberName string, rule Rule, direct bool) {
+	t.Helper()
+
+	bridgeLink, err := netlink.LinkByName(bridgeName)
+	if err != nil {
+		t.Fatalf("resolve bridge %q: %v", bridgeName, err)
+	}
+	memberLink, err := netlink.LinkByName(memberName)
+	if err != nil {
+		t.Fatalf("resolve bridge member %q: %v", memberName, err)
+	}
+	path, err := resolveTCOutboundPath(bridgeLink, rule)
+	if err != nil {
+		t.Fatalf("resolve tc bridge path: %v", err)
+	}
+	wantIfindex := bridgeLink.Attrs().Index
+	wantBridgeL2 := false
+	if direct {
+		wantIfindex = memberLink.Attrs().Index
+		wantBridgeL2 = true
+	}
+	gotBridgeL2 := path.flags&kernelRuleFlagBridgeL2 != 0
+	if path.outIfIndex != wantIfindex || gotBridgeL2 != wantBridgeL2 {
+		t.Fatalf("bridge path = ifindex:%d flags:%#x, want ifindex:%d bridge_l2:%t", path.outIfIndex, path.flags, wantIfindex, wantBridgeL2)
+	}
+}
+
+func hasTCRuleMutationReplyFilter(t *testing.T, ifname string) bool {
+	t.Helper()
+
+	link, err := netlink.LinkByName(ifname)
+	if err != nil {
+		t.Fatalf("resolve interface %q: %v", ifname, err)
+	}
+	filters, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
+	if err != nil {
+		t.Fatalf("list ingress filters on %q: %v", ifname, err)
+	}
+	wantHandle := netlink.MakeHandle(0, kernelReplyFilterHandle)
+	for _, filter := range filters {
+		attrs := filter.Attrs()
+		if attrs != nil && attrs.Priority == kernelReplyFilterPrio && attrs.Handle == wantHandle {
+			return true
+		}
+	}
+	return false
+}
+
+func rewriteTCRuleMutationFlowAsLegacyMemberKey(t *testing.T, bpfStateRoot string, ruleID int64, bridgeName string, memberName string) {
+	t.Helper()
+
+	bridgeLink, err := netlink.LinkByName(bridgeName)
+	if err != nil {
+		t.Fatalf("resolve bridge %q for legacy flow key: %v", bridgeName, err)
+	}
+	memberLink, err := netlink.LinkByName(memberName)
+	if err != nil {
+		t.Fatalf("resolve bridge member %q for legacy flow key: %v", memberName, err)
+	}
+	mapPath := filepath.Join(bpfStateRoot, "hot-restart", strings.ToLower(kernelEngineTC), kernelFlowsMapName)
+	flows, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		t.Fatalf("open pinned tc flow map %q: %v", mapPath, err)
+	}
+	defer flows.Close()
+
+	var sourceKey tcFlowKeyV4
+	var sourceValue tcFlowValueV4
+	found := false
+	iter := flows.Iterate()
+	var key tcFlowKeyV4
+	var value tcFlowValueV4
+	for iter.Next(&key, &value) {
+		if value.RuleID != uint32(ruleID) || key.IfIndex != uint32(bridgeLink.Attrs().Index) {
+			continue
+		}
+		if found {
+			t.Fatalf("found multiple canonical flow keys for rule %d", ruleID)
+		}
+		sourceKey = key
+		sourceValue = value
+		found = true
+	}
+	if err := iter.Err(); err != nil {
+		t.Fatalf("iterate pinned tc flow map for rule %d: %v", ruleID, err)
+	}
+	if !found {
+		t.Fatalf("canonical bridge flow key for rule %d was not found", ruleID)
+	}
+
+	legacyKey := sourceKey
+	legacyKey.IfIndex = uint32(memberLink.Attrs().Index)
+	if err := flows.Update(&legacyKey, &sourceValue, ebpf.UpdateNoExist); err != nil {
+		t.Fatalf("create legacy member flow key for rule %d: %v", ruleID, err)
+	}
+	if err := flows.Delete(&sourceKey); err != nil {
+		t.Fatalf("delete canonical bridge flow key for rule %d: %v", ruleID, err)
 	}
 }
 
@@ -727,6 +1001,10 @@ func startTCRuleMutationSteadyClientWithDuration(t *testing.T, clientNS string, 
 }
 
 func restartTCRuleMutationForward(t *testing.T, harness *tcRuleMutationHarness) {
+	restartTCRuleMutationForwardAfterStop(t, harness, nil)
+}
+
+func restartTCRuleMutationForwardAfterStop(t *testing.T, harness *tcRuleMutationHarness, afterStop func()) {
 	t.Helper()
 
 	if harness == nil {
@@ -734,6 +1012,9 @@ func restartTCRuleMutationForward(t *testing.T, harness *tcRuleMutationHarness) 
 	}
 
 	stopForwardProcessTree(t, harness.Cmd)
+	if afterStop != nil {
+		afterStop()
+	}
 	if delayMs := envInt("FORWARD_HOT_RESTART_DELAY_MS", 0); delayMs > 0 {
 		time.Sleep(time.Duration(delayMs) * time.Millisecond)
 	}

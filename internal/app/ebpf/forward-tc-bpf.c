@@ -548,6 +548,15 @@ static __always_inline int flow_matches_rule_v6(const struct flow_value_v6 *flow
 {
 	return flow && rule && flow->rule_id == rule->rule_id && flow->rule_revision == rule->revision;
 }
+
+static __always_inline int transparent_flow_matches_rule_v4(const struct flow_value_v4 *flow, const struct rule_value_v4 *rule, const struct packet_ctx *ctx, const struct __sk_buff *skb)
+{
+	return flow && rule && ctx && skb &&
+		flow->rule_id == rule->rule_id &&
+		flow->front_addr == bpf_ntohl(ctx->dst_addr) &&
+		flow->front_port == ctx->dst_port &&
+		flow->in_ifindex == skb->ifindex;
+}
 #if FORWARD_NAT_PORT_PROBE_ROUNDS > 3
 #error FORWARD_NAT_PORT_PROBE_ROUNDS above 3 requires extending reserve_nat_port()
 #endif
@@ -2615,12 +2624,6 @@ static __always_inline struct flow_value_v4 *lookup_reply_flow_v4_in_bank(__u8 b
 	if (!key)
 		return 0;
 	lookup_key = *key;
-	flow = lookup_flow_v4_in_bank(bank, &lookup_key);
-	if (flow) {
-		*key = lookup_key;
-		return flow;
-	}
-
 	parent_ifindex = resolve_parent_ifindex(lookup_key.ifindex);
 	if (parent_ifindex != lookup_key.ifindex) {
 		lookup_key.ifindex = parent_ifindex;
@@ -2631,6 +2634,14 @@ static __always_inline struct flow_value_v4 *lookup_reply_flow_v4_in_bank(__u8 b
 		}
 	}
 
+	lookup_key = *key;
+	flow = lookup_flow_v4_in_bank(bank, &lookup_key);
+	if (flow) {
+		*key = lookup_key;
+		return flow;
+	}
+
+	lookup_key.ifindex = parent_ifindex;
 	lookup_key.src_addr = 0;
 	lookup_key.src_port = 0;
 	flow = lookup_flow_v4_in_bank(bank, &lookup_key);
@@ -3443,6 +3454,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 	__u16 close_flags = 0;
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 	__u32 nat_cfg_flags = load_kernel_nat_config_flags();
+	__u32 direct_out_ifindex;
+	__u32 flow_out_ifindex;
 
 	if (local_dst_mac_mismatch(skb, ctx->rule_wildcard_addr))
 		return TC_ACT_OK;
@@ -3451,7 +3464,9 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 	__builtin_memset(flow_key, 0, sizeof(*flow_key));
 	__builtin_memset(flow_value, 0, sizeof(*flow_value));
 
-	flow_key->ifindex = rule->out_ifindex;
+	direct_out_ifindex = rule->out_ifindex;
+	flow_out_ifindex = resolve_parent_ifindex(direct_out_ifindex);
+	flow_key->ifindex = flow_out_ifindex;
 	flow_key->src_addr = rule->backend_addr;
 	flow_key->dst_addr = bpf_ntohl(ctx->src_addr);
 	flow_key->src_port = rule->backend_port;
@@ -3459,7 +3474,13 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 	flow_key->proto = ctx->proto;
 
 	existing_flow = lookup_flow_v4_active_or_old(flow_key, &flow_bank);
-	if (existing_flow && !flow_matches_rule_v4(existing_flow, rule)) {
+	if (!existing_flow && flow_out_ifindex != direct_out_ifindex) {
+		flow_key->ifindex = direct_out_ifindex;
+		existing_flow = lookup_flow_v4_active_or_old(flow_key, &flow_bank);
+		if (!existing_flow)
+			flow_key->ifindex = flow_out_ifindex;
+	}
+	if (existing_flow && !transparent_flow_matches_rule_v4(existing_flow, rule, ctx, skb)) {
 		__u64 stale_session_id = existing_flow->session_id;
 		__u32 stale_rule_id = existing_flow->rule_id;
 		__u16 stale_flags = existing_flow->flags;

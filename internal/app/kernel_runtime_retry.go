@@ -122,13 +122,56 @@ func samePreparedKernelRuleDataplaneIgnoringRuleID(a, b preparedKernelRule) bool
 }
 
 func samePreparedKernelRuleFlowContinuity(a, b preparedKernelRule) bool {
-	if a.rule.ID != b.rule.ID ||
-		!kernelReplyAttachmentsPreserveFlowContinuity(a.replyIfIndexes, b.replyIfIndexes, a.replyIfParents, b.replyIfParents) {
+	if a.rule.ID != b.rule.ID {
 		return false
 	}
 	left, leftErr := preparedKernelRuleFlowRevision(a)
 	right, rightErr := preparedKernelRuleFlowRevision(b)
-	return leftErr == nil && rightErr == nil && left != 0 && left == right
+	if leftErr != nil || rightErr != nil || left == 0 || left != right {
+		return false
+	}
+	return kernelReplyAttachmentsPreserveFlowContinuity(a.replyIfIndexes, b.replyIfIndexes, a.replyIfParents, b.replyIfParents) ||
+		transparentBridgePathPreservesFlowContinuity(a, b)
+}
+
+func transparentBridgePathPreservesFlowContinuity(previous, next preparedKernelRule) bool {
+	if !previous.rule.Transparent || !next.rule.Transparent {
+		return false
+	}
+	previousParent := preparedKernelRuleFlowOutIfIndex(previous)
+	nextParent := preparedKernelRuleFlowOutIfIndex(next)
+	if previousParent == 0 || previousParent != nextParent {
+		return false
+	}
+	return preparedKernelRuleHasReplyPath(previous, previousParent) && preparedKernelRuleHasReplyPath(next, nextParent)
+}
+
+func preparedKernelRuleHasReplyPath(item preparedKernelRule, parentIfIndex uint32) bool {
+	outIfIndex := item.value.OutIfIndex
+	if outIfIndex == 0 && item.outIfIndex > 0 {
+		outIfIndex = uint32(item.outIfIndex)
+	}
+	if outIfIndex == 0 || !kernelReplyIfIndexesContain(item.replyIfIndexes, int(outIfIndex)) {
+		return false
+	}
+	if outIfIndex == parentIfIndex {
+		return true
+	}
+	for _, mapping := range item.replyIfParents {
+		if mapping.ifindex == int(outIfIndex) && mapping.parentIfIndex == int(parentIfIndex) {
+			return true
+		}
+	}
+	return false
+}
+
+func kernelReplyIfIndexesContain(items []int, target int) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 func kernelReplyAttachmentsPreserveFlowContinuity(previousIndexes, nextIndexes []int, previousParents, nextParents []kernelIfParentMapping) bool {

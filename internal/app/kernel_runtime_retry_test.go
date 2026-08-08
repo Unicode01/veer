@@ -582,6 +582,57 @@ func TestCollectPreparedKernelRuleFlowPurgeIDsPreservesFlowsForAddedReplyAttachm
 	}
 }
 
+func TestCollectPreparedKernelRuleFlowPurgeIDsPreservesTransparentBridgePathPromotion(t *testing.T) {
+	fallback := preparedKernelRule{
+		rule: Rule{
+			ID:           44,
+			InInterface:  "vmbr0",
+			InIP:         "198.51.100.10",
+			InPort:       20022,
+			OutInterface: "vmbr1",
+			OutIP:        "192.0.2.6",
+			OutPort:      22,
+			Protocol:     "tcp",
+			Transparent:  true,
+		},
+		inIfIndex:      2,
+		outIfIndex:     3,
+		replyIfIndexes: []int{3, 55, 66},
+		replyIfParents: []kernelIfParentMapping{
+			{ifindex: 55, parentIfIndex: 3},
+			{ifindex: 66, parentIfIndex: 3},
+		},
+		key: tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 20022, Proto: 6},
+		value: tcRuleValueV4{
+			RuleID:      44,
+			BackendAddr: 2,
+			BackendPort: 22,
+			OutIfIndex:  3,
+		},
+	}
+	direct := fallback
+	direct.outIfIndex = 55
+	direct.replyIfIndexes = []int{55}
+	direct.replyIfParents = []kernelIfParentMapping{{ifindex: 55, parentIfIndex: 3}}
+	direct.value.OutIfIndex = 55
+	direct.value.Flags |= kernelRuleFlagBridgeL2
+
+	fallbackRevision, err := preparedKernelRuleFlowRevision(fallback)
+	if err != nil {
+		t.Fatalf("preparedKernelRuleFlowRevision(fallback) error = %v", err)
+	}
+	directRevision, err := preparedKernelRuleFlowRevision(direct)
+	if err != nil {
+		t.Fatalf("preparedKernelRuleFlowRevision(direct) error = %v", err)
+	}
+	if fallbackRevision != directRevision {
+		t.Fatalf("bridge fallback/direct revisions = %#x/%#x, want equal", fallbackRevision, directRevision)
+	}
+	if got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{fallback}, []preparedKernelRule{direct}); len(got) != 0 {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want no purge across bridge path promotion", got)
+	}
+}
+
 func TestCollectPreparedKernelRuleFlowPurgeIDsPurgesFlowsForRemovedOrReparentedReplyAttachment(t *testing.T) {
 	base := preparedKernelRule{
 		rule: Rule{

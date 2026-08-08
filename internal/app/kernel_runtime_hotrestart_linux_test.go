@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,6 +22,22 @@ func assertKernelHotRestartIncompatible(t *testing.T, err error) {
 	}
 	if !isKernelHotRestartIncompatible(err) {
 		t.Fatalf("expected hot restart incompatibility error, got %T: %v", err, err)
+	}
+}
+
+func TestKernelAttachmentsFromHotRestartMetadata(t *testing.T) {
+	items := []kernelHotRestartTCAttachment{
+		{LinkIndex: 12, Parent: netlink.HANDLE_MIN_INGRESS, Priority: 10, Handle: 20},
+		{LinkIndex: 0, Parent: netlink.HANDLE_MIN_INGRESS, Priority: 10, Handle: 20},
+	}
+
+	attachments := kernelAttachmentsFromHotRestartMetadata(items)
+	if len(attachments) != 1 || attachments[0].filter == nil {
+		t.Fatalf("attachments = %+v, want one valid filter", attachments)
+	}
+	filter := attachments[0].filter
+	if filter.LinkIndex != 12 || filter.Parent != netlink.HANDLE_MIN_INGRESS || filter.Priority != 10 || filter.Handle != 20 || filter.Protocol != unix.ETH_P_ALL {
+		t.Fatalf("filter attrs = %+v, want preserved tc attachment identity", filter.FilterAttrs)
 	}
 }
 

@@ -66,11 +66,12 @@ func kernelHotRestartIncompatibilityReason(err error) string {
 }
 
 type kernelHotRestartMapState struct {
-	replacements          map[string]*ebpf.Map
-	actualCapacities      kernelMapCapacities
-	oldStatsMap           *ebpf.Map
-	tcFlowMigrationFlags  uint32
-	xdpFlowMigrationFlags uint32
+	replacements           map[string]*ebpf.Map
+	actualCapacities       kernelMapCapacities
+	oldStatsMap            *ebpf.Map
+	predecessorAttachments []kernelAttachment
+	tcFlowMigrationFlags   uint32
+	xdpFlowMigrationFlags  uint32
 }
 
 type kernelHotRestartMapDescriptor struct {
@@ -131,6 +132,25 @@ func kernelHotRestartTCMetadata(attachments []kernelAttachment, objectHash strin
 		})
 	}
 	return meta
+}
+
+func kernelAttachmentsFromHotRestartMetadata(items []kernelHotRestartTCAttachment) []kernelAttachment {
+	attachments := make([]kernelAttachment, 0, len(items))
+	for _, item := range items {
+		if item.LinkIndex <= 0 || item.Parent == 0 || item.Priority == 0 || item.Handle == 0 {
+			continue
+		}
+		attachments = append(attachments, kernelAttachment{filter: &netlink.BpfFilter{
+			FilterAttrs: netlink.FilterAttrs{
+				LinkIndex: item.LinkIndex,
+				Parent:    item.Parent,
+				Priority:  item.Priority,
+				Handle:    item.Handle,
+				Protocol:  unix.ETH_P_ALL,
+			},
+		}})
+	}
+	return attachments
 }
 
 func kernelHotRestartXDPMetadata(attachments []xdpAttachment, objectHash string) kernelHotRestartMetadata {
@@ -795,8 +815,9 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 		return nil, fmt.Errorf("validate tc hot restart metadata: %w", err)
 	}
 	state := &kernelHotRestartMapState{
-		replacements:     make(map[string]*ebpf.Map, 9),
-		actualCapacities: desired,
+		replacements:           make(map[string]*ebpf.Map, 9),
+		actualCapacities:       desired,
+		predecessorAttachments: kernelAttachmentsFromHotRestartMetadata(meta.TCAttachments),
 	}
 	loadedAny := false
 	haveActiveFlowsV4 := false
