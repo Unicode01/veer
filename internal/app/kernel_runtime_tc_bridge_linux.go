@@ -206,8 +206,14 @@ func resolveTCReplyAttachments(outLink netlink.Link, outIfIndex int) ([]int, []k
 	}
 
 	replyIfIndexes := []int{outIfIndex}
-	if outLink == nil || outLink.Attrs() == nil || !isXDPBridgeLink(outLink) || outIfIndex != outLink.Attrs().Index {
+	if outLink == nil || outLink.Attrs() == nil || !isXDPBridgeLink(outLink) {
 		return replyIfIndexes, nil, nil
+	}
+	if outIfIndex != outLink.Attrs().Index {
+		return replyIfIndexes, []kernelIfParentMapping{{
+			ifindex:       outIfIndex,
+			parentIfIndex: outLink.Attrs().Index,
+		}}, nil
 	}
 
 	members, err := listTCBridgeMemberLinks(outLink.Attrs().Index)

@@ -93,6 +93,21 @@ func TestShouldFallbackTCBridgeFastPath(t *testing.T) {
 	}
 }
 
+func TestResolveTCReplyAttachmentsKeepsBridgeParentForDirectMember(t *testing.T) {
+	bridge := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Index: 12, Name: "vmbr0"}}
+
+	ifindexes, parents, err := resolveTCReplyAttachments(bridge, 77)
+	if err != nil {
+		t.Fatalf("resolveTCReplyAttachments() error = %v", err)
+	}
+	if len(ifindexes) != 1 || ifindexes[0] != 77 {
+		t.Fatalf("reply ifindexes = %v, want [77]", ifindexes)
+	}
+	if len(parents) != 1 || parents[0].ifindex != 77 || parents[0].parentIfIndex != 12 {
+		t.Fatalf("reply parent mappings = %+v, want 77->12", parents)
+	}
+}
+
 func TestMatchBridgeNeighborTarget(t *testing.T) {
 	backendIP := net.ParseIP("198.51.100.20").To4()
 	backendMAC := net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee}

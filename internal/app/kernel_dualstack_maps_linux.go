@@ -218,19 +218,35 @@ func assignPreparedKernelRuleRevision(item *preparedKernelRule) error {
 		if err != nil {
 			return err
 		}
-		revision, err := kernelRuleFlowRevisionV6(key, value.BackendAddr, value.BackendPort, value.Flags, value.OutIfIndex, value.NATAddr)
+		revision, err := kernelRuleFlowRevisionV6(key, value.BackendAddr, value.BackendPort, value.Flags, preparedKernelRuleFlowOutIfIndex(*item), value.NATAddr)
 		if err != nil {
 			return err
 		}
 		item.value.Revision = revision
 	default:
-		revision, err := kernelRuleFlowRevisionV4(item.key, item.value.BackendAddr, item.value.BackendPort, item.value.Flags, item.value.OutIfIndex, item.value.NATAddr)
+		revision, err := kernelRuleFlowRevisionV4(item.key, item.value.BackendAddr, item.value.BackendPort, item.value.Flags, preparedKernelRuleFlowOutIfIndex(*item), item.value.NATAddr)
 		if err != nil {
 			return err
 		}
 		item.value.Revision = revision
 	}
 	return nil
+}
+
+func preparedKernelRuleFlowOutIfIndex(item preparedKernelRule) uint32 {
+	outIfIndex := item.value.OutIfIndex
+	if outIfIndex == 0 && item.outIfIndex > 0 {
+		outIfIndex = uint32(item.outIfIndex)
+	}
+	if !item.rule.Transparent {
+		return outIfIndex
+	}
+	for _, mapping := range item.replyIfParents {
+		if mapping.ifindex > 0 && uint32(mapping.ifindex) == outIfIndex && mapping.parentIfIndex > 0 {
+			return uint32(mapping.parentIfIndex)
+		}
+	}
+	return outIfIndex
 }
 
 func preparedKernelRuleFlowRevision(item preparedKernelRule) (uint64, error) {

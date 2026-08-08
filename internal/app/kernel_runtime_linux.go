@@ -1354,7 +1354,27 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
+	var hotRestartFlowAliases *tcHotRestartTransparentFlowAliases
+	if hotRestartState != nil {
+		hotRestartFlowAliases, err = stageTCHotRestartTransparentFlowAliases(coll, prepared, hotRestartState.predecessorAttachments)
+		if err != nil {
+			coll.Close()
+			hotRestartState.close()
+			msg := fmt.Sprintf("stage legacy transparent flow keys for tc hot restart: %v", err)
+			log.Printf("kernel dataplane hot restart: %s", msg)
+			for _, rule := range rules {
+				results[rule.ID] = kernelRuleApplyResult{Error: msg}
+			}
+			return results, nil
+		}
+		if count := len(hotRestartFlowAliases.items); count > 0 {
+			log.Printf("kernel dataplane hot restart: staged %d legacy transparent flow alias(es) for bridge-path handoff", count)
+		}
+	}
 	oldAttachments := append([]kernelAttachment(nil), rt.attachments...)
+	if hotRestartState != nil {
+		oldAttachments = append(oldAttachments, hotRestartState.predecessorAttachments...)
+	}
 	forwardReady := make(map[int]bool)
 	replyReady := make(map[int]bool)
 	attachmentPlans := desiredKernelAttachmentPlansForRuleSets(attachmentRuleSets, attachmentPrograms)
@@ -1394,6 +1414,9 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	reconcileMetrics.Attaches = len(newAttachments)
 
 	if attachFailure != "" {
+		if rollbackErr := hotRestartFlowAliases.rollback(); rollbackErr != nil {
+			log.Printf("kernel dataplane hot restart: rollback transparent flow aliases after attach failure: %v", rollbackErr)
+		}
 		rt.discardAttachmentsLocked(newAttachments)
 		rt.cleanupPluginPipelineLocked()
 		coll.Close()
@@ -1427,10 +1450,25 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	}
 
 	if !runningAny && !pluginOnlyPipeline {
+		if rollbackErr := hotRestartFlowAliases.rollback(); rollbackErr != nil {
+			log.Printf("kernel dataplane hot restart: rollback transparent flow aliases after incomplete handoff: %v", rollbackErr)
+		}
 		rt.stateLog.Logf("kernel dataplane reconcile: no rules reached running state")
 		coll.Close()
 		rt.cleanupLocked()
 		return results, nil
+	}
+	if hotRestartFlowAliases != nil {
+		finalized, finalizeErr := hotRestartFlowAliases.finalize()
+		if finalizeErr != nil {
+			log.Printf("kernel dataplane hot restart: finalize legacy transparent flow keys after handoff: %v", finalizeErr)
+		}
+		if finalized > 0 {
+			log.Printf("kernel dataplane hot restart: canonicalized %d legacy transparent flow key(s) after bridge-path handoff", finalized)
+		}
+		if syncErr := syncKernelOccupancyMapFromCollectionExact(coll, true); syncErr != nil {
+			log.Printf("kernel dataplane hot restart: resync tc occupancy after transparent flow key handoff failed: %v", syncErr)
+		}
 	}
 
 	flowPurgeTargets := collectPreparedKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
