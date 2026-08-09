@@ -22,37 +22,41 @@ const (
 	insecureDefaultWebToken                      = "change-me-to-a-secure-token"
 	insecureDefaultPluginAdminToken              = "change-me-to-a-separate-plugin-admin-token"
 	remoteManagementMinimumTokenCharacters       = 24
+	kernelTCPEstablishedIdleTimeoutModeAuto      = "auto"
+	kernelTCPEstablishedIdleTimeoutModeFixed     = "fixed"
+	kernelTCPEstablishedIdleTimeoutMaxSeconds    = int64(9_223_372_036)
 )
 
 type Config struct {
-	WebPort                         int                       `json:"web_port"`
-	WebBind                         string                    `json:"web_bind"`
-	WebUIEnabledSetting             *bool                     `json:"web_ui_enabled,omitempty"`
-	WebToken                        string                    `json:"web_token"`
-	PluginAdminToken                string                    `json:"plugin_admin_token,omitempty"`
-	MaxWorkers                      int                       `json:"max_workers"`
-	DrainTimeoutHours               int                       `json:"drain_timeout_hours"`
-	ManagedNetworkAutoRepair        *bool                     `json:"managed_network_auto_repair,omitempty"`
-	PluginsEnabledSetting           *bool                     `json:"plugins_enabled,omitempty"`
-	PluginsDataplaneSetting         *bool                     `json:"plugins_dataplane_enabled,omitempty"`
-	PluginsIsolationSetting         *bool                     `json:"plugins_isolation,omitempty"`
-	PluginsMinSandboxLevel          string                    `json:"plugins_min_sandbox_level,omitempty"`
-	PluginsRequireSigned            *bool                     `json:"plugins_require_signed_packages,omitempty"`
-	PluginsDir                      string                    `json:"plugins_dir"`
-	PluginsMaxInstalled             int                       `json:"plugins_max_installed"`
-	PluginsMaxStaged                int                       `json:"plugins_max_staged"`
-	PluginsStorageLimitMB           int                       `json:"plugins_storage_limit_mb"`
-	PluginsRepositoryRefreshMinutes int                       `json:"plugins_repository_refresh_minutes"`
-	PluginsResourceLimits           PluginResourceLimitConfig `json:"plugins_resource_limits,omitempty"`
-	DefaultEngine                   string                    `json:"default_engine"`
-	KernelEngineOrder               []string                  `json:"kernel_engine_order"`
-	KernelRulesMapLimit             int                       `json:"kernel_rules_map_limit"`
-	KernelFlowsMapLimit             int                       `json:"kernel_flows_map_limit"`
-	KernelNATMapLimit               int                       `json:"kernel_nat_ports_map_limit"`
-	KernelNATPortMin                int                       `json:"kernel_nat_port_min"`
-	KernelNATPortMax                int                       `json:"kernel_nat_port_max"`
-	Experimental                    map[string]bool           `json:"experimental_features"`
-	Tags                            []string                  `json:"tags"`
+	WebPort                                int                       `json:"web_port"`
+	WebBind                                string                    `json:"web_bind"`
+	WebUIEnabledSetting                    *bool                     `json:"web_ui_enabled,omitempty"`
+	WebToken                               string                    `json:"web_token"`
+	PluginAdminToken                       string                    `json:"plugin_admin_token,omitempty"`
+	MaxWorkers                             int                       `json:"max_workers"`
+	DrainTimeoutHours                      int                       `json:"drain_timeout_hours"`
+	ManagedNetworkAutoRepair               *bool                     `json:"managed_network_auto_repair,omitempty"`
+	PluginsEnabledSetting                  *bool                     `json:"plugins_enabled,omitempty"`
+	PluginsDataplaneSetting                *bool                     `json:"plugins_dataplane_enabled,omitempty"`
+	PluginsIsolationSetting                *bool                     `json:"plugins_isolation,omitempty"`
+	PluginsMinSandboxLevel                 string                    `json:"plugins_min_sandbox_level,omitempty"`
+	PluginsRequireSigned                   *bool                     `json:"plugins_require_signed_packages,omitempty"`
+	PluginsDir                             string                    `json:"plugins_dir"`
+	PluginsMaxInstalled                    int                       `json:"plugins_max_installed"`
+	PluginsMaxStaged                       int                       `json:"plugins_max_staged"`
+	PluginsStorageLimitMB                  int                       `json:"plugins_storage_limit_mb"`
+	PluginsRepositoryRefreshMinutes        int                       `json:"plugins_repository_refresh_minutes"`
+	PluginsResourceLimits                  PluginResourceLimitConfig `json:"plugins_resource_limits,omitempty"`
+	DefaultEngine                          string                    `json:"default_engine"`
+	KernelEngineOrder                      []string                  `json:"kernel_engine_order"`
+	KernelRulesMapLimit                    int                       `json:"kernel_rules_map_limit"`
+	KernelFlowsMapLimit                    int                       `json:"kernel_flows_map_limit"`
+	KernelTCPEstablishedIdleTimeoutSeconds int64                     `json:"kernel_tcp_established_idle_timeout_seconds"`
+	KernelNATMapLimit                      int                       `json:"kernel_nat_ports_map_limit"`
+	KernelNATPortMin                       int                       `json:"kernel_nat_port_min"`
+	KernelNATPortMax                       int                       `json:"kernel_nat_port_max"`
+	Experimental                           map[string]bool           `json:"experimental_features"`
+	Tags                                   []string                  `json:"tags"`
 
 	pluginHostTestMode bool
 }
@@ -129,6 +133,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	cfg.KernelRulesMapLimit = normalizeKernelRulesMapLimit(cfg.KernelRulesMapLimit)
 	cfg.KernelFlowsMapLimit = normalizeKernelFlowsMapLimit(cfg.KernelFlowsMapLimit)
+	if err := validateKernelTCPEstablishedIdleTimeoutSeconds(cfg.KernelTCPEstablishedIdleTimeoutSeconds); err != nil {
+		return nil, err
+	}
 	cfg.KernelNATMapLimit = normalizeKernelNATMapLimit(cfg.KernelNATMapLimit)
 	cfg.KernelNATPortMin, cfg.KernelNATPortMax, err = normalizeKernelNATPortRange(cfg.KernelNATPortMin, cfg.KernelNATPortMax)
 	if err != nil {
@@ -141,6 +148,23 @@ func loadConfig(path string) (*Config, error) {
 	cfg.KernelEngineOrder = normalizeKernelEngineOrder(cfg.KernelEngineOrder)
 	cfg.Experimental = normalizeExperimentalFeatures(cfg.Experimental)
 	return &cfg, nil
+}
+
+func validateKernelTCPEstablishedIdleTimeoutSeconds(value int64) error {
+	if value < 0 || value > kernelTCPEstablishedIdleTimeoutMaxSeconds {
+		return fmt.Errorf(
+			"kernel_tcp_established_idle_timeout_seconds must be between 0 and %d",
+			kernelTCPEstablishedIdleTimeoutMaxSeconds,
+		)
+	}
+	return nil
+}
+
+func kernelTCPEstablishedIdleTimeoutMode(configuredSeconds int64) string {
+	if configuredSeconds == 0 {
+		return kernelTCPEstablishedIdleTimeoutModeAuto
+	}
+	return kernelTCPEstablishedIdleTimeoutModeFixed
 }
 
 func validateConfiguredManagementToken(name, value string) error {

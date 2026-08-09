@@ -150,9 +150,9 @@ func TestKernelFlowLifecycleMatrixAcrossBanks(t *testing.T) {
 					err         error
 				)
 				if engine.xdp {
-					corrections, metrics, err = pruneStaleXDPFlowsFullInCollection(nil, flows, nat, nowNS, true, metrics)
+					corrections, metrics, err = pruneStaleXDPFlowsFullInCollection(nil, flows, nat, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
 				} else {
-					corrections, metrics, err = pruneStaleKernelFlowsFullInCollection(nil, flows, nat, nowNS, true, metrics)
+					corrections, metrics, err = pruneStaleKernelFlowsFullInCollection(nil, flows, nat, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
 				}
 				if err != nil {
 					t.Fatalf("prune lifecycle matrix: %v", err)
@@ -406,7 +406,7 @@ func TestKernelIPv6FlowLifecycleMatrixAcrossBanks(t *testing.T) {
 				staleUDP := putFullNATSession(unix.IPPROTO_UDP, 602, 602, nowNS-kernelUDPFlowIdleTimeout-1)
 
 				metrics := kernelFlowPruneMetrics{Budget: 32}
-				corrections, metrics, err := pruneStaleKernelFlowsV6FullInCollection(nil, flows, nat, nowNS, true, metrics)
+				corrections, metrics, err := pruneStaleKernelFlowsV6FullInCollection(nil, flows, nat, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
 				if err != nil {
 					t.Fatalf("prune IPv6 lifecycle matrix: %v", err)
 				}

@@ -207,6 +207,7 @@ type xdpKernelRuleRuntime struct {
 	degradedSource     string
 	stateLog           kernelStateLogger
 	pressureState      kernelRuntimePressureState
+	tcpIdleTimeout     kernelTCPIdleTimeoutState
 	observability      kernelRuntimeObservabilityState
 	maintenanceState   kernelAdaptiveMaintenanceState
 	statsCorrection    map[uint32]kernelRuleStats
@@ -224,6 +225,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	flowsLimit := 0
 	natLimit := 0
 	natPortMin, natPortMax := effectiveKernelNATPortRange(0, 0)
+	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureBridgeXDP) {
 		opts.enableBridge = true
 	}
@@ -238,6 +240,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 		flowsLimit = cfg.KernelFlowsMapLimit
 		natLimit = cfg.KernelNATMapLimit
 		natPortMin, natPortMax = effectiveKernelNATPortRange(cfg.KernelNATPortMin, cfg.KernelNATPortMax)
+		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
 	}
 	return &xdpKernelRuleRuntime{
 		prepareOptions:     opts,
@@ -247,6 +250,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 		natMapLimit:        natLimit,
 		natPortMin:         natPortMin,
 		natPortMax:         natPortMax,
+		tcpIdleTimeout:     newKernelTCPIdleTimeoutState(tcpIdleTimeoutSeconds),
 		statsCorrection:    make(map[uint32]kernelRuleStats),
 	}
 }
@@ -1032,6 +1036,15 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		return pendingFlowPurgeErr
 	}
 	pressureActive := rt.pressureState.active
+	if rt.tcpIdleTimeout.auto() {
+		pressure := rt.refreshPressureLocked(startedAt)
+		previousTimeout := rt.tcpIdleTimeout
+		if rt.tcpIdleTimeout.observeFlowUsage(pressure.flowsEntries, pressure.flowsCapacity) {
+			logKernelTCPIdleTimeoutTransition(kernelEngineXDP, previousTimeout, rt.tcpIdleTimeout)
+		}
+		pressureActive = pressure.active
+	}
+	tcpIdleTimeoutNS := rt.tcpIdleTimeout.effectiveTimeoutNS()
 	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
 	mapSnapshot, err := snapshotKernelRuntimeMaps(rt.coll, runFull, false)
 	if err != nil {
@@ -1074,7 +1087,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	driftDetected := false
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &flowPruneState, v4ActiveBudget)
+		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &flowPruneState, v4ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1085,7 +1098,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsOldV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &oldFlowPruneState, v4OldBudget)
+		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &oldFlowPruneState, v4OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1096,7 +1109,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natV6, &flowPruneState, v6ActiveBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natV6, &flowPruneState, v6ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -1107,7 +1120,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
 	if refs.flowsOldV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldV6, &oldFlowPruneState, v6OldBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldV6, &oldFlowPruneState, v6OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted

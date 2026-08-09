@@ -90,7 +90,7 @@ const (
 	kernelTCPClosingGraceNS                        = 15 * 1000000000
 	kernelTCPUnrepliedTimeout                      = 30 * 1000000000
 	kernelTCPOrphanFrontIdleTimeout                = 10 * 60 * 1000000000
-	kernelTCPFlowIdleTimeout                       = 5 * 24 * 60 * 60 * 1000000000
+	kernelTCPFlowIdleTimeout                       = 24 * 60 * 60 * 1000000000
 	kernelICMPFlowIdleTimeout                      = 30 * 1000000000
 	kernelUDPFlowIdleTimeout                       = 300 * 1000000000
 	kernelOrphanNATPruneLogEvery                   = 10 * time.Minute
@@ -581,6 +581,7 @@ type linuxKernelRuleRuntime struct {
 	degradedSource               string
 	stateLog                     kernelStateLogger
 	pressureState                kernelRuntimePressureState
+	tcpIdleTimeout               kernelTCPIdleTimeoutState
 	observability                kernelRuntimeObservabilityState
 	maintenanceState             kernelAdaptiveMaintenanceState
 	orphanNATPruneLog            kernelCountLogState
@@ -618,6 +619,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	enablePreparedL2 := false
 	enableReplyL2Cache := false
 	pluginPipelineEnabled := false
+	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
@@ -630,6 +632,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		enablePreparedL2 = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCPreparedL2)
 		enableReplyL2Cache = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCReplyL2Cache)
 		pluginPipelineEnabled = cfg.PluginsEnabled() && cfg.PluginsDataplaneEnabled()
+		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
 	}
 	if enableDiagVerbose {
 		enableDiagnostics = true
@@ -643,6 +646,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		natPortMax:              natPortMax,
 		statsCorrection:         make(map[uint32]kernelRuleStats),
 		attachmentMode:          kernelTCAttachmentProgramModeLegacy,
+		tcpIdleTimeout:          newKernelTCPIdleTimeoutState(tcpIdleTimeoutSeconds),
 		enableTrafficStats:      enableTrafficStats,
 		enableDiagnostics:       enableDiagnostics,
 		enableDiagVerbose:       enableDiagVerbose,
@@ -1579,6 +1583,15 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		return pendingFlowPurgeErr
 	}
 	pressureActive := rt.pressureState.active
+	if rt.tcpIdleTimeout.auto() {
+		pressure := rt.refreshPressureLocked(startedAt)
+		previousTimeout := rt.tcpIdleTimeout
+		if rt.tcpIdleTimeout.observeFlowUsage(pressure.flowsEntries, pressure.flowsCapacity) {
+			logKernelTCPIdleTimeoutTransition(kernelEngineTC, previousTimeout, rt.tcpIdleTimeout)
+		}
+		pressureActive = pressure.active
+	}
+	tcpIdleTimeoutNS := rt.tcpIdleTimeout.effectiveTimeoutNS()
 	runFull := rt.maintenanceState.shouldRunFull(pressureActive)
 	mapSnapshot, err := snapshotKernelRuntimeMaps(rt.coll, runFull, false)
 	if err != nil {
@@ -1635,7 +1648,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	driftDetected := false
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &flowPruneState, v4ActiveBudget)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &flowPruneState, v4ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1646,7 +1659,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsOldV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &oldFlowPruneState, v4OldBudget)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &oldFlowPruneState, v4OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1657,7 +1670,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natV6, &flowPruneState, v6ActiveBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natV6, &flowPruneState, v6ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -1668,7 +1681,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
 	if refs.flowsOldV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldV6, &oldFlowPruneState, v6OldBudget)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldV6, &oldFlowPruneState, v6OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted

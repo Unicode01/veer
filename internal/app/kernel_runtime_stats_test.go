@@ -624,7 +624,7 @@ func TestPruneStaleXDPFlowsMapDeletesInvalidFlow(t *testing.T) {
 		t.Fatalf("flows.Put() error = %v", err)
 	}
 
-	corrections, metrics, err := pruneStaleXDPFlowsMap(nil, flows, nil, &kernelFlowPruneState{}, 1)
+	corrections, metrics, err := pruneStaleXDPFlowsMap(nil, flows, nil, &kernelFlowPruneState{}, 1, kernelTCPFlowIdleTimeout)
 	if err != nil {
 		t.Fatalf("pruneStaleXDPFlowsMap() error = %v", err)
 	}

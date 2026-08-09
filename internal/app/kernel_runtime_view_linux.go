@@ -208,10 +208,11 @@ func (snapshot kernelRuntimeMapSnapshot) Close() {
 
 func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
-		KernelCapabilities: kernelcap.DetectKernelCapabilities(),
-		DefaultEngine:      ruleEngineAuto,
-		ConfiguredOrder:    defaultKernelEngineOrder(),
-		Engines:            []KernelEngineRuntimeView{},
+		KernelCapabilities:                  kernelcap.DetectKernelCapabilities(),
+		DefaultEngine:                       ruleEngineAuto,
+		ConfiguredOrder:                     defaultKernelEngineOrder(),
+		KernelTCPEstablishedIdleTimeoutMode: kernelTCPEstablishedIdleTimeoutModeAuto,
+		Engines:                             []KernelEngineRuntimeView{},
 	}
 	if pm == nil {
 		return resp
@@ -225,6 +226,8 @@ func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRunti
 		resp.TCDiagnostics = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag) || resp.TCDiagnosticsVerbose
 		resp.KernelRulesMapConfiguredLimit = pm.cfg.KernelRulesMapLimit
 		resp.KernelFlowsMapConfiguredLimit = pm.cfg.KernelFlowsMapLimit
+		resp.KernelTCPEstablishedIdleTimeoutSeconds = pm.cfg.KernelTCPEstablishedIdleTimeoutSeconds
+		resp.KernelTCPEstablishedIdleTimeoutMode = kernelTCPEstablishedIdleTimeoutMode(pm.cfg.KernelTCPEstablishedIdleTimeoutSeconds)
 		resp.KernelNATMapConfiguredLimit = pm.cfg.KernelNATMapLimit
 		resp.KernelRulesMapCapacityMode = kernelRulesMapCapacityMode(pm.cfg.KernelRulesMapLimit)
 		resp.KernelFlowsMapCapacityMode = kernelFlowsMapCapacityMode(pm.cfg.KernelFlowsMapLimit)
@@ -510,21 +513,24 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) Kerne
 	obs := rt.observability.snapshot()
 
 	view := KernelEngineRuntimeView{
-		Name:               kernelEngineTC,
-		Available:          available,
-		AvailableReason:    reason,
-		Degraded:           degraded.active,
-		DegradedReason:     degraded.reason,
-		Loaded:             rt.coll != nil,
-		ActiveEntries:      len(rt.preparedRules),
-		Attachments:        len(rt.attachments),
-		RulesMapCapacity:   actualCapacities.Rules,
-		FlowsMapCapacity:   actualCapacities.Flows,
-		NATMapCapacity:     actualCapacities.NATPorts,
-		LastReconcileMode:  rt.lastReconcileMode,
-		TrafficStats:       rt.enableTrafficStats,
-		Diagnostics:        rt.enableDiagnostics,
-		DiagnosticsVerbose: rt.enableDiagVerbose,
+		Name:                              kernelEngineTC,
+		Available:                         available,
+		AvailableReason:                   reason,
+		Degraded:                          degraded.active,
+		DegradedReason:                    degraded.reason,
+		Loaded:                            rt.coll != nil,
+		ActiveEntries:                     len(rt.preparedRules),
+		Attachments:                       len(rt.attachments),
+		RulesMapCapacity:                  actualCapacities.Rules,
+		FlowsMapCapacity:                  actualCapacities.Flows,
+		NATMapCapacity:                    actualCapacities.NATPorts,
+		LastReconcileMode:                 rt.lastReconcileMode,
+		TrafficStats:                      rt.enableTrafficStats,
+		Diagnostics:                       rt.enableDiagnostics,
+		DiagnosticsVerbose:                rt.enableDiagVerbose,
+		TCPEstablishedIdleTimeoutMode:     rt.tcpIdleTimeout.mode(),
+		TCPEstablishedIdleTimeoutSeconds:  rt.tcpIdleTimeout.effectiveTimeoutSeconds(),
+		TCPEstablishedIdleTimeoutAutoTier: rt.tcpIdleTimeout.autoTierName(),
 	}
 	applyKernelRuntimePressureView(&view, pressure)
 	applyKernelRuntimeObservabilityView(&view, obs)
@@ -593,18 +599,21 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) KernelE
 	obs := rt.observability.snapshot()
 
 	view := KernelEngineRuntimeView{
-		Name:              kernelEngineXDP,
-		Available:         available,
-		AvailableReason:   reason,
-		Degraded:          degraded.active,
-		DegradedReason:    degraded.reason,
-		Loaded:            rt.coll != nil,
-		ActiveEntries:     len(rt.preparedRules),
-		Attachments:       len(rt.attachments),
-		RulesMapCapacity:  actualCapacities.Rules,
-		FlowsMapCapacity:  actualCapacities.Flows,
-		LastReconcileMode: rt.lastReconcileMode,
-		TrafficStats:      rt.prepareOptions.enableTrafficStats,
+		Name:                              kernelEngineXDP,
+		Available:                         available,
+		AvailableReason:                   reason,
+		Degraded:                          degraded.active,
+		DegradedReason:                    degraded.reason,
+		Loaded:                            rt.coll != nil,
+		ActiveEntries:                     len(rt.preparedRules),
+		Attachments:                       len(rt.attachments),
+		RulesMapCapacity:                  actualCapacities.Rules,
+		FlowsMapCapacity:                  actualCapacities.Flows,
+		LastReconcileMode:                 rt.lastReconcileMode,
+		TrafficStats:                      rt.prepareOptions.enableTrafficStats,
+		TCPEstablishedIdleTimeoutMode:     rt.tcpIdleTimeout.mode(),
+		TCPEstablishedIdleTimeoutSeconds:  rt.tcpIdleTimeout.effectiveTimeoutSeconds(),
+		TCPEstablishedIdleTimeoutAutoTier: rt.tcpIdleTimeout.autoTierName(),
 	}
 	if useNATMaps {
 		view.NATMapCapacity = actualCapacities.NATPorts

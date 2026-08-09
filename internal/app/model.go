@@ -450,6 +450,9 @@ type KernelEngineRuntimeView struct {
 	FlowsMapEntriesV6                       int       `json:"flows_map_entries_v6,omitempty"`
 	FlowsMapCapacityV6                      int       `json:"flows_map_capacity_v6,omitempty"`
 	FlowsMapOldCapacityV6                   int       `json:"flows_map_old_capacity_v6,omitempty"`
+	TCPEstablishedIdleTimeoutMode           string    `json:"tcp_established_idle_timeout_mode,omitempty"`
+	TCPEstablishedIdleTimeoutSeconds        int64     `json:"tcp_established_idle_timeout_seconds,omitempty"`
+	TCPEstablishedIdleTimeoutAutoTier       string    `json:"tcp_established_idle_timeout_auto_tier,omitempty"`
 	NATMapEntries                           int       `json:"nat_map_entries,omitempty"`
 	NATMapCapacity                          int       `json:"nat_map_capacity,omitempty"`
 	NATMapEntriesV4                         int       `json:"nat_map_entries_v4,omitempty"`
@@ -523,6 +526,8 @@ type KernelRuntimeResponse struct {
 	KernelEgressNATAutoFloor                       int                          `json:"kernel_egress_nat_auto_floor,omitempty"`
 	KernelRulesMapConfiguredLimit                  int                          `json:"kernel_rules_map_configured_limit,omitempty"`
 	KernelFlowsMapConfiguredLimit                  int                          `json:"kernel_flows_map_configured_limit,omitempty"`
+	KernelTCPEstablishedIdleTimeoutSeconds         int64                        `json:"kernel_tcp_established_idle_timeout_seconds"`
+	KernelTCPEstablishedIdleTimeoutMode            string                       `json:"kernel_tcp_established_idle_timeout_mode"`
 	KernelNATMapConfiguredLimit                    int                          `json:"kernel_nat_map_configured_limit,omitempty"`
 	KernelRulesMapCapacityMode                     string                       `json:"kernel_rules_map_capacity_mode,omitempty"`
 	KernelFlowsMapCapacityMode                     string                       `json:"kernel_flows_map_capacity_mode,omitempty"`

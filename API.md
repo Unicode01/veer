@@ -720,6 +720,8 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   "configured_order": ["tc", "xdp"],
   "traffic_stats": true,
   "tc_diagnostics": false,
+  "kernel_tcp_established_idle_timeout_seconds": 0,
+  "kernel_tcp_established_idle_timeout_mode": "auto",
   "active_rule_count": 12,
   "active_range_count": 3,
   "retry_pending": false,
@@ -731,7 +733,10 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
       "loaded": true,
       "active_entries": 128,
       "attachments": 6,
-      "attachment_summary": "eno1(3)/forward, eno1(3)/reply"
+      "attachment_summary": "eno1(3)/forward, eno1(3)/reply",
+      "tcp_established_idle_timeout_mode": "auto",
+      "tcp_established_idle_timeout_seconds": 3600,
+      "tcp_established_idle_timeout_auto_tier": "high"
     }
   ]
 }
@@ -745,6 +750,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - netlink recover 与 attachment heal 状态
 - dismissed note keys
 - traffic stats / diagnostics
+- 已建立 TCP idle timeout 的配置模式，以及 TC/XDP 各自当前生效值和 auto 档位
 - 最近一次 reconcile / maintain / prune 信息
 
 ## 详细接口

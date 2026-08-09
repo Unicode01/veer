@@ -23,12 +23,13 @@ func kernelRuntimeIdleDegradedRebuildReason(view KernelEngineRuntimeView) string
 
 func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
-		Available:          false,
-		AvailableReason:    "kernel dataplane requires Linux",
-		KernelCapabilities: kernelcap.DetectKernelCapabilities(),
-		DefaultEngine:      ruleEngineAuto,
-		ConfiguredOrder:    defaultKernelEngineOrder(),
-		Engines:            []KernelEngineRuntimeView{},
+		Available:                           false,
+		AvailableReason:                     "kernel dataplane requires Linux",
+		KernelCapabilities:                  kernelcap.DetectKernelCapabilities(),
+		DefaultEngine:                       ruleEngineAuto,
+		ConfiguredOrder:                     defaultKernelEngineOrder(),
+		KernelTCPEstablishedIdleTimeoutMode: kernelTCPEstablishedIdleTimeoutModeAuto,
+		Engines:                             []KernelEngineRuntimeView{},
 	}
 	if pm == nil {
 		return resp
@@ -41,6 +42,8 @@ func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRunti
 		resp.TCDiagnostics = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag) || resp.TCDiagnosticsVerbose
 		resp.KernelRulesMapConfiguredLimit = pm.cfg.KernelRulesMapLimit
 		resp.KernelFlowsMapConfiguredLimit = pm.cfg.KernelFlowsMapLimit
+		resp.KernelTCPEstablishedIdleTimeoutSeconds = pm.cfg.KernelTCPEstablishedIdleTimeoutSeconds
+		resp.KernelTCPEstablishedIdleTimeoutMode = kernelTCPEstablishedIdleTimeoutMode(pm.cfg.KernelTCPEstablishedIdleTimeoutSeconds)
 		resp.KernelNATMapConfiguredLimit = pm.cfg.KernelNATMapLimit
 		resp.KernelRulesMapCapacityMode = kernelRulesMapCapacityMode(pm.cfg.KernelRulesMapLimit)
 		resp.KernelFlowsMapCapacityMode = kernelFlowsMapCapacityMode(pm.cfg.KernelFlowsMapLimit)

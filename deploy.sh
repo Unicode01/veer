@@ -1037,6 +1037,7 @@ hardcoded_defaults = OrderedDict([
     ("kernel_engine_order", ["tc"]),
     ("kernel_rules_map_limit", 0),
     ("kernel_flows_map_limit", 0),
+    ("kernel_tcp_established_idle_timeout_seconds", 0),
     ("kernel_nat_ports_map_limit", 0),
     ("kernel_nat_port_min", 20000),
     ("kernel_nat_port_max", 65535),

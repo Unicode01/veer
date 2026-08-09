@@ -7,6 +7,47 @@ import (
 	"testing"
 )
 
+func TestLoadConfigKernelTCPEstablishedIdleTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		value       string
+		wantSeconds int64
+		wantError   bool
+	}{
+		{name: "default is auto", wantSeconds: 0},
+		{name: "zero selects auto", value: `,"kernel_tcp_established_idle_timeout_seconds":0`, wantSeconds: 0},
+		{name: "positive value is fixed", value: `,"kernel_tcp_established_idle_timeout_seconds":3600`, wantSeconds: 3600},
+		{name: "negative value is rejected", value: `,"kernel_tcp_established_idle_timeout_seconds":-1`, wantError: true},
+		{name: "overflowing duration is rejected", value: `,"kernel_tcp_established_idle_timeout_seconds":9223372037`, wantError: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.json")
+			data := `{"web_token":"test-token"` + tc.value + `}`
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig(path)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "kernel_tcp_established_idle_timeout_seconds") {
+					t.Fatalf("loadConfig() error = %v, want timeout validation error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadConfig() error = %v", err)
+			}
+			if cfg.KernelTCPEstablishedIdleTimeoutSeconds != tc.wantSeconds {
+				t.Fatalf("KernelTCPEstablishedIdleTimeoutSeconds = %d, want %d", cfg.KernelTCPEstablishedIdleTimeoutSeconds, tc.wantSeconds)
+			}
+		})
+	}
+}
+
 func TestLoadConfigDefaultsManagedNetworkAutoRepairEnabled(t *testing.T) {
 	t.Parallel()
 

@@ -703,8 +703,9 @@ func TestHandleKernelRuntimeIncludesFallbackSummary(t *testing.T) {
 	clearAt := now.Add(50 * time.Second)
 	pm := &ProcessManager{
 		cfg: &Config{
-			DefaultEngine:     ruleEngineAuto,
-			KernelEngineOrder: []string{kernelEngineTC},
+			DefaultEngine:                          ruleEngineAuto,
+			KernelEngineOrder:                      []string{kernelEngineTC},
+			KernelTCPEstablishedIdleTimeoutSeconds: 3600,
 			Experimental: map[string]bool{
 				experimentalFeatureKernelTraffic:       true,
 				experimentalFeatureKernelTCDiag:        true,
@@ -806,6 +807,14 @@ func TestHandleKernelRuntimeIncludesFallbackSummary(t *testing.T) {
 	}
 	if !resp.TCDiagnostics || !resp.TCDiagnosticsVerbose {
 		t.Fatalf("tc diagnostics flags = diag:%t verbose:%t, want true/true", resp.TCDiagnostics, resp.TCDiagnosticsVerbose)
+	}
+	if resp.KernelTCPEstablishedIdleTimeoutSeconds != 3600 || resp.KernelTCPEstablishedIdleTimeoutMode != kernelTCPEstablishedIdleTimeoutModeFixed {
+		t.Fatalf(
+			"kernel TCP established idle timeout = %d/%q, want 3600/%q",
+			resp.KernelTCPEstablishedIdleTimeoutSeconds,
+			resp.KernelTCPEstablishedIdleTimeoutMode,
+			kernelTCPEstablishedIdleTimeoutModeFixed,
+		)
 	}
 	if resp.KernelMapProfile != kernelAdaptiveMapProfileMedium {
 		t.Fatalf("kernel_map_profile = %q, want %q", resp.KernelMapProfile, kernelAdaptiveMapProfileMedium)
