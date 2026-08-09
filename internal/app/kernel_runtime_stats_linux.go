@@ -906,6 +906,9 @@ func kernelOrphanFrontShouldDelete(key tcFlowKeyV4, value tcFlowValueV4, nowNS u
 		return false
 	}
 	value.Flags &^= kernelFlowFlagFrontEntry
+	if kernelOrphanTCPFrontIdleExpired(key.Proto, value.Flags, value.LastSeenNS, nowNS, haveNow) {
+		return true
+	}
 	return kernelFlowDeleteReason(key, value, nowNS, haveNow) != ""
 }
 
@@ -914,7 +917,23 @@ func kernelOrphanFrontShouldDeleteV6(key tcFlowKeyV6, value tcFlowValueV6, nowNS
 		return false
 	}
 	value.Flags &^= kernelFlowFlagFrontEntry
+	if kernelOrphanTCPFrontIdleExpired(key.Proto, value.Flags, value.LastSeenNS, nowNS, haveNow) {
+		return true
+	}
 	return kernelFlowShouldDeleteV6(key, value, nowNS, haveNow)
+}
+
+func kernelOrphanTCPFrontIdleExpired(proto uint8, flags uint16, lastSeenNS uint64, nowNS uint64, haveNow bool) bool {
+	if proto != unix.IPPROTO_TCP || flags&kernelFlowFlagReplySeen == 0 {
+		return false
+	}
+	if flags&(kernelFlowFlagFrontClosing|kernelFlowFlagReplyClosing) == (kernelFlowFlagFrontClosing | kernelFlowFlagReplyClosing) {
+		return false
+	}
+	if !haveNow || lastSeenNS == 0 || nowNS < lastSeenNS {
+		return false
+	}
+	return nowNS-lastSeenNS > kernelTCPOrphanFrontIdleTimeout
 }
 
 func deleteConfirmedOrphanKernelFlowFrontV4(

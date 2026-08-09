@@ -437,9 +437,11 @@ func TestPruneOrphanKernelFlowFrontUsesProtocolTimeouts(t *testing.T) {
 		ageNS      uint64
 		want       bool
 	}{
-		{name: "established TCP at boundary", proto: unix.IPPROTO_TCP, extraFlags: kernelFlowFlagReplySeen, ageNS: kernelTCPFlowIdleTimeout},
-		{name: "established TCP expired", proto: unix.IPPROTO_TCP, extraFlags: kernelFlowFlagReplySeen, ageNS: kernelTCPFlowIdleTimeout + 1, want: true},
+		{name: "established TCP at orphan boundary", proto: unix.IPPROTO_TCP, extraFlags: kernelFlowFlagReplySeen, ageNS: kernelTCPOrphanFrontIdleTimeout},
+		{name: "established TCP orphan expired", proto: unix.IPPROTO_TCP, extraFlags: kernelFlowFlagReplySeen, ageNS: kernelTCPOrphanFrontIdleTimeout + 1, want: true},
 		{name: "unreplied TCP expired", proto: unix.IPPROTO_TCP, ageNS: kernelTCPUnrepliedTimeout + 1, want: true},
+		{name: "closing TCP at grace boundary", proto: unix.IPPROTO_TCP, extraFlags: kernelFlowFlagReplySeen | kernelFlowFlagFrontClosing | kernelFlowFlagReplyClosing, ageNS: kernelTCPClosingGraceNS},
+		{name: "closing TCP grace expired", proto: unix.IPPROTO_TCP, extraFlags: kernelFlowFlagReplySeen | kernelFlowFlagFrontClosing | kernelFlowFlagReplyClosing, ageNS: kernelTCPClosingGraceNS + 1, want: true},
 		{name: "UDP at boundary", proto: unix.IPPROTO_UDP, ageNS: kernelUDPFlowIdleTimeout},
 		{name: "UDP expired", proto: unix.IPPROTO_UDP, ageNS: kernelUDPFlowIdleTimeout + 1, want: true},
 		{name: "ICMP expired", proto: unix.IPPROTO_ICMP, ageNS: kernelICMPFlowIdleTimeout + 1, want: true},
@@ -469,6 +471,17 @@ func TestPruneOrphanKernelFlowFrontUsesProtocolTimeouts(t *testing.T) {
 				t.Fatalf("IPv6 orphan timeout decision = %t, want %t", got, test.want)
 			}
 		})
+	}
+
+	pairedTCP := tcFlowValueV4{
+		RuleID:     1,
+		NATAddr:    1,
+		NATPort:    1,
+		Flags:      kernelFlowFlagFullNAT | kernelFlowFlagReplySeen,
+		LastSeenNS: nowNS - kernelTCPOrphanFrontIdleTimeout - 1,
+	}
+	if reason := kernelFlowDeleteReason(tcFlowKeyV4{Proto: unix.IPPROTO_TCP}, pairedTCP, nowNS, true); reason != "" {
+		t.Fatalf("ordinary paired TCP inherited orphan timeout: %q", reason)
 	}
 }
 

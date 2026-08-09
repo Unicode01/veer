@@ -89,6 +89,7 @@ const (
 	kernelVerifierLogSize                          = 4 * 1024 * 1024
 	kernelTCPClosingGraceNS                        = 15 * 1000000000
 	kernelTCPUnrepliedTimeout                      = 30 * 1000000000
+	kernelTCPOrphanFrontIdleTimeout                = 10 * 60 * 1000000000
 	kernelTCPFlowIdleTimeout                       = 5 * 24 * 60 * 60 * 1000000000
 	kernelICMPFlowIdleTimeout                      = 30 * 1000000000
 	kernelUDPFlowIdleTimeout                       = 300 * 1000000000
