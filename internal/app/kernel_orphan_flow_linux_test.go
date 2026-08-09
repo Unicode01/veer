@@ -618,6 +618,128 @@ func TestPruneOrphanKernelFlowFrontBanksIPv6AcrossEnginesAndBanks(t *testing.T) 
 	}
 }
 
+func TestPruneOrphanKernelFlowFrontDeletesWhenRuleMissing(t *testing.T) {
+	for _, engine := range []struct {
+		name string
+		xdp  bool
+	}{
+		{name: "tc"},
+		{name: "xdp", xdp: true},
+	} {
+		t.Run("ipv4/"+engine.name, func(t *testing.T) {
+			fixture := newOrphanFlowV4TestFixture(t, engine.xdp, "active", false)
+			if err := fixture.rules.Delete(fixture.ruleKey); err != nil {
+				t.Fatalf("remove IPv4 rule: %v", err)
+			}
+			live := fixture.snapshot(t)
+			activeState, oldState, deleted, err := pruneOrphanKernelFlowFrontBanks(
+				fixture.refs, live.OrphanFrontsByBank, kernelFlowPruneState{}, kernelFlowPruneState{},
+			)
+			if err != nil || deleted != 0 {
+				t.Fatalf("mark ruleless IPv4 front: deleted=%d err=%v", deleted, err)
+			}
+			activeState, _, deleted, err = pruneOrphanKernelFlowFrontBanks(
+				fixture.refs, live.OrphanFrontsByBank, activeState, oldState,
+			)
+			if err != nil || deleted != 1 {
+				t.Fatalf("prune ruleless IPv4 front: deleted=%d err=%v", deleted, err)
+			}
+			if len(activeState.orphanFrontsV4) != 0 {
+				t.Fatalf("ruleless IPv4 front retained confirmation state: %+v", activeState.orphanFrontsV4)
+			}
+			if _, ok, err := lookupKernelFlowValue(fixture.flows, fixture.frontKey); err != nil || ok {
+				t.Fatalf("ruleless IPv4 front survived prune: ok=%t err=%v", ok, err)
+			}
+			var natValue tcNATPortValue
+			if err := fixture.nat.Lookup(fixture.natKey, &natValue); err != nil || natValue.SessionID != fixture.frontValue.SessionID {
+				t.Fatalf("ruleless IPv4 front changed NAT owner: value=%+v err=%v", natValue, err)
+			}
+		})
+
+		t.Run("ipv6/"+engine.name, func(t *testing.T) {
+			fixture := newOrphanFlowV6TestFixture(t, engine.xdp, "active")
+			if err := fixture.rules.Delete(fixture.ruleKey); err != nil {
+				t.Fatalf("remove IPv6 rule: %v", err)
+			}
+			live := fixture.snapshot(t)
+			activeState, oldState, deleted, err := pruneOrphanKernelFlowFrontBanks(
+				fixture.refs, live.OrphanFrontsByBank, kernelFlowPruneState{}, kernelFlowPruneState{},
+			)
+			if err != nil || deleted != 0 {
+				t.Fatalf("mark ruleless IPv6 front: deleted=%d err=%v", deleted, err)
+			}
+			activeState, _, deleted, err = pruneOrphanKernelFlowFrontBanks(
+				fixture.refs, live.OrphanFrontsByBank, activeState, oldState,
+			)
+			if err != nil || deleted != 1 {
+				t.Fatalf("prune ruleless IPv6 front: deleted=%d err=%v", deleted, err)
+			}
+			if len(activeState.orphanFrontsV6) != 0 {
+				t.Fatalf("ruleless IPv6 front retained confirmation state: %+v", activeState.orphanFrontsV6)
+			}
+			var frontValue tcFlowValueV6
+			if err := fixture.flows.Lookup(fixture.frontKey, &frontValue); !errors.Is(err, ebpf.ErrKeyNotExist) {
+				t.Fatalf("ruleless IPv6 front survived prune: value=%+v err=%v", frontValue, err)
+			}
+			var natValue tcNATPortValue
+			if err := fixture.nat.Lookup(fixture.natKey, &natValue); err != nil || natValue.SessionID != fixture.frontValue.SessionID {
+				t.Fatalf("ruleless IPv6 front changed NAT owner: value=%+v err=%v", natValue, err)
+			}
+		})
+	}
+}
+
+func TestPruneOrphanKernelFlowFrontProtectsUnavailableRuleMap(t *testing.T) {
+	t.Run("ipv4", func(t *testing.T) {
+		fixture := newOrphanFlowV4TestFixture(t, false, "active", false)
+		fixture.refs.rulesV4 = nil
+		live := fixture.snapshot(t)
+		activeState, oldState, _, err := pruneOrphanKernelFlowFrontBanks(
+			fixture.refs, live.OrphanFrontsByBank, kernelFlowPruneState{}, kernelFlowPruneState{},
+		)
+		if err != nil {
+			t.Fatalf("mark IPv4 front without rule map: %v", err)
+		}
+		activeState, _, deleted, err := pruneOrphanKernelFlowFrontBanks(
+			fixture.refs, live.OrphanFrontsByBank, activeState, oldState,
+		)
+		if err != nil || deleted != 0 {
+			t.Fatalf("unavailable IPv4 rule map deleted front: deleted=%d err=%v", deleted, err)
+		}
+		if len(activeState.orphanFrontsV4) != 1 {
+			t.Fatalf("unavailable IPv4 rule map confirmation state length = %d, want 1", len(activeState.orphanFrontsV4))
+		}
+		if _, ok, err := lookupKernelFlowValue(fixture.flows, fixture.frontKey); err != nil || !ok {
+			t.Fatalf("unavailable IPv4 rule map did not protect front: ok=%t err=%v", ok, err)
+		}
+	})
+
+	t.Run("ipv6", func(t *testing.T) {
+		fixture := newOrphanFlowV6TestFixture(t, false, "active")
+		fixture.refs.rulesV6 = nil
+		live := fixture.snapshot(t)
+		activeState, oldState, _, err := pruneOrphanKernelFlowFrontBanks(
+			fixture.refs, live.OrphanFrontsByBank, kernelFlowPruneState{}, kernelFlowPruneState{},
+		)
+		if err != nil {
+			t.Fatalf("mark IPv6 front without rule map: %v", err)
+		}
+		activeState, _, deleted, err := pruneOrphanKernelFlowFrontBanks(
+			fixture.refs, live.OrphanFrontsByBank, activeState, oldState,
+		)
+		if err != nil || deleted != 0 {
+			t.Fatalf("unavailable IPv6 rule map deleted front: deleted=%d err=%v", deleted, err)
+		}
+		if len(activeState.orphanFrontsV6) != 1 {
+			t.Fatalf("unavailable IPv6 rule map confirmation state length = %d, want 1", len(activeState.orphanFrontsV6))
+		}
+		var frontValue tcFlowValueV6
+		if err := fixture.flows.Lookup(fixture.frontKey, &frontValue); err != nil {
+			t.Fatalf("unavailable IPv6 rule map did not protect front: %v", err)
+		}
+	})
+}
+
 func TestPruneOrphanKernelFlowFrontProtectsReplyRebuiltAfterSnapshot(t *testing.T) {
 	for _, engine := range []struct {
 		name string

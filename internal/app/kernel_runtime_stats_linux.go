@@ -942,6 +942,9 @@ func deleteConfirmedOrphanKernelFlowFrontV4(
 	nowNS uint64,
 	haveNow bool,
 ) (int, bool, error) {
+	if rulesMap == nil {
+		return 0, true, nil
+	}
 	current, ok, err := lookupKernelFlowValue(flowsMap, candidate.key)
 	if err != nil {
 		return 0, true, fmt.Errorf("revalidate orphan front flow: %w", err)
@@ -954,7 +957,16 @@ func deleteConfirmedOrphanKernelFlowFrontV4(
 	if err != nil {
 		return 0, true, fmt.Errorf("resolve orphan front flow rule: %w", err)
 	}
-	if !ok || rule.RuleID != current.RuleID || rule.Revision != current.RuleRevision || rule.OutIfIndex == 0 {
+	if !ok {
+		if err := flowsMap.Delete(candidate.key); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				return 0, false, nil
+			}
+			return 0, true, fmt.Errorf("delete orphan front flow without rule: %w", err)
+		}
+		return 1, false, nil
+	}
+	if rule.RuleID != current.RuleID || rule.Revision != current.RuleRevision || rule.OutIfIndex == 0 {
 		return 0, true, nil
 	}
 
@@ -1000,6 +1012,9 @@ func deleteConfirmedOrphanKernelFlowFrontV6(
 	nowNS uint64,
 	haveNow bool,
 ) (int, bool, error) {
+	if rulesMap == nil {
+		return 0, true, nil
+	}
 	var current tcFlowValueV6
 	if flowsMap == nil {
 		return 0, false, nil
@@ -1018,7 +1033,16 @@ func deleteConfirmedOrphanKernelFlowFrontV6(
 	if err != nil {
 		return 0, true, fmt.Errorf("resolve IPv6 orphan front flow rule: %w", err)
 	}
-	if !ok || rule.RuleID != current.RuleID || rule.Revision != current.RuleRevision || rule.OutIfIndex == 0 {
+	if !ok {
+		if err := flowsMap.Delete(candidate.key); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				return 0, false, nil
+			}
+			return 0, true, fmt.Errorf("delete IPv6 orphan front flow without rule: %w", err)
+		}
+		return 1, false, nil
+	}
+	if rule.RuleID != current.RuleID || rule.Revision != current.RuleRevision || rule.OutIfIndex == 0 {
 		return 0, true, nil
 	}
 
