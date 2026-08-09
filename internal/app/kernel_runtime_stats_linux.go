@@ -30,6 +30,60 @@ type staleKernelFlowV6 struct {
 	value tcFlowValueV6
 }
 
+type kernelFlowSessionIdentity struct {
+	SessionID uint64
+	Proto     uint8
+}
+
+type kernelFlowPairTracker[T comparable] struct {
+	fronts  map[kernelFlowSessionIdentity][]T
+	replies map[kernelFlowSessionIdentity]struct{}
+}
+
+func (tracker *kernelFlowPairTracker[T]) observe(identity kernelFlowSessionIdentity, front bool, item T) {
+	if tracker == nil {
+		return
+	}
+	if !front {
+		if tracker.replies == nil {
+			tracker.replies = make(map[kernelFlowSessionIdentity]struct{})
+		}
+		tracker.replies[identity] = struct{}{}
+		delete(tracker.fronts, identity)
+		return
+	}
+	if _, paired := tracker.replies[identity]; paired {
+		return
+	}
+	if tracker.fronts == nil {
+		tracker.fronts = make(map[kernelFlowSessionIdentity][]T)
+	}
+	tracker.fronts[identity] = append(tracker.fronts[identity], item)
+}
+
+func (tracker kernelFlowPairTracker[T]) orphanFronts() map[T]struct{} {
+	var out map[T]struct{}
+	for identity, fronts := range tracker.fronts {
+		if _, paired := tracker.replies[identity]; paired {
+			continue
+		}
+		if out == nil {
+			out = make(map[T]struct{})
+		}
+		for _, front := range fronts {
+			out[front] = struct{}{}
+		}
+	}
+	return out
+}
+
+type kernelFlowOrphanBankSnapshot struct {
+	activeV4 map[staleKernelFlow]struct{}
+	oldV4    map[staleKernelFlow]struct{}
+	activeV6 map[staleKernelFlowV6]struct{}
+	oldV6    map[staleKernelFlowV6]struct{}
+}
+
 func kernelFlowValueFromXDP(value xdpFlowValueV4) tcFlowValueV4 {
 	return tcFlowValueV4{
 		RuleID:           value.RuleID,
@@ -71,6 +125,8 @@ type kernelFlowPruneState struct {
 	values            []tcFlowValueV4
 	xdpValues         []xdpFlowValueV4
 	valuesV6          []tcFlowValueV6
+	orphanFrontsV4    map[staleKernelFlow]struct{}
+	orphanFrontsV6    map[staleKernelFlowV6]struct{}
 }
 
 type kernelNATPruneState struct {
@@ -400,6 +456,7 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		out.NATByBank.activeV4 = live.UsedNATV4
+		out.OrphanFrontsByBank.activeV4 = live.orphanFrontsV4
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV4 != nil {
@@ -408,6 +465,7 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		out.NATByBank.oldV4 = live.UsedNATV4
+		out.OrphanFrontsByBank.oldV4 = live.orphanFrontsV4
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsV6 != nil {
@@ -416,6 +474,7 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		out.NATByBank.activeV6 = live.UsedNATV6
+		out.OrphanFrontsByBank.activeV6 = live.orphanFrontsV6
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV6 != nil {
@@ -424,6 +483,7 @@ func snapshotKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, includ
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		out.NATByBank.oldV6 = live.UsedNATV6
+		out.OrphanFrontsByBank.oldV6 = live.orphanFrontsV6
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	return out, nil
@@ -438,6 +498,7 @@ func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, inc
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		out.NATByBank.activeV4 = live.UsedNATV4
+		out.OrphanFrontsByBank.activeV4 = live.orphanFrontsV4
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV4 != nil {
@@ -446,6 +507,7 @@ func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, inc
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		out.NATByBank.oldV4 = live.UsedNATV4
+		out.OrphanFrontsByBank.oldV4 = live.orphanFrontsV4
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsV6 != nil {
@@ -454,6 +516,7 @@ func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, inc
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		out.NATByBank.activeV6 = live.UsedNATV6
+		out.OrphanFrontsByBank.activeV6 = live.orphanFrontsV6
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	if refs.flowsOldV6 != nil {
@@ -462,6 +525,7 @@ func snapshotXDPKernelLiveStateFromRuntimeMapRefs(refs kernelRuntimeMapRefs, inc
 			return kernelFlowLiveStateSnapshot{}, err
 		}
 		out.NATByBank.oldV6 = live.UsedNATV6
+		out.OrphanFrontsByBank.oldV6 = live.orphanFrontsV6
 		mergeKernelLiveStateSnapshot(&out, live)
 	}
 	return out, nil
@@ -476,8 +540,16 @@ func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, in
 	iter := flowsMap.Iterate()
 	var key tcFlowKeyV4
 	var value tcFlowValueV4
+	var pairs kernelFlowPairTracker[staleKernelFlow]
 	for iter.Next(&key, &value) {
 		out.FlowEntries++
+		if value.Flags&kernelFlowFlagFullNAT != 0 {
+			pairs.observe(
+				kernelFlowSessionIdentity{SessionID: value.SessionID, Proto: key.Proto},
+				value.Flags&kernelFlowFlagFrontEntry != 0,
+				staleKernelFlow{key: key, value: value},
+			)
+		}
 		if includeNAT {
 			if owner, ok := kernelUsedNATReservation(value.SessionID, rulesMap, key, value); ok {
 				out.UsedNATV4[owner] = struct{}{}
@@ -499,6 +571,7 @@ func snapshotKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map, in
 	if err := iter.Err(); err != nil {
 		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate kernel flows map for live counts: %w", err)
 	}
+	out.orphanFrontsV4 = pairs.orphanFronts()
 	return out, nil
 }
 
@@ -511,9 +584,17 @@ func snapshotXDPKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map,
 	iter := flowsMap.Iterate()
 	var key tcFlowKeyV4
 	var raw xdpFlowValueV4
+	var pairs kernelFlowPairTracker[staleKernelFlow]
 	for iter.Next(&key, &raw) {
 		value := kernelFlowValueFromXDP(raw)
 		out.FlowEntries++
+		if value.Flags&kernelFlowFlagFullNAT != 0 {
+			pairs.observe(
+				kernelFlowSessionIdentity{SessionID: value.SessionID, Proto: key.Proto},
+				value.Flags&kernelFlowFlagFrontEntry != 0,
+				staleKernelFlow{key: key, value: value},
+			)
+		}
 		if includeNAT {
 			if owner, ok := kernelUsedNATReservation(value.SessionID, rulesMap, key, value); ok {
 				out.UsedNATV4[owner] = struct{}{}
@@ -535,6 +616,7 @@ func snapshotXDPKernelLiveStateFromFlows(rulesMap *ebpf.Map, flowsMap *ebpf.Map,
 	if err := iter.Err(); err != nil {
 		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate xdp flows map for live counts: %w", err)
 	}
+	out.orphanFrontsV4 = pairs.orphanFronts()
 	return out, nil
 }
 
@@ -547,8 +629,16 @@ func snapshotKernelLiveStateFromFlowsV6(rulesMap *ebpf.Map, flowsMap *ebpf.Map, 
 	iter := flowsMap.Iterate()
 	var key tcFlowKeyV6
 	var value tcFlowValueV6
+	var pairs kernelFlowPairTracker[staleKernelFlowV6]
 	for iter.Next(&key, &value) {
 		out.FlowEntries++
+		if value.Flags&kernelFlowFlagFullNAT != 0 {
+			pairs.observe(
+				kernelFlowSessionIdentity{SessionID: value.SessionID, Proto: key.Proto},
+				value.Flags&kernelFlowFlagFrontEntry != 0,
+				staleKernelFlowV6{key: key, value: value},
+			)
+		}
 		if includeNAT {
 			if owner, ok := kernelUsedNATReservationV6(value.SessionID, rulesMap, key, value); ok {
 				out.UsedNATV6[owner] = struct{}{}
@@ -570,6 +660,7 @@ func snapshotKernelLiveStateFromFlowsV6(rulesMap *ebpf.Map, flowsMap *ebpf.Map, 
 	if err := iter.Err(); err != nil {
 		return kernelFlowLiveStateSnapshot{}, fmt.Errorf("iterate kernel ipv6 flows map for live counts: %w", err)
 	}
+	out.orphanFrontsV6 = pairs.orphanFronts()
 	return out, nil
 }
 
@@ -662,6 +753,286 @@ func kernelDatagramFlowIdleTimeout(proto uint8) uint64 {
 		return kernelICMPFlowIdleTimeout
 	}
 	return kernelUDPFlowIdleTimeout
+}
+
+func pruneOrphanKernelFlowFrontBanks(
+	refs kernelRuntimeMapRefs,
+	snapshot kernelFlowOrphanBankSnapshot,
+	activeState kernelFlowPruneState,
+	oldState kernelFlowPruneState,
+) (kernelFlowPruneState, kernelFlowPruneState, int, error) {
+	nowNS, haveNow := kernelMonotonicNowNS()
+	deleted := 0
+
+	next, count, err := pruneOrphanKernelFlowFrontsV4(
+		refs.rulesV4,
+		refs.flowsV4,
+		refs.natV4,
+		snapshot.activeV4,
+		activeState.orphanFrontsV4,
+		nowNS,
+		haveNow,
+	)
+	activeState.orphanFrontsV4 = next
+	deleted += count
+	if err != nil {
+		return activeState, oldState, deleted, fmt.Errorf("prune active IPv4 orphan flow fronts: %w", err)
+	}
+
+	next, count, err = pruneOrphanKernelFlowFrontsV4(
+		refs.rulesV4,
+		refs.flowsOldV4,
+		refs.natOldV4,
+		snapshot.oldV4,
+		oldState.orphanFrontsV4,
+		nowNS,
+		haveNow,
+	)
+	oldState.orphanFrontsV4 = next
+	deleted += count
+	if err != nil {
+		return activeState, oldState, deleted, fmt.Errorf("prune old IPv4 orphan flow fronts: %w", err)
+	}
+
+	nextV6, count, err := pruneOrphanKernelFlowFrontsV6(
+		refs.rulesV6,
+		refs.flowsV6,
+		refs.natV6,
+		snapshot.activeV6,
+		activeState.orphanFrontsV6,
+		nowNS,
+		haveNow,
+	)
+	activeState.orphanFrontsV6 = nextV6
+	deleted += count
+	if err != nil {
+		return activeState, oldState, deleted, fmt.Errorf("prune active IPv6 orphan flow fronts: %w", err)
+	}
+
+	nextV6, count, err = pruneOrphanKernelFlowFrontsV6(
+		refs.rulesV6,
+		refs.flowsOldV6,
+		refs.natOldV6,
+		snapshot.oldV6,
+		oldState.orphanFrontsV6,
+		nowNS,
+		haveNow,
+	)
+	oldState.orphanFrontsV6 = nextV6
+	deleted += count
+	if err != nil {
+		return activeState, oldState, deleted, fmt.Errorf("prune old IPv6 orphan flow fronts: %w", err)
+	}
+
+	return activeState, oldState, deleted, nil
+}
+
+func pruneOrphanKernelFlowFrontsV4(
+	rulesMap, flowsMap, natPortsMap *ebpf.Map,
+	current map[staleKernelFlow]struct{},
+	previous map[staleKernelFlow]struct{},
+	nowNS uint64,
+	haveNow bool,
+) (map[staleKernelFlow]struct{}, int, error) {
+	if flowsMap == nil || len(current) == 0 {
+		return nil, 0, nil
+	}
+
+	next := make(map[staleKernelFlow]struct{})
+	deleted := 0
+	for candidate := range current {
+		if !kernelOrphanFrontShouldDelete(candidate.key, candidate.value, nowNS, haveNow) {
+			continue
+		}
+		next[candidate] = struct{}{}
+		if _, confirmedBefore := previous[candidate]; !confirmedBefore {
+			continue
+		}
+
+		count, keep, err := deleteConfirmedOrphanKernelFlowFrontV4(rulesMap, flowsMap, natPortsMap, candidate, nowNS, haveNow)
+		deleted += count
+		if !keep {
+			delete(next, candidate)
+		}
+		if err != nil {
+			return next, deleted, err
+		}
+	}
+	if len(next) == 0 {
+		next = nil
+	}
+	return next, deleted, nil
+}
+
+func pruneOrphanKernelFlowFrontsV6(
+	rulesMap, flowsMap, natPortsMap *ebpf.Map,
+	current map[staleKernelFlowV6]struct{},
+	previous map[staleKernelFlowV6]struct{},
+	nowNS uint64,
+	haveNow bool,
+) (map[staleKernelFlowV6]struct{}, int, error) {
+	if flowsMap == nil || len(current) == 0 {
+		return nil, 0, nil
+	}
+
+	next := make(map[staleKernelFlowV6]struct{})
+	deleted := 0
+	for candidate := range current {
+		if !kernelOrphanFrontShouldDeleteV6(candidate.key, candidate.value, nowNS, haveNow) {
+			continue
+		}
+		next[candidate] = struct{}{}
+		if _, confirmedBefore := previous[candidate]; !confirmedBefore {
+			continue
+		}
+
+		count, keep, err := deleteConfirmedOrphanKernelFlowFrontV6(rulesMap, flowsMap, natPortsMap, candidate, nowNS, haveNow)
+		deleted += count
+		if !keep {
+			delete(next, candidate)
+		}
+		if err != nil {
+			return next, deleted, err
+		}
+	}
+	if len(next) == 0 {
+		next = nil
+	}
+	return next, deleted, nil
+}
+
+func kernelOrphanFrontShouldDelete(key tcFlowKeyV4, value tcFlowValueV4, nowNS uint64, haveNow bool) bool {
+	if value.Flags&(kernelFlowFlagFullNAT|kernelFlowFlagFrontEntry) != (kernelFlowFlagFullNAT | kernelFlowFlagFrontEntry) {
+		return false
+	}
+	value.Flags &^= kernelFlowFlagFrontEntry
+	return kernelFlowDeleteReason(key, value, nowNS, haveNow) != ""
+}
+
+func kernelOrphanFrontShouldDeleteV6(key tcFlowKeyV6, value tcFlowValueV6, nowNS uint64, haveNow bool) bool {
+	if value.Flags&(kernelFlowFlagFullNAT|kernelFlowFlagFrontEntry) != (kernelFlowFlagFullNAT | kernelFlowFlagFrontEntry) {
+		return false
+	}
+	value.Flags &^= kernelFlowFlagFrontEntry
+	return kernelFlowShouldDeleteV6(key, value, nowNS, haveNow)
+}
+
+func deleteConfirmedOrphanKernelFlowFrontV4(
+	rulesMap, flowsMap, natPortsMap *ebpf.Map,
+	candidate staleKernelFlow,
+	nowNS uint64,
+	haveNow bool,
+) (int, bool, error) {
+	current, ok, err := lookupKernelFlowValue(flowsMap, candidate.key)
+	if err != nil {
+		return 0, true, fmt.Errorf("revalidate orphan front flow: %w", err)
+	}
+	if !ok || current != candidate.value || !kernelOrphanFrontShouldDelete(candidate.key, current, nowNS, haveNow) {
+		return 0, false, nil
+	}
+
+	rule, ok, err := lookupRuleValueForFrontFlowWithError(rulesMap, candidate.key)
+	if err != nil {
+		return 0, true, fmt.Errorf("resolve orphan front flow rule: %w", err)
+	}
+	if !ok || rule.RuleID != current.RuleID || rule.Revision != current.RuleRevision || rule.OutIfIndex == 0 {
+		return 0, true, nil
+	}
+
+	replyKey := tcFlowKeyV4{
+		IfIndex: rule.OutIfIndex,
+		DstAddr: current.NATAddr,
+		DstPort: current.NATPort,
+		Proto:   candidate.key.Proto,
+	}
+	if rule.Flags&kernelRuleFlagEgressNAT != 0 {
+		replyKey.SrcAddr = current.FrontAddr
+		replyKey.SrcPort = current.FrontPort
+	} else {
+		replyKey.SrcAddr = rule.BackendAddr
+		replyKey.SrcPort = rule.BackendPort
+	}
+	pair, pairOK, err := lookupKernelFlowValue(flowsMap, replyKey)
+	if err != nil {
+		return 0, true, fmt.Errorf("revalidate orphan front reply flow: %w", err)
+	}
+	if pairOK && pair.SessionID == current.SessionID {
+		return 0, false, nil
+	}
+
+	if err := flowsMap.Delete(candidate.key); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, false, nil
+		}
+		return 0, true, fmt.Errorf("delete orphan front flow: %w", err)
+	}
+	deleteStaleKernelNATReservation(natPortsMap, tcNATPortKeyV4{
+		IfIndex: rule.OutIfIndex,
+		NATAddr: current.NATAddr,
+		NATPort: current.NATPort,
+		Proto:   candidate.key.Proto,
+	}, current.SessionID)
+	return 1, false, nil
+}
+
+func deleteConfirmedOrphanKernelFlowFrontV6(
+	rulesMap, flowsMap, natPortsMap *ebpf.Map,
+	candidate staleKernelFlowV6,
+	nowNS uint64,
+	haveNow bool,
+) (int, bool, error) {
+	var current tcFlowValueV6
+	if flowsMap == nil {
+		return 0, false, nil
+	}
+	if err := flowsMap.Lookup(candidate.key, &current); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, false, nil
+		}
+		return 0, true, fmt.Errorf("revalidate IPv6 orphan front flow: %w", err)
+	}
+	if current != candidate.value || !kernelOrphanFrontShouldDeleteV6(candidate.key, current, nowNS, haveNow) {
+		return 0, false, nil
+	}
+
+	rule, ok, err := lookupRuleValueForFrontFlowV6WithError(rulesMap, candidate.key)
+	if err != nil {
+		return 0, true, fmt.Errorf("resolve IPv6 orphan front flow rule: %w", err)
+	}
+	if !ok || rule.RuleID != current.RuleID || rule.Revision != current.RuleRevision || rule.OutIfIndex == 0 {
+		return 0, true, nil
+	}
+
+	replyKey := tcFlowKeyV6{
+		IfIndex: rule.OutIfIndex,
+		SrcAddr: rule.BackendAddr,
+		DstAddr: current.NATAddr,
+		SrcPort: rule.BackendPort,
+		DstPort: current.NATPort,
+		Proto:   candidate.key.Proto,
+	}
+	var pair tcFlowValueV6
+	if err := flowsMap.Lookup(replyKey, &pair); err == nil {
+		if pair.SessionID == current.SessionID {
+			return 0, false, nil
+		}
+	} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return 0, true, fmt.Errorf("revalidate IPv6 orphan front reply flow: %w", err)
+	}
+
+	if err := flowsMap.Delete(candidate.key); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, false, nil
+		}
+		return 0, true, fmt.Errorf("delete IPv6 orphan front flow: %w", err)
+	}
+	deleteStaleKernelNATReservationV6(natPortsMap, tcNATPortKeyV6{
+		IfIndex: rule.OutIfIndex,
+		NATAddr: current.NATAddr,
+		NATPort: current.NATPort,
+		Proto:   candidate.key.Proto,
+	}, current.SessionID)
+	return 1, false, nil
 }
 
 func kernelLiveStatsCorrection(observed map[uint32]kernelStatsValueV4, live map[uint32]kernelStatsValueV4) map[uint32]kernelRuleStats {
@@ -1008,6 +1379,8 @@ func (state *kernelFlowPruneState) reset() {
 	state.values = nil
 	state.xdpValues = nil
 	state.valuesV6 = nil
+	state.orphanFrontsV4 = nil
+	state.orphanFrontsV6 = nil
 }
 
 func (state *kernelFlowPruneState) ensureBuffers(size int) ([]tcFlowKeyV4, []tcFlowValueV4) {
@@ -1765,8 +2138,13 @@ func lookupKernelFlowValue(flowsMap *ebpf.Map, key tcFlowKeyV4) (tcFlowValueV4, 
 }
 
 func lookupRuleValueForFrontFlow(rulesMap *ebpf.Map, frontKey tcFlowKeyV4) (tcRuleValueV4, bool) {
+	value, ok, _ := lookupRuleValueForFrontFlowWithError(rulesMap, frontKey)
+	return value, ok
+}
+
+func lookupRuleValueForFrontFlowWithError(rulesMap *ebpf.Map, frontKey tcFlowKeyV4) (tcRuleValueV4, bool, error) {
 	if rulesMap == nil {
-		return tcRuleValueV4{}, false
+		return tcRuleValueV4{}, false, nil
 	}
 
 	ruleKey := tcRuleKeyV4{
@@ -1775,25 +2153,32 @@ func lookupRuleValueForFrontFlow(rulesMap *ebpf.Map, frontKey tcFlowKeyV4) (tcRu
 		DstPort: frontKey.DstPort,
 		Proto:   frontKey.Proto,
 	}
-	var ruleValue tcRuleValueV4
-	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
-		return ruleValue, true
+	ruleValue, ok, err := lookupKernelRuleValueV4(rulesMap, ruleKey)
+	if err != nil || ok {
+		return ruleValue, ok, err
 	}
 
 	ruleKey.DstAddr = 0
-	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
-		return ruleValue, true
+	ruleValue, ok, err = lookupKernelRuleValueV4(rulesMap, ruleKey)
+	if err != nil || ok {
+		return ruleValue, ok, err
 	}
 	ruleKey.DstPort = 0
-	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
-		return ruleValue, true
+	ruleValue, ok, err = lookupKernelRuleValueV4(rulesMap, ruleKey)
+	if err != nil || ok {
+		return ruleValue, ok, err
 	}
-	return tcRuleValueV4{}, false
+	return tcRuleValueV4{}, false, nil
 }
 
 func lookupRuleValueForFrontFlowV6(rulesMap *ebpf.Map, frontKey tcFlowKeyV6) (tcRuleValueV6, bool) {
+	value, ok, _ := lookupRuleValueForFrontFlowV6WithError(rulesMap, frontKey)
+	return value, ok
+}
+
+func lookupRuleValueForFrontFlowV6WithError(rulesMap *ebpf.Map, frontKey tcFlowKeyV6) (tcRuleValueV6, bool, error) {
 	if rulesMap == nil {
-		return tcRuleValueV6{}, false
+		return tcRuleValueV6{}, false, nil
 	}
 
 	ruleKey := tcRuleKeyV6{
@@ -1802,25 +2187,103 @@ func lookupRuleValueForFrontFlowV6(rulesMap *ebpf.Map, frontKey tcFlowKeyV6) (tc
 		DstPort: frontKey.DstPort,
 		Proto:   frontKey.Proto,
 	}
-	var ruleValue tcRuleValueV6
-	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
-		return ruleValue, true
+	ruleValue, ok, err := lookupKernelRuleValueV6(rulesMap, ruleKey)
+	if err != nil || ok {
+		return ruleValue, ok, err
 	}
 
 	ruleKey.DstAddr = [16]byte{}
-	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
-		return ruleValue, true
+	ruleValue, ok, err = lookupKernelRuleValueV6(rulesMap, ruleKey)
+	if err != nil || ok {
+		return ruleValue, ok, err
 	}
 	ruleKey.DstAddr = frontKey.DstAddr
 	ruleKey.DstPort = 0
-	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
-		return ruleValue, true
+	ruleValue, ok, err = lookupKernelRuleValueV6(rulesMap, ruleKey)
+	if err != nil || ok {
+		return ruleValue, ok, err
 	}
 	ruleKey.DstAddr = [16]byte{}
-	if err := rulesMap.Lookup(ruleKey, &ruleValue); err == nil {
-		return ruleValue, true
+	ruleValue, ok, err = lookupKernelRuleValueV6(rulesMap, ruleKey)
+	if err != nil || ok {
+		return ruleValue, ok, err
 	}
-	return tcRuleValueV6{}, false
+	return tcRuleValueV6{}, false, nil
+}
+
+func lookupKernelRuleValueV4(rulesMap *ebpf.Map, key tcRuleKeyV4) (tcRuleValueV4, bool, error) {
+	if rulesMap == nil {
+		return tcRuleValueV4{}, false, nil
+	}
+	if rulesMap.ValueSize() == uint32(binary.Size(xdpRuleValueV4{})) {
+		var raw xdpRuleValueV4
+		if err := rulesMap.Lookup(key, &raw); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				return tcRuleValueV4{}, false, nil
+			}
+			return tcRuleValueV4{}, false, err
+		}
+		return tcRuleValueV4{
+			RuleID:      raw.RuleID,
+			BackendAddr: raw.BackendAddr,
+			BackendPort: raw.BackendPort,
+			Flags:       normalizeXDPKernelRuleFlags(raw.Flags),
+			OutIfIndex:  raw.OutIfIndex,
+			NATAddr:     raw.NATAddr,
+			SrcMAC:      raw.SrcMAC,
+			DstMAC:      raw.DstMAC,
+			Revision:    raw.Revision,
+		}, true, nil
+	}
+
+	var value tcRuleValueV4
+	if err := rulesMap.Lookup(key, &value); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return tcRuleValueV4{}, false, nil
+		}
+		return tcRuleValueV4{}, false, err
+	}
+	return value, true, nil
+}
+
+func lookupKernelRuleValueV6(rulesMap *ebpf.Map, key tcRuleKeyV6) (tcRuleValueV6, bool, error) {
+	if rulesMap == nil {
+		return tcRuleValueV6{}, false, nil
+	}
+
+	// TC and XDP IPv6 rule values intentionally share a binary layout. The
+	// orphan cleanup only consumes their common identity and address fields.
+	var value tcRuleValueV6
+	if err := rulesMap.Lookup(key, &value); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return tcRuleValueV6{}, false, nil
+		}
+		return tcRuleValueV6{}, false, err
+	}
+	return value, true, nil
+}
+
+func normalizeXDPKernelRuleFlags(flags uint16) uint16 {
+	var normalized uint16
+	if flags&xdpRuleFlagFullNAT != 0 {
+		normalized |= kernelRuleFlagFullNAT
+	}
+	if flags&xdpRuleFlagBridgeL2 != 0 {
+		normalized |= kernelRuleFlagBridgeL2
+	}
+	if flags&xdpRuleFlagTrafficStats != 0 {
+		normalized |= kernelRuleFlagTrafficStats
+	}
+	if flags&xdpRuleFlagEgressNAT != 0 {
+		normalized |= kernelRuleFlagEgressNAT
+	}
+	if flags&xdpRuleFlagFullCone != 0 {
+		normalized |= kernelRuleFlagFullCone
+	}
+	if flags&xdpRuleFlagPreparedL2 != 0 {
+		normalized |= kernelRuleFlagPreparedL2
+	}
+	return normalized
 }
 
 func deleteStaleKernelNATReservation(natPortsMap *ebpf.Map, natKey tcNATPortKeyV4, sessionID uint64) {

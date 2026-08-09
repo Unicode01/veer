@@ -1693,6 +1693,22 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					driftDetected = !kernelStatsCorrectionsEqual(statsCorrection, exact)
 					syncKernelLiveStatsCorrections(statsCorrection, exact)
 				}
+				nextFlowPruneState, nextOldFlowPruneState, orphanFlowDeleted, orphanFlowErr := pruneOrphanKernelFlowFrontBanks(
+					refs,
+					live.OrphanFrontsByBank,
+					flowPruneState,
+					oldFlowPruneState,
+				)
+				flowPruneState = nextFlowPruneState
+				oldFlowPruneState = nextOldFlowPruneState
+				pruneMetrics.Deleted += orphanFlowDeleted
+				if orphanFlowErr != nil {
+					fullSuccess = false
+					log.Printf("kernel dataplane maintenance: prune orphan tc flow fronts failed: %v", orphanFlowErr)
+				} else if orphanFlowDeleted > 0 {
+					driftDetected = true
+					log.Printf("kernel dataplane maintenance: pruned %d orphan tc flow front(s)", orphanFlowDeleted)
+				}
 				natEntries, deleted, nextNATPruneState, natErr := pruneOrphanKernelNATBanks(refs, live.NATByBank, natPruneState)
 				if natErr != nil {
 					fullSuccess = false
@@ -1711,7 +1727,8 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					rt.orphanNATPruneLog.Reset()
 				}
 				if fullSuccess {
-					if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, live.FlowEntries, natEntries); syncErr != nil {
+					flowEntries := max(live.FlowEntries-orphanFlowDeleted, 0)
+					if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, flowEntries, natEntries); syncErr != nil {
 						fullSuccess = false
 						log.Printf("kernel dataplane maintenance: sync tc occupancy counters failed: %v", syncErr)
 					}

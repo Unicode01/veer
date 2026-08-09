@@ -19,11 +19,14 @@ type kernelOccupancyValueV4 struct {
 }
 
 type kernelFlowLiveStateSnapshot struct {
-	ByRuleID    map[uint32]kernelStatsValueV4
-	UsedNATV4   map[kernelNATReservationOwnerV4]struct{}
-	UsedNATV6   map[kernelNATReservationOwnerV6]struct{}
-	NATByBank   kernelNATBankUsage
-	FlowEntries int
+	ByRuleID           map[uint32]kernelStatsValueV4
+	UsedNATV4          map[kernelNATReservationOwnerV4]struct{}
+	UsedNATV6          map[kernelNATReservationOwnerV6]struct{}
+	NATByBank          kernelNATBankUsage
+	OrphanFrontsByBank kernelFlowOrphanBankSnapshot
+	FlowEntries        int
+	orphanFrontsV4     map[staleKernelFlow]struct{}
+	orphanFrontsV6     map[staleKernelFlowV6]struct{}
 }
 
 type kernelNATBankUsage struct {

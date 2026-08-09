@@ -1133,6 +1133,22 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 					driftDetected = !kernelStatsCorrectionsEqual(statsCorrection, exact)
 					syncKernelLiveStatsCorrections(statsCorrection, exact)
 				}
+				nextFlowPruneState, nextOldFlowPruneState, orphanFlowDeleted, orphanFlowErr := pruneOrphanKernelFlowFrontBanks(
+					refs,
+					live.OrphanFrontsByBank,
+					flowPruneState,
+					oldFlowPruneState,
+				)
+				flowPruneState = nextFlowPruneState
+				oldFlowPruneState = nextOldFlowPruneState
+				pruneMetrics.Deleted += orphanFlowDeleted
+				if orphanFlowErr != nil {
+					fullSuccess = false
+					log.Printf("xdp dataplane maintenance: prune orphan xdp flow fronts failed: %v", orphanFlowErr)
+				} else if orphanFlowDeleted > 0 {
+					driftDetected = true
+					log.Printf("xdp dataplane maintenance: pruned %d orphan xdp flow front(s)", orphanFlowDeleted)
+				}
 				natEntries, deleted, nextNATPruneState, natErr := pruneOrphanKernelNATBanks(refs, live.NATByBank, natPruneState)
 				if natErr != nil {
 					fullSuccess = false
@@ -1147,7 +1163,8 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 					log.Printf("xdp dataplane maintenance: pruned %d orphan xdp nat reservation(s)", deleted)
 				}
 				if fullSuccess {
-					if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, live.FlowEntries, natEntries); syncErr != nil {
+					flowEntries := max(live.FlowEntries-orphanFlowDeleted, 0)
+					if syncErr := syncKernelOccupancyMapForRuntimeRefs(refs, flowEntries, natEntries); syncErr != nil {
 						fullSuccess = false
 						log.Printf("xdp dataplane maintenance: sync xdp occupancy counters failed: %v", syncErr)
 					}
