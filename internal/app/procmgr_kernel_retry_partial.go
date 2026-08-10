@@ -23,6 +23,7 @@ type kernelIncrementalRetryResult struct {
 	recoveredRuleOwners  int
 	recoveredRangeOwners int
 	recoveredEgressNATs  int
+	deferredEgressNATs   int
 	cooldownRuleOwners   int
 	cooldownRangeOwners  int
 	cooldownEgressNATs   int
@@ -265,6 +266,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	unmatchedRuleFallbackPlans := make(map[int64]ruleDataplanePlan)
 	unmatchedRangeFallbackPlans := make(map[int64]rangeDataplanePlan)
 	unmatchedEgressNATFallbackPlans := make(map[int64]ruleDataplanePlan)
+	previousEgressNATPlans := make(map[int64]ruleDataplanePlan)
 	var cooldownUntil map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState
 	var failureCounts map[kernelCandidateOwner]int
 	cooldownRuleOwners := 0
@@ -365,6 +367,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		}
 	}
 	for id, plan := range pm.egressNATPlans {
+		previousEgressNATPlans[id] = plan
 		owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: id}
 		matched := false
 		switch {
@@ -596,6 +599,24 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		return result
 	}
 	activeCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
+	currentKernelAssignments := pm.kernelRuntime.SnapshotAssignments()
+	deferredDesiredByOwner, deferredOwners := preserveTransientDynamicEgressNATOwners(
+		trigger,
+		egressNATs,
+		egressNATSnapshot,
+		currentKernelEgressNATs,
+		retryOwners,
+		previousEgressNATPlans,
+		egressNATPlans,
+		groupKernelCandidatesByOwner(activeCandidates),
+		pm.kernelRuntime,
+		currentKernelAssignments,
+	)
+	if len(deferredOwners) > 0 {
+		result.deferredEgressNATs = len(deferredOwners)
+		pm.requestKernelEgressNATStableRecheck(managedNetworkReloadDebounce)
+	}
+	kernelMutationRetryOwners := kernelCandidateOwnerSetExcluding(retryOwners, deferredOwners)
 	matchedActiveLinkCandidates := filterLinkTriggeredActiveKernelCandidates(
 		trigger,
 		activeCandidates,
@@ -645,7 +666,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	retryCandidates := filterKernelCandidatesByOwners(activeCandidates, retryOwners, rulePlans, rangePlans, egressNATPlans)
 	result.attemptedRuleOwners, result.attemptedRangeOwners, result.attemptedEgressNATs = countKernelCandidateOwnersByKind(retryCandidates)
 	retryRequiresKernelMutation := hasActiveKernelOwnersMatchingRetryOwners(
-		retryOwners,
+		kernelMutationRetryOwners,
 		currentKernelRules,
 		currentKernelRanges,
 		currentKernelEgressNATs,
@@ -661,19 +682,20 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 			result.detail = "incremental kernel retry cannot retain current kernel owners"
 			return result
 		}
+		desiredByOwner := mergeKernelCandidateGroups(groupKernelCandidatesByOwner(activeCandidates), deferredDesiredByOwner)
 		retainedByEngine, retainedCandidates, retainedSummary, err = buildRetainedKernelAssignments(
 			rules,
 			ranges,
 			egressNATs,
-			filterCurrentKernelOwnerIDsExcluding(currentKernelRules, retryOwners, workerKindRule),
-			filterCurrentKernelOwnerIDsExcluding(currentKernelRanges, retryOwners, workerKindRange),
-			filterCurrentKernelOwnerIDsExcluding(currentKernelEgressNATs, retryOwners, workerKindEgressNAT),
+			filterCurrentKernelOwnerIDsExcluding(currentKernelRules, kernelMutationRetryOwners, workerKindRule),
+			filterCurrentKernelOwnerIDsExcluding(currentKernelRanges, kernelMutationRetryOwners, workerKindRange),
+			filterCurrentKernelOwnerIDsExcluding(currentKernelEgressNATs, kernelMutationRetryOwners, workerKindEgressNAT),
 			rulePlans,
 			rangePlans,
 			egressNATPlans,
-			groupKernelCandidatesByOwner(activeCandidates),
+			desiredByOwner,
 			retainer,
-			pm.kernelRuntime.SnapshotAssignments(),
+			currentKernelAssignments,
 		)
 		if err != nil {
 			result.handled = false
@@ -688,12 +710,13 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 
 	if len(retryCandidates) == 0 && !retryRequiresKernelMutation {
 		result.detail = fmt.Sprintf(
-			"incremental retry found no recoverable owners under current policy (retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d)%s%s",
+			"incremental retry found no recoverable owners under current policy (retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d)%s%s%s",
 			result.retainedRuleOwners,
 			result.retainedRangeOwners,
 			result.retainedEgressNATs,
 			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
 			kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
+			kernelIncrementalRetryDeferredEgressNATDetailSuffix(result.deferredEgressNATs),
 		)
 		pm.mu.Lock()
 		pm.kernelNetlinkOwnerRetryCooldownUntil = syncKernelNetlinkOwnerRetryCooldowns(cooldownUntil, time.Now(), rulePlans, rangePlans, egressNATPlans)
@@ -857,7 +880,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	if result.recoveredRuleOwners == 0 && result.recoveredRangeOwners == 0 && result.recoveredEgressNATs == 0 {
 		if result.attemptedEgressNATs > 0 {
 			result.detail = fmt.Sprintf(
-				"incremental retry refreshed egress_nat_owners=%d entries=%d retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d%s%s%s",
+				"incremental retry refreshed egress_nat_owners=%d entries=%d retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d%s%s%s%s",
 				result.attemptedEgressNATs,
 				len(activeRetryCandidates),
 				result.retainedRuleOwners,
@@ -866,22 +889,24 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 				kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
 				kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
 				kernelIncrementalRetryBackoffDetailSuffix(result.backoffRuleOwners, result.backoffRangeOwners, result.backoffEgressNATs, result.backoffSummary, result.backoffMaxFailures, result.backoffMaxDuration),
+				kernelIncrementalRetryDeferredEgressNATDetailSuffix(result.deferredEgressNATs),
 			)
 			return result
 		}
 		result.detail = fmt.Sprintf(
-			"incremental retry completed without recovered owners (retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d)%s%s%s",
+			"incremental retry completed without recovered owners (retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d)%s%s%s%s",
 			result.retainedRuleOwners,
 			result.retainedRangeOwners,
 			result.retainedEgressNATs,
 			kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
 			kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
 			kernelIncrementalRetryBackoffDetailSuffix(result.backoffRuleOwners, result.backoffRangeOwners, result.backoffEgressNATs, result.backoffSummary, result.backoffMaxFailures, result.backoffMaxDuration),
+			kernelIncrementalRetryDeferredEgressNATDetailSuffix(result.deferredEgressNATs),
 		)
 		return result
 	}
 	result.detail = fmt.Sprintf(
-		"incremental retry recovered rule_owners=%d range_owners=%d egress_nat_owners=%d entries=%d retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d%s%s%s",
+		"incremental retry recovered rule_owners=%d range_owners=%d egress_nat_owners=%d entries=%d retained_rule_owners=%d retained_range_owners=%d retained_egress_nat_owners=%d%s%s%s%s",
 		result.recoveredRuleOwners,
 		result.recoveredRangeOwners,
 		result.recoveredEgressNATs,
@@ -892,8 +917,102 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		kernelIncrementalRetryCooldownDetailSuffix(result.cooldownRuleOwners, result.cooldownRangeOwners, result.cooldownEgressNATs),
 		kernelIncrementalRetryCooldownSummaryDetailSuffix(result.cooldownSummary),
 		kernelIncrementalRetryBackoffDetailSuffix(result.backoffRuleOwners, result.backoffRangeOwners, result.backoffEgressNATs, result.backoffSummary, result.backoffMaxFailures, result.backoffMaxDuration),
+		kernelIncrementalRetryDeferredEgressNATDetailSuffix(result.deferredEgressNATs),
 	)
 	return result
+}
+
+func preserveTransientDynamicEgressNATOwners(
+	trigger kernelNetlinkRecoveryTrigger,
+	items []EgressNAT,
+	snapshot egressNATInterfaceSnapshot,
+	currentKernelEgressNATs map[int64]bool,
+	retryOwners map[kernelCandidateOwner]struct{},
+	previousPlans map[int64]ruleDataplanePlan,
+	nextPlans map[int64]ruleDataplanePlan,
+	desiredByOwner map[kernelCandidateOwner][]kernelCandidateRule,
+	runtime kernelRuleRuntime,
+	assignments map[int64]string,
+) (map[kernelCandidateOwner][]kernelCandidateRule, map[kernelCandidateOwner]struct{}) {
+	if !trigger.hasSource("link") || len(retryOwners) == 0 || len(currentKernelEgressNATs) == 0 {
+		return nil, nil
+	}
+	retainer, ok := runtime.(kernelHandoffRetentionRuntime)
+	if !ok || retainer == nil {
+		return nil, nil
+	}
+
+	itemsByID := make(map[int64]EgressNAT, len(items))
+	for _, item := range items {
+		itemsByID[item.ID] = item
+	}
+	preserved := make(map[kernelCandidateOwner][]kernelCandidateRule)
+	owners := make(map[kernelCandidateOwner]struct{})
+	for owner := range retryOwners {
+		if owner.kind != workerKindEgressNAT || !currentKernelEgressNATs[owner.id] || len(desiredByOwner[owner]) > 0 {
+			continue
+		}
+		item, ok := itemsByID[owner.id]
+		if !ok || !item.Enabled || strings.TrimSpace(item.ChildInterface) != "" {
+			continue
+		}
+		if snapshot.Err == nil {
+			if _, err := resolveEgressNATTargetInterfaces(item, snapshot.Infos); err == nil {
+				continue
+			}
+		}
+		previousPlan, ok := previousPlans[owner.id]
+		if !ok || previousPlan.EffectiveEngine != ruleEngineKernel {
+			continue
+		}
+		retained, ok := retainer.retainedKernelEgressNATCandidates(item)
+		if !ok || len(retained) == 0 {
+			continue
+		}
+		candidates := make([]kernelCandidateRule, 0, len(retained))
+		valid := true
+		for _, rule := range retained {
+			if assignments[rule.ID] == "" || kernelRuleLogKind(rule) != workerKindEgressNAT || kernelRuleLogOwnerID(rule) != owner.id {
+				valid = false
+				break
+			}
+			candidates = append(candidates, kernelCandidateRule{owner: owner, rule: rule})
+		}
+		if !valid {
+			continue
+		}
+		nextPlans[owner.id] = previousPlan
+		preserved[owner] = candidates
+		owners[owner] = struct{}{}
+	}
+	if len(owners) == 0 {
+		return nil, nil
+	}
+	return preserved, owners
+}
+
+func kernelCandidateOwnerSetExcluding(src map[kernelCandidateOwner]struct{}, excluded map[kernelCandidateOwner]struct{}) map[kernelCandidateOwner]struct{} {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[kernelCandidateOwner]struct{}, len(src))
+	for owner := range src {
+		if _, skip := excluded[owner]; skip {
+			continue
+		}
+		out[owner] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func kernelIncrementalRetryDeferredEgressNATDetailSuffix(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" deferred_egress_nat_owners=%d stable_recheck=pending", count)
 }
 
 type kernelRetainedAssignmentSummary struct {

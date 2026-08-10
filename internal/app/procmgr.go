@@ -319,6 +319,7 @@ type ProcessManager struct {
 	kernelNetlinkLinkStates                        map[int]kernelNetlinkLinkSnapshot
 	kernelNetlinkOwnerRetryCooldownUntil           map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState
 	kernelNetlinkOwnerRetryFailures                map[kernelCandidateOwner]int
+	kernelEgressNATStableRecheckAt                 time.Time
 	kernelPressureSnapshot                         kernelRuntimePressureSnapshot
 	managedRuntimeReloadWake                       chan struct{}
 	managedRuntimeReloadPending                    bool
@@ -1190,6 +1191,42 @@ func (pm *ProcessManager) requestRedistributeWorkers(delay time.Duration) {
 		default:
 		}
 	}
+}
+
+func (pm *ProcessManager) requestKernelEgressNATStableRecheck(delay time.Duration) {
+	if pm == nil {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	dueAt := time.Now().Add(delay)
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.shuttingDown {
+		return
+	}
+	if pm.kernelEgressNATStableRecheckAt.IsZero() || dueAt.After(pm.kernelEgressNATStableRecheckAt) {
+		pm.kernelEgressNATStableRecheckAt = dueAt
+	}
+}
+
+func (pm *ProcessManager) takeKernelEgressNATStableRecheck(now time.Time) bool {
+	if pm == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.shuttingDown || pm.kernelEgressNATStableRecheckAt.IsZero() || now.Before(pm.kernelEgressNATStableRecheckAt) {
+		return false
+	}
+	pm.kernelEgressNATStableRecheckAt = time.Time{}
+	return true
 }
 
 func (pm *ProcessManager) redistributeLoop() {
@@ -4368,6 +4405,7 @@ func (pm *ProcessManager) monitorLoop() {
 		var kernelPressurePrev kernelRuntimePressureSnapshot
 		hasPressureFallbacks := false
 		now := time.Now()
+		recheckStableKernelEgressNAT := pm.takeKernelEgressNATStableRecheck(now)
 
 		if pm.isShuttingDown() {
 			return
@@ -4570,6 +4608,10 @@ func (pm *ProcessManager) monitorLoop() {
 			if err := pm.kernelRuntime.Maintain(); err != nil {
 				log.Printf("kernel dataplane maintenance failed: %v", err)
 			}
+		}
+		if recheckStableKernelEgressNAT {
+			log.Print("kernel dataplane retry: interface inventory settle window elapsed, re-evaluating deferred egress nat owners")
+			pm.requestRedistributeWorkers(0)
 		}
 		if checkKernelAttachments && runtime != nil {
 			kernelAttachmentIssue = summarizeUnhealthyKernelAttachments(snapshotKernelAttachmentHealth(runtime))

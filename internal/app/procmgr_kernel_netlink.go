@@ -812,6 +812,9 @@ func shouldLogKernelNetlinkRecoveryResult(result kernelIncrementalRetryResult) b
 	if result.cooldownRuleOwners > 0 || result.cooldownRangeOwners > 0 || result.cooldownEgressNATs > 0 {
 		return true
 	}
+	if result.deferredEgressNATs > 0 {
+		return true
+	}
 	return result.recoveredRuleOwners == 0 && result.recoveredRangeOwners == 0 && result.recoveredEgressNATs == 0
 }
 
