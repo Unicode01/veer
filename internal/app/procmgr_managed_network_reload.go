@@ -426,9 +426,10 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 		pluginCatalog = &catalog
 	}
 	plan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{
-		LoadIPv6Assignments:    loadIPv6AssignmentsForManagedNetworkReload,
-		ForceInterfaceSnapshot: true,
-		PluginCatalog:          pluginCatalog,
+		LoadIPv6Assignments:        loadIPv6AssignmentsForManagedNetworkReload,
+		ForceInterfaceSnapshot:     true,
+		PluginCatalog:              pluginCatalog,
+		StabilizeInterfaceSnapshot: pm.stabilizeNetworkInterfaceSnapshot,
 	})
 	if err != nil {
 		return "", nil, err
@@ -454,7 +455,7 @@ func (pm *ProcessManager) currentManagedNetworkRuntimeFingerprint() (string, []s
 		plan.Reservations,
 		plan.IPv6Assignments,
 		plan.EgressNATs,
-		plan.InterfaceSnapshot.Infos,
+		plan.StableInterfaceSnapshot.Infos,
 	)
 	touchedInterfaces := collectManagedNetworkRuntimeTouchedInterfaces(plan.RuntimeManagedNetworks, plan.IPv6Assignments, plan.ManagedCompilation)
 	return fingerprint, touchedInterfaces, nil
@@ -676,8 +677,9 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		pluginCatalog = &catalog
 	}
 	plan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{
-		LoadIPv6Assignments: loadIPv6AssignmentsForManagedNetworkReload,
-		PluginCatalog:       pluginCatalog,
+		LoadIPv6Assignments:        loadIPv6AssignmentsForManagedNetworkReload,
+		PluginCatalog:              pluginCatalog,
+		StabilizeInterfaceSnapshot: pm.stabilizeNetworkInterfaceSnapshot,
 	})
 	if err != nil {
 		return err
@@ -704,6 +706,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "load ipv6 assignments", ipv6AssignmentLoadErr)
 	}
 	egressNATSnapshot := plan.InterfaceSnapshot
+	stableEgressNATSnapshot := plan.StableInterfaceSnapshot
 	if plan.RequiresInterfaceData && egressNATSnapshot.Err != nil {
 		log.Printf("managed network runtime: interface inventory unavailable: %v", egressNATSnapshot.Err)
 		reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "managed network interface inventory", egressNATSnapshot.Err)
@@ -727,7 +730,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 	dynamicEgressNATParents := collectDynamicEgressNATParentsWithSnapshot(effectiveEgressNATs, egressNATSnapshot)
 	managedNetworkInterfaces := sliceToManagedNetworkInterfaceSet(collectManagedNetworkRuntimeTouchedInterfaces(runtimeManagedNetworks, effectiveIPv6Assignments, managedNetworkCompiled))
 	reloadSummary := summarizeManagedNetworkRuntimeReload(runtimeManagedNetworks, managedNetworkReservations, effectiveIPv6Assignments, syntheticEgressNATs)
-	reloadFingerprint := buildManagedNetworkRuntimeReloadFingerprint(runtimeManagedNetworks, managedNetworkReservations, effectiveIPv6Assignments, effectiveEgressNATs, egressNATSnapshot.Infos)
+	reloadFingerprint := buildManagedNetworkRuntimeReloadFingerprint(runtimeManagedNetworks, managedNetworkReservations, effectiveIPv6Assignments, effectiveEgressNATs, stableEgressNATSnapshot.Infos)
 	pm.suppressManagedNetworkRuntimeReloadForInterfaces(managedNetworkSelfEventSuppressFor, collectManagedNetworkRuntimeTouchedInterfaces(runtimeManagedNetworks, effectiveIPv6Assignments, managedNetworkCompiled)...)
 
 	ipv6Interfaces, ipv6ConfiguredCount := collectIPv6AssignmentInterfaceNames(effectiveIPv6Assignments)
@@ -802,7 +805,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		return nil
 	}
 
-	if err := pm.reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs, syntheticEgressNATs, dynamicEgressNATParents, egressNATSnapshot, pluginCatalog); err != nil {
+	if err := pm.reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs, syntheticEgressNATs, dynamicEgressNATParents, egressNATSnapshot, stableEgressNATSnapshot, pluginCatalog); err != nil {
 		return err
 	}
 	if reloadErr == nil {
@@ -1002,7 +1005,7 @@ func summarizeManagedRuntimeReloadInterfaces(src map[string]struct{}) string {
 	return strings.Join(items, ",")
 }
 
-func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs []EgressNAT, autoEgressNATs []EgressNAT, dynamicEgressNATParents map[string]struct{}, snapshot egressNATInterfaceSnapshot, pluginCatalog *PluginCatalog) error {
+func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNATs []EgressNAT, autoEgressNATs []EgressNAT, dynamicEgressNATParents map[string]struct{}, snapshot egressNATInterfaceSnapshot, stableSnapshot egressNATInterfaceSnapshot, pluginCatalog *PluginCatalog) error {
 	if pm == nil || pm.kernelRuntime == nil || pm.cfg == nil {
 		return nil
 	}
@@ -1054,31 +1057,61 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 		return err
 	}
 
+	currentKernelAssignments := pm.kernelRuntime.SnapshotAssignments()
+	transientRetainedGroups, transientRetainedOwners := buildTransientEgressNATRetentions(
+		autoEgressNATs,
+		snapshot,
+		stableSnapshot,
+		filterNonPositiveKernelOwnerIDs(currentKernelEgressNATs),
+		currentEgressNATPlans,
+		nil,
+		pm.kernelRuntime,
+		currentKernelAssignments,
+	)
+	currentRetainedKernelEgressNATs := currentExplicitKernelEgressNATs
+	if len(transientRetainedOwners) > 0 {
+		if currentRetainedKernelEgressNATs == nil {
+			currentRetainedKernelEgressNATs = make(map[int64]bool)
+		}
+		for owner, candidates := range transientRetainedGroups {
+			retainedDesiredByOwner[owner] = candidates
+			currentRetainedKernelEgressNATs[owner.id] = true
+			retainedEntries += len(candidates)
+		}
+	}
+
 	planner := newRuleDataplanePlanner(pm.kernelRuntime, pm.cfg.DefaultEngine)
 	nextSyntheticID := maxRuleID + 1
+	plannedAutoEgressNATs := filterEgressNATItemsExcludingOwners(autoEgressNATs, transientRetainedOwners)
 	autoCandidates, autoPlans := buildEgressNATKernelCandidatesWithSnapshot(
-		autoEgressNATs,
+		plannedAutoEgressNATs,
 		planner,
 		pm.cfg.KernelRulesMapLimit,
 		retainedEntries,
 		&nextSyntheticID,
 		snapshot,
 	)
-	if err := stabilizeKernelCandidateRuleIDs(autoCandidates, snapshotKernelCandidateRules(pm.kernelRuntime)); err != nil {
+	previousKernelCandidates := snapshotKernelCandidateRules(pm.kernelRuntime)
+	for _, retained := range retainedDesiredByOwner {
+		for _, candidate := range retained {
+			previousKernelCandidates = append(previousKernelCandidates, candidate.rule)
+		}
+	}
+	if err := stabilizeKernelCandidateRuleIDs(autoCandidates, previousKernelCandidates); err != nil {
 		return fmt.Errorf("stabilize managed network egress nat kernel rule ids: %w", err)
 	}
 	autoCandidateOwners := ownerSetFromKernelCandidates(autoCandidates)
-	desiredByOwner := mergeKernelCandidateGroups(retainedDesiredByOwner, groupKernelCandidatesByOwner(autoCandidates))
 	egressNATPlans := mergeManagedNetworkReloadEgressNATPlans(currentEgressNATPlans, autoPlans)
+	restoreRetainedEgressNATPlans(egressNATPlans, currentEgressNATPlans, transientRetainedOwners)
+	desiredByOwner := mergeKernelCandidateGroups(retainedDesiredByOwner, groupKernelCandidatesByOwner(autoCandidates))
 
-	currentKernelAssignments := pm.kernelRuntime.SnapshotAssignments()
 	retainedByEngine, retainedCandidates, retainedSummary, err := buildRetainedKernelAssignments(
 		rules,
 		ranges,
 		append(append([]EgressNAT(nil), explicitEgressNATs...), autoEgressNATs...),
 		currentKernelRules,
 		currentKernelRanges,
-		currentExplicitKernelEgressNATs,
+		currentRetainedKernelEgressNATs,
 		currentRulePlans,
 		currentRangePlans,
 		egressNATPlans,
@@ -1091,7 +1124,7 @@ func (pm *ProcessManager) reconcileManagedNetworkAutoEgressNATs(explicitEgressNA
 	}
 
 	retryCandidates := filterKernelCandidatesByOwners(autoCandidates, autoCandidateOwners, nil, nil, egressNATPlans)
-	needsKernelRefresh := len(retryCandidates) > 0 || len(currentKernelEgressNATs) != len(currentExplicitKernelEgressNATs)
+	needsKernelRefresh := len(retryCandidates) > 0 || len(currentKernelEgressNATs) != len(currentRetainedKernelEgressNATs)
 	if totalRetainedKernelAssignments(retainedByEngine) == 0 && len(retryCandidates) == 0 && !needsKernelRefresh {
 		pm.mu.Lock()
 		pm.dynamicEgressNATParents = dynamicEgressNATParents
@@ -1253,6 +1286,23 @@ func filterPositiveKernelOwnerIDs(src map[int64]bool) map[int64]bool {
 	dst := make(map[int64]bool)
 	for id, active := range src {
 		if !active || id <= 0 {
+			continue
+		}
+		dst[id] = true
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+func filterNonPositiveKernelOwnerIDs(src map[int64]bool) map[int64]bool {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[int64]bool)
+	for id, active := range src {
+		if !active || id > 0 {
 			continue
 		}
 		dst[id] = true

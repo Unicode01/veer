@@ -102,6 +102,12 @@ func TestShouldReuseKernelRuleAfterPrepareFailure(t *testing.T) {
 	if shouldReuseKernelRuleAfterPrepareFailure(rule, rule, `resolve outbound path on "vmbr1": no forwarding database entry matched the backend MAC`, false) {
 		t.Fatal("shouldReuseKernelRuleAfterPrepareFailure() = true, want false when transient reuse is disabled")
 	}
+	if !shouldReuseKernelRuleAfterPrepareFailure(rule, rule, `resolve inbound interface "tap100i0": Link not found`, true) {
+		t.Fatal("shouldReuseKernelRuleAfterPrepareFailure() = false, want true for a disappearing unchanged interface")
+	}
+	if shouldReuseKernelRuleAfterPrepareFailure(rule, changed, `resolve inbound interface "tap100i0": Link not found`, true) {
+		t.Fatal("shouldReuseKernelRuleAfterPrepareFailure() = true, want false for a disappearing interface after config change")
+	}
 }
 
 func TestMatchDesiredKernelRuleAllowsSyntheticIDDrift(t *testing.T) {

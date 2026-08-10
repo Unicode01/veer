@@ -127,8 +127,14 @@ func kernelAttachmentHealErrorIsDisappearingInterface(err error) bool {
 	if errors.Is(err, kernelErrnoNoDevice) || errors.Is(err, kernelErrnoNoSuchIO) {
 		return true
 	}
-	text := strings.ToLower(strings.TrimSpace(err.Error()))
-	return strings.Contains(text, "no such device") || strings.Contains(text, "link not found")
+	return isDisappearingKernelInterfaceReason(err.Error())
+}
+
+func isDisappearingKernelInterfaceReason(reason string) bool {
+	text := strings.ToLower(strings.TrimSpace(reason))
+	return strings.Contains(text, "no such device") ||
+		strings.Contains(text, "link not found") ||
+		strings.Contains(text, "cannot find device")
 }
 
 func (state *kernelAdaptiveMaintenanceState) requestFull() {

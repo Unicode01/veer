@@ -414,6 +414,56 @@ func buildEgressNATSyntheticRule(item EgressNAT, childInterface string, id int64
 	}
 }
 
+func activeOwnerRulesMatchEgressNAT(items []Rule, item EgressNAT) bool {
+	variants := expandEgressNATProtocols(item.Protocol)
+	if !item.Enabled || len(items) == 0 || len(variants) == 0 || len(items)%len(variants) != 0 {
+		return false
+	}
+
+	allowedProtocols := make(map[string]struct{}, len(variants))
+	for _, variant := range variants {
+		allowedProtocols[variant] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(items))
+	protocolsByTarget := make(map[string]map[string]struct{}, len(items)/len(variants))
+	for _, rule := range items {
+		if _, ok := allowedProtocols[rule.Protocol]; !ok || strings.TrimSpace(rule.InInterface) == "" {
+			return false
+		}
+		if rule.InIP != "0.0.0.0" || rule.InPort != 0 ||
+			rule.OutInterface != strings.TrimSpace(item.OutInterface) ||
+			rule.OutIP != "0.0.0.0" ||
+			rule.OutSourceIP != strings.TrimSpace(item.OutSourceIP) ||
+			rule.OutPort != 0 || rule.Transparent ||
+			rule.kernelMode != kernelModeEgressNAT ||
+			rule.kernelNATType != normalizeEgressNATType(item.NATType) ||
+			rule.kernelRedirectMode != normalizeEgressNATRedirectMode(item.RedirectMode) {
+			return false
+		}
+		target := strings.TrimSpace(rule.InInterface)
+		key := target + "\x00" + rule.Protocol
+		if _, duplicate := seen[key]; duplicate {
+			return false
+		}
+		seen[key] = struct{}{}
+		if protocolsByTarget[target] == nil {
+			protocolsByTarget[target] = make(map[string]struct{}, len(variants))
+		}
+		protocolsByTarget[target][rule.Protocol] = struct{}{}
+	}
+	for _, protocols := range protocolsByTarget {
+		if len(protocols) != len(allowedProtocols) {
+			return false
+		}
+		for protocol := range allowedProtocols {
+			if _, ok := protocols[protocol]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func buildEgressNATKernelCandidates(items []EgressNAT, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, reservedKernelEntries int, nextSyntheticID *int64) ([]kernelCandidateRule, map[int64]ruleDataplanePlan) {
 	return buildEgressNATKernelCandidatesWithSnapshot(items, planner, configuredKernelRulesMapLimit, reservedKernelEntries, nextSyntheticID, loadEgressNATInterfaceSnapshot())
 }

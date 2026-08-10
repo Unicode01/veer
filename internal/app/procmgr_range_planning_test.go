@@ -56,3 +56,36 @@ func TestBuildKernelCandidateRulesSamplesRangeEligibilityPerProtocol(t *testing.
 		t.Fatalf("range plan effective engine = %q, want %q", plan.EffectiveEngine, ruleEngineKernel)
 	}
 }
+
+func TestBuildKernelCandidateRulesReservesRetainedEntriesBeforePlanning(t *testing.T) {
+	rt := &countingKernelSupportRuntime{}
+	planner := newRuleDataplanePlanner(rt, ruleEngineKernel)
+	rule := Rule{
+		ID:               1,
+		InInterface:      "eno1",
+		InIP:             "192.0.2.10",
+		InPort:           10022,
+		OutInterface:     "vmbr1",
+		OutIP:            "198.51.100.10",
+		OutPort:          22,
+		Protocol:         "tcp",
+		Enabled:          true,
+		EnginePreference: ruleEngineKernel,
+	}
+
+	candidates, rulePlans, _ := buildKernelCandidateRulesWithReservedEntries(
+		[]Rule{rule},
+		nil,
+		planner,
+		1,
+		1,
+	)
+
+	if len(candidates) != 0 {
+		t.Fatalf("candidate count = %d, want 0 after the retained entry consumes fixed capacity", len(candidates))
+	}
+	plan := rulePlans[rule.ID]
+	if plan.EffectiveEngine != ruleEngineUserspace || plan.FallbackReason == "" {
+		t.Fatalf("rule plan = %+v, want capacity fallback after reserving the retained entry", plan)
+	}
+}

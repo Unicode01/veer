@@ -319,7 +319,9 @@ type ProcessManager struct {
 	kernelNetlinkLinkStates                        map[int]kernelNetlinkLinkSnapshot
 	kernelNetlinkOwnerRetryCooldownUntil           map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState
 	kernelNetlinkOwnerRetryFailures                map[kernelCandidateOwner]int
-	kernelEgressNATStableRecheckAt                 time.Time
+	networkInventoryStableRecheckAt                time.Time
+	stableInterfaceInfos                           map[string]InterfaceInfo
+	missingInterfaceStates                         map[string]networkInterfaceMissingState
 	kernelPressureSnapshot                         kernelRuntimePressureSnapshot
 	managedRuntimeReloadWake                       chan struct{}
 	managedRuntimeReloadPending                    bool
@@ -468,6 +470,8 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		kernelRuntimeDismissedNoteKeys:       make(map[string]struct{}),
 		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
 		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
+		stableInterfaceInfos:                 make(map[string]InterfaceInfo),
+		missingInterfaceStates:               make(map[string]networkInterfaceMissingState),
 		kernelStatsSnapshot:                  emptyKernelRuleStatsSnapshot(),
 		managedRuntimeReloadWake:             make(chan struct{}, 1),
 		managedRuntimeReloadSuppressUntil:    make(map[string]time.Time),
@@ -918,7 +922,10 @@ func (pm *ProcessManager) redistributeWorkers() {
 	if len(pluginForwardRules) > 0 {
 		rules = append(rules, pluginForwardRules...)
 	}
-	networkPlan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{PluginCatalog: pluginCatalogSnapshot})
+	networkPlan, err := loadEffectiveNetworkPlan(pm.db, pluginCfg, effectiveNetworkPlanLoadOptions{
+		PluginCatalog:              pluginCatalogSnapshot,
+		StabilizeInterfaceSnapshot: pm.stabilizeNetworkInterfaceSnapshot,
+	})
 	if err != nil {
 		log.Printf("load effective network plan: %v", err)
 		return
@@ -947,6 +954,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 	ipv6Assignments := networkPlan.IPv6Assignments
 	egressNATs := networkPlan.EgressNATs
 	egressNATSnapshot := networkPlan.InterfaceSnapshot
+	stableEgressNATSnapshot := networkPlan.StableInterfaceSnapshot
 	managedNetworkCompiled := networkPlan.ManagedCompilation
 	ipv6AssignmentLoadErr := networkPlan.IPv6LoadErr
 	if ipv6AssignmentLoadErr != nil {
@@ -989,7 +997,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		pm.ipv6AssignmentInterfaces = ipv6Interfaces
 		pm.mu.Unlock()
 		if managedRuntimeReconcileOK && ipv6RuntimeReconcileOK && egressNATSnapshot.Err == nil {
-			managedRuntimeReloadFingerprint = buildManagedNetworkRuntimeReloadFingerprint(runtimeManagedNetworks, managedNetworkReservations, ipv6Assignments, egressNATs, egressNATSnapshot.Infos)
+			managedRuntimeReloadFingerprint = buildManagedNetworkRuntimeReloadFingerprint(runtimeManagedNetworks, managedNetworkReservations, ipv6Assignments, egressNATs, stableEgressNATSnapshot.Infos)
 		}
 	}
 	planner := newRuleDataplanePlanner(pm.kernelRuntime, pm.cfg.DefaultEngine)
@@ -1000,6 +1008,8 @@ func (pm *ProcessManager) redistributeWorkers() {
 	kernelPressure := snapshotKernelRuntimePressure(pm.kernelRuntime)
 	previousKernelRules := make(map[int64]bool)
 	previousKernelRanges := make(map[int64]bool)
+	previousKernelEgressNATs := make(map[int64]bool)
+	previousEgressNATPlans := make(map[int64]ruleDataplanePlan)
 	pm.mu.Lock()
 	for id, ok := range pm.kernelRules {
 		previousKernelRules[id] = ok
@@ -1007,8 +1017,48 @@ func (pm *ProcessManager) redistributeWorkers() {
 	for id, ok := range pm.kernelRanges {
 		previousKernelRanges[id] = ok
 	}
+	for id, ok := range pm.kernelEgressNATs {
+		previousKernelEgressNATs[id] = ok
+	}
+	for id, plan := range pm.egressNATPlans {
+		previousEgressNATPlans[id] = plan
+	}
 	pm.mu.Unlock()
-	candidates, rulePlans, rangePlans := buildKernelCandidateRules(rules, ranges, planner, configuredKernelRulesMapLimit)
+
+	retainedByEngine := map[string][]Rule(nil)
+	retainedKernelCandidates := []kernelCandidateRule(nil)
+	retainedEgressNATOwners := map[kernelCandidateOwner]struct{}(nil)
+	if pm.kernelRuntime != nil && len(previousKernelEgressNATs) > 0 {
+		currentKernelAssignments := pm.kernelRuntime.SnapshotAssignments()
+		retainedGroups, retainedOwners := buildTransientEgressNATRetentions(
+			egressNATs,
+			egressNATSnapshot,
+			stableEgressNATSnapshot,
+			previousKernelEgressNATs,
+			previousEgressNATPlans,
+			nil,
+			pm.kernelRuntime,
+			currentKernelAssignments,
+		)
+		if len(retainedOwners) > 0 {
+			var retainErr error
+			retainedByEngine, retainedKernelCandidates, retainErr = retainedKernelAssignmentsFromCandidateGroups(retainedGroups, currentKernelAssignments)
+			if retainErr != nil {
+				log.Printf("kernel dataplane planner: retain transient egress nat assignments: %v", retainErr)
+				return
+			}
+			retainedEgressNATOwners = retainedOwners
+			log.Printf("kernel dataplane planner: deferring cleanup for %d egress nat owner(s) while interface inventory settles", len(retainedOwners))
+		}
+	}
+	retainedKernelEntryCount := len(retainedKernelCandidates)
+	candidates, rulePlans, rangePlans := buildKernelCandidateRulesWithReservedEntries(
+		rules,
+		ranges,
+		planner,
+		configuredKernelRulesMapLimit,
+		retainedKernelEntryCount,
+	)
 	applyKernelOwnerConstraints(candidates, rulePlans, rangePlans)
 	applyKernelPressurePolicy(kernelPressure, candidates, previousKernelRules, previousKernelRanges, rulePlans, rangePlans)
 	candidates = pm.prewarmKernelToUserspaceHandoffs(rules, ranges, candidates, rulePlans, rangePlans)
@@ -1026,39 +1076,46 @@ func (pm *ProcessManager) redistributeWorkers() {
 		}
 	}
 	nextSyntheticID := maxCandidateRuleID + 1
-	egressNATCandidates, egressNATPlans := buildEgressNATKernelCandidatesWithSnapshot(egressNATs, planner, configuredKernelRulesMapLimit, activeRuleRangeKernelCandidateCount, &nextSyntheticID, egressNATSnapshot)
+	plannedEgressNATs := filterEgressNATItemsExcludingOwners(egressNATs, retainedEgressNATOwners)
+	egressNATCandidates, egressNATPlans := buildEgressNATKernelCandidatesWithSnapshot(
+		plannedEgressNATs,
+		planner,
+		configuredKernelRulesMapLimit,
+		retainedKernelEntryCount+activeRuleRangeKernelCandidateCount,
+		&nextSyntheticID,
+		egressNATSnapshot,
+	)
+	restoreRetainedEgressNATPlans(egressNATPlans, previousEgressNATPlans, retainedEgressNATOwners)
 	allKernelCandidates := make([]kernelCandidateRule, 0, len(candidates)+len(egressNATCandidates))
 	allKernelCandidates = append(allKernelCandidates, candidates...)
 	allKernelCandidates = append(allKernelCandidates, egressNATCandidates...)
-	if err := stabilizeKernelCandidateRuleIDs(allKernelCandidates, snapshotKernelCandidateRules(pm.kernelRuntime)); err != nil {
+	previousKernelCandidates := snapshotKernelCandidateRules(pm.kernelRuntime)
+	for _, candidate := range retainedKernelCandidates {
+		previousKernelCandidates = append(previousKernelCandidates, candidate.rule)
+	}
+	if err := stabilizeKernelCandidateRuleIDs(allKernelCandidates, previousKernelCandidates); err != nil {
 		log.Printf("kernel dataplane planner: stabilize candidate rule ids: %v", err)
 		return
 	}
 	activeKernelCandidateBuf := make([]kernelCandidateRule, 0, len(allKernelCandidates))
 	activeKernelCandidates := filterActiveKernelCandidatesInto(activeKernelCandidateBuf, allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
 	activeKernelCandidateBuf = activeKernelCandidates[:0]
-	activeKernelRuleBuf := make([]Rule, 0, len(activeKernelCandidates))
 	if pm.kernelRuntime != nil {
-		kernelWithPluginCatalog, usePluginCatalog := pm.kernelRuntime.(kernelRuleRuntimeWithPluginCatalog)
-		if usePluginCatalog && pluginCatalogSnapshot == nil {
+		if _, usePluginCatalog := pm.kernelRuntime.(kernelRuleRuntimeWithPluginCatalog); usePluginCatalog && pluginCatalogSnapshot == nil {
 			catalog := pm.pluginCatalogWithControlSurface(pm.cfg)
 			pluginCatalogSnapshot = &catalog
 		}
 		for {
-			activeKernelRules := kernelCandidateRulesInto(activeKernelRuleBuf, activeKernelCandidates)
-			activeKernelRuleBuf = activeKernelRules[:0]
-			var results map[int64]kernelRuleApplyResult
-			var err error
-			if usePluginCatalog {
-				results, err = kernelWithPluginCatalog.ReconcileWithPluginCatalog(activeKernelRules, *pluginCatalogSnapshot)
-			} else {
-				results, err = pm.kernelRuntime.Reconcile(activeKernelRules)
+			results, reconcileErr := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeKernelCandidates, pluginCatalogSnapshot)
+			if reconcileErr != nil && len(retainedByEngine) > 0 {
+				log.Printf("kernel dataplane planner: retained egress nat reconcile failed: %v", reconcileErr)
+				return
 			}
 			if len(activeKernelCandidates) == 0 {
 				break
 			}
 
-			ownerFailures := collectKernelOwnerFailures(activeKernelCandidates, results, err)
+			ownerFailures := collectKernelOwnerFailures(activeKernelCandidates, results, reconcileErr)
 			if len(ownerFailures) == 0 {
 				break
 			}
@@ -1067,8 +1124,15 @@ func (pm *ProcessManager) redistributeWorkers() {
 				applyKernelOwnerFallbackWithMetadata(owner, reason, ownerMetadata[owner], rulePlans, rangePlans, egressNATPlans)
 			}
 			activeKernelCandidates = filterActiveKernelCandidatesInto(activeKernelCandidateBuf, allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
+			activeKernelCandidates = filterKernelCandidatesExcludingOwners(activeKernelCandidates, retainedEgressNATOwners)
 			activeKernelCandidateBuf = activeKernelCandidates[:0]
 		}
+	}
+	if len(retainedKernelCandidates) > 0 {
+		combined := make([]kernelCandidateRule, 0, len(retainedKernelCandidates)+len(activeKernelCandidates))
+		combined = append(combined, retainedKernelCandidates...)
+		combined = append(combined, activeKernelCandidates...)
+		activeKernelCandidates = combined
 	}
 
 	pm.logRuleDataplanePlans(rules, rulePlans, pm.cfg.DefaultEngine)
@@ -1191,42 +1255,6 @@ func (pm *ProcessManager) requestRedistributeWorkers(delay time.Duration) {
 		default:
 		}
 	}
-}
-
-func (pm *ProcessManager) requestKernelEgressNATStableRecheck(delay time.Duration) {
-	if pm == nil {
-		return
-	}
-	if delay < 0 {
-		delay = 0
-	}
-	dueAt := time.Now().Add(delay)
-
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	if pm.shuttingDown {
-		return
-	}
-	if pm.kernelEgressNATStableRecheckAt.IsZero() || dueAt.After(pm.kernelEgressNATStableRecheckAt) {
-		pm.kernelEgressNATStableRecheckAt = dueAt
-	}
-}
-
-func (pm *ProcessManager) takeKernelEgressNATStableRecheck(now time.Time) bool {
-	if pm == nil {
-		return false
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	if pm.shuttingDown || pm.kernelEgressNATStableRecheckAt.IsZero() || now.Before(pm.kernelEgressNATStableRecheckAt) {
-		return false
-	}
-	pm.kernelEgressNATStableRecheckAt = time.Time{}
-	return true
 }
 
 func (pm *ProcessManager) redistributeLoop() {
@@ -1706,6 +1734,10 @@ func kernelOwnerEffectiveEngine(owner kernelCandidateOwner, rulePlans map[int64]
 }
 
 func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int) ([]kernelCandidateRule, map[int64]ruleDataplanePlan, map[int64]rangeDataplanePlan) {
+	return buildKernelCandidateRulesWithReservedEntries(rules, ranges, planner, configuredKernelRulesMapLimit, 0)
+}
+
+func buildKernelCandidateRulesWithReservedEntries(rules []Rule, ranges []PortRange, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, initialReservedKernelEntries int) ([]kernelCandidateRule, map[int64]ruleDataplanePlan, map[int64]rangeDataplanePlan) {
 	rulePlans := make(map[int64]ruleDataplanePlan, len(rules))
 	rangePlans := make(map[int64]rangeDataplanePlan, len(ranges))
 	familyFallbackCache := kernelRuleFamilyFallbackCache{}
@@ -1724,7 +1756,7 @@ func buildKernelCandidateRules(rules []Rule, ranges []PortRange, planner *ruleDa
 	nextSyntheticID := maxRuleID + 1
 
 	candidates := make([]kernelCandidateRule, 0, ruleCandidateCapacity)
-	reservedKernelEntries := 0
+	reservedKernelEntries := max(initialReservedKernelEntries, 0)
 
 	for _, rule := range rules {
 		owner := kernelCandidateOwner{kind: workerKindRule, id: rule.ID}
@@ -4405,7 +4437,7 @@ func (pm *ProcessManager) monitorLoop() {
 		var kernelPressurePrev kernelRuntimePressureSnapshot
 		hasPressureFallbacks := false
 		now := time.Now()
-		recheckStableKernelEgressNAT := pm.takeKernelEgressNATStableRecheck(now)
+		recheckStableNetworkInventory := pm.takeNetworkInventoryStableRecheck(now)
 
 		if pm.isShuttingDown() {
 			return
@@ -4609,8 +4641,8 @@ func (pm *ProcessManager) monitorLoop() {
 				log.Printf("kernel dataplane maintenance failed: %v", err)
 			}
 		}
-		if recheckStableKernelEgressNAT {
-			log.Print("kernel dataplane retry: interface inventory settle window elapsed, re-evaluating deferred egress nat owners")
+		if recheckStableNetworkInventory {
+			log.Print("network runtime: interface inventory settle window elapsed, re-evaluating deferred runtime state")
 			pm.requestRedistributeWorkers(0)
 		}
 		if checkKernelAttachments && runtime != nil {

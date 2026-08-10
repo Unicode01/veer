@@ -146,7 +146,7 @@ func (rt *linuxKernelRuleRuntime) retainedKernelEgressNATCandidates(item EgressN
 	defer rt.mu.Unlock()
 
 	items := collectPreparedKernelOwnerRules(rt.preparedRules, workerKindEgressNAT, item.ID)
-	if len(items) == 0 {
+	if !activeOwnerRulesMatchEgressNAT(items, item) {
 		return nil, false
 	}
 	return cloneRuleSlice(items), true

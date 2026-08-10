@@ -24,6 +24,7 @@ type effectiveNetworkPlan struct {
 	EgressNATs              []EgressNAT
 	ManagedCompilation      managedNetworkRuntimeCompilation
 	InterfaceSnapshot       egressNATInterfaceSnapshot
+	StableInterfaceSnapshot egressNATInterfaceSnapshot
 	Warnings                effectiveNetworkPlanWarnings
 	IPv6LoadErr             error
 	IPv6ResolutionErr       error
@@ -31,9 +32,10 @@ type effectiveNetworkPlan struct {
 }
 
 type effectiveNetworkPlanLoadOptions struct {
-	LoadIPv6Assignments    func(sqlRuleStore) ([]IPv6Assignment, error)
-	ForceInterfaceSnapshot bool
-	PluginCatalog          *PluginCatalog
+	LoadIPv6Assignments        func(sqlRuleStore) ([]IPv6Assignment, error)
+	ForceInterfaceSnapshot     bool
+	PluginCatalog              *PluginCatalog
+	StabilizeInterfaceSnapshot func(egressNATInterfaceSnapshot) egressNATInterfaceSnapshot
 }
 
 func loadEffectiveNetworkPlan(db *sql.DB, cfg *Config, options effectiveNetworkPlanLoadOptions) (effectiveNetworkPlan, error) {
@@ -86,13 +88,17 @@ func loadEffectiveNetworkPlan(db *sql.DB, cfg *Config, options effectiveNetworkP
 	plan.RequiresInterfaceData = len(managedNetworks) > 0 || len(egressNATRecords) > 0
 	if needsInterfaceSnapshot {
 		plan.InterfaceSnapshot = loadEgressNATInterfaceSnapshot()
+		plan.StableInterfaceSnapshot = plan.InterfaceSnapshot
+		if options.StabilizeInterfaceSnapshot != nil {
+			plan.StableInterfaceSnapshot = options.StabilizeInterfaceSnapshot(plan.InterfaceSnapshot)
+		}
 	}
-	plan.ExplicitEgressNATs = normalizeEgressNATItemsWithSnapshot(explicitEgressNATs, plan.InterfaceSnapshot)
+	plan.ExplicitEgressNATs = normalizeEgressNATItemsWithSnapshot(explicitEgressNATs, plan.StableInterfaceSnapshot)
 	plan.ManagedCompilation = compileManagedNetworkRuntime(
 		managedNetworks,
 		plan.ExplicitIPv6Assignments,
 		plan.ExplicitEgressNATs,
-		plan.InterfaceSnapshot.Infos,
+		plan.StableInterfaceSnapshot.Infos,
 	)
 	plan.Warnings.ManagedNetwork = append([]string(nil), plan.ManagedCompilation.Warnings...)
 
@@ -118,7 +124,7 @@ func loadEffectiveNetworkPlan(db *sql.DB, cfg *Config, options effectiveNetworkP
 	plan.SyntheticEgressNATs = append([]EgressNAT(nil), plan.ManagedCompilation.EgressNATs...)
 	if len(egressNATRecords) > 0 {
 		existing := append(append([]EgressNAT(nil), plan.ExplicitEgressNATs...), plan.SyntheticEgressNATs...)
-		pluginEgressNATs, pluginWarnings := compilePluginEgressNATPlansWithWarnings(egressNATRecords, existing, plan.InterfaceSnapshot)
+		pluginEgressNATs, pluginWarnings := compilePluginEgressNATPlansWithWarnings(egressNATRecords, existing, plan.StableInterfaceSnapshot)
 		plan.Warnings.EgressNAT = pluginWarnings
 		plan.SyntheticEgressNATs = append(plan.SyntheticEgressNATs, pluginEgressNATs...)
 	}

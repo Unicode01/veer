@@ -97,7 +97,7 @@ func shouldReuseKernelRuleAfterPrepareFailure(rule Rule, previousRule Rule, reas
 	if !allowTransientReuse || !sameKernelRuleOwnerDataplaneConfig(rule, previousRule) {
 		return false
 	}
-	return isTransientKernelFallbackReason(reason)
+	return isTransientKernelFallbackReason(reason) || isDisappearingKernelInterfaceReason(reason)
 }
 
 func samePreparedKernelRuleDataplane(a, b preparedKernelRule) bool {

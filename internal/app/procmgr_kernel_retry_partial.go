@@ -493,21 +493,23 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 	planner = newRuleDataplanePlanner(pm.kernelRuntime, defaultEngine)
 	kernelPressure := snapshotKernelRuntimePressure(pm.kernelRuntime)
 	egressNATSnapshot := egressNATInterfaceSnapshot{}
+	stableEgressNATSnapshot := egressNATInterfaceSnapshot{}
 	var dynamicEgressNATParents map[string]struct{}
 	if len(egressNATs) > 0 || len(managedNetworks) > 0 || len(pluginEgressNATPlanRecords) > 0 {
 		egressNATSnapshot = loadEgressNATInterfaceSnapshot()
+		stableEgressNATSnapshot = pm.stabilizeNetworkInterfaceSnapshot(egressNATSnapshot)
 	}
 	if len(egressNATs) > 0 {
-		egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, egressNATSnapshot)
+		egressNATs = normalizeEgressNATItemsWithSnapshot(egressNATs, stableEgressNATSnapshot)
 	}
 	if len(managedNetworks) > 0 {
-		managedNetworkCompiled := compileManagedNetworkRuntime(managedNetworks, nil, egressNATs, egressNATSnapshot.Infos)
+		managedNetworkCompiled := compileManagedNetworkRuntime(managedNetworks, nil, egressNATs, stableEgressNATSnapshot.Infos)
 		if len(managedNetworkCompiled.EgressNATs) > 0 {
 			egressNATs = append(egressNATs, managedNetworkCompiled.EgressNATs...)
 		}
 	}
 	if len(pluginEgressNATPlanRecords) > 0 {
-		pluginEgressNATs, _ := compilePluginEgressNATPlansWithWarnings(pluginEgressNATPlanRecords, egressNATs, egressNATSnapshot)
+		pluginEgressNATs, _ := compilePluginEgressNATPlansWithWarnings(pluginEgressNATPlanRecords, egressNATs, stableEgressNATSnapshot)
 		if len(pluginEgressNATs) > 0 {
 			egressNATs = append(egressNATs, pluginEgressNATs...)
 		}
@@ -562,7 +564,38 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		return result
 	}
 
-	candidates, rulePlans, rangePlans := buildKernelCandidateRules(rules, ranges, planner, configuredKernelRulesMapLimit)
+	currentKernelAssignments := pm.kernelRuntime.SnapshotAssignments()
+	deferredDesiredByOwner, deferredOwners := preserveTransientDynamicEgressNATOwners(
+		trigger,
+		egressNATs,
+		egressNATSnapshot,
+		stableEgressNATSnapshot,
+		currentKernelEgressNATs,
+		previousEgressNATPlans,
+		nil,
+		pm.kernelRuntime,
+		currentKernelAssignments,
+	)
+	deferredKernelEntryCount := 0
+	if len(deferredOwners) > 0 {
+		result.deferredEgressNATs = len(deferredOwners)
+		for owner, candidates := range deferredDesiredByOwner {
+			deferredKernelEntryCount += len(candidates)
+			if _, matched := matchedEgressNATOwners[owner.id]; !matched {
+				matchedEgressNATOwners[owner.id] = struct{}{}
+				result.matchedEgressNATs++
+			}
+			retryOwners[owner] = struct{}{}
+		}
+	}
+
+	candidates, rulePlans, rangePlans := buildKernelCandidateRulesWithReservedEntries(
+		rules,
+		ranges,
+		planner,
+		configuredKernelRulesMapLimit,
+		deferredKernelEntryCount,
+	)
 	applyKernelOwnerConstraints(candidates, rulePlans, rangePlans)
 	applyKernelPressurePolicy(kernelPressure, candidates, currentKernelRules, currentKernelRanges, rulePlans, rangePlans)
 	preserveUnmatchedNetlinkFallbackPlans(unmatchedRuleFallbackPlans, unmatchedRangeFallbackPlans, rulePlans, rangePlans)
@@ -580,42 +613,33 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 		}
 	}
 	nextSyntheticID := maxCandidateRuleID + 1
+	plannedEgressNATs := filterEgressNATItemsExcludingOwners(egressNATs, deferredOwners)
 	egressNATCandidates, egressNATPlans := buildEgressNATKernelCandidatesWithSnapshot(
-		egressNATs,
+		plannedEgressNATs,
 		planner,
 		configuredKernelRulesMapLimit,
-		activeRuleRangeKernelCandidateCount,
+		deferredKernelEntryCount+activeRuleRangeKernelCandidateCount,
 		&nextSyntheticID,
 		egressNATSnapshot,
 	)
 	preserveUnmatchedNetlinkFallbackEgressPlans(unmatchedEgressNATFallbackPlans, egressNATPlans)
+	restoreRetainedEgressNATPlans(egressNATPlans, previousEgressNATPlans, deferredOwners)
 
 	allKernelCandidates := make([]kernelCandidateRule, 0, len(candidates)+len(egressNATCandidates))
 	allKernelCandidates = append(allKernelCandidates, candidates...)
 	allKernelCandidates = append(allKernelCandidates, egressNATCandidates...)
-	if err := stabilizeKernelCandidateRuleIDs(allKernelCandidates, snapshotKernelCandidateRules(pm.kernelRuntime)); err != nil {
+	previousKernelCandidates := snapshotKernelCandidateRules(pm.kernelRuntime)
+	for _, retained := range deferredDesiredByOwner {
+		for _, candidate := range retained {
+			previousKernelCandidates = append(previousKernelCandidates, candidate.rule)
+		}
+	}
+	if err := stabilizeKernelCandidateRuleIDs(allKernelCandidates, previousKernelCandidates); err != nil {
 		result.handled = false
 		result.detail = fmt.Sprintf("stabilize kernel candidate rule ids: %v", err)
 		return result
 	}
 	activeCandidates := filterActiveKernelCandidates(allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
-	currentKernelAssignments := pm.kernelRuntime.SnapshotAssignments()
-	deferredDesiredByOwner, deferredOwners := preserveTransientDynamicEgressNATOwners(
-		trigger,
-		egressNATs,
-		egressNATSnapshot,
-		currentKernelEgressNATs,
-		retryOwners,
-		previousEgressNATPlans,
-		egressNATPlans,
-		groupKernelCandidatesByOwner(activeCandidates),
-		pm.kernelRuntime,
-		currentKernelAssignments,
-	)
-	if len(deferredOwners) > 0 {
-		result.deferredEgressNATs = len(deferredOwners)
-		pm.requestKernelEgressNATStableRecheck(managedNetworkReloadDebounce)
-	}
 	kernelMutationRetryOwners := kernelCandidateOwnerSetExcluding(retryOwners, deferredOwners)
 	matchedActiveLinkCandidates := filterLinkTriggeredActiveKernelCandidates(
 		trigger,
@@ -925,16 +949,40 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 func preserveTransientDynamicEgressNATOwners(
 	trigger kernelNetlinkRecoveryTrigger,
 	items []EgressNAT,
-	snapshot egressNATInterfaceSnapshot,
+	rawSnapshot egressNATInterfaceSnapshot,
+	stableSnapshot egressNATInterfaceSnapshot,
 	currentKernelEgressNATs map[int64]bool,
-	retryOwners map[kernelCandidateOwner]struct{},
 	previousPlans map[int64]ruleDataplanePlan,
 	nextPlans map[int64]ruleDataplanePlan,
-	desiredByOwner map[kernelCandidateOwner][]kernelCandidateRule,
 	runtime kernelRuleRuntime,
 	assignments map[int64]string,
 ) (map[kernelCandidateOwner][]kernelCandidateRule, map[kernelCandidateOwner]struct{}) {
-	if !trigger.hasSource("link") || len(retryOwners) == 0 || len(currentKernelEgressNATs) == 0 {
+	if !trigger.hasSource("link") || len(currentKernelEgressNATs) == 0 {
+		return nil, nil
+	}
+	return buildTransientEgressNATRetentions(
+		items,
+		rawSnapshot,
+		stableSnapshot,
+		currentKernelEgressNATs,
+		previousPlans,
+		nextPlans,
+		runtime,
+		assignments,
+	)
+}
+
+func buildTransientEgressNATRetentions(
+	items []EgressNAT,
+	rawSnapshot egressNATInterfaceSnapshot,
+	stableSnapshot egressNATInterfaceSnapshot,
+	currentKernelEgressNATs map[int64]bool,
+	previousPlans map[int64]ruleDataplanePlan,
+	nextPlans map[int64]ruleDataplanePlan,
+	runtime kernelRuleRuntime,
+	assignments map[int64]string,
+) (map[kernelCandidateOwner][]kernelCandidateRule, map[kernelCandidateOwner]struct{}) {
+	if len(items) == 0 || len(currentKernelEgressNATs) == 0 {
 		return nil, nil
 	}
 	retainer, ok := runtime.(kernelHandoffRetentionRuntime)
@@ -948,31 +996,34 @@ func preserveTransientDynamicEgressNATOwners(
 	}
 	preserved := make(map[kernelCandidateOwner][]kernelCandidateRule)
 	owners := make(map[kernelCandidateOwner]struct{})
-	for owner := range retryOwners {
-		if owner.kind != workerKindEgressNAT || !currentKernelEgressNATs[owner.id] || len(desiredByOwner[owner]) > 0 {
+	for id, active := range currentKernelEgressNATs {
+		owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: id}
+		if !active {
 			continue
 		}
-		item, ok := itemsByID[owner.id]
-		if !ok || !item.Enabled || strings.TrimSpace(item.ChildInterface) != "" {
+		item, ok := itemsByID[id]
+		if !ok || !item.Enabled || !egressNATInterfaceInventoryIsTransient(item, rawSnapshot, stableSnapshot) {
 			continue
 		}
-		if snapshot.Err == nil {
-			if _, err := resolveEgressNATTargetInterfaces(item, snapshot.Infos); err == nil {
-				continue
-			}
-		}
-		previousPlan, ok := previousPlans[owner.id]
+		previousPlan, ok := previousPlans[id]
 		if !ok || previousPlan.EffectiveEngine != ruleEngineKernel {
 			continue
 		}
 		retained, ok := retainer.retainedKernelEgressNATCandidates(item)
-		if !ok || len(retained) == 0 {
+		if !ok || !activeOwnerRulesMatchEgressNAT(retained, item) {
+			continue
+		}
+		stableDesired := buildEgressNATDesiredCandidateShapes(item, stableSnapshot)
+		if len(stableDesired) > 0 && !retainedKernelCandidatesMatchDesired(retained, stableDesired, owner) {
+			continue
+		}
+		if len(stableDesired) == 0 && rawSnapshot.Err == nil {
 			continue
 		}
 		candidates := make([]kernelCandidateRule, 0, len(retained))
 		valid := true
 		for _, rule := range retained {
-			if assignments[rule.ID] == "" || kernelRuleLogKind(rule) != workerKindEgressNAT || kernelRuleLogOwnerID(rule) != owner.id {
+			if assignments[rule.ID] == "" || kernelRuleLogKind(rule) != workerKindEgressNAT || kernelRuleLogOwnerID(rule) != id {
 				valid = false
 				break
 			}
@@ -981,7 +1032,9 @@ func preserveTransientDynamicEgressNATOwners(
 		if !valid {
 			continue
 		}
-		nextPlans[owner.id] = previousPlan
+		if nextPlans != nil {
+			nextPlans[id] = previousPlan
+		}
 		preserved[owner] = candidates
 		owners[owner] = struct{}{}
 	}
@@ -989,6 +1042,87 @@ func preserveTransientDynamicEgressNATOwners(
 		return nil, nil
 	}
 	return preserved, owners
+}
+
+func egressNATInterfaceInventoryIsTransient(item EgressNAT, rawSnapshot, stableSnapshot egressNATInterfaceSnapshot) bool {
+	if rawSnapshot.Err != nil {
+		return true
+	}
+	stableTargets, err := resolveEgressNATTargetInterfaces(item, stableSnapshot.Infos)
+	if err != nil || len(stableTargets) == 0 {
+		return false
+	}
+	rawTargets, err := resolveEgressNATTargetInterfaces(item, rawSnapshot.Infos)
+	if err != nil || !sameEgressNATTargetInterfaces(rawTargets, stableTargets) {
+		return true
+	}
+	outInterface := strings.TrimSpace(item.OutInterface)
+	if outInterface == "" {
+		return false
+	}
+	rawOK := egressNATSnapshotHasInterface(rawSnapshot, outInterface)
+	stableOK := egressNATSnapshotHasInterface(stableSnapshot, outInterface)
+	return stableOK && !rawOK
+}
+
+func egressNATSnapshotHasInterface(snapshot egressNATInterfaceSnapshot, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if _, ok := snapshot.IfaceByName[name]; ok {
+		return true
+	}
+	for _, info := range snapshot.Infos {
+		if strings.TrimSpace(info.Name) == name {
+			return true
+		}
+	}
+	return false
+}
+
+func sameEgressNATTargetInterfaces(a, b []InterfaceInfo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	names := make(map[string]int, len(a))
+	for _, item := range a {
+		names[strings.TrimSpace(item.Name)]++
+	}
+	for _, item := range b {
+		name := strings.TrimSpace(item.Name)
+		if names[name] == 0 {
+			return false
+		}
+		names[name]--
+	}
+	return true
+}
+
+func buildEgressNATDesiredCandidateShapes(item EgressNAT, snapshot egressNATInterfaceSnapshot) []kernelCandidateRule {
+	if !item.Enabled || snapshot.Err != nil {
+		return nil
+	}
+	targets, err := resolveEgressNATTargetInterfaces(item, snapshot.Infos)
+	if err != nil {
+		return nil
+	}
+	protocols := expandEgressNATProtocols(item.Protocol)
+	if len(protocols) == 0 {
+		return nil
+	}
+	owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: item.ID}
+	out := make([]kernelCandidateRule, 0, len(targets)*len(protocols))
+	nextID := int64(1)
+	for _, target := range targets {
+		for _, protocol := range protocols {
+			rule := buildEgressNATSyntheticRule(item, target.Name, nextID, protocol)
+			annotateKernelCandidateRule(&rule, owner)
+			out = append(out, kernelCandidateRule{owner: owner, rule: rule})
+			nextID++
+		}
+	}
+	return out
 }
 
 func kernelCandidateOwnerSetExcluding(src map[kernelCandidateOwner]struct{}, excluded map[kernelCandidateOwner]struct{}) map[kernelCandidateOwner]struct{} {
@@ -1006,6 +1140,67 @@ func kernelCandidateOwnerSetExcluding(src map[kernelCandidateOwner]struct{}, exc
 		return nil
 	}
 	return out
+}
+
+func filterKernelCandidatesExcludingOwners(items []kernelCandidateRule, excluded map[kernelCandidateOwner]struct{}) []kernelCandidateRule {
+	if len(items) == 0 || len(excluded) == 0 {
+		return items
+	}
+	out := make([]kernelCandidateRule, 0, len(items))
+	for _, item := range items {
+		if _, skip := excluded[item.owner]; skip {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func filterEgressNATItemsExcludingOwners(items []EgressNAT, excluded map[kernelCandidateOwner]struct{}) []EgressNAT {
+	if len(items) == 0 || len(excluded) == 0 {
+		return items
+	}
+	out := make([]EgressNAT, 0, len(items))
+	for _, item := range items {
+		owner := kernelCandidateOwner{kind: workerKindEgressNAT, id: item.ID}
+		if _, skip := excluded[owner]; skip {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func restoreRetainedEgressNATPlans(nextPlans, previousPlans map[int64]ruleDataplanePlan, owners map[kernelCandidateOwner]struct{}) {
+	for owner := range owners {
+		if owner.kind != workerKindEgressNAT {
+			continue
+		}
+		if plan, ok := previousPlans[owner.id]; ok {
+			nextPlans[owner.id] = plan
+		}
+	}
+}
+
+func retainedKernelAssignmentsFromCandidateGroups(
+	groups map[kernelCandidateOwner][]kernelCandidateRule,
+	assignments map[int64]string,
+) (map[string][]Rule, []kernelCandidateRule, error) {
+	if len(groups) == 0 {
+		return nil, nil, nil
+	}
+	retainedByEngine := make(map[string][]Rule)
+	retainedCandidates := make([]kernelCandidateRule, 0)
+	seenRuleIDs := make(map[int64]struct{})
+	for _, candidates := range groups {
+		for _, candidate := range candidates {
+			if err := appendRetainedKernelAssignment(retainedByEngine, assignments, seenRuleIDs, candidate.rule); err != nil {
+				return nil, nil, err
+			}
+			retainedCandidates = append(retainedCandidates, candidate)
+		}
+	}
+	return retainedByEngine, retainedCandidates, nil
 }
 
 func kernelIncrementalRetryDeferredEgressNATDetailSuffix(count int) string {

@@ -244,7 +244,7 @@ func TestReconcileManagedNetworkAutoEgressNATsReturnsRetainedOnlyKernelError(t *
 		},
 	}
 
-	err = pm.reconcileManagedNetworkAutoEgressNATs(nil, nil, nil, egressNATInterfaceSnapshot{}, nil)
+	err = pm.reconcileManagedNetworkAutoEgressNATs(nil, nil, nil, egressNATInterfaceSnapshot{}, egressNATInterfaceSnapshot{}, nil)
 	if !errors.Is(err, retainedErr) {
 		t.Fatalf("reconcileManagedNetworkAutoEgressNATs() error = %v, want %v", err, retainedErr)
 	}
@@ -253,6 +253,115 @@ func TestReconcileManagedNetworkAutoEgressNATsReturnsRetainedOnlyKernelError(t *
 	}
 	if !pm.kernelEgressNATs[natID] {
 		t.Fatalf("kernelEgressNATs = %#v, want old egress nat owner preserved after failed reload", pm.kernelEgressNATs)
+	}
+}
+
+func TestReconcileManagedNetworkAutoEgressNATsRetainsWholeNegativeOwnersDuringPartialInventoryJitter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   int64
+	}{
+		{name: "managed network", id: managedNetworkSyntheticID("egress_nat", 101, "vmbr1")},
+		{name: "plugin", id: pluginEgressNATSyntheticID("test.plugin", "nat")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			item := EgressNAT{
+				ID:              tc.id,
+				ParentInterface: "vmbr1",
+				OutInterface:    "eno1",
+				OutSourceIP:     "203.0.113.50",
+				Protocol:        "tcp",
+				NATType:         egressNATTypeSymmetric,
+				Enabled:         true,
+			}
+			competing := EgressNAT{
+				ID:              managedNetworkSyntheticID("egress_nat", 999, "vmbr2"),
+				ParentInterface: "vmbr2",
+				ChildInterface:  "tap200i0",
+				OutInterface:    "eno1",
+				OutSourceIP:     "203.0.113.60",
+				Protocol:        "tcp",
+				NATType:         egressNATTypeSymmetric,
+				Enabled:         true,
+			}
+			firstRule := buildEgressNATSyntheticRule(item, "tap100i0", 5501, "tcp")
+			secondRule := buildEgressNATSyntheticRule(item, "tap100i1", 5502, "tcp")
+			annotateKernelCandidateRule(&firstRule, kernelCandidateOwner{kind: workerKindEgressNAT, id: tc.id})
+			annotateKernelCandidateRule(&secondRule, kernelCandidateOwner{kind: workerKindEgressNAT, id: tc.id})
+			runtime := &stubIncrementalKernelRuntime{
+				assignments: map[int64]string{
+					firstRule.ID:  kernelEngineTC,
+					secondRule.ID: kernelEngineTC,
+				},
+				retainedEgressNATs: map[int64][]Rule{tc.id: {firstRule, secondRule}},
+			}
+			pm := &ProcessManager{
+				db:                     db,
+				cfg:                    &Config{DefaultEngine: ruleEngineKernel, MaxWorkers: 1, KernelRulesMapLimit: 2},
+				ruleWorkers:            make(map[int]*WorkerInfo),
+				rangeWorkers:           make(map[int]*WorkerInfo),
+				rulePlans:              make(map[int64]ruleDataplanePlan),
+				rangePlans:             make(map[int64]rangeDataplanePlan),
+				egressNATPlans:         map[int64]ruleDataplanePlan{tc.id: {PreferredEngine: ruleEngineKernel, KernelEligible: true, EffectiveEngine: ruleEngineKernel}},
+				kernelRuntime:          runtime,
+				kernelRules:            make(map[int64]bool),
+				kernelRanges:           make(map[int64]bool),
+				kernelEgressNATs:       map[int64]bool{tc.id: true},
+				kernelRuleEngines:      make(map[int64]string),
+				kernelRangeEngines:     make(map[int64]string),
+				kernelEgressNATEngines: map[int64]string{tc.id: kernelEngineTC},
+				kernelFlowOwners: map[uint32]kernelCandidateOwner{
+					uint32(firstRule.ID):  {kind: workerKindEgressNAT, id: tc.id},
+					uint32(secondRule.ID): {kind: workerKindEgressNAT, id: tc.id},
+				},
+				kernelRuleStats:                      make(map[int64]RuleStatsReport),
+				kernelRangeStats:                     make(map[int64]RangeStatsReport),
+				kernelEgressNATStats:                 make(map[int64]EgressNATStatsReport),
+				kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
+				kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
+			}
+			raw := newEgressNATInterfaceSnapshot([]InterfaceInfo{
+				{Name: "vmbr1", Kind: "bridge"},
+				{Name: "tap100i0", Parent: "vmbr1", Kind: "tuntap"},
+				{Name: "vmbr2", Kind: "bridge"},
+				{Name: "tap200i0", Parent: "vmbr2", Kind: "tuntap"},
+				{Name: "eno1", Kind: "device"},
+			}, nil)
+			stable := newEgressNATInterfaceSnapshot([]InterfaceInfo{
+				{Name: "vmbr1", Kind: "bridge"},
+				{Name: "tap100i0", Parent: "vmbr1", Kind: "tuntap"},
+				{Name: "tap100i1", Parent: "vmbr1", Kind: "tuntap"},
+				{Name: "vmbr2", Kind: "bridge"},
+				{Name: "tap200i0", Parent: "vmbr2", Kind: "tuntap"},
+				{Name: "eno1", Kind: "device"},
+			}, nil)
+
+			if err := pm.reconcileManagedNetworkAutoEgressNATs(nil, []EgressNAT{item, competing}, map[string]struct{}{"vmbr1": {}, "vmbr2": {}}, raw, stable, nil); err != nil {
+				t.Fatalf("reconcileManagedNetworkAutoEgressNATs() error = %v", err)
+			}
+			if !pm.kernelEgressNATs[tc.id] {
+				t.Fatalf("kernelEgressNATs = %#v, want negative owner %d retained", pm.kernelEgressNATs, tc.id)
+			}
+			if len(runtime.incrementalCalls) != 1 {
+				t.Fatalf("retaining reconcile calls = %d, want 1", len(runtime.incrementalCalls))
+			}
+			retained := runtime.incrementalCalls[0].retainedByEngine[kernelEngineTC]
+			if len(retained) != 2 {
+				t.Fatalf("retained rules = %#v, want both rules for the partially missing owner", retained)
+			}
+			retainedIDs := map[int64]bool{retained[0].ID: true, retained[1].ID: true}
+			if !retainedIDs[firstRule.ID] || !retainedIDs[secondRule.ID] {
+				t.Fatalf("retained rule ids = %#v, want %d and %d", retainedIDs, firstRule.ID, secondRule.ID)
+			}
+			if len(runtime.incrementalCalls[0].newRules) != 0 {
+				t.Fatalf("new rules = %#v, want no fabricated attachment for missing tap", runtime.incrementalCalls[0].newRules)
+			}
+			plan := pm.egressNATPlans[competing.ID]
+			if plan.EffectiveEngine != ruleEngineUserspace || !strings.Contains(plan.FallbackReason, "capacity") {
+				t.Fatalf("competing egress NAT plan = %+v, want retained entries to consume fixed capacity", plan)
+			}
+		})
 	}
 }
 
