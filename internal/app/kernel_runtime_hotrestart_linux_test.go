@@ -608,6 +608,56 @@ func TestKernelRuntimeMapCapacityUsesTCMigrationState(t *testing.T) {
 	}
 }
 
+func TestKernelRuntimeMapCapacityUsesOnlySelectedMigrationEngine(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelFlowsMapName,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 64,
+	})
+	flowsOld := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowsOldMapNameV4,
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 32,
+	})
+	tcState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelTCFlowMigrationStateMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+	xdpState := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       kernelXDPFlowMigrationStateMapName,
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 1,
+	})
+	if err := xdpState.Put(uint32(0), uint32(xdpFlowMigrationFlagV4Old)); err != nil {
+		t.Fatalf("xdpState.Put(active) error = %v", err)
+	}
+
+	refs := kernelRuntimeMapRefs{
+		engine:                kernelRuntimeMapEngineTC,
+		flowsV4:               flows,
+		flowsOldV4:            flowsOld,
+		tcFlowMigrationState:  tcState,
+		xdpFlowMigrationState: xdpState,
+	}
+	if got := kernelRuntimeFlowMapCapacity(refs); got != 64 {
+		t.Fatalf("tc capacity with conflicting xdp state = %d, want 64", got)
+	}
+
+	refs.engine = kernelRuntimeMapEngineXDP
+	if got := kernelRuntimeFlowMapCapacity(refs); got != 96 {
+		t.Fatalf("xdp capacity with active xdp state = %d, want 96", got)
+	}
+}
+
 func TestLoadXDPKernelHotRestartStatePromotesActiveMapsToOldBank(t *testing.T) {
 	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
 	runtimeRoot := t.TempDir()

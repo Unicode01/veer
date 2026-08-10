@@ -277,7 +277,7 @@ type ProcessManager struct {
 	kernelMaintenanceEvery                         time.Duration
 	kernelAttachmentCheckAt                        time.Time
 	kernelAttachmentHealAt                         time.Time
-	kernelDegradedHealAt                           time.Time
+	kernelDegradedCheckAt                          time.Time
 	kernelNetlinkRetryAt                           time.Time
 	kernelRetryAt                                  time.Time
 	kernelRetryLogAt                               time.Time
@@ -4384,6 +4384,16 @@ func (pm *ProcessManager) waitForBackgroundLoops(timeout time.Duration) {
 	}
 }
 
+func scheduleKernelDegradedIdleRebuildCheck(lastCheckedAt, now time.Time, runtimePresent bool) (bool, time.Time) {
+	if !runtimePresent {
+		return false, lastCheckedAt
+	}
+	if !lastCheckedAt.IsZero() && now.Sub(lastCheckedAt) < kernelDegradedRebuildCooldown {
+		return false, lastCheckedAt
+	}
+	return true, now
+}
+
 func (pm *ProcessManager) monitorLoop() {
 	defer close(pm.monitorDone)
 
@@ -4472,9 +4482,11 @@ func (pm *ProcessManager) monitorLoop() {
 			checkPluginProbations = true
 			pm.pluginProbationCheckAt = now
 		}
-		if pm.kernelRuntime != nil && (pm.kernelDegradedHealAt.IsZero() || now.Sub(pm.kernelDegradedHealAt) >= kernelDegradedRebuildCooldown) {
-			checkKernelDegradedIdleRebuild = true
-		}
+		checkKernelDegradedIdleRebuild, pm.kernelDegradedCheckAt = scheduleKernelDegradedIdleRebuildCheck(
+			pm.kernelDegradedCheckAt,
+			now,
+			pm.kernelRuntime != nil,
+		)
 		if pm.kernelRuntime != nil {
 			transientSummary := pm.summarizeTransientKernelFallbacksLocked()
 			hasPressureFallbacks = pm.hasPressureTriggeredKernelFallbacksLocked()
@@ -4705,9 +4717,6 @@ func (pm *ProcessManager) monitorLoop() {
 			for _, engine := range snapshotKernelRuntimeEngines(runtime) {
 				if reason := kernelRuntimeIdleDegradedRebuildReason(engine); reason != "" {
 					kernelDegradedIdleRebuildReason = reason
-					pm.mu.Lock()
-					pm.kernelDegradedHealAt = now
-					pm.mu.Unlock()
 					break
 				}
 			}

@@ -4,6 +4,7 @@ package app
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -263,6 +264,145 @@ func TestKernelRuntimeMapRefsEqualTracksOldNATAndMigrationMaps(t *testing.T) {
 	if kernelRuntimeMapRefsEqual(a, b) {
 		t.Fatal("kernelRuntimeMapRefsEqual() = true, want false when tc flow migration map ref differs")
 	}
+
+	b = a
+	b.engine = kernelRuntimeMapEngineXDP
+	if kernelRuntimeMapRefsEqual(a, b) {
+		t.Fatal("kernelRuntimeMapRefsEqual() = true, want false when runtime map engine differs")
+	}
+}
+
+func TestKernelRuntimeMapEngineFromCollection(t *testing.T) {
+	tests := []struct {
+		name     string
+		maps     map[string]*ebpf.Map
+		programs map[string]*ebpf.Program
+		want     kernelRuntimeMapEngine
+	}{
+		{
+			name: "tc migration state",
+			maps: map[string]*ebpf.Map{kernelTCFlowMigrationStateMapName: {}},
+			want: kernelRuntimeMapEngineTC,
+		},
+		{
+			name:     "legacy tc collection",
+			maps:     map[string]*ebpf.Map{kernelTCFlowsOldMapNameV4: {}},
+			programs: map[string]*ebpf.Program{kernelForwardProgramName: {}},
+			want:     kernelRuntimeMapEngineTC,
+		},
+		{
+			name: "xdp migration state",
+			maps: map[string]*ebpf.Map{
+				kernelXDPFlowMigrationStateMapName: {},
+				kernelTCNatPortsOldMapNameV4:       {},
+			},
+			want: kernelRuntimeMapEngineXDP,
+		},
+		{
+			name: "legacy xdp collection",
+			maps: map[string]*ebpf.Map{
+				kernelXDPFlowsOldMapNameV4:   {},
+				kernelTCNatPortsOldMapNameV4: {},
+			},
+			programs: map[string]*ebpf.Program{kernelXDPProgramName: {}},
+			want:     kernelRuntimeMapEngineXDP,
+		},
+		{
+			name: "shared legacy maps without programs",
+			maps: map[string]*ebpf.Map{
+				kernelTCFlowsOldMapNameV4:    {},
+				kernelTCNatPortsOldMapNameV4: {},
+			},
+			want: kernelRuntimeMapEngineUnknown,
+		},
+		{
+			name: "ambiguous markers",
+			maps: map[string]*ebpf.Map{
+				kernelTCFlowMigrationStateMapName:  {},
+				kernelXDPFlowMigrationStateMapName: {},
+			},
+			want: kernelRuntimeMapEngineUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			coll := &ebpf.Collection{Maps: tc.maps, Programs: tc.programs}
+			if got := kernelRuntimeMapEngineFromCollection(coll); got != tc.want {
+				t.Fatalf("kernelRuntimeMapEngineFromCollection() = %d, want %d", got, tc.want)
+			}
+			if got := kernelRuntimeMapRefsFromCollection(coll).engine; got != tc.want {
+				t.Fatalf("kernelRuntimeMapRefsFromCollection().engine = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKernelRuntimeBatchMapCountersAreConcurrentSafe(t *testing.T) {
+	const entries = 32
+	newMap := func(name string, keySize, valueSize uintptr) *ebpf.Map {
+		t.Helper()
+		return newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+			Name:       name,
+			Type:       ebpf.Hash,
+			KeySize:    uint32(keySize),
+			ValueSize:  uint32(valueSize),
+			MaxEntries: 64,
+		})
+	}
+
+	tcFlowsV4 := newMap("count_tc_v4", unsafe.Sizeof(tcFlowKeyV4{}), unsafe.Sizeof(tcFlowValueV4{}))
+	xdpFlowsV4 := newMap("count_xdp_v4", unsafe.Sizeof(tcFlowKeyV4{}), unsafe.Sizeof(xdpFlowValueV4{}))
+	tcFlowsV6 := newMap("count_tc_v6", unsafe.Sizeof(tcFlowKeyV6{}), unsafe.Sizeof(tcFlowValueV6{}))
+	natV4 := newMap("count_nat_v4", unsafe.Sizeof(tcNATPortKeyV4{}), unsafe.Sizeof(tcNATPortValue{}))
+	natV6 := newMap("count_nat_v6", unsafe.Sizeof(tcNATPortKeyV6{}), unsafe.Sizeof(tcNATPortValue{}))
+
+	for i := uint32(1); i <= entries; i++ {
+		if err := tcFlowsV4.Put(tcFlowKeyV4{IfIndex: i}, tcFlowValueV4{RuleID: i}); err != nil {
+			t.Fatalf("populate tc IPv4 flow map: %v", err)
+		}
+		if err := xdpFlowsV4.Put(tcFlowKeyV4{IfIndex: i}, xdpFlowValueV4{RuleID: i}); err != nil {
+			t.Fatalf("populate xdp IPv4 flow map: %v", err)
+		}
+		if err := tcFlowsV6.Put(tcFlowKeyV6{IfIndex: i}, tcFlowValueV6{RuleID: i}); err != nil {
+			t.Fatalf("populate tc IPv6 flow map: %v", err)
+		}
+		if err := natV4.Put(tcNATPortKeyV4{IfIndex: i}, tcNATPortValue{RuleID: i}); err != nil {
+			t.Fatalf("populate IPv4 NAT map: %v", err)
+		}
+		if err := natV6.Put(tcNATPortKeyV6{IfIndex: i}, tcNATPortValue{RuleID: i}); err != nil {
+			t.Fatalf("populate IPv6 NAT map: %v", err)
+		}
+	}
+
+	counters := []struct {
+		name  string
+		count func() (int, error)
+	}{
+		{name: "tc flow IPv4", count: func() (int, error) { return countKernelFlowMapEntries(tcFlowsV4) }},
+		{name: "xdp flow IPv4", count: func() (int, error) { return countXDPFlowMapEntries(xdpFlowsV4) }},
+		{name: "tc flow IPv6", count: func() (int, error) { return countKernelFlowMapEntriesV6(tcFlowsV6) }},
+		{name: "nat IPv4", count: func() (int, error) { return countKernelNATMapEntries(natV4) }},
+		{name: "nat IPv6", count: func() (int, error) { return countKernelNATMapEntriesV6(natV6) }},
+	}
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for iteration := 0; iteration < 20; iteration++ {
+				for _, counter := range counters {
+					got, err := counter.count()
+					if err != nil || got != entries {
+						t.Errorf("%s count = %d, %v; want %d, nil", counter.name, got, err, entries)
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestSnapshotKernelRuntimeMapsClonesRefsAndAuxMaps(t *testing.T) {

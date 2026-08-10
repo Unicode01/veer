@@ -26,6 +26,41 @@ const (
 	kernelRuntimeMapCountBatchSize        = 4096
 )
 
+type kernelRuntimeMapEngine uint8
+
+const (
+	kernelRuntimeMapEngineUnknown kernelRuntimeMapEngine = iota
+	kernelRuntimeMapEngineTC
+	kernelRuntimeMapEngineXDP
+)
+
+type kernelRuntimeMapCountBatch[K, V any] struct {
+	keys   [kernelRuntimeMapCountBatchSize]K
+	values [kernelRuntimeMapCountBatchSize]V
+}
+
+type kernelRuntimeMapCountBatchPool[K, V any] struct {
+	pool sync.Pool
+}
+
+func newKernelRuntimeMapCountBatchPool[K, V any]() *kernelRuntimeMapCountBatchPool[K, V] {
+	p := &kernelRuntimeMapCountBatchPool[K, V]{}
+	p.pool.New = func() any {
+		return new(kernelRuntimeMapCountBatch[K, V])
+	}
+	return p
+}
+
+func (p *kernelRuntimeMapCountBatchPool[K, V]) get() *kernelRuntimeMapCountBatch[K, V] {
+	return p.pool.Get().(*kernelRuntimeMapCountBatch[K, V])
+}
+
+func (p *kernelRuntimeMapCountBatchPool[K, V]) put(batch *kernelRuntimeMapCountBatch[K, V]) {
+	if batch != nil {
+		p.pool.Put(batch)
+	}
+}
+
 type kernelRuntimeMapCountSnapshot struct {
 	sampledAt       time.Time
 	detailSampledAt time.Time
@@ -41,6 +76,7 @@ type kernelRuntimeMapCountSnapshot struct {
 }
 
 type kernelRuntimeMapRefs struct {
+	engine                kernelRuntimeMapEngine
 	rulesV4               *ebpf.Map
 	rulesV6               *ebpf.Map
 	flowsV4               *ebpf.Map
@@ -73,6 +109,11 @@ type kernelRuntimeInterfaceLabelCacheEntry struct {
 var kernelRuntimeInterfaceLabelCache sync.Map
 var kernelRuntimeInterfaceLabelCacheStores atomic.Uint64
 var kernelRuntimeBatchLookupSupport sync.Map
+var kernelRuntimeXDPFlowV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV4, xdpFlowValueV4]()
+var kernelRuntimeTCFlowV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV4, tcFlowValueV4]()
+var kernelRuntimeTCFlowV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV6, tcFlowValueV6]()
+var kernelRuntimeTCNATV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcNATPortKeyV4, tcNATPortValue]()
+var kernelRuntimeTCNATV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcNATPortKeyV6, tcNATPortValue]()
 
 func cloneKernelRuntimeMap(m *ebpf.Map, label string) (*ebpf.Map, error) {
 	if m == nil {
@@ -86,7 +127,7 @@ func cloneKernelRuntimeMap(m *ebpf.Map, label string) (*ebpf.Map, error) {
 }
 
 func cloneKernelRuntimeMapRefs(refs kernelRuntimeMapRefs) (kernelRuntimeMapRefs, error) {
-	cloned := kernelRuntimeMapRefs{}
+	cloned := kernelRuntimeMapRefs{engine: refs.engine}
 	var err error
 	if cloned.rulesV4, err = cloneKernelRuntimeMap(refs.rulesV4, kernelRulesMapNameV4); err != nil {
 		closeKernelRuntimeMapRefs(cloned)
@@ -1068,13 +1109,13 @@ func countKernelFlowMapEntriesV6(m *ebpf.Map) (int, error) {
 	return 0, err
 }
 
-func countXDPFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
+func countKernelRuntimeMapEntriesBatch[K, V any](m *ebpf.Map, pool *kernelRuntimeMapCountBatchPool[K, V]) (int, bool, error) {
 	cursor := ebpf.MapBatchCursor{}
-	keys := make([]tcFlowKeyV4, kernelRuntimeMapCountBatchSize)
-	values := make([]xdpFlowValueV4, kernelRuntimeMapCountBatchSize)
+	batch := pool.get()
+	defer pool.put(batch)
 	count := 0
 	for {
-		n, err := m.BatchLookup(&cursor, keys, values, nil)
+		n, err := m.BatchLookup(&cursor, batch.keys[:], batch.values[:], nil)
 		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
 				return 0, false, nil
@@ -1086,46 +1127,18 @@ func countXDPFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
 			return count, true, nil
 		}
 	}
+}
+
+func countXDPFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
+	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeXDPFlowV4CountBatchPool)
 }
 
 func countKernelFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
-	cursor := ebpf.MapBatchCursor{}
-	keys := make([]tcFlowKeyV4, kernelRuntimeMapCountBatchSize)
-	values := make([]tcFlowValueV4, kernelRuntimeMapCountBatchSize)
-	count := 0
-	for {
-		n, err := m.BatchLookup(&cursor, keys, values, nil)
-		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
-				return 0, false, nil
-			}
-			return 0, true, err
-		}
-		count += n
-		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
-			return count, true, nil
-		}
-	}
+	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeTCFlowV4CountBatchPool)
 }
 
 func countKernelFlowMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
-	cursor := ebpf.MapBatchCursor{}
-	keys := make([]tcFlowKeyV6, kernelRuntimeMapCountBatchSize)
-	values := make([]tcFlowValueV6, kernelRuntimeMapCountBatchSize)
-	count := 0
-	for {
-		n, err := m.BatchLookup(&cursor, keys, values, nil)
-		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
-				return 0, false, nil
-			}
-			return 0, true, err
-		}
-		count += n
-		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
-			return count, true, nil
-		}
-	}
+	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeTCFlowV6CountBatchPool)
 }
 
 func countXDPFlowMapEntriesIter(m *ebpf.Map) (int, error) {
@@ -1216,43 +1229,11 @@ func countKernelNATMapEntriesV6(m *ebpf.Map) (int, error) {
 }
 
 func countKernelNATMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
-	cursor := ebpf.MapBatchCursor{}
-	keys := make([]tcNATPortKeyV4, kernelRuntimeMapCountBatchSize)
-	values := make([]tcNATPortValue, kernelRuntimeMapCountBatchSize)
-	count := 0
-	for {
-		n, err := m.BatchLookup(&cursor, keys, values, nil)
-		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
-				return 0, false, nil
-			}
-			return 0, true, err
-		}
-		count += n
-		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
-			return count, true, nil
-		}
-	}
+	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeTCNATV4CountBatchPool)
 }
 
 func countKernelNATMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
-	cursor := ebpf.MapBatchCursor{}
-	keys := make([]tcNATPortKeyV6, kernelRuntimeMapCountBatchSize)
-	values := make([]tcNATPortValue, kernelRuntimeMapCountBatchSize)
-	count := 0
-	for {
-		n, err := m.BatchLookup(&cursor, keys, values, nil)
-		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			if count == 0 && errors.Is(err, ebpf.ErrNotSupported) {
-				return 0, false, nil
-			}
-			return 0, true, err
-		}
-		count += n
-		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
-			return count, true, nil
-		}
-	}
+	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeTCNATV6CountBatchPool)
 }
 
 func countKernelNATMapEntriesIter(m *ebpf.Map) (int, error) {
@@ -1343,9 +1324,19 @@ func kernelRuntimeXDPOldFlowMigrationFlags(refs kernelRuntimeMapRefs) uint32 {
 	return 0
 }
 
+func kernelRuntimeOldFlowMigrationFlags(refs kernelRuntimeMapRefs) (uint32, uint32) {
+	switch refs.migrationEngine() {
+	case kernelRuntimeMapEngineTC:
+		return kernelRuntimeTCOldFlowMigrationFlags(refs), 0
+	case kernelRuntimeMapEngineXDP:
+		return 0, kernelRuntimeXDPOldFlowMigrationFlags(refs)
+	default:
+		return kernelRuntimeTCOldFlowMigrationFlags(refs), kernelRuntimeXDPOldFlowMigrationFlags(refs)
+	}
+}
+
 func kernelRuntimeFlowMapCapacityBreakdown(refs kernelRuntimeMapRefs) (int, int, int, int) {
-	tcFlags := kernelRuntimeTCOldFlowMigrationFlags(refs)
-	xdpFlags := kernelRuntimeXDPOldFlowMigrationFlags(refs)
+	tcFlags, xdpFlags := kernelRuntimeOldFlowMigrationFlags(refs)
 
 	activeV4 := kernelRuntimeMapCapacity(refs.flowsV4)
 	oldV4 := 0
@@ -1368,8 +1359,7 @@ func kernelRuntimeFlowMapCapacities(refs kernelRuntimeMapRefs) (int, int) {
 }
 
 func kernelRuntimeNATMapCapacityBreakdown(refs kernelRuntimeMapRefs) (int, int, int, int) {
-	tcFlags := kernelRuntimeTCOldFlowMigrationFlags(refs)
-	xdpFlags := kernelRuntimeXDPOldFlowMigrationFlags(refs)
+	tcFlags, xdpFlags := kernelRuntimeOldFlowMigrationFlags(refs)
 
 	activeV4 := kernelRuntimeMapCapacity(refs.natV4)
 	oldV4 := 0
@@ -1747,11 +1737,54 @@ func (s kernelRuntimeMapCountSnapshot) detailsFresh(now time.Time) bool {
 	return !s.detailSampledAt.IsZero() && now.Sub(s.detailSampledAt) < kernelRuntimeMapDetailCacheTTL
 }
 
+func kernelRuntimeMapEngineFromCollection(coll *ebpf.Collection) kernelRuntimeMapEngine {
+	if coll == nil || coll.Maps == nil {
+		return kernelRuntimeMapEngineUnknown
+	}
+	maps := coll.Maps
+	hasTCState := maps[kernelTCFlowMigrationStateMapName] != nil
+	hasXDPState := maps[kernelXDPFlowMigrationStateMapName] != nil
+	switch {
+	case hasTCState && !hasXDPState:
+		return kernelRuntimeMapEngineTC
+	case hasXDPState && !hasTCState:
+		return kernelRuntimeMapEngineXDP
+	case hasTCState || hasXDPState:
+		return kernelRuntimeMapEngineUnknown
+	}
+
+	hasTCPrograms := coll.Programs[kernelForwardProgramName] != nil || coll.Programs[kernelReplyProgramName] != nil
+	hasXDPPrograms := coll.Programs[kernelXDPProgramName] != nil
+	switch {
+	case hasTCPrograms && !hasXDPPrograms:
+		return kernelRuntimeMapEngineTC
+	case hasXDPPrograms && !hasTCPrograms:
+		return kernelRuntimeMapEngineXDP
+	default:
+		return kernelRuntimeMapEngineUnknown
+	}
+}
+
+func (refs kernelRuntimeMapRefs) migrationEngine() kernelRuntimeMapEngine {
+	if refs.engine != kernelRuntimeMapEngineUnknown {
+		return refs.engine
+	}
+	switch {
+	case refs.tcFlowMigrationState != nil && refs.xdpFlowMigrationState == nil:
+		return kernelRuntimeMapEngineTC
+	case refs.xdpFlowMigrationState != nil && refs.tcFlowMigrationState == nil:
+		return kernelRuntimeMapEngineXDP
+	default:
+		return kernelRuntimeMapEngineUnknown
+	}
+}
+
 func kernelRuntimeMapRefsFromCollection(coll *ebpf.Collection) kernelRuntimeMapRefs {
 	if coll == nil || coll.Maps == nil {
 		return kernelRuntimeMapRefs{}
 	}
 	return kernelRuntimeMapRefs{
+		engine:                kernelRuntimeMapEngineFromCollection(coll),
 		rulesV4:               coll.Maps[kernelRulesMapNameV4],
 		rulesV6:               coll.Maps[kernelRulesMapNameV6],
 		flowsV4:               coll.Maps[kernelFlowsMapNameV4],
@@ -1769,7 +1802,8 @@ func kernelRuntimeMapRefsFromCollection(coll *ebpf.Collection) kernelRuntimeMapR
 }
 
 func kernelRuntimeMapRefsEqual(a, b kernelRuntimeMapRefs) bool {
-	return a.rulesV4 == b.rulesV4 &&
+	return a.engine == b.engine &&
+		a.rulesV4 == b.rulesV4 &&
 		a.rulesV6 == b.rulesV6 &&
 		a.flowsV4 == b.flowsV4 &&
 		a.flowsV6 == b.flowsV6 &&
