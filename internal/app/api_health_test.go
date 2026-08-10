@@ -83,6 +83,57 @@ func TestBuildAPIHandlerReadyzReflectsProcessManagerState(t *testing.T) {
 	}
 }
 
+func TestBuildAPIHandlerReadyzRejectsUnavailableEgressNAT(t *testing.T) {
+	db := openTestDB(t)
+	pm := &ProcessManager{
+		ready: true,
+		egressNATPlans: map[int64]ruleDataplanePlan{
+			7: {
+				KernelEligible:  true,
+				EffectiveEngine: ruleEngineUserspace,
+				FallbackReason:  "tc map ABI mismatch",
+			},
+		},
+		enabledEgressNATs:      map[int64]bool{7: true},
+		kernelEgressNATs:       map[int64]bool{},
+		kernelEgressNATEngines: map[int64]string{},
+	}
+	handler := buildAPIHandler(&Config{
+		WebBind:  "127.0.0.1",
+		WebPort:  8080,
+		WebToken: "test-token",
+	}, db, pm)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz with unavailable egress NAT status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	pm.mu.Lock()
+	pm.egressNATPlans[7] = ruleDataplanePlan{KernelEligible: true, EffectiveEngine: ruleEngineKernel}
+	pm.kernelEgressNATs[7] = true
+	pm.kernelEgressNATEngines[7] = kernelEngineTC
+	pm.mu.Unlock()
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /readyz with running egress NAT status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	pm.mu.Lock()
+	delete(pm.enabledEgressNATs, 7)
+	pm.egressNATPlans[7] = ruleDataplanePlan{EffectiveEngine: ruleEngineUserspace, FallbackReason: "disabled"}
+	delete(pm.kernelEgressNATs, 7)
+	delete(pm.kernelEgressNATEngines, 7)
+	pm.mu.Unlock()
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /readyz with disabled egress NAT status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
 func TestAPIListenAddrUsesNormalizedBind(t *testing.T) {
 	addr := apiListenAddr(&Config{
 		WebBind: " [::1] ",

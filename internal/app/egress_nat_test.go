@@ -691,3 +691,14 @@ func TestEgressNATNATTypePersistsInDB(t *testing.T) {
 		t.Fatalf("NATType after update = %q, want %q", updated.NATType, egressNATTypeSymmetric)
 	}
 }
+
+func TestEnabledEgressNATIDsExcludesDisabledItems(t *testing.T) {
+	ids := enabledEgressNATIDs([]EgressNAT{
+		{ID: 1, Enabled: true},
+		{ID: 2, Enabled: false},
+		{ID: 3, Enabled: true},
+	})
+	if len(ids) != 2 || !ids[1] || !ids[3] || ids[2] {
+		t.Fatalf("enabledEgressNATIDs() = %+v, want IDs 1 and 3", ids)
+	}
+}

@@ -64,6 +64,7 @@ func TestValidateKernelCollectionSpecAllowsMissingIPv6Maps(t *testing.T) {
 			kernelOccupancyMapName:            &ebpf.MapSpec{},
 		},
 	}
+	setPresentKernelMapABISizesForTest(t, spec, tcKernelMapABIContracts())
 
 	if err := validateKernelCollectionSpec(spec); err != nil {
 		t.Fatalf("validateKernelCollectionSpec() error = %v, want nil", err)

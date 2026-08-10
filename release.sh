@@ -238,6 +238,10 @@ compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_OBJ}" "xdp"
 compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_STATS_OBJ}" "xdp-stats" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 compile_bpf_object "${EBPF_PLUGIN_XDP_SRC}" "${EBPF_PLUGIN_XDP_OBJ}" "plugin-xdp-dispatcher"
 
+info "校验 eBPF map ABI..."
+go test ./internal/app -run '^TestEmbeddedKernelMapABIs$' -count=1
+ok "eBPF map ABI 与 Go 编码一致"
+
 # ---------- bundled plugins ----------
 PLUGIN_BUNDLE="${PROJECT_DIR}/veer-plugins.tar.gz"
 rm -f "${PLUGIN_BUNDLE}"

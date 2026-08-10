@@ -300,6 +300,7 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 	spec.Maps[kernelFlowsMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
 	spec.Maps[kernelNatPortsMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
 	spec.Maps[kernelTCNatPortsOldMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
+	setPresentKernelMapABISizesForTest(t, spec, xdpKernelMapABIContracts())
 	if err := validateXDPCollectionSpec(spec); err != nil {
 		t.Fatalf("validateXDPCollectionSpec() error = %v, want nil with dual-stack map set", err)
 	}

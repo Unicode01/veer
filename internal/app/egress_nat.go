@@ -468,6 +468,16 @@ func buildEgressNATKernelCandidates(items []EgressNAT, planner *ruleDataplanePla
 	return buildEgressNATKernelCandidatesWithSnapshot(items, planner, configuredKernelRulesMapLimit, reservedKernelEntries, nextSyntheticID, loadEgressNATInterfaceSnapshot())
 }
 
+func enabledEgressNATIDs(items []EgressNAT) map[int64]bool {
+	ids := make(map[int64]bool)
+	for _, item := range items {
+		if item.Enabled {
+			ids[item.ID] = true
+		}
+	}
+	return ids
+}
+
 func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, reservedKernelEntries int, nextSyntheticID *int64, snapshot egressNATInterfaceSnapshot) ([]kernelCandidateRule, map[int64]ruleDataplanePlan) {
 	plans := make(map[int64]ruleDataplanePlan, len(items))
 	candidates := make([]kernelCandidateRule, 0, len(items)*2)

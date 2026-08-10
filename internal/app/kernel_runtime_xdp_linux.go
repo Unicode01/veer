@@ -1752,6 +1752,9 @@ func validateXDPCollectionSpec(spec *ebpf.CollectionSpec) error {
 			)
 		}
 	}
+	if err := validatePresentKernelMapABIContracts(spec, "xdp", xdpKernelMapABIContracts()); err != nil {
+		return err
+	}
 	return nil
 }
 

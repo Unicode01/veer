@@ -3567,6 +3567,9 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 			return fmt.Errorf("embedded tc eBPF object is missing program %q", kernelReplyProgramNameV6)
 		}
 	}
+	if err := validatePresentKernelMapABIContracts(spec, "tc", tcKernelMapABIContracts()); err != nil {
+		return err
+	}
 	return nil
 }
 
