@@ -4144,7 +4144,9 @@ static __attribute__((noinline)) int handle_egress_nat_forward_full_cone(struct 
 			front_value->front_close_seen_ns = now;
 		}
 		front_value->last_seen_ns = now;
+		build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
 		if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.flow, front_value, BPF_NOEXIST) < 0) {
+			build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
 			if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
 				drop_kernel_nat_occupancy();
 
@@ -4613,7 +4615,9 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 			front_value->front_close_seen_ns = now;
 		}
 		front_value->last_seen_ns = now;
+		build_front_flow_key_v6(skb, ctx, &reply_or_nat.flow);
 		if (update_flow_v6_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.flow, front_value, BPF_NOEXIST) < 0) {
+			build_nat_port_key_v6(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
 			if (delete_nat_port_v6_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
 				drop_kernel_nat_occupancy();
 

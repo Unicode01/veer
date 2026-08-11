@@ -111,6 +111,11 @@ type egressNATPacketCapture struct {
 	stopped bool
 }
 
+type egressNATTCPSYNObservation struct {
+	SourcePort int
+	Sequence   uint64
+}
+
 func ensureEgressNATIntegrationIPForwarding(t *testing.T) {
 	t.Helper()
 
@@ -372,6 +377,181 @@ func TestEgressNATTCActiveTCPRefreshesBothFlowEntries(t *testing.T) {
 	}
 	if observed := strings.TrimSpace(string(data)); observed != egressNATUplinkAddr {
 		t.Fatalf("streaming backend observed source IP %q, want %q", observed, egressNATUplinkAddr)
+	}
+}
+
+func TestEgressNATTCFullConeSYNRetryKeepsNATPort(t *testing.T) {
+	if os.Getenv(egressNATTestEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	for _, command := range []string{"ip", "tc", "tcpdump"} {
+		if _, err := exec.LookPath(command); err != nil {
+			t.Skipf("%s command is required", command)
+		}
+	}
+
+	topology := setupEgressNATIntegrationTopology(t)
+	seedEgressNATIntegrationNeighbor(t, topology)
+
+	rt := newTCKernelRuleRuntime(&Config{})
+	defer rt.Close()
+	rule := buildEgressNATSyntheticRule(EgressNAT{
+		ID:              1,
+		ParentInterface: topology.BridgeIF,
+		OutInterface:    topology.UplinkHostIF,
+		OutSourceIP:     egressNATUplinkAddr,
+		Protocol:        "tcp",
+		NATType:         egressNATTypeFullCone,
+		Enabled:         true,
+	}, topology.ChildHostIF, 1, "tcp")
+	results, err := rt.Reconcile([]Rule{rule})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("full-cone egress NAT result = %+v, want running tc", result)
+	}
+
+	targetAddr := net.JoinHostPort(egressNATBackendAddr, strconv.Itoa(egressNATProbePort))
+	observedFile := filepath.Join(t.TempDir(), "observed-syn-retry.txt")
+	backendCmd, backendLogs := startEgressNATBackendHelperInNamespaceWithObservedFormat(
+		t,
+		topology.BackendNS,
+		"tcp",
+		targetAddr,
+		observedFile,
+		egressNATObservedFmtHostPort,
+	)
+	t.Cleanup(func() {
+		if backendCmd != nil && backendCmd.ProcessState == nil {
+			stopDataplanePerfHelper(t, backendCmd)
+		}
+	})
+
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.BackendNS, "tc", "qdisc", "replace", "dev", topology.BackendNSIF, "root", "netem", "loss", "100%")
+	lossActive := true
+	removeLoss := func() error {
+		if !lossActive {
+			return nil
+		}
+		output, err := exec.Command("ip", "netns", "exec", topology.BackendNS, "tc", "qdisc", "del", "dev", topology.BackendNSIF, "root").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("remove backend SYN-ACK loss qdisc: %w (%s)", err, strings.TrimSpace(string(output)))
+		}
+		lossActive = false
+		return nil
+	}
+	t.Cleanup(func() {
+		if err := removeLoss(); err != nil {
+			t.Log(err)
+		}
+	})
+
+	captureCtx, cancelCapture := context.WithCancel(context.Background())
+	defer cancelCapture()
+	filter := fmt.Sprintf("tcp dst port %d and tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack = 0", egressNATProbePort)
+	captureCmd := exec.CommandContext(
+		captureCtx,
+		"ip", "netns", "exec", topology.BackendNS,
+		"tcpdump", "-l", "-nn", "-S", "-i", topology.BackendNSIF, "-c", "2", filter,
+	)
+	var captureOutput bytes.Buffer
+	var captureError bytes.Buffer
+	captureCmd.Stdout = &captureOutput
+	captureCmd.Stderr = &captureError
+	if err := captureCmd.Start(); err != nil {
+		t.Fatalf("start TCP SYN capture: %v", err)
+	}
+	captureDone := make(chan error, 1)
+	go func() { captureDone <- captureCmd.Wait() }()
+	time.Sleep(300 * time.Millisecond)
+
+	clientCtx, cancelClient := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelClient()
+	clientCmd := exec.CommandContext(clientCtx, "ip", "netns", "exec", topology.ClientNS, os.Args[0], "-test.run", "TestEgressNATIntegrationHelperProcess", "-test.v=false")
+	clientCmd.Env = append(os.Environ(),
+		egressNATHelperEnv+"=1",
+		egressNATHelperRoleEnv+"="+egressNATHelperRoleClient,
+		egressNATHelperProtocolEnv+"=tcp",
+		egressNATHelperTargetAddrEnv+"="+targetAddr,
+	)
+	type clientResult struct {
+		output []byte
+		err    error
+	}
+	clientDone := make(chan clientResult, 1)
+	go func() {
+		output, err := clientCmd.CombinedOutput()
+		clientDone <- clientResult{output: output, err: err}
+	}()
+
+	select {
+	case err := <-captureDone:
+		if err != nil {
+			cancelClient()
+			_ = removeLoss()
+			t.Fatalf("capture retransmitted TCP SYN: %v\nstdout:\n%s\nstderr:\n%s", err, captureOutput.String(), captureError.String())
+		}
+	case result := <-clientDone:
+		cancelCapture()
+		<-captureDone
+		_ = removeLoss()
+		t.Fatalf("TCP client exited before two SYN packets were captured: %v\nclient output:\n%s\npacket capture:\n%s\n%s", result.err, string(result.output), captureOutput.String(), captureError.String())
+	case <-time.After(6 * time.Second):
+		cancelCapture()
+		<-captureDone
+		cancelClient()
+		_ = removeLoss()
+		t.Fatalf("timed out waiting for TCP SYN retransmission\npacket capture:\n%s\n%s", captureOutput.String(), captureError.String())
+	}
+
+	if err := removeLoss(); err != nil {
+		cancelClient()
+		t.Fatal(err)
+	}
+	observations, err := parseEgressNATTCPSYNObservations(captureOutput.String())
+	if err != nil {
+		cancelClient()
+		t.Fatalf("parse TCP SYN capture: %v\n%s", err, captureOutput.String())
+	}
+	if len(observations) != 2 {
+		cancelClient()
+		t.Fatalf("captured TCP SYN count = %d, want 2\n%s", len(observations), captureOutput.String())
+	}
+	if observations[0].Sequence != observations[1].Sequence {
+		cancelClient()
+		t.Fatalf("TCP SYN sequence changed across retransmission: first=%d second=%d", observations[0].Sequence, observations[1].Sequence)
+	}
+	if observations[0].SourcePort != observations[1].SourcePort {
+		cancelClient()
+		t.Fatalf("full-cone NAT source port changed across TCP SYN retransmission: first=%d second=%d", observations[0].SourcePort, observations[1].SourcePort)
+	}
+
+	select {
+	case result := <-clientDone:
+		if result.err != nil {
+			t.Fatalf("TCP client did not recover after restoring SYN-ACK delivery: %v\nclient output:\n%s\nbackend logs:\n%s", result.err, string(result.output), backendLogs.String())
+		}
+	case <-clientCtx.Done():
+		t.Fatalf("TCP client did not recover after restoring SYN-ACK delivery: %v\nbackend logs:\n%s", clientCtx.Err(), backendLogs.String())
+	}
+	waitForEgressNATHelperExit(t, backendCmd, "tcp-syn-retry", backendLogs.String())
+	data, err := os.ReadFile(observedFile)
+	if err != nil {
+		t.Fatalf("read SYN retry observed peer: %v", err)
+	}
+	observedHost, observedPort, err := net.SplitHostPort(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parse SYN retry observed peer %q: %v", strings.TrimSpace(string(data)), err)
+	}
+	if observedHost != egressNATUplinkAddr {
+		t.Fatalf("backend observed source IP %q, want %q", observedHost, egressNATUplinkAddr)
+	}
+	if observedPort != strconv.Itoa(observations[0].SourcePort) {
+		t.Fatalf("established connection source port = %s, want retransmitted SYN port %d", observedPort, observations[0].SourcePort)
 	}
 }
 
@@ -2506,6 +2686,54 @@ func writeEgressNATObservedPeer(path string, addr net.Addr, format string) error
 		return err
 	}
 	return os.WriteFile(path, []byte(observed), 0o644)
+}
+
+func parseEgressNATTCPSYNObservations(capture string) ([]egressNATTCPSYNObservation, error) {
+	sourceMarker := "IP " + egressNATUplinkAddr + "."
+	destinationMarker := " > " + egressNATBackendAddr + "." + strconv.Itoa(egressNATProbePort) + ":"
+	observations := make([]egressNATTCPSYNObservation, 0, 2)
+	scanner := bufio.NewScanner(strings.NewReader(capture))
+	for scanner.Scan() {
+		line := scanner.Text()
+		sourceStart := strings.Index(line, sourceMarker)
+		if sourceStart < 0 || !strings.Contains(line, destinationMarker) {
+			continue
+		}
+		source := line[sourceStart+len(sourceMarker):]
+		sourceEnd := strings.Index(source, " > ")
+		if sourceEnd <= 0 {
+			return nil, fmt.Errorf("missing source endpoint separator in %q", line)
+		}
+		sourcePort, err := strconv.Atoi(source[:sourceEnd])
+		if err != nil {
+			return nil, fmt.Errorf("parse source port in %q: %w", line, err)
+		}
+
+		sequenceStart := strings.Index(line, "seq ")
+		if sequenceStart < 0 {
+			return nil, fmt.Errorf("missing TCP sequence in %q", line)
+		}
+		sequenceText := line[sequenceStart+len("seq "):]
+		sequenceEnd := 0
+		for sequenceEnd < len(sequenceText) && sequenceText[sequenceEnd] >= '0' && sequenceText[sequenceEnd] <= '9' {
+			sequenceEnd++
+		}
+		if sequenceEnd == 0 {
+			return nil, fmt.Errorf("invalid TCP sequence in %q", line)
+		}
+		sequence, err := strconv.ParseUint(sequenceText[:sequenceEnd], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("parse TCP sequence in %q: %w", line, err)
+		}
+		observations = append(observations, egressNATTCPSYNObservation{
+			SourcePort: sourcePort,
+			Sequence:   sequence,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan TCP SYN capture: %w", err)
+	}
+	return observations, nil
 }
 
 func buildICMPEchoMessage(icmpType byte, id uint16, seq uint16, payload []byte) []byte {

@@ -3227,7 +3227,13 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct xdp_md *xd
 			front_value->front_close_seen_ns = now;
 		}
 		front_value->last_seen_ns = now;
+		build_full_cone_front_flow_key(in_ifindex, ctx, &reply_or_nat.flow);
 		if (update_flow_v4_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.flow, front_value, BPF_NOEXIST) < 0) {
+			reply_or_nat.nat.ifindex = rule->out_ifindex;
+			reply_or_nat.nat.nat_addr = front_value->nat_addr;
+			reply_or_nat.nat.nat_port = front_value->nat_port;
+			reply_or_nat.nat.proto = ctx->proto;
+			reply_or_nat.nat.pad = 0;
 			if (delete_nat_port_v4_session_in_bank(FORWARD_XDP_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
 				drop_kernel_nat_occupancy();
 
