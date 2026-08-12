@@ -12,6 +12,7 @@ from typing import Optional
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEPLOY_SCRIPT = ROOT_DIR / "deploy.sh"
+EXAMPLE_CONFIG = ROOT_DIR / "config.example.json"
 EMBEDDED_CONFIG_PATTERN = re.compile(
     r'''python3 - "\$config_path" <<'PY'\r?\n(?P<body>.*?)\r?\nPY''',
     re.DOTALL,
@@ -95,6 +96,12 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="veer-deploy-config-policy-") as temp_dir:
         root = Path(temp_dir)
+        result = run_scenario(script, root, "new-local-full-defaults", None)
+        expected = json.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+        expected["web_token"] = STRONG_WEB_TOKEN
+        expected["plugin_admin_token"] = STRONG_ADMIN_TOKEN
+        assert result == expected, "deploy.sh hardcoded defaults differ from config.example.json"
+
         legacy = {
             "web_bind": "0.0.0.0",
             "web_token": "short-token",

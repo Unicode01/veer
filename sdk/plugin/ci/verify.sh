@@ -57,7 +57,7 @@ case "$kind" in
 			"$VEER_BIN" plugin build --source "$PLUGIN_DIR" --architectures "$BUILD_ARCHITECTURES"
 		fi
 		;;
-	control)
+	control|ui)
 		;;
 	*)
 		echo "unsupported plugin kind: $kind" >&2

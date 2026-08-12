@@ -77,6 +77,14 @@ func TestPluginDeveloperCLIInitLintAndTest(t *testing.T) {
 	}
 }
 
+func TestPluginPackageCLIUsageListsAllPluginKinds(t *testing.T) {
+	var output strings.Builder
+	writePluginPackageCLIUsage(&output)
+	if !strings.Contains(output.String(), "[--kind control|pipeline|ui]") {
+		t.Fatalf("plugin usage does not list every supported kind:\n%s", output.String())
+	}
+}
+
 func TestPluginDeveloperCLITestRejectsNondeterministicRegistration(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "random_surface", `{
@@ -136,6 +144,56 @@ func TestPluginDeveloperCLIInitPipelineCopiesSDK(t *testing.T) {
 	var checked pluginDeveloperLintResult
 	if err := json.Unmarshal(result, &checked); err != nil || checked.PluginID != "sample_pipeline" {
 		t.Fatalf("pipeline lint = %+v, error = %v", checked, err)
+	}
+}
+
+func TestPluginDeveloperCLIInitUI(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "sample_ui")
+	output := runPluginPackageCLIForTest(t,
+		"init", "--id", "sample_ui", "--name", "Sample <UI>", "--kind", "ui", "--directory", target,
+	)
+	var initialized map[string]any
+	if err := json.Unmarshal(output, &initialized); err != nil {
+		t.Fatal(err)
+	}
+	if initialized["plugin_id"] != "sample_ui" || initialized["kind"] != "ui" {
+		t.Fatalf("init output = %+v", initialized)
+	}
+	for _, name := range []string{pluginManifestFile, "control.js", filepath.Join("ui", "index.html")} {
+		if info, err := os.Stat(filepath.Join(target, name)); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("generated %s info = %+v, error = %v", name, info, err)
+		}
+	}
+	manifestData, err := os.ReadFile(filepath.Join(target, pluginManifestFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest PluginManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Kind != "ui" || manifest.Control == nil || strings.Join(manifest.Control.Permissions, ",") != "ui" {
+		t.Fatalf("generated UI manifest = %+v", manifest)
+	}
+	uiData, err := os.ReadFile(filepath.Join(target, "ui", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(uiData), "<title>Sample <UI></title>") || !strings.Contains(string(uiData), "<title>Sample &lt;UI&gt;</title>") {
+		t.Fatalf("generated UI title is not HTML-escaped:\n%s", uiData)
+	}
+	for _, command := range []string{"lint", "test"} {
+		result := runPluginPackageCLIForTest(t, command, "--source", target)
+		var checked pluginDeveloperLintResult
+		if err := json.Unmarshal(result, &checked); err != nil {
+			t.Fatal(err)
+		}
+		if checked.PluginID != "sample_ui" || checked.Kind != "ui" || !checked.Compatible {
+			t.Fatalf("%s result = %+v", command, checked)
+		}
+		if command == "test" && !checked.Registration {
+			t.Fatalf("%s did not exercise UI registration: %+v", command, checked)
+		}
 	}
 }
 

@@ -108,7 +108,7 @@ function createHarness() {
     'errors.deleteFailed': 'Delete failed: {{message}}',
     'validation.ruleNotFound': 'The rule no longer exists.',
     'validation.siteNotFound': 'The site no longer exists.',
-    'validation.siteQUICRequiresHTTPS': 'An HTTPS backend port is required when QUIC is enabled.',
+    'validation.siteQUICRequiresHTTPS': 'An HTTPS backend port is required when HTTP/3 (UDP 443) is enabled.',
     'validation.rangeNotFound': 'The range mapping no longer exists.',
     'validation.egressNATNotFound': 'The egress NAT takeover no longer exists.',
     'validation.egressNATRequired': 'Select the parent interface and outbound interface.',
@@ -1327,9 +1327,9 @@ test('applySiteValidationIssues highlights QUIC and HTTPS together', () => {
   }]);
 
   assert.equal(elements.siteQUIC.focused, true);
-  assert.equal(elements.siteQUIC.errorMessage, 'An HTTPS backend port is required when QUIC is enabled.');
-  assert.equal(elements.siteBackendHTTPS.errorMessage, 'An HTTPS backend port is required when QUIC is enabled.');
-  assert.equal(notifications.at(-1).message, 'An HTTPS backend port is required when QUIC is enabled.');
+  assert.equal(elements.siteQUIC.errorMessage, 'An HTTPS backend port is required when HTTP/3 (UDP 443) is enabled.');
+  assert.equal(elements.siteBackendHTTPS.errorMessage, 'An HTTPS backend port is required when HTTP/3 (UDP 443) is enabled.');
+  assert.equal(notifications.at(-1).message, 'An HTTPS backend port is required when HTTP/3 (UDP 443) is enabled.');
 });
 
 test('applyRangeValidationIssues reuses aggregated toast summary', () => {

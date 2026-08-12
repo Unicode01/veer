@@ -4,12 +4,22 @@
 
 ## 快速开始
 
+Veer 支持 `control`、`pipeline` 和 `ui` 三种插件类型：`control` 用于控制面逻辑，`pipeline` 在控制面的基础上加载 eBPF 数据面，`ui` 用于只注册 WebUI 页面和相关资源或动作。
+
 控制面插件从创建到可安装包只需要：
 
 ```text
 veer plugin init --id my_plugin --kind control --directory ./my_plugin
 veer plugin test --source ./my_plugin --format text
 veer plugin pack --source ./my_plugin
+```
+
+UI 插件使用同一套受限控制面宿主，通过 `control.js` 在声明 `ui` 权限后调用 `ui.register()`，而不是在 manifest 中增加顶层 `ui` 字段：
+
+```text
+veer plugin init --id my_ui --kind ui --directory ./my_ui
+veer plugin test --source ./my_ui --format text
+veer plugin pack --source ./my_ui
 ```
 
 数据面插件先构建 eBPF object；后续重建已有输出时显式加 `--force`：
@@ -56,7 +66,7 @@ my_plugin/
 }
 ```
 
-manifest 只承载静态契约：身份、入口、权限、兼容范围、依赖和冲突。资源、动作、Hook、object、逻辑接口和页面仍由 `control.js` 注册。插件 `version` 必须是完整 SemVer；`compatibility.runtime`、`compatibility.kernel` 和依赖版本使用 SemVer 约束。
+manifest 只承载静态契约：身份、入口、权限、兼容范围、依赖和冲突。资源、动作、Hook、object、逻辑接口和页面仍由 `control.js` 注册。`kind: "ui"` 也必须提供受限的 `control.main`，声明 `ui` 权限并由该脚本调用 `ui.register()`；manifest 不支持顶层 `ui` 字段。插件 `version` 必须是完整 SemVer；`compatibility.runtime`、`compatibility.kernel` 和依赖版本使用 SemVer 约束。
 
 需要其他插件时显式声明依赖：
 
@@ -245,7 +255,7 @@ veer plugin contract --output ./api-contract.json
 veer plugin contract --types-output ./methods.d.ts
 ```
 
-`GET /api/plugin-sdk-contract` 返回运行中二进制生成的同一份权威契约。契约摘要按 canonical JSON 计算；控制方法、feature、资源限制或 pipeline ABI 发生漂移时，仓库契约测试和 `contract --check` 都会失败。contract v7 的 `control.capabilities` 为每个 Host 方法声明必需/任一/条件权限、可调用阶段、主 VM/Worker 范围以及隔离 IPC 请求和响应上限；`netfilter_pipeline` 声明原生 Hook placement 契约，`operations` 公开持久 operation 的状态和配额，`control_methods` 作为简单工具兼容列表保留，并由同一注册表生成。
+`GET /api/plugin-sdk-contract` 返回运行中二进制生成的同一份权威契约。契约摘要按 canonical JSON 计算；控制方法、feature、资源限制或 pipeline ABI 发生漂移时，仓库契约测试和 `contract --check` 都会失败。contract v8 的 `control.capabilities` 为每个 Host 方法声明必需/任一/条件权限、可调用阶段、主 VM/Worker 范围以及隔离 IPC 请求和响应上限；`netfilter_pipeline` 声明原生 Hook placement 契约，`operations` 公开持久 operation 的状态和配额，`control_methods` 作为简单工具兼容列表保留，并由同一注册表生成。
 
 ### 兼容与 ABI 演进
 
@@ -1104,7 +1114,7 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 
 ## 插件包发布
 
-正式发布同时提供独立的 `veer-plugin-sdk.tar.gz`。归档保留 `sdk/plugin/`、`plugins/include/veer_plugin_helpers.h`、本指南和许可证，并带逐文件 SHA256 的 `sdk-manifest.json`；第三方插件不需要克隆 Veer 主仓库即可获得 TypeScript 契约、测试宿主、ABI fixture、eBPF helper 和 CI 模板。`scripts/package-plugin-sdk.sh` 使用固定成员顺序、时间戳和权限生成确定性归档，发布门禁会生成两次比较字节，并从归档初始化、构建、验收和打包一个 pipeline 插件。
+正式发布同时提供独立的 `veer-plugin-sdk.tar.gz`。归档保留 `sdk/plugin/`、`plugins/include/veer_plugin_helpers.h`、本指南和许可证，并带逐文件 SHA256 的 `sdk-manifest.json`；第三方插件不需要克隆 Veer 主仓库即可获得 TypeScript 契约、测试宿主、ABI fixture、eBPF helper 和 CI 模板。SDK 自带的 GitHub Actions 模板通过 `VEER_REPOSITORY` 和 `VEER_REF` 检出 Veer 源码，再构建匹配的 Veer 二进制和 SDK；生产插件应把 `VEER_REF` 固定到已发布 tag 或明确 commit，避免跟随浮动分支产生未经审核的契约变化。`scripts/package-plugin-sdk.sh` 使用固定成员顺序、时间戳和权限生成确定性归档，发布门禁会生成两次比较字节，并覆盖从归档初始化、验收到打包 `pipeline`、`control` 和 `ui` 三类插件；`pipeline` 还会执行 eBPF object 构建。
 
 Veer 可执行文件内置与服务端安装器共用格式和安全边界的打包工具：
 

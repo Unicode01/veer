@@ -3879,7 +3879,7 @@ function forward_validate_site_input(array $data, array $settings, $excludeLocal
     }
     $quic = forward_resolve_checkbox_value($data, 'quic', !empty($defaults['quic']));
     if ($quic && $backendHttpsPort === 0) {
-        return ['success' => false, 'message' => '启用 QUIC 时必须配置 HTTPS 后端端口'];
+        return ['success' => false, 'message' => '启用 HTTP/3 (UDP 443) 时必须配置 HTTPS 后端端口'];
     }
 
     $transparent = forward_resolve_checkbox_value($data, 'transparent', !empty($defaults['transparent']));
@@ -5285,7 +5285,7 @@ HTML;
             $siteJson = htmlspecialchars(json_encode($site, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8');
             $backendHttp = (int) $site['backend_http_port'] > 0 ? ('HTTP:' . (int) $site['backend_http_port']) : 'HTTP:关闭';
             $backendHttps = (int) $site['backend_https_port'] > 0 ? ('HTTPS:' . (int) $site['backend_https_port']) : 'HTTPS:关闭';
-            $backendQuic = !empty($site['quic']) ? 'QUIC:开启' : 'QUIC:关闭';
+            $backendQuic = !empty($site['quic']) ? 'HTTP/3 (UDP 443):开启' : 'HTTP/3 (UDP 443):关闭';
             $siteSourceMeta = !empty($site['transparent'])
                 ? '源地址：透传'
                 : (!empty($site['backend_source_ip']) ? ('回源 IP：' . $site['backend_source_ip']) : '回源 IP：自动');
@@ -5751,7 +5751,7 @@ HTML;
     var $form = $(this);
     var $submit = $form.find('button[type="submit"]');
     if ($('#forward_admin_site_quic').prop('checked') && (parseInt($('#forward_admin_site_https_port').val(), 10) || 0) === 0) {
-      showAdminNotice('warning', '启用 QUIC 时必须配置 HTTPS 后端端口');
+      showAdminNotice('warning', '启用 HTTP/3 (UDP 443) 时必须配置 HTTPS 后端端口');
       $('#forward_admin_site_https_port').focus();
       return;
     }

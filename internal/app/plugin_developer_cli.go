@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"os/exec"
@@ -188,7 +189,7 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	id := flags.String("id", "", "plugin id")
 	name := flags.String("name", "", "display name")
-	kind := flags.String("kind", "control", "control or pipeline")
+	kind := flags.String("kind", "control", "control, pipeline or ui")
 	directory := flags.String("directory", "", "target directory")
 	sdkInclude := flags.String("sdk-include", "", "directory containing veer_plugin_helpers.h")
 	force := flags.Bool("force", false, "replace generated files that already exist")
@@ -203,8 +204,8 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("plugin init requires --id matching %s and no positional arguments", pluginIDPattern.String())
 	}
 	pluginKind := strings.TrimSpace(strings.ToLower(*kind))
-	if pluginKind != "control" && pluginKind != "pipeline" {
-		return fmt.Errorf("plugin init --kind must be control or pipeline")
+	if pluginKind != "control" && pluginKind != "pipeline" && pluginKind != "ui" {
+		return fmt.Errorf("plugin init --kind must be control, pipeline or ui")
 	}
 	target := strings.TrimSpace(*directory)
 	if target == "" {
@@ -221,7 +222,7 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 	if displayName == "" {
 		displayName = pluginDeveloperDisplayName(pluginID)
 	}
-	manifest, controlSource, bpfSource := pluginDeveloperScaffold(pluginID, displayName, pluginKind)
+	manifest, controlSource, bpfSource, uiSource := pluginDeveloperScaffold(pluginID, displayName, pluginKind)
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
@@ -242,6 +243,8 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 		}
 		files["main.bpf.c"] = []byte(bpfSource)
 		files[filepath.Join("include", "veer_plugin_helpers.h")] = helper
+	} else if pluginKind == "ui" {
+		files[filepath.Join("ui", "index.html")] = []byte(uiSource)
 	}
 	paths := make([]string, 0, len(files))
 	for relative := range files {
@@ -566,7 +569,7 @@ func runPluginBuildCLI(args []string, stdout, stderr io.Writer) error {
 	return writePluginPackageCLIJSON(stdout, result)
 }
 
-func pluginDeveloperScaffold(id, name, kind string) (PluginManifest, string, string) {
+func pluginDeveloperScaffold(id, name, kind string) (PluginManifest, string, string, string) {
 	manifest := PluginManifest{
 		APIVersion:  pluginAPIVersionV1,
 		ID:          id,
@@ -586,6 +589,7 @@ func pluginDeveloperScaffold(id, name, kind string) (PluginManifest, string, str
 	}
 	control := "exports.onReconcile = function () {\n  metrics.counter('reconciles_total');\n};\n"
 	bpf := ""
+	ui := ""
 	if kind == "pipeline" {
 		manifest.Compatibility.TCPipelineABI = pluginTCPipelineABI
 		manifest.Compatibility.OS = []string{"linux"}
@@ -628,8 +632,52 @@ int pre_forward(struct __sk_buff *skb)
 
 char __license[] SEC("license") = "GPL";
 `
+	} else if kind == "ui" {
+		manifest.Control.Permissions = []string{"ui"}
+		page := id
+		if page == "plugins" || page == "diagnostics" {
+			page += "_ui"
+		}
+		quotedPage, _ := json.Marshal(page)
+		quotedName, _ := json.Marshal(name)
+		control = fmt.Sprintf(`ui.register({
+  static_dir: 'ui',
+  entry: 'index.html',
+  page: %s,
+  page_title: %s
+});
+
+exports.onReconcile = function () {};
+`, quotedPage, quotedName)
+		ui = fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>%s</title>
+  <style>
+    body { margin: 0; }
+    .plugin-page { padding: 8px; }
+  </style>
+</head>
+<body>
+  <main class="plugin-page" id="app"></main>
+  <script>
+    (function () {
+      var host = window.VeerPluginHost;
+      if (!host) {
+        document.getElementById('app').textContent = 'VeerPluginHost is not available.';
+        return;
+      }
+      document.getElementById('app').appendChild(host.status('Ready'));
+      host.requestResize();
+    }());
+  </script>
+</body>
+</html>
+`, html.EscapeString(name))
 	}
-	return manifest, control, bpf
+	return manifest, control, bpf, ui
 }
 
 func ensurePluginInitTarget(target string) error {
