@@ -3,13 +3,14 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 )
 
 func TestKernelFlowPurgeRetryStateRetainsFailedTargetsAndUnionsNewTargets(t *testing.T) {
-	first := kernelFlowPurgeTarget{RuleID: 41, RuleRevision: 1001}
-	second := kernelFlowPurgeTarget{RuleID: 42, RuleRevision: 1002}
+	first := kernelFlowPurgeTarget{RuleID: 41, RuleRevision: 1001, IfIndex: 55}
+	second := kernelFlowPurgeTarget{RuleID: 42, RuleRevision: 1002, IfIndex: 66}
 	state := kernelFlowPurgeRetryState{}
 	calls := 0
 
@@ -60,6 +61,44 @@ func TestKernelFlowPurgeRetryStateRetainsFailedTargetsAndUnionsNewTargets(t *tes
 	}
 }
 
+func TestKernelFlowPurgeRetryStateCoalescesCoveredScopedTargets(t *testing.T) {
+	state := kernelFlowPurgeRetryState{}
+	state.add(map[kernelFlowPurgeTarget]struct{}{
+		{RuleID: 41, RuleRevision: 1001, IfIndex: 55}: {},
+		{RuleID: 41, RuleRevision: 1001, IfIndex: 66}: {},
+		{RuleID: 41, RuleRevision: 1002, IfIndex: 77}: {},
+	})
+	state.add(map[kernelFlowPurgeTarget]struct{}{
+		{RuleID: 41, RuleRevision: 1001}: {},
+	})
+
+	wantRevision := kernelFlowPurgeTarget{RuleID: 41, RuleRevision: 1001}
+	wantOtherRevision := kernelFlowPurgeTarget{RuleID: 41, RuleRevision: 1002, IfIndex: 77}
+	got := state.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("coalesced targets = %#v, want full revision plus other scoped revision", got)
+	}
+	if _, ok := got[wantRevision]; !ok {
+		t.Fatalf("coalesced targets = %#v, missing %#v", got, wantRevision)
+	}
+	if _, ok := got[wantOtherRevision]; !ok {
+		t.Fatalf("coalesced targets = %#v, missing %#v", got, wantOtherRevision)
+	}
+
+	state.add(map[kernelFlowPurgeTarget]struct{}{
+		{RuleID: 41}: {},
+		{RuleID: 41, RuleRevision: 1003, IfIndex: 88}: {},
+	})
+	got = state.snapshot()
+	wantRule := kernelFlowPurgeTarget{RuleID: 41}
+	if len(got) != 1 {
+		t.Fatalf("wildcard-coalesced targets = %#v, want one rule wildcard", got)
+	}
+	if _, ok := got[wantRule]; !ok {
+		t.Fatalf("wildcard-coalesced targets = %#v, missing %#v", got, wantRule)
+	}
+}
+
 func TestKernelHotRestartMetadataRoundTripsCandidateIDsAndPendingPurges(t *testing.T) {
 	t.Setenv(forwardRuntimeStateDirEnv, t.TempDir())
 	rule := Rule{
@@ -77,7 +116,7 @@ func TestKernelHotRestartMetadataRoundTripsCandidateIDsAndPendingPurges(t *testi
 		kernelNATType:      egressNATTypeFullCone,
 		kernelRedirectMode: egressNATRedirectModePreparedL2,
 	}
-	target := kernelFlowPurgeTarget{RuleID: 699, RuleRevision: 0xabc}
+	target := kernelFlowPurgeTarget{RuleID: 699, RuleRevision: 0xabc, IfIndex: 66}
 	meta := kernelHotRestartMetadataWithRuleState(
 		kernelHotRestartTCMetadata(nil, "object"),
 		[]Rule{rule},
@@ -100,6 +139,24 @@ func TestKernelHotRestartMetadataRoundTripsCandidateIDsAndPendingPurges(t *testi
 	}
 	if _, ok := pending[target]; !ok {
 		t.Fatalf("hot restart pending purges = %#v, want %#v", pending, target)
+	}
+}
+
+func TestKernelHotRestartMetadataReadsLegacyPendingFlowPurgeWithoutIfIndex(t *testing.T) {
+	var meta kernelHotRestartMetadata
+	if err := json.Unmarshal([]byte(`{
+		"engine":"tc",
+		"pending_flow_purges":[{"rule_id":699,"rule_revision":2748}]
+	}`), &meta); err != nil {
+		t.Fatalf("unmarshal legacy hot restart metadata: %v", err)
+	}
+	want := kernelFlowPurgeTarget{RuleID: 699, RuleRevision: 2748}
+	got := kernelFlowPurgeTargetsFromHotRestartMetadata(meta)
+	if len(got) != 1 {
+		t.Fatalf("legacy pending purge targets = %#v, want one target", got)
+	}
+	if _, ok := got[want]; !ok {
+		t.Fatalf("legacy pending purge targets = %#v, want %#v", got, want)
 	}
 }
 

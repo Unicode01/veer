@@ -3,6 +3,7 @@
 package app
 
 import (
+	"errors"
 	"testing"
 	"unsafe"
 
@@ -906,6 +907,523 @@ func TestPurgeKernelFlowsForTargetsMatchesExactRevisionAcrossXDPBanks(t *testing
 	if preserved.RuleRevision != newRevision {
 		t.Fatalf("preserved xdp revision = %d, want %d", preserved.RuleRevision, newRevision)
 	}
+}
+
+func TestKernelFlowMatchesPurgeTargetsScopesInterfaceAndRevision(t *testing.T) {
+	const (
+		ruleID   = uint32(62)
+		revision = uint64(6201)
+	)
+	value := tcFlowValueV4{RuleID: ruleID, RuleRevision: revision}
+	tests := []struct {
+		name    string
+		ifindex uint32
+		targets map[kernelFlowPurgeTarget]struct{}
+		want    bool
+	}{
+		{
+			name:    "scoped_match",
+			ifindex: 66,
+			targets: map[kernelFlowPurgeTarget]struct{}{{RuleID: ruleID, RuleRevision: revision, IfIndex: 66}: {}},
+			want:    true,
+		},
+		{
+			name:    "different_interface",
+			ifindex: 3,
+			targets: map[kernelFlowPurgeTarget]struct{}{{RuleID: ruleID, RuleRevision: revision, IfIndex: 66}: {}},
+		},
+		{
+			name:    "different_revision",
+			ifindex: 66,
+			targets: map[kernelFlowPurgeTarget]struct{}{{RuleID: ruleID, RuleRevision: revision + 1, IfIndex: 66}: {}},
+		},
+		{
+			name:    "full_revision",
+			ifindex: 3,
+			targets: map[kernelFlowPurgeTarget]struct{}{{RuleID: ruleID, RuleRevision: revision}: {}},
+			want:    true,
+		},
+		{
+			name:    "rule_wildcard",
+			ifindex: 3,
+			targets: map[kernelFlowPurgeTarget]struct{}{{RuleID: ruleID}: {}},
+			want:    true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kernelFlowMatchesPurgeTargets(tc.ifindex, value, tc.targets); got != tc.want {
+				t.Fatalf("kernelFlowMatchesPurgeTargets() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKernelFlowMatchesInterfaceScopedPurgeTargetRejectsCoveredAndInvalidTargets(t *testing.T) {
+	const (
+		ruleID   = uint32(63)
+		revision = uint64(6301)
+		ifindex  = uint32(66)
+	)
+	value := tcFlowValueV4{RuleID: ruleID, RuleRevision: revision, SessionID: 63001}
+	tests := []struct {
+		name    string
+		keyIf   uint32
+		value   tcFlowValueV4
+		targets map[kernelFlowPurgeTarget]struct{}
+		want    bool
+	}{
+		{
+			name:    "uncovered_scoped_target",
+			keyIf:   ifindex,
+			value:   value,
+			targets: map[kernelFlowPurgeTarget]struct{}{{RuleID: ruleID, RuleRevision: revision, IfIndex: ifindex}: {}},
+			want:    true,
+		},
+		{
+			name:  "covered_by_revision",
+			keyIf: ifindex,
+			value: value,
+			targets: map[kernelFlowPurgeTarget]struct{}{
+				{RuleID: ruleID, RuleRevision: revision, IfIndex: ifindex}: {},
+				{RuleID: ruleID, RuleRevision: revision}:                   {},
+			},
+		},
+		{
+			name:  "covered_by_rule",
+			keyIf: ifindex,
+			value: value,
+			targets: map[kernelFlowPurgeTarget]struct{}{
+				{RuleID: ruleID, RuleRevision: revision, IfIndex: ifindex}: {},
+				{RuleID: ruleID}: {},
+			},
+		},
+		{
+			name:    "different_interface",
+			keyIf:   ifindex + 1,
+			value:   value,
+			targets: map[kernelFlowPurgeTarget]struct{}{{RuleID: ruleID, RuleRevision: revision, IfIndex: ifindex}: {}},
+		},
+		{
+			name:    "zero_revision",
+			keyIf:   ifindex,
+			value:   tcFlowValueV4{RuleID: ruleID},
+			targets: map[kernelFlowPurgeTarget]struct{}{{RuleID: ruleID, IfIndex: ifindex}: {}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kernelFlowMatchesInterfaceScopedPurgeTarget(tc.keyIf, tc.value, tc.targets); got != tc.want {
+				t.Fatalf("kernelFlowMatchesInterfaceScopedPurgeTarget() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKernelFlowPurgeSessionIdentityRequiresFullNATAndNonzeroSession(t *testing.T) {
+	base := tcFlowValueV4{RuleID: 64, RuleRevision: 6401, SessionID: 64001}
+	if _, ok := kernelFlowPurgeSessionIdentityFor(unix.IPPROTO_TCP, base); ok {
+		t.Fatal("transparent flow unexpectedly produced a paired purge identity")
+	}
+	base.Flags = kernelFlowFlagFullNAT
+	base.SessionID = 0
+	if _, ok := kernelFlowPurgeSessionIdentityFor(unix.IPPROTO_TCP, base); ok {
+		t.Fatal("zero-session full-NAT flow unexpectedly produced a paired purge identity")
+	}
+	base.SessionID = 64001
+	identity, ok := kernelFlowPurgeSessionIdentityFor(unix.IPPROTO_TCP, base)
+	if !ok {
+		t.Fatal("full-NAT flow did not produce a paired purge identity")
+	}
+	if identity.RuleID != base.RuleID || identity.RuleRevision != base.RuleRevision || identity.SessionID != base.SessionID || identity.Proto != unix.IPPROTO_TCP {
+		t.Fatalf("paired purge identity = %+v, want values from %+v", identity, base)
+	}
+}
+
+func TestPurgeKernelFlowsForTargetsScopesTransparentBridgeMemberWithoutDeletingParent(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       "scope_transparent_bridge",
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 8,
+	})
+	const (
+		ruleID        = uint32(65)
+		revision      = uint64(6501)
+		sessionID     = uint64(65001)
+		parentIfIndex = uint32(3)
+		childIfIndex  = uint32(66)
+	)
+	parentKey := tcFlowKeyV4{
+		IfIndex: parentIfIndex,
+		SrcAddr: 1,
+		DstAddr: 2,
+		SrcPort: 22,
+		DstPort: 40000,
+		Proto:   unix.IPPROTO_TCP,
+	}
+	childKey := parentKey
+	childKey.IfIndex = childIfIndex
+	value := tcFlowValueV4{
+		RuleID:       ruleID,
+		RuleRevision: revision,
+		SessionID:    sessionID,
+		Flags:        kernelFlowFlagReplySeen,
+	}
+	if err := flows.Put(parentKey, value); err != nil {
+		t.Fatalf("put parent bridge flow: %v", err)
+	}
+	if err := flows.Put(childKey, value); err != nil {
+		t.Fatalf("put child bridge flow: %v", err)
+	}
+
+	_, deleted, err := purgeKernelFlowsForTargets(kernelRuntimeMapRefs{flowsV4: flows}, map[kernelFlowPurgeTarget]struct{}{
+		{RuleID: ruleID, RuleRevision: revision, IfIndex: childIfIndex}: {},
+	}, false)
+	if err != nil {
+		t.Fatalf("purgeKernelFlowsForTargets() error = %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want only the child-key flow", deleted)
+	}
+	var got tcFlowValueV4
+	if err := flows.Lookup(parentKey, &got); err != nil {
+		t.Fatalf("scoped child purge removed parent bridge flow: %v", err)
+	}
+	if got.SessionID != sessionID {
+		t.Fatalf("parent bridge session = %d, want %d", got.SessionID, sessionID)
+	}
+	if err := flows.Lookup(childKey, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("scoped child purge retained child flow: value=%+v err=%v", got, err)
+	}
+}
+
+func TestPurgeKernelFlowsForTargetsScopesInterfaceAcrossTCBanksAndFamilies(t *testing.T) {
+	newV4FlowMap := func(name string) *ebpf.Map {
+		return newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+			Name:       name,
+			Type:       ebpf.Hash,
+			KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+			ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+			MaxEntries: 32,
+		})
+	}
+	newV6FlowMap := func(name string) *ebpf.Map {
+		return newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+			Name:       name,
+			Type:       ebpf.Hash,
+			KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV6{})),
+			ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV6{})),
+			MaxEntries: 32,
+		})
+	}
+	activeV4 := newV4FlowMap("scope_v4_active")
+	oldV4 := newV4FlowMap("scope_v4_old")
+	activeV6 := newV6FlowMap("scope_v6_active")
+	oldV6 := newV6FlowMap("scope_v6_old")
+
+	const (
+		ruleID          = uint32(62)
+		oldRevision     = uint64(6201)
+		currentRevision = uint64(6202)
+		parentIfIndex   = uint32(3)
+		staleIfIndex    = uint32(66)
+	)
+	type v4Expectation struct {
+		m         *ebpf.Map
+		deleted   []tcFlowKeyV4
+		preserved []tcFlowKeyV4
+	}
+	type v6Expectation struct {
+		m         *ebpf.Map
+		deleted   []tcFlowKeyV6
+		preserved []tcFlowKeyV6
+	}
+	v4Expected := make([]v4Expectation, 0, 2)
+	for bank, flows := range []*ebpf.Map{activeV4, oldV4} {
+		parentFront, parentReply := putScopedPurgeV4Session(t, flows, ruleID, oldRevision, uint64(100+bank), parentIfIndex, uint32(10+bank))
+		staleFront, staleReply := putScopedPurgeV4Session(t, flows, ruleID, oldRevision, uint64(200+bank), staleIfIndex, uint32(20+bank))
+		reusedFront, reusedReply := putScopedPurgeV4Session(t, flows, ruleID, currentRevision, uint64(300+bank), staleIfIndex, uint32(30+bank))
+		v4Expected = append(v4Expected, v4Expectation{
+			m:         flows,
+			deleted:   []tcFlowKeyV4{staleFront, staleReply},
+			preserved: []tcFlowKeyV4{parentFront, parentReply, reusedFront, reusedReply},
+		})
+	}
+	v6Expected := make([]v6Expectation, 0, 2)
+	for bank, flows := range []*ebpf.Map{activeV6, oldV6} {
+		parentFront, parentReply := putScopedPurgeV6Session(t, flows, ruleID, oldRevision, uint64(400+bank), parentIfIndex, byte(40+bank))
+		staleFront, staleReply := putScopedPurgeV6Session(t, flows, ruleID, oldRevision, uint64(500+bank), staleIfIndex, byte(50+bank))
+		staleDirectFront, staleDirectReply := putScopedPurgeV6SessionWithInterfaces(t, flows, ruleID, oldRevision, uint64(700+bank), staleIfIndex, parentIfIndex, byte(70+bank))
+		reusedFront, reusedReply := putScopedPurgeV6Session(t, flows, ruleID, currentRevision, uint64(600+bank), staleIfIndex, byte(60+bank))
+		v6Expected = append(v6Expected, v6Expectation{
+			m:         flows,
+			deleted:   []tcFlowKeyV6{staleFront, staleReply, staleDirectFront, staleDirectReply},
+			preserved: []tcFlowKeyV6{parentFront, parentReply, reusedFront, reusedReply},
+		})
+	}
+
+	corrections, deleted, err := purgeKernelFlowsForTargets(kernelRuntimeMapRefs{
+		flowsV4:    activeV4,
+		flowsOldV4: oldV4,
+		flowsV6:    activeV6,
+		flowsOldV6: oldV6,
+	}, map[kernelFlowPurgeTarget]struct{}{
+		{RuleID: ruleID, RuleRevision: oldRevision, IfIndex: staleIfIndex}: {},
+	}, false)
+	if err != nil {
+		t.Fatalf("purgeKernelFlowsForTargets() error = %v", err)
+	}
+	if deleted != 12 {
+		t.Fatalf("deleted = %d, want 12 entries from six stale session pairs", deleted)
+	}
+	if got := corrections[ruleID]; got.TCPActiveConns != -6 {
+		t.Fatalf("corrections[%d] = %+v, want tcp=-6", ruleID, got)
+	}
+
+	for _, expected := range v4Expected {
+		if count, err := countKernelFlowMapEntries(expected.m); err != nil {
+			t.Fatalf("countKernelFlowMapEntries() error = %v", err)
+		} else if count != len(expected.preserved) {
+			t.Fatalf("countKernelFlowMapEntries() = %d, want %d", count, len(expected.preserved))
+		}
+		for _, key := range expected.deleted {
+			var value tcFlowValueV4
+			if err := expected.m.Lookup(key, &value); !errors.Is(err, ebpf.ErrKeyNotExist) {
+				t.Fatalf("scoped purge retained IPv4 key %+v: value=%+v err=%v", key, value, err)
+			}
+		}
+		for _, key := range expected.preserved {
+			var value tcFlowValueV4
+			if err := expected.m.Lookup(key, &value); err != nil {
+				t.Fatalf("scoped purge removed IPv4 key %+v: %v", key, err)
+			}
+		}
+	}
+	for _, expected := range v6Expected {
+		if count, err := countKernelFlowMapEntriesV6(expected.m); err != nil {
+			t.Fatalf("countKernelFlowMapEntriesV6() error = %v", err)
+		} else if count != len(expected.preserved) {
+			t.Fatalf("countKernelFlowMapEntriesV6() = %d, want %d", count, len(expected.preserved))
+		}
+		for _, key := range expected.deleted {
+			var value tcFlowValueV6
+			if err := expected.m.Lookup(key, &value); !errors.Is(err, ebpf.ErrKeyNotExist) {
+				t.Fatalf("scoped purge retained IPv6 key %+v: value=%+v err=%v", key, value, err)
+			}
+		}
+		for _, key := range expected.preserved {
+			var value tcFlowValueV6
+			if err := expected.m.Lookup(key, &value); err != nil {
+				t.Fatalf("scoped purge removed IPv6 key %+v: %v", key, err)
+			}
+		}
+	}
+}
+
+func TestPurgeKernelFlowsForTargetsHandlesMixedScopedAndFullRevisionTargets(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       "scope_mixed_targets",
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 16,
+	})
+	const (
+		scopedRule     = uint32(66)
+		scopedRevision = uint64(6601)
+		fullRule       = uint32(67)
+		fullRevision   = uint64(6701)
+		parentIfIndex  = uint32(3)
+		staleIfIndex   = uint32(77)
+	)
+	scopedParent := tcFlowKeyV4{IfIndex: parentIfIndex, SrcAddr: 1, DstAddr: 2, SrcPort: 1001, DstPort: 22, Proto: unix.IPPROTO_TCP}
+	scopedChild := scopedParent
+	scopedChild.IfIndex = staleIfIndex
+	scopedChild.SrcPort++
+	fullFirst := tcFlowKeyV4{IfIndex: parentIfIndex, SrcAddr: 3, DstAddr: 4, SrcPort: 2001, DstPort: 443, Proto: unix.IPPROTO_TCP}
+	fullSecond := fullFirst
+	fullSecond.IfIndex = staleIfIndex
+	fullSecond.SrcPort++
+	for _, item := range []struct {
+		key   tcFlowKeyV4
+		value tcFlowValueV4
+	}{
+		{scopedParent, tcFlowValueV4{RuleID: scopedRule, RuleRevision: scopedRevision, SessionID: 66001, Flags: kernelFlowFlagReplySeen}},
+		{scopedChild, tcFlowValueV4{RuleID: scopedRule, RuleRevision: scopedRevision, SessionID: 66002, Flags: kernelFlowFlagReplySeen}},
+		{fullFirst, tcFlowValueV4{RuleID: fullRule, RuleRevision: fullRevision, SessionID: 67001, Flags: kernelFlowFlagFullNAT}},
+		{fullSecond, tcFlowValueV4{RuleID: fullRule, RuleRevision: fullRevision, SessionID: 67002, Flags: kernelFlowFlagFullNAT}},
+	} {
+		if err := flows.Put(item.key, item.value); err != nil {
+			t.Fatalf("put mixed-target flow %+v: %v", item.key, err)
+		}
+	}
+
+	_, deleted, err := purgeKernelFlowsForTargets(kernelRuntimeMapRefs{flowsV4: flows}, map[kernelFlowPurgeTarget]struct{}{
+		{RuleID: scopedRule, RuleRevision: scopedRevision, IfIndex: staleIfIndex}: {},
+		{RuleID: fullRule, RuleRevision: fullRevision}:                            {},
+	}, false)
+	if err != nil {
+		t.Fatalf("purgeKernelFlowsForTargets() error = %v", err)
+	}
+	if deleted != 3 {
+		t.Fatalf("deleted = %d, want scoped child plus both full-revision flows", deleted)
+	}
+	var value tcFlowValueV4
+	if err := flows.Lookup(scopedParent, &value); err != nil {
+		t.Fatalf("mixed purge removed scoped rule parent flow: %v", err)
+	}
+	for _, key := range []tcFlowKeyV4{scopedChild, fullFirst, fullSecond} {
+		if err := flows.Lookup(key, &value); !errors.Is(err, ebpf.ErrKeyNotExist) {
+			t.Fatalf("mixed purge retained stale key %+v: value=%+v err=%v", key, value, err)
+		}
+	}
+}
+
+func TestPurgeKernelFlowsForTargetsDoesNotPairZeroSessionFullNATEntries(t *testing.T) {
+	flows := newKernelHotRestartTestMap(t, &ebpf.MapSpec{
+		Name:       "scope_zero_session",
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(tcFlowKeyV4{})),
+		ValueSize:  uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		MaxEntries: 8,
+	})
+	const (
+		ruleID        = uint32(68)
+		revision      = uint64(6801)
+		parentIfIndex = uint32(3)
+		staleIfIndex  = uint32(88)
+	)
+	parentKey := tcFlowKeyV4{IfIndex: parentIfIndex, SrcAddr: 1, DstAddr: 2, SrcPort: 3001, DstPort: 80, Proto: unix.IPPROTO_TCP}
+	childKey := parentKey
+	childKey.IfIndex = staleIfIndex
+	childKey.SrcPort++
+	value := tcFlowValueV4{RuleID: ruleID, RuleRevision: revision, Flags: kernelFlowFlagFullNAT}
+	if err := flows.Put(parentKey, value); err != nil {
+		t.Fatalf("put zero-session parent flow: %v", err)
+	}
+	if err := flows.Put(childKey, value); err != nil {
+		t.Fatalf("put zero-session child flow: %v", err)
+	}
+
+	_, deleted, err := purgeKernelFlowsForTargets(kernelRuntimeMapRefs{flowsV4: flows}, map[kernelFlowPurgeTarget]struct{}{
+		{RuleID: ruleID, RuleRevision: revision, IfIndex: staleIfIndex}: {},
+	}, false)
+	if err != nil {
+		t.Fatalf("purgeKernelFlowsForTargets() error = %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want only directly matched zero-session entry", deleted)
+	}
+	if err := flows.Lookup(parentKey, &value); err != nil {
+		t.Fatalf("zero-session scoped purge removed unrelated parent entry: %v", err)
+	}
+}
+
+func putScopedPurgeV4Session(t *testing.T, flows *ebpf.Map, ruleID uint32, revision uint64, sessionID uint64, replyIfIndex uint32, seed uint32) (tcFlowKeyV4, tcFlowKeyV4) {
+	t.Helper()
+	frontAddr := uint32(1000) + seed
+	clientAddr := uint32(2000) + seed
+	natAddr := uint32(3000) + seed
+	backendAddr := uint32(4000) + seed
+	frontPort := uint16(10000 + seed)
+	clientPort := uint16(20000 + seed)
+	natPort := uint16(30000 + seed)
+	backendPort := uint16(4000 + seed)
+	frontKey := tcFlowKeyV4{
+		IfIndex: 2,
+		SrcAddr: clientAddr,
+		DstAddr: frontAddr,
+		SrcPort: clientPort,
+		DstPort: frontPort,
+		Proto:   unix.IPPROTO_TCP,
+	}
+	replyKey := tcFlowKeyV4{
+		IfIndex: replyIfIndex,
+		SrcAddr: backendAddr,
+		DstAddr: natAddr,
+		SrcPort: backendPort,
+		DstPort: natPort,
+		Proto:   unix.IPPROTO_TCP,
+	}
+	replyValue := tcFlowValueV4{
+		RuleID:       ruleID,
+		FrontAddr:    frontAddr,
+		ClientAddr:   clientAddr,
+		NATAddr:      natAddr,
+		InIfIndex:    frontKey.IfIndex,
+		FrontPort:    frontPort,
+		ClientPort:   clientPort,
+		NATPort:      natPort,
+		Flags:        kernelFlowFlagFullNAT | kernelFlowFlagCounted,
+		RuleRevision: revision,
+		SessionID:    sessionID,
+	}
+	frontValue := replyValue
+	frontValue.Flags = kernelFlowFlagFullNAT | kernelFlowFlagFrontEntry
+	if err := flows.Put(frontKey, frontValue); err != nil {
+		t.Fatalf("put scoped purge IPv4 front flow: %v", err)
+	}
+	if err := flows.Put(replyKey, replyValue); err != nil {
+		t.Fatalf("put scoped purge IPv4 reply flow: %v", err)
+	}
+	return frontKey, replyKey
+}
+
+func putScopedPurgeV6Session(t *testing.T, flows *ebpf.Map, ruleID uint32, revision uint64, sessionID uint64, replyIfIndex uint32, seed byte) (tcFlowKeyV6, tcFlowKeyV6) {
+	return putScopedPurgeV6SessionWithInterfaces(t, flows, ruleID, revision, sessionID, 2, replyIfIndex, seed)
+}
+
+func putScopedPurgeV6SessionWithInterfaces(t *testing.T, flows *ebpf.Map, ruleID uint32, revision uint64, sessionID uint64, frontIfIndex uint32, replyIfIndex uint32, seed byte) (tcFlowKeyV6, tcFlowKeyV6) {
+	t.Helper()
+	frontAddr := [16]byte{0: 0x20, 1: 0x01, 15: seed}
+	clientAddr := [16]byte{0: 0x20, 1: 0x02, 15: seed}
+	natAddr := [16]byte{0: 0x20, 1: 0x03, 15: seed}
+	backendAddr := [16]byte{0: 0x20, 1: 0x04, 15: seed}
+	frontPort := uint16(10000 + uint16(seed))
+	clientPort := uint16(20000 + uint16(seed))
+	natPort := uint16(30000 + uint16(seed))
+	backendPort := uint16(4000 + uint16(seed))
+	frontKey := tcFlowKeyV6{
+		IfIndex: frontIfIndex,
+		SrcAddr: clientAddr,
+		DstAddr: frontAddr,
+		SrcPort: clientPort,
+		DstPort: frontPort,
+		Proto:   unix.IPPROTO_TCP,
+	}
+	replyKey := tcFlowKeyV6{
+		IfIndex: replyIfIndex,
+		SrcAddr: backendAddr,
+		DstAddr: natAddr,
+		SrcPort: backendPort,
+		DstPort: natPort,
+		Proto:   unix.IPPROTO_TCP,
+	}
+	replyValue := tcFlowValueV6{
+		RuleID:       ruleID,
+		FrontAddr:    frontAddr,
+		ClientAddr:   clientAddr,
+		NATAddr:      natAddr,
+		InIfIndex:    frontKey.IfIndex,
+		FrontPort:    frontPort,
+		ClientPort:   clientPort,
+		NATPort:      natPort,
+		Flags:        kernelFlowFlagFullNAT | kernelFlowFlagCounted,
+		RuleRevision: revision,
+		SessionID:    sessionID,
+	}
+	frontValue := replyValue
+	frontValue.Flags = kernelFlowFlagFullNAT | kernelFlowFlagFrontEntry
+	if err := flows.Put(frontKey, frontValue); err != nil {
+		t.Fatalf("put scoped purge IPv6 front flow: %v", err)
+	}
+	if err := flows.Put(replyKey, replyValue); err != nil {
+		t.Fatalf("put scoped purge IPv6 reply flow: %v", err)
+	}
+	return frontKey, replyKey
 }
 
 func TestDeleteStaleKernelFlowPreservesReplacementOwners(t *testing.T) {

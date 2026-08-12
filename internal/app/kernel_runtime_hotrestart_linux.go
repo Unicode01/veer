@@ -118,6 +118,7 @@ type kernelHotRestartCandidateRule struct {
 type kernelHotRestartFlowPurgeDescriptor struct {
 	RuleID       uint32 `json:"rule_id"`
 	RuleRevision uint64 `json:"rule_revision,omitempty"`
+	IfIndex      uint32 `json:"ifindex,omitempty"`
 }
 
 type kernelHotRestartValidationOptions struct {
@@ -294,7 +295,10 @@ func kernelHotRestartMetadataWithRuleState(meta kernelHotRestartMetadata, rules 
 		if meta.PendingFlowPurges[i].RuleID != meta.PendingFlowPurges[j].RuleID {
 			return meta.PendingFlowPurges[i].RuleID < meta.PendingFlowPurges[j].RuleID
 		}
-		return meta.PendingFlowPurges[i].RuleRevision < meta.PendingFlowPurges[j].RuleRevision
+		if meta.PendingFlowPurges[i].RuleRevision != meta.PendingFlowPurges[j].RuleRevision {
+			return meta.PendingFlowPurges[i].RuleRevision < meta.PendingFlowPurges[j].RuleRevision
+		}
+		return meta.PendingFlowPurges[i].IfIndex < meta.PendingFlowPurges[j].IfIndex
 	})
 	return meta
 }

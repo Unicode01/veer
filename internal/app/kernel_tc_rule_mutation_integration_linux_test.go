@@ -42,6 +42,8 @@ const (
 	tcRuleMutationProbeIdleMs               = 1000
 	tcRuleMutationSteadyDuration            = 4 * time.Second
 	tcRuleMutationRestartSteadyDuration     = 8 * time.Second
+	tcRuleMutationBridgeChurnSteadyDuration = 35 * time.Second
+	tcRuleMutationBridgeChurnMembers        = 8
 	tcRuleMutationSteadyStepDeadline        = 1500 * time.Millisecond
 	tcRuleMutationSteadyPayload             = "forward-tc-rule-mutation"
 	tcRuleMutationExtraRuleFrontPortOffset  = 17
@@ -457,6 +459,125 @@ func TestTCKernelRuleMutationHotRestartKeepsEstablishedFullNATTCPConnection(t *t
 	}
 }
 
+func TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection(t *testing.T) {
+	baseBinary := requireTCRuleMutationIntegrationBinary(t)
+	if _, err := exec.LookPath("bridge"); err != nil {
+		t.Skip("bridge command is required")
+	}
+
+	harness := startTCRuleMutationHarness(t, baseBinary, "bridge-member-churn")
+	bridgeName, _ := setupTCRuleMutationBackendBridge(t, harness.Topology)
+	t.Cleanup(func() {
+		stopForwardProcessTree(t, harness.Cmd)
+	})
+	rule := createTCRuleMutationRule(t, harness.APIBase, harness.Topology, Rule{
+		InInterface:      harness.Topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     bridgeName,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Remark:           "tc-rule-mutation-bridge-member-churn",
+		Tag:              "tc-rule-mutation",
+		Transparent:      false,
+		EnginePreference: ruleEngineKernel,
+	})
+
+	target := net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, target); err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("baseline probe failed: %v", err)
+	}
+	client := startTCRuleMutationSteadyClientWithDuration(
+		t,
+		harness.Topology.ClientNS,
+		target,
+		tcRuleMutationBridgeChurnSteadyDuration,
+	)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+	probeStop, probeDone := startTCRuleMutationProbeLoop(harness.Topology.ClientNS, target)
+	probeStopped := false
+	t.Cleanup(func() {
+		if probeStopped {
+			return
+		}
+		close(probeStop)
+		<-probeDone
+	})
+
+	assertTCRuleMutationParentBridgeFlow(t, harness.Cmd, rule.ID, bridgeName)
+	members := createTCRuleMutationBridgeChurnMembers(t, bridgeName, tcRuleMutationBridgeChurnMembers)
+	forceTCRuleMutationReconcile(t, harness.APIBase, rule, "members-added")
+	assertTCRuleMutationParentBridgeFlow(t, harness.Cmd, rule.ID, bridgeName)
+	assertTCRuleMutationProbe(t, harness, target, "members-added")
+	assertTCRuleMutationSteadyClientRunning(t, client, "members-added")
+
+	for _, member := range members {
+		mustRunDataplanePerfCmd(t, "ip", "link", "set", member, "down")
+	}
+	forceTCRuleMutationReconcile(t, harness.APIBase, rule, "members-down")
+	assertTCRuleMutationParentBridgeFlow(t, harness.Cmd, rule.ID, bridgeName)
+	assertTCRuleMutationProbe(t, harness, target, "members-down")
+	assertTCRuleMutationSteadyClientRunning(t, client, "members-down")
+
+	for i := len(members) - 1; i >= 0; i-- {
+		mustRunDataplanePerfCmd(t, "ip", "link", "set", members[i], "up")
+	}
+	forceTCRuleMutationReconcile(t, harness.APIBase, rule, "members-up")
+	assertTCRuleMutationParentBridgeFlow(t, harness.Cmd, rule.ID, bridgeName)
+	assertTCRuleMutationProbe(t, harness, target, "members-up")
+	assertTCRuleMutationSteadyClientRunning(t, client, "members-up")
+
+	for _, member := range members {
+		mustRunDataplanePerfCmd(t, "ip", "link", "set", member, "nomaster")
+	}
+	forceTCRuleMutationReconcile(t, harness.APIBase, rule, "members-detached")
+	assertTCRuleMutationParentBridgeFlow(t, harness.Cmd, rule.ID, bridgeName)
+	assertTCRuleMutationProbe(t, harness, target, "members-detached")
+	assertTCRuleMutationSteadyClientRunning(t, client, "members-detached")
+
+	for i := len(members) - 1; i >= 0; i-- {
+		mustRunDataplanePerfCmd(t, "ip", "link", "set", members[i], "master", bridgeName)
+		mustRunDataplanePerfCmd(t, "ip", "link", "set", members[i], "up")
+	}
+	forceTCRuleMutationReconcile(t, harness.APIBase, rule, "members-reattached")
+	assertTCRuleMutationParentBridgeFlow(t, harness.Cmd, rule.ID, bridgeName)
+	assertTCRuleMutationProbe(t, harness, target, "members-reattached")
+	assertTCRuleMutationSteadyClientRunning(t, client, "members-reattached")
+
+	deleteTCRuleMutationBridgeChurnMembers(t, members)
+	forceTCRuleMutationReconcile(t, harness.APIBase, rule, "members-deleted")
+	assertTCRuleMutationParentBridgeFlow(t, harness.Cmd, rule.ID, bridgeName)
+	assertTCRuleMutationProbe(t, harness, target, "members-deleted")
+	assertTCRuleMutationSteadyClientRunning(t, client, "members-deleted")
+
+	members = createTCRuleMutationBridgeChurnMembers(t, bridgeName, tcRuleMutationBridgeChurnMembers)
+	forceTCRuleMutationReconcile(t, harness.APIBase, rule, "members-recreated")
+	deleteTCRuleMutationBridgeChurnMembers(t, members)
+	forceTCRuleMutationReconcile(t, harness.APIBase, rule, "members-rapidly-deleted")
+	assertTCRuleMutationParentBridgeFlow(t, harness.Cmd, rule.ID, bridgeName)
+	assertTCRuleMutationProbe(t, harness, target, "members-rapidly-deleted")
+	assertTCRuleMutationSteadyClientRunning(t, client, "members-rapidly-deleted")
+
+	close(probeStop)
+	probeErr := <-probeDone
+	probeStopped = true
+	if probeErr != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("new-flow probe loop failed across bridge member churn: %v", probeErr)
+	}
+
+	stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+	if err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("steady client failed across bridge member churn: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+}
+
 func runTCRuleMutationSteadyClientHelper() error {
 	target := strings.TrimSpace(os.Getenv(tcRuleMutationHelperTargetEnv))
 	if target == "" {
@@ -641,6 +762,286 @@ func setupTCRuleMutationBackendBridge(t *testing.T, topology dataplanePerfTopolo
 	runDataplanePerfCmd("bridge", "fdb", "del", backendMAC, "dev", topology.BackendHostIF, "master")
 
 	return bridgeName, backendMAC
+}
+
+func createTCRuleMutationBridgeChurnMembers(t *testing.T, bridgeName string, count int) []string {
+	t.Helper()
+	if count <= 0 {
+		return nil
+	}
+	prefix := fmt.Sprintf("fwj%03d", os.Getpid()%1000)
+	members := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		host := truncateIfName(fmt.Sprintf("%sh%02d", prefix, i))
+		peer := truncateIfName(fmt.Sprintf("%sp%02d", prefix, i))
+		runDataplanePerfCmd("ip", "link", "del", host)
+		mustRunDataplanePerfCmd(t, "ip", "link", "add", host, "type", "veth", "peer", "name", peer)
+		mustRunDataplanePerfCmd(t, "ip", "link", "set", host, "master", bridgeName)
+		mustRunDataplanePerfCmd(t, "ip", "link", "set", host, "up")
+		mustRunDataplanePerfCmd(t, "ip", "link", "set", peer, "up")
+		members = append(members, host)
+	}
+	t.Cleanup(func() {
+		deleteTCRuleMutationBridgeChurnMembers(t, members)
+	})
+	return members
+}
+
+func deleteTCRuleMutationBridgeChurnMembers(t *testing.T, members []string) {
+	t.Helper()
+	for i := len(members) - 1; i >= 0; i-- {
+		runDataplanePerfCmd("ip", "link", "del", members[i])
+	}
+}
+
+func forceTCRuleMutationReconcile(t *testing.T, apiBase string, rule RuleStatus, stage string) RuleStatus {
+	t.Helper()
+	before := fetchTCRuleMutationTCRuntime(t, apiBase)
+	updated := rule.Rule
+	updated.Remark = fmt.Sprintf("%s-%s-%d", rule.Remark, stage, time.Now().UnixNano())
+	status := updateTCRuleMutationRule(t, apiBase, updated)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		current := fetchTCRuleMutationTCRuntime(t, apiBase)
+		if current.LastReconcileAt.After(before.LastReconcileAt) {
+			if current.LastReconcileError != "" {
+				t.Fatalf("%s reconcile failed: %s", stage, current.LastReconcileError)
+			}
+			return status
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("%s did not produce a new tc reconcile after %s", stage, before.LastReconcileAt.Format(time.RFC3339Nano))
+	return RuleStatus{}
+}
+
+func fetchTCRuleMutationTCRuntime(t *testing.T, apiBase string) KernelEngineRuntimeView {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, apiBase+"/api/kernel/runtime?refresh=1", nil)
+	if err != nil {
+		t.Fatalf("build kernel runtime request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+dataplanePerfToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("fetch kernel runtime: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("fetch kernel runtime unexpected status %d: %s", resp.StatusCode, body)
+	}
+	var runtimeResp KernelRuntimeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&runtimeResp); err != nil {
+		t.Fatalf("decode kernel runtime: %v", err)
+	}
+	engine, ok := dataplanePerfFindKernelEngine(runtimeResp.Engines, kernelEngineTC)
+	if !ok {
+		t.Fatal("tc engine missing from kernel runtime")
+	}
+	return engine
+}
+
+func assertTCRuleMutationProbe(t *testing.T, harness tcRuleMutationHarness, target string, stage string) {
+	t.Helper()
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, target); err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("%s probe failed: %v", stage, err)
+	}
+}
+
+func startTCRuleMutationProbeLoop(clientNS string, target string) (chan struct{}, chan error) {
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		probes := 0
+		for {
+			select {
+			case <-stop:
+				if probes == 0 {
+					done <- errors.New("new-flow probe loop stopped before completing a probe")
+					return
+				}
+				done <- nil
+				return
+			default:
+			}
+
+			if err := runTCRuleMutationProbe(clientNS, target); err != nil {
+				done <- fmt.Errorf("probe %d: %w", probes+1, err)
+				return
+			}
+			probes++
+			select {
+			case <-stop:
+				done <- nil
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}()
+	return stop, done
+}
+
+func assertTCRuleMutationSteadyClientRunning(t *testing.T, client *tcRuleMutationSteadyClient, stage string) {
+	t.Helper()
+	if client == nil {
+		t.Fatalf("%s steady client is unavailable", stage)
+	}
+	select {
+	case <-client.scanDone:
+		stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+		t.Fatalf("steady client exited before %s completed: %v\nstdout=%s\nstderr=%s", stage, err, stdout, stderr)
+	default:
+	}
+}
+
+func assertTCRuleMutationParentBridgeFlow(t *testing.T, forwardCmd *exec.Cmd, ruleID int64, bridgeName string) {
+	t.Helper()
+	bridgeLink, err := netlink.LinkByName(bridgeName)
+	if err != nil {
+		t.Fatalf("resolve bridge %q for flow assertion: %v", bridgeName, err)
+	}
+	flows := openTCRuleMutationProcessMap(t, forwardCmd, kernelFlowsMapName)
+	defer flows.Close()
+
+	found := false
+	iter := flows.Iterate()
+	var key tcFlowKeyV4
+	var value tcFlowValueV4
+	for iter.Next(&key, &value) {
+		if value.RuleID != uint32(ruleID) || key.IfIndex != uint32(bridgeLink.Attrs().Index) {
+			continue
+		}
+		if value.Flags&kernelFlowFlagFullNAT == 0 || value.Flags&kernelFlowFlagFrontEntry != 0 {
+			continue
+		}
+		found = true
+		break
+	}
+	if err := iter.Err(); err != nil {
+		t.Fatalf("iterate live tc flow map for rule %d: %v", ruleID, err)
+	}
+	if !found {
+		t.Fatalf("full-NAT parent bridge flow for rule %d was not found on %q", ruleID, bridgeName)
+	}
+}
+
+func openTCRuleMutationProcessMap(t *testing.T, forwardCmd *exec.Cmd, mapName string) *ebpf.Map {
+	t.Helper()
+	if forwardCmd == nil || forwardCmd.Process == nil || forwardCmd.Process.Pid <= 0 {
+		t.Fatal("forward process is unavailable for live eBPF map lookup")
+	}
+
+	fdinfoDir := filepath.Join("/proc", strconv.Itoa(forwardCmd.Process.Pid), "fdinfo")
+	entries, err := os.ReadDir(fdinfoDir)
+	if err != nil {
+		t.Fatalf("read forward process fdinfo %q: %v", fdinfoDir, err)
+	}
+
+	seen := make(map[ebpf.MapID]struct{})
+	var found *ebpf.Map
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(fdinfoDir, entry.Name()))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read forward process fdinfo %q: %v", entry.Name(), err)
+		}
+		mapID, ok, err := tcRuleMutationMapIDFromFDInfo(data)
+		if err != nil {
+			t.Fatalf("parse forward process fdinfo %q: %v", entry.Name(), err)
+		}
+		if !ok {
+			continue
+		}
+		if _, duplicate := seen[mapID]; duplicate {
+			continue
+		}
+		seen[mapID] = struct{}{}
+
+		candidate, err := ebpf.NewMapFromID(mapID)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("open eBPF map id %d from forward process: %v", mapID, err)
+		}
+		info, err := candidate.Info()
+		if err != nil {
+			candidate.Close()
+			t.Fatalf("inspect eBPF map id %d from forward process: %v", mapID, err)
+		}
+		if info.Name != mapName {
+			candidate.Close()
+			continue
+		}
+		if found != nil {
+			candidate.Close()
+			found.Close()
+			t.Fatalf("forward process holds multiple distinct eBPF maps named %q", mapName)
+		}
+		found = candidate
+	}
+	if found == nil {
+		t.Fatalf("forward process %d does not hold eBPF map %q", forwardCmd.Process.Pid, mapName)
+	}
+	return found
+}
+
+func tcRuleMutationMapIDFromFDInfo(data []byte) (ebpf.MapID, bool, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		field, value, ok := strings.Cut(scanner.Text(), ":")
+		if !ok || strings.TrimSpace(field) != "map_id" {
+			continue
+		}
+		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
+		if err != nil || parsed == 0 {
+			if err == nil {
+				err = errors.New("map_id is zero")
+			}
+			return 0, false, err
+		}
+		return ebpf.MapID(parsed), true, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, false, err
+	}
+	return 0, false, nil
+}
+
+func TestTCRuleMutationMapIDFromFDInfo(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantID  ebpf.MapID
+		wantOK  bool
+		wantErr bool
+	}{
+		{name: "ordinary_fd", data: "pos:\t0\nflags:\t0100000\n"},
+		{name: "map_fd", data: "pos:\t0\nmap_type:\t1\nmap_id:\t742\n", wantID: 742, wantOK: true},
+		{name: "whitespace", data: "map_id :  19  \n", wantID: 19, wantOK: true},
+		{name: "zero", data: "map_id:\t0\n", wantErr: true},
+		{name: "invalid", data: "map_id:\tnot-a-number\n", wantErr: true},
+		{name: "overflow", data: "map_id:\t4294967296\n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotID, gotOK, err := tcRuleMutationMapIDFromFDInfo([]byte(tc.data))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("tcRuleMutationMapIDFromFDInfo() error = %v, wantErr %t", err, tc.wantErr)
+			}
+			if gotID != tc.wantID || gotOK != tc.wantOK {
+				t.Fatalf("tcRuleMutationMapIDFromFDInfo() = (%d, %t), want (%d, %t)", gotID, gotOK, tc.wantID, tc.wantOK)
+			}
+		})
+	}
 }
 
 func assertTCRuleMutationBridgePath(t *testing.T, bridgeName string, memberName string, rule Rule, direct bool) {
