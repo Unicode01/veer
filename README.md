@@ -6,7 +6,7 @@ Veer 是一个面向虚拟机宿主机和二级路由场景的可编程 Linux �
 
 ## 一键部署
 
-Linux 服务器推荐直接使用一键引导脚本：
+Linux 服务器推荐直接使用一键引导脚本。请先进入 root shell（例如执行 `sudo -i`），并确认宿主机正在运行 systemd 或 OpenRC；容器或 chroot 中没有可用服务管理器时不能完成整套部署：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
@@ -31,7 +31,7 @@ VEER_INSTALL_PLUGINS=1 bash <(curl -fsSL https://raw.githubusercontent.com/Unico
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
-`WEB_BIND=0.0.0.0` 会让管理面接受远程连接，但 Veer 本身只提供 HTTP。仅应在受信管理网或 VPN 内使用；公网访问应保持 Veer 监听回环地址，并由启用 TLS 与访问控制的反向代理转发。新建非回环配置、首次从回环地址改为远程监听，或在远程监听下显式更换令牌时，`web_token`（以及非空的 `plugin_admin_token`）至少需要 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。已有远程监听配置中的短令牌会为兼容升级而保留并输出警告，不会阻断部署；建议安排轮换，但不要在未同步更新 WHMCS/API 客户端时直接更换。
+`WEB_BIND=0.0.0.0` 会让管理面接受远程连接，但 Veer 本身只提供 HTTP。仅应在受信管理网或 VPN 内使用；公网访问应保持 Veer 监听回环地址，并由启用 TLS 与访问控制的反向代理转发。对新建非回环配置、首次从回环地址改为远程监听，或在远程监听下显式更换令牌，`deploy.sh` 要求 `web_token`（以及非空的 `plugin_admin_token`）至少包含 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。Veer 运行时为兼容既有及手工管理的配置，只会对远程监听下的短令牌输出安全警告而不会拒绝启动；应安排轮换，但不要在未同步更新 WHMCS/API 客户端时直接更换。
 
 `bootstrap.sh` 会安装依赖、拉取源码、执行 `release.sh` 构建，再调用 `deploy.sh` 安装或热更新。默认只构建和安装 Veer 核心；设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled stable 插件。它支持 `apt`、`dnf/yum`、`apk` 以及 systemd/OpenRC。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
 
@@ -41,7 +41,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/ma
 
 ```bash
 ./release.sh amd64
-scp veer-linux-amd64 deploy.sh root@server:/tmp/
+scp veer-linux-amd64 deploy.sh config.example.json root@server:/tmp/
 ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 ```
 
@@ -93,7 +93,13 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 - Goja 控制面与 TC eBPF pipeline 插件系统
 - WHMCS addon 插件
 
-共享站点的 QUIC 开关默认关闭。启用后，Veer 会监听同一入口 IP 的 UDP `443`，从 QUIC v1/v2 Initial 中解析 TLS SNI，再把原始数据报转发到 `backend_https_port`；Veer 不终止 TLS，也不替后端校验证书。启用前需确认防火墙允许 UDP `443`、后端在该端口提供 QUIC/HTTP/3，且没有普通 UDP 规则或端口范围占用该监听地址。ECH 隐藏实际 SNI、QUIC 连接迁移，以及同一客户端端点复用多条连接时的未知 CID 轮换目前不在支持范围内。
+共享站点的 QUIC 开关默认关闭。启用后，Veer 会监听同一入口 IP 的 UDP `443`，从 QUIC v1/v2 Initial 中解析 TLS SNI，再把原始数据报转发到 `backend_https_port`；Veer 不终止 TLS，也不替后端校验证书。`deploy.sh` 不会为这个可选功能自动开放 UDP `443`；启用前需确认防火墙允许该端口、后端在同一端口提供 QUIC/HTTP/3，且没有普通 UDP 规则或端口范围占用该监听地址。使用 UFW 时可执行：
+
+```bash
+ufw allow 443/udp
+```
+
+ECH 隐藏实际 SNI、QUIC 连接迁移，以及同一客户端端点复用多条连接时的未知 CID 轮换目前不在支持范围内。
 
 ## 推荐部署
 
@@ -186,7 +192,7 @@ Authorization: Bearer <web_token>
 关键字段：
 
 - `web_bind`：Web UI / API 监听地址，默认 `127.0.0.1`
-- `web_ui_enabled`：是否启用静态 Web UI；关闭后仍保留 `/api/*`、`/healthz`、`/readyz`
+- `web_ui_enabled`：是否启用静态 Web UI；关闭后仍保留 `/api/*`、`/metrics`、`/healthz`、`/readyz`
 - `web_port`：监听端口
 - `web_token`：Web UI 和 API 共用的 Bearer Token
 - `default_engine`：`auto`、`userspace`、`kernel`
@@ -285,8 +291,11 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 热更新与异常退出：
 
-- `deploy.sh` 更新时会尽量继承内核 flow / NAT / stats 状态
-- 这是尽量不断流，不是绝对零中断承诺
+- `deploy.sh` 热更新时会尝试交接活动的 userspace rule/range/shared-proxy worker；无法交接的 worker 会由新进程重建
+- TC/XDP 路径会尽量继承内核 flow / NAT / stats 状态；使用 `--no-inherit-stats` 时 stats 会重新累计
+- 新版本启动、重启或 `/readyz` 检查失败时，已有安装会自动回滚二进制、配置、服务定义和本次部署替换的 bundled plugins
+- 自动回滚不恢复 SQLite 数据库，也不恢复任意外部插件产生的状态；部署前服务原本未运行时只回滚文件，不会自动启动旧版本
+- 上述机制以尽量不断流为目标，不是绝对零中断承诺
 - 如果进程被 `kill -9`、OOM kill 或异常崩溃，内核附加点可能短时间继续存在
 - 下次启动会尝试识别并清理 orphan 附加点
 
@@ -351,6 +360,7 @@ go build -o veer .
 - `internal/app/ebpf/forward-tc-bpf-stats.o`
 - `internal/app/ebpf/forward-xdp-bpf.o`
 - `internal/app/ebpf/forward-xdp-bpf-stats.o`
+- `internal/app/ebpf/plugin-xdp-dispatcher-bpf.o`
 
 只重建 eBPF object 时可使用：
 

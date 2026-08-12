@@ -13,7 +13,7 @@
 #   veer-plugins.tar.gz (VEER_BUILD_PLUGIN_BUNDLE=0 时不生成)
 #   veer-plugin-sdk.tar.gz (VEER_BUILD_PLUGIN_SDK=0 时不生成)
 #
-# 部署: 将 veer-linux-<arch> + deploy.sh 一起传到服务器执行即可
+# 部署: 将 veer-linux-<arch>、deploy.sh 和 config.example.json 一起传到服务器执行即可
 # 注意: eBPF tc/xdp 对象会先在本地编译并 embed 进 Go 二进制，部署时无需额外携带 .o 文件
 #
 set -euo pipefail
@@ -283,7 +283,9 @@ done
 echo ""
 echo -e "${GREEN}构建完成。部署方法:${NC}"
 echo ""
-echo "  scp veer-linux-amd64 deploy.sh root@server:/tmp/"
+for ARCH in "${TARGETS[@]}"; do
+    echo "  scp veer-linux-${ARCH} deploy.sh config.example.json root@server:/tmp/"
+done
 echo "  ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'"
 if [[ "${BUILD_PLUGIN_BUNDLE}" == "1" ]]; then
     echo "  # 可选插件: 额外上传 veer-plugins.tar.gz，并设置 VEER_INSTALL_PLUGINS=1"

@@ -26,6 +26,7 @@ Veer 当前不只是规则转发 API，还包含：
 - 插件高权限操作额外要求: `X-Veer-Plugin-Admin: <plugin_admin_token>`
 - 写操作默认使用 `application/json`
 - 探活端点: `/healthz`、`/readyz` 不使用 `/api` 前缀
+- Prometheus 端点: `/metrics` 不使用 `/api` 前缀，但仍需要 Bearer Token
 
 `web_token` 来自 `config.json`：
 
@@ -41,11 +42,16 @@ Veer 当前不只是规则转发 API，还包含：
 
 - `web_token` 不能为空
 - 程序会拒绝使用示例占位值 `change-me-to-a-secure-token`
+- `web_token` 和非空的 `plugin_admin_token` 都不能包含空白或控制字符
 - `plugin_admin_token` 可留空以禁用插件高权限 API；非空时必须与 `web_token` 不同
+- 部署脚本在新建远程监听、首次从回环监听改为远程监听，或在远程监听下显式轮换 Token 时，要求相应 Token 至少 24 个字符
+- 升级已有远程部署时，较短的旧 Token 会为兼容继续生效并产生安全告警，不会仅因升级被强制替换
 
 ## 认证与错误约定
 
-所有 `/api/*` 端点都需要 Bearer Token。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。
+所有 `/api/*` 端点以及 `/metrics` 都需要 Bearer Token。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。
+
+Bearer Token 认证失败按客户端地址限流：1 分钟窗口内允许 10 次失败，之后返回 `429 Too Many Requests`，并通过 `Retry-After` 告知剩余等待秒数。一次成功的 Bearer Token 认证会清除该客户端的失败记录；插件管理员 Token 错误返回 `403`，不单独计入这组 `401` 限流。
 
 请求头示例：
 
@@ -54,7 +60,7 @@ Authorization: Bearer your-token-here
 Content-Type: application/json
 ```
 
-插件包 stage/apply/rollback/uninstall、信任键变更、Secret 轮换、插件启停和代码热加载还需要：
+以下插件运维操作除 Bearer Token 外还需要插件管理员 Token：插件目录 reload，插件包 stage/apply/apply-batch/rollback/uninstall，插件启停，信任键、仓库和仓库策略变更，仓库 refresh/stage/plan，Secret 轮换，以及死信 retry/discard。
 
 ```http
 X-Veer-Plugin-Admin: your-separate-plugin-admin-token
@@ -68,6 +74,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `403 Forbidden`: 插件管理员 Token 缺失、错误或该 API 未配置启用
 - `404 Not Found`: 资源不存在
 - `405 Method Not Allowed`: 请求方法不支持
+- `429 Too Many Requests`: 同一客户端的认证失败次数超过限制
 - `500 Internal Server Error`: 服务端内部错误
 
 大多数业务错误会返回 JSON，例如：
@@ -113,6 +120,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 
 - `GET /healthz`
 - `GET /readyz`
+- `GET /metrics`（需要 Bearer Token）
 
 ### 基础发现
 
@@ -121,28 +129,44 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `GET /api/tags`
 - `GET /api/plugins`
 - `GET /api/plugin-sdk-contract`
-- `POST /api/plugins/reload`
+- `POST /api/plugins/reload`（插件管理员）
+- `GET /api/plugins/<id>/logs`
 - `GET /api/plugins/<id>/state`
-- `PUT /api/plugins/<id>/state`
-- `GET /api/plugins/<id>/assets/<path>`
+- `POST|PUT /api/plugins/<id>/state`（插件管理员）
+- `GET|HEAD /api/plugins/<id>/assets/<path>`
 - `GET /api/plugins/<id>/resources/<resource>`
 - `GET /api/plugins/<id>/resources/<resource>/<key>`
 - `POST /api/plugins/<id>/resources/<resource>`
 - `PUT /api/plugins/<id>/resources/<resource>/<key>`
 - `DELETE /api/plugins/<id>/resources/<resource>/<key>`
 - `POST /api/plugins/<id>/actions/<action>`
+- `GET /api/plugin-admin/status`
+- `POST /api/plugin-packages/stage`（插件管理员）
+- `POST /api/plugin-packages/apply`（插件管理员）
+- `POST /api/plugin-packages/apply-batch`（插件管理员）
+- `GET /api/plugin-packages/history`
 - `GET /api/plugin-packages/provenance`
-- `GET|POST|DELETE /api/plugin-repositories`
+- `GET /api/plugin-packages/probations`
+- `GET /api/plugin-packages/probation-groups`
+- `POST /api/plugin-packages/rollback`（插件管理员）
+- `POST /api/plugin-packages/uninstall`（插件管理员）
+- `GET /api/plugin-trust`
+- `POST|DELETE /api/plugin-trust`（插件管理员）
+- `GET /api/plugin-secrets`
+- `POST /api/plugin-secrets`（插件管理员）
+- `GET /api/plugin-repositories`
+- `POST|DELETE /api/plugin-repositories`（插件管理员）
 - `GET /api/plugin-repositories/catalog`
-- `POST /api/plugin-repositories/refresh`
-- `POST /api/plugin-repositories/stage`
-- `POST /api/plugin-repositories/plan`
-- `GET|PUT|DELETE /api/plugin-repository-policies`
+- `POST /api/plugin-repositories/refresh`（插件管理员）
+- `POST /api/plugin-repositories/stage`（插件管理员）
+- `POST /api/plugin-repositories/plan`（插件管理员）
+- `GET /api/plugin-repository-policies`
+- `PUT|DELETE /api/plugin-repository-policies`（插件管理员）
 - `GET /api/plugin-repositories/updates`
 - `GET /api/plugin-audit`
 - `GET /api/plugin-event-dead-letters`
-- `POST /api/plugin-event-dead-letters/retry`
-- `POST /api/plugin-event-dead-letters/discard`
+- `POST /api/plugin-event-dead-letters/retry`（插件管理员）
+- `POST /api/plugin-event-dead-letters/discard`（插件管理员）
 
 ### 规则
 
@@ -384,9 +408,10 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 
 插件控制面数据接口：
 
-- `POST /api/plugins/reload`：手动应用插件源目录的当前候选版本。服务每 2 秒检查目录内容指纹，变化只会在 `GET /api/plugins` 的 `hot_reload.update_available` 中标记待更新，不会自动执行候选 control.js 或改动数据面。手动应用会先复制稳定快照并校验 manifest、control、UI 和 eBPF object，再执行 reconcile 和数据面分发；失败返回 `5xx` 并保留上一份已应用快照。`hot_reload.applied_fingerprint*` 和 `detected_fingerprint*` 分别表示运行中版本与源目录候选版本，二者不同即存在待更新。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据
+- `POST /api/plugins/reload`：手动应用插件源目录的当前候选版本，要求插件管理员权限。服务每 2 秒检查目录内容指纹，变化只会在 `GET /api/plugins` 的 `hot_reload.update_available` 中标记待更新，不会自动执行候选 control.js 或改动数据面。手动应用会先复制稳定快照并校验 manifest、control、UI 和 eBPF object，再执行 reconcile 和数据面分发；失败返回 `5xx` 并保留上一份已应用快照。`hot_reload.applied_fingerprint*` 和 `detected_fingerprint*` 分别表示运行中版本与源目录候选版本，二者不同即存在待更新。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据
 - `GET /api/plugins/<id>/state`：读取外部插件的持久启用状态和当前 catalog 中的插件视图。内置 `veer_core` 不支持该接口
-- `PUT /api/plugins/<id>/state`：设置外部插件启用状态，请求体为 `{"enabled":true}` 或 `{"enabled":false}`。禁用会热卸载该插件 runtime surface，停止 Goja control VM、timer、worker，移除 TC pipeline hook，并停止该插件贡献的 `forward_rule_plans`、`egress_nat_plans`、`dhcpv4_plans` 和 `ipv6_assignment_plans` synthetic runtime；插件自身资源记录会保留，重新启用后继续使用
+- `POST|PUT /api/plugins/<id>/state`：设置外部插件启用状态，两个方法语义相同且都要求插件管理员权限。请求体为 `{"enabled":true}` 或 `{"enabled":false}`。禁用会热卸载该插件 runtime surface，停止 Goja control VM、timer、worker，移除 TC pipeline hook，并停止该插件贡献的 `forward_rule_plans`、`egress_nat_plans`、`dhcpv4_plans` 和 `ipv6_assignment_plans` synthetic runtime；插件自身资源记录会保留，重新启用后继续使用
+- `GET|HEAD /api/plugins/<id>/assets/<path>`：读取已启用插件注册的静态资源；两个方法都只要求普通 Bearer Token
 - `GET /api/plugins/<id>/resources/<resource>`：列出 `control.js` 注册且允许 `list` 的资源记录，并返回该资源的 `runtime_status`。支持 `limit` 和 `offset` 查询参数，默认 `limit=1000`，最大 `limit=5000`；响应包含 `total/limit/offset/has_more`
 - `GET /api/plugins/<id>/resources/<resource>/<key>`：读取 `control.js` 注册且允许 `get` 的单条记录
 - `POST /api/plugins/<id>/resources/<resource>`：创建 `control.js` 注册且允许 `create` 的记录，请求体为 `{"key":"optional","data":{...},"enabled":true}`；未提供 `key` 时由服务生成。成功响应包含记录本身和该资源的 `runtime_status`
@@ -394,12 +419,15 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `DELETE /api/plugins/<id>/resources/<resource>/<key>`：删除 `control.js` 注册且允许 `delete` 的记录。成功响应包含 `status=deleted` 和该资源的 `runtime_status`
 - `control_methods`：资源可选字段，只影响本插件 Goja 控制脚本的 `resources.*` 权限校验；HTTP/UI 资源 API 和跨插件 `plugins.resources.*` 都只看目标资源的 `methods`。未声明 `control_methods` 时按 `methods` 处理。生产插件可用它把 `status`、`egress_nat_plans` 等派生资源对外和对其他插件设为只读，同时允许自身控制脚本维护。
 - `POST /api/plugins/<id>/actions/<action>`：执行 `control.js` 注册的动作，请求体为 `{"payload":{...}}`。请求会先按 Action 的 `request_schema` 校验；`runtime_update=runtime_query` 的动作会把通过 `response_schema` 校验的 `exports.onAction(ctx)` JSON 返回值放入响应 `result`，且不写 action runtime status、不触发 core 重分发
-- `GET /api/plugins/<id>/logs?level=<level>&limit=<n>`：读取该插件持久化的结构化日志，最新记录优先。`level` 可选 `debug/info/warn/error`，`limit` 为 `1..500`；响应中的 `state.entries` 是累计写入量，`state.dropped` 是限流或队列满时的丢弃量。日志字段会递归脱敏，异步批量写入 SQLite，服务重启后仍可查询已提交记录
+- 上述资源 CRUD 和 Action 接口只要求普通 Bearer Token，并由目标资源的 `methods` 或 Action 注册 surface 决定是否允许；它们不要求 `X-Veer-Plugin-Admin`
+- `GET /api/plugins/<id>/logs?level=<level>&limit=<n>&before_id=<id>`：读取该插件持久化的结构化日志，最新记录优先。`level` 可选 `debug/info/warn/error`，`limit` 为 `1..500`；`before_id` 是正整数游标，用当前页最后一项的 `sequence` 读取更早记录。正常持久化部署中，响应的 `state.entries` 是当前保留记录数，`state.dropped` 是运行时速率限制丢弃量，`state.persistence_dropped` 是异步持久化队列丢弃量。日志字段会递归脱敏，异步批量写入 SQLite，服务重启后仍可查询已提交记录
 
 插件包和运维接口：
 
 - `GET /api/plugin-admin/status`：返回 `configured` 和当前请求的 `authorized`，用于 WebUI 校验当前标签页提供的 `X-Veer-Plugin-Admin`。该接口本身只要求普通 Bearer Token
-- 下列写接口均同时要求 Bearer Token 和 `X-Veer-Plugin-Admin`；只读 history/probation/audit/trust/secret 状态接口仍只要求 Bearer Token
+- 以下固定运维路由由 `pluginAdminMiddleware` 整体保护，只接受所列 `POST` 方法：`/api/plugins/reload`，`/api/plugin-packages/stage|apply|apply-batch|rollback|uninstall`，`/api/plugin-repositories/refresh|stage|plan`，以及 `/api/plugin-event-dead-letters/retry|discard`
+- 其余混合读写路由按方法校验：`POST|DELETE /api/plugin-trust`、`POST|DELETE /api/plugin-repositories`、`PUT|DELETE /api/plugin-repository-policies`、`POST /api/plugin-secrets` 和 `POST|PUT /api/plugins/<id>/state` 要求插件管理员权限；这些路由的 `GET` 只要求普通 Bearer Token
+- 包 history/provenance/probation、仓库 catalog/updates、audit、dead-letter 列表和插件 logs 也只要求普通 Bearer Token
 
 - `POST /api/plugin-packages/stage`：上传由 `veer plugin sign` 生成的单文件 `.veerpkg`，或未签名的 `.tar.gz`，并执行有界解包、manifest/control/UI/object、兼容性、依赖、签名和权限差异预检。请求体是原始包字节，不是 JSON；payload 最大 32 MiB，`.veerpkg` 只允许固定的 `package.tar.gz` 与 `signature.json` 成员。服务端从容器内验证 payload SHA256、Ed25519 签名、signer ID 和公钥，外置的 `X-Veer-Plugin-Signer`、`X-Veer-Plugin-Public-Key`、`X-Veer-Plugin-Signature` 会被拒绝。未知、已撤销或超出授权范围的发布者不会阻止预检，但应用时需要明确批准。成功返回一次性 `stage.id`、候选版本、`signed/trusted/publisher_status`、发布者指纹、权限摘要、新增权限、依赖/冲突和运行时表面；stage 24 小时后过期，预检本身不会替换运行中插件。联合升级时传 `?defer_relationships=true`，仍会执行包、签名、权限、Goja surface 和宿主兼容性校验，但把依赖/冲突的最终判断延迟到批量应用
 - `POST /api/plugin-packages/apply`：应用已预检候选，请求体为 `{"stage_id":"...","approved_privilege_digest":"...","approve_unsigned":false,"approve_publisher":false,"remember_publisher":false}`。允许未签名包的开发策略下，未签名候选必须设置 `approve_unsigned=true`；有效签名但发布者未知、已撤销或超出授权范围时必须设置 `approve_publisher=true`。`remember_publisher=true` 仅适用于首次出现且签名有效的发布者，会在同一安装操作中按当前插件 ID、权限、执行层级和稳定级别创建最小信任范围；应用失败会移除该新建记录。存在新增权限时必须原样回传本次 stage 的 `privilege_digest`。服务会再次校验源版本、候选指纹、签名和权限表面，避免 stage 后被替换
@@ -730,6 +758,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
     {
       "name": "tc",
       "available": true,
+      "degraded": false,
       "loaded": true,
       "active_entries": 128,
       "attachments": 6,
@@ -742,22 +771,33 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 }
 ```
 
+已建立 TCP idle timeout 的字段分两层理解：
+
+- 顶层 `kernel_tcp_established_idle_timeout_seconds` 是配置值；`0` 表示 `auto`，正数表示固定的空闲秒数
+- engine 内的 `tcp_established_idle_timeout_seconds` 是该引擎当前实际生效值；auto 模式下它会随 flow map 占用档位变化
+- auto 的 `low/moderate/high/critical` 档位分别使用 24 小时、6 小时、1 小时和 10 分钟
+- 占用率达到 50%、70%、85% 时依次进入 `moderate/high/critical`；回落到 45%、65%、80% 以下才退出对应档位，避免阈值附近抖动
+
 它还会包含大量调试字段，例如：
 
 - map 容量与占用
+- `degraded` / `degraded_reason`：当前 map 容量低于期望容量时的降级状态和原因
+- `flows_map_old_capacity_v4/v6`、`nat_map_old_capacity_v4/v6`：迁移期间仍保留并计入的旧 map bank 容量；非零不代表泄漏
 - attach mode 与 attachment health
 - retry / self-heal / cooldown / backoff
 - netlink recover 与 attachment heal 状态
 - dismissed note keys
 - traffic stats / diagnostics
 - 已建立 TCP idle timeout 的配置模式，以及 TC/XDP 各自当前生效值和 auto 档位
-- 最近一次 reconcile / maintain / prune 信息
+- 最近一次 reconcile / maintain / prune 信息；`last_reconcile_preserved` 表示为保活而保留的既有项数
+
+热重启或实时更新会优先保留活动连接，因此可能暂时沿用容量较小的旧 map。此时 engine 会通过 `degraded` 和 `degraded_reason` 提示容量未达到当前期望值；旧 flow 排空后运行时可自愈，若需要立即扩容则应执行冷重启。`*_old_capacity_*` 非零表示迁移期旧 bank 仍参与容量统计。
 
 ## 详细接口
 
 ## 1. 基础发现
 
-### 1.0 健康检查
+### 1.0 本机探活与指标
 
 `GET /healthz`
 
@@ -778,10 +818,12 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 用途：
 
-- 判断服务是否已经完成启动并进入 ready 状态
+- 判断本机 Veer 运行时是否 ready，而不只是进程是否完成启动
+- 持续检查承载有效规则和范围的 userspace worker、shared proxy，以及所有已启用 Egress NAT 是否已经进入预期的 kernel runtime
+- 不探测转发后端服务，也不执行端到端转发链路健康检查
 - 不需要 Bearer Token
 
-启动中返回 `503`：
+启动中或必要运行时组件未就绪时返回 `503`：
 
 ```json
 {
@@ -798,6 +840,15 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   "ready": true
 }
 ```
+
+`GET /metrics`
+
+用途与约束：
+
+- 以 Prometheus text exposition format 输出插件运行时指标
+- 只支持 `GET`，并需要 `Authorization: Bearer <web_token>`
+- 响应 `Content-Type` 为 `text/plain; version=0.0.4; charset=utf-8`
+- 当前只包含 `veer_plugin_*` 插件指标，不是核心规则、范围、Egress NAT 或完整转发链路的指标接口
 
 ### 1.1 获取简化接口列表
 
@@ -847,7 +898,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - `plugins_isolation = true` 是默认值；主控制 VM 与每个命名 Worker 使用独立持久子进程。仅受信任的本地调试才应关闭该项
 - `plugins_min_sandbox_level = "full"` 是默认值；Host 或硬资源限制达不到要求时会在执行控制脚本前拒绝插件。旧内核/Windows 调试必须显式降低该值
 - `plugins_require_signed_packages = true` 是默认值；包管理器不会接受 `approve_unsigned` 覆盖，但任何携带自包含公钥且签名有效的 v2 包都可在审核发布者状态后应用，不要求预先写入 trust store；受校验历史和 TUF target 同样可应用
-- 外部插件可通过 `PUT /api/plugins/<id>/state` 热启用/禁用；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC/XDP/Netfilter Hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
+- 外部插件可通过 `POST|PUT /api/plugins/<id>/state` 热启用/禁用，这两个写方法都要求插件管理员权限；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC/XDP/Netfilter Hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
 - 插件源目录每 2 秒扫描一次，变化只标记待更新；`POST /api/plugins/reload` 才会校验并应用候选快照。应用失败时旧 control VM、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
 - 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
 - 插件静态资源路径为 `/api/plugins/<id>/assets/`，同样需要 Bearer Token
@@ -857,7 +908,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 `GET /api/plugin-sdk-contract`
 
-返回当前二进制生成的版本化控制 API、feature、资源限制、事件总线、持久 operation 以及 TC/XDP/Netfilter pipeline 契约。contract v7 的 `control.capabilities` 逐方法返回 `permissions`、`any_permissions`、`conditional_permissions`、`phases`、`contexts`、`max_request_bytes` 和 `max_response_bytes`；`operations` 返回 operation 状态集合与数量、字段、总存储和重试上限；`control_methods` 是由同一注册表生成的兼容列表。`tc_pipeline` 描述 ABI v2 的方向与 stage，`xdp_pipeline` 描述 24-entry prog-array、8 Hook 上限、仅 ingress 且必须显式接口的约束，`netfilter_pipeline` 描述 family、原生 Hook、语义 phase、namespace scope 和 placement 上限。该接口需要 Bearer Token，只支持 `GET`；第三方安装器可在 stage 前比较 `runtime.control_api_abi`、`runtime.tc_pipeline_abi` 和 `runtime.features`。本地 CI 可用 `veer plugin contract --check sdk/plugin/api-contract.json` 对同一结构做严格校验。
+返回当前二进制生成的版本化控制 API、feature、资源限制、事件总线、持久 operation 以及 TC/XDP/Netfilter pipeline 契约。contract v8 的 `control.capabilities` 逐方法返回 `permissions`、`any_permissions`、`conditional_permissions`、`phases`、`contexts`、`max_request_bytes` 和 `max_response_bytes`；`operations` 返回 operation 状态集合与数量、字段、总存储和重试上限；`control_methods` 是由同一注册表生成的兼容列表。`tc_pipeline` 描述 ABI v2 的方向与 stage，`xdp_pipeline` 描述 24-entry prog-array、8 Hook 上限、仅 ingress 且必须显式接口的约束，`netfilter_pipeline` 描述 family、原生 Hook、语义 phase、namespace scope 和 placement 上限。该接口需要 Bearer Token，只支持 `GET`；第三方安装器可在 stage 前比较 `runtime.control_api_abi`、`runtime.tc_pipeline_abi` 和 `runtime.features`。本地 CI 可用 `veer plugin contract --check sdk/plugin/api-contract.json` 对同一结构做严格校验。
 
 ## 2. 规则接口
 
@@ -1247,7 +1298,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 `POST /api/managed-networks/reload-runtime`
 
-响应示例：
+正常运行时会把重载异步排队，响应示例：
 
 ```json
 {
@@ -1255,11 +1306,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 }
 ```
 
-`status` 常见值：
-
-- `queued`
-- `success`
-- `fallback`
+`status = queued` 只表示请求已进入本机重载队列，不表示应用已经完成。没有运行中重载循环的特殊环境可能同步返回 `success` 或 `fallback`；正常部署应通过 `/api/managed-networks/runtime-status` 观察后续结果。
 
 ### 6.8 修复托管网络宿主机状态
 
@@ -1303,6 +1350,12 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - `last_result`
 - `last_applied_summary`
 - `last_error`
+
+状态值语义：
+
+- `last_result` 为 `success`、`partial` 或 `fallback`；重载尚未完成时可以为空
+- `last_request_source` 为 `manual`、`link_change`、`addr_change` 或 `drift_check`
+- 这是全局“最新一次重载”的状态快照，不包含 request ID。后续链路、地址变化或漂移检查触发的自动重载可能覆盖先前手动请求的字段，调用方不能用它关联某一次请求
 
 ## 7. 托管网络固定 DHCPv4 保留
 

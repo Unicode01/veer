@@ -1033,6 +1033,38 @@ hardcoded_defaults = OrderedDict([
     ("plugins_min_sandbox_level", "full"),
     ("plugins_require_signed_packages", True),
     ("plugins_dir", "plugins"),
+    ("plugins_max_installed", 128),
+    ("plugins_max_staged", 32),
+    ("plugins_storage_limit_mb", 2048),
+    ("plugins_repository_refresh_minutes", 360),
+    ("plugins_resource_limits", OrderedDict([
+        ("objects_per_plugin", 16),
+        ("capabilities_per_plugin", 128),
+        ("programs_per_plugin", 128),
+        ("maps_per_plugin", 128),
+        ("hooks_per_plugin", 128),
+        ("resources_per_plugin", 64),
+        ("actions_per_plugin", 64),
+        ("services_per_plugin", 64),
+        ("virtual_interfaces_per_plugin", 64),
+        ("instructions_per_program", 262144),
+        ("instructions_per_plugin", 1048576),
+        ("map_memory_mb", 64),
+        ("plugin_map_memory_mb", 256),
+        ("global_map_memory_mb", 1024),
+        ("plugin_database_mb", 256),
+        ("global_database_mb", 2048),
+        ("blob_objects_per_plugin", 1024),
+        ("blob_object_mb", 64),
+        ("plugin_blob_mb", 256),
+        ("global_blob_mb", 2048),
+        ("control_memory_mb", 512),
+        ("global_control_memory_mb", 2048),
+        ("control_process_memory_mb", 224),
+        ("control_pids", 64),
+        ("global_control_pids", 512),
+        ("control_cpu_percent", 200),
+    ])),
     ("default_engine", "auto"),
     ("kernel_engine_order", ["tc"]),
     ("kernel_rules_map_limit", 0),
@@ -1047,6 +1079,9 @@ hardcoded_defaults = OrderedDict([
         ("kernel_traffic_stats", False),
         ("kernel_tc_diag", False),
         ("kernel_tc_diag_verbose", False),
+        ("kernel_tc_redirect_neigh_fast", False),
+        ("kernel_tc_prepared_l2", False),
+        ("kernel_tc_reply_l2_cache", False),
     ])),
     ("tags", []),
 ])
@@ -1457,20 +1492,42 @@ if ! is_loopback_bind "$WEB_BIND"; then
 fi
 if command -v ufw &>/dev/null; then
     info "配置 UFW 防火墙规则..."
+    ufw_failed_ports=""
+    add_ufw_rule() {
+        local port="$1"
+        local comment="$2"
+        if ufw allow "$port" comment "$comment" > /dev/null 2>&1; then
+            return 0
+        fi
+        if [[ -n "$ufw_failed_ports" ]]; then
+            ufw_failed_ports+="、"
+        fi
+        ufw_failed_ports+="$port"
+        return 0
+    }
     if is_loopback_bind "$WEB_BIND"; then
         info "检测到 web_bind=${WEB_BIND}，跳过放行管理端口 ${WEB_PORT}"
+        ufw_ports="80/tcp, 443/tcp"
     else
-        ufw allow "$WEB_PORT"/tcp comment "forward-web" > /dev/null 2>&1 || true
+        add_ufw_rule "$WEB_PORT/tcp" "forward-web"
+        ufw_ports="${WEB_PORT}/tcp, 80/tcp, 443/tcp"
     fi
-    ufw allow 80/tcp comment "forward-http"   > /dev/null 2>&1 || true
-    ufw allow 443/tcp comment "forward-https" > /dev/null 2>&1 || true
-    ok "UFW 规则已添加"
+    add_ufw_rule "80/tcp" "forward-http"
+    add_ufw_rule "443/tcp" "forward-https"
+    if [[ -n "$ufw_failed_ports" ]]; then
+        warn "部分 UFW 规则添加失败: ${ufw_failed_ports}；请手动检查并放行所需端口"
+    else
+        ok "UFW 规则已添加: ${ufw_ports}"
+    fi
+    info "如启用 HTTP/3 (UDP 443)，请另行执行: ufw allow 443/udp"
 elif command -v nft &>/dev/null || command -v iptables &>/dev/null; then
     if is_loopback_bind "$WEB_BIND"; then
         info "管理端口仅监听本地地址 ${WEB_BIND}，无需额外放行 ${WEB_PORT}"
+        info "检测到 nftables/iptables，请手动放行 TCP 80、443"
     else
-        info "检测到 nftables/iptables，请手动放行端口: ${WEB_PORT}, 80, 443"
+        info "检测到 nftables/iptables，请手动放行 TCP ${WEB_PORT}、80、443"
     fi
+    info "如启用 HTTP/3 (UDP 443)，还需手动放行 UDP 443"
 fi
 
 # ---------- 内核转发 ----------

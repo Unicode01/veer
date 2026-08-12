@@ -196,6 +196,10 @@ run_portable() {
 	"$verify_binary" plugin init --id release_control --kind control --directory "$control_scaffold"
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$control_scaffold"
+	ui_scaffold="$TMP_DIR/plugin-sdk-ui-scaffold"
+	"$verify_binary" plugin init --id release_ui --kind ui --directory "$ui_scaffold"
+	VEER_BIN="$verify_binary" \
+		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$ui_scaffold"
 
 	for target_arch in amd64 arm64; do
 		log "plugin conformance for linux/$target_arch"

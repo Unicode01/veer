@@ -256,7 +256,7 @@
                                                 HTTP:{if $site.backend_http_port > 0}{$site.backend_http_port|escape:'html'}{else}关{/if}
                                                 /
                                                 HTTPS:{if $site.backend_https_port > 0}{$site.backend_https_port|escape:'html'}{else}关{/if}
-                                                / QUIC:{if $site.quic}开{else}关{/if}
+                                                / HTTP/3 (UDP 443):{if $site.quic}开启{else}关闭{/if}
                                             </div>
                                             <div class="forward-rule-meta">
                                                 {if $site.transparent}
@@ -930,7 +930,7 @@
             return false;
         }
         if ($form.find('input[name="quic"]:checked').length && httpsPort === 0) {
-            showNotice('warning', '启用 QUIC 时必须配置 HTTPS 后端端口。');
+            showNotice('warning', '启用 HTTP/3 (UDP 443) 时必须配置 HTTPS 后端端口。');
             $form.find('input[name="backend_https_port"]').focus();
             return false;
         }

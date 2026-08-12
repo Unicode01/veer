@@ -87,7 +87,7 @@ func runPluginPackageCLI(args []string, stdout, stderr io.Writer) (bool, error) 
 
 func writePluginPackageCLIUsage(w io.Writer) {
 	fmt.Fprintln(w, "Veer plugin tools:")
-	fmt.Fprintln(w, "  veer plugin init --id ID [--name NAME] [--kind control|pipeline] [--directory DIR]")
+	fmt.Fprintln(w, "  veer plugin init --id ID [--name NAME] [--kind control|pipeline|ui] [--directory DIR]")
 	fmt.Fprintln(w, "  veer plugin lint --source DIR [--format json|text]")
 	fmt.Fprintln(w, "  veer plugin test --source DIR [--format json|text]")
 	fmt.Fprintln(w, "  veer plugin contract [--check FILE | --output FILE | --types-output FILE] [--force]")
