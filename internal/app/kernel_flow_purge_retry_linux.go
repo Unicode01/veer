@@ -24,6 +24,26 @@ func (state *kernelFlowPurgeRetryState) add(targets map[kernelFlowPurgeTarget]st
 		if target.RuleID == 0 {
 			continue
 		}
+		wildcard := kernelFlowPurgeTarget{RuleID: target.RuleID}
+		if target.RuleRevision != 0 {
+			if _, covered := state.targets[wildcard]; covered {
+				continue
+			}
+		}
+		if target.IfIndex != 0 {
+			fullRevision := kernelFlowPurgeTarget{RuleID: target.RuleID, RuleRevision: target.RuleRevision}
+			if _, covered := state.targets[fullRevision]; covered {
+				continue
+			}
+		}
+		for pending := range state.targets {
+			if pending.RuleID != target.RuleID {
+				continue
+			}
+			if target.RuleRevision == 0 || (target.IfIndex == 0 && pending.RuleRevision == target.RuleRevision) {
+				delete(state.targets, pending)
+			}
+		}
 		state.targets[target] = struct{}{}
 	}
 }

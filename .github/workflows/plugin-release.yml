@@ -49,3 +49,23 @@ jobs:
         run: sh scripts/verify-plugin-release.sh portable
       - name: Run Go static analysis
         run: staticcheck ./...
+
+  flow-churn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install flow churn dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev iproute2 util-linux
+      - name: Run privileged flow churn gate
+        run: |
+          sudo env \
+            "PATH=$PATH" \
+            GOPATH=/tmp/veer-flow-churn-gopath \
+            GOMODCACHE=/tmp/veer-flow-churn-gomodcache \
+            GOCACHE=/tmp/veer-flow-churn-gocache \
+            sh scripts/verify-plugin-release.sh flow-churn

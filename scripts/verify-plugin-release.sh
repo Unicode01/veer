@@ -5,6 +5,7 @@ ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 PROFILE=${1:-portable}
 TMP_DIR=
 PACKAGE_DIR=
+MOUNTED_BPFFS=0
 
 log() {
 	printf '\n==> %s\n' "$*"
@@ -16,6 +17,9 @@ fail() {
 }
 
 cleanup() {
+	if [ "$MOUNTED_BPFFS" -eq 1 ]; then
+		umount /sys/fs/bpf >/dev/null 2>&1 || true
+	fi
 	if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
 		rm -rf -- "$TMP_DIR"
 	fi
@@ -24,6 +28,15 @@ cleanup() {
 			"$ROOT_DIR/dist/"*) rm -rf -- "$PACKAGE_DIR" ;;
 		esac
 	fi
+}
+
+ensure_bpffs() {
+	mkdir -p /sys/fs/bpf
+	if mountpoint -q /sys/fs/bpf; then
+		return
+	fi
+	mount -t bpf bpf /sys/fs/bpf
+	MOUNTED_BPFFS=1
 }
 
 trap cleanup EXIT INT TERM
@@ -346,6 +359,41 @@ run_privileged() {
 		sh "$ROOT_DIR/plugins/pppoe_client/test-blackbox-linux.sh"
 }
 
+run_flow_churn() {
+	require_linux_root
+	for command_name in bridge mount mountpoint tc; do
+		require_command "$command_name"
+	done
+	ensure_bpffs
+	new_temp_dir
+
+	log "build eBPF objects for flow churn integration"
+	sh "$ROOT_DIR/scripts/build-all-ebpf.sh"
+	log "build flow churn integration binary"
+	flow_churn_binary="$TMP_DIR/veer-flow-churn.test"
+	go test -c -o "$flow_churn_binary" ./internal/app
+
+	flow_churn_log="$TMP_DIR/flow-churn.log"
+	flow_churn_pattern='^(TestCollectPreparedKernelRuleFlowPurgeTargets.*|TestKernelFlowPurgeRetryState.*|TestKernelFlowMatchesPurgeTargetsScopesInterfaceAndRevision|TestKernelFlowMatchesInterfaceScopedPurgeTargetRejectsCoveredAndInvalidTargets|TestKernelFlowPurgeSessionIdentityRequiresFullNATAndNonzeroSession|TestPurgeKernelFlowsForTargetsScopesTransparentBridgeMemberWithoutDeletingParent|TestPurgeKernelFlowsForTargetsScopesInterfaceAcrossTCBanksAndFamilies|TestPurgeKernelFlowsForTargetsHandlesMixedScopedAndFullRevisionTargets|TestPurgeKernelFlowsForTargetsDoesNotPairZeroSessionFullNATEntries|TestTCRuleMutationMapIDFromFDInfo|TestTCKernelRuleMutationEstablishedTCPConnection|TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection)$'
+	run_no_skips "kernel flow purge and bridge churn integration" "$flow_churn_log" \
+		env \
+		FORWARD_RUN_TC_RULE_MUTATION_TEST=1 \
+		"$flow_churn_binary" \
+		-test.v -test.run "$flow_churn_pattern" -test.count=1 -test.timeout=10m
+
+	for required_test in \
+		TestPurgeKernelFlowsForTargetsScopesTransparentBridgeMemberWithoutDeletingParent \
+		TestPurgeKernelFlowsForTargetsScopesInterfaceAcrossTCBanksAndFamilies \
+		TestPurgeKernelFlowsForTargetsHandlesMixedScopedAndFullRevisionTargets \
+		TestPurgeKernelFlowsForTargetsDoesNotPairZeroSessionFullNATEntries \
+		TestTCKernelRuleMutationEstablishedTCPConnection/backend_port_update_breaks_connection \
+		TestTCKernelRuleMutationEstablishedTCPConnection/delete_rule_breaks_connection \
+		TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection
+	do
+		require_test_pass "$flow_churn_log" "$required_test"
+	done
+}
+
 run_stability() {
 	require_linux_root
 	new_temp_dir
@@ -568,6 +616,9 @@ case "$PROFILE" in
 	privileged)
 		run_privileged
 		;;
+	flow-churn)
+		run_flow_churn
+		;;
 	stability)
 		run_stability
 		;;
@@ -577,11 +628,12 @@ case "$PROFILE" in
 	all)
 		run_portable
 		run_privileged
+		run_flow_churn
 		run_stability
 		run_performance
 		;;
 	*)
-		printf 'usage: %s [portable|privileged|stability|performance|all]\n' "$0" >&2
+		printf 'usage: %s [portable|privileged|flow-churn|stability|performance|all]\n' "$0" >&2
 		exit 2
 		;;
 esac

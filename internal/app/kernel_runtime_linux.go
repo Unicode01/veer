@@ -1541,7 +1541,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	}
 	if purgedFlows > 0 {
 		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
-		log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed rule revision(s)", purgedFlows, len(flowPurgeAttempt))
+		log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d flow purge target(s)", purgedFlows, len(flowPurgeAttempt))
 	}
 	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed: %v", err)
@@ -2343,6 +2343,7 @@ func collectPreparedKernelRuleFlowPurgeIDs(oldItems []preparedKernelRule, nextIt
 type kernelFlowPurgeTarget struct {
 	RuleID       uint32
 	RuleRevision uint64
+	IfIndex      uint32
 }
 
 func collectPreparedKernelRuleFlowPurgeTargets(oldItems []preparedKernelRule, nextItems []preparedKernelRule) map[kernelFlowPurgeTarget]struct{} {
@@ -2355,9 +2356,8 @@ func collectPreparedKernelRuleFlowPurgeTargets(oldItems []preparedKernelRule, ne
 
 	var targets map[kernelFlowPurgeTarget]struct{}
 	for key, oldGroup := range oldByKey {
-		if preparedKernelRuleGroupsEqualBy(oldGroup, nextByKey[key], samePreparedKernelRuleFlowContinuity) {
-			continue
-		}
+		nextGroup := nextByKey[key]
+		used := make([]bool, len(nextGroup))
 		for _, item := range oldGroup {
 			if item.rule.ID <= 0 || item.rule.ID > int64(^uint32(0)) {
 				continue
@@ -2366,6 +2366,42 @@ func collectPreparedKernelRuleFlowPurgeTargets(oldItems []preparedKernelRule, ne
 			if err != nil || revision == 0 {
 				continue
 			}
+
+			matched := -1
+			for idx, next := range nextGroup {
+				if used[idx] || !samePreparedKernelRuleFlowContract(item, next) {
+					continue
+				}
+				if samePreparedKernelRuleFlowContinuity(item, next) {
+					matched = idx
+					break
+				}
+				if matched < 0 {
+					matched = idx
+				}
+			}
+			if matched >= 0 {
+				used[matched] = true
+				next := nextGroup[matched]
+				if samePreparedKernelRuleFlowContinuity(item, next) {
+					continue
+				}
+				staleIfIndexes := stalePreparedKernelRuleReplyIfIndexes(item, next)
+				if len(staleIfIndexes) > 0 {
+					if targets == nil {
+						targets = make(map[kernelFlowPurgeTarget]struct{})
+					}
+					for ifindex := range staleIfIndexes {
+						targets[kernelFlowPurgeTarget{
+							RuleID:       uint32(item.rule.ID),
+							RuleRevision: revision,
+							IfIndex:      ifindex,
+						}] = struct{}{}
+					}
+					continue
+				}
+			}
+
 			if targets == nil {
 				targets = make(map[kernelFlowPurgeTarget]struct{})
 			}
@@ -2373,6 +2409,50 @@ func collectPreparedKernelRuleFlowPurgeTargets(oldItems []preparedKernelRule, ne
 		}
 	}
 	return targets
+}
+
+func samePreparedKernelRuleFlowContract(a, b preparedKernelRule) bool {
+	if a.rule.ID != b.rule.ID {
+		return false
+	}
+	left, leftErr := preparedKernelRuleFlowRevision(a)
+	right, rightErr := preparedKernelRuleFlowRevision(b)
+	return leftErr == nil && rightErr == nil && left != 0 && left == right
+}
+
+func stalePreparedKernelRuleReplyIfIndexes(previous, next preparedKernelRule) map[uint32]struct{} {
+	stale := make(map[uint32]struct{})
+	nextIndexes := make(map[int]struct{}, len(next.replyIfIndexes))
+	for _, ifindex := range next.replyIfIndexes {
+		if ifindex > 0 {
+			nextIndexes[ifindex] = struct{}{}
+		}
+	}
+	for _, ifindex := range previous.replyIfIndexes {
+		if ifindex <= 0 || uint64(ifindex) > uint64(^uint32(0)) {
+			continue
+		}
+		if _, ok := nextIndexes[ifindex]; !ok {
+			stale[uint32(ifindex)] = struct{}{}
+		}
+	}
+
+	nextParents := make(map[kernelIfParentMapping]struct{}, len(next.replyIfParents))
+	for _, mapping := range next.replyIfParents {
+		nextParents[mapping] = struct{}{}
+	}
+	for _, mapping := range previous.replyIfParents {
+		if mapping.ifindex <= 0 || uint64(mapping.ifindex) > uint64(^uint32(0)) {
+			continue
+		}
+		if _, ok := nextParents[mapping]; !ok {
+			stale[uint32(mapping.ifindex)] = struct{}{}
+		}
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	return stale
 }
 
 func preparedKernelRulesNeedAttachmentReset(oldItems []preparedKernelRule, nextItems []preparedKernelRule) bool {
@@ -2530,11 +2610,51 @@ func purgeKernelFlowsForTargets(refs kernelRuntimeMapRefs, targets map[kernelFlo
 	return corrections, deleted, errors.Join(purgeErrs...)
 }
 
-func kernelFlowMatchesPurgeTargets(value tcFlowValueV4, targets map[kernelFlowPurgeTarget]struct{}) bool {
+func kernelFlowMatchesPurgeTargets(ifindex uint32, value tcFlowValueV4, targets map[kernelFlowPurgeTarget]struct{}) bool {
+	if _, ok := targets[kernelFlowPurgeTarget{RuleID: value.RuleID, RuleRevision: value.RuleRevision, IfIndex: ifindex}]; ok {
+		return true
+	}
 	if _, ok := targets[kernelFlowPurgeTarget{RuleID: value.RuleID, RuleRevision: value.RuleRevision}]; ok {
 		return true
 	}
 	_, ok := targets[kernelFlowPurgeTarget{RuleID: value.RuleID}]
+	return ok
+}
+
+type kernelFlowPurgeSessionIdentity struct {
+	RuleID       uint32
+	RuleRevision uint64
+	SessionID    uint64
+	Proto        uint8
+}
+
+func kernelFlowPurgeSessionIdentityFor(proto uint8, value tcFlowValueV4) (kernelFlowPurgeSessionIdentity, bool) {
+	if value.Flags&kernelFlowFlagFullNAT == 0 || value.SessionID == 0 {
+		return kernelFlowPurgeSessionIdentity{}, false
+	}
+	return kernelFlowPurgeSessionIdentity{
+		RuleID:       value.RuleID,
+		RuleRevision: value.RuleRevision,
+		SessionID:    value.SessionID,
+		Proto:        proto,
+	}, true
+}
+
+func kernelFlowMatchesInterfaceScopedPurgeTarget(ifindex uint32, value tcFlowValueV4, targets map[kernelFlowPurgeTarget]struct{}) bool {
+	if ifindex == 0 || value.RuleID == 0 || value.RuleRevision == 0 {
+		return false
+	}
+	if _, covered := targets[kernelFlowPurgeTarget{RuleID: value.RuleID}]; covered {
+		return false
+	}
+	if _, covered := targets[kernelFlowPurgeTarget{RuleID: value.RuleID, RuleRevision: value.RuleRevision}]; covered {
+		return false
+	}
+	_, ok := targets[kernelFlowPurgeTarget{
+		RuleID:       value.RuleID,
+		RuleRevision: value.RuleRevision,
+		IfIndex:      ifindex,
+	}]
 	return ok
 }
 
@@ -2544,27 +2664,74 @@ func purgeKernelFlowsForTargetsV4(flowsMap, natPortsMap *ebpf.Map, targets map[k
 		return corrections, 0, nil
 	}
 	stale := make([]staleKernelFlow, 0)
+	matchedSessions := make(map[kernelFlowPurgeSessionIdentity]struct{})
 	iter := flowsMap.Iterate()
 	if xdp {
 		var key tcFlowKeyV4
 		var raw xdpFlowValueV4
 		for iter.Next(&key, &raw) {
 			value := kernelFlowValueFromXDP(raw)
-			if kernelFlowMatchesPurgeTargets(value, targets) {
+			if kernelFlowMatchesPurgeTargets(key.IfIndex, value, targets) {
 				stale = append(stale, staleKernelFlow{key: key, value: value})
+				if kernelFlowMatchesInterfaceScopedPurgeTarget(key.IfIndex, value, targets) {
+					identity, ok := kernelFlowPurgeSessionIdentityFor(key.Proto, value)
+					if ok {
+						matchedSessions[identity] = struct{}{}
+					}
+				}
 			}
 		}
 	} else {
 		var key tcFlowKeyV4
 		var value tcFlowValueV4
 		for iter.Next(&key, &value) {
-			if kernelFlowMatchesPurgeTargets(value, targets) {
+			if kernelFlowMatchesPurgeTargets(key.IfIndex, value, targets) {
 				stale = append(stale, staleKernelFlow{key: key, value: value})
+				if kernelFlowMatchesInterfaceScopedPurgeTarget(key.IfIndex, value, targets) {
+					identity, ok := kernelFlowPurgeSessionIdentityFor(key.Proto, value)
+					if ok {
+						matchedSessions[identity] = struct{}{}
+					}
+				}
 			}
 		}
 	}
 	if err := iter.Err(); err != nil {
 		return nil, 0, fmt.Errorf("iterate kernel IPv4 flows map for targeted purge: %w", err)
+	}
+	if len(matchedSessions) > 0 {
+		iter = flowsMap.Iterate()
+		if xdp {
+			var key tcFlowKeyV4
+			var raw xdpFlowValueV4
+			for iter.Next(&key, &raw) {
+				value := kernelFlowValueFromXDP(raw)
+				if kernelFlowMatchesPurgeTargets(key.IfIndex, value, targets) {
+					continue
+				}
+				if identity, ok := kernelFlowPurgeSessionIdentityFor(key.Proto, value); ok {
+					if _, matched := matchedSessions[identity]; matched {
+						stale = append(stale, staleKernelFlow{key: key, value: value})
+					}
+				}
+			}
+		} else {
+			var key tcFlowKeyV4
+			var value tcFlowValueV4
+			for iter.Next(&key, &value) {
+				if kernelFlowMatchesPurgeTargets(key.IfIndex, value, targets) {
+					continue
+				}
+				if identity, ok := kernelFlowPurgeSessionIdentityFor(key.Proto, value); ok {
+					if _, matched := matchedSessions[identity]; matched {
+						stale = append(stale, staleKernelFlow{key: key, value: value})
+					}
+				}
+			}
+		}
+		if err := iter.Err(); err != nil {
+			return nil, 0, fmt.Errorf("iterate kernel IPv4 flows map for scoped session purge: %w", err)
+		}
 	}
 	deleted := 0
 	var deleteErrs []error
@@ -2585,15 +2752,40 @@ func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[k
 	}
 	iter := flowsMap.Iterate()
 	stale := make([]staleKernelFlowV6, 0)
+	matchedSessions := make(map[kernelFlowPurgeSessionIdentity]struct{})
 	var key tcFlowKeyV6
 	var value tcFlowValueV6
 	for iter.Next(&key, &value) {
-		if kernelFlowMatchesPurgeTargets(tcFlowValueV4{RuleID: value.RuleID, RuleRevision: value.RuleRevision}, targets) {
+		valueV4 := tcFlowValueV4{RuleID: value.RuleID, Flags: value.Flags, RuleRevision: value.RuleRevision, SessionID: value.SessionID}
+		if kernelFlowMatchesPurgeTargets(key.IfIndex, valueV4, targets) {
 			stale = append(stale, staleKernelFlowV6{key: key, value: value})
+			if kernelFlowMatchesInterfaceScopedPurgeTarget(key.IfIndex, valueV4, targets) {
+				identity, ok := kernelFlowPurgeSessionIdentityFor(key.Proto, valueV4)
+				if ok {
+					matchedSessions[identity] = struct{}{}
+				}
+			}
 		}
 	}
 	if err := iter.Err(); err != nil {
 		return nil, 0, fmt.Errorf("iterate kernel IPv6 flows map for targeted purge: %w", err)
+	}
+	if len(matchedSessions) > 0 {
+		iter = flowsMap.Iterate()
+		for iter.Next(&key, &value) {
+			valueV4 := tcFlowValueV4{RuleID: value.RuleID, Flags: value.Flags, RuleRevision: value.RuleRevision, SessionID: value.SessionID}
+			if kernelFlowMatchesPurgeTargets(key.IfIndex, valueV4, targets) {
+				continue
+			}
+			if identity, ok := kernelFlowPurgeSessionIdentityFor(key.Proto, valueV4); ok {
+				if _, matched := matchedSessions[identity]; matched {
+					stale = append(stale, staleKernelFlowV6{key: key, value: value})
+				}
+			}
+		}
+		if err := iter.Err(); err != nil {
+			return nil, 0, fmt.Errorf("iterate kernel IPv6 flows map for scoped session purge: %w", err)
+		}
 	}
 	deleted := 0
 	var deleteErrs []error
@@ -2951,7 +3143,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		if deleted > 0 {
 			flowPurgeDeleted = deleted
 			mergeKernelStatsCorrections(rt.statsCorrection, corrections)
-			log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d changed rule revision(s)", deleted, len(flowPurgeAttempt))
+			log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d flow purge target(s)", deleted, len(flowPurgeAttempt))
 		}
 		if purgeErr != nil {
 			log.Printf("kernel dataplane reconcile: purge stale tc flow state after in-place update incomplete; retry queued for %d target(s): %v", len(flowPurgeAttempt), purgeErr)

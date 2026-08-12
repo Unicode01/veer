@@ -639,7 +639,7 @@ func TestCollectPreparedKernelRuleFlowPurgeIDsPreservesTransparentBridgePathProm
 	}
 }
 
-func TestCollectPreparedKernelRuleFlowPurgeIDsPurgesFlowsForRemovedOrReparentedReplyAttachment(t *testing.T) {
+func TestCollectPreparedKernelRuleFlowPurgeTargetsScopesRemovedOrReparentedReplyAttachment(t *testing.T) {
 	base := preparedKernelRule{
 		rule: Rule{
 			ID:           43,
@@ -686,9 +686,250 @@ func TestCollectPreparedKernelRuleFlowPurgeIDsPurgesFlowsForRemovedOrReparentedR
 		"reparented": reparented,
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := collectPreparedKernelRuleFlowPurgeIDs([]preparedKernelRule{base}, []preparedKernelRule{next})
-			if _, ok := got[43]; !ok {
-				t.Fatalf("collectPreparedKernelRuleFlowPurgeIDs() = %#v, want rule 43 purged", got)
+			revision, err := preparedKernelRuleFlowRevision(base)
+			if err != nil {
+				t.Fatalf("preparedKernelRuleFlowRevision() error = %v", err)
+			}
+			want := kernelFlowPurgeTarget{RuleID: 43, RuleRevision: revision, IfIndex: 66}
+			got := collectPreparedKernelRuleFlowPurgeTargets([]preparedKernelRule{base}, []preparedKernelRule{next})
+			if len(got) != 1 {
+				t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want one scoped target", got)
+			}
+			if _, ok := got[want]; !ok {
+				t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeTargetsHandlesWorstCaseReplyAttachmentChurn(t *testing.T) {
+	base := preparedKernelRule{
+		rule: Rule{
+			ID:           45,
+			InInterface:  "vmbr0",
+			InIP:         "198.51.100.10",
+			InPort:       20022,
+			OutInterface: "vmbr1",
+			OutIP:        "192.0.2.6",
+			OutPort:      22,
+			Protocol:     "tcp",
+		},
+		inIfIndex:      2,
+		outIfIndex:     3,
+		replyIfIndexes: []int{3, 55, 66, 77, 88},
+		replyIfParents: []kernelIfParentMapping{
+			{ifindex: 55, parentIfIndex: 3},
+			{ifindex: 66, parentIfIndex: 3},
+			{ifindex: 77, parentIfIndex: 3},
+			{ifindex: 88, parentIfIndex: 3},
+		},
+		key: tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 20022, Proto: 6},
+		value: tcRuleValueV4{
+			RuleID:      45,
+			BackendAddr: 2,
+			BackendPort: 22,
+			OutIfIndex:  3,
+		},
+	}
+	next := base
+	next.replyIfIndexes = []int{99, 55, 3, 66}
+	next.replyIfParents = []kernelIfParentMapping{
+		{ifindex: 99, parentIfIndex: 3},
+		{ifindex: 66, parentIfIndex: 4},
+		{ifindex: 55, parentIfIndex: 3},
+	}
+
+	revision, err := preparedKernelRuleFlowRevision(base)
+	if err != nil {
+		t.Fatalf("preparedKernelRuleFlowRevision() error = %v", err)
+	}
+	got := collectPreparedKernelRuleFlowPurgeTargets([]preparedKernelRule{base}, []preparedKernelRule{next})
+	want := map[kernelFlowPurgeTarget]struct{}{
+		{RuleID: 45, RuleRevision: revision, IfIndex: 66}: {},
+		{RuleID: 45, RuleRevision: revision, IfIndex: 77}: {},
+		{RuleID: 45, RuleRevision: revision, IfIndex: 88}: {},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want %#v", got, want)
+	}
+	for target := range want {
+		if _, ok := got[target]; !ok {
+			t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, missing %#v", got, target)
+		}
+	}
+	if _, full := got[kernelFlowPurgeTarget{RuleID: 45, RuleRevision: revision}]; full {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, must not purge the full revision", got)
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeTargetsIgnoresReplyAttachmentOrdering(t *testing.T) {
+	base := preparedKernelRule{
+		rule:           Rule{ID: 46, Protocol: "tcp"},
+		inIfIndex:      2,
+		outIfIndex:     3,
+		replyIfIndexes: []int{3, 55, 66},
+		replyIfParents: []kernelIfParentMapping{
+			{ifindex: 55, parentIfIndex: 3},
+			{ifindex: 66, parentIfIndex: 3},
+		},
+		key:   tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 20022, Proto: 6},
+		value: tcRuleValueV4{},
+	}
+	base.value = tcRuleValueV4{RuleID: 46, BackendAddr: 2, BackendPort: 22, OutIfIndex: 3}
+	next := base
+	next.replyIfIndexes = []int{66, 3, 55}
+	next.replyIfParents = []kernelIfParentMapping{
+		{ifindex: 66, parentIfIndex: 3},
+		{ifindex: 55, parentIfIndex: 3},
+	}
+
+	if got := collectPreparedKernelRuleFlowPurgeTargets([]preparedKernelRule{base}, []preparedKernelRule{next}); len(got) != 0 {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want no targets for reordered attachments", got)
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeTargetsScopesMultipleRulesAndMembers(t *testing.T) {
+	makeRule := func(id int64, inPort int, members ...int) preparedKernelRule {
+		parents := make([]kernelIfParentMapping, 0, len(members))
+		replyIfIndexes := []int{3}
+		for _, member := range members {
+			replyIfIndexes = append(replyIfIndexes, member)
+			parents = append(parents, kernelIfParentMapping{ifindex: member, parentIfIndex: 3})
+		}
+		return preparedKernelRule{
+			rule: Rule{
+				ID:           id,
+				InInterface:  "vmbr0",
+				InIP:         "198.51.100.10",
+				InPort:       inPort,
+				OutInterface: "vmbr1",
+				OutIP:        "192.0.2.6",
+				OutPort:      22,
+				Protocol:     "tcp",
+			},
+			inIfIndex:      2,
+			outIfIndex:     3,
+			replyIfIndexes: replyIfIndexes,
+			replyIfParents: parents,
+			key:            tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: uint16(inPort), Proto: 6},
+			value:          tcRuleValueV4{RuleID: uint32(id), BackendAddr: 2, BackendPort: 22, OutIfIndex: 3},
+		}
+	}
+
+	oldFirst := makeRule(47, 20022, 55, 66, 77, 88)
+	oldSecond := makeRule(48, 20023, 55, 66, 77, 88)
+	nextFirst := makeRule(47, 20022, 55, 99)
+	nextSecond := makeRule(48, 20023, 66, 100)
+
+	want := make(map[kernelFlowPurgeTarget]struct{})
+	for _, item := range []struct {
+		rule    preparedKernelRule
+		members []uint32
+	}{
+		{oldFirst, []uint32{66, 77, 88}},
+		{oldSecond, []uint32{55, 77, 88}},
+	} {
+		revision, err := preparedKernelRuleFlowRevision(item.rule)
+		if err != nil {
+			t.Fatalf("preparedKernelRuleFlowRevision(%d) error = %v", item.rule.rule.ID, err)
+		}
+		for _, ifindex := range item.members {
+			want[kernelFlowPurgeTarget{RuleID: uint32(item.rule.rule.ID), RuleRevision: revision, IfIndex: ifindex}] = struct{}{}
+		}
+	}
+
+	got := collectPreparedKernelRuleFlowPurgeTargets(
+		[]preparedKernelRule{oldFirst, oldSecond},
+		[]preparedKernelRule{nextSecond, nextFirst},
+	)
+	if len(got) != len(want) {
+		t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want %#v", got, want)
+	}
+	for target := range want {
+		if _, ok := got[target]; !ok {
+			t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, missing %#v", got, target)
+		}
+	}
+	for target := range got {
+		if target.IfIndex == 0 {
+			t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, unexpected full-revision target %#v", got, target)
+		}
+	}
+}
+
+func TestCollectPreparedKernelRuleFlowPurgeTargetsUsesFullRevisionForContractChanges(t *testing.T) {
+	base := preparedKernelRule{
+		rule: Rule{
+			ID:           49,
+			InInterface:  "vmbr0",
+			InIP:         "198.51.100.10",
+			InPort:       20022,
+			OutInterface: "vmbr1",
+			OutIP:        "192.0.2.6",
+			OutPort:      22,
+			Protocol:     "tcp",
+		},
+		inIfIndex:      2,
+		outIfIndex:     3,
+		replyIfIndexes: []int{3, 66},
+		replyIfParents: []kernelIfParentMapping{{ifindex: 66, parentIfIndex: 3}},
+		key:            tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 20022, Proto: 6},
+		value: tcRuleValueV4{
+			RuleID:      49,
+			BackendAddr: 2,
+			BackendPort: 22,
+			OutIfIndex:  3,
+		},
+	}
+	revision, err := preparedKernelRuleFlowRevision(base)
+	if err != nil {
+		t.Fatalf("preparedKernelRuleFlowRevision() error = %v", err)
+	}
+	want := kernelFlowPurgeTarget{RuleID: 49, RuleRevision: revision}
+
+	tests := []struct {
+		name string
+		next []preparedKernelRule
+	}{
+		{name: "rule_deleted"},
+		{name: "backend_address", next: func() []preparedKernelRule {
+			next := base
+			next.value.BackendAddr++
+			return []preparedKernelRule{next}
+		}()},
+		{name: "backend_port", next: func() []preparedKernelRule {
+			next := base
+			next.value.BackendPort++
+			return []preparedKernelRule{next}
+		}()},
+		{name: "nat_address", next: func() []preparedKernelRule {
+			next := base
+			next.value.NATAddr = 7
+			return []preparedKernelRule{next}
+		}()},
+		{name: "nat_mode", next: func() []preparedKernelRule {
+			next := base
+			next.value.Flags |= kernelRuleFlagFullNAT
+			return []preparedKernelRule{next}
+		}()},
+		{name: "normalized_out_interface", next: func() []preparedKernelRule {
+			next := base
+			next.outIfIndex = 4
+			next.value.OutIfIndex = 4
+			next.replyIfIndexes = []int{4}
+			next.replyIfParents = nil
+			return []preparedKernelRule{next}
+		}()},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := collectPreparedKernelRuleFlowPurgeTargets([]preparedKernelRule{base}, tc.next)
+			if len(got) != 1 {
+				t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want one full-revision target", got)
+			}
+			if _, ok := got[want]; !ok {
+				t.Fatalf("collectPreparedKernelRuleFlowPurgeTargets() = %#v, want %#v", got, want)
 			}
 		})
 	}
