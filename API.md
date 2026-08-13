@@ -699,6 +699,15 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   "page_size": 20,
   "total": 5,
   "binary_hash": "abc123",
+  "dataplane": {
+    "status": "applied",
+    "desired_generation": 12,
+    "applied_generation": 12,
+    "pending_generations": 0
+  },
+  "plugins": {
+    "status": "applied"
+  },
   "workers": [
     {
       "kind": "kernel",
@@ -734,6 +743,8 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - `stopped`
 - `draining`
 - `error`
+
+`dataplane` 与 `plugins` 是鉴权后的 reconcile 诊断视图。失败时会额外返回 `retry_count`、`last_error`、`last_attempt_at` 和 `last_applied_at`；不要把这些错误详情写入匿名日志或公开状态页。
 
 ### KernelRuntimeResponse
 
@@ -819,16 +830,25 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 用途：
 
 - 判断本机 Veer 运行时是否 ready，而不只是进程是否完成启动
-- 持续检查承载有效规则和范围的 userspace worker、shared proxy，以及所有已启用 Egress NAT 是否已经进入预期的 kernel runtime
+- 持续检查控制面 generation 是否已应用、承载有效规则和范围的 userspace worker、shared proxy，以及所有已启用 Egress NAT 是否已经进入预期的 kernel runtime
 - 不探测转发后端服务，也不执行端到端转发链路健康检查
-- 不需要 Bearer Token
+- 不需要 Bearer Token；只返回状态和 generation 计数，不返回内部错误文本。完整错误位于鉴权后的 `GET /api/workers`
 
 启动中或必要运行时组件未就绪时返回 `503`：
 
 ```json
 {
   "status": "starting",
-  "ready": false
+  "ready": false,
+  "dataplane": {
+    "status": "pending",
+    "desired_generation": 12,
+    "applied_generation": 11,
+    "pending_generations": 1
+  },
+  "plugins": {
+    "status": "applied"
+  }
 }
 ```
 
@@ -837,9 +857,20 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 ```json
 {
   "status": "ready",
-  "ready": true
+  "ready": true,
+  "dataplane": {
+    "status": "applied",
+    "desired_generation": 12,
+    "applied_generation": 12,
+    "pending_generations": 0
+  },
+  "plugins": {
+    "status": "applied"
+  }
 }
 ```
+
+`plugins.status=error` 表示已启用插件的期望状态尚未完整应用，会触发后台退避重试，并使 `/readyz` 保持 `503`，直到运行态收敛。
 
 `GET /metrics`
 
@@ -1491,6 +1522,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - `page_size` 最大 `1000`
 - 不传 `page_size` 时返回全部 worker
 - 该接口会把规则 worker、范围 worker、共享站点 worker、kernel worker、egress_nat worker 合并返回
+- 顶层 `dataplane` 与 `plugins` 返回完整 reconcile 状态和错误详情，用于确认数据库期望状态是否已经应用到运行态
 
 ### 9.2 获取内核运行时
 

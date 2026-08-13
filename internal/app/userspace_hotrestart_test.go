@@ -257,6 +257,39 @@ func TestKillWorkerInfoBoundsBlockedControlWrite(t *testing.T) {
 	}
 }
 
+func TestKillWorkerInfoUsesConnectionSnapshotWhenBlockedWriteClearsField(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	wi := &WorkerInfo{conn: server}
+	writeStarted := make(chan struct{})
+	writeDone := make(chan struct{})
+	go func() {
+		wi.writeMu.Lock()
+		close(writeStarted)
+		_, _ = server.Write([]byte("blocked"))
+		wi.conn = nil
+		wi.writeMu.Unlock()
+		close(writeDone)
+	}()
+	<-writeStarted
+
+	killDone := make(chan struct{})
+	go func() {
+		killWorkerInfo(wi)
+		close(killDone)
+	}()
+	for name, done := range map[string]<-chan struct{}{
+		"kill":   killDone,
+		"writer": writeDone,
+	} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s remained blocked while stopping worker", name)
+		}
+	}
+}
+
 func assertWorkerConfigReceived(t *testing.T, conn net.Conn) {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {

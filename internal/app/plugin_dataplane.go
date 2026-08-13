@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Unicode01/veer/internal/store"
 )
@@ -469,10 +470,30 @@ func (pm *ProcessManager) reconcilePluginsForRuntimeWithError() (pluginRuntimeSn
 	if pm == nil {
 		return pluginRuntimeSnapshot{}, nil
 	}
+	pm.pluginReconcileMu.Lock()
+	defer pm.pluginReconcileMu.Unlock()
+	startedAt := time.Now()
+	pm.mu.Lock()
+	pm.pluginReconcileLastAttemptAt = startedAt
+	pm.mu.Unlock()
 	catalogCfg, sourceDir := pm.appliedPluginCatalogConfig(pm.cfg)
 	catalog := loadPluginCatalogWithState(catalogCfg, pm.db)
 	catalog.Directory = sourceDir
-	return pm.reconcilePluginCatalogForRuntime(catalog)
+	snapshot, err := pm.reconcilePluginCatalogForRuntime(catalog)
+	completedAt := time.Now()
+	pm.mu.Lock()
+	if err != nil {
+		pm.pluginReconcileLastError = strings.TrimSpace(err.Error())
+		pm.pluginReconcileRetryCount++
+		pm.pluginReconcileNextRetryAt = completedAt.Add(nextDataplaneReconcileRetryDelay(pm.pluginReconcileRetryCount))
+	} else {
+		pm.pluginReconcileLastError = ""
+		pm.pluginReconcileRetryCount = 0
+		pm.pluginReconcileNextRetryAt = time.Time{}
+		pm.pluginReconcileLastAppliedAt = completedAt
+	}
+	pm.mu.Unlock()
+	return snapshot, err
 }
 
 func (pm *ProcessManager) reconcilePluginCatalogForRuntime(catalog PluginCatalog) (pluginRuntimeSnapshot, error) {

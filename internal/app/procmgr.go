@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -22,6 +24,10 @@ type WorkerInfo struct {
 	kind              string
 	rules             []Rule
 	ranges            []PortRange
+	sites             []Site
+	desiredGeneration uint64
+	appliedGeneration uint64
+	configSentAt      time.Time
 	failedRules       map[int64]bool
 	failedRanges      map[int64]bool
 	failedSites       map[int64]bool
@@ -64,6 +70,8 @@ const (
 	workerControlStaleTimeout             = 30 * time.Second
 	workerControlStaleRecoverEvery        = 30 * time.Second
 	workerControlStopWriteTimeout         = 250 * time.Millisecond
+	workerControlWriteTimeout             = 5 * time.Second
+	workerConfigACKTimeout                = 15 * time.Second
 	userspaceWorkerReconnectGrace         = 3 * time.Second
 	workerRegistrationFailureUnhealthyFor = 10 * time.Second
 	kernelDegradedRebuildCooldown         = 30 * time.Second
@@ -229,6 +237,13 @@ type ProcessManager struct {
 	listener                                       net.Listener
 	binaryHash                                     string
 	ready                                          bool
+	desiredGeneration                              uint64
+	preparedGeneration                             uint64
+	appliedGeneration                              uint64
+	reconcileLastError                             string
+	reconcileRetryCount                            int
+	reconcileLastAttemptAt                         time.Time
+	reconcileLastAppliedAt                         time.Time
 	preservedWorkers                               map[userspaceWorkerHandoffKey]userspaceWorkerHandoffRecord
 	lastWorkerRegistrationFailureAt                time.Time
 	rulePlans                                      map[int64]ruleDataplanePlan
@@ -240,7 +255,14 @@ type ProcessManager struct {
 	managedRuntimeDriftCheckAt                     time.Time
 	pluginCatalogUpdateMu                          sync.Mutex
 	pluginPackageMu                                sync.Mutex
+	dataplaneReconcileMu                           sync.Mutex
+	pluginReconcileMu                              sync.Mutex
 	pluginProbationCheckAt                         time.Time
+	pluginReconcileLastError                       string
+	pluginReconcileRetryCount                      int
+	pluginReconcileNextRetryAt                     time.Time
+	pluginReconcileLastAttemptAt                   time.Time
+	pluginReconcileLastAppliedAt                   time.Time
 	pluginCatalogSourceDir                         string
 	pluginCatalogAppliedDir                        string
 	pluginCatalogAppliedFingerprint                string
@@ -348,6 +370,7 @@ type ProcessManager struct {
 	redistributeWake                               chan struct{}
 	redistributePending                            bool
 	redistributeDueAt                              time.Time
+	redistributeGeneration                         uint64
 	shuttingDown                                   bool
 	shutdownCh                                     chan struct{}
 	monitorDone                                    chan struct{}
@@ -437,19 +460,33 @@ func (pm *ProcessManager) isReady() bool {
 	}
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	return pm.isReadyLocked(time.Now())
+}
+
+func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 	if !pm.ready {
 		return false
 	}
-	if !pm.lastWorkerRegistrationFailureAt.IsZero() && time.Since(pm.lastWorkerRegistrationFailureAt) < workerRegistrationFailureUnhealthyFor {
+	if pm.desiredGeneration > pm.appliedGeneration || strings.TrimSpace(pm.reconcileLastError) != "" ||
+		pm.workerReconcileErrorLocked() != "" || strings.TrimSpace(pm.pluginReconcileLastError) != "" {
+		return false
+	}
+	if !pm.lastWorkerRegistrationFailureAt.IsZero() && now.Sub(pm.lastWorkerRegistrationFailureAt) < workerRegistrationFailureUnhealthyFor {
 		return false
 	}
 	for _, wi := range pm.ruleWorkers {
 		if wi != nil && len(wi.rules) > 0 && !userspaceWorkerControlReady(wi) {
 			return false
 		}
+		if pm.desiredGeneration > 0 && wi != nil && len(wi.rules) > 0 && !workerGenerationApplied(wi, pm.desiredGeneration) {
+			return false
+		}
 	}
 	for _, wi := range pm.rangeWorkers {
 		if wi != nil && len(wi.ranges) > 0 && !userspaceWorkerControlReady(wi) {
+			return false
+		}
+		if pm.desiredGeneration > 0 && wi != nil && len(wi.ranges) > 0 && !workerGenerationApplied(wi, pm.desiredGeneration) {
 			return false
 		}
 	}
@@ -462,7 +499,13 @@ func (pm *ProcessManager) isReady() bool {
 			return false
 		}
 	}
-	return pm.sharedProxy == nil || userspaceWorkerControlReady(pm.sharedProxy)
+	if pm.sharedProxy == nil {
+		return true
+	}
+	if !userspaceWorkerControlReady(pm.sharedProxy) {
+		return false
+	}
+	return pm.desiredGeneration == 0 || workerGenerationApplied(pm.sharedProxy, pm.desiredGeneration)
 }
 
 func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessManager, error) {
@@ -720,13 +763,12 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 	noteWorkerMessage(wi, time.Now())
 	wi.binaryHash = workerHash
 	rules := append([]Rule(nil), wi.rules...)
-	binHash := pm.binaryHash
 	pm.mu.Unlock()
 	closeReplacedWorkerConnection(previousConn, conn)
 
-	wi.writeMu.Lock()
-	writeIPC(conn, IPCMessage{Type: "config", Rules: rules, BinaryHash: binHash})
-	wi.writeMu.Unlock()
+	if err := pm.sendRuleConfig(wi); err != nil {
+		log.Printf("worker[%d]: send initial config: %v", workerIndex, err)
+	}
 
 	// target tracks where stats/status go; starts as wi, may switch to draining entry
 	target := wi
@@ -746,10 +788,16 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 		if status.Type == "status" {
 			startNewWorker := false
 			logIssue := false
+			issueText := ""
 			pm.mu.Lock()
 			if !connectionCurrentLocked() {
 				pm.mu.Unlock()
 				break
+			}
+			if target == wi && status.Generation != 0 && status.Generation != wi.desiredGeneration {
+				noteWorkerMessage(target, time.Now())
+				pm.mu.Unlock()
+				continue
 			}
 			now := time.Now()
 			if status.Status == "draining" && target == wi {
@@ -795,9 +843,19 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 				target.draining = status.Status == "draining"
 				target.activeRuleIDs = append([]int64(nil), status.ActiveRuleIDs...)
 				noteWorkerMessage(target, now)
-				if status.Status == "error" {
+				target.failedRules = make(map[int64]bool)
+				for _, id := range status.FailedRuleIDs {
+					target.failedRules[id] = true
+				}
+				issueActive := status.Status == "error" || len(target.failedRules) > 0
+				if issueActive {
 					recordWorkerStatusError(target, status)
-					logIssue = shouldLogWorkerIssue(target, status.Error, now)
+					issueText = strings.TrimSpace(status.Error)
+					if issueText == "" {
+						issueText = fmt.Sprintf("%d rule binding(s) unavailable", len(target.failedRules))
+						target.lastError = issueText
+					}
+					logIssue = shouldLogWorkerIssue(target, issueText, now)
 					if target == wi {
 						scheduleWorkerRetry(target, now)
 					} else {
@@ -810,10 +868,8 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 						target.errored = false
 					}
 				}
-				target.failedRules = make(map[int64]bool)
-				for _, id := range status.FailedRuleIDs {
-					target.failedRules[id] = true
-				}
+				noteWorkerGenerationStatusLocked(target, status, !issueActive && (status.Status == "running" || status.Status == "idle"))
+				pm.refreshDataplaneAppliedLocked(now)
 			}
 			pm.mu.Unlock()
 			if startNewWorker {
@@ -822,8 +878,8 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 					log.Printf("start replacement rule worker[%d]: %v", workerIndex, err)
 				}
 			}
-			if status.Status == "error" && logIssue {
-				log.Printf("worker[%d] error: %s", workerIndex, status.Error)
+			if logIssue {
+				log.Printf("worker[%d] issue: %s", workerIndex, issueText)
 			}
 		} else if status.Type == "stats" {
 			pm.mu.Lock()
@@ -861,19 +917,6 @@ func (pm *ProcessManager) handleRuleWorkerConn(conn net.Conn, scanner *bufio.Sca
 }
 
 func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Scanner, workerHash string) {
-	sites, err := dbGetSites(pm.db)
-	if err != nil {
-		conn.Close()
-		return
-	}
-
-	var enabledSites []Site
-	for _, s := range sites {
-		if s.Enabled {
-			enabledSites = append(enabledSites, s)
-		}
-	}
-
 	pm.mu.Lock()
 	proxy := pm.sharedProxy
 	if proxy != nil {
@@ -895,7 +938,9 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 		return
 	}
 
-	pm.sendSitesConfig(proxy, enabledSites)
+	if err := pm.sendSitesConfig(proxy); err != nil {
+		log.Printf("shared proxy: send initial config: %v", err)
+	}
 
 	target := proxy
 	connectionCurrentLocked := func() bool {
@@ -915,6 +960,11 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 			if !connectionCurrentLocked() {
 				pm.mu.Unlock()
 				break
+			}
+			if target == proxy && status.Generation != 0 && status.Generation != proxy.desiredGeneration {
+				noteWorkerMessage(target, time.Now())
+				pm.mu.Unlock()
+				continue
 			}
 			now := time.Now()
 			if status.Status == "draining" && target == proxy {
@@ -971,6 +1021,8 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 					resetWorkerRetryState(target)
 					recordWorkerStatusError(target, status)
 				}
+				noteWorkerGenerationStatusLocked(target, status, !issueActive && (status.Status == "running" || status.Status == "idle"))
+				pm.refreshDataplaneAppliedLocked(now)
 			}
 			pm.mu.Unlock()
 			if startNewProxy {
@@ -1010,8 +1062,47 @@ func (pm *ProcessManager) handleSharedProxyConn(conn net.Conn, scanner *bufio.Sc
 }
 
 func (pm *ProcessManager) redistributeWorkers() {
+	pm.runDataplaneReconcile(0)
+}
+
+func (pm *ProcessManager) runDataplaneReconcile(generation uint64) {
+	if pm == nil {
+		return
+	}
+	pm.dataplaneReconcileMu.Lock()
+	defer pm.dataplaneReconcileMu.Unlock()
+	if generation == 0 {
+		generation = pm.beginDataplaneReconcile()
+	} else {
+		pm.mu.Lock()
+		current := generation == pm.desiredGeneration && !pm.shuttingDown
+		pm.mu.Unlock()
+		if !current {
+			return
+		}
+	}
+	pm.markDataplaneReconcileAttempt(generation)
+	if err := pm.redistributeWorkersGeneration(generation); err != nil {
+		if errors.Is(err, errDataplaneReconcileSuperseded) {
+			return
+		}
+		log.Printf("dataplane reconcile generation %d failed: %v", generation, err)
+		pm.markDataplaneReconcileFailed(generation, err)
+		return
+	}
+	pm.markDataplaneReconcilePrepared(generation)
+}
+
+func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error {
 	pm.redistributeMu.Lock()
 	defer pm.redistributeMu.Unlock()
+	pm.mu.Lock()
+	current := generation == pm.desiredGeneration && !pm.shuttingDown
+	pm.mu.Unlock()
+	if !current {
+		return errDataplaneReconcileSuperseded
+	}
+	var reconcileErrors []error
 	pluginCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
 	var pluginCatalogSnapshot *PluginCatalog
 	if pluginCfg != nil && pluginCfg.PluginsEnabled() {
@@ -1021,24 +1112,20 @@ func (pm *ProcessManager) redistributeWorkers() {
 
 	rules, err := dbGetRules(pm.db)
 	if err != nil {
-		log.Printf("load rules: %v", err)
-		return
+		return fmt.Errorf("load rules: %w", err)
 	}
 	ranges, err := dbGetRanges(pm.db)
 	if err != nil {
-		log.Printf("load ranges: %v", err)
-		return
+		return fmt.Errorf("load ranges: %w", err)
 	}
 	sites, err := dbGetSites(pm.db)
 	if err != nil {
-		log.Printf("load sites: %v", err)
-		return
+		return fmt.Errorf("load sites: %w", err)
 	}
 	nextSyntheticRuleID := maxRuleID(rules) + 1
 	pluginForwardRules, warnings, err := loadPluginForwardRulesWithCatalog(pm.db, pluginCfg, pluginCatalogSnapshot, rules, sites, ranges, &nextSyntheticRuleID)
 	if err != nil {
-		log.Printf("load plugin forward rule plans: %v", err)
-		return
+		return fmt.Errorf("load plugin forward rule plans: %w", err)
 	}
 	for _, warning := range warnings {
 		log.Printf("plugin forward rule: %s", warning)
@@ -1051,8 +1138,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		StabilizeInterfaceSnapshot: pm.stabilizeNetworkInterfaceSnapshot,
 	})
 	if err != nil {
-		log.Printf("load effective network plan: %v", err)
-		return
+		return fmt.Errorf("load effective network plan: %w", err)
 	}
 	for _, warning := range networkPlan.Warnings.DHCPv4 {
 		log.Printf("plugin dhcpv4: %s", warning)
@@ -1071,6 +1157,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 	}
 	if networkPlan.IPv6ResolutionErr != nil {
 		log.Printf("managed network runtime: %v", networkPlan.IPv6ResolutionErr)
+		reconcileErrors = append(reconcileErrors, fmt.Errorf("resolve managed network IPv6 assignments: %w", networkPlan.IPv6ResolutionErr))
 	}
 
 	runtimeManagedNetworks := networkPlan.RuntimeManagedNetworks
@@ -1083,9 +1170,11 @@ func (pm *ProcessManager) redistributeWorkers() {
 	ipv6AssignmentLoadErr := networkPlan.IPv6LoadErr
 	if ipv6AssignmentLoadErr != nil {
 		log.Printf("load ipv6 assignments: %v", ipv6AssignmentLoadErr)
+		reconcileErrors = append(reconcileErrors, fmt.Errorf("load IPv6 assignments: %w", ipv6AssignmentLoadErr))
 	}
 	if networkPlan.RequiresInterfaceData && egressNATSnapshot.Err != nil {
 		log.Printf("managed network runtime: interface inventory unavailable: %v", egressNATSnapshot.Err)
+		reconcileErrors = append(reconcileErrors, fmt.Errorf("load interface inventory: %w", egressNATSnapshot.Err))
 	}
 
 	managedRuntimeReloadFingerprint := ""
@@ -1093,6 +1182,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 	if pm.managedNetworkRuntime != nil {
 		if err := pm.managedNetworkRuntime.Reconcile(runtimeManagedNetworks, managedNetworkReservations); err != nil {
 			log.Printf("managed network runtime reconcile: %v", err)
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("managed network runtime reconcile: %w", err))
 		} else {
 			managedRuntimeReconcileOK = true
 		}
@@ -1104,6 +1194,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		if pm.ipv6Runtime != nil {
 			if err := pm.ipv6Runtime.Reconcile(ipv6Assignments); err != nil {
 				log.Printf("ipv6 assignment runtime reconcile: %v", err)
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("IPv6 assignment runtime reconcile: %w", err))
 				ipv6RuntimeReconcileOK = false
 			} else {
 				ipv6RuntimeReconcileOK = true
@@ -1168,8 +1259,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 			var retainErr error
 			retainedByEngine, retainedKernelCandidates, retainErr = retainedKernelAssignmentsFromCandidateGroups(retainedGroups, currentKernelAssignments)
 			if retainErr != nil {
-				log.Printf("kernel dataplane planner: retain transient egress nat assignments: %v", retainErr)
-				return
+				return fmt.Errorf("kernel dataplane planner: retain transient egress NAT assignments: %w", retainErr)
 			}
 			retainedEgressNATOwners = retainedOwners
 			log.Printf("kernel dataplane planner: deferring cleanup for %d egress nat owner(s) while interface inventory settles", len(retainedOwners))
@@ -1218,8 +1308,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		previousKernelCandidates = append(previousKernelCandidates, candidate.rule)
 	}
 	if err := stabilizeKernelCandidateRuleIDs(allKernelCandidates, previousKernelCandidates); err != nil {
-		log.Printf("kernel dataplane planner: stabilize candidate rule ids: %v", err)
-		return
+		return fmt.Errorf("kernel dataplane planner: stabilize candidate rule ids: %w", err)
 	}
 	activeKernelCandidateBuf := make([]kernelCandidateRule, 0, len(allKernelCandidates))
 	activeKernelCandidates := filterActiveKernelCandidatesInto(activeKernelCandidateBuf, allKernelCandidates, rulePlans, rangePlans, egressNATPlans)
@@ -1232,8 +1321,7 @@ func (pm *ProcessManager) redistributeWorkers() {
 		for {
 			results, reconcileErr := reconcileIncrementalKernelRetry(pm.kernelRuntime, retainedByEngine, activeKernelCandidates, pluginCatalogSnapshot)
 			if reconcileErr != nil && len(retainedByEngine) > 0 {
-				log.Printf("kernel dataplane planner: retained egress nat reconcile failed: %v", reconcileErr)
-				return
+				return fmt.Errorf("kernel dataplane planner: retained egress NAT reconcile: %w", reconcileErr)
 			}
 			if len(activeKernelCandidates) == 0 {
 				break
@@ -1314,6 +1402,10 @@ func (pm *ProcessManager) redistributeWorkers() {
 	}
 
 	pm.mu.Lock()
+	if generation != pm.desiredGeneration || pm.shuttingDown {
+		pm.mu.Unlock()
+		return errDataplaneReconcileSuperseded
+	}
 	pm.rulePlans = rulePlans
 	pm.rangePlans = rangePlans
 	pm.egressNATPlans = egressNATPlans
@@ -1344,13 +1436,14 @@ func (pm *ProcessManager) redistributeWorkers() {
 	// so iptables rules are in place before any worker starts using IP_TRANSPARENT sockets.
 	pm.updateTransparentRouting(enabledRules, enabledRanges)
 
-	pm.updateSharedProxy()
+	pm.updateSharedProxy(sites, generation)
 
-	pm.applyRuleAssignments(ruleAssignments)
-	pm.applyRangeAssignments(rangeAssignments)
+	pm.applyRuleAssignmentsGeneration(ruleAssignments, generation)
+	pm.applyRangeAssignmentsGeneration(rangeAssignments, generation)
 	if pm.kernelRuntime != nil {
 		pm.refreshKernelStatsCacheIfNeeded()
 	}
+	return errors.Join(reconcileErrors...)
 }
 
 func (pm *ProcessManager) requestRedistributeWorkers(delay time.Duration) {
@@ -1371,9 +1464,42 @@ func (pm *ProcessManager) requestRedistributeWorkers(delay time.Duration) {
 		pm.redistributeDueAt = dueAt
 	}
 	pm.redistributePending = true
+	pm.redistributeGeneration = 0
 	wake := pm.redistributeWake
 	pm.mu.Unlock()
 
+	if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (pm *ProcessManager) requestRedistributeRetry(generation uint64, delay time.Duration) {
+	if pm == nil || generation == 0 {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	dueAt := time.Now().Add(delay)
+	pm.mu.Lock()
+	if pm.shuttingDown || generation != pm.desiredGeneration {
+		pm.mu.Unlock()
+		return
+	}
+	if pm.redistributePending && pm.redistributeGeneration == 0 {
+		pm.mu.Unlock()
+		return
+	}
+	if !pm.redistributePending || dueAt.Before(pm.redistributeDueAt) {
+		pm.redistributeDueAt = dueAt
+	}
+	pm.redistributePending = true
+	pm.redistributeGeneration = generation
+	wake := pm.redistributeWake
+	pm.mu.Unlock()
 	if wake != nil {
 		select {
 		case wake <- struct{}{}:
@@ -1459,12 +1585,14 @@ func (pm *ProcessManager) redistributeLoop() {
 		}
 		pm.redistributePending = false
 		pm.redistributeDueAt = time.Time{}
+		generation := pm.redistributeGeneration
+		pm.redistributeGeneration = 0
 		pm.mu.Unlock()
 
 		if pm.isShuttingDown() {
 			return
 		}
-		pm.redistributeWorkers()
+		pm.runDataplaneReconcile(generation)
 	}
 }
 
@@ -2752,12 +2880,20 @@ func canAppendRetainedKernelCandidates(existing map[int64]struct{}, retained []R
 }
 
 func (pm *ProcessManager) applyRuleAssignments(assignments [][]Rule) {
+	pm.applyRuleAssignmentsGeneration(assignments, 0)
+}
+
+func (pm *ProcessManager) applyRuleAssignmentsGeneration(assignments [][]Rule, generation uint64) {
 	desired := len(assignments)
 	toStart := make(map[int]struct{})
 	var toStop []*WorkerInfo
 	var toUpdate []*WorkerInfo
 
 	pm.mu.Lock()
+	if generation != 0 && generation != pm.desiredGeneration {
+		pm.mu.Unlock()
+		return
+	}
 	existingStats := snapshotRuleWorkerStats(pm.ruleWorkers)
 	for idx, wi := range pm.ruleWorkers {
 		if idx >= desired {
@@ -2778,12 +2914,13 @@ func (pm *ProcessManager) applyRuleAssignments(assignments [][]Rule) {
 		}
 		if !ok {
 			wi = &WorkerInfo{
-				workerIndex: idx,
-				kind:        workerKindRule,
-				rules:       rules,
-				failedRules: make(map[int64]bool),
-				ruleStats:   retainRuleStatsReports(existingStats, rules),
-				lastStart:   time.Now(),
+				workerIndex:       idx,
+				kind:              workerKindRule,
+				rules:             rules,
+				desiredGeneration: generation,
+				failedRules:       make(map[int64]bool),
+				ruleStats:         retainRuleStatsReports(existingStats, rules),
+				lastStart:         time.Now(),
 			}
 			pm.ruleWorkers[idx] = wi
 			restored := pm.restorePreservedWorkerLocked(wi)
@@ -2792,12 +2929,19 @@ func (pm *ProcessManager) applyRuleAssignments(assignments [][]Rule) {
 			}
 			continue
 		}
-		if !rulesEqual(wi.rules, rules) {
+		changed := !rulesEqual(wi.rules, rules)
+		if changed {
 			wi.rules = rules
 			wi.failedRules = make(map[int64]bool)
 			wi.ruleStats = retainRuleStatsReports(existingStats, rules)
 			wi.running = false
 			resetWorkerRetryState(wi)
+		}
+		shouldUpdate := changed
+		if advanceWorkerGenerationLocked(wi, generation, changed) {
+			shouldUpdate = true
+		}
+		if shouldUpdate {
 			toUpdate = append(toUpdate, wi)
 		}
 		if pm.ready && wi.process == nil && wi.conn == nil && !pm.restorePreservedWorkerLocked(wi) {
@@ -2820,12 +2964,20 @@ func (pm *ProcessManager) applyRuleAssignments(assignments [][]Rule) {
 }
 
 func (pm *ProcessManager) applyRangeAssignments(assignments [][]PortRange) {
+	pm.applyRangeAssignmentsGeneration(assignments, 0)
+}
+
+func (pm *ProcessManager) applyRangeAssignmentsGeneration(assignments [][]PortRange, generation uint64) {
 	desired := len(assignments)
 	toStart := make(map[int]struct{})
 	var toStop []*WorkerInfo
 	var toUpdate []*WorkerInfo
 
 	pm.mu.Lock()
+	if generation != 0 && generation != pm.desiredGeneration {
+		pm.mu.Unlock()
+		return
+	}
 	existingStats := snapshotRangeWorkerStats(pm.rangeWorkers)
 	for idx, wi := range pm.rangeWorkers {
 		if idx >= desired {
@@ -2845,12 +2997,13 @@ func (pm *ProcessManager) applyRangeAssignments(assignments [][]PortRange) {
 		}
 		if !ok {
 			wi = &WorkerInfo{
-				workerIndex:  idx,
-				kind:         workerKindRange,
-				ranges:       ranges,
-				failedRanges: make(map[int64]bool),
-				rangeStats:   retainRangeStatsReports(existingStats, ranges),
-				lastStart:    time.Now(),
+				workerIndex:       idx,
+				kind:              workerKindRange,
+				ranges:            ranges,
+				desiredGeneration: generation,
+				failedRanges:      make(map[int64]bool),
+				rangeStats:        retainRangeStatsReports(existingStats, ranges),
+				lastStart:         time.Now(),
 			}
 			pm.rangeWorkers[idx] = wi
 			restored := pm.restorePreservedWorkerLocked(wi)
@@ -2859,12 +3012,19 @@ func (pm *ProcessManager) applyRangeAssignments(assignments [][]PortRange) {
 			}
 			continue
 		}
-		if !rangesEqual(wi.ranges, ranges) {
+		changed := !rangesEqual(wi.ranges, ranges)
+		if changed {
 			wi.ranges = ranges
 			wi.failedRanges = make(map[int64]bool)
 			wi.rangeStats = retainRangeStatsReports(existingStats, ranges)
 			wi.running = false
 			resetWorkerRetryState(wi)
+		}
+		shouldUpdate := changed
+		if advanceWorkerGenerationLocked(wi, generation, changed) {
+			shouldUpdate = true
+		}
+		if shouldUpdate {
 			toUpdate = append(toUpdate, wi)
 		}
 		if pm.ready && wi.process == nil && wi.conn == nil && !pm.restorePreservedWorkerLocked(wi) {
@@ -3219,13 +3379,12 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 	noteWorkerMessage(wi, time.Now())
 	wi.binaryHash = workerHash
 	ranges := append([]PortRange(nil), wi.ranges...)
-	binHash := pm.binaryHash
 	pm.mu.Unlock()
 	closeReplacedWorkerConnection(previousConn, conn)
 
-	wi.writeMu.Lock()
-	writeIPC(conn, IPCMessage{Type: "range_config", PortRanges: ranges, BinaryHash: binHash})
-	wi.writeMu.Unlock()
+	if err := pm.sendRangeConfig(wi); err != nil {
+		log.Printf("range worker[%d]: send initial config: %v", workerIndex, err)
+	}
 
 	target := wi
 	connectionCurrentLocked := func() bool {
@@ -3244,10 +3403,16 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 		if status.Type == "status" {
 			startNewWorker := false
 			logIssue := false
+			issueText := ""
 			pm.mu.Lock()
 			if !connectionCurrentLocked() {
 				pm.mu.Unlock()
 				break
+			}
+			if target == wi && status.Generation != 0 && status.Generation != wi.desiredGeneration {
+				noteWorkerMessage(target, time.Now())
+				pm.mu.Unlock()
+				continue
 			}
 			now := time.Now()
 			if status.Status == "draining" && target == wi {
@@ -3292,9 +3457,19 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 				target.draining = status.Status == "draining"
 				target.activeRangeIDs = append([]int64(nil), status.ActiveRangeIDs...)
 				noteWorkerMessage(target, now)
-				if status.Status == "error" {
+				target.failedRanges = make(map[int64]bool)
+				for _, id := range status.FailedRangeIDs {
+					target.failedRanges[id] = true
+				}
+				issueActive := status.Status == "error" || len(target.failedRanges) > 0
+				if issueActive {
 					recordWorkerStatusError(target, status)
-					logIssue = shouldLogWorkerIssue(target, status.Error, now)
+					issueText = strings.TrimSpace(status.Error)
+					if issueText == "" {
+						issueText = fmt.Sprintf("%d port range binding(s) unavailable", len(target.failedRanges))
+						target.lastError = issueText
+					}
+					logIssue = shouldLogWorkerIssue(target, issueText, now)
 					if target == wi {
 						scheduleWorkerRetry(target, now)
 					} else {
@@ -3304,10 +3479,8 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 					resetWorkerRetryState(target)
 					recordWorkerStatusError(target, status)
 				}
-				target.failedRanges = make(map[int64]bool)
-				for _, id := range status.FailedRangeIDs {
-					target.failedRanges[id] = true
-				}
+				noteWorkerGenerationStatusLocked(target, status, !issueActive && (status.Status == "running" || status.Status == "idle"))
+				pm.refreshDataplaneAppliedLocked(now)
 			}
 			pm.mu.Unlock()
 			if startNewWorker {
@@ -3316,8 +3489,8 @@ func (pm *ProcessManager) handleRangeWorkerConn(conn net.Conn, scanner *bufio.Sc
 					log.Printf("start replacement range worker[%d]: %v", workerIndex, err)
 				}
 			}
-			if status.Status == "error" && logIssue {
-				log.Printf("range worker[%d] error: %s", workerIndex, status.Error)
+			if logIssue {
+				log.Printf("range worker[%d] issue: %s", workerIndex, issueText)
 			}
 		} else if status.Type == "range_stats" {
 			pm.mu.Lock()
@@ -3431,54 +3604,76 @@ func (pm *ProcessManager) startRangeWorker(workerIndex int) error {
 	return nil
 }
 
-func (pm *ProcessManager) sendRuleConfig(wi *WorkerInfo) {
+func (pm *ProcessManager) sendRuleConfig(wi *WorkerInfo) error {
 	if wi == nil {
-		return
+		return nil
 	}
+	wi.writeMu.Lock()
+	defer wi.writeMu.Unlock()
 	pm.mu.Lock()
 	rules := append([]Rule(nil), wi.rules...)
 	conn := wi.conn
 	binHash := pm.binaryHash
+	generation := wi.desiredGeneration
 	pm.mu.Unlock()
 	if conn == nil {
-		return
+		return nil
 	}
-	wi.writeMu.Lock()
-	writeIPC(conn, IPCMessage{Type: "config", Rules: rules, BinaryHash: binHash})
-	wi.writeMu.Unlock()
+	err := writeIPC(conn, IPCMessage{Type: "config", Generation: generation, Rules: rules, BinaryHash: binHash})
+	if err != nil {
+		pm.noteWorkerConfigWriteFailure(wi, conn, err)
+	} else {
+		pm.noteWorkerConfigSent(wi, conn, generation)
+	}
+	return err
 }
 
-func (pm *ProcessManager) sendRangeConfig(wi *WorkerInfo) {
+func (pm *ProcessManager) sendRangeConfig(wi *WorkerInfo) error {
 	if wi == nil {
-		return
+		return nil
 	}
+	wi.writeMu.Lock()
+	defer wi.writeMu.Unlock()
 	pm.mu.Lock()
 	ranges := append([]PortRange(nil), wi.ranges...)
 	conn := wi.conn
 	binHash := pm.binaryHash
+	generation := wi.desiredGeneration
 	pm.mu.Unlock()
 	if conn == nil {
-		return
+		return nil
 	}
-	wi.writeMu.Lock()
-	writeIPC(conn, IPCMessage{Type: "range_config", PortRanges: ranges, BinaryHash: binHash})
-	wi.writeMu.Unlock()
+	err := writeIPC(conn, IPCMessage{Type: "range_config", Generation: generation, PortRanges: ranges, BinaryHash: binHash})
+	if err != nil {
+		pm.noteWorkerConfigWriteFailure(wi, conn, err)
+	} else {
+		pm.noteWorkerConfigSent(wi, conn, generation)
+	}
+	return err
 }
 
-func (pm *ProcessManager) sendSitesConfig(wi *WorkerInfo, sites []Site) {
+func (pm *ProcessManager) sendSitesConfig(wi *WorkerInfo) error {
 	if wi == nil {
-		return
-	}
-	pm.mu.Lock()
-	conn := wi.conn
-	binHash := pm.binaryHash
-	pm.mu.Unlock()
-	if conn == nil {
-		return
+		return nil
 	}
 	wi.writeMu.Lock()
-	writeIPC(conn, IPCMessage{Type: "sites_config", Sites: sites, BinaryHash: binHash})
-	wi.writeMu.Unlock()
+	defer wi.writeMu.Unlock()
+	pm.mu.Lock()
+	sites := append([]Site(nil), wi.sites...)
+	conn := wi.conn
+	binHash := pm.binaryHash
+	generation := wi.desiredGeneration
+	pm.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	err := writeIPC(conn, IPCMessage{Type: "sites_config", Generation: generation, Sites: sites, BinaryHash: binHash})
+	if err != nil {
+		pm.noteWorkerConfigWriteFailure(wi, conn, err)
+	} else {
+		pm.noteWorkerConfigSent(wi, conn, generation)
+	}
+	return err
 }
 
 func (pm *ProcessManager) startSharedProxy() {
@@ -3560,24 +3755,7 @@ func (pm *ProcessManager) startSharedProxy() {
 	}()
 }
 
-func (pm *ProcessManager) stopSharedProxy() {
-	pm.mu.Lock()
-	wi := pm.sharedProxy
-	pm.sharedProxy = nil
-	pm.mu.Unlock()
-
-	if wi != nil {
-		killWorkerInfo(wi)
-	}
-}
-
-func (pm *ProcessManager) updateSharedProxy() {
-	sites, err := dbGetSites(pm.db)
-	if err != nil {
-		log.Printf("load sites for update: %v", err)
-		return
-	}
-
+func (pm *ProcessManager) updateSharedProxy(sites []Site, generation uint64) {
 	var enabledSites []Site
 	for _, s := range sites {
 		if s.Enabled {
@@ -3585,44 +3763,160 @@ func (pm *ProcessManager) updateSharedProxy() {
 		}
 	}
 
-	if len(enabledSites) == 0 {
-		pm.stopSharedProxy()
+	pm.mu.Lock()
+	if generation != 0 && generation != pm.desiredGeneration {
+		pm.mu.Unlock()
 		return
 	}
-
-	pm.mu.Lock()
 	proxy := pm.sharedProxy
-	pm.mu.Unlock()
-
+	if len(enabledSites) == 0 {
+		pm.sharedProxy = nil
+		pm.mu.Unlock()
+		if proxy != nil {
+			killWorkerInfo(proxy)
+		}
+		return
+	}
 	if proxy == nil {
-		// Create slot; monitorLoop will start process if no worker reconnects
-		pm.mu.Lock()
 		proxy = &WorkerInfo{
-			kind:        workerKindShared,
-			failedSites: make(map[int64]bool),
-			lastStart:   time.Now(),
+			kind:              workerKindShared,
+			sites:             enabledSites,
+			desiredGeneration: generation,
+			failedSites:       make(map[int64]bool),
+			lastStart:         time.Now(),
 		}
 		pm.sharedProxy = proxy
 		pm.restorePreservedWorkerLocked(proxy)
 		pm.mu.Unlock()
 		return
 	}
-	if !proxy.running && proxy.conn == nil && proxy.process == nil {
+	changed := !sitesEqual(proxy.sites, enabledSites)
+	if changed {
+		proxy.sites = append([]Site(nil), enabledSites...)
+		proxy.failedSites = make(map[int64]bool)
+		resetWorkerRetryState(proxy)
+	}
+	shouldSend := changed
+	if advanceWorkerGenerationLocked(proxy, generation, changed) {
+		shouldSend = true
+	}
+	running := proxy.running
+	hasControl := proxy.conn != nil
+	hasProcess := proxy.process != nil
+	pm.mu.Unlock()
+	if !running && !hasControl && !hasProcess {
 		return // monitorLoop will handle starting
 	}
 
-	// Send updated sites to running proxy
-	pm.sendSitesConfig(proxy, enabledSites)
+	if shouldSend {
+		_ = pm.sendSitesConfig(proxy)
+	}
 }
 
-func writeIPC(conn net.Conn, msg IPCMessage) {
-	data, _ := json.Marshal(msg)
+func sitesEqual(a, b []Site) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func writeIPC(conn net.Conn, msg IPCMessage) error {
+	return writeIPCWithTimeout(conn, msg, workerControlWriteTimeout)
+}
+
+func writeIPCWithTimeout(conn net.Conn, msg IPCMessage, timeout time.Duration) error {
+	if conn == nil {
+		return errors.New("control connection is unavailable")
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("encode control message: %w", err)
+	}
 	data = append(data, '\n')
-	conn.Write(data)
+	if timeout > 0 {
+		if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			return fmt.Errorf("set control write deadline: %w", err)
+		}
+		defer conn.SetWriteDeadline(time.Time{})
+	}
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return fmt.Errorf("write control message: %w", err)
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func registerIPCConnection(conn net.Conn, msg IPCMessage, connMu *sync.Mutex, target *net.Conn) error {
+	if connMu == nil || target == nil {
+		return errors.New("control connection registration target is unavailable")
+	}
+	if err := writeIPC(conn, msg); err != nil {
+		return err
+	}
+	connMu.Lock()
+	*target = conn
+	connMu.Unlock()
+	return nil
 }
 
 func sendStop(conn net.Conn) {
-	writeIPC(conn, IPCMessage{Type: "stop"})
+	_ = writeIPCWithTimeout(conn, IPCMessage{Type: "stop"}, workerControlStopWriteTimeout)
+}
+
+func (pm *ProcessManager) noteWorkerConfigWriteFailure(wi *WorkerInfo, conn net.Conn, err error) {
+	if pm == nil || wi == nil || conn == nil || err == nil {
+		return
+	}
+	now := time.Now()
+	pm.mu.Lock()
+	if wi.conn != conn {
+		pm.mu.Unlock()
+		return
+	}
+	wi.conn = nil
+	wi.running = false
+	wi.configSentAt = time.Time{}
+	wi.lastError = strings.TrimSpace(err.Error())
+	scheduleWorkerRetry(wi, now)
+	pm.mu.Unlock()
+	_ = conn.Close()
+}
+
+func (pm *ProcessManager) noteWorkerConfigSent(wi *WorkerInfo, conn net.Conn, generation uint64) {
+	if pm == nil || wi == nil || conn == nil || generation == 0 {
+		return
+	}
+	pm.mu.Lock()
+	if wi.conn == conn && wi.desiredGeneration == generation && wi.appliedGeneration < generation {
+		wi.configSentAt = time.Now()
+	}
+	pm.mu.Unlock()
+}
+
+func workerConfigACKTimedOut(wi *WorkerInfo, now time.Time) bool {
+	return wi != nil && wi.conn != nil && wi.desiredGeneration > wi.appliedGeneration &&
+		!wi.configSentAt.IsZero() && now.Sub(wi.configSentAt) >= workerConfigACKTimeout
+}
+
+func markWorkerConfigACKTimeout(wi *WorkerInfo, now time.Time) bool {
+	if !workerConfigACKTimedOut(wi, now) {
+		return false
+	}
+	wi.configSentAt = time.Time{}
+	wi.lastError = fmt.Sprintf("configuration generation %d ACK timed out", wi.desiredGeneration)
+	scheduleWorkerRetry(wi, now)
+	return true
 }
 
 func closeReplacedWorkerConnection(previous net.Conn, current net.Conn) {
@@ -3633,21 +3927,25 @@ func closeReplacedWorkerConnection(previous net.Conn, current net.Conn) {
 }
 
 func detachWorkerInfo(wi *WorkerInfo) {
-	if wi == nil || wi.conn == nil {
+	if wi == nil {
 		return
 	}
-	_ = wi.conn.Close()
+	conn := wi.conn
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func killWorkerInfo(wi *WorkerInfo) {
 	if wi == nil {
 		return
 	}
-	if wi.conn != nil {
-		_ = wi.conn.SetWriteDeadline(time.Now().Add(workerControlStopWriteTimeout))
+	conn := wi.conn
+	if conn != nil {
+		_ = conn.SetWriteDeadline(time.Now().Add(workerControlStopWriteTimeout))
 		wi.writeMu.Lock()
-		sendStop(wi.conn)
-		_ = wi.conn.Close()
+		sendStop(conn)
+		_ = conn.Close()
 		wi.writeMu.Unlock()
 	}
 
@@ -4674,6 +4972,7 @@ func (pm *ProcessManager) monitorLoop() {
 		checkPluginCatalogDrift := false
 		checkPluginProbations := false
 		repairPluginDataplane := false
+		retryPluginReconcile := false
 		kernelAttachmentIssue := ""
 		kernelAttachmentRecovered := ""
 		attemptKernelAttachmentHeal := false
@@ -4719,6 +5018,11 @@ func (pm *ProcessManager) monitorLoop() {
 			checkPluginProbations = true
 			pm.pluginProbationCheckAt = now
 		}
+		if strings.TrimSpace(pm.pluginReconcileLastError) != "" &&
+			(pm.pluginReconcileNextRetryAt.IsZero() || !now.Before(pm.pluginReconcileNextRetryAt)) {
+			retryPluginReconcile = true
+			pm.pluginReconcileNextRetryAt = now.Add(nextDataplaneReconcileRetryDelay(pm.pluginReconcileRetryCount + 1))
+		}
 		checkKernelDegradedIdleRebuild, pm.kernelDegradedCheckAt = scheduleKernelDegradedIdleRebuildCheck(
 			pm.kernelDegradedCheckAt,
 			now,
@@ -4744,6 +5048,7 @@ func (pm *ProcessManager) monitorLoop() {
 				continue
 			}
 			refreshAdoptedWorkerProcess(wi)
+			markWorkerConfigACKTimeout(wi, now)
 			if shouldRecoverStaleWorkerControl(wi, now) {
 				staleControls = append(staleControls, staleControlTask{
 					kind:          workerKindRule,
@@ -4782,6 +5087,7 @@ func (pm *ProcessManager) monitorLoop() {
 				continue
 			}
 			refreshAdoptedWorkerProcess(wi)
+			markWorkerConfigACKTimeout(wi, now)
 			if shouldRecoverStaleWorkerControl(wi, now) {
 				staleControls = append(staleControls, staleControlTask{
 					kind:          workerKindRange,
@@ -4817,6 +5123,7 @@ func (pm *ProcessManager) monitorLoop() {
 		}
 		if pm.sharedProxy != nil {
 			refreshAdoptedWorkerProcess(pm.sharedProxy)
+			markWorkerConfigACKTimeout(pm.sharedProxy, now)
 			if shouldRecoverStaleWorkerControl(pm.sharedProxy, now) {
 				staleControls = append(staleControls, staleControlTask{
 					kind:          workerKindShared,
@@ -4999,6 +5306,13 @@ func (pm *ProcessManager) monitorLoop() {
 				log.Printf("plugin dataplane self-heal: reconciled unhealthy attachments")
 			}
 		}
+		if retryPluginReconcile && !repairPluginDataplane {
+			if _, err := pm.reconcilePluginsForRuntimeWithError(); err != nil {
+				log.Printf("plugin runtime retry failed: %v", err)
+			} else {
+				log.Printf("plugin runtime retry: desired state applied")
+			}
+		}
 		if checkManagedRuntimeDrift {
 			pm.detectManagedNetworkRuntimeDrift()
 		}
@@ -5079,7 +5393,7 @@ func (pm *ProcessManager) monitorLoop() {
 					pm.mu.Unlock()
 					if proxy != nil && proxy.conn != nil && len(enabledSites) > 0 {
 						log.Printf("retrying shared proxy config (failure_count=%d)", sharedProxyFailureCount)
-						pm.sendSitesConfig(proxy, enabledSites)
+						_ = pm.sendSitesConfig(proxy)
 					}
 				}
 				if proxyDead && hasEnabled {

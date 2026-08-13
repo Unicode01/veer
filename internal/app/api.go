@@ -171,16 +171,27 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		ready := pm.isReady()
+		ready, reconcile, plugins := pm.readinessReconcileSnapshot()
 		statusCode := http.StatusServiceUnavailable
 		status := "starting"
 		if ready {
 			statusCode = http.StatusOK
 			status = "ready"
+		} else if reconcile.Status == "error" || plugins.Status == "error" {
+			status = "error"
+		} else if reconcile.Status == "pending" {
+			status = "reconciling"
 		}
 		writeJSON(w, statusCode, map[string]interface{}{
 			"status": status,
 			"ready":  ready,
+			"dataplane": map[string]interface{}{
+				"status":              reconcile.Status,
+				"desired_generation":  reconcile.DesiredGeneration,
+				"applied_generation":  reconcile.AppliedGeneration,
+				"pending_generations": reconcile.PendingGenerations,
+			},
+			"plugins": map[string]string{"status": plugins.Status},
 		})
 	})
 	mux.HandleFunc("/metrics", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
@@ -2548,8 +2559,12 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 	kernelRuleIDs := make(map[int64]bool)
 	kernelRangeIDs := make(map[int64]bool)
 	kernelBinaryHash := ""
+	var dataplaneStatus DataplaneReconcileStatus
+	var pluginStatus PluginReconcileStatus
 	needsSharedSiteCount := false
 	pm.mu.Lock()
+	dataplaneStatus = pm.dataplaneReconcileStatusLocked()
+	pluginStatus = pm.pluginReconcileStatusLocked()
 	for id := range pm.kernelRules {
 		kernelRuleIDs[id] = true
 	}
@@ -2973,6 +2988,8 @@ func handleListWorkers(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *P
 		PageSize:   pageSize,
 		Total:      total,
 		BinaryHash: kernelBinaryHash,
+		Dataplane:  dataplaneStatus,
+		Plugins:    pluginStatus,
 		Workers:    out,
 	}
 	writeJSON(w, http.StatusOK, resp)

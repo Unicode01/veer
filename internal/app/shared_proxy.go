@@ -34,6 +34,7 @@ func runSharedProxy(sockPath string) {
 
 	var (
 		connMu         sync.Mutex
+		writeMu        sync.Mutex
 		ipcConn        net.Conn
 		pendingUpgrade int32
 	)
@@ -50,21 +51,26 @@ func runSharedProxy(sockPath string) {
 		domainTransparent: make(map[string]bool),
 	}
 
-	sendIPC := func(msg IPCMessage) {
+	sendIPC := func(msg IPCMessage) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
 		connMu.Lock()
 		c := ipcConn
 		connMu.Unlock()
 		if c == nil {
-			return
+			return net.ErrClosed
 		}
-		data, _ := json.Marshal(msg)
-		data = append(data, '\n')
-		c.Write(data)
+		if err := writeIPC(c, msg); err != nil {
+			_ = c.Close()
+			return err
+		}
+		return nil
 	}
 
-	sendStatus := func(status, errMsg string, failedSiteIDs []int64) {
-		sendIPC(IPCMessage{
+	sendStatus := func(generation uint64, status, errMsg string, failedSiteIDs []int64) {
+		_ = sendIPC(IPCMessage{
 			Type:          "status",
+			Generation:    generation,
 			Status:        status,
 			Error:         errMsg,
 			FailedSiteIDs: failedSiteIDs,
@@ -87,7 +93,7 @@ func runSharedProxy(sockPath string) {
 			})
 		}
 		sp.mu.RUnlock()
-		sendIPC(IPCMessage{Type: "site_stats", SiteStats: reports})
+		_ = sendIPC(IPCMessage{Type: "site_stats", SiteStats: reports})
 	}
 
 	go func() {
@@ -182,14 +188,10 @@ func runSharedProxy(sockPath string) {
 			continue
 		}
 
-		connMu.Lock()
-		ipcConn = conn
-		connMu.Unlock()
-
-		regMsg := IPCMessage{Type: "register_proxy", BinaryHash: myHash}
-		data, _ := json.Marshal(regMsg)
-		data = append(data, '\n')
-		conn.Write(data)
+		if err := registerIPCConnection(conn, IPCMessage{Type: "register_proxy", BinaryHash: myHash}, &connMu, &ipcConn); err != nil {
+			_ = conn.Close()
+			continue
+		}
 
 		scanner := bufio.NewScanner(conn)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -209,7 +211,7 @@ func runSharedProxy(sockPath string) {
 				}
 				if atomic.LoadInt32(&pendingUpgrade) != 0 {
 					log.Println("shared proxy: pending upgrade, ignoring config update")
-					sendStatus("draining", "", nil)
+					sendStatus(msg.Generation, "draining", "", nil)
 					continue
 				}
 				log.Printf("shared proxy: updating %d sites", len(msg.Sites))
@@ -219,11 +221,11 @@ func runSharedProxy(sockPath string) {
 					if result.activeListenerCount == 0 {
 						status = "error"
 					}
-					sendStatus(status, result.summary(), result.failedSiteIDs)
+					sendStatus(msg.Generation, status, result.summary(), result.failedSiteIDs)
 				} else if len(msg.Sites) == 0 {
-					sendStatus("idle", "", nil)
+					sendStatus(msg.Generation, "idle", "", nil)
 				} else {
-					sendStatus("running", "", nil)
+					sendStatus(msg.Generation, "running", "", nil)
 				}
 			case "stop":
 				log.Println("shared proxy: received stop")

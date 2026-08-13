@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -80,6 +81,45 @@ func TestBuildAPIHandlerReadyzReflectsProcessManagerState(t *testing.T) {
 	}
 	if resp.Status != "ready" || !resp.Ready {
 		t.Fatalf("/readyz after ready = %+v, want status=ready ready=true", resp)
+	}
+}
+
+func TestBuildAPIHandlerReadyzRedactsReconcileErrors(t *testing.T) {
+	db := openTestDB(t)
+	pm := &ProcessManager{
+		ready:                    true,
+		desiredGeneration:        2,
+		appliedGeneration:        1,
+		pluginReconcileLastError: "secret plugin path",
+		ruleWorkers: map[int]*WorkerInfo{
+			0: {errored: true, lastError: "secret dataplane path"},
+		},
+	}
+	handler := buildAPIHandler(&Config{WebBind: "127.0.0.1", WebPort: 8080, WebToken: "test-token"}, db, pm)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("secret")) || bytes.Contains(rec.Body.Bytes(), []byte("last_error")) {
+		t.Fatalf("/readyz leaked reconcile detail: %s", rec.Body.String())
+	}
+	var resp struct {
+		Status    string `json:"status"`
+		Dataplane struct {
+			Status string `json:"status"`
+		} `json:"dataplane"`
+		Plugins struct {
+			Status string `json:"status"`
+		} `json:"plugins"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode /readyz response: %v", err)
+	}
+	if resp.Status != "error" || resp.Dataplane.Status != "error" || resp.Plugins.Status != "error" {
+		t.Fatalf("/readyz response = %+v", resp)
 	}
 }
 

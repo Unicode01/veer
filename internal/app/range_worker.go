@@ -19,6 +19,7 @@ import (
 
 type rangeBinding struct {
 	pr       PortRange
+	degraded error
 	cancel   context.CancelFunc
 	closeSet *closerSet
 	done     chan struct{}
@@ -26,6 +27,11 @@ type rangeBinding struct {
 }
 
 func startRangeBinding(workerIndex int, pr PortRange, st *ruleStats) (*rangeBinding, error) {
+	binding, _, err := startRangeBindingWithDegradedState(workerIndex, pr, st)
+	return binding, err
+}
+
+func startRangeBindingWithDegradedState(workerIndex int, pr PortRange, st *ruleStats) (*rangeBinding, error, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	closeSet := &closerSet{}
 	bound, failed, wg, firstErr := startRangeForwarder(ctx, &pr, st, closeSet)
@@ -34,9 +40,9 @@ func startRangeBinding(workerIndex int, pr PortRange, st *ruleStats) (*rangeBind
 		closeSet.CloseAll()
 		wg.Wait()
 		if firstErr != nil {
-			return nil, fmt.Errorf("all %d port bindings failed: %w", failed, firstErr)
+			return nil, nil, fmt.Errorf("all %d port bindings failed: %w", failed, firstErr)
 		}
-		return nil, fmt.Errorf("all %d port bindings failed", failed)
+		return nil, nil, fmt.Errorf("all %d port bindings failed", failed)
 	}
 	if failed > 0 {
 		log.Printf("range worker[%d] range %d: %d/%d ports bound, %d failed", workerIndex, pr.ID, bound, bound+failed, failed)
@@ -52,7 +58,8 @@ func startRangeBinding(workerIndex int, pr PortRange, st *ruleStats) (*rangeBind
 		defer close(binding.done)
 		wg.Wait()
 	}()
-	return binding, nil
+	binding.degraded = firstErr
+	return binding, firstErr, nil
 }
 
 func (b *rangeBinding) Stop() {
@@ -123,6 +130,7 @@ func runRangeWorker(workerIndex int, sockPath string) {
 
 	var (
 		connMu         sync.Mutex
+		writeMu        sync.Mutex
 		stateMu        sync.Mutex
 		ipcConn        net.Conn
 		currentStats   map[int64]*ruleStats
@@ -131,24 +139,28 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		pendingUpgrade int32
 	)
 
-	sendIPC := func(msg IPCMessage) {
+	sendIPC := func(msg IPCMessage) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
 		connMu.Lock()
 		c := ipcConn
 		connMu.Unlock()
 		if c == nil {
-			return
+			return net.ErrClosed
 		}
-		data, _ := json.Marshal(msg)
-		data = append(data, '\n')
-		c.Write(data)
+		if err := writeIPC(c, msg); err != nil {
+			_ = c.Close()
+			return err
+		}
+		return nil
 	}
 
-	sendStatus := func(status, errMsg string, failedIDs []int64, rangeErrors map[int64]string) {
-		sendIPC(IPCMessage{Type: "status", Status: status, Error: errMsg, FailedRangeIDs: failedIDs, RangeErrors: rangeErrors})
+	sendStatus := func(generation uint64, status, errMsg string, failedIDs []int64, rangeErrors map[int64]string) {
+		_ = sendIPC(IPCMessage{Type: "status", Generation: generation, Status: status, Error: errMsg, FailedRangeIDs: failedIDs, RangeErrors: rangeErrors})
 	}
 
 	sendStats := func(stats []RangeStatsReport) {
-		sendIPC(IPCMessage{Type: "range_stats", RangeStats: stats})
+		_ = sendIPC(IPCMessage{Type: "range_stats", RangeStats: stats})
 	}
 
 	stopBindings := func(clearStats bool) {
@@ -175,7 +187,7 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		stopBindings(true)
 	}()
 
-	applyRanges := func(ranges []PortRange) {
+	applyRanges := func(generation uint64, ranges []PortRange) {
 		ids := make([]int64, 0, len(ranges))
 		for _, pr := range ranges {
 			ids = append(ids, pr.ID)
@@ -188,6 +200,7 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		stateMu.Unlock()
 
 		keepIDs, startList, stopIDs, nextRanges := diffRangeConfigs(prevRanges, ranges)
+		startList, stopIDs = retryUnavailableRangeBindings(keepIDs, startList, stopIDs, ranges, prevBindings)
 		sm := reuseLiveRuleStats(prevStats, ids)
 		nextBindings := make(map[int64]*rangeBinding, len(ranges))
 		for id := range keepIDs {
@@ -204,13 +217,17 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		nextFailed := make(map[int64]struct{})
 		rangeErrors := make(map[int64]string)
 		for _, pr := range startList {
-			binding, err := startRangeBinding(workerIndex, pr, sm[pr.ID])
+			binding, degradedErr, err := startRangeBindingWithDegradedState(workerIndex, pr, sm[pr.ID])
 			if err != nil {
 				nextFailed[pr.ID] = struct{}{}
 				rangeErrors[pr.ID] = err.Error()
 				continue
 			}
 			nextBindings[pr.ID] = binding
+			if degradedErr != nil {
+				nextFailed[pr.ID] = struct{}{}
+				rangeErrors[pr.ID] = degradedErr.Error()
+			}
 		}
 
 		stateMu.Lock()
@@ -220,16 +237,16 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		stateMu.Unlock()
 
 		if len(ranges) == 0 {
-			sendStatus("idle", "", nil, nil)
+			sendStatus(generation, "idle", "", nil, nil)
 			return
 		}
 
 		failedIDs := sortedInt64SetKeys(nextFailed)
 		if len(nextBindings) == 0 {
-			sendStatus("error", fmt.Sprintf("all %d port range bindings failed", len(ranges)), failedIDs, rangeErrors)
+			sendStatus(generation, "error", fmt.Sprintf("all %d port range bindings failed", len(ranges)), failedIDs, rangeErrors)
 			return
 		}
-		sendStatus("running", "", failedIDs, rangeErrors)
+		sendStatus(generation, "running", "", failedIDs, rangeErrors)
 		if reports := buildRangeStatsReports(snapshotRuleStatsMap(sm)); len(reports) > 0 {
 			sendStats(reports)
 		}
@@ -322,14 +339,10 @@ func runRangeWorker(workerIndex int, sockPath string) {
 			continue
 		}
 
-		connMu.Lock()
-		ipcConn = conn
-		connMu.Unlock()
-
-		regMsg := IPCMessage{Type: "register_range", WorkerIndex: workerIndex, BinaryHash: myHash}
-		data, _ := json.Marshal(regMsg)
-		data = append(data, '\n')
-		conn.Write(data)
+		if err := registerIPCConnection(conn, IPCMessage{Type: "register_range", WorkerIndex: workerIndex, BinaryHash: myHash}, &connMu, &ipcConn); err != nil {
+			_ = conn.Close()
+			continue
+		}
 
 		scanner := bufio.NewScanner(conn)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -352,15 +365,15 @@ func runRangeWorker(workerIndex int, sockPath string) {
 					stateMu.Lock()
 					activeIDs := sortedRuleActiveIDs(currentStats)
 					stateMu.Unlock()
-					sendIPC(IPCMessage{Type: "status", Status: "draining", ActiveRangeIDs: activeIDs})
+					_ = sendIPC(IPCMessage{Type: "status", Generation: msg.Generation, Status: "draining", ActiveRangeIDs: activeIDs})
 					continue
 				}
 				if len(msg.PortRanges) == 0 {
 					stopBindings(true)
-					sendStatus("idle", "", nil, nil)
+					sendStatus(msg.Generation, "idle", "", nil, nil)
 					continue
 				}
-				applyRanges(msg.PortRanges)
+				applyRanges(msg.Generation, msg.PortRanges)
 			case "stop":
 				stopBindings(true)
 				return
@@ -383,6 +396,24 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func retryUnavailableRangeBindings(keepIDs map[int64]struct{}, startList []PortRange, stopIDs []int64, desired []PortRange, bindings map[int64]*rangeBinding) ([]PortRange, []int64) {
+	for _, pr := range desired {
+		if _, keep := keepIDs[pr.ID]; !keep {
+			continue
+		}
+		binding := bindings[pr.ID]
+		if binding != nil && binding.degraded == nil {
+			continue
+		}
+		delete(keepIDs, pr.ID)
+		startList = append(startList, pr)
+		if binding != nil {
+			stopIDs = append(stopIDs, pr.ID)
+		}
+	}
+	return startList, stopIDs
 }
 
 // startRangeForwarder binds all ports in the range, counts successes/failures,

@@ -154,7 +154,15 @@ func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, d
 			return
 		}
 		if pm != nil {
-			pm.reconcilePluginsForRuntime()
+			if _, err := pm.reconcilePluginsForRuntimeWithError(); err != nil {
+				recordPluginAudit(db, pluginID, "plugin.state", "api", "error", map[string]any{"enabled": *req.Enabled, "error": err.Error()})
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+					"error":  err.Error(),
+					"state":  pluginStateResponseForID(cfg, db, pm, pluginID),
+					"stored": true,
+				})
+				return
+			}
 			pm.redistributeWorkers()
 		}
 		recordPluginAudit(db, pluginID, "plugin.state", "api", "success", map[string]any{"enabled": *req.Enabled})
