@@ -129,6 +129,61 @@ func TestProcessManagerSkipsRuntimeReplayAfterPluginControlFailure(t *testing.T)
 	}
 }
 
+func TestPluginReconcileStatusClearsAfterSuccessfulRetry(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPlugin(t, dir, "retry_plugin", `{
+  "api_version": "v1",
+  "id": "retry_plugin",
+  "name": "Retry Plugin",
+  "version": "0.1.0",
+  "kind": "pipeline"
+}`)
+	runtime := &pluginRetryRuntimeTest{fail: true}
+	pm := &ProcessManager{
+		cfg:           pluginsEnabledTestConfig(&Config{PluginsDir: dir}),
+		pluginRuntime: runtime,
+	}
+
+	if _, err := pm.reconcilePluginsForRuntimeWithError(); err == nil {
+		t.Fatal("initial reconcile error = nil, want plugin failure")
+	}
+	failed := pm.pluginReconcileStatus()
+	if failed.Status != "error" || failed.RetryCount != 1 || !strings.Contains(failed.LastError, "temporary failure") {
+		t.Fatalf("failed plugin reconcile status = %+v", failed)
+	}
+
+	runtime.fail = false
+	if _, err := pm.reconcilePluginsForRuntimeWithError(); err != nil {
+		t.Fatalf("retry reconcile error = %v", err)
+	}
+	recovered := pm.pluginReconcileStatus()
+	if recovered.Status != "applied" || recovered.RetryCount != 0 || recovered.LastError != "" || recovered.LastAppliedAt == "" {
+		t.Fatalf("recovered plugin reconcile status = %+v", recovered)
+	}
+}
+
+type pluginRetryRuntimeTest struct {
+	fail bool
+}
+
+func (rt *pluginRetryRuntimeTest) Reconcile(catalog PluginCatalog) pluginRuntimeSnapshot {
+	states := make(map[string]PluginRuntimeState)
+	for _, plugin := range catalog.Plugins {
+		if plugin.Builtin || plugin.Status != pluginStatusActive {
+			continue
+		}
+		if rt.fail {
+			states[plugin.ID] = pluginRuntimeErrorState("temporary failure")
+		} else {
+			states[plugin.ID] = externalPluginRuntimeState()
+		}
+	}
+	return pluginRuntimeSnapshot{Plugins: states}
+}
+
+func (rt *pluginRetryRuntimeTest) Snapshot() pluginRuntimeSnapshot { return pluginRuntimeSnapshot{} }
+func (rt *pluginRetryRuntimeTest) Close() error                    { return nil }
+
 type pluginPostReplayFilterRuntimeTest struct {
 	emptySnapshotPluginControlRuntimeTest
 	controlSnapshot pluginRuntimeSnapshot

@@ -1,6 +1,11 @@
 package app
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"net"
+	"testing"
+)
 
 func TestDiffRuleConfigsKeepsOnlyDataplaneEquivalentRules(t *testing.T) {
 	current := map[int64]Rule{
@@ -87,6 +92,31 @@ func TestDiffRuleConfigsKeepsOnlyDataplaneEquivalentRules(t *testing.T) {
 	}
 	if len(desiredMap) != 3 {
 		t.Fatalf("diffRuleConfigs() desiredMap len = %d, want 3", len(desiredMap))
+	}
+}
+
+func TestRetryMissingRuleBindingsRestartsUnboundUnchangedRule(t *testing.T) {
+	rule := Rule{ID: 7, InIP: "127.0.0.1", InPort: 10007, OutIP: "127.0.0.1", OutPort: 22, Protocol: "tcp", Enabled: true}
+	keep := map[int64]struct{}{rule.ID: {}}
+	start, stop := retryUnavailableRuleBindings(keep, nil, nil, []Rule{rule}, map[int64]*ruleBinding{})
+	if len(start) != 1 || start[0].ID != rule.ID {
+		t.Fatalf("retry start rules = %+v, want rule %d", start, rule.ID)
+	}
+	if len(stop) != 0 {
+		t.Fatalf("retry stop rules = %+v, want none without a live binding", stop)
+	}
+	if _, ok := keep[rule.ID]; ok {
+		t.Fatalf("rule %d remained in keep set without a live binding", rule.ID)
+	}
+}
+
+func TestRetryDegradedRuleBindingRestartsWholeBinding(t *testing.T) {
+	rule := Rule{ID: 8, Protocol: "tcp+udp"}
+	keep := map[int64]struct{}{rule.ID: {}}
+	bindings := map[int64]*ruleBinding{rule.ID: {degraded: errors.New("udp unavailable")}}
+	start, stop := retryUnavailableRuleBindings(keep, nil, nil, []Rule{rule}, bindings)
+	if len(start) != 1 || start[0].ID != rule.ID || len(stop) != 1 || stop[0] != rule.ID {
+		t.Fatalf("degraded rule retry = start:%+v stop:%+v, want rule %d restarted", start, stop, rule.ID)
 	}
 }
 
@@ -178,4 +208,93 @@ func TestDiffRangeConfigsKeepsOnlyDataplaneEquivalentRanges(t *testing.T) {
 	if len(desiredMap) != 3 {
 		t.Fatalf("diffRangeConfigs() desiredMap len = %d, want 3", len(desiredMap))
 	}
+}
+
+func TestRetryMissingRangeBindingsRestartsUnboundUnchangedRange(t *testing.T) {
+	pr := PortRange{ID: 9, InIP: "127.0.0.1", StartPort: 10009, EndPort: 10010, OutIP: "127.0.0.1", OutStartPort: 22, Protocol: "tcp", Enabled: true}
+	keep := map[int64]struct{}{pr.ID: {}}
+	start, stop := retryUnavailableRangeBindings(keep, nil, nil, []PortRange{pr}, map[int64]*rangeBinding{})
+	if len(start) != 1 || start[0].ID != pr.ID {
+		t.Fatalf("retry start ranges = %+v, want range %d", start, pr.ID)
+	}
+	if len(stop) != 0 {
+		t.Fatalf("retry stop ranges = %+v, want none without a live binding", stop)
+	}
+	if _, ok := keep[pr.ID]; ok {
+		t.Fatalf("range %d remained in keep set without a live binding", pr.ID)
+	}
+}
+
+func TestRetryDegradedRangeBindingRestartsWholeBinding(t *testing.T) {
+	pr := PortRange{ID: 10, Protocol: "tcp"}
+	keep := map[int64]struct{}{pr.ID: {}}
+	bindings := map[int64]*rangeBinding{pr.ID: {degraded: errors.New("port unavailable")}}
+	start, stop := retryUnavailableRangeBindings(keep, nil, nil, []PortRange{pr}, bindings)
+	if len(start) != 1 || start[0].ID != pr.ID || len(stop) != 1 || stop[0] != pr.ID {
+		t.Fatalf("degraded range retry = start:%+v stop:%+v, want range %d restarted", start, stop, pr.ID)
+	}
+}
+
+func TestRuleBindingReportsDegradedTCPUDPListener(t *testing.T) {
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Skipf("listen udp4 on 127.0.0.1 unavailable: %v", err)
+	}
+	defer udp.Close()
+	port := udp.LocalAddr().(*net.UDPAddr).Port
+
+	binding, degradedErr, err := startRuleBindingWithDegradedState(0, Rule{
+		ID: 11, InIP: "127.0.0.1", InPort: port, OutIP: "127.0.0.1", OutPort: 9, Protocol: "tcp+udp",
+	}, &ruleStats{})
+	if err != nil {
+		t.Fatalf("startRuleBindingWithDegradedState() error = %v", err)
+	}
+	t.Cleanup(binding.Stop)
+	if degradedErr == nil {
+		t.Fatal("degraded error = nil, want occupied UDP listener failure")
+	}
+}
+
+func TestRangeBindingReportsDegradedPortListener(t *testing.T) {
+	occupied, startPort, endPort := reserveAdjacentTCPPortsForTest(t)
+	defer occupied.Close()
+
+	binding, degradedErr, err := startRangeBindingWithDegradedState(0, PortRange{
+		ID: 12, InIP: "127.0.0.1", StartPort: startPort, EndPort: endPort, OutIP: "127.0.0.1", OutStartPort: 9, Protocol: "tcp",
+	}, &ruleStats{})
+	if err != nil {
+		t.Fatalf("startRangeBindingWithDegradedState() error = %v", err)
+	}
+	t.Cleanup(binding.Stop)
+	if degradedErr == nil {
+		t.Fatal("degraded error = nil, want occupied range port failure")
+	}
+}
+
+func reserveAdjacentTCPPortsForTest(t *testing.T) (net.Listener, int, int) {
+	t.Helper()
+	for attempt := 0; attempt < 32; attempt++ {
+		occupied, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Skipf("listen tcp4 on 127.0.0.1 unavailable: %v", err)
+		}
+		port := occupied.Addr().(*net.TCPAddr).Port
+		for _, adjacent := range []int{port - 1, port + 1} {
+			if adjacent <= 0 || adjacent > 65535 {
+				continue
+			}
+			probe, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", fmt.Sprint(adjacent)))
+			if err != nil {
+				continue
+			}
+			_ = probe.Close()
+			if adjacent < port {
+				return occupied, adjacent, port
+			}
+			return occupied, port, adjacent
+		}
+		_ = occupied.Close()
+	}
+	t.Skip("could not reserve adjacent TCP ports for range test")
+	return nil, 0, 0
 }

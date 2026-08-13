@@ -232,6 +232,7 @@ func proxyTCPBidirectional(dst net.Conn, src net.Conn, srcReader io.Reader, inCo
 type ruleBinding struct {
 	rule     Rule
 	stats    *ruleStats
+	degraded error
 	cancel   context.CancelFunc
 	tcpLn    net.Listener
 	udpPC    *net.UDPConn
@@ -240,6 +241,11 @@ type ruleBinding struct {
 }
 
 func startRuleBinding(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, error) {
+	binding, _, err := startRuleBindingWithDegradedState(workerIndex, rule, st)
+	return binding, err
+}
+
+func startRuleBindingWithDegradedState(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, error, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	binding := &ruleBinding{
 		rule:   rule,
@@ -301,16 +307,17 @@ func startRuleBinding(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, 
 		}
 		close(binding.done)
 		if firstErr != nil {
-			return nil, fmt.Errorf("all bindings failed: %w", firstErr)
+			return nil, nil, fmt.Errorf("all bindings failed: %w", firstErr)
 		}
-		return nil, fmt.Errorf("all bindings failed")
+		return nil, nil, fmt.Errorf("all bindings failed")
 	}
 
 	go func() {
 		defer close(binding.done)
 		wg.Wait()
 	}()
-	return binding, nil
+	binding.degraded = firstErr
+	return binding, firstErr, nil
 }
 
 func (b *ruleBinding) Stop() {
@@ -437,6 +444,7 @@ func runWorker(workerIndex int, sockPath string) {
 
 	var (
 		connMu         sync.Mutex
+		writeMu        sync.Mutex
 		stateMu        sync.Mutex
 		ipcConn        net.Conn
 		currentStats   map[int64]*ruleStats
@@ -445,24 +453,28 @@ func runWorker(workerIndex int, sockPath string) {
 		pendingUpgrade int32 // atomic flag
 	)
 
-	sendIPC := func(msg IPCMessage) {
+	sendIPC := func(msg IPCMessage) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
 		connMu.Lock()
 		c := ipcConn
 		connMu.Unlock()
 		if c == nil {
-			return
+			return net.ErrClosed
 		}
-		data, _ := json.Marshal(msg)
-		data = append(data, '\n')
-		c.Write(data)
+		if err := writeIPC(c, msg); err != nil {
+			_ = c.Close()
+			return err
+		}
+		return nil
 	}
 
-	sendStatus := func(status, errMsg string, failedIDs []int64, ruleErrors map[int64]string) {
-		sendIPC(IPCMessage{Type: "status", Status: status, Error: errMsg, FailedRuleIDs: failedIDs, RuleErrors: ruleErrors})
+	sendStatus := func(generation uint64, status, errMsg string, failedIDs []int64, ruleErrors map[int64]string) {
+		_ = sendIPC(IPCMessage{Type: "status", Generation: generation, Status: status, Error: errMsg, FailedRuleIDs: failedIDs, RuleErrors: ruleErrors})
 	}
 
 	sendStats := func(stats []RuleStatsReport) {
-		sendIPC(IPCMessage{Type: "stats", Stats: stats})
+		_ = sendIPC(IPCMessage{Type: "stats", Stats: stats})
 	}
 
 	stopBindings := func(clearStats bool) {
@@ -489,7 +501,7 @@ func runWorker(workerIndex int, sockPath string) {
 		stopBindings(true)
 	}()
 
-	applyRules := func(rules []Rule) {
+	applyRules := func(generation uint64, rules []Rule) {
 		ids := make([]int64, 0, len(rules))
 		for _, r := range rules {
 			ids = append(ids, r.ID)
@@ -502,6 +514,7 @@ func runWorker(workerIndex int, sockPath string) {
 		stateMu.Unlock()
 
 		keepIDs, startList, stopIDs, nextRules := diffRuleConfigs(prevRules, rules)
+		startList, stopIDs = retryUnavailableRuleBindings(keepIDs, startList, stopIDs, rules, prevBindings)
 		sm := reuseLiveRuleStats(prevStats, ids)
 		nextBindings := make(map[int64]*ruleBinding, len(rules))
 		for id := range keepIDs {
@@ -518,13 +531,17 @@ func runWorker(workerIndex int, sockPath string) {
 		nextFailed := make(map[int64]struct{})
 		ruleErrors := make(map[int64]string)
 		for _, rule := range startList {
-			binding, err := startRuleBinding(workerIndex, rule, sm[rule.ID])
+			binding, degradedErr, err := startRuleBindingWithDegradedState(workerIndex, rule, sm[rule.ID])
 			if err != nil {
 				nextFailed[rule.ID] = struct{}{}
 				ruleErrors[rule.ID] = err.Error()
 				continue
 			}
 			nextBindings[rule.ID] = binding
+			if degradedErr != nil {
+				nextFailed[rule.ID] = struct{}{}
+				ruleErrors[rule.ID] = degradedErr.Error()
+			}
 		}
 
 		stateMu.Lock()
@@ -534,16 +551,16 @@ func runWorker(workerIndex int, sockPath string) {
 		stateMu.Unlock()
 
 		if len(rules) == 0 {
-			sendStatus("idle", "", nil, nil)
+			sendStatus(generation, "idle", "", nil, nil)
 			return
 		}
 
 		failedIDs := sortedInt64SetKeys(nextFailed)
 		if len(nextBindings) == 0 {
-			sendStatus("error", fmt.Sprintf("all %d rule bindings failed", len(rules)), failedIDs, ruleErrors)
+			sendStatus(generation, "error", fmt.Sprintf("all %d rule bindings failed", len(rules)), failedIDs, ruleErrors)
 			return
 		}
-		sendStatus("running", "", failedIDs, ruleErrors)
+		sendStatus(generation, "running", "", failedIDs, ruleErrors)
 		if reports := buildRuleStatsReports(snapshotRuleStatsMap(sm)); len(reports) > 0 {
 			sendStats(reports)
 		}
@@ -636,14 +653,10 @@ func runWorker(workerIndex int, sockPath string) {
 			continue
 		}
 
-		connMu.Lock()
-		ipcConn = conn
-		connMu.Unlock()
-
-		regMsg := IPCMessage{Type: "register", WorkerIndex: workerIndex, BinaryHash: myHash}
-		data, _ := json.Marshal(regMsg)
-		data = append(data, '\n')
-		conn.Write(data)
+		if err := registerIPCConnection(conn, IPCMessage{Type: "register", WorkerIndex: workerIndex, BinaryHash: myHash}, &connMu, &ipcConn); err != nil {
+			_ = conn.Close()
+			continue
+		}
 
 		scanner := bufio.NewScanner(conn)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -666,15 +679,15 @@ func runWorker(workerIndex int, sockPath string) {
 					stateMu.Lock()
 					activeIDs := sortedRuleActiveIDs(currentStats)
 					stateMu.Unlock()
-					sendIPC(IPCMessage{Type: "status", Status: "draining", ActiveRuleIDs: activeIDs})
+					_ = sendIPC(IPCMessage{Type: "status", Generation: msg.Generation, Status: "draining", ActiveRuleIDs: activeIDs})
 					continue
 				}
 				if len(msg.Rules) == 0 {
 					stopBindings(true)
-					sendStatus("idle", "", nil, nil)
+					sendStatus(msg.Generation, "idle", "", nil, nil)
 					continue
 				}
-				applyRules(msg.Rules)
+				applyRules(msg.Generation, msg.Rules)
 			case "stop":
 				stopBindings(true)
 				return
@@ -697,6 +710,24 @@ func runWorker(workerIndex int, sockPath string) {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func retryUnavailableRuleBindings(keepIDs map[int64]struct{}, startList []Rule, stopIDs []int64, desired []Rule, bindings map[int64]*ruleBinding) ([]Rule, []int64) {
+	for _, rule := range desired {
+		if _, keep := keepIDs[rule.ID]; !keep {
+			continue
+		}
+		binding := bindings[rule.ID]
+		if binding != nil && binding.degraded == nil {
+			continue
+		}
+		delete(keepIDs, rule.ID)
+		startList = append(startList, rule)
+		if binding != nil {
+			stopIDs = append(stopIDs, rule.ID)
+		}
+	}
+	return startList, stopIDs
 }
 
 func listenTCP(ctx context.Context, rule *Rule) (net.Listener, error) {

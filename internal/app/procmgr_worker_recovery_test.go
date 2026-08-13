@@ -270,6 +270,7 @@ func TestHandleSharedProxyConnDegradedStatusSchedulesRetry(t *testing.T) {
 		binaryHash: "manager-hash",
 		sharedProxy: &WorkerInfo{
 			kind:        workerKindShared,
+			sites:       []Site{{ID: siteID}},
 			failedSites: make(map[int64]bool),
 		},
 	}

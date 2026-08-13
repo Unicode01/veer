@@ -4,8 +4,43 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestHandleListWorkersIncludesDetailedReconcileStatus(t *testing.T) {
+	db := openTestDB(t)
+	pm := &ProcessManager{
+		binaryHash:                "deadbeefcafebabe",
+		ruleWorkers:               map[int]*WorkerInfo{},
+		rangeWorkers:              map[int]*WorkerInfo{},
+		kernelRules:               map[int64]bool{},
+		kernelRanges:              map[int64]bool{},
+		desiredGeneration:         4,
+		appliedGeneration:         3,
+		reconcileLastError:        "dataplane apply failed",
+		reconcileRetryCount:       2,
+		pluginReconcileLastError:  "plugin apply failed",
+		pluginReconcileRetryCount: 3,
+	}
+
+	w := httptest.NewRecorder()
+	handleListWorkers(w, httptest.NewRequest("GET", "/api/workers", nil), db, pm)
+	if w.Code != 200 {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	var resp WorkerListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Dataplane.Status != "error" || resp.Dataplane.DesiredGeneration != 4 || resp.Dataplane.AppliedGeneration != 3 ||
+		resp.Dataplane.RetryCount != 2 || !strings.Contains(resp.Dataplane.LastError, "dataplane apply failed") {
+		t.Fatalf("dataplane reconcile status = %+v", resp.Dataplane)
+	}
+	if resp.Plugins.Status != "error" || resp.Plugins.RetryCount != 3 || !strings.Contains(resp.Plugins.LastError, "plugin apply failed") {
+		t.Fatalf("plugin reconcile status = %+v", resp.Plugins)
+	}
+}
 
 func TestHandleListWorkersIncludesEgressNATWorker(t *testing.T) {
 	db := openTestDB(t)

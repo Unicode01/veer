@@ -65,6 +65,7 @@ type PortRange struct {
 
 type IPCMessage struct {
 	Type           string             `json:"type"`
+	Generation     uint64             `json:"generation,omitempty"`
 	RuleID         int64              `json:"rule_id,omitempty"`
 	WorkerIndex    int                `json:"worker_index,omitempty"`
 	Rule           *Rule              `json:"rule,omitempty"`
@@ -284,11 +285,13 @@ type WorkerView struct {
 }
 
 type WorkerListResponse struct {
-	Page       int          `json:"page"`
-	PageSize   int          `json:"page_size"`
-	Total      int          `json:"total"`
-	BinaryHash string       `json:"binary_hash"`
-	Workers    []WorkerView `json:"workers"`
+	Page       int                      `json:"page"`
+	PageSize   int                      `json:"page_size"`
+	Total      int                      `json:"total"`
+	BinaryHash string                   `json:"binary_hash"`
+	Dataplane  DataplaneReconcileStatus `json:"dataplane"`
+	Plugins    PluginReconcileStatus    `json:"plugins"`
+	Workers    []WorkerView             `json:"workers"`
 }
 
 type RuleStatsListItem struct {
