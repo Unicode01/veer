@@ -48,7 +48,7 @@ usage() {
   VEER_REPO_ARCHIVE_URL_CN
                       CN 模式优先尝试的源码归档地址，默认空
   VEER_REF             拉取的 Git ref，默认 main
-  VEER_GO_VERSION      安装的 Go 版本，默认 1.25.12
+  VEER_GO_VERSION      安装的 Go 版本，默认 1.26.6
   VEER_GO_SHA256       自定义 Go 版本/构建的官方 tar.gz SHA-256
   VEER_GO_REGION       Go 下载区域策略: auto/cn/global，默认 auto
   VEER_GO_BASE_URL     显式覆盖 Go 下载源前缀，例如 https://mirror.example.com/golang
@@ -105,7 +105,7 @@ FORWARD_REPO_URL_CN="${VEER_REPO_URL_CN:-${FORWARD_REPO_URL_CN:-}}"
 FORWARD_REPO_ARCHIVE_URL="${VEER_REPO_ARCHIVE_URL:-${FORWARD_REPO_ARCHIVE_URL:-}}"
 FORWARD_REPO_ARCHIVE_URL_CN="${VEER_REPO_ARCHIVE_URL_CN:-${FORWARD_REPO_ARCHIVE_URL_CN:-}}"
 FORWARD_REF="${VEER_REF:-${FORWARD_REF:-main}}"
-FORWARD_GO_VERSION="${VEER_GO_VERSION:-${FORWARD_GO_VERSION:-1.25.12}}"
+FORWARD_GO_VERSION="${VEER_GO_VERSION:-${FORWARD_GO_VERSION:-1.26.6}}"
 FORWARD_GO_SHA256="${VEER_GO_SHA256:-${FORWARD_GO_SHA256:-}}"
 FORWARD_GO_REGION="${VEER_GO_REGION:-${FORWARD_GO_REGION:-auto}}"
 FORWARD_GO_BASE_URL="${VEER_GO_BASE_URL:-${FORWARD_GO_BASE_URL:-}}"
@@ -1031,11 +1031,11 @@ expected_go_tarball_sha256() {
     fi
 
     case "${FORWARD_GO_VERSION}/${GO_TARBALL_ARCH}" in
-        1.25.12/amd64)
-            printf '%s\n' '234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1'
+        1.26.6/amd64)
+            printf '%s\n' '708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89'
             ;;
-        1.25.12/arm64)
-            printf '%s\n' '8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2'
+        1.26.6/arm64)
+            printf '%s\n' 'd0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e'
             ;;
         *)
             return 1

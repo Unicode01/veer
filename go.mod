@@ -1,6 +1,6 @@
 module github.com/Unicode01/veer
 
-go 1.25.12
+go 1.26.6
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
