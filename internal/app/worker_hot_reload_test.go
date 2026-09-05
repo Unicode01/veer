@@ -235,10 +235,7 @@ func TestRetryRangeBindingWithoutGroupRestarts(t *testing.T) {
 }
 
 func TestRuleBindingReportsDegradedTCPUDPListener(t *testing.T) {
-	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	if err != nil {
-		t.Skipf("listen udp4 on 127.0.0.1 unavailable: %v", err)
-	}
+	udp := reserveUDPWithFreeTCPForTest(t)
 	defer udp.Close()
 	port := udp.LocalAddr().(*net.UDPAddr).Port
 

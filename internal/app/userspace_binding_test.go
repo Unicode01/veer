@@ -55,10 +55,7 @@ func TestUserspaceRepairPreservesHealthyProtocolAndTCPConnection(t *testing.T) {
 		io.Copy(conn, conn)
 	}()
 	backendPort := backend.Addr().(*net.TCPAddr).Port
-	occupied, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	occupied := reserveUDPWithFreeTCPForTest(t)
 	defer occupied.Close()
 	port := occupied.LocalAddr().(*net.UDPAddr).Port
 	rule := Rule{ID: 1, InIP: "127.0.0.1", InPort: port, OutIP: "127.0.0.1", OutPort: backendPort, Protocol: "tcp+udp"}
@@ -106,6 +103,24 @@ func TestUserspaceRepairPreservesHealthyProtocolAndTCPConnection(t *testing.T) {
 		t.Fatal("runtime UDP failure replaced healthy TCP")
 	}
 	echo()
+}
+
+func reserveUDPWithFreeTCPForTest(t *testing.T) *net.UDPConn {
+	t.Helper()
+	for attempt := 0; attempt < 100; attempt++ {
+		tcp, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := tcp.Addr().(*net.TCPAddr).Port
+		udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+		tcp.Close()
+		if err == nil {
+			return udp
+		}
+	}
+	t.Fatal("could not reserve a UDP port with the same TCP port available")
+	return nil
 }
 
 func TestUserspaceRangeRepairsOnlyDeadEndpoint(t *testing.T) {
