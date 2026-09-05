@@ -1,7 +1,6 @@
 package app
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -110,10 +109,10 @@ func TestRetryMissingRuleBindingsRestartsUnboundUnchangedRule(t *testing.T) {
 	}
 }
 
-func TestRetryDegradedRuleBindingRestartsWholeBinding(t *testing.T) {
+func TestRetryRuleBindingWithoutGroupRestarts(t *testing.T) {
 	rule := Rule{ID: 8, Protocol: "tcp+udp"}
 	keep := map[int64]struct{}{rule.ID: {}}
-	bindings := map[int64]*ruleBinding{rule.ID: {degraded: errors.New("udp unavailable")}}
+	bindings := map[int64]*ruleBinding{rule.ID: {}}
 	start, stop := retryUnavailableRuleBindings(keep, nil, nil, []Rule{rule}, bindings)
 	if len(start) != 1 || start[0].ID != rule.ID || len(stop) != 1 || stop[0] != rule.ID {
 		t.Fatalf("degraded rule retry = start:%+v stop:%+v, want rule %d restarted", start, stop, rule.ID)
@@ -225,10 +224,10 @@ func TestRetryMissingRangeBindingsRestartsUnboundUnchangedRange(t *testing.T) {
 	}
 }
 
-func TestRetryDegradedRangeBindingRestartsWholeBinding(t *testing.T) {
+func TestRetryRangeBindingWithoutGroupRestarts(t *testing.T) {
 	pr := PortRange{ID: 10, Protocol: "tcp"}
 	keep := map[int64]struct{}{pr.ID: {}}
-	bindings := map[int64]*rangeBinding{pr.ID: {degraded: errors.New("port unavailable")}}
+	bindings := map[int64]*rangeBinding{pr.ID: {}}
 	start, stop := retryUnavailableRangeBindings(keep, nil, nil, []PortRange{pr}, bindings)
 	if len(start) != 1 || start[0].ID != pr.ID || len(stop) != 1 || stop[0] != pr.ID {
 		t.Fatalf("degraded range retry = start:%+v stop:%+v, want range %d restarted", start, stop, pr.ID)

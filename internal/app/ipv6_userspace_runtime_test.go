@@ -231,7 +231,7 @@ func TestRuleBindingReportsListenError(t *testing.T) {
 		t.Fatal("startRuleBinding() error = nil, want listen failure")
 	}
 	text := err.Error()
-	if !strings.Contains(text, "all bindings failed: tcp listen 127.0.0.1:") || !strings.Contains(text, "bind:") {
+	if !strings.Contains(text, "all bindings failed:") || !strings.Contains(text, "tcp listen 127.0.0.1:") || !strings.Contains(text, "bind:") {
 		t.Fatalf("startRuleBinding() error = %q, want concrete tcp listen bind error", text)
 	}
 }

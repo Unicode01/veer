@@ -270,8 +270,8 @@ func detectSiteDomainConflicts(states []projectedSiteState) []ruleValidationIssu
 		if !state.Site.Enabled {
 			continue
 		}
-		domain := strings.ToLower(strings.TrimSpace(state.Site.Domain))
-		if domain == "" {
+		domain, err := normalizeSharedSiteDomain(state.Site.Domain)
+		if err != nil {
 			continue
 		}
 		if state.Site.BackendHTTP > 0 {
@@ -470,7 +470,7 @@ func prepareSiteUpdate(db sqlRuleStore, raw Site) (Site, []ruleValidationIssue, 
 	return site, detectProjectedConflicts(projectExistingRuleStates(rules), siteStates, projectExistingRangeStates(ranges)), nil
 }
 
-func prepareSiteToggle(db sqlRuleStore, id int64) (Site, []ruleValidationIssue, error) {
+func prepareSiteEnabledState(db sqlRuleStore, id int64, enabled *bool) (Site, []ruleValidationIssue, error) {
 	rules, sites, ranges, err := loadEnabledValidationEntities(db)
 	if err != nil {
 		return Site{}, nil, err
@@ -499,6 +499,9 @@ func prepareSiteToggle(db sqlRuleStore, id int64) (Site, []ruleValidationIssue, 
 
 	target := *current
 	target.Enabled = !current.Enabled
+	if enabled != nil {
+		target.Enabled = *enabled
+	}
 	siteStates = append(siteStates, projectedSiteState{
 		Site:         target,
 		ContentScope: "existing",

@@ -3383,7 +3383,38 @@ function forward_services_by_api_target(array $services, array $settings)
     return [$targets, $servicesByTarget];
 }
 
-function forward_upsert_synced_rule(array $remoteRule, array $service)
+function forward_synced_binding_owner_matches($existing, array $service)
+{
+    return $existing
+        && (int) ($existing->user_id ?? 0) === (int) ($service['user_id'] ?? 0)
+        && (int) ($existing->service_id ?? 0) === (int) ($service['service_id'] ?? 0);
+}
+
+function forward_trusted_sync_services(array $services, $table, $remoteField, $legacyField)
+{
+    $trusted = [];
+    foreach ($services as $service) {
+        if ((int) ($service['service_id'] ?? 0) <= 0 || (int) ($service['user_id'] ?? 0) <= 0) {
+            continue;
+        }
+        $rows = Capsule::table($table)
+            ->where('server_id', (int) ($service['server_id'] ?? 0))
+            ->where('service_id', (int) $service['service_id'])
+            ->where('user_id', (int) $service['user_id'])
+            ->get();
+        foreach ($rows as $row) {
+            $remoteId = (int) (($row->$remoteField ?? 0) ?: ($row->$legacyField ?? 0));
+            if ($remoteId <= 0) {
+                continue;
+            }
+            // Duplicate mappings are ambiguous even when backend IPs match.
+            $trusted[$remoteId] = array_key_exists($remoteId, $trusted) ? null : $service;
+        }
+    }
+    return $trusted;
+}
+
+function forward_upsert_synced_rule(array $remoteRule, array $service, $allowUnboundImport = false)
 {
     $remoteId = forward_remote_int($remoteRule, 'id');
     $outIp = forward_normalize_ip_literal(forward_remote_string($remoteRule, 'out_ip'));
@@ -3411,6 +3442,11 @@ function forward_upsert_synced_rule(array $remoteRule, array $service)
             ->where('server_id', $serverId)
             ->where('forward_rule_id', $remoteId)
             ->first();
+    }
+
+    if ($existing ? !forward_synced_binding_owner_matches($existing, $service)
+        : (!$allowUnboundImport || (int) ($service['service_id'] ?? 0) !== 0 || (int) ($service['user_id'] ?? 0) !== 0)) {
+        return false;
     }
 
     $ruleName = forward_remote_string($remoteRule, 'remark');
@@ -3455,7 +3491,7 @@ function forward_upsert_synced_rule(array $remoteRule, array $service)
     return !empty($result['success']);
 }
 
-function forward_upsert_synced_site(array $remoteSite, array $service)
+function forward_upsert_synced_site(array $remoteSite, array $service, $allowUnboundImport = false)
 {
     $remoteId = forward_remote_int($remoteSite, 'id');
     $backendIp = forward_normalize_ip_literal(forward_remote_string($remoteSite, 'backend_ip'));
@@ -3483,6 +3519,11 @@ function forward_upsert_synced_site(array $remoteSite, array $service)
             ->where('server_id', $serverId)
             ->where('forward_site_id', $remoteId)
             ->first();
+    }
+
+    if ($existing ? !forward_synced_binding_owner_matches($existing, $service)
+        : (!$allowUnboundImport || (int) ($service['service_id'] ?? 0) !== 0 || (int) ($service['user_id'] ?? 0) !== 0)) {
+        return false;
     }
 
     $values = [
@@ -3557,6 +3598,8 @@ function forward_sync_remote_bindings_for_services(array $services, array $setti
 
     foreach ($targets as $key => $target) {
         $targetServices = $servicesByTarget[$key] ?? [];
+        $trustedRules = $syncRules ? forward_trusted_sync_services($targetServices, 'mod_forward_rules', 'remote_rule_id', 'forward_rule_id') : [];
+        $trustedSites = $syncSites ? forward_trusted_sync_services($targetServices, 'mod_forward_sites', 'remote_site_id', 'forward_site_id') : [];
         if ($syncRules) {
             if (($ruleSnapshot['errors'][$key] ?? '') !== '') {
                 $summary['errors']++;
@@ -3565,8 +3608,9 @@ function forward_sync_remote_bindings_for_services(array $services, array $setti
                 ], $ruleSnapshot['errors'][$key]);
             } else {
                 foreach (($ruleSnapshot['maps'][$key] ?? []) as $remoteRule) {
-                    $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteRule, 'out_ip'));
-                    if ($service === null && $includeUnmatched) {
+                    $remoteId = forward_remote_int($remoteRule, 'id');
+                    $service = $trustedRules[$remoteId] ?? null;
+                    if ($service === null && $includeUnmatched && !array_key_exists($remoteId, $trustedRules)) {
                         $service = forward_unbound_remote_service(
                             $target,
                             $settings,
@@ -3577,7 +3621,7 @@ function forward_sync_remote_bindings_for_services(array $services, array $setti
                     if ($service === null) {
                         continue;
                     }
-                    if (forward_upsert_synced_rule($remoteRule, $service)) {
+                    if (forward_upsert_synced_rule($remoteRule, $service, $includeUnmatched)) {
                         $summary['rules']++;
                     }
                 }
@@ -3592,8 +3636,9 @@ function forward_sync_remote_bindings_for_services(array $services, array $setti
                 ], $siteSnapshot['errors'][$key]);
             } else {
                 foreach (($siteSnapshot['maps'][$key] ?? []) as $remoteSite) {
-                    $service = forward_match_unique_service_for_remote_ip($targetServices, forward_remote_string($remoteSite, 'backend_ip'));
-                    if ($service === null && $includeUnmatched) {
+                    $remoteId = forward_remote_int($remoteSite, 'id');
+                    $service = $trustedSites[$remoteId] ?? null;
+                    if ($service === null && $includeUnmatched && !array_key_exists($remoteId, $trustedSites)) {
                         $service = forward_unbound_remote_service(
                             $target,
                             $settings,
@@ -3604,7 +3649,7 @@ function forward_sync_remote_bindings_for_services(array $services, array $setti
                     if ($service === null) {
                         continue;
                     }
-                    if (forward_upsert_synced_site($remoteSite, $service)) {
+                    if (forward_upsert_synced_site($remoteSite, $service, $includeUnmatched)) {
                         $summary['sites']++;
                     }
                 }
@@ -4399,21 +4444,34 @@ function forward_service_resource_query($table, $serviceId, $userId = 0)
 function forward_toggle_remote_resource_to_state($togglePath, $remoteId, $serverId, $desiredEnabled, $currentEnabled)
 {
     $remoteId = (int) $remoteId;
-    if ($remoteId <= 0 || (bool) $desiredEnabled === (bool) $currentEnabled) {
+    if ($remoteId <= 0) {
         return ['success' => true, 'changed' => false, 'enabled' => (bool) $currentEnabled];
     }
 
-    $toggle = forward_remote_toggle_resource($togglePath, $remoteId, $serverId, (bool) $currentEnabled);
-    if (!$toggle['success']) {
-        return ['success' => false, 'message' => $toggle['message'] ?? '远端切换失败'];
+    $path = forward_remote_enabled_path($togglePath, $remoteId, $desiredEnabled);
+    if ($path === '') {
+        return ['success' => false, 'message' => 'Unsupported resource state endpoint'];
     }
-
-    $enabled = $toggle['enabled'] === null ? (bool) $desiredEnabled : (bool) $toggle['enabled'];
+    // Do not fall back to toggle on old servers: a timeout can already have applied it.
+    $result = forward_call_api($path, 'POST', null, $serverId);
+    if (!$result['success'] || !is_array($result['data'] ?? null) || !array_key_exists('enabled', $result['data'])) {
+        return ['success' => false, 'message' => $result['message'] ?? 'Veer must support explicit resource state updates'];
+    }
+    $enabled = (bool) $result['data']['enabled'];
     if ($enabled !== (bool) $desiredEnabled) {
         return ['success' => false, 'message' => '远端切换后状态与期望不一致'];
     }
 
-    return ['success' => true, 'changed' => true, 'enabled' => $enabled];
+    return ['success' => true, 'changed' => $enabled !== (bool) $currentEnabled, 'enabled' => $enabled];
+}
+
+function forward_remote_enabled_path($togglePath, $remoteId, $enabled)
+{
+    $paths = ['/api/rules/toggle' => '/api/rules/enabled', '/api/sites/toggle' => '/api/sites/enabled'];
+    if (!isset($paths[$togglePath]) || (int) $remoteId <= 0) {
+        return '';
+    }
+    return $paths[$togglePath] . '?id=' . (int) $remoteId . '&enabled=' . ($enabled ? 'true' : 'false');
 }
 
 function forward_set_service_resources_enabled($serviceId, $userId, $enabled, $restoreOnlySuspended = false)

@@ -101,6 +101,8 @@ ufw allow 443/udp
 
 ECH 隐藏实际 SNI、QUIC 连接迁移，以及同一客户端端点复用多条连接时的未知 CID 轮换目前不在支持范围内。
 
+明文 HTTP 的每个 keep-alive 请求都会重新检查 Host 并清除客户端提供的来源转发头，支持流式响应和 Upgrade。HTTPS 支持跨 TLS record 的 ClientHello，但路由缓冲总量限制为 64 KiB，单个 record 限制为 16 KiB。
+
 ## 推荐部署
 
 生产建议：
@@ -229,6 +231,8 @@ Veer 有三条主要 dataplane：
 - `default_engine = auto`：自动选择可用路径
 - Linux 下会按 `kernel_engine_order` 尝试内核引擎
 
+用户态转发有进程级资源保护：Linux 的监听数和同时处理的 TCP 连接数分别限制为 `min(1024, RLIMIT_NOFILE / 8)`，以保留后端连接和控制通道的文件句柄空间。范围的 TCP+UDP 每端口占两个监听名额；超过预算的内核回退会报告错误，不会继续创建大量 socket。内核 flow 容量不受这一用户态限制影响。
+
 进入内核态通常需要：
 
 - Linux 上具备 eBPF/TC/XDP 能力
@@ -292,6 +296,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 热更新与异常退出：
 
 - `deploy.sh` 热更新时会尝试交接活动的 userspace rule/range/shared-proxy worker；无法交接的 worker 会由新进程重建
+- shared-proxy 二进制更新会关闭旧 QUIC/UDP 监听和中继会话，QUIC 客户端可能需要重连；TCP 已建立连接可以排空，不能据此推断 QUIC 同样无损交接
 - TC/XDP 路径会尽量继承内核 flow / NAT / stats 状态；使用 `--no-inherit-stats` 时 stats 会重新累计
 - 新版本启动、重启或 `/readyz` 检查失败时，已有安装会自动回滚二进制、配置、服务定义和本次部署替换的 bundled plugins
 - 自动回滚不恢复 SQLite 数据库，也不恢复任意外部插件产生的状态；部署前服务原本未运行时只回滚文件，不会自动启动旧版本
@@ -409,6 +414,8 @@ modules/addons/forward/
 - `api_server_map`
 - `allowed_product_ids`
 - 按产品配置端口规则和共享站点上限
+
+客户同步、暂停、恢复和终止操作只同步已有客户/服务归属记录，不再按后端 IP 自动认领远端资源。管理员全量同步导入的未绑定资源保持无归属，后续需显式分配；历史重复绑定不会自动选择一个客户。暂停、恢复使用 `/api/rules/enabled` 和 `/api/sites/enabled` 的明确状态接口，请先升级 Veer 服务端再升级 addon；旧服务端不支持该接口时会报错，不回退到可能因重试而反转状态的 `toggle`。
 
 ## 安全建议
 

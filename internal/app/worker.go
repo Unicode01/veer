@@ -109,33 +109,6 @@ func (st *ruleStats) snapshot(ruleID int64) RuleStatsReport {
 	}
 }
 
-type countingWriter struct {
-	w     io.Writer
-	count *int64
-}
-
-func (cw countingWriter) Write(p []byte) (int, error) {
-	n, err := cw.w.Write(p)
-	if cw.count != nil && n > 0 {
-		atomic.AddInt64(cw.count, int64(n))
-	}
-	return n, err
-}
-
-func writeAllCounting(w io.Writer, data []byte, count *int64) error {
-	for len(data) > 0 {
-		n, err := countingWriter{w: w, count: count}.Write(data)
-		if err != nil {
-			return err
-		}
-		if n <= 0 {
-			return io.ErrShortWrite
-		}
-		data = data[n:]
-	}
-	return nil
-}
-
 type countingConn struct {
 	net.Conn
 	count *int64
@@ -230,14 +203,9 @@ func proxyTCPBidirectional(dst net.Conn, src net.Conn, srcReader io.Reader, inCo
 }
 
 type ruleBinding struct {
-	rule     Rule
-	stats    *ruleStats
-	degraded error
-	cancel   context.CancelFunc
-	tcpLn    net.Listener
-	udpPC    *net.UDPConn
-	done     chan struct{}
-	stopOnce sync.Once
+	rule  Rule
+	stats *ruleStats
+	group *userspaceBindingGroup
 }
 
 func startRuleBinding(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, error) {
@@ -246,98 +214,25 @@ func startRuleBinding(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, 
 }
 
 func startRuleBindingWithDegradedState(workerIndex int, rule Rule, st *ruleStats) (*ruleBinding, error, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	binding := &ruleBinding{
-		rule:   rule,
-		stats:  st,
-		cancel: cancel,
-		done:   make(chan struct{}),
+	if !validForwardPorts(rule.InPort, rule.OutPort) {
+		return nil, nil, fmt.Errorf("ports must be between 1 and 65535")
 	}
-
-	ok := false
-	var firstErr error
-	var wg sync.WaitGroup
-
-	if rule.Protocol == "tcp" || rule.Protocol == "tcp+udp" {
-		ln, err := listenTCP(ctx, &rule)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			log.Printf("worker[%d] rule %d tcp: %v", workerIndex, rule.ID, err)
-		} else {
-			binding.tcpLn = ln
-			ok = true
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := serveTCP(ctx, ln, &rule, st); err != nil && ctx.Err() == nil {
-					log.Printf("worker[%d] rule %d tcp: %v", workerIndex, rule.ID, err)
-				}
-			}()
-		}
+	group, err := newUserspaceBindingGroup(userspaceRuleProtocols(rule), st)
+	if err != nil {
+		return nil, nil, err
 	}
-	if rule.Protocol == "udp" || rule.Protocol == "tcp+udp" {
-		pc, err := listenUDP(ctx, &rule)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			log.Printf("worker[%d] rule %d udp: %v", workerIndex, rule.ID, err)
-		} else {
-			binding.udpPC = pc
-			ok = true
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := serveUDP(ctx, pc, &rule, st); err != nil && ctx.Err() == nil {
-					log.Printf("worker[%d] rule %d udp: %v", workerIndex, rule.ID, err)
-				}
-			}()
-		}
+	bound, degraded := group.Status()
+	if bound == 0 {
+		group.Stop()
+		return nil, nil, fmt.Errorf("all bindings failed: %w", degraded)
 	}
-
-	if !ok {
-		cancel()
-		if binding.tcpLn != nil {
-			_ = binding.tcpLn.Close()
-		}
-		if binding.udpPC != nil {
-			_ = binding.udpPC.Close()
-		}
-		close(binding.done)
-		if firstErr != nil {
-			return nil, nil, fmt.Errorf("all bindings failed: %w", firstErr)
-		}
-		return nil, nil, fmt.Errorf("all bindings failed")
-	}
-
-	go func() {
-		defer close(binding.done)
-		wg.Wait()
-	}()
-	binding.degraded = firstErr
-	return binding, firstErr, nil
+	return &ruleBinding{rule: rule, stats: st, group: group}, degraded, nil
 }
 
 func (b *ruleBinding) Stop() {
-	if b == nil {
-		return
+	if b != nil {
+		b.group.Stop()
 	}
-	b.stopOnce.Do(func() {
-		if b.cancel != nil {
-			b.cancel()
-		}
-		if b.tcpLn != nil {
-			_ = b.tcpLn.Close()
-		}
-		if b.udpPC != nil {
-			_ = b.udpPC.Close()
-		}
-		if b.done != nil {
-			<-b.done
-		}
-	})
 }
 
 func stopRuleBindings(bindings map[int64]*ruleBinding) {
@@ -443,14 +338,15 @@ func runWorker(workerIndex int, sockPath string) {
 	myHash := computeBinaryHash()
 
 	var (
-		connMu         sync.Mutex
-		writeMu        sync.Mutex
-		stateMu        sync.Mutex
-		ipcConn        net.Conn
-		currentStats   map[int64]*ruleStats
-		currentRules   map[int64]Rule
-		currentBinds   map[int64]*ruleBinding
-		pendingUpgrade int32 // atomic flag
+		connMu            sync.Mutex
+		writeMu           sync.Mutex
+		stateMu           sync.Mutex
+		ipcConn           net.Conn
+		currentStats      map[int64]*ruleStats
+		currentRules      map[int64]Rule
+		currentBinds      map[int64]*ruleBinding
+		currentGeneration uint64
+		pendingUpgrade    int32 // atomic flag
 	)
 
 	sendIPC := func(msg IPCMessage) error {
@@ -548,6 +444,7 @@ func runWorker(workerIndex int, sockPath string) {
 		currentStats = sm
 		currentRules = nextRules
 		currentBinds = nextBindings
+		currentGeneration = generation
 		stateMu.Unlock()
 
 		if len(rules) == 0 {
@@ -555,6 +452,12 @@ func runWorker(workerIndex int, sockPath string) {
 			return
 		}
 
+		for id, binding := range nextBindings {
+			if _, err := binding.group.Status(); err != nil {
+				nextFailed[id] = struct{}{}
+				ruleErrors[id] = err.Error()
+			}
+		}
 		failedIDs := sortedInt64SetKeys(nextFailed)
 		if len(nextBindings) == 0 {
 			sendStatus(generation, "error", fmt.Sprintf("all %d rule bindings failed", len(rules)), failedIDs, ruleErrors)
@@ -588,11 +491,28 @@ func runWorker(workerIndex int, sockPath string) {
 				stateMu.Lock()
 				statsSnapshot := snapshotRuleStatsMap(currentStats)
 				active := ruleStatsMapHasActivity(currentStats)
+				generation := currentGeneration
+				failures := make(map[int64]struct{})
+				bindingErrors := make(map[int64]string)
+				for id := range currentRules {
+					var group *userspaceBindingGroup
+					if b := currentBinds[id]; b != nil {
+						group = b.group
+					}
+					if _, err := group.Status(); err != nil {
+						failures[id] = struct{}{}
+						bindingErrors[id] = err.Error()
+					}
+				}
+				hasRules := len(currentRules) > 0
 				stateMu.Unlock()
 				connMu.Lock()
 				hasIPC := ipcConn != nil
 				connMu.Unlock()
 				if hasIPC {
+					if hasRules && atomic.LoadInt32(&pendingUpgrade) == 0 {
+						sendStatus(generation, "running", "", sortedInt64SetKeys(failures), bindingErrors)
+					}
 					reports := buildRuleStatsReports(statsSnapshot)
 					if len(reports) > 0 {
 						sendStats(reports)
@@ -718,7 +638,8 @@ func retryUnavailableRuleBindings(keepIDs map[int64]struct{}, startList []Rule, 
 			continue
 		}
 		binding := bindings[rule.ID]
-		if binding != nil && binding.degraded == nil {
+		if binding != nil && binding.group != nil {
+			binding.group.Repair()
 			continue
 		}
 		delete(keepIDs, rule.ID)
@@ -747,14 +668,24 @@ func listenTCP(ctx context.Context, rule *Rule) (net.Listener, error) {
 func serveTCP(ctx context.Context, ln net.Listener, rule *Rule, st *ruleStats) error {
 	target := net.JoinHostPort(rule.OutIP, strconv.Itoa(rule.OutPort))
 	for {
-		src, err := ln.Accept()
+		src, err := acceptUserspaceTCP(ctx, ln)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
-		go handleTCPConn(ctx, src, target, rule.OutInterface, rule.OutSourceIP, rule.Transparent, st)
+		if !userspaceTCPBudget.tryAcquire() {
+			src.Close()
+			if st != nil {
+				atomic.AddInt64(&st.rejectedConns, 1)
+			}
+			continue
+		}
+		go func() {
+			defer userspaceTCPBudget.release()
+			handleTCPConn(ctx, src, target, rule.OutInterface, rule.OutSourceIP, rule.Transparent, st)
+		}()
 	}
 }
 func handleTCPConn(ctx context.Context, src net.Conn, target, outIface, outSourceIP string, transparent bool, st *ruleStats) {

@@ -501,6 +501,12 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 	mux.HandleFunc("/api/sites/toggle", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		handleToggleSite(w, r, db, pm)
 	}))
+	mux.HandleFunc("/api/rules/enabled", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleToggleRule(w, r, db, pm)
+	}))
+	mux.HandleFunc("/api/sites/enabled", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleToggleSite(w, r, db, pm)
+	}))
 	mux.HandleFunc("/api/ranges/toggle", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		handleToggleRange(w, r, db, pm)
 	}))
@@ -1627,6 +1633,11 @@ func normalizeAndValidateSite(site Site, requireID bool, knownIfaces map[string]
 	if site.Domain == "" || site.BackendIP == "" {
 		return site, "domain and backend_ip are required"
 	}
+	if domain, err := normalizeSharedSiteDomain(site.Domain); err != nil {
+		return site, err.Error()
+	} else {
+		site.Domain = domain
+	}
 	if site.BackendHTTP == 0 && site.BackendHTTPS == 0 {
 		return site, "at least one of backend_http_port or backend_https_port is required"
 	}
@@ -1710,8 +1721,8 @@ func normalizeAndValidateRange(pr PortRange, requireID bool, knownIfaces map[str
 	} else {
 		pr.OutIP = normalized
 	}
-	if pr.StartPort < 1 || pr.StartPort > 65535 || pr.EndPort < 1 || pr.EndPort > 65535 || pr.OutStartPort < 1 || pr.OutStartPort > 65535 {
-		return pr, "ports must be between 1 and 65535"
+	if msg := validatePortRangePorts(pr); msg != "" {
+		return pr, msg
 	}
 	if pr.InInterface != "" {
 		if _, ok := knownIfaces[pr.InInterface]; !ok {
@@ -1949,6 +1960,11 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	desiredEnabled, err := requestedResourceEnabled(r)
+	if err != nil {
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("toggle", 0, "enabled", err.Error()))
+		return
+	}
 	idStr := r.URL.Query().Get("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -1973,6 +1989,9 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		return
 	}
 	newEnabled := !rule.Enabled
+	if desiredEnabled != nil {
+		newEnabled = *desiredEnabled
+	}
 	prepared, issues, err := prepareRuleBatch(tx, ruleBatchRequest{
 		SetEnabled: []ruleSetEnabledRequest{{ID: id, Enabled: newEnabled}},
 	})
@@ -2177,6 +2196,11 @@ func handleToggleSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	desiredEnabled, err := requestedResourceEnabled(r)
+	if err != nil {
+		writeValidationIssueResponse(w, http.StatusBadRequest, singleValidationIssue("toggle", 0, "enabled", err.Error()))
+		return
+	}
 	idStr := r.URL.Query().Get("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -2191,7 +2215,7 @@ func handleToggleSite(w http.ResponseWriter, r *http.Request, db *sql.DB, pm *Pr
 	}
 	defer tx.Rollback()
 
-	site, issues, err := prepareSiteToggle(tx, id)
+	site, issues, err := prepareSiteEnabledState(tx, id, desiredEnabled)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

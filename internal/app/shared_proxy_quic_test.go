@@ -217,10 +217,7 @@ func TestSharedQUICProxyEndToEndWithRetry(t *testing.T) {
 	}
 	stats := &siteStats{}
 	proxy := &sharedProxyEngine{
-		quicRoutes:        map[string]string{"quic.example.test": backend.LocalAddr().String()},
-		domainStats:       map[string]*siteStats{"quic.example.test": stats},
-		domainSourceIP:    map[string]string{"quic.example.test": ""},
-		domainTransparent: map[string]bool{"quic.example.test": false},
+		quicRoutes: map[string]sharedProxyRoute{"quic.example.test": {backend: backend.LocalAddr().String(), stats: stats}},
 	}
 	proxyCtx, stopProxy := context.WithCancel(ctx)
 	proxyDone := make(chan struct{})

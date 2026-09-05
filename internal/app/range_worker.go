@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -18,12 +17,8 @@ import (
 )
 
 type rangeBinding struct {
-	pr       PortRange
-	degraded error
-	cancel   context.CancelFunc
-	closeSet *closerSet
-	done     chan struct{}
-	stopOnce sync.Once
+	pr    PortRange
+	group *userspaceBindingGroup
 }
 
 func startRangeBinding(workerIndex int, pr PortRange, st *ruleStats) (*rangeBinding, error) {
@@ -32,51 +27,38 @@ func startRangeBinding(workerIndex int, pr PortRange, st *ruleStats) (*rangeBind
 }
 
 func startRangeBindingWithDegradedState(workerIndex int, pr PortRange, st *ruleStats) (*rangeBinding, error, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	closeSet := &closerSet{}
-	bound, failed, wg, firstErr := startRangeForwarder(ctx, &pr, st, closeSet)
-	if bound == 0 {
-		cancel()
-		closeSet.CloseAll()
-		wg.Wait()
-		if firstErr != nil {
-			return nil, nil, fmt.Errorf("all %d port bindings failed: %w", failed, firstErr)
+	if msg := validatePortRangePorts(pr); msg != "" {
+		return nil, nil, fmt.Errorf("invalid port range: %s", msg)
+	}
+	protocols := userspaceRuleProtocols(Rule{Protocol: pr.Protocol})
+	count := (pr.EndPort - pr.StartPort + 1) * len(protocols)
+	if int64(count) > userspaceListenerBudget.limit {
+		return nil, nil, fmt.Errorf("userspace listener budget exceeded: requested %d, process limit %d; use the kernel dataplane or a smaller range", count, userspaceListenerBudget.limit)
+	}
+	rules := make([]Rule, 0, count)
+	for port := pr.StartPort; port <= pr.EndPort; port++ {
+		for _, protocol := range protocols {
+			rules = append(rules, Rule{ID: pr.ID, InInterface: pr.InInterface, InIP: pr.InIP, InPort: port,
+				OutInterface: pr.OutInterface, OutIP: pr.OutIP, OutPort: pr.OutStartPort + port - pr.StartPort,
+				OutSourceIP: pr.OutSourceIP, Transparent: pr.Transparent, Protocol: protocol.Protocol})
 		}
-		return nil, nil, fmt.Errorf("all %d port bindings failed", failed)
 	}
-	if failed > 0 {
-		log.Printf("range worker[%d] range %d: %d/%d ports bound, %d failed", workerIndex, pr.ID, bound, bound+failed, failed)
+	group, err := newUserspaceBindingGroup(rules, st)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	binding := &rangeBinding{
-		pr:       pr,
-		cancel:   cancel,
-		closeSet: closeSet,
-		done:     make(chan struct{}),
+	bound, degraded := group.Status()
+	if bound == 0 {
+		group.Stop()
+		return nil, nil, degraded
 	}
-	go func() {
-		defer close(binding.done)
-		wg.Wait()
-	}()
-	binding.degraded = firstErr
-	return binding, firstErr, nil
+	return &rangeBinding{pr: pr, group: group}, degraded, nil
 }
 
 func (b *rangeBinding) Stop() {
-	if b == nil {
-		return
+	if b != nil {
+		b.group.Stop()
 	}
-	b.stopOnce.Do(func() {
-		if b.cancel != nil {
-			b.cancel()
-		}
-		if b.closeSet != nil {
-			b.closeSet.CloseAll()
-		}
-		if b.done != nil {
-			<-b.done
-		}
-	})
 }
 
 func stopRangeBindings(bindings map[int64]*rangeBinding) {
@@ -129,14 +111,15 @@ func runRangeWorker(workerIndex int, sockPath string) {
 	myHash := computeBinaryHash()
 
 	var (
-		connMu         sync.Mutex
-		writeMu        sync.Mutex
-		stateMu        sync.Mutex
-		ipcConn        net.Conn
-		currentStats   map[int64]*ruleStats
-		currentRanges  map[int64]PortRange
-		currentBinds   map[int64]*rangeBinding
-		pendingUpgrade int32
+		connMu            sync.Mutex
+		writeMu           sync.Mutex
+		stateMu           sync.Mutex
+		ipcConn           net.Conn
+		currentStats      map[int64]*ruleStats
+		currentRanges     map[int64]PortRange
+		currentBinds      map[int64]*rangeBinding
+		currentGeneration uint64
+		pendingUpgrade    int32
 	)
 
 	sendIPC := func(msg IPCMessage) error {
@@ -234,6 +217,7 @@ func runRangeWorker(workerIndex int, sockPath string) {
 		currentStats = sm
 		currentRanges = nextRanges
 		currentBinds = nextBindings
+		currentGeneration = generation
 		stateMu.Unlock()
 
 		if len(ranges) == 0 {
@@ -241,6 +225,12 @@ func runRangeWorker(workerIndex int, sockPath string) {
 			return
 		}
 
+		for id, binding := range nextBindings {
+			if _, err := binding.group.Status(); err != nil {
+				nextFailed[id] = struct{}{}
+				rangeErrors[id] = err.Error()
+			}
+		}
 		failedIDs := sortedInt64SetKeys(nextFailed)
 		if len(nextBindings) == 0 {
 			sendStatus(generation, "error", fmt.Sprintf("all %d port range bindings failed", len(ranges)), failedIDs, rangeErrors)
@@ -274,11 +264,28 @@ func runRangeWorker(workerIndex int, sockPath string) {
 				stateMu.Lock()
 				statsSnapshot := snapshotRuleStatsMap(currentStats)
 				active := ruleStatsMapHasActivity(currentStats)
+				generation := currentGeneration
+				failures := make(map[int64]struct{})
+				bindingErrors := make(map[int64]string)
+				for id := range currentRanges {
+					var group *userspaceBindingGroup
+					if b := currentBinds[id]; b != nil {
+						group = b.group
+					}
+					if _, err := group.Status(); err != nil {
+						failures[id] = struct{}{}
+						bindingErrors[id] = err.Error()
+					}
+				}
+				hasRanges := len(currentRanges) > 0
 				stateMu.Unlock()
 				connMu.Lock()
 				hasIPC := ipcConn != nil
 				connMu.Unlock()
 				if hasIPC {
+					if hasRanges && atomic.LoadInt32(&pendingUpgrade) == 0 {
+						sendStatus(generation, "running", "", sortedInt64SetKeys(failures), bindingErrors)
+					}
 					reports := buildRangeStatsReports(statsSnapshot)
 					if len(reports) > 0 {
 						sendStats(reports)
@@ -404,7 +411,8 @@ func retryUnavailableRangeBindings(keepIDs map[int64]struct{}, startList []PortR
 			continue
 		}
 		binding := bindings[pr.ID]
-		if binding != nil && binding.degraded == nil {
+		if binding != nil && binding.group != nil {
+			binding.group.Repair()
 			continue
 		}
 		delete(keepIDs, pr.ID)
@@ -414,312 +422,4 @@ func retryUnavailableRangeBindings(keepIDs map[int64]struct{}, startList []PortR
 		}
 	}
 	return startList, stopIDs
-}
-
-// startRangeForwarder binds all ports in the range, counts successes/failures,
-// and returns the counts plus a WaitGroup that completes when all serve goroutines exit.
-func startRangeForwarder(ctx context.Context, pr *PortRange, st *ruleStats, closeSet *closerSet) (bound int, failed int, wg *sync.WaitGroup, firstErr error) {
-	wg = &sync.WaitGroup{}
-
-	ports := pr.EndPort - pr.StartPort + 1
-	perPort := 0
-	if pr.Protocol == "tcp" || pr.Protocol == "tcp+udp" {
-		perPort++
-	}
-	if pr.Protocol == "udp" || pr.Protocol == "tcp+udp" {
-		perPort++
-	}
-	totalBinds := ports * perPort
-	if totalBinds == 0 {
-		return 0, 0, wg, nil
-	}
-
-	bindCh := make(chan error, totalBinds)
-	for port := pr.StartPort; port <= pr.EndPort; port++ {
-		p := port
-		if pr.Protocol == "tcp" || pr.Protocol == "tcp+udp" {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				runRangeTCPPort(ctx, pr, p, bindCh, st, closeSet)
-			}()
-		}
-		if pr.Protocol == "udp" || pr.Protocol == "tcp+udp" {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				runRangeUDPPort(ctx, pr, p, bindCh, st, closeSet)
-			}()
-		}
-	}
-
-	for i := 0; i < totalBinds; i++ {
-		if err := <-bindCh; err != nil {
-			failed++
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			bound++
-		}
-	}
-
-	return bound, failed, wg, firstErr
-}
-func runRangeTCPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<- error, st *ruleStats, closeSet *closerSet) {
-	lc := net.ListenConfig{}
-	ctrl := controlBindToDevice(pr.InInterface)
-	if ctrl != nil {
-		lc.Control = ctrl
-	}
-
-	addr := net.JoinHostPort(pr.InIP, strconv.Itoa(port))
-	ln, err := lc.Listen(ctx, tcpListenNetworkForIP(pr.InIP), addr)
-	if err != nil {
-		err = fmt.Errorf("tcp listen %s: %w", addr, err)
-		log.Printf("range %d: %v", pr.ID, err)
-		bindCh <- err
-		return
-	}
-	if !closeSet.Add(ln) {
-		bindCh <- context.Canceled
-		return
-	}
-	bindCh <- nil
-	defer ln.Close()
-
-	outPort := port - pr.StartPort + pr.OutStartPort
-	target := net.JoinHostPort(pr.OutIP, strconv.Itoa(outPort))
-
-	for {
-		src, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("range %d: tcp accept port %d: %v", pr.ID, port, err)
-			return
-		}
-		go handleTCPConn(ctx, src, target, pr.OutInterface, pr.OutSourceIP, pr.Transparent, st)
-	}
-}
-func runRangeUDPPort(ctx context.Context, pr *PortRange, port int, bindCh chan<- error, st *ruleStats, closeSet *closerSet) {
-	lc := net.ListenConfig{}
-	ctrl := controlBindToDevice(pr.InInterface)
-	if ctrl != nil {
-		lc.Control = ctrl
-	}
-
-	addr := net.JoinHostPort(pr.InIP, strconv.Itoa(port))
-	pc, err := lc.ListenPacket(ctx, udpListenNetworkForIP(pr.InIP), addr)
-	if err != nil {
-		err = fmt.Errorf("udp listen %s: %w", addr, err)
-		log.Printf("range %d: %v", pr.ID, err)
-		bindCh <- err
-		return
-	}
-	udpConn, ok := pc.(*net.UDPConn)
-	if !ok {
-		pc.Close()
-		err = fmt.Errorf("udp listen %s returned unsupported packet conn %T", addr, pc)
-		log.Printf("range %d: %v", pr.ID, err)
-		bindCh <- err
-		return
-	}
-	if err := enableUDPReplyPacketInfo(udpConn); err != nil {
-		udpConn.Close()
-		err = fmt.Errorf("udp listen %s enable packet info: %w", addr, err)
-		log.Printf("range %d: %v", pr.ID, err)
-		bindCh <- err
-		return
-	}
-	_ = configureUDPConnBuffers(udpConn)
-	if !closeSet.Add(udpConn) {
-		bindCh <- context.Canceled
-		return
-	}
-	bindCh <- nil
-	defer udpConn.Close()
-
-	outPort := port - pr.StartPort + pr.OutStartPort
-	targetAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(pr.OutIP, strconv.Itoa(outPort)))
-	if err != nil {
-		log.Printf("range %d: udp resolve port %d: %v", pr.ID, port, err)
-		return
-	}
-
-	type natEntry struct {
-		conn       *net.UDPConn
-		lastActive time.Time
-	}
-
-	natTable := make(map[string]*natEntry)
-	var mu sync.Mutex
-
-	removeEntryLocked := func(key string, expected *net.UDPConn) {
-		entry, ok := natTable[key]
-		if !ok {
-			return
-		}
-		if expected != nil && entry.conn != expected {
-			return
-		}
-		delete(natTable, key)
-		if st != nil {
-			atomic.AddInt64(&st.natTableSize, -1)
-		}
-		userspaceUDPNATBudget.release()
-		entry.conn.Close()
-	}
-	cleanupStaleEntries := func(now time.Time) {
-		mu.Lock()
-		for key, entry := range natTable {
-			if now.Sub(entry.lastActive) > udpNatIdleTimeout {
-				removeEntryLocked(key, entry.conn)
-			}
-		}
-		mu.Unlock()
-	}
-	defer func() {
-		mu.Lock()
-		for key, entry := range natTable {
-			removeEntryLocked(key, entry.conn)
-		}
-		mu.Unlock()
-	}()
-
-	nextCleanup := time.Now().Add(udpCleanupInterval)
-	if err := udpConn.SetReadDeadline(nextCleanup); err != nil {
-		log.Printf("range %d: udp deadline port %d: %v", pr.ID, port, err)
-		return
-	}
-
-	buf := make([]byte, udpPacketBufferSize)
-	oobBuf := make([]byte, udpReplyPacketInfoBufferSize())
-	for {
-		n, srcAddr, replyInfo, err := readUDPWithReplyInfo(udpConn, buf, oobBuf)
-		now := time.Now()
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				if ctx.Err() != nil {
-					return
-				}
-				cleanupStaleEntries(now)
-				nextCleanup = now.Add(udpCleanupInterval)
-				if err := udpConn.SetReadDeadline(nextCleanup); err != nil {
-					log.Printf("range %d: udp deadline port %d: %v", pr.ID, port, err)
-					return
-				}
-				continue
-			}
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("range %d: udp read port %d: %v", pr.ID, port, err)
-			return
-		}
-		if !now.Before(nextCleanup) {
-			cleanupStaleEntries(now)
-			nextCleanup = now.Add(udpCleanupInterval)
-			if err := udpConn.SetReadDeadline(nextCleanup); err != nil {
-				log.Printf("range %d: udp deadline port %d: %v", pr.ID, port, err)
-				return
-			}
-		}
-		if st != nil && n > 0 {
-			atomic.AddInt64(&st.bytesIn, int64(n))
-		}
-
-		key := udpReplyKey(srcAddr, replyInfo)
-		mu.Lock()
-		entry, exists := natTable[key]
-		if exists {
-			entry.lastActive = now
-		}
-		mu.Unlock()
-
-		if !exists {
-			if !userspaceUDPNATBudget.tryAcquire() {
-				if st != nil {
-					atomic.AddInt64(&st.rejectedConns, 1)
-				}
-				continue
-			}
-			var outConn *net.UDPConn
-			if pr.Transparent {
-				outConn, err = dialTransparentUDP(srcAddr.IP, pr.OutInterface, targetAddr)
-			} else {
-				outConn, err = dialOutboundUDP(targetAddr, pr.OutInterface, pr.OutSourceIP)
-			}
-			if err != nil {
-				userspaceUDPNATBudget.release()
-				if st != nil {
-					atomic.AddInt64(&st.rejectedConns, 1)
-				}
-				log.Printf("range %d: udp dial port %d: %v", pr.ID, port, err)
-				continue
-			}
-
-			inserted := false
-			mu.Lock()
-			entry, exists = natTable[key]
-			if exists {
-				entry.lastActive = now
-			} else {
-				entry = &natEntry{conn: outConn, lastActive: now}
-				natTable[key] = entry
-				inserted = true
-				if st != nil {
-					atomic.AddInt64(&st.totalConns, 1)
-					atomic.AddInt64(&st.natTableSize, 1)
-				}
-			}
-			mu.Unlock()
-
-			if inserted {
-				go func(src *net.UDPAddr, reply udpReplyInfo, out *net.UDPConn, natKey string) {
-					retBuf := getUDPPacketBuffer()
-					defer putUDPPacketBuffer(retBuf)
-					for {
-						out.SetReadDeadline(time.Now().Add(udpNatIdleTimeout))
-						rn, err := out.Read(retBuf)
-						if err != nil {
-							mu.Lock()
-							removeEntryLocked(natKey, out)
-							mu.Unlock()
-							return
-						}
-						if st != nil && rn > 0 {
-							atomic.AddInt64(&st.bytesOut, int64(rn))
-						}
-						if _, err := writeUDPWithReplyInfo(udpConn, retBuf[:rn], src, reply); err != nil {
-							log.Printf("range %d: udp reply write port %d: %v", pr.ID, port, err)
-							mu.Lock()
-							removeEntryLocked(natKey, out)
-							mu.Unlock()
-							return
-						}
-						mu.Lock()
-						if e, ok := natTable[natKey]; ok {
-							e.lastActive = time.Now()
-						}
-						mu.Unlock()
-					}
-				}(srcAddr, replyInfo, outConn, key)
-			} else {
-				userspaceUDPNATBudget.release()
-				outConn.Close()
-			}
-		}
-
-		if _, err := entry.conn.Write(buf[:n]); err != nil {
-			if st != nil {
-				atomic.AddInt64(&st.rejectedConns, 1)
-			}
-			log.Printf("range %d: udp backend write port %d: %v", pr.ID, port, err)
-			mu.Lock()
-			removeEntryLocked(key, entry.conn)
-			mu.Unlock()
-		}
-	}
 }

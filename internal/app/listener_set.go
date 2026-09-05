@@ -1,7 +1,6 @@
 package app
 
 import (
-	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,30 +40,38 @@ type udpNATEntryBudget struct {
 }
 
 func (b *udpNATEntryBudget) tryAcquire() bool {
+	return b.tryAcquireN(1)
+}
+
+func (b *udpNATEntryBudget) tryAcquireN(count int64) bool {
 	if b == nil || b.limit <= 0 {
 		return false
 	}
 	for {
 		active := atomic.LoadInt64(&b.active)
-		if active >= b.limit {
+		if count <= 0 || count > b.limit-active {
 			return false
 		}
-		if atomic.CompareAndSwapInt64(&b.active, active, active+1) {
+		if atomic.CompareAndSwapInt64(&b.active, active, active+count) {
 			return true
 		}
 	}
 }
 
 func (b *udpNATEntryBudget) release() {
+	b.releaseN(1)
+}
+
+func (b *udpNATEntryBudget) releaseN(count int64) {
 	if b == nil {
 		return
 	}
 	for {
 		active := atomic.LoadInt64(&b.active)
-		if active <= 0 {
+		if active <= 0 || count <= 0 {
 			return
 		}
-		if atomic.CompareAndSwapInt64(&b.active, active, active-1) {
+		if atomic.CompareAndSwapInt64(&b.active, active, max(0, active-count)) {
 			return
 		}
 	}
@@ -133,42 +140,4 @@ func resetTimer(timer *time.Timer, interval time.Duration) {
 	}
 	stopTimer(timer)
 	timer.Reset(interval)
-}
-
-type closerSet struct {
-	mu      sync.Mutex
-	closers []io.Closer
-	closed  bool
-}
-
-func (s *closerSet) Add(c io.Closer) bool {
-	if c == nil {
-		return false
-	}
-
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		c.Close()
-		return false
-	}
-	s.closers = append(s.closers, c)
-	s.mu.Unlock()
-	return true
-}
-
-func (s *closerSet) CloseAll() {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
-	}
-	s.closed = true
-	closers := s.closers
-	s.closers = nil
-	s.mu.Unlock()
-
-	for _, c := range closers {
-		c.Close()
-	}
 }

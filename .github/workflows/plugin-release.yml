@@ -39,6 +39,9 @@ jobs:
           shellcheck -x bootstrap.sh deploy.sh release.sh scripts/*.sh plugins/*/*.sh
           php -l whmcs/forward/forward.php
           php -l whmcs/forward/hooks.php
+          php scripts/verify-whmcs-behavior.php
+          cc -O2 -Wall -Wextra -Werror scripts/verify-nat-probe.c -o /tmp/veer-nat-probe-test
+          /tmp/veer-nat-probe-test
       - name: Audit WebUI dependencies
         run: npm audit --audit-level=high
       - name: Install Go analysis tools
@@ -49,6 +52,20 @@ jobs:
         run: sh scripts/verify-plugin-release.sh portable
       - name: Run Go static analysis
         run: staticcheck ./...
+
+  core-dataplane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install core dataplane dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev iproute2 util-linux iputils-ping ethtool
+      - name: Run privileged core dataplane matrix
+        run: sudo env "PATH=$PATH" sh scripts/verify-plugin-release.sh core-dataplane
 
   flow-churn:
     runs-on: ubuntu-latest

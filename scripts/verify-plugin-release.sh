@@ -48,7 +48,7 @@ require_command() {
 }
 
 require_linux_root() {
-	[ "$(go env GOOS)" = "linux" ] || fail "$PROFILE requires Linux"
+	[ "$(uname -s)" = "Linux" ] || fail "$PROFILE requires Linux"
 	[ "$(id -u)" -eq 0 ] || fail "$PROFILE requires root"
 	for command_name in ip clang unshare ping awk sort; do
 		require_command "$command_name"
@@ -367,11 +367,14 @@ run_flow_churn() {
 	ensure_bpffs
 	new_temp_dir
 
-	log "build eBPF objects for flow churn integration"
-	sh "$ROOT_DIR/scripts/build-all-ebpf.sh"
-	log "build flow churn integration binary"
-	flow_churn_binary="$TMP_DIR/veer-flow-churn.test"
-	go test -c -o "$flow_churn_binary" ./internal/app
+	flow_churn_binary=${VEER_CORE_TEST_BINARY:-}
+	if [ -z "$flow_churn_binary" ]; then
+		log "build eBPF objects for flow churn integration"
+		sh "$ROOT_DIR/scripts/build-all-ebpf.sh"
+		log "build flow churn integration binary"
+		flow_churn_binary="$TMP_DIR/veer-flow-churn.test"
+		go test -c -o "$flow_churn_binary" ./internal/app
+	fi
 
 	flow_churn_log="$TMP_DIR/flow-churn.log"
 	flow_churn_pattern='^(TestCollectPreparedKernelRuleFlowPurgeTargets.*|TestKernelFlowPurgeRetryState.*|TestKernelFlowMatchesPurgeTargetsScopesInterfaceAndRevision|TestKernelFlowMatchesInterfaceScopedPurgeTargetRejectsCoveredAndInvalidTargets|TestKernelFlowPurgeSessionIdentityRequiresFullNATAndNonzeroSession|TestPurgeKernelFlowsForTargetsScopesTransparentBridgeMemberWithoutDeletingParent|TestPurgeKernelFlowsForTargetsScopesInterfaceAcrossTCBanksAndFamilies|TestPurgeKernelFlowsForTargetsHandlesMixedScopedAndFullRevisionTargets|TestPurgeKernelFlowsForTargetsDoesNotPairZeroSessionFullNATEntries|TestTCRuleMutationMapIDFromFDInfo|TestTCKernelRuleMutationEstablishedTCPConnection|TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection)$'
@@ -391,6 +394,33 @@ run_flow_churn() {
 		TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection
 	do
 		require_test_pass "$flow_churn_log" "$required_test"
+	done
+}
+
+run_core_dataplane() {
+	require_linux_root
+	for command_name in bridge mount mountpoint tc; do
+		require_command "$command_name"
+	done
+	ensure_bpffs
+	new_temp_dir
+	core_binary=${VEER_CORE_TEST_BINARY:-}
+	if [ -z "$core_binary" ]; then
+		sh "$ROOT_DIR/scripts/build-all-ebpf.sh"
+		core_binary="$TMP_DIR/veer-core.test"
+		go test -c -o "$core_binary" ./internal/app
+	fi
+	core_tests='TestLoadEmbeddedKernelCollectionsSmoke TestKernelPreparersRejectPortTruncation TestTCKernelIPv6Integration TestTCKernelIPv6RangeIntegration TestXDPKernelIPv4FullNATIntegration TestXDPKernelIPv4FullNATTransparentCoexists TestXDPKernelIPv4FullNATToggleDisableReenableRestoresConnectivity TestXDPKernelIPv4FullNATDeleteRecreateRestoresConnectivity TestXDPKernelIPv6Integration TestTCKernelTransparentRejectsACKOnlyNewSession TestXDPKernelTransparentRejectsACKOnlyNewSession TestEgressNATTCIntegration TestEgressNATXDPIntegration TestEgressNATUDPMappingRespectsNATType TestEgressNATKernelWildcardForwardCoexists'
+	core_pattern=$(printf '%s' "$core_tests" | tr ' ' '|')
+	core_log="$TMP_DIR/core-dataplane.log"
+	run_no_skips "core TC/XDP, IPv4/IPv6, NAT and session guard matrix" "$core_log" \
+		env FORWARD_RUN_KERNEL_LOAD_SMOKE=1 FORWARD_RUN_TC_IPV6_TEST=1 \
+		FORWARD_RUN_XDP_FULLNAT_TEST=1 FORWARD_RUN_XDP_IPV6_TEST=1 \
+		FORWARD_RUN_TCP_SESSION_GUARD_TEST=1 FORWARD_RUN_EGRESS_NAT_TEST=1 \
+		FORWARD_RUN_EGRESS_NAT_XDP_TEST=1 \
+		"$core_binary" -test.v -test.run "^($core_pattern)$" -test.count=1 -test.timeout=20m
+	for required_test in $core_tests; do
+		require_test_pass "$core_log" "$required_test"
 	done
 }
 
@@ -619,6 +649,9 @@ case "$PROFILE" in
 	flow-churn)
 		run_flow_churn
 		;;
+	core-dataplane)
+		run_core_dataplane
+		;;
 	stability)
 		run_stability
 		;;
@@ -629,11 +662,12 @@ case "$PROFILE" in
 		run_portable
 		run_privileged
 		run_flow_churn
+		run_core_dataplane
 		run_stability
 		run_performance
 		;;
 	*)
-		printf 'usage: %s [portable|privileged|flow-churn|stability|performance|all]\n' "$0" >&2
+		printf 'usage: %s [portable|privileged|flow-churn|core-dataplane|stability|performance|all]\n' "$0" >&2
 		exit 2
 		;;
 esac

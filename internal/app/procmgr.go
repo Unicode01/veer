@@ -2065,6 +2065,14 @@ func buildKernelCandidateRulesWithReservedEntries(rules []Rule, ranges []PortRan
 
 	rangePreferred := planner.resolvePreferredEngine("")
 	for _, pr := range ranges {
+		if reason := validatePortRangePorts(pr); reason != "" {
+			rangePlans[pr.ID] = rangeDataplanePlan{
+				PreferredEngine: rangePreferred,
+				EffectiveEngine: ruleEngineUserspace,
+				FallbackReason:  reason,
+			}
+			continue
+		}
 		owner := kernelCandidateOwner{kind: workerKindRange, id: pr.ID}
 		kernelReason := familyFallbackCache.Reason(pr.InIP, pr.OutIP, pr.Transparent)
 		variants := kernelProtocolVariants(pr.Protocol)
