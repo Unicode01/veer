@@ -221,14 +221,12 @@ func (relay *sharedQUICRelay) handleInitial(ctx context.Context, endpointKey str
 	relay.mu.Unlock()
 
 	relay.proxy.mu.RLock()
-	backend, ok := relay.proxy.quicRoutes[domain]
-	stats := relay.proxy.domainStats[domain]
-	sourceIP := relay.proxy.domainSourceIP[domain]
-	transparent := relay.proxy.domainTransparent[domain]
+	route, ok := relay.proxy.quicRoutes[domain]
 	relay.proxy.mu.RUnlock()
 	if !ok {
 		return
 	}
+	backend, stats, sourceIP, transparent := route.backend, route.stats, route.sourceIP, route.transparent
 	target, err := net.ResolveUDPAddr("udp", backend)
 	if err != nil {
 		log.Printf("shared proxy QUIC resolve %s -> %s: %v", domain, backend, err)

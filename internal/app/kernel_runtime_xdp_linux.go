@@ -2624,6 +2624,9 @@ func prepareXDPKernelRuleRef(rule *Rule, opts xdpPrepareOptions) ([]preparedXDPK
 	if rule == nil {
 		return nil, fmt.Errorf("xdp dataplane requires a rule")
 	}
+	if !isKernelEgressNATRule(*rule) && !validForwardPorts(rule.InPort, rule.OutPort) {
+		return nil, fmt.Errorf("ports must be between 1 and 65535")
+	}
 	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) {
 		return nil, fmt.Errorf("xdp dataplane requires a rule id in uint32 range")
 	}

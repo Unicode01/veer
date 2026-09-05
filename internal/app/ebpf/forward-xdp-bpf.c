@@ -1915,23 +1915,7 @@ static __always_inline void load_nat_port_window(__u32 *port_min, __u32 *port_ra
 	*port_range = max_port - min_port + 1U;
 }
 
-static __always_inline __u32 nat_probe_stride(__u32 seed, __u32 port_range)
-{
-	__u32 stride;
-
-	if (port_range <= 1U)
-		return 1U;
-
-	stride = (seed % (port_range - 1U)) + 1U;
-
-	if ((stride & 1U) == 0)
-		stride += 1U;
-	if (stride >= port_range)
-		stride -= (port_range - 1U);
-	if (stride == 0)
-		stride = 1U;
-	return stride;
-}
+#include "include/forward_nat_probe.h"
 
 static __always_inline void bump_kernel_nat_occupancy(void);
 static __always_inline void drop_kernel_nat_occupancy(void);

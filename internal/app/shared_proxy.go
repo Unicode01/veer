@@ -2,7 +2,6 @@ package app
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,7 +20,7 @@ import (
 const (
 	sharedProxyInitialReadTimeout = 15 * time.Second
 	sharedProxyHTTPReadBufferSize = 8 * 1024
-	sharedProxyTLSReadBufferSize  = 32 * 1024
+	sharedProxyTLSReadBufferSize  = 64 * 1024
 	sharedProxyMaxHeaderBytes     = 64 * 1024
 	sharedProxyMaxHeaderLines     = 128
 	sharedProxyMaxTLSRecordBytes  = 16 * 1024
@@ -40,15 +39,13 @@ func runSharedProxy(sockPath string) {
 	)
 
 	sp := &sharedProxyEngine{
-		httpRoutes:        make(map[string]string),
-		httpsRoutes:       make(map[string]string),
-		quicRoutes:        make(map[string]string),
-		listeners:         make(map[string]*managedListener),
-		quicListeners:     make(map[string]*managedQUICListener),
-		domainSiteID:      make(map[string]int64),
-		domainStats:       make(map[string]*siteStats),
-		domainSourceIP:    make(map[string]string),
-		domainTransparent: make(map[string]bool),
+		httpRoutes:    make(map[string]sharedProxyRoute),
+		httpsRoutes:   make(map[string]sharedProxyRoute),
+		quicRoutes:    make(map[string]sharedProxyRoute),
+		listeners:     make(map[string]*managedListener),
+		quicListeners: make(map[string]*managedQUICListener),
+		siteDomains:   make(map[int64]string),
+		domainStats:   make(map[int64]*siteStats),
 	}
 
 	sendIPC := func(msg IPCMessage) error {
@@ -80,10 +77,10 @@ func runSharedProxy(sockPath string) {
 	sendSiteStats := func() {
 		sp.mu.RLock()
 		reports := make([]SiteStatsReport, 0, len(sp.domainStats))
-		for domain, ss := range sp.domainStats {
+		for siteID, ss := range sp.domainStats {
 			reports = append(reports, SiteStatsReport{
-				SiteID:      sp.domainSiteID[domain],
-				Domain:      domain,
+				SiteID:      siteID,
+				Domain:      sp.siteDomains[siteID],
 				ActiveConns: atomic.LoadInt64(&ss.activeConns),
 				TotalConns:  atomic.LoadInt64(&ss.totalConns),
 				BytesIn:     atomic.LoadInt64(&ss.bytesIn),
@@ -129,11 +126,21 @@ func runSharedProxy(sockPath string) {
 			case <-sendTimer.C:
 				sp.mu.RLock()
 				active := siteStatsMapHasActivity(sp.domainStats)
+				generation := sp.generation
+				result := sp.listenerStatusLocked()
+				hasSites := len(sp.listenerSites)+len(sp.quicListenerSites)+len(sp.routeFailures) > 0
 				sp.mu.RUnlock()
 				connMu.Lock()
 				hasIPC := ipcConn != nil
 				connMu.Unlock()
 				if hasIPC {
+					if hasSites && atomic.LoadInt32(&pendingUpgrade) == 0 {
+						status := "running"
+						if result.activeListenerCount == 0 {
+							status = "error"
+						}
+						sendStatus(generation, status, result.summary(), result.failedSiteIDs)
+					}
 					sendSiteStats()
 				}
 				sendTimer.Reset(statsSendInterval(active))
@@ -215,7 +222,7 @@ func runSharedProxy(sockPath string) {
 					continue
 				}
 				log.Printf("shared proxy: updating %d sites", len(msg.Sites))
-				result := sp.applySites(ctx, msg.Sites)
+				result := sp.applySites(ctx, msg.Sites, msg.Generation)
 				if len(result.failedSiteIDs) > 0 {
 					status := "running"
 					if result.activeListenerCount == 0 {
@@ -255,6 +262,7 @@ func runSharedProxy(sockPath string) {
 }
 
 type managedListener struct {
+	done     chan struct{}
 	iface    string
 	addr     string
 	listener net.Listener
@@ -262,6 +270,7 @@ type managedListener struct {
 }
 
 type managedQUICListener struct {
+	done   chan struct{}
 	iface  string
 	addr   string
 	conn   *net.UDPConn
@@ -300,7 +309,7 @@ func (ss *siteStats) updateSpeed() {
 	atomic.StoreInt64(&ss.speedOut, sOut)
 }
 
-func siteStatsMapHasActivity(statsMap map[string]*siteStats) bool {
+func siteStatsMapHasActivity[K comparable](statsMap map[K]*siteStats) bool {
 	for _, ss := range statsMap {
 		if ss != nil && atomic.LoadInt64(&ss.activeConns) > 0 {
 			return true
@@ -329,16 +338,25 @@ func (r sharedProxyApplyResult) summary() string {
 }
 
 type sharedProxyEngine struct {
+	routeFailures     map[int64]struct{}
+	generation        uint64
+	listenerSites     map[string]map[int64]struct{}
+	quicListenerSites map[string]map[int64]struct{}
 	mu                sync.RWMutex
-	httpRoutes        map[string]string // domain -> ip:port
-	httpsRoutes       map[string]string // domain -> ip:port
-	quicRoutes        map[string]string // domain -> ip:port
+	httpRoutes        map[string]sharedProxyRoute
+	httpsRoutes       map[string]sharedProxyRoute
+	quicRoutes        map[string]sharedProxyRoute
 	listeners         map[string]*managedListener
 	quicListeners     map[string]*managedQUICListener
-	domainSiteID      map[string]int64      // domain -> site ID
-	domainStats       map[string]*siteStats // domain -> stats
-	domainSourceIP    map[string]string     // domain -> backend source IPv4
-	domainTransparent map[string]bool       // domain -> transparent flag
+	siteDomains       map[int64]string
+	domainStats       map[int64]*siteStats
+}
+
+type sharedProxyRoute struct {
+	backend     string
+	sourceIP    string
+	transparent bool
+	stats       *siteStats
 }
 
 type sharedProxyHTTPHeaders struct {
@@ -513,23 +531,42 @@ func peekSharedProxyTLSRecord(br *bufio.Reader) ([]byte, error) {
 	return record, nil
 }
 
-func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site) sharedProxyApplyResult {
+func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site, generation uint64) sharedProxyApplyResult {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
+	sp.generation = generation
+	sp.routeFailures = make(map[int64]struct{})
+	seenRoutes := make(map[string]int64)
+	for _, s := range sites {
+		domain, err := normalizeSharedSiteDomain(s.Domain)
+		if err != nil {
+			sp.routeFailures[s.ID] = struct{}{}
+			continue
+		}
+		for kind, port := range map[string]int{"http": s.BackendHTTP, "https": s.BackendHTTPS} {
+			if port == 0 {
+				continue
+			}
+			key := kind + "\x00" + domain
+			if previous, ok := seenRoutes[key]; ok {
+				sp.routeFailures[previous] = struct{}{}
+				sp.routeFailures[s.ID] = struct{}{}
+			}
+			seenRoutes[key] = s.ID
+		}
+	}
 
 	// Build new route tables
-	newHTTP := make(map[string]string)
-	newHTTPS := make(map[string]string)
-	newQUIC := make(map[string]string)
+	newHTTP := make(map[string]sharedProxyRoute)
+	newHTTPS := make(map[string]sharedProxyRoute)
+	newQUIC := make(map[string]sharedProxyRoute)
 	neededListeners := make(map[string]managedListener)
 	neededQUICListeners := make(map[string]managedQUICListener)
 	listenerSiteIDs := make(map[string]map[int64]struct{})
 	quicListenerSiteIDs := make(map[string]map[int64]struct{})
 
-	newSiteID := make(map[string]int64)
-	newStats := make(map[string]*siteStats)
-	newSourceIP := make(map[string]string)
-	newTransparent := make(map[string]bool)
+	newDomains := make(map[int64]string)
+	newStats := make(map[int64]*siteStats)
 	addListenerSiteID := func(key string, siteID int64) {
 		ids := listenerSiteIDs[key]
 		if ids == nil {
@@ -548,31 +585,35 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 	}
 
 	for _, s := range sites {
-		domain := strings.ToLower(s.Domain)
-		newSiteID[domain] = s.ID
-		newSourceIP[domain] = s.BackendSourceIP
-		newTransparent[domain] = s.Transparent
-		if old, ok := sp.domainStats[domain]; ok {
-			newStats[domain] = old
+		domain, _ := normalizeSharedSiteDomain(s.Domain)
+		newDomains[s.ID] = domain
+		if old, ok := sp.domainStats[s.ID]; ok {
+			newStats[s.ID] = old
 		} else {
-			newStats[domain] = &siteStats{}
+			newStats[s.ID] = &siteStats{}
 		}
+		if _, failed := sp.routeFailures[s.ID]; failed {
+			continue
+		}
+		route := sharedProxyRoute{sourceIP: s.BackendSourceIP, transparent: s.Transparent, stats: newStats[s.ID]}
 		if s.BackendHTTP > 0 {
-			newHTTP[domain] = net.JoinHostPort(s.BackendIP, fmt.Sprintf("%d", s.BackendHTTP))
+			route.backend = net.JoinHostPort(s.BackendIP, fmt.Sprintf("%d", s.BackendHTTP))
+			newHTTP[domain] = route
 			addr := net.JoinHostPort(s.ListenIP, "80")
 			key := listenerKey(s.ListenIface, addr)
 			neededListeners[key] = managedListener{iface: s.ListenIface, addr: addr}
 			addListenerSiteID(key, s.ID)
 		}
 		if s.BackendHTTPS > 0 {
-			newHTTPS[domain] = net.JoinHostPort(s.BackendIP, fmt.Sprintf("%d", s.BackendHTTPS))
+			route.backend = net.JoinHostPort(s.BackendIP, fmt.Sprintf("%d", s.BackendHTTPS))
+			newHTTPS[domain] = route
 			addr := net.JoinHostPort(s.ListenIP, "443")
 			key := listenerKey(s.ListenIface, addr)
 			neededListeners[key] = managedListener{iface: s.ListenIface, addr: addr}
 			addListenerSiteID(key, s.ID)
 		}
 		if s.QUIC && s.BackendHTTPS > 0 {
-			newQUIC[domain] = net.JoinHostPort(s.BackendIP, fmt.Sprintf("%d", s.BackendHTTPS))
+			newQUIC[domain] = route
 			addr := net.JoinHostPort(s.ListenIP, "443")
 			key := listenerKey(s.ListenIface, addr)
 			neededQUICListeners[key] = managedQUICListener{iface: s.ListenIface, addr: addr}
@@ -580,15 +621,24 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 		}
 	}
 
+	for id, stats := range sp.domainStats {
+		if _, exists := newStats[id]; !exists && atomic.LoadInt64(&stats.activeConns) > 0 {
+			newStats[id] = stats
+			newDomains[id] = sp.siteDomains[id]
+		}
+	}
 	sp.httpRoutes = newHTTP
 	sp.httpsRoutes = newHTTPS
 	sp.quicRoutes = newQUIC
-	sp.domainSiteID = newSiteID
+	sp.siteDomains = newDomains
 	sp.domainStats = newStats
-	sp.domainSourceIP = newSourceIP
-	sp.domainTransparent = newTransparent
+	sp.listenerSites = listenerSiteIDs
+	sp.quicListenerSites = quicListenerSiteIDs
 
 	failedSiteIDs := make(map[int64]struct{})
+	for id := range sp.routeFailures {
+		failedSiteIDs[id] = struct{}{}
+	}
 	var failedListeners []string
 
 	// Stop unneeded listeners
@@ -619,8 +669,13 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 
 	// Start new listeners
 	for key, spec := range neededListeners {
-		if _, exists := sp.listeners[key]; exists {
-			continue
+		if existing := sp.listeners[key]; existing != nil {
+			if !sharedListenerStopped(existing.done) {
+				continue
+			}
+			existing.cancel()
+			existing.listener.Close()
+			delete(sp.listeners, key)
 		}
 		lc := net.ListenConfig{}
 		if ctrl := controlBindToDevice(spec.iface); ctrl != nil {
@@ -639,13 +694,14 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 			continue
 		}
 		ctx, cancel := context.WithCancel(parentCtx)
-		sp.listeners[key] = &managedListener{iface: spec.iface, addr: spec.addr, listener: ln, cancel: cancel}
+		done := make(chan struct{})
+		sp.listeners[key] = &managedListener{iface: spec.iface, addr: spec.addr, listener: ln, cancel: cancel, done: done}
 
 		_, port, _ := net.SplitHostPort(spec.addr)
 		if port == "80" {
-			go sp.serveHTTP(ctx, ln, spec.addr)
+			go func() { defer close(done); sp.serveHTTP(ctx, ln, spec.addr) }()
 		} else {
-			go sp.serveHTTPS(ctx, ln, spec.addr)
+			go func() { defer close(done); sp.serveHTTPS(ctx, ln, spec.addr) }()
 		}
 		if spec.iface != "" {
 			log.Printf("shared proxy: listening on %s via %s", spec.addr, spec.iface)
@@ -656,8 +712,13 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 
 	// QUIC uses UDP 443 and therefore needs a listener separate from HTTPS/TCP.
 	for key, spec := range neededQUICListeners {
-		if _, exists := sp.quicListeners[key]; exists {
-			continue
+		if existing := sp.quicListeners[key]; existing != nil {
+			if !sharedListenerStopped(existing.done) {
+				continue
+			}
+			existing.cancel()
+			existing.conn.Close()
+			delete(sp.quicListeners, key)
 		}
 		udpConn, err := listenSharedProxyQUIC(parentCtx, spec.iface, spec.addr)
 		if err != nil {
@@ -672,8 +733,9 @@ func (sp *sharedProxyEngine) applySites(parentCtx context.Context, sites []Site)
 			continue
 		}
 		ctx, cancel := context.WithCancel(parentCtx)
-		sp.quicListeners[key] = &managedQUICListener{iface: spec.iface, addr: spec.addr, conn: udpConn, cancel: cancel}
-		go sp.serveQUIC(ctx, udpConn, spec.addr)
+		done := make(chan struct{})
+		sp.quicListeners[key] = &managedQUICListener{iface: spec.iface, addr: spec.addr, conn: udpConn, cancel: cancel, done: done}
+		go func() { defer close(done); sp.serveQUIC(ctx, udpConn, spec.addr) }()
 		if spec.iface != "" {
 			log.Printf("shared proxy: listening for QUIC on %s via %s", spec.addr, spec.iface)
 		} else {
@@ -704,113 +766,18 @@ func (sp *sharedProxyEngine) closeAll() {
 	}
 }
 
-func (sp *sharedProxyEngine) serveHTTP(ctx context.Context, ln net.Listener, addr string) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			continue
-		}
-		go sp.handleHTTPConn(ctx, conn)
-	}
-}
-
 func (sp *sharedProxyEngine) serveHTTPS(ctx context.Context, ln net.Listener, addr string) {
 	for {
-		conn, err := ln.Accept()
+		conn, err := acceptUserspaceTCP(ctx, ln)
 		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			continue
-		}
-		go sp.handleHTTPSConn(ctx, conn)
-	}
-}
-
-func (sp *sharedProxyEngine) handleHTTPConn(ctx context.Context, src net.Conn) {
-	defer src.Close()
-
-	clientIP, _, _ := net.SplitHostPort(src.RemoteAddr().String())
-
-	br := bufio.NewReaderSize(src, sharedProxyHTTPReadBufferSize)
-	setSharedProxyReadDeadline(src, sharedProxyInitialReadTimeout)
-	headers, err := readSharedProxyHTTPHeaders(br, clientIP)
-	if err != nil {
-		return
-	}
-
-	sp.mu.RLock()
-	backend, ok := sp.httpRoutes[headers.host]
-	ss := sp.domainStats[headers.host]
-	sourceIP := sp.domainSourceIP[headers.host]
-	transparent := sp.domainTransparent[headers.host]
-	sp.mu.RUnlock()
-	if !ok {
-		return
-	}
-
-	var dst net.Conn
-	var dialErr error
-	if transparent {
-		clientAddr := src.RemoteAddr().(*net.TCPAddr)
-		ip4 := clientAddr.IP.To4()
-		if ip4 == nil {
-			ip4 = clientAddr.IP
-		}
-		dialer := net.Dialer{
-			Timeout:   10 * time.Second,
-			LocalAddr: &net.TCPAddr{IP: ip4, Port: 0},
-			Control:   controlTransparent(ip4, ""),
-		}
-		dst, dialErr = dialer.DialContext(ctx, "tcp4", backend)
-	} else {
-		dialer := net.Dialer{Timeout: 10 * time.Second}
-		if dialErr = configureOutboundTCPDialer(&dialer, "", sourceIP); dialErr != nil {
-			log.Printf("shared proxy http dial %s -> %s: %v", headers.host, backend, dialErr)
 			return
 		}
-		dst, dialErr = dialer.DialContext(ctx, "tcp", backend)
-	}
-	if dialErr != nil {
-		log.Printf("shared proxy http dial %s -> %s: %v", headers.host, backend, dialErr)
-		return
-	}
-	defer dst.Close()
-
-	if ss != nil {
-		atomic.AddInt64(&ss.totalConns, 1)
-		atomic.AddInt64(&ss.activeConns, 1)
-		defer atomic.AddInt64(&ss.activeConns, -1)
-	}
-
-	// Write buffered headers (count as bytes in)
-	var headerBuf bytes.Buffer
-	for _, h := range headers.lines {
-		headerBuf.WriteString(h)
-		headerBuf.WriteString("\r\n")
-	}
-	headerBuf.WriteString("\r\n")
-	if err := writeAllCounting(dst, headerBuf.Bytes(), func() *int64 {
-		if ss == nil {
-			return nil
+		if !userspaceTCPBudget.tryAcquire() {
+			conn.Close()
+			continue
 		}
-		return &ss.bytesIn
-	}()); err != nil {
-		log.Printf("shared proxy http write buffered headers %s -> %s: %v", headers.host, backend, err)
-		return
+		go func() { defer userspaceTCPBudget.release(); sp.handleHTTPSConn(ctx, conn) }()
 	}
-
-	// Bridge remaining data
-	clearSharedProxyReadDeadline(src)
-	var inCounter, outCounter *int64
-	if ss != nil {
-		inCounter = &ss.bytesIn
-		outCounter = &ss.bytesOut
-	}
-	proxyTCPBidirectional(dst, src, br, inCounter, outCounter)
 }
 
 func (sp *sharedProxyEngine) handleHTTPSConn(ctx context.Context, src net.Conn) {
@@ -818,7 +785,7 @@ func (sp *sharedProxyEngine) handleHTTPSConn(ctx context.Context, src net.Conn) 
 
 	br := bufio.NewReaderSize(src, sharedProxyTLSReadBufferSize)
 	setSharedProxyReadDeadline(src, sharedProxyInitialReadTimeout)
-	record, err := peekSharedProxyTLSRecord(br)
+	record, err := peekSharedProxyClientHello(br)
 	if err != nil {
 		return
 	}
@@ -827,17 +794,15 @@ func (sp *sharedProxyEngine) handleHTTPSConn(ctx context.Context, src net.Conn) 
 	if sni == "" {
 		return
 	}
-	sni = strings.ToLower(sni)
+	sni = strings.ToLower(strings.TrimSuffix(sni, "."))
 
 	sp.mu.RLock()
-	backend, ok := sp.httpsRoutes[sni]
-	ss := sp.domainStats[sni]
-	sourceIP := sp.domainSourceIP[sni]
-	transparent := sp.domainTransparent[sni]
+	route, ok := sp.httpsRoutes[sni]
 	sp.mu.RUnlock()
 	if !ok {
 		return
 	}
+	backend, ss, sourceIP, transparent := route.backend, route.stats, route.sourceIP, route.transparent
 
 	var dst net.Conn
 	var err2 error

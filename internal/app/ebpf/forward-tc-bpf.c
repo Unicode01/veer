@@ -2887,22 +2887,7 @@ static __always_inline __u32 mix_nat_probe_seed(__u32 seed)
 	return seed;
 }
 
-static __always_inline __u32 nat_probe_stride(__u32 seed, __u32 port_range)
-{
-	__u32 stride;
-
-	if (port_range <= 1U)
-		return 1U;
-
-	stride = (seed % (port_range - 1U)) + 1U;
-	if ((stride & 1U) == 0)
-		stride += 1U;
-	if (stride >= port_range)
-		stride -= (port_range - 1U);
-	if (stride == 0)
-		stride = 1U;
-	return stride;
-}
+#include "include/forward_nat_probe.h"
 
 static __always_inline int try_reserve_nat_port(__u32 candidate, struct nat_port_key_v4 *nat_key, const struct nat_port_value_v4 *nat_value, __u16 *nat_port)
 {

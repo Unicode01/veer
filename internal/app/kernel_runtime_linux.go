@@ -3925,6 +3925,9 @@ func prepareKernelRuleRef(ctx *kernelPrepareContext, rule *Rule) ([]preparedKern
 	if rule == nil {
 		return nil, fmt.Errorf("kernel dataplane requires a rule")
 	}
+	if !isKernelEgressNATPassthroughRule(*rule) && !isKernelEgressNATRule(*rule) && !validForwardPorts(rule.InPort, rule.OutPort) {
+		return nil, fmt.Errorf("ports must be between 1 and 65535")
+	}
 	inLink, err := ctx.linkByName(rule.InInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve inbound interface %q: %w", rule.InInterface, err)

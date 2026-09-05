@@ -175,6 +175,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `PUT /api/rules`
 - `DELETE /api/rules?id=<rule_id>`
 - `POST /api/rules/toggle?id=<rule_id>`
+- `POST /api/rules/enabled?id=<rule_id>&enabled=<true|false>`
 - `POST /api/rules/validate`
 - `POST /api/rules/batch`
 
@@ -185,6 +186,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `PUT /api/sites`
 - `DELETE /api/sites?id=<site_id>`
 - `POST /api/sites/toggle?id=<site_id>`
+- `POST /api/sites/enabled?id=<site_id>&enabled=<true|false>`
 
 ### 端口范围
 
@@ -1019,6 +1021,8 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 `POST /api/rules/toggle?id=<rule_id>`
 
+自动化客户端应使用 `POST /api/rules/enabled?id=<rule_id>&enabled=true` 或 `enabled=false` 设置明确状态。重复提交不会反转状态，启用时仍检查监听冲突；`enabled` 必须是单个 `true` 或 `false`。旧 `toggle` 接口保留，但不适合在超时后直接重试。
+
 响应示例：
 
 ```json
@@ -1105,6 +1109,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 规则：
 
 - 必填：`domain`、`backend_ip`
+- `domain` 规范化为小写 ASCII DNS 主机名（IDNA），去除末尾根域点；不接受 URL、端口或通配符。同协议的规范化域名不得重复，历史冲突记录会报告失败而不会任意覆盖路由
 - `backend_http_port` 和 `backend_https_port` 至少一个非 `0`
 - `quic` 默认 `false`；设为 `true` 时 `backend_https_port` 必须非 `0`
 - QUIC 使用入口 UDP `443`，复用 `backend_https_port` 作为后端 UDP 端口，并与普通 UDP 规则/范围参与监听冲突校验
@@ -1123,6 +1128,8 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 ### 3.4 启用或禁用站点
 
 `POST /api/sites/toggle?id=<site_id>`
+
+自动化客户端应使用 `POST /api/sites/enabled?id=<site_id>&enabled=true` 或 `enabled=false` 设置明确状态，重复请求不会反转状态。返回结构与 `toggle` 相同。
 
 ### 3.5 删除站点
 
@@ -1166,8 +1173,11 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - `protocol` 允许：`tcp`、`udp`、`tcp+udp`
 - 省略 `protocol` 时默认 `tcp`
 - `out_start_port = 0` 时自动等于 `start_port`
+- 目标末端 `out_start_port + end_port - start_port` 不得超过 `65535`，历史配置和 worker 收到的范围同样检查
 - `transparent = true` 时必须省略 `out_source_ip`
 - 创建后默认 `enabled = true`
+
+用户态 rule/range worker 共用进程级监听预算：Linux 下为 `min(1024, RLIMIT_NOFILE / 8)`（极低限制下至少 1），其他平台为 1024。TCP+UDP 每端口占两个监听名额。超过预算的范围不会启动部分监听，也不会继续分配大批 goroutine；状态会返回明确的预算错误，应缩小范围或使用可用的内核转发。已部分成功的范围只重试失效监听，不重绑健康端口。
 
 ### 4.3 更新范围
 
