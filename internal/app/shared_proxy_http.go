@@ -15,6 +15,11 @@ import (
 
 type sharedHTTPContextKey struct{}
 
+type sharedHTTPBufferPool struct{}
+
+func (sharedHTTPBufferPool) Get() []byte  { return getTCPProxyBuffer() }
+func (sharedHTTPBufferPool) Put(b []byte) { putTCPProxyBuffer(b) }
+
 // Each frontend connection owns its backend pool, including transparent source IP.
 type sharedHTTPSession struct {
 	mu        sync.Mutex
@@ -93,7 +98,8 @@ func (sp *sharedProxyEngine) handleHTTPRequest(w http.ResponseWriter, r *http.Re
 	transport := session.transport
 	session.mu.Unlock()
 	proxy := httputil.ReverseProxy{
-		Transport: transport,
+		Transport:  transport,
+		BufferPool: sharedHTTPBufferPool{},
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
 			pr.Out.URL.Host = route.backend

@@ -165,3 +165,45 @@ func TestSharedRoutesKeepProtocolSpecificMetadata(t *testing.T) {
 		sp.applySites(context.Background(), sites, 2)
 	}
 }
+
+func BenchmarkSharedHTTPKeepAlive(b *testing.B) {
+	payload := strings.Repeat("x", 1024)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, payload)
+	}))
+	defer backend.Close()
+	sp := &sharedProxyEngine{httpRoutes: map[string]sharedProxyRoute{
+		"bench.test": {backend: strings.TrimPrefix(backend.URL, "http://")},
+	}}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); sp.serveHTTP(context.Background(), ln, ln.Addr().String()) }()
+	defer func() { ln.Close(); <-done }()
+	transport := &http.Transport{MaxIdleConnsPerHost: 32}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	url := "http://" + ln.Addr().String()
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			req, _ := http.NewRequest(http.MethodGet, url, nil)
+			req.Host = "bench.test"
+			response, err := client.Do(req)
+			if err != nil {
+				b.Error(err)
+				return
+			}
+			n, err := io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+			if err != nil || response.StatusCode != http.StatusOK || n != int64(len(payload)) {
+				b.Errorf("response status=%d bytes=%d error=%v", response.StatusCode, n, err)
+				return
+			}
+		}
+	})
+}
