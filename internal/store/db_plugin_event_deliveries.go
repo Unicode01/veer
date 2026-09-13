@@ -114,8 +114,12 @@ func GetDuePluginEventDeliveries(db RuleStore, pluginID, subscriptionID string, 
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]PluginEventDelivery, 0, limit)
+	// Most recovery scans are empty. Allocate only when a row is present.
+	items := []PluginEventDelivery{}
 	for rows.Next() {
+		if len(items) == 0 {
+			items = make([]PluginEventDelivery, 0, limit)
+		}
 		item, err := scanPluginEventDelivery(rows)
 		if err != nil {
 			return nil, err
@@ -123,6 +127,17 @@ func GetDuePluginEventDeliveries(db RuleStore, pluginID, subscriptionID string, 
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func NextPluginEventDeliveryTime(db RuleStore, pluginID, subscriptionID string) (int64, bool, error) {
+	var next int64
+	err := db.QueryRow(`SELECT next_attempt_unix_ms FROM plugin_event_deliveries
+		WHERE plugin_id = ? AND subscription_id = ? AND status = ?
+		ORDER BY next_attempt_unix_ms, id LIMIT 1`, pluginID, subscriptionID, PluginEventDeliveryPending).Scan(&next)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	return next, err == nil, err
 }
 
 func GetPluginEventDelivery(db RuleStore, pluginID, deliveryID string) (*PluginEventDelivery, error) {

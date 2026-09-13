@@ -44,11 +44,14 @@ type linuxPluginDataplaneRuntime struct {
 	netfilter   *kernelNetfilterPluginPipelineRuntime
 	combinedMu  sync.Mutex
 	combined    pluginRuntimeSnapshot
+	pendingTC   *pluginDirectTCUpdate
+	retiredTC   map[string]*loadedPluginDataplane
 }
 
 type loadedPluginDataplane struct {
 	objects []loadedPluginObjectRef
 	filters []*netlink.BpfFilter
+	plans   []pluginTCAttachPlan
 }
 
 type pluginDataplaneDesiredPlugin struct {
@@ -129,45 +132,7 @@ func (rt *linuxPluginDataplaneRuntime) reconcileDirectTC(catalog PluginCatalog) 
 	for id, state := range planStates {
 		states[id] = state
 	}
-	fingerprint := pluginDataplaneFingerprint(desired, states)
-	if fingerprint == rt.fingerprint {
-		if rt.loadedAttachmentsHealthyLocked() {
-			return clonePluginRuntimeSnapshot(rt.snapshot)
-		}
-		log.Printf("plugin runtime: detected missing tc attachment, rebuilding plugin dataplane")
-	}
-
-	rt.cleanupLocked()
-	rt.loaded = make(map[string]*loadedPluginDataplane)
-	for _, item := range desired {
-		state := PluginRuntimeState{
-			Mode:       pluginRuntimeModeDataplane,
-			Attachable: true,
-			Attached:   false,
-			Reason:     strings.Join(item.warnings, "; "),
-		}
-		loaded, attachments, err := rt.loadDesiredPlugin(item)
-		if err != nil {
-			state.Mode = pluginRuntimeModeError
-			state.Attachable = false
-			state.Error = err.Error()
-			if state.Reason == "" {
-				state.Reason = "plugin dataplane attach failed"
-			}
-			cleanupLoadedPluginDataplane(loaded)
-			states[item.plugin.ID] = state
-			continue
-		}
-		state.Attached = len(attachments) > 0
-		state.AttachmentCount = len(attachments)
-		state.Attachments = sortedPluginAttachmentStates(attachments)
-		states[item.plugin.ID] = state
-		rt.loaded[item.plugin.ID] = loaded
-	}
-
-	rt.fingerprint = fingerprint
-	rt.snapshot = pluginRuntimeSnapshot{Plugins: states}
-	return clonePluginRuntimeSnapshot(rt.snapshot)
+	return rt.reconcileDirectTCPlans(desired, states)
 }
 
 func (rt *linuxPluginDataplaneRuntime) Snapshot() pluginRuntimeSnapshot {
@@ -236,6 +201,20 @@ func (rt *linuxPluginDataplaneRuntime) dataplaneEnabled() bool {
 }
 
 func (rt *linuxPluginDataplaneRuntime) cleanupLocked() {
+	if rt.pendingTC != nil {
+		if err := rt.pendingTC.rollback(); err != nil {
+			log.Printf("plugin direct tc rollback during shutdown: %v", err)
+		}
+		for _, loaded := range rt.pendingTC.next {
+			for _, filter := range loaded.filters {
+				_ = removeOwnedPluginTCFilter(filter)
+			}
+		}
+		closeUnusedPluginTCObjects(rt.pendingTC.next, rt.loaded)
+		rt.pendingTC = nil
+	}
+	_ = retirePluginTCGeneration(rt.retiredTC, rt.loaded)
+	rt.retiredTC = nil
 	for id, loaded := range rt.loaded {
 		cleanupLoadedPluginDataplane(loaded)
 		delete(rt.loaded, id)
@@ -248,7 +227,9 @@ func cleanupLoadedPluginDataplane(loaded *loadedPluginDataplane) {
 	}
 	for i := len(loaded.filters) - 1; i >= 0; i-- {
 		if loaded.filters[i] != nil {
-			_ = netlink.FilterDel(loaded.filters[i])
+			if err := removeOwnedPluginTCFilter(loaded.filters[i]); err != nil {
+				log.Printf("plugin direct tc cleanup: %v", err)
+			}
 		}
 	}
 	seen := make(map[*ebpf.Collection]struct{}, len(loaded.objects))
@@ -265,6 +246,9 @@ func cleanupLoadedPluginDataplane(loaded *loadedPluginDataplane) {
 }
 
 func (rt *linuxPluginDataplaneRuntime) loadedAttachmentsHealthyLocked() bool {
+	if rt.pendingTC != nil || len(rt.retiredTC) != 0 {
+		return false
+	}
 	for _, loaded := range rt.loaded {
 		if loaded == nil {
 			continue
@@ -295,7 +279,8 @@ func pluginTCFilterExists(filter *netlink.BpfFilter) bool {
 		if !ok || bpf == nil {
 			continue
 		}
-		if bpf.Priority == filter.Priority && bpf.Handle == filter.Handle && bpf.Name == filter.Name {
+		if bpf.Priority == filter.Priority && bpf.Handle == filter.Handle && bpf.Name == filter.Name &&
+			(filter.Id == 0 || bpf.Id == filter.Id) {
 			return true
 		}
 	}
@@ -472,64 +457,6 @@ func assignPluginTCFilterIDs(items []pluginDataplaneDesiredPlugin) error {
 	return nil
 }
 
-func (rt *linuxPluginDataplaneRuntime) loadDesiredPlugin(item pluginDataplaneDesiredPlugin) (*loadedPluginDataplane, []PluginAttachmentState, error) {
-	if len(item.attachments) == 0 {
-		return &loadedPluginDataplane{}, nil, nil
-	}
-	if len(item.attachments) > pluginTCFilterMaxCount {
-		return nil, nil, fmt.Errorf("too many plugin tc attachments: %d > %d", len(item.attachments), pluginTCFilterMaxCount)
-	}
-	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Printf("plugin runtime: remove memlock limit: %v", err)
-	}
-	loaded := &loadedPluginDataplane{}
-	objects := make(map[string]*loadedPluginObject)
-	states := make([]PluginAttachmentState, 0, len(item.attachments))
-	for _, plan := range item.attachments {
-		object, err := loadPluginObjectForAttach(objects, plan.ObjectPath, plan.ObjectSHA256)
-		if err != nil {
-			cleanupLoadedPluginObjectCache(objects)
-			return loaded, states, err
-		}
-		prog, err := pluginProgramForAttach(object, plan.ProgramSection, plan.ProgramRef)
-		if err != nil {
-			cleanupLoadedPluginObjectCache(objects)
-			return loaded, states, err
-		}
-		filter, err := attachPluginTCProgram(plan, prog)
-		if err != nil {
-			cleanupLoadedPluginObjectCache(objects)
-			return loaded, states, fmt.Errorf("attach hook %s on %s %s: %w", plan.HookID, plan.Interface, plan.Attach, err)
-		}
-		loaded.filters = append(loaded.filters, filter)
-		states = append(states, PluginAttachmentState{
-			HookID:       plan.HookID,
-			Engine:       kernelEngineTC,
-			Attach:       plan.Attach,
-			Interface:    plan.Interface,
-			Program:      plan.ObjectID + ":" + plan.ProgramRef,
-			Mode:         plan.Mode,
-			Priority:     int(plan.Priority),
-			FilterHandle: fmt.Sprintf("0x%x", netlink.MakeHandle(0, plan.HandleMinor)),
-			Status:       "attached",
-		})
-	}
-	for _, plan := range item.attachments {
-		if object := objects[plan.ObjectPath]; object != nil && object.coll != nil {
-			loaded.objects = append(loaded.objects, loadedPluginObjectRef{
-				PluginID:     plan.PluginID,
-				ObjectID:     plan.ObjectID,
-				ObjectPath:   plan.ObjectPath,
-				ObjectSHA256: plan.ObjectSHA256,
-				spec:         object.spec,
-				coll:         object.coll,
-			})
-		}
-	}
-	loaded.objects = uniqueLoadedPluginObjectRefs(loaded.objects)
-	return loaded, states, nil
-}
-
 func uniqueLoadedPluginObjectRefs(refs []loadedPluginObjectRef) []loadedPluginObjectRef {
 	if len(refs) < 2 {
 		return refs
@@ -559,6 +486,9 @@ func cleanupLoadedPluginObjectCache(objects map[string]*loadedPluginObject) {
 func loadPluginObjectForAttach(cache map[string]*loadedPluginObject, objectPath, expectedSHA256 string) (*loadedPluginObject, error) {
 	if object, ok := cache[objectPath]; ok {
 		return object, nil
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		log.Printf("plugin runtime: remove memlock limit: %v", err)
 	}
 	spec, err := loadVerifiedPluginObjectCollectionSpec(objectPath, expectedSHA256)
 	if err != nil {
@@ -601,18 +531,8 @@ func pluginProgramForAttach(object *loadedPluginObject, section, programRef stri
 	return prog, nil
 }
 
-func attachPluginTCProgram(plan pluginTCAttachPlan, prog *ebpf.Program) (*netlink.BpfFilter, error) {
-	if prog == nil {
-		return nil, fmt.Errorf("nil program")
-	}
-	if err := ensureClsactQdisc(plan.IfIndex); err != nil {
-		return nil, err
-	}
-	name := pluginTCFilterName(plan)
-	if err := ensurePluginTCFilterSlotAvailable(plan, name); err != nil {
-		return nil, err
-	}
-	filter := &netlink.BpfFilter{
+func newPluginTCFilter(plan pluginTCAttachPlan, prog *ebpf.Program) *netlink.BpfFilter {
+	return &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
 			LinkIndex: plan.IfIndex,
 			Handle:    netlink.MakeHandle(0, plan.HandleMinor),
@@ -621,13 +541,20 @@ func attachPluginTCProgram(plan pluginTCAttachPlan, prog *ebpf.Program) (*netlin
 			Protocol:  unix.ETH_P_ALL,
 		},
 		Fd:           prog.FD(),
-		Name:         name,
+		Name:         pluginTCFilterName(plan),
+		Id:           int(kernelProgramID(prog)),
 		DirectAction: true,
 	}
-	if err := netlink.FilterReplace(filter); err != nil {
-		return nil, err
+}
+
+func installPluginTCFilter(plan pluginTCAttachPlan, filter *netlink.BpfFilter) error {
+	if err := ensureClsactQdisc(plan.IfIndex); err != nil {
+		return err
 	}
-	return filter, nil
+	if err := ensurePluginTCFilterSlotAvailable(plan, filter.Name); err != nil {
+		return err
+	}
+	return netlink.FilterReplace(filter)
 }
 
 func ensurePluginTCFilterSlotAvailable(plan pluginTCAttachPlan, name string) error {
@@ -641,17 +568,14 @@ func ensurePluginTCFilterSlotAvailable(plan pluginTCAttachPlan, name string) err
 	}
 	handle := netlink.MakeHandle(0, plan.HandleMinor)
 	for _, item := range filters {
-		bpf, ok := item.(*netlink.BpfFilter)
-		if !ok || bpf == nil {
+		attrs := item.Attrs()
+		if attrs.Priority != plan.Priority || attrs.Handle != handle {
 			continue
 		}
-		if bpf.Priority != plan.Priority || bpf.Handle != handle {
-			continue
-		}
-		if bpf.Name == name {
+		if bpf, ok := item.(*netlink.BpfFilter); ok && bpf.Name == name {
 			return nil
 		}
-		return fmt.Errorf("tc filter priority/handle slot already used by %q", bpf.Name)
+		return fmt.Errorf("tc filter priority/handle slot already used by %s filter", item.Type())
 	}
 	return nil
 }

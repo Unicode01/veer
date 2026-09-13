@@ -164,11 +164,13 @@ Linux 子进程设置 `no_new_privs` 及 core/FD rlimit，并在 root 服务下�
 
 每个插件的所有 VM 共享 cgroup v2 上限：512 MiB 内存、64 个进程和 2 个 CPU 配额；另有每进程 224 MiB RSS 兜底监控。Veer 会只增不减地把 `memory/pids/cpu` controller 委派到自己的 cgroup 子树，适配默认未启用 subtree controller 的 OpenWrt；无法获得所需 controller 时仍拒绝 full sandbox。`plugins_min_sandbox_level` 默认是 `full`；缺少 UID/GID 隔离、Landlock/空 chroot 文件系统隔离、seccomp TSYNC 或硬资源限制时，父子进程会在执行插件 JavaScript 前拒绝启动。旧内核或开发环境可显式降为 `partial`、`minimal` 或 `none`，实际降级原因仍显示在 `runtime.isolation.sandbox_level/sandbox_degraded`。Windows 只有 Job Object 和 `partial` 等级，必须显式降低策略后才能运行控制插件。
 
+IPC 请求的超时覆盖写入、等待响应及 host call 回复；终止进程和关闭管道不依赖发送锁。子进程停止读取时，中断和关闭仍有独立的强制终止兜底。
+
 `plugins_isolation=false` 只用于受信任的本地调试。它会恢复进程内 Goja VM，插件脚本缺陷可直接消耗主进程资源，因此生产环境不应关闭。关闭整个插件系统时不会创建 plugin-host，也不会给 TC/XDP 每包路径增加分支或 IPC。
 
 资源事务、插件包安装和 VM 热升级提供宿主可控制范围内的原子提交与失败回滚。普通 handler 内的 netlink 修改、eBPF map 写入、socket 写入、L2/UDP 发送和跨插件动作不能形成跨内核与外部对端的全局事务；插件必须使用幂等 reconcile、明确的 ownership 和补偿清理。普通 JavaScript 错误允许 `finally` 中提交修复 timer，超时、OOM 或协议退出则丢弃该未完成事件的 timer journal。
 
-Veer 每 2 秒检查插件源目录内容指纹。插件增删或 `plugin.json`、`control.js`、UI、eBPF object 变化只会设置 `update_available`，不会自动执行候选代码或重建数据面；WebUI 的“应用更新”或 `POST /api/plugins/reload` 会复制一份稳定候选快照，完成 manifest、control、UI 和 object 校验后再 reconcile。校验或运行时切换失败会保留上一份已应用快照。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据。
+Veer 每 2 秒在独立后台任务中检查插件源目录，重叠扫描会合并。文件身份、大小、mtime 和权限未变时复用内容 hash，每 30 秒重新计算完整内容指纹，因此保留大小和 mtime 的内容修改也会被发现。插件增删或 `plugin.json`、`control.js`、UI、eBPF object 变化只会设置 `update_available`，不会自动执行候选代码或重建数据面；WebUI 的“应用更新”或 `POST /api/plugins/reload` 会复制一份稳定候选快照，不使用扫描缓存，完成 manifest、control、UI 和 object 校验后再 reconcile。校验或运行时切换失败会保留上一份已应用快照。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据。
 
 启动时同样先创建私有已应用快照；快照失败会保持外部控制面和数据面插件关闭，并在 catalog 中报告错误，绝不退回可变源目录直接执行。Goja 主脚本在 VM 创建前还会复核 catalog 记录的已应用 SHA256，避免初始化与执行之间的文件替换绕过手动更新门禁。
 
@@ -504,6 +506,8 @@ exports.onPPPoESession = function (ctx) {
 
 默认 `delivery="volatile"` 只使用内存队列，适合状态通知和可重新计算的事件。需要进程重启后继续投递时声明 `delivery="durable"`，并可设置 `max_attempts=1..16` 与 `retry_delay_ms=100..60000`；默认最多 8 次、初始退避 500 ms。durable 事件会先原子写入 SQLite，再由订阅 worker 按顺序领取；handler 成功后删除，失败后指数退避，达到上限后转为 dead letter。每插件最多保留 2048 条、全局最多 16384 条 durable delivery，配额满时本次发布计入 `dropped`，不会阻塞发布方或挤掉已有记录。
 
+持久事件在发布、完成投递和手动重试时唤醒订阅，按下一条记录的重试时间调度；队列按批次读取，空闲时每 30 秒执行恢复扫描。运行时启动会立即恢复到期记录，正常发布和重试不必等待恢复扫描。
+
 插件只能通过 `events.deadLetters()` 查看自己的死信，通过 `events.retry(deliveryId)` 把 dead 状态恢复为 pending，或通过 `events.discard(deliveryId)` 明确丢弃；不能删除仍在等待投递的 pending 事件。管理员可在插件管理页统一筛选、重试和确认丢弃所有插件死信，也可使用 `/api/plugin-event-dead-letters` 系列接口。重试复用原 `delivery_id`、payload 和幂等上下文，不会重新发布或生成第二条事件；handler 仍应使用 `ctx.event.delivery_id` 实现下游幂等。所有管理员变更都会写入插件审计日志。
 
 运行时同时校验 topic 命名空间和真实发布来源，不能通过伪造 `plugin.<其他插件>.*` 绕过授权。系统事件包括 `net.link`、`net.addr`、`net.neigh`、`net.route`、`resource.changed` 和 `plugin.lifecycle`。网络事件要求 `net.admin` 以及对应接口的 `net_access: link.read`；多路径路由只有在全部相关接口均获授权且接口解析完整时才会投递。
@@ -630,6 +634,8 @@ F.onLocaleChange(function () {
 ## TC 数据面插件
 
 同时启用 `plugins_enabled=true` 和 `plugins_dataplane_enabled=true` 后，使用 `pipeline.attach()` 注册 TC `direction=forward` 或 `direction=reply` 的可信插件可以进入内置 `veer` pipeline。没有实际插件链时，不会给热路径增加额外 lookup。
+
+通过 `hooks.attach()` 直接挂载到接口的 TC `observe` 插件按对象和挂载点增量更新。对象内容未变时复用程序及 Map；接口迁移、缺失挂载修复不会卸载全部观察插件。候选对象先准备完成，再修改挂载；挂载失败会回滚已经切换的过滤器，回滚失败时保留必要句柄并在后续 reconcile 重试。多个接口的切换不保证跨接口原子性；显式移除或禁用的插件不会因其他插件候选失败而继续运行。
 
 `veer` 是逻辑 pipeline，不是 Linux netdev。它的作用是把宿主 TC dispatcher、插件 eBPF 程序和内置 Veer Core 编排成一条 tail-call chain：
 

@@ -15,6 +15,44 @@ import (
 
 const pluginHotReloadContentHashMaxBytes = pluginObjectMaxSize
 
+const pluginCatalogFullScanEvery = 30 * time.Second
+
+type pluginCatalogCachedFile struct {
+	info os.FileInfo
+	sum  string
+}
+
+// Used only for update discovery. Snapshots and candidate validation always
+// hash content without this cache, including same-size, same-mtime edits.
+type pluginCatalogFingerprintCache struct {
+	files      map[string]pluginCatalogCachedFile
+	fullScanAt time.Time
+}
+
+func (cache *pluginCatalogFingerprintCache) fingerprint(root string, now time.Time) (string, error) {
+	full := cache.fullScanAt.IsZero() || now.Sub(cache.fullScanAt) >= pluginCatalogFullScanEvery
+	files := make(map[string]pluginCatalogCachedFile)
+	fingerprint, err := buildPluginDirectoryFingerprintWithHasher(root, nil, func(path string, info os.FileInfo) (string, error) {
+		if previous, ok := cache.files[path]; !full && ok && os.SameFile(previous.info, info) &&
+			previous.info.Mode() == info.Mode() && previous.info.Size() == info.Size() && previous.info.ModTime().Equal(info.ModTime()) {
+			files[path] = previous
+			return previous.sum, nil
+		}
+		sum, err := sha256File(path)
+		if err == nil {
+			files[path] = pluginCatalogCachedFile{info: info, sum: sum}
+		}
+		return sum, err
+	})
+	cache.files = files
+	if err != nil {
+		cache.fullScanAt = time.Time{}
+	} else if full {
+		cache.fullScanAt = now
+	}
+	return fingerprint, err
+}
+
 const (
 	pluginCatalogHotReloadResultSuccess   = "success"
 	pluginCatalogHotReloadResultError     = "error"
@@ -48,6 +86,12 @@ func buildPluginDirectoryFingerprint(root string) (string, error) {
 }
 
 func buildPluginDirectoryFingerprintWithSkip(root string, skip func(string, os.DirEntry) bool) (string, error) {
+	return buildPluginDirectoryFingerprintWithHasher(root, skip, func(path string, _ os.FileInfo) (string, error) {
+		return sha256File(path)
+	})
+}
+
+func buildPluginDirectoryFingerprintWithHasher(root string, skip func(string, os.DirEntry) bool, hashFile func(string, os.FileInfo) (string, error)) (string, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return "plugins-dir-error:" + root + ":" + err.Error(), err
@@ -137,7 +181,7 @@ func buildPluginDirectoryFingerprintWithSkip(root string, skip func(string, os.D
 			if info.Size() > pluginHotReloadContentHashMaxBytes {
 				fmt.Fprintf(h, "content-skip path=%s reason=size>%d mtime=%d\n", rel, pluginHotReloadContentHashMaxBytes, info.ModTime().UnixNano())
 			} else {
-				sum, hashErr := sha256File(path)
+				sum, hashErr := hashFile(path, info)
 				if hashErr != nil {
 					fmt.Fprintf(h, "content-error path=%s err=%v\n", rel, hashErr)
 					if firstErr == nil {
@@ -567,6 +611,8 @@ func (pm *ProcessManager) cleanupPluginCatalogSnapshot() {
 	if pm == nil {
 		return
 	}
+	pm.pluginCatalogUpdateMu.Lock()
+	defer pm.pluginCatalogUpdateMu.Unlock()
 	pm.mu.Lock()
 	dir := pm.pluginCatalogAppliedDir
 	pm.pluginCatalogAppliedDir = ""
@@ -616,7 +662,7 @@ func pluginCatalogConfigForProcess(pm *ProcessManager, fallback *Config) *Config
 }
 
 func (pm *ProcessManager) shouldCheckPluginCatalogDriftLocked(now time.Time) bool {
-	if pm == nil || pm.cfg == nil || !pm.cfg.PluginsEnabled() {
+	if pm == nil || pm.cfg == nil || !pm.cfg.PluginsEnabled() || pm.pluginCatalogScanRunning {
 		return false
 	}
 	if now.IsZero() {
@@ -625,13 +671,43 @@ func (pm *ProcessManager) shouldCheckPluginCatalogDriftLocked(now time.Time) boo
 	return pm.pluginCatalogCheckAt.IsZero() || now.Sub(pm.pluginCatalogCheckAt) >= pluginCatalogDriftCheckEvery
 }
 
+func (pm *ProcessManager) startPluginCatalogDriftCheck() {
+	pm.mu.Lock()
+	if pm.shuttingDown || pm.pluginCatalogScanRunning {
+		pm.mu.Unlock()
+		return
+	}
+	pm.pluginCatalogScanRunning = true
+	pm.mu.Unlock()
+	go func() {
+		defer func() {
+			pm.mu.Lock()
+			pm.pluginCatalogScanRunning = false
+			pm.mu.Unlock()
+		}()
+		pm.detectPluginCatalogDrift()
+	}()
+}
+
 func (pm *ProcessManager) detectPluginCatalogDrift() bool {
 	if pm == nil {
 		return false
 	}
 	pm.pluginCatalogUpdateMu.Lock()
 	defer pm.pluginCatalogUpdateMu.Unlock()
-	next, err := buildPluginCatalogFingerprint(pm.cfg)
+	pm.mu.Lock()
+	stopping := pm.shuttingDown
+	pm.mu.Unlock()
+	if stopping {
+		return false
+	}
+	var next string
+	var err error
+	if pm.cfg == nil || !pm.cfg.PluginsEnabled() {
+		next = "plugins-disabled"
+	} else {
+		next, err = pm.pluginCatalogScanCache.fingerprint(normalizePluginsDir(pm.cfg.PluginsDir), time.Now())
+	}
 	now := time.Now()
 	checkResult := pluginCatalogHotReloadResultSuccess
 	checkError := ""
@@ -662,10 +738,15 @@ func (pm *ProcessManager) detectPluginCatalogDrift() bool {
 	}
 	updates := previousUpdates
 	if err == nil {
-		updates = nil
-		if next != applied && appliedDir != "" && sourceDir != "" {
-			updates = pluginCatalogUpdatesBetweenDirs(appliedDir, sourceDir)
+		if next == applied {
+			updates = nil
+		} else if next != previousDetected || applied != pm.pluginCatalogComparedApplied {
+			updates = nil
+			if appliedDir != "" && sourceDir != "" {
+				updates = pluginCatalogUpdatesBetweenDirs(appliedDir, sourceDir)
+			}
 		}
+		pm.pluginCatalogComparedApplied = applied
 	}
 	updateAvailable := len(updates) > 0
 	if updateAvailable && err == nil {
@@ -704,6 +785,8 @@ func (pm *ProcessManager) applyPluginCatalogUpdateSelection(pluginIDs []string) 
 	}
 	pm.pluginCatalogUpdateMu.Lock()
 	defer pm.pluginCatalogUpdateMu.Unlock()
+	pm.pluginCatalogScanCache = pluginCatalogFingerprintCache{}
+	pm.pluginCatalogComparedApplied = ""
 
 	detectedDir, detectedFingerprint, err := snapshotPluginCatalogDirectory(pm.cfg)
 	pm.mu.Lock()

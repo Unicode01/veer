@@ -17,33 +17,34 @@ import (
 )
 
 const (
-	pluginEventDefaultQueueSize     = 64
-	pluginEventMaxQueueSize         = 256
-	pluginEventMaxSubscriptions     = 64
-	pluginEventMaxAccessEntries     = 64
-	pluginEventMaxAccessTopics      = 256
-	pluginEventMaxPayloadBytes      = 64 << 10
-	pluginEventDefaultWorker        = "events"
-	pluginEventDefaultHandler       = "onEvent"
-	pluginEventMatchExact           = "exact"
-	pluginEventMatchPrefix          = "prefix"
-	pluginEventDeliveryVolatile     = "volatile"
-	pluginEventDeliveryDurable      = "durable"
-	pluginEventDurableMaxAttempts   = 16
-	pluginEventDurableDefaultTries  = 8
-	pluginEventDurableMinRetryMS    = 100
-	pluginEventDurableMaxRetryMS    = 60_000
-	pluginEventDurableDefaultRetry  = 500
-	pluginEventDurablePollInterval  = 250 * time.Millisecond
-	pluginEventDurablePerPluginMax  = 2048
-	pluginEventDurableGlobalMax     = 16_384
-	pluginEventDeadLetterListMax    = 100
-	pluginEventTopicNetLink         = "net.link"
-	pluginEventTopicNetAddr         = "net.addr"
-	pluginEventTopicNetNeigh        = "net.neigh"
-	pluginEventTopicNetRoute        = "net.route"
-	pluginEventTopicResourceChanged = "resource.changed"
-	pluginEventTopicPluginLifecycle = "plugin.lifecycle"
+	pluginEventDefaultQueueSize        = 64
+	pluginEventMaxQueueSize            = 256
+	pluginEventMaxSubscriptions        = 64
+	pluginEventMaxAccessEntries        = 64
+	pluginEventMaxAccessTopics         = 256
+	pluginEventMaxPayloadBytes         = 64 << 10
+	pluginEventDefaultWorker           = "events"
+	pluginEventDefaultHandler          = "onEvent"
+	pluginEventMatchExact              = "exact"
+	pluginEventMatchPrefix             = "prefix"
+	pluginEventDeliveryVolatile        = "volatile"
+	pluginEventDeliveryDurable         = "durable"
+	pluginEventDurableMaxAttempts      = 16
+	pluginEventDurableDefaultTries     = 8
+	pluginEventDurableMinRetryMS       = 100
+	pluginEventDurableMaxRetryMS       = 60_000
+	pluginEventDurableDefaultRetry     = 500
+	pluginEventDurablePollInterval     = 250 * time.Millisecond
+	pluginEventDurableRecoveryInterval = 30 * time.Second
+	pluginEventDurablePerPluginMax     = 2048
+	pluginEventDurableGlobalMax        = 16_384
+	pluginEventDeadLetterListMax       = 100
+	pluginEventTopicNetLink            = "net.link"
+	pluginEventTopicNetAddr            = "net.addr"
+	pluginEventTopicNetNeigh           = "net.neigh"
+	pluginEventTopicNetRoute           = "net.route"
+	pluginEventTopicResourceChanged    = "resource.changed"
+	pluginEventTopicPluginLifecycle    = "plugin.lifecycle"
 )
 
 type PluginEventSubscription struct {
@@ -584,13 +585,17 @@ func (rt *gojaPluginControlRuntime) reconcilePluginEventSubscriptions(plugins ma
 }
 
 func (rt *gojaPluginControlRuntime) runPluginEventSubscription(sub *pluginControlEventSubscriptionRuntime) {
-	var ticker *time.Ticker
+	var timer *time.Timer
 	var tick <-chan time.Time
 	if sub.spec.Delivery == pluginEventDeliveryDurable {
-		ticker = time.NewTicker(pluginEventDurablePollInterval)
-		defer ticker.Stop()
-		tick = ticker.C
-		rt.enqueueDueDurablePluginEvents(sub)
+		timer = time.NewTimer(rt.enqueueDueDurablePluginEvents(sub))
+		defer timer.Stop()
+		tick = timer.C
+	}
+	refill := func() {
+		if timer != nil {
+			timer.Reset(rt.enqueueDueDurablePluginEvents(sub))
+		}
 	}
 	for {
 		if sub.stopped.Load() {
@@ -600,9 +605,9 @@ func (rt *gojaPluginControlRuntime) runPluginEventSubscription(sub *pluginContro
 		case <-sub.stop:
 			return
 		case <-sub.wake:
-			rt.enqueueDueDurablePluginEvents(sub)
+			refill()
 		case <-tick:
-			rt.enqueueDueDurablePluginEvents(sub)
+			refill()
 		case event := <-sub.queue:
 			if sub.stopped.Load() {
 				return
@@ -722,31 +727,36 @@ func pluginDurableEventRetryDelay(baseMS, attempt int) time.Duration {
 	return time.Duration(delay) * time.Millisecond
 }
 
-func (rt *gojaPluginControlRuntime) enqueueDueDurablePluginEvents(sub *pluginControlEventSubscriptionRuntime) {
+func (rt *gojaPluginControlRuntime) enqueueDueDurablePluginEvents(sub *pluginControlEventSubscriptionRuntime) time.Duration {
 	if rt == nil || rt.db == nil || sub == nil || sub.stopped.Load() || sub.spec.Delivery != pluginEventDeliveryDurable {
-		return
+		return pluginEventDurableRecoveryInterval
 	}
-	available := cap(sub.queue) - len(sub.queue)
-	if available < 1 {
-		return
+	// Drain the current batch before reading it from SQLite again. The delivery
+	// loop is serial and every acknowledgement/failure wakes this scheduler.
+	if len(sub.queue) != 0 {
+		return pluginEventDurableRecoveryInterval
 	}
-	limit := cap(sub.queue) * 2
-	if limit < available {
-		limit = available
-	}
+	limit := cap(sub.queue)
 	items, err := store.GetDuePluginEventDeliveries(rt.db, sub.pluginID, sub.spec.ID, time.Now().UnixMilli(), limit)
 	if err != nil {
 		sub.noteStoreError(err)
-		return
+		return pluginEventDurablePollInterval
 	}
 	for _, item := range items {
-		if available < 1 {
-			break
-		}
-		if sub.enqueueDurableEvent(pluginControlBusEventFromStore(item)) {
-			available--
-		}
+		sub.enqueueDurableEvent(pluginControlBusEventFromStore(item))
 	}
+	if len(items) != 0 {
+		return pluginEventDurableRecoveryInterval
+	}
+	next, pending, err := store.NextPluginEventDeliveryTime(rt.db, sub.pluginID, sub.spec.ID)
+	if err != nil {
+		sub.noteStoreError(err)
+		return pluginEventDurablePollInterval
+	}
+	if pending {
+		return max(time.Millisecond, min(time.Until(time.UnixMilli(next)), pluginEventDurableRecoveryInterval))
+	}
+	return pluginEventDurableRecoveryInterval
 }
 
 func pluginControlBusEventFromStore(item store.PluginEventDelivery) pluginControlBusEvent {
