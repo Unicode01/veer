@@ -66,6 +66,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev iproute2 util-linux iputils-ping ethtool
       - name: Run privileged core dataplane matrix
         run: sudo env "PATH=$PATH" sh scripts/verify-plugin-release.sh core-dataplane
+      - name: Verify incremental direct TC plugin updates
+        run: |
+          sudo env "PATH=$PATH" FORWARD_RUN_PLUGIN_DATAPLANE_TEST=1 \
+            go test ./internal/app -run '^TestPluginDirectTCIncrementalReconcile$' -v -count=1 -timeout=2m
 
   flow-churn:
     runs-on: ubuntu-latest

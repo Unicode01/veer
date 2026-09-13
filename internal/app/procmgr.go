@@ -254,6 +254,9 @@ type ProcessManager struct {
 	managedRuntimeReloadAppliedFingerprint         string
 	managedRuntimeDriftCheckAt                     time.Time
 	pluginCatalogUpdateMu                          sync.Mutex
+	pluginCatalogScanCache                         pluginCatalogFingerprintCache // pluginCatalogUpdateMu
+	pluginCatalogComparedApplied                   string                        // pluginCatalogUpdateMu
+	pluginCatalogScanRunning                       bool                          // mu
 	pluginPackageMu                                sync.Mutex
 	dataplaneReconcileMu                           sync.Mutex
 	pluginReconcileMu                              sync.Mutex
@@ -5325,7 +5328,7 @@ func (pm *ProcessManager) monitorLoop() {
 			pm.detectManagedNetworkRuntimeDrift()
 		}
 		if checkPluginCatalogDrift {
-			pm.detectPluginCatalogDrift()
+			pm.startPluginCatalogDriftCheck()
 		}
 		if checkPluginProbations {
 			pm.checkPluginPackageProbations(now)

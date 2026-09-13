@@ -21,6 +21,7 @@ var errPluginHostProcessExited = errors.New("isolated plugin host exited")
 const (
 	pluginHostFilesystemRootEnv = "VEER_PLUGIN_HOST_FILESYSTEM_ROOT"
 	pluginHostMessageQueueSize  = 0
+	pluginHostShutdownGrace     = 100 * time.Millisecond
 )
 
 type pluginHostCallBroker interface {
@@ -28,23 +29,24 @@ type pluginHostCallBroker interface {
 }
 
 type pluginHostClient struct {
-	pluginID    string
-	mode        string
-	worker      string
-	command     *exec.Cmd
-	stdin       io.WriteCloser
-	messages    chan pluginHostMessage
-	errors      chan error
-	done        chan struct{}
-	writeMu     sync.Mutex
-	closeOnce   sync.Once
-	doneOnce    sync.Once
-	cleanupOnce sync.Once
-	nextID      atomic.Uint64
-	closing     atomic.Bool
-	cleanup     func()
-	budgetMu    sync.Mutex
-	callBudget  *int
+	pluginID      string
+	mode          string
+	worker        string
+	command       *exec.Cmd
+	stdin         io.WriteCloser
+	messages      chan pluginHostMessage
+	errors        chan error
+	done          chan struct{}
+	writeMu       sync.Mutex
+	closeOnce     sync.Once
+	doneOnce      sync.Once
+	cleanupOnce   sync.Once
+	terminateOnce sync.Once
+	nextID        atomic.Uint64
+	closing       atomic.Bool
+	cleanup       func()
+	budgetMu      sync.Mutex
+	callBudget    *int
 
 	lastRSS       atomic.Uint64
 	resourceError atomic.Value
@@ -385,22 +387,36 @@ func (client *pluginHostClient) acquireEventCallBudget(nested bool) (*int, func(
 	}, nil
 }
 
-func (client *pluginHostClient) exchange(message pluginHostMessage, broker pluginHostCallBroker, deadline time.Time, calls *int) (pluginHostMessage, error) {
+func (client *pluginHostClient) exchange(message pluginHostMessage, broker pluginHostCallBroker, deadline time.Time, calls *int) (result pluginHostMessage, resultErr error) {
 	if client == nil {
 		return pluginHostMessage{}, errPluginRuntimeTargetNotLoaded
 	}
 	if !deadline.After(time.Now()) {
 		return pluginHostMessage{}, fmt.Errorf("plugin host request deadline exceeded")
 	}
+	// Cover writes and broker replies as well as reads. In particular, neither
+	// the write mutex nor a child that stopped reading may delay termination.
+	timeoutErr := pluginHostProcessError(fmt.Errorf("plugin host request timed out"))
+	expired := make(chan struct{})
+	timer := time.AfterFunc(time.Until(deadline), func() {
+		client.reportError(timeoutErr)
+		client.terminate()
+		close(expired)
+	})
+	defer func() {
+		if !timer.Stop() {
+			<-expired
+			result = pluginHostMessage{}
+			resultErr = timeoutErr
+		}
+	}()
 	message.ID = client.nextID.Add(1)
 	if err := client.send(message); err != nil {
 		return pluginHostMessage{}, err
 	}
 	for {
-		timer := time.NewTimer(max(time.Until(deadline), time.Millisecond))
 		select {
 		case response := <-client.messages:
-			timer.Stop()
 			if response.Type == pluginHostMessageTypeHostCall {
 				if response.ReplyTo != message.ID {
 					return pluginHostMessage{}, client.failProtocol(fmt.Errorf("plugin host call belongs to request %d, want %d", response.ReplyTo, message.ID))
@@ -419,17 +435,11 @@ func (client *pluginHostClient) exchange(message pluginHostMessage, broker plugi
 			}
 			return response, nil
 		case err := <-client.errors:
-			timer.Stop()
 			return pluginHostMessage{}, err
 		case <-client.done:
-			timer.Stop()
 			return pluginHostMessage{}, errPluginHostProcessExited
-		case <-timer.C:
-			client.Interrupt("plugin host request timed out")
-			if client.command != nil && client.command.Process != nil {
-				_ = client.command.Process.Kill()
-			}
-			return pluginHostMessage{}, pluginHostProcessError(fmt.Errorf("plugin host request timed out"))
+		case <-expired:
+			return pluginHostMessage{}, timeoutErr
 		}
 	}
 }
@@ -487,6 +497,9 @@ func (client *pluginHostClient) send(message pluginHostMessage) error {
 	}
 	client.writeMu.Lock()
 	defer client.writeMu.Unlock()
+	if client.closing.Load() {
+		return errPluginHostProcessExited
+	}
 	if err := writePluginHostFrame(client.stdin, message, pluginHostMaxParentFrameBytes); err != nil {
 		return pluginHostProcessError(fmt.Errorf("write plugin host request: %w", err))
 	}
@@ -496,17 +509,42 @@ func (client *pluginHostClient) send(message pluginHostMessage) error {
 func (client *pluginHostClient) failProtocol(err error) error {
 	fatalErr := pluginHostProcessError(fmt.Errorf("plugin host protocol violation: %w", err))
 	client.reportError(fatalErr)
-	if client.command != nil && client.command.Process != nil {
-		_ = client.command.Process.Kill()
-	}
+	client.terminate()
 	return fatalErr
+}
+
+func (client *pluginHostClient) terminate() {
+	client.terminateOnce.Do(func() {
+		client.closing.Store(true)
+		if client.command != nil && client.command.Process != nil {
+			_ = client.command.Process.Kill()
+		}
+		if client.stdin != nil {
+			_ = client.stdin.Close()
+		}
+	})
 }
 
 func (client *pluginHostClient) Interrupt(reason string) {
 	if client == nil {
 		return
 	}
+	stopWatchdog := client.watchBlockedShutdown()
+	defer stopWatchdog()
 	_ = client.send(pluginHostMessage{Type: pluginHostMessageTypeInterrupt, Error: boundedPluginHostError(reason)})
+}
+
+func (client *pluginHostClient) watchBlockedShutdown() func() {
+	done := make(chan struct{})
+	timer := time.AfterFunc(pluginHostShutdownGrace, func() {
+		client.terminate()
+		close(done)
+	})
+	return func() {
+		if !timer.Stop() {
+			<-done
+		}
+	}
 }
 
 func (client *pluginHostClient) Close() {
@@ -515,18 +553,20 @@ func (client *pluginHostClient) Close() {
 	}
 	client.closeOnce.Do(func() {
 		client.closing.Store(true)
+		stopWatchdog := client.watchBlockedShutdown()
+		defer stopWatchdog()
 		client.writeMu.Lock()
-		_ = writePluginHostFrame(client.stdin, pluginHostMessage{Type: pluginHostMessageTypeShutdown}, pluginHostMaxParentFrameBytes)
-		_ = client.stdin.Close()
+		if client.stdin != nil {
+			_ = writePluginHostFrame(client.stdin, pluginHostMessage{Type: pluginHostMessageTypeShutdown}, pluginHostMaxParentFrameBytes)
+			_ = client.stdin.Close()
+		}
 		client.writeMu.Unlock()
 		select {
 		case <-client.done:
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(pluginHostShutdownGrace):
 		}
-		if client.command != nil && client.command.Process != nil {
-			_ = client.command.Process.Kill()
-		}
+		client.terminate()
 		select {
 		case <-client.done:
 		case <-time.After(2 * time.Second):
