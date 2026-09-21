@@ -9321,7 +9321,7 @@ exports.onAction = function () {
 		"setMTU:veervtap0:1492",
 		"setARP:veervtap0:false",
 		"setPromiscuous:veervtap0:true",
-		"setOffloads:veervtap0:gro=false,gso=false,sg=false,tso=false,tx=false",
+		"setOffloads:veervtap0:gso=false,sg=false,tso=false,tx=false",
 		"getOffloads:veervtap0",
 		"setGSO:veervtap0:1492:1",
 		"setUp:veervtap0:true",
@@ -14341,7 +14341,7 @@ func waitForPluginRuntimeStatusForTest(t *testing.T, db *sql.DB, pluginID, targe
 	}
 }
 
-func firePluginTimerForTest(t *testing.T, rt *gojaPluginControlRuntime, pluginID, name string) {
+func firePluginTimerForTest(t testing.TB, rt *gojaPluginControlRuntime, pluginID, name string) {
 	t.Helper()
 
 	key := pluginControlTimerKey{pluginID: pluginID, name: name}
@@ -15365,7 +15365,7 @@ func (c *pluginControlNetAdminTest) LinkSetOffloads(req pluginControlNetOffloadR
 	}
 	current := c.offloads[req.Interface]
 	if current == nil {
-		current = make(map[string]bool)
+		current = map[string]bool{"gro": false}
 		c.offloads[req.Interface] = current
 	}
 	for feature, enabled := range req.Features {
@@ -15605,7 +15605,7 @@ func testBPFTargetArch() string {
 	}
 }
 
-func copyDirForTest(t *testing.T, src, dst string) {
+func copyDirForTest(t testing.TB, src, dst string) {
 	t.Helper()
 
 	entries, err := os.ReadDir(src)

@@ -610,6 +610,7 @@
         if (event.key === 'Escape') closeProtocolMenu();
       });
       function csv(value) { return value.split(',').map((item) => item.trim()).filter(Boolean); }
+      let pppoePasswordStored = false;
       function payload() {
         const isPPPoE = wanMode.value === 'pppoe';
         const data = {
@@ -633,17 +634,19 @@
           }
         };
         if (isPPPoE) {
-          data.wan.pppoe_interface = pppoeInterface.value.trim();
-          data.wan.mac_mode = pppoeRandomMac.checked ? 'random' : 'manual';
-          data.wan.mac_address = pppoeMacAddress.value.trim();
-          data.wan.username = pppoeUsername.value.trim();
-          data.wan.password = pppoePassword.value;
-          data.wan.service = pppoeService.value.trim();
-          data.wan.auth = pppoeAuth.value;
-          data.wan.negotiate_ipv6 = pppoeIPv6.checked;
-          data.wan.request_pd = pppoePD.checked;
-          data.wan.install_tunnel = pppoeTunnel.checked;
-          data.wan.auto_redial = pppoeRedial.checked;
+          data.wan.pppoe = {
+            interface: pppoeInterface.value.trim(),
+            mac_mode: pppoeRandomMac.checked ? 'random' : 'manual',
+            mac_address: pppoeMacAddress.value.trim(),
+            username: pppoeUsername.value.trim(),
+            password: pppoePassword.value || (pppoePasswordStored ? '__redacted__' : ''),
+            service: pppoeService.value.trim(),
+            auth: pppoeAuth.value,
+            negotiate_ipv6: pppoeIPv6.checked,
+            request_pd: pppoePD.checked,
+            install_tunnel: pppoeTunnel.checked,
+            auto_redial: pppoeRedial.checked
+          };
         }
         return data;
       }
@@ -771,21 +774,24 @@
       function fillForm(data) {
         const freshConfig = !data || Object.keys(data).length === 0;
         const wan = data.wan || data;
+        const pppoe = wan.pppoe || wan;
         const lan = data.lan || data;
         wanMode.value = wan.mode || data.wan_mode || 'existing';
         wanEgress.value = wan.egress_interface || data.wan_egress_interface || '';
         wanSource.value = wan.source_ip || data.wan_egress_source_ip || '';
-        pppoeInterface.value = wan.pppoe_interface || data.pppoe_interface || '';
-        pppoeRandomMac.checked = (wan.mac_mode || data.pppoe_mac_mode || (wan.mac_address || data.pppoe_mac_address ? 'manual' : 'random')) !== 'manual';
-        pppoeMacAddress.value = wan.mac_address || data.pppoe_mac_address || '';
-        pppoeUsername.value = wan.username || data.pppoe_username || '';
-        pppoePassword.value = wan.password || data.pppoe_password || '';
-        pppoeService.value = wan.service || data.pppoe_service || '';
-        pppoeAuth.value = wan.auth || data.pppoe_auth || 'pap';
-        pppoeIPv6.checked = wan.negotiate_ipv6 === true || data.pppoe_negotiate_ipv6 === true;
-        pppoePD.checked = wan.request_pd === true || data.pppoe_request_pd === true;
-        pppoeTunnel.checked = wan.install_tunnel !== false && data.pppoe_install_tunnel !== false;
-        pppoeRedial.checked = wan.auto_redial !== false && data.pppoe_auto_redial !== false;
+        pppoeInterface.value = pppoe.interface || wan.pppoe_interface || data.pppoe_interface || '';
+        pppoeRandomMac.checked = (pppoe.mac_mode || data.pppoe_mac_mode || (pppoe.mac_address || data.pppoe_mac_address ? 'manual' : 'random')) !== 'manual';
+        pppoeMacAddress.value = pppoe.mac_address || data.pppoe_mac_address || '';
+        pppoeUsername.value = pppoe.username || data.pppoe_username || '';
+        const password = pppoe.password || data.pppoe_password || data.password || '';
+        pppoePasswordStored = password === '__redacted__';
+        pppoePassword.value = pppoePasswordStored ? '' : password;
+        pppoeService.value = pppoe.service || data.pppoe_service || '';
+        pppoeAuth.value = pppoe.auth || data.pppoe_auth || 'pap';
+        pppoeIPv6.checked = pppoe.negotiate_ipv6 === true || data.pppoe_negotiate_ipv6 === true;
+        pppoePD.checked = pppoe.request_pd === true || data.pppoe_request_pd === true;
+        pppoeTunnel.checked = pppoe.install_tunnel !== false && data.pppoe_install_tunnel !== false;
+        pppoeRedial.checked = pppoe.auto_redial !== false && data.pppoe_auto_redial !== false;
         lanBridge.value = lan.bridge || data.lan_bridge || 'br-lan';
         lanPorts.value = Array.isArray(lan.ports) ? lan.ports.join(', ') : (data.lan_ports || data.ports || '');
         lanAddresses.value = Array.isArray(lan.addresses) ? lan.addresses.join(', ') : (data.lan_addresses || data.addresses || '192.168.100.1/24');

@@ -1219,7 +1219,18 @@ func TestPluginControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegratio
 	createPluginIntegrationVeth(t, peer, peerPeer)
 
 	admin := linuxPluginControlNetAdmin{}
-	_, err := admin.LinkEnsureVeth(pluginControlNetVethRequest{
+	left, err := admin.LinkGet(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := admin.LinkGet(hostPeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left.PeerIfIndex != right.IfIndex || right.PeerIfIndex != left.IfIndex || left.PeerName != hostPeer || right.PeerName != host {
+		t.Fatalf("LinkGet must report actual veth peers: left=%+v right=%+v", left, right)
+	}
+	_, err = admin.LinkEnsureVeth(pluginControlNetVethRequest{
 		Host: host,
 		Peer: peer,
 		MTU:  1400,

@@ -395,23 +395,14 @@ func (store *pluginSecretStore) encryptRecordDataUnlocked(pluginID string, resou
 	if err := json.Unmarshal([]byte(dataJSON), &object); err != nil || object == nil {
 		return "", fmt.Errorf("resource with secret_fields must contain a JSON object")
 	}
-	secretFields := pluginSecretFieldSet(resource)
-	for key, value := range object {
-		if _, secret := secretFields[strings.ToLower(key)]; !secret {
-			continue
-		}
-		if _, encrypted, err := store.decryptJSON(pluginID, resource.ID, recordKey, key, value); err != nil {
-			return "", err
+	out, err := transformPluginSecretFields(json.RawMessage(dataJSON), resource, func(path string, value json.RawMessage) (json.RawMessage, error) {
+		if _, encrypted, err := store.decryptJSON(pluginID, resource.ID, recordKey, path, value); err != nil {
+			return nil, err
 		} else if encrypted {
-			continue
+			return value, nil
 		}
-		encrypted, err := store.encryptJSON(pluginID, resource.ID, recordKey, key, value)
-		if err != nil {
-			return "", err
-		}
-		object[key] = encrypted
-	}
-	out, err := json.Marshal(object)
+		return store.encryptJSON(pluginID, resource.ID, recordKey, path, value)
+	})
 	return string(out), err
 }
 
@@ -433,26 +424,18 @@ func (store *pluginSecretStore) decryptRecordDataUnlocked(pluginID string, resou
 	if err := json.Unmarshal([]byte(dataJSON), &object); err != nil || object == nil {
 		return "", false, fmt.Errorf("resource with secret_fields must contain a JSON object")
 	}
-	secretFields := pluginSecretFieldSet(resource)
 	changed := false
-	for key, value := range object {
-		if _, secret := secretFields[strings.ToLower(key)]; !secret {
-			continue
-		}
-		plaintext, encrypted, err := store.decryptJSON(pluginID, resource.ID, recordKey, key, value)
+	out, err := transformPluginSecretFields(json.RawMessage(dataJSON), resource, func(path string, value json.RawMessage) (json.RawMessage, error) {
+		plaintext, encrypted, err := store.decryptJSON(pluginID, resource.ID, recordKey, path, value)
 		if err != nil {
-			return "", false, err
+			return nil, err
 		}
 		if encrypted {
-			object[key] = plaintext
 			changed = true
 		}
-	}
-	if !changed {
-		return dataJSON, false, nil
-	}
-	out, err := json.Marshal(object)
-	return string(out), true, err
+		return plaintext, nil
+	})
+	return string(out), changed, err
 }
 
 func pluginSecretFieldSet(resource PluginResource) map[string]struct{} {
@@ -776,21 +759,15 @@ func (store *pluginSecretStore) recordUsesActiveKey(dataJSON string, resource Pl
 		var envelope pluginSecretEnvelopeObject
 		return json.Unmarshal([]byte(dataJSON), &envelope) == nil && envelope.Secret != nil && envelope.Secret.KeyID == active
 	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal([]byte(dataJSON), &object) != nil {
-		return false
-	}
-	fields := pluginSecretFieldSet(resource)
-	for key, value := range object {
-		if _, secret := fields[strings.ToLower(key)]; !secret {
-			continue
-		}
+	allActive := true
+	_, err := transformPluginSecretFields(json.RawMessage(dataJSON), resource, func(_ string, value json.RawMessage) (json.RawMessage, error) {
 		var envelope pluginSecretEnvelopeObject
 		if json.Unmarshal(value, &envelope) != nil || envelope.Secret == nil || envelope.Secret.KeyID != active {
-			return false
+			allActive = false
 		}
-	}
-	return true
+		return value, nil
+	})
+	return err == nil && allActive
 }
 
 func (store *pluginSecretStore) reencryptDiscoveredEnvelopes(record storepkg.PluginRecord) (string, bool, error) {
@@ -809,32 +786,28 @@ func (store *pluginSecretStore) reencryptDiscoveredEnvelopes(record storepkg.Plu
 		encrypted, err := store.encryptJSON(record.PluginID, record.ResourceID, record.RecordKey, "$", plaintext)
 		return string(encrypted), true, err
 	}
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
-		return record.DataJSON, false, nil
-	}
 	changed := false
-	for field, value := range object {
+	out, err := walkPluginJSON(raw, nil, func(path []string, value json.RawMessage) (json.RawMessage, bool, error) {
 		keyID, ok := pluginSecretEnvelopeKeyID(value)
-		if !ok || keyID == active {
-			continue
+		if !ok {
+			return value, false, nil
 		}
+		if keyID == active {
+			return value, true, nil
+		}
+		field := pluginSecretValuePath(path)
 		plaintext, _, err := store.decryptJSON(record.PluginID, record.ResourceID, record.RecordKey, field, value)
 		if err != nil {
-			continue
+			return value, true, nil
 		}
 		encrypted, err := store.encryptJSON(record.PluginID, record.ResourceID, record.RecordKey, field, plaintext)
 		if err != nil {
-			return "", false, err
+			return nil, true, err
 		}
-		object[field] = encrypted
 		changed = true
-	}
-	if !changed {
-		return record.DataJSON, false, nil
-	}
-	out, err := json.Marshal(object)
-	return string(out), true, err
+		return encrypted, true, nil
+	})
+	return string(out), changed, err
 }
 
 func pluginSecretEnvelopeKeyID(raw json.RawMessage) (string, bool) {

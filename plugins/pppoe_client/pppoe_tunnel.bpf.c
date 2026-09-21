@@ -447,6 +447,48 @@ static __always_inline int rewrite_ipv4_dst(struct __sk_buff *skb, const struct 
 	return 0;
 }
 
+static __always_inline int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
+{
+	int opt_off = l4_off + (int)sizeof(struct tcp_min_hdr);
+	if (tcp_hdr_len <= (int)sizeof(struct tcp_min_hdr) || tcp_hdr_len > 60)
+		return 0;
+#pragma clang loop unroll(disable)
+	for (int i = 0; i < 40; i++) {
+		__u8 kind = 0, len = 0;
+		__u16 old_mss_be = 0, new_mss_be;
+		if (opt_off >= l4_off + tcp_hdr_len)
+			break;
+		if (bpf_skb_load_bytes(skb, opt_off, &kind, sizeof(kind)) < 0)
+			return -1;
+		if (kind == TCPOPT_EOL)
+			break;
+		if (kind == TCPOPT_NOP) {
+			opt_off++;
+			continue;
+		}
+		if (opt_off + 1 >= l4_off + tcp_hdr_len)
+			break;
+		if (bpf_skb_load_bytes(skb, opt_off + 1, &len, sizeof(len)) < 0)
+			return -1;
+		if (len < 2 || opt_off + len > l4_off + tcp_hdr_len)
+			break;
+		if (kind == TCPOPT_MSS && len == TCPOPT_MSS_LEN) {
+			if (bpf_skb_load_bytes(skb, opt_off + 2, &old_mss_be, sizeof(old_mss_be)) < 0)
+				return -1;
+			if (ntohs16(old_mss_be) > clamp) {
+				new_mss_be = htons16(clamp);
+				if (bpf_l4_csum_replace(skb, l4_off + 16, old_mss_be, new_mss_be, sizeof(new_mss_be)) < 0)
+					return -1;
+				if (bpf_skb_store_bytes(skb, opt_off + 2, &new_mss_be, sizeof(new_mss_be), 0) < 0)
+					return -1;
+			}
+			break;
+		}
+		opt_off += len;
+	}
+	return 0;
+}
+
 static __always_inline int clamp_tcp_mss_v4(struct __sk_buff *skb, __u16 clamp)
 {
 	void *data = (void *)(long)skb->data;
@@ -456,13 +498,9 @@ static __always_inline int clamp_tcp_mss_v4(struct __sk_buff *skb, __u16 clamp)
 	struct tcp_min_hdr *linear_tcph;
 	struct ipv4_min_hdr iph = {};
 	struct tcp_min_hdr tcph = {};
-	__u16 old_mss_be = 0;
-	__u16 new_mss_be = 0;
-	__u16 old_mss = 0;
 	int l3_off = 14;
 	int l4_off = 34;
 	int tcp_hdr_len;
-	int opt_off;
 
 	if (!clamp)
 		return 0;
@@ -497,47 +535,57 @@ static __always_inline int clamp_tcp_mss_v4(struct __sk_buff *skb, __u16 clamp)
 	tcp_hdr_len = ((int)(tcph.doff_res >> 4)) << 2;
 
 scan_options:
-	if (tcp_hdr_len <= (int)sizeof(tcph) || tcp_hdr_len > 60)
+	return clamp_tcp_mss_options(skb, clamp, l4_off, tcp_hdr_len);
+}
+
+static __always_inline int clamp_tcp_mss_v6(struct __sk_buff *skb, __u16 clamp)
+{
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ipv6_min_hdr *linear_ip = data + 14;
+	struct tcp_min_hdr *linear_tcp = (void *)(linear_ip + 1);
+	struct ipv6_min_hdr ip = {};
+	struct tcp_min_hdr tcp = {};
+	int l4_off = 14 + sizeof(ip);
+	__u32 packet_end;
+	__u8 protocol;
+	if (!clamp)
 		return 0;
-
-	opt_off = l4_off + (int)sizeof(tcph);
+	// Established TCP traffic needs no helper calls or option parsing.
+	if ((void *)(linear_ip + 1) <= data_end && linear_ip->nexthdr == IPPROTO_TCP &&
+	    (void *)(linear_tcp + 1) <= data_end && !(linear_tcp->flags & TCP_FLAG_SYN))
+		return 0;
+	if (bpf_skb_load_bytes(skb, 14, &ip, sizeof(ip)) < 0)
+		return 0;
+	if ((htonl32(ip.ver_tc_flow) >> 28) != 6)
+		return 0;
+	packet_end = l4_off + (__u32)ntohs16(ip.payload_len);
+	if (packet_end > skb->len)
+		return 0;
+	protocol = ip.nexthdr;
 #pragma clang loop unroll(disable)
-	for (int i = 0; i < 40; i++) {
-		__u8 kind = 0;
-		__u8 len = 0;
-
-		if (opt_off >= l4_off + tcp_hdr_len)
+	for (int i = 0; i < VEER_MAX_IPV6_EXTENSION_HEADERS; i++) {
+		__u8 ext[2];
+		if (protocol == IPPROTO_TCP)
 			break;
-		if (bpf_skb_load_bytes(skb, opt_off, &kind, sizeof(kind)) < 0)
-			return -1;
-		if (kind == TCPOPT_EOL)
-			break;
-		if (kind == TCPOPT_NOP) {
-			opt_off++;
-			continue;
-		}
-		if (opt_off + 1 >= l4_off + tcp_hdr_len)
-			break;
-		if (bpf_skb_load_bytes(skb, opt_off + 1, &len, sizeof(len)) < 0)
-			return -1;
-		if (len < 2 || opt_off + len > l4_off + tcp_hdr_len)
-			break;
-		if (kind == TCPOPT_MSS && len == TCPOPT_MSS_LEN) {
-			if (bpf_skb_load_bytes(skb, opt_off + 2, &old_mss_be, sizeof(old_mss_be)) < 0)
-				return -1;
-			old_mss = ntohs16(old_mss_be);
-			if (old_mss > clamp) {
-				new_mss_be = htons16(clamp);
-				if (bpf_l4_csum_replace(skb, l4_off + 16, old_mss_be, new_mss_be, sizeof(new_mss_be)) < 0)
-					return -1;
-				if (bpf_skb_store_bytes(skb, opt_off + 2, &new_mss_be, sizeof(new_mss_be), 0) < 0)
-					return -1;
-			}
-			break;
-		}
-		opt_off += len;
+		// Fragmented and authenticated traffic must not be rewritten here.
+		if (protocol != VEER_IPPROTO_HOPOPTS && protocol != VEER_IPPROTO_ROUTING && protocol != VEER_IPPROTO_DSTOPTS)
+			return 0;
+		if ((__u32)l4_off + 2 > packet_end || bpf_skb_load_bytes(skb, l4_off, ext, sizeof(ext)) < 0)
+			return 0;
+		l4_off += ((__u32)ext[1] + 1) * 8;
+		if ((__u32)l4_off > packet_end)
+			return 0;
+		protocol = ext[0];
 	}
-	return 0;
+	if (protocol != IPPROTO_TCP || (__u32)l4_off + sizeof(tcp) > packet_end)
+		return 0;
+	if (bpf_skb_load_bytes(skb, l4_off, &tcp, sizeof(tcp)) < 0 || !(tcp.flags & TCP_FLAG_SYN))
+		return 0;
+	int header_len = ((int)(tcp.doff_res >> 4)) << 2;
+	if ((__u32)l4_off + header_len > packet_end)
+		return 0;
+	return clamp_tcp_mss_options(skb, clamp, l4_off, header_len);
 }
 
 static __always_inline int l3_packet_info(struct __sk_buff *skb, __u16 *length, __u16 *ppp_proto)
@@ -716,6 +764,8 @@ static __always_inline int encap_l3_to_pppoe(struct __sk_buff *skb, struct pppoe
 	}
 	if (ppp_proto == PPP_IP && clamp_tcp_mss_v4(skb, cfg->mss_clamp_v4) < 0)
 		return TC_ACT_SHOT;
+	if (ppp_proto == PPP_IPV6 && clamp_tcp_mss_v6(skb, cfg->mss_clamp_v6) < 0)
+		return TC_ACT_SHOT;
 	return encap_known_l3_to_pppoe(skb, cfg, l3_len, ppp_proto);
 }
 
@@ -820,6 +870,8 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 		return TC_ACT_SHOT;
 	}
 	if (eth_proto == ETH_P_IP && clamp_tcp_mss_v4(skb, cfg->mss_clamp_v4) < 0)
+		return TC_ACT_SHOT;
+	if (eth_proto == ETH_P_IPV6 && clamp_tcp_mss_v6(skb, cfg->mss_clamp_v6) < 0)
 		return TC_ACT_SHOT;
 
 	act = bpf_redirect(cfg->local_ifindex, BPF_F_INGRESS);

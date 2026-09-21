@@ -863,7 +863,7 @@ func (h *pluginControlHost) claimPluginRouteMutation(req pluginControlNetRouteRe
 		err = store.AddPluginOwnedResource(tx, store.PluginOwnedResource{
 			PluginID: h.plugin.ID, ResourceType: pluginOwnedResourceTypeRoute, ResourceKey: key, MetadataJSON: string(metadata),
 		})
-	} else {
+	} else if existing.MetadataJSON != string(metadata) {
 		err = store.UpdatePluginOwnedResource(tx, h.plugin.ID, pluginOwnedResourceTypeRoute, key, string(metadata))
 	}
 	if err != nil {
@@ -966,7 +966,7 @@ func (h *pluginControlHost) claimPluginRuleMutation(req pluginControlNetRuleRequ
 	}
 	if existing == nil {
 		err = store.AddPluginOwnedResource(tx, store.PluginOwnedResource{PluginID: h.plugin.ID, ResourceType: pluginOwnedResourceTypeRule, ResourceKey: key, MetadataJSON: string(metadata)})
-	} else {
+	} else if existing.MetadataJSON != string(metadata) {
 		err = store.UpdatePluginOwnedResource(tx, h.plugin.ID, pluginOwnedResourceTypeRule, key, string(metadata))
 	}
 	if err != nil {
@@ -1041,7 +1041,7 @@ func (h *pluginControlHost) claimPluginNeighMutation(req pluginControlNetNeighRe
 	}
 	if existing == nil {
 		err = store.AddPluginOwnedResource(tx, store.PluginOwnedResource{PluginID: h.plugin.ID, ResourceType: pluginOwnedResourceTypeNeighbor, ResourceKey: key, MetadataJSON: string(metadata)})
-	} else {
+	} else if existing.MetadataJSON != string(metadata) {
 		err = store.UpdatePluginOwnedResource(tx, h.plugin.ID, pluginOwnedResourceTypeNeighbor, key, string(metadata))
 	}
 	if err != nil {

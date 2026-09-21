@@ -833,41 +833,11 @@ func mergePluginSecretFieldsForUpdate(nextJSON []byte, existingJSON []byte, reso
 		return nil, false, nil
 	}
 
-	nextKeys := make(map[string]string, len(next))
-	for key := range next {
-		nextKeys[strings.ToLower(key)] = key
-	}
-	existingKeys := make(map[string]string, len(existing))
-	for key := range existing {
-		existingKeys[strings.ToLower(key)] = key
-	}
-
-	changed := false
-	for _, field := range resource.SecretFields {
-		lowerField := strings.ToLower(field)
-		existingKey, hasExisting := existingKeys[lowerField]
-		if !hasExisting {
-			continue
-		}
-		nextKey, hasNext := nextKeys[lowerField]
-		if !hasNext {
-			next[existingKey] = existing[existingKey]
-			changed = true
-			continue
-		}
-		if pluginSecretFieldValueIsRedacted(next[nextKey]) {
-			next[nextKey] = existing[existingKey]
-			changed = true
-		}
-	}
-	if !changed {
-		return nil, false, nil
-	}
-	out, err := json.Marshal(next)
+	out, err := mergePluginSecretJSON(nextJSON, existingJSON, pluginSecretFieldSet(resource))
 	if err != nil {
 		return nil, false, fmt.Errorf("merge secret fields: %v", err)
 	}
-	return json.RawMessage(out), true, nil
+	return out, string(out) != string(nextJSON), nil
 }
 
 func pluginSecretFieldValueIsRedacted(raw json.RawMessage) bool {
@@ -939,16 +909,9 @@ func redactPluginResourceData(dataJSON string, resource PluginResource) json.Raw
 	if err := json.Unmarshal([]byte(dataJSON), &obj); err != nil || obj == nil {
 		return json.RawMessage(dataJSON)
 	}
-	secretFields := make(map[string]struct{}, len(resource.SecretFields))
-	for _, field := range resource.SecretFields {
-		secretFields[strings.ToLower(field)] = struct{}{}
-	}
-	for key := range obj {
-		if _, ok := secretFields[strings.ToLower(key)]; ok {
-			obj[key] = json.RawMessage(`"__redacted__"`)
-		}
-	}
-	out, err := json.Marshal(obj)
+	out, err := transformPluginSecretFields(json.RawMessage(dataJSON), resource, func(_ string, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`"__redacted__"`), nil
+	})
 	if err != nil {
 		return json.RawMessage(dataJSON)
 	}
