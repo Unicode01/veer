@@ -411,11 +411,14 @@ run_core_dataplane() {
 		go test -c -o "$core_binary" ./internal/app
 	fi
 	plugin_log="$TMP_DIR/bundled-dataplane.log"
-	run_no_skips "direct TC updates and bundled PPPoE MSS handling" "$plugin_log" \
-		env FORWARD_RUN_PLUGIN_DATAPLANE_TEST=1 \
-		"$core_binary" -test.v -test.run '^(TestPluginDirectTCIncrementalReconcile|TestBundledPPPoEMSSClampLinux)$' -test.count=1 -test.timeout=2m
-	require_test_pass "$plugin_log" TestPluginDirectTCIncrementalReconcile
-	require_test_pass "$plugin_log" TestBundledPPPoEMSSClampLinux
+	plugin_tests='TestPluginDirectTCIncrementalReconcile TestBundledPPPoEMSSClampLinux TestPluginControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration TestPluginWANCoreLinuxIntegration TestPluginNetPolicyTransactionsLinuxIntegration TestPluginControlNetAddrReplaceIdempotentLinuxIntegration'
+	plugin_pattern=$(printf '%s' "$plugin_tests" | tr ' ' '|')
+	run_no_skips "bundled plugin recovery, direct TC updates and PPPoE MSS handling" "$plugin_log" \
+		env FORWARD_RUN_PLUGIN_DATAPLANE_TEST=1 FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 \
+		"$core_binary" -test.v -test.run "^($plugin_pattern)$" -test.count=1 -test.timeout=2m
+	for required_test in $plugin_tests; do
+		require_test_pass "$plugin_log" "$required_test"
+	done
 	core_tests='TestLoadEmbeddedKernelCollectionsSmoke TestKernelPreparersRejectPortTruncation TestTCKernelIPv6Integration TestTCKernelIPv6RangeIntegration TestXDPKernelIPv4FullNATIntegration TestXDPKernelIPv4FullNATTransparentCoexists TestXDPKernelIPv4FullNATToggleDisableReenableRestoresConnectivity TestXDPKernelIPv4FullNATDeleteRecreateRestoresConnectivity TestXDPKernelIPv6Integration TestTCKernelTransparentRejectsACKOnlyNewSession TestXDPKernelTransparentRejectsACKOnlyNewSession TestEgressNATTCIntegration TestEgressNATXDPIntegration TestEgressNATUDPMappingRespectsNATType TestEgressNATKernelWildcardForwardCoexists'
 	core_pattern=$(printf '%s' "$core_tests" | tr ' ' '|')
 	core_log="$TMP_DIR/core-dataplane.log"
