@@ -36,7 +36,7 @@ SEC("tc/test_compact") int test_compact(struct __sk_buff *skb) { return compact_
 	if err := os.WriteFile(cfile, []byte(wrapper), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := exec.Command("clang", "-O2", "-target", "bpf", "-c", cfile, "-o", object).CombinedOutput(); err != nil {
+	if output, err := exec.Command("clang", "-O2", "-g", "-target", "bpf", "-c", cfile, "-o", object).CombinedOutput(); err != nil {
 		t.Fatalf("compile PPPoE: %v\n%s", err, output)
 	}
 	spec, err := ebpf.LoadCollectionSpec(object)
