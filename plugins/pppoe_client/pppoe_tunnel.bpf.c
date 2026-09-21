@@ -447,10 +447,12 @@ static __always_inline int rewrite_ipv4_dst(struct __sk_buff *skb, const struct 
 	return 0;
 }
 
-static __always_inline int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
+// Keep the SYN-only option walk out of the tunnel's forwarding branches so
+// verifier state does not multiply across encapsulation and IPv6 extensions.
+static __attribute__((noinline)) int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
 {
 	int opt_off = l4_off + (int)sizeof(struct tcp_min_hdr);
-	if (tcp_hdr_len <= (int)sizeof(struct tcp_min_hdr) || tcp_hdr_len > 60)
+	if (l4_off < 14 || l4_off > 65535 || tcp_hdr_len <= (int)sizeof(struct tcp_min_hdr) || tcp_hdr_len > 60)
 		return 0;
 #pragma clang loop unroll(disable)
 	for (int i = 0; i < 40; i++) {

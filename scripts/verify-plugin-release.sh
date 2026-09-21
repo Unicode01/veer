@@ -410,6 +410,12 @@ run_core_dataplane() {
 		core_binary="$TMP_DIR/veer-core.test"
 		go test -c -o "$core_binary" ./internal/app
 	fi
+	plugin_log="$TMP_DIR/bundled-dataplane.log"
+	run_no_skips "direct TC updates and bundled PPPoE MSS handling" "$plugin_log" \
+		env FORWARD_RUN_PLUGIN_DATAPLANE_TEST=1 \
+		"$core_binary" -test.v -test.run '^(TestPluginDirectTCIncrementalReconcile|TestBundledPPPoEMSSClampLinux)$' -test.count=1 -test.timeout=2m
+	require_test_pass "$plugin_log" TestPluginDirectTCIncrementalReconcile
+	require_test_pass "$plugin_log" TestBundledPPPoEMSSClampLinux
 	core_tests='TestLoadEmbeddedKernelCollectionsSmoke TestKernelPreparersRejectPortTruncation TestTCKernelIPv6Integration TestTCKernelIPv6RangeIntegration TestXDPKernelIPv4FullNATIntegration TestXDPKernelIPv4FullNATTransparentCoexists TestXDPKernelIPv4FullNATToggleDisableReenableRestoresConnectivity TestXDPKernelIPv4FullNATDeleteRecreateRestoresConnectivity TestXDPKernelIPv6Integration TestTCKernelTransparentRejectsACKOnlyNewSession TestXDPKernelTransparentRejectsACKOnlyNewSession TestEgressNATTCIntegration TestEgressNATXDPIntegration TestEgressNATUDPMappingRespectsNATType TestEgressNATKernelWildcardForwardCoexists'
 	core_pattern=$(printf '%s' "$core_tests" | tr ' ' '|')
 	core_log="$TMP_DIR/core-dataplane.log"
