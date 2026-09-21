@@ -447,9 +447,9 @@ static __always_inline int rewrite_ipv4_dst(struct __sk_buff *skb, const struct 
 	return 0;
 }
 
-// Keep the SYN-only option walk out of the tunnel's forwarding branches so
-// verifier state does not multiply across encapsulation and IPv6 extensions.
-static __attribute__((noinline)) int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
+// Global BTF functions are verified independently of their callers. Keep this
+// SYN-only loop separate so state cannot multiply across tunnel branches.
+__attribute__((noinline)) int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
 {
 	int opt_off = l4_off + (int)sizeof(struct tcp_min_hdr);
 	if (l4_off < 14 || l4_off > 65535 || tcp_hdr_len <= (int)sizeof(struct tcp_min_hdr) || tcp_hdr_len > 60)
@@ -632,8 +632,8 @@ static __always_inline void copy_pppoe_payload_8(void *dst, const void *src)
 	*(__u32 *)(dst + 4) = *(const __u32 *)(src + 4);
 }
 
-// The copy loops must be verified separately from the IPv4/IPv6 MSS branches.
-static __attribute__((noinline)) int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
+// Global linkage and BTF keep these loops independent of the MSS branches.
+__attribute__((noinline)) int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
