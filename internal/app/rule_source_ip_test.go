@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func openTestDB(t *testing.T) *sql.DB {
+func openTestDB(t testing.TB) *sql.DB {
 	t.Helper()
 
 	dir := t.TempDir()

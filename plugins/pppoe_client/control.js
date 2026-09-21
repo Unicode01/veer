@@ -937,6 +937,7 @@ function installTunnel(profile, padsFrame, sessionID) {
     lcp_magic: profile.lcp_magic
   });
   var tunnelRecord = {
+    profile_key: profile.profile_key,
     object: 'pppoe_tunnel',
     map: 'pppoe_tunnel_config',
     value_hex: value,
@@ -944,6 +945,21 @@ function installTunnel(profile, padsFrame, sessionID) {
     local_interface: profile.local_interface,
     pipeline_interface: pipelineLink.name,
     wan_interface: profile.wan_interface,
+    wan_link_mac: wanLink ? wanLink.mac : '',
+    local_dst_mac_explicit: !!profile.local_dst_mac,
+    // Snapshot only non-secret preparation settings for this live session.
+    // Editing a saved dial profile must not change an established tunnel.
+    repair_preparation: {
+      tunnel_mtu: tunnelInterfaceMTU(profile),
+      prepare_interfaces: profile.prepare_interfaces,
+      prepare_local_mtu: profile.prepare_local_mtu,
+      prepare_wan_mtu: profile.prepare_wan_mtu,
+      prepare_offloads: profile.prepare_offloads,
+      prepare_gso: profile.prepare_gso,
+      prepare_wan_offloads: profile.prepare_wan_offloads,
+      allow_unsafe_offloads: profile.allow_unsafe_offloads,
+      wan_core_prepared_interfaces: profile.wan_core_prepared_interfaces === true
+    },
     local_ifindex: localIfIndex,
     pipeline_ifindex: pipelineIfIndex,
     wan_ifindex: wanIfIndex,
@@ -1017,6 +1033,10 @@ function resolveTunnelBoundary(profile) {
   var pipelineLink = net.link.get(pipelineName);
   if (lower(local.kind) !== 'veth' || lower(pipelineLink.kind) !== 'veth') {
     throw new Error('PPPoE segmented handoff must use a veth pair');
+  }
+  if ((local.peer_ifindex && local.peer_ifindex !== pipelineLink.ifindex) ||
+      (pipelineLink.peer_ifindex && pipelineLink.peer_ifindex !== local.ifindex)) {
+    throw new Error('PPPoE segmented handoff interfaces are not peers');
   }
   return {
     mode: 'segmented_veth',
@@ -1135,17 +1155,21 @@ function clearTunnelConfig() {
   armTunnelRepair();
 }
 
-function clearTunnelMap() {
+function clearTunnelMap(reportErrors) {
+  var empty = zeroTunnelConfigHex();
   try {
-    ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0), zeroTunnelConfigHex());
+    if (lower(ebpf.mapGet('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0)) || '') === empty) return;
+  } catch (_) {}
+  try {
+    ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0), empty);
   } catch (e) {
     log.info('pppoe tunnel config clear skipped: ' + errorMessage(e));
+    if (reportErrors) throw e;
   }
 }
 
 function applyStoredTunnelConfig(reportErrors) {
   var records = resources.list(TUNNEL_CONFIG_RESOURCE) || [];
-  if (!selectTunnelConfigRecord(records)) return;
   applyTunnelConfigRecords(records, reportErrors);
 }
 
@@ -1153,13 +1177,24 @@ function applyTunnelConfigRecords(records, reportErrors) {
   var selected = selectTunnelConfigRecord(records);
   var failures = [];
   if (!selected) {
-    clearTunnelMap();
+    clearTunnelMap(reportErrors);
     return;
   }
   try {
     applyTunnelConfigRecord(selected);
   } catch (e) {
     failures.push(errorMessage(e));
+    // Retain desired state for retries, but deactivate stale interface indices.
+    try { clearTunnelMap(true); } catch (clearError) { failures.push(errorMessage(clearError)); }
+  }
+  var data = selected.data || {};
+  var repairError = failures.join('; ');
+  if (text(data.last_repair_error || '') !== repairError) {
+    var current = resources.get(TUNNEL_CONFIG_RESOURCE, TUNNEL_CONFIG_KEY);
+    if (current && current.enabled !== false) {
+      resources.set(TUNNEL_CONFIG_RESOURCE, TUNNEL_CONFIG_KEY,
+        merge(current.data || {}, {last_repair_error: repairError}), true, false);
+    }
   }
   if (reportErrors && failures.length) {
     throw new Error('failed to apply PPPoE tunnel config: ' + failures.join('; '));
@@ -1178,8 +1213,47 @@ function selectTunnelConfigRecord(records) {
 
 function applyTunnelConfigRecord(record) {
   var data = record && record.data ? record.data : {};
-  var value = normalizeTunnelConfigValueHex(data.value_hex || tunnelConfigValueHex(data));
-  ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0), value);
+  var decoded = decodeTunnelConfigHex(data.value_hex || tunnelConfigValueHex(data));
+  var boundary = resolveTunnelBoundary({local_interface: data.local_interface, pipeline_interface: data.pipeline_interface});
+  var wan = net.link.get(ifaceName(data.wan_interface || '', 'wan_interface'));
+  if (boundary.local.up !== true || boundary.pipeline.up !== true || wan.up !== true) {
+    throw new Error('PPPoE tunnel endpoint is down');
+  }
+  if (!wan.ifindex || !boundary.local.ifindex || !boundary.pipeline.ifindex) {
+    throw new Error('PPPoE tunnel endpoint has no interface index');
+  }
+  if (data.wan_link_mac && lower(wan.mac) !== lower(data.wan_link_mac)) {
+    throw new Error('PPPoE WAN identity changed; redial is required');
+  }
+  var next = merge(data, decoded);
+  next.local_ifindex = boundary.local.ifindex;
+  next.pipeline_ifindex = boundary.pipeline.ifindex;
+  next.wan_ifindex = wan.ifindex;
+  if (data.local_dst_mac_explicit === false) next.local_dst_mac = boundary.local.mac;
+  next.lcp_magic = data.lcp_magic || decoded.value_hex.slice(96, 104);
+  next.value_hex = tunnelConfigValueHex(next);
+  var changed = next.value_hex !== decoded.value_hex;
+  if (changed) {
+    if (!data.repair_preparation || !data.profile_key) {
+      throw new Error('Legacy PPPoE tunnel endpoints changed; redial is required');
+    }
+    var runtimeProfile = merge(data.repair_preparation, {
+      profile_key: data.profile_key, interface: data.wan_interface, wan_interface: data.wan_interface,
+      local_interface: data.local_interface, pipeline_interface: data.pipeline_interface,
+      mac_mode: 'manual', mac_address: next.wan_src_mac
+    });
+    prepareTunnelInterfaces(runtimeProfile, boundary);
+    var identity = resolveL2Identity(runtimeProfile);
+    if (lower(identity.mac_address) !== lower(next.wan_src_mac)) {
+      throw new Error('PPPoE client identity changed; redial is required');
+    }
+  }
+  var currentValue = '';
+  try { currentValue = lower(ebpf.mapGet('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0)) || ''); } catch (_) {}
+  if (currentValue !== next.value_hex) {
+    ebpf.mapPut('pppoe_tunnel', 'pppoe_tunnel_config', u32lehex(0), next.value_hex);
+  }
+  if (changed) resources.set(TUNNEL_CONFIG_RESOURCE, TUNNEL_CONFIG_KEY, next, true, false);
 }
 
 function armTunnelRepair() {

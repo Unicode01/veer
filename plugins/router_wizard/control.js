@@ -525,7 +525,17 @@ function requireServiceEndpoint(pluginID, endpointKind, endpointID) {
 
 function loadConfigFromPayload(payload) {
   payload = payload || {};
-  return normalizeConfig(merge(storedConfig() || {}, payload));
+  var previous = storedConfig();
+  var cfg = normalizeConfig(merge(previous || {}, payload));
+  var wan = payload.wan || payload;
+  var pppoe = wan.pppoe || {};
+  var password = firstDefined(pppoe.password, wan.password, payload.pppoe_password, payload.password);
+  if (previous && (password == null || password === '__redacted__')) {
+    cfg.wan.pppoe.password = previous.wan.pppoe.password;
+  } else if (password === '__redacted__') {
+    throw new Error('No saved PPPoE password is available');
+  }
+  return cfg;
 }
 
 function storedConfig() {
