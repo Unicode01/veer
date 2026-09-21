@@ -3,6 +3,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ func TestBundledPPPoEMSSClampLinux(t *testing.T) {
 SEC("tc/test_mss_v4") int test_mss_v4(struct __sk_buff *skb) { return clamp_tcp_mss_v4(skb, 1400); }
 SEC("tc/test_mss_v6") int test_mss_v6(struct __sk_buff *skb) { return clamp_tcp_mss_v6(skb, 1400); }
 SEC("tc/test_mss_off") int test_mss_off(struct __sk_buff *skb) { return clamp_tcp_mss_v6(skb, 0); }
+SEC("tc/test_compact") int test_compact(struct __sk_buff *skb) { return compact_pppoe_payload_to_l3(skb, skb->len - 22); }
 `, source)
 	cfile, object := filepath.Join(dir, "mss.c"), filepath.Join(dir, "mss.o")
 	if err := os.WriteFile(cfile, []byte(wrapper), 0o600); err != nil {
@@ -77,6 +79,22 @@ SEC("tc/test_mss_off") int test_mss_off(struct __sk_buff *skb) { return clamp_tc
 			}
 			if pppoeTestChecksum(append(pseudo, output[tcpOffset:tcpOffset+24]...)) != 0 {
 				t.Fatal("TCP checksum invalid after MSS adjustment")
+			}
+		})
+	}
+	for _, length := range []int{20, 40, 63, 64, 65, 127, 128, 129, 1491, 1492} {
+		t.Run(fmt.Sprintf("decap_copy_%d", length), func(t *testing.T) {
+			packet := make([]byte, 22+length)
+			packet[12], packet[13] = 0x88, 0x64
+			for i := 22; i < len(packet); i++ {
+				packet[i] = byte(i * 31)
+			}
+			result, output, err := collection.Programs["test_compact"].Test(packet)
+			if err != nil || result != 0 {
+				t.Fatalf("compact PPPoE: result=%d, err=%v", result, err)
+			}
+			if len(output) != 14+length || !bytes.Equal(output[:14], packet[:14]) || !bytes.Equal(output[14:], packet[22:]) {
+				t.Fatal("PPPoE decapsulation changed payload bytes or packet length")
 			}
 		})
 	}
