@@ -175,19 +175,27 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 	}
 
 	if req.MTU > 0 {
-		if err := netlink.LinkSetMTU(host, req.MTU); err != nil {
-			return cleanupCreated(fmt.Errorf("set host mtu: %w", err))
+		if host.Attrs().MTU != req.MTU {
+			if err := netlink.LinkSetMTU(host, req.MTU); err != nil {
+				return cleanupCreated(fmt.Errorf("set host mtu: %w", err))
+			}
 		}
-		if err := netlink.LinkSetMTU(peer, req.MTU); err != nil {
-			return cleanupCreated(fmt.Errorf("set peer mtu: %w", err))
+		if peer.Attrs().MTU != req.MTU {
+			if err := netlink.LinkSetMTU(peer, req.MTU); err != nil {
+				return cleanupCreated(fmt.Errorf("set peer mtu: %w", err))
+			}
 		}
 	}
 	if req.Up {
-		if err := netlink.LinkSetUp(host); err != nil {
-			return cleanupCreated(fmt.Errorf("set host up: %w", err))
+		if host.Attrs().Flags&net.FlagUp == 0 {
+			if err := netlink.LinkSetUp(host); err != nil {
+				return cleanupCreated(fmt.Errorf("set host up: %w", err))
+			}
 		}
-		if err := netlink.LinkSetUp(peer); err != nil {
-			return cleanupCreated(fmt.Errorf("set peer up: %w", err))
+		if peer.Attrs().Flags&net.FlagUp == 0 {
+			if err := netlink.LinkSetUp(peer); err != nil {
+				return cleanupCreated(fmt.Errorf("set peer up: %w", err))
+			}
 		}
 	}
 
@@ -260,7 +268,7 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDumm
 			return cleanupCreated(fmt.Errorf("set dummy mtu: %w", err))
 		}
 	}
-	if req.Up {
+	if req.Up && link.Attrs().Flags&net.FlagUp == 0 {
 		if err := netlink.LinkSetUp(link); err != nil {
 			return cleanupCreated(fmt.Errorf("set dummy up: %w", err))
 		}
@@ -516,12 +524,12 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureBridge(req pluginControlNetBri
 	if link.Type() != "bridge" {
 		return pluginControlNetLinkInfo{}, fmt.Errorf("existing link %q is %s, want bridge", name, link.Type())
 	}
-	if req.MTU > 0 {
+	if req.MTU > 0 && link.Attrs().MTU != req.MTU {
 		if err := netlink.LinkSetMTU(link, req.MTU); err != nil {
 			return pluginControlNetLinkInfo{}, fmt.Errorf("set bridge mtu: %w", err)
 		}
 	}
-	if req.Up {
+	if req.Up && link.Attrs().Flags&net.FlagUp == 0 {
 		if err := netlink.LinkSetUp(link); err != nil {
 			return pluginControlNetLinkInfo{}, fmt.Errorf("set bridge up: %w", err)
 		}
@@ -886,14 +894,10 @@ func (admin linuxPluginControlNetAdmin) RuleReplace(req pluginControlNetRuleRequ
 	if err != nil {
 		return err
 	}
-	for _, state := range states {
-		rule, err := pluginControlNetRuleFromState(state)
-		if err != nil {
-			return err
-		}
-		if err := netlink.RuleDel(rule); err != nil && !pluginControlNetMutationNotFound(err) {
-			return err
-		}
+	// RuleSnapshot returns exact selector/table matches, not every rule at
+	// this priority. Keep a matching rule continuously installed.
+	if len(states) > 0 {
+		return nil
 	}
 	rule, err := pluginControlNetRule(req)
 	if err != nil {
@@ -1533,6 +1537,10 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 	}
 	if attrs.ParentIndex > 0 {
 		info.Parent = pluginControlNetLinkNameByIndex(attrs.ParentIndex)
+		if link.Type() == "veth" {
+			info.PeerIfIndex = attrs.ParentIndex
+			info.PeerName = info.Parent
+		}
 	}
 	if attrs.MasterIndex > 0 {
 		info.MasterName = pluginControlNetLinkNameByIndex(attrs.MasterIndex)

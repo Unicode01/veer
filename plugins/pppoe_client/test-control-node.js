@@ -68,6 +68,7 @@ function main() {
   testQueuedRedialCannotRunAfterDisconnect();
   testDisconnectClearsTunnelAndWANState();
   testTunnelConfigRuntimeApplyReplaysAndClearsMap();
+  testTunnelRepairFollowsCurrentInterfaces();
   testTrafficProbeTimeoutFailsClosed();
   testDebugStatsDeclaresCounterBuildMode();
   testTrafficStatsAggregatePerCPUValues();
@@ -1376,6 +1377,7 @@ function testTunnelConfigRuntimeApplyReplaysAndClearsMap() {
 
   const record = h.resource('tunnel_configs', 'active');
   h.state.mapPuts.length = 0;
+  h.state.mapValues.clear(); // A dataplane reload creates an empty map.
   h.context.exports.onResourceApply({
     resource: {id: 'tunnel_configs', runtime_update: 'runtime_apply'},
     records: [{key: 'active', data: record.data, enabled: true}]
@@ -1385,12 +1387,19 @@ function testTunnelConfigRuntimeApplyReplaysAndClearsMap() {
   assert.strictEqual(replay.value, record.data.value_hex, 'runtime_apply replay should preserve ABI value');
 
   h.state.mapPuts.length = 0;
+  h.state.mapValues.clear();
+  const legacy = Object.assign({}, record.data, {value_hex: record.data.value_hex.slice(0, 96)});
+  delete legacy.lcp_magic;
+  delete legacy.profile_key;
+  delete legacy.wan_link_mac;
+  delete legacy.local_dst_mac_explicit;
+  delete legacy.repair_preparation;
   h.context.exports.onResourceApply({
     resource: {id: 'tunnel_configs', runtime_update: 'runtime_apply'},
-    records: [{key: 'active', data: {value_hex: '11'.repeat(48)}, enabled: true}]
+    records: [{key: 'active', data: legacy, enabled: true}]
   });
   const migrated = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config');
-  assert.strictEqual(migrated.value, '11'.repeat(48) + '00'.repeat(4), 'legacy tunnel config should gain a zero LCP magic');
+  assert.strictEqual(migrated.value, legacy.value_hex + '00'.repeat(4), 'legacy tunnel config should gain a zero LCP magic');
 
   h.state.mapPuts.length = 0;
   h.context.exports.onResourceApply({
@@ -1400,6 +1409,64 @@ function testTunnelConfigRuntimeApplyReplaysAndClearsMap() {
   const clear = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config');
   assert(clear, 'empty tunnel config apply should clear eBPF map');
   assert.strictEqual(clear.value, '00'.repeat(52), 'empty tunnel config apply should write zero ABI value');
+}
+
+function testTunnelRepairFollowsCurrentInterfaces() {
+  const h = createHarness({auth: 'pap'});
+  runAction(h, 'traffic_probe', {interface: 'eth0', username: 'user', password: 'pass', auth: 'pap',
+    timeout_ms: 50, post_session_control_ms: 0, send_padt: false, local_interface: 'veerlocal0',
+    pipeline_interface: PIPELINE_INTERFACE, wan_core_sync: false});
+  const repair = () => h.context.exports.onTimer({timer: {name: 'tunnel_repair', payload: {}}});
+  h.state.mapPuts.length = 0;
+  repair();
+  repair();
+  assert.strictEqual(h.state.mapPuts.length, 0, 'stable repair must not rewrite the map');
+  h.setResource('profiles', 'default', {interface: 'eth0', mru: 1200,
+    mac_mode: 'manual', mac_address: '02:00:00:00:99:88'}, true);
+  h.state.netCalls.length = 0;
+  const oldLocal = h.context.net.link.get('veerlocal0');
+  const oldPeer = h.context.net.link.get(PIPELINE_INTERFACE);
+  h.state.links.set('veerlocal0', Object.assign({}, oldLocal, {ifindex: 201, peer_ifindex: 202, mac: '02:00:00:00:21:01'}));
+  h.state.links.set(PIPELINE_INTERFACE, Object.assign({}, oldPeer, {ifindex: 202, peer_ifindex: 201}));
+  repair();
+  const repaired = h.resource('tunnel_configs', 'active').data;
+  const value = h.context.decodeTunnelConfigHex(repaired.value_hex);
+  assert.strictEqual(value.local_ifindex, 201);
+  assert.strictEqual(value.pipeline_ifindex, 202);
+  assert.strictEqual(value.local_dst_mac, '02:00:00:00:21:01');
+  assert.strictEqual(value.session_id, SESSION_ID, 'handoff repair must preserve the PPP session');
+  assert.strictEqual(value.wan_src_mac, LOCAL_MAC, 'repair must retain the live client identity');
+  assert(h.state.netCalls.includes('setGSO:veerlocal0:1492:1'), 'repair must retain the live MTU despite profile edits');
+  assert.strictEqual(h.resource('l2_identities', 'default').data.mac_address, LOCAL_MAC);
+  const linkGet = h.context.net.link.get;
+  h.context.net.link.get = (name) => {
+    if (name === 'veerlocal0') throw new Error('link not found');
+    return linkGet(name);
+  };
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, '00'.repeat(52), 'missing interface must deactivate the tunnel');
+  assert.match(h.resource('tunnel_configs', 'active').data.last_repair_error, /link not found/);
+  const clearedWrites = h.state.mapPuts.length;
+  repair();
+  assert.strictEqual(h.state.mapPuts.length, clearedWrites, 'an already disabled tunnel needs no repeated map writes');
+  h.context.net.link.get = linkGet;
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, repaired.value_hex);
+  assert.strictEqual(h.resource('tunnel_configs', 'active').data.last_repair_error, '');
+  h.state.links.get('veerlocal0').up = false;
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, '00'.repeat(52), 'a down endpoint must deactivate the tunnel');
+  h.state.links.get('veerlocal0').up = true;
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, repaired.value_hex);
+  h.state.links.get(PIPELINE_INTERFACE).peer_ifindex = 999;
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, '00'.repeat(52), 'unrelated veth must not be adopted');
+  h.state.links.get(PIPELINE_INTERFACE).peer_ifindex = 201;
+  const wan = linkGet('eth0');
+  h.state.links.set('eth0', Object.assign({}, wan, {mac: '02:00:00:00:99:01'}));
+  repair();
+  assert.match(h.resource('tunnel_configs', 'active').data.last_repair_error, /WAN identity changed/);
 }
 
 function testTrafficProbeTimeoutFailsClosed() {

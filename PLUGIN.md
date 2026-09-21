@@ -297,6 +297,8 @@ plugin.resource({
 });
 ```
 
+`secret_fields` 按字段名（忽略大小写）递归保护对象及数组元素中的字段，例如 `password` 同时覆盖 `wan.pppoe.password`。宿主会加密持久化数据，并在 HTTP/UI 响应中替换为 `__redacted__`；更新时省略的密码或该占位值会保留原密码，显式空字符串则表示清空。数组只对仍存在的对应位置保留密码，删除数组或元素不会将其恢复。旧明文配置会在插件加载时迁移；已有导出文件、备份和数据库历史页不属于自动迁移范围。
+
 `control_methods` 只影响本插件 Goja 控制脚本。HTTP/UI 和跨插件访问只看 `methods`，因此派生状态建议对外只读、对控制脚本可写：
 
 ```js
@@ -1113,6 +1115,10 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 - `pppoe_client`（stable）：Goja + raw L2 PPPoE 控制面和双向 TC 隧道插件。插件目录内保留控制面自测和 Linux 黑盒脚本，覆盖 discovery、PAP/CHAP、IPv6CP、DHCPv6-PD、keepalive/redial、disconnect 和 tunnel map 写入。生产使用前仍应在目标运营商/AC 上跑真实断线重拨、IPv4/IPv6/PD、长流稳定性和目标拓扑吞吐验收。
 - `packet_observer`（lab）：TC pipeline 观测示例，需要执行 `build.sh` 生成 eBPF object。
 - `router_wizard`（lab）：组合 PPPoE/WAN/LAN 资源的路由配置向导示例。
+
+WAN 自愈仍会检查实际接口、地址、路由、策略规则、邻居和 offload 状态；状态一致时跳过重复写入及不变的恢复租约更新，发现漂移时再补回。已有的匹配策略规则不会先删除再添加。
+
+PPPoE tunnel 自愈按接口名重新解析 ifindex，并核对 veth 配对、接口启用状态和已保存的 WAN MAC。同名 handoff 接口重建可更新 map，同时保留当前 PPP 会话的 MAC 身份和接口准备参数；接口缺失或身份不匹配时停用 map、记录 `last_repair_error`，保留配置以便重试。WAN MAC 变化需要重新拨号；旧 tunnel 记录若没有接口名，或接口变化但缺少恢复参数，也需要重新拨号。IPv4/IPv6 MSS clamp 都对双向 SYN/SYN-ACK 生效；IPv6 支持至多 6 层 Hop-by-Hop、Routing、Destination Options 扩展头，不改写分片、AH 或 ESP 报文。
 
 `release.sh` 和 `scripts/package-plugins.sh` 默认只把 stable 插件放入 `veer-plugins.tar.gz`。
 

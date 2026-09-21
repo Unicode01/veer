@@ -1141,6 +1141,7 @@ func (h *pluginControlHost) netLinkSetOffloads(call goja.FunctionCall) goja.Valu
 		h.throwf("net.link.setOffloads: %v", err)
 	}
 	originals := make(map[string]any)
+	changes := make(map[string]bool)
 	for feature, desired := range features {
 		value, ok := current[feature]
 		if !ok && !owned {
@@ -1149,14 +1150,19 @@ func (h *pluginControlHost) netLinkSetOffloads(call goja.FunctionCall) goja.Valu
 		if ok && value != desired {
 			originals["offload."+feature] = value
 		}
+		if !ok || value != desired {
+			changes[feature] = desired
+		}
 	}
 	refs, err := h.claimPluginLinkMutations(previous, originals, "net.link.setOffloads")
 	if err != nil {
 		h.throwf("net.link.setOffloads: %v", err)
 	}
-	if err := admin.LinkSetOffloads(pluginControlNetOffloadRequest{Namespace: namespace, Interface: name, Features: features}); err != nil {
-		rollbackErr := h.rollbackNewPluginResourceClaims(admin, previous, originals, refs)
-		h.throwPluginNetMutationError("net.link.setOffloads", err, rollbackErr)
+	if len(changes) > 0 {
+		if err := admin.LinkSetOffloads(pluginControlNetOffloadRequest{Namespace: namespace, Interface: name, Features: changes}); err != nil {
+			rollbackErr := h.rollbackNewPluginResourceClaims(admin, previous, originals, refs)
+			h.throwPluginNetMutationError("net.link.setOffloads", err, rollbackErr)
+		}
 	}
 	for feature, desired := range features {
 		if err := h.releaseRestoredPluginLinkLease(namespace, name, "offload."+feature, desired); err != nil {
@@ -1219,10 +1225,13 @@ func (h *pluginControlHost) netLinkSetGSO(call goja.FunctionCall) goja.Value {
 	if err != nil {
 		h.throwf("net.link.setGSO: %v", err)
 	}
-	info, err := admin.LinkSetGSO(pluginControlNetGSORequest{Namespace: namespace, Interface: name, MaxSize: maxSize, MaxSegs: maxSegs})
-	if err != nil {
-		rollbackErr := h.rollbackNewPluginResourceClaims(admin, previous, originals, refs)
-		h.throwPluginNetMutationError("net.link.setGSO", err, rollbackErr)
+	info := previous
+	if len(originals) > 0 {
+		info, err = admin.LinkSetGSO(pluginControlNetGSORequest{Namespace: namespace, Interface: name, MaxSize: maxSize, MaxSegs: maxSegs})
+		if err != nil {
+			rollbackErr := h.rollbackNewPluginResourceClaims(admin, previous, originals, refs)
+			h.throwPluginNetMutationError("net.link.setGSO", err, rollbackErr)
+		}
 	}
 	if err := h.releaseRestoredPluginLinkLease(namespace, name, "gso", pluginControlNetGSORequest{Namespace: namespace, Interface: name, MaxSize: maxSize, MaxSegs: maxSegs}); err != nil {
 		h.throwf("net.link.setGSO: release restored lease: %v", err)
@@ -1292,9 +1301,11 @@ func (h *pluginControlHost) netAddrReplace(call goja.FunctionCall) goja.Value {
 			h.throwf("net.addr.replace: %v", err)
 		}
 	}
-	if err := admin.AddrReplace(normalized); err != nil {
-		rollbackErr := h.rollbackPluginAddressOperation(admin, normalized, originalPresent, refs)
-		h.throwPluginNetMutationError("net.addr.replace", err, rollbackErr)
+	if !originalPresent {
+		if err := admin.AddrReplace(normalized); err != nil {
+			rollbackErr := h.rollbackPluginAddressOperation(admin, normalized, originalPresent, refs)
+			h.throwPluginNetMutationError("net.addr.replace", err, rollbackErr)
+		}
 	}
 	if err := h.releaseRestoredPluginAddressLease(normalized, true); err != nil {
 		h.throwf("net.addr.replace: release restored lease: %v", err)
@@ -1389,12 +1400,14 @@ func (h *pluginControlHost) netRouteReplace(call goja.FunctionCall) goja.Value {
 	if err != nil {
 		h.throwf("net.route.replace: %v", err)
 	}
-	if err := admin.RouteReplace(req); err != nil {
-		var rollbackErr error
-		if leased {
-			rollbackErr = h.rollbackPluginRouteOperation(admin, req, true, previous, created)
+	if len(original) != 1 || !pluginControlRouteRequestMatchesState(req, original[0]) {
+		if err := admin.RouteReplace(req); err != nil {
+			var rollbackErr error
+			if leased {
+				rollbackErr = h.rollbackPluginRouteOperation(admin, req, true, previous, created)
+			}
+			h.throwPluginNetMutationError("net.route.replace", err, rollbackErr)
 		}
-		h.throwPluginNetMutationError("net.route.replace", err, rollbackErr)
 	}
 	if err := h.releaseRestoredPluginRouteLease(req, true); err != nil {
 		h.throwf("net.route.replace: release restored lease: %v", err)
@@ -1468,9 +1481,11 @@ func (h *pluginControlHost) netRuleReplace(call goja.FunctionCall) goja.Value {
 	if err != nil {
 		h.throwf("net.rule.replace: %v", err)
 	}
-	if err := admin.RuleReplace(req); err != nil {
-		rollbackErr := h.rollbackPluginRuleOperation(admin, req, true, previous, created)
-		h.throwPluginNetMutationError("net.rule.replace", err, rollbackErr)
+	if len(original) == 0 {
+		if err := admin.RuleReplace(req); err != nil {
+			rollbackErr := h.rollbackPluginRuleOperation(admin, req, true, previous, created)
+			h.throwPluginNetMutationError("net.rule.replace", err, rollbackErr)
+		}
 	}
 	if err := h.releaseRestoredPluginRuleLease(req, true); err != nil {
 		h.throwf("net.rule.replace: release restored lease: %v", err)
@@ -1528,12 +1543,14 @@ func (h *pluginControlHost) netNeighReplace(call goja.FunctionCall) goja.Value {
 	if err != nil {
 		h.throwf("net.neigh.replace: %v", err)
 	}
-	if err := admin.NeighReplace(req); err != nil {
-		var rollbackErr error
-		if leased {
-			rollbackErr = h.rollbackPluginNeighOperation(admin, req, true, previous, created)
+	if len(original) != 1 || !pluginControlNeighRequestMatchesState(req, original[0]) || original[0].LinkIfIndex != dev.IfIndex {
+		if err := admin.NeighReplace(req); err != nil {
+			var rollbackErr error
+			if leased {
+				rollbackErr = h.rollbackPluginNeighOperation(admin, req, true, previous, created)
+			}
+			h.throwPluginNetMutationError("net.neigh.replace", err, rollbackErr)
 		}
-		h.throwPluginNetMutationError("net.neigh.replace", err, rollbackErr)
 	}
 	if err := h.releaseRestoredPluginNeighLease(req, true); err != nil {
 		h.throwf("net.neigh.replace: release restored lease: %v", err)
