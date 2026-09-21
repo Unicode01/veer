@@ -623,7 +623,8 @@ static __always_inline int l3_packet_info(struct __sk_buff *skb, __u16 *length, 
 	return 0;
 }
 
-static __always_inline int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
+// The copy loops must be verified separately from the IPv4/IPv6 MSS branches.
+static __attribute__((noinline)) int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
