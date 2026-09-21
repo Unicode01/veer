@@ -14,6 +14,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
 )
 
 func TestBundledPPPoEMSSClampLinux(t *testing.T) {
@@ -41,6 +42,9 @@ SEC("tc/test_compact") int test_compact(struct __sk_buff *skb) { return compact_
 	spec, err := ebpf.LoadCollectionSpec(object)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, program := range spec.Programs {
+		program.Flags |= unix.BPF_F_STRICT_ALIGNMENT
 	}
 	collection, err := ebpf.NewCollection(spec)
 	if err != nil {

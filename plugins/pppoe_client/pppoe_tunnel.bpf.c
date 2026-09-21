@@ -623,6 +623,15 @@ static __always_inline int l3_packet_info(struct __sk_buff *skb, __u16 *length, 
 	return 0;
 }
 
+static __always_inline void copy_pppoe_payload_8(void *dst, const void *src)
+{
+	// skb packet data has NET_IP_ALIGN headroom. Offsets 14 and 22 plus
+	// multiples of 8 are four-byte aligned; explicit word accesses avoid
+	// clang lowering an unaligned memcpy into sixteen byte instructions.
+	*(__u32 *)dst = *(const __u32 *)src;
+	*(__u32 *)(dst + 4) = *(const __u32 *)(src + 4);
+}
+
 // The copy loops must be verified separately from the IPv4/IPv6 MSS branches.
 static __attribute__((noinline)) int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
 {
@@ -656,14 +665,14 @@ static __attribute__((noinline)) int compact_pppoe_payload_to_l3(struct __sk_buf
 			bump_tunnel_stat(13);
 			return -1;
 		}
-		__builtin_memcpy(dst, src, 8);
-		__builtin_memcpy(dst + 8, src + 8, 8);
-		__builtin_memcpy(dst + 16, src + 16, 8);
-		__builtin_memcpy(dst + 24, src + 24, 8);
-		__builtin_memcpy(dst + 32, src + 32, 8);
-		__builtin_memcpy(dst + 40, src + 40, 8);
-		__builtin_memcpy(dst + 48, src + 48, 8);
-		__builtin_memcpy(dst + 56, src + 56, 8);
+		copy_pppoe_payload_8(dst, src);
+		copy_pppoe_payload_8(dst + 8, src + 8);
+		copy_pppoe_payload_8(dst + 16, src + 16);
+		copy_pppoe_payload_8(dst + 24, src + 24);
+		copy_pppoe_payload_8(dst + 32, src + 32);
+		copy_pppoe_payload_8(dst + 40, src + 40);
+		copy_pppoe_payload_8(dst + 48, src + 48);
+		copy_pppoe_payload_8(dst + 56, src + 56);
 		copied += 64;
 	}
 #pragma clang loop unroll(disable)
@@ -677,7 +686,7 @@ static __attribute__((noinline)) int compact_pppoe_payload_to_l3(struct __sk_buf
 			bump_tunnel_stat(13);
 			return -1;
 		}
-		__builtin_memcpy(dst, src, 8);
+		copy_pppoe_payload_8(dst, src);
 		copied += 8;
 	}
 	if (copied < l3_len) {
