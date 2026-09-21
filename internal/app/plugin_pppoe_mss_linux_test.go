@@ -4,6 +4,7 @@ package app
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,10 +22,7 @@ func TestBundledPPPoEMSSClampLinux(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Fatal(err)
 	}
-	source, err := filepath.Abs(filepath.Join("..", "..", "plugins", "pppoe_client", "pppoe_tunnel.bpf.c"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	source := filepath.Join(findRepoRoot(t), "plugins", "pppoe_client", "pppoe_tunnel.bpf.c")
 	dir := t.TempDir()
 	wrapper := fmt.Sprintf(`#include %q
 SEC("tc/test_mss_v4") int test_mss_v4(struct __sk_buff *skb) { return clamp_tcp_mss_v4(skb, 1400); }
@@ -44,6 +42,10 @@ SEC("tc/test_mss_off") int test_mss_off(struct __sk_buff *skb) { return clamp_tc
 	}
 	collection, err := ebpf.NewCollection(spec)
 	if err != nil {
+		var verifier *ebpf.VerifierError
+		if errors.As(err, &verifier) {
+			t.Logf("PPPoE verifier: %+v", verifier)
+		}
 		t.Fatalf("load PPPoE programs: %+v", err)
 	}
 	defer collection.Close()
