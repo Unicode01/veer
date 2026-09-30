@@ -141,7 +141,10 @@ func TestPluginHostLinuxSandboxIdentityAndCgroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := string(statusData)
-	for _, want := range []string{"Uid:\t65534\t65534\t65534\t65534", "Gid:\t65534\t65534\t65534\t65534", "NoNewPrivs:\t1"} {
+	for _, want := range []string{
+		"Uid:\t65534\t65534\t65534\t65534", "Gid:\t65534\t65534\t65534\t65534", "NoNewPrivs:\t1",
+		"CapPrm:\t0000000000000000", "CapEff:\t0000000000000000", "CapAmb:\t0000000000000000",
+	} {
 		if !strings.Contains(status, want) {
 			client.Close()
 			t.Fatalf("plugin host status does not contain %q:\n%s", want, status)

@@ -166,6 +166,8 @@ Linux 子进程设置 `no_new_privs` 及 core/FD rlimit，并在 root 服务下�
 
 IPC 请求的超时覆盖写入、等待响应及 host call 回复；终止进程和关闭管道不依赖发送锁。子进程停止读取时，中断和关闭仍有独立的强制终止兜底。
 
+systemd 部署保留文件系统只读保护和私有临时目录。命名 network namespace 的创建和删除由可信父进程在一次性锁定线程中进入宿主挂载空间执行，避免 namespace 只挂载在服务私有空间、随服务退出消失。部署通过 `VEER_HOST_MOUNT_NAMESPACE=/proc/1/ns/mnt` 指定宿主挂载空间，并为父进程增加打开该句柄所需的 `CAP_SYS_PTRACE`；隔离 Host 仍降权且由 seccomp 拒绝 ptrace、setns 和 mount，不获得这项权限。直接从宿主 shell 运行时不需要设置该变量。
+
 `plugins_isolation=false` 只用于受信任的本地调试。它会恢复进程内 Goja VM，插件脚本缺陷可直接消耗主进程资源，因此生产环境不应关闭。关闭整个插件系统时不会创建 plugin-host，也不会给 TC/XDP 每包路径增加分支或 IPC。
 
 资源事务、插件包安装和 VM 热升级提供宿主可控制范围内的原子提交与失败回滚。普通 handler 内的 netlink 修改、eBPF map 写入、socket 写入、L2/UDP 发送和跨插件动作不能形成跨内核与外部对端的全局事务；插件必须使用幂等 reconcile、明确的 ownership 和补偿清理。普通 JavaScript 错误允许 `finally` 中提交修复 timer，超时、OOM 或协议退出则丢弃该未完成事件的 timer journal。
