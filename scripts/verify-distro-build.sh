@@ -6,7 +6,10 @@ set -eu
 . /etc/os-release
 # The archived minimum-version fixture is for compatibility, not security support.
 if [ "$ID" = debian ] && [ "$VERSION_ID" = 11 ]; then
-    printf '%s\n' 'deb http://archive.debian.org/debian bullseye main' > /etc/apt/sources.list
+    printf '%s\n' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260831T000000Z/ bullseye main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260831T000000Z/ bullseye-security main' \
+        > /etc/apt/sources.list
 fi
 case "$ID" in
     debian|ubuntu)
