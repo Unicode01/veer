@@ -402,6 +402,8 @@ go test ./...
 
 兼容性门槛包括：Debian 11、Ubuntu 22.04、Rocky Linux 9、Alpine 3.19 和当前 Fedora 容器中的真实依赖安装与 release 构建；Ubuntu amd64/arm64 原生 Linux 测试和 core dataplane；实际部署 unit 下命名 namespace 的创建、跨服务退出保留、重启复用和删除。容器只验证发行版用户环境与编译器，不证明该发行版默认内核、OpenRC 启动或 SELinux enforcing 兼容性，这些仍需在对应 VM 上验收。
 
+最低兼容版本不代表发行版仍受上游安全维护，生产环境应选择仍在维护的版本。[Debian 11 的官方 LTS 已于 2026-08-31 结束](https://www.debian.org/releases/bullseye/)；其 CI 容器仅使用归档源验证旧版用户环境，安装脚本不会替用户修改 apt 源。RHEL-compatible 系统会保留已安装的 `curl-minimal` / `coreutils-single`，避免与完整版软件包冲突。
+
 ## WHMCS 插件
 
 WHMCS addon 插件源码位于：
