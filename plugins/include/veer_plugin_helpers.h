@@ -5,9 +5,11 @@
 #define SEC(name) __attribute__((section(name), used))
 #endif
 
-#ifndef __always_inline
-#define __always_inline inline __attribute__((always_inline))
+/* Keep BPF inlining independent of macros from previously included system headers. */
+#ifdef __always_inline
+#undef __always_inline
 #endif
+#define __always_inline inline __attribute__((always_inline))
 
 typedef unsigned char __u8;
 typedef unsigned short __u16;

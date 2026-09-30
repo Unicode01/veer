@@ -30,4 +30,4 @@ export PATH="/opt/veer-go/bin:$PATH"
 export CGO_ENABLED=0
 export GOMAXPROCS=2
 VEER_BUILD_PLUGIN_SDK=0 bash release.sh amd64
-go test ./internal/app ./internal/kernelcap ./internal/tproxysetup -run 'TestPluginHostMountNamespaceOperation|TestEnsureRouting|TestCheckPluginCompatibility' -count=1
+go test ./internal/app ./internal/kernelcap ./internal/tproxysetup -run 'TestEBPFInlineHeadersOverrideWeakSystemMacro|TestPluginHostMountNamespaceOperation|TestEnsureRouting|TestCheckPluginCompatibility' -count=1

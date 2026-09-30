@@ -7,8 +7,10 @@ import (
 	"debug/elf"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -16,6 +18,58 @@ import (
 
 var ebpfDeclaredSymbolPattern = regexp.MustCompile(`\b(bpf_[A-Za-z0-9_]+)\b`)
 var ebpfUsedSymbolPattern = regexp.MustCompile(`\b(bpf_[A-Za-z0-9_]+)\s*\(`)
+
+func TestEBPFInlineHeadersOverrideWeakSystemMacro(t *testing.T) {
+	compiler := os.Getenv("BPF_CLANG")
+	if compiler == "" {
+		compiler = "clang"
+	}
+	if _, err := exec.LookPath(compiler); err != nil {
+		t.Skip("Clang is required for the BPF header compilation test")
+	}
+	repoRoot := findRepoRoot(t)
+	for _, header := range []string{"internal/app/ebpf/include/bpf_helpers.h", "plugins/include/veer_plugin_helpers.h"} {
+		t.Run(header, func(t *testing.T) {
+			dir := t.TempDir()
+			source := fmt.Sprintf(`#define __always_inline inline
+#include %q
+static __always_inline int veer_inline_fixture(int value) { return value + 1; }
+SEC("classifier/test") int veer_inline_entry(struct __sk_buff *skb) { return veer_inline_fixture(skb->len); }
+`, filepath.Join(repoRoot, header))
+			sourcePath, objectPath := filepath.Join(dir, "inline.c"), filepath.Join(dir, "inline.o")
+			if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-O0", "-target", "bpf", "-c", sourcePath, "-o", objectPath}
+			triplet := map[string]string{"amd64": "x86_64-linux-gnu", "arm64": "aarch64-linux-gnu"}[runtime.GOARCH]
+			if triplet != "" {
+				args = append(args, "-I/usr/include/"+triplet)
+			}
+			if output, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
+				t.Fatalf("compile weak-macro fixture: %v\n%s", err, output)
+			}
+			file, err := elf.Open(objectPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			symbols, err := file.Symbols()
+			if err != nil {
+				t.Fatal(err)
+			}
+			foundEntry := false
+			for _, symbol := range symbols {
+				if symbol.Name == "veer_inline_fixture" {
+					t.Fatal("weak system macro prevented forced BPF inlining")
+				}
+				foundEntry = foundEntry || symbol.Name == "veer_inline_entry"
+			}
+			if !foundEntry {
+				t.Fatal("compiled fixture contains no entry program")
+			}
+		})
+	}
+}
 
 func validateEmbeddedEBPFHelperDeclarations(repoRoot string) error {
 	ebpfDir := filepath.Join(repoRoot, "internal", "app", "ebpf")

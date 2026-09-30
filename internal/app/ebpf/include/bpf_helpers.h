@@ -4,9 +4,11 @@
 #include <linux/bpf.h>
 
 #define SEC(name) __attribute__((section(name), used))
-#ifndef __always_inline
-#define __always_inline inline __attribute__((always_inline))
+/* Older Linux UAPI headers define this as plain inline, increasing BPF call depth. */
+#ifdef __always_inline
+#undef __always_inline
 #endif
+#define __always_inline inline __attribute__((always_inline))
 
 struct bpf_map_def {
 	unsigned int type;

@@ -9,8 +9,8 @@
 #include <stddef.h>
 
 #include "include/bpf_endian.h"
-#include "include/forward_addr_helpers.h"
 #include "include/bpf_helpers.h"
+#include "include/forward_addr_helpers.h"
 
 #define ICMP_ECHOREPLY 0
 #define ICMP_ECHO 8
@@ -651,7 +651,8 @@ static __always_inline __sum16 csum_replace4_val(__sum16 check, __be32 old, __be
 	return csum_replace2_val(check, (__be16)old, (__be16)new);
 }
 
-static __always_inline __sum16 csum_replace_ipv6_addr_val(__sum16 check, const __u8 old_addr[16], const __u8 new_addr[16])
+/* Isolate checksum spills from the IPv6 NAT callers on older Clang versions. */
+static __attribute__((noinline)) __sum16 csum_replace_ipv6_addr_val(__sum16 check, const __u8 old_addr[16], const __u8 new_addr[16])
 {
 	int i;
 
@@ -3767,7 +3768,7 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 	}
 }
 
-static __attribute__((noinline)) int ensure_fullnat_existing_session_v6(const struct packet_ctx_v6 *ctx, const struct rule_value_v6 *rule, const struct flow_value_v6 *front_flow, __u8 flow_bank, __u64 now)
+static __always_inline int ensure_fullnat_existing_session_v6(const struct packet_ctx_v6 *ctx, const struct rule_value_v6 *rule, const struct flow_value_v6 *front_flow, __u8 flow_bank, __u64 now)
 {
 	struct flow_key_v6 *reply_key = lookup_xdp_flow_aux_key_scratch_v6();
 	struct flow_value_v6 *front_value = lookup_xdp_flow_scratch_v6();
@@ -3803,6 +3804,7 @@ static __attribute__((noinline)) int ensure_fullnat_existing_session_v6(const st
 	return state;
 }
 
+/* Port probing reuses this body; inlining all attempts can overflow BPF jump offsets. */
 static __attribute__((noinline)) int try_create_fullnat_session_v6(struct xdp_md *xdp, const struct packet_ctx_v6 *ctx, const struct rule_value_v6 *rule, __u64 now, __u16 nat_port)
 {
 	struct flow_key_v6 *front_key = lookup_xdp_flow_key_scratch_v6();
