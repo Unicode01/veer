@@ -4,6 +4,10 @@ set -eu
 # Run only inside disposable CI containers; use the real bootstrap package lists.
 [ "${VEER_PLATFORM_TEST_CONTAINER:-}" = 1 ] || { echo 'requires a disposable platform test container' >&2; exit 1; }
 . /etc/os-release
+# The archived minimum-version fixture is for compatibility, not security support.
+if [ "$ID" = debian ] && [ "$VERSION_ID" = 11 ]; then
+    printf '%s\n' 'deb http://archive.debian.org/debian bullseye main' > /etc/apt/sources.list
+fi
 case "$ID" in
     debian|ubuntu)
         apt-get update

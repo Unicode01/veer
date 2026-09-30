@@ -491,8 +491,21 @@ detect_package_manager() {
     fail "未找到受支持的包管理器: apt-get/dnf/yum/apk"
 }
 
+rpm_dependency_package() {
+    local standard="$1"
+    local variant="$2"
+
+    if command -v rpm >/dev/null 2>&1 && rpm -q --quiet "${variant}"; then
+        printf '%s' "${variant}"
+    else
+        printf '%s' "${standard}"
+    fi
+}
+
 install_system_deps() {
     local package_manager=""
+    local rpm_coreutils_package="coreutils"
+    local rpm_curl_package="curl"
 
     if [[ "${FORWARD_SKIP_DEPS}" == "1" ]]; then
         warn "已跳过系统依赖安装"
@@ -500,6 +513,10 @@ install_system_deps() {
     fi
 
     package_manager="$(detect_package_manager)"
+    if [[ "${package_manager}" == dnf || "${package_manager}" == yum ]]; then
+        rpm_coreutils_package="$(rpm_dependency_package coreutils coreutils-single)"
+        rpm_curl_package="$(rpm_dependency_package curl curl-minimal)"
+    fi
     case "${package_manager}" in
         apt)
             export DEBIAN_FRONTEND=noninteractive
@@ -529,8 +546,8 @@ install_system_deps() {
             run_with_retry 3 3 "安装系统依赖" dnf install -y \
                 ca-certificates \
                 bash \
-                coreutils \
-                curl \
+                "${rpm_coreutils_package}" \
+                "${rpm_curl_package}" \
                 ethtool \
                 findutils \
                 git \
@@ -552,8 +569,8 @@ install_system_deps() {
             run_with_retry 3 3 "安装系统依赖" yum install -y \
                 ca-certificates \
                 bash \
-                coreutils \
-                curl \
+                "${rpm_coreutils_package}" \
+                "${rpm_curl_package}" \
                 ethtool \
                 findutils \
                 git \
