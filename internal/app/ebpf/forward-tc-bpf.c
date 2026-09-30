@@ -10,8 +10,8 @@
 #include <stddef.h>
 
 #include "include/bpf_endian.h"
-#include "include/forward_addr_helpers.h"
 #include "include/bpf_helpers.h"
+#include "include/forward_addr_helpers.h"
 
 #define ICMP_ECHOREPLY 0
 #define ICMP_ECHO 8
@@ -4057,7 +4057,7 @@ static __always_inline int handle_egress_nat_forward_non_full_cone(struct __sk_b
 	return handle_egress_nat_forward_new(skb, ctx, rule, &front_key);
 }
 
-static __attribute__((noinline)) int handle_egress_nat_forward_full_cone(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
+static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
 {
 	union flow_nat_key_v4 reply_or_nat = {};
 	struct flow_key_v4 close_reply_key = {};
