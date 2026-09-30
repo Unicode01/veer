@@ -42,6 +42,13 @@ func pluginNetworkNamespaceFeatureStatus() PluginHostFeatureStatus {
 	if err := pluginRequireEffectiveCapabilities(unix.CAP_NET_ADMIN, unix.CAP_SYS_ADMIN); err != nil {
 		return PluginHostFeatureStatus{Reason: "network namespace provider unavailable: " + err.Error()}
 	}
+	hostMount, err := openLinuxPluginHostMountNamespace()
+	if err != nil {
+		return PluginHostFeatureStatus{Reason: "network namespace provider unavailable: " + err.Error()}
+	}
+	if hostMount >= 0 {
+		_ = unix.Close(hostMount)
+	}
 	fd, err := unix.Open("/proc/self/ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return PluginHostFeatureStatus{Reason: "network namespace provider unavailable: " + err.Error()}

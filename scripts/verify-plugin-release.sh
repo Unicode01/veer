@@ -142,6 +142,7 @@ run_portable() {
 
 	log "deployment platform scripts"
 	sh "$ROOT_DIR/scripts/verify-platform-support.sh"
+	python3 "$ROOT_DIR/scripts/verify-platform-behavior.py"
 	python3 "$ROOT_DIR/scripts/verify-deploy-config-policy.py"
 	sh "$ROOT_DIR/scripts/clean-dev-artifacts.sh" --dry-run
 

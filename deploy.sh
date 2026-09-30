@@ -330,6 +330,7 @@ WorkingDirectory=${INSTALL_DIR}
 Environment=VEER_HOT_RESTART_MARKER=${HOT_RESTART_MARKER}
 Environment=VEER_BPF_STATE_DIR=${BPF_STATE_DIR}
 Environment=VEER_RUNTIME_STATE_DIR=${RUNTIME_STATE_DIR}
+Environment=VEER_HOST_MOUNT_NAMESPACE=/proc/1/ns/mnt
 Environment=FORWARD_HOT_RESTART_MARKER=${HOT_RESTART_MARKER}
 Environment=FORWARD_BPF_STATE_DIR=${BPF_STATE_DIR}
 Environment=FORWARD_RUNTIME_STATE_DIR=${RUNTIME_STATE_DIR}
@@ -345,14 +346,15 @@ ProtectSystem=strict
 ReadWritePaths=${INSTALL_DIR}
 ReadWritePaths=${RUNTIME_STATE_DIR}
 ReadWritePaths=-/etc/network
+ReadWritePaths=/run/netns
 ReadWritePaths=/tmp
 ReadWritePaths=/sys/fs/bpf
 ReadWritePaths=${BPF_STATE_DIR}
 ReadWritePaths=/sys/fs/cgroup
 PrivateTmp=true
 
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE
 
 StandardOutput=journal
 StandardError=journal
@@ -381,6 +383,7 @@ respawn_max=0
 output_log="/var/log/${SERVICE_NAME}.log"
 error_log="/var/log/${SERVICE_NAME}.log"
 umask=0077
+rc_ulimit="-n 65535"
 
 export VEER_HOT_RESTART_MARKER="${HOT_RESTART_MARKER}"
 export VEER_BPF_STATE_DIR="${BPF_STATE_DIR}"
@@ -1405,6 +1408,10 @@ if ! mountpoint -q /sys/fs/bpf; then
 fi
 mkdir -p "$BPF_STATE_DIR"
 mkdir -p "$RUNTIME_STATE_DIR"
+if [[ -L /run/netns || ( -e /run/netns && ! -d /run/netns ) ]]; then
+    fail "/run/netns 必须是目录且不能是符号链接"
+fi
+mkdir -p /run/netns
 ok "bpffs 状态目录已就绪: ${BPF_STATE_DIR}"
 
 # ---------- 服务管理 ----------

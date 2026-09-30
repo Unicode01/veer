@@ -105,43 +105,19 @@ func (admin *linuxPluginControlNetAdmin) NamespaceEnsure(req pluginControlNetNam
 		return pluginControlNetNamespaceResult{Info: info}, nil
 	}
 
-	resultCh := make(chan struct {
-		info pluginControlNetNamespaceInfo
-		err  error
-	}, 1)
-	go func() {
-		runtime.LockOSThread()
-		safeToUnlock := true
-		defer func() {
-			if safeToUnlock {
-				runtime.UnlockOSThread()
-			}
-		}()
-		current, currentErr := netns.Get()
-		if currentErr != nil {
-			resultCh <- struct {
-				info pluginControlNetNamespaceInfo
-				err  error
-			}{err: fmt.Errorf("capture current namespace: %w", currentErr)}
-			return
-		}
-		defer current.Close()
-		safeToUnlock = false
+	var info pluginControlNetNamespaceInfo
+	err = runLinuxPluginHostMountOperation(func() error {
 		created, createErr := netns.NewNamed(name)
 		if createErr != nil {
-			restoreErr := netns.Set(current)
-			safeToUnlock = restoreErr == nil
-			if restoreErr != nil {
-				createErr = fmt.Errorf("%v; restore current namespace: %w", createErr, restoreErr)
-			}
-			resultCh <- struct {
-				info pluginControlNetNamespaceInfo
-				err  error
-			}{err: createErr}
-			return
+			return createErr
 		}
+		defer created.Close()
 		identity, identityErr := linuxPluginNamespaceIdentity(created)
-		if identityErr == nil && req.LoopbackUp {
+		if identityErr != nil {
+			return identityErr
+		}
+		info = pluginControlNetNamespaceInfo{Name: name, Identity: identity}
+		if req.LoopbackUp {
 			loopback, lookupErr := pluginControlNetLinkByName("lo")
 			if lookupErr != nil {
 				identityErr = fmt.Errorf("resolve loopback: %w", lookupErr)
@@ -149,27 +125,15 @@ func (admin *linuxPluginControlNetAdmin) NamespaceEnsure(req pluginControlNetNam
 				identityErr = fmt.Errorf("set loopback up: %w", upErr)
 			}
 		}
-		_ = created.Close()
-		restoreErr := netns.Set(current)
-		safeToUnlock = restoreErr == nil
-		if restoreErr != nil {
-			if identityErr != nil {
-				identityErr = fmt.Errorf("%v; restore current namespace: %w", identityErr, restoreErr)
-			} else {
-				identityErr = fmt.Errorf("restore current namespace: %w", restoreErr)
-			}
+		if identityErr != nil {
+			_ = deleteLinuxPluginNamedNamespace(name, identity)
 		}
-		resultCh <- struct {
-			info pluginControlNetNamespaceInfo
-			err  error
-		}{info: pluginControlNetNamespaceInfo{Name: name, Identity: identity}, err: identityErr}
-	}()
-	result := <-resultCh
-	if result.err != nil {
-		_ = netns.DeleteNamed(name)
-		return pluginControlNetNamespaceResult{}, result.err
+		return identityErr
+	})
+	if err != nil {
+		return pluginControlNetNamespaceResult{}, err
 	}
-	return pluginControlNetNamespaceResult{Info: result.info, Created: true}, nil
+	return pluginControlNetNamespaceResult{Info: info, Created: true}, nil
 }
 
 func (admin *linuxPluginControlNetAdmin) NamespaceDelete(name string, identity pluginControlNetNamespaceIdentity) error {
@@ -189,6 +153,12 @@ func (admin *linuxPluginControlNetAdmin) NamespaceDelete(name string, identity p
 		}
 	}
 	provider.mu.RUnlock()
+	return runLinuxPluginHostMountOperation(func() error {
+		return deleteLinuxPluginNamedNamespace(name, identity)
+	})
+}
+
+func deleteLinuxPluginNamedNamespace(name string, identity pluginControlNetNamespaceIdentity) error {
 	current, present, err := linuxPluginNamespaceLookup(name)
 	if err != nil || !present {
 		return err

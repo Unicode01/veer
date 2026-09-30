@@ -33,12 +33,14 @@ for script in \
 	"$ROOT_DIR/scripts/package-plugins.sh" \
 	"$ROOT_DIR/scripts/verify-plugin-manifests.sh" \
 	"$ROOT_DIR/scripts/verify-plugin-release.sh" \
+	"$ROOT_DIR/scripts/verify-distro-build.sh" \
 	"$ROOT_DIR/plugins/packet_observer/build.sh" \
 	"$ROOT_DIR/plugins/pppoe_client/build.sh" \
 	"$ROOT_DIR/plugins/pppoe_client/test-blackbox-linux.sh"
 do
 	sh -n "$script"
 done
+bash -n "$ROOT_DIR/scripts/verify-service-platform.sh"
 
 for distro_contract in \
 	'Debian 11+' \
@@ -54,7 +56,7 @@ for package_manager in 'apt-get' 'dnf' 'yum' 'apk'; do
 	require_text "$ROOT_DIR/bootstrap.sh" "$package_manager"
 done
 
-for dependency in 'iproute2' 'iproute' 'nftables' 'procps' 'procps-ng' 'util-linux' 'openrc'; do
+for dependency in 'iproute2' 'iproute' 'iptables' 'nftables' 'procps' 'procps-ng' 'util-linux' 'openrc'; do
 	require_text "$ROOT_DIR/bootstrap.sh" "$dependency"
 done
 
@@ -74,6 +76,7 @@ done
 require_text "$ROOT_DIR/deploy.sh" 'Delegate=yes'
 require_text "$ROOT_DIR/deploy.sh" 'ReadWritePaths=-/etc/network'
 require_text "$ROOT_DIR/deploy.sh" 'ReadWritePaths=/sys/fs/cgroup'
+require_text "$ROOT_DIR/deploy.sh" 'ReadWritePaths=/run/netns'
 for capability in \
 	CAP_NET_BIND_SERVICE \
 	CAP_NET_RAW \
@@ -84,6 +87,7 @@ for capability in \
 	CAP_SETGID \
 	CAP_KILL \
 	CAP_SYS_CHROOT \
+	CAP_SYS_PTRACE \
 	CAP_SYS_ADMIN
 do
 	require_text "$ROOT_DIR/deploy.sh" "$capability"
@@ -91,6 +95,7 @@ done
 
 require_text "$ROOT_DIR/deploy.sh" '#!/sbin/openrc-run'
 require_text "$ROOT_DIR/deploy.sh" 'supervisor="supervise-daemon"'
+require_text "$ROOT_DIR/deploy.sh" 'rc_ulimit="-n 65535"'
 require_text "$ROOT_DIR/deploy.sh" '/etc/sysctl.d/99-veer.conf'
 require_text "$ROOT_DIR/deploy.sh" 'getenforce'
 require_text "$ROOT_DIR/deploy.sh" 'systemd-analyze verify'

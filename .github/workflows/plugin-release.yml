@@ -35,6 +35,7 @@ jobs:
       - name: Verify deployment scripts
         run: |
           sh scripts/verify-platform-support.sh
+          python3 scripts/verify-platform-behavior.py
           python3 scripts/verify-deploy-config-policy.py
           shellcheck -x bootstrap.sh deploy.sh release.sh scripts/*.sh plugins/*/*.sh
           php -l whmcs/forward/forward.php
@@ -86,3 +87,50 @@ jobs:
             GOMODCACHE=/tmp/veer-flow-churn-gomodcache \
             GOCACHE=/tmp/veer-flow-churn-gocache \
             sh scripts/verify-plugin-release.sh flow-churn
+
+  platform-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:11", "ubuntu:22.04", "rockylinux:9", "fedora:latest", "alpine:3.19"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build with distribution dependencies and compiler
+        env:
+          PLATFORM_IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm \
+            --env VEER_PLATFORM_TEST_CONTAINER=1 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/src,readonly" \
+            --mount "type=bind,source=$(go env GOROOT),target=/opt/veer-go,readonly" \
+            "$PLATFORM_IMAGE" sh /src/scripts/verify-distro-build.sh
+
+  platform-runtime:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install native dataplane dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev iproute2 iptables nftables util-linux ethtool
+      - name: Build native eBPF and run Linux tests
+        run: |
+          sh scripts/build-all-ebpf.sh
+          go test ./internal/app ./internal/kernelcap ./internal/tproxysetup -count=1
+      - name: Verify real deployment unit and namespace persistence
+        run: sudo env "PATH=$PATH" bash scripts/verify-service-platform.sh
+      - name: Verify native core dataplane
+        run: sudo env "PATH=$PATH" sh scripts/verify-plugin-release.sh core-dataplane

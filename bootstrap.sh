@@ -513,6 +513,7 @@ install_system_deps() {
                 findutils \
                 git \
                 iproute2 \
+                iptables \
                 clang \
                 llvm \
                 linux-libc-dev \
@@ -534,6 +535,7 @@ install_system_deps() {
                 findutils \
                 git \
                 iproute \
+                iptables \
                 clang \
                 llvm \
                 kernel-headers \
@@ -556,6 +558,7 @@ install_system_deps() {
                 findutils \
                 git \
                 iproute \
+                iptables \
                 clang \
                 llvm \
                 kernel-headers \
@@ -580,6 +583,7 @@ install_system_deps() {
                 git \
                 grep \
                 iproute2 \
+                iptables \
                 linux-headers \
                 llvm \
                 musl-dev \
@@ -600,13 +604,11 @@ install_system_deps() {
     ok "系统依赖安装完成"
 }
 
-require_runtime_environment() {
+require_runtime_tools() {
     local missing=()
     local command_name=""
-    local service_manager="${VEER_SERVICE_MANAGER:-auto}"
-    local controllers=""
 
-    for command_name in bash curl tar git python3 clang ip ethtool nft mount mountpoint sysctl install readlink; do
+    for command_name in bash curl tar git python3 clang ip iptables ethtool nft mount mountpoint sysctl install readlink; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             missing+=("${command_name}")
         fi
@@ -614,6 +616,14 @@ require_runtime_environment() {
     if (( ${#missing[@]} > 0 )); then
         fail "系统依赖不完整，缺少命令: ${missing[*]}"
     fi
+}
+
+require_runtime_environment() {
+    local command_name=""
+    local service_manager="${VEER_SERVICE_MANAGER:-auto}"
+    local controllers=""
+
+    require_runtime_tools
 
     service_manager="$(printf '%s' "${service_manager}" | tr '[:upper:]' '[:lower:]')"
     case "${service_manager}" in

@@ -20,6 +20,16 @@ curl -fsSL https://codeload.github.com/Unicode01/veer/tar.gz/refs/heads/main | t
 bash "$tmpdir/bootstrap.sh"
 ```
 
+Alpine 的默认 shell 是 ash，首次安装请先准备 Bash、curl 和证书，再使用不依赖进程替换的入口：
+
+```sh
+apk add --no-cache bash curl ca-certificates
+bootstrap_file="$(mktemp)" && \
+curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh -o "$bootstrap_file" && \
+bash "$bootstrap_file"
+rm -f -- "$bootstrap_file"
+```
+
 常用部署参数：
 
 ```bash
@@ -321,6 +331,8 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 最终以宿主机实际内核版本和 eBPF 能力为准，不只看发行版版本号。旧内核可能只能运行用户态路径，或无法稳定使用内核 dataplane。默认 full 插件沙箱还要求 cgroup v2 提供 `cpu`、`memory`、`pids` controller；不满足时核心仍可运行，但外部插件会被拒绝启动。
 
+引导脚本同时安装 nftables 和 iptables：透明用户态转发目前仍需要 iptables 的 socket match 与 mangle MARK 支持，不能只安装 nftables。systemd 与 OpenRC 部署均设置 65535 的文件句柄上限。systemd 保留 `ProtectSystem=strict`，插件 namespace 的创建和删除由父进程进入宿主挂载空间执行，以保留跨服务重启的命名 namespace；打开该句柄需要父进程具有 `CAP_SYS_PTRACE`，插件子进程不继承此权限。
+
 托管网络的运行时桥使用 netlink，跨上述发行版可用；“持久化桥”目前只写 `/etc/network/interfaces`。RHEL/Fedora 默认使用 NetworkManager 时，应由 `nmcli` 或发行版网络配置管理宿主桥。
 
 构建要求：
@@ -387,6 +399,8 @@ go test ./...
 ```
 
 插件发布使用 `sh scripts/verify-plugin-release.sh portable`；root Linux 的完整验收与性能门槛见 [PLUGIN.md](PLUGIN.md#验收边界)。
+
+兼容性门槛包括：Debian 11、Ubuntu 22.04、Rocky Linux 9、Alpine 3.19 和当前 Fedora 容器中的真实依赖安装与 release 构建；Ubuntu amd64/arm64 原生 Linux 测试和 core dataplane；实际部署 unit 下命名 namespace 的创建、跨服务退出保留、重启复用和删除。容器只验证发行版用户环境与编译器，不证明该发行版默认内核、OpenRC 启动或 SELinux enforcing 兼容性，这些仍需在对应 VM 上验收。
 
 ## WHMCS 插件
 
