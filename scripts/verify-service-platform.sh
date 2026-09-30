@@ -17,6 +17,7 @@ cleanup() {
     journalctl -u "$SERVICE_NAME" --no-pager -n 100 || true
     ip netns del "$namespace" >/dev/null 2>&1 || true
     rm -f -- "$SERVICE_FILE"
+    systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
     systemctl daemon-reload
     rmdir "$BPF_STATE_DIR" 2>/dev/null || true
     if [[ "$mounted_bpffs" == 1 ]]; then
