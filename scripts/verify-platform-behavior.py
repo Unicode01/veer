@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BASH = os.environ.get("VEER_TEST_BASH", "bash")
 BOOTSTRAP_FUNCTIONS = (
     "version_ge", "os_major_version", "os_id_like_contains", "require_supported_distro",
-    "detect_package_manager", "run_with_retry", "install_system_deps", "require_runtime_tools",
+    "detect_package_manager", "run_with_retry", "rpm_dependency_package", "install_system_deps", "require_runtime_tools",
 )
 LOGGING = """
 info() { printf '%s\\n' "$*"; }
@@ -49,19 +49,25 @@ def run_shell(source: str, **variables: str) -> subprocess.CompletedProcess:
 
 class PlatformBehaviorTests(unittest.TestCase):
     def test_installer_dependencies(self):
-        for manager in ("apt", "dnf", "yum", "apk"):
-            with self.subTest(manager=manager):
+        cases = [(manager, "0") for manager in ("apt", "dnf", "yum", "apk")]
+        cases += [(manager, "1") for manager in ("dnf", "yum")]
+        for manager, minimal in cases:
+            with self.subTest(manager=manager, minimal=minimal):
                 source = library("bootstrap") + """
 ok() { :; }
 detect_package_manager() { printf '%s' "$TEST_MANAGER"; }
+rpm() { test "$TEST_RPM_MINIMAL" = 1; }
 run_with_retry() { shift 3; printf '%s\\n' "$@"; }
 install_system_deps
 """
-                result = run_shell(source, FORWARD_SKIP_DEPS="0", TEST_MANAGER=manager)
+                result = run_shell(source, FORWARD_SKIP_DEPS="0", TEST_MANAGER=manager, TEST_RPM_MINIMAL=minimal)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 arguments = result.stdout.splitlines()
                 for package in ("iptables", "nftables", "util-linux", "ethtool", "python3"):
                     self.assertIn(package, arguments)
+                self.assertIn("curl-minimal" if minimal == "1" else "curl", arguments)
+                self.assertIn("coreutils-single" if minimal == "1" else "coreutils", arguments)
+                self.assertNotIn("--allowerasing", arguments)
                 if manager == "apk":
                     self.assertIn("openrc", arguments)
 
