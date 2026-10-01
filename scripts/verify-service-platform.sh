@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SERVICE_NAME="veer-platform-$$"
 SERVICE_FILE="/run/systemd/system/${SERVICE_NAME}.service"
-INSTALL_DIR="$(mktemp -d /var/lib/veer-platform.XXXXXX)"
+INSTALL_DIR="$(mktemp -d /opt/veer-platform.XXXXXX)"
 export HOT_RESTART_MARKER="${INSTALL_DIR}/.hot"
 export BPF_STATE_DIR="/sys/fs/bpf/${SERVICE_NAME}"
 export RUNTIME_STATE_DIR="${INSTALL_DIR}/.state"
@@ -56,6 +56,7 @@ Environment=VEER_SERVICE_TEST_PHASE=${phase}
 Environment=VEER_SERVICE_TEST_NAMESPACE=${namespace}
 Environment=VEER_SERVICE_TEST_IDENTITY_FILE=${INSTALL_DIR}/identity.json
 EOF
+    prepare_selinux_labels
     systemd-analyze verify "$SERVICE_FILE"
     systemctl daemon-reload
     systemctl start "$SERVICE_NAME"
@@ -76,6 +77,7 @@ Type=oneshot
 Restart=no
 ExecStart=${INSTALL_DIR}/veer -test.v -test.run=^(TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe)$ -test.count=1 -test.timeout=2m
 EOF
+prepare_selinux_labels
 systemd-analyze verify "$SERVICE_FILE"
 systemctl daemon-reload
 systemctl start "$SERVICE_NAME"
