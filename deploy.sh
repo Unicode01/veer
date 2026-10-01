@@ -316,6 +316,19 @@ service_log_hint() {
 }
 
 write_service_definition() {
+    cat > "${INSTALL_DIR}/veer-runtime-prepare" <<EOF
+#!/bin/sh
+set -eu
+# /run and bpffs are ephemeral and must exist before systemd builds its mount namespace.
+if [ -L /run/netns ] || { [ -e /run/netns ] && [ ! -d /run/netns ]; }; then
+    echo '/run/netns must be a directory, not a symbolic link' >&2
+    exit 1
+fi
+mkdir -p /run/netns /sys/fs/bpf
+mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
+mkdir -p "${BPF_STATE_DIR}" "${RUNTIME_STATE_DIR}"
+EOF
+    chmod 755 "${INSTALL_DIR}/veer-runtime-prepare"
     case "${SERVICE_MANAGER}" in
         systemd)
             cat > "${SERVICE_FILE}" <<EOF
@@ -334,6 +347,7 @@ Environment=VEER_HOST_MOUNT_NAMESPACE=/proc/1/ns/mnt
 Environment=FORWARD_HOT_RESTART_MARKER=${HOT_RESTART_MARKER}
 Environment=FORWARD_BPF_STATE_DIR=${BPF_STATE_DIR}
 Environment=FORWARD_RUNTIME_STATE_DIR=${RUNTIME_STATE_DIR}
+ExecStartPre=+${INSTALL_DIR}/veer-runtime-prepare
 ExecStart=${INSTALL_DIR}/veer --config ${INSTALL_DIR}/config.json
 Restart=always
 RestartSec=3
@@ -419,6 +433,7 @@ veer_cgroup_path() {
 
 start_pre() {
     local group="\$(veer_cgroup_path)"
+    "${INSTALL_DIR}/veer-runtime-prepare" || return 1
     unset VEER_OPENRC_CGROUP
     [ -n "\$group" ] || return 0
     mkdir -p "\$group/veer-supervisor" || return 1
@@ -522,7 +537,7 @@ prepare_selinux_labels() {
     case "${mode}" in
         Enforcing|Permissive)
             if command -v restorecon >/dev/null 2>&1; then
-                restorecon -F "${INSTALL_DIR}/veer" "${SERVICE_FILE}" >/dev/null 2>&1 || \
+                restorecon -F "${INSTALL_DIR}/veer" "${INSTALL_DIR}/veer-runtime-prepare" "${SERVICE_FILE}" >/dev/null 2>&1 || \
                     warn "SELinux 标签恢复失败；若服务无法启动请检查 AVC 日志"
             else
                 warn "检测到 SELinux ${mode}，但未找到 restorecon"
