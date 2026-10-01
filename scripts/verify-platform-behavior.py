@@ -25,17 +25,29 @@ fail() { printf '%s\\n' "$*" >&2; exit 1; }
 
 def shell_function(filename: str, name: str) -> str:
     source = (ROOT / filename).read_text(encoding="utf-8")
-    # Top-level closing braces are followed by a blank line, unlike heredoc bodies.
-    match = re.search(r"^" + re.escape(name) + r"\(\) \{\n.*?^\}\n(?=\n|\Z)", source, re.M | re.S)
+    match = re.search(r"^" + re.escape(name) + r"\(\) \{\n", source, re.M)
     if match is None:
         raise AssertionError(f"missing shell function: {filename}:{name}")
-    return match.group()
+    lines = []
+    delimiter = None
+    for line in source[match.start():].splitlines(keepends=True):
+        lines.append(line)
+        if delimiter is not None:
+            if line.rstrip("\n") == delimiter:
+                delimiter = None
+            continue
+        heredoc = re.search(r"<<['\"]?([A-Za-z_][A-Za-z_0-9]*)['\"]?", line)
+        if heredoc:
+            delimiter = heredoc[1]
+        elif line == "}\n":
+            return "".join(lines)
+    raise AssertionError(f"unterminated shell function: {filename}:{name}")
 
 
 def library(kind: str) -> str:
     filename, names = (
         ("bootstrap.sh", BOOTSTRAP_FUNCTIONS) if kind == "bootstrap"
-        else ("deploy.sh", ("write_service_definition",))
+        else ("deploy.sh", ("write_service_definition", "prepare_selinux_labels"))
     )
     return "set -eu\n" + LOGGING + "\n".join(shell_function(filename, name) for name in names)
 
@@ -89,7 +101,7 @@ require_runtime_tools
                 unit = Path(temp) / "service"
                 result = run_shell(library("deploy") + "\nwrite_service_definition\n",
                                    SERVICE_MANAGER=manager, SERVICE_FILE=unit.as_posix(),
-                                   INSTALL_DIR="/opt/veer-test", HOT_RESTART_MARKER="/opt/veer-test/.hot",
+                                   INSTALL_DIR=Path(temp).as_posix(), HOT_RESTART_MARKER="/opt/veer-test/.hot",
                                    BPF_STATE_DIR="/sys/fs/bpf/veer-test", RUNTIME_STATE_DIR="/opt/veer-test/.state",
                                    SERVICE_NAME="veer-test")
                 self.assertEqual(result.returncode, 0, result.stderr)

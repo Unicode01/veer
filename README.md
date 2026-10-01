@@ -333,6 +333,8 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 引导脚本同时安装 nftables 和 iptables：透明用户态转发目前仍需要 iptables 的 socket match 与 mangle MARK 支持，不能只安装 nftables。systemd 与 OpenRC 部署均设置 65535 的文件句柄上限。systemd 保留 `ProtectSystem=strict`，插件 namespace 的创建和删除由父进程进入宿主挂载空间执行，以保留跨服务重启的命名 namespace；打开该句柄需要父进程具有 `CAP_SYS_PTRACE`，插件子进程不继承此权限。
 
+OpenRC 部署会在 cgroup 尚未挂载时启动并启用系统的 `cgroups` 服务；每次启动将 Veer 与 supervisor 分配到不同子组，供插件启用 cpu/memory/pids 资源隔离。热更新保留的 worker 不会被移动或清理；停止服务时只移除空 cgroup。已有的 cgroup 挂载与 controller 配置不会被重新挂载或替换。
+
 托管网络的运行时桥使用 netlink，跨上述发行版可用；“持久化桥”目前只写 `/etc/network/interfaces`。RHEL/Fedora 默认使用 NetworkManager 时，应由 `nmcli` 或发行版网络配置管理宿主桥。
 
 构建要求：
@@ -400,7 +402,19 @@ go test ./...
 
 插件发布使用 `sh scripts/verify-plugin-release.sh portable`；root Linux 的完整验收与性能门槛见 [PLUGIN.md](PLUGIN.md#验收边界)。
 
-兼容性门槛包括：Debian 11、Ubuntu 22.04、Rocky Linux 9、Alpine 3.19 和当前 Fedora 容器中的真实依赖安装与 release 构建；Ubuntu amd64/arm64 原生 Linux 测试和 core dataplane；实际部署 unit 下命名 namespace 的创建、跨服务退出保留、重启复用和删除。容器只验证发行版用户环境与编译器，不证明该发行版默认内核、OpenRC 启动或 SELinux enforcing 兼容性，这些仍需在对应 VM 上验收。
+兼容性门槛包括：Debian 11、Ubuntu 22.04、Rocky Linux 9、Alpine 3.19 和当前 Fedora 容器中的真实依赖安装与 release 构建；Ubuntu amd64/arm64 原生 Linux 测试和 core dataplane；实际部署 unit 下命名 namespace 的创建、跨服务退出保留、重启复用和删除。容器只验证发行版用户环境与编译器。
+
+CI 另外启动官方 Alpine 3.19.8 和 Rocky Linux 9.8 云镜像的 QEMU VM，使用各自默认内核验证实际安装、热更新、崩溃恢复、开机启动、插件沙箱与 TC/XDP 的 IPv4/IPv6 转发和 egress NAT；Alpine 验证 OpenRC 及保留 worker 时的 cgroup 隔离，Rocky 全程保持 SELinux enforcing。镜像固定版本并校验摘要，关键测试被跳过会使验收失败，串口与测试日志保留为 CI artifact。这些结果只覆盖所列镜像与默认策略，自定义内核或 SELinux 策略仍需单独验收。
+
+在装有 QEMU、genisoimage 和 OpenSSH 的 Linux 主机上可复现 VM 验收（可用时使用 KVM，否则使用 TCG）：
+
+```bash
+sh scripts/build-all-ebpf.sh
+CGO_ENABLED=0 go build -o /tmp/veer-vm-binary .
+CGO_ENABLED=0 go test -c -o /tmp/veer-vm.test ./internal/app
+python3 scripts/verify-qemu-platform.py alpine --binary /tmp/veer-vm-binary --test-binary /tmp/veer-vm.test
+python3 scripts/verify-qemu-platform.py rocky --binary /tmp/veer-vm-binary --test-binary /tmp/veer-vm.test
+```
 
 最低兼容版本不代表发行版仍受上游安全维护，生产环境应选择仍在维护的版本。[Debian 11 的官方 LTS 已于 2026-08-31 结束](https://www.debian.org/releases/bullseye/)；其 CI 容器仅使用 LTS 末期归档快照验证旧版用户环境，安装脚本不会替用户修改 apt 源。RHEL-compatible 系统会保留已安装的 `curl-minimal` / `coreutils-single`，避免与完整版软件包冲突。
 

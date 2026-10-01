@@ -370,11 +370,22 @@ WantedBy=multi-user.target
 EOF
             ;;
         openrc)
+            cat > "${INSTALL_DIR}/veer-openrc-launch" <<EOF
+#!/bin/sh
+# Each supervised invocation owns a delegated subtree; the supervisor stays outside it.
+if [ -n "\${VEER_OPENRC_CGROUP:-}" ]; then
+    group="\${VEER_OPENRC_CGROUP}/veer-app-\$\$"
+    mkdir -p "\$group" || exit 1
+    printf '%s\\n' "\$\$" > "\$group/cgroup.procs" || exit 1
+fi
+exec "${INSTALL_DIR}/veer" "\$@"
+EOF
+            chmod 755 "${INSTALL_DIR}/veer-openrc-launch"
             cat > "${SERVICE_FILE}" <<EOF
 #!/sbin/openrc-run
 
 description="Veer Network Service"
-command="${INSTALL_DIR}/veer"
+command="${INSTALL_DIR}/veer-openrc-launch"
 command_args="--config ${INSTALL_DIR}/config.json"
 directory="${INSTALL_DIR}"
 supervisor="supervise-daemon"
@@ -392,8 +403,52 @@ export FORWARD_HOT_RESTART_MARKER="${HOT_RESTART_MARKER}"
 export FORWARD_BPF_STATE_DIR="${BPF_STATE_DIR}"
 export FORWARD_RUNTIME_STATE_DIR="${RUNTIME_STATE_DIR}"
 
+veer_cgroup_path() {
+    local group
+    # Alpine prefixes service names; upstream OpenRC uses the plain name.
+    # On restart OpenRC may fail to enter an already delegated domain, so do not
+    # infer its path from the runscript's current cgroup or use the shared root.
+    for group in "/sys/fs/cgroup/openrc.\${RC_SVCNAME}" "/sys/fs/cgroup/\${RC_SVCNAME}"; do
+        if [ -r "\$group/cgroup.controllers" ]; then
+            printf '%s\\n' "\$group"
+            return 0
+        fi
+    done
+    return 0
+}
+
+start_pre() {
+    local group="\$(veer_cgroup_path)"
+    unset VEER_OPENRC_CGROUP
+    [ -n "\$group" ] || return 0
+    mkdir -p "\$group/veer-supervisor" || return 1
+    printf '%s\\n' "\$\$" > "\$group/veer-supervisor/cgroup.procs" || return 1
+    if printf '%s' '+cpu +memory +pids' > "\$group/cgroup.subtree_control"; then
+        export VEER_OPENRC_CGROUP="\$group"
+    else
+        ewarn 'Cannot delegate plugin cgroup controllers; check existing service processes and cgroup configuration'
+    fi
+}
+
+stop_post() {
+    local group="\$(veer_cgroup_path)" attempts=0
+    [ -n "\$group" ] || return 0
+    # Only remove empty groups. Hot-update workers may still be using this subtree.
+    while [ -d "\$group" ]; do
+        find "\$group" -depth -mindepth 1 -type d -exec rmdir {} \\; 2>/dev/null
+        [ -n "\$(find "\$group" -mindepth 1 -type d -print -quit)" ] || break
+        # Leave retained workers alone; retry only after their processes have exited.
+        grep -qx 'populated 0' "\$group/cgroup.events" || break
+        attempts=\$((attempts + 1))
+        [ "\$attempts" -lt 20 ] || break
+        sleep 0.1
+    done
+    return 0
+}
+
 depend() {
     need net
+    use cgroups
     after firewall
 }
 EOF
@@ -416,6 +471,15 @@ check_cgroup_v2() {
     local controllers=""
     local missing=()
     local controller=""
+    if [[ "${SERVICE_MANAGER}" == "openrc" && ! -r /sys/fs/cgroup/cgroup.controllers && -f /etc/init.d/cgroups ]] && \
+        ! mountpoint -q /sys/fs/cgroup; then
+        info "启动 OpenRC cgroups 服务，准备插件资源隔离..."
+        if rc-service cgroups start; then
+            rc-update add cgroups sysinit || warn "无法设置 cgroups 开机启动，请手动添加到 sysinit runlevel"
+        else
+            warn "OpenRC cgroups 服务启动失败，请检查内核与 /etc/rc.conf 中的 cgroup 配置"
+        fi
+    fi
     if [[ ! -r /sys/fs/cgroup/cgroup.controllers ]]; then
         warn "未检测到 cgroup v2；Veer 核心可运行，但默认 full 插件沙箱会拒绝启动"
         return

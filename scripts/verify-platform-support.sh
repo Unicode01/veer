@@ -34,6 +34,7 @@ for script in \
 	"$ROOT_DIR/scripts/verify-plugin-manifests.sh" \
 	"$ROOT_DIR/scripts/verify-plugin-release.sh" \
 	"$ROOT_DIR/scripts/verify-distro-build.sh" \
+	"$ROOT_DIR/scripts/verify-vm-guest.sh" \
 	"$ROOT_DIR/plugins/packet_observer/build.sh" \
 	"$ROOT_DIR/plugins/pppoe_client/build.sh" \
 	"$ROOT_DIR/plugins/pppoe_client/test-blackbox-linux.sh"
@@ -41,6 +42,7 @@ do
 	sh -n "$script"
 done
 bash -n "$ROOT_DIR/scripts/verify-service-platform.sh"
+bash -n "$ROOT_DIR/scripts/verify-openrc-platform.sh"
 
 for distro_contract in \
 	'Debian 11+' \
