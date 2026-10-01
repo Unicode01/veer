@@ -335,6 +335,8 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 OpenRC 部署会在 cgroup 尚未挂载时启动并启用系统的 `cgroups` 服务；每次启动将 Veer 与 supervisor 分配到不同子组，供插件启用 cpu/memory/pids 资源隔离。热更新保留的 worker 不会被移动或清理；停止服务时只移除空 cgroup。已有的 cgroup 挂载与 controller 配置不会被重新挂载或替换。
 
+两种服务管理器每次启动都会准备 `/run/netns`、bpffs 与状态目录，确保重启系统后仍可启动。systemd 仅让目录与挂载准备步骤在宿主挂载空间执行，Veer 主进程继续使用上述文件系统保护。
+
 托管网络的运行时桥使用 netlink，跨上述发行版可用；“持久化桥”目前只写 `/etc/network/interfaces`。RHEL/Fedora 默认使用 NetworkManager 时，应由 `nmcli` 或发行版网络配置管理宿主桥。
 
 构建要求：
