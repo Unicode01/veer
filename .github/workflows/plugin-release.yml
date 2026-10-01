@@ -149,7 +149,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install VM and eBPF build dependencies
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils genisoimage clang llvm linux-libc-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage clang llvm linux-libc-dev
       - name: Build guest binaries
         run: |
           sh scripts/build-all-ebpf.sh
@@ -157,7 +157,8 @@ jobs:
           CGO_ENABLED=0 go test -c -o /tmp/veer-vm.test ./internal/app
       - name: Verify stock kernel, deployment, sandbox and reboot
         run: |
-          python3 scripts/verify-qemu-platform.py "${{ matrix.profile }}" \
+          # The runner user cannot normally open /dev/kvm; use the available KVM device.
+          sudo python3 scripts/verify-qemu-platform.py "${{ matrix.profile }}" \
             --binary /tmp/veer-vm-binary --test-binary /tmp/veer-vm.test \
             --output "${RUNNER_TEMP}/veer-vm-logs"
       - name: Preserve VM verification logs
