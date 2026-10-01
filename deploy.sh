@@ -326,15 +326,28 @@ if [ -L /run/netns ] || { [ -e /run/netns ] && [ ! -d /run/netns ]; }; then
 fi
 mkdir -p /run/netns /sys/fs/bpf
 mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
-mkdir -p "${BPF_STATE_DIR}" "${RUNTIME_STATE_DIR}"
+[ "\${1:-}" != --mounts-only ] || exit 0
+mkdir -p "\${VEER_BPF_STATE_DIR:-/sys/fs/bpf/forward}" "\${VEER_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}"
 EOF
     chmod 755 "${INSTALL_DIR}/veer-runtime-prepare"
     case "${SERVICE_MANAGER}" in
         systemd)
+            cat > "${SERVICE_FILE%/*}/${SERVICE_NAME}-prepare.service" <<EOF
+[Unit]
+Description=Prepare Veer Runtime Mounts
+Before=${SERVICE_NAME}.service
+
+[Service]
+Type=oneshot
+ExecStart=${INSTALL_DIR}/veer-runtime-prepare --mounts-only
+TimeoutStartSec=30
+UMask=0077
+EOF
             cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Veer Network Service
-After=network-online.target
+After=network-online.target ${SERVICE_NAME}-prepare.service
+Requires=${SERVICE_NAME}-prepare.service
 Wants=network-online.target
 
 [Service]
@@ -358,12 +371,12 @@ Delegate=yes
 NoNewPrivileges=false
 ProtectSystem=strict
 ReadWritePaths=${INSTALL_DIR}
-ReadWritePaths=${RUNTIME_STATE_DIR}
+ReadWritePaths=-${RUNTIME_STATE_DIR}
 ReadWritePaths=-/etc/network
 ReadWritePaths=/run/netns
 ReadWritePaths=/tmp
 ReadWritePaths=/sys/fs/bpf
-ReadWritePaths=${BPF_STATE_DIR}
+ReadWritePaths=-${BPF_STATE_DIR}
 ReadWritePaths=/sys/fs/cgroup
 PrivateTmp=true
 
@@ -539,6 +552,10 @@ prepare_selinux_labels() {
             if command -v restorecon >/dev/null 2>&1; then
                 restorecon -F "${INSTALL_DIR}/veer" "${INSTALL_DIR}/veer-runtime-prepare" "${SERVICE_FILE}" >/dev/null 2>&1 || \
                     warn "SELinux 标签恢复失败；若服务无法启动请检查 AVC 日志"
+                if [[ "${SERVICE_MANAGER}" == systemd ]]; then
+                    restorecon -F "${SERVICE_FILE%/*}/${SERVICE_NAME}-prepare.service" >/dev/null 2>&1 || \
+                        warn "SELinux 准备服务标签恢复失败；若服务无法启动请检查 AVC 日志"
+                fi
             else
                 warn "检测到 SELinux ${mode}，但未找到 restorecon"
             fi
@@ -1688,7 +1705,7 @@ echo ""
 echo -e "  卸载:"
 if [[ "${SERVICE_MANAGER}" == "systemd" ]]; then
     echo -e "    ${CYAN}systemctl stop ${SERVICE_NAME} && systemctl disable ${SERVICE_NAME}${NC}"
-    echo -e "    ${CYAN}rm -f ${SERVICE_FILE} ${LEGACY_SERVICE_FILE} ${SERVICE_BACKUP_PATH} ${LEGACY_SERVICE_BACKUP_PATH} && systemctl daemon-reload${NC}"
+    echo -e "    ${CYAN}rm -f ${SERVICE_FILE} ${SERVICE_FILE%/*}/${SERVICE_NAME}-prepare.service ${LEGACY_SERVICE_FILE} ${SERVICE_BACKUP_PATH} ${LEGACY_SERVICE_BACKUP_PATH} && systemctl daemon-reload${NC}"
 else
     echo -e "    ${CYAN}rc-service ${SERVICE_NAME} stop && rc-update del ${SERVICE_NAME} default${NC}"
     echo -e "    ${CYAN}rm -f ${SERVICE_FILE} ${LEGACY_SERVICE_FILE} ${SERVICE_BACKUP_PATH} ${LEGACY_SERVICE_BACKUP_PATH}${NC}"

@@ -13,11 +13,11 @@ export SERVICE_MANAGER=systemd
 namespace="${SERVICE_NAME}"
 mounted_bpffs=0
 cleanup() {
-    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl stop "$SERVICE_NAME" "${SERVICE_NAME}-prepare" >/dev/null 2>&1 || true
     journalctl -u "$SERVICE_NAME" --no-pager -n 100 || true
     ip netns del "$namespace" >/dev/null 2>&1 || true
-    rm -f -- "$SERVICE_FILE"
-    systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+    rm -f -- "$SERVICE_FILE" "${SERVICE_FILE%/*}/${SERVICE_NAME}-prepare.service"
+    systemctl reset-failed "$SERVICE_NAME" "${SERVICE_NAME}-prepare" >/dev/null 2>&1 || true
     systemctl daemon-reload
     rmdir "$BPF_STATE_DIR" 2>/dev/null || true
     if [[ "$mounted_bpffs" == 1 ]]; then
