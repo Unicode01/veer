@@ -1155,7 +1155,9 @@ var result = process.exec({
   args: ["show", "wg0", "dump"],
   timeout_ms: 5000
 });
-if (result.exit_code !== 0) throw new Error(result.stderr);
+if (result.exit_code !== 0 || result.timed_out || result.cancelled || result.truncated) {
+  throw new Error(result.stderr || "command did not complete successfully");
+}
 ```
 
 `command` 必须是可执行文件的绝对路径，`args` 最多 128 项，直接传给进程，不隐式启动 shell。可选 `stdin` 适合传递密钥等输入；请求最多 64 KiB。超时默认 5 秒、最大 15 秒，受当前 handler 剩余期限约束。返回 `stdout`、`stderr`、`exit_code`、`timed_out`、`cancelled`、`truncated`；非零退出码由插件处理，无法启动或参数无效时抛异常。stdout/stderr 合计最多 64 KiB，超限终止命令。工作目录为文件系统根目录，不继承 Veer 的环境变量或标准输入。停止 VM 会取消在途命令；Linux 使用独立进程组并在结束时清理同组子进程，不支持用该接口托管后台守护进程。

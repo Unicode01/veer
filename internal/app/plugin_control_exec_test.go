@@ -82,10 +82,10 @@ func TestPluginExecTimeoutStopAndOutputLimit(t *testing.T) {
 			start := time.Now()
 			result, err := runPluginExec(request, timeout, stop)
 			if err != nil || time.Since(start) > 4*time.Second {
-				t.Fatalf("exec = %+v, %v, took %s", result, err, time.Since(start))
+				t.Fatalf("exit=%d timeout=%t cancelled=%t truncated=%t output=%d, error=%v, took %s", result.ExitCode, result.TimedOut, result.Cancelled, result.Truncated, len(result.Stdout)+len(result.Stderr), err, time.Since(start))
 			}
 			if mode == "timeout" && !result.TimedOut || mode == "stop" && !result.Cancelled || mode == "output" && (!result.Truncated || len(result.Stdout)+len(result.Stderr) > pluginExecMaxOutputBytes) {
-				t.Fatalf("wrong termination state: %+v", result)
+				t.Fatalf("wrong termination state: timeout=%t cancelled=%t truncated=%t output=%d", result.TimedOut, result.Cancelled, result.Truncated, len(result.Stdout)+len(result.Stderr))
 			}
 		})
 	}
