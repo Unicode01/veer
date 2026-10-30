@@ -2544,7 +2544,7 @@
     if (status === 'error') return { badge: 'error', text: app.t('status.error') };
     if (status === 'draining') return { badge: 'draining', text: app.t('status.draining') };
     if (status === 'running') return { badge: 'running', text: app.t('status.running') };
-    if (status === 'overridden') return { badge: 'enabled', text: app.t('status.overridden') };
+    if (status === 'overridden') return { badge: 'kernel', text: app.t('status.overridden') };
     return { badge: 'stopped', text: app.t('status.stopped') };
   };
 
