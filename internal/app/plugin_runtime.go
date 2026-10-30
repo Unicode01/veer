@@ -170,6 +170,8 @@ type PluginRuntimeCapabilities struct {
 	ProtectedAssets          bool                                `json:"protected_assets"`
 	MinimumSandboxLevel      string                              `json:"minimum_sandbox_level"`
 	RequireSignedPackages    bool                                `json:"require_signed_packages"`
+	RemoteInstallEnabled     bool                                `json:"remote_install_enabled"`
+	ExecEnabled              bool                                `json:"exec_enabled"`
 	StabilityLevels          []string                            `json:"stability_levels"`
 	ExternalDataplaneAttach  bool                                `json:"external_dataplane_attach"`
 	ExternalDataplaneEngines []string                            `json:"external_dataplane_engines"`
@@ -741,6 +743,8 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 		ProtectedAssets:          true,
 		MinimumSandboxLevel:      cfg.PluginMinimumSandboxLevel(),
 		RequireSignedPackages:    cfg.PluginsRequireSignedPackages(),
+		RemoteInstallEnabled:     cfg.PluginRemoteInstallEnabled(),
+		ExecEnabled:              cfg.PluginExecEnabled(),
 		StabilityLevels:          []string{pluginStabilityLab, pluginStabilityPreview, pluginStabilityStable, pluginStabilityDeprecated},
 		ExternalDataplaneAttach:  externalDataplaneAttach,
 		ExternalDataplaneEngines: []string{kernelEngineTC, kernelEngineXDP, pluginEngineNetfilter},

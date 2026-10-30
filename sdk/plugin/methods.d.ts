@@ -149,6 +149,7 @@ declare global {
     "plugins.services.call": typeof plugins.services.call;
     "plugins.services.list": typeof plugins.services.list;
     "plugins.services.resolve": typeof plugins.services.resolve;
+    "process.exec": typeof process.exec;
     "resources.delete": typeof resources.delete;
     "resources.get": typeof resources.get;
     "resources.list": typeof resources.list;

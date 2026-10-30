@@ -172,7 +172,7 @@ systemd 部署保留文件系统只读保护和私有临时目录。命名 netwo
 
 资源事务、插件包安装和 VM 热升级提供宿主可控制范围内的原子提交与失败回滚。普通 handler 内的 netlink 修改、eBPF map 写入、socket 写入、L2/UDP 发送和跨插件动作不能形成跨内核与外部对端的全局事务；插件必须使用幂等 reconcile、明确的 ownership 和补偿清理。普通 JavaScript 错误允许 `finally` 中提交修复 timer，超时、OOM 或协议退出则丢弃该未完成事件的 timer journal。
 
-Veer 每 2 秒在独立后台任务中检查插件源目录，重叠扫描会合并。文件身份、大小、mtime 和权限未变时复用内容 hash，每 30 秒重新计算完整内容指纹，因此保留大小和 mtime 的内容修改也会被发现。插件增删或 `plugin.json`、`control.js`、UI、eBPF object 变化只会设置 `update_available`，不会自动执行候选代码或重建数据面；WebUI 的“应用更新”或 `POST /api/plugins/reload` 会复制一份稳定候选快照，不使用扫描缓存，完成 manifest、control、UI 和 object 校验后再 reconcile。校验或运行时切换失败会保留上一份已应用快照。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据。
+Veer 每 2 秒在独立后台任务中检查插件源目录，重叠扫描会合并。文件身份、大小、mtime 和权限未变时复用内容 hash，每 30 秒重新计算完整内容指纹，因此保留大小和 mtime 的内容修改也会被发现。插件增删或 `plugin.json`、`control.js`、UI、eBPF object 变化只会设置 `update_available`，不会自动执行候选代码或重建数据面；显式开启 `plugins_remote_install_enabled` 后，WebUI 的“应用更新”或 `POST /api/plugins/reload` 会复制一份稳定候选快照，不使用扫描缓存，完成 manifest、control、UI 和 object 校验后再 reconcile。默认关闭远程安装时，请在本机更新文件并重启服务。校验或运行时切换失败会保留上一份已应用快照。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据。
 
 启动时同样先创建私有已应用快照；快照失败会保持外部控制面和数据面插件关闭，并在 catalog 中报告错误，绝不退回可变源目录直接执行。Goja 主脚本在 VM 创建前还会复核 catalog 记录的已应用 SHA256，避免初始化与执行之间的文件替换绕过手动更新门禁。
 
@@ -259,7 +259,7 @@ veer plugin contract --output ./api-contract.json
 veer plugin contract --types-output ./methods.d.ts
 ```
 
-`GET /api/plugin-sdk-contract` 返回运行中二进制生成的同一份权威契约。契约摘要按 canonical JSON 计算；控制方法、feature、资源限制或 pipeline ABI 发生漂移时，仓库契约测试和 `contract --check` 都会失败。contract v8 的 `control.capabilities` 为每个 Host 方法声明必需/任一/条件权限、可调用阶段、主 VM/Worker 范围以及隔离 IPC 请求和响应上限；`netfilter_pipeline` 声明原生 Hook placement 契约，`operations` 公开持久 operation 的状态和配额，`control_methods` 作为简单工具兼容列表保留，并由同一注册表生成。
+`GET /api/plugin-sdk-contract` 返回运行中二进制生成的同一份权威契约。契约摘要按 canonical JSON 计算；控制方法、feature、资源限制或 pipeline ABI 发生漂移时，仓库契约测试和 `contract --check` 都会失败。contract v9 的 `control.capabilities` 为每个 Host 方法声明必需/任一/条件权限、可调用阶段、主 VM/Worker 范围以及隔离 IPC 请求和响应上限；`netfilter_pipeline` 声明原生 Hook placement 契约，`operations` 公开持久 operation 的状态和配额，`control_methods` 作为简单工具兼容列表保留，并由同一注册表生成。
 
 ### 兼容与 ABI 演进
 
@@ -1143,7 +1143,24 @@ veer plugin restore --archive ./plugin-state.tar.gz --database ./forward.db --pl
 
 `pack` 会执行 manifest、control hash、Goja 注册、路径、文件类型、条目数和大小校验，并生成确定性 `tar.gz`。`sign` 使用 Ed25519 对带 Veer v2 domain 的 archive SHA256 签名，默认输出同名 `.veerpkg`；该单文件容器只包含不可变的 `package.tar.gz` 和 `signature.json`，可直接发布或上传，不再生成独立 `.sig`。安装端会限制容器成员、数量、压缩方式和大小，再校验 payload 摘要、签名及发布者密钥指纹；外置签名和旧 sidecar 请求头不再接受。`verify` 要求显式提供预期公钥，用于确认包内公钥就是操作者信任的那一把；签名有效本身不等于已建立长期信任。未签名的本地 `.tar.gz` 仍可预检，但受 `plugins_require_signed_packages` 策略约束。
 
-`plugins_require_signed_packages=true` 是默认包准入策略。此时 `approve_unsigned` 不能覆盖签名要求，但签名有效的首次发布者不需要预先进入 trust store：WebUI 会显示密钥指纹、权限和风险，管理员确认后即可只安装当前候选。需要调试本地未签名包时必须显式关闭该策略；未签名确认和权限扩张摘要仍分别生效。
+`plugins_remote_install_enabled=false` 是默认值。此时宿主拒绝远程包上传、应用、批量应用、回滚、卸载、仓库、发布者信任管理及代码 reload，WebUI 隐藏相应入口；已安装插件的页面、资源、动作、启停、日志和审计继续可用。请由本机管理员将插件部署到 `plugins_dir` 并重启服务。需要远程安装时，必须在本机配置中显式开启该项并重启，原有双令牌、签名和权限审核仍然有效；该模式禁止 `process.exec`，远程包也不能声明 `exec` 权限。两种模式互斥。
+
+`plugins_require_signed_packages=true` 是默认包准入策略。此时 `approve_unsigned` 不能覆盖签名要求，但签名有效的首次发布者不需要预先进入 trust store：远程安装开启时 WebUI 会显示密钥指纹、权限和风险，管理员确认后即可只安装当前候选。需要调试本地未签名包时必须显式关闭该策略；未签名确认和权限扩张摘要仍分别生效。
+
+本地受信任插件可在 `control.permissions` 中声明 `"exec"`，并在运行阶段调用：
+
+```javascript
+var result = process.exec({
+  command: "/usr/bin/wg",
+  args: ["show", "wg0", "dump"],
+  timeout_ms: 5000
+});
+if (result.exit_code !== 0) throw new Error(result.stderr);
+```
+
+`command` 必须是可执行文件的绝对路径，`args` 最多 128 项，直接传给进程，不隐式启动 shell。可选 `stdin` 适合传递密钥等输入；请求最多 64 KiB。超时默认 5 秒、最大 15 秒，受当前 handler 剩余期限约束。返回 `stdout`、`stderr`、`exit_code`、`timed_out`、`cancelled`、`truncated`；非零退出码由插件处理，无法启动或参数无效时抛异常。stdout/stderr 合计最多 64 KiB，超限终止命令。工作目录为文件系统根目录，不继承 Veer 的环境变量或标准输入。停止 VM 会取消在途命令；Linux 使用独立进程组并在结束时清理同组子进程，不支持用该接口托管后台守护进程。
+
+exec 经父进程 broker 执行，具有 Veer 服务的系统权限，不受 JS 子进程降权、seccomp、`net_access` 和单插件 cgroup 限制。JS 沙箱本身继续禁止直接 exec。仅应给本机管理员审核的插件授予该权限，保护插件目录和被执行文件；插件必须校验远程资源/动作传入的参数，不能将其直接交给 shell。注册、迁移、升级快照/恢复阶段不允许 exec。
 
 信任键可以限制 `plugin_ids`（精确 ID 或尾部 `*` 前缀）、`permissions`、`execution_tiers`（`control/dataplane`）和 `stabilities`；`permissions_restricted=true` 允许把空权限列表明确锁定为零权限。有效签名位于范围内时显示为已信任；超出范围时仍可人工批准当前候选，但不会隐式扩大原范围。安装审核中的“记住发布者”会按当前候选自动生成最小范围，同一批次由同一密钥签署的包会合并各自最小范围。密钥轮换默认继承范围，显式新范围只能收窄；需要扩大长期授权时应单独审核，而不是借轮换隐式升级。
 
@@ -1162,7 +1179,7 @@ veer plugin repository status --directory ./private-repository
 
 私有仓库的 target 已由 TUF 元数据签名，因此 `repository add` 继续接收 `pack` 生成的原始 `.tar.gz`；`.veerpkg` 用于不经过 TUF 仓库的单文件签名分发。
 
-客户端为每个已安装插件提供独立仓库策略：仓库 ID、`stable/preview` channel、可选精确 SemVer pin 和 hold。pin 会同时约束直接安装和依赖求解；hold 会保留当前已安装版本，即使它只是其他插件的依赖也不能被替换。策略不会自动执行升级，WebUI 只生成经过完整依赖求解和权限复核的候选 stage。`plugins_enabled=true` 时，宿主按 `plugins_repository_refresh_minutes`（默认 360 分钟）在独立后台循环刷新 TUF 元数据和撤销状态；插件关闭时不启动该循环，刷新永远不会下载或运行 target。
+客户端为每个已安装插件提供独立仓库策略：仓库 ID、`stable/preview` channel、可选精确 SemVer pin 和 hold。pin 会同时约束直接安装和依赖求解；hold 会保留当前已安装版本，即使它只是其他插件的依赖也不能被替换。策略不会自动执行升级，WebUI 只生成经过完整依赖求解和权限复核的候选 stage。`plugins_enabled=true` 且 `plugins_remote_install_enabled=true` 时，宿主按 `plugins_repository_refresh_minutes`（默认 360 分钟）在独立后台循环刷新 TUF 元数据和撤销状态；任一开关关闭时不刷新，刷新永远不会下载或运行 target。
 
 workspace 是 `0700` 私有发布目录，包含 Ed25519 私钥、不可变包缓存、版本状态和恢复 journal；只有其中的 `public/` 是静态 TUF 输出。不同用户运行的 nginx 无法穿透该私有父目录，生产部署应在持有 workspace 的发布进程完成 `publish` 后，把完整 `public/` 原子同步到独立 Web 根目录，不能放宽私钥目录权限或逐文件覆盖在线仓库。`add/revoke/publish/rotate-key/status` 使用跨进程独占锁；publish 和 key rotation 在进程中断后会按持久 journal 幂等恢复。
 

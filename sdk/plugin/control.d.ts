@@ -1206,6 +1206,22 @@ declare global {
   }
 
   const plugin: VeerPluginAPI;
+  /** Trusted host execution. Requires exec permission and remote installation disabled. */
+  const process: {
+    exec(request: {
+      command: string;
+      args?: string[];
+      stdin?: string;
+      timeout_ms?: number;
+    }): {
+      stdout: string;
+      stderr: string;
+      exit_code: number;
+      timed_out: boolean;
+      cancelled: boolean;
+      truncated: boolean;
+    };
+  };
   const pipeline: {
     node(spec: VeerVirtualInterfaceSpec): void;
     handoff(spec: VeerVirtualInterfaceSpec): void;

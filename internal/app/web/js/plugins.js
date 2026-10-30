@@ -2,6 +2,11 @@
   const app = window.VeerApp;
   if (!app) return;
 
+  app.pluginRemoteInstallEnabled = function pluginRemoteInstallEnabled() {
+    const runtime = app.state.plugins && app.state.plugins.catalog && app.state.plugins.catalog.runtime;
+    return !!(runtime && runtime.remote_install_enabled === true);
+  };
+
   const pluginUIRPCMaxInflight = 32;
   const pluginUIRPCMaxPayloadBytes = 2 * 1024 * 1024;
   const pluginUIRPCMaxPendingBytes = 4 * 1024 * 1024;
@@ -1363,6 +1368,7 @@
   }
 
   function pluginUpdateSelectorNode(update) {
+    if (!app.pluginRemoteInstallEnabled()) return null;
     if (!update || !update.plugin_id) return null;
     const id = String(update.plugin_id);
     const applying = app.state.plugins.applyingUpdate === true;
@@ -3286,6 +3292,14 @@ select.veer-input {
 
   function syncPluginUpdateButton(status) {
     const button = app.el.applyPluginUpdateBtn;
+    const remoteInstall = app.pluginRemoteInstallEnabled();
+    if (app.el.addPluginBtn) app.el.addPluginBtn.hidden = !remoteInstall;
+    if (!remoteInstall) {
+      app.state.plugins.selectedUpdateIDs = {};
+      if (app.el.pluginUpdateSelectionBar) app.el.pluginUpdateSelectionBar.hidden = true;
+      if (button) { button.hidden = true; button.disabled = true; }
+      return;
+    }
     const item = status && typeof status === 'object' ? status : {};
     const updates = pendingPluginUpdates(item);
     const available = new Set(updates.map((update) => String(update.plugin_id)));
@@ -3599,6 +3613,7 @@ select.veer-input {
   };
 
   app.applyPluginUpdate = async function applyPluginUpdate() {
+    if (!app.pluginRemoteInstallEnabled()) return;
     const hotReload = app.state.plugins.catalog && app.state.plugins.catalog.hot_reload;
     const pluginIDs = selectedPluginUpdateIDs();
     if (app.state.plugins.applyingUpdate || !hotReload || pluginIDs.length === 0) return;

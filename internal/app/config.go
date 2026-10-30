@@ -41,6 +41,7 @@ type Config struct {
 	PluginsIsolationSetting                *bool                     `json:"plugins_isolation,omitempty"`
 	PluginsMinSandboxLevel                 string                    `json:"plugins_min_sandbox_level,omitempty"`
 	PluginsRequireSigned                   *bool                     `json:"plugins_require_signed_packages,omitempty"`
+	PluginsRemoteInstallEnabled            bool                      `json:"plugins_remote_install_enabled"`
 	PluginsDir                             string                    `json:"plugins_dir"`
 	PluginsMaxInstalled                    int                       `json:"plugins_max_installed"`
 	PluginsMaxStaged                       int                       `json:"plugins_max_staged"`
@@ -289,6 +290,16 @@ func (cfg *Config) PluginsRequireSignedPackages() bool {
 		return true
 	}
 	return *cfg.PluginsRequireSigned
+}
+
+// This policy is read from the local configuration at startup. Remote package
+// management and arbitrary host execution must never be enabled together.
+func (cfg *Config) PluginRemoteInstallEnabled() bool {
+	return cfg != nil && cfg.PluginsRemoteInstallEnabled
+}
+
+func (cfg *Config) PluginExecEnabled() bool {
+	return cfg != nil && !cfg.PluginRemoteInstallEnabled()
 }
 
 func validPluginSandboxLevel(level string) bool {

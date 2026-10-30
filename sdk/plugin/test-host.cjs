@@ -419,6 +419,7 @@ class VeerPluginTestHost {
     this.pluginDir = fs.realpathSync(path.resolve(options.pluginDir));
     this.timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
     this.adapters = Object.assign({}, options.adapters || {});
+    this.remoteInstallEnabled = options.remoteInstallEnabled === true;
     this.state = sharedState || createSharedState(options.fixtures || {});
     this.workerName = workerName;
 	this.moduleCache = new Map();
@@ -949,6 +950,17 @@ class VeerPluginTestHost {
         delete: (...args) => this.#metricDelete(args[0], args[1], args.length > 1),
         clear: () => this.#metricClear(),
         list: () => this.#metricList(),
+      }),
+      process: Object.freeze({
+        exec: (request) => {
+          this.#requirePermission('exec', 'process.exec');
+          if (this.remoteInstallEnabled) throw new Error('process.exec is disabled while remote plugin installation is enabled');
+          if (!request || typeof request.command !== 'string' || !path.isAbsolute(request.command) || request.command.includes('\0')) throw new Error('process.exec command must be an absolute executable path');
+          if (request.args != null && (!Array.isArray(request.args) || request.args.length > 128 || request.args.some((arg) => typeof arg !== 'string' || arg.includes('\0')))) throw new Error('process.exec args must be at most 128 strings without NUL bytes');
+          if (request.timeout_ms != null && (!Number.isInteger(request.timeout_ms) || request.timeout_ms < 0 || request.timeout_ms > 15000)) throw new Error('process.exec timeout_ms is invalid');
+          if (Buffer.byteLength(JSON.stringify(request)) > 65536) throw new Error('process.exec request exceeds 65536 bytes');
+          return this.#adapter('process.exec', [request]);
+        },
       }),
       crypto: Object.freeze({
         md5: (...values) => {
@@ -1782,7 +1794,7 @@ class VeerPluginTestHost {
   #worker(name) {
     const id = token(name, 'worker');
     if (!this.state.workers.has(id)) {
-      const worker = new VeerPluginTestHost({ pluginDir: this.pluginDir, timeoutMs: this.timeoutMs, adapters: this.adapters }, this.state, id).load();
+      const worker = new VeerPluginTestHost({ pluginDir: this.pluginDir, timeoutMs: this.timeoutMs, adapters: this.adapters, remoteInstallEnabled: this.remoteInstallEnabled }, this.state, id).load();
       this.state.workers.set(id, worker);
     }
     return this.state.workers.get(id);

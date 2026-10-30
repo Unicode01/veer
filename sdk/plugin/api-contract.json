@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 9,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -61,6 +61,7 @@
       "control.plugin_interop",
       "control.typed_services.v1",
       "control.process_isolation.v1",
+      "control.exec.v1",
       "control.raw_l2",
       "control.resource_schema.v1",
       "control.resource_limits.v1",
@@ -2612,6 +2613,21 @@
         "max_response_bytes": 75497472
       },
       {
+        "method": "process.exec",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
         "method": "resources.delete",
         "permissions": [
           "resource"
@@ -3012,6 +3028,7 @@
     "plugins.services.call",
     "plugins.services.list",
     "plugins.services.resolve",
+    "process.exec",
     "resources.delete",
     "resources.get",
     "resources.list",

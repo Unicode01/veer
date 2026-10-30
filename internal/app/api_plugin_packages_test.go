@@ -17,6 +17,7 @@ import (
 
 func TestPluginPackageAPIsRequireAuthentication(t *testing.T) {
 	cfg := &Config{WebToken: "package-token", PluginsDir: t.TempDir()}
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
 	for index, test := range []struct {
 		method string
@@ -61,6 +62,7 @@ func TestPluginPackageAPIsRequireAuthentication(t *testing.T) {
 
 func TestPluginPackageMutationsRequireSeparateAdminToken(t *testing.T) {
 	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginAdminToken: "package-admin", PluginsDir: t.TempDir()})
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
 	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "admin_gate", Version: "1.0.0"})
 	request := func(adminToken string) *httptest.ResponseRecorder {
@@ -96,6 +98,7 @@ func TestPluginPackageMutationsRequireSeparateAdminToken(t *testing.T) {
 func TestPluginPackageMutationsAreDisabledWithoutAdminToken(t *testing.T) {
 	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginAdminToken: "", PluginsDir: t.TempDir()})
 	cfg.PluginAdminToken = ""
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/plugin-packages/stage", bytes.NewReader([]byte("invalid")))
 	req.Header.Set("Authorization", "Bearer package-token")
@@ -108,6 +111,7 @@ func TestPluginPackageMutationsAreDisabledWithoutAdminToken(t *testing.T) {
 
 func TestPluginPackageApplyAPIRejectsLegacyApprovalField(t *testing.T) {
 	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
 	rec := performPluginPackageAPIRequest(t, handler, http.MethodPost, "/api/plugin-packages/apply", []byte(`{
   "stage_id": "0123456789abcdef0123456789abcdef",
@@ -122,6 +126,7 @@ func TestPluginPackageAPIStagesFirstSeenSignedPublisherWithoutPretrust(t *testin
 	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
 	requireSigned := true
 	cfg.PluginsRequireSigned = &requireSigned
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -158,6 +163,7 @@ func TestPluginPackageAPIStagesFirstSeenSignedPublisherWithoutPretrust(t *testin
 
 func TestPluginPackageAPIRejectsDetachedSignatureHeaders(t *testing.T) {
 	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
 	archive := buildPluginPackageForTest(t, pluginPackageTestSpec{ID: "detached_signature", Version: "1.0.0"})
 	req := httptest.NewRequest(http.MethodPost, "/api/plugin-packages/stage", bytes.NewReader(archive))
@@ -173,6 +179,7 @@ func TestPluginPackageAPIRejectsDetachedSignatureHeaders(t *testing.T) {
 
 func TestPluginPackageBatchAPIEndToEnd(t *testing.T) {
 	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
 	requests := make([]PluginPackageApplyRequest, 0, 2)
 	for _, pluginID := range []string{"api_batch_a", "api_batch_b"} {
@@ -222,6 +229,7 @@ func TestPluginPackageProvenanceAPIReportsInstalledTrustState(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, db, nil)
 	rec := performPluginPackageAPIRequest(t, handler, http.MethodGet, "/api/plugin-packages/provenance?plugin_id=api_origin", nil)
 	if rec.Code != http.StatusOK {
@@ -241,6 +249,7 @@ func TestPluginPackageProvenanceAPIReportsInstalledTrustState(t *testing.T) {
 func TestPluginPackageAPIEndToEnd(t *testing.T) {
 	cfg := pluginsEnabledTestConfig(&Config{WebToken: "package-token", PluginsDir: t.TempDir()})
 	db := openTestDB(t)
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, db, nil)
 
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)

@@ -11,6 +11,24 @@ const { createTestHost } = require('./test-host.cjs');
 
 const apiContract = JSON.parse(fs.readFileSync(path.join(__dirname, 'api-contract.json'), 'utf8'));
 
+test('exec is adapter-only and mutually exclusive with remote installation', (t) => {
+  const manifest = testManifest('exec_test');
+  manifest.control.permissions.push('exec');
+  manifest.actions = [{id: 'run', runtime_update: 'runtime_query'}];
+  const dir = writePlugin(t, manifest, `
+    plugin.action({id: 'run', runtime_update: 'runtime_query'});
+    exports.onAction = function () { return process.exec({command: '/usr/bin/wg', args: ['show']}); };
+  `);
+  const host = createTestHost({pluginDir: dir, adapters: {
+    'process.exec': (request) => ({stdout: request.args[0], stderr: '', exit_code: 0, timed_out: false, cancelled: false, truncated: false})
+  }}).load();
+  assert.equal(host.action('run').stdout, 'show');
+  const remote = createTestHost({pluginDir: dir, remoteInstallEnabled: true, adapters: {'process.exec': () => assert.fail('remote mode invoked adapter')}}).load();
+  assert.throws(() => remote.action('run'), /disabled while remote plugin installation/);
+  const unmocked = createTestHost({pluginDir: dir}).load();
+  assert.throws(() => unmocked.action('run'), /requires an explicit test adapter/);
+});
+
 function writePlugin(t, manifest, control, files = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'veer-plugin-sdk-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -521,7 +539,7 @@ test('test host loads bundled control-plane plugins without compatibility shims'
 test('test host exposes every versioned control API method', (t) => {
   const pluginDir = writePlugin(t, testManifest('api_contract'), `exports.onReconcile = function () {};`);
   const host = createTestHost({ pluginDir });
-  assert.equal(apiContract.version, 8);
+  assert.equal(apiContract.version, 9);
   assert.equal(apiContract.runtime.api_version, 'v1');
   assert.equal(apiContract.runtime.tc_pipeline_abi, 2);
   assert.equal(apiContract.runtime.core_priority, 1000);

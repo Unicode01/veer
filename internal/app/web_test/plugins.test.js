@@ -616,7 +616,7 @@ test('plugin catalog exposes a pending update without applying it', () => {
   app.state.plugins.catalog = {
     external_plugins_enabled: true,
     directory: 'plugins',
-    runtime: {},
+    runtime: { remote_install_enabled: true },
     hot_reload: {
       enabled: true,
       update_available: true,
@@ -669,7 +669,7 @@ test('plugin catalog renders a pending addition as a selectable table row', () =
   app.state.plugins.catalog = {
     external_plugins_enabled: true,
     directory: 'plugins',
-    runtime: {},
+    runtime: { remote_install_enabled: true },
     hot_reload: {
       enabled: true,
       update_available: true,
@@ -759,7 +759,7 @@ test('applyPluginUpdate posts the pending catalog and reports completion', async
   app.state.plugins.catalog = {
     external_plugins_enabled: true,
     directory: 'plugins',
-    runtime: {},
+    runtime: { remote_install_enabled: true },
     hot_reload: {
       enabled: true,
       update_available: true,
@@ -772,7 +772,7 @@ test('applyPluginUpdate posts the pending catalog and reports completion', async
     return {
       external_plugins_enabled: true,
       directory: 'plugins',
-      runtime: {},
+      runtime: { remote_install_enabled: true },
       hot_reload: { enabled: true, update_available: false, last_reload_result: 'success' },
       plugins: []
     };
@@ -1921,4 +1921,24 @@ test('openPluginUI handles unauthorized asset response', async () => {
   assert.equal(app.tokenCleared, true);
   assert.equal(app.tokenModalShown, true);
   assert.equal(app.el.pluginUIPanel.hidden, true);
+});
+
+
+test('local plugin mode hides reload selection and keeps plugin controls', async () => {
+  const app = createHarness();
+  const calls = [];
+  app.apiCall = async (...args) => { calls.push(args); return {}; };
+  app.state.plugins.catalog = {
+    runtime: { remote_install_enabled: false },
+    hot_reload: { enabled: true, update_available: true, updates: [{plugin_id: 'demo', change: 'modified'}] }
+  };
+  app.state.plugins.data = [{id: 'demo', name: 'Demo', status: 'active'}];
+  app.state.plugins.selectedUpdateIDs = {demo: true};
+  app.renderPluginsTable();
+  assert.equal(findNodes(app.el.pluginsBody, (node) => String(node.className || '').includes('plugin-update-checkbox')).length, 0);
+  assert.equal(findNodes(app.el.pluginsBody, (node) => String(node.className || '').includes('btn-toggle-plugin')).length, 1);
+  assert.equal(app.el.pluginUpdateSelectionBar.hidden, true);
+  assert.equal(app.el.applyPluginUpdateBtn.hidden, true);
+  await app.applyPluginUpdate();
+  assert.deepEqual(calls, []);
 });
