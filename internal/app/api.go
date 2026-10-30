@@ -415,8 +415,10 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{
-			"configured": cfg.PluginAdminAPIEnabled(),
-			"authorized": authorizedPluginAdminRequest(cfg, r),
+			"configured":             cfg.PluginAdminAPIEnabled(),
+			"authorized":             authorizedPluginAdminRequest(cfg, r),
+			"remote_install_enabled": cfg.PluginRemoteInstallEnabled(),
+			"exec_enabled":           cfg.PluginExecEnabled(),
 		})
 	}))
 	mux.Handle("/api/plugins/", authStaticMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -569,7 +571,7 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		handleListCurrentConns(w, r, db, pm)
 	}))
-	return securityHeadersMiddleware(authFailureLimitMiddleware(cfg, mux))
+	return securityHeadersMiddleware(authFailureLimitMiddleware(cfg, pluginInstallationPolicyMiddleware(cfg, mux)))
 }
 
 func apiListenAddr(cfg *Config) string {

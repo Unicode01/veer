@@ -104,7 +104,7 @@ func mustDiscoverPluginHostControlMethods() []string {
 	seenObjects := make(map[*goja.Object]struct{})
 	for _, root := range []string{
 		"plugin", "pipeline", "kv", "resources", "plugins", "ebpf", "hooks", "ui", "net",
-		"timer", "worker", "events", "operations", "metrics", "crypto", "secret", "blob", "log",
+		"timer", "worker", "events", "operations", "metrics", "crypto", "secret", "blob", "log", "process",
 	} {
 		value := vm.Get(root)
 		if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {

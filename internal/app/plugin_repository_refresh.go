@@ -9,6 +9,9 @@ const pluginRepositoryInitialRefreshDelay = 30 * time.Second
 
 func (pm *ProcessManager) pluginRepositoryRefreshLoop() {
 	defer close(pm.pluginRepositoryRefreshDone)
+	if !pm.cfg.PluginRemoteInstallEnabled() {
+		return
+	}
 	interval := 360 * time.Minute
 	if pm.cfg != nil && pm.cfg.PluginsRepositoryRefreshMinutes > 0 {
 		interval = time.Duration(pm.cfg.PluginsRepositoryRefreshMinutes) * time.Minute
@@ -31,7 +34,7 @@ func (pm *ProcessManager) pluginRepositoryRefreshLoop() {
 }
 
 func (pm *ProcessManager) refreshPluginRepositories() {
-	if pm == nil || pm.cfg == nil || !pm.cfg.PluginsEnabled() {
+	if pm == nil || pm.cfg == nil || !pm.cfg.PluginsEnabled() || !pm.cfg.PluginRemoteInstallEnabled() {
 		return
 	}
 	pm.pluginPackageMu.Lock()

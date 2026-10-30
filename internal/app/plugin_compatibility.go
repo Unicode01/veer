@@ -38,6 +38,7 @@ var pluginRuntimeFeatures = []string{
 	"control.plugin_interop",
 	"control.typed_services.v1",
 	"control.process_isolation.v1",
+	"control.exec.v1",
 	"control.raw_l2",
 	"control.resource_schema.v1",
 	"control.resource_limits.v1",

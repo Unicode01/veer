@@ -168,6 +168,32 @@ const apiFixtures = new Map([
 
 const browserErrors = new WeakMap();
 
+test('plugin installation controls follow the host policy while plugin pages remain accessible', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  await page.locator('[data-tab="plugins"]').click();
+  await expect(page.locator('#addPluginBtn')).toBeHidden();
+  await expect(page.locator('#managePluginsAdvancedBtn')).toBeVisible();
+  await page.locator('#managePluginsAdvancedBtn').click();
+  await expect(page.locator('#pluginManagerNav')).not.toContainText(/Add Plugin|添加插件/);
+  await expect(page.locator('#pluginManagerBody')).not.toContainText(/Publishers|发布者/);
+  await page.locator('#closePluginManagerBtn').click();
+  await page.locator('[data-tab="plugin-firewall"]').click();
+  await expect(page.frameLocator('#tab-plugin-firewall .plugin-page-frame').locator('h1')).toHaveText('Firewall fixture');
+
+  await page.route('**/api/plugins', async (route) => {
+    const catalog = JSON.parse(JSON.stringify(pluginCatalog));
+    catalog.runtime.remote_install_enabled = true;
+    catalog.runtime.exec_enabled = false;
+    await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(catalog)});
+  });
+  await page.evaluate(() => window.VeerApp.loadPlugins());
+  await page.locator('[data-tab="plugins"]').click();
+  await expect(page.locator('#addPluginBtn')).toBeVisible();
+  await page.locator('#addPluginBtn').click();
+  await expect(page.locator('#pluginManagerModal')).toBeVisible();
+  await expect(page.locator('#pluginManagerBody input[type="file"]')).toBeVisible();
+});
+
 async function installDashboardFixtures(page, locale) {
   const errors = [];
   browserErrors.set(page, errors);

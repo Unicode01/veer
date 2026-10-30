@@ -128,6 +128,7 @@ function createHarness() {
       locale: 'en-US',
       activeRequests: 0,
       plugins: {
+        catalog: { runtime: { remote_install_enabled: true } },
         data: [{
           id: 'demo',
           name: 'Demo',
@@ -412,7 +413,7 @@ test('staged package approval only blocks unsigned policy and privilege expansio
 
 test('signed-package policy cannot be bypassed by unsigned approval', () => {
   const app = createHarness();
-  app.state.plugins.catalog = { runtime: { require_signed_packages: true } };
+  app.state.plugins.catalog = { runtime: { require_signed_packages: true, remote_install_enabled: true } };
   const stage = stagedPackage({ privilege_additions: [] });
 	assert.equal(app.__pluginManagerStageApprovedForTest(stage, {}), false);
 	assert.equal(app.__pluginManagerStageApprovedForTest(stagedPackage({ signed: true, publisher_status: 'unknown', privilege_additions: [] }), {}), true);
@@ -1043,4 +1044,34 @@ test('plugin overview exposes atomic probation group members', async () => {
   assert.match(text, /plugins\.probation\.group/);
   assert.match(text, /plugins\.probation\.groupMeta/);
   assert.match(text, /dependency \/ 2\.0\.0 \/ update/);
+});
+
+
+test('local plugin mode hides installation controls while keeping inspection available', async () => {
+  const app = createHarness();
+  app.state.plugins.catalog = { runtime: { remote_install_enabled: false, exec_enabled: true } };
+  app.openPluginManager('install');
+  assert.equal(app.state.plugins.manager.view, 'advanced');
+  assert.doesNotMatch(descendantText(app.el.pluginManagerNav), /plugins.catalog.add/);
+  assert.doesNotMatch(descendantText(app.el.pluginManagerBody), /plugins.trust.title/);
+  app.openPluginManager('repositories');
+  assert.equal(app.state.plugins.manager.view, 'advanced');
+  assert.equal(app.__calls.length, 0);
+  app.__setAPIHandler(async () => []);
+  app.openPluginManager('plugin', { pluginID: 'demo', tab: 'overview' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(descendantText(app.el.pluginManagerBody), /demo/);
+  assert.doesNotMatch(descendantText(app.el.pluginManagerBody), /plugins.uninstall.action/);
+  app.__setAPIHandler(async () => [{ id: 'old', version: '0.9.0' }]);
+  app.openPluginManager('plugin', { pluginID: 'demo', tab: 'history' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(descendantText(app.el.pluginManagerBody), /0.9.0/);
+  assert.doesNotMatch(descendantText(app.el.pluginManagerBody), /plugins.history.rollback/);
+  const before = app.__calls.length;
+  let uploads = 0;
+  app.__setRawHandler(async () => { uploads++; throw new Error('unexpected upload'); });
+  await app.stagePluginPackage({name: 'bad.veerpkg', type: 'application/zip'});
+  assert.equal(app.__calls.length, before);
+  assert.equal(uploads, 0);
+  assert.match(JSON.stringify(app.__notifications), /plugins.package.stageFailed/);
 });

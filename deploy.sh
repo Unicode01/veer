@@ -1131,6 +1131,7 @@ hardcoded_defaults = OrderedDict([
     ("plugins_isolation", True),
     ("plugins_min_sandbox_level", "full"),
     ("plugins_require_signed_packages", True),
+    ("plugins_remote_install_enabled", False),
     ("plugins_dir", "plugins"),
     ("plugins_max_installed", 128),
     ("plugins_max_staged", 32),

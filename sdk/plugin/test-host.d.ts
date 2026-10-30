@@ -3,6 +3,7 @@
 export interface VeerPluginTestHostOptions {
   pluginDir: string;
   timeoutMs?: number;
+  remoteInstallEnabled?: boolean;
   fixtures?: {
     kv?: Record<string, unknown>;
     secrets?: Record<string, unknown>;

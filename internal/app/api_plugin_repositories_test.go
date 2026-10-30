@@ -15,6 +15,7 @@ func TestPluginRepositoryAPIManagesPinnedRepositoryConfiguration(t *testing.T) {
 	cfg := pluginsEnabledTestConfig(&Config{
 		WebToken: "repository-token", PluginAdminToken: "repository-admin", PluginsDir: t.TempDir(),
 	})
+	cfg.PluginsRemoteInstallEnabled = true
 	handler := buildAPIHandler(cfg, openTestDB(t), nil)
 	request := repositoryServer.request("official", "stable")
 	body, err := json.Marshal(request)

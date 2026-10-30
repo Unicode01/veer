@@ -284,6 +284,9 @@ func (m *pluginPackageManager) validateCandidateDirectoryWithOptions(candidateDi
 	if candidate.Status != pluginStatusActive {
 		return LoadedPlugin{}, nil, nil, fmt.Errorf("plugin candidate is invalid: %s", candidate.Error)
 	}
+	if m.cfg.PluginRemoteInstallEnabled() && pluginControlHasPermission(candidate, "exec") {
+		return LoadedPlugin{}, nil, nil, fmt.Errorf("remote plugin packages cannot request exec permission; deploy this plugin locally with remote installation disabled")
+	}
 	validationCfg := pluginPackageValidationConfig(m.cfg, m.pluginsRoot)
 	candidate, err = registerPluginPackageCandidate(candidate, validationCfg)
 	if err != nil {

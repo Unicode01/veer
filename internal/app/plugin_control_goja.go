@@ -336,6 +336,7 @@ type pluginControlHost struct {
 	controlGeneration           string
 	eventStack                  []string
 	executionDeadline           time.Time
+	executionStop               <-chan struct{}
 	remoteEventInvoker          pluginControlRemoteEventInvoker
 }
 
@@ -1634,6 +1635,7 @@ func (vm *pluginControlVM) newControlHost(plugin LoadedPlugin, trackRuntime bool
 		workerVM:          vm.mode == "worker",
 		workerName:        vm.workerName,
 		controlGeneration: controlGeneration,
+		executionStop:     vm.stop,
 	}
 	if err := host.install(); err != nil {
 		return nil, err
@@ -2267,6 +2269,13 @@ func pluginControlDecodeJSON(raw json.RawMessage) any {
 }
 
 func (h *pluginControlHost) install() error {
+	processAPI := h.vm.NewObject()
+	if err := processAPI.Set("exec", h.processExec); err != nil {
+		return err
+	}
+	if err := h.vm.Set("process", processAPI); err != nil {
+		return err
+	}
 	pluginAPI := h.vm.NewObject()
 	if err := pluginAPI.Set("host", h.pluginHostInfo); err != nil {
 		return err

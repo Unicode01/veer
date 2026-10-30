@@ -33,6 +33,7 @@
 	"operations.retry",
 	"operations.stats",
     "plugin.service",
+    "process.exec",
     "plugins.services.call",
     "plugins.services.list",
     "plugins.services.resolve"

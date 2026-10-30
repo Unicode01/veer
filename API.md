@@ -44,6 +44,7 @@ Veer 当前不只是规则转发 API，还包含：
 - 程序会拒绝使用示例占位值 `change-me-to-a-secure-token`
 - `web_token` 和非空的 `plugin_admin_token` 都不能包含空白或控制字符
 - `plugin_admin_token` 可留空以禁用插件高权限 API；非空时必须与 `web_token` 不同
+- `plugins_remote_install_enabled` 默认 `false`，只能通过本机配置修改并重启生效。关闭时拒绝远程包安装、应用、回滚、卸载、仓库、信任管理和代码 reload；插件页面、资源、动作、启停及诊断访问保留。开启后仍需原有独立管理员令牌和签名审核，同时禁止插件 `process.exec`，拒绝声明 `exec` 权限的远程包。
 - 部署脚本在新建远程监听、首次从回环监听改为远程监听，或在远程监听下显式轮换 Token 时，要求相应 Token 至少 24 个字符
 - 升级已有远程部署时，较短的旧 Token 会为兼容继续生效并产生安全告警，不会仅因升级被强制替换
 
@@ -452,7 +453,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `POST /api/plugin-repositories/plan`：用 `{"repository_id":"...","plugin_id":"...","version":"optional"}` 回溯求解完整必需依赖闭包并创建最多 16 个 stage。满足全部约束的已安装版本会列入 `reused`；最终仍需把返回 stages 的权限摘要交给 `/api/plugin-packages/apply-batch` 原子应用
 - `GET /api/plugin-repository-policies`：列出每插件仓库策略；`PUT` 用 `{"plugin_id":"...","repository_id":"...","channel":"stable","pinned_version":"optional-exact-semver","hold":false}` 创建或替换，`DELETE` 用 `{"plugin_id":"..."}` 清除。pin 和 hold 同时约束根插件与依赖求解；写操作要求插件管理员权限。有策略引用时对应仓库不能删除
 - `GET /api/plugin-repositories/updates`：基于已验证的缓存 catalog 返回已安装插件的 `current_version/available_version/status/policy/provenance` 和 `execution_tier`。`status` 包括 `current/update_available/held/pinned/revoked/unavailable/metadata_unavailable`；该接口不联网、不下载且不自动应用
-- `plugins_enabled=true` 时宿主每 `plugins_repository_refresh_minutes` 分钟在独立后台循环刷新所有 TUF 仓库，默认 360、范围 15 至 10080。刷新只更新 metadata/catalog/撤销状态，不创建 stage；插件系统关闭时不启动该循环
+- `plugins_enabled=true` 且 `plugins_remote_install_enabled=true` 时宿主每 `plugins_repository_refresh_minutes` 分钟在独立后台循环刷新所有 TUF 仓库，默认 360、范围 15 至 10080。刷新只更新 metadata/catalog/撤销状态，不创建 stage；任一开关关闭时不刷新
 - 包管理全局数量和磁盘配额由 `plugins_max_installed`、`plugins_max_staged`、`plugins_storage_limit_mb` 控制。超限前会清理最旧且未被 probation 引用的历史；仍不足时写接口返回冲突/参数错误，不影响运行中的插件
 
 资源和动作都必须先由 `control.js` 注册。资源数据以 canonical JSON 存储在 SQLite，`max_record_bytes` 按 canonical 后的存储大小计算，`secret_fields` 会在 API 返回时脱敏，并在 HTTP update 时支持“保留脱敏旧值”的表单语义；`runtime_update=manual` 只标记 pending，`plugin_reconcile` 触发插件运行时重算，`runtime_apply` 调用宿主数据面实现的运行时更新接口。动作还可声明 `runtime_query`，用于不落 action runtime status 的瞬时结果，返回 JSON 上限为 64 KiB；它不会额外限制控制脚本原有权限，插件仍应自行保证查询动作无副作用。运行时更新失败会写入 `runtime_status.status=error` 和 `last_error`，不会让插件 UI 直接拿到 Web Token。资源写接口会先提交 SQLite；如果随后的运行时应用失败，响应会使用 `5xx` 并返回已落库记录、`error`、`runtime_error` 和 `runtime_status`，调用方应按“配置已保存但运行时未生效”处理，避免盲目重试创建导致 key 冲突。动作执行失败同样返回 `5xx`、`error`、`runtime_error` 和 `runtime_status`，用于插件 UI 展示具体失败状态。
@@ -931,8 +932,9 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - `plugins_isolation = true` 是默认值；主控制 VM 与每个命名 Worker 使用独立持久子进程。仅受信任的本地调试才应关闭该项
 - `plugins_min_sandbox_level = "full"` 是默认值；Host 或硬资源限制达不到要求时会在执行控制脚本前拒绝插件。旧内核/Windows 调试必须显式降低该值
 - `plugins_require_signed_packages = true` 是默认值；包管理器不会接受 `approve_unsigned` 覆盖，但任何携带自包含公钥且签名有效的 v2 包都可在审核发布者状态后应用，不要求预先写入 trust store；受校验历史和 TUF target 同样可应用
+- `plugins_remote_install_enabled = false` 是默认值；WebUI 隐藏添加插件、代码更新、回滚、卸载、仓库和发布者管理入口。`runtime.remote_install_enabled`、`runtime.exec_enabled` 以及 `GET /api/plugin-admin/status` 中的同名字段用于发现当前策略。远程安装开启时 `exec_enabled=false`；模式不能由 WebUI 或插件修改
 - 外部插件可通过 `POST|PUT /api/plugins/<id>/state` 热启用/禁用，这两个写方法都要求插件管理员权限；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC/XDP/Netfilter Hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
-- 插件源目录每 2 秒扫描一次，变化只标记待更新；`POST /api/plugins/reload` 才会校验并应用候选快照。应用失败时旧 control VM、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
+- 插件源目录每 2 秒扫描一次，变化只标记待更新；远程安装开启时可通过 `POST /api/plugins/reload` 校验并应用候选快照。关闭时请在本机部署并重启服务加载更新。应用失败时旧 control VM、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
 - 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
 - 插件静态资源路径为 `/api/plugins/<id>/assets/`，同样需要 Bearer Token
 - `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC/XDP/Netfilter object 按各自 placement 契约加载。TC ABI v2 对象必须声明共享 `tc_prog_chain_v4`，Netfilter object 则直接挂原生 `bpf_link`，不使用 TC prog-array。不会自动挂载未声明的接口、Hook 或 namespace，生产环境应只对可信对象启用
@@ -941,7 +943,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 `GET /api/plugin-sdk-contract`
 
-返回当前二进制生成的版本化控制 API、feature、资源限制、事件总线、持久 operation 以及 TC/XDP/Netfilter pipeline 契约。contract v8 的 `control.capabilities` 逐方法返回 `permissions`、`any_permissions`、`conditional_permissions`、`phases`、`contexts`、`max_request_bytes` 和 `max_response_bytes`；`operations` 返回 operation 状态集合与数量、字段、总存储和重试上限；`control_methods` 是由同一注册表生成的兼容列表。`tc_pipeline` 描述 ABI v2 的方向与 stage，`xdp_pipeline` 描述 24-entry prog-array、8 Hook 上限、仅 ingress 且必须显式接口的约束，`netfilter_pipeline` 描述 family、原生 Hook、语义 phase、namespace scope 和 placement 上限。该接口需要 Bearer Token，只支持 `GET`；第三方安装器可在 stage 前比较 `runtime.control_api_abi`、`runtime.tc_pipeline_abi` 和 `runtime.features`。本地 CI 可用 `veer plugin contract --check sdk/plugin/api-contract.json` 对同一结构做严格校验。
+返回当前二进制生成的版本化控制 API、feature、资源限制、事件总线、持久 operation 以及 TC/XDP/Netfilter pipeline 契约。contract v9 的 `control.capabilities` 逐方法返回 `permissions`、`any_permissions`、`conditional_permissions`、`phases`、`contexts`、`max_request_bytes` 和 `max_response_bytes`；`operations` 返回 operation 状态集合与数量、字段、总存储和重试上限；`control_methods` 是由同一注册表生成的兼容列表。`tc_pipeline` 描述 ABI v2 的方向与 stage，`xdp_pipeline` 描述 24-entry prog-array、8 Hook 上限、仅 ingress 且必须显式接口的约束，`netfilter_pipeline` 描述 family、原生 Hook、语义 phase、namespace scope 和 placement 上限。该接口需要 Bearer Token，只支持 `GET`；第三方安装器可在 stage 前比较 `runtime.control_api_abi`、`runtime.tc_pipeline_abi` 和 `runtime.features`。本地 CI 可用 `veer plugin contract --check sdk/plugin/api-contract.json` 对同一结构做严格校验。
 
 ## 2. 规则接口
 
