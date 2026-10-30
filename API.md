@@ -932,7 +932,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - `plugins_isolation = true` 是默认值；主控制 VM 与每个命名 Worker 使用独立持久子进程。仅受信任的本地调试才应关闭该项
 - `plugins_min_sandbox_level = "full"` 是默认值；Host 或硬资源限制达不到要求时会在执行控制脚本前拒绝插件。旧内核/Windows 调试必须显式降低该值
 - `plugins_require_signed_packages = true` 是默认值；包管理器不会接受 `approve_unsigned` 覆盖，但任何携带自包含公钥且签名有效的 v2 包都可在审核发布者状态后应用，不要求预先写入 trust store；受校验历史和 TUF target 同样可应用
-- `plugins_remote_install_enabled = false` 是默认值；WebUI 隐藏添加插件、代码更新、回滚、卸载、仓库和发布者管理入口。`runtime.remote_install_enabled`、`runtime.exec_enabled` 以及 `GET /api/plugin-admin/status` 中的同名字段用于发现当前策略。远程安装开启时 `exec_enabled=false`；模式不能由 WebUI 或插件修改
+- `plugins_remote_install_enabled = false` 是默认值；WebUI 隐藏添加插件、代码更新、回滚、卸载、仓库和发布者管理入口。`runtime.remote_install_enabled`、`runtime.exec_enabled` 以及 `GET /api/plugin-admin/status` 中的同名字段用于发现当前策略。远程安装开启时 `exec_enabled=false`；不提供切换模式的 WebUI 或插件 API
 - 外部插件可通过 `POST|PUT /api/plugins/<id>/state` 热启用/禁用，这两个写方法都要求插件管理员权限；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC/XDP/Netfilter Hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
 - 插件源目录每 2 秒扫描一次，变化只标记待更新；远程安装开启时可通过 `POST /api/plugins/reload` 校验并应用候选快照。关闭时请在本机部署并重启服务加载更新。应用失败时旧 control VM、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
 - 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
