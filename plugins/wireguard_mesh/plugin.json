@@ -1,0 +1,18 @@
+{
+  "api_version": "v1",
+  "id": "wireguard_mesh",
+  "name": "WireGuard Mesh Example",
+  "version": "0.1.0",
+  "kind": "control",
+  "stability": "lab",
+  "description": "Opt-in Linux WireGuard example: route a LAN or selected downstream IPs through a tunnel, with optional NAT and site-to-site routing.",
+  "compatibility": {
+    "runtime": ">=1.0.0 <2.0.0",
+    "control_api_abi": 1,
+    "features": ["control.exec.v1", "ui.capabilities.v1"]
+  },
+  "control": {
+    "main": "control.js",
+    "permissions": ["plugin.register", "exec", "resource", "kv", "secret", "ui"]
+  }
+}

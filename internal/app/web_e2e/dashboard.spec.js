@@ -1,4 +1,6 @@
 const { expect, test } = require('@playwright/test');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const pluginPageHTML = `<!doctype html>
 <html>
@@ -167,6 +169,59 @@ const apiFixtures = new Map([
 ]);
 
 const browserErrors = new WeakMap();
+
+test('WireGuard example saves drafts and secrets, applies and loads profiles through the real UI bridge', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  const profile = {slot:2, addresses:['10.77.0.1/32'], peers:[{public_key:'peer', allowed_ips:['0.0.0.0/0']}],
+    bindings:[{lan_interface:'br-test', source:'192.168.2.3/32', destination:'0.0.0.0/0'}], masquerade:true};
+  const records = {saved:{key:'saved', data:profile, enabled:true}};
+  const actions = [];
+  const methods = ['list','get','create','update'];
+  const plugin = {id:'wireguard_mesh', name:'WireGuard', kind:'control', stability:'lab', version:'0.1.0', status:'active', enabled:true,
+    resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
+    actions:['set_key','apply','teardown','inspect'].map(id => ({id})),
+    ui:{entry:'index.html', page:'wireguard', page_title:'WireGuard', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
+      actions:['set_key','apply','teardown','inspect']}, asset_base_path:'/api/plugins/wireguard_mesh/assets/', runtime:{mode:'control'}};
+  await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
+  await page.route('**/api/plugins/wireguard_mesh/**', async route => {
+    const url = new URL(route.request().url());
+    const endpoint = url.pathname.split('/wireguard_mesh/')[1];
+    if (endpoint === 'assets/index.html') return route.fulfill({contentType:'text/html; charset=utf-8', body:fs.readFileSync(path.resolve(__dirname, '../../../plugins/wireguard_mesh/ui/index.html'), 'utf8')});
+    if (endpoint === 'resources/status') return route.fulfill({json:{records:[]}});
+    if (endpoint === 'resources/profiles' && route.request().method() === 'GET') return route.fulfill({json:{records:Object.values(records)}});
+    if (endpoint.startsWith('resources/profiles/')) {
+      const key = endpoint.split('/').pop();
+      if (route.request().method() === 'PUT') records[key] = {key, ...route.request().postDataJSON()};
+      return route.fulfill({json:records[key]});
+    }
+    if (endpoint.startsWith('actions/')) {
+      actions.push({id:endpoint.split('/').pop(), ...route.request().postDataJSON()});
+      return route.fulfill({json:{plugin_id:'wireguard_mesh', action_id:endpoint.split('/').pop(), status:'completed'}});
+    }
+    return route.fulfill({status:404, json:{error:'unknown fixture'}});
+  });
+  await page.evaluate(() => window.VeerApp.loadPlugins());
+  await page.locator('[data-tab="plugin-wireguard"]').click();
+  const frame = page.frameLocator('#tab-plugin-wireguard .plugin-page-frame');
+  await expect(frame.locator('h1')).toHaveText('WireGuard');
+  await frame.getByRole('combobox', {name:'已保存隧道'}).selectOption('saved');
+  await expect(frame.getByLabel('WireGuard 配置')).toHaveValue(JSON.stringify(profile, null, 2));
+  expect(await frame.getByLabel('WireGuard 配置').evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThanOrEqual(260);
+  await frame.getByRole('button', {name:'保存草稿', exact:true}).click();
+  await expect(frame.getByRole('button', {name:'保存并应用', exact:true})).toBeEnabled();
+  expect(actions).toHaveLength(0);
+  await frame.getByLabel('私钥 / 预共享密钥', {exact:true}).fill('sensitive-key');
+  await frame.getByRole('button', {name:'保存密钥', exact:true}).click();
+  await expect(frame.getByLabel('私钥 / 预共享密钥', {exact:true})).toHaveValue('');
+  expect(actions[0]).toEqual({id:'set_key', payload:{key:'saved', name:'', value:'sensitive-key'}});
+  await frame.getByRole('button', {name:'保存并应用', exact:true}).click();
+  await expect.poll(() => actions.map(a => a.id)).toEqual(['set_key','apply']);
+  await expect(frame.locator('body')).not.toContainText('sensitive-key');
+  await expectNoPageOverflow(page);
+  expect(await frame.locator('body').evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
+  await page.evaluate(() => window.scrollTo(0,0));
+  await page.screenshot({path:testInfo.outputPath('wireguard.png'), fullPage:true});
+});
 
 test('plugin installation controls follow the host policy while plugin pages remain accessible', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
