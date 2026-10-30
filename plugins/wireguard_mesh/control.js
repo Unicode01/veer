@@ -291,6 +291,7 @@ function preflight(p, old) {
   Object.keys(inputs).forEach(function (name) {
     var current = links.filter(function (l) { return l.ifname === name; })[0];
     if (!current || name === p.interface) throw new Error('LAN interface does not exist');
+    if (name === 'lo' || (current.flags || []).indexOf('LOOPBACK') >= 0 || current.master) throw new Error('LAN must be a routed interface, not loopback or an enslaved member; select its bridge/bond master');
     // Linux policy routing cannot steer traffic already redirected by Veer TC/XDP.
     var attached = jsonIP(['address', 'show', 'dev', name]);
     (attached[0] && attached[0].addr_info || []).forEach(function (a) {
