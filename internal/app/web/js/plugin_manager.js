@@ -14,6 +14,14 @@
     return !!(catalog && catalog.runtime && catalog.runtime.remote_install_enabled === true);
   }
 
+  app.syncPluginManagerPolicy = function syncPluginManagerPolicy() {
+    const state = managerState();
+    const enabled = managerRemoteInstallEnabled();
+    if (app.el.addPluginBtn) app.el.addPluginBtn.hidden = !enabled;
+    if (state.open && state.remoteInstallEnabled !== enabled) app.closePluginManager(true);
+    state.remoteInstallEnabled = enabled;
+  };
+
   function managerRequireInstallAPI(method, path) {
     const restricted = path === '/api/plugins/reload'
       || /^\/api\/(plugin-trust|plugin-repositories|plugin-repository-policies)(\/|\?|$)/.test(path)
@@ -2136,6 +2144,7 @@
 
   app.openPluginManager = function openPluginManager(view, options) {
     const state = managerState();
+    state.remoteInstallEnabled = managerRemoteInstallEnabled();
     const opts = options || {};
     managerNextRequest();
     managerOpenShell();

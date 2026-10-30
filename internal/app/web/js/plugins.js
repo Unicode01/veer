@@ -3481,6 +3481,7 @@ select.veer-input {
   }
 
   app.renderPluginsTable = function renderPluginsTable() {
+    if (typeof app.syncPluginManagerPolicy === 'function') app.syncPluginManagerPolicy();
     const el = app.el;
     const st = app.state.plugins;
     const appliedData = Array.isArray(st.data) ? st.data : [];

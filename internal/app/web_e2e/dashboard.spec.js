@@ -192,6 +192,13 @@ test('plugin installation controls follow the host policy while plugin pages rem
   await page.locator('#addPluginBtn').click();
   await expect(page.locator('#pluginManagerModal')).toBeVisible();
   await expect(page.locator('#pluginManagerBody input[type="file"]')).toBeVisible();
+
+  await page.route('**/api/plugins', async (route) => {
+    await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(pluginCatalog)});
+  });
+  await page.evaluate(() => window.VeerApp.loadPlugins());
+  await expect(page.locator('#pluginManagerModal')).toBeHidden();
+  await expect(page.locator('#addPluginBtn')).toBeHidden();
 });
 
 async function installDashboardFixtures(page, locale) {

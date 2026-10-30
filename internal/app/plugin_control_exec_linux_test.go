@@ -23,6 +23,9 @@ func TestPluginExecCleansChildProcessGroup(t *testing.T) {
 			if wait && !result.TimedOut {
 				t.Fatalf("expected timeout: %+v", result)
 			}
+			if !wait && !result.Truncated && !result.TimedOut {
+				t.Fatal("closing inherited output pipes must report incomplete output")
+			}
 			time.Sleep(700 * time.Millisecond)
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Fatalf("child survived command cleanup: %v", err)
