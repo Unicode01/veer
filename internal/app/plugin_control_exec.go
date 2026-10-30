@@ -138,7 +138,7 @@ func runPluginExec(request pluginExecRequest, timeout time.Duration, stop <-chan
 	err := command.Run()
 	result := pluginExecResult{
 		Stdout: stdout.buffer.String(), Stderr: stderr.buffer.String(), ExitCode: -1,
-		TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Truncated: output.truncated,
+		TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Truncated: output.truncated || errors.Is(err, exec.ErrWaitDelay),
 		Cancelled: errors.Is(ctx.Err(), context.Canceled) && !output.truncated,
 	}
 	if command.ProcessState != nil {
