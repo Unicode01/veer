@@ -1117,6 +1117,7 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 - `pppoe_client`（stable）：Goja + raw L2 PPPoE 控制面和双向 TC 隧道插件。插件目录内保留控制面自测和 Linux 黑盒脚本，覆盖 discovery、PAP/CHAP、IPv6CP、DHCPv6-PD、keepalive/redial、disconnect 和 tunnel map 写入。生产使用前仍应在目标运营商/AC 上跑真实断线重拨、IPv4/IPv6/PD、长流稳定性和目标拓扑吞吐验收。
 - `packet_observer`（lab）：TC pipeline 观测示例，需要执行 `build.sh` 生成 eBPF object。
 - `router_wizard`（lab）：组合 PPPoE/WAN/LAN 资源的路由配置向导示例。
+- [wireguard_mesh](plugins/wireguard_mesh/README.md)（lab）：通过本机 WireGuard 工具为整个 LAN/指定设备选择出口或双向互联内网；要求目标 LAN 使用 Linux 路由，不默认安装。
 
 WAN 自愈仍会检查实际接口、地址、路由、策略规则、邻居和 offload 状态；状态一致时跳过重复写入及不变的恢复租约更新，发现漂移时再补回。已有的匹配策略规则不会先删除再添加。
 
