@@ -92,6 +92,7 @@ test('WireGuard example is lab-only; a saved draft and registration do not execu
   const {host, state} = fixture(); host.reconcile();
   assert.equal(state.calls.length, 0);
   assert.equal(host.snapshot().manifest.stability, 'lab');
+  assert.deepEqual(host.snapshot().manifest.compatibility.os, ['linux']);
   assert.equal(host.snapshot().surface.ui.page, 'wireguard');
   assert.throws(() => fixture(profile(), {remoteInstallEnabled: true}).apply(), /disabled while remote/);
 });
