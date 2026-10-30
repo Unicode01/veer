@@ -1232,7 +1232,10 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - 省略 `nat_type` 时默认 `symmetric`
 - `out_source_ip` 可选，但必须是 `out_interface` 上的本地 IPv4
 - `parent_interface` / `child_interface` / `out_interface` 之间不能形成非法重叠
-- 同协议集合下，enabled 的 Egress NAT scope 不能互相冲突
+- 启用的子接口规则按协议覆盖父接口默认规则；其余子接口和协议继续继承默认出口，创建顺序不影响优先级
+- 相同接口范围上不能重复配置相交协议；不同子接口或不相交协议可以共存
+- 覆盖规则暂时缺少接口或出口、或无法应用时，不会由父接口默认 NAT 接管其协议；禁用或删除覆盖规则后恢复继承
+- 默认规则当前所有子接口和协议均被覆盖时，状态为 `overridden`，配置仍保持启用，新增子接口后会重新生效
 - 创建后默认 `enabled = true`
 
 ### 5.3 更新 Egress NAT

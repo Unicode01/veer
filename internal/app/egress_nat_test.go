@@ -362,7 +362,7 @@ func TestCollectDynamicEgressNATParentsIncludesNormalizedSingleTargetParent(t *t
 	}
 }
 
-func TestValidateProjectedEgressNATsDetectsParentScopeOverlap(t *testing.T) {
+func TestValidateProjectedEgressNATsAllowsChildOverride(t *testing.T) {
 	ifaceByName := map[string]InterfaceInfo{
 		"vmbr0":    {Name: "vmbr0"},
 		"tap100i0": {Name: "tap100i0", Parent: "vmbr0", Kind: "tuntap"},
@@ -371,15 +371,12 @@ func TestValidateProjectedEgressNATsDetectsParentScopeOverlap(t *testing.T) {
 		{ID: 1, ParentInterface: "vmbr0", ChildInterface: "", OutInterface: "eno1", Enabled: true},
 		{ID: 2, ParentInterface: "vmbr0", ChildInterface: "tap100i0", OutInterface: "eno2", Enabled: true},
 	}, ifaceByName, "update", 2)
-	if len(issues) != 1 {
-		t.Fatalf("len(issues) = %d, want 1", len(issues))
-	}
-	if issues[0].Message != "egress nat scope conflicts with egress nat #1" {
-		t.Fatalf("issues[0].Message = %q", issues[0].Message)
+	if len(issues) != 0 {
+		t.Fatalf("child override issues = %#v, want none", issues)
 	}
 }
 
-func TestValidateProjectedEgressNATsDetectsSingleTargetOverlapWithParentScope(t *testing.T) {
+func TestValidateProjectedEgressNATsAllowsNormalizedChildOverride(t *testing.T) {
 	ifaceByName := map[string]InterfaceInfo{
 		"vmbr0":    {Name: "vmbr0", Kind: "bridge"},
 		"tap100i0": {Name: "tap100i0", Parent: "vmbr0", Kind: "tuntap"},
@@ -388,11 +385,8 @@ func TestValidateProjectedEgressNATsDetectsSingleTargetOverlapWithParentScope(t 
 		{ID: 1, ParentInterface: "vmbr0", ChildInterface: "", OutInterface: "eno1", Protocol: "tcp", Enabled: true},
 		{ID: 2, ParentInterface: "tap100i0", ChildInterface: "", OutInterface: "eno2", Protocol: "tcp", Enabled: true},
 	}, ifaceByName, "update", 2)
-	if len(issues) != 1 {
-		t.Fatalf("len(issues) = %d, want 1", len(issues))
-	}
-	if issues[0].Message != "egress nat scope conflicts with egress nat #1" {
-		t.Fatalf("issues[0].Message = %q", issues[0].Message)
+	if len(issues) != 0 {
+		t.Fatalf("normalized child override issues = %#v, want none", issues)
 	}
 }
 
@@ -404,11 +398,8 @@ func TestValidateProjectedEgressNATsKeepsStoredChildScopeWhenChildIsCurrentlyMis
 		{ID: 1, ParentInterface: "vmbr0", ChildInterface: "", OutInterface: "eno1", Protocol: "tcp", Enabled: true},
 		{ID: 2, ParentInterface: "vmbr0", ChildInterface: "tap100i0", OutInterface: "eno2", Protocol: "tcp", Enabled: true},
 	}, ifaceByName, "update", 2)
-	if len(issues) != 1 {
-		t.Fatalf("len(issues) = %d, want 1", len(issues))
-	}
-	if issues[0].Message != "egress nat scope conflicts with egress nat #1" {
-		t.Fatalf("issues[0].Message = %q", issues[0].Message)
+	if len(issues) != 0 {
+		t.Fatalf("missing child override issues = %#v, want none", issues)
 	}
 }
 

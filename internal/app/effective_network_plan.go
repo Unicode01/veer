@@ -129,5 +129,6 @@ func loadEffectiveNetworkPlan(db *sql.DB, cfg *Config, options effectiveNetworkP
 		plan.SyntheticEgressNATs = append(plan.SyntheticEgressNATs, pluginEgressNATs...)
 	}
 	plan.EgressNATs = append(append([]EgressNAT(nil), plan.ExplicitEgressNATs...), plan.SyntheticEgressNATs...)
+	plan.EgressNATs = compileEgressNATSubsets(plan.EgressNATs, plan.StableInterfaceSnapshot)
 	return plan, nil
 }

@@ -263,7 +263,7 @@
       'managedNetworkReservation.delete.confirm': '确认删除固定 DHCPv4 租约 #{{id}} 吗？',
       'egressNAT.form.title.add': '添加出向 NAT 接管',
       'egressNAT.form.title.edit': '编辑出向 NAT 接管 #{{id}}',
-      'egressNAT.form.desc': '接管指定父接口下全部可接管子接口，或直接接管单个子接口的 IPv4 TCP/UDP/ICMP 出向流量，并在 TC 中使用指定出口接口、源 IP 和 NAT 类型做出向改写。',
+      'egressNAT.form.desc': '接管父接口下全部子接口，或指定单个子接口的 IPv4 TCP/UDP/ICMP 出向流量。单独配置的子接口优先使用自己的出口，其余接口与协议继续使用父接口默认出口。',
       'egressNAT.form.parentInterface': '父接口',
       'egressNAT.form.childInterface': '子接口',
       'egressNAT.form.childInterfaceAll': '全部可接管子接口',
@@ -1021,6 +1021,7 @@
       'status.draining': '更新中',
       'status.running': '运行中',
       'status.stopped': '已停止',
+      'status.overridden': '已由子接口覆盖',
       'errors.operationFailed': '操作失败: {{message}}',
       'errors.deleteFailed': '删除失败: {{message}}',
       'errors.saveFailed': '保存失败: {{message}}',
@@ -1383,7 +1384,7 @@
       'managedNetworkReservation.delete.confirm': 'Delete fixed DHCPv4 lease #{{id}}?',
       'egressNAT.form.title.add': 'Add Egress NAT Takeover',
       'egressNAT.form.title.edit': 'Edit Egress NAT Takeover #{{id}}',
-      'egressNAT.form.desc': 'Take over IPv4 TCP/UDP/ICMP egress traffic from all eligible child interfaces under a parent scope, or from one selected child interface directly, and apply TC egress rewriting with the selected uplink, source IP, and NAT type.',
+      'egressNAT.form.desc': 'Select a default IPv4 TCP/UDP/ICMP exit for all child interfaces, or an exit for one child. Child rules override the default for their selected protocols; other interfaces and protocols keep the parent exit.',
       'egressNAT.form.parentInterface': 'Parent Interface',
       'egressNAT.form.childInterface': 'Child Interface',
       'egressNAT.form.childInterfaceAll': 'All Eligible Child Interfaces',
@@ -2141,6 +2142,7 @@
       'status.draining': 'Updating',
       'status.running': 'Running',
       'status.stopped': 'Stopped',
+      'status.overridden': 'Covered by child rules',
       'errors.operationFailed': 'Operation failed: {{message}}',
       'errors.deleteFailed': 'Delete failed: {{message}}',
       'errors.saveFailed': 'Save failed: {{message}}',
@@ -2542,6 +2544,7 @@
     if (status === 'error') return { badge: 'error', text: app.t('status.error') };
     if (status === 'draining') return { badge: 'draining', text: app.t('status.draining') };
     if (status === 'running') return { badge: 'running', text: app.t('status.running') };
+    if (status === 'overridden') return { badge: 'enabled', text: app.t('status.overridden') };
     return { badge: 'stopped', text: app.t('status.stopped') };
   };
 

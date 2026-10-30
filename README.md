@@ -89,7 +89,7 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 - 单端口转发：TCP、UDP、TCP+UDP
 - 共享站点：HTTP/HTTPS 共享入口，可选 QUIC/HTTP/3，按域名转发到不同后端
 - 端口范围：连续端口区间映射到指定后端
-- Egress NAT：按父接口、子接口、出接口、源地址管理出向 NAT
+- Egress NAT：按父接口、子接口、出接口、源地址管理出向 NAT；单个子接口可按协议覆盖父接口默认出口，其余接口继续继承默认出口
 - 托管网络：创建或托管 existing bridge，维护 IPv4 DHCP、保留地址、自动 Egress NAT
 - IPv6 分发：向目标接口下发 `/128` 或 `/64`
 - 诊断页：Kernel Runtime、Worker 状态、规则/站点/范围/Egress NAT 统计

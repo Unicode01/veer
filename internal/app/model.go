@@ -229,6 +229,9 @@ type EgressNAT struct {
 	NATType         string `json:"nat_type"`
 	RedirectMode    string `json:"redirect_mode,omitempty"`
 	Enabled         bool   `json:"enabled"`
+
+	// Runtime-only protocol exclusions compiled from more specific child rules.
+	subsetOverrides map[string]int
 }
 
 type EgressNATStatus struct {

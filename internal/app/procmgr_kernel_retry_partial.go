@@ -514,6 +514,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 			egressNATs = append(egressNATs, pluginEgressNATs...)
 		}
 	}
+	egressNATs = compileEgressNATSubsets(egressNATs, stableEgressNATSnapshot)
 	dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
 	dynamicRetryEgressNATOwners := collectDynamicEgressNATOwnersForTrigger(trigger, egressNATs, egressNATSnapshot)
 	for id := range dynamicRetryEgressNATOwners {
@@ -1116,6 +1117,9 @@ func buildEgressNATDesiredCandidateShapes(item EgressNAT, snapshot egressNATInte
 	nextID := int64(1)
 	for _, target := range targets {
 		for _, protocol := range protocols {
+			if !egressNATTargetProtocolEnabled(item, target.Name, protocol) {
+				continue
+			}
 			rule := buildEgressNATSyntheticRule(item, target.Name, nextID, protocol)
 			annotateKernelCandidateRule(&rule, owner)
 			out = append(out, kernelCandidateRule{owner: owner, rule: rule})
