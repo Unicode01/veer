@@ -64,7 +64,7 @@ IPv6 同理，例如源 `fd10::/64`、目标 `fd20::/64`。`masquerade=true` 会
 
 页面“保存密钥”将私钥写入插件独立的加密 Secret `private_<profile-key>`。也可通过 `set_key` action 写入：`{"key":"default","value":"实际私钥"}`。若启用 PSK，给 action 增加 `name`，然后在 peer 中填写同名 `preshared_key_secret`。私钥不放入 profile，不通过 argv、日志或状态接口返回；WG 配置经 stdin 传给 `wg syncconf`，不落明文临时文件。inspect 仅查询公钥、endpoint、握手时间和字节计数；握手为 0 代表尚未成功握手，配置已应用不等于对端可达。
 
-应用前检查所有参数、密钥、主机转发条件和资源冲突；接口 alias、nft table comment、持久化 lease 共同标记所有权。使用固定专用路由表和完整 selector 删除规则，不调用系统范围的 flush。对已有未知接口、表或优先级冲突会报错。
+应用前检查所有参数、密钥、主机转发条件和资源冲突；接口 alias、nft table comment、持久化 lease 共同标记所有权。旧版 nft 的 JSON 未包含 table comment 时，严格检查文本输出中的表头和顶层 comment，不接受链/规则中的同名 comment。使用固定专用路由表和完整 selector 删除规则，不调用系统范围的 flush。对已有未知接口、表或优先级冲突会报错。
 
 选中流量使用独立路由表，包含 unreachable 默认路由；nft guard 阻止它在 WG 接口消失后转向其他出口。应用过程先阻止选中流量再修改路由；中途失败保留已安装 guard 和恢复信息，重试同一配置或拆除，不会假报成功。修改路由的应用操作可能短暂中断选中流量；这是示例管理流程，不保证无损切换。硬退出发生在外部命令之间时需重启/重试完成恢复，不能视作跨进程原子事务。
 
