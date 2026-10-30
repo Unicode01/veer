@@ -235,3 +235,11 @@ test('WG handles old nft JSON without table comments and refuses nested or forei
     assert.equal(foreign.state.calls.some(v => v.args.includes('-f')),false);
   }
 });
+
+test('WG refuses loopback and enslaved LAN selectors before changing routing', () => {
+  for (const link of [{ifname:'br-lan', flags:['LOOPBACK']}, {ifname:'br-lan', master:'bridge-master'}]) {
+    const h=fixture(profile(),{state:{links:[link]}});
+    assert.throws(h.apply,/routed interface/);
+    assert.equal(h.state.calls.some(v => v.args.includes('-f') || v.args.includes('add')),false);
+  }
+});

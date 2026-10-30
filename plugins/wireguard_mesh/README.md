@@ -42,7 +42,7 @@
 }
 ```
 
-整个 LAN 改用 `source: "192.168.10.0/24"`。多个设备增加 bindings；选择另一个出口时新增 profile，分配不同 slot 和 peer，避免源/目标选择范围重叠。远端需要允许本端隧道地址的 AllowedIPs，并具备转发、互联网出口及相应 NAT；本插件不能替你配置远端。
+整个 LAN 改用 `source: "192.168.10.0/24"`。`lan_interface` 填实际三层入口（例如 bridge/bond 主接口），不能填 loopback 或被桥接/绑定的成员口。多个设备增加 bindings；选择另一个出口时新增 profile，分配不同 slot 和 peer，避免源/目标选择范围重叠。远端需要允许本端隧道地址的 AllowedIPs，并具备转发、互联网出口及相应 NAT；本插件不能替你配置远端。
 
 接口名为 `vwg<profile-key>`，标识限 1–11 个小写字母、数字或下划线，以字母开头。每个 profile 有一个 `slot`（1–8），对应表 `52000+slot`、规则优先级 `22000+slot*32` 到 `+31`、nft 表 `inet veer_wg_<slot>`，协议标记 `242`。这些空间必须独占。更换 slot 前先拆除。bindings 最多 16 条，peers 最多 8 个，每个 peer 最多 32 个 AllowedIPs；不接受同一 AllowedIPs 重复分配给不同 peer。
 
