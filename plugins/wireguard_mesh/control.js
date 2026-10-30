@@ -224,7 +224,14 @@ function table(p) {
   }
   var items = JSON.parse(result.stdout).nftables || [];
   var existing = items.filter(function (v) { return v.table && v.table.name === p.nft; })[0];
-  if (!existing || existing.table.comment !== p.owner) throw new Error('Reserved nftables table is owned by another configuration');
+  var owner = existing && existing.table.comment;
+  if (existing && owner == null) {
+    // Older nft releases omit table comments from JSON. Require the exact
+    // top-level comment, before any chain, from their canonical text output.
+    var lines = command(NFT, ['list', 'table', 'inet', p.nft]).split('\n').map(function (line) { return line.trim(); }).filter(Boolean);
+    if (lines[0] === 'table inet ' + p.nft + ' {' && lines[1] === 'comment "' + p.owner + '"') owner = p.owner;
+  }
+  if (!existing || owner !== p.owner) throw new Error('Reserved nftables table is owned by another configuration');
   return existing.table;
 }
 function routes(p, family) {

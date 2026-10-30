@@ -33,7 +33,11 @@ function fixture(config = profile(), options = {}) {
     if (request.command.endsWith('/nft')) {
       if (a[0] === '-j') {
         const table = state.tables[a[4]];
-        return table ? ok(JSON.stringify({nftables: [{table}]})) : error('No such file or directory');
+        return table ? ok(JSON.stringify({nftables: [{table:state.legacyNftJSON ? {name:table.name} : table}]})) : error('No such file or directory');
+      }
+      if (a[0] === 'list') {
+        const table = state.tables[a[3]];
+        return ok(table.text || 'table inet '+table.name+' {\n\tcomment "'+table.comment+'"\n\tchain forward {\n\t}\n}\n');
       }
       if (a[0] === 'delete') { delete state.tables[a[3]]; return ok(); }
       const match = /add table inet (\w+) \{ comment "([^"]+)"/.exec(request.stdin);
@@ -215,4 +219,19 @@ test('WG refuses same-protocol foreign routes and preserves them during teardown
   assert.equal(h.state.calls.slice(calls).some(v => v.args.includes('del') || v.args.includes('-f')), false);
   h.host.action('teardown', {key:'default'});
   assert.deepEqual(h.state.routes, [foreign]);
+});
+
+test('WG handles old nft JSON without table comments and refuses nested or foreign ownership markers', () => {
+  const h = fixture(profile(), {state:{legacyNftJSON:true}});
+  h.apply(); h.apply(); assert.equal(h.state.rules.length,1);
+  h.host.action('teardown',{key:'default'}); assert.deepEqual(h.state.tables,{});
+  for (const text of [
+    'table inet veer_wg_1 {\n\tchain forward {\n\t\tcomment "veer:wireguard_mesh:default"\n\t}\n}\n',
+    'table inet veer_wg_1 {\n\tcomment "someone-else"\n}\n',
+    'table inet wrong_table {\n\tcomment "veer:wireguard_mesh:default"\n}\n'
+  ]) {
+    const foreign=fixture(profile(),{state:{legacyNftJSON:true,tables:{veer_wg_1:{name:'veer_wg_1',text}}}});
+    assert.throws(foreign.apply,/owned by another/);
+    assert.equal(foreign.state.calls.some(v => v.args.includes('-f')),false);
+  }
 });
