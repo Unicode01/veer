@@ -498,6 +498,9 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 		if !ok {
 			return false
 		}
+		if egressNATPlanIsFullyOverridden(plan) {
+			continue
+		}
 		if !plan.KernelEligible || plan.EffectiveEngine != ruleEngineKernel || !pm.kernelEgressNATs[id] || strings.TrimSpace(pm.kernelEgressNATEngines[id]) == "" {
 			return false
 		}
@@ -3248,6 +3251,9 @@ func (pm *ProcessManager) egressNATRuntimeStatus(id int64, enabled bool) string 
 	if running {
 		return "running"
 	}
+	if ok && egressNATPlanIsFullyOverridden(plan) {
+		return "overridden"
+	}
 	if ok && egressNATPlanIsUnavailable(plan) {
 		return "error"
 	}
@@ -3256,6 +3262,11 @@ func (pm *ProcessManager) egressNATRuntimeStatus(id int64, enabled bool) string 
 
 func egressNATPlanIsUnavailable(plan ruleDataplanePlan) bool {
 	return strings.TrimSpace(plan.FallbackReason) != "" || (!plan.KernelEligible && strings.TrimSpace(plan.KernelReason) != "")
+}
+
+func egressNATPlanIsFullyOverridden(plan ruleDataplanePlan) bool {
+	return plan.KernelEligible && plan.EffectiveEngine == ruleEngineKernel &&
+		plan.KernelReason == egressNATFullyOverriddenReason && plan.FallbackReason == ""
 }
 
 func (pm *ProcessManager) buildEgressNATStatus(item EgressNAT, status string) EgressNATStatus {

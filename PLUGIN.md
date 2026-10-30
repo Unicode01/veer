@@ -321,6 +321,8 @@ plugin.resource({
 
 需要复用核心网络能力时，使用约定资源而不是直接修改 Veer 全局配置表：`forward_rule_plans` 编排端口转发，`egress_nat_plans` 编排 Egress NAT，`dhcpv4_plans` 在已有 LAN bridge 上启用 DHCPv4，`ipv6_assignment_plans` 编排 IPv6 路由、网关地址、RA 与 DHCPv6。这些记录只生成带稳定负数 ID 的 synthetic runtime，不复制到核心业务表；插件禁用或记录失活后会随下一次 runtime apply 撤销。
 
+`egress_nat_plans` 与手工出向 NAT、托管网络自动 NAT 统一按接口范围和协议编排：`parent_interface` 不带 `child_interface` 时提供默认出口；指定子接口的启用规则覆盖该子接口上相交的协议，其余子接口和协议继续使用默认出口。同一范围上的协议重叠仍视为冲突。覆盖规则暂时缺少接口或出口、或运行失败时，不会自动恢复父接口默认出口；只有禁用或删除覆盖规则才恢复继承。接口增删会重新计算实际子集，所有子接口及协议均已覆盖的默认规则显示为 `overridden`。
+
 `dhcpv4_plans` 支持 `bridge/ipv4_cidr/gateway/pool_start/pool_end/dns_servers/reservations/remark/enabled`。固定租约写在同一 plan 内：
 
 ```js

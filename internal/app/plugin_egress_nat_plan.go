@@ -130,7 +130,7 @@ func pluginEgressNATPlanRecordToItem(record store.PluginRecord, existing []Egres
 		if !ruleProtocolsOverlap(item.Protocol, normalizeEgressNATProtocol(current.Protocol)) {
 			continue
 		}
-		if !egressNATScopesOverlap(item, current, snapshot.IfaceByName) {
+		if !egressNATScopesConflict(item, current, snapshot.IfaceByName) {
 			continue
 		}
 		return EgressNAT{}, fmt.Sprintf("%s: skip egress nat plan because it overlaps egress nat #%d", scope, current.ID)
