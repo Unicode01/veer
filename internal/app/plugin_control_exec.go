@@ -145,7 +145,10 @@ func runPluginExec(request pluginExecRequest, timeout time.Duration, stop <-chan
 		result.ExitCode = command.ProcessState.ExitCode()
 	}
 	var exitError *exec.ExitError
-	if err != nil && !errors.As(err, &exitError) && !errors.Is(err, exec.ErrWaitDelay) {
+	// Cancellation can race with a successful exit after the output writer has
+	// cancelled the context. os/exec then returns ctx.Err rather than ExitError.
+	cancelledAfterStart := command.ProcessState != nil && ctx.Err() != nil && errors.Is(err, ctx.Err())
+	if err != nil && !errors.As(err, &exitError) && !errors.Is(err, exec.ErrWaitDelay) && !cancelledAfterStart {
 		return result, fmt.Errorf("execute command: %w", err)
 	}
 	return result, nil
