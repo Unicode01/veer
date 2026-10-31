@@ -41,9 +41,10 @@
 .vpn-wide { grid-column:1/-1; }
 .vpn-page .veer-input { padding:9px 11px; min-height:37px; border-radius:7px; font-size:12px; }
 .vpn-page textarea { resize:vertical; width:100%; }
-.vpn-json { min-height:230px; font-family:ui-monospace,Consolas,monospace; line-height:1.7; }
+.vpn-page .vpn-json { min-height:230px; font-family:ui-monospace,Consolas,monospace; line-height:1.7; }
 .vpn-page .veer-button { min-height:34px; }
 .vpn-subsection { border-top:1px solid var(--veer-border); padding-top:20px; margin-top:22px; }
+.vpn-subsection > .veer-field { margin-top:16px; }
 .vpn-peer { padding:16px; border-radius:9px; background:var(--veer-surface-soft); margin-bottom:12px; }
 .vpn-peer .vpn-heading { margin-bottom:14px; }
 .vpn-peer .vpn-heading h3 { font-size:12px; margin:0; }
