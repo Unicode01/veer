@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -307,7 +308,44 @@ func runWireGuardMeshTopology(t *testing.T) {
 		if driver == "sing_box" {
 			core = os.Getenv("VEER_TEST_SING_BOX")
 		}
-		profile = map[string]any{"driver": driver, "core_path": core, "upstream_interface": "wan", "slot": 1, "addresses": []string{"10.77.0.1/32"}}
+		// Seed through the verified installer, then exercise the daemon's default
+		// core resolution and restart recovery using its persistent directory.
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, core) }))
+		defer server.Close()
+		binaries, err := newPluginBinaryStore(&cfg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer binaries.cancelOwner("", true)
+		binaries.client = server.Client()
+		digest, err := sha256File(core)
+		if err != nil {
+			t.Fatal(err)
+		}
+		executable, check := "mihomo", []string{"-v"}
+		if driver == "sing_box" {
+			executable, check = "sing-box", []string{"version"}
+		}
+		if _, err = binaries.Install("wireguard_mesh", pluginBinaryRequest{ID: driver, Version: "vtest", URL: server.URL, SHA256: digest, Executable: executable, Format: "raw", CheckArgs: check}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-binaries.jobs["wireguard_mesh/"+driver].done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("managed core installation did not finish")
+		}
+		installed, err := binaries.Status("wireguard_mesh", driver)
+		if err != nil || installed.Install.State != "ready" {
+			t.Fatalf("core install: %+v %v", installed, err)
+		}
+		var managed struct {
+			Result pluginBinaryStatus `json:"result"`
+		}
+		body := api("POST", "/api/plugins/wireguard_mesh/actions/core_status", map[string]any{"payload": map[string]any{"driver": driver}})
+		if err = json.Unmarshal(body, &managed); err != nil || managed.Result.Path != installed.Path {
+			t.Fatalf("daemon did not discover persistent core: %s %v", body, err)
+		}
+		profile = map[string]any{"driver": driver, "upstream_interface": "wan", "slot": 1, "addresses": []string{"10.77.0.1/32"}}
 		var config map[string]any
 		if driver == "mihomo" {
 			config = map[string]any{"proxies": []any{map[string]any{"name": "test", "type": "ss", "server": "192.0.2.2", "port": 8388, "cipher": "aes-128-gcm", "password": "veer-integration-only", "udp": true}}, "rules": []string{"MATCH,test"}}

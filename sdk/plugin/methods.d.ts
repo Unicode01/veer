@@ -149,6 +149,10 @@ declare global {
     "plugins.services.call": typeof plugins.services.call;
     "plugins.services.list": typeof plugins.services.list;
     "plugins.services.resolve": typeof plugins.services.resolve;
+    "process.binaryInstall": typeof process.binaryInstall;
+    "process.binaryRemove": typeof process.binaryRemove;
+    "process.binarySelect": typeof process.binarySelect;
+    "process.binaryStatus": typeof process.binaryStatus;
     "process.exec": typeof process.exec;
     "process.list": typeof process.list;
     "process.logs": typeof process.logs;

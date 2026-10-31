@@ -539,7 +539,7 @@ test('test host loads bundled control-plane plugins without compatibility shims'
 test('test host exposes every versioned control API method', (t) => {
   const pluginDir = writePlugin(t, testManifest('api_contract'), `exports.onReconcile = function () {};`);
   const host = createTestHost({ pluginDir });
-  assert.equal(apiContract.version, 10);
+  assert.equal(apiContract.version, 11);
   assert.equal(apiContract.runtime.api_version, 'v1');
   assert.equal(apiContract.runtime.tc_pipeline_abi, 2);
   assert.equal(apiContract.runtime.core_priority, 1000);

@@ -50,10 +50,11 @@ func (status pluginProcessStatus) value() map[string]any {
 }
 
 type pluginProcessRegistry struct {
-	mu      sync.Mutex
-	closed  bool
-	entries map[string]*pluginManagedProcess
-	cfg     *Config
+	mu       sync.Mutex
+	closed   bool
+	entries  map[string]*pluginManagedProcess
+	cfg      *Config
+	binaries *pluginBinaryStore
 }
 
 type pluginManagedProcess struct {
@@ -61,6 +62,7 @@ type pluginManagedProcess struct {
 	status      pluginProcessStatus
 	fingerprint [32]byte
 	generation  string
+	command     string
 	stop        chan struct{}
 	done        chan struct{}
 	stopOnce    sync.Once
@@ -327,7 +329,7 @@ func (r *pluginProcessRegistry) Start(owner, generation string, req pluginProces
 	}
 	limitIdentity := sha256.Sum256([]byte(key))
 	p := &pluginManagedProcess{
-		generation: generation, fingerprint: fingerprint,
+		generation: generation, fingerprint: fingerprint, command: req.Command,
 		stop: make(chan struct{}), done: make(chan struct{}), restart: make(chan struct{}, 1),
 		maxRestarts: req.MaxRestarts,
 		status:      pluginProcessStatus{ID: req.ID, State: "starting", ExitCode: -1},
@@ -479,6 +481,7 @@ func (r *pluginProcessRegistry) Stop(owner, id string) pluginProcessStatus {
 
 func (r *pluginProcessRegistry) ClosePlugin(owner string) {
 	r.mu.Lock()
+	binaries := r.binaries
 	var ids []string
 	for key, p := range r.entries {
 		if strings.HasPrefix(key, owner+"/") {
@@ -487,6 +490,9 @@ func (r *pluginProcessRegistry) ClosePlugin(owner string) {
 		}
 	}
 	r.mu.Unlock()
+	if binaries != nil {
+		binaries.cancelOwner(owner, false)
+	}
 	for _, id := range ids {
 		r.Stop(owner, id)
 	}
@@ -495,16 +501,31 @@ func (r *pluginProcessRegistry) ClosePlugin(owner string) {
 func (r *pluginProcessRegistry) CloseAll() {
 	r.mu.Lock()
 	r.closed = true
+	binaries := r.binaries
 	entries := make([]*pluginManagedProcess, 0, len(r.entries))
 	for _, p := range r.entries {
 		entries = append(entries, p)
 		p.close()
 	}
 	r.mu.Unlock()
+	if binaries != nil {
+		binaries.cancelOwner("", true)
+	}
 	for _, p := range entries {
 		<-p.done
 	}
 	r.mu.Lock()
 	r.entries = nil
 	r.mu.Unlock()
+}
+
+func (r *pluginProcessRegistry) binaryInUse(path string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, process := range r.entries {
+		if process.command == path {
+			return true
+		}
+	}
+	return false
 }
