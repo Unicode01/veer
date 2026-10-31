@@ -39,7 +39,7 @@ plugin.action({id: 'apply', description: 'Create or update a VPN WAN; select it 
 plugin.action({id: 'teardown', description: 'Remove the owned VPN WAN and its TC adapter.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'inspect', description: 'Read public interface, peer, handshake and traffic state.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 plugin.action({id: 'core_logs', description: 'Explicitly read managed core logs; output may contain credentials.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
-ui.register({static_dir: 'ui', entry: 'index.html', sha256: '656197d7c44492558a958966b3c3c83181f24f9fb3ac8f490e741302474af864', page: 'wireguard', page_title: 'VPN',
+ui.register({static_dir: 'ui', entry: 'index.html', sha256: '6c0964eccd59ddf02948ee5c21a0954cd8326f5cb3018c147414c61e7821f347', page: 'wireguard', page_title: 'VPN',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
   actions: ['set_key', 'set_core_config', 'apply', 'teardown', 'inspect', 'core_logs']});
 
