@@ -281,7 +281,15 @@ func TestPluginManagedProcessGracefulAndForcedStop(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			r := &pluginProcessRegistry{}
 			defer r.CloseAll()
-			if _, err := r.Start("one", "v1", managedTestRequest(t, mode), nil); err != nil {
+			req := managedTestRequest(t, mode)
+			stopBound := 2 * time.Second
+			if mode == "graceful" {
+				// Race-instrumented Go helpers sleep for 1s inside os.Exit.
+				// Keep the forced-stop case short, but let graceful exit finish.
+				req.StopTimeoutMS = 2500
+				stopBound = 4 * time.Second
+			}
+			if _, err := r.Start("one", "v1", req, nil); err != nil {
 				t.Fatal(err)
 			}
 			p := r.get("one", "core")
@@ -298,7 +306,7 @@ func TestPluginManagedProcessGracefulAndForcedStop(t *testing.T) {
 			}
 			start := time.Now()
 			status := r.Stop("one", "core")
-			if status.State != "stopped" || time.Since(start) > 2*time.Second {
+			if status.State != "stopped" || time.Since(start) > stopBound {
 				t.Fatal(status, time.Since(start))
 			}
 			out, _ := p.stdout.snapshot()
