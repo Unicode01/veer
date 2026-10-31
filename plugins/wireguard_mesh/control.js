@@ -699,6 +699,14 @@ function applyTUNProfile(key, raw, explicit) {
     var verified = ownedLink(p);
     if (!verified || verified.ifindex !== current.ifindex || verified.mtu !== p.mtu || (verified.flags || []).indexOf('UP') < 0)
       throw new Error('TUN changed while inspecting its capabilities');
+    if (p.tun_gso) {
+      // WAN Core persists the preparation in its profile, which takes priority
+      // over later session fields. Update that profile before publishing;
+      // otherwise its original segmented settings silently override the probe.
+      var prepared = wanPayload(p, false);
+      prepared.interface_preparation = wanPayload(p, true).interface_preparation;
+      wanCall('prepare_handoff', prepared);
+    }
     var boundary = boundaryLinks(p);
     if (!boundary) throw new Error('WAN boundary is not ready');
     lease.wg_ifindex = current.ifindex; lease.local_ifindex = boundary.local.ifindex;

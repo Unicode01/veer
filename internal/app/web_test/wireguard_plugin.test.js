@@ -370,6 +370,11 @@ test('VPN enables GSO only for a managed sing-box TUN with negotiated capabiliti
     assert.equal(data.interface_preparation.local_offloads.gso,c.want);
     assert.equal(data.interface_preparation.pipeline_offloads.gro,c.want);
     assert.equal(data.interface_preparation.local_gso.max_segs,c.want?65535:1);
+    // WAN Core saves prepare_handoff settings as profile defaults. Session
+    // updates alone cannot replace those defaults, so inspect the service call.
+    const prepared=h.state.services.filter(r=>r.action==='prepare_handoff').at(-1).payload;
+    assert.equal(prepared.usable,false);
+    assert.equal(prepared.interface_preparation.local_offloads.gso,c.want);
     const before=probes;
     h.host.run('onTimer',{timer:{name:'wg_repair'}});h.host.reconcile();
     assert.equal(probes,before,'healthy polling/reconciliation must not execute ethtool');
