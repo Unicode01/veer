@@ -1,19 +1,75 @@
 {
   "api_version": "v1",
   "id": "wireguard_mesh",
-  "name": "WireGuard Mesh Example",
-  "version": "0.1.0",
-  "kind": "control",
+  "name": "WireGuard WAN Example",
+  "version": "0.2.0",
+  "kind": "pipeline",
   "stability": "lab",
-  "description": "Opt-in Linux WireGuard example: route a LAN or selected downstream IPs through a tunnel, with optional NAT and site-to-site routing.",
+  "description": "Opt-in WireGuard WAN driver with a bidirectional TC adapter and WAN Core handoff.",
   "compatibility": {
-    "os": ["linux"],
+    "os": [
+      "linux"
+    ],
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
-    "features": ["control.exec.v1", "ui.capabilities.v1"]
+    "features": [
+      "control.exec.v1",
+      "control.typed_services.v1",
+      "dataplane.tc_pipeline.v2",
+      "ui.capabilities.v1"
+    ],
+    "tc_pipeline_abi": 2
   },
   "control": {
     "main": "control.js",
-    "permissions": ["plugin.register", "exec", "resource", "kv", "secret", "ui"]
-  }
+    "permissions": [
+      "crypto",
+      "exec",
+      "ebpf.load",
+      "ebpf.map_read",
+      "ebpf.map_write",
+      "hook.attach",
+      "plugin.action",
+      "plugin.register",
+      "plugin.resource",
+      "resource",
+      "kv",
+      "secret",
+      "timer",
+      "ui"
+    ],
+    "resource_access": [
+      {
+        "plugin": "wan_core",
+        "resource": "sessions",
+        "methods": [
+          "get",
+          "create",
+          "update"
+        ]
+      },
+      {
+        "plugin": "wan_core",
+        "resource": "status",
+        "methods": [
+          "get"
+        ]
+      }
+    ],
+    "action_access": [
+      {
+        "plugin": "wan_core",
+        "actions": [
+          "prepare_handoff",
+          "teardown"
+        ]
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "wan_core",
+      "version": ">=1.5.0 <2.0.0"
+    }
+  ]
 }

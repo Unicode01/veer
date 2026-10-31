@@ -317,7 +317,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 插件层
 
-`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入 TC 数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [wireguard_mesh](plugins/wireguard_mesh/README.md) 仍是源码内的 lab 插件，不进入默认发布包。WireGuard 示例使用本机工具为 LAN/设备选择隧道出口或互联内网，目标 LAN 需走 Linux 路由。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
+`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入 TC 数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [wireguard_mesh](plugins/wireguard_mesh/README.md) 仍是源码内的 lab 插件，不进入默认发布包。WireGuard 示例以 WAN Core veth 和双向 TC 适配器接入内核 WG，由现有 LAN/出向 NAT 选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
 
 ## 平台与依赖
 

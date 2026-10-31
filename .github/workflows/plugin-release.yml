@@ -130,8 +130,8 @@ jobs:
         run: |
           sh scripts/build-all-ebpf.sh
           go test ./internal/app ./internal/kernelcap ./internal/tproxysetup -count=1
-      - name: Verify opt-in WireGuard LAN and device routing
-        run: sudo env "PATH=$PATH" VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestWireGuardMeshLinuxIntegration$' -count=1 -v -timeout=3m
+      - name: Verify opt-in WireGuard WAN and core NAT
+        run: sudo env "PATH=$PATH" VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestWireGuardMeshLinuxIntegration$' -count=1 -v -timeout=5m
       - name: Verify real deployment unit and namespace persistence
         run: sudo env "PATH=$PATH" bash scripts/verify-service-platform.sh
       - name: Verify native core dataplane

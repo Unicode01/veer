@@ -3,29 +3,34 @@ package app
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
-
-	"github.com/Unicode01/veer/internal/store"
 )
 
 // The complete topology runs in a disposable network namespace. No route,
 // firewall rule, sysctl or WireGuard device is installed in the runner's netns.
 func TestWireGuardMeshLinuxIntegration(t *testing.T) {
+	if role := os.Getenv("VEER_WG_BULK"); role != "" {
+		runWireGuardBulkHelper(t, role)
+		return
+	}
 	if os.Getenv("VEER_RUN_WIREGUARD_TESTS") != "1" {
 		t.Skip("set VEER_RUN_WIREGUARD_TESTS=1 to test real WireGuard routing")
 	}
 	if os.Geteuid() != 0 {
 		t.Fatal("WireGuard integration requires root")
 	}
-	for _, tool := range []string{"ip", "wg", "nft", "tc", "sysctl", "ping", "unshare"} {
+	for _, tool := range []string{"ip", "wg", "tc", "sysctl", "ping", "unshare"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("required tool %s: %v", tool, err)
 		}
@@ -38,9 +43,9 @@ func TestWireGuardMeshLinuxIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "unshare", "--net", "--", binary, "-test.run=^TestWireGuardMeshLinuxIntegration$", "-test.v", "-test.timeout=110s")
+	cmd := exec.CommandContext(ctx, "unshare", "--net", "--", binary, "-test.run=^TestWireGuardMeshLinuxIntegration$", "-test.v", "-test.timeout=230s")
 	cmd.Env = append(os.Environ(), "VEER_WG_TEST_CHILD=1")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -124,87 +129,318 @@ func runWireGuardMeshTopology(t *testing.T) {
 	ip("-n", remote, "route", "add", "10.77.0.1/32", "dev", "wgpeer")
 	ip("-n", remote, "-6", "route", "add", "fd77::1/128", "dev", "wgpeer")
 	ip("netns", "exec", remote, "sysctl", "-qw", "net.ipv4.conf.all.rp_filter=2", "net.ipv4.conf.wgpeer.rp_filter=2")
-	plugin, db, runtime := loadPluginIntegrationControlRuntimeForTest(t, "wireguard_mesh")
-	t.Cleanup(func() { _ = runtime.Close() })
-	catalog := loadPluginCatalogWithState(runtime.cfg, db)
-	applyPluginRuntimeSnapshot(&catalog, runtime.Reconcile(catalog))
-	plugin = pluginByIDForTest(t, catalog, "wireguard_mesh")
-	action := func(id string, payload any) {
+	// Exercise the real daemon, plugin service calls, TC verifier and core NAT together.
+	root, work := findRepoRoot(t), t.TempDir()
+	for _, id := range []string{"wan_core", "wireguard_mesh"} {
+		copyDirForTest(t, filepath.Join(root, "plugins", id), filepath.Join(work, "plugins", id))
+	}
+	enabled, disabled := true, false
+	cfg := Config{WebBind: "127.0.0.1", WebPort: freeTCPPort(t), WebToken: egressNATTestToken,
+		PluginAdminToken: "wireguard-integration-admin", MaxWorkers: 1, DefaultEngine: ruleEngineKernel,
+		KernelEngineOrder: []string{kernelEngineTC}, PluginsDir: filepath.Join(work, "plugins"),
+		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, PluginsIsolationSetting: &disabled,
+		PluginsMinSandboxLevel: pluginSandboxLevelNone, PluginsRequireSigned: &disabled,
+		Experimental: map[string]bool{experimentalFeatureKernelTCPreparedL2: true}}
+	data, _ := json.Marshal(cfg)
+	configPath := filepath.Join(work, "config.json")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(work, "veer.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	cmd := exec.Command(buildDataplanePerfBinary(t, root), "--config", configPath)
+	cmd.Dir = work
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(8 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	})
+	t.Cleanup(func() {
+		if t.Failed() {
+			b, _ := os.ReadFile(logPath)
+			t.Logf("daemon log:\n%s", b)
+		}
+	})
+	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.WebPort)
+	waitForEgressNATIntegrationAPI(t, base, cmd, logPath)
+	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "wireguard_mesh", "apply")
+	api := func(method, path string, payload any) []byte {
 		t.Helper()
-		data, err := json.Marshal(payload)
+		data, _ := json.Marshal(payload)
+		req, _ := http.NewRequest(method, base+path, bytes.NewReader(data))
+		req.Header.Set("Authorization", "Bearer "+cfg.WebToken)
+		req.Header.Set(pluginAdminTokenHeader, cfg.PluginAdminToken)
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 20 * time.Second}
+		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := runtime.ApplyPluginAction(plugin, pluginActionByIDForTest(t, plugin, id), data); err != nil {
-			t.Fatalf("WireGuard action %s: %v", id, err)
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+
+			check, _ := http.NewRequest("GET", base+"/api/plugins", nil)
+			check.Header.Set("Authorization", "Bearer "+cfg.WebToken)
+			if response, e := client.Do(check); e == nil {
+				var catalog struct {
+					Plugins []struct {
+						ID      string          `json:"id"`
+						Runtime json.RawMessage `json:"runtime"`
+					}
+				}
+				_ = json.NewDecoder(response.Body).Decode(&catalog)
+				response.Body.Close()
+				for _, p := range catalog.Plugins {
+					if p.ID == "wireguard_mesh" {
+						t.Logf("WG runtime: %s", p.Runtime)
+					}
+				}
+			}
+			if strings.Contains(path, "set_key") {
+				t.Fatalf("set key HTTP %d", resp.StatusCode)
+			}
+			t.Fatalf("%s %s HTTP %d: %s", method, path, resp.StatusCode, body)
 		}
+		return body
 	}
-	action("set_key", map[string]any{"key": "default", "value": localPrivate})
-	profile := map[string]any{
-		"slot": 1, "listen_port": 51821, "addresses": []string{"10.77.0.1/32", "fd77::1/128"}, "masquerade": true,
-		"peers": []any{map[string]any{"public_key": remotePublic, "endpoint": "192.0.2.2:51820", "allowed_ips": []string{"0.0.0.0/0", "::/0"}}},
-		"bindings": []any{
-			map[string]any{"lan_interface": "br-lan", "source": "192.168.10.20/32", "destination": "0.0.0.0/0"},
-			map[string]any{"lan_interface": "br-lan", "source": "fd10::20/128", "destination": "::/0"},
-		},
+	action := func(id string) {
+		api("POST", "/api/plugins/wireguard_mesh/actions/"+id, map[string]any{"payload": map[string]any{"key": "default"}})
 	}
-	storeProfile := func() {
+	api("POST", "/api/plugins/wireguard_mesh/actions/set_key", map[string]any{"payload": map[string]any{"key": "default", "value": localPrivate}})
+	profile := map[string]any{"slot": 1, "listen_port": 51821, "addresses": []string{"10.77.0.1/32"},
+		"peers": []any{map[string]any{"public_key": remotePublic, "endpoint": "192.0.2.2:51820", "allowed_ips": []string{"0.0.0.0/0"}}}}
+	api("POST", "/api/plugins/wireguard_mesh/resources/profiles", map[string]any{"key": "default", "data": profile, "enabled": true})
+	action("apply")
+	if got := ip("route", "get", "192.0.2.2"); !strings.Contains(got, "dev wan") {
+		t.Fatal("recursive outer route: " + got)
+	}
+	if got := ip("route", "show", "default"); strings.Contains(got, "veerwg") || strings.Contains(got, "vwg") {
+		t.Fatal("host default route changed: " + got)
+	}
+	// A parent default remains on the ordinary uplink; the child overrides it with the WG WAN.
+	create := func(child, out, source string) int64 {
 		t.Helper()
-		data, _ := json.Marshal(profile)
-		if err := store.DeletePluginRecord(db, "wireguard_mesh", "profiles", "default"); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		body := api("POST", "/api/egress-nats", map[string]any{"parent_interface": "br-lan", "child_interface": child, "out_interface": out, "out_source_ip": source, "redirect_mode": egressNATRedirectModePreparedL2, "protocol": "tcp+udp+icmp"})
+		var r struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.Unmarshal(body, &r)
+		return r.ID
+	}
+	// Ordinary WAN uses route/neighbour resolution rather than prepared L2.
+	api("POST", "/api/egress-nats", map[string]any{"parent_interface": "br-lan", "out_interface": "wan", "out_source_ip": "192.0.2.1", "protocol": "tcp+udp+icmp"})
+	childID := create("port0", "veerwg1", "10.77.0.1")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var entries []EgressNATStatus
+		if err := json.Unmarshal(api("GET", "/api/egress-nats", nil), &entries); err != nil {
 			t.Fatal(err)
 		}
-		addPluginIntegrationRecord(t, db, "wireguard_mesh", "profiles", "default", string(data), true)
+		ready := false
+		for _, entry := range entries {
+			if entry.ID == childID {
+				ready = entry.Status == "running" && entry.EffectiveEngine == ruleEngineKernel && entry.EffectiveKernelEngine == kernelEngineTC && entry.OutSourceIP == "10.77.0.1"
+			}
+		}
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("WG NAT did not enter TC: %+v", entries)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	storeProfile()
-	action("apply", map[string]any{"key": "default"})
-	ping := func(ns, target string) {
+	probe := func(ns, source string) {
 		t.Helper()
-		ip("netns", "exec", ns, "ping", "-n", "-c", "2", "-W", "2", target)
+		for _, protocol := range []string{"tcp", "udp"} {
+			observed := filepath.Join(t.TempDir(), "observed")
+			backend, logs := startEgressNATBackendHelperInNamespace(t, remote, protocol, "203.0.113.1:24001", observed)
+			client := exec.Command("ip", "netns", "exec", ns, os.Args[0], "-test.run=^TestEgressNATIntegrationHelperProcess$")
+			client.Env = append(os.Environ(), egressNATHelperEnv+"=1", egressNATHelperRoleEnv+"="+egressNATHelperRoleClient, egressNATHelperProtocolEnv+"="+protocol, egressNATHelperTargetAddrEnv+"=203.0.113.1:24001")
+			out, err := client.CombinedOutput()
+			if err != nil {
+				stopDataplanePerfHelper(t, backend)
+				t.Fatalf("%s probe: %v: %s backend: %s", protocol, err, out, logs.String())
+			}
+			waitForEgressNATHelperExit(t, backend, protocol, logs.String())
+			b, _ := os.ReadFile(observed)
+			if strings.TrimSpace(string(b)) != source {
+				t.Fatalf("%s observed %q, want %s", protocol, b, source)
+			}
+		}
+		ip("netns", "exec", ns, "ping", "-n", "-c", "2", "-W", "2", "203.0.113.1")
 	}
-	ping(selected, "203.0.113.1") // Only the tunnel address is allowed by the remote peer: this proves SNAT.
-	ping(selected, "fd20::1")
-	ping(direct, "203.0.113.1")
-	if got := ip("route", "get", "203.0.113.1", "from", "192.168.10.20", "iif", "br-lan"); !strings.Contains(got, "dev vwgdefault") {
-		t.Fatal("selected device did not choose WireGuard: " + got)
+	probe(selected, "10.77.0.1")
+	probe(direct, "192.0.2.1")
+	// A 2 MiB echo in each direction crosses the tunnel MTU many times.
+	ready := filepath.Join(t.TempDir(), "bulk-ready")
+	bulk := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+	bulk.Env = append(os.Environ(), "VEER_WG_BULK=server", "VEER_WG_BULK_READY="+ready)
+	var bulkLogs bytes.Buffer
+	bulk.Stdout = &bulkLogs
+	bulk.Stderr = &bulkLogs
+	if err := bulk.Start(); err != nil {
+		t.Fatal(err)
 	}
-	if got := ip("route", "get", "203.0.113.1", "from", "192.168.10.30", "iif", "br-lan"); !strings.Contains(got, "dev wan") {
-		t.Fatal("unselected device routing changed: " + got)
+	t.Cleanup(func() {
+		if bulk.ProcessState == nil {
+			_ = bulk.Process.Kill()
+			_ = bulk.Wait()
+		}
+	})
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bulk server not ready: %s", bulkLogs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if got := ip("route", "get", "192.0.2.2"); !strings.Contains(got, "dev wan") {
-		t.Fatal("outer endpoint recursively enters WireGuard: " + got)
+	client := exec.Command("ip", "netns", "exec", selected, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+	client.Env = append(os.Environ(), "VEER_WG_BULK=client")
+	if out, err := client.CombinedOutput(); err != nil {
+		t.Fatalf("bulk client: %v: %s", err, out)
 	}
-	ip("link", "del", "vwgdefault")
-	if out, err := exec.Command("ip", "route", "get", "203.0.113.1", "from", "192.168.10.20", "iif", "br-lan").CombinedOutput(); err == nil {
-		t.Fatalf("missing tunnel fell through to cleartext routing: %s", out)
+	if err := bulk.Wait(); err != nil {
+		t.Fatalf("bulk server: %v: %s", err, bulkLogs.String())
 	}
-	ping(direct, "203.0.113.1")
-	action("apply", map[string]any{"key": "default"})
-	ping(selected, "203.0.113.1")
-	// Change to routed site-to-site mode, including the whole LAN and IPv6.
-	configureRemote("192.168.10.0/24, fd10::/64, 10.77.0.1/32, fd77::1/128")
-	ip("-n", remote, "route", "replace", "192.168.10.0/24", "dev", "wgpeer")
-	ip("-n", remote, "-6", "route", "replace", "fd10::/64", "dev", "wgpeer")
-	profile["masquerade"] = false
-	profile["peers"] = []any{map[string]any{"public_key": remotePublic, "endpoint": "192.0.2.2:51820", "allowed_ips": []string{"192.168.20.0/24", "fd20::/64"}}}
-	profile["bindings"] = []any{map[string]any{"lan_interface": "br-lan", "source": "192.168.10.0/24", "destination": "192.168.20.0/24"}, map[string]any{"lan_interface": "br-lan", "source": "fd10::/64", "destination": "fd20::/64"}}
-	storeProfile()
-	action("apply", map[string]any{"key": "default"})
-	ping(selected, "192.168.20.1")
-	ping(direct, "192.168.20.1")
-	ping(selected, "fd20::1")
-	ip("netns", "exec", remote, "ping", "-I", "192.168.20.1", "-n", "-c", "2", "-W", "2", "192.168.10.20")
-	ip("netns", "exec", remote, "ping", "-I", "fd20::1", "-n", "-c", "2", "-W", "2", "fd10::20")
-	action("teardown", map[string]any{"key": "default"})
-	if out := ip("-j", "link", "show"); bytes.Contains([]byte(out), []byte("vwgdefault")) {
-		t.Fatal("owned WireGuard link remains")
+
+	// Both directions must remain on the real core TC engine.
+	workers := api("GET", "/api/workers", nil)
+	if !bytes.Contains(workers, []byte(`"tc"`)) {
+		t.Fatal("TC core missing from worker status")
 	}
-	for _, family := range []string{"-4", "-6"} {
-		if out := ip("-j", family, "rule", "show"); strings.Contains(out, "52001") {
-			t.Fatal("owned policy rules remain: " + out)
+	var view KernelRuntimeResponse
+	if err := json.Unmarshal(api("GET", "/api/kernel/runtime", nil), &view); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, engine := range view.Engines {
+		if engine.Name == kernelEngineTC && engine.FlowsMapEntries > 0 {
+			found = true
+			t.Logf("TC core flow entries after WG probes: %d", engine.FlowsMapEntries)
 		}
 	}
-	if exec.Command("nft", "list", "table", "inet", "veer_wg_1").Run() == nil {
-		t.Fatal("owned firewall table remains")
+	if !found {
+		t.Fatal("WG probes did not create core flow entries")
+	}
+
+	// Abrupt daemon loss preserves applied intent and the next startup rebuilds the adapter.
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	cmd = exec.Command(buildDataplanePerfBinary(t, root), "--config", configPath)
+	cmd.Dir = work
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForEgressNATIntegrationAPI(t, base, cmd, logPath)
+	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "wireguard_mesh", "apply")
+	probe(selected, "10.77.0.1")
+	probe(direct, "192.0.2.1")
+	ip("link", "set", "vwgdefault", "down")
+	action("apply")
+	probe(selected, "10.77.0.1")
+	// Pause userspace to observe the failure before the repair timer can hide it.
+	if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Signal(syscall.SIGCONT) })
+	ip("link", "del", "vwgdefault")
+	if out, err := exec.Command("ip", "netns", "exec", selected, "ping", "-n", "-c", "1", "-W", "1", "203.0.113.1").CombinedOutput(); err == nil {
+		t.Fatalf("missing WG leaked selected traffic: %s", out)
+	}
+	ip("netns", "exec", direct, "ping", "-n", "-c", "1", "-W", "1", "203.0.113.1")
+	_ = cmd.Process.Signal(syscall.SIGCONT)
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		if exec.Command("ip", "link", "show", "vwgdefault").Run() == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("repair timer did not recreate WG")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	probe(selected, "10.77.0.1")
+	// Deleting a child override restores the parent's ordinary WAN.
+	api("DELETE", fmt.Sprintf("/api/egress-nats?id=%d", childID), nil)
+	probe(selected, "192.0.2.1")
+	action("teardown")
+	action("apply")
+	action("teardown")
+	if got := ip("-j", "link", "show"); strings.Contains(got, "vwgdefault") || strings.Contains(got, "veerwg1") {
+		t.Fatal("WG WAN links remain: " + got)
+	}
+	t.Log("TCP/UDP/ICMP: selected child used WG SNAT, sibling used ordinary WAN; interface rebuild and teardown/reapply passed")
+}
+
+// Subprocess helper: ordinary TCP sockets exercise GSO/checksums and MSS through the whole path.
+func runWireGuardBulkHelper(t *testing.T, role string) {
+	t.Helper()
+	payload := bytes.Repeat([]byte("wireguard-bulk-check"), 110377)
+	var conn net.Conn
+	if role == "server" {
+		listener, err := net.Listen("tcp4", "203.0.113.1:24002")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		if err := os.WriteFile(os.Getenv("VEER_WG_BULK_READY"), []byte("ready"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		conn, err = listener.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if host, _, _ := net.SplitHostPort(conn.RemoteAddr().String()); host != "10.77.0.1" {
+			t.Fatalf("bulk bypassed WG: %s", host)
+		}
+	} else {
+		var err error
+		conn, err = net.DialTimeout("tcp4", "203.0.113.1:24002", 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
+	if role == "client" {
+		if _, err := io.Copy(conn, bytes.NewReader(payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	received := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, received); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(received, payload) {
+		t.Fatal("bulk payload corrupted")
+	}
+	if role == "server" {
+		if _, err := io.Copy(conn, bytes.NewReader(received)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
