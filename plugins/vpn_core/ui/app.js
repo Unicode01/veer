@@ -196,7 +196,14 @@
   const advanced=h('details',{className:'vpn-advanced'},[
     h('summary',{text:'高级设置与 JSON'}),h('div',{className:'vpn-fields'},[field('出口位置',slotInput,'范围 1–8，每个出口使用不同位置。'),field('MTU',mtuInput)]),wgAdvanced,proxyAdvanced,
     button('读取当前表单 JSON',async () => {rawConfig.value=JSON.stringify(M.profile(values(),original,records,selected()),null,2);rawDirty=false;},true),rawConfig,
-    button('将 JSON 更新到表单',async () => {const value=JSON.parse(rawConfig.value);if(!value || typeof value!=='object' || Array.isArray(value))throw new Error('出口配置必须是 JSON 对象');fill(value);dirty=true;F.toast('已更新表单，尚未保存');},true)
+    button('将 JSON 更新到表单',async () => {
+      const value=JSON.parse(rawConfig.value);if(!value || typeof value!=='object' || Array.isArray(value))throw new Error('出口配置必须是 JSON 对象');
+      const keep=['mihomo','sing_box'].includes(currentDriver) && value.driver===currentDriver && value.config_secret===original.config_secret;
+      const draft=keep?{storedMode,mode:configMode.value,nodes:nodeNames,selected:Number(nodeSelect.value),options:proxyOptions(),links:shareLinks.value,native:coreConfig.value}:null;
+      fill(value);
+      if(draft) {proxyForm({mode:draft.storedMode,nodes:draft.nodes,selected:draft.selected,options:draft.options});configMode.value=draft.mode;shareLinks.value=draft.links;coreConfig.value=draft.native;renderProxyMode();}
+      dirty=true;F.toast('已更新表单，尚未保存');
+    },true)
   ]);
   rawConfig.addEventListener('input',()=>{rawDirty=true;});
   async function save(apply) {
