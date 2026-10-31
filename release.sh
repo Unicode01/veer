@@ -106,6 +106,13 @@ BPF_CLANG="${BPF_CLANG:-clang}"
 BPF_EXTRA_CFLAGS="${BPF_EXTRA_CFLAGS:-}"
 BUILD_PLUGIN_BUNDLE="${VEER_BUILD_PLUGIN_BUNDLE:-1}"
 BUILD_PLUGIN_SDK="${VEER_BUILD_PLUGIN_SDK:-1}"
+BUILD_KERNEL_MODULE="${VEER_BUILD_KERNEL_MODULE:-0}"
+GO_BUILD_TAGS=()
+case "$BUILD_KERNEL_MODULE" in
+    0) ;;
+    1) sh "${PROJECT_DIR}/scripts/build-kernel-module.sh"; GO_BUILD_TAGS=(-tags veer_kfuncs) ;;
+    *) fail "VEER_BUILD_KERNEL_MODULE 仅支持 0 或 1" ;;
+esac
 # Debian 5.10 rejects the TC object emitted at -O1 with a 9-frame verifier stack.
 # -O2 produces verifier-safe subprog layout without changing the source inputs.
 BPF_OLEVEL="${BPF_OLEVEL:-2}"
@@ -274,7 +281,7 @@ for ARCH in "${TARGETS[@]}"; do
 
     NONCE=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
     CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" \
-        go build -ldflags="-s -w -X main.buildNonce=${NONCE}" -trimpath -o "$OUT" .
+        go build "${GO_BUILD_TAGS[@]}" -ldflags="-s -w -X main.buildNonce=${NONCE}" -trimpath -o "$OUT" .
 
     SIZE=$(du -h "$OUT" | cut -f1)
     ok "linux/${ARCH} => veer-linux-${ARCH} (${SIZE})"
@@ -286,6 +293,9 @@ echo ""
 for ARCH in "${TARGETS[@]}"; do
     echo "  scp veer-linux-${ARCH} deploy.sh config.example.json root@server:/tmp/"
 done
+if [[ "$BUILD_KERNEL_MODULE" == "1" ]]; then
+    echo "  # 同时上传 kernel/$(uname -r)/veer_kfuncs.ko，使用 VEER_INSTALL_KERNEL_MODULE=1 部署"
+fi
 echo "  ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'"
 if [[ "${BUILD_PLUGIN_BUNDLE}" == "1" ]]; then
     echo "  # 可选插件: 额外上传 veer-plugins.tar.gz，并设置 VEER_INSTALL_PLUGINS=1"

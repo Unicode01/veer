@@ -29,3 +29,7 @@ if command -v llvm-strip >/dev/null 2>&1; then
 	llvm-strip -g pppoe_tunnel.o || true
 fi
 echo "built pppoe_tunnel.o"
+
+# Optional host capability selects this object at runtime.
+# shellcheck disable=SC2086
+"$BPF_CLANG" -O2 -g -target bpf $BPF_EXTRA_CFLAGS -DVEER_KFUNCS=1 -c pppoe_tunnel.bpf.c -o pppoe_tunnel-kfuncs.o

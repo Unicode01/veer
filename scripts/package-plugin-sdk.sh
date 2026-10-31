@@ -49,6 +49,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
 
 sources = [
     ("PLUGIN.md", root / "PLUGIN.md"),
+    ("KERNEL.md", root / "KERNEL.md"),
     ("LICENSE", root / "LICENSE"),
     ("sdk/plugin", root / "sdk" / "plugin"),
     ("plugins/include", root / "plugins" / "include"),

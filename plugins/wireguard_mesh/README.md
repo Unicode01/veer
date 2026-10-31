@@ -12,6 +12,8 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 
 ## 安装
 
+默认使用基础 TC 适配器。可选 [Veer 内核扩展](../../KERNEL.md) 通过 kfunc 保留 GSO/GRO、减少适配开销；插件自动按宿主实际能力选择 `wg_adapter-kfuncs.o`，不需要额外开关。veth 与核心 NAT 路径仍保留，WireGuard 加密仍由内核 WG 完成。
+
 1. Linux 内核需支持 WireGuard，安装 `wireguard-tools iproute2 ethtool`，确认 `/usr/bin/wg`、`/usr/sbin/ip` 可用。主机原有路由和防火墙需允许对端 UDP。
 2. 在 Linux 源码目录运行 `sh plugins/wireguard_mesh/build.sh`，生成 `wg_adapter.o`。将整个插件目录复制到实际 `plugins_dir`，同时安装 `wan_core >=1.5.0 <2.0.0`。
 3. 开启 `plugins_enabled=true` 和 `plugins_dataplane_enabled=true`；保持默认 `plugins_remote_install_enabled=false` 以允许插件 exec。插件需要 Veer 的网络管理权限，不执行 shell 或用户提供的脚本。

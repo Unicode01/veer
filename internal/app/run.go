@@ -129,6 +129,12 @@ func Main(buildNonce string) {
 	defer db.Close()
 	logStartupPhase("init db", phaseStartedAt, startupStartedAt)
 
+	closeKernelModule, moduleErr := startOptionalKernelModule()
+	if moduleErr != nil {
+		log.Printf("optional kernel module: using base dataplane: %v", moduleErr)
+	}
+	defer closeKernelModule()
+
 	binHash := computeBinaryHash()
 	log.Printf("binary hash: %s", binHash)
 

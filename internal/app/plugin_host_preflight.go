@@ -21,6 +21,7 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 	for _, feature := range pluginRuntimeFeatures {
 		status[feature] = PluginHostFeatureStatus{Available: true}
 	}
+	status["dataplane.kfuncs.handoff.v1"] = optionalKernelModuleFeatureStatus()
 	caps := detectPluginHostKernelCapabilities()
 	osName := strings.TrimSpace(strings.ToLower(caps.OS))
 	if osName == "" {
@@ -44,6 +45,7 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 			"control.sockets",
 			"control.tuntap_provider.v1",
 			"dataplane.tc_pipeline.v2",
+			"dataplane.kfuncs.handoff.v1",
 			"dataplane.xdp_pipeline.v1",
 			"dataplane.netfilter_pipeline.v1",
 			"dataplane.netfilter_skb_dynptr.v1",

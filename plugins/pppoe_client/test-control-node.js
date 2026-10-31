@@ -69,6 +69,7 @@ function main() {
   testDisconnectClearsTunnelAndWANState();
   testTunnelConfigRuntimeApplyReplaysAndClearsMap();
   testTunnelRepairFollowsCurrentInterfaces();
+  testTunnelDataplaneSwitchPreservesSession();
   testTrafficProbeTimeoutFailsClosed();
   testDebugStatsDeclaresCounterBuildMode();
   testTrafficStatsAggregatePerCPUValues();
@@ -1469,6 +1470,49 @@ function testTunnelRepairFollowsCurrentInterfaces() {
   assert.match(h.resource('tunnel_configs', 'active').data.last_repair_error, /WAN identity changed/);
 }
 
+function testTunnelDataplaneSwitchPreservesSession() {
+  const h = createHarness({auth: 'pap'});
+  runAction(h, 'traffic_probe', {interface: 'eth0', username: 'user', password: 'pass', auth: 'pap',
+    timeout_ms: 50, post_session_control_ms: 0, send_padt: false, local_interface: 'veerlocal0',
+    pipeline_interface: PIPELINE_INTERFACE, wan_core_sync: true});
+  const original = h.resource('tunnel_configs', 'active').data;
+  assert.strictEqual(original.repair_preparation.wan_core_prepared_interfaces, true);
+  const repair = () => h.context.exports.onTimer({timer: {name: 'tunnel_repair', payload: {}}});
+  for (const enhanced of [true, false]) {
+    h.context.KFUNCS = enhanced;
+    h.state.netCalls.length = 0;
+    h.state.mapPuts.length = 0;
+    const l2Sends = h.state.l2Sends.length;
+    repair();
+    const current = h.resource('tunnel_configs', 'active').data;
+    assert.strictEqual(current.dataplane, enhanced ? 'kfuncs' : 'bpf');
+    assert.strictEqual(current.session_id, original.session_id);
+    assert.strictEqual(current.value_hex, original.value_hex);
+    assert.strictEqual(h.state.mapPuts.length, 0, 'mode switch must preserve tunnel ABI and indices');
+    assert.strictEqual(h.state.l2Sends.length, l2Sends, 'mode switch must not redial');
+    assert.strictEqual(h.state.pluginActionCalls.at(-1).action, 'apply_session', 'WAN Core must update its own offload leases');
+    assert.strictEqual(h.state.pluginRecords.get('wan_core/status/default').data.usable, true);
+    assert(h.state.netCalls.includes(`setGSO:veerlocal0:${enhanced ? '65536:65535' : '1492:1'}`));
+    assert(h.state.netCalls.includes(`setOffloads:veerlocal0:gso=${enhanced},sg=${enhanced},tso=${enhanced}`));
+    assert(h.state.netCalls.includes(`setOffloads:${PIPELINE_INTERFACE}:gro=${enhanced},lro=false`));
+    h.state.netCalls.length = 0;
+    repair();
+    assert.strictEqual(h.state.netCalls.length, 0, 'stable mode must not repeatedly reconfigure interfaces');
+  }
+  h.context.KFUNCS = true;
+  const setGSO = h.context.net.link.setGSO;
+  h.context.net.link.setGSO = () => { throw new Error('GSO preparation failed'); };
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, '00'.repeat(52), 'failed mode switch must stop forwarding');
+  assert.strictEqual(h.resource('tunnel_configs', 'active').data.dataplane, 'bpf');
+  h.context.net.link.setGSO = setGSO;
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, original.value_hex, 'retry must restore the same session');
+  assert.strictEqual(h.resource('tunnel_configs', 'active').data.dataplane, 'kfuncs');
+  const missing = createHarness({kfuncs: true, missingKfuncObject: true});
+  assert.strictEqual(missing.context.KFUNCS, false, 'older plugin package must fall back to base object');
+}
+
 function testTrafficProbeTimeoutFailsClosed() {
   const h = createHarness({auth: 'pap', padsTimeout: true});
   assert.throws(() => runAction(h, 'traffic_probe', {
@@ -1559,6 +1603,7 @@ function createHarness(options) {
     clearTimeout,
     exports: {},
     plugin: {
+      host() { return {available_features: options && options.kfuncs ? ['dataplane.kfuncs.handoff.v1'] : []}; },
       capabilities(items) { state.capabilities.push(...items); },
       virtualInterface(item) { state.virtualInterfaces.push(clone(item)); },
       pipelineNode(item) { state.virtualInterfaces.push(Object.assign({type: 'pipeline'}, clone(item))); },
@@ -1648,6 +1693,18 @@ function createHarness(options) {
         call(plugin, action, payload) {
           state.pluginActionCalls.push({plugin, action, payload: clone(payload || {})});
           if (options && options.pluginActionError) throw new Error(options.pluginActionError);
+          if (plugin === 'wan_core' && action === 'apply_session') {
+            const key = payload.key;
+            const status = state.pluginRecords.get(`wan_core/status/${key}`).data;
+            const session = state.pluginRecords.get(`wan_core/sessions/${key}`).data;
+            const request = payload.interface_preparation;
+            if (request.local_gso) context.net.link.setGSO(status.local_interface, request.local_gso);
+            if (request.local_offloads) context.net.link.setOffloads(status.local_interface, request.local_offloads);
+            if (request.pipeline_offloads) context.net.link.setOffloads(status.pipeline_interface, request.pipeline_offloads);
+            status.interface_preparation = {applied: true};
+            status.usable = session.usable;
+            return clone(status);
+          }
           if (plugin !== 'wan_core' || action !== 'prepare_handoff') {
             throw new Error(`unexpected plugin action ${plugin}/${action}`);
           }
@@ -1772,6 +1829,7 @@ function createHarness(options) {
     },
     crypto: {
       sha256File(rel) {
+        if (options && options.missingKfuncObject && rel.endsWith('-kfuncs.o')) throw new Error('file not found');
         const file = path.join(pluginDir, rel);
         if (!fs.existsSync(file)) return '00'.repeat(32);
         return nodeCrypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
