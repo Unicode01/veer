@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const F=window.VeerPluginHost, M=window.VPNConfig, h=F.h;
-  let records=[], statuses={}, busy=false, original={}, currentDriver='wireguard', editing=false;
+  let records=[], statuses={}, busy=false, original={}, currentDriver='wireguard', savedDriver='', editing=false;
   let peers=[], dirty=false, rawDirty=false, coreDriver='mihomo', coreSequence=0, corePoll=null, statusPoll=null;
   const controlNodes=() => document.querySelectorAll('.vpn-page button,.vpn-page input,.vpn-page select,.vpn-page textarea');
   function node(tag, className, text) { return h(tag,{className,text}); }
@@ -27,12 +27,20 @@
   const corePanel=h('section',{attrs:{hidden:true}});
   const editor=h('section',{className:'vpn-panel vpn-editor',attrs:{hidden:true}});
   const editorTitle=node('h2','','新建出口');
-  const keyInput=input('出口标识',''), addressInput=input('隧道地址',''), slotInput=input('出口位置',1,'number');
-  const mtuInput=input('MTU',1420,'number'), upstream=input('上联接口','','text');
+  const keyInput=input('出口标识',''), addressInput=input('本机 WireGuard 地址',''), wanAddressInput=input('内部 WAN 地址',''), slotInput=input('出口位置',1,'number');
+  addressInput.placeholder='使用 WireGuard 配置中的 Address';wanAddressInput.placeholder='自动分配，无需填写';
+  const mtuInput=input('MTU',1420,'number'), upstream=input('实际出站接口','','text');
   const listenPort=input('监听端口',0,'number'), privateKey=input('WireGuard 私钥','','password');
   const routes=input('远端内网路由',''), tunName=input('TUN 接口',''), tunAlias=input('TUN 归属标记','');
   const coreConfig=area('代理核心 JSON 配置'), rawConfig=area('VPN 出口 JSON'), importConfig=area('WireGuard 配置文件');
   const peerList=h('div',{}), driverButtons={}, driverSpecific=h('div',{});
+  const wgAdvanced=h('div',{className:'vpn-subsection vpn-fields',attrs:{hidden:true}},[
+    field('WireGuard 监听端口',listenPort,'0 表示由系统分配；对应 [Interface] ListenPort。'),
+    field('宿主访问远端内网的路由（可选）',routes,'仅供 Veer 所在主机访问远端内网；下游设备分流在 LAN 或出向 NAT 中设置。')
+  ]);
+  const proxyAdvanced=h('div',{className:'vpn-subsection vpn-fields',attrs:{hidden:true}},[
+    field('内部 WAN 地址（可选）',wanAddressInput,'留空自动分配，重新应用时保留已分配地址。仅用于 Veer 出口，不是节点地址或核心 TUN 地址；手动指定须使用 /32 或 /128。',true)
+  ]);
   const wgImport=h('details',{className:'vpn-advanced'},[
     h('summary',{text:'导入 WireGuard 配置'}),node('p','vpn-subtle','粘贴 wg.conf，导入后检查表单再保存。配置中的脚本钩子不会被接受。'),importConfig,
     button('导入到表单',async () => {
@@ -59,7 +67,7 @@
     return peer;
   }
   function values() {
-    return {driver:currentDriver,slot:slotInput.value,mtu:mtuInput.value,addresses:addressInput.value,upstream_interface:upstream.value,
+    return {driver:currentDriver,slot:slotInput.value,mtu:mtuInput.value,addresses:currentDriver==='wireguard'?addressInput.value:wanAddressInput.value,upstream_interface:upstream.value,
       listen_port:listenPort.value,remote_routes:routes.value,tun_interface:tunName.value,tun_alias:tunAlias.value,
       peers:peers.map(p => ({original:p.original,public_key:p.public_key.value,endpoint:p.endpoint.value,allowed_ips:p.allowed_ips.value,keepalive:p.keepalive.value,psk:p.psk.value}))};
   }
@@ -70,7 +78,8 @@
     for(const name of ['addresses','peers','remote_routes']) if(value[name]!=null && !Array.isArray(value[name]))throw new Error(name+' 必须是数组');
     if (replaceOriginal!==false) original=M.copy(value);
     currentDriver=driver;
-    addressInput.value=(value.addresses || []).join(', ');slotInput.value=value.slot || 1;mtuInput.value=value.mtu || 1420;
+    addressInput.value=driver==='wireguard'?(value.addresses || []).join(', '):'';
+    wanAddressInput.value=driver==='wireguard'?'':(value.addresses || []).join(', ');slotInput.value=value.slot || 1;mtuInput.value=value.mtu || 1420;
     upstream.value=value.upstream_interface || '';listenPort.value=value.listen_port || 0;routes.value=(value.remote_routes || []).join(', ');
     tunName.value=value.tun_interface || '';tunAlias.value=value.tun_alias || '';
     peers=[];peerList.replaceChildren();(value.peers || (currentDriver==='wireguard'?[{}]:[])).forEach(p=>addPeer(p));
@@ -80,30 +89,41 @@
   function renderDriver() {
     Object.keys(driverButtons).forEach(id => driverButtons[id].setAttribute('aria-pressed',String(id===currentDriver)));
     wgImport.hidden=currentDriver!=='wireguard';
+    wgAdvanced.hidden=currentDriver!=='wireguard';proxyAdvanced.hidden=currentDriver==='wireguard';
     driverSpecific.replaceChildren();
     if (currentDriver==='wireguard') driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
-      node('h3','vpn-section-title','WireGuard 连接'),h('div',{className:'vpn-fields'},[
-        field('私钥',privateKey,'留空沿用已保存的私钥。密钥只写入，不回填。'),field('监听端口',listenPort,'0 表示由系统分配。')]),wgImport,
-      h('div',{className:'vpn-subsection'},[node('h3','vpn-section-title','远端 Peer'),peerList,button('添加 Peer',async () => {if(peers.length>=8)throw new Error('最多支持 8 个 Peer');addPeer();dirty=true;},true)]),
-      h('div',{className:'vpn-subsection'},[field('远端内网路由（可选）',routes,'仅为宿主添加到远端内网的路由；设备分流在 LAN 或出向 NAT 中设置。')])
+      node('h3','vpn-section-title','WireGuard 连接'),
+      node('p','vpn-subtle','导入 wg.conf，或按服务端提供的配置填写。本机地址须与对端配置匹配；连接对端时使用宿主路由。'),wgImport,
+      h('div',{className:'vpn-fields'},[
+        field('本机 WireGuard 地址',addressInput,'对应 [Interface] Address，包含前缀；多个地址用逗号分隔。'),
+        field('本机私钥',privateKey,'对应 [Interface] PrivateKey。留空沿用已保存的私钥，保存后不会回填。')]),
+      h('div',{className:'vpn-subsection'},[node('h3','vpn-section-title','远端 Peer'),peerList,button('添加 Peer',async () => {if(peers.length>=8)throw new Error('最多支持 8 个 Peer');addPeer();dirty=true;},true)])
     ]));
-    else if (currentDriver==='tun') driverSpecific.appendChild(h('div',{className:'vpn-subsection vpn-fields'},[
-      field('TUN 接口',tunName,'由外部程序创建的 Linux TUN，例如 tun0。'),field('归属标记',tunAlias,'必须匹配接口 alias，避免接管其他程序的接口。')
+    else if (currentDriver==='tun') driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
+      node('h3','vpn-section-title','接入已有 TUN'),
+      node('p','vpn-subtle','外部程序负责连接、上联和 TUN 地址。本页只接入它已创建并启用的接口，不安装或启动该程序。'),
+      h('div',{className:'vpn-fields'},[field('TUN 接口',tunName,'填写现有 Linux TUN 名称，例如 tun0。'),field('接口归属标记',tunAlias,'必须与该接口的 alias 完全一致，用于确认接口归属。')])
     ]));
-    else driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
-      node('h3','vpn-section-title',M.drivers[currentDriver].name+' 配置'),h('div',{className:'vpn-fields'},[field('上联接口',upstream,'填写主机实际上联，例如 vmbr0 或 PPPoE 接口。')]),
-      node('p','vpn-subtle','粘贴核心原生 JSON 配置，包含节点、规则与 DNS。留空沿用已保存的配置；TUN 接入由插件管理。'),coreConfig,
-      node('p','vpn-field-help','核心可在“核心管理”中安装。保存后配置加密存储，页面不会回填。')
-    ]));
+    else {
+      const name=M.drivers[currentDriver].name;
+      coreConfig.setAttribute('aria-label',name+' 配置（JSON）');
+      driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
+        node('h3','vpn-section-title',name+' 代理出口'),
+        node('p','vpn-subtle','选择核心连接节点时使用的实际出站接口，并提供 '+name+' 配置。TUN 和内部出口地址自动管理，无需填写。'),
+        h('div',{className:'vpn-fields'},[field('实际出站接口',upstream,'填写可访问节点服务器的物理、网桥或 PPPoE 接口，例如 eth0、vmbr0、ppp0；不能选择 VPN 自身。',true)]),
+        field(name+' 配置（JSON）',coreConfig,'使用 '+name+' 自身的节点、规则和 DNS 格式。'+(currentDriver==='mihomo'?'当前仅接受 JSON，不接受 YAML。':'')),
+        node('p','vpn-field-help','留空沿用已保存配置。保存后加密存储，不会回填；核心在“核心管理”中安装。')
+      ]));
+    }
   }
   async function openEditor(record) {
     if (dirty && !await F.confirm({title:'离开当前编辑',message:'尚未保存的修改将丢失。',confirmText:'继续',cancelText:'留在此页'})) return;
-    editing=!!record;keyInput.readOnly=editing;
+    editing=!!record;savedDriver=record?(record.data.driver || 'wireguard'):'';keyInput.readOnly=editing;
     const next=record ? {key:record.key,...record.data} : M.allocation(records);
     keyInput.value=next.key;
-    fill(record ? record.data : {driver:'wireguard',slot:next.slot,mtu:1420,addresses:['10.77.'+next.slot+'.1/32'],listen_port:0,peers:[{allowed_ips:['0.0.0.0/0'],keepalive:25}],remote_routes:[]});
+    fill(record ? record.data : {driver:'wireguard',slot:next.slot,mtu:1420,addresses:[],listen_port:0,peers:[{allowed_ips:['0.0.0.0/0'],keepalive:25}],remote_routes:[]});
     editorTitle.textContent=editing?'编辑出口 · '+record.key:'新建出口';
-    editor.hidden=false;dirty=false;message('');editor.scrollIntoView({block:'start',behavior:'smooth'});
+    editor.hidden=false;list.hidden=!records.length;dirty=false;message('');editor.scrollIntoView({block:'start',behavior:'smooth'});
   }
   const types=h('div',{className:'vpn-types'},Object.keys(M.drivers).map(id => {
     const driver=M.drivers[id];
@@ -113,13 +133,13 @@
       if (editing && status && !['down','deleted'].includes(status.phase)) throw new Error('请先拆除现有出口，再切换类型');
       if (dirty && !await F.confirm({title:'切换出口类型',message:'当前未保存的连接配置将被替换。',confirmText:'切换',cancelText:'取消'})) return;
       const slot=Number(slotInput.value)||1;
-      fill({driver:id,slot,mtu:1420,addresses:[(id==='wireguard'?'10.77.':'10.78.')+slot+'.1/32'],peers:id==='wireguard'?[{allowed_ips:['0.0.0.0/0'],keepalive:25}]:undefined,remote_routes:[]});
+      fill({driver:id,slot,mtu:1420,peers:id==='wireguard'?[{allowed_ips:['0.0.0.0/0'],keepalive:25}]:undefined});
       dirty=true;
     },true);
     el.className='vpn-type';el.setAttribute('aria-label',driver.name);el.append(node('strong','',driver.name),node('span','',driver.description));driverButtons[id]=el;return el;
   }));
   const advanced=h('details',{className:'vpn-advanced'},[
-    h('summary',{text:'高级设置与 JSON'}),h('div',{className:'vpn-fields'},[field('出口位置',slotInput,'范围 1–8，每个出口使用不同位置。'),field('MTU',mtuInput)]),
+    h('summary',{text:'高级设置与 JSON'}),h('div',{className:'vpn-fields'},[field('出口位置',slotInput,'范围 1–8，每个出口使用不同位置。'),field('MTU',mtuInput)]),wgAdvanced,proxyAdvanced,
     button('读取当前表单 JSON',async () => {rawConfig.value=JSON.stringify(M.profile(values(),original,records,selected()),null,2);rawDirty=false;},true),rawConfig,
     button('将 JSON 更新到表单',async () => {const value=JSON.parse(rawConfig.value);if(!value || typeof value!=='object' || Array.isArray(value))throw new Error('出口配置必须是 JSON 对象');fill(value);dirty=true;F.toast('已更新表单，尚未保存');},true)
   ]);
@@ -127,6 +147,8 @@
   async function save(apply) {
     if (rawDirty) throw new Error('请先点击“将 JSON 更新到表单”，或重新读取表单 JSON');
     const key=selected(), profile=M.profile(values(),original,records,key), text=coreConfig.value.trim();
+    if (['mihomo','sing_box'].includes(currentDriver) && !profile.config_secret && (!editing || savedDriver!==currentDriver))
+      profile.config_secret='core_'+currentDriver+'_'+key;
     if (text) {const parsed=JSON.parse(text);if(!parsed || typeof parsed!=='object' || Array.isArray(parsed))throw new Error('核心配置必须是 JSON 对象');}
     // Validate every local field before writing any credential or draft.
     if (privateKey.value.trim() && !/^[A-Za-z0-9+/]{43}=$/.test(privateKey.value.trim())) throw new Error('WireGuard 私钥格式不正确');
@@ -135,10 +157,10 @@
       if (currentDriver==='wireguard') {
         if (privateKey.value.trim()) await F.action('set_key',{key,value:privateKey.value.trim()});
         for (let i=0;i<peers.length;i++) if (peers[i].psk.value.trim()) await F.action('set_key',{key,name:profile.peers[i].preshared_key_secret,value:peers[i].psk.value.trim()});
-      } else if (['mihomo','sing_box'].includes(currentDriver) && text) await F.action('set_core_config',{key,value:text});
+      } else if (['mihomo','sing_box'].includes(currentDriver) && text) await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),value:text});
     } finally {privateKey.value='';peers.forEach(p=>{p.psk.value='';});coreConfig.value='';}
     await F.data.upsert('profiles',key,profile,{enabled:true});
-    original=M.copy(profile);editing=true;keyInput.readOnly=true;dirty=false;
+    original=M.copy(profile);editing=true;savedDriver=currentDriver;keyInput.readOnly=true;dirty=false;
     if (apply) {
       message('草稿已保存，正在应用…');
       try {
@@ -152,9 +174,9 @@
   editor.append(
     h('div',{className:'vpn-heading'},[editorTitle,button('收起编辑',async () => {
       if(dirty && !await F.confirm({title:'放弃未保存修改',message:'草稿尚未保存。',confirmText:'收起',cancelText:'继续编辑'}))return;
-      privateKey.value='';coreConfig.value='';importConfig.value='';peers.forEach(p=>{p.psk.value='';});dirty=false;editor.hidden=true;
+      privateKey.value='';coreConfig.value='';importConfig.value='';peers.forEach(p=>{p.psk.value='';});dirty=false;editor.hidden=true;list.hidden=false;
     },true)]),types,
-    h('div',{className:'vpn-fields'},[field('出口标识',keyInput,'用于区分出口，保存后保持不变。'),field('隧道地址',addressInput,'包含前缀，例如 10.77.1.1/32；多个地址用逗号分隔。')]),
+    h('div',{className:'vpn-fields'},[field('出口标识',keyInput,'用于区分出口，保存后保持不变。')]),
     driverSpecific,advanced,
     h('div',{className:'vpn-savebar'},[node('span','vpn-field-help','应用会重建此出口的连接。仅保存草稿不会影响流量。'),actions([button('保存草稿',()=>save(false),true),button('保存并应用',()=>save(true))])])
   );
@@ -170,7 +192,7 @@
     detailPanel.scrollIntoView({block:'nearest',behavior:'smooth'});
   }
   function renderList() {
-    count.textContent=String(records.length);list.replaceChildren();list.className=records.length?'vpn-list':'';
+    count.textContent=String(records.length);list.replaceChildren();list.className=records.length?'vpn-list':'';list.hidden=!records.length && !editor.hidden;
     if (!records.length) {list.appendChild(h('div',{className:'vpn-empty'},[
       node('div','vpn-icon','↗'),node('h2','','创建你的第一个 VPN 出口'),node('p','','选择 WireGuard、Mihomo 或 sing-box，再把需要的 LAN 或设备分配到这个出口。'),button('创建出口',()=>openEditor(),false)
     ]));return;}
@@ -178,7 +200,11 @@
       const profile=record.data, driver=M.drivers[profile.driver || 'wireguard'] || {name:profile.driver,short:'?'}, status=statuses[record.key] || {};
       const phase=phases[status.phase] || ['未应用',''], name=status.local_interface || (profile.driver && profile.driver!=='wireguard'?'veervpn':'veerwg')+profile.slot;
       const metadata=h('dl',{className:'vpn-metadata'});
-      [['出口接口',name],['隧道地址',(profile.addresses || []).join(', ') || '未配置'],['上联',profile.upstream_interface || (profile.driver==='tun'?profile.tun_interface:'主机路由')],['接入方式','LAN / 出向 NAT']].forEach(pair=>metadata.append(h('div',{},[node('dt','',pair[0]),node('dd','',pair[1])])));
+      const wg=!profile.driver || profile.driver==='wireguard';
+      const addresses=profile.addresses && profile.addresses.length?profile.addresses:status.wan_addresses || [];
+      [['出口接口',name],[wg?'本机 WireGuard 地址':'内部 WAN 地址',addresses.join(', ') || (wg?'未配置':'应用时自动分配')],
+        [wg?'对端选路':profile.driver==='tun'?'外部 TUN 接口':'实际出站接口',wg?'按宿主路由':profile.driver==='tun'?profile.tun_interface:profile.upstream_interface],
+        ['接入方式','LAN / 出向 NAT']].forEach(pair=>metadata.append(h('div',{},[node('dt','',pair[0]),node('dd','',pair[1])])));
       const card=h('article',{className:'vpn-outlet'},[
         h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:phase[0]})]),metadata,
         status.error?node('p','vpn-card-error',status.error):null,

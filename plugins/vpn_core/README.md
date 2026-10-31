@@ -4,6 +4,14 @@
 
 WebUI 默认显示出口卡片，新建或编辑时按类型显示表单。支持多 Peer WireGuard 配置、粘贴导入 wg.conf、Mihomo / sing-box 原生 JSON 配置和外部 TUN；密钥与核心配置只写入加密存储，不会回填。核心安装、默认版本与回滚位于独立的“核心管理”页签，原始出口 JSON 位于高级设置。订阅、节点目录和运行时切换仍是后续方案，见 [WebUI 配置流程研究](WEBUI-DESIGN.md)。
 
+| 表单类型 | 普通配置 | 高级配置 |
+| --- | --- | --- |
+| WireGuard | 配置文件导入，或本机 Address/PrivateKey 与远端 Peer | 监听端口、宿主访问远端内网的路由、MTU、出口位置 |
+| Mihomo / sing-box | 实际出站接口、对应核心的 JSON 配置 | 内部 WAN 地址覆盖、MTU、出口位置 |
+| 外部 TUN | 已有 TUN 接口名、匹配的接口 alias | 内部 WAN 地址覆盖、MTU、出口位置 |
+
+WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代理和外部 TUN 的内部 WAN 地址不属于节点参数，留空在首次应用时自动分配；核心自己的 TUN 地址由插件管理，外部 TUN 地址则由外部程序管理。
+
 ## 从 wireguard_mesh 迁移
 
 0.6.0 将旧插件 ID `wireguard_mesh` 改为 `vpn_core`。不能只改目录或直接修改数据库中的 ID：密钥密文的认证信息绑定了原 ID。
@@ -48,12 +56,14 @@ TC 适配器要求显式动态接口绑定，只在已应用出口的自有隧�
 在 VPN 页面加密保存核心 JSON 配置，再保存并应用出口配置：
 
 ```json
-{"driver":"mihomo","slot":1,"mtu":1420,"addresses":["10.78.0.1/32"],"upstream_interface":"eth0","max_restarts":3}
+{"driver":"mihomo","slot":1,"mtu":1420,"upstream_interface":"eth0","max_restarts":3}
 ```
 
-sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密保存为 `core_<标识>`，最多 768 KiB；也可通过 `config_secret` 引用已有 Secret。节点、规则和 DNS 使用对应核心的 JSON 格式，不提供跨核心订阅格式转换。重新应用后生效；恢复使用单独加密保存的已应用配置，不读取后续草稿。
+sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密保存，最多 768 KiB；API 不指定 `name` 时沿用 `core_<标识>`，指定时写入该 Secret，并通过 profile 的 `config_secret` 引用。页面新建代理配置使用 `core_<driver>_<标识>`，切换核心类型时不会串用另一种核心的配置；已有默认或自定义 Secret 引用继续沿用。节点、规则和 DNS 使用对应核心的 JSON 格式，不提供跨核心订阅格式转换。重新应用后生效；恢复使用单独加密保存的已应用配置，不读取后续草稿。
 
 插件生成独占 TUN，强制 gVisor、关闭自动路由和自动重定向，并指定实际上游。Mihomo 额外入站/控制端口及 sing-box 额外入站/experimental 控制项不沿用；不能把 VPN 自身或其他 VPN 边界作为上游。WAN 地址使用 `/32` 或 `/128`，不安装 `remote_routes`。相对文件和资源下载需按核心要求准备，工作目录是受管理的临时目录。
+
+`addresses` 可省略或为空，首次应用会检查本机接口网段、非默认路由、其他出口草稿和已应用租约，从有界候选池选择内部 WAN IPv4 `/32`。优先使用 `10.78.<slot>.1/32`，冲突时尝试其他候选；无可用地址时明确失败，不修改网络或启动核心。已分配地址固定在应用租约中，重新应用和恢复时沿用，避免改变现有 LAN/NAT 选择。高级设置仍可显式填写 `addresses`，保留原 API 行为；已保存的显式地址不会被替换。最终地址发布为 `status.wan_addresses` 和 `status.egress_nat_source_ip`。
 
 宿主按插件控制代际托管进程，提供状态、有限日志、优雅停止、超时强杀、子进程清理和指数退避重启。默认失败重启 3 次，耗尽后需显式重新应用；定时恢复不重置预算；TUN 丢失时通过同一预算执行受控重启，接口 DOWN/MTU 漂移在核验归属后原地修复。插件停用、控制 VM 停止及 Veer 退出会停止进程，Linux 设置父进程死亡信号。完整资源保护下，核心使用独立 cgroup，复用配置中的插件 CPU/内存/PID 和全局上限；核心拥有本地 exec 的服务权限，不属于低权限 JS 沙箱。
 
@@ -61,12 +71,12 @@ sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密
 
 健康轮询优先使用宿主原生接口查询，避免每秒为各出口启动多个 `ip` 子进程；旧宿主缺少 alias/TUN 元数据时仍按单接口调用 `ip` 并核验归属。受管理 sing-box 的 TUN 确认启用 vnet header、TX checksum、SG、TSO 和 GSO 后，WAN 边界保留 GSO/GRO，避免提前逐包分段；`inspect.tun_gso` 显示本代际的决定。TUN 刚创建而 offload 尚未协商完成时，间隔 1 秒最多探测 3 次，期间出口保持未就绪。探测失败或不支持时使用逐包边界，健康轮询不重复执行 `ethtool`；核心重启会重新探测。Mihomo 和外部 TUN 保持逐包边界。
 
-slot 1 的出口选择 `veervpn1`、源 IPv4 `10.78.0.1`、模式 `prepared_l2`。IPv4 NAT 后核心无法直接区分原下游 IP，设备选择留给 Veer。DNS/fake-IP、UDP/ICMP 支持受核心和代理协议约束，不等同于任意 IP 协议的双向路由 VPN；宿主代发 DNS 不自动继承设备出口。
+slot 1 的出口接口为 `veervpn1`，源 IPv4 使用已发布 WAN 的地址（无冲突时自动分配 `10.78.1.1`），模式为 `prepared_l2`。IPv4 NAT 后核心无法直接区分原下游 IP，设备选择留给 Veer。DNS/fake-IP、UDP/ICMP 支持受核心和代理协议约束，不等同于任意 IP 协议的双向路由 VPN；宿主代发 DNS 不自动继承设备出口。
 
 ## 外部 TUN
 
 ```json
-{"driver":"tun","slot":1,"addresses":["10.78.0.1/32"],"mtu":1420,"tun_interface":"tun0","tun_alias":"my-vpn-provider"}
+{"driver":"tun","slot":1,"mtu":1420,"tun_interface":"tun0","tun_alias":"my-vpn-provider"}
 ```
 
 提供者需创建同一网络命名空间内的 Linux TUN，设置匹配的 alias、MTU 并启用。插件核验身份后只接入 TC/WAN，不启动进程、不接管 FD、不修改或删除提供者接口。纯 SOCKS/HTTP 监听器需另配 TUN 转换。
