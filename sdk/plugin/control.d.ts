@@ -1207,7 +1207,21 @@ declare global {
 
   const plugin: VeerPluginAPI;
   /** Trusted host execution. Requires exec permission and remote installation disabled. */
+  interface VeerManagedProcessStatus {
+    id: string; state: 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'exited' | 'backoff' | 'failed';
+    pid: number; starts: number; exit_code: number; started_at: number;
+  }
   const process: {
+    /** Linux main context only. Config is private (0600), {config} expands to its path. */
+    start(request: {id: string; command: string; args?: string[]; stdin?: string; config?: string;
+      restart?: 'never' | 'on-failure'; max_restarts?: number; stop_timeout_ms?: number}): VeerManagedProcessStatus;
+    status(id: string): VeerManagedProcessStatus;
+    stop(id: string): VeerManagedProcessStatus;
+    /** Health recovery shares max_restarts with failed exits; does not reset its budget. */
+    restart(id: string): VeerManagedProcessStatus;
+    list(): VeerManagedProcessStatus[];
+    /** Output can contain secrets. Never include it in ordinary plugin status. */
+    logs(id: string): {stdout: string; stderr: string; truncated: boolean};
     exec(request: {
       command: string;
       args?: string[];

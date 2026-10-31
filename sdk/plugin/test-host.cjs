@@ -954,6 +954,42 @@ class VeerPluginTestHost {
         list: () => this.#metricList(),
       }),
       process: Object.freeze({
+        start: (request) => {
+          this.#requirePermission('exec', 'process.start');
+          if (this.remoteInstallEnabled) throw new Error('process.start is disabled while remote plugin installation is enabled');
+          if (!request || typeof request.id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(request.id)) throw new Error('invalid process id');
+          return this.#adapter('process.start', [request]);
+        },
+        status: (id) => {
+          this.#requirePermission('exec', 'process.status');
+          if (this.remoteInstallEnabled) throw new Error('process.status is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid process id');
+          return this.#adapter('process.status', [id]);
+        },
+        stop: (id) => {
+          this.#requirePermission('exec', 'process.stop');
+          if (this.remoteInstallEnabled) throw new Error('process.stop is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid process id');
+          return this.#adapter('process.stop', [id]);
+        },
+        restart: (id) => {
+          this.#requirePermission('exec', 'process.restart');
+          if (this.remoteInstallEnabled) throw new Error('process.restart is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid process id');
+          return this.#adapter('process.restart', [id]);
+        },
+        list: () => {
+          this.#requirePermission('exec', 'process.list');
+          if (this.remoteInstallEnabled) throw new Error('process.list is disabled while remote plugin installation is enabled');
+
+          return this.#adapter('process.list', []);
+        },
+        logs: (id) => {
+          this.#requirePermission('exec', 'process.logs');
+          if (this.remoteInstallEnabled) throw new Error('process.logs is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid process id');
+          return this.#adapter('process.logs', [id]);
+        },
         exec: (request) => {
           this.#requirePermission('exec', 'process.exec');
           if (this.remoteInstallEnabled) throw new Error('process.exec is disabled while remote plugin installation is enabled');

@@ -29,7 +29,7 @@ const (
 	pluginControlKVResourceID          = "__kv"
 	pluginControlSecretResourceID      = "__secret"
 	pluginControlTimeout               = 20 * time.Second
-	pluginControlMaxSecretBytes        = 4096
+	pluginControlMaxSecretBytes        = 2 << 20
 	pluginControlMaxSecrets            = 128
 	pluginControlMaxKVRecords          = 1024
 	pluginControlMaxKVRecordBytes      = 64 << 10
@@ -156,6 +156,7 @@ type gojaPluginControlRuntime struct {
 	l2Transport          pluginControlL2Transport
 	udpTransport         pluginControlUDPTransport
 	socketRegistry       *pluginControlSocketRegistry
+	processRegistry      *pluginProcessRegistry
 	networkBroker        pluginControlNetworkBroker
 	netAdmin             pluginControlNetAdmin
 	snapshot             pluginRuntimeSnapshot
@@ -386,6 +387,7 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 		l2Transport:          newPluginControlL2Transport(),
 		udpTransport:         newPluginControlUDPTransport(),
 		socketRegistry:       newPluginControlSocketRegistry(socketTransport),
+		processRegistry:      &pluginProcessRegistry{cfg: cfg},
 		networkBroker:        newPluginControlNetworkBroker(socketTransport),
 		netAdmin:             newPluginControlNetAdmin(),
 		timers:               make(map[pluginControlTimerKey]pluginControlTimerState),
@@ -585,6 +587,9 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 		rt.interruptPluginControlIfRunning(pluginID, "plugin deactivation requested")
 		if _, err := rt.runPluginControlWithSurface(previous, pluginControlEvent{Kind: "deactivate", Reason: "plugin disabled, removed, or no longer loadable"}, true); err != nil {
 			log.Printf("plugin control deactivate %s failed: %v", pluginID, err)
+		}
+		if rt.processRegistry != nil {
+			rt.processRegistry.ClosePlugin(pluginID)
 		}
 		if rt.socketRegistry != nil {
 			rt.socketRegistry.ClosePlugin(pluginID)
@@ -793,6 +798,9 @@ func (rt *gojaPluginControlRuntime) Close() error {
 	}
 	rt.clearAllPluginLogs()
 	rt.clearAllPluginMetrics()
+	if rt.processRegistry != nil {
+		rt.processRegistry.CloseAll()
+	}
 	if rt.socketRegistry != nil {
 		rt.socketRegistry.CloseAll()
 	}
@@ -1023,6 +1031,9 @@ func (rt *gojaPluginControlRuntime) deactivatePluginControl(pluginID string) {
 	rt.stopPluginEventSubscriptions(pluginID)
 	rt.stopPluginRingSubscriptions(pluginID)
 	rt.clearPluginControlCircuits(pluginID)
+	if rt.processRegistry != nil {
+		rt.processRegistry.ClosePlugin(pluginID)
+	}
 	if rt.socketRegistry != nil {
 		rt.socketRegistry.ClosePlugin(pluginID)
 	}
@@ -2270,6 +2281,14 @@ func pluginControlDecodeJSON(raw json.RawMessage) any {
 
 func (h *pluginControlHost) install() error {
 	processAPI := h.vm.NewObject()
+	for name, method := range map[string]func(goja.FunctionCall) goja.Value{
+		"start": h.processStart, "status": h.processStatus, "list": h.processList,
+		"stop": h.processStop, "restart": h.processRestart, "logs": h.processLogs,
+	} {
+		if err := processAPI.Set(name, method); err != nil {
+			return err
+		}
+	}
 	if err := processAPI.Set("exec", h.processExec); err != nil {
 		return err
 	}

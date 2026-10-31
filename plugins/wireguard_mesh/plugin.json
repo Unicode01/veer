@@ -1,11 +1,11 @@
 {
   "api_version": "v1",
   "id": "wireguard_mesh",
-  "name": "WireGuard WAN Example",
-  "version": "0.3.0",
+  "name": "VPN WAN",
+  "version": "0.4.0",
   "kind": "pipeline",
   "stability": "lab",
-  "description": "Opt-in WireGuard WAN driver with a bidirectional TC adapter and WAN Core handoff.",
+  "description": "Opt-in VPN WAN adapters for kernel WireGuard, Mihomo, sing-box and external TUN cores.",
   "compatibility": {
     "os": [
       "linux"
@@ -16,7 +16,8 @@
       "control.exec.v1",
       "control.typed_services.v1",
       "dataplane.tc_pipeline.v2",
-      "ui.capabilities.v1"
+      "ui.capabilities.v1",
+      "control.process.v1"
     ],
     "tc_pipeline_abi": 2
   },
