@@ -1,0 +1,328 @@
+{
+  "date": "2026-10-31",
+  "host": {
+    "kernel": "6.12.74+deb12-cloud-amd64",
+    "vcpus": 4,
+    "ram_mib": 967,
+    "virtualized": true
+  },
+  "method": {
+    "topology": "same-host isolated network namespaces",
+    "streams": 1,
+    "rounds_per_direction": 3,
+    "pppoe_mtu": 1492,
+    "pppoe_wan_tx_checksum_offload": false,
+    "wg_mtu": 1420,
+    "wg_core_nat": true,
+    "wg_real_kernel_encryption": true,
+    "note": "Host busy CPU includes both endpoints and background activity; steal and TCP retransmissions are present. These are not public-network throughput results."
+  },
+  "baseline_revision": "512807056da91f811f19613e25ecf94a008c190c",
+  "binary_sha256": {
+    "base": "f0c1c0f727722df352f51ad65ccb24b72b47ae590dda43be7e1451da75132936",
+    "enhanced": "b0c5500c20c7a381b4266fded9c72aafa756851d64ac5051a0d291bce2f3f459"
+  },
+  "source_sha256": {
+    "kernel/veer_kfuncs/veer_kfuncs.c": "81c525b54a553836e6b9f587532ba7ad1b42449c1f6d98b3396b4e0a0667db17",
+    "plugins/pppoe_client/pppoe_tunnel.bpf.c": "0885eb87d4590cb509160200a3a587c2db61459b55135693a99452189d59a991",
+    "plugins/wireguard_mesh/wg_adapter.bpf.c": "007dda330f5806c45e3db4c0b5d980f534655894634a83225956d750fd021ce0",
+    "plugins/wireguard_mesh/control.js": "3ff5146f394987c20517fa44df5a23f62679bc753e1ebd103afba5e599123761",
+    "internal/app/kernel_module_linux.go": "001f8ea118f8619bf338ea65adfe7e4654887cd8235a69e2494e4090daab904b"
+  },
+  "results": {
+    "pppoe": [
+      {
+        "mode": "bpf",
+        "direction": "tx",
+        "round": 1,
+        "mbps": 1247.160214852292,
+        "busy_cores": 1.474166079385667,
+        "retransmits": 55
+      },
+      {
+        "mode": "bpf",
+        "direction": "tx",
+        "round": 2,
+        "mbps": 1270.499739320046,
+        "busy_cores": 1.4605584866295163,
+        "retransmits": 205
+      },
+      {
+        "mode": "bpf",
+        "direction": "tx",
+        "round": 3,
+        "mbps": 1258.901341403509,
+        "busy_cores": 1.501854446534228,
+        "retransmits": 0
+      },
+      {
+        "mode": "bpf",
+        "direction": "rx",
+        "round": 1,
+        "mbps": 1298.9341510030663,
+        "busy_cores": 1.4759084936320876,
+        "retransmits": 461
+      },
+      {
+        "mode": "bpf",
+        "direction": "rx",
+        "round": 2,
+        "mbps": 1252.3539235926562,
+        "busy_cores": 1.5174962211413674,
+        "retransmits": 79
+      },
+      {
+        "mode": "bpf",
+        "direction": "rx",
+        "round": 3,
+        "mbps": 1188.3094447679161,
+        "busy_cores": 1.475423891609372,
+        "retransmits": 387
+      },
+      {
+        "mode": "kfuncs",
+        "direction": "tx",
+        "round": 1,
+        "mbps": 3982.035684465568,
+        "busy_cores": 1.4224903286642137,
+        "retransmits": 1
+      },
+      {
+        "mode": "kfuncs",
+        "direction": "tx",
+        "round": 2,
+        "mbps": 3988.356259456179,
+        "busy_cores": 1.4504135544811831,
+        "retransmits": 3
+      },
+      {
+        "mode": "kfuncs",
+        "direction": "tx",
+        "round": 3,
+        "mbps": 3980.1313729822245,
+        "busy_cores": 1.488252092855619,
+        "retransmits": 0
+      },
+      {
+        "mode": "kfuncs",
+        "direction": "rx",
+        "round": 1,
+        "mbps": 4003.8788763641014,
+        "busy_cores": 1.4783089437747545,
+        "retransmits": 37
+      },
+      {
+        "mode": "kfuncs",
+        "direction": "rx",
+        "round": 2,
+        "mbps": 4051.306868826717,
+        "busy_cores": 1.4724090358326145,
+        "retransmits": 1
+      },
+      {
+        "mode": "kfuncs",
+        "direction": "rx",
+        "round": 3,
+        "mbps": 4084.2587766875677,
+        "busy_cores": 1.3942642634037223,
+        "retransmits": 0
+      }
+    ],
+    "wg_base": [
+      {
+        "round": 1,
+        "mode": "veer_wg",
+        "direction": "upload",
+        "mbps": 992.6170087261355,
+        "retransmits": 321,
+        "host_busy_cores": 2.8354079322322847,
+        "host_steal_cores": 0.290811069972542,
+        "veer_cpu_one_core_percent": 0.7127722303248579,
+        "veer_max_rss_mib": 81.921875,
+        "ping_median_ms": 0.249,
+        "ping_p95_ms": 0.33,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 926718044,
+        "remote_wg_sent_bytes": 10747200
+      },
+      {
+        "round": 1,
+        "mode": "veer_wg",
+        "direction": "download",
+        "mbps": 1627.246571728332,
+        "retransmits": 3,
+        "host_busy_cores": 3.153371866872343,
+        "host_steal_cores": 0.26230579724435404,
+        "veer_cpu_one_core_percent": 2.1383624775354946,
+        "veer_max_rss_mib": 60.7109375,
+        "ping_median_ms": 0.249,
+        "ping_p95_ms": 0.33,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 8900288,
+        "remote_wg_sent_bytes": 1515497976
+      },
+      {
+        "round": 2,
+        "mode": "veer_wg",
+        "direction": "upload",
+        "mbps": 998.9659864671,
+        "retransmits": 170,
+        "host_busy_cores": 2.800177238648574,
+        "host_steal_cores": 0.28957512962081533,
+        "veer_cpu_one_core_percent": 0.9985349297269495,
+        "veer_max_rss_mib": 59.5546875,
+        "ping_median_ms": 0.251,
+        "ping_p95_ms": 0.318,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 942797808,
+        "remote_wg_sent_bytes": 10427264
+      },
+      {
+        "round": 2,
+        "mode": "veer_wg",
+        "direction": "download",
+        "mbps": 1631.9315544928447,
+        "retransmits": 5,
+        "host_busy_cores": 3.1679224708153937,
+        "host_steal_cores": 0.25651194095671204,
+        "veer_cpu_one_core_percent": 0.8550398031890402,
+        "veer_max_rss_mib": 59.66796875,
+        "ping_median_ms": 0.251,
+        "ping_p95_ms": 0.318,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 8931296,
+        "remote_wg_sent_bytes": 1518919084
+      },
+      {
+        "round": 3,
+        "mode": "veer_wg",
+        "direction": "upload",
+        "mbps": 981.066076091275,
+        "retransmits": 45,
+        "host_busy_cores": 2.8110724024956473,
+        "host_steal_cores": 0.26229073126734237,
+        "veer_cpu_one_core_percent": 1.1403944837710538,
+        "veer_max_rss_mib": 71.21875,
+        "ping_median_ms": 0.258,
+        "ping_p95_ms": 0.344,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 918095608,
+        "remote_wg_sent_bytes": 10491408
+      },
+      {
+        "round": 3,
+        "mode": "veer_wg",
+        "direction": "download",
+        "mbps": 1623.2389619796663,
+        "retransmits": 1,
+        "host_busy_cores": 3.166165036930264,
+        "host_steal_cores": 0.27370719814975714,
+        "veer_cpu_one_core_percent": 1.1404466589573214,
+        "veer_max_rss_mib": 71.21875,
+        "ping_median_ms": 0.258,
+        "ping_p95_ms": 0.344,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 8681504,
+        "remote_wg_sent_bytes": 1510363092
+      }
+    ],
+    "wg_enhanced": [
+      {
+        "round": 1,
+        "mode": "veer_wg",
+        "direction": "upload",
+        "mbps": 2186.6978874598285,
+        "retransmits": 220,
+        "host_busy_cores": 3.3409794924356655,
+        "host_steal_cores": 0.27770289898761924,
+        "veer_cpu_one_core_percent": 1.1392939445645918,
+        "veer_max_rss_mib": 56.8125,
+        "ping_median_ms": 0.229,
+        "ping_p95_ms": 0.274,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 2033557588,
+        "remote_wg_sent_bytes": 8010640
+      },
+      {
+        "round": 1,
+        "mode": "veer_wg",
+        "direction": "download",
+        "mbps": 1630.0600576906634,
+        "retransmits": 3,
+        "host_busy_cores": 3.1601290049897366,
+        "host_steal_cores": 0.27652910553360793,
+        "veer_cpu_one_core_percent": 1.9955708646755212,
+        "veer_max_rss_mib": 59.3125,
+        "ping_median_ms": 0.229,
+        "ping_p95_ms": 0.274,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 8283584,
+        "remote_wg_sent_bytes": 1520020704
+      },
+      {
+        "round": 2,
+        "mode": "veer_wg",
+        "direction": "upload",
+        "mbps": 2203.517804055791,
+        "retransmits": 119,
+        "host_busy_cores": 3.414886531868343,
+        "host_steal_cores": 0.23088965699610664,
+        "veer_cpu_one_core_percent": 1.1401958370178105,
+        "veer_max_rss_mib": 56.87890625,
+        "ping_median_ms": 0.2365,
+        "ping_p95_ms": 0.273,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 2049085716,
+        "remote_wg_sent_bytes": 8480768
+      },
+      {
+        "round": 2,
+        "mode": "veer_wg",
+        "direction": "download",
+        "mbps": 1641.0715403408233,
+        "retransmits": 8,
+        "host_busy_cores": 3.212506638710959,
+        "host_steal_cores": 0.24656772337932387,
+        "veer_cpu_one_core_percent": 1.1401975647598792,
+        "veer_max_rss_mib": 60.8203125,
+        "ping_median_ms": 0.2365,
+        "ping_p95_ms": 0.273,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 8730272,
+        "remote_wg_sent_bytes": 1531170868
+      },
+      {
+        "round": 3,
+        "mode": "veer_wg",
+        "direction": "upload",
+        "mbps": 2223.0405971511923,
+        "retransmits": 408,
+        "host_busy_cores": 3.3662059716580863,
+        "host_steal_cores": 0.2565271273913867,
+        "veer_cpu_one_core_percent": 1.140120566183941,
+        "veer_max_rss_mib": 67.86328125,
+        "ping_median_ms": 0.2585,
+        "ping_p95_ms": 0.315,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 2066338136,
+        "remote_wg_sent_bytes": 8251808
+      },
+      {
+        "round": 3,
+        "mode": "veer_wg",
+        "direction": "download",
+        "mbps": 1632.269830565877,
+        "retransmits": 4,
+        "host_busy_cores": 3.1944557286874766,
+        "host_steal_cores": 0.2124883498100152,
+        "veer_cpu_one_core_percent": 1.1408770459598132,
+        "veer_max_rss_mib": 62.1953125,
+        "ping_median_ms": 0.2585,
+        "ping_p95_ms": 0.315,
+        "parallel_streams": 1,
+        "remote_wg_received_bytes": 8842784,
+        "remote_wg_sent_bytes": 1521042476
+      }
+    ]
+  }
+}

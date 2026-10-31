@@ -120,6 +120,11 @@ SERVICE_BACKUP_PATH=""
 LEGACY_SERVICE_BACKUP_PATH=""
 PLUGIN_BUNDLE_PATH="${VEER_PLUGIN_BUNDLE_PATH:-${SCRIPT_DIR}/veer-plugins.tar.gz}"
 INSTALL_BUNDLED_PLUGINS="${VEER_INSTALL_PLUGINS:-0}"
+INSTALL_KERNEL_MODULE="${VEER_INSTALL_KERNEL_MODULE:-0}"
+case "$INSTALL_KERNEL_MODULE" in 0|1) ;; *) fail "VEER_INSTALL_KERNEL_MODULE 仅支持 0 或 1" ;; esac
+KERNEL_MODULE_DEST=""
+KERNEL_MODULE_BACKED_UP=false
+KERNEL_MODULE_APPLIED=false
 PLUGIN_STAGING_DIR="${INSTALL_DIR}/.plugins.next.$$"
 PLUGIN_BACKUP_DIR="${INSTALL_DIR}/.plugins.rollback"
 PLUGIN_INSTALL_DIR=""
@@ -316,6 +321,11 @@ service_log_hint() {
 }
 
 write_service_definition() {
+    local kernel_module_capability=""
+    if [[ -f "${INSTALL_DIR}/kernel/$(uname -r)/veer_kfuncs.ko" ]]; then
+        kernel_module_capability="CAP_SYS_MODULE"
+    fi
+
     cat > "${INSTALL_DIR}/veer-runtime-prepare" <<EOF
 #!/bin/sh
 set -eu
@@ -325,6 +335,10 @@ if [ -L /run/netns ] || { [ -e /run/netns ] && [ ! -d /run/netns ]; }; then
     exit 1
 fi
 mkdir -p /run/netns /sys/fs/bpf
+if [ -f "${INSTALL_DIR}/kernel/\$(uname -r)/veer_kfuncs.ko" ]; then
+    mkdir -p /run/veer-kfuncs
+    chmod 700 /run/veer-kfuncs
+fi
 mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
 [ "\${1:-}" != --mounts-only ] || exit 0
 mkdir -p "\${VEER_BPF_STATE_DIR:-/sys/fs/bpf/forward}" "\${VEER_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}"
@@ -374,14 +388,15 @@ ReadWritePaths=${INSTALL_DIR}
 ReadWritePaths=-${RUNTIME_STATE_DIR}
 ReadWritePaths=-/etc/network
 ReadWritePaths=/run/netns
+ReadWritePaths=-/run/veer-kfuncs
 ReadWritePaths=/tmp
 ReadWritePaths=/sys/fs/bpf
 ReadWritePaths=-${BPF_STATE_DIR}
 ReadWritePaths=/sys/fs/cgroup
 PrivateTmp=true
 
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability}
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability}
 
 StandardOutput=journal
 StandardError=journal
@@ -1350,6 +1365,14 @@ rollback_update() {
         install -m 600 "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
     fi
     restore_bundled_plugins
+    if [[ "${KERNEL_MODULE_APPLIED}" == "true" ]]; then
+        if [[ "${KERNEL_MODULE_BACKED_UP}" == "true" ]]; then
+            install -o root -g root -m 644 "${KERNEL_MODULE_DEST}.rollback" "${KERNEL_MODULE_DEST}.next.$$"
+            mv -f "${KERNEL_MODULE_DEST}.next.$$" "${KERNEL_MODULE_DEST}"
+        else
+            rm -f -- "${KERNEL_MODULE_DEST}"
+        fi
+    fi
 
     rm -f "${INSTALL_DIR}/veer"
     if [[ "${ORIGINAL_BINARY_NAME}" == "veer" ]]; then
@@ -1418,6 +1441,17 @@ fi
 
 FILE_SIZE=$(du -h "$BINARY_PATH" | cut -f1)
 ok "找到二进制: $(basename "$BINARY_PATH") (${FILE_SIZE}) [${ARCH}]"
+
+# Validate optional artifacts before changing installed configuration/plugins.
+if [[ "$INSTALL_KERNEL_MODULE" == "1" ]]; then
+    kernel_release="$(uname -r)"
+    module_source="${SCRIPT_DIR}/kernel/${kernel_release}/veer_kfuncs.ko"
+    [[ -f "$module_source" && ! -L "$module_source" ]] || fail "缺少匹配当前内核的模块: $module_source"
+    command -v modinfo >/dev/null 2>&1 || fail "安装可选模块需要 kmod/modinfo"
+    module_release="$(modinfo -F vermagic "$module_source")"
+    [[ "${module_release%% *}" == "$kernel_release" ]] || fail "可选模块 vermagic 与当前内核不匹配"
+    KERNEL_MODULE_DEST="${INSTALL_DIR}/kernel/${kernel_release}/veer_kfuncs.ko"
+fi
 
 require_python3
 for command_name in install mount mountpoint sysctl ip readlink; do
@@ -1490,6 +1524,18 @@ if ! install_bundled_plugins; then
         install -m 600 "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
     fi
     fail "bundled plugin 安装失败，现有插件与配置已恢复"
+fi
+
+if [[ "$INSTALL_KERNEL_MODULE" == "1" ]]; then
+    mkdir -p "${INSTALL_DIR}/kernel/${kernel_release}"
+    if [[ -f "${KERNEL_MODULE_DEST}" ]]; then
+        cp -f "${KERNEL_MODULE_DEST}" "${KERNEL_MODULE_DEST}.rollback"
+        KERNEL_MODULE_BACKED_UP=true
+    fi
+    install -o root -g root -m 644 "$module_source" "${KERNEL_MODULE_DEST}.next.$$"
+    mv -f "${KERNEL_MODULE_DEST}.next.$$" "${KERNEL_MODULE_DEST}"
+    KERNEL_MODULE_APPLIED=true
+    ok "可选内核模块已部署，Veer 启动时验证能力并管理生命周期"
 fi
 
 install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/veer"

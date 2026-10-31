@@ -321,6 +321,8 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 平台与依赖
 
+PPPoE/WireGuard 可选择编译 [内核扩展](KERNEL.md)，为 TC 提供 GSO 分段和 skb 头部处理能力。默认构建与部署不加载该模块；增强构建需要匹配目标内核的 `.ko`，能力探测失败时使用基础路径。构建、生命周期和实测数据见该指南。
+
 推荐运行环境：
 
 - Debian 11+

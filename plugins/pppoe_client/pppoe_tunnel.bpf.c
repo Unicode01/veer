@@ -1,4 +1,7 @@
 #include "../include/veer_plugin_helpers.h"
+#ifdef VEER_KFUNCS
+#include "../include/veer_kfuncs.h"
+#endif
 
 #ifndef BPF_MAP_TYPE_ARRAY
 #define BPF_MAP_TYPE_ARRAY 2
@@ -726,6 +729,19 @@ static __always_inline int encap_known_l3_to_pppoe(struct __sk_buff *skb, struct
 	struct pppoe_ppp_hdr hdr = {};
 	int act;
 
+#ifdef VEER_KFUNCS
+	struct veer_handoff_v1 handoff = {
+		.output = cfg->wan_ifindex, .mtu = 1492, .session = cfg->session_id,
+		.operation = VEER_PPPOE_ENCAP,
+	};
+	__builtin_memcpy(handoff.source, cfg->wan_src_mac, 6);
+	__builtin_memcpy(handoff.destination, cfg->wan_dst_mac, 6);
+	if (!veer_skb_handoff_v1(skb, &handoff)) {
+		bump_tunnel_stat(20);
+		bump_traffic_stats(0, skb->len > 14 ? skb->len - 14 : 0);
+	} else bump_tunnel_stat(21);
+	return TC_ACT_SHOT;
+#else
 	if (l3_len > 1492)
 	{
 		bump_tunnel_stat(22);
@@ -759,6 +775,7 @@ static __always_inline int encap_known_l3_to_pppoe(struct __sk_buff *skb, struct
 		bump_tunnel_stat(21);
 	}
 	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
+#endif
 }
 
 static __always_inline int encap_l3_to_pppoe(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg)
@@ -857,6 +874,19 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 		return TC_ACT_UNSPEC;
 	l3_len = ppp_len - 2;
 
+#ifdef VEER_KFUNCS
+	struct veer_handoff_v1 handoff = {
+		.output = cfg->local_ifindex, .mtu = 1492, .session = cfg->session_id,
+		.operation = VEER_PPPOE_DECAP,
+		.mss_v4 = cfg->mss_clamp_v4, .mss_v6 = cfg->mss_clamp_v6,
+	};
+	__builtin_memcpy(handoff.source, cfg->local_src_mac, 6);
+	__builtin_memcpy(handoff.destination, cfg->local_dst_mac, 6);
+	if (!veer_skb_handoff_v1(skb, &handoff)) {
+		bump_tunnel_stat(7); bump_traffic_stats(1, l3_len);
+	} else bump_tunnel_stat(8);
+	return TC_ACT_SHOT;
+#else
 	/* The helper rejects PPP session skb protocols before removing MAC room. */
 	if ((cfg->flags & PPPOE_TUNNEL_FLAG_MANUAL_DECAP) != 0 ||
 		(skb->protocol != htons16(ETH_P_IP) && skb->protocol != htons16(ETH_P_IPV6))) {
@@ -894,6 +924,7 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 		bump_tunnel_stat(8);
 	}
 	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
+#endif
 }
 
 SEC("tc/veer/pre_forward")

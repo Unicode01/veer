@@ -152,7 +152,9 @@ func runWireGuardMeshTopology(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer logFile.Close()
+	hotMarker := filepath.Join(work, "hot-restart")
 	cmd := exec.Command(buildDataplanePerfBinary(t, root), "--config", configPath)
+	cmd.Env = append(os.Environ(), "VEER_HOT_RESTART_MARKER="+hotMarker)
 	cmd.Dir = work
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -177,7 +179,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 		}
 	})
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.WebPort)
-	waitForEgressNATIntegrationAPI(t, base, cmd, logPath)
+	waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
 	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "wireguard_mesh", "apply")
 	api := func(method, path string, payload any) []byte {
 		t.Helper()
@@ -343,19 +345,96 @@ func runWireGuardMeshTopology(t *testing.T) {
 		t.Fatal("WG probes did not create core flow entries")
 	}
 
+	if os.Getenv("VEER_RUN_KFUNCS_TESTS") == "1" {
+		before, err := os.ReadFile("/sys/module/veer_kfuncs/parameters/instance")
+		if err != nil {
+			t.Fatal(err)
+		}
+		serverReady, connected := filepath.Join(work, "stream-ready"), filepath.Join(work, "stream-connected")
+		release := filepath.Join(work, "stream-release")
+		startStream := func(ns, role string) *exec.Cmd {
+			p := exec.Command("ip", "netns", "exec", ns, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+			p.Env = append(os.Environ(), "VEER_WG_BULK=stream-"+role, "VEER_WG_BULK_READY="+serverReady, "VEER_WG_STREAM_CONNECTED="+connected, "VEER_WG_STREAM_RELEASE="+release)
+			p.Stdout = logFile
+			p.Stderr = logFile
+			if err := p.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if p.ProcessState == nil {
+					_ = p.Process.Kill()
+					_ = p.Wait()
+				}
+			})
+			return p
+		}
+		waitFile := func(path string) {
+			t.Helper()
+			end := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(path); err == nil {
+					return
+				}
+				if time.Now().After(end) {
+					t.Fatal("stream did not become ready")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+		streamServer := startStream(remote, "server")
+		waitFile(serverReady)
+		streamClient := startStream(selected, "client")
+		waitFile(connected)
+		if err := os.WriteFile(hotMarker, []byte("1"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("hot restart shutdown: %v", err)
+		}
+		cmd = exec.Command(buildDataplanePerfBinary(t, root), "--config", configPath)
+		cmd.Env = append(os.Environ(), "VEER_HOT_RESTART_MARKER="+hotMarker)
+		cmd.Dir = work
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
+		waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "wireguard_mesh", "apply")
+		if err := os.Remove(hotMarker); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(release, []byte("1"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := streamClient.Wait(); err != nil {
+			t.Fatalf("live TCP stream lost during hot restart: %v", err)
+		}
+		if err := streamServer.Wait(); err != nil {
+			t.Fatalf("stream server: %v", err)
+		}
+		after, err := os.ReadFile("/sys/module/veer_kfuncs/parameters/instance")
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("hot restart replaced the kernel module: %v", err)
+		}
+		t.Log("live TCP stream and module load identity survived daemon hot restart")
+	}
+
 	// Abrupt daemon loss preserves applied intent and the next startup rebuilds the adapter.
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	_ = cmd.Wait()
 	cmd = exec.Command(buildDataplanePerfBinary(t, root), "--config", configPath)
+	cmd.Env = append(os.Environ(), "VEER_HOT_RESTART_MARKER="+hotMarker)
 	cmd.Dir = work
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitForEgressNATIntegrationAPI(t, base, cmd, logPath)
+	waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
 	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "wireguard_mesh", "apply")
 	probe(selected, "10.77.0.1")
 	probe(direct, "192.0.2.1")
@@ -399,6 +478,10 @@ func runWireGuardMeshTopology(t *testing.T) {
 // Subprocess helper: ordinary TCP sockets exercise GSO/checksums and MSS through the whole path.
 func runWireGuardBulkHelper(t *testing.T, role string) {
 	t.Helper()
+	if strings.HasPrefix(role, "stream-") {
+		runWireGuardStreamHelper(t, role)
+		return
+	}
 	payload := bytes.Repeat([]byte("wireguard-bulk-check"), 110377)
 	var conn net.Conn
 	if role == "server" {
@@ -441,6 +524,72 @@ func runWireGuardBulkHelper(t *testing.T, role string) {
 	if role == "server" {
 		if _, err := io.Copy(conn, bytes.NewReader(received)); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// A single connection exchanges data across the daemon transition. A reconnect
+// would hide a flow reset, so neither endpoint retries a failed socket.
+func runWireGuardStreamHelper(t *testing.T, role string) {
+	t.Helper()
+	var conn net.Conn
+	var err error
+	if role == "stream-server" {
+		listener, e := net.Listen("tcp4", "203.0.113.1:24003")
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer listener.Close()
+		if err = os.WriteFile(os.Getenv("VEER_WG_BULK_READY"), []byte("1"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		conn, err = listener.Accept()
+	} else {
+		conn, err = net.DialTimeout("tcp4", "203.0.113.1:24003", 5*time.Second)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(90 * time.Second))
+	payload := bytes.Repeat([]byte("stream"), 700)
+	finalPayload := bytes.Repeat([]byte("finish"), 700)
+	buf := make([]byte, len(payload))
+	for i := 0; ; i++ {
+		if role == "stream-client" {
+			if i >= 100 {
+				if _, err := os.Stat(os.Getenv("VEER_WG_STREAM_RELEASE")); err == nil {
+					payload = finalPayload
+				}
+			}
+			if _, err = io.Copy(conn, bytes.NewReader(payload)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err = io.ReadFull(conn, buf); err != nil {
+			t.Fatal(err)
+		}
+		finished := bytes.Equal(buf, finalPayload)
+		if !bytes.Equal(buf, payload) && !(role == "stream-server" && finished) {
+			t.Fatal("stream payload corrupted")
+		}
+		if role == "stream-server" {
+			if _, err = io.Copy(conn, bytes.NewReader(buf)); err != nil {
+				t.Fatal(err)
+			}
+			if finished {
+				return
+			}
+		} else {
+			if finished {
+				return
+			}
+			if i == 0 {
+				if err = os.WriteFile(os.Getenv("VEER_WG_STREAM_CONNECTED"), []byte("1"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 }

@@ -44,3 +44,12 @@ test-results/
 # OS files
 .DS_Store
 Thumbs.db
+
+# optional kernel module build products
+kernel/**/*.o
+kernel/**/*.ko
+kernel/**/*.mod
+kernel/**/*.mod.c
+kernel/**/.*.cmd
+kernel/**/Module.symvers
+kernel/**/modules.order

@@ -420,6 +420,8 @@ class VeerPluginTestHost {
     this.timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
     this.adapters = Object.assign({}, options.adapters || {});
     this.remoteInstallEnabled = options.remoteInstallEnabled === true;
+    this.availableFeatures = Array.isArray(options.availableFeatures) ? options.availableFeatures.slice()
+      : API_CONTRACT.runtime.features.filter(feature => feature !== 'dataplane.kfuncs.handoff.v1');
     this.state = sharedState || createSharedState(options.fixtures || {});
     this.workerName = workerName;
 	this.moduleCache = new Map();
@@ -802,8 +804,8 @@ class VeerPluginTestHost {
           kernel_release: 'test',
           core_priority: API_CONTRACT.runtime.core_priority,
           features: API_CONTRACT.runtime.features.slice(),
-          available_features: API_CONTRACT.runtime.features.slice(),
-          feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: true}])),
+          available_features: this.availableFeatures.slice(),
+          feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: this.availableFeatures.includes(feature)}])),
           resource_limits: cloneJSON(API_CONTRACT.runtime.resource_limits),
         }),
         capabilities: (...values) => {
@@ -1794,7 +1796,7 @@ class VeerPluginTestHost {
   #worker(name) {
     const id = token(name, 'worker');
     if (!this.state.workers.has(id)) {
-      const worker = new VeerPluginTestHost({ pluginDir: this.pluginDir, timeoutMs: this.timeoutMs, adapters: this.adapters, remoteInstallEnabled: this.remoteInstallEnabled }, this.state, id).load();
+      const worker = new VeerPluginTestHost({ pluginDir: this.pluginDir, timeoutMs: this.timeoutMs, adapters: this.adapters, remoteInstallEnabled: this.remoteInstallEnabled, availableFeatures: this.availableFeatures }, this.state, id).load();
       this.state.workers.set(id, worker);
     }
     return this.state.workers.get(id);
@@ -2038,8 +2040,8 @@ class VeerPluginTestHost {
         os: process.platform,
         arch: process.arch,
         features: API_CONTRACT.runtime.features.slice(),
-        available_features: API_CONTRACT.runtime.features.slice(),
-        feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: true}])),
+        available_features: this.availableFeatures.slice(),
+        feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: this.availableFeatures.includes(feature)}])),
         resource_limits: cloneJSON(API_CONTRACT.runtime.resource_limits),
       },
     }, cloneJSON(extra));

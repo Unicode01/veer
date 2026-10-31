@@ -1,4 +1,7 @@
 #include "../include/veer_plugin_helpers.h"
+#ifdef VEER_KFUNCS
+#include "../include/veer_kfuncs.h"
+#endif
 
 VEER_DECLARE_PROG_CHAIN_V4();
 
@@ -101,6 +104,19 @@ int tc_adapter(struct __sk_buff *skb)
 	struct wg_link *link = veer_bpf_map_lookup_elem(&wg_links, &index);
 	if (!link || !link->output)
 		return TC_ACT_SHOT;
+#ifdef VEER_KFUNCS
+	if (link->direction != 1 && link->direction != 2) return TC_ACT_SHOT;
+	struct veer_handoff_v1 handoff = {
+		.output = link->output, .mtu = link->mtu,
+		.operation = link->direction == 1 ? VEER_ETH_TO_L3 : VEER_L3_TO_ETH,
+		.mss_v4 = link->mtu > 40 ? link->mtu - 40 : 0,
+		.mss_v6 = link->mtu > 60 ? link->mtu - 60 : 0,
+	};
+	__builtin_memcpy(handoff.source, link->source, 6);
+	__builtin_memcpy(handoff.destination, link->destination, 6);
+	veer_skb_handoff_v1(skb, &handoff);
+	return TC_ACT_SHOT;
+#else
 	if (link->direction == 1) {
 		struct veer_packet packet = {};
 		veer_packet_from_skb(skb, &packet);
@@ -131,6 +147,7 @@ int tc_adapter(struct __sk_buff *skb)
 	eth->h_proto = protocol;
 	if (clamp_mss(skb, protocol, config.mtu)) return TC_ACT_SHOT;
 	return veer_redirect(config.output);
+#endif
 }
 
 char SEC("license") LICENSE[] = "GPL";

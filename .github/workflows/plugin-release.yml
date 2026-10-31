@@ -170,3 +170,17 @@ jobs:
           name: platform-vm-${{ matrix.profile }}
           path: ${{ runner.temp }}/veer-vm-logs
           retention-days: 14
+
+  optional-kernel-module:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install matching kernel build and network test dependencies
+        run: sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential clang llvm pahole kmod iproute2 util-linux iputils-ping ethtool wireguard-tools iperf3
+      - name: Verify optional module and both plugin paths
+        run: sudo env "PATH=$PATH" sh scripts/verify-kernel-module.sh

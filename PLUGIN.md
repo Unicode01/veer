@@ -1113,6 +1113,8 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 
 ## 随仓库维护的插件
 
+可选 `veer_kfuncs` 模块为 TC 插件提供 `dataplane.kfuncs.handoff.v1`。插件必须根据宿主实际发布的 available_features 选择独立增强对象，缺少能力时保留基础路径；其 skb 所有权、GSO/GRO、编译/部署与生命周期契约见 [KERNEL.md](KERNEL.md)。这项能力默认不编译、不部署。
+
 - `wan_core`（stable）：消费标准化 WAN session；direct 模式管理本地 L3 dummy，`segmented_veth` 模式管理 local/pipeline veth 边界。
 - `lan_core`（stable）：管理 LAN bridge，并生成 Egress NAT、DHCPv4 和 IPv6 assignment plan。
 - `vtolocal`（stable）：创建静态本地 L3 dummy，并管理该接口上的地址与路由。

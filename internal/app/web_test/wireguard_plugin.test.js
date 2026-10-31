@@ -57,7 +57,7 @@ function fixture(config = profile(), options = {}) {
       return ok();
     }
   };
-  const host=createTestHost({pluginDir,remoteInstallEnabled:options.remoteInstallEnabled,fixtures:{kv:options.kv||{},resources:{profiles:{default:{data:config,enabled:options.enabled!==false}}},secrets:options.missingKey?{}:{private_default:PRIVATE}},adapters}).load();
+  const host=createTestHost({pluginDir:options.pluginDir||pluginDir,availableFeatures:options.availableFeatures,remoteInstallEnabled:options.remoteInstallEnabled,fixtures:{kv:options.kv||{},resources:{profiles:{default:{data:config,enabled:options.enabled!==false}}},secrets:options.missingKey?{}:{private_default:PRIVATE}},adapters}).load();
   return {host,state,apply:()=>host.action('apply',{key:'default'}),maps:()=>host.state.maps};
 }
 test('WG is opt-in and registration/drafts do not change networking',()=>{
@@ -162,4 +162,24 @@ test('WG legacy cleanup accepts only the owned top-level nft marker and never fl
     if(owned) {host.action('teardown',{});assert.deepEqual(mutations,['ip','nft']);assert.equal(host.snapshot().kv.lease_default,undefined);}
     else {assert.throws(()=>host.action('teardown',{}),/owned by another/);assert.deepEqual(mutations,[]);assert.ok(host.snapshot().kv.lease_default);}
   }
+});
+
+
+test('WG selects a probed optional object and coordinates GSO, with missing-artifact fallback',t=>{
+  const fs=require('node:fs'), os=require('node:os');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'veer-wg-capability-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  fs.cpSync(pluginDir,dir,{recursive:true});
+  fs.writeFileSync(path.join(dir,'wg_adapter.o'),'base-test-object');
+  fs.writeFileSync(path.join(dir,'wg_adapter-kfuncs.o'),'enhanced-test-object');
+  const options={pluginDir:dir,availableFeatures:['dataplane.kfuncs.handoff.v1']};
+  const enhanced=fixture(profile(),options);enhanced.apply();
+  assert.equal(enhanced.host.snapshot().surface.objects[0].path,'wg_adapter-kfuncs.o');
+  const request=enhanced.state.records.sessions.wg_default.data.interface_preparation;
+  assert.equal(request.local_gso.max_segs,65535);assert.equal(request.local_offloads.gso,true);assert.equal(request.pipeline_offloads.gro,true);
+  assert.equal(enhanced.host.state.resources.get('status').get('default').data.dataplane,'kfuncs');
+  fs.unlinkSync(path.join(dir,'wg_adapter-kfuncs.o'));
+  const fallback=fixture(profile(),options);fallback.apply();
+  assert.equal(fallback.host.snapshot().surface.objects[0].path,'wg_adapter.o');
+  assert.equal(fallback.state.records.sessions.wg_default.data.interface_preparation.local_offloads.gso,false);
 });

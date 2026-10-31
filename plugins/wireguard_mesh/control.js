@@ -1,3 +1,11 @@
+var KFUNCS = false, TUNNEL_OBJECT_PATH = 'wg_adapter.o';
+if (typeof plugin.host === 'function') {
+  var host = plugin.host();
+  if ((host.available_features || []).indexOf('dataplane.kfuncs.handoff.v1') >= 0) {
+    try { crypto.sha256File('wg_adapter-kfuncs.o'); KFUNCS = true; TUNNEL_OBJECT_PATH = 'wg_adapter-kfuncs.o'; }
+    catch (e) { /* Packages built before this capability retain the base path. */ }
+  }
+}
 // A protocol driver: Veer selects a WAN; TC bridges that WAN to kernel WireGuard.
 var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft';
 var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
@@ -5,7 +13,7 @@ var OBJECT = 'wg_adapter', MAP = 'wg_links';
 var changing = false;
 plugin.capabilities(['wireguard', 'wan', 'tc_adapter', 'control']);
 pipeline.node({id: 'wireguard', description: 'Kernel WireGuard attached to a WAN Core veth boundary.'});
-ebpf.loadObject({id: OBJECT, path: 'wg_adapter.o', sha256: crypto.sha256File('wg_adapter.o'),
+ebpf.loadObject({id: OBJECT, path: TUNNEL_OBJECT_PATH, sha256: crypto.sha256File(TUNNEL_OBJECT_PATH),
   programs: [{id: 'tc_adapter', section: 'tc/veer/pre_forward', type: 'tc'}]});
 pipeline.attach({id: 'wg-links', direction: 'forward', attach: 'ingress', priority: 20,
   program: 'wg_adapter:tc_adapter', mode: 'rewrite'});
@@ -172,7 +180,7 @@ function wanPayload(p, usable) {
     ipv4: p.addresses.filter(function (v) { return prefix(v).family === '4'; })[0].split('/')[0],
     addresses: p.addresses, routes: p.remote_routes.map(function (dst) { return {dst: dst, dev: p.local}; }),
     install_default_route: false, install_default_route_v6: false, egress_nat_redirect_mode: 'prepared_l2',
-    interface_preparation: {local_offloads: {sg: false, tso: false, gso: false}, pipeline_offloads: {gro: false, lro: false}}};
+    interface_preparation: {local_gso: {max_size: KFUNCS ? 65536 : p.mtu, max_segs: KFUNCS ? 65535 : 1}, local_offloads: {sg: KFUNCS, tso: KFUNCS, gso: KFUNCS}, pipeline_offloads: {gro: KFUNCS, lro: false}}};
 }
 function bindings(exclude) {
   var names = [];
@@ -239,7 +247,7 @@ function applyProfile(key, raw) {
       local_ifindex: boundary.local.ifindex, pipeline_ifindex: boundary.peer.ifindex});
     var result = {phase: 'applied', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
       pipeline_interface: p.pipeline, egress_nat_interface: p.local, egress_nat_source_ip: wanPayload(p, true).ipv4,
-      egress_nat_redirect_mode: 'prepared_l2', tc_ready: true, mtu: p.mtu};
+      egress_nat_redirect_mode: 'prepared_l2', tc_ready: true, mtu: p.mtu, dataplane: KFUNCS ? 'kfuncs' : 'bpf'};
     resources.set('status', key, result, true); armRepair(); return result;
   } catch (e) {
     try {
