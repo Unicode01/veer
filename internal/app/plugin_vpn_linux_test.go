@@ -3,8 +3,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -166,7 +168,23 @@ func runWireGuardMeshTopology(t *testing.T) {
 	ip("-n", remote, "-6", "route", "add", "fd77::1/128", "dev", "wgpeer")
 	ip("netns", "exec", remote, "sysctl", "-qw", "net.ipv4.conf.all.rp_filter=2", "net.ipv4.conf.wgpeer.rp_filter=2")
 	if driver != "" {
-		serverConfig := map[string]any{"log": map[string]any{"disabled": true}, "inbounds": []any{map[string]any{"type": "shadowsocks", "tag": "ss", "listen": "192.0.2.2", "listen_port": 8388, "method": "aes-128-gcm", "password": "veer-integration-only"}}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}}
+		// A local test certificate keeps the AnyTLS peer self-contained. Only
+		// its test share link explicitly opts out of certificate verification.
+		tlsServer := httptest.NewTLSServer(http.NotFoundHandler())
+		cert := tlsServer.TLS.Certificates[0]
+		tlsServer.Close()
+		keyDER, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serverConfig := map[string]any{"log": map[string]any{"disabled": true}, "inbounds": []any{
+			map[string]any{"type": "shadowsocks", "tag": "ss", "listen": "192.0.2.2", "listen_port": 8388, "method": "aes-128-gcm", "password": "veer-integration-only"},
+			map[string]any{"type": "anytls", "tag": "anytls", "listen": "192.0.2.2", "listen_port": 8389,
+				"users": []any{map[string]any{"name": "test", "password": "veer-integration-only"}},
+				"tls": map[string]any{"enabled": true,
+					"certificate": []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))},
+					"key":         []string{string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))}}},
+		}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}}
 		data, _ := json.Marshal(serverConfig)
 		path := filepath.Join(t.TempDir(), "server.json")
 		if err := os.WriteFile(path, data, 0600); err != nil {
@@ -491,6 +509,16 @@ func runWireGuardMeshTopology(t *testing.T) {
 	probe(selected, selectedSource)
 	probe(direct, "192.0.2.1")
 	if driver != "" {
+		// Replace the SS import with AnyTLS through the same public action.
+		// Both cores must carry TCP/UDP before and after supervised recovery.
+		api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{
+			"key": "default", "format": "links", "driver": driver,
+			"value": "anytls://veer-integration-only@192.0.2.2:8389?sni=example.com&insecure=1#AnyTLS",
+		}})
+		action("apply")
+		probe(selected, selectedSource)
+		probe(direct, "192.0.2.1")
+		t.Log("imported AnyTLS carried TCP/UDP; sibling retained ordinary TC forwarding")
 		// Kill the real proxy leader, not the daemon, and require a new supervised
 		// generation before probing the encrypted path again.
 		readProcess := func() pluginProcessStatus {

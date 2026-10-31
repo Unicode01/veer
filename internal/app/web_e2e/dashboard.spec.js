@@ -332,7 +332,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
   await expect(frame.locator('.vpn-notice')).toContainText('端口');expect(actions.length).toBe(beforeInvalid);
   const shareList='ss://'+Buffer.from('aes-128-gcm:share-secret').toString('base64url')+'@192.0.2.2:8388#first\n'+
-    'trojan://second-secret@node.example:443#second';
+    'anytls://second-secret@node.example?sni=example.com#second';
   await frame.getByLabel('节点分享链接或 Base64').fill(Buffer.from(shareList).toString('base64'));
   await frame.getByRole('button',{name:'识别节点',exact:true}).click();
   await expect(frame.getByLabel('使用节点').locator('option')).toHaveCount(2);

@@ -9,18 +9,35 @@ const samples=[ss,
   'vmess://'+b64(JSON.stringify({v:'2',ps:'VMess',add:'node.example',port:'443',id,aid:'0',scy:'auto',net:'ws',path:'/proxy',host:'cdn.example',tls:'tls',sni:'cdn.example',alpn:'h2,http/1.1',fp:'chrome'})),
   'vless://'+id+'@node.example:443?security=reality&sni=example.com&fp=chrome&pbk='+Buffer.alloc(32,1).toString('base64url')+'&sid=ab12&flow=xtls-rprx-vision#Reality',
   'trojan://p%40ss%3Aword@[2001:db8::1]:443?sni=example.com&type=grpc&serviceName=proxy',
-  'hy2://user%3Apass@node.example/?sni=example.com&obfs=salamander&obfs-password=obfs-secret'
+  'hy2://user%3Apass@node.example/?sni=example.com&obfs=salamander&obfs-password=obfs-secret',
+  'anytls://p%40ss%3Aword%2B%E5%AF%86%E7%A0%81@node.example/?sni=example.com&alpn=h2,http%2F1.1&fp=chrome#AnyTLS'
 ];
 
 for(const driver of ['mihomo','sing_box']) {
   test(driver+' parses plain, URL-safe Base64 and wrapped lists without losing UTF-8 or credentials',()=>{
     const nodes=S.parse(samples.join('\r\n'),driver);
-    assert.equal(nodes.length,5);assert.equal(nodes[0].name,'测试节点');assert.equal(nodes[0].password,'p@ss:word');
+    assert.equal(nodes.length,6);assert.equal(nodes[0].name,'测试节点');assert.equal(nodes[0].password,'p@ss:word');
     assert.deepEqual(S.parse(Buffer.from(samples.join('\n')).toString('base64url'),driver),nodes);
     assert.deepEqual(S.parse(b64(samples.join('\n')).match(/.{1,60}/g).join('\n'),driver),nodes);
     assert.equal(S.parse('ss://'+b64('aes-128-gcm:secret@[2001:db8::2]:1234')+'#legacy',driver)[0].server,'2001:db8::2');
     assert.equal(S.parse('ss://2022-blake3-aes-128-gcm:p%2Bss%3D@host.example:443',driver)[0].password,'p+ss=');
     assert.equal(nodes[3].password,'p@ss:word');assert.equal(nodes[4].password,'user:pass');assert.equal(nodes[4].port,443);
+  });
+  test(driver+' preserves AnyTLS passwords, TLS verification and explicit/default IPv4/IPv6 endpoints',()=>{
+    const node=S.parse(samples[5],driver)[0];
+    assert.equal(node.type,'anytls');assert.equal(node.password,'p@ss:word+密码');assert.equal(node.port,443);
+    assert.deepEqual(node.tls,{server_name:'example.com',insecure:false,alpn:['h2','http/1.1'],fingerprint:'chrome'});
+    const config=S.generate(S.create(driver,samples[5]));
+    const p=config[driver==='mihomo'?'proxies':'outbounds'][0];
+    assert.equal(p.type,'anytls');assert.equal(p.password,node.password);
+    if(driver==='mihomo') {assert.equal(p.sni,'example.com');assert.equal(p['skip-cert-verify'],false);assert.equal(p['client-fingerprint'],'chrome');assert.equal(p.udp,true);}
+    else {assert.equal(p.tls.enabled,true);assert.equal(p.tls.insecure,false);assert.equal(p.tls.utls.fingerprint,'chrome');}
+    for(const flag of ['insecure','allowInsecure']) {
+      const n=S.parse('anytls://private-password@[2001:db8::1]:8443?'+flag+'=1',driver)[0];
+      assert.equal(n.server,'2001:db8::1');assert.equal(n.port,8443);assert.equal(n.tls.insecure,true);
+    }
+    assert.equal(S.parse('anytls://secret@192.0.2.2?insecure=0',driver)[0].tls.insecure,false);
+    assert.equal(S.parse('anytls://YWJjZA==@node.example',driver)[0].password,'YWJjZA==');
   });
   test(driver+' generates complete configs for each protocol and keeps WAN topology under plugin control',()=>{
     for(const link of samples) {
@@ -54,7 +71,11 @@ for(const driver of ['mihomo','sing_box']) {
       'trojan://private-password@host:443?security=none','trojan://private-password@host:443?security=tls&sni=%ZZ',
       'ss://'+b64('aes-128-gcm:private-password')+'@host:443?plugin=unavailable',
       'vmess://'+b64(JSON.stringify({add:'host',port:443,id,aid:'10'})),
-      'hy2://private-password@host:443?pinSHA256=unknown'];
+      'hy2://private-password@host:443?pinSHA256=unknown',
+      'anytls://@host','anytls://private-password@host:0','anytls://private-password@host?insecure=perhaps',
+      'anytls://private-password@host?security=none','anytls://private-password@host?security=reality',
+      'anytls://private-password@host?pbk=unknown','anytls://private-password@host?type=ws',
+      'anytls://private-password@host?sni=bad/host'];
     for(const value of invalid)assert.throws(()=>S.parse(value,driver),e=>!e.message.includes('private-password')&&!e.message.includes(id));
     for(const o of [{direct_cidrs:['10.0.0.0/999']},{direct_cidrs:['1.2.3.999/32']},{direct_domains:'example.com\ninvalid/host'},{proxy_dns:'host.example'},{dns_hijack:'perhaps'},{__unknown:true}])assert.throws(()=>S.options(o));
     for(const selected of [-1,10,1.5,'oops'])assert.throws(()=>S.create(driver,ss,selected));

@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "vpn_core",
   "name": "VPN WAN",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "kind": "pipeline",
   "stability": "lab",
   "description": "Opt-in VPN WAN adapters for kernel WireGuard, Mihomo, sing-box and external TUN cores.",
