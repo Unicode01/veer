@@ -1,8 +1,9 @@
 (function () {
   'use strict';
-  const F=window.VeerPluginHost, M=window.VPNConfig, h=F.h;
+  const F=window.VeerPluginHost, M=window.VPNConfig, S=window.VPNShare, h=F.h;
   let records=[], statuses={}, busy=false, original={}, currentDriver='wireguard', savedDriver='', editing=false;
   let peers=[], dirty=false, rawDirty=false, coreDriver='mihomo', coreSequence=0, corePoll=null, statusPoll=null;
+  let storedMode='empty', nodeNames=[];
   const controlNodes=() => document.querySelectorAll('.vpn-page button,.vpn-page input,.vpn-page select,.vpn-page textarea');
   function node(tag, className, text) { return h(tag,{className,text}); }
   function input(label,value,type) {
@@ -17,7 +18,7 @@
     busy=true; controlNodes().forEach(el => {el.disabled=true;});
     try { await task(); }
     catch (error) { message(F.errorText(error),true);F.toastError(error); }
-    finally { busy=false;controlNodes().forEach(el => {el.disabled=false;});keyInput.readOnly=editing;F.requestResize(); }
+    finally { busy=false;controlNodes().forEach(el => {el.disabled=false;});keyInput.readOnly=editing;renderProxyMode();F.requestResize(); }
   }
   function button(text,task,secondary) { const el=F.button(text,() => run(task),secondary);return el; }
   function actions(children) { return h('div',{className:'vpn-actions'},children); }
@@ -33,6 +34,40 @@
   const listenPort=input('监听端口',0,'number'), privateKey=input('WireGuard 私钥','','password');
   const routes=input('远端内网路由',''), tunName=input('TUN 接口',''), tunAlias=input('TUN 归属标记','');
   const coreConfig=area('代理核心 JSON 配置'), rawConfig=area('VPN 出口 JSON'), importConfig=area('WireGuard 配置文件');
+  const shareLinks=area('节点分享链接或 Base64'), nodeSelect=h('select',{className:F.classes.input,attrs:{'aria-label':'使用节点'}});
+  shareLinks.classList.add('vpn-links');shareLinks.placeholder='ss://…\nvless://…\n或粘贴 Base64 编码的分享内容';
+  const configMode=h('select',{className:F.classes.input,attrs:{'aria-label':'核心配置方式'}},[
+    h('option',{attrs:{value:'links'},text:'分享链接 · 自动生成配置'}),h('option',{attrs:{value:'native'},text:'原生 JSON · 自行配置'})
+  ]);
+  const directCIDRs=area('直连网段'), directDomains=area('直连域名'), bootstrapDNS=input('节点解析 DNS','223.5.5.5'), proxyDNS=input('代理 DNS','1.1.1.1');
+  directCIDRs.classList.add('vpn-rule-input');directDomains.classList.add('vpn-rule-input');
+  directCIDRs.placeholder='192.168.0.0/16\n10.0.0.0/8';directDomains.placeholder='example.com';
+  const hijackDNS=h('select',{className:F.classes.input,attrs:{'aria-label':'下游 DNS'}},[
+    h('option',{attrs:{value:'off'},text:'沿用下游 DNS'}),h('option',{attrs:{value:'on'},text:'接管 53 端口并通过节点解析'})
+  ]);
+  const linksPanel=h('div',{}), nativePanel=h('div',{}), routingPanel=h('div',{});
+  function nodeOptions(nodes,selected) {
+    nodeNames=nodes.map(n=>({name:n.name,type:n.type}));
+    nodeSelect.replaceChildren(...nodeNames.map((n,i)=>h('option',{attrs:{value:String(i)},text:(i+1)+'. '+n.name+' · '+n.type})));
+    if(!nodeNames.length)nodeSelect.appendChild(h('option',{attrs:{value:'0'},text:'粘贴后自动识别节点'}));
+    nodeSelect.value=String(selected||0);
+  }
+  function proxyOptions() {return S.options({direct_cidrs:directCIDRs.value,direct_domains:directDomains.value,dns_hijack:hijackDNS.value==='on',bootstrap_dns:bootstrapDNS.value.trim(),proxy_dns:proxyDNS.value.trim()});}
+  function proxyForm(form) {
+    storedMode=form.mode||'empty';configMode.value=storedMode==='native'?'native':'links';
+    nodeOptions(form.nodes||[],form.selected);
+    const o=S.options(form.options);
+    directCIDRs.value=o.direct_cidrs.join('\n');directDomains.value=o.direct_domains.join('\n');
+    bootstrapDNS.value=o.bootstrap_dns;proxyDNS.value=o.proxy_dns;hijackDNS.value=o.dns_hijack?'on':'off';
+    renderProxyMode();
+  }
+  function renderProxyMode() {
+    const native=configMode.value==='native';linksPanel.hidden=native;nativePanel.hidden=!native;routingPanel.hidden=native;
+    proxyDNS.disabled=hijackDNS.value!=='on';F.requestResize();
+  }
+  configMode.addEventListener('change',()=>{dirty=true;renderProxyMode();});
+  hijackDNS.addEventListener('change',renderProxyMode);
+  shareLinks.addEventListener('input',()=>nodeOptions([],0));
   const peerList=h('div',{}), driverButtons={}, driverSpecific=h('div',{});
   const wgAdvanced=h('div',{className:'vpn-subsection vpn-fields',attrs:{hidden:true}},[
     field('WireGuard 监听端口',listenPort,'0 表示由系统分配；对应 [Interface] ListenPort。'),
@@ -77,7 +112,7 @@
     if (!M.drivers[driver]) throw new Error('此出口类型不受当前页面支持');
     for(const name of ['addresses','peers','remote_routes']) if(value[name]!=null && !Array.isArray(value[name]))throw new Error(name+' 必须是数组');
     if (replaceOriginal!==false) original=M.copy(value);
-    currentDriver=driver;
+    currentDriver=driver;proxyForm({mode:'empty'});shareLinks.value='';
     addressInput.value=driver==='wireguard'?(value.addresses || []).join(', '):'';
     wanAddressInput.value=driver==='wireguard'?'':(value.addresses || []).join(', ');slotInput.value=value.slot || 1;mtuInput.value=value.mtu || 1420;
     upstream.value=value.upstream_interface || '';listenPort.value=value.listen_port || 0;routes.value=(value.remote_routes || []).join(', ');
@@ -109,11 +144,27 @@
       coreConfig.setAttribute('aria-label',name+' 配置（JSON）');
       driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
         node('h3','vpn-section-title',name+' 代理出口'),
-        node('p','vpn-subtle','选择核心连接节点时使用的实际出站接口，并提供 '+name+' 配置。TUN 和内部出口地址自动管理，无需填写。'),
+        node('p','vpn-subtle','粘贴分享链接，选择节点后即可保存并应用。核心配置、TUN 和内部出口地址自动生成。'),
         h('div',{className:'vpn-fields'},[field('实际出站接口',upstream,'填写可访问节点服务器的物理、网桥或 PPPoE 接口，例如 eth0、vmbr0、ppp0；不能选择 VPN 自身。',true)]),
-        field(name+' 配置（JSON）',coreConfig,'使用 '+name+' 自身的节点、规则和 DNS 格式。'+(currentDriver==='mihomo'?'当前仅接受 JSON，不接受 YAML。':'')),
-        node('p','vpn-field-help','留空沿用已保存配置。保存后加密存储，不会回填；核心在“核心管理”中安装。')
+        linksPanel,
+        h('details',{className:'vpn-advanced vpn-proxy-advanced'},[
+          h('summary',{text:'分流与高级配置'}),field('核心配置方式',configMode),routingPanel,nativePanel
+        ]),
+        node('p','vpn-field-help','分享链接与配置加密保存，凭据不会回填。核心在“核心管理”中安装。')
       ]));
+      linksPanel.replaceChildren(
+        field('节点分享链接或 Base64',shareLinks,'支持 SS、VMess、VLESS、Trojan、Hysteria2；多条链接每行一条。留空保留已导入节点。'),
+        actions([button('识别节点',async()=>{
+          nodeOptions(S.parse(shareLinks.value,currentDriver),0);dirty=true;
+          message('已识别 '+nodeNames.length+' 个节点，请选择要使用的节点并保存。');
+        },true)]),field('使用节点',nodeSelect,'默认选择第一个节点；未点击“识别节点”时，保存也会自动识别。')
+      );
+      routingPanel.replaceChildren(node('p','vpn-subtle','默认全部通过所选节点。以下例外通过实际出站接口直连；域名规则依赖 HTTP / TLS / QUIC 嗅探，无法识别时仍通过节点。'),
+        h('div',{className:'vpn-fields'},[field('直连网段',directCIDRs,'每行一个 CIDR；留空不添加网段例外。'),field('直连域名及子域名',directDomains,'每行一个域名；留空不添加域名例外。'),
+          field('节点解析 DNS',bootstrapDNS,'填写可通过上联接口访问的 IPv4 DNS，用于解析节点域名。'),field('下游 DNS',hijackDNS,'仅接管经过此 VPN 出口的 TCP / UDP 53 流量。'),field('代理 DNS',proxyDNS,'通过所选节点访问的 IPv4 DNS。')])
+      );
+      nativePanel.replaceChildren(field(name+' 配置（JSON）',coreConfig,'填写完整原生 JSON；保存后加密存储。留空保留已保存的原生配置。'));
+      renderProxyMode();
     }
   }
   async function openEditor(record) {
@@ -122,6 +173,10 @@
     const next=record ? {key:record.key,...record.data} : M.allocation(records);
     keyInput.value=next.key;
     fill(record ? record.data : {driver:'wireguard',slot:next.slot,mtu:1420,addresses:[],listen_port:0,peers:[{allowed_ips:['0.0.0.0/0'],keepalive:25}],remote_routes:[]});
+    if(record && ['mihomo','sing_box'].includes(currentDriver)) {
+      const response=await F.action('core_form',{key:record.key});proxyForm(response.result||{mode:'empty'});
+      if(storedMode==='native')driverSpecific.querySelector('details').open=true;
+    }
     editorTitle.textContent=editing?'编辑出口 · '+record.key:'新建出口';
     editor.hidden=false;list.hidden=!records.length;dirty=false;message('');editor.scrollIntoView({block:'start',behavior:'smooth'});
   }
@@ -149,7 +204,15 @@
     const key=selected(), profile=M.profile(values(),original,records,key), text=coreConfig.value.trim();
     if (['mihomo','sing_box'].includes(currentDriver) && !profile.config_secret && (!editing || savedDriver!==currentDriver))
       profile.config_secret='core_'+currentDriver+'_'+key;
-    if (text) {const parsed=JSON.parse(text);if(!parsed || typeof parsed!=='object' || Array.isArray(parsed))throw new Error('核心配置必须是 JSON 对象');}
+    const managed=['mihomo','sing_box'].includes(currentDriver), links=shareLinks.value.trim();
+    let imported=null;
+    if(managed && configMode.value==='links') {
+      if(links)imported=S.create(currentDriver,links,nodeSelect.value,proxyOptions());
+      else {if(storedMode!=='links')throw new Error('请粘贴节点分享链接或 Base64 分享内容');proxyOptions();}
+    } else if(managed) {
+      if(text) {try {const parsed=JSON.parse(text);if(!parsed || typeof parsed!=='object' || Array.isArray(parsed))throw new Error();}catch(error){throw new Error('核心配置必须是有效 JSON 对象');}}
+      else if(storedMode!=='native')throw new Error('请填写原生 JSON 配置，或切换为分享链接导入');
+    }
     // Validate every local field before writing any credential or draft.
     if (privateKey.value.trim() && !/^[A-Za-z0-9+/]{43}=$/.test(privateKey.value.trim())) throw new Error('WireGuard 私钥格式不正确');
     peers.forEach(p=>{if(p.psk.value.trim() && !/^[A-Za-z0-9+/]{43}=$/.test(p.psk.value.trim()))throw new Error('预共享密钥格式不正确');});
@@ -157,8 +220,12 @@
       if (currentDriver==='wireguard') {
         if (privateKey.value.trim()) await F.action('set_key',{key,value:privateKey.value.trim()});
         for (let i=0;i<peers.length;i++) if (peers[i].psk.value.trim()) await F.action('set_key',{key,name:profile.peers[i].preshared_key_secret,value:peers[i].psk.value.trim()});
-      } else if (['mihomo','sing_box'].includes(currentDriver) && text) await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),value:text});
-    } finally {privateKey.value='';peers.forEach(p=>{p.psk.value='';});coreConfig.value='';}
+      } else if(managed && configMode.value==='links') {
+        const result=await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),format:'links',driver:currentDriver,value:links,selected:Number(nodeSelect.value),options:proxyOptions()});
+        if(result.result && result.result.form)proxyForm(result.result.form);
+        else {storedMode='links';if(imported)nodeOptions(S.metadata(imported).nodes,imported.selected);}
+      } else if(managed && text) {await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),value:text});storedMode='native';}
+    } finally {privateKey.value='';peers.forEach(p=>{p.psk.value='';});coreConfig.value='';shareLinks.value='';}
     await F.data.upsert('profiles',key,profile,{enabled:true});
     original=M.copy(profile);editing=true;savedDriver=currentDriver;keyInput.readOnly=true;dirty=false;
     if (apply) {
@@ -174,7 +241,7 @@
   editor.append(
     h('div',{className:'vpn-heading'},[editorTitle,button('收起编辑',async () => {
       if(dirty && !await F.confirm({title:'放弃未保存修改',message:'草稿尚未保存。',confirmText:'收起',cancelText:'继续编辑'}))return;
-      privateKey.value='';coreConfig.value='';importConfig.value='';peers.forEach(p=>{p.psk.value='';});dirty=false;editor.hidden=true;list.hidden=false;
+      privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';peers.forEach(p=>{p.psk.value='';});dirty=false;editor.hidden=true;list.hidden=false;
     },true)]),types,
     h('div',{className:'vpn-fields'},[field('出口标识',keyInput,'用于区分出口，保存后保持不变。')]),
     driverSpecific,advanced,
@@ -282,6 +349,6 @@
     h('header',{className:'vpn-header'},[h('div',{},[node('h1','','VPN 出口'),node('p','','管理 VPN 连接，按需分配给 LAN 或下游设备。')]),actions([button('刷新出口',reload,true),button('新建出口',async()=>{switchTab(false);await openEditor();})])]),
     h('nav',{className:'vpn-nav',attrs:{role:'tablist','aria-label':'VPN 页面'}},[outletTab,coreTab]),notice,outletPanel,corePanel
   ]);
-  window.addEventListener('pagehide',()=>{++coreSequence;clearTimeout(corePoll);clearTimeout(statusPoll);privateKey.value='';coreConfig.value='';importConfig.value='';});
+  window.addEventListener('pagehide',()=>{++coreSequence;clearTimeout(corePoll);clearTimeout(statusPoll);privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';});
   document.body.replaceChildren(page);reload().catch(error=>message(F.errorText(error),true));
 })();

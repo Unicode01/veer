@@ -1,6 +1,7 @@
 const { expect, test } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
+const vpnShares = require('../../../plugins/vpn_core/ui/share');
 
 const pluginPageHTML = `<!doctype html>
 <html>
@@ -176,22 +177,23 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
     remote_routes:[]};
   const records = {saved:{key:'saved', data:profile, enabled:true}};
   const actions = [];
+  const coreConfigs = {};
   const methods = ['list','get','create','update'];
   const coreActions = ['core_status','core_install','core_select','core_rollback','core_remove'];
   const cores = {id:'mihomo', directory:'/opt/veer/plugins.veer-state/cores/vpn_core/mihomo/linux-amd64', versions:[]};
   let installationPolls=0;
   const plugin = {id:'vpn_core', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.6.1', status:'active', enabled:true,
     resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
-    actions:['set_key','set_core_config','apply','teardown','inspect','core_logs',...coreActions].map(id => ({id})),
+    actions:['set_key','set_core_config','core_form','apply','teardown','inspect','core_logs',...coreActions].map(id => ({id})),
     ui:{entry:'index.html', page:'vpn', page_title:'VPN', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
-      actions:['set_key','set_core_config','apply','teardown','inspect','core_logs',...coreActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
+      actions:['set_key','set_core_config','core_form','apply','teardown','inspect','core_logs',...coreActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
   await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
   await page.route('**/api/plugins/vpn_core/**', async route => {
     const url = new URL(route.request().url());
     const endpoint = url.pathname.split('/vpn_core/')[1];
     if (endpoint.startsWith('assets/')) {
       const asset=endpoint.slice('assets/'.length);
-      if (!['index.html','app.js','model.js','style.css'].includes(asset)) return route.fulfill({status:404});
+      if (!['index.html','app.js','model.js','share.js','style.css'].includes(asset)) return route.fulfill({status:404});
       return route.fulfill({contentType:asset.endsWith('.css')?'text/css':asset.endsWith('.js')?'application/javascript':'text/html; charset=utf-8', body:fs.readFileSync(path.resolve(__dirname, '../../../plugins/vpn_core/ui',asset), 'utf8')});
     }
     if (endpoint === 'resources/status') return route.fulfill({json:{records:[]}});
@@ -203,6 +205,21 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
     }
     if (endpoint.startsWith('actions/')) {
       const id=endpoint.split('/').pop();
+      const payload=route.request().postDataJSON().payload;
+      if(id==='core_form') {
+        const name=records[payload.key]?.data.config_secret || 'core_'+payload.key;
+        return route.fulfill({json:{result:coreConfigs[name]?vpnShares.metadata(coreConfigs[name]):{mode:'empty'}}});
+      }
+      if(id==='set_core_config') {
+        actions.push({id,...route.request().postDataJSON()});
+        const name=payload.name || 'core_'+payload.key;
+        if(payload.format==='links') {
+          coreConfigs[name]=vpnShares.create(payload.driver,payload.value||coreConfigs[name]?.links,payload.selected,payload.options);
+          return route.fulfill({json:{result:{stored:true,form:vpnShares.metadata(coreConfigs[name])}}});
+        }
+        coreConfigs[name]=JSON.parse(payload.value);
+        return route.fulfill({json:{result:{stored:true}}});
+      }
       if(id==='core_status') {
         if(cores.install && cores.install.state==='downloading' && ++installationPolls>=2) {
           cores.version='v1.19.33';cores.versions=[{version:cores.version}];cores.install={state:'ready',downloaded_bytes:1048576};
@@ -245,7 +262,12 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('本机 WireGuard 地址', {exact:true})).toHaveCount(0);
   await expect(frame.getByLabel('WireGuard 私钥', {exact:true})).toHaveCount(0);
   await expect(frame.getByLabel('内部 WAN 地址', {exact:true})).toBeHidden();
+  await expect(frame.getByLabel('节点分享链接或 Base64')).toBeVisible();
+  await expect(frame.getByLabel('Mihomo 配置（JSON）', {exact:true})).toBeHidden();
   await frame.getByLabel('实际出站接口', {exact:true}).fill('vmbr0');
+  await frame.getByText('分流与高级配置',{exact:true}).click();
+  await frame.getByLabel('核心配置方式').selectOption('native');
+  await expect(frame.getByLabel('节点分享链接或 Base64')).toBeHidden();
   const coreJSON=JSON.stringify({proxies:[{password:'core-secret'}],rules:['MATCH,DIRECT']});
   await frame.getByLabel('Mihomo 配置（JSON）', {exact:true}).fill(coreJSON);
   await frame.getByRole('button', {name:'保存草稿', exact:true}).click();
@@ -303,13 +325,45 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('内部 WAN 地址',{exact:true})).toBeHidden();
   await expect(frame.getByLabel('Mihomo 配置（JSON）',{exact:true})).toHaveCount(0);
   await frame.getByLabel('实际出站接口',{exact:true}).fill('ppp0');
-  await frame.getByLabel('sing-box 配置（JSON）',{exact:true}).fill('{"outbounds":[{"type":"direct","tag":"direct"}]}');
+  await expect(frame.getByLabel('sing-box 配置（JSON）',{exact:true})).toBeHidden();
+  await expect(frame.getByLabel('直连网段')).toBeHidden();
+  await frame.getByLabel('节点分享链接或 Base64').fill('trojan://test-secret@host.example:0');
+  const beforeInvalid=actions.length;
+  await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
+  await expect(frame.locator('.vpn-notice')).toContainText('端口');expect(actions.length).toBe(beforeInvalid);
+  const shareList='ss://'+Buffer.from('aes-128-gcm:share-secret').toString('base64url')+'@192.0.2.2:8388#first\n'+
+    'trojan://second-secret@node.example:443#second';
+  await frame.getByLabel('节点分享链接或 Base64').fill(Buffer.from(shareList).toString('base64'));
+  await frame.getByRole('button',{name:'识别节点',exact:true}).click();
+  await expect(frame.getByLabel('使用节点').locator('option')).toHaveCount(2);
+  await frame.getByLabel('使用节点').selectOption('1');
+  await frame.getByText('分流与高级配置',{exact:true}).click();
+  await frame.getByLabel('直连网段').fill('10.0.0.0/8');
+  await frame.getByLabel('直连域名').fill('example.com');
+  await frame.getByLabel('下游 DNS').selectOption('on');
   await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
   await expect.poll(()=>records.vpn1.data.driver).toBe('sing_box');
   expect(records.vpn1.data.upstream_interface).toBe('ppp0');
   expect(records.vpn1.data.config_secret).toBe('core_sing_box_vpn1');
+  expect(actions.at(-1).payload.format).toBe('links');expect(actions.at(-1).payload.selected).toBe(1);
+  expect(actions.at(-1).payload.options.direct_cidrs).toEqual(['10.0.0.0/8']);
+  expect(actions.at(-1).payload.options.dns_hijack).toBe(true);
+  await expect(frame.getByLabel('节点分享链接或 Base64')).toHaveValue('');
+  await expect(frame.locator('body')).not.toContainText('share-secret');
+  await expect(frame.locator('body')).not.toContainText('second-secret');
+  expect(JSON.stringify(records.vpn1)).not.toContain('secret@');
   for(const field of ['addresses','peers','listen_port','remote_routes']) expect(records.vpn1.data[field]).toBeUndefined();
   await page.screenshot({path:testInfo.outputPath('vpn-sing-box-form.png'),fullPage:true});
+  await frame.getByRole('button',{name:'收起编辑',exact:true}).click();
+  await frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})}).getByRole('button',{name:'编辑',exact:true}).click();
+  await expect(frame.getByLabel('使用节点')).toHaveValue('1');
+  await expect(frame.getByLabel('直连网段')).toBeHidden();
+  await frame.getByText('分流与高级配置',{exact:true}).click();
+  await expect(frame.getByLabel('直连网段')).toHaveValue('10.0.0.0/8');
+  await frame.getByLabel('使用节点').selectOption('0');
+  await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
+  await expect.poll(()=>coreConfigs.core_sing_box_vpn1.selected).toBe(0);
+  expect(actions.at(-1).payload.value).toBe('');
   await frame.getByText('高级设置与 JSON',{exact:true}).click();
   await expect(frame.getByLabel('内部 WAN 地址',{exact:true})).toBeVisible();
   await frame.getByLabel('内部 WAN 地址',{exact:true}).fill('10.90.0.1/24');
