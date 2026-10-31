@@ -173,11 +173,11 @@ const browserErrors = new WeakMap();
 test('WireGuard example saves drafts and secrets, applies and loads profiles through the real UI bridge', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
   const profile = {slot:2, addresses:['10.77.0.1/32'], peers:[{public_key:'peer', allowed_ips:['0.0.0.0/0']}],
-    bindings:[{lan_interface:'br-test', source:'192.168.2.3/32', destination:'0.0.0.0/0'}], masquerade:true};
+    remote_routes:[]};
   const records = {saved:{key:'saved', data:profile, enabled:true}};
   const actions = [];
   const methods = ['list','get','create','update'];
-  const plugin = {id:'wireguard_mesh', name:'WireGuard', kind:'control', stability:'lab', version:'0.1.0', status:'active', enabled:true,
+  const plugin = {id:'wireguard_mesh', name:'WireGuard', kind:'pipeline', stability:'lab', version:'0.2.0', status:'active', enabled:true,
     resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
     actions:['set_key','apply','teardown','inspect'].map(id => ({id})),
     ui:{entry:'index.html', page:'wireguard', page_title:'WireGuard', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],

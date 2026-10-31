@@ -1,39 +1,39 @@
-// Local, opt-in example. Only fixed executables and structured argv reach exec.
-var IP = '/usr/sbin/ip';
-var WG = '/usr/bin/wg';
-var NFT = '/usr/sbin/nft';
-var TC = '/usr/sbin/tc';
-var SYSCTL = '/usr/sbin/sysctl';
-var PROTOCOL = '242';
-plugin.capabilities(['wireguard', 'policy_routing', 'control']);
+// A protocol driver: Veer selects a WAN; TC bridges that WAN to kernel WireGuard.
+var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft';
+var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
+var OBJECT = 'wg_adapter', MAP = 'wg_links';
+var changing = false;
+plugin.capabilities(['wireguard', 'wan', 'tc_adapter', 'control']);
+pipeline.node({id: 'wireguard', description: 'Kernel WireGuard attached to a WAN Core veth boundary.'});
+ebpf.loadObject({id: OBJECT, path: 'wg_adapter.o', sha256: crypto.sha256File('wg_adapter.o'),
+  programs: [{id: 'tc_adapter', section: 'tc/veer/pre_forward', type: 'tc'}]});
+pipeline.attach({id: 'wg-links', direction: 'forward', attach: 'ingress', priority: 20,
+  program: 'wg_adapter:tc_adapter', mode: 'rewrite'});
+plugin.resource({id: 'hook_bindings', methods: ['list', 'get'], control_methods: ['list', 'get', 'create', 'update', 'delete'],
+  runtime_update: 'plugin_reconcile', max_records: 1, max_record_bytes: 4096});
 plugin.resource({id: 'profiles', methods: ['list', 'get', 'create', 'update'], runtime_update: 'manual', max_records: 8, max_record_bytes: 16384,
   schema: {type: 'object', additionalProperties: false, properties: {
-    slot: {type: 'integer'}, mtu: {type: 'integer'}, listen_port: {type: 'integer'}, masquerade: {type: 'boolean'},
-    addresses: {type: 'array', items: {type: 'string'}}, bypass_cidrs: {type: 'array', items: {type: 'string'}},
+    slot: {type: 'integer'}, mtu: {type: 'integer'}, listen_port: {type: 'integer'},
+    addresses: {type: 'array', items: {type: 'string'}}, remote_routes: {type: 'array', items: {type: 'string'}},
     peers: {type: 'array', items: {type: 'object', additionalProperties: false, properties: {
       public_key: {type: 'string'}, endpoint: {type: 'string'}, allowed_ips: {type: 'array', items: {type: 'string'}},
       keepalive: {type: 'integer'}, preshared_key_secret: {type: 'string'}
-    }}}, bindings: {type: 'array', items: {type: 'object', additionalProperties: false, properties: {
-      lan_interface: {type: 'string'}, source: {type: 'string'}, destination: {type: 'string'}
     }}}
   }}});
 plugin.resource({id: 'status', methods: ['list', 'get'], control_methods: ['list', 'get', 'create', 'update', 'delete'], runtime_update: 'manual', max_records: 8, max_record_bytes: 32768});
 plugin.action({id: 'set_key', description: 'Store a private or preshared key in the encrypted Secret store.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
-plugin.action({id: 'apply', description: 'Apply a stored WireGuard profile; key/slot identity is immutable until teardown.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
-plugin.action({id: 'teardown', description: 'Remove this profile\'s routes, rules, firewall table and owned WireGuard interface.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
-plugin.action({id: 'inspect', description: 'Read public keys, endpoints, handshake ages and transfer counters without reading private keys.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
+plugin.action({id: 'apply', description: 'Create or update a WireGuard WAN; select it in LAN or Egress NAT settings.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
+plugin.action({id: 'teardown', description: 'Remove the owned WireGuard WAN and its TC adapter.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
+plugin.action({id: 'inspect', description: 'Read public interface, peer, handshake and traffic state.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 ui.register({static_dir: 'ui', entry: 'index.html', page: 'wireguard', page_title: 'WireGuard',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
   actions: ['set_key', 'apply', 'teardown', 'inspect']});
 
 exports.onAction = function (ctx) {
-  var payload = ctx.payload || {};
-  var key = profileKey(payload.key);
+  var payload = ctx.payload || {}, key = profileKey(payload.key);
   if (ctx.action.id === 'set_key') {
-    var value = wgKey(payload.value);
-    var name = payload.name ? token(payload.name) : 'private_' + key;
-    var publicKey = '';
-    if (name === 'private_' + key) publicKey = command(WG, ['pubkey'], value + '\n').trim();
+    var value = wgKey(payload.value), name = payload.name ? token(payload.name) : 'private_' + key;
+    var publicKey = name === 'private_' + key ? command(WG, ['pubkey'], value + '\n').trim() : '';
     secret.set(name, value);
     return {stored: true, name: name, public_key: publicKey};
   }
@@ -46,32 +46,246 @@ exports.onAction = function (ctx) {
   }
   throw new Error('Unsupported action');
 };
-
-// Restart restores only explicitly applied profiles, never a newly saved draft.
 exports.onReconcile = function () {
-  var leases = allLeases();
-  Object.keys(leases).sort().forEach(function (key) {
-    if (!leases[key].active) return;
-    var record = resources.get('profiles', key);
+  if (changing) return;
+  var errors = [];
+  Object.keys(allLeases()).sort().forEach(function (key) {
+    var lease = allLeases()[key], record = resources.get('profiles', key);
+    if (!lease.active) return;
     if (!record || record.enabled === false) { teardown(key); return; }
-    try { apply(key, leases[key].settings); }
-    catch (e) { resources.set('status', key, {phase: 'error', error: String(e.message || e)}, true); }
+    try { apply(key, lease.settings); }
+    catch (e) { errors.push(key + ': ' + String(e.message || e)); resources.set('status', key, {phase: 'error', error: String(e.message || e), cleanup_required: true}, true); }
+  });
+  armRepair();
+  if (errors.length) throw new Error(errors.join('; '));
+};
+exports.onTimer = function (ctx) {
+  if (!ctx.timer || ctx.timer.name !== 'wg_repair') return;
+  Object.keys(allLeases()).sort().forEach(function (key) {
+    var lease = allLeases()[key];
+    if (!lease.active || isLegacy(lease)) return;
+    try {
+      var p = lease.plan, wg = ownedLink(p), boundary = boundaryLinks(p);
+      if (lease.pending || !wg || !boundary || (wg.flags || []).indexOf('UP') < 0 || wg.mtu !== p.mtu || wg.ifindex !== lease.wg_ifindex || boundary.local.ifindex !== lease.local_ifindex || boundary.peer.ifindex !== lease.pipeline_ifindex) {
+        clearMaps(lease);
+        apply(key, lease.settings);
+      }
+    } catch (e) {
+      try { clearMaps(lease); } catch (cleanup) { log.error('WG map cleanup failed: ' + String(cleanup.message || cleanup)); }
+      resources.set('status', key, {phase: 'error', error: String(e.message || e), cleanup_required: true}, true);
+    }
   });
 };
 exports.onDeactivate = function () {
+  timer.clear('wg_repair');
   var failures = [];
   Object.keys(allLeases()).forEach(function (key) {
     try { teardown(key); } catch (e) { failures.push(key + ': ' + String(e.message || e)); }
   });
   if (failures.length) throw new Error('WireGuard cleanup incomplete: ' + failures.join('; '));
 };
-
 function allLeases() {
   var out = {};
-  kv.list({limit: 32}).forEach(function (record) {
-    if (record.key.indexOf('lease_') === 0) out[record.key.slice(6)] = record.data;
-  });
+  kv.list({limit: 32}).forEach(function (r) { if (r.key.indexOf('lease_') === 0) out[r.key.slice(6)] = r.data; });
   return out;
+}
+function armRepair() {
+  if (Object.keys(allLeases()).some(function (k) { return allLeases()[k].active; })) timer.setInterval('wg_repair', 5000, {});
+  else timer.clear('wg_repair');
+}
+function normalize(key, raw) {
+  raw = raw || {};
+  if (raw.bindings || raw.masquerade != null || raw.bypass_cidrs) throw new Error('Legacy routing profile: teardown the old profile, then configure a WAN and select it in Egress NAT');
+  var p = {key: key, slot: integer(raw.slot, 1, 8, 1), interface: 'vwg' + key,
+    mtu: integer(raw.mtu, 1280, 9000, 1420), listen_port: integer(raw.listen_port, 0, 65535, 0)};
+  p.owner = 'veer:wireguard_mesh:' + key;
+  p.wan_id = 'wg_' + key; p.local = 'veerwg' + p.slot; p.pipeline = 'veerwgp' + p.slot;
+  p.addresses = list(raw.addresses, 1, 8).map(function (v) { return prefix(v, true).text; });
+  if (!p.addresses.some(function (v) { return prefix(v).family === '4'; })) throw new Error('A local IPv4 tunnel address is required for Veer Egress NAT');
+  p.peers = list(raw.peers, 1, 8).map(function (peer) {
+    var endpoint = String(peer.endpoint || '');
+    if (endpoint) {
+      var match = /^(\[[0-9a-fA-F:]+\]|[0-9.]+):([0-9]+)$/.exec(endpoint);
+      if (!match) throw new Error('Endpoint must be a numeric IP:port (bracket IPv6)');
+      address(match[1].replace(/[\[\]]/g, '')); integer(match[2], 1, 65535);
+    }
+    return {public_key: wgKey(peer.public_key), endpoint: endpoint,
+      allowed_ips: list(peer.allowed_ips, 1, 32).map(function (v) { return prefix(v).text; }),
+      keepalive: integer(peer.keepalive, 0, 65535, 25), preshared_key_secret: peer.preshared_key_secret ? token(peer.preshared_key_secret) : ''};
+  });
+  var seenPeers = {}, seenPrefixes = {};
+  p.peers.forEach(function (peer) {
+    if (seenPeers[peer.public_key]) throw new Error('Duplicate peer public key');
+    seenPeers[peer.public_key] = true;
+    peer.allowed_ips.forEach(function (v) { if (seenPrefixes[v]) throw new Error('AllowedIPs must not be duplicated across peers'); seenPrefixes[v] = true; });
+    if (peer.endpoint) {
+      var endpointIP = peer.endpoint[0] === '[' ? peer.endpoint.slice(1, peer.endpoint.indexOf(']')) : peer.endpoint.split(':')[0];
+      if (p.addresses.some(function (v) { return covers(prefix(v), prefix(endpointIP)); })) throw new Error('Tunnel address route would capture a WireGuard endpoint');
+    }
+  });
+  p.remote_routes = list(raw.remote_routes || [], 0, 32).map(function (v) {
+    var cidr = prefix(v);
+    if (cidr.bits === 0) throw new Error('remote_routes cannot replace the host default route; select the WAN in Egress NAT instead');
+    if (!p.peers.some(function (peer) { return peer.allowed_ips.some(function (a) { return covers(prefix(a), cidr); }); })) throw new Error('Route is not covered by peer AllowedIPs');
+    p.peers.forEach(function (peer) {
+      if (!peer.endpoint) return;
+      var host = peer.endpoint[0] === '[' ? peer.endpoint.slice(1, peer.endpoint.indexOf(']')) : peer.endpoint.split(':')[0];
+      if (covers(cidr, prefix(host))) throw new Error('Remote route would capture a WireGuard endpoint');
+    });
+    return cidr.text;
+  });
+  return p;
+}
+function settings(p) { return {slot: p.slot, mtu: p.mtu, listen_port: p.listen_port, addresses: p.addresses, peers: p.peers, remote_routes: p.remote_routes}; }
+function link(name) { return jsonIP(['-d', 'link', 'show']).filter(function (l) { return l.ifname === name; })[0] || null; }
+function ownedLink(p) {
+  var current = link(p.interface);
+  var lease = allLeases()[p.key];
+  var created = lease && lease.pending && lease.created_ifindex === (current && current.ifindex) && !current.ifalias;
+  if (current && ((current.ifalias !== p.owner && !created) || !current.linkinfo || current.linkinfo.info_kind !== 'wireguard')) throw new Error('Refusing to modify an existing unowned WireGuard interface');
+  return current;
+}
+function wanRecord(resource, p) { return plugins.resources.get('wan_core', resource, p.wan_id); }
+function assertWANOwner(p) {
+  var session = wanRecord('sessions', p);
+  ['sessions', 'status'].forEach(function (resource) {
+    var r = wanRecord(resource, p);
+    if (resource === 'status' && r && r.data && r.data.phase === 'deleted' && session && session.enabled === false &&
+        session.data.driver_plugin === 'wireguard_mesh' && r.data.local_interface === p.local && r.data.pipeline_interface === p.pipeline) return;
+    if (r && r.data && r.data.driver_plugin !== 'wireguard_mesh') throw new Error('WAN key is already owned by another driver');
+  });
+}
+function wanCall(action, payload) { return plugins.services.call({service: 'wan.adapter', version: '^1.0.0', provider: 'wan_core', action: action, payload: payload}); }
+function boundaryLinks(p) {
+  var r = wanRecord('status', p), data = r && r.data;
+  if (!data || data.driver_plugin !== 'wireguard_mesh') return null;
+  var local = link(p.local), peer = link(p.pipeline);
+  if (!local || !peer || !local.linkinfo || !peer.linkinfo || local.linkinfo.info_kind !== 'veth' || peer.linkinfo.info_kind !== 'veth') return null;
+  function linked(a, b) { return a.link_index === b.ifindex || a.link === b.ifname; }
+  if (!linked(local, peer) || !linked(peer, local) || data.local_ifindex !== local.ifindex || data.pipeline_ifindex !== peer.ifindex) return null;
+  return {local: local, peer: peer};
+}
+function wanPayload(p, usable) {
+  return {wan_id: p.wan_id, key: p.wan_id, profile_key: p.key, driver: 'wireguard', driver_plugin: 'wireguard_mesh',
+    state: usable ? 'up' : 'prepared', usable: usable, real_interface: p.interface, wan_interface: p.local,
+    local_interface: p.local, pipeline_interface: p.pipeline, handoff_mode: 'segmented_veth', mtu: p.mtu,
+    ipv4: p.addresses.filter(function (v) { return prefix(v).family === '4'; })[0].split('/')[0],
+    addresses: p.addresses, routes: p.remote_routes.map(function (dst) { return {dst: dst, dev: p.local}; }),
+    install_default_route: false, install_default_route_v6: false, egress_nat_redirect_mode: 'prepared_l2',
+    interface_preparation: {local_offloads: {sg: false, tso: false, gso: false}, pipeline_offloads: {gro: false, lro: false}}};
+}
+function bindings(exclude) {
+  var names = [];
+  Object.keys(allLeases()).sort().forEach(function (key) {
+    var lease = allLeases()[key];
+    if (key !== exclude && lease.active && !isLegacy(lease)) names = names.concat([lease.plan.interface, lease.plan.pipeline]);
+  });
+  resources.set('hook_bindings', 'wg-links', {hook_id: 'wg-links', interfaces: names}, names.length > 0, true);
+}
+function u32(n) { var s = ''; for (var i = 0; i < 4; i++) s += ('0' + ((n >>> (i * 8)) & 255).toString(16)).slice(-2); return s; }
+function macHex(s) { if (!/^([a-fA-F0-9]{2}:){5}[a-fA-F0-9]{2}$/.test(s || '')) throw new Error('Invalid WAN boundary MAC'); return s.replace(/:/g, '').toLowerCase(); }
+function clearMaps(lease) {
+  [lease && lease.wg_ifindex, lease && lease.pipeline_ifindex].forEach(function (index) {
+    if (!index) return;
+    try { ebpf.mapDelete(OBJECT, MAP, u32(index)); }
+    catch (e) { if (String(e.message || e).indexOf('plugin runtime target is not loaded') < 0) throw e; }
+  });
+}
+function installMaps(p, wg, boundary, old) {
+  var ops = [], next = [wg.ifindex, boundary.peer.ifindex];
+  [old && old.wg_ifindex, old && old.pipeline_ifindex].forEach(function (n) { if (n && next.indexOf(n) < 0) ops.push({op: 'delete', object: OBJECT, map: MAP, key: u32(n)}); });
+  ops.push({op: 'put', object: OBJECT, map: MAP, key: u32(boundary.peer.ifindex), value: u32(1) + u32(wg.ifindex) + '000000000000000000000000' + u32(p.mtu)});
+  ops.push({op: 'put', object: OBJECT, map: MAP, key: u32(wg.ifindex), value: u32(2) + u32(boundary.peer.ifindex) + macHex(boundary.peer.address) + macHex(boundary.local.address) + u32(p.mtu)});
+  ebpf.mapTransaction({operations: ops});
+}
+function isLegacy(lease) { return !!(lease && lease.plan && lease.plan.bindings); }
+function apply(key, raw) {
+  var before = changing; changing = true;
+  try { return applyProfile(key, raw); } finally { changing = before; }
+}
+function applyProfile(key, raw) {
+  var p = normalize(key, raw), old = allLeases()[key];
+  if (isLegacy(old)) throw new Error('Teardown the legacy routing profile before creating a WireGuard WAN');
+  if (old && old.plan.slot !== p.slot) throw new Error('Teardown before changing the slot');
+  Object.keys(allLeases()).forEach(function (k) { if (k !== key && allLeases()[k].plan.slot === p.slot) throw new Error('Slot is already reserved by another profile'); });
+  plugins.services.resolve({service: 'wan.adapter', version: '^1.0.0', provider: 'wan_core'});
+  assertWANOwner(p);
+  var wg = ownedLink(p), config = configuration(p);
+  var previousWAN = wanRecord('status', p), previousSession = wanRecord('sessions', p);
+  var cleanWAN = previousWAN && previousWAN.data.phase === 'deleted' && previousSession && previousSession.enabled === false;
+  if (!old && (wg || link(p.local) || link(p.pipeline) || ((previousWAN || previousSession) && !cleanWAN))) throw new Error('Recorded ownership is missing; inspect leftover WAN resources before retrying');
+  kv.set('lease_' + key, {active: true, pending: true, settings: settings(p), plan: p,
+    created_ifindex: old && old.created_ifindex, wg_ifindex: old && old.wg_ifindex, local_ifindex: old && old.local_ifindex, pipeline_ifindex: old && old.pipeline_ifindex});
+  try {
+    if ((link(p.local) || link(p.pipeline)) && !boundaryLinks(p)) throw new Error('WAN boundary is not ready or no longer owned; inspect replaced interfaces');
+    wanCall('prepare_handoff', wanPayload(p, false));
+    if (!wg) {
+      ip(['link', 'add', 'name', p.interface, 'alias', p.owner, 'type', 'wireguard']);
+      // Some iproute/kernel combinations ignore alias during RTM_NEWLINK.
+      var created = link(p.interface), pending = allLeases()[key];
+      if (!created || !created.linkinfo || created.linkinfo.info_kind !== 'wireguard') throw new Error('WireGuard creation did not return the expected link');
+      pending.created_ifindex = created.ifindex; kv.set('lease_' + key, pending);
+    }
+    ip(['link', 'set', 'dev', p.interface, 'alias', p.owner]);
+    command(WG, ['syncconf', p.interface, '/dev/stdin'], config);
+    ip(['link', 'set', 'dev', p.interface, 'mtu', String(p.mtu), 'up']);
+    plugins.resources.set('wan_core', 'sessions', p.wan_id, wanPayload(p, true), true, true);
+    wg = ownedLink(p);
+    var boundary = boundaryLinks(p);
+    if (!wg || !boundary) throw new Error('WAN boundary is not ready');
+    bindings();
+    installMaps(p, wg, boundary, old);
+    kv.set('lease_' + key, {active: true, settings: settings(p), plan: p, wg_ifindex: wg.ifindex,
+      local_ifindex: boundary.local.ifindex, pipeline_ifindex: boundary.peer.ifindex});
+    var result = {phase: 'applied', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
+      pipeline_interface: p.pipeline, egress_nat_interface: p.local, egress_nat_source_ip: wanPayload(p, true).ipv4,
+      egress_nat_redirect_mode: 'prepared_l2', tc_ready: true, mtu: p.mtu};
+    resources.set('status', key, result, true); armRepair(); return result;
+  } catch (e) {
+    try {
+      clearMaps(old);
+      wg = ownedLink(p); if (wg) clearMaps({wg_ifindex: wg.ifindex});
+      var partial = boundaryLinks(p); if (partial) clearMaps({pipeline_ifindex: partial.peer.ifindex});
+    } catch (cleanup) { log.error('WG map cleanup failed: ' + String(cleanup.message || cleanup)); }
+    resources.set('status', key, {phase: 'error', interface: p.interface, local_interface: p.local,
+      error: String(e.message || e), cleanup_required: true}, true);
+    throw e;
+  }
+}
+function teardown(key) {
+  var before = changing; changing = true;
+  try { return teardownProfile(key); } finally { changing = before; }
+}
+function teardownProfile(key) {
+  var lease = allLeases()[key]; if (!lease) return;
+  var p = lease.plan;
+  ownedLink(p);
+  if (isLegacy(lease)) {
+    var nft = table(p);
+    if (lease.previous) removePlan(lease.previous);
+    removePlan(p);
+    if (ownedLink(p)) ip(['link', 'del', 'dev', p.interface]);
+    if (nft) command(NFT, ['delete', 'table', 'inet', p.nft]);
+  } else {
+    assertWANOwner(p);
+    clearMaps(lease);
+    bindings(key);
+    if (ownedLink(p)) ip(['link', 'del', 'dev', p.interface]);
+    if (wanRecord('status', p)) {
+      wanCall('teardown', wanPayload(p, false));
+      if (wanRecord('status', p).data.phase !== 'deleted') throw new Error('WAN cleanup incomplete; retry teardown');
+    }
+  }
+  kv.delete('lease_' + key);
+  resources.set('status', key, {phase: 'down'}, false); armRepair();
+}
+function inspect(key) {
+  var lease = allLeases()[key]; if (!lease) return {phase: 'down'};
+  var p = lease.plan;
+  if (!ownedLink(p)) return {phase: 'missing', interface: p.interface};
+  return {phase: 'configured', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
+    public_key: command(WG, ['show', p.interface, 'public-key']).trim(), endpoints: command(WG, ['show', p.interface, 'endpoints']).trim(),
+    latest_handshakes: command(WG, ['show', p.interface, 'latest-handshakes']).trim(), transfer: command(WG, ['show', p.interface, 'transfer']).trim()};
 }
 
 function execute(program, args, stdin) {
@@ -167,55 +381,18 @@ function covers(a, b) {
   }
   return true;
 }
-function normalize(key, raw) {
-  raw = raw || {};
-  var p = {key: key, slot: integer(raw.slot, 1, 8, 1), interface: 'vwg' + key,
-    mtu: integer(raw.mtu, 576, 9000, 1420), listen_port: integer(raw.listen_port, 0, 65535, 0), masquerade: raw.masquerade === true};
-  p.table = 52000 + p.slot; p.priority = 22000 + p.slot * 32;
-  p.owner = 'veer:wireguard_mesh:' + key; p.nft = 'veer_wg_' + p.slot;
-  p.addresses = list(raw.addresses, 1, 8).map(function (v) { return prefix(v, true).text; });
-  p.bypass = list(raw.bypass_cidrs || [], 0, 32).map(function (v) { return prefix(v).text; });
-  p.peers = list(raw.peers, 1, 8).map(function (peer) {
-    var endpoint = String(peer.endpoint || '');
-    if (endpoint) {
-      var match = /^(\[[0-9a-fA-F:]+\]|[0-9.]+):([0-9]+)$/.exec(endpoint);
-      if (!match) throw new Error('Endpoint must be a numeric IP:port (bracket IPv6)');
-      address(match[1].replace(/[\[\]]/g, '')); integer(match[2], 1, 65535);
-    }
-    return {public_key: wgKey(peer.public_key), endpoint: endpoint,
-      allowed_ips: list(peer.allowed_ips, 1, 32).map(function (v) { return prefix(v).text; }),
-      keepalive: integer(peer.keepalive, 0, 65535, 25),
-      preshared_key_secret: peer.preshared_key_secret ? token(peer.preshared_key_secret) : ''};
-  });
-  var seenPeers = {}, seenPrefixes = {};
+
+function configuration(p) {
+  var lines = ['[Interface]', 'PrivateKey = ' + wgKey(secret.get('private_' + p.key)), 'ListenPort = ' + p.listen_port];
   p.peers.forEach(function (peer) {
-    if (seenPeers[peer.public_key]) throw new Error('Duplicate peer public key');
-    seenPeers[peer.public_key] = true;
-    peer.allowed_ips.forEach(function (cidr) {
-      if (seenPrefixes[cidr]) throw new Error('AllowedIPs must not be duplicated across peers');
-      seenPrefixes[cidr] = true;
-    });
+    lines.push('[Peer]', 'PublicKey = ' + peer.public_key, 'AllowedIPs = ' + peer.allowed_ips.join(', '), 'PersistentKeepalive = ' + peer.keepalive);
+    if (peer.endpoint) lines.push('Endpoint = ' + peer.endpoint);
+    if (peer.preshared_key_secret) lines.push('PresharedKey = ' + wgKey(secret.get(peer.preshared_key_secret)));
   });
-  p.bindings = list(raw.bindings, 1, 16).map(function (b, index) {
-    var src = prefix(b.source), dst = prefix(b.destination);
-    if (src.family !== dst.family) throw new Error('Source and destination families differ');
-    if (!p.peers.some(function (peer) { return peer.allowed_ips.some(function (v) { return covers(prefix(v), dst); }); })) throw new Error('Destination is not covered by peer AllowedIPs');
-    return {lan_interface: iface(b.lan_interface), source: src.text, destination: dst.text, family: src.family, priority: p.priority + index};
-  });
-  if (p.mtu < 1280 && p.bindings.some(function (b) { return b.family === '6'; })) throw new Error('IPv6 requires MTU >= 1280');
-  return p;
+  return lines.join('\n') + '\n';
 }
-function settings(p) {
-  return {slot: p.slot, mtu: p.mtu, listen_port: p.listen_port, masquerade: p.masquerade,
-    addresses: p.addresses.slice(), bypass_cidrs: p.bypass.slice(), peers: p.peers,
-    bindings: p.bindings.map(function (b) { return {lan_interface: b.lan_interface, source: b.source, destination: b.destination}; })};
-}
-function link(name) { return jsonIP(['link', 'show']).filter(function (l) { return l.ifname === name; })[0] || null; }
-function ownedLink(p) {
-  var current = link(p.interface);
-  if (current && current.ifalias !== p.owner) throw new Error('Refusing to modify an existing unowned WireGuard interface');
-  return current;
-}
+
+// Exact cleanup for previously applied 0.1.x routing leases.
 function table(p) {
   var result = execute(NFT, ['-j', 'list', 'table', 'inet', p.nft]);
   if (result.exit_code !== 0) {
@@ -259,95 +436,6 @@ function routeMatches(actual, planned) {
     String(actual.metric || 0) === planned.metric && (actual.type || 'unicast') === (planned.type || 'unicast') &&
     (actual.dev || '') === (planned.dev || (planned.type && planned.family === '6' && actual.dev === 'lo' ? 'lo' : '')) && !actual.gateway && !actual.nexthops;
 }
-function preflight(p, old) {
-  var owned = ownedLink(p), nft = table(p);
-  if (!old && (owned || nft)) throw new Error('Recorded ownership is missing; inspect leftover resources before retrying');
-  var leases = allLeases();
-  Object.keys(leases).forEach(function (key) {
-    if (key === p.key) return;
-    var other = leases[key].plan;
-    if (other.slot === p.slot) throw new Error('Slot is already reserved by another profile');
-    p.bindings.forEach(function (a) { other.bindings.forEach(function (b) {
-      if (a.lan_interface === b.lan_interface && coversEither(a.source, b.source) && coversEither(a.destination, b.destination)) throw new Error('Traffic selectors overlap another active profile');
-    }); });
-  });
-  ['4', '6'].forEach(function (family) {
-    var existing = routes(p, family);
-    if (existing.some(function (r) {
-      return !old || ![old.plan, old.previous].filter(Boolean).some(function (plan) {
-        return routePlan(plan).some(function (planned) { return planned.family === family && routeMatches(r, planned); });
-      });
-    })) throw new Error('Routing table contains foreign routes');
-    var rules = jsonIP(['-' + family, 'rule', 'show']);
-    rules.forEach(function (r) {
-      if (r.priority < p.priority || r.priority >= p.priority + 32) return;
-      var owned = old && [old.plan, old.previous].filter(Boolean).some(function (plan) { return plan.bindings.some(function (b) { return ruleMatches(r, plan, b); }); });
-      if (!owned) throw new Error('Policy rule priority is already in use');
-    });
-  });
-  var inputs = {};
-  p.bindings.forEach(function (b) { inputs[b.lan_interface] = true; });
-  var links = jsonIP(['-d', 'link', 'show']);
-  Object.keys(inputs).forEach(function (name) {
-    var current = links.filter(function (l) { return l.ifname === name; })[0];
-    if (!current || name === p.interface) throw new Error('LAN interface does not exist');
-    if (name === 'lo' || (current.flags || []).indexOf('LOOPBACK') >= 0 || current.master) throw new Error('LAN must be a routed interface, not loopback or an enslaved member; select its bridge/bond master');
-    // Linux policy routing cannot steer traffic already redirected by Veer TC/XDP.
-    var attached = jsonIP(['address', 'show', 'dev', name]);
-    (attached[0] && attached[0].addr_info || []).forEach(function (a) {
-      if (a.scope !== 'global') return;
-      var cidr = prefix(a.local + '/' + a.prefixlen).text;
-      if (p.bypass.indexOf(cidr) < 0) p.bypass.push(cidr);
-    });
-  });
-  // Check bridge members too: Veer can attach before packets reach the bridge.
-  var changed = true;
-  while (changed) {
-    changed = false;
-    links.forEach(function (l) {
-      var master = links.filter(function (m) { return m.ifindex === l.master || m.ifname === l.master; })[0];
-      if (master && inputs[master.ifname] && !inputs[l.ifname]) { inputs[l.ifname] = true; changed = true; }
-    });
-  }
-  Object.keys(inputs).forEach(function (name) {
-    var current = links.filter(function (l) { return l.ifname === name; })[0];
-    if (current && current.xdp && current.xdp.attached && current.xdp.attached !== 'off') throw new Error('LAN fast-path conflict: remove XDP from ' + name);
-    var filters = JSON.parse(command(TC, ['-j', 'filter', 'show', 'dev', name, 'ingress']) || '[]');
-    if (filters.some(function (f) { return f.kind === 'bpf'; })) throw new Error('LAN fast-path conflict: disable Veer fast NAT/BPF on ' + name);
-  });
-  if (p.bindings.some(function (b) { return b.family === '4'; })) {
-    if (command(SYSCTL, ['-n', 'net.ipv4.ip_forward']).trim() !== '1') throw new Error('Enable net.ipv4.ip_forward on the host first');
-    if (command(SYSCTL, ['-n', 'net.ipv4.conf.all.rp_filter']).trim() === '1') throw new Error('Use loose/disabled global rp_filter for policy routing');
-  }
-  if (p.bindings.some(function (b) { return b.family === '6'; }) && command(SYSCTL, ['-n', 'net.ipv6.conf.all.forwarding']).trim() !== '1') throw new Error('Enable IPv6 forwarding on the host first');
-}
-function coversEither(a, b) { return covers(prefix(a), prefix(b)) || covers(prefix(b), prefix(a)); }
-function configuration(p) {
-  var lines = ['[Interface]', 'PrivateKey = ' + wgKey(secret.get('private_' + p.key)), 'ListenPort = ' + p.listen_port];
-  p.peers.forEach(function (peer) {
-    lines.push('[Peer]', 'PublicKey = ' + peer.public_key, 'AllowedIPs = ' + peer.allowed_ips.join(', '), 'PersistentKeepalive = ' + peer.keepalive);
-    if (peer.endpoint) lines.push('Endpoint = ' + peer.endpoint);
-    if (peer.preshared_key_secret) lines.push('PresharedKey = ' + wgKey(secret.get(peer.preshared_key_secret)));
-  });
-  return lines.join('\n') + '\n';
-}
-function firewall(p, existing, blocked) {
-  var lines = [];
-  if (existing) lines.push('delete table inet ' + p.nft);
-  lines.push('add table inet ' + p.nft + ' { comment "' + p.owner + '"; }');
-  lines.push('add chain inet ' + p.nft + ' forward { type filter hook forward priority -10; policy accept; }');
-  lines.push('add chain inet ' + p.nft + ' nat { type nat hook postrouting priority 100; policy accept; }');
-  p.bindings.forEach(function (b) {
-    var family = b.family === '4' ? 'ip' : 'ip6';
-    var select = 'iifname "' + b.lan_interface + '" ' + family + ' saddr ' + b.source;
-    p.bypass.forEach(function (cidr) {
-      if (prefix(cidr).family === b.family) lines.push('add rule inet ' + p.nft + ' forward ' + select + ' ' + family + ' daddr ' + cidr + ' return');
-    });
-    lines.push('add rule inet ' + p.nft + ' forward ' + select + ' ' + family + ' daddr ' + b.destination + (blocked ? '' : ' oifname != "' + p.interface + '"') + ' reject');
-    if (!blocked && p.masquerade) lines.push('add rule inet ' + p.nft + ' nat ' + select + ' oifname "' + p.interface + '" ' + family + ' daddr ' + b.destination + ' masquerade');
-  });
-  command(NFT, ['-f', '/dev/stdin'], lines.join('\n') + '\n');
-}
 function routePlan(p) {
   var out = [];
   ['4', '6'].forEach(function (family) {
@@ -376,66 +464,4 @@ function removePlan(p) {
   routePlan(p).forEach(function (r) {
     if (routes(p, r.family).some(function (v) { return routeMatches(v, r); })) ip(['-' + r.family, 'route', 'del'].concat(routeArgs(p, r)));
   });
-}
-function apply(key, raw) {
-  var p = normalize(key, raw), old = allLeases()[key];
-  var requested = settings(p);
-  if (old && old.pending && JSON.stringify(old.settings) !== JSON.stringify(requested)) throw new Error('Retry the failed configuration or teardown before editing it');
-  if (old && old.plan.slot !== p.slot) throw new Error('Teardown before changing the slot');
-  preflight(p, old);
-  var config = configuration(p); // Validate every secret before changing the host.
-  var previous = old && (old.previous || old.plan);
-  kv.set('lease_' + key, {active: true, pending: true, settings: requested, plan: p, previous: previous || null});
-  try {
-    firewall(p, !!table(p), true);
-    // Remove only exact, protocol-tagged resources recorded by this plugin.
-    if (previous) removePlan(previous);
-    removePlan(p); // A prior attempt may have failed after installing some rules.
-    if (!ownedLink(p)) {
-      ip(['link', 'add', 'name', p.interface, 'type', 'wireguard']);
-      ip(['link', 'set', 'dev', p.interface, 'alias', p.owner]);
-    }
-    command(WG, ['syncconf', p.interface, '/dev/stdin'], config);
-    ip(['link', 'set', 'dev', p.interface, 'mtu', String(p.mtu), 'up']);
-    if (p.bindings.some(function (b) { return b.family === '4'; })) command(SYSCTL, ['-w', 'net.ipv4.conf.' + p.interface + '.rp_filter=2']);
-    var current = jsonIP(['address', 'show', 'dev', p.interface])[0];
-    (current && current.addr_info || []).forEach(function (a) {
-      var cidr = prefix(a.local + '/' + a.prefixlen, true).text;
-      if (a.scope === 'global' && p.addresses.indexOf(cidr) < 0) ip(['address', 'del', cidr, 'dev', p.interface]);
-    });
-    p.addresses.forEach(function (cidr) { ip(['address', 'replace', cidr, 'dev', p.interface]); });
-    routePlan(p).forEach(function (r) { ip(['-' + r.family, 'route', 'replace'].concat(routeArgs(p, r))); });
-    p.bindings.forEach(function (b) { ip(['-' + b.family, 'rule', 'add'].concat(ruleArgs(p, b))); });
-    firewall(p, true, false);
-    kv.set('lease_' + key, {active: true, settings: requested, plan: p});
-    resources.set('status', key, {phase: 'applied', interface: p.interface, table: p.table, bindings: p.bindings, masquerade: p.masquerade}, true);
-    return {phase: 'applied', interface: p.interface, table: p.table};
-  } catch (e) {
-    // Keep the guard and lease on failure. A retry/teardown can recover exact state.
-    resources.set('status', key, {phase: 'error', interface: p.interface, error: String(e.message || e), cleanup_required: true}, true);
-    throw e;
-  }
-}
-function teardown(key) {
-  var lease = allLeases()[key];
-  if (!lease) return;
-  var p = lease.plan;
-  ownedLink(p); var nft = table(p);
-  if (lease.previous) removePlan(lease.previous);
-  removePlan(p);
-  if (ownedLink(p)) ip(['link', 'del', 'dev', p.interface]);
-  // Teardown explicitly returns traffic to the system's normal routing policy.
-  if (nft) command(NFT, ['delete', 'table', 'inet', p.nft]);
-  kv.delete('lease_' + key);
-  resources.set('status', key, {phase: 'down'}, false);
-}
-function inspect(key) {
-  var lease = allLeases()[key];
-  if (!lease) return {phase: 'down'};
-  var p = lease.plan;
-  if (!ownedLink(p)) return {phase: 'missing', interface: p.interface};
-  return {phase: 'configured', interface: p.interface, public_key: command(WG, ['show', p.interface, 'public-key']).trim(),
-    endpoints: command(WG, ['show', p.interface, 'endpoints']).trim(),
-    latest_handshakes: command(WG, ['show', p.interface, 'latest-handshakes']).trim(),
-    transfer: command(WG, ['show', p.interface, 'transfer']).trim()};
 }
