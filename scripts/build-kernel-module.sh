@@ -33,8 +33,21 @@ if ! readelf -S "$module" | grep -q '\.BTF '; then
     if [ -z "$resolver" ] || [ ! -x "$resolver" ]; then
         echo "matching kernel resolve_btfids tool is required (set RESOLVE_BTFIDS for a kernel source build)" >&2; exit 1;
     fi
-    pahole -J --btf_base "$VMLINUX_BTF" "$module"
-    "$resolver" -b "$VMLINUX_BTF" "$module"
+    # Resolve in an isolated directory so old sidecars from a previous build
+    # cannot be mistaken for this invocation's output. Older resolvers patch
+    # the ELF in place; newer ones emit both sections as separate files.
+    work=$(mktemp -d)
+    trap 'rm -rf -- "$work"' EXIT INT TERM
+    resolved="$work/veer_kfuncs.ko"
+    cp "$module" "$resolved"
+    pahole -J --btf_base "$VMLINUX_BTF" "$resolved"
+    "$resolver" -b "$VMLINUX_BTF" "$resolved"
+    if [ -f "$resolved.BTF" ]; then
+        [ -f "$resolved.BTF_ids" ] || { echo "resolver omitted .BTF_ids output" >&2; exit 1; }
+        objcopy --update-section ".BTF=$resolved.BTF" \
+            --update-section ".BTF_ids=$resolved.BTF_ids" "$resolved"
+    fi
+    install -m 0644 "$resolved" "$module"
 fi
 mkdir -p "$ROOT_DIR/kernel/$release"
 install -m 0644 "$ROOT_DIR/kernel/veer_kfuncs/veer_kfuncs.ko" "$ROOT_DIR/kernel/$release/veer_kfuncs.ko"

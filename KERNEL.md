@@ -39,7 +39,7 @@ KDIR=/lib/modules/$(uname -r)/build sh scripts/build-kernel-module.sh
 go build -tags veer_kfuncs -o veer .
 ```
 
-若 headers 包缺少 vmlinux，脚本仅在模块尚无 BTF 时，使用匹配的 base BTF、pahole 和 `resolve_btfids` 补齐。原生构建默认读取 `/sys/kernel/btf/vmlinux`；跨内核必须显式提供 `VMLINUX_BTF`。发行版没打包工具时可从对应内核源码构建 `tools/bpf/resolve_btfids`，通过 `RESOLVE_BTFIDS=/absolute/path/resolve_btfids` 指定。不能使用其他内核的 base BTF 冒充匹配版本。
+若 headers 包缺少 vmlinux，脚本仅在模块尚无 BTF 时，使用匹配的 base BTF、pahole 和 `resolve_btfids` 补齐，兼容工具原地更新 ELF 和输出独立 BTF 文件的两种方式。原生构建默认读取 `/sys/kernel/btf/vmlinux`；跨内核必须显式提供 `VMLINUX_BTF`。发行版没打包工具时可从对应内核源码构建 `tools/bpf/resolve_btfids`，通过 `RESOLVE_BTFIDS=/absolute/path/resolve_btfids` 指定。不能使用其他内核的 base BTF 冒充匹配版本。
 
 部署把模块放在 `<Veer 可执行文件目录>/kernel/<uname -r>/veer_kfuncs.ko`，要求 root 所有、普通文件、无 group/world 写权限。systemd 单元仅在存在已部署模块时增加 `CAP_SYS_MODULE`，并准备 `/run/veer-kfuncs`；默认部署不增加此权限。模块缺失、加载被拒绝、ABI/probe 不兼容时记录原因，使用基础路径。
 
