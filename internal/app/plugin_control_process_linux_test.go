@@ -113,6 +113,50 @@ func TestPluginManagedProcessConfigOwnershipAndCleanup(t *testing.T) {
 	}
 }
 
+func TestPluginManagedProcessOrphanDirectoryCleanup(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "processes")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	dead := exec.Command("/bin/true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(root, fmt.Sprintf("%d-old", dead.Process.Pid))
+	live := filepath.Join(root, fmt.Sprintf("%d-live", os.Getpid()))
+	for _, dir := range []string{orphan, live} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(orphan, "config"), []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	link := filepath.Join(root, fmt.Sprintf("%d-link", dead.Process.Pid))
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupPluginManagedProcessDirectories(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatal("orphan remains", err)
+	}
+	for _, dir := range []string{live, outside, link} {
+		if _, err := os.Lstat(dir); err != nil {
+			t.Fatal("live or unrelated path removed", dir, err)
+		}
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupPluginManagedProcessDirectories(alias); err == nil {
+		t.Fatal("symlink root accepted")
+	}
+}
+
 func TestPluginManagedProcessIdempotenceStopAndOwnerShutdown(t *testing.T) {
 	r := &pluginProcessRegistry{}
 	defer r.CloseAll()
