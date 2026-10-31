@@ -140,7 +140,10 @@
         if(n.type==='trojan' && !n.tls)fail('Trojan 必须启用 TLS');
         if(n.flow && (!n.tls || n.transport.type!=='tcp'))fail('Vision 需要 TCP + TLS/REALITY');
       } else if(n.type==='anytls') {
-        allowed(q,['sni','insecure','allowInsecure','alpn','fp']);
+        allowed(q,['sni','insecure','allowInsecure','alpn','fp','security','type','headerType']);
+        if(q.security && q.security!=='tls')fail('AnyTLS 仅支持 TLS，不支持此 security 参数');
+        if(q.type && !['tcp','raw'].includes(q.type))fail('AnyTLS 仅支持 TCP，不支持此传输方式');
+        if(q.headerType && q.headerType!=='none')fail('AnyTLS 不支持 TCP 伪装头');
         n.port=n.port||443;n.password=text(u.auth,'AnyTLS 密码');
         tls(n,q,'tls');
       } else if(n.type==='hysteria2') {

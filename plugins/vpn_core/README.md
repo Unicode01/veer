@@ -62,7 +62,7 @@ TC 适配器要求显式动态接口绑定，只在已应用出口的自有隧�
 | VLESS `vless://` | TCP / WebSocket / gRPC / HTTP2，TLS / REALITY、Vision；不支持新式 VLESS encryption |
 | Trojan `trojan://` | TLS、TCP / WebSocket / gRPC；sing-box 另支持 HTTP2 |
 | Hysteria2 `hysteria2://` / `hy2://` | TLS、单端口、可选 salamander 混淆 |
-| AnyTLS `anytls://` | 密码按 URL 编码，端口默认 443，支持 SNI、insecure，以及 ALPN / 指纹参数；不支持 REALITY |
+| AnyTLS `anytls://` | 密码按 URL 编码，端口默认 443，支持 SNI、insecure，以及 ALPN / 指纹参数；兼容显式 `security=tls`、`type=tcp` / `raw`、`headerType=none`，不支持 REALITY 或其他传输封装 |
 
 不支持的协议、传输或参数会在写入 Secret 前报错，不静默丢弃。其他核心功能仍可在“分流与高级配置”中切换为原生 JSON。已有原生 JSON 配置会以原生模式打开，留空继续沿用。这里只导入粘贴内容，不下载订阅 URL，也不接受 YAML；协议映射以 [Mihomo 文档](https://wiki.metacubex.one/en/config/proxies/)、[sing-box 文档](https://sing-box.sagernet.org/configuration/outbound/)、[SIP002](https://shadowsocks.org/doc/sip002.html)、[VMess/VLESS 链接提案](https://github.com/XTLS/Xray-core/discussions/716)、[Hysteria2 URI](https://v2.hysteria.network/docs/developers/URI-Scheme/) 和 [AnyTLS URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md) 为依据。
 

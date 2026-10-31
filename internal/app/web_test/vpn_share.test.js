@@ -39,6 +39,15 @@ for(const driver of ['mihomo','sing_box']) {
     assert.equal(S.parse('anytls://secret@192.0.2.2?insecure=0',driver)[0].tls.insecure,false);
     assert.equal(S.parse('anytls://YWJjZA==@node.example',driver)[0].password,'YWJjZA==');
   });
+  test(driver+' accepts explicit AnyTLS TLS/TCP defaults from sharing clients without changing generated settings',()=>{
+    const plain='anytls://private-password@node.example?sni=example.com&insecure=0&allowInsecure=0',
+      suffix='&security=tls&type=tcp&headerType=none';
+    for(const link of [plain+suffix,plain+suffix.replace('type=tcp','type=raw')]) {
+      assert.deepEqual(S.parse(link,driver),S.parse(plain,driver));
+      assert.deepEqual(S.generate(S.create(driver,link)),S.generate(S.create(driver,plain)));
+      assert.deepEqual(S.parse(b64(link),driver),S.parse(plain,driver));
+    }
+  });
   test(driver+' generates complete configs for each protocol and keeps WAN topology under plugin control',()=>{
     for(const link of samples) {
       const v=S.create(driver,link,0,{}), config=S.generate(v);
@@ -75,6 +84,7 @@ for(const driver of ['mihomo','sing_box']) {
       'anytls://@host','anytls://private-password@host:0','anytls://private-password@host?insecure=perhaps',
       'anytls://private-password@host?security=none','anytls://private-password@host?security=reality',
       'anytls://private-password@host?pbk=unknown','anytls://private-password@host?type=ws',
+      'anytls://private-password@host?headerType=http',
       'anytls://private-password@host?sni=bad/host'];
     for(const value of invalid)assert.throws(()=>S.parse(value,driver),e=>!e.message.includes('private-password')&&!e.message.includes(id));
     for(const o of [{direct_cidrs:['10.0.0.0/999']},{direct_cidrs:['1.2.3.999/32']},{direct_domains:'example.com\ninvalid/host'},{proxy_dns:'host.example'},{dns_hijack:'perhaps'},{__unknown:true}])assert.throws(()=>S.options(o));
