@@ -170,18 +170,18 @@ const apiFixtures = new Map([
 
 const browserErrors = new WeakMap();
 
-test('WireGuard example saves drafts and secrets, applies and loads profiles through the real UI bridge', async ({ page }, testInfo) => {
+test('VPN WAN saves drafts and encrypted core configurations through the real UI bridge', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
   const profile = {slot:2, addresses:['10.77.0.1/32'], peers:[{public_key:'peer', allowed_ips:['0.0.0.0/0']}],
     remote_routes:[]};
   const records = {saved:{key:'saved', data:profile, enabled:true}};
   const actions = [];
   const methods = ['list','get','create','update'];
-  const plugin = {id:'wireguard_mesh', name:'WireGuard', kind:'pipeline', stability:'lab', version:'0.2.0', status:'active', enabled:true,
+  const plugin = {id:'wireguard_mesh', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.4.0', status:'active', enabled:true,
     resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
-    actions:['set_key','apply','teardown','inspect'].map(id => ({id})),
-    ui:{entry:'index.html', page:'wireguard', page_title:'WireGuard', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
-      actions:['set_key','apply','teardown','inspect']}, asset_base_path:'/api/plugins/wireguard_mesh/assets/', runtime:{mode:'control'}};
+    actions:['set_key','set_core_config','apply','teardown','inspect','core_logs'].map(id => ({id})),
+    ui:{entry:'index.html', page:'wireguard', page_title:'VPN', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
+      actions:['set_key','set_core_config','apply','teardown','inspect','core_logs']}, asset_base_path:'/api/plugins/wireguard_mesh/assets/', runtime:{mode:'control'}};
   await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
   await page.route('**/api/plugins/wireguard_mesh/**', async route => {
     const url = new URL(route.request().url());
@@ -203,10 +203,10 @@ test('WireGuard example saves drafts and secrets, applies and loads profiles thr
   await page.evaluate(() => window.VeerApp.loadPlugins());
   await page.locator('[data-tab="plugin-wireguard"]').click();
   const frame = page.frameLocator('#tab-plugin-wireguard .plugin-page-frame');
-  await expect(frame.locator('h1')).toHaveText('WireGuard');
+  await expect(frame.locator('h1')).toHaveText('VPN');
   await frame.getByRole('combobox', {name:'已保存隧道'}).selectOption('saved');
-  await expect(frame.getByLabel('WireGuard 配置')).toHaveValue(JSON.stringify(profile, null, 2));
-  expect(await frame.getByLabel('WireGuard 配置').evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThanOrEqual(260);
+  await expect(frame.getByLabel('VPN 出口配置')).toHaveValue(JSON.stringify(profile, null, 2));
+  expect(await frame.getByLabel('VPN 出口配置').evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThanOrEqual(260);
   await frame.getByRole('button', {name:'保存草稿', exact:true}).click();
   await expect(frame.getByRole('button', {name:'保存并应用', exact:true})).toBeEnabled();
   expect(actions).toHaveLength(0);
@@ -217,10 +217,21 @@ test('WireGuard example saves drafts and secrets, applies and loads profiles thr
   await frame.getByRole('button', {name:'保存并应用', exact:true}).click();
   await expect.poll(() => actions.map(a => a.id)).toEqual(['set_key','apply']);
   await expect(frame.locator('body')).not.toContainText('sensitive-key');
+  await frame.getByRole('button', {name:'Mihomo', exact:true}).click();
+  await frame.getByLabel('代理核心 JSON 配置').fill(JSON.stringify({proxies:[{password:'core-secret'}],rules:['MATCH,DIRECT']}));
+  await frame.getByRole('button', {name:'保存核心配置', exact:true}).click();
+  await expect(frame.getByLabel('代理核心 JSON 配置')).toHaveValue('');
+  expect(actions.at(-1)).toEqual({id:'set_core_config',payload:{key:'saved',value:JSON.stringify({proxies:[{password:'core-secret'}],rules:['MATCH,DIRECT']})}});
+  await frame.getByRole('button', {name:'保存并应用', exact:true}).click();
+  await expect.poll(() => actions.map(a => a.id)).toEqual(['set_key','apply','set_core_config','apply']);
+  expect(records.saved.data.driver).toBe('mihomo');
+  await frame.getByRole('button', {name:'查看核心日志', exact:true}).click();
+  await expect.poll(() => actions.at(-1).id).toBe('core_logs');
+  await expect(frame.locator('body')).not.toContainText('core-secret');
   await expectNoPageOverflow(page);
   expect(await frame.locator('body').evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
   await page.evaluate(() => window.scrollTo(0,0));
-  await page.screenshot({path:testInfo.outputPath('wireguard.png'), fullPage:true});
+  await page.screenshot({path:testInfo.outputPath('vpn.png'), fullPage:true});
 });
 
 test('plugin installation controls follow the host policy while plugin pages remain accessible', async ({ page }, testInfo) => {

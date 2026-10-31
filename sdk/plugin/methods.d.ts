@@ -150,6 +150,12 @@ declare global {
     "plugins.services.list": typeof plugins.services.list;
     "plugins.services.resolve": typeof plugins.services.resolve;
     "process.exec": typeof process.exec;
+    "process.list": typeof process.list;
+    "process.logs": typeof process.logs;
+    "process.restart": typeof process.restart;
+    "process.start": typeof process.start;
+    "process.status": typeof process.status;
+    "process.stop": typeof process.stop;
     "resources.delete": typeof resources.delete;
     "resources.get": typeof resources.get;
     "resources.list": typeof resources.list;

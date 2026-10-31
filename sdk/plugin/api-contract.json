@@ -1,5 +1,5 @@
 {
-  "version": 9,
+  "version": 10,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -62,6 +62,7 @@
       "control.typed_services.v1",
       "control.process_isolation.v1",
       "control.exec.v1",
+      "control.process.v1",
       "control.raw_l2",
       "control.resource_schema.v1",
       "control.resource_limits.v1",
@@ -2629,6 +2630,90 @@
         "max_response_bytes": 75497472
       },
       {
+        "method": "process.list",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.logs",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.restart",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.start",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.status",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.stop",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
         "method": "resources.delete",
         "permissions": [
           "resource"
@@ -3030,6 +3115,12 @@
     "plugins.services.list",
     "plugins.services.resolve",
     "process.exec",
+    "process.list",
+    "process.logs",
+    "process.restart",
+    "process.start",
+    "process.status",
+    "process.stop",
     "resources.delete",
     "resources.get",
     "resources.list",

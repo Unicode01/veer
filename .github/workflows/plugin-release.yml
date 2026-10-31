@@ -138,6 +138,22 @@ jobs:
       - name: Verify native core dataplane
         run: sudo env "PATH=$PATH" sh scripts/verify-plugin-release.sh core-dataplane
 
+  vpn-cores:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install VPN integration dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev iproute2 util-linux wireguard-tools iputils-ping ethtool curl
+      - name: Build packet adapters
+        run: sh scripts/build-all-ebpf.sh
+      - name: Verify real Mihomo and sing-box WANs and managed process lifecycle
+        run: sudo env "PATH=$PATH" sh scripts/verify-vpn-cores.sh
+
   platform-vm:
     runs-on: ubuntu-latest
     timeout-minutes: 35

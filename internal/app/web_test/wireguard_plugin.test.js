@@ -57,7 +57,7 @@ function fixture(config = profile(), options = {}) {
       return ok();
     }
   };
-  const host=createTestHost({pluginDir:options.pluginDir||pluginDir,availableFeatures:options.availableFeatures,remoteInstallEnabled:options.remoteInstallEnabled,fixtures:{kv:options.kv||{},resources:{profiles:{default:{data:config,enabled:options.enabled!==false}}},secrets:options.missingKey?{}:{private_default:PRIVATE}},adapters}).load();
+  const host=createTestHost({pluginDir:options.pluginDir||pluginDir,availableFeatures:options.availableFeatures,remoteInstallEnabled:options.remoteInstallEnabled,fixtures:{kv:options.kv||{},resources:{profiles:{default:{data:config,enabled:options.enabled!==false}}},secrets:options.missingKey?{}:{private_default:PRIVATE,...options.secrets}},adapters:{...adapters,...options.adapters}}).load();
   return {host,state,apply:()=>host.action('apply',{key:'default'}),maps:()=>host.state.maps};
 }
 test('WG is opt-in and registration/drafts do not change networking',()=>{
@@ -182,4 +182,126 @@ test('WG selects a probed optional object and coordinates GSO, with missing-arti
   const fallback=fixture(profile(),options);fallback.apply();
   assert.equal(fallback.host.snapshot().surface.objects[0].path,'wg_adapter.o');
   assert.equal(fallback.state.records.sessions.wg_default.data.interface_preparation.local_offloads.gso,false);
+});
+
+
+function vpnFixture(driver = 'mihomo', extra = {}, options = {}) {
+  const state = options.state || {links:[], records:{sessions:{},status:{}}, calls:[], services:[], next:10};
+  const procs = options.procs || {};
+  const specs = [];
+  const adapters = {
+    'process.status': id => procs[id] || {id,state:'stopped',started_at:0},
+    'process.stop': id => {
+      if (procs[id]) { delete procs[id]; state.links = state.links.filter(l => l.ifname !== 'vtun' + id.slice(4)); }
+      return {id,state:'stopped'};
+    },
+    'process.start': spec => {
+      specs.push(clone(spec));
+      if (!procs[spec.id]) {
+        procs[spec.id] = {id:spec.id,state:'running',pid:100,starts:1,started_at:1000};
+        if (!options.delayed) state.links.push({ifname:'vtun'+spec.id.slice(4),ifindex:state.next++,ifalias:'',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
+      }
+      return procs[spec.id];
+    },
+    'process.restart': id => {
+      const p=procs[id];
+      if (p.starts >= 4) throw new Error('restart budget exhausted');
+      p.starts++;p.started_at+=1000;
+      state.links=state.links.filter(l=>l.ifname!=='vtun'+id.slice(4));
+      state.links.push({ifname:'vtun'+id.slice(4),ifindex:state.next++,ifalias:'',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
+      return {...p,state:'restarting'};
+    }
+  };
+  const h = fixture({driver,slot:1,mtu:1420,addresses:['10.78.0.1/32'],upstream_interface:'eth0',...extra},
+    {...options,state,secrets:{core_default:JSON.stringify(driver === 'mihomo' ? {proxies:[{password:'sensitive-core-password'}],tun:{'auto-route':true}} : {outbounds:[{type:'direct',tag:'direct'}]}),...options.secrets},adapters:{...adapters,...options.adapters}});
+  return {...h,procs,specs};
+}
+for (const driver of ['mihomo','sing_box']) {
+  test('VPN '+driver+' uses a managed TUN WAN and leaves host routing to the selected upstream',()=>{
+    const h=vpnFixture(driver); const result=h.apply();
+    assert.equal(result.phase,'applied');assert.equal(result.egress_nat_interface,'veervpn1');assert.equal(result.egress_nat_redirect_mode,'prepared_l2');
+    assert.equal([...h.maps().values()][0].size,2);const config=JSON.parse(h.specs[0].config);
+    if(driver==='mihomo') {assert.equal(config.tun.stack,'gvisor');assert.equal(config.tun['auto-route'],false);assert.equal(config.tun['auto-redirect'],false);assert.equal(config['interface-name'],'eth0');}
+    else {assert.equal(config.inbounds[0].stack,'gvisor');assert.equal(config.inbounds[0].auto_route,false);assert.equal(config.route.default_interface,'eth0');}
+    assert.ok(!JSON.stringify(h.host.snapshot().resources.status).includes('sensitive-core-password'));
+    h.host.action('teardown',{});assert.equal(h.state.links.length,0);assert.deepEqual(h.procs,{});
+  });
+}
+test('VPN delayed TUN is withheld until ready, then claimed and published by repair',()=>{
+  const h=vpnFixture('mihomo',{}, {delayed:true});assert.equal(h.apply().phase,'starting');
+  assert.equal(h.state.records.status.vpn_default.enabled,false);
+  h.state.links.push({ifname:'vtundefault',ifindex:h.state.next++,ifalias:'',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
+  assert.equal(h.state.links.find(l=>l.ifname==='vtundefault').ifalias,'veer:wireguard_mesh:default');
+});
+
+test('VPN startup without a TUN times out through the existing restart budget',()=>{
+  const h=vpnFixture('mihomo',{}, {delayed:true});h.apply();
+  h.procs.vpn_default.started_at=Date.now();
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});assert.equal(h.procs.vpn_default.starts,1);
+  h.procs.vpn_default.started_at=Date.now()-31000;
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});assert.equal(h.procs.vpn_default.starts,2);
+  assert.equal(h.state.records.sessions.vpn_default.enabled,false);
+});
+test('VPN core death withdraws both packet directions and never resets an exhausted restart budget',()=>{
+  const h=vpnFixture();h.apply();h.procs.vpn_default.state='exited';h.procs.vpn_default.exit_code=2;
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal([...h.maps().values()][0].size,0);assert.equal(h.state.records.sessions.vpn_default.enabled,false);
+  assert.equal(h.host.snapshot().resources.status.default.data.phase,'failed');
+  assert.equal(h.procs.vpn_default.starts,1);
+});
+
+test('VPN deleted TUN uses bounded health recovery, and down/MTU drift repairs the owned link',()=>{
+  const h=vpnFixture();h.apply();
+  h.state.links.find(l=>l.ifname==='vtundefault').flags=[];
+  h.state.links.find(l=>l.ifname==='vtundefault').mtu=1300;
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.state.links.find(l=>l.ifname==='vtundefault').mtu,1420);
+  assert.equal(h.procs.vpn_default.starts,1);
+  h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.procs.vpn_default.starts,2);
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
+  h.procs.vpn_default.starts=4;
+  h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.match(h.host.snapshot().resources.status.default.data.error,/budget exhausted/);
+  assert.equal([...h.maps().values()][0].size,0);
+});
+test('VPN recovery restores the applied encrypted configuration and ignores newer drafts',()=>{
+  const h=vpnFixture();h.apply();const applied=h.specs[0].config;
+  h.host.action('set_core_config',{value:JSON.stringify({proxies:[{password:'new-draft'}]})});
+  h.procs.vpn_default.started_at=2000;h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
+  h.state.links.push({ifname:'vtundefault',ifindex:h.state.next++,ifalias:'',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.specs.at(-1).config,applied);assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
+});
+
+test('VPN healthy reconciliation preserves the WAN boundary and running core',()=>{
+  const h=vpnFixture();h.apply();const preparations=h.state.services.length;
+  h.host.reconcile();
+  assert.equal(h.state.services.length,preparations);
+  assert.equal(h.procs.vpn_default.starts,1);
+  assert.equal(h.state.records.sessions.vpn_default.data.usable,true);
+  assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
+});
+
+test('VPN logs are explicit and fit the bounded runtime query response',()=>{
+  const h=vpnFixture('mihomo',{}, {adapters:{'process.logs':()=>({stdout:'x'.repeat(64000),stderr:'y'.repeat(64000),truncated:false})}});
+  h.apply();const logs=h.host.action('core_logs',{});
+  assert.equal(logs.stdout.length,4000);assert.equal(logs.stderr.length,4000);assert.equal(logs.truncated,true);
+});
+test('VPN rejects recursive upstreams, executable injection and foreign TUNs',()=>{
+  for (const extra of [{upstream_interface:'veervpn1'},{core_path:'/bin/sh'},{addresses:['10.0.0.1/8']},{remote_routes:['0.0.0.0/0']}]) {
+    const h=vpnFixture('mihomo',extra);assert.throws(h.apply);assert.equal(h.state.services.length,0);assert.equal(h.specs.length,0);
+  }
+  const h=vpnFixture();h.state.links.push({ifname:'vtundefault',ifindex:19,ifalias:'foreign',linkinfo:{info_kind:'tun'}});
+  assert.throws(h.apply,/ownership/);assert.equal(h.specs.length,0);
+});
+test('VPN external TUN mode checks explicit ownership and leaves the provider device intact',()=>{
+  const h=vpnFixture('tun',{tun_interface:'tun0',tun_alias:'external-owner'});
+  h.state.links.push({ifname:'tun0',ifindex:30,ifalias:'external-owner',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
+  h.apply();assert.equal(h.specs.length,0);h.host.action('teardown',{});
+  assert.deepEqual(h.state.links.map(l=>l.ifname),['tun0']);
 });

@@ -1,4 +1,58 @@
-# WireGuard WAN 示例插件
+# VPN WAN 插件
+
+显式安装的 `lab` 插件，不默认打包，也不自动下载核心。目录、插件 ID `wireguard_mesh`、页面 ID 和旧 WG 的 WAN 名称保留，以兼容已保存的配置与 LAN 引用。
+
+| driver | 数据处理 | 依赖 |
+| --- | --- | --- |
+| `wireguard`（旧配置默认值） | 内核 WireGuard | wireguard-tools |
+| `mihomo` | Mihomo TUN / gVisor 与代理协议 | 本机预装 Mihomo |
+| `sing_box` | sing-box TUN / gVisor 与代理协议 | 本机预装 sing-box，带 gVisor |
+| `tun` | 外部 TUN 提供者 | 提供者自行运行 |
+
+各驱动共用 WAN Core 和双向 TC L2/L3 适配，JavaScript 不逐包转发，无需关闭 Veer 快速 NAT。
+
+## Mihomo / sing-box
+
+```text
+下游 → Veer TC 分流/NAT → veervpnN ↔ veervpnpN → TC ↔ vtun<标识> ↔ 代理核心 → 原有上游
+```
+
+按下方安装步骤安装插件和 `wan_core`，保持远程插件安装关闭。由本机管理员将核心安装到 `/usr/local/bin/mihomo` 或 `/usr/local/bin/sing-box`，也可用 `core_path` 指定其他绝对路径；文件名必须对应核心。插件不下载核心、不运行 shell。
+
+在 VPN 页面加密保存核心 JSON 配置，再保存并应用出口配置：
+
+```json
+{"driver":"mihomo","slot":1,"mtu":1420,"addresses":["10.78.0.1/32"],"upstream_interface":"eth0","max_restarts":3}
+```
+
+sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密保存为 `core_<标识>`，最多 768 KiB；也可通过 `config_secret` 引用已有 Secret。节点、规则和 DNS 使用对应核心的 JSON 格式，不提供跨核心订阅格式转换。重新应用后生效；恢复使用单独加密保存的已应用配置，不读取后续草稿。
+
+插件生成独占 TUN，强制 gVisor、关闭自动路由和自动重定向，并指定实际上游。Mihomo 额外入站/控制端口及 sing-box 额外入站/experimental 控制项不沿用；不能把 VPN 自身或其他 VPN 边界作为上游。WAN 地址使用 `/32` 或 `/128`，不安装 `remote_routes`。相对文件和资源下载需按核心要求准备，工作目录是受管理的临时目录。
+
+宿主按插件控制代际托管进程，提供状态、有限日志、优雅停止、超时强杀、子进程清理和指数退避重启。默认失败重启 3 次，耗尽后需显式重新应用；定时恢复不重置预算；TUN 丢失时通过同一预算执行受控重启，接口 DOWN/MTU 漂移在核验归属后原地修复。插件停用、控制 VM 停止及 Veer 退出会停止进程，Linux 设置父进程死亡信号。完整资源保护下，核心使用独立 cgroup，复用配置中的插件 CPU/内存/PID 和全局上限；核心拥有本地 exec 的服务权限，不属于低权限 JS 沙箱。
+
+核心进程存在且自有 TUN 就绪后才发布可用 WAN；每秒检查状态、ifindex 和 MTU；启动后默认 30 秒仍未创建 TUN 则按同一预算重启，可用 startup_timeout_seconds 调整为 1–300 秒。失败时撤销 TC 映射和 WAN 可用状态，保留所选出口，不回退到直连。ready 只表示本机接入完成，不代表远端节点健康；核心重启会中断它持有的代理连接。WebUI 可按需读取核心日志的尾部，日志可能包含凭据，不会自动加入状态。
+
+slot 1 的出口选择 `veervpn1`、源 IPv4 `10.78.0.1`、模式 `prepared_l2`。IPv4 NAT 后核心无法直接区分原下游 IP，设备选择留给 Veer。DNS/fake-IP、UDP/ICMP 支持受核心和代理协议约束，不等同于任意 IP 协议的双向路由 VPN；宿主代发 DNS 不自动继承设备出口。
+
+## 外部 TUN
+
+```json
+{"driver":"tun","slot":1,"addresses":["10.78.0.1/32"],"mtu":1420,"tun_interface":"tun0","tun_alias":"my-vpn-provider"}
+```
+
+提供者需创建同一网络命名空间内的 Linux TUN，设置匹配的 alias、MTU 并启用。插件核验身份后只接入 TC/WAN，不启动进程、不接管 FD、不修改或删除提供者接口。纯 SOCKS/HTTP 监听器需另配 TUN 转换。
+
+代理核心测试在独立网络命名空间运行真实加密 Shadowsocks 对端、Veer TC NAT、两种核心的 TCP/UDP 和大包回传，并检查普通 WAN、重启和拆除：
+
+```sh
+sudo env "PATH=$PATH" sh scripts/verify-vpn-cores.sh
+```
+
+脚本下载固定版本并核验 SHA256，退出后清理；也可通过 `VEER_TEST_MIHOMO` / `VEER_TEST_SING_BOX` 提供本机核心。
+
+## WireGuard 驱动
+
 
 显式安装的 `lab` 插件，不进入默认发布包，也不自动安装 WireGuard。一个 profile 提供一个 WAN，LAN 或下游设备通过现有 Veer 出向 NAT 选择它。
 
@@ -17,7 +71,7 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 1. Linux 内核需支持 WireGuard，安装 `wireguard-tools iproute2 ethtool`，确认 `/usr/bin/wg`、`/usr/sbin/ip` 可用。主机原有路由和防火墙需允许对端 UDP。
 2. 在 Linux 源码目录运行 `sh plugins/wireguard_mesh/build.sh`，生成 `wg_adapter.o`。将整个插件目录复制到实际 `plugins_dir`，同时安装 `wan_core >=1.5.0 <2.0.0`。
 3. 开启 `plugins_enabled=true` 和 `plugins_dataplane_enabled=true`；保持默认 `plugins_remote_install_enabled=false` 以允许插件 exec。插件需要 Veer 的网络管理权限，不执行 shell 或用户提供的脚本。
-4. 打开 WireGuard 页面，保存私钥，再保存并应用 profile。空插件和仅保存的草稿不更改网络。
+4. 打开 VPN 页面，保存私钥，再保存并应用 profile。空插件和仅保存的草稿不更改网络。
 5. 在 LAN 配置中选择此 WAN，或在出向 NAT 中设置出口接口、源 IPv4 与 `prepared_l2` 重定向模式。不要填写内核 `vwg*` 接口作为核心 NAT 出口。
 
 ## 配置示例

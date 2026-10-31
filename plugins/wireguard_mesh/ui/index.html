@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WireGuard</title>
+  <title>VPN</title>
   <style>
     .wg-page { padding:8px; }
     .wg-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }
@@ -37,10 +37,11 @@
   const key = input('default');
   const secretName = input('');
   const privateKey = input('', 'password'); privateKey.autocomplete = 'new-password';
-  const editor = h('textarea', {className:F.classes.input + ' wg-json', attrs:{spellcheck:'false', 'aria-label':'WireGuard 配置'}});
+  const editor = h('textarea', {className:F.classes.input + ' wg-json', attrs:{spellcheck:'false', 'aria-label':'VPN 出口配置'}});
+  const coreEditor = h('textarea', {className:F.classes.input + ' wg-json', attrs:{spellcheck:'false', 'aria-label':'代理核心 JSON 配置'}});
   const output = h('pre', {className:'wg-output', text:'尚未加载'});
   const picker = h('select', {className:F.classes.input, attrs:{'aria-label':'已保存隧道'}});
-  controls.push(key, secretName, privateKey, editor, picker);
+  controls.push(key, secretName, privateKey, editor, coreEditor, picker);
   function selected() {
     if (!/^[a-z][a-z0-9_]{0,10}$/.test(key.value)) throw new Error('隧道标识使用 1–11 位小写字母、数字或下划线，以字母开头');
     return key.value;
@@ -50,6 +51,12 @@
       peers:[{public_key:'替换为对端公钥', endpoint:'192.0.2.2:51820', allowed_ips:[mesh ? '192.168.20.0/24' : '0.0.0.0/0'], keepalive:25}],
       remote_routes:[]}, null, 2);
     F.requestResize();
+  }
+  function corePreset(driver) {
+    const config = {driver, slot:1, addresses:['10.78.0.1/32'], mtu:1420};
+    if (driver === 'tun') { config.tun_interface = 'tun0'; config.tun_alias = 'my-vpn-provider'; }
+    else { config.upstream_interface = 'eth0'; coreEditor.value = JSON.stringify(driver === 'mihomo' ? {mode:'rule', proxies:[], rules:['MATCH,DIRECT']} : {outbounds:[{type:'direct',tag:'direct'}],route:{final:'direct'}}, null, 2); }
+    editor.value = JSON.stringify(config,null,2); F.requestResize();
   }
   async function reload() {
     const result = await F.data.list('profiles');
@@ -67,7 +74,7 @@
     try {
       const record = await F.data.get('profiles', id);
       key.value = id;
-      editor.value = JSON.stringify(record.data, null, 2); privateKey.value = ''; secretName.value = '';
+      editor.value = JSON.stringify(record.data, null, 2); privateKey.value = ''; secretName.value = ''; coreEditor.value = '';
     } catch (e) { F.toastError(e); }
     finally { busy = false; controls.forEach(function (c) { c.disabled = false; }); }
     F.requestResize();
@@ -82,13 +89,13 @@
     } finally { privateKey.value = ''; }
   }
   const page = h('main', {className:F.classes.page + ' wg-page'}, [F.stack([
-    F.card([h('h1', {className:F.classes.title, text:'WireGuard'}),
-      h('p', {className:F.classes.description, text:'创建 WireGuard WAN 后，在 LAN 或出向 NAT 中选择该出口，即可让整个 LAN 或指定下游设备通过隧道访问互联网或远端内网。'}),
-      h('p', {className:F.classes.description, text:'流量经过 Veer 快速 NAT 与 TC 适配器，WireGuard 加解密由内核处理。主机需安装 WireGuard 工具；上游路由和防火墙需允许对端 UDP。'})]),
-    F.card([h('h2', {className:F.classes.title, text:'隧道配置'}),
+    F.card([h('h1', {className:F.classes.title, text:'VPN'}),
+      h('p', {className:F.classes.description, text:'创建 VPN WAN 后，在 LAN 或出向 NAT 中选择该出口，即可让整个 LAN 或指定下游设备通过隧道访问互联网或远端内网。'}),
+      h('p', {className:F.classes.description, text:'支持 WireGuard、Mihomo、sing-box 和外部 TUN。先在主机安装所选核心，再在此配置出口。核心故障时暂停该出口。'})]),
+    F.card([h('h2', {className:F.classes.title, text:'出口配置'}),
       h('div', {className:'wg-fields'}, [field('隧道标识', key), field('已保存隧道', picker)]),
-      h('div', {className:'wg-actions'}, [button('互联网出口示例', function () { preset(false); }, true), button('远端内网示例', function () { preset(true); }, true)]),
-      h('p', {className:F.classes.description, text:'每个隧道使用不同 slot（1–8）。slot 1 对应 WAN 接口 veerwg1；出向 NAT 源地址填写 addresses 中的 IPv4。AllowedIPs 决定隧道可访问的目标，私钥单独保存。IPv4 出向 NAT 会转换源地址，远端主动访问下游需另行配置端口转发。'}),
+      h('div', {className:'wg-actions'}, [button('WireGuard 出口', function () { preset(false); }, true), button('WireGuard 内网', function () { preset(true); }, true), button('Mihomo', function () { corePreset('mihomo'); }, true), button('sing-box', function () { corePreset('sing_box'); }, true), button('外部 TUN', function () { corePreset('tun'); }, true)]),
+      h('p', {className:F.classes.description, text:'每个出口使用不同 slot（1–8）。WireGuard 使用 veerwg1，其他核心使用 veervpn1；出向 NAT 源地址填写 addresses 中的 IPv4。upstream_interface 填主机实际上联网口。'}),
       editor, h('div', {className:'wg-actions'}, [
         button('保存草稿', async function () { await F.data.upsert('profiles', selected(), JSON.parse(editor.value), {enabled:true}); await reload(); F.toast('已保存，尚未应用'); }, true),
         button('保存并应用', async function () { const id = selected(); await F.data.upsert('profiles', id, JSON.parse(editor.value), {enabled:true}); await F.action('apply', {key:id}); await reload(); F.toast('已应用'); }),
@@ -97,12 +104,15 @@
           await F.action('teardown', {key:selected()}); await reload();
         }, true)
       ])]),
-    F.card([h('h2', {className:F.classes.title, text:'密钥'}), h('div', {className:'wg-fields'}, [field('私钥 / 预共享密钥', privateKey), field('Secret 名称（留空保存本隧道私钥）', secretName)]),
+    F.card([h('h2', {className:F.classes.title, text:'WireGuard 密钥'}), h('div', {className:'wg-fields'}, [field('私钥 / 预共享密钥', privateKey), field('Secret 名称（留空保存本隧道私钥）', secretName)]),
       h('p', {className:F.classes.description, text:'密钥只写入加密 Secret，不会回填。使用预共享密钥时，在 peer 中填写对应 preshared_key_secret。'}), button('保存密钥', storeKey)]),
+    F.card([h('h2', {className:F.classes.title, text:'代理核心配置'}), h('p', {className:F.classes.description, text:'Mihomo / sing-box 使用 JSON 格式。节点、规则和 DNS 由对应核心处理；TUN 接入与上联网口由出口配置统一管理。配置加密保存，不会回填；保存后需重新应用出口。'}), coreEditor, button('保存核心配置', async function () { try { await F.action('set_core_config', {key:selected(), value:coreEditor.value}); F.toast('已加密保存，重新应用后生效'); } finally { coreEditor.value = ''; } })]),
     F.card([h('h2', {className:F.classes.title, text:'运行状态'}), h('div', {className:'wg-actions'}, [
-      button('刷新状态', reload, true), button('查看握手与流量', async function () { output.textContent = JSON.stringify(await F.action('inspect', {key:selected()}), null, 2); }, true)]), output])
+      button('刷新状态', reload, true), button('查看核心状态', async function () { output.textContent = JSON.stringify(await F.action('inspect', {key:selected()}), null, 2); }, true),
+      button('查看核心日志', async function () { output.textContent = JSON.stringify(await F.action('core_logs', {key:selected()}), null, 2); }, true)]),
+      h('p', {className:F.classes.description, text:'核心日志可能包含节点凭据，仅在排障时查看，分享前请自行脱敏。'}), output])
   ])]);
-  preset(false, false); document.body.replaceChildren(page);
+  preset(false); document.body.replaceChildren(page);
   reload().catch(F.toastError).finally(F.requestResize);
 })();
 </script>
