@@ -228,6 +228,7 @@ for (const driver of ['mihomo','sing_box']) {
   test('VPN '+driver+' uses a managed TUN WAN and leaves host routing to the selected upstream',()=>{
     const h=vpnFixture(driver); const result=h.apply();
     assert.equal(result.phase,'applied');assert.equal(result.egress_nat_interface,'veervpn1');assert.equal(result.egress_nat_redirect_mode,'prepared_l2');
+    assert.equal(h.host.action('inspect',{}).phase,'applied');
     assert.equal([...h.maps().values()][0].size,2);const config=JSON.parse(h.specs[0].config);
     if(driver==='mihomo') {assert.equal(config.tun.stack,'gvisor');assert.equal(config.tun['auto-route'],false);assert.equal(config.tun['auto-redirect'],false);assert.equal(config['interface-name'],'eth0');}
     else {assert.equal(config.inbounds[0].stack,'gvisor');assert.equal(config.inbounds[0].auto_route,false);assert.equal(config.route.default_interface,'eth0');}

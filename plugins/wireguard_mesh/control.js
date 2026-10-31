@@ -327,7 +327,11 @@ function teardownProfile(key) {
 function inspect(key) {
   var lease = allLeases()[key]; if (!lease) return {phase: 'down'};
   var p = lease.plan;
-  if (p.driver && p.driver !== 'wireguard') return {phase: resources.get('status', key), driver: p.driver, process: p.driver === 'tun' ? null : process.status('vpn_' + key), interface: p.interface, wan_id: p.wan_id};
+  if (p.driver && p.driver !== 'wireguard') {
+    var status = resources.get('status', key);
+    return {phase: status && status.data ? status.data.phase : 'missing', driver: p.driver,
+      process: p.driver === 'tun' ? null : process.status('vpn_' + key), interface: p.interface, wan_id: p.wan_id};
+  }
   if (!ownedLink(p)) return {phase: 'missing', interface: p.interface};
   return {phase: 'configured', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
     public_key: command(WG, ['show', p.interface, 'public-key']).trim(), endpoints: command(WG, ['show', p.interface, 'endpoints']).trim(),
