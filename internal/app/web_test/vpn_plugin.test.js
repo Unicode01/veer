@@ -12,6 +12,7 @@ function fixture(config = profile(), options = {}) {
   const state = options.state || {links:[], records:{sessions:{},status:{}}, calls:[], services:[], next:10, config:'', fail:null};
   const ok = (stdout = '') => ({stdout, stderr:'', exit_code:0});
   const adapters = {
+    'net.link.list': () => options.inventory || [],
     'net.link.get': name => {
       const l=state.links.find(l=>l.ifname===name);
       if(!l) throw new Error('net.link.get: link not found: '+name);
@@ -58,6 +59,7 @@ function fixture(config = profile(), options = {}) {
         return ok(a[0]==='pubkey'||a[2]==='public-key'?PUBLIC:'peer\t123');
       }
       assert.match(request.command,/\/ip$/);
+      if(a.includes('route')) {assert.deepEqual(a,['-j','-4','route','show','table','all']);return ok(JSON.stringify(options.routes || []));}
       const args=a.filter(v=>!['-j','-d'].includes(v)), field=k=>args[args.indexOf(k)+1];
       assert.equal(args[0],'link');
       if(args[1]==='show') return ok(JSON.stringify(state.links));
@@ -241,6 +243,43 @@ function vpnFixture(driver = 'mihomo', extra = {}, options = {}) {
   return {...h,procs,specs};
 }
 
+for(const driver of ['mihomo','sing_box']) {
+  test('VPN '+driver+' allocates its internal WAN address, publishes it, and pins it across reapply and recovery',()=>{
+    const h=vpnFixture(driver,{addresses:undefined});
+    const applied=h.apply(), address=applied.egress_nat_source_ip;
+    assert.ok(address);assert.deepEqual(applied.wan_addresses,[address+'/32']);
+    assert.deepEqual(h.host.snapshot().kv.lease_default.settings.addresses,applied.wan_addresses);
+    assert.equal(h.host.snapshot().resources.profiles.default.data.addresses,undefined,'applying must not rewrite the draft');
+    const routeReads=h.state.calls.filter(r=>r.args.includes('route')).length;
+    h.apply();h.host.reconcile();
+    assert.equal(h.state.records.sessions.vpn_default.data.ipv4,address);
+    assert.equal(h.state.calls.filter(r=>r.args.includes('route')).length,routeReads);
+    h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
+    h.host.run('onTimer',{timer:{name:'wg_repair'}});
+    h.host.run('onTimer',{timer:{name:'wg_repair'}});
+    assert.equal(h.state.records.sessions.vpn_default.data.ipv4,address);
+  });
+}
+
+test('VPN automatic WAN allocation avoids host networks, non-default routes, drafts and active leases',()=>{
+  const h=vpnFixture('mihomo',{addresses:undefined},{inventory:[{name:'br-lan',addresses:['10.78.1.254/24']}],routes:[{dst:'default'},{dst:'10.78.9.1/32'}]});
+  h.host.state.resources.get('profiles').set('draft',{data:{driver:'wireguard',slot:2,addresses:['10.78.17.1/32']},enabled:false});
+  h.host.context.kv.set('lease_running',{active:true,plan:{slot:3,driver:'mihomo',interface:'vtunrunning',local:'veervpn3',pipeline:'veervpnp3',addresses:['10.78.25.1/32']}});
+  const result=h.apply();
+  assert.ok(!['10.78.1.1','10.78.9.1','10.78.17.1','10.78.25.1'].includes(result.egress_nat_source_ip));
+  assert.equal(h.state.records.sessions.vpn_default.data.ipv4,result.egress_nat_source_ip);
+});
+
+test('VPN allocation fails before WAN or process mutation if inventory fails or all pools conflict',()=>{
+  const cases=[{inventory:[{addresses:['10.0.0.1/8','172.16.0.1/12','192.168.0.1/16','198.18.0.1/15']}]},
+    {adapters:{'net.link.list':()=>{throw new Error('inventory unavailable');}}}];
+  for(const options of cases){
+    const h=vpnFixture('mihomo',{addresses:undefined},options);
+    assert.throws(h.apply,/No free internal WAN address|inventory unavailable/);
+    assert.equal(h.specs.length,0);assert.equal(h.state.services.length,0);assert.equal(h.host.snapshot().kv.lease_default,undefined);
+  }
+});
+
 test('VPN installs official cores through a background host task without changing active WANs',()=>{
   const requests=[];
   const h=vpnFixture('mihomo',{}, {hostInfo:{os:'linux',arch:'amd64'},adapters:{'process.binaryInstall':request=>{requests.push(clone(request));return {id:request.id,versions:[],install:{state:'resolving'}};}}});
@@ -273,6 +312,16 @@ test('VPN core rollback chooses the previous version and never restarts processe
   h.host.action('core_remove',{driver:'mihomo',version:'v0'});assert.deepEqual(calls[2],{id:'mihomo',version:'v0'});
   assert.equal(h.state.services.length,0);assert.equal(h.specs.length,0);
   delete selected.previous;assert.throws(()=>h.host.action('core_rollback',{driver:'mihomo'}),/No previous/);
+});
+
+test('VPN saves the core configuration to the selected Secret reference and preserves the legacy default',()=>{
+  const h=vpnFixture('sing_box',{config_secret:'core_sing_box_default'});
+  const config=JSON.stringify({outbounds:[{type:'direct',tag:'selected-core'}]});
+  h.host.action('set_core_config',{name:'core_sing_box_default',value:config});
+  h.apply();assert.equal(JSON.parse(h.specs[0].config).outbounds[0].tag,'selected-core');
+  h.host.action('set_core_config',{value:'{"outbounds":[]}'});
+  assert.equal(h.host.snapshot().secrets.core_default,'[REDACTED]');
+  assert.throws(()=>h.host.action('set_core_config',{name:'../../config',value:config}),/identifier/);
 });
 for (const driver of ['mihomo','sing_box']) {
   test('VPN '+driver+' uses a managed TUN WAN and leaves host routing to the selected upstream',()=>{

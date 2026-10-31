@@ -11,6 +11,26 @@ test('VPN forms allocate distinct slots and preserve existing advanced settings'
   assert.throws(()=>M.profile({...fields,slot:'2oops'},{},[],'home'),/范围/);
   assert.throws(()=>M.profile({...fields,addresses:'999.1.1.1/32'},{},[],'home'),/有效/);
 });
+
+test('proxy forms allow automatic WAN addresses while WG requires its assigned address',()=>{
+  for(const driver of ['mihomo','sing_box','tun']) {
+    const fields={driver,slot:1,mtu:1420,addresses:'',upstream_interface:'vmbr0',tun_interface:'tun0',tun_alias:'owner'};
+    const p=M.profile(fields,{addresses:['10.78.1.1/32']},[],'home');
+    assert.equal(Object.hasOwn(p,'addresses'),false);
+    assert.throws(()=>M.profile({...fields,addresses:'10.78.1.1/24'},{},[],'home'),/\/32/);
+    assert.throws(()=>M.profile({...fields,addresses:'fd77::1/128'},{},[],'home'),/IPv4/);
+  }
+  assert.throws(()=>M.profile({driver:'wireguard',slot:1,mtu:1420,addresses:'',peers:[]},{},[],'home'),/WireGuard.*IPv4/);
+});
+
+test('VPN forms discard parameters belonging to another driver but preserve compatible advanced settings',()=>{
+  const original={peers:[{}],listen_port:51820,remote_routes:['10.0.0.0/8'],tun_interface:'tun0',tun_alias:'external',core_path:'/usr/local/bin/sing-box',max_restarts:5};
+  const proxy=M.profile({driver:'sing_box',slot:1,mtu:1420,upstream_interface:'eth0'},original,[],'home');
+  for(const field of ['peers','listen_port','remote_routes','tun_interface','tun_alias']) assert.equal(Object.hasOwn(proxy,field),false);
+  assert.equal(proxy.core_path,original.core_path);assert.equal(proxy.max_restarts,5);
+  const tun=M.profile({driver:'tun',slot:1,mtu:1420,tun_interface:'tun0',tun_alias:'external'},proxy,[],'home');
+  for(const field of ['core_path','max_restarts','upstream_interface']) assert.equal(Object.hasOwn(tun,field),false);
+});
 test('WG import separates credentials from profile data and reports unsupported DNS',()=>{
   const result=M.importWG('[Interface]\nPrivateKey = '+key+'\nAddress = 10.77.1.1/32\nDNS = 1.1.1.1\n[Peer]\nPublicKey = '+key+'\nPresharedKey = '+key+'\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0, ::/0\n');
   assert.equal(result.privateKey,key);assert.equal(result.psks[0],key);assert.equal(result.warnings.length,1);

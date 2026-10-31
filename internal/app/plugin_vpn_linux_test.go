@@ -87,6 +87,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	t.Helper()
 	driver := os.Getenv("VEER_TEST_VPN_DRIVER")
 	tunnelInterface, wanInterface, selectedSource := "vwgdefault", "veerwg1", "10.77.0.1"
+	natSource := "10.77.0.1"
 	if driver != "" {
 		tunnelInterface, wanInterface, selectedSource = "vtundefault", "veervpn1", "203.0.113.1"
 	}
@@ -278,7 +279,8 @@ func runWireGuardMeshTopology(t *testing.T) {
 					Records []struct {
 						Key  string `json:"key"`
 						Data struct {
-							Phase string `json:"phase"`
+							Phase  string `json:"phase"`
+							Source string `json:"egress_nat_source_ip"`
 						} `json:"data"`
 					} `json:"records"`
 				}
@@ -287,6 +289,13 @@ func runWireGuardMeshTopology(t *testing.T) {
 				ready := false
 				for _, record := range records.Records {
 					if record.Key == "default" && record.Data.Phase == "applied" {
+						if net.ParseIP(record.Data.Source).To4() == nil {
+							t.Fatalf("VPN did not publish its automatic WAN IPv4: %s", data)
+						}
+						if natSource != "10.77.0.1" && natSource != record.Data.Source {
+							t.Fatalf("VPN changed its applied WAN address: %s -> %s", natSource, record.Data.Source)
+						}
+						natSource = record.Data.Source
 						ready = true
 					}
 				}
@@ -412,7 +421,10 @@ func runWireGuardMeshTopology(t *testing.T) {
 		if err = json.Unmarshal(body, &managed); err != nil || managed.Result.Path != installed.Path {
 			t.Fatalf("daemon did not discover persistent core: %s %v", body, err)
 		}
-		profile = map[string]any{"driver": driver, "upstream_interface": "wan", "slot": 1, "addresses": []string{"10.77.0.1/32"}}
+		profile = map[string]any{"driver": driver, "upstream_interface": "wan", "slot": 1}
+		// Exercise the ordinary form with no internal address and an occupied
+		// preferred pool subnet, using the real netlink and route inventories.
+		ip("addr", "add", "10.78.1.254/24", "dev", "lo")
 		var config map[string]any
 		if driver == "mihomo" {
 			config = map[string]any{"proxies": []any{map[string]any{"name": "test", "type": "ss", "server": "192.0.2.2", "port": 8388, "cipher": "aes-128-gcm", "password": "veer-integration-only", "udp": true}}, "rules": []string{"MATCH,test"}}
@@ -424,6 +436,9 @@ func runWireGuardMeshTopology(t *testing.T) {
 	}
 	api("POST", "/api/plugins/vpn_core/resources/profiles", map[string]any{"key": "default", "data": profile, "enabled": true})
 	action("apply")
+	if driver != "" && strings.HasPrefix(natSource, "10.78.1.") {
+		t.Fatalf("automatic WAN address overlaps the host subnet: %s", natSource)
+	}
 	checkTUNBoundary := func() {
 		t.Helper()
 		if driver == "" {
@@ -464,8 +479,8 @@ func runWireGuardMeshTopology(t *testing.T) {
 	if got := ip("route", "show", "default"); strings.Contains(got, "veerwg") || strings.Contains(got, "vwg") {
 		t.Fatal("host default route changed: " + got)
 	}
-	childID := create("port0", wanInterface, "10.77.0.1")
-	waitNAT(childID, "10.77.0.1")
+	childID := create("port0", wanInterface, natSource)
+	waitNAT(childID, natSource)
 	probe(selected, selectedSource)
 	probe(direct, "192.0.2.1")
 	if driver != "" {

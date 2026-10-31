@@ -43,9 +43,16 @@
     value.slot=integer(fields.slot,1,8,'出口位置');
     if (records.some(r => r.key !== key && Number(r.data.slot) === value.slot)) throw new Error('这个出口位置已被其他配置使用');
     value.mtu=integer(fields.mtu,1280,9000,'MTU');
-    value.addresses=list(fields.addresses);
-    if (!value.addresses.length || value.addresses.some(v => !prefix(v))) throw new Error('请填写有效的隧道地址与前缀，例如 10.77.0.1/32');
-    if (!value.addresses.some(v => /^\d+\.\d+\.\d+\.\d+\//.test(v))) throw new Error('至少需要一个 IPv4 隧道地址');
+    const addresses=list(fields.addresses);
+    const addressLabel=driver==='wireguard'?'本机 WireGuard 地址':'内部 WAN 地址';
+    if (addresses.some(v => !prefix(v))) throw new Error('请填写有效的'+addressLabel+'与前缀');
+    if ((driver==='wireguard' || addresses.length) && !addresses.some(v => /^\d+\.\d+\.\d+\.\d+\//.test(v))) throw new Error(addressLabel+'至少需要一个 IPv4 地址');
+    if (driver!=='wireguard' && addresses.some(v => Number(v.split('/')[1])!==(v.includes(':')?128:32))) throw new Error('内部 WAN 地址只接受 /32 或 /128');
+    if (addresses.length) value.addresses=addresses;
+    else delete value.addresses;
+    const unrelated=driver==='wireguard'?['core_path','config_secret','upstream_interface','tun_interface','tun_alias','max_restarts','startup_timeout_seconds']:
+      driver==='tun'?['peers','listen_port','remote_routes','core_path','config_secret','upstream_interface','max_restarts','startup_timeout_seconds']:['peers','listen_port','remote_routes','tun_interface','tun_alias'];
+    unrelated.forEach(name=>{delete value[name];});
     if (driver === 'wireguard') {
       value.listen_port=integer(fields.listen_port || '0',0,65535,'监听端口');
       value.remote_routes=list(fields.remote_routes);

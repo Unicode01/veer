@@ -71,7 +71,8 @@ exports.onAction = function (ctx) {
     try { var parsed = JSON.parse(config); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(); }
     catch (e) { throw new Error('Core configuration must be a JSON object'); }
     if (utf8Size(config) > 768 * 1024) throw new Error('Core configuration exceeds 768 KiB');
-    secret.set('core_' + key, config); return {stored: true};
+    var name = payload.name ? token(payload.name) : 'core_' + key;
+    secret.set(name, config); return {stored: true};
   }
   if (ctx.action.id === 'inspect') return inspect(key);
   if (ctx.action.id === 'core_logs') {
@@ -560,12 +561,12 @@ function normalizeTUN(key, raw) {
   if (!p.owner || p.owner.length > 128 || /[\r\n\0]/.test(p.owner)) throw new Error('An external TUN requires an explicit tun_alias ownership marker');
   p.wan_id = 'vpn_' + key; p.local = 'veervpn' + p.slot; p.pipeline = 'veervpnp' + p.slot;
   if ([p.local, p.pipeline].indexOf(p.interface) >= 0) throw new Error('TUN and WAN boundaries must differ');
-  p.addresses = list(raw.addresses, 1, 8).map(function (v) {
+  p.addresses = list(raw.addresses || [], 0, 8).map(function (v) {
     var c = prefix(v, true);
     if (c.bits !== (c.family === '4' ? 32 : 128)) throw new Error('Proxy WAN addresses must be /32 or /128 to avoid changing host routes');
     return c.text;
   });
-  if (!p.addresses.some(function (v) { return prefix(v).family === '4'; })) throw new Error('A local IPv4 WAN address is required');
+  if (p.addresses.length && !p.addresses.some(function (v) { return prefix(v).family === '4'; })) throw new Error('A local IPv4 WAN address is required');
   if (raw.remote_routes && raw.remote_routes.length) throw new Error('Select this WAN in Veer instead of installing host routes');
   p.remote_routes = [];
   p.upstream_interface = driver === 'tun' ? '' : iface(raw.upstream_interface);
@@ -579,6 +580,32 @@ function normalizeTUN(key, raw) {
     core_path: p.core_path, config_secret: p.config_secret, max_restarts: p.max_restarts, startup_timeout_seconds: p.startup_timeout_seconds};
   if (driver === 'tun') { p.settings.tun_interface = p.interface; p.settings.tun_alias = p.owner; }
   return p;
+}
+function resolveWANAddresses(p, old) {
+  // An explicit address keeps the existing API contract. Automatic addresses
+  // are pinned in the applied lease, never recalculated on healthy polling or
+  // recovery, so an existing NAT selection retains its source address.
+  if (!p.addresses.length && old && old.plan.addresses && old.plan.addresses.length)
+    p.addresses = old.plan.addresses.slice();
+  if (!p.addresses.length) {
+    var occupied = [];
+    function reserve(values) { (values || []).forEach(function (v) { occupied.push(prefix(v)); }); }
+    net.link.list().forEach(function (l) { reserve(l.addresses); });
+    var routes = JSON.parse(command(IP, ['-j', '-4', 'route', 'show', 'table', 'all']));
+    routes.forEach(function (r) { if (r.dst && r.dst !== 'default' && prefix(r.dst).bits > 0) reserve([r.dst]); });
+    resources.list('profiles', {limit: 8}).forEach(function (r) { if (r.key !== p.key) reserve(r.data.addresses); });
+    var leases = allLeases();
+    Object.keys(leases).forEach(function (key) { if (key !== p.key) reserve(leases[key].plan.addresses); });
+    var pools = ['10.78.', '172.31.', '192.168.', '198.19.'];
+    for (var i = 0; i < pools.length && !p.addresses.length; i++) {
+      for (var n = 0; n < 8; n++) {
+        var candidate = prefix(pools[i] + (p.slot + n * 8) + '.1/32', true);
+        if (!occupied.some(function (v) { return covers(v, candidate); })) { p.addresses = [candidate.text]; break; }
+      }
+    }
+    if (!p.addresses.length) throw new Error('No free internal WAN address; choose an unused /32 address in advanced settings');
+  }
+  p.settings.addresses = p.addresses;
 }
 function suspendTUN(p, lease) {
   clearMaps(lease);
@@ -613,6 +640,7 @@ function applyTUNProfile(key, raw, explicit) {
   });
   plugins.services.resolve({service: 'wan.adapter', version: '^1.0.0', provider: 'wan_core'});
   assertWANOwner(p);
+  resolveWANAddresses(p, old);
   var current = link(p.interface), previousWAN = wanRecord('status', p);
   var cleanWAN = previousWAN && previousWAN.data.phase === 'deleted';
   if (!old && (link(p.local) || link(p.pipeline) || (previousWAN && !cleanWAN) || (managed && current)))
@@ -666,8 +694,8 @@ function applyTUNProfile(key, raw, explicit) {
         proc = process.restart('vpn_' + key);
       if (proc.state !== 'running' || !current) {
         resources.set('status', key, {phase: proc.state === 'exited' || proc.state === 'failed' ? 'failed' : 'starting',
-          driver: p.driver, interface: p.interface, wan_id: p.wan_id, process: proc}, true);
-        armRepair(); return {phase: 'starting', driver: p.driver, wan_id: p.wan_id, process: proc};
+          driver: p.driver, interface: p.interface, wan_id: p.wan_id, wan_addresses: p.addresses, process: proc}, true);
+        armRepair(); return {phase: 'starting', driver: p.driver, wan_id: p.wan_id, wan_addresses: p.addresses, process: proc};
       }
       if (!current.linkinfo || current.linkinfo.info_kind !== 'tun') throw new Error('Core did not create a TUN interface');
       if (!current.ifalias && (!old || proc.started_at !== old.process_started_at)) ip(['link', 'set', 'dev', p.interface, 'alias', p.owner]);
@@ -691,7 +719,7 @@ function applyTUNProfile(key, raw, explicit) {
     if (waiting || (probe.retry && lease.tun_probe_attempts < 3)) {
       lease.tun_probe_retry_at = waiting ? old.tun_probe_retry_at : Date.now() + 1000;
       kv.set('lease_' + key, lease);
-      var starting = {phase: 'starting', driver: p.driver, interface: p.interface, wan_id: p.wan_id, process: proc};
+      var starting = {phase: 'starting', driver: p.driver, interface: p.interface, wan_id: p.wan_id, wan_addresses: p.addresses, process: proc};
       resources.set('status', key, starting, true); armRepair(); return starting;
     }
     p.tun_gso = probe.enabled;
@@ -719,7 +747,7 @@ function applyTUNProfile(key, raw, explicit) {
     lease.pipeline_ifindex = boundary.peer.ifindex; lease.process_started_at = proc && proc.started_at;
     kv.set('lease_' + key, lease);
     var result = {phase: 'applied', driver: p.driver, interface: p.interface, wan_id: p.wan_id,
-      local_interface: p.local, pipeline_interface: p.pipeline, egress_nat_interface: p.local,
+      local_interface: p.local, pipeline_interface: p.pipeline, egress_nat_interface: p.local, wan_addresses: p.addresses,
       egress_nat_source_ip: wanPayload(p, true).ipv4, egress_nat_redirect_mode: 'prepared_l2', tc_ready: true,
       process: proc, dataplane: KFUNCS ? 'kfuncs' : 'bpf', tun_gso: p.tun_gso};
     resources.set('status', key, result, true); armRepair(); return result;
