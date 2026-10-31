@@ -3,7 +3,7 @@ package app
 import "testing"
 
 func TestPluginControlNetLinkInfoPreservesOwnershipAndTUNCapabilities(t *testing.T) {
-	info := pluginControlNetLinkInfo{Name: "tun0", Alias: "veer:wireguard_mesh:default", Kind: "tuntap", TunMode: "tun", TunVNetHeader: true}
+	info := pluginControlNetLinkInfo{Name: "tun0", Alias: "veer:vpn_core:default", Kind: "tuntap", TunMode: "tun", TunVNetHeader: true}
 	got := pluginControlNetLinkInfoMap(info)
 	if got["alias"] != info.Alias || got["tun_mode"] != "tun" || got["tun_vnet_hdr"] != true {
 		t.Fatalf("link details lost: %+v", got)

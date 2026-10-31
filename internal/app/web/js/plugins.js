@@ -1886,6 +1886,9 @@ select.veer-input {
     for (var i = 0; i < children.length; i++) {
       var child = children[i];
       if (!child || !child.getBoundingClientRect) continue;
+      // Toasts and other fixed overlays do not contribute to document height.
+      // Including a bottom-fixed toast prevents an expanded iframe shrinking.
+      if (window.getComputedStyle && window.getComputedStyle(child).position === 'fixed') continue;
       var rect = child.getBoundingClientRect();
       bottom = Math.max(bottom, rect.bottom - bodyRect.top);
     }

@@ -68,6 +68,8 @@ func runPluginPackageCLI(args []string, stdout, stderr io.Writer) (bool, error) 
 		err = runPluginStateBackupCLI(args[2:], stdout, stderr)
 	case "restore":
 		err = runPluginStateRestoreCLI(args[2:], stdout, stderr)
+	case "migrate-vpn":
+		err = runVPNPluginMigrationCLI(args[2:], stdout, stderr)
 	case "keygen":
 		err = runPluginPackageKeygenCLI(args[2:], stdout, stderr)
 	case "sign":
@@ -95,6 +97,7 @@ func writePluginPackageCLIUsage(w io.Writer) {
 	fmt.Fprintln(w, "  veer plugin pack --source DIR [--output FILE]")
 	fmt.Fprintln(w, "  veer plugin backup --database FILE --plugins-dir DIR --output FILE")
 	fmt.Fprintln(w, "  veer plugin restore (--archive FILE | --status | --retry | --cancel) [--database FILE] [--plugins-dir DIR]")
+	fmt.Fprintln(w, "  veer plugin migrate-vpn --database FILE --plugins-dir DIR")
 	fmt.Fprintln(w, "  veer plugin keygen --private-key FILE --public-key FILE")
 	fmt.Fprintln(w, "  veer plugin sign --archive FILE --private-key FILE [--output FILE]")
 	fmt.Fprintln(w, "  veer plugin verify --package FILE --public-key FILE")
