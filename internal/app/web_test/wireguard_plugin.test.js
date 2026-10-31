@@ -12,6 +12,15 @@ function fixture(config = profile(), options = {}) {
   const state = options.state || {links:[], records:{sessions:{},status:{}}, calls:[], services:[], next:10, config:'', fail:null};
   const ok = (stdout = '') => ({stdout, stderr:'', exit_code:0});
   const adapters = {
+    'net.link.get': name => {
+      const l=state.links.find(l=>l.ifname===name);
+      if(!l) throw new Error('net.link.get: link not found: '+name);
+      if(options.legacyNetInfo) return {name,kind:l.linkinfo?.info_kind};
+      return {name,ifindex:l.ifindex,alias:l.ifalias||'',kind:l.linkinfo?.info_kind,
+        mtu:l.mtu,mac:l.address,up:(l.flags||[]).includes('UP'),peer_ifindex:l.link_index,
+        peer_name:l.link,tun_vnet_hdr:options.vnetHeader===true};
+    },
+    'net.link.getOffloads': () => options.offloads || {},
     'process.binaryStatus': id => ({id, versions:[]}),
     'plugins.services.resolve': () => ({provider:'wan_core',service:'wan.adapter',version:'1.0.0'}),
     'plugins.resources.get': (plugin, resource, key) => state.records[resource][key] || null,
@@ -161,7 +170,7 @@ test('WG legacy cleanup accepts only the owned top-level nft marker and never fl
     bindings:[{family:'4',priority:22032,lan_interface:'br-lan',source:'192.168.10.0/24',destination:'0.0.0.0/0'}],peers:[{allowed_ips:['0.0.0.0/0']}],bypass:['192.168.10.0/24']};
   for(const owned of [true,false]) {
     const mutations=[];
-    const host=createTestHost({pluginDir,fixtures:{kv:{lease_default:{active:true,plan}}},adapters:{'process.exec':r=>{
+    const host=createTestHost({pluginDir,fixtures:{kv:{lease_default:{active:true,plan}}},adapters:{'net.link.get':()=>({}),'process.exec':r=>{
       const a=r.args,ok=stdout=>({stdout,exit_code:0});
       assert.ok(!a.includes('flush'));
       if(r.command.endsWith('/nft')) {
@@ -335,6 +344,148 @@ test('VPN healthy reconciliation preserves the WAN boundary and running core',()
   assert.equal(h.procs.vpn_default.starts,1);
   assert.equal(h.state.records.sessions.vpn_default.data.usable,true);
   assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
+});
+
+test('VPN enables GSO only for a managed sing-box TUN with negotiated capabilities',()=>{
+  const full={tx:true,sg:true,tso:true,gso:true};
+  const cases=[
+    {driver:'sing_box',vnetHeader:true,offloads:full,want:true},
+    {driver:'sing_box',vnetHeader:false,offloads:full,want:false},
+    ...Object.keys(full).map(k=>({driver:'sing_box',vnetHeader:true,offloads:{...full,[k]:false},want:false})),
+    {driver:'sing_box',vnetHeader:true,offloads:{},want:false},
+    {driver:'mihomo',vnetHeader:true,offloads:full,want:false},
+    {driver:'sing_box',vnetHeader:true,offloads:full,legacyNetInfo:true,want:false}
+  ];
+  for(const c of cases){
+    let probes=0, now=Date.now();
+    const h=vpnFixture(c.driver,{}, {...c,adapters:{'net.link.getOffloads':()=>{probes++;return c.offloads;}}});
+    h.host.context.vpnTestNow=()=>now;require('node:vm').runInContext('Date.now = vpnTestNow',h.host.context);
+    let status=h.apply();
+    for(let i=0;status.phase==='starting'&&i<3;i++){
+      now+=1001;h.host.run('onTimer',{timer:{name:'wg_repair'}});status=h.host.action('inspect',{});
+    }
+    assert.equal(status.phase,'applied');
+    const data=h.state.records.sessions.vpn_default.data;
+    assert.equal(status.tun_gso,c.want);
+    assert.equal(data.interface_preparation.local_offloads.gso,c.want);
+    assert.equal(data.interface_preparation.pipeline_offloads.gro,c.want);
+    assert.equal(data.interface_preparation.local_gso.max_segs,c.want?65535:1);
+    const before=probes;
+    h.host.run('onTimer',{timer:{name:'wg_repair'}});h.host.reconcile();
+    assert.equal(probes,before,'healthy polling/reconciliation must not execute ethtool');
+    assert.equal(h.state.records.sessions.vpn_default.data.interface_preparation.local_offloads.gso,c.want);
+  }
+});
+
+test('VPN waits for bounded TUN offload negotiation without publishing or repeated early probes',()=>{
+  let probes=0, now=Date.now(), ready=false;
+  const h=vpnFixture('sing_box',{}, {vnetHeader:true,adapters:{'net.link.getOffloads':()=>{
+    probes++;return {tx:ready,sg:ready,tso:ready,gso:ready};
+  }}});
+  h.host.context.vpnTestNow=()=>now;require('node:vm').runInContext('Date.now = vpnTestNow',h.host.context);
+  assert.equal(h.apply().phase,'starting');
+  assert.equal([...h.maps().values()].reduce((n,m)=>n+m.size,0),0);
+  assert.notEqual(h.state.records.sessions.vpn_default?.enabled,true);
+  h.host.reconcile();h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(probes,1);
+  ready=true;now+=1001;
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.host.action('inspect',{}).tun_gso,true);
+  assert.equal(h.state.records.sessions.vpn_default.enabled,true);
+  assert.equal(probes,2);
+  for(let i=0;i<10;i++)h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(probes,2);
+});
+
+test('VPN offload query failure falls back and a new core generation reprobes safely',()=>{
+  let supported=true, probes=0;
+  const h=vpnFixture('sing_box',{}, {vnetHeader:true,adapters:{'net.link.getOffloads':()=>{
+    probes++;if(!supported)throw new Error('ethtool unavailable');return {tx:true,sg:true,tso:true,gso:true};
+  }}});
+  assert.equal(h.apply().tun_gso,true);
+  supported=false;
+  h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.state.records.sessions.vpn_default.enabled,false);
+  assert.equal(h.state.records.sessions.vpn_default.data.interface_preparation.local_offloads.gso,false);
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
+  assert.equal(h.state.records.sessions.vpn_default.data.interface_preparation.local_offloads.gso,false);
+  assert.equal(probes,2);
+});
+
+test('VPN refuses a TUN replaced during capability probing before enabling either direction',()=>{
+  const h=vpnFixture('sing_box',{}, {vnetHeader:true,adapters:{'net.link.getOffloads':()=>{
+    const link=h.state.links.find(l=>l.ifname==='vtundefault');link.ifindex++;
+    return {tx:true,sg:true,tso:true,gso:true};
+  }}});
+  assert.throws(h.apply,/TUN changed/);
+  assert.notEqual(h.state.records.sessions.vpn_default?.enabled,true);
+  assert.equal([...h.maps().values()].reduce((n,m)=>n+m.size,0),0);
+});
+
+test('VPN healthy polling uses native reads without subprocesses or dataplane mutations',()=>{
+  const h=vpnFixture();h.apply();
+  const before=h.host.snapshot(), calls=h.state.calls.length, preparations=h.state.services.length;
+  const maps=clone([...h.maps()].map(([name,entries])=>[name,[...entries]]));
+  for(let i=0;i<10;i++)h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.state.calls.length,calls);
+  assert.equal(h.state.services.length,preparations);
+  assert.equal(h.specs.length,1);
+  assert.deepEqual(h.host.snapshot().kv,before.kv);
+  assert.deepEqual([...h.maps()].map(([name,entries])=>[name,[...entries]]),maps);
+});
+
+test('VPN older native metadata falls back to bounded ip queries and preserves ownership',()=>{
+  const h=vpnFixture('mihomo',{}, {legacyNetInfo:true});h.apply();
+  const before=h.state.calls.length;
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  const reads=h.state.calls.slice(before);
+  assert.equal(reads.length,3);
+  for(const r of reads)assert.deepEqual(r.args.slice(0,6),['-j','-d','link','show','dev',r.args[5]]);
+  h.state.links.find(l=>l.ifname==='vtundefault').ifalias='foreign';
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.state.records.sessions.vpn_default.enabled,false);
+  assert.match(h.host.snapshot().resources.status.default.data.error,/unowned/);
+});
+
+test('VPN native lookup errors suspend forwarding and never bypass ownership through exec',()=>{
+  let broken=false;
+  const h=vpnFixture('mihomo',{}, {adapters:{'net.link.get':name=>{
+    if(broken)throw new Error('netlink permanent failure');
+    const l=h.state.links.find(l=>l.ifname===name);
+    if(!l)throw new Error('link not found: '+name);
+    return {name,ifindex:l.ifindex,alias:l.ifalias||'',kind:l.linkinfo.info_kind,mtu:l.mtu,
+      mac:l.address,up:(l.flags||[]).includes('UP'),peer_ifindex:l.link_index};
+  }}});
+  h.apply();const calls=h.state.calls.length;broken=true;
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.state.calls.length,calls);
+  assert.equal(h.state.records.sessions.vpn_default.enabled,false);
+  assert.equal([...h.maps().values()][0].size,0);
+  assert.match(h.host.snapshot().resources.status.default.data.error,/netlink permanent failure/);
+});
+
+test('VPN native tuntap metadata distinguishes TUN from a foreign TAP',()=>{
+  for(const mode of ['tun','tap']){
+    const h=vpnFixture('tun',{tun_interface:'tun0',tun_alias:'external-owner'}, {adapters:{'net.link.get':name=>{
+      const l=h.state.links.find(l=>l.ifname===name);
+      if(!l)throw new Error('link not found: '+name);
+      return {name,ifindex:l.ifindex,alias:l.ifalias||'',kind:name==='tun0'?'tuntap':l.linkinfo.info_kind,
+        tun_mode:name==='tun0'?mode:'',mtu:l.mtu,mac:l.address,up:(l.flags||[]).includes('UP'),peer_ifindex:l.link_index};
+    }}});
+    h.state.links.push({ifname:'tun0',ifindex:30,ifalias:'external-owner',flags:['UP'],mtu:1420});
+    if(mode==='tap') {assert.throws(h.apply,/unowned/);assert.equal(h.state.services.length,0);}
+    else assert.equal(h.apply().phase,'applied');
+  }
+});
+
+test('VPN polling withdraws a TAP even if its owner and reused ifindex match the lease',()=>{
+  const h=vpnFixture();h.apply();
+  h.state.links.find(l=>l.ifname==='vtundefault').linkinfo.info_kind='tap';
+  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(h.state.records.sessions.vpn_default.enabled,false);
+  assert.equal([...h.maps().values()][0].size,0);
 });
 
 test('VPN logs are explicit and fit the bounded runtime query response',()=>{

@@ -1510,6 +1510,7 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 	}
 	info := pluginControlNetLinkInfo{
 		Name:          attrs.Name,
+		Alias:         attrs.Alias,
 		IfIndex:       attrs.Index,
 		Kind:          link.Type(),
 		MTU:           attrs.MTU,
@@ -1546,6 +1547,13 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 		info.MasterName = pluginControlNetLinkNameByIndex(attrs.MasterIndex)
 	}
 	switch typed := link.(type) {
+	case *netlink.Tuntap:
+		if typed.Mode == netlink.TUNTAP_MODE_TUN {
+			info.TunMode = "tun"
+		} else if typed.Mode == netlink.TUNTAP_MODE_TAP {
+			info.TunMode = "tap"
+		}
+		info.TunVNetHeader = typed.Flags&netlink.TUNTAP_VNET_HDR != 0
 	case *netlink.Vlan:
 		info.VLANID = typed.VlanId
 		info.VLANProtocol = typed.VlanProtocol.String()

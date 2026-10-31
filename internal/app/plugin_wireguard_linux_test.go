@@ -424,6 +424,40 @@ func runWireGuardMeshTopology(t *testing.T) {
 	}
 	api("POST", "/api/plugins/wireguard_mesh/resources/profiles", map[string]any{"key": "default", "data": profile, "enabled": true})
 	action("apply")
+	checkTUNBoundary := func() {
+		t.Helper()
+		if driver == "" {
+			return
+		}
+		// Compare the plugin's decision with independent ip/ethtool observations
+		// of the real core, rather than a mocked driver name or capability bit.
+		var links []struct {
+			LinkInfo struct {
+				InfoData struct {
+					VNetHeader bool `json:"vnet_hdr"`
+				} `json:"info_data"`
+			} `json:"linkinfo"`
+		}
+		if err := json.Unmarshal([]byte(ip("-j", "-d", "link", "show", "dev", tunnelInterface)), &links); err != nil || len(links) != 1 {
+			t.Fatalf("cannot read real TUN capabilities: %v", err)
+		}
+		features := parsePluginControlOffloadFeatures(run("", "ethtool", "-k", tunnelInterface))
+		want := driver == "sing_box" && links[0].LinkInfo.InfoData.VNetHeader && features["tx"] && features["sg"] && features["tso"] && features["gso"]
+		var response struct {
+			Result struct {
+				TUNGSO bool `json:"tun_gso"`
+			} `json:"result"`
+		}
+		body := api("POST", "/api/plugins/wireguard_mesh/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+		if err := json.Unmarshal(body, &response); err != nil || response.Result.TUNGSO != want {
+			t.Fatalf("TUN GSO decision = %s, want %t: %v", body, want, err)
+		}
+		boundary, err := newPluginControlNetAdmin().LinkGet(wanInterface)
+		if err != nil || (boundary.GSOMaxSegs > 1) != want {
+			t.Fatalf("WAN boundary GSO does not match TUN: %+v want=%t err=%v", boundary, want, err)
+		}
+	}
+	checkTUNBoundary()
 	if got := ip("route", "get", "192.0.2.2"); !strings.Contains(got, "dev wan") {
 		t.Fatal("recursive outer route: " + got)
 	}
@@ -469,6 +503,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 		}
 		probe(selected, selectedSource)
 		probe(direct, "192.0.2.1")
+		checkTUNBoundary()
 	}
 	// A 2 MiB echo in each direction crosses the tunnel MTU many times.
 	ready := filepath.Join(t.TempDir(), "bulk-ready")
