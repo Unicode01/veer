@@ -1493,8 +1493,12 @@ function testTunnelDataplaneSwitchPreservesSession() {
     assert.strictEqual(h.state.pluginActionCalls.at(-1).action, 'apply_session', 'WAN Core must update its own offload leases');
     assert.strictEqual(h.state.pluginRecords.get('wan_core/status/default').data.usable, true);
     assert(h.state.netCalls.includes(`setGSO:veerlocal0:${enhanced ? '65536:65535' : '1492:1'}`));
-    assert(h.state.netCalls.includes(`setOffloads:veerlocal0:gso=${enhanced},sg=${enhanced},tso=${enhanced}`));
-    assert(h.state.netCalls.includes(`setOffloads:${PIPELINE_INTERFACE}:gro=${enhanced},lro=false`));
+    assert(h.state.netCalls.includes(enhanced
+      ? 'setOffloads:veerlocal0:gro=true,gso=true,sg=true,tso=true'
+      : 'setOffloads:veerlocal0:gso=false,sg=false,tso=false'));
+    assert(h.state.netCalls.includes(enhanced
+      ? `setOffloads:${PIPELINE_INTERFACE}:gro=true,lro=false,tso=false`
+      : `setOffloads:${PIPELINE_INTERFACE}:gro=false,lro=false`));
     h.state.netCalls.length = 0;
     repair();
     assert.strictEqual(h.state.netCalls.length, 0, 'stable mode must not repeatedly reconfigure interfaces');

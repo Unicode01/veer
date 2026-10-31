@@ -56,11 +56,48 @@ int veer_skb_handoff_v1(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 
 __bpf_kfunc u32 veer_kfuncs_abi_v1(void) { return 1; }
 static DEFINE_PER_CPU(unsigned int, veer_send_depth);
 
+/* veer_clamp has made the complete IP/TCP headers directly accessible.
+ * Pure ACKs cannot aggregate. Keep them on the original receive path so
+ * reverse-path ACK scheduling does not throttle GSO uploads.
+ */
+static bool veer_gro_packet(const struct sk_buff *skb)
+{
+	unsigned int off = ETH_HLEN;
+	const struct tcphdr *tcp;
+	if (skb->protocol == htons(ETH_P_IP)) {
+		const struct iphdr *ip = ip_hdr(skb);
+		if (ip->protocol != IPPROTO_TCP || ip_is_fragment(ip)) return false;
+		off += ip->ihl * 4;
+	} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		if (ipv6_hdr(skb)->nexthdr != IPPROTO_TCP) return false;
+		off += sizeof(struct ipv6hdr);
+	} else return false;
+	tcp = (const void *)(skb->data + off);
+	return skb->len > off + tcp->doff * 4 || tcp->syn || tcp->fin || tcp->rst;
+}
+
 static int veer_send(struct sk_buff *skb, struct net_device *dev, bool ingress)
 {
 	int err;
-	if (ingress)
-		return dev_forward_skb(dev, skb);
+	if (ingress) {
+		struct net_device *peer = NULL;
+		/* Enter the existing veth NAPI/GRO path after PPPoE decapsulation.
+		 * Direct ingress injection bypasses that aggregation point. The
+		 * peer must have TSO disabled for veth to consider TCP GRO, and
+		 * both ends must belong to the requested destination's namespace.
+		 * The caller holds RCU throughout lookup and submission.
+		 */
+		if ((dev->features & NETIF_F_GRO) && veer_gro_packet(skb) &&
+		    dev->netdev_ops->ndo_get_peer_dev)
+			peer = dev->netdev_ops->ndo_get_peer_dev(dev);
+		if (!peer || !net_eq(dev_net(peer), dev_net(dev)) ||
+		    peer->type != ARPHRD_ETHER || !(peer->flags & IFF_UP) ||
+		    (peer->features & NETIF_F_ALL_TSO) ||
+		    !peer->netdev_ops->ndo_get_peer_dev ||
+		    peer->netdev_ops->ndo_get_peer_dev(peer) != dev)
+			return dev_forward_skb(dev, skb);
+		dev = peer;
+	}
 	local_bh_disable();
 	if (unlikely(this_cpu_read(veer_send_depth) >= 4)) {
 		local_bh_enable();

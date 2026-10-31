@@ -895,12 +895,26 @@ function wanCoreInterfacePreparation(profile) {
   var tunnelMTU = tunnelInterfaceMTU(profile);
   var request = {
     local_gso: profile.prepare_gso ? {max_size: KFUNCS ? 65536 : tunnelMTU, max_segs: KFUNCS ? 65535 : 1} : null,
-    local_offloads: profile.prepare_offloads ? {sg: KFUNCS, tso: KFUNCS, gso: KFUNCS} : null,
-    pipeline_offloads: profile.prepare_offloads ? {gro: KFUNCS, lro: false} : null,
+    local_offloads: profile.prepare_offloads ? tunnelLocalOffloads() : null,
+    pipeline_offloads: profile.prepare_offloads ? tunnelPipelineOffloads() : null,
     allow_unsafe_offloads: profile.allow_unsafe_offloads === true
   };
   if (!request.local_gso && !request.local_offloads && !request.pipeline_offloads) return null;
   return request;
+}
+
+function tunnelLocalOffloads() {
+  var features = {sg: KFUNCS, tso: KFUNCS, gso: KFUNCS};
+  if (KFUNCS) features.gro = true;
+  return features;
+}
+
+function tunnelPipelineOffloads() {
+  var features = {gro: KFUNCS, lro: false};
+  // Decapsulated TCP enters local RX through this peer's TX. veth skips
+  // TCP GRO on that path when the transmitting peer advertises TSO.
+  if (KFUNCS) features.tso = false;
+  return features;
 }
 
 function installTunnel(profile, padsFrame, sessionID) {
@@ -1120,8 +1134,8 @@ function prepareTunnelInterfaces(profile, boundary) {
   }
   if (profile.prepare_offloads) {
     if (!delegated) {
-      prepareTunnelOffloads(profile, result, preparedOffloads, local, 'local', {sg: KFUNCS, tso: KFUNCS, gso: KFUNCS});
-      prepareTunnelOffloads(profile, result, preparedOffloads, pipelineInterface, 'pipeline', {gro: KFUNCS, lro: false});
+      prepareTunnelOffloads(profile, result, preparedOffloads, local, 'local', tunnelLocalOffloads());
+      prepareTunnelOffloads(profile, result, preparedOffloads, pipelineInterface, 'pipeline', tunnelPipelineOffloads());
     }
     if (profile.prepare_wan_offloads) {
       prepareTunnelOffloads(profile, result, preparedOffloads, wan, 'wan', {tx: false, sg: false, tso: false, gso: false, gro: false});

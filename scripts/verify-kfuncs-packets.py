@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import pathlib
+import select
 import socket
 import struct
 import subprocess
@@ -173,17 +174,24 @@ def malformed_frames(mode):
     )
 
 
-def nonlinear_frames(mode, clamp=True):
+def nonlinear_frames(mode, clamp=True, linear=False):
     # NAPI_FRAGS preserves writev's first iovec as the skb's linear head.
-    # The wrapper rejects linear PPP headers so a passing test proves that
-    # the real plugin parsed a header crossing into skb frags.
-    source = BASE / (mode + "-frags.c")
-    obj = BASE / (mode + "-frags.o")
+    # Short first iovecs force the real plugin to parse headers in skb frags.
+    # Echo the source skb after handoff to verify the kfunc's clone contract.
+    label = mode + ("-linear" if linear else "-frags") + ("" if clamp else "-unclamped")
+    source = BASE / (label + ".c")
+    obj = BASE / (label + ".o")
+    guard = "!= skb->len" if linear else ">= 22"
     source.write_text(
         '#include "' + str(ROOT / "plugins/pppoe_client/pppoe_tunnel.bpf.c") + '"\n'
+        'static long (*source_echo)(struct __sk_buff *, __u32, __u64) = (void *)13;\n'
         'SEC("tc/test_frags") int test_frags(struct __sk_buff *skb) {\n'
-        '  if (skb->data_end - skb->data >= 22) return TC_ACT_SHOT;\n'
-        '  return tc_tunnel(skb);\n}\n'
+        '  if (skb->data_end - skb->data ' + guard + ') return TC_ACT_SHOT;\n'
+        '  int result = tc_tunnel(skb);\n'
+        '#ifdef VEER_KFUNCS\n'
+        '  source_echo(skb, skb->ifindex, 0);\n'
+        '#endif\n'
+        '  return result;\n}\n'
         # Match the next TC NAT parser's direct-access requirements. Capture
         # only packets that actually pass this classifier, after handoff.
         'SEC("tc/test_headers") int test_headers(struct __sk_buff *skb) {\n'
@@ -231,13 +239,13 @@ def nonlinear_frames(mode, clamp=True):
         if not clamp:
             struct.pack_into("<HH", value, 20, 0, 0)
         for program, interface in [("test_frags", "fragwan"), ("test_headers", "local0")]:
-            config = BASE / (mode + "-" + program + ".json")
+            config = BASE / (label + "-" + program + ".json")
             config.write_text(json.dumps({
                 "Object": str(obj), "Program": program, "Map": "pppoe_tunnel_config",
                 "Interfaces": [interface],
                 "Entries": [{"Key": "00000000", "Value": value.hex()}],
             }))
-            loaders.append(proc([str(LOADER), str(config)], mode + "-" + program))
+            loaders.append(proc([str(LOADER), str(config)], label + "-" + program))
         time.sleep(0.3)
         if any(loader.poll() is not None for loader in loaders):
             raise RuntimeError("fragment test loader exited")
@@ -253,6 +261,16 @@ def nonlinear_frames(mode, clamp=True):
                     return frame[14:]
             raise socket.timeout()
 
+        def inject(frame, linear):
+            while select.select([tap], [], [], 0)[0]:
+                os.read(tap, 65536)
+            os.writev(tap, [part for part in [frame[:linear], frame[linear:]] if part])
+            if mode == "kfuncs":
+                if not select.select([tap], [], [], 1)[0]:
+                    raise RuntimeError("source skb echo missing after kfunc handoff")
+                if os.read(tap, 65536) != frame:
+                    raise RuntimeError("kfunc changed the original PPPoE skb")
+
         def checksum(data):
             if len(data) % 2:
                 data += b"\0"
@@ -264,16 +282,17 @@ def nonlinear_frames(mode, clamp=True):
         eth = bytes.fromhex(idx("wan0")["address"].replace(":", ""))
         eth += bytes.fromhex(idx("wan1", remote)["address"].replace(":", "")) + b"\x88\x64"
         for v6 in [False, True]:
-            for protocol, options, length in [(17, 0, 64), (17, 0, 1444 if v6 else 1464),
-                                               (6, 0, 64), (6, 12, 64), (6, 40, 64)]:
+            for protocol, options, length, flags in [(17, 0, 64, 0), (17, 0, 1444 if v6 else 1464, 0),
+                                                     (6, 0, 64, 16), (6, 12, 64, 16), (6, 40, 64, 16),
+                                                     (6, 4, 64, 2)]:
                 payload = b"veer-frags:" + os.urandom(length - 11)
                 if protocol == 17:
                     transport = struct.pack("!HHHH", 39994, 39993, length + 8, 0) + payload
                     csum_offset = 6
                 else:
                     transport = struct.pack("!HHIIBBHHH", 39994, 39993, 100, 200,
-                                            (5 + options // 4) << 4, 16, 4096, 0, 0)
-                    transport += b"\x01" * options + payload
+                                            (5 + options // 4) << 4, flags, 4096, 0, 0)
+                    transport += (b"\x02\x04\xff\xff" if flags == 2 else b"\x01" * options) + payload
                     csum_offset = 16
                 if v6:
                     addresses = socket.inet_pton(socket.AF_INET6, "fd90::2")
@@ -288,25 +307,31 @@ def nonlinear_frames(mode, clamp=True):
                 transport = transport[:csum_offset] + struct.pack("!H", checksum(pseudo + transport) or 65535) + transport[csum_offset + 2:]
                 packet = header + transport
                 frame = eth + struct.pack("!BBHHH", 0x11, 0, 1234, len(packet) + 2, 0x57 if v6 else 0x21) + packet
-                for linear in [14, 15, 20, 21]:
-                    os.writev(tap, [frame[:linear], frame[linear:]])
+                expected = packet
+                if flags == 2 and clamp:
+                    clamped = transport[:22] + struct.pack("!H", 1432 if v6 else 1452) + transport[24:]
+                    clamped = clamped[:16] + b"\0\0" + clamped[18:]
+                    clamped = clamped[:16] + struct.pack("!H", checksum(pseudo + clamped)) + clamped[18:]
+                    expected = header + clamped
+                for head in ([len(frame)] if linear else [14, 15, 20, 21]):
+                    inject(frame, head)
                     try:
                         received = receive(1)
                     except socket.timeout as error:
                         raise RuntimeError(
                             f"{mode}: fragmented IPv{6 if v6 else 4} protocol={protocol} "
-                            f"TCP options={options} linear={linear} clamp={clamp} did not pass TC"
+                            f"TCP options={options} linear={head} clamp={clamp} did not pass TC"
                         ) from error
-                    if received != packet:
+                    if received != expected:
                         raise RuntimeError("fragmented PPPoE payload changed")
             for bad in [frame[:20], frame[:21], frame[:-1], frame[:16] + b"\x04\xd3" + frame[18:]]:
-                os.writev(tap, [bad[:14], bad[14:]])
+                inject(bad, len(bad) if linear else 14)
                 try:
                     receive(0.15)
                 except socket.timeout:
                     continue
                 raise RuntimeError("malformed fragmented PPPoE frame reached the next classifier")
-        print(mode, "nonlinear IPv4/IPv6 PPP, TCP/UDP headers and truncated frames passed; clamp=" + str(clamp), flush=True)
+        print(label, "IPv4/IPv6 PPP, TCP/UDP headers, truncated frames and source skb checks passed; clamp=" + str(clamp), flush=True)
     finally:
         if client is not None:
             client.close()
@@ -316,6 +341,78 @@ def nonlinear_frames(mode, clamp=True):
             procs.remove(loader)
         os.close(tap)
         run(["ip", "link", "del", "fragcap0"], check=False)
+
+
+def gro_paths():
+    # Observe actual skbs delivered after decapsulation, rather than merely
+    # checking ethtool flags. PPPoE wire frames are always <= MTU + 22.
+    cases = [(destination, gro, tso, aggregate)
+             for destination in ["10.90.0.2", "fd90::2"]
+             for gro, tso, aggregate in [(True, False, True), (False, False, False), (True, True, False)]]
+    for destination, gro, tso, aggregate in cases:
+        run(["ethtool", "-K", "local0", "gro", "on" if gro else "off"])
+        run(["ethtool", "-K", "pipe0", "tso", "on" if tso else "off"])
+        capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+        capture.bind(("local0", 0))
+        capture.settimeout(0.1)
+        transfer = proc(["iperf3", "-c", destination, "-R", "-t", "1", "-J"], "gro-" + destination.replace(":", "") + str(gro) + str(tso))
+        large = False
+        received = 0
+        try:
+            deadline = time.monotonic() + 6
+            while transfer.poll() is None and time.monotonic() < deadline:
+                try:
+                    frame, address = capture.recvfrom(131072)
+                except socket.timeout:
+                    continue
+                if address[2] != socket.PACKET_OUTGOING and frame[12:14] == (b"\x86\xdd" if ":" in destination else b"\x08\x00"):
+                    received += 1
+                    large |= len(frame) > 1492 + 14
+            transfer.wait(timeout=3)
+            log = pathlib.Path(logs[-1].name)
+            data = json.loads(log.read_text())
+            assert "error" not in data and data["end"]["sum_received"]["bytes"] > 0, data
+            assert received and large == aggregate, (gro, tso, received, large)
+        finally:
+            capture.close()
+        procs.remove(transfer)
+        print("kfuncs GRO delivery/fallback passed:", {"destination": destination, "gro": gro, "peer_tso": tso, "aggregated": large}, flush=True)
+    run(["ethtool", "-K", "pipe0", "tso", "off"])
+    # Upload ACKs received from the WAN must not take peer TX. SYN/FIN/RST and
+    # data may use it, but a pure ACK would add NAPI latency to the reverse path.
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+    capture.bind(("pipe0", 0))
+    capture.settimeout(0.1)
+    transfer = proc(["iperf3", "-c", "10.90.0.2", "-b", "10M", "-t", "1", "-J"], "ack-path")
+    peer_tx = 0
+    try:
+        deadline = time.monotonic() + 6
+        while transfer.poll() is None and time.monotonic() < deadline:
+            try:
+                frame, address = capture.recvfrom(131072)
+            except socket.timeout:
+                continue
+            if frame[12:14] != b"\x08\x00" or len(frame) < 54 or frame[23] != 6:
+                continue
+            ip_length = struct.unpack_from("!H", frame, 16)[0]
+            off = 14 + (frame[14] & 15) * 4
+            if address[2] == socket.PACKET_OUTGOING and frame[26:30] == socket.inet_aton("10.90.0.2"):
+                peer_tx += 1
+            if len(frame) < off + 20 or frame[off + 13] & 7:
+                continue
+            if ip_length != off - 14 + (frame[off + 12] >> 4) * 4:
+                continue
+            if frame[26:30] == socket.inet_aton("10.90.0.2"):
+                assert address[2] != socket.PACKET_OUTGOING, "pure ACK unexpectedly sent through GRO peer"
+        transfer.wait(timeout=3)
+        data = json.loads(pathlib.Path(logs[-1].name).read_text())
+        assert "error" not in data and data["end"]["sum_received"]["bytes"] > 0, data
+        assert peer_tx, "capture did not observe peer TX for TCP handshake/control"
+        # Successful upload proves ACK delivery; peer sees no pure ACK TX.
+        print("kfuncs pure ACK bypass and upload passed", flush=True)
+    finally:
+        capture.close()
+    procs.remove(transfer)
 
 
 try:
@@ -417,6 +514,8 @@ try:
                     "on" if mode == "kfuncs" else "off",
                     "gso",
                     "on" if mode == "kfuncs" else "off",
+                    "gro",
+                    "on" if mode == "kfuncs" else "off",
                 ]
             )
             run(
@@ -428,6 +527,8 @@ try:
                     "gro",
                     "on" if mode == "kfuncs" else "off",
                     "lro",
+                    "off",
+                    "tso",
                     "off",
                 ]
             )
@@ -512,6 +613,8 @@ try:
         nonlinear_frames(mode)
         if mode == "kfuncs":
             nonlinear_frames(mode, clamp=False)
+            nonlinear_frames(mode, linear=True)
+            gro_paths()
         print(
             mode,
             "IPv4/IPv6 TCP, UDP, UDP GSO and live-reference checks passed",
