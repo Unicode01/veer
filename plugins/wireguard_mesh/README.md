@@ -2,6 +2,8 @@
 
 显式安装的 `lab` 插件，不默认打包。核心按管理员操作安装，不在启动时自动下载。目录、插件 ID `wireguard_mesh`、页面 ID 和旧 WG 的 WAN 名称保留，以兼容已保存的配置与 LAN 引用。
 
+订阅、节点和 WireGuard 表单的后续交互方案见 [WebUI 配置流程研究](WEBUI-DESIGN.md)；该文档描述待实现方案，当前页面仍使用 JSON 配置。
+
 | driver | 数据处理 | 依赖 |
 | --- | --- | --- |
 | `wireguard`（旧配置默认值） | 内核 WireGuard | wireguard-tools |
@@ -40,6 +42,8 @@ sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密
 宿主按插件控制代际托管进程，提供状态、有限日志、优雅停止、超时强杀、子进程清理和指数退避重启。默认失败重启 3 次，耗尽后需显式重新应用；定时恢复不重置预算；TUN 丢失时通过同一预算执行受控重启，接口 DOWN/MTU 漂移在核验归属后原地修复。插件停用、控制 VM 停止及 Veer 退出会停止进程，Linux 设置父进程死亡信号。完整资源保护下，核心使用独立 cgroup，复用配置中的插件 CPU/内存/PID 和全局上限；核心拥有本地 exec 的服务权限，不属于低权限 JS 沙箱。
 
 核心进程存在且自有 TUN 就绪后才发布可用 WAN；每秒检查状态、ifindex 和 MTU；启动后默认 30 秒仍未创建 TUN 则按同一预算重启，可用 startup_timeout_seconds 调整为 1–300 秒。失败时撤销 TC 映射和 WAN 可用状态，保留所选出口，不回退到直连。ready 只表示本机接入完成，不代表远端节点健康；核心重启会中断它持有的代理连接。WebUI 可按需读取核心日志的尾部，日志可能包含凭据，不会自动加入状态。
+
+健康轮询优先使用宿主原生接口查询，避免每秒为各出口启动多个 `ip` 子进程；旧宿主缺少 alias/TUN 元数据时仍按单接口调用 `ip` 并核验归属。受管理 sing-box 的 TUN 确认启用 vnet header、TX checksum、SG、TSO 和 GSO 后，WAN 边界保留 GSO/GRO，避免提前逐包分段；`inspect.tun_gso` 显示本代际的决定。TUN 刚创建而 offload 尚未协商完成时，间隔 1 秒最多探测 3 次，期间出口保持未就绪。探测失败或不支持时使用逐包边界，健康轮询不重复执行 `ethtool`；核心重启会重新探测。Mihomo 和外部 TUN 保持逐包边界。
 
 slot 1 的出口选择 `veervpn1`、源 IPv4 `10.78.0.1`、模式 `prepared_l2`。IPv4 NAT 后核心无法直接区分原下游 IP，设备选择留给 Veer。DNS/fake-IP、UDP/ICMP 支持受核心和代理协议约束，不等同于任意 IP 协议的双向路由 VPN；宿主代发 DNS 不自动继承设备出口。
 

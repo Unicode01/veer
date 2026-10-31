@@ -93,8 +93,9 @@ exports.onAction = function (ctx) {
 exports.onReconcile = function () {
   if (changing) return;
   var errors = [];
-  Object.keys(allLeases()).sort().forEach(function (key) {
-    var lease = allLeases()[key], record = resources.get('profiles', key);
+  var leases = allLeases();
+  Object.keys(leases).sort().forEach(function (key) {
+    var lease = leases[key], record = resources.get('profiles', key);
     if (!lease.active) return;
     if (!record || record.enabled === false) { teardown(key); return; }
     try { apply(key, lease.settings); }
@@ -105,8 +106,9 @@ exports.onReconcile = function () {
 };
 exports.onTimer = function (ctx) {
   if (!ctx.timer || ctx.timer.name !== 'wg_repair') return;
-  Object.keys(allLeases()).sort().forEach(function (key) {
-    var lease = allLeases()[key];
+  var leases = allLeases();
+  Object.keys(leases).sort().forEach(function (key) {
+    var lease = leases[key];
     if (!lease.active || isLegacy(lease)) return;
     if (lease.plan.driver && lease.plan.driver !== 'wireguard') { repairTUN(key, lease); return; }
     try {
@@ -135,7 +137,8 @@ function allLeases() {
   return out;
 }
 function armRepair() {
-  if (Object.keys(allLeases()).some(function (k) { return allLeases()[k].active; })) timer.setInterval('wg_repair', Object.keys(allLeases()).some(function (k) { return allLeases()[k].plan.driver && allLeases()[k].plan.driver !== 'wireguard'; }) ? 1000 : 5000, {});
+  var leases = allLeases(), keys = Object.keys(leases);
+  if (keys.some(function (k) { return leases[k].active; })) timer.setInterval('wg_repair', keys.some(function (k) { return leases[k].active && leases[k].plan.driver && leases[k].plan.driver !== 'wireguard'; }) ? 1000 : 5000, {});
   else timer.clear('wg_repair');
 }
 function normalize(key, raw) {
@@ -184,6 +187,20 @@ function normalize(key, raw) {
 }
 function settings(p) { if (p.driver && p.driver !== 'wireguard') return p.settings; return {slot: p.slot, mtu: p.mtu, listen_port: p.listen_port, addresses: p.addresses, peers: p.peers, remote_routes: p.remote_routes}; }
 function link(name) {
+  // Prefer a bounded native lookup. Older hosts lack alias/TUN details, so
+  // retain their exec path rather than weakening the ownership checks.
+  try {
+    var info = net.link.get(name);
+    if (typeof info.alias === 'string' && (info.kind !== 'tuntap' || info.tun_mode)) {
+      return {ifname: info.name, ifindex: info.ifindex, ifalias: info.alias,
+        linkinfo: {info_kind: info.tun_mode || info.kind}, mtu: info.mtu,
+        address: info.mac, flags: info.up ? ['UP'] : [], link_index: info.peer_ifindex,
+        link: info.peer_name, tun_vnet_hdr: info.tun_vnet_hdr === true};
+    }
+  } catch (e) {
+    if (String(e.message || e).indexOf('link not found:') >= 0) return null;
+    throw e;
+  }
   // Query only this device; dumping a PVE host's whole interface inventory on
   // every health check can exceed the exec output bound and waste CPU.
   var result = execute(IP, ['-j', '-d', 'link', 'show', 'dev', name]);
@@ -221,9 +238,10 @@ function boundaryLinks(p) {
   return {local: local, peer: peer};
 }
 function wanPayload(p, usable) {
-  // Userspace TUN providers do not all negotiate GSO/vnet headers. Keep their
-  // boundary segmented even when the kernel WireGuard extension is available.
-  var gso = KFUNCS && (!p.driver || p.driver === 'wireguard');
+  // A managed TUN must positively negotiate vnet headers and offloads before
+  // accepting large skbs. Never carry a previous core generation's capability
+  // into its prepared/restarting boundary.
+  var gso = (KFUNCS && (!p.driver || p.driver === 'wireguard')) || (usable && p.tun_gso === true);
   return {wan_id: p.wan_id, key: p.wan_id, profile_key: p.key, driver: p.driver || 'wireguard', driver_plugin: 'wireguard_mesh',
     state: usable ? 'up' : 'prepared', usable: usable, real_interface: p.interface, wan_interface: p.local,
     local_interface: p.local, pipeline_interface: p.pipeline, handoff_mode: 'segmented_veth', mtu: p.mtu,
@@ -233,9 +251,9 @@ function wanPayload(p, usable) {
     interface_preparation: {local_gso: {max_size: gso ? 65536 : p.mtu, max_segs: gso ? 65535 : 1}, local_offloads: {sg: gso, tso: gso, gso: gso}, pipeline_offloads: {gro: gso, lro: false}}};
 }
 function bindings(exclude) {
-  var names = [];
-  Object.keys(allLeases()).sort().forEach(function (key) {
-    var lease = allLeases()[key];
+  var names = [], leases = allLeases();
+  Object.keys(leases).sort().forEach(function (key) {
+    var lease = leases[key];
     if (key !== exclude && lease.active && !isLegacy(lease)) names = names.concat([lease.plan.interface, lease.plan.pipeline]);
   });
   resources.set('hook_bindings', 'wg-links', {hook_id: 'wg-links', interfaces: names}, names.length > 0, true);
@@ -345,7 +363,7 @@ function inspect(key) {
   if (p.driver && p.driver !== 'wireguard') {
     var status = resources.get('status', key);
     return {phase: status && status.data ? status.data.phase : 'missing', driver: p.driver,
-      process: p.driver === 'tun' ? null : process.status('vpn_' + key), interface: p.interface, wan_id: p.wan_id};
+      process: p.driver === 'tun' ? null : process.status('vpn_' + key), interface: p.interface, wan_id: p.wan_id, tun_gso: p.tun_gso === true};
   }
   if (!ownedLink(p)) return {phase: 'missing', interface: p.interface};
   return {phase: 'configured', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
@@ -568,6 +586,21 @@ function suspendTUN(p, lease) {
   // to the host's direct default route when a core is absent or restarting.
   if (wanRecord('status', p)) plugins.resources.set('wan_core', 'sessions', p.wan_id, wanPayload(p, false), false, true);
 }
+function tunGSO(p, current) {
+  // sing-box's Linux gVisor driver negotiates this itself. Other providers have
+  // different contracts and retain the segmented boundary until verified.
+  if (p.driver !== 'sing_box' || current.tun_vnet_hdr !== true) return {enabled: false};
+  try {
+    var features = net.link.getOffloads(p.interface);
+    var enabled = features.tx === true && features.sg === true && features.tso === true && features.gso === true;
+    return {enabled: enabled, retry: !enabled};
+  } catch (_) {
+    // Offload introspection is an optimization; missing ethtool must not stop a
+    // working core. Keep diagnostics bounded and free of core configuration.
+    log.warn('TUN offload capability unavailable; using a segmented VPN boundary');
+    return {enabled: false};
+  }
+}
 function applyTUNProfile(key, raw, explicit) {
   var p = normalizeTUN(key, raw), old = allLeases()[key], managed = p.driver !== 'tun';
   if (old && ((old.plan.driver || 'wireguard') !== p.driver || old.plan.slot !== p.slot || old.plan.interface !== p.interface))
@@ -646,6 +679,26 @@ function applyTUNProfile(key, raw, explicit) {
     }
     if (!current || (current.flags || []).indexOf('UP') < 0) throw new Error('TUN interface is not ready');
     if (current.mtu !== p.mtu) throw new Error('TUN MTU does not match the WAN profile');
+    // The TUN becomes visible before a core finishes TUNSETOFFLOAD. A negative
+    // result at that instant is not its final capability. Retry at most twice,
+    // one second apart, while keeping the WAN unpublished and the maps empty.
+    var generation = proc ? proc.started_at : current.ifindex;
+    var sameProbe = old && old.tun_probe_generation === generation;
+    var waiting = sameProbe && old.tun_probe_retry_at > Date.now();
+    var probe = waiting ? {enabled: false, retry: true} : tunGSO(p, current);
+    lease.tun_probe_generation = generation;
+    lease.tun_probe_attempts = (sameProbe ? old.tun_probe_attempts || 0 : 0) + (waiting ? 0 : 1);
+    if (waiting || (probe.retry && lease.tun_probe_attempts < 3)) {
+      lease.tun_probe_retry_at = waiting ? old.tun_probe_retry_at : Date.now() + 1000;
+      kv.set('lease_' + key, lease);
+      var starting = {phase: 'starting', driver: p.driver, interface: p.interface, wan_id: p.wan_id, process: proc};
+      resources.set('status', key, starting, true); armRepair(); return starting;
+    }
+    p.tun_gso = probe.enabled;
+    // Probe only while publishing this generation, never on healthy polling.
+    var verified = ownedLink(p);
+    if (!verified || verified.ifindex !== current.ifindex || verified.mtu !== p.mtu || (verified.flags || []).indexOf('UP') < 0)
+      throw new Error('TUN changed while inspecting its capabilities');
     var boundary = boundaryLinks(p);
     if (!boundary) throw new Error('WAN boundary is not ready');
     lease.wg_ifindex = current.ifindex; lease.local_ifindex = boundary.local.ifindex;
@@ -660,7 +713,7 @@ function applyTUNProfile(key, raw, explicit) {
     var result = {phase: 'applied', driver: p.driver, interface: p.interface, wan_id: p.wan_id,
       local_interface: p.local, pipeline_interface: p.pipeline, egress_nat_interface: p.local,
       egress_nat_source_ip: wanPayload(p, true).ipv4, egress_nat_redirect_mode: 'prepared_l2', tc_ready: true,
-      process: proc, dataplane: KFUNCS ? 'kfuncs' : 'bpf'};
+      process: proc, dataplane: KFUNCS ? 'kfuncs' : 'bpf', tun_gso: p.tun_gso};
     resources.set('status', key, result, true); armRepair(); return result;
   } catch (e) {
     try { suspendTUN(p, lease); } catch (cleanup) { log.error('VPN suspension failed'); }
@@ -673,7 +726,7 @@ function repairTUN(key, lease) {
   try {
     var p = lease.plan, current = link(p.interface), boundary = boundaryLinks(p);
     var proc = p.driver === 'tun' ? null : process.status('vpn_' + key);
-    if (lease.pending || !current || !boundary || current.ifalias !== p.owner || current.ifindex !== lease.wg_ifindex ||
+    if (lease.pending || !current || !current.linkinfo || current.linkinfo.info_kind !== 'tun' || !boundary || current.ifalias !== p.owner || current.ifindex !== lease.wg_ifindex ||
         current.mtu !== p.mtu || (current.flags || []).indexOf('UP') < 0 || boundary.local.ifindex !== lease.local_ifindex ||
         boundary.peer.ifindex !== lease.pipeline_ifindex || (proc && (proc.state !== 'running' || proc.started_at !== lease.process_started_at))) {
       suspendTUN(p, lease);

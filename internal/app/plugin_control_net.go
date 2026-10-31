@@ -63,9 +63,12 @@ type pluginControlNetReadAdmin interface {
 type pluginControlNetLinkInfo struct {
 	Namespace     string
 	Name          string
+	Alias         string
 	Created       bool
 	IfIndex       int
 	Kind          string
+	TunMode       string
+	TunVNetHeader bool
 	Parent        string
 	MTU           int
 	MAC           string
@@ -1902,9 +1905,12 @@ func pluginControlNetLinkInfoMap(info pluginControlNetLinkInfo) map[string]any {
 	out := map[string]any{
 		"namespace":      normalizePluginControlNamespace(info.Namespace),
 		"name":           info.Name,
+		"alias":          info.Alias,
 		"created":        info.Created,
 		"ifindex":        info.IfIndex,
 		"kind":           info.Kind,
+		"tun_mode":       info.TunMode,
+		"tun_vnet_hdr":   info.TunVNetHeader,
 		"parent":         info.Parent,
 		"mtu":            info.MTU,
 		"mac":            info.MAC,

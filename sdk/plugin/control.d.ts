@@ -579,9 +579,13 @@ declare global {
   interface VeerNetLinkInfo {
     namespace: string;
     name: string;
+    /** Kernel interface alias; absent on older hosts. */
+    alias?: string;
     created: boolean;
     ifindex: number;
     kind: string;
+    tun_mode?: 'tun' | 'tap' | '';
+    tun_vnet_hdr?: boolean;
     parent: string;
     mtu: number;
     mac: string;
