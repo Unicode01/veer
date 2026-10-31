@@ -77,7 +77,7 @@ sh scripts/verify-kernel-module.sh
 
 该门禁构建模块和两套插件对象，执行实际 ABI probe、生命周期单测、PPPoE IPv4/IPv6/TCP/UDP/UDP GSO/畸形包测试，以及真实 Veer TC NAT + 内核 WG 集成。PPPoE 还检查真实 GRO 聚合、GRO/TSO 不满足条件时的回落、纯 ACK 绕过，以及线性/非线性原始 skb 在 handoff 后逐字节不变（包含 MSS 修改）。WG 测试包含单 socket 长连接跨热更新、异常重启、接口消失、修复和拆除后重新应用。测试结束释放引用和模块；不在业务主机运行。
 
-性能复测使用 `scripts/verify-kfuncs-packets.py --loader <loader> --performance --output <json>`；loader 可用 `go build -o loader ./scripts/kfuncs-test-loader` 构建。WG 使用 `python3 scripts/benchmark-wireguard.py --runtime <directory>`，目录内放 `veer` 和 `plugins/{wan_core,wireguard_mesh}`，增强模式另放匹配 `.ko`。分别用当前源码的普通/带标签二进制执行，保存 results.json；脚本使用独立 netns，WG 实际经过核心 NAT 和加解密。
+性能复测使用 `scripts/verify-kfuncs-packets.py --loader <loader> --performance --output <json>`；loader 可用 `go build -o loader ./scripts/kfuncs-test-loader` 构建。WG 使用 `python3 scripts/benchmark-wireguard.py --runtime <directory>`，目录内放 `veer` 和 `plugins/{wan_core,vpn_core}`，增强模式另放匹配 `.ko`。分别用当前源码的普通/带标签二进制执行，保存 results.json；脚本使用独立 netns，WG 实际经过核心 NAT 和加解密。
 
 2026-10-31，Linux 6.12、4 vCPU、约 967 MiB 的独立虚拟机，同机 namespace 单流、每方向 3 轮中位数。下表 PPPoE 为直接隧道测试，未经过 Veer NAT；WG 包含真实核心 NAT 和加解密，不能把两种拓扑的数字直接比较：
 

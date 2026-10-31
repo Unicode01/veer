@@ -6,7 +6,7 @@ if (typeof plugin.host === 'function') {
     catch (e) { /* Packages built before this capability retain the base path. */ }
   }
 }
-// Stable plugin ID and WG names preserve existing profiles during upgrades.
+// WAN keys and WG netdev names stay stable across the plugin ID migration.
 var coreDrivers = require('./core-drivers');
 var coreManager = require('./core-manager');
 var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft';
@@ -14,7 +14,7 @@ var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing 
 var OBJECT = 'wg_adapter', MAP = 'wg_links';
 var changing = false;
 plugin.capabilities(['vpn', 'wireguard', 'mihomo', 'sing_box', 'wan', 'tc_adapter', 'control']);
-pipeline.node({id: 'wireguard', description: 'VPN core attached to a WAN Core veth boundary.'});
+pipeline.node({id: 'vpn', description: 'VPN core attached to a WAN Core veth boundary.'});
 ebpf.loadObject({id: OBJECT, path: TUNNEL_OBJECT_PATH, sha256: crypto.sha256File(TUNNEL_OBJECT_PATH),
   programs: [{id: 'tc_adapter', section: 'tc/veer/pre_forward', type: 'tc'}]});
 pipeline.attach({id: 'wg-links', direction: 'forward', attach: 'ingress', priority: 20,
@@ -45,7 +45,7 @@ plugin.action({id: 'core_install', description: 'Download and verify an official
 plugin.action({id: 'core_select', description: 'Choose an installed core for subsequently applied WANs.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'core_rollback', description: 'Restore the previous default core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'core_remove', description: 'Remove an unused installed core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
-ui.register({static_dir: 'ui', entry: 'index.html', sha256: '22d33356f0bb622cbca23ce76e1faea6ceb573c67c3551b77acf0b2e84e8edd1', page: 'wireguard', page_title: 'VPN',
+ui.register({static_dir: 'ui', entry: 'index.html', sha256: '424d2a88426349685965d2f8c828264bddb5252d7460cc8464316e482b29bb61', page: 'vpn', page_title: 'VPN',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
   actions: ['set_key', 'set_core_config', 'apply', 'teardown', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
 
@@ -147,7 +147,7 @@ function normalize(key, raw) {
   if (raw.bindings || raw.masquerade != null || raw.bypass_cidrs) throw new Error('Legacy routing profile: teardown the old profile, then configure a WAN and select it in Egress NAT');
   var p = {driver: 'wireguard', key: key, slot: integer(raw.slot, 1, 8, 1), interface: 'vwg' + key,
     mtu: integer(raw.mtu, 1280, 9000, 1420), listen_port: integer(raw.listen_port, 0, 65535, 0)};
-  p.owner = 'veer:wireguard_mesh:' + key;
+  p.owner = 'veer:vpn_core:' + key;
   p.wan_id = 'wg_' + key; p.local = 'veerwg' + p.slot; p.pipeline = 'veerwgp' + p.slot;
   p.addresses = list(raw.addresses, 1, 8).map(function (v) { return prefix(v, true).text; });
   if (!p.addresses.some(function (v) { return prefix(v).family === '4'; })) throw new Error('A local IPv4 tunnel address is required for Veer Egress NAT');
@@ -223,14 +223,14 @@ function assertWANOwner(p) {
   ['sessions', 'status'].forEach(function (resource) {
     var r = wanRecord(resource, p);
     if (resource === 'status' && r && r.data && r.data.phase === 'deleted' && session && session.enabled === false &&
-        session.data.driver_plugin === 'wireguard_mesh' && r.data.local_interface === p.local && r.data.pipeline_interface === p.pipeline) return;
-    if (r && r.data && r.data.driver_plugin !== 'wireguard_mesh') throw new Error('WAN key is already owned by another driver');
+        session.data.driver_plugin === 'vpn_core' && r.data.local_interface === p.local && r.data.pipeline_interface === p.pipeline) return;
+    if (r && r.data && r.data.driver_plugin !== 'vpn_core') throw new Error('WAN key is already owned by another driver');
   });
 }
 function wanCall(action, payload) { return plugins.services.call({service: 'wan.adapter', version: '^1.0.0', provider: 'wan_core', action: action, payload: payload}); }
 function boundaryLinks(p) {
   var r = wanRecord('status', p), data = r && r.data;
-  if (!data || data.driver_plugin !== 'wireguard_mesh') return null;
+  if (!data || data.driver_plugin !== 'vpn_core') return null;
   var local = link(p.local), peer = link(p.pipeline);
   if (!local || !peer || !local.linkinfo || !peer.linkinfo || local.linkinfo.info_kind !== 'veth' || peer.linkinfo.info_kind !== 'veth') return null;
   function linked(a, b) { return a.link_index === b.ifindex || a.link === b.ifname; }
@@ -242,7 +242,7 @@ function wanPayload(p, usable) {
   // accepting large skbs. Never carry a previous core generation's capability
   // into its prepared/restarting boundary.
   var gso = (KFUNCS && (!p.driver || p.driver === 'wireguard')) || (usable && p.tun_gso === true);
-  return {wan_id: p.wan_id, key: p.wan_id, profile_key: p.key, driver: p.driver || 'wireguard', driver_plugin: 'wireguard_mesh',
+  return {wan_id: p.wan_id, key: p.wan_id, profile_key: p.key, driver: p.driver || 'wireguard', driver_plugin: 'vpn_core',
     state: usable ? 'up' : 'prepared', usable: usable, real_interface: p.interface, wan_interface: p.local,
     local_interface: p.local, pipeline_interface: p.pipeline, handoff_mode: 'segmented_veth', mtu: p.mtu,
     ipv4: p.addresses.filter(function (v) { return prefix(v).family === '4'; })[0].split('/')[0],
@@ -556,7 +556,7 @@ function normalizeTUN(key, raw) {
   var p = {key: key, driver: driver, slot: integer(raw.slot, 1, 8, 1), mtu: integer(raw.mtu, 1280, 9000, 1420)};
   p.interface = driver === 'tun' ? iface(raw.tun_interface) : 'vtun' + key;
   if (driver === 'tun' && !raw.tun_interface) throw new Error('An external TUN interface is required');
-  p.owner = driver === 'tun' ? String(raw.tun_alias || '') : 'veer:wireguard_mesh:' + key;
+  p.owner = driver === 'tun' ? String(raw.tun_alias || '') : 'veer:vpn_core:' + key;
   if (!p.owner || p.owner.length > 128 || /[\r\n\0]/.test(p.owner)) throw new Error('An external TUN requires an explicit tun_alias ownership marker');
   p.wan_id = 'vpn_' + key; p.local = 'veervpn' + p.slot; p.pipeline = 'veervpnp' + p.slot;
   if ([p.local, p.pipeline].indexOf(p.interface) >= 0) throw new Error('TUN and WAN boundaries must differ');

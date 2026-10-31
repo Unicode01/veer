@@ -1,6 +1,6 @@
 """Opt-in WG + real Veer TC NAT throughput benchmark in disposable namespaces.
 
-The runtime directory must contain veer and plugins/{wan_core,wireguard_mesh}.
+The runtime directory must contain veer and plugins/{wan_core,vpn_core}.
 Use a native root test host; run the same script with base/enhanced binaries.
 """
 
@@ -197,7 +197,7 @@ try:
     )
     for _ in range(100):
         try:
-            api("GET", "/api/plugins/wireguard_mesh/resources/profiles")
+            api("GET", "/api/plugins/vpn_core/resources/profiles")
             break
         except Exception:
             time.sleep(0.15)
@@ -205,12 +205,12 @@ try:
         raise RuntimeError("daemon not ready")
     api(
         "POST",
-        "/api/plugins/wireguard_mesh/actions/set_key",
+        "/api/plugins/vpn_core/actions/set_key",
         {"payload": {"key": "default", "value": localkey}},
     )
     api(
         "POST",
-        "/api/plugins/wireguard_mesh/resources/profiles",
+        "/api/plugins/vpn_core/resources/profiles",
         {
             "key": "default",
             "enabled": True,
@@ -234,7 +234,7 @@ try:
         json.dumps(
             api(
                 "POST",
-                "/api/plugins/wireguard_mesh/actions/apply",
+                "/api/plugins/vpn_core/actions/apply",
                 {"payload": {"key": "default"}},
             )
         ),

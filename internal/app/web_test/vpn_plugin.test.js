@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
 const {createTestHost} = require('../../../sdk/plugin/test-host.cjs');
-const pluginDir = path.resolve(__dirname, '../../../plugins/wireguard_mesh');
+const pluginDir = path.resolve(__dirname, '../../../plugins/vpn_core');
 const PRIVATE = Buffer.alloc(32, 1).toString('base64');
 const PUBLIC = Buffer.alloc(32, 2).toString('base64');
 const clone = v => JSON.parse(JSON.stringify(v));
@@ -142,7 +142,7 @@ test('WG recovers an alias failure using the journaled creation ifindex',()=>{
   const h=fixture();h.state.ignoreCreateAlias=true;h.state.fail=r=>r.args.includes('alias')&&r.args[1]==='set';
   assert.throws(h.apply,/failed/);const lease=h.host.snapshot().kv.lease_default;
   assert.ok(lease.created_ifindex>0);assert.equal(h.state.links.find(l=>l.ifname==='vwgdefault').ifalias,'');
-  h.state.fail=null;h.apply();assert.equal(h.state.links.find(l=>l.ifname==='vwgdefault').ifalias,'veer:wireguard_mesh:default');
+  h.state.fail=null;h.apply();assert.equal(h.state.links.find(l=>l.ifname==='vwgdefault').ifalias,'veer:vpn_core:default');
 });
 test('WG multiple WANs keep their own maps and bindings during independent teardown',()=>{
   const h=fixture();h.apply();
@@ -166,7 +166,7 @@ test('WG disabled profiles are torn down on reconciliation',()=>{
 });
 
 test('WG legacy cleanup accepts only the owned top-level nft marker and never flushes global state',()=>{
-  const plan={key:'default',interface:'vwgdefault',owner:'veer:wireguard_mesh:default',nft:'veer_wg_1',table:52001,
+  const plan={key:'default',interface:'vwgdefault',owner:'veer:vpn_core:default',nft:'veer_wg_1',table:52001,
     bindings:[{family:'4',priority:22032,lan_interface:'br-lan',source:'192.168.10.0/24',destination:'0.0.0.0/0'}],peers:[{allowed_ips:['0.0.0.0/0']}],bypass:['192.168.10.0/24']};
   for(const owned of [true,false]) {
     const mutations=[];
@@ -175,7 +175,7 @@ test('WG legacy cleanup accepts only the owned top-level nft marker and never fl
       assert.ok(!a.includes('flush'));
       if(r.command.endsWith('/nft')) {
         if(a[0]==='-j')return ok(JSON.stringify({nftables:[{table:{name:'veer_wg_1'}}]}));
-        if(a[0]==='list')return ok(owned?'table inet veer_wg_1 {\n comment "veer:wireguard_mesh:default"\n chain forward {\n }\n}\n':'table inet veer_wg_1 {\n chain forward {\n comment "veer:wireguard_mesh:default"\n }\n}\n');
+        if(a[0]==='list')return ok(owned?'table inet veer_wg_1 {\n comment "veer:vpn_core:default"\n chain forward {\n }\n}\n':'table inet veer_wg_1 {\n chain forward {\n comment "veer:vpn_core:default"\n }\n}\n');
         mutations.push('nft');return ok('');
       }
       if(a.includes('link')&&a.includes('show'))return ok(JSON.stringify([{ifname:'vwgdefault',ifindex:10,ifalias:plan.owner,linkinfo:{info_kind:'wireguard'}}]));
@@ -255,7 +255,7 @@ test('VPN installs official cores through a background host task without changin
 });
 
 test('VPN managed default updates only explicitly reapplied WANs and keeps recovery pinned',()=>{
-  const selected={id:'mihomo',path:'/opt/veer/plugins.veer-state/cores/wireguard_mesh/mihomo/linux-amd64/v1/mihomo',versions:[]};
+  const selected={id:'mihomo',path:'/opt/veer/plugins.veer-state/cores/vpn_core/mihomo/linux-amd64/v1/mihomo',versions:[]};
   const h=vpnFixture('mihomo',{}, {adapters:{'process.binaryStatus':()=>clone(selected)}});
   h.apply();const old=h.specs[0].command;
   assert.equal(old,selected.path);
@@ -291,7 +291,7 @@ test('VPN delayed TUN is withheld until ready, then claimed and published by rep
   assert.equal(h.state.records.status.vpn_default.enabled,false);
   h.state.links.push({ifname:'vtundefault',ifindex:h.state.next++,ifalias:'',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
   h.host.run('onTimer',{timer:{name:'wg_repair'}});assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
-  assert.equal(h.state.links.find(l=>l.ifname==='vtundefault').ifalias,'veer:wireguard_mesh:default');
+  assert.equal(h.state.links.find(l=>l.ifname==='vtundefault').ifalias,'veer:vpn_core:default');
 });
 
 test('VPN startup without a TUN times out through the existing restart budget',()=>{

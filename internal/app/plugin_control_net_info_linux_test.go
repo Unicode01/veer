@@ -25,7 +25,7 @@ func TestPluginControlNetLinkInfoTUNMetadata(t *testing.T) {
 		{"tun", netlink.TUNTAP_MODE_TUN, false},
 		{"tap", netlink.TUNTAP_MODE_TAP, true},
 	} {
-		link := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "testtun", Index: lo.Index, Alias: "veer:wireguard_mesh:test"}, Mode: tc.mode}
+		link := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "testtun", Index: lo.Index, Alias: "veer:vpn_core:test"}, Mode: tc.mode}
 		if tc.vnet {
 			link.Flags = netlink.TUNTAP_VNET_HDR
 		}

@@ -1,8 +1,24 @@
 # VPN WAN 插件
 
-显式安装的 `lab` 插件，不默认打包。核心按管理员操作安装，不在启动时自动下载。目录、插件 ID `wireguard_mesh`、页面 ID 和旧 WG 的 WAN 名称保留，以兼容已保存的配置与 LAN 引用。
+显式安装的 `lab` 插件，不默认打包。目录和插件 ID 为 `vpn_core`，WebUI 页面为 VPN。核心按管理员操作安装，不在启动时自动下载；已有 WG 的 WAN ID 和接口名保持不变。
 
-订阅、节点和 WireGuard 表单的后续交互方案见 [WebUI 配置流程研究](WEBUI-DESIGN.md)；该文档描述待实现方案，当前页面仍使用 JSON 配置。
+WebUI 默认显示出口卡片，新建或编辑时按类型显示表单。支持多 Peer WireGuard 配置、粘贴导入 wg.conf、Mihomo / sing-box 原生 JSON 配置和外部 TUN；密钥与核心配置只写入加密存储，不会回填。核心安装、默认版本与回滚位于独立的“核心管理”页签，原始出口 JSON 位于高级设置。订阅、节点目录和运行时切换仍是后续方案，见 [WebUI 配置流程研究](WEBUI-DESIGN.md)。
+
+## 从 wireguard_mesh 迁移
+
+0.6.0 将旧插件 ID `wireguard_mesh` 改为 `vpn_core`。不能只改目录或直接修改数据库中的 ID：密钥密文的认证信息绑定了原 ID。
+
+1. 备份数据库、对应 `.veer-secrets.key`、插件代码及 `<plugins_dir>.veer-state`。先将引用 VPN 的 LAN / NAT 切换到其他出口，再在旧插件中拆除隧道并停用旧插件。拆除会中断这些隧道的连接，保留草稿与密钥。
+2. 把旧 `wireguard_mesh` 代码移到插件扫描目录以外，安装新 `vpn_core` 代码。保持 Veer 停止或旧插件停用，不要在迁移完成前启用新插件。
+3. 使用新版本 Veer 执行本地命令：
+
+   ```sh
+   /opt/veer/veer plugin migrate-vpn --database /opt/veer/forward.db --plugins-dir /opt/veer/plugins
+   ```
+
+4. 重启 Veer 并启用 VPN 插件。确认草稿和核心版本，重新应用所需出口，再恢复 LAN / NAT 的选择。
+
+迁移在 SQLite 事务内改写身份、按新 ID 重新加密 Secret，并迁移受管理核心目录和该目录内的显式 `core_path` 引用。已停用的插件保持停用；旧租约未清理、新 ID 已有状态或两边核心目录同时存在时明确拒绝合并。核心目录改名与数据库提交之间的崩溃可通过原命令重试；迁移失败时保持插件停用。WAN ID、接口名和 LAN/NAT 引用不改名。历史性能报告中的旧路径保留其当时含义。
 
 | driver | 数据处理 | 依赖 |
 | --- | --- | --- |
@@ -23,7 +39,7 @@ TC 适配器要求显式动态接口绑定，只在已应用出口的自有隧�
 
 按下方安装步骤安装插件和 `wan_core`，保持远程插件安装关闭。在 VPN 页面的“核心管理”中选择 Mihomo 或 sing-box，点击“安装 / 更新”；版本留空时获取官方最新稳定版，也可指定发布版本。后台下载显示进度，不占用插件控制 VM；从 GitHub 官方 release 元数据读取资产 SHA256，校验压缩包、ELF 架构及版本命令后才原子切换默认版本。旧发布缺少摘要时需在“指定校验值”中填写核实过的 SHA256。amd64 使用兼容指令集构建，ARM 使用保守构建，缺少对应架构资产时明确失败。
 
-核心统一持久保存到 `<plugins_dir>.veer-state/cores/wireguard_mesh/<driver>/<os>-<arch>/<version>/`，与插件代码包和临时运行配置分开。每种核心最多保留 4 个版本，每插件核心文件合计上限 1 GiB；压缩包和解压出的可执行文件各最多 256 MiB。安装失败保留原默认版本并清理临时文件；Veer 崩溃遗留的下载目录在后续启动核心管理时按进程所有者清理。备份包含已安装核心及默认版本，不包含下载临时目录。
+核心统一持久保存到 `<plugins_dir>.veer-state/cores/vpn_core/<driver>/<os>-<arch>/<version>/`，与插件代码包和临时运行配置分开。每种核心最多保留 4 个版本，每插件核心文件合计上限 1 GiB；压缩包和解压出的可执行文件各最多 256 MiB。安装失败保留原默认版本并清理临时文件；Veer 崩溃遗留的下载目录在后续启动核心管理时按进程所有者清理。备份包含已安装核心及默认版本，不包含下载临时目录。
 
 “设为默认”选择已安装版本，“回滚上一版本”切回上次默认版本，“删除所选版本”清理不用的版本；默认版本及仍被受管理进程引用的文件禁止删除。安装、更新、选择和回滚均不重启正在运行的出口。确认版本后，重新应用需要切换的出口；其恢复配置固定到应用时的核心路径，不会因后来切换默认版本而自行升级。重新应用会中断该出口的代理连接。版本命令通过只表示核心可运行，不等于节点或出口健康。
 
@@ -81,7 +97,7 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 默认使用基础 TC 适配器。可选 [Veer 内核扩展](../../KERNEL.md) 通过 kfunc 保留 GSO/GRO、减少适配开销；插件自动按宿主实际能力选择 `wg_adapter-kfuncs.o`，不需要额外开关。veth 与核心 NAT 路径仍保留，WireGuard 加密仍由内核 WG 完成。
 
 1. Linux 内核需支持 WireGuard，安装 `wireguard-tools iproute2 ethtool`，确认 `/usr/bin/wg`、`/usr/sbin/ip` 可用。主机原有路由和防火墙需允许对端 UDP。
-2. 在 Linux 源码目录运行 `sh plugins/wireguard_mesh/build.sh`，生成 `wg_adapter.o`。将整个插件目录复制到实际 `plugins_dir`，同时安装 `wan_core >=1.5.0 <2.0.0`。
+2. 在 Linux 源码目录运行 `sh plugins/vpn_core/build.sh`，生成 `wg_adapter.o`。将整个插件目录复制到实际 `plugins_dir`，同时安装 `wan_core >=1.5.0 <2.0.0`。
 3. 开启 `plugins_enabled=true` 和 `plugins_dataplane_enabled=true`；保持默认 `plugins_remote_install_enabled=false` 以允许插件 exec。插件需要 Veer 的网络管理权限，不执行 shell 或用户提供的脚本。
 4. 打开 VPN 页面，保存私钥，再保存并应用 profile。空插件和仅保存的草稿不更改网络。
 5. 在 LAN 配置中选择此 WAN，或在出向 NAT 中设置出口接口、源 IPv4 与 `prepared_l2` 重定向模式。不要填写内核 `vwg*` 接口作为核心 NAT 出口。
@@ -139,7 +155,7 @@ DNS 沿用 LAN 配置。Veer 本机代发的 DNS 属于宿主流量，不会自�
 
 ```sh
 sh scripts/build-all-ebpf.sh
-node --test internal/app/web_test/wireguard_plugin.test.js
+node --test internal/app/web_test/vpn_plugin.test.js
 sudo env VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestWireGuardMeshLinuxIntegration$' -count=1 -v -timeout=5m
 ```
 

@@ -178,7 +178,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	}
 	// Exercise the real daemon, plugin service calls, TC verifier and core NAT together.
 	root, work := findRepoRoot(t), t.TempDir()
-	for _, id := range []string{"wan_core", "wireguard_mesh"} {
+	for _, id := range []string{"wan_core", "vpn_core"} {
 		copyDirForTest(t, filepath.Join(root, "plugins", id), filepath.Join(work, "plugins", id))
 	}
 	enabled, disabled := true, false
@@ -227,7 +227,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	})
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.WebPort)
 	waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
-	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "wireguard_mesh", "apply")
+	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "vpn_core", "apply")
 	api := func(method, path string, payload any) []byte {
 		t.Helper()
 		data, _ := json.Marshal(payload)
@@ -256,7 +256,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 				_ = json.NewDecoder(response.Body).Decode(&catalog)
 				response.Body.Close()
 				for _, p := range catalog.Plugins {
-					if p.ID == "wireguard_mesh" {
+					if p.ID == "vpn_core" {
 						t.Logf("WG runtime: %s", p.Runtime)
 					}
 				}
@@ -269,7 +269,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 		return body
 	}
 	action := func(id string) {
-		api("POST", "/api/plugins/wireguard_mesh/actions/"+id, map[string]any{"payload": map[string]any{"key": "default"}})
+		api("POST", "/api/plugins/vpn_core/actions/"+id, map[string]any{"payload": map[string]any{"key": "default"}})
 
 		if driver != "" && id == "apply" {
 			end := time.Now().Add(15 * time.Second)
@@ -282,7 +282,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 						} `json:"data"`
 					} `json:"records"`
 				}
-				data := api("GET", "/api/plugins/wireguard_mesh/resources/status", nil)
+				data := api("GET", "/api/plugins/vpn_core/resources/status", nil)
 				_ = json.Unmarshal(data, &records)
 				ready := false
 				for _, record := range records.Records {
@@ -367,7 +367,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	probe(selected, "192.0.2.1")
 	probe(direct, "192.0.2.1")
 	t.Log("fresh VPN plugin without bindings: ordinary TC TCP/UDP/ICMP passed")
-	api("POST", "/api/plugins/wireguard_mesh/actions/set_key", map[string]any{"payload": map[string]any{"key": "default", "value": localPrivate}})
+	api("POST", "/api/plugins/vpn_core/actions/set_key", map[string]any{"payload": map[string]any{"key": "default", "value": localPrivate}})
 	profile := map[string]any{"slot": 1, "listen_port": 51821, "addresses": []string{"10.77.0.1/32"},
 		"peers": []any{map[string]any{"public_key": remotePublic, "endpoint": "192.0.2.2:51820", "allowed_ips": []string{"0.0.0.0/0"}}}}
 	if driver != "" {
@@ -393,22 +393,22 @@ func runWireGuardMeshTopology(t *testing.T) {
 		if driver == "sing_box" {
 			executable, check = "sing-box", []string{"version"}
 		}
-		if _, err = binaries.Install("wireguard_mesh", pluginBinaryRequest{ID: driver, Version: "vtest", URL: server.URL, SHA256: digest, Executable: executable, Format: "raw", CheckArgs: check}); err != nil {
+		if _, err = binaries.Install("vpn_core", pluginBinaryRequest{ID: driver, Version: "vtest", URL: server.URL, SHA256: digest, Executable: executable, Format: "raw", CheckArgs: check}); err != nil {
 			t.Fatal(err)
 		}
 		select {
-		case <-binaries.jobs["wireguard_mesh/"+driver].done:
+		case <-binaries.jobs["vpn_core/"+driver].done:
 		case <-time.After(30 * time.Second):
 			t.Fatal("managed core installation did not finish")
 		}
-		installed, err := binaries.Status("wireguard_mesh", driver)
+		installed, err := binaries.Status("vpn_core", driver)
 		if err != nil || installed.Install.State != "ready" {
 			t.Fatalf("core install: %+v %v", installed, err)
 		}
 		var managed struct {
 			Result pluginBinaryStatus `json:"result"`
 		}
-		body := api("POST", "/api/plugins/wireguard_mesh/actions/core_status", map[string]any{"payload": map[string]any{"driver": driver}})
+		body := api("POST", "/api/plugins/vpn_core/actions/core_status", map[string]any{"payload": map[string]any{"driver": driver}})
 		if err = json.Unmarshal(body, &managed); err != nil || managed.Result.Path != installed.Path {
 			t.Fatalf("daemon did not discover persistent core: %s %v", body, err)
 		}
@@ -420,9 +420,9 @@ func runWireGuardMeshTopology(t *testing.T) {
 			config = map[string]any{"outbounds": []any{map[string]any{"type": "shadowsocks", "tag": "test", "server": "192.0.2.2", "server_port": 8388, "method": "aes-128-gcm", "password": "veer-integration-only"}}, "route": map[string]any{"final": "test"}}
 		}
 		data, _ := json.Marshal(config)
-		api("POST", "/api/plugins/wireguard_mesh/actions/set_core_config", map[string]any{"payload": map[string]any{"key": "default", "value": string(data)}})
+		api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{"key": "default", "value": string(data)}})
 	}
-	api("POST", "/api/plugins/wireguard_mesh/resources/profiles", map[string]any{"key": "default", "data": profile, "enabled": true})
+	api("POST", "/api/plugins/vpn_core/resources/profiles", map[string]any{"key": "default", "data": profile, "enabled": true})
 	action("apply")
 	checkTUNBoundary := func() {
 		t.Helper()
@@ -448,7 +448,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 				TUNGSO bool `json:"tun_gso"`
 			} `json:"result"`
 		}
-		body := api("POST", "/api/plugins/wireguard_mesh/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+		body := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
 		if err := json.Unmarshal(body, &response); err != nil || response.Result.TUNGSO != want {
 			t.Fatalf("TUN GSO decision = %s, want %t: %v", body, want, err)
 		}
@@ -477,7 +477,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 					Process pluginProcessStatus `json:"process"`
 				} `json:"result"`
 			}
-			body := api("POST", "/api/plugins/wireguard_mesh/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+			body := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
 			if err := json.Unmarshal(body, &response); err != nil {
 				t.Fatal(err)
 			}
@@ -616,7 +616,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
-		waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "wireguard_mesh", "apply")
+		waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "vpn_core", "apply")
 		if err := os.Remove(hotMarker); err != nil {
 			t.Fatal(err)
 		}
@@ -650,7 +650,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
-	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "wireguard_mesh", "apply")
+	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "vpn_core", "apply")
 	probe(selected, selectedSource)
 	probe(direct, "192.0.2.1")
 	ip("link", "set", tunnelInterface, "down")
