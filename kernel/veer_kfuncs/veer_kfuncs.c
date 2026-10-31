@@ -88,7 +88,9 @@ static void veer_eth(struct sk_buff *skb, const struct veer_handoff_v1 *c, __be1
 	skb->protocol = proto;
 }
 
-/* SYN options only. All accesses follow a pull/COW on our private skb. */
+/* Expose complete transport headers to the next TC program without copying
+ * payload frags. Only SYN option changes need a writable private header.
+ */
 static int veer_clamp(struct sk_buff *skb, const struct veer_handoff_v1 *c)
 {
 	unsigned int off = skb_network_offset(skb), end, pos;
@@ -100,7 +102,8 @@ static int veer_clamp(struct sk_buff *skb, const struct veer_handoff_v1 *c)
 		if (!pskb_may_pull(skb, off + sizeof(*ip))) return -EINVAL;
 		ip = (void *)(skb->data + off);
 		if (ip->version != 4 || ip->ihl < 5) return -EINVAL;
-		if (ip_is_fragment(ip) || ip->protocol != IPPROTO_TCP) return 0;
+		if (ip_is_fragment(ip)) return 0;
+		protocol = ip->protocol;
 		off += ip->ihl * 4;
 		clamp = c->mss_v4;
 	} else if (skb->protocol == htons(ETH_P_IPV6)) {
@@ -110,6 +113,7 @@ static int veer_clamp(struct sk_buff *skb, const struct veer_handoff_v1 *c)
 		off += sizeof(struct ipv6hdr);
 		for (depth = 0; depth < 8 && protocol != IPPROTO_TCP; depth++) {
 			struct ipv6_opt_hdr *ext;
+			if (protocol == IPPROTO_UDP || protocol == IPPROTO_ICMPV6) break;
 			/* Never alter fragments or authenticated TCP packets. */
 			if (protocol != NEXTHDR_HOP && protocol != NEXTHDR_ROUTING && protocol != NEXTHDR_DEST) return 0;
 			if (!pskb_may_pull(skb, off + sizeof(*ext))) return -EINVAL;
@@ -117,17 +121,21 @@ static int veer_clamp(struct sk_buff *skb, const struct veer_handoff_v1 *c)
 			protocol = ext->nexthdr;
 			off += (ext->hdrlen + 1) * 8;
 		}
-		if (protocol != IPPROTO_TCP) return 0;
 		clamp = c->mss_v6;
 	} else return -EPROTONOSUPPORT;
-	if (!clamp) return 0;
+	if (protocol != IPPROTO_TCP) {
+		if (protocol == IPPROTO_UDP || protocol == IPPROTO_ICMP || protocol == IPPROTO_ICMPV6)
+			return pskb_may_pull(skb, off + 8) ? 0 : -EINVAL;
+		return 0;
+	}
 	if (off - skb_network_offset(skb) + sizeof(*tcp) >= c->mtu) return -EMSGSIZE;
 	clamp = min_t(u16, clamp, c->mtu - (off - skb_network_offset(skb)) - sizeof(*tcp));
 	if (!pskb_may_pull(skb, off + sizeof(*tcp))) return -EINVAL;
 	tcp = (void *)(skb->data + off);
-	if (!tcp->syn) return 0;
 	end = off + tcp->doff * 4;
-	if (tcp->doff < 5 || skb_ensure_writable(skb, end)) return -EINVAL;
+	if (tcp->doff < 5 || !pskb_may_pull(skb, end)) return -EINVAL;
+	if (!clamp || !((struct tcphdr *)(skb->data + off))->syn) return 0;
+	if (skb_ensure_writable(skb, end)) return -EINVAL;
 	tcp = (void *)(skb->data + off);
 	for (pos = off + sizeof(*tcp); pos < end;) {
 		u8 *opt = skb->data + pos;
