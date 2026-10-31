@@ -1167,7 +1167,7 @@ if (result.exit_code !== 0 || result.timed_out || result.cancelled || result.tru
 
 `command` 必须是可执行文件的绝对路径，`args` 最多 128 项，直接传给进程，不隐式启动 shell。可选 `stdin` 适合传递密钥等输入；请求最多 64 KiB。超时默认 5 秒、最大 15 秒，受当前 handler 剩余期限约束。返回 `stdout`、`stderr`、`exit_code`、`timed_out`、`cancelled`、`truncated`；非零退出码由插件处理，无法启动或参数无效时抛异常。stdout/stderr 合计最多 64 KiB，超限终止命令。工作目录为文件系统根目录，不继承 Veer 的环境变量或标准输入。停止 VM 会取消在途命令；Linux 使用独立进程组并在结束时清理同组子进程，不支持用该接口托管后台守护进程。
 
-常驻外部程序使用 Linux 主控制 VM 的 `process.start({id, command, args, stdin, config, restart, max_restarts, stop_timeout_ms})`，对应 feature 为 `control.process.v1`，同样要求本地 `exec` 权限及关闭远程安装。config 最多 1 MiB，写入私有目录的 0600 文件，argv 中的 `{config}` 替换为文件路径；目录随最终退出清理。持久配置另存加密 Secret（每条上限 2 MiB，计入数据库配额）。
+常驻外部程序使用 Linux 主控制 VM 的 `process.start({id, command, args, stdin, config, restart, max_restarts, stop_timeout_ms})`，对应 feature 为 `control.process.v1`，同样要求本地 `exec` 权限及关闭远程安装。config 最多 1 MiB，写入私有目录的 0600 文件，argv 中的 `{config}` 替换为文件路径；目录随最终退出清理；Veer 被强杀时遗留的私有目录按进程所有者区分，后续启动自动清理已退出所有者的目录，保留活跃目录和符号链接。持久配置另存加密 Secret（每条上限 2 MiB，计入数据库配额）。
 
 进程 ID 按插件隔离；同代际同配置的 start 幂等，改变配置或代际需先 stop。`process.status(id)`、`list()` 返回状态、PID、启动次数、时间和退出码，不含配置和参数。`process.logs(id)` 显式读取 stdout/stderr 各自最多 64 KiB 的尾部，可能包含凭据，不能直接加入公开状态。restart 默认为 never；on-failure 按 1、2、4、8、16 秒退避，最多重启 max_restarts 次（0–10），耗尽后相同 start 不重置预算。`process.restart(id)` 用于健康检查发现的故障，先优雅停止再退避重启，与失败退出共用同一重启预算。每插件最多 8 项，全局最多 32 项。
 

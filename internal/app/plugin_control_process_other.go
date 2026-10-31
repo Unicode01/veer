@@ -2,7 +2,14 @@
 
 package app
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+)
+
+func newPluginManagedProcessDirectory() (string, error) {
+	return os.MkdirTemp("", "veer-plugin-process-")
+}
 
 func preparePluginManagedProcess(cmd *exec.Cmd)   {}
 func terminatePluginManagedProcess(cmd *exec.Cmd) { _ = cmd.Process.Kill() }

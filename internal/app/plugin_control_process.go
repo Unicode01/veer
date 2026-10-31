@@ -315,7 +315,7 @@ func (r *pluginProcessRegistry) Start(owner, generation string, req pluginProces
 	if count >= 8 || len(r.entries) >= 32 {
 		return pluginProcessStatus{}, fmt.Errorf("managed process limit reached")
 	}
-	dir, err := os.MkdirTemp("", "veer-plugin-process-")
+	dir, err := newPluginManagedProcessDirectory()
 	if err != nil {
 		return pluginProcessStatus{}, fmt.Errorf("create private process directory: %w", err)
 	}
