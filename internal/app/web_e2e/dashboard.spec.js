@@ -365,6 +365,11 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect.poll(()=>coreConfigs.core_sing_box_vpn1.selected).toBe(0);
   expect(actions.at(-1).payload.value).toBe('');
   await frame.getByText('高级设置与 JSON',{exact:true}).click();
+  await frame.getByRole('button',{name:'读取当前表单 JSON',exact:true}).click();
+  const rawProfile=JSON.parse(await frame.getByLabel('VPN 出口 JSON').inputValue());rawProfile.mtu=1400;
+  await frame.getByLabel('VPN 出口 JSON').fill(JSON.stringify(rawProfile));
+  await frame.getByRole('button',{name:'将 JSON 更新到表单',exact:true}).click();
+  await expect(frame.getByLabel('使用节点')).toHaveValue('0');
   await expect(frame.getByLabel('内部 WAN 地址',{exact:true})).toBeVisible();
   await frame.getByLabel('内部 WAN 地址',{exact:true}).fill('10.90.0.1/24');
   await frame.getByRole('button',{name:'保存草稿',exact:true}).click();

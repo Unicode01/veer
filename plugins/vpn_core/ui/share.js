@@ -179,7 +179,9 @@
     if(!Number.isInteger(index) || index<0 || index>=nodes.length)fail('请选择有效节点');
     const value={veer_proxy:1,driver,links:source,selected:index,options:options(rawOptions)};
     // runtime_query has a 64 KiB response bound, including JSON escaping.
-    if(byteSize(JSON.stringify({nodes:nodes.map(n=>({name:n.name,type:n.type})),options:value.options}))>48*1024)fail('节点名称或高级规则摘要过大，请减少节点或规则');
+    const summary=JSON.stringify({nodes:nodes.map(n=>({name:n.name,type:n.type})),options:value.options});
+    // Go's JSON encoder additionally escapes HTML and line separators.
+    if(byteSize(summary.replace(/[<>&\u2028\u2029]/g,'______'))>48*1024)fail('节点名称或高级规则摘要过大，请减少节点或规则');
     return value;
   }
   function metadata(value) {

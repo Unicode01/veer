@@ -58,6 +58,7 @@ for(const driver of ['mihomo','sing_box']) {
     for(const value of invalid)assert.throws(()=>S.parse(value,driver),e=>!e.message.includes('private-password')&&!e.message.includes(id));
     for(const o of [{direct_cidrs:['10.0.0.0/999']},{direct_cidrs:['1.2.3.999/32']},{direct_domains:'example.com\ninvalid/host'},{proxy_dns:'host.example'},{dns_hijack:'perhaps'},{__unknown:true}])assert.throws(()=>S.options(o));
     for(const selected of [-1,10,1.5,'oops'])assert.throws(()=>S.create(driver,ss,selected));
+    assert.throws(()=>S.create(driver,Array(128).fill(ss.split('#')[0]+'#'+'<'.repeat(128)).join('\n')),/摘要过大/);
   });
 }
 
