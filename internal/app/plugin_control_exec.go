@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -148,7 +150,11 @@ func runPluginExec(request pluginExecRequest, timeout time.Duration, stop <-chan
 	// Cancellation can race with a successful exit after the output writer has
 	// cancelled the context. os/exec then returns ctx.Err rather than ExitError.
 	cancelledAfterStart := command.ProcessState != nil && ctx.Err() != nil && errors.Is(err, ctx.Err())
-	if err != nil && !errors.As(err, &exitError) && !errors.Is(err, exec.ErrWaitDelay) && !cancelledAfterStart {
+	// Windows can report access denied when cancellation races with a child
+	// that has already exited successfully. Wait has confirmed that exit here;
+	// preserve the timeout/truncation outcome instead of reporting a start error.
+	cancelledAfterExit := runtime.GOOS == "windows" && command.ProcessState != nil && command.ProcessState.Success() && ctx.Err() != nil && errors.Is(err, os.ErrPermission)
+	if err != nil && !errors.As(err, &exitError) && !errors.Is(err, exec.ErrWaitDelay) && !cancelledAfterStart && !cancelledAfterExit {
 		return result, fmt.Errorf("execute command: %w", err)
 	}
 	return result, nil
