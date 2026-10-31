@@ -65,6 +65,14 @@ test('WG is opt-in and registration/drafts do not change networking',()=>{
   assert.equal(h.host.snapshot().manifest.kind,'pipeline');assert.equal(h.host.snapshot().manifest.stability,'lab');
   assert.throws(()=>fixture(profile(),{remoteInstallEnabled:true}).apply(),/disabled while remote/);
 });
+
+test('VPN UI integrity matches the LF bytes stored in release packages',()=>{
+  const fs=require('node:fs'), crypto=require('node:crypto');
+  const ui=fixture().host.snapshot().surface.ui;
+  const bytes=fs.readFileSync(path.join(pluginDir,ui.static_dir,ui.entry));
+  assert.equal(bytes.includes('\r\n'),false,'hash-bearing UI files must use repository LF line endings');
+  assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),ui.sha256);
+});
 test('WG publishes a segmented WAN, installs both TC directions and cleans/reapplies exactly',()=>{
   const h=fixture();h.host.action('set_key',{value:PRIVATE});const result=h.apply();
   assert.equal(result.egress_nat_interface,'veerwg1');assert.equal(result.tc_ready,true);
