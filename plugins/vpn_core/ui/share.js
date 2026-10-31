@@ -139,12 +139,16 @@
         transport(n,q,driver);tls(n,q,n.type==='trojan'?'tls':'none');
         if(n.type==='trojan' && !n.tls)fail('Trojan 必须启用 TLS');
         if(n.flow && (!n.tls || n.transport.type!=='tcp'))fail('Vision 需要 TCP + TLS/REALITY');
+      } else if(n.type==='anytls') {
+        allowed(q,['sni','insecure','allowInsecure','alpn','fp']);
+        n.port=n.port||443;n.password=text(u.auth,'AnyTLS 密码');
+        tls(n,q,'tls');
       } else if(n.type==='hysteria2') {
         allowed(q,['sni','insecure','obfs','obfs-password']);n.port=n.port||443;n.password=text(u.auth,'Hysteria2 密码');
         tls(n,{sni:q.sni,insecure:q.insecure},'tls');
         if(q.obfs) {if(q.obfs!=='salamander')fail('暂只支持 salamander 混淆');n.obfs={type:q.obfs,password:text(q['obfs-password'],'混淆密码')};}
         else if(q['obfs-password'])fail('混淆密码缺少 obfs 类型');
-      } else fail('支持 ss、vmess、vless、trojan、hysteria2 / hy2 分享链接；其他协议请使用原生 JSON');
+      } else fail('支持 ss、vmess、vless、trojan、hysteria2 / hy2、anytls 分享链接；其他协议请使用原生 JSON');
       if(!n.port)fail('分享链接缺少节点端口');
     }
     if(n.type==='vmess' && !['auto','none','zero','aes-128-gcm','chacha20-poly1305'].includes(n.cipher))fail('VMess 加密方式无效');

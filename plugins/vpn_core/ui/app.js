@@ -153,7 +153,7 @@
         node('p','vpn-field-help','分享链接与配置加密保存，凭据不会回填。核心在“核心管理”中安装。')
       ]));
       linksPanel.replaceChildren(
-        field('节点分享链接或 Base64',shareLinks,'支持 SS、VMess、VLESS、Trojan、Hysteria2；多条链接每行一条。留空保留已导入节点。'),
+        field('节点分享链接或 Base64',shareLinks,'支持 SS、VMess、VLESS、Trojan、Hysteria2、AnyTLS；多条链接每行一条。留空保留已导入节点。'),
         actions([button('识别节点',async()=>{
           nodeOptions(S.parse(shareLinks.value,currentDriver),0);dirty=true;
           message('已识别 '+nodeNames.length+' 个节点，请选择要使用的节点并保存。');

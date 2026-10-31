@@ -62,8 +62,9 @@ TC 适配器要求显式动态接口绑定，只在已应用出口的自有隧�
 | VLESS `vless://` | TCP / WebSocket / gRPC / HTTP2，TLS / REALITY、Vision；不支持新式 VLESS encryption |
 | Trojan `trojan://` | TLS、TCP / WebSocket / gRPC；sing-box 另支持 HTTP2 |
 | Hysteria2 `hysteria2://` / `hy2://` | TLS、单端口、可选 salamander 混淆 |
+| AnyTLS `anytls://` | 密码按 URL 编码，端口默认 443，支持 SNI、insecure，以及 ALPN / 指纹参数；不支持 REALITY |
 
-不支持的协议、传输或参数会在写入 Secret 前报错，不静默丢弃。其他核心功能仍可在“分流与高级配置”中切换为原生 JSON。已有原生 JSON 配置会以原生模式打开，留空继续沿用。这里只导入粘贴内容，不下载订阅 URL，也不接受 YAML；协议映射以 [Mihomo 文档](https://wiki.metacubex.one/en/config/proxies/)、[sing-box 文档](https://sing-box.sagernet.org/configuration/outbound/)、[SIP002](https://shadowsocks.org/doc/sip002.html)、[VMess/VLESS 链接提案](https://github.com/XTLS/Xray-core/discussions/716) 和 [Hysteria2 URI](https://v2.hysteria.network/docs/developers/URI-Scheme/) 为依据。
+不支持的协议、传输或参数会在写入 Secret 前报错，不静默丢弃。其他核心功能仍可在“分流与高级配置”中切换为原生 JSON。已有原生 JSON 配置会以原生模式打开，留空继续沿用。这里只导入粘贴内容，不下载订阅 URL，也不接受 YAML；协议映射以 [Mihomo 文档](https://wiki.metacubex.one/en/config/proxies/)、[sing-box 文档](https://sing-box.sagernet.org/configuration/outbound/)、[SIP002](https://shadowsocks.org/doc/sip002.html)、[VMess/VLESS 链接提案](https://github.com/XTLS/Xray-core/discussions/716)、[Hysteria2 URI](https://v2.hysteria.network/docs/developers/URI-Scheme/) 和 [AnyTLS URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md) 为依据。
 
 自动配置默认把流量发送到所选节点。高级栏可填写直连 CIDR、直连域名及子域名（依赖 HTTP/TLS/QUIC 嗅探，识别不到时仍走节点）。节点域名解析默认使用经实际上联访问的 `223.5.5.5`，可修改。下游 DNS 默认沿用；可选择接管经过此出口的 TCP/UDP 53 流量，通过节点访问指定 DNS（默认 `1.1.1.1`）。LAN 网关代发的 DNS 不一定经过此出口，DoH/DoT 也不属于 53 端口接管范围。
 
