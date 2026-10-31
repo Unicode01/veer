@@ -1,6 +1,7 @@
 """PPPoE base/enhanced wire correctness and optional same-host throughput."""
 
 import argparse
+import fcntl
 import json
 import os
 import pathlib
@@ -170,6 +171,151 @@ def malformed_frames(mode):
         "PPPoE padding, truncated lengths, wrong session/protocol/peer checks passed",
         flush=True,
     )
+
+
+def nonlinear_frames(mode, clamp=True):
+    # NAPI_FRAGS preserves writev's first iovec as the skb's linear head.
+    # The wrapper rejects linear PPP headers so a passing test proves that
+    # the real plugin parsed a header crossing into skb frags.
+    source = BASE / (mode + "-frags.c")
+    obj = BASE / (mode + "-frags.o")
+    source.write_text(
+        '#include "' + str(ROOT / "plugins/pppoe_client/pppoe_tunnel.bpf.c") + '"\n'
+        'SEC("tc/test_frags") int test_frags(struct __sk_buff *skb) {\n'
+        '  if (skb->data_end - skb->data >= 22) return TC_ACT_SHOT;\n'
+        '  return tc_tunnel(skb);\n}\n'
+        # Match the next TC NAT parser's direct-access requirements. Capture
+        # only packets that actually pass this classifier, after handoff.
+        'SEC("tc/test_headers") int test_headers(struct __sk_buff *skb) {\n'
+        '  void *data = (void *)(long)skb->data, *end = (void *)(long)skb->data_end;\n'
+        '  struct ethhdr *eth = data; __u32 key = 0, off = 14; __u8 proto;\n'
+        '  struct pppoe_tunnel_config *cfg = bpf_map_lookup_elem(&pppoe_tunnel_config, &key);\n'
+        '  if (!cfg || (void *)(eth + 1) > end) return TC_ACT_SHOT;\n'
+        '  if (eth->h_proto == htons16(ETH_P_IP)) {\n'
+        '    struct ipv4_min_hdr *ip = data + off;\n'
+        '    if ((void *)(ip + 1) > end) return TC_ACT_SHOT;\n'
+        '    off += (ip->ver_ihl & 15) * 4; proto = ip->protocol;\n'
+        '  } else if (eth->h_proto == htons16(ETH_P_IPV6)) {\n'
+        '    struct ipv6_min_hdr *ip = data + off;\n'
+        '    if ((void *)(ip + 1) > end) return TC_ACT_SHOT;\n'
+        '    off += 40; proto = ip->nexthdr;\n'
+        '  } else return TC_ACT_SHOT;\n'
+        '  if (proto == IPPROTO_TCP) {\n'
+        '    struct tcp_min_hdr *tcp = data + off;\n'
+        '    if ((void *)(tcp + 1) > end || (tcp->doff_res >> 4) < 5) return TC_ACT_SHOT;\n'
+        '    off += (tcp->doff_res >> 4) * 4;\n'
+        '  } else if (proto == IPPROTO_UDP) off += 8;\n'
+        '  else return TC_ACT_SHOT;\n'
+        '  if (data + off > end) return TC_ACT_SHOT;\n'
+        '  return bpf_redirect(cfg->pipeline_ifindex, 0);\n}\n'
+    )
+    run(
+        ["clang", "-O2", "-g", "-target", "bpf"]
+        + (["-DVEER_KFUNCS=1"] if mode == "kfuncs" else [])
+        + ["-c", str(source), "-o", str(obj)]
+    )
+    tap = os.open("/dev/net/tun", os.O_RDWR | os.O_NONBLOCK)
+    loaders = []
+    client = None
+    try:
+        # IFF_TAP | IFF_NO_PI | IFF_NAPI | IFF_NAPI_FRAGS, TUNSETIFF.
+        fcntl.ioctl(tap, 0x400454CA, struct.pack("16sH", b"fragwan", 0x1032))
+        ip("link", "set", "fragwan", "address", idx("wan0")["address"], "up")
+        run(["ethtool", "-K", "fragwan", "gro", "off"])
+        ip("link", "add", "fragcap0", "type", "veth", "peer", "name", "fragcap1")
+        for name in ["fragcap0", "fragcap1"]:
+            ip("link", "set", name, "up")
+        value = bytearray(cfg(None, "0"))
+        struct.pack_into("<I", value, 12, idx("fragwan")["ifindex"])
+        struct.pack_into("<I", value, 8, idx("fragcap0")["ifindex"])
+        if not clamp:
+            struct.pack_into("<HH", value, 20, 0, 0)
+        for program, interface in [("test_frags", "fragwan"), ("test_headers", "local0")]:
+            config = BASE / (mode + "-" + program + ".json")
+            config.write_text(json.dumps({
+                "Object": str(obj), "Program": program, "Map": "pppoe_tunnel_config",
+                "Interfaces": [interface],
+                "Entries": [{"Key": "00000000", "Value": value.hex()}],
+            }))
+            loaders.append(proc([str(LOADER), str(config)], mode + "-" + program))
+        time.sleep(0.3)
+        if any(loader.poll() is not None for loader in loaders):
+            raise RuntimeError("fragment test loader exited")
+        client = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+        client.bind(("fragcap1", 0))
+
+        def receive(timeout):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                client.settimeout(max(0.001, deadline - time.monotonic()))
+                frame = client.recv(65536)
+                if frame[12:14] in [b"\x08\x00", b"\x86\xdd"] and b"veer-frags:" in frame:
+                    return frame[14:]
+            raise socket.timeout()
+
+        def checksum(data):
+            if len(data) % 2:
+                data += b"\0"
+            total = sum(struct.unpack("!" + "H" * (len(data) // 2), data))
+            while total >> 16:
+                total = (total & 65535) + (total >> 16)
+            return (~total) & 65535
+
+        eth = bytes.fromhex(idx("wan0")["address"].replace(":", ""))
+        eth += bytes.fromhex(idx("wan1", remote)["address"].replace(":", "")) + b"\x88\x64"
+        for v6 in [False, True]:
+            for protocol, options, length in [(17, 0, 64), (17, 0, 1444 if v6 else 1464),
+                                               (6, 0, 64), (6, 12, 64), (6, 40, 64)]:
+                payload = b"veer-frags:" + os.urandom(length - 11)
+                if protocol == 17:
+                    transport = struct.pack("!HHHH", 39994, 39993, length + 8, 0) + payload
+                    csum_offset = 6
+                else:
+                    transport = struct.pack("!HHIIBBHHH", 39994, 39993, 100, 200,
+                                            (5 + options // 4) << 4, 16, 4096, 0, 0)
+                    transport += b"\x01" * options + payload
+                    csum_offset = 16
+                if v6:
+                    addresses = socket.inet_pton(socket.AF_INET6, "fd90::2")
+                    addresses += socket.inet_pton(socket.AF_INET6, "fd90::1")
+                    pseudo = addresses + struct.pack("!I3xB", len(transport), protocol)
+                    header = struct.pack("!IHBB", 6 << 28, len(transport), protocol, 64) + addresses
+                else:
+                    header = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(transport), 1, 0, 64, protocol, 0,
+                                         socket.inet_aton("10.90.0.2"), socket.inet_aton("10.90.0.1"))
+                    pseudo = header[12:20] + struct.pack("!BBH", 0, protocol, len(transport))
+                    header = header[:10] + struct.pack("!H", checksum(header)) + header[12:]
+                transport = transport[:csum_offset] + struct.pack("!H", checksum(pseudo + transport) or 65535) + transport[csum_offset + 2:]
+                packet = header + transport
+                frame = eth + struct.pack("!BBHHH", 0x11, 0, 1234, len(packet) + 2, 0x57 if v6 else 0x21) + packet
+                for linear in [14, 15, 20, 21]:
+                    os.writev(tap, [frame[:linear], frame[linear:]])
+                    try:
+                        received = receive(1)
+                    except socket.timeout as error:
+                        raise RuntimeError(
+                            f"{mode}: fragmented IPv{6 if v6 else 4} protocol={protocol} "
+                            f"TCP options={options} linear={linear} clamp={clamp} did not pass TC"
+                        ) from error
+                    if received != packet:
+                        raise RuntimeError("fragmented PPPoE payload changed")
+            for bad in [frame[:20], frame[:21], frame[:-1], frame[:16] + b"\x04\xd3" + frame[18:]]:
+                os.writev(tap, [bad[:14], bad[14:]])
+                try:
+                    receive(0.15)
+                except socket.timeout:
+                    continue
+                raise RuntimeError("malformed fragmented PPPoE frame reached the next classifier")
+        print(mode, "nonlinear IPv4/IPv6 PPP, TCP/UDP headers and truncated frames passed; clamp=" + str(clamp), flush=True)
+    finally:
+        if client is not None:
+            client.close()
+        for loader in loaders:
+            loader.terminate()
+            loader.wait(timeout=4)
+            procs.remove(loader)
+        os.close(tap)
+        run(["ip", "link", "del", "fragcap0"], check=False)
 
 
 try:
@@ -363,6 +509,9 @@ try:
             if "error" in transfer or transfer["end"]["sum_received"]["bytes"] <= 0:
                 raise RuntimeError("TCP transfer failed")
         malformed_frames(mode)
+        nonlinear_frames(mode)
+        if mode == "kfuncs":
+            nonlinear_frames(mode, clamp=False)
         print(
             mode,
             "IPv4/IPv6 TCP, UDP, UDP GSO and live-reference checks passed",

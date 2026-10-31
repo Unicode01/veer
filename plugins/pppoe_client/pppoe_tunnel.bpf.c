@@ -848,9 +848,13 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 		return TC_ACT_UNSPEC;
 	bump_tunnel_stat(3);
 	packet_hdr = data + 14;
-	if ((void *)(packet_hdr + 1) > data_end)
-		return TC_ACT_SHOT;
-	hdr = *packet_hdr;
+	/* Virtio and zero-copy receive paths may keep the PPP header in frags. */
+	if ((void *)(packet_hdr + 1) > data_end) {
+		if (bpf_skb_load_bytes(skb, 14, &hdr, sizeof(hdr)) < 0)
+			return TC_ACT_SHOT;
+	} else {
+		hdr = *packet_hdr;
+	}
 	if (hdr.ver_type != 0x11 || hdr.code != 0 || ntohs16(hdr.session_id) != cfg->session_id)
 		return TC_ACT_UNSPEC;
 	bump_tunnel_stat(4);
