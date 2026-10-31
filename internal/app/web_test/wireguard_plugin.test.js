@@ -63,6 +63,10 @@ function fixture(config = profile(), options = {}) {
 }
 test('WG is opt-in and registration/drafts do not change networking',()=>{
   const h=fixture();h.host.reconcile();assert.equal(h.state.calls.length,0);assert.equal(h.state.services.length,0);
+  const snapshot=h.host.snapshot();
+  assert.equal(snapshot.surface.hooks.find(h=>h.id==='wg-links').binding_required,true);
+  assert.equal(snapshot.resources.hook_bindings?.['wg-links'],undefined);
+  assert.ok(snapshot.manifest.compatibility.features.includes('dataplane.hook_bindings.v1'));
   assert.equal(h.host.snapshot().manifest.kind,'pipeline');assert.equal(h.host.snapshot().manifest.stability,'lab');
   assert.throws(()=>fixture(profile(),{remoteInstallEnabled:true}).apply(),/disabled while remote/);
 });
@@ -140,6 +144,8 @@ test('WG multiple WANs keep their own maps and bindings during independent teard
   assert.equal([...h.maps().values()][0].size,2);
   assert.deepEqual(h.host.snapshot().resources.hook_bindings['wg-links'].data.interfaces,['vwgsecond','veerwgp2']);
   h.host.action('teardown',{key:'second'});assert.equal(h.state.links.length,0);
+  assert.equal(h.host.snapshot().resources.hook_bindings['wg-links'].enabled,false);
+  assert.deepEqual(h.host.snapshot().resources.hook_bindings['wg-links'].data.interfaces,[]);
 });
 test('WG rejects a mismatched WAN veth peer without enabling TC forwarding',()=>{
   const h=fixture();h.apply();h.state.links.find(l=>l.ifname==='veerwgp1').link_index=999;

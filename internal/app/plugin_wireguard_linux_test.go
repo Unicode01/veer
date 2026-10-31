@@ -300,6 +300,73 @@ func runWireGuardMeshTopology(t *testing.T) {
 			}
 		}
 	}
+	// A parent default remains on the ordinary uplink; the child overrides it with the WG WAN.
+	create := func(child, out, source string) int64 {
+		t.Helper()
+		body := api("POST", "/api/egress-nats", map[string]any{"parent_interface": "br-lan", "child_interface": child, "out_interface": out, "out_source_ip": source, "redirect_mode": egressNATRedirectModePreparedL2, "protocol": "tcp+udp+icmp"})
+		var r struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.Unmarshal(body, &r)
+		return r.ID
+	}
+	waitNAT := func(id int64, source string) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			var entries []EgressNATStatus
+			if err := json.Unmarshal(api("GET", "/api/egress-nats", nil), &entries); err != nil {
+				t.Fatal(err)
+			}
+			ready := false
+			for _, entry := range entries {
+				if entry.ID == id {
+					ready = entry.Status == "running" && entry.EffectiveEngine == ruleEngineKernel && entry.EffectiveKernelEngine == kernelEngineTC && entry.OutSourceIP == source
+				}
+			}
+			if ready {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("NAT %d did not enter TC: %+v", id, entries)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	probe := func(ns, source string) {
+		t.Helper()
+		for _, protocol := range []string{"tcp", "udp"} {
+			observed := filepath.Join(t.TempDir(), "observed")
+			backend, logs := startEgressNATBackendHelperInNamespace(t, remote, protocol, "203.0.113.1:24001", observed)
+			client := exec.Command("ip", "netns", "exec", ns, os.Args[0], "-test.run=^TestEgressNATIntegrationHelperProcess$")
+			client.Env = append(os.Environ(), egressNATHelperEnv+"=1", egressNATHelperRoleEnv+"="+egressNATHelperRoleClient, egressNATHelperProtocolEnv+"="+protocol, egressNATHelperTargetAddrEnv+"=203.0.113.1:24001")
+			out, err := client.CombinedOutput()
+			if err != nil {
+				stopDataplanePerfHelper(t, backend)
+				t.Fatalf("%s probe: %v: %s backend: %s", protocol, err, out, logs.String())
+			}
+			waitForEgressNATHelperExit(t, backend, protocol, logs.String())
+			b, _ := os.ReadFile(observed)
+			if strings.TrimSpace(string(b)) != source {
+				t.Fatalf("%s observed %q, want %s", protocol, b, source)
+			}
+		}
+		if driver == "" || ns == direct {
+			ip("netns", "exec", ns, "ping", "-n", "-c", "2", "-W", "2", "203.0.113.1")
+		}
+	}
+	// A freshly enabled VPN plugin has no hook_bindings record. Ordinary TC
+	// TCP/UDP must work before any apply/teardown can initialize that resource.
+	var ordinary struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(api("POST", "/api/egress-nats", map[string]any{"parent_interface": "br-lan", "out_interface": "wan", "out_source_ip": "192.0.2.1", "protocol": "tcp+udp+icmp"}), &ordinary); err != nil {
+		t.Fatal(err)
+	}
+	waitNAT(ordinary.ID, "192.0.2.1")
+	probe(selected, "192.0.2.1")
+	probe(direct, "192.0.2.1")
+	t.Log("fresh VPN plugin without bindings: ordinary TC TCP/UDP/ICMP passed")
 	api("POST", "/api/plugins/wireguard_mesh/actions/set_key", map[string]any{"payload": map[string]any{"key": "default", "value": localPrivate}})
 	profile := map[string]any{"slot": 1, "listen_port": 51821, "addresses": []string{"10.77.0.1/32"},
 		"peers": []any{map[string]any{"public_key": remotePublic, "endpoint": "192.0.2.2:51820", "allowed_ips": []string{"0.0.0.0/0"}}}}
@@ -363,61 +430,8 @@ func runWireGuardMeshTopology(t *testing.T) {
 	if got := ip("route", "show", "default"); strings.Contains(got, "veerwg") || strings.Contains(got, "vwg") {
 		t.Fatal("host default route changed: " + got)
 	}
-	// A parent default remains on the ordinary uplink; the child overrides it with the WG WAN.
-	create := func(child, out, source string) int64 {
-		t.Helper()
-		body := api("POST", "/api/egress-nats", map[string]any{"parent_interface": "br-lan", "child_interface": child, "out_interface": out, "out_source_ip": source, "redirect_mode": egressNATRedirectModePreparedL2, "protocol": "tcp+udp+icmp"})
-		var r struct {
-			ID int64 `json:"id"`
-		}
-		_ = json.Unmarshal(body, &r)
-		return r.ID
-	}
-	// Ordinary WAN uses route/neighbour resolution rather than prepared L2.
-	api("POST", "/api/egress-nats", map[string]any{"parent_interface": "br-lan", "out_interface": "wan", "out_source_ip": "192.0.2.1", "protocol": "tcp+udp+icmp"})
 	childID := create("port0", wanInterface, "10.77.0.1")
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		var entries []EgressNATStatus
-		if err := json.Unmarshal(api("GET", "/api/egress-nats", nil), &entries); err != nil {
-			t.Fatal(err)
-		}
-		ready := false
-		for _, entry := range entries {
-			if entry.ID == childID {
-				ready = entry.Status == "running" && entry.EffectiveEngine == ruleEngineKernel && entry.EffectiveKernelEngine == kernelEngineTC && entry.OutSourceIP == "10.77.0.1"
-			}
-		}
-		if ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("WG NAT did not enter TC: %+v", entries)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	probe := func(ns, source string) {
-		t.Helper()
-		for _, protocol := range []string{"tcp", "udp"} {
-			observed := filepath.Join(t.TempDir(), "observed")
-			backend, logs := startEgressNATBackendHelperInNamespace(t, remote, protocol, "203.0.113.1:24001", observed)
-			client := exec.Command("ip", "netns", "exec", ns, os.Args[0], "-test.run=^TestEgressNATIntegrationHelperProcess$")
-			client.Env = append(os.Environ(), egressNATHelperEnv+"=1", egressNATHelperRoleEnv+"="+egressNATHelperRoleClient, egressNATHelperProtocolEnv+"="+protocol, egressNATHelperTargetAddrEnv+"=203.0.113.1:24001")
-			out, err := client.CombinedOutput()
-			if err != nil {
-				stopDataplanePerfHelper(t, backend)
-				t.Fatalf("%s probe: %v: %s backend: %s", protocol, err, out, logs.String())
-			}
-			waitForEgressNATHelperExit(t, backend, protocol, logs.String())
-			b, _ := os.ReadFile(observed)
-			if strings.TrimSpace(string(b)) != source {
-				t.Fatalf("%s observed %q, want %s", protocol, b, source)
-			}
-		}
-		if driver == "" || ns == direct {
-			ip("netns", "exec", ns, "ping", "-n", "-c", "2", "-W", "2", "203.0.113.1")
-		}
-	}
+	waitNAT(childID, "10.77.0.1")
 	probe(selected, selectedSource)
 	probe(direct, "192.0.2.1")
 	if driver != "" {
@@ -472,7 +486,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 			_ = bulk.Wait()
 		}
 	})
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(ready); err == nil {
 			break
@@ -668,8 +682,13 @@ func runWireGuardMeshTopology(t *testing.T) {
 	api("DELETE", fmt.Sprintf("/api/egress-nats?id=%d", childID), nil)
 	probe(selected, "192.0.2.1")
 	action("teardown")
+	probe(selected, "192.0.2.1")
+	probe(direct, "192.0.2.1")
 	action("apply")
+	probe(direct, "192.0.2.1")
 	action("teardown")
+	probe(selected, "192.0.2.1")
+	probe(direct, "192.0.2.1")
 	if got := ip("-j", "link", "show"); strings.Contains(got, tunnelInterface) || strings.Contains(got, wanInterface) {
 		t.Fatal("WG WAN links remain: " + got)
 	}

@@ -648,6 +648,7 @@ F.onLocaleChange(function () {
 - 真实接口只出现在边界：例如 `eth1` 是 TC attach 点，`br-lan` 是 LAN ingress 点。
 - `pipeline.node()` / `plugin.virtualInterface()` 只描述逻辑节点或能力，不会创建系统网卡，也没有 ifindex。
 - `pipeline.attach({ interfaces: [...] })` 同时定义 dispatcher 挂载目标和该 Hook 的执行白名单；即使其他规则或插件也让 dispatcher 挂在同一组接口上，该 Hook 也不会在声明范围外执行。它不会把 vtap 落成 netdev。
+- 动态 TC/XDP 适配器可设置 `binding_required: true`，并在 `compatibility.features` 声明 `dataplane.hook_bindings.v1`。此时必须声明 `hook_bindings` 资源并提供启用、含有效非空 `interfaces` 的对应 Hook 记录才能挂载；记录缺失、禁用、损坏或读取失败时不挂载，不回退到全局或静态 `interfaces`。未设置此标记的 Hook 保持原有语义。
 - `vtolocal` 使用单个 dummy 接入 Linux 协议栈；`wan_core` 的 direct 模式使用 dummy，PPPoE 所需的 `segmented_veth` 模式则创建 local/pipeline veth 对。它们都是显式 L3/分段边界，不是逻辑 veer 节点。
 
 因此，PPPoE、firewall、VXLAN 这类数据面插件应优先实现为逻辑 chain。只有需要让 Linux 本机看见 L3 边界或提供明确分段点时才创建 dummy/veth/tun/bridge 等系统接口；插件节点本身始终不占用 netdev。

@@ -119,6 +119,8 @@ declare global {
     mode?: string;
     context?: string[];
     interfaces?: string[];
+    /** Require a valid enabled hook_bindings record; otherwise this hook is inactive. TC/XDP only. */
+    binding_required?: boolean;
     packet_metadata?: VeerPacketMetadataBinding[];
   }
 
@@ -142,6 +144,8 @@ declare global {
     mode?: string;
     context?: string[];
     interfaces?: string[];
+    /** Require a valid enabled hook_bindings record; no global/static fallback. */
+    binding_required?: boolean;
     packet_metadata?: VeerPacketMetadataBinding[];
   }
 
