@@ -72,6 +72,7 @@ func mustBuildPluginHostControlCapabilities() []pluginHostControlCapability {
 	add([]string{"plugin.host"}, pluginHostCapabilityOptions{phases: allPhases})
 	add([]string{"process.exec"}, pluginHostCapabilityOptions{permissions: []string{"exec"}})
 	add([]string{"process.start", "process.status", "process.stop", "process.restart", "process.list", "process.logs"}, pluginHostCapabilityOptions{permissions: []string{"exec"}, contexts: mainOnly})
+	add([]string{"process.binaryInstall", "process.binaryStatus", "process.binarySelect", "process.binaryRemove"}, pluginHostCapabilityOptions{permissions: []string{"exec"}, contexts: mainOnly})
 	add([]string{
 		"plugin.capabilities", "plugin.resource", "plugin.action", "plugin.service", "plugin.virtualInterface",
 		"plugin.pipelineNode", "plugin.handoff", "pipeline.node", "pipeline.handoff",

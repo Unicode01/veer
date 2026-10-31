@@ -1,12 +1,12 @@
 # VPN WAN 插件
 
-显式安装的 `lab` 插件，不默认打包，也不自动下载核心。目录、插件 ID `wireguard_mesh`、页面 ID 和旧 WG 的 WAN 名称保留，以兼容已保存的配置与 LAN 引用。
+显式安装的 `lab` 插件，不默认打包。核心按管理员操作安装，不在启动时自动下载。目录、插件 ID `wireguard_mesh`、页面 ID 和旧 WG 的 WAN 名称保留，以兼容已保存的配置与 LAN 引用。
 
 | driver | 数据处理 | 依赖 |
 | --- | --- | --- |
 | `wireguard`（旧配置默认值） | 内核 WireGuard | wireguard-tools |
-| `mihomo` | Mihomo TUN / gVisor 与代理协议 | 本机预装 Mihomo |
-| `sing_box` | sing-box TUN / gVisor 与代理协议 | 本机预装 sing-box，带 gVisor |
+| `mihomo` | Mihomo TUN / gVisor 与代理协议 | 页面安装或本机预装 Mihomo |
+| `sing_box` | sing-box TUN / gVisor 与代理协议 | 页面安装或本机预装 sing-box，带 gVisor |
 | `tun` | 外部 TUN 提供者 | 提供者自行运行 |
 
 各驱动共用 WAN Core 和双向 TC L2/L3 适配，JavaScript 不逐包转发，无需关闭 Veer 快速 NAT。
@@ -17,7 +17,13 @@
 下游 → Veer TC 分流/NAT → veervpnN ↔ veervpnpN → TC ↔ vtun<标识> ↔ 代理核心 → 原有上游
 ```
 
-按下方安装步骤安装插件和 `wan_core`，保持远程插件安装关闭。由本机管理员将核心安装到 `/usr/local/bin/mihomo` 或 `/usr/local/bin/sing-box`，也可用 `core_path` 指定其他绝对路径；文件名必须对应核心。插件不下载核心、不运行 shell。
+按下方安装步骤安装插件和 `wan_core`，保持远程插件安装关闭。在 VPN 页面的“核心管理”中选择 Mihomo 或 sing-box，点击“安装 / 更新”；版本留空时获取官方最新稳定版，也可指定发布版本。后台下载显示进度，不占用插件控制 VM；从 GitHub 官方 release 元数据读取资产 SHA256，校验压缩包、ELF 架构及版本命令后才原子切换默认版本。旧发布缺少摘要时需在“指定校验值”中填写核实过的 SHA256。amd64 使用兼容指令集构建，ARM 使用保守构建，缺少对应架构资产时明确失败。
+
+核心统一持久保存到 `<plugins_dir>.veer-state/cores/wireguard_mesh/<driver>/<os>-<arch>/<version>/`，与插件代码包和临时运行配置分开。每种核心最多保留 4 个版本，每插件核心文件合计上限 1 GiB；压缩包和解压出的可执行文件各最多 256 MiB。安装失败保留原默认版本并清理临时文件；Veer 崩溃遗留的下载目录在后续启动核心管理时按进程所有者清理。备份包含已安装核心及默认版本，不包含下载临时目录。
+
+“设为默认”选择已安装版本，“回滚上一版本”切回上次默认版本，“删除所选版本”清理不用的版本；默认版本及仍被受管理进程引用的文件禁止删除。安装、更新、选择和回滚均不重启正在运行的出口。确认版本后，重新应用需要切换的出口；其恢复配置固定到应用时的核心路径，不会因后来切换默认版本而自行升级。重新应用会中断该出口的代理连接。版本命令通过只表示核心可运行，不等于节点或出口健康。
+
+未填写 `core_path` 的出口优先使用此处安装的默认核心；没有受管理版本时仍使用 `/usr/local/bin/mihomo` 或 `/usr/local/bin/sing-box`。也可用 `core_path` 指定本机其他绝对路径，文件名必须对应核心；指定的文件不参与插件版本管理。插件不运行 shell。WireGuard 工具和外部 TUN 提供者仍由本机管理员安装维护。
 
 在 VPN 页面加密保存核心 JSON 配置，再保存并应用出口配置：
 

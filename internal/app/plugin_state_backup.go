@@ -344,7 +344,7 @@ func collectPluginStateBackupSources(databaseSnapshot, keySnapshot, pluginsRoot 
 
 func pluginStateBackupSkipVolatile(rel string, _ os.DirEntry) bool {
 	rel = filepath.ToSlash(rel)
-	return rel == pluginBlobUploadDirectoryName || strings.HasPrefix(rel, pluginBlobUploadDirectoryName+"/")
+	return rel == pluginBlobUploadDirectoryName || strings.HasPrefix(rel, pluginBlobUploadDirectoryName+"/") || rel == "cores/.staging" || strings.HasPrefix(rel, "cores/.staging/")
 }
 
 func addPluginStateBackupFile(sources *[]pluginStateBackupSource, diskPath, archivePath string) error {

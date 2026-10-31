@@ -177,11 +177,14 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   const records = {saved:{key:'saved', data:profile, enabled:true}};
   const actions = [];
   const methods = ['list','get','create','update'];
-  const plugin = {id:'wireguard_mesh', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.4.0', status:'active', enabled:true,
+  const coreActions = ['core_status','core_install','core_select','core_rollback','core_remove'];
+  const cores = {id:'mihomo', directory:'/opt/veer/plugins.veer-state/cores/wireguard_mesh/mihomo/linux-amd64', versions:[]};
+  let installationPolls=0;
+  const plugin = {id:'wireguard_mesh', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.5.0', status:'active', enabled:true,
     resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
-    actions:['set_key','set_core_config','apply','teardown','inspect','core_logs'].map(id => ({id})),
+    actions:['set_key','set_core_config','apply','teardown','inspect','core_logs',...coreActions].map(id => ({id})),
     ui:{entry:'index.html', page:'wireguard', page_title:'VPN', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
-      actions:['set_key','set_core_config','apply','teardown','inspect','core_logs']}, asset_base_path:'/api/plugins/wireguard_mesh/assets/', runtime:{mode:'control'}};
+      actions:['set_key','set_core_config','apply','teardown','inspect','core_logs',...coreActions]}, asset_base_path:'/api/plugins/wireguard_mesh/assets/', runtime:{mode:'control'}};
   await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
   await page.route('**/api/plugins/wireguard_mesh/**', async route => {
     const url = new URL(route.request().url());
@@ -195,6 +198,23 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
       return route.fulfill({json:records[key]});
     }
     if (endpoint.startsWith('actions/')) {
+      const id=endpoint.split('/').pop();
+      if(id==='core_status') {
+        if(cores.install && cores.install.state==='downloading' && ++installationPolls>=2) {
+          cores.version='v1.19.33';cores.versions=[{version:cores.version}];cores.install={state:'ready',downloaded_bytes:1048576};
+        }
+        return route.fulfill({json:{status:'completed',result:cores}});
+      }
+      if(id==='core_install') {
+        actions.push({id,...route.request().postDataJSON()});
+        cores.install={state:'downloading',downloaded_bytes:0};installationPolls=0;
+        return route.fulfill({json:{status:'completed',result:cores}});
+      }
+      if(id==='core_rollback') {
+        actions.push({id,...route.request().postDataJSON()});
+        [cores.version,cores.previous]=[cores.previous,cores.version];
+        return route.fulfill({json:{status:'completed',result:cores}});
+      }
       actions.push({id:endpoint.split('/').pop(), ...route.request().postDataJSON()});
       return route.fulfill({json:{plugin_id:'wireguard_mesh', action_id:endpoint.split('/').pop(), status:'completed'}});
     }
@@ -228,6 +248,14 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button', {name:'查看核心日志', exact:true}).click();
   await expect.poll(() => actions.at(-1).id).toBe('core_logs');
   await expect(frame.locator('body')).not.toContainText('core-secret');
+  await frame.getByRole('button',{name:'安装 / 更新',exact:true}).click();
+  await expect(frame.getByRole('combobox',{name:'已安装核心版本'})).toHaveValue('v1.19.33');
+  expect(actions.at(-1)).toEqual({id:'core_install',payload:{driver:'mihomo',version:'',sha256:''}});
+  await expect(frame.locator('body')).toContainText('安装成功');
+  cores.previous='v1.19.32';cores.versions.push({version:cores.previous});
+  await frame.getByRole('button',{name:'回滚上一版本',exact:true}).click();
+  await expect(frame.locator('body')).toContainText('默认版本：v1.19.32');
+  expect(actions.at(-1).id).toBe('core_rollback');
   await expectNoPageOverflow(page);
   expect(await frame.locator('body').evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
   await page.evaluate(() => window.scrollTo(0,0));

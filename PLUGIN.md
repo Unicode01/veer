@@ -1173,6 +1173,12 @@ if (result.exit_code !== 0 || result.timed_out || result.cancelled || result.tru
 
 `process.stop(id)` 先 TERM，默认 1 秒后 KILL（可设 1–3000 ms），并清理同组子进程。控制 VM 停止、插件停用及运行时关闭都会停止所属进程。Linux 设置父进程死亡信号；完整保护要求 cgroup 限额成功，并通过独立 cgroup 清理后代。CPU/内存/PID 复用插件配置，全局内存/PID 与控制 Host 共用；这些资源限制不表示核心受到低权限 JS 沙箱约束。
 
+需要管理外部可执行文件时，Linux 主控制 VM 可使用 feature `control.process_binaries.v1`：`process.binaryInstall(request)` 后台下载，`binaryStatus(id)` 查询版本与进度，`binarySelect({id, version})` 切换默认版本，`binaryRemove({id, version})` 删除未使用版本。均要求本地 `exec` 权限和关闭远程插件安装。该下载属于受信任宿主执行能力，使用宿主网络，不经过 JS 的 `net_access`。
+
+安装请求提供 `id`、`executable`、`format`（`raw/gzip/tar.gz`），直接来源需提供 `version/url/sha256`；GitHub 发布来源提供 `release_url`（官方 API 的 latest 或 tags 路径）与 `asset`，摘要读取资产的 SHA256，缺失时需显式提供。`asset` 和 `archive_path` 支持 `{tag}` 与去掉 v 前缀的 `{version}`。tar.gz 必须指定 `archive_path`，只读取该常规文件；不解压链接或其他目录。可用 `check_args` 执行最多 10 秒的版本检查，失败不切换默认版本。只接受 HTTPS，验证压缩包摘要、ELF 架构与文件大小，不运行 shell。
+
+版本保存在 `<plugins_dir>.veer-state/cores/<plugin>/<id>/<os>-<arch>/<version>/`，重装代码包后保留。下载和可执行文件分别上限 256 MiB，每插件合计上限 1 GiB，最多 8 个二进制 ID，每 ID 最多 4 个版本。每插件最多一个下载，宿主最多四个，10 分钟超时；插件停用或运行时退出取消下载。`binaryStatus` 返回 `path/version/previous/versions/install`，安装阶段为 `resolving/downloading/verifying/ready/failed`。成功安装原子切换默认版本；正在运行的进程保持原文件，调用者决定何时重新应用。选择时重新校验可执行文件摘要；默认版本和被受管理进程引用的版本拒绝删除。回滚可将 `previous` 传给 `binarySelect`。下载残留按进程所有者清理，备份排除下载临时目录。
+
 exec 经父进程 broker 执行，具有 Veer 服务的系统权限，不受 JS 子进程降权、seccomp、`net_access` 和单插件 cgroup 限制。JS 沙箱本身继续禁止直接 exec。仅应给本机管理员审核的插件授予该权限，保护插件目录和被执行文件；插件必须校验远程资源/动作传入的参数，不能将其直接交给 shell。注册、迁移、升级快照/恢复阶段不允许 exec。
 
 信任键可以限制 `plugin_ids`（精确 ID 或尾部 `*` 前缀）、`permissions`、`execution_tiers`（`control/dataplane`）和 `stabilities`；`permissions_restricted=true` 允许把空权限列表明确锁定为零权限。有效签名位于范围内时显示为已信任；超出范围时仍可人工批准当前候选，但不会隐式扩大原范围。安装审核中的“记住发布者”会按当前候选自动生成最小范围，同一批次由同一密钥签署的包会合并各自最小范围。密钥轮换默认继承范围，显式新范围只能收窄；需要扩大长期授权时应单独审核，而不是借轮换隐式升级。

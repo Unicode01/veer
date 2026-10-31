@@ -420,6 +420,8 @@ class VeerPluginTestHost {
     this.timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
     this.adapters = Object.assign({}, options.adapters || {});
     this.remoteInstallEnabled = options.remoteInstallEnabled === true;
+    this.hostInfo = Object.assign({os:process.platform === 'win32' ? 'windows' : process.platform,
+      arch:({x64:'amd64', ia32:'386'})[process.arch] || process.arch}, options.hostInfo || {});
     this.availableFeatures = Array.isArray(options.availableFeatures) ? options.availableFeatures.slice()
       : API_CONTRACT.runtime.features.filter(feature => feature !== 'dataplane.kfuncs.handoff.v1');
     this.state = sharedState || createSharedState(options.fixtures || {});
@@ -799,8 +801,8 @@ class VeerPluginTestHost {
           runtime_version: API_CONTRACT.runtime.runtime_version,
           control_api_abi: API_CONTRACT.runtime.control_api_abi,
           tc_pipeline_abi: API_CONTRACT.runtime.tc_pipeline_abi,
-          os: process.platform,
-          arch: process.arch,
+          os: this.hostInfo.os,
+          arch: this.hostInfo.arch,
           kernel_release: 'test',
           core_priority: API_CONTRACT.runtime.core_priority,
           features: API_CONTRACT.runtime.features.slice(),
@@ -954,6 +956,30 @@ class VeerPluginTestHost {
         list: () => this.#metricList(),
       }),
       process: Object.freeze({
+        binaryInstall: (request) => {
+          this.#requirePermission('exec', 'process.binaryInstall');
+          if (this.remoteInstallEnabled) throw new Error('process.binaryInstall is disabled while remote plugin installation is enabled');
+          if (!request || !/^[a-z][a-z0-9_-]{0,31}$/.test(request.id) || !/^[a-z][a-z0-9-]{0,31}$/.test(request.executable)) throw new Error('invalid binary id or executable');
+          return this.#adapter('process.binaryInstall', [request]);
+        },
+        binaryStatus: (id) => {
+          this.#requirePermission('exec', 'process.binaryStatus');
+          if (this.remoteInstallEnabled) throw new Error('process.binaryStatus is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid binary id');
+          return this.#adapter('process.binaryStatus', [id]);
+        },
+        binarySelect: (request) => {
+          this.#requirePermission('exec', 'process.binarySelect');
+          if (this.remoteInstallEnabled) throw new Error('process.binarySelect is disabled while remote plugin installation is enabled');
+          if (!request || !/^[a-z][a-z0-9_-]{0,31}$/.test(request.id) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(request.version) || request.version.includes('..')) throw new Error('invalid binary selection');
+          return this.#adapter('process.binarySelect', [request]);
+        },
+        binaryRemove: (request) => {
+          this.#requirePermission('exec', 'process.binaryRemove');
+          if (this.remoteInstallEnabled) throw new Error('process.binaryRemove is disabled while remote plugin installation is enabled');
+          if (!request || !/^[a-z][a-z0-9_-]{0,31}$/.test(request.id) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(request.version) || request.version.includes('..')) throw new Error('invalid binary selection');
+          return this.#adapter('process.binaryRemove', [request]);
+        },
         start: (request) => {
           this.#requirePermission('exec', 'process.start');
           if (this.remoteInstallEnabled) throw new Error('process.start is disabled while remote plugin installation is enabled');
@@ -2074,7 +2100,7 @@ class VeerPluginTestHost {
         control_api_abi: API_CONTRACT.runtime.control_api_abi,
         tc_pipeline_abi: API_CONTRACT.runtime.tc_pipeline_abi,
         os: process.platform,
-        arch: process.arch,
+        arch: this.hostInfo.arch,
         features: API_CONTRACT.runtime.features.slice(),
         available_features: this.availableFeatures.slice(),
         feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: this.availableFeatures.includes(feature)}])),

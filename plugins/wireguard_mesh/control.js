@@ -8,6 +8,7 @@ if (typeof plugin.host === 'function') {
 }
 // Stable plugin ID and WG names preserve existing profiles during upgrades.
 var coreDrivers = require('./core-drivers');
+var coreManager = require('./core-manager');
 var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft';
 var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
 var OBJECT = 'wg_adapter', MAP = 'wg_links';
@@ -39,12 +40,26 @@ plugin.action({id: 'apply', description: 'Create or update a VPN WAN; select it 
 plugin.action({id: 'teardown', description: 'Remove the owned VPN WAN and its TC adapter.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'inspect', description: 'Read public interface, peer, handshake and traffic state.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 plugin.action({id: 'core_logs', description: 'Explicitly read managed core logs; output may contain credentials.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
-ui.register({static_dir: 'ui', entry: 'index.html', sha256: '6c0964eccd59ddf02948ee5c21a0954cd8326f5cb3018c147414c61e7821f347', page: 'wireguard', page_title: 'VPN',
+plugin.action({id: 'core_status', description: 'List persistent core versions and installation progress.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
+plugin.action({id: 'core_install', description: 'Download and verify an official core release in the background.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
+plugin.action({id: 'core_select', description: 'Choose an installed core for subsequently applied WANs.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
+plugin.action({id: 'core_rollback', description: 'Restore the previous default core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
+plugin.action({id: 'core_remove', description: 'Remove an unused installed core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
+ui.register({static_dir: 'ui', entry: 'index.html', sha256: '22d33356f0bb622cbca23ce76e1faea6ceb573c67c3551b77acf0b2e84e8edd1', page: 'wireguard', page_title: 'VPN',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
-  actions: ['set_key', 'set_core_config', 'apply', 'teardown', 'inspect', 'core_logs']});
+  actions: ['set_key', 'set_core_config', 'apply', 'teardown', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
 
 exports.onAction = function (ctx) {
   var payload = ctx.payload || {}, key = profileKey(payload.key);
+  if (['core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove'].indexOf(ctx.action.id) >= 0) {
+    var driver = coreManager.driver(payload.driver);
+    if (ctx.action.id === 'core_status') return process.binaryStatus(driver);
+    if (ctx.action.id === 'core_install') return process.binaryInstall(coreManager.install(payload, plugin.host()));
+    if (ctx.action.id === 'core_remove') return process.binaryRemove({id:driver, version:String(payload.version || '')});
+    var version = ctx.action.id === 'core_rollback' ? process.binaryStatus(driver).previous : String(payload.version || '');
+    if (!version) throw new Error('No previous installed core version');
+    return process.binarySelect({id:driver, version:version});
+  }
   if (ctx.action.id === 'set_key') {
     var value = wgKey(payload.value), name = payload.name ? token(payload.name) : 'private_' + key;
     var publicKey = name === 'private_' + key ? command(WG, ['pubkey'], value + '\n').trim() : '';
@@ -537,7 +552,8 @@ function normalizeTUN(key, raw) {
   p.remote_routes = [];
   p.upstream_interface = driver === 'tun' ? '' : iface(raw.upstream_interface);
   if (driver !== 'tun' && (!raw.upstream_interface || [p.interface, p.local, p.pipeline].indexOf(p.upstream_interface) >= 0)) throw new Error('Select a separate physical or PPPoE upstream_interface');
-  p.core_path = driver === 'tun' ? '' : coreDrivers.command(driver, raw.core_path);
+  var managed = driver !== 'tun' && !raw.core_path ? process.binaryStatus(driver) : null;
+  p.core_path = driver === 'tun' ? '' : coreDrivers.command(driver, raw.core_path || (managed && managed.path));
   p.config_secret = raw.config_secret ? token(raw.config_secret) : 'core_' + key;
   p.max_restarts = integer(raw.max_restarts, 0, 10, 3);
   p.startup_timeout_seconds = integer(raw.startup_timeout_seconds, 1, 300, 30);

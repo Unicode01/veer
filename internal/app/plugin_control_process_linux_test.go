@@ -267,7 +267,7 @@ func TestPluginManagedProcessBrokerPolicy(t *testing.T) {
 			if err := h.install(); err != nil {
 				t.Fatal(err)
 			}
-			for _, method := range []string{"process.start", "process.status", "process.stop", "process.restart", "process.list", "process.logs"} {
+			for _, method := range []string{"process.start", "process.status", "process.stop", "process.restart", "process.list", "process.logs", "process.binaryInstall", "process.binaryStatus", "process.binarySelect", "process.binaryRemove"} {
 				if _, _, err := h.callPluginHostMethod(method, []any{map[string]any{"id": "core", "command": "/bin/sleep"}}); err == nil {
 					t.Fatal(method, "accepted", mode)
 				}

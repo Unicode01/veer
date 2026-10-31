@@ -12,6 +12,7 @@ function fixture(config = profile(), options = {}) {
   const state = options.state || {links:[], records:{sessions:{},status:{}}, calls:[], services:[], next:10, config:'', fail:null};
   const ok = (stdout = '') => ({stdout, stderr:'', exit_code:0});
   const adapters = {
+    'process.binaryStatus': id => ({id, versions:[]}),
     'plugins.services.resolve': () => ({provider:'wan_core',service:'wan.adapter',version:'1.0.0'}),
     'plugins.resources.get': (plugin, resource, key) => state.records[resource][key] || null,
     'plugins.resources.set': (plugin, resource, key, data, enabled) => {
@@ -57,7 +58,7 @@ function fixture(config = profile(), options = {}) {
       return ok();
     }
   };
-  const host=createTestHost({pluginDir:options.pluginDir||pluginDir,availableFeatures:options.availableFeatures,remoteInstallEnabled:options.remoteInstallEnabled,fixtures:{kv:options.kv||{},resources:{profiles:{default:{data:config,enabled:options.enabled!==false}}},secrets:options.missingKey?{}:{private_default:PRIVATE,...options.secrets}},adapters:{...adapters,...options.adapters}}).load();
+  const host=createTestHost({pluginDir:options.pluginDir||pluginDir,hostInfo:options.hostInfo,availableFeatures:options.availableFeatures,remoteInstallEnabled:options.remoteInstallEnabled,fixtures:{kv:options.kv||{},resources:{profiles:{default:{data:config,enabled:options.enabled!==false}}},secrets:options.missingKey?{}:{private_default:PRIVATE,...options.secrets}},adapters:{...adapters,...options.adapters}}).load();
   return {host,state,apply:()=>host.action('apply',{key:'default'}),maps:()=>host.state.maps};
 }
 test('WG is opt-in and registration/drafts do not change networking',()=>{
@@ -206,7 +207,7 @@ function vpnFixture(driver = 'mihomo', extra = {}, options = {}) {
     'process.start': spec => {
       specs.push(clone(spec));
       if (!procs[spec.id]) {
-        procs[spec.id] = {id:spec.id,state:'running',pid:100,starts:1,started_at:1000};
+        procs[spec.id] = {id:spec.id,state:'running',pid:100,starts:1,started_at:1000*specs.length};
         if (!options.delayed) state.links.push({ifname:'vtun'+spec.id.slice(4),ifindex:state.next++,ifalias:'',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
       }
       return procs[spec.id];
@@ -224,6 +225,40 @@ function vpnFixture(driver = 'mihomo', extra = {}, options = {}) {
     {...options,state,secrets:{core_default:JSON.stringify(driver === 'mihomo' ? {proxies:[{password:'sensitive-core-password'}],tun:{'auto-route':true}} : {outbounds:[{type:'direct',tag:'direct'}]}),...options.secrets},adapters:{...adapters,...options.adapters}});
   return {...h,procs,specs};
 }
+
+test('VPN installs official cores through a background host task without changing active WANs',()=>{
+  const requests=[];
+  const h=vpnFixture('mihomo',{}, {hostInfo:{os:'linux',arch:'amd64'},adapters:{'process.binaryInstall':request=>{requests.push(clone(request));return {id:request.id,versions:[],install:{state:'resolving'}};}}});
+  const result=h.host.action('core_install',{driver:'mihomo',version:'1.19.33'});
+  assert.equal(result.install.state,'resolving');assert.equal(h.state.services.length,0);assert.equal(h.specs.length,0);
+  assert.equal(requests[0].release_url,'https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/v1.19.33');
+  assert.match(requests[0].asset,/amd64-compatible/);assert.deepEqual(requests[0].check_args,['-v']);
+  h.host.action('core_install',{driver:'sing_box'});
+  assert.equal(requests[1].release_url,'https://api.github.com/repos/SagerNet/sing-box/releases/latest');
+  assert.equal(requests[1].archive_path,'sing-box-{version}-linux-amd64/sing-box');
+  for(const payload of [{driver:'wireguard'},{driver:'mihomo',version:'../../tmp'},{driver:'mihomo',sha256:'bad'}]) assert.throws(()=>h.host.action('core_install',payload));
+});
+
+test('VPN managed default updates only explicitly reapplied WANs and keeps recovery pinned',()=>{
+  const selected={id:'mihomo',path:'/opt/veer/plugins.veer-state/cores/wireguard_mesh/mihomo/linux-amd64/v1/mihomo',versions:[]};
+  const h=vpnFixture('mihomo',{}, {adapters:{'process.binaryStatus':()=>clone(selected)}});
+  h.apply();const old=h.specs[0].command;
+  assert.equal(old,selected.path);
+  selected.path=selected.path.replace('/v1/','/v2/');
+  h.host.reconcile();assert.equal(h.specs.at(-1).command,old);
+  h.apply();assert.equal(h.specs.at(-1).command,selected.path);
+});
+
+test('VPN core rollback chooses the previous version and never restarts processes implicitly',()=>{
+  const selected={id:'mihomo',version:'v2',previous:'v1',versions:[]};const calls=[];
+  const h=vpnFixture('mihomo',{}, {adapters:{'process.binaryStatus':()=>clone(selected),
+    'process.binarySelect':req=>{calls.push(clone(req));return selected;},'process.binaryRemove':req=>{calls.push(clone(req));return selected;}}});
+  h.host.action('core_rollback',{driver:'mihomo'});assert.deepEqual(calls[0],{id:'mihomo',version:'v1'});
+  h.host.action('core_select',{driver:'mihomo',version:'v3'});assert.deepEqual(calls[1],{id:'mihomo',version:'v3'});
+  h.host.action('core_remove',{driver:'mihomo',version:'v0'});assert.deepEqual(calls[2],{id:'mihomo',version:'v0'});
+  assert.equal(h.state.services.length,0);assert.equal(h.specs.length,0);
+  delete selected.previous;assert.throws(()=>h.host.action('core_rollback',{driver:'mihomo'}),/No previous/);
+});
 for (const driver of ['mihomo','sing_box']) {
   test('VPN '+driver+' uses a managed TUN WAN and leaves host routing to the selected upstream',()=>{
     const h=vpnFixture(driver); const result=h.apply();

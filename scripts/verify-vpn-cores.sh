@@ -26,7 +26,7 @@ fi
 export VEER_TEST_MIHOMO VEER_TEST_SING_BOX
 cd "$ROOT_DIR"
 go test -c -o "$WORK_DIR/vpn.test" ./internal/app
-VEER_RUN_VPN_CORE_TESTS=1 "$WORK_DIR/vpn.test" -test.run='^(TestPluginManagedProcess.*|TestVPNCoreLinuxIntegration)$' -test.count=1 -test.v -test.timeout=10m
+VEER_RUN_VPN_CORE_TESTS=1 "$WORK_DIR/vpn.test" -test.run='^(TestPluginManagedProcess.*|TestPluginBinary.*|TestVPNCoreLinuxIntegration)$' -test.count=1 -test.v -test.timeout=10m
 # A service-owned delegated cgroup lets the strict test verify real quotas,
 # rather than silently degrading in the go command's shared runner cgroup.
 systemd-run --quiet --wait --pipe --collect --unit="veer-vpn-limits-$$" \

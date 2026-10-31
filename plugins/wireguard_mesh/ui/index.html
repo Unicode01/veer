@@ -41,7 +41,45 @@
   const coreEditor = h('textarea', {className:F.classes.input + ' wg-json', attrs:{spellcheck:'false', 'aria-label':'代理核心 JSON 配置'}});
   const output = h('pre', {className:'wg-output', text:'尚未加载'});
   const picker = h('select', {className:F.classes.input, attrs:{'aria-label':'已保存隧道'}});
+  const coreDriver = h('select', {className:F.classes.input, attrs:{'aria-label':'管理核心'}}, [
+    h('option', {attrs:{value:'mihomo'}, text:'Mihomo'}), h('option', {attrs:{value:'sing_box'}, text:'sing-box'})]);
+  const coreVersion = input(''); coreVersion.placeholder = '留空：最新稳定版';
+  const coreDigest = input(''); coreDigest.placeholder = '通常留空，自动读取官方 SHA256';
+  const installedVersion = h('select', {className:F.classes.input, attrs:{'aria-label':'已安装核心版本'}});
+  const coreOutput = h('pre', {className:'wg-output', attrs:{'aria-live':'polite'}, text:'正在读取核心状态…'});
+  let corePoll = null, coreSequence = 0;
   controls.push(key, secretName, privateKey, editor, coreEditor, picker);
+  controls.push(coreDriver, coreVersion, coreDigest, installedVersion);
+  function showCoreStatus(status) {
+    const selectedVersion = installedVersion.value;
+    installedVersion.replaceChildren(h('option', {attrs:{value:''}, text:'选择已安装版本'}));
+    (status.versions || []).forEach(function (v) {
+      installedVersion.appendChild(h('option', {attrs:{value:v.version}, text:v.version + (v.version === status.version ? '（默认）' : '')}));
+    });
+    installedVersion.value = (status.versions || []).some(v => v.version === selectedVersion) ? selectedVersion : status.version || '';
+    const lines = ['默认版本：' + (status.version || '尚未安装'), '上一版本：' + (status.previous || '无')];
+    if (status.directory) lines.push('核心目录：' + status.directory);
+    const job = status.install;
+    if (job) {
+      const phases = {resolving:'正在查询版本', downloading:'正在下载', verifying:'正在校验', ready:'安装成功', failed:'安装失败'};
+      lines.push(phases[job.state] || job.state);
+      if (job.downloaded_bytes) lines.push((job.downloaded_bytes / 1048576).toFixed(1) + ' MiB' + (job.total_bytes ? ' / ' + (job.total_bytes / 1048576).toFixed(1) + ' MiB' : ''));
+      if (job.error) lines.push(job.error);
+    }
+    coreOutput.textContent = lines.join('\n'); F.requestResize();
+    return job && ['resolving', 'downloading', 'verifying'].includes(job.state);
+  }
+  async function refreshCore() {
+    clearTimeout(corePoll); corePoll = null;
+    const sequence = ++coreSequence, driver = coreDriver.value;
+    const response = await F.action('core_status', {driver});
+    if (sequence !== coreSequence || driver !== coreDriver.value) return;
+    const status = response && response.result;
+    if (!status) throw new Error('无法读取核心状态');
+    if (showCoreStatus(status)) corePoll = setTimeout(function () { refreshCore().catch(F.toastError); }, 1500);
+  }
+  coreDriver.addEventListener('change', function () { installedVersion.value = ''; refreshCore().catch(F.toastError); });
+  window.addEventListener('pagehide', function () { ++coreSequence; clearTimeout(corePoll); });
   function selected() {
     if (!/^[a-z][a-z0-9_]{0,10}$/.test(key.value)) throw new Error('隧道标识使用 1–11 位小写字母、数字或下划线，以字母开头');
     return key.value;
@@ -91,7 +129,18 @@
   const page = h('main', {className:F.classes.page + ' wg-page'}, [F.stack([
     F.card([h('h1', {className:F.classes.title, text:'VPN'}),
       h('p', {className:F.classes.description, text:'创建 VPN WAN 后，在 LAN 或出向 NAT 中选择该出口，即可让整个 LAN 或指定下游设备通过隧道访问互联网或远端内网。'}),
-      h('p', {className:F.classes.description, text:'支持 WireGuard、Mihomo、sing-box 和外部 TUN。先在主机安装所选核心，再在此配置出口。核心故障时暂停该出口。'})]),
+      h('p', {className:F.classes.description, text:'支持 WireGuard、Mihomo、sing-box 和外部 TUN。代理核心可在此安装，也可使用本机已有核心。核心故障时暂停该出口。'})]),
+    F.card([h('h2', {className:F.classes.title, text:'核心管理'}),
+      h('p', {className:F.classes.description, text:'从官方发布下载匹配本机架构的核心，校验通过后设为默认。更新或回滚保留正在运行的出口；重新应用出口后使用新默认版本。填写了 core_path 的出口继续使用指定文件。'}),
+      h('div', {className:'wg-fields'}, [field('核心', coreDriver), field('安装版本', coreVersion), field('已安装版本', installedVersion)]),
+      h('details', {}, [h('summary', {text:'指定校验值'}), field('SHA256（旧版官方资产无摘要时填写）', coreDigest)]),
+      h('div', {className:'wg-actions'}, [
+        button('安装 / 更新', async function () { ++coreSequence; clearTimeout(corePoll); await F.action('core_install', {driver:coreDriver.value, version:coreVersion.value.trim(), sha256:coreDigest.value.trim()}); await refreshCore(); F.toast('安装任务已提交'); }),
+        button('刷新核心', refreshCore, true),
+        button('设为默认', async function () { if (!installedVersion.value) throw new Error('请选择已安装版本'); await F.action('core_select', {driver:coreDriver.value, version:installedVersion.value}); await refreshCore(); F.toast('默认版本已切换，重新应用出口后生效'); }, true),
+        button('回滚上一版本', async function () { await F.action('core_rollback', {driver:coreDriver.value}); await refreshCore(); F.toast('默认版本已回滚，重新应用出口后生效'); }, true),
+        button('删除所选版本', async function () { if (!installedVersion.value) throw new Error('请选择已安装版本'); await F.action('core_remove', {driver:coreDriver.value, version:installedVersion.value}); await refreshCore(); }, true)
+      ]), coreOutput]),
     F.card([h('h2', {className:F.classes.title, text:'出口配置'}),
       h('div', {className:'wg-fields'}, [field('隧道标识', key), field('已保存隧道', picker)]),
       h('div', {className:'wg-actions'}, [button('WireGuard 出口', function () { preset(false); }, true), button('WireGuard 内网', function () { preset(true); }, true), button('Mihomo', function () { corePreset('mihomo'); }, true), button('sing-box', function () { corePreset('sing_box'); }, true), button('外部 TUN', function () { corePreset('tun'); }, true)]),
@@ -114,6 +163,7 @@
   ])]);
   preset(false); document.body.replaceChildren(page);
   reload().catch(F.toastError).finally(F.requestResize);
+  refreshCore().catch(F.toastError);
 })();
 </script>
 </body>

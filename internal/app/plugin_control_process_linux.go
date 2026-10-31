@@ -18,6 +18,10 @@ func newPluginManagedProcessDirectory() (string, error) {
 	return os.MkdirTemp(root, fmt.Sprintf("%d-", os.Getpid()))
 }
 
+func cleanupPluginBinaryStages(root string) error {
+	return cleanupPluginManagedProcessDirectories(root)
+}
+
 // A daemon killed with SIGKILL cannot run defers. Reclaim its private config
 // directories on the next start, without touching live owners or symlinks.
 func cleanupPluginManagedProcessDirectories(root string) error {

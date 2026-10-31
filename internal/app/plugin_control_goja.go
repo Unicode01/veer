@@ -2284,6 +2284,8 @@ func (h *pluginControlHost) install() error {
 	for name, method := range map[string]func(goja.FunctionCall) goja.Value{
 		"start": h.processStart, "status": h.processStatus, "list": h.processList,
 		"stop": h.processStop, "restart": h.processRestart, "logs": h.processLogs,
+		"binaryInstall": h.processBinaryInstall, "binaryStatus": h.processBinaryStatus,
+		"binarySelect": h.processBinarySelect, "binaryRemove": h.processBinaryRemove,
 	} {
 		if err := processAPI.Set(name, method); err != nil {
 			return err

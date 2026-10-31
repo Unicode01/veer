@@ -1211,7 +1211,29 @@ declare global {
     id: string; state: 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'exited' | 'backoff' | 'failed';
     pid: number; starts: number; exit_code: number; started_at: number;
   }
+  interface VeerBinaryInstallRequest {
+    id: string; executable: string; format: 'raw' | 'gzip' | 'tar.gz';
+    /** Direct source: version, HTTPS URL and SHA256 are all required. */
+    version?: string; url?: string; sha256?: string;
+    /** GitHub release metadata; asset/path templates accept {tag} and {version}. */
+    release_url?: string; asset?: string; archive_path?: string; check_args?: string[];
+  }
+  interface VeerBinaryStatus {
+    id: string; directory: string; path?: string; version?: string; previous?: string;
+    versions: Array<{version: string; executable: string; sha256: string; binary_sha256: string;
+      bytes: number; path: string; installed_at: string}>;
+    install?: {state: 'resolving' | 'downloading' | 'verifying' | 'ready' | 'failed'; version?: string;
+      downloaded_bytes: number; total_bytes?: number; error?: string};
+  }
   const process: {
+    /** Trusted Linux main context. Background verified download; selects default only on success.
+     * Live processes retain their immutable executable. At most 4 versions and 1 GiB per plugin. */
+    binaryInstall(request: VeerBinaryInstallRequest): VeerBinaryStatus;
+    binaryStatus(id: string): VeerBinaryStatus;
+    /** Atomically choose a verified installed version; previous is available for rollback. */
+    binarySelect(request: {id: string; version: string}): VeerBinaryStatus;
+    /** Selected versions and versions referenced by managed processes cannot be removed. */
+    binaryRemove(request: {id: string; version: string}): VeerBinaryStatus;
     /** Linux main context only. Config is private (0600), {config} expands to its path. */
     start(request: {id: string; command: string; args?: string[]; stdin?: string; config?: string;
       restart?: 'never' | 'on-failure'; max_restarts?: number; stop_timeout_ms?: number}): VeerManagedProcessStatus;

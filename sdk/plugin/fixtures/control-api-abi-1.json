@@ -42,6 +42,10 @@
     "process.stop",
     "process.restart",
     "process.list",
-    "process.logs"
+    "process.logs",
+    "process.binaryInstall",
+    "process.binaryStatus",
+    "process.binarySelect",
+    "process.binaryRemove"
   ]
 }
