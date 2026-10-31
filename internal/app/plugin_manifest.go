@@ -1175,6 +1175,9 @@ func normalizePluginHook(hook *PluginHook) error {
 		return err
 	}
 	hook.Interfaces = interfaces
+	if hook.BindingRequired && hook.Engine != kernelEngineTC && hook.Engine != kernelEngineXDP {
+		return fmt.Errorf("binding_required is only available to tc/xdp hooks")
+	}
 	if hook.Engine == pluginEngineNetfilter && len(interfaces) > 0 {
 		return fmt.Errorf("netfilter hooks are namespace-scoped; match input/output interfaces inside the plugin program")
 	}

@@ -238,6 +238,15 @@ function normalizeHookOrderReferences(values, label) {
   return [...new Set(out)].sort();
 }
 
+function normalizeHookBinding(item, api) {
+  if (item.binding_required != null && typeof item.binding_required !== 'boolean') {
+    throw new Error(`${api}.binding_required must be a boolean`);
+  }
+  if (item.binding_required && !['tc', 'xdp'].includes(item.engine)) {
+    throw new Error(`${api}.binding_required is only available to tc/xdp hooks`);
+  }
+}
+
 function normalizeHookOrder(item, api) {
   item.before = normalizeHookOrderReferences(item.before, `${api}.before`);
   item.after = normalizeHookOrderReferences(item.after, `${api}.after`);
@@ -833,6 +842,7 @@ class VeerPluginTestHost {
             else input.stage = input.direction === 'reply' ? 'pre_reply' : 'pre_forward';
           }
           const hook = this.#registerUnique(this.surface.hooks, input, 'pipeline.attach');
+          normalizeHookBinding(hook, 'pipeline.attach');
           normalizeHookOrder(hook, 'pipeline.attach');
           normalizeHookPacketMetadata(hook, 'pipeline.attach');
         },
@@ -841,6 +851,7 @@ class VeerPluginTestHost {
         attach: (spec) => {
           this.#requirePermission('hook.attach', 'hooks.attach', true);
           const hook = this.#registerUnique(this.surface.hooks, spec, 'hooks.attach');
+          normalizeHookBinding(hook, 'hooks.attach');
           normalizeHookOrder(hook, 'hooks.attach');
           normalizeHookPacketMetadata(hook, 'hooks.attach');
         },

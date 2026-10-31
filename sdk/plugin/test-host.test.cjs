@@ -539,7 +539,7 @@ test('test host loads bundled control-plane plugins without compatibility shims'
 test('test host exposes every versioned control API method', (t) => {
   const pluginDir = writePlugin(t, testManifest('api_contract'), `exports.onReconcile = function () {};`);
   const host = createTestHost({ pluginDir });
-  assert.equal(apiContract.version, 11);
+  assert.equal(apiContract.version, 12);
   assert.equal(apiContract.runtime.api_version, 'v1');
   assert.equal(apiContract.runtime.tc_pipeline_abi, 2);
   assert.equal(apiContract.runtime.core_priority, 1000);
@@ -866,6 +866,23 @@ exports.onReconcile = function () {};
 hooks.attach({id:'bad', engine:'tc', stage:'pre_forward', program:'object:program', before:['a/h'], after:['a/h']});
 `);
   assert.throws(() => createTestHost({pluginDir: invalidDir}), /both before and after/);
+});
+
+test('test host preserves required dynamic bindings and rejects unsupported engines', (t) => {
+  const manifest = testManifest('bound_hooks');
+  manifest.control.permissions.push('hook.attach');
+  const pluginDir = writePlugin(t, manifest, `
+pipeline.attach({id:'adapter', direction:'forward', program:'object:program', binding_required:true});
+hooks.attach({id:'xdp_adapter', engine:'xdp', stage:'pre_forward', program:'object:program', binding_required:true});
+`);
+  const hooks = createTestHost({pluginDir}).snapshot().surface.hooks;
+  assert.ok(hooks.every(hook => hook.binding_required === true));
+  for (const [engine, value] of [['netfilter', true], ['control', true], ['tc', 'true']]) {
+    const invalidDir = writePlugin(t, manifest, `
+hooks.attach({id:'bad', engine:${JSON.stringify(engine)}, stage:'pre_forward', program:'object:program', binding_required:${JSON.stringify(value)}});
+`);
+    assert.throws(() => createTestHost({pluginDir:invalidDir}), /binding_required/);
+  }
 });
 
 test('test host normalizes packet metadata bindings and rejects unsafe contracts', (t) => {

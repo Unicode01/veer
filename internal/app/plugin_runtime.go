@@ -440,22 +440,23 @@ type PluginObjectProgram struct {
 }
 
 type PluginHook struct {
-	ID             string                        `json:"id"`
-	Engine         string                        `json:"engine"`
-	Attach         string                        `json:"attach,omitempty"`
-	Stage          string                        `json:"stage,omitempty"`
-	Family         string                        `json:"family,omitempty"`
-	NetfilterHook  string                        `json:"hook,omitempty"`
-	Phase          string                        `json:"phase,omitempty"`
-	Namespace      string                        `json:"namespace,omitempty"`
-	Priority       int                           `json:"priority,omitempty"`
-	Before         []string                      `json:"before,omitempty"`
-	After          []string                      `json:"after,omitempty"`
-	Program        string                        `json:"program,omitempty"`
-	Mode           string                        `json:"mode,omitempty"`
-	Context        []string                      `json:"context,omitempty"`
-	Interfaces     []string                      `json:"interfaces,omitempty"`
-	PacketMetadata []PluginPacketMetadataBinding `json:"packet_metadata,omitempty"`
+	ID              string                        `json:"id"`
+	Engine          string                        `json:"engine"`
+	Attach          string                        `json:"attach,omitempty"`
+	Stage           string                        `json:"stage,omitempty"`
+	Family          string                        `json:"family,omitempty"`
+	NetfilterHook   string                        `json:"hook,omitempty"`
+	Phase           string                        `json:"phase,omitempty"`
+	Namespace       string                        `json:"namespace,omitempty"`
+	Priority        int                           `json:"priority,omitempty"`
+	Before          []string                      `json:"before,omitempty"`
+	After           []string                      `json:"after,omitempty"`
+	Program         string                        `json:"program,omitempty"`
+	Mode            string                        `json:"mode,omitempty"`
+	Context         []string                      `json:"context,omitempty"`
+	Interfaces      []string                      `json:"interfaces,omitempty"`
+	BindingRequired bool                          `json:"binding_required,omitempty"`
+	PacketMetadata  []PluginPacketMetadataBinding `json:"packet_metadata,omitempty"`
 }
 
 type PluginPacketMetadataBinding struct {

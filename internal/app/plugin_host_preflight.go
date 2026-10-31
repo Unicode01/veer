@@ -199,6 +199,9 @@ func pluginRequiredHostFeatures(plugin LoadedPlugin) []string {
 		}
 	}
 	for _, hook := range plugin.Hooks {
+		if hook.BindingRequired {
+			required["dataplane.hook_bindings.v1"] = struct{}{}
+		}
 		if len(hook.Before) > 0 || len(hook.After) > 0 {
 			required["dataplane.hook_order.v1"] = struct{}{}
 		}

@@ -24,9 +24,6 @@ type pluginHookBindingSet struct {
 }
 
 func applyPluginHookBindingsFromDB(catalog PluginCatalog, db *sql.DB) PluginCatalog {
-	if db == nil {
-		return catalog
-	}
 	pluginIDs := make([]string, 0, len(catalog.Plugins))
 	for i := range catalog.Plugins {
 		plugin := catalog.Plugins[i]
@@ -34,27 +31,34 @@ func applyPluginHookBindingsFromDB(catalog PluginCatalog, db *sql.DB) PluginCata
 			pluginIDs = append(pluginIDs, plugin.ID)
 		}
 	}
-	recordsByPlugin, err := store.GetPluginRecordsByPluginIDs(db, pluginIDs, pluginHookBindingsResourceID)
-	if err != nil {
-		log.Printf("plugin hook bindings: batch load failed: %v", err)
-		return catalog
+	var recordsByPlugin map[string][]store.PluginRecord
+	if db != nil {
+		var err error
+		recordsByPlugin, err = store.GetPluginRecordsByPluginIDs(db, pluginIDs, pluginHookBindingsResourceID)
+		if err != nil {
+			log.Printf("plugin hook bindings: batch load failed: %v", err)
+			recordsByPlugin = nil
+		}
 	}
 	for i := range catalog.Plugins {
 		plugin := &catalog.Plugins[i]
-		if plugin.Builtin || plugin.Status != pluginStatusActive || !pluginHasResource(*plugin, pluginHookBindingsResourceID) {
+		if plugin.Builtin || plugin.Status != pluginStatusActive || len(plugin.Hooks) == 0 {
 			continue
 		}
 		bindings := pluginHookBindingsFromRecords(plugin.ID, recordsByPlugin[plugin.ID])
-		if len(bindings.Interfaces) == 0 && len(bindings.Disabled) == 0 {
-			continue
-		}
-		hooks := plugin.Hooks[:0]
+		hooks := make([]PluginHook, 0, len(plugin.Hooks))
 		for _, hook := range plugin.Hooks {
 			hookID := strings.TrimSpace(strings.ToLower(hook.ID))
 			if _, disabled := bindings.Disabled[hookID]; disabled {
 				continue
 			}
-			if interfaces, ok := bindings.Interfaces[hookID]; ok && hook.Engine != pluginEngineNetfilter {
+			interfaces, bound := bindings.Interfaces[hookID]
+			// Dynamic adapters must never fall back to a global hook, including
+			// before the first reconcile and when binding storage is unavailable.
+			if hook.BindingRequired && !bound {
+				continue
+			}
+			if bound && hook.Engine != pluginEngineNetfilter {
 				hook.Interfaces = interfaces
 			}
 			hooks = append(hooks, hook)

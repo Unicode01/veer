@@ -3108,17 +3108,18 @@ func (h *pluginControlHost) hookAttach(call goja.FunctionCall) goja.Value {
 }
 
 type pluginControlPipelineAttachment struct {
-	ID         string   `json:"id"`
-	Pipeline   string   `json:"pipeline,omitempty"`
-	Direction  string   `json:"direction,omitempty"`
-	Phase      string   `json:"phase,omitempty"`
-	Engine     string   `json:"engine,omitempty"`
-	Attach     string   `json:"attach,omitempty"`
-	Priority   int      `json:"priority,omitempty"`
-	Program    string   `json:"program"`
-	Mode       string   `json:"mode,omitempty"`
-	Context    []string `json:"context,omitempty"`
-	Interfaces []string `json:"interfaces,omitempty"`
+	ID              string   `json:"id"`
+	Pipeline        string   `json:"pipeline,omitempty"`
+	Direction       string   `json:"direction,omitempty"`
+	Phase           string   `json:"phase,omitempty"`
+	Engine          string   `json:"engine,omitempty"`
+	Attach          string   `json:"attach,omitempty"`
+	Priority        int      `json:"priority,omitempty"`
+	Program         string   `json:"program"`
+	Mode            string   `json:"mode,omitempty"`
+	Context         []string `json:"context,omitempty"`
+	Interfaces      []string `json:"interfaces,omitempty"`
+	BindingRequired bool     `json:"binding_required,omitempty"`
 }
 
 func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
@@ -3155,15 +3156,16 @@ func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
 		h.throwf("pipeline.attach: phase must be around_core or after_apply")
 	}
 	hook := PluginHook{
-		ID:         spec.ID,
-		Engine:     spec.Engine,
-		Attach:     spec.Attach,
-		Stage:      stage,
-		Priority:   spec.Priority,
-		Program:    spec.Program,
-		Mode:       spec.Mode,
-		Context:    append([]string(nil), spec.Context...),
-		Interfaces: append([]string(nil), spec.Interfaces...),
+		ID:              spec.ID,
+		Engine:          spec.Engine,
+		Attach:          spec.Attach,
+		Stage:           stage,
+		Priority:        spec.Priority,
+		Program:         spec.Program,
+		Mode:            spec.Mode,
+		Context:         append([]string(nil), spec.Context...),
+		Interfaces:      append([]string(nil), spec.Interfaces...),
+		BindingRequired: spec.BindingRequired,
 	}
 	if hook.Engine == "" {
 		hook.Engine = kernelEngineTC

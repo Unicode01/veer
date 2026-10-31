@@ -18,7 +18,7 @@ pipeline.node({id: 'wireguard', description: 'VPN core attached to a WAN Core ve
 ebpf.loadObject({id: OBJECT, path: TUNNEL_OBJECT_PATH, sha256: crypto.sha256File(TUNNEL_OBJECT_PATH),
   programs: [{id: 'tc_adapter', section: 'tc/veer/pre_forward', type: 'tc'}]});
 pipeline.attach({id: 'wg-links', direction: 'forward', attach: 'ingress', priority: 20,
-  program: 'wg_adapter:tc_adapter', mode: 'rewrite'});
+  program: 'wg_adapter:tc_adapter', mode: 'rewrite', binding_required: true});
 plugin.resource({id: 'hook_bindings', methods: ['list', 'get'], control_methods: ['list', 'get', 'create', 'update', 'delete'],
   runtime_update: 'plugin_reconcile', max_records: 1, max_record_bytes: 4096});
 plugin.resource({id: 'profiles', schema_version: 2, methods: ['list', 'get', 'create', 'update'], runtime_update: 'manual', max_records: 8, max_record_bytes: 16384,

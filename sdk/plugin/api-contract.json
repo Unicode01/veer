@@ -1,5 +1,5 @@
 {
-  "version": 11,
+  "version": 12,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -76,6 +76,7 @@
       "dataplane.kfuncs.handoff.v1",
       "dataplane.tc_pipeline.v2",
       "dataplane.hook_order.v1",
+      "dataplane.hook_bindings.v1",
       "dataplane.xdp_pipeline.v1",
       "dataplane.netfilter_pipeline.v1",
       "dataplane.netfilter_skb_dynptr.v1",

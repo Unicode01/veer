@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "wireguard_mesh",
   "name": "VPN WAN",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "kind": "pipeline",
   "stability": "lab",
   "description": "Opt-in VPN WAN adapters for kernel WireGuard, Mihomo, sing-box and external TUN cores.",
@@ -16,6 +16,7 @@
       "control.exec.v1",
       "control.typed_services.v1",
       "dataplane.tc_pipeline.v2",
+      "dataplane.hook_bindings.v1",
       "ui.capabilities.v1",
       "control.process.v1",
       "control.process_binaries.v1"

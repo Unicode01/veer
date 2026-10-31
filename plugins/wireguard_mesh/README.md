@@ -11,6 +11,8 @@
 
 各驱动共用 WAN Core 和双向 TC L2/L3 适配，JavaScript 不逐包转发，无需关闭 Veer 快速 NAT。
 
+TC 适配器要求显式动态接口绑定，只在已应用出口的自有隧道和 pipeline 接口上执行。首次启用且未应用出口时不挂载适配器，不影响普通 TC 出口；自有接口映射缺失时仍丢包，避免断链流量回退到普通上游。插件要求宿主提供 `dataplane.hook_bindings.v1`，旧宿主会拒绝加载。
+
 ## Mihomo / sing-box
 
 ```text

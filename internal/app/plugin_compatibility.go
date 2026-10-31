@@ -53,6 +53,7 @@ var pluginRuntimeFeatures = []string{
 	"dataplane.kfuncs.handoff.v1",
 	"dataplane.tc_pipeline.v2",
 	"dataplane.hook_order.v1",
+	"dataplane.hook_bindings.v1",
 	"dataplane.xdp_pipeline.v1",
 	"dataplane.netfilter_pipeline.v1",
 	"dataplane.netfilter_skb_dynptr.v1",
