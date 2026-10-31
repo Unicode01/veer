@@ -1,4 +1,5 @@
 // Core-specific configuration ends here. The WAN and packet handoff are shared.
+var shares = require('./ui/share');
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(label + ' must be a JSON object');
   return value;
@@ -14,6 +15,10 @@ exports.build = function (p, text) {
   var config;
   try { config = object(JSON.parse(text), 'Core configuration'); }
   catch (e) { throw new Error('Core configuration must be valid JSON'); }
+  if (config.veer_proxy === 1) {
+    if (config.driver !== p.driver) throw new Error('Saved node configuration belongs to another core');
+    config = shares.generate(config);
+  }
   var tunAddress = '198.18.' + p.slot + '.1/30';
   if (p.driver === 'mihomo') {
     config.tun = {enable: true, device: p.interface, stack: 'gvisor', mtu: p.mtu,

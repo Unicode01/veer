@@ -8,6 +8,7 @@ if (typeof plugin.host === 'function') {
 }
 // WAN keys and WG netdev names stay stable across the plugin ID migration.
 var coreDrivers = require('./core-drivers');
+var shares = require('./ui/share');
 var coreManager = require('./core-manager');
 var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft';
 var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
@@ -36,6 +37,7 @@ plugin.resource({id: 'profiles', schema_version: 2, methods: ['list', 'get', 'cr
 plugin.resource({id: 'status', methods: ['list', 'get'], control_methods: ['list', 'get', 'create', 'update', 'delete'], runtime_update: 'manual', max_records: 8, max_record_bytes: 32768});
 plugin.action({id: 'set_key', description: 'Store a private or preshared key in the encrypted Secret store.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'set_core_config', description: 'Store JSON core configuration encrypted.', runtime_update: 'runtime_apply', max_payload_bytes: 1048576});
+plugin.action({id: 'core_form', description: 'Read node names and advanced settings without credentials.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 plugin.action({id: 'apply', description: 'Create or update a VPN WAN; select it in LAN or Egress NAT settings.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'teardown', description: 'Remove the owned VPN WAN and its TC adapter.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'inspect', description: 'Read public interface, peer, handshake and traffic state.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
@@ -45,9 +47,9 @@ plugin.action({id: 'core_install', description: 'Download and verify an official
 plugin.action({id: 'core_select', description: 'Choose an installed core for subsequently applied WANs.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'core_rollback', description: 'Restore the previous default core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'core_remove', description: 'Remove an unused installed core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
-ui.register({static_dir: 'ui', entry: 'index.html', sha256: '424d2a88426349685965d2f8c828264bddb5252d7460cc8464316e482b29bb61', page: 'vpn', page_title: 'VPN',
+ui.register({static_dir: 'ui', entry: 'index.html', sha256: '3e71ed4426ad50a960d01225bb26a5e2d5d29f9e46cd7b249bff3b700567aa11', page: 'vpn', page_title: 'VPN',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
-  actions: ['set_key', 'set_core_config', 'apply', 'teardown', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
+  actions: ['set_key', 'set_core_config', 'core_form', 'apply', 'teardown', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
 
 exports.onAction = function (ctx) {
   var payload = ctx.payload || {}, key = profileKey(payload.key);
@@ -67,12 +69,37 @@ exports.onAction = function (ctx) {
     return {stored: true, name: name, public_key: publicKey};
   }
   if (ctx.action.id === 'set_core_config') {
+    var name = payload.name ? token(payload.name) : 'core_' + key;
+    if (payload.format === 'links') {
+      var source = String(payload.value || '').trim();
+      if (!source) {
+        var previous;
+        try { previous = JSON.parse(secret.get(name)); } catch (e) { throw new Error('请先导入分享链接'); }
+        if (!previous || previous.veer_proxy !== 1 || previous.driver !== payload.driver) throw new Error('请为当前核心重新导入分享链接');
+        source = previous.links;
+      }
+      var imported = shares.create(payload.driver, source, payload.selected, payload.options);
+      // Validate both parsing and generation before replacing any saved Secret.
+      shares.generate(imported);
+      secret.set(name, JSON.stringify(imported));
+      return {stored: true, form: shares.metadata(imported)};
+    }
+    if (payload.format && payload.format !== 'native') throw new Error('Unsupported core configuration format');
     var config = String(payload.value || '');
     try { var parsed = JSON.parse(config); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(); }
     catch (e) { throw new Error('Core configuration must be a JSON object'); }
+    if (parsed.veer_proxy != null) throw new Error('Use the sharing-link import format for managed node configurations');
     if (utf8Size(config) > 768 * 1024) throw new Error('Core configuration exceeds 768 KiB');
-    var name = payload.name ? token(payload.name) : 'core_' + key;
     secret.set(name, config); return {stored: true};
+  }
+  if (ctx.action.id === 'core_form') {
+    var record = resources.get('profiles', key);
+    if (!record || ['mihomo', 'sing_box'].indexOf(record.data.driver) < 0) return {mode: 'empty'};
+    var saved = secret.get(record.data.config_secret || 'core_' + key);
+    if (!saved) return {mode: 'empty'};
+    var form = shares.metadata(JSON.parse(saved));
+    if (form.driver && form.driver !== record.data.driver) throw new Error('Saved node configuration belongs to another core');
+    return form;
   }
   if (ctx.action.id === 'inspect') return inspect(key);
   if (ctx.action.id === 'core_logs') {

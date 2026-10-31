@@ -2,12 +2,12 @@
 
 显式安装的 `lab` 插件，不默认打包。目录和插件 ID 为 `vpn_core`，WebUI 页面为 VPN。核心按管理员操作安装，不在启动时自动下载；已有 WG 的 WAN ID 和接口名保持不变。
 
-WebUI 默认显示出口卡片，新建或编辑时按类型显示表单。支持多 Peer WireGuard 配置、粘贴导入 wg.conf、Mihomo / sing-box 原生 JSON 配置和外部 TUN；密钥与核心配置只写入加密存储，不会回填。核心安装、默认版本与回滚位于独立的“核心管理”页签，原始出口 JSON 位于高级设置。订阅、节点目录和运行时切换仍是后续方案，见 [WebUI 配置流程研究](WEBUI-DESIGN.md)。
+WebUI 默认显示出口卡片，新建或编辑时按类型显示表单。支持多 Peer WireGuard 配置、粘贴导入 wg.conf、Mihomo / sing-box 分享链接导入和外部 TUN；密钥与核心配置只写入加密存储，不会回填。代理普通表单只需上联接口、分享内容和节点选择，自动生成完整核心配置；分流、DNS 和原生 JSON 收在可折叠的高级栏。核心安装、默认版本与回滚位于独立的“核心管理”页签。远程订阅下载、共享节点目录和运行时无重启切换仍是后续方案，见 [WebUI 配置流程研究](WEBUI-DESIGN.md)。
 
 | 表单类型 | 普通配置 | 高级配置 |
 | --- | --- | --- |
 | WireGuard | 配置文件导入，或本机 Address/PrivateKey 与远端 Peer | 监听端口、宿主访问远端内网的路由、MTU、出口位置 |
-| Mihomo / sing-box | 实际出站接口、对应核心的 JSON 配置 | 内部 WAN 地址覆盖、MTU、出口位置 |
+| Mihomo / sing-box | 实际出站接口、分享链接或 Base64 内容、节点选择 | 直连网段/域名、DNS、原生 JSON；内部 WAN 地址覆盖、MTU、出口位置 |
 | 外部 TUN | 已有 TUN 接口名、匹配的接口 alias | 内部 WAN 地址覆盖、MTU、出口位置 |
 
 WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代理和外部 TUN 的内部 WAN 地址不属于节点参数，留空在首次应用时自动分配；核心自己的 TUN 地址由插件管理，外部 TUN 地址则由外部程序管理。
@@ -53,13 +53,27 @@ TC 适配器要求显式动态接口绑定，只在已应用出口的自有隧�
 
 未填写 `core_path` 的出口优先使用此处安装的默认核心；没有受管理版本时仍使用 `/usr/local/bin/mihomo` 或 `/usr/local/bin/sing-box`。也可用 `core_path` 指定本机其他绝对路径，文件名必须对应核心；指定的文件不参与插件版本管理。插件不运行 shell。WireGuard 工具和外部 TUN 提供者仍由本机管理员安装维护。
 
-在 VPN 页面加密保存核心 JSON 配置，再保存并应用出口配置：
+在 VPN 页面新建 Mihomo / sing-box 出口，填写实际上联接口，粘贴分享链接或整体 Base64 编码的分享内容。“识别节点”可预览并选择，直接保存则默认使用第一个节点；一次支持 1–128 个节点，分享内容最多 256 KiB。保存后只返回节点名称、协议、所选序号和高级设置，链接、服务器地址和密码不回填；后续可直接选择其他已导入节点。重新粘贴会替换此出口的整组节点。
+
+| 分享协议 | 支持范围 |
+| --- | --- |
+| Shadowsocks `ss://` | SIP002 明文/URL-safe Base64 凭据，兼容整体 Base64 的旧 SS 链接；常用 AEAD / 2022 加密方式，不支持 SIP003 插件参数 |
+| VMess `vmess://` | Base64 JSON 或 URI；仅 AEAD（alterId=0），TCP / WebSocket / gRPC / HTTP2，可选 TLS |
+| VLESS `vless://` | TCP / WebSocket / gRPC / HTTP2，TLS / REALITY、Vision；不支持新式 VLESS encryption |
+| Trojan `trojan://` | TLS、TCP / WebSocket / gRPC；sing-box 另支持 HTTP2 |
+| Hysteria2 `hysteria2://` / `hy2://` | TLS、单端口、可选 salamander 混淆 |
+
+不支持的协议、传输或参数会在写入 Secret 前报错，不静默丢弃。其他核心功能仍可在“分流与高级配置”中切换为原生 JSON。已有原生 JSON 配置会以原生模式打开，留空继续沿用。这里只导入粘贴内容，不下载订阅 URL，也不接受 YAML；协议映射以 [Mihomo 文档](https://wiki.metacubex.one/en/config/proxies/)、[sing-box 文档](https://sing-box.sagernet.org/configuration/outbound/)、[SIP002](https://shadowsocks.org/doc/sip002.html)、[VMess/VLESS 链接提案](https://github.com/XTLS/Xray-core/discussions/716) 和 [Hysteria2 URI](https://v2.hysteria.network/docs/developers/URI-Scheme/) 为依据。
+
+自动配置默认把流量发送到所选节点。高级栏可填写直连 CIDR、直连域名及子域名（依赖 HTTP/TLS/QUIC 嗅探，识别不到时仍走节点）。节点域名解析默认使用经实际上联访问的 `223.5.5.5`，可修改。下游 DNS 默认沿用；可选择接管经过此出口的 TCP/UDP 53 流量，通过节点访问指定 DNS（默认 `1.1.1.1`）。LAN 网关代发的 DNS 不一定经过此出口，DoH/DoT 也不属于 53 端口接管范围。
+
+保存并应用出口配置：
 
 ```json
 {"driver":"mihomo","slot":1,"mtu":1420,"upstream_interface":"eth0","max_restarts":3}
 ```
 
-sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密保存，最多 768 KiB；API 不指定 `name` 时沿用 `core_<标识>`，指定时写入该 Secret，并通过 profile 的 `config_secret` 引用。页面新建代理配置使用 `core_<driver>_<标识>`，切换核心类型时不会串用另一种核心的配置；已有默认或自定义 Secret 引用继续沿用。节点、规则和 DNS 使用对应核心的 JSON 格式，不提供跨核心订阅格式转换。重新应用后生效；恢复使用单独加密保存的已应用配置，不读取后续草稿。
+sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密保存，原生 JSON 最多 768 KiB；API 不指定 `name` 时沿用 `core_<标识>`，指定时写入该 Secret，并通过 profile 的 `config_secret` 引用。页面新建代理配置使用 `core_<driver>_<标识>`，切换核心类型时不会串用另一种核心的配置；已有默认或自定义 Secret 引用继续沿用。链接导入使用 `format:"links"`、`driver`、`value`、从 0 开始的 `selected` 和 `options`；`value` 留空仅调整同类型已导入节点的选择及高级设置。`core_form` 返回不含凭据的编辑摘要。重新应用后生效；恢复使用单独加密保存的已应用配置，不读取后续草稿。
 
 插件生成独占 TUN，强制 gVisor、关闭自动路由和自动重定向，并指定实际上游。Mihomo 额外入站/控制端口及 sing-box 额外入站/experimental 控制项不沿用；不能把 VPN 自身或其他 VPN 边界作为上游。WAN 地址使用 `/32` 或 `/128`，不安装 `remote_routes`。相对文件和资源下载需按核心要求准备，工作目录是受管理的临时目录。
 

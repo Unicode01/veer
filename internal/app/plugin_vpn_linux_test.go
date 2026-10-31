@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -425,16 +426,22 @@ func runWireGuardMeshTopology(t *testing.T) {
 		// Exercise the ordinary form with no internal address and an occupied
 		// preferred pool subnet, using the real netlink and route inventories.
 		ip("addr", "add", "10.78.1.254/24", "dev", "lo")
-		var config map[string]any
-		if driver == "mihomo" {
-			config = map[string]any{"proxies": []any{map[string]any{"name": "test", "type": "ss", "server": "192.0.2.2", "port": 8388, "cipher": "aes-128-gcm", "password": "veer-integration-only", "udp": true}}, "rules": []string{"MATCH,test"}}
-		} else {
-			config = map[string]any{"outbounds": []any{map[string]any{"type": "shadowsocks", "tag": "test", "server": "192.0.2.2", "server_port": 8388, "method": "aes-128-gcm", "password": "veer-integration-only"}}, "route": map[string]any{"final": "test"}}
-		}
-		data, _ := json.Marshal(config)
-		api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{"key": "default", "value": string(data)}})
+		// The ordinary form imports a Base64 list and selects the second node.
+		// The first node is deliberately unusable, so traffic tests the selection.
+		links := "ss://" + base64.RawURLEncoding.EncodeToString([]byte("aes-128-gcm:wrong-password")) + "@192.0.2.2:8388#unused\n" +
+			"ss://" + base64.RawURLEncoding.EncodeToString([]byte("aes-128-gcm:veer-integration-only")) + "@192.0.2.2:8388#test"
+		api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{
+			"key": "default", "format": "links", "driver": driver, "value": base64.StdEncoding.EncodeToString([]byte(links)), "selected": 1,
+			"options": map[string]any{"direct_cidrs": []string{"198.51.100.0/24"}},
+		}})
 	}
 	api("POST", "/api/plugins/vpn_core/resources/profiles", map[string]any{"key": "default", "data": profile, "enabled": true})
+	if driver != "" {
+		body := api("POST", "/api/plugins/vpn_core/actions/core_form", map[string]any{"payload": map[string]any{"key": "default"}})
+		if !bytes.Contains(body, []byte(`"mode":"links"`)) || bytes.Contains(body, []byte("veer-integration-only")) || bytes.Contains(body, []byte("wrong-password")) {
+			t.Fatalf("node edit form must provide metadata without credentials: %s", body)
+		}
+	}
 	action("apply")
 	if driver != "" && strings.HasPrefix(natSource, "10.78.1.") {
 		t.Fatalf("automatic WAN address overlaps the host subnet: %s", natSource)

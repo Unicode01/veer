@@ -323,6 +323,40 @@ test('VPN saves the core configuration to the selected Secret reference and pres
   assert.equal(h.host.snapshot().secrets.core_default,'[REDACTED]');
   assert.throws(()=>h.host.action('set_core_config',{name:'../../config',value:config}),/identifier/);
 });
+for(const driver of ['mihomo','sing_box']) {
+  test('VPN '+driver+' stores imported links encrypted, edits names/options without credentials and recovers the applied snapshot',()=>{
+    const h=vpnFixture(driver), source='ss://'+Buffer.from('aes-128-gcm:import-secret').toString('base64url')+'@192.0.2.2:8388#first\n'+
+      'trojan://another-secret@node.example:443?sni=example.com#second';
+    const saved=h.host.action('set_core_config',{format:'links',driver,value:Buffer.from(source).toString('base64'),selected:1,options:{direct_cidrs:['10.0.0.0/8']}});
+    assert.equal(saved.stored,true);assert.equal(saved.form.selected,1);
+    assert.deepEqual(saved.form.nodes.map(n=>n.name),['first','second']);
+    assert.equal(h.specs.length,0);assert.equal(h.state.services.length,0);
+    const form=h.host.action('core_form',{});assert.deepEqual(form,saved.form);
+    for(const secret of ['import-secret','another-secret','192.0.2.2','node.example'])assert.ok(!JSON.stringify(form).includes(secret));
+    h.apply();const applied=h.specs[0].config;
+    assert.equal(JSON.parse(applied)[driver==='mihomo'?'proxies':'outbounds'][0].password,'another-secret');
+    h.host.action('set_core_config',{format:'links',driver,value:'',selected:0,options:{dns_hijack:true}});
+    assert.equal(h.host.action('core_form',{}).selected,0);
+    delete h.procs.vpn_default;h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
+    h.host.reconcile();assert.equal(h.specs.at(-1).config,applied);
+    h.apply();assert.equal(JSON.parse(h.specs.at(-1).config)[driver==='mihomo'?'proxies':'outbounds'][0].password,'import-secret');
+    assert.equal(h.host.snapshot().secrets.core_default,'[REDACTED]');
+    for(const resource of ['profiles','status'])assert.ok(!JSON.stringify(h.host.snapshot().resources[resource]).includes('import-secret'));
+  });
+  test('VPN '+driver+' validates the entire import before changing a saved config or touching networking',()=>{
+    const h=vpnFixture(driver), source='ss://'+Buffer.from('aes-128-gcm:private-password').toString('base64url')+'@192.0.2.2:8388';
+    h.host.action('set_core_config',{format:'links',driver,value:source});
+    for(const payload of [{value:source+'\ntrojan://private-password@host:0'}, {selected:100},{driver:driver==='mihomo'?'sing_box':'mihomo'}, {options:{direct_cidrs:['10.0.0.0/99']}}]) {
+      assert.throws(()=>h.host.action('set_core_config',{format:'links',driver,value:'',...payload}),e=>!e.message.includes('private-password'));
+      assert.equal(h.host.action('core_form',{}).selected,0);
+    }
+    assert.equal(h.specs.length,0);assert.equal(h.state.services.length,0);
+    assert.throws(()=>h.host.action('set_core_config',{value:'{"veer_proxy":1}'}),/sharing-link/);
+    h.apply();assert.equal(JSON.parse(h.specs.at(-1).config)[driver==='mihomo'?'proxies':'outbounds'][0].password,'private-password');
+    const native=vpnFixture(driver);assert.equal(native.host.action('core_form',{}).mode,'native');
+    assert.throws(()=>native.host.action('set_core_config',{format:'links',driver,value:''}),/重新导入/);
+  });
+}
 for (const driver of ['mihomo','sing_box']) {
   test('VPN '+driver+' uses a managed TUN WAN and leaves host routing to the selected upstream',()=>{
     const h=vpnFixture(driver); const result=h.apply();
