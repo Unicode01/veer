@@ -5,6 +5,9 @@ ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 : "${KDIR:=/lib/modules/$(uname -r)/build}"
 : "${BPF_CLANG:=clang}"
 [ -f "$KDIR/Makefile" ] || { echo "matching kernel headers are required: $KDIR" >&2; exit 1; }
+# Header trees for different distro flavours can share relative compiler paths
+# and older timestamps. Kbuild may otherwise reuse a previous kernel's objects.
+make -C "$ROOT_DIR/kernel/veer_kfuncs" KDIR="$KDIR" clean
 make -C "$ROOT_DIR/kernel/veer_kfuncs" KDIR="$KDIR"
 # Some distro header packages omit the vmlinux ELF and kbuild skips module
 # BTF. For a native build, the running kernel supplies the exact base BTF.

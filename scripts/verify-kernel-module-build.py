@@ -37,8 +37,18 @@ def verify(mode):
         if mode == "existing":
             command("objcopy", "--add-section", f".BTF={root / 'final.btf'}",
                     "--update-section", f".BTF_ids={root / 'final.ids'}", str(fixture))
+        if mode == "stale-kernel":
+            previous = root / "kernel/veer_kfuncs/veer_kfuncs.ko"
+            shutil.copy2(fixture, previous)
+            command("objcopy", "--add-section", f".BTF={root / 'initial.btf'}", str(previous))
 
-        executable(root / "bin/make", 'cp "$FIXTURE_ROOT/fixture.o" "$FIXTURE_ROOT/kernel/veer_kfuncs/veer_kfuncs.ko"\n')
+        executable(root / "bin/make", '''
+target="$FIXTURE_ROOT/kernel/veer_kfuncs/veer_kfuncs.ko"
+for arg do
+    if [ "$arg" = clean ]; then rm -f "$target"; exit 0; fi
+done
+if [ ! -f "$target" ]; then cp "$FIXTURE_ROOT/fixture.o" "$target"; fi
+''')
         executable(root / "bin/modinfo", "echo fixture-release SMP\n")
         executable(root / "bin/pahole", '''
 for target do :; done
@@ -49,7 +59,7 @@ objcopy --add-section ".BTF=$FIXTURE_ROOT/initial.btf" "$target"
 for target do :; done
 touch "$target"
 ''')
-        if mode == "legacy":
+        if mode in ("legacy", "stale-kernel"):
             resolver = '''
 objcopy --update-section ".BTF=$FIXTURE_ROOT/final.btf" \\
     --update-section ".BTF_ids=$FIXTURE_ROOT/final.ids" "$3"
@@ -87,5 +97,5 @@ objcopy --update-section ".BTF=$FIXTURE_ROOT/final.btf" \\
 
 
 if __name__ == "__main__":
-    for case in ("legacy", "sidecars", "existing", "missing-ids"):
+    for case in ("legacy", "sidecars", "existing", "missing-ids", "stale-kernel"):
         verify(case)
