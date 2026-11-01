@@ -216,9 +216,11 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		staticFileServer.ServeHTTP(w, r)
 	}))
 
-	mux.HandleFunc("/api/host-network", authMiddleware(cfg, handleHostNetwork))
+	mux.HandleFunc("/api/host-network", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleHostNetwork(w, r, db)
+	}))
 	mux.HandleFunc("/api/interfaces", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
-		handleInterfacesWithStore(w, r, db)
+		handleInterfaces(w, r, db)
 	}))
 	mux.HandleFunc("/api/managed-networks", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -795,11 +797,7 @@ func authorizedAPIRequest(cfg *Config, r *http.Request) bool {
 	return expected != "" && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
-func handleInterfaces(w http.ResponseWriter, r *http.Request) {
-	handleInterfacesWithStore(w, r, nil)
-}
-
-func handleInterfacesWithStore(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func handleInterfaces(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

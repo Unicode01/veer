@@ -63,7 +63,7 @@ PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，
 
 公共声明在 [plugins/include/veer_kfuncs.h](plugins/include/veer_kfuncs.h)：`veer_kfuncs_abi_v1()`、`veer_skb_handoff_v1()`，以及可选的 `veer_skb_handoff_ingress_v1()`。后者仅接受 `VEER_L3_TO_ETH`，补 Ethernet 后送入目标设备接收路径，执行目标 TC ingress；原函数发送语义与 ABI 保持不变。handoff 配置为 28 字节，仅含标量，当前只注册给 `BPF_PROG_TYPE_SCHED_CLS`。
 
-handoff 不修改或释放调用方的 skb；所有修改都作用于独立 clone。调用后 **BPF 必须始终返回 `TC_ACT_SHOT`**，包括失败路径，避免原包重复发送或回落宿主路由。目标只能是同 netns 的有效、启用、类型匹配且不同于源设备的接口。模块校验参数、PPPoE 会话/长度，限制发送递归，并处理必要的 checksum/MSS。调用权限仍受宿主插件加载和 BPF 特权边界约束；这不是向不可信插件开放任意内核执行。
+handoff 不修改或释放调用方的 skb；所有修改都作用于独立 clone。调用后 **BPF 必须终止当前路径，让 TC 释放原 skb**：成功返回 `TC_ACT_STOLEN`，失败返回 `TC_ACT_SHOT`，避免原包重复发送或回落宿主路由。旧 ingress 调用方也可以在成功后返回 `TC_ACT_SHOT`；本机 egress 成功时必须返回 `TC_ACT_STOLEN`，否则内核会把已转交的包当作发送失败，本机 TCP 无法正确推进发送序号。目标只能是同 netns 的有效、启用、类型匹配且不同于源设备的接口。模块校验参数、PPPoE 会话/长度，限制发送递归，并处理必要的 checksum/MSS。调用权限仍受宿主插件加载和 BPF 特权边界约束；这不是向不可信插件开放任意内核执行。
 
 Veer 自己的 `v1` 约定不代表 Linux 内部 ABI 稳定。增加操作或改变所有权语义需重新审查 verifier、skb/offload 和生命周期，不能把任意 skb 修改函数直接暴露为 kfunc。
 

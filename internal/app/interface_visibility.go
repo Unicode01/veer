@@ -8,14 +8,14 @@ import (
 
 // Only the current, owned peer of a WAN boundary is an internal pipe. Names
 // alone cannot distinguish our devices from an administrator's own veths.
-func userInterfaceInfos(db store.RuleStore, infos []InterfaceInfo, get func(string) (pluginControlNetLinkInfo, error)) []InterfaceInfo {
+func internalWANPipelineNames(db store.RuleStore, get func(string) (pluginControlNetLinkInfo, error)) map[string]bool {
 	records, err := store.GetPluginRecords(db, "wan_core", "status")
 	if err != nil || len(records) == 0 {
-		return infos
+		return nil
 	}
 	owned, err := store.GetPluginOwnedResources(db, "wan_core")
 	if err != nil {
-		return infos
+		return nil
 	}
 	claims := map[string]pluginOwnedLinkClaim{}
 	for _, item := range owned {
@@ -47,7 +47,23 @@ func userInterfaceInfos(db store.RuleStore, infos []InterfaceInfo, get func(stri
 			hidden[peer.Name] = true
 		}
 	}
+	return hidden
+}
+
+func userInterfaceInfos(db store.RuleStore, infos []InterfaceInfo, get func(string) (pluginControlNetLinkInfo, error)) []InterfaceInfo {
+	hidden := internalWANPipelineNames(db, get)
 	visible := make([]InterfaceInfo, 0, len(infos))
+	for _, info := range infos {
+		if !hidden[info.Name] {
+			visible = append(visible, info)
+		}
+	}
+	return visible
+}
+
+func userHostNetworkInterfaces(db store.RuleStore, infos []HostNetworkInterface, get func(string) (pluginControlNetLinkInfo, error)) []HostNetworkInterface {
+	hidden := internalWANPipelineNames(db, get)
+	visible := make([]HostNetworkInterface, 0, len(infos))
 	for _, info := range infos {
 		if !hidden[info.Name] {
 			visible = append(visible, info)

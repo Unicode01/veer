@@ -58,19 +58,33 @@ func TestUserInterfaceInfosHidesOnlyCurrentOwnedWANPipeline(t *testing.T) {
 				delete(links, "pipe0")
 			}
 			infos := []InterfaceInfo{{Name: "eth0"}, {Name: "wan0"}, {Name: "pipe0"}, {Name: "veervpnp9"}}
-			got := userInterfaceInfos(db, infos, func(name string) (pluginControlNetLinkInfo, error) {
+			get := func(name string) (pluginControlNetLinkInfo, error) {
 				link, ok := links[name]
 				if !ok {
 					return link, fmt.Errorf("missing")
 				}
 				return link, nil
-			})
+			}
+			got := userInterfaceInfos(db, infos, get)
 			want := 4
 			if fault == "" {
 				want = 3
 			}
 			if len(got) != want || got[len(got)-1].Name != "veervpnp9" {
 				t.Fatalf("visible interfaces: %+v", got)
+			}
+			hostInfos := make([]HostNetworkInterface, len(infos))
+			for i, info := range infos {
+				hostInfos[i] = HostNetworkInterface{Name: info.Name}
+			}
+			hostGot := userHostNetworkInterfaces(db, hostInfos, get)
+			if len(hostGot) != len(got) {
+				t.Fatalf("host network interface count differs: %+v", hostGot)
+			}
+			for i, info := range hostGot {
+				if info.Name != got[i].Name {
+					t.Fatalf("host network interface list differs: %+v", hostGot)
+				}
 			}
 		})
 	}
