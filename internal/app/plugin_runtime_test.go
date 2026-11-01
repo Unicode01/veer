@@ -15112,25 +15112,26 @@ func (c *pluginControlMapControllerTest) ClearPluginMap(pluginID string, objectI
 }
 
 type pluginControlNetAdminTest struct {
-	calls               []string
-	links               map[string]pluginControlNetLinkInfo
-	listNames           []string
-	offloads            map[string]map[string]bool
-	getOffloadErrors    map[string]error
-	getErrors           map[string]error
-	ensureVethErrors    map[string]error
-	ensureDummyErrors   map[string]error
-	ensureMacvlanErrors map[string]error
-	deleteErrors        map[string]error
-	setMasterErrors     map[string]error
-	clearMasterErrors   map[string]error
-	setARPErrors        map[string]error
-	setOffloadErrors    map[string]error
-	routeSnapshots      map[string][]pluginControlNetRouteState
-	ruleSnapshots       map[string][]pluginControlNetRuleState
-	neighSnapshots      map[string][]pluginControlNetNeighState
-	neighbors           []pluginControlNetNeighborInfo
-	fdbEntries          []pluginControlNetFDBInfo
+	calls                 []string
+	links                 map[string]pluginControlNetLinkInfo
+	listNames             []string
+	offloads              map[string]map[string]bool
+	getOffloadErrors      map[string]error
+	getErrors             map[string]error
+	ensureVethErrors      map[string]error
+	ensureDummyErrors     map[string]error
+	ensureHelperWANErrors map[string]error
+	ensureMacvlanErrors   map[string]error
+	deleteErrors          map[string]error
+	setMasterErrors       map[string]error
+	clearMasterErrors     map[string]error
+	setARPErrors          map[string]error
+	setOffloadErrors      map[string]error
+	routeSnapshots        map[string][]pluginControlNetRouteState
+	ruleSnapshots         map[string][]pluginControlNetRuleState
+	neighSnapshots        map[string][]pluginControlNetNeighState
+	neighbors             []pluginControlNetNeighborInfo
+	fdbEntries            []pluginControlNetFDBInfo
 }
 
 func (c *pluginControlNetAdminTest) LinkGet(name string) (pluginControlNetLinkInfo, error) {
@@ -15232,6 +15233,25 @@ func (c *pluginControlNetAdminTest) LinkEnsureDummy(req pluginControlNetDummyReq
 	_, existed := c.links[req.Name]
 	info := c.linkInfo(req.Name)
 	info.Kind = "dummy"
+	info.MTU = req.MTU
+	info.Up = req.Up
+	c.updateLinkInfo(info)
+	if !existed && c.getErrors != nil {
+		delete(c.getErrors, req.Name)
+	}
+	return pluginControlNetDummyResult{Link: info, Created: !existed}, nil
+}
+
+func (c *pluginControlNetAdminTest) LinkEnsureHelperWAN(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	c.calls = append(c.calls, fmt.Sprintf("ensureHelperWAN:%s:%d:%t", req.Name, req.MTU, req.Up))
+	if c.ensureHelperWANErrors != nil {
+		if err := c.ensureHelperWANErrors[req.Name]; err != nil {
+			return pluginControlNetDummyResult{}, err
+		}
+	}
+	_, existed := c.links[req.Name]
+	info := c.linkInfo(req.Name)
+	info.Kind = "veerwan"
 	info.MTU = req.MTU
 	info.Up = req.Up
 	c.updateLinkInfo(info)

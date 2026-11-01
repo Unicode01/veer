@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "pppoe_client",
   "name": "PPPoE Client",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "kind": "pipeline",
   "stability": "stable",
   "description": "PPPoE WAN control and bidirectional TC pipeline integration.",
@@ -15,12 +15,12 @@
   "dependencies": [
     {
       "id": "wan_core",
-      "version": ">=1.5.0 <2.0.0"
+      "version": ">=1.6.0 <2.0.0"
     }
   ],
   "control": {
     "main": "control.js",
-    "sha256": "d88be7a8ae17a0956e459b54ec3fd0180c0ec54223fc90d3c4262125280641d0",
+    "sha256": "6e775b3131e3cd58455774235de92e3be9d4ea60c0efa6c3d237add211720960",
     "permissions": ["crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "net.admin", "net.l2", "plugin.action", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui"],
     "net_access": [
       {

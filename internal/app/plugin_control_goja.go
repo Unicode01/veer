@@ -2636,6 +2636,9 @@ func (h *pluginControlHost) install() error {
 	if err := linkAPI.Set("ensureVeth", h.netLinkEnsureVeth); err != nil {
 		return err
 	}
+	if err := linkAPI.Set("ensureHelperWAN", h.netLinkEnsureHelperWAN); err != nil {
+		return err
+	}
 	if err := linkAPI.Set("ensureDummy", h.netLinkEnsureDummy); err != nil {
 		return err
 	}

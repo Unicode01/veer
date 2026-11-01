@@ -233,6 +233,14 @@ func pluginControlNetValidateVethPeers(host netlink.Link, peer netlink.Link) err
 }
 
 func (admin linuxPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	return admin.linkEnsureSingle(req, "dummy")
+}
+
+func (admin linuxPluginControlNetAdmin) LinkEnsureHelperWAN(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	return admin.linkEnsureSingle(req, "veerwan")
+}
+
+func (admin linuxPluginControlNetAdmin) linkEnsureSingle(req pluginControlNetDummyRequest, kind string) (pluginControlNetDummyResult, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		return pluginControlNetDummyResult{}, fmt.Errorf("name is required")
@@ -245,14 +253,18 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDumm
 		if req.MTU > 0 {
 			attrs.MTU = req.MTU
 		}
-		if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: attrs}); err != nil {
-			return pluginControlNetDummyResult{}, fmt.Errorf("create dummy %s: %w", name, err)
+		var candidate netlink.Link = &netlink.Dummy{LinkAttrs: attrs}
+		if kind == "veerwan" {
+			candidate = &netlink.GenericLink{LinkAttrs: attrs, LinkType: kind}
+		}
+		if err := netlink.LinkAdd(candidate); err != nil {
+			return pluginControlNetDummyResult{}, fmt.Errorf("create %s %s: %w", kind, name, err)
 		}
 		created = true
 		link, err = pluginControlNetLinkByName(name)
 	}
 	if err != nil {
-		return pluginControlNetDummyResult{}, fmt.Errorf("resolve dummy %q: %w", name, err)
+		return pluginControlNetDummyResult{}, fmt.Errorf("resolve %s %q: %w", kind, name, err)
 	}
 	cleanupCreated := func(cause error) (pluginControlNetDummyResult, error) {
 		if created {
@@ -260,17 +272,17 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDumm
 		}
 		return pluginControlNetDummyResult{}, cause
 	}
-	if _, ok := link.(*netlink.Dummy); !ok || link.Type() != "dummy" {
-		return cleanupCreated(fmt.Errorf("existing link %q is %s, want dummy", name, link.Type()))
+	if link.Type() != kind {
+		return cleanupCreated(fmt.Errorf("existing link %q is %s, want %s", name, link.Type(), kind))
 	}
 	if req.MTU > 0 && link.Attrs().MTU != req.MTU {
 		if err := netlink.LinkSetMTU(link, req.MTU); err != nil {
-			return cleanupCreated(fmt.Errorf("set dummy mtu: %w", err))
+			return cleanupCreated(fmt.Errorf("set %s mtu: %w", kind, err))
 		}
 	}
 	if req.Up && link.Attrs().Flags&net.FlagUp == 0 {
 		if err := netlink.LinkSetUp(link); err != nil {
-			return cleanupCreated(fmt.Errorf("set dummy up: %w", err))
+			return cleanupCreated(fmt.Errorf("set %s up: %w", kind, err))
 		}
 	}
 	info, err := admin.LinkGet(name)

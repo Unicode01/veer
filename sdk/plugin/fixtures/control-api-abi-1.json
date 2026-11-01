@@ -46,6 +46,7 @@
     "process.binaryInstall",
     "process.binaryStatus",
     "process.binarySelect",
-    "process.binaryRemove"
+    "process.binaryRemove",
+    "net.link.ensureHelperWAN"
   ]
 }

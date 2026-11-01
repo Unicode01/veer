@@ -19,6 +19,7 @@ import (
 type settings struct {
 	Object, Program, Map string
 	Interfaces           []string
+	EgressInterfaces     []string
 	Entries              []struct{ Key, Value string }
 }
 
@@ -66,7 +67,7 @@ func run() error {
 			return e
 		}
 	}
-	for _, name := range c.Interfaces {
+	for _, name := range append(append([]string{}, c.Interfaces...), c.EgressInterfaces...) {
 		link, e := netlink.LinkByName(name)
 		if e != nil {
 			return e
@@ -76,7 +77,13 @@ func run() error {
 		if e = netlink.QdiscReplace(q); e != nil {
 			return e
 		}
-		filter := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: link.Attrs().Index, Parent: netlink.HANDLE_MIN_INGRESS, Priority: 10, Protocol: unix.ETH_P_ALL}, Fd: coll.Programs[c.Program].FD(), Name: "veer-kfunc-test", DirectAction: true}
+		parent := uint32(netlink.HANDLE_MIN_INGRESS)
+		for _, egress := range c.EgressInterfaces {
+			if name == egress {
+				parent = netlink.HANDLE_MIN_EGRESS
+			}
+		}
+		filter := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: link.Attrs().Index, Parent: parent, Priority: 10, Protocol: unix.ETH_P_ALL}, Fd: coll.Programs[c.Program].FD(), Name: "veer-kfunc-test", DirectAction: true}
 		if e = netlink.FilterReplace(filter); e != nil {
 			return e
 		}

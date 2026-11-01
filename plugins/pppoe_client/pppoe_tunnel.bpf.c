@@ -739,6 +739,7 @@ static __always_inline int encap_known_l3_to_pppoe(struct __sk_buff *skb, struct
 	if (!veer_skb_handoff_v1(skb, &handoff)) {
 		bump_tunnel_stat(20);
 		bump_traffic_stats(0, skb->len > 14 ? skb->len - 14 : 0);
+		return TC_ACT_STOLEN;
 	} else bump_tunnel_stat(21);
 	return TC_ACT_SHOT;
 #else

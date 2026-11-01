@@ -1069,7 +1069,7 @@ class VeerPluginTestHost {
         link: Object.freeze({
           get: linkMethod('get', 'link.read'), list: linkMethod('list', 'link.read'),
           ensureBridge: linkMethod('ensureBridge', 'link.create'), ensureVeth: linkMethod('ensureVeth', 'link.create'),
-          ensureDummy: linkMethod('ensureDummy', 'link.create'), ensureMacvlan: linkMethod('ensureMacvlan', 'link.create'),
+          ensureDummy: linkMethod('ensureDummy', 'link.create'), ensureHelperWAN: linkMethod('ensureHelperWAN', 'link.create'), ensureMacvlan: linkMethod('ensureMacvlan', 'link.create'),
           ensureVLAN: linkMethod('ensureVLAN', 'link.create'), ensureVRF: linkMethod('ensureVRF', 'link.create'),
           delete: linkMethod('delete', 'link.delete'), release: linkMethod('release', 'link.delete'), owned: linkMethod('owned', 'link.read'),
           setMaster: linkMethod('setMaster', 'link.master'), clearMaster: linkMethod('clearMaster', 'link.master'),

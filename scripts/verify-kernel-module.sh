@@ -27,6 +27,7 @@ insmod "kernel/$(uname -r)/veer_kfuncs.ko"
 loaded=1
 VEER_RUN_KFUNCS_TESTS=1 go test -tags veer_kfuncs ./internal/app -run '^TestOptionalKernelModule' -count=1 -v
 python3 scripts/verify-kfuncs-packets.py --loader "$work/loader"
+python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --direct --veer "$work/veer"
 VEER_RUN_KFUNCS_TESTS=1 VEER_RUN_WIREGUARD_TESTS=1 FORWARD_PERF_BINARY="$work/veer" \
     go test -tags veer_kfuncs ./internal/app -run '^TestWireGuardMeshLinuxIntegration$' -count=1 -v -timeout=5m
 FORWARD_PERF_BINARY="$work/veer" VEER_VPN_EXPECT_DIRECT=1 sh scripts/verify-vpn-cores.sh

@@ -1,3 +1,4 @@
+var DIRECT = false;
 var KFUNCS = false, TUNNEL_OBJECT_PATH = 'pppoe_tunnel.o';
 if (typeof plugin.host === 'function') {
   var host = plugin.host();
@@ -6,6 +7,7 @@ if (typeof plugin.host === 'function') {
     catch (e) { /* Packages built before this capability retain the base path. */ }
   }
 }
+DIRECT = KFUNCS && (host.available_features || []).indexOf('dataplane.kfuncs.wan.v1') >= 0;
 var ETH_P_PPP_DISC = '0x8863';
 var ETH_P_PPP_SESS = '0x8864';
 var CODE_PADI = 0x09;
@@ -98,6 +100,10 @@ pipeline.attach({
   priority: 20,
   program: 'pppoe_tunnel:tc_tunnel',
   mode: 'rewrite'
+});
+if (KFUNCS) pipeline.attach({
+  id: 'pppoe-local-egress', direction: 'forward', attach: 'egress',
+  priority: 20, program: 'pppoe_tunnel:tc_tunnel', mode: 'rewrite', binding_required: true
 });
 plugin.resource({
   id: 'hook_bindings',
@@ -853,7 +859,7 @@ function prepareWANCoreTunnelBoundary(profile) {
     wan_interface: profile.local_interface,
     local_interface: profile.local_interface,
     pipeline_interface: profile.pipeline_interface,
-    handoff_mode: 'segmented_veth',
+    handoff_mode: DIRECT ? 'direct_gro' : 'segmented_veth',
     mtu: tunnelInterfaceMTU(profile),
     interface_preparation: interfacePreparation
   };
@@ -868,14 +874,15 @@ function prepareWANCoreTunnelBoundary(profile) {
     if (!status || !status.local_interface) {
       throw new Error('WAN core did not publish prepared handoff status');
     }
+    if (status.handoff_mode === 'direct_gro') profile.pipeline_interface = '';
     if (status.pipeline_interface) {
       profile.pipeline_interface = optionalIfaceName(status.pipeline_interface, 'wan_core pipeline_interface');
     }
     if (interfacePreparation && (!status.interface_preparation || status.interface_preparation.applied !== true)) {
       throw new Error('WAN core did not apply requested interface preparation');
     }
-    profile.wan_core_prepared_interfaces = status.handoff_mode === 'segmented_veth' &&
-      !!status.local_interface && !!status.pipeline_interface;
+    profile.wan_core_prepared_interfaces = !!status.local_interface &&
+      (status.handoff_mode === 'direct_gro' || (status.handoff_mode === 'segmented_veth' && !!status.pipeline_interface));
     return status;
   } catch (e) {
     if (profile.wan_core_required || !profile.pipeline_interface) {
@@ -922,9 +929,10 @@ function installTunnel(profile, padsFrame, sessionID) {
   var boundary = resolveTunnelBoundary(profile);
   var localLink = boundary.local;
   var pipelineLink = boundary.pipeline;
+  var direct = boundary.mode === 'direct_gro';
   var wanLink = profile.wan_interface ? net.link.get(profile.wan_interface) : null;
   var localIfIndex = profile.local_ifindex || (localLink && localLink.ifindex) || 0;
-  var pipelineIfIndex = profile.pipeline_ifindex || (pipelineLink && pipelineLink.ifindex) || 0;
+  var pipelineIfIndex = direct ? localIfIndex : (profile.pipeline_ifindex || (pipelineLink && pipelineLink.ifindex) || 0);
   var wanIfIndex = profile.wan_ifindex || (wanLink && wanLink.ifindex) || padsFrame.ifindex || 0;
   var localSrcMAC = profile.local_src_mac || padsFrame.src_mac || '';
   var localDstMAC = profile.local_dst_mac || (localLink && localLink.mac) || '';
@@ -964,9 +972,9 @@ function installTunnel(profile, padsFrame, sessionID) {
     map: 'pppoe_tunnel_config',
     value_hex: value,
     dataplane: KFUNCS ? 'kfuncs' : 'bpf',
-    mode: 'segmented_veth',
+    mode: boundary.mode,
     local_interface: profile.local_interface,
-    pipeline_interface: pipelineLink.name,
+    pipeline_interface: pipelineLink ? pipelineLink.name : '',
     wan_interface: profile.wan_interface,
     wan_link_mac: wanLink ? wanLink.mac : '',
     local_dst_mac_explicit: !!profile.local_dst_mac,
@@ -1011,10 +1019,10 @@ function installTunnel(profile, padsFrame, sessionID) {
   return {
     object: 'pppoe_tunnel',
     map: 'pppoe_tunnel_config',
-    mode: 'segmented_veth',
+    mode: boundary.mode,
     requires_kernel_tc_prepared_l2: false,
     local_interface: profile.local_interface,
-    pipeline_interface: pipelineLink.name,
+    pipeline_interface: pipelineLink ? pipelineLink.name : '',
     wan_interface: profile.wan_interface,
     local_ifindex: localIfIndex,
     pipeline_ifindex: pipelineIfIndex,
@@ -1051,10 +1059,15 @@ function resolveTunnelBoundary(profile) {
       throw new Error('wan_core pipeline boundary is not ready for segmentation');
     }
   }
+  var local = net.link.get(localName);
+  if (lower(local.kind) === 'veerwan') {
+    if (!DIRECT) throw new Error('PPPoE direct boundary requires dataplane.kfuncs.wan.v1; redial with a supported helper');
+    if (pipelineName) throw new Error('PPPoE direct boundary must not name a pipeline peer');
+    return {mode: 'direct_gro', local: local, pipeline: null};
+  }
   if (!pipelineName || pipelineName === localName) {
     throw new Error('PPPoE tunnel requires a segmented WAN handoff with a distinct pipeline interface');
   }
-  var local = net.link.get(localName);
   var pipelineLink = net.link.get(pipelineName);
   if (lower(local.kind) !== 'veth' || lower(pipelineLink.kind) !== 'veth') {
     throw new Error('PPPoE segmented handoff must use a veth pair');
@@ -1082,7 +1095,8 @@ function syncTunnelHookBindings(profile, boundary) {
     return {status: 'disabled'};
   }
   var wan = profile.wan_interface || profile.interface || '';
-  var pipelineInterface = boundary && boundary.pipeline ? boundary.pipeline.name : '';
+  var direct = boundary && boundary.mode === 'direct_gro';
+  var pipelineInterface = direct ? boundary.local.name : (boundary && boundary.pipeline ? boundary.pipeline.name : '');
   if (!wan || !pipelineInterface) {
     return {status: 'skipped', reason: 'no hook interfaces'};
   }
@@ -1091,9 +1105,11 @@ function syncTunnelHookBindings(profile, boundary) {
     interfaces: [wan]
   }, true, profile.apply_hook_bindings);
   resources.set('hook_bindings', 'pppoe-egress', {
-    hook_id: 'pppoe-egress',
-    interfaces: [pipelineInterface]
-  }, true, profile.apply_hook_bindings);
+    hook_id: 'pppoe-egress', interfaces: direct ? [] : [pipelineInterface]
+  }, !direct, profile.apply_hook_bindings);
+  if (KFUNCS) resources.set('hook_bindings', 'pppoe-local-egress', {
+    hook_id: 'pppoe-local-egress', interfaces: direct ? [pipelineInterface] : []
+  }, direct, profile.apply_hook_bindings);
   return {
     status: profile.apply_hook_bindings ? 'applied' : 'stored',
     ingress: [wan],
@@ -1163,7 +1179,7 @@ function refreshTunnelPreparation(profile, boundary, sessionID) {
     var statusRecord = plugins.resources.get(profile.wan_core_plugin, 'status', key);
     var status = statusRecord && statusRecord.data;
     if (!status || status.usable !== true || status.local_interface !== boundary.local.name ||
-        status.pipeline_interface !== boundary.pipeline.name ||
+        (status.pipeline_interface || '') !== (boundary.pipeline ? boundary.pipeline.name : '') ||
         !status.interface_preparation || status.interface_preparation.applied !== true) {
       throw new Error('WAN core did not prepare the live tunnel boundary');
     }
@@ -1268,10 +1284,10 @@ function applyTunnelConfigRecord(record) {
   var decoded = decodeTunnelConfigHex(data.value_hex || tunnelConfigValueHex(data));
   var boundary = resolveTunnelBoundary({local_interface: data.local_interface, pipeline_interface: data.pipeline_interface});
   var wan = net.link.get(ifaceName(data.wan_interface || '', 'wan_interface'));
-  if (boundary.local.up !== true || boundary.pipeline.up !== true || wan.up !== true) {
+  if (boundary.local.up !== true || (boundary.pipeline && boundary.pipeline.up !== true) || wan.up !== true) {
     throw new Error('PPPoE tunnel endpoint is down');
   }
-  if (!wan.ifindex || !boundary.local.ifindex || !boundary.pipeline.ifindex) {
+  if (!wan.ifindex || !boundary.local.ifindex || (boundary.pipeline && !boundary.pipeline.ifindex)) {
     throw new Error('PPPoE tunnel endpoint has no interface index');
   }
   if (data.wan_link_mac && lower(wan.mac) !== lower(data.wan_link_mac)) {
@@ -1279,7 +1295,7 @@ function applyTunnelConfigRecord(record) {
   }
   var next = merge(data, decoded);
   next.local_ifindex = boundary.local.ifindex;
-  next.pipeline_ifindex = boundary.pipeline.ifindex;
+  next.pipeline_ifindex = boundary.pipeline ? boundary.pipeline.ifindex : boundary.local.ifindex;
   next.wan_ifindex = wan.ifindex;
   if (data.local_dst_mac_explicit === false) next.local_dst_mac = boundary.local.mac;
   next.lcp_magic = data.lcp_magic || decoded.value_hex.slice(96, 104);
@@ -2444,7 +2460,7 @@ function normalizedWANLink(profile, session) {
   var pdPrefixes = Array.isArray(dhcpv6PD.prefixes) ? dhcpv6PD.prefixes : [];
   var open = session.padt_sent !== true && session.lcp_ready === true;
   var state = open ? 'up' : (session.padt_sent ? 'closed' : (session.phase || 'unknown'));
-  var pipelineInterface = session.tunnel && session.tunnel.pipeline_interface || profile.pipeline_interface || '';
+  var pipelineInterface = session.tunnel ? (session.tunnel.pipeline_interface || '') : (DIRECT ? '' : (profile.pipeline_interface || ''));
   return {
     wan_id: token(session.wan_id || profile.wan_id || profile.profile_key),
     profile_key: profile.profile_key,
@@ -2457,7 +2473,7 @@ function normalizedWANLink(profile, session) {
     wan_interface: profile.local_interface || '',
     local_interface: profile.local_interface || '',
     pipeline_interface: pipelineInterface,
-    handoff_mode: 'segmented_veth',
+    handoff_mode: session.tunnel && session.tunnel.mode || (DIRECT ? 'direct_gro' : 'segmented_veth'),
     mac_address: profile.mac_address || session.local_mac || '',
     local_mac: session.local_mac || '',
     peer_mac: session.ac_mac || '',
@@ -2482,7 +2498,7 @@ function normalizedWANLink(profile, session) {
     dns_servers: uniqueTextValues((ipcp.dns_servers || []).concat(dhcpv6PD.dns_servers || []).concat(ipv6RA.dns_servers || [])),
     tunnel: session.tunnel || null,
     handoff: {
-      preferred_mode: 'segmented_veth',
+      preferred_mode: session.tunnel && session.tunnel.mode || (DIRECT ? 'direct_gro' : 'segmented_veth'),
       local_interface: profile.local_interface || '',
       pipeline_interface: pipelineInterface,
       veer_core_parent_interface: profile.local_interface || '',

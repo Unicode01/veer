@@ -1,5 +1,5 @@
 {
-  "version": 12,
+  "version": 13,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -75,6 +75,7 @@
       "dataplane.packet_metadata.v1",
       "dataplane.kfuncs.handoff.v1",
       "dataplane.kfuncs.handoff_ingress.v1",
+      "dataplane.kfuncs.wan.v1",
       "dataplane.tc_pipeline.v2",
       "dataplane.hook_order.v1",
       "dataplane.hook_bindings.v1",
@@ -1178,6 +1179,24 @@
       },
       {
         "method": "net.link.ensureDummy",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.ensureHelperWAN",
         "permissions": [
           "net.admin"
         ],
@@ -3088,6 +3107,7 @@
     "net.link.delete",
     "net.link.ensureBridge",
     "net.link.ensureDummy",
+    "net.link.ensureHelperWAN",
     "net.link.ensureMacvlan",
     "net.link.ensureVLAN",
     "net.link.ensureVRF",

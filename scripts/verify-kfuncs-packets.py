@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 parser = argparse.ArgumentParser(
     description="Isolated PPPoE kfunc correctness and optional throughput checks"
@@ -22,8 +24,13 @@ parser.add_argument(
 parser.add_argument("--loader", type=pathlib.Path, required=True)
 parser.add_argument("--output", type=pathlib.Path)
 parser.add_argument("--performance", action="store_true")
+parser.add_argument("--direct", action="store_true", help="Test the helper-owned single WAN boundary")
+parser.add_argument("--mode", choices=["all", "bpf", "kfuncs"], default="all")
+parser.add_argument("--veer", type=pathlib.Path, help="Also verify real TC NAT through the selected boundary")
 parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
 args = parser.parse_args()
+if args.direct and args.mode == "bpf":
+    parser.error("--direct requires the kfuncs dataplane")
 ROOT = args.root.resolve()
 LOADER = args.loader.resolve()
 if not args.child:
@@ -65,7 +72,7 @@ results = []
 def proc(a, label):
     f = open(BASE / (label + ".log"), "w")
     logs.append(f)
-    p = subprocess.Popen(a, stdout=f, stderr=f)
+    p = subprocess.Popen(a, stdout=f, stderr=f, cwd=BASE)
     procs.append(p)
     return p
 
@@ -77,7 +84,7 @@ def idx(name, ns=None):
 
 
 def cfg(ns, side):
-    l, p, w = [idx(n, ns) for n in ["local" + side, "pipe" + side, "wan" + side]]
+    l, p, w = [idx(n, ns) for n in ["local" + side, ("local" if args.direct else "pipe") + side, "wan" + side]]
     other = idx("wan" + ("0" if side == "1" else "1"), None if side == "1" else remote)
     mac = lambda a: bytes.fromhex(a["address"].replace(":", ""))
     return (
@@ -343,15 +350,99 @@ def nonlinear_frames(mode, clamp=True, linear=False):
         run(["ip", "link", "del", "fragcap0"], check=False)
 
 
+def nat_path():
+    binary = args.veer.resolve()
+    client_ns = remote + "-lan"
+    ip("netns", "add", client_ns)
+    daemon = echo = None
+    try:
+        ip("link", "add", "br-lan", "type", "bridge")
+        ip("addr", "add", "192.168.90.1/24", "dev", "br-lan")
+        ip("link", "set", "br-lan", "up")
+        ip("link", "add", "lan0", "type", "veth", "peer", "name", "client0")
+        ip("link", "set", "lan0", "master", "br-lan")
+        ip("link", "set", "lan0", "up")
+        ip("link", "set", "client0", "netns", client_ns)
+        ip("-n", client_ns, "link", "set", "lo", "up")
+        ip("-n", client_ns, "link", "set", "client0", "up")
+        ip("-n", client_ns, "addr", "add", "192.168.90.2/24", "dev", "client0")
+        ip("-n", client_ns, "route", "add", "default", "via", "192.168.90.1")
+        port_socket = socket.socket()
+        port_socket.bind(("127.0.0.1", 0))
+        port = port_socket.getsockname()[1]
+        port_socket.close()
+        token = "isolated-pppoe-nat-verification-token"
+        config = BASE / "veer.json"
+        config.write_text(json.dumps({
+            "web_bind": "127.0.0.1", "web_port": port, "web_token": token,
+            "max_workers": 1, "default_engine": "kernel", "kernel_engine_order": ["tc"],
+            "plugins_enabled": False, "experimental_features": {"kernel_tc_prepared_l2": True},
+        }))
+        daemon = proc([str(binary), "--config", str(config)], "veer-nat")
+
+        def api(method, path, data=None):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}" + path,
+                data=None if data is None else json.dumps(data).encode(), method=method,
+                headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.load(response)
+
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                api("GET", "/api/egress-nats")
+                break
+            except (OSError, urllib.error.URLError):
+                if daemon.poll() is not None or time.monotonic() > deadline:
+                    raise RuntimeError("Veer NAT daemon failed to start")
+                time.sleep(0.1)
+        api("POST", "/api/egress-nats", {
+            "parent_interface": "br-lan", "out_interface": "local0", "out_source_ip": "10.90.0.1",
+            "protocol": "tcp+udp+icmp", "redirect_mode": "prepared_l2",
+        })
+        deadline = time.monotonic() + 20
+        while True:
+            entries = api("GET", "/api/egress-nats")
+            if any(entry.get("status") == "running" and entry.get("effective_kernel_engine") == "tc" for entry in entries):
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError("TC NAT did not become ready: " + str(entries))
+            time.sleep(0.1)
+        for reverse in [False, True]:
+            result = json.loads(run(["ip", "netns", "exec", client_ns, "iperf3", "-c", "10.90.0.2", "-n", "8M", "-J"] + (["-R"] if reverse else [])))
+            assert "error" not in result and result["end"]["sum_received"]["bytes"] >= 8 * 1024 * 1024, result
+        echo_code = "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('10.90.0.2',39989));\nwhile True:\n d,a=s.recvfrom(65536);s.sendto(a[0].encode()+b':'+d,a)"
+        echo = proc(["ip", "netns", "exec", remote, "python3", "-u", "-c", echo_code], "nat-udp")
+        time.sleep(0.2)
+        client_code = "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(2);\nfor i in range(8):\n p=('packet'+str(i)).encode();s.sendto(p,('10.90.0.2',39989));assert s.recv(65536)==b'10.90.0.1:'+p"
+        run(["ip", "netns", "exec", client_ns, "python3", "-c", client_code])
+        print("real Veer TC prepared_l2 NAT TCP upload/download and UDP source translation passed", flush=True)
+    finally:
+        for process in [echo, daemon]:
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                procs.remove(process)
+        ip("netns", "del", client_ns)
+        run(["ip", "link", "del", "br-lan"], check=False)
+        run(["ip", "link", "del", "lan0"], check=False)
+
+
 def gro_paths():
     # Observe actual skbs delivered after decapsulation, rather than merely
     # checking ethtool flags. PPPoE wire frames are always <= MTU + 22.
     cases = [(destination, gro, tso, aggregate)
              for destination in ["10.90.0.2", "fd90::2"]
-             for gro, tso, aggregate in [(True, False, True), (False, False, False), (True, True, False)]]
+             for gro, tso, aggregate in ([(True, False, True), (False, False, False)] if args.direct else [(True, False, True), (False, False, False), (True, True, False)])]
     for destination, gro, tso, aggregate in cases:
         run(["ethtool", "-K", "local0", "gro", "on" if gro else "off"])
-        run(["ethtool", "-K", "pipe0", "tso", "on" if tso else "off"])
+        if not args.direct: run(["ethtool", "-K", "pipe0", "tso", "on" if tso else "off"])
         capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
         capture.bind(("local0", 0))
         capture.settimeout(0.1)
@@ -377,6 +468,9 @@ def gro_paths():
             capture.close()
         procs.remove(transfer)
         print("kfuncs GRO delivery/fallback passed:", {"destination": destination, "gro": gro, "peer_tso": tso, "aggregated": large}, flush=True)
+    if args.direct:
+        run(["ethtool", "-K", "local0", "gro", "on"])
+        return
     run(["ethtool", "-K", "pipe0", "tso", "off"])
     # Upload ACKs received from the WAN must not take peer TX. SYN/FIN/RST and
     # data may use it, but a pure ACK would add NAPI latency to the reverse path.
@@ -423,20 +517,23 @@ try:
     ip("link", "set", "wan1", "netns", remote)
     for side, ns in [("0", None), ("1", remote)]:
         prefix = ["ip"] + (["-n", ns] if ns else [])
-        run(
-            prefix
-            + [
-                "link",
-                "add",
-                "local" + side,
-                "type",
-                "veth",
-                "peer",
-                "name",
-                "pipe" + side,
-            ]
-        )
-        for name in ["local" + side, "pipe" + side]:
+        if args.direct:
+            run(prefix + ["link", "add", "local" + side, "type", "veerwan"])
+        else:
+            run(
+                prefix
+                + [
+                    "link",
+                    "add",
+                    "local" + side,
+                    "type",
+                    "veth",
+                    "peer",
+                    "name",
+                    "pipe" + side,
+                ]
+            )
+        for name in (["local" + side] if args.direct else ["local" + side, "pipe" + side]):
             run(prefix + ["link", "set", name, "mtu", "1492", "up"])
         run(prefix + ["link", "set", "wan" + side, "up"])
         run(
@@ -475,7 +572,7 @@ try:
                 "replace",
                 "10.90.0." + ("2" if side == "0" else "1"),
                 "lladdr",
-                idx("pipe" + side, ns)["address"],
+                idx(("local" if args.direct else "pipe") + side, ns)["address"],
                 "nud",
                 "permanent",
                 "dev",
@@ -490,7 +587,7 @@ try:
                 "replace",
                 "fd90::" + ("2" if side == "0" else "1"),
                 "lladdr",
-                idx("pipe" + side, ns)["address"],
+                idx(("local" if args.direct else "pipe") + side, ns)["address"],
                 "nud",
                 "permanent",
                 "dev",
@@ -498,7 +595,7 @@ try:
             ]
         )
     server = proc(["ip", "netns", "exec", remote, "iperf3", "-s"], "server")
-    for mode in ["bpf", "kfuncs"]:
+    for mode in (["kfuncs"] if args.direct else (["bpf", "kfuncs"] if args.mode == "all" else [args.mode])):
         loaders = []
         for side, ns in [("0", None), ("1", remote)]:
             pre = ["ip", "netns", "exec", ns] if ns else []
@@ -518,20 +615,21 @@ try:
                     "on" if mode == "kfuncs" else "off",
                 ]
             )
-            run(
-                pre
-                + [
-                    "ethtool",
-                    "-K",
-                    "pipe" + side,
-                    "gro",
-                    "on" if mode == "kfuncs" else "off",
-                    "lro",
-                    "off",
-                    "tso",
-                    "off",
-                ]
-            )
+            if not args.direct:
+                run(
+                    pre
+                    + [
+                        "ethtool",
+                        "-K",
+                        "pipe" + side,
+                        "gro",
+                        "on" if mode == "kfuncs" else "off",
+                        "lro",
+                        "off",
+                        "tso",
+                        "off",
+                    ]
+                )
             run(
                 (["ip", "-n", ns] if ns else ["ip"])
                 + [
@@ -552,7 +650,8 @@ try:
                 ),
                 "Program": "tc_tunnel",
                 "Map": "pppoe_tunnel_config",
-                "Interfaces": ["pipe" + side, "wan" + side],
+                "Interfaces": ["wan" + side] + ([] if args.direct else ["pipe" + side]),
+                "EgressInterfaces": ["local" + side] if args.direct else [],
                 "Entries": [{"Key": "00000000", "Value": cfg(ns, side).hex()}],
             }
             file = BASE / (mode + side + ".json")
@@ -659,7 +758,7 @@ try:
                     / elapsed
                 )
                 r = {
-                    "mode": mode,
+                    "mode": "direct_gro" if args.direct else mode,
                     "direction": "rx" if reverse else "tx",
                     "round": round + 1,
                     "mbps": d["end"]["sum_received"]["bits_per_second"] / 1e6,
@@ -668,6 +767,8 @@ try:
                 }
                 results.append(r)
                 print(json.dumps(r), flush=True)
+        if args.veer:
+            nat_path()
         for p in loaders:
             p.terminate()
             p.wait(timeout=5)

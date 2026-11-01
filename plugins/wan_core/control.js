@@ -559,6 +559,7 @@ function previousHandoffMode(previous) {
   previous = previous || {};
   var veerCore = previous.veer_core || {};
   var mode = lower(previous.handoff_mode || veerCore.mode || '');
+  if (mode === 'direct_gro') return mode;
   return mode === 'segmented_veth' || mode === 'vtap' ? 'segmented_veth' : 'direct';
 }
 
@@ -756,14 +757,16 @@ function ensureHandoffLink(profile, previous) {
       interface_preparation: interfacePreparation
     };
   }
-  var dummy = net.link.ensureDummy({
+  var ensureSingle = profile.handoff_mode === 'direct_gro' ? net.link.ensureHelperWAN : net.link.ensureDummy;
+  if (typeof ensureSingle !== 'function') throw new Error('helper WAN boundary is unavailable');
+  var dummy = ensureSingle({
     name: profile.local_interface,
     mtu: profile.mtu,
     up: true
   });
   try {
     return {
-      mode: 'direct',
+      mode: profile.handoff_mode,
       local: dummy.link,
       pipeline: null,
       created: dummy.created === true,
@@ -928,14 +931,14 @@ function normalizeProfile(key, session, raw) {
     addresses = appendCIDRUnique(addresses, ipv6HostCIDR(session.ipv6));
     addresses = appendCIDRUnique(addresses, ipv6LinkLocalCIDR(session.ipv6_link_local));
     var ipv4PeerCIDR = ipv4HostCIDR(session.ipv4_peer);
-    if (handoffMode === 'segmented_veth' && session.ipv4 && ipv4PeerCIDR) {
+    if ((handoffMode === 'segmented_veth' || handoffMode === 'direct_gro') && session.ipv4 && ipv4PeerCIDR) {
       routes = appendRouteUnique(routes, {dst: ipv4PeerCIDR, dev: localInterface, src: session.ipv4});
     }
     if (bool(raw.install_default_route, false) && session.ipv4) {
       routes = appendRouteUnique(routes, {dst: '0.0.0.0/0', dev: localInterface, src: session.ipv4, metric: intValue(raw.route_metric, 0, 2147483647, 0)});
     }
     if (installDefaultRouteV6) {
-      if (handoffMode === 'segmented_veth') {
+      if (handoffMode === 'segmented_veth' || handoffMode === 'direct_gro') {
         var sourcePrefix = ipv6RouteSourcePrefix(session);
         var gateway = text(session.ipv6_gateway || session.ipv6_peer_link_local || '');
         if (!sourcePrefix || !gateway || !session.peer_mac) {
@@ -1072,6 +1075,7 @@ function normalizeOffloadSettings(value) {
 
 function normalizeHandoffMode(value) {
   value = lower(value);
+  if (value === 'direct_gro') return value;
   if (value === 'segmented' || value === 'segmented_veth' || value === 'veth' || value === 'vtap') {
     return 'segmented_veth';
   }
