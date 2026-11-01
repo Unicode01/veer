@@ -534,9 +534,9 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		return nil, fmt.Errorf("recover plugin resource migrations: %w", err)
 	}
 	if err := recoverPendingPluginNetTransactions(db, newPluginControlNetAdmin()); err != nil {
-		_ = ln.Close()
-		_ = os.Remove(sockPath)
-		return nil, fmt.Errorf("recover plugin network transactions: %w", err)
+		// Retain failed journals and fence only their slots. A broken plugin or
+		// disappearing interface must not stop unrelated forwarding at startup.
+		log.Printf("plugin network recovery incomplete; affected resources remain fenced: %v", err)
 	}
 
 	pm := &ProcessManager{

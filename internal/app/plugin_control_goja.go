@@ -460,6 +460,9 @@ func (rt *gojaPluginControlRuntime) currentPluginBlobStore() *pluginBlobStore {
 func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRuntimeSnapshot {
 	rt.reconcileMu.Lock()
 	defer rt.reconcileMu.Unlock()
+	if err := recoverPendingPluginNetTransactions(rt.db, rt.netAdmin); err != nil {
+		log.Printf("plugin network recovery remains pending: %v", err)
+	}
 
 	_, implicitMigrationTransaction, migrationTransactionErr := rt.beginImplicitPluginResourceMigrationTransaction()
 

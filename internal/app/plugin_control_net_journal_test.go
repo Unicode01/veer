@@ -121,7 +121,7 @@ func TestRecoverPendingPluginMultipathRouteTransaction(t *testing.T) {
 		RouteRequest: &req, RouteOriginal: []pluginControlNetRouteState{original},
 	}
 	record := addPendingPluginNetTransactionForTest(t, db, pluginID, pluginNetTransactionKindRoute, 1, []pluginNetTransactionEntry{entry})
-	admin := &pluginControlNetAdminTest{}
+	admin := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{"host0": {Name: "host0", IfIndex: 50}, "host1": {Name: "host1", IfIndex: 51}}}
 	if err := recoverPendingPluginNetTransactions(db, admin); err != nil {
 		t.Fatal(err)
 	}

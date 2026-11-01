@@ -311,7 +311,9 @@ func transactPluginMapsInRefs(refs []loadedPluginObjectRef, pluginID string, req
 
 func pluginMapSupportsTransaction(mapType ebpf.MapType) bool {
 	switch mapType {
-	case ebpf.Hash, ebpf.Array, ebpf.LRUHash, ebpf.LRUCPUHash, ebpf.LPMTrie:
+	// An insertion into an LRU map can evict a key outside this transaction's
+	// snapshot. Such a mutation cannot be rolled back without losing live state.
+	case ebpf.Hash, ebpf.Array, ebpf.LPMTrie:
 		return true
 	default:
 		return false

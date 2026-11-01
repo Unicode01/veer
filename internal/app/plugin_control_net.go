@@ -183,21 +183,23 @@ type pluginControlNetMasterRequest struct {
 }
 
 type pluginControlNetAddrRequest struct {
-	Namespace string `json:"namespace,omitempty"`
-	Interface string `json:"interface"`
-	CIDR      string `json:"cidr"`
+	expectedIfIndex int
+	Namespace       string `json:"namespace,omitempty"`
+	Interface       string `json:"interface"`
+	CIDR            string `json:"cidr"`
 }
 
 type pluginControlNetRouteRequest struct {
-	Namespace string                         `json:"namespace,omitempty"`
-	Dst       string                         `json:"dst"`
-	Gateway   string                         `json:"gateway,omitempty"`
-	Dev       string                         `json:"dev,omitempty"`
-	Src       string                         `json:"src,omitempty"`
-	Table     int                            `json:"table,omitempty"`
-	Metric    int                            `json:"metric,omitempty"`
-	Scope     int                            `json:"scope,omitempty"`
-	Nexthops  []pluginControlNetRouteNexthop `json:"nexthops,omitempty"`
+	expectedLinkIndices map[string]int
+	Namespace           string                         `json:"namespace,omitempty"`
+	Dst                 string                         `json:"dst"`
+	Gateway             string                         `json:"gateway,omitempty"`
+	Dev                 string                         `json:"dev,omitempty"`
+	Src                 string                         `json:"src,omitempty"`
+	Table               int                            `json:"table,omitempty"`
+	Metric              int                            `json:"metric,omitempty"`
+	Scope               int                            `json:"scope,omitempty"`
+	Nexthops            []pluginControlNetRouteNexthop `json:"nexthops,omitempty"`
 }
 
 type pluginControlNetRouteNexthop struct {
@@ -274,12 +276,13 @@ type pluginControlNetRuleState struct {
 }
 
 type pluginControlNetNeighRequest struct {
-	Namespace string `json:"namespace,omitempty"`
-	Interface string `json:"interface"`
-	IP        string `json:"ip"`
-	MAC       string `json:"mac,omitempty"`
-	State     string `json:"state,omitempty"`
-	VLAN      int    `json:"vlan,omitempty"`
+	expectedIfIndex int
+	Namespace       string `json:"namespace,omitempty"`
+	Interface       string `json:"interface"`
+	IP              string `json:"ip"`
+	MAC             string `json:"mac,omitempty"`
+	State           string `json:"state,omitempty"`
+	VLAN            int    `json:"vlan,omitempty"`
 }
 
 type pluginControlNetNeighState struct {
@@ -465,10 +468,30 @@ func (h *pluginControlHost) netLeaseRestore(call goja.FunctionCall) goja.Value {
 	if len(resourceKey) > 512 || strings.ContainsRune(resourceKey, '\x00') {
 		h.throwf("net.lease.restore: invalid resource key")
 	}
-	item, err := store.PluginOwnedResourceOrNil(h.db, resourceType, resourceKey)
-	if err != nil {
-		h.throwf("net.lease.restore: %v", err)
+	var item *store.PluginOwnedResource
+	var unlock func()
+	for {
+		previous, err := store.PluginOwnedResourceOrNil(h.db, resourceType, resourceKey)
+		if err != nil {
+			h.throwf("net.lease.restore: %v", err)
+		}
+		var dependencies []pluginOwnedResourceRef
+		if previous != nil {
+			dependencies, _ = pluginOwnedResourceDependencies(*previous)
+		}
+		unlock = h.lockPluginNetMutation([]pluginOwnedResourceRef{{resourceType, resourceKey}}, "net.lease.restore", dependencies...)
+		item, err = store.PluginOwnedResourceOrNil(h.db, resourceType, resourceKey)
+		if err != nil {
+			unlock()
+			h.throwf("net.lease.restore: %v", err)
+		}
+		if item != nil && (previous == nil || item.MetadataJSON != previous.MetadataJSON) {
+			unlock()
+			continue
+		}
+		break
 	}
+	defer unlock()
 	if item == nil {
 		return h.vm.ToValue(map[string]any{"restored": false, "type": resourceType, "key": resourceKey})
 	}
@@ -540,6 +563,8 @@ func (h *pluginControlHost) netLinkEnsureVeth(call goja.FunctionCall) goja.Value
 	}
 	h.requireNetAccess("link.create", req.Host, "net.link.ensureVeth")
 	h.requireNetAccess("link.create", req.Peer, "net.link.ensureVeth")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.link.ensureVeth", req.Host, req.Peer)
+	defer unlock()
 	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Host, "net.link.ensureVeth")
 	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Peer, "net.link.ensureVeth")
 	hostSnapshot, hostRefs, err := h.preparePluginEnsureLinkMutation(admin, req.Host, req.MTU, req.Up, "net.link.ensureVeth")
@@ -597,6 +622,8 @@ func (h *pluginControlHost) netLinkEnsureDummy(call goja.FunctionCall) goja.Valu
 		h.throwf("net.link.ensureDummy: mtu must be between 576 and 65535")
 	}
 	h.requireNetAccess("link.create", req.Name, "net.link.ensureDummy")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.link.ensureDummy", req.Name)
+	defer unlock()
 	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Name, "net.link.ensureDummy")
 	snapshot, refs, err := h.preparePluginEnsureLinkMutation(admin, req.Name, req.MTU, req.Up, "net.link.ensureDummy")
 	if err != nil {
@@ -667,6 +694,8 @@ func (h *pluginControlHost) netLinkEnsureMacvlan(call goja.FunctionCall) goja.Va
 	}
 	h.requireNetAccess("link.read", req.Parent, "net.link.ensureMacvlan")
 	h.requireNetAccess("link.create", req.Name, "net.link.ensureMacvlan")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.link.ensureMacvlan", req.Name, req.Parent)
+	defer unlock()
 	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Name, "net.link.ensureMacvlan")
 	snapshot, refs, err := h.preparePluginEnsureLinkMutation(admin, req.Name, req.MTU, req.Up, "net.link.ensureMacvlan")
 	if err != nil {
@@ -731,6 +760,8 @@ func (h *pluginControlHost) netLinkEnsureVLAN(call goja.FunctionCall) goja.Value
 	}
 	h.requireNetAccess("link.read", req.Parent, "net.link.ensureVLAN")
 	h.requireNetAccess("link.create", req.Name, "net.link.ensureVLAN")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.link.ensureVLAN", req.Name, req.Parent)
+	defer unlock()
 	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Name, "net.link.ensureVLAN")
 	snapshot, refs, err := h.preparePluginEnsureLinkMutation(admin, req.Name, req.MTU, req.Up, "net.link.ensureVLAN")
 	if err != nil {
@@ -776,6 +807,8 @@ func (h *pluginControlHost) netLinkEnsureVRF(call goja.FunctionCall) goja.Value 
 		h.throwf("net.link.ensureVRF: table must be between 1 and 4294967295")
 	}
 	h.requireNetAccess("link.create", req.Name, "net.link.ensureVRF")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.link.ensureVRF", req.Name)
+	defer unlock()
 	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Name, "net.link.ensureVRF")
 	snapshot, refs, err := h.preparePluginEnsureLinkMutation(admin, req.Name, 0, req.Up, "net.link.ensureVRF")
 	if err != nil {
@@ -839,6 +872,8 @@ func (h *pluginControlHost) netLinkEnsureBridge(call goja.FunctionCall) goja.Val
 		h.throwf("net.link.ensureBridge: mtu must be between 576 and 65535")
 	}
 	h.requireNetAccess("link.create", req.Name, "net.link.ensureBridge")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.link.ensureBridge", req.Name)
+	defer unlock()
 	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Name, "net.link.ensureBridge")
 	snapshot, refs, err := h.preparePluginEnsureLinkMutation(admin, req.Name, req.MTU, req.Up, "net.link.ensureBridge")
 	if err != nil {
@@ -865,14 +900,22 @@ func (h *pluginControlHost) netLinkEnsureBridge(call goja.FunctionCall) goja.Val
 func (h *pluginControlHost) netLinkDelete(call goja.FunctionCall) goja.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
 	namespace := h.netNamespaceArgument(call, 1, "net.link.delete")
-	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.delete")
+	h.netAdminInNamespaceOrThrow(namespace, "net.link.delete")
 	h.requireNetAccess("link.delete", name, "net.link.delete")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.delete", name)
+	defer unlock()
 	owned := h.requirePluginLinkDeleteOwnership(namespace, name, "net.link.delete")
 	if !owned {
 		h.throwf("net.link.delete: only links created and owned by this plugin may be deleted")
 	}
-	if err := admin.LinkDelete(name); err != nil {
-		h.throwf("net.link.delete: %v", err)
+	recorded, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeLink, pluginControlNetScopedResourceKey(namespace, name))
+	if err != nil {
+		h.throwf("net.link.delete: inspect recorded identity: %v", err)
+	}
+	if recorded != nil {
+		if err := restorePluginOwnedResource(h.netAdmin, *recorded); err != nil {
+			h.throwf("net.link.delete: %v", err)
+		}
 	}
 	if err := h.releasePluginOwnedLink(namespace, name); err != nil {
 		h.throwf("net.link.delete: clear ownership: %v", err)
@@ -885,6 +928,8 @@ func (h *pluginControlHost) netLinkRelease(call goja.FunctionCall) goja.Value {
 	namespace := h.netNamespaceArgument(call, 1, "net.link.release")
 	h.netAdminInNamespaceOrThrow(namespace, "net.link.release")
 	h.requireNetAccess("link.create", name, "net.link.release")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.release", name)
+	defer unlock()
 	if err := h.releasePluginOwnedLink(namespace, name); err != nil {
 		h.throwf("net.link.release: %v", err)
 	}
@@ -923,6 +968,8 @@ func (h *pluginControlHost) netLinkSetMaster(call goja.FunctionCall) goja.Value 
 	}
 	h.requireNetAccess("link.master", req.Link, "net.link.setMaster")
 	h.requireNetAccess("link.master", req.Master, "net.link.setMaster")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.link.setMaster", req.Link, req.Master)
+	defer unlock()
 	previous, err := admin.LinkGet(req.Link)
 	if err != nil {
 		h.throwf("net.link.setMaster: inspect current state: %v", err)
@@ -959,6 +1006,8 @@ func (h *pluginControlHost) netLinkClearMaster(call goja.FunctionCall) goja.Valu
 	namespace := h.netNamespaceArgument(call, 1, "net.link.clearMaster")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.clearMaster")
 	h.requireNetAccess("link.master", name, "net.link.clearMaster")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.clearMaster", name)
+	defer unlock()
 	previous, err := admin.LinkGet(name)
 	if err != nil {
 		h.throwf("net.link.clearMaster: inspect current state: %v", err)
@@ -991,6 +1040,8 @@ func (h *pluginControlHost) netLinkSetUp(call goja.FunctionCall) goja.Value {
 	namespace := h.netNamespaceArgument(call, 2, "net.link.setUp")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.setUp")
 	h.requireNetAccess("link.state", name, "net.link.setUp")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.setUp", name)
+	defer unlock()
 	previous, err := admin.LinkGet(name)
 	if err != nil {
 		h.throwf("net.link.setUp: inspect current state: %v", err)
@@ -1025,6 +1076,8 @@ func (h *pluginControlHost) netLinkSetMTU(call goja.FunctionCall) goja.Value {
 	namespace := h.netNamespaceArgument(call, 2, "net.link.setMTU")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.setMTU")
 	h.requireNetAccess("link.state", name, "net.link.setMTU")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.setMTU", name)
+	defer unlock()
 	previous, err := admin.LinkGet(name)
 	if err != nil {
 		h.throwf("net.link.setMTU: inspect current state: %v", err)
@@ -1056,6 +1109,8 @@ func (h *pluginControlHost) netLinkSetARP(call goja.FunctionCall) goja.Value {
 	namespace := h.netNamespaceArgument(call, 2, "net.link.setARP")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.setARP")
 	h.requireNetAccess("link.state", name, "net.link.setARP")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.setARP", name)
+	defer unlock()
 	previous, err := admin.LinkGet(name)
 	if err != nil {
 		h.throwf("net.link.setARP: inspect current state: %v", err)
@@ -1088,6 +1143,8 @@ func (h *pluginControlHost) netLinkSetPromiscuous(call goja.FunctionCall) goja.V
 	namespace := h.netNamespaceArgument(call, 2, "net.link.setPromiscuous")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.setPromiscuous")
 	h.requireNetAccess("link.state", name, "net.link.setPromiscuous")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.setPromiscuous", name)
+	defer unlock()
 	previous, err := admin.LinkGet(name)
 	if err != nil {
 		h.throwf("net.link.setPromiscuous: inspect current state: %v", err)
@@ -1131,6 +1188,8 @@ func (h *pluginControlHost) netLinkSetOffloads(call goja.FunctionCall) goja.Valu
 	namespace := h.netNamespaceArgument(call, 2, "net.link.setOffloads")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.setOffloads")
 	h.requireNetAccess("link.offload", name, "net.link.setOffloads")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.setOffloads", name)
+	defer unlock()
 	previous, err := admin.LinkGet(name)
 	if err != nil {
 		h.throwf("net.link.setOffloads: inspect current link: %v", err)
@@ -1209,6 +1268,8 @@ func (h *pluginControlHost) netLinkSetGSO(call goja.FunctionCall) goja.Value {
 	namespace := h.netNamespaceArgument(call, 2, "net.link.setGSO")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.setGSO")
 	h.requireNetAccess("link.offload", name, "net.link.setGSO")
+	unlock := h.lockPluginNetLinks(namespace, "net.link.setGSO", name)
+	defer unlock()
 	previous, err := admin.LinkGet(name)
 	if err != nil {
 		h.throwf("net.link.setGSO: inspect current state: %v", err)
@@ -1285,6 +1346,8 @@ func (h *pluginControlHost) netAddrReplace(call goja.FunctionCall) goja.Value {
 	req := h.netAddrRequest(call, "net.addr.replace")
 	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.addr.replace")
 	h.requireNetAccess("addr.write", req.Interface, "net.addr.replace")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.addr.replace", req.Interface)
+	defer unlock()
 	previous, err := admin.LinkGet(req.Interface)
 	if err != nil {
 		h.throwf("net.addr.replace: inspect current state: %v", err)
@@ -1297,6 +1360,7 @@ func (h *pluginControlHost) netAddrReplace(call goja.FunctionCall) goja.Value {
 		h.throwf("net.addr.replace: %v", err)
 	}
 	originalPresent := pluginControlNetLinkHasAddress(previous, normalized.CIDR)
+	normalized.expectedIfIndex = previous.IfIndex
 	refs := []pluginOwnedResourceRef(nil)
 	if !originalPresent {
 		refs, normalized, err = h.claimPluginAddressMutation(previous, normalized, false, "net.addr.replace")
@@ -1348,6 +1412,8 @@ func (h *pluginControlHost) netAddrDelete(call goja.FunctionCall) goja.Value {
 	req := h.netAddrRequest(call, "net.addr.delete")
 	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.addr.delete")
 	h.requireNetAccess("addr.write", req.Interface, "net.addr.delete")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.addr.delete", req.Interface)
+	defer unlock()
 	previous, err := admin.LinkGet(req.Interface)
 	if err != nil {
 		h.throwf("net.addr.delete: inspect current state: %v", err)
@@ -1360,6 +1426,7 @@ func (h *pluginControlHost) netAddrDelete(call goja.FunctionCall) goja.Value {
 		h.throwf("net.addr.delete: %v", err)
 	}
 	originalPresent := pluginControlNetLinkHasAddress(previous, normalized.CIDR)
+	normalized.expectedIfIndex = previous.IfIndex
 	refs := []pluginOwnedResourceRef(nil)
 	if originalPresent {
 		refs, normalized, err = h.claimPluginAddressMutation(previous, normalized, true, "net.addr.delete")
@@ -1389,70 +1456,15 @@ func pluginControlNetLinkHasAddress(info pluginControlNetLinkInfo, cidr string) 
 
 func (h *pluginControlHost) netRouteReplace(call goja.FunctionCall) goja.Value {
 	req := h.netRouteRequest(call, "net.route.replace")
-	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.route.replace")
 	h.requireRouteNetAccess(req, "net.route.replace")
-	identities, err := h.pluginRouteLinkIdentities(admin, req, "net.route.replace")
-	if err != nil {
-		h.throwf("net.route.replace: %v", err)
-	}
-	original, err := admin.RouteSnapshot(req)
-	if err != nil {
-		h.throwf("net.route.replace: snapshot current route: %v", err)
-	}
-	previous, created, leased, err := h.claimPluginRouteMutation(req, true, original, identities)
-	if err != nil {
-		h.throwf("net.route.replace: %v", err)
-	}
-	if len(original) != 1 || !pluginControlRouteRequestMatchesState(req, original[0]) {
-		if err := admin.RouteReplace(req); err != nil {
-			var rollbackErr error
-			if leased {
-				rollbackErr = h.rollbackPluginRouteOperation(admin, req, true, previous, created)
-			}
-			h.throwPluginNetMutationError("net.route.replace", err, rollbackErr)
-		}
-	}
-	if err := h.releaseRestoredPluginRouteLease(req, true); err != nil {
-		h.throwf("net.route.replace: release restored lease: %v", err)
-	}
+	h.netRouteTransactionItems([]pluginControlNetRouteBatchItem{{request: req, present: true}})
 	return goja.Undefined()
 }
 
 func (h *pluginControlHost) netRouteDelete(call goja.FunctionCall) goja.Value {
 	req := h.netRouteRequest(call, "net.route.delete")
-	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.route.delete")
 	h.requireRouteNetAccess(req, "net.route.delete")
-	identities, err := h.pluginRouteLinkIdentities(admin, req, "net.route.delete")
-	if err != nil {
-		h.throwf("net.route.delete: %v", err)
-	}
-	original, err := admin.RouteSnapshot(req)
-	if err != nil {
-		h.throwf("net.route.delete: snapshot current route: %v", err)
-	}
-	if len(original) == 0 {
-		if err := admin.RouteDelete(req); err != nil {
-			h.throwf("net.route.delete: %v", err)
-		}
-		if err := h.releaseRestoredPluginRouteLease(req, false); err != nil {
-			h.throwf("net.route.delete: release restored lease: %v", err)
-		}
-		return goja.Undefined()
-	}
-	previous, created, leased, err := h.claimPluginRouteMutation(req, false, original, identities)
-	if err != nil {
-		h.throwf("net.route.delete: %v", err)
-	}
-	if err := admin.RouteDelete(req); err != nil {
-		var rollbackErr error
-		if leased {
-			rollbackErr = h.rollbackPluginRouteOperation(admin, req, false, previous, created)
-		}
-		h.throwPluginNetMutationError("net.route.delete", err, rollbackErr)
-	}
-	if err := h.releaseRestoredPluginRouteLease(req, false); err != nil {
-		h.throwf("net.route.delete: release restored lease: %v", err)
-	}
+	h.netRouteTransactionItems([]pluginControlNetRouteBatchItem{{request: req, present: false}})
 	return goja.Undefined()
 }
 
@@ -1467,138 +1479,36 @@ func (h *pluginControlHost) pluginRouteLinkIdentities(admin pluginControlNetAdmi
 		if _, err := h.pluginOwnedLinkState(req.Namespace, interfaceName, operation); err != nil {
 			return nil, err
 		}
-		identities = append(identities, pluginOwnedRouteLinkIdentity{Dev: interfaceName, IfIndex: link.IfIndex})
+		identities = append(identities, pluginOwnedRouteLinkIdentity{Dev: interfaceName, IfIndex: link.IfIndex, Kind: link.Kind, MAC: link.MAC})
 	}
 	return identities, nil
 }
 
 func (h *pluginControlHost) netRuleReplace(call goja.FunctionCall) goja.Value {
 	req := h.netRuleRequest(call, "net.rule.replace")
-	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.rule.replace")
 	h.requireRuleNetAccess(req, "net.rule.replace")
-	original, err := admin.RuleSnapshot(req)
-	if err != nil {
-		h.throwf("net.rule.replace: snapshot current policy rule: %v", err)
-	}
-	previous, created, err := h.claimPluginRuleMutation(req, true, original)
-	if err != nil {
-		h.throwf("net.rule.replace: %v", err)
-	}
-	if len(original) == 0 {
-		if err := admin.RuleReplace(req); err != nil {
-			rollbackErr := h.rollbackPluginRuleOperation(admin, req, true, previous, created)
-			h.throwPluginNetMutationError("net.rule.replace", err, rollbackErr)
-		}
-	}
-	if err := h.releaseRestoredPluginRuleLease(req, true); err != nil {
-		h.throwf("net.rule.replace: release restored lease: %v", err)
-	}
+	h.netRuleTransactionItems([]pluginControlNetRuleBatchItem{{request: req, present: true}})
 	return goja.Undefined()
 }
 
 func (h *pluginControlHost) netRuleDelete(call goja.FunctionCall) goja.Value {
 	req := h.netRuleRequest(call, "net.rule.delete")
-	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.rule.delete")
 	h.requireRuleNetAccess(req, "net.rule.delete")
-	original, err := admin.RuleSnapshot(req)
-	if err != nil {
-		h.throwf("net.rule.delete: snapshot current policy rule: %v", err)
-	}
-	if len(original) == 0 {
-		if err := admin.RuleDelete(req); err != nil {
-			h.throwf("net.rule.delete: %v", err)
-		}
-		if err := h.releaseRestoredPluginRuleLease(req, false); err != nil {
-			h.throwf("net.rule.delete: release restored lease: %v", err)
-		}
-		return goja.Undefined()
-	}
-	previous, created, err := h.claimPluginRuleMutation(req, false, original)
-	if err != nil {
-		h.throwf("net.rule.delete: %v", err)
-	}
-	if err := admin.RuleDelete(req); err != nil {
-		rollbackErr := h.rollbackPluginRuleOperation(admin, req, false, previous, created)
-		h.throwPluginNetMutationError("net.rule.delete", err, rollbackErr)
-	}
-	if err := h.releaseRestoredPluginRuleLease(req, false); err != nil {
-		h.throwf("net.rule.delete: release restored lease: %v", err)
-	}
+	h.netRuleTransactionItems([]pluginControlNetRuleBatchItem{{request: req, present: false}})
 	return goja.Undefined()
 }
 
 func (h *pluginControlHost) netNeighReplace(call goja.FunctionCall) goja.Value {
 	req := h.netNeighRequest(call, "net.neigh.replace", true)
-	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.neigh.replace")
 	h.requireNetAccess("neigh.write", req.Interface, "net.neigh.replace")
-	dev, err := admin.LinkGet(req.Interface)
-	if err != nil {
-		h.throwf("net.neigh.replace: inspect neighbor interface: %v", err)
-	}
-	if _, err := h.pluginOwnedLinkState(req.Namespace, req.Interface, "net.neigh.replace"); err != nil {
-		h.throwf("net.neigh.replace: %v", err)
-	}
-	original, err := admin.NeighSnapshot(req)
-	if err != nil {
-		h.throwf("net.neigh.replace: snapshot current neighbor: %v", err)
-	}
-	previous, created, leased, err := h.claimPluginNeighMutation(req, true, original, dev.IfIndex)
-	if err != nil {
-		h.throwf("net.neigh.replace: %v", err)
-	}
-	if len(original) != 1 || !pluginControlNeighRequestMatchesState(req, original[0]) || original[0].LinkIfIndex != dev.IfIndex {
-		if err := admin.NeighReplace(req); err != nil {
-			var rollbackErr error
-			if leased {
-				rollbackErr = h.rollbackPluginNeighOperation(admin, req, true, previous, created)
-			}
-			h.throwPluginNetMutationError("net.neigh.replace", err, rollbackErr)
-		}
-	}
-	if err := h.releaseRestoredPluginNeighLease(req, true); err != nil {
-		h.throwf("net.neigh.replace: release restored lease: %v", err)
-	}
+	h.netNeighTransactionItems([]pluginControlNetNeighBatchItem{{request: req, present: true}})
 	return goja.Undefined()
 }
 
 func (h *pluginControlHost) netNeighDelete(call goja.FunctionCall) goja.Value {
 	req := h.netNeighRequest(call, "net.neigh.delete", false)
-	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.neigh.delete")
 	h.requireNetAccess("neigh.write", req.Interface, "net.neigh.delete")
-	dev, err := admin.LinkGet(req.Interface)
-	if err != nil {
-		h.throwf("net.neigh.delete: inspect neighbor interface: %v", err)
-	}
-	if _, err := h.pluginOwnedLinkState(req.Namespace, req.Interface, "net.neigh.delete"); err != nil {
-		h.throwf("net.neigh.delete: %v", err)
-	}
-	original, err := admin.NeighSnapshot(req)
-	if err != nil {
-		h.throwf("net.neigh.delete: snapshot current neighbor: %v", err)
-	}
-	if len(original) == 0 {
-		if err := admin.NeighDelete(req); err != nil {
-			h.throwf("net.neigh.delete: %v", err)
-		}
-		if err := h.releaseRestoredPluginNeighLease(req, false); err != nil {
-			h.throwf("net.neigh.delete: release restored lease: %v", err)
-		}
-		return goja.Undefined()
-	}
-	previous, created, leased, err := h.claimPluginNeighMutation(req, false, original, dev.IfIndex)
-	if err != nil {
-		h.throwf("net.neigh.delete: %v", err)
-	}
-	if err := admin.NeighDelete(req); err != nil {
-		var rollbackErr error
-		if leased {
-			rollbackErr = h.rollbackPluginNeighOperation(admin, req, false, previous, created)
-		}
-		h.throwPluginNetMutationError("net.neigh.delete", err, rollbackErr)
-	}
-	if err := h.releaseRestoredPluginNeighLease(req, false); err != nil {
-		h.throwf("net.neigh.delete: release restored lease: %v", err)
-	}
+	h.netNeighTransactionItems([]pluginControlNetNeighBatchItem{{request: req, present: false}})
 	return goja.Undefined()
 }
 

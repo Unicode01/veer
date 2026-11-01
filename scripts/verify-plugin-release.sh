@@ -413,7 +413,7 @@ run_core_dataplane() {
 		go test -c -o "$core_binary" ./internal/app
 	fi
 	plugin_log="$TMP_DIR/bundled-dataplane.log"
-	plugin_tests='TestPluginDirectTCIncrementalReconcile TestBundledPPPoEMSSClampLinux TestPluginControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration TestPluginWANCoreLinuxIntegration TestPluginNetPolicyTransactionsLinuxIntegration TestPluginControlNetAddrReplaceIdempotentLinuxIntegration'
+	plugin_tests='TestPluginDirectTCIncrementalReconcile TestPluginDirectTCCleanupRetainsFailures TestPluginXDPDetachOwnershipLinuxIntegration TestPluginMapTransactionLinuxRejectsLRUBeforeMutation TestBundledPPPoEMSSClampLinux TestPluginControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration TestPluginWANCoreLinuxIntegration TestPluginNetPolicyTransactionsLinuxIntegration TestPluginNetRecoveryInterfaceFaultsLinuxIntegration TestPluginNetTransactionCrashRecoveryLinuxIntegration TestPluginControlNetAddrReplaceIdempotentLinuxIntegration'
 	plugin_pattern=$(printf '%s' "$plugin_tests" | tr ' ' '|')
 	run_no_skips "bundled plugin recovery, direct TC updates and PPPoE MSS handling" "$plugin_log" \
 		env FORWARD_RUN_PLUGIN_DATAPLANE_TEST=1 FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 \

@@ -22,6 +22,13 @@ func DeletePluginData(db *sql.DB, pluginID string) error {
 		return err
 	}
 	defer tx.Rollback()
+	var pending int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM plugin_net_transactions WHERE plugin_id = ?`, pluginID).Scan(&pending); err != nil {
+		return err
+	}
+	if pending != 0 {
+		return errors.New("plugin network recovery is pending; recover owned resources before purging plugin data")
+	}
 	if _, err := tx.Exec(`DELETE FROM plugin_event_deliveries WHERE plugin_id = ? OR source_plugin = ?`, pluginID, pluginID); err != nil {
 		return err
 	}

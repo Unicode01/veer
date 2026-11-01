@@ -237,3 +237,57 @@ func assertPluginMapTestMissing(t *testing.T, m *ebpf.Map, key []byte) {
 		t.Fatalf("map key %x error = %v, want missing", key, err)
 	}
 }
+
+func TestPluginMapTransactionLinuxRejectsLRUBeforeMutation(t *testing.T) {
+	for _, kind := range []ebpf.MapType{ebpf.LRUHash, ebpf.LRUCPUHash} {
+		t.Run(kind.String(), func(t *testing.T) {
+			lru := newPluginMapAPITestMap(t, &ebpf.MapSpec{Type: kind, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+			key := pluginMapTestUint32(1)
+			value := pluginMapTestUint64(17)
+			if kind == ebpf.LRUCPUHash {
+				cpus, err := ebpf.PossibleCPU()
+				if err != nil {
+					t.Fatal(err)
+				}
+				perCPU := make([]uint64, cpus)
+				for i := range perCPU {
+					perCPU[i] = 17
+				}
+				if err := lru.Put(uint32(1), perCPU); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := lru.Put(key, value); err != nil {
+				t.Fatal(err)
+			}
+			ordinary := newPluginMapAPITestMap(t, &ebpf.MapSpec{Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+			if err := ordinary.Put(key, value); err != nil {
+				t.Fatal(err)
+			}
+			refs := []loadedPluginObjectRef{{PluginID: "lru", ObjectID: "obj", coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"ordinary": ordinary, "lru": lru}}}}
+			err := transactPluginMapsInRefs(refs, "lru", pluginEBPFMapTransactionRequest{Operations: []pluginEBPFMapMutation{
+				{Operation: pluginEBPFMapMutationPut, ObjectID: "obj", MapName: "ordinary", Key: key, Value: pluginMapTestUint64(99)},
+				{Operation: pluginEBPFMapMutationPut, ObjectID: "obj", MapName: "lru", Key: pluginMapTestUint32(2), Value: pluginMapTestUint64(99)},
+			}})
+			if err == nil {
+				t.Fatal("LRU transaction accepted")
+			}
+			assertPluginMapTestValue(t, ordinary, key, value)
+			if kind == ebpf.LRUCPUHash {
+				var perCPU []uint64
+				if err := lru.Lookup(uint32(1), &perCPU); err != nil {
+					t.Fatal(err)
+				}
+				for _, v := range perCPU {
+					if v != 17 {
+						t.Fatalf("LRU entry changed: %v", perCPU)
+					}
+				}
+			} else {
+				assertPluginMapTestValue(t, lru, key, value)
+			}
+			if next, err := lru.NextKeyBytes(key); err != nil || next != nil {
+				t.Fatalf("unexpected LRU insertion: %v %v", next, err)
+			}
+		})
+	}
+}

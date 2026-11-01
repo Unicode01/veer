@@ -44,7 +44,7 @@ type linuxPluginDataplaneRuntime struct {
 	netfilter   *kernelNetfilterPluginPipelineRuntime
 	combinedMu  sync.Mutex
 	combined    pluginRuntimeSnapshot
-	pendingTC   *pluginDirectTCUpdate
+	pendingTC   map[string]*pluginDirectTCUpdate
 	retiredTC   map[string]*loadedPluginDataplane
 }
 
@@ -122,7 +122,12 @@ func (rt *linuxPluginDataplaneRuntime) reconcileDirectTC(catalog PluginCatalog) 
 			}
 			states[plugin.ID] = externalPluginRuntimeState()
 		}
-		rt.cleanupLocked()
+		if err := rt.cleanupLocked(); err != nil {
+			for id, state := range rt.snapshot.Plugins {
+				state.Mode, state.Error = pluginRuntimeModeError, err.Error()
+				states[id] = state
+			}
+		}
 		rt.fingerprint = ""
 		rt.snapshot = pluginRuntimeSnapshot{Plugins: states}
 		return clonePluginRuntimeSnapshot(rt.snapshot)
@@ -178,19 +183,21 @@ func (rt *linuxPluginDataplaneRuntime) Close() error {
 			failures = append(failures, err.Error())
 		}
 	}
-	rt.combinedMu.Lock()
-	rt.combined = pluginRuntimeSnapshot{}
-	rt.combinedMu.Unlock()
 	if len(failures) > 0 {
 		return fmt.Errorf("plugin dataplane cleanup: %s", strings.Join(failures, "; "))
 	}
+	rt.combinedMu.Lock()
+	rt.combined = pluginRuntimeSnapshot{}
+	rt.combinedMu.Unlock()
 	return nil
 }
 
 func (rt *linuxPluginDataplaneRuntime) closeDirectTC() error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	rt.cleanupLocked()
+	if err := rt.cleanupLocked(); err != nil {
+		return err
+	}
 	rt.snapshot = pluginRuntimeSnapshot{}
 	rt.fingerprint = ""
 	return nil
@@ -200,53 +207,29 @@ func (rt *linuxPluginDataplaneRuntime) dataplaneEnabled() bool {
 	return rt.cfg != nil && rt.cfg.PluginsEnabled() && rt.cfg.PluginsDataplaneEnabled()
 }
 
-func (rt *linuxPluginDataplaneRuntime) cleanupLocked() {
-	if rt.pendingTC != nil {
-		if err := rt.pendingTC.rollback(); err != nil {
-			log.Printf("plugin direct tc rollback during shutdown: %v", err)
-		}
-		for _, loaded := range rt.pendingTC.next {
-			for _, filter := range loaded.filters {
-				_ = removeOwnedPluginTCFilter(filter)
-			}
-		}
-		closeUnusedPluginTCObjects(rt.pendingTC.next, rt.loaded)
-		rt.pendingTC = nil
-	}
-	_ = retirePluginTCGeneration(rt.retiredTC, rt.loaded)
-	rt.retiredTC = nil
+func (rt *linuxPluginDataplaneRuntime) cleanupLocked() error {
+	all := make(map[string]*loadedPluginDataplane)
 	for id, loaded := range rt.loaded {
-		cleanupLoadedPluginDataplane(loaded)
-		delete(rt.loaded, id)
+		all["live/"+id] = loaded
 	}
-}
-
-func cleanupLoadedPluginDataplane(loaded *loadedPluginDataplane) {
-	if loaded == nil {
-		return
+	for id, loaded := range rt.retiredTC {
+		all["retired/"+id] = loaded
 	}
-	for i := len(loaded.filters) - 1; i >= 0; i-- {
-		if loaded.filters[i] != nil {
-			if err := removeOwnedPluginTCFilter(loaded.filters[i]); err != nil {
-				log.Printf("plugin direct tc cleanup: %v", err)
-			}
+	for id, update := range rt.pendingTC {
+		for key, loaded := range update.next {
+			all["pending/"+id+"/"+key] = loaded
 		}
 	}
-	seen := make(map[*ebpf.Collection]struct{}, len(loaded.objects))
-	for i := len(loaded.objects) - 1; i >= 0; i-- {
-		coll := loaded.objects[i].coll
-		if coll != nil {
-			if _, ok := seen[coll]; ok {
-				continue
-			}
-			seen[coll] = struct{}{}
-			coll.Close()
-		}
-	}
+	remaining, err := retirePluginTCGeneration(all, nil)
+	rt.retiredTC = remaining
+	rt.loaded = nil
+	rt.pendingTC = nil
+	rt.fingerprint = ""
+	return err
 }
 
 func (rt *linuxPluginDataplaneRuntime) loadedAttachmentsHealthyLocked() bool {
-	if rt.pendingTC != nil || len(rt.retiredTC) != 0 {
+	if len(rt.pendingTC) != 0 || len(rt.retiredTC) != 0 {
 		return false
 	}
 	for _, loaded := range rt.loaded {
