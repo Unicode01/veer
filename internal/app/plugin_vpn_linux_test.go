@@ -648,6 +648,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 		api("DELETE", fmt.Sprintf("/api/egress-nats?id=%d", ordinaryChild), nil)
 		probe(selected, selectedSource)
 		probe(direct, "192.0.2.1")
+		wanBefore := api("GET", "/api/plugins/wan_core/resources/sessions", nil)
 		for id, m := range adapterMaps {
 			for key, value := range expectedMaps[id] {
 				got, err := m.LookupBytes([]byte(key))
@@ -675,6 +676,9 @@ func runWireGuardMeshTopology(t *testing.T) {
 				t.Fatal("VPN did not repair lost adapter maps while interface/core generations were unchanged")
 			}
 			time.Sleep(100 * time.Millisecond)
+		}
+		if wanAfter := api("GET", "/api/plugins/wan_core/resources/sessions", nil); !bytes.Equal(wanBefore, wanAfter) {
+			t.Fatalf("map repair withdrew or reapplied the WAN: %s -> %s", wanBefore, wanAfter)
 		}
 		probeHealth("/", "healthy", "")
 		probe(selected, selectedSource)
