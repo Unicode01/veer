@@ -23,7 +23,7 @@ if [ "$PPPOE_TUNNEL_DIAG" = "1" ]; then
 fi
 
 # shellcheck disable=SC2086
-# BTF enables independent verification of the bounded MSS/copy subprograms.
+# Preserve object BTF; only the helper variant needs the running kernel's BTF.
 "$BPF_CLANG" -O2 -g -target bpf -D__TARGET_ARCH_"$(target_arch)" $BPF_EXTRA_CFLAGS -c pppoe_tunnel.bpf.c -o pppoe_tunnel.o
 if command -v llvm-strip >/dev/null 2>&1; then
 	llvm-strip -g pppoe_tunnel.o || true
