@@ -19,6 +19,9 @@ import (
 
 func TestPluginNetRecoveryInterfaceFaultsLinuxIntegration(t *testing.T) {
 	requirePluginLinuxIntegration(t)
+	if runPluginIntegrationInIsolatedNetNS(t) {
+		return
+	}
 	provider := newPluginControlNetAdmin().(*linuxPluginControlNetAdmin)
 	nsName := pluginIntegrationLinkName("vrns")
 	ns, err := provider.NamespaceEnsure(pluginControlNetNamespaceRequest{Name: nsName, LoopbackUp: true})

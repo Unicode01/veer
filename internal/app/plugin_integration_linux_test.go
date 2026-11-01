@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -784,6 +785,9 @@ func assertPluginNetPolicyTransactionState(
 
 func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 	requirePluginLinuxIntegration(t)
+	if runPluginIntegrationInIsolatedNetNS(t) {
+		return
+	}
 
 	plugin, db, rt := loadPluginIntegrationControlRuntimeForTest(t, "wan_core")
 	defer rt.Close()
@@ -852,6 +856,18 @@ func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 	}
 	assertPluginIntegrationDummy(t, local, 1400)
 	assertPluginIntegrationLinkLacksCIDR(t, local, "169.254.240.2/32")
+	ownedLink, err := store.PluginOwnedResourceOrNil(db, pluginOwnedResourceTypeLink, local)
+	if err != nil || ownedLink == nil {
+		t.Fatalf("repaired WAN link ownership = %+v, err=%v", ownedLink, err)
+	}
+	var claim pluginOwnedLinkClaim
+	if err := json.Unmarshal([]byte(ownedLink.MetadataJSON), &claim); err != nil {
+		t.Fatal(err)
+	}
+	currentLink, err := rt.netAdmin.LinkGet(local)
+	if err != nil || !pluginOwnedLinkIdentityMatches(currentLink, claim.IfIndex, claim.Kind, claim.MAC) {
+		t.Fatalf("repaired WAN identity = %+v, recorded = %+v, err=%v", currentLink, claim, err)
+	}
 
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(fmt.Sprintf(`{"wan_id":"itest","local_interface":%q}`, local))); err != nil {
@@ -1366,6 +1382,30 @@ func requirePluginLinuxIntegration(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("plugin Linux integration tests require root")
 	}
+}
+
+// Tests which depend on exact interface identity or a policy-only traffic path
+// need their own namespace. Host network managers and firewall rules are outside
+// the plugin runtime and must not mutate these fixtures during the assertions.
+func runPluginIntegrationInIsolatedNetNS(t *testing.T) bool {
+	t.Helper()
+	const helperEnv = "VEER_PLUGIN_ISOLATED_NETNS_HELPER"
+	if os.Getenv(helperEnv) == t.Name() {
+		return false
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("unshare", "--net", executable,
+		"-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.v", "-test.count=1", "-test.timeout=1m")
+	cmd.Env = append(os.Environ(), helperEnv+"="+t.Name())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated plugin integration: %v\n%s", err, strings.TrimSpace(string(output)))
+	}
+	t.Logf("isolated plugin integration passed:\n%s", strings.TrimSpace(string(output)))
+	return true
 }
 
 func assertPluginIntegrationEnabledRecord(t *testing.T, db *sql.DB, pluginID, resourceID, key string) {
