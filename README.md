@@ -317,7 +317,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 插件层
 
-`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入 TC 数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [vpn_core](plugins/vpn_core/README.md) 仍是源码内的 lab 插件，不进入默认发布包。VPN 示例支持内核 WireGuard、Mihomo、sing-box 和外部 TUN，以 WAN Core veth 和双向 TC 适配器接入核心，由现有 LAN/出向 NAT 选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
+`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入 TC 数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [vpn_core](plugins/vpn_core/README.md) 仍是源码内的 lab 插件，不进入默认发布包。VPN 示例支持内核 WireGuard、Mihomo、sing-box 和外部 TUN，通过 WAN Core 边界和双向 TC 适配器接入核心：支持 ingress 交接的 helper 使用单接口边界，其余环境使用 veth 兼容路径，内部 peer 对普通界面隐藏。现有 LAN/出向 NAT 可选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
 
 ## 平台与依赖
 

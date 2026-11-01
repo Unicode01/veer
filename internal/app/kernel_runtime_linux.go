@@ -4317,8 +4317,7 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 
 	for _, rule := range rules {
 		items, err := prepareKernelRule(prepareCtx, rule)
-		if err != nil && isKernelEgressNATRule(rule) &&
-			normalizeEgressNATRedirectMode(rule.kernelRedirectMode) == egressNATRedirectModePreparedL2 {
+		if err != nil && isKernelEgressNATRule(rule) {
 			// The boundary can disappear after preflight. Close that race without
 			// removing the LAN selector and exposing the host's default route.
 			guard := rule
