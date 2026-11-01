@@ -32,6 +32,7 @@
   const keyInput=input('出口标识',''), addressInput=input('本机 WireGuard 地址',''), wanAddressInput=input('内部 WAN 地址',''), slotInput=input('出口位置',1,'number');
   addressInput.placeholder='使用 WireGuard 配置中的 Address';wanAddressInput.placeholder='自动分配，无需填写';
   const mtuInput=input('MTU',1420,'number'), upstream=input('实际出站接口','','text');
+  const upstreamIP=input('出站 IP','','text');upstreamIP.placeholder='自动选择';
   const listenPort=input('监听端口',0,'number'), privateKey=input('WireGuard 私钥','','password');
   const routes=input('远端内网路由',''), tunName=input('TUN 接口',''), tunAlias=input('TUN 归属标记','');
   const coreConfig=area('代理核心 JSON 配置'), rawConfig=area('VPN 出口 JSON'), importConfig=area('WireGuard 配置文件');
@@ -103,7 +104,7 @@
     return peer;
   }
   function values() {
-    return {driver:currentDriver,slot:slotInput.value,mtu:mtuInput.value,addresses:currentDriver==='wireguard'?addressInput.value:wanAddressInput.value,upstream_interface:upstream.value,
+    return {driver:currentDriver,slot:slotInput.value,mtu:mtuInput.value,addresses:currentDriver==='wireguard'?addressInput.value:wanAddressInput.value,upstream_interface:upstream.value,upstream_ip:upstreamIP.value,
       listen_port:listenPort.value,remote_routes:routes.value,tun_interface:tunName.value,tun_alias:tunAlias.value,
       peers:peers.map(p => ({original:p.original,public_key:p.public_key.value,endpoint:p.endpoint.value,allowed_ips:p.allowed_ips.value,keepalive:p.keepalive.value,psk:p.psk.value}))};
   }
@@ -117,6 +118,7 @@
     addressInput.value=driver==='wireguard'?(value.addresses || []).join(', '):'';
     wanAddressInput.value=driver==='wireguard'?'':(value.addresses || []).join(', ');slotInput.value=value.slot || 1;mtuInput.value=value.mtu || 1420;
     upstream.value=value.upstream_interface || '';listenPort.value=value.listen_port || 0;routes.value=(value.remote_routes || []).join(', ');
+    upstreamIP.value=value.upstream_ip || '';
     tunName.value=value.tun_interface || '';tunAlias.value=value.tun_alias || '';
     peers=[];peerList.replaceChildren();(value.peers || (currentDriver==='wireguard'?[{}]:[])).forEach(p=>addPeer(p));
     privateKey.value='';coreConfig.value='';rawDirty=false;rawConfig.value=JSON.stringify(value,null,2);
@@ -146,7 +148,10 @@
       driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
         node('h3','vpn-section-title',name+' 代理出口'),
         node('p','vpn-subtle','粘贴分享链接，选择节点后即可保存并应用。核心配置、TUN 和内部出口地址自动生成。'),
-        h('div',{className:'vpn-fields'},[field('实际出站接口',upstream,'填写可访问节点服务器的物理、网桥或 PPPoE 接口，例如 eth0、vmbr0、ppp0；不能选择 VPN 自身。',true)]),
+        h('div',{className:'vpn-fields'},[
+          field('实际出站接口',upstream,'填写可访问节点服务器的物理、网桥或 PPPoE 接口，例如 eth0、vmbr0、ppp0；不能选择 VPN 自身。',currentDriver!=='sing_box'),
+          currentDriver==='sing_box'?field('出站 IP（可选）',upstreamIP,'填写所选接口上的 IPv4 或 IPv6，不含前缀。留空自动选择；填写后绑定对应地址族。'):null
+        ]),
         linksPanel,
         h('details',{className:'vpn-advanced vpn-proxy-advanced'},[
           h('summary',{text:'分流与高级配置'}),field('核心配置方式',configMode),routingPanel,nativePanel
@@ -309,6 +314,12 @@
           button('拆除',async()=>{
             if (!await F.confirm({title:'拆除 '+record.key,message:'请先把引用此出口的 LAN 或出向 NAT 切换到其他出口。配置草稿与密钥会保留。',confirmText:'拆除',cancelText:'取消',danger:true}))return;
             await F.action('teardown',{key:record.key});await reload();
+          },true),
+          button('删除',async()=>{
+            if (!await F.confirm({title:'删除 '+record.key,message:'删除前会拆除运行中的出口，并删除草稿、专用密钥与检测设置。请先把引用此出口的 LAN 或出向 NAT 切换到其他出口。共用的核心程序会保留。',confirmText:'删除',cancelText:'取消',danger:true}))return;
+            await F.action('delete_profile',{key:record.key});
+            if(editing && keyInput.value===record.key) {editor.hidden=true;editing=false;dirty=false;original={};}
+            detailPanel.hidden=true;await reload();message('已删除出口 '+record.key);
           },true),
           ['mihomo','sing_box'].includes(profile.driver)?button('核心日志',async()=>{
             if(await F.confirm({title:'查看核心日志',message:'日志可能包含节点凭据，请在分享前脱敏。',confirmText:'查看',cancelText:'取消'}))await showDetails(record.key,true);

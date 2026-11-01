@@ -23,10 +23,10 @@ pipeline.attach({id: 'wg-links', direction: 'forward', attach: 'ingress', priori
   program: 'wg_adapter:tc_adapter', mode: 'rewrite', binding_required: true});
 plugin.resource({id: 'hook_bindings', methods: ['list', 'get'], control_methods: ['list', 'get', 'create', 'update', 'delete'],
   runtime_update: 'plugin_reconcile', max_records: 1, max_record_bytes: 4096});
-plugin.resource({id: 'profiles', schema_version: 2, methods: ['list', 'get', 'create', 'update'], runtime_update: 'manual', max_records: 8, max_record_bytes: 16384,
+plugin.resource({id: 'profiles', schema_version: 2, methods: ['list', 'get', 'create', 'update'], control_methods: ['list', 'get', 'create', 'update', 'delete'], runtime_update: 'manual', max_records: 8, max_record_bytes: 16384,
   schema: {type: 'object', additionalProperties: false, properties: {
     driver: {type: 'string', enum: ['wireguard', 'mihomo', 'sing_box', 'tun']},
-    core_path: {type: 'string'}, config_secret: {type: 'string'}, upstream_interface: {type: 'string'},
+    core_path: {type: 'string'}, config_secret: {type: 'string'}, upstream_interface: {type: 'string'}, upstream_ip: {type: 'string'},
     tun_interface: {type: 'string'}, tun_alias: {type: 'string'}, max_restarts: {type: 'integer'}, startup_timeout_seconds: {type: 'integer'},
     slot: {type: 'integer'}, mtu: {type: 'integer'}, listen_port: {type: 'integer'},
     addresses: {type: 'array', items: {type: 'string'}}, remote_routes: {type: 'array', items: {type: 'string'}},
@@ -44,6 +44,7 @@ plugin.action({id: 'health_settings', description: 'Configure manual or periodic
 plugin.action({id: 'health_check', description: 'Queue a bounded asynchronous request through the applied VPN WAN.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'apply', description: 'Create or update a VPN WAN; select it in LAN or Egress NAT settings.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'teardown', description: 'Remove the owned VPN WAN and its TC adapter.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
+plugin.action({id: 'delete_profile', description: 'Teardown the owned VPN WAN, then delete its draft and unshared credentials.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'inspect', description: 'Read public interface, peer, handshake and traffic state.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 plugin.action({id: 'core_logs', description: 'Explicitly read managed core logs; output may contain credentials.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 plugin.action({id: 'core_status', description: 'List persistent core versions and installation progress.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
@@ -53,7 +54,7 @@ plugin.action({id: 'core_rollback', description: 'Restore the previous default c
 plugin.action({id: 'core_remove', description: 'Remove an unused installed core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 ui.register({static_dir: 'ui', entry: 'index.html', sha256: '3e71ed4426ad50a960d01225bb26a5e2d5d29f9e46cd7b249bff3b700567aa11', page: 'vpn', page_title: 'VPN',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
-  actions: ['set_key', 'set_core_config', 'core_form', 'health_status', 'health_settings', 'health_check', 'apply', 'teardown', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
+  actions: ['set_key', 'set_core_config', 'core_form', 'health_status', 'health_settings', 'health_check', 'apply', 'teardown', 'delete_profile', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
 
 exports.onAction = function (ctx) {
   var payload = ctx.payload || {}, key = profileKey(payload.key);
@@ -120,6 +121,7 @@ exports.onAction = function (ctx) {
       truncated: logs.truncated || logs.stdout.length > 4000 || logs.stderr.length > 4000};
   }
   if (ctx.action.id === 'teardown') { teardown(key); return {phase: 'down'}; }
+  if (ctx.action.id === 'delete_profile') return deleteProfile(key);
   if (ctx.action.id === 'apply') {
     var record = resources.get('profiles', key);
     if (!record || record.enabled === false) throw new Error('Save and enable the profile first');
@@ -187,6 +189,7 @@ function armRepair() {
 }
 function normalize(key, raw) {
   raw = raw || {};
+  if (raw.upstream_ip && raw.driver !== 'sing_box') throw new Error('出站 IP 仅支持 sing-box');
   if (raw.driver && raw.driver !== 'wireguard') return normalizeTUN(key, raw);
   if (raw.bindings || raw.masquerade != null || raw.bypass_cidrs) throw new Error('Legacy routing profile: teardown the old profile, then configure a WAN and select it in Egress NAT');
   var p = {driver: 'wireguard', key: key, slot: integer(raw.slot, 1, 8, 1), interface: 'vwg' + key,
@@ -393,6 +396,35 @@ function teardown(key) {
   health.invalidate(key);
   var before = changing; changing = true;
   try { return teardownProfile(key); } finally { changing = before; }
+}
+function profileSecrets(key, data) {
+  var names = ['private_' + key, 'active_' + key, 'core_' + key, 'core_mihomo_' + key, 'core_sing_box_' + key];
+  if (data) {
+    if (data.config_secret) names.push(data.config_secret);
+    (data.peers || []).forEach(function (peer) { if (peer.preshared_key_secret) names.push(peer.preshared_key_secret); });
+  }
+  for (var i = 0; i < 8; i++) names.push('psk_' + key + '_' + i);
+  return names.filter(function (name) { return /^[a-z][a-z0-9_]{0,31}$/.test(name); });
+}
+function deleteProfile(key) {
+  var record = resources.get('profiles', key), leases = allLeases(), lease = leases[key];
+  var names = profileSecrets(key, record && record.data).concat(profileSecrets(key, lease && lease.settings));
+  var retained = [];
+  resources.list('profiles', {limit: 8}).forEach(function (r) { if (r.key !== key) retained = retained.concat(profileSecrets(r.key, r.data)); });
+  Object.keys(leases).forEach(function (k) { if (k !== key) retained = retained.concat(profileSecrets(k, leases[k].settings)); });
+  // Keep the retryable draft and credentials until network cleanup succeeds.
+  teardown(key);
+  ['wg_' + key, 'vpn_' + key].forEach(function (id) {
+    var session = plugins.resources.get('wan_core', 'sessions', id);
+    if (!session || session.data.driver_plugin !== 'vpn_core' || session.data.profile_key !== key) return;
+    if (session.enabled !== false) throw new Error('WAN session is still active; retry teardown');
+    wanCall('teardown', {key: id, session: session.data, forget: true});
+    if (plugins.resources.get('wan_core', 'sessions', id)) throw new Error('WAN records remain; retry deletion');
+  });
+  health.remove(key);
+  names.forEach(function (name) { if (retained.indexOf(name) < 0) secret.delete(name); });
+  resources.transaction([{op: 'delete', resource: 'status', key: key}, {op: 'delete', resource: 'profiles', key: key}]);
+  armRepair(); return {phase: 'deleted'};
 }
 function teardownProfile(key) {
   var lease = allLeases()[key]; if (!lease) return;
@@ -630,6 +662,7 @@ function removePlan(p) {
 function normalizeTUN(key, raw) {
   var driver = String(raw.driver);
   if (['mihomo', 'sing_box', 'tun'].indexOf(driver) < 0) throw new Error('Unsupported VPN driver');
+  if (raw.upstream_ip && driver !== 'sing_box') throw new Error('出站 IP 仅支持 sing-box');
   var p = {key: key, driver: driver, slot: integer(raw.slot, 1, 8, 1), mtu: integer(raw.mtu, 1280, 9000, 1420)};
   p.interface = driver === 'tun' ? iface(raw.tun_interface) : 'vtun' + key;
   if (driver === 'tun' && !raw.tun_interface) throw new Error('An external TUN interface is required');
@@ -647,6 +680,15 @@ function normalizeTUN(key, raw) {
   p.remote_routes = [];
   p.upstream_interface = driver === 'tun' ? '' : iface(raw.upstream_interface);
   if (driver !== 'tun' && (!raw.upstream_interface || [p.interface, p.local, p.pipeline].indexOf(p.upstream_interface) >= 0)) throw new Error('Select a separate physical or PPPoE upstream_interface');
+  p.upstream_ip = String(raw.upstream_ip || '').trim();
+  if (p.upstream_ip) {
+    // Bind an address already owned by the selected uplink; never create an
+    // address, route or NAT rule to make a source binding appear to work.
+    p.upstream_ip = addressText(address(p.upstream_ip));
+    var upstream = net.link.get(p.upstream_interface);
+    if (!(upstream.addresses || []).some(function (value) { return addressText(address(value.split('/')[0])) === p.upstream_ip; }))
+      throw new Error('出站 IP 不属于所选出站接口');
+  }
   var managed = driver !== 'tun' && !raw.core_path ? process.binaryStatus(driver) : null;
   p.core_path = driver === 'tun' ? '' : coreDrivers.command(driver, raw.core_path || (managed && managed.path));
   p.config_secret = raw.config_secret ? token(raw.config_secret) : 'core_' + key;
@@ -654,6 +696,7 @@ function normalizeTUN(key, raw) {
   p.startup_timeout_seconds = integer(raw.startup_timeout_seconds, 1, 300, 30);
   p.settings = {driver: driver, slot: p.slot, mtu: p.mtu, addresses: p.addresses, upstream_interface: p.upstream_interface,
     core_path: p.core_path, config_secret: p.config_secret, max_restarts: p.max_restarts, startup_timeout_seconds: p.startup_timeout_seconds};
+  if (p.upstream_ip) p.settings.upstream_ip = p.upstream_ip;
   if (driver === 'tun') { p.settings.tun_interface = p.interface; p.settings.tun_alias = p.owner; }
   return p;
 }

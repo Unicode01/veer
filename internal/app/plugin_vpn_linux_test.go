@@ -27,6 +27,10 @@ import (
 // The complete topology runs in a disposable network namespace. No route,
 // firewall rule, sysctl or WireGuard device is installed in the runner's netns.
 func TestWireGuardMeshLinuxIntegration(t *testing.T) {
+	if os.Getenv("VEER_VPN_CAPTURE_SOURCE") != "" {
+		runVPNOuterSourceCapture(t)
+		return
+	}
 	if os.Getenv("VEER_VPN_HEALTH_SERVER") == "1" {
 		t.Fatal(http.ListenAndServe("203.0.113.1:24005", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/slow" {
@@ -158,6 +162,9 @@ func runWireGuardMeshTopology(t *testing.T) {
 	ip("link", "add", "wan", "type", "veth", "peer", "name", "outside")
 	ip("link", "set", "outside", "netns", remote)
 	ip("address", "add", "192.0.2.1/24", "dev", "wan")
+	if driver == "sing_box" {
+		ip("address", "add", "192.0.2.9/24", "dev", "wan")
+	}
 	ip("-6", "address", "add", "fd02::1/64", "dev", "wan", "nodad")
 	ip("link", "set", "wan", "up")
 	ip("-n", remote, "address", "add", "192.0.2.2/24", "dev", "outside")
@@ -166,6 +173,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	ip("route", "add", "default", "via", "192.0.2.2")
 	ip("-6", "route", "add", "default", "via", "fd02::2")
 	ip("-n", remote, "address", "add", "203.0.113.1/32", "dev", "lo")
+	ip("-n", remote, "address", "add", "198.51.100.1/32", "dev", "lo")
 	ip("-n", remote, "address", "add", "192.168.20.1/32", "dev", "lo")
 	ip("-n", remote, "-6", "address", "add", "fd20::1/128", "dev", "lo", "nodad")
 	ip("-n", remote, "route", "add", "192.168.10.0/24", "via", "192.0.2.1")
@@ -379,13 +387,13 @@ func runWireGuardMeshTopology(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
-	probe := func(ns, source string) {
+	probeTarget := func(ns, source, target string) {
 		t.Helper()
 		for _, protocol := range []string{"tcp", "udp"} {
 			observed := filepath.Join(t.TempDir(), "observed")
-			backend, logs := startEgressNATBackendHelperInNamespace(t, remote, protocol, "203.0.113.1:24001", observed)
+			backend, logs := startEgressNATBackendHelperInNamespace(t, remote, protocol, target+":24001", observed)
 			client := exec.Command("ip", "netns", "exec", ns, os.Args[0], "-test.run=^TestEgressNATIntegrationHelperProcess$")
-			client.Env = append(os.Environ(), egressNATHelperEnv+"=1", egressNATHelperRoleEnv+"="+egressNATHelperRoleClient, egressNATHelperProtocolEnv+"="+protocol, egressNATHelperTargetAddrEnv+"=203.0.113.1:24001")
+			client.Env = append(os.Environ(), egressNATHelperEnv+"=1", egressNATHelperRoleEnv+"="+egressNATHelperRoleClient, egressNATHelperProtocolEnv+"="+protocol, egressNATHelperTargetAddrEnv+"="+target+":24001")
 			out, err := client.CombinedOutput()
 			if err != nil {
 				stopDataplanePerfHelper(t, backend)
@@ -401,6 +409,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 			ip("netns", "exec", ns, "ping", "-n", "-c", "2", "-W", "2", "203.0.113.1")
 		}
 	}
+	probe := func(ns, source string) { t.Helper(); probeTarget(ns, source, "203.0.113.1") }
 	// A freshly enabled VPN plugin has no hook_bindings record. Ordinary TC
 	// TCP/UDP must work before any apply/teardown can initialize that resource.
 	var ordinary struct {
@@ -459,6 +468,9 @@ func runWireGuardMeshTopology(t *testing.T) {
 			t.Fatalf("daemon did not discover persistent core: %s %v", body, err)
 		}
 		profile = map[string]any{"driver": driver, "upstream_interface": "wan", "slot": 1}
+		if driver == "sing_box" {
+			profile["upstream_ip"] = "192.0.2.9"
+		}
 		// Exercise the ordinary form with no internal address and an occupied
 		// preferred pool subnet, using the real netlink and route inventories.
 		ip("addr", "add", "10.78.1.254/24", "dev", "lo")
@@ -524,7 +536,47 @@ func runWireGuardMeshTopology(t *testing.T) {
 	}
 	childID := create("port0", wanInterface, natSource)
 	waitNAT(childID, natSource)
-	probe(selected, selectedSource)
+	if driver == "sing_box" {
+		capture := filepath.Join(t.TempDir(), "outer-source")
+		watcher := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$", "-test.timeout=30s")
+		watcher.Env = append(os.Environ(), "VEER_VPN_CAPTURE_SOURCE="+capture)
+		var logs bytes.Buffer
+		watcher.Stdout = &logs
+		watcher.Stderr = &logs
+		if err := watcher.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if watcher.ProcessState == nil {
+				_ = watcher.Process.Kill()
+				_ = watcher.Wait()
+			}
+		})
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(capture + ".ready"); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("source capture not ready")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		probe(selected, selectedSource)
+		if err := watcher.Wait(); err != nil {
+			t.Fatalf("outer source capture: %v: %s", err, logs.String())
+		}
+		for _, protocol := range []string{"tcp", "udp"} {
+			seen, _ := os.ReadFile(capture + "." + protocol)
+			if string(seen) != "192.0.2.9" {
+				t.Fatalf("%s proxy outer source=%q, want selected secondary IP", protocol, seen)
+			}
+		}
+		probeTarget(selected, "192.0.2.9", "198.51.100.1")
+		t.Log("sing-box proxy and DIRECT TCP/UDP use the selected secondary uplink IP")
+	} else {
+		probe(selected, selectedSource)
+	}
 	probe(direct, "192.0.2.1")
 	{
 		observed := filepath.Join(t.TempDir(), "health-source")
@@ -997,13 +1049,74 @@ func runWireGuardMeshTopology(t *testing.T) {
 	probe(direct, "192.0.2.1")
 	action("apply")
 	probe(direct, "192.0.2.1")
-	action("teardown")
+	action("delete_profile")
 	probe(selected, "192.0.2.1")
 	probe(direct, "192.0.2.1")
+	for _, resource := range []string{"profiles", "status"} {
+		var records struct {
+			Records []json.RawMessage `json:"records"`
+		}
+		if err := json.Unmarshal(api("GET", "/api/plugins/vpn_core/resources/"+resource, nil), &records); err != nil || len(records.Records) != 0 {
+			t.Fatalf("VPN %s remain after deletion", resource)
+		}
+	}
+	for _, resource := range []string{"profiles", "sessions", "status"} {
+		var records struct {
+			Records []json.RawMessage `json:"records"`
+		}
+		if err := json.Unmarshal(api("GET", "/api/plugins/wan_core/resources/"+resource, nil), &records); err != nil || len(records.Records) != 0 {
+			t.Fatalf("WAN %s remain after deletion", resource)
+		}
+	}
 	if got := ip("-j", "link", "show"); strings.Contains(got, tunnelInterface) || strings.Contains(got, wanInterface) {
 		t.Fatal("WG WAN links remain: " + got)
 	}
 	t.Log("TCP/UDP/ICMP: selected child used WG SNAT, sibling used ordinary WAN; interface rebuild and teardown/reapply passed")
+}
+
+// Observe the actual encrypted sockets at the peer, independently of generated
+// JSON. Raw sockets mirror incoming traffic without consuming the core's data.
+func runVPNOuterSourceCapture(t *testing.T) {
+	type result struct {
+		protocol, source string
+		err              error
+	}
+	results := make(chan result, 2)
+	for _, protocol := range []string{"tcp", "udp"} {
+		conn, err := net.ListenPacket("ip4:"+protocol, "192.0.2.2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		go func(protocol string, conn net.PacketConn) {
+			_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+			buffer := make([]byte, 65536)
+			for {
+				n, peer, err := conn.ReadFrom(buffer)
+				if err != nil {
+					results <- result{protocol: protocol, err: err}
+					return
+				}
+				if n >= 4 && int(buffer[2])<<8|int(buffer[3]) == 8388 {
+					results <- result{protocol: protocol, source: peer.String()}
+					return
+				}
+			}
+		}(protocol, conn)
+	}
+	path := os.Getenv("VEER_VPN_CAPTURE_SOURCE")
+	if err := os.WriteFile(path+".ready", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		observed := <-results
+		if observed.err != nil {
+			t.Fatal(observed.err)
+		}
+		if err := os.WriteFile(path+"."+observed.protocol, []byte(observed.source), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // Subprocess helper: ordinary TCP sockets exercise GSO/checksums and MSS through the whole path.

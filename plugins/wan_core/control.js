@@ -123,8 +123,14 @@ exports.onAction = function (ctx) {
     return prepareHandoff(preparePlan);
   }
   if (action === 'teardown') {
-    teardownSession(loadPlan(ctx.payload || {}));
+    var teardownPlan = loadPlan(ctx.payload || {});
+    teardownSession(teardownPlan);
     armRepairTimer();
+    if (ctx.payload && ctx.payload.forget === true) {
+      var deleted = previousStatus(teardownPlan.key);
+      if (!deleted || deleted.phase !== 'deleted') throw new Error('WAN cleanup incomplete; records retained for retry');
+      resources.transaction(['profiles', 'sessions', 'status'].map(function (id) { return {op: 'delete', resource: id, key: teardownPlan.key}; }));
+    }
     return;
   }
   throw new Error('unsupported action ' + action);

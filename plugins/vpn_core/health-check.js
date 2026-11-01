@@ -93,7 +93,7 @@ exports.create = function (env) {
     result.latency_ms = Math.max(0, Date.now() - started); result.checked_at = Date.now();
     result.consecutive_failures = result.state === 'unhealthy' ? input.failures + 1 : 0;
     result.last_success_at = result.state === 'healthy' ? result.checked_at : input.last_success_at;
-    kv.set('health_result_' + input.key, {id: payload.id, revision: payload.revision, result: result});
+    if (resources.get('profiles', input.key)) kv.set('health_result_' + input.key, {id: payload.id, revision: payload.revision, result: result});
   }
   function collect(key) {
     var op = operation(key), reply = value('health_result_' + key);
@@ -114,6 +114,11 @@ exports.create = function (env) {
     else timer.clear('vpn_health');
   }
   return {status: status, start: start, run: run, invalidate: invalidate, arm: arm,
+    remove: function (key) {
+      invalidate(key);
+      var op = operation(key); if (op) operations.remove(op.id);
+      ['health_config_', 'health_generation_', 'health_result_'].forEach(function (prefix) { kv.delete(prefix + key); });
+    },
     configure: function (key, raw) { var c = exports.settings(raw); invalidate(key); kv.set('health_config_' + key, c); arm(); return status(key); },
     tick: function () {
       var leases = env.leases();

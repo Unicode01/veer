@@ -13361,6 +13361,15 @@ func TestBundledWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
 			t.Fatalf("wan_core status/default after repeated teardown = %s, missing %s", statusRecord.DataJSON, want)
 		}
 	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"key":"default","forget":true}`)); err != nil {
+		t.Fatalf("forget previously torn down WAN: %v", err)
+	}
+	for _, id := range []string{"profiles", "sessions", "status"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM plugin_records WHERE plugin_id = 'wan_core' AND resource_id = ? AND record_key = 'default'`, id).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("WAN %s remains after forget: count=%d err=%v", id, count, err)
+		}
+	}
 }
 
 func TestBundledWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
@@ -13437,6 +13446,12 @@ func TestBundledWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
 	}
 	if timers := rt.pluginTimerList("wan_core"); len(timers) != 0 {
 		t.Fatalf("wan_core timers after failed physical delete = %+v, want none", timers)
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"key":"default","forget":true}`)); err == nil {
+		t.Fatal("forget must retain records when physical cleanup fails")
+	}
+	if _, err := store.GetPluginRecord(db, "wan_core", "sessions", "default"); err != nil {
+		t.Fatalf("retryable WAN session was removed: %v", err)
 	}
 }
 
