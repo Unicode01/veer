@@ -53,6 +53,14 @@
     const unrelated=driver==='wireguard'?['core_path','config_secret','upstream_interface','tun_interface','tun_alias','max_restarts','startup_timeout_seconds']:
       driver==='tun'?['peers','listen_port','remote_routes','core_path','config_secret','upstream_interface','max_restarts','startup_timeout_seconds']:['peers','listen_port','remote_routes','tun_interface','tun_alias'];
     unrelated.forEach(name=>{delete value[name];});
+    delete value.upstream_ip;
+    if (driver === 'sing_box') {
+      const ip=String(fields.upstream_ip || '').trim();
+      if (ip) {
+        if (ip.includes('/') || !prefix(ip+(ip.includes(':')?'/128':'/32'))) throw new Error('出站 IP 请填写不带前缀的 IPv4 或 IPv6 地址');
+        value.upstream_ip=ip;
+      }
+    }
     if (driver === 'wireguard') {
       value.listen_port=integer(fields.listen_port || '0',0,65535,'监听端口');
       value.remote_routes=list(fields.remote_routes);

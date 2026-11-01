@@ -4,6 +4,26 @@ function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(label + ' must be a JSON object');
   return value;
 }
+function bindSource(config, p) {
+  if (!p.upstream_ip) return;
+  var key = p.upstream_ip.indexOf(':') >= 0 ? 'inet6_bind_address' : 'inet4_bind_address';
+  function bind(value) {
+    if (value.detour) return; // The last outbound in the chain owns the socket.
+    // A source address disables sing-box's default_interface inheritance.
+    // Bind both explicitly to retain the selected physical uplink.
+    value.bind_interface = p.upstream_interface;
+    value[key] = p.upstream_ip;
+  }
+  (config.outbounds || []).forEach(function (value) {
+    object(value, 'Outbound');
+    if (['selector', 'urltest', 'block', 'dns'].indexOf(value.type) < 0) bind(value);
+  });
+  // Bootstrap DNS also creates physical sockets; DNS sent through a proxy
+  // inherits that proxy's binding instead of binding the inner connection.
+  ((config.dns && config.dns.servers) || []).forEach(function (value) {
+    if (['local', 'udp', 'tcp', 'tls', 'quic', 'https', 'h3', 'dhcp', 'mdns'].indexOf(value.type) >= 0) bind(value);
+  });
+}
 exports.command = function (driver, path) {
   var name = driver === 'mihomo' ? 'mihomo' : 'sing-box';
   path = String(path || '/usr/local/bin/' + name);
@@ -38,6 +58,7 @@ exports.build = function (p, text) {
   config.route = config.route ? object(config.route, 'Route configuration') : {};
   config.route.auto_detect_interface = false;
   config.route.default_interface = p.upstream_interface;
+  bindSource(config, p);
   // A core must not create a second privileged network topology behind this WAN.
   if (config.endpoints && config.endpoints.length) throw new Error('Use outbound proxies; managed VPN cores do not accept additional endpoints');
   delete config.experimental;

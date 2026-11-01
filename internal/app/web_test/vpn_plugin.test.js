@@ -14,12 +14,12 @@ function fixture(config = profile(), options = {}) {
   const adapters = {
     'net.link.list': () => options.inventory || [],
     'net.link.get': name => {
-      const l=state.links.find(l=>l.ifname===name);
+      const l=state.links.find(l=>l.ifname===name) || (options.inventory || []).find(l=>l.name===name);
       if(!l) throw new Error('net.link.get: link not found: '+name);
       if(options.legacyNetInfo) return {name,kind:l.linkinfo?.info_kind};
       return {name,ifindex:l.ifindex,alias:l.ifalias||'',kind:l.linkinfo?.info_kind,
         mtu:l.mtu,mac:l.address,up:(l.flags||[]).includes('UP'),peer_ifindex:l.link_index,
-        peer_name:l.link,tun_vnet_hdr:options.vnetHeader===true};
+        peer_name:l.link,addresses:l.addresses || [],tun_vnet_hdr:options.vnetHeader===true};
     },
     'net.link.getOffloads': () => options.offloads || {},
     'process.binaryStatus': id => ({id, versions:[]}),
@@ -32,8 +32,9 @@ function fixture(config = profile(), options = {}) {
     },
     'plugins.services.call': request => {
       state.services.push(clone(request));
-      const p=request.payload, k=p.wan_id;
+      const p=request.payload, k=p.wan_id || p.key;
       if(request.action === 'teardown') {
+        if(p.forget) {delete state.records.sessions[k];delete state.records.status[k];return {};}
         state.links=state.links.filter(l => ![p.local_interface,p.pipeline_interface].includes(l.ifname));
         state.records.sessions[k]={data:p,enabled:false};
         state.records.status[k]={enabled:false,data:{phase:'deleted',local_interface:p.local_interface,pipeline_interface:p.pipeline_interface}};
@@ -242,6 +243,61 @@ function vpnFixture(driver = 'mihomo', extra = {}, options = {}) {
     {...options,state,secrets:{core_default:JSON.stringify(driver === 'mihomo' ? {proxies:[{password:'sensitive-core-password'}],tun:{'auto-route':true}} : {outbounds:[{type:'direct',tag:'direct'}]}),...options.secrets},adapters:{...adapters,...options.adapters}});
   return {...h,procs,specs};
 }
+
+test('sing-box binds the chosen uplink IP for concrete outbounds and direct DNS, preserving chains and virtual groups',()=>{
+  const drivers=require('../../../plugins/vpn_core/core-drivers');
+  const source={outbounds:[{type:'selector',tag:'pick',outbounds:['proxy']},{type:'urltest',tag:'test',outbounds:['proxy']},
+    {type:'shadowsocks',tag:'proxy'},{type:'direct',tag:'direct'},{type:'socks',tag:'chain',detour:'proxy'},{type:'block',tag:'block'}],
+    dns:{servers:[{type:'udp',tag:'bootstrap',server:'192.0.2.53'},{type:'udp',tag:'remote',server:'1.1.1.1',detour:'proxy'},{type:'hosts',tag:'hosts',predefined:{}}]}};
+  for(const ip of ['192.0.2.9','2001:db8::9']) {
+    const p={driver:'sing_box',slot:1,interface:'vtundefault',mtu:1420,upstream_interface:'eth0',upstream_ip:ip};
+    const config=JSON.parse(drivers.build(p,JSON.stringify(source)).config),key=ip.includes(':')?'inet6_bind_address':'inet4_bind_address';
+    for(const v of [config.outbounds[2],config.outbounds[3],config.dns.servers[0]]) {assert.equal(v[key],ip);assert.equal(v.bind_interface,'eth0');}
+    for(const v of [config.outbounds[0],config.outbounds[1],config.outbounds[4],config.outbounds[5],config.dns.servers[1],config.dns.servers[2]]) assert.equal(v[key],undefined);
+  }
+  const h=vpnFixture('sing_box',{upstream_ip:'2001:db8::9'},{inventory:[{name:'eth0',addresses:['2001:db8:0:0:0:0:0:9/64']}]});
+  h.apply();assert.equal(h.host.snapshot().kv.lease_default.settings.upstream_ip,'2001:db8:0:0:0:0:0:9');
+  const original=h.specs[0].config;
+  h.host.state.resources.get('profiles').get('default').data.upstream_ip='192.0.2.88';
+  h.host.reconcile();assert.equal(h.specs.at(-1).config,original,'recovery must ignore later drafts');
+});
+
+test('VPN rejects invalid, non-local and wrong-driver source addresses before disturbing the active WAN',()=>{
+  const h=vpnFixture('sing_box',{}, {inventory:[{name:'eth0',addresses:['192.0.2.1/24']}]});h.apply();
+  const before=clone(h.state),specs=h.specs.length;
+  for(const ip of ['192.0.2.1/24','192.0.2.9','0.0.0.0','node.example','192.00.2.1','fe80::1%eth0']) {
+    h.host.state.resources.get('profiles').get('default').data.upstream_ip=ip;
+    assert.throws(h.apply);assert.deepEqual(h.state,before);assert.equal(h.specs.length,specs);
+  }
+  const m=vpnFixture('mihomo',{upstream_ip:'192.0.2.1'});assert.throws(m.apply,/仅支持 sing-box/);assert.equal(m.state.services.length,0);
+});
+
+for(const driver of ['wireguard','mihomo','sing_box','tun'])test('VPN deletes '+driver+' only after owned network cleanup and retains shared credentials',()=>{
+  const h=driver==='wireguard'?fixture():vpnFixture(driver,driver==='tun'?{tun_interface:'tun0',tun_alias:'external-owner'}:{});
+  if(driver==='tun')h.state.links.push({ifname:'tun0',ifindex:30,ifalias:'external-owner',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
+  h.apply();h.host.state.secrets.set('core_default','shared');h.host.state.secrets.set('psk_default_7',PRIVATE);
+  h.host.state.resources.get('profiles').set('other',{key:'other',data:{driver:'mihomo',slot:2,config_secret:'core_default'},enabled:false});
+  h.host.action('health_settings',{settings:{enabled:true}});
+  assert.equal(h.host.action('delete_profile',{}).phase,'deleted');
+  assert.equal(h.host.state.resources.get('profiles').has('default'),false);assert.equal(h.host.state.resources.get('profiles').has('other'),true);
+  assert.equal(h.host.state.resources.get('status').has('default'),false);assert.equal(h.host.state.secrets.has('private_default'),false);
+  assert.equal(h.host.state.secrets.has('psk_default_7'),false);assert.equal(h.host.state.secrets.get('core_default'),'shared');
+  assert.equal(h.host.state.kv.size,0);assert.equal([...h.maps().values()][0].size,0);
+  assert.equal(h.state.links.length,driver==='tun'?1:0);assert.deepEqual(h.state.records.sessions,{});
+  assert.equal(Object.keys(h.procs||{}).length,0);assert.equal(h.host.action('delete_profile',{}).phase,'deleted','retries are idempotent');
+});
+
+test('VPN deletion handles never-applied drafts, delayed health workers and retryable cleanup failures',()=>{
+  const draft=vpnFixture();draft.host.action('delete_profile',{});assert.equal(draft.state.services.length,0);assert.equal(draft.host.state.resources.get('profiles').size,0);
+  const h=vpnFixture();h.apply();const queued=[];
+  h.host.context.worker={dispatch:(name,handler,payload)=>queued.push(clone(payload))};h.host.action('health_check',{});
+  h.state.records.sessions.vpn_default.data.driver_plugin='foreign';
+  assert.throws(()=>h.host.action('delete_profile',{}),/another driver/);
+  assert.equal(h.host.state.resources.get('profiles').has('default'),true);assert.equal(h.host.state.secrets.has('core_default'),true);
+  h.state.records.sessions.vpn_default.data.driver_plugin='vpn_core';
+  h.host.action('delete_profile',{});h.host.run('onHealthProbe',{payload:queued[0]});
+  assert.equal(h.host.state.operations.size,0);assert.equal(h.host.state.kv.size,0);assert.equal(h.host.state.resources.get('profiles').size,0);
+});
 
 const healthTick = h => h.host.run('onTimer',{timer:{name:'vpn_health'}});
 const healthStatus = h => h.host.action('health_status',{}).items.find(v=>v.key==='default');

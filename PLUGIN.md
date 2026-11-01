@@ -1124,6 +1124,8 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 - `router_wizard`（lab）：组合 PPPoE/WAN/LAN 资源的路由配置向导示例。
 - [vpn_core](plugins/vpn_core/README.md)（lab）：把内核 WireGuard、Mihomo、sing-box 或外部 TUN 接入 WAN Core 与双向 TC 适配器；提供出口表单、WG 配置导入和核心版本管理，LAN/指定下游通过现有出向 NAT 选择出口，不默认安装。
 
+VPN 的“拆除”保留配置，“删除”清理自有出口、配置和未被其他出口引用的凭据；已安装的核心版本保留。sing-box 可在出站接口旁指定该接口上的出站源 IP，使用核心原生绑定。WAN Core 的 `teardown` 动作支持可选 `forget:true`：仅在网络清理完整成功后移除对应 profiles / sessions / status 记录，失败时保留记录供重试。
+
 WAN 自愈仍会检查实际接口、地址、路由、策略规则、邻居和 offload 状态；状态一致时跳过重复写入及不变的恢复租约更新，发现漂移时再补回。已有的匹配策略规则不会先删除再添加。
 
 PPPoE tunnel 自愈按接口名重新解析 ifindex，并核对 veth 配对、接口启用状态和已保存的 WAN MAC。同名 handoff 接口重建可更新 map，同时保留当前 PPP 会话的 MAC 身份和接口准备参数；接口缺失或身份不匹配时停用 map、记录 `last_repair_error`，保留配置以便重试。WAN MAC 变化需要重新拨号；旧 tunnel 记录若没有接口名，或接口变化但缺少恢复参数，也需要重新拨号。IPv4/IPv6 MSS clamp 都对双向 SYN/SYN-ACK 生效；IPv6 支持至多 6 层 Hop-by-Hop、Routing、Destination Options 扩展头，不改写分片、AH 或 ESP 报文。

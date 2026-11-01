@@ -2,6 +2,13 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const M=require('../../../plugins/vpn_core/ui/model.js');
 const key=Buffer.alloc(32,1).toString('base64');
+
+test('only sing-box forms save an optional source IP and reject CIDRs or malformed addresses',()=>{
+  const fields={driver:'sing_box',slot:1,mtu:1420,upstream_interface:'eth0'};
+  for(const ip of ['192.0.2.9','2001:db8::9'])assert.equal(M.profile({...fields,upstream_ip:' '+ip+' '},{},[],'home').upstream_ip,ip);
+  for(const ip of ['192.0.2.9/24','300.1.1.1','node.example','fe80::1%eth0'])assert.throws(()=>M.profile({...fields,upstream_ip:ip},{},[],'home'),/出站 IP/);
+  for(const driver of ['sing_box','mihomo','tun'])assert.equal(M.profile({...fields,driver,tun_interface:'tun0',tun_alias:'owner'}, {upstream_ip:'192.0.2.9'},[],'home').upstream_ip,undefined);
+});
 test('VPN forms allocate distinct slots and preserve existing advanced settings',()=>{
   assert.deepEqual(M.allocation([{key:'vpn1',data:{slot:1}}]),{key:'vpn2',slot:2});
   const fields={driver:'sing_box',slot:'2',mtu:'1420',addresses:'10.78.0.1/32',upstream_interface:'vmbr0'};

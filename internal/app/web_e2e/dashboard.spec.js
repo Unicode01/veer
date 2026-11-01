@@ -188,9 +188,9 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   let installationPolls=0;
   const plugin = {id:'vpn_core', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.6.1', status:'active', enabled:true,
     resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
-    actions:['set_key','set_core_config','core_form','apply','teardown','inspect','core_logs',...coreActions,...healthActions].map(id => ({id})),
+    actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','core_logs',...coreActions,...healthActions].map(id => ({id})),
     ui:{entry:'index.html', page:'vpn', page_title:'VPN', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
-      actions:['set_key','set_core_config','core_form','apply','teardown','inspect','core_logs',...coreActions,...healthActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
+      actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','core_logs',...coreActions,...healthActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
   await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
   await page.route('**/api/plugins/vpn_core/**', async route => {
     const url = new URL(route.request().url());
@@ -210,6 +210,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
     if (endpoint.startsWith('actions/')) {
       const id=endpoint.split('/').pop();
       const payload=route.request().postDataJSON().payload;
+      if(id==='delete_profile') {actions.push({id,payload});delete records[payload.key];delete healthValues[payload.key];return route.fulfill({json:{result:{phase:'deleted'}}});}
       if(healthActions.includes(id)) {
         Object.keys(records).forEach(key=>{healthValues[key] ||= {key,settings:{...healthDefaults},state:'unknown',result:null};});
         if(id==='health_status') {
@@ -289,6 +290,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button', {name:'保存并应用', exact:true}).click();
   await expect.poll(() => actions.map(a => a.id)).toEqual(['set_key','apply']);
   await frame.getByRole('button', {name:'Mihomo', exact:true}).click();
+  await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveCount(0);
   await expect(frame.getByLabel('本机 WireGuard 地址', {exact:true})).toHaveCount(0);
   await expect(frame.getByLabel('WireGuard 私钥', {exact:true})).toHaveCount(0);
   await expect(frame.getByLabel('内部 WAN 地址', {exact:true})).toBeHidden();
@@ -355,6 +357,13 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('内部 WAN 地址',{exact:true})).toBeHidden();
   await expect(frame.getByLabel('Mihomo 配置（JSON）',{exact:true})).toHaveCount(0);
   await frame.getByLabel('实际出站接口',{exact:true}).fill('ppp0');
+  await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveValue('');
+  const interfaceBox=await frame.getByLabel('实际出站接口',{exact:true}).boundingBox(), ipBox=await frame.getByLabel('出站 IP',{exact:true}).boundingBox();
+  if(testInfo.project.name.startsWith('desktop')) expect(Math.abs(interfaceBox.y-ipBox.y)).toBeLessThan(2);
+  await frame.getByLabel('出站 IP',{exact:true}).fill('192.0.2.9/24');
+  await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
+  await expect(frame.locator('.vpn-notice')).toContainText('出站 IP');
+  await frame.getByLabel('出站 IP',{exact:true}).fill('192.0.2.9');
   await expect(frame.getByLabel('sing-box 配置（JSON）',{exact:true})).toBeHidden();
   await expect(frame.getByLabel('直连网段')).toBeHidden();
   await frame.getByLabel('节点分享链接或 Base64').fill('trojan://test-secret@host.example:0');
@@ -374,6 +383,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
   await expect.poll(()=>records.vpn1.data.driver).toBe('sing_box');
   expect(records.vpn1.data.upstream_interface).toBe('ppp0');
+  expect(records.vpn1.data.upstream_ip).toBe('192.0.2.9');
   expect(records.vpn1.data.config_secret).toBe('core_sing_box_vpn1');
   expect(actions.at(-1).payload.format).toBe('links');expect(actions.at(-1).payload.selected).toBe(1);
   expect(actions.at(-1).payload.options.direct_cidrs).toEqual(['10.0.0.0/8']);
@@ -387,6 +397,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button',{name:'收起编辑',exact:true}).click();
   await frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})}).getByRole('button',{name:'编辑',exact:true}).click();
   await expect(frame.getByLabel('使用节点')).toHaveValue('1');
+  await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveValue('192.0.2.9');
   await expect(frame.getByLabel('直连网段')).toBeHidden();
   await frame.getByText('分流与高级配置',{exact:true}).click();
   await expect(frame.getByLabel('直连网段')).toHaveValue('10.0.0.0/8');
@@ -417,9 +428,20 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect.poll(()=>records.vpn1.data.driver).toBe('tun');
   expect(records.vpn1.data.tun_interface).toBe('tun0');
   expect(records.vpn1.data.tun_alias).toBe('external-provider');
-  for(const field of ['addresses','upstream_interface','config_secret','peers']) expect(records.vpn1.data[field]).toBeUndefined();
+  for(const field of ['addresses','upstream_interface','upstream_ip','config_secret','peers']) expect(records.vpn1.data[field]).toBeUndefined();
+  await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveCount(0);
   await expectNoPageOverflow(page);
   await page.screenshot({path:testInfo.outputPath('vpn-external-tun-form.png'),fullPage:true});
+  const card=frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})});
+  await card.getByRole('button',{name:'删除',exact:true}).click();
+  await expect(page.locator('#confirmMessage')).toContainText('共用的核心程序会保留');
+  await page.locator('#confirmCancelBtn').click();
+  expect(records.vpn1).toBeDefined();
+  await card.getByRole('button',{name:'删除',exact:true}).click();
+  await page.locator('#confirmSubmitBtn').click();
+  await expect.poll(()=>records.vpn1).toBeUndefined();
+  await expect(card).toHaveCount(0);await expect(frame.locator('.vpn-editor')).toBeHidden();
+  expect(actions.at(-1)).toEqual({id:'delete_profile',payload:{key:'vpn1'}});
 });
 
 
