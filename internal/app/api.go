@@ -217,7 +217,9 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 	}))
 
 	mux.HandleFunc("/api/host-network", authMiddleware(cfg, handleHostNetwork))
-	mux.HandleFunc("/api/interfaces", authMiddleware(cfg, handleInterfaces))
+	mux.HandleFunc("/api/interfaces", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleInterfacesWithStore(w, r, db)
+	}))
 	mux.HandleFunc("/api/managed-networks", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -794,6 +796,10 @@ func authorizedAPIRequest(cfg *Config, r *http.Request) bool {
 }
 
 func handleInterfaces(w http.ResponseWriter, r *http.Request) {
+	handleInterfacesWithStore(w, r, nil)
+}
+
+func handleInterfacesWithStore(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -803,6 +809,9 @@ func handleInterfaces(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if db != nil && r.URL.Query().Get("include_internal") != "true" {
+		ifaces = userInterfaceInfos(db, ifaces, newPluginControlNetAdmin().LinkGet)
 	}
 	writeJSON(w, http.StatusOK, ifaces)
 }

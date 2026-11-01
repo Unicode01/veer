@@ -203,6 +203,6 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install matching kernel build and network test dependencies
-        run: sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential clang llvm pahole kmod iproute2 util-linux iputils-ping ethtool wireguard-tools iperf3
+        run: sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential clang llvm pahole kmod iproute2 util-linux iputils-ping ethtool wireguard-tools iperf3 curl
       - name: Verify optional module and both plugin paths
         run: sudo env "PATH=$PATH" sh scripts/verify-kernel-module.sh

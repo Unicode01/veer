@@ -141,8 +141,8 @@ sudo env "PATH=$PATH" sh scripts/verify-vpn-cores.sh
 显式安装的 `lab` 插件，不进入默认发布包，也不自动安装 WireGuard。一个 profile 提供一个 WAN，LAN 或下游设备通过现有 Veer 出向 NAT 选择它。
 
 ```text
-下游设备 → Veer TC 出向 NAT → WAN local veth → pipeline veth
-         → WG TC 适配器 → 内核 WireGuard → 主机原有上游 → 对端
+新版 helper：下游 → Veer TC NAT → WAN local egress → 适配 → WG/TUN
+兼容路径：下游 → Veer TC NAT → WAN local veth → pipeline veth → 适配 → WG/TUN
 回包：内核 WG 解密 → TC 补回 Ethernet → WAN local ingress → Veer reply flow → 下游
 ```
 
@@ -150,10 +150,12 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 
 ## 安装
 
-默认使用基础 TC 适配器。可选 [Veer 内核扩展](../../KERNEL.md) 通过 kfunc 保留 GSO/GRO、减少适配开销；插件自动按宿主实际能力选择 `wg_adapter-kfuncs.o`，不需要额外开关。veth 与核心 NAT 路径仍保留，WireGuard 加密仍由内核 WG 完成。
+默认使用基础 TC 适配器和 veth 分段边界。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `wg_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `wg_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
+
+`pipeline.node` / `pipeline.handoff` 只是逻辑定义，本身不创建 Linux 网卡。兼容路径的 pipeline veth 则是真实设备，属于插件内部实现，不出现在普通接口列表或规则出口选择中；诊断资源和 `/api/interfaces?include_internal=true` 仍可查看。隐藏前核验 WAN 所有权、boot ID、接口代际、MAC 与双端关系，不按名称前缀隐藏管理员的设备。
 
 1. Linux 内核需支持 WireGuard，安装 `wireguard-tools iproute2 ethtool`，确认 `/usr/bin/wg`、`/usr/sbin/ip` 可用。主机原有路由和防火墙需允许对端 UDP。
-2. 在 Linux 源码目录运行 `sh plugins/vpn_core/build.sh`，生成 `wg_adapter.o`。将整个插件目录复制到实际 `plugins_dir`，同时安装 `wan_core >=1.5.0 <2.0.0`。
+2. 在 Linux 源码目录运行 `sh plugins/vpn_core/build.sh`，生成基础、helper 与 direct 三份适配对象。将整个插件目录复制到实际 `plugins_dir`，同时安装 `wan_core >=1.5.6 <2.0.0`。
 3. 开启 `plugins_enabled=true` 和 `plugins_dataplane_enabled=true`；保持默认 `plugins_remote_install_enabled=false` 以允许插件 exec。插件需要 Veer 的网络管理权限，不执行 shell 或用户提供的脚本。
 4. 打开 VPN 页面，保存私钥，再保存并应用 profile。空插件和仅保存的草稿不更改网络。
 5. 在 LAN 配置中选择此 WAN，或在出向 NAT 中设置出口接口、源 IPv4 与 `prepared_l2` 重定向模式。不要填写内核 `vwg*` 接口作为核心 NAT 出口。

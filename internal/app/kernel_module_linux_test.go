@@ -162,4 +162,7 @@ func TestOptionalKernelModuleActualAPI(t *testing.T) {
 	if status := optionalKernelModuleFeatureStatus(); !status.Available {
 		t.Fatalf("capability unavailable: %+v", status)
 	}
+	if status := optionalKernelModuleIngressFeatureStatus(); !status.Available {
+		t.Fatalf("ingress capability unavailable: %+v", status)
+	}
 }

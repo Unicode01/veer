@@ -49,7 +49,7 @@ go build -tags veer_kfuncs -o veer .
 
 ## 生命周期与插件契约
 
-Veer 在启动插件之前加载并探测模块。宿主只有在 probe 实际调用成功后才发布 `dataplane.kfuncs.handoff.v1`；插件通过 `plugin.host().available_features` 决定加载基础或 `-kfuncs.o` 对象。增强文件缺失时选择基础对象。两个插件的 build.sh 都生成这两份对象，构建插件对象本身不需要模块 headers。
+Veer 在启动插件之前加载并探测模块。宿主只有在 probe 实际调用成功后才发布 `dataplane.kfuncs.handoff.v1`；另行调用接收注入 probe 成功后发布 `dataplane.kfuncs.handoff_ingress.v1`，旧模块不会误报。插件通过 `plugin.host().available_features` 选择对象。VPN 有基础、`-kfuncs.o` 和 `-direct.o` 三份对象；只有新能力与 direct 对象均可用才省去 veth peer。构建插件对象本身不需要模块 headers。
 
 能力是运行中模块实例的结果，不等同于编译标签。模块出现、移除或重新加载后，能力查询按实例重新探测。已经附加的程序不因一次查询切换对象，需正常重载/重启以协调对象和接口设置。
 
@@ -61,7 +61,7 @@ PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，
 
 ## kfunc 开发边界
 
-公共声明在 [plugins/include/veer_kfuncs.h](plugins/include/veer_kfuncs.h)：`veer_kfuncs_abi_v1()` 与 `veer_skb_handoff_v1()`。handoff 配置为 28 字节，仅含标量，当前只注册给 `BPF_PROG_TYPE_SCHED_CLS`。
+公共声明在 [plugins/include/veer_kfuncs.h](plugins/include/veer_kfuncs.h)：`veer_kfuncs_abi_v1()`、`veer_skb_handoff_v1()`，以及可选的 `veer_skb_handoff_ingress_v1()`。后者仅接受 `VEER_L3_TO_ETH`，补 Ethernet 后送入目标设备接收路径，执行目标 TC ingress；原函数发送语义与 ABI 保持不变。handoff 配置为 28 字节，仅含标量，当前只注册给 `BPF_PROG_TYPE_SCHED_CLS`。
 
 handoff 不修改或释放调用方的 skb；所有修改都作用于独立 clone。调用后 **BPF 必须始终返回 `TC_ACT_SHOT`**，包括失败路径，避免原包重复发送或回落宿主路由。目标只能是同 netns 的有效、启用、类型匹配且不同于源设备的接口。模块校验参数、PPPoE 会话/长度，限制发送递归，并处理必要的 checksum/MSS。调用权限仍受宿主插件加载和 BPF 特权边界约束；这不是向不可信插件开放任意内核执行。
 

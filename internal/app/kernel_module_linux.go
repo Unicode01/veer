@@ -23,11 +23,18 @@ import (
 //go:embed ebpf/veer-kfuncs-probe-bpf.o
 var kernelModuleProbeBytes []byte
 
+//go:embed ebpf/veer-kfuncs-ingress-probe-bpf.o
+var kernelModuleIngressProbeBytes []byte
+
 const optionalKernelModuleName = "veer_kfuncs"
 const optionalKernelModuleCompiled = true
 
 func probeOptionalKernelModule() error {
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(kernelModuleProbeBytes))
+	return probeKernelModuleHandoff(kernelModuleProbeBytes)
+}
+
+func probeKernelModuleHandoff(object []byte) error {
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(object))
 	if err != nil {
 		return err
 	}
@@ -51,6 +58,7 @@ var optionalKernelModuleProbe struct {
 	identity kernelModuleIdentity
 	cached   bool
 	status   PluginHostFeatureStatus
+	ingress  PluginHostFeatureStatus
 }
 
 func optionalKernelModuleFeatureStatus() PluginHostFeatureStatus {
@@ -68,8 +76,23 @@ func optionalKernelModuleFeatureStatus() PluginHostFeatureStatus {
 		if err != nil {
 			optionalKernelModuleProbe.status.Reason = "optional kernel module unavailable: " + err.Error()
 		}
+		optionalKernelModuleProbe.ingress = optionalKernelModuleProbe.status
+		if err == nil {
+			if err := probeKernelModuleHandoff(kernelModuleIngressProbeBytes); err != nil {
+				optionalKernelModuleProbe.ingress = PluginHostFeatureStatus{Reason: "optional kernel ingress handoff unavailable: " + err.Error()}
+			}
+		}
 	}
 	return optionalKernelModuleProbe.status
+}
+
+func optionalKernelModuleIngressFeatureStatus() PluginHostFeatureStatus {
+	if status := optionalKernelModuleFeatureStatus(); !status.Available {
+		return status
+	}
+	optionalKernelModuleProbe.Lock()
+	defer optionalKernelModuleProbe.Unlock()
+	return optionalKernelModuleProbe.ingress
 }
 
 type kernelModuleIdentity struct {

@@ -1,9 +1,13 @@
-var KFUNCS = false, TUNNEL_OBJECT_PATH = 'wg_adapter.o';
+var KFUNCS = false, DIRECT = false, TUNNEL_OBJECT_PATH = 'wg_adapter.o';
 if (typeof plugin.host === 'function') {
   var host = plugin.host();
   if ((host.available_features || []).indexOf('dataplane.kfuncs.handoff.v1') >= 0) {
     try { crypto.sha256File('wg_adapter-kfuncs.o'); KFUNCS = true; TUNNEL_OBJECT_PATH = 'wg_adapter-kfuncs.o'; }
     catch (e) { /* Packages built before this capability retain the base path. */ }
+  }
+  if (KFUNCS && (host.available_features || []).indexOf('dataplane.kfuncs.handoff_ingress.v1') >= 0) {
+    try { crypto.sha256File('wg_adapter-direct.o'); DIRECT = true; TUNNEL_OBJECT_PATH = 'wg_adapter-direct.o'; }
+    catch (e) { /* Keep the veth boundary when the optional object is absent. */ }
   }
 }
 // WAN keys and WG netdev names stay stable across the plugin ID migration.
@@ -16,13 +20,15 @@ var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing 
 var OBJECT = 'wg_adapter', MAP = 'wg_links';
 var changing = false;
 plugin.capabilities(['vpn', 'wireguard', 'mihomo', 'sing_box', 'wan', 'tc_adapter', 'control']);
-pipeline.node({id: 'vpn', description: 'VPN core attached to a WAN Core veth boundary.'});
+pipeline.node({id: 'vpn', description: 'VPN core attached to a WAN Core boundary.'});
 ebpf.loadObject({id: OBJECT, path: TUNNEL_OBJECT_PATH, sha256: crypto.sha256File(TUNNEL_OBJECT_PATH),
   programs: [{id: 'tc_adapter', section: 'tc/veer/pre_forward', type: 'tc'}]});
 pipeline.attach({id: 'wg-links', direction: 'forward', attach: 'ingress', priority: 20,
   program: 'wg_adapter:tc_adapter', mode: 'rewrite', binding_required: true});
+pipeline.attach({id: 'wg-direct-out', direction: 'forward', attach: 'egress', priority: 20,
+  program: 'wg_adapter:tc_adapter', mode: 'rewrite', binding_required: true});
 plugin.resource({id: 'hook_bindings', methods: ['list', 'get'], control_methods: ['list', 'get', 'create', 'update', 'delete'],
-  runtime_update: 'plugin_reconcile', max_records: 1, max_record_bytes: 4096});
+  runtime_update: 'plugin_reconcile', max_records: 2, max_record_bytes: 4096});
 plugin.resource({id: 'profiles', schema_version: 3, methods: ['list', 'get', 'create', 'update'], control_methods: ['list', 'get', 'create', 'update', 'delete'], runtime_update: 'manual', max_records: 8, max_record_bytes: 16384,
   schema: {type: 'object', additionalProperties: false, properties: {
     driver: {type: 'string', enum: ['wireguard', 'mihomo', 'sing_box', 'tun']},
@@ -196,6 +202,7 @@ function normalize(key, raw) {
     mtu: integer(raw.mtu, 1280, 9000, 1420), listen_port: integer(raw.listen_port, 0, 65535, 0)};
   p.owner = 'veer:vpn_core:' + key;
   p.wan_id = 'wg_' + key; p.local = 'veerwg' + p.slot; p.pipeline = 'veerwgp' + p.slot;
+  p.handoff_mode = DIRECT ? 'direct' : 'segmented_veth';
   p.addresses = list(raw.addresses, 1, 8).map(function (v) { return prefix(v, true).text; });
   if (!p.addresses.some(function (v) { return prefix(v).family === '4'; })) throw new Error('A local IPv4 tunnel address is required for Veer Egress NAT');
   p.peers = list(raw.peers, 1, 8).map(function (peer) {
@@ -270,7 +277,7 @@ function cleanWANState(p) {
   if (!status || status.enabled !== false || !session || session.enabled !== false) return false;
   var data = status.data || {}, owner = session.data || {};
   if (owner.driver_plugin !== 'vpn_core' || owner.profile_key !== p.key || owner.wan_id !== p.wan_id ||
-      owner.real_interface !== p.interface || data.local_interface !== p.local || data.pipeline_interface !== p.pipeline ||
+      owner.real_interface !== p.interface || data.local_interface !== p.local || !knownWANPipeline(p, data.pipeline_interface) ||
       (data.cleanup_errors || []).length) return false;
   if (data.phase === 'deleted') return true;
   // Older WAN Core versions replaced the teardown journal with "disabled"
@@ -284,15 +291,24 @@ function assertWANOwner(p) {
   ['sessions', 'status'].forEach(function (resource) {
     var r = wanRecord(resource, p);
     if (resource === 'status' && r && r.data && r.data.phase === 'deleted' && session && session.enabled === false &&
-        session.data.driver_plugin === 'vpn_core' && r.data.local_interface === p.local && r.data.pipeline_interface === p.pipeline) return;
+        session.data.driver_plugin === 'vpn_core' && session.data.profile_key === p.key && session.data.real_interface === p.interface &&
+        r.data.local_interface === p.local && knownWANPipeline(p, r.data.pipeline_interface)) return;
     if (r && r.data && r.data.driver_plugin !== 'vpn_core') throw new Error('WAN key is already owned by another driver');
   });
 }
 function wanCall(action, payload) { return plugins.services.call({service: 'wan.adapter', version: '^1.0.0', provider: 'wan_core', action: action, payload: payload}); }
-function boundaryLinks(p) {
+function wanPipeline(p) { return p.handoff_mode === 'direct' ? '' : p.pipeline; }
+function knownWANPipeline(p, name) { return !name || name === p.pipeline; }
+function boundaryLinks(p, previousMode) {
   var r = wanRecord('status', p), data = r && r.data;
-  if (!data || data.driver_plugin !== 'vpn_core') return null;
-  var local = link(p.local), peer = link(p.pipeline);
+  if (!data || data.driver_plugin !== 'vpn_core' || data.local_interface !== p.local) return null;
+  var name = data.pipeline_interface || '';
+  if (previousMode ? (name && name !== p.pipeline) : name !== wanPipeline(p)) return null;
+  var local = link(p.local), peer = name ? link(name) : local;
+  if (!name) {
+    if (!local || !local.linkinfo || local.linkinfo.info_kind !== 'dummy' || data.local_ifindex !== local.ifindex) return null;
+    return {local: local, peer: local, direct: true};
+  }
   if (!local || !peer || !local.linkinfo || !peer.linkinfo || local.linkinfo.info_kind !== 'veth' || peer.linkinfo.info_kind !== 'veth') return null;
   function linked(a, b) { return a.link_index === b.ifindex || a.link === b.ifname; }
   if (!linked(local, peer) || !linked(peer, local) || data.local_ifindex !== local.ifindex || data.pipeline_ifindex !== peer.ifindex) return null;
@@ -305,19 +321,24 @@ function wanPayload(p, usable) {
   var gso = (KFUNCS && (!p.driver || p.driver === 'wireguard')) || (usable && p.tun_gso === true);
   return {wan_id: p.wan_id, key: p.wan_id, profile_key: p.key, driver: p.driver || 'wireguard', driver_plugin: 'vpn_core',
     state: usable ? 'up' : 'prepared', usable: usable, real_interface: p.interface, wan_interface: p.local,
-    local_interface: p.local, pipeline_interface: p.pipeline, handoff_mode: 'segmented_veth', mtu: p.mtu,
+    local_interface: p.local, pipeline_interface: wanPipeline(p), handoff_mode: p.handoff_mode || 'segmented_veth', mtu: p.mtu,
     ipv4: p.addresses.filter(function (v) { return prefix(v).family === '4'; })[0].split('/')[0],
     addresses: p.addresses, routes: p.remote_routes.map(function (dst) { return {dst: dst, dev: p.local}; }),
     install_default_route: false, install_default_route_v6: false, egress_nat_redirect_mode: 'prepared_l2',
     interface_preparation: {local_gso: {max_size: gso ? 65536 : p.mtu, max_segs: gso ? 65535 : 1}, local_offloads: {sg: gso, tso: gso, gso: gso}, pipeline_offloads: {gro: gso, lro: false}}};
 }
 function bindings(exclude) {
-  var names = [], leases = allLeases();
+  var names = [], outgoing = [], leases = allLeases();
   Object.keys(leases).sort().forEach(function (key) {
     var lease = leases[key];
-    if (key !== exclude && lease.active && !isLegacy(lease)) names = names.concat([lease.plan.interface, lease.plan.pipeline]);
+    if (key !== exclude && lease.active && !isLegacy(lease)) {
+      names.push(lease.plan.interface);
+      if (lease.plan.handoff_mode === 'direct') outgoing.push(lease.plan.local);
+      else names.push(lease.plan.pipeline);
+    }
   });
   resources.set('hook_bindings', 'wg-links', {hook_id: 'wg-links', interfaces: names}, names.length > 0, true);
+  resources.set('hook_bindings', 'wg-direct-out', {hook_id: 'wg-direct-out', interfaces: outgoing}, outgoing.length > 0, true);
 }
 function u32(n) { var s = ''; for (var i = 0; i < 4; i++) s += ('0' + ((n >>> (i * 8)) & 255).toString(16)).slice(-2); return s; }
 function macHex(s) { if (!/^([a-fA-F0-9]{2}:){5}[a-fA-F0-9]{2}$/.test(s || '')) throw new Error('Invalid WAN boundary MAC'); return s.replace(/:/g, '').toLowerCase(); }
@@ -331,7 +352,7 @@ function clearMaps(lease) {
 function mapEntries(p, wg, boundary) {
   return [
     {op: 'put', object: OBJECT, map: MAP, key: u32(boundary.peer.ifindex), value: u32(1) + u32(wg.ifindex) + '000000000000000000000000' + u32(p.mtu)},
-    {op: 'put', object: OBJECT, map: MAP, key: u32(wg.ifindex), value: u32(2) + u32(boundary.peer.ifindex) + macHex(boundary.peer.address) + macHex(boundary.local.address) + u32(p.mtu)}
+    {op: 'put', object: OBJECT, map: MAP, key: u32(wg.ifindex), value: u32(boundary.direct ? 3 : 2) + u32(boundary.peer.ifindex) + macHex(boundary.peer.address) + macHex(boundary.local.address) + u32(p.mtu)}
   ];
 }
 function repairMaps(p, wg, boundary) {
@@ -354,9 +375,9 @@ function isLegacy(lease) { return !!(lease && lease.plan && lease.plan.bindings)
 function apply(key, raw, explicit) {
   if (explicit) health.invalidate(key);
   var before = changing; changing = true;
-  try { return raw && raw.driver && raw.driver !== 'wireguard' ? applyTUNProfile(key, raw, explicit === true) : applyProfile(key, raw); } finally { changing = before; }
+  try { return raw && raw.driver && raw.driver !== 'wireguard' ? applyTUNProfile(key, raw, explicit === true) : applyProfile(key, raw, explicit === true); } finally { changing = before; }
 }
-function applyProfile(key, raw) {
+function applyProfile(key, raw, explicit) {
   var p = normalize(key, raw), old = allLeases()[key];
   if (isLegacy(old)) throw new Error('Teardown the legacy routing profile before creating a WireGuard WAN');
   if (old && (old.plan.driver && old.plan.driver !== 'wireguard')) throw new Error('Teardown before changing the driver');
@@ -368,10 +389,18 @@ function applyProfile(key, raw) {
   var previousWAN = wanRecord('status', p), previousSession = wanRecord('sessions', p);
   var cleanWAN = cleanWANState(p);
   if (!old && (wg || link(p.local) || link(p.pipeline) || ((previousWAN || previousSession) && !cleanWAN))) throw new Error('Recorded ownership is missing; inspect leftover WAN resources before retrying');
+  var stable = boundaryLinks(p);
+  if (!explicit && old && !old.pending && wg && stable && wg.ifindex === old.wg_ifindex &&
+      wg.mtu === p.mtu && (wg.flags || []).indexOf('UP') >= 0 && stable.local.ifindex === old.local_ifindex &&
+      stable.peer.ifindex === old.pipeline_ifindex) {
+    bindings(); repairMaps(p, wg, stable);
+    return resources.get('status', key).data;
+  }
   kv.set('lease_' + key, {active: true, pending: true, settings: settings(p), plan: p,
     created_ifindex: old && old.created_ifindex, wg_ifindex: old && old.wg_ifindex, local_ifindex: old && old.local_ifindex, pipeline_ifindex: old && old.pipeline_ifindex});
   try {
-    if ((link(p.local) || link(p.pipeline)) && !boundaryLinks(p)) throw new Error('WAN boundary is not ready or no longer owned; inspect replaced interfaces');
+    if ((link(p.local) || link(p.pipeline)) && !boundaryLinks(p, true)) throw new Error('WAN boundary is not ready or no longer owned; inspect replaced interfaces');
+    suspendTUN(p, old);
     wanCall('prepare_handoff', wanPayload(p, false));
     if (!wg) {
       ip(['link', 'add', 'name', p.interface, 'alias', p.owner, 'type', 'wireguard']);
@@ -383,16 +412,16 @@ function applyProfile(key, raw) {
     ip(['link', 'set', 'dev', p.interface, 'alias', p.owner]);
     command(WG, ['syncconf', p.interface, '/dev/stdin'], config);
     ip(['link', 'set', 'dev', p.interface, 'mtu', String(p.mtu), 'up']);
-    plugins.resources.set('wan_core', 'sessions', p.wan_id, wanPayload(p, true), true, true);
     wg = ownedLink(p);
     var boundary = boundaryLinks(p);
     if (!wg || !boundary) throw new Error('WAN boundary is not ready');
     bindings();
     installMaps(p, wg, boundary, old);
+    plugins.resources.set('wan_core', 'sessions', p.wan_id, wanPayload(p, true), true, true);
     kv.set('lease_' + key, {active: true, settings: settings(p), plan: p, wg_ifindex: wg.ifindex,
       local_ifindex: boundary.local.ifindex, pipeline_ifindex: boundary.peer.ifindex});
     var result = {phase: 'applied', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
-      pipeline_interface: p.pipeline, egress_nat_interface: p.local, egress_nat_source_ip: wanPayload(p, true).ipv4,
+      pipeline_interface: wanPipeline(p), handoff_mode: p.handoff_mode, egress_nat_interface: p.local, egress_nat_source_ip: wanPayload(p, true).ipv4,
       egress_nat_redirect_mode: 'prepared_l2', tc_ready: true, mtu: p.mtu, dataplane: KFUNCS ? 'kfuncs' : 'bpf'};
     resources.set('status', key, result, true); armRepair(); return result;
   } catch (e) {
@@ -683,6 +712,7 @@ function normalizeTUN(key, raw) {
   p.owner = driver === 'tun' ? String(raw.tun_alias || '') : 'veer:vpn_core:' + key;
   if (!p.owner || p.owner.length > 128 || /[\r\n\0]/.test(p.owner)) throw new Error('An external TUN requires an explicit tun_alias ownership marker');
   p.wan_id = 'vpn_' + key; p.local = 'veervpn' + p.slot; p.pipeline = 'veervpnp' + p.slot;
+  p.handoff_mode = DIRECT ? 'direct' : 'segmented_veth';
   if ([p.local, p.pipeline].indexOf(p.interface) >= 0) throw new Error('TUN and WAN boundaries must differ');
   p.addresses = list(raw.addresses || [], 0, 8).map(function (v) {
     var c = prefix(v, true);
@@ -880,7 +910,7 @@ function applyTUNProfile(key, raw, explicit) {
     lease.pipeline_ifindex = boundary.peer.ifindex; lease.process_started_at = proc && proc.started_at;
     kv.set('lease_' + key, lease);
     var result = {phase: 'applied', driver: p.driver, interface: p.interface, wan_id: p.wan_id,
-      local_interface: p.local, pipeline_interface: p.pipeline, egress_nat_interface: p.local, wan_addresses: p.addresses,
+      local_interface: p.local, pipeline_interface: wanPipeline(p), handoff_mode: p.handoff_mode, egress_nat_interface: p.local, wan_addresses: p.addresses,
       egress_nat_source_ip: wanPayload(p, true).ipv4, egress_nat_redirect_mode: 'prepared_l2', tc_ready: true,
       process: proc, dataplane: KFUNCS ? 'kfuncs' : 'bpf', tun_gso: p.tun_gso};
     resources.set('status', key, result, true); armRepair(); return result;

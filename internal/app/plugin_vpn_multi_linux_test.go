@@ -186,6 +186,12 @@ func runVPNMultiTopology(t *testing.T) {
 	for i, exit := range exits {
 		exit.ns = fmt.Sprintf("vmc%d-%d", i, os.Getpid())
 	}
+	if os.Getenv("VEER_VPN_EXPECT_DIRECT") == "1" {
+		for _, exit := range exits[:3] {
+			// The map's forward key is the local boundary in direct mode.
+			exit.pipeline = exit.local
+		}
+	}
 	for _, ns := range []string{remote, exits[0].ns, exits[1].ns, exits[2].ns, exits[3].ns} {
 		ip("netns", "add", ns)
 		ns := ns
@@ -416,6 +422,32 @@ func runVPNMultiTopology(t *testing.T) {
 		api("POST", "/api/plugins/vpn_core/resources/profiles", map[string]any{"key": exit.key, "data": profile, "enabled": true}, false)
 		action(exit, "apply", false)
 		waitApplied(exit)
+		boundary, err := newPluginControlNetAdmin().LinkGet(exit.local)
+		wantKind := "veth"
+		if os.Getenv("VEER_VPN_EXPECT_DIRECT") == "1" {
+			wantKind = "dummy"
+		}
+		if err != nil || boundary.Kind != wantKind {
+			t.Fatalf("%s boundary: %+v, want %s: %v", exit.key, boundary, wantKind, err)
+		}
+	}
+	var visible []InterfaceInfo
+	if err := json.Unmarshal(api("GET", "/api/interfaces", nil, false), &visible); err != nil {
+		t.Fatal(err)
+	}
+	for _, exit := range exits[:3] {
+		localVisible := false
+		for _, info := range visible {
+			if info.Name == exit.local {
+				localVisible = true
+			}
+			if exit.pipeline != exit.local && info.Name == exit.pipeline {
+				t.Fatalf("internal pipeline exposed in user interface list: %s", info.Name)
+			}
+		}
+		if !localVisible {
+			t.Fatalf("user WAN is hidden: %s", exit.local)
+		}
 	}
 	for i, exit := range exits {
 		payload := map[string]any{"parent_interface": "br-lan", "out_interface": exit.local, "out_source_ip": exit.natSource, "protocol": "tcp+udp+icmp"}
