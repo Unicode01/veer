@@ -1232,7 +1232,9 @@ func isAddrTriggeredKernelFallbackPlan(plan ruleDataplanePlan) bool {
 	// Source-address checks run during both preflight and application. Preflight
 	// cannot mark a rule eligible while its selected source is absent, but the
 	// later address event must still retry it under the configured engine policy.
-	return plan.PreferredEngine != ruleEngineUserspace && plan.EffectiveEngine != ruleEngineKernel && isAddrTriggeredKernelRefreshReason(plan.FallbackReason)
+	// A pinned kernel plan retains EffectiveEngine=kernel even on preflight
+	// failure, so the recorded failure determines whether recovery is needed.
+	return plan.PreferredEngine != ruleEngineUserspace && isAddrTriggeredKernelRefreshReason(plan.FallbackReason)
 }
 
 func isKernelIncrementalRetryCooldownPlan(plan ruleDataplanePlan) bool {
