@@ -454,6 +454,9 @@ func runPluginNamespaceTunTapCrashRecoveryHelper() error {
 
 func TestPluginNetTransactionCrashRecoveryLinuxIntegration(t *testing.T) {
 	requirePluginLinuxIntegration(t)
+	if runPluginIntegrationInIsolatedNetNS(t) {
+		return
+	}
 	interfaceName := pluginIntegrationLinkName("fwcr")
 	neighborInterface := pluginIntegrationLinkName("fwcn")
 	defer deletePluginIntegrationLinkQuietly(t, interfaceName)
@@ -1384,9 +1387,9 @@ func requirePluginLinuxIntegration(t *testing.T) {
 	}
 }
 
-// Tests which depend on exact interface identity or a policy-only traffic path
-// need their own namespace. Host network managers and firewall rules are outside
-// the plugin runtime and must not mutate these fixtures during the assertions.
+// Tests which depend on exact interface identity, network state snapshots, or a
+// policy-only traffic path need their own namespace. Host network managers and
+// firewall rules must not mutate these fixtures during the assertions.
 func runPluginIntegrationInIsolatedNetNS(t *testing.T) bool {
 	t.Helper()
 	const helperEnv = "VEER_PLUGIN_ISOLATED_NETNS_HELPER"
