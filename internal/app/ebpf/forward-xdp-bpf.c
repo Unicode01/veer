@@ -11,6 +11,7 @@
 #include "include/bpf_endian.h"
 #include "include/bpf_helpers.h"
 #include "include/forward_addr_helpers.h"
+#include "include/forward_flow_time.h"
 
 #define ICMP_ECHOREPLY 0
 #define ICMP_ECHO 8
@@ -2766,7 +2767,7 @@ static __always_inline int handle_transparent_reply(struct xdp_md *xdp, const st
 	*flow_value = *flow;
 	if (ctx->proto == IPPROTO_UDP) {
 		now = bpf_ktime_get_ns();
-		if (flow_value->last_seen_ns == 0 || now < flow_value->last_seen_ns || (now - flow_value->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
+		if (forward_flow_idle_expired(now, flow_value->last_seen_ns, FORWARD_UDP_FLOW_IDLE_NS)) {
 			if (delete_flow_v4_session_in_bank(flow_bank, flow_key, flow_value->session_id) == 0) {
 				if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
 					drop_rule_udp_nat(flow_value->rule_id);
@@ -2903,7 +2904,7 @@ static __always_inline int handle_transparent_forward(struct xdp_md *xdp, __u32 
 		flow_bank = FORWARD_XDP_FLOW_BANK_ACTIVE;
 	} else if (ctx->proto == IPPROTO_UDP) {
 		now = bpf_ktime_get_ns();
-		if (flow->last_seen_ns == 0 || now < flow->last_seen_ns || (now - flow->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
+		if (forward_flow_idle_expired(now, flow->last_seen_ns, FORWARD_UDP_FLOW_IDLE_NS)) {
 			if (delete_flow_v4_session_in_bank(flow_bank, &flow_key, flow->session_id) < 0)
 				return XDP_DROP;
 			if ((flow->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
@@ -3006,7 +3007,7 @@ static __always_inline int handle_fullnat_reply(struct xdp_md *xdp, const struct
 	xdp_diag_v4_fullnat_reply_enter();
 	*reply_value = *flow;
 	if (is_datagram_proto(ctx->proto)) {
-		if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, reply_value->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			delete_fullnat_state(reply_key, reply_value, ctx->proto, flow_bank);
 			return XDP_PASS;
 		}
@@ -3673,7 +3674,7 @@ static __always_inline int handle_fullnat_reply_v6(struct xdp_md *xdp, const str
 		return XDP_DROP;
 	*reply_value = *flow;
 	if (ctx->proto == IPPROTO_UDP) {
-		if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) > FORWARD_UDP_FLOW_IDLE_NS) {
+		if (forward_flow_idle_expired(now, reply_value->last_seen_ns, FORWARD_UDP_FLOW_IDLE_NS)) {
 			delete_fullnat_state_v6(reply_key, reply_value, ctx->proto, flow_bank);
 			return XDP_PASS;
 		}
