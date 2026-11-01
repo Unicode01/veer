@@ -751,6 +751,9 @@ func (linuxPluginControlNetAdmin) AddrReplace(req pluginControlNetAddrRequest) e
 	if err != nil {
 		return err
 	}
+	if req.expectedIfIndex > 0 && link.Attrs().Index != req.expectedIfIndex {
+		return fmt.Errorf("address interface %s was recreated", req.Interface)
+	}
 	addr, err := netlink.ParseAddr(strings.TrimSpace(req.CIDR))
 	if err != nil {
 		return err
@@ -777,6 +780,9 @@ func (linuxPluginControlNetAdmin) AddrDelete(req pluginControlNetAddrRequest) er
 	link, err := pluginControlNetLinkByName(strings.TrimSpace(req.Interface))
 	if err != nil {
 		return err
+	}
+	if req.expectedIfIndex > 0 && link.Attrs().Index != req.expectedIfIndex {
+		return fmt.Errorf("address interface %s was recreated", req.Interface)
 	}
 	addr, err := netlink.ParseAddr(strings.TrimSpace(req.CIDR))
 	if err != nil {
@@ -1256,6 +1262,9 @@ func pluginControlNetNeighTarget(req pluginControlNetNeighRequest) (netlink.Link
 	if err != nil {
 		return nil, nil, 0, err
 	}
+	if req.expectedIfIndex > 0 && link.Attrs().Index != req.expectedIfIndex {
+		return nil, nil, 0, fmt.Errorf("neighbor interface %s changed during transaction", req.Interface)
+	}
 	ip := net.ParseIP(strings.TrimSpace(req.IP))
 	if ip == nil {
 		return nil, nil, 0, fmt.Errorf("invalid neighbor ip")
@@ -1582,6 +1591,9 @@ func pluginControlNetRoute(req pluginControlNetRouteRequest) (*netlink.Route, er
 			return nil, fmt.Errorf("dev %q: %w", req.Dev, err)
 		}
 		linkIndex = link.Attrs().Index
+		if expected := req.expectedLinkIndices[req.Dev]; expected > 0 && linkIndex != expected {
+			return nil, fmt.Errorf("route interface %s changed during transaction", req.Dev)
+		}
 	}
 	var gw net.IP
 	if strings.TrimSpace(req.Gateway) != "" {
@@ -1608,6 +1620,9 @@ func pluginControlNetRoute(req pluginControlNetRouteRequest) (*netlink.Route, er
 			return nil, fmt.Errorf("nexthop dev %q: %w", nexthop.Dev, err)
 		}
 		info := &netlink.NexthopInfo{LinkIndex: link.Attrs().Index, Hops: nexthop.Weight - 1}
+		if expected := req.expectedLinkIndices[nexthop.Dev]; expected > 0 && info.LinkIndex != expected {
+			return nil, fmt.Errorf("route interface %s changed during transaction", nexthop.Dev)
+		}
 		if nexthop.Gateway != "" {
 			info.Gw = net.ParseIP(nexthop.Gateway)
 		}

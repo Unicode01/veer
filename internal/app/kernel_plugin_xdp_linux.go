@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -210,22 +211,18 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 	programID := kernelProgramID(pieces.dispatcher)
 	newAttachments, addedAttachments, err := rt.reconcileAttachmentsLocked(desiredIfIndexes, pieces.dispatcher, programID)
 	if err != nil {
-		detachOwnedXDPPluginAttachments(addedAttachments, programID)
+		detachErr := rt.rollbackAddedAttachmentsLocked(addedAttachments, programID, dispatcher, createdDispatcher)
+		err = errors.Join(err, detachErr)
 		cleanupKernelPluginPipelineCollections(loaded)
-		if createdDispatcher {
-			dispatcher.Close()
-		}
 		rt.snapshot = rt.failureSnapshot(catalog, desired, states, err)
 		return clonePluginRuntimeSnapshot(rt.snapshot)
 	}
 
 	bank, err := installKernelXDPPluginPrograms(pieces, programs)
 	if err != nil {
-		detachOwnedXDPPluginAttachments(addedAttachments, programID)
+		detachErr := rt.rollbackAddedAttachmentsLocked(addedAttachments, programID, dispatcher, createdDispatcher)
+		err = errors.Join(err, detachErr)
 		cleanupKernelPluginPipelineCollections(loaded)
-		if createdDispatcher {
-			dispatcher.Close()
-		}
 		rt.snapshot = rt.failureSnapshot(catalog, desired, states, err)
 		return clonePluginRuntimeSnapshot(rt.snapshot)
 	}
@@ -265,8 +262,13 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 		}
 	}
 	cleanupKernelPluginPipelineCollections(oldLoaded)
-	detachStaleOwnedXDPPluginAttachments(oldAttachments, newAttachments, programID)
-	if err := writeXDPPluginRuntimeMetadata(newAttachments, programID); err != nil {
+	pending, detachErr := detachStaleOwnedXDPPluginAttachments(oldAttachments, newAttachments, programID)
+	rt.attachments = append(rt.attachments, pending...)
+	if detachErr != nil {
+		rt.fingerprint = ""
+		rt.snapshot = rt.failureSnapshot(catalog, desired, states, detachErr)
+	}
+	if err := writeXDPPluginRuntimeMetadata(rt.attachments, programID); err != nil {
 		log.Printf("xdp plugin pipeline metadata: %v", err)
 	}
 
@@ -1230,7 +1232,16 @@ func (rt *kernelXDPPluginPipelineRuntime) cleanupLocked() error {
 			}
 		}
 	}
-	detachOwnedXDPPluginAttachments(rt.attachments, rt.programID)
+	pending, detachErr := detachOwnedXDPPluginAttachments(rt.attachments, rt.programID)
+	rt.attachments = pending
+	if detachErr != nil {
+		failures = append(failures, detachErr.Error())
+		if err := writeXDPPluginRuntimeMetadata(pending, rt.programID); err != nil {
+			failures = append(failures, err.Error())
+		}
+		rt.fingerprint = ""
+		return errors.New(strings.Join(failures, "; "))
+	}
 	cleanupKernelPluginPipelineCollections(rt.loaded)
 	if rt.dispatcher != nil {
 		rt.dispatcher.Close()
@@ -1250,29 +1261,76 @@ func (rt *kernelXDPPluginPipelineRuntime) cleanupLocked() error {
 	return nil
 }
 
-func detachOwnedXDPPluginAttachments(attachments []xdpAttachment, programID uint32) {
-	for i := len(attachments) - 1; i >= 0; i-- {
-		att := attachments[i]
-		if programID == 0 || !xdpAttachmentExists(att, programID) {
-			continue
-		}
-		if err := detachXDPAttachment(att); err != nil {
-			log.Printf("xdp plugin pipeline detach %s: %v", xdpInterfaceLabel(att.ifindex), err)
-		}
+// EXPECTED_FD makes the owner check and detach one kernel operation. A
+// check-then-unconditional-detach can remove a replacement installed between
+// the two syscalls. Older kernels must fail safely instead of using that path.
+func detachOwnedXDPPluginAttachment(att xdpAttachment, programID uint32) error {
+	if programID == 0 {
+		return fmt.Errorf("cannot detach xdp attachment without a program identity")
 	}
+	expected, err := ebpf.NewProgramFromID(ebpf.ProgramID(programID))
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer expected.Close()
+	req := nl.NewNetlinkRequest(unix.RTM_SETLINK, unix.NLM_F_ACK)
+	msg := nl.NewIfInfomsg(unix.AF_UNSPEC)
+	msg.Index = int32(att.ifindex)
+	req.AddData(msg)
+	attrs := nl.NewRtAttr(unix.IFLA_XDP|unix.NLA_F_NESTED, nil)
+	attrs.AddRtAttr(nl.IFLA_XDP_FD, nl.Uint32Attr(^uint32(0)))
+	attrs.AddRtAttr(nl.IFLA_XDP_FLAGS, nl.Uint32Attr(uint32(att.flags)|unix.XDP_FLAGS_REPLACE))
+	attrs.AddRtAttr(unix.IFLA_XDP_EXPECTED_FD, nl.Uint32Attr(uint32(expected.FD())))
+	req.AddData(attrs)
+	_, err = req.Execute(unix.NETLINK_ROUTE, 0)
+	// Missing interface or a different owner means our old attachment is gone.
+	if errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EEXIST) {
+		return nil
+	}
+	return err
 }
 
-func detachStaleOwnedXDPPluginAttachments(oldAttachments, newAttachments []xdpAttachment, programID uint32) {
-	active := make(map[int]struct{}, len(newAttachments))
-	for _, att := range newAttachments {
-		active[att.ifindex] = struct{}{}
-	}
-	for _, att := range oldAttachments {
-		if _, ok := active[att.ifindex]; ok {
-			continue
+func detachOwnedXDPPluginAttachments(attachments []xdpAttachment, programID uint32) ([]xdpAttachment, error) {
+	var pending []xdpAttachment
+	var failures []error
+	for i := len(attachments) - 1; i >= 0; i-- {
+		att := attachments[i]
+		if err := detachOwnedXDPPluginAttachment(att, programID); err != nil {
+			pending = append(pending, att)
+			failures = append(failures, fmt.Errorf("detach xdp plugin from ifindex %d: %w", att.ifindex, err))
 		}
-		detachOwnedXDPPluginAttachments([]xdpAttachment{att}, programID)
 	}
+	return pending, errors.Join(failures...)
+}
+
+func detachStaleOwnedXDPPluginAttachments(oldAttachments, newAttachments []xdpAttachment, programID uint32) ([]xdpAttachment, error) {
+	active := make(map[xdpAttachment]bool, len(newAttachments))
+	for _, att := range newAttachments {
+		active[att] = true
+	}
+	var stale []xdpAttachment
+	for _, att := range oldAttachments {
+		if !active[att] {
+			stale = append(stale, att)
+		}
+	}
+	return detachOwnedXDPPluginAttachments(stale, programID)
+}
+
+func (rt *kernelXDPPluginPipelineRuntime) rollbackAddedAttachmentsLocked(added []xdpAttachment, programID uint32, dispatcher *ebpf.Collection, created bool) error {
+	pending, err := detachOwnedXDPPluginAttachments(added, programID)
+	if len(pending) > 0 {
+		rt.dispatcher, rt.programID = dispatcher, programID
+		rt.attachments = append(rt.attachments, pending...)
+		rt.fingerprint = ""
+		err = errors.Join(err, writeXDPPluginRuntimeMetadata(rt.attachments, programID))
+	} else if created {
+		dispatcher.Close()
+	}
+	return err
 }
 
 func writeXDPPluginRuntimeMetadata(attachments []xdpAttachment, programID uint32) error {
@@ -1302,15 +1360,17 @@ func cleanupOrphanXDPPluginRuntimeState() error {
 	if kernelMetadataOwnerAlive(meta) {
 		return fmt.Errorf("another Veer process still owns the xdp plugin dispatcher")
 	}
+	var failures []error
 	for _, item := range meta.XDPAttachments {
 		att := xdpAttachment{ifindex: item.Ifindex, flags: item.Flags}
-		if item.ProgramID == 0 || !xdpAttachmentExists(att, item.ProgramID) {
-			continue
-		}
-		if err := detachXDPAttachment(att); err != nil {
-			return fmt.Errorf("detach orphan xdp plugin dispatcher from ifindex %d: %w", item.Ifindex, err)
+		if err := detachOwnedXDPPluginAttachment(att, item.ProgramID); err != nil {
+			failures = append(failures, fmt.Errorf("detach orphan xdp plugin from ifindex %d: %w", item.Ifindex, err))
 		}
 	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+
 	clearKernelRuntimeMetadata(kernelXDPPluginRuntimeEngine)
 	return nil
 }

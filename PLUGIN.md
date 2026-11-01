@@ -948,7 +948,7 @@ net.route.replace({namespace: ns.name, dst: "192.0.2.0/24", dev: "tun0", table: 
 
 插件创建的 bridge/veth/dummy/macvlan，以及对已有接口 master、up/down、MTU、ARP、promiscuous、offload、GSO、地址和路由的修改都会写入宿主资源租约。租约按属性互斥，记录首次修改前的值和 Linux boot ID；插件禁用、卸载或加载失败时按依赖顺序恢复，同名接口 identity 已变化或系统已跨 boot 时只丢弃旧租约，不会修改新设备。插件主动把属性、地址或自己新增的路由恢复到原值时租约自动释放。`net.lease.list()` 可读取本插件当前租约；`net.lease.restore(type, key)` 会恢复并释放指定租约，失败时保留记录供重试。`net.link.delete()` 只允许删除本插件通过 ensure API 创建并持有的 link，不能凭接口白名单删除宿主或其他插件的设备。
 
-需要同时切换多条路由、策略规则或静态邻居时，使用 `net.route.transaction()`、`net.rule.transaction()` 或 `net.neigh.transaction()`。每批最多 128 项；运行时先完成全部参数、权限、接口、租约冲突和内核快照预检，再按顺序应用，任一项失败会逆序恢复已经应用的项及 ownership ledger。事务只发生在控制面，不给 TC 热路径增加指令。示例：
+需要同时切换多条路由、策略规则或静态邻居时，使用 `net.route.transaction()`、`net.rule.transaction()` 或 `net.neigh.transaction()`。每批最多 128 项；运行时先完成全部参数、权限、接口、租约冲突和内核快照预检，再按顺序应用，任一项失败会逆序恢复已经应用的项及 ownership ledger。事务只发生在控制面，不给 TC 热路径增加指令。单条 route/rule/neigh 写入也使用同一持久恢复路径；失败项保留 journal 和 ownership，阻止该表项被再次改写，无关表项继续处理。恢复按较新的事务优先、逐表项保存进度，并先核对当前属主、启动标识和接口身份，避免旧快照操作同名重建的接口。卸载前必须完成恢复，失败时保留依赖接口供重试。示例：
 
 ```js
 net.route.transaction([
@@ -1029,7 +1029,7 @@ ebpf.mapTransaction({
 });
 ```
 
-该能力对应 `ebpf.map_transactions.v1`。事务只支持普通 Hash/Array/LRU/LPM raw-value map，不支持 per-CPU、prog-array、map-in-map、socket/device 引用或 ring buffer；这些类型需要专用 ABI。
+该能力对应 `ebpf.map_transactions.v1`。事务只支持普通 Hash/Array/LPM raw-value map，不支持 LRU、per-CPU、prog-array、map-in-map、socket/device 引用或 ring buffer。LRU 插入可能驱逐事务范围外的有效表项，无法完整回滚，因此在执行任何写入之前拒绝；其他类型需要专用 ABI。
 
 需要为同一物理口创建独立二层身份时，可使用 `net.link.ensureMacvlan()`。调用方需要父接口的 `link.read` 和子接口的 `link.create` 权限；返回值包含接口信息和本次是否实际创建。随机 MAC 应由插件首次生成后持久化，重拨时复用，避免每次被上游识别成新终端：
 

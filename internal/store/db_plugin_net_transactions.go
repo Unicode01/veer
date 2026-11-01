@@ -49,6 +49,21 @@ func UpdatePluginNetTransactionStarted(db RuleStore, transactionID string, start
 	return nil
 }
 
+func UpdatePluginNetTransactionState(db RuleStore, transactionID, stateJSON string) error {
+	result, err := db.Exec(`UPDATE plugin_net_transactions SET state_json = ?, updated_at = `+pluginNowSQL+` WHERE transaction_id = ?`, stateJSON, transactionID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func GetPluginNetTransactions(db RuleStore) ([]PluginNetTransaction, error) {
 	rows, err := db.Query(`SELECT ` + pluginNetTransactionColumns + ` FROM plugin_net_transactions ORDER BY id ASC`)
 	if err != nil {

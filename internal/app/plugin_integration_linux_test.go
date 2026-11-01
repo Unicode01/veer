@@ -696,6 +696,11 @@ func runPluginNetTransactionCrashRecoveryHelper() error {
 	if err := markPluginNetTransactionStarted(db, ruleTransaction, 1); err != nil {
 		return err
 	}
+	// Exercise recovery of a genuinely changed rule. RuleReplace keeps an
+	// already matching selector installed, including its original protocol.
+	if err := admin.RuleDelete(rule); err != nil {
+		return err
+	}
 	if err := admin.RuleReplace(rule); err != nil {
 		return err
 	}

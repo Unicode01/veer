@@ -21,6 +21,7 @@ type pluginControlNetRouteBatchItem struct {
 	present     bool
 	original    []pluginControlNetRouteState
 	identities  []pluginOwnedRouteLinkIdentity
+	links       []pluginNetTransactionLinkIdentity
 	leaseBefore pluginNetLeaseSnapshot
 }
 
@@ -29,6 +30,7 @@ type pluginControlNetRuleBatchItem struct {
 	namespaceID pluginControlNetNamespaceIdentity
 	present     bool
 	original    []pluginControlNetRuleState
+	links       []pluginNetTransactionLinkIdentity
 	leaseBefore pluginNetLeaseSnapshot
 }
 
@@ -38,32 +40,8 @@ type pluginControlNetNeighBatchItem struct {
 	present     bool
 	original    []pluginControlNetNeighState
 	ifIndex     int
+	links       []pluginNetTransactionLinkIdentity
 	leaseBefore pluginNetLeaseSnapshot
-}
-
-type pluginControlNetRouteBatchJournal struct {
-	request  pluginControlNetRouteRequest
-	present  bool
-	original []pluginControlNetRouteState
-	previous pluginOwnedRouteMutation
-	created  bool
-	leased   bool
-}
-
-type pluginControlNetRuleBatchJournal struct {
-	request  pluginControlNetRuleRequest
-	present  bool
-	previous pluginOwnedRuleMutation
-	created  bool
-}
-
-type pluginControlNetNeighBatchJournal struct {
-	request  pluginControlNetNeighRequest
-	present  bool
-	original []pluginControlNetNeighState
-	previous pluginOwnedNeighMutation
-	created  bool
-	leased   bool
 }
 
 func (h *pluginControlHost) netRouteTransaction(call goja.FunctionCall) goja.Value {
@@ -80,6 +58,21 @@ func (h *pluginControlHost) netRouteTransaction(call goja.FunctionCall) goja.Val
 		seen[key] = struct{}{}
 		items = append(items, pluginControlNetRouteBatchItem{request: req, present: value.operation == "replace"})
 	}
+	return h.netRouteTransactionItems(items)
+}
+
+func (h *pluginControlHost) netRouteTransactionItems(items []pluginControlNetRouteBatchItem) goja.Value {
+	refs := make([]pluginOwnedResourceRef, 0, len(items))
+	for _, item := range items {
+		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeRoute, pluginControlNetRouteLeaseKey(item.request)})
+	}
+	var related []pluginOwnedResourceRef
+	for _, item := range items {
+		related = append(related, pluginNetTransactionLinkRefs(pluginNetTransactionEntry{RouteRequest: &item.request})...)
+	}
+	unlock := h.lockPluginNetMutation(refs, "net.route.transaction", related...)
+	defer unlock()
+
 	namespace := pluginControlNetRouteBatchNamespace(h, items, "net.route.transaction")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.route.transaction")
 	namespaceID, err := h.pluginControlNamespaceIdentity(namespace)
@@ -103,37 +96,35 @@ func (h *pluginControlHost) netRouteTransaction(call goja.FunctionCall) goja.Val
 		if err != nil {
 			h.throwf("net.route.transaction: snapshot current route: %v", err)
 		}
+		item.links, err = capturePluginNetTransactionLinks(admin, pluginNetTransactionEntry{RouteRequest: &item.request, RouteOriginal: item.original})
+		if err != nil {
+			h.throwf("inspect network transaction interfaces: %v", err)
+		}
 	}
 	persistent, err := beginPluginRouteNetTransaction(h.db, h.plugin.ID, items)
 	if err != nil {
 		h.throwf("net.route.transaction: create recovery journal: %v", err)
 	}
 
-	journal := make([]pluginControlNetRouteBatchJournal, 0, len(items))
 	for index, item := range items {
 		if err := markPluginNetTransactionStarted(h.db, persistent, index+1); err != nil {
-			rollbackErr := h.rollbackPluginRouteBatch(admin, journal)
-			rollbackErr = finishPluginNetTransactionAfterRollback(h.db, persistent, rollbackErr)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.route.transaction", fmt.Errorf("advance recovery journal: %w", err), rollbackErr)
 		}
-		entry, changed, err := h.applyPluginRouteBatchItem(admin, item)
+		err := h.applyPluginRouteBatchItem(admin, item)
 		if err != nil {
-			rollbackErr := h.rollbackPluginRouteBatch(admin, journal)
-			rollbackErr = finishPluginNetTransactionAfterRollback(h.db, persistent, rollbackErr)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.route.transaction", err, rollbackErr)
-		}
-		if changed {
-			journal = append(journal, entry)
 		}
 	}
 	for _, item := range items {
 		if err := h.releaseRestoredPluginRouteLease(item.request, item.present); err != nil {
-			rollbackErr := rollbackPendingPluginNetTransaction(h.db, admin, persistent)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.route.transaction", fmt.Errorf("finalize route lease: %w", err), rollbackErr)
 		}
 	}
 	if err := completePluginNetTransaction(h.db, persistent); err != nil {
-		rollbackErr := rollbackPendingPluginNetTransaction(h.db, admin, persistent)
+		rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 		h.throwPluginNetMutationError("net.route.transaction", fmt.Errorf("commit recovery journal: %w", err), rollbackErr)
 	}
 	return h.vm.ToValue(map[string]any{"status": "completed", "operations": len(items)})
@@ -153,6 +144,21 @@ func (h *pluginControlHost) netRuleTransaction(call goja.FunctionCall) goja.Valu
 		seen[key] = struct{}{}
 		items = append(items, pluginControlNetRuleBatchItem{request: req, present: value.operation == "replace"})
 	}
+	return h.netRuleTransactionItems(items)
+}
+
+func (h *pluginControlHost) netRuleTransactionItems(items []pluginControlNetRuleBatchItem) goja.Value {
+	refs := make([]pluginOwnedResourceRef, 0, len(items))
+	for _, item := range items {
+		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeRule, pluginControlNetRuleLeaseKey(item.request)})
+	}
+	var related []pluginOwnedResourceRef
+	for _, item := range items {
+		related = append(related, pluginNetTransactionLinkRefs(pluginNetTransactionEntry{RuleRequest: &item.request})...)
+	}
+	unlock := h.lockPluginNetMutation(refs, "net.rule.transaction", related...)
+	defer unlock()
+
 	namespace := pluginControlNetRuleBatchNamespace(h, items, "net.rule.transaction")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.rule.transaction")
 	namespaceID, err := h.pluginControlNamespaceIdentity(namespace)
@@ -172,37 +178,35 @@ func (h *pluginControlHost) netRuleTransaction(call goja.FunctionCall) goja.Valu
 		if err != nil {
 			h.throwf("net.rule.transaction: snapshot current policy rule: %v", err)
 		}
+		item.links, err = capturePluginNetTransactionLinks(admin, pluginNetTransactionEntry{RuleRequest: &item.request, RuleOriginal: item.original})
+		if err != nil {
+			h.throwf("inspect network transaction interfaces: %v", err)
+		}
 	}
 	persistent, err := beginPluginRuleNetTransaction(h.db, h.plugin.ID, items)
 	if err != nil {
 		h.throwf("net.rule.transaction: create recovery journal: %v", err)
 	}
 
-	journal := make([]pluginControlNetRuleBatchJournal, 0, len(items))
 	for index, item := range items {
 		if err := markPluginNetTransactionStarted(h.db, persistent, index+1); err != nil {
-			rollbackErr := h.rollbackPluginRuleBatch(admin, journal)
-			rollbackErr = finishPluginNetTransactionAfterRollback(h.db, persistent, rollbackErr)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.rule.transaction", fmt.Errorf("advance recovery journal: %w", err), rollbackErr)
 		}
-		entry, changed, err := h.applyPluginRuleBatchItem(admin, item)
+		err := h.applyPluginRuleBatchItem(admin, item)
 		if err != nil {
-			rollbackErr := h.rollbackPluginRuleBatch(admin, journal)
-			rollbackErr = finishPluginNetTransactionAfterRollback(h.db, persistent, rollbackErr)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.rule.transaction", err, rollbackErr)
-		}
-		if changed {
-			journal = append(journal, entry)
 		}
 	}
 	for _, item := range items {
 		if err := h.releaseRestoredPluginRuleLease(item.request, item.present); err != nil {
-			rollbackErr := rollbackPendingPluginNetTransaction(h.db, admin, persistent)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.rule.transaction", fmt.Errorf("finalize policy rule lease: %w", err), rollbackErr)
 		}
 	}
 	if err := completePluginNetTransaction(h.db, persistent); err != nil {
-		rollbackErr := rollbackPendingPluginNetTransaction(h.db, admin, persistent)
+		rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 		h.throwPluginNetMutationError("net.rule.transaction", fmt.Errorf("commit recovery journal: %w", err), rollbackErr)
 	}
 	return h.vm.ToValue(map[string]any{"status": "completed", "operations": len(items)})
@@ -223,6 +227,21 @@ func (h *pluginControlHost) netNeighTransaction(call goja.FunctionCall) goja.Val
 		seen[key] = struct{}{}
 		items = append(items, pluginControlNetNeighBatchItem{request: req, present: present})
 	}
+	return h.netNeighTransactionItems(items)
+}
+
+func (h *pluginControlHost) netNeighTransactionItems(items []pluginControlNetNeighBatchItem) goja.Value {
+	refs := make([]pluginOwnedResourceRef, 0, len(items))
+	for _, item := range items {
+		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeNeighbor, pluginControlNetNeighLeaseKey(item.request)})
+	}
+	var related []pluginOwnedResourceRef
+	for _, item := range items {
+		related = append(related, pluginNetTransactionLinkRefs(pluginNetTransactionEntry{NeighRequest: &item.request})...)
+	}
+	unlock := h.lockPluginNetMutation(refs, "net.neigh.transaction", related...)
+	defer unlock()
+
 	namespace := pluginControlNetNeighBatchNamespace(h, items, "net.neigh.transaction")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.neigh.transaction")
 	namespaceID, err := h.pluginControlNamespaceIdentity(namespace)
@@ -249,37 +268,35 @@ func (h *pluginControlHost) netNeighTransaction(call goja.FunctionCall) goja.Val
 			h.throwf("net.neigh.transaction: snapshot current neighbor: %v", err)
 		}
 		item.ifIndex = dev.IfIndex
+		item.links, err = capturePluginNetTransactionLinks(admin, pluginNetTransactionEntry{NeighRequest: &item.request, NeighOriginal: item.original})
+		if err != nil {
+			h.throwf("inspect network transaction interfaces: %v", err)
+		}
 	}
 	persistent, err := beginPluginNeighNetTransaction(h.db, h.plugin.ID, items)
 	if err != nil {
 		h.throwf("net.neigh.transaction: create recovery journal: %v", err)
 	}
 
-	journal := make([]pluginControlNetNeighBatchJournal, 0, len(items))
 	for index, item := range items {
 		if err := markPluginNetTransactionStarted(h.db, persistent, index+1); err != nil {
-			rollbackErr := h.rollbackPluginNeighBatch(admin, journal)
-			rollbackErr = finishPluginNetTransactionAfterRollback(h.db, persistent, rollbackErr)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.neigh.transaction", fmt.Errorf("advance recovery journal: %w", err), rollbackErr)
 		}
-		entry, changed, err := h.applyPluginNeighBatchItem(admin, item)
+		err := h.applyPluginNeighBatchItem(admin, item)
 		if err != nil {
-			rollbackErr := h.rollbackPluginNeighBatch(admin, journal)
-			rollbackErr = finishPluginNetTransactionAfterRollback(h.db, persistent, rollbackErr)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.neigh.transaction", err, rollbackErr)
-		}
-		if changed {
-			journal = append(journal, entry)
 		}
 	}
 	for _, item := range items {
 		if err := h.releaseRestoredPluginNeighLease(item.request, item.present); err != nil {
-			rollbackErr := rollbackPendingPluginNetTransaction(h.db, admin, persistent)
+			rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 			h.throwPluginNetMutationError("net.neigh.transaction", fmt.Errorf("finalize neighbor lease: %w", err), rollbackErr)
 		}
 	}
 	if err := completePluginNetTransaction(h.db, persistent); err != nil {
-		rollbackErr := rollbackPendingPluginNetTransaction(h.db, admin, persistent)
+		rollbackErr := rollbackPendingPluginNetTransactionLocked(h.db, h.netAdmin, persistent, nil)
 		h.throwPluginNetMutationError("net.neigh.transaction", fmt.Errorf("commit recovery journal: %w", err), rollbackErr)
 	}
 	return h.vm.ToValue(map[string]any{"status": "completed", "operations": len(items)})
@@ -363,138 +380,52 @@ func (h *pluginControlHost) netBatchValues(call goja.FunctionCall, operation str
 	return out
 }
 
-func (h *pluginControlHost) applyPluginRouteBatchItem(admin pluginControlNetAdmin, item pluginControlNetRouteBatchItem) (pluginControlNetRouteBatchJournal, bool, error) {
-	if !item.present && len(item.original) == 0 {
-		return pluginControlNetRouteBatchJournal{}, false, admin.RouteDelete(item.request)
+func (h *pluginControlHost) applyPluginRouteBatchItem(admin pluginControlNetAdmin, item pluginControlNetRouteBatchItem) error {
+	if err := h.validatePluginNetTransactionLinks(item.namespaceID, item.request.Namespace, item.links); err != nil {
+		return err
 	}
-	previous, created, leased, err := h.claimPluginRouteMutation(item.request, item.present, item.original, item.identities)
-	if err != nil {
-		return pluginControlNetRouteBatchJournal{}, false, err
+	if _, _, _, err := h.claimPluginRouteMutation(item.request, item.present, item.original, item.identities); err != nil {
+		return err
 	}
-	entry := pluginControlNetRouteBatchJournal{request: item.request, present: item.present, original: item.original, previous: previous, created: created, leased: leased}
+	item.request.expectedLinkIndices = pluginNetTransactionLinkIndices(item.links)
 	if item.present {
-		err = admin.RouteReplace(item.request)
-	} else {
-		err = admin.RouteDelete(item.request)
+		if len(item.original) == 1 && pluginControlRouteRequestMatchesState(item.request, item.original[0]) {
+			return nil
+		}
+		return admin.RouteReplace(item.request)
 	}
-	if err != nil {
-		rollbackErr := h.rollbackPluginRouteBatchEntry(admin, entry)
-		return pluginControlNetRouteBatchJournal{}, false, combinePluginNetBatchErrors(err, rollbackErr)
-	}
-	return entry, true, nil
+	return admin.RouteDelete(item.request)
 }
 
-func (h *pluginControlHost) applyPluginRuleBatchItem(admin pluginControlNetAdmin, item pluginControlNetRuleBatchItem) (pluginControlNetRuleBatchJournal, bool, error) {
-	if !item.present && len(item.original) == 0 {
-		return pluginControlNetRuleBatchJournal{}, false, admin.RuleDelete(item.request)
+func (h *pluginControlHost) applyPluginRuleBatchItem(admin pluginControlNetAdmin, item pluginControlNetRuleBatchItem) error {
+	if err := h.validatePluginNetTransactionLinks(item.namespaceID, item.request.Namespace, item.links); err != nil {
+		return err
 	}
-	previous, created, err := h.claimPluginRuleMutation(item.request, item.present, item.original)
-	if err != nil {
-		return pluginControlNetRuleBatchJournal{}, false, err
+	if _, _, err := h.claimPluginRuleMutation(item.request, item.present, item.original, item.links); err != nil {
+		return err
 	}
-	entry := pluginControlNetRuleBatchJournal{request: item.request, present: item.present, previous: previous, created: created}
 	if item.present {
-		err = admin.RuleReplace(item.request)
-	} else {
-		err = admin.RuleDelete(item.request)
+		if len(item.original) > 0 {
+			return nil
+		}
+		return admin.RuleReplace(item.request)
 	}
-	if err != nil {
-		rollbackErr := h.rollbackPluginRuleOperation(admin, item.request, item.present, previous, created)
-		return pluginControlNetRuleBatchJournal{}, false, combinePluginNetBatchErrors(err, rollbackErr)
-	}
-	return entry, true, nil
+	return admin.RuleDelete(item.request)
 }
 
-func (h *pluginControlHost) applyPluginNeighBatchItem(admin pluginControlNetAdmin, item pluginControlNetNeighBatchItem) (pluginControlNetNeighBatchJournal, bool, error) {
-	if !item.present && len(item.original) == 0 {
-		return pluginControlNetNeighBatchJournal{}, false, admin.NeighDelete(item.request)
+func (h *pluginControlHost) applyPluginNeighBatchItem(admin pluginControlNetAdmin, item pluginControlNetNeighBatchItem) error {
+	if err := h.validatePluginNetTransactionLinks(item.namespaceID, item.request.Namespace, item.links); err != nil {
+		return err
 	}
-	previous, created, leased, err := h.claimPluginNeighMutation(item.request, item.present, item.original, item.ifIndex)
-	if err != nil {
-		return pluginControlNetNeighBatchJournal{}, false, err
+	if _, _, _, err := h.claimPluginNeighMutation(item.request, item.present, item.original, item.ifIndex, item.links); err != nil {
+		return err
 	}
-	entry := pluginControlNetNeighBatchJournal{request: item.request, present: item.present, original: item.original, previous: previous, created: created, leased: leased}
+	item.request.expectedIfIndex = item.ifIndex
 	if item.present {
-		err = admin.NeighReplace(item.request)
-	} else {
-		err = admin.NeighDelete(item.request)
-	}
-	if err != nil {
-		rollbackErr := h.rollbackPluginNeighBatchEntry(admin, entry)
-		return pluginControlNetNeighBatchJournal{}, false, combinePluginNetBatchErrors(err, rollbackErr)
-	}
-	return entry, true, nil
-}
-
-func (h *pluginControlHost) rollbackPluginRouteBatch(admin pluginControlNetAdmin, entries []pluginControlNetRouteBatchJournal) error {
-	return rollbackPluginNetBatch(len(entries), func(i int) error { return h.rollbackPluginRouteBatchEntry(admin, entries[i]) })
-}
-
-func (h *pluginControlHost) rollbackPluginRuleBatch(admin pluginControlNetAdmin, entries []pluginControlNetRuleBatchJournal) error {
-	return rollbackPluginNetBatch(len(entries), func(i int) error {
-		entry := entries[i]
-		return h.rollbackPluginRuleOperation(admin, entry.request, entry.present, entry.previous, entry.created)
-	})
-}
-
-func (h *pluginControlHost) rollbackPluginNeighBatch(admin pluginControlNetAdmin, entries []pluginControlNetNeighBatchJournal) error {
-	return rollbackPluginNetBatch(len(entries), func(i int) error { return h.rollbackPluginNeighBatchEntry(admin, entries[i]) })
-}
-
-func (h *pluginControlHost) rollbackPluginRouteBatchEntry(admin pluginControlNetAdmin, entry pluginControlNetRouteBatchJournal) error {
-	if entry.leased {
-		return h.rollbackPluginRouteOperation(admin, entry.request, entry.present, entry.previous, entry.created)
-	}
-	var failures []string
-	if entry.present {
-		if err := admin.RouteDelete(entry.request); err != nil {
-			failures = append(failures, err.Error())
+		if len(item.original) == 1 && pluginControlNeighRequestMatchesState(item.request, item.original[0]) && item.original[0].LinkIfIndex == item.ifIndex {
+			return nil
 		}
+		return admin.NeighReplace(item.request)
 	}
-	if err := admin.RouteRestore(entry.original); err != nil {
-		failures = append(failures, err.Error())
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("restore route batch entry: %s", strings.Join(failures, "; "))
-	}
-	return nil
-}
-
-func (h *pluginControlHost) rollbackPluginNeighBatchEntry(admin pluginControlNetAdmin, entry pluginControlNetNeighBatchJournal) error {
-	if entry.leased {
-		return h.rollbackPluginNeighOperation(admin, entry.request, entry.present, entry.previous, entry.created)
-	}
-	var failures []string
-	if entry.present {
-		if err := admin.NeighDelete(entry.request); err != nil {
-			failures = append(failures, err.Error())
-		}
-	}
-	if err := admin.NeighRestore(entry.original); err != nil {
-		failures = append(failures, err.Error())
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("restore neighbor batch entry: %s", strings.Join(failures, "; "))
-	}
-	return nil
-}
-
-func rollbackPluginNetBatch(count int, rollback func(int) error) error {
-	failures := make([]string, 0)
-	for i := count - 1; i >= 0; i-- {
-		if err := rollback(i); err != nil {
-			failures = append(failures, fmt.Sprintf("operation %d: %v", i, err))
-		}
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("batch rollback failed: %s", strings.Join(failures, "; "))
-	}
-	return nil
-}
-
-func combinePluginNetBatchErrors(operationErr, rollbackErr error) error {
-	if rollbackErr == nil {
-		return operationErr
-	}
-	return fmt.Errorf("%v; rollback failed: %v", operationErr, rollbackErr)
+	return admin.NeighDelete(item.request)
 }

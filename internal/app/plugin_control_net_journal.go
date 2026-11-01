@@ -8,13 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/Unicode01/veer/internal/store"
 )
 
 const (
-	pluginNetTransactionJournalVersion = 1
+	pluginNetTransactionJournalVersion = 2
 	pluginNetTransactionStateMaxBytes  = 2 << 20
 	pluginNetTransactionKindRoute      = "route"
 	pluginNetTransactionKindRule       = "rule"
@@ -29,15 +30,18 @@ type pluginNetLeaseSnapshot struct {
 
 type pluginNetTransactionState struct {
 	Version int                         `json:"version"`
+	BootID  string                      `json:"boot_id,omitempty"`
 	Entries []pluginNetTransactionEntry `json:"entries"`
 }
 
 type pluginNetTransactionEntry struct {
-	Present           bool                              `json:"present"`
-	ResourceType      string                            `json:"resource_type"`
-	ResourceKey       string                            `json:"resource_key"`
-	LeaseBefore       pluginNetLeaseSnapshot            `json:"lease_before"`
-	NamespaceIdentity pluginControlNetNamespaceIdentity `json:"namespace_identity,omitempty"`
+	Resolved          bool                               `json:"resolved,omitempty"`
+	LinkIdentities    []pluginNetTransactionLinkIdentity `json:"link_identities,omitempty"`
+	Present           bool                               `json:"present"`
+	ResourceType      string                             `json:"resource_type"`
+	ResourceKey       string                             `json:"resource_key"`
+	LeaseBefore       pluginNetLeaseSnapshot             `json:"lease_before"`
+	NamespaceIdentity pluginControlNetNamespaceIdentity  `json:"namespace_identity,omitempty"`
 
 	RouteRequest  *pluginControlNetRouteRequest `json:"route_request,omitempty"`
 	RouteOriginal []pluginControlNetRouteState  `json:"route_original,omitempty"`
@@ -47,12 +51,20 @@ type pluginNetTransactionEntry struct {
 	NeighOriginal []pluginControlNetNeighState  `json:"neigh_original,omitempty"`
 }
 
+type pluginNetTransactionLinkIdentity struct {
+	Name    string `json:"name"`
+	IfIndex int    `json:"ifindex"`
+	Kind    string `json:"kind,omitempty"`
+	MAC     string `json:"mac,omitempty"`
+}
+
 func beginPluginRouteNetTransaction(db *sql.DB, pluginID string, items []pluginControlNetRouteBatchItem) (*store.PluginNetTransaction, error) {
 	entries := make([]pluginNetTransactionEntry, 0, len(items))
 	for _, item := range items {
 		request := item.request
 		entries = append(entries, pluginNetTransactionEntry{
-			Present: item.present, ResourceType: pluginOwnedResourceTypeRoute,
+			LinkIdentities: item.links,
+			Present:        item.present, ResourceType: pluginOwnedResourceTypeRoute,
 			ResourceKey: pluginControlNetRouteLeaseKey(item.request), LeaseBefore: item.leaseBefore,
 			NamespaceIdentity: item.namespaceID, RouteRequest: &request, RouteOriginal: clonePluginControlNetRouteStates(item.original),
 		})
@@ -65,7 +77,8 @@ func beginPluginRuleNetTransaction(db *sql.DB, pluginID string, items []pluginCo
 	for _, item := range items {
 		request := item.request
 		entries = append(entries, pluginNetTransactionEntry{
-			Present: item.present, ResourceType: pluginOwnedResourceTypeRule,
+			LinkIdentities: item.links,
+			Present:        item.present, ResourceType: pluginOwnedResourceTypeRule,
 			ResourceKey: pluginControlNetRuleLeaseKey(item.request), LeaseBefore: item.leaseBefore,
 			NamespaceIdentity: item.namespaceID, RuleRequest: &request, RuleOriginal: append([]pluginControlNetRuleState(nil), item.original...),
 		})
@@ -78,7 +91,8 @@ func beginPluginNeighNetTransaction(db *sql.DB, pluginID string, items []pluginC
 	for _, item := range items {
 		request := item.request
 		entries = append(entries, pluginNetTransactionEntry{
-			Present: item.present, ResourceType: pluginOwnedResourceTypeNeighbor,
+			LinkIdentities: item.links,
+			Present:        item.present, ResourceType: pluginOwnedResourceTypeNeighbor,
 			ResourceKey: pluginControlNetNeighLeaseKey(item.request), LeaseBefore: item.leaseBefore,
 			NamespaceIdentity: item.namespaceID, NeighRequest: &request, NeighOriginal: append([]pluginControlNetNeighState(nil), item.original...),
 		})
@@ -94,7 +108,7 @@ func beginPluginNetTransaction(db *sql.DB, pluginID, kind string, entries []plug
 	if err != nil {
 		return nil, err
 	}
-	state, err := json.Marshal(pluginNetTransactionState{Version: pluginNetTransactionJournalVersion, Entries: entries})
+	state, err := json.Marshal(pluginNetTransactionState{Version: pluginNetTransactionJournalVersion, BootID: pluginOwnershipBootID, Entries: entries})
 	if err != nil {
 		return nil, err
 	}
@@ -139,27 +153,65 @@ func completePluginNetTransaction(db *sql.DB, record *store.PluginNetTransaction
 	return store.DeletePluginNetTransaction(db, record.TransactionID)
 }
 
-func finishPluginNetTransactionAfterRollback(db *sql.DB, record *store.PluginNetTransaction, rollbackErr error) error {
-	if rollbackErr != nil {
-		return rollbackErr
-	}
-	if err := completePluginNetTransaction(db, record); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("delete recovery journal after rollback: %w", err)
-	}
-	return nil
+func recoverPendingPluginNetTransactions(db *sql.DB, admin pluginControlNetAdmin) error {
+	return recoverPluginNetTransactionsForResources(db, admin, nil, "")
 }
 
-func recoverPendingPluginNetTransactions(db *sql.DB, admin pluginControlNetAdmin) error {
+func recoverPluginNetTransactionsForResources(db *sql.DB, admin pluginControlNetAdmin, refs []pluginOwnedResourceRef, pluginID string) error {
 	if db == nil {
 		return nil
 	}
+	// Recovery walks overlapping snapshots in reverse order. Two concurrent
+	// walks must not interleave an older restore with a newer failed restore.
+	unlockRecovery := lockPluginNetResources(db, []pluginOwnedResourceRef{{"net-recovery", "journals"}})
+	defer unlockRecovery()
 	records, err := store.GetPluginNetTransactions(db)
 	if err != nil {
 		return err
 	}
 	failures := make([]string, 0)
-	for _, record := range records {
-		if err := rollbackPendingPluginNetTransaction(db, admin, &record); err != nil {
+	blocked := make(map[string]bool)
+	blockedKinds := make(map[string]bool)
+	if len(refs) > 0 {
+		// Include overlapping journals transitively. Otherwise retrying X in a
+		// journal containing X/Y could bypass a newer failed journal for Y.
+		selected := make(map[string]bool)
+		for changed := true; changed; {
+			changed = false
+			for _, record := range records {
+				if selected[record.TransactionID] || !pluginNetTransactionTouches(record, refs) {
+					continue
+				}
+				selected[record.TransactionID], changed = true, true
+				if state, err := decodePluginNetTransactionState(&record); err == nil {
+					for _, entry := range state.Entries {
+						refs = append(refs, pluginOwnedResourceRef{entry.ResourceType, entry.ResourceKey})
+					}
+				}
+			}
+		}
+	}
+	// Undo newer snapshots first. If a newer entry cannot be recovered, its
+	// older snapshots must wait; unrelated entries can still make progress.
+	for i := len(records) - 1; i >= 0; i-- {
+		record := records[i]
+		if pluginID != "" && record.PluginID != pluginID {
+			continue
+		}
+		if len(refs) > 0 && !pluginNetTransactionTouches(record, refs) {
+			continue
+		}
+		scope := record.PluginID + "\x00" + record.Kind
+		if blockedKinds[scope] {
+			failures = append(failures, record.TransactionID+": newer journal is invalid")
+			continue
+		}
+		if _, err := decodePluginNetTransactionState(&record); err != nil && record.StartedCount != 0 {
+			blockedKinds[scope] = true
+			failures = append(failures, record.TransactionID+": "+err.Error())
+			continue
+		}
+		if err := rollbackPendingPluginNetTransactionWithBlocked(db, admin, &record, blocked); err != nil {
 			failures = append(failures, record.TransactionID+": "+err.Error())
 		}
 	}
@@ -169,10 +221,36 @@ func recoverPendingPluginNetTransactions(db *sql.DB, admin pluginControlNetAdmin
 	return nil
 }
 
-func rollbackPendingPluginNetTransaction(db *sql.DB, admin pluginControlNetAdmin, record *store.PluginNetTransaction) error {
+func rollbackPendingPluginNetTransactionWithBlocked(db *sql.DB, admin pluginControlNetAdmin, record *store.PluginNetTransaction, blocked map[string]bool) error {
+	if record == nil {
+		return fmt.Errorf("plugin network transaction recovery is unavailable")
+	}
+	// Even an unstarted journal belongs to an in-flight operation until its
+	// slot locks are released. Never delete it before acquiring those locks.
+	state, err := decodePluginNetTransactionState(record)
+	if err != nil && record.StartedCount != 0 {
+		return err
+	}
+	refs := pluginNetTransactionRefs(state)
+	unlock := lockPluginNetResources(db, refs)
+	defer unlock()
+	return rollbackPendingPluginNetTransactionLocked(db, admin, record, blocked)
+}
+
+// Caller holds the resource locks, including when rolling back an in-flight
+// transaction. Re-read durable progress so retries never replay resolved slots.
+func rollbackPendingPluginNetTransactionLocked(db *sql.DB, admin pluginControlNetAdmin, record *store.PluginNetTransaction, blocked map[string]bool) error {
 	if db == nil || record == nil {
 		return fmt.Errorf("plugin network transaction recovery is unavailable")
 	}
+	current, err := store.PluginNetTransactionOrNil(db, record.TransactionID)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return nil
+	}
+	*record = *current
 	if record.StartedCount < 0 {
 		return fmt.Errorf("journal started_count %d is invalid", record.StartedCount)
 	}
@@ -185,29 +263,105 @@ func rollbackPendingPluginNetTransaction(db *sql.DB, admin pluginControlNetAdmin
 	if admin == nil {
 		return fmt.Errorf("plugin network transaction recovery is unavailable")
 	}
-	var state pluginNetTransactionState
-	decoder := json.NewDecoder(strings.NewReader(record.StateJSON))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&state); err != nil {
-		return fmt.Errorf("decode journal: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return fmt.Errorf("journal contains trailing JSON values")
-		}
-		return fmt.Errorf("decode trailing journal content: %w", err)
-	}
-	if err := validatePluginNetTransactionState(record, state); err != nil {
+	state, err := decodePluginNetTransactionState(record)
+	if err != nil {
 		return err
 	}
 	failures := make([]string, 0)
 	for index := record.StartedCount - 1; index >= 0; index-- {
 		entry := state.Entries[index]
-		if err := restorePluginNetTransactionKernelEntry(admin, record.Kind, entry); err != nil {
-			failures = append(failures, fmt.Sprintf("operation %d kernel: %v", index, err))
+		if entry.Resolved {
+			continue
 		}
-		if err := restorePluginNetTransactionLease(db, record.PluginID, entry); err != nil {
-			failures = append(failures, fmt.Sprintf("operation %d lease: %v", index, err))
+		slot := pluginNetResourceSlot(pluginOwnedResourceRef{entry.ResourceType, entry.ResourceKey})
+		fail := func(err error) {
+			failures = append(failures, fmt.Sprintf("operation %d: %v", index, err))
+			if blocked != nil {
+				blocked[slot] = true
+			}
+		}
+		if blocked[slot] {
+			fail(fmt.Errorf("newer recovery for this slot is still pending"))
+			continue
+		}
+		owned, err := store.PluginOwnedResourceOrNil(db, entry.ResourceType, entry.ResourceKey)
+		if err != nil {
+			fail(err)
+			continue
+		}
+		// A superseded journal cannot delete or restore the new owner's state.
+		superseded := owned != nil && owned.PluginID != record.PluginID
+		if owned != nil && !superseded {
+			superseded, err = pluginNetTransactionLeaseSuperseded(entry, *owned)
+			if err != nil {
+				fail(err)
+				continue
+			}
+		}
+		if state.Version == 1 && !superseded {
+			entry, err = hydrateLegacyPluginNetTransactionIdentity(db, record.PluginID, &state, entry, owned)
+			if err != nil {
+				fail(err)
+				continue
+			}
+			state.Entries[index] = entry
+		}
+		stale := state.BootID != "" && pluginOwnershipBootID != "" && state.BootID != pluginOwnershipBootID
+		if !superseded && !stale {
+			stale, err = pluginNetTransactionLinksChanged(admin, entry)
+			if err != nil {
+				fail(err)
+				continue
+			}
+		}
+		// Name-based policy rules survive link deletion. If the lease still
+		// belongs to this generation, remove that exact rule without restoring
+		// its old interface selectors onto a newly created interface.
+		if stale && !superseded && record.Kind == pluginNetTransactionKindRule && owned != nil &&
+			(state.BootID == "" || pluginOwnershipBootID == "" || state.BootID == pluginOwnershipBootID) &&
+			pluginNetTransactionOwnsOldGeneration(state, entry, *owned) {
+			staleEntry := entry
+			staleEntry.RuleOriginal = nil
+			if err := restorePluginNetTransactionKernelEntry(admin, record.Kind, staleEntry); err != nil {
+				fail(err)
+				continue
+			}
+		}
+		if !superseded && !stale {
+			if err := restorePluginNetTransactionKernelEntry(admin, record.Kind, entry); err != nil {
+				fail(err)
+				continue
+			}
+		}
+		state.Entries[index].Resolved = true
+		tx, err := db.Begin()
+		if err != nil {
+			state.Entries[index].Resolved = false
+			fail(err)
+			continue
+		}
+		if !superseded && !stale {
+			err = restorePluginNetTransactionLeaseInTx(tx, record.PluginID, entry)
+		}
+		if err == nil && stale && !superseded && owned != nil && pluginNetTransactionOwnsOldGeneration(state, entry, *owned) {
+			err = store.DeletePluginOwnedResource(tx, record.PluginID, entry.ResourceType, entry.ResourceKey)
+		}
+		if err == nil {
+			var raw []byte
+			raw, err = json.Marshal(state)
+			if err == nil {
+				err = store.UpdatePluginNetTransactionState(tx, record.TransactionID, string(raw))
+			}
+		}
+		if err == nil {
+			err = tx.Commit()
+		} else {
+			_ = tx.Rollback()
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			state.Entries[index].Resolved = false
+			fail(err)
 		}
 	}
 	if len(failures) > 0 {
@@ -219,8 +373,27 @@ func rollbackPendingPluginNetTransaction(db *sql.DB, admin pluginControlNetAdmin
 	return nil
 }
 
+func decodePluginNetTransactionState(record *store.PluginNetTransaction) (pluginNetTransactionState, error) {
+	var state pluginNetTransactionState
+	decoder := json.NewDecoder(strings.NewReader(record.StateJSON))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return state, fmt.Errorf("decode journal: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return state, fmt.Errorf("journal contains trailing JSON values")
+		}
+		return state, fmt.Errorf("decode trailing journal content: %w", err)
+	}
+	if err := validatePluginNetTransactionState(record, state); err != nil {
+		return state, err
+	}
+	return state, nil
+}
+
 func validatePluginNetTransactionState(record *store.PluginNetTransaction, state pluginNetTransactionState) error {
-	if state.Version != pluginNetTransactionJournalVersion || len(state.Entries) < 1 || len(state.Entries) > pluginControlNetBatchMaxOperations {
+	if (state.Version != 1 && state.Version != pluginNetTransactionJournalVersion) || len(state.Entries) < 1 || len(state.Entries) > pluginControlNetBatchMaxOperations {
 		return fmt.Errorf("journal shape is invalid")
 	}
 	if strings.TrimSpace(record.PluginID) == "" || record.StartedCount > len(state.Entries) {
@@ -316,11 +489,16 @@ func restorePluginNetTransactionKernelEntry(admin pluginControlNetAdmin, kind st
 			return fmt.Errorf("route journal entry is invalid")
 		}
 		if entry.Present {
+			entry.RouteRequest.expectedLinkIndices = pluginNetTransactionLinkIndices(entry.LinkIdentities)
 			if err := admin.RouteDelete(*entry.RouteRequest); err != nil {
-				failures = append(failures, "delete intended route: "+err.Error())
+				return fmt.Errorf("delete intended route: %w", err)
 			}
 		}
-		if err := admin.RouteRestore(entry.RouteOriginal); err != nil {
+		originals, err := pluginNetRecoverableRouteStates(admin, entry.RouteOriginal)
+		if err != nil {
+			return err
+		}
+		if err := admin.RouteRestore(originals); err != nil {
 			failures = append(failures, "restore original route: "+err.Error())
 		}
 	case pluginNetTransactionKindRule:
@@ -329,7 +507,7 @@ func restorePluginNetTransactionKernelEntry(admin pluginControlNetAdmin, kind st
 		}
 		if entry.Present {
 			if err := admin.RuleDelete(*entry.RuleRequest); err != nil {
-				failures = append(failures, "delete intended rule: "+err.Error())
+				return fmt.Errorf("delete intended rule: %w", err)
 			}
 		}
 		if err := admin.RuleRestore(entry.RuleOriginal); err != nil {
@@ -340,8 +518,9 @@ func restorePluginNetTransactionKernelEntry(admin pluginControlNetAdmin, kind st
 			return fmt.Errorf("neighbor journal entry is invalid")
 		}
 		if entry.Present {
+			entry.NeighRequest.expectedIfIndex = pluginNetTransactionLinkIndices(entry.LinkIdentities)[entry.NeighRequest.Interface]
 			if err := admin.NeighDelete(*entry.NeighRequest); err != nil {
-				failures = append(failures, "delete intended neighbor: "+err.Error())
+				return fmt.Errorf("delete intended neighbor: %w", err)
 			}
 		}
 		if err := admin.NeighRestore(entry.NeighOriginal); err != nil {
@@ -369,15 +548,7 @@ func pluginNetTransactionEntryNamespace(entry pluginNetTransactionEntry) string 
 	return "host"
 }
 
-func restorePluginNetTransactionLease(db *sql.DB, pluginID string, entry pluginNetTransactionEntry) error {
-	if entry.ResourceKey == "" || entry.ResourceType == "" {
-		return fmt.Errorf("lease identity is missing")
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+func restorePluginNetTransactionLeaseInTx(tx *sql.Tx, pluginID string, entry pluginNetTransactionEntry) error {
 	current, err := store.PluginOwnedResourceOrNil(tx, entry.ResourceType, entry.ResourceKey)
 	if err != nil {
 		return err
@@ -402,7 +573,197 @@ func restorePluginNetTransactionLease(db *sql.DB, pluginID string, entry pluginN
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	return tx.Commit()
+	return nil
+}
+
+func pluginNetTransactionRefs(state pluginNetTransactionState) []pluginOwnedResourceRef {
+	refs := make([]pluginOwnedResourceRef, 0, len(state.Entries))
+	for _, entry := range state.Entries {
+		refs = append(refs, pluginOwnedResourceRef{entry.ResourceType, entry.ResourceKey})
+		refs = append(refs, pluginNetTransactionLinkRefs(entry)...)
+	}
+	return refs
+}
+
+func pluginNetTransactionLinkRefs(entry pluginNetTransactionEntry) []pluginOwnedResourceRef {
+	namespace := pluginNetTransactionEntryNamespace(entry)
+	var refs []pluginOwnedResourceRef
+	if namespace != "host" {
+		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeNamespace, namespace})
+	}
+	for _, name := range pluginNetTransactionInterfaceNames(entry) {
+		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeLink, pluginControlNetScopedResourceKey(namespace, name)})
+	}
+	return refs
+}
+
+func pluginNetTransactionInterfaceNames(entry pluginNetTransactionEntry) []string {
+	names := make(map[string]bool)
+	add := func(name string) {
+		if name != "" {
+			names[name] = true
+		}
+	}
+	if req := entry.RouteRequest; req != nil {
+		for _, name := range pluginControlNetRouteInterfaces(*req) {
+			add(name)
+		}
+	}
+	if req := entry.RuleRequest; req != nil {
+		add(req.IIF)
+		add(req.OIF)
+	}
+	if req := entry.NeighRequest; req != nil {
+		add(req.Interface)
+	}
+	var ordered []string
+	for name := range names {
+		ordered = append(ordered, name)
+	}
+	sort.Strings(ordered)
+	return ordered
+}
+
+func pluginNetTransactionTouches(record store.PluginNetTransaction, refs []pluginOwnedResourceRef) bool {
+	state, err := decodePluginNetTransactionState(&record)
+	if err != nil {
+		return true
+	}
+	for _, entry := range state.Entries {
+		if entry.Resolved {
+			continue
+		}
+		for _, ref := range refs {
+			if ref.ResourceType == entry.ResourceType && ref.ResourceKey == entry.ResourceKey {
+				return true
+			}
+			for _, link := range pluginNetTransactionLinkRefs(entry) {
+				if ref == link {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func checkPendingPluginNetResources(db *sql.DB, pluginID string, refs []pluginOwnedResourceRef) error {
+	if db == nil {
+		return fmt.Errorf("plugin ownership store is unavailable")
+	}
+	records, err := store.GetPluginNetTransactions(db)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if record.StartedCount == 0 {
+			continue
+		}
+		state, err := decodePluginNetTransactionState(&record)
+		if err != nil {
+			if record.PluginID == pluginID {
+				return fmt.Errorf("network recovery journal %s is invalid: %w", record.TransactionID, err)
+			}
+			continue
+		}
+		for _, entry := range state.Entries[:record.StartedCount] {
+			if entry.Resolved {
+				continue
+			}
+			for _, ref := range refs {
+				if ref.ResourceType == entry.ResourceType && ref.ResourceKey == entry.ResourceKey {
+					return fmt.Errorf("%s slot %s has pending recovery %s", ref.ResourceType, ref.ResourceKey, record.TransactionID)
+				}
+				if ref.ResourceType == pluginOwnedResourceTypeLink || ref.ResourceType == pluginOwnedResourceTypeNamespace {
+					for _, dependency := range pluginNetTransactionLinkRefs(entry) {
+						if ref == dependency {
+							return fmt.Errorf("interface %s has pending network recovery %s", ref.ResourceKey, record.TransactionID)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func capturePluginNetTransactionLinks(admin pluginControlNetAdmin, entry pluginNetTransactionEntry) ([]pluginNetTransactionLinkIdentity, error) {
+	ordered := pluginNetTransactionInterfaceNames(entry)
+	links := make([]pluginNetTransactionLinkIdentity, 0, len(ordered))
+	for _, name := range ordered {
+		link, err := admin.LinkGet(name)
+		if err != nil {
+			return nil, fmt.Errorf("inspect transaction interface %s: %w", name, err)
+		}
+		links = append(links, pluginNetTransactionLinkIdentity{Name: name, IfIndex: link.IfIndex, Kind: link.Kind, MAC: link.MAC})
+	}
+	return links, nil
+}
+
+func pluginNetTransactionLinksChanged(admin pluginControlNetAdmin, entry pluginNetTransactionEntry) (bool, error) {
+	scoped, present, err := pluginControlNetAdminForOwnedNamespace(admin, pluginNetTransactionEntryNamespace(entry), entry.NamespaceIdentity)
+	if err != nil || !present {
+		return !present, err
+	}
+	for _, expected := range entry.LinkIdentities {
+		current, present, err := scoped.LinkLookup(expected.Name)
+		if err != nil {
+			return false, err
+		}
+		if !present || !pluginOwnedLinkIdentityMatches(current, expected.IfIndex, expected.Kind, expected.MAC) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (h *pluginControlHost) validatePluginNetTransactionLinks(namespaceID pluginControlNetNamespaceIdentity, namespace string, links []pluginNetTransactionLinkIdentity) error {
+	// Namespace identity and link identity are stable across carrier/MTU/IP
+	// changes, but never across deletion and recreation of the same name.
+	entry := pluginNetTransactionEntry{NamespaceIdentity: namespaceID, LinkIdentities: links, RouteRequest: &pluginControlNetRouteRequest{Namespace: namespace}}
+	changed, err := pluginNetTransactionLinksChanged(h.netAdmin, entry)
+	if err != nil {
+		return err
+	}
+	if changed {
+		return fmt.Errorf("network interface or namespace changed during transaction")
+	}
+	return nil
+}
+
+func pluginNetTransactionLinkIndices(links []pluginNetTransactionLinkIdentity) map[string]int {
+	indices := make(map[string]int, len(links))
+	for _, link := range links {
+		indices[link.Name] = link.IfIndex
+	}
+	return indices
+}
+
+func pluginNetTransactionOwnsOldGeneration(state pluginNetTransactionState, entry pluginNetTransactionEntry, owned store.PluginOwnedResource) bool {
+	var metadata struct {
+		BootID         string                         `json:"boot_id"`
+		DevIfIndex     int                            `json:"dev_ifindex"`
+		LinkIdentities []pluginOwnedRouteLinkIdentity `json:"link_identities"`
+	}
+	if json.Unmarshal([]byte(owned.MetadataJSON), &metadata) != nil {
+		return false
+	}
+	if state.BootID != "" && metadata.BootID != state.BootID {
+		return false
+	}
+	for _, old := range entry.LinkIdentities {
+		if metadata.DevIfIndex > 0 && metadata.DevIfIndex != old.IfIndex {
+			return false
+		}
+		for _, current := range metadata.LinkIdentities {
+			if current.Dev == old.Name && (current.IfIndex != old.IfIndex ||
+				(current.Kind != "" && old.Kind != "" && current.Kind != old.Kind) ||
+				(current.MAC != "" && old.MAC != "" && !strings.EqualFold(current.MAC, old.MAC))) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func capturePluginNetLeaseSnapshot(db *sql.DB, pluginID, resourceType, resourceKey string, metadata any) (pluginNetLeaseSnapshot, error) {
@@ -420,4 +781,167 @@ func capturePluginNetLeaseSnapshot(db *sql.DB, pluginID, resourceType, resourceK
 		return pluginNetLeaseSnapshot{}, fmt.Errorf("decode %s ownership metadata: %w", resourceType, err)
 	}
 	return pluginNetLeaseSnapshot{Exists: true, PluginID: owned.PluginID, MetadataJSON: owned.MetadataJSON}, nil
+}
+
+// Link removal deletes its routes in the kernel. A stale snapshot must not
+// recreate those routes using a new device that happens to reuse the name.
+func pluginNetRecoverableRouteStates(admin pluginControlNetAdmin, states []pluginControlNetRouteState) ([]pluginControlNetRouteState, error) {
+	var eligible []pluginControlNetRouteState
+	for _, state := range states {
+		identities := make(map[string]int)
+		if state.Dev != "" {
+			identities[state.Dev] = state.DevIfIndex
+		}
+		for _, hop := range state.Nexthops {
+			identities[hop.Dev] = hop.DevIfIndex
+		}
+		valid := true
+		for name, index := range identities {
+			current, present, err := admin.LinkLookup(name)
+			if err != nil {
+				return nil, err
+			}
+			// Legacy snapshots without an index are still handled by RouteRestore.
+			if index > 0 && (!present || current.IfIndex != index) {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			eligible = append(eligible, state)
+		}
+	}
+	return eligible, nil
+}
+
+// Legacy journals lacked device identities. Recover only when the existing
+// lease or owned link still supplies that identity; guessing from today's
+// interface name would allow an old journal to mutate a replacement device.
+func hydrateLegacyPluginNetTransactionIdentity(db *sql.DB, pluginID string, state *pluginNetTransactionState, entry pluginNetTransactionEntry, owned *store.PluginOwnedResource) (pluginNetTransactionEntry, error) {
+	var metadata struct {
+		BootID         string                         `json:"boot_id"`
+		DevIfIndex     int                            `json:"dev_ifindex"`
+		LinkIdentities []pluginOwnedRouteLinkIdentity `json:"link_identities"`
+	}
+	if owned != nil {
+		if err := json.Unmarshal([]byte(owned.MetadataJSON), &metadata); err != nil {
+			return entry, err
+		}
+	}
+	if state.BootID == "" {
+		state.BootID = metadata.BootID
+	}
+	if state.BootID != "" && pluginOwnershipBootID != "" && state.BootID != pluginOwnershipBootID {
+		return entry, nil
+	}
+	if len(entry.LinkIdentities) > 0 {
+		return entry, nil
+	}
+	names := pluginNetTransactionInterfaceNames(entry)
+	for _, name := range names {
+		identity := pluginNetTransactionLinkIdentity{Name: name}
+		for _, known := range metadata.LinkIdentities {
+			if known.Dev == name {
+				identity.IfIndex, identity.Kind, identity.MAC = known.IfIndex, known.Kind, known.MAC
+			}
+		}
+		if identity.IfIndex == 0 && len(names) == 1 {
+			identity.IfIndex = metadata.DevIfIndex
+		}
+		if identity.IfIndex == 0 {
+			link, err := store.PluginOwnedResourceOrNil(db, pluginOwnedResourceTypeLink, pluginControlNetScopedResourceKey(pluginNetTransactionEntryNamespace(entry), name))
+			if err != nil {
+				return entry, err
+			}
+			if link != nil && link.PluginID == pluginID {
+				var claim pluginOwnedLinkClaim
+				if err := json.Unmarshal([]byte(link.MetadataJSON), &claim); err != nil {
+					return entry, err
+				}
+				identity.IfIndex, identity.Kind, identity.MAC = claim.IfIndex, claim.Kind, claim.MAC
+				if state.BootID == "" {
+					state.BootID = claim.BootID
+				}
+			}
+		}
+		if identity.IfIndex == 0 {
+			return entry, fmt.Errorf("legacy recovery lacks recorded identity for interface %s", name)
+		}
+		entry.LinkIdentities = append(entry.LinkIdentities, identity)
+	}
+	if state.BootID == "" && pluginOwnershipBootID != "" {
+		return entry, fmt.Errorf("legacy recovery lacks a recorded boot identity")
+	}
+	return entry, nil
+}
+
+func pluginNetTransactionLeaseSuperseded(entry pluginNetTransactionEntry, owned store.PluginOwnedResource) (bool, error) {
+	if entry.LeaseBefore.Exists && entry.LeaseBefore.MetadataJSON == owned.MetadataJSON {
+		return false, nil
+	}
+	var metadata struct {
+		Current        json.RawMessage                `json:"current"`
+		Present        bool                           `json:"current_present"`
+		DevIfIndex     int                            `json:"dev_ifindex"`
+		LinkIdentities []pluginOwnedRouteLinkIdentity `json:"link_identities"`
+	}
+	if err := json.Unmarshal([]byte(owned.MetadataJSON), &metadata); err != nil {
+		return false, err
+	}
+	for _, old := range entry.LinkIdentities {
+		if metadata.DevIfIndex > 0 && metadata.DevIfIndex != old.IfIndex {
+			return true, nil
+		}
+		for _, current := range metadata.LinkIdentities {
+			if current.Dev == old.Name && (current.IfIndex != old.IfIndex || (current.Kind != "" && old.Kind != "" && current.Kind != old.Kind) || (current.MAC != "" && old.MAC != "" && !strings.EqualFold(current.MAC, old.MAC))) {
+				return true, nil
+			}
+		}
+	}
+	if len(metadata.Current) == 0 || string(metadata.Current) == "null" {
+		return false, nil
+	}
+	if metadata.Present != entry.Present {
+		return true, nil
+	}
+	var current, expected any
+	switch {
+	case entry.RouteRequest != nil:
+		var req pluginControlNetRouteRequest
+		if err := json.Unmarshal(metadata.Current, &req); err != nil {
+			return false, err
+		}
+		current, expected = normalizePluginControlRouteRequest(req), normalizePluginControlRouteRequest(*entry.RouteRequest)
+	case entry.RuleRequest != nil:
+		var req pluginControlNetRuleRequest
+		if err := json.Unmarshal(metadata.Current, &req); err != nil {
+			return false, err
+		}
+		normalized, err := normalizePluginControlRuleRequest(req)
+		if err != nil {
+			return false, err
+		}
+		current = normalized
+		expected, _ = normalizePluginControlRuleRequest(*entry.RuleRequest)
+	case entry.NeighRequest != nil:
+		var req pluginControlNetNeighRequest
+		if err := json.Unmarshal(metadata.Current, &req); err != nil {
+			return false, err
+		}
+		normalized, err := normalizePluginControlNeighRequest(req, false)
+		if err != nil {
+			return false, err
+		}
+		current = normalized
+		expected, _ = normalizePluginControlNeighRequest(*entry.NeighRequest, false)
+	}
+	actualJSON, err := json.Marshal(current)
+	if err != nil {
+		return false, err
+	}
+	expectedJSON, err := json.Marshal(expected)
+	if err != nil {
+		return false, err
+	}
+	return string(actualJSON) != string(expectedJSON), nil
 }
