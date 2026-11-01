@@ -406,6 +406,32 @@ test('renderKernelRuntime omits degraded note when no engine is degraded', () =>
   assert.equal(degradedNotes.length, 0);
 });
 
+test('kernel status details distinguish helper build support, loading and usable capabilities', () => {
+  for (const state of [
+    {compiled:false,loaded:false,available:false,want:'kernel.helper.notCompiled'},
+    {compiled:false,loaded:true,available:false,want:'kernel.helper.notCompiled'},
+    {compiled:true,loaded:true,available:false,want:'kernel.helper.unavailable',reason:'ABI mismatch'},
+    {compiled:true,loaded:true,available:true,want:'kernel.helper.available'}
+  ]) {
+    const {app}=createHarness();
+    app.state.kernelRuntime.data=Object.assign(baseRuntimeData(), {
+      kernel_helper_module:{name:'veer_kfuncs',...state}, engines:[runtimeEngine()]
+    });
+    app.renderKernelRuntime();
+    const labels=[];
+    function visit(node) {
+      if(node.attributes?.['aria-label'])labels.push(node.attributes['aria-label']);
+      (node.childNodes||[]).forEach(visit);
+    }
+    visit(app.el.kernelRuntimeSummary);
+    const detail=labels.find(value=>value.includes('veer_kfuncs'));
+    assert.ok(detail,'helper status must be visible in the summary details');
+    assert.ok(detail.includes(state.loaded?'Loaded':'Not loaded'));
+    assert.ok(detail.includes(state.want));
+    if(state.reason)assert.ok(detail.includes(state.reason));
+  }
+});
+
 test('applyKernelFeatureVisibility hides egress nat surfaces when kernel dataplane is unavailable', () => {
   const { app, elements } = createHarness();
   app.state.activeTab = 'egress-nats';

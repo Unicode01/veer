@@ -24,6 +24,7 @@ import (
 var kernelModuleProbeBytes []byte
 
 const optionalKernelModuleName = "veer_kfuncs"
+const optionalKernelModuleCompiled = true
 
 func probeOptionalKernelModule() error {
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(kernelModuleProbeBytes))
