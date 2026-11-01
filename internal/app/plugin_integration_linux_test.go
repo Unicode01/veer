@@ -60,6 +60,7 @@ func TestPluginNetPolicyProviderLinuxIntegration(t *testing.T) {
 	if !vrf.Created || vrf.Link.VRFTable != 12001 {
 		t.Fatalf("vrf result = %+v", vrf)
 	}
+	assertPluginOwnedLinkMACStable(t, admin, vrf.Link)
 	if _, err := admin.LinkSetMaster(pluginControlNetMasterRequest{Link: vlanName, Master: vrfName, Up: true}); err != nil {
 		t.Fatalf("attach vlan to vrf: %v", err)
 	}

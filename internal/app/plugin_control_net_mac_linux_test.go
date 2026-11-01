@@ -23,7 +23,7 @@ func TestPluginControlNetOwnedLinkMACLinuxIntegration(t *testing.T) {
 	assertPluginOwnedLinkMACStable(t, admin, pair.Host)
 	assertPluginOwnedLinkMACStable(t, admin, pair.Peer)
 
-	kinds := []string{"dummy", "bridge", "vrf"}
+	kinds := []string{"dummy", "bridge"}
 	if os.Getenv("VEER_RUN_KFUNCS_TESTS") == "1" {
 		kinds = append(kinds, "veerwan")
 	}
@@ -40,10 +40,6 @@ func TestPluginControlNetOwnedLinkMACLinuxIntegration(t *testing.T) {
 				info = result.Link
 			case "bridge":
 				info, err = admin.LinkEnsureBridge(pluginControlNetBridgeRequest{Name: name, MTU: 1492, Up: true})
-			case "vrf":
-				var result pluginControlNetVRFResult
-				result, err = admin.LinkEnsureVRF(pluginControlNetVRFRequest{Name: name, Table: 14299, Up: true})
-				info = result.Link
 			}
 			if err != nil {
 				t.Fatal(err)
