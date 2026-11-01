@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 )
 
 func resolvePluginObjects(plugin *LoadedPlugin) error {
@@ -296,7 +298,64 @@ func loadVerifiedPluginObjectCollectionSpec(objectPath, expectedSHA256 string) (
 	if got != expectedSHA256 {
 		return nil, fmt.Errorf("sha256 changed after catalog verification: got %s, want %s", got, expectedSHA256)
 	}
-	return ebpf.LoadCollectionSpecFromReader(bytes.NewReader(data))
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	preparePluginObjectContextFunctions(spec)
+	return spec, nil
+}
+
+// Independent verification of global context arguments uses the running
+// kernel's vmlinux BTF. An external userspace BTF file cannot provide it.
+// Keep globals when possible: caller-dependent loop verification can exceed
+// the verifier's complexity limit on newer kernels.
+func preparePluginObjectContextFunctions(spec *ebpf.CollectionSpec) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	if _, err := os.Stat("/sys/kernel/btf/vmlinux"); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	localizePluginObjectContextFunctions(spec)
+}
+
+func localizePluginObjectContextFunctions(spec *ebpf.CollectionSpec) {
+	if spec == nil {
+		return
+	}
+	for _, program := range spec.Programs {
+		if program == nil {
+			continue
+		}
+		// The first instruction describes the entry point, not a subprogram.
+		for i := 1; i < len(program.Instructions); i++ {
+			function := btf.FuncMetadata(&program.Instructions[i])
+			if function == nil || function.Linkage != btf.GlobalFunc {
+				continue
+			}
+			proto, ok := btf.UnderlyingType(function.Type).(*btf.FuncProto)
+			if !ok {
+				continue
+			}
+			for _, parameter := range proto.Params {
+				pointer, ok := btf.UnderlyingType(parameter.Type).(*btf.Pointer)
+				if !ok {
+					continue
+				}
+				context, ok := btf.UnderlyingType(pointer.Target).(*btf.Struct)
+				if !ok || (context.Name != "__sk_buff" && context.Name != "xdp_md") {
+					continue
+				}
+				// Do not mutate the ELF type graph shared by other programs or
+				// entry points. Instructions and function prototypes stay intact.
+				local := *function
+				local.Linkage = btf.StaticFunc
+				program.Instructions[i] = btf.WithFuncMetadata(program.Instructions[i], &local)
+				break
+			}
+		}
+	}
 }
 
 func pluginObjectProgramsFromSpec(spec *ebpf.CollectionSpec) []PluginObjectProgram {

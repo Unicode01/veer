@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -48,18 +47,7 @@ SEC("tc/test_dhcpv6") int test_dhcpv6(struct __sk_buff *skb) { return pppoe_dhcp
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Without vmlinux BTF, older kernels cannot identify a global function's
-	// __sk_buff argument as PTR_TO_CTX. The portable object must retain local
-	// subprograms so the verifier inherits that type from the actual caller.
-	for _, name := range []string{"clamp_tcp_mss_options", "compact_pppoe_payload_to_l3"} {
-		var function *btf.Func
-		if err := spec.Types.TypeByName(name, &function); err != nil {
-			t.Fatalf("PPPoE subprogram %s: %v", name, err)
-		}
-		if function.Linkage != btf.StaticFunc {
-			t.Fatalf("PPPoE subprogram %s needs kernel BTF: linkage=%v", name, function.Linkage)
-		}
-	}
+	preparePluginObjectContextFunctions(spec)
 	for _, program := range spec.Programs {
 		program.Flags |= unix.BPF_F_STRICT_ALIGNMENT
 	}
