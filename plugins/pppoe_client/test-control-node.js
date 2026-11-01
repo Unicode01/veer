@@ -61,6 +61,7 @@ function main() {
   testDisabledAutoRedialHonorsFailureGrace();
   testKeepaliveFinalConfirmationRecoversWithoutPADT();
   testKeepaliveTransportErrorKeepsRetryState();
+  testSessionControlRecoversAfterLinkFailure();
   testAutoRedialAfterKeepaliveTimeout();
   testRedialDiscoveryFailureRetriesWithoutOldKeepalive();
   testAutoRedialDoesNotMaskAuthFailure();
@@ -983,6 +984,46 @@ function testKeepaliveTransportErrorKeepsRetryState() {
   assert.match(keepalive.redial_error, /link temporarily unavailable/);
   assert.strictEqual(keepalive.redial_next_attempt, 2);
   assert(h.state.timers.has('redial_retry'), 'a retry-time link error must schedule the next attempt');
+}
+
+function testSessionControlRecoversAfterLinkFailure() {
+  for (const failure of ['receive', 'link']) {
+    const h = createHarness({auth: 'none'});
+    const payload = {profile_key: 'default', interface: 'eth0', auth: 'none',
+      timeout_ms: 20, control_ack_timeout_ms: 10, control_idle_timeout_ms: 1,
+      max_frames: 4, session_id: SESSION_ID, ac_mac: AC_MAC,
+      deadline_ms: Date.now() + 2000, slice_ms: 20};
+    h.setResource('sessions', 'last', {phase: 'session_probe', session_id: SESSION_ID,
+      ac_mac: AC_MAC, lcp_ready: true}, true);
+    const originalRecv = h.context.net.l2.recvMany;
+    const originalLinkGet = h.context.net.link.get;
+    const sendsBefore = h.state.l2Sends.length;
+    if (failure === 'receive') h.context.net.l2.recvMany = () => { throw new Error('network is down'); };
+    else h.context.net.link.get = () => { throw new Error('network is down'); };
+    const fire = (value) => {
+      h.state.timers.delete('session_control');
+      h.context.exports.onTimer({timer: {name: 'session_control', payload: value}});
+    };
+    fire(payload);
+    let control = h.resource('sessions', 'control').data;
+    assert.strictEqual(control.io_errors, 1);
+    assert.match(control.events[0].message, /network is down/);
+    assert(h.state.timers.has('session_control'), 'link failure must rearm the consumed one-shot timer');
+    const retry = clone(h.state.timers.get('session_control').payload);
+    assert.strictEqual(retry.deadline_ms, payload.deadline_ms, 'retry must not extend the window');
+    h.context.net.l2.recvMany = originalRecv;
+    h.context.net.link.get = originalLinkGet;
+    fire(retry);
+    control = h.resource('sessions', 'control').data;
+    assert.strictEqual(control.io_errors, 1, 'recovered poll must preserve the diagnostic count');
+    assert(control.polls > 0, 'recovered timer must resume receiving control frames');
+    assert(h.state.timers.has('session_control'));
+    assert.strictEqual(h.resource('sessions', 'last').data.session_id, SESSION_ID);
+    assert.strictEqual(h.state.l2Sends.length, sendsBefore,
+      'a transient control-window failure must not transmit PADT or start discovery');
+    fire(Object.assign({}, retry, {deadline_ms: Date.now() - 1}));
+    assert(!h.state.timers.has('session_control'), 'expired window must stop retrying');
+  }
 }
 
 function testAutoRedialAfterKeepaliveTimeout() {
