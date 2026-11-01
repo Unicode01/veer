@@ -609,6 +609,16 @@ func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *rule
 		}
 
 		plan := acc.Result()
+		// Protocol WANs must not fall through to the host's default route when
+		// their boundary or source address is temporarily unavailable. Keep the
+		// configured ingress/protocol selectors installed as drop guards.
+		if item.Enabled && !plan.KernelEligible && planner.kernelAvailable &&
+			normalizeEgressNATRedirectMode(item.RedirectMode) == egressNATRedirectModePreparedL2 {
+			for i := candidateStart; i < len(candidates); i++ {
+				candidates[i].rule.kernelUnavailable = true
+			}
+			plan.EffectiveEngine = ruleEngineKernel
+		}
 		if item.Enabled && plan.EffectiveEngine == ruleEngineKernel {
 			neededEntries := len(candidates) - candidateStart
 			requestedEntries := reservedKernelEntries + neededEntries

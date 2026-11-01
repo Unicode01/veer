@@ -3248,14 +3248,14 @@ func (pm *ProcessManager) egressNATRuntimeStatus(id int64, enabled bool) string 
 	running := pm.kernelEgressNATs[id]
 	plan, ok := pm.egressNATPlans[id]
 	pm.mu.Unlock()
-	if running {
-		return "running"
-	}
 	if ok && egressNATPlanIsFullyOverridden(plan) {
 		return "overridden"
 	}
 	if ok && egressNATPlanIsUnavailable(plan) {
 		return "error"
+	}
+	if running {
+		return "running"
 	}
 	return "stopped"
 }
