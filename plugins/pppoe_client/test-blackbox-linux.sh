@@ -326,11 +326,19 @@ api_post_plugin_action() {
 	api_plugin=$1
 	api_action=$2
 	api_payload=$3
-	curl -sS --fail-with-body \
+	api_response="$work_dir/$api_plugin-$api_action-response.json"
+	api_status=0
+	curl -sS --fail-with-body --max-time 120 -o "$api_response" \
 		-H "Authorization: Bearer $VEER_PPPOE_BLACKBOX_TOKEN" \
 		-H "Content-Type: application/json" \
 		-d "{\"payload\":$api_payload}" \
-		"http://127.0.0.1:$VEER_PPPOE_BLACKBOX_PORT/api/plugins/$api_plugin/actions/$api_action"
+		"http://127.0.0.1:$VEER_PPPOE_BLACKBOX_PORT/api/plugins/$api_plugin/actions/$api_action" || api_status=$?
+	cat "$api_response"
+	if [ "$api_status" -ne 0 ]; then
+		printf 'plugin action failed: %s/%s\n' "$api_plugin" "$api_action" >&2
+		cat "$api_response" >&2
+	fi
+	return "$api_status"
 }
 
 api_post_action() {
@@ -623,10 +631,11 @@ EOF
 	tc filter show dev "$wan_host" ingress | grep -q bpf
 	api_post_action traffic_stats '{"profile_key":"blackbox"}' >"$work_dir/traffic-before.json"
 	grep -q '"available":true' "$work_dir/traffic-before.json"
-	if [ "$VEER_PPPOE_BLACKBOX_TEST_IPV6" != "1" ]; then
-		grep -q '"rx_bytes":0' "$work_dir/traffic-before.json"
-		grep -q '"tx_bytes":0' "$work_dir/traffic-before.json"
-	fi
+	# Creating the WAN boundary can already send kernel IPv6 control traffic.
+	# Verify data traffic against this baseline rather than requiring zero.
+	rx_bytes_before=$(sed -n 's/.*"rx_bytes":\([0-9][0-9]*\).*/\1/p' "$work_dir/traffic-before.json")
+	tx_bytes_before=$(sed -n 's/.*"tx_bytes":\([0-9][0-9]*\).*/\1/p' "$work_dir/traffic-before.json")
+	test -n "$rx_bytes_before" && test -n "$tx_bytes_before"
 
 	ip link add "$lan_host" type veth peer name "$lan_peer"
 	ip link set "$lan_host" up
@@ -676,10 +685,6 @@ EOF
 		ip -6 route replace 2001:db8:ffff::1/128 dev "$local_if" src 2001:db8:ffff::2
 		ping -6 -I "$local_if" -c 3 -W 2 2001:db8:ffff::1
 	fi
-	if [ "$VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL" = "1" ]; then
-		test_automatic_redial
-	fi
-
 	if [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" = "1" ]; then
 	iperf_port=$((56000 + ($$ % 1000)))
 	ip netns exec "$server_ns" iperf3 -s -B 8.8.8.8 -p "$iperf_port" --one-off >"$work_dir/iperf-server.log" 2>&1 &
@@ -730,6 +735,15 @@ EOF
 	grep -q '"available":true' "$work_dir/traffic-after.json"
 	grep -Eq '"rx_bytes":[1-9][0-9]*' "$work_dir/traffic-after.json"
 	grep -Eq '"tx_bytes":[1-9][0-9]*' "$work_dir/traffic-after.json"
+	rx_bytes_after=$(sed -n 's/.*"rx_bytes":\([0-9][0-9]*\).*/\1/p' "$work_dir/traffic-after.json")
+	tx_bytes_after=$(sed -n 's/.*"tx_bytes":\([0-9][0-9]*\).*/\1/p' "$work_dir/traffic-after.json")
+	test "$rx_bytes_after" -gt "$rx_bytes_before"
+	test "$tx_bytes_after" -gt "$tx_bytes_before"
+	# Redial installs a new tunnel and resets its counters, so run it only
+	# after comparing data traffic within the original tunnel generation.
+	if [ "$VEER_PPPOE_BLACKBOX_TEST_AUTO_REDIAL" = "1" ]; then
+		test_automatic_redial
+	fi
 	{
 		echo '=== local ==='
 		ip -s -s link show dev "$local_if"

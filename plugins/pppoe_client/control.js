@@ -3311,7 +3311,6 @@ function ackPeerConfigureRequests(profile, peerMAC, sessionID, protocol) {
 function serviceSessionControlTimer(payload) {
   if (!sessionTimerIsCurrent(payload)) return;
   var profile = loadProfile(payload);
-  resolveL2Identity(profile);
   var sessionID = clampInt(payload.session_id, 1, 65535, 0);
   var peerMAC = macText(payload.ac_mac || payload.peer_mac || '');
   if (!sessionID || !peerMAC) throw new Error('session_control timer requires session_id and ac_mac');
@@ -3322,7 +3321,18 @@ function serviceSessionControlTimer(payload) {
   if (slice > remaining) slice = remaining;
 
   var started = Date.now();
-  var result = servicePPPControlWindow(profile, peerMAC, sessionID, slice, null);
+  var result;
+  try {
+    resolveL2Identity(profile);
+    result = servicePPPControlWindow(profile, peerMAC, sessionID, slice, null);
+  } catch (e) {
+    // A timeout timer is consumed before its handler runs. Preserve the
+    // bounded control window across a temporary link/socket failure.
+    result = newPPPControlWindowResult(slice);
+    result.phase = 'io_error';
+    result.io_errors = 1;
+    result.events.push({event: 'io_error', message: errorMessage(e)});
+  }
   if (!sessionTimerIsCurrent(payload)) return;
   var elapsed = Math.max(slice, Date.now() - started);
   var nextRemaining = Math.max(0, remaining - elapsed);
@@ -3368,6 +3378,7 @@ function mergeControlWindowResult(previous, next) {
   out.skipped = clampInt(previous.skipped, 0, 1000000, 0) + clampInt(next.skipped, 0, 1000000, 0);
   out.timeouts = clampInt(previous.timeouts, 0, 1000000, 0) + clampInt(next.timeouts, 0, 1000000, 0);
   out.parse_errors = clampInt(previous.parse_errors, 0, 1000000, 0) + clampInt(next.parse_errors, 0, 1000000, 0);
+  out.io_errors = clampInt(previous.io_errors, 0, 1000000, 0) + clampInt(next.io_errors, 0, 1000000, 0);
   out.configure_acks_sent = clampInt(previous.configure_acks_sent, 0, 1000000, 0) + clampInt(next.configure_acks_sent, 0, 1000000, 0);
   out.echo_replies_sent = clampInt(previous.echo_replies_sent, 0, 1000000, 0) + clampInt(next.echo_replies_sent, 0, 1000000, 0);
   out.terminate_acks_sent = clampInt(previous.terminate_acks_sent, 0, 1000000, 0) + clampInt(next.terminate_acks_sent, 0, 1000000, 0);
@@ -3410,6 +3421,7 @@ function newPPPControlWindowResult(durationMs) {
     skipped: 0,
     timeouts: 0,
     parse_errors: 0,
+    io_errors: 0,
     configure_acks_sent: 0,
     echo_replies_sent: 0,
     terminate_acks_sent: 0,
