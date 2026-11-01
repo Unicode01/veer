@@ -321,7 +321,11 @@ function repairMaps(p, wg, boundary) {
   // A dataplane replacement can lose private maps without replacing netdevs
   // or the core. Restore only this WAN's two entries; leave live flows alone.
   var entries = mapEntries(p, wg, boundary);
-  if (entries.some(function (entry) { return ebpf.mapGet(OBJECT, MAP, entry.key) !== entry.value; }))
+  if (entries.some(function (entry) {
+    // Hash-map reads may throw for absent keys.
+    try { return ebpf.mapGet(OBJECT, MAP, entry.key) !== entry.value; }
+    catch (_) { return true; }
+  }))
     ebpf.mapTransaction({operations: entries});
 }
 function installMaps(p, wg, boundary, old) {

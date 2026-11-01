@@ -510,6 +510,7 @@ for(const driver of ['wireguard','mihomo','sing_box','tun']) {
     const map=[...h.maps().values()][0], expected=[...map], before=clone(h.state), lease=clone(h.host.snapshot().kv.lease_default);
     const procs=clone(h.procs||{}), specs=h.specs?.length;
     let writes=0;const put=map.set.bind(map);map.set=(...args)=>{writes++;return put(...args);};
+    const get=map.get.bind(map);map.get=key=>{if(!map.has(key))throw new Error('ebpf.mapGet: get map wg_links: lookup: key does not exist');return get(key);};
     const tick=()=>h.host.run('onTimer',{timer:{name:'wg_repair'}});
     tick();assert.equal(writes,0,'healthy polls must not rewrite maps');
     for(const damage of ['empty','missing-forward','missing-reply','corrupt-forward','corrupt-reply']) {
