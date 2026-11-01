@@ -154,7 +154,7 @@ exports.onTimer = function (ctx) {
       if (lease.pending || !wg || !boundary || (wg.flags || []).indexOf('UP') < 0 || wg.mtu !== p.mtu || wg.ifindex !== lease.wg_ifindex || boundary.local.ifindex !== lease.local_ifindex || boundary.peer.ifindex !== lease.pipeline_ifindex) {
         clearMaps(lease);
         apply(key, lease.settings);
-      }
+      } else repairMaps(p, wg, boundary);
     } catch (e) {
       try { clearMaps(lease); } catch (cleanup) { log.error('WG map cleanup failed: ' + String(cleanup.message || cleanup)); }
       resources.set('status', key, {phase: 'error', error: String(e.message || e), cleanup_required: true}, true);
@@ -311,12 +311,23 @@ function clearMaps(lease) {
     catch (e) { if (String(e.message || e).indexOf('plugin runtime target is not loaded') < 0) throw e; }
   });
 }
+function mapEntries(p, wg, boundary) {
+  return [
+    {op: 'put', object: OBJECT, map: MAP, key: u32(boundary.peer.ifindex), value: u32(1) + u32(wg.ifindex) + '000000000000000000000000' + u32(p.mtu)},
+    {op: 'put', object: OBJECT, map: MAP, key: u32(wg.ifindex), value: u32(2) + u32(boundary.peer.ifindex) + macHex(boundary.peer.address) + macHex(boundary.local.address) + u32(p.mtu)}
+  ];
+}
+function repairMaps(p, wg, boundary) {
+  // A dataplane replacement can lose private maps without replacing netdevs
+  // or the core. Restore only this WAN's two entries; leave live flows alone.
+  var entries = mapEntries(p, wg, boundary);
+  if (entries.some(function (entry) { return ebpf.mapGet(OBJECT, MAP, entry.key) !== entry.value; }))
+    ebpf.mapTransaction({operations: entries});
+}
 function installMaps(p, wg, boundary, old) {
   var ops = [], next = [wg.ifindex, boundary.peer.ifindex];
   [old && old.wg_ifindex, old && old.pipeline_ifindex].forEach(function (n) { if (n && next.indexOf(n) < 0) ops.push({op: 'delete', object: OBJECT, map: MAP, key: u32(n)}); });
-  ops.push({op: 'put', object: OBJECT, map: MAP, key: u32(boundary.peer.ifindex), value: u32(1) + u32(wg.ifindex) + '000000000000000000000000' + u32(p.mtu)});
-  ops.push({op: 'put', object: OBJECT, map: MAP, key: u32(wg.ifindex), value: u32(2) + u32(boundary.peer.ifindex) + macHex(boundary.peer.address) + macHex(boundary.local.address) + u32(p.mtu)});
-  ebpf.mapTransaction({operations: ops});
+  ebpf.mapTransaction({operations: ops.concat(mapEntries(p, wg, boundary))});
 }
 function isLegacy(lease) { return !!(lease && lease.plan && lease.plan.bindings); }
 function apply(key, raw, explicit) {
@@ -828,7 +839,7 @@ function repairTUN(key, lease) {
         boundary.peer.ifindex !== lease.pipeline_ifindex || (proc && (proc.state !== 'running' || proc.started_at !== lease.process_started_at))) {
       suspendTUN(p, lease);
       apply(key, lease.settings);
-    }
+    } else repairMaps(p, current, boundary);
   } catch (e) {
     try { suspendTUN(lease.plan, lease); } catch (_) { log.error('VPN suspension failed'); }
     resources.set('status', key, {phase: 'error', driver: lease.plan.driver, error: String(e.message || e), cleanup_required: true}, true);

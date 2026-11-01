@@ -1993,6 +1993,69 @@ func (rt *linuxKernelRuleRuntime) cleanupPluginPipelineLocked() {
 	rt.pluginRuntimeSnapshot = pluginRuntimeSnapshot{}
 }
 
+// Keep independent FDs until the replacement core has attached successfully.
+// Reconciliation closes the previous plugin collections, so retaining only
+// their Go pointers cannot restore map access after a failed core rebuild.
+func (rt *linuxKernelRuleRuntime) preservePluginPipelineForRebuildLocked() (func(bool), error) {
+	previousCore := rt.coll
+	if previousCore == nil || len(rt.pluginPipelineLoaded) == 0 {
+		return func(bool) {}, nil
+	}
+	previous := &linuxKernelRuleRuntime{
+		pluginPipelineActive:         rt.pluginPipelineActive,
+		pluginPipelineDesired:        rt.pluginPipelineDesired,
+		pluginPipelineFingerprint:    rt.pluginPipelineFingerprint,
+		pluginPipelineProgChain:      rt.pluginPipelineProgChain,
+		pluginPipelineBankSwitchedAt: rt.pluginPipelineBankSwitchedAt,
+		pluginRuntimeSnapshot:        rt.pluginRuntimeSnapshot,
+	}
+	collections := make(map[*ebpf.Collection]*ebpf.Collection)
+	for _, ref := range rt.pluginPipelineLoaded {
+		copyRef := ref
+		if ref.coll != nil {
+			copyRef.coll = collections[ref.coll]
+			if copyRef.coll == nil {
+				copyRef.coll = &ebpf.Collection{Maps: make(map[string]*ebpf.Map), Programs: make(map[string]*ebpf.Program)}
+				collections[ref.coll] = copyRef.coll
+				previous.pluginPipelineLoaded = append(previous.pluginPipelineLoaded, copyRef)
+				for name, m := range ref.coll.Maps {
+					cloned, err := m.Clone()
+					if err != nil {
+						cleanupKernelPluginPipelineCollections(previous.pluginPipelineLoaded)
+						return nil, fmt.Errorf("retain plugin map %s for core rebuild: %w", name, err)
+					}
+					copyRef.coll.Maps[name] = cloned
+				}
+				for name, prog := range ref.coll.Programs {
+					cloned, err := prog.Clone()
+					if err != nil {
+						cleanupKernelPluginPipelineCollections(previous.pluginPipelineLoaded)
+						return nil, fmt.Errorf("retain plugin program %s for core rebuild: %w", name, err)
+					}
+					copyRef.coll.Programs[name] = cloned
+				}
+				continue
+			}
+		}
+		previous.pluginPipelineLoaded = append(previous.pluginPipelineLoaded, copyRef)
+	}
+	return func(committed bool) {
+		if committed || rt.coll != previousCore {
+			// A full cleanup must not resurrect a disabled or empty runtime.
+			cleanupKernelPluginPipelineCollections(previous.pluginPipelineLoaded)
+			return
+		}
+		rt.cleanupPluginPipelineLocked()
+		rt.pluginPipelineLoaded = previous.pluginPipelineLoaded
+		rt.pluginPipelineActive = previous.pluginPipelineActive
+		rt.pluginPipelineDesired = previous.pluginPipelineDesired
+		rt.pluginPipelineFingerprint = previous.pluginPipelineFingerprint
+		rt.pluginPipelineProgChain = previous.pluginPipelineProgChain
+		rt.pluginPipelineBankSwitchedAt = previous.pluginPipelineBankSwitchedAt
+		rt.pluginRuntimeSnapshot = previous.pluginRuntimeSnapshot
+	}, nil
+}
+
 func cleanupKernelPluginPipelineCollections(refs []loadedPluginObjectRef) {
 	seen := make(map[*ebpf.Collection]struct{}, len(refs))
 	for i := len(refs) - 1; i >= 0; i-- {
