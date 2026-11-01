@@ -24,6 +24,21 @@ import (
 // The complete topology runs in a disposable network namespace. No route,
 // firewall rule, sysctl or WireGuard device is installed in the runner's netns.
 func TestWireGuardMeshLinuxIntegration(t *testing.T) {
+	if os.Getenv("VEER_VPN_HEALTH_SERVER") == "1" {
+		t.Fatal(http.ListenAndServe("203.0.113.1:24005", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/slow" {
+				time.Sleep(4 * time.Second)
+			}
+			if r.URL.Path == "/status" {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			_ = os.WriteFile(os.Getenv("VEER_VPN_HEALTH_OBSERVED"), []byte(host), 0600)
+			w.WriteHeader(http.StatusNoContent)
+		})))
+		return
+	}
 	if role := os.Getenv("VEER_WG_BULK"); role != "" {
 		runWireGuardBulkHelper(t, role)
 		return
@@ -508,6 +523,119 @@ func runWireGuardMeshTopology(t *testing.T) {
 	waitNAT(childID, natSource)
 	probe(selected, selectedSource)
 	probe(direct, "192.0.2.1")
+	{
+		observed := filepath.Join(t.TempDir(), "health-source")
+		server := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+		server.Env = append(os.Environ(), "VEER_VPN_HEALTH_SERVER=1", "VEER_VPN_HEALTH_OBSERVED="+observed)
+		if err := server.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = server.Process.Kill(); _ = server.Wait() }()
+		time.Sleep(100 * time.Millisecond)
+		type healthItem struct {
+			State  string `json:"state"`
+			Result struct {
+				Reason    string `json:"reason"`
+				CheckedAt int64  `json:"checked_at"`
+			} `json:"result"`
+		}
+		getHealth := func() healthItem {
+			t.Helper()
+			var response struct {
+				Result struct {
+					Items []healthItem `json:"items"`
+				} `json:"result"`
+			}
+			body := api("POST", "/api/plugins/vpn_core/actions/health_status", map[string]any{"payload": map[string]any{}})
+			if err := json.Unmarshal(body, &response); err != nil || len(response.Result.Items) != 1 {
+				t.Fatalf("health status: %s %v", body, err)
+			}
+			return response.Result.Items[0]
+		}
+		configureHealth := func(path string, enabled bool, timeout int) {
+			t.Helper()
+			api("POST", "/api/plugins/vpn_core/actions/health_settings", map[string]any{"payload": map[string]any{"key": "default", "settings": map[string]any{
+				"url": "http://203.0.113.1:24005" + path, "expected_status": 204, "timeout_ms": timeout, "enabled": enabled, "interval_seconds": 15,
+			}}})
+		}
+		waitHealth := func(want, reason string) healthItem {
+			t.Helper()
+			end := time.Now().Add(12 * time.Second)
+			for {
+				value := getHealth()
+				if value.State == want && (reason == "" || value.Result.Reason == reason) {
+					return value
+				}
+				if time.Now().After(end) {
+					t.Fatalf("health want %s/%s, got %+v", want, reason, value)
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		probeHealth := func(path, state, reason string) {
+			t.Helper()
+			configureHealth(path, false, 500)
+			action("health_check")
+			waitHealth(state, reason)
+		}
+		routesBefore := ip("-j", "route", "show", "table", "all")
+		interfacesBefore := ip("-o", "link", "show")
+		coreBefore := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+		probeHealth("/", "healthy", "")
+		seen, err := os.ReadFile(observed)
+		if err != nil || strings.TrimSpace(string(seen)) != selectedSource {
+			t.Fatalf("health escaped VPN: backend saw %s want %s (%v)", seen, selectedSource, err)
+		}
+		probeHealth("/status", "unhealthy", "http_status")
+		configureHealth("/slow", false, 3000)
+		started := time.Now()
+		action("health_check")
+		if time.Since(started) > 1500*time.Millisecond {
+			t.Fatal("health request blocked the main control VM")
+		}
+		probe(selected, selectedSource)
+		probe(direct, "192.0.2.1")
+		waitHealth("unhealthy", "timeout")
+		if routesBefore != ip("-j", "route", "show", "table", "all") || interfacesBefore != ip("-o", "link", "show") {
+			t.Fatal("health checks mutated host routes or interface topology")
+		}
+		if driver != "" {
+			coreAfter := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+			if !bytes.Equal(coreBefore, coreAfter) {
+				t.Fatalf("health failure changed the core generation: %s -> %s", coreBefore, coreAfter)
+			}
+			// Local readiness cannot detect a wrong proxy password. The actual
+			// WAN-bound request must detect it without consuming restart budget.
+			api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{"key": "default", "format": "links", "driver": driver, "selected": 0}})
+			action("apply")
+			probeHealth("/", "unhealthy", "")
+			probe(direct, "192.0.2.1")
+			api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{"key": "default", "format": "links", "driver": driver, "selected": 1}})
+			action("apply")
+		}
+		// A request completing after an explicit apply must not publish success
+		// for the new generation. Its replacement probe uses the same record.
+		configureHealth("/slow", false, 3000)
+		action("health_check")
+		action("apply")
+		if getHealth().State == "healthy" {
+			t.Fatal("old probe survived apply")
+		}
+		probeHealth("/", "healthy", "")
+		if driver == "" {
+			configureHealth("/", true, 1000)
+			first := waitHealth("healthy", "")
+			deadline := time.Now().Add(20 * time.Second)
+			for getHealth().Result.CheckedAt <= first.Result.CheckedAt {
+				if time.Now().After(deadline) {
+					t.Fatal("periodic health probe did not run")
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			configureHealth("/", false, 1000)
+		}
+		t.Log("WAN-bound health: real VPN source, HTTP failure, timeout, async control, stale generation and ordinary TC traffic passed")
+	}
 	if driver != "" {
 		// Replace the SS import with AnyTLS through the same public action.
 		// Both cores must carry TCP/UDP before and after supervised recovery.

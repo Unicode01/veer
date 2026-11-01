@@ -12,6 +12,27 @@ WebUI 默认显示出口卡片，新建或编辑时按类型显示表单。支�
 
 WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代理和外部 TUN 的内部 WAN 地址不属于节点参数，留空在首次应用时自动分配；核心自己的 TUN 地址由插件管理，外部 TUN 地址则由外部程序管理。
 
+## 链路健康检测（0.8.0）
+
+出口卡片分别显示本机就绪状态与链路检测结果。点击“健康检测”可立即发起异步 HTTP / HTTPS 请求，查看可用性、请求耗时、检测时间、失败原因及连续失败次数。“检测设置”独立保存，不重新应用出口；自动检测默认关闭，开启后按设置间隔运行。
+
+请求绑定已应用的 WAN local veth 及其源 IPv4，经过 WAN 边界、TC 适配器和实际 WG / 代理核心；域名通过同一出口访问指定 DNS。无需额外代理监听端口、curl 或宿主策略路由。后台 worker 只执行请求，主控制面管理有界任务并核验出口代际；重新应用、拆除、接口替换或核心重启后，旧结果不能成为新出口的健康证明。失败只更新检测状态，不触发重启、故障切换、撤销 WAN 或清理 flow。
+
+| 检测设置 | 默认值 / 范围 |
+| --- | --- |
+| `enabled` | `false`，手动检测始终可用 |
+| `url` | `https://www.gstatic.com/generate_204`；HTTP / HTTPS，不含用户凭据或片段 |
+| `expected_status` | `204`；100–599，`0` 接受任意 2xx；不跟随重定向 |
+| `resolver_ip` | `1.1.1.1`，IPv4 DNS；目标为数值 IP 时不解析 |
+| `interval_seconds` | `60`；15–3600 秒 |
+| `timeout_ms` | `5000`；500–10000 毫秒，响应体最多 4 KiB |
+
+检测地址可改为 WG 对端内网服务，并配合实际返回状态码。代理请求遵循核心自身的分流规则；要验证代理节点，请选择不命中直连例外的目标。成功只代表当前出口到该目标的 HTTP 请求可用，不覆盖全部目的地、UDP、每个 WG peer 或下游 LAN / NAT 规则。耗时包含连接、TLS、响应及必要的 DNS 解析，不是 ICMP RTT；超过 `max(120 秒, 2 × 检测间隔)` 的结果标为需重新检测。
+
+API：`health_settings` 接收 `{key, settings}`，`health_check` 接收 `{key}` 并立即排队返回，`health_status` 返回 `{items:[{key,settings,state,result}]}`。`state` 为 `unknown` / `checking` / `healthy` / `unhealthy` / `unavailable` / `stale`。同出口并发点击合并，每个出口复用一个持久任务；所有网络等待均在独立 worker 中进行。宿主需支持 `control.http_client.v1`、`control.durable_operations.v1` 和 `control.workers`。
+
+Linux 集成测试通过实际插件 API 验证 WG、Mihomo、sing-box 探测及后端观察到的源地址，覆盖错误 HTTP 状态、超时、错误节点认证、重新应用时的旧任务隔离、定时检测，以及探测期间普通 TC 和选中出口的 TCP / UDP 转发。
+
 ## 从 wireguard_mesh 迁移
 
 0.6.0 将旧插件 ID `wireguard_mesh` 改为 `vpn_core`。不能只改目录或直接修改数据库中的 ID：密钥密文的认证信息绑定了原 ID。
