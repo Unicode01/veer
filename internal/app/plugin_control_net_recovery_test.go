@@ -210,16 +210,26 @@ func TestPluginNetResourceLocksIsolateSlotsAndReleaseEntries(t *testing.T) {
 	a := []pluginOwnedResourceRef{{pluginOwnedResourceTypeRoute, "a"}, {pluginOwnedResourceTypeRoute, "a"}}
 	b := []pluginOwnedResourceRef{{pluginOwnedResourceTypeRoute, "b"}}
 	releaseA := lockPluginNetResources(db, a)
+	acquiredA := make(chan struct{})
 	doneA, doneB := make(chan struct{}), make(chan struct{})
-	go func() { release := lockPluginNetResources(db, a); defer release(); close(doneA) }()
-	go func() { release := lockPluginNetResources(db, b); defer release(); close(doneB) }()
+	go func() {
+		release := lockPluginNetResources(db, a)
+		close(acquiredA)
+		release()
+		close(doneA)
+	}()
+	go func() {
+		release := lockPluginNetResources(db, b)
+		release()
+		close(doneB)
+	}()
 	select {
 	case <-doneB:
 	case <-time.After(time.Second):
 		t.Fatal("independent slot blocked")
 	}
 	select {
-	case <-doneA:
+	case <-acquiredA:
 		t.Fatal("overlapping slot was not serialized")
 	default:
 	}
@@ -229,9 +239,8 @@ func TestPluginNetResourceLocksIsolateSlotsAndReleaseEntries(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("slot lock did not release")
 	}
-	// Wait for deferred release in both goroutines by reacquiring the slots.
-	release := lockPluginNetResources(db, append(a, b...))
-	release()
+	// Both goroutines must finish the entire release, including reference
+	// bookkeeping. Reacquiring the slot only waits for its mutex unlock.
 	pluginNetResourceLocks.Lock()
 	defer pluginNetResourceLocks.Unlock()
 	for key := range pluginNetResourceLocks.items {
