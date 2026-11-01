@@ -562,6 +562,28 @@ func TestHandleKernelNetlinkRecoveryEventFallsBackToFullRedistribute(t *testing.
 	}
 }
 
+func TestHandleKernelAddrRecoveryQueuesTransitionDuringDebounce(t *testing.T) {
+	pm := &ProcessManager{
+		kernelRuntime: &stubNetlinkFallbackRuntime{},
+		kernelRules:   map[int64]bool{1: true},
+		rulePlans: map[int64]ruleDataplanePlan{1: {
+			KernelEligible:  true,
+			EffectiveEngine: ruleEngineKernel,
+			AddrRefresh:     kernelAddressRefreshMetadata{OutInterface: "eno2", Family: ipFamilyIPv4},
+		}},
+		kernelNetlinkRetryAt:     time.Now(),
+		kernelNetlinkRecoverWake: make(chan struct{}, 1),
+	}
+	trigger := newKernelNetlinkRecoveryTrigger("addr")
+	trigger.addInterfaceName("eno2")
+	trigger.addAddrFamily(ipFamilyIPv4)
+	pm.handleKernelNetlinkRecoveryTrigger(trigger)
+	_, _, queued, _, ok := pm.takePendingKernelNetlinkRecovery()
+	if !ok || !queued.hasSource("addr") || !queued.matchesOutInterface("eno2") || !queued.matchesAddrFamily(ipFamilyIPv4) {
+		t.Fatalf("address transition was dropped during debounce: queued=%v trigger=%+v", ok, queued)
+	}
+}
+
 func TestHandleKernelNetlinkRecoveryEventQueuesAsyncRetry(t *testing.T) {
 	db := openTestDB(t)
 
