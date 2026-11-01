@@ -132,8 +132,13 @@ func TestEgressNATSubsetsDoNotFallBackWhenSelectedExitFails(t *testing.T) {
 	nextID := int64(1)
 	candidates, plans := buildEgressNATKernelCandidatesWithSnapshot(items, planner, 0, 0, &nextID, snapshot)
 	owners := egressNATSubsetCandidateOwners(t, candidates)
-	if _, leaked := owners["tap100/tcp"]; leaked || len(owners) != 5 || plans[2].FallbackReason == "" {
+	if owners["tap100/tcp"] != 2 || len(owners) != 6 || plans[2].FallbackReason == "" {
 		t.Fatalf("failed exit fell back: owners=%v plans=%+v", owners, plans)
+	}
+	for _, candidate := range candidates {
+		if candidate.rule.kernelUnavailable != (candidate.owner.id == 2) {
+			t.Fatalf("only the failed exit must be guarded: %+v", candidate)
+		}
 	}
 }
 
