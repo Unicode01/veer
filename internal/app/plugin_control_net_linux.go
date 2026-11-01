@@ -3,6 +3,7 @@
 package app
 
 import (
+	cryptorand "crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,21 @@ import (
 )
 
 const pluginControlNetLinkLookupAttempts = 8
+
+// Supply the address in RTM_NEWLINK, before udev can apply its persistent-MAC
+// policy. A kernel-generated random address can otherwise change after the
+// ownership lease and protocol maps have already recorded it.
+func pluginControlNetEthernetAttrs(name string) (netlink.LinkAttrs, error) {
+	attrs := netlink.NewLinkAttrs()
+	attrs.Name = name
+	mac := make(net.HardwareAddr, 6)
+	if _, err := cryptorand.Read(mac); err != nil {
+		return attrs, fmt.Errorf("generate link address: %w", err)
+	}
+	mac[0] = (mac[0] | 2) & 0xfe
+	attrs.HardwareAddr = mac
+	return attrs, nil
+}
 
 func newPluginControlNetAdmin() pluginControlNetAdmin {
 	return &linuxPluginControlNetAdmin{provider: newLinuxPluginNetworkProvider()}
@@ -150,16 +166,21 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 		return pluginControlNetVethResult{}, fmt.Errorf("veth pair is partially present: host_exists=%t peer_exists=%t", !hostMissing, !peerMissing)
 	}
 	if hostMissing && peerMissing {
-		attrs := netlink.NewLinkAttrs()
-		attrs.Name = hostName
+		attrs, err := pluginControlNetEthernetAttrs(hostName)
+		if err != nil {
+			return pluginControlNetVethResult{}, err
+		}
+		peerAttrs, err := pluginControlNetEthernetAttrs(peerName)
+		if err != nil {
+			return pluginControlNetVethResult{}, err
+		}
 		if req.MTU > 0 {
 			attrs.MTU = req.MTU
 		}
-		if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: attrs, PeerName: peerName}); err != nil {
+		if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: attrs, PeerName: peerName, PeerHardwareAddr: peerAttrs.HardwareAddr}); err != nil {
 			return pluginControlNetVethResult{}, fmt.Errorf("create veth %s<->%s: %w", hostName, peerName, err)
 		}
 		created = true
-		var err error
 		host, err = pluginControlNetLinkByName(hostName)
 		if err != nil {
 			return cleanupCreated(fmt.Errorf("resolve created host link %q: %w", hostName, err))
@@ -248,8 +269,10 @@ func (admin linuxPluginControlNetAdmin) linkEnsureSingle(req pluginControlNetDum
 	created := false
 	link, err := pluginControlNetLinkByName(name)
 	if pluginControlNetLinkNotFound(err) {
-		attrs := netlink.NewLinkAttrs()
-		attrs.Name = name
+		attrs, addrErr := pluginControlNetEthernetAttrs(name)
+		if addrErr != nil {
+			return pluginControlNetDummyResult{}, addrErr
+		}
 		if req.MTU > 0 {
 			attrs.MTU = req.MTU
 		}
@@ -445,8 +468,10 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVRF(req pluginControlNetVRFReq
 	created := false
 	link, err := pluginControlNetLinkByName(name)
 	if pluginControlNetLinkNotFound(err) {
-		attrs := netlink.NewLinkAttrs()
-		attrs.Name = name
+		attrs, addrErr := pluginControlNetEthernetAttrs(name)
+		if addrErr != nil {
+			return pluginControlNetVRFResult{}, addrErr
+		}
 		if err := netlink.LinkAdd(&netlink.Vrf{LinkAttrs: attrs, Table: req.Table}); err != nil {
 			return pluginControlNetVRFResult{}, fmt.Errorf("create vrf %s: %w", name, err)
 		}
@@ -519,8 +544,10 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureBridge(req pluginControlNetBri
 	created := false
 	link, err := pluginControlNetLinkByName(name)
 	if pluginControlNetLinkNotFound(err) {
-		attrs := netlink.NewLinkAttrs()
-		attrs.Name = name
+		attrs, addrErr := pluginControlNetEthernetAttrs(name)
+		if addrErr != nil {
+			return pluginControlNetLinkInfo{}, addrErr
+		}
 		if req.MTU > 0 {
 			attrs.MTU = req.MTU
 		}
