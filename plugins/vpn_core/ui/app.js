@@ -4,7 +4,7 @@
   let records=[], statuses={}, busy=false, original={}, currentDriver='wireguard', savedDriver='', editing=false;
   let peers=[], dirty=false, rawDirty=false, coreDriver='mihomo', coreSequence=0, corePoll=null, statusPoll=null;
   let storedMode='empty', nodeNames=[];
-  let healthStates={}, healthKey='', healthPoll=null;
+  let healthStates={}, healthPoll=null;
   const controlNodes=() => document.querySelectorAll('.vpn-page button,.vpn-page input,.vpn-page select,.vpn-page textarea');
   function node(tag, className, text) { return h(tag,{className,text}); }
   function input(label,value,type) {
@@ -269,44 +269,15 @@
     if(result && value.state==='unhealthy')row.appendChild(node('span','vpn-health-message',result.message+(result.consecutive_failures>1?' · 连续失败 '+result.consecutive_failures+' 次':'')));
     return row;
   }
-  const healthPanel=h('section',{className:'vpn-panel vpn-health',attrs:{hidden:true}}), healthTitle=node('h2','','健康检测'), healthResult=h('div',{});
-  const healthEnabled=h('select',{className:F.classes.input,attrs:{'aria-label':'自动检测'}},[
-    h('option',{attrs:{value:'off'},text:'关闭 · 仅手动检测'}),h('option',{attrs:{value:'on'},text:'按间隔自动检测'})
-  ]);
-  const healthURL=input('检测地址',''),healthDNS=input('检测 DNS',''),healthInterval=input('检测间隔（秒）',60,'number'),healthTimeout=input('检测超时（毫秒）',5000,'number'),healthExpected=input('预期 HTTP 状态码',204,'number');
-  healthInterval.min='15';healthInterval.max='3600';healthTimeout.min='500';healthTimeout.max='10000';healthExpected.min='0';healthExpected.max='599';
   async function refreshHealth() {
     clearTimeout(healthPoll);
     const response=await F.action('health_status',{});
     healthStates={};((response.result || {}).items || []).forEach(value=>{healthStates[value.key]=value;});
-    renderList();if(healthKey)healthResult.replaceChildren(healthSummary(healthKey));
+    renderList();
     const values=Object.values(healthStates), checking=values.some(v=>v.state==='checking');
     if(checking || values.some(v=>v.settings.enabled))healthPoll=setTimeout(()=>refreshHealth().catch(F.toastError),checking?1000:5000);
     F.requestResize();
   }
-  async function openHealth(key) {
-    await refreshHealth();healthKey=key;
-    const c=healthStates[key].settings;
-    healthEnabled.value=c.enabled?'on':'off';healthURL.value=c.url;healthDNS.value=c.resolver_ip;healthInterval.value=c.interval_seconds;healthTimeout.value=c.timeout_ms;healthExpected.value=c.expected_status;
-    healthTitle.textContent='健康检测 · '+key;healthResult.replaceChildren(healthSummary(key));healthPanel.hidden=false;
-    healthPanel.scrollIntoView({block:'nearest',behavior:'smooth'});
-  }
-  healthPanel.append(
-    h('div',{className:'vpn-heading'},[healthTitle,button('收起检测',async()=>{healthPanel.hidden=true;healthKey='';},true)]),
-    node('p','vpn-subtle','通过当前 VPN 出口发送 HTTP / HTTPS 请求，检查 WAN 接入、隧道与目标的连通性。内网组网可改用内网检测地址。'),healthResult,
-    h('details',{className:'vpn-advanced'},[
-      h('summary',{text:'检测设置'}),h('div',{className:'vpn-fields'},[
-        field('自动检测',healthEnabled,'默认关闭；失败仅记录状态，不触发重启或切换出口。',true),
-        field('检测地址',healthURL,'使用返回小响应的地址。请求遵循核心分流规则；验证代理节点时，请避开直连例外。',true),
-        field('预期 HTTP 状态码',healthExpected,'0 接受任意 2xx；不跟随重定向。'),field('检测 DNS',healthDNS,'通过此 VPN 出口访问的 IPv4 DNS；使用 IP 地址时无需解析。'),
-        field('检测间隔（秒）',healthInterval,'15–3600 秒。'),field('检测超时（毫秒）',healthTimeout,'500–10000 毫秒。')
-      ]),button('保存检测设置',async()=>{
-        await F.action('health_settings',{key:healthKey,settings:{enabled:healthEnabled.value==='on',url:healthURL.value.trim(),resolver_ip:healthDNS.value.trim(),interval_seconds:Number(healthInterval.value),timeout_ms:Number(healthTimeout.value),expected_status:Number(healthExpected.value)}});
-        await refreshHealth();F.toast('检测设置已保存');
-      },true)
-    ]),actions([button('立即检测',async()=>{await F.action('health_check',{key:healthKey});await refreshHealth();})]),
-    node('p','vpn-field-help','立即检测使用已保存的检测设置，不会重新应用出口。耗时包含连接、TLS、响应与必要的 DNS 解析。')
-  );
   const phases={applied:['就绪','ready'],configured:['就绪','ready'],starting:['启动中',''],failed:['启动失败','error'],error:['需要处理','error'],down:['已停止',''],deleted:['已停止','']};
   async function showDetails(key,logs) {
     const value=await F.action(logs?'core_logs':'inspect',{key});
@@ -331,10 +302,10 @@
       const card=h('article',{className:'vpn-outlet'},[
         h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:phase[0]})]),metadata,
         status.error?node('p','vpn-card-error',status.error):null,
-        h('div',{className:'vpn-health-line'},[node('span','vpn-caption','链路检测'),healthSummary(record.key)]),
+        healthStates[record.key] && !['unknown','unavailable'].includes(healthStates[record.key].state)?h('div',{className:'vpn-health-line'},[healthSummary(record.key)]):null,
         h('div',{className:'vpn-card-footer'},[
           button('编辑',()=>openEditor(record),true),button('查看状态',()=>showDetails(record.key,false),true),
-          button('健康检测',()=>openHealth(record.key),true),
+          button('健康检测',async()=>{await F.action('health_check',{key:record.key});await refreshHealth();},true),
           button('拆除',async()=>{
             if (!await F.confirm({title:'拆除 '+record.key,message:'请先把引用此出口的 LAN 或出向 NAT 切换到其他出口。配置草稿与密钥会保留。',confirmText:'拆除',cancelText:'取消',danger:true}))return;
             await F.action('teardown',{key:record.key});await reload();
@@ -403,7 +374,7 @@
     F.requestResize();
   }
   outletTab.addEventListener('click',()=>switchTab(false));coreTab.addEventListener('click',()=>switchTab(true));
-  outletPanel.append(editor,healthPanel,detailPanel);
+  outletPanel.append(editor,detailPanel);
   const page=h('main',{className:F.classes.page+' vpn-page'},[
     h('header',{className:'vpn-header'},[h('div',{},[node('h1','','VPN 出口'),node('p','','管理 VPN 连接，按需分配给 LAN 或下游设备。')]),actions([button('刷新出口',reload,true),button('新建出口',async()=>{switchTab(false);await openEditor();})])]),
     h('nav',{className:'vpn-nav',attrs:{role:'tablist','aria-label':'VPN 页面'}},[outletTab,coreTab]),notice,outletPanel,corePanel
