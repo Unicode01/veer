@@ -23,11 +23,12 @@ func TestPluginControlNetOwnedLinkMACLinuxIntegration(t *testing.T) {
 	assertPluginOwnedLinkMACStable(t, admin, pair.Host)
 	assertPluginOwnedLinkMACStable(t, admin, pair.Peer)
 
-	for _, kind := range []string{"dummy", "bridge", "vrf", "veerwan"} {
+	kinds := []string{"dummy", "bridge", "vrf"}
+	if os.Getenv("VEER_RUN_KFUNCS_TESTS") == "1" {
+		kinds = append(kinds, "veerwan")
+	}
+	for _, kind := range kinds {
 		t.Run(kind, func(t *testing.T) {
-			if kind == "veerwan" && os.Getenv("VEER_RUN_KFUNCS_TESTS") != "1" {
-				t.Skip("requires the optional helper module")
-			}
 			name := pluginIntegrationLinkName("fwm")
 			defer deletePluginIntegrationLinkQuietly(t, name)
 			var info pluginControlNetLinkInfo
