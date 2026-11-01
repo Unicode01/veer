@@ -828,6 +828,31 @@ static __always_inline int reply_lcp_echo_request(struct __sk_buff *skb, struct 
 	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
 }
 
+static __always_inline int pppoe_dhcpv6_to_client(struct __sk_buff *skb, __u16 l3_len)
+{
+	struct {
+		struct ipv6_min_hdr ip;
+		struct udp_min_hdr udp;
+	} packet = {};
+	__u16 payload_len, udp_len;
+
+	if (l3_len < sizeof(packet) ||
+		bpf_skb_load_bytes(skb, 22, &packet, sizeof(packet)) < 0)
+		return 0;
+	if (((__u8 *)&packet.ip)[0] >> 4 != 6 || packet.ip.nexthdr != IPPROTO_UDP)
+		return 0;
+	/* The PPP client uses a link-local source. Do not divert downstream
+	 * global-address traffic merely because it happens to use these ports. */
+	if (!((packet.ip.daddr[0] == 0xfe && (packet.ip.daddr[1] & 0xc0) == 0x80) ||
+		(packet.ip.daddr[0] == 0xff && packet.ip.daddr[1] == 0x02)))
+		return 0;
+	payload_len = ntohs16(packet.ip.payload_len);
+	udp_len = ntohs16(packet.udp.len);
+	return payload_len >= sizeof(packet.udp) && payload_len <= l3_len - sizeof(packet.ip) &&
+		udp_len >= sizeof(packet.udp) && udp_len <= payload_len &&
+		packet.udp.source == htons16(547) && packet.udp.dest == htons16(546);
+}
+
 static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg)
 {
 	void *data = (void *)(long)skb->data;
@@ -878,6 +903,11 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 	if (ppp_len < 2 || ppp_len > 1494)
 		return TC_ACT_UNSPEC;
 	l3_len = ppp_len - 2;
+	/* Protocol-bound AF_PACKET sockets run after TC ingress. Keep DHCPv6
+	 * replies framed on the WAN so lease renewal remains reachable after
+	 * installing either tunnel path; tcpdump's ETH_P_ALL tap alone is not proof. */
+	if (eth_proto == ETH_P_IPV6 && pppoe_dhcpv6_to_client(skb, l3_len))
+		return TC_ACT_UNSPEC;
 
 #ifdef VEER_KFUNCS
 	struct veer_handoff_v1 handoff = {
