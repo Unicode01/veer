@@ -25,7 +25,7 @@ CGO_ENABLED=0 go build -tags veer_kfuncs -o "$work/veer" .
 CGO_ENABLED=0 go build -o "$work/loader" ./scripts/kfuncs-test-loader
 insmod "kernel/$(uname -r)/veer_kfuncs.ko"
 loaded=1
-VEER_RUN_KFUNCS_TESTS=1 go test -tags veer_kfuncs ./internal/app -run '^TestOptionalKernelModule' -count=1 -v
+VEER_RUN_KFUNCS_TESTS=1 FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 go test -tags veer_kfuncs ./internal/app -run '^(TestOptionalKernelModule.*|TestPluginControlNetOwnedLinkMACLinuxIntegration)$' -count=1 -v
 python3 scripts/verify-kfuncs-packets.py --loader "$work/loader"
 python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --direct --veer "$work/veer"
 VEER_RUN_KFUNCS_TESTS=1 VEER_RUN_WIREGUARD_TESTS=1 FORWARD_PERF_BINARY="$work/veer" \
