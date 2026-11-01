@@ -12371,6 +12371,8 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 		  "local_interface":"veerlocal0",
 		  "pipeline_interface":"veerpipe0",
 		  "handoff_mode":"segmented_veth",
+		  "ipv6_route_table":15000,
+		  "ipv6_rule_priority":19000,
 		  "ipv4":%q,
 		  "ipv4_peer":%q
 		}`, ipv4, peer)
@@ -12380,7 +12382,7 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 	}
 
 	apply("10.77.0.2", "10.77.0.1")
-	if want := "routeReplace:10.77.0.1/32:veerlocal0::254:0"; !containsString(controller.calls, want) {
+	if want := "routeReplace:10.77.0.1/32:veerlocal0::15000:0"; !containsString(controller.calls, want) {
 		t.Fatalf("initial segmented IPv4 calls = %+v, missing %s", controller.calls, want)
 	}
 	status, err := store.GetPluginRecord(db, "wan_core", "status", "default")
@@ -12403,8 +12405,8 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 	controller.calls = nil
 	apply("10.77.0.3", "10.77.0.254")
 	for _, want := range []string{
-		"routeDelete:10.77.0.1/32:veerlocal0::254:0",
-		"routeReplace:10.77.0.254/32:veerlocal0::254:0",
+		"routeDelete:10.77.0.1/32:veerlocal0::15000:0",
+		"routeReplace:10.77.0.254/32:veerlocal0::15000:0",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("changed segmented IPv4 calls = %+v, missing %s", controller.calls, want)
@@ -12415,7 +12417,7 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 	if err := rt.ApplyPluginAction(plugin, teardownAction, json.RawMessage(`{"key":"default"}`)); err != nil {
 		t.Fatalf("ApplyPluginAction(wan_core segmented IPv4 teardown) error = %v", err)
 	}
-	if want := "routeDelete:10.77.0.254/32:veerlocal0::254:0"; !containsString(controller.calls, want) {
+	if want := "routeDelete:10.77.0.254/32:veerlocal0::15000:0"; !containsString(controller.calls, want) {
 		t.Fatalf("segmented IPv4 teardown calls = %+v, missing %s", controller.calls, want)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -888,6 +889,105 @@ func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 	if timers := rt.pluginTimerList("wan_core"); len(timers) != 0 {
 		t.Fatalf("wan_core timers after teardown = %+v, want none", timers)
 	}
+
+	t.Run("shared_ipv4_peer", func(t *testing.T) {
+		admin := linuxPluginControlNetAdmin{}
+		ambient := pluginIntegrationLinkName("veera")
+		defer deletePluginIntegrationLinkQuietly(t, ambient)
+		if _, err := admin.LinkEnsureDummy(pluginControlNetDummyRequest{Name: ambient, Up: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.AddrReplace(pluginControlNetAddrRequest{Interface: ambient, CIDR: "169.254.241.1/32"}); err != nil {
+			t.Fatal(err)
+		}
+		peer := "169.254.240.254"
+		if err := admin.RouteReplace(pluginControlNetRouteRequest{Dst: peer + "/32", Dev: ambient, Src: "169.254.241.1", Scope: int(netlink.SCOPE_LINK)}); err != nil {
+			t.Fatal(err)
+		}
+		mainRoutes := func() []netlink.Route {
+			t.Helper()
+			_, dst, _ := net.ParseCIDR(peer + "/32")
+			routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Dst: dst, Table: 254}, netlink.RT_FILTER_DST|netlink.RT_FILTER_TABLE)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return routes
+		}
+		before := mainRoutes()
+		if len(before) != 1 {
+			t.Fatalf("ambient peer route = %+v", before)
+		}
+		assertAmbient := func() {
+			t.Helper()
+			if after := mainRoutes(); !reflect.DeepEqual(before, after) {
+				t.Fatalf("unrelated WAN peer route changed: before=%+v after=%+v", before, after)
+			}
+		}
+		locals := []string{pluginIntegrationLinkName("veerl"), pluginIntegrationLinkName("veerl")}
+		sources := []string{"169.254.240.11", "169.254.240.12"}
+		apply := pluginActionByIDForTest(t, plugin, "apply_session")
+		teardown := pluginActionByIDForTest(t, plugin, "teardown")
+		assertPeer := func(i int) {
+			t.Helper()
+			link, err := netlink.LinkByName(locals[i])
+			if err != nil {
+				t.Fatal(err)
+			}
+			routes, err := netlink.RouteGetWithOptions(net.ParseIP(peer), &netlink.RouteGetOptions{SrcAddr: net.ParseIP(sources[i])})
+			if err != nil || len(routes) != 1 || routes[0].LinkIndex != link.Attrs().Index {
+				t.Fatalf("WAN %d peer lookup = %+v, err=%v, want dev %s", i, routes, err, locals[i])
+			}
+		}
+		for i := range locals {
+			defer deletePluginIntegrationLinkQuietly(t, locals[i])
+			payload := fmt.Sprintf(`{"wan_id":"peer%d","state":"up","usable":true,"driver":"integration","driver_plugin":"test","local_interface":%q,"handoff_mode":"segmented_veth","ipv4":%q,"ipv4_peer":%q}`, i, locals[i], sources[i], peer)
+			if err := rt.ApplyPluginAction(plugin, apply, json.RawMessage(payload)); err != nil {
+				t.Fatal(err)
+			}
+			assertAmbient()
+			for j := 0; j <= i; j++ {
+				assertPeer(j)
+			}
+		}
+		if err := deletePluginIntegrationLink(locals[0]); err != nil {
+			t.Fatal(err)
+		}
+		assertPeer(1)
+		assertAmbient()
+		firePluginTimerForTest(t, rt, "wan_core", "wan_repair")
+		assertPeer(0)
+		assertPeer(1)
+		assertAmbient()
+		for i := range locals {
+			payload := json.RawMessage(fmt.Sprintf(`{"wan_id":"peer%d"}`, i))
+			if err := rt.ApplyPluginAction(plugin, teardown, payload); err != nil {
+				t.Fatal(err)
+			}
+			assertAmbient()
+			if i == 0 {
+				assertPeer(1)
+			}
+		}
+		// No per-WAN peer route or selector may remain after both teardowns.
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, route := range routes {
+			if route.Dst != nil && route.Dst.String() == peer+"/32" && route.Table != 254 {
+				t.Fatalf("leaked WAN peer route: %+v", route)
+			}
+		}
+		rules, err := netlink.RuleList(netlink.FAMILY_V4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rule := range rules {
+			if rule.Dst != nil && rule.Dst.String() == peer+"/32" {
+				t.Fatalf("leaked WAN peer rule: %+v", rule)
+			}
+		}
+	})
 }
 
 func TestPluginVToLocalLinuxIntegration(t *testing.T) {
