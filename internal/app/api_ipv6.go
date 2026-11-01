@@ -8,7 +8,7 @@ import (
 	"strconv"
 )
 
-func handleHostNetwork(w http.ResponseWriter, r *http.Request) {
+func handleHostNetwork(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -21,6 +21,9 @@ func handleHostNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	if items == nil {
 		items = []HostNetworkInterface{}
+	}
+	if db != nil && r.URL.Query().Get("include_internal") != "true" {
+		items = userHostNetworkInterfaces(db, items, newPluginControlNetAdmin().LinkGet)
 	}
 	writeJSON(w, http.StatusOK, HostNetworkResponse{Interfaces: items})
 }

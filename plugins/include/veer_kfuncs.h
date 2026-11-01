@@ -19,7 +19,8 @@ extern __u32 veer_kfuncs_abi_v1(void) __attribute__((section(".ksyms")));
 extern int veer_skb_handoff_v1(struct __sk_buff *, const struct veer_handoff_v1 *) __attribute__((section(".ksyms")));
 /* Optional receive injection: L3_TO_ETH followed by target TC ingress. */
 extern int veer_skb_handoff_ingress_v1(struct __sk_buff *, const struct veer_handoff_v1 *) __attribute__((section(".ksyms")));
-/* Always return SHOT afterwards. A successful call submits a separate skb;
- * errors fail closed and never fall through to host routing.
+/* Always terminate afterwards so TC releases the original skb: STOLEN on
+ * success (required for local egress), SHOT on error. Ingress callers may
+ * also return SHOT on success. Never fall through to host routing.
  */
 #endif

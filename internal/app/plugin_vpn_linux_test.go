@@ -579,6 +579,30 @@ func runWireGuardMeshTopology(t *testing.T) {
 	}
 	probe(direct, "192.0.2.1")
 	{
+		// Retain packet/route evidence on failure; a working downstream NAT
+		// does not imply that a device-bound host probe uses the same path.
+		if capture, err := exec.LookPath("tcpdump"); err == nil {
+			capturePath := filepath.Join(t.TempDir(), "health-packets.log")
+			captureFile, err := os.Create(capturePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			captureCmd := exec.Command(capture, "-nn", "-l", "-i", "any", "tcp port 24005")
+			captureCmd.Stdout, captureCmd.Stderr = captureFile, captureFile
+			if err := captureCmd.Start(); err != nil {
+				captureFile.Close()
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = captureCmd.Process.Signal(syscall.SIGINT)
+				_ = captureCmd.Wait()
+				_ = captureFile.Close()
+				if t.Failed() {
+					data, _ := os.ReadFile(capturePath)
+					t.Logf("health packets:\n%s", data)
+				}
+			}()
+		}
 		observed := filepath.Join(t.TempDir(), "health-source")
 		server := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
 		server.Env = append(os.Environ(), "VEER_VPN_HEALTH_SERVER=1", "VEER_VPN_HEALTH_OBSERVED="+observed)
@@ -622,6 +646,8 @@ func runWireGuardMeshTopology(t *testing.T) {
 					return value
 				}
 				if time.Now().After(end) {
+					t.Logf("health host routes: %s", ip("-j", "route", "show", "table", "all"))
+					t.Logf("health host links: %s", ip("-j", "-d", "link", "show"))
 					t.Fatalf("health want %s/%s, got %+v", want, reason, value)
 				}
 				time.Sleep(100 * time.Millisecond)

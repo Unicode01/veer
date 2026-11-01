@@ -103,6 +103,9 @@ typedef int __s32;
 #ifndef TC_ACT_OK
 #define TC_ACT_OK 0
 #endif
+#ifndef TC_ACT_STOLEN
+#define TC_ACT_STOLEN 4
+#endif
 
 #ifndef TC_ACT_SHOT
 #define TC_ACT_SHOT 2

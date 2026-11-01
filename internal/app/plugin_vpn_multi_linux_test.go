@@ -435,6 +435,18 @@ func runVPNMultiTopology(t *testing.T) {
 	if err := json.Unmarshal(api("GET", "/api/interfaces", nil, false), &visible); err != nil {
 		t.Fatal(err)
 	}
+	var hostVisible HostNetworkResponse
+	if err := json.Unmarshal(api("GET", "/api/host-network", nil, false), &hostVisible); err != nil {
+		t.Fatal(err)
+	}
+	var rawInterfaces []InterfaceInfo
+	if err := json.Unmarshal(api("GET", "/api/interfaces?include_internal=true", nil, false), &rawInterfaces); err != nil {
+		t.Fatal(err)
+	}
+	var rawHost HostNetworkResponse
+	if err := json.Unmarshal(api("GET", "/api/host-network?include_internal=true", nil, false), &rawHost); err != nil {
+		t.Fatal(err)
+	}
 	for _, exit := range exits[:3] {
 		localVisible := false
 		for _, info := range visible {
@@ -447,6 +459,37 @@ func runVPNMultiTopology(t *testing.T) {
 		}
 		if !localVisible {
 			t.Fatalf("user WAN is hidden: %s", exit.local)
+		}
+		hostLocalVisible, rawLocalVisible, rawPipelineVisible := false, false, false
+		for _, info := range hostVisible.Interfaces {
+			hostLocalVisible = hostLocalVisible || info.Name == exit.local
+			if exit.pipeline != exit.local && info.Name == exit.pipeline {
+				t.Fatalf("internal pipeline exposed in host network selector: %s", info.Name)
+			}
+		}
+		for _, info := range rawInterfaces {
+			rawLocalVisible = rawLocalVisible || info.Name == exit.local
+			rawPipelineVisible = rawPipelineVisible || info.Name == exit.pipeline
+		}
+		if !hostLocalVisible || !rawLocalVisible || !rawPipelineVisible {
+			t.Fatalf("%s missing from user host selector or diagnostic inventory", exit.key)
+		}
+		rawLocalVisible, rawPipelineVisible = false, false
+		for _, info := range rawHost.Interfaces {
+			rawLocalVisible = rawLocalVisible || info.Name == exit.local
+			rawPipelineVisible = rawPipelineVisible || info.Name == exit.pipeline
+		}
+		if !rawLocalVisible || !rawPipelineVisible {
+			t.Fatalf("%s missing from diagnostic host inventory", exit.key)
+		}
+		if os.Getenv("VEER_VPN_EXPECT_DIRECT") == "1" {
+			peer := strings.Replace(exit.local, "veerwg", "veerwgp", 1)
+			if strings.HasPrefix(exit.local, "veervpn") {
+				peer = strings.Replace(exit.local, "veervpn", "veervpnp", 1)
+			}
+			if _, err := newPluginControlNetAdmin().LinkGet(peer); err == nil {
+				t.Fatalf("direct WAN retained an internal veth peer: %s", peer)
+			}
 		}
 	}
 	for i, exit := range exits {
