@@ -932,7 +932,13 @@ function normalizeProfile(key, session, raw) {
     addresses = appendCIDRUnique(addresses, ipv6LinkLocalCIDR(session.ipv6_link_local));
     var ipv4PeerCIDR = ipv4HostCIDR(session.ipv4_peer);
     if ((handoffMode === 'segmented_veth' || handoffMode === 'direct_gro') && session.ipv4 && ipv4PeerCIDR) {
-      routes = appendRouteUnique(routes, {dst: ipv4PeerCIDR, dev: localInterface, src: session.ipv4});
+      // Different PPP sessions often share the same AC address. A route in
+      // main would replace another WAN's route even with a different dev/src.
+      routes = appendRouteUnique(routes, {dst: ipv4PeerCIDR, dev: localInterface, src: session.ipv4, table: routingIdentity.table});
+      rules = appendRuleUnique(rules, {
+        family: 'ipv4', priority: routingIdentity.priority, table: routingIdentity.table,
+        src: ipv4HostCIDR(session.ipv4), dst: ipv4PeerCIDR
+      });
     }
     if (bool(raw.install_default_route, false) && session.ipv4) {
       routes = appendRouteUnique(routes, {dst: '0.0.0.0/0', dev: localInterface, src: session.ipv4, metric: intValue(raw.route_metric, 0, 2147483647, 0)});
