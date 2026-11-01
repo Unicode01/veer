@@ -502,6 +502,27 @@ test('VPN healthy reconciliation preserves the WAN boundary and running core',()
   assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
 });
 
+for(const driver of ['wireguard','mihomo','sing_box','tun']) {
+  test(driver+' repairs lost or corrupt adapter entries without touching networking or restarting cores',()=>{
+    const h=driver==='wireguard'?fixture():vpnFixture(driver,driver==='tun'?{tun_interface:'vtundefault',tun_alias:'veer:vpn_core:default'}:{});
+    if(driver==='tun') h.state.links.push({ifname:'vtundefault',ifindex:h.state.next++,ifalias:'veer:vpn_core:default',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
+    h.apply();
+    const map=[...h.maps().values()][0], expected=[...map], before=clone(h.state), lease=clone(h.host.snapshot().kv.lease_default);
+    const procs=clone(h.procs||{}), specs=h.specs?.length;
+    let writes=0;const put=map.set.bind(map);map.set=(...args)=>{writes++;return put(...args);};
+    const tick=()=>h.host.run('onTimer',{timer:{name:'wg_repair'}});
+    tick();assert.equal(writes,0,'healthy polls must not rewrite maps');
+    for(const damage of ['empty','missing-forward','missing-reply','corrupt-forward','corrupt-reply']) {
+      if(damage==='empty')map.clear();
+      else {const key=expected[damage.endsWith('forward')?0:1][0];if(damage.startsWith('missing'))map.delete(key);else put(key,'00'.repeat(24));}
+      tick();assert.deepEqual([...map].sort(),[...expected].sort(),damage);
+      const count=writes;tick();assert.equal(writes,count,'repair must stop writing after recovery');
+      assert.deepEqual(h.state,before);assert.deepEqual(h.host.snapshot().kv.lease_default,lease);
+      assert.deepEqual(h.procs||{},procs);assert.equal(h.specs?.length,specs);
+    }
+  });
+}
+
 test('VPN enables GSO only for a managed sing-box TUN with negotiated capabilities',()=>{
   const full={tx:true,sg:true,tso:true,gso:true};
   const cases=[

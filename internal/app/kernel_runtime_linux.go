@@ -1251,6 +1251,18 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
+	finishPluginRebuild, err := rt.preservePluginPipelineForRebuildLocked()
+	if err != nil {
+		coll.Close()
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, err.Error()) {
+			return results, nil
+		}
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: err.Error()}
+		}
+		return results, nil
+	}
+	defer func() { finishPluginRebuild(rt.coll == coll) }()
 	rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates, kernelPluginPipelineCoreConfig{Forward: len(prepared) > 0, Reply: len(prepared) > 0})
 	if pluginOnlyPipeline && !rt.pluginPipelineActive {
 		coll.Close()

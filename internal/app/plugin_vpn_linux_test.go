@@ -15,10 +15,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cilium/ebpf"
 )
 
 // The complete topology runs in a disposable network namespace. No route,
@@ -586,6 +589,97 @@ func runWireGuardMeshTopology(t *testing.T) {
 		if err != nil || strings.TrimSpace(string(seen)) != selectedSource {
 			t.Fatalf("health escaped VPN: backend saw %s want %s (%v)", seen, selectedSource, err)
 		}
+		// Inspect only map FDs owned by this disposable daemon. eBPF objects
+		// are global even inside a netns; never mutate another daemon's maps.
+		fdDir := fmt.Sprintf("/proc/%d/fdinfo", cmd.Process.Pid)
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		adapterMaps := map[ebpf.MapID]*ebpf.Map{}
+		for _, fd := range fds {
+			data, err := os.ReadFile(filepath.Join(fdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) != 2 || fields[0] != "map_id:" {
+					continue
+				}
+				id, err := strconv.ParseUint(fields[1], 10, 32)
+				if err != nil || adapterMaps[ebpf.MapID(id)] != nil {
+					continue
+				}
+				m, err := ebpf.NewMapFromID(ebpf.MapID(id))
+				if err != nil {
+					continue
+				}
+				info, err := m.Info()
+				if err != nil || info.Name != "wg_links" {
+					m.Close()
+					continue
+				}
+				adapterMaps[ebpf.MapID(id)] = m
+				defer m.Close()
+			}
+		}
+		if len(adapterMaps) == 0 {
+			t.Fatal("daemon has no VPN adapter map")
+		}
+		expectedMaps := map[ebpf.MapID]map[string][]byte{}
+		for id, m := range adapterMaps {
+			entries := map[string][]byte{}
+			var key [4]byte
+			var value [24]byte
+			it := m.Iterate()
+			for it.Next(&key, &value) {
+				entries[string(key[:])] = bytes.Clone(value[:])
+			}
+			if it.Err() != nil || len(entries) != 2 {
+				t.Fatalf("unexpected adapter map %d: %d entries %v", id, len(entries), it.Err())
+			}
+			expectedMaps[id] = entries
+		}
+		// Ordinary configuration changes must preserve maps for the active
+		// VPN, even though no VPN profile, interface or core has changed.
+		ordinaryChild := create("port1", "wan", "192.0.2.1")
+		waitNAT(ordinaryChild, "192.0.2.1")
+		api("DELETE", fmt.Sprintf("/api/egress-nats?id=%d", ordinaryChild), nil)
+		probe(selected, selectedSource)
+		probe(direct, "192.0.2.1")
+		for id, m := range adapterMaps {
+			for key, value := range expectedMaps[id] {
+				got, err := m.LookupBytes([]byte(key))
+				if err != nil || !bytes.Equal(got, value) {
+					t.Fatalf("ordinary NAT change lost adapter %d: %x %v", id, got, err)
+				}
+				if err := m.Delete([]byte(key)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		deadline := time.Now().Add(8 * time.Second)
+		for {
+			recovered := true
+			for id, m := range adapterMaps {
+				for key, want := range expectedMaps[id] {
+					got, err := m.LookupBytes([]byte(key))
+					recovered = recovered && err == nil && bytes.Equal(got, want)
+				}
+			}
+			if recovered {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("VPN did not repair lost adapter maps while interface/core generations were unchanged")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		probeHealth("/", "healthy", "")
+		probe(selected, selectedSource)
+		probe(direct, "192.0.2.1")
+		t.Log("ordinary NAT updates preserve adapter maps; injected map loss recovers without core/interface changes")
 		probeHealth("/status", "unhealthy", "http_status")
 		configureHealth("/slow", false, 3000)
 		started := time.Now()

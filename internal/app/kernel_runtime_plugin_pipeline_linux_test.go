@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/vishvananda/netlink"
 )
 
@@ -1274,6 +1275,78 @@ func TestPluginPipelineVersionedMapReplacementsReuseCompatibleStateMapFD(t *test
 	}}
 	if _, err := pluginPipelineVersionedMapReplacements(incompatible, map[string]*ebpf.Map{}, contract, previous); err == nil || !strings.Contains(err.Error(), "preserve state map") {
 		t.Fatalf("incompatible state map error = %v", err)
+	}
+}
+
+func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T) {
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	if err := state.Put(uint32(17), uint64(99)); err != nil {
+		t.Fatal(err)
+	}
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{Type: ebpf.SchedCLS, License: "GPL", Instructions: asm.Instructions{asm.Mov.Imm(asm.R0, 0), asm.Return()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prog.Close()
+	core := &ebpf.Collection{}
+	rt := &linuxKernelRuleRuntime{
+		coll: core, pluginPipelineActive: true, pluginPipelineFingerprint: "applied",
+		pluginPipelineBankSwitchedAt: time.Now(),
+		pluginPipelineLoaded:         []loadedPluginObjectRef{{PluginID: "vpn_core", ObjectID: "wg_adapter", coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}, Programs: map[string]*ebpf.Program{"tc_adapter": prog}}}},
+		pluginRuntimeSnapshot:        pluginRuntimeSnapshot{Plugins: map[string]PluginRuntimeState{"vpn_core": {Attached: true}}},
+	}
+	t.Cleanup(rt.cleanupPluginPipelineLocked)
+	for attempt := 0; attempt < 3; attempt++ {
+		finish, err := rt.preservePluginPipelineForRebuildLocked()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The attachment-failure path closes the replacement plugin objects
+		// while retaining the original core and its active TC attachments.
+		rt.cleanupPluginPipelineLocked()
+		finish(false)
+		got, err := getPluginMapValueInRefs(rt.pluginPipelineLoaded, "vpn_core", "wg_adapter", "wg_links", pluginMapTestUint32(17))
+		if err != nil || string(got) != string(pluginMapTestUint64(99)) {
+			t.Fatalf("attempt %d lost live adapter map: %x %v", attempt, got, err)
+		}
+		if !rt.pluginPipelineActive || rt.pluginPipelineFingerprint != "applied" || !rt.pluginRuntimeSnapshot.Plugins["vpn_core"].Attached {
+			t.Fatalf("attempt %d lost plugin pipeline state", attempt)
+		}
+		if _, err := rt.pluginPipelineLoaded[0].coll.Programs["tc_adapter"].Info(); err != nil {
+			t.Fatalf("attempt %d lost plugin program access: %v", attempt, err)
+		}
+	}
+}
+
+func TestKernelPluginPipelineRebuildCommitKeepsReplacement(t *testing.T) {
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	rt := &linuxKernelRuleRuntime{coll: &ebpf.Collection{}, pluginPipelineActive: true,
+		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}}}}}
+	finish, err := rt.preservePluginPipelineForRebuildLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.cleanupPluginPipelineLocked()
+	rt.coll = &ebpf.Collection{}
+	rt.pluginPipelineFingerprint = "replacement"
+	finish(true)
+	if rt.pluginPipelineFingerprint != "replacement" || len(rt.pluginPipelineLoaded) != 0 {
+		t.Fatal("commit restored predecessor pipeline state")
+	}
+}
+
+func TestKernelPluginPipelineRebuildDoesNotResurrectCleanedRuntime(t *testing.T) {
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	rt := &linuxKernelRuleRuntime{coll: &ebpf.Collection{}, pluginPipelineActive: true,
+		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}}}}}
+	finish, err := rt.preservePluginPipelineForRebuildLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.cleanupLocked()
+	finish(false)
+	if rt.pluginPipelineActive || len(rt.pluginPipelineLoaded) != 0 {
+		t.Fatal("full cleanup restored an obsolete plugin pipeline")
 	}
 }
 
