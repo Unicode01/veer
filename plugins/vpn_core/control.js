@@ -10,6 +10,7 @@ if (typeof plugin.host === 'function') {
 var coreDrivers = require('./core-drivers');
 var shares = require('./ui/share');
 var coreManager = require('./core-manager');
+var health = require('./health-check').create({path: healthPath, leases: allLeases});
 var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft';
 var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
 var OBJECT = 'wg_adapter', MAP = 'wg_links';
@@ -38,6 +39,9 @@ plugin.resource({id: 'status', methods: ['list', 'get'], control_methods: ['list
 plugin.action({id: 'set_key', description: 'Store a private or preshared key in the encrypted Secret store.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'set_core_config', description: 'Store JSON core configuration encrypted.', runtime_update: 'runtime_apply', max_payload_bytes: 1048576});
 plugin.action({id: 'core_form', description: 'Read node names and advanced settings without credentials.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
+plugin.action({id: 'health_status', description: 'Read actual VPN path probe results and settings.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
+plugin.action({id: 'health_settings', description: 'Configure manual or periodic VPN path probes independently of the running tunnel.', runtime_update: 'runtime_apply', max_payload_bytes: 4096});
+plugin.action({id: 'health_check', description: 'Queue a bounded asynchronous request through the applied VPN WAN.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'apply', description: 'Create or update a VPN WAN; select it in LAN or Egress NAT settings.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'teardown', description: 'Remove the owned VPN WAN and its TC adapter.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'inspect', description: 'Read public interface, peer, handshake and traffic state.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
@@ -49,10 +53,15 @@ plugin.action({id: 'core_rollback', description: 'Restore the previous default c
 plugin.action({id: 'core_remove', description: 'Remove an unused installed core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 ui.register({static_dir: 'ui', entry: 'index.html', sha256: '3e71ed4426ad50a960d01225bb26a5e2d5d29f9e46cd7b249bff3b700567aa11', page: 'vpn', page_title: 'VPN',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
-  actions: ['set_key', 'set_core_config', 'core_form', 'apply', 'teardown', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
+  actions: ['set_key', 'set_core_config', 'core_form', 'health_status', 'health_settings', 'health_check', 'apply', 'teardown', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
 
 exports.onAction = function (ctx) {
   var payload = ctx.payload || {}, key = profileKey(payload.key);
+  if (ctx.action.id === 'health_status') return health.all();
+  if (ctx.action.id === 'health_settings' || ctx.action.id === 'health_check') {
+    if (!resources.get('profiles', key)) throw new Error('请先保存出口配置');
+    return ctx.action.id === 'health_settings' ? health.configure(key, payload.settings) : health.start(key);
+  }
   if (['core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove'].indexOf(ctx.action.id) >= 0) {
     var driver = coreManager.driver(payload.driver);
     if (ctx.action.id === 'core_status') return process.binaryStatus(driver);
@@ -133,6 +142,7 @@ exports.onReconcile = function () {
   if (errors.length) throw new Error(errors.join('; '));
 };
 exports.onTimer = function (ctx) {
+  if (ctx.timer && ctx.timer.name === 'vpn_health') { health.tick(); return; }
   if (!ctx.timer || ctx.timer.name !== 'wg_repair') return;
   var leases = allLeases();
   Object.keys(leases).sort().forEach(function (key) {
@@ -152,6 +162,7 @@ exports.onTimer = function (ctx) {
   });
 };
 exports.onDeactivate = function () {
+  health.stop();
   timer.clear('wg_repair');
   var failures = [];
   Object.keys(allLeases()).forEach(function (key) {
@@ -161,10 +172,15 @@ exports.onDeactivate = function () {
 };
 function allLeases() {
   var out = {};
-  kv.list({limit: 32}).forEach(function (r) { if (r.key.indexOf('lease_') === 0) out[r.key.slice(6)] = r.data; });
+  for (var offset = 0; offset < 1024; offset += 32) {
+    var page = kv.list({limit: 32, offset: offset});
+    page.forEach(function (r) { if (r.key.indexOf('lease_') === 0) out[r.key.slice(6)] = r.data; });
+    if (page.length < 32) break;
+  }
   return out;
 }
 function armRepair() {
+  health.arm();
   var leases = allLeases(), keys = Object.keys(leases);
   if (keys.some(function (k) { return leases[k].active; })) timer.setInterval('wg_repair', keys.some(function (k) { return leases[k].active && leases[k].plan.driver && leases[k].plan.driver !== 'wireguard'; }) ? 1000 : 5000, {});
   else timer.clear('wg_repair');
@@ -304,6 +320,7 @@ function installMaps(p, wg, boundary, old) {
 }
 function isLegacy(lease) { return !!(lease && lease.plan && lease.plan.bindings); }
 function apply(key, raw, explicit) {
+  if (explicit) health.invalidate(key);
   var before = changing; changing = true;
   try { return raw && raw.driver && raw.driver !== 'wireguard' ? applyTUNProfile(key, raw, explicit === true) : applyProfile(key, raw); } finally { changing = before; }
 }
@@ -358,6 +375,7 @@ function applyProfile(key, raw) {
   }
 }
 function teardown(key) {
+  health.invalidate(key);
   var before = changing; changing = true;
   try { return teardownProfile(key); } finally { changing = before; }
 }
@@ -397,6 +415,22 @@ function inspect(key) {
   return {phase: 'configured', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
     public_key: command(WG, ['show', p.interface, 'public-key']).trim(), endpoints: command(WG, ['show', p.interface, 'endpoints']).trim(),
     latest_handshakes: command(WG, ['show', p.interface, 'latest-handshakes']).trim(), transfer: command(WG, ['show', p.interface, 'transfer']).trim()};
+}
+exports.onHealthProbe = function (ctx) { health.run(ctx.payload || {}); };
+function healthPath(key, workerRead) {
+  var lease = allLeases()[key], status = resources.get('status', key);
+  if (!lease || !lease.active || lease.pending || isLegacy(lease) || !status || status.data.phase !== 'applied') return null;
+  var p = lease.plan, tunnel = ownedLink(p), boundary = boundaryLinks(p);
+  if (!tunnel || (tunnel.flags || []).indexOf('UP') < 0 || tunnel.ifindex !== lease.wg_ifindex || !boundary ||
+      boundary.local.ifindex !== lease.local_ifindex || boundary.peer.ifindex !== lease.pipeline_ifindex) return null;
+  var managed = p.driver && p.driver !== 'wireguard' && p.driver !== 'tun';
+  var proc = managed && !workerRead ? process.status('vpn_' + key) : null;
+  if (proc && (proc.state !== 'running' || proc.started_at !== lease.process_started_at)) return null;
+  var generation = kv.get('health_generation_' + key);
+  return {interface: p.local, source_ip: wanPayload(p, true).ipv4,
+    // Use ordered primitives: host-decoded objects do not promise JS property
+    // order. Explicit applies/settings already advance the health generation.
+    fingerprint: JSON.stringify([generation && generation.data, tunnel.ifindex, boundary.local.ifindex, boundary.peer.ifindex, managed ? lease.process_started_at : null])};
 }
 
 function execute(program, args, stdin) {

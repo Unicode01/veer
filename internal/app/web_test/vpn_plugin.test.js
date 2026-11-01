@@ -243,6 +243,79 @@ function vpnFixture(driver = 'mihomo', extra = {}, options = {}) {
   return {...h,procs,specs};
 }
 
+const healthTick = h => h.host.run('onTimer',{timer:{name:'vpn_health'}});
+const healthStatus = h => h.host.action('health_status',{}).items.find(v=>v.key==='default');
+test('VPN health settings are bounded and reject credentials, malformed URLs and invalid status codes',()=>{
+  const settings=require('../../../plugins/vpn_core/health-check').settings;
+  assert.equal(settings().enabled,false);
+  for(const value of [{enabled:'yes'},{url:'http://user:secret@example.com/'},{url:'http://a..b/'},{url:'https://a/#secret'},
+    {url:'https://a/\nheader'},{url:'ftp://example.com'},{url:'http://example.com:65536'},
+    {resolver_ip:'127.00.0.1'},{resolver_ip:'300.1.1.1'},{interval_seconds:14},{timeout_ms:10001},{expected_status:99},{extra:true}])assert.throws(()=>settings(value));
+  assert.equal(settings({expected_status:0,url:'http://192.168.20.1:8080/health'}).expected_status,0);
+});
+for(const driver of ['wireguard','mihomo','sing_box'])test('VPN health '+driver+' uses the applied WAN and does not mutate forwarding or restart the core',()=>{
+  const requests=[], options={adapters:{'net.http.request':r=>{requests.push(clone(r));return {status_code:204};}}};
+  const h=driver==='wireguard'?fixture(profile(),options):vpnFixture(driver,{},options);
+  assert.throws(()=>h.host.action('health_check',{}),/尚未就绪/);
+  h.apply();const before=clone(h.state),specs=h.specs?.length;
+  assert.equal(healthStatus(h).state,'unknown');assert.equal(h.host.state.timers.has('vpn_health'),false);
+  h.host.action('health_check',{});healthTick(h);
+  const value=healthStatus(h);assert.equal(value.state,'healthy');assert.equal(value.result.status_code,204);
+  assert.equal(value.result.consecutive_failures,0);assert.ok(value.result.last_success_at>0);
+  assert.equal(requests.length,1);assert.equal(requests[0].interface,driver==='wireguard'?'veerwg1':'veervpn1');
+  assert.equal(requests[0].source_ip,driver==='wireguard'?'10.77.0.1':'10.78.0.1');
+  assert.equal(requests[0].follow_redirects,false);assert.equal(requests[0].resolver_ip,'1.1.1.1');
+  assert.deepEqual(h.state,before);assert.equal(h.specs?.length,specs);assert.equal(h.host.state.timers.has('vpn_health'),false);
+});
+test('VPN health counts failures, sanitizes errors, checks HTTP status and recovers without restarting',()=>{
+  let response=()=>{throw new Error('password=sensitive-core-password TLS certificate failed');};
+  const h=vpnFixture('mihomo',{}, {adapters:{'net.http.request':()=>response()}});h.apply();
+  const check=()=>{h.host.action('health_check',{});healthTick(h);return healthStatus(h);};
+  assert.equal(check().result.reason,'tls');assert.equal(check().result.consecutive_failures,2);
+  assert.ok(!JSON.stringify(healthStatus(h)).includes('sensitive-core-password'));
+  response=()=>({status_code:302});assert.equal(check().result.reason,'http_status');
+  response=()=>{throw new Error('deadline exceeded');};assert.equal(check().result.reason,'timeout');
+  response=()=>({status_code:201});h.host.action('health_settings',{settings:{expected_status:0}});
+  assert.equal(check().state,'healthy');assert.equal(healthStatus(h).result.consecutive_failures,0);assert.equal(h.specs.length,1);
+});
+test('VPN health deduplicates queued work, rejects old generations and expires abandoned jobs',()=>{
+  let requests=0;const h=fixture(profile(),{adapters:{'net.http.request':()=>{requests++;return {status_code:204};}}});h.apply();
+  const queued=[];h.host.context.worker={dispatch:(name,handler,payload)=>queued.push(clone(payload))};
+  h.host.action('health_check',{});h.host.action('health_check',{});assert.equal(queued.length,1);
+  h.host.action('health_settings',{settings:{url:'http://192.168.20.1/'}});
+  h.host.run('onHealthProbe',{payload:queued[0]});healthTick(h);assert.equal(requests,0);
+  h.host.action('health_check',{});const op=h.host.state.operations.get('health_default');op.input.started_at-=20000;
+  healthTick(h);assert.equal(healthStatus(h).result.reason,'timeout');
+  h.host.action('health_check',{});const newest=queued.at(-1);
+  h.host.run('onHealthProbe',{payload:queued[1]});healthTick(h);assert.equal(healthStatus(h).state,'checking');
+  h.host.run('onHealthProbe',{payload:newest});healthTick(h);assert.equal(healthStatus(h).state,'healthy');
+  assert.equal(h.host.state.operations.size,1,'repeated probes reuse one durable record');
+});
+test('VPN health cannot publish success after a link or core generation changes',()=>{
+  for(const change of ['link','core','teardown']) {
+    let h;h=vpnFixture('mihomo',{}, {adapters:{'net.http.request':()=>{
+      if(change==='link')h.state.links.find(l=>l.ifname==='vtundefault').ifindex++;
+      if(change==='core')h.procs.vpn_default.started_at++;
+      if(change==='teardown')h.host.action('teardown',{});
+      return {status_code:204};
+    }}});h.apply();h.host.action('health_check',{});healthTick(h);
+    assert.ok(['stale','unavailable'].includes(healthStatus(h).state));assert.notEqual(healthStatus(h).result?.state,'healthy');
+  }
+});
+test('VPN health automatic probes are opt-in, respect cadence and keep lease enumeration complete',()=>{
+  let requests=0;const h=fixture(profile(),{adapters:{'net.http.request':()=>{requests++;return {status_code:204};}}});h.apply();
+  // Additional health records must not push applied leases beyond the first KV page.
+  for(let i=0;i<45;i++)h.host.context.kv.set('health_padding_'+i,{});
+  healthTick(h);assert.equal(requests,0);
+  h.host.action('health_check',{});healthTick(h);assert.equal(requests,1);
+  h.host.action('health_settings',{settings:{enabled:true,interval_seconds:15}});healthTick(h);healthTick(h);healthTick(h);
+  assert.equal(requests,2,'enabling auto probes must immediately check the new settings');
+  h.host.state.operations.get('health_default').input.started_at-=16000;healthTick(h);healthTick(h);assert.equal(requests,3);
+  h.host.action('health_settings',{settings:{enabled:false}});healthTick(h);assert.equal(requests,3);
+  h.host.reconcile();assert.equal(h.host.snapshot().kv.lease_default.active,true);
+  h.host.run('onDeactivate');assert.equal(h.host.state.timers.has('vpn_health'),false);assert.equal(h.state.links.length,0);
+});
+
 for(const driver of ['mihomo','sing_box']) {
   test('VPN '+driver+' allocates its internal WAN address, publishes it, and pins it across reapply and recovery',()=>{
     const h=vpnFixture(driver,{addresses:undefined});

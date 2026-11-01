@@ -172,6 +172,7 @@ const apiFixtures = new Map([
 const browserErrors = new WeakMap();
 
 test('VPN WAN saves drafts and encrypted core configurations through the real UI bridge', async ({ page }, testInfo) => {
+  test.setTimeout(60000);
   await openDashboard(page, testInfo);
   const profile = {slot:2, addresses:['10.77.0.1/32'], peers:[{public_key:Buffer.alloc(32,2).toString('base64'), allowed_ips:['0.0.0.0/0']}],
     remote_routes:[]};
@@ -180,13 +181,16 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   const coreConfigs = {};
   const methods = ['list','get','create','update'];
   const coreActions = ['core_status','core_install','core_select','core_rollback','core_remove'];
+  const healthActions=['health_status','health_settings','health_check'], healthRequests=[], healthValues={};
+  const healthDefaults=require('../../../plugins/vpn_core/health-check').settings();
+  let healthFailure=false, healthPolls=0;
   const cores = {id:'mihomo', directory:'/opt/veer/plugins.veer-state/cores/vpn_core/mihomo/linux-amd64', versions:[]};
   let installationPolls=0;
   const plugin = {id:'vpn_core', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.6.1', status:'active', enabled:true,
     resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
-    actions:['set_key','set_core_config','core_form','apply','teardown','inspect','core_logs',...coreActions].map(id => ({id})),
+    actions:['set_key','set_core_config','core_form','apply','teardown','inspect','core_logs',...coreActions,...healthActions].map(id => ({id})),
     ui:{entry:'index.html', page:'vpn', page_title:'VPN', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
-      actions:['set_key','set_core_config','core_form','apply','teardown','inspect','core_logs',...coreActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
+      actions:['set_key','set_core_config','core_form','apply','teardown','inspect','core_logs',...coreActions,...healthActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
   await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
   await page.route('**/api/plugins/vpn_core/**', async route => {
     const url = new URL(route.request().url());
@@ -206,6 +210,17 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
     if (endpoint.startsWith('actions/')) {
       const id=endpoint.split('/').pop();
       const payload=route.request().postDataJSON().payload;
+      if(healthActions.includes(id)) {
+        Object.keys(records).forEach(key=>{healthValues[key] ||= {key,settings:{...healthDefaults},state:'unknown',result:null};});
+        if(id==='health_status') {
+          if(healthValues.saved?.state==='checking' && ++healthPolls>=3)healthValues.saved={...healthValues.saved,state:healthFailure?'unhealthy':'healthy',result:{latency_ms:37,checked_at:Date.now(),message:healthFailure?'检测超时':'VPN 链路可用',consecutive_failures:healthFailure?1:0}};
+          return route.fulfill({json:{result:{items:Object.values(healthValues)}}});
+        }
+        healthRequests.push({id,payload});
+        if(id==='health_settings')healthValues[payload.key]={...healthValues[payload.key],settings:payload.settings,state:'stale'};
+        if(id==='health_check'){healthValues[payload.key].state='checking';healthPolls=0;}
+        return route.fulfill({json:{result:healthValues[payload.key]}});
+      }
       if(id==='core_form') {
         const name=records[payload.key]?.data.config_secret || 'core_'+payload.key;
         return route.fulfill({json:{result:coreConfigs[name]?vpnShares.metadata(coreConfigs[name]):{mode:'empty'}}});
@@ -246,6 +261,27 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   const frame = page.frameLocator('#tab-plugin-vpn .plugin-page-frame');
   await expect(frame.locator('h1')).toHaveText('VPN 出口');
   await expect(frame.locator('.vpn-outlet')).toHaveCount(1);
+  await frame.getByRole('button',{name:'健康检测',exact:true}).click();
+  await expect(frame.locator('.vpn-health')).toContainText('未检测');
+  await expect(frame.getByLabel('检测地址',{exact:true})).toBeHidden();
+  await frame.getByText('检测设置',{exact:true}).click();
+  await expect(frame.getByLabel('自动检测',{exact:true})).toHaveValue('off');
+  await frame.getByLabel('检测地址',{exact:true}).fill('http://192.168.20.1/health');
+  await frame.getByRole('button',{name:'保存检测设置',exact:true}).click();
+  await expect.poll(()=>healthRequests.length).toBe(1);
+  expect(healthRequests[0].payload.settings.url).toBe('http://192.168.20.1/health');
+  expect(actions).toHaveLength(0);
+  await frame.getByRole('button',{name:'立即检测',exact:true}).click();
+  await expect(frame.locator('.vpn-health')).toContainText('检测中');
+  await expect(frame.locator('.vpn-health')).toContainText('链路可用');
+  await expect(frame.locator('.vpn-health')).toContainText('37 ms');
+  healthFailure=true;
+  await frame.getByRole('button',{name:'立即检测',exact:true}).click();
+  await expect(frame.locator('.vpn-health')).toContainText('链路异常');
+  await expect(frame.locator('.vpn-health')).toContainText('检测超时');
+  await expectNoPageOverflow(page);
+  await page.screenshot({path:testInfo.outputPath('vpn-health.png'),fullPage:true});
+  await frame.getByRole('button',{name:'收起检测',exact:true}).click();
   await expect(frame.getByLabel('代理核心 JSON 配置')).toHaveCount(0);
   await frame.getByRole('button', {name:'编辑', exact:true}).click();
   await expect(frame.getByLabel('本机 WireGuard 地址', {exact:true})).toHaveValue('10.77.0.1/32');

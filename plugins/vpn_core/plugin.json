@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "vpn_core",
   "name": "VPN WAN",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "kind": "pipeline",
   "stability": "lab",
   "description": "Opt-in VPN WAN adapters for kernel WireGuard, Mihomo, sing-box and external TUN cores.",
@@ -20,7 +20,10 @@
       "dataplane.hook_bindings.v1",
       "ui.capabilities.v1",
       "control.process.v1",
-      "control.process_binaries.v1"
+      "control.process_binaries.v1",
+      "control.http_client.v1",
+      "control.durable_operations.v1",
+      "control.workers"
     ],
     "tc_pipeline_abi": 2
   },
@@ -30,6 +33,10 @@
       "crypto",
       "exec",
       "net.admin",
+      "net.http",
+      "net.dns",
+      "worker",
+      "operation",
       "ebpf.load",
       "ebpf.map_read",
       "ebpf.map_write",
@@ -43,7 +50,10 @@
       "timer",
       "ui"
     ],
-    "net_access": [{"interfaces": ["*"], "operations": ["link.read"]}],
+    "net_access": [
+      {"interfaces": ["*"], "operations": ["link.read"]},
+      {"interfaces": ["veerwg*", "veervpn*"], "operations": ["http", "dns"], "remote_cidrs": ["0.0.0.0/0", "::/0"]}
+    ],
     "resource_access": [
       {
         "plugin": "wan_core",
