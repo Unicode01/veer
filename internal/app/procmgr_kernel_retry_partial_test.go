@@ -627,7 +627,7 @@ func testRetryNetlinkTriggeredKernelFallbackOwnersRecoversSourceIPFallbackOnAddr
 }
 
 func TestRetryNetlinkTriggeredKernelFallbackOwnersRecoversMatchedEgressNATFallbackIncrementally(t *testing.T) {
-	for _, cause := range []string{"neighbor", "source_address_preflight"} {
+	for _, cause := range []string{"neighbor", "source_address_preflight", "source_address_preflight_pinned_kernel"} {
 		t.Run(cause, func(t *testing.T) {
 			testRetryNetlinkTriggeredKernelFallbackOwnersRecoversMatchedEgressNATFallbackIncrementally(t, cause)
 		})
@@ -726,12 +726,17 @@ func testRetryNetlinkTriggeredKernelFallbackOwnersRecoversMatchedEgressNATFallba
 	trigger := newKernelNetlinkRecoveryTrigger("neighbor")
 	trigger.addInterfaceName("eno1")
 	trigger.addBackendIP("198.51.100.40")
-	if cause == "source_address_preflight" {
+	if cause == "source_address_preflight" || cause == "source_address_preflight_pinned_kernel" {
 		pm.egressNATPlans[natID] = ruleDataplanePlan{
 			PreferredEngine: ruleEngineKernel,
 			EffectiveEngine: ruleEngineUserspace,
 			FallbackReason:  `tc: resolve outbound nat ip on "eno1": preferred source IPv4 "203.0.113.40" is not assigned`,
 			AddrRefresh:     kernelAddressRefreshMetadata{OutInterface: "eno1", Family: ipFamilyIPv4},
+		}
+		if cause == "source_address_preflight_pinned_kernel" {
+			plan := pm.egressNATPlans[natID]
+			plan.EffectiveEngine = ruleEngineKernel
+			pm.egressNATPlans[natID] = plan
 		}
 		trigger = newKernelNetlinkRecoveryTrigger("addr")
 		trigger.addInterfaceName("eno1")
