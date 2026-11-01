@@ -23,7 +23,7 @@ pipeline.attach({id: 'wg-links', direction: 'forward', attach: 'ingress', priori
   program: 'wg_adapter:tc_adapter', mode: 'rewrite', binding_required: true});
 plugin.resource({id: 'hook_bindings', methods: ['list', 'get'], control_methods: ['list', 'get', 'create', 'update', 'delete'],
   runtime_update: 'plugin_reconcile', max_records: 1, max_record_bytes: 4096});
-plugin.resource({id: 'profiles', schema_version: 2, methods: ['list', 'get', 'create', 'update'], control_methods: ['list', 'get', 'create', 'update', 'delete'], runtime_update: 'manual', max_records: 8, max_record_bytes: 16384,
+plugin.resource({id: 'profiles', schema_version: 3, methods: ['list', 'get', 'create', 'update'], control_methods: ['list', 'get', 'create', 'update', 'delete'], runtime_update: 'manual', max_records: 8, max_record_bytes: 16384,
   schema: {type: 'object', additionalProperties: false, properties: {
     driver: {type: 'string', enum: ['wireguard', 'mihomo', 'sing_box', 'tun']},
     core_path: {type: 'string'}, config_secret: {type: 'string'}, upstream_interface: {type: 'string'}, upstream_ip: {type: 'string'},

@@ -5,11 +5,83 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Unicode01/veer/internal/store"
 )
+
+func TestBundledVPNProfileSourceIPUpgradePreservesExistingRecords(t *testing.T) {
+	plugin, err := loadPluginFromDir(filepath.Join("..", "..", "plugins", "vpn_core"), "vpn_core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := pluginResourceByIDForTest(t, plugin, "profiles")
+	if resource.SchemaVersion <= 2 {
+		t.Fatal("VPN source IP schema must advance beyond the installed version 2")
+	}
+	var historical map[string]any
+	if err := json.Unmarshal(resource.Schema, &historical); err != nil {
+		t.Fatal(err)
+	}
+	properties := historical["properties"].(map[string]any)
+	if _, ok := properties["upstream_ip"]; !ok {
+		t.Fatal("source IP missing from new profile schema")
+	}
+	delete(properties, "upstream_ip")
+	previous := resource
+	previous.SchemaVersion = 2
+	previous.Schema, err = json.Marshal(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := normalizePluginResourceSchema(&previous); err != nil {
+		t.Fatal(err)
+	}
+	db := openTestDB(t)
+	for i, data := range []string{
+		`{"driver":"wireguard","slot":1,"addresses":["10.77.0.1/32"],"peers":[{"public_key":"saved-key","preshared_key_secret":"shared_psk"}]}`,
+		`{"driver":"mihomo","slot":2,"upstream_interface":"wan0","config_secret":"custom_core"}`,
+		`{"driver":"sing_box","slot":3,"upstream_interface":"wan1","config_secret":"shared_core"}`,
+		`{"driver":"tun","slot":4,"tun_interface":"external0"}`,
+	} {
+		if _, err := store.AddPluginRecord(db, &store.PluginRecord{
+			PluginID: plugin.ID, ResourceID: resource.ID, RecordKey: fmt.Sprintf("vpn%d", i+1), DataJSON: data, Enabled: i%2 == 0,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.UpsertPluginResourceSchemaState(db, store.PluginResourceSchemaState{
+		PluginID: plugin.ID, ResourceID: resource.ID, SchemaVersion: 2, SchemaDigest: previous.SchemaDigest, Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetPluginRecords(db, plugin.ID, resource.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: t.TempDir()}), nil).(*gojaPluginControlRuntime)
+	defer rt.Close()
+	if err := rt.BeginPluginResourceMigrationTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.ensurePluginResourceSchema(plugin, resource, rt.PluginResourceMigrationTransactionID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.CommitPluginResourceMigrationTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.GetPluginRecords(db, plugin.ID, resource.ID)
+	if err != nil || !equalStoredPluginRecords(before, after) {
+		t.Fatalf("upgrade changed saved profiles: before=%+v after=%+v err=%v", before, after, err)
+	}
+	state, err := store.PluginResourceSchemaStateOrNil(db, plugin.ID, resource.ID)
+	if err != nil || state == nil || state.SchemaVersion != resource.SchemaVersion || state.SchemaDigest != resource.SchemaDigest || state.Status != "active" || state.TransactionID != "" {
+		t.Fatalf("upgraded schema = %+v, err=%v", state, err)
+	}
+	assertNoPluginResourceMigrations(t, db)
+}
 
 func TestPluginResourceMigrationCommitsAfterSuccessfulReconcile(t *testing.T) {
 	dir := t.TempDir()
