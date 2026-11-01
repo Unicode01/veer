@@ -1,6 +1,11 @@
 #include "../include/veer_plugin_helpers.h"
 #ifdef VEER_KFUNCS
 #include "../include/veer_kfuncs.h"
+#define PPPOE_SUBPROG __attribute__((noinline))
+#else
+// Global skb-context functions need the running kernel's vmlinux BTF. Keep
+// the ordinary BPF object usable on kernels built without it (e.g. OpenWrt).
+#define PPPOE_SUBPROG static __attribute__((noinline))
 #endif
 
 #ifndef BPF_MAP_TYPE_ARRAY
@@ -450,9 +455,9 @@ static __always_inline int rewrite_ipv4_dst(struct __sk_buff *skb, const struct 
 	return 0;
 }
 
-// Global BTF functions are verified independently of their callers. Keep this
-// SYN-only loop separate so state cannot multiply across tunnel branches.
-__attribute__((noinline)) int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
+// Keep this SYN-only loop out of the main tunnel body. The helper object can
+// use independent global-function verification because it requires kernel BTF.
+PPPOE_SUBPROG int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
 {
 	int opt_off = l4_off + (int)sizeof(struct tcp_min_hdr);
 	if (l4_off < 14 || l4_off > 65535 || tcp_hdr_len <= (int)sizeof(struct tcp_min_hdr) || tcp_hdr_len > 60)
@@ -635,8 +640,8 @@ static __always_inline void copy_pppoe_payload_8(void *dst, const void *src)
 	*(__u32 *)(dst + 4) = *(const __u32 *)(src + 4);
 }
 
-// Global linkage and BTF keep these loops independent of the MSS branches.
-__attribute__((noinline)) int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
+// The helper object verifies these loops independently of the MSS branches.
+PPPOE_SUBPROG int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
