@@ -44,6 +44,8 @@ jobs:
           php scripts/verify-whmcs-behavior.php
           cc -O2 -Wall -Wextra -Werror scripts/verify-nat-probe.c -o /tmp/veer-nat-probe-test
           /tmp/veer-nat-probe-test
+          cc -O2 -Wall -Wextra -Werror scripts/verify-flow-time.c -o /tmp/veer-flow-time-test
+          /tmp/veer-flow-time-test
       - name: Audit WebUI dependencies
         run: npm audit --audit-level=high
       - name: Install Go analysis tools

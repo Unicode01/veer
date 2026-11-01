@@ -1921,8 +1921,13 @@ func kernelFlowDeleteReasonWithTCPIdleTimeout(key tcFlowKeyV4, value tcFlowValue
 	if !haveNow {
 		return ""
 	}
-	if value.LastSeenNS == 0 || nowNS < value.LastSeenNS {
+	if value.LastSeenNS == 0 {
 		return "invalid_last_seen"
+	}
+	// nowNS is sampled before scanning the map. Packets can refresh this
+	// entry after that sample, so a newer timestamp is live, not corrupt.
+	if nowNS < value.LastSeenNS {
+		return ""
 	}
 
 	ageNS := nowNS - value.LastSeenNS
@@ -1975,8 +1980,11 @@ func kernelFlowShouldDeleteV6WithTCPIdleTimeout(key tcFlowKeyV6, value tcFlowVal
 	if !haveNow {
 		return false
 	}
-	if value.LastSeenNS == 0 || nowNS < value.LastSeenNS {
+	if value.LastSeenNS == 0 {
 		return true
+	}
+	if nowNS < value.LastSeenNS {
+		return false
 	}
 
 	ageNS := nowNS - value.LastSeenNS

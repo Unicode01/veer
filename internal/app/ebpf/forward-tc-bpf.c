@@ -12,6 +12,7 @@
 #include "include/bpf_endian.h"
 #include "include/bpf_helpers.h"
 #include "include/forward_addr_helpers.h"
+#include "include/forward_flow_time.h"
 
 #define ICMP_ECHOREPLY 0
 #define ICMP_ECHO 8
@@ -3507,7 +3508,7 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 		new_session = 1;
 	} else if (is_datagram_proto(ctx->proto)) {
 		now = bpf_ktime_get_ns();
-		if (existing_flow->last_seen_ns == 0 || now < existing_flow->last_seen_ns || (now - existing_flow->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, existing_flow->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			flow_value->rule_id = rule->rule_id;
 			flow_value->rule_revision = rule->revision;
 			flow_value->session_id = new_flow_session_id();
@@ -4288,7 +4289,7 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 
 	if (is_datagram_proto(ctx->proto)) {
 		now = bpf_ktime_get_ns();
-		if (flow_value->last_seen_ns == 0 || now < flow_value->last_seen_ns || (now - flow_value->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, flow_value->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			if (delete_flow_v4_session_in_bank(bank, flow_key, flow_value->session_id) == 0) {
 				if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
 					drop_rule_datagram_nat(flow_value->rule_id, ctx->proto);
@@ -4396,7 +4397,7 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 	__builtin_memset(front_value, 0, sizeof(*front_value));
 
 	if (is_datagram_proto(ctx->proto)) {
-		if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, reply_value->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			delete_fullnat_state(bank, reply_key, reply_value, ctx->proto);
 			return TC_ACT_OK;
 		}
@@ -4752,7 +4753,7 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 	*reply_value = *flow;
 
 	if (is_datagram_proto(ctx->proto)) {
-		if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, reply_value->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			delete_fullnat_state_v6(bank, reply_key, reply_value, ctx->proto);
 			return TC_ACT_OK;
 		}
