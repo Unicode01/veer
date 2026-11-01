@@ -510,6 +510,7 @@ struct tc_plugin_metric_value {
 #define FORWARD_RULE_FLAG_PASSTHROUGH 0x10
 #define FORWARD_RULE_FLAG_FULL_CONE 0x20
 #define FORWARD_RULE_FLAG_PREPARED_L2 0x40
+#define FORWARD_RULE_FLAG_DROP 0x80
 #define FORWARD_TCP_FLOW_REFRESH_NS (30ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_REFRESH_NS (1ULL * 1000000000ULL)
 #define FORWARD_ICMP_FLOW_IDLE_NS (30ULL * 1000000000ULL)
@@ -4886,6 +4887,8 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, rule))
 		return TC_ACT_OK;
+	if (rule->flags & FORWARD_RULE_FLAG_DROP)
+		return TC_ACT_SHOT;
 	if (is_egress_nat_rule(rule)) {
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return TC_ACT_UNSPEC;
@@ -5084,6 +5087,8 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 		if (egress_nat_dst_mac_mismatch(skb, rule))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+		if (rule->flags & FORWARD_RULE_FLAG_DROP)
+			return finish_forward_pipeline_v4(skb, TC_ACT_SHOT);
 		if (!is_full_cone_egress_nat_rule(rule)) {
 			/* Keep established egress NAT sessions on the current program across
 			 * hot-restart handoff so they don't depend on a successor-only tail call.

@@ -29,6 +29,7 @@ type Rule struct {
 	kernelMode         string
 	kernelNATType      string
 	kernelRedirectMode string
+	kernelUnavailable  bool
 }
 
 type Site struct {

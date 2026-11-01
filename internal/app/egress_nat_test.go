@@ -417,6 +417,36 @@ func TestValidateProjectedEgressNATsAllowsDisjointProtocolsOnSameScope(t *testin
 	}
 }
 
+func TestUnavailableProtocolWANRetainsDropSelectors(t *testing.T) {
+	planner := newRuleDataplanePlanner(stubKernelSupportRuntime{
+		available: true, supported: false, supportText: "outbound source IP is not assigned to the selected outbound interface",
+	}, ruleEngineKernel)
+	snapshot := newEgressNATInterfaceSnapshot([]InterfaceInfo{
+		{Name: "br-lan", Kind: "bridge"}, {Name: "port0", Parent: "br-lan", Kind: "veth"},
+	}, nil)
+	item := EgressNAT{ID: 7, ParentInterface: "br-lan", ChildInterface: "port0", OutInterface: "veervpn1",
+		OutSourceIP: "10.78.1.1", Protocol: "tcp+udp+icmp", RedirectMode: egressNATRedirectModePreparedL2, Enabled: true}
+	nextID := int64(1)
+	candidates, plans := buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot)
+	if len(candidates) != 3 || plans[item.ID].KernelEligible || plans[item.ID].FallbackReason == "" {
+		t.Fatalf("unavailable WAN candidates=%v plan=%+v", candidates, plans[item.ID])
+	}
+	for _, candidate := range candidates {
+		if !candidate.rule.kernelUnavailable || candidate.rule.InInterface != "port0" {
+			t.Fatalf("missing scoped drop selector: %+v", candidate)
+		}
+	}
+	pm := &ProcessManager{kernelEgressNATs: map[int64]bool{item.ID: true}, egressNATPlans: plans}
+	if status := pm.egressNATRuntimeStatus(item.ID, true); status != "error" {
+		t.Fatalf("guarded WAN status=%s, want error", status)
+	}
+	item.Enabled = false
+	candidates, _ = buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot)
+	if len(candidates) != 0 {
+		t.Fatal("disabled NAT retained a drop selector")
+	}
+}
+
 func TestBuildEgressNATKernelCandidates(t *testing.T) {
 	planner := newRuleDataplanePlanner(stubKernelSupportRuntime{
 		available: true,

@@ -159,6 +159,7 @@ const (
 	kernelRuleFlagPassthrough  = 0x10
 	kernelRuleFlagFullCone     = 0x20
 	kernelRuleFlagPreparedL2   = 0x40
+	kernelRuleFlagDrop         = 0x80
 )
 
 const (
@@ -3956,6 +3957,9 @@ func prepareKernelRuleRef(ctx *kernelPrepareContext, rule *Rule) ([]preparedKern
 	if err != nil {
 		return nil, fmt.Errorf("resolve inbound interface %q: %w", rule.InInterface, err)
 	}
+	if rule.kernelUnavailable && isKernelEgressNATRule(*rule) {
+		return prepareKernelEgressNATDropRule(*rule, inLink)
+	}
 	outLink, err := ctx.linkByName(rule.OutInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound interface %q: %w", rule.OutInterface, err)
@@ -4218,6 +4222,36 @@ func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink net
 	return prepared, nil
 }
 
+func prepareKernelEgressNATDropRule(rule Rule, inLink netlink.Link) ([]preparedKernelRule, error) {
+	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) || !kernelEgressProtocolSupported(rule.Protocol) ||
+		rule.InPort != 0 || rule.OutPort != 0 || rule.Transparent {
+		return nil, fmt.Errorf("invalid egress NAT drop selector")
+	}
+	inLinks, err := resolveTCInboundLinks(inLink)
+	if err != nil {
+		return nil, err
+	}
+	prepared := make([]preparedKernelRule, 0, len(inLinks))
+	for _, current := range inLinks {
+		if current == nil || current.Attrs() == nil || current.Attrs().Index <= 0 {
+			continue
+		}
+		index := current.Attrs().Index
+		prepared = append(prepared, preparedKernelRule{
+			rule: rule, inIfIndex: index, outIfIndex: index,
+			spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+			key:  tcRuleKeyV4{IfIndex: uint32(index), Proto: kernelRuleProtocol(rule.Protocol)},
+			value: tcRuleValueV4{RuleID: uint32(rule.ID),
+				Flags:      kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT | kernelRuleFlagDrop,
+				OutIfIndex: uint32(index), SrcMAC: egressNATIngressLocalMAC(current)},
+		})
+	}
+	if len(prepared) == 0 {
+		return nil, fmt.Errorf("egress NAT drop selector has no attachable ingress")
+	}
+	return prepared, nil
+}
+
 func prepareKernelEgressNATPassthroughRule(ctx *kernelPrepareContext, rule Rule, inLink netlink.Link, outLink netlink.Link) ([]preparedKernelRule, error) {
 	inAddr, err := parseKernelInboundIPv4Uint32(rule.InIP)
 	if err != nil {
@@ -4283,6 +4317,14 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 
 	for _, rule := range rules {
 		items, err := prepareKernelRule(prepareCtx, rule)
+		if err != nil && isKernelEgressNATRule(rule) &&
+			normalizeEgressNATRedirectMode(rule.kernelRedirectMode) == egressNATRedirectModePreparedL2 {
+			// The boundary can disappear after preflight. Close that race without
+			// removing the LAN selector and exposing the host's default route.
+			guard := rule
+			guard.kernelUnavailable = true
+			items, err = prepareKernelRule(prepareCtx, guard)
+		}
 		if err != nil {
 			if reused, ok := reusablePreparedKernelRules(rule, err, previousByKey, allowTransientReuse); ok {
 				prepared = append(prepared, reused...)
