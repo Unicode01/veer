@@ -3221,11 +3221,22 @@ func kernelAttachmentDeleteCount(oldAttachments, newAttachments []kernelAttachme
 }
 
 func (rt *linuxKernelRuleRuntime) discardAttachmentsLocked(attachments []kernelAttachment) {
-	for i := len(attachments) - 1; i >= 0; i-- {
-		if attachments[i].filter == nil {
-			continue
+	// FilterReplace may have replaced a live slot before another interface
+	// disappears. Restore that slot atomically instead of deleting its only
+	// filter and leaving unrelated traffic on the host forwarding path.
+	update := &pluginDirectTCUpdate{previous: make(map[pluginTCSlot]*netlink.BpfFilter)}
+	for _, att := range rt.attachments {
+		if att.filter != nil {
+			update.previous[pluginTCFilterSlot(att.filter)] = att.filter
 		}
-		_ = netlink.FilterDel(attachments[i].filter)
+	}
+	for _, att := range attachments {
+		if att.filter != nil {
+			update.installed = append(update.installed, att.filter)
+		}
+	}
+	if err := update.rollback(); err != nil {
+		log.Printf("kernel dataplane rollback: restore tc attachments failed: %v", err)
 	}
 }
 
@@ -3267,6 +3278,7 @@ func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, i
 		},
 		Fd:           prog.FD(),
 		Name:         name,
+		Id:           int(kernelProgramID(prog)),
 		DirectAction: true,
 	}
 	if err := netlink.FilterReplace(filter); err != nil {

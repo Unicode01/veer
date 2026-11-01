@@ -712,7 +712,7 @@ func TestKernelPluginPipelineInvalidExplicitInterfaceFiltersPlugin(t *testing.T)
 	}
 }
 
-func TestKernelPluginPipelineNoRuleFilterValidatesPostCoreInvalidInterface(t *testing.T) {
+func TestKernelPluginPipelineMissingPostCoreInterfacePreservesHealthyHook(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
 		t.Fatalf("WriteFile(observer.o) error = %v", err)
@@ -745,15 +745,64 @@ func TestKernelPluginPipelineNoRuleFilterValidatesPostCoreInvalidInterface(t *te
 	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	desired = kernelPluginPipelineFilterNoRulePlugins(desired)
 	desired, states, forwardIfRules, replyIfRules := kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
-	if len(desired) != 0 {
-		t.Fatalf("desired = %+v, want plugin filtered after post-core interface resolution failure", desired)
+	if len(desired) != 1 || len(desired[0].hooks) != 1 || desired[0].hooks[0].HookID != "pre-core" {
+		t.Fatalf("desired = %+v, want healthy explicit pre-core hook retained", desired)
 	}
-	if kernelPluginPipelineHasAttachmentTargets(forwardIfRules, replyIfRules) {
-		t.Fatalf("forwardIfRules=%+v replyIfRules=%+v, want no attachment target for failed plugin", forwardIfRules, replyIfRules)
+	if !kernelPluginPipelineHasAttachmentTargets(forwardIfRules, replyIfRules) {
+		t.Fatalf("forwardIfRules=%+v replyIfRules=%+v, want healthy attachment retained", forwardIfRules, replyIfRules)
 	}
-	state, ok := states["mixed_interface"]
-	if !ok || state.Error == "" || !strings.Contains(state.Error, "forward_missing0") {
-		t.Fatalf("state = %+v, want post-core interface resolution error", state)
+	if len(states) != 0 || !strings.Contains(strings.Join(desired[0].warnings, "; "), "forward_missing0") {
+		t.Fatalf("states=%+v warnings=%+v, want missing interface warning without disabling healthy hooks", states, desired[0].warnings)
+	}
+}
+
+func TestKernelPluginPipelineMissingInterfacePreservesOtherBindings(t *testing.T) {
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attach := range []string{"ingress", "egress", "both"} {
+		t.Run(attach, func(t *testing.T) {
+			original := []kernelPluginPipelineDesiredPlugin{{
+				plugin: LoadedPlugin{PluginManifest: PluginManifest{ID: "multi_wan"}},
+				hooks: []kernelPluginPipelineHookPlan{{
+					PluginID: "multi_wan", HookID: "adapter", Stage: kernelPluginPipelineStagePreForward,
+					Attach: attach, Interfaces: []string{"forward_missing0", "lo", "lo"}, InterfaceIndexes: []uint32{999},
+				}},
+			}}
+			desired, states, targets := kernelPluginPipelineResolveExplicitAttachTargets(original, nil)
+			if len(desired) != 1 || len(desired[0].hooks) != 1 || len(states) != 0 {
+				t.Fatalf("healthy binding lost: desired=%+v states=%+v", desired, states)
+			}
+			hook := desired[0].hooks[0]
+			if len(hook.InterfaceIndexes) != 1 || hook.InterfaceIndexes[0] != uint32(lo.Index) {
+				t.Fatalf("resolved indexes=%v, want only live lo", hook.InterfaceIndexes)
+			}
+			if len(original[0].hooks[0].InterfaceIndexes) != 1 || original[0].hooks[0].InterfaceIndexes[0] != 999 {
+				t.Fatal("resolution mutated the original desired plan")
+			}
+			masks, err := buildKernelPluginPipelineInterfaceMasks([]loadedKernelPluginPipelineProgram{{plan: hook}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(masks.globalByAttach) != 0 {
+				t.Fatalf("missing binding widened hook to global: %+v", masks)
+			}
+			for _, direction := range kernelPluginPipelinePlanAttachDirections(attach) {
+				if masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: uint32(lo.Index), Attach: direction}].PreForwardMask != 1 {
+					t.Fatalf("healthy interface lost its adapter mask: %+v", masks)
+				}
+			}
+			if (len(targets.ForwardIngress) > 0) != (attach != "egress") || (len(targets.ForwardEgress) > 0) != (attach != "ingress") {
+				t.Fatalf("healthy attachment directions changed: %+v", targets)
+			}
+			// Resolve again from the catalog after a missing device returns.
+			original[0].hooks[0].Interfaces = []string{"lo"}
+			desired, states, _ = kernelPluginPipelineResolveExplicitAttachTargets(original, nil)
+			if len(states) != 0 || len(desired[0].warnings) != 0 {
+				t.Fatalf("resolved interface retained stale failure: %+v %+v", desired, states)
+			}
+		})
 	}
 }
 

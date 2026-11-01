@@ -2,6 +2,7 @@ package app
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -900,25 +901,72 @@ func (h *pluginControlHost) netLinkEnsureBridge(call goja.FunctionCall) goja.Val
 func (h *pluginControlHost) netLinkDelete(call goja.FunctionCall) goja.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
 	namespace := h.netNamespaceArgument(call, 1, "net.link.delete")
-	h.netAdminInNamespaceOrThrow(namespace, "net.link.delete")
+	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.delete")
 	h.requireNetAccess("link.delete", name, "net.link.delete")
-	unlock := h.lockPluginNetLinks(namespace, "net.link.delete", name)
+	if h.db == nil {
+		h.throwf("net.link.delete: plugin ownership store is unavailable")
+	}
+	key := pluginControlNetScopedResourceKey(namespace, name)
+	recorded, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeLink, key)
+	if err != nil {
+		h.throwf("net.link.delete: inspect recorded identity: %v", err)
+	}
+	var identity pluginOwnedLinkClaim
+	if recorded != nil && recorded.PluginID == h.plugin.ID {
+		if err := json.Unmarshal([]byte(recorded.MetadataJSON), &identity); err != nil {
+			h.throwf("net.link.delete: decode recorded identity: %v", err)
+		}
+	}
+	peer := ""
+	if identity.Kind == "veth" {
+		peer = identity.Peer
+	}
+	unlock := h.lockPluginNetLinks(namespace, "net.link.delete", name, peer)
 	defer unlock()
 	owned := h.requirePluginLinkDeleteOwnership(namespace, name, "net.link.delete")
 	if !owned {
 		h.throwf("net.link.delete: only links created and owned by this plugin may be deleted")
 	}
-	recorded, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeLink, pluginControlNetScopedResourceKey(namespace, name))
+	current, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeLink, key)
 	if err != nil {
 		h.throwf("net.link.delete: inspect recorded identity: %v", err)
 	}
-	if recorded != nil {
-		if err := restorePluginOwnedResource(h.netAdmin, *recorded); err != nil {
-			h.throwf("net.link.delete: %v", err)
+	if recorded == nil || current == nil || current.MetadataJSON != recorded.MetadataJSON {
+		h.throwf("net.link.delete: recorded identity changed; retry deletion")
+	}
+	if err := restorePluginOwnedResource(h.netAdmin, *recorded); err != nil {
+		h.throwf("net.link.delete: %v", err)
+	}
+	refs := []pluginOwnedResourceRef{{pluginOwnedResourceTypeLink, key}}
+	if peer != "" {
+		peerKey := pluginControlNetScopedResourceKey(namespace, peer)
+		paired, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeLink, peerKey)
+		if err != nil {
+			h.throwf("net.link.delete: inspect peer ownership: %v", err)
+		}
+		var pairedIdentity pluginOwnedLinkClaim
+		if paired != nil && paired.PluginID == h.plugin.ID && json.Unmarshal([]byte(paired.MetadataJSON), &pairedIdentity) == nil &&
+			pairedIdentity.Kind == "veth" && pairedIdentity.Peer == name && normalizePluginControlNamespace(pairedIdentity.Namespace) == normalizePluginControlNamespace(namespace) {
+			// Deleting a veth also removes its peer. Only forget the reciprocal
+			// lease after confirming it is absent from the recorded namespace.
+			// A live replacement is left for explicit ownership-aware cleanup.
+			if _, present, err := pluginOwnedLinkForRestore(admin, peer); err != nil {
+				h.throwf("net.link.delete: inspect deleted peer: %v", err)
+			} else if !present {
+				refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeLink, peerKey})
+			}
 		}
 	}
-	if err := h.releasePluginOwnedLink(namespace, name); err != nil {
+	tx, err := h.db.Begin()
+	if err != nil {
+		h.throwf("net.link.delete: begin ownership cleanup: %v", err)
+	}
+	defer tx.Rollback()
+	if err := releasePluginOwnedResourceRefs(tx, h.plugin.ID, refs); err != nil {
 		h.throwf("net.link.delete: clear ownership: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		h.throwf("net.link.delete: commit ownership cleanup: %v", err)
 	}
 	return goja.Undefined()
 }
