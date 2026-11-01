@@ -495,7 +495,7 @@ func runVPNMultiTopology(t *testing.T) {
 	for i, exit := range exits {
 		payload := map[string]any{"parent_interface": "br-lan", "out_interface": exit.local, "out_source_ip": exit.natSource, "protocol": "tcp+udp+icmp"}
 		if i != 3 {
-			payload["child_interface"], payload["redirect_mode"] = fmt.Sprintf("port%d", i), egressNATRedirectModePreparedL2
+			payload["child_interface"] = fmt.Sprintf("port%d", i)
 		}
 		api("POST", "/api/egress-nats", payload, false)
 	}

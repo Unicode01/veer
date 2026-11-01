@@ -184,9 +184,10 @@ func manageOptionalKernelModule(dir string, system kernelModuleSystem, preserve 
 		return noop, err
 	}
 	marker := filepath.Join(dir, "owner.json")
-	id, err := system.identity()
+	_, err = system.identity()
 	if errors.Is(err, os.ErrNotExist) {
 		if err = system.load(); err == nil {
+			var id kernelModuleIdentity
 			id, err = system.identity()
 			if err == nil {
 				data, _ := json.Marshal(id)

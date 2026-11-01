@@ -417,7 +417,15 @@ func TestValidateProjectedEgressNATsAllowsDisjointProtocolsOnSameScope(t *testin
 	}
 }
 
-func TestUnavailableProtocolWANRetainsDropSelectors(t *testing.T) {
+func TestUnavailableEgressNATRetainsDropSelectors(t *testing.T) {
+	for _, mode := range []string{"", egressNATRedirectModePreparedL2} {
+		t.Run("redirect_mode="+mode, func(t *testing.T) {
+			testUnavailableEgressNATRetainsDropSelectors(t, mode)
+		})
+	}
+}
+
+func testUnavailableEgressNATRetainsDropSelectors(t *testing.T, mode string) {
 	planner := newRuleDataplanePlanner(stubKernelSupportRuntime{
 		available: true, supported: false, supportText: "outbound source IP is not assigned to the selected outbound interface",
 	}, ruleEngineKernel)
@@ -425,7 +433,21 @@ func TestUnavailableProtocolWANRetainsDropSelectors(t *testing.T) {
 		{Name: "br-lan", Kind: "bridge"}, {Name: "port0", Parent: "br-lan", Kind: "veth"},
 	}, nil)
 	item := EgressNAT{ID: 7, ParentInterface: "br-lan", ChildInterface: "port0", OutInterface: "veervpn1",
-		OutSourceIP: "10.78.1.1", Protocol: "tcp+udp+icmp", RedirectMode: egressNATRedirectModePreparedL2, Enabled: true}
+		OutSourceIP: "10.78.1.1", Protocol: "tcp+udp+icmp", RedirectMode: mode, Enabled: true}
+	if mode == "" {
+		// Ordinary API-created NATs are reloaded from storage without any
+		// plugin-only redirect metadata. They must be protected as well.
+		db := openTestDB(t)
+		id, err := dbAddEgressNAT(db, &item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, err := dbGetEgressNAT(db, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		item = *stored
+	}
 	nextID := int64(1)
 	candidates, plans := buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot)
 	if len(candidates) != 3 || plans[item.ID].KernelEligible || plans[item.ID].FallbackReason == "" {
@@ -434,6 +456,16 @@ func TestUnavailableProtocolWANRetainsDropSelectors(t *testing.T) {
 	for _, candidate := range candidates {
 		if !candidate.rule.kernelUnavailable || candidate.rule.InInterface != "port0" {
 			t.Fatalf("missing scoped drop selector: %+v", candidate)
+		}
+	}
+	planner = newRuleDataplanePlanner(stubKernelSupportRuntime{available: true, supported: true}, ruleEngineKernel)
+	if restored, restoredPlans := buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot); len(restored) != 3 || !restoredPlans[item.ID].KernelEligible {
+		t.Fatalf("restored exit candidates=%v plan=%+v", restored, restoredPlans[item.ID])
+	} else {
+		for _, candidate := range restored {
+			if candidate.rule.kernelUnavailable {
+				t.Fatal("restored exit retained a drop selector")
+			}
 		}
 	}
 	pm := &ProcessManager{kernelEgressNATs: map[int64]bool{item.ID: true}, egressNATPlans: plans}

@@ -33,3 +33,18 @@ func TestProtocolWANDropPreparationDoesNotResolveMissingExit(t *testing.T) {
 		t.Fatalf("drop selector lost the local destination-MAC guard: %v", item.value.SrcMAC)
 	}
 }
+
+func TestEgressNATPreparationGuardsExitLostAfterPreflight(t *testing.T) {
+	// The public NAT API has no plugin-only redirect metadata. The exit may
+	// disappear after the planner accepted it but before map preparation.
+	rule := buildEgressNATSyntheticRule(EgressNAT{
+		OutInterface: "missing-vpn", Enabled: true,
+	}, "lo", 7, "udp")
+	prepared, forward, reply, _, results, _ := prepareKernelRules([]Rule{rule}, nil, false, false, true, false)
+	if len(prepared) != 1 || len(forward) != 1 || len(reply) != 1 || len(results) != 0 {
+		t.Fatalf("missing exit lost the ingress guard: prepared=%+v forward=%v reply=%v results=%v", prepared, forward, reply, results)
+	}
+	if prepared[0].value.Flags&kernelRuleFlagDrop == 0 {
+		t.Fatal("missing exit did not produce a drop selector")
+	}
+}

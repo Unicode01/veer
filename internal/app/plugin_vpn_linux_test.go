@@ -357,7 +357,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	// A parent default remains on the ordinary uplink; the child overrides it with the WG WAN.
 	create := func(child, out, source string) int64 {
 		t.Helper()
-		body := api("POST", "/api/egress-nats", map[string]any{"parent_interface": "br-lan", "child_interface": child, "out_interface": out, "out_source_ip": source, "redirect_mode": egressNATRedirectModePreparedL2, "protocol": "tcp+udp+icmp"})
+		body := api("POST", "/api/egress-nats", map[string]any{"parent_interface": "br-lan", "child_interface": child, "out_interface": out, "out_source_ip": source, "protocol": "tcp+udp+icmp"})
 		var r struct {
 			ID int64 `json:"id"`
 		}
