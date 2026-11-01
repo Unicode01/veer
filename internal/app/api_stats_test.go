@@ -799,6 +799,9 @@ func TestHandleKernelRuntimeIncludesFallbackSummary(t *testing.T) {
 	if resp.DefaultEngine != ruleEngineAuto {
 		t.Fatalf("default engine = %q, want %q", resp.DefaultEngine, ruleEngineAuto)
 	}
+	if resp.KernelHelperModule.Name != "veer_kfuncs" || resp.KernelHelperModule.Compiled != optionalKernelModuleCompiled {
+		t.Fatalf("missing kernel helper build status: %+v", resp.KernelHelperModule)
+	}
 	if !reflect.DeepEqual(resp.ConfiguredOrder, []string{kernelEngineTC}) {
 		t.Fatalf("configured order = %v, want %v", resp.ConfiguredOrder, []string{kernelEngineTC})
 	}

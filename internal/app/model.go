@@ -519,6 +519,7 @@ type KernelRuntimeResponse struct {
 	Available                                      bool                         `json:"available"`
 	AvailableReason                                string                       `json:"available_reason,omitempty"`
 	KernelCapabilities                             kernelcap.KernelCapabilities `json:"kernel_capabilities"`
+	KernelHelperModule                             KernelHelperModuleStatus     `json:"kernel_helper_module"`
 	DefaultEngine                                  string                       `json:"default_engine"`
 	ConfiguredOrder                                []string                     `json:"configured_order"`
 	TrafficStats                                   bool                         `json:"traffic_stats"`

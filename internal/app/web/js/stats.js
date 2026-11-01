@@ -1125,9 +1125,15 @@
     return parts.join(' · ');
   }
 
-  function kernelRuntimeCapabilityDetails(capabilities) {
-    if (!capabilities || typeof capabilities !== 'object') return [];
+  function kernelRuntimeCapabilityDetails(capabilities, helper) {
+    if (!capabilities || typeof capabilities !== 'object') capabilities = {};
     const rows = [];
+    if (helper && helper.name) {
+      const state = [helper.name, app.t(helper.loaded ? 'kernel.loaded.yes' : 'kernel.loaded.no'),
+        app.t(helper.compiled ? (helper.available ? 'kernel.helper.available' : 'kernel.helper.unavailable') : 'kernel.helper.notCompiled')];
+      if (helper.compiled && helper.reason) state.push(helper.reason);
+      rows.push(app.t('kernel.helper.title') + ': ' + state.join(' · '));
+    }
     const osArch = [capabilities.os, capabilities.arch].filter(Boolean).join('/');
     if (osArch || capabilities.kernel_release) {
       rows.push(app.t('kernel.capability.platform') + ': ' + [osArch, capabilities.kernel_release].filter(Boolean).join(' '));
@@ -1430,7 +1436,7 @@
       : [app.emptyCellNode('stat-muted')];
     const mapProfileDetail = kernelRuntimeMapProfileDetail(data);
     const capabilitySummary = kernelRuntimeCapabilitySummary(data.kernel_capabilities);
-    const capabilityDetails = kernelRuntimeCapabilityDetails(data.kernel_capabilities);
+    const capabilityDetails = kernelRuntimeCapabilityDetails(data.kernel_capabilities, data.kernel_helper_module);
 
     const summaryFragment = document.createDocumentFragment();
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
