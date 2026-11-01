@@ -720,22 +720,24 @@ func kernelPluginPipelineResolveExplicitAttachTargets(desired []kernelPluginPipe
 	}
 
 	filtered := make([]kernelPluginPipelineDesiredPlugin, 0, len(desired))
-	for itemIndex := range desired {
-		item := desired[itemIndex]
+	for _, original := range desired {
+		item := original
+		item.hooks = nil
+		item.warnings = append([]string(nil), original.warnings...)
 		itemTargets := kernelAttachmentRuleSetsForPrepared(make(map[int][]int64), make(map[int][]int64))
-		itemErr := ""
-		for hookIndex := range item.hooks {
-			hook := &item.hooks[hookIndex]
+		var resolutionErrors []string
+		for _, hook := range original.hooks {
 			hook.InterfaceIndexes = nil
 			if len(hook.Interfaces) == 0 {
+				item.hooks = append(item.hooks, hook)
 				continue
 			}
 			seenIndexes := make(map[uint32]struct{}, len(hook.Interfaces))
 			for _, name := range hook.Interfaces {
 				iface, err := net.InterfaceByName(name)
 				if err != nil {
-					itemErr = fmt.Sprintf("hook %s interface %q: %v", hook.HookID, name, err)
-					break
+					resolutionErrors = append(resolutionErrors, fmt.Sprintf("hook %s interface %q: %v", hook.HookID, name, err))
+					continue
 				}
 				if _, exists := seenIndexes[uint32(iface.Index)]; !exists {
 					hook.InterfaceIndexes = append(hook.InterfaceIndexes, uint32(iface.Index))
@@ -758,15 +760,18 @@ func kernelPluginPipelineResolveExplicitAttachTargets(desired []kernelPluginPipe
 					}
 				}
 			}
-			if itemErr != "" {
-				break
+			// A missing interface must not disable the same hook on other live
+			// interfaces (or discard its shared state maps). An entirely missing
+			// explicit binding is omitted, never widened to a global hook.
+			if len(hook.InterfaceIndexes) > 0 {
+				item.hooks = append(item.hooks, hook)
 			}
 		}
-		if itemErr != "" {
-			states[item.plugin.ID] = pluginRuntimeErrorState(itemErr)
+		if len(item.hooks) == 0 {
+			states[item.plugin.ID] = pluginRuntimeErrorState(strings.Join(resolutionErrors, "; "))
 			continue
 		}
-		desired[itemIndex] = item
+		item.warnings = append(item.warnings, resolutionErrors...)
 		mergeKernelPluginPipelineAttachmentRuleSets(&targets, itemTargets)
 		filtered = append(filtered, item)
 	}

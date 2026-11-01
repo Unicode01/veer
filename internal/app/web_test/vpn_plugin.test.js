@@ -125,6 +125,18 @@ test('WG failure does not expose secrets and retry recovers the journaled WAN',(
   h.state.fail=null;h.apply();assert.equal(h.host.snapshot().kv.lease_default.pending,undefined);
   h.host.action('teardown',{});assert.equal(h.state.links.length,0);
 });
+test('WG pending cleanup retries after its tunnel is already gone',()=>{
+  for(const created of [undefined,null]) {
+    const h=fixture();h.apply();
+    h.state.links=h.state.links.filter(l=>l.ifname!=='vwgdefault');
+    const lease=h.host.state.kv.get('lease_default').data;
+    lease.pending=true;lease.created_ifindex=created;
+    h.host.action('teardown',{});
+    assert.equal(h.state.links.length,0);
+    assert.equal(h.host.snapshot().kv.lease_default,undefined);
+    assert.equal([...h.maps().values()][0].size,0);
+  }
+});
 test('WG repairs ifindex changes and restores applied settings across restart, ignoring draft edits',()=>{
   const h=fixture();h.apply();const old=h.host.snapshot();
   h.state.links=h.state.links.filter(l=>l.ifname!=='vwgdefault');

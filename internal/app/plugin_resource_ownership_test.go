@@ -72,6 +72,73 @@ exports.onAction = function () { return net.link.ensureDummy({name:"veerexisting
 	}
 }
 
+type ownedVethDeleteTestAdmin struct{ *pluginControlNetAdminTest }
+
+func (a *ownedVethDeleteTestAdmin) LinkLookup(name string) (pluginControlNetLinkInfo, bool, error) {
+	info, present := a.links[name]
+	return info, present, nil
+}
+
+func TestPluginVethDeletionReleasesOnlyRemovedPeerOwnership(t *testing.T) {
+	for _, mode := range []string{"deleted_pair", "external_peer", "external_owner", "delete_failure"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			writeOwnedLinkPlugin(t, dir, `
+exports.onAction = function (ctx) {
+  if (ctx.payload.remove) { net.link.delete("veerlocal"); return; }
+  net.link.ensureVeth({host:"veerlocal", peer:"veerpeer", mtu:1500, up:true});
+};`)
+			cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
+			db := openTestDB(t)
+			runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+			controller := &ownedVethDeleteTestAdmin{&pluginControlNetAdminTest{}}
+			runtime.netAdmin = controller
+			defer runtime.Close()
+			catalog := loadPluginCatalogWithState(cfg, db)
+			assertPluginReconcileSuccess(t, runtime, catalog, "owned_link_plugin")
+			plugin := transactionPluginWithRuntimeSurfaceForTest(t, runtime, catalog, "owned_link_plugin")
+			if _, err := runtime.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "external_peer" || mode == "external_owner" {
+				delete(controller.links, "veerlocal")
+				controller.links["veerpeer"] = pluginControlNetLinkInfo{Name: "veerpeer", Kind: "dummy", IfIndex: 999}
+			}
+			if mode == "external_owner" {
+				if _, err := db.Exec("UPDATE plugin_owned_resources SET plugin_id = 'another_plugin' WHERE resource_key = 'veerpeer'"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "delete_failure" {
+				controller.deleteErrors = map[string]error{"veerlocal": errors.New("delete fault")}
+			}
+			_, err := runtime.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{"remove":true}`))
+			if (err != nil) != (mode == "delete_failure") {
+				t.Fatalf("delete result: %v", err)
+			}
+			owned, err := store.GetPluginOwnedResources(db, "owned_link_plugin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]int{"deleted_pair": 0, "external_peer": 1, "external_owner": 0, "delete_failure": 2}[mode]
+			if len(owned) != want {
+				t.Fatalf("ownership after %s: %+v, want %d", mode, owned, want)
+			}
+			if mode == "external_peer" || mode == "external_owner" {
+				if controller.links["veerpeer"].IfIndex != 999 || containsPluginNetAdminCall(controller.calls, "delete:veerpeer") {
+					t.Fatal("external peer replacement was modified")
+				}
+			}
+			if mode == "external_owner" {
+				peer, err := store.PluginOwnedResourceOrNil(db, pluginOwnedResourceTypeLink, "veerpeer")
+				if err != nil || peer == nil || peer.PluginID != "another_plugin" {
+					t.Fatalf("external ownership changed: %+v: %v", peer, err)
+				}
+			}
+		})
+	}
+}
+
 func TestPluginCanReleaseCreatedLinkOwnership(t *testing.T) {
 	dir := t.TempDir()
 	writeOwnedLinkPlugin(t, dir, `

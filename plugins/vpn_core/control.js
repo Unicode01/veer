@@ -260,7 +260,7 @@ function link(name) {
 function ownedLink(p) {
   var current = link(p.interface);
   var lease = allLeases()[p.key];
-  var created = lease && lease.pending && lease.created_ifindex === (current && current.ifindex) && !current.ifalias;
+  var created = current && lease && lease.pending && lease.created_ifindex === current.ifindex && !current.ifalias;
   if (current && ((current.ifalias !== p.owner && !created) || !current.linkinfo || current.linkinfo.info_kind !== (p.driver && p.driver !== 'wireguard' ? 'tun' : 'wireguard'))) throw new Error('Refusing to modify an existing unowned VPN interface');
   return current;
 }
