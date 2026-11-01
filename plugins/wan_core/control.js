@@ -244,9 +244,13 @@ function applyRecords(records, reportErrors) {
 
 function disableSessionRuntime(record) {
   var key = token(record && record.key || 'default');
+  // Teardown is a completed cleanup journal, not a suspended live session.
+  // Reconciliation of its disabled record must preserve that proof across
+  // restart so protocol drivers can safely recreate their WAN boundary.
+  var previous = previousStatus(key);
+  if (previous.phase === 'deleted') return;
   var raw = merge(record && record.data ? record.data : {}, {state: 'down', usable: false});
   var plan = loadPlan({key: key, session: raw});
-  var previous = previousStatus(key);
   var localInterface = safeIfaceName(plan.profile.local_interface || raw.local_interface || '');
   var previousManaged = managedLinkProven(previous) && previousMatchesInterface(previous, localInterface);
   var previousSegmentationReady = previous.noarp_ready === true && !managedLinkChanged(previous, plan.profile);

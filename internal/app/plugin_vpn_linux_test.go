@@ -1047,6 +1047,22 @@ func runWireGuardMeshTopology(t *testing.T) {
 	action("teardown")
 	probe(selected, "192.0.2.1")
 	probe(direct, "192.0.2.1")
+	// A daemon restart must preserve completed teardown proof. Disabled WAN
+	// reconciliation used to replace it, blocking the next explicit apply.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("restart after teardown: %v", err)
+	}
+	cmd = exec.Command(buildDataplanePerfBinary(t, root), "--config", configPath)
+	cmd.Env = append(os.Environ(), "VEER_HOT_RESTART_MARKER="+hotMarker)
+	cmd.Dir = work
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
+	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "vpn_core", "apply")
 	action("apply")
 	probe(direct, "192.0.2.1")
 	action("delete_profile")
@@ -1071,7 +1087,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	if got := ip("-j", "link", "show"); strings.Contains(got, tunnelInterface) || strings.Contains(got, wanInterface) {
 		t.Fatal("WG WAN links remain: " + got)
 	}
-	t.Log("TCP/UDP/ICMP: selected child used WG SNAT, sibling used ordinary WAN; interface rebuild and teardown/reapply passed")
+	t.Log("TCP/UDP/ICMP: selected child used WG SNAT, sibling used ordinary WAN; interface rebuild and teardown/restart/reapply passed")
 }
 
 // Observe the actual encrypted sockets at the peer, independently of generated
