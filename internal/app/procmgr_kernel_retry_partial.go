@@ -958,7 +958,10 @@ func preserveTransientDynamicEgressNATOwners(
 	runtime kernelRuleRuntime,
 	assignments map[int64]string,
 ) (map[kernelCandidateOwner][]kernelCandidateRule, map[kernelCandidateOwner]struct{}) {
-	if !trigger.hasSource("link") || len(currentKernelEgressNATs) == 0 {
+	// An inventory read failure is not evidence that any rule's interfaces
+	// disappeared. Preserve matching active owners for every event source until
+	// the scheduled stable recheck can obtain a complete inventory.
+	if len(currentKernelEgressNATs) == 0 || (!trigger.hasSource("link") && rawSnapshot.Err == nil) {
 		return nil, nil
 	}
 	return buildTransientEgressNATRetentions(

@@ -1409,6 +1409,44 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersKeepsTwoEgressNATsRunningAcros
 	}
 }
 
+func TestAddrRetryRetainsActiveEgressNATWhenInterfaceInventoryFails(t *testing.T) {
+	_, item, activeRule, runtime, pm := newTransientEgressNATRedistributeFixture(t)
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return nil, errors.New("netlink inventory: no such device")
+	}
+	plan := pm.egressNATPlans[item.ID]
+	plan.AddrRefresh = kernelAddressRefreshMetadata{OutInterface: "eno1", Family: ipFamilyIPv4}
+	pm.egressNATPlans[item.ID] = plan
+
+	// Deleted links can no longer be resolved by index. The resulting unscoped
+	// address event must not turn one failed inventory read into a withdrawal.
+	trigger := newKernelNetlinkRecoveryTrigger("addr")
+	trigger.addAddrFamily(ipFamilyIPv4)
+	result := pm.retryNetlinkTriggeredKernelFallbackOwnersForTrigger(trigger)
+	if !result.handled || result.deferredEgressNATs != 1 || result.recoveredEgressNATs != 0 {
+		t.Fatalf("inventory failure retry = %+v, want the active NAT deferred", result)
+	}
+	if !pm.kernelEgressNATs[item.ID] || runtime.assignments[activeRule.ID] != kernelEngineTC {
+		t.Fatalf("active NAT lost: owners=%v assignments=%v", pm.kernelEgressNATs, runtime.assignments)
+	}
+	if len(runtime.incrementalCalls) != 0 {
+		t.Fatalf("reconcile calls = %d, want no mutation during the failed inventory read", len(runtime.incrementalCalls))
+	}
+	if pm.networkInventoryStableRecheckAt.IsZero() {
+		t.Fatal("failed inventory did not schedule a recheck")
+	}
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return interfaceInfoMapToSortedSlice(pm.stableInterfaceInfos), nil
+	}
+	if !pm.takeNetworkInventoryStableRecheck(pm.networkInventoryStableRecheckAt.Add(time.Nanosecond)) {
+		t.Fatal("inventory recovery recheck did not become due")
+	}
+	pm.redistributeWorkers()
+	if !pm.kernelEgressNATs[item.ID] || pm.kernelEgressNATEngines[item.ID] != kernelEngineTC || len(runtime.assignments) != 1 {
+		t.Fatalf("active NAT lost after inventory recovery: owners=%v assignments=%v", pm.kernelEgressNATs, runtime.assignments)
+	}
+}
+
 func TestRedistributeWorkersRetainsMissingEgressNATOnlyWhileConfigurationMatches(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
