@@ -265,6 +265,20 @@ function ownedLink(p) {
   return current;
 }
 function wanRecord(resource, p) { return plugins.resources.get('wan_core', resource, p.wan_id); }
+function cleanWANState(p) {
+  var status = wanRecord('status', p), session = wanRecord('sessions', p);
+  if (!status || status.enabled !== false || !session || session.enabled !== false) return false;
+  var data = status.data || {}, owner = session.data || {};
+  if (owner.driver_plugin !== 'vpn_core' || owner.profile_key !== p.key || owner.wan_id !== p.wan_id ||
+      owner.real_interface !== p.interface || data.local_interface !== p.local || data.pipeline_interface !== p.pipeline ||
+      (data.cleanup_errors || []).length) return false;
+  if (data.phase === 'deleted') return true;
+  // Older WAN Core versions replaced the teardown journal with "disabled"
+  // during restart. Accept only its fully withdrawn, matching owner state;
+  // the caller separately requires every managed interface to be absent.
+  return data.phase === 'disabled' && data.driver_plugin === 'vpn_core' && data.profile_key === p.key &&
+    data.managed_link === false && data.arp_disabled_by_plugin !== true && data.noarp_ready !== true;
+}
 function assertWANOwner(p) {
   var session = wanRecord('sessions', p);
   ['sessions', 'status'].forEach(function (resource) {
@@ -352,7 +366,7 @@ function applyProfile(key, raw) {
   assertWANOwner(p);
   var wg = ownedLink(p), config = configuration(p);
   var previousWAN = wanRecord('status', p), previousSession = wanRecord('sessions', p);
-  var cleanWAN = previousWAN && previousWAN.data.phase === 'deleted' && previousSession && previousSession.enabled === false;
+  var cleanWAN = cleanWANState(p);
   if (!old && (wg || link(p.local) || link(p.pipeline) || ((previousWAN || previousSession) && !cleanWAN))) throw new Error('Recorded ownership is missing; inspect leftover WAN resources before retrying');
   kv.set('lease_' + key, {active: true, pending: true, settings: settings(p), plan: p,
     created_ifindex: old && old.created_ifindex, wg_ifindex: old && old.wg_ifindex, local_ifindex: old && old.local_ifindex, pipeline_ifindex: old && old.pipeline_ifindex});
@@ -760,9 +774,9 @@ function applyTUNProfile(key, raw, explicit) {
   plugins.services.resolve({service: 'wan.adapter', version: '^1.0.0', provider: 'wan_core'});
   assertWANOwner(p);
   resolveWANAddresses(p, old);
-  var current = link(p.interface), previousWAN = wanRecord('status', p);
-  var cleanWAN = previousWAN && previousWAN.data.phase === 'deleted';
-  if (!old && (link(p.local) || link(p.pipeline) || (previousWAN && !cleanWAN) || (managed && current)))
+  var current = link(p.interface), previousWAN = wanRecord('status', p), previousSession = wanRecord('sessions', p);
+  var cleanWAN = cleanWANState(p);
+  if (!old && (link(p.local) || link(p.pipeline) || ((previousWAN || previousSession) && !cleanWAN) || (managed && current)))
     throw new Error('Recorded ownership is missing; inspect leftover VPN resources');
   if (!managed) ownedLink(p);
   // Build and validate before changing any network state. Active core configs

@@ -13346,6 +13346,17 @@ func TestBundledWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
 	}
 
 	controller.calls = nil
+	if err := rt.ApplyPluginResourceData(plugin, resource, []PluginResourceRecord{{
+		Key: "default", Enabled: false, Data: json.RawMessage(sessionRecord.DataJSON),
+	}}); err != nil {
+		t.Fatalf("reconcile disabled session after teardown: %v", err)
+	}
+	preserved, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil || *preserved != *statusRecord || len(controller.calls) != 0 {
+		t.Fatalf("disabled reconcile changed teardown journal or touched networking: status=%+v err=%v calls=%+v", preserved, err, controller.calls)
+	}
+
+	controller.calls = nil
 	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"key":"default"}`)); err != nil {
 		t.Fatalf("second ApplyPluginAction(wan_core teardown) error = %v", err)
 	}

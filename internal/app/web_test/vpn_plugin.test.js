@@ -244,6 +244,45 @@ function vpnFixture(driver = 'mihomo', extra = {}, options = {}) {
   return {...h,procs,specs};
 }
 
+function legacyDisabledWAN(h, id) {
+  const status=h.state.records.status[id].data, session=h.state.records.sessions[id].data;
+  h.state.records.status[id]={enabled:false,data:{...session,local_interface:status.local_interface,pipeline_interface:status.pipeline_interface,
+    phase:'disabled',managed_link:false,arp_disabled_by_plugin:false,noarp_ready:false,cleanup_errors:[]}};
+}
+
+for(const driver of ['wireguard','mihomo','sing_box'])test(driver+' reapplies after teardown and a restart that replaced the WAN cleanup journal',()=>{
+  const h=driver==='wireguard'?fixture():vpnFixture(driver);h.apply();h.host.action('teardown',{});
+  const id=(driver==='wireguard'?'wg_':'vpn_')+'default';legacyDisabledWAN(h,id);
+  assert.equal(h.state.links.length,0);assert.equal(h.host.snapshot().kv.lease_default,undefined);
+  // A fresh control VM has no process or lease generation. Switching between
+  // proxy cores must also accept the previous core's withdrawn WAN session.
+  const next=driver==='wireguard'?fixture(profile(),{state:h.state,kv:h.host.snapshot().kv}):
+    vpnFixture(driver==='mihomo'?'sing_box':'mihomo',{}, {state:h.state,kv:h.host.snapshot().kv});
+  assert.equal(next.apply().tc_ready,true);assert.equal(next.state.links.length,3);
+});
+
+test('withdrawn WAN recovery rejects missing ownership, cleanup failures and leftover interfaces before mutation',()=>{
+  const damage=[
+    h=>{h.state.records.sessions.vpn_default.enabled=true;},
+    h=>{delete h.state.records.sessions.vpn_default;},
+    h=>{delete h.state.records.status.vpn_default;},
+    h=>{h.state.records.sessions.vpn_default.data.profile_key='other';},
+    h=>{h.state.records.sessions.vpn_default.data.real_interface='foreign0';},
+    h=>{h.state.records.status.vpn_default.data.profile_key='other';},
+    h=>{h.state.records.status.vpn_default.data.cleanup_errors=['route cleanup failed'];},
+    h=>{h.state.records.status.vpn_default.data.managed_link=true;},
+    h=>{h.state.records.status.vpn_default.data.arp_disabled_by_plugin=true;},
+    h=>{h.state.records.status.vpn_default.data.noarp_ready=true;},
+    h=>{h.state.records.status.vpn_default.data.phase='delete_failed';},
+    ...['vtundefault','veervpn1','veervpnp1'].map(ifname=>h=>h.state.links.push({ifname,ifindex:99,ifalias:'foreign',linkinfo:{info_kind:'tun'}}))
+  ];
+  for(const corrupt of damage) {
+    const h=vpnFixture();h.apply();h.host.action('teardown',{});legacyDisabledWAN(h,'vpn_default');corrupt(h);
+    const before=clone(h.state), starts=h.specs.length;
+    assert.throws(h.apply,/ownership|owned/);assert.deepEqual(h.state,before);assert.equal(h.specs.length,starts);
+  }
+});
+
 test('sing-box binds the chosen uplink IP for concrete outbounds and direct DNS, preserving chains and virtual groups',()=>{
   const drivers=require('../../../plugins/vpn_core/core-drivers');
   const source={outbounds:[{type:'selector',tag:'pick',outbounds:['proxy']},{type:'urltest',tag:'test',outbounds:['proxy']},
