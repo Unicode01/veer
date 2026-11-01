@@ -55,4 +55,5 @@ fi
 mkdir -p "$ROOT_DIR/kernel/$release"
 install -m 0644 "$ROOT_DIR/kernel/veer_kfuncs/veer_kfuncs.ko" "$ROOT_DIR/kernel/$release/veer_kfuncs.ko"
 "$BPF_CLANG" -O2 -g -target bpf -c "$ROOT_DIR/internal/app/ebpf/veer-kfuncs-probe-bpf.c" -o "$ROOT_DIR/internal/app/ebpf/veer-kfuncs-probe-bpf.o"
+"$BPF_CLANG" -O2 -g -target bpf -c "$ROOT_DIR/internal/app/ebpf/veer-kfuncs-ingress-probe-bpf.c" -o "$ROOT_DIR/internal/app/ebpf/veer-kfuncs-ingress-probe-bpf.o"
 echo "optional kernel module: kernel/$release/veer_kfuncs.ko (build Go with -tags veer_kfuncs)"

@@ -266,8 +266,12 @@ function disableSessionRuntime(record) {
     real_interface: text(raw.real_interface || raw.interface || ''),
     wan_interface: text(raw.wan_interface || raw.real_interface || raw.interface || ''),
     local_interface: localInterface,
-    pipeline_interface: plan.profile.pipeline_interface,
-    handoff_mode: plan.profile.handoff_mode,
+    local_ifindex: previous.local_ifindex || 0,
+    local_mac: previous.local_mac || '',
+    pipeline_interface: previousManaged ? text(previous.pipeline_interface || '') : plan.profile.pipeline_interface,
+    pipeline_ifindex: previous.pipeline_ifindex || 0,
+    pipeline_mac: previous.pipeline_mac || '',
+    handoff_mode: previousManaged ? previousHandoffMode(previous) : plan.profile.handoff_mode,
     addresses: plan.profile.addresses,
     routes: plan.profile.routes,
     cleanup_errors: cleanupErrors,
@@ -279,8 +283,8 @@ function disableSessionRuntime(record) {
   if (localInterface) {
     status.veer_core = veerCoreHandoff({
       local_interface: localInterface,
-      pipeline_interface: plan.profile.pipeline_interface,
-      handoff_mode: plan.profile.handoff_mode,
+      pipeline_interface: status.pipeline_interface,
+      handoff_mode: status.handoff_mode,
       egress_nat_redirect_mode: ''
     }, previousSegmentationReady);
   }
@@ -366,7 +370,11 @@ function applySession(plan) {
       real_interface: plan.session.real_interface,
       wan_interface: plan.session.wan_interface,
       local_interface: previous.local_interface || plan.profile.local_interface,
+      local_ifindex: previous.local_ifindex || 0,
+      local_mac: previous.local_mac || '',
       pipeline_interface: previous.pipeline_interface || plan.profile.pipeline_interface,
+      pipeline_ifindex: previous.pipeline_ifindex || 0,
+      pipeline_mac: previous.pipeline_mac || '',
       handoff_mode: previousHandoffMode(previous),
       managed_link: managedLinkProven(previous) && !managedLinkChanged(previous, plan.profile),
       original_arp: previous.original_arp,
@@ -516,11 +524,16 @@ function rollbackPreviousHandoff(previous, nextProfile) {
     interface_preparation: normalizeInterfacePreparation(previous.interface_preparation_request, previous.mtu)
   };
   try {
-    ensureHandoffLink(profile, previous);
+    var restored = ensureHandoffLink(profile, previous);
     replaceAddrs(profile.local_interface, profile.addresses);
     replaceNeighbors(profile.local_interface, profile.neighbors);
     replaceRoutes(profile.local_interface, profile.routes);
     replaceRules(profile.rules);
+    previous.local_ifindex = restored.local.ifindex;
+    previous.local_mac = restored.local.mac;
+    previous.pipeline_ifindex = restored.pipeline ? restored.pipeline.ifindex : 0;
+    previous.pipeline_mac = restored.pipeline ? restored.pipeline.mac : '';
+    setRecordIfChanged('status', token(previous.wan_id || previous.profile_key), previous, previous.usable === true);
     return '';
   } catch (e) {
     return errorMessage(e);

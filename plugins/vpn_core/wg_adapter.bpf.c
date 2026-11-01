@@ -105,7 +105,7 @@ int tc_adapter(struct __sk_buff *skb)
 	if (!link || !link->output)
 		return TC_ACT_SHOT;
 #ifdef VEER_KFUNCS
-	if (link->direction != 1 && link->direction != 2) return TC_ACT_SHOT;
+	if (link->direction != 1 && link->direction != 2 && link->direction != 3) return TC_ACT_SHOT;
 	struct veer_handoff_v1 handoff = {
 		.output = link->output, .mtu = link->mtu,
 		.operation = link->direction == 1 ? VEER_ETH_TO_L3 : VEER_L3_TO_ETH,
@@ -114,7 +114,13 @@ int tc_adapter(struct __sk_buff *skb)
 	};
 	__builtin_memcpy(handoff.source, link->source, 6);
 	__builtin_memcpy(handoff.destination, link->destination, 6);
+#ifdef VEER_KFUNCS_DIRECT
+	if (link->direction == 3) veer_skb_handoff_ingress_v1(skb, &handoff);
+	else veer_skb_handoff_v1(skb, &handoff);
+#else
+	if (link->direction == 3) return TC_ACT_SHOT;
 	veer_skb_handoff_v1(skb, &handoff);
+#endif
 	return TC_ACT_SHOT;
 #else
 	if (link->direction == 1) {

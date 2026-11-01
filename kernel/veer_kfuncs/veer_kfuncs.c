@@ -52,6 +52,7 @@ struct veer_pppoe { u8 version, code; __be16 session, length, protocol; } __pack
 
 u32 veer_kfuncs_abi_v1(void);
 int veer_skb_handoff_v1(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config);
+int veer_skb_handoff_ingress_v1(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config);
 
 __bpf_kfunc u32 veer_kfuncs_abi_v1(void) { return 1; }
 static DEFINE_PER_CPU(unsigned int, veer_send_depth);
@@ -271,7 +272,7 @@ static int veer_pppoe_decap(struct sk_buff *skb, const struct veer_handoff_v1 *c
 /* One source skb may create many PPPoE frames. Ownership stays entirely in C.
  * The BPF caller MUST terminate its path with TC_ACT_SHOT, including on error.
  */
-__bpf_kfunc int veer_skb_handoff_v1(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config)
+static int veer_handoff(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config, bool receive)
 {
 	/* The verifier accepts the TC context type; its runtime value is sk_buff.
 	 * Using the UAPI name also supports kernels predating ctx projections.
@@ -281,10 +282,15 @@ __bpf_kfunc int veer_skb_handoff_v1(struct __sk_buff *skb_ctx, const struct veer
 	struct net_device *dev;
 	struct sk_buff *copy, *segs, *next;
 	int err = 0, result = 0;
-	bool ingress = c.operation == VEER_PPPOE_DECAP;
+	bool ingress = receive || c.operation == VEER_PPPOE_DECAP;
 
 	if (!skb->dev || !c.output || c.mtu < 68 || c.mtu > 9000 ||
 	    c.operation < VEER_PPPOE_ENCAP || c.operation > VEER_ETH_TO_L3)
+		return -EINVAL;
+	/* Receive injection currently accepts Ethernet framing only. Keep the
+	 * original entry point's transmit semantics unchanged for older plugins.
+	 */
+	if (receive && c.operation != VEER_L3_TO_ETH)
 		return -EINVAL;
 	rcu_read_lock();
 	dev = dev_get_by_index_rcu(dev_net(skb->dev), c.output);
@@ -359,9 +365,20 @@ out:
 	return result;
 }
 
+__bpf_kfunc int veer_skb_handoff_v1(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config)
+{
+	return veer_handoff(skb_ctx, config, false);
+}
+
+__bpf_kfunc int veer_skb_handoff_ingress_v1(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config)
+{
+	return veer_handoff(skb_ctx, config, true);
+}
+
 BTF_KFUNCS_START(veer_kfuncs_ids)
 BTF_ID_FLAGS(func, veer_kfuncs_abi_v1)
 BTF_ID_FLAGS(func, veer_skb_handoff_v1)
+BTF_ID_FLAGS(func, veer_skb_handoff_ingress_v1)
 BTF_KFUNCS_END(veer_kfuncs_ids)
 static const struct btf_kfunc_id_set veer_kfuncs_set = {
 	.owner = THIS_MODULE, .set = &veer_kfuncs_ids,
@@ -382,4 +399,4 @@ module_init(veer_kfuncs_init);
 module_exit(veer_kfuncs_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Optional Veer TC packet capabilities");
-MODULE_VERSION("1.0.0");
+MODULE_VERSION("1.1.0");

@@ -12998,6 +12998,18 @@ func TestBundledWANCoreHandoffMigrationFailureRestoresPreviousBoundary(t *testin
 			t.Fatalf("wan_core status/default = %s, missing preserved state %s", statusRecord.DataJSON, want)
 		}
 	}
+	var restored map[string]any
+	_ = json.Unmarshal([]byte(statusRecord.DataJSON), &restored)
+	if restored["local_ifindex"] != float64(controller.links["veerlocal0"].IfIndex) {
+		t.Fatalf("rollback retained a deleted interface generation: %s", statusRecord.DataJSON)
+	}
+	if err := rt.ApplyPluginResourceData(plugin, pluginResourceByIDForTest(t, plugin, "sessions"), []PluginResourceRecord{{Key: "default", Enabled: false, Data: json.RawMessage(`{"state":"down","usable":false}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil || !strings.Contains(withdrawn.DataJSON, `"handoff_mode":"direct"`) || !strings.Contains(withdrawn.DataJSON, `"pipeline_interface":""`) {
+		t.Fatalf("withdrawal forgot the restored boundary: %+v, %v", withdrawn, err)
+	}
 }
 
 func TestBundledWANCoreResourceApplyArmsRepairTimer(t *testing.T) {

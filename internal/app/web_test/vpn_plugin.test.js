@@ -42,12 +42,20 @@ function fixture(config = profile(), options = {}) {
       }
       assert.equal(request.action,'prepare_handoff');
       let local=state.links.find(l=>l.ifname===p.local_interface), peer=state.links.find(l=>l.ifname===p.pipeline_interface);
-      if(!local && !peer) {
-        local={ifname:p.local_interface,ifindex:state.next++,address:'02:00:00:00:00:01',linkinfo:{info_kind:'veth'}};
-        peer={ifname:p.pipeline_interface,ifindex:state.next++,address:'02:00:00:00:00:02',linkinfo:{info_kind:'veth'}};
-        local.link_index=peer.ifindex;peer.link_index=local.ifindex;state.links.push(local,peer);
+      const direct=p.handoff_mode==='direct';
+      if(local && local.linkinfo.info_kind!==(direct?'dummy':'veth')) {
+        const oldPeer=local.link_index;
+        state.links=state.links.filter(l=>l!==local&&l.ifindex!==oldPeer);local=null;peer=null;
       }
-      state.records.status[k]={enabled:false,data:{...p,phase:'prepared',local_ifindex:local.ifindex,pipeline_ifindex:peer.ifindex}};
+      if(!local && !peer) {
+        local={ifname:p.local_interface,ifindex:state.next++,address:'02:00:00:00:00:01',linkinfo:{info_kind:direct?'dummy':'veth'}};
+        state.links.push(local);
+        if(!direct) {
+          peer={ifname:p.pipeline_interface,ifindex:state.next++,address:'02:00:00:00:00:02',linkinfo:{info_kind:'veth'}};
+          local.link_index=peer.ifindex;peer.link_index=local.ifindex;state.links.push(peer);
+        }
+      }
+      state.records.status[k]={enabled:false,data:{...p,phase:'prepared',local_ifindex:local.ifindex,pipeline_ifindex:peer?peer.ifindex:0}};
       return state.records.status[k].data;
     },
     'process.exec': request => {
@@ -261,6 +269,54 @@ function legacyDisabledWAN(h, id) {
   h.state.records.status[id]={enabled:false,data:{...session,local_interface:status.local_interface,pipeline_interface:status.pipeline_interface,
     phase:'disabled',managed_link:false,arp_disabled_by_plugin:false,noarp_ready:false,cleanup_errors:[]}};
 }
+
+test('VPN selects a single WAN boundary only after probing ingress handoff and finding its object',t=>{
+  const fs=require('node:fs'), os=require('node:os');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'veer-vpn-direct-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  fs.cpSync(pluginDir,dir,{recursive:true});
+  for(const name of ['wg_adapter.o','wg_adapter-kfuncs.o','wg_adapter-direct.o'])fs.writeFileSync(path.join(dir,name),'test-object');
+  const features=['dataplane.kfuncs.handoff.v1','dataplane.kfuncs.handoff_ingress.v1'];
+  for(const driver of ['wireguard','mihomo','sing_box']) {
+    const options={pluginDir:dir,availableFeatures:features};
+    const h=driver==='wireguard'?fixture(profile(),options):vpnFixture(driver,{},options);
+    const result=h.apply(), local=driver==='wireguard'?'veerwg1':'veervpn1';
+    assert.equal(result.handoff_mode,'direct');assert.equal(result.pipeline_interface,'');
+    assert.equal(h.state.links.length,2);assert.equal(h.state.links.find(l=>l.ifname===local).linkinfo.info_kind,'dummy');
+    assert.equal(h.host.snapshot().surface.objects[0].path,'wg_adapter-direct.o');
+    assert.deepEqual(h.host.snapshot().resources.hook_bindings['wg-direct-out'].data.interfaces,[local]);
+    assert.deepEqual(h.host.snapshot().resources.hook_bindings['wg-links'].data.interfaces,[result.interface]);
+    const map=[...h.maps().values()][0];assert.equal(map.size,2);
+    const reply=[...map.values()].find(value=>value.startsWith('03000000'));assert.ok(reply);
+    const before=h.state.services.length;h.host.reconcile();assert.equal(h.state.services.length,before);
+    h.host.action('teardown',{});assert.equal(h.state.links.length,0);assert.equal(map.size,0);
+    h.apply();assert.equal(h.state.links.length,2);
+  }
+  const old=fixture(profile(),{pluginDir:dir,availableFeatures:features.slice(0,1)});old.apply();assert.equal(old.state.links.length,3);
+  fs.unlinkSync(path.join(dir,'wg_adapter-direct.o'));
+  const missing=fixture(profile(),{pluginDir:dir,availableFeatures:features});missing.apply();assert.equal(missing.state.links.length,3);
+});
+
+test('VPN migrates owned boundaries between helper and veth paths without leaking map keys',t=>{
+  const fs=require('node:fs'), os=require('node:os');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'veer-vpn-migrate-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  fs.cpSync(pluginDir,dir,{recursive:true});
+  for(const name of ['wg_adapter.o','wg_adapter-kfuncs.o','wg_adapter-direct.o'])fs.writeFileSync(path.join(dir,name),'test-object');
+  for(const driver of ['wireguard','mihomo','sing_box']) {
+    const create=options=>driver==='wireguard'?fixture(profile(),options):vpnFixture(driver,{},options);
+    let h=create({pluginDir:dir});h.apply();const source=h.host.snapshot().kv.lease_default.plan.addresses;
+    for(const features of [['dataplane.kfuncs.handoff.v1','dataplane.kfuncs.handoff_ingress.v1'],[]]) {
+      h=create({pluginDir:dir,availableFeatures:features,state:h.state,kv:h.host.snapshot().kv,procs:h.procs});
+      h.host.reconcile();
+      assert.equal(h.state.links.length,features.length?2:3);
+      assert.deepEqual(h.host.snapshot().kv.lease_default.plan.addresses,source);
+      assert.equal([...h.maps().values()][0].size,2);
+    }
+    h.host.action('teardown',{});assert.equal(h.state.links.length,0);
+    const reopened=create({pluginDir:dir,availableFeatures:['dataplane.kfuncs.handoff.v1','dataplane.kfuncs.handoff_ingress.v1'],state:h.state,procs:h.procs});
+    reopened.apply();assert.equal(reopened.state.links.length,2);reopened.host.action('teardown',{});
+  }
+});
 
 for(const driver of ['wireguard','mihomo','sing_box'])test(driver+' reapplies after teardown and a restart that replaced the WAN cleanup journal',()=>{
   const h=driver==='wireguard'?fixture():vpnFixture(driver);h.apply();h.host.action('teardown',{});
