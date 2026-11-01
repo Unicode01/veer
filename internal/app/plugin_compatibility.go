@@ -52,6 +52,7 @@ var pluginRuntimeFeatures = []string{
 	"dataplane.packet_metadata.v1",
 	"dataplane.kfuncs.handoff.v1",
 	"dataplane.kfuncs.handoff_ingress.v1",
+	"dataplane.kfuncs.wan.v1",
 	"dataplane.tc_pipeline.v2",
 	"dataplane.hook_order.v1",
 	"dataplane.hook_bindings.v1",

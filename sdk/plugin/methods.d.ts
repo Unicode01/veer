@@ -64,6 +64,7 @@ declare global {
     "net.link.delete": typeof net.link.delete;
     "net.link.ensureBridge": typeof net.link.ensureBridge;
     "net.link.ensureDummy": typeof net.link.ensureDummy;
+    "net.link.ensureHelperWAN": typeof net.link.ensureHelperWAN;
     "net.link.ensureMacvlan": typeof net.link.ensureMacvlan;
     "net.link.ensureVLAN": typeof net.link.ensureVLAN;
     "net.link.ensureVRF": typeof net.link.ensureVRF;

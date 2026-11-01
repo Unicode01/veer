@@ -27,6 +27,7 @@ type pluginControlNetAdmin interface {
 	LinkEnsureBridge(req pluginControlNetBridgeRequest) (pluginControlNetLinkInfo, error)
 	LinkEnsureVeth(req pluginControlNetVethRequest) (pluginControlNetVethResult, error)
 	LinkEnsureDummy(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error)
+	LinkEnsureHelperWAN(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error)
 	LinkEnsureMacvlan(req pluginControlNetMacvlanRequest) (pluginControlNetMacvlanResult, error)
 	LinkEnsureVLAN(req pluginControlNetVLANRequest) (pluginControlNetVLANResult, error)
 	LinkEnsureVRF(req pluginControlNetVRFRequest) (pluginControlNetVRFResult, error)
@@ -605,44 +606,57 @@ func (h *pluginControlHost) netLinkEnsureVeth(call goja.FunctionCall) goja.Value
 }
 
 func (h *pluginControlHost) netLinkEnsureDummy(call goja.FunctionCall) goja.Value {
+	return h.netLinkEnsureSingle(call, "net.link.ensureDummy", "dummy")
+}
+
+func (h *pluginControlHost) netLinkEnsureHelperWAN(call goja.FunctionCall) goja.Value {
+	return h.netLinkEnsureSingle(call, "net.link.ensureHelperWAN", "veerwan")
+}
+
+func (h *pluginControlHost) netLinkEnsureSingle(call goja.FunctionCall, api, kind string) goja.Value {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetDummyRequest{
-		Namespace: h.netNamespaceObjectField(obj, "net.link.ensureDummy"),
+		Namespace: h.netNamespaceObjectField(obj, api),
 		Name:      h.firstStringObjectField(obj, "name", "interface", "link"),
 		MTU:       h.optionalIntObjectField(obj, 0, "mtu"),
 		Up:        true,
 	}
-	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.link.ensureDummy")
+	admin := h.netAdminInNamespaceOrThrow(req.Namespace, api)
 	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
-		h.throwf("net.link.ensureDummy: %v", err)
+		h.throwf("%s: %v", api, err)
 	}
 	if req.MTU != 0 && (req.MTU < 576 || req.MTU > 65535) {
-		h.throwf("net.link.ensureDummy: mtu must be between 576 and 65535")
+		h.throwf("%s: mtu must be between 576 and 65535", api)
 	}
-	h.requireNetAccess("link.create", req.Name, "net.link.ensureDummy")
-	unlock := h.lockPluginNetLinks(req.Namespace, "net.link.ensureDummy", req.Name)
+	h.requireNetAccess("link.create", req.Name, api)
+	unlock := h.lockPluginNetLinks(req.Namespace, api, req.Name)
 	defer unlock()
-	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Name, "net.link.ensureDummy")
-	snapshot, refs, err := h.preparePluginEnsureLinkMutation(admin, req.Name, req.MTU, req.Up, "net.link.ensureDummy")
+	h.requirePluginLinkOwnershipAvailable(req.Namespace, req.Name, api)
+	snapshot, refs, err := h.preparePluginEnsureLinkMutation(admin, req.Name, req.MTU, req.Up, api)
 	if err != nil {
-		h.throwf("net.link.ensureDummy: inspect current state: %v", err)
+		h.throwf("%s: inspect current state: %v", api, err)
 	}
-	result, err := admin.LinkEnsureDummy(req)
+	var result pluginControlNetDummyResult
+	if kind == "veerwan" {
+		result, err = admin.LinkEnsureHelperWAN(req)
+	} else {
+		result, err = admin.LinkEnsureDummy(req)
+	}
 	if err != nil {
 		rollbackErr := h.rollbackPluginLinkSnapshots(admin, []pluginLinkMutationSnapshot{snapshot}, refs)
-		h.throwPluginNetMutationError("net.link.ensureDummy", err, rollbackErr)
+		h.throwPluginNetMutationError(api, err, rollbackErr)
 	}
 	if result.Created {
 		if err := releasePluginOwnedResourceRefs(h.db, h.plugin.ID, refs); err != nil {
 			_ = admin.LinkDelete(req.Name)
-			h.throwf("net.link.ensureDummy: release provisional leases: %v", err)
+			h.throwf("%s: release provisional leases: %v", api, err)
 		}
-		if err := h.claimPluginOwnedLinks([]pluginOwnedLinkClaim{{Namespace: req.Namespace, Name: req.Name, Kind: "dummy", IfIndex: result.Link.IfIndex, MAC: result.Link.MAC}}); err != nil {
+		if err := h.claimPluginOwnedLinks([]pluginOwnedLinkClaim{{Namespace: req.Namespace, Name: req.Name, Kind: kind, IfIndex: result.Link.IfIndex, MAC: result.Link.MAC}}); err != nil {
 			_ = admin.LinkDelete(req.Name)
-			h.throwf("net.link.ensureDummy: record ownership: %v", err)
+			h.throwf("%s: record ownership: %v", api, err)
 		}
 	}
 	return h.vm.ToValue(map[string]any{

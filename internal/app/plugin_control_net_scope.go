@@ -105,6 +105,16 @@ func (admin *scopedPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDu
 	return out, err
 }
 
+func (admin *scopedPluginControlNetAdmin) LinkEnsureHelperWAN(req pluginControlNetDummyRequest) (out pluginControlNetDummyResult, err error) {
+	err = admin.run(func(base pluginControlNetAdmin) error {
+		var callErr error
+		out, callErr = base.LinkEnsureHelperWAN(req)
+		return callErr
+	})
+	out.Link = admin.annotate(out.Link)
+	return out, err
+}
+
 func (admin *scopedPluginControlNetAdmin) LinkEnsureMacvlan(req pluginControlNetMacvlanRequest) (out pluginControlNetMacvlanResult, err error) {
 	err = admin.run(func(base pluginControlNetAdmin) error {
 		var callErr error

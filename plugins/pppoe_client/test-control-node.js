@@ -35,6 +35,7 @@ const PIPELINE_INTERFACE = 'veerpipe0';
 const PIPELINE_BOUNDARY_MAC = '02:00:00:00:10:02';
 
 function main() {
+  testDirectHelperBoundary();
   testRegistration();
   testUpgradeLifecycleSchema();
   testReconcileRestoresOnlyActiveControlState();
@@ -1570,6 +1571,46 @@ function testTrafficStatsAggregatePerCPUValues() {
   assert.strictEqual(stats.byte_scope, 'inner_ip');
 }
 
+function testDirectHelperBoundary() {
+  const h = createHarness({auth: 'pap', kfuncs: true, direct: true});
+  const args = {interface: 'eth0', username: 'user', password: 'pass', auth: 'pap',
+    timeout_ms: 50, post_session_control_ms: 0, send_padt: false, local_interface: 'veerlocal0', wan_core_sync: true};
+  runAction(h, 'traffic_probe', args);
+  const original = h.resource('tunnel_configs', 'active').data;
+  assert.strictEqual(original.mode, 'direct_gro');
+  assert.strictEqual(original.pipeline_interface, '');
+  assert.strictEqual(original.pipeline_ifindex, original.local_ifindex);
+  assert.strictEqual(h.resource('hook_bindings', 'pppoe-egress').enabled, false);
+  assert.deepStrictEqual(h.resource('hook_bindings', 'pppoe-local-egress').data.interfaces, ['veerlocal0']);
+  assert(h.state.hooks.some(hook => hook.id === 'pppoe-local-egress' && hook.attach === 'egress' && hook.binding_required));
+  assert.strictEqual(h.resource('wan_links', 'default').data.handoff_mode, 'direct_gro');
+  const repair = () => h.context.exports.onTimer({timer: {name: 'tunnel_repair', payload: {}}});
+  const sends = h.state.l2Sends.length;
+  const local = h.state.links.get('veerlocal0');
+  for (const change of ['down', 'wrong-kind', 'missing-helper']) {
+    local.up = change !== 'down';
+    local.kind = change === 'wrong-kind' ? 'dummy' : 'veerwan';
+    h.context.DIRECT = change !== 'missing-helper';
+    repair();
+    assert.strictEqual(h.state.mapPuts.at(-1).value, '00'.repeat(52), change + ' must stop this tunnel');
+    local.up = true; local.kind = 'veerwan'; h.context.DIRECT = true;
+    repair();
+    assert.strictEqual(h.state.mapPuts.at(-1).value, original.value_hex);
+  }
+  h.state.links.set('veerlocal0', Object.assign({}, h.state.links.get('veerlocal0'), {ifindex: 301, mac: '02:00:00:00:21:01'}));
+  repair();
+  const repaired = h.resource('tunnel_configs', 'active').data;
+  assert.strictEqual(repaired.last_repair_error || '', '');
+  assert.strictEqual(repaired.local_ifindex, 301);
+  assert.strictEqual(repaired.pipeline_ifindex, 301);
+  assert.strictEqual(repaired.session_id, original.session_id);
+  assert.strictEqual(h.state.l2Sends.length, sends, 'boundary recovery must not redial');
+  const legacy = createHarness({kfuncs: true});
+  assert.strictEqual(legacy.context.DIRECT, false, 'helper 1.0/1.1 must keep veth');
+  const old = createHarness({kfuncs: true, direct: true, missingKfuncObject: true});
+  assert.strictEqual(old.context.DIRECT, false, 'old package must keep base path');
+}
+
 function createHarness(options) {
   const state = {
     capabilities: [],
@@ -1607,7 +1648,7 @@ function createHarness(options) {
     clearTimeout,
     exports: {},
     plugin: {
-      host() { return {available_features: options && options.kfuncs ? ['dataplane.kfuncs.handoff.v1'] : []}; },
+      host() { return {available_features: options && options.kfuncs ? ['dataplane.kfuncs.handoff.v1', ...(options.direct ? ['dataplane.kfuncs.wan.v1'] : [])] : []}; },
       capabilities(items) { state.capabilities.push(...items); },
       virtualInterface(item) { state.virtualInterfaces.push(clone(item)); },
       pipelineNode(item) { state.virtualInterfaces.push(Object.assign({type: 'pipeline'}, clone(item))); },
@@ -1704,7 +1745,7 @@ function createHarness(options) {
             const request = payload.interface_preparation;
             if (request.local_gso) context.net.link.setGSO(status.local_interface, request.local_gso);
             if (request.local_offloads) context.net.link.setOffloads(status.local_interface, request.local_offloads);
-            if (request.pipeline_offloads) context.net.link.setOffloads(status.pipeline_interface, request.pipeline_offloads);
+            if (request.pipeline_offloads && status.pipeline_interface) context.net.link.setOffloads(status.pipeline_interface, request.pipeline_offloads);
             status.interface_preparation = {applied: true};
             status.usable = session.usable;
             return clone(status);
@@ -1741,6 +1782,15 @@ function createHarness(options) {
               segmentation_ready: true
             }
           };
+          if (payload.handoff_mode === 'direct_gro') {
+            state.links.set(localInterface, Object.assign(linkInfo(localInterface), {kind: 'veerwan', peer_ifindex: 0}));
+            state.links.delete(pipelineInterface);
+            status.handoff_mode = 'direct_gro';
+            status.pipeline_interface = '';
+            status.pipeline_ifindex = 0;
+            status.segmentation_ready = false;
+            status.veer_core = {mode: 'single_local_boundary', parent_interface: localInterface};
+          }
           state.pluginRecords.set(`wan_core/status/${key}`, {data: clone(status), enabled: false});
           return clone(status);
         }

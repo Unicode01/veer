@@ -165,4 +165,7 @@ func TestOptionalKernelModuleActualAPI(t *testing.T) {
 	if status := optionalKernelModuleIngressFeatureStatus(); !status.Available {
 		t.Fatalf("ingress capability unavailable: %+v", status)
 	}
+	if status := optionalKernelModuleWANFeatureStatus(); !status.Available {
+		t.Fatalf("WAN capability unavailable: %+v", status)
+	}
 }

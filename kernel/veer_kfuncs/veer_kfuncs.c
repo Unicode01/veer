@@ -27,6 +27,8 @@
 #include <net/tcp.h>
 #include <net/ipv6.h>
 #include <net/checksum.h>
+#include <net/gro_cells.h>
+#include <net/rtnetlink.h>
 
 #ifndef __bpf_kfunc
 #define __bpf_kfunc noinline
@@ -51,11 +53,74 @@ enum { VEER_PPPOE_ENCAP = 1, VEER_PPPOE_DECAP, VEER_L3_TO_ETH, VEER_ETH_TO_L3 };
 struct veer_pppoe { u8 version, code; __be16 session, length, protocol; } __packed;
 
 u32 veer_kfuncs_abi_v1(void);
+u32 veer_kfuncs_wan_v1(void);
 int veer_skb_handoff_v1(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config);
 int veer_skb_handoff_ingress_v1(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config);
 
 __bpf_kfunc u32 veer_kfuncs_abi_v1(void) { return 1; }
+__bpf_kfunc u32 veer_kfuncs_wan_v1(void) { return 1; }
 static DEFINE_PER_CPU(unsigned int, veer_send_depth);
+
+/* A single Ethernet boundary with its own receive aggregation point. Only
+ * devices explicitly created as this kind use these queues; ordinary dummy,
+ * veth and physical interfaces keep their original receive semantics.
+ */
+struct veer_wan { struct gro_cells gro; };
+static int veer_wan_init(struct net_device *dev)
+{
+	struct veer_wan *wan = netdev_priv(dev);
+	int err;
+	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
+	if (!dev->tstats) return -ENOMEM;
+	err = gro_cells_init(&wan->gro, dev);
+	if (err) free_percpu(dev->tstats);
+	return err;
+}
+static void veer_wan_uninit(struct net_device *dev)
+{
+	struct veer_wan *wan = netdev_priv(dev);
+	gro_cells_destroy(&wan->gro);
+	free_percpu(dev->tstats);
+}
+static netdev_tx_t veer_wan_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	/* A missing encapsulation hook fails closed. Never emit plain IP. */
+	dev_kfree_skb(skb);
+	return NETDEV_TX_OK;
+}
+static void veer_wan_rx_mode(struct net_device *dev) {}
+static const struct net_device_ops veer_wan_ops = {
+	.ndo_init = veer_wan_init, .ndo_uninit = veer_wan_uninit,
+	.ndo_start_xmit = veer_wan_xmit, .ndo_get_stats64 = dev_get_tstats64,
+	.ndo_validate_addr = eth_validate_addr, .ndo_set_mac_address = eth_mac_addr,
+	.ndo_set_rx_mode = veer_wan_rx_mode,
+};
+static void veer_wan_setup(struct net_device *dev)
+{
+	ether_setup(dev);
+	dev->netdev_ops = &veer_wan_ops;
+	dev->needs_free_netdev = true;
+	dev->flags |= IFF_NOARP;
+	dev->flags &= ~IFF_MULTICAST;
+	dev->priv_flags |= IFF_NO_QUEUE | IFF_LIVE_ADDR_CHANGE;
+	dev->features |= NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_HW_CSUM |
+		NETIF_F_GSO_SOFTWARE | NETIF_F_GRO;
+	dev->hw_features = dev->features;
+	dev->min_mtu = 68;
+	dev->max_mtu = 9000;
+	eth_hw_addr_random(dev);
+}
+static int veer_wan_validate(struct nlattr *tb[], struct nlattr *data[],
+			     struct netlink_ext_ack *extack)
+{
+	if (tb[IFLA_ADDRESS] && (nla_len(tb[IFLA_ADDRESS]) != ETH_ALEN ||
+	    !is_valid_ether_addr(nla_data(tb[IFLA_ADDRESS])))) return -EINVAL;
+	return 0;
+}
+static struct rtnl_link_ops veer_wan_link_ops = {
+	.kind = "veerwan", .priv_size = sizeof(struct veer_wan),
+	.setup = veer_wan_setup, .validate = veer_wan_validate,
+};
 
 /* veer_clamp has made the complete IP/TCP headers directly accessible.
  * Pure ACKs cannot aggregate. Keep them on the original receive path so
@@ -82,6 +147,23 @@ static int veer_send(struct sk_buff *skb, struct net_device *dev, bool ingress)
 	int err;
 	if (ingress) {
 		struct net_device *peer = NULL;
+		if (dev->netdev_ops == &veer_wan_ops) {
+			struct veer_wan *wan = netdev_priv(dev);
+			bool gro = (dev->features & NETIF_F_GRO) && veer_gro_packet(skb);
+			unsigned int len = skb->len;
+			/* Same receive preparation as dev_forward_skb, then enter this
+			 * device's GRO cells. Pure ACKs bypass aggregation scheduling.
+			 * RCU in veer_handoff protects the target through submission;
+			 * unregister_netdevice drains readers before ndo_uninit.
+			 */
+			err = __dev_forward_skb(dev, skb);
+			if (err) return err;
+			local_bh_disable();
+			dev_sw_netstats_rx_add(dev, len);
+			err = gro ? gro_cells_receive(&wan->gro, skb) : netif_rx(skb);
+			local_bh_enable();
+			return err;
+		}
 		/* Enter the existing veth NAPI/GRO path after PPPoE decapsulation.
 		 * Direct ingress injection bypasses that aggregation point. The
 		 * peer must have TSO disabled for veth to consider TCP GRO, and
@@ -379,6 +461,7 @@ __bpf_kfunc int veer_skb_handoff_ingress_v1(struct __sk_buff *skb_ctx, const str
 
 BTF_KFUNCS_START(veer_kfuncs_ids)
 BTF_ID_FLAGS(func, veer_kfuncs_abi_v1)
+BTF_ID_FLAGS(func, veer_kfuncs_wan_v1)
 BTF_ID_FLAGS(func, veer_skb_handoff_v1)
 BTF_ID_FLAGS(func, veer_skb_handoff_ingress_v1)
 BTF_KFUNCS_END(veer_kfuncs_ids)
@@ -392,13 +475,18 @@ static int __init veer_kfuncs_init(void)
 {
 	int err;
 	instance = get_random_u64();
+	err = rtnl_link_register(&veer_wan_link_ops);
+	if (err) return err;
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_SCHED_CLS, &veer_kfuncs_set);
-	if (err) pr_err("veer_kfuncs: TC kfunc registration failed: %d\n", err);
+	if (err) {
+		pr_err("veer_kfuncs: TC kfunc registration failed: %d\n", err);
+		rtnl_link_unregister(&veer_wan_link_ops);
+	}
 	return err;
 }
-static void __exit veer_kfuncs_exit(void) {}
+static void __exit veer_kfuncs_exit(void) { rtnl_link_unregister(&veer_wan_link_ops); }
 module_init(veer_kfuncs_init);
 module_exit(veer_kfuncs_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Optional Veer TC packet capabilities");
-MODULE_VERSION("1.1.0");
+MODULE_VERSION("1.2.0");

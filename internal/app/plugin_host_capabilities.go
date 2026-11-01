@@ -131,7 +131,7 @@ func mustBuildPluginHostControlCapabilities() []pluginHostControlCapability {
 		"net.tuntap.ensure", "net.tuntap.close", "net.tuntap.read", "net.tuntap.write", "net.tuntap.list", "net.tuntap.owned",
 	}, pluginHostCapabilityOptions{permissions: []string{"net.tuntap"}, conditionalPermissions: namespaceConditional})
 	add([]string{
-		"net.link.get", "net.link.list", "net.link.ensureBridge", "net.link.ensureVeth", "net.link.ensureDummy",
+		"net.link.get", "net.link.list", "net.link.ensureBridge", "net.link.ensureVeth", "net.link.ensureDummy", "net.link.ensureHelperWAN",
 		"net.link.ensureMacvlan", "net.link.ensureVLAN", "net.link.ensureVRF", "net.link.delete", "net.link.release",
 		"net.link.owned", "net.link.setMaster", "net.link.clearMaster", "net.link.setUp", "net.link.setMTU",
 		"net.link.setARP", "net.link.setPromiscuous", "net.link.getOffloads", "net.link.setOffloads", "net.link.setGSO",

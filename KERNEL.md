@@ -9,17 +9,17 @@
 | 操作 | 模块承担的工作 |
 | --- | --- |
 | PPPoE 出站 | 接收 GSO skb，在 C 内分段，逐段补 PPPoE 长度和校验和，再发到物理 WAN |
-| PPPoE 入站 | 校验会话与长度，去除 padding，调整 skb 头部，复用 veth NAPI/GRO 后交给 local ingress |
+| PPPoE 入站 | 校验会话与长度，去除 padding，调整 skb 头部，经单口 GRO cells 或兼容 veth GRO 后交给 local ingress |
 | WG 出站 | 去除 Ethernet 头，把 L3 skb 交给内核 WireGuard，保留 GSO |
-| WG 入站 | 补 Ethernet 头，经 WAN Core veth 回到核心 reply flow，允许 GRO/GSO |
+| WG 入站 | 补 Ethernet 头，经 WAN Core 本机边界回到核心 reply flow，允许 GRO/GSO |
 
-当前仍保留 WAN Core 的 local/pipeline veth，作为已有 NAT 和接口租约的边界。收益来自延后分段、减少逐段 BPF 调用和包体搬移，不能理解为消除了 veth、分段、checksum 或内存分配。模块使用独立 skb clone，必要时 COW；不是零拷贝承诺。
+新 helper 允许 VPN 与 PPPoE 使用单口 WAN 边界，兼容路径继续保留 local/pipeline veth。NAT 和接口租约统一由 WAN Core 管理。收益来自减少交接层、延后分段、减少逐段 BPF 调用和包体搬移；模块仍使用独立 skb clone，必要时 COW。
 
-PPPoE 增强模式为 local 开启 GRO，并关闭 pipeline 的 TSO，使解封装后的 TCP 数据包经同 netns 的双向 veth peer 进入已有 NAPI/GRO。纯 ACK 保留原接收路径，避免拖慢反方向上传；UDP、ICMP、IPv4 分片和带扩展头的 IPv6 也使用原路径。GRO 未开启、peer 不符合条件或仍启用 TSO 时自动回落直接 local ingress，不增加接口、线程或独立 NAPI 生命周期。
+PPPoE 的增强 veth 兼容路径为 local 开启 GRO，并关闭 pipeline 的 TSO，使解封装后的 TCP 数据包经同 netns 的双向 veth peer 进入已有 NAPI/GRO。纯 ACK 保留原接收路径，避免拖慢反方向上传；UDP、ICMP、IPv4 分片和带扩展头的 IPv6 也使用原路径。GRO 未开启、peer 不符合条件或仍启用 TSO 时自动回落直接 local ingress。单口路径改用该 WAN 自身的 GRO cells，无需 peer，也保留纯 ACK 的快速接收路径。
 
 ## 构建与部署
 
-在目标 Linux 主机或匹配的构建环境准备编译器、clang、kmod、pahole 和**精确匹配目标内核**的 headers/build tree。增强路径要求 Linux 6.1+，以及启用 BPF syscall/JIT、内核 BTF、模块和模块 BTF；最终以实际 kfunc probe 为准。发行版签名策略、Secure Boot/lockdown 也可能阻止加载，需由管理员签名及信任模块。
+在目标 Linux 主机或匹配的构建环境准备编译器、clang、kmod、pahole 和**精确匹配目标内核**的 headers/build tree。增强路径要求 Linux 6.1+，以及启用 BPF syscall/JIT、内核 BTF、模块、模块 BTF 和 `CONFIG_GRO_CELLS`；最终以实际 kfunc probe 为准。发行版签名策略、Secure Boot/lockdown 也可能阻止加载，需由管理员签名及信任模块。
 
 ```sh
 # 原构建方式仍默认不带模块。
@@ -53,6 +53,10 @@ Veer 在启动插件之前加载并探测模块。宿主只有在 probe 实际�
 
 能力是运行中模块实例的结果，不等同于编译标签。模块出现、移除或重新加载后，能力查询按实例重新探测。已经附加的程序不因一次查询切换对象，需正常重载/重启以协调对象和接口设置。
 
+helper 1.2.0 增加 `veerwan` 单口边界。独立 probe 实际调用 `veer_kfuncs_wan_v1()` 成功后，宿主发布 `dataplane.kfuncs.wan.v1`。PPPoE 1.8.0 与 WAN Core 1.6.0 在新建会话时选用 `direct_gro`：本机 TC egress 封装并执行 GSO 分段，物理 WAN TC ingress 解封装后进入该口专属的 GRO cells；纯 ACK 绕过聚合队列。每个 PPPoE WAN 只新增一个接口，且保留下行 GRO。没有这项能力时继续使用原 veth 路径。已在线的 veth 会话不会因插件升级而被拆除，重新拨号才切换边界。
+
+`net.link.ensureHelperWAN()` 使用与其他建口 API 相同的 `net.admin`、`link.create` 接口范围、所有权和回滚限制。GRO 队列与各自网口共同创建和销毁，普通 dummy/veth 不受影响；单口缺失、类型不匹配或 helper 不可用时仅停用对应隧道并保留配置重试。模块卸载会注销其所有 `veerwan`，因此仍须先正常释放活动数据面引用。
+
 PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，会通过 WAN Core 的 `apply_session` 更新其持有的接口 offload 租约；不会重新拨号或把在线 WAN 标为 prepared/down。接口准备失败就清空 tunnel map，保留配置重试。WG 在 apply/repair 时同样根据实际选中的对象协调 GSO/GRO。
 
 共享 daemon lease 避免重叠启动/升级互相卸载。只有最后一个正常退出的 Veer 才尝试卸载自己加载的模块；boot ID 与模块每次加载生成的随机 instance 共同标记所有权。手动加载或替换后的模块不由 Veer 卸载。BPF 引用仍在、权限不足等情况下保留模块并记录日志，不强制卸载。
@@ -78,6 +82,10 @@ sh scripts/verify-kernel-module.sh
 该门禁构建模块和两套插件对象，执行实际 ABI probe、生命周期单测、PPPoE IPv4/IPv6/TCP/UDP/UDP GSO/畸形包测试，以及真实 Veer TC NAT + 内核 WG 集成。PPPoE 还检查真实 GRO 聚合、GRO/TSO 不满足条件时的回落、纯 ACK 绕过，以及线性/非线性原始 skb 在 handoff 后逐字节不变（包含 MSS 修改）。WG 测试包含单 socket 长连接跨热更新、异常重启、接口消失、修复和拆除后重新应用。测试结束释放引用和模块；不在业务主机运行。
 
 性能复测使用 `scripts/verify-kfuncs-packets.py --loader <loader> --performance --output <json>`；loader 可用 `go build -o loader ./scripts/kfuncs-test-loader` 构建。WG 使用 `python3 scripts/benchmark-wireguard.py --runtime <directory>`，目录内放 `veer` 和 `plugins/{wan_core,vpn_core}`，增强模式另放匹配 `.ko`。分别用当前源码的普通/带标签二进制执行，保存 results.json；脚本使用独立 netns，WG 实际经过核心 NAT 和加解密。
+
+PPPoE 单口使用同一脚本附加 `--direct` 复测，与原 helper + veth 路径使用相同的 IPv4/IPv6、TCP/UDP、UDP GSO、畸形包、原始 skb 不变和真实 GRO 聚合检查。单口本机 TCP 测试同时验证 TC egress 成功交接的发送完成语义。
+
+2026-11-01 在 Linux 7.0.14-8-pve 的隔离 KVM（4 vCPU、4 GiB）中，以 `--mode kfuncs --performance` 和 `--direct --performance` 各测三轮，单流中位数由 veth 的 TX/RX 4.23/4.35 Gbps 提高到单口的 4.90/5.04 Gbps；整机忙 CPU 分别约 1.30/1.28 核和 1.31/1.32 核。这是同机 PPPoE 段的对照，不包含 Veer NAT。额外的 `--direct --veer <binary>` 检查实际 TC prepared-L2 NAT 的 TCP 双向传输和 UDP 源地址转换。恢复测试反复删除、重建 helper 网口，验证同名错误类型接口保护、所有权更新和其他 WAN 保持不变。
 
 2026-10-31，Linux 6.12、4 vCPU、约 967 MiB 的独立虚拟机，同机 namespace 单流、每方向 3 轮中位数。下表 PPPoE 为直接隧道测试，未经过 Veer NAT；WG 包含真实核心 NAT 和加解密，不能把两种拓扑的数字直接比较：
 

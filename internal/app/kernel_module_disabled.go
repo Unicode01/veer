@@ -2,6 +2,10 @@
 
 package app
 
+func optionalKernelModuleWANFeatureStatus() PluginHostFeatureStatus {
+	return optionalKernelModuleFeatureStatus()
+}
+
 const optionalKernelModuleCompiled = false
 
 func startOptionalKernelModule() (func(), error) { return func() {}, nil }

@@ -20,15 +20,15 @@ func resolveKernelEgressNATPreparedL2Redirect(outLink netlink.Link) ([6]byte, [6
 	}
 	attrs := outLink.Attrs()
 	kind := strings.ToLower(strings.TrimSpace(outLink.Type()))
-	if kind != "veth" && kind != "dummy" {
-		return srcMAC, dstMAC, fmt.Errorf("prepared_l2 redirect requires a veth or dummy outbound interface, got %q", outLink.Type())
+	if kind != "veth" && kind != "dummy" && kind != "veerwan" {
+		return srcMAC, dstMAC, fmt.Errorf("prepared_l2 redirect requires a veth, dummy or veerwan outbound interface, got %q", outLink.Type())
 	}
 	if !isValidHardwareAddr(attrs.HardwareAddr) {
 		return srcMAC, dstMAC, fmt.Errorf("outbound interface %q has no usable MAC", attrs.Name)
 	}
 	// A protocol plugin consumes a single boundary on TC egress. Its synthetic
 	// Ethernet destination belongs to that boundary itself; there is no peer.
-	if kind == "dummy" {
+	if kind == "dummy" || kind == "veerwan" {
 		mac := hardwareAddrToArray(attrs.HardwareAddr)
 		return mac, mac, nil
 	}

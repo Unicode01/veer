@@ -649,7 +649,7 @@ F.onLocaleChange(function () {
 - `pipeline.node()` / `plugin.virtualInterface()` 只描述逻辑节点或能力，不会创建系统网卡，也没有 ifindex。
 - `pipeline.attach({ interfaces: [...] })` 同时定义 dispatcher 挂载目标和该 Hook 的执行白名单；即使其他规则或插件也让 dispatcher 挂在同一组接口上，该 Hook 也不会在声明范围外执行。它不会把 vtap 落成 netdev。
 - 动态 TC/XDP 适配器可设置 `binding_required: true`，并在 `compatibility.features` 声明 `dataplane.hook_bindings.v1`。此时必须声明 `hook_bindings` 资源并提供启用、含有效非空 `interfaces` 的对应 Hook 记录才能挂载；记录缺失、禁用、损坏或读取失败时不挂载，不回退到全局或静态 `interfaces`。未设置此标记的 Hook 保持原有语义。
-- `vtolocal` 使用单个 dummy 接入 Linux 协议栈；`wan_core` 的 direct 模式使用 dummy，PPPoE 所需的 `segmented_veth` 模式则创建 local/pipeline veth 对。它们都是显式 L3/分段边界，不是逻辑 veer 节点。
+- `vtolocal` 使用单个 dummy 接入 Linux 协议栈；`wan_core` 的 direct 模式使用 dummy，`segmented_veth` 创建 local/pipeline veth 对，`direct_gro` 使用 helper 提供的单个 `veerwan`。它们都是显式 L3/分段边界，不是逻辑 veer 节点。
 
 因此，PPPoE、firewall、VXLAN 这类数据面插件应优先实现为逻辑 chain。只有需要让 Linux 本机看见 L3 边界或提供明确分段点时才创建 dummy/veth/tun/bridge 等系统接口；插件节点本身始终不占用 netdev。
 
@@ -698,6 +698,8 @@ pipeline.attach({
 ABI v2 的共享 prog-array 固定为 111 slots。每个具体 stage 最多 8 个 Hook，forward 和 reply 每个方向跨三个 stage 合计最多 14 个 Hook，以保留 eBPF tail-call 深度余量。超限会在注册/reconcile 阶段拒绝，不会截断链。
 
 PPPoE 路径出站使用 `local0 -> pipeline peer TC ingress -> PPPoE stage -> physical WAN`，入站使用 `physical WAN TC ingress -> PPPoE stage -> local0 ingress`。`local0` 与内部 pipeline peer 组成由 `wan_core` 管理的 veth 边界；pipeline peer 只承担数据面换向，不应作为用户可选 WAN 接口。
+
+宿主提供 `dataplane.kfuncs.wan.v1` 且插件增强对象可用时，新 PPPoE 会话改用 `direct_gro`：`local0 TC egress -> PPPoE stage -> physical WAN`，回包解封装后直接进入 `local0` 的 GRO 接收队列，只创建一个 helper WAN 网口。WAN Core 通过 `net.link.ensureHelperWAN({name, mtu, up})` 管理此边界；该 API 沿用建口的权限、接口范围与所有权检查。旧 helper 或无 helper 时保留 veth 路径，已建立的会话保留原边界直到重拨。
 
 动态 PPPoE 地址、对端地址和路由由 `wan_core` 发布到这个本地边界，并在重拨时替换；`vtolocal` 只用于静态本地边界，不应同时管理同一个 PPPoE 接口的动态地址。
 
@@ -1116,7 +1118,7 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 
 可选 `veer_kfuncs` 模块为 TC 插件提供 `dataplane.kfuncs.handoff.v1`。插件必须根据宿主实际发布的 available_features 选择独立增强对象，缺少能力时保留基础路径；其 skb 所有权、GSO/GRO、编译/部署与生命周期契约见 [KERNEL.md](KERNEL.md)。这项能力默认不编译、不部署。
 
-- `wan_core`（stable）：消费标准化 WAN session；direct 模式管理本地 L3 dummy，`segmented_veth` 模式管理 local/pipeline veth 边界。
+- `wan_core`（stable）：消费标准化 WAN session；direct 模式管理本地 L3 dummy，`segmented_veth` 管理 local/pipeline veth 边界，`direct_gro` 管理可选 helper 的单口 GRO 边界。
 - `lan_core`（stable）：管理 LAN bridge，并生成 Egress NAT、DHCPv4 和 IPv6 assignment plan。
 - `vtolocal`（stable）：创建静态本地 L3 dummy，并管理该接口上的地址与路由。
 - `pppoe_client`（stable）：Goja + raw L2 PPPoE 控制面和双向 TC 隧道插件。插件目录内保留控制面自测和 Linux 黑盒脚本，覆盖 discovery、PAP/CHAP、IPv6CP、DHCPv6-PD、keepalive/redial、disconnect 和 tunnel map 写入。生产使用前仍应在目标运营商/AC 上跑真实断线重拨、IPv4/IPv6/PD、长流稳定性和目标拓扑吞吐验收。

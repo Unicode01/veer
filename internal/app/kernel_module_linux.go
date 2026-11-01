@@ -26,6 +26,9 @@ var kernelModuleProbeBytes []byte
 //go:embed ebpf/veer-kfuncs-ingress-probe-bpf.o
 var kernelModuleIngressProbeBytes []byte
 
+//go:embed ebpf/veer-kfuncs-wan-probe-bpf.o
+var kernelModuleWANProbeBytes []byte
+
 const optionalKernelModuleName = "veer_kfuncs"
 const optionalKernelModuleCompiled = true
 
@@ -59,6 +62,7 @@ var optionalKernelModuleProbe struct {
 	cached   bool
 	status   PluginHostFeatureStatus
 	ingress  PluginHostFeatureStatus
+	wan      PluginHostFeatureStatus
 }
 
 func optionalKernelModuleFeatureStatus() PluginHostFeatureStatus {
@@ -77,7 +81,11 @@ func optionalKernelModuleFeatureStatus() PluginHostFeatureStatus {
 			optionalKernelModuleProbe.status.Reason = "optional kernel module unavailable: " + err.Error()
 		}
 		optionalKernelModuleProbe.ingress = optionalKernelModuleProbe.status
+		optionalKernelModuleProbe.wan = optionalKernelModuleProbe.status
 		if err == nil {
+			if err := probeKernelModuleHandoff(kernelModuleWANProbeBytes); err != nil {
+				optionalKernelModuleProbe.wan = PluginHostFeatureStatus{Reason: "optional kernel WAN boundary unavailable: " + err.Error()}
+			}
 			if err := probeKernelModuleHandoff(kernelModuleIngressProbeBytes); err != nil {
 				optionalKernelModuleProbe.ingress = PluginHostFeatureStatus{Reason: "optional kernel ingress handoff unavailable: " + err.Error()}
 			}
@@ -93,6 +101,15 @@ func optionalKernelModuleIngressFeatureStatus() PluginHostFeatureStatus {
 	optionalKernelModuleProbe.Lock()
 	defer optionalKernelModuleProbe.Unlock()
 	return optionalKernelModuleProbe.ingress
+}
+
+func optionalKernelModuleWANFeatureStatus() PluginHostFeatureStatus {
+	if status := optionalKernelModuleFeatureStatus(); !status.Available {
+		return status
+	}
+	optionalKernelModuleProbe.Lock()
+	defer optionalKernelModuleProbe.Unlock()
+	return optionalKernelModuleProbe.wan
 }
 
 type kernelModuleIdentity struct {

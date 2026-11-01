@@ -34,6 +34,10 @@ func (unsupportedPluginControlNetAdmin) LinkEnsureDummy(pluginControlNetDummyReq
 	return pluginControlNetDummyResult{}, fmt.Errorf("net.admin is supported only on linux")
 }
 
+func (unsupportedPluginControlNetAdmin) LinkEnsureHelperWAN(pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	return pluginControlNetDummyResult{}, fmt.Errorf("net.admin is supported only on linux")
+}
+
 func (unsupportedPluginControlNetAdmin) LinkEnsureMacvlan(pluginControlNetMacvlanRequest) (pluginControlNetMacvlanResult, error) {
 	return pluginControlNetMacvlanResult{}, fmt.Errorf("net.admin is supported only on linux")
 }

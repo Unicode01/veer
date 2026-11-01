@@ -678,6 +678,8 @@ declare global {
     ensureBridge(request: VeerNetLinkEnsureRequest): VeerNetLinkInfo;
     ensureVeth(request: VeerNetVethRequest): VeerNetVethResult;
     ensureDummy(request: VeerNetLinkEnsureRequest): VeerNetLinkEnsureResult;
+    /** Optional helper-owned Ethernet boundary with receive GRO (dataplane.kfuncs.wan.v1). */
+    ensureHelperWAN(request: VeerNetLinkEnsureRequest): VeerNetLinkEnsureResult;
     ensureMacvlan(request: VeerNetMacvlanRequest): VeerNetLinkEnsureResult;
     ensureVLAN(request: VeerNetVLANRequest): VeerNetLinkEnsureResult;
     ensureVRF(request: VeerNetVRFRequest): VeerNetLinkEnsureResult;
