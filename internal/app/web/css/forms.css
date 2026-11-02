@@ -201,8 +201,8 @@
     gap: 10px;
 }
 
-.form-actions button,
-.modal-content button {
+/* Zero-specificity defaults: any button with its own class (cancel, mini, ghost) keeps its own look and hover. */
+:where(.form-actions, .modal-content) button {
     display: inline-flex;
     align-items: center;
     min-height: 36px;
@@ -217,8 +217,7 @@
     transition: none;
 }
 
-.form-actions button:hover,
-.modal-content button:hover {
+:where(.form-actions, .modal-content) button:hover {
     background: var(--primary-hover);
     border-color: var(--primary-hover);
 }
