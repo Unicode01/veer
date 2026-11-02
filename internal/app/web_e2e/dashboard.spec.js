@@ -1022,6 +1022,19 @@ test('plugin header mirrors button state and notifications cannot escape the act
   await expect(action).toHaveText('Fixture action');
   await action.click();
   expect(await frame.locator('body').evaluate(() => window.fixtureHeaderClicks)).toBe(1);
+  await navigatePage(page, 'plugins');
+  await page.evaluate(() => {
+    const app = window.VeerApp;
+    const plugin = app.state.plugins.data.find((item) => item.id === 'nf_counter');
+    delete plugin.ui.page;
+    return app.openPluginUI('nf_counter');
+  });
+  const inline = page.frameLocator('#pluginUIFrame');
+  await expect(inline.locator('h1')).toHaveText('Firewall fixture');
+  expect(await inline.locator('body').evaluate(() => window.VeerPluginHost.notify('inline visible'))).toBe(true);
+  await navigatePage(page, 'rules');
+  expect(await inline.locator('body').evaluate(() => window.VeerPluginHost.notify('inline hidden'))).toBe(false);
+  await expect(page.locator('#toastStack')).not.toContainText('inline hidden');
 });
 
 test('confirmation dialog stays above plugin management', async ({ page }, testInfo) => {
