@@ -125,6 +125,31 @@
         color: var(--veer-danger);
       }
     }
+    /* Patchbay grammar overrides */
+    .pppoe-page { padding: 0 0 4px; }
+    .pppoe-section { gap: 14px; padding: 0; border: 0; border-radius: 0; background: transparent; }
+    .pppoe-section + .pppoe-section { padding-top: 20px; border-top: 1px solid var(--veer-border); }
+    .pppoe-section-title { color: var(--veer-muted); font-size: var(--veer-fs-xs); letter-spacing: .08em; }
+    .pppoe-section-desc { color: var(--veer-muted); }
+    /* Fixed grids so every row is full: four field columns (the picker spans two, dropdown and name
+       side by side) and three switch columns with room for their labels. */
+    .pppoe-field-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 12px; }
+    .pppoe-field-grid > :has(.veer-record-picker, .pppoe-profile-picker) { grid-column: span 2; }
+    .pppoe-profile-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; align-items: end; }
+    .pppoe-profile-picker > [hidden] { display: none; }
+    .pppoe-field-grid:has(> :nth-child(2):last-child) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .pppoe-toggle-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 24px; }
+    .pppoe-toggle-field { min-height: 36px; padding: 0; border: 0; border-bottom: 1px solid var(--veer-border); border-radius: 0; background: transparent; }
+    .pppoe-actions { justify-content: flex-end; padding-top: 16px; border-top: 1px solid var(--veer-border); }
+    @media (max-width: 880px) {
+      .pppoe-field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pppoe-toggle-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 620px) {
+      .pppoe-field-grid, .pppoe-toggle-grid { grid-template-columns: minmax(0, 1fr); }
+      .pppoe-field-grid > :has(.veer-record-picker, .pppoe-profile-picker) { grid-column: auto; }
+    }
+    /* End Patchbay grammar overrides */
   </style>
 </head>
 <body>

@@ -5,11 +5,11 @@
   const node = (tag, options) => app.createNode(tag, options || {});
   const text = (key, params) => app.t(key, params);
   const configs = [
-    { tab: 'rules', state: 'rules', stem: 'Rule', form: 'rule', title: 'tab.rules', color: 'blue', render: 'renderRulesTable', idColumn: 1 },
-    { tab: 'sites', state: 'sites', stem: 'Site', form: 'site', title: 'tab.sites', color: 'violet', render: 'renderSitesTable', idColumn: 0 },
-    { tab: 'ranges', state: 'ranges', stem: 'Range', form: 'range', title: 'tab.ranges', color: 'green', render: 'renderRangesTable', idColumn: 0 },
+    { tab: 'rules', state: 'rules', stem: 'Rule', form: 'rule', title: 'tab.rules', color: 'blue', render: 'renderRulesTable', idColumn: 1, stats: '/api/rules/stats', statsKey: 'rule_id' },
+    { tab: 'sites', state: 'sites', stem: 'Site', form: 'site', title: 'tab.sites', color: 'violet', render: 'renderSitesTable', idColumn: 0, stats: '/api/sites/stats', statsKey: 'site_id' },
+    { tab: 'ranges', state: 'ranges', stem: 'Range', form: 'range', title: 'tab.ranges', color: 'green', render: 'renderRangesTable', idColumn: 0, stats: '/api/ranges/stats', statsKey: 'range_id' },
     { tab: 'managed-networks', state: 'managedNetworks', stem: 'ManagedNetwork', form: 'managedNetwork', title: 'tab.managedNetworks', color: 'brown', render: 'renderManagedNetworksTable', idColumn: 0 },
-    { tab: 'egress-nats', state: 'egressNATs', stem: 'EgressNAT', form: 'egressNAT', title: 'tab.egressNATs', color: 'slate', render: 'renderEgressNATsTable', idColumn: 0 },
+    { tab: 'egress-nats', state: 'egressNATs', stem: 'EgressNAT', form: 'egressNAT', title: 'tab.egressNATs', color: 'slate', render: 'renderEgressNATsTable', idColumn: 0, stats: '/api/egress-nats/stats', statsKey: 'egress_nat_id' },
     { tab: 'ipv6-assignments', state: 'ipv6Assignments', stem: 'IPv6Assignment', form: 'ipv6Assignment', title: 'tab.ipv6Assignments', color: 'rose', render: 'renderIPv6AssignmentsTable', idColumn: 0 }
   ];
   const reservation = { tab: 'managed-networks', state: 'managedNetworkReservations', stem: 'ManagedNetworkReservation', form: 'managedNetworkReservation', title: 'managedNetworkReservation.list.title', color: 'brown' };
@@ -77,6 +77,148 @@
     });
   }
 
+  // Live traffic is sampled client-side so each row can show a short rate history.
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const TRAFFIC_SLOTS = 30;
+  const traffic = {};
+  function trafficFor(cfg) {
+    if (!traffic[cfg.state]) traffic[cfg.state] = { at: 0, busy: false, ready: false, byId: new Map(), total: [], in: 0, out: 0 };
+    return traffic[cfg.state];
+  }
+  function pushSample(list, value) {
+    list.push(value);
+    if (list.length > TRAFFIC_SLOTS) list.shift();
+  }
+  async function sampleTraffic(cfg) {
+    if (!cfg || !cfg.stats || !app.getToken() || document.hidden) return;
+    const store = trafficFor(cfg);
+    if (store.busy || Date.now() - store.at < 4000) return;
+    store.busy = true;
+    store.at = Date.now();
+    try {
+      const query = cfg.state === 'sites' ? '' : '?page=1&page_size=500';
+      const response = await fetch(cfg.stats + query, { headers: { Authorization: 'Bearer ' + app.getToken() }, cache: 'no-store' });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const items = Array.isArray(payload) ? payload : (payload && payload.items) || [];
+      const seen = new Set();
+      let totalIn = 0;
+      let totalOut = 0;
+      items.forEach((entry) => {
+        const id = Number(entry[cfg.statsKey]);
+        const speedIn = Number(entry.speed_in) || 0;
+        const speedOut = Number(entry.speed_out) || 0;
+        const slot = store.byId.get(id) || { samples: [] };
+        slot.rate = speedIn + speedOut;
+        pushSample(slot.samples, slot.rate);
+        store.byId.set(id, slot);
+        seen.add(id);
+        totalIn += speedIn;
+        totalOut += speedOut;
+      });
+      store.byId.forEach((_, id) => { if (!seen.has(id)) store.byId.delete(id); });
+      store.in = totalIn;
+      store.out = totalOut;
+      pushSample(store.total, totalIn + totalOut);
+      store.ready = true;
+      if (configForTab(app.state.activeTab) === cfg) { paintTraffic(cfg); renderKPIs(cfg); }
+    } catch (_) {
+      /* Traffic is supplementary; the resource list stays authoritative. */
+    } finally {
+      store.busy = false;
+    }
+  }
+
+  function sparkline(values, options) {
+    const opts = options || {};
+    const width = opts.width || 72;
+    const height = opts.height || 22;
+    const step = width / (TRAFFIC_SLOTS - 1);
+    const max = Math.max(1, ...values);
+    const points = values.map((value, index) => [width - (values.length - 1 - index) * step, height - 2 - (value / max) * (height - 6)]);
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    Object.entries({ viewBox: '0 0 ' + width + ' ' + height, width: String(width), height: String(height), 'aria-hidden': 'true', class: 'sparkline' + (opts.live ? ' is-live' : '') }).forEach(([key, value]) => svg.setAttribute(key, value));
+    const base = document.createElementNS(SVG_NS, 'path');
+    base.setAttribute('d', 'M0 ' + (height - 1.5) + ' H' + width);
+    base.setAttribute('class', 'spark-base');
+    svg.appendChild(base);
+    if (points.length > 1) {
+      const line = points.map((point, index) => (index ? 'L' : 'M') + point[0].toFixed(1) + ' ' + point[1].toFixed(1)).join(' ');
+      const area = document.createElementNS(SVG_NS, 'path');
+      area.setAttribute('d', line + ' L' + width + ' ' + height + ' L' + points[0][0].toFixed(1) + ' ' + height + ' Z');
+      area.setAttribute('class', 'spark-area');
+      const stroke = document.createElementNS(SVG_NS, 'path');
+      stroke.setAttribute('d', line);
+      stroke.setAttribute('class', 'spark-line');
+      const dot = document.createElementNS(SVG_NS, 'circle');
+      const last = points[points.length - 1];
+      Object.entries({ cx: last[0].toFixed(1), cy: last[1].toFixed(1), r: '2', class: 'spark-dot' }).forEach(([key, value]) => dot.setAttribute(key, value));
+      svg.append(area, stroke, dot);
+    }
+    return svg;
+  }
+
+  function trafficNode(cfg, item) {
+    const slot = trafficFor(cfg).byId.get(Number(item.id));
+    const flowing = !!(slot && slot.rate > 0 && item.enabled !== false);
+    const box = node('div', { className: 'traffic route-' + cfg.color + (flowing ? ' is-flowing' : '') });
+    if (item.enabled === false) {
+      box.appendChild(node('span', { className: 'traffic-rate is-idle', text: '—' }));
+      return box;
+    }
+    box.appendChild(sparkline(slot ? slot.samples : [], { live: flowing }));
+    box.appendChild(node('span', { className: 'traffic-rate mono' + (flowing ? '' : ' is-idle'), text: slot ? (flowing ? app.formatSpeed(slot.rate) : text('patchbay.traffic.idle')) : '—' }));
+    return box;
+  }
+
+  function paintTraffic(cfg) {
+    const body = app.$(cfg.state + 'Body');
+    if (!body) return;
+    const byID = new Map((app.state[cfg.state].data || []).map((item) => [Number(item.id), item]));
+    body.querySelectorAll('tr[data-resource-id]').forEach((row) => {
+      const item = byID.get(Number(row.dataset.resourceId));
+      const cell = row.querySelector('.resource-traffic');
+      if (!item || !cell) return;
+      const next = trafficNode(cfg, item);
+      cell.replaceChildren(next);
+      const route = row.querySelector('.resource-route .patch-route');
+      if (route) route.classList.toggle('is-flowing', next.classList.contains('is-flowing'));
+    });
+  }
+
+  // Every KPI is exactly two lines: a label line (with an optional inline detail) and a value.
+  function kpiNode(label, value, extra) {
+    const opts = extra || {};
+    const head = node('div', { className: 'kpi-head', children: [node('span', { className: 'kpi-label', text: label })] });
+    if (opts.detail) head.appendChild(node('span', { className: 'kpi-detail mono', text: opts.detail, attrs: { title: opts.detail } }));
+    const box = node('div', { className: 'kpi' + (opts.className ? ' ' + opts.className : ''), children: [head, node('strong', { className: 'kpi-value', text: value })] });
+    if (opts.chart) box.appendChild(opts.chart);
+    return box;
+  }
+
+  function renderKPIs(cfg) {
+    const rows = app.state[cfg.state].data || [];
+    const count = (key) => rows.filter((item) => tone(item) === key).length;
+    const live = count('live');
+    const attention = count('attention');
+    const paused = count('off');
+    const items = [];
+    if (cfg.stats) {
+      const store = trafficFor(cfg);
+      items.push(kpiNode(text('patchbay.kpi.throughput'), store.ready ? app.formatSpeed(store.in + store.out) : '—', {
+        detail: store.ready ? text('patchbay.kpi.inOut', { in: app.formatSpeed(store.in), out: app.formatSpeed(store.out) }) : '',
+        className: 'kpi-hero route-' + cfg.color,
+        chart: sparkline(store.total, { width: 160, height: 32, live: store.in + store.out > 0 })
+      }));
+    } else {
+      items.push(kpiNode(text('patchbay.status.total'), rows.length.toLocaleString()));
+    }
+    items.push(kpiNode(text('patchbay.kpi.liveOf'), live.toLocaleString() + ' / ' + rows.length.toLocaleString()));
+    items.push(kpiNode(text('patchbay.kpi.attention'), attention.toLocaleString(), { className: attention ? 'kpi-alert' : '' }));
+    items.push(kpiNode(text('patchbay.kpi.paused'), paused.toLocaleString()));
+    shell.kpis.replaceChildren(...items);
+  }
+
   function configForTab(tab) { return configs.find((cfg) => cfg.tab === tab); }
   function pageTitle() {
     const cfg = configForTab(app.state.activeTab);
@@ -102,6 +244,16 @@
     return svg;
   }
 
+  const ICON_EDIT = 'M4 20h4L19 9l-4-4L4 16v4Z M13.5 6.5l4 4';
+  const ICON_REFRESH = 'M20 12a8 8 0 1 1-2.34-5.66 M20 4v4.5h-4.5';
+
+  function iconOnly(button, path, label) {
+    button.replaceChildren(icon(path, '16'));
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    button.classList.add('icon-only');
+  }
+
   function closeThemeMenu(restoreFocus) {
     if (!shell.themeMenu || shell.themeMenu.hidden) return;
     shell.themeMenu.hidden = true;
@@ -122,6 +274,7 @@
     shell.localeButton.textContent = app.state.locale === 'en-US' ? '中文' : 'EN';
     shell.localeButton.title = app.state.locale === 'en-US' ? '切换为简体中文' : 'Switch to English';
     shell.localeButton.setAttribute('aria-label', shell.localeButton.title);
+    if (app.el.refreshNowBtn) iconOnly(app.el.refreshNowBtn, ICON_REFRESH, text('common.refresh'));
   }
 
   function buildSettings(actions) {
@@ -184,9 +337,9 @@
       node('strong', { className: 'mono', text: window.location.hostname || 'Veer', attrs: { id: 'hostName' } }),
       node('dl', { children: [
         node('dt', { text: text('patchbay.hostSystem'), dataset: { i18n: 'patchbay.hostSystem' } }), node('dd', { attrs: { id: 'hostPlatform' } }),
-        node('dt', { text: text('patchbay.hostKernel'), dataset: { i18n: 'patchbay.hostKernel' } }), node('dd', { attrs: { id: 'hostKernel' } })
-      ] }),
-      node('span', { className: 'host-uptime', attrs: { id: 'hostUptime' } })
+        node('dt', { text: text('patchbay.hostKernel'), dataset: { i18n: 'patchbay.hostKernel' } }), node('dd', { attrs: { id: 'hostKernel' } }),
+        node('dt', { text: text('patchbay.hostUptime'), dataset: { i18n: 'patchbay.hostUptime' } }), node('dd', { attrs: { id: 'hostUptime' } })
+      ] })
     ] });
     shell.sidebar = node('aside', { className: 'sidebar', attrs: { id: 'mainSidebar' }, children: [brand, shell.host] });
     const nav = node('nav', { attrs: { 'aria-label': text('patchbay.navigation') }, children: [tabs] });
@@ -201,7 +354,10 @@
     shell.breadcrumb = node('div', { className: 'breadcrumb' });
     shell.commandButton = node('button', { className: 'command-trigger', attrs: { id: 'openCommandPalette', type: 'button' }, children: [node('span', { text: text('patchbay.search'), dataset: { i18n: 'patchbay.search' } }), node('kbd', { text: 'Ctrl K' })] });
     shell.commandButton.addEventListener('click', openCommand);
-    const topbar = node('div', { className: 'topbar', children: [mobile, shell.breadcrumb, node('div', { className: 'topbar-actions', children: [shell.commandButton, app.el.lastSyncLabel, app.el.refreshNowBtn] })] });
+    app.el.refreshNowBtn.removeAttribute('data-i18n');
+    app.el.refreshNowBtn.className = 'topbar-refresh';
+    const sync = node('div', { className: 'topbar-sync', children: [app.el.lastSyncLabel, app.el.refreshNowBtn] });
+    const topbar = node('div', { className: 'topbar', children: [mobile, shell.breadcrumb, node('div', { className: 'topbar-actions', children: [shell.commandButton, sync] })] });
     shell.main.appendChild(topbar);
     shell.content = node('div', { className: 'page-content' });
     shell.heading = node('div', { className: 'page-heading', children: [node('div', { children: [
@@ -211,7 +367,9 @@
     ] })] });
     shell.create = node('button', { className: 'primary-button', attrs: { id: 'createResourceBtn', type: 'button' } });
     shell.create.addEventListener('click', () => startCreate(configForTab(app.state.activeTab)));
-    shell.heading.appendChild(shell.create);
+    // Page-level actions sit in the header; managed networks add their runtime tools beside "create".
+    shell.networkTools = node('div', { className: 'page-heading-tools', children: ['managedNetworkRuntimeStatusBtn', 'repairManagedNetworkRuntimeBtn', 'reloadManagedNetworkRuntimeBtn'].map((id) => app.$(id)).filter(Boolean) });
+    shell.heading.appendChild(node('div', { className: 'page-heading-actions', children: [shell.networkTools, shell.create] }));
     shell.content.appendChild(shell.heading);
     Array.from(root.children).forEach((child) => {
       if (child === shell.sidebar || child === oldHeader) return;
@@ -256,13 +414,21 @@
     const tab = app.state.activeTab || 'rules';
     const cfg = configForTab(tab);
     const title = pageTitle();
-    shell.breadcrumb.replaceChildren(node('span', { text: text(groupKey(tab)) }), node('span', { className: 'breadcrumb-separator', text: '/' }), node('strong', { text: title }));
-    app.$('pageTitle').textContent = title;
-    app.$('pageEyebrow').textContent = text(groupKey(tab));
-    app.$('pageDescription').textContent = text('patchbay.desc.' + (cfg ? cfg.state : tab === 'diagnostics' ? 'diagnostics' : 'plugins'));
+    // A managed network's detail view is its own page: its name is the title and the list KPIs step aside.
+    const network = tab === 'managed-networks' && selectedNetworkID ? (app.state.managedNetworks.data || []).find((entry) => Number(entry.id) === selectedNetworkID) : null;
+    const crumbs = [node('span', { text: text(groupKey(tab)) }), node('span', { className: 'breadcrumb-separator', text: '/' })];
+    if (network) crumbs.push(node('span', { text: title }), node('span', { className: 'breadcrumb-separator', text: '/' }));
+    crumbs.push(node('strong', { text: network ? network.name || network.bridge || '#' + network.id : title }));
+    shell.breadcrumb.replaceChildren(...crumbs);
+    app.$('pageTitle').textContent = network ? network.name || network.bridge || '#' + network.id : title;
+    app.$('pageEyebrow').textContent = network ? title : text(groupKey(tab));
+    app.$('pageDescription').textContent = network ? [network.bridge, network.ipv4_cidr, network.ipv6_parent_prefix].filter(Boolean).join(' · ') : text('patchbay.desc.' + (cfg ? cfg.state : tab === 'diagnostics' ? 'diagnostics' : 'plugins'));
+    app.$('pageDescription').classList.toggle('mono', !!network);
+    shell.kpis.hidden = !!network;
     shell.heading.className = 'page-heading' + (cfg ? ' resource-' + cfg.color : '');
     shell.heading.hidden = tab.startsWith('plugin-');
     shell.create.hidden = !cfg || (tab === 'managed-networks' && selectedNetworkID > 0);
+    shell.networkTools.hidden = tab !== 'managed-networks' || selectedNetworkID > 0;
     if (cfg) shell.create.textContent = text('patchbay.create.' + cfg.state);
     document.querySelectorAll('.tabs .tab').forEach((button) => {
       const id = button.dataset.tab;
@@ -281,9 +447,8 @@
       if (count !== null) button.appendChild(node('span', { className: 'nav-count', text: Number(count).toLocaleString() }));
     });
     if (cfg) {
-      const rows = app.state[cfg.state].data || [];
-      const values = [rows.length, rows.filter((item) => tone(item) === 'live').length, rows.filter((item) => tone(item) === 'attention').length, rows.filter((item) => tone(item) === 'off').length];
-      shell.kpis.replaceChildren(...['total', 'live', 'attention', 'off'].map((key, index) => node('div', { className: 'kpi', children: [node('span', { text: text('patchbay.status.' + key) }), node('strong', { text: values[index].toLocaleString() })] })));
+      renderKPIs(cfg);
+      sampleTraffic(cfg);
     }
     const caps = app.state.kernelRuntime && app.state.kernelRuntime.data && app.state.kernelRuntime.data.kernel_capabilities;
     const host = app.hostSummary || caps || {};
@@ -293,7 +458,7 @@
     app.$('hostPlatform').textContent = platform || '—';
     app.$('hostKernel').textContent = host.kernel_release || '—';
     app.$('hostKernel').title = host.kernel_release || '';
-    app.$('hostUptime').textContent = Number.isFinite(host.uptime_seconds) ? text('patchbay.uptime', { days: Math.floor(host.uptime_seconds / 86400), hours: Math.floor(host.uptime_seconds % 86400 / 3600) }) : '';
+    app.$('hostUptime').textContent = Number.isFinite(host.uptime_seconds) ? text('patchbay.uptimeValue', { days: Math.floor(host.uptime_seconds / 86400), hours: Math.floor(host.uptime_seconds % 86400 / 3600) }) : '—';
     if (activeDrawer) updatePreview(activeDrawer);
   }
 
@@ -328,7 +493,8 @@
       cancel.classList.add('drawer-cancel');
       cancel.addEventListener('click', (event) => { event.preventDefault(); event.stopImmediatePropagation(); requestCloseDrawer(); }, true);
       cfg.footer.append(cancel, submit);
-      shell.drawerPanel.appendChild(cfg.footer);
+      // The footer lives at the end of the scrolling body and sticks to the bottom, so a short form keeps its buttons close.
+      shell.drawerBody.appendChild(cfg.footer);
       cfg.element.querySelectorAll('.form-actions').forEach((el) => el.closest('.form-row').remove());
       organizeEditor(cfg);
       cfg.element.querySelectorAll('.form-group').forEach((group) => {
@@ -339,6 +505,7 @@
       });
       cfg.element.addEventListener('input', () => updatePreview(cfg));
       cfg.element.addEventListener('change', () => updatePreview(cfg));
+      cfg.element.addEventListener('toggle', () => balanceEditorRows(cfg), true);
       cfg.element.addEventListener('invalid', (event) => {
         const details = event.target.closest('details');
         if (details) details.open = true;
@@ -442,8 +609,20 @@
     openDrawer(cfg);
   }
 
+  // In two-column editor rows, an odd last visible field takes the full row instead of sitting alone at half width.
+  function balanceEditorRows(cfg) {
+    if (!cfg.element) return;
+    cfg.element.querySelectorAll('.form-row').forEach((row) => {
+      const visible = Array.from(row.children).filter((child) => { child.classList.remove('is-full-row'); return child.getClientRects().length > 0; });
+      if (getComputedStyle(row).gridTemplateColumns.split(' ').length !== 2) return;
+      const spanning = visible.filter((child) => getComputedStyle(child).gridColumnStart === '1' && getComputedStyle(child).gridColumnEnd === '-1').length;
+      if ((visible.length - spanning) % 2 === 1) visible.filter((child) => getComputedStyle(child).gridColumnEnd !== '-1').pop().classList.add('is-full-row');
+    });
+  }
+
   function updatePreview(cfg) {
     if (!cfg.preview) return;
+    balanceEditorRows(cfg);
     if (cfg.protocolControl) cfg.protocolControl.segmented.querySelectorAll('button').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.value === cfg.protocolControl.select.value)));
     const build = app['build' + cfg.stem + 'FromForm'];
     let draft = {};
@@ -468,7 +647,7 @@
     const headers = [];
     if (select) headers.push(node('th', { className: 'cell-select', children: [select] }));
     const sortKeys = { status: 'status', name: cfg.state === 'sites' ? 'domain' : cfg.state === 'managedNetworks' ? 'name' : cfg.state === 'egressNATs' ? 'parent_interface' : 'remark', route: cfg.state === 'sites' ? 'listen_ip' : ['managedNetworks', 'egressNATs', 'ipv6Assignments'].includes(cfg.state) ? 'id' : 'in_ip', protocol: 'protocol' };
-    ['status', 'name', 'route', 'protocol', 'actions'].forEach((key) => {
+    ['status', 'name', 'route'].concat(cfg.stats ? ['traffic'] : [], ['protocol', 'actions']).forEach((key) => {
       const th = node('th', { className: 'resource-' + key, attrs: { scope: 'col' } });
       const sort = sortKeys[key];
       if (sort) {
@@ -494,29 +673,54 @@
       const status = cells[cells.length - 2];
       status.className = 'resource-status';
       status.dataset.label = text('patchbay.column.status');
-      const name = node('div', { className: 'resource-name-content', children: [node('strong', { className: 'mono', text: item.remark || item.name || item.domain || '#' + item.id }), node('span', { className: 'resource-id mono', text: '#' + item.id })] });
-      if (cfg.state === 'managedNetworks') {
-        const link = node('button', { className: 'network-detail-link mono', text: item.name || item.bridge || '#' + item.id, attrs: { type: 'button' } });
-        link.addEventListener('click', () => openNetworkDetail(item.id));
-        name.firstChild.replaceWith(link);
-      }
-      if (item.domain && item.remark) name.appendChild(node('span', { className: 'mono', text: item.domain }));
-      if (item.tag && typeof app.createTagBadgeNode === 'function') name.appendChild(app.createTagBadgeNode(cfg.state, item.tag, app.state[cfg.state].filterTag === item.tag));
+      // Name cell: a fixed first line (name, id, tag) and at most one second line, the runtime
+      // reason when there is one, otherwise a single line of detail tags. Rows never exceed two lines.
+      const label = item.remark || item.name || item.domain || '';
+      const title = cfg.state === 'managedNetworks'
+        ? node('button', { className: 'network-detail-link mono', text: item.name || item.bridge || '#' + item.id, attrs: { type: 'button', title: item.name || item.bridge || '#' + item.id } })
+        : node('strong', { className: 'mono', text: label || '#' + item.id, attrs: { title: label || '#' + item.id } });
+      if (cfg.state === 'managedNetworks') title.addEventListener('click', () => openNetworkDetail(item.id));
+      const firstLine = node('div', { className: 'resource-name-line', children: [title] });
+      if (label) firstLine.appendChild(node('span', { className: 'resource-id mono', text: '#' + item.id }));
+      if (item.tag && typeof app.createTagBadgeNode === 'function') firstLine.appendChild(app.createTagBadgeNode(cfg.state, item.tag, app.state[cfg.state].filterTag === item.tag));
+      const name = node('div', { className: 'resource-name-content', children: [firstLine] });
       const reason = item.runtime_error || item.runtime_detail || item.ipv4_runtime_detail || item.ipv6_runtime_detail || item.fallback_reason || item.kernel_reason;
-      if (reason) name.appendChild(node('span', { className: 'resource-reason' + (item.runtime_error ? ' is-error' : state === 'attention' ? ' is-warning' : ''), text: reason }));
-      const details = node('details', { className: 'resource-details', children: [node('summary', { text: text('patchbay.details') })] });
-      if (cfg.state === 'managedNetworks') cells.slice(4, cells.length - 2).forEach((cell) => details.appendChild(node('div', { children: Array.from(cell.childNodes) })));
-      const meta = [item.out_source_ip || item.backend_source_ip ? text('form.outSourceIP') + ': ' + (item.out_source_ip || item.backend_source_ip) : '', item.transparent ? text('form.transparent') : '', item.nat_type || '', item.quic ? 'HTTP/3 (UDP 443)' : ''].filter(Boolean);
-      meta.forEach((value) => details.appendChild(node('p', { className: 'mono', text: value })));
-      if (details.children.length > 1) name.appendChild(details);
+      const meta = [item.domain && item.remark ? item.domain : '', item.out_source_ip || item.backend_source_ip ? text('form.outSourceIP') + ' ' + (item.out_source_ip || item.backend_source_ip) : '', item.transparent ? text('form.transparent') : '', item.nat_type || '', item.quic ? 'HTTP/3' : ''];
+      if (cfg.state === 'managedNetworks') {
+        // Tags come from the network itself; the CIDR is already in the route, so it is not repeated.
+        const children = Array.isArray(item.child_interfaces) ? item.child_interfaces.length : Number(item.child_interface_count) || 0;
+        meta.push(text('managedNetwork.list.targets') + ' ' + children);
+        if (item.ipv4_enabled !== false && (item.ipv4_pool_start || item.ipv4_pool_end)) meta.push('DHCPv4');
+        if (item.ipv6_enabled !== false) meta.push('IPv6 ' + (item.ipv6_assignment_mode === 'prefix_64' ? '/64' : '/128'));
+        if (item.auto_egress_nat !== false && item.generated_egress_nat) meta.push(text('managedNetwork.form.autoEgressNAT'));
+        if (item.remark) meta.push(item.remark);
+      }
+      const tags = meta.filter((value) => value && value !== '-' && value !== '—');
+      if (reason) {
+        name.appendChild(node('span', { className: 'resource-reason' + (item.runtime_error ? ' is-error' : state === 'attention' ? ' is-warning' : ''), text: reason, attrs: { title: [reason].concat(tags).join('\n') } }));
+      } else if (tags.length) {
+        name.appendChild(node('div', { className: 'resource-meta', attrs: { title: tags.join('\n') }, children: tags.map((value) => node('span', { className: 'resource-meta-tag', text: value })) }));
+      }
       const actions = cells[cells.length - 1];
       actions.classList.add('resource-actions');
       actions.dataset.label = text('common.actions');
       const edit = actions.querySelector('button[class*="btn-edit"]');
-      if (edit) { edit.classList.add('mini-btn', 'quick-edit'); actions.prepend(edit); }
+      if (edit) {
+        edit.classList.add('mini-btn', 'quick-edit');
+        iconOnly(edit, ICON_EDIT, text('common.edit'));
+        actions.prepend(edit);
+      }
+      actions.replaceChildren(node('div', { className: 'row-actions', children: Array.from(actions.childNodes) }));
       const output = [];
       if (cfg.state === 'rules') output.push(cells[0]);
-      output.push(status, app.createCell(name, 'resource-name'), app.createCell(routeNode(cfg, item), 'resource-route'), app.createCell(String(item.protocol || (cfg.state === 'sites' ? (item.quic ? 'HTTP · H3' : 'HTTP · TLS') : cfg.state === 'ipv6Assignments' ? 'IPv6' : 'IPv4 / IPv6')).toUpperCase(), 'resource-protocol'), actions);
+      const route = routeNode(cfg, item);
+      output.push(status, app.createCell(name, 'resource-name'), app.createCell(route, 'resource-route'));
+      if (cfg.stats) {
+        const flow = trafficNode(cfg, item);
+        route.classList.toggle('is-flowing', flow.classList.contains('is-flowing'));
+        output.push(app.createCell(flow, 'resource-traffic'));
+      }
+      output.push(app.createCell(String(item.protocol || (cfg.state === 'sites' ? (item.quic ? 'HTTP · H3' : 'HTTP · TLS') : cfg.state === 'ipv6Assignments' ? 'IPv6' : 'IPv4 / IPv6')).toUpperCase(), 'resource-protocol'), actions);
       row.replaceChildren(...output);
     });
     renderChips(cfg);
@@ -530,7 +734,7 @@
     shell.leaseList = app.$('managedNetworkReservationsTable').closest('section');
     shell.deviceList = app.$('managedNetworkReservationCandidatesTable').closest('section');
     const back = node('button', { className: 'mini-btn', text: text('patchbay.network.back'), dataset: { i18n: 'patchbay.network.back' }, attrs: { type: 'button' } });
-    back.addEventListener('click', () => { selectedNetworkID = 0; shell.networkDetail.hidden = true; shell.networkList.hidden = false; shell.create.hidden = false; shell.networkList.querySelector('.network-detail-link')?.focus(); });
+    back.addEventListener('click', () => { selectedNetworkID = 0; shell.networkDetail.hidden = true; shell.networkList.hidden = false; shell.create.hidden = false; shell.networkTools.hidden = false; renderShell(); shell.networkList.querySelector('.network-detail-link')?.focus(); });
     shell.networkTitle = node('h2', { className: 'mono' });
     shell.networkTabs = node('div', { className: 'network-subtabs', attrs: { role: 'tablist', 'aria-label': text('patchbay.networkDetails') } });
     shell.networkOverview = node('div', { className: 'network-overview', attrs: { role: 'tabpanel', id: 'networkDetail-overview' } });
@@ -540,7 +744,7 @@
     shell.deviceList.setAttribute('role', 'tabpanel');
     const add = node('button', { className: 'mini-btn', text: text('managedNetworkReservation.form.title.add'), dataset: { i18n: 'managedNetworkReservation.form.title.add' }, attrs: { type: 'button', id: 'addNetworkReservationBtn' } });
     add.addEventListener('click', () => startCreate(reservation));
-    shell.leaseList.prepend(add);
+    shell.leaseList.querySelector('.table-toolbar').appendChild(add);
     shell.networkDetail = node('div', { className: 'network-detail', attrs: { hidden: '' }, children: [back, shell.networkTitle, shell.networkTabs, shell.networkOverview, shell.leaseList, shell.deviceList] });
     panel.appendChild(shell.networkDetail);
   }
@@ -552,14 +756,16 @@
     shell.networkList.hidden = true;
     shell.networkDetail.hidden = false;
     shell.create.hidden = true;
+    shell.networkTools.hidden = true;
     renderNetworkDetail();
     app.renderManagedNetworkReservationsTable();
     app.renderManagedNetworkReservationCandidatesTable();
+    renderShell();
     shell.networkTabs.querySelector('button').focus();
   }
   function renderNetworkDetail() {
     const item = (app.state.managedNetworks.data || []).find((entry) => Number(entry.id) === selectedNetworkID);
-    if (!item) { selectedNetworkID = 0; shell.networkDetail.hidden = true; shell.networkList.hidden = false; return; }
+    if (!item) { selectedNetworkID = 0; shell.networkDetail.hidden = true; shell.networkList.hidden = false; renderShell(); return; }
     shell.networkTitle.textContent = item.name || item.bridge || '#' + item.id;
     shell.networkTabs.replaceChildren(...['overview', 'leases', 'devices'].map((key, index) => {
       const button = node('button', { text: text('patchbay.network.' + key), attrs: { type: 'button', role: 'tab', id: 'networkDetail-tab-' + key, 'aria-controls': 'networkDetail-' + key, 'aria-selected': String(networkSubview === key), tabindex: networkSubview === key ? '0' : '-1' } });
@@ -711,11 +917,20 @@
   });
   wrap('refreshLocalizedUI', () => {
     renderSettings();
+    if (typeof app.renderManagedNetworkRuntimeStatusButton === 'function' && app.state.managedNetworkRuntimeReloadStatus) app.renderManagedNetworkRuntimeStatusButton();
     document.querySelectorAll('.tabs .tab').forEach((button) => { delete button.dataset.pageTitle; });
     renderShell();
     if (selectedNetworkID) renderNetworkDetail();
   });
   wrap('applyTheme', renderSettings);
+  // The runtime "button" only reveals details on hover/focus, so it reads as a status line:
+  // a tone dot, a "Runtime" label and the current state; the detail popover stays on the element.
+  wrap('renderManagedNetworkRuntimeStatusButton', () => {
+    const button = app.el.managedNetworkRuntimeStatusBtn;
+    if (!button) return;
+    const value = button.textContent;
+    button.replaceChildren(node('span', { className: 'runtime-status-label', text: text('patchbay.runtime') }), node('span', { className: 'runtime-status-value', text: value }));
+  });
   const originalActivate = app.activateTab;
   app.activateTab = function (target, options) {
     if (!/^[a-z0-9_-]+$/.test(target || '')) return;

@@ -86,7 +86,8 @@ select {
     margin-bottom: 16px;
 }
 
-.modal-content button {
+/* Zero specificity so classed dialog buttons (menu items, close, cancel) keep their own layout. */
+:where(.modal-content) button {
     width: 100%;
     justify-content: center;
 }

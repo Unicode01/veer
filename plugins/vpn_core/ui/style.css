@@ -1,4 +1,4 @@
-.vpn-page { padding: 20px; max-width:1160px; margin:0 auto; }
+.vpn-page { padding: 0 0 4px; }
 .vpn-page *, .vpn-page *::before, .vpn-page *::after { box-sizing:border-box; }
 .vpn-page [hidden] { display:none !important; }
 .vpn-header, .vpn-heading, .vpn-actions, .vpn-card-top { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
@@ -49,7 +49,7 @@
 .vpn-page .veer-button { min-height:34px; }
 .vpn-subsection { border-top:1px solid var(--veer-border); padding-top:20px; margin-top:22px; }
 .vpn-subsection > .veer-field { margin-top:16px; }
-.vpn-peer { padding:16px; border-radius: var(--veer-radius-lg); background:var(--veer-surface-soft); margin-bottom:12px; }
+.vpn-peer { padding:16px; border:1px solid var(--veer-border); border-radius: var(--veer-radius-lg); background:transparent; margin-bottom:12px; }
 .vpn-peer .vpn-heading { margin-bottom:14px; }
 .vpn-peer .vpn-heading h3 { font-size: var(--veer-fs-sm); margin:0; }
 .vpn-subtle { color:var(--veer-muted); font-size: var(--veer-fs-sm); line-height:1.7; }

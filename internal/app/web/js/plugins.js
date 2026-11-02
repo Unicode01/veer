@@ -1751,9 +1751,58 @@ select.veer-input {
 .veer-input[type="checkbox"]:checked:focus {
   background: var(--veer-primary);
 }
+/* Patchbay page grammar: top-level cards are panels on the host canvas; anything nested inside a panel is flat. */
+.veer-page { padding: 0 0 4px; }
+.veer-stack { gap: 16px; }
+.veer-context { display: flex; align-items: center; gap: 12px; padding: 0; border: 0; }
+.veer-context .veer-desc { margin: 0; font-size: var(--veer-fs-md); }
+.veer-card { padding: 20px; border-radius: var(--veer-radius-lg); }
+.veer-card > * + * { margin-top: 14px; }
+.veer-card > .veer-title:first-child, .veer-card > .veer-toolbar:first-child { padding-bottom: 12px; border-bottom: 1px solid var(--veer-border); }
+.veer-card .veer-card { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.veer-card .veer-card + .veer-card { padding-top: 16px; border-top: 1px solid var(--veer-border); }
+.veer-title { font-size: var(--veer-fs-lg); font-weight: 600; letter-spacing: -0.01em; }
+.veer-desc { color: var(--veer-muted); font-size: var(--veer-fs-sm); line-height: 1.55; }
+.veer-field { gap: 6px; }
+.veer-field label, .veer-field > span:first-child { color: var(--veer-muted); font-size: var(--veer-fs-sm); font-weight: 500; letter-spacing: 0; text-transform: none; }
+.veer-grid:has(> .veer-stat) { gap: 16px 24px; padding: 0; border: 0; }
+.veer-grid > .veer-stat { padding: 0; gap: 4px; border: 0; }
+.veer-stat-label { color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .08em; }
+.veer-stat-value { font-family: var(--veer-sans); font-size: var(--veer-fs-base); font-weight: 600; font-variant-numeric: tabular-nums; }
+.veer-record-picker { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); align-items: end; }
+:root .veer-toolbar .veer-button { flex: 0 0 auto; }
+:root details { border-top: 1px solid var(--veer-border); padding: 0; }
+:root details > summary { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0; color: var(--veer-text); font-size: var(--veer-fs-md); font-weight: 500; list-style: none; cursor: pointer; }
+:root details > summary::-webkit-details-marker { display: none; }
+:root details > summary::before { content: ""; width: 6px; height: 6px; margin: 0 2px; border-right: 1.5px solid var(--veer-muted); border-bottom: 1.5px solid var(--veer-muted); transform: rotate(-45deg); transition: transform .15s ease; }
+:root details[open] > summary::before { transform: rotate(45deg); }
+:root details > summary:hover::before { border-color: var(--veer-text); }
+:root details[open] > summary { margin-bottom: 4px; }
+:root details[open] { padding-bottom: 16px; }
+.veer-badge { min-height: 20px; padding: 0 6px; border-radius: var(--veer-radius); background: transparent; color: var(--veer-muted); font: 500 var(--veer-fs-xs) var(--veer-mono); }
+.veer-status { gap: 6px; min-height: 22px; border: 0; }
+.veer-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.veer-status[data-tone="off"] { background: var(--veer-off-bg); color: var(--veer-muted); }
+.veer-status[data-tone="warn"] { background: var(--veer-warn-bg); color: var(--veer-warn); }
+.veer-status[data-tone="error"] { background: var(--veer-danger-soft); color: var(--veer-danger); }
+.veer-table { border: 0; border-radius: 0; background: transparent; }
+.veer-table th { padding: 10px; background: transparent; color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.veer-table td { padding: 12px 10px; font-size: var(--veer-fs-md); }
+.veer-table tbody tr:hover td { background: var(--veer-surface-soft); }
+.veer-collection-row { padding: 12px 44px 12px 12px; background: transparent; }
+.veer-empty { padding: 40px 16px; }
+.veer-collection-empty { padding: 4px 0; border: 0; border-radius: 0; background: transparent; color: var(--veer-muted); font-size: var(--veer-fs-sm); }
+.veer-button { font-weight: 500; font-size: var(--veer-fs-md); padding: 0 12px; }
+.veer-button.secondary { color: var(--veer-text); border-color: var(--veer-border-strong); }
+.veer-button.secondary:hover, .veer-button.secondary:focus { color: var(--veer-text); }
+.veer-input { font-size: var(--veer-fs-md); border-color: var(--veer-border-strong); }
+.veer-input:focus { border-color: var(--veer-muted); box-shadow: 0 0 0 3px var(--veer-primary-soft); }
 @media (max-width: 720px) {
-  .veer-page { padding: 20px; }
+  .veer-page { padding: 0 0 4px; }
+  .veer-card { padding: 16px; }
+
   .veer-grid { grid-template-columns: 1fr; }
+  .veer-grid:has(> .veer-stat) { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
   .veer-toolbar { align-items: flex-start; }
   .veer-collection-field.wide { grid-column: span 1; }
 }
@@ -2112,8 +2161,20 @@ select.veer-input {
   host.badge = function (text, title) {
     return host.h('span', { className: host.classes.badge, text: text, title: title || '' });
   };
+  // The pill's tone follows its text, and keeps following it when a page rewrites the label later.
+  function statusTone(value) {
+    var text = String(value || '').toLowerCase();
+    if (/error|fail|invalid|conflict|失败|错误|异常|冲突/.test(text)) return 'error';
+    if (/warn|degrad|retry|partial|警告|降级|重试/.test(text)) return 'warn';
+    if (/not[ _]configured|idle|disabled|stopped|inactive|pending|unknown|ing$|空闲|未|已停止|已禁用|已拆除|中$/.test(text)) return 'off';
+    return 'live';
+  }
   host.status = function (text) {
-    return host.h('span', { className: host.classes.status, text: text || '' });
+    var node = host.h('span', { className: host.classes.status, text: String(text || '').replace(/_/g, ' ') });
+    var sync = function () { node.setAttribute('data-tone', statusTone(node.textContent)); };
+    sync();
+    if (typeof MutationObserver === 'function') new MutationObserver(sync).observe(node, { childList: true, characterData: true, subtree: true });
+    return node;
   };
   Object.defineProperty(host, 'locale', {
     enumerable: true,
@@ -2643,6 +2704,8 @@ select.veer-input {
   function setPluginFrameHeight(iframe, height) {
     const value = Math.ceil(Number(height) || 0);
     if (!iframe || value <= 0) return;
+    // The first height report means the page has rendered; the host placeholder can step aside.
+    if (iframe.dataset) iframe.dataset.ready = '1';
     iframe.style.height = Math.min(Math.max(value + 2, 180), 6000) + 'px';
   }
 
@@ -3797,6 +3860,7 @@ select.veer-input {
       return;
     }
     panel.dataset.loaded = 'loading';
+    if (iframe.dataset) iframe.dataset.ready = '';
     setPluginPageLoadingState(page.tabID, true);
     try {
       const html = await fetchDecoratedPluginHTML(page.plugin, page.entry);
@@ -3804,8 +3868,11 @@ select.veer-input {
       preparePluginFrame(iframe, page.plugin, page.entry);
       iframe.src = 'about:blank';
       iframe.srcdoc = html;
+      // A page that never reports its height still appears.
+      if (typeof setTimeout === 'function') setTimeout(() => { if (iframe.dataset && iframe.dataset.ready === '') iframe.dataset.ready = '1'; }, 4000);
     } catch (e) {
       panel.dataset.loaded = '';
+      if (iframe.dataset) iframe.dataset.ready = '1';
       if (e.message !== 'unauthorized') {
         app.notify('error', app.t('plugins.openFailed', { message: e.message || String(e) }));
       }

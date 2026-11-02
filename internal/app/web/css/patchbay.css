@@ -1,0 +1,332 @@
+/* Patchbay craft layer. Loaded last: page hierarchy, live traffic and quieter row chrome. */
+
+/* Page header: one clear title, a jacket-coloured eyebrow and a single primary action. */
+.page-heading { align-items: flex-end; margin-bottom: 28px; }
+.page-heading h1 { margin: 10px 0 6px; font-size: 32px; font-weight: 600; line-height: 1.15; letter-spacing: -.025em; }
+.page-eyebrow { font-size: var(--fs-xs); font-weight: 600; letter-spacing: .14em; text-transform: uppercase; }
+.page-eyebrow::before { width: 9px; height: 9px; box-shadow: inset 0 0 0 2px var(--bg); outline: 1px solid currentColor; outline-offset: -1px; }
+.page-description { max-width: 60ch; font-size: var(--fs-base); }
+#createResourceBtn { gap: 8px; padding: 6px 14px 6px 12px; }
+#createResourceBtn::before { content: '+'; font: 400 18px/1 var(--font-ui); margin-top: -2px; }
+
+/* KPI strip: live throughput leads, counts follow. Hairlines only, no cards. */
+.kpi-strip { grid-template-columns: minmax(0, 1.8fr) repeat(3, minmax(0, 1fr)); padding: 0; }
+.kpi { align-content: center; gap: 6px; padding: 18px 24px; }
+.kpi-head { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.kpi-label { flex: none; color: var(--ink-2); font-size: var(--fs-sm); }
+.kpi-detail { min-width: 0; overflow: hidden; color: var(--ink-3); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
+.kpi > .kpi-value { font: 500 28px/1.2 var(--font-mono); letter-spacing: -.03em; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi-alert > .kpi-value { color: var(--warn); }
+.kpi-hero { grid-template-columns: minmax(0, 1fr) auto; column-gap: 20px; }
+.kpi-hero > :not(svg) { grid-column: 1; }
+.kpi-hero > .sparkline { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+
+/* Sparklines take the resource's jacket colour; idle ones fall back to the off tone. */
+.sparkline { display: block; flex: none; overflow: visible; }
+.spark-base { fill: none; stroke: var(--line); stroke-width: 1; }
+.spark-area { fill: var(--cable, var(--ink-2)); opacity: .12; }
+.spark-line { fill: none; stroke: var(--cable, var(--ink-2)); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.spark-dot { fill: var(--cable, var(--ink-2)); }
+.sparkline:not(.is-live) .spark-area { fill: var(--off); opacity: .08; }
+.sparkline:not(.is-live) .spark-line { stroke: var(--off); }
+.sparkline:not(.is-live) .spark-dot { fill: var(--off); }
+
+/* Resource rows */
+.patchbay .resource-table th { padding: 12px 10px; color: var(--ink-3); letter-spacing: .08em; }
+/* Cells are vertically centred: a single-line value sits in the middle of a row that grew
+   because another cell has two lines (name + tags, or a wrapped route), so no row is top-heavy. */
+.patchbay .resource-table td { padding: 12px 10px; vertical-align: middle; }
+.patchbay .resource-table tbody tr { transition: background-color .12s var(--ease); }
+.patchbay .resource-table .cell-select input { display: block; margin: 0; }
+.resource-table .resource-status { line-height: 28px; }
+.resource-table .resource-status .badge { vertical-align: middle; }
+/* Short values never wrap. A row is at most two lines: the name cell's single second line, or a
+   route breaking between its two labels on narrow screens. */
+.patchbay .resource-table td:is(.resource-status, .resource-protocol, .resource-traffic, .resource-actions) { white-space: nowrap; }
+.resource-name-content { display: grid; gap: 4px; min-width: 0; }
+.resource-name-line { display: flex; align-items: center; gap: 6px; min-width: 0; line-height: 20px; }
+.resource-name-line > strong, .resource-name-line > .network-detail-link { min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.resource-name-line > :not(strong):not(.network-detail-link) { flex: none; }
+.resource-id { color: var(--ink-3); }
+.resource-reason { display: block; min-width: 0; overflow: hidden; font-size: var(--fs-xs); line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+/* One line of tags; tags that do not fit drop out of view and stay readable in the tooltip. */
+.resource-meta { display: flex; flex-wrap: wrap; gap: 4px; height: 20px; min-width: 0; overflow: hidden; }
+.resource-meta-tag { max-width: 220px; overflow: hidden; padding: 0 6px; border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-2); font: 400 var(--fs-xs)/18px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.resource-table .resource-route .patch-route { min-height: 28px; }
+.resource-table .resource-protocol { color: var(--ink-2); line-height: 28px; white-space: nowrap; }
+.resource-table .resource-traffic { width: 176px; white-space: nowrap; }
+.traffic { display: flex; align-items: center; gap: 10px; min-height: 28px; }
+.traffic-rate { min-width: 76px; color: var(--ink); font-size: var(--fs-sm); text-align: right; white-space: nowrap; }
+.traffic-rate.is-idle { color: var(--ink-3); }
+
+/* Cables carry a moving dash while traffic flows. */
+.patch-route.is-flowing .patch-cable { background: repeating-linear-gradient(90deg, var(--cable) 0 6px, transparent 6px 10px); background-size: 10px 2px; animation: cable-flow .8s linear infinite; }
+@keyframes cable-flow { to { background-position: 10px 0; } }
+
+/* Row actions: two quiet 28px icon buttons (edit, more), always on one line. */
+.resource-table .resource-actions { width: 76px; white-space: nowrap; }
+.row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-height: 28px; }
+.patchbay .resource-actions .icon-only, .patchbay .resource-actions .action-dropdown-trigger { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; min-height: 28px; margin: 0; padding: 0; border: 1px solid transparent; border-radius: var(--r-md); background: transparent; color: var(--ink-2); }
+.patchbay .resource-actions .icon-only:hover, .patchbay .resource-actions .icon-only:focus-visible { color: var(--ink); background: var(--accent-soft); border-color: transparent; }
+.resource-actions .action-dropdown-trigger { font-size: 0; letter-spacing: 0; }
+.resource-actions .action-dropdown-trigger::before { content: '\2022\2022\2022'; font-size: 7px; letter-spacing: 2px; margin-right: -2px; }
+.resource-actions .action-dropdown-trigger:hover, .resource-actions .action-dropdown-trigger:focus-visible, .resource-actions .action-dropdown-trigger[aria-expanded='true'] { color: var(--ink); background: var(--accent-soft); border-color: transparent; }
+
+/* Sidebar: quieter group labels, a live host dot, firmer current item. */
+.nav-group { color: var(--ink-3); font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; }
+.patchbay .tab.active { font-weight: 600; }
+.host-card strong { display: flex; align-items: center; gap: 8px; }
+.host-card strong::before { content: ''; width: 7px; height: 7px; flex: none; border-radius: var(--r-pill); background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); }
+
+@media (max-width: 859px) {
+    .kpi-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .kpi { padding: 16px 16px 16px 0; }
+    .kpi:nth-child(even) { padding-left: 16px; }
+    .kpi:nth-child(n+3) { border-top: 1px solid var(--line); }
+    .kpi-hero > .sparkline { display: none; }
+}
+@media (max-width: 679px) {
+    .patchbay .resource-table td, .patchbay .resource-table .cell-select { padding: 0; }
+    .patchbay .resource-table .cell-select input { margin-top: 6px; }
+    .page-heading h1 { font-size: 26px; }
+    .kpi > .kpi-value { font-size: 22px; }
+    .patchbay .resource-table .resource-traffic { grid-column: 1 / 3; grid-row: 3; align-self: center; width: auto; }
+    .patchbay .resource-table .resource-traffic ~ .resource-actions { grid-column: 3; }
+    .patchbay .resource-table .resource-protocol { display: none; }
+    .traffic .sparkline { display: block; }
+}
+
+/* Column priority: the route never wraps on wide screens; protocol yields first, then the sparkline. */
+@media (min-width: 680px) {
+    .resource-table .resource-route .port-label { flex-wrap: nowrap; white-space: nowrap; }
+    .resource-table .resource-name { max-width: 200px; }
+}
+/* Below 1200px the content column is too narrow for a one-line route plus traffic: the route
+   breaks between its two labels (never inside one) and the sparklines step aside. */
+@media (min-width: 680px) and (max-width: 1199px) {
+    /* Stacked route: inbound label on line one, arrow + outbound label on line two, every row alike. */
+    .resource-table .resource-route .patch-route { display: grid; grid-template-columns: 20px max-content; align-items: center; justify-content: start; row-gap: 4px; }
+    .resource-table .resource-route .patch-route > .port-label:first-child { grid-column: 1 / -1; justify-self: start; }
+    .resource-table .resource-route .patch-cable { width: 14px; }
+    .resource-table .resource-traffic { width: auto; }
+    .traffic .sparkline, .kpi-hero > .sparkline { display: none; }
+    .traffic-rate { min-width: 0; }
+    .resource-name-line > .resource-id { display: none; }
+}
+@media (min-width: 680px) and (max-width: 1365px) {
+    .patchbay .resource-table .resource-protocol { display: none; }
+}
+
+/* Plugin pages use the same page header as resource pages; plugin panels sit directly on the canvas. */
+.patchbay .plugin-page-section { padding: 0; border: 0; border-radius: 0; background: transparent; overflow: visible; }
+.patchbay .plugin-page-toolbar { display: flex; align-items: flex-end; gap: 24px; padding: 0 0 24px; margin: 0; border: 0; }
+.patchbay .plugin-page-toolbar h1 { font-size: 32px; font-weight: 600; line-height: 1.15; letter-spacing: -.025em; }
+.patchbay .plugin-page-title-block { min-width: 0; }
+/* Bundled plugins render a localized context line, so the manifest description (developer-facing) stays out of the header. */
+.patchbay .plugin-page-title-block .section-desc { display: none; }
+.patchbay .plugin-header-meta { margin-top: 12px; }
+.patchbay .plugin-header-meta .badge { border: 0; }
+@media (max-width: 679px) {
+    .patchbay .plugin-page-toolbar { flex-direction: column; align-items: flex-start; gap: 16px; padding: 0 0 20px; }
+    .patchbay .plugin-page-toolbar h1 { font-size: 26px; }
+    .patchbay .plugin-page-toolbar .plugin-header-actions { width: 100%; margin-left: 0; }
+    .patchbay .plugin-page-toolbar .plugin-header-actions > * { flex: 0 0 auto; width: auto; }
+}
+
+/* Top bar: refresh is an icon attached to the sync status it updates. */
+.topbar-sync { display: flex; align-items: center; gap: 2px; }
+.topbar #refreshNowBtn.topbar-refresh { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border: 0; border-radius: var(--r-md); background: transparent; color: var(--ink-2); font-size: 0; cursor: pointer; }
+.topbar #refreshNowBtn.topbar-refresh::before { content: none; }
+.topbar #refreshNowBtn.topbar-refresh:hover { color: var(--ink); background: var(--accent-soft); }
+.topbar #refreshNowBtn.topbar-refresh.is-busy svg { animation: refresh-spin .8s linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
+
+/* Plugin table: state is a dot and a word; stability shows only when it is not the default. */
+.plugin-status-compact { gap: 12px; overflow: visible; }
+.patchbay .plugin-status-compact > * { flex: none; max-width: none; overflow: visible; }
+.plugin-status-compact .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 0; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); font-weight: 500; }
+.plugin-status-compact .badge::before, .plugin-header-meta .badge::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: var(--r-pill); background: currentColor; }
+.plugin-status-compact .badge-kernel, .plugin-status-compact .badge-disabled { color: var(--ink-2); }
+.plugin-stability-badge { min-height: 0; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); font-weight: 500; }
+.plugin-stability-badge.is-stable { display: none; }
+.plugin-stability-badge.is-preview { border: 0; background: transparent; color: var(--ink-2); }
+.plugin-stability-badge.is-lab { border: 0; background: transparent; color: var(--warn); }
+.plugin-stability-badge.is-deprecated { border: 0; background: transparent; color: var(--danger); }
+.patchbay .plugin-status-compact .plugin-detail-trigger { min-height: 0; padding: 0; border: 0; background: transparent; color: var(--ink-2); font-size: var(--fs-sm); font-weight: 400; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.patchbay .plugin-status-compact .plugin-detail-trigger:hover { color: var(--ink); text-decoration-color: currentColor; }
+
+/* Plugin header: actions align with the title and share one control height. */
+.patchbay .plugin-page-toolbar { align-items: flex-start; }
+.patchbay .plugin-header-actions { margin-top: 2px; }
+.patchbay .plugin-header-actions button { height: var(--h-ctl); min-height: var(--h-ctl); padding: 0 14px; border-radius: var(--r-md); font-size: var(--fs-md); font-weight: 500; }
+.patchbay .plugin-header-actions .mini-btn { border-color: var(--line-strong); background: var(--surface); color: var(--ink); }
+.patchbay .plugin-header-actions .mini-btn:hover { background: var(--surface-2); color: var(--ink); }
+.patchbay .plugin-header-meta { gap: 8px; color: var(--ink-2); }
+.patchbay .plugin-header-meta .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 0; padding: 0; border: 0; background: transparent; font: 500 var(--fs-sm) var(--font-ui); }
+.patchbay .plugin-header-meta > span + span::before { content: '·'; margin-right: 8px; color: var(--ink-3); }
+
+/* Drawer editor: an endpoint reads interface | address | port on one line, ports get a fixed
+   narrow column, and checkboxes always take a full row so no field sits alone at half width. */
+/* Endpoint rows: the interface takes its own row, then address and a fixed port column. */
+.drawer-form .form-row:has(#inPort), .drawer-form .form-row:has(#outPort), .drawer-form .form-row:has(#rangeOutStartPort) { grid-template-columns: minmax(0, 1fr) 112px; }
+.drawer-form .form-row:has(#inPort) > :first-child, .drawer-form .form-row:has(#outPort) > :first-child, .drawer-form .form-row:has(#rangeOutStartPort) > :first-child { grid-column: 1 / -1; }
+/* Site backend: the address takes its own row, the two ports share the next, so no placeholder is clipped. */
+.drawer-form .form-row:has(#siteBackendHTTP) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.drawer-form .form-row:has(#siteBackendHTTP) > :first-child { grid-column: 1 / -1; }
+.drawer-form .form-row > .form-group-checkbox, .drawer-form .form-group:has(#ruleOutSourceIP), .drawer-form .form-group:has(#siteBackendSourceIP), .drawer-form .form-group:has(#rangeOutSourceIP) { grid-column: 1 / -1; }
+.drawer-form .form-row > .is-full-row { grid-column: 1 / -1; }
+/* forms.css pads checkboxes down 19px to line up with labelled inputs in the same row; in drawers a
+   checkbox always has its own row, so the normal row gap is the only spacing it needs. */
+.drawer-form .form-row > .form-group-checkbox { padding-top: 0; }
+/* One vertical rhythm: rows sit 16px apart, the same as fields that wrap inside a row. */
+.drawer-form .form-row { margin-bottom: 16px; }
+.drawer-form .form-group-checkbox label { display: flex; align-items: center; gap: 8px; min-height: var(--h-ctl); margin: 0; padding: 0; border: 0; background: transparent; color: var(--ink); font-size: var(--fs-md); }
+.segmented-control button[aria-pressed='true'] { color: var(--ink); background: var(--surface); box-shadow: 0 0 0 1px var(--line-strong), 0 1px 2px rgba(0, 0, 0, .12); }
+.drawer-form details.advanced-options { margin: 0 0 20px; padding: 0; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.drawer-form details.advanced-options[open] { padding-bottom: 4px; }
+.drawer-form details.advanced-options > .advanced-options-body { padding: 0 0 8px; }
+.drawer-form details.advanced-options > summary { padding: 0; display: flex; align-items: center; gap: 10px; min-height: 44px; color: var(--ink); font-size: var(--fs-md); font-weight: 500; list-style: none; cursor: pointer; }
+.drawer-form details.advanced-options > summary::-webkit-details-marker { display: none; }
+.drawer-form details.advanced-options > summary::before { content: ''; width: 6px; height: 6px; margin: 0 2px; border-right: 1.5px solid var(--ink-2); border-bottom: 1.5px solid var(--ink-2); transform: rotate(-45deg); transition: transform .15s var(--ease); }
+.drawer-form details.advanced-options[open] > summary::before { transform: rotate(45deg); }
+.drawer-form details.advanced-options > .form-row { padding-top: 4px; }
+@media (max-width: 479px) {
+    .drawer-form .form-row:has(#inPort), .drawer-form .form-row:has(#outPort), .drawer-form .form-row:has(#rangeOutStartPort) { grid-template-columns: minmax(0, 1fr) 88px; }
+    .drawer-form .form-row:has(#inPort) > :first-child, .drawer-form .form-row:has(#outPort) > :first-child, .drawer-form .form-row:has(#rangeOutStartPort) > :first-child { grid-column: 1 / -1; }
+    .drawer-form .form-row:has(#siteBackendHTTP) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .drawer-form .form-row:has(#siteBackendHTTP) > :first-child { grid-column: 1 / -1; }
+}
+
+/* Drawer footer follows the form and sticks to the bottom only when the form is taller than the drawer. */
+.drawer-body { padding-bottom: 0; }
+.drawer-body > .drawer-footer { position: sticky; bottom: 0; z-index: 1; margin: 24px -24px 0; padding: 12px 24px; border-top: 1px solid var(--line); background: var(--surface); }
+.drawer-footer button, .drawer-footer .drawer-cancel { height: var(--h-ctl); min-height: var(--h-ctl); padding: 0 14px; font-size: var(--fs-md); }
+.drawer-form > :last-child, .drawer-form .form-row:last-child { margin-bottom: 0; }
+.drawer-form details.advanced-options:last-child { margin-bottom: 0; border-bottom: 0; }
+@media (max-width: 479px) {
+    .drawer-body > .drawer-footer { margin: 20px -16px 0; padding: 12px 16px; }
+}
+
+/* Page header actions: secondary tools, then the single primary action. */
+.page-heading-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.page-heading-tools { display: flex; align-items: center; gap: 8px; }
+.patchbay .page-heading-tools button { height: var(--h-ctl); min-height: var(--h-ctl); padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); color: var(--ink); font-size: var(--fs-md); font-weight: 500; }
+.patchbay .page-heading-tools button:hover { background: var(--surface-2); }
+@media (max-width: 679px) {
+    .page-heading-actions { flex-wrap: wrap; }
+}
+
+/* Managed network detail: the page header carries the name, so the in-panel heading steps aside
+   and "back" is a quiet text link above the sub-tabs. */
+.network-detail > h2 { display: none; }
+.patchbay .network-detail > .mini-btn { min-height: 0; margin-bottom: 16px; padding: 0; border: 0; background: transparent; color: var(--ink-2); font-size: var(--fs-sm); }
+.patchbay .network-detail > .mini-btn:hover { background: transparent; color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.network-subtabs { gap: 24px; margin-bottom: 16px; }
+.network-subtabs button { min-height: 36px; font-size: var(--fs-md); }
+.network-subtabs button[aria-selected='true'] { font-weight: 600; }
+.network-overview { display: grid; gap: 20px; padding: 20px; }
+.network-overview .patch-route { flex-wrap: nowrap; }
+.network-facts { grid-template-columns: max-content minmax(0, 1fr); gap: 10px 32px; margin: 0; padding-top: 16px; border-top: 1px solid var(--line); }
+.network-facts dd { font-size: var(--fs-md); }
+#networkDetail-leases, #networkDetail-devices { margin: 0; }
+
+/* Lease and device tables inside a network: same row language as the main lists. The network
+   and bridge columns (and the lease id) repeat the page itself, so they step aside. */
+.patchbay .overview-panel:has(> .kpi-strip[hidden]) { margin: 0; }
+.network-detail .rule-list > h2 { display: none; }
+.network-detail .table-toolbar { align-items: center; }
+.patchbay .network-detail #addNetworkReservationBtn { order: 2; height: var(--h-ctl); margin: 0 0 0 auto; padding: 0 12px; border-color: var(--line-strong); color: var(--ink); font-size: var(--fs-md); }
+.network-detail table { width: 100%; min-width: 0; border-collapse: collapse; }
+.network-detail th { padding: 12px 10px; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink-3); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .08em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.network-detail td { height: 53px; padding: 12px 10px; border-bottom: 1px solid var(--line); background: transparent; font-size: var(--fs-md); vertical-align: middle; white-space: nowrap; }
+.network-detail tbody tr:hover td { background: var(--surface-2); }
+.network-detail td:not(.cell-actions) { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+#managedNetworkReservationsTable :is(th, td):nth-child(-n+3), #managedNetworkReservationCandidatesTable :is(th, td):nth-child(-n+2) { display: none; }
+#managedNetworkReservationsTable td:nth-child(4), #managedNetworkReservationsTable td:nth-child(5), #managedNetworkReservationCandidatesTable td:nth-child(5) { font-family: var(--font-mono); }
+.network-detail .cell-actions { width: 48px; text-align: right; }
+.network-detail .action-dropdown-trigger { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border: 1px solid transparent; border-radius: var(--r-md); background: transparent; color: var(--ink-2); font-size: 0; letter-spacing: 0; }
+.network-detail .action-dropdown-trigger::before { content: '\2022\2022\2022'; margin-right: -2px; font-size: 7px; letter-spacing: 2px; }
+.network-detail .action-dropdown-trigger:hover, .network-detail .action-dropdown-trigger[aria-expanded='true'] { color: var(--ink); background: var(--accent-soft); border-color: transparent; }
+.network-detail .table-scroll { overflow-x: auto; }
+.patchbay .network-detail #addNetworkReservationBtn { font-weight: 500; }
+/* Inline empty hints read as quiet text, not as a filled box. */
+.patchbay .empty-hint { padding: 32px 16px; border: 0; background: transparent; text-align: center; }
+.patchbay .empty-hint .empty-title { color: var(--ink-2); font-size: var(--fs-md); font-weight: 400; }
+
+/* Plugin manager: navigation reads as underline tabs (same as network detail), facts keep labels on one line. */
+.plugin-manager-nav { gap: 20px; padding: 0 20px; }
+.plugin-manager-nav-btn { min-height: 40px !important; padding: 0 !important; border: 0 !important; border-bottom: 2px solid transparent !important; border-radius: 0 !important; background: transparent !important; color: var(--ink-2) !important; font-size: var(--fs-md) !important; font-weight: 500 !important; }
+.plugin-manager-nav-btn:hover, .plugin-manager-nav-btn:focus-visible { color: var(--ink) !important; }
+.plugin-manager-nav-btn.is-active { border-bottom-color: var(--ink) !important; color: var(--ink) !important; font-weight: 600 !important; }
+.plugin-manager-fact { grid-template-columns: max-content minmax(0, 1fr); gap: 16px; padding: 10px 12px; }
+.plugin-manager-fact dt { white-space: nowrap; }
+.plugin-manager-fact dd { font-family: var(--font-mono); }
+.plugin-manager-header { padding: 16px 20px 14px; }
+.plugin-manager-body { padding: 16px 20px 20px; }
+.plugin-manager-dialog :is(select, input:not([type='checkbox']):not([type='radio'])) { height: var(--h-ctl) !important; min-height: var(--h-ctl) !important; }
+.plugin-manager-body :is(.mini-btn, .ghost-btn, .btn-cancel) { height: var(--h-ctl); min-height: var(--h-ctl); padding: 0 12px; }
+
+/* Popovers (plugin details, runtime breakdowns): quiet header actions, hairline sections, and
+   label | value rows that read left to right in the UI font. */
+.kernel-runtime-floating-tooltip, .kernel-runtime-floating-tooltip.plugin-detail-popover { padding: 14px 16px; border-color: var(--line-strong); box-shadow: var(--shadow-pop); }
+.kernel-runtime-floating-tooltip.plugin-detail-popover { max-height: min(440px, calc(100vh - 24px)); }
+.plugin-detail-header { gap: 12px; padding-bottom: 12px; border-bottom-color: var(--line); }
+.kernel-runtime-tooltip-title { color: var(--ink); font-size: var(--fs-md); font-weight: 600; }
+.kernel-runtime-tooltip-meta { color: var(--ink-3); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.plugin-detail-header-actions { gap: 2px; }
+.plugin-detail-header-actions .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 0; margin-right: 6px; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); font-weight: 500; }
+.plugin-detail-header-actions .badge::before { content: ''; width: 6px; height: 6px; border-radius: var(--r-pill); background: currentColor; }
+.plugin-detail-header-actions .plugin-stability-badge { min-height: 0; margin-right: 6px; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); }
+.plugin-detail-header-actions .plugin-stability-badge.is-stable { display: none; }
+.plugin-detail-close, .plugin-detail-close.plugin-detail-manage { min-height: 26px; padding: 0 8px; border: 0; border-radius: var(--r-md); background: transparent; color: var(--ink-2); font-size: var(--fs-sm); font-weight: 500; }
+.plugin-detail-close:hover, .plugin-detail-close:focus-visible { border: 0; background: var(--accent-soft); color: var(--ink); }
+.plugin-detail-sections { gap: 0; margin-top: 0; }
+.plugin-detail-section { gap: 0; border-bottom: 1px solid var(--line); }
+.plugin-detail-section:last-child { border-bottom: 0; }
+.plugin-detail-section-title { justify-content: flex-start; min-height: 38px; padding: 0; color: var(--ink-2); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.plugin-detail-section-title::before, .plugin-detail-section[open] .plugin-detail-section-title::before { content: ''; width: 6px; height: 6px; margin: 0 10px 0 2px; border: 0; border-right: 1.5px solid var(--ink-3); border-bottom: 1.5px solid var(--ink-3); border-radius: 0; transform: rotate(-45deg); transition: transform .15s var(--ease); }
+.plugin-detail-section[open] .plugin-detail-section-title::before { transform: rotate(45deg); }
+.plugin-detail-section-count { padding: 0; border: 0; background: transparent; color: var(--ink-3); font-family: var(--font-mono); font-weight: 400; letter-spacing: 0; }
+.plugin-detail-breakdown { gap: 6px; margin-top: 0; padding: 0 0 12px; border-top: 0; }
+.kernel-runtime-tooltip-breakdown-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; }
+.kernel-runtime-tooltip-breakdown-label { color: var(--ink-2); font-family: var(--font-ui); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kernel-runtime-tooltip-breakdown-value { color: var(--ink); font-family: var(--font-ui); text-align: left; word-break: normal; }
+
+/* Diagnostics summary: hairline-separated cells like the KPI strip, status as a dot and a word. */
+.kernel-runtime-summary { gap: 0; margin: 0 0 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); align-items: stretch; }
+.kernel-runtime-card { gap: 6px; padding: 16px 20px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; }
+.kernel-runtime-card:first-child { padding-left: 0; border-left: 0; }
+.kernel-runtime-label { color: var(--ink-2); font-size: var(--fs-sm); font-weight: 400; }
+.kernel-runtime-value { color: var(--ink); font-size: var(--fs-base); font-weight: 600; }
+.kernel-runtime-sub { display: grid; gap: 2px; color: var(--ink-2); font-size: var(--fs-xs); line-height: 1.6; }
+.kernel-runtime-card :is(.stat-pill, .badge) { display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 0; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); font-weight: 500; }
+.kernel-runtime-card :is(.stat-pill, .badge)::before { content: ''; width: 6px; height: 6px; border-radius: var(--r-pill); background: currentColor; }
+.kernel-runtime-card .kernel-runtime-inline { gap: 12px; }
+@media (max-width: 1079px) {
+    .kernel-runtime-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .kernel-runtime-card:nth-child(3) { padding-left: 0; border-left: 0; }
+    .kernel-runtime-card:nth-child(n+3) { border-top: 1px solid var(--line); }
+}
+@media (max-width: 679px) {
+    .kernel-runtime-summary { grid-template-columns: minmax(0, 1fr); }
+    .kernel-runtime-card { padding-left: 0; border-left: 0; }
+    .kernel-runtime-card + .kernel-runtime-card { border-top: 1px solid var(--line); }
+}
+.plugin-detail-value { font-weight: 400; }
+@media (max-width: 679px) {
+    .kpi-detail { display: none; }
+}
+
+/* While a plugin page loads, a quiet placeholder panel holds its place instead of a blank canvas. */
+.patchbay .plugin-page-frame[data-ready=''] { height: 0 !important; }
+.patchbay .plugin-page-section:has(> .plugin-page-frame[data-ready=''])::after { content: ''; display: block; height: 280px; border: 1px solid var(--line); border-radius: var(--r-lg); background: linear-gradient(90deg, var(--surface) 0%, var(--surface-2) 50%, var(--surface) 100%) 0 0 / 200% 100%; animation: plugin-placeholder 1.4s var(--ease) infinite; }
+@keyframes plugin-placeholder { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+/* Managed-network runtime: a status line (dot, label, state) rather than a button, set apart from
+   the two real actions by a hairline. Hover or focus still opens its detail popover. */
+.patchbay .page-heading-tools #managedNetworkRuntimeStatusBtn { display: inline-flex; align-items: center; gap: 8px; margin-right: 4px; padding: 0 16px 0 4px; border: 0; border-right: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--ink); font-size: var(--fs-md); font-weight: 500; cursor: help; }
+.patchbay .page-heading-tools #managedNetworkRuntimeStatusBtn::before { content: ''; width: 7px; height: 7px; flex: none; border-radius: var(--r-pill); background: var(--off); }
+.patchbay .page-heading-tools #managedNetworkRuntimeStatusBtn.is-success::before { background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); }
+.patchbay .page-heading-tools #managedNetworkRuntimeStatusBtn:is(.is-warning, .is-pending)::before { background: var(--warn); }
+.patchbay .page-heading-tools #managedNetworkRuntimeStatusBtn:hover .runtime-status-value, .patchbay .page-heading-tools #managedNetworkRuntimeStatusBtn[aria-expanded='true'] .runtime-status-value { text-decoration: underline dotted; text-underline-offset: 4px; }
+.runtime-status-label { color: var(--ink-2); font-weight: 400; }
