@@ -96,9 +96,9 @@ PPPoE 单口使用同一脚本附加 `--direct` 复测，与原 helper + veth �
 | WG 上传，MTU 1420 | 0.99 Gbps | 2.20 Gbps | 2.22× |
 | WG 下载，MTU 1420 | 1.63 Gbps | 1.63 Gbps | 1.00× |
 
-PPPoE 两侧 WAN veth 均关闭 TX checksum offload，模拟真实线上的 PPPoE 帧。整机忙 CPU 约 1.46–1.52 核降至 1.39–1.49 核。WG 上传忙 CPU 约 2.81 核增至 3.37 核，单位吞吐 CPU 降低；下载 CPU 与吞吐基本持平。最终对照数据和逐轮记录见 [benchmarks/kernel-module-20261031.json](../benchmarks/kernel-module-20261031.json)。
+PPPoE 两侧 WAN veth 均关闭 TX checksum offload，模拟真实线上的 PPPoE 帧。整机忙 CPU 约 1.46–1.52 核降至 1.39–1.49 核。WG 上传忙 CPU 约 2.81 核增至 3.37 核，单位吞吐 CPU 降低；下载 CPU 与吞吐基本持平。
 
-随后在同机完整 PPPoE + NAT 拓扑中，对 pppd、基础 BPF、原增强版和本次 GRO 优化版进行了三轮共 72 项轮换复测。原增强版 → 优化版的单流下行中位数为 2.19 → 3.41 Gbps，四流下行为 2.78 → 4.04 Gbps；上行中位数变化为 +1.2% / +0.4%。固定 1 Gbps 下行的四核整机总 CPU 从 5.42% 降至 2.42%，该口径包含 client、AC、server 和 router。拓扑、三轮范围、重传与全部结果见 [完整复测报告](../benchmarks/pppoe-rx-gro-20261031.md)。
+随后在同机完整 PPPoE + NAT 拓扑中，对 pppd、基础 BPF、原增强版和本次 GRO 优化版进行了三轮共 72 项轮换复测。原增强版 → 优化版的单流下行中位数为 2.19 → 3.41 Gbps，四流下行为 2.78 → 4.04 Gbps；上行中位数变化为 +1.2% / +0.4%。固定 1 Gbps 下行的四核整机总 CPU 从 5.42% 降至 2.42%，该口径包含 client、AC、server 和 router。
 
 这些是同机数据面实验，包含虚拟机调度/steal 和 TCP 重传，不是公网带宽或目标物理网卡的性能保证，也不能替代运营商 PPPoE 长时间稳定性验证。当前优化主要覆盖 PPPoE 包处理与 WG 适配，WireGuard 加密本身仍消耗 CPU。
 
