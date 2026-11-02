@@ -2,6 +2,7 @@ const { expect, test } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
 const vpnShares = require('../../../plugins/vpn_core/ui/share');
+const { contrastIssues, brightDarkSurfaces } = require('./contrast.cjs');
 
 const pluginPageHTML = `<!doctype html>
 <html>
@@ -162,7 +163,7 @@ const pluginCatalog = {
 const apiFixtures = new Map([
   ['/api/tags', []],
   ['/api/interfaces', []],
-  ['/api/host-network', { interfaces: [] }],
+  ['/api/host-network', { interfaces: [], host: { name: 'pve-node-03', os: 'linux', arch: 'amd64', kernel_release: '6.8.12-pve', uptime_seconds: 3564000 } }],
   ['/api/rules', []],
   ['/api/sites', []],
   ['/api/ranges', []],
@@ -270,6 +271,8 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(page.locator('#tab-plugin-vpn h1')).toHaveText('VPN');
   await expect(frame.locator('h1')).toHaveCount(0);
   await expect(frame.locator('.vpn-outlet')).toHaveCount(1);
+  await page.evaluate(() => window.VeerApp.setTheme('dark'));
+  await expect(frame.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expect(frame.locator('.vpn-health')).toHaveCount(0);
   await expect(frame.getByLabel('检测地址',{exact:true})).toHaveCount(0);
   await frame.getByRole('button',{name:'健康检测',exact:true}).click();
@@ -284,6 +287,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.locator('.vpn-outlet')).toContainText('链路异常');
   await expect(frame.locator('.vpn-outlet')).toContainText('检测超时');
   await expectNoPageOverflow(page);
+  await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-health.png'),fullPage:true});
   await expect(frame.getByLabel('代理核心 JSON 配置')).toHaveCount(0);
   await frame.getByRole('button', {name:'编辑', exact:true}).click();
@@ -332,10 +336,12 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   expect(actions.at(-1).id).toBe('core_rollback');
   await expectNoPageOverflow(page);
   expect(await frame.locator('body').evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
+  await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-cores.png'), fullPage:true});
   await frame.getByRole('tab',{name:/^出口/}).click();
   await frame.getByRole('button',{name:'收起编辑',exact:true}).click();
   await expect.poll(() => page.locator('#tab-plugin-vpn iframe').evaluate(el => el.getBoundingClientRect().height)).toBeLessThan(850);
+  await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-outlets.png'), fullPage:true});
   await page.locator('#tab-plugin-vpn .plugin-header-actions').getByRole('button',{name:'新建出口',exact:true}).click();
   await expect(frame.getByLabel('本机 WireGuard 地址',{exact:true})).toHaveValue('');
@@ -359,6 +365,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   expect(records.vpn1.data.peers[0].preshared_key_secret).toBe('psk_vpn1_0');
   expect(JSON.stringify(records.vpn1.data)).not.toContain(psk);
   expect(JSON.stringify(records.vpn1.data)).not.toContain(privateKey);
+  await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-wireguard-form.png'),fullPage:true});
   await frame.getByRole('button',{name:'sing-box',exact:true}).click();
   await expect(frame.getByLabel('本机 WireGuard 地址',{exact:true})).toHaveCount(0);
@@ -401,6 +408,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.locator('body')).not.toContainText('second-secret');
   expect(JSON.stringify(records.vpn1)).not.toContain('secret@');
   for(const field of ['addresses','peers','listen_port','remote_routes']) expect(records.vpn1.data[field]).toBeUndefined();
+  await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-sing-box-form.png'),fullPage:true});
   await frame.getByRole('button',{name:'收起编辑',exact:true}).click();
   await frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})}).getByRole('button',{name:'编辑',exact:true}).click();
@@ -439,6 +447,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   for(const field of ['addresses','upstream_interface','upstream_ip','config_secret','peers']) expect(records.vpn1.data[field]).toBeUndefined();
   await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveCount(0);
   await expectNoPageOverflow(page);
+  await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-external-tun-form.png'),fullPage:true});
   const card=frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})});
   await card.getByRole('button',{name:'删除',exact:true}).click();
@@ -520,11 +529,22 @@ async function installDashboardFixtures(page, locale) {
 }
 
 async function openDashboard(page, testInfo) {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   const locale = testInfo.project.name.startsWith('mobile') ? 'en-US' : 'zh-CN';
   await installDashboardFixtures(page, locale);
   await page.goto('/');
   await expect(page.locator('#app')).toBeVisible();
   await expect(page.locator('#masterVersion')).toHaveText('01234567');
+  await page.evaluate(() => document.fonts.ready);
+}
+
+async function expectReadableThemes(page, scope) {
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate((theme) => window.VeerApp.setTheme(theme), theme);
+    await expect.poll(() => scope.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
+    expect(await contrastIssues(scope), theme).toEqual([]);
+    if (theme === 'dark') expect(await brightDarkSurfaces(scope)).toEqual([]);
+  }
 }
 
 async function expectNoPageOverflow(page) {
@@ -570,7 +590,11 @@ test('Patchbay resource lists, drawers, filtering and hash navigation work witho
   await expectNoPageOverflow(page);
   await page.screenshot({ path: testInfo.outputPath('patchbay-list-light.png'), fullPage: true });
   await page.evaluate(() => window.VeerApp.setTheme('dark'));
+  expect(await contrastIssues(page.locator('body'))).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath('patchbay-list-dark.png'), fullPage: true });
+  await page.locator('#rulesBody .action-dropdown-trigger').first().click();
+  expect(await contrastIssues(page.locator('body'))).toEqual([]);
+  await page.keyboard.press('Escape');
   await page.locator('#tab-rules .status-chip').last().click();
   await expect(page.locator('#rulesBody tr')).toHaveCount(1);
   await expect(page.locator('#rulesBody')).toContainText('ipv6-monitoring');
@@ -635,6 +659,11 @@ test('Patchbay preserves every resource editor and isolates network leases and d
     await page.locator('#tab-' + tab + ' .quick-edit').first().click();
     await expect(page.locator('#' + form + 'Form')).toBeVisible();
     await expect(page.locator('#' + form + 'SubmitBtn')).toBeVisible();
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate((theme) => window.VeerApp.setTheme(theme), theme);
+      expect(await contrastIssues(page.locator('#resourceDrawer')), form + ' ' + theme).toEqual([]);
+      if (theme === 'dark') expect(await brightDarkSurfaces(page.locator('#resourceDrawer'))).toEqual([]);
+    }
     if (tab === 'sites') {
       await expect(page.locator('#siteBackendHTTP')).toHaveValue('0');
       await expect(page.locator('#siteBackendHTTP').locator('xpath=ancestor::fieldset')).toBeVisible();
@@ -694,9 +723,63 @@ test('bundled plugin pages share host actions and themes at desktop and 375px', 
     for (const theme of ['dark', 'light']) {
       await page.evaluate((theme) => window.VeerApp.setTheme(theme), theme);
       await expect(iframe.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await contrastIssues(iframe.locator('body')), plugin.id + ' ' + theme).toEqual([]);
+      if (theme === 'dark') expect(await brightDarkSurfaces(iframe.locator('body')), plugin.id).toEqual([]);
       await page.screenshot({ path: testInfo.outputPath(plugin.id + '-' + theme + '.png'), fullPage: true });
     }
   }
+  await page.setViewportSize({ width: page.viewportSize().width, height: 430 });
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await expect(page.locator('#themeMenuButton')).toBeInViewport();
+  await expect(page.locator('#logoutBtn')).toBeInViewport();
+  await expect(page.locator('.sidebar-brand')).toBeInViewport();
+  expect(await page.locator('.sidebar nav').evaluate((nav) => nav.scrollHeight > nav.clientHeight)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('sidebar-short.png'), fullPage: true });
+});
+
+test('sidebar tools preserve theme, language and logout behavior with keyboard and system changes', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  await page.emulateMedia({ reducedMotion: 'no-preference', colorScheme: 'light' });
+  if (page.viewportSize().width < 860) {
+    await expect(page.locator('#mainSidebar')).toHaveAttribute('inert', '');
+    await page.locator('#sidebarToggle').click();
+    await expect(page.locator('#mainSidebar')).not.toHaveAttribute('inert', '');
+  }
+  const theme = page.locator('#themeMenuButton');
+  await theme.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator('#themeMenu')).toBeVisible();
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(theme).toBeFocused();
+  expect(await page.evaluate(() => localStorage.getItem('veer_theme'))).toBe('dark');
+  expect(await contrastIssues(page.locator('body'))).toEqual([]);
+  expect(await brightDarkSurfaces(page.locator('body'))).toEqual([]);
+  await theme.click();
+  await page.screenshot({ path: testInfo.outputPath('sidebar-theme-dark.png'), fullPage: true });
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#themeMenu')).toBeHidden();
+  await expect(theme).toBeFocused();
+  await theme.click();
+  await page.locator('#hostName').click();
+  await expect(page.locator('#themeMenu')).toBeHidden();
+  const originalLocale = await page.locator('html').getAttribute('lang');
+  await page.locator('#localeToggle').click();
+  await expect(page.locator('html')).toHaveAttribute('lang', originalLocale === 'en-US' ? 'zh-CN' : 'en-US');
+  await theme.click();
+  await page.keyboard.press('Home');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  expect(await page.evaluate(() => localStorage.getItem('veer_theme'))).toBe('system');
+  await page.locator('#logoutBtn').click();
+  await expect(page.locator('#confirmModal')).toBeVisible();
+  expect(await contrastIssues(page.locator('#confirmModal'))).toEqual([]);
+  await page.locator('#confirmCancelBtn').click();
+  await expect(page.locator('#app')).toBeVisible();
+  await expect(page.locator('#tokenModal')).toBeHidden();
 });
 
 test('dashboard shell localizes cleanly and plugin details stay usable', async ({ page }, testInfo) => {
@@ -731,6 +814,7 @@ test('dashboard shell localizes cleanly and plugin details stay usable', async (
   await trigger.click();
   const popover = page.locator('#pluginRuntimeTooltip');
   await expect(popover).toBeVisible();
+  await expectReadableThemes(page, page.locator('body'));
   const overlap = await page.evaluate(() => {
     const triggerBox = document.querySelector('.plugin-detail-trigger[data-plugin-id="nf_counter"]').getBoundingClientRect();
     const popoverBox = document.getElementById('pluginRuntimeTooltip').getBoundingClientRect();
