@@ -9,7 +9,7 @@
 .vpn-tab { background:transparent; border:0; border-bottom:2px solid transparent; color:var(--veer-muted); padding:0 1px 12px; font:inherit; font-weight: 600; cursor:pointer; }
 .vpn-tab[aria-selected="true"] { color:var(--veer-primary); border-bottom-color:var(--veer-primary); }
 .vpn-count { font-size: var(--veer-fs-xs); background:var(--veer-surface-soft); border:1px solid var(--veer-border); border-radius: var(--veer-radius-lg); padding:1px 6px; margin-left:5px; }
-.vpn-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.vpn-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(440px,1fr)); gap:16px; }
 .vpn-outlet, .vpn-panel { border:1px solid var(--veer-border); background:var(--veer-surface); border-radius: var(--veer-radius-lg); padding:20px; min-width:0; }
 .vpn-outlet h3 { font-size: var(--veer-fs-lg); margin:0; overflow-wrap:anywhere; }
 .vpn-card-heading { display:flex; align-items:center; gap:12px; min-width:0; }
