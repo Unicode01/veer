@@ -65,7 +65,7 @@ PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，
 
 ## kfunc 开发边界
 
-公共声明在 [plugins/include/veer_kfuncs.h](plugins/include/veer_kfuncs.h)：`veer_kfuncs_abi_v1()`、`veer_skb_handoff_v1()`，以及可选的 `veer_skb_handoff_ingress_v1()`。后者仅接受 `VEER_L3_TO_ETH`，补 Ethernet 后送入目标设备接收路径，执行目标 TC ingress；原函数发送语义与 ABI 保持不变。handoff 配置为 28 字节，仅含标量，当前只注册给 `BPF_PROG_TYPE_SCHED_CLS`。
+公共声明在 [plugins/include/veer_kfuncs.h](../plugins/include/veer_kfuncs.h)：`veer_kfuncs_abi_v1()`、`veer_skb_handoff_v1()`，以及可选的 `veer_skb_handoff_ingress_v1()`。后者仅接受 `VEER_L3_TO_ETH`，补 Ethernet 后送入目标设备接收路径，执行目标 TC ingress；原函数发送语义与 ABI 保持不变。handoff 配置为 28 字节，仅含标量，当前只注册给 `BPF_PROG_TYPE_SCHED_CLS`。
 
 handoff 不修改或释放调用方的 skb；所有修改都作用于独立 clone。调用后 **BPF 必须终止当前路径，让 TC 释放原 skb**：成功返回 `TC_ACT_STOLEN`，失败返回 `TC_ACT_SHOT`，避免原包重复发送或回落宿主路由。旧 ingress 调用方也可以在成功后返回 `TC_ACT_SHOT`；本机 egress 成功时必须返回 `TC_ACT_STOLEN`，否则内核会把已转交的包当作发送失败，本机 TCP 无法正确推进发送序号。目标只能是同 netns 的有效、启用、类型匹配且不同于源设备的接口。模块校验参数、PPPoE 会话/长度，限制发送递归，并处理必要的 checksum/MSS。调用权限仍受宿主插件加载和 BPF 特权边界约束；这不是向不可信插件开放任意内核执行。
 
@@ -96,9 +96,9 @@ PPPoE 单口使用同一脚本附加 `--direct` 复测，与原 helper + veth �
 | WG 上传，MTU 1420 | 0.99 Gbps | 2.20 Gbps | 2.22× |
 | WG 下载，MTU 1420 | 1.63 Gbps | 1.63 Gbps | 1.00× |
 
-PPPoE 两侧 WAN veth 均关闭 TX checksum offload，模拟真实线上的 PPPoE 帧。整机忙 CPU 约 1.46–1.52 核降至 1.39–1.49 核。WG 上传忙 CPU 约 2.81 核增至 3.37 核，单位吞吐 CPU 降低；下载 CPU 与吞吐基本持平。最终对照数据和逐轮记录见 [benchmarks/kernel-module-20261031.json](benchmarks/kernel-module-20261031.json)。
+PPPoE 两侧 WAN veth 均关闭 TX checksum offload，模拟真实线上的 PPPoE 帧。整机忙 CPU 约 1.46–1.52 核降至 1.39–1.49 核。WG 上传忙 CPU 约 2.81 核增至 3.37 核，单位吞吐 CPU 降低；下载 CPU 与吞吐基本持平。最终对照数据和逐轮记录见 [benchmarks/kernel-module-20261031.json](../benchmarks/kernel-module-20261031.json)。
 
-随后在同机完整 PPPoE + NAT 拓扑中，对 pppd、基础 BPF、原增强版和本次 GRO 优化版进行了三轮共 72 项轮换复测。原增强版 → 优化版的单流下行中位数为 2.19 → 3.41 Gbps，四流下行为 2.78 → 4.04 Gbps；上行中位数变化为 +1.2% / +0.4%。固定 1 Gbps 下行的四核整机总 CPU 从 5.42% 降至 2.42%，该口径包含 client、AC、server 和 router。拓扑、三轮范围、重传与全部结果见 [完整复测报告](benchmarks/pppoe-rx-gro-20261031.md)。
+随后在同机完整 PPPoE + NAT 拓扑中，对 pppd、基础 BPF、原增强版和本次 GRO 优化版进行了三轮共 72 项轮换复测。原增强版 → 优化版的单流下行中位数为 2.19 → 3.41 Gbps，四流下行为 2.78 → 4.04 Gbps；上行中位数变化为 +1.2% / +0.4%。固定 1 Gbps 下行的四核整机总 CPU 从 5.42% 降至 2.42%，该口径包含 client、AC、server 和 router。拓扑、三轮范围、重传与全部结果见 [完整复测报告](../benchmarks/pppoe-rx-gro-20261031.md)。
 
 这些是同机数据面实验，包含虚拟机调度/steal 和 TCP 重传，不是公网带宽或目标物理网卡的性能保证，也不能替代运营商 PPPoE 长时间稳定性验证。当前优化主要覆盖 PPPoE 包处理与 WG 适配，WireGuard 加密本身仍消耗 CPU。
 
