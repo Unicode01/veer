@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WAN Core</title>
   <style>
-    .wan-page { padding: 8px; }
+    .wan-page { padding: 20px; }
     .wan-config-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -20,8 +20,8 @@
     .wan-advanced > summary {
       cursor: pointer;
       color: var(--veer-muted);
-      font-size: 12px;
-      font-weight: 700;
+      font-size: var(--veer-fs-sm);
+      font-weight: 600;
     }
     .wan-advanced-body { display: grid; gap: 12px; padding-top: 10px; }
     .wan-toggle-grid {
@@ -36,18 +36,18 @@
       min-height: 32px;
       padding: 5px 8px;
       border: 1px solid var(--veer-border);
-      border-radius: 8px;
+      border-radius: var(--veer-radius);
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 650;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
     }
     .wan-toggle .veer-input { flex: 0 0 auto; }
     .wan-effective { display: grid; gap: 9px; }
     .wan-effective-title {
       margin: 0;
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 700;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
     }
     .wan-addresses { display: flex; flex-wrap: wrap; gap: 6px; }
     .wan-route-wrap { overflow-x: auto; }
@@ -61,6 +61,8 @@
   <script>
     (function () {
       const F = window.VeerPluginHost;
+      const notify = F.notify || F.toast;
+      const notifyError = F.notifyError || F.toastError;
       if (!F) {
         document.body.textContent = 'VeerPluginHost is not available.';
         return;
@@ -498,10 +500,10 @@
           }
           renderStatus();
           setStatus('status.idle');
-          if (!options.silent) F.toast(T('toast.loaded'));
+          if (!options.silent) notify(T('toast.loaded'));
         } catch (e) {
           setStatus('status.idle');
-          if (!options.silent) F.toastError(e);
+          if (!options.silent) notifyError(e);
           throw e;
         } finally {
           F.requestResize();
@@ -517,11 +519,11 @@
           await refreshRecords(data.profile_key);
           fillForm(data.profile_key);
           setStatus('status.saved');
-          if (!options.silent) F.toast(T('toast.saved'));
+          if (!options.silent) notify(T('toast.saved'));
           return data;
         } catch (e) {
           setStatus('status.saveFailed');
-          if (!options.silent) F.toastError(e);
+          if (!options.silent) notifyError(e);
           throw e;
         } finally {
           F.requestResize();
@@ -537,10 +539,10 @@
           await F.action(session ? 'apply_session' : 'prepare_handoff', data);
           await loadSelection({ key: data.profile_key, silent: true });
           setStatus('status.applied');
-          F.toast(T('toast.applied'));
+          notify(T('toast.applied'));
         } catch (e) {
           setStatus('status.applyFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           setBusy(button, false, T('action.apply'));
           F.requestResize();
@@ -558,7 +560,7 @@
           });
           if (!confirmed) return;
         } catch (e) {
-          F.toastError(e);
+          notifyError(e);
           return;
         }
         setBusy(button, true, T('status.deleting'));
@@ -568,10 +570,10 @@
           await F.action('teardown', data);
           await loadSelection({ key: data.profile_key, silent: true });
           setStatus('status.deleted');
-          F.toast(T('toast.deleted'));
+          notify(T('toast.deleted'));
         } catch (e) {
           setStatus('status.deleteFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           setBusy(button, false, T('action.teardown'));
           F.requestResize();
@@ -646,24 +648,23 @@
 
       saveButton = i18nButton('action.save', function () {
         runButtonTask(saveButton, T('status.saving'), function () { return saveProfile(); }).catch(function () {});
-      });
+      }, true);
       loadButton = i18nButton('action.load', function () {
         runButtonTask(loadButton, T('status.loading'), function () { return loadSelection({ silent: false }); }).catch(function () {});
       }, true);
       applyButton = i18nButton('action.apply', function () { apply(applyButton); });
       teardownButton = i18nButton('action.teardown', function () { teardown(teardownButton); }, true);
       refreshButton = i18nButton('action.refresh', function () {
-        runButtonTask(refreshButton, T('status.loading'), function () { return loadSelection({ silent: true }); }).catch(function (e) { F.toastError(e); });
+        runButtonTask(refreshButton, T('status.loading'), function () { return loadSelection({ silent: true }); }).catch(function (e) { notifyError(e); });
       }, true);
       syncActionButtons();
       wanProfileField = field('field.wanID', profilePicker.element);
       wanProfileField.hidden = true;
       const page = F.h('main', { className: F.classes.page + ' wan-page' }, [
         F.stack([
-          F.card([
+          F.h('section', { className: 'veer-context' }, [
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', null, [
-                textNode('h1', { className: F.classes.title }, 'title'),
                 textNode('p', { className: F.classes.description }, 'desc')
               ]),
               F.h('div', { className: F.classes.toolbar }, [
@@ -720,7 +721,8 @@
       ]);
 
       document.body.replaceChildren(page);
-      loadSelection({ silent: true }).catch(function (e) { F.toastError(e); }).finally(F.requestResize);
+      if (F.headerActions) F.headerActions([saveButton, applyButton]);
+      loadSelection({ silent: true }).catch(function (e) { notifyError(e); }).finally(F.requestResize);
     })();
   </script>
 </body>

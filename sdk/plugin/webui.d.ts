@@ -122,6 +122,11 @@ declare global {
     toast(message: string, timeout?: number): HTMLElement;
     errorText(error: unknown, fallback?: string): string;
     toastError(error: unknown, timeout?: number): HTMLElement;
+    /** Host notification. False when hidden or rate limited; never rejects. */
+    notify(message: string, timeout?: number, tone?: 'info' | 'success' | 'error' | 'warning'): Promise<boolean>;
+    notifyError(error: unknown, timeout?: number): Promise<boolean>;
+    /** Mirror up to two local buttons (one primary) in the host header. [] removes them. */
+    headerActions(buttons: HTMLButtonElement[]): void;
     confirm(options: {
       title?: string;
       message: string;

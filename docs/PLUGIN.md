@@ -606,9 +606,16 @@ async function saveProfile() {
 - `VeerPluginHost.action(action, payload)`
 - `VeerPluginHost.toast(message)`
 - `VeerPluginHost.toastError(error)`
+- `VeerPluginHost.notify(message, timeout?, tone?)`
+- `VeerPluginHost.notifyError(error, timeout?)`
+- `VeerPluginHost.headerActions(buttons)`
 - `VeerPluginHost.errorText(error)`
 - `VeerPluginHost.confirm({title, message, confirmText, cancelText, danger})`
 - `VeerPluginHost.requestResize()`
+
+新页面优先使用 `notify` / `notifyError`，通知由宿主展示并标注插件名。消息最多 2000 个字符，显示时间为 1000–10000 毫秒，`tone` 为 `info`、`success`、`warning` 或 `error`。隐藏页面、参数无效或超出配额时返回 `Promise<false>`；成功返回 `Promise<true>`。旧 `toast` / `toastError` 仍返回 iframe 内的元素，兼容已有插件。
+
+`headerActions([saveButton, applyButton])` 把最多两个本地按钮镜像到宿主页头，其中最多一个主按钮；次按钮使用 `.secondary`。按钮的文字、禁用和隐藏状态自动同步，点击仍由插件内原按钮处理。传入空数组可解除绑定。宿主不可用时保留本地按钮；卸载 iframe 会释放观察器和回调。页头与通知均走原 RPC 来源校验和限额，只有当前可见插件页面可以更新宿主 UI。它们不开放宿主 DOM、认证信息或额外控制权限。
 
 删除记录、拆除链路、断开会话等破坏性操作应先调用 `confirm()`。确认框由父 WebUI 的统一浮层渲染；只有当前可见的插件页面可以请求，且同一时刻最多打开一个。插件仍不能创建浏览器原生弹窗或向宿主注入 HTML。
 

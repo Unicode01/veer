@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VTap To Local</title>
   <style>
-    .local-page { padding: 8px; }
+    .local-page { padding: 20px; }
     .local-config-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -16,8 +16,8 @@
     .local-section-title {
       margin: 0;
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 700;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
     }
     .local-effective { display: grid; gap: 9px; }
     .local-addresses { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -32,6 +32,8 @@
   <script>
     (function () {
       const F = window.VeerPluginHost;
+      const notify = F.notify || F.toast;
+      const notifyError = F.notifyError || F.toastError;
       if (!F) {
         document.body.textContent = 'VeerPluginHost is not available.';
         return;
@@ -373,10 +375,10 @@
           if (profilePicker.isNew()) resetForm(); else fillForm(key);
           renderStatus();
           setStatus('status.idle');
-          if (!options.silent) F.toast(T('toast.loaded'));
+          if (!options.silent) notify(T('toast.loaded'));
         } catch (e) {
           setStatus('status.idle');
-          if (!options.silent) F.toastError(e);
+          if (!options.silent) notifyError(e);
           throw e;
         } finally {
           F.requestResize();
@@ -391,10 +393,10 @@
           await F.data.upsert('links', data.profile_key, data, { enabled: true });
           await loadSelection({ key: data.profile_key, silent: true });
           setStatus('status.applied');
-          F.toast(T('toast.applied'));
+          notify(T('toast.applied'));
         } catch (e) {
           setStatus('status.applyFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           setBusy(button, false, T('action.apply'));
           F.requestResize();
@@ -412,7 +414,7 @@
           });
           if (!confirmed) return;
         } catch (e) {
-          F.toastError(e);
+          notifyError(e);
           return;
         }
         setBusy(button, true, T('status.deleting'));
@@ -422,10 +424,10 @@
           await F.action('teardown', data);
           await loadSelection({ key: data.profile_key, silent: true });
           setStatus('status.deleted');
-          F.toast(T('toast.deleted'));
+          notify(T('toast.deleted'));
         } catch (e) {
           setStatus('status.deleteFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           setBusy(button, false, T('action.teardown'));
           F.requestResize();
@@ -485,15 +487,14 @@
         runButtonTask(loadButton, T('status.loading'), function () { return loadSelection({ silent: false }); }).catch(function () {});
       }, true);
       refreshButton = i18nButton('action.refresh', function () {
-        runButtonTask(refreshButton, T('status.loading'), function () { return loadSelection({ silent: true }); }).catch(function (e) { F.toastError(e); });
+        runButtonTask(refreshButton, T('status.loading'), function () { return loadSelection({ silent: true }); }).catch(function (e) { notifyError(e); });
       }, true);
       syncActionButtons();
       const page = F.h('main', { className: F.classes.page + ' local-page' }, [
         F.stack([
-          F.card([
+          F.h('section', { className: 'veer-context' }, [
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', null, [
-                textNode('h1', { className: F.classes.title }, 'title'),
                 textNode('p', { className: F.classes.description }, 'desc')
               ]),
               F.h('div', { className: F.classes.toolbar }, [
@@ -534,7 +535,8 @@
       ]);
 
       document.body.replaceChildren(page);
-      loadSelection({ silent: true }).catch(function (e) { F.toastError(e); }).finally(F.requestResize);
+      if (F.headerActions) F.headerActions([loadButton, applyButton]);
+      loadSelection({ silent: true }).catch(function (e) { notifyError(e); }).finally(F.requestResize);
     })();
   </script>
 </body>

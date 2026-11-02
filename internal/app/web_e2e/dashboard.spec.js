@@ -39,6 +39,13 @@ const pluginPageHTML = `<!doctype html>
         window.fixtureConfirmResult = confirmed;
       });
     });
+    var hostAction = window.VeerPluginHost.button('Fixture action', function () {
+      window.fixtureHeaderClicks = (window.fixtureHeaderClicks || 0) + 1;
+      window.VeerPluginHost.notify('Header action completed');
+    });
+    hostAction.id = 'fixtureHeaderAction';
+    document.body.appendChild(hostAction);
+    window.VeerPluginHost.headerActions([hostAction]);
   </script>
 </body>
 </html>`;
@@ -258,9 +265,10 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
     return route.fulfill({status:404, json:{error:'unknown fixture'}});
   });
   await page.evaluate(() => window.VeerApp.loadPlugins());
-  await page.locator('[data-tab="plugin-vpn"]').click();
+  await navigatePage(page, 'plugin-vpn');
   const frame = page.frameLocator('#tab-plugin-vpn .plugin-page-frame');
-  await expect(frame.locator('h1')).toHaveText('VPN 出口');
+  await expect(page.locator('#tab-plugin-vpn h1')).toHaveText('VPN');
+  await expect(frame.locator('h1')).toHaveCount(0);
   await expect(frame.locator('.vpn-outlet')).toHaveCount(1);
   await expect(frame.locator('.vpn-health')).toHaveCount(0);
   await expect(frame.getByLabel('检测地址',{exact:true})).toHaveCount(0);
@@ -329,7 +337,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button',{name:'收起编辑',exact:true}).click();
   await expect.poll(() => page.locator('#tab-plugin-vpn iframe').evaluate(el => el.getBoundingClientRect().height)).toBeLessThan(850);
   await page.screenshot({path:testInfo.outputPath('vpn-outlets.png'), fullPage:true});
-  await frame.getByRole('button',{name:'新建出口',exact:true}).click();
+  await page.locator('#tab-plugin-vpn .plugin-header-actions').getByRole('button',{name:'新建出口',exact:true}).click();
   await expect(frame.getByLabel('本机 WireGuard 地址',{exact:true})).toHaveValue('');
   await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
   await expect(frame.locator('.vpn-notice')).toContainText('WireGuard 地址');
@@ -447,14 +455,14 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
 
 test('plugin installation controls follow the host policy while plugin pages remain accessible', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
-  await page.locator('[data-tab="plugins"]').click();
+  await navigatePage(page, 'plugins');
   await expect(page.locator('#addPluginBtn')).toBeHidden();
   await expect(page.locator('#managePluginsAdvancedBtn')).toBeVisible();
   await page.locator('#managePluginsAdvancedBtn').click();
   await expect(page.locator('#pluginManagerNav')).not.toContainText(/Add Plugin|添加插件/);
   await expect(page.locator('#pluginManagerBody')).not.toContainText(/Publishers|发布者/);
   await page.locator('#closePluginManagerBtn').click();
-  await page.locator('[data-tab="plugin-firewall"]').click();
+  await navigatePage(page, 'plugin-firewall');
   await expect(page.frameLocator('#tab-plugin-firewall .plugin-page-frame').locator('h1')).toHaveText('Firewall fixture');
 
   await page.route('**/api/plugins', async (route) => {
@@ -464,7 +472,7 @@ test('plugin installation controls follow the host policy while plugin pages rem
     await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(catalog)});
   });
   await page.evaluate(() => window.VeerApp.loadPlugins());
-  await page.locator('[data-tab="plugins"]').click();
+  await navigatePage(page, 'plugins');
   await expect(page.locator('#addPluginBtn')).toBeVisible();
   await page.locator('#addPluginBtn').click();
   await expect(page.locator('#pluginManagerModal')).toBeVisible();
@@ -520,18 +528,180 @@ async function openDashboard(page, testInfo) {
 }
 
 async function expectNoPageOverflow(page) {
+  const overflow = await page.evaluate(() => Array.from(document.querySelectorAll('body *')).filter((el) => {
+    const box = el.getBoundingClientRect();
+    return box.width > 0 && box.left >= 0 && box.right > window.innerWidth + 1;
+  }).slice(0, 15).map((el) => ({ element: el.tagName + '#' + el.id + '.' + el.className, width: el.getBoundingClientRect().width, right: el.getBoundingClientRect().right, minWidth: getComputedStyle(el).minWidth, display: getComputedStyle(el).display })));
+  if (await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)) console.log('Overflow elements:', overflow);
   await expect.poll(() => page.evaluate(() => (
     document.documentElement.scrollWidth - document.documentElement.clientWidth
   )), { message: 'page-level horizontal overflow' }).toBeLessThanOrEqual(1);
 }
 
+async function navigatePage(page, tab) {
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await page.locator('[data-tab="' + tab + '"]').click();
+}
+
+test('Patchbay resource lists, drawers, filtering and hash navigation work without losing edits', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  const rules = [
+    { id: 1, remark: 'web-production', in_interface: 'eth0', in_ip: '203.0.113.10', in_port: 443, out_interface: 'br0', out_ip: '10.0.0.12', out_port: 8443, protocol: 'tcp', enabled: true, status: 'running' },
+    { id: 2, remark: 'ipv6-monitoring', in_interface: 'eth0', in_ip: '2001:db8:1234:abcd:1111:2222:3333:4444', in_port: 19999, out_interface: 'br0', out_ip: '2001:db8:ffff:abcd:aaaa:bbbb:cccc:dddd', out_port: 19999, protocol: 'tcp', enabled: false, status: 'stopped' },
+    { id: 3, remark: 'mail-service', in_interface: 'eth0', in_ip: '203.0.113.10', in_port: 587, out_interface: 'br0', out_ip: '10.0.0.25', out_port: 587, protocol: 'tcp', enabled: true, status: 'error', runtime_error: 'Port 587 is already in use' }
+  ];
+  const writes = [];
+  await page.route('**/api/interfaces', (route) => route.fulfill({ json: [{ name: 'eth0', addrs: ['203.0.113.10'] }, { name: 'br0', addrs: ['10.0.0.1'] }] }));
+  await page.route('**/api/rules/validate', (route) => route.fulfill({ json: { valid: true, ...route.request().postDataJSON() } }));
+  await page.route('**/api/rules', (route) => {
+    if (route.request().method() === 'PUT') {
+      const payload = route.request().postDataJSON();
+      writes.push(payload);
+      Object.assign(rules.find((rule) => rule.id === payload.id), payload);
+      return route.fulfill({ json: payload });
+    }
+    return route.fulfill({ json: rules });
+  });
+  await page.evaluate(async () => { await window.VeerApp.loadInterfaces(); await window.VeerApp.loadRules(); window.VeerApp.stopPolling(); });
+  await expect(page.locator('#rulesBody tr')).toHaveCount(3);
+  await expect(page.locator('#ruleForm')).toBeHidden();
+  await expect(page.locator('#rulesBody .patch-route')).toHaveCount(3);
+  await expect(page.locator('#rulesBody')).toContainText('Port 587 is already in use');
+  await expectNoPageOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath('patchbay-list-light.png'), fullPage: true });
+  await page.evaluate(() => window.VeerApp.setTheme('dark'));
+  await page.screenshot({ path: testInfo.outputPath('patchbay-list-dark.png'), fullPage: true });
+  await page.locator('#tab-rules .status-chip').last().click();
+  await expect(page.locator('#rulesBody tr')).toHaveCount(1);
+  await expect(page.locator('#rulesBody')).toContainText('ipv6-monitoring');
+  await page.locator('#tab-rules .status-chip').first().click();
+  await page.locator('#rulesBody tr').first().locator('.quick-edit').click();
+  await expect(page.locator('#resourceDrawer')).toBeVisible();
+  await expect(page.locator('#ruleRemark')).toHaveValue('web-production');
+  await expect(page.locator('#mainContent')).toHaveAttribute('inert', '');
+  await page.locator('#ruleRemark').fill('web-updated');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#confirmModal')).toBeVisible();
+  await page.locator('#confirmCancelBtn').click();
+  await expect(page.locator('#ruleRemark')).toHaveValue('web-updated');
+  await page.screenshot({ path: testInfo.outputPath('patchbay-edit-drawer.png'), fullPage: true });
+  await page.locator('#ruleSubmitBtn').click();
+  await expect(page.locator('#resourceDrawer')).toBeHidden();
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({ id: 1, remark: 'web-updated', in_port: 443, out_port: 8443 });
+  await expect(page.locator('#rulesBody')).toContainText('web-updated');
+  await navigatePage(page, 'sites');
+  await expect(page).toHaveURL(/#sites$/);
+  await page.goBack();
+  await expect(page.locator('#tab-rules')).toBeVisible();
+  await page.keyboard.press('Control+k');
+  await page.locator('#commandSearch').fill('web-updated');
+  await expect(page.locator('#commandResults [role="option"]')).toHaveCount(1);
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#ruleRemark')).toHaveValue('web-updated');
+  await page.locator('#closeResourceDrawer').click();
+  await expect(page.locator('#resourceDrawer')).toBeHidden();
+  expect(writes).toHaveLength(1);
+  await expectNoPageOverflow(page);
+});
+
 test.afterEach(async ({ page }) => {
   expect(browserErrors.get(page) || [], 'browser console and page errors').toEqual([]);
 });
 
+test('Patchbay preserves every resource editor and isolates network leases and devices', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  await page.evaluate(() => {
+    const app = window.VeerApp;
+    app.stopPolling();
+    app.hostSummary = { name: 'router-lab', os: 'linux', arch: 'amd64', kernel_release: '6.8-test', uptime_seconds: 90000 };
+    app.state.sites.data = [{ id: 11, domain: 'example.test', listen_ip: '203.0.113.10', backend_ip: '10.0.0.2', backend_http_port: 0, backend_https_port: 8443, enabled: true }];
+    app.state.ranges.data = [{ id: 12, in_ip: '203.0.113.10', start_port: 8000, end_port: 8010, out_ip: '10.0.0.2', out_start_port: 9000, protocol: 'udp', enabled: true }];
+    app.state.managedNetworks.data = [{ id: 13, name: 'lan-one', bridge: 'br0', bridge_mode: 'existing', ipv4_cidr: '10.0.0.1/24', enabled: true }, { id: 14, name: 'lan-two', bridge: 'br1', bridge_mode: 'existing', ipv4_cidr: '10.1.0.1/24', enabled: true }];
+    app.state.egressNATs.data = [{ id: 15, parent_interface: 'br0', child_interface: 'tap100', out_interface: 'eth0', out_source_ip: '203.0.113.10', enabled: true }];
+    app.state.ipv6Assignments.data = [{ id: 16, parent_interface: 'eth0', target_interface: 'br0', parent_prefix: '2001:db8::/48', assigned_prefix: '2001:db8:0:1::/64', enabled: true }];
+    app.state.managedNetworkReservations.data = [{ id: 21, managed_network_id: 13, mac_address: '02:00:00:00:00:01', ipv4_address: '10.0.0.11', remark: 'only-first-network' }, { id: 22, managed_network_id: 14, mac_address: '02:00:00:00:00:02', ipv4_address: '10.1.0.12', remark: 'only-second-network' }];
+    app.state.managedNetworkReservationCandidates.data = [{ managed_network_id: 13, child_interface: 'tap100', mac_address: '02:00:00:00:00:03', suggested_ipv4: '10.0.0.13', status: 'ready' }, { managed_network_id: 14, child_interface: 'tap200', mac_address: '02:00:00:00:00:04', suggested_ipv4: '10.1.0.14', status: 'ready' }];
+    app.patchbay.configs.forEach((cfg) => app[cfg.render]());
+    app.refreshManagedNetworkReservationNetworkOptions();
+  });
+  const snapshots = await page.evaluate(() => {
+    const app = window.VeerApp;
+    return Object.fromEntries([['sites','sites'], ['ranges','ranges'], ['managed-networks','managedNetworks'], ['egress-nats','egressNATs'], ['ipv6-assignments','ipv6Assignments'], ['managed-network-reservations','managedNetworkReservations'], ['managed-network-reservation-candidates','managedNetworkReservationCandidates']].map(([endpoint, state]) => [endpoint, app.state[state].data]));
+  });
+  for (const [endpoint, data] of Object.entries(snapshots)) await page.route('**/api/' + endpoint, (route) => route.fulfill({ json: data }));
+  for (const [tab, form] of [['sites','site'], ['ranges','range'], ['managed-networks','managedNetwork'], ['egress-nats','egressNAT'], ['ipv6-assignments','ipv6Assignment']]) {
+    await navigatePage(page, tab);
+    await page.locator('#tab-' + tab + ' .quick-edit').first().click();
+    await expect(page.locator('#' + form + 'Form')).toBeVisible();
+    await expect(page.locator('#' + form + 'SubmitBtn')).toBeVisible();
+    if (tab === 'sites') {
+      await expect(page.locator('#siteBackendHTTP')).toHaveValue('0');
+      await expect(page.locator('#siteBackendHTTP').locator('xpath=ancestor::fieldset')).toBeVisible();
+      await expect(page.locator('#resourceDrawer .drawer-preview:visible')).toContainText('8443');
+      await expect(page.locator('#resourceDrawer .drawer-preview:visible')).not.toContainText('80 / 8443');
+    }
+    await expectNoPageOverflow(page);
+    await page.locator('#closeResourceDrawer').click();
+    await expect(page.locator('#resourceDrawer')).toBeHidden();
+  }
+  await navigatePage(page, 'managed-networks');
+  await page.getByRole('button', { name: 'lan-one', exact: true }).click();
+  await page.locator('#networkDetail-tab-leases').click();
+  await expect(page.locator('#managedNetworkReservationsBody')).toContainText('only-first-network');
+  await expect(page.locator('#managedNetworkReservationsBody')).not.toContainText('only-second-network');
+  await page.locator('#addNetworkReservationBtn').click();
+  await expect(page.locator('#managedNetworkReservationManagedNetworkId')).toHaveValue('13');
+  await page.locator('#closeResourceDrawer').click();
+  await page.locator('#networkDetail-tab-devices').click();
+  await expect(page.locator('#managedNetworkReservationCandidatesBody')).toContainText('tap100');
+  await expect(page.locator('#managedNetworkReservationCandidatesBody')).not.toContainText('tap200');
+  await page.screenshot({ path: testInfo.outputPath('network-detail.png'), fullPage: true });
+  await expectNoPageOverflow(page);
+});
+
+test('bundled plugin pages share host actions and themes at desktop and 375px', async ({ page }, testInfo) => {
+  const vm = require('node:vm');
+  const plugins = ['router_wizard', 'wan_core', 'lan_core', 'pppoe_client', 'vtolocal', 'packet_observer'].map((id) => {
+    const root = path.resolve(__dirname, '../../../plugins', id);
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
+    const source = fs.readFileSync(path.join(root, 'control.js'), 'utf8');
+    const ui = vm.runInNewContext('(' + source.match(/ui\.register\((\{[\s\S]*?\})\);/)[1] + ')', { crypto: { sha256File: () => '' } });
+    return { ...manifest, status: 'active', enabled: true, ui, resources: ui.resources.map((entry) => ({ id: entry.resource, methods: entry.methods })), actions: ui.actions.map((id) => ({ id })), control: { ...manifest.control, resource_access: ui.resource_access }, asset_base_path: '/api/plugins/' + id + '/assets/', runtime: { mode: 'control' } };
+  });
+  await openDashboard(page, testInfo);
+  await page.route('**/api/plugins', (route) => route.fulfill({ json: { ...pluginCatalog, plugins } }));
+  await page.route('**/api/plugins/*/**', (route) => {
+    const url = new URL(route.request().url());
+    const parts = url.pathname.split('/');
+    if (parts[4] === 'assets') {
+      const file = path.resolve(__dirname, '../../../plugins', parts[3], 'ui', ...parts.slice(5));
+      return route.fulfill({ contentType: file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html; charset=utf-8', body: fs.readFileSync(file, 'utf8') });
+    }
+    return route.fulfill({ json: parts.length > 6 ? { key: parts[6], data: {}, enabled: true } : { records: [], result: {}, status: 'completed' } });
+  });
+  await page.evaluate(async () => { await window.VeerApp.loadPlugins(); window.VeerApp.stopPolling(); });
+  for (const plugin of plugins) {
+    const tab = 'plugin-' + plugin.ui.page;
+    await navigatePage(page, tab);
+    const panel = page.locator('#tab-' + tab);
+    const iframe = page.frameLocator('#tab-' + tab + ' iframe');
+    await expect(iframe.locator('main')).toBeVisible();
+    await expect(iframe.locator('h1')).toHaveCount(0);
+    await expect(panel.locator('.plugin-header-actions .primary-button')).toHaveCount(1);
+    await expect.poll(() => iframe.locator('body').evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    await expectNoPageOverflow(page);
+    for (const theme of ['dark', 'light']) {
+      await page.evaluate((theme) => window.VeerApp.setTheme(theme), theme);
+      await expect(iframe.locator('html')).toHaveAttribute('data-theme', theme);
+      await page.screenshot({ path: testInfo.outputPath(plugin.id + '-' + theme + '.png'), fullPage: true });
+    }
+  }
+});
+
 test('dashboard shell localizes cleanly and plugin details stay usable', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
-  await page.locator('[data-tab="plugins"]').click();
+  await navigatePage(page, 'plugins');
   await expect(page.locator('#pluginsBody tr')).toHaveCount(3);
 
   const unresolved = await page.evaluate(() => {
@@ -646,7 +816,7 @@ test('background load failures stay visible and recover outside the active tab',
   await syncPopover.locator('.overview-sync-popover-header button').click();
   await expect(syncPopover).toBeHidden();
 
-  await page.locator('[data-tab="sites"]').click();
+  await navigatePage(page, 'sites');
   await page.unroute('**/api/rules');
   await page.evaluate(async () => {
     const app = window.VeerApp;
@@ -656,7 +826,7 @@ test('background load failures stay visible and recover outside the active tab',
     await app.runAutoRefresh();
   });
   await expect(syncLabel).not.toHaveClass(/is-error/);
-  await expect(syncLabel).toHaveAttribute('title', '');
+  await expect(syncLabel).toHaveAttribute('title', /.+/);
 
   browserErrors.set(page, []);
 });
@@ -742,7 +912,7 @@ test('non-replayable plugin failures show guidance without a retry action', asyn
 
 test('in-flight polling waits for an opened floating layer before applying data', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
-  await page.locator('[data-tab="plugins"]').click();
+  await navigatePage(page, 'plugins');
   await page.evaluate(() => window.VeerApp.stopPolling());
   await expect.poll(() => page.evaluate(() => window.VeerApp.state.pollRefreshInFlight === null)).toBe(true);
 
@@ -784,7 +954,7 @@ test('in-flight polling waits for an opened floating layer before applying data'
 
 test('plugin page renders Netfilter placement and resizes in both directions', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
-  await page.locator('[data-tab="plugin-firewall"]').click();
+  await navigatePage(page, 'plugin-firewall');
 
   const panel = page.locator('#tab-plugin-firewall');
   await expect(panel).toBeVisible();
@@ -812,7 +982,7 @@ test('plugin page renders Netfilter placement and resizes in both directions', a
 
 test('plugin page confirmation uses the parent overlay and returns the result', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
-  await page.locator('[data-tab="plugin-firewall"]').click();
+  await navigatePage(page, 'plugin-firewall');
 
   const frame = page.frameLocator('#tab-plugin-firewall .plugin-page-frame');
   await frame.locator('#confirm').click();
@@ -825,6 +995,33 @@ test('plugin page confirmation uses the parent overlay and returns the result', 
   await page.locator('#confirmCancelBtn').click();
   await expect(confirm).toBeHidden();
   await expect.poll(() => frame.locator('body').evaluate(() => window.fixtureConfirmResult)).toBe(false);
+});
+
+test('plugin header mirrors button state and notifications cannot escape the active page', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  await navigatePage(page, 'plugin-firewall');
+  const frame = page.frameLocator('#tab-plugin-firewall iframe');
+  const action = page.locator('#tab-plugin-firewall .plugin-header-actions button');
+  await expect(action).toHaveText('Fixture action');
+  await expect(frame.locator('#fixtureHeaderAction')).toBeHidden();
+  await action.click();
+  await expect(page.locator('#toastStack')).toContainText('Netfilter Counter: Header action completed');
+  await frame.locator('#fixtureHeaderAction').evaluate((button) => { button.disabled = true; button.textContent = 'Busy'; });
+  await expect(action).toHaveText('Busy');
+  await expect(action).toBeDisabled();
+  await frame.locator('#fixtureHeaderAction').evaluate((button) => { button.disabled = false; button.textContent = 'Ready'; });
+  await expect(action).toBeEnabled();
+  await expect(action).toHaveText('Ready');
+  await navigatePage(page, 'rules');
+  const accepted = await frame.locator('body').evaluate(() => window.VeerPluginHost.notify('must stay hidden'));
+  expect(accepted).toBe(false);
+  await expect(page.locator('#toastStack')).not.toContainText('must stay hidden');
+  await navigatePage(page, 'plugin-firewall');
+  await expect(action).toHaveText('Ready');
+  await page.evaluate(() => window.VeerApp.reloadPluginPageForTab('plugin-firewall'));
+  await expect(action).toHaveText('Fixture action');
+  await action.click();
+  expect(await frame.locator('body').evaluate(() => window.fixtureHeaderClicks)).toBe(1);
 });
 
 test('confirmation dialog stays above plugin management', async ({ page }, testInfo) => {

@@ -8,9 +8,7 @@
     .pppoe-page {
       padding: 10px;
     }
-    .pppoe-hero {
-      border-left: 3px solid var(--veer-primary);
-    }
+
     .pppoe-form {
       display: grid;
       gap: 10px;
@@ -20,7 +18,7 @@
       gap: 8px;
       padding: 10px;
       border: 1px solid var(--veer-border);
-      border-radius: 9px;
+      border-radius: var(--veer-radius-lg);
       background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
     }
     .pppoe-section-head {
@@ -32,14 +30,14 @@
     .pppoe-section-title {
       margin: 0;
       color: var(--veer-text);
-      font-size: 12px;
-      font-weight: 760;
+      font-size: var(--veer-fs-sm);
+      font-weight: 600;
       letter-spacing: 0.02em;
       text-transform: uppercase;
     }
     .pppoe-section-desc {
       color: var(--veer-soft);
-      font-size: 11px;
+      font-size: var(--veer-fs-xs);
       line-height: 1.4;
     }
     .pppoe-field-grid {
@@ -68,7 +66,7 @@
       min-height: 38px;
       padding: 8px 10px;
       border: 1px solid var(--veer-border);
-      border-radius: 8px;
+      border-radius: var(--veer-radius);
       background: var(--veer-surface);
     }
     .pppoe-toggle-field > span:first-child {
@@ -88,9 +86,9 @@
     }
     .pppoe-runtime-status[data-state="degraded"],
     .pppoe-runtime-status[data-state="redialing"] {
-      border-color: #f6c453;
-      background: #fffbeb;
-      color: #a16207;
+      border-color: var(--veer-warn);
+      background: var(--veer-warn-bg);
+      color: var(--veer-warn);
     }
     .pppoe-runtime-status[data-state="offline"],
     .pppoe-runtime-status[data-state="unknown"] {
@@ -99,13 +97,13 @@
       color: var(--veer-muted);
     }
     .pppoe-runtime-status[data-state="error"] {
-      border-color: #fca5a5;
-      background: #fef2f2;
-      color: #b91c1c;
+      border-color: var(--veer-danger);
+      background: var(--veer-danger-soft);
+      color: var(--veer-danger);
     }
     @media (max-width: 720px) {
       .pppoe-page {
-        padding: 8px;
+        padding: 20px;
       }
       .pppoe-section-head {
         display: grid;
@@ -117,14 +115,14 @@
     @media (prefers-color-scheme: dark) {
       .pppoe-runtime-status[data-state="degraded"],
       .pppoe-runtime-status[data-state="redialing"] {
-        border-color: rgba(250, 204, 21, 0.46);
-        background: rgba(161, 98, 7, 0.2);
-        color: #fde047;
+        border-color: var(--veer-warn);
+        background: var(--veer-warn-bg);
+        color: var(--veer-warn);
       }
       .pppoe-runtime-status[data-state="error"] {
-        border-color: rgba(248, 113, 113, 0.48);
-        background: rgba(185, 28, 28, 0.2);
-        color: #fca5a5;
+        border-color: var(--veer-danger);
+        background: var(--veer-danger-soft);
+        color: var(--veer-danger);
       }
     }
   </style>
@@ -133,6 +131,8 @@
   <script>
     (function () {
       const F = window.VeerPluginHost;
+      const notify = F.notify || F.toast;
+      const notifyError = F.notifyError || F.toastError;
       if (!F) {
         document.body.textContent = 'VeerPluginHost is not available.';
         return;
@@ -998,10 +998,10 @@
           updateMACFields();
           loadedProfileKey = key;
           syncActionButtons();
-          if (!silent) F.toast(T('toast.profileLoaded'));
+          if (!silent) notify(T('toast.profileLoaded'));
           return true;
         } catch (e) {
-          if (!silent) F.toastError(e);
+          if (!silent) notifyError(e);
           return false;
         }
       }
@@ -1040,10 +1040,10 @@
           loadedProfileKey = key;
           syncActionButtons();
           setStatus('status.profileSaved');
-          F.toast(T('toast.profileSaved'));
+          notify(T('toast.profileSaved'));
         } catch (e) {
           setStatus('status.saveFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           pendingAction = '';
           syncActionButtons();
@@ -1075,10 +1075,10 @@
           await F.action(action, payload);
           await loadState();
           setStatus('status.completed');
-          F.toast(action === 'discover' ? T('toast.discoveryDone') : (action === 'traffic_probe' ? T('toast.tunnelDone') : T('toast.probeDone')));
+          notify(action === 'discover' ? T('toast.discoveryDone') : (action === 'traffic_probe' ? T('toast.tunnelDone') : T('toast.probeDone')));
         } catch (e) {
           setStatus('status.failed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           pendingAction = '';
           syncActionButtons();
@@ -1111,7 +1111,7 @@
           updateTraffic({ available: false, reason: F.errorText(error) });
           renderState(lastStateRecord, lastKeepaliveRecord, lastRedialRecord);
           setRuntimeStatus('error', F.errorText(error));
-          if (!silent) F.toastError(error);
+          if (!silent) notifyError(error);
         }).finally(function () {
           stateRefreshPromise = null;
         });
@@ -1143,7 +1143,7 @@
           p = profilePayload();
           p.profile_key = requireProfileKey();
         } catch (e) {
-          F.toastError(e);
+          notifyError(e);
           return;
         }
         if (active) {
@@ -1157,7 +1157,7 @@
             });
             if (!confirmed) return;
           } catch (e) {
-            F.toastError(e);
+            notifyError(e);
             return;
           }
         }
@@ -1170,10 +1170,10 @@
           if (action === 'dial') loadedProfileKey = p.profile_key;
           await loadState();
           setStatus(action === 'disconnect' ? 'status.disconnected' : 'status.dialed');
-          F.toast(T(action === 'disconnect' ? 'toast.disconnected' : 'toast.dialed'));
+          notify(T(action === 'disconnect' ? 'toast.disconnected' : 'toast.dialed'));
         } catch (e) {
           setStatus(action === 'disconnect' ? 'status.disconnectFailed' : 'status.dialFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           pendingAction = '';
           syncActionButtons();
@@ -1183,19 +1183,19 @@
 
       discoverButton = F.button('Discover', function () {
         runAction('discover', discoverButton, 'busy.discover', 'action.discover');
-      });
+      }, true);
       bindText(discoverButton, 'action.discover');
       probeButton = F.button(T('action.probe'), function () {
         runAction('probe_session', probeButton, 'busy.probe', 'action.probe');
-      });
+      }, true);
       bindText(probeButton, 'action.probe');
       tunnelProbeButton = F.button(T('action.tunnelProbe'), function () {
         installTunnel.checked = true;
         runAction('traffic_probe', tunnelProbeButton, 'busy.tunnel', 'action.tunnelProbe');
-      });
+      }, true);
       bindText(tunnelProbeButton, 'action.tunnelProbe');
       connectionButton = F.button(T('action.dial'), runConnectionAction);
-      saveButton = i18nButton('action.save', saveProfile);
+      saveButton = i18nButton('action.save', saveProfile, true);
       loadButton = i18nButton('action.load', loadSelectedProfile, true);
       refreshButton = i18nButton('action.refresh', refreshState, true);
       syncActionButtons();
@@ -1218,10 +1218,9 @@
 
       const page = F.h('main', { className: F.classes.page + ' pppoe-page' }, [
         F.stack([
-          F.card([
+          F.h('section', { className: 'veer-context' }, [
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', null, [
-                textNode('h1', { className: F.classes.title }, 'title'),
                 textNode('p', { className: F.classes.description }, 'desc')
               ]),
               F.h('div', { className: F.classes.toolbar }, [
@@ -1230,7 +1229,7 @@
                 status
               ])
             ])
-          ], { className: 'pppoe-hero' }),
+          ]),
           F.card([
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', null, [
@@ -1347,6 +1346,7 @@
       macMode.addEventListener('change', updateMACFields);
 
       document.body.replaceChildren(page);
+      if (F.headerActions) F.headerActions([saveButton, connectionButton]);
       updateMACFields();
       loadState().then(loadInitialProfile).finally(F.requestResize);
       const stateRefreshTimer = window.setInterval(function () {

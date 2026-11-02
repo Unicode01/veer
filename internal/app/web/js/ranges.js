@@ -349,4 +349,20 @@
       app.renderRangesTable();
     }
   };
+  app.buildRangeFromForm = function buildRangeFromForm() {
+    return {
+      in_interface: app.getInterfaceSubmissionValue(app.el.rangeInInterface, app.el.rangeInInterfacePicker),
+      in_ip: app.el.rangeInIP.value,
+      start_port: parseInt(app.$('rangeStartPort').value, 10),
+      end_port: parseInt(app.$('rangeEndPort').value, 10),
+      out_interface: app.getInterfaceSubmissionValue(app.el.rangeOutInterface, app.el.rangeOutInterfacePicker),
+      out_ip: app.$('rangeOutIP').value.trim(),
+      out_source_ip: app.$('rangeTransparent').checked ? '' : app.el.rangeOutSourceIP.value,
+      out_start_port: parseInt(app.$('rangeOutStartPort').value, 10) || 0,
+      protocol: app.$('rangeProtocol').value,
+      remark: app.$('rangeRemark').value.trim(),
+      tag: app.$('rangeTag').value,
+      transparent: app.$('rangeTransparent').checked
+    };
+  };
 })();

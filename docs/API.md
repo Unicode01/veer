@@ -272,6 +272,8 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 
 `GET /api/host-network` 返回更完整的宿主机接口视图：
 
+响应还包含只读 `host` 对象：`name`（主机名）、`os`、`arch`，Linux 上另有 `kernel_release` 与 `uptime_seconds`（系统启动至今的秒数）。无法读取的字段省略；接口列表的筛选规则不变。
+
 ```json
 {
   "interfaces": [

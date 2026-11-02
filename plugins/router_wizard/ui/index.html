@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Router</title>
   <style>
-    .router-page { padding: 8px; }
-    .router-hero { padding: 11px 12px; }
+    .router-page { padding: 20px; }
+
     .router-title { min-width: 0; }
     .router-badges { justify-content: flex-end; }
     .router-topology {
@@ -18,13 +18,13 @@
       min-width: 0;
       padding: 9px 10px;
       border: 1px solid var(--veer-border);
-      border-radius: 10px;
+      border-radius: var(--veer-radius-lg);
       background: color-mix(in srgb, var(--veer-surface-soft) 76%, transparent);
     }
     .router-node-label {
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 720;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
       line-height: 1.25;
     }
     .router-node-value {
@@ -33,8 +33,8 @@
       text-overflow: ellipsis;
       white-space: nowrap;
       color: var(--veer-text);
-      font-size: 13px;
-      font-weight: 780;
+      font-size: var(--veer-fs-md);
+      font-weight: 600;
       line-height: 1.25;
     }
     .router-config-grid,
@@ -48,16 +48,16 @@
       min-width: 0;
       padding: 10px;
       border: 1px solid var(--veer-border);
-      border-radius: 10px;
+      border-radius: var(--veer-radius-lg);
       background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
     }
     .router-section > * + * { margin-top: 10px; }
     .router-section-title {
       margin: 0;
       color: var(--veer-text);
-      font-size: 13px;
+      font-size: var(--veer-fs-md);
       line-height: 1.25;
-      font-weight: 780;
+      font-weight: 600;
     }
     .router-form-grid {
       display: grid;
@@ -72,8 +72,8 @@
       gap: 8px;
       min-width: 0;
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 680;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
     }
     .router-field-label > span:first-child {
       overflow: hidden;
@@ -88,18 +88,18 @@
       width: 16px;
       height: 16px;
       border: 1px solid var(--veer-border);
-      border-radius: 999px;
+      border-radius: var(--veer-radius-pill);
       color: var(--veer-soft);
       background: var(--veer-surface);
-      font-size: 10px;
-      font-weight: 800;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
       cursor: help;
     }
     .router-check-field {
       min-height: 31px;
       padding: 5px 8px;
       border: 1px solid var(--veer-border);
-      border-radius: 8px;
+      border-radius: var(--veer-radius);
       background: var(--veer-surface);
     }
     .router-check-field label {
@@ -128,12 +128,12 @@
       min-height: 31px;
       padding: 5px 9px;
       border: 1px solid var(--veer-border);
-      border-radius: 8px;
+      border-radius: var(--veer-radius);
       background: var(--veer-surface);
       color: var(--veer-text);
       font: inherit;
-      font-size: 13px;
-      font-weight: 720;
+      font-size: var(--veer-fs-md);
+      font-weight: 600;
       text-align: left;
       cursor: pointer;
       transition: border-color .12s ease, box-shadow .12s ease;
@@ -141,14 +141,14 @@
     .router-multi-button:hover,
     .router-multi-select.is-open .router-multi-button {
       border-color: color-mix(in srgb, var(--veer-accent) 45%, var(--veer-border));
-      box-shadow: 0 0 0 2px color-mix(in srgb, var(--veer-accent) 10%, transparent);
+      box-shadow: none;
     }
     .router-multi-button::after {
       content: "v";
       flex: 0 0 auto;
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 900;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
     }
     .router-multi-value {
       min-width: 0;
@@ -167,9 +167,9 @@
       min-width: 150px;
       padding: 6px;
       border: 1px solid var(--veer-border);
-      border-radius: 9px;
+      border-radius: var(--veer-radius-lg);
       background: var(--veer-surface);
-      box-shadow: 0 12px 32px color-mix(in srgb, var(--veer-shadow, #000) 16%, transparent);
+      box-shadow: none;
     }
     .router-multi-options[hidden] {
       display: none !important;
@@ -180,10 +180,10 @@
       gap: 7px;
       min-width: 0;
       padding: 5px 6px;
-      border-radius: 7px;
+      border-radius: var(--veer-radius);
       color: var(--veer-text);
-      font-size: 12px;
-      font-weight: 680;
+      font-size: var(--veer-fs-sm);
+      font-weight: 600;
       cursor: pointer;
       transition: background .12s ease, color .12s ease;
     }
@@ -207,8 +207,8 @@
     .router-step-group-title {
       margin: 0;
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 760;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
       text-transform: uppercase;
     }
     .router-step-group-list { display: grid; gap: 7px; }
@@ -221,7 +221,7 @@
       min-width: 0;
       padding: 7px 8px;
       border: 1px solid var(--veer-border);
-      border-radius: 8px;
+      border-radius: var(--veer-radius);
       background: var(--veer-surface);
     }
     .router-step-main,
@@ -230,8 +230,8 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font-size: 12px;
-      font-weight: 720;
+      font-size: var(--veer-fs-sm);
+      font-weight: 600;
     }
     .router-step-detail,
     .router-plugin-detail {
@@ -240,7 +240,7 @@
       text-overflow: ellipsis;
       white-space: nowrap;
       color: var(--veer-muted);
-      font-size: 12px;
+      font-size: var(--veer-fs-sm);
     }
     @media (max-width: 900px) {
       .router-config-grid,
@@ -259,6 +259,8 @@
   <script>
     (function () {
       const F = window.VeerPluginHost;
+      const notify = F.notify || F.toast;
+      const notifyError = F.notifyError || F.toastError;
       if (!F) {
         document.body.textContent = 'VeerPluginHost is not available.';
         return;
@@ -741,10 +743,10 @@
         try {
           await F.data.upsert('config', CONFIG_KEY, payload(), { enabled: true });
           setStatus('status.saved');
-          if (!options.silent) F.toast(T('toast.saved'));
+          if (!options.silent) notify(T('toast.saved'));
         } catch (e) {
           setStatus('status.failed');
-          if (!options.silent) F.toastError(e);
+          if (!options.silent) notifyError(e);
           throw e;
         } finally {
           F.requestResize();
@@ -757,16 +759,16 @@
           const record = await F.data.get('config', CONFIG_KEY);
           fillForm(record.data || {});
           setStatus('status.saved');
-          if (!options.silent) F.toast(T('toast.loaded'));
+          if (!options.silent) notify(T('toast.loaded'));
         } catch (e) {
           if (e && e.status && e.status !== 404) {
             setStatus('status.failed');
-            if (!options.silent) F.toastError(e);
+            if (!options.silent) notifyError(e);
             throw e;
           }
           fillForm({});
           setStatus('status.idle');
-          if (!options.silent) F.toast(T('toast.defaultLoaded'));
+          if (!options.silent) notify(T('toast.defaultLoaded'));
         } finally {
           F.requestResize();
         }
@@ -830,7 +832,7 @@
           setStatus('status.idle');
         } catch (e) {
           setStatus('status.failed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           F.requestResize();
         }
@@ -842,10 +844,10 @@
           lastStatus = await F.action('apply_router', payload());
           await loadStatusOnly();
           setStatus('status.applied');
-          F.toast(T('toast.applied'));
+          notify(T('toast.applied'));
         } catch (e) {
           setStatus('status.failed');
-          F.toastError(e);
+          notifyError(e);
           await loadStatusOnly();
         } finally {
           setBusy(button, false, T('action.apply'));
@@ -863,7 +865,7 @@
           });
           if (!confirmed) return;
         } catch (e) {
-          F.toastError(e);
+          notifyError(e);
           return;
         }
         setBusy(button, true, T('status.tearing'));
@@ -872,10 +874,10 @@
           lastStatus = await F.action('teardown_router', payload());
           await loadStatusOnly();
           setStatus('status.deleted');
-          F.toast(T('toast.deleted'));
+          notify(T('toast.deleted'));
         } catch (e) {
           setStatus('status.failed');
-          F.toastError(e);
+          notifyError(e);
           await loadStatusOnly();
         } finally {
           setBusy(button, false, T('action.teardown'));
@@ -1030,7 +1032,7 @@
       ]);
       saveButton = i18nButton('action.save', function () {
         runButtonTask(saveButton, T('status.saving'), function () { return saveConfig(); }).catch(function () {});
-      });
+      }, true);
       loadButton = i18nButton('action.load', function () {
         runButtonTask(loadButton, T('status.loading'), function () { return loadConfig({ silent: false }); }).catch(function () {});
       }, true);
@@ -1043,10 +1045,9 @@
       updateLANAddressingVisibility();
       const page = F.h('main', { className: F.classes.page + ' router-page' }, [
         F.stack([
-          F.card([
+          F.h('section', { className: 'veer-context' }, [
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', { className: 'router-title' }, [
-                textNode('h1', { className: F.classes.title }, 'title'),
                 textNode('p', { className: F.classes.description }, 'desc')
               ]),
               F.h('div', { className: F.classes.toolbar + ' router-badges' }, [
@@ -1055,7 +1056,7 @@
                 status
               ])
             ])
-          ], { className: 'router-hero' }),
+          ]),
           F.card([topologyBody]),
           F.card([
             F.h('div', { className: 'router-config-grid' }, [wanSection, lanSection]),
@@ -1076,12 +1077,13 @@
       ]);
 
       document.body.replaceChildren(page);
+      if (F.headerActions) F.headerActions([saveButton, applyButton]);
       fillForm({});
       updateModeVisibility();
       Promise.all([
         loadConfig({ silent: true }),
         loadStatusOnly()
-      ]).catch(function (e) { F.toastError(e); }).finally(F.requestResize);
+      ]).catch(function (e) { notifyError(e); }).finally(F.requestResize);
     })();
   </script>
 </body>
