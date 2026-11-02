@@ -101,7 +101,7 @@ td {
     color: var(--text);
     outline: none;
     box-shadow: var(--shadow-soft);
-    transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, transform 0.2s ease;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
 }
 
 .table-search-prominent {
@@ -427,7 +427,7 @@ td {
     text-overflow: ellipsis;
     white-space: nowrap;
     cursor: pointer;
-    transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+    transition: box-shadow 0.16s ease;
 }
 
 .plugin-link-step:hover,
@@ -606,7 +606,7 @@ td {
     font-size: var(--fs-sm);
     font-weight: 600;
     white-space: nowrap;
-    transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+    transition: box-shadow 140ms ease;
 }
 
 .plugin-update-choice:not(.is-disabled):hover {
@@ -636,7 +636,7 @@ td {
     border: 1.5px solid currentColor;
     border-radius: var(--r-sm);
     background: var(--surface-solid);
-    transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+    transition: box-shadow 140ms ease;
 }
 
 .plugin-update-check::after {
@@ -1374,7 +1374,7 @@ td {
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+    transition: none;
 }
 
 .plugin-detail-close:hover,
@@ -1765,7 +1765,7 @@ tr.row-pending td {
     font-weight: 600;
     line-height: 1;
     cursor: pointer;
-    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+    transition: none;
 }
 
 .kernel-runtime-note-close:hover,
@@ -1821,7 +1821,7 @@ tr.row-pending td {
     background: var(--surface-muted);
     color: var(--text);
     cursor: pointer;
-    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+    transition: none;
 }
 
 .kernel-runtime-map-badge:hover,
@@ -1957,7 +1957,7 @@ tr.row-pending td {
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+    transition: none;
 }
 
 .kernel-runtime-detail-trigger:hover,
@@ -2489,7 +2489,7 @@ tr.row-pending td {
 .pagination-btn {
     padding: 0 10px;
     cursor: pointer;
-    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+    transition: none;
 }
 
 .pagination-btn:hover,
@@ -2710,8 +2710,7 @@ tr.row-pending td {
 .resource-actions > .action-dropdown { display: inline-block; min-width: 0; }
 .resource-actions > .quick-edit { margin-right: 4px; }
 .resource-actions button { font-size: var(--fs-sm); }
-.resource-row:not(:hover):not(:focus-within) .resource-actions { opacity: .65; }
-.resource-row.is-paused > td:not(.cell-select):not(.resource-actions) { opacity: .62; }
+.resource-row.is-paused .resource-name-content > strong { color: var(--ink-2); }
 .resource-status .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 22px; border: 0; border-radius: var(--r-pill); padding: 3px 8px; font-size: var(--fs-xs); font-weight: 500; }
 .resource-status .badge::before { content: ''; width: 5px; height: 5px; background: currentColor; border-radius: var(--r-pill); flex: 0 0 auto; }
 .patch-route { display: flex; align-items: center; min-width: 0; gap: 0; }

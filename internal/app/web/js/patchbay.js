@@ -90,6 +90,86 @@
     return tab === 'diagnostics' ? 'patchbay.nav.runtime' : 'patchbay.nav.extensions';
   }
 
+  function icon(path, size) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', size || '16');
+    svg.setAttribute('height', size || '16');
+    svg.setAttribute('aria-hidden', 'true');
+    const line = document.createElementNS(svg.namespaceURI, 'path');
+    Object.entries({ d: path, fill: 'none', stroke: 'currentColor', 'stroke-width': '1.7', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }).forEach(([key, value]) => line.setAttribute(key, value));
+    svg.appendChild(line);
+    return svg;
+  }
+
+  function closeThemeMenu(restoreFocus) {
+    if (!shell.themeMenu || shell.themeMenu.hidden) return;
+    shell.themeMenu.hidden = true;
+    shell.themeButton.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) shell.themeButton.focus();
+  }
+
+  function renderSettings() {
+    if (!shell.themeButton) return;
+    shell.themeButton.title = text('toolbar.theme') + ': ' + text('theme.' + app.state.theme);
+    shell.themeButton.setAttribute('aria-label', shell.themeButton.title);
+    shell.themeLabel.textContent = text('toolbar.theme');
+    shell.themeMenu.setAttribute('aria-label', text('toolbar.theme'));
+    shell.themeMenu.querySelectorAll('button').forEach((button) => {
+      button.textContent = text('theme.' + button.dataset.theme);
+      button.setAttribute('aria-checked', String(button.dataset.theme === app.state.theme));
+    });
+    shell.localeButton.textContent = app.state.locale === 'en-US' ? '中文' : 'EN';
+    shell.localeButton.title = app.state.locale === 'en-US' ? '切换为简体中文' : 'Switch to English';
+    shell.localeButton.setAttribute('aria-label', shell.localeButton.title);
+  }
+
+  function buildSettings(actions) {
+    actions.className = 'sidebar-settings';
+    actions.querySelectorAll('.toolbar-field').forEach((label) => { label.hidden = true; });
+    shell.themeLabel = node('span');
+    shell.themeButton = node('button', { className: 'sidebar-tool', attrs: { type: 'button', id: 'themeMenuButton', 'aria-haspopup': 'menu', 'aria-controls': 'themeMenu', 'aria-expanded': 'false' }, children: [icon('M12 3a9 9 0 1 0 0 18V3Z M12 3a9 9 0 0 1 0 18'), shell.themeLabel] });
+    shell.themeMenu = node('div', { className: 'theme-menu', attrs: { id: 'themeMenu', role: 'menu', hidden: '' } });
+    ['system', 'light', 'dark'].forEach((theme) => {
+      const button = node('button', { attrs: { type: 'button', role: 'menuitemradio', tabindex: '-1' }, dataset: { theme } });
+      button.addEventListener('click', () => { app.setTheme(theme); closeThemeMenu(true); });
+      shell.themeMenu.appendChild(button);
+    });
+    const openThemeMenu = () => {
+      shell.themeMenu.hidden = false;
+      shell.themeButton.setAttribute('aria-expanded', 'true');
+      shell.themeMenu.querySelector('[aria-checked="true"]').focus();
+    };
+    shell.themeButton.addEventListener('click', () => { if (shell.themeMenu.hidden) openThemeMenu(); else closeThemeMenu(true); });
+    shell.themeButton.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); openThemeMenu(); }
+    });
+    shell.themeMenu.addEventListener('keydown', (event) => {
+      const buttons = Array.from(shell.themeMenu.children);
+      const index = buttons.indexOf(document.activeElement);
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next].focus();
+      }
+      if (event.key === 'Escape' || event.key === 'Tab') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeThemeMenu(true);
+        if (event.key === 'Tab' && !event.shiftKey) shell.localeButton.focus();
+      }
+    });
+    shell.localeButton = node('button', { className: 'sidebar-tool locale-tool', attrs: { type: 'button', id: 'localeToggle' } });
+    shell.localeButton.addEventListener('click', () => { closeThemeMenu(false); app.setLocale(app.state.locale === 'en-US' ? 'zh-CN' : 'en-US'); });
+    const logout = actions.querySelector('#logoutBtn');
+    logout.className = 'sidebar-tool';
+    logout.addEventListener('click', () => closeThemeMenu(false));
+    actions.append(shell.themeMenu, shell.themeButton, shell.localeButton, logout);
+    document.addEventListener('pointerdown', (event) => { if (!actions.contains(event.target)) closeThemeMenu(false); });
+    document.addEventListener('focusin', (event) => { if (!actions.contains(event.target)) closeThemeMenu(false); });
+    renderSettings();
+  }
+
   function buildShell() {
     const root = app.el.appRoot;
     root.classList.add('patchbay');
@@ -98,18 +178,21 @@
     const actions = oldHeader.querySelector('.header-actions');
     const brand = oldHeader.querySelector('.header-title');
     brand.className = 'sidebar-brand';
-    brand.insertBefore(node('span', { className: 'brand-mark', text: 'V', attrs: { 'aria-hidden': 'true' } }), brand.firstChild);
+    brand.insertBefore(icon('M3 6h7l4 12h7 M19 18a2 2 0 1 0 4 0 2 2 0 1 0-4 0', '24'), brand.firstChild);
+    brand.appendChild(app.$('masterVersion'));
     shell.host = node('div', { className: 'host-card', children: [
-      node('span', { className: 'host-label', text: text('patchbay.host'), dataset: { i18n: 'patchbay.host' } }),
       node('strong', { className: 'mono', text: window.location.hostname || 'Veer', attrs: { id: 'hostName' } }),
-      node('span', { className: 'host-platform', text: '—', attrs: { id: 'hostPlatform' } }),
-      node('span', { className: 'host-platform mono', attrs: { id: 'hostUptime' } })
+      node('dl', { children: [
+        node('dt', { text: text('patchbay.hostSystem'), dataset: { i18n: 'patchbay.hostSystem' } }), node('dd', { attrs: { id: 'hostPlatform' } }),
+        node('dt', { text: text('patchbay.hostKernel'), dataset: { i18n: 'patchbay.hostKernel' } }), node('dd', { attrs: { id: 'hostKernel' } })
+      ] }),
+      node('span', { className: 'host-uptime', attrs: { id: 'hostUptime' } })
     ] });
     shell.sidebar = node('aside', { className: 'sidebar', attrs: { id: 'mainSidebar' }, children: [brand, shell.host] });
     const nav = node('nav', { attrs: { 'aria-label': text('patchbay.navigation') }, children: [tabs] });
     tabs.setAttribute('aria-orientation', 'vertical');
     shell.sidebar.appendChild(nav);
-    actions.className = 'sidebar-settings';
+    buildSettings(actions);
     shell.sidebar.appendChild(actions);
     root.prepend(shell.sidebar);
     shell.main = node('main', { className: 'workspace', attrs: { id: 'mainContent' } });
@@ -151,6 +234,7 @@
   }
 
   function setSidebar(open) {
+    if (!open) closeThemeMenu(false);
     sidebarOpen = !!open;
     shell.sidebar.classList.toggle('is-open', sidebarOpen);
     shell.navBackdrop.hidden = !sidebarOpen;
@@ -163,7 +247,7 @@
   function syncInert() {
     const modal = !!activeDrawer || !!(shell.command && !shell.command.hidden);
     shell.main.inert = modal || sidebarOpen;
-    shell.sidebar.inert = modal;
+    shell.sidebar.inert = modal || (window.innerWidth < 860 && !sidebarOpen);
     document.body.classList.toggle('overlay-open', modal || sidebarOpen);
   }
 
@@ -203,9 +287,12 @@
     }
     const caps = app.state.kernelRuntime && app.state.kernelRuntime.data && app.state.kernelRuntime.data.kernel_capabilities;
     const host = app.hostSummary || caps || {};
-    const platform = [host.os, host.arch, host.kernel_release].filter(Boolean).join(' · ');
+    const platform = [host.os, host.arch].filter(Boolean).join(' / ');
     app.$('hostName').textContent = host.name || window.location.hostname || 'Veer';
-    app.$('hostPlatform').textContent = platform || text('patchbay.hostEndpoint');
+    app.$('hostName').title = app.$('hostName').textContent;
+    app.$('hostPlatform').textContent = platform || '—';
+    app.$('hostKernel').textContent = host.kernel_release || '—';
+    app.$('hostKernel').title = host.kernel_release || '';
     app.$('hostUptime').textContent = Number.isFinite(host.uptime_seconds) ? text('patchbay.uptime', { days: Math.floor(host.uptime_seconds / 86400), hours: Math.floor(host.uptime_seconds % 86400 / 3600) }) : '';
     if (activeDrawer) updatePreview(activeDrawer);
   }
@@ -623,10 +710,12 @@
     cancel.hidden = selected === 0;
   });
   wrap('refreshLocalizedUI', () => {
+    renderSettings();
     document.querySelectorAll('.tabs .tab').forEach((button) => { delete button.dataset.pageTitle; });
     renderShell();
     if (selectedNetworkID) renderNetworkDetail();
   });
+  wrap('applyTheme', renderSettings);
   const originalActivate = app.activateTab;
   app.activateTab = function (target, options) {
     if (!/^[a-z0-9_-]+$/.test(target || '')) return;
@@ -663,7 +752,10 @@
     if (tab && app.$('tab-' + tab)) app.activateTab(tab, { persist: false });
     else { pendingHash = ''; app.activateTab('rules', { persist: false }); }
   });
-  window.addEventListener('resize', () => { if (window.innerWidth >= 860 && sidebarOpen) setSidebar(false); });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth >= 860 && sidebarOpen) setSidebar(false);
+    else syncInert();
+  });
   window.addEventListener('beforeunload', (event) => {
     if (activeDrawer && serializeForm(activeDrawer) !== drawerSnapshot) { event.preventDefault(); event.returnValue = ''; }
   });

@@ -1528,7 +1528,7 @@ body {
   line-height: 1.2;
   white-space: nowrap;
   cursor: pointer;
-  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
 }
 .veer-button.secondary {
   border-color: var(--veer-border);
@@ -1684,8 +1684,9 @@ body {
   font: inherit;
   font-size: var(--veer-fs-sm);
   outline: none;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+  transition: box-shadow 0.16s ease;
 }
+.veer-input::placeholder { color: var(--veer-muted); opacity: 1; }
 textarea.veer-input {
   min-height: 70px;
   padding-top: 7px;
@@ -1734,7 +1735,7 @@ select.veer-input {
   top: 2px;
   border-radius: 50%;
   background: var(--veer-soft);
-  transition: transform 0.16s ease, background 0.16s ease;
+  transition: transform 0.16s ease;
 }
 .veer-input[type="checkbox"]:checked {
   border-color: var(--veer-primary);

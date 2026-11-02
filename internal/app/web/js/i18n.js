@@ -7,6 +7,8 @@
   app.translations = {
     'zh-CN': {
       "patchbay.host": "管理主机",
+      "patchbay.hostSystem": "系统",
+      "patchbay.hostKernel": "内核",
       "patchbay.networkDetails": "网络详情",
       "patchbay.network.overview": "概览",
       "patchbay.network.leases": "固定租约",
@@ -1190,6 +1192,8 @@
     },
     'en-US': {
       "patchbay.host": "MANAGED HOST",
+      "patchbay.hostSystem": "System",
+      "patchbay.hostKernel": "Kernel",
       "patchbay.networkDetails": "Network details",
       "patchbay.network.overview": "Overview",
       "patchbay.network.leases": "Fixed leases",
