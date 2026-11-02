@@ -227,13 +227,13 @@ worker 不是 `new Worker("file")`。第一次 `worker.call(name, handler, paylo
 
 ### 类型和单元测试宿主
 
-编辑 `control.js` 时可以引用 [sdk/plugin/control.d.ts](sdk/plugin/control.d.ts) 获得 Goja 全局 API、context、resource 和 pipeline 类型：
+编辑 `control.js` 时可以引用 [sdk/plugin/control.d.ts](../sdk/plugin/control.d.ts) 获得 Goja 全局 API、context、resource 和 pipeline 类型：
 
 ```js
 /// <reference path="../../sdk/plugin/control.d.ts" />
 ```
 
-不依赖运行中的 Veer 即可用 [sdk/plugin/test-host.cjs](sdk/plugin/test-host.cjs) 执行持久主 VM、独立 worker VM、resource/KV/secret/blob、timer 和 event 单元测试：
+不依赖运行中的 Veer 即可用 [sdk/plugin/test-host.cjs](../sdk/plugin/test-host.cjs) 执行持久主 VM、独立 worker VM、resource/KV/secret/blob、timer 和 event 单元测试：
 
 ```js
 const { createTestHost } = require('../../sdk/plugin/test-host.cjs');

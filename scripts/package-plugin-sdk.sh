@@ -48,8 +48,11 @@ if output.is_symlink():
 output.parent.mkdir(parents=True, exist_ok=True)
 
 sources = [
-    ("PLUGIN.md", root / "PLUGIN.md"),
-    ("KERNEL.md", root / "KERNEL.md"),
+    ("PLUGIN.md", root / "docs" / "PLUGIN.md"),
+    ("KERNEL.md", root / "docs" / "KERNEL.md"),
+    ("docs/PLUGIN.md", root / "docs" / "PLUGIN.md"),
+    ("docs/KERNEL.md", root / "docs" / "KERNEL.md"),
+    ("docs/plugins/vpn_core", root / "docs" / "plugins" / "vpn_core"),
     ("LICENSE", root / "LICENSE"),
     ("sdk/plugin", root / "sdk" / "plugin"),
     ("plugins/include", root / "plugins" / "include"),
@@ -91,6 +94,10 @@ payloads = {}
 total_bytes = 0
 for archive_path, source in sorted(files):
     data = source.read_bytes()
+    if archive_path in ("PLUGIN.md", "KERNEL.md"):
+        # Keep the historical entry points while relative links resolve from
+        # the same docs/ layout as the source repository.
+        data = f"# Veer plugin SDK\n\n[Documentation](docs/{archive_path})\n".encode("utf-8")
     if len(data) > 8 * 1024 * 1024:
         raise SystemExit(f"plugin SDK file is too large: {source}")
     total_bytes += len(data)

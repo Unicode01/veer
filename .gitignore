@@ -35,6 +35,9 @@ scripts/lib-plugin-test-env.sh
 coverage.out
 test-results/
 
+# local WebUI design references; public documentation under docs/ is tracked
+/docs/ui/
+
 # editor / IDE
 .idea/
 .vscode/
