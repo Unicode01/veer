@@ -1,6 +1,8 @@
 (function () {
   'use strict';
   const F=window.VeerPluginHost, M=window.VPNConfig, S=window.VPNShare, h=F.h;
+      const notify = F.notify || F.toast;
+      const notifyError = F.notifyError || F.toastError;
   let records=[], statuses={}, busy=false, original={}, currentDriver='wireguard', savedDriver='', editing=false;
   let peers=[], dirty=false, rawDirty=false, coreDriver='mihomo', coreSequence=0, corePoll=null, statusPoll=null;
   let storedMode='empty', nodeNames=[];
@@ -18,7 +20,7 @@
     if (busy) return;
     busy=true; controlNodes().forEach(el => {el.disabled=true;});
     try { await task(); }
-    catch (error) { message(F.errorText(error),true);F.toastError(error); }
+    catch (error) { message(F.errorText(error),true);notifyError(error); }
     finally { busy=false;controlNodes().forEach(el => {el.disabled=false;});keyInput.readOnly=editing;renderProxyMode();F.requestResize(); }
   }
   function button(text,task,secondary) { const el=F.button(text,() => run(task),secondary);return el; }
@@ -184,7 +186,7 @@
       if(storedMode==='native')driverSpecific.querySelector('details').open=true;
     }
     editorTitle.textContent=editing?'编辑出口 · '+record.key:'新建出口';
-    editor.hidden=false;list.hidden=!records.length;dirty=false;message('');editor.scrollIntoView({block:'start',behavior:'smooth'});
+    editor.hidden=false;createOutletButton.classList.add('secondary');list.hidden=!records.length;dirty=false;message('');editor.scrollIntoView({block:'start',behavior:'smooth'});
   }
   const types=h('div',{className:'vpn-types'},Object.keys(M.drivers).map(id => {
     const driver=M.drivers[id];
@@ -208,7 +210,7 @@
       const draft=keep?{storedMode,mode:configMode.value,nodes:nodeNames,selected:Number(nodeSelect.value),options:proxyOptions(),links:shareLinks.value,native:coreConfig.value}:null;
       fill(value);
       if(draft) {proxyForm({mode:draft.storedMode,nodes:draft.nodes,selected:draft.selected,options:draft.options});configMode.value=draft.mode;shareLinks.value=draft.links;coreConfig.value=draft.native;renderProxyMode();}
-      dirty=true;F.toast('已更新表单，尚未保存');
+      dirty=true;notify('已更新表单，尚未保存');
     },true)
   ]);
   rawConfig.addEventListener('input',()=>{rawDirty=true;});
@@ -249,12 +251,12 @@
         message(result.phase==='starting'?'出口正在启动，稍后查看出口卡片状态。':'已应用。请在 LAN 或出向 NAT 中选择此出口；就绪状态仅表示本机接入完成。');
       } catch (error) { await reload();throw error; }
     } else message('草稿已保存，正在运行的出口未改变。');
-    await reload();F.toast(apply?'已提交应用':'草稿已保存');
+    await reload();notify(apply?'已提交应用':'草稿已保存');
   }
   editor.append(
     h('div',{className:'vpn-heading'},[editorTitle,button('收起编辑',async () => {
       if(dirty && !await F.confirm({title:'放弃未保存修改',message:'草稿尚未保存。',confirmText:'收起',cancelText:'继续编辑'}))return;
-      privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';peers.forEach(p=>{p.psk.value='';});dirty=false;editor.hidden=true;list.hidden=false;
+      privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';peers.forEach(p=>{p.psk.value='';});dirty=false;editor.hidden=true;list.hidden=false;createOutletButton.classList.remove('secondary');
     },true)]),types,
     h('div',{className:'vpn-fields'},[field('出口标识',keyInput,'用于区分出口，保存后保持不变。')]),
     driverSpecific,advanced,
@@ -280,7 +282,7 @@
     healthStates={};((response.result || {}).items || []).forEach(value=>{healthStates[value.key]=value;});
     renderList();
     const values=Object.values(healthStates), checking=values.some(v=>v.state==='checking');
-    if(checking || values.some(v=>v.settings.enabled))healthPoll=setTimeout(()=>refreshHealth().catch(F.toastError),checking?1000:5000);
+    if(checking || values.some(v=>v.settings.enabled))healthPoll=setTimeout(()=>refreshHealth().catch(notifyError),checking?1000:5000);
     F.requestResize();
   }
   const phases={applied:['就绪','ready'],configured:['就绪','ready'],starting:['启动中',''],failed:['启动失败','error'],error:['需要处理','error'],down:['已停止',''],deleted:['已停止','']};
@@ -293,7 +295,7 @@
   function renderList() {
     count.textContent=String(records.length);list.replaceChildren();list.className=records.length?'vpn-list':'';list.hidden=!records.length && !editor.hidden;
     if (!records.length) {list.appendChild(h('div',{className:'vpn-empty'},[
-      node('div','vpn-icon','↗'),node('h2','','创建你的第一个 VPN 出口'),node('p','','选择 WireGuard、Mihomo 或 sing-box，再把需要的 LAN 或设备分配到这个出口。'),button('创建出口',()=>openEditor(),false)
+      node('div','vpn-icon','↗'),node('h2','','创建你的第一个 VPN 出口'),node('p','','选择 WireGuard、Mihomo 或 sing-box，再把需要的 LAN 或设备分配到这个出口。'),button('创建出口',()=>openEditor(),true)
     ]));return;}
     records.forEach(record=>{
       const profile=record.data, driver=M.drivers[profile.driver || 'wireguard'] || {name:profile.driver,short:'?'}, status=statuses[record.key] || {};
@@ -334,7 +336,7 @@
     const state=Array.isArray(results[1])?results[1]:results[1].records || [];
     statuses={};state.forEach(r=>{statuses[r.key]=r.data || {};});renderList();
     clearTimeout(statusPoll);
-    if(state.some(r=>r.data && r.data.phase==='starting'))statusPoll=setTimeout(()=>reload().catch(F.toastError),2500);
+    if(state.some(r=>r.data && r.data.phase==='starting'))statusPoll=setTimeout(()=>reload().catch(notifyError),2500);
     await refreshHealth();
     F.requestResize();
   }
@@ -360,7 +362,7 @@
     const response=await F.action('core_status',{driver});
     if(sequence!==coreSequence || driver!==coreDriver)return;
     if(!response || !response.result)throw new Error('无法读取核心状态');
-    if(setCoreStatus(response.result))corePoll=setTimeout(()=>refreshCore().catch(F.toastError),1500);
+    if(setCoreStatus(response.result))corePoll=setTimeout(()=>refreshCore().catch(notifyError),1500);
   }
   coreDetails.append(coreName,coreVersion,coreInfo,coreProgress,h('div',{className:'vpn-fields'},[field('安装版本',installVersion),field('已安装版本',installed)]),
     h('details',{className:'vpn-advanced'},[h('summary',{text:'指定校验值'}),field('SHA256',installDigest,'官方资产没有摘要时，填写已核实的 SHA256。')]),
@@ -379,17 +381,20 @@
   const outletTab=h('button',{className:'vpn-tab',attrs:{type:'button',role:'tab','aria-selected':'true'},text:'出口'},count);
   const coreTab=h('button',{className:'vpn-tab',attrs:{type:'button',role:'tab','aria-selected':'false'},text:'核心管理'});
   function switchTab(core) {
-    outletPanel.hidden=core;corePanel.hidden=!core;
+    outletPanel.hidden=core;corePanel.hidden=!core;createOutletButton.classList.toggle('secondary',core || !editor.hidden);
     outletTab.setAttribute('aria-selected',String(!core));coreTab.setAttribute('aria-selected',String(core));
-    if(core)refreshCore().catch(F.toastError);else{++coreSequence;clearTimeout(corePoll);}
+    if(core)refreshCore().catch(notifyError);else{++coreSequence;clearTimeout(corePoll);}
     F.requestResize();
   }
   outletTab.addEventListener('click',()=>switchTab(false));coreTab.addEventListener('click',()=>switchTab(true));
   outletPanel.append(editor,detailPanel);
+  const refreshOutletButton=button('刷新出口',reload,true);
+  const createOutletButton=button('新建出口',async()=>{switchTab(false);await openEditor();});
   const page=h('main',{className:F.classes.page+' vpn-page'},[
-    h('header',{className:'vpn-header'},[h('div',{},[node('h1','','VPN 出口'),node('p','','管理 VPN 连接，按需分配给 LAN 或下游设备。')]),actions([button('刷新出口',reload,true),button('新建出口',async()=>{switchTab(false);await openEditor();})])]),
+    actions([refreshOutletButton, createOutletButton]),
     h('nav',{className:'vpn-nav',attrs:{role:'tablist','aria-label':'VPN 页面'}},[outletTab,coreTab]),notice,outletPanel,corePanel
   ]);
   window.addEventListener('pagehide',()=>{++coreSequence;clearTimeout(corePoll);clearTimeout(statusPoll);clearTimeout(healthPoll);privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';});
-  document.body.replaceChildren(page);reload().catch(error=>message(F.errorText(error),true));
+  document.body.replaceChildren(page);
+      if (F.headerActions) F.headerActions([refreshOutletButton, createOutletButton]);reload().catch(error=>message(F.errorText(error),true));
 })();

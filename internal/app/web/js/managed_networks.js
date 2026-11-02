@@ -1046,7 +1046,8 @@
     const st = app.state.managedNetworkReservationCandidates;
     if (!st || !el.managedNetworkReservationCandidatesBody) return;
 
-    const items = Array.isArray(st.data) ? st.data : [];
+    const allItems = Array.isArray(st.data) ? st.data : [];
+    const items = typeof app.filterManagedNetworkDetailRows === 'function' ? app.filterManagedNetworkDetailRows(allItems) : allItems;
     normalizeManagedNetworkReservationCandidateSelections(items);
     let filteredList = items.slice();
     if (st.searchQuery) {
@@ -2085,7 +2086,8 @@
     if (!st || !el.managedNetworkReservationsBody) return;
     app.closeDropdowns();
 
-    let filteredList = st.data.slice();
+    const scopedRows = typeof app.filterManagedNetworkDetailRows === 'function' ? app.filterManagedNetworkDetailRows(st.data) : st.data;
+    let filteredList = scopedRows.slice();
     if (st.searchQuery) {
       filteredList = filteredList.filter((item) => app.matchesSearch(st.searchQuery, [
         item.id,
@@ -2101,7 +2103,7 @@
 
     app.clearNode(el.managedNetworkReservationsBody);
     app.updateSortIndicators('managedNetworkReservationsTable', st);
-    app.renderFilterMeta('managedNetworkReservations', filteredList.length, st.data.length);
+    app.renderFilterMeta('managedNetworkReservations', filteredList.length, scopedRows.length);
     app.renderPagination('managedNetworkReservations', filteredList.length);
 
     if (filteredList.length === 0) {

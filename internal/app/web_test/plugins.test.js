@@ -14,7 +14,7 @@ function makeNode(tagName, opts = {}) {
     attributes: {},
     dataset: Object.assign({}, opts.dataset || {}),
     hidden: false,
-    style: {},
+    style: { setProperty(name, value) { this[name] = String(value); } },
     childNodes: [],
     parentNode: null,
     contentWindow: opts.contentWindow || null,
@@ -1398,6 +1398,23 @@ test('plugin host delegates bounded confirmations to the visible parent modal', 
     host.confirm({ message: 'Hidden prompt' }),
     (error) => error.status === 409 && error.payload.code === 'plugin_ui_confirm_hidden'
   );
+});
+
+test('host notifications require a visible registered frame and bounded plain text', async () => {
+  const app = createHarness();
+  app.state.plugins.data = [{ id: 'sample', name: 'Sample', asset_base_path: '/api/plugins/sample/assets/', ui: { entry: 'index.html' } }];
+  app.__context.fetch = async () => ({ ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => '<!doctype html><title>Sample</title>' });
+  await app.openPluginUI('sample');
+  const host = attachPluginHostChildFrame(app);
+  assert.equal(await host.notify('<img src=x onerror=alert(1)>', 1200, 'info'), true);
+  assert.deepEqual(app.__notifications, [{ type: 'info', message: 'Sample: <img src=x onerror=alert(1)>' }]);
+  assert.equal(await host.notify('too long', 60000), false);
+  assert.equal(await host.notify('bad tone', 2000, 'html'), false);
+  assert.equal(await host.notify(''), false);
+  app.el.pluginUIPanel.hidden = true;
+  assert.equal(await host.notify('hidden notification'), false);
+  assert.equal(app.__notifications.length, 1);
+  assert.throws(() => host.headerActions([{}, {}, {}]), /at most two/);
 });
 
 test('plugin host rejects concurrent confirmations instead of replacing the active modal', async () => {

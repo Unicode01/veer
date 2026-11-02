@@ -887,6 +887,7 @@
     try {
       const resp = await app.apiCall('GET', '/api/host-network');
       app.hostNetworkInterfaces = Array.isArray(resp && resp.interfaces) ? resp.interfaces : [];
+      app.hostSummary = resp && resp.host || null;
       if (typeof app.refreshManagedNetworkInterfaceSelectors === 'function') {
         app.refreshManagedNetworkInterfaceSelectors({ preservePrefix: true });
       }

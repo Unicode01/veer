@@ -1,0 +1,36 @@
+{
+  "project": "https://github.com/IBM/plex",
+  "revision": "71f558992315a12ca1f06a2215d57962a1992162",
+  "files": {
+    "IBMPlexSans-Regular-Latin1.woff2": {
+      "source": "https://raw.githubusercontent.com/IBM/plex/71f558992315a12ca1f06a2215d57962a1992162/packages/plex-sans/fonts/split/woff2/IBMPlexSans-Regular-Latin1.woff2",
+      "sha256": "b5ad7bd39f996144915f0ad9849a90183b27d8c28ad97ed98af5b1bebc51f6b1",
+      "bytes": 20984
+    },
+    "IBMPlexSans-Medium-Latin1.woff2": {
+      "source": "https://raw.githubusercontent.com/IBM/plex/71f558992315a12ca1f06a2215d57962a1992162/packages/plex-sans/fonts/split/woff2/IBMPlexSans-Medium-Latin1.woff2",
+      "sha256": "b5610af04d0d4b5a14a621d96d974b993e945a065db1a8861918f69ef9321934",
+      "bytes": 21960
+    },
+    "IBMPlexSans-SemiBold-Latin1.woff2": {
+      "source": "https://raw.githubusercontent.com/IBM/plex/71f558992315a12ca1f06a2215d57962a1992162/packages/plex-sans/fonts/split/woff2/IBMPlexSans-SemiBold-Latin1.woff2",
+      "sha256": "fff0ab3a88b0b4aa0b693e4f0201359a15183b08e3fa5696d1918d8f0ade8ad5",
+      "bytes": 22260
+    },
+    "IBMPlexMono-Regular-Latin1.woff2": {
+      "source": "https://raw.githubusercontent.com/IBM/plex/71f558992315a12ca1f06a2215d57962a1992162/packages/plex-mono/fonts/split/woff2/IBMPlexMono-Regular-Latin1.woff2",
+      "sha256": "e8993d946649b9d01abb1ed06d574b19d8ea3e66b5c3948602db335c44c18e56",
+      "bytes": 17544
+    },
+    "IBMPlexMono-Medium-Latin1.woff2": {
+      "source": "https://raw.githubusercontent.com/IBM/plex/71f558992315a12ca1f06a2215d57962a1992162/packages/plex-mono/fonts/split/woff2/IBMPlexMono-Medium-Latin1.woff2",
+      "sha256": "41201b658a328b9d00368215c2f1102770f80b15952ab82631e4006255e6365d",
+      "bytes": 17868
+    },
+    "IBMPlexMono-SemiBold-Latin1.woff2": {
+      "source": "https://raw.githubusercontent.com/IBM/plex/71f558992315a12ca1f06a2215d57962a1992162/packages/plex-mono/fonts/split/woff2/IBMPlexMono-SemiBold-Latin1.woff2",
+      "sha256": "b7acd05041ab65f3b7039e218ddd893065e11a07e85ea85019473152a51b6b7d",
+      "bytes": 17872
+    }
+  }
+}

@@ -95,6 +95,15 @@ type HostNetworkInterface = netinfo.HostNetworkInterface
 
 type HostNetworkResponse struct {
 	Interfaces []HostNetworkInterface `json:"interfaces"`
+	Host       HostSummary            `json:"host"`
+}
+
+type HostSummary struct {
+	Name          string   `json:"name,omitempty"`
+	OS            string   `json:"os"`
+	Arch          string   `json:"arch"`
+	KernelRelease string   `json:"kernel_release,omitempty"`
+	UptimeSeconds *float64 `json:"uptime_seconds,omitempty"`
 }
 
 type ManagedNetwork struct {

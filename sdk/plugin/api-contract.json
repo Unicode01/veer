@@ -1,5 +1,5 @@
 {
-  "version": 13,
+  "version": 14,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -3221,5 +3221,16 @@
     "worker.dispatch",
     "worker.list",
     "worker.stats"
-  ]
+  ],
+  "webui": {
+    "version": 1,
+    "host_methods": [
+      "notify",
+      "notifyError",
+      "headerActions"
+    ],
+    "max_header_actions": 2,
+    "max_primary_actions": 1,
+    "max_notification_chars": 2000
+  }
 }

@@ -42,7 +42,7 @@ plugin.service({
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
-  sha256: 'f99d932f2258f162d26159868ee2cf6259da5e608d1fdd86c1b795302d001ba5',
+  sha256: '2bc01a1f279434802ce621a286044fe924d497d0fa935a351daca0a9c02e6e40',
   page: 'vtolocal',
   page_title: 'VToLocal',
   resources: [

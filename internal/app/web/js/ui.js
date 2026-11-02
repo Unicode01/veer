@@ -990,9 +990,9 @@
         app.el.lastSyncLabel.setAttribute('aria-label', app.t('overview.syncFailed', { count: failures.length }) + '. ' + app.t('overview.syncFailuresTitle'));
       } else {
         app.el.lastSyncLabel.textContent = app.state.lastSyncAt
-          ? app.t('overview.lastSync', { time: app.formatClock(app.state.lastSyncAt) })
+          ? app.t('overview.lastSync', { time: new Intl.RelativeTimeFormat(app.state.locale, { numeric: 'auto' }).format(-Math.max(0, Math.floor((Date.now() - app.state.lastSyncAt) / 1000)), 'second') })
           : app.t('overview.awaitingSync');
-        app.el.lastSyncLabel.title = '';
+        app.el.lastSyncLabel.title = app.state.lastSyncAt ? new Date(app.state.lastSyncAt).toLocaleString(app.state.locale) : '';
         app.el.lastSyncLabel.removeAttribute('aria-controls');
         app.el.lastSyncLabel.removeAttribute('aria-haspopup');
         app.el.lastSyncLabel.removeAttribute('aria-label');

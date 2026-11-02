@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const pluginSDKContractVersion = 13
+const pluginSDKContractVersion = 14
 
 type pluginSDKAPIContract struct {
 	Version           int                                 `json:"version"`
@@ -27,6 +27,15 @@ type pluginSDKAPIContract struct {
 	Operations        pluginSDKOperationContract          `json:"operations"`
 	Control           pluginSDKControlContract            `json:"control"`
 	ControlMethods    []string                            `json:"control_methods"`
+	WebUI             pluginSDKWebUIContract              `json:"webui"`
+}
+
+type pluginSDKWebUIContract struct {
+	Version              int      `json:"version"`
+	HostMethods          []string `json:"host_methods"`
+	MaxHeaderActions     int      `json:"max_header_actions"`
+	MaxPrimaryActions    int      `json:"max_primary_actions"`
+	MaxNotificationChars int      `json:"max_notification_chars"`
 }
 
 type pluginSDKControlContract struct {
@@ -94,6 +103,7 @@ func currentPluginSDKAPIContract() pluginSDKAPIContract {
 	capabilities := pluginRuntimeCapabilities(&Config{})
 	return pluginSDKAPIContract{
 		Version: pluginSDKContractVersion,
+		WebUI:   pluginSDKWebUIContract{Version: 1, HostMethods: []string{"notify", "notifyError", "headerActions"}, MaxHeaderActions: 2, MaxPrimaryActions: 1, MaxNotificationChars: 2000},
 		Runtime: pluginSDKRuntimeContract{
 			APIVersion:     pluginAPIVersionV1,
 			RuntimeVersion: pluginRuntimeVersion,
