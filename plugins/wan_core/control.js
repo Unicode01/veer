@@ -60,7 +60,7 @@ plugin.service({
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
-  sha256: '5a8e0ea9acd2526c3c270ad9a9451e4c0407f51adbdbe2e58d558d1e6c3c2604',
+  sha256: 'f25bf63d36f5d6f8c16cee68a5d5b1664cda401a6084e70359982de43a3dd089',
   page: 'wan',
   page_title: 'WAN',
   resources: [
