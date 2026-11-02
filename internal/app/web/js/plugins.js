@@ -2660,6 +2660,8 @@ select.veer-input {
 
   function pluginFrameCanPrompt(frame) {
     if (!frame) return false;
+    // An inline plugin panel may remain open inside an inactive ancestor tab.
+    if (typeof frame.getClientRects === 'function' && frame.getClientRects().length === 0) return false;
     if (frame === app.el.pluginUIFrame) {
       return !!(app.el.pluginUIPanel && !app.el.pluginUIPanel.hidden);
     }
