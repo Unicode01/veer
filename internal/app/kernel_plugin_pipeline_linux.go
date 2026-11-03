@@ -122,6 +122,27 @@ func (sets kernelAttachmentRuleSets) hasTargets() bool {
 		len(sets.ForwardEgress) > 0 || len(sets.ReplyEgress) > 0
 }
 
+// sameTargets reports whether both sets attach to the same interfaces in every
+// direction. Rule IDs do not change which TC hooks exist, so they are ignored.
+func (sets kernelAttachmentRuleSets) sameTargets(other kernelAttachmentRuleSets) bool {
+	return sameKernelAttachTargetInterfaces(sets.ForwardIngress, other.ForwardIngress) &&
+		sameKernelAttachTargetInterfaces(sets.ReplyIngress, other.ReplyIngress) &&
+		sameKernelAttachTargetInterfaces(sets.ForwardEgress, other.ForwardEgress) &&
+		sameKernelAttachTargetInterfaces(sets.ReplyEgress, other.ReplyEgress)
+}
+
+func sameKernelAttachTargetInterfaces(a, b map[int][]int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for ifindex := range a {
+		if _, ok := b[ifindex]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (sets kernelAttachmentRuleSets) rules(reply bool, attach uint32) map[int][]int64 {
 	if reply {
 		if attach == kernelPluginPipelineAttachEgress {

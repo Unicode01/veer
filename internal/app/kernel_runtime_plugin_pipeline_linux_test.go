@@ -592,6 +592,57 @@ func TestKernelPluginPipelinePlansDualStackIngressAndEgress(t *testing.T) {
 	}
 }
 
+func TestKernelAttachmentRuleSetsSameTargetsComparesInterfacesOnly(t *testing.T) {
+	a := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: {1, 2}},
+		ReplyIngress:   map[int][]int64{11: {1}},
+		ForwardEgress:  map[int][]int64{},
+	}
+	b := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: {3}},
+		ReplyIngress:   map[int][]int64{11: nil},
+	}
+	if !a.sameTargets(b) || !b.sameTargets(a) {
+		t.Fatalf("sameTargets(%+v, %+v) = false, rule IDs and empty maps must not matter", a, b)
+	}
+	moved := b.clone()
+	moved.ReplyIngress = map[int][]int64{12: nil}
+	if a.sameTargets(moved) {
+		t.Fatalf("sameTargets ignored a reply interface change")
+	}
+	direction := b.clone()
+	direction.ForwardEgress = map[int][]int64{10: nil}
+	direction.ForwardIngress = nil
+	if a.sameTargets(direction) {
+		t.Fatalf("sameTargets ignored an ingress-to-egress direction change")
+	}
+}
+
+func TestKernelSamePreparedRulesRejectsRemovedPluginBoundary(t *testing.T) {
+	// Deleting a VPN removes its boundary from the plugin egress hook while
+	// the prepared rules stay identical. Every remaining target is attached,
+	// but the stored set must still be replaced; otherwise self-heal keeps
+	// repairing forward_egress_pipeline on the vanished ifindex.
+	stored := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: nil, 202: nil},
+		ForwardEgress:  map[int][]int64{20: nil, 201: nil},
+	}
+	next := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: nil},
+		ForwardEgress:  map[int][]int64{20: nil},
+	}
+	rt := &linuxKernelRuleRuntime{
+		coll:                 &ebpf.Collection{},
+		attachments:          []kernelAttachment{{filter: &netlink.BpfFilter{}}},
+		pluginPipelineActive: true,
+		attachmentMode:       desiredKernelTCAttachmentProgramMode(nil, true),
+		attachmentRuleSets:   stored,
+	}
+	if rt.samePreparedRulesLocked(nil, next) {
+		t.Fatal("samePreparedRulesLocked() = true, want a refresh after a plugin boundary disappears")
+	}
+}
+
 func TestKernelPluginPipelineNoRuleFilterRequiresExplicitPreCoreHook(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
