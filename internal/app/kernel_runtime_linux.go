@@ -4416,6 +4416,12 @@ func (rt *linuxKernelRuleRuntime) samePreparedRulesLocked(next []preparedKernelR
 			return false
 		}
 	}
+	// Health only proves the next targets are attached. A target that went
+	// away, such as a deleted plugin boundary, must still replace the stored
+	// set; otherwise self-heal keeps reattaching to an ifindex that is gone.
+	if !effectiveKernelAttachmentRuleSets(rt.preparedRules, rt.attachmentRuleSets).sameTargets(attachmentRuleSets) {
+		return false
+	}
 	return rt.attachmentsHealthyLocked(attachmentRuleSets)
 }
 
