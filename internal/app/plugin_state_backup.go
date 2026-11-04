@@ -71,6 +71,7 @@ func runPluginStateBackupCLI(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 || strings.TrimSpace(*output) == "" {
 		return fmt.Errorf("plugin backup requires --output and no positional arguments")
 	}
+	applyInstallStateDefaults(flags, databasePath, pluginsDir, stderr)
 	dbPath, err := filepath.Abs(strings.TrimSpace(*databasePath))
 	if err != nil {
 		return err

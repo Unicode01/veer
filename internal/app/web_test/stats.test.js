@@ -151,7 +151,11 @@ function createHarness() {
     'kernel.maps.tooltip.decision.current': 'Current capacity {{current}}',
     'kernel.maps.tooltip.scope.families': 'Active capacity summed across v4/v6 families',
     'kernel.traffic.enabled': 'Enabled',
-    'kernel.traffic.disabled': 'Disabled'
+    'kernel.traffic.disabled': 'Disabled',
+    'kernel.note.helperModuleMissing': 'No helper module for {{release}}',
+    'kernel.note.helperModuleOtherReleases': 'installed for {{releases}}',
+    'kernel.note.helperModuleRebuild': 'run {{command}}',
+    'kernel.note.helperModuleUnavailable': 'Helper module unavailable'
   };
 
   const documentRef = {
@@ -430,6 +434,28 @@ test('kernel status details distinguish helper build support, loading and usable
     assert.ok(detail.includes(state.want));
     if(state.reason)assert.ok(detail.includes(state.reason));
   }
+});
+
+test('kernel runtime notes flag a helper module missing after a kernel upgrade', () => {
+  function helperNotes(helper) {
+    const {app}=createHarness();
+    app.state.kernelRuntime.data=Object.assign(baseRuntimeData(), {
+      kernel_helper_module:Object.assign({name:'veer_kfuncs'}, helper), engines:[runtimeEngine()]
+    });
+    app.renderKernelRuntime();
+    return collectKernelRuntimeNotes(app.el.kernelRuntimeSummary).map(collectText).filter((text)=>text.includes('elper module'));
+  }
+  const missing=helperNotes({compiled:true,loaded:false,available:false,module_installed:false,
+    kernel_release:'6.12.74',other_module_releases:['6.12.73'],rebuild_command:'/opt/veer/veer kfuncs build'});
+  assert.equal(missing.length,1);
+  for(const part of ['No helper module for 6.12.74','installed for 6.12.73','run /opt/veer/veer kfuncs build'])assert.ok(missing[0].includes(part),missing[0]);
+
+  const failed=helperNotes({compiled:true,loaded:true,available:false,module_installed:true,kernel_release:'6.12.74',reason:'ABI mismatch'});
+  assert.equal(failed.length,1);
+  assert.ok(failed[0].includes('Helper module unavailable') && failed[0].includes('ABI mismatch'));
+
+  assert.equal(helperNotes({compiled:true,loaded:true,available:true,module_installed:true,kernel_release:'6.12.74'}).length,0);
+  assert.equal(helperNotes({compiled:false,loaded:false,available:false,module_installed:false,kernel_release:'6.12.74'}).length,0);
 });
 
 test('applyKernelFeatureVisibility hides egress nat surfaces when kernel dataplane is unavailable', () => {

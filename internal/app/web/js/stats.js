@@ -1091,6 +1091,24 @@
     return kernelRuntimeNoteSpec('xdp_attachment_mode', app.t('kernel.note.xdpAttachmentMode') + ' · ' + detail);
   }
 
+  // A kernel upgrade leaves no module for the new release and the host quietly
+  // falls back to the base dataplane; say so and give the rebuild command.
+  function kernelRuntimeHelperModuleNote(helper) {
+    if (!helper || typeof helper !== 'object' || !helper.compiled || helper.available) return null;
+    if (!helper.loaded && helper.module_installed === false && helper.kernel_release) {
+      const parts = [app.t('kernel.note.helperModuleMissing', { release: helper.kernel_release })];
+      const others = Array.isArray(helper.other_module_releases)
+        ? helper.other_module_releases.map((value) => String(value || '').trim()).filter(Boolean)
+        : [];
+      if (others.length) parts.push(app.t('kernel.note.helperModuleOtherReleases', { releases: others.join(', ') }));
+      if (helper.rebuild_command) parts.push(app.t('kernel.note.helperModuleRebuild', { command: helper.rebuild_command }));
+      return kernelRuntimeNoteSpec('kernel_helper_module', parts.join(' · '));
+    }
+    const reason = String(helper.reason || '').trim();
+    if (!reason) return null;
+    return kernelRuntimeNoteSpec('kernel_helper_module', app.t('kernel.note.helperModuleUnavailable') + ' · ' + reason);
+  }
+
   function kernelCapabilityStateText(check) {
     if (!check || typeof check !== 'object') return app.t('common.unknown');
     if (check.available) return app.t('kernel.available.yes');
@@ -1628,6 +1646,7 @@
     );
     const xdpAttachmentModeNote = kernelRuntimeXDPAttachmentModeNote(engines);
     appendKernelRuntimeNote(el.kernelRuntimeSummary, xdpAttachmentModeNote, activeKernelRuntimeNotes);
+    appendKernelRuntimeNote(el.kernelRuntimeSummary, kernelRuntimeHelperModuleNote(data.kernel_helper_module), activeKernelRuntimeNotes);
     pruneKernelRuntimeDismissedNotes(activeKernelRuntimeNotes);
 
     if (!engines.length) {

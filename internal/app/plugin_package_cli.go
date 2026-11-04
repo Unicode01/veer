@@ -95,13 +95,16 @@ func writePluginPackageCLIUsage(w io.Writer) {
 	fmt.Fprintln(w, "  veer plugin contract [--check FILE | --output FILE | --types-output FILE] [--force]")
 	fmt.Fprintln(w, "  veer plugin build --source DIR [--architectures amd64,arm64,arm] [--output-dir build]")
 	fmt.Fprintln(w, "  veer plugin pack --source DIR [--output FILE]")
-	fmt.Fprintln(w, "  veer plugin backup --database FILE --plugins-dir DIR --output FILE")
+	fmt.Fprintln(w, "  veer plugin backup --output FILE [--database FILE] [--plugins-dir DIR]")
 	fmt.Fprintln(w, "  veer plugin restore (--archive FILE | --status | --retry | --cancel) [--database FILE] [--plugins-dir DIR]")
-	fmt.Fprintln(w, "  veer plugin migrate-vpn --database FILE --plugins-dir DIR")
+	fmt.Fprintln(w, "  veer plugin migrate-vpn [--database FILE] [--plugins-dir DIR]")
 	fmt.Fprintln(w, "  veer plugin keygen --private-key FILE --public-key FILE")
 	fmt.Fprintln(w, "  veer plugin sign --archive FILE --private-key FILE [--output FILE]")
 	fmt.Fprintln(w, "  veer plugin verify --package FILE --public-key FILE")
 	fmt.Fprintln(w, "  veer plugin repository init|add|revoke|publish|rotate-key|status [options]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "backup, restore and migrate-vpn default to ./forward.db and ./plugins; when the current")
+	fmt.Fprintln(w, "directory has no forward.db they use the Veer install beside this binary and its plugins_dir.")
 }
 
 func runPluginPackagePackCLI(args []string, stdout, stderr io.Writer) error {
