@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/bits"
 	"net"
 	"sort"
 	"strings"
@@ -282,22 +283,22 @@ func kernelPluginMetricKey(attachment PluginAttachmentState) (uint32, bool) {
 	switch attachment.Stage {
 	case kernelPluginPipelineStagePreForward:
 		metricBase = tcPluginMetricPreForwardBase
-		chainBase = tcProgramChainIndexV4PluginBase
+		chainBase = tcPluginHookSlotPreForward
 	case kernelPluginPipelineStagePostLookup:
 		metricBase = tcPluginMetricPostLookupBase
-		chainBase = tcProgramChainIndexV4PluginPostBase
+		chainBase = tcPluginHookSlotPostLookup
 	case kernelPluginPipelineStagePostApply:
 		metricBase = tcPluginMetricPostApplyBase
-		chainBase = tcProgramChainIndexV4PluginApplyBase
+		chainBase = tcPluginHookSlotPostApply
 	case kernelPluginPipelineStagePreReply:
 		metricBase = tcPluginMetricPreReplyBase
-		chainBase = tcProgramChainIndexV4PluginReplyBase
+		chainBase = tcPluginHookSlotPreReply
 	case kernelPluginPipelineStagePostReply:
 		metricBase = tcPluginMetricPostReplyBase
-		chainBase = tcProgramChainIndexV4PluginReplyPostBase
+		chainBase = tcPluginHookSlotPostReply
 	case kernelPluginPipelineStageReplyApply:
 		metricBase = tcPluginMetricReplyApplyBase
-		chainBase = tcProgramChainIndexV4PluginReplyApplyBase
+		chainBase = tcPluginHookSlotReplyApply
 	default:
 		return 0, false
 	}
@@ -1025,94 +1026,83 @@ func buildKernelPluginPipelineDesiredWithConfig(catalog PluginCatalog, cfg *Conf
 		}
 		desired = append(desired, item)
 	}
-	desired, states = applyKernelPluginPacketMetadataBindings(desired, states)
-	desired, states = applyKernelPluginPipelineOrdering(desired, states)
-	preForwardHooks := 0
-	postLookupHooks := 0
-	postApplyHooks := 0
-	preReplyHooks := 0
-	postReplyHooks := 0
-	replyApplyHooks := 0
-	for _, item := range desired {
-		for _, hook := range item.hooks {
-			switch hook.Stage {
-			case kernelPluginPipelineStagePreForward:
-				preForwardHooks++
-			case kernelPluginPipelineStagePostLookup:
-				postLookupHooks++
-			case kernelPluginPipelineStagePostApply:
-				postApplyHooks++
-			case kernelPluginPipelineStagePreReply:
-				preReplyHooks++
-			case kernelPluginPipelineStagePostReply:
-				postReplyHooks++
-			case kernelPluginPipelineStageReplyApply:
-				replyApplyHooks++
-			}
-		}
-	}
-	if preForwardHooks > tcProgramChainV4PluginPreForwardMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many pre-core tc plugin hooks: %d > %d", preForwardHooks, tcProgramChainV4PluginPreForwardMax))
-		for _, item := range desired {
-			states[item.plugin.ID] = errState
-		}
-		return nil, states
-	}
-	if postLookupHooks > tcProgramChainV4PluginPostLookupMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many next-core tc plugin hooks: %d > %d", postLookupHooks, tcProgramChainV4PluginPostLookupMax))
-		for _, item := range desired {
-			states[item.plugin.ID] = errState
-		}
-		return nil, states
-	}
-	if postApplyHooks > tcProgramChainV4PluginPostApplyMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many post-apply tc plugin hooks: %d > %d", postApplyHooks, tcProgramChainV4PluginPostApplyMax))
-		for _, item := range desired {
-			states[item.plugin.ID] = errState
-		}
-		return nil, states
-	}
-	if preReplyHooks > tcProgramChainV4PluginPreReplyMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many pre-reply tc plugin hooks: %d > %d", preReplyHooks, tcProgramChainV4PluginPreReplyMax))
-		for _, item := range desired {
-			states[item.plugin.ID] = errState
-		}
-		return nil, states
-	}
-	if postReplyHooks > tcProgramChainV4PluginPostReplyMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many post-reply tc plugin hooks: %d > %d", postReplyHooks, tcProgramChainV4PluginPostReplyMax))
-		for _, item := range desired {
-			states[item.plugin.ID] = errState
-		}
-		return nil, states
-	}
-	if replyApplyHooks > tcProgramChainV4PluginPostReplyApplyMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many reply post-apply tc plugin hooks: %d > %d", replyApplyHooks, tcProgramChainV4PluginPostReplyApplyMax))
-		for _, item := range desired {
-			states[item.plugin.ID] = errState
-		}
-		return nil, states
-	}
-	if preForwardHooks+postLookupHooks+postApplyHooks > tcProgramChainV4PluginTotalMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many total tc plugin hooks: %d > %d", preForwardHooks+postLookupHooks+postApplyHooks, tcProgramChainV4PluginTotalMax))
-		for _, item := range desired {
-			states[item.plugin.ID] = errState
-		}
-		return nil, states
-	}
-	if preReplyHooks+postReplyHooks+replyApplyHooks > tcProgramChainV4PluginReplyTotalMax {
-		errState := pluginRuntimeErrorState(fmt.Sprintf("too many total reply tc plugin hooks: %d > %d", preReplyHooks+postReplyHooks+replyApplyHooks, tcProgramChainV4PluginReplyTotalMax))
-		for _, item := range desired {
-			states[item.plugin.ID] = errState
-		}
-		return nil, states
-	}
+	desired, states = admitKernelPluginPipelineDesired(desired, states)
 	sort.Slice(desired, func(i, j int) bool {
 		a := desired[i].hooks[0]
 		b := desired[j].hooks[0]
 		return kernelPluginPipelineLess(a, b)
 	})
 	return desired, states
+}
+
+// admitKernelPluginPipelineDesired resolves metadata bindings and hook order,
+// then admits plugins against the hook capacity. A plugin that does not fit
+// is rejected on its own; the others are re-ordered without it, since their
+// before/after or metadata references may have pointed at it.
+func admitKernelPluginPipelineDesired(desired []kernelPluginPipelineDesiredPlugin, states map[string]PluginRuntimeState) ([]kernelPluginPipelineDesiredPlugin, map[string]PluginRuntimeState) {
+	for {
+		desired, states = applyKernelPluginPacketMetadataBindings(desired, states)
+		desired, states = applyKernelPluginPipelineOrdering(desired, states)
+		if len(desired) == 0 {
+			return desired, states
+		}
+		sort.SliceStable(desired, func(i, j int) bool {
+			return kernelPluginPipelineLess(desired[i].hooks[0], desired[j].hooks[0])
+		})
+		candidates := make([]pluginHookCapacityPlugin, 0, len(desired))
+		for _, item := range desired {
+			candidates = append(candidates, kernelPluginPipelineCapacityPlugin(item))
+		}
+		rejected := admitPluginHooksByCapacity(candidates, pluginHookCapacityLimits{
+			Engine:         kernelEngineTC,
+			StageCapacity:  tcPluginHookStageCapacity,
+			InterfaceStage: pluginTCPipelineStageHookLimit,
+			InterfaceGroup: pluginTCPipelineDirectionHookLimit,
+		})
+		if len(rejected) == 0 {
+			return desired, states
+		}
+		kept := make([]kernelPluginPipelineDesiredPlugin, 0, len(desired)-len(rejected))
+		for _, item := range desired {
+			if message, ok := rejected[item.plugin.ID]; ok {
+				states[item.plugin.ID] = pluginRuntimeErrorState(message)
+				continue
+			}
+			kept = append(kept, item)
+		}
+		desired = kept
+	}
+}
+
+func kernelPluginPipelineCapacityPlugin(item kernelPluginPipelineDesiredPlugin) pluginHookCapacityPlugin {
+	plugin := pluginHookCapacityPlugin{
+		ID:      item.plugin.ID,
+		Running: item.plugin.Runtime.Attached,
+		Hooks:   make([]pluginHookCapacityHook, 0, len(item.hooks)),
+	}
+	for _, hook := range item.hooks {
+		group := pluginPipelineDirectionForward
+		switch hook.Stage {
+		case kernelPluginPipelineStagePreReply, kernelPluginPipelineStagePostReply, kernelPluginPipelineStageReplyApply:
+			group = pluginPipelineDirectionReply
+		}
+		attaches := make([]string, 0, 2)
+		for _, attach := range kernelPluginPipelinePlanAttachDirections(hook.Attach) {
+			if attach == kernelPluginPipelineAttachEgress {
+				attaches = append(attaches, "egress")
+			} else {
+				attaches = append(attaches, "ingress")
+			}
+		}
+		plugin.Hooks = append(plugin.Hooks, pluginHookCapacityHook{
+			HookID:     hook.HookID,
+			Stage:      hook.Stage,
+			Group:      group,
+			Attaches:   attaches,
+			Interfaces: normalizePluginHookCapacityInterfaces(hook.Interfaces),
+		})
+	}
+	return plugin
 }
 
 func kernelPluginPipelineCatalogHasRuntimeHooks(catalog PluginCatalog, cfg *Config) bool {
@@ -1297,22 +1287,22 @@ func (rt *linuxKernelRuleRuntime) loadKernelPluginPipelinePrograms(desired []ker
 		slot := 0
 		switch item.plan.Stage {
 		case kernelPluginPipelineStagePreForward:
-			slot = tcProgramChainIndexV4PluginBase + preForwardIndex
+			slot = tcPluginHookSlotPreForward + preForwardIndex
 			preForwardIndex++
 		case kernelPluginPipelineStagePostLookup:
-			slot = tcProgramChainIndexV4PluginPostBase + postLookupIndex
+			slot = tcPluginHookSlotPostLookup + postLookupIndex
 			postLookupIndex++
 		case kernelPluginPipelineStagePostApply:
-			slot = tcProgramChainIndexV4PluginApplyBase + postApplyIndex
+			slot = tcPluginHookSlotPostApply + postApplyIndex
 			postApplyIndex++
 		case kernelPluginPipelineStagePreReply:
-			slot = tcProgramChainIndexV4PluginReplyBase + preReplyIndex
+			slot = tcPluginHookSlotPreReply + preReplyIndex
 			preReplyIndex++
 		case kernelPluginPipelineStagePostReply:
-			slot = tcProgramChainIndexV4PluginReplyPostBase + postReplyIndex
+			slot = tcPluginHookSlotPostReply + postReplyIndex
 			postReplyIndex++
 		case kernelPluginPipelineStageReplyApply:
-			slot = tcProgramChainIndexV4PluginReplyApplyBase + replyApplyIndex
+			slot = tcPluginHookSlotReplyApply + replyApplyIndex
 			replyApplyIndex++
 		}
 		countByPlugin[item.plan.PluginID]++
@@ -1618,31 +1608,22 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 			return 0, fmt.Errorf("unsupported plugin stage %q", item.plan.Stage)
 		}
 	}
-	if len(preForward) > tcProgramChainV4PluginPreForwardMax {
-		return 0, fmt.Errorf("too many pre_forward plugin programs: %d > %d", len(preForward), tcProgramChainV4PluginPreForwardMax)
+	for _, stage := range []struct {
+		name  string
+		count int
+	}{
+		{kernelPluginPipelineStagePreForward, len(preForward)},
+		{kernelPluginPipelineStagePostLookup, len(postLookup)},
+		{kernelPluginPipelineStagePostApply, len(postApply)},
+		{kernelPluginPipelineStagePreReply, len(preReply)},
+		{kernelPluginPipelineStagePostReply, len(postReply)},
+		{kernelPluginPipelineStageReplyApply, len(replyApply)},
+	} {
+		if stage.count > tcPluginHookStageCapacity {
+			return 0, fmt.Errorf("too many %s plugin programs: %d > host capacity %d", stage.name, stage.count, tcPluginHookStageCapacity)
+		}
 	}
-	if len(postLookup) > tcProgramChainV4PluginPostLookupMax {
-		return 0, fmt.Errorf("too many post_lookup plugin programs: %d > %d", len(postLookup), tcProgramChainV4PluginPostLookupMax)
-	}
-	if len(postApply) > tcProgramChainV4PluginPostApplyMax {
-		return 0, fmt.Errorf("too many post_apply plugin programs: %d > %d", len(postApply), tcProgramChainV4PluginPostApplyMax)
-	}
-	if len(preForward)+len(postLookup)+len(postApply) > tcProgramChainV4PluginTotalMax {
-		return 0, fmt.Errorf("too many total plugin programs: %d > %d", len(preForward)+len(postLookup)+len(postApply), tcProgramChainV4PluginTotalMax)
-	}
-	if len(preReply) > tcProgramChainV4PluginPreReplyMax {
-		return 0, fmt.Errorf("too many pre_reply plugin programs: %d > %d", len(preReply), tcProgramChainV4PluginPreReplyMax)
-	}
-	if len(postReply) > tcProgramChainV4PluginPostReplyMax {
-		return 0, fmt.Errorf("too many post_reply plugin programs: %d > %d", len(postReply), tcProgramChainV4PluginPostReplyMax)
-	}
-	if len(replyApply) > tcProgramChainV4PluginPostReplyApplyMax {
-		return 0, fmt.Errorf("too many post_reply_apply plugin programs: %d > %d", len(replyApply), tcProgramChainV4PluginPostReplyApplyMax)
-	}
-	if len(preReply)+len(postReply)+len(replyApply) > tcProgramChainV4PluginReplyTotalMax {
-		return 0, fmt.Errorf("too many total reply plugin programs: %d > %d", len(preReply)+len(postReply)+len(replyApply), tcProgramChainV4PluginReplyTotalMax)
-	}
-	if pieces.progChainV4 == nil || pieces.pluginConfigV4 == nil || pieces.pluginInterfacesV4 == nil || pieces.pluginMetrics == nil {
+	if pieces.progChainV4 == nil || pieces.pluginHooksV4 == nil || pieces.pluginConfigV4 == nil || pieces.pluginInterfacesV4 == nil || pieces.pluginMetrics == nil {
 		return 0, fmt.Errorf("tc plugin pipeline maps are incomplete")
 	}
 
@@ -1655,11 +1636,17 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 	if err != nil {
 		return 0, err
 	}
+	// Admission already enforced this from hook interface names. The masks
+	// are what the packet path actually walks, so check them too before a
+	// chain that could overrun the tail-call budget goes live.
+	if err := validateKernelPluginPipelineInterfaceDepth(masks); err != nil {
+		return 0, err
+	}
 	if err := clearKernelPluginPipelineInterfaceBank(pieces.pluginInterfacesV4, inactiveBank); err != nil {
 		return 0, err
 	}
 
-	installStage := func(items []loadedKernelPluginPipelineProgram, stage string, max int) error {
+	installStage := func(items []loadedKernelPluginPipelineProgram, stage string) error {
 		base, err := kernelPluginPipelineBankStageBase(inactiveBank, stage)
 		if err != nil {
 			return err
@@ -1669,34 +1656,31 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 				return fmt.Errorf("%s plugin program at index %d is nil", stage, i)
 			}
 			slot := uint32(base + i)
-			if err := pieces.progChainV4.Put(slot, uint32(item.prog.FD())); err != nil {
+			if err := pieces.pluginHooksV4.Put(slot, uint32(item.prog.FD())); err != nil {
 				return fmt.Errorf("install plugin %s hook %s at slot %d: %w", item.plan.PluginID, item.plan.HookID, slot, err)
 			}
 		}
-		for i := len(items); i < max; i++ {
-			if err := deleteKernelMapEntry(pieces.progChainV4, uint32(base+i)); err != nil {
+		for i := len(items); i < tcPluginHookStageCapacity; i++ {
+			if err := deleteKernelMapEntry(pieces.pluginHooksV4, uint32(base+i)); err != nil {
 				return fmt.Errorf("clear stale %s plugin slot %d: %w", stage, base+i, err)
 			}
 		}
 		return nil
 	}
-	if err := installStage(preForward, kernelPluginPipelineStagePreForward, tcProgramChainV4PluginPreForwardMax); err != nil {
-		return 0, err
-	}
-	if err := installStage(postLookup, kernelPluginPipelineStagePostLookup, tcProgramChainV4PluginPostLookupMax); err != nil {
-		return 0, err
-	}
-	if err := installStage(postApply, kernelPluginPipelineStagePostApply, tcProgramChainV4PluginPostApplyMax); err != nil {
-		return 0, err
-	}
-	if err := installStage(preReply, kernelPluginPipelineStagePreReply, tcProgramChainV4PluginPreReplyMax); err != nil {
-		return 0, err
-	}
-	if err := installStage(postReply, kernelPluginPipelineStagePostReply, tcProgramChainV4PluginPostReplyMax); err != nil {
-		return 0, err
-	}
-	if err := installStage(replyApply, kernelPluginPipelineStageReplyApply, tcProgramChainV4PluginPostReplyApplyMax); err != nil {
-		return 0, err
+	for _, stage := range []struct {
+		name  string
+		items []loadedKernelPluginPipelineProgram
+	}{
+		{kernelPluginPipelineStagePreForward, preForward},
+		{kernelPluginPipelineStagePostLookup, postLookup},
+		{kernelPluginPipelineStagePostApply, postApply},
+		{kernelPluginPipelineStagePreReply, preReply},
+		{kernelPluginPipelineStagePostReply, postReply},
+		{kernelPluginPipelineStageReplyApply, replyApply},
+	} {
+		if err := installStage(stage.items, stage.name); err != nil {
+			return 0, err
+		}
 	}
 	for scope, value := range masks.byInterface {
 		key := kernelTCPluginInterfaceKeyV4{IfIndex: scope.IfIndex, Bank: inactiveBank, Attach: scope.Attach}
@@ -1797,6 +1781,57 @@ func buildKernelPluginPipelineInterfaceMasks(programs []loadedKernelPluginPipeli
 	return result, nil
 }
 
+// validateKernelPluginPipelineInterfaceDepth checks the hooks one packet would
+// walk on each interface and attach direction against the tail-call budget.
+func validateKernelPluginPipelineInterfaceDepth(masks kernelPluginPipelineInterfaceMasks) error {
+	check := func(label string, value kernelTCPluginInterfaceValueV4) error {
+		stages := []struct {
+			name string
+			mask uint32
+		}{
+			{kernelPluginPipelineStagePreForward, value.PreForwardMask},
+			{kernelPluginPipelineStagePostLookup, value.PostLookupMask},
+			{kernelPluginPipelineStagePostApply, value.PostApplyMask},
+			{kernelPluginPipelineStagePreReply, value.PreReplyMask},
+			{kernelPluginPipelineStagePostReply, value.PostReplyMask},
+			{kernelPluginPipelineStageReplyApply, value.ReplyApplyMask},
+		}
+		for _, stage := range stages {
+			if count := bits.OnesCount32(stage.mask); count > pluginTCPipelineStageHookLimit {
+				return fmt.Errorf("%s runs %d %s hooks per packet, limit %d", label, count, stage.name, pluginTCPipelineStageHookLimit)
+			}
+		}
+		forward := bits.OnesCount32(value.PreForwardMask) + bits.OnesCount32(value.PostLookupMask) + bits.OnesCount32(value.PostApplyMask)
+		reply := bits.OnesCount32(value.PreReplyMask) + bits.OnesCount32(value.PostReplyMask) + bits.OnesCount32(value.ReplyApplyMask)
+		if forward > pluginTCPipelineDirectionHookLimit || reply > pluginTCPipelineDirectionHookLimit {
+			return fmt.Errorf("%s runs %d forward and %d reply hooks per packet, limit %d per direction", label, forward, reply, pluginTCPipelineDirectionHookLimit)
+		}
+		return nil
+	}
+	merge := func(left, right kernelTCPluginInterfaceValueV4) kernelTCPluginInterfaceValueV4 {
+		return kernelTCPluginInterfaceValueV4{
+			PreForwardMask: left.PreForwardMask | right.PreForwardMask,
+			PostLookupMask: left.PostLookupMask | right.PostLookupMask,
+			PreReplyMask:   left.PreReplyMask | right.PreReplyMask,
+			PostReplyMask:  left.PostReplyMask | right.PostReplyMask,
+			PostApplyMask:  left.PostApplyMask | right.PostApplyMask,
+			ReplyApplyMask: left.ReplyApplyMask | right.ReplyApplyMask,
+		}
+	}
+	for attach, global := range masks.globalByAttach {
+		if err := check(fmt.Sprintf("tc attach %d on every interface", attach), global); err != nil {
+			return err
+		}
+	}
+	for scope, scoped := range masks.byInterface {
+		label := fmt.Sprintf("tc attach %d on ifindex %d", scope.Attach, scope.IfIndex)
+		if err := check(label, merge(masks.globalByAttach[scope.Attach], scoped)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func kernelPluginPipelinePlanAttachDirections(attach string) []uint32 {
 	switch attach {
 	case "egress":
@@ -1825,37 +1860,30 @@ func setKernelPluginPipelineStageMask(value *kernelTCPluginInterfaceValueV4, sta
 	}
 }
 
+// kernelPluginPipelineBankStageBase returns the first tc_plugin_hooks_v4 slot
+// of stage in bank. It mirrors tc_plugin_hook_slot() in forward-tc-bpf.c.
 func kernelPluginPipelineBankStageBase(bank uint32, stage string) (int, error) {
-	if bank&1 == 0 {
-		switch stage {
-		case kernelPluginPipelineStagePreForward:
-			return tcProgramChainIndexV4PluginBase, nil
-		case kernelPluginPipelineStagePostLookup:
-			return tcProgramChainIndexV4PluginPostBase, nil
-		case kernelPluginPipelineStagePostApply:
-			return tcProgramChainIndexV4PluginApplyBase, nil
-		case kernelPluginPipelineStagePreReply:
-			return tcProgramChainIndexV4PluginReplyBase, nil
-		case kernelPluginPipelineStagePostReply:
-			return tcProgramChainIndexV4PluginReplyPostBase, nil
-		case kernelPluginPipelineStageReplyApply:
-			return tcProgramChainIndexV4PluginReplyApplyBase, nil
-		}
-	} else {
-		switch stage {
-		case kernelPluginPipelineStagePreForward:
-			return tcProgramChainIndexV4PluginBank1Base, nil
-		case kernelPluginPipelineStagePostLookup:
-			return tcProgramChainIndexV4PluginBank1PostBase, nil
-		case kernelPluginPipelineStagePostApply:
-			return tcProgramChainIndexV4PluginBank1ApplyBase, nil
-		case kernelPluginPipelineStagePreReply:
-			return tcProgramChainIndexV4PluginBank1ReplyBase, nil
-		case kernelPluginPipelineStagePostReply:
-			return tcProgramChainIndexV4PluginBank1ReplyPostBase, nil
-		case kernelPluginPipelineStageReplyApply:
-			return tcProgramChainIndexV4PluginBank1ReplyApplyBase, nil
-		}
+	base, err := kernelPluginPipelineStageSlotBase(stage)
+	if err != nil {
+		return 0, err
+	}
+	return int(bank&1)*tcPluginHookBankSlots + base, nil
+}
+
+func kernelPluginPipelineStageSlotBase(stage string) (int, error) {
+	switch stage {
+	case kernelPluginPipelineStagePreForward:
+		return tcPluginHookSlotPreForward, nil
+	case kernelPluginPipelineStagePostLookup:
+		return tcPluginHookSlotPostLookup, nil
+	case kernelPluginPipelineStagePostApply:
+		return tcPluginHookSlotPostApply, nil
+	case kernelPluginPipelineStagePreReply:
+		return tcPluginHookSlotPreReply, nil
+	case kernelPluginPipelineStagePostReply:
+		return tcPluginHookSlotPostReply, nil
+	case kernelPluginPipelineStageReplyApply:
+		return tcPluginHookSlotReplyApply, nil
 	}
 	return 0, fmt.Errorf("unsupported plugin stage %q", stage)
 }
@@ -1886,25 +1914,13 @@ func clearKernelPluginPipelineInterfaceBank(m *ebpf.Map, bank uint32) error {
 
 func clearKernelPluginPipelineBank(pieces kernelCollectionPieces, bank uint32) error {
 	errs := make([]string, 0)
-	if pieces.progChainV4 == nil {
-		errs = append(errs, "tc program chain map is nil")
+	if pieces.pluginHooksV4 == nil {
+		errs = append(errs, "tc plugin hook map is nil")
 	} else {
-		for _, stage := range []struct {
-			name  string
-			count int
-		}{
-			{name: kernelPluginPipelineStagePreForward, count: tcProgramChainV4PluginPreForwardMax},
-			{name: kernelPluginPipelineStagePostLookup, count: tcProgramChainV4PluginPostLookupMax},
-			{name: kernelPluginPipelineStagePostApply, count: tcProgramChainV4PluginPostApplyMax},
-			{name: kernelPluginPipelineStagePreReply, count: tcProgramChainV4PluginPreReplyMax},
-			{name: kernelPluginPipelineStagePostReply, count: tcProgramChainV4PluginPostReplyMax},
-			{name: kernelPluginPipelineStageReplyApply, count: tcProgramChainV4PluginPostReplyApplyMax},
-		} {
-			base, _ := kernelPluginPipelineBankStageBase(bank, stage.name)
-			for i := 0; i < stage.count; i++ {
-				if err := deleteKernelMapEntry(pieces.progChainV4, uint32(base+i)); err != nil {
-					errs = append(errs, fmt.Sprintf("delete tc plugin chain slot %d: %v", base+i, err))
-				}
+		base := int(bank&1) * tcPluginHookBankSlots
+		for slot := base; slot < base+tcPluginHookBankSlots; slot++ {
+			if err := deleteKernelMapEntry(pieces.pluginHooksV4, uint32(slot)); err != nil {
+				errs = append(errs, fmt.Sprintf("delete tc plugin hook slot %d: %v", slot, err))
 			}
 		}
 	}

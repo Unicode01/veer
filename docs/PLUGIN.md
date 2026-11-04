@@ -702,7 +702,14 @@ pipeline.attach({
 - `post_reply_apply`：reply rewrite、校验和更新完成后且最终 redirect 前，适合 PPPoE/VXLAN 回包封装；通过 `direction: "reply", phase: "after_apply"` 注册。
 - `attach=ingress|egress`：同一逻辑 chain 可分别绑定到真实接口的 TC ingress 或 egress，并使用独立接口作用域。
 
-ABI v2 的共享 prog-array 固定为 111 slots。每个具体 stage 最多 8 个 Hook，forward 和 reply 每个方向跨三个 stage 合计最多 14 个 Hook，以保留 eBPF tail-call 深度余量。超限会在注册/reconcile 阶段拒绝，不会截断链。
+ABI v2 的共享 prog-array 固定为 111 slots，插件只会跳回其中的 continue slot；Hook 本身放在宿主私有的 `tc_plugin_hooks_v4` 中，不属于插件 ABI，插件 object 不需要为此重新编译。
+
+Hook 上限分两层：
+
+- **按接口计算的深度上限**：一个包在一个接口、一个挂载方向（ingress/egress）上，每个具体 stage 最多经过 8 个 Hook，forward 或 reply 方向跨三个 stage 合计最多 14 个。每个 Hook 消耗两次 tail call，这是内核每次执行 33 次 tail call 上限留下的余量。不带 `interfaces` 的全局 Hook 会计入每一个接口。
+- **整机容量**：每个具体 stage 整机最多 32 个 Hook。挂在不同接口上的 Hook 互不叠加，所以 12 个插件各自绑定自己的接口时可以同时运行。
+
+超限时按插件整体准入：已在运行的插件优先保留，其余按链顺序依次放入，放不下的插件单独报错（错误信息会指出是哪个接口、哪个 stage 超限），其他插件照常运行，链不会被截断。被拒插件被其他插件 `before/after` 引用时，引用方随后也会按排序规则报错。能力接口中 `runtime.tc_pipeline.stage_hook_limit/direction_hook_limit` 是按接口的上限，`stage_hook_capacity` 是整机容量，`hook_limit_scope` 为 `interface`。
 
 PPPoE 路径出站使用 `local0 -> pipeline peer TC ingress -> PPPoE stage -> physical WAN`，入站使用 `physical WAN TC ingress -> PPPoE stage -> local0 ingress`。`local0` 与内部 pipeline peer 组成由 `wan_core` 管理的 veth 边界；pipeline peer 只承担数据面换向，不应作为用户可选 WAN 接口。
 
@@ -812,7 +819,7 @@ exports.onEBPFStateMigrate = function (ctx) {
 
 XDP 插件使用 `engine: "xdp"`，只能注册 `pre_forward` 或 `priority < 1000` 的 `forward` Hook，并且必须声明显式 ingress 接口。XDP 没有 egress Hook，也不能读取 `tc_plugin_ctx_v4/tc_plugin_ctx_v6`；需要 core 查表结果、reply 方向或改写后的包时应使用 TC stage。
 
-XDP 插件 object 必须声明 24-entry 的共享 `xdp_prog_chain`，处理后调用 `veer_xdp_continue(ctx)` 进入下一 Hook。链结束返回 `XDP_PASS`，随后继续进入现有 TC/系统路径。所有接口共用一个 Dispatcher，因此整机最多 8 个 XDP Hook（不是每个接口 8 个），按 priority、插件 ID、Hook ID 稳定排序；更新使用双 bank 原子切换，每个 bank 有独立的完整配置，切换只翻转一个 `active_bank`，包不会读到两个 bank 混合的配置。
+XDP 插件 object 必须声明 24-entry 的共享 `xdp_prog_chain`，处理后调用 `veer_xdp_continue(ctx)` 进入下一 Hook。链结束返回 `XDP_PASS`，随后继续进入现有 TC/系统路径。Hook 按 priority、插件 ID、Hook ID 稳定排序，放在 Dispatcher 私有的 `xdp_plugin_hooks` 中。每个接口最多 14 个 XDP Hook（每个 Hook 两次 tail call），整机最多 32 个；超限时与 TC 相同，只拒绝放不下的插件，已在运行的插件优先保留。更新使用双 bank 原子切换，每个 bank 有独立的完整配置，切换只翻转一个 `active_bank`，包不会读到两个 bank 混合的配置。
 
 ```c
 #include "../include/veer_plugin_helpers.h"

@@ -154,6 +154,13 @@ typedef int __s32;
 #define VEER_HAVE_KERNEL_BPF_TYPES 1
 #endif
 
+/*
+ * Shared tail-call chain layout of plugin ABI v2. Plugins only tail-call the
+ * *_CONTINUE slots (through the veer_continue_* helpers). The *_BASE ranges
+ * held hooks under earlier hosts; current hosts keep hooks in a private table
+ * and leave those slots empty, so never tail-call them directly. *_MAX is the
+ * per-interface stage limit.
+ */
 #define VEER_TC_PROG_CHAIN_V4_MAX_ENTRIES 111
 #define VEER_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE 8
 #define VEER_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE 9

@@ -82,6 +82,7 @@ func tcKernelMapABIContracts() []kernelMapABIContract {
 		{name: kernelOccupancyMapName, key: uint32(0), value: kernelOccupancyValueV4{}},
 		{name: kernelTCFlowMigrationStateMapName, key: uint32(0), value: uint32(0)},
 		{name: kernelTCProgramChainMapName, key: uint32(0), value: uint32(0)},
+		{name: kernelTCPluginHooksMapName, key: uint32(0), value: uint32(0)},
 		{name: kernelTCPluginConfigMapName, key: uint32(0), value: kernelTCPluginConfigV4{}},
 		{name: kernelTCPluginInterfacesMapName, key: kernelTCPluginInterfaceKeyV4{}, value: kernelTCPluginInterfaceValueV4{}},
 		{name: kernelTCPluginMetricsMapName, key: uint32(0), value: kernelTCPluginMetricValue{}},
