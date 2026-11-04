@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	veerkfuncs "github.com/Unicode01/veer/kernel/veer_kfuncs"
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
@@ -29,8 +31,11 @@ var kernelModuleIngressProbeBytes []byte
 //go:embed ebpf/veer-kfuncs-wan-probe-bpf.o
 var kernelModuleWANProbeBytes []byte
 
-const optionalKernelModuleName = "veer_kfuncs"
 const optionalKernelModuleCompiled = true
+
+// kernelHelperEmbeddedSource lets `veer kfuncs build` rebuild the module for
+// a new kernel from the source matching this binary's ABI probes.
+func kernelHelperEmbeddedSource() (fs.FS, bool) { return veerkfuncs.Source, true }
 
 func probeOptionalKernelModule() error {
 	return probeKernelModuleHandoff(kernelModuleProbeBytes)

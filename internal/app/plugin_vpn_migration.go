@@ -31,6 +31,7 @@ func runVPNPluginMigrationCLI(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("migrate-vpn accepts no positional arguments")
 	}
+	applyInstallStateDefaults(flags, database, plugins, stderr)
 	if info, err := os.Lstat(*database); err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("migration requires an existing regular database")
 	}

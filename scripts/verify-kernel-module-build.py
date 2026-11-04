@@ -8,6 +8,7 @@ import tempfile
 
 
 SOURCE = Path(__file__).resolve().parent / "build-kernel-module.sh"
+MODULE_BUILD = Path(__file__).resolve().parents[1] / "kernel/veer_kfuncs/build.sh"
 
 
 def command(*args, **kwargs):
@@ -25,6 +26,7 @@ def verify(mode):
         for name in ("scripts", "kernel/veer_kfuncs", "internal/app/ebpf", "bin", "headers"):
             (root / name).mkdir(parents=True)
         shutil.copy2(SOURCE, root / "scripts/build-kernel-module.sh")
+        shutil.copy2(MODULE_BUILD, root / "kernel/veer_kfuncs/build.sh")
         (root / "headers/Makefile").touch()
         (root / "base.btf").write_bytes(b"matching base")
         (root / "initial.btf").write_bytes(b"original type order")
@@ -59,7 +61,7 @@ objcopy --add-section ".BTF=$FIXTURE_ROOT/initial.btf" "$target"
 for target do :; done
 touch "$target"
 ''')
-        if mode in ("legacy", "stale-kernel"):
+        if mode in ("legacy", "stale-kernel", "standalone"):
             resolver = '''
 objcopy --update-section ".BTF=$FIXTURE_ROOT/final.btf" \\
     --update-section ".BTF_ids=$FIXTURE_ROOT/final.ids" "$3"
@@ -80,14 +82,18 @@ objcopy --update-section ".BTF=$FIXTURE_ROOT/final.btf" \\
             "RESOLVE_BTFIDS": str(root / "bin/resolver"),
             "BPF_CLANG": str(root / "bin/clang"),
         })
-        run = subprocess.run(["sh", str(root / "scripts/build-kernel-module.sh")],
-                             env=env, capture_output=True, text=True)
+        # `veer kfuncs build` runs the module script alone from a private copy.
+        script = "kernel/veer_kfuncs/build.sh" if mode == "standalone" else "scripts/build-kernel-module.sh"
+        run = subprocess.run(["sh", str(root / script)], env=env, capture_output=True, text=True)
         if mode == "missing-ids":
             assert run.returncode != 0 and "omitted .BTF_ids" in run.stderr, run
             assert not (root / "kernel/fixture-release/veer_kfuncs.ko").exists()
         else:
             assert run.returncode == 0, run.stderr
             module = root / "kernel/fixture-release/veer_kfuncs.ko"
+            if mode == "standalone":
+                assert not module.exists(), "build.sh must not install into kernel/<release>"
+                module = root / "kernel/veer_kfuncs/veer_kfuncs.ko"
             command("objcopy", "--dump-section", f".BTF={root / 'got.btf'}",
                     "--dump-section", f".BTF_ids={root / 'got.ids'}", str(module))
             assert (root / "got.btf").read_bytes() == (root / "final.btf").read_bytes()
@@ -97,5 +103,5 @@ objcopy --update-section ".BTF=$FIXTURE_ROOT/final.btf" \\
 
 
 if __name__ == "__main__":
-    for case in ("legacy", "sidecars", "existing", "missing-ids", "stale-kernel"):
+    for case in ("legacy", "sidecars", "existing", "missing-ids", "stale-kernel", "standalone"):
         verify(case)

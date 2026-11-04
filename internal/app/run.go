@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -47,10 +48,16 @@ func computeBinaryHash() string {
 
 func Main(buildNonce string) {
 	applySecureProcessUmask()
+	if handled, err := runVeerInfoCLI(os.Args[1:], buildNonce, os.Stdout, os.Stderr); handled {
+		exitOnVeerCLIError(os.Args[1], err)
+		return
+	}
 	if handled, err := runPluginPackageCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
-		if err != nil {
-			log.Fatalf("plugin package command: %v", err)
-		}
+		exitOnVeerCLIError("plugin", err)
+		return
+	}
+	if handled, err := runKernelHelperCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
+		exitOnVeerCLIError("kfuncs", err)
 		return
 	}
 
@@ -61,7 +68,16 @@ func Main(buildNonce string) {
 	workerIndex := flag.Int("id", 0, "worker slot index")
 	sockPath := flag.String("sock", "", "unix socket path")
 	configPath := flag.String("config", "config.json", "config file path")
+	// Internal worker flags stay out of -h; the service is the daemon's caller.
+	flag.Usage = func() { writeVeerUsage(flag.CommandLine.Output()) }
 	flag.Parse()
+	// A mistyped subcommand must not fall through and start a second daemon
+	// against the config and database in the current directory.
+	if flag.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "veer: unknown command %q\n\n", flag.Arg(0))
+		writeVeerUsage(os.Stderr)
+		os.Exit(2)
+	}
 
 	if *pluginHostMode {
 		if err := runPluginHostProcess(); err != nil {
@@ -131,7 +147,7 @@ func Main(buildNonce string) {
 
 	closeKernelModule, moduleErr := startOptionalKernelModule()
 	if moduleErr != nil {
-		log.Printf("optional kernel module: using base dataplane: %v", moduleErr)
+		log.Printf("optional kernel module: using base dataplane: %s", optionalKernelModuleStartupDetail(moduleErr))
 	}
 	defer closeKernelModule()
 

@@ -112,6 +112,7 @@ func runPluginStateRestoreCLI(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("plugin restore does not accept positional arguments")
 	}
+	applyInstallStateDefaults(flags, databasePath, pluginsDir, stderr)
 	modeCount := 0
 	for _, enabled := range []bool{*status, *retry, *cancel} {
 		if enabled {

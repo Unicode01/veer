@@ -2,11 +2,15 @@
 
 package app
 
+import "io/fs"
+
 func optionalKernelModuleWANFeatureStatus() PluginHostFeatureStatus {
 	return optionalKernelModuleFeatureStatus()
 }
 
 const optionalKernelModuleCompiled = false
+
+func kernelHelperEmbeddedSource() (fs.FS, bool) { return nil, false }
 
 func startOptionalKernelModule() (func(), error) { return func() {}, nil }
 func optionalKernelModuleFeatureStatus() PluginHostFeatureStatus {

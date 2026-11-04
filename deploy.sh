@@ -21,6 +21,7 @@
 #   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成；新远程配置至少 24 个字符)
 #   PLUGIN_ADMIN_TOKEN 插件高权限 Token，对应 plugin_admin_token (首次安装默认独立随机生成；新远程配置至少 24 个字符)
 #   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
+#   VEER_LINK_CLI 设为 0 时不把 veer 命令链接进 PATH (默认 1，链接到 /usr/local/bin/veer)
 #
 set -euo pipefail
 
@@ -52,6 +53,10 @@ usage() {
   VEER_INSTALL_PLUGINS   设为 1 时安装 bundled stable 插件，默认 0
   VEER_PLUGIN_BUNDLE_PATH bundled plugin 包路径，默认与 deploy.sh 同目录的 veer-plugins.tar.gz
   VEER_SERVICE_MANAGER   服务管理器，auto/systemd/openrc，默认 auto
+  VEER_INSTALL_KERNEL_MODULE 设为 1 时安装同目录 kernel/<内核版本>/veer_kfuncs.ko，默认 0
+  VEER_LINK_CLI          设为 1 时把 <INSTALL_DIR>/veer 链接为 PATH 中的 veer 命令，
+                         设为 0 时不链接并移除本安装之前创建的链接，默认 1
+  VEER_CLI_LINK_DIR      命令链接所在目录，需为绝对路径，默认 /usr/local/bin
 
 兼容性:
   FORWARD_BPF_STATE_DIR 和 FORWARD_RUNTIME_STATE_DIR 仍可使用；同时设置时 VEER_* 优先。
@@ -122,9 +127,17 @@ PLUGIN_BUNDLE_PATH="${VEER_PLUGIN_BUNDLE_PATH:-${SCRIPT_DIR}/veer-plugins.tar.gz
 INSTALL_BUNDLED_PLUGINS="${VEER_INSTALL_PLUGINS:-0}"
 INSTALL_KERNEL_MODULE="${VEER_INSTALL_KERNEL_MODULE:-0}"
 case "$INSTALL_KERNEL_MODULE" in 0|1) ;; *) fail "VEER_INSTALL_KERNEL_MODULE 仅支持 0 或 1" ;; esac
-KERNEL_MODULE_DEST=""
-KERNEL_MODULE_BACKED_UP=false
-KERNEL_MODULE_APPLIED=false
+LINK_CLI="${VEER_LINK_CLI:-1}"
+case "$LINK_CLI" in 0|1) ;; *) fail "VEER_LINK_CLI 仅支持 0 或 1" ;; esac
+CLI_LINK_DIR="${VEER_CLI_LINK_DIR:-/usr/local/bin}"
+[[ "$CLI_LINK_DIR" == /* ]] || fail "VEER_CLI_LINK_DIR 必须是绝对路径"
+CLI_LINK_PATH="${CLI_LINK_DIR%/}/veer"
+CLI_LINKED=false
+# Kernel releases whose modules this run installs; rollback restores each
+# destination from its .rollback copy or removes it if it was new.
+KERNEL_MODULE_RELEASES=()
+KERNEL_MODULE_DESTS=()
+KERNEL_MODULE_BACKUPS=()
 PLUGIN_STAGING_DIR="${INSTALL_DIR}/.plugins.next.$$"
 PLUGIN_BACKUP_DIR="${INSTALL_DIR}/.plugins.rollback"
 PLUGIN_INSTALL_DIR=""
@@ -320,9 +333,58 @@ service_log_hint() {
     fi
 }
 
+# Link ${INSTALL_DIR}/veer into PATH. Only symlinks are replaced or removed;
+# a regular file named veer belongs to someone else and is left alone.
+configure_cli_link() {
+    local target="${INSTALL_DIR}/veer"
+    local current=""
+    if [[ -L "${CLI_LINK_PATH}" ]]; then
+        current="$(readlink "${CLI_LINK_PATH}")"
+    fi
+    if [[ "${LINK_CLI}" == "0" ]]; then
+        if [[ "${current}" == "${target}" ]]; then
+            rm -f -- "${CLI_LINK_PATH}"
+            info "已移除命令行入口 ${CLI_LINK_PATH}"
+        fi
+        return 0
+    fi
+    if [[ -e "${CLI_LINK_PATH}" && ! -L "${CLI_LINK_PATH}" ]]; then
+        warn "${CLI_LINK_PATH} 已存在且不是符号链接，未加入 PATH；请使用 ${target}"
+        return 0
+    fi
+    if [[ ! -d "${CLI_LINK_DIR}" ]]; then
+        warn "${CLI_LINK_DIR} 不存在，未加入 PATH；请使用 ${target}"
+        return 0
+    fi
+    if [[ "${current}" != "${target}" ]]; then
+        if [[ -n "${current}" ]]; then
+            warn "${CLI_LINK_PATH} 原指向 ${current}，改为 ${target}"
+        fi
+        if ! ln -sfn "${target}" "${CLI_LINK_PATH}"; then
+            warn "创建 ${CLI_LINK_PATH} 失败，未加入 PATH；请使用 ${target}"
+            return 0
+        fi
+    fi
+    CLI_LINKED=true
+    ok "命令行入口: ${CLI_LINK_PATH} -> ${target}"
+}
+
+# Any installed release counts: after a kernel upgrade the old release's module
+# keeps the opt-in, so `veer kfuncs build` for the new kernel loads after a
+# restart without redeploying.
+kernel_helper_module_installed() {
+    local module
+    for module in "${INSTALL_DIR}"/kernel/*/veer_kfuncs.ko; do
+        if [[ -f "$module" && ! -L "$module" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 write_service_definition() {
     local kernel_module_capability=""
-    if [[ -f "${INSTALL_DIR}/kernel/$(uname -r)/veer_kfuncs.ko" ]]; then
+    if kernel_helper_module_installed; then
         kernel_module_capability="CAP_SYS_MODULE"
     fi
 
@@ -335,10 +397,13 @@ if [ -L /run/netns ] || { [ -e /run/netns ] && [ ! -d /run/netns ]; }; then
     exit 1
 fi
 mkdir -p /run/netns /sys/fs/bpf
-if [ -f "${INSTALL_DIR}/kernel/\$(uname -r)/veer_kfuncs.ko" ]; then
-    mkdir -p /run/veer-kfuncs
-    chmod 700 /run/veer-kfuncs
-fi
+for module in "${INSTALL_DIR}"/kernel/*/veer_kfuncs.ko; do
+    if [ -f "\$module" ] && [ ! -L "\$module" ]; then
+        mkdir -p /run/veer-kfuncs
+        chmod 700 /run/veer-kfuncs
+        break
+    fi
+done
 mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
 [ "\${1:-}" != --mounts-only ] || exit 0
 mkdir -p "\${VEER_BPF_STATE_DIR:-/sys/fs/bpf/forward}" "\${VEER_RUNTIME_STATE_DIR:-${INSTALL_DIR}/.kernel-state}"
@@ -1365,14 +1430,16 @@ rollback_update() {
         install -m 600 "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
     fi
     restore_bundled_plugins
-    if [[ "${KERNEL_MODULE_APPLIED}" == "true" ]]; then
-        if [[ "${KERNEL_MODULE_BACKED_UP}" == "true" ]]; then
-            install -o root -g root -m 644 "${KERNEL_MODULE_DEST}.rollback" "${KERNEL_MODULE_DEST}.next.$$"
-            mv -f "${KERNEL_MODULE_DEST}.next.$$" "${KERNEL_MODULE_DEST}"
+    local module_index module_dest
+    for (( module_index = 0; module_index < ${#KERNEL_MODULE_DESTS[@]}; module_index++ )); do
+        module_dest="${KERNEL_MODULE_DESTS[$module_index]}"
+        if [[ "${KERNEL_MODULE_BACKUPS[$module_index]}" == "true" ]]; then
+            install -o root -g root -m 644 "${module_dest}.rollback" "${module_dest}.next.$$"
+            mv -f "${module_dest}.next.$$" "${module_dest}"
         else
-            rm -f -- "${KERNEL_MODULE_DEST}"
+            rm -f -- "${module_dest}"
         fi
-    fi
+    done
 
     rm -f "${INSTALL_DIR}/veer"
     if [[ "${ORIGINAL_BINARY_NAME}" == "veer" ]]; then
@@ -1444,13 +1511,22 @@ ok "找到二进制: $(basename "$BINARY_PATH") (${FILE_SIZE}) [${ARCH}]"
 
 # Validate optional artifacts before changing installed configuration/plugins.
 if [[ "$INSTALL_KERNEL_MODULE" == "1" ]]; then
-    kernel_release="$(uname -r)"
-    module_source="${SCRIPT_DIR}/kernel/${kernel_release}/veer_kfuncs.ko"
-    [[ -f "$module_source" && ! -L "$module_source" ]] || fail "缺少匹配当前内核的模块: $module_source"
     command -v modinfo >/dev/null 2>&1 || fail "安装可选模块需要 kmod/modinfo"
-    module_release="$(modinfo -F vermagic "$module_source")"
-    [[ "${module_release%% *}" == "$kernel_release" ]] || fail "可选模块 vermagic 与当前内核不匹配"
-    KERNEL_MODULE_DEST="${INSTALL_DIR}/kernel/${kernel_release}/veer_kfuncs.ko"
+    # Every kernel/<release>/veer_kfuncs.ko is installed, so a module built for
+    # a pending kernel upgrade can be staged before the reboot.
+    for module_source in "${SCRIPT_DIR}"/kernel/*/veer_kfuncs.ko; do
+        [[ -e "$module_source" || -L "$module_source" ]] || continue
+        module_release="$(basename "$(dirname "$module_source")")"
+        [[ "$module_release" =~ ^[0-9][A-Za-z0-9._+-]*$ ]] || fail "可选模块目录名不是内核版本: $module_source"
+        [[ -f "$module_source" && ! -L "$module_source" ]] || fail "可选模块必须是普通文件: $module_source"
+        module_vermagic="$(modinfo -F vermagic "$module_source")"
+        [[ "${module_vermagic%% *}" == "$module_release" ]] || fail "可选模块 vermagic 与目录 ${module_release} 不匹配: $module_source"
+        KERNEL_MODULE_RELEASES+=("$module_release")
+    done
+    (( ${#KERNEL_MODULE_RELEASES[@]} > 0 )) || fail "缺少可选模块: ${SCRIPT_DIR}/kernel/<内核版本>/veer_kfuncs.ko"
+    if [[ ! -f "${SCRIPT_DIR}/kernel/$(uname -r)/veer_kfuncs.ko" ]]; then
+        warn "未提供当前内核 $(uname -r) 的模块；其他版本在对应内核启动后生效，当前内核使用基础数据面"
+    fi
 fi
 
 require_python3
@@ -1527,15 +1603,20 @@ if ! install_bundled_plugins; then
 fi
 
 if [[ "$INSTALL_KERNEL_MODULE" == "1" ]]; then
-    mkdir -p "${INSTALL_DIR}/kernel/${kernel_release}"
-    if [[ -f "${KERNEL_MODULE_DEST}" ]]; then
-        cp -f "${KERNEL_MODULE_DEST}" "${KERNEL_MODULE_DEST}.rollback"
-        KERNEL_MODULE_BACKED_UP=true
-    fi
-    install -o root -g root -m 644 "$module_source" "${KERNEL_MODULE_DEST}.next.$$"
-    mv -f "${KERNEL_MODULE_DEST}.next.$$" "${KERNEL_MODULE_DEST}"
-    KERNEL_MODULE_APPLIED=true
-    ok "可选内核模块已部署，Veer 启动时验证能力并管理生命周期"
+    for module_release in "${KERNEL_MODULE_RELEASES[@]}"; do
+        module_dest="${INSTALL_DIR}/kernel/${module_release}/veer_kfuncs.ko"
+        mkdir -p "${module_dest%/*}"
+        module_backed_up=false
+        if [[ -f "$module_dest" ]]; then
+            cp -f "$module_dest" "${module_dest}.rollback"
+            module_backed_up=true
+        fi
+        KERNEL_MODULE_DESTS+=("$module_dest")
+        KERNEL_MODULE_BACKUPS+=("$module_backed_up")
+        install -o root -g root -m 644 "${SCRIPT_DIR}/kernel/${module_release}/veer_kfuncs.ko" "${module_dest}.next.$$"
+        mv -f "${module_dest}.next.$$" "$module_dest"
+    done
+    ok "可选内核模块已部署（${KERNEL_MODULE_RELEASES[*]}），Veer 启动时验证能力并管理生命周期"
 fi
 
 install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/veer"
@@ -1619,6 +1700,8 @@ if [[ -e "${INSTALL_DIR}/forward" || -L "${INSTALL_DIR}/forward" ]]; then
     rm -f "${INSTALL_DIR}/forward"
 fi
 ln -s "veer" "${INSTALL_DIR}/forward"
+# The service is already healthy here, so a link problem only warns.
+configure_cli_link
 
 if [[ -f "${LEGACY_SERVICE_FILE}" && ! -L "${LEGACY_SERVICE_FILE}" ]]; then
     service_disable "${LEGACY_SERVICE_NAME}" >/dev/null 2>&1 || true
@@ -1749,6 +1832,15 @@ else
     echo -e "    停止服务:  ${CYAN}rc-service ${SERVICE_NAME} stop${NC}"
 fi
 echo ""
+if [[ "${CLI_LINKED}" == "true" ]]; then
+    CLI_COMMAND="veer"
+else
+    CLI_COMMAND="${INSTALL_DIR}/veer"
+fi
+echo -e "  命令行:"
+echo -e "    命令帮助:  ${CYAN}${CLI_COMMAND} help${NC}"
+echo -e "    内核模块:  ${CYAN}${CLI_COMMAND} kfuncs status${NC}"
+echo ""
 echo -e "  卸载:"
 if [[ "${SERVICE_MANAGER}" == "systemd" ]]; then
     echo -e "    ${CYAN}systemctl stop ${SERVICE_NAME} && systemctl disable ${SERVICE_NAME}${NC}"
@@ -1760,6 +1852,9 @@ fi
 echo -e "    ${CYAN}rm -f ${SYSCTL_FILE}${NC}"
 echo -e "    ${CYAN}rm -rf ${BPF_STATE_DIR} ${RUNTIME_STATE_DIR}${NC}"
 echo -e "    ${CYAN}rm -rf ${INSTALL_DIR}${NC}"
+if [[ "${CLI_LINKED}" == "true" ]]; then
+    echo -e "    ${CYAN}rm -f ${CLI_LINK_PATH}${NC}"
+fi
 if [[ "${INSTALL_DIR}" == "${DEFAULT_INSTALL_DIR}" ]]; then
     echo -e "    ${CYAN}rm -f ${LEGACY_INSTALL_DIR}${NC}"
 fi

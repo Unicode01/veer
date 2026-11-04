@@ -32,7 +32,7 @@ VEER_BUILD_KERNEL_MODULE=1 bash release.sh amd64
 VEER_INSTALL_KERNEL_MODULE=1 bash deploy.sh
 ```
 
-ARM64 主机使用 `arm64`。Go 二进制可以交叉构建；`.ko` 必须匹配目标架构、内核配置、符号版本和 vermagic，不能把一台主机的模块作为通用 Linux 发布物。内核更新后需重新构建并部署对应目录。默认 bootstrap 不自动安装构建模块所需的 headers 和工具。
+ARM64 主机使用 `arm64`。Go 二进制可以交叉构建；`.ko` 必须匹配目标架构、内核配置、符号版本和 vermagic，不能把一台主机的模块作为通用 Linux 发布物。内核更新后的重建见下文“内核升级”。默认 bootstrap 不自动安装构建模块所需的 headers 和工具。
 
 单独构建及非默认 build tree：
 
@@ -43,9 +43,25 @@ go build -tags veer_kfuncs -o veer .
 
 若 headers 包缺少 vmlinux，脚本仅在模块尚无 BTF 时，使用匹配的 base BTF、pahole 和 `resolve_btfids` 补齐，兼容工具原地更新 ELF 和输出独立 BTF 文件的两种方式。原生构建默认读取 `/sys/kernel/btf/vmlinux`；跨内核必须显式提供 `VMLINUX_BTF`。发行版没打包工具时可从对应内核源码构建 `tools/bpf/resolve_btfids`，通过 `RESOLVE_BTFIDS=/absolute/path/resolve_btfids` 指定。不能使用其他内核的 base BTF 冒充匹配版本。
 
-部署把模块放在 `<Veer 可执行文件目录>/kernel/<uname -r>/veer_kfuncs.ko`，要求 root 所有、普通文件、无 group/world 写权限。systemd 单元仅在存在已部署模块时增加 `CAP_SYS_MODULE`，并准备 `/run/veer-kfuncs`；默认部署不增加此权限。模块缺失、加载被拒绝、ABI/probe 不兼容时记录原因，使用基础路径。
+Veer 加载 `<Veer 可执行文件目录>/kernel/<uname -r>/veer_kfuncs.ko`，要求 root 所有、普通文件、无 group/world 写权限。systemd 单元在任一内核版本已部署模块时增加 `CAP_SYS_MODULE`，并准备 `/run/veer-kfuncs`；默认部署不增加此权限。模块缺失、加载被拒绝、ABI/probe 不兼容时记录原因，使用基础路径。
 
-显式安装会在修改配置/插件前校验模块产物，原子替换模块文件；更新失败回滚时同时恢复旧模块文件。已经加载的模块遵循下面的引用与卸载规则，不会强制替换运行中的代码。
+`VEER_INSTALL_KERNEL_MODULE=1` 安装上传目录中所有 `kernel/<release>/veer_kfuncs.ko`，逐个校验目录名与 vermagic 一致；至少需要一个版本，缺少当前内核的模块时只警告。校验在修改配置/插件前完成，模块文件原子替换；更新失败回滚时恢复每个旧模块文件或删除新增的文件。已经加载的模块遵循下面的引用与卸载规则，不会强制替换运行中的代码。
+
+### 内核升级
+
+带 `-tags veer_kfuncs` 构建的二进制内嵌了与自身 probe 匹配的模块源码。内核升级并重启后，新版本目录下没有模块，Veer 照常启动并使用基础数据面；启动日志、`GET /api/kernel/runtime` 的 `kernel_helper_module` 和 WebUI 内核运行时页会给出缺失的内核版本、已有模块的版本和重建命令。安装新内核的 headers 后在主机上执行：
+
+```sh
+veer kfuncs status       # 未链接进 PATH 时用 /opt/veer/veer
+veer kfuncs build
+systemctl restart veer   # OpenRC: rc-service veer restart
+```
+
+`build` 需要 root、make、内核使用的编译器和 headers（Debian/Ubuntu `linux-headers-<release>`、Proxmox VE `proxmox-headers-<release>`、RHEL/Fedora `kernel-devel-<release>`）；headers 不带 vmlinux 时还需要 pahole 和 `resolve_btfids`，并以运行中内核的 `/sys/kernel/btf/vmlinux` 生成模块 BTF，因此默认在新内核启动后执行。源码解压到私有临时目录构建，产物校验模块名、vermagic 和 BTF 后原子安装为 root 所有的 0644 文件；模块已存在时需 `--force`。重启 Veer 后新拨号的 PPPoE 会话才切到单口边界。
+
+也可以在重启前为待启动内核预构建：`--kernel <release>` 加上该内核的 `--vmlinux-btf`（例如调试包中的 vmlinux），`--kdir` 指定非默认 build tree；或在其他主机构建后放入上传目录的 `kernel/<release>/` 交给 deploy 安装。
+
+Veer 不在启动时自动编译：那需要在主机上常驻工具链和匹配 headers，会拖慢开机联网；跨大版本时编译和 probe 通过也不代表 GRO/skb 语义未变，升级大版本前仍应在测试机运行 `scripts/verify-kernel-module.sh`。
 
 ## 生命周期与插件契约
 
