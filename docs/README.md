@@ -424,7 +424,7 @@ python3 scripts/verify-qemu-platform.py alpine --binary /tmp/veer-vm-binary --te
 python3 scripts/verify-qemu-platform.py rocky --binary /tmp/veer-vm-binary --test-binary /tmp/veer-vm.test
 ```
 
-最低兼容版本不代表发行版仍受上游安全维护，生产环境应选择仍在维护的版本。[Debian 11 的官方 LTS 已于 2026-08-31 结束](https://www.debian.org/releases/bullseye/)；其 CI 容器仅使用 LTS 末期归档快照验证旧版用户环境，安装脚本不会替用户修改 apt 源。RHEL-compatible 系统会保留已安装的 `curl-minimal` / `coreutils-single`，避免与完整版软件包冲突。
+最低兼容版本不代表发行版仍受上游安全维护，生产环境应选择仍在维护的版本。[Debian 11 的官方 LTS 已于 2026-08-31 结束](https://www.debian.org/releases/bullseye/)；其 CI 容器仅使用 archive.debian.org 上 LTS 结束后冻结的归档源验证旧版用户环境，安装脚本不会替用户修改 apt 源。RHEL-compatible 系统会保留已安装的 `curl-minimal` / `coreutils-single`，避免与完整版软件包冲突。
 
 ## WHMCS 插件
 
