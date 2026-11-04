@@ -5,10 +5,13 @@ set -eu
 [ "${VEER_PLATFORM_TEST_CONTAINER:-}" = 1 ] || { echo 'requires a disposable platform test container' >&2; exit 1; }
 . /etc/os-release
 # The archived minimum-version fixture is for compatibility, not security support.
+# archive.debian.org holds bullseye and bullseye-security frozen after LTS ended,
+# so main and security stay consistent; snapshot.debian.org timed out on
+# individual packages for days.
 if [ "$ID" = debian ] && [ "$VERSION_ID" = 11 ]; then
     printf '%s\n' \
-        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260831T000000Z/ bullseye main' \
-        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260831T000000Z/ bullseye-security main' \
+        'deb [check-valid-until=no] http://archive.debian.org/debian/ bullseye main' \
+        'deb [check-valid-until=no] http://archive.debian.org/debian-security/ bullseye-security main' \
         > /etc/apt/sources.list
 fi
 case "$ID" in
