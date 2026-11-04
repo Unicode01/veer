@@ -112,12 +112,17 @@ static __always_inline __u32 xdp_plugin_count_mask(__u32 count)
 /*
  * Position of the lowest set bit of a non-zero value. It is branch-free on
  * purpose: a branch per bit would make the verifier fork on every hook.
+ * The empty asm statements hide the value from the optimizer. Without them
+ * LLVM 18 folds the sequence into cttz/ctpop, which its BPF backend cannot
+ * lower ("unimplemented opcode").
  */
 static __always_inline __u32 xdp_plugin_lowest_set_bit(__u32 value)
 {
 	__u32 below = (value & (0U - value)) - 1;
 
+	asm volatile("" : "+r"(below));
 	below = below - ((below >> 1) & 0x55555555U);
+	asm volatile("" : "+r"(below));
 	below = (below & 0x33333333U) + ((below >> 2) & 0x33333333U);
 	below = (below + (below >> 4)) & 0x0f0f0f0fU;
 	return (below * 0x01010101U) >> 24;

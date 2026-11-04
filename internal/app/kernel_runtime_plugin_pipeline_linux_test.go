@@ -272,6 +272,7 @@ func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t 
 		replyTransparentProg:        &ebpf.Program{},
 		replyFullNATProg:            &ebpf.Program{},
 		progChainV4:                 &ebpf.Map{},
+		pluginHooksV4:               &ebpf.Map{},
 		pluginConfigV4:              &ebpf.Map{},
 		pluginInterfacesV4:          &ebpf.Map{},
 		dispatchScratchV4:           &ebpf.Map{},
