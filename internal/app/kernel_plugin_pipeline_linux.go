@@ -28,6 +28,12 @@ const (
 	kernelPluginPipelineUpdateGrace     = 25 * time.Millisecond
 	kernelPluginPipelineAttachIngress   = uint32(0)
 	kernelPluginPipelineAttachEgress    = uint32(1)
+
+	// tc_plugin_config_v4 layout: key 0 is the header (active_bank plus a
+	// userspace mirror), keys 1 and 2 are the per-bank configs.
+	kernelTCPluginConfigHeaderKey   = uint32(0)
+	kernelTCPluginConfigBankBaseKey = uint32(1)
+	kernelTCPluginConfigEntries     = 3
 )
 
 type kernelTCPluginConfigV4 struct {
@@ -1949,8 +1955,15 @@ func syncKernelPluginConfigV4(m *ebpf.Map, value kernelTCPluginConfigV4) error {
 		}
 		return fmt.Errorf("tc plugin config map is nil")
 	}
-	key := uint32(0)
-	if err := m.Put(key, value); err != nil {
+	value.ActiveBank &= 1
+	// The packet path reads only active_bank from key 0 and takes everything
+	// else from the bank entry, so the bank entry must be complete before the
+	// header flips. Key 0 keeps a full mirror for userspace readers.
+	bankKey := kernelTCPluginConfigBankBaseKey + value.ActiveBank
+	if err := m.Put(bankKey, value); err != nil {
+		return fmt.Errorf("sync tc plugin config bank %d: %w", value.ActiveBank, err)
+	}
+	if err := m.Put(kernelTCPluginConfigHeaderKey, value); err != nil {
 		return fmt.Errorf("sync tc plugin config: %w", err)
 	}
 	return nil

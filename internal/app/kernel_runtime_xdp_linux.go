@@ -1291,6 +1291,15 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
+	// The IPv4/IPv6 split and every NAT path are tail calls. The collection
+	// is closed below, and without the pin the kernel would then empty
+	// xdp_prog_chain while the attachments wait for the successor.
+	if err := pinKernelHotRestartTailCalls(kernelEngineXDP, kernelXDPProgramChainMapName, rt.coll.Maps[kernelXDPProgramChainMapName]); err != nil {
+		clearKernelHotRestartState(kernelEngineXDP)
+		log.Printf("xdp dataplane hot restart: preserve xdp tail-call chain failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
 	if err := writeKernelHotRestartMetadata(
 		kernelEngineXDP,
 		rt.hotRestartMetadataWithRuleState(kernelHotRestartXDPMetadataForHotRestart(rt.attachments, objectHash, rt.prepareOptions.enableTrafficStats)),

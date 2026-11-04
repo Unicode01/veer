@@ -675,11 +675,21 @@ struct bpf_map_def SEC("maps") tc_dispatch_scratch_v4 = {
 	.max_entries = 1,
 };
 
+/*
+ * Key 0 mirrors the active config and is read only for active_bank; keys 1
+ * and 2 hold the full config of bank 0 and bank 1. Userspace writes the
+ * inactive bank before flipping key 0, so a packet never mixes the counts and
+ * masks of two banks while an update is copied into the map.
+ */
+#define FORWARD_TC_PLUGIN_CONFIG_HEADER_KEY 0
+#define FORWARD_TC_PLUGIN_CONFIG_BANK_BASE 1
+#define FORWARD_TC_PLUGIN_CONFIG_ENTRIES 3
+
 struct bpf_map_def SEC("maps") tc_plugin_config_v4 = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_plugin_config_v4),
-	.max_entries = 1,
+	.max_entries = FORWARD_TC_PLUGIN_CONFIG_ENTRIES,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_interfaces_v4 = {
@@ -1037,8 +1047,13 @@ static __always_inline struct tc_plugin_ctx_v6 *lookup_tc_plugin_ctx_v6(void)
 
 static __always_inline struct tc_plugin_config_v4 *lookup_tc_plugin_config_v4(void)
 {
-	__u32 key = 0;
+	struct tc_plugin_config_v4 *header;
+	__u32 key = FORWARD_TC_PLUGIN_CONFIG_HEADER_KEY;
 
+	header = bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
+	if (!header)
+		return 0;
+	key = FORWARD_TC_PLUGIN_CONFIG_BANK_BASE + (header->active_bank & 1);
 	return bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
 }
 

@@ -812,11 +812,39 @@ exports.onEBPFStateMigrate = function (ctx) {
 
 XDP 插件使用 `engine: "xdp"`，只能注册 `pre_forward` 或 `priority < 1000` 的 `forward` Hook，并且必须声明显式 ingress 接口。XDP 没有 egress Hook，也不能读取 `tc_plugin_ctx_v4/tc_plugin_ctx_v6`；需要 core 查表结果、reply 方向或改写后的包时应使用 TC stage。
 
-XDP 插件 object 必须声明 24-entry 的共享 `xdp_prog_chain`，处理后调用 `veer_xdp_continue(ctx)` 进入下一 Hook。链结束返回 `XDP_PASS`，随后继续进入现有 TC/系统路径。单条 XDP 链最多 8 个 Hook，按 priority、插件 ID、Hook ID 稳定排序；更新使用双 bank 原子切换。
+XDP 插件 object 必须声明 24-entry 的共享 `xdp_prog_chain`，处理后调用 `veer_xdp_continue(ctx)` 进入下一 Hook。链结束返回 `XDP_PASS`，随后继续进入现有 TC/系统路径。所有接口共用一个 Dispatcher，因此整机最多 8 个 XDP Hook（不是每个接口 8 个），按 priority、插件 ID、Hook ID 稳定排序；更新使用双 bank 原子切换，每个 bank 有独立的完整配置，切换只翻转一个 `active_bank`，包不会读到两个 bank 混合的配置。
+
+```c
+#include "../include/veer_plugin_helpers.h"
+
+VEER_DECLARE_XDP_PROG_CHAIN();
+
+SEC("xdp/veer/filter")
+int xdp_filter(struct xdp_md *xdp)
+{
+	struct veer_packet pkt;
+	struct veer_l2_info l2;
+
+	if (!veer_packet_from_xdp(xdp, &pkt) || veer_parse_l2(&pkt, &l2) < 0)
+		return VEER_XDP_PASS;
+	if (should_drop(&pkt, &l2))
+		return VEER_XDP_DROP;
+	veer_xdp_continue(xdp);
+	return VEER_XDP_PASS; /* 只在 continue 槽不可用时到达 */
+}
+```
+
+helper 提供 `VEER_XDP_ABORTED/DROP/PASS/TX/REDIRECT`、`veer_packet_from_xdp()`、`veer_xdp_adjust_head/tail()`、`veer_xdp_redirect_map()` 和 `veer_csum_diff()/veer_csum_fold()`；L2/L3/L4 解析 helper 与 TC 共用。需要内核 UAPI 类型时可以先 include `<linux/bpf.h>`（或 `vmlinux.h`）再 include helper，此时 `__sk_buff`/`xdp_md` 使用内核定义；顺序反过来会让 helper 的 `BPF_FUNC_*` 宏与内核枚举冲突。
+
+XDP Hook 可以用 `veer_xdp_meta_reserve(xdp, len)` 在包前的 metadata 区写入最多 32 字节、4 字节对齐的小记录，同一 ingress 上的 TC Hook 用 `veer_skb_meta(skb, len)` 读回，例如把 XDP 的分类结果交给 TC 阶段。驱动不支持 metadata 时 reserve 返回空指针，读取方必须把没有记录当作"未分类"处理。
+
+Hook 的 `interfaces` 中有接口不存在时，只跳过该接口并在插件状态中给出提示，其余已存在接口上的 Hook 照常挂载；一个 Hook 的接口全部不存在时只移除这个 Hook，插件的所有 Hook 都无法挂载时才报错。接口出现后由 link 事件触发的 reconcile 重新挂上，不会退化成全局 Hook。
 
 Veer 使用独立最小 Dispatcher，不改写实验性的 Forward XDP NAT object。只要 catalog 中存在可运行的 TC/XDP 插件 Hook，核心转发规则就固定走 TC，避免 XDP Core 绕过插件链；XDP 插件仍可在相同 ingress 上先于 TC 执行。目标接口已有任何 XDP 程序时会报告冲突，Veer 不替换、不接管；driver 模式不可用时，只有显式开启 `xdp_generic` 才尝试 generic 模式。
 
-没有 XDP Hook、插件被禁用或插件系统关闭时，Dispatcher 会从接口完全卸载，不给无插件热路径增加 lookup。接口删除后，同名接口重建会按新 ifindex 重新挂载；崩溃恢复同时核对原进程 start-time 和 XDP program ID，绝不根据旧 ifindex 盲目删除其他程序。对象内容更新可继承兼容的 `state_maps`；Hook、模式、优先级或接口范围变化失败时不会隐形保留旧链。
+没有 XDP Hook、插件被禁用或插件系统关闭时，Dispatcher 会从接口完全卸载，不给无插件热路径增加 lookup；上一个进程留下的 Dispatcher 也会在这时卸载。接口删除后，同名接口重建会按新 ifindex 重新挂载；崩溃恢复同时核对原进程 start-time 和 XDP program ID，绝不根据旧 ifindex 盲目删除其他程序。
+
+热更新（`deploy.sh` 热重启）时，旧进程不卸载 Dispatcher，而是 pin 住 `xdp_prog_chain` 并记录挂载点，旧插件链在进程交接期间继续处理每个包。新进程先在新 Dispatcher 中装好完整插件链，再用 `XDP_FLAGS_REPLACE` 按 program ID 原子替换旧 Dispatcher，最后释放 pin；替换中途失败会把已替换的接口恢复成旧 Dispatcher。原子替换需要 Linux 5.7+，更旧的内核仍在退出时卸载 Dispatcher，交接期间 XDP 插件不生效。对象内容更新可继承兼容的 `state_maps`；Hook、模式、优先级或接口范围变化失败时不会隐形保留旧链。
 
 同一个 eBPF object 不能同时承载 TC、XDP 或 Netfilter 中的多个数据面引擎。跨引擎插件应按引擎拆分 object，使私有 map 的 ownership 和 Goja map API 目标保持唯一；需要同步配置时由控制面使用 map transaction 分别更新。
 
