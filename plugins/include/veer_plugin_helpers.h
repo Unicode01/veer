@@ -115,6 +115,45 @@ typedef int __s32;
 #define TC_ACT_REDIRECT 7
 #endif
 
+/*
+ * XDP verdicts. linux/bpf.h declares XDP_PASS and friends as an enum, which a
+ * preprocessor guard cannot detect, so the helper uses its own names.
+ */
+#define VEER_XDP_ABORTED 0
+#define VEER_XDP_DROP 1
+#define VEER_XDP_PASS 2
+#define VEER_XDP_TX 3
+#define VEER_XDP_REDIRECT 4
+
+#ifndef BPF_FUNC_csum_diff
+#define BPF_FUNC_csum_diff 28
+#endif
+
+#ifndef BPF_FUNC_xdp_adjust_head
+#define BPF_FUNC_xdp_adjust_head 44
+#endif
+
+#ifndef BPF_FUNC_redirect_map
+#define BPF_FUNC_redirect_map 51
+#endif
+
+#ifndef BPF_FUNC_xdp_adjust_meta
+#define BPF_FUNC_xdp_adjust_meta 54
+#endif
+
+#ifndef BPF_FUNC_xdp_adjust_tail
+#define BPF_FUNC_xdp_adjust_tail 65
+#endif
+
+/*
+ * The helper is self-contained, but objects that need kernel UAPI types may
+ * include <linux/bpf.h> or vmlinux.h first. In that case the kernel definitions
+ * of __sk_buff and xdp_md win and the helper does not redeclare them.
+ */
+#if defined(__LINUX_BPF_H__) || defined(_UAPI__LINUX_BPF_H__) || defined(__VMLINUX_H__)
+#define VEER_HAVE_KERNEL_BPF_TYPES 1
+#endif
+
 #define VEER_TC_PROG_CHAIN_V4_MAX_ENTRIES 111
 #define VEER_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE 8
 #define VEER_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE 9
@@ -148,6 +187,8 @@ typedef int __s32;
 #define VEER_PACKET_METADATA_ACCESS_WRITE 2
 #define VEER_PACKET_METADATA_PENDING_LEN 0xffff
 
+#ifndef VEER_HAVE_KERNEL_BPF_TYPES
+/* Field order and offsets follow the kernel UAPI; only the prefix up to data_meta is declared. */
 struct __sk_buff {
 	__u32 len;
 	__u32 pkt_type;
@@ -166,7 +207,26 @@ struct __sk_buff {
 	__u32 tc_classid;
 	__u32 data;
 	__u32 data_end;
+	__u32 napi_id;
+	__u32 family;
+	__u32 remote_ip4;
+	__u32 local_ip4;
+	__u32 remote_ip6[4];
+	__u32 local_ip6[4];
+	__u32 remote_port;
+	__u32 local_port;
+	__u32 data_meta;
 };
+
+struct xdp_md {
+	__u32 data;
+	__u32 data_end;
+	__u32 data_meta;
+	__u32 ingress_ifindex;
+	__u32 rx_queue_index;
+	__u32 egress_ifindex;
+};
+#endif
 
 struct bpf_map_def {
 	__u32 type;
@@ -201,15 +261,6 @@ struct tc_plugin_ctx_v4 {
 	__u16 nat_port;
 	__u16 pad1;
 	__s32 final_action;
-};
-
-struct xdp_md {
-	__u32 data;
-	__u32 data_end;
-	__u32 data_meta;
-	__u32 ingress_ifindex;
-	__u32 rx_queue_index;
-	__u32 egress_ifindex;
 };
 
 struct tc_plugin_ctx_v6 {
@@ -345,6 +396,11 @@ static int (*const veer_bpf_l4_csum_replace)(struct __sk_buff *skb, __u32 offset
 static int (*const veer_bpf_redirect)(__u32 ifindex, __u64 flags) = (void *)BPF_FUNC_redirect;
 static int (*const veer_bpf_skb_pull_data)(struct __sk_buff *skb, __u32 len) = (void *)BPF_FUNC_skb_pull_data;
 static int (*const veer_bpf_skb_adjust_room)(struct __sk_buff *skb, __s32 len_diff, __u32 mode, __u64 flags) = (void *)BPF_FUNC_skb_adjust_room;
+static long long (*const veer_bpf_csum_diff)(__u32 *from, __u32 from_size, __u32 *to, __u32 to_size, __u32 seed) = (void *)BPF_FUNC_csum_diff;
+static int (*const veer_bpf_xdp_adjust_head)(struct xdp_md *xdp, int delta) = (void *)BPF_FUNC_xdp_adjust_head;
+static int (*const veer_bpf_xdp_adjust_meta)(struct xdp_md *xdp, int delta) = (void *)BPF_FUNC_xdp_adjust_meta;
+static int (*const veer_bpf_xdp_adjust_tail)(struct xdp_md *xdp, int delta) = (void *)BPF_FUNC_xdp_adjust_tail;
+static long (*const veer_bpf_redirect_map)(void *map, __u64 key, __u64 flags) = (void *)BPF_FUNC_redirect_map;
 
 #define VEER_DECLARE_PROG_CHAIN_V4() \
 	struct bpf_map_def SEC("maps") tc_prog_chain_v4 = { \
@@ -532,6 +588,69 @@ static __always_inline int veer_redirect(__u32 ifindex)
 	return veer_bpf_redirect(ifindex, 0);
 }
 
+/* XDP packet helpers. Every adjust call invalidates earlier packet pointers. */
+static __always_inline int veer_xdp_adjust_head(struct xdp_md *xdp, int delta)
+{
+	return veer_bpf_xdp_adjust_head(xdp, delta);
+}
+
+static __always_inline int veer_xdp_adjust_tail(struct xdp_md *xdp, int delta)
+{
+	return veer_bpf_xdp_adjust_tail(xdp, delta);
+}
+
+static __always_inline long veer_xdp_redirect_map(void *map, __u32 key, __u64 flags)
+{
+	return veer_bpf_redirect_map(map, key, flags);
+}
+
+/* Incremental checksum delta for XDP rewrites, which have no l3/l4_csum_replace. */
+static __always_inline long long veer_csum_diff(__u32 *from, __u32 from_size, __u32 *to, __u32 to_size, __u32 seed)
+{
+	return veer_bpf_csum_diff(from, from_size, to, to_size, seed);
+}
+
+static __always_inline __u16 veer_csum_fold(__u64 sum)
+{
+	sum = (sum & 0xffff) + (sum >> 16);
+	sum = (sum & 0xffff) + (sum >> 16);
+	sum = (sum & 0xffff) + (sum >> 16);
+	return (__u16)~sum;
+}
+
+/*
+ * XDP-to-TC handoff through the packet metadata area. An XDP hook reserves
+ * len bytes in front of the packet and writes a small record; TC hooks on the
+ * same ingress read it back from skb->data_meta. Drivers without metadata
+ * support make veer_xdp_meta_reserve() fail, so readers must treat a missing
+ * record as "no classification" rather than an error.
+ */
+static __always_inline void *veer_xdp_meta_reserve(struct xdp_md *xdp, __u32 len)
+{
+	void *meta;
+	void *data;
+
+	if (len == 0 || len > 32 || (len & 3) != 0)
+		return 0;
+	if (veer_bpf_xdp_adjust_meta(xdp, -(int)len) != 0)
+		return 0;
+	meta = (void *)(long)xdp->data_meta;
+	data = (void *)(long)xdp->data;
+	if ((char *)meta + len > (char *)data)
+		return 0;
+	return meta;
+}
+
+static __always_inline void *veer_skb_meta(struct __sk_buff *skb, __u32 len)
+{
+	void *meta = (void *)(long)skb->data_meta;
+	void *data = (void *)(long)skb->data;
+
+	if (len == 0 || (char *)meta + len > (char *)data)
+		return 0;
+	return meta;
+}
+
 static __always_inline __u16 veer_bswap16(__u16 value)
 {
 	return (value << 8) | (value >> 8);
@@ -551,6 +670,13 @@ static __always_inline int veer_packet_from_skb(struct __sk_buff *skb, struct ve
 {
 	pkt->data = (void *)(long)skb->data;
 	pkt->data_end = (void *)(long)skb->data_end;
+	return pkt->data <= pkt->data_end;
+}
+
+static __always_inline int veer_packet_from_xdp(struct xdp_md *xdp, struct veer_packet *pkt)
+{
+	pkt->data = (void *)(long)xdp->data;
+	pkt->data_end = (void *)(long)xdp->data_end;
 	return pkt->data <= pkt->data_end;
 }
 

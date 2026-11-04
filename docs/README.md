@@ -309,6 +309,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 - `deploy.sh` 热更新时会尝试交接活动的 userspace rule/range/shared-proxy worker；无法交接的 worker 会由新进程重建
 - shared-proxy 二进制更新会关闭旧 QUIC/UDP 监听和中继会话，QUIC 客户端可能需要重连；TCP 已建立连接可以排空，不能据此推断 QUIC 同样无损交接
 - TC/XDP 路径会尽量继承内核 flow / NAT / stats 状态；使用 `--no-inherit-stats` 时 stats 会重新累计
+- 交接期间旧进程的 tail-call 链会被 pin 住，Full NAT、Egress NAT 和插件阶段在新进程接管前继续生效；XDP 插件 Dispatcher 在 Linux 5.7+ 上由新进程原子替换
 - 新版本启动、重启或 `/readyz` 检查失败时，已有安装会自动回滚二进制、配置、服务定义和本次部署替换的 bundled plugins
 - 自动回滚不恢复 SQLite 数据库，也不恢复任意外部插件产生的状态；部署前服务原本未运行时只回滚文件，不会自动启动旧版本
 - 上述机制以尽量不断流为目标，不是绝对零中断承诺

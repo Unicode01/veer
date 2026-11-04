@@ -1963,6 +1963,15 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
+	// Full NAT, egress NAT and every plugin stage are tail calls. Without the
+	// pin the kernel empties tc_prog_chain_v4 when this process exits, and the
+	// filters left for the successor pass those packets unprocessed.
+	if err := pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCProgramChainMapName, rt.coll.Maps[kernelTCProgramChainMapName]); err != nil {
+		clearKernelHotRestartState(kernelEngineTC)
+		log.Printf("kernel dataplane hot restart: preserve tc tail-call chain failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
 	if rt.attachmentMode == kernelTCAttachmentProgramModeDispatchV4 || rt.attachmentMode == kernelTCAttachmentProgramModePipelineV4 {
 		programs := map[string]*ebpf.Program{
 			kernelForwardTransparentProgramName:     rt.coll.Programs[kernelForwardTransparentProgramName],
@@ -3708,8 +3717,10 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 				return fmt.Errorf("embedded tc eBPF object has incomplete plugin pipeline set: missing program %q", name)
 			}
 		}
-		if _, ok := spec.Maps[kernelTCPluginConfigMapName]; !ok {
+		if configSpec, ok := spec.Maps[kernelTCPluginConfigMapName]; !ok {
 			return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 plugin pipeline set: missing map %q", kernelTCPluginConfigMapName)
+		} else if configSpec.MaxEntries < kernelTCPluginConfigEntries {
+			return fmt.Errorf("embedded tc eBPF object map %q has %d entries, want header plus two banks (%d)", kernelTCPluginConfigMapName, configSpec.MaxEntries, kernelTCPluginConfigEntries)
 		}
 		if _, ok := spec.Maps[kernelTCDispatchScratchMapName]; !ok {
 			return fmt.Errorf("embedded tc eBPF object has incomplete plugin pipeline set: missing map %q", kernelTCDispatchScratchMapName)

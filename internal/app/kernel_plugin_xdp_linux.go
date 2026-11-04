@@ -37,6 +37,18 @@ const (
 	kernelXDPPluginBank1Base              = 16
 	kernelXDPPluginMaxHooks               = pluginXDPPipelineHookLimit
 	kernelXDPPluginProgramChainMaxEntries = pluginXDPPipelineProgramArrayEntries
+
+	// xdp_plugin_config layout: key 0 is the header the packet path reads for
+	// active_bank (plus a userspace mirror), keys 1 and 2 are per-bank configs.
+	kernelXDPPluginConfigHeaderKey   = uint32(0)
+	kernelXDPPluginConfigBankBaseKey = uint32(1)
+	kernelXDPPluginConfigEntries     = 3
+
+	// XDP_FLAGS_REPLACE with IFLA_XDP_EXPECTED_FD arrived in Linux 5.7. Without
+	// it a successor cannot take over a dispatcher atomically, so hot restart
+	// falls back to detaching it.
+	kernelXDPPluginReplaceMinMajor = 5
+	kernelXDPPluginReplaceMinMinor = 7
 )
 
 //go:embed ebpf/plugin-xdp-dispatcher-bpf.o
@@ -116,6 +128,13 @@ type kernelXDPPluginPipelineRuntime struct {
 	activeBank    uint32
 	snapshot      pluginRuntimeSnapshot
 	orphanChecked bool
+	// handoff is a predecessor dispatcher left attached by a hot restart. It
+	// keeps running the old chain until this process replaces it in place.
+	handoff *kernelHotRestartMetadata
+	// handedOff marks that this process left its own dispatcher attached for a
+	// successor and must not touch it again before exit.
+	handedOff      bool
+	predecessorLog string
 }
 
 func newKernelXDPPluginPipelineRuntime(cfg *Config) *kernelXDPPluginPipelineRuntime {
@@ -133,7 +152,11 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
+	if rt.handedOff {
+		return clonePluginRuntimeSnapshot(rt.snapshot)
+	}
 	if !rt.enabled() {
+		rt.releasePredecessorLocked()
 		if err := rt.cleanupLocked(); err != nil {
 			log.Printf("xdp plugin pipeline cleanup while disabled: %v", err)
 		}
@@ -154,6 +177,7 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 	}
 
 	if len(desired) == 0 {
+		rt.releasePredecessorLocked()
 		if err := rt.cleanupLocked(); err != nil {
 			for id, state := range states {
 				state.Error = joinPluginRuntimeText(state.Error, err.Error())
@@ -167,7 +191,7 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 	}
 
 	if !rt.orphanChecked {
-		if err := cleanupOrphanXDPPluginRuntimeState(); err != nil {
+		if err := rt.recoverPredecessorLocked(); err != nil {
 			rt.snapshot = rt.failureSnapshot(catalog, desired, states, fmt.Errorf("recover xdp plugin runtime: %w", err))
 			return clonePluginRuntimeSnapshot(rt.snapshot)
 		}
@@ -209,22 +233,59 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 
 	desiredIfIndexes := collectKernelXDPPluginInterfaces(programs)
 	programID := kernelProgramID(pieces.dispatcher)
-	newAttachments, addedAttachments, err := rt.reconcileAttachmentsLocked(desiredIfIndexes, pieces.dispatcher, programID)
+
+	// Nothing reaches a freshly loaded dispatcher yet, so fill its chain before
+	// attaching it. The first packet it sees, including one taken over from a
+	// hot-restart predecessor, then already runs the complete chain.
+	var bank uint32
+	installed := false
+	if createdDispatcher {
+		bank, err = installKernelXDPPluginPrograms(pieces, programs)
+		if err != nil {
+			cleanupKernelPluginPipelineCollections(loaded)
+			dispatcher.Close()
+			rt.snapshot = rt.failureSnapshot(catalog, desired, states, err)
+			return clonePluginRuntimeSnapshot(rt.snapshot)
+		}
+		installed = true
+	}
+
+	handoff, err := rt.openHandoffLocked()
 	if err != nil {
+		cleanupKernelPluginPipelineCollections(loaded)
+		if createdDispatcher {
+			dispatcher.Close()
+		}
+		rt.snapshot = rt.failureSnapshot(catalog, desired, states, err)
+		return clonePluginRuntimeSnapshot(rt.snapshot)
+	}
+	defer handoff.close()
+
+	newAttachments, addedAttachments, adoptedAttachments, err := rt.reconcileAttachmentsLocked(desiredIfIndexes, pieces.dispatcher, programID, handoff)
+	if err != nil {
+		restoreErr := handoff.restore(adoptedAttachments, pieces.dispatcher)
 		detachErr := rt.rollbackAddedAttachmentsLocked(addedAttachments, programID, dispatcher, createdDispatcher)
-		err = errors.Join(err, detachErr)
+		err = errors.Join(err, restoreErr, detachErr)
 		cleanupKernelPluginPipelineCollections(loaded)
 		rt.snapshot = rt.failureSnapshot(catalog, desired, states, err)
 		return clonePluginRuntimeSnapshot(rt.snapshot)
 	}
 
-	bank, err := installKernelXDPPluginPrograms(pieces, programs)
-	if err != nil {
-		detachErr := rt.rollbackAddedAttachmentsLocked(addedAttachments, programID, dispatcher, createdDispatcher)
-		err = errors.Join(err, detachErr)
-		cleanupKernelPluginPipelineCollections(loaded)
-		rt.snapshot = rt.failureSnapshot(catalog, desired, states, err)
-		return clonePluginRuntimeSnapshot(rt.snapshot)
+	if !installed {
+		bank, err = installKernelXDPPluginPrograms(pieces, programs)
+		if err != nil {
+			detachErr := rt.rollbackAddedAttachmentsLocked(addedAttachments, programID, dispatcher, createdDispatcher)
+			err = errors.Join(err, detachErr)
+			cleanupKernelPluginPipelineCollections(loaded)
+			rt.snapshot = rt.failureSnapshot(catalog, desired, states, err)
+			return clonePluginRuntimeSnapshot(rt.snapshot)
+		}
+	}
+	if handoff != nil {
+		if err := handoff.finish(); err != nil {
+			log.Printf("xdp plugin pipeline hot restart: %v", err)
+		}
+		rt.handoff = nil
 	}
 
 	attachmentsByPlugin := kernelXDPPluginAttachmentStates(programs, bank)
@@ -296,6 +357,9 @@ func (rt *kernelXDPPluginPipelineRuntime) Close() error {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.handedOff || rt.prepareHotRestartLocked() {
+		return nil
+	}
 	return rt.cleanupLocked()
 }
 
@@ -305,6 +369,15 @@ func (rt *kernelXDPPluginPipelineRuntime) Maintain() error {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.handedOff {
+		return nil
+	}
+	if !rt.enabled() {
+		// A disabled plugin system never reconciles a catalog, so release a
+		// predecessor's dispatcher here instead of leaving it attached.
+		rt.releasePredecessorLocked()
+		return nil
+	}
 	if rt.dispatcher == nil || len(rt.desired) == 0 {
 		return nil
 	}
@@ -500,6 +573,7 @@ func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesi
 		objects[object.ID] = object
 		objects[object.Path] = object
 	}
+	var resolutionErrors []string
 	for _, hook := range plugin.Hooks {
 		if hook.Engine != kernelEngineXDP {
 			continue
@@ -545,11 +619,15 @@ func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesi
 		seen := make(map[uint32]struct{}, len(hook.Interfaces))
 		for _, name := range hook.Interfaces {
 			link, err := pluginControlNetLinkByName(name)
-			if err != nil {
-				return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s resolve interface %q: %v", hook.ID, name, err))
+			if err == nil && (link == nil || link.Attrs() == nil || link.Attrs().Index <= 0) {
+				err = fmt.Errorf("invalid link identity")
 			}
-			if link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 {
-				return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s resolve interface %q: invalid link identity", hook.ID, name))
+			if err != nil {
+				// Same rule as the TC pipeline: one missing interface must not
+				// switch the hook off on the interfaces that do exist. The next
+				// link event reconciles it back in.
+				resolutionErrors = append(resolutionErrors, fmt.Sprintf("hook %s interface %q: %v", hook.ID, name, err))
+				continue
 			}
 			ifindex := uint32(link.Attrs().Index)
 			if _, exists := seen[ifindex]; exists {
@@ -558,6 +636,10 @@ func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesi
 			seen[ifindex] = struct{}{}
 			interfaces = append(interfaces, link.Attrs().Name)
 			ifIndexes = append(ifIndexes, ifindex)
+		}
+		if len(ifIndexes) == 0 {
+			// An entirely missing explicit binding is omitted, never widened.
+			continue
 		}
 		item.hooks = append(item.hooks, kernelXDPPluginHookPlan{
 			PluginID:         plugin.ID,
@@ -578,10 +660,14 @@ func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesi
 		})
 	}
 	if len(item.hooks) == 0 {
+		if len(resolutionErrors) > 0 {
+			return item, pluginRuntimeErrorState(strings.Join(resolutionErrors, "; "))
+		}
 		state := externalPluginRuntimeState()
 		state.Reason = "no supported xdp pipeline hook is declared"
 		return item, state
 	}
+	item.warnings = append(item.warnings, resolutionErrors...)
 	sort.Slice(item.hooks, func(i, j int) bool {
 		return kernelXDPPluginHookLess(item.hooks[i], item.hooks[j])
 	})
@@ -801,7 +887,7 @@ func validateKernelXDPPluginDispatcherSpec(spec *ebpf.CollectionSpec) error {
 		minEntries uint32
 	}{
 		{kernelXDPPluginProgramChainMapName, ebpf.ProgramArray, 4, 4, kernelXDPPluginProgramChainMaxEntries},
-		{kernelXDPPluginConfigMapName, ebpf.Array, 4, 16, 1},
+		{kernelXDPPluginConfigMapName, ebpf.Array, 4, 16, kernelXDPPluginConfigEntries},
 		{kernelXDPPluginInterfacesMapName, ebpf.Hash, 8, 4, 1},
 		{kernelXDPPluginScratchMapName, ebpf.PerCPUArray, 4, 16, 1},
 		{kernelXDPPluginMetricsMapName, ebpf.PerCPUArray, 4, 32, kernelXDPPluginMaxHooks},
@@ -943,29 +1029,42 @@ func collectKernelXDPPluginInterfaces(programs []loadedKernelXDPPluginProgram) [
 	return out
 }
 
-func (rt *kernelXDPPluginPipelineRuntime) reconcileAttachmentsLocked(desired []int, prog *ebpf.Program, programID uint32) ([]xdpAttachment, []xdpAttachment, error) {
+// reconcileAttachmentsLocked returns every attachment of prog, the ones it
+// attached from scratch, and the ones it took over from a hot-restart
+// predecessor. Callers roll back the second set by detaching and the third by
+// restoring the predecessor.
+func (rt *kernelXDPPluginPipelineRuntime) reconcileAttachmentsLocked(desired []int, prog *ebpf.Program, programID uint32, handoff *kernelXDPPluginHandoff) ([]xdpAttachment, []xdpAttachment, []xdpAttachment, error) {
 	oldByIndex := make(map[int]xdpAttachment, len(rt.attachments))
 	for _, att := range rt.attachments {
 		oldByIndex[att.ifindex] = att
 	}
+	allowGeneric := rt.cfg != nil && rt.cfg.ExperimentalFeatureEnabled(experimentalFeatureXDPGeneric)
 	result := make([]xdpAttachment, 0, len(desired))
 	added := make([]xdpAttachment, 0, len(desired))
+	adopted := make([]xdpAttachment, 0)
 	for _, ifindex := range desired {
 		if old, ok := oldByIndex[ifindex]; ok && xdpAttachmentExists(old, rt.programID) {
 			result = append(result, old)
 			continue
 		}
-		att, err := attachKernelXDPPluginDispatcher(ifindex, prog, rt.cfg != nil && rt.cfg.ExperimentalFeatureEnabled(experimentalFeatureXDPGeneric))
+		if att, ok, err := handoff.adopt(ifindex, prog, allowGeneric); err != nil {
+			return result, added, adopted, fmt.Errorf("take over xdp plugin dispatcher on %s: %w", xdpInterfaceLabel(ifindex), err)
+		} else if ok {
+			result = append(result, att)
+			adopted = append(adopted, att)
+			continue
+		}
+		att, err := attachKernelXDPPluginDispatcher(ifindex, prog, allowGeneric)
 		if err != nil {
-			return result, added, fmt.Errorf("attach xdp plugin dispatcher on %s: %w", xdpInterfaceLabel(ifindex), err)
+			return result, added, adopted, fmt.Errorf("attach xdp plugin dispatcher on %s: %w", xdpInterfaceLabel(ifindex), err)
 		}
 		result = append(result, att)
 		added = append(added, att)
 	}
 	if len(result) == 0 || programID == 0 {
-		return result, added, fmt.Errorf("xdp plugin dispatcher did not establish a verifiable attachment")
+		return result, added, adopted, fmt.Errorf("xdp plugin dispatcher did not establish a verifiable attachment")
 	}
-	return result, added, nil
+	return result, added, adopted, nil
 }
 
 func attachKernelXDPPluginDispatcher(ifindex int, prog *ebpf.Program, allowGeneric bool) (xdpAttachment, error) {
@@ -1061,11 +1160,28 @@ func installKernelXDPPluginPrograms(pieces kernelXDPPluginPieces, programs []loa
 		ActiveBank: inactive,
 		Generation: current.Generation + 1,
 	}
-	if err := pieces.config.Put(uint32(0), next); err != nil {
-		return 0, fmt.Errorf("switch xdp plugin chain bank: %w", err)
+	if err := syncKernelXDPPluginConfig(pieces.config, next); err != nil {
+		return 0, err
 	}
 	switched = true
 	return inactive, nil
+}
+
+// syncKernelXDPPluginConfig publishes value as the active chain. The bank
+// entry is complete before the header flips, so a packet that reads the new
+// active_bank also reads that bank's own count and masks.
+func syncKernelXDPPluginConfig(m *ebpf.Map, value kernelXDPPluginConfig) error {
+	if m == nil {
+		return fmt.Errorf("xdp plugin config map is nil")
+	}
+	value.ActiveBank &= 1
+	if err := m.Put(kernelXDPPluginConfigBankBaseKey+value.ActiveBank, value); err != nil {
+		return fmt.Errorf("sync xdp plugin config bank %d: %w", value.ActiveBank, err)
+	}
+	if err := m.Put(kernelXDPPluginConfigHeaderKey, value); err != nil {
+		return fmt.Errorf("switch xdp plugin chain bank: %w", err)
+	}
+	return nil
 }
 
 func kernelXDPPluginBankBase(bank uint32) int {
@@ -1210,6 +1326,10 @@ func kernelXDPPluginMetricIndex(slot int) (int, bool) {
 
 func (rt *kernelXDPPluginPipelineRuntime) cleanupLocked() error {
 	var failures []string
+	// Runtime metadata on disk belongs to whoever attached a dispatcher. With
+	// nothing of our own it may still describe a predecessor that
+	// releasePredecessorLocked could not recover, so leave it in place.
+	owned := rt.dispatcher != nil || len(rt.attachments) > 0 || len(rt.loaded) > 0
 	if rt.dispatcher != nil {
 		if pieces, err := kernelXDPPluginCollectionPieces(rt.dispatcher); err != nil {
 			failures = append(failures, err.Error())
@@ -1219,7 +1339,7 @@ func (rt *kernelXDPPluginPipelineRuntime) cleanupLocked() error {
 				failures = append(failures, fmt.Sprintf("lookup xdp plugin config: %v", err))
 			} else {
 				empty := kernelXDPPluginConfig{ActiveBank: (current.ActiveBank & 1) ^ 1, Generation: current.Generation + 1}
-				if err := pieces.config.Put(uint32(0), empty); err != nil {
+				if err := syncKernelXDPPluginConfig(pieces.config, empty); err != nil {
 					failures = append(failures, fmt.Sprintf("disable xdp plugin chain: %v", err))
 				} else if current.Count > 0 {
 					time.Sleep(kernelPluginPipelineUpdateGrace)
@@ -1246,7 +1366,9 @@ func (rt *kernelXDPPluginPipelineRuntime) cleanupLocked() error {
 	if rt.dispatcher != nil {
 		rt.dispatcher.Close()
 	}
-	clearKernelRuntimeMetadata(kernelXDPPluginRuntimeEngine)
+	if owned {
+		clearKernelRuntimeMetadata(kernelXDPPluginRuntimeEngine)
+	}
 	rt.dispatcher = nil
 	rt.attachments = nil
 	rt.programID = 0
@@ -1276,21 +1398,275 @@ func detachOwnedXDPPluginAttachment(att xdpAttachment, programID uint32) error {
 		return err
 	}
 	defer expected.Close()
-	req := nl.NewNetlinkRequest(unix.RTM_SETLINK, unix.NLM_F_ACK)
-	msg := nl.NewIfInfomsg(unix.AF_UNSPEC)
-	msg.Index = int32(att.ifindex)
-	req.AddData(msg)
-	attrs := nl.NewRtAttr(unix.IFLA_XDP|unix.NLA_F_NESTED, nil)
-	attrs.AddRtAttr(nl.IFLA_XDP_FD, nl.Uint32Attr(^uint32(0)))
-	attrs.AddRtAttr(nl.IFLA_XDP_FLAGS, nl.Uint32Attr(uint32(att.flags)|unix.XDP_FLAGS_REPLACE))
-	attrs.AddRtAttr(unix.IFLA_XDP_EXPECTED_FD, nl.Uint32Attr(uint32(expected.FD())))
-	req.AddData(attrs)
-	_, err = req.Execute(unix.NETLINK_ROUTE, 0)
+	err = replaceXDPProgram(att.ifindex, -1, expected.FD(), att.flags)
 	// Missing interface or a different owner means our old attachment is gone.
 	if errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EEXIST) {
 		return nil
 	}
 	return err
+}
+
+// replaceXDPProgram installs newFD on ifindex only while expectedFD is the
+// attached program, as one netlink operation. newFD -1 detaches. The kernel
+// answers EEXIST when a different program is attached.
+func replaceXDPProgram(ifindex, newFD, expectedFD, flags int) error {
+	req := nl.NewNetlinkRequest(unix.RTM_SETLINK, unix.NLM_F_ACK)
+	msg := nl.NewIfInfomsg(unix.AF_UNSPEC)
+	msg.Index = int32(ifindex)
+	req.AddData(msg)
+	attrs := nl.NewRtAttr(unix.IFLA_XDP|unix.NLA_F_NESTED, nil)
+	attrs.AddRtAttr(nl.IFLA_XDP_FD, nl.Uint32Attr(uint32(int32(newFD))))
+	attrs.AddRtAttr(nl.IFLA_XDP_FLAGS, nl.Uint32Attr(uint32(flags)|unix.XDP_FLAGS_REPLACE))
+	attrs.AddRtAttr(unix.IFLA_XDP_EXPECTED_FD, nl.Uint32Attr(uint32(expectedFD)))
+	req.AddData(attrs)
+	_, err := req.Execute(unix.NETLINK_ROUTE, 0)
+	return err
+}
+
+func kernelSupportsXDPPluginReplace(release string) bool {
+	major, minor, ok := parseKernelReleaseMajorMinor(release)
+	if !ok {
+		return false
+	}
+	return major > kernelXDPPluginReplaceMinMajor || (major == kernelXDPPluginReplaceMinMajor && minor >= kernelXDPPluginReplaceMinMinor)
+}
+
+// prepareHotRestartLocked leaves the dispatcher attached so the plugin chain
+// keeps running while the service restarts. The successor swaps in its own
+// dispatcher with XDP_FLAGS_REPLACE, so no packet skips the chain.
+func (rt *kernelXDPPluginPipelineRuntime) prepareHotRestartLocked() bool {
+	if !kernelHotRestartRequested() || rt.dispatcher == nil || len(rt.attachments) == 0 || rt.programID == 0 {
+		return false
+	}
+	if release := kernelRelease(); !kernelSupportsXDPPluginReplace(release) {
+		log.Printf("xdp plugin pipeline hot restart: kernel %q cannot replace an xdp program atomically; detaching the dispatcher instead", release)
+		return false
+	}
+	pieces, err := kernelXDPPluginCollectionPieces(rt.dispatcher)
+	if err != nil {
+		log.Printf("xdp plugin pipeline hot restart: %v; detaching the dispatcher instead", err)
+		return false
+	}
+	clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
+	// The kernel empties a prog array once no fd or pin refers to it. The pin
+	// keeps the continuation and every plugin program in the chain after this
+	// process exits.
+	if err := pinKernelHotRestartMaps(kernelXDPPluginRuntimeEngine, map[string]*ebpf.Map{
+		kernelXDPPluginProgramChainMapName: pieces.progChain,
+	}); err != nil {
+		log.Printf("xdp plugin pipeline hot restart: pin plugin chain: %v; detaching the dispatcher instead", err)
+		clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
+		return false
+	}
+	meta := kernelHotRestartMetadata{
+		FormatVersion:  kernelHotRestartMetadataFormatVersion,
+		Engine:         kernelXDPPluginRuntimeEngine,
+		XDPAttachments: make([]kernelHotRestartXDPAttachment, 0, len(rt.attachments)),
+	}
+	for _, att := range rt.attachments {
+		meta.XDPAttachments = append(meta.XDPAttachments, kernelHotRestartXDPAttachment{Ifindex: att.ifindex, Flags: att.flags, ProgramID: rt.programID})
+	}
+	if err := writeKernelHotRestartMetadata(kernelXDPPluginRuntimeEngine, meta); err != nil {
+		log.Printf("xdp plugin pipeline hot restart: write handoff metadata: %v; detaching the dispatcher instead", err)
+		clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
+		return false
+	}
+	log.Printf("xdp plugin pipeline hot restart: leaving %d dispatcher attachment(s) and the plugin chain active for successor", len(rt.attachments))
+	// The runtime metadata stays on disk on purpose: a successor that predates
+	// the handoff then detaches this dispatcher as a crashed owner's, which is
+	// the old cold behaviour. Collections stay open until the process exits.
+	rt.handedOff = true
+	return true
+}
+
+// recoverPredecessorLocked runs once before this process attaches its first
+// dispatcher. A dispatcher left by a hot restart is kept for an in-place
+// takeover; one left by a crashed owner is detached.
+func (rt *kernelXDPPluginPipelineRuntime) recoverPredecessorLocked() error {
+	handoff, err := readXDPPluginHotRestartHandoff()
+	if err != nil {
+		return err
+	}
+	if handoff != nil {
+		// The predecessor kept its runtime metadata only for older successors.
+		clearKernelRuntimeMetadata(kernelXDPPluginRuntimeEngine)
+		rt.handoff = handoff
+		return nil
+	}
+	return cleanupOrphanXDPPluginRuntimeState()
+}
+
+// releasePredecessorLocked detaches whatever a predecessor left attached once
+// this process is not going to run any XDP plugin hook itself.
+func (rt *kernelXDPPluginPipelineRuntime) releasePredecessorLocked() {
+	if !rt.orphanChecked {
+		if err := rt.recoverPredecessorLocked(); err != nil {
+			rt.logPredecessorOnce("xdp plugin pipeline: recover predecessor dispatcher: %v", err)
+			return
+		}
+		rt.orphanChecked = true
+	}
+	if rt.handoff == nil {
+		return
+	}
+	var failures []error
+	for _, item := range rt.handoff.XDPAttachments {
+		if err := detachOwnedXDPPluginAttachment(xdpAttachment{ifindex: item.Ifindex, flags: item.Flags}, item.ProgramID); err != nil {
+			failures = append(failures, fmt.Errorf("ifindex %d: %w", item.Ifindex, err))
+		}
+	}
+	if err := errors.Join(failures...); err != nil {
+		rt.logPredecessorOnce("xdp plugin pipeline hot restart: detach predecessor dispatcher: %v", err)
+		return
+	}
+	log.Printf("xdp plugin pipeline hot restart: no xdp plugin hook remains; detached %d predecessor attachment(s)", len(rt.handoff.XDPAttachments))
+	clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
+	rt.handoff = nil
+}
+
+func (rt *kernelXDPPluginPipelineRuntime) logPredecessorOnce(format string, err error) {
+	message := fmt.Sprintf(format, err)
+	if message == rt.predecessorLog {
+		return
+	}
+	rt.predecessorLog = message
+	log.Print(message)
+}
+
+func readXDPPluginHotRestartHandoff() (*kernelHotRestartMetadata, error) {
+	meta, err := readKernelHotRestartMetadata(kernelXDPPluginRuntimeEngine)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// A pin without metadata cannot be matched to any attachment.
+			clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read xdp plugin hot restart metadata: %w", err)
+	}
+	if meta.Engine != kernelXDPPluginRuntimeEngine {
+		return nil, fmt.Errorf("xdp plugin hot restart metadata has unexpected engine %q", meta.Engine)
+	}
+	if kernelMetadataOwnerAlive(meta) {
+		return nil, fmt.Errorf("xdp plugin hot restart predecessor pid %d is still running", meta.OwnerPID)
+	}
+	if len(meta.XDPAttachments) == 0 {
+		clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
+		return nil, nil
+	}
+	return &meta, nil
+}
+
+// kernelXDPPluginHandoff is one takeover attempt of a predecessor dispatcher.
+// It holds the old program open so a failed attempt can put it back even
+// after its last attachment was replaced.
+type kernelXDPPluginHandoff struct {
+	byIndex     map[int]kernelHotRestartXDPAttachment
+	predecessor *ebpf.Program
+	adopted     map[int]struct{}
+}
+
+func (rt *kernelXDPPluginPipelineRuntime) openHandoffLocked() (*kernelXDPPluginHandoff, error) {
+	if rt.handoff == nil {
+		return nil, nil
+	}
+	h := &kernelXDPPluginHandoff{
+		byIndex: make(map[int]kernelHotRestartXDPAttachment, len(rt.handoff.XDPAttachments)),
+		adopted: make(map[int]struct{}),
+	}
+	var programID uint32
+	for _, item := range rt.handoff.XDPAttachments {
+		h.byIndex[item.Ifindex] = item
+		if programID == 0 {
+			programID = item.ProgramID
+		}
+	}
+	if programID == 0 {
+		return h, nil
+	}
+	prog, err := ebpf.NewProgramFromID(ebpf.ProgramID(programID))
+	if errors.Is(err, unix.ENOENT) {
+		// Every predecessor attachment is already gone.
+		return h, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open predecessor xdp plugin dispatcher %d: %w", programID, err)
+	}
+	h.predecessor = prog
+	return h, nil
+}
+
+func (h *kernelXDPPluginHandoff) close() {
+	if h != nil && h.predecessor != nil {
+		h.predecessor.Close()
+		h.predecessor = nil
+	}
+}
+
+// adopt swaps the predecessor's dispatcher on ifindex for prog in one netlink
+// operation. ok is false when the interface has nothing to take over, and the
+// caller then attaches normally.
+func (h *kernelXDPPluginHandoff) adopt(ifindex int, prog *ebpf.Program, allowGeneric bool) (xdpAttachment, bool, error) {
+	if h == nil || h.predecessor == nil || prog == nil {
+		return xdpAttachment{}, false, nil
+	}
+	old, ok := h.byIndex[ifindex]
+	if !ok {
+		return xdpAttachment{}, false, nil
+	}
+	if old.Flags == nl.XDP_FLAGS_SKB_MODE && !allowGeneric {
+		// Generic mode is no longer allowed, so this interface cannot keep the
+		// predecessor's mode. Detach it and let the caller attach in driver mode.
+		return xdpAttachment{}, false, detachOwnedXDPPluginAttachment(xdpAttachment{ifindex: ifindex, flags: old.Flags}, old.ProgramID)
+	}
+	err := replaceXDPProgram(ifindex, prog.FD(), h.predecessor.FD(), old.Flags)
+	if errors.Is(err, unix.EEXIST) || errors.Is(err, unix.ENODEV) {
+		// The predecessor is no longer attached there.
+		return xdpAttachment{}, false, nil
+	}
+	if err != nil {
+		return xdpAttachment{}, false, err
+	}
+	h.adopted[ifindex] = struct{}{}
+	return xdpAttachment{ifindex: ifindex, flags: old.Flags}, true, nil
+}
+
+// restore puts the predecessor back where a later step of the same update
+// failed, so the old chain keeps running instead of no chain.
+func (h *kernelXDPPluginHandoff) restore(adopted []xdpAttachment, prog *ebpf.Program) error {
+	if h == nil || h.predecessor == nil || prog == nil {
+		return nil
+	}
+	var failures []error
+	for _, att := range adopted {
+		if err := replaceXDPProgram(att.ifindex, h.predecessor.FD(), prog.FD(), att.flags); err != nil {
+			failures = append(failures, fmt.Errorf("restore predecessor xdp plugin dispatcher on %s: %w", xdpInterfaceLabel(att.ifindex), err))
+			continue
+		}
+		delete(h.adopted, att.ifindex)
+	}
+	return errors.Join(failures...)
+}
+
+// finish detaches the predecessor from interfaces that were not taken over
+// and drops the pinned chain, which frees the old programs.
+func (h *kernelXDPPluginHandoff) finish() error {
+	if h == nil {
+		return nil
+	}
+	var failures []error
+	if h.predecessor != nil {
+		for ifindex, old := range h.byIndex {
+			if _, adopted := h.adopted[ifindex]; adopted {
+				continue
+			}
+			if err := detachOwnedXDPPluginAttachment(xdpAttachment{ifindex: ifindex, flags: old.Flags}, old.ProgramID); err != nil {
+				failures = append(failures, fmt.Errorf("detach predecessor xdp plugin dispatcher from ifindex %d: %w", ifindex, err))
+			}
+		}
+	}
+	clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
+	log.Printf("xdp plugin pipeline hot restart: took over %d predecessor attachment(s) in place", len(h.adopted))
+	return errors.Join(failures...)
 }
 
 func detachOwnedXDPPluginAttachments(attachments []xdpAttachment, programID uint32) ([]xdpAttachment, error) {

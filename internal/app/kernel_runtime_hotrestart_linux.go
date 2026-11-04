@@ -798,6 +798,28 @@ func pinKernelHotRestartMaps(engine string, maps map[string]*ebpf.Map) error {
 	return nil
 }
 
+// pinKernelHotRestartTailCalls keeps a prog array populated after this process
+// exits. The kernel empties a prog array as soon as no fd or pin refers to it,
+// which would make every tail call of the programs left attached for the
+// successor miss until it takes over. Pinning the programs alone does not
+// prevent that. The pin lives in the engine's hot-restart directory, so the
+// successor drops it together with the rest of the handoff state.
+func pinKernelHotRestartTailCalls(engine string, name string, m *ebpf.Map) error {
+	if m == nil {
+		return nil
+	}
+	dir := filepath.Join(kernelHotRestartEngineDir(engine), "tail-calls")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create hot restart tail-call dir %q: %w", dir, err)
+	}
+	path := filepath.Join(dir, name)
+	_ = os.Remove(path)
+	if err := m.Pin(path); err != nil {
+		return fmt.Errorf("pin %s tail-call map at %q: %w", name, path, err)
+	}
+	return nil
+}
+
 func pinKernelHotRestartPrograms(engine string, programs map[string]*ebpf.Program) error {
 	dir := filepath.Join(kernelHotRestartEngineDir(engine), "programs")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

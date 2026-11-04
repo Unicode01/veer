@@ -8,6 +8,16 @@
 #define VEER_XDP_PLUGIN_BANK0_BASE 8
 #define VEER_XDP_PLUGIN_BANK1_BASE 16
 #define VEER_XDP_PLUGIN_MAX 8
+/*
+ * xdp_plugin_config holds a header at key 0 and one full config per bank at
+ * keys 1 and 2. Userspace writes the inactive bank's entry first and then
+ * flips active_bank in the header, so a packet never pairs one bank's count
+ * with another bank's masks. Array updates copy the value without a lock, so
+ * the header is the only entry a packet reads while it can change.
+ */
+#define VEER_XDP_PLUGIN_CONFIG_HEADER_KEY 0
+#define VEER_XDP_PLUGIN_CONFIG_BANK_BASE 1
+#define VEER_XDP_PLUGIN_CONFIG_ENTRIES 3
 
 struct xdp_plugin_config {
 	__u32 count;
@@ -50,7 +60,7 @@ struct bpf_map_def SEC("maps") xdp_plugin_config = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct xdp_plugin_config),
-	.max_entries = 1,
+	.max_entries = VEER_XDP_PLUGIN_CONFIG_ENTRIES,
 };
 
 struct bpf_map_def SEC("maps") xdp_plugin_interfaces = {
@@ -81,6 +91,18 @@ static __always_inline __u32 xdp_plugin_count_mask(__u32 count)
 	if (count >= 32)
 		return ~0U;
 	return (1U << count) - 1;
+}
+
+static __always_inline struct xdp_plugin_config *xdp_plugin_active_config(void)
+{
+	struct xdp_plugin_config *header;
+	__u32 key = VEER_XDP_PLUGIN_CONFIG_HEADER_KEY;
+
+	header = bpf_map_lookup_elem(&xdp_plugin_config, &key);
+	if (!header)
+		return 0;
+	key = VEER_XDP_PLUGIN_CONFIG_BANK_BASE + (header->active_bank & 1);
+	return bpf_map_lookup_elem(&xdp_plugin_config, &key);
 }
 
 static __always_inline struct xdp_plugin_dispatch *xdp_plugin_dispatch_state(void)
@@ -162,14 +184,13 @@ int veer_xdp_plugin_dispatch(struct xdp_md *xdp)
 	struct xdp_plugin_if_value *scoped;
 	struct xdp_plugin_dispatch *dispatch;
 	struct xdp_plugin_config *config;
-	__u32 key = 0;
 	__u32 full_mask;
 
 	dispatch = xdp_plugin_dispatch_state();
 	if (!dispatch)
 		return XDP_PASS;
 	__builtin_memset(dispatch, 0, sizeof(*dispatch));
-	config = bpf_map_lookup_elem(&xdp_plugin_config, &key);
+	config = xdp_plugin_active_config();
 	if (!config || config->count == 0)
 		return XDP_PASS;
 	dispatch->count = config->count;
