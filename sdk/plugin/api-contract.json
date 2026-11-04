@@ -1,5 +1,5 @@
 {
-  "version": 14,
+  "version": 15,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -99,6 +99,8 @@
     "program_array_entries": 111,
     "stage_hook_limit": 8,
     "direction_hook_limit": 14,
+    "stage_hook_capacity": 32,
+    "hook_limit_scope": "interface",
     "directions": [
       "forward",
       "reply"
@@ -137,7 +139,9 @@
   },
   "xdp_pipeline": {
     "program_array_entries": 24,
-    "hook_limit": 8,
+    "hook_limit": 14,
+    "hook_capacity": 32,
+    "hook_limit_scope": "interface",
     "hook_stages": [
       "pre_forward",
       "forward"

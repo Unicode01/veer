@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/bits"
 	"os"
 	"sort"
 	"strings"
@@ -24,18 +25,23 @@ import (
 )
 
 const (
-	kernelXDPPluginRuntimeEngine          = "xdp-plugin"
-	kernelXDPPluginProgramChainMapName    = "xdp_prog_chain"
-	kernelXDPPluginConfigMapName          = "xdp_plugin_config"
-	kernelXDPPluginInterfacesMapName      = "xdp_plugin_interfaces"
-	kernelXDPPluginScratchMapName         = "xdp_plugin_scratch"
-	kernelXDPPluginMetricsMapName         = "xdp_plugin_metrics"
-	kernelXDPPluginDispatcherProgramName  = "veer_xdp_plugin_dispatch"
-	kernelXDPPluginContinueProgramName    = "veer_xdp_plugin_continue"
-	kernelXDPPluginContinueSlot           = 7
-	kernelXDPPluginBank0Base              = 8
-	kernelXDPPluginBank1Base              = 16
-	kernelXDPPluginMaxHooks               = pluginXDPPipelineHookLimit
+	kernelXDPPluginRuntimeEngine         = "xdp-plugin"
+	kernelXDPPluginProgramChainMapName   = "xdp_prog_chain"
+	kernelXDPPluginConfigMapName         = "xdp_plugin_config"
+	kernelXDPPluginInterfacesMapName     = "xdp_plugin_interfaces"
+	kernelXDPPluginScratchMapName        = "xdp_plugin_scratch"
+	kernelXDPPluginMetricsMapName        = "xdp_plugin_metrics"
+	kernelXDPPluginDispatcherProgramName = "veer_xdp_plugin_dispatch"
+	kernelXDPPluginContinueProgramName   = "veer_xdp_plugin_continue"
+	kernelXDPPluginContinueSlot          = 7
+	kernelXDPPluginHooksMapName          = "xdp_plugin_hooks"
+	// Hooks live in the dispatcher's own xdp_plugin_hooks table at
+	// bank*kernelXDPPluginMaxHooks + position. xdp_prog_chain keeps its
+	// plugin-visible 24-entry layout and only holds the continue slot.
+	kernelXDPPluginBank0Base              = 0
+	kernelXDPPluginBank1Base              = kernelXDPPluginMaxHooks
+	kernelXDPPluginMaxHooks               = pluginXDPPipelineHookCapacity
+	kernelXDPPluginHookSlots              = 2 * kernelXDPPluginMaxHooks
 	kernelXDPPluginProgramChainMaxEntries = pluginXDPPipelineProgramArrayEntries
 
 	// xdp_plugin_config layout: key 0 is the header the packet path reads for
@@ -81,6 +87,7 @@ type kernelXDPPluginPieces struct {
 	dispatcher   *ebpf.Program
 	continuation *ebpf.Program
 	progChain    *ebpf.Map
+	hooks        *ebpf.Map
 	config       *ebpf.Map
 	interfaces   *ebpf.Map
 	metrics      *ebpf.Map
@@ -545,22 +552,46 @@ func buildKernelXDPPluginDesired(catalog PluginCatalog, cfg *Config) ([]kernelXD
 		}
 		desired = append(desired, item)
 	}
-	desired, states = applyKernelXDPPluginOrdering(desired, states)
-	totalHooks := 0
-	for _, item := range desired {
-		totalHooks += len(item.hooks)
-	}
-	if totalHooks > kernelXDPPluginMaxHooks {
-		state := pluginRuntimeErrorState(fmt.Sprintf("too many xdp plugin hooks: %d > %d", totalHooks, kernelXDPPluginMaxHooks))
+	// A plugin that does not fit is rejected on its own. The rest are ordered
+	// again without it, since their before/after constraints may name it.
+	for {
+		desired, states = applyKernelXDPPluginOrdering(desired, states)
+		sort.Slice(desired, func(i, j int) bool {
+			return kernelXDPPluginHookLess(desired[i].hooks[0], desired[j].hooks[0])
+		})
+		candidates := make([]pluginHookCapacityPlugin, 0, len(desired))
 		for _, item := range desired {
-			states[item.plugin.ID] = state
+			candidate := pluginHookCapacityPlugin{ID: item.plugin.ID, Running: item.plugin.Runtime.Attached}
+			for _, hook := range item.hooks {
+				candidate.Hooks = append(candidate.Hooks, pluginHookCapacityHook{
+					HookID:     hook.HookID,
+					Stage:      hook.Stage,
+					Group:      kernelEngineXDP,
+					Attaches:   []string{"ingress"},
+					Interfaces: normalizePluginHookCapacityInterfaces(hook.Interfaces),
+				})
+			}
+			candidates = append(candidates, candidate)
 		}
-		return nil, states
+		rejected := admitPluginHooksByCapacity(candidates, pluginHookCapacityLimits{
+			Engine:         kernelEngineXDP,
+			StageCapacity:  kernelXDPPluginMaxHooks,
+			InterfaceStage: pluginXDPPipelineHookLimit,
+			InterfaceGroup: pluginXDPPipelineHookLimit,
+		})
+		if len(rejected) == 0 {
+			return desired, states
+		}
+		kept := desired[:0]
+		for _, item := range desired {
+			if message, ok := rejected[item.plugin.ID]; ok {
+				states[item.plugin.ID] = pluginRuntimeErrorState(message)
+				continue
+			}
+			kept = append(kept, item)
+		}
+		desired = kept
 	}
-	sort.Slice(desired, func(i, j int) bool {
-		return kernelXDPPluginHookLess(desired[i].hooks[0], desired[j].hooks[0])
-	})
-	return desired, states
 }
 
 func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesiredPlugin, PluginRuntimeState) {
@@ -887,6 +918,7 @@ func validateKernelXDPPluginDispatcherSpec(spec *ebpf.CollectionSpec) error {
 		minEntries uint32
 	}{
 		{kernelXDPPluginProgramChainMapName, ebpf.ProgramArray, 4, 4, kernelXDPPluginProgramChainMaxEntries},
+		{kernelXDPPluginHooksMapName, ebpf.ProgramArray, 4, 4, kernelXDPPluginHookSlots},
 		{kernelXDPPluginConfigMapName, ebpf.Array, 4, 16, kernelXDPPluginConfigEntries},
 		{kernelXDPPluginInterfacesMapName, ebpf.Hash, 8, 4, 1},
 		{kernelXDPPluginScratchMapName, ebpf.PerCPUArray, 4, 16, 1},
@@ -912,11 +944,12 @@ func kernelXDPPluginCollectionPieces(coll *ebpf.Collection) (kernelXDPPluginPiec
 		dispatcher:   coll.Programs[kernelXDPPluginDispatcherProgramName],
 		continuation: coll.Programs[kernelXDPPluginContinueProgramName],
 		progChain:    coll.Maps[kernelXDPPluginProgramChainMapName],
+		hooks:        coll.Maps[kernelXDPPluginHooksMapName],
 		config:       coll.Maps[kernelXDPPluginConfigMapName],
 		interfaces:   coll.Maps[kernelXDPPluginInterfacesMapName],
 		metrics:      coll.Maps[kernelXDPPluginMetricsMapName],
 	}
-	if pieces.dispatcher == nil || pieces.continuation == nil || pieces.progChain == nil || pieces.config == nil || pieces.interfaces == nil || pieces.metrics == nil {
+	if pieces.dispatcher == nil || pieces.continuation == nil || pieces.progChain == nil || pieces.hooks == nil || pieces.config == nil || pieces.interfaces == nil || pieces.metrics == nil {
 		return kernelXDPPluginPieces{}, fmt.Errorf("xdp plugin dispatcher collection is incomplete")
 	}
 	return pieces, nil
@@ -1138,12 +1171,19 @@ func installKernelXDPPluginPrograms(pieces kernelXDPPluginPieces, programs []loa
 			return 0, fmt.Errorf("xdp plugin program %d is nil", i)
 		}
 		slot := uint32(base + i)
-		if err := pieces.progChain.Put(slot, uint32(item.prog.FD())); err != nil {
+		if err := pieces.hooks.Put(slot, uint32(item.prog.FD())); err != nil {
 			return 0, fmt.Errorf("install xdp plugin %s/%s at slot %d: %w", item.plan.PluginID, item.plan.HookID, slot, err)
 		}
 		bit := uint32(1) << uint32(i)
 		for _, ifindex := range item.plan.InterfaceIndexes {
 			interfaceMasks[ifindex] |= bit
+		}
+	}
+	for ifindex, mask := range interfaceMasks {
+		// Two tail calls per hook: more than this on one interface would run
+		// out of the kernel's tail-call budget mid-chain.
+		if count := bits.OnesCount32(mask); count > pluginXDPPipelineHookLimit {
+			return 0, fmt.Errorf("xdp plugin hooks on %s: %d exceed the per-interface limit %d", xdpInterfaceLabel(int(ifindex)), count, pluginXDPPipelineHookLimit)
 		}
 	}
 	for ifindex, mask := range interfaceMasks {
@@ -1195,7 +1235,7 @@ func clearKernelXDPPluginBank(pieces kernelXDPPluginPieces, bank uint32) error {
 	var failures []string
 	base := kernelXDPPluginBankBase(bank)
 	for i := 0; i < kernelXDPPluginMaxHooks; i++ {
-		if err := deleteKernelMapEntry(pieces.progChain, uint32(base+i)); err != nil {
+		if err := deleteKernelMapEntry(pieces.hooks, uint32(base+i)); err != nil {
 			failures = append(failures, fmt.Sprintf("clear xdp plugin slot %d: %v", base+i, err))
 		}
 	}
@@ -1448,11 +1488,12 @@ func (rt *kernelXDPPluginPipelineRuntime) prepareHotRestartLocked() bool {
 		return false
 	}
 	clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
-	// The kernel empties a prog array once no fd or pin refers to it. The pin
-	// keeps the continuation and every plugin program in the chain after this
+	// The kernel empties a prog array once no fd or pin refers to it. The pins
+	// keep the continuation and every plugin program in place after this
 	// process exits.
 	if err := pinKernelHotRestartMaps(kernelXDPPluginRuntimeEngine, map[string]*ebpf.Map{
 		kernelXDPPluginProgramChainMapName: pieces.progChain,
+		kernelXDPPluginHooksMapName:        pieces.hooks,
 	}); err != nil {
 		log.Printf("xdp plugin pipeline hot restart: pin plugin chain: %v; detaching the dispatcher instead", err)
 		clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)

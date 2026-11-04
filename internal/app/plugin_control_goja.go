@@ -63,6 +63,7 @@ var errPluginControlDisabledByState = errors.New("plugin is disabled")
 
 var pluginControlReservedMapNames = map[string]string{
 	"tc_prog_chain_v4":             "shared Veer TC tail-call chain",
+	"tc_plugin_hooks_v4":           "host-managed Veer TC plugin hook slots",
 	"tc_plugin_config_v4":          "shared Veer TC pipeline configuration",
 	"tc_plugin_interfaces_v4":      "shared Veer TC interface masks",
 	"tc_dispatch_scratch_v4":       "shared Veer TC dispatch scratch",
@@ -76,6 +77,7 @@ var pluginControlReservedMapNames = map[string]string{
 	"tc_packet_meta_v4":            "shared Veer IPv4 packet metadata",
 	"tc_packet_meta_v6":            "shared Veer IPv6 packet metadata",
 	"xdp_prog_chain":               "shared XDP tail-call chain",
+	"xdp_plugin_hooks":             "host-managed XDP plugin hook slots",
 }
 
 type pluginControlRuntime interface {

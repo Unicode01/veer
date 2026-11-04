@@ -2587,8 +2587,8 @@ func dataplanePerfPluginPipelineCount() int {
 	if count < 1 {
 		return 1
 	}
-	if count > tcProgramChainV4PluginPreForwardMax {
-		return tcProgramChainV4PluginPreForwardMax
+	if count > pluginTCPipelineStageHookLimit {
+		return pluginTCPipelineStageHookLimit
 	}
 	return count
 }

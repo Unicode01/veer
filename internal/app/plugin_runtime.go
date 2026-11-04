@@ -46,11 +46,17 @@ const (
 	pluginControlAPIABI  = 1
 	pluginTCPipelineABI  = 2
 
-	pluginTCPipelineProgramArrayEntries  = 111
-	pluginTCPipelineStageHookLimit       = 8
-	pluginTCPipelineDirectionHookLimit   = 14
+	pluginTCPipelineProgramArrayEntries = 111
+	pluginTCPipelineStageHookLimit      = 8
+	pluginTCPipelineDirectionHookLimit  = 14
+	pluginTCPipelineStageHookCapacity   = 32
+	// Stage and direction hook limits bound the hooks one packet walks on one
+	// interface and attach direction (the tail-call budget). Capacities bound
+	// hooks host-wide.
+	pluginHookLimitScopeInterface        = "interface"
 	pluginXDPPipelineProgramArrayEntries = 24
-	pluginXDPPipelineHookLimit           = 8
+	pluginXDPPipelineHookLimit           = 14
+	pluginXDPPipelineHookCapacity        = 32
 	pluginNetfilterPipelineHookLimit     = 8
 	pluginNetfilterPipelineGroupLimit    = 64
 
@@ -196,6 +202,8 @@ type PluginTCPipelineCapabilities struct {
 	ProgramArrayEntries int      `json:"program_array_entries"`
 	StageHookLimit      int      `json:"stage_hook_limit"`
 	DirectionHookLimit  int      `json:"direction_hook_limit"`
+	StageHookCapacity   int      `json:"stage_hook_capacity"`
+	HookLimitScope      string   `json:"hook_limit_scope"`
 	Directions          []string `json:"directions"`
 	Phases              []string `json:"phases"`
 	HookStages          []string `json:"hook_stages"`
@@ -205,6 +213,8 @@ type PluginTCPipelineCapabilities struct {
 type PluginXDPPipelineCapabilities struct {
 	ProgramArrayEntries int      `json:"program_array_entries"`
 	HookLimit           int      `json:"hook_limit"`
+	HookCapacity        int      `json:"hook_capacity"`
+	HookLimitScope      string   `json:"hook_limit_scope"`
 	HookStages          []string `json:"hook_stages"`
 	Attaches            []string `json:"attaches"`
 	RequiresInterfaces  bool     `json:"requires_interfaces"`
@@ -756,6 +766,8 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 			ProgramArrayEntries: pluginTCPipelineProgramArrayEntries,
 			StageHookLimit:      pluginTCPipelineStageHookLimit,
 			DirectionHookLimit:  pluginTCPipelineDirectionHookLimit,
+			StageHookCapacity:   pluginTCPipelineStageHookCapacity,
+			HookLimitScope:      pluginHookLimitScopeInterface,
 			Directions:          []string{pluginPipelineDirectionForward, pluginPipelineDirectionReply},
 			Phases:              []string{pluginPipelinePhaseAroundCore, pluginPipelinePhaseAfterApply},
 			HookStages: []string{
@@ -782,6 +794,8 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 		XDPPipeline: PluginXDPPipelineCapabilities{
 			ProgramArrayEntries: pluginXDPPipelineProgramArrayEntries,
 			HookLimit:           pluginXDPPipelineHookLimit,
+			HookCapacity:        pluginXDPPipelineHookCapacity,
+			HookLimitScope:      pluginHookLimitScopeInterface,
 			HookStages:          []string{pluginPipelineStagePreForward, pluginPipelineDirectionForward},
 			Attaches:            []string{"ingress"},
 			RequiresInterfaces:  true,

@@ -42,6 +42,7 @@ const RESERVED_EBPF_MAPS = new Set([
   'tc_plugin_ctx_v6', 'tc_plugin_metrics', 'tc_packet_meta_bindings_v1',
   'tc_packet_meta_generation_v4', 'tc_packet_meta_generation_v6',
   'tc_packet_meta_v4', 'tc_packet_meta_v6', 'xdp_prog_chain',
+  'tc_plugin_hooks_v4', 'xdp_plugin_hooks',
 ]);
 
 function cloneJSON(value) {

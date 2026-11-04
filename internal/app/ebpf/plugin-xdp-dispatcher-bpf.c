@@ -3,11 +3,20 @@
 
 #include "include/bpf_helpers.h"
 
+/*
+ * Plugins share xdp_prog_chain and only tail-call its continue slot, so its
+ * 24-entry layout stays part of the plugin ABI. Hooks live in the
+ * dispatcher's own xdp_plugin_hooks table, which plugins never reference:
+ *   slot = bank * HOOK_CAPACITY + position
+ * HOOK_CAPACITY bounds hooks host-wide. A packet only walks the hooks of its
+ * ingress interface, which admission keeps at or below INTERFACE_MAX, the
+ * bound that the tail-call budget sets (two tail calls per hook).
+ */
 #define VEER_XDP_PROG_CHAIN_MAX_ENTRIES 24
 #define VEER_XDP_PLUGIN_CONTINUE_SLOT 7
-#define VEER_XDP_PLUGIN_BANK0_BASE 8
-#define VEER_XDP_PLUGIN_BANK1_BASE 16
-#define VEER_XDP_PLUGIN_MAX 8
+#define VEER_XDP_PLUGIN_HOOK_CAPACITY 32
+#define VEER_XDP_PLUGIN_INTERFACE_MAX 14
+#define VEER_XDP_PLUGIN_HOOK_SLOTS (2 * VEER_XDP_PLUGIN_HOOK_CAPACITY)
 /*
  * xdp_plugin_config holds a header at key 0 and one full config per bank at
  * keys 1 and 2. Userspace writes the inactive bank's entry first and then
@@ -56,6 +65,13 @@ struct bpf_map_def SEC("maps") xdp_prog_chain = {
 	.max_entries = VEER_XDP_PROG_CHAIN_MAX_ENTRIES,
 };
 
+struct bpf_map_def SEC("maps") xdp_plugin_hooks = {
+	.type = BPF_MAP_TYPE_PROG_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = VEER_XDP_PLUGIN_HOOK_SLOTS,
+};
+
 struct bpf_map_def SEC("maps") xdp_plugin_config = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(__u32),
@@ -81,7 +97,7 @@ struct bpf_map_def SEC("maps") xdp_plugin_metrics = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct xdp_plugin_metric),
-	.max_entries = VEER_XDP_PLUGIN_MAX,
+	.max_entries = VEER_XDP_PLUGIN_HOOK_CAPACITY,
 };
 
 static __always_inline __u32 xdp_plugin_count_mask(__u32 count)
@@ -91,6 +107,20 @@ static __always_inline __u32 xdp_plugin_count_mask(__u32 count)
 	if (count >= 32)
 		return ~0U;
 	return (1U << count) - 1;
+}
+
+/*
+ * Position of the lowest set bit of a non-zero value. It is branch-free on
+ * purpose: a branch per bit would make the verifier fork on every hook.
+ */
+static __always_inline __u32 xdp_plugin_lowest_set_bit(__u32 value)
+{
+	__u32 below = (value & (0U - value)) - 1;
+
+	below = below - ((below >> 1) & 0x55555555U);
+	below = (below & 0x33333333U) + ((below >> 2) & 0x33333333U);
+	below = (below + (below >> 4)) & 0x0f0f0f0fU;
+	return (below * 0x01010101U) >> 24;
 }
 
 static __always_inline struct xdp_plugin_config *xdp_plugin_active_config(void)
@@ -116,7 +146,7 @@ static __always_inline void xdp_plugin_metric_attempt(struct xdp_md *xdp, __u32 
 {
 	struct xdp_plugin_metric *metric;
 
-	if (index >= VEER_XDP_PLUGIN_MAX)
+	if (index >= VEER_XDP_PLUGIN_HOOK_CAPACITY)
 		return;
 	metric = bpf_map_lookup_elem(&xdp_plugin_metrics, &index);
 	if (!metric)
@@ -133,7 +163,7 @@ static __always_inline void xdp_plugin_metric_continue(__u32 chain_index)
 	if (chain_index == 0)
 		return;
 	index = chain_index - 1;
-	if (index >= VEER_XDP_PLUGIN_MAX)
+	if (index >= VEER_XDP_PLUGIN_HOOK_CAPACITY)
 		return;
 	metric = bpf_map_lookup_elem(&xdp_plugin_metrics, &index);
 	if (metric)
@@ -144,39 +174,51 @@ static __always_inline void xdp_plugin_metric_miss(__u32 index)
 {
 	struct xdp_plugin_metric *metric;
 
-	if (index >= VEER_XDP_PLUGIN_MAX)
+	if (index >= VEER_XDP_PLUGIN_HOOK_CAPACITY)
 		return;
 	metric = bpf_map_lookup_elem(&xdp_plugin_metrics, &index);
 	if (metric)
 		metric->tail_call_misses++;
 }
 
+/*
+ * Each iteration consumes one set bit of the packet's mask, and admission
+ * keeps the bits of one interface at or below INTERFACE_MAX, so the loop is
+ * bounded by the per-interface limit, not by the host-wide capacity.
+ */
 SEC("xdp/veer_plugin_continue")
 int veer_xdp_plugin_continue(struct xdp_md *xdp)
 {
 	struct xdp_plugin_dispatch *dispatch = xdp_plugin_dispatch_state();
 	__u32 slot_base;
-	__u32 index;
 	int i;
 
 	if (!dispatch)
 		return XDP_PASS;
 	xdp_plugin_metric_continue(dispatch->chain_index);
-	slot_base = dispatch->bank ? VEER_XDP_PLUGIN_BANK1_BASE : VEER_XDP_PLUGIN_BANK0_BASE;
+	slot_base = dispatch->bank ? VEER_XDP_PLUGIN_HOOK_CAPACITY : 0;
 #pragma unroll
-	for (i = 0; i < VEER_XDP_PLUGIN_MAX; i++) {
-		index = dispatch->chain_index;
-		if (index >= dispatch->count || index >= VEER_XDP_PLUGIN_MAX)
+	for (i = 0; i < VEER_XDP_PLUGIN_INTERFACE_MAX; i++) {
+		__u32 next = dispatch->chain_index;
+		__u32 pending;
+		__u32 position;
+
+		if (next >= VEER_XDP_PLUGIN_HOOK_CAPACITY)
 			break;
-		dispatch->chain_index = index + 1;
-		if ((dispatch->mask & (1U << index)) == 0)
-			continue;
-		xdp_plugin_metric_attempt(xdp, index);
-		bpf_tail_call(xdp, &xdp_prog_chain, slot_base + index);
-		xdp_plugin_metric_miss(index);
+		pending = dispatch->mask & ~((1U << next) - 1);
+		if (pending == 0)
+			break;
+		position = xdp_plugin_lowest_set_bit(pending);
+		if (position >= VEER_XDP_PLUGIN_HOOK_CAPACITY)
+			break;
+		dispatch->chain_index = position + 1;
+		xdp_plugin_metric_attempt(xdp, position);
+		bpf_tail_call(xdp, &xdp_plugin_hooks, slot_base + position);
+		xdp_plugin_metric_miss(position);
 	}
 	return XDP_PASS;
 }
+
 SEC("xdp/veer_plugin_dispatch")
 int veer_xdp_plugin_dispatch(struct xdp_md *xdp)
 {

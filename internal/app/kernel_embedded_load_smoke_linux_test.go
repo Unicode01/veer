@@ -88,4 +88,14 @@ func TestLoadEmbeddedKernelCollectionsSmoke(t *testing.T) {
 			coll.Close()
 		})
 	}
+
+	// The XDP plugin dispatcher is loaded on demand only, so a verifier
+	// rejection would otherwise surface first when a user attaches an XDP hook.
+	t.Run("xdp-plugin-dispatcher", func(t *testing.T) {
+		coll, err := loadKernelXDPPluginDispatcher()
+		if err != nil {
+			t.Fatalf("load embedded xdp plugin dispatcher into kernel: %+v", err)
+		}
+		coll.Close()
+	})
 }
