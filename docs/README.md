@@ -499,11 +499,11 @@ Veer 是宿主机网络控制面，核心进程需要修改接口、路由、TC/
 1. Web 主令牌保存在 `localStorage` 以避免每次打开面板都重新输入。当前通过无第三方脚本、DOM 文本构造、CSP 和插件 iframe 隔离降低 XSS 风险；未来若引入任何第三方前端代码，必须先改为短期会话凭据或受保护的认证代理。
 2. 核心服务仍是高权限网络守护进程。systemd 已限制可写路径和 capability 集，但 `CAP_SYS_ADMIN` 等能力由插件命名空间与网络编排路径需要；应继续拆分可由低权限 broker 承担的操作。
 3. WHMCS 域名所有权和跨进程配额分别属于业务授权与并发边界。本次已修复配额竞态；域名验证需要结合实际域名资产来源设计，不能用 DNS 解析结果冒充所有权证明。
-4. Privileged、稳定性和性能测试需要 root Linux 与真实内核能力，发布前应在专用测试机运行 `sh scripts/verify-plugin-release.sh privileged`，并按发布风险运行 `stability` 与 `performance`。
+4. 稳定性和性能测试需要 root Linux、真实内核能力和可重复的硬件基线，发布前应在专用测试机按发布风险运行 `sh scripts/verify-plugin-release.sh stability` 与 `performance`。`privileged`（插件特权集成与 PPPoE 黑盒）已在 GitHub CI 中以 root 运行，专用测试机上仍可手动复跑。
 
 ### 发布门禁
 
-GitHub CI 执行 module 完整性、Go 测试与 race、vet、staticcheck、govulncheck、fuzz、Node 单元测试、Playwright E2E、npm audit、PHP 语法、shellcheck、插件 SDK 合约与确定性打包。任何安全门禁变更必须带回归测试，且不能通过静默降级换取通过。
+GitHub CI 执行 module 完整性、Go 测试与 race、vet、staticcheck、govulncheck、fuzz、Node 单元测试、Playwright E2E、npm audit、PHP 语法、shellcheck、插件 SDK 合约与确定性打包，并以 root 运行插件特权集成测试与 PPPoE 黑盒（任何测试被跳过即失败）。任何安全门禁变更必须带回归测试，且不能通过静默降级换取通过。
 
 ## License
 

@@ -71,6 +71,35 @@ jobs:
       - name: Run privileged core dataplane matrix
         run: sudo env "PATH=$PATH" sh scripts/verify-plugin-release.sh core-dataplane
 
+  privileged:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install privileged plugin and PPPoE dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clang llvm linux-libc-dev iproute2 util-linux iputils-ping ethtool nftables tcpdump ppp pppoe iperf3 curl procps
+      - name: Load PPP kernel modules
+        run: |
+          # Cloud runner kernels may ship the PPP drivers only in the extra modules package.
+          if ! sudo modprobe -a ppp_generic pppoe; then
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe -a ppp_generic pppoe
+          fi
+      - name: Run privileged plugin integration and PPPoE blackbox
+        run: |
+          sudo env \
+            "PATH=$PATH" \
+            GOPATH=/tmp/veer-privileged-gopath \
+            GOMODCACHE=/tmp/veer-privileged-gomodcache \
+            GOCACHE=/tmp/veer-privileged-gocache \
+            sh scripts/verify-plugin-release.sh privileged
+
   flow-churn:
     runs-on: ubuntu-latest
     timeout-minutes: 20
