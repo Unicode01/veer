@@ -382,6 +382,23 @@ kernel_helper_module_installed() {
     return 1
 }
 
+# Adds every kernel/<release>/veer_kfuncs.ko under $1 to KERNEL_MODULE_RELEASES,
+# so a module built for a pending kernel upgrade can be staged before the reboot.
+# kernel/veer_kfuncs is the module source, where builds leave their output.
+collect_kernel_helper_modules() {
+    local module_source module_release module_vermagic
+    for module_source in "$1"/kernel/*/veer_kfuncs.ko; do
+        [[ -e "$module_source" || -L "$module_source" ]] || continue
+        module_release="$(basename "$(dirname "$module_source")")"
+        [[ "$module_release" != veer_kfuncs ]] || continue
+        [[ "$module_release" =~ ^[0-9][A-Za-z0-9._+-]*$ ]] || fail "可选模块目录名不是内核版本: $module_source"
+        [[ -f "$module_source" && ! -L "$module_source" ]] || fail "可选模块必须是普通文件: $module_source"
+        module_vermagic="$(modinfo -F vermagic "$module_source")"
+        [[ "${module_vermagic%% *}" == "$module_release" ]] || fail "可选模块 vermagic 与目录 ${module_release} 不匹配: $module_source"
+        KERNEL_MODULE_RELEASES+=("$module_release")
+    done
+}
+
 write_service_definition() {
     local kernel_module_capability=""
     if kernel_helper_module_installed; then
@@ -1512,17 +1529,7 @@ ok "找到二进制: $(basename "$BINARY_PATH") (${FILE_SIZE}) [${ARCH}]"
 # Validate optional artifacts before changing installed configuration/plugins.
 if [[ "$INSTALL_KERNEL_MODULE" == "1" ]]; then
     command -v modinfo >/dev/null 2>&1 || fail "安装可选模块需要 kmod/modinfo"
-    # Every kernel/<release>/veer_kfuncs.ko is installed, so a module built for
-    # a pending kernel upgrade can be staged before the reboot.
-    for module_source in "${SCRIPT_DIR}"/kernel/*/veer_kfuncs.ko; do
-        [[ -e "$module_source" || -L "$module_source" ]] || continue
-        module_release="$(basename "$(dirname "$module_source")")"
-        [[ "$module_release" =~ ^[0-9][A-Za-z0-9._+-]*$ ]] || fail "可选模块目录名不是内核版本: $module_source"
-        [[ -f "$module_source" && ! -L "$module_source" ]] || fail "可选模块必须是普通文件: $module_source"
-        module_vermagic="$(modinfo -F vermagic "$module_source")"
-        [[ "${module_vermagic%% *}" == "$module_release" ]] || fail "可选模块 vermagic 与目录 ${module_release} 不匹配: $module_source"
-        KERNEL_MODULE_RELEASES+=("$module_release")
-    done
+    collect_kernel_helper_modules "${SCRIPT_DIR}"
     (( ${#KERNEL_MODULE_RELEASES[@]} > 0 )) || fail "缺少可选模块: ${SCRIPT_DIR}/kernel/<内核版本>/veer_kfuncs.ko"
     if [[ ! -f "${SCRIPT_DIR}/kernel/$(uname -r)/veer_kfuncs.ko" ]]; then
         warn "未提供当前内核 $(uname -r) 的模块；其他版本在对应内核启动后生效，当前内核使用基础数据面"
