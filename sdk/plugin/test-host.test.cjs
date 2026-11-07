@@ -11,6 +11,24 @@ const { createTestHost } = require('./test-host.cjs');
 
 const apiContract = JSON.parse(fs.readFileSync(path.join(__dirname, 'api-contract.json'), 'utf8'));
 
+test('exec is adapter-only and mutually exclusive with remote installation', (t) => {
+  const manifest = testManifest('exec_test');
+  manifest.control.permissions.push('exec');
+  manifest.actions = [{id: 'run', runtime_update: 'runtime_query'}];
+  const dir = writePlugin(t, manifest, `
+    plugin.action({id: 'run', runtime_update: 'runtime_query'});
+    exports.onAction = function () { return process.exec({command: '/usr/bin/wg', args: ['show']}); };
+  `);
+  const host = createTestHost({pluginDir: dir, adapters: {
+    'process.exec': (request) => ({stdout: request.args[0], stderr: '', exit_code: 0, timed_out: false, cancelled: false, truncated: false})
+  }}).load();
+  assert.equal(host.action('run').stdout, 'show');
+  const remote = createTestHost({pluginDir: dir, remoteInstallEnabled: true, adapters: {'process.exec': () => assert.fail('remote mode invoked adapter')}}).load();
+  assert.throws(() => remote.action('run'), /disabled while remote plugin installation/);
+  const unmocked = createTestHost({pluginDir: dir}).load();
+  assert.throws(() => unmocked.action('run'), /requires an explicit test adapter/);
+});
+
 function writePlugin(t, manifest, control, files = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'veer-plugin-sdk-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -521,13 +539,19 @@ test('test host loads bundled control-plane plugins without compatibility shims'
 test('test host exposes every versioned control API method', (t) => {
   const pluginDir = writePlugin(t, testManifest('api_contract'), `exports.onReconcile = function () {};`);
   const host = createTestHost({ pluginDir });
-  assert.equal(apiContract.version, 8);
+  assert.equal(apiContract.version, 15);
+  assert.deepEqual(apiContract.webui.host_methods, ['notify', 'notifyError', 'headerActions']);
+  assert.equal(apiContract.webui.max_header_actions, 2);
   assert.equal(apiContract.runtime.api_version, 'v1');
   assert.equal(apiContract.runtime.tc_pipeline_abi, 2);
   assert.equal(apiContract.runtime.core_priority, 1000);
   assert.equal(apiContract.tc_pipeline.program_array_entries, 111);
   assert.equal(apiContract.tc_pipeline.stage_hook_limit, 8);
   assert.equal(apiContract.tc_pipeline.direction_hook_limit, 14);
+  assert.equal(apiContract.tc_pipeline.stage_hook_capacity, 32);
+  assert.equal(apiContract.tc_pipeline.hook_limit_scope, 'interface');
+  assert.equal(apiContract.xdp_pipeline.hook_limit, 14);
+  assert.equal(apiContract.xdp_pipeline.hook_capacity, 32);
   assert.deepEqual(apiContract.tc_pipeline.directions, ['forward', 'reply']);
   assert.deepEqual(apiContract.tc_pipeline.phases, ['around_core', 'after_apply']);
   assert.ok(apiContract.tc_pipeline.hook_stages.includes('post_apply'));
@@ -848,6 +872,23 @@ exports.onReconcile = function () {};
 hooks.attach({id:'bad', engine:'tc', stage:'pre_forward', program:'object:program', before:['a/h'], after:['a/h']});
 `);
   assert.throws(() => createTestHost({pluginDir: invalidDir}), /both before and after/);
+});
+
+test('test host preserves required dynamic bindings and rejects unsupported engines', (t) => {
+  const manifest = testManifest('bound_hooks');
+  manifest.control.permissions.push('hook.attach');
+  const pluginDir = writePlugin(t, manifest, `
+pipeline.attach({id:'adapter', direction:'forward', program:'object:program', binding_required:true});
+hooks.attach({id:'xdp_adapter', engine:'xdp', stage:'pre_forward', program:'object:program', binding_required:true});
+`);
+  const hooks = createTestHost({pluginDir}).snapshot().surface.hooks;
+  assert.ok(hooks.every(hook => hook.binding_required === true));
+  for (const [engine, value] of [['netfilter', true], ['control', true], ['tc', 'true']]) {
+    const invalidDir = writePlugin(t, manifest, `
+hooks.attach({id:'bad', engine:${JSON.stringify(engine)}, stage:'pre_forward', program:'object:program', binding_required:${JSON.stringify(value)}});
+`);
+    assert.throws(() => createTestHost({pluginDir:invalidDir}), /binding_required/);
+  }
 });
 
 test('test host normalizes packet metadata bindings and rejects unsafe contracts', (t) => {

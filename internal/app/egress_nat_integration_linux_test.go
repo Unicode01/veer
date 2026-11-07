@@ -1724,9 +1724,14 @@ func seedEgressNATIntegrationNeighbor(t *testing.T, topology egressNATIntegratio
 
 func waitForEgressNATIntegrationAPI(t *testing.T, apiBase string, cmd *exec.Cmd, logPath string) {
 	t.Helper()
+	waitForEgressNATIntegrationAPIWithTimeout(t, apiBase, cmd, logPath, 15*time.Second)
+}
+
+func waitForEgressNATIntegrationAPIWithTimeout(t *testing.T, apiBase string, cmd *exec.Cmd, logPath string, timeout time.Duration) {
+	t.Helper()
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if cmd != nil && cmd.Process != nil {
 			if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {

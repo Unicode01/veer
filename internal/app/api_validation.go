@@ -743,6 +743,17 @@ func egressNATScopesOverlap(a, b EgressNAT, ifaceByName map[string]InterfaceInfo
 	return scopeA.Target != "" && scopeA.Target == scopeB.Target
 }
 
+// A child scope overrides its parent's default for the selected protocols.
+// Equal scopes remain ambiguous and must still be rejected.
+func egressNATScopesConflict(a, b EgressNAT, ifaceByName map[string]InterfaceInfo) bool {
+	if !egressNATScopesOverlap(a, b, ifaceByName) {
+		return false
+	}
+	scopeA := describeEgressNATScope(a, ifaceByName)
+	scopeB := describeEgressNATScope(b, ifaceByName)
+	return scopeA.Wildcard == scopeB.Wildcard || scopeA.Parent != scopeB.Parent
+}
+
 func validateProjectedEgressNATs(items []EgressNAT, ifaceByName map[string]InterfaceInfo, scope string, id int64) []ruleValidationIssue {
 	if len(items) == 0 {
 		return nil
@@ -778,7 +789,7 @@ func validateProjectedEgressNATs(items []EgressNAT, ifaceByName map[string]Inter
 		if !ruleProtocolsOverlap(normalizeEgressNATProtocol(target.Protocol), normalizeEgressNATProtocol(other.Protocol)) {
 			continue
 		}
-		if !egressNATScopesOverlap(target, other, ifaceByName) {
+		if !egressNATScopesConflict(target, other, ifaceByName) {
 			continue
 		}
 		return []ruleValidationIssue{{

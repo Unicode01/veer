@@ -538,6 +538,17 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersRefreshesActiveKernelRuleOnAdd
 }
 
 func TestRetryNetlinkTriggeredKernelFallbackOwnersRecoversSourceIPFallbackOnAddrChange(t *testing.T) {
+	for _, state := range []struct {
+		name     string
+		eligible bool
+	}{{"runtime_failure", true}, {"preflight_failure", false}} {
+		t.Run(state.name, func(t *testing.T) {
+			testRetryNetlinkTriggeredKernelFallbackOwnersRecoversSourceIPFallbackOnAddrChange(t, state.eligible)
+		})
+	}
+}
+
+func testRetryNetlinkTriggeredKernelFallbackOwnersRecoversSourceIPFallbackOnAddrChange(t *testing.T, eligible bool) {
 	db := openTestDB(t)
 
 	rule := Rule{
@@ -577,7 +588,7 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersRecoversSourceIPFallbackOnAddr
 		kernelFlowOwners:       map[uint32]kernelCandidateOwner{},
 	}
 	pm.rulePlans[rule.ID] = ruleDataplanePlan{
-		KernelEligible:  true,
+		KernelEligible:  eligible,
 		EffectiveEngine: ruleEngineUserspace,
 		FallbackReason:  "outbound source IP is not assigned to the selected outbound interface",
 		TransientFallback: kernelTransientFallbackMetadata{
@@ -616,6 +627,14 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersRecoversSourceIPFallbackOnAddr
 }
 
 func TestRetryNetlinkTriggeredKernelFallbackOwnersRecoversMatchedEgressNATFallbackIncrementally(t *testing.T) {
+	for _, cause := range []string{"neighbor", "source_address_preflight", "source_address_preflight_pinned_kernel"} {
+		t.Run(cause, func(t *testing.T) {
+			testRetryNetlinkTriggeredKernelFallbackOwnersRecoversMatchedEgressNATFallbackIncrementally(t, cause)
+		})
+	}
+}
+
+func testRetryNetlinkTriggeredKernelFallbackOwnersRecoversMatchedEgressNATFallbackIncrementally(t *testing.T, cause string) {
 	db := openTestDB(t)
 
 	oldLoad := loadInterfaceInfosForEgressNATTests
@@ -707,6 +726,25 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersRecoversMatchedEgressNATFallba
 	trigger := newKernelNetlinkRecoveryTrigger("neighbor")
 	trigger.addInterfaceName("eno1")
 	trigger.addBackendIP("198.51.100.40")
+	if cause == "source_address_preflight" || cause == "source_address_preflight_pinned_kernel" {
+		pm.egressNATPlans[natID] = ruleDataplanePlan{
+			PreferredEngine: ruleEngineKernel,
+			EffectiveEngine: ruleEngineUserspace,
+			FallbackReason:  `tc: resolve outbound nat ip on "eno1": preferred source IPv4 "203.0.113.40" is not assigned`,
+			AddrRefresh:     kernelAddressRefreshMetadata{OutInterface: "eno1", Family: ipFamilyIPv4},
+		}
+		if cause == "source_address_preflight_pinned_kernel" {
+			plan := pm.egressNATPlans[natID]
+			plan.EffectiveEngine = ruleEngineKernel
+			pm.egressNATPlans[natID] = plan
+		}
+		trigger = newKernelNetlinkRecoveryTrigger("addr")
+		trigger.addInterfaceName("eno1")
+		trigger.addAddrFamily(ipFamilyIPv4)
+		if pm.summarizeKernelAddrRefreshLocked(trigger) == "" {
+			t.Fatal("source-address preflight failure did not schedule recovery")
+		}
+	}
 
 	result := pm.retryNetlinkTriggeredKernelFallbackOwnersForTrigger(trigger)
 	if !result.handled {
@@ -1368,6 +1406,44 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersKeepsTwoEgressNATsRunningAcros
 	}
 	if len(rt.assignments) != 2 {
 		t.Fatalf("runtime assignments after stable recheck = %#v, want two egress nat entries", rt.assignments)
+	}
+}
+
+func TestAddrRetryRetainsActiveEgressNATWhenInterfaceInventoryFails(t *testing.T) {
+	_, item, activeRule, runtime, pm := newTransientEgressNATRedistributeFixture(t)
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return nil, errors.New("netlink inventory: no such device")
+	}
+	plan := pm.egressNATPlans[item.ID]
+	plan.AddrRefresh = kernelAddressRefreshMetadata{OutInterface: "eno1", Family: ipFamilyIPv4}
+	pm.egressNATPlans[item.ID] = plan
+
+	// Deleted links can no longer be resolved by index. The resulting unscoped
+	// address event must not turn one failed inventory read into a withdrawal.
+	trigger := newKernelNetlinkRecoveryTrigger("addr")
+	trigger.addAddrFamily(ipFamilyIPv4)
+	result := pm.retryNetlinkTriggeredKernelFallbackOwnersForTrigger(trigger)
+	if !result.handled || result.deferredEgressNATs != 1 || result.recoveredEgressNATs != 0 {
+		t.Fatalf("inventory failure retry = %+v, want the active NAT deferred", result)
+	}
+	if !pm.kernelEgressNATs[item.ID] || runtime.assignments[activeRule.ID] != kernelEngineTC {
+		t.Fatalf("active NAT lost: owners=%v assignments=%v", pm.kernelEgressNATs, runtime.assignments)
+	}
+	if len(runtime.incrementalCalls) != 0 {
+		t.Fatalf("reconcile calls = %d, want no mutation during the failed inventory read", len(runtime.incrementalCalls))
+	}
+	if pm.networkInventoryStableRecheckAt.IsZero() {
+		t.Fatal("failed inventory did not schedule a recheck")
+	}
+	loadInterfaceInfosForEgressNATTests = func() ([]InterfaceInfo, error) {
+		return interfaceInfoMapToSortedSlice(pm.stableInterfaceInfos), nil
+	}
+	if !pm.takeNetworkInventoryStableRecheck(pm.networkInventoryStableRecheckAt.Add(time.Nanosecond)) {
+		t.Fatal("inventory recovery recheck did not become due")
+	}
+	pm.redistributeWorkers()
+	if !pm.kernelEgressNATs[item.ID] || pm.kernelEgressNATEngines[item.ID] != kernelEngineTC || len(runtime.assignments) != 1 {
+		t.Fatalf("active NAT lost after inventory recovery: owners=%v assignments=%v", pm.kernelEgressNATs, runtime.assignments)
 	}
 }
 

@@ -38,6 +38,9 @@ var pluginRuntimeFeatures = []string{
 	"control.plugin_interop",
 	"control.typed_services.v1",
 	"control.process_isolation.v1",
+	"control.exec.v1",
+	"control.process.v1",
+	"control.process_binaries.v1",
 	"control.raw_l2",
 	"control.resource_schema.v1",
 	"control.resource_limits.v1",
@@ -47,8 +50,12 @@ var pluginRuntimeFeatures = []string{
 	"control.sockets",
 	"control.workers",
 	"dataplane.packet_metadata.v1",
+	"dataplane.kfuncs.handoff.v1",
+	"dataplane.kfuncs.handoff_ingress.v1",
+	"dataplane.kfuncs.wan.v1",
 	"dataplane.tc_pipeline.v2",
 	"dataplane.hook_order.v1",
+	"dataplane.hook_bindings.v1",
 	"dataplane.xdp_pipeline.v1",
 	"dataplane.netfilter_pipeline.v1",
 	"dataplane.netfilter_skb_dynptr.v1",
@@ -78,7 +85,7 @@ type pluginHostEnvironment struct {
 func currentPluginHostEnvironment() pluginHostEnvironment {
 	features := make(map[string]struct{}, len(pluginRuntimeFeatures))
 	for _, feature := range pluginRuntimeFeatures {
-		if runtime.GOOS != "linux" && (feature == "control.netns_provider.v1" || feature == "control.netns_scoped.v1" || feature == "control.tuntap_provider.v1") {
+		if runtime.GOOS != "linux" && (feature == "control.process_binaries.v1" || feature == "control.process.v1" || feature == "control.netns_provider.v1" || feature == "control.netns_scoped.v1" || feature == "control.tuntap_provider.v1") {
 			continue
 		}
 		features[feature] = struct{}{}

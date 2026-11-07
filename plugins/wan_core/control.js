@@ -60,7 +60,7 @@ plugin.service({
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
-  sha256: '4d190cbe36e1571afc0db561fe6cc1f3f715a8aa4c953f882dbb145fb4639098',
+  sha256: 'f25bf63d36f5d6f8c16cee68a5d5b1664cda401a6084e70359982de43a3dd089',
   page: 'wan',
   page_title: 'WAN',
   resources: [
@@ -123,8 +123,14 @@ exports.onAction = function (ctx) {
     return prepareHandoff(preparePlan);
   }
   if (action === 'teardown') {
-    teardownSession(loadPlan(ctx.payload || {}));
+    var teardownPlan = loadPlan(ctx.payload || {});
+    teardownSession(teardownPlan);
     armRepairTimer();
+    if (ctx.payload && ctx.payload.forget === true) {
+      var deleted = previousStatus(teardownPlan.key);
+      if (!deleted || deleted.phase !== 'deleted') throw new Error('WAN cleanup incomplete; records retained for retry');
+      resources.transaction(['profiles', 'sessions', 'status'].map(function (id) { return {op: 'delete', resource: id, key: teardownPlan.key}; }));
+    }
     return;
   }
   throw new Error('unsupported action ' + action);
@@ -238,9 +244,13 @@ function applyRecords(records, reportErrors) {
 
 function disableSessionRuntime(record) {
   var key = token(record && record.key || 'default');
+  // Teardown is a completed cleanup journal, not a suspended live session.
+  // Reconciliation of its disabled record must preserve that proof across
+  // restart so protocol drivers can safely recreate their WAN boundary.
+  var previous = previousStatus(key);
+  if (previous.phase === 'deleted') return;
   var raw = merge(record && record.data ? record.data : {}, {state: 'down', usable: false});
   var plan = loadPlan({key: key, session: raw});
-  var previous = previousStatus(key);
   var localInterface = safeIfaceName(plan.profile.local_interface || raw.local_interface || '');
   var previousManaged = managedLinkProven(previous) && previousMatchesInterface(previous, localInterface);
   var previousSegmentationReady = previous.noarp_ready === true && !managedLinkChanged(previous, plan.profile);
@@ -256,8 +266,12 @@ function disableSessionRuntime(record) {
     real_interface: text(raw.real_interface || raw.interface || ''),
     wan_interface: text(raw.wan_interface || raw.real_interface || raw.interface || ''),
     local_interface: localInterface,
-    pipeline_interface: plan.profile.pipeline_interface,
-    handoff_mode: plan.profile.handoff_mode,
+    local_ifindex: previous.local_ifindex || 0,
+    local_mac: previous.local_mac || '',
+    pipeline_interface: previousManaged ? text(previous.pipeline_interface || '') : plan.profile.pipeline_interface,
+    pipeline_ifindex: previous.pipeline_ifindex || 0,
+    pipeline_mac: previous.pipeline_mac || '',
+    handoff_mode: previousManaged ? previousHandoffMode(previous) : plan.profile.handoff_mode,
     addresses: plan.profile.addresses,
     routes: plan.profile.routes,
     cleanup_errors: cleanupErrors,
@@ -269,8 +283,8 @@ function disableSessionRuntime(record) {
   if (localInterface) {
     status.veer_core = veerCoreHandoff({
       local_interface: localInterface,
-      pipeline_interface: plan.profile.pipeline_interface,
-      handoff_mode: plan.profile.handoff_mode,
+      pipeline_interface: status.pipeline_interface,
+      handoff_mode: status.handoff_mode,
       egress_nat_redirect_mode: ''
     }, previousSegmentationReady);
   }
@@ -356,7 +370,11 @@ function applySession(plan) {
       real_interface: plan.session.real_interface,
       wan_interface: plan.session.wan_interface,
       local_interface: previous.local_interface || plan.profile.local_interface,
+      local_ifindex: previous.local_ifindex || 0,
+      local_mac: previous.local_mac || '',
       pipeline_interface: previous.pipeline_interface || plan.profile.pipeline_interface,
+      pipeline_ifindex: previous.pipeline_ifindex || 0,
+      pipeline_mac: previous.pipeline_mac || '',
       handoff_mode: previousHandoffMode(previous),
       managed_link: managedLinkProven(previous) && !managedLinkChanged(previous, plan.profile),
       original_arp: previous.original_arp,
@@ -506,11 +524,16 @@ function rollbackPreviousHandoff(previous, nextProfile) {
     interface_preparation: normalizeInterfacePreparation(previous.interface_preparation_request, previous.mtu)
   };
   try {
-    ensureHandoffLink(profile, previous);
+    var restored = ensureHandoffLink(profile, previous);
     replaceAddrs(profile.local_interface, profile.addresses);
     replaceNeighbors(profile.local_interface, profile.neighbors);
     replaceRoutes(profile.local_interface, profile.routes);
     replaceRules(profile.rules);
+    previous.local_ifindex = restored.local.ifindex;
+    previous.local_mac = restored.local.mac;
+    previous.pipeline_ifindex = restored.pipeline ? restored.pipeline.ifindex : 0;
+    previous.pipeline_mac = restored.pipeline ? restored.pipeline.mac : '';
+    setRecordIfChanged('status', token(previous.wan_id || previous.profile_key), previous, previous.usable === true);
     return '';
   } catch (e) {
     return errorMessage(e);
@@ -536,6 +559,7 @@ function previousHandoffMode(previous) {
   previous = previous || {};
   var veerCore = previous.veer_core || {};
   var mode = lower(previous.handoff_mode || veerCore.mode || '');
+  if (mode === 'direct_gro') return mode;
   return mode === 'segmented_veth' || mode === 'vtap' ? 'segmented_veth' : 'direct';
 }
 
@@ -733,14 +757,16 @@ function ensureHandoffLink(profile, previous) {
       interface_preparation: interfacePreparation
     };
   }
-  var dummy = net.link.ensureDummy({
+  var ensureSingle = profile.handoff_mode === 'direct_gro' ? net.link.ensureHelperWAN : net.link.ensureDummy;
+  if (typeof ensureSingle !== 'function') throw new Error('helper WAN boundary is unavailable');
+  var dummy = ensureSingle({
     name: profile.local_interface,
     mtu: profile.mtu,
     up: true
   });
   try {
     return {
-      mode: 'direct',
+      mode: profile.handoff_mode,
       local: dummy.link,
       pipeline: null,
       created: dummy.created === true,
@@ -905,14 +931,20 @@ function normalizeProfile(key, session, raw) {
     addresses = appendCIDRUnique(addresses, ipv6HostCIDR(session.ipv6));
     addresses = appendCIDRUnique(addresses, ipv6LinkLocalCIDR(session.ipv6_link_local));
     var ipv4PeerCIDR = ipv4HostCIDR(session.ipv4_peer);
-    if (handoffMode === 'segmented_veth' && session.ipv4 && ipv4PeerCIDR) {
-      routes = appendRouteUnique(routes, {dst: ipv4PeerCIDR, dev: localInterface, src: session.ipv4});
+    if ((handoffMode === 'segmented_veth' || handoffMode === 'direct_gro') && session.ipv4 && ipv4PeerCIDR) {
+      // Different PPP sessions often share the same AC address. A route in
+      // main would replace another WAN's route even with a different dev/src.
+      routes = appendRouteUnique(routes, {dst: ipv4PeerCIDR, dev: localInterface, src: session.ipv4, table: routingIdentity.table});
+      rules = appendRuleUnique(rules, {
+        family: 'ipv4', priority: routingIdentity.priority, table: routingIdentity.table,
+        src: ipv4HostCIDR(session.ipv4), dst: ipv4PeerCIDR
+      });
     }
     if (bool(raw.install_default_route, false) && session.ipv4) {
       routes = appendRouteUnique(routes, {dst: '0.0.0.0/0', dev: localInterface, src: session.ipv4, metric: intValue(raw.route_metric, 0, 2147483647, 0)});
     }
     if (installDefaultRouteV6) {
-      if (handoffMode === 'segmented_veth') {
+      if (handoffMode === 'segmented_veth' || handoffMode === 'direct_gro') {
         var sourcePrefix = ipv6RouteSourcePrefix(session);
         var gateway = text(session.ipv6_gateway || session.ipv6_peer_link_local || '');
         if (!sourcePrefix || !gateway || !session.peer_mac) {
@@ -1049,6 +1081,7 @@ function normalizeOffloadSettings(value) {
 
 function normalizeHandoffMode(value) {
   value = lower(value);
+  if (value === 'direct_gro') return value;
   if (value === 'segmented' || value === 'segmented_veth' || value === 'veth' || value === 'vtap') {
     return 'segmented_veth';
   }

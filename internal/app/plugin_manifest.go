@@ -157,7 +157,7 @@ func normalizePluginControl(control *PluginControl) error {
 	}
 	for _, permission := range permissions {
 		if !validPluginControlPermission(permission) {
-			return fmt.Errorf("permission %q must be one of blob, crypto, ebpf.load, ebpf.map_read, ebpf.map_write, event, hook.attach, kv, metrics, net.admin, net.dns, net.http, net.l2, net.namespace, net.tcp, net.tuntap, net.udp, operation, plugin.action, plugin.event, plugin.register, plugin.resource, resource, secret, timer, ui, worker", permission)
+			return fmt.Errorf("permission %q must be one of blob, crypto, ebpf.load, ebpf.map_read, ebpf.map_write, event, exec, hook.attach, kv, metrics, net.admin, net.dns, net.http, net.l2, net.namespace, net.tcp, net.tuntap, net.udp, operation, plugin.action, plugin.event, plugin.register, plugin.resource, resource, secret, timer, ui, worker", permission)
 		}
 	}
 	control.Permissions = permissions
@@ -1175,6 +1175,9 @@ func normalizePluginHook(hook *PluginHook) error {
 		return err
 	}
 	hook.Interfaces = interfaces
+	if hook.BindingRequired && hook.Engine != kernelEngineTC && hook.Engine != kernelEngineXDP {
+		return fmt.Errorf("binding_required is only available to tc/xdp hooks")
+	}
 	if hook.Engine == pluginEngineNetfilter && len(interfaces) > 0 {
 		return fmt.Errorf("netfilter hooks are namespace-scoped; match input/output interfaces inside the plugin program")
 	}
@@ -1494,7 +1497,7 @@ func validPluginActionRuntimeUpdate(value string) bool {
 
 func validPluginControlPermission(value string) bool {
 	switch value {
-	case "blob", "crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "event", "hook.attach", "kv", "metrics", "net.admin", "net.dns", "net.http", "net.l2", "net.namespace", "net.tcp", "net.tuntap", "net.udp", "operation", "plugin.action", "plugin.event", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui", "worker":
+	case "blob", "crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "event", "exec", "hook.attach", "kv", "metrics", "net.admin", "net.dns", "net.http", "net.l2", "net.namespace", "net.tcp", "net.tuntap", "net.udp", "operation", "plugin.action", "plugin.event", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui", "worker":
 		return true
 	default:
 		return false

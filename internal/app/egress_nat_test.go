@@ -362,7 +362,7 @@ func TestCollectDynamicEgressNATParentsIncludesNormalizedSingleTargetParent(t *t
 	}
 }
 
-func TestValidateProjectedEgressNATsDetectsParentScopeOverlap(t *testing.T) {
+func TestValidateProjectedEgressNATsAllowsChildOverride(t *testing.T) {
 	ifaceByName := map[string]InterfaceInfo{
 		"vmbr0":    {Name: "vmbr0"},
 		"tap100i0": {Name: "tap100i0", Parent: "vmbr0", Kind: "tuntap"},
@@ -371,15 +371,12 @@ func TestValidateProjectedEgressNATsDetectsParentScopeOverlap(t *testing.T) {
 		{ID: 1, ParentInterface: "vmbr0", ChildInterface: "", OutInterface: "eno1", Enabled: true},
 		{ID: 2, ParentInterface: "vmbr0", ChildInterface: "tap100i0", OutInterface: "eno2", Enabled: true},
 	}, ifaceByName, "update", 2)
-	if len(issues) != 1 {
-		t.Fatalf("len(issues) = %d, want 1", len(issues))
-	}
-	if issues[0].Message != "egress nat scope conflicts with egress nat #1" {
-		t.Fatalf("issues[0].Message = %q", issues[0].Message)
+	if len(issues) != 0 {
+		t.Fatalf("child override issues = %#v, want none", issues)
 	}
 }
 
-func TestValidateProjectedEgressNATsDetectsSingleTargetOverlapWithParentScope(t *testing.T) {
+func TestValidateProjectedEgressNATsAllowsNormalizedChildOverride(t *testing.T) {
 	ifaceByName := map[string]InterfaceInfo{
 		"vmbr0":    {Name: "vmbr0", Kind: "bridge"},
 		"tap100i0": {Name: "tap100i0", Parent: "vmbr0", Kind: "tuntap"},
@@ -388,11 +385,8 @@ func TestValidateProjectedEgressNATsDetectsSingleTargetOverlapWithParentScope(t 
 		{ID: 1, ParentInterface: "vmbr0", ChildInterface: "", OutInterface: "eno1", Protocol: "tcp", Enabled: true},
 		{ID: 2, ParentInterface: "tap100i0", ChildInterface: "", OutInterface: "eno2", Protocol: "tcp", Enabled: true},
 	}, ifaceByName, "update", 2)
-	if len(issues) != 1 {
-		t.Fatalf("len(issues) = %d, want 1", len(issues))
-	}
-	if issues[0].Message != "egress nat scope conflicts with egress nat #1" {
-		t.Fatalf("issues[0].Message = %q", issues[0].Message)
+	if len(issues) != 0 {
+		t.Fatalf("normalized child override issues = %#v, want none", issues)
 	}
 }
 
@@ -404,11 +398,8 @@ func TestValidateProjectedEgressNATsKeepsStoredChildScopeWhenChildIsCurrentlyMis
 		{ID: 1, ParentInterface: "vmbr0", ChildInterface: "", OutInterface: "eno1", Protocol: "tcp", Enabled: true},
 		{ID: 2, ParentInterface: "vmbr0", ChildInterface: "tap100i0", OutInterface: "eno2", Protocol: "tcp", Enabled: true},
 	}, ifaceByName, "update", 2)
-	if len(issues) != 1 {
-		t.Fatalf("len(issues) = %d, want 1", len(issues))
-	}
-	if issues[0].Message != "egress nat scope conflicts with egress nat #1" {
-		t.Fatalf("issues[0].Message = %q", issues[0].Message)
+	if len(issues) != 0 {
+		t.Fatalf("missing child override issues = %#v, want none", issues)
 	}
 }
 
@@ -423,6 +414,68 @@ func TestValidateProjectedEgressNATsAllowsDisjointProtocolsOnSameScope(t *testin
 	}, ifaceByName, "update", 2)
 	if len(issues) != 0 {
 		t.Fatalf("validateProjectedEgressNATs() issues = %#v, want none", issues)
+	}
+}
+
+func TestUnavailableEgressNATRetainsDropSelectors(t *testing.T) {
+	for _, mode := range []string{"", egressNATRedirectModePreparedL2} {
+		t.Run("redirect_mode="+mode, func(t *testing.T) {
+			testUnavailableEgressNATRetainsDropSelectors(t, mode)
+		})
+	}
+}
+
+func testUnavailableEgressNATRetainsDropSelectors(t *testing.T, mode string) {
+	planner := newRuleDataplanePlanner(stubKernelSupportRuntime{
+		available: true, supported: false, supportText: "outbound source IP is not assigned to the selected outbound interface",
+	}, ruleEngineKernel)
+	snapshot := newEgressNATInterfaceSnapshot([]InterfaceInfo{
+		{Name: "br-lan", Kind: "bridge"}, {Name: "port0", Parent: "br-lan", Kind: "veth"},
+	}, nil)
+	item := EgressNAT{ID: 7, ParentInterface: "br-lan", ChildInterface: "port0", OutInterface: "veervpn1",
+		OutSourceIP: "10.78.1.1", Protocol: "tcp+udp+icmp", RedirectMode: mode, Enabled: true}
+	if mode == "" {
+		// Ordinary API-created NATs are reloaded from storage without any
+		// plugin-only redirect metadata. They must be protected as well.
+		db := openTestDB(t)
+		id, err := dbAddEgressNAT(db, &item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, err := dbGetEgressNAT(db, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		item = *stored
+	}
+	nextID := int64(1)
+	candidates, plans := buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot)
+	if len(candidates) != 3 || plans[item.ID].KernelEligible || plans[item.ID].FallbackReason == "" {
+		t.Fatalf("unavailable WAN candidates=%v plan=%+v", candidates, plans[item.ID])
+	}
+	for _, candidate := range candidates {
+		if !candidate.rule.kernelUnavailable || candidate.rule.InInterface != "port0" {
+			t.Fatalf("missing scoped drop selector: %+v", candidate)
+		}
+	}
+	planner = newRuleDataplanePlanner(stubKernelSupportRuntime{available: true, supported: true}, ruleEngineKernel)
+	if restored, restoredPlans := buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot); len(restored) != 3 || !restoredPlans[item.ID].KernelEligible {
+		t.Fatalf("restored exit candidates=%v plan=%+v", restored, restoredPlans[item.ID])
+	} else {
+		for _, candidate := range restored {
+			if candidate.rule.kernelUnavailable {
+				t.Fatal("restored exit retained a drop selector")
+			}
+		}
+	}
+	pm := &ProcessManager{kernelEgressNATs: map[int64]bool{item.ID: true}, egressNATPlans: plans}
+	if status := pm.egressNATRuntimeStatus(item.ID, true); status != "error" {
+		t.Fatalf("guarded WAN status=%s, want error", status)
+	}
+	item.Enabled = false
+	candidates, _ = buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot)
+	if len(candidates) != 0 {
+		t.Fatal("disabled NAT retained a drop selector")
 	}
 }
 

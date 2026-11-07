@@ -514,6 +514,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 			egressNATs = append(egressNATs, pluginEgressNATs...)
 		}
 	}
+	egressNATs = compileEgressNATSubsets(egressNATs, stableEgressNATSnapshot)
 	dynamicEgressNATParents = collectDynamicEgressNATParentsWithSnapshot(egressNATs, egressNATSnapshot)
 	dynamicRetryEgressNATOwners := collectDynamicEgressNATOwnersForTrigger(trigger, egressNATs, egressNATSnapshot)
 	for id := range dynamicRetryEgressNATOwners {
@@ -957,7 +958,10 @@ func preserveTransientDynamicEgressNATOwners(
 	runtime kernelRuleRuntime,
 	assignments map[int64]string,
 ) (map[kernelCandidateOwner][]kernelCandidateRule, map[kernelCandidateOwner]struct{}) {
-	if !trigger.hasSource("link") || len(currentKernelEgressNATs) == 0 {
+	// An inventory read failure is not evidence that any rule's interfaces
+	// disappeared. Preserve matching active owners for every event source until
+	// the scheduled stable recheck can obtain a complete inventory.
+	if len(currentKernelEgressNATs) == 0 || (!trigger.hasSource("link") && rawSnapshot.Err == nil) {
 		return nil, nil
 	}
 	return buildTransientEgressNATRetentions(
@@ -1116,6 +1120,9 @@ func buildEgressNATDesiredCandidateShapes(item EgressNAT, snapshot egressNATInte
 	nextID := int64(1)
 	for _, target := range targets {
 		for _, protocol := range protocols {
+			if !egressNATTargetProtocolEnabled(item, target.Name, protocol) {
+				continue
+			}
 			rule := buildEgressNATSyntheticRule(item, target.Name, nextID, protocol)
 			annotateKernelCandidateRule(&rule, owner)
 			out = append(out, kernelCandidateRule{owner: owner, rule: rule})
@@ -1225,7 +1232,12 @@ func isAddrTriggeredKernelRefreshReason(reason string) bool {
 }
 
 func isAddrTriggeredKernelFallbackPlan(plan ruleDataplanePlan) bool {
-	return plan.KernelEligible && plan.EffectiveEngine != ruleEngineKernel && isAddrTriggeredKernelRefreshReason(plan.FallbackReason)
+	// Source-address checks run during both preflight and application. Preflight
+	// cannot mark a rule eligible while its selected source is absent, but the
+	// later address event must still retry it under the configured engine policy.
+	// A pinned kernel plan retains EffectiveEngine=kernel even on preflight
+	// failure, so the recorded failure determines whether recovery is needed.
+	return plan.PreferredEngine != ruleEngineUserspace && isAddrTriggeredKernelRefreshReason(plan.FallbackReason)
 }
 
 func isKernelIncrementalRetryCooldownPlan(plan ruleDataplanePlan) bool {

@@ -172,7 +172,7 @@ systemd 部署保留文件系统只读保护和私有临时目录。命名 netwo
 
 资源事务、插件包安装和 VM 热升级提供宿主可控制范围内的原子提交与失败回滚。普通 handler 内的 netlink 修改、eBPF map 写入、socket 写入、L2/UDP 发送和跨插件动作不能形成跨内核与外部对端的全局事务；插件必须使用幂等 reconcile、明确的 ownership 和补偿清理。普通 JavaScript 错误允许 `finally` 中提交修复 timer，超时、OOM 或协议退出则丢弃该未完成事件的 timer journal。
 
-Veer 每 2 秒在独立后台任务中检查插件源目录，重叠扫描会合并。文件身份、大小、mtime 和权限未变时复用内容 hash，每 30 秒重新计算完整内容指纹，因此保留大小和 mtime 的内容修改也会被发现。插件增删或 `plugin.json`、`control.js`、UI、eBPF object 变化只会设置 `update_available`，不会自动执行候选代码或重建数据面；WebUI 的“应用更新”或 `POST /api/plugins/reload` 会复制一份稳定候选快照，不使用扫描缓存，完成 manifest、control、UI 和 object 校验后再 reconcile。校验或运行时切换失败会保留上一份已应用快照。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据。
+Veer 每 2 秒在独立后台任务中检查插件源目录，重叠扫描会合并。文件身份、大小、mtime 和权限未变时复用内容 hash，每 30 秒重新计算完整内容指纹，因此保留大小和 mtime 的内容修改也会被发现。插件增删或 `plugin.json`、`control.js`、UI、eBPF object 变化只会设置 `update_available`，不会自动执行候选代码或重建数据面；显式开启 `plugins_remote_install_enabled` 后，WebUI 的“应用更新”或 `POST /api/plugins/reload` 会复制一份稳定候选快照，不使用扫描缓存，完成 manifest、control、UI 和 object 校验后再 reconcile。默认关闭远程安装时，请在本机更新文件并重启服务。校验或运行时切换失败会保留上一份已应用快照。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据。
 
 启动时同样先创建私有已应用快照；快照失败会保持外部控制面和数据面插件关闭，并在 catalog 中报告错误，绝不退回可变源目录直接执行。Goja 主脚本在 VM 创建前还会复核 catalog 记录的已应用 SHA256，避免初始化与执行之间的文件替换绕过手动更新门禁。
 
@@ -227,13 +227,13 @@ worker 不是 `new Worker("file")`。第一次 `worker.call(name, handler, paylo
 
 ### 类型和单元测试宿主
 
-编辑 `control.js` 时可以引用 [sdk/plugin/control.d.ts](sdk/plugin/control.d.ts) 获得 Goja 全局 API、context、resource 和 pipeline 类型：
+编辑 `control.js` 时可以引用 [sdk/plugin/control.d.ts](../sdk/plugin/control.d.ts) 获得 Goja 全局 API、context、resource 和 pipeline 类型：
 
 ```js
 /// <reference path="../../sdk/plugin/control.d.ts" />
 ```
 
-不依赖运行中的 Veer 即可用 [sdk/plugin/test-host.cjs](sdk/plugin/test-host.cjs) 执行持久主 VM、独立 worker VM、resource/KV/secret/blob、timer 和 event 单元测试：
+不依赖运行中的 Veer 即可用 [sdk/plugin/test-host.cjs](../sdk/plugin/test-host.cjs) 执行持久主 VM、独立 worker VM、resource/KV/secret/blob、timer 和 event 单元测试：
 
 ```js
 const { createTestHost } = require('../../sdk/plugin/test-host.cjs');
@@ -259,7 +259,7 @@ veer plugin contract --output ./api-contract.json
 veer plugin contract --types-output ./methods.d.ts
 ```
 
-`GET /api/plugin-sdk-contract` 返回运行中二进制生成的同一份权威契约。契约摘要按 canonical JSON 计算；控制方法、feature、资源限制或 pipeline ABI 发生漂移时，仓库契约测试和 `contract --check` 都会失败。contract v8 的 `control.capabilities` 为每个 Host 方法声明必需/任一/条件权限、可调用阶段、主 VM/Worker 范围以及隔离 IPC 请求和响应上限；`netfilter_pipeline` 声明原生 Hook placement 契约，`operations` 公开持久 operation 的状态和配额，`control_methods` 作为简单工具兼容列表保留，并由同一注册表生成。
+`GET /api/plugin-sdk-contract` 返回运行中二进制生成的同一份权威契约。契约摘要按 canonical JSON 计算；控制方法、feature、资源限制或 pipeline ABI 发生漂移时，仓库契约测试和 `contract --check` 都会失败。contract v10 的 `control.capabilities` 为每个 Host 方法声明必需/任一/条件权限、可调用阶段、主 VM/Worker 范围以及隔离 IPC 请求和响应上限；`netfilter_pipeline` 声明原生 Hook placement 契约，`operations` 公开持久 operation 的状态和配额，`control_methods` 作为简单工具兼容列表保留，并由同一注册表生成。
 
 ### 兼容与 ABI 演进
 
@@ -320,6 +320,8 @@ plugin.resource({
 - 动作可使用 `runtime_query`：执行 `exports.onAction(ctx)` 并把 JSON 返回值放进 HTTP 响应的 `result`，不写 action runtime status、不触发 core 重分发，适合流量、链路和设备状态快照。返回值最大 64 KiB。
 
 需要复用核心网络能力时，使用约定资源而不是直接修改 Veer 全局配置表：`forward_rule_plans` 编排端口转发，`egress_nat_plans` 编排 Egress NAT，`dhcpv4_plans` 在已有 LAN bridge 上启用 DHCPv4，`ipv6_assignment_plans` 编排 IPv6 路由、网关地址、RA 与 DHCPv6。这些记录只生成带稳定负数 ID 的 synthetic runtime，不复制到核心业务表；插件禁用或记录失活后会随下一次 runtime apply 撤销。
+
+`egress_nat_plans` 与手工出向 NAT、托管网络自动 NAT 统一按接口范围和协议编排：`parent_interface` 不带 `child_interface` 时提供默认出口；指定子接口的启用规则覆盖该子接口上相交的协议，其余子接口和协议继续使用默认出口。同一范围上的协议重叠仍视为冲突。覆盖规则暂时缺少接口或出口、或运行失败时，不会自动恢复父接口默认出口；只有禁用或删除覆盖规则才恢复继承。接口增删会重新计算实际子集，所有子接口及协议均已覆盖的默认规则显示为 `overridden`。
 
 `dhcpv4_plans` 支持 `bridge/ipv4_cidr/gateway/pool_start/pool_end/dns_servers/reservations/remark/enabled`。固定租约写在同一 plan 内：
 
@@ -604,9 +606,16 @@ async function saveProfile() {
 - `VeerPluginHost.action(action, payload)`
 - `VeerPluginHost.toast(message)`
 - `VeerPluginHost.toastError(error)`
+- `VeerPluginHost.notify(message, timeout?, tone?)`
+- `VeerPluginHost.notifyError(error, timeout?)`
+- `VeerPluginHost.headerActions(buttons)`
 - `VeerPluginHost.errorText(error)`
 - `VeerPluginHost.confirm({title, message, confirmText, cancelText, danger})`
 - `VeerPluginHost.requestResize()`
+
+新页面优先使用 `notify` / `notifyError`，通知由宿主展示并标注插件名。消息最多 2000 个字符，显示时间为 1000–10000 毫秒，`tone` 为 `info`、`success`、`warning` 或 `error`。隐藏页面、参数无效或超出配额时返回 `Promise<false>`；成功返回 `Promise<true>`。旧 `toast` / `toastError` 仍返回 iframe 内的元素，兼容已有插件。
+
+`headerActions([saveButton, applyButton])` 把最多两个本地按钮镜像到宿主页头，其中最多一个主按钮；次按钮使用 `.secondary`。按钮的文字、禁用和隐藏状态自动同步，点击仍由插件内原按钮处理。传入空数组可解除绑定。宿主不可用时保留本地按钮；卸载 iframe 会释放观察器和回调。页头与通知均走原 RPC 来源校验和限额，只有当前可见插件页面可以更新宿主 UI。它们不开放宿主 DOM、认证信息或额外控制权限。
 
 删除记录、拆除链路、断开会话等破坏性操作应先调用 `confirm()`。确认框由父 WebUI 的统一浮层渲染；只有当前可见的插件页面可以请求，且同一时刻最多打开一个。插件仍不能创建浏览器原生弹窗或向宿主注入 HTML。
 
@@ -646,7 +655,8 @@ F.onLocaleChange(function () {
 - 真实接口只出现在边界：例如 `eth1` 是 TC attach 点，`br-lan` 是 LAN ingress 点。
 - `pipeline.node()` / `plugin.virtualInterface()` 只描述逻辑节点或能力，不会创建系统网卡，也没有 ifindex。
 - `pipeline.attach({ interfaces: [...] })` 同时定义 dispatcher 挂载目标和该 Hook 的执行白名单；即使其他规则或插件也让 dispatcher 挂在同一组接口上，该 Hook 也不会在声明范围外执行。它不会把 vtap 落成 netdev。
-- `vtolocal` 使用单个 dummy 接入 Linux 协议栈；`wan_core` 的 direct 模式使用 dummy，PPPoE 所需的 `segmented_veth` 模式则创建 local/pipeline veth 对。它们都是显式 L3/分段边界，不是逻辑 veer 节点。
+- 动态 TC/XDP 适配器可设置 `binding_required: true`，并在 `compatibility.features` 声明 `dataplane.hook_bindings.v1`。此时必须声明 `hook_bindings` 资源并提供启用、含有效非空 `interfaces` 的对应 Hook 记录才能挂载；记录缺失、禁用、损坏或读取失败时不挂载，不回退到全局或静态 `interfaces`。未设置此标记的 Hook 保持原有语义。
+- `vtolocal` 使用单个 dummy 接入 Linux 协议栈；`wan_core` 的 direct 模式使用 dummy，`segmented_veth` 创建 local/pipeline veth 对，`direct_gro` 使用 helper 提供的单个 `veerwan`。它们都是显式 L3/分段边界，不是逻辑 veer 节点。
 
 因此，PPPoE、firewall、VXLAN 这类数据面插件应优先实现为逻辑 chain。只有需要让 Linux 本机看见 L3 边界或提供明确分段点时才创建 dummy/veth/tun/bridge 等系统接口；插件节点本身始终不占用 netdev。
 
@@ -692,9 +702,18 @@ pipeline.attach({
 - `post_reply_apply`：reply rewrite、校验和更新完成后且最终 redirect 前，适合 PPPoE/VXLAN 回包封装；通过 `direction: "reply", phase: "after_apply"` 注册。
 - `attach=ingress|egress`：同一逻辑 chain 可分别绑定到真实接口的 TC ingress 或 egress，并使用独立接口作用域。
 
-ABI v2 的共享 prog-array 固定为 111 slots。每个具体 stage 最多 8 个 Hook，forward 和 reply 每个方向跨三个 stage 合计最多 14 个 Hook，以保留 eBPF tail-call 深度余量。超限会在注册/reconcile 阶段拒绝，不会截断链。
+ABI v2 的共享 prog-array 固定为 111 slots，插件只会跳回其中的 continue slot；Hook 本身放在宿主私有的 `tc_plugin_hooks_v4` 中，不属于插件 ABI，插件 object 不需要为此重新编译。
+
+Hook 上限分两层：
+
+- **按接口计算的深度上限**：一个包在一个接口、一个挂载方向（ingress/egress）上，每个具体 stage 最多经过 8 个 Hook，forward 或 reply 方向跨三个 stage 合计最多 14 个。每个 Hook 消耗两次 tail call，这是内核每次执行 33 次 tail call 上限留下的余量。不带 `interfaces` 的全局 Hook 会计入每一个接口。
+- **整机容量**：每个具体 stage 整机最多 32 个 Hook。挂在不同接口上的 Hook 互不叠加，所以 12 个插件各自绑定自己的接口时可以同时运行。
+
+超限时按插件整体准入：已在运行的插件优先保留，其余按链顺序依次放入，放不下的插件单独报错（错误信息会指出是哪个接口、哪个 stage 超限），其他插件照常运行，链不会被截断。被拒插件被其他插件 `before/after` 引用时，引用方随后也会按排序规则报错。能力接口中 `runtime.tc_pipeline.stage_hook_limit/direction_hook_limit` 是按接口的上限，`stage_hook_capacity` 是整机容量，`hook_limit_scope` 为 `interface`。
 
 PPPoE 路径出站使用 `local0 -> pipeline peer TC ingress -> PPPoE stage -> physical WAN`，入站使用 `physical WAN TC ingress -> PPPoE stage -> local0 ingress`。`local0` 与内部 pipeline peer 组成由 `wan_core` 管理的 veth 边界；pipeline peer 只承担数据面换向，不应作为用户可选 WAN 接口。
+
+宿主提供 `dataplane.kfuncs.wan.v1` 且插件增强对象可用时，新 PPPoE 会话改用 `direct_gro`：`local0 TC egress -> PPPoE stage -> physical WAN`，回包解封装后直接进入 `local0` 的 GRO 接收队列，只创建一个 helper WAN 网口。WAN Core 通过 `net.link.ensureHelperWAN({name, mtu, up})` 管理此边界；该 API 沿用建口的权限、接口范围与所有权检查。旧 helper 或无 helper 时保留 veth 路径，已建立的会话保留原边界直到重拨。
 
 动态 PPPoE 地址、对端地址和路由由 `wan_core` 发布到这个本地边界，并在重拨时替换；`vtolocal` 只用于静态本地边界，不应同时管理同一个 PPPoE 接口的动态地址。
 
@@ -800,11 +819,39 @@ exports.onEBPFStateMigrate = function (ctx) {
 
 XDP 插件使用 `engine: "xdp"`，只能注册 `pre_forward` 或 `priority < 1000` 的 `forward` Hook，并且必须声明显式 ingress 接口。XDP 没有 egress Hook，也不能读取 `tc_plugin_ctx_v4/tc_plugin_ctx_v6`；需要 core 查表结果、reply 方向或改写后的包时应使用 TC stage。
 
-XDP 插件 object 必须声明 24-entry 的共享 `xdp_prog_chain`，处理后调用 `veer_xdp_continue(ctx)` 进入下一 Hook。链结束返回 `XDP_PASS`，随后继续进入现有 TC/系统路径。单条 XDP 链最多 8 个 Hook，按 priority、插件 ID、Hook ID 稳定排序；更新使用双 bank 原子切换。
+XDP 插件 object 必须声明 24-entry 的共享 `xdp_prog_chain`，处理后调用 `veer_xdp_continue(ctx)` 进入下一 Hook。链结束返回 `XDP_PASS`，随后继续进入现有 TC/系统路径。Hook 按 priority、插件 ID、Hook ID 稳定排序，放在 Dispatcher 私有的 `xdp_plugin_hooks` 中。每个接口最多 14 个 XDP Hook（每个 Hook 两次 tail call），整机最多 32 个；超限时与 TC 相同，只拒绝放不下的插件，已在运行的插件优先保留。更新使用双 bank 原子切换，每个 bank 有独立的完整配置，切换只翻转一个 `active_bank`，包不会读到两个 bank 混合的配置。
+
+```c
+#include "../include/veer_plugin_helpers.h"
+
+VEER_DECLARE_XDP_PROG_CHAIN();
+
+SEC("xdp/veer/filter")
+int xdp_filter(struct xdp_md *xdp)
+{
+	struct veer_packet pkt;
+	struct veer_l2_info l2;
+
+	if (!veer_packet_from_xdp(xdp, &pkt) || veer_parse_l2(&pkt, &l2) < 0)
+		return VEER_XDP_PASS;
+	if (should_drop(&pkt, &l2))
+		return VEER_XDP_DROP;
+	veer_xdp_continue(xdp);
+	return VEER_XDP_PASS; /* 只在 continue 槽不可用时到达 */
+}
+```
+
+helper 提供 `VEER_XDP_ABORTED/DROP/PASS/TX/REDIRECT`、`veer_packet_from_xdp()`、`veer_xdp_adjust_head/tail()`、`veer_xdp_redirect_map()` 和 `veer_csum_diff()/veer_csum_fold()`；L2/L3/L4 解析 helper 与 TC 共用。需要内核 UAPI 类型时可以先 include `<linux/bpf.h>`（或 `vmlinux.h`）再 include helper，此时 `__sk_buff`/`xdp_md` 使用内核定义；顺序反过来会让 helper 的 `BPF_FUNC_*` 宏与内核枚举冲突。
+
+XDP Hook 可以用 `veer_xdp_meta_reserve(xdp, len)` 在包前的 metadata 区写入最多 32 字节、4 字节对齐的小记录，同一 ingress 上的 TC Hook 用 `veer_skb_meta(skb, len)` 读回，例如把 XDP 的分类结果交给 TC 阶段。驱动不支持 metadata 时 reserve 返回空指针，读取方必须把没有记录当作"未分类"处理。
+
+Hook 的 `interfaces` 中有接口不存在时，只跳过该接口并在插件状态中给出提示，其余已存在接口上的 Hook 照常挂载；一个 Hook 的接口全部不存在时只移除这个 Hook，插件的所有 Hook 都无法挂载时才报错。接口出现后由 link 事件触发的 reconcile 重新挂上，不会退化成全局 Hook。
 
 Veer 使用独立最小 Dispatcher，不改写实验性的 Forward XDP NAT object。只要 catalog 中存在可运行的 TC/XDP 插件 Hook，核心转发规则就固定走 TC，避免 XDP Core 绕过插件链；XDP 插件仍可在相同 ingress 上先于 TC 执行。目标接口已有任何 XDP 程序时会报告冲突，Veer 不替换、不接管；driver 模式不可用时，只有显式开启 `xdp_generic` 才尝试 generic 模式。
 
-没有 XDP Hook、插件被禁用或插件系统关闭时，Dispatcher 会从接口完全卸载，不给无插件热路径增加 lookup。接口删除后，同名接口重建会按新 ifindex 重新挂载；崩溃恢复同时核对原进程 start-time 和 XDP program ID，绝不根据旧 ifindex 盲目删除其他程序。对象内容更新可继承兼容的 `state_maps`；Hook、模式、优先级或接口范围变化失败时不会隐形保留旧链。
+没有 XDP Hook、插件被禁用或插件系统关闭时，Dispatcher 会从接口完全卸载，不给无插件热路径增加 lookup；上一个进程留下的 Dispatcher 也会在这时卸载。接口删除后，同名接口重建会按新 ifindex 重新挂载；崩溃恢复同时核对原进程 start-time 和 XDP program ID，绝不根据旧 ifindex 盲目删除其他程序。
+
+热更新（`deploy.sh` 热重启）时，旧进程不卸载 Dispatcher，而是 pin 住 `xdp_prog_chain` 并记录挂载点，旧插件链在进程交接期间继续处理每个包。新进程先在新 Dispatcher 中装好完整插件链，再用 `XDP_FLAGS_REPLACE` 按 program ID 原子替换旧 Dispatcher，最后释放 pin；替换中途失败会把已替换的接口恢复成旧 Dispatcher。原子替换需要 Linux 5.7+，更旧的内核仍在退出时卸载 Dispatcher，交接期间 XDP 插件不生效。对象内容更新可继承兼容的 `state_maps`；Hook、模式、优先级或接口范围变化失败时不会隐形保留旧链。
 
 同一个 eBPF object 不能同时承载 TC、XDP 或 Netfilter 中的多个数据面引擎。跨引擎插件应按引擎拆分 object，使私有 map 的 ownership 和 Goja map API 目标保持唯一；需要同步配置时由控制面使用 map transaction 分别更新。
 
@@ -945,7 +992,7 @@ net.route.replace({namespace: ns.name, dst: "192.0.2.0/24", dev: "tun0", table: 
 
 插件创建的 bridge/veth/dummy/macvlan，以及对已有接口 master、up/down、MTU、ARP、promiscuous、offload、GSO、地址和路由的修改都会写入宿主资源租约。租约按属性互斥，记录首次修改前的值和 Linux boot ID；插件禁用、卸载或加载失败时按依赖顺序恢复，同名接口 identity 已变化或系统已跨 boot 时只丢弃旧租约，不会修改新设备。插件主动把属性、地址或自己新增的路由恢复到原值时租约自动释放。`net.lease.list()` 可读取本插件当前租约；`net.lease.restore(type, key)` 会恢复并释放指定租约，失败时保留记录供重试。`net.link.delete()` 只允许删除本插件通过 ensure API 创建并持有的 link，不能凭接口白名单删除宿主或其他插件的设备。
 
-需要同时切换多条路由、策略规则或静态邻居时，使用 `net.route.transaction()`、`net.rule.transaction()` 或 `net.neigh.transaction()`。每批最多 128 项；运行时先完成全部参数、权限、接口、租约冲突和内核快照预检，再按顺序应用，任一项失败会逆序恢复已经应用的项及 ownership ledger。事务只发生在控制面，不给 TC 热路径增加指令。示例：
+需要同时切换多条路由、策略规则或静态邻居时，使用 `net.route.transaction()`、`net.rule.transaction()` 或 `net.neigh.transaction()`。每批最多 128 项；运行时先完成全部参数、权限、接口、租约冲突和内核快照预检，再按顺序应用，任一项失败会逆序恢复已经应用的项及 ownership ledger。事务只发生在控制面，不给 TC 热路径增加指令。单条 route/rule/neigh 写入也使用同一持久恢复路径；失败项保留 journal 和 ownership，阻止该表项被再次改写，无关表项继续处理。恢复按较新的事务优先、逐表项保存进度，并先核对当前属主、启动标识和接口身份，避免旧快照操作同名重建的接口。卸载前必须完成恢复，失败时保留依赖接口供重试。示例：
 
 ```js
 net.route.transaction([
@@ -1026,7 +1073,7 @@ ebpf.mapTransaction({
 });
 ```
 
-该能力对应 `ebpf.map_transactions.v1`。事务只支持普通 Hash/Array/LRU/LPM raw-value map，不支持 per-CPU、prog-array、map-in-map、socket/device 引用或 ring buffer；这些类型需要专用 ABI。
+该能力对应 `ebpf.map_transactions.v1`。事务只支持普通 Hash/Array/LPM raw-value map，不支持 LRU、per-CPU、prog-array、map-in-map、socket/device 引用或 ring buffer。LRU 插入可能驱逐事务范围外的有效表项，无法完整回滚，因此在执行任何写入之前拒绝；其他类型需要专用 ABI。
 
 需要为同一物理口创建独立二层身份时，可使用 `net.link.ensureMacvlan()`。调用方需要父接口的 `link.read` 和子接口的 `link.create` 权限；返回值包含接口信息和本次是否实际创建。随机 MAC 应由插件首次生成后持久化，重拨时复用，避免每次被上游识别成新终端：
 
@@ -1111,12 +1158,17 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 
 ## 随仓库维护的插件
 
-- `wan_core`（stable）：消费标准化 WAN session；direct 模式管理本地 L3 dummy，`segmented_veth` 模式管理 local/pipeline veth 边界。
+可选 `veer_kfuncs` 模块为 TC 插件提供 `dataplane.kfuncs.handoff.v1`。插件必须根据宿主实际发布的 available_features 选择独立增强对象，缺少能力时保留基础路径；其 skb 所有权、GSO/GRO、编译/部署与生命周期契约见 [KERNEL.md](KERNEL.md)。这项能力默认不编译、不部署。
+
+- `wan_core`（stable）：消费标准化 WAN session；direct 模式管理本地 L3 dummy，`segmented_veth` 管理 local/pipeline veth 边界，`direct_gro` 管理可选 helper 的单口 GRO 边界。
 - `lan_core`（stable）：管理 LAN bridge，并生成 Egress NAT、DHCPv4 和 IPv6 assignment plan。
 - `vtolocal`（stable）：创建静态本地 L3 dummy，并管理该接口上的地址与路由。
 - `pppoe_client`（stable）：Goja + raw L2 PPPoE 控制面和双向 TC 隧道插件。插件目录内保留控制面自测和 Linux 黑盒脚本，覆盖 discovery、PAP/CHAP、IPv6CP、DHCPv6-PD、keepalive/redial、disconnect 和 tunnel map 写入。生产使用前仍应在目标运营商/AC 上跑真实断线重拨、IPv4/IPv6/PD、长流稳定性和目标拓扑吞吐验收。
 - `packet_observer`（lab）：TC pipeline 观测示例，需要执行 `build.sh` 生成 eBPF object。
 - `router_wizard`（lab）：组合 PPPoE/WAN/LAN 资源的路由配置向导示例。
+- [vpn_core](plugins/vpn_core/README.md)（lab）：把内核 WireGuard、Mihomo、sing-box 或外部 TUN 接入 WAN Core 与双向 TC 适配器；提供出口表单、WG 配置导入和核心版本管理，LAN/指定下游通过现有出向 NAT 选择出口，不默认安装。
+
+VPN 的“拆除”保留配置，“删除”清理自有出口、配置和未被其他出口引用的凭据；已安装的核心版本保留。sing-box 可在出站接口旁指定该接口上的出站源 IP，使用核心原生绑定。WAN Core 的 `teardown` 动作支持可选 `forget:true`：仅在网络清理完整成功后移除对应 profiles / sessions / status 记录，失败时保留记录供重试。
 
 WAN 自愈仍会检查实际接口、地址、路由、策略规则、邻居和 offload 状态；状态一致时跳过重复写入及不变的恢复租约更新，发现漂移时再补回。已有的匹配策略规则不会先删除再添加。
 
@@ -1143,7 +1195,38 @@ veer plugin restore --archive ./plugin-state.tar.gz --database ./forward.db --pl
 
 `pack` 会执行 manifest、control hash、Goja 注册、路径、文件类型、条目数和大小校验，并生成确定性 `tar.gz`。`sign` 使用 Ed25519 对带 Veer v2 domain 的 archive SHA256 签名，默认输出同名 `.veerpkg`；该单文件容器只包含不可变的 `package.tar.gz` 和 `signature.json`，可直接发布或上传，不再生成独立 `.sig`。安装端会限制容器成员、数量、压缩方式和大小，再校验 payload 摘要、签名及发布者密钥指纹；外置签名和旧 sidecar 请求头不再接受。`verify` 要求显式提供预期公钥，用于确认包内公钥就是操作者信任的那一把；签名有效本身不等于已建立长期信任。未签名的本地 `.tar.gz` 仍可预检，但受 `plugins_require_signed_packages` 策略约束。
 
-`plugins_require_signed_packages=true` 是默认包准入策略。此时 `approve_unsigned` 不能覆盖签名要求，但签名有效的首次发布者不需要预先进入 trust store：WebUI 会显示密钥指纹、权限和风险，管理员确认后即可只安装当前候选。需要调试本地未签名包时必须显式关闭该策略；未签名确认和权限扩张摘要仍分别生效。
+`plugins_remote_install_enabled=false` 是默认值。此时宿主拒绝远程包上传、应用、批量应用、回滚、卸载、仓库、发布者信任管理及代码 reload，WebUI 隐藏相应入口；已安装插件的页面、资源、动作、启停、日志和审计继续可用。请由本机管理员将插件部署到 `plugins_dir` 并重启服务。需要远程安装时，必须在本机配置中显式开启该项并重启，原有双令牌、签名和权限审核仍然有效；该模式禁止 `process.exec`，远程包也不能声明 `exec` 权限。两种模式互斥。
+
+`plugins_require_signed_packages=true` 是默认包准入策略。此时 `approve_unsigned` 不能覆盖签名要求，但签名有效的首次发布者不需要预先进入 trust store：远程安装开启时 WebUI 会显示密钥指纹、权限和风险，管理员确认后即可只安装当前候选。需要调试本地未签名包时必须显式关闭该策略；未签名确认和权限扩张摘要仍分别生效。
+
+本地受信任插件可在 `control.permissions` 中声明 `"exec"`，并在运行阶段调用：
+
+```javascript
+var result = process.exec({
+  command: "/usr/bin/wg",
+  args: ["show", "wg0", "dump"],
+  timeout_ms: 5000
+});
+if (result.exit_code !== 0 || result.timed_out || result.cancelled || result.truncated) {
+  throw new Error(result.stderr || "command did not complete successfully");
+}
+```
+
+`command` 必须是可执行文件的绝对路径，`args` 最多 128 项，直接传给进程，不隐式启动 shell。可选 `stdin` 适合传递密钥等输入；请求最多 64 KiB。超时默认 5 秒、最大 15 秒，受当前 handler 剩余期限约束。返回 `stdout`、`stderr`、`exit_code`、`timed_out`、`cancelled`、`truncated`；非零退出码由插件处理，无法启动或参数无效时抛异常。stdout/stderr 合计最多 64 KiB，超限终止命令。工作目录为文件系统根目录，不继承 Veer 的环境变量或标准输入。停止 VM 会取消在途命令；Linux 使用独立进程组并在结束时清理同组子进程，不支持用该接口托管后台守护进程。
+
+常驻外部程序使用 Linux 主控制 VM 的 `process.start({id, command, args, stdin, config, restart, max_restarts, stop_timeout_ms})`，对应 feature 为 `control.process.v1`，同样要求本地 `exec` 权限及关闭远程安装。config 最多 1 MiB，写入私有目录的 0600 文件，argv 中的 `{config}` 替换为文件路径；目录随最终退出清理；Veer 被强杀时遗留的私有目录按进程所有者区分，后续启动自动清理已退出所有者的目录，保留活跃目录和符号链接。持久配置另存加密 Secret（每条上限 2 MiB，计入数据库配额）。
+
+进程 ID 按插件隔离；同代际同配置的 start 幂等，改变配置或代际需先 stop。`process.status(id)`、`list()` 返回状态、PID、启动次数、时间和退出码，不含配置和参数。`process.logs(id)` 显式读取 stdout/stderr 各自最多 64 KiB 的尾部，可能包含凭据，不能直接加入公开状态。restart 默认为 never；on-failure 按 1、2、4、8、16 秒退避，最多重启 max_restarts 次（0–10），耗尽后相同 start 不重置预算。`process.restart(id)` 用于健康检查发现的故障，先优雅停止再退避重启，与失败退出共用同一重启预算。每插件最多 8 项，全局最多 32 项。
+
+`process.stop(id)` 先 TERM，默认 1 秒后 KILL（可设 1–3000 ms），并清理同组子进程。控制 VM 停止、插件停用及运行时关闭都会停止所属进程。Linux 设置父进程死亡信号；完整保护要求 cgroup 限额成功，并通过独立 cgroup 清理后代。CPU/内存/PID 复用插件配置，全局内存/PID 与控制 Host 共用；这些资源限制不表示核心受到低权限 JS 沙箱约束。
+
+需要管理外部可执行文件时，Linux 主控制 VM 可使用 feature `control.process_binaries.v1`：`process.binaryInstall(request)` 后台下载，`binaryStatus(id)` 查询版本与进度，`binarySelect({id, version})` 切换默认版本，`binaryRemove({id, version})` 删除未使用版本。均要求本地 `exec` 权限和关闭远程插件安装。该下载属于受信任宿主执行能力，使用宿主网络，不经过 JS 的 `net_access`。
+
+安装请求提供 `id`、`executable`、`format`（`raw/gzip/tar.gz`），直接来源需提供 `version/url/sha256`；GitHub 发布来源提供 `release_url`（官方 API 的 latest 或 tags 路径）与 `asset`，摘要读取资产的 SHA256，缺失时需显式提供。`asset` 和 `archive_path` 支持 `{tag}` 与去掉 v 前缀的 `{version}`。tar.gz 必须指定 `archive_path`，只读取该常规文件；不解压链接或其他目录。可用 `check_args` 执行最多 10 秒的版本检查，失败不切换默认版本。只接受 HTTPS，验证压缩包摘要、ELF 架构与文件大小，不运行 shell。
+
+版本保存在 `<plugins_dir>.veer-state/cores/<plugin>/<id>/<os>-<arch>/<version>/`，重装代码包后保留。下载和可执行文件分别上限 256 MiB，每插件合计上限 1 GiB，最多 8 个二进制 ID，每 ID 最多 4 个版本。每插件最多一个下载，宿主最多四个，10 分钟超时；插件停用或运行时退出取消下载。`binaryStatus` 返回 `path/version/previous/versions/install`，安装阶段为 `resolving/downloading/verifying/ready/failed`。成功安装原子切换默认版本；正在运行的进程保持原文件，调用者决定何时重新应用。选择时重新校验可执行文件摘要；默认版本和被受管理进程引用的版本拒绝删除。回滚可将 `previous` 传给 `binarySelect`。下载残留按进程所有者清理，备份排除下载临时目录。
+
+exec 经父进程 broker 执行，具有 Veer 服务的系统权限，不受 JS 子进程降权、seccomp、`net_access` 和单插件 cgroup 限制。JS 沙箱本身继续禁止直接 exec。仅应给本机管理员审核的插件授予该权限，保护插件目录和被执行文件；插件必须校验远程资源/动作传入的参数，不能将其直接交给 shell。注册、迁移、升级快照/恢复阶段不允许 exec。
 
 信任键可以限制 `plugin_ids`（精确 ID 或尾部 `*` 前缀）、`permissions`、`execution_tiers`（`control/dataplane`）和 `stabilities`；`permissions_restricted=true` 允许把空权限列表明确锁定为零权限。有效签名位于范围内时显示为已信任；超出范围时仍可人工批准当前候选，但不会隐式扩大原范围。安装审核中的“记住发布者”会按当前候选自动生成最小范围，同一批次由同一密钥签署的包会合并各自最小范围。密钥轮换默认继承范围，显式新范围只能收窄；需要扩大长期授权时应单独审核，而不是借轮换隐式升级。
 
@@ -1162,7 +1245,7 @@ veer plugin repository status --directory ./private-repository
 
 私有仓库的 target 已由 TUF 元数据签名，因此 `repository add` 继续接收 `pack` 生成的原始 `.tar.gz`；`.veerpkg` 用于不经过 TUF 仓库的单文件签名分发。
 
-客户端为每个已安装插件提供独立仓库策略：仓库 ID、`stable/preview` channel、可选精确 SemVer pin 和 hold。pin 会同时约束直接安装和依赖求解；hold 会保留当前已安装版本，即使它只是其他插件的依赖也不能被替换。策略不会自动执行升级，WebUI 只生成经过完整依赖求解和权限复核的候选 stage。`plugins_enabled=true` 时，宿主按 `plugins_repository_refresh_minutes`（默认 360 分钟）在独立后台循环刷新 TUF 元数据和撤销状态；插件关闭时不启动该循环，刷新永远不会下载或运行 target。
+客户端为每个已安装插件提供独立仓库策略：仓库 ID、`stable/preview` channel、可选精确 SemVer pin 和 hold。pin 会同时约束直接安装和依赖求解；hold 会保留当前已安装版本，即使它只是其他插件的依赖也不能被替换。策略不会自动执行升级，WebUI 只生成经过完整依赖求解和权限复核的候选 stage。`plugins_enabled=true` 且 `plugins_remote_install_enabled=true` 时，宿主按 `plugins_repository_refresh_minutes`（默认 360 分钟）在独立后台循环刷新 TUF 元数据和撤销状态；任一开关关闭时不刷新，刷新永远不会下载或运行 target。
 
 workspace 是 `0700` 私有发布目录，包含 Ed25519 私钥、不可变包缓存、版本状态和恢复 journal；只有其中的 `public/` 是静态 TUF 输出。不同用户运行的 nginx 无法穿透该私有父目录，生产部署应在持有 workspace 的发布进程完成 `publish` 后，把完整 `public/` 原子同步到独立 Web 根目录，不能放宽私钥目录权限或逐文件覆盖在线仓库。`add/revoke/publish/rotate-key/status` 使用跨进程独占锁；publish 和 key rotation 在进程中断后会按持久 journal 幂等恢复。
 

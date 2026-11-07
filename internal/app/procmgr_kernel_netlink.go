@@ -841,7 +841,12 @@ func (pm *ProcessManager) handleKernelNetlinkRecoveryTrigger(trigger kernelNetli
 			summary = pm.summarizeNetlinkTriggeredKernelFallbacksLocked()
 		}
 		if trigger.hasSource("addr") {
-			summary = mergeKernelNetlinkRecoverySummaries(summary, pm.summarizeKernelAddrRefreshLocked(trigger))
+			addrSummary := pm.summarizeKernelAddrRefreshLocked(trigger)
+			summary = mergeKernelNetlinkRecoverySummaries(summary, addrSummary)
+			// Address removal and restoration often occur within the debounce
+			// window. Queue both relevant transitions so the worker can coalesce
+			// them; dropping the final restoration can strand a source-IP failure.
+			forceRetry = addrSummary != ""
 		}
 		if trigger.hasSource("link") {
 			// Parent-scope egress NAT depends on live child-interface inventory. Link

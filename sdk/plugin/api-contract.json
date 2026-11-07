@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 15,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -61,6 +61,9 @@
       "control.plugin_interop",
       "control.typed_services.v1",
       "control.process_isolation.v1",
+      "control.exec.v1",
+      "control.process.v1",
+      "control.process_binaries.v1",
       "control.raw_l2",
       "control.resource_schema.v1",
       "control.resource_limits.v1",
@@ -70,8 +73,12 @@
       "control.sockets",
       "control.workers",
       "dataplane.packet_metadata.v1",
+      "dataplane.kfuncs.handoff.v1",
+      "dataplane.kfuncs.handoff_ingress.v1",
+      "dataplane.kfuncs.wan.v1",
       "dataplane.tc_pipeline.v2",
       "dataplane.hook_order.v1",
+      "dataplane.hook_bindings.v1",
       "dataplane.xdp_pipeline.v1",
       "dataplane.netfilter_pipeline.v1",
       "dataplane.netfilter_skb_dynptr.v1",
@@ -92,6 +99,8 @@
     "program_array_entries": 111,
     "stage_hook_limit": 8,
     "direction_hook_limit": 14,
+    "stage_hook_capacity": 32,
+    "hook_limit_scope": "interface",
     "directions": [
       "forward",
       "reply"
@@ -130,7 +139,9 @@
   },
   "xdp_pipeline": {
     "program_array_entries": 24,
-    "hook_limit": 8,
+    "hook_limit": 14,
+    "hook_capacity": 32,
+    "hook_limit_scope": "interface",
     "hook_stages": [
       "pre_forward",
       "forward"
@@ -1172,6 +1183,24 @@
       },
       {
         "method": "net.link.ensureDummy",
+        "permissions": [
+          "net.admin"
+        ],
+        "conditional_permissions": [
+          "net.namespace"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "net.link.ensureHelperWAN",
         "permissions": [
           "net.admin"
         ],
@@ -2612,6 +2641,161 @@
         "max_response_bytes": 75497472
       },
       {
+        "method": "process.binaryInstall",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.binaryRemove",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.binarySelect",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.binaryStatus",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.exec",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.list",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.logs",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.restart",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.start",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.status",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "process.stop",
+        "permissions": [
+          "exec"
+        ],
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
         "method": "resources.delete",
         "permissions": [
           "resource"
@@ -2927,6 +3111,7 @@
     "net.link.delete",
     "net.link.ensureBridge",
     "net.link.ensureDummy",
+    "net.link.ensureHelperWAN",
     "net.link.ensureMacvlan",
     "net.link.ensureVLAN",
     "net.link.ensureVRF",
@@ -3012,6 +3197,17 @@
     "plugins.services.call",
     "plugins.services.list",
     "plugins.services.resolve",
+    "process.binaryInstall",
+    "process.binaryRemove",
+    "process.binarySelect",
+    "process.binaryStatus",
+    "process.exec",
+    "process.list",
+    "process.logs",
+    "process.restart",
+    "process.start",
+    "process.status",
+    "process.stop",
     "resources.delete",
     "resources.get",
     "resources.list",
@@ -3029,5 +3225,16 @@
     "worker.dispatch",
     "worker.list",
     "worker.stats"
-  ]
+  ],
+  "webui": {
+    "version": 1,
+    "host_methods": [
+      "notify",
+      "notifyError",
+      "headerActions"
+    ],
+    "max_header_actions": 2,
+    "max_primary_actions": 1,
+    "max_notification_chars": 2000
+  }
 }

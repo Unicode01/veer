@@ -15,3 +15,7 @@
 *.md text eol=lf
 go.mod text eol=lf
 go.sum text eol=lf
+# Embedded by `veer kfuncs build`; keep LF even when the binary is built on Windows.
+kernel/veer_kfuncs/Kbuild text eol=lf
+kernel/veer_kfuncs/Makefile text eol=lf
+kernel/veer_kfuncs/*.c text eol=lf

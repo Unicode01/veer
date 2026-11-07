@@ -14,6 +14,7 @@ const (
 	egressNATTypeSymmetric          = "symmetric"
 	egressNATTypeFullCone           = "full_cone"
 	egressNATRedirectModePreparedL2 = "prepared_l2"
+	egressNATFullyOverriddenReason  = "all eligible child interfaces and protocols are covered by more specific egress nat rules"
 )
 
 const (
@@ -212,6 +213,55 @@ func normalizeEgressNATItemsWithSnapshot(items []EgressNAT, snapshot egressNATIn
 		return out
 	}
 	return normalizeEgressNATItems(items, snapshot.Infos)
+}
+
+// Compile child overrides before filtering retained/retry owners. An enabled
+// child reserves its protocols even when its interface or outbound is missing:
+// a failed selected exit must never silently fall back to the parent exit.
+func compileEgressNATSubsets(items []EgressNAT, snapshot egressNATInterfaceSnapshot) []EgressNAT {
+	items = normalizeEgressNATItemsWithSnapshot(items, snapshot)
+	if len(items) == 0 {
+		return items
+	}
+	byParent := make(map[string]map[string]int)
+	for _, item := range items {
+		if !item.Enabled || item.ChildInterface == "" {
+			continue
+		}
+		if byParent[item.ParentInterface] == nil {
+			byParent[item.ParentInterface] = make(map[string]int)
+		}
+		byParent[item.ParentInterface][item.ChildInterface] |= protocolMaskFromString(normalizeEgressNATProtocol(item.Protocol))
+	}
+	out := append([]EgressNAT(nil), items...)
+	for i, item := range items {
+		if item.ChildInterface != "" {
+			out[i].subsetOverrides = nil
+			continue
+		}
+		// Preserve a projection made from the complete plan when this call only
+		// receives owners remaining after transient retention or retry filtering.
+		if len(item.subsetOverrides) == 0 && len(byParent[item.ParentInterface]) == 0 {
+			continue
+		}
+		overrides := make(map[string]int, len(item.subsetOverrides)+len(byParent[item.ParentInterface]))
+		for name, mask := range item.subsetOverrides {
+			overrides[name] = mask
+		}
+		for name, mask := range byParent[item.ParentInterface] {
+			overrides[name] |= mask
+		}
+		out[i].subsetOverrides = overrides
+	}
+	return out
+}
+
+func egressNATTargetProtocolMask(item EgressNAT, target string) int {
+	return protocolMaskFromString(normalizeEgressNATProtocol(item.Protocol)) &^ item.subsetOverrides[target]
+}
+
+func egressNATTargetProtocolEnabled(item EgressNAT, target, protocol string) bool {
+	return egressNATTargetProtocolMask(item, target)&protocolMaskFromString(protocol) != 0
 }
 
 func normalizeEgressNATItemsWithCurrentInterfaces(items []EgressNAT) []EgressNAT {
@@ -416,7 +466,7 @@ func buildEgressNATSyntheticRule(item EgressNAT, childInterface string, id int64
 
 func activeOwnerRulesMatchEgressNAT(items []Rule, item EgressNAT) bool {
 	variants := expandEgressNATProtocols(item.Protocol)
-	if !item.Enabled || len(items) == 0 || len(variants) == 0 || len(items)%len(variants) != 0 {
+	if !item.Enabled || len(items) == 0 || len(variants) == 0 {
 		return false
 	}
 
@@ -428,6 +478,9 @@ func activeOwnerRulesMatchEgressNAT(items []Rule, item EgressNAT) bool {
 	protocolsByTarget := make(map[string]map[string]struct{}, len(items)/len(variants))
 	for _, rule := range items {
 		if _, ok := allowedProtocols[rule.Protocol]; !ok || strings.TrimSpace(rule.InInterface) == "" {
+			return false
+		}
+		if !egressNATTargetProtocolEnabled(item, rule.InInterface, rule.Protocol) {
 			return false
 		}
 		if rule.InIP != "0.0.0.0" || rule.InPort != 0 ||
@@ -451,14 +504,13 @@ func activeOwnerRulesMatchEgressNAT(items []Rule, item EgressNAT) bool {
 		}
 		protocolsByTarget[target][rule.Protocol] = struct{}{}
 	}
-	for _, protocols := range protocolsByTarget {
-		if len(protocols) != len(allowedProtocols) {
-			return false
+	for target, protocols := range protocolsByTarget {
+		mask := 0
+		for protocol := range protocols {
+			mask |= protocolMaskFromString(protocol)
 		}
-		for protocol := range allowedProtocols {
-			if _, ok := protocols[protocol]; !ok {
-				return false
-			}
+		if mask != egressNATTargetProtocolMask(item, target) {
+			return false
 		}
 	}
 	return true
@@ -479,6 +531,7 @@ func enabledEgressNATIDs(items []EgressNAT) map[int64]bool {
 }
 
 func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *ruleDataplanePlanner, configuredKernelRulesMapLimit int, reservedKernelEntries int, nextSyntheticID *int64, snapshot egressNATInterfaceSnapshot) ([]kernelCandidateRule, map[int64]ruleDataplanePlan) {
+	items = compileEgressNATSubsets(items, snapshot)
 	plans := make(map[int64]ruleDataplanePlan, len(items))
 	candidates := make([]kernelCandidateRule, 0, len(items)*2)
 	if planner == nil {
@@ -521,8 +574,13 @@ func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *rule
 			candidates = growKernelCandidateBuffer(candidates, len(targetInfos)*len(protocols))
 		}
 		candidateStart := len(candidates)
+		selectedProtocols := 0
 		for _, target := range targetInfos {
 			for _, proto := range protocols {
+				if !egressNATTargetProtocolEnabled(item, target.Name, proto) {
+					continue
+				}
+				selectedProtocols++
 				id, err := allocateSyntheticKernelRuleID(nextSyntheticID)
 				if err != nil {
 					acc.Add(ruleDataplanePlan{
@@ -540,8 +598,26 @@ func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *rule
 				}
 			}
 		}
+		if selectedProtocols == 0 && item.Enabled {
+			plans[item.ID] = ruleDataplanePlan{
+				PreferredEngine: ruleEngineKernel,
+				EffectiveEngine: ruleEngineKernel,
+				KernelEligible:  true,
+				KernelReason:    egressNATFullyOverriddenReason,
+			}
+			continue
+		}
 
 		plan := acc.Result()
+		// An unavailable configured exit must not fall through to the host's
+		// default route. Manual NATs do not carry a plugin redirect mode, so
+		// keep every enabled NAT's ingress/protocol selectors as drop guards.
+		if item.Enabled && !plan.KernelEligible && planner.kernelAvailable {
+			for i := candidateStart; i < len(candidates); i++ {
+				candidates[i].rule.kernelUnavailable = true
+			}
+			plan.EffectiveEngine = ruleEngineKernel
+		}
 		if item.Enabled && plan.EffectiveEngine == ruleEngineKernel {
 			neededEntries := len(candidates) - candidateStart
 			requestedEntries := reservedKernelEntries + neededEntries

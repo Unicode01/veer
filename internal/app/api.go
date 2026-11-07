@@ -216,8 +216,12 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		staticFileServer.ServeHTTP(w, r)
 	}))
 
-	mux.HandleFunc("/api/host-network", authMiddleware(cfg, handleHostNetwork))
-	mux.HandleFunc("/api/interfaces", authMiddleware(cfg, handleInterfaces))
+	mux.HandleFunc("/api/host-network", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleHostNetwork(w, r, db)
+	}))
+	mux.HandleFunc("/api/interfaces", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
+		handleInterfaces(w, r, db)
+	}))
 	mux.HandleFunc("/api/managed-networks", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -415,8 +419,10 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{
-			"configured": cfg.PluginAdminAPIEnabled(),
-			"authorized": authorizedPluginAdminRequest(cfg, r),
+			"configured":             cfg.PluginAdminAPIEnabled(),
+			"authorized":             authorizedPluginAdminRequest(cfg, r),
+			"remote_install_enabled": cfg.PluginRemoteInstallEnabled(),
+			"exec_enabled":           cfg.PluginExecEnabled(),
 		})
 	}))
 	mux.Handle("/api/plugins/", authStaticMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -569,7 +575,7 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		handleListCurrentConns(w, r, db, pm)
 	}))
-	return securityHeadersMiddleware(authFailureLimitMiddleware(cfg, mux))
+	return securityHeadersMiddleware(authFailureLimitMiddleware(cfg, pluginInstallationPolicyMiddleware(cfg, mux)))
 }
 
 func apiListenAddr(cfg *Config) string {
@@ -791,7 +797,7 @@ func authorizedAPIRequest(cfg *Config, r *http.Request) bool {
 	return expected != "" && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
-func handleInterfaces(w http.ResponseWriter, r *http.Request) {
+func handleInterfaces(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -801,6 +807,9 @@ func handleInterfaces(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if db != nil && r.URL.Query().Get("include_internal") != "true" {
+		ifaces = userInterfaceInfos(db, ifaces, newPluginControlNetAdmin().LinkGet)
 	}
 	writeJSON(w, http.StatusOK, ifaces)
 }

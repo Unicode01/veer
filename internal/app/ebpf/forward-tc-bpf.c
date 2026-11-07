@@ -12,6 +12,7 @@
 #include "include/bpf_endian.h"
 #include "include/bpf_helpers.h"
 #include "include/forward_addr_helpers.h"
+#include "include/forward_flow_time.h"
 
 #define ICMP_ECHOREPLY 0
 #define ICMP_ECHO 8
@@ -509,6 +510,7 @@ struct tc_plugin_metric_value {
 #define FORWARD_RULE_FLAG_PASSTHROUGH 0x10
 #define FORWARD_RULE_FLAG_FULL_CONE 0x20
 #define FORWARD_RULE_FLAG_PREPARED_L2 0x40
+#define FORWARD_RULE_FLAG_DROP 0x80
 #define FORWARD_TCP_FLOW_REFRESH_NS (30ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_REFRESH_NS (1ULL * 1000000000ULL)
 #define FORWARD_ICMP_FLOW_IDLE_NS (30ULL * 1000000000ULL)
@@ -659,11 +661,34 @@ struct bpf_map_def SEC("maps") scratch_flow_key_v4 = {
 	.max_entries = 1,
 };
 
+/*
+ * Plugins share tc_prog_chain_v4 and only tail-call its continue slots, so
+ * its 111-entry layout stays part of plugin ABI v2. Plugin hooks themselves
+ * live in tc_plugin_hooks_v4, which plugins never reference:
+ *   slot = bank * BANK_SLOTS + stage * STAGE_CAPACITY + position
+ * STAGE_CAPACITY bounds hooks per stage host-wide. Each packet only walks the
+ * hooks of its own interface, which admission keeps at or below
+ * STAGE_INTERFACE_MAX per stage, the bound that the tail-call budget sets.
+ */
+#define FORWARD_TC_PLUGIN_STAGE_CAPACITY 32
+#define FORWARD_TC_PLUGIN_STAGE_INTERFACE_MAX 8
+#define FORWARD_TC_PLUGIN_STAGE_COUNT 6
+#define FORWARD_TC_PLUGIN_BANK_SLOTS (FORWARD_TC_PLUGIN_STAGE_CAPACITY * FORWARD_TC_PLUGIN_STAGE_COUNT)
+#define FORWARD_TC_PLUGIN_HOOK_SLOTS (2 * FORWARD_TC_PLUGIN_BANK_SLOTS)
+#define FORWARD_TC_PLUGIN_METRIC_ENTRIES FORWARD_TC_PLUGIN_BANK_SLOTS
+
 struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
 	.max_entries = 111,
+};
+
+struct bpf_map_def SEC("maps") tc_plugin_hooks_v4 = {
+	.type = BPF_MAP_TYPE_PROG_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = FORWARD_TC_PLUGIN_HOOK_SLOTS,
 };
 
 struct bpf_map_def SEC("maps") tc_dispatch_scratch_v4 = {
@@ -673,11 +698,21 @@ struct bpf_map_def SEC("maps") tc_dispatch_scratch_v4 = {
 	.max_entries = 1,
 };
 
+/*
+ * Key 0 mirrors the active config and is read only for active_bank; keys 1
+ * and 2 hold the full config of bank 0 and bank 1. Userspace writes the
+ * inactive bank before flipping key 0, so a packet never mixes the counts and
+ * masks of two banks while an update is copied into the map.
+ */
+#define FORWARD_TC_PLUGIN_CONFIG_HEADER_KEY 0
+#define FORWARD_TC_PLUGIN_CONFIG_BANK_BASE 1
+#define FORWARD_TC_PLUGIN_CONFIG_ENTRIES 3
+
 struct bpf_map_def SEC("maps") tc_plugin_config_v4 = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_plugin_config_v4),
-	.max_entries = 1,
+	.max_entries = FORWARD_TC_PLUGIN_CONFIG_ENTRIES,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_interfaces_v4 = {
@@ -740,7 +775,7 @@ struct bpf_map_def SEC("maps") tc_plugin_metrics = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct tc_plugin_metric_value),
-	.max_entries = 48,
+	.max_entries = FORWARD_TC_PLUGIN_METRIC_ENTRIES,
 };
 
 struct bpf_map_def SEC("maps") rules_v6 = {
@@ -880,38 +915,33 @@ enum {
 	FORWARD_TC_PROG_V4_FORWARD_CORE = 7,
 	FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE = 8,
 	FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE = 9,
-	FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE = 10,
-	FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX = 8,
-	FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_BASE = 18,
-	FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX = 8,
+	/* 10-25: hook slots of plugin ABI v2, now unused (see tc_plugin_hooks_v4). */
 	FORWARD_TC_PROG_V4_REPLY_CORE = 26,
 	FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_CONTINUE = 27,
 	FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_CONTINUE = 28,
-	FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE = 29,
-	FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX = 8,
-	FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_BASE = 37,
-	FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX = 8,
-	FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_FORWARD_BASE = 45,
-	FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_LOOKUP_BASE = 53,
-	FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_REPLY_BASE = 61,
-	FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_REPLY_BASE = 69,
+	/* 29-76: hook slots of plugin ABI v2, now unused. */
 	FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_CONTINUE = 77,
 	FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_CONTINUE = 78,
-	FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_BASE = 79,
-	FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_MAX = 8,
-	FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_APPLY_BASE = 87,
-	FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_BASE = 95,
-	FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_MAX = 8,
-	FORWARD_TC_PROG_V4_PLUGIN_BANK1_REPLY_APPLY_BASE = 103,
+	/* 79-110: hook slots of plugin ABI v2, now unused. */
 };
 
 enum {
-	FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE = 0,
-	FORWARD_TC_PLUGIN_METRIC_POST_LOOKUP_BASE = 8,
-	FORWARD_TC_PLUGIN_METRIC_POST_APPLY_BASE = 16,
-	FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE = 24,
-	FORWARD_TC_PLUGIN_METRIC_POST_REPLY_BASE = 32,
-	FORWARD_TC_PLUGIN_METRIC_REPLY_APPLY_BASE = 40,
+	FORWARD_TC_PLUGIN_STAGE_PRE_FORWARD = 0,
+	FORWARD_TC_PLUGIN_STAGE_POST_LOOKUP = 1,
+	FORWARD_TC_PLUGIN_STAGE_POST_APPLY = 2,
+	FORWARD_TC_PLUGIN_STAGE_PRE_REPLY = 3,
+	FORWARD_TC_PLUGIN_STAGE_POST_REPLY = 4,
+	FORWARD_TC_PLUGIN_STAGE_REPLY_APPLY = 5,
+};
+
+/* Metrics are indexed like bank 0 of tc_plugin_hooks_v4: stage * capacity + position. */
+enum {
+	FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE = FORWARD_TC_PLUGIN_STAGE_PRE_FORWARD * FORWARD_TC_PLUGIN_STAGE_CAPACITY,
+	FORWARD_TC_PLUGIN_METRIC_POST_LOOKUP_BASE = FORWARD_TC_PLUGIN_STAGE_POST_LOOKUP * FORWARD_TC_PLUGIN_STAGE_CAPACITY,
+	FORWARD_TC_PLUGIN_METRIC_POST_APPLY_BASE = FORWARD_TC_PLUGIN_STAGE_POST_APPLY * FORWARD_TC_PLUGIN_STAGE_CAPACITY,
+	FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE = FORWARD_TC_PLUGIN_STAGE_PRE_REPLY * FORWARD_TC_PLUGIN_STAGE_CAPACITY,
+	FORWARD_TC_PLUGIN_METRIC_POST_REPLY_BASE = FORWARD_TC_PLUGIN_STAGE_POST_REPLY * FORWARD_TC_PLUGIN_STAGE_CAPACITY,
+	FORWARD_TC_PLUGIN_METRIC_REPLY_APPLY_BASE = FORWARD_TC_PLUGIN_STAGE_REPLY_APPLY * FORWARD_TC_PLUGIN_STAGE_CAPACITY,
 };
 
 static __always_inline struct kernel_occupancy_value_v4 *lookup_kernel_occupancy(void);
@@ -1035,8 +1065,13 @@ static __always_inline struct tc_plugin_ctx_v6 *lookup_tc_plugin_ctx_v6(void)
 
 static __always_inline struct tc_plugin_config_v4 *lookup_tc_plugin_config_v4(void)
 {
-	__u32 key = 0;
+	struct tc_plugin_config_v4 *header;
+	__u32 key = FORWARD_TC_PLUGIN_CONFIG_HEADER_KEY;
 
+	header = bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
+	if (!header)
+		return 0;
+	key = FORWARD_TC_PLUGIN_CONFIG_BANK_BASE + (header->active_bank & 1);
 	return bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
 }
 
@@ -1054,7 +1089,7 @@ static __always_inline void tc_plugin_metric_attempt(struct __sk_buff *skb, __u3
 	__u32 key = base + index;
 	struct tc_plugin_metric_value *value;
 
-	if (index >= 8 || key >= 48)
+	if (index >= FORWARD_TC_PLUGIN_STAGE_CAPACITY || key >= FORWARD_TC_PLUGIN_METRIC_ENTRIES)
 		return;
 	value = bpf_map_lookup_elem(&tc_plugin_metrics, &key);
 	if (!value)
@@ -1078,7 +1113,7 @@ static __always_inline void tc_plugin_metric_continue(__u32 base, __u32 chain_in
 		return;
 	index = chain_index - 1;
 	key = base + index;
-	if (index >= 8 || key >= 48)
+	if (index >= FORWARD_TC_PLUGIN_STAGE_CAPACITY || key >= FORWARD_TC_PLUGIN_METRIC_ENTRIES)
 		return;
 	value = bpf_map_lookup_elem(&tc_plugin_metrics, &key);
 	if (!value)
@@ -1094,7 +1129,7 @@ static __always_inline void tc_plugin_metric_tail_call_miss(__u32 base, __u32 in
 	__u32 key = base + index;
 	struct tc_plugin_metric_value *value;
 
-	if (index >= 8 || key >= 48)
+	if (index >= FORWARD_TC_PLUGIN_STAGE_CAPACITY || key >= FORWARD_TC_PLUGIN_METRIC_ENTRIES)
 		return;
 	value = bpf_map_lookup_elem(&tc_plugin_metrics, &key);
 	if (!value)
@@ -1103,6 +1138,63 @@ static __always_inline void tc_plugin_metric_tail_call_miss(__u32 base, __u32 in
 		value->tail_call_misses_v6++;
 	else
 		value->tail_call_misses_v4++;
+}
+
+static __always_inline __u32 tc_plugin_hook_slot(__u32 bank, __u32 stage, __u32 position)
+{
+	return (bank & 1) * FORWARD_TC_PLUGIN_BANK_SLOTS + stage * FORWARD_TC_PLUGIN_STAGE_CAPACITY + position;
+}
+
+/*
+ * Position of the lowest set bit of a non-zero value. It is branch-free on
+ * purpose: a branch per bit would make the verifier fork on every hook.
+ * The empty asm statements hide the value from the optimizer. Without them
+ * LLVM 18 folds the sequence into cttz/ctpop, which its BPF backend cannot
+ * lower ("unimplemented opcode").
+ */
+static __always_inline __u32 tc_plugin_lowest_set_bit(__u32 value)
+{
+	__u32 below = (value & (0U - value)) - 1;
+
+	asm volatile("" : "+r"(below));
+	below = below - ((below >> 1) & 0x55555555U);
+	asm volatile("" : "+r"(below));
+	below = (below & 0x33333333U) + ((below >> 2) & 0x33333333U);
+	below = (below + (below >> 4)) & 0x0f0f0f0fU;
+	return (below * 0x01010101U) >> 24;
+}
+
+/*
+ * Tail-calls the next hook of one stage after *chain_index. Each iteration
+ * consumes one set bit of mask, and admission keeps the bits set for one
+ * interface at or below STAGE_INTERFACE_MAX, so the loop is bounded by that
+ * per-interface limit instead of by the host-wide stage capacity. A hook
+ * whose slot is empty is skipped, as before.
+ */
+static __always_inline void tc_plugin_run_stage(struct __sk_buff *skb, __u32 *chain_index, __u32 mask, __u32 bank, __u32 stage, int ipv6)
+{
+	__u32 metric_base = stage * FORWARD_TC_PLUGIN_STAGE_CAPACITY;
+	int i;
+
+#pragma unroll
+	for (i = 0; i < FORWARD_TC_PLUGIN_STAGE_INTERFACE_MAX; i++) {
+		__u32 next = *chain_index;
+		__u32 pending;
+		__u32 position;
+
+		if (next >= FORWARD_TC_PLUGIN_STAGE_CAPACITY)
+			break;
+		pending = mask & ~((1U << next) - 1);
+		if (pending == 0)
+			break;
+		position = tc_plugin_lowest_set_bit(pending);
+		if (position >= FORWARD_TC_PLUGIN_STAGE_CAPACITY)
+			break;
+		*chain_index = position + 1;
+		tc_plugin_metric_attempt(skb, metric_base, position, ipv6);
+		bpf_tail_call(skb, &tc_plugin_hooks_v4, tc_plugin_hook_slot(bank, stage, position));
+		tc_plugin_metric_tail_call_miss(metric_base, position, ipv6);
+	}
 }
 
 #define FORWARD_TC_PLUGIN_ATTACH_INGRESS 0
@@ -3507,7 +3599,7 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 		new_session = 1;
 	} else if (is_datagram_proto(ctx->proto)) {
 		now = bpf_ktime_get_ns();
-		if (existing_flow->last_seen_ns == 0 || now < existing_flow->last_seen_ns || (now - existing_flow->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, existing_flow->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			flow_value->rule_id = rule->rule_id;
 			flow_value->rule_revision = rule->revision;
 			flow_value->session_id = new_flow_session_id();
@@ -4288,7 +4380,7 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 
 	if (is_datagram_proto(ctx->proto)) {
 		now = bpf_ktime_get_ns();
-		if (flow_value->last_seen_ns == 0 || now < flow_value->last_seen_ns || (now - flow_value->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, flow_value->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			if (delete_flow_v4_session_in_bank(bank, flow_key, flow_value->session_id) == 0) {
 				if ((flow_value->flags & FORWARD_FLOW_FLAG_COUNTED) != 0)
 					drop_rule_datagram_nat(flow_value->rule_id, ctx->proto);
@@ -4396,7 +4488,7 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 	__builtin_memset(front_value, 0, sizeof(*front_value));
 
 	if (is_datagram_proto(ctx->proto)) {
-		if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, reply_value->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			delete_fullnat_state(bank, reply_key, reply_value, ctx->proto);
 			return TC_ACT_OK;
 		}
@@ -4752,7 +4844,7 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 	*reply_value = *flow;
 
 	if (is_datagram_proto(ctx->proto)) {
-		if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) > FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto)) {
+		if (forward_flow_idle_expired(now, reply_value->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			delete_fullnat_state_v6(bank, reply_key, reply_value, ctx->proto);
 			return TC_ACT_OK;
 		}
@@ -4885,6 +4977,8 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, rule))
 		return TC_ACT_OK;
+	if (rule->flags & FORWARD_RULE_FLAG_DROP)
+		return TC_ACT_SHOT;
 	if (is_egress_nat_rule(rule)) {
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return TC_ACT_UNSPEC;
@@ -5083,6 +5177,8 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 		if (egress_nat_dst_mac_mismatch(skb, rule))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+		if (rule->flags & FORWARD_RULE_FLAG_DROP)
+			return finish_forward_pipeline_v4(skb, TC_ACT_SHOT);
 		if (!is_full_cone_egress_nat_rule(rule)) {
 			/* Keep established egress NAT sessions on the current program across
 			 * hot-restart handoff so they don't depend on a successor-only tail call.
@@ -5170,31 +5266,29 @@ static __always_inline int dispatch_forward_ingress_pipeline_core_v4(struct __sk
 
 /* Skip the empty continuation hop; the plugin still returns through the normal continuation. */
 static __always_inline int try_tail_call_single_pre_plugin_v4(struct __sk_buff *skb,
-	struct tc_dispatch_ctx_v4 *dispatch, __u32 metric_base, __u32 bank0_base, __u32 bank1_base)
+	struct tc_dispatch_ctx_v4 *dispatch, __u32 stage)
 {
-	__u32 slot_base;
+	__u32 metric_base = stage * FORWARD_TC_PLUGIN_STAGE_CAPACITY;
 
 	if (!dispatch || dispatch->plugin_pre_count != 1 || dispatch->plugin_pre_mask != 1)
 		return 0;
 	dispatch->plugin_chain_index = 1;
-	slot_base = dispatch->plugin_chain_bank ? bank1_base : bank0_base;
 	tc_plugin_metric_attempt(skb, metric_base, 0, 0);
-	bpf_tail_call(skb, &tc_prog_chain_v4, slot_base);
+	bpf_tail_call(skb, &tc_plugin_hooks_v4, tc_plugin_hook_slot(dispatch->plugin_chain_bank, stage, 0));
 	tc_plugin_metric_tail_call_miss(metric_base, 0, 0);
 	return 1;
 }
 
 static __always_inline int try_tail_call_single_pre_plugin_v6(struct __sk_buff *skb,
-	struct tc_dispatch_ctx_v6 *dispatch, __u32 metric_base, __u32 bank0_base, __u32 bank1_base)
+	struct tc_dispatch_ctx_v6 *dispatch, __u32 stage)
 {
-	__u32 slot_base;
+	__u32 metric_base = stage * FORWARD_TC_PLUGIN_STAGE_CAPACITY;
 
 	if (!dispatch || dispatch->plugin_pre_count != 1 || dispatch->plugin_pre_mask != 1)
 		return 0;
 	dispatch->plugin_chain_index = 1;
-	slot_base = dispatch->plugin_chain_bank ? bank1_base : bank0_base;
 	tc_plugin_metric_attempt(skb, metric_base, 0, 1);
-	bpf_tail_call(skb, &tc_prog_chain_v4, slot_base);
+	bpf_tail_call(skb, &tc_plugin_hooks_v4, tc_plugin_hook_slot(dispatch->plugin_chain_bank, stage, 0));
 	tc_plugin_metric_tail_call_miss(metric_base, 0, 1);
 	return 1;
 }
@@ -5211,10 +5305,7 @@ static __always_inline int dispatch_forward_pipeline_v4(struct __sk_buff *skb, _
 			clear_tc_plugin_ctx_v4();
 		}
 		if (dispatch->plugin_pre_mask != 0 &&
-		    !try_tail_call_single_pre_plugin_v4(skb, dispatch,
-			    FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE,
-			    FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE,
-			    FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_FORWARD_BASE)) {
+		    !try_tail_call_single_pre_plugin_v4(skb, dispatch, FORWARD_TC_PLUGIN_STAGE_PRE_FORWARD)) {
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE);
 		}
 		return dispatch_forward_ingress_pipeline_core_v4(skb);
@@ -5227,25 +5318,11 @@ static __always_inline int dispatch_forward_pipeline_v4(struct __sk_buff *skb, _
 static __always_inline int dispatch_plugin_pre_forward_continue_v4(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (dispatch) {
 		tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE, dispatch->plugin_chain_index, 0);
-		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_FORWARD_BASE : FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE;
-#pragma unroll
-		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX; i++) {
-			index = dispatch->plugin_chain_index;
-			if (index >= dispatch->plugin_pre_count || index >= FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX)
-				break;
-			dispatch->plugin_chain_index = index + 1;
-			if ((dispatch->plugin_pre_mask & (1U << index)) != 0) {
-				tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE, index, 0);
-				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-				tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE, index, 0);
-			}
-		}
+		tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_pre_mask,
+			dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_PRE_FORWARD, 0);
 	}
 	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_FORWARD_CORE);
 	return dispatch_forward_ingress_pipeline_core_v4(skb);
@@ -5254,25 +5331,11 @@ static __always_inline int dispatch_plugin_pre_forward_continue_v4(struct __sk_b
 static __always_inline int dispatch_plugin_post_lookup_continue_v4(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (dispatch) {
 		tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_POST_LOOKUP_BASE, dispatch->plugin_chain_index, 0);
-		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_LOOKUP_BASE : FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_BASE;
-#pragma unroll
-		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX; i++) {
-			index = dispatch->plugin_chain_index;
-			if (index >= dispatch->plugin_post_count || index >= FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX)
-				break;
-			dispatch->plugin_chain_index = index + 1;
-			if ((dispatch->plugin_post_mask & (1U << index)) != 0) {
-				tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_POST_LOOKUP_BASE, index, 0);
-				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-				tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_POST_LOOKUP_BASE, index, 0);
-			}
-		}
+		tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_post_mask,
+			dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_POST_LOOKUP, 0);
 	}
 	return dispatch_forward_ingress_v4_core_prepared(skb);
 }
@@ -5280,26 +5343,12 @@ static __always_inline int dispatch_plugin_post_lookup_continue_v4(struct __sk_b
 static __always_inline int dispatch_plugin_post_apply_continue_v4(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (!dispatch)
 		return TC_ACT_UNSPEC;
 	tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_POST_APPLY_BASE, dispatch->plugin_chain_index, 0);
-	slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_APPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_BASE;
-#pragma unroll
-	for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_MAX; i++) {
-		index = dispatch->plugin_chain_index;
-		if (index >= dispatch->plugin_apply_count || index >= FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_MAX)
-			break;
-		dispatch->plugin_chain_index = index + 1;
-		if ((dispatch->plugin_apply_mask & (1U << index)) != 0) {
-			tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_POST_APPLY_BASE, index, 0);
-			bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-			tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_POST_APPLY_BASE, index, 0);
-		}
-	}
+	tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_apply_mask,
+		dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_POST_APPLY, 0);
 	return dispatch->plugin_final_action;
 }
 
@@ -5409,10 +5458,7 @@ static __always_inline int dispatch_reply_pipeline_v4(struct __sk_buff *skb, __u
 			clear_tc_plugin_ctx_v4();
 		}
 		if (dispatch->plugin_pre_mask != 0 &&
-		    !try_tail_call_single_pre_plugin_v4(skb, dispatch,
-			    FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE,
-			    FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE,
-			    FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_REPLY_BASE)) {
+		    !try_tail_call_single_pre_plugin_v4(skb, dispatch, FORWARD_TC_PLUGIN_STAGE_PRE_REPLY)) {
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_CONTINUE);
 		}
 		return dispatch_reply_ingress_pipeline_core_v4(skb);
@@ -5425,25 +5471,11 @@ static __always_inline int dispatch_reply_pipeline_v4(struct __sk_buff *skb, __u
 static __always_inline int dispatch_plugin_pre_reply_continue_v4(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (dispatch) {
 		tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE, dispatch->plugin_chain_index, 0);
-		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_REPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE;
-#pragma unroll
-		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX; i++) {
-			index = dispatch->plugin_chain_index;
-			if (index >= dispatch->plugin_pre_count || index >= FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX)
-				break;
-			dispatch->plugin_chain_index = index + 1;
-			if ((dispatch->plugin_pre_mask & (1U << index)) != 0) {
-				tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE, index, 0);
-				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-				tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE, index, 0);
-			}
-		}
+		tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_pre_mask,
+			dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_PRE_REPLY, 0);
 	}
 	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_REPLY_CORE);
 	return dispatch_reply_ingress_pipeline_core_v4(skb);
@@ -5452,25 +5484,11 @@ static __always_inline int dispatch_plugin_pre_reply_continue_v4(struct __sk_buf
 static __always_inline int dispatch_plugin_post_reply_continue_v4(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (dispatch) {
 		tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_POST_REPLY_BASE, dispatch->plugin_chain_index, 0);
-		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_REPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_BASE;
-#pragma unroll
-		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX; i++) {
-			index = dispatch->plugin_chain_index;
-			if (index >= dispatch->plugin_post_count || index >= FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX)
-				break;
-			dispatch->plugin_chain_index = index + 1;
-			if ((dispatch->plugin_post_mask & (1U << index)) != 0) {
-				tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_POST_REPLY_BASE, index, 0);
-				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-				tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_POST_REPLY_BASE, index, 0);
-			}
-		}
+		tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_post_mask,
+			dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_POST_REPLY, 0);
 	}
 	return dispatch_reply_ingress_v4_core_prepared(skb);
 }
@@ -5478,26 +5496,12 @@ static __always_inline int dispatch_plugin_post_reply_continue_v4(struct __sk_bu
 static __always_inline int dispatch_plugin_reply_apply_continue_v4(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (!dispatch)
 		return TC_ACT_UNSPEC;
 	tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_REPLY_APPLY_BASE, dispatch->plugin_chain_index, 0);
-	slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_REPLY_APPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_BASE;
-#pragma unroll
-	for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_MAX; i++) {
-		index = dispatch->plugin_chain_index;
-		if (index >= dispatch->plugin_apply_count || index >= FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_MAX)
-			break;
-		dispatch->plugin_chain_index = index + 1;
-		if ((dispatch->plugin_apply_mask & (1U << index)) != 0) {
-			tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_REPLY_APPLY_BASE, index, 0);
-			bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-			tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_REPLY_APPLY_BASE, index, 0);
-		}
-	}
+	tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_apply_mask,
+		dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_REPLY_APPLY, 0);
 	return dispatch->plugin_final_action;
 }
 
@@ -5686,10 +5690,7 @@ static __always_inline int dispatch_forward_pipeline_v6(struct __sk_buff *skb, _
 		if (dispatch->plugin_pre_mask != 0 || dispatch->plugin_core_enable == 0)
 			clear_tc_plugin_ctx_v6();
 		if (dispatch->plugin_pre_mask != 0 &&
-		    !try_tail_call_single_pre_plugin_v6(skb, dispatch,
-			    FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE,
-			    FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE,
-			    FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_FORWARD_BASE))
+		    !try_tail_call_single_pre_plugin_v6(skb, dispatch, FORWARD_TC_PLUGIN_STAGE_PRE_FORWARD))
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE);
 		return dispatch_forward_ingress_pipeline_core_v6(skb);
 	}
@@ -5701,25 +5702,11 @@ static __always_inline int dispatch_forward_pipeline_v6(struct __sk_buff *skb, _
 static __always_inline int dispatch_plugin_pre_forward_continue_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (dispatch) {
 		tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE, dispatch->plugin_chain_index, 1);
-		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_FORWARD_BASE : FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_BASE;
-#pragma unroll
-		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX; i++) {
-			index = dispatch->plugin_chain_index;
-			if (index >= dispatch->plugin_pre_count || index >= FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_MAX)
-				break;
-			dispatch->plugin_chain_index = index + 1;
-			if ((dispatch->plugin_pre_mask & (1U << index)) != 0) {
-				tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE, index, 1);
-				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-				tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_PRE_FORWARD_BASE, index, 1);
-			}
-		}
+		tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_pre_mask,
+			dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_PRE_FORWARD, 1);
 	}
 	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_FORWARD_CORE);
 	return dispatch_forward_ingress_pipeline_core_v6(skb);
@@ -5728,25 +5715,11 @@ static __always_inline int dispatch_plugin_pre_forward_continue_v6(struct __sk_b
 static __always_inline int dispatch_plugin_post_lookup_continue_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (dispatch) {
 		tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_POST_LOOKUP_BASE, dispatch->plugin_chain_index, 1);
-		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_LOOKUP_BASE : FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_BASE;
-#pragma unroll
-		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX; i++) {
-			index = dispatch->plugin_chain_index;
-			if (index >= dispatch->plugin_post_count || index >= FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_MAX)
-				break;
-			dispatch->plugin_chain_index = index + 1;
-			if ((dispatch->plugin_post_mask & (1U << index)) != 0) {
-				tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_POST_LOOKUP_BASE, index, 1);
-				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-				tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_POST_LOOKUP_BASE, index, 1);
-			}
-		}
+		tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_post_mask,
+			dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_POST_LOOKUP, 1);
 	}
 	return dispatch_forward_ingress_v6_core_prepared(skb);
 }
@@ -5754,26 +5727,12 @@ static __always_inline int dispatch_plugin_post_lookup_continue_v6(struct __sk_b
 static __always_inline int dispatch_plugin_post_apply_continue_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (!dispatch)
 		return TC_ACT_UNSPEC;
 	tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_POST_APPLY_BASE, dispatch->plugin_chain_index, 1);
-	slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_APPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_BASE;
-#pragma unroll
-	for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_MAX; i++) {
-		index = dispatch->plugin_chain_index;
-		if (index >= dispatch->plugin_apply_count || index >= FORWARD_TC_PROG_V4_PLUGIN_POST_APPLY_MAX)
-			break;
-		dispatch->plugin_chain_index = index + 1;
-		if ((dispatch->plugin_apply_mask & (1U << index)) != 0) {
-			tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_POST_APPLY_BASE, index, 1);
-			bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-			tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_POST_APPLY_BASE, index, 1);
-		}
-	}
+	tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_apply_mask,
+		dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_POST_APPLY, 1);
 	return dispatch->plugin_final_action;
 }
 
@@ -5873,10 +5832,7 @@ static __always_inline int dispatch_reply_pipeline_v6(struct __sk_buff *skb, __u
 		if (dispatch->plugin_pre_mask != 0 || dispatch->plugin_core_enable == 0)
 			clear_tc_plugin_ctx_v6();
 		if (dispatch->plugin_pre_mask != 0 &&
-		    !try_tail_call_single_pre_plugin_v6(skb, dispatch,
-			    FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE,
-			    FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE,
-			    FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_REPLY_BASE))
+		    !try_tail_call_single_pre_plugin_v6(skb, dispatch, FORWARD_TC_PLUGIN_STAGE_PRE_REPLY))
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_CONTINUE);
 		return dispatch_reply_ingress_pipeline_core_v6(skb);
 	}
@@ -5888,25 +5844,11 @@ static __always_inline int dispatch_reply_pipeline_v6(struct __sk_buff *skb, __u
 static __always_inline int dispatch_plugin_pre_reply_continue_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (dispatch) {
 		tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE, dispatch->plugin_chain_index, 1);
-		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_PRE_REPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_BASE;
-#pragma unroll
-		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX; i++) {
-			index = dispatch->plugin_chain_index;
-			if (index >= dispatch->plugin_pre_count || index >= FORWARD_TC_PROG_V4_PLUGIN_PRE_REPLY_MAX)
-				break;
-			dispatch->plugin_chain_index = index + 1;
-			if ((dispatch->plugin_pre_mask & (1U << index)) != 0) {
-				tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE, index, 1);
-				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-				tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_PRE_REPLY_BASE, index, 1);
-			}
-		}
+		tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_pre_mask,
+			dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_PRE_REPLY, 1);
 	}
 	bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_REPLY_CORE);
 	return dispatch_reply_ingress_pipeline_core_v6(skb);
@@ -5915,25 +5857,11 @@ static __always_inline int dispatch_plugin_pre_reply_continue_v6(struct __sk_buf
 static __always_inline int dispatch_plugin_post_reply_continue_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (dispatch) {
 		tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_POST_REPLY_BASE, dispatch->plugin_chain_index, 1);
-		slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_POST_REPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_BASE;
-#pragma unroll
-		for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX; i++) {
-			index = dispatch->plugin_chain_index;
-			if (index >= dispatch->plugin_post_count || index >= FORWARD_TC_PROG_V4_PLUGIN_POST_REPLY_MAX)
-				break;
-			dispatch->plugin_chain_index = index + 1;
-			if ((dispatch->plugin_post_mask & (1U << index)) != 0) {
-				tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_POST_REPLY_BASE, index, 1);
-				bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-				tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_POST_REPLY_BASE, index, 1);
-			}
-		}
+		tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_post_mask,
+			dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_POST_REPLY, 1);
 	}
 	return dispatch_reply_ingress_v6_core_prepared(skb);
 }
@@ -5941,26 +5869,12 @@ static __always_inline int dispatch_plugin_post_reply_continue_v6(struct __sk_bu
 static __always_inline int dispatch_plugin_reply_apply_continue_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
-	__u32 index;
-	__u32 slot_base;
-	int i;
 
 	if (!dispatch)
 		return TC_ACT_UNSPEC;
 	tc_plugin_metric_continue(FORWARD_TC_PLUGIN_METRIC_REPLY_APPLY_BASE, dispatch->plugin_chain_index, 1);
-	slot_base = dispatch->plugin_chain_bank ? FORWARD_TC_PROG_V4_PLUGIN_BANK1_REPLY_APPLY_BASE : FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_BASE;
-#pragma unroll
-	for (i = 0; i < FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_MAX; i++) {
-		index = dispatch->plugin_chain_index;
-		if (index >= dispatch->plugin_apply_count || index >= FORWARD_TC_PROG_V4_PLUGIN_REPLY_APPLY_MAX)
-			break;
-		dispatch->plugin_chain_index = index + 1;
-		if ((dispatch->plugin_apply_mask & (1U << index)) != 0) {
-			tc_plugin_metric_attempt(skb, FORWARD_TC_PLUGIN_METRIC_REPLY_APPLY_BASE, index, 1);
-			bpf_tail_call(skb, &tc_prog_chain_v4, slot_base + index);
-			tc_plugin_metric_tail_call_miss(FORWARD_TC_PLUGIN_METRIC_REPLY_APPLY_BASE, index, 1);
-		}
-	}
+	tc_plugin_run_stage(skb, &dispatch->plugin_chain_index, dispatch->plugin_apply_mask,
+		dispatch->plugin_chain_bank, FORWARD_TC_PLUGIN_STAGE_REPLY_APPLY, 1);
 	return dispatch->plugin_final_action;
 }
 

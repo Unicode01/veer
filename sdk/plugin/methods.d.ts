@@ -64,6 +64,7 @@ declare global {
     "net.link.delete": typeof net.link.delete;
     "net.link.ensureBridge": typeof net.link.ensureBridge;
     "net.link.ensureDummy": typeof net.link.ensureDummy;
+    "net.link.ensureHelperWAN": typeof net.link.ensureHelperWAN;
     "net.link.ensureMacvlan": typeof net.link.ensureMacvlan;
     "net.link.ensureVLAN": typeof net.link.ensureVLAN;
     "net.link.ensureVRF": typeof net.link.ensureVRF;
@@ -149,6 +150,17 @@ declare global {
     "plugins.services.call": typeof plugins.services.call;
     "plugins.services.list": typeof plugins.services.list;
     "plugins.services.resolve": typeof plugins.services.resolve;
+    "process.binaryInstall": typeof process.binaryInstall;
+    "process.binaryRemove": typeof process.binaryRemove;
+    "process.binarySelect": typeof process.binarySelect;
+    "process.binaryStatus": typeof process.binaryStatus;
+    "process.exec": typeof process.exec;
+    "process.list": typeof process.list;
+    "process.logs": typeof process.logs;
+    "process.restart": typeof process.restart;
+    "process.start": typeof process.start;
+    "process.status": typeof process.status;
+    "process.stop": typeof process.stop;
     "resources.delete": typeof resources.delete;
     "resources.get": typeof resources.get;
     "resources.list": typeof resources.list;

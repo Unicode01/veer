@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,6 +61,7 @@ func TestPluginNetPolicyProviderLinuxIntegration(t *testing.T) {
 	if !vrf.Created || vrf.Link.VRFTable != 12001 {
 		t.Fatalf("vrf result = %+v", vrf)
 	}
+	assertPluginOwnedLinkMACStable(t, admin, vrf.Link)
 	if _, err := admin.LinkSetMaster(pluginControlNetMasterRequest{Link: vlanName, Master: vrfName, Up: true}); err != nil {
 		t.Fatalf("attach vlan to vrf: %v", err)
 	}
@@ -453,6 +456,9 @@ func runPluginNamespaceTunTapCrashRecoveryHelper() error {
 
 func TestPluginNetTransactionCrashRecoveryLinuxIntegration(t *testing.T) {
 	requirePluginLinuxIntegration(t)
+	if runPluginIntegrationInIsolatedNetNS(t) {
+		return
+	}
 	interfaceName := pluginIntegrationLinkName("fwcr")
 	neighborInterface := pluginIntegrationLinkName("fwcn")
 	defer deletePluginIntegrationLinkQuietly(t, interfaceName)
@@ -696,6 +702,11 @@ func runPluginNetTransactionCrashRecoveryHelper() error {
 	if err := markPluginNetTransactionStarted(db, ruleTransaction, 1); err != nil {
 		return err
 	}
+	// Exercise recovery of a genuinely changed rule. RuleReplace keeps an
+	// already matching selector installed, including its original protocol.
+	if err := admin.RuleDelete(rule); err != nil {
+		return err
+	}
 	if err := admin.RuleReplace(rule); err != nil {
 		return err
 	}
@@ -779,6 +790,9 @@ func assertPluginNetPolicyTransactionState(
 
 func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 	requirePluginLinuxIntegration(t)
+	if runPluginIntegrationInIsolatedNetNS(t) {
+		return
+	}
 
 	plugin, db, rt := loadPluginIntegrationControlRuntimeForTest(t, "wan_core")
 	defer rt.Close()
@@ -847,6 +861,18 @@ func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 	}
 	assertPluginIntegrationDummy(t, local, 1400)
 	assertPluginIntegrationLinkLacksCIDR(t, local, "169.254.240.2/32")
+	ownedLink, err := store.PluginOwnedResourceOrNil(db, pluginOwnedResourceTypeLink, local)
+	if err != nil || ownedLink == nil {
+		t.Fatalf("repaired WAN link ownership = %+v, err=%v", ownedLink, err)
+	}
+	var claim pluginOwnedLinkClaim
+	if err := json.Unmarshal([]byte(ownedLink.MetadataJSON), &claim); err != nil {
+		t.Fatal(err)
+	}
+	currentLink, err := rt.netAdmin.LinkGet(local)
+	if err != nil || !pluginOwnedLinkIdentityMatches(currentLink, claim.IfIndex, claim.Kind, claim.MAC) {
+		t.Fatalf("repaired WAN identity = %+v, recorded = %+v, err=%v", currentLink, claim, err)
+	}
 
 	action := pluginActionByIDForTest(t, plugin, "teardown")
 	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(fmt.Sprintf(`{"wan_id":"itest","local_interface":%q}`, local))); err != nil {
@@ -863,6 +889,105 @@ func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 	if timers := rt.pluginTimerList("wan_core"); len(timers) != 0 {
 		t.Fatalf("wan_core timers after teardown = %+v, want none", timers)
 	}
+
+	t.Run("shared_ipv4_peer", func(t *testing.T) {
+		admin := linuxPluginControlNetAdmin{}
+		ambient := pluginIntegrationLinkName("veera")
+		defer deletePluginIntegrationLinkQuietly(t, ambient)
+		if _, err := admin.LinkEnsureDummy(pluginControlNetDummyRequest{Name: ambient, Up: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.AddrReplace(pluginControlNetAddrRequest{Interface: ambient, CIDR: "169.254.241.1/32"}); err != nil {
+			t.Fatal(err)
+		}
+		peer := "169.254.240.254"
+		if err := admin.RouteReplace(pluginControlNetRouteRequest{Dst: peer + "/32", Dev: ambient, Src: "169.254.241.1", Scope: int(netlink.SCOPE_LINK)}); err != nil {
+			t.Fatal(err)
+		}
+		mainRoutes := func() []netlink.Route {
+			t.Helper()
+			_, dst, _ := net.ParseCIDR(peer + "/32")
+			routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Dst: dst, Table: 254}, netlink.RT_FILTER_DST|netlink.RT_FILTER_TABLE)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return routes
+		}
+		before := mainRoutes()
+		if len(before) != 1 {
+			t.Fatalf("ambient peer route = %+v", before)
+		}
+		assertAmbient := func() {
+			t.Helper()
+			if after := mainRoutes(); !reflect.DeepEqual(before, after) {
+				t.Fatalf("unrelated WAN peer route changed: before=%+v after=%+v", before, after)
+			}
+		}
+		locals := []string{pluginIntegrationLinkName("veerl"), pluginIntegrationLinkName("veerl")}
+		sources := []string{"169.254.240.11", "169.254.240.12"}
+		apply := pluginActionByIDForTest(t, plugin, "apply_session")
+		teardown := pluginActionByIDForTest(t, plugin, "teardown")
+		assertPeer := func(i int) {
+			t.Helper()
+			link, err := netlink.LinkByName(locals[i])
+			if err != nil {
+				t.Fatal(err)
+			}
+			routes, err := netlink.RouteGetWithOptions(net.ParseIP(peer), &netlink.RouteGetOptions{SrcAddr: net.ParseIP(sources[i])})
+			if err != nil || len(routes) != 1 || routes[0].LinkIndex != link.Attrs().Index {
+				t.Fatalf("WAN %d peer lookup = %+v, err=%v, want dev %s", i, routes, err, locals[i])
+			}
+		}
+		for i := range locals {
+			defer deletePluginIntegrationLinkQuietly(t, locals[i])
+			payload := fmt.Sprintf(`{"wan_id":"peer%d","state":"up","usable":true,"driver":"integration","driver_plugin":"test","local_interface":%q,"handoff_mode":"segmented_veth","ipv4":%q,"ipv4_peer":%q}`, i, locals[i], sources[i], peer)
+			if err := rt.ApplyPluginAction(plugin, apply, json.RawMessage(payload)); err != nil {
+				t.Fatal(err)
+			}
+			assertAmbient()
+			for j := 0; j <= i; j++ {
+				assertPeer(j)
+			}
+		}
+		if err := deletePluginIntegrationLink(locals[0]); err != nil {
+			t.Fatal(err)
+		}
+		assertPeer(1)
+		assertAmbient()
+		firePluginTimerForTest(t, rt, "wan_core", "wan_repair")
+		assertPeer(0)
+		assertPeer(1)
+		assertAmbient()
+		for i := range locals {
+			payload := json.RawMessage(fmt.Sprintf(`{"wan_id":"peer%d"}`, i))
+			if err := rt.ApplyPluginAction(plugin, teardown, payload); err != nil {
+				t.Fatal(err)
+			}
+			assertAmbient()
+			if i == 0 {
+				assertPeer(1)
+			}
+		}
+		// No per-WAN peer route or selector may remain after both teardowns.
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, route := range routes {
+			if route.Dst != nil && route.Dst.String() == peer+"/32" && route.Table != 254 {
+				t.Fatalf("leaked WAN peer route: %+v", route)
+			}
+		}
+		rules, err := netlink.RuleList(netlink.FAMILY_V4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rule := range rules {
+			if rule.Dst != nil && rule.Dst.String() == peer+"/32" {
+				t.Fatalf("leaked WAN peer rule: %+v", rule)
+			}
+		}
+	})
 }
 
 func TestPluginVToLocalLinuxIntegration(t *testing.T) {
@@ -1361,6 +1486,30 @@ func requirePluginLinuxIntegration(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("plugin Linux integration tests require root")
 	}
+}
+
+// Tests which depend on exact interface identity, network state snapshots, or a
+// policy-only traffic path need their own namespace. Host network managers and
+// firewall rules must not mutate these fixtures during the assertions.
+func runPluginIntegrationInIsolatedNetNS(t *testing.T) bool {
+	t.Helper()
+	const helperEnv = "VEER_PLUGIN_ISOLATED_NETNS_HELPER"
+	if os.Getenv(helperEnv) == t.Name() {
+		return false
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("unshare", "--net", executable,
+		"-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.v", "-test.count=1", "-test.timeout=1m")
+	cmd.Env = append(os.Environ(), helperEnv+"="+t.Name())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated plugin integration: %v\n%s", err, strings.TrimSpace(string(output)))
+	}
+	t.Logf("isolated plugin integration passed:\n%s", strings.TrimSpace(string(output)))
+	return true
 }
 
 func assertPluginIntegrationEnabledRecord(t *testing.T, db *sql.DB, pluginID, resourceID, key string) {

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Unicode01/veer/internal/store"
 )
 
 // Unlike the generic call-recording fake, this controller models persisted
@@ -121,6 +123,46 @@ func TestBundledWANRepairSkipsStableWritesAndRepairsDrift(t *testing.T) {
 	firePluginTimerForTest(t, rt, "wan_core", "wan_repair")
 	if writes := bundledRepairWriteCount(controller.calls); writes != 0 {
 		t.Fatalf("recovered repair made %d writes", writes)
+	}
+}
+
+func TestBundledWANLiveOffloadModeSwitch(t *testing.T) {
+	rt, controller := newBundledWANRepairFixture(t)
+	plugin, err := loadPluginFromDir(filepath.Join(rt.cfg.PluginsDir, "wan_core"), "wan_core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := controller.links["veerlocal0"]
+	for _, enhanced := range []bool{true, false} {
+		maxSize, maxSegs := 1492, 1
+		if enhanced {
+			maxSize, maxSegs = 65536, 65535
+		}
+		payload, _ := json.Marshal(map[string]any{"key": "default", "interface_preparation": map[string]any{
+			"local_gso":         map[string]any{"max_size": maxSize, "max_segs": maxSegs},
+			"local_offloads":    map[string]bool{"sg": enhanced, "tso": enhanced, "gso": enhanced},
+			"pipeline_offloads": map[string]bool{"gro": enhanced, "lro": false},
+		}})
+		controller.calls = nil
+		if err := rt.ApplyPluginAction(plugin, PluginAction{ID: "apply_session", RuntimeUpdate: "runtime_apply"}, payload); err != nil {
+			t.Fatal(err)
+		}
+		current := controller.links["veerlocal0"]
+		if current.IfIndex != before.IfIndex || current.GSOMaxSize != maxSize || current.GSOMaxSegs != maxSegs || controller.offloads["veerpipe0"]["gro"] != enhanced {
+			t.Fatalf("live mode switch failed: %+v, offloads=%v", current, controller.offloads)
+		}
+		if countStringsWithPrefix(controller.calls, "delete:") != 0 {
+			t.Fatalf("mode switch deleted the live boundary: %v", controller.calls)
+		}
+		status, err := store.GetPluginRecord(rt.db, "wan_core", "status", "default")
+		if err != nil || !status.Enabled || !strings.Contains(status.DataJSON, `"usable":true`) || !strings.Contains(status.DataJSON, `"ipv4":"192.0.2.2"`) {
+			t.Fatalf("live WAN lost session state: %+v, %v", status, err)
+		}
+		controller.calls = nil
+		firePluginTimerForTest(t, rt, "wan_core", "wan_repair")
+		if writes := bundledRepairWriteCount(controller.calls); writes != 0 {
+			t.Fatalf("repair reverted the selected offload mode: %v", controller.calls)
+		}
 	}
 }
 

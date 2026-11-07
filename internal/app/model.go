@@ -29,6 +29,7 @@ type Rule struct {
 	kernelMode         string
 	kernelNATType      string
 	kernelRedirectMode string
+	kernelUnavailable  bool
 }
 
 type Site struct {
@@ -94,6 +95,15 @@ type HostNetworkInterface = netinfo.HostNetworkInterface
 
 type HostNetworkResponse struct {
 	Interfaces []HostNetworkInterface `json:"interfaces"`
+	Host       HostSummary            `json:"host"`
+}
+
+type HostSummary struct {
+	Name          string   `json:"name,omitempty"`
+	OS            string   `json:"os"`
+	Arch          string   `json:"arch"`
+	KernelRelease string   `json:"kernel_release,omitempty"`
+	UptimeSeconds *float64 `json:"uptime_seconds,omitempty"`
 }
 
 type ManagedNetwork struct {
@@ -229,6 +239,9 @@ type EgressNAT struct {
 	NATType         string `json:"nat_type"`
 	RedirectMode    string `json:"redirect_mode,omitempty"`
 	Enabled         bool   `json:"enabled"`
+
+	// Runtime-only protocol exclusions compiled from more specific child rules.
+	subsetOverrides map[string]int
 }
 
 type EgressNATStatus struct {
@@ -516,6 +529,7 @@ type KernelRuntimeResponse struct {
 	Available                                      bool                         `json:"available"`
 	AvailableReason                                string                       `json:"available_reason,omitempty"`
 	KernelCapabilities                             kernelcap.KernelCapabilities `json:"kernel_capabilities"`
+	KernelHelperModule                             KernelHelperModuleStatus     `json:"kernel_helper_module"`
 	DefaultEngine                                  string                       `json:"default_engine"`
 	ConfiguredOrder                                []string                     `json:"configured_order"`
 	TrafficStats                                   bool                         `json:"traffic_stats"`

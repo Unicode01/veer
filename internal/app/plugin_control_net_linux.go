@@ -3,6 +3,7 @@
 package app
 
 import (
+	cryptorand "crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,21 @@ import (
 )
 
 const pluginControlNetLinkLookupAttempts = 8
+
+// Supply the address in RTM_NEWLINK, before udev can apply its persistent-MAC
+// policy. A kernel-generated random address can otherwise change after the
+// ownership lease and protocol maps have already recorded it.
+func pluginControlNetEthernetAttrs(name string) (netlink.LinkAttrs, error) {
+	attrs := netlink.NewLinkAttrs()
+	attrs.Name = name
+	mac := make(net.HardwareAddr, 6)
+	if _, err := cryptorand.Read(mac); err != nil {
+		return attrs, fmt.Errorf("generate link address: %w", err)
+	}
+	mac[0] = (mac[0] | 2) & 0xfe
+	attrs.HardwareAddr = mac
+	return attrs, nil
+}
 
 func newPluginControlNetAdmin() pluginControlNetAdmin {
 	return &linuxPluginControlNetAdmin{provider: newLinuxPluginNetworkProvider()}
@@ -150,16 +166,21 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVeth(req pluginControlNetVethR
 		return pluginControlNetVethResult{}, fmt.Errorf("veth pair is partially present: host_exists=%t peer_exists=%t", !hostMissing, !peerMissing)
 	}
 	if hostMissing && peerMissing {
-		attrs := netlink.NewLinkAttrs()
-		attrs.Name = hostName
+		attrs, err := pluginControlNetEthernetAttrs(hostName)
+		if err != nil {
+			return pluginControlNetVethResult{}, err
+		}
+		peerAttrs, err := pluginControlNetEthernetAttrs(peerName)
+		if err != nil {
+			return pluginControlNetVethResult{}, err
+		}
 		if req.MTU > 0 {
 			attrs.MTU = req.MTU
 		}
-		if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: attrs, PeerName: peerName}); err != nil {
+		if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: attrs, PeerName: peerName, PeerHardwareAddr: peerAttrs.HardwareAddr}); err != nil {
 			return pluginControlNetVethResult{}, fmt.Errorf("create veth %s<->%s: %w", hostName, peerName, err)
 		}
 		created = true
-		var err error
 		host, err = pluginControlNetLinkByName(hostName)
 		if err != nil {
 			return cleanupCreated(fmt.Errorf("resolve created host link %q: %w", hostName, err))
@@ -233,6 +254,14 @@ func pluginControlNetValidateVethPeers(host netlink.Link, peer netlink.Link) err
 }
 
 func (admin linuxPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	return admin.linkEnsureSingle(req, "dummy")
+}
+
+func (admin linuxPluginControlNetAdmin) LinkEnsureHelperWAN(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	return admin.linkEnsureSingle(req, "veerwan")
+}
+
+func (admin linuxPluginControlNetAdmin) linkEnsureSingle(req pluginControlNetDummyRequest, kind string) (pluginControlNetDummyResult, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		return pluginControlNetDummyResult{}, fmt.Errorf("name is required")
@@ -240,19 +269,25 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDumm
 	created := false
 	link, err := pluginControlNetLinkByName(name)
 	if pluginControlNetLinkNotFound(err) {
-		attrs := netlink.NewLinkAttrs()
-		attrs.Name = name
+		attrs, addrErr := pluginControlNetEthernetAttrs(name)
+		if addrErr != nil {
+			return pluginControlNetDummyResult{}, addrErr
+		}
 		if req.MTU > 0 {
 			attrs.MTU = req.MTU
 		}
-		if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: attrs}); err != nil {
-			return pluginControlNetDummyResult{}, fmt.Errorf("create dummy %s: %w", name, err)
+		var candidate netlink.Link = &netlink.Dummy{LinkAttrs: attrs}
+		if kind == "veerwan" {
+			candidate = &netlink.GenericLink{LinkAttrs: attrs, LinkType: kind}
+		}
+		if err := netlink.LinkAdd(candidate); err != nil {
+			return pluginControlNetDummyResult{}, fmt.Errorf("create %s %s: %w", kind, name, err)
 		}
 		created = true
 		link, err = pluginControlNetLinkByName(name)
 	}
 	if err != nil {
-		return pluginControlNetDummyResult{}, fmt.Errorf("resolve dummy %q: %w", name, err)
+		return pluginControlNetDummyResult{}, fmt.Errorf("resolve %s %q: %w", kind, name, err)
 	}
 	cleanupCreated := func(cause error) (pluginControlNetDummyResult, error) {
 		if created {
@@ -260,17 +295,17 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureDummy(req pluginControlNetDumm
 		}
 		return pluginControlNetDummyResult{}, cause
 	}
-	if _, ok := link.(*netlink.Dummy); !ok || link.Type() != "dummy" {
-		return cleanupCreated(fmt.Errorf("existing link %q is %s, want dummy", name, link.Type()))
+	if link.Type() != kind {
+		return cleanupCreated(fmt.Errorf("existing link %q is %s, want %s", name, link.Type(), kind))
 	}
 	if req.MTU > 0 && link.Attrs().MTU != req.MTU {
 		if err := netlink.LinkSetMTU(link, req.MTU); err != nil {
-			return cleanupCreated(fmt.Errorf("set dummy mtu: %w", err))
+			return cleanupCreated(fmt.Errorf("set %s mtu: %w", kind, err))
 		}
 	}
 	if req.Up && link.Attrs().Flags&net.FlagUp == 0 {
 		if err := netlink.LinkSetUp(link); err != nil {
-			return cleanupCreated(fmt.Errorf("set dummy up: %w", err))
+			return cleanupCreated(fmt.Errorf("set %s up: %w", kind, err))
 		}
 	}
 	info, err := admin.LinkGet(name)
@@ -433,8 +468,10 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureVRF(req pluginControlNetVRFReq
 	created := false
 	link, err := pluginControlNetLinkByName(name)
 	if pluginControlNetLinkNotFound(err) {
-		attrs := netlink.NewLinkAttrs()
-		attrs.Name = name
+		attrs, addrErr := pluginControlNetEthernetAttrs(name)
+		if addrErr != nil {
+			return pluginControlNetVRFResult{}, addrErr
+		}
 		if err := netlink.LinkAdd(&netlink.Vrf{LinkAttrs: attrs, Table: req.Table}); err != nil {
 			return pluginControlNetVRFResult{}, fmt.Errorf("create vrf %s: %w", name, err)
 		}
@@ -507,8 +544,10 @@ func (admin linuxPluginControlNetAdmin) LinkEnsureBridge(req pluginControlNetBri
 	created := false
 	link, err := pluginControlNetLinkByName(name)
 	if pluginControlNetLinkNotFound(err) {
-		attrs := netlink.NewLinkAttrs()
-		attrs.Name = name
+		attrs, addrErr := pluginControlNetEthernetAttrs(name)
+		if addrErr != nil {
+			return pluginControlNetLinkInfo{}, addrErr
+		}
 		if req.MTU > 0 {
 			attrs.MTU = req.MTU
 		}
@@ -751,6 +790,9 @@ func (linuxPluginControlNetAdmin) AddrReplace(req pluginControlNetAddrRequest) e
 	if err != nil {
 		return err
 	}
+	if req.expectedIfIndex > 0 && link.Attrs().Index != req.expectedIfIndex {
+		return fmt.Errorf("address interface %s was recreated", req.Interface)
+	}
 	addr, err := netlink.ParseAddr(strings.TrimSpace(req.CIDR))
 	if err != nil {
 		return err
@@ -777,6 +819,9 @@ func (linuxPluginControlNetAdmin) AddrDelete(req pluginControlNetAddrRequest) er
 	link, err := pluginControlNetLinkByName(strings.TrimSpace(req.Interface))
 	if err != nil {
 		return err
+	}
+	if req.expectedIfIndex > 0 && link.Attrs().Index != req.expectedIfIndex {
+		return fmt.Errorf("address interface %s was recreated", req.Interface)
 	}
 	addr, err := netlink.ParseAddr(strings.TrimSpace(req.CIDR))
 	if err != nil {
@@ -1256,6 +1301,9 @@ func pluginControlNetNeighTarget(req pluginControlNetNeighRequest) (netlink.Link
 	if err != nil {
 		return nil, nil, 0, err
 	}
+	if req.expectedIfIndex > 0 && link.Attrs().Index != req.expectedIfIndex {
+		return nil, nil, 0, fmt.Errorf("neighbor interface %s changed during transaction", req.Interface)
+	}
 	ip := net.ParseIP(strings.TrimSpace(req.IP))
 	if ip == nil {
 		return nil, nil, 0, fmt.Errorf("invalid neighbor ip")
@@ -1510,6 +1558,7 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 	}
 	info := pluginControlNetLinkInfo{
 		Name:          attrs.Name,
+		Alias:         attrs.Alias,
 		IfIndex:       attrs.Index,
 		Kind:          link.Type(),
 		MTU:           attrs.MTU,
@@ -1546,6 +1595,13 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 		info.MasterName = pluginControlNetLinkNameByIndex(attrs.MasterIndex)
 	}
 	switch typed := link.(type) {
+	case *netlink.Tuntap:
+		if typed.Mode == netlink.TUNTAP_MODE_TUN {
+			info.TunMode = "tun"
+		} else if typed.Mode == netlink.TUNTAP_MODE_TAP {
+			info.TunMode = "tap"
+		}
+		info.TunVNetHeader = typed.Flags&netlink.TUNTAP_VNET_HDR != 0
 	case *netlink.Vlan:
 		info.VLANID = typed.VlanId
 		info.VLANProtocol = typed.VlanProtocol.String()
@@ -1574,6 +1630,9 @@ func pluginControlNetRoute(req pluginControlNetRouteRequest) (*netlink.Route, er
 			return nil, fmt.Errorf("dev %q: %w", req.Dev, err)
 		}
 		linkIndex = link.Attrs().Index
+		if expected := req.expectedLinkIndices[req.Dev]; expected > 0 && linkIndex != expected {
+			return nil, fmt.Errorf("route interface %s changed during transaction", req.Dev)
+		}
 	}
 	var gw net.IP
 	if strings.TrimSpace(req.Gateway) != "" {
@@ -1600,6 +1659,9 @@ func pluginControlNetRoute(req pluginControlNetRouteRequest) (*netlink.Route, er
 			return nil, fmt.Errorf("nexthop dev %q: %w", nexthop.Dev, err)
 		}
 		info := &netlink.NexthopInfo{LinkIndex: link.Attrs().Index, Hops: nexthop.Weight - 1}
+		if expected := req.expectedLinkIndices[nexthop.Dev]; expected > 0 && info.LinkIndex != expected {
+			return nil, fmt.Errorf("route interface %s changed during transaction", nexthop.Dev)
+		}
 		if nexthop.Gateway != "" {
 			info.Gw = net.ParseIP(nexthop.Gateway)
 		}

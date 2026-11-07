@@ -47,7 +47,7 @@ def shell_function(filename: str, name: str) -> str:
 def library(kind: str) -> str:
     filename, names = (
         ("bootstrap.sh", BOOTSTRAP_FUNCTIONS) if kind == "bootstrap"
-        else ("deploy.sh", ("write_service_definition", "prepare_selinux_labels"))
+        else ("deploy.sh", ("write_service_definition", "prepare_selinux_labels", "collect_kernel_helper_modules"))
     )
     return "set -eu\n" + LOGGING + "\n".join(shell_function(filename, name) for name in names)
 
@@ -94,6 +94,31 @@ require_runtime_tools
                 self.assertEqual(result.returncode, expected, result.stderr)
                 if expected:
                     self.assertIn("iptables", result.stderr)
+
+    def test_kernel_helper_module_collection(self):
+        # bootstrap deploys from the repo, where the build leaves kernel/veer_kfuncs/veer_kfuncs.ko.
+        source = library("deploy") + """
+modinfo() { sed -n 's/^vermagic=//p' "$3"; }
+KERNEL_MODULE_RELEASES=()
+collect_kernel_helper_modules "$TEST_DIR"
+printf '%s\\n' "${KERNEL_MODULE_RELEASES[@]}"
+"""
+        built = "6.12.74+deb12-cloud-amd64"
+        cases = (
+            ({"veer_kfuncs": built, built: built, "5.14.0-427.el9.x86_64": "5.14.0-427.el9.x86_64"},
+             0, "5.14.0-427.el9.x86_64\n" + built + "\n"),
+            ({"6.1.0-31-amd64": built}, 1, "vermagic"),
+            ({"latest": built}, 1, "目录名不是内核版本"),
+        )
+        for directories, expected, output in cases:
+            with self.subTest(directories=sorted(directories)), tempfile.TemporaryDirectory(prefix="veer-kmod-") as temp:
+                for directory, vermagic in directories.items():
+                    module = Path(temp) / "kernel" / directory / "veer_kfuncs.ko"
+                    module.parent.mkdir(parents=True)
+                    module.write_text(f"vermagic={vermagic} SMP preempt mod_unload\n", encoding="utf-8")
+                result = run_shell(source, TEST_DIR=Path(temp).as_posix())
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertIn(output, result.stdout if expected == 0 else result.stderr)
 
     def test_generated_services(self):
         for manager in ("systemd", "openrc"):

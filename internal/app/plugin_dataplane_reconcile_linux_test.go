@@ -138,7 +138,7 @@ func TestPluginDirectTCIncrementalReconcile(t *testing.T) {
 		}
 		assertState()
 	})
-	t.Run("attach_failure_rolls_back_new_filters", func(t *testing.T) {
+	t.Run("attach_failure_isolated_to_failed_plugin", func(t *testing.T) {
 		changedA := a
 		changedA.attachments = append([]pluginTCAttachPlan(nil), a.attachments...)
 		changedA.attachments[0].ProgramRef = "alternate"
@@ -146,7 +146,11 @@ func TestPluginDirectTCIncrementalReconcile(t *testing.T) {
 		badB := b
 		badB.attachments = append([]pluginTCAttachPlan(nil), b.attachments...)
 		badB.attachments[0].IfIndex = 1 << 30
+		beforeA := rt.loaded["a"].filters[0].Id
 		snapshot := reconcile(changedA, badB)
+		if snapshot.Plugins["a"].Error != "" || rt.loaded["a"].filters[0].Id == beforeA {
+			t.Fatal("failed plugin prevented healthy program update")
+		}
 		if snapshot.Plugins["b"].Error == "" {
 			t.Fatal("attachment failure hidden")
 		}
@@ -158,6 +162,22 @@ func TestPluginDirectTCIncrementalReconcile(t *testing.T) {
 			t.Fatalf("rollback left extra filters: %d, %v", len(filters), err)
 		}
 		assertHealthy(reconcile(a, b))
+		assertState()
+	})
+	t.Run("prepare_failure_does_not_block_other_plugin_repair", func(t *testing.T) {
+		bad := a
+		bad.attachments = append([]pluginTCAttachPlan(nil), a.attachments...)
+		bad.attachments[0].ObjectSHA256 = "changed"
+		bad.attachments[0].ObjectPath = "/nonexistent/veer-plugin-audit.o"
+		oldB = rt.loaded["b"].filters[0]
+		if err := netlink.FilterDel(oldB); err != nil {
+			t.Fatal(err)
+		}
+		snapshot := reconcile(bad, b)
+		if snapshot.Plugins["a"].Error == "" || snapshot.Plugins["b"].Error != "" || !pluginTCFilterExists(rt.loaded["b"].filters[0]) {
+			t.Fatal("unrelated failed prepare blocked filter repair")
+		}
+		oldB = rt.loaded["b"].filters[0]
 		assertState()
 	})
 	t.Run("prepare_failure_preserves_live_runtime_and_allows_removal", func(t *testing.T) {
@@ -177,4 +197,110 @@ func TestPluginDirectTCIncrementalReconcile(t *testing.T) {
 		assertState()
 		assertHealthy(reconcile(a))
 	})
+}
+
+func TestPluginDirectTCCleanupRetainsFailures(t *testing.T) {
+	shared := &ebpf.Collection{Maps: map[string]*ebpf.Map{"state": newPluginMapAPITestMap(t, &ebpf.MapSpec{Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 1})}}
+	unrelated := &ebpf.Collection{Maps: map[string]*ebpf.Map{"state": newPluginMapAPITestMap(t, &ebpf.MapSpec{Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 1})}}
+	defer shared.Close()
+	defer unrelated.Close()
+	bad := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: 1, Handle: 1}}
+	good := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: 2, Handle: 2}}
+	old := map[string]*loadedPluginDataplane{
+		"bad":  {filters: []*netlink.BpfFilter{bad}, objects: []loadedPluginObjectRef{{coll: shared}}},
+		"good": {filters: []*netlink.BpfFilter{good}, objects: []loadedPluginObjectRef{{coll: unrelated}}},
+	}
+	var calls int
+	remaining, err := retirePluginTCGenerationWithRemove(old, nil, func(filter *netlink.BpfFilter) error {
+		calls++
+		if filter == bad {
+			return fmt.Errorf("injected detach failure")
+		}
+		return nil
+	})
+	if err == nil || calls != 2 || len(remaining) != 1 || remaining["bad"].filters[0] != bad {
+		t.Fatalf("cleanup tracking lost: %+v %v", remaining, err)
+	}
+	if shared.Maps["state"].FD() < 0 {
+		t.Fatal("failed attachment lost its map FD")
+	}
+	if unrelated.Maps["state"].FD() >= 0 {
+		t.Fatal("unrelated successful cleanup leaked its map FD")
+	}
+	remaining, err = retirePluginTCGenerationWithRemove(remaining, nil, func(*netlink.BpfFilter) error { return nil })
+	if err != nil || len(remaining) != 0 || shared.Maps["state"].FD() >= 0 {
+		t.Fatal("retry did not release failed generation")
+	}
+}
+
+func TestPluginXDPDetachOwnershipLinuxIntegration(t *testing.T) {
+	requirePluginLinuxIntegration(t)
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	makeProgram := func(name string) *ebpf.Program {
+		t.Helper()
+		p, err := ebpf.NewProgram(&ebpf.ProgramSpec{Name: name, Type: ebpf.XDP, License: "GPL", Instructions: asm.Instructions{asm.Mov.Imm(asm.R0, 2), asm.Return()}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = p.Close() })
+		return p
+	}
+	makeLink := func() netlink.Link {
+		t.Helper()
+		name := pluginIntegrationLinkName("vpx")
+		if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}); err != nil {
+			t.Fatal(err)
+		}
+		link, err := netlink.LinkByName(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = netlink.LinkDel(link) })
+		return link
+	}
+	old, next := makeProgram("old_owner"), makeProgram("next_owner")
+	first, second := makeLink(), makeLink()
+	att := xdpAttachment{ifindex: first.Attrs().Index, flags: 2} // XDP_FLAGS_SKB_MODE
+	if err := netlink.LinkSetXdpFdWithFlags(first, old.FD(), att.flags); err != nil {
+		t.Fatal(err)
+	}
+	if err := netlink.LinkSetXdpFdWithFlags(first, next.FD(), att.flags); err != nil {
+		t.Fatal(err)
+	}
+	if err := detachOwnedXDPPluginAttachment(att, kernelProgramID(old)); err != nil {
+		t.Fatal(err)
+	}
+	if !xdpAttachmentExists(att, kernelProgramID(next)) {
+		t.Fatal("old ownership deleted external replacement")
+	}
+	if err := detachOwnedXDPPluginAttachment(att, kernelProgramID(next)); err != nil {
+		t.Fatal(err)
+	}
+	if xdpAttachmentExists(att, kernelProgramID(next)) {
+		t.Fatal("owned attachment not detached")
+	}
+	if err := netlink.LinkSetXdpFdWithFlags(first, old.FD(), att.flags); err != nil {
+		t.Fatal(err)
+	}
+	if err := netlink.LinkDel(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := detachOwnedXDPPluginAttachment(att, kernelProgramID(old)); err != nil {
+		t.Fatalf("removed interface cleanup: %v", err)
+	}
+	valid := xdpAttachment{ifindex: second.Attrs().Index, flags: 2}
+	if err := netlink.LinkSetXdpFdWithFlags(second, old.FD(), valid.flags); err != nil {
+		t.Fatal(err)
+	}
+	invalid := valid
+	invalid.flags = 1 << 29
+	pending, err := detachOwnedXDPPluginAttachments([]xdpAttachment{invalid, valid}, kernelProgramID(old))
+	if err == nil || len(pending) != 1 || pending[0] != invalid {
+		t.Fatalf("failed detach record lost: %+v %v", pending, err)
+	}
+	if xdpAttachmentExists(valid, kernelProgramID(old)) {
+		t.Fatal("one failed cleanup blocked another attachment")
+	}
 }

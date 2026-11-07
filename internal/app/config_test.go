@@ -7,6 +7,23 @@ import (
 	"testing"
 )
 
+func TestLoadConfigPluginInstallationPolicy(t *testing.T) {
+	for _, setting := range []string{"", `,"plugins_remote_install_enabled":false`, `,"plugins_remote_install_enabled":true`} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"web_token":"test-token"`+setting+`}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		remote := strings.Contains(setting, "true")
+		if cfg.PluginRemoteInstallEnabled() != remote || cfg.PluginExecEnabled() == remote {
+			t.Fatalf("wrong plugin policy: %+v", cfg)
+		}
+	}
+}
+
 func TestLoadConfigKernelTCPEstablishedIdleTimeout(t *testing.T) {
 	t.Parallel()
 

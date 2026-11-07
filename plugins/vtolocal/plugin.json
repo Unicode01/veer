@@ -13,7 +13,7 @@
   },
   "control": {
     "main": "control.js",
-    "sha256": "21b815605cf339d1576ab39936833c696b5773faef5f0bad2b3fc88d967f6d63",
+    "sha256": "c6015441cd0935c0d2b0d0aa2cdef6ed365df43205955550559fc5aa022718ce",
     "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
     "net_access": [
       {

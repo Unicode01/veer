@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/vishvananda/netlink"
 )
 
@@ -271,6 +272,7 @@ func TestKernelAttachmentProgramsUsesPipelineProgramWhenPluginPipelineEnabled(t 
 		replyTransparentProg:        &ebpf.Program{},
 		replyFullNATProg:            &ebpf.Program{},
 		progChainV4:                 &ebpf.Map{},
+		pluginHooksV4:               &ebpf.Map{},
 		pluginConfigV4:              &ebpf.Map{},
 		pluginInterfacesV4:          &ebpf.Map{},
 		dispatchScratchV4:           &ebpf.Map{},
@@ -320,27 +322,58 @@ func TestTCPluginPipelineABIV2SlotLayoutHasNoOverlap(t *testing.T) {
 		}
 	}
 
+	// The plugin-visible shared chain keeps its ABI v2 layout: core and
+	// continue slots where they were, the old hook ranges reserved.
 	claim("core-forward", tcProgramChainIndexV4Transparent, 10)
-	claim("bank0-pre-reply", tcProgramChainIndexV4PluginReplyBase, tcProgramChainV4PluginPreReplyMax)
-	claim("bank0-post-reply", tcProgramChainIndexV4PluginReplyPostBase, tcProgramChainV4PluginPostReplyMax)
+	claim("reserved-v2-forward-hooks", 10, 16)
 	claim("reply-control", tcProgramChainIndexV4ReplyCore, 3)
-	claim("bank0-pre-forward", tcProgramChainIndexV4PluginBase, tcProgramChainV4PluginPreForwardMax)
-	claim("bank0-post-lookup", tcProgramChainIndexV4PluginPostBase, tcProgramChainV4PluginPostLookupMax)
-	claim("bank1-pre-forward", tcProgramChainIndexV4PluginBank1Base, tcProgramChainV4PluginPreForwardMax)
-	claim("bank1-post-lookup", tcProgramChainIndexV4PluginBank1PostBase, tcProgramChainV4PluginPostLookupMax)
-	claim("bank1-pre-reply", tcProgramChainIndexV4PluginBank1ReplyBase, tcProgramChainV4PluginPreReplyMax)
-	claim("bank1-post-reply", tcProgramChainIndexV4PluginBank1ReplyPostBase, tcProgramChainV4PluginPostReplyMax)
+	claim("reserved-v2-reply-hooks", 29, 48)
 	claim("apply-control", tcProgramChainIndexV4PluginPostApply, 2)
-	claim("bank0-post-apply", tcProgramChainIndexV4PluginApplyBase, tcProgramChainV4PluginPostApplyMax)
-	claim("bank1-post-apply", tcProgramChainIndexV4PluginBank1ApplyBase, tcProgramChainV4PluginPostApplyMax)
-	claim("bank0-reply-apply", tcProgramChainIndexV4PluginReplyApplyBase, tcProgramChainV4PluginPostReplyApplyMax)
-	claim("bank1-reply-apply", tcProgramChainIndexV4PluginBank1ReplyApplyBase, tcProgramChainV4PluginPostReplyApplyMax)
-
+	claim("reserved-v2-apply-hooks", 79, 32)
 	if len(owners) != tcProgramChainV4MaxEntries {
 		t.Fatalf("ABI v2 slot coverage = %d, want %d", len(owners), tcProgramChainV4MaxEntries)
 	}
-	if tcProgramChainV4PluginTotalMax > 14 || tcProgramChainV4PluginReplyTotalMax > 14 {
-		t.Fatalf("plugin hook totals exceed the tail-call depth budget: forward=%d reply=%d", tcProgramChainV4PluginTotalMax, tcProgramChainV4PluginReplyTotalMax)
+	for name, slot := range map[string]int{
+		"pre_forward continue": tcProgramChainIndexV4PluginContinue,
+		"post_lookup continue": tcProgramChainIndexV4PluginPostLookup,
+		"pre_reply continue":   tcProgramChainIndexV4PluginPreReply,
+		"post_reply continue":  tcProgramChainIndexV4PluginPostReply,
+		"post_apply continue":  tcProgramChainIndexV4PluginPostApply,
+		"reply_apply continue": tcProgramChainIndexV4PluginReplyPostApply,
+	} {
+		if owners[slot] == "" || strings.HasPrefix(owners[slot], "reserved") {
+			t.Fatalf("%s slot %d is not a control slot", name, slot)
+		}
+	}
+
+	// Hooks live in their own table: every bank/stage range is disjoint and
+	// the per-interface limits stay inside the tail-call budget.
+	hooks := make(map[int]string, tcPluginHookSlots)
+	for bank := uint32(0); bank < 2; bank++ {
+		for _, stage := range []string{
+			kernelPluginPipelineStagePreForward, kernelPluginPipelineStagePostLookup, kernelPluginPipelineStagePostApply,
+			kernelPluginPipelineStagePreReply, kernelPluginPipelineStagePostReply, kernelPluginPipelineStageReplyApply,
+		} {
+			base, err := kernelPluginPipelineBankStageBase(bank, stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for slot := base; slot < base+tcPluginHookStageCapacity; slot++ {
+				if slot < 0 || slot >= tcPluginHookSlots {
+					t.Fatalf("bank %d %s slot %d outside [0,%d)", bank, stage, slot, tcPluginHookSlots)
+				}
+				if previous := hooks[slot]; previous != "" {
+					t.Fatalf("hook slot %d is shared by %s and bank %d %s", slot, previous, bank, stage)
+				}
+				hooks[slot] = fmt.Sprintf("bank %d %s", bank, stage)
+			}
+		}
+	}
+	if len(hooks) != tcPluginHookSlots {
+		t.Fatalf("hook slot coverage = %d, want %d", len(hooks), tcPluginHookSlots)
+	}
+	if pluginTCPipelineDirectionHookLimit > 14 || pluginTCPipelineStageHookLimit > pluginTCPipelineDirectionHookLimit || tcPluginHookStageCapacity > 32 {
+		t.Fatalf("hook limits break the tail-call or mask budget: stage=%d direction=%d capacity=%d", pluginTCPipelineStageHookLimit, pluginTCPipelineDirectionHookLimit, tcPluginHookStageCapacity)
 	}
 }
 
@@ -350,12 +383,12 @@ func TestKernelPluginMetricKeyMapsEveryPipelineStage(t *testing.T) {
 		chainBase int
 		metricKey uint32
 	}{
-		{kernelPluginPipelineStagePreForward, tcProgramChainIndexV4PluginBase, tcPluginMetricPreForwardBase},
-		{kernelPluginPipelineStagePostLookup, tcProgramChainIndexV4PluginPostBase, tcPluginMetricPostLookupBase},
-		{kernelPluginPipelineStagePostApply, tcProgramChainIndexV4PluginApplyBase, tcPluginMetricPostApplyBase},
-		{kernelPluginPipelineStagePreReply, tcProgramChainIndexV4PluginReplyBase, tcPluginMetricPreReplyBase},
-		{kernelPluginPipelineStagePostReply, tcProgramChainIndexV4PluginReplyPostBase, tcPluginMetricPostReplyBase},
-		{kernelPluginPipelineStageReplyApply, tcProgramChainIndexV4PluginReplyApplyBase, tcPluginMetricReplyApplyBase},
+		{kernelPluginPipelineStagePreForward, tcPluginHookSlotPreForward, tcPluginMetricPreForwardBase},
+		{kernelPluginPipelineStagePostLookup, tcPluginHookSlotPostLookup, tcPluginMetricPostLookupBase},
+		{kernelPluginPipelineStagePostApply, tcPluginHookSlotPostApply, tcPluginMetricPostApplyBase},
+		{kernelPluginPipelineStagePreReply, tcPluginHookSlotPreReply, tcPluginMetricPreReplyBase},
+		{kernelPluginPipelineStagePostReply, tcPluginHookSlotPostReply, tcPluginMetricPostReplyBase},
+		{kernelPluginPipelineStageReplyApply, tcPluginHookSlotReplyApply, tcPluginMetricReplyApplyBase},
 	}
 	for _, test := range tests {
 		for index := 0; index < tcPluginMetricStageWidth; index++ {
@@ -368,7 +401,7 @@ func TestKernelPluginMetricKeyMapsEveryPipelineStage(t *testing.T) {
 	if _, ok := kernelPluginMetricKey(PluginAttachmentState{Stage: "unknown", ChainSlot: 1}); ok {
 		t.Fatal("kernelPluginMetricKey(unknown) succeeded")
 	}
-	if _, ok := kernelPluginMetricKey(PluginAttachmentState{Stage: kernelPluginPipelineStagePreForward, ChainSlot: tcProgramChainIndexV4PluginBase + tcPluginMetricStageWidth}); ok {
+	if _, ok := kernelPluginMetricKey(PluginAttachmentState{Stage: kernelPluginPipelineStagePreForward, ChainSlot: tcPluginHookSlotPreForward + tcPluginMetricStageWidth}); ok {
 		t.Fatal("kernelPluginMetricKey(out-of-range slot) succeeded")
 	}
 }
@@ -591,6 +624,57 @@ func TestKernelPluginPipelinePlansDualStackIngressAndEgress(t *testing.T) {
 	}
 }
 
+func TestKernelAttachmentRuleSetsSameTargetsComparesInterfacesOnly(t *testing.T) {
+	a := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: {1, 2}},
+		ReplyIngress:   map[int][]int64{11: {1}},
+		ForwardEgress:  map[int][]int64{},
+	}
+	b := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: {3}},
+		ReplyIngress:   map[int][]int64{11: nil},
+	}
+	if !a.sameTargets(b) || !b.sameTargets(a) {
+		t.Fatalf("sameTargets(%+v, %+v) = false, rule IDs and empty maps must not matter", a, b)
+	}
+	moved := b.clone()
+	moved.ReplyIngress = map[int][]int64{12: nil}
+	if a.sameTargets(moved) {
+		t.Fatalf("sameTargets ignored a reply interface change")
+	}
+	direction := b.clone()
+	direction.ForwardEgress = map[int][]int64{10: nil}
+	direction.ForwardIngress = nil
+	if a.sameTargets(direction) {
+		t.Fatalf("sameTargets ignored an ingress-to-egress direction change")
+	}
+}
+
+func TestKernelSamePreparedRulesRejectsRemovedPluginBoundary(t *testing.T) {
+	// Deleting a VPN removes its boundary from the plugin egress hook while
+	// the prepared rules stay identical. Every remaining target is attached,
+	// but the stored set must still be replaced; otherwise self-heal keeps
+	// repairing forward_egress_pipeline on the vanished ifindex.
+	stored := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: nil, 202: nil},
+		ForwardEgress:  map[int][]int64{20: nil, 201: nil},
+	}
+	next := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{10: nil},
+		ForwardEgress:  map[int][]int64{20: nil},
+	}
+	rt := &linuxKernelRuleRuntime{
+		coll:                 &ebpf.Collection{},
+		attachments:          []kernelAttachment{{filter: &netlink.BpfFilter{}}},
+		pluginPipelineActive: true,
+		attachmentMode:       desiredKernelTCAttachmentProgramMode(nil, true),
+		attachmentRuleSets:   stored,
+	}
+	if rt.samePreparedRulesLocked(nil, next) {
+		t.Fatal("samePreparedRulesLocked() = true, want a refresh after a plugin boundary disappears")
+	}
+}
+
 func TestKernelPluginPipelineNoRuleFilterRequiresExplicitPreCoreHook(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
@@ -711,7 +795,7 @@ func TestKernelPluginPipelineInvalidExplicitInterfaceFiltersPlugin(t *testing.T)
 	}
 }
 
-func TestKernelPluginPipelineNoRuleFilterValidatesPostCoreInvalidInterface(t *testing.T) {
+func TestKernelPluginPipelineMissingPostCoreInterfacePreservesHealthyHook(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
 		t.Fatalf("WriteFile(observer.o) error = %v", err)
@@ -744,15 +828,64 @@ func TestKernelPluginPipelineNoRuleFilterValidatesPostCoreInvalidInterface(t *te
 	desired, states := buildKernelPluginPipelineDesired(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	desired = kernelPluginPipelineFilterNoRulePlugins(desired)
 	desired, states, forwardIfRules, replyIfRules := kernelPluginPipelineResolveExplicitAttachRuleSets(desired, states)
-	if len(desired) != 0 {
-		t.Fatalf("desired = %+v, want plugin filtered after post-core interface resolution failure", desired)
+	if len(desired) != 1 || len(desired[0].hooks) != 1 || desired[0].hooks[0].HookID != "pre-core" {
+		t.Fatalf("desired = %+v, want healthy explicit pre-core hook retained", desired)
 	}
-	if kernelPluginPipelineHasAttachmentTargets(forwardIfRules, replyIfRules) {
-		t.Fatalf("forwardIfRules=%+v replyIfRules=%+v, want no attachment target for failed plugin", forwardIfRules, replyIfRules)
+	if !kernelPluginPipelineHasAttachmentTargets(forwardIfRules, replyIfRules) {
+		t.Fatalf("forwardIfRules=%+v replyIfRules=%+v, want healthy attachment retained", forwardIfRules, replyIfRules)
 	}
-	state, ok := states["mixed_interface"]
-	if !ok || state.Error == "" || !strings.Contains(state.Error, "forward_missing0") {
-		t.Fatalf("state = %+v, want post-core interface resolution error", state)
+	if len(states) != 0 || !strings.Contains(strings.Join(desired[0].warnings, "; "), "forward_missing0") {
+		t.Fatalf("states=%+v warnings=%+v, want missing interface warning without disabling healthy hooks", states, desired[0].warnings)
+	}
+}
+
+func TestKernelPluginPipelineMissingInterfacePreservesOtherBindings(t *testing.T) {
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attach := range []string{"ingress", "egress", "both"} {
+		t.Run(attach, func(t *testing.T) {
+			original := []kernelPluginPipelineDesiredPlugin{{
+				plugin: LoadedPlugin{PluginManifest: PluginManifest{ID: "multi_wan"}},
+				hooks: []kernelPluginPipelineHookPlan{{
+					PluginID: "multi_wan", HookID: "adapter", Stage: kernelPluginPipelineStagePreForward,
+					Attach: attach, Interfaces: []string{"forward_missing0", "lo", "lo"}, InterfaceIndexes: []uint32{999},
+				}},
+			}}
+			desired, states, targets := kernelPluginPipelineResolveExplicitAttachTargets(original, nil)
+			if len(desired) != 1 || len(desired[0].hooks) != 1 || len(states) != 0 {
+				t.Fatalf("healthy binding lost: desired=%+v states=%+v", desired, states)
+			}
+			hook := desired[0].hooks[0]
+			if len(hook.InterfaceIndexes) != 1 || hook.InterfaceIndexes[0] != uint32(lo.Index) {
+				t.Fatalf("resolved indexes=%v, want only live lo", hook.InterfaceIndexes)
+			}
+			if len(original[0].hooks[0].InterfaceIndexes) != 1 || original[0].hooks[0].InterfaceIndexes[0] != 999 {
+				t.Fatal("resolution mutated the original desired plan")
+			}
+			masks, err := buildKernelPluginPipelineInterfaceMasks([]loadedKernelPluginPipelineProgram{{plan: hook}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(masks.globalByAttach) != 0 {
+				t.Fatalf("missing binding widened hook to global: %+v", masks)
+			}
+			for _, direction := range kernelPluginPipelinePlanAttachDirections(attach) {
+				if masks.byInterface[kernelPluginPipelineInterfaceScope{IfIndex: uint32(lo.Index), Attach: direction}].PreForwardMask != 1 {
+					t.Fatalf("healthy interface lost its adapter mask: %+v", masks)
+				}
+			}
+			if (len(targets.ForwardIngress) > 0) != (attach != "egress") || (len(targets.ForwardEgress) > 0) != (attach != "ingress") {
+				t.Fatalf("healthy attachment directions changed: %+v", targets)
+			}
+			// Resolve again from the catalog after a missing device returns.
+			original[0].hooks[0].Interfaces = []string{"lo"}
+			desired, states, _ = kernelPluginPipelineResolveExplicitAttachTargets(original, nil)
+			if len(states) != 0 || len(desired[0].warnings) != 0 {
+				t.Fatalf("resolved interface retained stale failure: %+v %+v", desired, states)
+			}
+		})
 	}
 }
 
@@ -1277,6 +1410,78 @@ func TestPluginPipelineVersionedMapReplacementsReuseCompatibleStateMapFD(t *test
 	}
 }
 
+func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T) {
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	if err := state.Put(uint32(17), uint64(99)); err != nil {
+		t.Fatal(err)
+	}
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{Type: ebpf.SchedCLS, License: "GPL", Instructions: asm.Instructions{asm.Mov.Imm(asm.R0, 0), asm.Return()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prog.Close()
+	core := &ebpf.Collection{}
+	rt := &linuxKernelRuleRuntime{
+		coll: core, pluginPipelineActive: true, pluginPipelineFingerprint: "applied",
+		pluginPipelineBankSwitchedAt: time.Now(),
+		pluginPipelineLoaded:         []loadedPluginObjectRef{{PluginID: "vpn_core", ObjectID: "wg_adapter", coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}, Programs: map[string]*ebpf.Program{"tc_adapter": prog}}}},
+		pluginRuntimeSnapshot:        pluginRuntimeSnapshot{Plugins: map[string]PluginRuntimeState{"vpn_core": {Attached: true}}},
+	}
+	t.Cleanup(rt.cleanupPluginPipelineLocked)
+	for attempt := 0; attempt < 3; attempt++ {
+		finish, err := rt.preservePluginPipelineForRebuildLocked()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The attachment-failure path closes the replacement plugin objects
+		// while retaining the original core and its active TC attachments.
+		rt.cleanupPluginPipelineLocked()
+		finish(false)
+		got, err := getPluginMapValueInRefs(rt.pluginPipelineLoaded, "vpn_core", "wg_adapter", "wg_links", pluginMapTestUint32(17))
+		if err != nil || string(got) != string(pluginMapTestUint64(99)) {
+			t.Fatalf("attempt %d lost live adapter map: %x %v", attempt, got, err)
+		}
+		if !rt.pluginPipelineActive || rt.pluginPipelineFingerprint != "applied" || !rt.pluginRuntimeSnapshot.Plugins["vpn_core"].Attached {
+			t.Fatalf("attempt %d lost plugin pipeline state", attempt)
+		}
+		if _, err := rt.pluginPipelineLoaded[0].coll.Programs["tc_adapter"].Info(); err != nil {
+			t.Fatalf("attempt %d lost plugin program access: %v", attempt, err)
+		}
+	}
+}
+
+func TestKernelPluginPipelineRebuildCommitKeepsReplacement(t *testing.T) {
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	rt := &linuxKernelRuleRuntime{coll: &ebpf.Collection{}, pluginPipelineActive: true,
+		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}}}}}
+	finish, err := rt.preservePluginPipelineForRebuildLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.cleanupPluginPipelineLocked()
+	rt.coll = &ebpf.Collection{}
+	rt.pluginPipelineFingerprint = "replacement"
+	finish(true)
+	if rt.pluginPipelineFingerprint != "replacement" || len(rt.pluginPipelineLoaded) != 0 {
+		t.Fatal("commit restored predecessor pipeline state")
+	}
+}
+
+func TestKernelPluginPipelineRebuildDoesNotResurrectCleanedRuntime(t *testing.T) {
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	rt := &linuxKernelRuleRuntime{coll: &ebpf.Collection{}, pluginPipelineActive: true,
+		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}}}}}
+	finish, err := rt.preservePluginPipelineForRebuildLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.cleanupLocked()
+	finish(false)
+	if rt.pluginPipelineActive || len(rt.pluginPipelineLoaded) != 0 {
+		t.Fatal("full cleanup restored an obsolete plugin pipeline")
+	}
+}
+
 func TestBuildKernelPluginPipelineDesiredRejectsHookLimitOverflow(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
@@ -1303,7 +1508,7 @@ func TestBuildKernelPluginPipelineDesiredRejectsHookLimitOverflow(t *testing.T) 
 		Status:  pluginStatusActive,
 		rootDir: dir,
 	}
-	for i := 0; i < tcProgramChainV4PluginPreForwardMax+1; i++ {
+	for i := 0; i < pluginTCPipelineStageHookLimit+1; i++ {
 		plugin.Hooks = append(plugin.Hooks, PluginHook{
 			ID:       "pre-core-" + string(rune('a'+i)),
 			Engine:   kernelEngineTC,
@@ -1320,8 +1525,62 @@ func TestBuildKernelPluginPipelineDesiredRejectsHookLimitOverflow(t *testing.T) 
 		t.Fatalf("desired = %+v, want rejected hook overflow", desired)
 	}
 	state, ok := states["too_many_hooks"]
-	if !ok || state.Error == "" || !strings.Contains(state.Error, "too many pre-core tc plugin hooks") {
-		t.Fatalf("state = %+v, want pre-core hook limit error", state)
+	if !ok || state.Error == "" || !strings.Contains(state.Error, "limit 8 per interface") {
+		t.Fatalf("state = %+v, want per-interface pre-core hook limit error", state)
+	}
+}
+
+func TestBuildKernelPluginPipelineDesiredAdmitsPluginsPerInterface(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "observer.o"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newPlugin := func(id string, interfaces []string, running bool) LoadedPlugin {
+		plugin := LoadedPlugin{
+			PluginManifest: PluginManifest{ID: id, Name: id, Version: "0.1.0", Kind: "pipeline"},
+			Objects: []PluginObject{{
+				ID: "observer", Path: "observer.o", Status: pluginObjectStatusVerified, ResolvedSHA256: "fake",
+				Programs: []PluginObjectProgram{{ID: "tc_pre_filter", Section: "tc/veer/pre_filter", Type: kernelEngineTC}},
+			}},
+			Hooks: []PluginHook{{
+				ID: "pre", Engine: kernelEngineTC, Attach: "ingress", Stage: kernelPluginPipelineStagePreForward,
+				Priority: 10, Program: "observer:tc_pre_filter", Mode: "observe", Interfaces: interfaces,
+			}},
+			Status:  pluginStatusActive,
+			rootDir: dir,
+		}
+		plugin.Runtime.Attached = running
+		return plugin
+	}
+
+	// Twelve plugins on their own interfaces exceed the old host-wide limit of
+	// eight but never put more than one hook on a packet's path.
+	catalog := PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin()}}
+	for i := 0; i < 12; i++ {
+		catalog.Plugins = append(catalog.Plugins, newPlugin(fmt.Sprintf("edge_%02d", i), []string{fmt.Sprintf("veth%d", i)}, false))
+	}
+	desired, states := buildKernelPluginPipelineDesired(catalog)
+	if len(desired) != 12 {
+		t.Fatalf("desired = %d plugins, states = %+v, want all 12 admitted", len(desired), states)
+	}
+
+	// Nine plugins that all run on every interface: the one that is not yet
+	// running is rejected and the eight running ones stay.
+	catalog = PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), newPlugin("aa_newcomer", nil, false)}}
+	for i := 0; i < 8; i++ {
+		catalog.Plugins = append(catalog.Plugins, newPlugin(fmt.Sprintf("running_%d", i), nil, true))
+	}
+	desired, states = buildKernelPluginPipelineDesired(catalog)
+	if len(desired) != 8 {
+		t.Fatalf("desired = %d plugins, want the eight running plugins", len(desired))
+	}
+	if state := states["aa_newcomer"]; state.Error == "" || !strings.Contains(state.Error, "other plugins keep running") {
+		t.Fatalf("newcomer state = %+v, want an individual capacity rejection", state)
+	}
+	for _, item := range desired {
+		if item.plugin.ID == "aa_newcomer" {
+			t.Fatal("newcomer was admitted ahead of a running plugin")
+		}
 	}
 }
 
@@ -1581,8 +1840,8 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 	if len(state.Attachments) != 1 || state.Attachments[0].Interface != kernelPluginPipelineInterface || state.Attachments[0].Status != "chained" {
 		t.Fatalf("plugin attachments = %+v, want chained veer attachment", state.Attachments)
 	}
-	if state.Attachments[0].Stage != kernelPluginPipelineStagePreForward || state.Attachments[0].ChainSlot != tcProgramChainIndexV4PluginBase {
-		t.Fatalf("plugin attachment = %+v, want pre_forward slot %d", state.Attachments[0], tcProgramChainIndexV4PluginBase)
+	if state.Attachments[0].Stage != kernelPluginPipelineStagePreForward || state.Attachments[0].ChainSlot != tcPluginHookSlotPreForward {
+		t.Fatalf("plugin attachment = %+v, want pre_forward slot %d", state.Attachments[0], tcPluginHookSlotPreForward)
 	}
 
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
@@ -1606,7 +1865,7 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Fatalf("plugin bank config = %+v, want initial inactive bank 1 with global pre-forward slot", config)
 	}
 	var pluginFD uint32
-	if err := pieces.progChainV4.Lookup(uint32(tcProgramChainIndexV4PluginBank1Base), &pluginFD); err != nil || pluginFD == 0 {
+	if err := pieces.pluginHooksV4.Lookup(uint32(tcPluginHookBankSlots+tcPluginHookSlotPreForward), &pluginFD); err != nil || pluginFD == 0 {
 		t.Fatalf("lookup bank 1 pre-forward plugin slot: fd=%d err=%v", pluginFD, err)
 	}
 	if _, ok := stateHasAttachmentProgram(state, "packet_observer:tc_pre_forward"); !ok {
@@ -1649,7 +1908,7 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Fatalf("scoped interface mask key=%+v value=%+v err=%v, want pre-forward bit 0", interfaceKey, interfaceMask, err)
 	}
 	pluginFD = 0
-	if err := pieces.progChainV4.Lookup(uint32(tcProgramChainIndexV4PluginBank1Base), &pluginFD); !errors.Is(err, ebpf.ErrKeyNotExist) {
+	if err := pieces.pluginHooksV4.Lookup(uint32(tcPluginHookBankSlots+tcPluginHookSlotPreForward), &pluginFD); !errors.Is(err, ebpf.ErrKeyNotExist) {
 		t.Fatalf("previous bank slot remains after hot-switch grace: fd=%d err=%v", pluginFD, err)
 	}
 	state, _ = rt.PluginSnapshot().stateFor("packet_observer")
@@ -1977,11 +2236,11 @@ func TestKernelPluginPipelineRuntimeIPv6PostApplyForwardsTraffic(t *testing.T) {
 	if !ok || !state.Attached || state.AttachmentCount != 2 {
 		t.Fatalf("plugin state = %+v, want forward and reply post-apply attachments", state)
 	}
-	if attachment, ok := stateHasAttachmentProgram(state, "observer:tc_post_apply"); !ok || attachment.Stage != kernelPluginPipelineStagePostApply || attachment.ChainSlot != tcProgramChainIndexV4PluginApplyBase {
-		t.Fatalf("plugin attachments = %+v, want post_apply slot %d", state.Attachments, tcProgramChainIndexV4PluginApplyBase)
+	if attachment, ok := stateHasAttachmentProgram(state, "observer:tc_post_apply"); !ok || attachment.Stage != kernelPluginPipelineStagePostApply || attachment.ChainSlot != tcPluginHookSlotPostApply {
+		t.Fatalf("plugin attachments = %+v, want post_apply slot %d", state.Attachments, tcPluginHookSlotPostApply)
 	}
-	if attachment, ok := stateHasAttachmentProgram(state, "observer:tc_reply_apply"); !ok || attachment.Stage != kernelPluginPipelineStageReplyApply || attachment.ChainSlot != tcProgramChainIndexV4PluginReplyApplyBase {
-		t.Fatalf("plugin attachments = %+v, want post_reply_apply slot %d", state.Attachments, tcProgramChainIndexV4PluginReplyApplyBase)
+	if attachment, ok := stateHasAttachmentProgram(state, "observer:tc_reply_apply"); !ok || attachment.Stage != kernelPluginPipelineStageReplyApply || attachment.ChainSlot != tcPluginHookSlotReplyApply {
+		t.Fatalf("plugin attachments = %+v, want post_reply_apply slot %d", state.Attachments, tcPluginHookSlotReplyApply)
 	}
 
 	if err := runTCIPv6IntegrationProbePorts(t, topology, "tcp", tcIPv6IntegrationFrontPort, tcIPv6IntegrationBackendPort); err != nil {
@@ -2098,7 +2357,7 @@ func TestKernelPluginPipelineRuntimePacketMetadataAcrossPluginsDualStack(t *test
 	}
 	producerAttachment, producerAttached := stateHasAttachmentProgram(producerState, "producer:tc_produce")
 	consumerAttachment, consumerAttached := stateHasAttachmentProgram(consumerState, "consumer:tc_consume")
-	if !producerAttached || !consumerAttached || producerAttachment.ChainSlot != tcProgramChainIndexV4PluginBase || consumerAttachment.ChainSlot != tcProgramChainIndexV4PluginBase+1 {
+	if !producerAttached || !consumerAttached || producerAttachment.ChainSlot != tcPluginHookSlotPreForward || consumerAttachment.ChainSlot != tcPluginHookSlotPreForward+1 {
 		t.Fatalf("metadata attachment order producer=%+v consumer=%+v", producerAttachment, consumerAttachment)
 	}
 
@@ -2476,8 +2735,8 @@ func TestKernelPluginPipelineRuntimeNoRulePostLookupPluginAttachesWithCoreDisabl
 	if state.Mode != pluginRuntimeModeDataplane || !state.Attached || state.AttachmentCount != 1 {
 		t.Fatalf("plugin state = %+v, want one chained dataplane attachment", state)
 	}
-	if len(state.Attachments) != 1 || state.Attachments[0].Stage != kernelPluginPipelineStagePostLookup || state.Attachments[0].ChainSlot != tcProgramChainIndexV4PluginPostBase {
-		t.Fatalf("plugin attachment = %+v, want post_lookup slot %d", state.Attachments, tcProgramChainIndexV4PluginPostBase)
+	if len(state.Attachments) != 1 || state.Attachments[0].Stage != kernelPluginPipelineStagePostLookup || state.Attachments[0].ChainSlot != tcPluginHookSlotPostLookup {
+		t.Fatalf("plugin attachment = %+v, want post_lookup slot %d", state.Attachments, tcPluginHookSlotPostLookup)
 	}
 }
 
@@ -2493,7 +2752,7 @@ func assertKernelPluginPipelineClearedForTest(t *testing.T, pieces kernelCollect
 	assertMissing := func(slot int) {
 		t.Helper()
 		var fd uint32
-		err := pieces.progChainV4.Lookup(uint32(slot), &fd)
+		err := pieces.pluginHooksV4.Lookup(uint32(slot), &fd)
 		if err == nil {
 			t.Fatalf("tc plugin chain slot %d still contains fd %d, want deleted", slot, fd)
 		}
@@ -2506,10 +2765,10 @@ func assertKernelPluginPipelineClearedForTest(t *testing.T, pieces kernelCollect
 			name  string
 			count int
 		}{
-			{name: kernelPluginPipelineStagePreForward, count: tcProgramChainV4PluginPreForwardMax},
-			{name: kernelPluginPipelineStagePostLookup, count: tcProgramChainV4PluginPostLookupMax},
-			{name: kernelPluginPipelineStagePreReply, count: tcProgramChainV4PluginPreReplyMax},
-			{name: kernelPluginPipelineStagePostReply, count: tcProgramChainV4PluginPostReplyMax},
+			{name: kernelPluginPipelineStagePreForward, count: tcPluginHookStageCapacity},
+			{name: kernelPluginPipelineStagePostLookup, count: tcPluginHookStageCapacity},
+			{name: kernelPluginPipelineStagePreReply, count: tcPluginHookStageCapacity},
+			{name: kernelPluginPipelineStagePostReply, count: tcPluginHookStageCapacity},
 		} {
 			base, _ := kernelPluginPipelineBankStageBase(bank, stage.name)
 			for i := 0; i < stage.count; i++ {
@@ -2803,8 +3062,8 @@ func TestKernelPluginPipelineRuntimeChainsPostLookupPlugin(t *testing.T) {
 	if state.Mode != pluginRuntimeModeDataplane || !state.Attached || state.AttachmentCount != 1 {
 		t.Fatalf("plugin state = %+v, want one chained dataplane attachment", state)
 	}
-	if len(state.Attachments) != 1 || state.Attachments[0].Stage != kernelPluginPipelineStagePostLookup || state.Attachments[0].ChainSlot != tcProgramChainIndexV4PluginPostBase {
-		t.Fatalf("plugin attachment = %+v, want post_lookup slot %d", state.Attachments, tcProgramChainIndexV4PluginPostBase)
+	if len(state.Attachments) != 1 || state.Attachments[0].Stage != kernelPluginPipelineStagePostLookup || state.Attachments[0].ChainSlot != tcPluginHookSlotPostLookup {
+		t.Fatalf("plugin attachment = %+v, want post_lookup slot %d", state.Attachments, tcPluginHookSlotPostLookup)
 	}
 
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
@@ -2891,8 +3150,8 @@ func TestKernelPluginPipelineRuntimeChainsPostReplyPlugin(t *testing.T) {
 	if state.Mode != pluginRuntimeModeDataplane || !state.Attached || state.AttachmentCount != 1 {
 		t.Fatalf("plugin state = %+v, want one chained dataplane attachment", state)
 	}
-	if len(state.Attachments) != 1 || state.Attachments[0].Stage != kernelPluginPipelineStagePostReply || state.Attachments[0].ChainSlot != tcProgramChainIndexV4PluginReplyPostBase {
-		t.Fatalf("plugin attachment = %+v, want post_reply slot %d", state.Attachments, tcProgramChainIndexV4PluginReplyPostBase)
+	if len(state.Attachments) != 1 || state.Attachments[0].Stage != kernelPluginPipelineStagePostReply || state.Attachments[0].ChainSlot != tcPluginHookSlotPostReply {
+		t.Fatalf("plugin attachment = %+v, want post_reply slot %d", state.Attachments, tcPluginHookSlotPostReply)
 	}
 
 	pieces, err := lookupKernelCollectionPieces(rt.coll)

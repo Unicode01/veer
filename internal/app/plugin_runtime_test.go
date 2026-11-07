@@ -12371,6 +12371,8 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 		  "local_interface":"veerlocal0",
 		  "pipeline_interface":"veerpipe0",
 		  "handoff_mode":"segmented_veth",
+		  "ipv6_route_table":15000,
+		  "ipv6_rule_priority":19000,
 		  "ipv4":%q,
 		  "ipv4_peer":%q
 		}`, ipv4, peer)
@@ -12380,7 +12382,7 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 	}
 
 	apply("10.77.0.2", "10.77.0.1")
-	if want := "routeReplace:10.77.0.1/32:veerlocal0::254:0"; !containsString(controller.calls, want) {
+	if want := "routeReplace:10.77.0.1/32:veerlocal0::15000:0"; !containsString(controller.calls, want) {
 		t.Fatalf("initial segmented IPv4 calls = %+v, missing %s", controller.calls, want)
 	}
 	status, err := store.GetPluginRecord(db, "wan_core", "status", "default")
@@ -12403,8 +12405,8 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 	controller.calls = nil
 	apply("10.77.0.3", "10.77.0.254")
 	for _, want := range []string{
-		"routeDelete:10.77.0.1/32:veerlocal0::254:0",
-		"routeReplace:10.77.0.254/32:veerlocal0::254:0",
+		"routeDelete:10.77.0.1/32:veerlocal0::15000:0",
+		"routeReplace:10.77.0.254/32:veerlocal0::15000:0",
 	} {
 		if !containsString(controller.calls, want) {
 			t.Fatalf("changed segmented IPv4 calls = %+v, missing %s", controller.calls, want)
@@ -12415,7 +12417,7 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 	if err := rt.ApplyPluginAction(plugin, teardownAction, json.RawMessage(`{"key":"default"}`)); err != nil {
 		t.Fatalf("ApplyPluginAction(wan_core segmented IPv4 teardown) error = %v", err)
 	}
-	if want := "routeDelete:10.77.0.254/32:veerlocal0::254:0"; !containsString(controller.calls, want) {
+	if want := "routeDelete:10.77.0.254/32:veerlocal0::15000:0"; !containsString(controller.calls, want) {
 		t.Fatalf("segmented IPv4 teardown calls = %+v, missing %s", controller.calls, want)
 	}
 }
@@ -12998,6 +13000,18 @@ func TestBundledWANCoreHandoffMigrationFailureRestoresPreviousBoundary(t *testin
 			t.Fatalf("wan_core status/default = %s, missing preserved state %s", statusRecord.DataJSON, want)
 		}
 	}
+	var restored map[string]any
+	_ = json.Unmarshal([]byte(statusRecord.DataJSON), &restored)
+	if restored["local_ifindex"] != float64(controller.links["veerlocal0"].IfIndex) {
+		t.Fatalf("rollback retained a deleted interface generation: %s", statusRecord.DataJSON)
+	}
+	if err := rt.ApplyPluginResourceData(plugin, pluginResourceByIDForTest(t, plugin, "sessions"), []PluginResourceRecord{{Key: "default", Enabled: false, Data: json.RawMessage(`{"state":"down","usable":false}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil || !strings.Contains(withdrawn.DataJSON, `"handoff_mode":"direct"`) || !strings.Contains(withdrawn.DataJSON, `"pipeline_interface":""`) {
+		t.Fatalf("withdrawal forgot the restored boundary: %+v, %v", withdrawn, err)
+	}
 }
 
 func TestBundledWANCoreResourceApplyArmsRepairTimer(t *testing.T) {
@@ -13346,6 +13360,17 @@ func TestBundledWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
 	}
 
 	controller.calls = nil
+	if err := rt.ApplyPluginResourceData(plugin, resource, []PluginResourceRecord{{
+		Key: "default", Enabled: false, Data: json.RawMessage(sessionRecord.DataJSON),
+	}}); err != nil {
+		t.Fatalf("reconcile disabled session after teardown: %v", err)
+	}
+	preserved, err := store.GetPluginRecord(db, "wan_core", "status", "default")
+	if err != nil || *preserved != *statusRecord || len(controller.calls) != 0 {
+		t.Fatalf("disabled reconcile changed teardown journal or touched networking: status=%+v err=%v calls=%+v", preserved, err, controller.calls)
+	}
+
+	controller.calls = nil
 	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"key":"default"}`)); err != nil {
 		t.Fatalf("second ApplyPluginAction(wan_core teardown) error = %v", err)
 	}
@@ -13359,6 +13384,15 @@ func TestBundledWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
 	for _, want := range []string{`"phase":"deleted"`, `"managed_link":true`, `"link_delete_skipped":true`, `"link_delete_skip_reason":"previous wan_core status already deleted this plugin-managed handoff"`} {
 		if !strings.Contains(statusRecord.DataJSON, want) {
 			t.Fatalf("wan_core status/default after repeated teardown = %s, missing %s", statusRecord.DataJSON, want)
+		}
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"key":"default","forget":true}`)); err != nil {
+		t.Fatalf("forget previously torn down WAN: %v", err)
+	}
+	for _, id := range []string{"profiles", "sessions", "status"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM plugin_records WHERE plugin_id = 'wan_core' AND resource_id = ? AND record_key = 'default'`, id).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("WAN %s remains after forget: count=%d err=%v", id, count, err)
 		}
 	}
 }
@@ -13437,6 +13471,12 @@ func TestBundledWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
 	}
 	if timers := rt.pluginTimerList("wan_core"); len(timers) != 0 {
 		t.Fatalf("wan_core timers after failed physical delete = %+v, want none", timers)
+	}
+	if err := rt.ApplyPluginAction(plugin, action, json.RawMessage(`{"key":"default","forget":true}`)); err == nil {
+		t.Fatal("forget must retain records when physical cleanup fails")
+	}
+	if _, err := store.GetPluginRecord(db, "wan_core", "sessions", "default"); err != nil {
+		t.Fatalf("retryable WAN session was removed: %v", err)
 	}
 }
 
@@ -15074,25 +15114,26 @@ func (c *pluginControlMapControllerTest) ClearPluginMap(pluginID string, objectI
 }
 
 type pluginControlNetAdminTest struct {
-	calls               []string
-	links               map[string]pluginControlNetLinkInfo
-	listNames           []string
-	offloads            map[string]map[string]bool
-	getOffloadErrors    map[string]error
-	getErrors           map[string]error
-	ensureVethErrors    map[string]error
-	ensureDummyErrors   map[string]error
-	ensureMacvlanErrors map[string]error
-	deleteErrors        map[string]error
-	setMasterErrors     map[string]error
-	clearMasterErrors   map[string]error
-	setARPErrors        map[string]error
-	setOffloadErrors    map[string]error
-	routeSnapshots      map[string][]pluginControlNetRouteState
-	ruleSnapshots       map[string][]pluginControlNetRuleState
-	neighSnapshots      map[string][]pluginControlNetNeighState
-	neighbors           []pluginControlNetNeighborInfo
-	fdbEntries          []pluginControlNetFDBInfo
+	calls                 []string
+	links                 map[string]pluginControlNetLinkInfo
+	listNames             []string
+	offloads              map[string]map[string]bool
+	getOffloadErrors      map[string]error
+	getErrors             map[string]error
+	ensureVethErrors      map[string]error
+	ensureDummyErrors     map[string]error
+	ensureHelperWANErrors map[string]error
+	ensureMacvlanErrors   map[string]error
+	deleteErrors          map[string]error
+	setMasterErrors       map[string]error
+	clearMasterErrors     map[string]error
+	setARPErrors          map[string]error
+	setOffloadErrors      map[string]error
+	routeSnapshots        map[string][]pluginControlNetRouteState
+	ruleSnapshots         map[string][]pluginControlNetRuleState
+	neighSnapshots        map[string][]pluginControlNetNeighState
+	neighbors             []pluginControlNetNeighborInfo
+	fdbEntries            []pluginControlNetFDBInfo
 }
 
 func (c *pluginControlNetAdminTest) LinkGet(name string) (pluginControlNetLinkInfo, error) {
@@ -15194,6 +15235,25 @@ func (c *pluginControlNetAdminTest) LinkEnsureDummy(req pluginControlNetDummyReq
 	_, existed := c.links[req.Name]
 	info := c.linkInfo(req.Name)
 	info.Kind = "dummy"
+	info.MTU = req.MTU
+	info.Up = req.Up
+	c.updateLinkInfo(info)
+	if !existed && c.getErrors != nil {
+		delete(c.getErrors, req.Name)
+	}
+	return pluginControlNetDummyResult{Link: info, Created: !existed}, nil
+}
+
+func (c *pluginControlNetAdminTest) LinkEnsureHelperWAN(req pluginControlNetDummyRequest) (pluginControlNetDummyResult, error) {
+	c.calls = append(c.calls, fmt.Sprintf("ensureHelperWAN:%s:%d:%t", req.Name, req.MTU, req.Up))
+	if c.ensureHelperWANErrors != nil {
+		if err := c.ensureHelperWANErrors[req.Name]; err != nil {
+			return pluginControlNetDummyResult{}, err
+		}
+	}
+	_, existed := c.links[req.Name]
+	info := c.linkInfo(req.Name)
+	info.Kind = "veerwan"
 	info.MTU = req.MTU
 	info.Up = req.Up
 	c.updateLinkInfo(info)

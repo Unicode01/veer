@@ -868,7 +868,7 @@ func buildManagedNetworkAutoEgressNAT(network ManagedNetwork, ifaceByName map[st
 			continue
 		}
 		current = normalizeEgressNATScope(current, ifaceByName)
-		if !egressNATScopesOverlap(item, current, ifaceByName) {
+		if !ruleProtocolsOverlap(item.Protocol, normalizeEgressNATProtocol(current.Protocol)) || !egressNATScopesConflict(item, current, ifaceByName) {
 			continue
 		}
 		return EgressNAT{}, fmt.Sprintf("managed network #%d (%s): skip auto egress nat because it overlaps egress nat #%d", network.ID, network.Name, current.ID)

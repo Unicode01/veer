@@ -42,6 +42,7 @@ const RESERVED_EBPF_MAPS = new Set([
   'tc_plugin_ctx_v6', 'tc_plugin_metrics', 'tc_packet_meta_bindings_v1',
   'tc_packet_meta_generation_v4', 'tc_packet_meta_generation_v6',
   'tc_packet_meta_v4', 'tc_packet_meta_v6', 'xdp_prog_chain',
+  'tc_plugin_hooks_v4', 'xdp_plugin_hooks',
 ]);
 
 function cloneJSON(value) {
@@ -238,6 +239,15 @@ function normalizeHookOrderReferences(values, label) {
   return [...new Set(out)].sort();
 }
 
+function normalizeHookBinding(item, api) {
+  if (item.binding_required != null && typeof item.binding_required !== 'boolean') {
+    throw new Error(`${api}.binding_required must be a boolean`);
+  }
+  if (item.binding_required && !['tc', 'xdp'].includes(item.engine)) {
+    throw new Error(`${api}.binding_required is only available to tc/xdp hooks`);
+  }
+}
+
 function normalizeHookOrder(item, api) {
   item.before = normalizeHookOrderReferences(item.before, `${api}.before`);
   item.after = normalizeHookOrderReferences(item.after, `${api}.after`);
@@ -419,6 +429,11 @@ class VeerPluginTestHost {
     this.pluginDir = fs.realpathSync(path.resolve(options.pluginDir));
     this.timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
     this.adapters = Object.assign({}, options.adapters || {});
+    this.remoteInstallEnabled = options.remoteInstallEnabled === true;
+    this.hostInfo = Object.assign({os:process.platform === 'win32' ? 'windows' : process.platform,
+      arch:({x64:'amd64', ia32:'386'})[process.arch] || process.arch}, options.hostInfo || {});
+    this.availableFeatures = Array.isArray(options.availableFeatures) ? options.availableFeatures.slice()
+      : API_CONTRACT.runtime.features.filter(feature => feature !== 'dataplane.kfuncs.handoff.v1');
     this.state = sharedState || createSharedState(options.fixtures || {});
     this.workerName = workerName;
 	this.moduleCache = new Map();
@@ -796,13 +811,13 @@ class VeerPluginTestHost {
           runtime_version: API_CONTRACT.runtime.runtime_version,
           control_api_abi: API_CONTRACT.runtime.control_api_abi,
           tc_pipeline_abi: API_CONTRACT.runtime.tc_pipeline_abi,
-          os: process.platform,
-          arch: process.arch,
+          os: this.hostInfo.os,
+          arch: this.hostInfo.arch,
           kernel_release: 'test',
           core_priority: API_CONTRACT.runtime.core_priority,
           features: API_CONTRACT.runtime.features.slice(),
-          available_features: API_CONTRACT.runtime.features.slice(),
-          feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: true}])),
+          available_features: this.availableFeatures.slice(),
+          feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: this.availableFeatures.includes(feature)}])),
           resource_limits: cloneJSON(API_CONTRACT.runtime.resource_limits),
         }),
         capabilities: (...values) => {
@@ -828,6 +843,7 @@ class VeerPluginTestHost {
             else input.stage = input.direction === 'reply' ? 'pre_reply' : 'pre_forward';
           }
           const hook = this.#registerUnique(this.surface.hooks, input, 'pipeline.attach');
+          normalizeHookBinding(hook, 'pipeline.attach');
           normalizeHookOrder(hook, 'pipeline.attach');
           normalizeHookPacketMetadata(hook, 'pipeline.attach');
         },
@@ -836,6 +852,7 @@ class VeerPluginTestHost {
         attach: (spec) => {
           this.#requirePermission('hook.attach', 'hooks.attach', true);
           const hook = this.#registerUnique(this.surface.hooks, spec, 'hooks.attach');
+          normalizeHookBinding(hook, 'hooks.attach');
           normalizeHookOrder(hook, 'hooks.attach');
           normalizeHookPacketMetadata(hook, 'hooks.attach');
         },
@@ -950,6 +967,77 @@ class VeerPluginTestHost {
         clear: () => this.#metricClear(),
         list: () => this.#metricList(),
       }),
+      process: Object.freeze({
+        binaryInstall: (request) => {
+          this.#requirePermission('exec', 'process.binaryInstall');
+          if (this.remoteInstallEnabled) throw new Error('process.binaryInstall is disabled while remote plugin installation is enabled');
+          if (!request || !/^[a-z][a-z0-9_-]{0,31}$/.test(request.id) || !/^[a-z][a-z0-9-]{0,31}$/.test(request.executable)) throw new Error('invalid binary id or executable');
+          return this.#adapter('process.binaryInstall', [request]);
+        },
+        binaryStatus: (id) => {
+          this.#requirePermission('exec', 'process.binaryStatus');
+          if (this.remoteInstallEnabled) throw new Error('process.binaryStatus is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid binary id');
+          return this.#adapter('process.binaryStatus', [id]);
+        },
+        binarySelect: (request) => {
+          this.#requirePermission('exec', 'process.binarySelect');
+          if (this.remoteInstallEnabled) throw new Error('process.binarySelect is disabled while remote plugin installation is enabled');
+          if (!request || !/^[a-z][a-z0-9_-]{0,31}$/.test(request.id) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(request.version) || request.version.includes('..')) throw new Error('invalid binary selection');
+          return this.#adapter('process.binarySelect', [request]);
+        },
+        binaryRemove: (request) => {
+          this.#requirePermission('exec', 'process.binaryRemove');
+          if (this.remoteInstallEnabled) throw new Error('process.binaryRemove is disabled while remote plugin installation is enabled');
+          if (!request || !/^[a-z][a-z0-9_-]{0,31}$/.test(request.id) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(request.version) || request.version.includes('..')) throw new Error('invalid binary selection');
+          return this.#adapter('process.binaryRemove', [request]);
+        },
+        start: (request) => {
+          this.#requirePermission('exec', 'process.start');
+          if (this.remoteInstallEnabled) throw new Error('process.start is disabled while remote plugin installation is enabled');
+          if (!request || typeof request.id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(request.id)) throw new Error('invalid process id');
+          return this.#adapter('process.start', [request]);
+        },
+        status: (id) => {
+          this.#requirePermission('exec', 'process.status');
+          if (this.remoteInstallEnabled) throw new Error('process.status is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid process id');
+          return this.#adapter('process.status', [id]);
+        },
+        stop: (id) => {
+          this.#requirePermission('exec', 'process.stop');
+          if (this.remoteInstallEnabled) throw new Error('process.stop is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid process id');
+          return this.#adapter('process.stop', [id]);
+        },
+        restart: (id) => {
+          this.#requirePermission('exec', 'process.restart');
+          if (this.remoteInstallEnabled) throw new Error('process.restart is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid process id');
+          return this.#adapter('process.restart', [id]);
+        },
+        list: () => {
+          this.#requirePermission('exec', 'process.list');
+          if (this.remoteInstallEnabled) throw new Error('process.list is disabled while remote plugin installation is enabled');
+
+          return this.#adapter('process.list', []);
+        },
+        logs: (id) => {
+          this.#requirePermission('exec', 'process.logs');
+          if (this.remoteInstallEnabled) throw new Error('process.logs is disabled while remote plugin installation is enabled');
+          if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) throw new Error('invalid process id');
+          return this.#adapter('process.logs', [id]);
+        },
+        exec: (request) => {
+          this.#requirePermission('exec', 'process.exec');
+          if (this.remoteInstallEnabled) throw new Error('process.exec is disabled while remote plugin installation is enabled');
+          if (!request || typeof request.command !== 'string' || !path.isAbsolute(request.command) || request.command.includes('\0')) throw new Error('process.exec command must be an absolute executable path');
+          if (request.args != null && (!Array.isArray(request.args) || request.args.length > 128 || request.args.some((arg) => typeof arg !== 'string' || arg.includes('\0')))) throw new Error('process.exec args must be at most 128 strings without NUL bytes');
+          if (request.timeout_ms != null && (!Number.isInteger(request.timeout_ms) || request.timeout_ms < 0 || request.timeout_ms > 15000)) throw new Error('process.exec timeout_ms is invalid');
+          if (Buffer.byteLength(JSON.stringify(request)) > 65536) throw new Error('process.exec request exceeds 65536 bytes');
+          return this.#adapter('process.exec', [request]);
+        },
+      }),
       crypto: Object.freeze({
         md5: (...values) => {
           this.#requirePermission('crypto', 'crypto.md5');
@@ -982,7 +1070,7 @@ class VeerPluginTestHost {
         link: Object.freeze({
           get: linkMethod('get', 'link.read'), list: linkMethod('list', 'link.read'),
           ensureBridge: linkMethod('ensureBridge', 'link.create'), ensureVeth: linkMethod('ensureVeth', 'link.create'),
-          ensureDummy: linkMethod('ensureDummy', 'link.create'), ensureMacvlan: linkMethod('ensureMacvlan', 'link.create'),
+          ensureDummy: linkMethod('ensureDummy', 'link.create'), ensureHelperWAN: linkMethod('ensureHelperWAN', 'link.create'), ensureMacvlan: linkMethod('ensureMacvlan', 'link.create'),
           ensureVLAN: linkMethod('ensureVLAN', 'link.create'), ensureVRF: linkMethod('ensureVRF', 'link.create'),
           delete: linkMethod('delete', 'link.delete'), release: linkMethod('release', 'link.delete'), owned: linkMethod('owned', 'link.read'),
           setMaster: linkMethod('setMaster', 'link.master'), clearMaster: linkMethod('clearMaster', 'link.master'),
@@ -1782,7 +1870,7 @@ class VeerPluginTestHost {
   #worker(name) {
     const id = token(name, 'worker');
     if (!this.state.workers.has(id)) {
-      const worker = new VeerPluginTestHost({ pluginDir: this.pluginDir, timeoutMs: this.timeoutMs, adapters: this.adapters }, this.state, id).load();
+      const worker = new VeerPluginTestHost({ pluginDir: this.pluginDir, timeoutMs: this.timeoutMs, adapters: this.adapters, remoteInstallEnabled: this.remoteInstallEnabled, availableFeatures: this.availableFeatures }, this.state, id).load();
       this.state.workers.set(id, worker);
     }
     return this.state.workers.get(id);
@@ -2024,10 +2112,10 @@ class VeerPluginTestHost {
         control_api_abi: API_CONTRACT.runtime.control_api_abi,
         tc_pipeline_abi: API_CONTRACT.runtime.tc_pipeline_abi,
         os: process.platform,
-        arch: process.arch,
+        arch: this.hostInfo.arch,
         features: API_CONTRACT.runtime.features.slice(),
-        available_features: API_CONTRACT.runtime.features.slice(),
-        feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: true}])),
+        available_features: this.availableFeatures.slice(),
+        feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: this.availableFeatures.includes(feature)}])),
         resource_limits: cloneJSON(API_CONTRACT.runtime.resource_limits),
       },
     }, cloneJSON(extra));

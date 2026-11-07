@@ -14,3 +14,4 @@ build_if_present() {
 
 build_if_present "$ROOT_DIR/plugins/packet_observer"
 build_if_present "$ROOT_DIR/plugins/pppoe_client"
+build_if_present "$ROOT_DIR/plugins/vpn_core"

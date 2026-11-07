@@ -9,6 +9,8 @@
   <script>
     (function () {
       const F = window.VeerPluginHost;
+      const notify = F.notify || F.toast;
+      const notifyError = F.notifyError || F.toastError;
       if (!F) {
         document.body.textContent = 'VeerPluginHost is not available.';
         return;
@@ -259,16 +261,16 @@
               });
               if (!confirmed) return;
             } catch (e) {
-              F.toastError(e);
+              notifyError(e);
               return;
             }
             setBusy(removeButton, true, T('status.deleting'));
             try {
               await F.data.delete('bindings', record.key);
-              F.toast(T('toast.deleted'));
+              notify(T('toast.deleted'));
               await loadRecords();
             } catch (e) {
-              F.toastError(e);
+              notifyError(e);
             } finally {
               setBusy(removeButton, false, T('action.delete'));
             }
@@ -301,7 +303,7 @@
           renderRecords(records);
         } catch (e) {
           setListStatus('error');
-          F.toastError(e);
+          notifyError(e);
         }
       }
 
@@ -311,10 +313,10 @@
         try {
           const response = await F.action('apply', { source: 'ui' });
           status.textContent = response.status || T('status.applied');
-          F.toast(T('toast.applied'));
+          notify(T('toast.applied'));
         } catch (e) {
           setStatus('status.applyFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           setBusy(applyButton, false, T('action.apply'));
           F.requestResize();
@@ -329,21 +331,20 @@
             value_hex: valueInput.value || '0000000000000000',
             created_at: new Date().toISOString()
           });
-          F.toast(T('toast.created'));
+          notify(T('toast.created'));
           await loadRecords();
         } catch (e) {
-          F.toastError(e);
+          notifyError(e);
         } finally {
           setBusy(createButton, false, T('action.create'));
         }
-      }, false);
+      }, true);
 
       const page = F.h('main', { className: F.classes.page }, [
         F.stack([
-          F.card([
+          F.h('section', { className: 'veer-context' }, [
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', null, [
-                textNode('h1', { className: F.classes.title }, 'title'),
                 textNode('p', { className: F.classes.description }, 'desc')
               ]),
               F.h('div', null, [
@@ -402,6 +403,7 @@
 
       renderContract();
       document.body.replaceChildren(page);
+      if (F.headerActions) F.headerActions([applyButton]);
       loadRecords().finally(function () {
         F.requestResize();
       });

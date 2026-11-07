@@ -9,6 +9,26 @@
   const managerAdvancedViews = new Set(['advanced', 'repositories', 'trust', 'audit', 'dead-letters', 'secrets', 'access']);
   let managerFocusReturn = null;
 
+  function managerRemoteInstallEnabled() {
+    const catalog = app.state.plugins && app.state.plugins.catalog;
+    return !!(catalog && catalog.runtime && catalog.runtime.remote_install_enabled === true);
+  }
+
+  app.syncPluginManagerPolicy = function syncPluginManagerPolicy() {
+    const state = managerState();
+    const enabled = managerRemoteInstallEnabled();
+    if (app.el.addPluginBtn) app.el.addPluginBtn.hidden = !enabled;
+    if (state.open && state.remoteInstallEnabled !== enabled) app.closePluginManager(true);
+    state.remoteInstallEnabled = enabled;
+  };
+
+  function managerRequireInstallAPI(method, path) {
+    const restricted = path === '/api/plugins/reload'
+      || /^\/api\/(plugin-trust|plugin-repositories|plugin-repository-policies)(\/|\?|$)/.test(path)
+      || (method !== 'GET' && path.startsWith('/api/plugin-packages/'));
+    if (restricted && !managerRemoteInstallEnabled()) throw new Error(app.t('plugins.remoteInstallDisabled'));
+  }
+
   function managerState() {
     app.state.plugins = app.state.plugins || {};
     app.state.plugins.manager = app.state.plugins.manager || {};
@@ -250,9 +270,9 @@
 
   function managerGlobalNav() {
     return [
-	  { id: 'install', label: app.t('plugins.catalog.add') },
+	  managerRemoteInstallEnabled() ? { id: 'install', label: app.t('plugins.catalog.add') } : null,
 	  { id: 'advanced', label: app.t('plugins.manager.advanced') }
-    ];
+    ].filter(Boolean);
   }
 
   function managerPluginNav() {
@@ -291,7 +311,7 @@
       className: 'plugin-manager-stack',
       children: [
         managerSection(app.t('plugins.manager.security'), [managerMenu([
-          { label: app.t('plugins.trust.title'), open: () => app.openPluginManager('trust') },
+          ...(managerRemoteInstallEnabled() ? [{ label: app.t('plugins.trust.title'), open: () => app.openPluginManager('trust') }] : []),
           { label: app.t('plugins.secrets.title'), open: () => app.openPluginManager('secrets') },
           { label: app.t('plugins.admin.title'), open: () => app.openPluginManager('access') }
         ])]),
@@ -377,6 +397,7 @@
   }
 
   async function managerRawRequest(method, path, body, headers) {
+    managerRequireInstallAPI(method, path);
     const requestHeaders = Object.assign({ Authorization: 'Bearer ' + app.getToken() }, headers || {});
 	const adminToken = typeof app.getPluginAdminToken === 'function' ? app.getPluginAdminToken() : '';
 	if (adminToken) requestHeaders['X-Veer-Plugin-Admin'] = adminToken;
@@ -409,6 +430,7 @@
   }
 
 	function managerAPIRequest(method, path, body) {
+		managerRequireInstallAPI(method, path);
 		if (typeof app.pluginAdminAPICall === 'function') return app.pluginAdminAPICall(method, path, body);
 		return app.apiCall(method, path, body);
 	}
@@ -1918,7 +1940,7 @@
         managerSection(app.t('plugins.manager.overview'), [summaryFacts]),
         managerRenderProbation(state.probation, state.probationGroup),
         managerDisclosure(app.t('plugins.manager.technicalDetails'), [technicalFacts]),
-        managerDisclosure(app.t('plugins.manager.maintenance'), [danger], 'danger')
+        managerRemoteInstallEnabled() ? managerDisclosure(app.t('plugins.manager.maintenance'), [danger], 'danger') : null
       ].filter(Boolean)
     }));
   }
@@ -1953,13 +1975,13 @@
       return;
     }
     const rows = state.history.map((entry) => {
-      const rollback = managerButton(app.t('plugins.history.rollback'), 'mini-btn', () => app.preparePluginRollback(state.pluginID, entry.id, rollback), { disabled: !!state.busy });
+      const rollback = managerRemoteInstallEnabled() ? managerButton(app.t('plugins.history.rollback'), 'mini-btn', () => app.preparePluginRollback(state.pluginID, entry.id, rollback), { disabled: !!state.busy }) : null;
       return [
         app.createNode('span', { text: entry.version || app.t('common.dash') }),
         app.createNode('span', { text: entry.reason || app.t('common.dash') }),
         app.createNode('span', { text: managerFormatDate(entry.created_at) }),
         app.createNode('code', { className: 'plugin-manager-mono', text: managerShortText(entry.archive_sha256 || entry.source_fingerprint, 24), title: entry.archive_sha256 || entry.source_fingerprint || '' }),
-        rollback
+        ...(rollback ? [rollback] : [])
       ];
     });
     managerRender(managerTable([
@@ -1967,7 +1989,7 @@
       app.t('plugins.history.reason'),
       app.t('plugins.manager.createdAt'),
       app.t('plugins.history.fingerprint'),
-      app.t('common.actions')
+      ...(managerRemoteInstallEnabled() ? [app.t('common.actions')] : [])
     ], rows));
   }
 
@@ -2122,10 +2144,12 @@
 
   app.openPluginManager = function openPluginManager(view, options) {
     const state = managerState();
+    state.remoteInstallEnabled = managerRemoteInstallEnabled();
     const opts = options || {};
     managerNextRequest();
     managerOpenShell();
     state.view = String(view || 'install');
+    if (!managerRemoteInstallEnabled() && ['install', 'repositories', 'trust'].includes(state.view)) state.view = 'advanced';
     state.pluginID = state.view === 'plugin' ? String(opts.pluginID || state.pluginID || '').trim() : '';
     state.tab = state.view === 'plugin' ? String(opts.tab || 'overview') : '';
     state.busy = false;
@@ -2194,9 +2218,10 @@
       managerLoadPluginOverview(state.pluginID);
       return;
     }
-    state.view = 'install';
+    state.view = managerRemoteInstallEnabled() ? 'install' : 'advanced';
     managerRenderNav();
-    managerRenderPackageInput();
+    if (managerRemoteInstallEnabled()) managerRenderPackageInput();
+    else managerRenderAdvanced();
   };
 
   app.closePluginManager = function closePluginManager(force) {
@@ -2244,6 +2269,7 @@
   }
 
   if (app.el.addPluginBtn) app.el.addPluginBtn.addEventListener('click', () => app.openPluginManager('install'));
+  if (app.el.addPluginBtn) app.el.addPluginBtn.hidden = !managerRemoteInstallEnabled();
   if (app.el.managePluginsAdvancedBtn) app.el.managePluginsAdvancedBtn.addEventListener('click', () => app.openPluginManager('advanced'));
   if (app.el.closePluginManagerBtn) app.el.closePluginManagerBtn.addEventListener('click', () => app.closePluginManager());
   if (app.el.pluginManagerModal) {

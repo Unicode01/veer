@@ -498,6 +498,9 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 		if !ok {
 			return false
 		}
+		if egressNATPlanIsFullyOverridden(plan) {
+			continue
+		}
 		if !plan.KernelEligible || plan.EffectiveEngine != ruleEngineKernel || !pm.kernelEgressNATs[id] || strings.TrimSpace(pm.kernelEgressNATEngines[id]) == "" {
 			return false
 		}
@@ -531,9 +534,9 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 		return nil, fmt.Errorf("recover plugin resource migrations: %w", err)
 	}
 	if err := recoverPendingPluginNetTransactions(db, newPluginControlNetAdmin()); err != nil {
-		_ = ln.Close()
-		_ = os.Remove(sockPath)
-		return nil, fmt.Errorf("recover plugin network transactions: %w", err)
+		// Retain failed journals and fence only their slots. A broken plugin or
+		// disappearing interface must not stop unrelated forwarding at startup.
+		log.Printf("plugin network recovery incomplete; affected resources remain fenced: %v", err)
 	}
 
 	pm := &ProcessManager{
@@ -3245,17 +3248,25 @@ func (pm *ProcessManager) egressNATRuntimeStatus(id int64, enabled bool) string 
 	running := pm.kernelEgressNATs[id]
 	plan, ok := pm.egressNATPlans[id]
 	pm.mu.Unlock()
-	if running {
-		return "running"
+	if ok && egressNATPlanIsFullyOverridden(plan) {
+		return "overridden"
 	}
 	if ok && egressNATPlanIsUnavailable(plan) {
 		return "error"
+	}
+	if running {
+		return "running"
 	}
 	return "stopped"
 }
 
 func egressNATPlanIsUnavailable(plan ruleDataplanePlan) bool {
 	return strings.TrimSpace(plan.FallbackReason) != "" || (!plan.KernelEligible && strings.TrimSpace(plan.KernelReason) != "")
+}
+
+func egressNATPlanIsFullyOverridden(plan ruleDataplanePlan) bool {
+	return plan.KernelEligible && plan.EffectiveEngine == ruleEngineKernel &&
+		plan.KernelReason == egressNATFullyOverriddenReason && plan.FallbackReason == ""
 }
 
 func (pm *ProcessManager) buildEgressNATStatus(item EgressNAT, status string) EgressNATStatus {

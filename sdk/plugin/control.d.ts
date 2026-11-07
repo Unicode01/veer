@@ -119,6 +119,8 @@ declare global {
     mode?: string;
     context?: string[];
     interfaces?: string[];
+    /** Require a valid enabled hook_bindings record; otherwise this hook is inactive. TC/XDP only. */
+    binding_required?: boolean;
     packet_metadata?: VeerPacketMetadataBinding[];
   }
 
@@ -142,6 +144,8 @@ declare global {
     mode?: string;
     context?: string[];
     interfaces?: string[];
+    /** Require a valid enabled hook_bindings record; no global/static fallback. */
+    binding_required?: boolean;
     packet_metadata?: VeerPacketMetadataBinding[];
   }
 
@@ -575,9 +579,13 @@ declare global {
   interface VeerNetLinkInfo {
     namespace: string;
     name: string;
+    /** Kernel interface alias; absent on older hosts. */
+    alias?: string;
     created: boolean;
     ifindex: number;
     kind: string;
+    tun_mode?: 'tun' | 'tap' | '';
+    tun_vnet_hdr?: boolean;
     parent: string;
     mtu: number;
     mac: string;
@@ -670,6 +678,8 @@ declare global {
     ensureBridge(request: VeerNetLinkEnsureRequest): VeerNetLinkInfo;
     ensureVeth(request: VeerNetVethRequest): VeerNetVethResult;
     ensureDummy(request: VeerNetLinkEnsureRequest): VeerNetLinkEnsureResult;
+    /** Optional helper-owned Ethernet boundary with receive GRO (dataplane.kfuncs.wan.v1). */
+    ensureHelperWAN(request: VeerNetLinkEnsureRequest): VeerNetLinkEnsureResult;
     ensureMacvlan(request: VeerNetMacvlanRequest): VeerNetLinkEnsureResult;
     ensureVLAN(request: VeerNetVLANRequest): VeerNetLinkEnsureResult;
     ensureVRF(request: VeerNetVRFRequest): VeerNetLinkEnsureResult;
@@ -1206,6 +1216,58 @@ declare global {
   }
 
   const plugin: VeerPluginAPI;
+  /** Trusted host execution. Requires exec permission and remote installation disabled. */
+  interface VeerManagedProcessStatus {
+    id: string; state: 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'exited' | 'backoff' | 'failed';
+    pid: number; starts: number; exit_code: number; started_at: number;
+  }
+  interface VeerBinaryInstallRequest {
+    id: string; executable: string; format: 'raw' | 'gzip' | 'tar.gz';
+    /** Direct source: version, HTTPS URL and SHA256 are all required. */
+    version?: string; url?: string; sha256?: string;
+    /** GitHub release metadata; asset/path templates accept {tag} and {version}. */
+    release_url?: string; asset?: string; archive_path?: string; check_args?: string[];
+  }
+  interface VeerBinaryStatus {
+    id: string; directory: string; path?: string; version?: string; previous?: string;
+    versions: Array<{version: string; executable: string; sha256: string; binary_sha256: string;
+      bytes: number; path: string; installed_at: string}>;
+    install?: {state: 'resolving' | 'downloading' | 'verifying' | 'ready' | 'failed'; version?: string;
+      downloaded_bytes: number; total_bytes?: number; error?: string};
+  }
+  const process: {
+    /** Trusted Linux main context. Background verified download; selects default only on success.
+     * Live processes retain their immutable executable. At most 4 versions and 1 GiB per plugin. */
+    binaryInstall(request: VeerBinaryInstallRequest): VeerBinaryStatus;
+    binaryStatus(id: string): VeerBinaryStatus;
+    /** Atomically choose a verified installed version; previous is available for rollback. */
+    binarySelect(request: {id: string; version: string}): VeerBinaryStatus;
+    /** Selected versions and versions referenced by managed processes cannot be removed. */
+    binaryRemove(request: {id: string; version: string}): VeerBinaryStatus;
+    /** Linux main context only. Config is private (0600), {config} expands to its path. */
+    start(request: {id: string; command: string; args?: string[]; stdin?: string; config?: string;
+      restart?: 'never' | 'on-failure'; max_restarts?: number; stop_timeout_ms?: number}): VeerManagedProcessStatus;
+    status(id: string): VeerManagedProcessStatus;
+    stop(id: string): VeerManagedProcessStatus;
+    /** Health recovery shares max_restarts with failed exits; does not reset its budget. */
+    restart(id: string): VeerManagedProcessStatus;
+    list(): VeerManagedProcessStatus[];
+    /** Output can contain secrets. Never include it in ordinary plugin status. */
+    logs(id: string): {stdout: string; stderr: string; truncated: boolean};
+    exec(request: {
+      command: string;
+      args?: string[];
+      stdin?: string;
+      timeout_ms?: number;
+    }): {
+      stdout: string;
+      stderr: string;
+      exit_code: number;
+      timed_out: boolean;
+      cancelled: boolean;
+      truncated: boolean;
+    };
+  };
   const pipeline: {
     node(spec: VeerVirtualInterfaceSpec): void;
     handoff(spec: VeerVirtualInterfaceSpec): void;

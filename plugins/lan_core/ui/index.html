@@ -6,11 +6,9 @@
   <title>LAN Core</title>
   <style>
     .lan-page {
-      padding: 8px;
+      padding: 20px;
     }
-    .lan-hero {
-      padding: 11px 12px;
-    }
+
     .lan-hero .veer-toolbar {
       align-items: flex-start;
     }
@@ -46,7 +44,7 @@
       min-width: 0;
       padding: 10px;
       border: 1px solid var(--veer-border);
-      border-radius: 9px;
+      border-radius: var(--veer-radius-lg);
       background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
     }
     .lan-form-section > * + * {
@@ -55,9 +53,9 @@
     .lan-section-title {
       margin: 0;
       color: var(--veer-text);
-      font-size: 13px;
+      font-size: var(--veer-fs-md);
       line-height: 1.25;
-      font-weight: 760;
+      font-weight: 600;
     }
     .lan-form-grid {
       display: grid;
@@ -72,8 +70,8 @@
       gap: 8px;
       min-width: 0;
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 650;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
     }
     .lan-field-label > span:first-child {
       overflow: hidden;
@@ -88,18 +86,18 @@
       width: 16px;
       height: 16px;
       border: 1px solid var(--veer-border);
-      border-radius: 999px;
+      border-radius: var(--veer-radius-pill);
       color: var(--veer-soft);
       background: var(--veer-surface);
-      font-size: 10px;
-      font-weight: 800;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
       cursor: help;
     }
     .lan-check-field {
       min-height: 31px;
       padding: 5px 8px;
       border: 1px solid var(--veer-border);
-      border-radius: 8px;
+      border-radius: var(--veer-radius);
       background: var(--veer-surface);
     }
     .lan-check-field label {
@@ -117,7 +115,7 @@
       min-height: 31px;
       padding: 5px 8px;
       border: 1px solid var(--veer-border);
-      border-radius: 8px;
+      border-radius: var(--veer-radius);
       background: var(--veer-surface);
     }
     .lan-protocols label {
@@ -125,8 +123,8 @@
       align-items: center;
       gap: 5px;
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 650;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
     }
     .lan-protocols .veer-input[type="checkbox"] {
       width: 30px;
@@ -151,13 +149,13 @@
     .lan-effective-label {
       padding-top: 3px;
       color: var(--veer-muted);
-      font-size: 11px;
-      font-weight: 650;
+      font-size: var(--veer-fs-xs);
+      font-weight: 600;
     }
     .lan-runtime-note {
       margin: 0;
       color: var(--veer-muted);
-      font-size: 11px;
+      font-size: var(--veer-fs-xs);
       line-height: 1.45;
       overflow-wrap: anywhere;
     }
@@ -199,12 +197,45 @@
         flex: 1 1 auto;
       }
     }
+    /* Patchbay grammar overrides */
+    .lan-page { padding: 0 0 4px; }
+    /* LAN and WAN sections stack full width; neither leaves an empty half column. */
+    .lan-section-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+    .lan-form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .lan-service-section .lan-form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    /* Every section fills whole rows: the LAN picker spans two columns (dropdown and name side by side),
+       WAN egress uses two columns, and the DHCPv4 switch heads its own section. */
+    .lan-form-grid > :has(.veer-record-picker) { grid-column: span 2; }
+    .lan-section-grid > .lan-form-section:nth-child(2) .lan-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .lan-section-grid > .lan-form-section:nth-child(2) .lan-form-grid > :has(.veer-record-picker) { grid-column: auto; }
+    .lan-service-section .lan-form-grid > :first-child { grid-column: 1 / -1; }
+    .lan-form-section { padding: 0; border: 0; border-radius: 0; background: transparent; }
+    .lan-form-section > * + * { margin-top: 14px; }
+    .lan-section-grid > .lan-form-section + .lan-form-section { margin-top: 20px; padding: 20px 0 0; border-top: 1px solid var(--veer-border); }
+    .lan-section-title { color: var(--veer-muted); font-size: var(--veer-fs-xs); letter-spacing: .08em; text-transform: uppercase; }
+    .lan-form-grid { gap: 14px 12px; }
+    .lan-field-label { font-size: var(--veer-fs-sm); font-weight: 500; }
+    .lan-hint { width: 15px; height: 15px; background: transparent; font-weight: 500; }
+    .lan-check-field, .lan-protocols { min-height: 32px; padding: 0; border: 0; background: transparent; }
+    .lan-check-field { display: flex; align-items: center; }
+    .lan-protocols label { color: var(--veer-text); font-family: var(--veer-mono); font-weight: 500; }
+    .lan-actions { padding-top: 16px; border-top: 1px solid var(--veer-border); }
+    @media (max-width: 880px) {
+      .lan-form-grid, .lan-service-section .lan-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 620px) {
+      .lan-form-grid, .lan-service-section .lan-form-grid, .lan-section-grid > .lan-form-section:nth-child(2) .lan-form-grid { grid-template-columns: minmax(0, 1fr); }
+      .lan-form-grid > :has(.veer-record-picker) { grid-column: auto; }
+    }
+    /* End Patchbay grammar overrides */
   </style>
 </head>
 <body>
   <script>
     (function () {
       const F = window.VeerPluginHost;
+      const notify = F.notify || F.toast;
+      const notifyError = F.notifyError || F.toastError;
       if (!F) {
         document.body.textContent = 'VeerPluginHost is not available.';
         return;
@@ -898,11 +929,11 @@
           await refreshRecords(p.lan_id);
           fillForm(p.lan_id);
           setStatus('status.saved');
-          if (!options.silent) F.toast(T('toast.saved'));
+          if (!options.silent) notify(T('toast.saved'));
           return p;
         } catch (e) {
           setStatus('status.saveFailed');
-          if (!options.silent) F.toastError(e);
+          if (!options.silent) notifyError(e);
           throw e;
         } finally {
           F.requestResize();
@@ -920,9 +951,9 @@
           renderStatus();
           renderPlan();
           await loadTraffic({ key: selected, silent: true });
-          if (!options.silent) F.toast(T('toast.loaded'));
+          if (!options.silent) notify(T('toast.loaded'));
         } catch (e) {
-          if (!options.silent) F.toastError(e);
+          if (!options.silent) notifyError(e);
           throw e;
         } finally {
           F.requestResize();
@@ -937,10 +968,10 @@
           await F.action('apply_network', p);
           await loadProfile({ key: p.lan_id, silent: true });
           setStatus('status.applied');
-          F.toast(T('toast.applied'));
+          notify(T('toast.applied'));
         } catch (e) {
           setStatus('status.applyFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           setBusy(button, false, T('action.apply'));
           F.requestResize();
@@ -958,7 +989,7 @@
           });
           if (!confirmed) return;
         } catch (e) {
-          F.toastError(e);
+          notifyError(e);
           return;
         }
         setBusy(button, true, T('status.disabling'));
@@ -968,10 +999,10 @@
           await F.action('teardown', p);
           await loadProfile({ key: p.lan_id, silent: true });
           setStatus('status.disabled');
-          F.toast(T('toast.disabled'));
+          notify(T('toast.disabled'));
         } catch (e) {
           setStatus('status.disableFailed');
-          F.toastError(e);
+          notifyError(e);
         } finally {
           setBusy(button, false, T('action.teardown'));
           F.requestResize();
@@ -1235,7 +1266,7 @@
           if (serial === trafficRequestSerial) updateTraffic(response && response.result ? response.result : null);
         }).catch(function (error) {
           if (serial === trafficRequestSerial) updateTraffic({ available: false, reason: F.errorText(error) });
-          if (!options.silent) F.toastError(error);
+          if (!options.silent) notifyError(error);
         }).finally(function () {
           F.requestResize();
         });
@@ -1257,7 +1288,7 @@
           renderPlan();
           await loadTraffic({ key: current, silent: true });
         } catch (e) {
-          F.toastError(e);
+          notifyError(e);
           throw e;
         } finally {
           F.requestResize();
@@ -1288,7 +1319,7 @@
 
       saveButton = i18nButton('action.save', function () {
         runButtonTask(saveButton, T('status.saving'), function () { return saveProfile(); }).catch(function () {});
-      });
+      }, true);
       loadButton = i18nButton('action.load', function () {
         runButtonTask(loadButton, T('action.load'), function () { return loadProfile({ silent: false }); }).catch(function () {});
       }, true);
@@ -1307,10 +1338,9 @@
       dhcpv4PoolEndField = field('field.poolEnd', dhcpv4PoolEnd, 'hint.pool');
       const page = F.h('main', { className: F.classes.page + ' lan-page' }, [
         F.stack([
-          F.card([
+          F.h('section', { className: 'veer-context' }, [
             F.h('div', { className: F.classes.toolbar }, [
               F.h('div', { className: 'lan-title-row' }, [
-                textNode('h1', { className: F.classes.title }, 'title'),
                 textNode('p', { className: F.classes.description }, 'desc')
               ]),
               F.h('div', { className: F.classes.toolbar + ' lan-badges' }, [
@@ -1319,7 +1349,7 @@
                 status
               ])
             ])
-          ], { className: 'lan-hero' }),
+          ]),
           F.h('div', { className: F.classes.grid + ' lan-overview' }, [
             i18nStat('stat.bridge', 'br-lan', 'stat.bridge.detail'),
             i18nStat('stat.ports', 'stat.ports.value', 'stat.ports.detail', true),
@@ -1383,8 +1413,9 @@
       ]);
 
       document.body.replaceChildren(page);
+      if (F.headerActions) F.headerActions([saveButton, applyButton]);
       syncAddressServiceFields();
-      loadProfile({ silent: true }).catch(function (e) { F.toastError(e); }).finally(F.requestResize);
+      loadProfile({ silent: true }).catch(function (e) { notifyError(e); }).finally(F.requestResize);
       const trafficTimer = window.setInterval(function () {
         if (document.visibilityState !== 'hidden' && !lanPicker.isNew()) {
           loadTraffic({ key: lanPicker.value(), silent: true });

@@ -29,7 +29,7 @@ const (
 	pluginControlKVResourceID          = "__kv"
 	pluginControlSecretResourceID      = "__secret"
 	pluginControlTimeout               = 20 * time.Second
-	pluginControlMaxSecretBytes        = 4096
+	pluginControlMaxSecretBytes        = 2 << 20
 	pluginControlMaxSecrets            = 128
 	pluginControlMaxKVRecords          = 1024
 	pluginControlMaxKVRecordBytes      = 64 << 10
@@ -63,6 +63,7 @@ var errPluginControlDisabledByState = errors.New("plugin is disabled")
 
 var pluginControlReservedMapNames = map[string]string{
 	"tc_prog_chain_v4":             "shared Veer TC tail-call chain",
+	"tc_plugin_hooks_v4":           "host-managed Veer TC plugin hook slots",
 	"tc_plugin_config_v4":          "shared Veer TC pipeline configuration",
 	"tc_plugin_interfaces_v4":      "shared Veer TC interface masks",
 	"tc_dispatch_scratch_v4":       "shared Veer TC dispatch scratch",
@@ -76,6 +77,7 @@ var pluginControlReservedMapNames = map[string]string{
 	"tc_packet_meta_v4":            "shared Veer IPv4 packet metadata",
 	"tc_packet_meta_v6":            "shared Veer IPv6 packet metadata",
 	"xdp_prog_chain":               "shared XDP tail-call chain",
+	"xdp_plugin_hooks":             "host-managed XDP plugin hook slots",
 }
 
 type pluginControlRuntime interface {
@@ -156,6 +158,7 @@ type gojaPluginControlRuntime struct {
 	l2Transport          pluginControlL2Transport
 	udpTransport         pluginControlUDPTransport
 	socketRegistry       *pluginControlSocketRegistry
+	processRegistry      *pluginProcessRegistry
 	networkBroker        pluginControlNetworkBroker
 	netAdmin             pluginControlNetAdmin
 	snapshot             pluginRuntimeSnapshot
@@ -336,6 +339,7 @@ type pluginControlHost struct {
 	controlGeneration           string
 	eventStack                  []string
 	executionDeadline           time.Time
+	executionStop               <-chan struct{}
 	remoteEventInvoker          pluginControlRemoteEventInvoker
 }
 
@@ -385,6 +389,7 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 		l2Transport:          newPluginControlL2Transport(),
 		udpTransport:         newPluginControlUDPTransport(),
 		socketRegistry:       newPluginControlSocketRegistry(socketTransport),
+		processRegistry:      &pluginProcessRegistry{cfg: cfg},
 		networkBroker:        newPluginControlNetworkBroker(socketTransport),
 		netAdmin:             newPluginControlNetAdmin(),
 		timers:               make(map[pluginControlTimerKey]pluginControlTimerState),
@@ -457,6 +462,9 @@ func (rt *gojaPluginControlRuntime) currentPluginBlobStore() *pluginBlobStore {
 func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRuntimeSnapshot {
 	rt.reconcileMu.Lock()
 	defer rt.reconcileMu.Unlock()
+	if err := recoverPendingPluginNetTransactions(rt.db, rt.netAdmin); err != nil {
+		log.Printf("plugin network recovery remains pending: %v", err)
+	}
 
 	_, implicitMigrationTransaction, migrationTransactionErr := rt.beginImplicitPluginResourceMigrationTransaction()
 
@@ -584,6 +592,9 @@ func (rt *gojaPluginControlRuntime) Reconcile(catalog PluginCatalog) pluginRunti
 		rt.interruptPluginControlIfRunning(pluginID, "plugin deactivation requested")
 		if _, err := rt.runPluginControlWithSurface(previous, pluginControlEvent{Kind: "deactivate", Reason: "plugin disabled, removed, or no longer loadable"}, true); err != nil {
 			log.Printf("plugin control deactivate %s failed: %v", pluginID, err)
+		}
+		if rt.processRegistry != nil {
+			rt.processRegistry.ClosePlugin(pluginID)
 		}
 		if rt.socketRegistry != nil {
 			rt.socketRegistry.ClosePlugin(pluginID)
@@ -792,6 +803,9 @@ func (rt *gojaPluginControlRuntime) Close() error {
 	}
 	rt.clearAllPluginLogs()
 	rt.clearAllPluginMetrics()
+	if rt.processRegistry != nil {
+		rt.processRegistry.CloseAll()
+	}
 	if rt.socketRegistry != nil {
 		rt.socketRegistry.CloseAll()
 	}
@@ -1022,6 +1036,9 @@ func (rt *gojaPluginControlRuntime) deactivatePluginControl(pluginID string) {
 	rt.stopPluginEventSubscriptions(pluginID)
 	rt.stopPluginRingSubscriptions(pluginID)
 	rt.clearPluginControlCircuits(pluginID)
+	if rt.processRegistry != nil {
+		rt.processRegistry.ClosePlugin(pluginID)
+	}
 	if rt.socketRegistry != nil {
 		rt.socketRegistry.ClosePlugin(pluginID)
 	}
@@ -1634,6 +1651,7 @@ func (vm *pluginControlVM) newControlHost(plugin LoadedPlugin, trackRuntime bool
 		workerVM:          vm.mode == "worker",
 		workerName:        vm.workerName,
 		controlGeneration: controlGeneration,
+		executionStop:     vm.stop,
 	}
 	if err := host.install(); err != nil {
 		return nil, err
@@ -2267,6 +2285,23 @@ func pluginControlDecodeJSON(raw json.RawMessage) any {
 }
 
 func (h *pluginControlHost) install() error {
+	processAPI := h.vm.NewObject()
+	for name, method := range map[string]func(goja.FunctionCall) goja.Value{
+		"start": h.processStart, "status": h.processStatus, "list": h.processList,
+		"stop": h.processStop, "restart": h.processRestart, "logs": h.processLogs,
+		"binaryInstall": h.processBinaryInstall, "binaryStatus": h.processBinaryStatus,
+		"binarySelect": h.processBinarySelect, "binaryRemove": h.processBinaryRemove,
+	} {
+		if err := processAPI.Set(name, method); err != nil {
+			return err
+		}
+	}
+	if err := processAPI.Set("exec", h.processExec); err != nil {
+		return err
+	}
+	if err := h.vm.Set("process", processAPI); err != nil {
+		return err
+	}
 	pluginAPI := h.vm.NewObject()
 	if err := pluginAPI.Set("host", h.pluginHostInfo); err != nil {
 		return err
@@ -2601,6 +2636,9 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := linkAPI.Set("ensureVeth", h.netLinkEnsureVeth); err != nil {
+		return err
+	}
+	if err := linkAPI.Set("ensureHelperWAN", h.netLinkEnsureHelperWAN); err != nil {
 		return err
 	}
 	if err := linkAPI.Set("ensureDummy", h.netLinkEnsureDummy); err != nil {
@@ -3078,17 +3116,18 @@ func (h *pluginControlHost) hookAttach(call goja.FunctionCall) goja.Value {
 }
 
 type pluginControlPipelineAttachment struct {
-	ID         string   `json:"id"`
-	Pipeline   string   `json:"pipeline,omitempty"`
-	Direction  string   `json:"direction,omitempty"`
-	Phase      string   `json:"phase,omitempty"`
-	Engine     string   `json:"engine,omitempty"`
-	Attach     string   `json:"attach,omitempty"`
-	Priority   int      `json:"priority,omitempty"`
-	Program    string   `json:"program"`
-	Mode       string   `json:"mode,omitempty"`
-	Context    []string `json:"context,omitempty"`
-	Interfaces []string `json:"interfaces,omitempty"`
+	ID              string   `json:"id"`
+	Pipeline        string   `json:"pipeline,omitempty"`
+	Direction       string   `json:"direction,omitempty"`
+	Phase           string   `json:"phase,omitempty"`
+	Engine          string   `json:"engine,omitempty"`
+	Attach          string   `json:"attach,omitempty"`
+	Priority        int      `json:"priority,omitempty"`
+	Program         string   `json:"program"`
+	Mode            string   `json:"mode,omitempty"`
+	Context         []string `json:"context,omitempty"`
+	Interfaces      []string `json:"interfaces,omitempty"`
+	BindingRequired bool     `json:"binding_required,omitempty"`
 }
 
 func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
@@ -3125,15 +3164,16 @@ func (h *pluginControlHost) pipelineAttach(call goja.FunctionCall) goja.Value {
 		h.throwf("pipeline.attach: phase must be around_core or after_apply")
 	}
 	hook := PluginHook{
-		ID:         spec.ID,
-		Engine:     spec.Engine,
-		Attach:     spec.Attach,
-		Stage:      stage,
-		Priority:   spec.Priority,
-		Program:    spec.Program,
-		Mode:       spec.Mode,
-		Context:    append([]string(nil), spec.Context...),
-		Interfaces: append([]string(nil), spec.Interfaces...),
+		ID:              spec.ID,
+		Engine:          spec.Engine,
+		Attach:          spec.Attach,
+		Stage:           stage,
+		Priority:        spec.Priority,
+		Program:         spec.Program,
+		Mode:            spec.Mode,
+		Context:         append([]string(nil), spec.Context...),
+		Interfaces:      append([]string(nil), spec.Interfaces...),
+		BindingRequired: spec.BindingRequired,
 	}
 	if hook.Engine == "" {
 		hook.Engine = kernelEngineTC

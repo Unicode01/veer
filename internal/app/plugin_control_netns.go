@@ -225,6 +225,8 @@ func (h *pluginControlHost) netNamespaceEnsure(call goja.FunctionCall) goja.Valu
 		h.throwf("net.namespace.ensure: %v", err)
 	}
 	h.requireNamespaceAccess(name, "net.namespace.ensure")
+	unlock := h.lockPluginNetMutation([]pluginOwnedResourceRef{{pluginOwnedResourceTypeNamespace, name}}, "net.namespace.ensure")
+	defer unlock()
 	loopbackUp := true
 	if raw := h.objectField(obj, "loopback_up"); goja.IsUndefined(raw) || goja.IsNull(raw) {
 		if raw = h.objectField(obj, "loopbackUp"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
@@ -299,6 +301,8 @@ func (h *pluginControlHost) netNamespaceDelete(call goja.FunctionCall) goja.Valu
 		h.throwf("net.namespace.delete: %v", err)
 	}
 	h.requireNamespaceAccess(name, "net.namespace.delete")
+	unlock := h.lockPluginNetMutation([]pluginOwnedResourceRef{{pluginOwnedResourceTypeNamespace, name}}, "net.namespace.delete")
+	defer unlock()
 	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeNamespace, name)
 	if err != nil {
 		h.throwf("net.namespace.delete: inspect ownership: %v", err)
@@ -331,6 +335,8 @@ func (h *pluginControlHost) netNamespaceRelease(call goja.FunctionCall) goja.Val
 		h.throwf("net.namespace.release: %v", err)
 	}
 	h.requireNamespaceAccess(name, "net.namespace.release")
+	unlock := h.lockPluginNetMutation([]pluginOwnedResourceRef{{pluginOwnedResourceTypeNamespace, name}}, "net.namespace.release")
+	defer unlock()
 	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeNamespace, name)
 	if err != nil {
 		h.throwf("net.namespace.release: inspect ownership: %v", err)
@@ -385,6 +391,8 @@ func (h *pluginControlHost) netTunTapEnsure(call goja.FunctionCall) goja.Value {
 	}
 	h.requireNamespaceAccess(req.Namespace, "net.tuntap.ensure")
 	h.requireNetAccess("tuntap", req.Name, "net.tuntap.ensure")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.tuntap.ensure", req.Name)
+	defer unlock()
 	key := pluginControlTunTapResourceKey(req.Namespace, req.Name)
 	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeTunTap, key)
 	if err != nil {
@@ -434,6 +442,9 @@ func (h *pluginControlHost) netTunTapEnsure(call goja.FunctionCall) goja.Value {
 func (h *pluginControlHost) netTunTapClose(call goja.FunctionCall) goja.Value {
 	provider := h.networkProviderOrThrow("net.tuntap", "net.tuntap.close")
 	req, owned := h.requiredOwnedTunTap(call, "net.tuntap.close")
+	unlock := h.lockPluginNetLinks(req.Namespace, "net.tuntap.close", req.Name)
+	defer unlock()
+	req, owned = h.requiredOwnedTunTap(call, "net.tuntap.close")
 	if err := provider.TunTapClose(h.plugin.ID, pluginControlNetTunTapCloseRequest{Name: req.Name, Namespace: req.Namespace, IfIndex: req.IfIndex}); err != nil {
 		h.throwf("net.tuntap.close: %v", err)
 	}

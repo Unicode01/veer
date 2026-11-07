@@ -99,7 +99,7 @@ func BenchmarkKernelXDPPluginChain(b *testing.B) {
 			if count > 0 {
 				mask = (uint32(1) << uint32(count)) - 1
 			}
-			if err := pieces.config.Put(uint32(0), kernelXDPPluginConfig{Count: uint32(count), ActiveBank: 0, GlobalMask: mask}); err != nil {
+			if err := syncKernelXDPPluginConfig(pieces.config, kernelXDPPluginConfig{Count: uint32(count), ActiveBank: 0, GlobalMask: mask}); err != nil {
 				b.Fatal(err)
 			}
 			run(b, pieces.dispatcher)

@@ -93,9 +93,12 @@ type pluginOwnedRouteMutation struct {
 type pluginOwnedRouteLinkIdentity struct {
 	Dev     string `json:"dev"`
 	IfIndex int    `json:"ifindex"`
+	Kind    string `json:"kind,omitempty"`
+	MAC     string `json:"mac,omitempty"`
 }
 
 type pluginOwnedRuleMutation struct {
+	LinkIdentities    []pluginOwnedRouteLinkIdentity    `json:"link_identities,omitempty"`
 	Version           int                               `json:"version"`
 	BootID            string                            `json:"boot_id,omitempty"`
 	NamespaceIdentity pluginControlNetNamespaceIdentity `json:"namespace_identity,omitempty"`
@@ -105,6 +108,7 @@ type pluginOwnedRuleMutation struct {
 }
 
 type pluginOwnedNeighMutation struct {
+	LinkIdentities    []pluginOwnedRouteLinkIdentity    `json:"link_identities,omitempty"`
 	Version           int                               `json:"version"`
 	BootID            string                            `json:"boot_id,omitempty"`
 	NamespaceIdentity pluginControlNetNamespaceIdentity `json:"namespace_identity,omitempty"`
@@ -331,7 +335,10 @@ func pluginOwnedResourceGenerationChanged(previous string, next []byte) bool {
 		return true
 	}
 	for index := range oldGeneration.LinkIdentities {
-		if oldGeneration.LinkIdentities[index] != newGeneration.LinkIdentities[index] {
+		old, current := oldGeneration.LinkIdentities[index], newGeneration.LinkIdentities[index]
+		if old.Dev != current.Dev || old.IfIndex != current.IfIndex ||
+			(old.Kind != "" && current.Kind != "" && old.Kind != current.Kind) ||
+			(old.MAC != "" && current.MAC != "" && !strings.EqualFold(old.MAC, current.MAC)) {
 			return true
 		}
 	}
@@ -914,7 +921,7 @@ func clonePluginControlNetRouteStates(states []pluginControlNetRouteState) []plu
 	return out
 }
 
-func (h *pluginControlHost) claimPluginRuleMutation(req pluginControlNetRuleRequest, currentPresent bool, original []pluginControlNetRuleState) (pluginOwnedRuleMutation, bool, error) {
+func (h *pluginControlHost) claimPluginRuleMutation(req pluginControlNetRuleRequest, currentPresent bool, original []pluginControlNetRuleState, links ...[]pluginNetTransactionLinkIdentity) (pluginOwnedRuleMutation, bool, error) {
 	if h.db == nil {
 		return pluginOwnedRuleMutation{}, false, fmt.Errorf("plugin ownership store is unavailable")
 	}
@@ -945,7 +952,7 @@ func (h *pluginControlHost) claimPluginRuleMutation(req pluginControlNetRuleRequ
 		if err := json.Unmarshal([]byte(existing.MetadataJSON), &previous); err != nil {
 			return pluginOwnedRuleMutation{}, false, fmt.Errorf("decode policy rule ownership metadata: %w", err)
 		}
-		candidate := pluginOwnedRuleMutation{Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, Original: append([]pluginControlNetRuleState(nil), original...)}
+		candidate := pluginOwnedRuleMutation{Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetRuleState(nil), original...)}
 		candidateJSON, marshalErr := json.Marshal(candidate)
 		if marshalErr != nil {
 			return pluginOwnedRuleMutation{}, false, marshalErr
@@ -955,7 +962,7 @@ func (h *pluginControlHost) claimPluginRuleMutation(req pluginControlNetRuleRequ
 			created = true
 		}
 	} else {
-		previous = pluginOwnedRuleMutation{Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, Original: append([]pluginControlNetRuleState(nil), original...)}
+		previous = pluginOwnedRuleMutation{Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetRuleState(nil), original...)}
 	}
 	next := previous
 	next.Current = req
@@ -978,7 +985,7 @@ func (h *pluginControlHost) claimPluginRuleMutation(req pluginControlNetRuleRequ
 	return previous, created, nil
 }
 
-func (h *pluginControlHost) claimPluginNeighMutation(req pluginControlNetNeighRequest, currentPresent bool, original []pluginControlNetNeighState, devIfIndex int) (pluginOwnedNeighMutation, bool, bool, error) {
+func (h *pluginControlHost) claimPluginNeighMutation(req pluginControlNetNeighRequest, currentPresent bool, original []pluginControlNetNeighState, devIfIndex int, links ...[]pluginNetTransactionLinkIdentity) (pluginOwnedNeighMutation, bool, bool, error) {
 	if h.db == nil {
 		return pluginOwnedNeighMutation{}, false, false, fmt.Errorf("plugin ownership store is unavailable")
 	}
@@ -1017,7 +1024,7 @@ func (h *pluginControlHost) claimPluginNeighMutation(req pluginControlNetNeighRe
 			return pluginOwnedNeighMutation{}, false, false, fmt.Errorf("decode neighbor ownership metadata: %w", err)
 		}
 		candidate := pluginOwnedNeighMutation{
-			Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, Original: append([]pluginControlNetNeighState(nil), original...), DevIfIndex: devIfIndex,
+			Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetNeighState(nil), original...), DevIfIndex: devIfIndex,
 		}
 		candidateJSON, marshalErr := json.Marshal(candidate)
 		if marshalErr != nil {
@@ -1029,7 +1036,7 @@ func (h *pluginControlHost) claimPluginNeighMutation(req pluginControlNetNeighRe
 		}
 	} else {
 		previous = pluginOwnedNeighMutation{
-			Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, Original: append([]pluginControlNetNeighState(nil), original...), DevIfIndex: devIfIndex,
+			Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetNeighState(nil), original...), DevIfIndex: devIfIndex,
 		}
 	}
 	next := previous
@@ -1054,6 +1061,13 @@ func (h *pluginControlHost) claimPluginNeighMutation(req pluginControlNetNeighRe
 }
 
 func rollbackPluginLinkOperation(admin pluginControlNetAdmin, info pluginControlNetLinkInfo, originals map[string]any) error {
+	current, present, err := admin.LinkLookup(info.Name)
+	if err != nil || !present {
+		return err
+	}
+	if !pluginOwnedLinkIdentityMatches(current, info.IfIndex, info.Kind, info.MAC) {
+		return nil
+	}
 	properties := make([]string, 0, len(originals))
 	for property := range originals {
 		properties = append(properties, property)
@@ -1078,7 +1092,7 @@ func rollbackPluginLinkOperation(admin pluginControlNetAdmin, info pluginControl
 func (h *pluginControlHost) rollbackNewPluginResourceClaims(admin pluginControlNetAdmin, info pluginControlNetLinkInfo, originals map[string]any, refs []pluginOwnedResourceRef) error {
 	failures := make([]string, 0, 2)
 	if err := rollbackPluginLinkOperation(admin, info, originals); err != nil {
-		failures = append(failures, err.Error())
+		return fmt.Errorf("rollback plugin network mutation: %w", err)
 	}
 	if err := releasePluginOwnedResourceRefs(h.db, h.plugin.ID, refs); err != nil {
 		failures = append(failures, err.Error())
@@ -1099,8 +1113,10 @@ func (h *pluginControlHost) rollbackPluginLinkSnapshots(admin pluginControlNetAd
 			failures = append(failures, snapshot.Info.Name+": "+err.Error())
 		}
 	}
-	if err := releasePluginOwnedResourceRefs(h.db, h.plugin.ID, refs); err != nil {
-		failures = append(failures, err.Error())
+	if len(failures) == 0 {
+		if err := releasePluginOwnedResourceRefs(h.db, h.plugin.ID, refs); err != nil {
+			failures = append(failures, err.Error())
+		}
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("rollback plugin link changes: %s", strings.Join(failures, "; "))
@@ -1115,122 +1131,10 @@ func (h *pluginControlHost) rollbackPluginAddressOperation(admin pluginControlNe
 	} else {
 		restoreErr = admin.AddrDelete(req)
 	}
-	releaseErr := releasePluginOwnedResourceRefs(h.db, h.plugin.ID, refs)
-	if restoreErr != nil && releaseErr != nil {
-		return fmt.Errorf("restore address: %v; %v", restoreErr, releaseErr)
-	}
 	if restoreErr != nil {
 		return restoreErr
 	}
-	return releaseErr
-}
-
-func (h *pluginControlHost) rollbackPluginRouteOperation(admin pluginControlNetAdmin, intended pluginControlNetRouteRequest, intendedPresent bool, previous pluginOwnedRouteMutation, created bool) error {
-	key := pluginControlNetRouteLeaseKey(intended)
-	failures := make([]string, 0, 3)
-	if intendedPresent {
-		if err := admin.RouteDelete(intended); err != nil {
-			failures = append(failures, "delete intended route: "+err.Error())
-		}
-	}
-	if previous.CurrentPresent {
-		if err := admin.RouteReplace(previous.Current); err != nil {
-			failures = append(failures, "restore previous route: "+err.Error())
-		}
-	} else if created {
-		if err := admin.RouteRestore(previous.Original); err != nil {
-			failures = append(failures, "restore original route: "+err.Error())
-		}
-	}
-	if created {
-		if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeRoute, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			failures = append(failures, "release route lease: "+err.Error())
-		}
-	} else {
-		metadata, err := json.Marshal(previous)
-		if err == nil {
-			err = store.UpdatePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeRoute, key, string(metadata))
-		}
-		if err != nil {
-			failures = append(failures, "restore route lease: "+err.Error())
-		}
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("rollback route mutation: %s", strings.Join(failures, "; "))
-	}
-	return nil
-}
-
-func (h *pluginControlHost) rollbackPluginRuleOperation(admin pluginControlNetAdmin, intended pluginControlNetRuleRequest, intendedPresent bool, previous pluginOwnedRuleMutation, created bool) error {
-	key := pluginControlNetRuleLeaseKey(intended)
-	failures := make([]string, 0, 3)
-	if intendedPresent {
-		if err := admin.RuleDelete(intended); err != nil {
-			failures = append(failures, "delete intended policy rule: "+err.Error())
-		}
-	}
-	if previous.CurrentPresent {
-		if err := admin.RuleReplace(previous.Current); err != nil {
-			failures = append(failures, "restore previous policy rule: "+err.Error())
-		}
-	} else if created {
-		if err := admin.RuleRestore(previous.Original); err != nil {
-			failures = append(failures, "restore original policy rule: "+err.Error())
-		}
-	}
-	if created {
-		if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeRule, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			failures = append(failures, "release policy rule lease: "+err.Error())
-		}
-	} else {
-		metadata, err := json.Marshal(previous)
-		if err == nil {
-			err = store.UpdatePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeRule, key, string(metadata))
-		}
-		if err != nil {
-			failures = append(failures, "restore policy rule lease: "+err.Error())
-		}
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("rollback policy rule mutation: %s", strings.Join(failures, "; "))
-	}
-	return nil
-}
-
-func (h *pluginControlHost) rollbackPluginNeighOperation(admin pluginControlNetAdmin, intended pluginControlNetNeighRequest, intendedPresent bool, previous pluginOwnedNeighMutation, created bool) error {
-	key := pluginControlNetNeighLeaseKey(intended)
-	failures := make([]string, 0, 3)
-	if intendedPresent {
-		if err := admin.NeighDelete(intended); err != nil {
-			failures = append(failures, "delete intended neighbor: "+err.Error())
-		}
-	}
-	if previous.CurrentPresent {
-		if err := admin.NeighReplace(previous.Current); err != nil {
-			failures = append(failures, "restore previous neighbor: "+err.Error())
-		}
-	} else if created {
-		if err := admin.NeighRestore(previous.Original); err != nil {
-			failures = append(failures, "restore original neighbor: "+err.Error())
-		}
-	}
-	if created {
-		if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeNeighbor, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			failures = append(failures, "release neighbor lease: "+err.Error())
-		}
-	} else {
-		metadata, err := json.Marshal(previous)
-		if err == nil {
-			err = store.UpdatePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeNeighbor, key, string(metadata))
-		}
-		if err != nil {
-			failures = append(failures, "restore neighbor lease: "+err.Error())
-		}
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("rollback neighbor mutation: %s", strings.Join(failures, "; "))
-	}
-	return nil
+	return releasePluginOwnedResourceRefs(h.db, h.plugin.ID, refs)
 }
 
 func (h *pluginControlHost) releaseRestoredPluginLinkLease(namespace, interfaceName, property string, desired any) error {
@@ -1489,6 +1393,10 @@ func cleanupPluginOwnedResources(db *sql.DB, admin pluginControlNetAdmin, plugin
 	if db == nil || admin == nil || strings.TrimSpace(pluginID) == "" {
 		return nil
 	}
+	var failures []string
+	if err := recoverPluginNetTransactionsForResources(db, admin, nil, pluginID); err != nil {
+		failures = append(failures, err.Error())
+	}
 	items, err := store.GetPluginOwnedResources(db, pluginID)
 	if err != nil {
 		return err
@@ -1496,20 +1404,121 @@ func cleanupPluginOwnedResources(db *sql.DB, admin pluginControlNetAdmin, plugin
 	sort.SliceStable(items, func(i, j int) bool {
 		return pluginOwnedResourceCleanupPriority(items[i]) < pluginOwnedResourceCleanupPriority(items[j])
 	})
-	failures := make([]string, 0)
+	blockedLinks := make(map[pluginOwnedResourceRef]bool)
+	blockedNamespaces := make(map[string]bool)
 	for _, item := range items {
-		if err := restorePluginOwnedResource(admin, item); err != nil {
-			failures = append(failures, item.ResourceKey+": "+err.Error())
+		ref := pluginOwnedResourceRef{item.ResourceType, item.ResourceKey}
+		var dependencies []pluginOwnedResourceRef
+		var namespace string
+		var current *store.PluginOwnedResource
+		var inspectErr error
+		var unlock func()
+		for {
+			dependencies, namespace = pluginOwnedResourceDependencies(item)
+			unlock = lockPluginNetResources(db, append([]pluginOwnedResourceRef{ref}, dependencies...))
+			current, inspectErr = store.PluginOwnedResourceOrNil(db, item.ResourceType, item.ResourceKey)
+			if inspectErr == nil && current != nil && current.PluginID == pluginID && current.MetadataJSON != item.MetadataJSON {
+				// The same plugin may have moved this slot to another interface
+				// while cleanup waited. Acquire the updated dependency set first.
+				unlock()
+				item = *current
+				continue
+			}
+			break
+		}
+		if inspectErr == nil && (current == nil || current.PluginID != pluginID) {
+			unlock()
+			continue
+		}
+		if inspectErr == nil {
+			item = *current
+		}
+		if inspectErr == nil && ((item.ResourceType == pluginOwnedResourceTypeLink && blockedLinks[ref]) || (item.ResourceType == pluginOwnedResourceTypeTunTap && blockedLinks[pluginOwnedResourceRef{pluginOwnedResourceTypeLink, item.ResourceKey}]) || (item.ResourceType == pluginOwnedResourceTypeNamespace && blockedNamespaces[item.ResourceKey])) {
+			inspectErr = fmt.Errorf("dependent resource cleanup is still pending")
+		}
+		if inspectErr == nil {
+			inspectErr = checkPendingPluginNetResources(db, pluginID, []pluginOwnedResourceRef{ref})
+		}
+		if inspectErr == nil {
+			inspectErr = restorePluginOwnedResource(admin, item)
+		}
+		if inspectErr != nil {
+			for _, dependency := range dependencies {
+				blockedLinks[dependency] = true
+			}
+			blockedNamespaces[namespace] = true
+			unlock()
+			failures = append(failures, item.ResourceKey+": "+inspectErr.Error())
 			continue
 		}
 		if err := store.DeletePluginOwnedResource(db, pluginID, item.ResourceType, item.ResourceKey); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			for _, dependency := range dependencies {
+				blockedLinks[dependency] = true
+			}
+			blockedNamespaces[namespace] = true
 			failures = append(failures, item.ResourceKey+" ledger: "+err.Error())
 		}
+		unlock()
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("owned resource cleanup failed: %s", strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+func pluginOwnedResourceDependencies(item store.PluginOwnedResource) ([]pluginOwnedResourceRef, string) {
+	var metadata struct {
+		Namespace string          `json:"namespace"`
+		Name      string          `json:"name"`
+		Interface string          `json:"interface"`
+		Parent    string          `json:"parent"`
+		Peer      string          `json:"peer"`
+		Property  string          `json:"property"`
+		Original  json.RawMessage `json:"original"`
+		Request   struct {
+			Namespace string `json:"namespace"`
+			Interface string `json:"interface"`
+		} `json:"request"`
+		Current struct {
+			Namespace string                         `json:"namespace"`
+			Dev       string                         `json:"dev"`
+			Interface string                         `json:"interface"`
+			IIF       string                         `json:"iif"`
+			OIF       string                         `json:"oif"`
+			Nexthops  []pluginControlNetRouteNexthop `json:"nexthops"`
+		} `json:"current"`
+	}
+	if json.Unmarshal([]byte(item.MetadataJSON), &metadata) != nil {
+		return nil, ""
+	}
+	namespace := metadata.Namespace
+	if namespace == "" {
+		namespace = metadata.Request.Namespace
+	}
+	if namespace == "" {
+		namespace = metadata.Current.Namespace
+	}
+	namespace = normalizePluginControlNamespace(namespace)
+	names := []string{metadata.Name, metadata.Interface, metadata.Parent, metadata.Peer, metadata.Request.Interface, metadata.Current.Dev, metadata.Current.Interface, metadata.Current.IIF, metadata.Current.OIF}
+	for _, hop := range metadata.Current.Nexthops {
+		names = append(names, hop.Dev)
+	}
+	if metadata.Property == "master" {
+		var master string
+		if json.Unmarshal(metadata.Original, &master) == nil {
+			names = append(names, master)
+		}
+	}
+	var refs []pluginOwnedResourceRef
+	if namespace != "host" {
+		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeNamespace, namespace})
+	}
+	for _, name := range names {
+		if name != "" {
+			refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeLink, pluginControlNetScopedResourceKey(namespace, name)})
+		}
+	}
+	return refs, namespace
 }
 
 func restorePluginOwnedResource(admin pluginControlNetAdmin, item store.PluginOwnedResource) error {
@@ -1573,6 +1582,7 @@ func restorePluginOwnedResource(admin pluginControlNetAdmin, item store.PluginOw
 		if !pluginOwnedLinkIdentityMatches(current, metadata.OriginalIfIndex, metadata.OriginalKind, metadata.OriginalMAC) {
 			return nil
 		}
+		metadata.Request.expectedIfIndex = metadata.OriginalIfIndex
 		if metadata.OriginalPresent {
 			return scoped.AddrReplace(metadata.Request)
 		}
@@ -1724,7 +1734,7 @@ func restorePluginOwnedRouteMutation(admin pluginControlNetAdmin, metadata plugi
 			if err != nil || !present {
 				return err
 			}
-			if current.IfIndex != identity.IfIndex {
+			if !pluginOwnedLinkIdentityMatches(current, identity.IfIndex, identity.Kind, identity.MAC) {
 				return nil
 			}
 		}
@@ -1737,25 +1747,48 @@ func restorePluginOwnedRouteMutation(admin pluginControlNetAdmin, metadata plugi
 			return nil
 		}
 	}
+	metadata.Current.expectedLinkIndices = make(map[string]int)
+	for _, identity := range metadata.LinkIdentities {
+		metadata.Current.expectedLinkIndices[identity.Dev] = identity.IfIndex
+	}
 	if metadata.CurrentPresent {
 		if err := admin.RouteDelete(metadata.Current); err != nil {
 			return err
 		}
 	}
-	return admin.RouteRestore(metadata.Original)
+	originals, err := pluginNetRecoverableRouteStates(admin, metadata.Original)
+	if err != nil {
+		return err
+	}
+	return admin.RouteRestore(originals)
 }
 
 func restorePluginOwnedRuleMutation(admin pluginControlNetAdmin, metadata pluginOwnedRuleMutation) error {
+	// Policy rules are keyed by selectors including interface names. Unlike
+	// routes, Linux keeps these rules after the interface disappears. Remove
+	// the exact owned selector but never resurrect it on a replacement link.
+	changed, err := pluginOwnedRouteLinksChanged(admin, metadata.LinkIdentities)
+	if err != nil {
+		return err
+	}
 	if metadata.CurrentPresent {
 		if err := admin.RuleDelete(metadata.Current); err != nil {
 			return err
 		}
 	}
+	if changed {
+		return nil
+	}
 	return admin.RuleRestore(metadata.Original)
 }
 
 func restorePluginOwnedNeighMutation(admin pluginControlNetAdmin, metadata pluginOwnedNeighMutation) error {
-	if metadata.Current.Interface != "" && metadata.DevIfIndex > 0 {
+	if len(metadata.LinkIdentities) > 0 {
+		changed, err := pluginOwnedRouteLinksChanged(admin, metadata.LinkIdentities)
+		if err != nil || changed {
+			return err
+		}
+	} else if metadata.Current.Interface != "" && metadata.DevIfIndex > 0 {
 		current, present, err := pluginOwnedLinkForRestore(admin, metadata.Current.Interface)
 		if err != nil || !present {
 			return err
@@ -1764,12 +1797,36 @@ func restorePluginOwnedNeighMutation(admin pluginControlNetAdmin, metadata plugi
 			return nil
 		}
 	}
+	metadata.Current.expectedIfIndex = metadata.DevIfIndex
 	if metadata.CurrentPresent {
 		if err := admin.NeighDelete(metadata.Current); err != nil {
 			return err
 		}
 	}
 	return admin.NeighRestore(metadata.Original)
+}
+
+func pluginOwnedIdentitiesFromTransactionLinks(groups ...[]pluginNetTransactionLinkIdentity) []pluginOwnedRouteLinkIdentity {
+	var identities []pluginOwnedRouteLinkIdentity
+	for _, links := range groups {
+		for _, link := range links {
+			identities = append(identities, pluginOwnedRouteLinkIdentity{Dev: link.Name, IfIndex: link.IfIndex, Kind: link.Kind, MAC: link.MAC})
+		}
+	}
+	return identities
+}
+
+func pluginOwnedRouteLinksChanged(admin pluginControlNetAdmin, identities []pluginOwnedRouteLinkIdentity) (bool, error) {
+	for _, identity := range identities {
+		current, present, err := admin.LinkLookup(identity.Dev)
+		if err != nil {
+			return false, err
+		}
+		if !present || !pluginOwnedLinkIdentityMatches(current, identity.IfIndex, identity.Kind, identity.MAC) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func pluginOwnedLinkForRestore(admin pluginControlNetAdmin, name string) (pluginControlNetLinkInfo, bool, error) {

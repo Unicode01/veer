@@ -35,6 +35,9 @@ scripts/lib-plugin-test-env.sh
 coverage.out
 test-results/
 
+# local WebUI design references; public documentation under docs/ is tracked
+/docs/ui/
+
 # editor / IDE
 .idea/
 .vscode/
@@ -44,3 +47,12 @@ test-results/
 # OS files
 .DS_Store
 Thumbs.db
+
+# optional kernel module build products
+kernel/**/*.o
+kernel/**/*.ko
+kernel/**/*.mod
+kernel/**/*.mod.c
+kernel/**/.*.cmd
+kernel/**/Module.symvers
+kernel/**/modules.order

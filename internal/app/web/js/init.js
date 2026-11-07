@@ -87,6 +87,7 @@
   }
 
   app.shouldPauseAutoRefresh = function shouldPauseAutoRefresh() {
+    if (app.patchbay && app.patchbay.activeDrawer()) return true;
     if (app.state.activeDropdown) return true;
     if (app.el.egressNATProtocolMenu && !app.el.egressNATProtocolMenu.hidden) return true;
     if (typeof document.querySelector === 'function' &&
@@ -236,8 +237,8 @@
       if (index < 0) return;
 
       let nextIndex = index;
-      if (e.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
-      else if (e.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
+      if ((e.key === 'ArrowRight' || e.key === 'ArrowDown')) nextIndex = (index + 1) % tabs.length;
+      else if ((e.key === 'ArrowLeft' || e.key === 'ArrowUp')) nextIndex = (index - 1 + tabs.length) % tabs.length;
       else if (e.key === 'Home') nextIndex = 0;
       else if (e.key === 'End') nextIndex = tabs.length - 1;
       else return;
@@ -941,18 +942,7 @@
       return;
     }
 
-    const site = {
-      domain: app.$('siteDomain').value.trim(),
-      listen_ip: app.el.siteListenIP.value || '0.0.0.0',
-      listen_interface: app.getInterfaceSubmissionValue(app.el.siteListenIface, app.el.siteListenIfacePicker),
-      backend_ip: app.$('siteBackendIP').value.trim(),
-      backend_source_ip: app.$('siteTransparent').checked ? '' : app.el.siteBackendSourceIP.value,
-      backend_http_port: httpPort,
-      backend_https_port: httpsPort,
-      quic: app.el.siteQUIC.checked,
-      tag: app.$('siteTag').value,
-      transparent: app.$('siteTransparent').checked
-    };
+    const site = app.buildSiteFromForm();
 
     let valid = true;
     if (!app.validateRequiredField(app.$('siteDomain'))) valid = false;
@@ -1029,20 +1019,7 @@
       return;
     }
 
-    const range = {
-      in_interface: app.getInterfaceSubmissionValue(app.el.rangeInInterface, app.el.rangeInInterfacePicker),
-      in_ip: inIPVal,
-      start_port: startPort,
-      end_port: endPort,
-      out_interface: app.getInterfaceSubmissionValue(app.el.rangeOutInterface, app.el.rangeOutInterfacePicker),
-      out_ip: outIP,
-      out_source_ip: app.$('rangeTransparent').checked ? '' : app.el.rangeOutSourceIP.value,
-      out_start_port: parseInt(app.$('rangeOutStartPort').value, 10) || 0,
-      protocol: app.$('rangeProtocol').value,
-      remark: app.$('rangeRemark').value.trim(),
-      tag: app.$('rangeTag').value,
-      transparent: app.$('rangeTransparent').checked
-    };
+    const range = app.buildRangeFromForm();
 
     const warning = app.updateRangeTransparentWarning();
     if (!(await app.confirmTransparentWarning(warning))) return;

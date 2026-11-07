@@ -30,7 +30,7 @@
             document.documentElement.style.colorScheme = resolved;
         })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20260802-1">
+    <link rel="stylesheet" href="style.css?v=20261102-54">
 </head>
 <body>
     <div id="tokenModal" class="modal auth-modal">
@@ -210,7 +210,7 @@
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.outIP">Outbound IP</label>
-                            <input type="text" id="outIP" placeholder="198.51.100.2 / 2001:db8::2" spellcheck="false" autocapitalize="off" inputmode="text" required>
+                            <input type="text" id="outIP" placeholder="198.51.100.2" spellcheck="false" autocapitalize="off" inputmode="text" required>
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.outSourceIP">Fixed Source IP</label>
@@ -452,7 +452,7 @@
                         </div>
                         <div class="form-group">
                             <label data-i18n="range.form.targetIP">Target IP</label>
-                            <input type="text" id="rangeOutIP" placeholder="198.51.100.2 / 2001:db8::2" spellcheck="false" autocapitalize="off" inputmode="text" required>
+                            <input type="text" id="rangeOutIP" placeholder="198.51.100.2" spellcheck="false" autocapitalize="off" inputmode="text" required>
                         </div>
                         <div class="form-group">
                             <label data-i18n="form.outSourceIP">Fixed Source IP</label>
@@ -975,10 +975,10 @@
                 <div class="section-heading-row">
                     <div>
                         <h2 data-i18n="plugins.title">Runtime Plugins</h2>
-                        <p class="section-desc" data-i18n="plugins.desc">Install, configure, and inspect plugin status.</p>
+                        <p class="section-desc" data-i18n="plugins.desc">Configure plugins and inspect their status.</p>
                     </div>
                     <div class="section-heading-actions">
-                        <button type="button" id="addPluginBtn" class="mini-btn" data-i18n="plugins.catalog.add">Add Plugin</button>
+                        <button type="button" id="addPluginBtn" class="mini-btn" data-i18n="plugins.catalog.add" hidden>Add Plugin</button>
                         <button type="button" id="managePluginsAdvancedBtn" class="mini-btn" data-i18n="plugins.manager.advanced">Advanced</button>
                         <button type="button" id="refreshPluginsBtn" class="mini-btn" data-i18n="plugins.refresh">Refresh Plugins</button>
                     </div>
@@ -1201,19 +1201,20 @@
         </div>
     </div>
 
-    <script defer src="js/core.js?v=20260806-1"></script>
-    <script defer src="js/i18n.js?v=20260806-2"></script>
-    <script defer src="js/ui.js?v=20260802-1"></script>
-    <script defer src="js/rules.js?v=20260806-1"></script>
-    <script defer src="js/sites.js?v=20260806-1"></script>
-    <script defer src="js/ranges.js?v=20260407-4"></script>
-    <script defer src="js/egress_nats.js?v=20260407-2"></script>
-    <script defer src="js/ipv6_assignments.js?v=20260408-6"></script>
-    <script defer src="js/managed_networks.js?v=20260422-1"></script>
-    <script defer src="js/workers.js?v=20260729-1"></script>
-    <script defer src="js/plugins.js?v=20260729-1"></script>
-    <script defer src="js/plugin_manager.js?v=20260729-1"></script>
-    <script defer src="js/stats.js?v=20260729-1"></script>
-    <script defer src="js/init.js?v=20260806-1"></script>
+    <script defer src="js/core.js?v=20261102-2"></script>
+    <script defer src="js/i18n.js?v=20261102-54"></script>
+    <script defer src="js/ui.js?v=20261102-2"></script>
+    <script defer src="js/rules.js?v=20261102-2"></script>
+    <script defer src="js/sites.js?v=20261102-2"></script>
+    <script defer src="js/ranges.js?v=20261102-2"></script>
+    <script defer src="js/egress_nats.js?v=20261102-2"></script>
+    <script defer src="js/ipv6_assignments.js?v=20261102-2"></script>
+    <script defer src="js/managed_networks.js?v=20261102-2"></script>
+    <script defer src="js/workers.js?v=20261102-2"></script>
+    <script defer src="js/plugins.js?v=20261102-53"></script>
+    <script defer src="js/plugin_manager.js?v=20261102-2"></script>
+    <script defer src="js/stats.js?v=20261102-2"></script>
+    <script defer src="js/patchbay.js?v=20261102-54"></script>
+    <script defer src="js/init.js?v=20261102-2"></script>
 </body>
 </html>

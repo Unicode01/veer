@@ -131,7 +131,7 @@ exports.onAction = function () {
 	if err := json.Unmarshal([]byte(owned[0].MetadataJSON), &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if len(metadata.Current.Nexthops) != 2 || !reflect.DeepEqual(metadata.LinkIdentities, []pluginOwnedRouteLinkIdentity{{Dev: "host0", IfIndex: 50}, {Dev: "host1", IfIndex: 51}}) {
+	if len(metadata.Current.Nexthops) != 2 || !reflect.DeepEqual(metadata.LinkIdentities, []pluginOwnedRouteLinkIdentity{{Dev: "host0", IfIndex: 50, Kind: "device"}, {Dev: "host1", IfIndex: 51, Kind: "device"}}) {
 		t.Fatalf("multipath ownership = %+v", metadata)
 	}
 	runtime.Reconcile(PluginCatalog{})

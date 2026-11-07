@@ -35,6 +35,7 @@ const PIPELINE_INTERFACE = 'veerpipe0';
 const PIPELINE_BOUNDARY_MAC = '02:00:00:00:10:02';
 
 function main() {
+  testDirectHelperBoundary();
   testRegistration();
   testUpgradeLifecycleSchema();
   testReconcileRestoresOnlyActiveControlState();
@@ -60,6 +61,7 @@ function main() {
   testDisabledAutoRedialHonorsFailureGrace();
   testKeepaliveFinalConfirmationRecoversWithoutPADT();
   testKeepaliveTransportErrorKeepsRetryState();
+  testSessionControlRecoversAfterLinkFailure();
   testAutoRedialAfterKeepaliveTimeout();
   testRedialDiscoveryFailureRetriesWithoutOldKeepalive();
   testAutoRedialDoesNotMaskAuthFailure();
@@ -69,6 +71,7 @@ function main() {
   testDisconnectClearsTunnelAndWANState();
   testTunnelConfigRuntimeApplyReplaysAndClearsMap();
   testTunnelRepairFollowsCurrentInterfaces();
+  testTunnelDataplaneSwitchPreservesSession();
   testTrafficProbeTimeoutFailsClosed();
   testDebugStatsDeclaresCounterBuildMode();
   testTrafficStatsAggregatePerCPUValues();
@@ -983,6 +986,46 @@ function testKeepaliveTransportErrorKeepsRetryState() {
   assert(h.state.timers.has('redial_retry'), 'a retry-time link error must schedule the next attempt');
 }
 
+function testSessionControlRecoversAfterLinkFailure() {
+  for (const failure of ['receive', 'link']) {
+    const h = createHarness({auth: 'none'});
+    const payload = {profile_key: 'default', interface: 'eth0', auth: 'none',
+      timeout_ms: 20, control_ack_timeout_ms: 10, control_idle_timeout_ms: 1,
+      max_frames: 4, session_id: SESSION_ID, ac_mac: AC_MAC,
+      deadline_ms: Date.now() + 2000, slice_ms: 20};
+    h.setResource('sessions', 'last', {phase: 'session_probe', session_id: SESSION_ID,
+      ac_mac: AC_MAC, lcp_ready: true}, true);
+    const originalRecv = h.context.net.l2.recvMany;
+    const originalLinkGet = h.context.net.link.get;
+    const sendsBefore = h.state.l2Sends.length;
+    if (failure === 'receive') h.context.net.l2.recvMany = () => { throw new Error('network is down'); };
+    else h.context.net.link.get = () => { throw new Error('network is down'); };
+    const fire = (value) => {
+      h.state.timers.delete('session_control');
+      h.context.exports.onTimer({timer: {name: 'session_control', payload: value}});
+    };
+    fire(payload);
+    let control = h.resource('sessions', 'control').data;
+    assert.strictEqual(control.io_errors, 1);
+    assert.match(control.events[0].message, /network is down/);
+    assert(h.state.timers.has('session_control'), 'link failure must rearm the consumed one-shot timer');
+    const retry = clone(h.state.timers.get('session_control').payload);
+    assert.strictEqual(retry.deadline_ms, payload.deadline_ms, 'retry must not extend the window');
+    h.context.net.l2.recvMany = originalRecv;
+    h.context.net.link.get = originalLinkGet;
+    fire(retry);
+    control = h.resource('sessions', 'control').data;
+    assert.strictEqual(control.io_errors, 1, 'recovered poll must preserve the diagnostic count');
+    assert(control.polls > 0, 'recovered timer must resume receiving control frames');
+    assert(h.state.timers.has('session_control'));
+    assert.strictEqual(h.resource('sessions', 'last').data.session_id, SESSION_ID);
+    assert.strictEqual(h.state.l2Sends.length, sendsBefore,
+      'a transient control-window failure must not transmit PADT or start discovery');
+    fire(Object.assign({}, retry, {deadline_ms: Date.now() - 1}));
+    assert(!h.state.timers.has('session_control'), 'expired window must stop retrying');
+  }
+}
+
 function testAutoRedialAfterKeepaliveTimeout() {
   const h = createHarness({auth: 'none', echoReplies: false});
   h.setResource('sessions', 'last', {
@@ -1469,6 +1512,53 @@ function testTunnelRepairFollowsCurrentInterfaces() {
   assert.match(h.resource('tunnel_configs', 'active').data.last_repair_error, /WAN identity changed/);
 }
 
+function testTunnelDataplaneSwitchPreservesSession() {
+  const h = createHarness({auth: 'pap'});
+  runAction(h, 'traffic_probe', {interface: 'eth0', username: 'user', password: 'pass', auth: 'pap',
+    timeout_ms: 50, post_session_control_ms: 0, send_padt: false, local_interface: 'veerlocal0',
+    pipeline_interface: PIPELINE_INTERFACE, wan_core_sync: true});
+  const original = h.resource('tunnel_configs', 'active').data;
+  assert.strictEqual(original.repair_preparation.wan_core_prepared_interfaces, true);
+  const repair = () => h.context.exports.onTimer({timer: {name: 'tunnel_repair', payload: {}}});
+  for (const enhanced of [true, false]) {
+    h.context.KFUNCS = enhanced;
+    h.state.netCalls.length = 0;
+    h.state.mapPuts.length = 0;
+    const l2Sends = h.state.l2Sends.length;
+    repair();
+    const current = h.resource('tunnel_configs', 'active').data;
+    assert.strictEqual(current.dataplane, enhanced ? 'kfuncs' : 'bpf');
+    assert.strictEqual(current.session_id, original.session_id);
+    assert.strictEqual(current.value_hex, original.value_hex);
+    assert.strictEqual(h.state.mapPuts.length, 0, 'mode switch must preserve tunnel ABI and indices');
+    assert.strictEqual(h.state.l2Sends.length, l2Sends, 'mode switch must not redial');
+    assert.strictEqual(h.state.pluginActionCalls.at(-1).action, 'apply_session', 'WAN Core must update its own offload leases');
+    assert.strictEqual(h.state.pluginRecords.get('wan_core/status/default').data.usable, true);
+    assert(h.state.netCalls.includes(`setGSO:veerlocal0:${enhanced ? '65536:65535' : '1492:1'}`));
+    assert(h.state.netCalls.includes(enhanced
+      ? 'setOffloads:veerlocal0:gro=true,gso=true,sg=true,tso=true'
+      : 'setOffloads:veerlocal0:gso=false,sg=false,tso=false'));
+    assert(h.state.netCalls.includes(enhanced
+      ? `setOffloads:${PIPELINE_INTERFACE}:gro=true,lro=false,tso=false`
+      : `setOffloads:${PIPELINE_INTERFACE}:gro=false,lro=false`));
+    h.state.netCalls.length = 0;
+    repair();
+    assert.strictEqual(h.state.netCalls.length, 0, 'stable mode must not repeatedly reconfigure interfaces');
+  }
+  h.context.KFUNCS = true;
+  const setGSO = h.context.net.link.setGSO;
+  h.context.net.link.setGSO = () => { throw new Error('GSO preparation failed'); };
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, '00'.repeat(52), 'failed mode switch must stop forwarding');
+  assert.strictEqual(h.resource('tunnel_configs', 'active').data.dataplane, 'bpf');
+  h.context.net.link.setGSO = setGSO;
+  repair();
+  assert.strictEqual(h.state.mapPuts.at(-1).value, original.value_hex, 'retry must restore the same session');
+  assert.strictEqual(h.resource('tunnel_configs', 'active').data.dataplane, 'kfuncs');
+  const missing = createHarness({kfuncs: true, missingKfuncObject: true});
+  assert.strictEqual(missing.context.KFUNCS, false, 'older plugin package must fall back to base object');
+}
+
 function testTrafficProbeTimeoutFailsClosed() {
   const h = createHarness({auth: 'pap', padsTimeout: true});
   assert.throws(() => runAction(h, 'traffic_probe', {
@@ -1522,6 +1612,46 @@ function testTrafficStatsAggregatePerCPUValues() {
   assert.strictEqual(stats.byte_scope, 'inner_ip');
 }
 
+function testDirectHelperBoundary() {
+  const h = createHarness({auth: 'pap', kfuncs: true, direct: true});
+  const args = {interface: 'eth0', username: 'user', password: 'pass', auth: 'pap',
+    timeout_ms: 50, post_session_control_ms: 0, send_padt: false, local_interface: 'veerlocal0', wan_core_sync: true};
+  runAction(h, 'traffic_probe', args);
+  const original = h.resource('tunnel_configs', 'active').data;
+  assert.strictEqual(original.mode, 'direct_gro');
+  assert.strictEqual(original.pipeline_interface, '');
+  assert.strictEqual(original.pipeline_ifindex, original.local_ifindex);
+  assert.strictEqual(h.resource('hook_bindings', 'pppoe-egress').enabled, false);
+  assert.deepStrictEqual(h.resource('hook_bindings', 'pppoe-local-egress').data.interfaces, ['veerlocal0']);
+  assert(h.state.hooks.some(hook => hook.id === 'pppoe-local-egress' && hook.attach === 'egress' && hook.binding_required));
+  assert.strictEqual(h.resource('wan_links', 'default').data.handoff_mode, 'direct_gro');
+  const repair = () => h.context.exports.onTimer({timer: {name: 'tunnel_repair', payload: {}}});
+  const sends = h.state.l2Sends.length;
+  const local = h.state.links.get('veerlocal0');
+  for (const change of ['down', 'wrong-kind', 'missing-helper']) {
+    local.up = change !== 'down';
+    local.kind = change === 'wrong-kind' ? 'dummy' : 'veerwan';
+    h.context.DIRECT = change !== 'missing-helper';
+    repair();
+    assert.strictEqual(h.state.mapPuts.at(-1).value, '00'.repeat(52), change + ' must stop this tunnel');
+    local.up = true; local.kind = 'veerwan'; h.context.DIRECT = true;
+    repair();
+    assert.strictEqual(h.state.mapPuts.at(-1).value, original.value_hex);
+  }
+  h.state.links.set('veerlocal0', Object.assign({}, h.state.links.get('veerlocal0'), {ifindex: 301, mac: '02:00:00:00:21:01'}));
+  repair();
+  const repaired = h.resource('tunnel_configs', 'active').data;
+  assert.strictEqual(repaired.last_repair_error || '', '');
+  assert.strictEqual(repaired.local_ifindex, 301);
+  assert.strictEqual(repaired.pipeline_ifindex, 301);
+  assert.strictEqual(repaired.session_id, original.session_id);
+  assert.strictEqual(h.state.l2Sends.length, sends, 'boundary recovery must not redial');
+  const legacy = createHarness({kfuncs: true});
+  assert.strictEqual(legacy.context.DIRECT, false, 'helper 1.0/1.1 must keep veth');
+  const old = createHarness({kfuncs: true, direct: true, missingKfuncObject: true});
+  assert.strictEqual(old.context.DIRECT, false, 'old package must keep base path');
+}
+
 function createHarness(options) {
   const state = {
     capabilities: [],
@@ -1559,6 +1689,7 @@ function createHarness(options) {
     clearTimeout,
     exports: {},
     plugin: {
+      host() { return {available_features: options && options.kfuncs ? ['dataplane.kfuncs.handoff.v1', ...(options.direct ? ['dataplane.kfuncs.wan.v1'] : [])] : []}; },
       capabilities(items) { state.capabilities.push(...items); },
       virtualInterface(item) { state.virtualInterfaces.push(clone(item)); },
       pipelineNode(item) { state.virtualInterfaces.push(Object.assign({type: 'pipeline'}, clone(item))); },
@@ -1648,6 +1779,18 @@ function createHarness(options) {
         call(plugin, action, payload) {
           state.pluginActionCalls.push({plugin, action, payload: clone(payload || {})});
           if (options && options.pluginActionError) throw new Error(options.pluginActionError);
+          if (plugin === 'wan_core' && action === 'apply_session') {
+            const key = payload.key;
+            const status = state.pluginRecords.get(`wan_core/status/${key}`).data;
+            const session = state.pluginRecords.get(`wan_core/sessions/${key}`).data;
+            const request = payload.interface_preparation;
+            if (request.local_gso) context.net.link.setGSO(status.local_interface, request.local_gso);
+            if (request.local_offloads) context.net.link.setOffloads(status.local_interface, request.local_offloads);
+            if (request.pipeline_offloads && status.pipeline_interface) context.net.link.setOffloads(status.pipeline_interface, request.pipeline_offloads);
+            status.interface_preparation = {applied: true};
+            status.usable = session.usable;
+            return clone(status);
+          }
           if (plugin !== 'wan_core' || action !== 'prepare_handoff') {
             throw new Error(`unexpected plugin action ${plugin}/${action}`);
           }
@@ -1680,6 +1823,15 @@ function createHarness(options) {
               segmentation_ready: true
             }
           };
+          if (payload.handoff_mode === 'direct_gro') {
+            state.links.set(localInterface, Object.assign(linkInfo(localInterface), {kind: 'veerwan', peer_ifindex: 0}));
+            state.links.delete(pipelineInterface);
+            status.handoff_mode = 'direct_gro';
+            status.pipeline_interface = '';
+            status.pipeline_ifindex = 0;
+            status.segmentation_ready = false;
+            status.veer_core = {mode: 'single_local_boundary', parent_interface: localInterface};
+          }
           state.pluginRecords.set(`wan_core/status/${key}`, {data: clone(status), enabled: false});
           return clone(status);
         }
@@ -1772,6 +1924,7 @@ function createHarness(options) {
     },
     crypto: {
       sha256File(rel) {
+        if (options && options.missingKfuncObject && rel.endsWith('-kfuncs.o')) throw new Error('file not found');
         const file = path.join(pluginDir, rel);
         if (!fs.existsSync(file)) return '00'.repeat(32);
         return nodeCrypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');

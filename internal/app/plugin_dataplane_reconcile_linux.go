@@ -96,127 +96,154 @@ func assignStablePluginTCHandles(items []pluginDataplaneDesiredPlugin, previous 
 }
 
 func (rt *linuxPluginDataplaneRuntime) reconcileDirectTCPlans(desired []pluginDataplaneDesiredPlugin, states map[string]PluginRuntimeState) pluginRuntimeSnapshot {
-	fail := func(err error) pluginRuntimeSnapshot {
-		// Report the retained runtime alongside the failure, never a successful
-		// desired-state snapshot when staging or rollback failed.
-		snapshot := clonePluginRuntimeSnapshot(rt.snapshot)
-		if snapshot.Plugins == nil {
-			snapshot.Plugins = make(map[string]PluginRuntimeState)
-		}
-		affected := make(map[string]bool)
-		for id, state := range states {
-			if rt.loaded[id] == nil {
-				snapshot.Plugins[id] = state
-			}
-		}
-		for id := range rt.loaded {
-			affected[id] = true
-		}
-		for id := range rt.retiredTC {
-			affected[id] = true
-		}
-		for _, item := range desired {
-			affected[item.plugin.ID] = true
-		}
-		for id := range affected {
-			state := snapshot.Plugins[id]
-			state.Mode, state.Error = pluginRuntimeModeError, err.Error()
-			state.Reason = "tc update incomplete; live attachments retained"
-			snapshot.Plugins[id] = state
-		}
-		log.Printf("plugin direct tc update failed: %v", err)
-		rt.fingerprint = ""
-		return snapshot
+	if rt.loaded == nil {
+		rt.loaded = make(map[string]*loadedPluginDataplane)
 	}
-	if rt.pendingTC != nil {
-		if err := rt.pendingTC.rollback(); err != nil {
-			return fail(err)
+	if rt.pendingTC == nil {
+		rt.pendingTC = make(map[string]*pluginDirectTCUpdate)
+	}
+	if rt.retiredTC == nil {
+		rt.retiredTC = make(map[string]*loadedPluginDataplane)
+	}
+	failures := make(map[string]error)
+	failed := func(id string, err error) {
+		failures[id] = errors.Join(failures[id], err)
+		state, ok := states[id]
+		if !ok || !state.Attached {
+			state = rt.snapshot.Plugins[id]
 		}
-		closeUnusedPluginTCObjects(rt.pendingTC.next, rt.loaded)
-		rt.pendingTC = nil
+		state.Mode, state.Error = pluginRuntimeModeError, failures[id].Error()
+		state.Reason = "tc update incomplete; live attachments retained"
+		states[id] = state
+		log.Printf("plugin direct tc %s: %v", id, err)
 	}
-	if err := retirePluginTCGeneration(rt.retiredTC, rt.loaded); err != nil {
-		return fail(err)
-	}
-	rt.retiredTC = nil
-	// Explicit removals/revocations must take effect even if another plugin's
-	// candidate subsequently fails to load.
-	live := make(map[string]*loadedPluginDataplane)
-	for _, item := range desired {
-		if old := rt.loaded[item.plugin.ID]; old != nil {
-			live[item.plugin.ID] = old
+	// A failed rollback fences only that plugin. Other plugins can still repair
+	// missing attachments, update their programs, or be explicitly removed.
+	for id, update := range rt.pendingTC {
+		if err := update.rollback(); err != nil {
+			failed(id, err)
+			continue
 		}
+		closeUnusedPluginTCObjects(update.next, rt.loaded, rt.retiredTC)
+		delete(rt.pendingTC, id)
 	}
-	if err := retirePluginTCGeneration(rt.loaded, live); err != nil {
-		return fail(err)
-	}
-	for id := range rt.loaded {
-		if _, ok := live[id]; !ok {
-			delete(rt.snapshot.Plugins, id)
-		}
-	}
-	rt.loaded = live
-	if err := assignStablePluginTCHandles(desired, rt.loaded); err != nil {
-		return fail(err)
-	}
-	fingerprint := pluginDataplaneFingerprint(desired, states)
-	if fingerprint == rt.fingerprint && rt.loadedAttachmentsHealthyLocked() {
-		return clonePluginRuntimeSnapshot(rt.snapshot)
-	}
-	next := make(map[string]*loadedPluginDataplane)
-	for _, item := range desired {
-		loaded, err := preparePluginDirectTC(item, rt.loaded[item.plugin.ID])
+	for id, old := range rt.retiredTC {
+		delete(rt.retiredTC, id)
+		remaining, err := retirePluginTCGeneration(map[string]*loadedPluginDataplane{id: old}, rt.loaded, rt.retiredTC, rt.pendingTCObjects())
 		if err != nil {
-			closeUnusedPluginTCObjects(next, rt.loaded)
-			return fail(fmt.Errorf("prepare plugin %s: %w", item.plugin.ID, err))
-		}
-		next[item.plugin.ID] = loaded
-	}
-	update := &pluginDirectTCUpdate{next: next, previous: make(map[pluginTCSlot]*netlink.BpfFilter)}
-	for _, loaded := range rt.loaded {
-		for _, filter := range loaded.filters {
-			update.previous[pluginTCFilterSlot(filter)] = filter
+			rt.retiredTC[id] = remaining[id]
+			failed(pluginTCGenerationID(id, old), err)
+		} else {
+			delete(rt.retiredTC, id)
 		}
 	}
+	wanted := make(map[string]bool, len(desired))
 	for _, item := range desired {
-		loaded := next[item.plugin.ID]
-		for i, filter := range loaded.filters {
-			if update.previous[pluginTCFilterSlot(filter)] == filter {
+		wanted[item.plugin.ID] = true
+	}
+	for id, old := range rt.loaded {
+		if wanted[id] || failures[id] != nil {
+			continue
+		}
+		remaining, err := retirePluginTCGeneration(map[string]*loadedPluginDataplane{id: old}, nil, rt.retiredTC, rt.pendingTCObjects())
+		if err != nil {
+			rt.loaded[id] = remaining[id]
+			failed(id, err)
+		} else {
+			delete(rt.loaded, id)
+		}
+	}
+	// Reserve candidate/retired handles too; no healthy plugin may reuse a slot
+	// whose cleanup is still pending.
+	reserved := make(map[string]*loadedPluginDataplane)
+	for id, old := range rt.loaded {
+		reserved[id] = old
+	}
+	for id, old := range rt.retiredTC {
+		reserved["retired/"+id] = old
+	}
+	for id, update := range rt.pendingTC {
+		for key, old := range update.next {
+			reserved["pending/"+id+"/"+key] = old
+		}
+	}
+	if err := assignStablePluginTCHandles(desired, reserved); err != nil {
+		for _, item := range desired {
+			failed(item.plugin.ID, err)
+		}
+	} else {
+		fingerprint := pluginDataplaneFingerprint(desired, states)
+		if len(failures) == 0 && fingerprint == rt.fingerprint && rt.loadedAttachmentsHealthyLocked() {
+			return clonePluginRuntimeSnapshot(rt.snapshot)
+		}
+		defer func() {
+			if len(failures) == 0 {
+				rt.fingerprint = fingerprint
+			}
+		}()
+		for _, item := range desired {
+			id := item.plugin.ID
+			if failures[id] != nil {
 				continue
 			}
-			if err := installPluginTCFilter(loaded.plans[i], filter); err != nil {
-				rt.pendingTC = update
-				rollbackErr := update.rollback()
-				if rollbackErr == nil {
-					closeUnusedPluginTCObjects(next, rt.loaded)
-					rt.pendingTC = nil
-				}
-				return fail(errors.Join(fmt.Errorf("attach plugin %s: %w", item.plugin.ID, err), rollbackErr))
+			old := rt.loaded[id]
+			loaded, err := preparePluginDirectTC(item, old)
+			if err != nil {
+				failed(id, fmt.Errorf("prepare: %w", err))
+				continue
 			}
-			update.installed = append(update.installed, filter)
+			candidate := map[string]*loadedPluginDataplane{id: loaded}
+			update := &pluginDirectTCUpdate{next: candidate, previous: make(map[pluginTCSlot]*netlink.BpfFilter)}
+			if old != nil {
+				for _, filter := range old.filters {
+					update.previous[pluginTCFilterSlot(filter)] = filter
+				}
+			}
+			for i, filter := range loaded.filters {
+				if update.previous[pluginTCFilterSlot(filter)] == filter {
+					continue
+				}
+				if err = installPluginTCFilter(loaded.plans[i], filter); err != nil {
+					break
+				}
+				update.installed = append(update.installed, filter)
+			}
+			if err != nil {
+				rollbackErr := update.rollback()
+				if rollbackErr != nil {
+					rt.pendingTC[id] = update
+				} else {
+					closeUnusedPluginTCObjects(candidate, rt.loaded, rt.retiredTC)
+				}
+				failed(id, errors.Join(fmt.Errorf("attach: %w", err), rollbackErr))
+				continue
+			}
+			rt.loaded[id] = loaded
+			states[id] = pluginDirectTCRuntimeState(item, loaded)
+			if old != nil {
+				remaining, retireErr := retirePluginTCGeneration(map[string]*loadedPluginDataplane{id: old}, rt.loaded, rt.retiredTC, rt.pendingTCObjects())
+				if retireErr != nil {
+					rt.retiredTC[id] = remaining[id]
+					failed(id, fmt.Errorf("retire: %w", retireErr))
+				}
+			}
 		}
-	}
-	previous := rt.loaded
-	rt.loaded = next
-	for _, item := range desired {
-		loaded := next[item.plugin.ID]
-		state := PluginRuntimeState{Mode: pluginRuntimeModeDataplane, Attachable: true,
-			Attached: len(loaded.filters) > 0, AttachmentCount: len(loaded.filters), Reason: strings.Join(item.warnings, "; ")}
-		for i, plan := range loaded.plans {
-			state.Attachments = append(state.Attachments, PluginAttachmentState{HookID: plan.HookID, Engine: kernelEngineTC,
-				Attach: plan.Attach, Interface: plan.Interface, Program: plan.ObjectID + ":" + plan.ProgramRef,
-				Mode: plan.Mode, Priority: int(plan.Priority), FilterHandle: fmt.Sprintf("0x%x", loaded.filters[i].Handle), Status: "attached"})
-		}
-		state.Attachments = sortedPluginAttachmentStates(state.Attachments)
-		states[item.plugin.ID] = state
 	}
 	rt.snapshot = pluginRuntimeSnapshot{Plugins: states}
-	rt.fingerprint = fingerprint
-	if err := retirePluginTCGeneration(previous, next); err != nil {
-		rt.retiredTC = previous
-		return fail(fmt.Errorf("retire old tc attachments: %w", err))
-	}
+	rt.fingerprint = ""
 	return clonePluginRuntimeSnapshot(rt.snapshot)
+}
+
+func pluginDirectTCRuntimeState(item pluginDataplaneDesiredPlugin, loaded *loadedPluginDataplane) PluginRuntimeState {
+	state := PluginRuntimeState{Mode: pluginRuntimeModeDataplane, Attachable: true,
+		Attached: len(loaded.filters) > 0, AttachmentCount: len(loaded.filters), Reason: strings.Join(item.warnings, "; ")}
+	for i, plan := range loaded.plans {
+		state.Attachments = append(state.Attachments, PluginAttachmentState{HookID: plan.HookID, Engine: kernelEngineTC,
+			Attach: plan.Attach, Interface: plan.Interface, Program: plan.ObjectID + ":" + plan.ProgramRef,
+			Mode: plan.Mode, Priority: int(plan.Priority), FilterHandle: fmt.Sprintf("0x%x", loaded.filters[i].Handle), Status: "attached"})
+	}
+	state.Attachments = sortedPluginAttachmentStates(state.Attachments)
+	return state
 }
 
 func preparePluginDirectTC(item pluginDataplaneDesiredPlugin, previous *loadedPluginDataplane) (*loadedPluginDataplane, error) {
@@ -292,7 +319,13 @@ func removeOwnedPluginTCFilter(filter *netlink.BpfFilter) error {
 	return nil
 }
 
-func retirePluginTCGeneration(previous, next map[string]*loadedPluginDataplane) error {
+// Return only resources that could not be detached. Successful slots release
+// their collections unless another live or pending generation still uses them.
+func retirePluginTCGeneration(previous, next map[string]*loadedPluginDataplane, retained ...map[string]*loadedPluginDataplane) (map[string]*loadedPluginDataplane, error) {
+	return retirePluginTCGenerationWithRemove(previous, next, removeOwnedPluginTCFilter, retained...)
+}
+
+func retirePluginTCGenerationWithRemove(previous, next map[string]*loadedPluginDataplane, remove func(*netlink.BpfFilter) error, retained ...map[string]*loadedPluginDataplane) (map[string]*loadedPluginDataplane, error) {
 	keep := make(map[pluginTCSlot]bool)
 	for _, loaded := range next {
 		if loaded != nil {
@@ -301,32 +334,41 @@ func retirePluginTCGeneration(previous, next map[string]*loadedPluginDataplane) 
 			}
 		}
 	}
+	remaining := make(map[string]*loadedPluginDataplane)
 	var failures []error
-	for _, loaded := range previous {
+	for id, loaded := range previous {
 		if loaded == nil {
 			continue
 		}
-		for _, filter := range loaded.filters {
-			if !keep[pluginTCFilterSlot(filter)] {
-				if err := removeOwnedPluginTCFilter(filter); err != nil {
-					failures = append(failures, err)
+		pending := &loadedPluginDataplane{objects: loaded.objects}
+		for i, filter := range loaded.filters {
+			if keep[pluginTCFilterSlot(filter)] {
+				continue
+			}
+			if err := remove(filter); err != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", id, err))
+				pending.filters = append(pending.filters, filter)
+				if i < len(loaded.plans) {
+					pending.plans = append(pending.plans, loaded.plans[i])
 				}
 			}
 		}
+		if len(pending.filters) > 0 {
+			remaining[id] = pending
+		}
 	}
-	if err := errors.Join(failures...); err != nil {
-		return err
-	}
-	closeUnusedPluginTCObjects(previous, next)
-	return nil
+	closeUnusedPluginTCObjects(previous, append(retained, next, remaining)...)
+	return remaining, errors.Join(failures...)
 }
 
-func closeUnusedPluginTCObjects(previous, next map[string]*loadedPluginDataplane) {
+func closeUnusedPluginTCObjects(previous map[string]*loadedPluginDataplane, retained ...map[string]*loadedPluginDataplane) {
 	keep := make(map[*ebpf.Collection]bool)
-	for _, loaded := range next {
-		if loaded != nil {
-			for _, ref := range loaded.objects {
-				keep[ref.coll] = true
+	for _, next := range retained {
+		for _, loaded := range next {
+			if loaded != nil {
+				for _, ref := range loaded.objects {
+					keep[ref.coll] = true
+				}
 			}
 		}
 	}
@@ -340,4 +382,21 @@ func closeUnusedPluginTCObjects(previous, next map[string]*loadedPluginDataplane
 			}
 		}
 	}
+}
+
+func pluginTCGenerationID(fallback string, loaded *loadedPluginDataplane) string {
+	if loaded != nil && len(loaded.plans) > 0 && loaded.plans[0].PluginID != "" {
+		return loaded.plans[0].PluginID
+	}
+	return fallback
+}
+
+func (rt *linuxPluginDataplaneRuntime) pendingTCObjects() map[string]*loadedPluginDataplane {
+	all := make(map[string]*loadedPluginDataplane)
+	for id, update := range rt.pendingTC {
+		for key, loaded := range update.next {
+			all[id+"/"+key] = loaded
+		}
+	}
+	return all
 }

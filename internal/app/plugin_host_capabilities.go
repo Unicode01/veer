@@ -70,6 +70,9 @@ func mustBuildPluginHostControlCapabilities() []pluginHostControlCapability {
 	}
 
 	add([]string{"plugin.host"}, pluginHostCapabilityOptions{phases: allPhases})
+	add([]string{"process.exec"}, pluginHostCapabilityOptions{permissions: []string{"exec"}})
+	add([]string{"process.start", "process.status", "process.stop", "process.restart", "process.list", "process.logs"}, pluginHostCapabilityOptions{permissions: []string{"exec"}, contexts: mainOnly})
+	add([]string{"process.binaryInstall", "process.binaryStatus", "process.binarySelect", "process.binaryRemove"}, pluginHostCapabilityOptions{permissions: []string{"exec"}, contexts: mainOnly})
 	add([]string{
 		"plugin.capabilities", "plugin.resource", "plugin.action", "plugin.service", "plugin.virtualInterface",
 		"plugin.pipelineNode", "plugin.handoff", "pipeline.node", "pipeline.handoff",
@@ -128,7 +131,7 @@ func mustBuildPluginHostControlCapabilities() []pluginHostControlCapability {
 		"net.tuntap.ensure", "net.tuntap.close", "net.tuntap.read", "net.tuntap.write", "net.tuntap.list", "net.tuntap.owned",
 	}, pluginHostCapabilityOptions{permissions: []string{"net.tuntap"}, conditionalPermissions: namespaceConditional})
 	add([]string{
-		"net.link.get", "net.link.list", "net.link.ensureBridge", "net.link.ensureVeth", "net.link.ensureDummy",
+		"net.link.get", "net.link.list", "net.link.ensureBridge", "net.link.ensureVeth", "net.link.ensureDummy", "net.link.ensureHelperWAN",
 		"net.link.ensureMacvlan", "net.link.ensureVLAN", "net.link.ensureVRF", "net.link.delete", "net.link.release",
 		"net.link.owned", "net.link.setMaster", "net.link.clearMaster", "net.link.setUp", "net.link.setMTU",
 		"net.link.setARP", "net.link.setPromiscuous", "net.link.getOffloads", "net.link.setOffloads", "net.link.setGSO",

@@ -250,6 +250,7 @@ func (snapshot kernelRuntimeMapSnapshot) Close() {
 func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRuntimeResponse {
 	resp := KernelRuntimeResponse{
 		KernelCapabilities:                  kernelcap.DetectKernelCapabilities(),
+		KernelHelperModule:                  optionalKernelModuleRuntimeStatus(),
 		DefaultEngine:                       ruleEngineAuto,
 		ConfiguredOrder:                     defaultKernelEngineOrder(),
 		KernelTCPEstablishedIdleTimeoutMode: kernelTCPEstablishedIdleTimeoutModeAuto,

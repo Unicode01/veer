@@ -76,7 +76,7 @@ plugin.service({
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
-  sha256: '7419f7b539a161969c94ca3165bc15ef881bf3ee39b6885a458209f503ef910a',
+  sha256: '1823a0f072b0e2c209ba3b2c5996353a62dbbf6a5ea688eebb43d24a5f744c4f',
   page: 'lan',
   page_title: 'LAN',
   resources: [

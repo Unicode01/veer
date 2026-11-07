@@ -21,123 +21,117 @@ import (
 )
 
 const (
-	kernelForwardProgramName                       = "forward_ingress"
-	kernelReplyProgramName                         = "reply_ingress"
-	kernelForwardProgramNameV6                     = "forward_ingress_v6"
-	kernelReplyProgramNameV6                       = "reply_ingress_v6"
-	kernelForwardDispatchProgramName               = "forward_ingress_dispatch"
-	kernelForwardPipelineProgramName               = "forward_ingress_pipeline"
-	kernelForwardEgressPipelineProgramName         = "forward_egress_pipeline"
-	kernelForwardPipelineProgramNameV6             = "forward_ingress_v6_pipeline"
-	kernelForwardEgressPipelineProgramNameV6       = "forward_egress_v6_pipeline"
-	kernelForwardCoreProgramName                   = "forward_ingress_v4_core"
-	kernelForwardPluginContinueProgramName         = "forward_ingress_v4_plugin_continue"
-	kernelForwardPluginPostLookupProgramName       = "forward_ingress_v4_plugin_post_lookup_continue"
-	kernelForwardPluginPostApplyProgramName        = "forward_ingress_v4_plugin_post_apply_continue"
-	kernelForwardTransparentProgramName            = "forward_ingress_v4_transparent"
-	kernelForwardFullNATProgramName                = "forward_ingress_v4_fullnat"
-	kernelForwardFullNATExistingProgramName        = "forward_ingress_v4_fullnat_existing"
-	kernelForwardFullNATNewProgramName             = "forward_ingress_v4_fullnat_new"
-	kernelForwardEgressNATProgramName              = "forward_ingress_v4_egress_nat"
-	kernelReplyDispatchProgramName                 = "reply_ingress_dispatch"
-	kernelReplyPipelineProgramName                 = "reply_ingress_pipeline"
-	kernelReplyEgressPipelineProgramName           = "reply_egress_pipeline"
-	kernelReplyPipelineProgramNameV6               = "reply_ingress_v6_pipeline"
-	kernelReplyEgressPipelineProgramNameV6         = "reply_egress_v6_pipeline"
-	kernelReplyCoreProgramName                     = "reply_ingress_v4_core"
-	kernelReplyPluginContinueProgramName           = "reply_ingress_v4_plugin_continue"
-	kernelReplyPluginPostReplyProgramName          = "reply_ingress_v4_plugin_post_reply_continue"
-	kernelReplyPluginPostApplyProgramName          = "reply_ingress_v4_plugin_post_apply_continue"
-	kernelReplyTransparentProgramName              = "reply_ingress_v4_transparent"
-	kernelReplyFullNATProgramName                  = "reply_ingress_v4_fullnat"
-	kernelRulesMapName                             = kernelRulesMapNameV4
-	kernelFlowsMapName                             = kernelFlowsMapNameV4
-	kernelNatPortsMapName                          = kernelNatPortsMapNameV4
-	kernelIfParentMapName                          = "if_parent_v4"
-	kernelLocalIPv4MapName                         = "local_ipv4s_v4"
-	kernelLocalMACMapName                          = "local_macs"
-	kernelNATConfigMapName                         = "nat_config_v4"
-	kernelStatsMapName                             = "stats_v4"
-	kernelDiagMapName                              = "diag_v4"
-	kernelOccupancyMapName                         = "occupancy_v4"
-	kernelTCProgramChainMapName                    = "tc_prog_chain_v4"
-	kernelTCPluginConfigMapName                    = "tc_plugin_config_v4"
-	kernelTCPluginInterfacesMapName                = "tc_plugin_interfaces_v4"
-	kernelTCDispatchScratchMapName                 = "tc_dispatch_scratch_v4"
-	kernelTCDispatchScratchMapNameV6               = "tc_dispatch_scratch_v6"
-	kernelTCPluginContextMapName                   = "tc_plugin_ctx_v4"
-	kernelTCPluginContextMapNameV6                 = "tc_plugin_ctx_v6"
-	kernelTCPluginMetricsMapName                   = "tc_plugin_metrics"
-	kernelTCPacketMetadataBindingsMapName          = "tc_packet_meta_bindings_v1"
-	kernelTCPacketMetadataGenerationMapNameV4      = "tc_packet_meta_generation_v4"
-	kernelTCPacketMetadataGenerationMapNameV6      = "tc_packet_meta_generation_v6"
-	kernelTCPacketMetadataMapNameV4                = "tc_packet_meta_v4"
-	kernelTCPacketMetadataMapNameV6                = "tc_packet_meta_v6"
-	kernelTCFlowsOldMapNameV4                      = "flows_old_v4"
-	kernelTCFlowsOldMapNameV6                      = "flows_old_v6"
-	kernelTCNatPortsOldMapNameV4                   = "nat_ports_old_v4"
-	kernelTCNatPortsOldMapNameV6                   = "nat_ports_old_v6"
-	kernelTCFlowMigrationStateMapName              = "tc_flow_migration_state"
-	kernelReplyFilterPrio                          = 10
-	kernelReplyFilterPrioV6                        = 11
-	kernelForwardFilterPrio                        = 20
-	kernelForwardFilterPrioV6                      = 21
-	kernelForwardFilterHandle                      = 10
-	kernelForwardFilterHandleV6                    = 11
-	kernelReplyFilterHandle                        = 20
-	kernelReplyFilterHandleV6                      = 21
-	kernelVerifierLogSize                          = 4 * 1024 * 1024
-	kernelTCPClosingGraceNS                        = 15 * 1000000000
-	kernelTCPUnrepliedTimeout                      = 30 * 1000000000
-	kernelTCPOrphanFrontIdleTimeout                = 10 * 60 * 1000000000
-	kernelTCPFlowIdleTimeout                       = 24 * 60 * 60 * 1000000000
-	kernelICMPFlowIdleTimeout                      = 30 * 1000000000
-	kernelUDPFlowIdleTimeout                       = 300 * 1000000000
-	kernelOrphanNATPruneLogEvery                   = 10 * time.Minute
-	tcProgramChainIndexV4Transparent               = 0
-	tcProgramChainIndexV4FullNATForward            = 1
-	tcProgramChainIndexV4EgressNATForward          = 2
-	tcProgramChainIndexV4ReplyTransparent          = 3
-	tcProgramChainIndexV4ReplyFullNAT              = 4
-	tcProgramChainIndexV4FullNATExisting           = 5
-	tcProgramChainIndexV4FullNATNew                = 6
-	tcProgramChainIndexV4ForwardCore               = 7
-	tcProgramChainIndexV4PluginContinue            = 8
-	tcProgramChainIndexV4PluginPostLookup          = 9
-	tcProgramChainIndexV4PluginBase                = 10
-	tcProgramChainV4PluginPreForwardMax            = pluginTCPipelineStageHookLimit
-	tcProgramChainIndexV4PluginPostBase            = 18
-	tcProgramChainV4PluginPostLookupMax            = pluginTCPipelineStageHookLimit
-	tcProgramChainV4PluginTotalMax                 = pluginTCPipelineDirectionHookLimit
-	tcProgramChainIndexV4ReplyCore                 = 26
-	tcProgramChainIndexV4PluginPreReply            = 27
-	tcProgramChainIndexV4PluginPostReply           = 28
-	tcProgramChainIndexV4PluginReplyBase           = 29
-	tcProgramChainV4PluginPreReplyMax              = pluginTCPipelineStageHookLimit
-	tcProgramChainIndexV4PluginReplyPostBase       = 37
-	tcProgramChainV4PluginPostReplyMax             = pluginTCPipelineStageHookLimit
-	tcProgramChainV4PluginReplyTotalMax            = pluginTCPipelineDirectionHookLimit
-	tcProgramChainIndexV4PluginBank1Base           = 45
-	tcProgramChainIndexV4PluginBank1PostBase       = 53
-	tcProgramChainIndexV4PluginBank1ReplyBase      = 61
-	tcProgramChainIndexV4PluginBank1ReplyPostBase  = 69
-	tcProgramChainIndexV4PluginPostApply           = 77
-	tcProgramChainIndexV4PluginReplyPostApply      = 78
-	tcProgramChainIndexV4PluginApplyBase           = 79
-	tcProgramChainV4PluginPostApplyMax             = pluginTCPipelineStageHookLimit
-	tcProgramChainIndexV4PluginBank1ApplyBase      = 87
-	tcProgramChainIndexV4PluginReplyApplyBase      = 95
-	tcProgramChainV4PluginPostReplyApplyMax        = pluginTCPipelineStageHookLimit
-	tcProgramChainIndexV4PluginBank1ReplyApplyBase = 103
-	tcProgramChainV4MaxEntries                     = pluginTCPipelineProgramArrayEntries
-	tcPluginMetricStageWidth                       = 8
-	tcPluginMetricPreForwardBase                   = 0
-	tcPluginMetricPostLookupBase                   = 8
-	tcPluginMetricPostApplyBase                    = 16
-	tcPluginMetricPreReplyBase                     = 24
-	tcPluginMetricPostReplyBase                    = 32
-	tcPluginMetricReplyApplyBase                   = 40
-	tcPluginMetricMaxEntries                       = 48
+	kernelForwardProgramName                  = "forward_ingress"
+	kernelReplyProgramName                    = "reply_ingress"
+	kernelForwardProgramNameV6                = "forward_ingress_v6"
+	kernelReplyProgramNameV6                  = "reply_ingress_v6"
+	kernelForwardDispatchProgramName          = "forward_ingress_dispatch"
+	kernelForwardPipelineProgramName          = "forward_ingress_pipeline"
+	kernelForwardEgressPipelineProgramName    = "forward_egress_pipeline"
+	kernelForwardPipelineProgramNameV6        = "forward_ingress_v6_pipeline"
+	kernelForwardEgressPipelineProgramNameV6  = "forward_egress_v6_pipeline"
+	kernelForwardCoreProgramName              = "forward_ingress_v4_core"
+	kernelForwardPluginContinueProgramName    = "forward_ingress_v4_plugin_continue"
+	kernelForwardPluginPostLookupProgramName  = "forward_ingress_v4_plugin_post_lookup_continue"
+	kernelForwardPluginPostApplyProgramName   = "forward_ingress_v4_plugin_post_apply_continue"
+	kernelForwardTransparentProgramName       = "forward_ingress_v4_transparent"
+	kernelForwardFullNATProgramName           = "forward_ingress_v4_fullnat"
+	kernelForwardFullNATExistingProgramName   = "forward_ingress_v4_fullnat_existing"
+	kernelForwardFullNATNewProgramName        = "forward_ingress_v4_fullnat_new"
+	kernelForwardEgressNATProgramName         = "forward_ingress_v4_egress_nat"
+	kernelReplyDispatchProgramName            = "reply_ingress_dispatch"
+	kernelReplyPipelineProgramName            = "reply_ingress_pipeline"
+	kernelReplyEgressPipelineProgramName      = "reply_egress_pipeline"
+	kernelReplyPipelineProgramNameV6          = "reply_ingress_v6_pipeline"
+	kernelReplyEgressPipelineProgramNameV6    = "reply_egress_v6_pipeline"
+	kernelReplyCoreProgramName                = "reply_ingress_v4_core"
+	kernelReplyPluginContinueProgramName      = "reply_ingress_v4_plugin_continue"
+	kernelReplyPluginPostReplyProgramName     = "reply_ingress_v4_plugin_post_reply_continue"
+	kernelReplyPluginPostApplyProgramName     = "reply_ingress_v4_plugin_post_apply_continue"
+	kernelReplyTransparentProgramName         = "reply_ingress_v4_transparent"
+	kernelReplyFullNATProgramName             = "reply_ingress_v4_fullnat"
+	kernelRulesMapName                        = kernelRulesMapNameV4
+	kernelFlowsMapName                        = kernelFlowsMapNameV4
+	kernelNatPortsMapName                     = kernelNatPortsMapNameV4
+	kernelIfParentMapName                     = "if_parent_v4"
+	kernelLocalIPv4MapName                    = "local_ipv4s_v4"
+	kernelLocalMACMapName                     = "local_macs"
+	kernelNATConfigMapName                    = "nat_config_v4"
+	kernelStatsMapName                        = "stats_v4"
+	kernelDiagMapName                         = "diag_v4"
+	kernelOccupancyMapName                    = "occupancy_v4"
+	kernelTCProgramChainMapName               = "tc_prog_chain_v4"
+	kernelTCPluginHooksMapName                = "tc_plugin_hooks_v4"
+	kernelTCPluginConfigMapName               = "tc_plugin_config_v4"
+	kernelTCPluginInterfacesMapName           = "tc_plugin_interfaces_v4"
+	kernelTCDispatchScratchMapName            = "tc_dispatch_scratch_v4"
+	kernelTCDispatchScratchMapNameV6          = "tc_dispatch_scratch_v6"
+	kernelTCPluginContextMapName              = "tc_plugin_ctx_v4"
+	kernelTCPluginContextMapNameV6            = "tc_plugin_ctx_v6"
+	kernelTCPluginMetricsMapName              = "tc_plugin_metrics"
+	kernelTCPacketMetadataBindingsMapName     = "tc_packet_meta_bindings_v1"
+	kernelTCPacketMetadataGenerationMapNameV4 = "tc_packet_meta_generation_v4"
+	kernelTCPacketMetadataGenerationMapNameV6 = "tc_packet_meta_generation_v6"
+	kernelTCPacketMetadataMapNameV4           = "tc_packet_meta_v4"
+	kernelTCPacketMetadataMapNameV6           = "tc_packet_meta_v6"
+	kernelTCFlowsOldMapNameV4                 = "flows_old_v4"
+	kernelTCFlowsOldMapNameV6                 = "flows_old_v6"
+	kernelTCNatPortsOldMapNameV4              = "nat_ports_old_v4"
+	kernelTCNatPortsOldMapNameV6              = "nat_ports_old_v6"
+	kernelTCFlowMigrationStateMapName         = "tc_flow_migration_state"
+	kernelReplyFilterPrio                     = 10
+	kernelReplyFilterPrioV6                   = 11
+	kernelForwardFilterPrio                   = 20
+	kernelForwardFilterPrioV6                 = 21
+	kernelForwardFilterHandle                 = 10
+	kernelForwardFilterHandleV6               = 11
+	kernelReplyFilterHandle                   = 20
+	kernelReplyFilterHandleV6                 = 21
+	kernelVerifierLogSize                     = 4 * 1024 * 1024
+	kernelTCPClosingGraceNS                   = 15 * 1000000000
+	kernelTCPUnrepliedTimeout                 = 30 * 1000000000
+	kernelTCPOrphanFrontIdleTimeout           = 10 * 60 * 1000000000
+	kernelTCPFlowIdleTimeout                  = 24 * 60 * 60 * 1000000000
+	kernelICMPFlowIdleTimeout                 = 30 * 1000000000
+	kernelUDPFlowIdleTimeout                  = 300 * 1000000000
+	kernelOrphanNATPruneLogEvery              = 10 * time.Minute
+	tcProgramChainIndexV4Transparent          = 0
+	tcProgramChainIndexV4FullNATForward       = 1
+	tcProgramChainIndexV4EgressNATForward     = 2
+	tcProgramChainIndexV4ReplyTransparent     = 3
+	tcProgramChainIndexV4ReplyFullNAT         = 4
+	tcProgramChainIndexV4FullNATExisting      = 5
+	tcProgramChainIndexV4FullNATNew           = 6
+	tcProgramChainIndexV4ForwardCore          = 7
+	tcProgramChainIndexV4PluginContinue       = 8
+	tcProgramChainIndexV4PluginPostLookup     = 9
+	tcProgramChainIndexV4ReplyCore            = 26
+	tcProgramChainIndexV4PluginPreReply       = 27
+	tcProgramChainIndexV4PluginPostReply      = 28
+	tcProgramChainIndexV4PluginPostApply      = 77
+	tcProgramChainIndexV4PluginReplyPostApply = 78
+	tcProgramChainV4MaxEntries                = pluginTCPipelineProgramArrayEntries
+	// Plugin hooks live in tc_plugin_hooks_v4, not in the shared chain above:
+	// slot = bank*tcPluginHookBankSlots + stage base + position. Slots 10-25,
+	// 29-76 and 79-110 of the shared chain held hooks under ABI v2 and stay
+	// reserved so the plugin-visible layout does not change.
+	tcPluginHookStageCapacity    = pluginTCPipelineStageHookCapacity
+	tcPluginHookSlotPreForward   = 0 * tcPluginHookStageCapacity
+	tcPluginHookSlotPostLookup   = 1 * tcPluginHookStageCapacity
+	tcPluginHookSlotPostApply    = 2 * tcPluginHookStageCapacity
+	tcPluginHookSlotPreReply     = 3 * tcPluginHookStageCapacity
+	tcPluginHookSlotPostReply    = 4 * tcPluginHookStageCapacity
+	tcPluginHookSlotReplyApply   = 5 * tcPluginHookStageCapacity
+	tcPluginHookBankSlots        = 6 * tcPluginHookStageCapacity
+	tcPluginHookSlots            = 2 * tcPluginHookBankSlots
+	tcPluginMetricStageWidth     = tcPluginHookStageCapacity
+	tcPluginMetricPreForwardBase = tcPluginHookSlotPreForward
+	tcPluginMetricPostLookupBase = tcPluginHookSlotPostLookup
+	tcPluginMetricPostApplyBase  = tcPluginHookSlotPostApply
+	tcPluginMetricPreReplyBase   = tcPluginHookSlotPreReply
+	tcPluginMetricPostReplyBase  = tcPluginHookSlotPostReply
+	tcPluginMetricReplyApplyBase = tcPluginHookSlotReplyApply
+	tcPluginMetricMaxEntries     = tcPluginHookBankSlots
 )
 
 const (
@@ -159,6 +153,7 @@ const (
 	kernelRuleFlagPassthrough  = 0x10
 	kernelRuleFlagFullCone     = 0x20
 	kernelRuleFlagPreparedL2   = 0x40
+	kernelRuleFlagDrop         = 0x80
 )
 
 const (
@@ -340,6 +335,7 @@ type kernelCollectionPieces struct {
 	replyTransparentProg        *ebpf.Program
 	replyFullNATProg            *ebpf.Program
 	progChainV4                 *ebpf.Map
+	pluginHooksV4               *ebpf.Map
 	pluginConfigV4              *ebpf.Map
 	pluginInterfacesV4          *ebpf.Map
 	dispatchScratchV4           *ebpf.Map
@@ -1251,6 +1247,18 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
+	finishPluginRebuild, err := rt.preservePluginPipelineForRebuildLocked()
+	if err != nil {
+		coll.Close()
+		if rt.applyRetainedRulesOnFailureLocked(results, rules, err.Error()) {
+			return results, nil
+		}
+		for _, rule := range rules {
+			results[rule.ID] = kernelRuleApplyResult{Error: err.Error()}
+		}
+		return results, nil
+	}
+	defer func() { finishPluginRebuild(rt.coll == coll) }()
 	rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates, kernelPluginPipelineCoreConfig{Forward: len(prepared) > 0, Reply: len(prepared) > 0})
 	if pluginOnlyPipeline && !rt.pluginPipelineActive {
 		coll.Close()
@@ -1947,6 +1955,20 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	}
 	if err := pinKernelHotRestartMaps(kernelEngineTC, maps); err != nil {
 		log.Printf("kernel dataplane hot restart: preserve tc maps failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
+	// Full NAT, egress NAT and every plugin stage are tail calls. Without the
+	// pins the kernel empties tc_prog_chain_v4 and tc_plugin_hooks_v4 when this
+	// process exits, and the filters left for the successor pass those packets
+	// unprocessed.
+	err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCProgramChainMapName, rt.coll.Maps[kernelTCProgramChainMapName])
+	if err == nil {
+		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCPluginHooksMapName, rt.coll.Maps[kernelTCPluginHooksMapName])
+	}
+	if err != nil {
+		clearKernelHotRestartState(kernelEngineTC)
+		log.Printf("kernel dataplane hot restart: preserve tc tail-call chain failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
 		return true
 	}
@@ -3209,11 +3231,22 @@ func kernelAttachmentDeleteCount(oldAttachments, newAttachments []kernelAttachme
 }
 
 func (rt *linuxKernelRuleRuntime) discardAttachmentsLocked(attachments []kernelAttachment) {
-	for i := len(attachments) - 1; i >= 0; i-- {
-		if attachments[i].filter == nil {
-			continue
+	// FilterReplace may have replaced a live slot before another interface
+	// disappears. Restore that slot atomically instead of deleting its only
+	// filter and leaving unrelated traffic on the host forwarding path.
+	update := &pluginDirectTCUpdate{previous: make(map[pluginTCSlot]*netlink.BpfFilter)}
+	for _, att := range rt.attachments {
+		if att.filter != nil {
+			update.previous[pluginTCFilterSlot(att.filter)] = att.filter
 		}
-		_ = netlink.FilterDel(attachments[i].filter)
+	}
+	for _, att := range attachments {
+		if att.filter != nil {
+			update.installed = append(update.installed, att.filter)
+		}
+	}
+	if err := update.rollback(); err != nil {
+		log.Printf("kernel dataplane rollback: restore tc attachments failed: %v", err)
 	}
 }
 
@@ -3255,6 +3288,7 @@ func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, i
 		},
 		Fd:           prog.FD(),
 		Name:         name,
+		Id:           int(kernelProgramID(prog)),
 		DirectAction: true,
 	}
 	if err := netlink.FilterReplace(filter); err != nil {
@@ -3386,6 +3420,7 @@ func kernelCollectionPiecesSupportPluginPipelineV4(pieces kernelCollectionPieces
 		pieces.replyPluginPostApplyProg != nil &&
 		pieces.dispatchScratchV4 != nil &&
 		pieces.dispatchScratchV6 != nil &&
+		pieces.pluginHooksV4 != nil &&
 		pieces.pluginConfigV4 != nil &&
 		pieces.pluginInterfacesV4 != nil &&
 		pieces.pluginCtxV4 != nil &&
@@ -3683,8 +3718,13 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 				return fmt.Errorf("embedded tc eBPF object has incomplete plugin pipeline set: missing program %q", name)
 			}
 		}
-		if _, ok := spec.Maps[kernelTCPluginConfigMapName]; !ok {
+		if hooksSpec, ok := spec.Maps[kernelTCPluginHooksMapName]; !ok || hooksSpec.Type != ebpf.ProgramArray || hooksSpec.MaxEntries < tcPluginHookSlots {
+			return fmt.Errorf("embedded tc eBPF object needs program array %q with %d hook slots", kernelTCPluginHooksMapName, tcPluginHookSlots)
+		}
+		if configSpec, ok := spec.Maps[kernelTCPluginConfigMapName]; !ok {
 			return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 plugin pipeline set: missing map %q", kernelTCPluginConfigMapName)
+		} else if configSpec.MaxEntries < kernelTCPluginConfigEntries {
+			return fmt.Errorf("embedded tc eBPF object map %q has %d entries, want header plus two banks (%d)", kernelTCPluginConfigMapName, configSpec.MaxEntries, kernelTCPluginConfigEntries)
 		}
 		if _, ok := spec.Maps[kernelTCDispatchScratchMapName]; !ok {
 			return fmt.Errorf("embedded tc eBPF object has incomplete plugin pipeline set: missing map %q", kernelTCDispatchScratchMapName)
@@ -3800,6 +3840,7 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		replyTransparentProg:        coll.Programs[kernelReplyTransparentProgramName],
 		replyFullNATProg:            coll.Programs[kernelReplyFullNATProgramName],
 		progChainV4:                 coll.Maps[kernelTCProgramChainMapName],
+		pluginHooksV4:               coll.Maps[kernelTCPluginHooksMapName],
 		pluginConfigV4:              coll.Maps[kernelTCPluginConfigMapName],
 		pluginInterfacesV4:          coll.Maps[kernelTCPluginInterfacesMapName],
 		dispatchScratchV4:           coll.Maps[kernelTCDispatchScratchMapName],
@@ -3931,6 +3972,9 @@ func prepareKernelRuleRef(ctx *kernelPrepareContext, rule *Rule) ([]preparedKern
 	inLink, err := ctx.linkByName(rule.InInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve inbound interface %q: %w", rule.InInterface, err)
+	}
+	if rule.kernelUnavailable && isKernelEgressNATRule(*rule) {
+		return prepareKernelEgressNATDropRule(*rule, inLink)
 	}
 	outLink, err := ctx.linkByName(rule.OutInterface)
 	if err != nil {
@@ -4194,6 +4238,36 @@ func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink net
 	return prepared, nil
 }
 
+func prepareKernelEgressNATDropRule(rule Rule, inLink netlink.Link) ([]preparedKernelRule, error) {
+	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) || !kernelEgressProtocolSupported(rule.Protocol) ||
+		rule.InPort != 0 || rule.OutPort != 0 || rule.Transparent {
+		return nil, fmt.Errorf("invalid egress NAT drop selector")
+	}
+	inLinks, err := resolveTCInboundLinks(inLink)
+	if err != nil {
+		return nil, err
+	}
+	prepared := make([]preparedKernelRule, 0, len(inLinks))
+	for _, current := range inLinks {
+		if current == nil || current.Attrs() == nil || current.Attrs().Index <= 0 {
+			continue
+		}
+		index := current.Attrs().Index
+		prepared = append(prepared, preparedKernelRule{
+			rule: rule, inIfIndex: index, outIfIndex: index,
+			spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+			key:  tcRuleKeyV4{IfIndex: uint32(index), Proto: kernelRuleProtocol(rule.Protocol)},
+			value: tcRuleValueV4{RuleID: uint32(rule.ID),
+				Flags:      kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT | kernelRuleFlagDrop,
+				OutIfIndex: uint32(index), SrcMAC: egressNATIngressLocalMAC(current)},
+		})
+	}
+	if len(prepared) == 0 {
+		return nil, fmt.Errorf("egress NAT drop selector has no attachable ingress")
+	}
+	return prepared, nil
+}
+
 func prepareKernelEgressNATPassthroughRule(ctx *kernelPrepareContext, rule Rule, inLink netlink.Link, outLink netlink.Link) ([]preparedKernelRule, error) {
 	inAddr, err := parseKernelInboundIPv4Uint32(rule.InIP)
 	if err != nil {
@@ -4259,6 +4333,13 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 
 	for _, rule := range rules {
 		items, err := prepareKernelRule(prepareCtx, rule)
+		if err != nil && isKernelEgressNATRule(rule) {
+			// The boundary can disappear after preflight. Close that race without
+			// removing the LAN selector and exposing the host's default route.
+			guard := rule
+			guard.kernelUnavailable = true
+			items, err = prepareKernelRule(prepareCtx, guard)
+		}
 		if err != nil {
 			if reused, ok := reusablePreparedKernelRules(rule, err, previousByKey, allowTransientReuse); ok {
 				prepared = append(prepared, reused...)
@@ -4350,6 +4431,12 @@ func (rt *linuxKernelRuleRuntime) samePreparedRulesLocked(next []preparedKernelR
 		if !samePreparedKernelRuleDataplane(rt.preparedRules[i], next[i]) {
 			return false
 		}
+	}
+	// Health only proves the next targets are attached. A target that went
+	// away, such as a deleted plugin boundary, must still replace the stored
+	// set; otherwise self-heal keeps reattaching to an ifindex that is gone.
+	if !effectiveKernelAttachmentRuleSets(rt.preparedRules, rt.attachmentRuleSets).sameTargets(attachmentRuleSets) {
+		return false
 	}
 	return rt.attachmentsHealthyLocked(attachmentRuleSets)
 }
