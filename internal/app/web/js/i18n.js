@@ -2521,6 +2521,10 @@
       node.setAttribute('title', app.t(node.dataset.i18nTitle));
     });
 
+    document.querySelectorAll('[data-i18n-aria-label]').forEach((node) => {
+      node.setAttribute('aria-label', app.t(node.dataset.i18nAriaLabel));
+    });
+
     document.title = app.t('app.title');
   };
 

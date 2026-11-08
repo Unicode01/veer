@@ -562,6 +562,33 @@ async function expectNoPageOverflow(page) {
   )), { message: 'page-level horizontal overflow' }).toBeLessThanOrEqual(1);
 }
 
+// Labels built once (aria-label, placeholder, title) must follow a locale switch,
+// so no element may keep a string that only the other locale uses. A plugin frame's
+// title is the plugin's name, not a translation.
+async function staleLocaleStrings(page) {
+  return page.evaluate(() => {
+    const app = window.VeerApp;
+    const current = app.translations[app.state.locale];
+    const previous = app.translations[app.state.locale === 'en-US' ? 'zh-CN' : 'en-US'];
+    const currentValues = new Set(Object.values(current));
+    const stale = new Set(Object.keys(previous).map((key) => previous[key]).filter((value) => !/\{\{/.test(value) && !currentValues.has(value)));
+    const found = [];
+    // Attributes are checked everywhere: hidden palettes and drawers keep theirs when shown.
+    // Text is checked where visible: hidden tabs re-render when they are opened.
+    document.querySelectorAll('body *').forEach((el) => {
+      const name = el.tagName.toLowerCase() + (el.id ? '#' + el.id : '');
+      ['aria-label', 'placeholder', 'title'].forEach((attr) => {
+        if (stale.has(el.getAttribute(attr)) && !(el.tagName === 'IFRAME' && attr === 'title')) found.push(name + '@' + attr + ': ' + el.getAttribute(attr));
+      });
+      if (el.closest('script, style, option') || !el.checkVisibility()) return;
+      el.childNodes.forEach((child) => {
+        if (child.nodeType === Node.TEXT_NODE && stale.has(child.textContent.trim())) found.push(name + ': ' + child.textContent.trim());
+      });
+    });
+    return found;
+  });
+}
+
 async function navigatePage(page, tab) {
   if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
   await page.locator('[data-tab="' + tab + '"]').click();
@@ -771,6 +798,7 @@ test('sidebar tools preserve theme, language and logout behavior with keyboard a
   const originalLocale = await page.locator('html').getAttribute('lang');
   await page.locator('#localeToggle').click();
   await expect(page.locator('html')).toHaveAttribute('lang', originalLocale === 'en-US' ? 'zh-CN' : 'en-US');
+  expect(await staleLocaleStrings(page), 'strings left in the previous locale').toEqual([]);
   await theme.click();
   await page.keyboard.press('Home');
   await page.keyboard.press('Enter');
