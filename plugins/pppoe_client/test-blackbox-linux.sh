@@ -419,6 +419,27 @@ wait_for_server_session_release() {
 	exit 1
 }
 
+# Dials with $payload, saving the reply as $work_dir/$1.json. One probe gives
+# discovery, LCP and auth only timeout_ms, which a slow runner can miss; a
+# failed probe sends PADT, so let the single-session server go and dial again.
+post_traffic_probe() {
+	probe_name=$1
+	for attempt in 1 2 3 4 5; do
+		if api_post_action traffic_probe "$payload" >"$work_dir/$probe_name-$attempt.json" 2>"$work_dir/$probe_name-$attempt.err"; then
+			cp "$work_dir/$probe_name-$attempt.json" "$work_dir/$probe_name.json"
+			return
+		fi
+		wait_for_server_session_release
+		sleep 1
+	done
+	stop_capture
+	for result in "$work_dir/$probe_name"-*.json "$work_dir/$probe_name"-*.err; do
+		cat "$result" >&2 || true
+	done
+	dump_dataplane_state
+	exit 1
+}
+
 test_automatic_redial() {
 	api_get_resource sessions last >"$work_dir/session-before-auto-redial.json"
 	previous_generation=$(sed -n 's/.*"session_generation":"\([^"]*\)".*/\1/p' "$work_dir/session-before-auto-redial.json" | head -n 1)
@@ -611,7 +632,7 @@ $keepalive_test_fields
 }
 EOF
 )
-	api_post_action traffic_probe "$payload" >"$work_dir/action.json"
+	post_traffic_probe action
 	wait_for_session_up
 	api_get_plugin_resource wan_core status blackbox >"$work_dir/wan-status.json"
 	grep -q '"segmentation_ready":true' "$work_dir/wan-status.json"
@@ -782,23 +803,8 @@ EOF
 			exit 1
 		fi
 	fi
-	redial_ok=0
-	for attempt in 1 2 3 4 5; do
-		sleep 1
-		if api_post_action traffic_probe "$payload" >"$work_dir/redial-action-$attempt.json" 2>"$work_dir/redial-action-$attempt.err"; then
-			cp "$work_dir/redial-action-$attempt.json" "$work_dir/redial-action.json"
-			redial_ok=1
-			break
-		fi
-	done
-	if [ "$redial_ok" != "1" ]; then
-		stop_capture
-		for result in "$work_dir"/redial-action-*.json "$work_dir"/redial-action-*.err; do
-			cat "$result" >&2 || true
-		done
-		dump_dataplane_state
-		exit 1
-	fi
+	sleep 1
+	post_traffic_probe redial-action
 	wait_for_session_up
 	if ! ping -I "$local_if" -c 3 -W 2 8.8.8.8; then
 		dump_dataplane_state
