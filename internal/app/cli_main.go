@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 )
@@ -94,22 +95,32 @@ func veerBuildInfo(buildNonce string) veerBuildInformation {
 	return info
 }
 
+// releaseVersionPattern matches tags such as v1.2.3 or v1.3.0-rc.1. Go stamps a
+// tagged clean checkout with its tag; untagged or modified trees get
+// pseudo-versions or "+dirty", which name no release.
+var releaseVersionPattern = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`)
+
 func writeVeerBuildInfo(w io.Writer, info veerBuildInformation) {
+	revision := info.Revision
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	if revision != "" && info.Modified {
+		revision += "-dirty"
+	}
 	label := "devel"
-	if info.ModuleVersion != "" {
+	switch {
+	case releaseVersionPattern.MatchString(info.ModuleVersion):
+		label = info.ModuleVersion
+	case revision != "":
+		label = revision
+	case info.ModuleVersion != "":
 		label = info.ModuleVersion
 	}
-	if info.Revision != "" {
-		revision := info.Revision
-		if len(revision) > 12 {
-			revision = revision[:12]
-		}
-		label = revision
-		if info.Modified {
-			label += "-dirty"
-		}
-	}
 	fmt.Fprintf(w, "veer %s\n", label)
+	if revision != "" && label != revision {
+		fmt.Fprintf(w, "  revision:       %s\n", revision)
+	}
 	if info.CommitTime != "" {
 		fmt.Fprintf(w, "  commit time:    %s\n", info.CommitTime)
 	}

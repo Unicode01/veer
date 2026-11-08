@@ -27,7 +27,7 @@ mkdir -p /work/veer
 cp -R /src/. /work/veer/
 cd /work/veer
 python3 scripts/verify-platform-behavior.py --library bootstrap > /work/bootstrap-functions.sh
-bash -c '. /work/bootstrap-functions.sh; FORWARD_SKIP_DEPS=0; require_supported_distro; install_system_deps; require_runtime_tools'
+bash -c '. /work/bootstrap-functions.sh; FORWARD_SKIP_DEPS=0; require_supported_distro; install_system_deps build; require_runtime_tools; require_build_tools'
 python3 scripts/verify-platform-behavior.py
 export PATH="/opt/veer-go/bin:$PATH"
 export CGO_ENABLED=0

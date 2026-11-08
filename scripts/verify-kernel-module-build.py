@@ -8,6 +8,7 @@ import tempfile
 
 
 SOURCE = Path(__file__).resolve().parent / "build-kernel-module.sh"
+PROBES = Path(__file__).resolve().parent / "build-kfuncs-probes.sh"
 MODULE_BUILD = Path(__file__).resolve().parents[1] / "kernel/veer_kfuncs/build.sh"
 
 
@@ -26,6 +27,7 @@ def verify(mode):
         for name in ("scripts", "kernel/veer_kfuncs", "internal/app/ebpf", "bin", "headers"):
             (root / name).mkdir(parents=True)
         shutil.copy2(SOURCE, root / "scripts/build-kernel-module.sh")
+        shutil.copy2(PROBES, root / "scripts/build-kfuncs-probes.sh")
         shutil.copy2(MODULE_BUILD, root / "kernel/veer_kfuncs/build.sh")
         (root / "headers/Makefile").touch()
         (root / "base.btf").write_bytes(b"matching base")

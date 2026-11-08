@@ -3,14 +3,14 @@
 # Veer - Linux 一键引导部署脚本
 #
 # 设计目标:
-#   1. 安装构建与部署依赖
-#   2. 拉取指定 Git ref 的源码
-#   3. 调用 release.sh 本机构建
-#   4. 调用 deploy.sh 完成安装 / 热更新
+#   1. 安装部署依赖
+#   2. 下载并校验 GitHub Release 预编译包；没有 release 或指定 VEER_REF 时
+#      安装构建依赖、拉取源码并调用 release.sh 本机构建
+#   3. 调用 deploy.sh 完成安装 / 热更新
 #
 # 典型用法:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
-#   VEER_REF=main WEB_PORT=8080 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+#   VEER_VERSION=v1.2.3 WEB_PORT=8080 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 #   bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 #
 # 说明:
@@ -47,7 +47,16 @@ usage() {
                       显式覆盖源码归档地址，git 拉取失败时作为回退
   VEER_REPO_ARCHIVE_URL_CN
                       CN 模式优先尝试的源码归档地址，默认空
-  VEER_REF             拉取的 Git ref，默认 main
+  VEER_INSTALL_MODE    auto/release/source，默认 auto：安装最新 release，
+                      无法获取 release 时回退为源码构建；设置 VEER_REF 时直接源码构建
+  VEER_VERSION         安装的 release tag，默认 latest；指定 tag 时下载失败直接报错，不回退
+  VEER_RELEASE_BASE_URL
+                      release 镜像目录，需包含 sha256sums.txt 与 veer-linux-<arch>.tar.gz，
+                      优先于 GitHub 尝试
+  VEER_BUILD_KERNEL_MODULE
+                      设为 1 时为当前内核构建 veer_kfuncs.ko，需当前内核 headers、make 和编译器；
+                      配合 VEER_INSTALL_KERNEL_MODULE=1 安装
+  VEER_REF             源码构建拉取的 Git ref，默认 main
   VEER_GO_VERSION      安装的 Go 版本，默认 1.26.10
   VEER_GO_SHA256       自定义 Go 版本/构建的官方 tar.gz SHA-256
   VEER_GO_REGION       Go 下载区域策略: auto/cn/global，默认 auto
@@ -67,7 +76,7 @@ usage() {
                         失败时保留临时目录，默认 1
   VEER_SKIP_DEPS       设为 1 时跳过系统依赖安装
   VEER_SKIP_GO         设为 1 时跳过 Go 安装检查
-  VEER_INSTALL_PLUGINS 设为 1 时构建并安装 bundled stable 插件，默认 0
+  VEER_INSTALL_PLUGINS 设为 1 时安装 bundled stable 插件，默认 0
   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
 
 兼容性:
@@ -76,10 +85,12 @@ usage() {
 
 部署阶段透传给 deploy.sh 的常用环境变量:
   INSTALL_DIR WEB_PORT WEB_TOKEN VEER_BPF_STATE_DIR VEER_RUNTIME_STATE_DIR VEER_INSTALL_PLUGINS
+  VEER_INSTALL_KERNEL_MODULE
 
 示例:
   bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})
-  VEER_REF=v1.2.3 bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})
+  VEER_VERSION=v1.2.3 bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})
+  VEER_REF=dev bash <(curl -fsSL ${BOOTSTRAP_HINT_URL})
   bash <(curl -fsSL ${BOOTSTRAP_HINT_URL}) -- --no-inherit-stats
 EOF
 }
@@ -104,7 +115,17 @@ FORWARD_LEGACY_REPO_URL="https://github.com/Unicode01/forward.git"
 FORWARD_REPO_URL_CN="${VEER_REPO_URL_CN:-${FORWARD_REPO_URL_CN:-}}"
 FORWARD_REPO_ARCHIVE_URL="${VEER_REPO_ARCHIVE_URL:-${FORWARD_REPO_ARCHIVE_URL:-}}"
 FORWARD_REPO_ARCHIVE_URL_CN="${VEER_REPO_ARCHIVE_URL_CN:-${FORWARD_REPO_ARCHIVE_URL_CN:-}}"
+# Naming a Git ref asks for that source tree, so auto mode builds it instead of
+# installing a release.
+FORWARD_REF_EXPLICIT=0
+if [[ -n "${VEER_REF:-}" || -n "${FORWARD_REF:-}" ]]; then
+    FORWARD_REF_EXPLICIT=1
+fi
 FORWARD_REF="${VEER_REF:-${FORWARD_REF:-main}}"
+FORWARD_INSTALL_MODE="${VEER_INSTALL_MODE:-auto}"
+FORWARD_VERSION="${VEER_VERSION:-latest}"
+FORWARD_RELEASE_BASE_URL="${VEER_RELEASE_BASE_URL:-}"
+FORWARD_BUILD_KERNEL_MODULE="${VEER_BUILD_KERNEL_MODULE:-0}"
 FORWARD_GO_VERSION="${VEER_GO_VERSION:-${FORWARD_GO_VERSION:-1.26.10}}"
 FORWARD_GO_SHA256="${VEER_GO_SHA256:-${FORWARD_GO_SHA256:-}}"
 FORWARD_GO_REGION="${VEER_GO_REGION:-${FORWARD_GO_REGION:-auto}}"
@@ -126,6 +147,8 @@ fi
 FORWARD_SKIP_GO="${VEER_SKIP_GO:-${FORWARD_SKIP_GO:-0}}"
 FORWARD_INSTALL_PLUGINS="${VEER_INSTALL_PLUGINS:-0}"
 FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
+FORWARD_RELEASE_DIR="${FORWARD_WORKDIR}/release"
+FORWARD_DEPLOY_DIR=""
 FORWARD_GO_ROOT="${FORWARD_WORKDIR}/go"
 FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH:-amd64}.tar.gz"
 
@@ -136,6 +159,23 @@ case "${FORWARD_INSTALL_PLUGINS}" in
         ;;
     *)
         fail "VEER_INSTALL_PLUGINS 仅支持 0 或 1，当前值: ${FORWARD_INSTALL_PLUGINS}"
+        ;;
+esac
+case "${FORWARD_INSTALL_MODE}" in
+    auto|release|source)
+        ;;
+    *)
+        fail "VEER_INSTALL_MODE 仅支持 auto/release/source，当前值: ${FORWARD_INSTALL_MODE}"
+        ;;
+esac
+if [[ "${FORWARD_VERSION}" != "latest" && ! "${FORWARD_VERSION}" =~ ^v[0-9][0-9A-Za-z._+-]*$ ]]; then
+    fail "VEER_VERSION 必须是 latest 或以 v 开头的 release tag，当前值: ${FORWARD_VERSION}"
+fi
+case "${FORWARD_BUILD_KERNEL_MODULE}" in
+    0|1)
+        ;;
+    *)
+        fail "VEER_BUILD_KERNEL_MODULE 仅支持 0 或 1，当前值: ${FORWARD_BUILD_KERNEL_MODULE}"
         ;;
 esac
 
@@ -223,6 +263,7 @@ safe_remove_bootstrap_path() {
 
 initialize_bootstrap_workdir "${FORWARD_WORKDIR}"
 FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
+FORWARD_RELEASE_DIR="${FORWARD_WORKDIR}/release"
 FORWARD_GO_ROOT="${FORWARD_WORKDIR}/go"
 FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH:-amd64}.tar.gz"
 
@@ -502,15 +543,23 @@ rpm_dependency_package() {
     fi
 }
 
+# Installs what deploy.sh and the service need. The "build" scope adds the
+# compiler and Git a source build needs; release installs skip them.
 install_system_deps() {
+    local scope="${1:-runtime}"
     local package_manager=""
     local rpm_coreutils_package="coreutils"
     local rpm_curl_package="curl"
+    local packages=()
 
     if [[ "${FORWARD_SKIP_DEPS}" == "1" ]]; then
         warn "已跳过系统依赖安装"
         return
     fi
+    case "${scope}" in
+        runtime|build) ;;
+        *) fail "未知的依赖范围: ${scope}" ;;
+    esac
 
     package_manager="$(detect_package_manager)"
     if [[ "${package_manager}" == dnf || "${package_manager}" == yum ]]; then
@@ -519,99 +568,26 @@ install_system_deps() {
     fi
     case "${package_manager}" in
         apt)
+            packages=(ca-certificates bash coreutils curl ethtool findutils iproute2 iptables nftables procps python3 util-linux xz-utils tar)
+            [[ "${scope}" == runtime ]] || packages+=(git clang llvm linux-libc-dev)
             export DEBIAN_FRONTEND=noninteractive
             run_with_retry 3 3 "apt-get update" apt-get update
-            run_with_retry 3 3 "安装系统依赖" apt-get install -y --no-install-recommends \
-                ca-certificates \
-                bash \
-                coreutils \
-                curl \
-                ethtool \
-                findutils \
-                git \
-                iproute2 \
-                iptables \
-                clang \
-                llvm \
-                linux-libc-dev \
-                nftables \
-                procps \
-                python3 \
-                util-linux \
-                xz-utils \
-                tar
+            run_with_retry 3 3 "安装系统依赖" apt-get install -y --no-install-recommends "${packages[@]}"
             ;;
-        dnf)
-            run_with_retry 3 3 "刷新 dnf 元数据" dnf -y makecache --refresh
-            run_with_retry 3 3 "安装系统依赖" dnf install -y \
-                ca-certificates \
-                bash \
-                "${rpm_coreutils_package}" \
-                "${rpm_curl_package}" \
-                ethtool \
-                findutils \
-                git \
-                iproute \
-                iptables \
-                clang \
-                llvm \
-                kernel-headers \
-                nftables \
-                policycoreutils \
-                procps-ng \
-                python3 \
-                util-linux \
-                xz \
-                tar
-            ;;
-        yum)
-            run_with_retry 3 3 "刷新 yum 元数据" yum -y makecache
-            run_with_retry 3 3 "安装系统依赖" yum install -y \
-                ca-certificates \
-                bash \
-                "${rpm_coreutils_package}" \
-                "${rpm_curl_package}" \
-                ethtool \
-                findutils \
-                git \
-                iproute \
-                iptables \
-                clang \
-                llvm \
-                kernel-headers \
-                nftables \
-                policycoreutils \
-                procps-ng \
-                python3 \
-                util-linux \
-                xz \
-                tar
+        dnf|yum)
+            packages=(ca-certificates bash "${rpm_coreutils_package}" "${rpm_curl_package}" ethtool findutils iproute iptables nftables policycoreutils procps-ng python3 util-linux xz tar)
+            [[ "${scope}" == runtime ]] || packages+=(git clang llvm kernel-headers)
+            if [[ "${package_manager}" == dnf ]]; then
+                run_with_retry 3 3 "刷新 dnf 元数据" dnf -y makecache --refresh
+            else
+                run_with_retry 3 3 "刷新 yum 元数据" yum -y makecache
+            fi
+            run_with_retry 3 3 "安装系统依赖" "${package_manager}" install -y "${packages[@]}"
             ;;
         apk)
-            run_with_retry 3 3 "安装 Alpine 系统依赖" apk add --no-cache \
-                bash \
-                ca-certificates \
-                clang \
-                coreutils \
-                curl \
-                ethtool \
-                findutils \
-                gawk \
-                git \
-                grep \
-                iproute2 \
-                iptables \
-                linux-headers \
-                llvm \
-                musl-dev \
-                nftables \
-                openrc \
-                procps \
-                python3 \
-                sed \
-                tar \
-                util-linux \
-                xz
+            packages=(bash ca-certificates coreutils curl ethtool findutils gawk grep iproute2 iptables nftables openrc procps python3 sed tar util-linux xz)
+            [[ "${scope}" == runtime ]] || packages+=(clang git linux-headers llvm musl-dev)
+            run_with_retry 3 3 "安装 Alpine 系统依赖" apk add --no-cache "${packages[@]}"
             ;;
         *)
             fail "未处理的包管理器: ${package_manager}"
@@ -625,13 +601,27 @@ require_runtime_tools() {
     local missing=()
     local command_name=""
 
-    for command_name in bash curl tar git python3 clang ip iptables ethtool nft mount mountpoint sysctl install readlink; do
+    for command_name in bash curl tar python3 ip iptables ethtool nft mount mountpoint sysctl install readlink; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             missing+=("${command_name}")
         fi
     done
     if (( ${#missing[@]} > 0 )); then
         fail "系统依赖不完整，缺少命令: ${missing[*]}"
+    fi
+}
+
+require_build_tools() {
+    local missing=()
+    local command_name=""
+
+    for command_name in git clang; do
+        if ! command -v "${command_name}" >/dev/null 2>&1; then
+            missing+=("${command_name}")
+        fi
+    done
+    if (( ${#missing[@]} > 0 )); then
+        fail "源码构建依赖不完整，缺少命令: ${missing[*]}"
     fi
 }
 
@@ -1070,10 +1060,8 @@ expected_go_tarball_sha256() {
     esac
 }
 
-verify_go_tarball() {
-    local expected_sha256="$1"
-    local actual_sha256=""
-    actual_sha256="$(python3 - "${FORWARD_GO_TARBALL}" <<'PY'
+file_sha256() {
+    python3 - "$1" <<'PY'
 import hashlib
 import sys
 
@@ -1083,7 +1071,12 @@ with open(sys.argv[1], "rb") as stream:
         digest.update(chunk)
 print(digest.hexdigest())
 PY
-)" || return 1
+}
+
+verify_go_tarball() {
+    local expected_sha256="$1"
+    local actual_sha256=""
+    actual_sha256="$(file_sha256 "${FORWARD_GO_TARBALL}")" || return 1
     [[ "${actual_sha256}" == "${expected_sha256}" ]]
 }
 
@@ -1157,6 +1150,113 @@ install_go_if_needed() {
     ok "临时 Go 已安装: ${current} (${FORWARD_GO_ROOT})"
 }
 
+# auto installs the published release and falls back to a source build only
+# when no release can be downloaded; an explicit VEER_REF builds that tree.
+resolve_install_mode() {
+    if [[ "${FORWARD_INSTALL_MODE}" == auto && "${FORWARD_REF_EXPLICIT}" == "1" ]]; then
+        printf 'source'
+        return
+    fi
+    printf '%s' "${FORWARD_INSTALL_MODE}"
+}
+
+# Resolves "latest" through GitHub's redirect, so the checksum list and the
+# archive come from the same release even if another is published meanwhile.
+resolve_release_tag() {
+    local slug="$1"
+    local effective=""
+
+    if [[ "${FORWARD_VERSION}" != "latest" ]]; then
+        printf '%s' "${FORWARD_VERSION}"
+        return 0
+    fi
+    effective="$(curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 1 -o /dev/null -w '%{url_effective}' "https://github.com/${slug}/releases/latest")" || return 1
+    case "${effective}" in
+        "https://github.com/${slug}/releases/tag/"*)
+            effective="${effective#"https://github.com/${slug}/releases/tag/"}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [[ "${effective}" =~ ^v[0-9][0-9A-Za-z._+-]*$ ]] || return 1
+    printf '%s' "${effective}"
+}
+
+# Prints directories that serve sha256sums.txt and the archives, mirror first.
+resolve_release_base_urls() {
+    local slug=""
+    local tag=""
+
+    if [[ -n "${FORWARD_RELEASE_BASE_URL}" ]]; then
+        printf '%s\n' "${FORWARD_RELEASE_BASE_URL%/}"
+    fi
+    slug="$(github_repo_slug_from_url "${FORWARD_REPO_URL}" || true)"
+    if [[ -n "${slug}" ]] && tag="$(resolve_release_tag "${slug}")"; then
+        printf '%s\n' "https://github.com/${slug}/releases/download/${tag}"
+    fi
+}
+
+release_asset_checksum() {
+    local sums="$1"
+    local asset="$2"
+    local checksum=""
+
+    checksum="$(awk -v asset="${asset}" '$2 == asset || $2 == "*" asset { print tolower($1); exit }' "${sums}")"
+    [[ "${checksum}" =~ ^[a-f0-9]{64}$ ]] || return 1
+    printf '%s' "${checksum}"
+}
+
+# Downloads, verifies and unpacks veer-linux-<arch>.tar.gz. Returns non-zero when
+# no source serves the release; a checksum mismatch or a broken archive fails.
+download_release() {
+    local asset="veer-linux-${GOARCH}.tar.gz"
+    local sums="${FORWARD_WORKDIR}/sha256sums.txt"
+    local archive="${FORWARD_WORKDIR}/${asset}"
+    local deploy_dir="${FORWARD_RELEASE_DIR}/veer-linux-${GOARCH}"
+    local base=""
+    local expected=""
+    local actual=""
+    local file=""
+    local urls=()
+
+    mapfile -t urls < <(resolve_release_base_urls)
+    for base in "${urls[@]}"; do
+        [[ -n "${base}" ]] || continue
+        info "尝试下载 release: ${base}/${asset}"
+        rm -f "${sums}" "${archive}"
+        if ! curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 -o "${sums}" "${base}/sha256sums.txt" ||
+            ! curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 -o "${archive}" "${base}/${asset}"; then
+            warn "release 下载失败，尝试下一个源: ${base}"
+            continue
+        fi
+        expected="$(release_asset_checksum "${sums}" "${asset}")" || fail "sha256sums.txt 缺少 ${asset} 的 SHA-256: ${base}"
+        actual="$(file_sha256 "${archive}")" || fail "无法计算 ${asset} 的 SHA-256"
+        [[ "${actual}" == "${expected}" ]] || fail "${asset} SHA-256 不匹配，拒绝安装: ${base}"
+
+        safe_remove_bootstrap_path "${FORWARD_RELEASE_DIR}"
+        mkdir -p "${FORWARD_RELEASE_DIR}"
+        tar -C "${FORWARD_RELEASE_DIR}" --no-same-owner -xzf "${archive}" || fail "解压 ${asset} 失败"
+        rm -f "${sums}" "${archive}"
+        for file in "veer-linux-${GOARCH}" deploy.sh config.example.json; do
+            [[ -f "${deploy_dir}/${file}" && ! -L "${deploy_dir}/${file}" ]] || fail "release 归档缺少 ${file}: ${base}"
+        done
+        FORWARD_DEPLOY_DIR="${deploy_dir}"
+        ok "release 已通过 SHA-256 校验: $(cat "${deploy_dir}/VERSION" 2>/dev/null || printf '%s' "${base}")"
+        return 0
+    done
+    return 1
+}
+
+# Release binaries embed the helper source; the .ko must match this kernel, so
+# it is built here and handed to deploy.sh like an uploaded module.
+build_release_kernel_module() {
+    [[ "${FORWARD_BUILD_KERNEL_MODULE}" == "1" ]] || return 0
+    "${FORWARD_DEPLOY_DIR}/veer-linux-${GOARCH}" kfuncs build --install-dir "${FORWARD_DEPLOY_DIR}" ||
+        fail "构建内核扩展失败；需要当前内核的 headers、make 和编译器，详见 docs/KERNEL.md"
+    ok "内核扩展已构建: ${FORWARD_DEPLOY_DIR}/kernel/$(uname -r)/veer_kfuncs.ko"
+}
+
 clone_repo() {
     local fetch_urls=()
     local archive_urls=()
@@ -1198,26 +1298,22 @@ clone_repo() {
 build_release() {
     cd "${FORWARD_REPO_DIR}"
     VEER_BUILD_PLUGIN_BUNDLE="${FORWARD_INSTALL_PLUGINS}" bash ./release.sh "${GOARCH}"
+    FORWARD_DEPLOY_DIR="${FORWARD_REPO_DIR}"
     ok "构建完成"
 }
 
 run_deploy() {
-    cd "${FORWARD_REPO_DIR}"
+    cd "${FORWARD_DEPLOY_DIR}"
     VEER_INSTALL_PLUGINS="${FORWARD_INSTALL_PLUGINS}" bash ./deploy.sh "${DEPLOY_ARGS[@]}"
 }
 
-main() {
-    set_step "检测架构"
-    detect_arch
-    FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
+build_from_source() {
     set_step "检查内存"
     warn_low_memory
-    set_step "检查发行版"
-    require_supported_distro
-    set_step "安装系统依赖"
-    install_system_deps
-    set_step "检查基础工具"
-    require_runtime_environment
+    set_step "安装构建依赖"
+    install_system_deps build
+    set_step "检查构建工具"
+    require_build_tools
     set_step "安装 Go"
     install_go_if_needed
     set_step "配置 Go 模块代理"
@@ -1226,6 +1322,39 @@ main() {
     clone_repo
     set_step "构建 release"
     build_release
+}
+
+main() {
+    local mode=""
+
+    mode="$(resolve_install_mode)"
+    set_step "检测架构"
+    detect_arch
+    FORWARD_GO_TARBALL="${FORWARD_WORKDIR}/go${FORWARD_GO_VERSION}.linux-${GO_TARBALL_ARCH}.tar.gz"
+    set_step "检查发行版"
+    require_supported_distro
+    set_step "安装系统依赖"
+    install_system_deps runtime
+    set_step "检查基础工具"
+    require_runtime_environment
+    if [[ "${mode}" != source ]]; then
+        set_step "下载 release ${FORWARD_VERSION}"
+        if download_release; then
+            mode="release"
+        elif [[ "${mode}" == release || "${FORWARD_VERSION}" != "latest" ]]; then
+            # A pinned version must not quietly become a build of another ref.
+            fail "无法下载 release ${FORWARD_VERSION}；可设置 VEER_RELEASE_BASE_URL 指定镜像，或用 VEER_INSTALL_MODE=source 从源码构建"
+        else
+            warn "无法获取 release ${FORWARD_VERSION}，回退为从源码构建 ${FORWARD_REF}"
+            mode="source"
+        fi
+    fi
+    if [[ "${mode}" == source ]]; then
+        build_from_source
+    elif [[ "${FORWARD_BUILD_KERNEL_MODULE}" == "1" ]]; then
+        set_step "构建内核扩展"
+        build_release_kernel_module
+    fi
     set_step "执行部署"
     run_deploy
 }

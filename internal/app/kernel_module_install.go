@@ -122,16 +122,33 @@ func currentKernelHelperInstall() (string, kernelHelperInstall, bool) {
 	return executable, inspectKernelHelperInstall(filepath.Dir(executable), release), true
 }
 
+// kernelHelperNotInstalledReason describes a binary with helper support on a
+// host that never installed a module. Release binaries carry the support for
+// every host, so this is the normal base-dataplane state, not a fault.
+const kernelHelperNotInstalledReason = "not installed"
+
+// optedIn reports whether a module was installed for any kernel, which is
+// when a missing module for the running kernel deserves attention.
+func (state kernelHelperInstall) optedIn() bool {
+	return state.ModuleInstalled || len(state.OtherReleases) > 0
+}
+
 // optionalKernelModuleStartupDetail turns a missing module file into an
 // actionable log line; other failures keep their original error.
 func optionalKernelModuleStartupDetail(err error) string {
+	executable, install, ok := currentKernelHelperInstall()
+	return kernelHelperStartupDetail(err, executable, install, ok)
+}
+
+func kernelHelperStartupDetail(err error, executable string, install kernelHelperInstall, inspected bool) string {
 	if err == nil {
 		return ""
 	}
-	if errors.Is(err, fs.ErrNotExist) {
-		if executable, install, ok := currentKernelHelperInstall(); ok && !install.ModuleInstalled {
-			return install.missingReason() + "; build it with: " + kernelHelperBuildCommand(executable, "")
+	if errors.Is(err, fs.ErrNotExist) && inspected && !install.ModuleInstalled {
+		if !install.optedIn() {
+			return kernelHelperNotInstalledReason
 		}
+		return install.missingReason() + "; build it with: " + kernelHelperBuildCommand(executable, "")
 	}
 	return err.Error()
 }

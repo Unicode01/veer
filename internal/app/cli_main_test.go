@@ -56,6 +56,33 @@ func TestVeerInfoCLIHelpAndVersion(t *testing.T) {
 	}
 }
 
+func TestVeerBuildInfoNamesReleaseVersions(t *testing.T) {
+	const commit = "6e32b95ab12cd34ef56ab78cd90ef12ab34cd56e"
+	for _, tc := range []struct {
+		name     string
+		info     veerBuildInformation
+		label    string
+		revision bool
+	}{
+		{"release tag", veerBuildInformation{ModuleVersion: "v1.2.3", Revision: commit}, "v1.2.3", true},
+		{"release candidate", veerBuildInformation{ModuleVersion: "v1.3.0-rc.1", Revision: commit}, "v1.3.0-rc.1", true},
+		{"untagged commit", veerBuildInformation{ModuleVersion: "v1.2.4-0.20261108120000-6e32b95ab12c", Revision: commit}, "6e32b95ab12c", false},
+		{"modified tree", veerBuildInformation{ModuleVersion: "v1.2.3+dirty", Revision: commit, Modified: true}, "6e32b95ab12c-dirty", false},
+		{"no VCS data", veerBuildInformation{}, "devel", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			writeVeerBuildInfo(&out, tc.info)
+			if !strings.HasPrefix(out.String(), "veer "+tc.label+"\n") {
+				t.Fatalf("label is not %q:\n%s", tc.label, out.String())
+			}
+			if got := strings.Contains(out.String(), "revision:       6e32b95ab12c\n"); got != tc.revision {
+				t.Fatalf("revision line shown = %v, want %v:\n%s", got, tc.revision, out.String())
+			}
+		})
+	}
+}
+
 func TestKernelHelperCLIHelpFlagIsNotAnError(t *testing.T) {
 	for _, command := range []string{"status", "build"} {
 		if _, err := runKernelHelperCLI([]string{"kfuncs", command, "-h"}, io.Discard, io.Discard); err != nil {

@@ -1989,6 +1989,7 @@ func TestValidateEmbeddedEBPFObjectsDetectsStaleObject(t *testing.T) {
 	}
 
 	header := filepath.Join(includeDir, "bpf_helpers.h")
+	commonHeader := filepath.Join(includeDir, "forward_common.h")
 	tcSource := filepath.Join(ebpfDir, "forward-tc-bpf.c")
 	xdpSource := filepath.Join(ebpfDir, "forward-xdp-bpf.c")
 	tcObject := filepath.Join(ebpfDir, "forward-tc-bpf.o")
@@ -1996,12 +1997,12 @@ func TestValidateEmbeddedEBPFObjectsDetectsStaleObject(t *testing.T) {
 	xdpObject := filepath.Join(ebpfDir, "forward-xdp-bpf.o")
 	xdpStatsObject := filepath.Join(ebpfDir, "forward-xdp-bpf-stats.o")
 
-	for _, path := range []string{header, tcSource, xdpSource, tcObject, tcStatsObject, xdpObject, xdpStatsObject} {
+	for _, path := range []string{header, commonHeader, tcSource, xdpSource, tcObject, tcStatsObject, xdpObject, xdpStatsObject} {
 		writeFile(path)
 	}
 
 	base := time.Now().Add(-2 * time.Hour).Round(time.Second)
-	for _, path := range []string{header, tcSource, xdpSource} {
+	for _, path := range []string{header, commonHeader, tcSource, xdpSource} {
 		setModTime(path, base)
 	}
 	for _, path := range []string{tcObject, tcStatsObject, xdpObject, xdpStatsObject} {
@@ -2022,6 +2023,18 @@ func TestValidateEmbeddedEBPFObjectsDetectsStaleObject(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), xdpSource) {
 		t.Fatalf("validateEmbeddedEBPFObjects() error = %q, want source path %q", err.Error(), xdpSource)
+	}
+
+	// Both dataplanes compile the shared helpers, so editing them alone
+	// must still mark the objects stale.
+	setModTime(xdpSource, base)
+	setModTime(commonHeader, base.Add(2*time.Hour))
+	err = validateEmbeddedEBPFObjects(repoRoot)
+	if err == nil {
+		t.Fatal("validateEmbeddedEBPFObjects() error = nil, want stale object failure after shared header change")
+	}
+	if !strings.Contains(err.Error(), commonHeader) {
+		t.Fatalf("validateEmbeddedEBPFObjects() error = %q, want shared header path %q", err.Error(), commonHeader)
 	}
 }
 

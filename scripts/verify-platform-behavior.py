@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -14,7 +15,10 @@ BASH = os.environ.get("VEER_TEST_BASH", "bash")
 BOOTSTRAP_FUNCTIONS = (
     "version_ge", "os_major_version", "os_id_like_contains", "require_supported_distro",
     "detect_package_manager", "run_with_retry", "rpm_dependency_package", "install_system_deps", "require_runtime_tools",
+    "require_build_tools", "file_sha256", "github_repo_slug_from_url", "resolve_install_mode", "resolve_release_tag",
+    "resolve_release_base_urls", "release_asset_checksum", "download_release",
 )
+BUILD_PACKAGES = ("clang", "git", "llvm")
 LOGGING = """
 info() { printf '%s\\n' "$*"; }
 ok() { printf '%s\\n' "$*"; }
@@ -61,27 +65,135 @@ def run_shell(source: str, **variables: str) -> subprocess.CompletedProcess:
 
 class PlatformBehaviorTests(unittest.TestCase):
     def test_installer_dependencies(self):
-        cases = [(manager, "0") for manager in ("apt", "dnf", "yum", "apk")]
-        cases += [(manager, "1") for manager in ("dnf", "yum")]
-        for manager, minimal in cases:
-            with self.subTest(manager=manager, minimal=minimal):
+        cases = [(manager, "0", scope) for manager in ("apt", "dnf", "yum", "apk") for scope in ("runtime", "build")]
+        cases += [(manager, "1", "runtime") for manager in ("dnf", "yum")]
+        for manager, minimal, scope in cases:
+            with self.subTest(manager=manager, minimal=minimal, scope=scope):
                 source = library("bootstrap") + """
 ok() { :; }
 detect_package_manager() { printf '%s' "$TEST_MANAGER"; }
 rpm() { test "$TEST_RPM_MINIMAL" = 1; }
 run_with_retry() { shift 3; printf '%s\\n' "$@"; }
-install_system_deps
+install_system_deps "$TEST_SCOPE"
 """
-                result = run_shell(source, FORWARD_SKIP_DEPS="0", TEST_MANAGER=manager, TEST_RPM_MINIMAL=minimal)
+                result = run_shell(source, FORWARD_SKIP_DEPS="0", TEST_MANAGER=manager, TEST_RPM_MINIMAL=minimal,
+                                   TEST_SCOPE=scope)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 arguments = result.stdout.splitlines()
-                for package in ("iptables", "nftables", "util-linux", "ethtool", "python3"):
+                for package in ("iptables", "nftables", "util-linux", "ethtool", "python3", "tar"):
                     self.assertIn(package, arguments)
                 self.assertIn("curl-minimal" if minimal == "1" else "curl", arguments)
                 self.assertIn("coreutils-single" if minimal == "1" else "coreutils", arguments)
                 self.assertNotIn("--allowerasing", arguments)
                 if manager == "apk":
                     self.assertIn("openrc", arguments)
+                # Release installs need no toolchain; only source builds pull it in.
+                for package in BUILD_PACKAGES:
+                    if scope == "build":
+                        self.assertIn(package, arguments)
+                    else:
+                        self.assertNotIn(package, arguments)
+
+    def test_install_mode(self):
+        source = library("bootstrap") + "\nresolve_install_mode\n"
+        for mode, explicit, expected in (
+            ("auto", "0", "auto"), ("auto", "1", "source"),
+            ("release", "1", "release"), ("source", "0", "source"),
+        ):
+            with self.subTest(mode=mode, explicit_ref=explicit):
+                result = run_shell(source, FORWARD_INSTALL_MODE=mode, FORWARD_REF_EXPLICIT=explicit)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+
+    def test_release_tag_resolution(self):
+        source = library("bootstrap") + """
+curl() { printf '%s' "$TEST_EFFECTIVE_URL"; }
+resolve_release_tag Unicode01/veer
+"""
+        latest = "https://github.com/Unicode01/veer/releases"
+        for version, effective, expected in (
+            ("latest", latest + "/tag/v1.2.3", "v1.2.3"),
+            ("v1.0.0-rc.1", "", "v1.0.0-rc.1"),
+            # Without any release GitHub redirects to the release list.
+            ("latest", latest, None),
+            ("latest", latest + "/tag/v1.2.3;rm", None),
+            ("latest", "https://github.com/other/veer/releases/tag/v9.9.9", None),
+        ):
+            with self.subTest(version=version, effective=effective):
+                result = run_shell(source, FORWARD_VERSION=version, TEST_EFFECTIVE_URL=effective)
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected)
+
+    def test_release_checksum_lookup(self):
+        digest = "ab" * 32
+        sums = f"{digest.upper()}  veer-linux-amd64.tar.gz\n{'cd' * 32} *veer-linux-arm64.tar.gz\nnot-a-digest  veer-plugin-sdk.tar.gz\n"
+        source = library("bootstrap") + '\nrelease_asset_checksum "$TEST_SUMS" "$TEST_ASSET"\n'
+        with tempfile.TemporaryDirectory(prefix="veer-sums-") as temp:
+            path = Path(temp) / "sha256sums.txt"
+            path.write_text(sums, encoding="utf-8")
+            for asset, expected in (
+                ("veer-linux-amd64.tar.gz", digest), ("veer-linux-arm64.tar.gz", "cd" * 32),
+                ("veer-plugin-sdk.tar.gz", None), ("veer-linux-riscv64.tar.gz", None),
+            ):
+                with self.subTest(asset=asset):
+                    result = run_shell(source, TEST_SUMS=path.as_posix(), TEST_ASSET=asset)
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout, expected)
+
+    def test_release_download(self):
+        source = library("bootstrap") + """
+safe_remove_bootstrap_path() { rm -rf -- "$1"; }
+FORWARD_DEPLOY_DIR=""
+if download_release; then
+    printf 'deploy=%s\\n' "$FORWARD_DEPLOY_DIR"
+    cat "$FORWARD_DEPLOY_DIR/VERSION"
+else
+    echo unavailable
+fi
+"""
+        for case in ("valid", "tampered", "unlisted", "missing"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="veer-release-") as temp:
+                root = Path(temp)
+                mirror, work, stage = root / "mirror", root / "work", root / "stage" / "veer-linux-amd64"
+                for directory in (mirror, work, stage):
+                    directory.mkdir(parents=True)
+                for name, body in (("veer-linux-amd64", "binary"), ("deploy.sh", "deploy"),
+                                   ("config.example.json", "{}"), ("VERSION", "v1.2.3\n")):
+                    (stage / name).write_text(body, encoding="utf-8")
+                archive = mirror / "veer-linux-amd64.tar.gz"
+                subprocess.run(["tar", "-C", stage.parent.as_posix(), "-czf", archive.as_posix(), "veer-linux-amd64"],
+                               check=True)
+                digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+                listed = "veer-linux-arm64.tar.gz" if case == "unlisted" else "veer-linux-amd64.tar.gz"
+                (mirror / "sha256sums.txt").write_text(f"{digest}  {listed}\n", encoding="utf-8")
+                if case == "tampered":
+                    archive.write_bytes(archive.read_bytes() + b"\0")
+                if case == "missing":
+                    archive.unlink()
+                result = run_shell(
+                    source, GOARCH="amd64", FORWARD_WORKDIR=work.as_posix(),
+                    FORWARD_RELEASE_DIR=(work / "release").as_posix(),
+                    FORWARD_RELEASE_BASE_URL=mirror.as_uri(), FORWARD_REPO_URL="https://example.invalid/veer.git",
+                    FORWARD_VERSION="latest",
+                )
+                if case == "valid":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"deploy={(work / 'release' / 'veer-linux-amd64').as_posix()}\nv1.2.3\n", result.stdout)
+                elif case == "missing":
+                    # Nothing served is not fatal: auto mode falls back to a source build.
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("unavailable", result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("SHA-256", result.stderr)
+                    self.assertFalse((work / "release").exists(), "an unverified archive must not be unpacked")
 
     def test_missing_iptables_fails_preflight(self):
         source = library("bootstrap") + """

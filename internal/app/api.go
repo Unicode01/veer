@@ -197,6 +197,7 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 	mux.HandleFunc("/metrics", authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		handlePluginPrometheusMetrics(w, r, cfg, db, pm)
 	}))
+	registerPprofHandlers(mux, cfg)
 
 	webUIEnabled := cfg.WebUIEnabled()
 	webSub, _ := fs.Sub(webFS, "web")

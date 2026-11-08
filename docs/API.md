@@ -27,6 +27,7 @@ Veer 当前不只是规则转发 API，还包含：
 - 写操作默认使用 `application/json`
 - 探活端点: `/healthz`、`/readyz` 不使用 `/api` 前缀
 - Prometheus 端点: `/metrics` 不使用 `/api` 前缀，但仍需要 Bearer Token
+- 性能剖析端点: `/debug/pprof/` 不使用 `/api` 前缀，但仍需要 Bearer Token
 
 `web_token` 来自 `config.json`：
 
@@ -50,7 +51,7 @@ Veer 当前不只是规则转发 API，还包含：
 
 ## 认证与错误约定
 
-所有 `/api/*` 端点以及 `/metrics` 都需要 Bearer Token。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。
+所有 `/api/*` 端点以及 `/metrics`、`/debug/pprof/` 都需要 Bearer Token。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。
 
 Bearer Token 认证失败按客户端地址限流：1 分钟窗口内允许 10 次失败，之后返回 `429 Too Many Requests`，并通过 `Retry-After` 告知剩余等待秒数。一次成功的 Bearer Token 认证会清除该客户端的失败记录；插件管理员 Token 错误返回 `403`，不单独计入这组 `401` 限流。
 
@@ -122,6 +123,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `GET /healthz`
 - `GET /readyz`
 - `GET /metrics`（需要 Bearer Token）
+- `GET /debug/pprof/`（需要 Bearer Token）
 
 ### 基础发现
 
@@ -796,7 +798,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - auto 的 `low/moderate/high/critical` 档位分别使用 24 小时、6 小时、1 小时和 10 分钟
 - 占用率达到 50%、70%、85% 时依次进入 `moderate/high/critical`；回落到 45%、65%、80% 以下才退出对应档位，避免阈值附近抖动
 
-`kernel_helper_module` 描述可选的 `veer_kfuncs` 模块：`compiled`、`loaded`、`available`、`reason`，以及安装状态 `kernel_release`（运行中内核）、`module_path`（该内核的模块路径）、`module_installed`、`other_module_releases`（已有模块但未运行的内核，通常是升级前的版本）。二进制带模块支持、模块未加载且当前内核没有模块文件时，`reason` 说明缺少哪个版本，`rebuild_command` 给出主机上的 `veer kfuncs build` 命令；此时数据面使用基础路径，WebUI 内核运行时页显示可关闭的提示。
+`kernel_helper_module` 描述可选的 `veer_kfuncs` 模块：`compiled`、`loaded`、`available`、`reason`，以及安装状态 `kernel_release`（运行中内核）、`module_path`（该内核的模块路径）、`module_installed`、`other_module_releases`（已有模块但未运行的内核，通常是升级前的版本）。二进制带模块支持、模块未加载且当前内核没有模块文件时：若已为其他内核安装过模块（通常是内核升级后），`reason` 说明缺少哪个版本，`rebuild_command` 给出主机上的 `veer kfuncs build` 命令，WebUI 内核运行时页显示可关闭的提示；从未安装过模块时 `reason` 为 `not installed`，不给重建命令也不提示。两种情况数据面都使用基础路径。
 
 它还会包含大量调试字段，例如：
 
@@ -817,7 +819,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 ## 1. 基础发现
 
-### 1.0 本机探活与指标
+### 1.0 本机探活、指标与性能剖析
 
 `GET /healthz`
 
@@ -889,6 +891,23 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - 只支持 `GET`，并需要 `Authorization: Bearer <web_token>`
 - 响应 `Content-Type` 为 `text/plain; version=0.0.4; charset=utf-8`
 - 当前只包含 `veer_plugin_*` 插件指标，不是核心规则、范围、Egress NAT 或完整转发链路的指标接口
+
+`GET /debug/pprof/`
+
+用途与约束：
+
+- Go 标准库 `net/http/pprof`，用于排查主进程的 CPU、内存和 goroutine 问题；首页列出可用的 profile
+- 需要 `Authorization: Bearer <web_token>`
+- 只覆盖主进程；规则/范围 worker、shared-proxy 和插件宿主是独立进程，不在采样范围内
+- API 写超时为 30 秒，`/debug/pprof/profile` 和 `/debug/pprof/trace` 的 `seconds` 必须小于 30，否则返回 `400`
+
+示例：
+
+```bash
+curl -fsS -H "Authorization: Bearer $TOKEN" -o cpu.pprof 'http://127.0.0.1:8080/debug/pprof/profile?seconds=25'
+go tool pprof -top cpu.pprof
+curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/goroutine?debug=1'
+```
 
 ### 1.1 获取简化接口列表
 

@@ -456,6 +456,9 @@ test('kernel runtime notes flag a helper module missing after a kernel upgrade',
 
   assert.equal(helperNotes({compiled:true,loaded:true,available:true,module_installed:true,kernel_release:'6.12.74'}).length,0);
   assert.equal(helperNotes({compiled:false,loaded:false,available:false,module_installed:false,kernel_release:'6.12.74'}).length,0);
+  // Release binaries carry helper support; a host that never installed a module is not nagged.
+  assert.equal(helperNotes({compiled:true,loaded:false,available:false,module_installed:false,kernel_release:'6.12.74',
+    other_module_releases:[],reason:'not installed'}).length,0);
 });
 
 test('applyKernelFeatureVisibility hides egress nat surfaces when kernel dataplane is unavailable', () => {

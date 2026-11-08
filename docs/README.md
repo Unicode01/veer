@@ -33,7 +33,8 @@ rm -f -- "$bootstrap_file"
 常用部署参数：
 
 ```bash
-VEER_REF=main bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+VEER_VERSION=v1.2.3 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+VEER_REF=dev bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 WEB_BIND=0.0.0.0 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 WEB_UI_ENABLED=false bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 READY_TIMEOUT_SECONDS=180 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
@@ -43,11 +44,28 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/ma
 
 `WEB_BIND=0.0.0.0` 会让管理面接受远程连接，但 Veer 本身只提供 HTTP。仅应在受信管理网或 VPN 内使用；公网访问应保持 Veer 监听回环地址，并由启用 TLS 与访问控制的反向代理转发。对新建非回环配置、首次从回环地址改为远程监听，或在远程监听下显式更换令牌，`deploy.sh` 要求 `web_token`（以及非空的 `plugin_admin_token`）至少包含 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。Veer 运行时为兼容既有及手工管理的配置，只会对远程监听下的短令牌输出安全警告而不会拒绝启动；应安排轮换，但不要在未同步更新 WHMCS/API 客户端时直接更换。
 
-`bootstrap.sh` 会安装依赖、拉取源码、执行 `release.sh` 构建，再调用 `deploy.sh` 安装或热更新。默认只构建和安装 Veer 核心；设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled stable 插件。它支持 `apt`、`dnf/yum`、`apk` 以及 systemd/OpenRC。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
+`bootstrap.sh` 默认下载最新 [GitHub Release](https://github.com/Unicode01/veer/releases) 中对应架构的 `veer-linux-<arch>.tar.gz`，按同一 release 的 `sha256sums.txt` 校验后，用包内的 `deploy.sh` 安装或热更新；目标机只需运行依赖，不安装 Go、clang 或 Git。安装方式由以下变量控制：
+
+- `VEER_VERSION`：要安装的 release tag，默认 `latest`。
+- `VEER_RELEASE_BASE_URL`：GitHub 访问受限时指定镜像目录。该目录需同时提供 `sha256sums.txt` 和 `veer-linux-<arch>.tar.gz`，会先于 GitHub 尝试。
+- 回退规则：`VEER_VERSION=latest` 时，若还没有 release 或下载失败，回退为从源码构建 `VEER_REF`（默认 `main`）。指定了版本却下载失败、或校验不通过时，直接报错，不会回退。
+- `VEER_REF`：显式设置时直接从源码构建该 ref，流程同旧版：安装构建依赖、拉取源码、执行 `release.sh`。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
+- `VEER_INSTALL_MODE`：固定为 `release` 或 `source`，可关闭上述自动选择。
+
+默认只安装 Veer 核心；设置 `VEER_INSTALL_PLUGINS=1` 才会安装 bundled stable 插件。支持 `apt`、`dnf/yum`、`apk` 以及 systemd/OpenRC。release 二进制带[可选内核扩展](KERNEL.md)支持，不带 `.ko`；需要时以 `VEER_BUILD_KERNEL_MODULE=1 VEER_INSTALL_KERNEL_MODULE=1` 部署，bootstrap 会用下载的二进制为当前内核构建模块。
 
 从更名前的 `main` 版本升级时，`deploy.sh` 会把默认目录 `/opt/forward` 迁移到 `/opt/veer`，将服务切换为 `veer.service`，并保留 `/opt/forward`、`forward` 二进制名和 `forward.service` 兼容入口。现有 `forward.db`、内核状态目录和配置文件不会改名；旧 `FORWARD_*` 部署变量仍可使用，同时设置时 `VEER_*` 优先。
 
-需要手动部署时：
+需要手动部署时，可以直接使用 release 包（其中已含 `deploy.sh`、配置模板和插件包）：
+
+```bash
+curl -fLO https://github.com/Unicode01/veer/releases/latest/download/veer-linux-amd64.tar.gz
+curl -fLO https://github.com/Unicode01/veer/releases/latest/download/sha256sums.txt
+sha256sum -c --ignore-missing sha256sums.txt
+tar -xzf veer-linux-amd64.tar.gz && cd veer-linux-amd64 && ./deploy.sh
+```
+
+也可以自行构建后上传：
 
 ```bash
 ./release.sh amd64
@@ -206,7 +224,7 @@ Authorization: Bearer <web_token>
 关键字段：
 
 - `web_bind`：Web UI / API 监听地址，默认 `127.0.0.1`
-- `web_ui_enabled`：是否启用静态 Web UI；关闭后仍保留 `/api/*`、`/metrics`、`/healthz`、`/readyz`
+- `web_ui_enabled`：是否启用静态 Web UI；关闭后仍保留 `/api/*`、`/metrics`、`/debug/pprof/`、`/healthz`、`/readyz`
 - `web_port`：监听端口
 - `web_token`：Web UI 和 API 共用的 Bearer Token
 - `default_engine`：`auto`、`userspace`、`kernel`
@@ -306,6 +324,8 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 - Worker 状态和 runtime error
 - 规则、站点、范围、Egress NAT 统计
 
+主进程 CPU、内存或 goroutine 异常时，可用 `/debug/pprof/` 采样（需要 Bearer Token，用法见 [API](API.md) 中的 `GET /debug/pprof/`）。
+
 热更新与异常退出：
 
 - `deploy.sh` 热更新时会尝试交接活动的 userspace rule/range/shared-proxy worker；无法交接的 worker 会由新进程重建
@@ -389,6 +409,8 @@ go build -o veer .
 - `internal/app/ebpf/forward-xdp-bpf-stats.o`
 - `internal/app/ebpf/plugin-xdp-dispatcher-bpf.o`
 
+TC 与 XDP 源码完全相同的辅助函数放在 `internal/app/ebpf/include/forward_common.h`，两个 dataplane 都在各自的 map 与前置声明之后包含它；修改其中任一函数会同时影响两个对象。只在一侧需要或两侧实现不同的函数仍留在各自的 `.c` 文件中。
+
 只重建 eBPF object 时可使用：
 
 ```bash
@@ -400,6 +422,23 @@ sh scripts/package-plugins.sh
 ```
 
 发布构建优先使用 `release.sh`。上面的脚本仅用于开发时单独重建 eBPF、校验插件或生成插件运行时包。
+
+### 发布版本
+
+推送 `v*` tag 后，[Release 工作流](../.github/workflows/release.yml)以 `VEER_KFUNCS_SUPPORT=1 bash release.sh amd64 arm64` 构建，再由 `scripts/package-release.sh` 打包，产物如下：
+
+- `veer-linux-amd64.tar.gz`、`veer-linux-arm64.tar.gz`：内含二进制、`deploy.sh`、`config.example.json`、插件包、`LICENSE` 和 `VERSION`
+- `veer-plugin-sdk.tar.gz`
+- `sha256sums.txt`
+
+产物先作为草稿上传，全部完成后才公开，`releases/latest` 不会指向资产不全的 release；带 `-` 的 tag（如 `v1.3.0-rc.1`）发布为预发布，不会成为 `latest`。每次推送 `main`/`dev` 时，同一工作流也会构建并打包、作为 workflow artifact 保留，但不发布。
+
+```bash
+git tag v1.2.3 <已通过 CI 的 main 提交>
+git push origin v1.2.3
+```
+
+tag 只能使用 `v0.x.y` 或 `v1.x.y`：模块路径没有 `/vN` 后缀，Go 不会把 v2 及以上的 tag 写入二进制。工作流会检查 `veer version` 是否等于 tag，不一致时不发布。bootstrap 默认安装最新 release，因此打 tag 即对所有新部署生效；未打 tag 的 `main` 只影响显式设置 `VEER_REF` 的部署和尚无 release 时的回退构建。
 
 常规测试：
 
@@ -470,7 +509,7 @@ modules/addons/forward/
 
 Veer 是宿主机网络控制面，核心进程需要修改接口、路由、TC/XDP、nftables 与网络命名空间。获得 `web_token` 的主体等同于网络管理员；获得 `web_token` 和 `plugin_admin_token` 的主体还可以安装、信任、启停和更新插件。宿主机 root 始终在信任边界内，Veer 不试图防御 root。
 
-管理 API 不内置 TLS。默认回环监听是安全基线；远程管理必须置于受信管理网、VPN、堡垒机或启用 TLS 和访问控制的反向代理之后。`/healthz` 与 `/readyz` 故意匿名开放，只返回最小存活状态；其余 `/api/*` 与 `/metrics` 均需要 Bearer Token。
+管理 API 不内置 TLS。默认回环监听是安全基线；远程管理必须置于受信管理网、VPN、堡垒机或启用 TLS 和访问控制的反向代理之后。`/healthz` 与 `/readyz` 故意匿名开放，只返回最小存活状态；其余 `/api/*`、`/metrics` 与 `/debug/pprof/` 均需要 Bearer Token。
 
 ### 已有门禁
 
