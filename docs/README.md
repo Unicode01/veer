@@ -389,6 +389,8 @@ go build -o veer .
 - `internal/app/ebpf/forward-xdp-bpf-stats.o`
 - `internal/app/ebpf/plugin-xdp-dispatcher-bpf.o`
 
+TC 与 XDP 源码完全相同的辅助函数放在 `internal/app/ebpf/include/forward_common.h`，两个 dataplane 都在各自的 map 与前置声明之后包含它；修改其中任一函数会同时影响两个对象。只在一侧需要或两侧实现不同的函数仍留在各自的 `.c` 文件中。
+
 只重建 eBPF object 时可使用：
 
 ```bash

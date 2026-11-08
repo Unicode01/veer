@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -73,7 +74,10 @@ SEC("classifier/test") int veer_inline_entry(struct __sk_buff *skb) { return vee
 
 func validateEmbeddedEBPFHelperDeclarations(repoRoot string) error {
 	ebpfDir := filepath.Join(repoRoot, "internal", "app", "ebpf")
-	declared, err := collectEmbeddedEBPFDeclaredSymbols(filepath.Join(ebpfDir, "include"))
+	// The shared helpers call bpf_* like the dataplanes do, so they are
+	// checked as a source and must not count as declaring what they call.
+	commonHeader := filepath.Join(ebpfDir, "include", "forward_common.h")
+	declared, err := collectEmbeddedEBPFDeclaredSymbols(filepath.Join(ebpfDir, "include"), commonHeader)
 	if err != nil {
 		return err
 	}
@@ -81,6 +85,7 @@ func validateEmbeddedEBPFHelperDeclarations(repoRoot string) error {
 	sourceFiles := []string{
 		filepath.Join(ebpfDir, "forward-tc-bpf.c"),
 		filepath.Join(ebpfDir, "forward-xdp-bpf.c"),
+		commonHeader,
 	}
 	missing := make(map[string][]string)
 	for _, sourcePath := range sourceFiles {
@@ -108,7 +113,7 @@ func validateEmbeddedEBPFHelperDeclarations(repoRoot string) error {
 	return fmt.Errorf("eBPF helper declarations are out of sync with source usage: missing %s in %s", strings.Join(items, "; "), filepath.Join(ebpfDir, "include"))
 }
 
-func collectEmbeddedEBPFDeclaredSymbols(path string) (map[string]struct{}, error) {
+func collectEmbeddedEBPFDeclaredSymbols(path string, skip ...string) (map[string]struct{}, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat %s: %w", path, err)
@@ -124,6 +129,9 @@ func collectEmbeddedEBPFDeclaredSymbols(path string) (map[string]struct{}, error
 
 	symbols := make(map[string]struct{})
 	for _, current := range files {
+		if slices.Contains(skip, current) {
+			continue
+		}
 		content, err := os.ReadFile(current)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", current, err)
@@ -212,38 +220,52 @@ func TestEmbeddedEBPFObjectsAreArchitectureNeutralBPF(t *testing.T) {
 	}
 }
 
-func TestValidateEmbeddedEBPFHelperDeclarationsDetectsMissingHelper(t *testing.T) {
+// writeEmbeddedEBPFHelperFixture lays out the files the helper declaration
+// check reads. bpf_helpers.h declares bpf_map_lookup_elem plus declaredExtra.
+func writeEmbeddedEBPFHelperFixture(t *testing.T, declaredExtra, tcSource, xdpSource, commonHeader string) string {
+	t.Helper()
 	repoRoot := t.TempDir()
 	ebpfDir := filepath.Join(repoRoot, "internal", "app", "ebpf")
 	includeDir := filepath.Join(ebpfDir, "include")
 	if err := os.MkdirAll(includeDir, 0o755); err != nil {
 		t.Fatalf("create include dir: %v", err)
 	}
+	files := map[string]string{
+		filepath.Join(includeDir, "bpf_helpers.h"):    "static long (*const bpf_map_lookup_elem)(void *map, const void *key) = (void *)0;\n" + declaredExtra,
+		filepath.Join(includeDir, "bpf_endian.h"):     "#define bpf_htons(x) (x)\n",
+		filepath.Join(includeDir, "forward_common.h"): commonHeader,
+		filepath.Join(ebpfDir, "forward-tc-bpf.c"):    tcSource,
+		filepath.Join(ebpfDir, "forward-xdp-bpf.c"):   xdpSource,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	return repoRoot
+}
 
-	if err := os.WriteFile(filepath.Join(includeDir, "bpf_helpers.h"), []byte(`
-static long (*const bpf_map_lookup_elem)(void *map, const void *key) = (void *)0;
-`), 0o644); err != nil {
-		t.Fatalf("write helper header: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(includeDir, "bpf_endian.h"), []byte(`
-#define bpf_htons(x) (x)
-`), 0o644); err != nil {
-		t.Fatalf("write endian header: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(ebpfDir, "forward-tc-bpf.c"), []byte(`
+const (
+	embeddedEBPFFixtureTCSource = `
 int test(void) {
 	return bpf_skb_change_head(0, 0, 0);
 }
-`), 0o644); err != nil {
-		t.Fatalf("write tc source: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(ebpfDir, "forward-xdp-bpf.c"), []byte(`
+`
+	embeddedEBPFFixtureXDPSource = `
 int test(void) {
 	return (int)(long)bpf_map_lookup_elem(0, 0);
 }
-`), 0o644); err != nil {
-		t.Fatalf("write xdp source: %v", err)
-	}
+`
+	embeddedEBPFFixtureCommonHeader = `
+static inline void *common_lookup(void) {
+	return bpf_map_lookup_elem(0, 0);
+}
+`
+	embeddedEBPFFixtureSkbChangeHead = "static long (*const bpf_skb_change_head)(void *skb, unsigned int len, unsigned long long flags) = (void *)0;\n"
+)
+
+func TestValidateEmbeddedEBPFHelperDeclarationsDetectsMissingHelper(t *testing.T) {
+	repoRoot := writeEmbeddedEBPFHelperFixture(t, "", embeddedEBPFFixtureTCSource, embeddedEBPFFixtureXDPSource, embeddedEBPFFixtureCommonHeader)
 
 	err := validateEmbeddedEBPFHelperDeclarations(repoRoot)
 	if err == nil {
@@ -257,39 +279,26 @@ int test(void) {
 	}
 }
 
-func TestValidateEmbeddedEBPFHelperDeclarationsAllowsDeclaredHelpers(t *testing.T) {
-	repoRoot := t.TempDir()
-	ebpfDir := filepath.Join(repoRoot, "internal", "app", "ebpf")
-	includeDir := filepath.Join(ebpfDir, "include")
-	if err := os.MkdirAll(includeDir, 0o755); err != nil {
-		t.Fatalf("create include dir: %v", err)
-	}
+func TestValidateEmbeddedEBPFHelperDeclarationsChecksCommonHeader(t *testing.T) {
+	// A helper called only from the shared header must still be declared.
+	commonHeader := embeddedEBPFFixtureCommonHeader + `
+static inline unsigned int common_random(void) {
+	return bpf_get_prandom_u32();
+}
+`
+	repoRoot := writeEmbeddedEBPFHelperFixture(t, embeddedEBPFFixtureSkbChangeHead, embeddedEBPFFixtureTCSource, embeddedEBPFFixtureXDPSource, commonHeader)
 
-	if err := os.WriteFile(filepath.Join(includeDir, "bpf_helpers.h"), []byte(`
-static long (*const bpf_map_lookup_elem)(void *map, const void *key) = (void *)0;
-static long (*const bpf_skb_change_head)(void *skb, unsigned int len, unsigned long long flags) = (void *)0;
-`), 0o644); err != nil {
-		t.Fatalf("write helper header: %v", err)
+	err := validateEmbeddedEBPFHelperDeclarations(repoRoot)
+	if err == nil {
+		t.Fatal("validateEmbeddedEBPFHelperDeclarations() error = nil, want missing helper error")
 	}
-	if err := os.WriteFile(filepath.Join(includeDir, "bpf_endian.h"), []byte(`
-#define bpf_htons(x) (x)
-`), 0o644); err != nil {
-		t.Fatalf("write endian header: %v", err)
+	if !strings.Contains(err.Error(), "bpf_get_prandom_u32 (forward_common.h)") {
+		t.Fatalf("validateEmbeddedEBPFHelperDeclarations() error = %q, want helper missing from forward_common.h", err.Error())
 	}
-	if err := os.WriteFile(filepath.Join(ebpfDir, "forward-tc-bpf.c"), []byte(`
-int test(void) {
-	return bpf_skb_change_head(0, 0, 0);
 }
-`), 0o644); err != nil {
-		t.Fatalf("write tc source: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(ebpfDir, "forward-xdp-bpf.c"), []byte(`
-int test(void) {
-	return (int)(long)bpf_map_lookup_elem(0, 0);
-}
-`), 0o644); err != nil {
-		t.Fatalf("write xdp source: %v", err)
-	}
+
+func TestValidateEmbeddedEBPFHelperDeclarationsAllowsDeclaredHelpers(t *testing.T) {
+	repoRoot := writeEmbeddedEBPFHelperFixture(t, embeddedEBPFFixtureSkbChangeHead, embeddedEBPFFixtureTCSource, embeddedEBPFFixtureXDPSource, embeddedEBPFFixtureCommonHeader)
 
 	if err := validateEmbeddedEBPFHelperDeclarations(repoRoot); err != nil {
 		t.Fatalf("validateEmbeddedEBPFHelperDeclarations() error = %v, want nil", err)
