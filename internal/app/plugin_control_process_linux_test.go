@@ -237,10 +237,18 @@ func TestPluginManagedProcessStopKillsDescendants(t *testing.T) {
 		t.Fatal("child did not start")
 	}
 	r.Stop("one", "core")
-	// A descendant can briefly remain as a zombie until PID 1 reaps it.
+	// A descendant can briefly remain as a zombie (Z) until PID 1 reaps it,
+	// or as a dead task (X) whose /proc entry is being removed.
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
-	if err == nil && !strings.Contains(string(data), ") Z ") {
-		t.Fatal("descendant still alive", string(data))
+	if err == nil {
+		stat := string(data)
+		state := ""
+		if i := strings.LastIndex(stat, ") "); i >= 0 && i+3 <= len(stat) {
+			state = stat[i+2 : i+3]
+		}
+		if state != "Z" && state != "X" {
+			t.Fatal("descendant still alive", stat)
+		}
 	}
 }
 
