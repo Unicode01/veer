@@ -10,7 +10,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 ```
 
-默认管理地址为 `http://127.0.0.1:8080`。脚本会构建源码并安装或更新 Veer；插件默认不安装。Alpine、GitHub 访问受限和手动部署方式见[使用指南](docs/README.md#一键部署)。
+默认管理地址为 `http://127.0.0.1:8080`。脚本会下载最新 release 的预编译包，校验 SHA-256 后安装或更新 Veer；尚无 release 或指定 `VEER_REF` 时从源码构建。插件默认不安装。Alpine、GitHub 访问受限和手动部署方式见[使用指南](docs/README.md#一键部署)。
 
 ## 文档
 

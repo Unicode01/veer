@@ -1093,14 +1093,17 @@
 
   // A kernel upgrade leaves no module for the new release and the host quietly
   // falls back to the base dataplane; say so and give the rebuild command.
+  // Release binaries carry helper support on every host, so one that never
+  // installed a module for any kernel runs the base dataplane as intended.
   function kernelRuntimeHelperModuleNote(helper) {
     if (!helper || typeof helper !== 'object' || !helper.compiled || helper.available) return null;
     if (!helper.loaded && helper.module_installed === false && helper.kernel_release) {
-      const parts = [app.t('kernel.note.helperModuleMissing', { release: helper.kernel_release })];
       const others = Array.isArray(helper.other_module_releases)
         ? helper.other_module_releases.map((value) => String(value || '').trim()).filter(Boolean)
         : [];
-      if (others.length) parts.push(app.t('kernel.note.helperModuleOtherReleases', { releases: others.join(', ') }));
+      if (!others.length) return null;
+      const parts = [app.t('kernel.note.helperModuleMissing', { release: helper.kernel_release })];
+      parts.push(app.t('kernel.note.helperModuleOtherReleases', { releases: others.join(', ') }));
       if (helper.rebuild_command) parts.push(app.t('kernel.note.helperModuleRebuild', { command: helper.rebuild_command }));
       return kernelRuntimeNoteSpec('kernel_helper_module', parts.join(' · '));
     }

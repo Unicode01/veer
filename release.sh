@@ -13,6 +13,10 @@
 #   veer-plugins.tar.gz (VEER_BUILD_PLUGIN_BUNDLE=0 时不生成)
 #   veer-plugin-sdk.tar.gz (VEER_BUILD_PLUGIN_SDK=0 时不生成)
 #
+# 可选内核扩展:
+#   VEER_KFUNCS_SUPPORT=1      二进制带 veer_kfuncs 支持，不编译 .ko（发布构建使用）
+#   VEER_BUILD_KERNEL_MODULE=1 另外为本机内核编译 kernel/<release>/veer_kfuncs.ko
+#
 # 部署: 将 veer-linux-<arch>、deploy.sh 和 config.example.json 一起传到服务器执行即可
 # 注意: eBPF tc/xdp 对象会先在本地编译并 embed 进 Go 二进制，部署时无需额外携带 .o 文件
 #
@@ -107,12 +111,30 @@ BPF_EXTRA_CFLAGS="${BPF_EXTRA_CFLAGS:-}"
 BUILD_PLUGIN_BUNDLE="${VEER_BUILD_PLUGIN_BUNDLE:-1}"
 BUILD_PLUGIN_SDK="${VEER_BUILD_PLUGIN_SDK:-1}"
 BUILD_KERNEL_MODULE="${VEER_BUILD_KERNEL_MODULE:-0}"
+# A module only loads into a binary that embeds its probes, so building one
+# implies support. Published releases enable support alone: the .ko must match
+# each host's kernel and is built there with `veer kfuncs build`.
+KFUNCS_SUPPORT="${VEER_KFUNCS_SUPPORT:-${BUILD_KERNEL_MODULE}}"
 GO_BUILD_TAGS=()
 case "$BUILD_KERNEL_MODULE" in
-    0) ;;
-    1) sh "${PROJECT_DIR}/scripts/build-kernel-module.sh"; GO_BUILD_TAGS=(-tags veer_kfuncs) ;;
+    0|1) ;;
     *) fail "VEER_BUILD_KERNEL_MODULE 仅支持 0 或 1" ;;
 esac
+case "$KFUNCS_SUPPORT" in
+    0|1) ;;
+    *) fail "VEER_KFUNCS_SUPPORT 仅支持 0 或 1" ;;
+esac
+if [[ "$BUILD_KERNEL_MODULE" == "1" && "$KFUNCS_SUPPORT" != "1" ]]; then
+    fail "VEER_BUILD_KERNEL_MODULE=1 需要 VEER_KFUNCS_SUPPORT=1"
+fi
+if [[ "$BUILD_KERNEL_MODULE" == "1" ]]; then
+    sh "${PROJECT_DIR}/scripts/build-kernel-module.sh"
+elif [[ "$KFUNCS_SUPPORT" == "1" ]]; then
+    sh "${PROJECT_DIR}/scripts/build-kfuncs-probes.sh"
+fi
+if [[ "$KFUNCS_SUPPORT" == "1" ]]; then
+    GO_BUILD_TAGS=(-tags veer_kfuncs)
+fi
 # Debian 5.10 rejects the TC object emitted at -O1 with a 9-frame verifier stack.
 # -O2 produces verifier-safe subprog layout without changing the source inputs.
 BPF_OLEVEL="${BPF_OLEVEL:-2}"
@@ -295,6 +317,8 @@ for ARCH in "${TARGETS[@]}"; do
 done
 if [[ "$BUILD_KERNEL_MODULE" == "1" ]]; then
     echo "  # 同时上传 kernel/$(uname -r)/veer_kfuncs.ko，使用 VEER_INSTALL_KERNEL_MODULE=1 部署"
+elif [[ "$KFUNCS_SUPPORT" == "1" ]]; then
+    echo "  # 内核扩展: 在目标机执行 ./veer-linux-<arch> kfuncs build --install-dir . 后，用 VEER_INSTALL_KERNEL_MODULE=1 部署"
 fi
 echo "  ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'"
 if [[ "${BUILD_PLUGIN_BUNDLE}" == "1" ]]; then

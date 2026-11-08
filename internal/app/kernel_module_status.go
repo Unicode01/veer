@@ -35,12 +35,21 @@ func optionalKernelModuleRuntimeStatus() KernelHelperModuleStatus {
 	if !ok {
 		return status
 	}
+	return withKernelHelperInstall(status, executable, install)
+}
+
+func withKernelHelperInstall(status KernelHelperModuleStatus, executable string, install kernelHelperInstall) KernelHelperModuleStatus {
 	status.KernelRelease = install.KernelRelease
 	status.ModulePath = install.ModulePath
 	status.ModuleInstalled = install.ModuleInstalled
 	status.OtherModuleReleases = install.OtherReleases
 	if status.Compiled && !status.Available && !status.Loaded && !install.ModuleInstalled {
-		// The probe's own reason only says /sys/module is absent.
+		// The probe's own reason only says /sys/module is absent. Only a host
+		// that installed a module for another kernel gets the rebuild command.
+		if !install.optedIn() {
+			status.Reason = kernelHelperNotInstalledReason
+			return status
+		}
 		status.Reason = install.missingReason()
 		status.RebuildCommand = kernelHelperBuildCommand(executable, "")
 	}

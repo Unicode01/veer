@@ -798,7 +798,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - auto 的 `low/moderate/high/critical` 档位分别使用 24 小时、6 小时、1 小时和 10 分钟
 - 占用率达到 50%、70%、85% 时依次进入 `moderate/high/critical`；回落到 45%、65%、80% 以下才退出对应档位，避免阈值附近抖动
 
-`kernel_helper_module` 描述可选的 `veer_kfuncs` 模块：`compiled`、`loaded`、`available`、`reason`，以及安装状态 `kernel_release`（运行中内核）、`module_path`（该内核的模块路径）、`module_installed`、`other_module_releases`（已有模块但未运行的内核，通常是升级前的版本）。二进制带模块支持、模块未加载且当前内核没有模块文件时，`reason` 说明缺少哪个版本，`rebuild_command` 给出主机上的 `veer kfuncs build` 命令；此时数据面使用基础路径，WebUI 内核运行时页显示可关闭的提示。
+`kernel_helper_module` 描述可选的 `veer_kfuncs` 模块：`compiled`、`loaded`、`available`、`reason`，以及安装状态 `kernel_release`（运行中内核）、`module_path`（该内核的模块路径）、`module_installed`、`other_module_releases`（已有模块但未运行的内核，通常是升级前的版本）。二进制带模块支持、模块未加载且当前内核没有模块文件时：若已为其他内核安装过模块（通常是内核升级后），`reason` 说明缺少哪个版本，`rebuild_command` 给出主机上的 `veer kfuncs build` 命令，WebUI 内核运行时页显示可关闭的提示；从未安装过模块时 `reason` 为 `not installed`，不给重建命令也不提示。两种情况数据面都使用基础路径。
 
 它还会包含大量调试字段，例如：
 

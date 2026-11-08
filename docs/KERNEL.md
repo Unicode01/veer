@@ -1,6 +1,6 @@
 # 可选内核扩展
 
-`veer_kfuncs.ko` 为 TC/eBPF 插件提供版本化包处理能力。默认构建不包含模块支持、不调用 kbuild，也不增加模块加载权限；基础 PPPoE/WG 插件继续使用原 eBPF 路径。
+`veer_kfuncs.ko` 为 TC/eBPF 插件提供版本化包处理能力。GitHub Release 的二进制带模块支持（内嵌 probe 与模块源码），但不附带 `.ko`；本地 `release.sh` 默认不带支持。两种构建都不调用 kbuild，也不增加模块加载权限；没有为任何内核安装过模块的主机照常使用基础数据面，不提示重建。基础 PPPoE/WG 插件继续使用原 eBPF 路径。
 
 ## 数据路径
 
@@ -19,11 +19,20 @@ PPPoE 的增强 veth 兼容路径为 local 开启 GRO，并关闭 pipeline 的 T
 
 ## 构建与部署
 
-在目标 Linux 主机或匹配的构建环境准备编译器、clang、kmod、pahole 和**精确匹配目标内核**的 headers/build tree。增强路径要求 Linux 6.1+，以及启用 BPF syscall/JIT、内核 BTF、模块、模块 BTF 和 `CONFIG_GRO_CELLS`；最终以实际 kfunc probe 为准。发行版签名策略、Secure Boot/lockdown 也可能阻止加载，需由管理员签名及信任模块。
+使用一键部署时最简单：release 二进制已带支持，在目标机准备 make、内核使用的编译器和匹配的 headers 后执行下面的命令。bootstrap 会用下载的二进制运行 `veer kfuncs build`，把模块交给 deploy 安装：
+
+```sh
+VEER_BUILD_KERNEL_MODULE=1 VEER_INSTALL_KERNEL_MODULE=1 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+```
+
+自行构建时，在目标 Linux 主机或匹配的构建环境准备编译器、clang、kmod、pahole 和**精确匹配目标内核**的 headers/build tree。增强路径要求 Linux 6.1+，以及启用 BPF syscall/JIT、内核 BTF、模块、模块 BTF 和 `CONFIG_GRO_CELLS`；最终以实际 kfunc probe 为准。发行版签名策略、Secure Boot/lockdown 也可能阻止加载，需由管理员签名及信任模块。
 
 ```sh
 # 原构建方式仍默认不带模块。
 bash release.sh amd64
+
+# 只要带支持的二进制、不编译 .ko（发布构建使用）；模块到目标机用 veer kfuncs build 构建。
+VEER_KFUNCS_SUPPORT=1 bash release.sh amd64 arm64
 
 # 可选：原生构建匹配当前内核的模块、probe 和带支持的二进制。
 VEER_BUILD_KERNEL_MODULE=1 bash release.sh amd64
@@ -32,7 +41,7 @@ VEER_BUILD_KERNEL_MODULE=1 bash release.sh amd64
 VEER_INSTALL_KERNEL_MODULE=1 bash deploy.sh
 ```
 
-ARM64 主机使用 `arm64`。Go 二进制可以交叉构建；`.ko` 必须匹配目标架构、内核配置、符号版本和 vermagic，不能把一台主机的模块作为通用 Linux 发布物。内核更新后的重建见下文“内核升级”。默认 bootstrap 不自动安装构建模块所需的 headers 和工具。
+ARM64 主机使用 `arm64`。Go 二进制可以交叉构建；`.ko` 必须匹配目标架构、内核配置、符号版本和 vermagic，不能把一台主机的模块作为通用 Linux 发布物。内核更新后的重建见下文“内核升级”。bootstrap 不自动安装构建模块所需的 headers 和工具。
 
 单独构建及非默认 build tree：
 
@@ -49,7 +58,7 @@ Veer 加载 `<Veer 可执行文件目录>/kernel/<uname -r>/veer_kfuncs.ko`，�
 
 ### 内核升级
 
-带 `-tags veer_kfuncs` 构建的二进制内嵌了与自身 probe 匹配的模块源码。内核升级并重启后，新版本目录下没有模块，Veer 照常启动并使用基础数据面；启动日志、`GET /api/kernel/runtime` 的 `kernel_helper_module` 和 WebUI 内核运行时页会给出缺失的内核版本、已有模块的版本和重建命令。安装新内核的 headers 后在主机上执行：
+带 `-tags veer_kfuncs` 构建的二进制内嵌了与自身 probe 匹配的模块源码。内核升级并重启后，新版本目录下没有模块，Veer 照常启动并使用基础数据面；已为其他内核安装过模块时，启动日志、`GET /api/kernel/runtime` 的 `kernel_helper_module` 和 WebUI 内核运行时页会给出缺失的内核版本、已有模块的版本和重建命令。安装新内核的 headers 后在主机上执行：
 
 ```sh
 veer kfuncs status       # 未链接进 PATH 时用 /opt/veer/veer

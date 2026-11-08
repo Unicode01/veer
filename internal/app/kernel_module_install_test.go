@@ -341,25 +341,52 @@ func TestBuildKernelHelperModuleRejectsUnsafeOrMismatchedBuilds(t *testing.T) {
 	}
 }
 
-func TestOptionalKernelModuleStartupDetailExplainsMissingModule(t *testing.T) {
-	release, err := runningKernelRelease()
-	if err != nil {
-		t.Skipf("running kernel release unavailable: %v", err)
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if kernelHelperRegularFile(kernelHelperModulePath(filepath.Dir(executable), release)) {
-		t.Skip("test binary directory unexpectedly has a module")
-	}
+func TestKernelHelperStartupDetailExplainsMissingModule(t *testing.T) {
+	const executable = "/opt/veer/veer"
 	missing := fmt.Errorf("open optional module: %w", fs.ErrNotExist)
-	detail := optionalKernelModuleStartupDetail(missing)
-	if !strings.Contains(detail, "running kernel "+release) || !strings.Contains(detail, executable+" kfuncs build") {
-		t.Fatalf("detail = %q", detail)
+	upgraded := kernelHelperInstall{KernelRelease: "6.12.74", OtherReleases: []string{"6.12.73"}}
+	detail := kernelHelperStartupDetail(missing, executable, upgraded, true)
+	if !strings.Contains(detail, "running kernel 6.12.74") || !strings.Contains(detail, "installed for 6.12.73") || !strings.Contains(detail, executable+" kfuncs build") {
+		t.Fatalf("detail after a kernel upgrade = %q", detail)
 	}
-	if got := optionalKernelModuleStartupDetail(errors.New("load optional module: operation not permitted")); got != "load optional module: operation not permitted" {
+	// Release binaries carry helper support on every host; one that never
+	// installed a module is told so without being asked to build one.
+	if got := kernelHelperStartupDetail(missing, executable, kernelHelperInstall{KernelRelease: "6.12.74"}, true); got != kernelHelperNotInstalledReason {
+		t.Fatalf("detail without any module = %q, want %q", got, kernelHelperNotInstalledReason)
+	}
+	if got := kernelHelperStartupDetail(missing, executable, upgraded, false); got != missing.Error() {
+		t.Fatalf("uninspected install must keep the error: %q", got)
+	}
+	if got := kernelHelperStartupDetail(errors.New("load optional module: operation not permitted"), executable, upgraded, true); got != "load optional module: operation not permitted" {
 		t.Fatalf("other errors must pass through: %q", got)
+	}
+	if got := kernelHelperStartupDetail(nil, executable, upgraded, true); got != "" {
+		t.Fatalf("no error = %q", got)
+	}
+}
+
+func TestKernelHelperStatusOffersRebuildOnlyAfterOptIn(t *testing.T) {
+	const executable = "/opt/veer/veer"
+	base := KernelHelperModuleStatus{Name: optionalKernelModuleName, Compiled: true, Reason: "module is not loaded"}
+
+	dormant := withKernelHelperInstall(base, executable, kernelHelperInstall{KernelRelease: "6.12.74"})
+	if dormant.Reason != kernelHelperNotInstalledReason || dormant.RebuildCommand != "" || dormant.ModuleInstalled {
+		t.Fatalf("host without any module = %+v", dormant)
+	}
+
+	upgraded := withKernelHelperInstall(base, executable, kernelHelperInstall{KernelRelease: "6.12.74", OtherReleases: []string{"6.12.73"}})
+	if !strings.Contains(upgraded.Reason, "running kernel 6.12.74") || upgraded.RebuildCommand != executable+" kfuncs build" {
+		t.Fatalf("host after a kernel upgrade = %+v", upgraded)
+	}
+
+	installed := withKernelHelperInstall(base, executable, kernelHelperInstall{KernelRelease: "6.12.74", ModuleInstalled: true})
+	if installed.Reason != base.Reason || installed.RebuildCommand != "" {
+		t.Fatalf("an installed module keeps the probe's reason: %+v", installed)
+	}
+
+	unsupported := withKernelHelperInstall(KernelHelperModuleStatus{Name: optionalKernelModuleName}, executable, kernelHelperInstall{KernelRelease: "6.12.74", OtherReleases: []string{"6.12.73"}})
+	if unsupported.RebuildCommand != "" {
+		t.Fatalf("a binary without helper support cannot rebuild: %+v", unsupported)
 	}
 }
 
