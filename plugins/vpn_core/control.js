@@ -58,7 +58,7 @@ plugin.action({id: 'core_install', description: 'Download and verify an official
 plugin.action({id: 'core_select', description: 'Choose an installed core for subsequently applied WANs.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'core_rollback', description: 'Restore the previous default core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'core_remove', description: 'Remove an unused installed core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
-ui.register({static_dir: 'ui', entry: 'index.html', sha256: '3e71ed4426ad50a960d01225bb26a5e2d5d29f9e46cd7b249bff3b700567aa11', page: 'vpn', page_title: 'VPN',
+ui.register({static_dir: 'ui', entry: 'index.html', sha256: '30039017dbb70e05163e484256e5a986e3a0049258c6cf617813b3c0d23831c9', page: 'vpn', page_title: 'VPN',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
   actions: ['set_key', 'set_core_config', 'core_form', 'health_status', 'health_settings', 'health_check', 'apply', 'teardown', 'delete_profile', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
 

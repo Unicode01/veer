@@ -2,27 +2,172 @@
   'use strict';
   // Shared by the sandboxed UI and the plugin runtime; no browser/Node APIs.
   const LIMIT=256*1024, MAX_NODES=128;
+  // Messages follow the host locale in the page; the plugin runtime has no locale and uses Chinese.
+  const messages={
+    'zh-CN':{
+      'urlEncoding':'分享链接的 URL 编码无效',
+      'base64':'Base64 编码无效',
+      'base64Text':'Base64 内容不是有效 UTF-8 文本',
+      'port':'节点端口必须为 1–65535',
+      'host':'节点地址必须是有效 IP 或 ASCII 域名',
+      'hostIP':'节点 IP 地址无效',
+      'bool':'链接中的布尔参数无效',
+      'uuid':'节点 UUID 格式无效',
+      'params':'链接含暂不支持的参数，请使用高级栏中的原生 JSON',
+      'duplicateParam':'分享链接含重复或空参数',
+      'format':'分享链接格式无效',
+      'credentials':'分享链接缺少节点凭据',
+      'address':'节点地址或端口格式无效',
+      'transport':'此传输方式暂不支持链接导入，请使用原生 JSON',
+      'tcpHeader':'暂不支持 TCP 伪装头，请使用原生 JSON',
+      'grpcMode':'暂不支持此 gRPC 模式',
+      'grpcAuthority':'暂不支持 gRPC authority，请使用原生 JSON',
+      'spiderX':'暂不支持此 REALITY spiderX 参数，请使用原生 JSON',
+      'path':'传输路径无效',
+      'grpcService':'gRPC 服务名无效',
+      'grpcServiceMissing':'gRPC 链接缺少 serviceName',
+      'mihomoTrojan':'Mihomo Trojan 不支持此传输方式',
+      'tlsType':'此 TLS 类型暂不支持',
+      'tlsNone':'TLS 参数与 security=none 冲突',
+      'alpn':'ALPN 参数无效',
+      'fingerprint':'TLS 指纹暂不支持',
+      'reality':'REALITY 公钥或 short ID 无效',
+      'realityInsecure':'REALITY 不接受跳过证书验证',
+      'realityConflict':'REALITY 参数与 TLS 类型冲突',
+      'vmessJSON':'VMess Base64 JSON 无效',
+      'vmessObject':'VMess 配置必须是对象',
+      'vmessCert':'暂不支持此证书名称或指纹参数，请使用原生 JSON',
+      'vmessAEAD':'仅支持 VMess AEAD（alterId=0）',
+      'vmessHeader':'暂不支持 VMess 伪装头',
+      'ssCredentials':'Shadowsocks 凭据无效',
+      'ssCipher':'此 Shadowsocks 加密方式暂不支持链接导入',
+      'ssCipherSingBox':'sing-box 不支持此 Shadowsocks 加密方式',
+      'vlessEncryption':'VLESS encryption 暂不支持',
+      'vlessFlow':'此 VLESS flow 暂不支持',
+      'vmessFlow':'VMess 不接受 VLESS flow',
+      'trojanParams':'Trojan 链接包含其他协议参数',
+      'trojanTLS':'Trojan 必须启用 TLS',
+      'vision':'Vision 需要 TCP + TLS/REALITY',
+      'anytlsSecurity':'AnyTLS 仅支持 TLS，不支持此 security 参数',
+      'anytlsTransport':'AnyTLS 仅支持 TCP，不支持此传输方式',
+      'anytlsHeader':'AnyTLS 不支持 TCP 伪装头',
+      'obfs':'暂只支持 salamander 混淆',
+      'obfsType':'混淆密码缺少 obfs 类型',
+      'protocol':'支持 ss、vmess、vless、trojan、hysteria2 / hy2、anytls 分享链接；其他协议请使用原生 JSON',
+      'portMissing':'分享链接缺少节点端口',
+      'vmessCipher':'VMess 加密方式无效',
+      'driver':'请选择 Mihomo 或 sing-box',
+      'size':'分享内容不能为空，且不能超过 256 KiB',
+      'count':'一次可导入 1–128 个节点',
+      'options':'高级设置必须是对象',
+      'ruleCount':'每类分流规则最多 128 条',
+      'cidr':'直连网段必须是有效 CIDR',
+      'dns':'DNS 服务器请填写 IPv4 地址',
+      'selected':'请选择有效节点',
+      'summary':'节点名称或高级规则摘要过大，请减少节点或规则',
+      'invalid':'{{label}}无效',
+      'node':'第 {{index}} 个节点：{{message}}',
+      'label.ssPassword':'Shadowsocks 密码',
+      'label.trojanPassword':'Trojan 密码',
+      'label.anytlsPassword':'AnyTLS 密码',
+      'label.hy2Password':'Hysteria2 密码',
+      'label.obfsPassword':'混淆密码'
+    },
+    'en-US':{
+      'urlEncoding':'The share link has invalid URL encoding',
+      'base64':'Invalid Base64 encoding',
+      'base64Text':'The Base64 content is not valid UTF-8 text',
+      'port':'The node port must be 1–65535',
+      'host':'The node address must be a valid IP or ASCII domain name',
+      'hostIP':'Invalid node IP address',
+      'bool':'Invalid boolean parameter in the link',
+      'uuid':'Malformed node UUID',
+      'params':'The link has unsupported parameters; use native JSON in the advanced settings',
+      'duplicateParam':'The share link has duplicate or empty parameters',
+      'format':'Invalid share link format',
+      'credentials':'The share link has no node credentials',
+      'address':'Invalid node address or port',
+      'transport':'This transport cannot be imported from a link yet; use native JSON',
+      'tcpHeader':'TCP header obfuscation is not supported yet; use native JSON',
+      'grpcMode':'This gRPC mode is not supported yet',
+      'grpcAuthority':'gRPC authority is not supported yet; use native JSON',
+      'spiderX':'This REALITY spiderX parameter is not supported yet; use native JSON',
+      'path':'Invalid transport path',
+      'grpcService':'Invalid gRPC service name',
+      'grpcServiceMissing':'The gRPC link has no serviceName',
+      'mihomoTrojan':'Mihomo Trojan does not support this transport',
+      'tlsType':'This TLS type is not supported yet',
+      'tlsNone':'TLS parameters conflict with security=none',
+      'alpn':'Invalid ALPN parameter',
+      'fingerprint':'This TLS fingerprint is not supported yet',
+      'reality':'Invalid REALITY public key or short ID',
+      'realityInsecure':'REALITY does not allow skipping certificate verification',
+      'realityConflict':'REALITY parameters conflict with the TLS type',
+      'vmessJSON':'Invalid VMess Base64 JSON',
+      'vmessObject':'The VMess configuration must be an object',
+      'vmessCert':'These certificate name or fingerprint parameters are not supported yet; use native JSON',
+      'vmessAEAD':'Only VMess AEAD (alterId=0) is supported',
+      'vmessHeader':'VMess header obfuscation is not supported yet',
+      'ssCredentials':'Invalid Shadowsocks credentials',
+      'ssCipher':'This Shadowsocks cipher cannot be imported from a link yet',
+      'ssCipherSingBox':'sing-box does not support this Shadowsocks cipher',
+      'vlessEncryption':'VLESS encryption is not supported yet',
+      'vlessFlow':'This VLESS flow is not supported yet',
+      'vmessFlow':'VMess does not accept a VLESS flow',
+      'trojanParams':'The Trojan link has parameters of another protocol',
+      'trojanTLS':'Trojan requires TLS',
+      'vision':'Vision requires TCP + TLS/REALITY',
+      'anytlsSecurity':'AnyTLS supports only TLS, not this security parameter',
+      'anytlsTransport':'AnyTLS supports only TCP, not this transport',
+      'anytlsHeader':'AnyTLS does not support TCP header obfuscation',
+      'obfs':'Only salamander obfuscation is supported',
+      'obfsType':'The obfuscation password has no obfs type',
+      'protocol':'Supported share links: ss, vmess, vless, trojan, hysteria2 / hy2 and anytls; use native JSON for other protocols',
+      'portMissing':'The share link has no node port',
+      'vmessCipher':'Invalid VMess cipher',
+      'driver':'Choose Mihomo or sing-box',
+      'size':'Share content must not be empty or exceed 256 KiB',
+      'count':'Import 1–128 nodes at a time',
+      'options':'Advanced settings must be an object',
+      'ruleCount':'Each routing rule list allows at most 128 entries',
+      'cidr':'Direct CIDRs must be valid CIDRs',
+      'dns':'DNS servers must be IPv4 addresses',
+      'selected':'Choose a valid node',
+      'summary':'Node names or advanced rules are too large; use fewer nodes or rules',
+      'invalid':'Invalid {{label}}',
+      'node':'Node {{index}}: {{message}}',
+      'label.ssPassword':'Shadowsocks password',
+      'label.trojanPassword':'Trojan password',
+      'label.anytlsPassword':'AnyTLS password',
+      'label.hy2Password':'Hysteria2 password',
+      'label.obfsPassword':'obfuscation password'
+    }
+  };
+  function msg(key,params) {
+    const host=root.VeerPluginHost, dict=messages[host && host.locale==='en-US'?'en-US':'zh-CN'];
+    return dict[key].replace(/\{\{(\w+)\}\}/g,(_,name)=>String(params[name]));
+  }
   const fail=text=>{throw new Error(text);};
   const own=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
   const object=v=>v && typeof v==='object' && !Array.isArray(v);
   function byteSize(s) {return encodeURIComponent(s).replace(/%[a-f0-9]{2}|[^%]/gi,'x').length;}
   function decode(value) {
-    try {return decodeURIComponent(value);} catch(e) {fail('分享链接的 URL 编码无效');}
+    try {return decodeURIComponent(value);} catch(e) {fail(msg('urlEncoding'));}
   }
   function base64(value) {
     const s=String(value).replace(/\s/g,'').replace(/-/g,'+').replace(/_/g,'/');
-    if(!s || s.length>LIMIT || !/^[A-Za-z0-9+/]*={0,2}$/.test(s) || s.replace(/=+$/,'').length%4===1 || (s.includes('=') && s.length%4)) fail('Base64 编码无效');
+    if(!s || s.length>LIMIT || !/^[A-Za-z0-9+/]*={0,2}$/.test(s) || s.replace(/=+$/,'').length%4===1 || (s.includes('=') && s.length%4)) fail(msg('base64'));
     const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', data=s.replace(/=+$/,'');
     let bits=0, count=0, escaped='';
     for(let i=0;i<data.length;i++) {
       bits=(bits<<6)|alphabet.indexOf(data[i]);count+=6;
       if(count>=8) {count-=8;escaped+='%'+((bits>>count)&255).toString(16).padStart(2,'0');bits&=(1<<count)-1;}
     }
-    if(bits) fail('Base64 编码无效');
-    try {return decodeURIComponent(escaped);}catch(e){fail('Base64 内容不是有效 UTF-8 文本');}
+    if(bits) fail(msg('base64'));
+    try {return decodeURIComponent(escaped);}catch(e){fail(msg('base64Text'));}
   }
   function port(value) {
-    if(!/^\d+$/.test(String(value)) || Number(value)<1 || Number(value)>65535) fail('节点端口必须为 1–65535');
+    if(!/^\d+$/.test(String(value)) || Number(value)<1 || Number(value)>65535) fail(msg('port'));
     return Number(value);
   }
   function ipv4(s) {return /^\d+\.\d+\.\d+\.\d+$/.test(s) && s.split('.').every(v=>Number(v)<=255 && String(Number(v))===v);}
@@ -35,81 +180,81 @@
   function ip(s) {return ipv4(s)||ipv6(s);}
   function hostname(s) {
     if(ip(s))return s;
-    if(s.length>253 || !s || !s.replace(/\.$/,'').split('.').every(v=>/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(v)))fail('节点地址必须是有效 IP 或 ASCII 域名');
-    if(/^[0-9.]+$/.test(s))fail('节点 IP 地址无效');
+    if(s.length>253 || !s || !s.replace(/\.$/,'').split('.').every(v=>/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(v)))fail(msg('host'));
+    if(/^[0-9.]+$/.test(s))fail(msg('hostIP'));
     return s;
   }
   function bool(value) {
     if(value==null || value==='')return false;
     if(value===true || value===1 || value==='1' || value==='true')return true;
     if(value===false || value===0 || value==='0' || value==='false')return false;
-    fail('链接中的布尔参数无效');
+    fail(msg('bool'));
   }
-  function uuid(s) {if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s))fail('节点 UUID 格式无效');return s;}
-  function text(s,label) {if(typeof s!=='string' || !s || s.length>4096 || /[\x00-\x1f\x7f]/.test(s))fail(label+'无效');return s;}
-  function allowed(o, keys) {if(Object.keys(o).some(k=>!keys.includes(k)))fail('链接含暂不支持的参数，请使用高级栏中的原生 JSON');}
+  function uuid(s) {if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s))fail(msg('uuid'));return s;}
+  function text(s,label) {if(typeof s!=='string' || !s || s.length>4096 || /[\x00-\x1f\x7f]/.test(s))fail(msg('invalid',{label}));return s;}
+  function allowed(o, keys) {if(Object.keys(o).some(k=>!keys.includes(k)))fail(msg('params'));}
   function query(s) {
     const out=Object.create(null);
     if(s) s.split('&').forEach(pair=>{
       const i=pair.indexOf('='), k=decode(i<0?pair:pair.slice(0,i)), v=decode(i<0?'':pair.slice(i+1));
-      if(!k || own(out,k))fail('分享链接含重复或空参数');out[k]=v;
+      if(!k || own(out,k))fail(msg('duplicateParam'));out[k]=v;
     });
     return out;
   }
   function uri(line) {
     const m=/^([a-z0-9]+):\/\/([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/i.exec(line);
-    if(!m)fail('分享链接格式无效');
+    if(!m)fail(msg('format'));
     let body=m[2];if(body.endsWith('/'))body=body.slice(0,-1);
-    const at=body.lastIndexOf('@');if(at<0)fail('分享链接缺少节点凭据');
+    const at=body.lastIndexOf('@');if(at<0)fail(msg('credentials'));
     const a=/^(?:\[([0-9a-fA-F:]+)\]|([^:/\s]+))(?::(\d+))?$/.exec(body.slice(at+1));
-    if(!a)fail('节点地址或端口格式无效');
+    if(!a)fail(msg('address'));
     return {scheme:m[1].toLowerCase(),auth:decode(body.slice(0,at)),server:hostname(a[1]||a[2]),port:a[3]?port(a[3]):null,q:query(m[3]),name:decode(m[4]||'')};
   }
   const common=['type','security','sni','peer','alpn','fp','pbk','sid','spx','flow','encryption','path','host','serviceName','mode','authority','headerType','allowInsecure','insecure'];
   function transport(n,q,driver) {
     const type=q.type==='raw'?'tcp':q.type || 'tcp';
-    if(!['tcp','ws','grpc','http','h2'].includes(type))fail('此传输方式暂不支持链接导入，请使用原生 JSON');
-    if(q.headerType && q.headerType!=='none')fail('暂不支持 TCP 伪装头，请使用原生 JSON');
-    if(q.mode && q.mode!=='gun')fail('暂不支持此 gRPC 模式');
-    if(q.authority)fail('暂不支持 gRPC authority，请使用原生 JSON');
-    if(q.spx && q.spx!=='/')fail('暂不支持此 REALITY spiderX 参数，请使用原生 JSON');
+    if(!['tcp','ws','grpc','http','h2'].includes(type))fail(msg('transport'));
+    if(q.headerType && q.headerType!=='none')fail(msg('tcpHeader'));
+    if(q.mode && q.mode!=='gun')fail(msg('grpcMode'));
+    if(q.authority)fail(msg('grpcAuthority'));
+    if(q.spx && q.spx!=='/')fail(msg('spiderX'));
     n.transport={type:type==='http'?'h2':type,path:q.path||'/',host:q.host||'',service:q.serviceName||''};
-    if(n.transport.path.length>2048 || /[\x00-\x1f\x7f]/.test(n.transport.path))fail('传输路径无效');
+    if(n.transport.path.length>2048 || /[\x00-\x1f\x7f]/.test(n.transport.path))fail(msg('path'));
     if(n.transport.host)hostname(n.transport.host);
-    if(n.transport.service && !/^[a-zA-Z0-9_.\/-]{1,256}$/.test(n.transport.service))fail('gRPC 服务名无效');
-    if(n.transport.type==='grpc' && !n.transport.service)fail('gRPC 链接缺少 serviceName');
+    if(n.transport.service && !/^[a-zA-Z0-9_.\/-]{1,256}$/.test(n.transport.service))fail(msg('grpcService'));
+    if(n.transport.type==='grpc' && !n.transport.service)fail(msg('grpcServiceMissing'));
     // The driver's protocol mapping is deliberately explicit, never silently TCP.
-    if(driver==='mihomo' && n.type==='trojan' && n.transport.type==='h2')fail('Mihomo Trojan 不支持此传输方式');
+    if(driver==='mihomo' && n.type==='trojan' && n.transport.type==='h2')fail(msg('mihomoTrojan'));
   }
   function tls(n,q,defaultSecurity) {
     const security=q.security || defaultSecurity || 'none';
-    if(!['none','tls','reality'].includes(security))fail('此 TLS 类型暂不支持');
+    if(!['none','tls','reality'].includes(security))fail(msg('tlsType'));
     if(security==='none') {
-      if(q.pbk || q.sid || q.sni || q.peer || q.alpn || q.fp || bool(q.allowInsecure)||bool(q.insecure))fail('TLS 参数与 security=none 冲突');
+      if(q.pbk || q.sid || q.sni || q.peer || q.alpn || q.fp || bool(q.allowInsecure)||bool(q.insecure))fail(msg('tlsNone'));
       return;
     }
     const t={server_name:q.sni||q.peer||n.server,insecure:bool(q.allowInsecure)||bool(q.insecure)};
     hostname(t.server_name);
-    if(q.alpn) {t.alpn=q.alpn.split(',');if(t.alpn.some(v=>!v || v.length>64 || /[^\x21-\x7e]/.test(v)))fail('ALPN 参数无效');}
-    if(q.fp) {if(!['chrome','firefox','safari','ios','android','edge','360','qq','random','randomized'].includes(q.fp))fail('TLS 指纹暂不支持');t.fingerprint=q.fp;}
+    if(q.alpn) {t.alpn=q.alpn.split(',');if(t.alpn.some(v=>!v || v.length>64 || /[^\x21-\x7e]/.test(v)))fail(msg('alpn'));}
+    if(q.fp) {if(!['chrome','firefox','safari','ios','android','edge','360','qq','random','randomized'].includes(q.fp))fail(msg('fingerprint'));t.fingerprint=q.fp;}
     if(security==='reality') {
-      if(n.type!=='vless' || !/^[A-Za-z0-9_-]{43}$/.test(q.pbk||'') || !/^(?:[0-9a-fA-F]{2}){0,8}$/.test(q.sid||''))fail('REALITY 公钥或 short ID 无效');
-      if(t.insecure)fail('REALITY 不接受跳过证书验证');
+      if(n.type!=='vless' || !/^[A-Za-z0-9_-]{43}$/.test(q.pbk||'') || !/^(?:[0-9a-fA-F]{2}){0,8}$/.test(q.sid||''))fail(msg('reality'));
+      if(t.insecure)fail(msg('realityInsecure'));
       t.reality={public_key:q.pbk,short_id:q.sid||''};t.fingerprint=t.fingerprint||'chrome';
-    } else if(q.pbk || q.sid)fail('REALITY 参数与 TLS 类型冲突');
+    } else if(q.pbk || q.sid)fail(msg('realityConflict'));
     n.tls=t;
   }
   function parseOne(line,driver) {
     let n;
     if(/^vmess:\/\//i.test(line) && !line.includes('@')) {
-      let v;try {v=JSON.parse(base64(line.slice(8)));}catch(e){fail('VMess Base64 JSON 无效');}
-      if(!object(v))fail('VMess 配置必须是对象');
+      let v;try {v=JSON.parse(base64(line.slice(8)));}catch(e){fail(msg('vmessJSON'));}
+      if(!object(v))fail(msg('vmessObject'));
       allowed(v,['v','ps','add','port','id','aid','scy','net','type','host','path','tls','sni','alpn','fp','allowInsecure','insecure','vcn','pcs']);
-      if(v.vcn || v.pcs)fail('暂不支持此证书名称或指纹参数，请使用原生 JSON');
-      if(v.aid!=null && String(v.aid)!=='0')fail('仅支持 VMess AEAD（alterId=0）');
+      if(v.vcn || v.pcs)fail(msg('vmessCert'));
+      if(v.aid!=null && String(v.aid)!=='0')fail(msg('vmessAEAD'));
       n={type:'vmess',name:String(v.ps||''),server:hostname(String(v.add||'')),port:port(v.port),uuid:uuid(String(v.id||'')),cipher:v.scy||'auto'};
       const q={type:v.net||'tcp',path:v.path,host:v.host,security:v.tls||'none',sni:v.sni,alpn:v.alpn,fp:v.fp,allowInsecure:v.allowInsecure,insecure:v.insecure};
-      if(v.type && v.type!=='none')fail('暂不支持 VMess 伪装头');
+      if(v.type && v.type!=='none')fail(msg('vmessHeader'));
       if(q.type==='grpc') {q.serviceName=q.path;q.path='';}
       transport(n,q,driver);tls(n,q);
     } else {
@@ -123,72 +268,72 @@
       if(n.type==='ss') {
         allowed(q,[]);
         let auth=u.auth;if(!auth.includes(':'))auth=base64(auth);
-        const i=auth.indexOf(':');if(i<1)fail('Shadowsocks 凭据无效');
-        n.method=auth.slice(0,i);n.password=text(auth.slice(i+1),'Shadowsocks 密码');
-        if(!['aes-128-gcm','aes-192-gcm','aes-256-gcm','chacha20-ietf-poly1305','xchacha20-ietf-poly1305','2022-blake3-aes-128-gcm','2022-blake3-aes-256-gcm','2022-blake3-chacha20-poly1305'].includes(n.method))fail('此 Shadowsocks 加密方式暂不支持链接导入');
-        if(driver==='sing_box' && n.method==='aes-192-gcm')fail('sing-box 不支持此 Shadowsocks 加密方式');
+        const i=auth.indexOf(':');if(i<1)fail(msg('ssCredentials'));
+        n.method=auth.slice(0,i);n.password=text(auth.slice(i+1),msg('label.ssPassword'));
+        if(!['aes-128-gcm','aes-192-gcm','aes-256-gcm','chacha20-ietf-poly1305','xchacha20-ietf-poly1305','2022-blake3-aes-128-gcm','2022-blake3-aes-256-gcm','2022-blake3-chacha20-poly1305'].includes(n.method))fail(msg('ssCipher'));
+        if(driver==='sing_box' && n.method==='aes-192-gcm')fail(msg('ssCipherSingBox'));
       } else if(['vless','vmess','trojan'].includes(n.type)) {
         allowed(q,common);
-        if(n.type==='trojan')n.password=text(u.auth,'Trojan 密码');else n.uuid=uuid(u.auth);
+        if(n.type==='trojan')n.password=text(u.auth,msg('label.trojanPassword'));else n.uuid=uuid(u.auth);
         if(n.type==='vless') {
-          if(q.encryption && q.encryption!=='none')fail('VLESS encryption 暂不支持');
-          if(q.flow && q.flow!=='xtls-rprx-vision')fail('此 VLESS flow 暂不支持');
+          if(q.encryption && q.encryption!=='none')fail(msg('vlessEncryption'));
+          if(q.flow && q.flow!=='xtls-rprx-vision')fail(msg('vlessFlow'));
           if(q.flow)n.flow=q.flow;
-        } else if(n.type==='vmess') {if(q.flow)fail('VMess 不接受 VLESS flow');n.cipher=q.encryption||'auto';}
-        else if(q.flow || q.encryption)fail('Trojan 链接包含其他协议参数');
+        } else if(n.type==='vmess') {if(q.flow)fail(msg('vmessFlow'));n.cipher=q.encryption||'auto';}
+        else if(q.flow || q.encryption)fail(msg('trojanParams'));
         transport(n,q,driver);tls(n,q,n.type==='trojan'?'tls':'none');
-        if(n.type==='trojan' && !n.tls)fail('Trojan 必须启用 TLS');
-        if(n.flow && (!n.tls || n.transport.type!=='tcp'))fail('Vision 需要 TCP + TLS/REALITY');
+        if(n.type==='trojan' && !n.tls)fail(msg('trojanTLS'));
+        if(n.flow && (!n.tls || n.transport.type!=='tcp'))fail(msg('vision'));
       } else if(n.type==='anytls') {
         allowed(q,['sni','insecure','allowInsecure','alpn','fp','security','type','headerType']);
-        if(q.security && q.security!=='tls')fail('AnyTLS 仅支持 TLS，不支持此 security 参数');
-        if(q.type && !['tcp','raw'].includes(q.type))fail('AnyTLS 仅支持 TCP，不支持此传输方式');
-        if(q.headerType && q.headerType!=='none')fail('AnyTLS 不支持 TCP 伪装头');
-        n.port=n.port||443;n.password=text(u.auth,'AnyTLS 密码');
+        if(q.security && q.security!=='tls')fail(msg('anytlsSecurity'));
+        if(q.type && !['tcp','raw'].includes(q.type))fail(msg('anytlsTransport'));
+        if(q.headerType && q.headerType!=='none')fail(msg('anytlsHeader'));
+        n.port=n.port||443;n.password=text(u.auth,msg('label.anytlsPassword'));
         tls(n,q,'tls');
       } else if(n.type==='hysteria2') {
-        allowed(q,['sni','insecure','obfs','obfs-password']);n.port=n.port||443;n.password=text(u.auth,'Hysteria2 密码');
+        allowed(q,['sni','insecure','obfs','obfs-password']);n.port=n.port||443;n.password=text(u.auth,msg('label.hy2Password'));
         tls(n,{sni:q.sni,insecure:q.insecure},'tls');
-        if(q.obfs) {if(q.obfs!=='salamander')fail('暂只支持 salamander 混淆');n.obfs={type:q.obfs,password:text(q['obfs-password'],'混淆密码')};}
-        else if(q['obfs-password'])fail('混淆密码缺少 obfs 类型');
-      } else fail('支持 ss、vmess、vless、trojan、hysteria2 / hy2、anytls 分享链接；其他协议请使用原生 JSON');
-      if(!n.port)fail('分享链接缺少节点端口');
+        if(q.obfs) {if(q.obfs!=='salamander')fail(msg('obfs'));n.obfs={type:q.obfs,password:text(q['obfs-password'],msg('label.obfsPassword'))};}
+        else if(q['obfs-password'])fail(msg('obfsType'));
+      } else fail(msg('protocol'));
+      if(!n.port)fail(msg('portMissing'));
     }
-    if(n.type==='vmess' && !['auto','none','zero','aes-128-gcm','chacha20-poly1305'].includes(n.cipher))fail('VMess 加密方式无效');
+    if(n.type==='vmess' && !['auto','none','zero','aes-128-gcm','chacha20-poly1305'].includes(n.cipher))fail(msg('vmessCipher'));
     n.name=n.name.replace(/[\x00-\x1f\x7f]/g,'').slice(0,128);
     return n;
   }
   function parse(value,driver) {
-    if(!['mihomo','sing_box'].includes(driver))fail('请选择 Mihomo 或 sing-box');
+    if(!['mihomo','sing_box'].includes(driver))fail(msg('driver'));
     let source=String(value||'').trim();
-    if(!source || source.length>LIMIT || byteSize(source)>LIMIT)fail('分享内容不能为空，且不能超过 256 KiB');
+    if(!source || source.length>LIMIT || byteSize(source)>LIMIT)fail(msg('size'));
     if(!/^[a-z][a-z0-9+.-]*:\/\//i.test(source))source=base64(source).trim();
     const lines=source.split(/\r?\n/).map(v=>v.trim()).filter(Boolean);
-    if(!lines.length || lines.length>MAX_NODES)fail('一次可导入 1–128 个节点');
+    if(!lines.length || lines.length>MAX_NODES)fail(msg('count'));
     return lines.map((line,i)=>{
       try {const n=parseOne(line,driver);n.name=n.name||n.type.toUpperCase()+' '+(i+1);return n;}
-      catch(e) {throw new Error('第 '+(i+1)+' 个节点：'+e.message);}
+      catch(e) {throw new Error(msg('node',{index:i+1,message:e.message}));}
     });
   }
   function list(value) {return Array.isArray(value)?value:String(value||'').split(/[,\n]/).map(v=>v.trim()).filter(Boolean);}
   function options(raw) {
-    raw=raw||{};if(!object(raw))fail('高级设置必须是对象');
+    raw=raw||{};if(!object(raw))fail(msg('options'));
     allowed(raw,['direct_cidrs','direct_domains','dns_hijack','bootstrap_dns','proxy_dns']);
     const o={direct_cidrs:list(raw.direct_cidrs),direct_domains:list(raw.direct_domains),dns_hijack:bool(raw.dns_hijack),bootstrap_dns:raw.bootstrap_dns||'223.5.5.5',proxy_dns:raw.proxy_dns||'1.1.1.1'};
-    if(o.direct_cidrs.length>128 || o.direct_domains.length>128)fail('每类分流规则最多 128 条');
-    o.direct_cidrs.forEach(v=>{const a=String(v).split('/');if(a.length!==2 || !ip(a[0]) || !/^\d+$/.test(a[1]) || Number(a[1])>(a[0].includes(':')?128:32))fail('直连网段必须是有效 CIDR');});
+    if(o.direct_cidrs.length>128 || o.direct_domains.length>128)fail(msg('ruleCount'));
+    o.direct_cidrs.forEach(v=>{const a=String(v).split('/');if(a.length!==2 || !ip(a[0]) || !/^\d+$/.test(a[1]) || Number(a[1])>(a[0].includes(':')?128:32))fail(msg('cidr'));});
     o.direct_domains=o.direct_domains.map(v=>hostname(String(v).replace(/^\.?\*?\.?/,''))).map(v=>v.toLowerCase());
-    if(!ipv4(o.bootstrap_dns) || !ipv4(o.proxy_dns))fail('DNS 服务器请填写 IPv4 地址');
+    if(!ipv4(o.bootstrap_dns) || !ipv4(o.proxy_dns))fail(msg('dns'));
     return o;
   }
   function create(driver,source,selected,rawOptions) {
     const nodes=parse(source,driver), index=selected==null?0:Number(selected);
-    if(!Number.isInteger(index) || index<0 || index>=nodes.length)fail('请选择有效节点');
+    if(!Number.isInteger(index) || index<0 || index>=nodes.length)fail(msg('selected'));
     const value={veer_proxy:1,driver,links:source,selected:index,options:options(rawOptions)};
     // runtime_query has a 64 KiB response bound, including JSON escaping.
     const summary=JSON.stringify({nodes:nodes.map(n=>({name:n.name,type:n.type})),options:value.options});
     // Go's JSON encoder additionally escapes HTML and line separators.
-    if(byteSize(summary.replace(/[<>&\u2028\u2029]/g,'______'))>48*1024)fail('节点名称或高级规则摘要过大，请减少节点或规则');
+    if(byteSize(summary.replace(/[<>&\u2028\u2029]/g,'______'))>48*1024)fail(msg('summary'));
     return value;
   }
   function metadata(value) {

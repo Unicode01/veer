@@ -186,6 +186,8 @@ const browserErrors = new WeakMap();
 test('VPN WAN saves drafts and encrypted core configurations through the real UI bridge', async ({ page }, testInfo) => {
   test.setTimeout(60000);
   await openDashboard(page, testInfo);
+  // This walk-through finds controls by their Chinese names; the English page has its own test.
+  await page.evaluate(() => window.VeerApp.setLocale('zh-CN'));
   const profile = {slot:2, addresses:['10.77.0.1/32'], peers:[{public_key:Buffer.alloc(32,2).toString('base64'), allowed_ips:['0.0.0.0/0']}],
     remote_routes:[]};
   const records = {saved:{key:'saved', data:profile, enabled:true}};
@@ -209,7 +211,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
     const endpoint = url.pathname.split('/vpn_core/')[1];
     if (endpoint.startsWith('assets/')) {
       const asset=endpoint.slice('assets/'.length);
-      if (!['index.html','app.js','model.js','share.js','style.css'].includes(asset)) return route.fulfill({status:404});
+      if (!['index.html','app.js','i18n.js','model.js','share.js','style.css'].includes(asset)) return route.fulfill({status:404});
       return route.fulfill({contentType:asset.endsWith('.css')?'text/css':asset.endsWith('.js')?'application/javascript':'text/html; charset=utf-8', body:fs.readFileSync(path.resolve(__dirname, '../../../plugins/vpn_core/ui',asset), 'utf8')});
     }
     if (endpoint === 'resources/status') return route.fulfill({json:{records:[]}});
@@ -226,7 +228,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
       if(healthActions.includes(id)) {
         Object.keys(records).forEach(key=>{healthValues[key] ||= {key,settings:{...healthDefaults},state:'unknown',result:null};});
         if(id==='health_status') {
-          if(healthValues.saved?.state==='checking' && ++healthPolls>=3)healthValues.saved={...healthValues.saved,state:healthFailure?'unhealthy':'healthy',result:{latency_ms:37,checked_at:Date.now(),message:healthFailure?'检测超时':'VPN 链路可用',consecutive_failures:healthFailure?1:0}};
+          if(healthValues.saved?.state==='checking' && ++healthPolls>=3)healthValues.saved={...healthValues.saved,state:healthFailure?'unhealthy':'healthy',result:{latency_ms:37,checked_at:Date.now(),reason:healthFailure?'timeout':'',message:healthFailure?'检测超时':'VPN 链路可用',consecutive_failures:healthFailure?1:0}};
           return route.fulfill({json:{result:{items:Object.values(healthValues)}}});
         }
         healthRequests.push({id,payload});
@@ -465,6 +467,80 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   expect(actions.at(-1)).toEqual({id:'delete_profile',payload:{key:'vpn1'}});
 });
 
+
+test('VPN page follows the host locale without losing edits', async ({ page }, testInfo) => {
+  await openDashboard(page, testInfo);
+  await page.evaluate(() => window.VeerApp.setLocale('en-US'));
+  const methods = ['list','get','create','update'], actions = ['core_form','health_status','health_check','core_status'];
+  const profile = {slot:1, addresses:['10.77.0.1/32'], peers:[{public_key:Buffer.alloc(32,2).toString('base64'), allowed_ips:['0.0.0.0/0']}], remote_routes:[]};
+  const plugin = {id:'vpn_core', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.9.0', status:'active', enabled:true,
+    resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}], actions:actions.map(id => ({id})),
+    ui:{entry:'index.html', page:'vpn', page_title:'VPN', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}], actions},
+    asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
+  await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
+  await page.route('**/api/plugins/vpn_core/**', route => {
+    const endpoint = new URL(route.request().url()).pathname.split('/vpn_core/')[1];
+    if (endpoint.startsWith('assets/')) {
+      const file = path.resolve(__dirname, '../../../plugins/vpn_core/ui', endpoint.slice('assets/'.length));
+      return route.fulfill({contentType:file.endsWith('.css')?'text/css':file.endsWith('.js')?'application/javascript':'text/html; charset=utf-8', body:fs.readFileSync(file, 'utf8')});
+    }
+    if (endpoint === 'resources/profiles') return route.fulfill({json:{records:[{key:'home', data:profile, enabled:true}]}});
+    if (endpoint === 'resources/status') return route.fulfill({json:{records:[{key:'home', data:{phase:'applied'}}]}});
+    // The runtime's Chinese message is only a fallback: the page localizes the reason code.
+    if (endpoint === 'actions/health_status') return route.fulfill({json:{result:{items:[{key:'home', settings:{enabled:false}, state:'unhealthy',
+      result:{reason:'http_status', status_code:503, message:'检测目标返回 HTTP 503', latency_ms:12, checked_at:Date.now(), consecutive_failures:2}}]}}});
+    if (endpoint === 'actions/core_status') return route.fulfill({json:{result:{versions:[]}}});
+    return route.fulfill({status:404, json:{error:'unknown fixture'}});
+  });
+  await page.evaluate(() => window.VeerApp.loadPlugins());
+  await navigatePage(page, 'plugin-vpn');
+  const frame = page.frameLocator('#tab-plugin-vpn .plugin-page-frame');
+  const header = page.locator('#tab-plugin-vpn .plugin-header-actions');
+  // Hidden panels count too: they keep their text when shown later.
+  const chinese = () => frame.locator('body').evaluate((body) => {
+    const cjk = /[㐀-鿿＀-￯]/, found = [];
+    body.querySelectorAll('*').forEach((el) => {
+      if (el.closest('script, style')) return;
+      ['aria-label', 'placeholder', 'title'].forEach((attr) => { if (cjk.test(el.getAttribute(attr) || '')) found.push(el.tagName + '@' + attr + ': ' + el.getAttribute(attr)); });
+      el.childNodes.forEach((child) => { if (child.nodeType === Node.TEXT_NODE && cjk.test(child.textContent)) found.push(el.tagName + ': ' + child.textContent.trim()); });
+    });
+    return found;
+  });
+
+  await expect(frame.locator('.vpn-outlet')).toContainText('The check target returned HTTP 503 · 2 consecutive failures');
+  await expect(header.getByRole('button', {name:'New outlet', exact:true})).toBeVisible();
+  expect(await chinese()).toEqual([]);
+  await frame.getByRole('button', {name:'Edit', exact:true}).click();
+  await frame.getByLabel('Local WireGuard address', {exact:true}).fill('10.77.0.9/32');
+  await frame.getByText('Advanced settings and JSON', {exact:true}).click();
+  await expect(frame.locator('.vpn-editor h2')).toHaveText('Edit outlet · home');
+  expect(await chinese()).toEqual([]);
+  await expectNoPageOverflow(page);
+  expect(await frame.locator('body').evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
+  await page.screenshot({path:testInfo.outputPath('vpn-editor-en.png'), fullPage:true});
+
+  await page.evaluate(() => window.VeerApp.setLocale('zh-CN'));
+  await expect(frame.locator('.vpn-editor h2')).toHaveText('编辑出口 · home');
+  await expect(frame.getByLabel('本机 WireGuard 地址', {exact:true})).toHaveValue('10.77.0.9/32');
+  await expect(frame.getByLabel('出口位置', {exact:true})).toBeVisible();
+  await expect(frame.locator('.vpn-outlet')).toContainText('检测目标返回 HTTP 503 · 连续失败 2 次');
+  await expect(header.getByRole('button', {name:'新建出口', exact:true})).toBeVisible();
+
+  await page.evaluate(() => window.VeerApp.setLocale('en-US'));
+  await expect(frame.getByLabel('Local WireGuard address', {exact:true})).toHaveValue('10.77.0.9/32');
+  await expect(header.getByRole('button', {name:'Refresh outlets', exact:true})).toBeVisible();
+  expect(await chinese()).toEqual([]);
+  await frame.getByRole('tab', {name:'Cores', exact:true}).click();
+  await expect(frame.locator('.vpn-core-version')).toHaveText('Not installed');
+  await expect(frame.locator('.vpn-status-line')).toHaveText('Install a core from the official releases, or use one already on this host.');
+  expect(await chinese()).toEqual([]);
+  await expectNoPageOverflow(page);
+  await expectReadableThemes(page, frame.locator('body'));
+  await page.screenshot({path:testInfo.outputPath('vpn-cores-en.png'), fullPage:true});
+  await page.evaluate(() => window.VeerApp.setLocale('zh-CN'));
+  await expect(frame.locator('.vpn-core-version')).toHaveText('尚未安装');
+  await expect(frame.getByRole('tab', {name:'核心管理', exact:true})).toBeVisible();
+});
 
 test('plugin installation controls follow the host policy while plugin pages remain accessible', async ({ page }, testInfo) => {
   await openDashboard(page, testInfo);
