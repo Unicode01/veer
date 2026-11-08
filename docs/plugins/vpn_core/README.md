@@ -223,8 +223,8 @@ DNS 沿用 LAN 配置。Veer 本机代发的 DNS 属于宿主流量，不会自�
 
 ```sh
 sh scripts/build-all-ebpf.sh
-node --test internal/app/web_test/vpn_plugin.test.js
-sudo env VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestWireGuardMeshLinuxIntegration$' -count=1 -v -timeout=5m
+node --test plugins/vpn_core/test-*.test.js
+sudo env VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestVPNWireGuardLinuxIntegration$' -count=1 -v -timeout=5m
 ```
 
 Linux 测试在独立网络命名空间启动真实 Veer 和 WG peer，验证核心 NAT 与适配器的 TCP/UDP/ICMP 收发、下游接口覆盖、普通 WAN 不受影响、WG 重建及拆除后重新应用。显式启用时缺少权限、工具或内核能力直接失败。

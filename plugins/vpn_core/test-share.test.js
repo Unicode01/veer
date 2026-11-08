@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const S=require('../../../plugins/vpn_core/ui/share');
-const D=require('../../../plugins/vpn_core/core-drivers');
+const S=require('./ui/share');
+const D=require('./core-drivers');
 const id='bf000d23-0752-40b4-affe-68f7707a9661';
 const b64=s=>Buffer.from(s).toString('base64');
 const ss='ss://'+b64('aes-128-gcm:p@ss:word')+'@192.0.2.2:8388#'+encodeURIComponent('测试节点');

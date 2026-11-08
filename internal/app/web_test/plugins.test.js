@@ -1557,36 +1557,6 @@ test('plugin host cross-plugin resource reads enforce manifest grants', async ()
   assert.equal(calls.length, 1);
 });
 
-test('core plugin pages use record pickers and structured route editors', () => {
-  const pluginRoot = path.join(__dirname, '..', '..', '..', 'plugins');
-  const wan = fs.readFileSync(path.join(pluginRoot, 'wan_core', 'ui', 'index.html'), 'utf8');
-  const lan = fs.readFileSync(path.join(pluginRoot, 'lan_core', 'ui', 'index.html'), 'utf8');
-  const local = fs.readFileSync(path.join(pluginRoot, 'vtolocal', 'ui', 'index.html'), 'utf8');
-  const pppoe = fs.readFileSync(path.join(pluginRoot, 'pppoe_client', 'ui', 'index.html'), 'utf8');
-  const router = fs.readFileSync(path.join(pluginRoot, 'router_wizard', 'ui', 'index.html'), 'utf8');
-
-  assert.match(wan, /F\.recordPicker/);
-  assert.match(wan, /F\.collectionEditor/);
-  assert.match(wan, /wanProfileField\.hidden = profilePicker\.keys\(\)\.length <= 1/);
-  assert.match(lan, /F\.recordPicker/);
-  assert.match(lan, /lanProfileField\.hidden = lanPicker\.keys\(\)\.length <= 1/);
-  assert.match(lan, /wanReferenceField\.hidden = wanPicker\.keys\(\)\.length <= 1/);
-  assert.match(local, /F\.recordPicker/);
-  assert.match(local, /F\.collectionEditor/);
-  assert.match(pppoe, /const action = active \? 'disconnect' : 'dial'/);
-  assert.match(pppoe, /setConfigurationLocked\(active \|\| redialing \|\| pending\)/);
-  assert.match(pppoe, /stats\.push\(\.\.\.trafficStats\(data\)\)/);
-  assert.doesNotMatch(pppoe, /'traffic\.title'/);
-  assert.doesNotMatch(pppoe, /const trafficBody/);
-  [wan, lan, local, router].forEach((source) => {
-    assert.match(source, /F\.setButtonState/);
-    assert.match(source, /'action\.update'/);
-    assert.match(source, /tone: 'danger'/);
-  });
-  assert.doesNotMatch(wan, /Routes JSON/);
-  assert.doesNotMatch(local, /Routes JSON/);
-});
-
 test('plugin table keeps routine plugin information in four stable columns', () => {
   const cssPath = path.join(__dirname, '..', 'web', 'css', 'tables.css');
   const source = fs.readFileSync(cssPath, 'utf8');
@@ -1602,28 +1572,6 @@ test('plugin table keeps routine plugin information in four stable columns', () 
   assert.equal(widths.get(4), 32);
   assert.equal(Array.from(widths.values()).reduce((sum, width) => sum + width, 0), 100);
   assert.match(source, /@media \(max-width: 720px\)[\s\S]*?#pluginsTable\s*\{\s*min-width:\s*760px/);
-});
-
-test('router wizard apply keeps the previous saved config available for rollback', () => {
-  const filePath = path.join(__dirname, '..', '..', '..', 'plugins', 'router_wizard', 'ui', 'index.html');
-  const source = fs.readFileSync(filePath, 'utf8');
-  const body = source.match(/async function applyRouter\(button\) \{([\s\S]*?)\n      \}/);
-  assert.ok(body, 'applyRouter function should exist');
-  assert.doesNotMatch(body[1], /saveConfig\s*\(/);
-  assert.match(body[1], /F\.action\('apply_router'/);
-});
-
-test('router wizard renders recovery steps without a raw status dump', () => {
-  const filePath = path.join(__dirname, '..', '..', '..', 'plugins', 'router_wizard', 'ui', 'index.html');
-  const source = fs.readFileSync(filePath, 'utf8');
-
-  assert.match(source, /lastStatus\.steps/);
-  assert.match(source, /lastStatus\.rollback_steps/);
-  assert.match(source, /lastStatus\.restore_steps/);
-  assert.match(source, /lastStatus\.restore_rollback_steps/);
-  assert.match(source, /appendStepGroup/);
-  assert.doesNotMatch(source, /JSON\.stringify\(value \|\| \{\}, null, 2\)/);
-  assert.doesNotMatch(source, /json\.raw/);
 });
 
 test('plugin host data.upsert only falls back to create on missing records', async () => {

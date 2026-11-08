@@ -2,8 +2,9 @@
   "name": "veer-webui-tests",
   "private": true,
   "scripts": {
-    "test": "npm run test:web",
-    "test:all": "npm run test:web && npm run test:sdk && npm run test:web:e2e",
+    "test": "npm run test:web && npm run test:plugins",
+    "test:all": "npm run test:web && npm run test:plugins && npm run test:sdk && npm run test:web:e2e",
+    "test:plugins": "node --test plugins/*/test-*.test.js",
     "test:sdk": "node --test sdk/plugin/test-host.test.cjs",
     "test:web": "node --test internal/app/web_test/*.test.js",
     "test:web:e2e": "playwright test"

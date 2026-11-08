@@ -1176,6 +1176,8 @@ PPPoE tunnel 自愈按接口名重新解析 ifindex，并核对 veth 配对、�
 
 `release.sh` 和 `scripts/package-plugins.sh` 默认只把 stable 插件放入 `veer-plugins.tar.gz`。
 
+插件自己的测试放在插件目录内并以 `test-` 开头：Node 单元测试命名为 `test-*.test.js`，由 `npm run test:plugins` 与发布门禁的 portable 层执行，可用 `sdk/plugin/test-host.cjs` 驱动控制面；宿主的 `internal/app/web_test` 只测试 WebUI 与 bridge 本身。bundled 打包会跳过 `test-` 开头的文件；`veer plugin pack` 不做这项过滤。
+
 `bootstrap.sh` 默认只构建和安装 Veer 核心，不执行 bundled 插件构建；`deploy.sh` 默认也不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled 插件；该开关不启用插件运行时，插件控制面和数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。直接运行 `release.sh` 时仍默认生成插件包，可用 `VEER_BUILD_PLUGIN_BUNDLE=0` 只构建核心发布物。
 
 ## 插件包发布

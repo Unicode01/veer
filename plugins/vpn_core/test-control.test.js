@@ -2,8 +2,8 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
-const {createTestHost} = require('../../../sdk/plugin/test-host.cjs');
-const pluginDir = path.resolve(__dirname, '../../../plugins/vpn_core');
+const {createTestHost} = require('../../sdk/plugin/test-host.cjs');
+const pluginDir = __dirname;
 const PRIVATE = Buffer.alloc(32, 1).toString('base64');
 const PUBLIC = Buffer.alloc(32, 2).toString('base64');
 const clone = v => JSON.parse(JSON.stringify(v));
@@ -352,7 +352,7 @@ test('withdrawn WAN recovery rejects missing ownership, cleanup failures and lef
 });
 
 test('sing-box binds the chosen uplink IP for concrete outbounds and direct DNS, preserving chains and virtual groups',()=>{
-  const drivers=require('../../../plugins/vpn_core/core-drivers');
+  const drivers=require('./core-drivers');
   const source={outbounds:[{type:'selector',tag:'pick',outbounds:['proxy']},{type:'urltest',tag:'test',outbounds:['proxy']},
     {type:'shadowsocks',tag:'proxy'},{type:'direct',tag:'direct'},{type:'socks',tag:'chain',detour:'proxy'},{type:'block',tag:'block'}],
     dns:{servers:[{type:'udp',tag:'bootstrap',server:'192.0.2.53'},{type:'udp',tag:'remote',server:'1.1.1.1',detour:'proxy'},{type:'hosts',tag:'hosts',predefined:{}}]}};
@@ -409,7 +409,7 @@ test('VPN deletion handles never-applied drafts, delayed health workers and retr
 const healthTick = h => h.host.run('onTimer',{timer:{name:'vpn_health'}});
 const healthStatus = h => h.host.action('health_status',{}).items.find(v=>v.key==='default');
 test('VPN health settings are bounded and reject credentials, malformed URLs and invalid status codes',()=>{
-  const settings=require('../../../plugins/vpn_core/health-check').settings;
+  const settings=require('./health-check').settings;
   assert.equal(settings().enabled,false);
   for(const value of [{enabled:'yes'},{url:'http://user:secret@example.com/'},{url:'http://a..b/'},{url:'https://a/#secret'},
     {url:'https://a/\nheader'},{url:'ftp://example.com'},{url:'http://example.com:65536'},

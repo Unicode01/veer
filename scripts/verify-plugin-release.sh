@@ -165,6 +165,9 @@ run_portable() {
 	log "WebUI Node tests"
 	(cd "$ROOT_DIR" && node --test internal/app/web_test/*.test.js)
 
+	log "bundled plugin Node tests"
+	(cd "$ROOT_DIR" && node --test plugins/*/test-*.test.js)
+
 	log "WebUI browser tests"
 	(cd "$ROOT_DIR" && npm run test:web:e2e)
 

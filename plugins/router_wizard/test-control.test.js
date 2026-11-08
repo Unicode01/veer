@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 function harness() {
-  const dir = path.resolve(__dirname, '../../../plugins/router_wizard');
+  const dir = __dirname;
   const noop = () => {};
   const registration = new Proxy({}, {get: () => noop});
   let stored = null;

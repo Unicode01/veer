@@ -29,5 +29,5 @@ VEER_RUN_KFUNCS_TESTS=1 FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 go test -tags veer
 python3 scripts/verify-kfuncs-packets.py --loader "$work/loader"
 python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --direct --veer "$work/veer"
 VEER_RUN_KFUNCS_TESTS=1 VEER_RUN_WIREGUARD_TESTS=1 FORWARD_PERF_BINARY="$work/veer" \
-    go test -tags veer_kfuncs ./internal/app -run '^TestWireGuardMeshLinuxIntegration$' -count=1 -v -timeout=5m
+    go test -tags veer_kfuncs ./internal/app -run '^TestVPNWireGuardLinuxIntegration$' -count=1 -v -timeout=5m
 FORWARD_PERF_BINARY="$work/veer" VEER_VPN_EXPECT_DIRECT=1 sh scripts/verify-vpn-cores.sh
