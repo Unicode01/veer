@@ -112,19 +112,6 @@
         flex: 1 1 auto;
       }
     }
-    @media (prefers-color-scheme: dark) {
-      .pppoe-runtime-status[data-state="degraded"],
-      .pppoe-runtime-status[data-state="redialing"] {
-        border-color: var(--veer-warn);
-        background: var(--veer-warn-bg);
-        color: var(--veer-warn);
-      }
-      .pppoe-runtime-status[data-state="error"] {
-        border-color: var(--veer-danger);
-        background: var(--veer-danger-soft);
-        color: var(--veer-danger);
-      }
-    }
     /* Patchbay grammar overrides */
     .pppoe-page { padding: 0 0 4px; }
     .pppoe-section { gap: 14px; padding: 0; border: 0; border-radius: 0; background: transparent; }

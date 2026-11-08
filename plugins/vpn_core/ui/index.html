@@ -5,7 +5,7 @@
 (function () {
   var host = window.VeerPluginHost;
   if (!host) { document.body.textContent = 'VeerPluginHost unavailable'; return; }
-  Promise.all([host.assets.style('style.css'), host.assets.script('model.js'), host.assets.script('share.js')])
+  Promise.all([host.assets.style('style.css'), host.assets.script('i18n.js'), host.assets.script('model.js'), host.assets.script('share.js')])
     .then(function () { return host.assets.script('app.js'); })
     .catch(function (error) { host.toastError(error); });
 })();

@@ -63,7 +63,7 @@
                     <h2 id="pluginManagerTitle" data-i18n="plugins.manager.title">Manage Plugins</h2>
                     <p id="pluginManagerMeta" class="section-desc"></p>
                 </div>
-                <button type="button" id="closePluginManagerBtn" class="plugin-manager-close" data-i18n-title="common.close" aria-label="Close">&times;</button>
+                <button type="button" id="closePluginManagerBtn" class="plugin-manager-close" data-i18n-title="common.close" data-i18n-aria-label="common.close" aria-label="Close">&times;</button>
             </div>
             <div id="pluginManagerNav" class="plugin-manager-nav" hidden></div>
             <div id="pluginManagerBody" class="plugin-manager-body"></div>
@@ -103,7 +103,7 @@
             </div>
         </header>
 
-        <div class="tabs" role="tablist" aria-label="Main navigation">
+        <div class="tabs" role="tablist" aria-label="Main navigation" data-i18n-aria-label="patchbay.navigation">
             <button id="tab-rules-button" class="tab active" data-tab="rules" data-i18n="tab.rules" role="tab" aria-selected="true" aria-controls="tab-rules" tabindex="0">Port Forwarding</button>
             <button id="tab-sites-button" class="tab" data-tab="sites" data-i18n="tab.sites" role="tab" aria-selected="false" aria-controls="tab-sites" tabindex="-1">Sites (80/443)</button>
             <button id="tab-ranges-button" class="tab" data-tab="ranges" data-i18n="tab.ranges" role="tab" aria-selected="false" aria-controls="tab-ranges" tabindex="-1">Range Mapping</button>
@@ -1202,7 +1202,7 @@
     </div>
 
     <script defer src="js/core.js?v=20261102-2"></script>
-    <script defer src="js/i18n.js?v=20261102-54"></script>
+    <script defer src="js/i18n.js?v=20261102-55"></script>
     <script defer src="js/ui.js?v=20261102-2"></script>
     <script defer src="js/rules.js?v=20261102-2"></script>
     <script defer src="js/sites.js?v=20261102-2"></script>
@@ -1214,7 +1214,7 @@
     <script defer src="js/plugins.js?v=20261102-53"></script>
     <script defer src="js/plugin_manager.js?v=20261102-2"></script>
     <script defer src="js/stats.js?v=20261102-2"></script>
-    <script defer src="js/patchbay.js?v=20261102-54"></script>
+    <script defer src="js/patchbay.js?v=20261102-55"></script>
     <script defer src="js/init.js?v=20261102-2"></script>
 </body>
 </html>

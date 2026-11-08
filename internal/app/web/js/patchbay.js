@@ -342,14 +342,14 @@
       ] })
     ] });
     shell.sidebar = node('aside', { className: 'sidebar', attrs: { id: 'mainSidebar' }, children: [brand, shell.host] });
-    const nav = node('nav', { attrs: { 'aria-label': text('patchbay.navigation') }, children: [tabs] });
+    const nav = node('nav', { attrs: { 'aria-label': text('patchbay.navigation') }, dataset: { i18nAriaLabel: 'patchbay.navigation' }, children: [tabs] });
     tabs.setAttribute('aria-orientation', 'vertical');
     shell.sidebar.appendChild(nav);
     buildSettings(actions);
     shell.sidebar.appendChild(actions);
     root.prepend(shell.sidebar);
     shell.main = node('main', { className: 'workspace', attrs: { id: 'mainContent' } });
-    const mobile = node('button', { className: 'icon-button mobile-menu', text: '☰', attrs: { type: 'button', id: 'sidebarToggle', 'aria-controls': 'mainSidebar', 'aria-expanded': 'false', 'aria-label': text('patchbay.navigation') } });
+    const mobile = node('button', { className: 'icon-button mobile-menu', text: '☰', attrs: { type: 'button', id: 'sidebarToggle', 'aria-controls': 'mainSidebar', 'aria-expanded': 'false', 'aria-label': text('patchbay.navigation') }, dataset: { i18nAriaLabel: 'patchbay.navigation' } });
     mobile.addEventListener('click', () => setSidebar(!sidebarOpen));
     shell.breadcrumb = node('div', { className: 'breadcrumb' });
     shell.commandButton = node('button', { className: 'command-trigger', attrs: { id: 'openCommandPalette', type: 'button' }, children: [node('span', { text: text('patchbay.search'), dataset: { i18n: 'patchbay.search' } }), node('kbd', { text: 'Ctrl K' })] });
@@ -378,7 +378,7 @@
     oldHeader.remove();
     shell.main.appendChild(shell.content);
     root.appendChild(shell.main);
-    shell.navBackdrop = node('button', { className: 'sidebar-backdrop', attrs: { type: 'button', hidden: '', 'aria-label': text('common.close') } });
+    shell.navBackdrop = node('button', { className: 'sidebar-backdrop', attrs: { type: 'button', hidden: '', 'aria-label': text('common.close') }, dataset: { i18nAriaLabel: 'common.close' } });
     shell.navBackdrop.addEventListener('click', () => setSidebar(false));
     root.appendChild(shell.navBackdrop);
     const overview = app.el.overviewPanel;
@@ -468,7 +468,7 @@
 
   function buildDrawers() {
     shell.drawerTitle = node('h2', { attrs: { id: 'resourceDrawerTitle' } });
-    const close = node('button', { className: 'icon-button', text: '×', attrs: { type: 'button', 'aria-label': text('common.close'), id: 'closeResourceDrawer' } });
+    const close = node('button', { className: 'icon-button', text: '×', attrs: { type: 'button', 'aria-label': text('common.close'), id: 'closeResourceDrawer' }, dataset: { i18nAriaLabel: 'common.close' } });
     close.addEventListener('click', requestCloseDrawer);
     shell.drawerPanel = node('div', { className: 'resource-drawer-panel', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'resourceDrawerTitle', tabindex: '-1' }, children: [node('div', { className: 'drawer-heading', children: [shell.drawerTitle, close] })] });
     shell.drawerBody = node('div', { className: 'drawer-body' });
@@ -482,7 +482,7 @@
       cfg.section = cfg.element.closest('section');
       cfg.section.hidden = true;
       cfg.section.classList.add('drawer-form');
-      cfg.preview = node('div', { className: 'drawer-preview', attrs: { 'aria-label': text('patchbay.preview') } });
+      cfg.preview = node('div', { className: 'drawer-preview', attrs: { 'aria-label': text('patchbay.preview') }, dataset: { i18nAriaLabel: 'patchbay.preview' } });
       cfg.section.insertBefore(cfg.preview, cfg.element);
       shell.drawerBody.appendChild(cfg.section);
       cfg.footer = node('div', { className: 'drawer-footer', attrs: { hidden: '' } });
@@ -544,7 +544,7 @@
     const select = app.$(cfg.form === 'rule' ? 'protocol' : cfg.form === 'range' ? 'rangeProtocol' : '');
     if (select) {
       select.hidden = true;
-      const segmented = node('div', { className: 'segmented-control', attrs: { role: 'group', 'aria-label': text('form.protocol') } });
+      const segmented = node('div', { className: 'segmented-control', attrs: { role: 'group', 'aria-label': text('form.protocol') }, dataset: { i18nAriaLabel: 'form.protocol' } });
       Array.from(select.options).forEach((option) => {
         const button = node('button', { text: option.textContent, attrs: { type: 'button', 'aria-pressed': String(select.value === option.value) }, dataset: { value: option.value } });
         button.addEventListener('click', () => { select.value = option.value; select.dispatchEvent(new Event('change', { bubbles: true })); updatePreview(cfg); });
@@ -736,7 +736,7 @@
     const back = node('button', { className: 'mini-btn', text: text('patchbay.network.back'), dataset: { i18n: 'patchbay.network.back' }, attrs: { type: 'button' } });
     back.addEventListener('click', () => { selectedNetworkID = 0; shell.networkDetail.hidden = true; shell.networkList.hidden = false; shell.create.hidden = false; shell.networkTools.hidden = false; renderShell(); shell.networkList.querySelector('.network-detail-link')?.focus(); });
     shell.networkTitle = node('h2', { className: 'mono' });
-    shell.networkTabs = node('div', { className: 'network-subtabs', attrs: { role: 'tablist', 'aria-label': text('patchbay.networkDetails') } });
+    shell.networkTabs = node('div', { className: 'network-subtabs', attrs: { role: 'tablist', 'aria-label': text('patchbay.networkDetails') }, dataset: { i18nAriaLabel: 'patchbay.networkDetails' } });
     shell.networkOverview = node('div', { className: 'network-overview', attrs: { role: 'tabpanel', id: 'networkDetail-overview' } });
     shell.leaseList.id = 'networkDetail-leases';
     shell.deviceList.id = 'networkDetail-devices';
@@ -789,7 +789,7 @@
     const toolbar = panel && panel.querySelector('.table-toolbar');
     if (!toolbar) return;
     let chips = toolbar.querySelector('.status-chips');
-    if (!chips) { chips = node('div', { className: 'status-chips', attrs: { 'aria-label': text('patchbay.filterStatus') } }); toolbar.appendChild(chips); }
+    if (!chips) { chips = node('div', { className: 'status-chips', attrs: { 'aria-label': text('patchbay.filterStatus') }, dataset: { i18nAriaLabel: 'patchbay.filterStatus' } }); toolbar.appendChild(chips); }
     const state = app.state[cfg.state];
     const rows = state.data || [];
     chips.replaceChildren(...['all', 'live', 'attention', 'off'].map((key) => {
@@ -811,9 +811,9 @@
   }
 
   function buildCommands() {
-    shell.commandInput = node('input', { attrs: { type: 'search', id: 'commandSearch', autocomplete: 'off', role: 'combobox', 'aria-controls': 'commandResults', 'aria-expanded': 'true', 'aria-autocomplete': 'list', placeholder: text('patchbay.commandPlaceholder'), 'aria-label': text('patchbay.search') } });
+    shell.commandInput = node('input', { attrs: { type: 'search', id: 'commandSearch', autocomplete: 'off', role: 'combobox', 'aria-controls': 'commandResults', 'aria-expanded': 'true', 'aria-autocomplete': 'list', placeholder: text('patchbay.commandPlaceholder'), 'aria-label': text('patchbay.search') }, dataset: { i18nPlaceholder: 'patchbay.commandPlaceholder', i18nAriaLabel: 'patchbay.search' } });
     shell.commandList = node('div', { className: 'command-results', attrs: { id: 'commandResults', role: 'listbox' } });
-    const panel = node('div', { className: 'command-panel', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': text('patchbay.search') }, children: [shell.commandInput, shell.commandList, node('p', { className: 'command-help', text: text('patchbay.commandHelp') })] });
+    const panel = node('div', { className: 'command-panel', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': text('patchbay.search') }, dataset: { i18nAriaLabel: 'patchbay.search' }, children: [shell.commandInput, shell.commandList, node('p', { className: 'command-help', text: text('patchbay.commandHelp'), dataset: { i18n: 'patchbay.commandHelp' } })] });
     shell.command = node('div', { className: 'command-overlay', attrs: { id: 'commandPalette', hidden: '' }, children: [panel] });
     document.body.appendChild(shell.command);
     shell.command.addEventListener('click', (event) => { if (event.target === shell.command) closeCommand(); });

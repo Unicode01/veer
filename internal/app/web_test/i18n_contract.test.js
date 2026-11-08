@@ -55,6 +55,7 @@ function staticTranslationReferences() {
     const source = fs.readFileSync(filePath, 'utf8');
     for (const match of source.matchAll(/app\.t\(\s*(['"])([^'"]+)\1/g)) remember(match[2], filePath);
     for (const match of source.matchAll(/\bdata-i18n(?:-[a-z-]+)?=(['"])([^'"]+)\1/g)) remember(match[2], filePath);
+    for (const match of source.matchAll(/\bi18n(?:[A-Z][A-Za-z]*)?:\s*(['"])([^'"]+)\1/g)) remember(match[2], filePath);
   }
   return references;
 }
