@@ -43,19 +43,7 @@ Linux 集成测试通过实际插件 API 验证 WG、Mihomo、sing-box 探测及
 
 ## 从 wireguard_mesh 迁移
 
-0.6.0 将旧插件 ID `wireguard_mesh` 改为 `vpn_core`。不能只改目录或直接修改数据库中的 ID：密钥密文的认证信息绑定了原 ID。
-
-1. 备份数据库、对应 `.veer-secrets.key`、插件代码及 `<plugins_dir>.veer-state`。先将引用 VPN 的 LAN / NAT 切换到其他出口，再在旧插件中拆除隧道并停用旧插件。拆除会中断这些隧道的连接，保留草稿与密钥。
-2. 把旧 `wireguard_mesh` 代码移到插件扫描目录以外，安装新 `vpn_core` 代码。保持 Veer 停止或旧插件停用，不要在迁移完成前启用新插件。
-3. 使用新版本 Veer 执行本地命令：
-
-   ```sh
-   /opt/veer/veer plugin migrate-vpn --database /opt/veer/forward.db --plugins-dir /opt/veer/plugins
-   ```
-
-4. 重启 Veer 并启用 VPN 插件。确认草稿和核心版本，重新应用所需出口，再恢复 LAN / NAT 的选择。
-
-迁移在 SQLite 事务内改写身份、按新 ID 重新加密 Secret，并迁移受管理核心目录和该目录内的显式 `core_path` 引用。已停用的插件保持停用；旧租约未清理、新 ID 已有状态或两边核心目录同时存在时明确拒绝合并。核心目录改名与数据库提交之间的崩溃可通过原命令重试；迁移失败时保持插件停用。WAN ID、接口名和 LAN/NAT 引用不改名。历史性能报告中的旧路径保留其当时含义。
+0.6.0 将旧插件 ID `wireguard_mesh` 改为 `vpn_core`。当前 Veer 不再携带这项一次性迁移；仍在使用旧 ID 的安装先用 Veer v0.1.0 的 `veer plugin migrate-vpn` 完成迁移（步骤见 v0.1.0 中的本文档），再升级到更新版本。不能只改目录或直接修改数据库中的 ID：密钥密文的认证信息绑定了原 ID。
 
 | driver | 数据处理 | 依赖 |
 | --- | --- | --- |

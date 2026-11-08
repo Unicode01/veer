@@ -75,7 +75,7 @@ ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 
 需要插件时额外上传 `veer-plugins.tar.gz`，并以 `VEER_INSTALL_PLUGINS=1 ./deploy.sh` 部署。安装插件文件与启用插件相互独立，升级时未请求安装不会删除或覆盖现有插件目录。
 
-部署默认把 `/opt/veer/veer` 链接为 `/usr/local/bin/veer`，之后可直接运行 `veer help`、`veer version`、`veer kfuncs status` 和 `veer plugin ...`。已有同名普通文件时不会覆盖，只给出警告；`VEER_LINK_CLI=0` 不创建链接，并移除此前为本安装创建的链接；`VEER_CLI_LINK_DIR` 可改为其他绝对路径目录。RHEL 系列 sudo 的 `secure_path` 默认不含 `/usr/local/bin`，可在 root shell 中运行或写完整路径。`plugin backup/restore/migrate-vpn` 在当前目录没有 `forward.db` 时，自动使用可执行文件所在安装目录的数据库和配置里的 `plugins_dir`。未知子命令会直接报错退出，不会误启动第二个 daemon。
+部署默认把 `/opt/veer/veer` 链接为 `/usr/local/bin/veer`，之后可直接运行 `veer help`、`veer version`、`veer kfuncs status` 和 `veer plugin ...`。已有同名普通文件时不会覆盖，只给出警告；`VEER_LINK_CLI=0` 不创建链接，并移除此前为本安装创建的链接；`VEER_CLI_LINK_DIR` 可改为其他绝对路径目录。RHEL 系列 sudo 的 `secure_path` 默认不含 `/usr/local/bin`，可在 root shell 中运行或写完整路径。`plugin backup/restore` 在当前目录没有 `forward.db` 时，自动使用可执行文件所在安装目录的数据库和配置里的 `plugins_dir`。未知子命令会直接报错退出，不会误启动第二个 daemon。
 
 部署后默认访问：
 
