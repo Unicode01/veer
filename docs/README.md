@@ -206,7 +206,7 @@ Authorization: Bearer <web_token>
 关键字段：
 
 - `web_bind`：Web UI / API 监听地址，默认 `127.0.0.1`
-- `web_ui_enabled`：是否启用静态 Web UI；关闭后仍保留 `/api/*`、`/metrics`、`/healthz`、`/readyz`
+- `web_ui_enabled`：是否启用静态 Web UI；关闭后仍保留 `/api/*`、`/metrics`、`/debug/pprof/`、`/healthz`、`/readyz`
 - `web_port`：监听端口
 - `web_token`：Web UI 和 API 共用的 Bearer Token
 - `default_engine`：`auto`、`userspace`、`kernel`
@@ -305,6 +305,8 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 - degraded / pressure / retry / self-heal 状态
 - Worker 状态和 runtime error
 - 规则、站点、范围、Egress NAT 统计
+
+主进程 CPU、内存或 goroutine 异常时，可用 `/debug/pprof/` 采样（需要 Bearer Token，用法见 [API](API.md) 中的 `GET /debug/pprof/`）。
 
 热更新与异常退出：
 
@@ -472,7 +474,7 @@ modules/addons/forward/
 
 Veer 是宿主机网络控制面，核心进程需要修改接口、路由、TC/XDP、nftables 与网络命名空间。获得 `web_token` 的主体等同于网络管理员；获得 `web_token` 和 `plugin_admin_token` 的主体还可以安装、信任、启停和更新插件。宿主机 root 始终在信任边界内，Veer 不试图防御 root。
 
-管理 API 不内置 TLS。默认回环监听是安全基线；远程管理必须置于受信管理网、VPN、堡垒机或启用 TLS 和访问控制的反向代理之后。`/healthz` 与 `/readyz` 故意匿名开放，只返回最小存活状态；其余 `/api/*` 与 `/metrics` 均需要 Bearer Token。
+管理 API 不内置 TLS。默认回环监听是安全基线；远程管理必须置于受信管理网、VPN、堡垒机或启用 TLS 和访问控制的反向代理之后。`/healthz` 与 `/readyz` 故意匿名开放，只返回最小存活状态；其余 `/api/*`、`/metrics` 与 `/debug/pprof/` 均需要 Bearer Token。
 
 ### 已有门禁
 
