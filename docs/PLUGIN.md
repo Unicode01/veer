@@ -1158,7 +1158,7 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 
 ## 随仓库维护的插件
 
-可选 `veer_kfuncs` 模块为 TC 插件提供 `dataplane.kfuncs.handoff.v1`。插件必须根据宿主实际发布的 available_features 选择独立增强对象，缺少能力时保留基础路径；其 skb 所有权、GSO/GRO、编译/部署与生命周期契约见 [KERNEL.md](KERNEL.md)。这项能力默认不编译、不部署。
+可选 `veer_kfuncs` 模块为 TC 插件提供 `dataplane.kfuncs.handoff.v1`，按探测结果另行发布 `dataplane.kfuncs.handoff_ingress.v1` 和 `dataplane.kfuncs.wan.v1`。插件必须根据宿主实际发布的 available_features 选择独立增强对象，缺少能力时保留基础路径；其 skb 所有权、GSO/GRO、编译/部署与生命周期契约见 [KERNEL.md](KERNEL.md)。这项能力默认不编译、不部署。
 
 - `wan_core`（stable）：消费标准化 WAN session；direct 模式管理本地 L3 dummy，`segmented_veth` 管理 local/pipeline veth 边界，`direct_gro` 管理可选 helper 的单口 GRO 边界。
 - `lan_core`（stable）：管理 LAN bridge，并生成 Egress NAT、DHCPv4 和 IPv6 assignment plan。
@@ -1176,7 +1176,7 @@ PPPoE tunnel 自愈按接口名重新解析 ifindex，并核对 veth 配对、�
 
 `release.sh` 和 `scripts/package-plugins.sh` 默认只把 stable 插件放入 `veer-plugins.tar.gz`。
 
-`bootstrap.sh` 默认只构建和安装 Veer 核心，不执行 bundled 插件构建；`deploy.sh` 默认也不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled 插件；该开关不启用插件运行时，插件控制面和 TC 数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。直接运行 `release.sh` 时仍默认生成插件包，可用 `VEER_BUILD_PLUGIN_BUNDLE=0` 只构建核心发布物。
+`bootstrap.sh` 默认只构建和安装 Veer 核心，不执行 bundled 插件构建；`deploy.sh` 默认也不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled 插件；该开关不启用插件运行时，插件控制面和数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。直接运行 `release.sh` 时仍默认生成插件包，可用 `VEER_BUILD_PLUGIN_BUNDLE=0` 只构建核心发布物。
 
 ## 插件包发布
 
@@ -1284,4 +1284,4 @@ trust store 不物理删除发布者记录。撤销后状态变为 `revoked`，�
 - UI 永远通过 `VeerPluginHost` 访问资源和动作，不假设能拿到 Web Token。
 - 慢任务、重试、拨号状态机放 worker 或 timer，不阻塞主控制 VM。
 - 热路径能力只放 eBPF object 和 map，配置更新通过控制面批量写 map，避免包路径查询 SQLite 或 HTTP。
-- 默认发布包不包含 `lab` 插件。手动部署 lab 插件前必须审查 manifest 权限，并显式开启全局 `plugins_enabled`，再用插件级状态控制其控制面；进入 TC 数据面还必须显式开启 `plugins_dataplane_enabled`。
+- 默认发布包不包含 `lab` 插件。手动部署 lab 插件前必须审查 manifest 权限，并显式开启全局 `plugins_enabled`，再用插件级状态控制其控制面；进入数据面还必须显式开启 `plugins_dataplane_enabled`。

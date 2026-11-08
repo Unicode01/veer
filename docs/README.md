@@ -1,6 +1,6 @@
 # Veer 使用指南
 
-Veer 是一个面向虚拟机宿主机和二级路由场景的可编程 Linux 网络转发服务。它用 Go 编写，内置 Web UI、管理 API、SQLite 持久化和 Linux 内核 dataplane，可把端口转发、共享建站、端口范围、Egress NAT、托管网络、IPv6 分发和运行时诊断统一收敛到一个进程里管理。
+Veer 是一个面向虚拟机宿主机和二级路由场景的可编程 Linux 网络转发服务。它用 Go 编写，内置 Web UI、管理 API、SQLite 持久化和 Linux 内核 dataplane，可把端口转发、共享建站、端口范围、Egress NAT、托管网络、IPv6 分发和运行时诊断统一收敛到一个服务里管理；可选的沙箱插件在此之上提供 PPPoE 拨号、VPN 出口与 LAN/WAN 编排。
 
 开发者 API 见 [API.md](API.md)，安全边界见[安全建议](#安全建议)。下列源码构建、脚本与测试命令均在仓库根目录执行。
 
@@ -101,6 +101,7 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 - 多台 VM 共享宿主机 TCP `80/443`，并可选共享 UDP `443` 的 QUIC/HTTP/3，按域名回源
 - 下联 bridge 的 IPv4 DHCP、静态保留、IPv6 分发和 Egress NAT
 - `userspace / TC / XDP` 多 dataplane 转发与自动回退
+- 二级路由：经可选插件进行 PPPoE 拨号、WireGuard / Mihomo / sing-box 出口及 LAN/WAN 编排
 
 ## 功能概览
 
@@ -120,7 +121,7 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 - SQLite 配置与状态持久化
 - Worker 热重载和 draining
 - TC/XDP 内核态热更新、状态观测和异常恢复
-- Goja 控制面与 TC eBPF pipeline 插件系统
+- 插件系统：Goja 控制面在独立沙箱子进程中运行，数据面支持 TC pipeline、XDP Dispatcher 与原生 Netfilter Hook；插件包签名、TUF 仓库、原子安装与回滚
 - WHMCS addon 插件
 
 共享站点的 QUIC 开关默认关闭。启用后，Veer 会监听同一入口 IP 的 UDP `443`，从 QUIC v1/v2 Initial 中解析 TLS SNI，再把原始数据报转发到 `backend_https_port`；Veer 不终止 TLS，也不替后端校验证书。`deploy.sh` 不会为这个可选功能自动开放 UDP `443`；启用前需确认防火墙允许该端口、后端在同一端口提供 QUIC/HTTP/3，且没有普通 UDP 规则或端口范围占用该监听地址。使用 UFW 时可执行：
@@ -231,14 +232,14 @@ Authorization: Bearer <web_token>
 - `kernel_engine_order`：Linux 内核引擎尝试顺序；省略时默认 `["tc"]`
 - `managed_network_auto_repair`：托管网络链路变化后的自动修复
 - `plugins_enabled`：是否扫描并运行外部插件；默认关闭，必须手动设为 `true` 才会启动外部插件控制面；内置 `veer_core` 始终可见
-- `plugins_dataplane_enabled`：是否允许外部插件进入 TC 数据面；默认关闭，当前支持按 priority 围绕 `Veer Core` 排序的 forward/reply TC 链
+- `plugins_dataplane_enabled`：是否允许外部插件进入数据面；默认关闭。开启后可使用按 priority 围绕 `Veer Core` 排序的 forward/reply TC 链、XDP Dispatcher 和原生 Netfilter Hook
 - `plugins_isolation`：是否让每个插件控制 VM 和命名 Worker 运行在独立子进程；默认开启，仅受信任的本地调试才应关闭
 - `plugins_min_sandbox_level`：插件 Host 最低隔离等级，允许 `none`、`minimal`、`partial`、`full`；默认 `full`，达不到时在执行插件 JavaScript 前拒绝启动
 - `plugins_remote_install_enabled`：是否开放远程插件安装、更新、回滚、卸载、仓库/信任管理和代码重载；默认关闭，WebUI 同步隐藏入口。关闭时可向本地受信任插件授予 `exec` 权限；开启后禁止 exec。只能在本机修改配置并重启生效，插件页面和资源/动作访问不受该开关影响
 - `plugins_require_signed_packages`：是否要求插件包带可独立验证的 Ed25519 签名；默认开启。首次出现的发布者可直接在安装审核中确认，无需预先维护信任列表；开发环境可显式关闭后审批未签名包
 - `plugin_admin_token`：插件安装、信任、启停和热加载使用的独立高权限令牌；留空时相关写 API 禁用，非空时必须不同于 `web_token`
 - `plugins_max_installed` / `plugins_max_staged` / `plugins_storage_limit_mb`：插件安装数、暂存数和插件持久状态总量上限；`plugins_repository_refresh_minutes` 控制同时启用插件和远程安装后 TUF 元数据的后台刷新周期
-- `plugins_enabled=true` 时，`lab` / `preview` / `stable` 插件可执行控制脚本；进入外部 TC 数据面仍需同时开启 `plugins_dataplane_enabled`；`deprecated` 插件始终禁用
+- `plugins_enabled=true` 时，`lab` / `preview` / `stable` 插件可执行控制脚本；进入外部数据面（TC/XDP/Netfilter）仍需同时开启 `plugins_dataplane_enabled`；`deprecated` 插件始终禁用
 - `plugins_dir`：运行时插件目录，默认 `plugins`
 - `kernel_rules_map_limit`：内核规则 map 容量，`0` 表示自适应
 - `kernel_flows_map_limit`：内核 flow map 容量，`0` 表示自适应
@@ -340,7 +341,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 插件层
 
-`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入 TC 数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [vpn_core](plugins/vpn_core/README.md) 仍是源码内的 lab 插件，不进入默认发布包。VPN 示例支持内核 WireGuard、Mihomo、sing-box 和外部 TUN，通过 WAN Core 边界和双向 TC 适配器接入核心：支持 ingress 交接的 helper 使用单接口边界，其余环境使用 veth 兼容路径，内部 peer 对普通界面隐藏。现有 LAN/出向 NAT 可选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
+`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [vpn_core](plugins/vpn_core/README.md) 仍是源码内的 lab 插件，不进入默认发布包。VPN 插件支持内核 WireGuard、Mihomo、sing-box 和外部 TUN，通过 WAN Core 边界和双向 TC 适配器接入核心：支持 ingress 交接的 helper 使用单接口边界，其余环境使用 veth 兼容路径，内部 peer 对普通界面隐藏。现有 LAN/出向 NAT 可选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
 
 ## 平台与依赖
 
