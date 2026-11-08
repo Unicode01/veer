@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "wan_core",
   "name": "WAN Core",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "kind": "control",
   "stability": "stable",
   "description": "Protocol-neutral WAN adapter with direct and kernel-segmented Linux L3 handoff modes.",
@@ -13,7 +13,7 @@
   },
   "control": {
     "main": "control.js",
-    "sha256": "db4e0789e78eca605ea6d84a238558d15d396987246cda4bc03947930365deb8",
+    "sha256": "29a9095fa88480873432b4fa451317a3e2d584fd21226e82b2b2e2f17ea424ed",
     "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
     "net_access": [
       {

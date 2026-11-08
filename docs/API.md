@@ -917,6 +917,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 
 - 给规则、范围、站点、Egress NAT 表单做接口下拉
 - 返回每个接口的 IP 字符串列表
+- 默认省略插件标记为内部管道、且仍由该插件持有的接口（例如 WAN 边界的 pipeline 端）；`?include_internal=true` 返回全部接口
 
 ### 1.2 获取宿主机网络拓扑
 
@@ -926,6 +927,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 
 - 给托管网络和 IPv6 Assignment 表单提供更完整的宿主机网络视图
 - 返回按地址族拆开的 `addresses`
+- 与 `GET /api/interfaces` 相同，默认省略插件内部管道接口，`?include_internal=true` 返回全部接口
 
 ### 1.3 获取标签列表
 

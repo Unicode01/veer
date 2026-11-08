@@ -992,6 +992,8 @@ net.route.replace({namespace: ns.name, dst: "192.0.2.0/24", dev: "tun0", table: 
 
 插件创建的 bridge/veth/dummy/macvlan，以及对已有接口 master、up/down、MTU、ARP、promiscuous、offload、GSO、地址和路由的修改都会写入宿主资源租约。租约按属性互斥，记录首次修改前的值和 Linux boot ID；插件禁用、卸载或加载失败时按依赖顺序恢复，同名接口 identity 已变化或系统已跨 boot 时只丢弃旧租约，不会修改新设备。插件主动把属性、地址或自己新增的路由恢复到原值时租约自动释放。`net.lease.list()` 可读取本插件当前租约；`net.lease.restore(type, key)` 会恢复并释放指定租约，失败时保留记录供重试。`net.link.delete()` 只允许删除本插件通过 ensure API 创建并持有的 link，不能凭接口白名单删除宿主或其他插件的设备。
 
+`net.link.ensureVeth()` 的 `peer_internal: true` 把 peer 端标记为内部管道（例如 WAN 边界的 pipeline 端）：只要本插件仍持有这对 veth，且接口 identity 与租约一致，WebUI 和 `GET /api/interfaces`、宿主网络拓扑接口就不列出它；`include_internal=true` 仍可查询。标记写在所有权记录里，对已存在的 veth 再次调用时按最新值更新，旧宿主会忽略该字段。宿主不读取插件自己的资源记录来判断接口用途。
+
 需要同时切换多条路由、策略规则或静态邻居时，使用 `net.route.transaction()`、`net.rule.transaction()` 或 `net.neigh.transaction()`。每批最多 128 项；运行时先完成全部参数、权限、接口、租约冲突和内核快照预检，再按顺序应用，任一项失败会逆序恢复已经应用的项及 ownership ledger。事务只发生在控制面，不给 TC 热路径增加指令。单条 route/rule/neigh 写入也使用同一持久恢复路径；失败项保留 journal 和 ownership，阻止该表项被再次改写，无关表项继续处理。恢复按较新的事务优先、逐表项保存进度，并先核对当前属主、启动标识和接口身份，避免旧快照操作同名重建的接口。卸载前必须完成恢复，失败时保留依赖接口供重试。示例：
 
 ```js

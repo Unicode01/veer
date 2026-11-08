@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -456,6 +457,45 @@ func TestPluginCannotDeleteUnownedHostLink(t *testing.T) {
 	}
 	if containsPluginNetAdminCall(controller.calls, "delete:host0") {
 		t.Fatalf("unowned link was deleted: %+v", controller.calls)
+	}
+}
+
+func TestPluginVethPeerInternalFollowsLatestEnsure(t *testing.T) {
+	dir := t.TempDir()
+	writeOwnedLinkPlugin(t, dir, `
+exports.onAction = function (ctx) {
+  net.link.ensureVeth({host:"veerlocal", peer:"veerpeer", peer_internal: ctx.payload.internal === true});
+};`)
+	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
+	db := openTestDB(t)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime.netAdmin = &pluginControlNetAdminTest{}
+	defer runtime.Close()
+	catalog := loadPluginCatalogWithState(cfg, db)
+	assertPluginReconcileSuccess(t, runtime, catalog, "owned_link_plugin")
+	plugin := transactionPluginWithRuntimeSurfaceForTest(t, runtime, catalog, "owned_link_plugin")
+	internal := func(name string) bool {
+		t.Helper()
+		owned, err := store.PluginOwnedResourceOrNil(db, pluginOwnedResourceTypeLink, name)
+		if err != nil || owned == nil {
+			t.Fatalf("%s ownership: %+v, %v", name, owned, err)
+		}
+		var claim pluginOwnedLinkClaim
+		if err := json.Unmarshal([]byte(owned.MetadataJSON), &claim); err != nil {
+			t.Fatal(err)
+		}
+		return claim.Internal
+	}
+	// Creation records the flag; later ensures of the existing pair update it,
+	// so links created before the flag existed are marked on the next repair.
+	for _, want := range []bool{true, false, true} {
+		payload := fmt.Sprintf(`{"internal":%t}`, want)
+		if _, err := runtime.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(payload)); err != nil {
+			t.Fatal(err)
+		}
+		if internal("veerpeer") != want || internal("veerlocal") {
+			t.Fatalf("after ensure with internal=%t: peer=%t host=%t", want, internal("veerpeer"), internal("veerlocal"))
+		}
 	}
 }
 

@@ -949,6 +949,24 @@ func TestPluginWANCoreLinuxIntegration(t *testing.T) {
 				assertPeer(j)
 			}
 		}
+		// The host hides each live pipeline peer because wan_core marks it
+		// internal in its link ownership, not by reading wan_core's records.
+		for i := range locals {
+			record, err := store.GetPluginRecord(db, "wan_core", "status", fmt.Sprintf("peer%d", i))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var status struct {
+				Pipeline string `json:"pipeline_interface"`
+			}
+			if err := json.Unmarshal([]byte(record.DataJSON), &status); err != nil || status.Pipeline == "" {
+				t.Fatalf("WAN %d status has no pipeline: %s, %v", i, record.DataJSON, err)
+			}
+			visible := userInterfaceInfos(db, []InterfaceInfo{{Name: locals[i]}, {Name: status.Pipeline}}, newPluginControlNetAdmin().LinkGet)
+			if len(visible) != 1 || visible[0].Name != locals[i] {
+				t.Fatalf("WAN %d visible interfaces = %+v, want only %s", i, visible, locals[i])
+			}
+		}
 		if err := deletePluginIntegrationLink(locals[0]); err != nil {
 			t.Fatal(err)
 		}

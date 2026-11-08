@@ -36,6 +36,9 @@ type pluginOwnedLinkClaim struct {
 	Parent            string                            `json:"parent,omitempty"`
 	IfIndex           int                               `json:"ifindex,omitempty"`
 	MAC               string                            `json:"mac,omitempty"`
+	// Internal marks plumbing such as the pipeline end of a WAN boundary;
+	// interface lists for users omit it while the claim matches the device.
+	Internal bool `json:"internal,omitempty"`
 }
 
 type pluginOwnedResourceClaim struct {
@@ -386,6 +389,32 @@ func (h *pluginControlHost) claimPluginOwnedLinks(claims []pluginOwnedLinkClaim)
 		}
 	}
 	return nil
+}
+
+// Visibility is metadata on an existing claim, so a link this plugin does not
+// own (or any link, without an ownership store) is never marked.
+func (h *pluginControlHost) setPluginOwnedLinkInternal(namespace, name string, internal bool) error {
+	if h.db == nil {
+		return nil
+	}
+	key := pluginControlNetScopedResourceKey(normalizePluginControlNamespace(namespace), name)
+	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeLink, key)
+	if err != nil || owned == nil || owned.PluginID != h.plugin.ID {
+		return err
+	}
+	var claim pluginOwnedLinkClaim
+	if err := json.Unmarshal([]byte(owned.MetadataJSON), &claim); err != nil {
+		return fmt.Errorf("decode link ownership %s: %w", name, err)
+	}
+	if claim.Internal == internal {
+		return nil
+	}
+	claim.Internal = internal
+	metadata, err := json.Marshal(claim)
+	if err != nil {
+		return err
+	}
+	return store.UpdatePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeLink, key, string(metadata))
 }
 
 func (h *pluginControlHost) releasePluginOwnedLink(namespace, name string) error {

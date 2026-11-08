@@ -8,8 +8,8 @@ import (
 	"github.com/Unicode01/veer/internal/store"
 )
 
-func TestUserInterfaceInfosHidesOnlyCurrentOwnedWANPipeline(t *testing.T) {
-	for _, fault := range []string{"", "index", "mac", "peer", "boot", "namespace", "owner", "missing", "direct"} {
+func TestUserInterfaceInfosHidesOnlyCurrentInternalPluginLinks(t *testing.T) {
+	for _, fault := range []string{"", "index", "mac", "peer", "boot", "namespace", "owner", "missing", "public"} {
 		t.Run(fault, func(t *testing.T) {
 			db := openTestDB(t)
 			links := map[string]pluginControlNetLinkInfo{
@@ -23,8 +23,9 @@ func TestUserInterfaceInfosHidesOnlyCurrentOwnedWANPipeline(t *testing.T) {
 					peer = "pipe0"
 				}
 				claim := pluginOwnedLinkClaim{Name: name, Kind: "veth", IfIndex: link.IfIndex, MAC: link.MAC, Peer: peer, BootID: pluginOwnershipBootID}
-				owner := "wan_core"
+				owner := "boundary_plugin"
 				if name == "pipe0" {
+					claim.Internal = fault != "public"
 					switch fault {
 					case "index":
 						link.IfIndex++
@@ -45,14 +46,6 @@ func TestUserInterfaceInfosHidesOnlyCurrentOwnedWANPipeline(t *testing.T) {
 				if err := store.AddPluginOwnedResource(db, store.PluginOwnedResource{PluginID: owner, ResourceType: pluginOwnedResourceTypeLink, ResourceKey: name, MetadataJSON: string(data)}); err != nil {
 					t.Fatal(err)
 				}
-			}
-			mode := "segmented_veth"
-			if fault == "direct" {
-				mode = "direct"
-			}
-			data, _ := json.Marshal(map[string]any{"handoff_mode": mode, "local_interface": "wan0", "pipeline_interface": "pipe0"})
-			if _, err := store.AddPluginRecord(db, &store.PluginRecord{PluginID: "wan_core", ResourceID: "status", RecordKey: "wan", DataJSON: string(data), Enabled: true}); err != nil {
-				t.Fatal(err)
 			}
 			if fault == "missing" {
 				delete(links, "pipe0")

@@ -725,11 +725,14 @@ function prepareHandoff(plan) {
 
 function ensureHandoffLink(profile, previous) {
   if (profile.handoff_mode === 'segmented_veth') {
+    // The pipeline end is internal plumbing: hosts that understand the flag
+    // keep it out of user interface lists, older hosts ignore it.
     var pair = net.link.ensureVeth({
       host: profile.local_interface,
       peer: profile.pipeline_interface,
       mtu: profile.mtu,
-      up: true
+      up: true,
+      peer_internal: true
     });
     var arpState;
     var interfacePreparation;

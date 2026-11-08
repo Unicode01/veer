@@ -617,6 +617,8 @@ declare global {
     peer: string;
     mtu?: number;
     up?: boolean;
+    /** Marks the peer end as internal plumbing, omitted from user interface lists while this plugin owns the pair. */
+    peer_internal?: boolean;
   }
 
   interface VeerNetMacvlanRequest extends VeerNetLinkEnsureRequest {

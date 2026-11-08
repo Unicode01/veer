@@ -6,52 +6,56 @@ import (
 	"github.com/Unicode01/veer/internal/store"
 )
 
-// Only the current, owned peer of a WAN boundary is an internal pipe. Names
-// alone cannot distinguish our devices from an administrator's own veths.
-func internalWANPipelineNames(db store.RuleStore, get func(string) (pluginControlNetLinkInfo, error)) map[string]bool {
-	records, err := store.GetPluginRecords(db, "wan_core", "status")
-	if err != nil || len(records) == 0 {
-		return nil
-	}
-	owned, err := store.GetPluginOwnedResources(db, "wan_core")
+// Plugins mark the links they own as internal plumbing (for example the
+// pipeline end of a WAN boundary). Names alone cannot distinguish those from an
+// administrator's own devices, so a link is hidden only while its claim still
+// matches the live device on this boot, and a veth only while its peer is the
+// one the same plugin owns.
+func internalPluginLinkNames(db store.RuleStore, get func(string) (pluginControlNetLinkInfo, error)) map[string]bool {
+	owned, err := store.GetPluginOwnedResources(db, "")
 	if err != nil {
 		return nil
 	}
-	claims := map[string]pluginOwnedLinkClaim{}
+	type ownedLink struct {
+		plugin string
+		claim  pluginOwnedLinkClaim
+	}
+	links := map[string]ownedLink{}
 	for _, item := range owned {
 		var claim pluginOwnedLinkClaim
 		if item.ResourceType == pluginOwnedResourceTypeLink && json.Unmarshal([]byte(item.MetadataJSON), &claim) == nil &&
 			normalizePluginControlNamespace(claim.Namespace) == "host" && claim.BootID == pluginOwnershipBootID {
-			claims[claim.Name] = claim
+			links[claim.Name] = ownedLink{plugin: item.PluginID, claim: claim}
 		}
 	}
 	hidden := map[string]bool{}
-	for _, record := range records {
-		var status struct {
-			Mode  string `json:"handoff_mode"`
-			Local string `json:"local_interface"`
-			Peer  string `json:"pipeline_interface"`
-		}
-		if json.Unmarshal([]byte(record.DataJSON), &status) != nil || status.Mode != "segmented_veth" || status.Local == status.Peer {
+	for name, link := range links {
+		claim := link.claim
+		if !claim.Internal || claim.IfIndex <= 0 || claim.MAC == "" {
 			continue
 		}
-		local, lok := claims[status.Local]
-		peer, pok := claims[status.Peer]
-		if !lok || !pok || local.Peer != peer.Name || peer.Peer != local.Name || local.Kind != "veth" || peer.Kind != "veth" || local.IfIndex <= 0 || peer.IfIndex <= 0 || local.MAC == "" || peer.MAC == "" {
+		info, err := get(name)
+		if err != nil || !pluginOwnedLinkIdentityMatches(info, claim.IfIndex, claim.Kind, claim.MAC) {
 			continue
 		}
-		l, le := get(local.Name)
-		p, pe := get(peer.Name)
-		if le == nil && pe == nil && pluginOwnedLinkIdentityMatches(l, local.IfIndex, local.Kind, local.MAC) &&
-			pluginOwnedLinkIdentityMatches(p, peer.IfIndex, peer.Kind, peer.MAC) && l.PeerIfIndex == p.IfIndex && p.PeerIfIndex == l.IfIndex {
-			hidden[peer.Name] = true
+		if claim.Kind == "veth" {
+			peer, ok := links[claim.Peer]
+			if !ok || peer.plugin != link.plugin || peer.claim.Peer != name || peer.claim.Kind != "veth" || peer.claim.IfIndex <= 0 || peer.claim.MAC == "" {
+				continue
+			}
+			peerInfo, err := get(peer.claim.Name)
+			if err != nil || !pluginOwnedLinkIdentityMatches(peerInfo, peer.claim.IfIndex, peer.claim.Kind, peer.claim.MAC) ||
+				info.PeerIfIndex != peerInfo.IfIndex || peerInfo.PeerIfIndex != info.IfIndex {
+				continue
+			}
 		}
+		hidden[name] = true
 	}
 	return hidden
 }
 
 func userInterfaceInfos(db store.RuleStore, infos []InterfaceInfo, get func(string) (pluginControlNetLinkInfo, error)) []InterfaceInfo {
-	hidden := internalWANPipelineNames(db, get)
+	hidden := internalPluginLinkNames(db, get)
 	visible := make([]InterfaceInfo, 0, len(infos))
 	for _, info := range infos {
 		if !hidden[info.Name] {
@@ -62,7 +66,7 @@ func userInterfaceInfos(db store.RuleStore, infos []InterfaceInfo, get func(stri
 }
 
 func userHostNetworkInterfaces(db store.RuleStore, infos []HostNetworkInterface, get func(string) (pluginControlNetLinkInfo, error)) []HostNetworkInterface {
-	hidden := internalWANPipelineNames(db, get)
+	hidden := internalPluginLinkNames(db, get)
 	visible := make([]HostNetworkInterface, 0, len(infos))
 	for _, info := range infos {
 		if !hidden[info.Name] {
