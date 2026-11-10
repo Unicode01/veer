@@ -212,6 +212,7 @@ type xdpKernelRuleRuntime struct {
 	maintenanceState   kernelAdaptiveMaintenanceState
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPurgeRetry     kernelFlowPurgeRetryState
+	deferredFlows      kernelDeferredFlowRules[preparedXDPKernelRule]
 	flowPruneState     kernelFlowPruneState
 	oldFlowPruneState  kernelFlowPruneState
 	natPruneState      kernelNATPruneState
@@ -932,7 +933,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		}
 		results[item.rule.ID] = kernelRuleApplyResult{Running: true, Engine: kernelEngineXDP}
 	}
-	flowPurgeTargets := collectPreparedXDPKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
+	flowPurgeTargets := collectPreparedXDPKernelRuleFlowPurgeTargets(rt.deferredFlows.baseline(rt.preparedRules), prepared)
 	rt.flowPurgeRetry.add(flowPurgeTargets)
 	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	purgeCorrections := map[uint32]kernelRuleStats{}
@@ -971,6 +972,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	rt.coll = coll
 	rt.attachments = newAttachments
 	rt.preparedRules = clonePreparedXDPKernelRules(prepared)
+	rt.deferredFlows.reset()
 	rt.programID = programID
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
@@ -1029,6 +1031,7 @@ func (rt *xdpKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error)
 func (rt *xdpKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
 	rt.mu.Lock()
+	rt.expireDeferredFlowRulesLocked(startedAt)
 	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
 	if pendingFlowPurgeErr != nil {
 		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}, pendingFlowPurgeErr)
@@ -1324,6 +1327,7 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
+	rt.deferredFlows.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -1353,6 +1357,7 @@ func (rt *xdpKernelRuleRuntime) cleanupLocked() {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
+	rt.deferredFlows.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -1455,6 +1460,7 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if err := syncKernelLocalMACMap(pieces.localMACs, nil); err != nil {
 		return fmt.Errorf("clear xdp local MAC guard map during drain: %w", err)
 	}
+	rt.deferredFlows.record(clonePreparedXDPKernelRules(rt.preparedRules), time.Now())
 	rt.preparedRules = nil
 	rt.rulesMapCapacity = kernelRuntimeRuleMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	rt.flowsMapCapacity = kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))

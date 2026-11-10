@@ -583,6 +583,7 @@ type linuxKernelRuleRuntime struct {
 	orphanNATPruneLog            kernelCountLogState
 	statsCorrection              map[uint32]kernelRuleStats
 	flowPurgeRetry               kernelFlowPurgeRetryState
+	deferredFlows                kernelDeferredFlowRules[preparedKernelRule]
 	flowPruneState               kernelFlowPruneState
 	oldFlowPruneState            kernelFlowPruneState
 	natPruneState                kernelNATPruneState
@@ -797,6 +798,12 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 
 	prepareStartedAt := time.Now()
 	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2, rt.enableReplyL2Cache)
+	flowPurgePlan := planPreparedKernelRuleFlowPurge(rt.deferredFlows.items, rt.preparedRules, prepared, time.Now(), kernelLinkIndexExists)
+	for _, item := range flowPurgePlan.deferred {
+		// Keep the reply hook of a deferred rule: replies that still reach its
+		// flows are delivered instead of being reset by the host stack.
+		recordPreparedKernelReplyTargets(replyIfRules, parentIfMap, item.rule, item.rule.rule.ID)
+	}
 	attachmentRuleSets := kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules)
 	reconcileMetrics.PrepareDuration = time.Since(prepareStartedAt)
 	reconcileMetrics.PreparedEntries = len(prepared)
@@ -908,7 +915,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		)
 	}
 	if rt.canReconcileInPlaceLocked(desiredCapacities) && !preferFreshMapGrowth {
-		if err := rt.reconcileInPlaceLocked(prepared, attachmentRuleSets, parentIfMap, desiredLocalIPv4s, desiredLocalMACs, pluginCatalog, pluginDesired, pluginStates, pluginOnlyPipeline, results, &reconcileMetrics); err == nil {
+		if err := rt.reconcileInPlaceLocked(prepared, attachmentRuleSets, parentIfMap, desiredLocalIPv4s, desiredLocalMACs, pluginCatalog, pluginDesired, pluginStates, pluginOnlyPipeline, flowPurgePlan, results, &reconcileMetrics); err == nil {
 			return results, nil
 		} else {
 			log.Printf("kernel dataplane reconcile: in-place update unavailable, falling back to collection rebuild: %v", err)
@@ -1488,8 +1495,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 	}
 
-	flowPurgeTargets := collectPreparedKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
-	rt.flowPurgeRetry.add(flowPurgeTargets)
+	rt.flowPurgeRetry.add(flowPurgePlan.targets)
 	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	purgeCorrections := map[uint32]kernelRuleStats{}
 	purgedFlows := 0
@@ -1525,6 +1531,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	rt.coll = coll
 	rt.attachments = newAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
+	rt.deferredFlows.replace(flowPurgePlan.deferred)
 	rt.attachmentRuleSets = attachmentRuleSets.clone()
 	rt.attachmentMode = attachmentPrograms.mode
 	rt.rulesMapCapacity = actualCapacities.Rules
@@ -1584,6 +1591,7 @@ func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, erro
 func (rt *linuxKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
 	rt.mu.Lock()
+	rt.expireDeferredFlowRulesLocked(startedAt)
 	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
 	if pendingFlowPurgeErr != nil {
 		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}, pendingFlowPurgeErr)
@@ -2019,6 +2027,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
+	rt.deferredFlows.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -2049,6 +2058,7 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
+	rt.deferredFlows.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -2382,6 +2392,10 @@ func collectPreparedKernelRuleFlowPurgeTargets(oldItems []preparedKernelRule, ne
 		used := make([]bool, len(nextGroup))
 		for _, item := range oldGroup {
 			if item.rule.ID <= 0 || item.rule.ID > int64(^uint32(0)) {
+				continue
+			}
+			// A drop guard drops before any flow lookup, so it never owns flows.
+			if item.value.Flags&kernelRuleFlagDrop != 0 {
 				continue
 			}
 			revision, err := preparedKernelRuleFlowRevision(item)
@@ -2957,6 +2971,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if err := syncKernelLocalMACMap(rt.coll.Maps[kernelLocalMACMapName], nil); err != nil {
 		return fmt.Errorf("clear kernel local MAC guard map during drain: %w", err)
 	}
+	rt.deferredFlows.record(clonePreparedKernelRules(rt.preparedRules), time.Now())
 	rt.preparedRules = nil
 	if rt.cleanupIdlePluginPipelineRuntimeLocked("rule drain") {
 		return nil
@@ -2981,8 +2996,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	return nil
 }
 
-func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, attachmentRuleSets kernelAttachmentRuleSets, parentIfMap map[uint32]uint32, localIPv4s map[uint32]uint8, localMACs map[uint32]kernelLocalMACValue, pluginCatalog PluginCatalog, pluginDesired []kernelPluginPipelineDesiredPlugin, pluginStates map[string]PluginRuntimeState, pluginOnlyPipeline bool, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
-	flowPurgeTargets := collectPreparedKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
+func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, attachmentRuleSets kernelAttachmentRuleSets, parentIfMap map[uint32]uint32, localIPv4s map[uint32]uint8, localMACs map[uint32]kernelLocalMACValue, pluginCatalog PluginCatalog, pluginDesired []kernelPluginPipelineDesiredPlugin, pluginStates map[string]PluginRuntimeState, pluginOnlyPipeline bool, flowPurgePlan kernelFlowPurgePlan, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
 	if err != nil {
 		return err
@@ -3119,6 +3133,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	actualCapacities := rt.currentMapCapacitiesLocked()
 	rt.attachments = finalAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
+	rt.deferredFlows.replace(flowPurgePlan.deferred)
 	rt.attachmentRuleSets = attachmentRuleSets.clone()
 	rt.attachmentMode = attachmentPrograms.mode
 	rt.rulesMapCapacity = actualCapacities.Rules
@@ -3152,7 +3167,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
-	rt.flowPurgeRetry.add(flowPurgeTargets)
+	rt.flowPurgeRetry.add(flowPurgePlan.targets)
 	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	flowPurgeDeleted := 0
 	flowPurgeDuration := time.Duration(0)

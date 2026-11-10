@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestKernelFlowPurgeRetryStateRetainsFailedTargetsAndUnionsNewTargets(t *testing.T) {
@@ -195,5 +196,185 @@ func TestStableKernelCandidateIDsAvoidTCAndXDPPurgeForUnchangedRule(t *testing.T
 	newXDP.valueV4.RuleID = uint32(desired[0].rule.ID)
 	if got := collectPreparedXDPKernelRuleFlowPurgeTargets([]preparedXDPKernelRule{oldXDP}, []preparedXDPKernelRule{newXDP}); len(got) != 0 {
 		t.Fatalf("xdp flow purge targets = %#v, want none for stable candidate", got)
+	}
+}
+
+func TestKernelDeferredFlowRulesBecomeThePurgeBaselineForReturningRules(t *testing.T) {
+	unchanged := preparedKernelRule{
+		rule:  Rule{ID: 71, Protocol: "tcp"},
+		key:   tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 20022, Proto: 6},
+		value: tcRuleValueV4{RuleID: 71, BackendAddr: 2, BackendPort: 22, OutIfIndex: 3},
+	}
+	recreated := preparedKernelRule{
+		rule:  Rule{ID: 72, Protocol: "udp"},
+		key:   tcRuleKeyV4{IfIndex: 9, Proto: 17},
+		value: tcRuleValueV4{RuleID: 72, Flags: kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT, OutIfIndex: 3, NATAddr: 5},
+	}
+	removed := preparedKernelRule{
+		rule:  Rule{ID: 73, Protocol: "tcp"},
+		key:   tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 20080, Proto: 6},
+		value: tcRuleValueV4{RuleID: 73, BackendAddr: 2, BackendPort: 80, OutIfIndex: 3},
+	}
+	recreatedRevision := mustPreparedKernelRuleFlowRevision(t, recreated)
+	removedRevision := mustPreparedKernelRuleFlowRevision(t, removed)
+
+	var drained kernelDeferredFlowRules[preparedKernelRule]
+	if got := drained.baseline(nil); got != nil {
+		t.Fatalf("empty baseline = %#v, want nil", got)
+	}
+	drained.record([]preparedKernelRule{unchanged, recreated, removed}, time.Unix(100, 0))
+
+	// The interface behind rule 72 came back with a new ifindex, rule 73 did
+	// not come back, and rule 71 returned exactly as it was.
+	returned := recreated
+	returned.key.IfIndex = 10
+	got := collectPreparedKernelRuleFlowPurgeTargets(drained.baseline(nil), []preparedKernelRule{unchanged, returned})
+	assertKernelFlowPurgeTargets(t, got, kernelFlowPurgeTarget{RuleID: 72, RuleRevision: recreatedRevision}, kernelFlowPurgeTarget{RuleID: 73, RuleRevision: removedRevision})
+
+	// Without the drained baseline nothing would be purged at all.
+	if targets := collectPreparedKernelRuleFlowPurgeTargets(nil, []preparedKernelRule{unchanged, returned}); len(targets) != 0 {
+		t.Fatalf("purge targets without a baseline = %#v, want none", targets)
+	}
+}
+
+func TestKernelDeferredFlowRulesExpireEachRuleAfterItsOwnGrace(t *testing.T) {
+	var deferred kernelDeferredFlowRules[preparedKernelRule]
+	start := time.Unix(100, 0)
+	if got := deferred.expire(start.Add(time.Hour)); len(got) != 0 {
+		t.Fatalf("an empty set expired %#v", got)
+	}
+	deferred.record([]preparedKernelRule{{rule: Rule{ID: 1}}}, start)
+	deferred.record([]preparedKernelRule{{rule: Rule{ID: 2}}}, start.Add(10*time.Second))
+	if got := deferred.expire(start.Add(kernelDeferredFlowGrace - time.Second)); len(got) != 0 {
+		t.Fatalf("rules expired before the grace: %#v", got)
+	}
+	// A later record must not extend an earlier one.
+	got := deferred.expire(start.Add(kernelDeferredFlowGrace))
+	if len(got) != 1 || got[0].rule.ID != 1 {
+		t.Fatalf("expired at the first grace = %#v, want only rule 1", got)
+	}
+	current := []preparedKernelRule{{rule: Rule{ID: 3}}}
+	if baseline := deferred.baseline(current); len(baseline) != 2 || baseline[0].rule.ID != 2 || baseline[1].rule.ID != 3 {
+		t.Fatalf("baseline with current rules = %#v", baseline)
+	}
+	deferred.reset()
+	if len(deferred.baseline(current)) != 1 || len(deferred.expire(start.Add(time.Hour))) != 0 {
+		t.Fatal("reset left deferred rules behind")
+	}
+}
+
+func TestEgressNATGuardDefersFlowPurgeUntilTheExitReturnsOrTheGraceEnds(t *testing.T) {
+	rule := Rule{ID: 81, InInterface: "lan0", OutInterface: "wan0", Protocol: "tcp", kernelMode: kernelModeEgressNAT}
+	working := preparedKernelRule{
+		rule: rule, inIfIndex: 10, outIfIndex: 3, replyIfIndexes: []int{3},
+		key:   tcRuleKeyV4{IfIndex: 10, Proto: 6},
+		value: tcRuleValueV4{RuleID: 81, Flags: kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT, OutIfIndex: 3, NATAddr: 5},
+	}
+	guard := preparedKernelRule{
+		rule: rule, inIfIndex: 10, outIfIndex: 10,
+		key:   working.key,
+		value: tcRuleValueV4{RuleID: 81, Flags: kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT | kernelRuleFlagDrop, OutIfIndex: 10},
+	}
+	workingTarget := kernelFlowPurgeTarget{RuleID: 81, RuleRevision: mustPreparedKernelRuleFlowRevision(t, working)}
+	allLinks := func(int) bool { return true }
+	start := time.Unix(1000, 0)
+
+	// The exit lost its address: the guard replaces the rule, its flows wait.
+	plan := planPreparedKernelRuleFlowPurge(nil, []preparedKernelRule{working}, []preparedKernelRule{guard}, start, allLinks)
+	if len(plan.targets) != 0 || len(plan.deferred) != 1 || plan.deferred[0].rule.value.NATAddr != 5 || !plan.deferred[0].at.Equal(start) {
+		t.Fatalf("guard plan = %+v, want the working rule deferred without purge", plan)
+	}
+
+	// Still guarded later: the rule stays deferred from the first moment.
+	later := planPreparedKernelRuleFlowPurge(plan.deferred, []preparedKernelRule{guard}, []preparedKernelRule{guard}, start.Add(10*time.Second), allLinks)
+	if len(later.targets) != 0 || len(later.deferred) != 1 || !later.deferred[0].at.Equal(start) {
+		t.Fatalf("still guarded plan = %+v, want the deferral kept from its start", later)
+	}
+
+	// The same address came back: nothing is purged and the deferral ends.
+	back := planPreparedKernelRuleFlowPurge(later.deferred, []preparedKernelRule{guard}, []preparedKernelRule{working}, start.Add(20*time.Second), allLinks)
+	if len(back.targets) != 0 || len(back.deferred) != 0 {
+		t.Fatalf("returning rule plan = %+v, want connections kept", back)
+	}
+
+	// A different address came back: the old contract's flows go.
+	changed := working
+	changed.value.NATAddr = 6
+	moved := planPreparedKernelRuleFlowPurge(later.deferred, []preparedKernelRule{guard}, []preparedKernelRule{changed}, start.Add(20*time.Second), allLinks)
+	assertKernelFlowPurgeTargets(t, moved.targets, workingTarget)
+	if len(moved.deferred) != 0 {
+		t.Fatalf("changed rule kept a deferral: %+v", moved.deferred)
+	}
+
+	// The NAT was removed while guarded.
+	removed := planPreparedKernelRuleFlowPurge(later.deferred, []preparedKernelRule{guard}, nil, start.Add(20*time.Second), allLinks)
+	assertKernelFlowPurgeTargets(t, removed.targets, workingTarget)
+
+	// The grace ran out while still guarded.
+	expired := planPreparedKernelRuleFlowPurge(later.deferred, []preparedKernelRule{guard}, []preparedKernelRule{guard}, start.Add(kernelDeferredFlowGrace), allLinks)
+	assertKernelFlowPurgeTargets(t, expired.targets, workingTarget)
+	if len(expired.deferred) != 0 {
+		t.Fatalf("expired deferral kept: %+v", expired.deferred)
+	}
+
+	// The exit interface itself is gone: its flows can never be used again.
+	exitGone := func(ifindex int) bool { return ifindex != 3 }
+	gone := planPreparedKernelRuleFlowPurge(nil, []preparedKernelRule{working}, []preparedKernelRule{guard}, start, exitGone)
+	assertKernelFlowPurgeTargets(t, gone.targets, workingTarget)
+	if len(gone.deferred) != 0 {
+		t.Fatalf("rule of a deleted exit was deferred: %+v", gone.deferred)
+	}
+
+	// A guard with another rule ID does not shelter this rule's flows.
+	otherGuard := guard
+	otherGuard.rule.ID = 82
+	otherGuard.value.RuleID = 82
+	other := planPreparedKernelRuleFlowPurge(nil, []preparedKernelRule{working}, []preparedKernelRule{otherGuard}, start, allLinks)
+	assertKernelFlowPurgeTargets(t, other.targets, workingTarget)
+}
+
+func TestKernelFlowPurgeTargetsIgnoreDropGuards(t *testing.T) {
+	guard := preparedKernelRule{
+		rule:  Rule{ID: 91, InInterface: "lan0", Protocol: "udp", kernelMode: kernelModeEgressNAT},
+		key:   tcRuleKeyV4{IfIndex: 10, Proto: 17},
+		value: tcRuleValueV4{RuleID: 91, Flags: kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT | kernelRuleFlagDrop, OutIfIndex: 10},
+	}
+	if got := collectPreparedKernelRuleFlowPurgeTargets([]preparedKernelRule{guard}, nil); len(got) != 0 {
+		t.Fatalf("purge targets for a removed guard = %#v, want none", got)
+	}
+}
+
+func TestKernelHandoffPurgesDeferredRules(t *testing.T) {
+	deferred := preparedKernelRule{
+		rule:  Rule{ID: 95, Protocol: "tcp"},
+		key:   tcRuleKeyV4{IfIndex: 10, Proto: 6},
+		value: tcRuleValueV4{RuleID: 95, Flags: kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT, OutIfIndex: 3, NATAddr: 5},
+	}
+	rt := &linuxKernelRuleRuntime{}
+	pending := kernelFlowPurgeTarget{RuleID: 96, RuleRevision: 7}
+	rt.flowPurgeRetry.add(map[kernelFlowPurgeTarget]struct{}{pending: {}})
+	rt.deferredFlows.record([]preparedKernelRule{deferred}, time.Unix(1, 0))
+	got := rt.pendingFlowPurgesForHandoffLocked()
+	assertKernelFlowPurgeTargets(t, got, pending, kernelFlowPurgeTarget{RuleID: 95, RuleRevision: mustPreparedKernelRuleFlowRevision(t, deferred)})
+}
+
+func mustPreparedKernelRuleFlowRevision(t *testing.T, item preparedKernelRule) uint64 {
+	t.Helper()
+	revision, err := preparedKernelRuleFlowRevision(item)
+	if err != nil || revision == 0 {
+		t.Fatalf("flow revision = %d, %v", revision, err)
+	}
+	return revision
+}
+
+func assertKernelFlowPurgeTargets(t *testing.T, got map[kernelFlowPurgeTarget]struct{}, want ...kernelFlowPurgeTarget) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("purge targets = %#v, want %#v", got, want)
+	}
+	for _, target := range want {
+		if _, ok := got[target]; !ok {
+			t.Fatalf("purge targets = %#v, want %#v", got, want)
+		}
 	}
 }
