@@ -450,6 +450,15 @@ go test ./...
 
 插件发布使用 `sh scripts/verify-plugin-release.sh portable`；root Linux 的完整验收与性能门槛见 [PLUGIN.md](PLUGIN.md#验收边界)。
 
+接口状态变化下的内核连接表审计不在默认门禁内，需要 root Linux 与 python3，约 10 分钟：
+
+```bash
+sh scripts/build-all-ebpf.sh
+sudo env "PATH=$PATH" VEER_RUN_FLOW_CHURN_AUDIT=1 go test ./internal/app -run '^TestKernelFlowTablesAcrossInterfaceChurn$' -count=1 -v -timeout=20m
+```
+
+它启动真实进程并保持 TCP/UDP 流量，对上联、网桥和子接口做 down/up、脱离与重新加入网桥、删除重建和地址变更，每一步之后读取内核 flow 与 NAT 端口表，要求没有条目指向已不存在的接口、已撤下的规则或旧的规则版本，并核对流量恢复；接口只是短暂失去载波或地址、或全 NAT 端口转发在网桥与成员口路径间变化时，还要求原有 TCP 连接不中断。`VEER_FLOW_CHURN_SCENARIO=<名称>` 只运行单个场景。
+
 兼容性门槛包括：Debian 11、Ubuntu 22.04、Rocky Linux 9、Alpine 3.19 和当前 Fedora 容器中的真实依赖安装与 release 构建；Ubuntu amd64/arm64 原生 Linux 测试和 core dataplane；实际部署 unit 下命名 namespace 的创建、跨服务退出保留、重启复用和删除。容器只验证发行版用户环境与编译器。
 
 CI 另外启动官方 Alpine 3.19.8 和 Rocky Linux 9.8 云镜像的 QEMU VM，使用各自默认内核验证实际安装、热更新、崩溃恢复、开机启动、插件沙箱与 TC/XDP 的 IPv4/IPv6 转发和 egress NAT；Alpine 验证 OpenRC 及保留 worker 时的 cgroup 隔离，Rocky 全程保持 SELinux enforcing。镜像固定版本并校验摘要，关键测试被跳过会使验收失败，串口与测试日志保留为 CI artifact。这些结果只覆盖所列镜像与默认策略，自定义内核或 SELinux 策略仍需单独验收。
