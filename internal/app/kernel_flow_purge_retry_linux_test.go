@@ -358,6 +358,42 @@ func TestKernelHandoffPurgesDeferredRules(t *testing.T) {
 	assertKernelFlowPurgeTargets(t, got, pending, kernelFlowPurgeTarget{RuleID: 95, RuleRevision: mustPreparedKernelRuleFlowRevision(t, deferred)})
 }
 
+func TestBridgePathHoldKeepsTheBridgePathOnlyForItsOwnSessions(t *testing.T) {
+	member := preparedKernelRule{
+		rule:       Rule{ID: 61, OutInterface: "vmbr1", OutIP: "198.18.0.2", Protocol: "tcp"},
+		outIfIndex: 12,
+		key:        tcRuleKeyV4{IfIndex: 2, DstAddr: 1, DstPort: 2222, Proto: 6},
+		value:      tcRuleValueV4{RuleID: 61, BackendAddr: 7, BackendPort: 22, Flags: kernelRuleFlagFullNAT | kernelRuleFlagBridgeL2, OutIfIndex: 12, NATAddr: 9},
+	}
+	path, ok := heldKernelBridgePath(member, nil, 11, member.rule.OutIP)
+	if !ok || path.outIfIndex != 11 || path.flags != 0 {
+		t.Fatalf("held path for a member-path rule = %+v, %v, want the bridge path", path, ok)
+	}
+	onBridge := member
+	onBridge.outIfIndex = 11
+	onBridge.value.Flags = kernelRuleFlagFullNAT
+	onBridge.value.OutIfIndex = 11
+	if _, ok := heldKernelBridgePath(onBridge, nil, 11, member.rule.OutIP); ok {
+		t.Fatal("a bridge-path rule without a previous member path was held")
+	}
+
+	// Sessions on the member path itself, or none at all, need no hold.
+	memberRevision := mustPreparedKernelRuleFlowRevision(t, member)
+	hold := newKernelBridgePathHold(func(uint32) map[uint64]struct{} {
+		return map[uint64]struct{}{memberRevision: {}}
+	})
+	if _, ok := hold.apply(newKernelPrepareContext(false, false, false), member.rule, []preparedKernelRule{member}, nil); ok || hold.heldRevisions() != nil {
+		t.Fatal("rule was held although its sessions already use the prepared path")
+	}
+	if got := withoutPreparedKernelRuleRevisions(map[uint64]struct{}{memberRevision: {}, 5: {}}, []preparedKernelRule{member}); len(got) != 1 {
+		t.Fatalf("foreign revisions = %#v, want only the other revision", got)
+	}
+	var none *kernelBridgePathHold
+	if _, ok := none.apply(nil, member.rule, []preparedKernelRule{member}, nil); ok || none.heldRevisions() != nil {
+		t.Fatal("a nil hold held a rule")
+	}
+}
+
 func mustPreparedKernelRuleFlowRevision(t *testing.T, item preparedKernelRule) uint64 {
 	t.Helper()
 	revision, err := preparedKernelRuleFlowRevision(item)

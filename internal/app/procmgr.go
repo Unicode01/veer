@@ -5215,6 +5215,9 @@ func (pm *ProcessManager) monitorLoop() {
 			if err := pm.kernelRuntime.Maintain(); err != nil {
 				log.Printf("kernel dataplane maintenance failed: %v", err)
 			}
+			if releaser, ok := pm.kernelRuntime.(kernelPathHoldReleaser); ok && releaser.takeKernelPathHoldRelease() {
+				pm.requestRedistributeWorkers(0)
+			}
 		}
 		if recheckStableNetworkInventory {
 			log.Print("network runtime: interface inventory settle window elapsed, re-evaluating deferred runtime state")

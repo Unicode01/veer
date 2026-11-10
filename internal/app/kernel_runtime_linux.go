@@ -436,6 +436,8 @@ type kernelPrepareContext struct {
 	snatAddrs          map[string]cachedKernelSNAT
 	snatIPs            map[string]cachedKernelSNATIP
 	outPaths           map[string]cachedKernelPath
+	// heldPaths overrides the out path of a rule; see kernelBridgePathHold.
+	heldPaths map[int64]preparedKernelPath
 }
 
 func newKernelPrepareContext(enableTrafficStats bool, enablePreparedL2 bool, enableReplyL2Cache bool) *kernelPrepareContext {
@@ -584,6 +586,9 @@ type linuxKernelRuleRuntime struct {
 	statsCorrection              map[uint32]kernelRuleStats
 	flowPurgeRetry               kernelFlowPurgeRetryState
 	deferredFlows                kernelDeferredFlowRules[preparedKernelRule]
+	pathHolds                    kernelFlowRevisionSet
+	pathHoldReleased             bool
+	lastPathHoldLog              map[string]struct{}
 	flowPruneState               kernelFlowPruneState
 	oldFlowPruneState            kernelFlowPruneState
 	natPruneState                kernelNATPruneState
@@ -797,7 +802,10 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	}
 
 	prepareStartedAt := time.Now()
-	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2, rt.enableReplyL2Cache)
+	pathHold := rt.newBridgePathHoldLocked()
+	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRulesHoldingPaths(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2, rt.enableReplyL2Cache, pathHold)
+	rt.pathHolds = pathHold.heldRevisions()
+	rt.lastPathHoldLog = logKernelPathHolds(rt.lastPathHoldLog, pathHold)
 	flowPurgePlan := planPreparedKernelRuleFlowPurge(rt.deferredFlows.items, rt.preparedRules, prepared, time.Now(), kernelLinkIndexExists)
 	for _, item := range flowPurgePlan.deferred {
 		// Keep the reply hook of a deferred rule: replies that still reach its
@@ -1592,6 +1600,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
 	rt.mu.Lock()
 	rt.expireDeferredFlowRulesLocked(startedAt)
+	rt.checkBridgePathHoldsLocked()
 	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
 	if pendingFlowPurgeErr != nil {
 		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}, pendingFlowPurgeErr)
@@ -2028,6 +2037,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
 	rt.deferredFlows.reset()
+	rt.pathHolds = nil
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -2059,6 +2069,7 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
 	rt.deferredFlows.reset()
+	rt.pathHolds = nil
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -4048,6 +4059,11 @@ func prepareKernelRuleRef(ctx *kernelPrepareContext, rule *Rule) ([]preparedKern
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound path on %q: %w", rule.OutInterface, err)
 	}
+	if ctx != nil {
+		if held, ok := ctx.heldPaths[rule.ID]; ok {
+			path = held
+		}
+	}
 	replyIfIndexes, replyIfParents, err := resolveTCReplyAttachments(outLink, path.outIfIndex)
 	if err != nil {
 		return nil, fmt.Errorf("resolve reply interfaces on %q: %w", rule.OutInterface, err)
@@ -4337,6 +4353,10 @@ func prepareKernelEgressNATPassthroughRule(ctx *kernelPrepareContext, rule Rule,
 }
 
 func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool, enablePreparedL2 bool, enableReplyL2Cache bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
+	return prepareKernelRulesHoldingPaths(rules, previous, allowTransientReuse, enableTrafficStats, enablePreparedL2, enableReplyL2Cache, nil)
+}
+
+func prepareKernelRulesHoldingPaths(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool, enablePreparedL2 bool, enableReplyL2Cache bool, pathHold *kernelBridgePathHold) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
 	prepared := make([]preparedKernelRule, 0, len(rules))
 	forwardIfRules := make(map[int][]int64)
 	replyIfRules := make(map[int][]int64)
@@ -4379,6 +4399,9 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 			skipLogger.Add(rule, revisionErr)
 			results[rule.ID] = kernelRuleApplyResult{Error: revisionErr.Error()}
 			continue
+		}
+		if held, ok := pathHold.apply(prepareCtx, rule, items, previousByKey); ok {
+			items = held
 		}
 		prepared = append(prepared, items...)
 		for _, item := range items {
