@@ -1,6 +1,8 @@
 package app
 
 import (
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -924,5 +926,53 @@ func TestShouldLogKernelNetlinkRecoveryResult(t *testing.T) {
 				t.Fatalf("shouldLogKernelNetlinkRecoveryResult(%+v) = %v, want %v", tc.result, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCollectDynamicEgressNATOwnersForTriggerFollowsChildScopedLinks(t *testing.T) {
+	snapshot := egressNATInterfaceSnapshot{IfaceByName: map[string]InterfaceInfo{}}
+	items := []EgressNAT{
+		{ID: 1, ParentInterface: "vmbr1", ChildInterface: "tap100i0", Enabled: true},
+		{ID: 2, ParentInterface: "vmbr1", ChildInterface: "tap101i0", Enabled: true},
+		{ID: 3, ParentInterface: "vmbr1", Enabled: true},
+		{ID: 4, ParentInterface: "vmbr2", Enabled: true},
+		{ID: 5, ParentInterface: "vmbr1", ChildInterface: "tap100i0", Enabled: false},
+	}
+	owners := func(trigger kernelNetlinkRecoveryTrigger) []int64 {
+		t.Helper()
+		got := make([]int64, 0)
+		for id := range collectDynamicEgressNATOwnersForTrigger(trigger, items, snapshot) {
+			got = append(got, id)
+		}
+		sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+		return got
+	}
+
+	// tap100i0 rejoining vmbr1 retries the NAT bound to it and the NAT that
+	// follows every child of vmbr1, but not the NAT bound to its sibling.
+	rejoined := newKernelNetlinkRecoveryTrigger("link")
+	rejoined.addLinkNeighborInterface("tap100i0")
+	rejoined.addLinkFDBInterface("vmbr1")
+	if got := owners(rejoined); !reflect.DeepEqual(got, []int64{1, 3}) {
+		t.Fatalf("owners after tap100i0 rejoined vmbr1 = %v, want [1 3]", got)
+	}
+
+	// A child that reappears before it has a master names no parent; the NAT
+	// bound to it is still retried.
+	created := newKernelNetlinkRecoveryTrigger("link")
+	created.addInterfaceName("TAP100I0")
+	if got := owners(created); !reflect.DeepEqual(got, []int64{1}) {
+		t.Fatalf("owners after tap100i0 was created = %v, want [1]", got)
+	}
+
+	unrelated := newKernelNetlinkRecoveryTrigger("link")
+	unrelated.addLinkNeighborInterface("eno2")
+	unrelated.addLinkFDBInterface("vmbr9")
+	if got := owners(unrelated); len(got) != 0 {
+		t.Fatalf("owners after an unrelated link change = %v, want none", got)
+	}
+
+	if got := collectDynamicEgressNATOwnersForTrigger(newKernelNetlinkRecoveryTrigger("neighbor"), items, snapshot); got != nil {
+		t.Fatalf("owners for a non-link trigger = %v, want nil", got)
 	}
 }

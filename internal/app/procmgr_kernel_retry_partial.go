@@ -1340,8 +1340,17 @@ func collectDynamicEgressNATOwnersForTrigger(trigger kernelNetlinkRecoveryTrigge
 		return nil
 	}
 	matchedParents := kernelNetlinkTriggerMatchesDynamicEgressNATParents(trigger, collectDynamicEgressNATParentsWithSnapshot(items, snapshot))
-	if len(matchedParents) == 0 {
-		return nil
+	named := normalizeKernelNetlinkRecoveryTrigger(trigger)
+	childChanged := func(name string) bool {
+		name = normalizeKernelTransientFallbackInterface(name)
+		if name == "" {
+			return false
+		}
+		if _, ok := named.interfaceNames[name]; ok {
+			return true
+		}
+		_, ok := named.linkNeighborInterfaces[name]
+		return ok
 	}
 
 	out := make(map[int64]struct{})
@@ -1352,11 +1361,20 @@ func collectDynamicEgressNATOwnersForTrigger(trigger kernelNetlinkRecoveryTrigge
 		if snapshot.Err == nil {
 			item = normalizeEgressNATScope(item, snapshot.IfaceByName)
 		}
-		parent := normalizeKernelTransientFallbackInterface(item.ParentInterface)
-		if _, ok := matchedParents[parent]; !ok {
+		if strings.TrimSpace(item.ChildInterface) != "" {
+			// A NAT bound to one child follows only that child's link events.
+			// Without this, a child that is deleted or leaves its bridge and
+			// later returns would stay unavailable until an unrelated reload.
+			if childChanged(item.ChildInterface) {
+				out[item.ID] = struct{}{}
+			}
 			continue
 		}
-		if strings.TrimSpace(item.ParentInterface) == "" || strings.TrimSpace(item.ChildInterface) != "" {
+		parent := normalizeKernelTransientFallbackInterface(item.ParentInterface)
+		if parent == "" {
+			continue
+		}
+		if _, ok := matchedParents[parent]; !ok {
 			continue
 		}
 		out[item.ID] = struct{}{}
