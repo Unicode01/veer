@@ -368,7 +368,7 @@ OpenRC 部署会在 cgroup 尚未挂载时启动并启用系统的 `cgroups` 服
 
 构建要求：
 
-- Go 1.26.10+
+- Go 1.26.11+
 - `clang`
 - Debian/Ubuntu 通常需要 `linux-libc-dev`
 - RHEL-compatible/Fedora 通常需要 `kernel-headers`
