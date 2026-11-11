@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -57,21 +56,43 @@ type pluginProcessRegistry struct {
 	binaries *pluginBinaryStore
 }
 
+// newPluginProcessRegistry adopts any processes the previous daemon handed
+// off during a hot restart before plugins reconcile and ask for them.
+func newPluginProcessRegistry(cfg *Config) *pluginProcessRegistry {
+	r := &pluginProcessRegistry{cfg: cfg}
+	r.adoptHandedOffProcesses()
+	return r
+}
+
 type pluginManagedProcess struct {
-	mu          sync.Mutex
-	status      pluginProcessStatus
-	fingerprint [32]byte
-	generation  string
-	command     string
-	stop        chan struct{}
-	done        chan struct{}
-	stopOnce    sync.Once
-	restart     chan struct{}
-	maxRestarts int
-	stdout      pluginProcessLog
-	stderr      pluginProcessLog
-	limitOwner  string
-	limitConfig *Config
+	mu            sync.Mutex
+	status        pluginProcessStatus
+	fingerprint   [32]byte
+	generation    string
+	command       string
+	restartPolicy string
+	stopTimeout   time.Duration
+	stop          chan struct{}
+	done          chan struct{}
+	stopOnce      sync.Once
+	restart       chan struct{}
+	maxRestarts   int
+	stdout        pluginProcessLog
+	stderr        pluginProcessLog
+	limitOwner    string
+	limitConfig   *Config
+	run           *pluginKeeperRun
+	// adopted marks a process handed over by the previous daemon. It has no
+	// generation until a plugin starts the same specification again.
+	adopted   bool
+	claims    chan pluginProcessClaim
+	handedOff bool
+}
+
+type pluginProcessClaim struct {
+	req       pluginProcessRequest
+	dir       string
+	ownerStop <-chan struct{}
 }
 
 type pluginProcessLog struct {
@@ -250,6 +271,9 @@ func (h *pluginControlHost) processRestart(call goja.FunctionCall) goja.Value {
 func (p *pluginManagedProcess) requestRestart() (pluginProcessStatus, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.handedOff || (p.adopted && p.generation == "") {
+		return p.status, fmt.Errorf("process is not supervised by this plugin generation")
+	}
 	if p.status.State == "restarting" || p.status.State == "backoff" {
 		return p.status, nil
 	}
@@ -286,12 +310,45 @@ func (p *pluginManagedProcess) snapshot() pluginProcessStatus {
 
 func (p *pluginManagedProcess) close() { p.stopOnce.Do(func() { close(p.stop) }) }
 
+func (p *pluginManagedProcess) ownedBy() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.generation
+}
+
+func (p *pluginManagedProcess) unclaimed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.adopted && p.generation == ""
+}
+
+func (p *pluginManagedProcess) isHandedOff() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.handedOff
+}
+
+func pluginProcessFingerprint(req pluginProcessRequest) [32]byte {
+	encoded, _ := json.Marshal(req)
+	return sha256.Sum256(encoded)
+}
+
 func (r *pluginProcessRegistry) Start(owner, generation string, req pluginProcessRequest, ownerStop <-chan struct{}) (pluginProcessStatus, error) {
 	if err := validatePluginProcessRequest(&req); err != nil {
 		return pluginProcessStatus{}, err
 	}
-	encoded, _ := json.Marshal(req)
-	fingerprint := sha256.Sum256(encoded)
+	fingerprint := pluginProcessFingerprint(req)
+	// A process adopted from the previous daemon goes to the first generation
+	// that starts the same specification. Anything else replaces it, exactly
+	// as if the restart had stopped it.
+	if old := r.get(owner, req.ID); old != nil && old.unclaimed() {
+		if old.fingerprint == fingerprint {
+			if status, ok := r.claim(old, generation, req, ownerStop); ok {
+				return status, nil
+			}
+		}
+		r.Stop(owner, req.ID)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -304,7 +361,7 @@ func (r *pluginProcessRegistry) Start(owner, generation string, req pluginProces
 	}
 	key, count := owner+"/"+req.ID, 0
 	if old := r.entries[key]; old != nil {
-		if old.generation != generation || old.fingerprint != fingerprint {
+		if old.ownedBy() != generation || old.fingerprint != fingerprint {
 			return pluginProcessStatus{}, fmt.Errorf("process id is already owned by another specification or generation; stop it first")
 		}
 		return old.snapshot(), nil
@@ -321,21 +378,19 @@ func (r *pluginProcessRegistry) Start(owner, generation string, req pluginProces
 	if err != nil {
 		return pluginProcessStatus{}, fmt.Errorf("create private process directory: %w", err)
 	}
-	if req.Config != "" {
-		if err := os.WriteFile(filepath.Join(dir, "config"), []byte(req.Config), 0600); err != nil {
-			_ = os.RemoveAll(dir)
-			return pluginProcessStatus{}, fmt.Errorf("write private process configuration: %w", err)
-		}
+	if err := writePluginProcessConfig(dir, req.Config); err != nil {
+		_ = os.RemoveAll(dir)
+		return pluginProcessStatus{}, err
 	}
-	limitIdentity := sha256.Sum256([]byte(key))
 	p := &pluginManagedProcess{
 		generation: generation, fingerprint: fingerprint, command: req.Command,
+		restartPolicy: req.Restart, stopTimeout: time.Duration(req.StopTimeoutMS) * time.Millisecond,
 		stop: make(chan struct{}), done: make(chan struct{}), restart: make(chan struct{}, 1),
 		maxRestarts: req.MaxRestarts,
 		status:      pluginProcessStatus{ID: req.ID, State: "starting", ExitCode: -1},
-		limitOwner:  fmt.Sprintf("managed-%x", limitIdentity[:24]), limitConfig: r.cfg,
+		limitOwner:  pluginManagedProcessLimitOwner(key), limitConfig: r.cfg,
 	}
-	cmd, cleanup, err := p.launch(req, dir)
+	run, cleanup, err := p.launch(req, dir)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return p.snapshot(), err
@@ -344,56 +399,119 @@ func (r *pluginProcessRegistry) Start(owner, generation string, req pluginProces
 		r.entries = make(map[string]*pluginManagedProcess)
 	}
 	r.entries[key] = p
-	go p.supervise(req, dir, cmd, cleanup, ownerStop)
+	go p.supervise(req, dir, run, cleanup, ownerStop)
 	return p.snapshot(), nil
 }
 
-func (p *pluginManagedProcess) launch(req pluginProcessRequest, dir string) (*exec.Cmd, func(), error) {
-	args := append([]string(nil), req.Args...)
-	for i := range args {
-		args[i] = strings.ReplaceAll(args[i], "{config}", filepath.Join(dir, "config"))
-	}
-	cmd := exec.Command(req.Command, args...) // #nosec G204 -- trusted local exec permission.
-	cmd.Env, cmd.Dir, cmd.Stdin = pluginExecEnvironment(), dir, strings.NewReader(req.Stdin)
-	cmd.Stdout, cmd.Stderr, cmd.WaitDelay = &p.stdout, &p.stderr, 100*time.Millisecond
-	cleanup := configurePluginExecCommand(cmd)
-	cmd.Cancel = nil // The supervisor owns cancellation, rather than CommandContext.
-	preparePluginManagedProcess(cmd)
-	if err := cmd.Start(); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("start executable: %w", err)
-	}
-	limitCleanup, err := limitPluginManagedProcess(cmd, p.limitOwner, p.limitConfig)
-	if err != nil {
-		cleanup()
-		_ = cmd.Wait()
-		return nil, nil, err
-	}
-	processCleanup := cleanup
-	cleanup = func() { processCleanup(); limitCleanup() }
-	p.mu.Lock()
-	p.status.State, p.status.PID, p.status.ExitCode = "running", cmd.Process.Pid, -1
-	p.status.Starts++
-	p.status.StartedAt = time.Now().UnixMilli()
-	p.mu.Unlock()
-	return cmd, cleanup, nil
+func pluginManagedProcessLimitOwner(key string) string {
+	identity := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("managed-%x", identity[:24])
 }
 
-func (p *pluginManagedProcess) supervise(req pluginProcessRequest, dir string, cmd *exec.Cmd, cleanup func(), ownerStop <-chan struct{}) {
+func writePluginProcessConfig(dir, config string) error {
+	if config == "" {
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(config), 0600); err != nil {
+		return fmt.Errorf("write private process configuration: %w", err)
+	}
+	return nil
+}
+
+// claim hands an adopted process to the generation that asked for its exact
+// specification. The new private directory serves later restarts; the running
+// process keeps whatever its predecessor gave it.
+func (r *pluginProcessRegistry) claim(p *pluginManagedProcess, generation string, req pluginProcessRequest, ownerStop <-chan struct{}) (pluginProcessStatus, bool) {
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return pluginProcessStatus{}, false
+	}
+	dir, err := newPluginManagedProcessDirectory()
+	if err != nil {
+		return pluginProcessStatus{}, false
+	}
+	if err := writePluginProcessConfig(dir, req.Config); err != nil {
+		_ = os.RemoveAll(dir)
+		return pluginProcessStatus{}, false
+	}
+	select {
+	case p.claims <- pluginProcessClaim{req: req, dir: dir, ownerStop: ownerStop}:
+		p.mu.Lock()
+		p.generation, p.restartPolicy, p.stopTimeout = generation, req.Restart, time.Duration(req.StopTimeoutMS)*time.Millisecond
+		p.mu.Unlock()
+		return p.snapshot(), true
+	case <-p.done:
+		_ = os.RemoveAll(dir)
+		return pluginProcessStatus{}, false
+	}
+}
+
+// awaitClaim watches an adopted process until a plugin claims it. Unclaimed
+// processes are stopped after the deadline, so a removed or disabled plugin
+// cannot leave one running.
+func (r *pluginProcessRegistry) awaitClaim(key string, p *pluginManagedProcess, cleanup func(), deadline time.Duration) {
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	run := p.run
+	state, expired := "stopped", false
+	select {
+	case claim := <-p.claims:
+		p.supervise(claim.req, claim.dir, run, cleanup, claim.ownerStop)
+		return
+	case <-run.exited:
+		state = "exited"
+	case <-p.stop:
+		if p.isHandedOff() {
+			run.release()
+			close(p.done)
+			return
+		}
+		run.stop(p.stopTimeout)
+	case <-timer.C:
+		expired = true
+		run.stop(p.stopTimeout)
+	}
+	cleanup()
+	p.mu.Lock()
+	p.status.PID, p.status.ExitCode, p.status.State = 0, run.code(), state
+	p.mu.Unlock()
+	close(p.done)
+	if expired {
+		r.mu.Lock()
+		if r.entries[key] == p {
+			delete(r.entries, key)
+		}
+		r.mu.Unlock()
+	}
+}
+
+func (p *pluginManagedProcess) supervise(req pluginProcessRequest, dir string, run *pluginKeeperRun, cleanup func(), ownerStop <-chan struct{}) {
 	defer close(p.done)
-	defer os.RemoveAll(dir)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	for {
-		wait := make(chan error, 1)
-		go func() { wait <- cmd.Wait() }()
 		stopping, requested := false, false
 		select {
-		case <-wait:
+		case <-run.exited:
 		case <-p.restart:
 			requested = true
 		case <-p.stop:
 			stopping = true
 		case <-ownerStop:
 			stopping = true
+		}
+		if stopping && p.isHandedOff() {
+			// The successor adopts the keeper: leave the process, its cgroup
+			// and its directory alone.
+			handedOff = true
+			run.release()
+			return
 		}
 		if stopping || requested {
 			p.mu.Lock()
@@ -402,15 +520,7 @@ func (p *pluginManagedProcess) supervise(req pluginProcessRequest, dir string, c
 				p.status.State = "stopping"
 			}
 			p.mu.Unlock()
-			terminatePluginManagedProcess(cmd)
-			timer := time.NewTimer(time.Duration(req.StopTimeoutMS) * time.Millisecond)
-			select {
-			case <-wait:
-			case <-timer.C:
-				cleanup()
-				<-wait
-			}
-			timer.Stop()
+			run.stop(time.Duration(req.StopTimeoutMS) * time.Millisecond)
 		}
 		cleanup() // Reap descendants even if the leader exited on its own.
 		p.mu.Lock()
@@ -422,7 +532,7 @@ func (p *pluginManagedProcess) supervise(req pluginProcessRequest, dir string, c
 		default:
 		}
 		p.status.PID = 0
-		p.status.ExitCode = cmd.ProcessState.ExitCode()
+		p.status.ExitCode = run.code()
 		p.status.State = "exited"
 		if stopping {
 			p.status.State = "stopped"
@@ -454,7 +564,7 @@ func (p *pluginManagedProcess) supervise(req pluginProcessRequest, dir string, c
 		case <-timer.C:
 		}
 		var err error
-		cmd, cleanup, err = p.launch(req, dir)
+		run, cleanup, err = p.launch(req, dir)
 		if err != nil {
 			p.mu.Lock()
 			p.status.State = "failed"

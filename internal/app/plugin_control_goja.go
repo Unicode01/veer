@@ -389,7 +389,7 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 		l2Transport:          newPluginControlL2Transport(),
 		udpTransport:         newPluginControlUDPTransport(),
 		socketRegistry:       newPluginControlSocketRegistry(socketTransport),
-		processRegistry:      &pluginProcessRegistry{cfg: cfg},
+		processRegistry:      newPluginProcessRegistry(cfg),
 		networkBroker:        newPluginControlNetworkBroker(socketTransport),
 		netAdmin:             newPluginControlNetAdmin(),
 		timers:               make(map[pluginControlTimerKey]pluginControlTimerState),

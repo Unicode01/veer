@@ -3,7 +3,6 @@ package app
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -56,15 +55,9 @@ func cleanupPluginManagedProcessDirectories(root string) error {
 	return nil
 }
 
-func preparePluginManagedProcess(cmd *exec.Cmd) {
-	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
-}
-
-func terminatePluginManagedProcess(cmd *exec.Cmd) {
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-}
-
-func limitPluginManagedProcess(cmd *exec.Cmd, owner string, cfg *Config) (func(), error) {
+// limitPluginManagedProcess places a keeper in the process's resource cgroup.
+// The executable it starts afterwards, and every descendant, inherits it.
+func limitPluginManagedProcess(pid int, owner string, cfg *Config) (func(), error) {
 	if cfg == nil {
 		return func() {}, nil
 	}
@@ -74,7 +67,7 @@ func limitPluginManagedProcess(cmd *exec.Cmd, owner string, cfg *Config) (func()
 		}
 		return func() {}, nil
 	}
-	cleanup, _, err := attachPluginHostResourceLimits(cmd.Process.Pid, owner, pluginHostResourceLimitsFromConfig(cfg))
+	cleanup, _, err := attachPluginHostResourceLimits(pid, owner, pluginHostResourceLimitsFromConfig(cfg))
 	if err != nil {
 		if cfg.PluginMinimumSandboxLevel() == pluginSandboxLevelFull {
 			return nil, fmt.Errorf("managed process resource limits: %w", err)

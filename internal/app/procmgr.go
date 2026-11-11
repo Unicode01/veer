@@ -4777,7 +4777,16 @@ func (pm *ProcessManager) stopAll() {
 		logShutdownStep("stop plugin runtime", pm.pluginRuntime.Close)
 	}
 	if pm.pluginControlRuntime != nil {
+		// Closing the control runtime stops managed processes; a hot restart
+		// hands them to the successor first.
+		var processHandoff *pluginProcessHandoff
+		if userspaceWorkerPreserveOnClose() {
+			processHandoff = handOffPluginProcesses(pm.pluginControlRuntime)
+		}
 		logShutdownStep("stop plugin control runtime", pm.pluginControlRuntime.Close)
+		if processHandoff != nil {
+			logShutdownStep("release cgroups for handed-off plugin processes", processHandoff.finalize)
+		}
 	}
 	if pm.kernelRuntime != nil {
 		logShutdownStep("stop kernel runtime", pm.kernelRuntime.Close)

@@ -1222,7 +1222,9 @@ if (result.exit_code !== 0 || result.timed_out || result.cancelled || result.tru
 
 进程 ID 按插件隔离；同代际同配置的 start 幂等，改变配置或代际需先 stop。`process.status(id)`、`list()` 返回状态、PID、启动次数、时间和退出码，不含配置和参数。`process.logs(id)` 显式读取 stdout/stderr 各自最多 64 KiB 的尾部，可能包含凭据，不能直接加入公开状态。restart 默认为 never；on-failure 按 1、2、4、8、16 秒退避，最多重启 max_restarts 次（0–10），耗尽后相同 start 不重置预算。`process.restart(id)` 用于健康检查发现的故障，先优雅停止再退避重启，与失败退出共用同一重启预算。每插件最多 8 项，全局最多 32 项。
 
-`process.stop(id)` 先 TERM，默认 1 秒后 KILL（可设 1–3000 ms），并清理同组子进程。控制 VM 停止、插件停用及运行时关闭都会停止所属进程。Linux 设置父进程死亡信号；完整保护要求 cgroup 限额成功，并通过独立 cgroup 清理后代。CPU/内存/PID 复用插件配置，全局内存/PID 与控制 Host 共用；这些资源限制不表示核心受到低权限 JS 沙箱约束。
+`process.stop(id)` 先 TERM，默认 1 秒后 KILL（可设 1–3000 ms），并清理同组子进程。控制 VM 停止、插件停用及运行时关闭都会停止所属进程。每个进程由一个 `veer --plugin-process-keeper` 守护进程托管：keeper 设置父进程死亡信号启动程序、转发输出并上报退出码；Veer 异常退出时 keeper 立即强杀程序，效果与原来的父进程死亡信号相同。完整保护要求 cgroup 限额成功，并通过独立 cgroup 清理后代；keeper 与程序位于同一 cgroup，计入同一限额。CPU/内存/PID 复用插件配置，全局内存/PID 与控制 Host 共用；这些资源限制不表示核心受到低权限 JS 沙箱约束。
+
+热重启时运行中的进程交给新 Veer，不重启：旧进程为每个 keeper 启用一次性抽象 socket 和随机令牌，写入运行状态目录下的私有交接文件，把进程移到不带控制器的 `veer-handoff/` cgroup 叶子，并关闭委托 cgroup 根上的控制器，使 systemd 能把新主进程放进根 cgroup；做不到时改为停止这些进程。新 Veer 只接受同用户、持有令牌的连接，接管后恢复资源限额，保留 PID、启动时间、启动次数和日志尾部。新 Veer 中的插件用完全相同的规格调用 `start` 即认领该进程，不会重启；规格不同则停止旧进程后重新启动；2 分钟内未被认领的进程会被停止。keeper 等待接管最多 90 秒，超时自行停止程序。`process.restart` 在认领前不可用。服务私有 `/tmp` 在旧实例退出后会被删除，运行中的程序不再能在原私有目录创建文件，认领时新建的私有目录供之后的重启使用。
 
 需要管理外部可执行文件时，Linux 主控制 VM 可使用 feature `control.process_binaries.v1`：`process.binaryInstall(request)` 后台下载，`binaryStatus(id)` 查询版本与进度，`binarySelect({id, version})` 切换默认版本，`binaryRemove({id, version})` 删除未使用版本。均要求本地 `exec` 权限和关闭远程插件安装。该下载属于受信任宿主执行能力，使用宿主网络，不经过 JS 的 `net_access`。
 
