@@ -395,7 +395,8 @@ type tcL2CacheValueV4 struct {
 }
 
 // Established flows send through the next hop their slow path recorded; that
-// record must follow a neighbour change within the fast-path window.
+// record must follow a neighbour change within the fast-path window. Full-cone
+// flows share one front entry per source, so they take the same check.
 func TestEgressNATTCNextHopCacheFollowsNeighbourChange(t *testing.T) {
 	if os.Getenv(egressNATTestEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
@@ -406,7 +407,14 @@ func TestEgressNATTCNextHopCacheFollowsNeighbourChange(t *testing.T) {
 	if _, err := exec.LookPath("ip"); err != nil {
 		t.Skip("ip command is required")
 	}
+	for _, natType := range []string{egressNATTypeSymmetric, egressNATTypeFullCone} {
+		t.Run(natType, func(t *testing.T) {
+			testEgressNATTCNextHopCacheFollowsNeighbourChange(t, natType)
+		})
+	}
+}
 
+func testEgressNATTCNextHopCacheFollowsNeighbourChange(t *testing.T, natType string) {
 	t.Setenv(egressNATHelperStreamCyclesEnv, "240")
 	topology := setupEgressNATIntegrationTopology(t)
 	seedEgressNATIntegrationNeighbor(t, topology)
@@ -419,7 +427,7 @@ func TestEgressNATTCNextHopCacheFollowsNeighbourChange(t *testing.T) {
 		OutInterface:    topology.UplinkHostIF,
 		OutSourceIP:     egressNATUplinkAddr,
 		Protocol:        "tcp",
-		NATType:         egressNATTypeSymmetric,
+		NATType:         natType,
 		Enabled:         true,
 	}, topology.ChildHostIF, 1, "tcp")
 	results, err := rt.Reconcile([]Rule{rule})
@@ -429,6 +437,7 @@ func TestEgressNATTCNextHopCacheFollowsNeighbourChange(t *testing.T) {
 	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
 		t.Fatalf("egress NAT result = %+v, want running tc", result)
 	}
+	assertEgressNATTCIfindexHints(t, rt, topology)
 	cache := rt.coll.Maps["tc_l2_cache_v4"]
 	if cache == nil {
 		t.Fatal("TC tc_l2_cache_v4 map is unavailable")
@@ -519,6 +528,35 @@ func TestEgressNATTCNextHopCacheFollowsNeighbourChange(t *testing.T) {
 		t.Fatalf("streaming client helper failed: %v\nclient logs:\n%s\nbackend logs:\n%s", err, clientLogs.String(), backendLogs.String())
 	}
 	waitForEgressNATHelperExit(t, backendCmd, "tcp-stream", backendLogs.String())
+}
+
+// The ingress interface of an egress NAT rule holds only the wildcard rule
+// form, and its parent hint agrees with the reply parent map.
+func assertEgressNATTCIfindexHints(t *testing.T, rt *linuxKernelRuleRuntime, topology egressNATIntegrationTopology) {
+	t.Helper()
+	hintsMap := rt.coll.Maps[kernelTCIfindexHintsMapName]
+	if hintsMap == nil {
+		t.Fatalf("TC %s map is unavailable", kernelTCIfindexHintsMapName)
+	}
+	for _, name := range []string{topology.ChildHostIF, topology.UplinkHostIF} {
+		link, err := net.InterfaceByName(name)
+		if err != nil {
+			t.Fatalf("interface %s: %v", name, err)
+		}
+		var hints uint32
+		if err := hintsMap.Lookup(uint32(link.Index), &hints); err != nil {
+			t.Fatalf("lookup %s[%s]: %v", kernelTCIfindexHintsMapName, name, err)
+		}
+		wantForms := uint32(0)
+		if name == topology.ChildHostIF {
+			wantForms = kernelTCIfindexHintRuleAny
+		}
+		var parent uint32
+		hasParent := rt.coll.Maps[kernelIfParentMapName].Lookup(uint32(link.Index), &parent) == nil
+		if hints&kernelTCIfindexHintKnown == 0 || hints&0xff != wantForms || (hints&kernelTCIfindexHintHasParent != 0) != hasParent {
+			t.Fatalf("%s[%s] = %#x, want known, rule forms %#x, parent %v", kernelTCIfindexHintsMapName, name, hints, wantForms, hasParent)
+		}
+	}
 }
 
 func TestEgressNATTCFullConeSYNRetryKeepsNATPort(t *testing.T) {

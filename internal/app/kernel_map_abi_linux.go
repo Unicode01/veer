@@ -74,6 +74,7 @@ func tcKernelMapABIContracts() []kernelMapABIContract {
 		{name: kernelNatPortsMapNameV6, key: tcNATPortKeyV6{}, value: tcNATPortValue{}},
 		{name: kernelTCNatPortsOldMapNameV6, key: tcNATPortKeyV6{}, value: tcNATPortValue{}},
 		{name: kernelIfParentMapName, key: uint32(0), value: uint32(0)},
+		{name: kernelTCIfindexHintsMapName, key: uint32(0), value: uint32(0)},
 		{name: kernelLocalIPv4MapName, key: uint32(0), value: uint8(0)},
 		{name: kernelLocalMACMapName, key: uint32(0), value: kernelLocalMACValue{}},
 		{name: kernelNATConfigMapName, key: uint32(0), value: tcNATConfigValueV4{}},

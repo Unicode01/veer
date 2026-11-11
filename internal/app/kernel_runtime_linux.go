@@ -1362,6 +1362,11 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
+	// The hints map starts out unknown, which makes every lookup, so a failure
+	// here leaves the programs correct.
+	if err := narrowKernelTCIfindexHints(coll, prepared); err != nil {
+		log.Printf("kernel dataplane reconcile: sync tc ifindex hints failed: %v", err)
+	}
 	if err := syncKernelLocalIPv4Map(coll.Maps[kernelLocalIPv4MapName], desiredLocalIPv4s); err != nil {
 		coll.Close()
 		msg := fmt.Sprintf("sync kernel local IPv4 bypass map: %v", err)
@@ -2128,6 +2133,9 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 		if err := deletePreparedKernelRuleMapEntry(pieces, item); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return nil, fmt.Errorf("delete stale preserved kernel rule %d: %w", item.rule.ID, err)
 		}
+	}
+	if err := narrowKernelTCIfindexHints(rt.coll, kept); err != nil {
+		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints after retaining rules failed: %v", err)
 	}
 	rt.preparedRules = kept
 	capacities := rt.currentMapCapacitiesLocked()
@@ -2976,6 +2984,9 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 			return fmt.Errorf("clear kernel rule key during drain: %w", err)
 		}
 	}
+	if err := narrowKernelTCIfindexHints(rt.coll, nil); err != nil {
+		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints during drain failed: %v", err)
+	}
 	if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
 		return fmt.Errorf("clear kernel local IPv4 bypass map during drain: %w", err)
 	}
@@ -3088,6 +3099,10 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel nat config map: %w", err)
 	}
+	if err := widenKernelTCIfindexHints(rt.coll, rt.preparedRules, prepared, parentIfMap); err != nil {
+		rt.discardAttachmentsLocked(createdAttachments)
+		return fmt.Errorf("widen tc ifindex hints: %w", err)
+	}
 	if err := applyKernelDualStackRuleMapDiff(pieces, diff); err != nil {
 		rt.discardAttachmentsLocked(createdAttachments)
 		return err
@@ -3095,6 +3110,9 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err := syncKernelIfParentMap(rt.coll.Maps[kernelIfParentMapName], parentIfMap); err != nil {
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel reply parent map: %w", err)
+	}
+	if err := narrowKernelTCIfindexHints(rt.coll, prepared); err != nil {
+		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints failed: %v", err)
 	}
 	if len(localIPv4s) == 0 {
 		if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {

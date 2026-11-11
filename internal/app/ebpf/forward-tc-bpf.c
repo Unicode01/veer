@@ -642,6 +642,31 @@ struct bpf_map_def SEC("maps") tc_l2_cache_v4 = {
 	.max_entries = 16384,
 };
 
+/*
+ * Per-ifindex hints written by userspace after the rule and parent maps
+ * change: which rule key forms exist on the interface and whether it has a
+ * reply parent. They only let lookups be skipped, so an entry without
+ * FORWARD_TC_IFINDEX_HINT_KNOWN (a fresh map, or an ifindex past the end)
+ * falls back to trying every form. Userspace widens the hints before it adds
+ * rules or parents and narrows them only afterwards.
+ */
+#define FORWARD_TC_IFINDEX_HINTS_MAX 65536
+#define FORWARD_TC_IFINDEX_HINT_RULE_EXACT 0x1
+#define FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR 0x2
+#define FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT 0x4
+#define FORWARD_TC_IFINDEX_HINT_RULE_ANY 0x8
+#define FORWARD_TC_IFINDEX_HINT_RULE_FORMS 0xf
+#define FORWARD_TC_IFINDEX_HINT_RULE_V6_SHIFT 4
+#define FORWARD_TC_IFINDEX_HINT_HAS_PARENT 0x100
+#define FORWARD_TC_IFINDEX_HINT_KNOWN 0x80000000U
+
+struct bpf_map_def SEC("maps") tc_ifindex_hints = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = FORWARD_TC_IFINDEX_HINTS_MAX,
+};
+
 struct bpf_map_def SEC("maps") scratch_flow_v4 = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
@@ -1003,7 +1028,7 @@ static __always_inline int handle_forward_ingress_v4_fullnat(struct __sk_buff *s
 static __always_inline int handle_forward_ingress_v4_egress_nat(struct __sk_buff *skb);
 static __always_inline int handle_forward_ingress_v4_fullnat_existing(struct __sk_buff *skb);
 static __always_inline int handle_forward_ingress_v4_fullnat_new(struct __sk_buff *skb);
-static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank);
+static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank, int try_fast);
 static __always_inline int handle_reply_ingress_v4_transparent(struct __sk_buff *skb);
 static __always_inline int handle_reply_ingress_v4_fullnat(struct __sk_buff *skb);
 
@@ -2091,6 +2116,28 @@ static __always_inline int parse_ipv6_l4(struct __sk_buff *skb, struct packet_ct
 	return 0;
 }
 
+static __always_inline __u32 lookup_tc_ifindex_hints(__u32 ifindex)
+{
+	__u32 key = ifindex;
+	__u32 *hints;
+
+	if (ifindex >= FORWARD_TC_IFINDEX_HINTS_MAX)
+		return 0;
+	hints = bpf_map_lookup_elem(&tc_ifindex_hints, &key);
+	if (!hints)
+		return 0;
+	return *hints;
+}
+
+static __always_inline __u32 tc_ifindex_rule_forms(__u32 ifindex, __u32 shift)
+{
+	__u32 hints = lookup_tc_ifindex_hints(ifindex);
+
+	if ((hints & FORWARD_TC_IFINDEX_HINT_KNOWN) == 0)
+		return FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
+	return (hints >> shift) & FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
+}
+
 static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *skb, struct packet_ctx *ctx)
 {
 	struct rule_key_v4 key = {
@@ -2100,30 +2147,40 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *sk
 		.proto = ctx->proto,
 	};
 	struct rule_value_v4 *rule;
+	__u32 forms = tc_ifindex_rule_forms(skb->ifindex, 0);
 
 	ctx->rule_wildcard_addr = 0;
-	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule)
-		return rule;
-
-	key.dst_addr = 0;
-	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule) {
-		ctx->rule_wildcard_addr = 1;
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_EXACT) {
+		rule = bpf_map_lookup_elem(&rules_v4, &key);
+		if (rule)
+			return rule;
 	}
 
-	key.dst_addr = bpf_ntohl(ctx->dst_addr);
-	key.dst_port = 0;
-	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule)
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR) {
+		key.dst_addr = 0;
+		rule = bpf_map_lookup_elem(&rules_v4, &key);
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
+			return rule;
+		}
+	}
 
-	key.dst_addr = 0;
-	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule) {
-		ctx->rule_wildcard_addr = 1;
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT) {
+		key.dst_addr = bpf_ntohl(ctx->dst_addr);
+		key.dst_port = 0;
+		rule = bpf_map_lookup_elem(&rules_v4, &key);
+		if (rule)
+			return rule;
+	}
+
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY) {
+		key.dst_addr = 0;
+		key.dst_port = 0;
+		rule = bpf_map_lookup_elem(&rules_v4, &key);
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
+			return rule;
+		}
 	}
 
 	return 0;
@@ -2137,31 +2194,41 @@ static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *sk
 		.proto = ctx->proto,
 	};
 	struct rule_value_v6 *rule;
+	__u32 forms = tc_ifindex_rule_forms(skb->ifindex, FORWARD_TC_IFINDEX_HINT_RULE_V6_SHIFT);
 
 	ctx->rule_wildcard_addr = 0;
-	copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
-	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule)
-		return rule;
-
-	__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
-	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule) {
-		ctx->rule_wildcard_addr = 1;
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_EXACT) {
+		copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
+		rule = bpf_map_lookup_elem(&rules_v6, &key);
+		if (rule)
+			return rule;
 	}
 
-	copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
-	key.dst_port = 0;
-	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule)
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR) {
+		__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
+		rule = bpf_map_lookup_elem(&rules_v6, &key);
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
+			return rule;
+		}
+	}
 
-	__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
-	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule) {
-		ctx->rule_wildcard_addr = 1;
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT) {
+		copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
+		key.dst_port = 0;
+		rule = bpf_map_lookup_elem(&rules_v6, &key);
+		if (rule)
+			return rule;
+	}
+
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY) {
+		__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
+		key.dst_port = 0;
+		rule = bpf_map_lookup_elem(&rules_v6, &key);
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
+			return rule;
+		}
 	}
 
 	return 0;
@@ -2581,8 +2648,12 @@ static __always_inline void build_full_cone_front_flow_key(struct __sk_buff *skb
 static __always_inline __u32 resolve_parent_ifindex(__u32 ifindex)
 {
 	__u32 key = ifindex;
-	__u32 *parent = bpf_map_lookup_elem(&if_parent_v4, &key);
+	__u32 hints = lookup_tc_ifindex_hints(ifindex);
+	__u32 *parent;
 
+	if ((hints & (FORWARD_TC_IFINDEX_HINT_KNOWN | FORWARD_TC_IFINDEX_HINT_HAS_PARENT)) == FORWARD_TC_IFINDEX_HINT_KNOWN)
+		return ifindex;
+	parent = bpf_map_lookup_elem(&if_parent_v4, &key);
 	if (parent && *parent != 0)
 		return *parent;
 	return ifindex;
@@ -3606,14 +3677,27 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 {
 	const struct tc_l2_value_v4 *l2 = 0;
 	__u32 nat_addr;
+	__u32 dst_addr;
+	__u16 dst_port;
+	int full_cone;
 
 	if (!front_flow || !flow_within_fast_path_window(front_flow, now) || tcp_packet_changes_state(ctx))
 		return FORWARD_TC_SLOW_PATH;
 	if (!flow_matches_rule_v4(front_flow, rule))
 		return FORWARD_TC_SLOW_PATH;
 	nat_addr = front_flow->nat_addr ? front_flow->nat_addr : rule->nat_addr;
-	if ((rule->flags & FORWARD_RULE_FLAG_PREPARED_L2) == 0 && !prefer_redirect_neigh_fast(nat_cfg_flags)) {
-		l2 = lookup_tc_l2_v4(skb, ctx, rule->out_ifindex, nat_addr, front_flow->front_addr);
+	/* A full-cone front entry is shared by every destination of its source. */
+	full_cone = is_full_cone_flow(front_flow);
+	if (full_cone) {
+		dst_addr = bpf_ntohl(ctx->dst_addr);
+		dst_port = ctx->dst_port;
+	} else {
+		dst_addr = front_flow->front_addr;
+		dst_port = front_flow->front_port;
+	}
+	/* The full-cone slow path always resolves through the FIB, so this does too. */
+	if ((full_cone || (rule->flags & FORWARD_RULE_FLAG_PREPARED_L2) == 0) && !prefer_redirect_neigh_fast(nat_cfg_flags)) {
+		l2 = lookup_tc_l2_v4(skb, ctx, rule->out_ifindex, nat_addr, dst_addr);
 		if (!l2)
 			return FORWARD_TC_SLOW_PATH;
 	}
@@ -3634,11 +3718,21 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 		return TC_ACT_SHOT;
 	if (l2)
 		return redirect_tc_l2_v4(skb, l2);
+	if (full_cone) {
+		struct redirect_target_v4 redirect = {};
+
+		redirect.ifindex = rule->out_ifindex;
+		redirect.src_addr = nat_addr;
+		redirect.dst_addr = dst_addr;
+		redirect.src_port = front_flow->nat_port;
+		redirect.dst_port = dst_port;
+		return redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
+	}
 	return send_egress_nat_forward(skb, ctx, rule, nat_addr, front_flow->nat_port,
-		front_flow->front_addr, front_flow->front_port, nat_cfg_flags);
+		dst_addr, dst_port, nat_cfg_flags);
 }
 
-static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank)
+static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank, int try_fast)
 {
 	struct flow_key_v4 front_key = {};
 	struct flow_key_v4 reply_key = {};
@@ -3655,9 +3749,11 @@ static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *
 	int close_complete = 0;
 	int fast;
 
-	fast = try_egress_nat_forward_fast(skb, ctx, rule, front_flow, now, nat_cfg_flags);
-	if (fast != FORWARD_TC_SLOW_PATH)
-		return fast;
+	if (try_fast) {
+		fast = try_egress_nat_forward_fast(skb, ctx, rule, front_flow, now, nat_cfg_flags);
+		if (fast != FORWARD_TC_SLOW_PATH)
+			return fast;
+	}
 	front_value = lookup_scratch_flow_v4();
 	reply_value = lookup_scratch_flow_aux_v4();
 	if (!front_value || !reply_value || !front_flow)
@@ -3807,7 +3903,7 @@ static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, 
 			return TC_ACT_OK;
 		if (!is_fullnat_front_flow(front_flow))
 			return TC_ACT_SHOT;
-		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank);
+		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank, 1);
 	}
 	created_front = 1;
 	bump_kernel_flow_occupancy();
@@ -3850,7 +3946,7 @@ static __always_inline int handle_egress_nat_forward_non_full_cone(struct __sk_b
 	if (front_flow && !is_egress_nat_flow(front_flow))
 		return TC_ACT_OK;
 	if (is_fullnat_front_flow(front_flow))
-		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank);
+		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank, 1);
 	return handle_egress_nat_forward_new(skb, ctx, rule, &front_key);
 }
 
@@ -3869,6 +3965,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	__u8 created_reply = 0;
 	__u8 update_front = 0;
 	__u8 update_reply = 0;
+	__u8 touch_front = 0;
 	__u8 new_session = 0;
 	__u8 count_udp_now = 0;
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
@@ -3994,6 +4091,9 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 			if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 				front_value->last_seen_ns = now;
 				update_front = 1;
+			} else if (!created_front && (now - front_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+				/* Reopens the fast-path window now that the pair was checked. */
+				touch_front = 1;
 			}
 			if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 				reply_value->last_seen_ns = now;
@@ -4010,6 +4110,9 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 			if (update_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, front_value, BPF_ANY) < 0)
 				return TC_ACT_SHOT;
 		}
+	} else if (touch_front && front_flow) {
+		/* Only the timestamp, so concurrent flag updates are kept. */
+		front_flow->last_seen_ns = now;
 	}
 	if (update_reply) {
 		if (!created_front && !created_reply && reply_flow) {
@@ -4043,7 +4146,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	reply_or_nat.flow.dst_addr = bpf_ntohl(ctx->dst_addr);
 	reply_or_nat.flow.dst_port = ctx->dst_port;
 	{
-		int action = redirect_ifindex(skb, ctx, (const struct redirect_target_v4 *)&reply_or_nat.flow, nat_cfg_flags);
+		int action = redirect_ifindex_l2(skb, ctx, (const struct redirect_target_v4 *)&reply_or_nat.flow, nat_cfg_flags, 1);
 
 		if (close_complete && action == TC_ACT_REDIRECT)
 			delete_fullnat_state(flow_bank, &close_reply_key, reply_value, ctx->proto);
@@ -4948,24 +5051,38 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 	if (is_passthrough_rule(rule))
 		return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 	if (is_egress_nat_rule(rule)) {
-		if (is_local_ipv4(dispatch->ctx.dst_addr))
-			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 		if (egress_nat_dst_mac_mismatch(skb, rule))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 		if (rule->flags & FORWARD_RULE_FLAG_DROP)
 			return finish_forward_pipeline_v4(skb, TC_ACT_SHOT);
-		if (!is_full_cone_egress_nat_rule(rule)) {
-			/* Keep established egress NAT sessions on the current program across
-			 * hot-restart handoff so they don't depend on a successor-only tail call.
-			 */
-			__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
-			dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+		/* Keep established egress NAT sessions on the current program across
+		 * hot-restart handoff so they don't depend on a successor-only tail call.
+		 */
+		__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
+		dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+		if (is_full_cone_egress_nat_rule(rule))
+			build_full_cone_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
+		else
 			build_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
-			front_flow = lookup_flow_v4_active_or_old(&dispatch->flow_key, &dispatch->flow_bank);
+		front_flow = lookup_flow_v4_active_or_old(&dispatch->flow_key, &dispatch->flow_bank);
+		/* No flow is created towards a local address. One whose destination
+		 * became local afterwards stops matching here once its fast-path
+		 * window lapses, so the local check can follow.
+		 */
+		if (is_egress_nat_flow(front_flow) && is_fullnat_front_flow(front_flow)) {
+			int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, front_flow,
+				bpf_ktime_get_ns(), load_kernel_nat_config_flags());
+
+			if (fast != FORWARD_TC_SLOW_PATH)
+				return finish_forward_pipeline_v4(skb, fast);
+		}
+		if (is_local_ipv4(dispatch->ctx.dst_addr))
+			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+		if (!is_full_cone_egress_nat_rule(rule)) {
 			if (front_flow && !is_egress_nat_flow(front_flow))
 				return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 			if (is_fullnat_front_flow(front_flow))
-				return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank));
+				return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank, 0));
 		}
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return finish_forward_pipeline_v4(skb, TC_ACT_UNSPEC);
