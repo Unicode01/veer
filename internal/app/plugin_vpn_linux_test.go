@@ -694,7 +694,7 @@ func runVPNWireGuardTopology(t *testing.T) {
 					continue
 				}
 				info, err := m.Info()
-				if err != nil || info.Name != "wg_links" {
+				if err != nil || info.Name != "tunnel_links" {
 					m.Close()
 					continue
 				}

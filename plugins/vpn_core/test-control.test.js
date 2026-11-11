@@ -78,14 +78,14 @@ function fixture(config = profile(), options = {}) {
       return ok();
     }
   };
-  const host=createTestHost({pluginDir:options.pluginDir||pluginDir,hostInfo:options.hostInfo,availableFeatures:options.availableFeatures,remoteInstallEnabled:options.remoteInstallEnabled,fixtures:{kv:options.kv||{},resources:{profiles:{default:{data:config,enabled:options.enabled!==false}}},secrets:options.missingKey?{}:{private_default:PRIVATE,...options.secrets}},adapters:{...adapters,...options.adapters}}).load();
+  const host=createTestHost({pluginDir:options.pluginDir||pluginDir,hostInfo:options.hostInfo,availableFeatures:options.availableFeatures,remoteInstallEnabled:options.remoteInstallEnabled,fixtures:{kv:options.kv||{},resources:{profiles:{default:{data:config,enabled:options.enabled!==false}},...options.resources},secrets:options.missingKey?{}:{private_default:PRIVATE,...options.secrets}},adapters:{...adapters,...options.adapters}}).load();
   return {host,state,apply:()=>host.action('apply',{key:'default'}),maps:()=>host.state.maps};
 }
 test('WG is opt-in and registration/drafts do not change networking',()=>{
   const h=fixture();h.host.reconcile();assert.equal(h.state.calls.length,0);assert.equal(h.state.services.length,0);
   const snapshot=h.host.snapshot();
-  assert.equal(snapshot.surface.hooks.find(h=>h.id==='wg-links').binding_required,true);
-  assert.equal(snapshot.resources.hook_bindings?.['wg-links'],undefined);
+  assert.equal(snapshot.surface.hooks.find(h=>h.id==='tunnel-links').binding_required,true);
+  assert.equal(snapshot.resources.hook_bindings?.['tunnel-links'],undefined);
   assert.ok(snapshot.manifest.compatibility.features.includes('dataplane.hook_bindings.v1'));
   assert.equal(h.host.snapshot().manifest.kind,'pipeline');assert.equal(h.host.snapshot().manifest.stability,'lab');
   assert.throws(()=>fixture(profile(),{remoteInstallEnabled:true}).apply(),/disabled while remote/);
@@ -148,10 +148,33 @@ test('WG pending cleanup retries after its tunnel is already gone',()=>{
 test('WG repairs ifindex changes and restores applied settings across restart, ignoring draft edits',()=>{
   const h=fixture();h.apply();const old=h.host.snapshot();
   h.state.links=h.state.links.filter(l=>l.ifname!=='vwgdefault');
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});assert.equal(h.state.links.length,3);
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});assert.equal(h.state.links.length,3);
   const next=fixture(profile({slot:2}),{state:h.state,kv:old.kv});next.host.reconcile();
   assert.equal(next.host.snapshot().kv.lease_default.plan.slot,1);
   next.host.run('onDeactivate');assert.equal(next.state.links.length,0);
+});
+test('VPN 0.9.0 leases, hook bindings and repair timer move to the tunnel adapter without rebuilding the WAN',()=>{
+  const h=fixture();h.apply();const snapshot=h.host.snapshot(),old=clone(snapshot.kv);
+  old.lease_default.wg_ifindex=old.lease_default.tunnel_ifindex;delete old.lease_default.tunnel_ifindex;
+  const legacy={'wg-links':{data:{hook_id:'wg-links',interfaces:['vwgdefault','veerwgp1']},enabled:true},
+    'wg-direct-out':{data:{hook_id:'wg-direct-out',interfaces:[]},enabled:false}};
+  const status={default:{data:clone(snapshot.resources.status.default.data),enabled:true}};
+  const next=fixture(profile(),{state:h.state,kv:old,resources:{hook_bindings:legacy,status}});
+  const calls=h.state.calls.length,services=h.state.services.length;
+  next.host.reconcile();
+  assert.equal(next.state.calls.slice(calls).some(r=>['add','del','set','syncconf'].some(a=>r.args.includes(a))),false);
+  assert.equal(next.state.services.length,services);
+  const bindings=next.host.snapshot().resources.hook_bindings;
+  assert.deepEqual(Object.keys(bindings).sort(),['tunnel-direct-out','tunnel-links']);
+  assert.deepEqual(bindings['tunnel-links'].data.interfaces,['vwgdefault','veerwgp1']);
+  assert.deepEqual([...next.maps().keys()],['tunnel_adapter\0tunnel_links']);
+  assert.equal(next.maps().get('tunnel_adapter\0tunnel_links').size,2);
+  next.host.state.timers.set('wg_repair',{name:'wg_repair',kind:'interval',delay_ms:1000,payload:{}});
+  next.host.run('onTimer',{timer:{name:'wg_repair'}});
+  assert.equal(next.host.state.timers.has('wg_repair'),false);assert.equal(next.host.state.timers.has('tunnel_repair'),true);
+  next.apply();const lease=next.host.snapshot().kv.lease_default;
+  assert.equal(lease.wg_ifindex,undefined);
+  assert.equal(lease.tunnel_ifindex,next.state.links.find(l=>l.ifname==='vwgdefault').ifindex);
 });
 test('WG reserves slots and refuses teardown of an externally replaced link',()=>{
   const h=fixture();h.apply();const lease=clone(h.host.snapshot().kv.lease_default);lease.plan.key='other';
@@ -174,10 +197,10 @@ test('WG multiple WANs keep their own maps and bindings during independent teard
   assert.equal(h.state.links.length,6);assert.equal([...h.maps().values()][0].size,4);
   h.host.action('teardown',{key:'default'});assert.equal(h.state.links.length,3);
   assert.equal([...h.maps().values()][0].size,2);
-  assert.deepEqual(h.host.snapshot().resources.hook_bindings['wg-links'].data.interfaces,['vwgsecond','veerwgp2']);
+  assert.deepEqual(h.host.snapshot().resources.hook_bindings['tunnel-links'].data.interfaces,['vwgsecond','veerwgp2']);
   h.host.action('teardown',{key:'second'});assert.equal(h.state.links.length,0);
-  assert.equal(h.host.snapshot().resources.hook_bindings['wg-links'].enabled,false);
-  assert.deepEqual(h.host.snapshot().resources.hook_bindings['wg-links'].data.interfaces,[]);
+  assert.equal(h.host.snapshot().resources.hook_bindings['tunnel-links'].enabled,false);
+  assert.deepEqual(h.host.snapshot().resources.hook_bindings['tunnel-links'].data.interfaces,[]);
 });
 test('WG rejects a mismatched WAN veth peer without enabling TC forwarding',()=>{
   const h=fixture();h.apply();h.state.links.find(l=>l.ifname==='veerwgp1').link_index=999;
@@ -217,17 +240,17 @@ test('WG selects a probed optional object and coordinates GSO, with missing-arti
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'veer-wg-capability-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   fs.cpSync(pluginDir,dir,{recursive:true});
-  fs.writeFileSync(path.join(dir,'wg_adapter.o'),'base-test-object');
-  fs.writeFileSync(path.join(dir,'wg_adapter-kfuncs.o'),'enhanced-test-object');
+  fs.writeFileSync(path.join(dir,'tunnel_adapter.o'),'base-test-object');
+  fs.writeFileSync(path.join(dir,'tunnel_adapter-kfuncs.o'),'enhanced-test-object');
   const options={pluginDir:dir,availableFeatures:['dataplane.kfuncs.handoff.v1']};
   const enhanced=fixture(profile(),options);enhanced.apply();
-  assert.equal(enhanced.host.snapshot().surface.objects[0].path,'wg_adapter-kfuncs.o');
+  assert.equal(enhanced.host.snapshot().surface.objects[0].path,'tunnel_adapter-kfuncs.o');
   const request=enhanced.state.records.sessions.wg_default.data.interface_preparation;
   assert.equal(request.local_gso.max_segs,65535);assert.equal(request.local_offloads.gso,true);assert.equal(request.pipeline_offloads.gro,true);
   assert.equal(enhanced.host.state.resources.get('status').get('default').data.dataplane,'kfuncs');
-  fs.unlinkSync(path.join(dir,'wg_adapter-kfuncs.o'));
+  fs.unlinkSync(path.join(dir,'tunnel_adapter-kfuncs.o'));
   const fallback=fixture(profile(),options);fallback.apply();
-  assert.equal(fallback.host.snapshot().surface.objects[0].path,'wg_adapter.o');
+  assert.equal(fallback.host.snapshot().surface.objects[0].path,'tunnel_adapter.o');
   assert.equal(fallback.state.records.sessions.wg_default.data.interface_preparation.local_offloads.gso,false);
 });
 
@@ -275,7 +298,7 @@ test('VPN selects a single WAN boundary only after probing ingress handoff and f
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'veer-vpn-direct-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   fs.cpSync(pluginDir,dir,{recursive:true});
-  for(const name of ['wg_adapter.o','wg_adapter-kfuncs.o','wg_adapter-direct.o'])fs.writeFileSync(path.join(dir,name),'test-object');
+  for(const name of ['tunnel_adapter.o','tunnel_adapter-kfuncs.o','tunnel_adapter-direct.o'])fs.writeFileSync(path.join(dir,name),'test-object');
   const features=['dataplane.kfuncs.handoff.v1','dataplane.kfuncs.handoff_ingress.v1'];
   for(const driver of ['wireguard','mihomo','sing_box']) {
     const options={pluginDir:dir,availableFeatures:features};
@@ -283,9 +306,9 @@ test('VPN selects a single WAN boundary only after probing ingress handoff and f
     const result=h.apply(), local=driver==='wireguard'?'veerwg1':'veervpn1';
     assert.equal(result.handoff_mode,'direct');assert.equal(result.pipeline_interface,'');
     assert.equal(h.state.links.length,2);assert.equal(h.state.links.find(l=>l.ifname===local).linkinfo.info_kind,'dummy');
-    assert.equal(h.host.snapshot().surface.objects[0].path,'wg_adapter-direct.o');
-    assert.deepEqual(h.host.snapshot().resources.hook_bindings['wg-direct-out'].data.interfaces,[local]);
-    assert.deepEqual(h.host.snapshot().resources.hook_bindings['wg-links'].data.interfaces,[result.interface]);
+    assert.equal(h.host.snapshot().surface.objects[0].path,'tunnel_adapter-direct.o');
+    assert.deepEqual(h.host.snapshot().resources.hook_bindings['tunnel-direct-out'].data.interfaces,[local]);
+    assert.deepEqual(h.host.snapshot().resources.hook_bindings['tunnel-links'].data.interfaces,[result.interface]);
     const map=[...h.maps().values()][0];assert.equal(map.size,2);
     const reply=[...map.values()].find(value=>value.startsWith('03000000'));assert.ok(reply);
     const before=h.state.services.length;h.host.reconcile();assert.equal(h.state.services.length,before);
@@ -293,7 +316,7 @@ test('VPN selects a single WAN boundary only after probing ingress handoff and f
     h.apply();assert.equal(h.state.links.length,2);
   }
   const old=fixture(profile(),{pluginDir:dir,availableFeatures:features.slice(0,1)});old.apply();assert.equal(old.state.links.length,3);
-  fs.unlinkSync(path.join(dir,'wg_adapter-direct.o'));
+  fs.unlinkSync(path.join(dir,'tunnel_adapter-direct.o'));
   const missing=fixture(profile(),{pluginDir:dir,availableFeatures:features});missing.apply();assert.equal(missing.state.links.length,3);
 });
 
@@ -301,7 +324,7 @@ test('VPN migrates owned boundaries between helper and veth paths without leakin
   const fs=require('node:fs'), os=require('node:os');
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'veer-vpn-migrate-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   fs.cpSync(pluginDir,dir,{recursive:true});
-  for(const name of ['wg_adapter.o','wg_adapter-kfuncs.o','wg_adapter-direct.o'])fs.writeFileSync(path.join(dir,name),'test-object');
+  for(const name of ['tunnel_adapter.o','tunnel_adapter-kfuncs.o','tunnel_adapter-direct.o'])fs.writeFileSync(path.join(dir,name),'test-object');
   for(const driver of ['wireguard','mihomo','sing_box']) {
     const create=options=>driver==='wireguard'?fixture(profile(),options):vpnFixture(driver,{},options);
     let h=create({pluginDir:dir});h.apply();const source=h.host.snapshot().kv.lease_default.plan.addresses;
@@ -491,8 +514,8 @@ for(const driver of ['mihomo','sing_box']) {
     assert.equal(h.state.records.sessions.vpn_default.data.ipv4,address);
     assert.equal(h.state.calls.filter(r=>r.args.includes('route')).length,routeReads);
     h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
-    h.host.run('onTimer',{timer:{name:'wg_repair'}});
-    h.host.run('onTimer',{timer:{name:'wg_repair'}});
+    h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
+    h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
     assert.equal(h.state.records.sessions.vpn_default.data.ipv4,address);
   });
 }
@@ -609,21 +632,21 @@ test('VPN delayed TUN is withheld until ready, then claimed and published by rep
   const h=vpnFixture('mihomo',{}, {delayed:true});assert.equal(h.apply().phase,'starting');
   assert.equal(h.state.records.status.vpn_default.enabled,false);
   h.state.links.push({ifname:'vtundefault',ifindex:h.state.next++,ifalias:'',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
   assert.equal(h.state.links.find(l=>l.ifname==='vtundefault').ifalias,'veer:vpn_core:default');
 });
 
 test('VPN startup without a TUN times out through the existing restart budget',()=>{
   const h=vpnFixture('mihomo',{}, {delayed:true});h.apply();
   h.procs.vpn_default.started_at=Date.now();
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});assert.equal(h.procs.vpn_default.starts,1);
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});assert.equal(h.procs.vpn_default.starts,1);
   h.procs.vpn_default.started_at=Date.now()-31000;
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});assert.equal(h.procs.vpn_default.starts,2);
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});assert.equal(h.procs.vpn_default.starts,2);
   assert.equal(h.state.records.sessions.vpn_default.enabled,false);
 });
 test('VPN core death withdraws both packet directions and never resets an exhausted restart budget',()=>{
   const h=vpnFixture();h.apply();h.procs.vpn_default.state='exited';h.procs.vpn_default.exit_code=2;
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal([...h.maps().values()][0].size,0);assert.equal(h.state.records.sessions.vpn_default.enabled,false);
   assert.equal(h.host.snapshot().resources.status.default.data.phase,'failed');
   assert.equal(h.procs.vpn_default.starts,1);
@@ -633,17 +656,17 @@ test('VPN deleted TUN uses bounded health recovery, and down/MTU drift repairs t
   const h=vpnFixture();h.apply();
   h.state.links.find(l=>l.ifname==='vtundefault').flags=[];
   h.state.links.find(l=>l.ifname==='vtundefault').mtu=1300;
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.state.links.find(l=>l.ifname==='vtundefault').mtu,1420);
   assert.equal(h.procs.vpn_default.starts,1);
   h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.procs.vpn_default.starts,2);
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
   h.procs.vpn_default.starts=4;
   h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.match(h.host.snapshot().resources.status.default.data.error,/budget exhausted/);
   assert.equal([...h.maps().values()][0].size,0);
 });
@@ -652,7 +675,7 @@ test('VPN recovery restores the applied encrypted configuration and ignores newe
   h.host.action('set_core_config',{value:JSON.stringify({proxies:[{password:'new-draft'}]})});
   h.procs.vpn_default.started_at=2000;h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
   h.state.links.push({ifname:'vtundefault',ifindex:h.state.next++,ifalias:'',linkinfo:{info_kind:'tun'},flags:['UP'],mtu:1420});
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.specs.at(-1).config,applied);assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
 });
 
@@ -673,8 +696,8 @@ for(const driver of ['wireguard','mihomo','sing_box','tun']) {
     const map=[...h.maps().values()][0], expected=[...map], before=clone(h.state), lease=clone(h.host.snapshot().kv.lease_default);
     const procs=clone(h.procs||{}), specs=h.specs?.length;
     let writes=0;const put=map.set.bind(map);map.set=(...args)=>{writes++;return put(...args);};
-    const get=map.get.bind(map);map.get=key=>{if(!map.has(key))throw new Error('ebpf.mapGet: get map wg_links: lookup: key does not exist');return get(key);};
-    const tick=()=>h.host.run('onTimer',{timer:{name:'wg_repair'}});
+    const get=map.get.bind(map);map.get=key=>{if(!map.has(key))throw new Error('ebpf.mapGet: get map tunnel_links: lookup: key does not exist');return get(key);};
+    const tick=()=>h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
     tick();assert.equal(writes,0,'healthy polls must not rewrite maps');
     for(const damage of ['empty','missing-forward','missing-reply','corrupt-forward','corrupt-reply']) {
       if(damage==='empty')map.clear();
@@ -703,7 +726,7 @@ test('VPN enables GSO only for a managed sing-box TUN with negotiated capabiliti
     h.host.context.vpnTestNow=()=>now;require('node:vm').runInContext('Date.now = vpnTestNow',h.host.context);
     let status=h.apply();
     for(let i=0;status.phase==='starting'&&i<3;i++){
-      now+=1001;h.host.run('onTimer',{timer:{name:'wg_repair'}});status=h.host.action('inspect',{});
+      now+=1001;h.host.run('onTimer',{timer:{name:'tunnel_repair'}});status=h.host.action('inspect',{});
     }
     assert.equal(status.phase,'applied');
     const data=h.state.records.sessions.vpn_default.data;
@@ -717,7 +740,7 @@ test('VPN enables GSO only for a managed sing-box TUN with negotiated capabiliti
     assert.equal(prepared.usable,false);
     assert.equal(prepared.interface_preparation.local_offloads.gso,c.want);
     const before=probes;
-    h.host.run('onTimer',{timer:{name:'wg_repair'}});h.host.reconcile();
+    h.host.run('onTimer',{timer:{name:'tunnel_repair'}});h.host.reconcile();
     assert.equal(probes,before,'healthy polling/reconciliation must not execute ethtool');
     assert.equal(h.state.records.sessions.vpn_default.data.interface_preparation.local_offloads.gso,c.want);
   }
@@ -732,14 +755,14 @@ test('VPN waits for bounded TUN offload negotiation without publishing or repeat
   assert.equal(h.apply().phase,'starting');
   assert.equal([...h.maps().values()].reduce((n,m)=>n+m.size,0),0);
   assert.notEqual(h.state.records.sessions.vpn_default?.enabled,true);
-  h.host.reconcile();h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.reconcile();h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(probes,1);
   ready=true;now+=1001;
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.host.action('inspect',{}).tun_gso,true);
   assert.equal(h.state.records.sessions.vpn_default.enabled,true);
   assert.equal(probes,2);
-  for(let i=0;i<10;i++)h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  for(let i=0;i<10;i++)h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(probes,2);
 });
 
@@ -751,10 +774,10 @@ test('VPN offload query failure falls back and a new core generation reprobes sa
   assert.equal(h.apply().tun_gso,true);
   supported=false;
   h.state.links=h.state.links.filter(l=>l.ifname!=='vtundefault');
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.state.records.sessions.vpn_default.enabled,false);
   assert.equal(h.state.records.sessions.vpn_default.data.interface_preparation.local_offloads.gso,false);
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.host.snapshot().resources.status.default.data.phase,'applied');
   assert.equal(h.state.records.sessions.vpn_default.data.interface_preparation.local_offloads.gso,false);
   assert.equal(probes,2);
@@ -774,7 +797,7 @@ test('VPN healthy polling uses native reads without subprocesses or dataplane mu
   const h=vpnFixture();h.apply();
   const before=h.host.snapshot(), calls=h.state.calls.length, preparations=h.state.services.length;
   const maps=clone([...h.maps()].map(([name,entries])=>[name,[...entries]]));
-  for(let i=0;i<10;i++)h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  for(let i=0;i<10;i++)h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.state.calls.length,calls);
   assert.equal(h.state.services.length,preparations);
   assert.equal(h.specs.length,1);
@@ -785,12 +808,12 @@ test('VPN healthy polling uses native reads without subprocesses or dataplane mu
 test('VPN older native metadata falls back to bounded ip queries and preserves ownership',()=>{
   const h=vpnFixture('mihomo',{}, {legacyNetInfo:true});h.apply();
   const before=h.state.calls.length;
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   const reads=h.state.calls.slice(before);
   assert.equal(reads.length,3);
   for(const r of reads)assert.deepEqual(r.args.slice(0,6),['-j','-d','link','show','dev',r.args[5]]);
   h.state.links.find(l=>l.ifname==='vtundefault').ifalias='foreign';
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.state.records.sessions.vpn_default.enabled,false);
   assert.match(h.host.snapshot().resources.status.default.data.error,/unowned/);
 });
@@ -805,7 +828,7 @@ test('VPN native lookup errors suspend forwarding and never bypass ownership thr
       mac:l.address,up:(l.flags||[]).includes('UP'),peer_ifindex:l.link_index};
   }}});
   h.apply();const calls=h.state.calls.length;broken=true;
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.state.calls.length,calls);
   assert.equal(h.state.records.sessions.vpn_default.enabled,false);
   assert.equal([...h.maps().values()][0].size,0);
@@ -829,7 +852,7 @@ test('VPN native tuntap metadata distinguishes TUN from a foreign TAP',()=>{
 test('VPN polling withdraws a TAP even if its owner and reused ifindex match the lease',()=>{
   const h=vpnFixture();h.apply();
   h.state.links.find(l=>l.ifname==='vtundefault').linkinfo.info_kind='tap';
-  h.host.run('onTimer',{timer:{name:'wg_repair'}});
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
   assert.equal(h.state.records.sessions.vpn_default.enabled,false);
   assert.equal([...h.maps().values()][0].size,0);
 });

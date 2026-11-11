@@ -20,6 +20,8 @@ WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代�
 
 0.8.5 修复 WG 清理失败后、隧道已不存在时的重试异常；保留 journal 继续完成清理，不影响其他出口。多出口接口故障隔离还需要配合包含对应 TC 挂载与回滚、源地址恢复重试及 veth 双端所有权清理修复的 Veer 主程序。
 
+0.9.1 把各驱动共用的 TC 适配器从 WireGuard 时期的名字改为中性名称：对象文件 `tunnel_adapter*.o`、map `tunnel_links`、hook `tunnel-links` / `tunnel-direct-out`、巡检定时器 `tunnel_repair`。升级后照常读取旧出口记录里的隧道 ifindex，并删除旧 hook 的绑定记录；首次 reconcile 按原接口重新填充映射和绑定，不因改名重建出口。WireGuard 驱动自己的 WAN ID（`wg_<key>`）和接口名（`vwg*`、`veerwg*`）不变，出向 NAT 无需调整。
+
 ## 链路健康检测（0.8.0）
 
 出口卡片提供一个“健康检测”按钮，点击后直接在卡片上显示检测中、结果、请求耗时、检测时间及失败原因，不打开独立面板。默认仅手动检测；内网目标、预期状态、DNS 及可选定时检测通过下方 API 设置，不重新应用出口。
@@ -54,7 +56,7 @@ Linux 集成测试通过实际插件 API 验证 WG、Mihomo、sing-box 探测及
 
 各驱动共用 WAN Core 和双向 TC L2/L3 适配，JavaScript 不逐包转发，无需关闭 Veer 快速 NAT。
 
-0.9.0 配合 `wan_core >=1.5.6` 自动选择两种数据路径。宿主编译了可选 helper、实际加载的模块提供 `dataplane.kfuncs.handoff_ingress.v1`，且插件含 `wg_adapter-direct.o` 时，本机 WAN 使用单个 dummy 边界，TC egress 送入隧道，helper 将回包送回该边界的 ingress；每个出口只有本机边界和实际隧道两个接口。未满足这些条件时使用 veth 兼容路径，旧 helper 继续使用原有交接能力。
+0.9.0 配合 `wan_core >=1.5.6` 自动选择两种数据路径。宿主编译了可选 helper、实际加载的模块提供 `dataplane.kfuncs.handoff_ingress.v1`，且插件含 `tunnel_adapter-direct.o` 时，本机 WAN 使用单个 dummy 边界，TC egress 送入隧道，helper 将回包送回该边界的 ingress；每个出口只有本机边界和实际隧道两个接口。未满足这些条件时使用 veth 兼容路径，旧 helper 继续使用原有交接能力。
 
 两种路径使用相同 WAN ID 和源地址。能力变化后，正常恢复或重新应用会迁移自有边界；迁移会中断该出口的现有连接。普通接口列表、IPv6 / 托管网络表单和出口选择隐藏 WAN Core 核验归属的内部 veth peer，保留可选 WAN 边界；诊断 API 可通过 `include_internal=true` 查看完整接口，不按名称前缀隐藏管理员自己的接口。
 
@@ -148,7 +150,7 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 
 ## 安装
 
-默认使用基础 TC 适配器和 veth 分段边界。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `wg_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `wg_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
+默认使用基础 TC 适配器和 veth 分段边界。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `tunnel_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `tunnel_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
 
 `pipeline.node` / `pipeline.handoff` 只是逻辑定义，本身不创建 Linux 网卡。兼容路径的 pipeline veth 则是真实设备，属于插件内部实现，不出现在普通接口列表或规则出口选择中；诊断资源和 `/api/interfaces?include_internal=true` 仍可查看。隐藏前核验 WAN 所有权、boot ID、接口代际、MAC 与双端关系，不按名称前缀隐藏管理员的设备。
 

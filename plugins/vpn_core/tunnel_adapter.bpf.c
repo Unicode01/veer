@@ -10,7 +10,7 @@ VEER_DECLARE_PROG_CHAIN_V4();
 // See Linux net/core/filter.c: __bpf_redirect_no_mac, bpf_skb_change_head.
 static int (*const change_head)(struct __sk_buff *, __u32, __u64) = (void *)43;
 
-struct wg_link {
+struct tunnel_link {
 	__u32 direction;
 	__u32 output;
 	__u8 source[6];
@@ -18,10 +18,10 @@ struct wg_link {
 	__u32 mtu;
 };
 
-struct bpf_map_def SEC("maps") wg_links = {
+struct bpf_map_def SEC("maps") tunnel_links = {
 	.type = 1, // BPF_MAP_TYPE_HASH
 	.key_size = sizeof(__u32),
-	.value_size = sizeof(struct wg_link),
+	.value_size = sizeof(struct tunnel_link),
 	.max_entries = 32,
 };
 
@@ -101,7 +101,7 @@ SEC("tc/veer/pre_forward")
 int tc_adapter(struct __sk_buff *skb)
 {
 	__u32 index = skb->ifindex;
-	struct wg_link *link = veer_bpf_map_lookup_elem(&wg_links, &index);
+	struct tunnel_link *link = veer_bpf_map_lookup_elem(&tunnel_links, &index);
 	if (!link || !link->output)
 		return TC_ACT_SHOT;
 #ifdef VEER_KFUNCS
@@ -145,7 +145,7 @@ int tc_adapter(struct __sk_buff *skb)
 	if (protocol != veer_htons(VEER_ETH_P_IP) && protocol != veer_htons(VEER_ETH_P_IPV6))
 		return TC_ACT_SHOT;
 	// Copy configuration to the stack before the helper invalidates packet pointers.
-	struct wg_link config = *link;
+	struct tunnel_link config = *link;
 	if (change_head(skb, sizeof(struct veer_ethhdr), 0))
 		return TC_ACT_SHOT;
 	struct veer_packet packet = {};

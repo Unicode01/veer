@@ -1411,7 +1411,7 @@ func TestPluginPipelineVersionedMapReplacementsReuseCompatibleStateMapFD(t *test
 }
 
 func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T) {
-	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "tunnel_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
 	if err := state.Put(uint32(17), uint64(99)); err != nil {
 		t.Fatal(err)
 	}
@@ -1424,7 +1424,7 @@ func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T)
 	rt := &linuxKernelRuleRuntime{
 		coll: core, pluginPipelineActive: true, pluginPipelineFingerprint: "applied",
 		pluginPipelineBankSwitchedAt: time.Now(),
-		pluginPipelineLoaded:         []loadedPluginObjectRef{{PluginID: "vpn_core", ObjectID: "wg_adapter", coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}, Programs: map[string]*ebpf.Program{"tc_adapter": prog}}}},
+		pluginPipelineLoaded:         []loadedPluginObjectRef{{PluginID: "vpn_core", ObjectID: "tunnel_adapter", coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"tunnel_links": state}, Programs: map[string]*ebpf.Program{"tc_adapter": prog}}}},
 		pluginRuntimeSnapshot:        pluginRuntimeSnapshot{Plugins: map[string]PluginRuntimeState{"vpn_core": {Attached: true}}},
 	}
 	t.Cleanup(rt.cleanupPluginPipelineLocked)
@@ -1437,7 +1437,7 @@ func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T)
 		// while retaining the original core and its active TC attachments.
 		rt.cleanupPluginPipelineLocked()
 		finish(false)
-		got, err := getPluginMapValueInRefs(rt.pluginPipelineLoaded, "vpn_core", "wg_adapter", "wg_links", pluginMapTestUint32(17))
+		got, err := getPluginMapValueInRefs(rt.pluginPipelineLoaded, "vpn_core", "tunnel_adapter", "tunnel_links", pluginMapTestUint32(17))
 		if err != nil || string(got) != string(pluginMapTestUint64(99)) {
 			t.Fatalf("attempt %d lost live adapter map: %x %v", attempt, got, err)
 		}
@@ -1451,9 +1451,9 @@ func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T)
 }
 
 func TestKernelPluginPipelineRebuildCommitKeepsReplacement(t *testing.T) {
-	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "tunnel_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
 	rt := &linuxKernelRuleRuntime{coll: &ebpf.Collection{}, pluginPipelineActive: true,
-		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}}}}}
+		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"tunnel_links": state}}}}}
 	finish, err := rt.preservePluginPipelineForRebuildLocked()
 	if err != nil {
 		t.Fatal(err)
@@ -1468,9 +1468,9 @@ func TestKernelPluginPipelineRebuildCommitKeepsReplacement(t *testing.T) {
 }
 
 func TestKernelPluginPipelineRebuildDoesNotResurrectCleanedRuntime(t *testing.T) {
-	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "tunnel_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
 	rt := &linuxKernelRuleRuntime{coll: &ebpf.Collection{}, pluginPipelineActive: true,
-		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}}}}}
+		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"tunnel_links": state}}}}}
 	finish, err := rt.preservePluginPipelineForRebuildLocked()
 	if err != nil {
 		t.Fatal(err)
