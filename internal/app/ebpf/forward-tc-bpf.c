@@ -5057,33 +5057,46 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 			return finish_forward_pipeline_v4(skb, TC_ACT_SHOT);
 		/* Keep established egress NAT sessions on the current program across
 		 * hot-restart handoff so they don't depend on a successor-only tail call.
+		 * No flow is created towards a local address, and one whose destination
+		 * became local later leaves the fast path once its window lapses, so the
+		 * local check can come after it.
+		 *
+		 * Each NAT type dereferences its flow only inside its own branch:
+		 * verifiers before 6.10 lose a pointer's null state when the compiler
+		 * ORs that check into the NAT-type test.
 		 */
 		__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
 		dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
-		if (is_full_cone_egress_nat_rule(rule))
+		if (is_full_cone_egress_nat_rule(rule)) {
 			build_full_cone_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
-		else
-			build_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
-		front_flow = lookup_flow_v4_active_or_old(&dispatch->flow_key, &dispatch->flow_bank);
-		/* No flow is created towards a local address. One whose destination
-		 * became local afterwards stops matching here once its fast-path
-		 * window lapses, so the local check can follow.
-		 */
-		if (is_egress_nat_flow(front_flow) && is_fullnat_front_flow(front_flow)) {
-			int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, front_flow,
-				bpf_ktime_get_ns(), load_kernel_nat_config_flags());
+			front_flow = lookup_flow_v4_active_or_old(&dispatch->flow_key, &dispatch->flow_bank);
+			if (is_egress_nat_flow(front_flow) && is_full_cone_front_flow(front_flow)) {
+				int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, front_flow,
+					bpf_ktime_get_ns(), load_kernel_nat_config_flags());
 
-			if (fast != FORWARD_TC_SLOW_PATH)
-				return finish_forward_pipeline_v4(skb, fast);
+				if (fast != FORWARD_TC_SLOW_PATH)
+					return finish_forward_pipeline_v4(skb, fast);
+			}
+		} else {
+			build_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
+			front_flow = lookup_flow_v4_active_or_old(&dispatch->flow_key, &dispatch->flow_bank);
+			if (front_flow) {
+				if (!is_egress_nat_flow(front_flow))
+					return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+				if (is_fullnat_front_flow(front_flow)) {
+					int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, front_flow,
+						bpf_ktime_get_ns(), load_kernel_nat_config_flags());
+
+					if (fast != FORWARD_TC_SLOW_PATH)
+						return finish_forward_pipeline_v4(skb, fast);
+					if (is_local_ipv4(dispatch->ctx.dst_addr))
+						return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+					return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank, 0));
+				}
+			}
 		}
 		if (is_local_ipv4(dispatch->ctx.dst_addr))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
-		if (!is_full_cone_egress_nat_rule(rule)) {
-			if (front_flow && !is_egress_nat_flow(front_flow))
-				return finish_forward_pipeline_v4(skb, TC_ACT_OK);
-			if (is_fullnat_front_flow(front_flow))
-				return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank, 0));
-		}
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return finish_forward_pipeline_v4(skb, TC_ACT_UNSPEC);
 	}
