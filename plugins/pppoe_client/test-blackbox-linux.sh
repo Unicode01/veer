@@ -360,6 +360,25 @@ api_get_resource() {
 	api_get_plugin_resource pppoe_client "$api_resource" "$api_key"
 }
 
+# Veer attaches its TC programs through tcx on Linux 6.6 and later, where
+# `tc filter` does not list them; the kernel runtime view names each
+# interface it attached to.
+assert_tc_program_attached() {
+	if tc filter show dev "$1" ingress | grep -q bpf; then
+		return 0
+	fi
+	curl -sS --fail-with-body \
+		-H "Authorization: Bearer $VEER_PPPOE_BLACKBOX_TOKEN" \
+		"http://127.0.0.1:$VEER_PPPOE_BLACKBOX_PORT/api/kernel/runtime" >"$work_dir/kernel-runtime.json"
+	if grep -q '"attachment_api":"tcx"' "$work_dir/kernel-runtime.json" &&
+		grep -Eq "(\"attachment_summary\":\"|, )$1\\(" "$work_dir/kernel-runtime.json"; then
+		return 0
+	fi
+	echo "no TC program attached to $1 ingress" >&2
+	cat "$work_dir/kernel-runtime.json" >&2
+	exit 1
+}
+
 assert_gro_enabled() {
 	if ! ethtool -k "$1" | grep -q '^generic-receive-offload: on'; then
 		echo "expected GRO to remain enabled on $1" >&2
@@ -648,8 +667,8 @@ EOF
 
 	ip -4 addr show dev "$local_if" | grep -q '198.18.0.2/32'
 	ip -4 route show dev "$local_if" | grep -q '8.8.8.8'
-	tc filter show dev "$pipeline_if" ingress | grep -q bpf
-	tc filter show dev "$wan_host" ingress | grep -q bpf
+	assert_tc_program_attached "$pipeline_if"
+	assert_tc_program_attached "$wan_host"
 	api_post_action traffic_stats '{"profile_key":"blackbox"}' >"$work_dir/traffic-before.json"
 	grep -q '"available":true' "$work_dir/traffic-before.json"
 	# Creating the WAN boundary can already send kernel IPv6 control traffic.
