@@ -626,27 +626,6 @@ static __always_inline int delete_nat_port_v6_in_bank(__u8 bank, const struct na
 
 #include "include/forward_common.h"
 
-static __always_inline __u16 csum_fold_helper(__u32 csum)
-{
-	csum = (csum & 0xffff) + (csum >> 16);
-	csum = (csum & 0xffff) + (csum >> 16);
-	return ~csum;
-}
-
-static __always_inline __sum16 csum_replace2_val(__sum16 check, __be16 old, __be16 new)
-{
-	__u32 csum = (~(__u32)check) & 0xffff;
-	csum += (~(__u32)old) & 0xffff;
-	csum += (__u32)new;
-	return csum_fold_helper(csum);
-}
-
-static __always_inline __sum16 csum_replace4_val(__sum16 check, __be32 old, __be32 new)
-{
-	check = csum_replace2_val(check, (__be16)(old >> 16), (__be16)(new >> 16));
-	return csum_replace2_val(check, (__be16)old, (__be16)new);
-}
-
 /* Isolate checksum spills from the IPv6 NAT callers on older Clang versions. */
 static __attribute__((noinline)) __sum16 csum_replace_ipv6_addr_val(__sum16 check, const __u8 old_addr[16], const __u8 new_addr[16])
 {

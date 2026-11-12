@@ -3369,6 +3369,9 @@ func loadEmbeddedKernelCollectionSpec(enableTrafficStats bool) (*ebpf.Collection
 	if err != nil {
 		return nil, fmt.Errorf("load embedded tc eBPF object: %w", err)
 	}
+	if kernelCoarseClockSupported() {
+		useKernelCoarseClock(spec)
+	}
 	return spec, nil
 }
 

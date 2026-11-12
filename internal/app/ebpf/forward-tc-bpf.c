@@ -1688,40 +1688,78 @@ static __always_inline int delete_nat_port_v6_in_bank(__u8 bank, const struct na
 	return bpf_map_delete_elem(&nat_ports_v6, key);
 }
 
+/* Largest header offset the parsers produce (VLAN, IPv6, L4 ports), with room to spare. */
+#define FORWARD_TC_MAX_HEADER_OFF 255
+
+/*
+ * Direct access to len bytes of the packet at off, or NULL. The parsers read
+ * the same headers directly, so a parsed packet has them in the linear area.
+ * Offsets kept in packet_ctx live in map memory and must be bounded for the
+ * verifier. Writing through the pointer is cheaper than the store and L3
+ * checksum helpers; only the L4 checksum, which the kernel may still be
+ * completing (CHECKSUM_PARTIAL), has to go through bpf_l4_csum_replace.
+ * Any helper that changes packet data invalidates the pointer.
+ */
+static __always_inline void *tc_packet_ptr(struct __sk_buff *skb, __u32 off, __u32 len)
+{
+	void *data;
+	void *data_end;
+	void *ptr;
+
+	/*
+	 * Without this clang may compute &skb->data_end once and reuse it across
+	 * the inlined callers; the verifier rejects loads through a ctx pointer
+	 * with an offset added.
+	 */
+	asm volatile("" : "+r"(skb));
+	data = (void *)(long)skb->data;
+	data_end = (void *)(long)skb->data_end;
+	if (off > FORWARD_TC_MAX_HEADER_OFF)
+		return 0;
+	ptr = data + off;
+	if (ptr + len > data_end)
+		return 0;
+	return ptr;
+}
+
 static __always_inline int rewrite_eth_addrs(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN])
 {
-	__u8 mac_addrs[ETH_ALEN * 2];
+	struct ethhdr *eth = tc_packet_ptr(skb, 0, sizeof(*eth));
 
-	__builtin_memcpy(mac_addrs, dst, ETH_ALEN);
-	__builtin_memcpy(mac_addrs + ETH_ALEN, src, ETH_ALEN);
-	return bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_dest), mac_addrs, sizeof(mac_addrs), 0);
+	if (!eth)
+		return -1;
+	__builtin_memcpy(eth->h_dest, dst, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, src, ETH_ALEN);
+	return 0;
 }
 
 static __always_inline int egress_nat_dst_mac_mismatch(struct __sk_buff *skb, const struct rule_value_v4 *rule)
 {
-	__u8 dst[ETH_ALEN];
+	const struct ethhdr *eth;
 
 	if (!rule || (rule->flags & FORWARD_RULE_FLAG_EGRESS_NAT) == 0 || mac_is_zero(rule->src_mac))
 		return 0;
-	if (bpf_skb_load_bytes(skb, offsetof(struct ethhdr, h_dest), dst, sizeof(dst)) < 0)
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth)
 		return 0;
-	return !mac_equal(dst, rule->src_mac);
+	return !mac_equal(eth->h_dest, rule->src_mac);
 }
 
 static __always_inline int local_dst_mac_mismatch(struct __sk_buff *skb, __u8 wildcard_addr_match)
 {
 	struct local_mac_value *local;
+	const struct ethhdr *eth;
 	__u32 ifindex = skb->ifindex;
-	__u8 dst[ETH_ALEN];
 
 	if (!wildcard_addr_match)
 		return 0;
 	local = bpf_map_lookup_elem(&local_macs, &ifindex);
 	if (!local || mac_is_zero(local->mac))
 		return 0;
-	if (bpf_skb_load_bytes(skb, offsetof(struct ethhdr, h_dest), dst, sizeof(dst)) < 0)
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth)
 		return 0;
-	return !mac_equal(dst, local->mac);
+	return !mac_equal(eth->h_dest, local->mac);
 }
 
 static __always_inline int prepend_eth_header(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN], __be16 proto)
@@ -1749,9 +1787,15 @@ static __always_inline int prepend_eth_header(struct __sk_buff *skb, const __u8 
 
 static __always_inline int load_packet_macs(struct __sk_buff *skb, struct reply_l2_value_v4 *value)
 {
+	const void *macs;
+
 	if (!value)
 		return -1;
-	return bpf_skb_load_bytes(skb, 0, value, sizeof(*value));
+	macs = tc_packet_ptr(skb, 0, sizeof(*value));
+	if (!macs)
+		return -1;
+	__builtin_memcpy(value, macs, sizeof(*value));
+	return 0;
 }
 
 static __always_inline int update_l4_addr_checksum(struct __sk_buff *skb, const struct packet_ctx *ctx, int check_off, __be32 old_addr, __be32 new_addr)
@@ -2234,62 +2278,60 @@ static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *sk
 	return 0;
 }
 
+/*
+ * Rewrites the IPv4 source or destination address and L4 port in place: the
+ * header fields and the IPv4 checksum directly, the L4 checksum through the
+ * helper (see tc_packet_ptr).
+ */
+static __always_inline int rewrite_l4_addr_port(struct __sk_buff *skb, const struct packet_ctx *ctx, int dst, __u32 new_addr_host, __u16 new_port_host)
+{
+	__be32 old_addr = dst ? ctx->dst_addr : ctx->src_addr;
+	__be32 new_addr = bpf_htonl(new_addr_host);
+	__be16 old_port = bpf_htons(dst ? ctx->dst_port : ctx->src_port);
+	__be16 new_port = bpf_htons(new_port_host);
+	int addr_changed = old_addr != new_addr;
+	int port_changed = old_port != new_port;
+
+	if (addr_changed) {
+		struct iphdr *iph = tc_packet_ptr(skb, ctx->l3_off, sizeof(*iph));
+
+		if (!iph)
+			return -1;
+		iph->check = csum_replace4_val(iph->check, old_addr, new_addr);
+		if (dst)
+			iph->daddr = new_addr;
+		else
+			iph->saddr = new_addr;
+	}
+	if (port_changed) {
+		__be16 *port = tc_packet_ptr(skb, dst ? ctx->l4_dst_off : ctx->l4_src_off, sizeof(*port));
+
+		if (!port)
+			return -1;
+		*port = new_port;
+	}
+	if (addr_changed && update_l4_addr_checksum(skb, ctx, ctx->l4_check_off, old_addr, new_addr) < 0)
+		return -1;
+	if (port_changed && update_l4_port_checksum(skb, ctx, ctx->l4_check_off, old_port, new_port) < 0)
+		return -1;
+	return 0;
+}
+
 static __always_inline int rewrite_l4_dnat(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 new_addr_host, __u16 new_port_host)
 {
-	const int ip_check_off = ctx->l3_off + offsetof(struct iphdr, check);
-	const int ip_dst_off = ctx->l3_off + offsetof(struct iphdr, daddr);
-	__be32 old_addr = ctx->dst_addr;
-	__be32 new_addr = bpf_htonl(new_addr_host);
-
-	if (old_addr != new_addr) {
-		if (bpf_l3_csum_replace(skb, ip_check_off, old_addr, new_addr, sizeof(new_addr)) < 0)
-			return -1;
-		if (update_l4_addr_checksum(skb, ctx, ctx->l4_check_off, old_addr, new_addr) < 0)
-			return -1;
-		if (bpf_skb_store_bytes(skb, ip_dst_off, &new_addr, sizeof(new_addr), 0) < 0)
-			return -1;
-	}
-
-	__be16 old_port = bpf_htons(ctx->dst_port);
-	__be16 new_port = bpf_htons(new_port_host);
-	if (old_port != new_port) {
-		if (update_l4_port_checksum(skb, ctx, ctx->l4_check_off, old_port, new_port) < 0)
-			return -1;
-		if (bpf_skb_store_bytes(skb, ctx->l4_dst_off, &new_port, sizeof(new_port), 0) < 0)
-			return -1;
-	}
-
-	return 0;
+	return rewrite_l4_addr_port(skb, ctx, 1, new_addr_host, new_port_host);
 }
 
 static __always_inline int rewrite_l4_snat(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 new_addr_host, __u16 new_port_host)
 {
-	const int ip_check_off = ctx->l3_off + offsetof(struct iphdr, check);
-	const int ip_src_off = ctx->l3_off + offsetof(struct iphdr, saddr);
-	__be32 old_addr = ctx->src_addr;
-	__be32 new_addr = bpf_htonl(new_addr_host);
-
-	if (old_addr != new_addr) {
-		if (bpf_l3_csum_replace(skb, ip_check_off, old_addr, new_addr, sizeof(new_addr)) < 0)
-			return -1;
-		if (update_l4_addr_checksum(skb, ctx, ctx->l4_check_off, old_addr, new_addr) < 0)
-			return -1;
-		if (bpf_skb_store_bytes(skb, ip_src_off, &new_addr, sizeof(new_addr), 0) < 0)
-			return -1;
-	}
-
-	__be16 old_port = bpf_htons(ctx->src_port);
-	__be16 new_port = bpf_htons(new_port_host);
-	if (old_port != new_port) {
-		if (update_l4_port_checksum(skb, ctx, ctx->l4_check_off, old_port, new_port) < 0)
-			return -1;
-		if (bpf_skb_store_bytes(skb, ctx->l4_src_off, &new_port, sizeof(new_port), 0) < 0)
-			return -1;
-	}
-
-	return 0;
+	return rewrite_l4_addr_port(skb, ctx, 0, new_addr_host, new_port_host);
 }
 
+/*
+ * IPv6 keeps the store helper: copying a 16-byte address directly takes
+ * about 30 instructions per site, and the IPv6 pipeline programs are close
+ * to the jump range the verifier can still patch on recent kernels.
+ */
 static __always_inline int rewrite_l4_dnat_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, const __u8 new_addr[16], __u16 new_port_host)
 {
 	const int ip_dst_off = ctx->l3_off + offsetof(struct ipv6hdr, daddr);
