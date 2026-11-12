@@ -69,11 +69,11 @@ func addTCHotRestartPredecessorFlowParents(parents map[tcHotRestartTransparentFl
 		}
 	}
 	for _, attachment := range attachments {
-		filter := attachment.filter
-		if filter == nil || filter.Priority != kernelReplyFilterPrio || filter.Handle != netlink.MakeHandle(0, kernelReplyFilterHandle) {
+		key, ok := attachment.key()
+		if !ok || key.priority != kernelReplyFilterPrio || key.handle != netlink.MakeHandle(0, kernelReplyFilterHandle) {
 			continue
 		}
-		link, err := netlink.LinkByIndex(filter.LinkIndex)
+		link, err := netlink.LinkByIndex(key.linkIndex)
 		if err != nil {
 			continue
 		}

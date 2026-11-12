@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -21,6 +22,8 @@ type settings struct {
 	Interfaces           []string
 	EgressInterfaces     []string
 	Entries              []struct{ Key, Value string }
+	// TCX attaches through tcx, as the Veer core does on Linux 6.6+.
+	TCX bool
 }
 
 func main() {
@@ -72,6 +75,14 @@ func run() error {
 		if e != nil {
 			return e
 		}
+		if c.TCX {
+			closer, e := attachTCX(link.Attrs().Index, coll.Programs[c.Program], contains(c.EgressInterfaces, name))
+			if e != nil {
+				return e
+			}
+			defer closer.Close()
+			continue
+		}
 		a := netlink.QdiscAttrs{LinkIndex: link.Attrs().Index, Handle: netlink.MakeHandle(0xffff, 0), Parent: netlink.HANDLE_CLSACT}
 		q := &netlink.GenericQdisc{QdiscAttrs: a, QdiscType: "clsact"}
 		if e = netlink.QdiscReplace(q); e != nil {
@@ -94,4 +105,21 @@ func run() error {
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	<-ch
 	return nil
+}
+
+func attachTCX(ifindex int, prog *ebpf.Program, egress bool) (link.Link, error) {
+	attach := ebpf.AttachTCXIngress
+	if egress {
+		attach = ebpf.AttachTCXEgress
+	}
+	return link.AttachTCX(link.TCXOptions{Interface: ifindex, Program: prog, Attach: attach})
+}
+
+func contains(items []string, item string) bool {
+	for _, current := range items {
+		if current == item {
+			return true
+		}
+	}
+	return false
 }

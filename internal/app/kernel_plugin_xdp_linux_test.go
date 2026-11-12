@@ -559,6 +559,11 @@ func TestOrderedKernelRuntimeChainsXDPIntoTCPlugin(t *testing.T) {
 			t.Fatalf("Veer TC filter remained after combined runtime close: %+v", bpf)
 		}
 	}
+	if kernelTCXProgramAttached(t, target.Attrs().Index, ebpf.AttachTCXIngress, func(name string) bool {
+		return strings.HasPrefix(name, "forward_") || strings.HasPrefix(name, "reply_")
+	}) {
+		t.Fatal("Veer tcx program remained after combined runtime close")
+	}
 }
 
 func TestKernelXDPPluginCrashHelper(t *testing.T) {

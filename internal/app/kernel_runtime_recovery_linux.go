@@ -15,6 +15,7 @@ func (rt *linuxKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentH
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	mode := rt.attachmentMode
 	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, preparedRules, mode, rt.pluginPipelineActive)
+	programs.tcx = rt.useTCX()
 	rt.mu.Unlock()
 
 	healthy := true
@@ -86,6 +87,7 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 		return nil, err
 	}
 	programs := kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(rt.preparedRules), rt.attachmentMode)
+	programs.tcx = rt.useTCX()
 	if kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, rt.attachments, programs) {
 		return nil, nil
 	}
@@ -97,10 +99,9 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 	oldAttachments := append([]kernelAttachment(nil), rt.attachments...)
 	currentAttachments := make(map[kernelAttachmentKey]kernelAttachment, len(oldAttachments))
 	for _, att := range oldAttachments {
-		if att.filter == nil {
-			continue
+		if key, ok := att.key(); ok {
+			currentAttachments[key] = att
 		}
-		currentAttachments[kernelAttachmentKeyForFilter(att.filter)] = att
 	}
 	plannedKeys := make([]kernelAttachmentKey, 0, len(plans))
 	expected := make(map[kernelAttachmentKey]kernelAttachmentExpectation, len(plans))
@@ -108,7 +109,7 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 		plannedKeys = append(plannedKeys, plan.key)
 		expected[plan.key] = kernelAttachmentExpectationForPlan(plan)
 	}
-	observedAttachments := kernelAttachmentObservations(plannedKeys)
+	observedAttachments := kernelAttachmentObservations(plannedKeys, oldAttachments)
 
 	newAttachments := make([]kernelAttachment, 0, len(plans))
 	createdAttachments := make([]kernelAttachment, 0, len(plans))
@@ -118,7 +119,7 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 			newAttachments = append(newAttachments, current)
 			continue
 		}
-		if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+		if err := rt.attachProgramLocked(&createdAttachments, plan, oldAttachments); err != nil {
 			rt.discardAttachmentsLocked(createdAttachments)
 			return nil, fmt.Errorf("repair %s attachment on ifindex %d: %w", plan.name, plan.ifindex, err)
 		}

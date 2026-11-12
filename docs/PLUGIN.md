@@ -757,7 +757,7 @@ packet metadata 的 namespace 防止可信插件之间误用 ABI，不是恶意 
 
 没有 Veer/Egress NAT 规则时，显式声明了 `interfaces` 的 hook 仍可把 TC pipeline 挂到目标接口上；这时 Veer Core 的 forward/reply 路径会被关闭，pipeline 只执行插件链。core 后插件仍可运行，但 `tc_plugin_ctx_v4/tc_plugin_ctx_v6` 是按当前包地址族清空的上下文，不包含规则或 flow 匹配结果。
 
-进入 `veer` pipeline 的 TC object 必须声明共享 `tc_prog_chain_v4` prog-array map，处理后应 tail-call 回对应 stage 的 continue slot，除非插件明确要返回最终 TC action。eBPF tail call 是 continuation，不是普通函数调用；tail-call 成功后不会回到插件原来的栈帧。core 后插件如果要读取规则匹配上下文，需要同时声明共享 `tc_plugin_ctx_v4` 和 `tc_plugin_ctx_v6` map；只有内置 core 实际启用并匹配规则或回包 flow 时，对应地址族上下文才会带有 `have_rule` 或 `have_flow`。新插件应 include 当前版本的 `plugins/include/veer_plugin_helpers.h` 并随 ABI 版本重新编译 object，以保持共享 prog-array 规格一致，同时复用 slot、continue helper、skb 写入/校验和/redirect 包装以及 IPv4/IPv6/L4 解析 helper。
+进入 `veer` pipeline 的 TC object 必须声明共享 `tc_prog_chain_v4` prog-array map，处理后应 tail-call 回对应 stage 的 continue slot，除非插件明确要返回最终 TC action。最终 action 只能是 `TC_ACT_OK`、`TC_ACT_SHOT`、`TC_ACT_UNSPEC`、重定向 helper 的返回值，或 `veer_tc_consumed()`。插件已接管数据包（例如 kfunc 已发出 clone）时返回 `veer_tc_consumed()`：TC 释放原包，并向发送方报告成功。不要返回 `TC_ACT_STOLEN`：Linux 6.6 及以上内核中核心程序通过 tcx 挂载，tcx 会把它当作“交给下一个程序”，原包会继续被发送；helper 头文件因此不再定义这个常量。eBPF tail call 是 continuation，不是普通函数调用；tail-call 成功后不会回到插件原来的栈帧。core 后插件如果要读取规则匹配上下文，需要同时声明共享 `tc_plugin_ctx_v4` 和 `tc_plugin_ctx_v6` map；只有内置 core 实际启用并匹配规则或回包 flow 时，对应地址族上下文才会带有 `have_rule` 或 `have_flow`。新插件应 include 当前版本的 `plugins/include/veer_plugin_helpers.h` 并随 ABI 版本重新编译 object，以保持共享 prog-array 规格一致，同时复用 slot、continue helper、skb 写入/校验和/redirect 包装以及 IPv4/IPv6/L4 解析 helper。
 
 生产环境只应加载可信 eBPF object。服务会校验路径、大小、sha256、program type 和 section，但不能证明第三方程序一定不会改包或丢包。
 

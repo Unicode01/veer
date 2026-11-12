@@ -581,8 +581,9 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) Kerne
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	coll := rt.coll
 	mode := rt.attachmentMode
+	tcx := rt.useTCX()
 	attachmentRuleSets = effectiveKernelAttachmentRuleSets(preparedRules, attachmentRuleSets)
-	expectedAttachments := expectedKernelAttachmentsForRuleSets(coll, preparedRules, attachmentRuleSets, mode)
+	expectedAttachments := expectedKernelAttachmentsForRuleSets(coll, preparedRules, attachmentRuleSets, mode, tcx)
 	mapSnapshot, mapErr := snapshotKernelRuntimeMaps(coll, false, true)
 	rt.mu.Unlock()
 	defer mapSnapshot.Close()
@@ -590,13 +591,14 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) Kerne
 	view.Attachments = len(attachments)
 	view.AttachmentSummary = describeKernelAttachments(attachments)
 	view.AttachmentMode = tcAttachmentMode(attachments, mode)
+	view.AttachmentAPI = tcAttachmentAPI(attachments)
 	if !attachmentRuleSets.hasTargets() {
 		view.AttachmentsHealthy = true
 	} else {
 		view.AttachmentsHealthy = kernelExpectedAttachmentsHealthy(
 			expectedAttachments,
 			len(attachments),
-			kernelAttachmentObservations(kernelAttachmentKeys(expectedAttachments)),
+			kernelAttachmentObservations(kernelAttachmentKeys(expectedAttachments), attachments),
 		)
 	}
 	rt.mu.Lock()
@@ -725,11 +727,11 @@ func describeKernelAttachments(attachments []kernelAttachment) string {
 	}
 	labels := make([]string, 0, len(attachments))
 	for _, att := range attachments {
-		if att.filter == nil || att.filter.Attrs() == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		attrs := att.filter.Attrs()
-		label := fmt.Sprintf("%s/%s", kernelRuntimeInterfaceLabel(attrs.LinkIndex), kernelAttachmentProgramLabel(attrs.Handle, attrs.Priority))
+		label := fmt.Sprintf("%s/%s", kernelRuntimeInterfaceLabel(key.linkIndex), kernelAttachmentProgramLabel(key.handle, key.priority))
 		labels = append(labels, label)
 	}
 	if len(labels) == 0 {
@@ -777,6 +779,20 @@ func xdpAttachmentMode(attachments []xdpAttachment) string {
 	default:
 		return ""
 	}
+}
+
+// tcAttachmentAPI names how the core programs are attached: "tcx" or
+// "cls_bpf".
+func tcAttachmentAPI(attachments []kernelAttachment) string {
+	for _, att := range attachments {
+		if key, ok := att.key(); ok {
+			if key.tcx {
+				return "tcx"
+			}
+			return "cls_bpf"
+		}
+	}
+	return ""
 }
 
 func tcAttachmentMode(attachments []kernelAttachment, mode kernelTCAttachmentProgramMode) string {
@@ -891,8 +907,9 @@ func kernelAttachmentKeys(expected []kernelAttachmentExpectation) []kernelAttach
 	return keys
 }
 
-func expectedKernelAttachmentsForRuleSets(coll *ebpf.Collection, prepared []preparedKernelRule, sets kernelAttachmentRuleSets, mode kernelTCAttachmentProgramMode) []kernelAttachmentExpectation {
+func expectedKernelAttachmentsForRuleSets(coll *ebpf.Collection, prepared []preparedKernelRule, sets kernelAttachmentRuleSets, mode kernelTCAttachmentProgramMode, tcx bool) []kernelAttachmentExpectation {
 	programs := kernelAttachmentProgramsForPreparedRules(coll, prepared, mode, mode == kernelTCAttachmentProgramModePipelineV4)
+	programs.tcx = tcx
 	return expectedKernelAttachments(desiredKernelAttachmentPlansForRuleSets(sets, programs))
 }
 
@@ -921,14 +938,20 @@ func kernelExpectedAttachmentsHealthy(expected []kernelAttachmentExpectation, at
 	return true
 }
 
-func kernelAttachmentObservations(keys []kernelAttachmentKey) map[kernelAttachmentKey]kernelAttachmentObservation {
+// kernelAttachmentObservations reads the attached state of the positions in
+// keys. A tcx position is identified through the link of its attachment.
+func kernelAttachmentObservations(keys []kernelAttachmentKey, attachments []kernelAttachment) map[kernelAttachmentKey]kernelAttachmentObservation {
 	observed := make(map[kernelAttachmentKey]kernelAttachmentObservation, len(keys))
 	if len(keys) == 0 {
 		return observed
 	}
+	observeKernelTCXAttachments(observed, keys, attachments)
 
 	grouped := make(map[kernelAttachmentLookupGroup]map[kernelAttachmentKey]struct{})
 	for _, key := range keys {
+		if key.tcx {
+			continue
+		}
 		group := kernelAttachmentLookupGroup{linkIndex: key.linkIndex, parent: key.parent}
 		if grouped[group] == nil {
 			grouped[group] = make(map[kernelAttachmentKey]struct{})
@@ -1942,7 +1965,7 @@ func kernelAttachmentsHealthyForRuleSets(sets kernelAttachmentRuleSets, attachme
 	for _, item := range expected {
 		keys = append(keys, item.key)
 	}
-	return kernelExpectedAttachmentsHealthy(expected, len(attachments), kernelAttachmentObservations(keys))
+	return kernelExpectedAttachmentsHealthy(expected, len(attachments), kernelAttachmentObservations(keys, attachments))
 }
 
 func xdpAttachmentsHealthy(requiredIfIndices []int, attachments []xdpAttachment, programID uint32) bool {

@@ -253,6 +253,78 @@ func TestTCKernelRuleMutationHotRestartKeepsEstablishedTCPConnection(t *testing.
 	}
 }
 
+// The build named by FORWARD_TC_RULE_MUTATION_PEER_BINARY starts, hands over
+// to this build and takes over again. With a peer that attaches through
+// cls_bpf this covers both directions of the switch to tcx.
+func TestTCKernelRuleMutationHotRestartAcrossBuildsKeepsEstablishedTCPConnection(t *testing.T) {
+	baseBinary := requireTCRuleMutationIntegrationBinary(t)
+	peerBinary := strings.TrimSpace(os.Getenv("FORWARD_TC_RULE_MUTATION_PEER_BINARY"))
+	if peerBinary == "" {
+		t.Skip("set FORWARD_TC_RULE_MUTATION_PEER_BINARY to the build to hot restart from and to")
+	}
+
+	harness := startTCRuleMutationHarness(t, peerBinary, "hot-restart-across-builds")
+	rule := createTCRuleMutationRule(t, harness.APIBase, harness.Topology, Rule{
+		InInterface:      harness.Topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     harness.Topology.BackendHostIF,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Remark:           "tc-rule-mutation-hot-restart-across-builds",
+		Tag:              "tc-rule-mutation",
+		Transparent:      true,
+		EnginePreference: ruleEngineKernel,
+	})
+	target := net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, target); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("baseline probe failed: %v", err)
+	}
+
+	client := startTCRuleMutationSteadyClientWithDuration(t, harness.Topology.ClientNS, target, 3*tcRuleMutationRestartSteadyDuration)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+
+	for _, binary := range []string{baseBinary, peerBinary} {
+		if err := os.WriteFile(harness.HotRestartMarkerPath, []byte("1"), 0o644); err != nil {
+			stopTCRuleMutationSteadyClient(t, client)
+			t.Fatalf("write hot restart marker: %v", err)
+		}
+		harness.ForwardBinary = binary
+		restartTCRuleMutationForward(t, &harness)
+		waitForTCRuleMutationRuleRunning(t, harness.APIBase, rule.ID)
+
+		// The new build attaches through tcx where the kernel has it; the
+		// peer is expected to use cls_bpf. The previous attachment goes away
+		// once the handoff completes.
+		wantTCX := binary == baseBinary && kernelTCXSupported()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			filter, tcx := tcRuleMutationReplyAttachments(t, harness.Topology.BackendHostIF)
+			if tcx == wantTCX && filter == !wantTCX {
+				break
+			}
+			if time.Now().After(deadline) {
+				logForwardLogOnFailure(t, harness.LogPath)
+				t.Fatalf("after hot restart into %s: reply cls_bpf filter=%t tcx=%t, want tcx=%t", binary, filter, tcx, wantTCX)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+	if err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("steady client failed across hot restarts: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, target); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("post-restart probe failed: %v", err)
+	}
+}
+
 func TestTCKernelRuleMutationHotRestartKeepsEstablishedTCPConnectionAcrossBridgePathPromotion(t *testing.T) {
 	baseBinary := requireTCRuleMutationIntegrationBinary(t)
 	if _, err := exec.LookPath("bridge"); err != nil {
@@ -1073,6 +1145,14 @@ func assertTCRuleMutationBridgePath(t *testing.T, bridgeName string, memberName 
 
 func hasTCRuleMutationReplyFilter(t *testing.T, ifname string) bool {
 	t.Helper()
+	filter, tcx := tcRuleMutationReplyAttachments(t, ifname)
+	return filter || tcx
+}
+
+// tcRuleMutationReplyAttachments reports whether the IPv4 reply program runs
+// on the interface as a cls_bpf filter and as a tcx program.
+func tcRuleMutationReplyAttachments(t *testing.T, ifname string) (filter bool, tcx bool) {
+	t.Helper()
 
 	link, err := netlink.LinkByName(ifname)
 	if err != nil {
@@ -1083,13 +1163,18 @@ func hasTCRuleMutationReplyFilter(t *testing.T, ifname string) bool {
 		t.Fatalf("list ingress filters on %q: %v", ifname, err)
 	}
 	wantHandle := netlink.MakeHandle(0, kernelReplyFilterHandle)
-	for _, filter := range filters {
-		attrs := filter.Attrs()
+	for _, item := range filters {
+		attrs := item.Attrs()
 		if attrs != nil && attrs.Priority == kernelReplyFilterPrio && attrs.Handle == wantHandle {
-			return true
+			filter = true
 		}
 	}
-	return false
+	// Kernel program names stop at 15 characters, so the IPv6 reply program
+	// shows up as "reply_ingress_v".
+	tcx = kernelTCXProgramAttached(t, link.Attrs().Index, ebpf.AttachTCXIngress, func(name string) bool {
+		return strings.HasPrefix(name, "reply_ingress") && !strings.HasPrefix(name, "reply_ingress_v")
+	})
+	return filter, tcx
 }
 
 func rewriteTCRuleMutationFlowAsLegacyMemberKey(t *testing.T, bpfStateRoot string, ruleID int64, bridgeName string, memberName string) {

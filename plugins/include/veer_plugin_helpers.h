@@ -103,9 +103,12 @@ typedef int __s32;
 #ifndef TC_ACT_OK
 #define TC_ACT_OK 0
 #endif
-#ifndef TC_ACT_STOLEN
-#define TC_ACT_STOLEN 4
-#endif
+
+/*
+ * No TC_ACT_STOLEN on purpose: Veer may run the pipeline from tcx, which
+ * treats it as "continue" and lets the packet through. Use
+ * veer_tc_consumed() instead.
+ */
 
 #ifndef TC_ACT_SHOT
 #define TC_ACT_SHOT 2
@@ -593,6 +596,17 @@ static __always_inline int veer_skb_adjust_room(struct __sk_buff *skb, __s32 len
 static __always_inline int veer_redirect(__u32 ifindex)
 {
 	return veer_bpf_redirect(ifindex, 0);
+}
+
+/*
+ * Verdict for a packet this program has taken over, for example after a kfunc
+ * sent its clone: TC frees the original and reports success to the sender,
+ * so local TCP keeps advancing. A redirect without a target device has this
+ * effect under both cls_bpf and tcx, on ingress and egress.
+ */
+static __always_inline int veer_tc_consumed(void)
+{
+	return veer_bpf_redirect(0, 0);
 }
 
 /* XDP packet helpers. Every adjust call invalidates earlier packet pointers. */

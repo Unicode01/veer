@@ -121,7 +121,7 @@ int tc_adapter(struct __sk_buff *skb)
 	// TC consumes the original skb in either case. A successful egress
 	// handoff must report success to local TCP; SHOT would leave snd_nxt
 	// behind packets that the peer has already received and acknowledged.
-	return result ? TC_ACT_SHOT : TC_ACT_STOLEN;
+	return result ? TC_ACT_SHOT : veer_tc_consumed();
 #else
 	if (link->direction == 3) return TC_ACT_SHOT;
 	veer_skb_handoff_v1(skb, &handoff);

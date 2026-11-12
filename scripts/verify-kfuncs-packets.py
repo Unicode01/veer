@@ -27,6 +27,7 @@ parser.add_argument("--performance", action="store_true")
 parser.add_argument("--direct", action="store_true", help="Test the helper-owned single WAN boundary")
 parser.add_argument("--mode", choices=["all", "bpf", "kfuncs"], default="all")
 parser.add_argument("--veer", type=pathlib.Path, help="Also verify real TC NAT through the selected boundary")
+parser.add_argument("--tcx", action="store_true", help="Attach the plugin programs through tcx, as the Veer core does on Linux 6.6+")
 parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
 args = parser.parse_args()
 if args.direct and args.mode == "bpf":
@@ -251,6 +252,7 @@ def nonlinear_frames(mode, clamp=True, linear=False):
                 "Object": str(obj), "Program": program, "Map": "pppoe_tunnel_config",
                 "Interfaces": [interface],
                 "Entries": [{"Key": "00000000", "Value": value.hex()}],
+                "TCX": args.tcx,
             }))
             loaders.append(proc([str(LOADER), str(config)], label + "-" + program))
         time.sleep(0.3)
@@ -653,6 +655,7 @@ try:
                 "Interfaces": ["wan" + side] + ([] if args.direct else ["pipe" + side]),
                 "EgressInterfaces": ["local" + side] if args.direct else [],
                 "Entries": [{"Key": "00000000", "Value": cfg(ns, side).hex()}],
+                "TCX": args.tcx,
             }
             file = BASE / (mode + side + ".json")
             file.write_text(json.dumps(config))

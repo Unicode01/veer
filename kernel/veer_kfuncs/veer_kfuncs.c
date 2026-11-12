@@ -352,9 +352,10 @@ static int veer_pppoe_decap(struct sk_buff *skb, const struct veer_handoff_v1 *c
 }
 
 /* One source skb may create many PPPoE frames. Ownership stays entirely in C.
- * The caller must terminate so TC releases the original: TC_ACT_STOLEN on
- * success (required for local egress), TC_ACT_SHOT on error. Existing ingress
- * callers may also return TC_ACT_SHOT on success.
+ * The caller must terminate so TC releases the original: a redirect without
+ * a target device on success (veer_tc_consumed(), required for local egress),
+ * TC_ACT_SHOT on error. Existing ingress callers may also return TC_ACT_SHOT
+ * on success. TC_ACT_STOLEN does not work under tcx.
  */
 static int veer_handoff(struct __sk_buff *skb_ctx, const struct veer_handoff_v1 *config, bool receive)
 {

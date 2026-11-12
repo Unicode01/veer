@@ -450,6 +450,7 @@ type KernelEngineRuntimeView struct {
 	AttachmentsHealthy                      bool      `json:"attachments_healthy"`
 	AttachmentSummary                       string    `json:"attachment_summary,omitempty"`
 	AttachmentMode                          string    `json:"attachment_mode,omitempty"`
+	AttachmentAPI                           string    `json:"attachment_api,omitempty"`
 	AttachmentsUnhealthyCount               int       `json:"attachments_unhealthy_count,omitempty"`
 	LastAttachmentsUnhealthyAt              time.Time `json:"last_attachments_unhealthy_at,omitempty"`
 	RulesMapEntries                         int       `json:"rules_map_entries"`

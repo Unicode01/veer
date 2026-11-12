@@ -64,7 +64,8 @@
     "kernel_tc_diag_verbose": false,
     "kernel_tc_redirect_neigh_fast": false,
     "kernel_tc_prepared_l2": false,
-    "kernel_tc_reply_l2_cache": false
+    "kernel_tc_reply_l2_cache": false,
+    "kernel_tc_legacy_attach": false
   },
   "tags": []
 }

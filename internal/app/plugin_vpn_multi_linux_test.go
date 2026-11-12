@@ -56,9 +56,19 @@ func TestVPNMultiExitTCAttachmentRollback(t *testing.T) {
 	}
 	old, candidate, foreign := program("old", 0), program("candidate", 2), program("foreign", 0)
 	rt := &linuxKernelRuleRuntime{}
+	plan := func(ifindex int, handle uint16, prog *ebpf.Program) kernelAttachmentPlan {
+		return kernelAttachmentPlan{
+			key:         kernelAttachmentKey{linkIndex: ifindex, parent: netlink.HANDLE_MIN_INGRESS, priority: 49100, handle: netlink.MakeHandle(0, handle)},
+			ifindex:     ifindex,
+			priority:    49100,
+			handleMinor: handle,
+			name:        "rollback",
+			prog:        prog,
+		}
+	}
 	attach := func(dst *[]kernelAttachment, handle uint16, prog *ebpf.Program) {
 		t.Helper()
-		if err := rt.attachProgramLocked(dst, link.Attrs().Index, netlink.HANDLE_MIN_INGRESS, 49100, handle, "rollback", prog); err != nil {
+		if err := rt.attachProgramLocked(dst, plan(link.Attrs().Index, handle, prog), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -70,7 +80,7 @@ func TestVPNMultiExitTCAttachmentRollback(t *testing.T) {
 	attach(&installed, 3, candidate)
 	var external []kernelAttachment
 	attach(&external, 3, foreign)
-	if err := rt.attachProgramLocked(&installed, 1<<30, netlink.HANDLE_MIN_INGRESS, 49100, 1, "rollback", candidate); err == nil {
+	if err := rt.attachProgramLocked(&installed, plan(1<<30, 1, candidate), nil); err == nil {
 		t.Fatal("missing target interface did not fail")
 	}
 	rt.discardAttachmentsLocked(installed)

@@ -783,6 +783,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
       "active_entries": 128,
       "attachments": 6,
       "attachment_summary": "eno1(3)/forward, eno1(3)/reply",
+      "attachment_api": "tcx",
       "tcp_established_idle_timeout_mode": "auto",
       "tcp_established_idle_timeout_seconds": 3600,
       "tcp_established_idle_timeout_auto_tier": "high"

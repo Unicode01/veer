@@ -256,8 +256,11 @@ type tcNATConfigValueV4 struct {
 	Pad1    uint32
 }
 
+// kernelAttachment is one core program position: a cls_bpf filter, or a
+// tcx link when the runtime attaches through tcx.
 type kernelAttachment struct {
 	filter *netlink.BpfFilter
+	tcx    *kernelTCXAttachment
 }
 
 type kernelAttachmentKey struct {
@@ -265,6 +268,20 @@ type kernelAttachmentKey struct {
 	parent    uint32
 	priority  uint16
 	handle    uint32
+	// tcx positions are ordered by priority and handle like the cls_bpf
+	// filters they replace, but never match a filter with the same values.
+	tcx bool
+}
+
+func (att kernelAttachment) key() (kernelAttachmentKey, bool) {
+	switch {
+	case att.filter != nil:
+		return kernelAttachmentKeyForFilter(att.filter), true
+	case att.tcx != nil:
+		return att.tcx.key, true
+	default:
+		return kernelAttachmentKey{}, false
+	}
 }
 
 type kernelRuleMapEntry struct {
@@ -371,6 +388,8 @@ type kernelAttachmentPrograms struct {
 	forwardProgV6       *ebpf.Program
 	replyProgV6         *ebpf.Program
 	mode                kernelTCAttachmentProgramMode
+	// tcx attaches the programs through tcx.
+	tcx bool
 }
 
 type kernelAttachmentPlan struct {
@@ -600,6 +619,7 @@ type linuxKernelRuleRuntime struct {
 	enablePreparedL2             bool
 	enableReplyL2Cache           bool
 	pluginPipelineEnabled        bool
+	tcxAllowed                   bool
 	pluginPipelineActive         bool
 	pluginPipelineLoaded         []loadedPluginObjectRef
 	pluginPipelineDesired        []kernelPluginPipelineDesiredPlugin
@@ -621,6 +641,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	enablePreparedL2 := false
 	enableReplyL2Cache := false
 	pluginPipelineEnabled := false
+	forceLegacyAttach := false
 	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
@@ -635,6 +656,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		enableReplyL2Cache = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCReplyL2Cache)
 		pluginPipelineEnabled = cfg.PluginsEnabled() && cfg.PluginsDataplaneEnabled()
 		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
+		forceLegacyAttach = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCLegacyAttach)
 	}
 	if enableDiagVerbose {
 		enableDiagnostics = true
@@ -656,7 +678,15 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		enablePreparedL2:        enablePreparedL2,
 		enableReplyL2Cache:      enableReplyL2Cache,
 		pluginPipelineEnabled:   pluginPipelineEnabled,
+		// The attach API stays fixed for the life of the runtime, so
+		// reconciles never mix filters and links for one position.
+		tcxAllowed: !forceLegacyAttach,
 	}
+}
+
+// useTCX reports whether the core programs attach through tcx.
+func (rt *linuxKernelRuleRuntime) useTCX() bool {
+	return rt != nil && rt.tcxAllowed && kernelTCXSupported()
 }
 
 func (rt *linuxKernelRuleRuntime) natConfigFlags() uint32 {
@@ -1293,6 +1323,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
+	attachmentPrograms.tcx = rt.useTCX()
 	if err := configureTCFlowMigrationState(pieces, tcFlowMigrationFlags); err != nil {
 		coll.Close()
 		msg := fmt.Sprintf("configure tc flow migration state: %v", err)
@@ -1421,7 +1452,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 
 	for _, plan := range attachmentPlans {
 		ruleIDs := attachmentRuleSets.rules(plan.reply, plan.attach)[plan.ifindex]
-		if err := rt.attachProgramLocked(&newAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+		if err := rt.attachProgramLocked(&newAttachments, plan, oldAttachments); err != nil {
 			log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", plan.name, plan.ifindex, ruleIDs, err)
 			label := "forward"
 			if plan.reply {
@@ -1491,6 +1522,9 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			log.Printf("kernel dataplane hot restart: rollback transparent flow aliases after incomplete handoff: %v", rollbackErr)
 		}
 		rt.stateLog.Logf("kernel dataplane reconcile: no rules reached running state")
+		// cleanupLocked only knows the previous positions; a tcx link created
+		// in this pass would otherwise stay attached.
+		rt.deleteStaleAttachmentsLocked(newAttachments, rt.attachments)
 		coll.Close()
 		rt.cleanupLocked()
 		return results, nil
@@ -2016,6 +2050,12 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 			return true
 		}
 	}
+	if err := pinKernelTCXAttachments(rt.attachments); err != nil {
+		clearKernelHotRestartState(kernelEngineTC)
+		log.Printf("kernel dataplane hot restart: preserve tcx links failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
+	}
 	if err := writeKernelHotRestartMetadata(
 		kernelEngineTC,
 		rt.hotRestartMetadataWithRuleState(kernelHotRestartTCMetadataForHotRestart(rt.attachments, objectHash, rt.enableTrafficStats)),
@@ -2056,9 +2096,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 
 func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	for i := len(rt.attachments) - 1; i >= 0; i-- {
-		if rt.attachments[i].filter != nil {
-			_ = netlink.FilterDel(rt.attachments[i].filter)
-		}
+		deleteKernelAttachment(rt.attachments[i])
 	}
 	rt.cleanupPluginPipelineLocked()
 	clearKernelRuntimeMetadata(kernelEngineTC)
@@ -2174,6 +2212,7 @@ func kernelAttachmentKeyForFilter(filter *netlink.BpfFilter) kernelAttachmentKey
 func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, programs kernelAttachmentPrograms) []kernelAttachmentPlan {
 	targetCount := len(sets.ForwardIngress) + len(sets.ReplyIngress) + len(sets.ForwardEgress) + len(sets.ReplyEgress)
 	plans := make([]kernelAttachmentPlan, 0, targetCount*2)
+	tcx := programs.tcx
 	appendPlans := func(targets map[int][]int64, reply bool, attach uint32, prog *ebpf.Program, progV6 *ebpf.Program) {
 		parent := uint32(netlink.HANDLE_MIN_INGRESS)
 		priority := uint16(kernelForwardFilterPrio)
@@ -2206,6 +2245,7 @@ func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, prog
 					parent:    parent,
 					priority:  priority,
 					handle:    netlink.MakeHandle(0, handle),
+					tcx:       tcx,
 				},
 				ifindex:     ifindex,
 				priority:    priority,
@@ -2222,6 +2262,7 @@ func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, prog
 						parent:    parent,
 						priority:  priorityV6,
 						handle:    netlink.MakeHandle(0, handleV6),
+						tcx:       tcx,
 					},
 					ifindex:     ifindex,
 					priority:    priorityV6,
@@ -2913,18 +2954,18 @@ func mergeKernelAttachments(oldAttachments, newAttachments []kernelAttachment) [
 	out := make([]kernelAttachment, 0, len(oldAttachments)+len(newAttachments))
 	seen := make(map[kernelAttachmentKey]struct{}, len(oldAttachments)+len(newAttachments))
 	for _, att := range newAttachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		key := kernelAttachmentKeyForFilter(att.filter)
 		seen[key] = struct{}{}
 		out = append(out, att)
 	}
 	for _, att := range oldAttachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		key := kernelAttachmentKeyForFilter(att.filter)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -3032,6 +3073,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err != nil {
 		return err
 	}
+	attachmentPrograms.tcx = rt.useTCX()
 
 	diff, err := diffPreparedKernelRules(rt.preparedRules, prepared)
 	if err != nil {
@@ -3043,10 +3085,9 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	}
 	currentAttachments := make(map[kernelAttachmentKey]kernelAttachment, len(rt.attachments))
 	for _, att := range rt.attachments {
-		if att.filter == nil {
-			continue
+		if key, ok := att.key(); ok {
+			currentAttachments[key] = att
 		}
-		currentAttachments[kernelAttachmentKeyForFilter(att.filter)] = att
 	}
 	plannedKeys := make([]kernelAttachmentKey, 0, len(plans))
 	expectedAttachments := make(map[kernelAttachmentKey]kernelAttachmentExpectation, len(plans))
@@ -3054,7 +3095,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		plannedKeys = append(plannedKeys, plan.key)
 		expectedAttachments[plan.key] = kernelAttachmentExpectationForPlan(plan)
 	}
-	observedAttachments := kernelAttachmentObservations(plannedKeys)
+	observedAttachments := kernelAttachmentObservations(plannedKeys, rt.attachments)
 
 	newAttachments := make([]kernelAttachment, 0, len(plans))
 	createdAttachments := make([]kernelAttachment, 0, len(plans))
@@ -3066,7 +3107,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		if current, ok := currentAttachments[plan.key]; ok && kernelAttachmentObservationMatchesExpectation(observedAttachments[plan.key], expectedAttachments[plan.key]) {
 			newAttachments = append(newAttachments, current)
 		} else {
-			if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+			if err := rt.attachProgramLocked(&createdAttachments, plan, rt.attachments); err != nil {
 				rt.discardAttachmentsLocked(createdAttachments)
 				return fmt.Errorf("attach %s on ifindex %d: %w", plan.name, plan.ifindex, err)
 			}
@@ -3254,19 +3295,14 @@ func kernelAttachmentDeleteCount(oldAttachments, newAttachments []kernelAttachme
 	if len(oldAttachments) == 0 {
 		return 0
 	}
-	newKeys := make(map[kernelAttachmentKey]struct{}, len(newAttachments))
-	for _, att := range newAttachments {
-		if att.filter == nil {
-			continue
-		}
-		newKeys[kernelAttachmentKeyForFilter(att.filter)] = struct{}{}
-	}
+	newKeys := kernelAttachmentKeySet(newAttachments)
 	count := 0
 	for _, att := range oldAttachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		if _, ok := newKeys[kernelAttachmentKeyForFilter(att.filter)]; ok {
+		if _, ok := newKeys[key]; ok {
 			continue
 		}
 		count++
@@ -3292,46 +3328,92 @@ func (rt *linuxKernelRuleRuntime) discardAttachmentsLocked(attachments []kernelA
 	if err := update.rollback(); err != nil {
 		log.Printf("kernel dataplane rollback: restore tc attachments failed: %v", err)
 	}
+	// A tcx position that existed before gets its previous program back; one
+	// this attempt created is detached.
+	previousTCX := make(map[kernelAttachmentKey]*kernelTCXAttachment)
+	for _, att := range rt.attachments {
+		if att.tcx != nil {
+			previousTCX[att.tcx.key] = att.tcx
+		}
+	}
+	for i := len(attachments) - 1; i >= 0; i-- {
+		installed := attachments[i].tcx
+		if installed == nil || installed.slot == nil || installed.slot.link == nil {
+			continue
+		}
+		if previous := previousTCX[installed.key]; previous != nil && previous.prog != nil {
+			if err := installed.slot.link.Update(previous.prog); err != nil {
+				log.Printf("kernel dataplane rollback: restore tcx link of %s on ifindex %d failed: %v", previous.name, installed.key.linkIndex, err)
+			}
+			continue
+		}
+		detachKernelTCXSlot(installed.slot)
+	}
+}
+
+func kernelAttachmentKeySet(attachments []kernelAttachment) map[kernelAttachmentKey]struct{} {
+	keys := make(map[kernelAttachmentKey]struct{}, len(attachments))
+	for _, att := range attachments {
+		if key, ok := att.key(); ok {
+			keys[key] = struct{}{}
+		}
+	}
+	return keys
 }
 
 func (rt *linuxKernelRuleRuntime) deleteStaleAttachmentsLocked(oldAttachments, newAttachments []kernelAttachment) {
-	newKeys := make(map[kernelAttachmentKey]struct{}, len(newAttachments))
-	for _, att := range newAttachments {
-		if att.filter == nil {
-			continue
-		}
-		newKeys[kernelAttachmentKeyForFilter(att.filter)] = struct{}{}
-	}
-
+	newKeys := kernelAttachmentKeySet(newAttachments)
 	for _, att := range oldAttachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		if _, ok := newKeys[kernelAttachmentKeyForFilter(att.filter)]; ok {
+		if _, ok := newKeys[key]; ok {
 			continue
 		}
-		_ = netlink.FilterDel(att.filter)
+		deleteKernelAttachment(att)
 	}
 }
 
-func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, ifindex int, parent uint32, priority uint16, handleMinor uint16, name string, prog *ebpf.Program) error {
-	if prog == nil {
-		return fmt.Errorf("tc program %q is unavailable", name)
+func deleteKernelAttachment(att kernelAttachment) {
+	if att.filter != nil {
+		_ = netlink.FilterDel(att.filter)
 	}
-	if err := ensureClsactQdisc(ifindex); err != nil {
+	if att.tcx != nil {
+		detachKernelTCXSlot(att.tcx.slot)
+	}
+}
+
+// attachProgramLocked puts plan.prog into the position of plan. live holds
+// attachments that may already own the position; those attached earlier in
+// the same pass come from dst.
+func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, plan kernelAttachmentPlan, live []kernelAttachment) error {
+	prog := plan.prog
+	if prog == nil {
+		return fmt.Errorf("tc program %q is unavailable", plan.name)
+	}
+	if plan.key.tcx {
+		att, err := attachKernelTCX(plan, *dst, live)
+		if err != nil {
+			return err
+		}
+		*dst = append(*dst, att)
+		return nil
+	}
+	if err := ensureClsactQdisc(plan.ifindex); err != nil {
 		return err
 	}
 
 	filter := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: ifindex,
-			Handle:    netlink.MakeHandle(0, handleMinor),
-			Parent:    parent,
-			Priority:  priority,
+			LinkIndex: plan.ifindex,
+			Handle:    netlink.MakeHandle(0, plan.handleMinor),
+			Parent:    plan.key.parent,
+			Priority:  plan.priority,
 			Protocol:  unix.ETH_P_ALL,
 		},
 		Fd:           prog.FD(),
-		Name:         name,
+		Name:         plan.name,
 		Id:           int(kernelProgramID(prog)),
 		DirectAction: true,
 	}
@@ -4597,6 +4679,7 @@ func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(attachmentRuleSets ke
 		return false
 	}
 	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, rt.preparedRules, rt.attachmentMode, rt.pluginPipelineActive)
+	programs.tcx = rt.useTCX()
 	return kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, rt.attachments, programs)
 }
 

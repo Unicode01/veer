@@ -2573,22 +2573,31 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitEgressInterfaceWithoutRules(
 	if _, err := rt.Reconcile(nil); err != nil {
 		t.Fatalf("Reconcile(nil) error = %v", err)
 	}
-	if len(rt.attachments) != 2 || rt.attachments[0].filter == nil || rt.attachments[1].filter == nil {
-		t.Fatalf("attachments = %+v, want IPv4 and IPv6 egress filters", rt.attachments)
+	if len(rt.attachments) != 2 {
+		t.Fatalf("attachments = %+v, want IPv4 and IPv6 egress attachments", rt.attachments)
 	}
 	wantNames := map[string]bool{
 		kernelForwardEgressPipelineProgramName:   false,
 		kernelForwardEgressPipelineProgramNameV6: false,
 	}
 	for _, attachment := range rt.attachments {
-		filter := attachment.filter
-		if filter.Parent != netlink.HANDLE_MIN_EGRESS {
-			t.Fatalf("filter parent = %#x, want HANDLE_MIN_EGRESS %#x", filter.Parent, uint32(netlink.HANDLE_MIN_EGRESS))
+		key, ok := attachment.key()
+		if !ok {
+			t.Fatalf("attachment %+v has no position", attachment)
 		}
-		if _, ok := wantNames[filter.Name]; !ok {
-			t.Fatalf("unexpected egress filter name %q", filter.Name)
+		if key.parent != netlink.HANDLE_MIN_EGRESS {
+			t.Fatalf("attachment parent = %#x, want HANDLE_MIN_EGRESS %#x", key.parent, uint32(netlink.HANDLE_MIN_EGRESS))
 		}
-		wantNames[filter.Name] = true
+		name := ""
+		if attachment.filter != nil {
+			name = attachment.filter.Name
+		} else {
+			name = attachment.tcx.name
+		}
+		if _, ok := wantNames[name]; !ok {
+			t.Fatalf("unexpected egress program %q", name)
+		}
+		wantNames[name] = true
 	}
 	for name, found := range wantNames {
 		if !found {

@@ -132,6 +132,9 @@ type kernelHotRestartTCAttachment struct {
 	Parent    uint32 `json:"parent"`
 	Priority  uint16 `json:"priority"`
 	Handle    uint32 `json:"handle"`
+	// TCX marks a tcx link, pinned under the handoff state for a successor.
+	// Older successors read the entry as a cls_bpf filter position.
+	TCX bool `json:"tcx,omitempty"`
 }
 
 type kernelHotRestartXDPAttachment struct {
@@ -148,14 +151,16 @@ func kernelHotRestartTCMetadata(attachments []kernelAttachment, objectHash strin
 		TCAttachments: make([]kernelHotRestartTCAttachment, 0, len(attachments)),
 	}
 	for _, att := range attachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
 		meta.TCAttachments = append(meta.TCAttachments, kernelHotRestartTCAttachment{
-			LinkIndex: att.filter.LinkIndex,
-			Parent:    att.filter.Parent,
-			Priority:  att.filter.Priority,
-			Handle:    att.filter.Handle,
+			LinkIndex: key.linkIndex,
+			Parent:    key.parent,
+			Priority:  key.priority,
+			Handle:    key.handle,
+			TCX:       key.tcx,
 		})
 	}
 	return meta
@@ -165,6 +170,12 @@ func kernelAttachmentsFromHotRestartMetadata(items []kernelHotRestartTCAttachmen
 	attachments := make([]kernelAttachment, 0, len(items))
 	for _, item := range items {
 		if item.LinkIndex <= 0 || item.Parent == 0 || item.Priority == 0 || item.Handle == 0 {
+			continue
+		}
+		if item.TCX {
+			if att, ok := loadKernelTCXPredecessorAttachment(item); ok {
+				attachments = append(attachments, att)
+			}
 			continue
 		}
 		attachments = append(attachments, kernelAttachment{filter: &netlink.BpfFilter{
@@ -698,7 +709,12 @@ func cleanupOrphanTCKernelRuntimeState() error {
 	if kernelMetadataOwnerAlive(meta) {
 		return nil
 	}
+	// The tcx links of a process that is gone went with it; only cls_bpf
+	// filters outlive their owner.
 	for _, att := range meta.TCAttachments {
+		if att.TCX {
+			continue
+		}
 		filter := &netlink.BpfFilter{
 			FilterAttrs: netlink.FilterAttrs{
 				LinkIndex: att.LinkIndex,
@@ -742,7 +758,11 @@ func cleanupStaleTCKernelHotRestartState() error {
 		}
 		return fmt.Errorf("read tc hot restart metadata: %w", err)
 	}
+	detachKernelTCXPredecessorLinks(meta.TCAttachments)
 	for _, att := range meta.TCAttachments {
+		if att.TCX {
+			continue
+		}
 		filter := &netlink.BpfFilter{
 			FilterAttrs: netlink.FilterAttrs{
 				LinkIndex: att.LinkIndex,
@@ -1459,6 +1479,7 @@ func (state *kernelHotRestartMapState) close() {
 	if state == nil {
 		return
 	}
+	closeKernelTCXAttachments(state.predecessorAttachments)
 	closed := make(map[*ebpf.Map]struct{}, len(state.replacements)+1)
 	for _, m := range state.replacements {
 		if m == nil {
