@@ -425,9 +425,22 @@ session_is_up() {
 	grep -q '"tunnel_installed":true' "$1" && grep -q '"up":true' "$1"
 }
 
+# Says whether Veer still runs, for failures where its API stopped answering.
+report_veer_process() {
+	if [ -n "$veer_pid" ] && kill -0 "$veer_pid" 2>/dev/null; then
+		echo "Veer (pid $veer_pid) is still running" >&2
+	else
+		echo "Veer (pid ${veer_pid:-unknown}) is not running" >&2
+	fi
+	if [ -n "$veer_unit" ]; then
+		systemctl status "$veer_unit" --no-pager -l 2>&1 | head -n 20 >&2 || true
+	fi
+}
+
 wait_for_session_up() {
+	: >"$work_dir/session-wait.err"
 	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-		if api_get_resource sessions last >"$work_dir/session.json" 2>/dev/null; then
+		if api_get_resource sessions last >"$work_dir/session.json" 2>>"$work_dir/session-wait.err"; then
 			if session_is_up "$work_dir/session.json"; then
 				return
 			fi
@@ -436,6 +449,11 @@ wait_for_session_up() {
 	done
 	echo "PPPoE session did not become usable" >&2
 	cat "$work_dir/session.json" 2>/dev/null >&2 || true
+	if [ -s "$work_dir/session-wait.err" ]; then
+		echo "failed session reads:" >&2
+		sort "$work_dir/session-wait.err" | uniq -c >&2
+	fi
+	report_veer_process
 	cat "$work_dir/veer.log" >&2
 	exit 1
 }
@@ -527,6 +545,7 @@ test_automatic_redial() {
 
 dump_dataplane_state() {
 	set +e
+	report_veer_process
 	api_post_action debug_stats '{}' >"$work_dir/debug-stats-action.json" 2>&1
 	api_get_resource sessions debug_stats >"$work_dir/debug-stats.json" 2>&1
 	{
