@@ -350,6 +350,12 @@ run_privileged() {
 	VEER_PPPOE_BLACKBOX_SECONDS=8 \
 		sh "$ROOT_DIR/plugins/pppoe_client/test-blackbox-linux.sh"
 
+	log "PPPoE Linux blackbox: LAN data through the TC flow cache"
+	VEER_BINARY="$pppoe_blackbox_binary" \
+	VEER_PPPOE_BLACKBOX_SECONDS=4 \
+	VEER_PPPOE_BLACKBOX_FLOW_CACHE=1 \
+		sh "$ROOT_DIR/plugins/pppoe_client/test-blackbox-linux.sh"
+
 	log "PPPoE Linux blackbox: IPv6 data"
 	VEER_BINARY="$pppoe_blackbox_binary" \
 	VEER_PPPOE_BLACKBOX_SECONDS=4 \
