@@ -22,9 +22,10 @@ import (
 
 func TestFlowCacheAttachmentPlansRunAheadOfTheCore(t *testing.T) {
 	prog := &ebpf.Program{}
+	// 6 and 7 carry only plugin hooks: the core runs there, the cache does not.
 	sets := kernelAttachmentRuleSets{
-		ForwardIngress: map[int][]int64{3: {1}},
-		ReplyIngress:   map[int][]int64{3: {2}, 4: {1}},
+		ForwardIngress: map[int][]int64{3: {1}, 6: nil},
+		ReplyIngress:   map[int][]int64{3: {2}, 4: {1}, 7: nil},
 		ForwardEgress:  map[int][]int64{5: {1}},
 	}
 	programs := kernelAttachmentPrograms{
@@ -37,9 +38,11 @@ func TestFlowCacheAttachmentPlansRunAheadOfTheCore(t *testing.T) {
 	plans := desiredKernelAttachmentPlansForRuleSets(sets, programs)
 	var order []string
 	cached := map[int]bool{}
+	core := map[int]bool{}
 	for _, plan := range plans {
 		order = append(order, strconv.Itoa(plan.ifindex)+"/"+plan.name)
 		if !plan.flowCache {
+			core[plan.ifindex] = true
 			continue
 		}
 		if plan.key.parent != netlink.HANDLE_MIN_INGRESS || !plan.key.tcx || plan.attach != kernelPluginPipelineAttachIngress {
@@ -48,7 +51,10 @@ func TestFlowCacheAttachmentPlansRunAheadOfTheCore(t *testing.T) {
 		cached[plan.ifindex] = true
 	}
 	if len(cached) != 2 || !cached[3] || !cached[4] {
-		t.Fatalf("flow cache on ifindexes %v, want the ingress hooks 3 and 4", cached)
+		t.Fatalf("flow cache on ifindexes %v, want the rule ingress hooks 3 and 4", cached)
+	}
+	if !core[6] || !core[7] {
+		t.Fatalf("core on ifindexes %v, want the plugin-only hooks 6 and 7 too", core)
 	}
 	want := "3/" + kernelFlowCacheProgramName + " 3/" + kernelReplyProgramName + " 3/" + kernelForwardProgramName
 	if got := strings.Join(order[:3], " "); got != want {
@@ -60,6 +66,40 @@ func TestFlowCacheAttachmentPlansRunAheadOfTheCore(t *testing.T) {
 		if plan.flowCache {
 			t.Fatalf("flow cache plan without the program: %+v", plan)
 		}
+	}
+}
+
+// The steady reconcile must notice an interface whose last rule left while
+// its plugin hooks stay, which sameTargets ignores, so the cache leaves it.
+func TestFlowCacheTargetsFollowRuleIDs(t *testing.T) {
+	ruled := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{3: {1}},
+		ReplyIngress:   map[int][]int64{4: {1, 2}},
+	}
+	pluginOnly := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{3: {1}},
+		ReplyIngress:   map[int][]int64{4: nil},
+	}
+	if !ruled.sameTargets(pluginOnly) {
+		t.Fatal("sameTargets must keep ignoring rule IDs")
+	}
+	if ruled.sameFlowCacheTargets(pluginOnly) || pluginOnly.sameFlowCacheTargets(ruled) {
+		t.Fatal("sameFlowCacheTargets = true across an interface that lost its last rule")
+	}
+	renumbered := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{3: {7}},
+		ReplyIngress:   map[int][]int64{4: {8}},
+	}
+	if !ruled.sameFlowCacheTargets(renumbered) {
+		t.Fatal("sameFlowCacheTargets = false for the same ruled interfaces")
+	}
+	// An interface that serves rules in either direction keeps the cache.
+	mixed := kernelAttachmentRuleSets{
+		ForwardIngress: map[int][]int64{3: {1}, 4: {2}},
+		ReplyIngress:   map[int][]int64{4: nil},
+	}
+	if !ruled.sameFlowCacheTargets(mixed) {
+		t.Fatal("sameFlowCacheTargets = false although interface 4 still serves a rule")
 	}
 }
 
@@ -266,7 +306,7 @@ func testEgressNATTCFlowCacheServesEstablishedTCP(t *testing.T, natType string) 
 
 // A plugin hook on an interface's ingress keeps that interface out of the
 // flow cache, so the hook sees every packet. The other direction, without
-// hooks, is still cached.
+// hooks, is still cached. An interface that only a hook needs gets no cache.
 func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 	if os.Getenv(egressNATTestEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
@@ -283,7 +323,8 @@ func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 
 	pluginsRoot := t.TempDir()
 	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ChildHostIF)
+	// The bridge serves no rule: the core runs there only for the hook.
+	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ChildHostIF, topology.BridgeIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 	enabled := true
 	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
@@ -323,6 +364,29 @@ func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 	uplink, err := netlink.LinkByName(topology.UplinkHostIF)
 	if err != nil {
 		t.Fatalf("resolve %s: %v", topology.UplinkHostIF, err)
+	}
+	bridge, err := netlink.LinkByName(topology.BridgeIF)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", topology.BridgeIF, err)
+	}
+	cacheOn := map[int]bool{}
+	coreOn := map[int]bool{}
+	for _, att := range rt.attachments {
+		key, ok := att.key()
+		if !ok || key.parent != netlink.HANDLE_MIN_INGRESS {
+			continue
+		}
+		if key.priority == kernelFlowCacheFilterPrio {
+			cacheOn[key.linkIndex] = true
+		} else {
+			coreOn[key.linkIndex] = true
+		}
+	}
+	if !coreOn[bridge.Attrs().Index] || cacheOn[bridge.Attrs().Index] {
+		t.Fatalf("on %s, which only a plugin hook needs: core attached %v, flow cache attached %v; want the core alone", topology.BridgeIF, coreOn[bridge.Attrs().Index], cacheOn[bridge.Attrs().Index])
+	}
+	if !cacheOn[child.Attrs().Index] || !cacheOn[uplink.Attrs().Index] {
+		t.Fatalf("flow cache attached on ifindexes %v, want %s and %s, where the rule receives packets", cacheOn, topology.ChildHostIF, topology.UplinkHostIF)
 	}
 
 	stream := startEgressNATTCStream(t, topology)

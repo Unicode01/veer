@@ -10,7 +10,7 @@ import (
 )
 
 // The experimental flow cache (kernel_tc_flow_cache): tc_flow_cache runs on
-// each ingress hook of the core, ahead of it, and sends packets of
+// each ingress hook where the core serves rules, ahead of it, and sends packets of
 // established egress NAT flows the way the core's fast path last sent them,
 // with one lookup. The core records those entries and never records one for
 // an interface where a plugin hook runs on ingress, so such interfaces keep
@@ -53,36 +53,61 @@ func (rt *linuxKernelRuleRuntime) completeAttachmentPrograms(programs *kernelAtt
 	}
 }
 
-// appendFlowCacheAttachmentPlans puts tc_flow_cache on every ingress hook of
-// the core.
+// kernelFlowCacheTargets lists the ingress hooks of the core where rules
+// receive packets. The core also runs on ingress hooks that only plugin hooks
+// need, which carry no rule IDs; it records no entry for packets entering
+// those, so a cache there could only miss.
+func kernelFlowCacheTargets(sets kernelAttachmentRuleSets) map[int]struct{} {
+	targets := make(map[int]struct{}, len(sets.ForwardIngress)+len(sets.ReplyIngress))
+	for _, rules := range []map[int][]int64{sets.ForwardIngress, sets.ReplyIngress} {
+		for ifindex, ids := range rules {
+			if len(ids) > 0 {
+				targets[ifindex] = struct{}{}
+			}
+		}
+	}
+	return targets
+}
+
+// sameFlowCacheTargets reports whether both sets put the flow cache on the
+// same interfaces. sameTargets ignores rule IDs, so it misses an interface
+// that keeps its plugin hooks after its last rule left.
+func (sets kernelAttachmentRuleSets) sameFlowCacheTargets(other kernelAttachmentRuleSets) bool {
+	a, b := kernelFlowCacheTargets(sets), kernelFlowCacheTargets(other)
+	if len(a) != len(b) {
+		return false
+	}
+	for ifindex := range a {
+		if _, ok := b[ifindex]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// appendFlowCacheAttachmentPlans puts tc_flow_cache on the ingress hooks of
+// the core where rules receive packets.
 func appendFlowCacheAttachmentPlans(plans []kernelAttachmentPlan, sets kernelAttachmentRuleSets, programs kernelAttachmentPrograms) []kernelAttachmentPlan {
 	if programs.flowCacheProg == nil {
 		return plans
 	}
-	seen := make(map[int]struct{}, len(sets.ForwardIngress)+len(sets.ReplyIngress))
-	for _, targets := range []map[int][]int64{sets.ForwardIngress, sets.ReplyIngress} {
-		for ifindex := range targets {
-			if _, ok := seen[ifindex]; ok {
-				continue
-			}
-			seen[ifindex] = struct{}{}
-			plans = append(plans, kernelAttachmentPlan{
-				key: kernelAttachmentKey{
-					linkIndex: ifindex,
-					parent:    netlink.HANDLE_MIN_INGRESS,
-					priority:  kernelFlowCacheFilterPrio,
-					handle:    netlink.MakeHandle(0, kernelFlowCacheFilterHandle),
-					tcx:       programs.tcx,
-				},
-				ifindex:     ifindex,
-				priority:    kernelFlowCacheFilterPrio,
-				handleMinor: kernelFlowCacheFilterHandle,
-				name:        kernelFlowCacheProgramName,
-				prog:        programs.flowCacheProg,
-				attach:      kernelPluginPipelineAttachIngress,
-				flowCache:   true,
-			})
-		}
+	for ifindex := range kernelFlowCacheTargets(sets) {
+		plans = append(plans, kernelAttachmentPlan{
+			key: kernelAttachmentKey{
+				linkIndex: ifindex,
+				parent:    netlink.HANDLE_MIN_INGRESS,
+				priority:  kernelFlowCacheFilterPrio,
+				handle:    netlink.MakeHandle(0, kernelFlowCacheFilterHandle),
+				tcx:       programs.tcx,
+			},
+			ifindex:     ifindex,
+			priority:    kernelFlowCacheFilterPrio,
+			handleMinor: kernelFlowCacheFilterHandle,
+			name:        kernelFlowCacheProgramName,
+			prog:        programs.flowCacheProg,
+			attach:      kernelPluginPipelineAttachIngress,
+			flowCache:   true,
+		})
 	}
 	return plans
 }

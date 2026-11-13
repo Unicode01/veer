@@ -286,10 +286,10 @@ TC 路径中，Egress NAT（对称和 Full Cone 两种类型）已建立连接�
 
 在 Linux 6.6 及以上内核中，TC 核心程序（包括插件 pipeline）通过 tcx 挂载，不再经过 clsact 下的 cls_bpf 过滤器链，每个包少一次分类器遍历。tcx 程序先于网卡上所有 cls_bpf 过滤器执行；插件直接挂载的 TC 过滤器仍是 cls_bpf，执行顺序和以前一样排在核心程序之后。tcx 不支持 `TC_ACT_STOLEN`，插件接管数据包后应返回 `veer_tc_consumed()`，见 [PLUGIN.md](PLUGIN.md)。`experimental_features` 中的 `kernel_tc_legacy_attach` 可强制使用 cls_bpf。运行时视图中 TC 引擎的 `attachment_api` 字段显示当前挂载方式（`tcx` 或 `cls_bpf`）。热重启时新进程接管已挂载的 tcx 程序并原子替换；在两种挂载方式之间切换时，先挂上新程序，再移除旧的挂载。
 
-`experimental_features` 中的 `kernel_tc_flow_cache` 开启实验性的连接缓存：每个挂了 TC 核心程序的网卡入口前面再挂一个小程序，已建立的 Egress NAT 连接（对称和 Full Cone，去程和回程）的普通包查一次表就改写并转发，不再经过核心程序。缓存条目由核心程序在快路径上写入，和该连接的 1 秒快路径窗口一起过期，所以每条连接每秒仍至少由核心程序完整处理一次，路由、邻居和本机地址变化的生效时间不变。
+`experimental_features` 中的 `kernel_tc_flow_cache` 开启实验性的连接缓存：规则收包的每个网卡入口上，在 TC 核心程序前面再挂一个小程序，已建立的 Egress NAT 连接（对称和 Full Cone，去程和回程）的普通包查一次表就改写并转发，不再经过核心程序。缓存条目由核心程序在快路径上写入，和该连接的 1 秒快路径窗口一起过期，所以每条连接每秒仍至少由核心程序完整处理一次，路由、邻居和本机地址变化的生效时间不变。
 
 - **只缓存**：不带 VLAN 标签的 IPv4 TCP/UDP 包；SYN、FIN、RST 总是交给核心程序，FIN/RST 同时删除这条连接两个方向的缓存条目。
-- **不使用缓存**：入口挂了插件钩子的网卡；开启了 `kernel_traffic_stats`；同时开启了 `kernel_tc_reply_l2_cache`。
+- **不使用缓存**：入口挂了插件钩子的网卡（这些网卡进来的包不缓存，只挂插件钩子、没有规则的网卡不挂缓存程序）；开启了 `kernel_traffic_stats`；同时开启了 `kernel_tc_reply_l2_cache`。
 - **失效**：规则、本机地址、插件钩子变化或用户态清理连接时，所有条目立即作废。热重启后缓存从空开始。
 
 ## 托管网络
