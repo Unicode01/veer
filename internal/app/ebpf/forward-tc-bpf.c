@@ -128,8 +128,11 @@ struct tc_l2_value_v4 {
 
 /*
  * A packet the core's fast path would send unchanged apart from this rewrite
- * and next hop. Keyed like a front flow entry (ingress ifindex, host-order
- * 5-tuple) by the packet's own tuple, never a full-cone wildcard.
+ * and next hop. Keyed by the packet's own host-order 5-tuple, never a
+ * full-cone wildcard, and the ifindex the core keys that flow direction by:
+ * the ingress ifindex for the front, the flow's reply ifindex (a bridge
+ * port's parent) for the reply. Only a packet entering in_ifindex for
+ * in_dmac, as the recorded one did, may use it.
  */
 struct tc_flow_cache_value_v4 {
 	__u64 expires_ns;
@@ -142,7 +145,9 @@ struct tc_flow_cache_value_v4 {
 	__u16 dst_port;
 	__u8 dmac[ETH_ALEN];
 	__u8 smac[ETH_ALEN];
-	__u8 pad[4];
+	__u32 in_ifindex;
+	__u8 in_dmac[ETH_ALEN];
+	__u8 pad[2];
 };
 
 struct tc_flow_cache_state_v4 {
@@ -3795,22 +3800,31 @@ static __always_inline const struct tc_flow_cache_state_v4 *tc_flow_cache_writab
 #endif
 
 /*
- * Records how the fast path sends this packet. Only untagged TCP and UDP is
- * recorded, as tc_flow_cache parses nothing else, and only next hops the FIB
- * resolved, which carry both MAC addresses.
+ * Records how the fast path sends this packet, under key_ifindex (see
+ * tc_flow_cache_value_v4). Only untagged TCP and UDP is recorded, as
+ * tc_flow_cache parses nothing else, and only next hops the FIB resolved,
+ * which carry both MAC addresses. It must run before the packet is
+ * rewritten: the entry keeps the destination MAC the packet arrived with.
  */
-static __always_inline void remember_tc_flow_cache_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 src_addr, __u16 src_port, __u32 dst_addr, __u16 dst_port, const struct tc_l2_value_v4 *l2, __u64 window_start)
+static __always_inline void remember_tc_flow_cache_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 key_ifindex, __u32 src_addr, __u16 src_port, __u32 dst_addr, __u16 dst_port, const struct tc_l2_value_v4 *l2, __u64 window_start)
 {
 	const struct tc_flow_cache_state_v4 *state;
 	struct tc_flow_cache_value_v4 value = {};
 	struct flow_key_v4 key = {};
+	const struct ethhdr *eth;
 
 	if (!l2 || ctx->l3_off != (int)sizeof(struct ethhdr) || ctx->proto == IPPROTO_ICMP)
 		return;
 	state = tc_flow_cache_writable(skb->ifindex);
 	if (!state)
 		return;
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth)
+		return;
 	build_front_flow_key(skb, ctx, &key);
+	key.ifindex = key_ifindex;
+	value.in_ifindex = skb->ifindex;
+	__builtin_memcpy(value.in_dmac, eth->h_dest, ETH_ALEN);
 	value.expires_ns = window_start + FORWARD_TC_FAST_PATH_WINDOW_NS;
 	value.generation = state->generation;
 	value.out_ifindex = l2->out_ifindex;
@@ -3826,9 +3840,10 @@ static __always_inline void remember_tc_flow_cache_v4(struct __sk_buff *skb, con
 
 /*
  * A SYN, FIN or RST takes the core's full path; so must the rest of the
- * connection in both directions while the core tracks the change.
+ * connection in both directions while the core tracks the change. key_ifindex
+ * and peer use the ifindexes the entries were recorded under.
  */
-static __always_inline void forget_tc_flow_cache_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *peer)
+static __always_inline void forget_tc_flow_cache_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 key_ifindex, const struct flow_key_v4 *peer)
 {
 	struct flow_key_v4 key = {};
 	const struct tc_flow_cache_state_v4 *state;
@@ -3838,6 +3853,7 @@ static __always_inline void forget_tc_flow_cache_v4(struct __sk_buff *skb, const
 	if (!state || !state->enabled)
 		return;
 	build_front_flow_key(skb, ctx, &key);
+	key.ifindex = key_ifindex;
 	bpf_map_delete_elem(&tc_flow_cache_v4, &key);
 	bpf_map_delete_elem(&tc_flow_cache_v4, peer);
 }
@@ -3880,13 +3896,14 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 	if (tcp_packet_changes_state(ctx)) {
 		struct flow_key_v4 reply_key = {};
 
+		/* Replies are recorded under the reply flow's ifindex. */
 		reply_key.ifindex = rule->out_ifindex;
 		reply_key.src_addr = bpf_ntohl(ctx->dst_addr);
 		reply_key.dst_addr = nat_addr;
 		reply_key.src_port = ctx->dst_port;
 		reply_key.dst_port = front_flow->nat_port;
 		reply_key.proto = ctx->proto;
-		forget_tc_flow_cache_v4(skb, ctx, &reply_key);
+		forget_tc_flow_cache_v4(skb, ctx, skb->ifindex, &reply_key);
 		return FORWARD_TC_SLOW_PATH;
 	}
 	if (!flow_within_fast_path_window(front_flow, now))
@@ -3922,7 +3939,7 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 	else if (!prefer_reply_l2_cache(nat_cfg_flags))
-		remember_tc_flow_cache_v4(skb, ctx, nat_addr, front_flow->nat_port, bpf_ntohl(ctx->dst_addr), ctx->dst_port, l2, front_flow->last_seen_ns);
+		remember_tc_flow_cache_v4(skb, ctx, skb->ifindex, nat_addr, front_flow->nat_port, bpf_ntohl(ctx->dst_addr), ctx->dst_port, l2, front_flow->last_seen_ns);
 	if (rewrite_l4_snat(skb, ctx, nat_addr, front_flow->nat_port) < 0)
 		return TC_ACT_SHOT;
 	if (l2)
@@ -4491,6 +4508,13 @@ static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const s
 {
 	const struct tc_l2_value_v4 *l2 = 0;
 	int full_cone = is_full_cone_flow(flow);
+	/*
+	 * The reply lookup resolved the flow under this ifindex: the parent
+	 * when the packet entered a port of the reply interface. Cache entries
+	 * of this direction use it, so a FIN or RST on the front side, which
+	 * only knows the flow's reply ifindex, finds them.
+	 */
+	__u32 cache_ifindex = reply_key ? reply_key->ifindex : (__u32)skb->ifindex;
 	__u32 ifindex;
 	__u32 src_addr;
 	int action;
@@ -4504,7 +4528,7 @@ static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const s
 		front_key.dst_addr = full_cone ? bpf_ntohl(ctx->src_addr) : flow->front_addr;
 		front_key.dst_port = full_cone ? ctx->src_port : flow->front_port;
 		front_key.proto = ctx->proto;
-		forget_tc_flow_cache_v4(skb, ctx, &front_key);
+		forget_tc_flow_cache_v4(skb, ctx, cache_ifindex, &front_key);
 		return FORWARD_TC_SLOW_PATH;
 	}
 	if (!flow_within_fast_path_window(flow, now))
@@ -4525,7 +4549,7 @@ static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const s
 	if (FORWARD_FLOW_TRAFFIC_ENABLED(flow))
 		add_rule_traffic_bytes(flow->rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
 	else if (is_egress_nat_flow(flow))
-		remember_tc_flow_cache_v4(skb, ctx, src_addr, full_cone ? ctx->src_port : flow->front_port,
+		remember_tc_flow_cache_v4(skb, ctx, cache_ifindex, src_addr, full_cone ? ctx->src_port : flow->front_port,
 			flow->client_addr, flow->client_port, l2, flow->last_seen_ns);
 	if (!full_cone) {
 		if (rewrite_l4_snat(skb, ctx, flow->front_addr, flow->front_port) < 0)
@@ -6389,7 +6413,9 @@ int tc_flow_cache(struct __sk_buff *skb)
 	struct flow_key_v4 key = {};
 	const struct tc_flow_cache_value_v4 *entry;
 	const struct tc_flow_cache_state_v4 *state;
+	const struct ethhdr *eth;
 	__u32 state_key = 0;
+	__u32 parent;
 
 	if (parse_ipv4_l4(skb, &ctx) < 0)
 		return TC_ACT_UNSPEC;
@@ -6397,7 +6423,25 @@ int tc_flow_cache(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	build_front_flow_key(skb, &ctx, &key);
 	entry = bpf_map_lookup_elem(&tc_flow_cache_v4, &key);
-	if (!entry)
+	if (!entry) {
+		/* A reply entering a port is recorded under the port's parent. */
+		parent = resolve_parent_ifindex(key.ifindex);
+		if (parent == key.ifindex)
+			return TC_ACT_UNSPEC;
+		key.ifindex = parent;
+		entry = bpf_map_lookup_elem(&tc_flow_cache_v4, &key);
+		if (!entry)
+			return TC_ACT_UNSPEC;
+	}
+	/*
+	 * The core checks the destination MAC before its fast path and keys
+	 * front flows by the ingress port, so only a packet that arrived like
+	 * the recorded one may skip it.
+	 */
+	if (entry->in_ifindex != skb->ifindex)
+		return TC_ACT_UNSPEC;
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth || !mac_equal(eth->h_dest, entry->in_dmac))
 		return TC_ACT_UNSPEC;
 	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &state_key);
 	if (!state || entry->generation != state->generation)

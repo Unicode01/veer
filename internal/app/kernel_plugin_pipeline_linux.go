@@ -113,6 +113,12 @@ type kernelAttachmentRuleSets struct {
 	ReplyIngress   map[int][]int64
 	ForwardEgress  map[int][]int64
 	ReplyEgress    map[int][]int64
+	// PluginIngressHooked holds the interfaces where a plugin hook runs on
+	// ingress; PluginIngressHookedAll is set when one runs on every
+	// interface. The core records no flow cache entry for packets entering
+	// those, so the cache stays off them.
+	PluginIngressHooked    map[int]struct{}
+	PluginIngressHookedAll bool
 }
 
 func kernelAttachmentRuleSetsForPrepared(forward, reply map[int][]int64) kernelAttachmentRuleSets {
@@ -169,7 +175,21 @@ func (sets kernelAttachmentRuleSets) clone() kernelAttachmentRuleSets {
 		ReplyIngress:   cloneKernelPluginPipelineAttachRuleSet(sets.ReplyIngress),
 		ForwardEgress:  cloneKernelPluginPipelineAttachRuleSet(sets.ForwardEgress),
 		ReplyEgress:    cloneKernelPluginPipelineAttachRuleSet(sets.ReplyEgress),
+
+		PluginIngressHooked:    cloneKernelIfIndexSet(sets.PluginIngressHooked),
+		PluginIngressHookedAll: sets.PluginIngressHookedAll,
 	}
+}
+
+func cloneKernelIfIndexSet(src map[int]struct{}) map[int]struct{} {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[int]struct{}, len(src))
+	for ifindex := range src {
+		dst[ifindex] = struct{}{}
+	}
+	return dst
 }
 
 func cloneKernelPluginPipelineAttachRuleSet(src map[int][]int64) map[int][]int64 {
@@ -191,6 +211,13 @@ func mergeKernelPluginPipelineAttachmentRuleSets(dst *kernelAttachmentRuleSets, 
 	mergeKernelPluginPipelineAttachRuleSets(dst.ReplyIngress, src.ReplyIngress)
 	mergeKernelPluginPipelineAttachRuleSets(dst.ForwardEgress, src.ForwardEgress)
 	mergeKernelPluginPipelineAttachRuleSets(dst.ReplyEgress, src.ReplyEgress)
+	for ifindex := range src.PluginIngressHooked {
+		if dst.PluginIngressHooked == nil {
+			dst.PluginIngressHooked = make(map[int]struct{}, len(src.PluginIngressHooked))
+		}
+		dst.PluginIngressHooked[ifindex] = struct{}{}
+	}
+	dst.PluginIngressHookedAll = dst.PluginIngressHookedAll || src.PluginIngressHookedAll
 }
 
 func boolToKernelPluginConfigFlag(value bool) uint32 {
@@ -757,6 +784,11 @@ func kernelPluginPipelineResolveExplicitAttachTargets(desired []kernelPluginPipe
 		for _, hook := range original.hooks {
 			hook.InterfaceIndexes = nil
 			if len(hook.Interfaces) == 0 {
+				for _, attach := range kernelPluginPipelinePlanAttachDirections(hook.Attach) {
+					if attach == kernelPluginPipelineAttachIngress {
+						itemTargets.PluginIngressHookedAll = true
+					}
+				}
 				item.hooks = append(item.hooks, hook)
 				continue
 			}
@@ -772,6 +804,12 @@ func kernelPluginPipelineResolveExplicitAttachTargets(desired []kernelPluginPipe
 					seenIndexes[uint32(iface.Index)] = struct{}{}
 				}
 				for _, attach := range kernelPluginPipelinePlanAttachDirections(hook.Attach) {
+					if attach == kernelPluginPipelineAttachIngress {
+						if itemTargets.PluginIngressHooked == nil {
+							itemTargets.PluginIngressHooked = make(map[int]struct{})
+						}
+						itemTargets.PluginIngressHooked[iface.Index] = struct{}{}
+					}
 					switch hook.Stage {
 					case kernelPluginPipelineStagePreForward, kernelPluginPipelineStagePostLookup, kernelPluginPipelineStagePostApply:
 						if attach == kernelPluginPipelineAttachEgress {
@@ -1722,9 +1760,9 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 	if err := clearKernelPluginMetrics(pieces.pluginMetrics); err != nil {
 		return 0, fmt.Errorf("reset tc plugin metrics before chain switch: %w", err)
 	}
-	// The core reads the cache generation before the plugin config, so one
-	// bump after the switch discards entries for interfaces that gained hooks.
-	defer invalidateKernelTCFlowCache(pieces.flowCacheState)
+	// Discard flow cache entries recorded for interfaces that gain hooks,
+	// including those a packet still reading the old config records.
+	defer settleKernelTCFlowCache(pieces.flowCacheState)
 	if err := syncKernelPluginConfigV4(pieces.pluginConfigV4, next); err != nil {
 		return 0, err
 	}
