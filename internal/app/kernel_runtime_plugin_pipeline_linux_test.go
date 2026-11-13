@@ -3299,26 +3299,43 @@ func TestKernelPluginPipelineRuntimePersistsReplyFlowSnapshotState(t *testing.T)
 			}
 
 			initialLastSeen := flowValue.LastSeenNS
+			// Clearing last_seen_ns makes the next reply refresh it. The
+			// dataplane reads the coarse clock, so a refresh within the tick
+			// of initialLastSeen stores the same value, and a packet that read
+			// the entry before the clear writes the old value back; clear
+			// again until a refresh lands on a later tick.
 			if assertionErr == nil {
-				flowValue.LastSeenNS = 0
-				if err := pieces.flowsV4.Put(flowKey, flowValue); err != nil {
-					assertionErr = fmt.Errorf("clear reply flow last_seen_ns: %w", err)
-				}
-			}
-			if assertionErr == nil {
-				_, refreshed, waitErr := waitForKernelPluginReplyFlowV4(
-					pieces.flowsV4,
-					uint32(rule.ID),
-					fullNAT,
-					2*time.Second,
-					func(value tcFlowValueV4) bool {
-						return value.Flags&kernelFlowFlagReplySeen != 0 && value.LastSeenNS > initialLastSeen
-					},
-				)
-				if waitErr != nil {
-					assertionErr = fmt.Errorf("reply flow did not refresh after another packet: %w", waitErr)
-				} else if refreshed.LastSeenNS == 0 {
-					assertionErr = errors.New("reply flow last_seen_ns remained zero")
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					var current tcFlowValueV4
+					if err := pieces.flowsV4.Lookup(flowKey, &current); err != nil {
+						assertionErr = fmt.Errorf("read reply flow: %w", err)
+						break
+					}
+					current.LastSeenNS = 0
+					if err := pieces.flowsV4.Put(flowKey, current); err != nil {
+						assertionErr = fmt.Errorf("clear reply flow last_seen_ns: %w", err)
+						break
+					}
+					_, refreshed, waitErr := waitForKernelPluginReplyFlowV4(
+						pieces.flowsV4,
+						uint32(rule.ID),
+						fullNAT,
+						250*time.Millisecond,
+						func(value tcFlowValueV4) bool {
+							return value.Flags&kernelFlowFlagReplySeen != 0 && value.LastSeenNS > initialLastSeen
+						},
+					)
+					if waitErr == nil {
+						if refreshed.LastSeenNS == 0 {
+							assertionErr = errors.New("reply flow last_seen_ns remained zero")
+						}
+						break
+					}
+					if time.Now().After(deadline) {
+						assertionErr = fmt.Errorf("reply flow did not refresh after another packet: %w", waitErr)
+						break
+					}
 				}
 			}
 			if assertionErr == nil {
