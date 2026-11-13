@@ -628,7 +628,7 @@
       const preserveBridge = checkbox(false);
       const protocolTCP = checkbox(true);
       const protocolUDP = checkbox(true);
-      const protocolICMP = checkbox(false);
+      const protocolICMP = checkbox(true);
       const protocolControl = F.h('div', { className: 'lan-protocols' }, [
         F.h('label', null, [protocolTCP, F.h('span', { text: 'TCP' })]),
         F.h('label', null, [protocolUDP, F.h('span', { text: 'UDP' })]),
@@ -844,7 +844,7 @@
         dhcpv4PoolEnd.value = data.dhcpv4_pool_end || '';
         ipv6SubnetID.value = data.ipv6_subnet_id == null ? '0' : String(data.ipv6_subnet_id);
         preserveBridge.checked = data.preserve_bridge === true || String(bridge.value).toLowerCase().indexOf('vmbr') === 0;
-        const selected = new Set(String(data.protocol || 'tcp+udp').toLowerCase().split('+'));
+        const selected = new Set(String(data.protocol || 'tcp+udp+icmp').toLowerCase().split('+'));
         protocolTCP.checked = selected.has('tcp');
         protocolUDP.checked = selected.has('udp');
         protocolICMP.checked = selected.has('icmp');

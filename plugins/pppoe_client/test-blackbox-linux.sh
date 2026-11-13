@@ -713,9 +713,13 @@ run_lan_traffic() {
 		done
 		sed -n 's/.*"attachment_summary":"\([^"]*\)".*/flow cache attachments: \1/p' "$work_dir/kernel-runtime-flow-cache.json"
 	fi
-	# The LAN's egress NAT covers TCP and UDP, so iperf3 is the probe.
+	# Echo through egress NAT, which this LAN profile covers along with TCP
+	# and UDP.
+	if ! ip netns exec "$client_ns" ping -c 3 -W 2 8.8.8.8; then
+		dump_dataplane_state
+		exit 1
+	fi
 	if [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" != "1" ]; then
-		echo "VEER_PPPOE_BLACKBOX_RUN_IPERF=0: skipping LAN traffic through egress NAT" >&2
 		return
 	fi
 	lan_iperf upload
@@ -902,7 +906,7 @@ EOF
   "mtu": 1500,
   "wan_ref": "blackbox",
   "wan_egress_interface": $(json_string "$local_if"),
-  "protocol": "tcp+udp",
+  "protocol": "tcp+udp+icmp",
   "auto_egress_nat": true,
   "dhcpv4_enabled": false
 }
