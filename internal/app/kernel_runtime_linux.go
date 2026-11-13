@@ -353,6 +353,9 @@ type kernelCollectionPieces struct {
 	replyTransparentProg        *ebpf.Program
 	replyFullNATProg            *ebpf.Program
 	progChainV4                 *ebpf.Map
+	icmpErrorChainV4            *ebpf.Map
+	icmpErrorForwardProg        *ebpf.Program
+	icmpErrorReplyProg          *ebpf.Program
 	pluginHooksV4               *ebpf.Map
 	pluginConfigV4              *ebpf.Map
 	pluginInterfacesV4          *ebpf.Map
@@ -2030,13 +2033,16 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	// Full NAT, egress NAT and every plugin stage are tail calls. Without the
-	// pins the kernel empties tc_prog_chain_v4 and tc_plugin_hooks_v4 when this
-	// process exits, and the filters left for the successor pass those packets
-	// unprocessed.
+	// Full NAT, egress NAT, every plugin stage and the ICMP error translators
+	// are tail calls. Without the pins the kernel empties tc_prog_chain_v4,
+	// tc_plugin_hooks_v4 and tc_icmp_error_chain_v4 when this process exits,
+	// and the filters left for the successor pass those packets unprocessed.
 	err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCProgramChainMapName, rt.coll.Maps[kernelTCProgramChainMapName])
 	if err == nil {
 		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCPluginHooksMapName, rt.coll.Maps[kernelTCPluginHooksMapName])
+	}
+	if err == nil {
+		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCICMPErrorChainMapName, rt.coll.Maps[kernelTCICMPErrorChainMapName])
 	}
 	if err != nil {
 		clearKernelHotRestartState(kernelEngineTC)
@@ -3643,7 +3649,7 @@ func configureTCKernelProgramChain(pieces kernelCollectionPieces, pluginPipeline
 			return fmt.Errorf("install tc plugin reply post-apply continue tail-call target: %w", err)
 		}
 	}
-	return nil
+	return configureKernelTCICMPErrorChain(pieces)
 }
 
 func configureTCFlowMigrationState(pieces kernelCollectionPieces, flags uint32) error {
@@ -3991,6 +3997,9 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		replyTransparentProg:        coll.Programs[kernelReplyTransparentProgramName],
 		replyFullNATProg:            coll.Programs[kernelReplyFullNATProgramName],
 		progChainV4:                 coll.Maps[kernelTCProgramChainMapName],
+		icmpErrorChainV4:            coll.Maps[kernelTCICMPErrorChainMapName],
+		icmpErrorForwardProg:        coll.Programs[kernelICMPErrorForwardProgramName],
+		icmpErrorReplyProg:          coll.Programs[kernelICMPErrorReplyProgramName],
 		pluginHooksV4:               coll.Maps[kernelTCPluginHooksMapName],
 		pluginConfigV4:              coll.Maps[kernelTCPluginConfigMapName],
 		pluginInterfacesV4:          coll.Maps[kernelTCPluginInterfacesMapName],

@@ -282,6 +282,8 @@ TC 与 XDP 选择建议：
 
 TC 路径中，Egress NAT（对称和 Full Cone 两种类型）已建立连接的去程，以及 Egress NAT / Full NAT 的回程，在本方向 1 秒内完整处理过一次后，后续普通包（不含 SYN、FIN、RST）只做地址转换，并按本方向上次路由查找得到的下一跳直接发出，不再逐包查询反向会话和路由表。每条活动连接每秒至少完整处理一次，并重新确认下一跳和目标是否已成为本机地址，因此路由、邻居或本机地址变化最多约 1 秒后生效。
 
+Egress NAT 的 `protocol` 含 `icmp` 时，ICMP 回显请求和应答以标识符代替端口做转换，30 秒没有流量即回收。不论 `protocol` 是否含 `icmp`，TC 路径都会双向转换关于已有 Egress NAT 连接的 ICMP 差错（目标不可达，含需要分片；超时；参数问题）：上游发往 NAT 地址的差错改回内网主机，包括外层目的地址、差错里引用的原始包的源地址和端口，以及各层校验和，使路径 MTU 发现、traceroute 和 UDP 端口不可达对内网主机生效；内网主机发出的差错改成 NAT 地址后从规则的出口发出。只处理不带 VLAN 标签的以太网帧；经 L3 出口（如 WireGuard）的差错和 Full NAT 端口转发的差错仍交给内核。
+
 在 Linux 5.11 及以上内核中，TC 程序用粗粒度单调时钟记录连接时间，精度为一个时钟节拍（通常 1–10 毫秒），省去了虚拟机中每包读取时钟源的开销；更老的内核仍使用精确时钟。
 
 在 Linux 6.6 及以上内核中，TC 核心程序（包括插件 pipeline）通过 tcx 挂载，不再经过 clsact 下的 cls_bpf 过滤器链，每个包少一次分类器遍历。tcx 程序先于网卡上所有 cls_bpf 过滤器执行；插件直接挂载的 TC 过滤器仍是 cls_bpf，执行顺序和以前一样排在核心程序之后。tcx 不支持 `TC_ACT_STOLEN`，插件接管数据包后应返回 `veer_tc_consumed()`，见 [PLUGIN.md](PLUGIN.md)。`experimental_features` 中的 `kernel_tc_legacy_attach` 可强制使用 cls_bpf。运行时视图中 TC 引擎的 `attachment_api` 字段显示当前挂载方式（`tcx` 或 `cls_bpf`）。热重启时新进程接管已挂载的 tcx 程序并原子替换；在两种挂载方式之间切换时，先挂上新程序，再移除旧的挂载。

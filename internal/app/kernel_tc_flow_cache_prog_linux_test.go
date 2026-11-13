@@ -19,8 +19,9 @@ const (
 	tcActUnspec   = math.MaxUint32 // TC_ACT_UNSPEC (-1)
 )
 
-// loadFlowCacheProgramForTest loads tc_flow_cache with only the maps it uses.
-func loadFlowCacheProgramForTest(t *testing.T) *ebpf.Collection {
+// loadTCProgramsForTest loads the named programs of the embedded TC object
+// with only the maps they use, hash maps cut down to test size.
+func loadTCProgramsForTest(t *testing.T, names ...string) *ebpf.Collection {
 	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("root privileges are required")
@@ -29,14 +30,23 @@ func loadFlowCacheProgramForTest(t *testing.T) *ebpf.Collection {
 	if err != nil {
 		t.Skipf("embedded tc object is unavailable: %v", err)
 	}
-	progSpec := spec.Programs[kernelFlowCacheProgramName]
-	if progSpec == nil {
-		t.Fatalf("embedded tc object has no %s program", kernelFlowCacheProgramName)
-	}
+	programs := make(map[string]*ebpf.ProgramSpec, len(names))
 	maps := make(map[string]*ebpf.MapSpec)
-	for _, ins := range progSpec.Instructions {
-		if m := spec.Maps[ins.Reference()]; m != nil {
-			maps[ins.Reference()] = m
+	for _, name := range names {
+		progSpec := spec.Programs[name]
+		if progSpec == nil {
+			t.Fatalf("embedded tc object has no %s program", name)
+		}
+		programs[name] = progSpec
+		for _, ins := range progSpec.Instructions {
+			if m := spec.Maps[ins.Reference()]; m != nil {
+				maps[ins.Reference()] = m
+			}
+		}
+	}
+	for _, m := range maps {
+		if (m.Type == ebpf.Hash || m.Type == ebpf.LRUHash) && m.MaxEntries > 4096 {
+			m.MaxEntries = 4096
 		}
 	}
 	for name, v := range spec.Variables {
@@ -44,14 +54,20 @@ func loadFlowCacheProgramForTest(t *testing.T) *ebpf.Collection {
 			delete(spec.Variables, name)
 		}
 	}
-	spec.Programs = map[string]*ebpf.ProgramSpec{kernelFlowCacheProgramName: progSpec}
+	spec.Programs = programs
 	spec.Maps = maps
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
-		t.Fatalf("load %s: %v", kernelFlowCacheProgramName, err)
+		t.Fatalf("load %v: %v", names, err)
 	}
 	t.Cleanup(coll.Close)
 	return coll
+}
+
+// loadFlowCacheProgramForTest loads tc_flow_cache with only the maps it uses.
+func loadFlowCacheProgramForTest(t *testing.T) *ebpf.Collection {
+	t.Helper()
+	return loadTCProgramsForTest(t, kernelFlowCacheProgramName)
 }
 
 // flowCacheTestFrame builds an untagged IPv4 UDP frame.

@@ -15,7 +15,10 @@
 #include "include/forward_flow_time.h"
 
 #define ICMP_ECHOREPLY 0
+#define ICMP_DEST_UNREACH 3
 #define ICMP_ECHO 8
+#define ICMP_TIME_EXCEEDED 11
+#define ICMP_PARAMETERPROB 12
 #define ICMPV6_ECHO_REQUEST 128
 #define ICMPV6_ECHO_REPLY 129
 
@@ -775,6 +778,19 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
 	.max_entries = 111,
+};
+
+/*
+ * The ICMP error translators. Plugins share tc_prog_chain_v4 and keep its
+ * layout, so they get a chain of their own.
+ */
+#define FORWARD_TC_ICMP_ERROR_FORWARD 0
+#define FORWARD_TC_ICMP_ERROR_REPLY 1
+struct bpf_map_def SEC("maps") tc_icmp_error_chain_v4 = {
+	.type = BPF_MAP_TYPE_PROG_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = 2,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_hooks_v4 = {
@@ -1772,6 +1788,30 @@ static __always_inline void *tc_packet_ptr(struct __sk_buff *skb, __u32 off, __u
 	if (ptr + len > data_end)
 		return 0;
 	return ptr;
+}
+
+static __always_inline int is_icmp_error_type(__u8 type)
+{
+	return type == ICMP_DEST_UNREACH || type == ICMP_TIME_EXCEEDED || type == ICMP_PARAMETERPROB;
+}
+
+/*
+ * Whether the packet the IPv4 parsers rejected may be an ICMP error about a
+ * NAT flow, which icmp_error_forward_v4 and icmp_error_reply_v4 translate.
+ * A cheap guess: those programs parse the error properly.
+ */
+static __always_inline int tc_packet_may_be_icmp_error_v4(struct __sk_buff *skb)
+{
+	const struct iphdr *iph;
+	const __u8 *type;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return 0;
+	iph = tc_packet_ptr(skb, sizeof(struct ethhdr), sizeof(*iph));
+	if (!iph || iph->protocol != IPPROTO_ICMP)
+		return 0;
+	type = tc_packet_ptr(skb, sizeof(struct ethhdr) + sizeof(*iph), sizeof(*type));
+	return type && is_icmp_error_type(*type);
 }
 
 static __always_inline int rewrite_eth_addrs(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN])
@@ -5089,6 +5129,8 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 	__builtin_memset(ctx, 0, sizeof(*ctx));
 
 	if (parse_ipv4_l4(skb, ctx) < 0) {
+		if (tc_packet_may_be_icmp_error_v4(skb))
+			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_FORWARD);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -5135,6 +5177,8 @@ static __always_inline int handle_reply_ingress_v4(struct __sk_buff *skb)
 	__builtin_memset(flow_key, 0, sizeof(*flow_key));
 
 	if (parse_ipv4_l4_any(skb, ctx) < 0) {
+		if (tc_packet_may_be_icmp_error_v4(skb))
+			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_REPLY);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -5270,6 +5314,10 @@ static __always_inline int prepare_dispatch_forward_ingress_v4(struct __sk_buff 
 		__builtin_memset(plugin_ctx, 0, sizeof(*plugin_ctx));
 
 	if (parse_ipv4_l4(skb, &dispatch->ctx) < 0) {
+		/* Apply-stage plugin hooks still expect the packet back. */
+		if ((dispatch->plugin_pipeline_active == 0 || dispatch->plugin_apply_mask == 0) &&
+		    tc_packet_may_be_icmp_error_v4(skb))
+			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_FORWARD);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -5517,6 +5565,10 @@ static __always_inline int prepare_dispatch_reply_ingress_v4(struct __sk_buff *s
 	__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
 
 	if (parse_ipv4_l4_any(skb, &dispatch->ctx) < 0) {
+		/* Apply-stage plugin hooks still expect the packet back. */
+		if ((dispatch->plugin_pipeline_active == 0 || dispatch->plugin_apply_mask == 0) &&
+		    tc_packet_may_be_icmp_error_v4(skb))
+			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_REPLY);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -6400,6 +6452,297 @@ int reply_ingress_v6(struct __sk_buff *skb)
 	if (!is_fullnat_reply_flow_v6(flow_v6))
 		return TC_ACT_UNSPEC;
 	return handle_fullnat_reply_v6(skb, ctx_v6, flow_key_v6, flow_v6, flow_bank_v6);
+}
+
+/*
+ * ICMP errors about egress NAT flows. An error quotes the IPv4 header and the
+ * first L4 bytes of the packet it reports, as that packet was where the error
+ * was raised: after the NAT for one a LAN host sent (errors from the WAN),
+ * before the NAT for one it received (errors from LAN hosts). The kernel
+ * cannot match such an error to a flow it never saw, so the translators find
+ * the flow from the quote and undo the NAT on the quoted packet and on the
+ * error, and send it on like the flow's packets. Only untagged Ethernet frames
+ * are translated; anything else continues as before.
+ */
+#define FORWARD_IPV4_FRAG_OFFSET_MASK 0x1fff
+#define FORWARD_ICMP_ERROR_OUTER_OFF ((__u32)sizeof(struct ethhdr))
+#define FORWARD_ICMP_ERROR_ICMP_OFF (FORWARD_ICMP_ERROR_OUTER_OFF + (__u32)sizeof(struct iphdr))
+#define FORWARD_ICMP_ERROR_INNER_OFF (FORWARD_ICMP_ERROR_ICMP_OFF + (__u32)sizeof(struct icmphdr))
+#define FORWARD_ICMP_ERROR_INNER_L4_OFF (FORWARD_ICMP_ERROR_INNER_OFF + (__u32)sizeof(struct iphdr))
+/* Outer IPv4 length of an error that quotes the inner TCP checksum. */
+#define FORWARD_ICMP_ERROR_TCP_CHECK_LEN ((__u32)(2 * sizeof(struct iphdr) + sizeof(struct icmphdr) + 18))
+/* Everything the translators read: through the quoted TCP checksum. */
+#define FORWARD_ICMP_ERROR_PULL_LEN (FORWARD_ICMP_ERROR_INNER_L4_OFF + 18)
+
+struct icmp_error_v4 {
+	__be32 outer_src;
+	__be32 outer_dst;
+	__be32 inner_src;
+	__be32 inner_dst;
+	/* Host order. A quoted echo carries its identifier as the source port. */
+	__u16 inner_sport;
+	__u16 inner_dport;
+	__u16 outer_tot_len;
+	__u8 inner_proto;
+	__u8 inner_icmp_type;
+	__u8 tos;
+	__u8 pad[3];
+};
+
+static __always_inline int parse_icmp_error_v4(struct __sk_buff *skb, struct icmp_error_v4 *err)
+{
+	const struct ethhdr *eth;
+	const struct iphdr *outer;
+	const struct icmphdr *icmph;
+	const struct iphdr *inner;
+	const __be16 *l4;
+	__u32 pull = FORWARD_ICMP_ERROR_PULL_LEN;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return -1;
+	if (skb->len < pull)
+		pull = skb->len;
+	if (bpf_skb_pull_data(skb, pull) < 0)
+		return -1;
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth || eth->h_proto != bpf_htons(ETH_P_IP))
+		return -1;
+	outer = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_OUTER_OFF, sizeof(*outer));
+	if (!outer || outer->version != 4 || outer->ihl != 5 || outer->protocol != IPPROTO_ICMP)
+		return -1;
+	if ((bpf_ntohs(outer->frag_off) & FORWARD_IPV4_FRAG_MASK) != 0)
+		return -1;
+	/* The quote must hold the 8 L4 bytes, not Ethernet padding. */
+	if (bpf_ntohs(outer->tot_len) < FORWARD_ICMP_ERROR_INNER_L4_OFF - FORWARD_ICMP_ERROR_OUTER_OFF + 8)
+		return -1;
+	icmph = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_ICMP_OFF, sizeof(*icmph));
+	if (!icmph || !is_icmp_error_type(icmph->type))
+		return -1;
+	inner = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_OFF, sizeof(*inner));
+	if (!inner || inner->version != 4 || inner->ihl != 5)
+		return -1;
+	/* Only a first fragment carries the ports. */
+	if ((bpf_ntohs(inner->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0)
+		return -1;
+	if (inner->protocol != IPPROTO_TCP && inner->protocol != IPPROTO_UDP && inner->protocol != IPPROTO_ICMP)
+		return -1;
+	l4 = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_L4_OFF, 4 * sizeof(*l4));
+	if (!l4)
+		return -1;
+
+	err->outer_src = outer->saddr;
+	err->outer_dst = outer->daddr;
+	err->outer_tot_len = bpf_ntohs(outer->tot_len);
+	err->tos = outer->tos;
+	err->inner_src = inner->saddr;
+	err->inner_dst = inner->daddr;
+	err->inner_proto = inner->protocol;
+	if (inner->protocol == IPPROTO_ICMP) {
+		const struct icmphdr *quoted = (const void *)l4;
+
+		err->inner_icmp_type = quoted->type;
+		err->inner_sport = bpf_ntohs(quoted->un.echo.id);
+		err->inner_dport = 0;
+	} else {
+		err->inner_sport = bpf_ntohs(l4[0]);
+		err->inner_dport = bpf_ntohs(l4[1]);
+	}
+	return 0;
+}
+
+/*
+ * Undoes the NAT of one quoted endpoint. With inner_src the quoted source and
+ * the error's destination become addr (and the quoted source port port),
+ * otherwise the quoted destination and the error's source. Every checksum
+ * over a changed field follows: both IPv4 headers, the quoted L4 checksum when
+ * it is quoted, and the ICMP checksum over the whole error.
+ */
+static __always_inline int translate_icmp_error_v4(struct __sk_buff *skb, const struct icmp_error_v4 *err, int inner_src, __be32 addr, __be16 port)
+{
+	struct iphdr *outer = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_OUTER_OFF, sizeof(*outer));
+	struct icmphdr *icmph = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_ICMP_OFF, sizeof(*icmph));
+	struct iphdr *inner = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_OFF, sizeof(*inner));
+	__be16 *l4 = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_L4_OFF, 4 * sizeof(__be16));
+	__sum16 *l4_check = 0;
+	__sum16 icmp_check;
+	__sum16 old_check;
+	__sum16 check;
+	__be32 old_addr;
+	__be16 old_port;
+
+	if (!outer || !icmph || !inner || !l4)
+		return -1;
+	icmp_check = icmph->checksum;
+	if (inner_src) {
+		outer->check = csum_replace4_val(outer->check, outer->daddr, addr);
+		outer->daddr = addr;
+		old_addr = inner->saddr;
+		inner->saddr = addr;
+	} else {
+		outer->check = csum_replace4_val(outer->check, outer->saddr, addr);
+		outer->saddr = addr;
+		old_addr = inner->daddr;
+		inner->daddr = addr;
+	}
+	old_check = inner->check;
+	inner->check = csum_replace4_val(old_check, old_addr, addr);
+	icmp_check = csum_replace4_val(icmp_check, old_addr, addr);
+	icmp_check = csum_replace2_val(icmp_check, old_check, inner->check);
+
+	if (err->inner_proto == IPPROTO_ICMP) {
+		/* A quoted echo request: no pseudo-header, the identifier is the port. */
+		old_port = l4[2];
+		old_check = l4[1];
+		l4[2] = port;
+		l4[1] = csum_replace2_val(old_check, old_port, port);
+		icmp_check = csum_replace2_val(icmp_check, old_port, port);
+		icmp_check = csum_replace2_val(icmp_check, old_check, l4[1]);
+		icmph->checksum = icmp_check;
+		return 0;
+	}
+	if (inner_src) {
+		old_port = l4[0];
+		l4[0] = port;
+	} else {
+		old_port = l4[1];
+		l4[1] = port;
+	}
+	icmp_check = csum_replace2_val(icmp_check, old_port, port);
+	if (err->inner_proto == IPPROTO_UDP) {
+		/* Zero means the sender computed none. */
+		if (l4[3] != 0)
+			l4_check = (__sum16 *)&l4[3];
+	} else if (err->outer_tot_len >= FORWARD_ICMP_ERROR_TCP_CHECK_LEN) {
+		l4_check = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_L4_OFF + 16, sizeof(*l4_check));
+	}
+	if (l4_check) {
+		old_check = *l4_check;
+		check = csum_replace4_val(old_check, old_addr, addr);
+		check = csum_replace2_val(check, old_port, port);
+		if (err->inner_proto == IPPROTO_UDP && check == 0)
+			check = 0xffff;
+		*l4_check = check;
+		icmp_check = csum_replace2_val(icmp_check, old_check, check);
+	}
+	icmph->checksum = icmp_check;
+	return 0;
+}
+
+static __always_inline int send_icmp_error_v4(struct __sk_buff *skb, const struct icmp_error_v4 *err, const struct redirect_target_v4 *target)
+{
+	struct packet_ctx ctx = {};
+
+	ctx.l3_off = sizeof(struct ethhdr);
+	ctx.proto = IPPROTO_ICMP;
+	ctx.tos = err->tos;
+	ctx.tot_len = err->outer_tot_len;
+	return redirect_ifindex_l2(skb, &ctx, target, load_kernel_nat_config_flags(), 0);
+}
+
+/* An error from the WAN about a packet a LAN host sent: back to that host. */
+SEC("classifier/icmp_error_reply_v4")
+int icmp_error_reply_v4(struct __sk_buff *skb)
+{
+	struct icmp_error_v4 err = {};
+	struct flow_key_v4 key = {};
+	struct redirect_target_v4 target = {};
+	const struct flow_value_v4 *flow;
+	__u8 bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+	__u32 client_addr;
+	__u16 client_port;
+
+	if (parse_icmp_error_v4(skb, &err) < 0)
+		return TC_ACT_UNSPEC;
+	/* It reports a packet from the NAT address and returns to it. */
+	if (err.outer_dst != err.inner_src)
+		return TC_ACT_UNSPEC;
+	key.ifindex = skb->ifindex;
+	key.src_addr = bpf_ntohl(err.inner_dst);
+	key.dst_addr = bpf_ntohl(err.inner_src);
+	key.proto = err.inner_proto;
+	if (err.inner_proto == IPPROTO_ICMP) {
+		/* Of ICMP, only the hosts' echo requests have flows. */
+		if (err.inner_icmp_type != ICMP_ECHO)
+			return TC_ACT_UNSPEC;
+		key.src_port = 0;
+		key.dst_port = err.inner_sport;
+	} else {
+		key.src_port = err.inner_dport;
+		key.dst_port = err.inner_sport;
+	}
+	flow = lookup_reply_flow_v4(&key, &bank);
+	if (!is_egress_nat_flow(flow) || !is_fullnat_reply_flow(flow))
+		return TC_ACT_UNSPEC;
+	if (flow->nat_addr != bpf_ntohl(err.inner_src) || flow->nat_port != err.inner_sport)
+		return TC_ACT_UNSPEC;
+	client_addr = flow->client_addr;
+	client_port = flow->client_port;
+	target.ifindex = resolve_reply_redirect_ifindex(flow);
+	if (!target.ifindex)
+		return TC_ACT_UNSPEC;
+	target.src_addr = bpf_ntohl(err.outer_src);
+	target.dst_addr = client_addr;
+	if (translate_icmp_error_v4(skb, &err, 1, bpf_htonl(client_addr), bpf_htons(client_port)) < 0)
+		return TC_ACT_SHOT;
+	return send_icmp_error_v4(skb, &err, &target);
+}
+
+/* An error from a LAN host about a packet it received: to the remote host. */
+SEC("classifier/icmp_error_forward_v4")
+int icmp_error_forward_v4(struct __sk_buff *skb)
+{
+	struct icmp_error_v4 err = {};
+	struct flow_key_v4 key = {};
+	struct packet_ctx flow_ctx = {};
+	struct redirect_target_v4 target = {};
+	const struct flow_value_v4 *flow;
+	const struct rule_value_v4 *rule;
+	__u8 bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+	__u32 nat_addr;
+	__u16 nat_port;
+	__u32 rule_id;
+
+	if (parse_icmp_error_v4(skb, &err) < 0)
+		return TC_ACT_UNSPEC;
+	/* A host that received an echo reply has nothing to report about it. */
+	if (err.inner_proto == IPPROTO_ICMP)
+		return TC_ACT_UNSPEC;
+	/* The reporting host is the quoted destination. */
+	if (err.outer_src != err.inner_dst)
+		return TC_ACT_UNSPEC;
+	key.ifindex = skb->ifindex;
+	key.src_addr = bpf_ntohl(err.inner_dst);
+	key.dst_addr = bpf_ntohl(err.inner_src);
+	key.src_port = err.inner_dport;
+	key.dst_port = err.inner_sport;
+	key.proto = err.inner_proto;
+	flow = lookup_flow_v4_active_or_old(&key, &bank);
+	if (!flow) {
+		/* A full-cone front entry is shared by every destination of its source. */
+		key.dst_addr = 0;
+		key.dst_port = 0;
+		flow = lookup_flow_v4_active_or_old(&key, &bank);
+	}
+	if (!is_egress_nat_flow(flow) || !is_fullnat_front_flow(flow))
+		return TC_ACT_UNSPEC;
+	nat_addr = flow->nat_addr;
+	nat_port = flow->nat_port;
+	rule_id = flow->rule_id;
+	/* Out through the uplink of the rule the flow's own packets match. */
+	flow_ctx.dst_addr = err.inner_src;
+	flow_ctx.dst_port = err.inner_sport;
+	flow_ctx.proto = err.inner_proto;
+	rule = lookup_rule_v4(skb, &flow_ctx);
+	if (!is_egress_nat_rule(rule) || rule->rule_id != rule_id || !rule->out_ifindex)
+		return TC_ACT_UNSPEC;
+	if (egress_nat_dst_mac_mismatch(skb, rule))
+		return TC_ACT_UNSPEC;
+	target.ifindex = rule->out_ifindex;
+	target.src_addr = nat_addr;
+	target.dst_addr = bpf_ntohl(err.outer_dst);
+	if (translate_icmp_error_v4(skb, &err, 0, bpf_htonl(nat_addr), bpf_htons(nat_port)) < 0)
+		return TC_ACT_SHOT;
+	return send_icmp_error_v4(skb, &err, &target);
 }
 
 /*
