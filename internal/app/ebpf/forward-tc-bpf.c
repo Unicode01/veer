@@ -6469,10 +6469,24 @@ int reply_ingress_v6(struct __sk_buff *skb)
 #define FORWARD_ICMP_ERROR_ICMP_OFF (FORWARD_ICMP_ERROR_OUTER_OFF + (__u32)sizeof(struct iphdr))
 #define FORWARD_ICMP_ERROR_INNER_OFF (FORWARD_ICMP_ERROR_ICMP_OFF + (__u32)sizeof(struct icmphdr))
 #define FORWARD_ICMP_ERROR_INNER_L4_OFF (FORWARD_ICMP_ERROR_INNER_OFF + (__u32)sizeof(struct iphdr))
+/* Through the quoted ports, or echo identifier: the shortest error handled. */
+#define FORWARD_ICMP_ERROR_MIN_LEN (FORWARD_ICMP_ERROR_INNER_L4_OFF + 8)
 /* Outer IPv4 length of an error that quotes the inner TCP checksum. */
 #define FORWARD_ICMP_ERROR_TCP_CHECK_LEN ((__u32)(2 * sizeof(struct iphdr) + sizeof(struct icmphdr) + 18))
 /* Everything the translators read: through the quoted TCP checksum. */
 #define FORWARD_ICMP_ERROR_PULL_LEN (FORWARD_ICMP_ERROR_INNER_L4_OFF + 18)
+
+/*
+ * The error's headers through the quoted ports, or NULL. Each header is a
+ * constant offset from this one pointer: given a pointer per header, clang 18
+ * merges their bounds checks into one and re-tests it after spilling the
+ * pointers, and the verifier, unable to tie the two tests together, follows a
+ * path where the check held but a pointer is NULL.
+ */
+static __always_inline void *icmp_error_headers_v4(struct __sk_buff *skb)
+{
+	return tc_packet_ptr(skb, 0, FORWARD_ICMP_ERROR_MIN_LEN);
+}
 
 struct icmp_error_v4 {
 	__be32 outer_src;
@@ -6491,6 +6505,7 @@ struct icmp_error_v4 {
 
 static __always_inline int parse_icmp_error_v4(struct __sk_buff *skb, struct icmp_error_v4 *err)
 {
+	const void *hdrs;
 	const struct ethhdr *eth;
 	const struct iphdr *outer;
 	const struct icmphdr *icmph;
@@ -6504,30 +6519,31 @@ static __always_inline int parse_icmp_error_v4(struct __sk_buff *skb, struct icm
 		pull = skb->len;
 	if (bpf_skb_pull_data(skb, pull) < 0)
 		return -1;
-	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
-	if (!eth || eth->h_proto != bpf_htons(ETH_P_IP))
+	hdrs = icmp_error_headers_v4(skb);
+	if (!hdrs)
 		return -1;
-	outer = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_OUTER_OFF, sizeof(*outer));
-	if (!outer || outer->version != 4 || outer->ihl != 5 || outer->protocol != IPPROTO_ICMP)
+	eth = hdrs;
+	outer = hdrs + FORWARD_ICMP_ERROR_OUTER_OFF;
+	icmph = hdrs + FORWARD_ICMP_ERROR_ICMP_OFF;
+	inner = hdrs + FORWARD_ICMP_ERROR_INNER_OFF;
+	l4 = hdrs + FORWARD_ICMP_ERROR_INNER_L4_OFF;
+	if (eth->h_proto != bpf_htons(ETH_P_IP))
+		return -1;
+	if (outer->version != 4 || outer->ihl != 5 || outer->protocol != IPPROTO_ICMP)
 		return -1;
 	if ((bpf_ntohs(outer->frag_off) & FORWARD_IPV4_FRAG_MASK) != 0)
 		return -1;
 	/* The quote must hold the 8 L4 bytes, not Ethernet padding. */
-	if (bpf_ntohs(outer->tot_len) < FORWARD_ICMP_ERROR_INNER_L4_OFF - FORWARD_ICMP_ERROR_OUTER_OFF + 8)
+	if (bpf_ntohs(outer->tot_len) < FORWARD_ICMP_ERROR_MIN_LEN - FORWARD_ICMP_ERROR_OUTER_OFF)
 		return -1;
-	icmph = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_ICMP_OFF, sizeof(*icmph));
-	if (!icmph || !is_icmp_error_type(icmph->type))
+	if (!is_icmp_error_type(icmph->type))
 		return -1;
-	inner = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_OFF, sizeof(*inner));
-	if (!inner || inner->version != 4 || inner->ihl != 5)
+	if (inner->version != 4 || inner->ihl != 5)
 		return -1;
 	/* Only a first fragment carries the ports. */
 	if ((bpf_ntohs(inner->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0)
 		return -1;
 	if (inner->protocol != IPPROTO_TCP && inner->protocol != IPPROTO_UDP && inner->protocol != IPPROTO_ICMP)
-		return -1;
-	l4 = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_L4_OFF, 4 * sizeof(*l4));
-	if (!l4)
 		return -1;
 
 	err->outer_src = outer->saddr;
@@ -6557,21 +6573,31 @@ static __always_inline int parse_icmp_error_v4(struct __sk_buff *skb, struct icm
  * over a changed field follows: both IPv4 headers, the quoted L4 checksum when
  * it is quoted, and the ICMP checksum over the whole error.
  */
+static __always_inline __sum16 icmp_error_quoted_l4_check(__sum16 check, __be32 old_addr, __be32 addr, __be16 old_port, __be16 port)
+{
+	check = csum_replace4_val(check, old_addr, addr);
+	return csum_replace2_val(check, old_port, port);
+}
+
 static __always_inline int translate_icmp_error_v4(struct __sk_buff *skb, const struct icmp_error_v4 *err, int inner_src, __be32 addr, __be16 port)
 {
-	struct iphdr *outer = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_OUTER_OFF, sizeof(*outer));
-	struct icmphdr *icmph = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_ICMP_OFF, sizeof(*icmph));
-	struct iphdr *inner = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_OFF, sizeof(*inner));
-	__be16 *l4 = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_L4_OFF, 4 * sizeof(__be16));
-	__sum16 *l4_check = 0;
+	void *hdrs = icmp_error_headers_v4(skb);
+	struct iphdr *outer;
+	struct icmphdr *icmph;
+	struct iphdr *inner;
+	__be16 *l4;
 	__sum16 icmp_check;
 	__sum16 old_check;
 	__sum16 check;
 	__be32 old_addr;
 	__be16 old_port;
 
-	if (!outer || !icmph || !inner || !l4)
+	if (!hdrs)
 		return -1;
+	outer = hdrs + FORWARD_ICMP_ERROR_OUTER_OFF;
+	icmph = hdrs + FORWARD_ICMP_ERROR_ICMP_OFF;
+	inner = hdrs + FORWARD_ICMP_ERROR_INNER_OFF;
+	l4 = hdrs + FORWARD_ICMP_ERROR_INNER_L4_OFF;
 	icmp_check = icmph->checksum;
 	if (inner_src) {
 		outer->check = csum_replace4_val(outer->check, outer->daddr, addr);
@@ -6609,20 +6635,25 @@ static __always_inline int translate_icmp_error_v4(struct __sk_buff *skb, const 
 	}
 	icmp_check = csum_replace2_val(icmp_check, old_port, port);
 	if (err->inner_proto == IPPROTO_UDP) {
+		old_check = l4[3];
 		/* Zero means the sender computed none. */
-		if (l4[3] != 0)
-			l4_check = (__sum16 *)&l4[3];
+		if (old_check != 0) {
+			check = icmp_error_quoted_l4_check(old_check, old_addr, addr, old_port, port);
+			if (check == 0)
+				check = 0xffff;
+			l4[3] = check;
+			icmp_check = csum_replace2_val(icmp_check, old_check, check);
+		}
 	} else if (err->outer_tot_len >= FORWARD_ICMP_ERROR_TCP_CHECK_LEN) {
-		l4_check = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_L4_OFF + 16, sizeof(*l4_check));
-	}
-	if (l4_check) {
-		old_check = *l4_check;
-		check = csum_replace4_val(old_check, old_addr, addr);
-		check = csum_replace2_val(check, old_port, port);
-		if (err->inner_proto == IPPROTO_UDP && check == 0)
-			check = 0xffff;
-		*l4_check = check;
-		icmp_check = csum_replace2_val(icmp_check, old_check, check);
+		/* Past the shortest error: checked on its own. */
+		__sum16 *tcp_check = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_L4_OFF + 16, sizeof(*tcp_check));
+
+		if (tcp_check) {
+			old_check = *tcp_check;
+			check = icmp_error_quoted_l4_check(old_check, old_addr, addr, old_port, port);
+			*tcp_check = check;
+			icmp_check = csum_replace2_val(icmp_check, old_check, check);
+		}
 	}
 	icmph->checksum = icmp_check;
 	return 0;
