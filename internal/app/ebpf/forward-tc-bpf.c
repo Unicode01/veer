@@ -126,6 +126,31 @@ struct tc_l2_value_v4 {
 	__u32 max_len;
 };
 
+/*
+ * A packet the core's fast path would send unchanged apart from this rewrite
+ * and next hop. Keyed like a front flow entry (ingress ifindex, host-order
+ * 5-tuple) by the packet's own tuple, never a full-cone wildcard.
+ */
+struct tc_flow_cache_value_v4 {
+	__u64 expires_ns;
+	__u32 generation;
+	__u32 out_ifindex;
+	__u32 max_len;
+	__u32 src_addr;
+	__u32 dst_addr;
+	__u16 src_port;
+	__u16 dst_port;
+	__u8 dmac[ETH_ALEN];
+	__u8 smac[ETH_ALEN];
+	__u8 pad[4];
+};
+
+struct tc_flow_cache_state_v4 {
+	/* An entry recorded under another generation is stale. */
+	__u32 generation;
+	__u32 enabled;
+};
+
 struct rule_key_v6 {
 	__u32 ifindex;
 	__u8 dst_addr[16];
@@ -640,6 +665,28 @@ struct bpf_map_def SEC("maps") tc_l2_cache_v4 = {
 	.key_size = sizeof(struct tc_l2_key_v4),
 	.value_size = sizeof(struct tc_l2_value_v4),
 	.max_entries = 16384,
+};
+
+/*
+ * Experimental flow cache. The core's fast path records how it sent a packet
+ * of an established egress NAT flow; tc_flow_cache runs before the core on
+ * the same ingress hook and sends the flow's next packets the same way with
+ * one lookup. An entry lives until the fast-path window of its flow ends, so
+ * the core still sees every flow at least once per window. Entries are not
+ * handed over across a hot restart.
+ */
+struct bpf_map_def SEC("maps") tc_flow_cache_v4 = {
+	.type = BPF_MAP_TYPE_LRU_HASH,
+	.key_size = sizeof(struct flow_key_v4),
+	.value_size = sizeof(struct tc_flow_cache_value_v4),
+	.max_entries = 65536,
+};
+
+struct bpf_map_def SEC("maps") tc_flow_cache_state_v4 = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct tc_flow_cache_state_v4),
+	.max_entries = 1,
 };
 
 /*
@@ -3691,6 +3738,110 @@ static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, co
 		front_value->front_addr, front_value->front_port, nat_cfg_flags);
 }
 
+#if FORWARD_ENABLE_TRAFFIC_STATS
+/* Cached packets would bypass the per-rule counters. */
+static __always_inline const struct tc_flow_cache_state_v4 *tc_flow_cache_writable(__u32 ifindex)
+{
+	return 0;
+}
+#else
+/* Whether a plugin hook runs for packets entering this interface. */
+static __always_inline int tc_flow_cache_plugin_hooked(__u32 ifindex)
+{
+	struct tc_plugin_config_v4 *header;
+	struct tc_plugin_config_v4 *config;
+	struct tc_plugin_if_key_v4 if_key = {};
+	struct tc_plugin_if_value_v4 *scoped;
+	__u32 key = FORWARD_TC_PLUGIN_CONFIG_HEADER_KEY;
+	__u32 bank;
+
+	header = bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
+	if (!header)
+		return 1;
+	bank = header->active_bank & 1;
+	key = FORWARD_TC_PLUGIN_CONFIG_BANK_BASE + bank;
+	config = bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
+	if (!config)
+		return 1;
+	if ((config->pre_forward_count | config->post_lookup_count | config->pre_reply_count |
+		config->post_reply_count | config->post_apply_count | config->post_reply_apply_count) == 0)
+		return 0;
+	if ((config->pre_forward_global_mask | config->post_lookup_global_mask | config->pre_reply_global_mask |
+		config->post_reply_global_mask | config->post_apply_global_mask | config->post_reply_apply_global_mask) != 0)
+		return 1;
+	if_key.ifindex = ifindex;
+	if_key.bank = bank;
+	if_key.attach = FORWARD_TC_PLUGIN_ATTACH_INGRESS;
+	scoped = bpf_map_lookup_elem(&tc_plugin_interfaces_v4, &if_key);
+	if (!scoped)
+		return 0;
+	return (scoped->pre_forward_mask | scoped->post_lookup_mask | scoped->pre_reply_mask |
+		scoped->post_reply_mask | scoped->post_apply_mask | scoped->reply_apply_mask) != 0;
+}
+
+/* The cache state if the core may record packets entering this interface. */
+static __always_inline const struct tc_flow_cache_state_v4 *tc_flow_cache_writable(__u32 ifindex)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	__u32 key = 0;
+
+	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &key);
+	if (!state || !state->enabled)
+		return 0;
+	if (tc_flow_cache_plugin_hooked(ifindex))
+		return 0;
+	return state;
+}
+#endif
+
+/*
+ * Records how the fast path sends this packet. Only untagged TCP and UDP is
+ * recorded, as tc_flow_cache parses nothing else, and only next hops the FIB
+ * resolved, which carry both MAC addresses.
+ */
+static __always_inline void remember_tc_flow_cache_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 src_addr, __u16 src_port, __u32 dst_addr, __u16 dst_port, const struct tc_l2_value_v4 *l2, __u64 window_start)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	struct tc_flow_cache_value_v4 value = {};
+	struct flow_key_v4 key = {};
+
+	if (!l2 || ctx->l3_off != (int)sizeof(struct ethhdr) || ctx->proto == IPPROTO_ICMP)
+		return;
+	state = tc_flow_cache_writable(skb->ifindex);
+	if (!state)
+		return;
+	build_front_flow_key(skb, ctx, &key);
+	value.expires_ns = window_start + FORWARD_TC_FAST_PATH_WINDOW_NS;
+	value.generation = state->generation;
+	value.out_ifindex = l2->out_ifindex;
+	value.max_len = l2->max_len;
+	value.src_addr = src_addr;
+	value.dst_addr = dst_addr;
+	value.src_port = src_port;
+	value.dst_port = dst_port;
+	__builtin_memcpy(value.dmac, l2->dmac, ETH_ALEN);
+	__builtin_memcpy(value.smac, l2->smac, ETH_ALEN);
+	bpf_map_update_elem(&tc_flow_cache_v4, &key, &value, BPF_ANY);
+}
+
+/*
+ * A SYN, FIN or RST takes the core's full path; so must the rest of the
+ * connection in both directions while the core tracks the change.
+ */
+static __always_inline void forget_tc_flow_cache_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *peer)
+{
+	struct flow_key_v4 key = {};
+	const struct tc_flow_cache_state_v4 *state;
+	__u32 state_key = 0;
+
+	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &state_key);
+	if (!state || !state->enabled)
+		return;
+	build_front_flow_key(skb, ctx, &key);
+	bpf_map_delete_elem(&tc_flow_cache_v4, &key);
+	bpf_map_delete_elem(&tc_flow_cache_v4, peer);
+}
+
 /* A fast path declined the packet; run the full handler. */
 #define FORWARD_TC_SLOW_PATH (-2)
 
@@ -3723,11 +3874,25 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 	__u16 dst_port;
 	int full_cone;
 
-	if (!front_flow || !flow_within_fast_path_window(front_flow, now) || tcp_packet_changes_state(ctx))
+	if (!front_flow)
+		return FORWARD_TC_SLOW_PATH;
+	nat_addr = front_flow->nat_addr ? front_flow->nat_addr : rule->nat_addr;
+	if (tcp_packet_changes_state(ctx)) {
+		struct flow_key_v4 reply_key = {};
+
+		reply_key.ifindex = rule->out_ifindex;
+		reply_key.src_addr = bpf_ntohl(ctx->dst_addr);
+		reply_key.dst_addr = nat_addr;
+		reply_key.src_port = ctx->dst_port;
+		reply_key.dst_port = front_flow->nat_port;
+		reply_key.proto = ctx->proto;
+		forget_tc_flow_cache_v4(skb, ctx, &reply_key);
+		return FORWARD_TC_SLOW_PATH;
+	}
+	if (!flow_within_fast_path_window(front_flow, now))
 		return FORWARD_TC_SLOW_PATH;
 	if (!flow_matches_rule_v4(front_flow, rule))
 		return FORWARD_TC_SLOW_PATH;
-	nat_addr = front_flow->nat_addr ? front_flow->nat_addr : rule->nat_addr;
 	/* A full-cone front entry is shared by every destination of its source. */
 	full_cone = is_full_cone_flow(front_flow);
 	if (full_cone) {
@@ -3756,6 +3921,8 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 	}
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
+	else if (!prefer_reply_l2_cache(nat_cfg_flags))
+		remember_tc_flow_cache_v4(skb, ctx, nat_addr, front_flow->nat_port, bpf_ntohl(ctx->dst_addr), ctx->dst_port, l2, front_flow->last_seen_ns);
 	if (rewrite_l4_snat(skb, ctx, nat_addr, front_flow->nat_port) < 0)
 		return TC_ACT_SHOT;
 	if (l2)
@@ -4328,7 +4495,19 @@ static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const s
 	__u32 src_addr;
 	int action;
 
-	if (!flow_within_fast_path_window(flow, now) || tcp_packet_changes_state(ctx))
+	if (tcp_packet_changes_state(ctx)) {
+		struct flow_key_v4 front_key = {};
+
+		front_key.ifindex = flow->in_ifindex;
+		front_key.src_addr = flow->client_addr;
+		front_key.src_port = flow->client_port;
+		front_key.dst_addr = full_cone ? bpf_ntohl(ctx->src_addr) : flow->front_addr;
+		front_key.dst_port = full_cone ? ctx->src_port : flow->front_port;
+		front_key.proto = ctx->proto;
+		forget_tc_flow_cache_v4(skb, ctx, &front_key);
+		return FORWARD_TC_SLOW_PATH;
+	}
+	if (!flow_within_fast_path_window(flow, now))
 		return FORWARD_TC_SLOW_PATH;
 	if (ctx->proto == IPPROTO_TCP && (flow->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0)
 		return FORWARD_TC_SLOW_PATH;
@@ -4345,6 +4524,9 @@ static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const s
 	}
 	if (FORWARD_FLOW_TRAFFIC_ENABLED(flow))
 		add_rule_traffic_bytes(flow->rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
+	else if (is_egress_nat_flow(flow))
+		remember_tc_flow_cache_v4(skb, ctx, src_addr, full_cone ? ctx->src_port : flow->front_port,
+			flow->client_addr, flow->client_port, l2, flow->last_seen_ns);
 	if (!full_cone) {
 		if (rewrite_l4_snat(skb, ctx, flow->front_addr, flow->front_port) < 0)
 			return TC_ACT_SHOT;
@@ -6194,6 +6376,44 @@ int reply_ingress_v6(struct __sk_buff *skb)
 	if (!is_fullnat_reply_flow_v6(flow_v6))
 		return TC_ACT_UNSPEC;
 	return handle_fullnat_reply_v6(skb, ctx_v6, flow_key_v6, flow_v6, flow_bank_v6);
+}
+
+/*
+ * Runs before the core on its ingress hooks while the flow cache is enabled.
+ * Anything it does not find, or may not handle, continues to the core.
+ */
+SEC("classifier/tc_flow_cache")
+int tc_flow_cache(struct __sk_buff *skb)
+{
+	struct packet_ctx ctx = {};
+	struct flow_key_v4 key = {};
+	const struct tc_flow_cache_value_v4 *entry;
+	const struct tc_flow_cache_state_v4 *state;
+	__u32 state_key = 0;
+
+	if (parse_ipv4_l4(skb, &ctx) < 0)
+		return TC_ACT_UNSPEC;
+	if (ctx.l3_off != (int)sizeof(struct ethhdr) || ctx.proto == IPPROTO_ICMP || tcp_packet_changes_state(&ctx))
+		return TC_ACT_UNSPEC;
+	build_front_flow_key(skb, &ctx, &key);
+	entry = bpf_map_lookup_elem(&tc_flow_cache_v4, &key);
+	if (!entry)
+		return TC_ACT_UNSPEC;
+	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &state_key);
+	if (!state || entry->generation != state->generation)
+		return TC_ACT_UNSPEC;
+	if (bpf_ktime_get_ns() >= entry->expires_ns)
+		return TC_ACT_UNSPEC;
+	/* Like the FIB lookup, GSO packets are not held to the MTU here. */
+	if (ctx.tot_len > entry->max_len && skb->gso_size == 0)
+		return TC_ACT_UNSPEC;
+	if (rewrite_l4_snat(skb, &ctx, entry->src_addr, entry->src_port) < 0)
+		return TC_ACT_SHOT;
+	if (rewrite_l4_dnat(skb, &ctx, entry->dst_addr, entry->dst_port) < 0)
+		return TC_ACT_SHOT;
+	if (rewrite_eth_addrs(skb, entry->dmac, entry->smac) < 0)
+		return TC_ACT_SHOT;
+	return bpf_redirect(entry->out_ifindex, 0);
 }
 
 char _license[] SEC("license") = "GPL";

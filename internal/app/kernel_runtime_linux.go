@@ -322,6 +322,7 @@ type kernelDualStackRuleMapDiff struct {
 }
 
 type kernelCollectionPieces struct {
+	flowCacheState              *ebpf.Map
 	forwardProg                 *ebpf.Program
 	replyProg                   *ebpf.Program
 	forwardProgV6               *ebpf.Program
@@ -390,6 +391,8 @@ type kernelAttachmentPrograms struct {
 	mode                kernelTCAttachmentProgramMode
 	// tcx attaches the programs through tcx.
 	tcx bool
+	// flowCacheProg, if set, runs ahead of the core on its ingress hooks.
+	flowCacheProg *ebpf.Program
 }
 
 type kernelAttachmentPlan struct {
@@ -401,6 +404,8 @@ type kernelAttachmentPlan struct {
 	prog        *ebpf.Program
 	reply       bool
 	attach      uint32
+	// flowCache marks the flow cache, which no rule depends on.
+	flowCache bool
 }
 
 type preparedKernelRule struct {
@@ -620,6 +625,7 @@ type linuxKernelRuleRuntime struct {
 	enableReplyL2Cache           bool
 	pluginPipelineEnabled        bool
 	tcxAllowed                   bool
+	enableFlowCache              bool
 	pluginPipelineActive         bool
 	pluginPipelineLoaded         []loadedPluginObjectRef
 	pluginPipelineDesired        []kernelPluginPipelineDesiredPlugin
@@ -642,6 +648,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	enableReplyL2Cache := false
 	pluginPipelineEnabled := false
 	forceLegacyAttach := false
+	enableFlowCache := false
 	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
@@ -657,6 +664,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		pluginPipelineEnabled = cfg.PluginsEnabled() && cfg.PluginsDataplaneEnabled()
 		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
 		forceLegacyAttach = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCLegacyAttach)
+		enableFlowCache = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCFlowCache)
 	}
 	if enableDiagVerbose {
 		enableDiagnostics = true
@@ -681,6 +689,8 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		// The attach API stays fixed for the life of the runtime, so
 		// reconciles never mix filters and links for one position.
 		tcxAllowed: !forceLegacyAttach,
+		// Cached packets would bypass the per-rule traffic counters.
+		enableFlowCache: enableFlowCache && !enableTrafficStats,
 	}
 }
 
@@ -756,6 +766,9 @@ func (rt *linuxKernelRuleRuntime) ensureAvailabilityInitialized() {
 		}
 		if rt.enableReplyL2Cache {
 			rt.availableReason += "; kernel_tc_reply_l2_cache experimental path enabled"
+		}
+		if rt.enableFlowCache {
+			rt.availableReason += "; kernel_tc_flow_cache experimental path enabled"
 		}
 	})
 }
@@ -1323,7 +1336,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
-	attachmentPrograms.tcx = rt.useTCX()
+	rt.completeAttachmentPrograms(&attachmentPrograms, coll)
 	if err := configureTCFlowMigrationState(pieces, tcFlowMigrationFlags); err != nil {
 		coll.Close()
 		msg := fmt.Sprintf("configure tc flow migration state: %v", err)
@@ -1355,6 +1368,9 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	}
 	if err := syncKernelOccupancyMapFromCollectionExact(coll, true); err != nil {
 		log.Printf("kernel dataplane reconcile: sync tc occupancy counters failed before attach: %v", err)
+	}
+	if err := configureKernelTCFlowCache(coll.Maps[kernelTCFlowCacheStateMapName], attachmentPrograms.flowCacheProg != nil); err != nil {
+		log.Printf("kernel dataplane reconcile: configure tc flow cache failed, leaving it off: %v", err)
 	}
 	if err := syncKernelNATConfigMap(coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax, rt.natConfigFlags()); err != nil {
 		coll.Close()
@@ -1469,7 +1485,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			}
 			break
 		}
-		if plan.attach != kernelPluginPipelineAttachIngress {
+		if plan.attach != kernelPluginPipelineAttachIngress || plan.flowCache {
 			continue
 		}
 		if plan.reply {
@@ -2279,6 +2295,7 @@ func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, prog
 	appendPlans(sets.ReplyIngress, true, kernelPluginPipelineAttachIngress, programs.replyProg, programs.replyProgV6)
 	appendPlans(sets.ForwardEgress, false, kernelPluginPipelineAttachEgress, programs.forwardEgressProg, programs.forwardEgressProgV6)
 	appendPlans(sets.ReplyEgress, true, kernelPluginPipelineAttachEgress, programs.replyEgressProg, programs.replyEgressProgV6)
+	plans = appendFlowCacheAttachmentPlans(plans, sets, programs)
 	sort.Slice(plans, func(i, j int) bool {
 		if plans[i].ifindex != plans[j].ifindex {
 			return plans[i].ifindex < plans[j].ifindex
@@ -3064,6 +3081,10 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err != nil {
 		return err
 	}
+	// Rules, parents, local addresses and flows may change below; no entry
+	// the flow cache recorded from the old state may outlive the change.
+	invalidateKernelTCFlowCache(pieces.flowCacheState)
+	defer settleKernelTCFlowCache(pieces.flowCacheState)
 	rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates, kernelPluginPipelineCoreConfig{Forward: len(prepared) > 0, Reply: len(prepared) > 0})
 	if pluginOnlyPipeline && !rt.pluginPipelineActive {
 		return fmt.Errorf("explicit plugin pipeline attachment skipped because no plugin programs are active")
@@ -3073,7 +3094,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err != nil {
 		return err
 	}
-	attachmentPrograms.tcx = rt.useTCX()
+	rt.completeAttachmentPrograms(&attachmentPrograms, rt.coll)
 
 	diff, err := diffPreparedKernelRules(rt.preparedRules, prepared)
 	if err != nil {
@@ -3113,7 +3134,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 			}
 			newAttachments = append(newAttachments, createdAttachments[len(createdAttachments)-1])
 		}
-		if plan.attach != kernelPluginPipelineAttachIngress {
+		if plan.attach != kernelPluginPipelineAttachIngress || plan.flowCache {
 			continue
 		}
 		if plan.reply {
@@ -3939,6 +3960,7 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		return kernelCollectionPieces{}, fmt.Errorf("kernel object is missing")
 	}
 	pieces := kernelCollectionPieces{
+		flowCacheState:              coll.Maps[kernelTCFlowCacheStateMapName],
 		forwardProg:                 coll.Programs[kernelForwardProgramName],
 		replyProg:                   coll.Programs[kernelReplyProgramName],
 		forwardProgV6:               coll.Programs[kernelForwardProgramNameV6],
@@ -4679,7 +4701,7 @@ func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(attachmentRuleSets ke
 		return false
 	}
 	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, rt.preparedRules, rt.attachmentMode, rt.pluginPipelineActive)
-	programs.tcx = rt.useTCX()
+	rt.completeAttachmentPrograms(&programs, rt.coll)
 	return kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, rt.attachments, programs)
 }
 

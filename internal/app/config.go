@@ -20,6 +20,7 @@ const (
 	experimentalFeatureKernelTCPreparedL2        = "kernel_tc_prepared_l2"
 	experimentalFeatureKernelTCReplyL2Cache      = "kernel_tc_reply_l2_cache"
 	experimentalFeatureKernelTCLegacyAttach      = "kernel_tc_legacy_attach"
+	experimentalFeatureKernelTCFlowCache         = "kernel_tc_flow_cache"
 	insecureDefaultWebToken                      = "change-me-to-a-secure-token"
 	insecureDefaultPluginAdminToken              = "change-me-to-a-separate-plugin-admin-token"
 	remoteManagementMinimumTokenCharacters       = 24

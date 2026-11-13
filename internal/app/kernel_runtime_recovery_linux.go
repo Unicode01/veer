@@ -15,7 +15,7 @@ func (rt *linuxKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentH
 	attachments := append([]kernelAttachment(nil), rt.attachments...)
 	mode := rt.attachmentMode
 	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, preparedRules, mode, rt.pluginPipelineActive)
-	programs.tcx = rt.useTCX()
+	rt.completeAttachmentPrograms(&programs, rt.coll)
 	rt.mu.Unlock()
 
 	healthy := true
@@ -87,7 +87,7 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 		return nil, err
 	}
 	programs := kernelAttachmentProgramsFromPieces(pieces, kernelPreparedRulesIncludeIPv6(rt.preparedRules), rt.attachmentMode)
-	programs.tcx = rt.useTCX()
+	rt.completeAttachmentPrograms(&programs, rt.coll)
 	if kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, rt.attachments, programs) {
 		return nil, nil
 	}

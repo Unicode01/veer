@@ -1722,6 +1722,9 @@ func installKernelPluginPipelinePrograms(pieces kernelCollectionPieces, programs
 	if err := clearKernelPluginMetrics(pieces.pluginMetrics); err != nil {
 		return 0, fmt.Errorf("reset tc plugin metrics before chain switch: %w", err)
 	}
+	// The core reads the cache generation before the plugin config, so one
+	// bump after the switch discards entries for interfaces that gained hooks.
+	defer invalidateKernelTCFlowCache(pieces.flowCacheState)
 	if err := syncKernelPluginConfigV4(pieces.pluginConfigV4, next); err != nil {
 		return 0, err
 	}

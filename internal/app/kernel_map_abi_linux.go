@@ -89,6 +89,8 @@ func tcKernelMapABIContracts() []kernelMapABIContract {
 		{name: kernelTCPluginMetricsMapName, key: uint32(0), value: kernelTCPluginMetricValue{}},
 		{name: kernelTCPacketMetadataGenerationMapNameV4, key: uint32(0), value: uint64(0)},
 		{name: kernelTCPacketMetadataGenerationMapNameV6, key: uint32(0), value: uint64(0)},
+		{name: kernelTCFlowCacheMapName, key: tcFlowKeyV4{}, value: tcFlowCacheValueV4{}},
+		{name: kernelTCFlowCacheStateMapName, key: uint32(0), value: tcFlowCacheStateV4{}},
 	}
 }
 

@@ -309,6 +309,9 @@ func (rt *linuxKernelRuleRuntime) retryPendingFlowPurgesLocked() (int, error) {
 	corrections, deleted, purgeErr := rt.flowPurgeRetry.run(nil, func(targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
 		return purgeKernelFlowsForTargets(kernelRuntimeMapRefsFromCollection(rt.coll), targets, false)
 	})
+	if deleted > 0 {
+		settleKernelTCFlowCache(rt.coll.Maps[kernelTCFlowCacheStateMapName])
+	}
 	mergeKernelStatsCorrections(rt.statsCorrection, corrections)
 	var syncErr error
 	if deleted > 0 || purgeErr != nil {

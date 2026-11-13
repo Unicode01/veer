@@ -1280,6 +1280,7 @@ hardcoded_defaults = OrderedDict([
         ("kernel_tc_prepared_l2", False),
         ("kernel_tc_reply_l2_cache", False),
         ("kernel_tc_legacy_attach", False),
+        ("kernel_tc_flow_cache", False),
     ])),
     ("tags", []),
 ])
