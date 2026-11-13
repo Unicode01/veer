@@ -528,6 +528,9 @@ function loadProfile(payload) {
     250,
     10
   );
+  // Long enough for one resend of a peer Configure-Request lost between
+  // receive windows: RFC 1661's default restart timer is 3 s.
+  profile.peer_configure_wait_ms = clampInt(profile.peer_configure_wait_ms, 0, 10000, 3500);
   profile.disconnect_drain_ms = clampInt(
     firstDefined(profile.disconnect_drain_ms, profile.disconnect_control_ms),
     0,
@@ -1643,7 +1646,9 @@ function runSessionProbe(profile, peerMAC, sessionID, localMAC) {
     ipcp: null,
     ipv6cp: null,
     dhcpv6_pd: null,
-    lcp_magic: profile.lcp_magic
+    lcp_magic: profile.lcp_magic,
+    // Network control protocols whose peer Configure-Request we acked.
+    peer_cp_acked: {}
   };
 	var firstFrames = exchangePPPControlFrames(profile, peerMAC, sessionID, PPP_LCP, lcpRequest, profile.timeout_ms, profile.max_frames);
 	if (!firstFrames.length) {
@@ -1664,13 +1669,13 @@ function runSessionProbe(profile, peerMAC, sessionID, localMAC) {
   }
   if (lcpReadyForNetworkCP(profile, out) && profile.negotiate_ipv4) {
     drainPeerControlAfterAuth(profile, peerMAC, sessionID, out);
-    out.ipcp = runIPCP(profile, peerMAC, sessionID);
+    out.ipcp = runIPCP(profile, peerMAC, sessionID, out.peer_cp_acked);
     if (out.peer_ipcp && out.ipcp) out.ipcp.peer_address = out.peer_ipcp.address || '';
     out.items.push({protocol: 'ipcp', event: out.ipcp.phase || 'complete'});
   }
   if (lcpReadyForNetworkCP(profile, out) && profile.negotiate_ipv6) {
     drainPeerControlAfterAuth(profile, peerMAC, sessionID, out);
-    out.ipv6cp = runIPv6CP(profile, peerMAC, sessionID);
+    out.ipv6cp = runIPv6CP(profile, peerMAC, sessionID, out.peer_cp_acked);
     if (out.peer_ipv6cp && out.ipv6cp) {
       out.ipv6cp.peer_interface_id = out.peer_ipv6cp.interface_id || '';
       out.ipv6cp.peer_link_local = out.peer_ipv6cp.link_local || '';
@@ -1836,6 +1841,7 @@ function drainPeerControlAfterAuth(profile, peerMAC, sessionID, out) {
   if (out.peer_control_drained) return;
   out.peer_control_drained = true;
   var result = servicePPPControlWindow(profile, peerMAC, sessionID, profile.control_ack_timeout_ms, null);
+  for (var protocol in result.acked_protocols) out.peer_cp_acked[protocol] = true;
   if (result.frames || result.configure_acks_sent || result.skipped || result.parse_errors) {
     out.items.push({
       event: 'peer_control_drained',
@@ -1856,6 +1862,7 @@ function handlePeerNetworkControl(profile, peerMAC, sessionID, parsed, out) {
   if (cp.code === 1) {
     sendPPPControl(profile, peerMAC, sessionID, parsed.protocol, cpPacket(2, cp.identifier, cp.data_hex));
     out.items.push({protocol: protocol, event: 'configure_ack_sent', identifier: cp.identifier});
+    if (out.peer_cp_acked) out.peer_cp_acked[protocol] = true;
     return;
   }
   out.items.push({protocol: protocol, event: cpCodeName(cp.code), identifier: cp.identifier});
@@ -2915,7 +2922,8 @@ function sessionControlTimerPayload(profile, session, remainingMs) {
   };
 }
 
-function runIPCP(profile, peerMAC, sessionID) {
+function runIPCP(profile, peerMAC, sessionID, peerAcked) {
+  peerAcked = peerAcked || {};
   var requestedIP = '0.0.0.0';
   var requestedDNS = {};
   requestedDNS[IPCP_OPTION_PRIMARY_DNS] = '0.0.0.0';
@@ -2931,7 +2939,7 @@ function runIPCP(profile, peerMAC, sessionID) {
     if (enabledDNS[IPCP_OPTION_SECONDARY_DNS]) requestOptions += cpOptionIPv4(IPCP_OPTION_SECONDARY_DNS, requestedDNS[IPCP_OPTION_SECONDARY_DNS]);
     var req = cpPacket(1, identifier, requestOptions);
     var frame = exchangePPPControl(profile, peerMAC, sessionID, PPP_IPCP, req);
-    var result = completeCPNegotiation(profile, peerMAC, sessionID, PPP_IPCP, identifier, frame);
+    var result = completeCPNegotiation(profile, peerMAC, sessionID, PPP_IPCP, identifier, frame, peerAcked);
     if (result.timeout) return {phase: 'timeout', requested_address: requestedIP};
     if (result.protocol !== PPP_IPCP) return {phase: 'unexpected_protocol', protocol: '0x' + u16hex(result.protocol), requested_address: requestedIP};
     var cp = result.cp;
@@ -2950,7 +2958,7 @@ function runIPCP(profile, peerMAC, sessionID) {
       dns_servers: usableIPCPDNSServers(enabledDNS, primaryDNS, secondaryDNS)
     };
     if (cp.code === 2) {
-      last.peer = ackPeerConfigureRequests(profile, peerMAC, sessionID, PPP_IPCP);
+      last.peer = ackPeerConfigureRequests(profile, peerMAC, sessionID, PPP_IPCP, peerAcked);
       return last;
     }
     if (cp.code === 3) {
@@ -2984,7 +2992,8 @@ function usableIPCPDNSServers(enabledDNS, primary, secondary) {
   return uniqueTextValues(out);
 }
 
-function runIPv6CP(profile, peerMAC, sessionID) {
+function runIPv6CP(profile, peerMAC, sessionID, peerAcked) {
+  peerAcked = peerAcked || {};
   var iid = profile.ipv6_iid || crypto.randomBytes(8);
   profile.ipv6_iid = iid;
   var last = null;
@@ -2992,7 +3001,7 @@ function runIPv6CP(profile, peerMAC, sessionID) {
     var identifier = randomByte();
     var req = cpPacket(1, identifier, cpOptionHex(IPV6CP_OPTION_INTERFACE_ID, iid));
     var frame = exchangePPPControl(profile, peerMAC, sessionID, PPP_IPV6CP, req);
-    var result = completeCPNegotiation(profile, peerMAC, sessionID, PPP_IPV6CP, identifier, frame);
+    var result = completeCPNegotiation(profile, peerMAC, sessionID, PPP_IPV6CP, identifier, frame, peerAcked);
     if (result.timeout) return {phase: 'timeout', interface_id: iid};
     if (result.protocol !== PPP_IPV6CP) return {phase: 'unexpected_protocol', protocol: '0x' + u16hex(result.protocol), interface_id: iid};
     var cp = result.cp;
@@ -3010,7 +3019,7 @@ function runIPv6CP(profile, peerMAC, sessionID) {
       attempts: attempt + 1
     };
     if (cp.code === 2 || cp.code === 4) {
-      last.peer = ackPeerConfigureRequests(profile, peerMAC, sessionID, PPP_IPV6CP);
+      last.peer = ackPeerConfigureRequests(profile, peerMAC, sessionID, PPP_IPV6CP, peerAcked);
       return last;
     }
     if (cp.code === 3 && suggested) {
@@ -3284,28 +3293,51 @@ function annotateDHCPv6PartialBinding(profile, lease) {
   return lease;
 }
 
-function ackPeerConfigureRequests(profile, peerMAC, sessionID, protocol) {
+// Our request is acked; the peer's side opens once we ack its own
+// Configure-Request. Each receive opens a new socket, so a request that came
+// between two receives is lost until the peer resends it, by default 3 s later
+// (RFC 1661). Until then the peer drops our packets of this protocol, so wait
+// for the resend rather than report the link usable early.
+function ackPeerConfigureRequests(profile, peerMAC, sessionID, protocol, peerAcked) {
+  peerAcked = peerAcked || {};
+  var name = pppControlProtocolName(protocol);
   var acked = 0;
   var targetAcked = 0;
   var skipped = 0;
+  var received = 0;
+  var startedAt = Date.now();
   var drainTimeout = clampInt(profile.peer_ack_timeout_ms, 10, 250, profile.control_ack_timeout_ms);
-  var frames = recvPPPSessionFrames(profile, drainTimeout, Math.min(profile.max_frames, 6), peerMAC, sessionID);
-  if (!frames.length) return {phase: 'timeout', acked: acked, target_acked: targetAcked, skipped: skipped};
-  for (var i = 0; i < frames.length && i < Math.min(profile.max_frames * 2, 16); i++) {
-    var event = servicePPPControlFrame(profile, peerMAC, sessionID, frames[i], {});
-    appendControlEventFrames(frames, event);
-    if (event.event === 'configure_ack_sent') {
-      acked++;
-      if (event.protocol === pppControlProtocolName(protocol)) targetAcked++;
-      continue;
+  var waitMs = peerAcked[name] ? 0 : profile.peer_configure_wait_ms;
+  var deadline = startedAt + Math.max(drainTimeout, waitMs);
+  // Bounds the loop when receives return at once, as LCP echoes make them do.
+  var maxPolls = 1 + Math.ceil(waitMs / profile.timeout_ms) + profile.max_frames;
+  var timeout = drainTimeout;
+  for (var poll = 0; poll < maxPolls; poll++) {
+    var frames = recvPPPSessionFrames(profile, timeout, Math.min(profile.max_frames, 6), peerMAC, sessionID);
+    received += frames.length;
+    for (var i = 0; i < frames.length && i < Math.min(profile.max_frames * 2, 16); i++) {
+      var event = servicePPPControlFrame(profile, peerMAC, sessionID, frames[i], {});
+      appendControlEventFrames(frames, event);
+      if (event.event === 'configure_ack_sent') {
+        acked++;
+        peerAcked[event.protocol] = true;
+        if (event.protocol === name) targetAcked++;
+        continue;
+      }
+      if (event.protocol !== name) {
+        skipped++;
+        continue;
+      }
+      if (event.code !== 1) return {phase: 'complete', acked: acked, target_acked: targetAcked, code: event.code, identifier: event.identifier, skipped: skipped, waited_ms: Date.now() - startedAt};
     }
-    if (event.protocol !== pppControlProtocolName(protocol)) {
-      skipped++;
-      continue;
-    }
-    if (event.code !== 1) return {phase: 'complete', acked: acked, target_acked: targetAcked, code: event.code, identifier: event.identifier, skipped: skipped};
+    if (peerAcked[name]) break;
+    var remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    timeout = Math.min(remaining, profile.timeout_ms);
   }
-  return {phase: acked ? 'acked' : 'drained', acked: acked, target_acked: targetAcked, skipped: skipped};
+  var waited = Date.now() - startedAt;
+  if (!received) return {phase: 'timeout', acked: acked, target_acked: targetAcked, skipped: skipped, waited_ms: waited};
+  return {phase: acked ? 'acked' : 'drained', acked: acked, target_acked: targetAcked, skipped: skipped, waited_ms: waited};
 }
 
 function serviceSessionControlTimer(payload) {
@@ -3423,6 +3455,7 @@ function newPPPControlWindowResult(durationMs) {
     parse_errors: 0,
     io_errors: 0,
     configure_acks_sent: 0,
+    acked_protocols: {},
     echo_replies_sent: 0,
     terminate_acks_sent: 0,
     lcp_echo_reply: false,
@@ -3437,7 +3470,10 @@ function consumePPPControlFrames(profile, peerMAC, sessionID, frames, expected, 
     var event = servicePPPControlFrame(profile, peerMAC, sessionID, frames[j], expected);
     appendControlEventFrames(frames, event);
     if (out.events.length < 16) out.events.push(event);
-    if (event.event === 'configure_ack_sent') out.configure_acks_sent++;
+    if (event.event === 'configure_ack_sent') {
+      out.configure_acks_sent++;
+      out.acked_protocols[event.protocol] = true;
+    }
     if (event.event === 'echo_reply_sent') out.echo_replies_sent++;
     if (event.event === 'terminate_ack_sent') {
       out.terminate_acks_sent++;
@@ -3699,7 +3735,7 @@ function appendMatchingSessionFrames(out, frames, peerMAC, sessionID, frameLimit
   }
 }
 
-function completeCPNegotiation(profile, peerMAC, sessionID, protocol, identifier, firstFrame) {
+function completeCPNegotiation(profile, peerMAC, sessionID, protocol, identifier, firstFrame, peerAcked) {
   var frame = firstFrame;
   for (var i = 0; i < profile.max_frames; i++) {
     if (frame === null) return {timeout: true};
@@ -3707,6 +3743,7 @@ function completeCPNegotiation(profile, peerMAC, sessionID, protocol, identifier
     if (parsed.protocol !== protocol) return {protocol: parsed.protocol, cp: {code: 0, identifier: 0, data_hex: ''}};
     var cp = parseCP(parsed.payload);
     if (cp.code === 1) {
+      if (peerAcked) peerAcked[pppControlProtocolName(protocol)] = true;
       frame = net.l2.exchange(pppoeSessionRecvFilter({
         interface: profile.interface,
         ethertype: ETH_P_PPP_SESS,

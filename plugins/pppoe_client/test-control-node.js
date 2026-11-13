@@ -28,6 +28,9 @@ const PPP_CHAP = 0xc223;
 const PPP_IPCP = 0x8021;
 const PPP_IPV6CP = 0x8057;
 const SESSION_ID = 0x0010;
+const PEER_LCP_ID = 0x31;
+const PEER_IPCP_ID = 0x61;
+const PEER_IPV6CP_ID = 0x62;
 const LOCAL_MAC = '02:00:00:00:00:01';
 const AC_MAC = '02:00:00:00:00:02';
 const LOCAL_BOUNDARY_MAC = '02:00:00:00:10:01';
@@ -51,6 +54,9 @@ function main() {
   testExplicitAuthMismatchFailsClosed();
   testAutoAuthRejectsUnsupportedCHAPAlgorithm();
   testIPCPDNSRejectFallsBack();
+  testPeerIPCPRequestAckedAfterLCP();
+  testLostPeerIPCPRequestWaitsForResend();
+  testMissingPeerIPCPRequestBoundsTheWait();
   testRADrivenIPv6WithoutIANA();
   testKeepaliveRedialPreservesTunnelPreparation();
   testRequiredWANCoreSyncFailsClosed();
@@ -657,6 +663,65 @@ function testIPCPDNSRejectFallsBack() {
   const ipcp = h.resource('sessions', 'last').data.ipcp;
   assert.strictEqual(ipcp.phase, 'configure_ack', 'IPCP must continue when only DNS options are rejected');
   assert.deepStrictEqual(ipcp.dns_servers, []);
+}
+
+function ipv4DialPayload(overrides) {
+  return Object.assign({
+    interface: 'eth0',
+    auth: 'none',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: true,
+    negotiate_ipv6: false,
+    send_padt: false,
+    keepalive_interval_ms: 0,
+    auto_redial: false,
+    install_tunnel: false,
+    local_interface: 'veerlocal0',
+    pipeline_interface: PIPELINE_INTERFACE,
+    wan_core_sync: false
+  }, overrides || {});
+}
+
+// The peer's IPCP request, acked when it arrives after LCP opens, leaves
+// nothing to wait for once the client's own request is acked.
+function testPeerIPCPRequestAckedAfterLCP() {
+  const h = createHarness({auth: 'none'});
+  runAction(h, 'traffic_probe', ipv4DialPayload());
+  const ipcp = h.resource('sessions', 'last').data.ipcp;
+  assert.strictEqual(ipcp.up, true);
+  assert(sentControl(h, PPP_IPCP, 2, PEER_IPCP_ID), 'the peer IPCP request must be acked');
+  assert(sentControl(h, PPP_IPV6CP, 2, PEER_IPV6CP_ID), 'the peer IPv6CP request must be acked');
+  const polls = h.state.l2Recvs.length - h.state.recvsAtClientIPCPAck;
+  assert.strictEqual(polls, 1, 'an acked peer request must not be waited for');
+}
+
+// A peer IPCP request that came between two receives is lost; the session is
+// not usable until the peer resends it and the client acks the resend.
+function testLostPeerIPCPRequestWaitsForResend() {
+  const h = createHarness({auth: 'none', lostPeerIPCPRequest: true});
+  runAction(h, 'traffic_probe', ipv4DialPayload({peer_configure_wait_ms: 1000}));
+  const ipcp = h.resource('sessions', 'last').data.ipcp;
+  assert.strictEqual(ipcp.up, true);
+  assert.strictEqual(ipcp.peer.target_acked, 1, `the resent peer IPCP request must be acked: ${JSON.stringify(ipcp.peer)}`);
+  assert(sentControl(h, PPP_IPCP, 2, PEER_IPCP_ID), 'the resent peer IPCP request must be acked');
+  // Two empty receives, then the resend: the wait outlasted the first one.
+  assert(h.state.l2Recvs.length - h.state.recvsAtClientIPCPAck >= 3, 'the client must keep receiving until the resend');
+}
+
+// A peer that never sends its request still gets a usable session once the
+// wait is over, and the wait does not spin on receives that return at once.
+function testMissingPeerIPCPRequestBoundsTheWait() {
+  const h = createHarness({auth: 'none', peerNetworkRequests: false});
+  runAction(h, 'traffic_probe', ipv4DialPayload({peer_configure_wait_ms: 300}));
+  const ipcp = h.resource('sessions', 'last').data.ipcp;
+  assert.strictEqual(ipcp.up, true);
+  assert.strictEqual(ipcp.peer.phase, 'timeout');
+  assert.strictEqual(ipcp.peer.target_acked, 0);
+  const polls = h.state.l2Recvs.length - h.state.recvsAtClientIPCPAck;
+  assert(polls <= 1 + Math.ceil(300 / 50) + 4, `wait polls = ${polls}`);
 }
 
 function testRADrivenIPv6WithoutIANA() {
@@ -1678,7 +1743,11 @@ function createHarness(options) {
     netCalls: [],
     randomByte: 1,
     lastEchoIdentifier: null,
-    ipcpNAKSent: false
+    ipcpNAKSent: false,
+    // The peer's own network control requests, sent once LCP opens.
+    peerNCPFrames: [],
+    peerIPCPResend: null,
+    clientIPCPAcked: false
   };
   const context = {
     console,
@@ -2040,7 +2109,7 @@ function handleExchangeMany(ctx, state, options, req) {
     } else if (options.auth === 'chap-unsupported') {
       authOption = ctx.cpOptionHex(3, ctx.u16hex(PPP_CHAP) + '80');
     }
-    const peerRequest = ctx.cpPacket(1, 0x31, ctx.cpOptionU16(1, 1492) + authOption);
+    const peerRequest = ctx.cpPacket(1, PEER_LCP_ID, ctx.cpOptionU16(1, 1492) + authOption);
     const frames = [
       sessionFrame(ctx, PPP_LCP, peerRequest),
       sessionFrame(ctx, PPP_LCP, ctx.cpPacket(2, cp.identifier, cp.data_hex))
@@ -2049,6 +2118,10 @@ function handleExchangeMany(ctx, state, options, req) {
       frames.push(sessionFrame(ctx, PPP_CHAP, ctx.cpPacket(1, 0x42, '04aabbccdd' + ctx.stringHex('test-ac'))));
     }
     return frames;
+  }
+  if (parsed.protocol === PPP_LCP && cp.code === 2 && cp.identifier === PEER_LCP_ID) {
+    queuePeerNetworkRequests(ctx, state, options);
+    return [];
   }
   if (parsed.protocol === PPP_PAP && cp.code === 1) {
     assert(cp.data_hex.includes(ctx.stringHex('user')) || cp.data_hex.includes(ctx.stringHex('chap-user')), 'PAP Authenticate-Request should include username');
@@ -2078,6 +2151,8 @@ function handleExchangeMany(ctx, state, options, req) {
       const rejected = requested.filter((item) => item.type === 129 || item.type === 131).map((item) => ctx.cpOptionHex(item.type, item.value_hex)).join('');
       return [sessionFrame(ctx, PPP_IPCP, ctx.cpPacket(4, cp.identifier, rejected))];
     }
+    state.clientIPCPAcked = true;
+    state.recvsAtClientIPCPAck = state.l2Recvs.length;
     return [sessionFrame(ctx, PPP_IPCP, ctx.cpPacket(2, cp.identifier, cp.data_hex))];
   }
   if (parsed.protocol === PPP_IPV6CP && cp.code === 1) {
@@ -2119,12 +2194,59 @@ function handleRecvMany(ctx, state, options, req) {
     state.pendingTerminateIdentifier = null;
     return [sessionFrame(ctx, PPP_LCP, ctx.cpPacket(5, id, ctx.stringHex('Received PADT')))];
   }
+  if (state.peerNCPFrames.length) {
+    const frames = state.peerNCPFrames;
+    state.peerNCPFrames = [];
+    return frames;
+  }
+  // The peer resends a lost IPCP request on its restart timer, after the
+  // client's own request was acked and a few receives came back empty.
+  if (state.peerIPCPResend && state.clientIPCPAcked) {
+    if (state.peerIPCPResend.emptyPolls > 0) {
+      state.peerIPCPResend.emptyPolls--;
+      return [];
+    }
+    const frame = state.peerIPCPResend.frame;
+    state.peerIPCPResend = null;
+    return [frame];
+  }
   if (options.echoReplies && state.lastEchoIdentifier != null) {
     const id = state.lastEchoIdentifier;
     state.lastEchoIdentifier = null;
     return [sessionFrame(ctx, PPP_LCP, ctx.cpPacket(10, id, '00000000'))];
   }
   return [];
+}
+
+// Like pppd, the peer sends its own IPCP and IPv6CP requests once it has its
+// LCP request acked. lostPeerIPCPRequest drops the first IPCP one, as when it
+// arrives between two of the client's receives.
+function queuePeerNetworkRequests(ctx, state, options) {
+  state.clientIPCPAcked = false;
+  state.peerIPCPResend = null;
+  if (options.peerNetworkRequests === false) {
+    state.peerNCPFrames = [];
+    return;
+  }
+  const ipcp = sessionFrame(ctx, PPP_IPCP, ctx.cpPacket(1, PEER_IPCP_ID, ctx.cpOptionIPv4(3, '198.51.100.1')));
+  const ipv6cp = sessionFrame(ctx, PPP_IPV6CP, ctx.cpPacket(1, PEER_IPV6CP_ID, ctx.cpOptionHex(1, '0200000000000001')));
+  state.peerNCPFrames = [ipv6cp];
+  if (options.lostPeerIPCPRequest) {
+    state.peerIPCPResend = {frame: ipcp, emptyPolls: 2};
+  } else {
+    state.peerNCPFrames.unshift(ipcp);
+  }
+}
+
+// Whether the client sent a control packet with this code and identifier.
+function sentControl(h, protocol, code, identifier) {
+  return h.state.l2Sends.concat(h.state.l2Exchanges).some((req) => {
+    if (req.ethertype !== ETH_P_PPP_SESS || !req.payload) return false;
+    const parsed = h.context.parseSessionFrame({payload_hex: req.payload});
+    if (parsed.protocol !== protocol) return false;
+    const cp = h.context.parseCP(parsed.payload);
+    return cp.code === code && cp.identifier === identifier;
+  });
 }
 
 function rememberPADT(state, ctx, options, req) {
