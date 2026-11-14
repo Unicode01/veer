@@ -108,6 +108,44 @@ func TestLoadConfigAllowsDisablingManagedNetworkAutoRepair(t *testing.T) {
 	}
 }
 
+// The flow cache is off unless the setting turns it on. Configs from before
+// the setting existed still turn it on through experimental_features; the
+// setting wins when both are present.
+func TestLoadConfigKernelTCFlowCacheSetting(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		extra string
+		want  bool
+	}{
+		{name: "default"},
+		{name: "enabled", extra: `"kernel_tc_flow_cache": true`, want: true},
+		{name: "disabled", extra: `"kernel_tc_flow_cache": false`},
+		{name: "legacy experimental feature", extra: `"experimental_features": {"kernel_tc_flow_cache": true}`, want: true},
+		{name: "setting overrides experimental feature", extra: `"kernel_tc_flow_cache": false, "experimental_features": {"kernel_tc_flow_cache": true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := `{"web_port": 8080, "web_token": "test-token"`
+			if tc.extra != "" {
+				body += ", " + tc.extra
+			}
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(body+"}"), 0o644); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			cfg, err := loadConfig(path)
+			if err != nil {
+				t.Fatalf("loadConfig() error = %v", err)
+			}
+			if got := cfg.KernelTCFlowCacheEnabled(); got != tc.want {
+				t.Fatalf("KernelTCFlowCacheEnabled() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadConfigDefaultsWebBindToLoopback(t *testing.T) {
 	t.Parallel()
 

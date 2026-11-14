@@ -1270,6 +1270,7 @@ hardcoded_defaults = OrderedDict([
     ("kernel_nat_ports_map_limit", 0),
     ("kernel_nat_port_min", 20000),
     ("kernel_nat_port_max", 65535),
+    ("kernel_tc_flow_cache", False),
     ("experimental_features", OrderedDict([
         ("bridge_xdp", False),
         ("xdp_generic", False),
@@ -1280,7 +1281,6 @@ hardcoded_defaults = OrderedDict([
         ("kernel_tc_prepared_l2", False),
         ("kernel_tc_reply_l2_cache", False),
         ("kernel_tc_legacy_attach", False),
-        ("kernel_tc_flow_cache", False),
     ])),
     ("tags", []),
 ])
@@ -1297,6 +1297,14 @@ defaults["plugin_admin_token"] = os.environ["FORWARD_DEPLOY_DEFAULT_PLUGIN_ADMIN
 result = OrderedDict()
 for key, default_value in defaults.items():
     result[key] = choose_value(key, default_value)
+
+# kernel_tc_flow_cache moved out of experimental_features; keep the choice of
+# a config written before the move.
+experimental_features = result.get("experimental_features")
+if isinstance(experimental_features, dict) and "kernel_tc_flow_cache" in experimental_features:
+    legacy_flow_cache = experimental_features.pop("kernel_tc_flow_cache")
+    if "kernel_tc_flow_cache" not in current and isinstance(legacy_flow_cache, bool):
+        result["kernel_tc_flow_cache"] = legacy_flow_cache
 
 if result["web_token"] == "":
     raise SystemExit("web_token 不能为空")

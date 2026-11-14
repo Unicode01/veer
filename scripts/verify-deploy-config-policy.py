@@ -180,6 +180,21 @@ def main() -> None:
         )
         assert result is not None and result["web_token"] == STRONG_WEB_TOKEN
 
+        # kernel_tc_flow_cache left experimental_features: an older config
+        # keeps its choice, and a top-level value already present wins.
+        for name, current, want in (
+            ("flow-cache-legacy-on", {"experimental_features": {"kernel_tc_flow_cache": True, "kernel_tc_diag": True}}, True),
+            ("flow-cache-legacy-off", {"experimental_features": {"kernel_tc_flow_cache": False}}, False),
+            ("flow-cache-setting-wins", {"kernel_tc_flow_cache": False, "experimental_features": {"kernel_tc_flow_cache": True}}, False),
+            ("flow-cache-setting-kept", {"kernel_tc_flow_cache": True, "experimental_features": {}}, True),
+        ):
+            current.update({"web_token": STRONG_WEB_TOKEN, "plugin_admin_token": STRONG_ADMIN_TOKEN})
+            result = run_scenario(script, root, name, current)
+            assert result is not None
+            assert result["kernel_tc_flow_cache"] is want, f"{name}: kernel_tc_flow_cache = {result['kernel_tc_flow_cache']!r}"
+            others = {k: v for k, v in current["experimental_features"].items() if k != "kernel_tc_flow_cache"}
+            assert result["experimental_features"] == others, f"{name}: {result['experimental_features']!r}"
+
     print("deploy config compatibility policy: ok")
 
 

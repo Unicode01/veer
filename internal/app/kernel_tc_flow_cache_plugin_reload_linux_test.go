@@ -60,13 +60,11 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 	enabled := true
 	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
-		PluginsEnabledSetting:   &enabled,
-		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-		Experimental: map[string]bool{
-			experimentalFeatureKernelTCFlowCache:    true,
-			experimentalFeatureKernelTCLegacyAttach: legacyAttach,
-		},
+		PluginsEnabledSetting:    &enabled,
+		PluginsDataplaneSetting:  &enabled,
+		PluginsDir:               pluginsRoot,
+		KernelTCFlowCacheSetting: &enabled,
+		Experimental:             map[string]bool{experimentalFeatureKernelTCLegacyAttach: legacyAttach},
 	}))
 	defer rt.Close()
 	rule := buildEgressNATSyntheticRule(EgressNAT{

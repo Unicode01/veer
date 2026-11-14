@@ -39,6 +39,7 @@ func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRunti
 		resp.DefaultEngine = pm.cfg.DefaultEngine
 		resp.ConfiguredOrder = normalizeKernelEngineOrder(pm.cfg.KernelEngineOrder)
 		resp.TrafficStats = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
+		resp.KernelTCFlowCache = pm.cfg.KernelTCFlowCacheEnabled()
 		resp.TCDiagnosticsVerbose = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
 		resp.TCDiagnostics = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag) || resp.TCDiagnosticsVerbose
 		resp.KernelRulesMapConfiguredLimit = pm.cfg.KernelRulesMapLimit

@@ -210,6 +210,21 @@
     });
   }
 
+  // The configured flow cache, and the option that keeps it from taking effect on the TC engine.
+  function kernelFlowCachePill(data) {
+    if (!data.kernel_tc_flow_cache) {
+      return kernelStatePill(false, 'kernel.flowCache.enabled', 'kernel.flowCache.disabled');
+    }
+    const tc = (Array.isArray(data.engines) ? data.engines : []).find((engine) => engine && engine.name === 'tc');
+    if (tc && tc.flow_cache_disabled_by) {
+      return app.createNode('span', {
+        className: 'stat-pill',
+        text: app.t('kernel.flowCache.inactive', { option: tc.flow_cache_disabled_by })
+      });
+    }
+    return kernelStatePill(true, 'kernel.flowCache.enabled', 'kernel.flowCache.disabled');
+  }
+
   function kernelEngineBadge(name) {
     const normalized = String(name || '').toLowerCase();
     const badgeClass = normalized === 'xdp' ? 'badge-xdp' : normalized === 'tc' ? 'badge-tc' : 'badge-kernel';
@@ -1501,6 +1516,7 @@
       }),
       kernelRuntimeSummaryInline([
         kernelStatePill(!!data.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled'),
+        kernelFlowCachePill(data),
         app.createNode('span', {
           text: app.t(data.retry_pending ? 'kernel.retry.pending' : 'kernel.retry.idle')
         })

@@ -480,6 +480,8 @@ type KernelEngineRuntimeView struct {
 	NATMapOldCapacityV6                     int       `json:"nat_map_old_capacity_v6,omitempty"`
 	LastReconcileMode                       string    `json:"last_reconcile_mode,omitempty"`
 	TrafficStats                            bool      `json:"traffic_stats"`
+	FlowCache                               bool      `json:"flow_cache,omitempty"`
+	FlowCacheDisabledBy                     string    `json:"flow_cache_disabled_by,omitempty"`
 	Diagnostics                             bool      `json:"diagnostics"`
 	DiagnosticsVerbose                      bool      `json:"diagnostics_verbose"`
 	DiagFIBNonSuccess                       uint64    `json:"diag_fib_non_success,omitempty"`
@@ -536,6 +538,7 @@ type KernelRuntimeResponse struct {
 	TrafficStats                                   bool                         `json:"traffic_stats"`
 	TCDiagnostics                                  bool                         `json:"tc_diagnostics"`
 	TCDiagnosticsVerbose                           bool                         `json:"tc_diagnostics_verbose"`
+	KernelTCFlowCache                              bool                         `json:"kernel_tc_flow_cache"`
 	KernelMapProfile                               string                       `json:"kernel_map_profile,omitempty"`
 	KernelMapTotalMemoryBytes                      uint64                       `json:"kernel_map_total_memory_bytes,omitempty"`
 	KernelRulesMapBaseLimit                        int                          `json:"kernel_rules_map_base_limit,omitempty"`

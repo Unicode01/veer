@@ -629,6 +629,7 @@ type linuxKernelRuleRuntime struct {
 	pluginPipelineEnabled        bool
 	tcxAllowed                   bool
 	enableFlowCache              bool
+	flowCacheDisabledBy          string // see kernelTCFlowCacheDisabledBy
 	pluginPipelineActive         bool
 	pluginPipelineLoaded         []loadedPluginObjectRef
 	pluginPipelineDesired        []kernelPluginPipelineDesiredPlugin
@@ -667,10 +668,14 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		pluginPipelineEnabled = cfg.PluginsEnabled() && cfg.PluginsDataplaneEnabled()
 		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
 		forceLegacyAttach = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCLegacyAttach)
-		enableFlowCache = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCFlowCache)
+		enableFlowCache = cfg.KernelTCFlowCacheEnabled()
 	}
 	if enableDiagVerbose {
 		enableDiagnostics = true
+	}
+	flowCacheDisabledBy := ""
+	if enableFlowCache {
+		flowCacheDisabledBy = kernelTCFlowCacheDisabledBy(enableTrafficStats, enableReplyL2Cache, enableRedirectNeighFast)
 	}
 	return &linuxKernelRuleRuntime{
 		cfg:                     cfg,
@@ -691,9 +696,9 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		pluginPipelineEnabled:   pluginPipelineEnabled,
 		// The attach API stays fixed for the life of the runtime, so
 		// reconciles never mix filters and links for one position.
-		tcxAllowed: !forceLegacyAttach,
-		// Cached packets would bypass the per-rule traffic counters.
-		enableFlowCache: enableFlowCache && !enableTrafficStats,
+		tcxAllowed:          !forceLegacyAttach,
+		enableFlowCache:     enableFlowCache && flowCacheDisabledBy == "",
+		flowCacheDisabledBy: flowCacheDisabledBy,
 	}
 }
 
@@ -771,7 +776,9 @@ func (rt *linuxKernelRuleRuntime) ensureAvailabilityInitialized() {
 			rt.availableReason += "; kernel_tc_reply_l2_cache experimental path enabled"
 		}
 		if rt.enableFlowCache {
-			rt.availableReason += "; kernel_tc_flow_cache experimental path enabled"
+			rt.availableReason += "; kernel_tc_flow_cache enabled"
+		} else if rt.flowCacheDisabledBy != "" {
+			rt.availableReason += "; kernel_tc_flow_cache off while " + rt.flowCacheDisabledBy + " is enabled"
 		}
 	})
 }

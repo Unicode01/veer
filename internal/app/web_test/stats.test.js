@@ -122,6 +122,9 @@ function createHarness() {
     'kernel.available.no': 'Unavailable',
     'kernel.traffic.enabled': 'Enabled',
     'kernel.traffic.disabled': 'Disabled',
+    'kernel.flowCache.enabled': 'Flow cache on',
+    'kernel.flowCache.disabled': 'Flow cache off',
+    'kernel.flowCache.inactive': 'Flow cache inactive: {{option}} is on',
     'kernel.retry.idle': 'Idle',
     'kernel.retry.pending': 'Pending',
     'kernel.loaded.yes': 'Loaded',
@@ -408,6 +411,28 @@ test('renderKernelRuntime omits degraded note when no engine is degraded', () =>
   const notes = collectKernelRuntimeNotes(app.el.kernelRuntimeSummary);
   const degradedNotes = notes.filter((note) => collectText(note).includes('Kernel Engine Degraded'));
   assert.equal(degradedNotes.length, 0);
+});
+
+test('renderKernelRuntime shows whether the configured flow cache is in effect', () => {
+  for (const state of [
+    { configured: false, engine: {}, want: 'Flow cache off' },
+    { configured: true, engine: { flow_cache: true }, want: 'Flow cache on' },
+    {
+      configured: true,
+      engine: { flow_cache_disabled_by: 'kernel_tc_reply_l2_cache' },
+      want: 'Flow cache inactive: kernel_tc_reply_l2_cache is on'
+    }
+  ]) {
+    const { app } = createHarness();
+    app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
+      kernel_tc_flow_cache: state.configured,
+      engines: [runtimeEngine(state.engine)]
+    });
+
+    app.renderKernelRuntime();
+
+    assert.ok(collectText(app.el.kernelRuntimeSummary).includes(state.want), state.want);
+  }
 });
 
 test('kernel status details distinguish helper build support, loading and usable capabilities', () => {

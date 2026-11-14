@@ -128,6 +128,37 @@ func TestFlowCacheTargetsFollowRuleIDs(t *testing.T) {
 	}
 }
 
+// A configured flow cache stays off beside the options it cannot serve, and
+// the runtime names the option that keeps it off.
+func TestTCRuntimeKeepsFlowCacheOffBesideOptionsItCannotServe(t *testing.T) {
+	enabled := true
+	for _, tc := range []struct {
+		feature string
+		want    string
+	}{
+		{feature: "", want: ""},
+		{feature: experimentalFeatureKernelTraffic, want: experimentalFeatureKernelTraffic},
+		{feature: experimentalFeatureKernelTCReplyL2Cache, want: experimentalFeatureKernelTCReplyL2Cache},
+		{feature: experimentalFeatureKernelTCRedirectNeighFast, want: experimentalFeatureKernelTCRedirectNeighFast},
+		// Prepared L2 only affects its own rules; the others still record.
+		{feature: experimentalFeatureKernelTCPreparedL2, want: ""},
+	} {
+		cfg := &Config{KernelTCFlowCacheSetting: &enabled, Experimental: map[string]bool{}}
+		if tc.feature != "" {
+			cfg.Experimental[tc.feature] = true
+		}
+		rt := newTCKernelRuleRuntime(cfg)
+		if rt.flowCacheDisabledBy != tc.want || rt.enableFlowCache != (tc.want == "") {
+			t.Fatalf("with %q: enableFlowCache = %t, flowCacheDisabledBy = %q; want %t, %q",
+				tc.feature, rt.enableFlowCache, rt.flowCacheDisabledBy, tc.want == "", tc.want)
+		}
+	}
+	rt := newTCKernelRuleRuntime(&Config{Experimental: map[string]bool{experimentalFeatureKernelTCReplyL2Cache: true}})
+	if rt.enableFlowCache || rt.flowCacheDisabledBy != "" {
+		t.Fatalf("unconfigured cache: enableFlowCache = %t, flowCacheDisabledBy = %q; want off without a reason", rt.enableFlowCache, rt.flowCacheDisabledBy)
+	}
+}
+
 // An in-place reconcile keeps the core attachments it no longer plans but
 // drops the flow caches it no longer plans, on cls_bpf and tcx alike.
 func TestWithoutUnplannedFlowCacheKeepsOnlyPlannedCaches(t *testing.T) {
@@ -373,7 +404,8 @@ func testEgressNATTCFlowCacheServesEstablishedTCP(t *testing.T, natType string, 
 		outInterface = moveEgressNATUplinkIntoBridge(t, topology)
 	}
 
-	rt := newTCKernelRuleRuntime(&Config{Experimental: map[string]bool{experimentalFeatureKernelTCFlowCache: true}})
+	enabled := true
+	rt := newTCKernelRuleRuntime(&Config{KernelTCFlowCacheSetting: &enabled})
 	defer rt.Close()
 	rule := buildEgressNATSyntheticRule(EgressNAT{
 		ID:              1,
@@ -511,10 +543,10 @@ func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 	enabled := true
 	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
-		PluginsEnabledSetting:   &enabled,
-		PluginsDataplaneSetting: &enabled,
-		PluginsDir:              pluginsRoot,
-		Experimental:            map[string]bool{experimentalFeatureKernelTCFlowCache: true},
+		PluginsEnabledSetting:    &enabled,
+		PluginsDataplaneSetting:  &enabled,
+		PluginsDir:               pluginsRoot,
+		KernelTCFlowCacheSetting: &enabled,
 	}))
 	defer rt.Close()
 	rule := buildEgressNATSyntheticRule(EgressNAT{

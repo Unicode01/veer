@@ -264,6 +264,7 @@ func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRunti
 		resp.DefaultEngine = pm.cfg.DefaultEngine
 		resp.ConfiguredOrder = normalizeKernelEngineOrder(pm.cfg.KernelEngineOrder)
 		resp.TrafficStats = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
+		resp.KernelTCFlowCache = pm.cfg.KernelTCFlowCacheEnabled()
 		resp.TCDiagnosticsVerbose = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
 		resp.TCDiagnostics = pm.cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag) || resp.TCDiagnosticsVerbose
 		resp.KernelRulesMapConfiguredLimit = pm.cfg.KernelRulesMapLimit
@@ -568,6 +569,8 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) Kerne
 		NATMapCapacity:                    actualCapacities.NATPorts,
 		LastReconcileMode:                 rt.lastReconcileMode,
 		TrafficStats:                      rt.enableTrafficStats,
+		FlowCache:                         rt.enableFlowCache,
+		FlowCacheDisabledBy:               rt.flowCacheDisabledBy,
 		Diagnostics:                       rt.enableDiagnostics,
 		DiagnosticsVerbose:                rt.enableDiagVerbose,
 		TCPEstablishedIdleTimeoutMode:     rt.tcpIdleTimeout.mode(),

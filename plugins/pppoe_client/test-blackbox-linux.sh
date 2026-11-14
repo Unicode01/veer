@@ -294,7 +294,7 @@ start_veer() {
   "plugins_enabled": true,
   "plugins_dataplane_enabled": true,
   "plugins_dir": "$work_dir/plugins",
-  "experimental_features": {"kernel_tc_flow_cache": $flow_cache_json},
+  "kernel_tc_flow_cache": $flow_cache_json,
   "default_engine": "auto"
 }
 EOF

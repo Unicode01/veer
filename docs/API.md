@@ -768,6 +768,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   "configured_order": ["tc", "xdp"],
   "traffic_stats": true,
   "tc_diagnostics": false,
+  "kernel_tc_flow_cache": true,
   "kernel_tcp_established_idle_timeout_seconds": 0,
   "kernel_tcp_established_idle_timeout_mode": "auto",
   "active_rule_count": 12,
@@ -784,6 +785,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
       "attachments": 6,
       "attachment_summary": "eno1(3)/forward, eno1(3)/reply",
       "attachment_api": "tcx",
+      "flow_cache_disabled_by": "kernel_traffic_stats",
       "tcp_established_idle_timeout_mode": "auto",
       "tcp_established_idle_timeout_seconds": 3600,
       "tcp_established_idle_timeout_auto_tier": "high"
@@ -791,6 +793,8 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   ]
 }
 ```
+
+TC 连接缓存的字段同样分两层：顶层 `kernel_tc_flow_cache` 是配置值；TC 引擎的 `flow_cache` 为 `true` 表示缓存已挂载生效，配置开启却未生效时 `flow_cache_disabled_by` 给出原因所在的实验特性（`kernel_traffic_stats`、`kernel_tc_reply_l2_cache` 或 `kernel_tc_redirect_neigh_fast`）。上例开启了流量统计，所以缓存未生效。
 
 已建立 TCP idle timeout 的字段分两层理解：
 

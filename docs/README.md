@@ -246,6 +246,7 @@ Authorization: Bearer <web_token>
 - `kernel_tcp_established_idle_timeout_seconds`：内核已建立 TCP flow 的空闲超时；`0` 表示按 IPv4/IPv6 flow map 的最高利用率自动选择，正数表示固定秒数。auto 在利用率达到 50% / 70% / 85% 时依次采用 6 小时 / 1 小时 / 10 分钟，低负载采用 24 小时；回落阈值分别为 45% / 65% / 80%，避免临界点抖动
 - `kernel_nat_ports_map_limit`：内核 NAT 端口 map 容量，`0` 表示自适应
 - `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT 临时端口池
+- `kernel_tc_flow_cache`：TC 连接缓存，默认关闭；长连接、大流量为主时可开启，取舍见下文 Dataplane 一节
 - `experimental_features`：实验特性开关，默认都应保持关闭，按需验证后再开
 
 ## Dataplane
@@ -288,10 +289,11 @@ Egress NAT 的 `protocol` 含 `icmp` 时，ICMP 回显请求和应答以标识�
 
 在 Linux 6.6 及以上内核中，TC 核心程序（包括插件 pipeline）通过 tcx 挂载，不再经过 clsact 下的 cls_bpf 过滤器链，每个包少一次分类器遍历。tcx 程序先于网卡上所有 cls_bpf 过滤器执行；插件直接挂载的 TC 过滤器仍是 cls_bpf，执行顺序和以前一样排在核心程序之后。tcx 不支持 `TC_ACT_STOLEN`，插件接管数据包后应返回 `veer_tc_consumed()`，见 [PLUGIN.md](PLUGIN.md)。`experimental_features` 中的 `kernel_tc_legacy_attach` 可强制使用 cls_bpf。运行时视图中 TC 引擎的 `attachment_api` 字段显示当前挂载方式（`tcx` 或 `cls_bpf`）。热重启时新进程接管已挂载的 tcx 程序并原子替换；在两种挂载方式之间切换时，先挂上新程序，再移除旧的挂载。
 
-`experimental_features` 中的 `kernel_tc_flow_cache` 开启实验性的连接缓存：规则收包的每个网卡入口上，在 TC 核心程序前面再挂一个小程序，已建立的 Egress NAT 连接（对称和 Full Cone，去程和回程）的普通包查一次表就改写并转发，不再经过核心程序。缓存条目由核心程序在快路径上写入，和该连接的 1 秒快路径窗口一起过期，所以每条连接每秒仍至少由核心程序完整处理一次，路由、邻居和本机地址变化的生效时间不变。
+顶层配置 `kernel_tc_flow_cache` 开启 TC 连接缓存，默认关闭：规则收包的每个网卡入口上，在 TC 核心程序前面再挂一个小程序，已建立的 Egress NAT 连接（对称和 Full Cone，去程和回程）的普通包查一次表就改写并转发，不再经过核心程序。缓存条目由核心程序在快路径上写入，和该连接的 1 秒快路径窗口一起过期，所以每条连接每秒仍至少由核心程序完整处理一次，路由、邻居和本机地址变化的生效时间不变。旧配置写在 `experimental_features` 里的同名开关仍然有效（顶层配置优先），`deploy.sh` 升级配置时会把它移到顶层。
 
+- **取舍**：缓存程序要在每个进入的包上运行一次。测试机上（MTU 1500、关闭 GRO），长连接每个包在路由器上的 BPF 时间从约 356 ns 降到约 226 ns；一条约 8 个包的短连接则多花约 12% 的 BPF 时间，整机建连速率低约 1%。以下载、代理、视频等长连接大流量为主时适合开启；以大量短连接为主时可保持关闭。
 - **只缓存**：不带 VLAN 标签的 IPv4 TCP/UDP 包；SYN、FIN、RST 总是交给核心程序，FIN/RST 同时删除这条连接两个方向的缓存条目。条目只用于和写入时从同一个网卡进来、目的 MAC 也相同的包，其他包交给核心程序检查。
-- **不使用缓存**：入口挂了插件钩子的网卡（这些网卡不挂缓存程序，进来的包也不写缓存）；开启了 `kernel_traffic_stats`；同时开启了 `kernel_tc_reply_l2_cache`。
+- **不使用缓存**：入口挂了插件钩子的网卡（这些网卡不挂缓存程序，进来的包也不写缓存）。开启了 `kernel_traffic_stats`、`kernel_tc_reply_l2_cache` 或 `kernel_tc_redirect_neigh_fast` 时完全不挂缓存程序：前者下缓存的包会绕过规则流量统计，后两者让核心程序不经 FIB 解析下一跳，缓存记不下任何条目。运行时视图顶层的 `kernel_tc_flow_cache` 是配置值，TC 引擎的 `flow_cache` 表示缓存是否生效，`flow_cache_disabled_by` 给出让它不生效的选项。
 - **失效**：规则或插件钩子变化、用户态清理连接时，所有条目立即作废，变化过程中正在处理的包写下的条目在 25 ms 后再作废一次。规则不变时的本机地址变化和核心程序的快路径一样，在 1 秒窗口内生效。热重启后缓存从空开始。
 
 ## 托管网络

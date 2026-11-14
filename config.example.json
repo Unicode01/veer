@@ -56,6 +56,7 @@
   "kernel_nat_ports_map_limit": 0,
   "kernel_nat_port_min": 20000,
   "kernel_nat_port_max": 65535,
+  "kernel_tc_flow_cache": false,
   "experimental_features": {
     "bridge_xdp": false,
     "xdp_generic": false,
@@ -65,8 +66,7 @@
     "kernel_tc_redirect_neigh_fast": false,
     "kernel_tc_prepared_l2": false,
     "kernel_tc_reply_l2_cache": false,
-    "kernel_tc_legacy_attach": false,
-    "kernel_tc_flow_cache": false
+    "kernel_tc_legacy_attach": false
   },
   "tags": []
 }

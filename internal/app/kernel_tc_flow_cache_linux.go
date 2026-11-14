@@ -11,7 +11,7 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// The experimental flow cache (kernel_tc_flow_cache): tc_flow_cache runs on
+// The flow cache (the kernel_tc_flow_cache setting): tc_flow_cache runs on
 // each ingress hook where the core serves rules and no plugin hook runs,
 // ahead of the core, and sends packets of established egress NAT flows the
 // way the core's fast path last sent them, with one lookup. The core records
@@ -46,6 +46,24 @@ type tcFlowCacheValueV4 struct {
 type tcFlowCacheStateV4 struct {
 	Generation uint32
 	Enabled    uint32
+}
+
+// kernelTCFlowCacheDisabledBy names the experimental feature that keeps a
+// configured flow cache off, or returns "". With traffic stats, cached packets
+// would bypass the per-rule counters. With the reply L2 cache or the neighbour
+// redirect, the core's fast paths send packets without a next hop from the
+// FIB, so it records no entry and the cache could only miss.
+func kernelTCFlowCacheDisabledBy(trafficStats, replyL2Cache, redirectNeighFast bool) string {
+	switch {
+	case trafficStats:
+		return experimentalFeatureKernelTraffic
+	case replyL2Cache:
+		return experimentalFeatureKernelTCReplyL2Cache
+	case redirectNeighFast:
+		return experimentalFeatureKernelTCRedirectNeighFast
+	default:
+		return ""
+	}
 }
 
 // completeAttachmentPrograms adds what this runtime attaches on every hook

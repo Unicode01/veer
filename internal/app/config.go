@@ -20,7 +20,6 @@ const (
 	experimentalFeatureKernelTCPreparedL2        = "kernel_tc_prepared_l2"
 	experimentalFeatureKernelTCReplyL2Cache      = "kernel_tc_reply_l2_cache"
 	experimentalFeatureKernelTCLegacyAttach      = "kernel_tc_legacy_attach"
-	experimentalFeatureKernelTCFlowCache         = "kernel_tc_flow_cache"
 	insecureDefaultWebToken                      = "change-me-to-a-secure-token"
 	insecureDefaultPluginAdminToken              = "change-me-to-a-separate-plugin-admin-token"
 	remoteManagementMinimumTokenCharacters       = 24
@@ -28,6 +27,10 @@ const (
 	kernelTCPEstablishedIdleTimeoutModeFixed     = "fixed"
 	kernelTCPEstablishedIdleTimeoutMaxSeconds    = int64(9_223_372_036)
 )
+
+// The flow cache was an experimental feature before kernel_tc_flow_cache
+// became a setting of its own; configs may still enable it there.
+const legacyExperimentalFeatureKernelTCFlowCache = "kernel_tc_flow_cache"
 
 type Config struct {
 	WebPort                                int                       `json:"web_port"`
@@ -58,6 +61,7 @@ type Config struct {
 	KernelNATMapLimit                      int                       `json:"kernel_nat_ports_map_limit"`
 	KernelNATPortMin                       int                       `json:"kernel_nat_port_min"`
 	KernelNATPortMax                       int                       `json:"kernel_nat_port_max"`
+	KernelTCFlowCacheSetting               *bool                     `json:"kernel_tc_flow_cache,omitempty"`
 	Experimental                           map[string]bool           `json:"experimental_features"`
 	Tags                                   []string                  `json:"tags"`
 
@@ -233,6 +237,19 @@ func (cfg *Config) ExperimentalFeatureEnabled(name string) bool {
 		return false
 	}
 	return cfg.Experimental[name]
+}
+
+// KernelTCFlowCacheEnabled reports whether the TC flow cache is switched on.
+// It is off by default. The top-level setting wins; without it, the former
+// experimental feature of the same name still counts.
+func (cfg *Config) KernelTCFlowCacheEnabled() bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.KernelTCFlowCacheSetting != nil {
+		return *cfg.KernelTCFlowCacheSetting
+	}
+	return cfg.ExperimentalFeatureEnabled(legacyExperimentalFeatureKernelTCFlowCache)
 }
 
 func (cfg *Config) ManagedNetworkAutoRepairEnabled() bool {
