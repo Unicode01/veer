@@ -356,6 +356,8 @@ type kernelCollectionPieces struct {
 	icmpErrorChainV4            *ebpf.Map
 	icmpErrorForwardProg        *ebpf.Program
 	icmpErrorReplyProg          *ebpf.Program
+	egressNATNewChainV4         *ebpf.Map
+	forwardEgressNATNewProg     *ebpf.Program
 	pluginHooksV4               *ebpf.Map
 	pluginConfigV4              *ebpf.Map
 	pluginInterfacesV4          *ebpf.Map
@@ -2040,11 +2042,15 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	// Full NAT, egress NAT, every plugin stage and the ICMP error translators
-	// are tail calls. Without the pins the kernel empties tc_prog_chain_v4,
-	// tc_plugin_hooks_v4 and tc_icmp_error_chain_v4 when this process exits,
-	// and the filters left for the successor pass those packets unprocessed.
+	// Full NAT, egress NAT and its new flows, every plugin stage and the ICMP
+	// error translators are tail calls. Without the pins the kernel empties
+	// tc_prog_chain_v4, tc_egress_nat_new_chain_v4, tc_plugin_hooks_v4 and
+	// tc_icmp_error_chain_v4 when this process exits, and the filters left
+	// for the successor pass those packets unprocessed.
 	err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCProgramChainMapName, rt.coll.Maps[kernelTCProgramChainMapName])
+	if err == nil {
+		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCEgressNATNewChainMapName, rt.coll.Maps[kernelTCEgressNATNewChainMapName])
+	}
 	if err == nil {
 		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCPluginHooksMapName, rt.coll.Maps[kernelTCPluginHooksMapName])
 	}
@@ -2064,6 +2070,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 			kernelForwardFullNATExistingProgramName: rt.coll.Programs[kernelForwardFullNATExistingProgramName],
 			kernelForwardFullNATNewProgramName:      rt.coll.Programs[kernelForwardFullNATNewProgramName],
 			kernelForwardEgressNATProgramName:       rt.coll.Programs[kernelForwardEgressNATProgramName],
+			kernelForwardEgressNATNewProgramName:    rt.coll.Programs[kernelForwardEgressNATNewProgramName],
 			kernelReplyTransparentProgramName:       rt.coll.Programs[kernelReplyTransparentProgramName],
 			kernelReplyFullNATProgramName:           rt.coll.Programs[kernelReplyFullNATProgramName],
 		}
@@ -3622,6 +3629,9 @@ func configureTCKernelProgramChain(pieces kernelCollectionPieces, pluginPipeline
 	if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4ReplyFullNAT), uint32(pieces.replyFullNATProg.FD())); err != nil {
 		return fmt.Errorf("install tc IPv4 reply full-nat tail-call target: %w", err)
 	}
+	if err := configureKernelTCEgressNATNewChain(pieces); err != nil {
+		return err
+	}
 	if kernelCollectionPiecesSupportFullNATSplitV4(pieces) {
 		if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4FullNATExisting), uint32(pieces.forwardFullNATExistingProg.FD())); err != nil {
 			return fmt.Errorf("install tc IPv4 full-nat existing tail-call target: %w", err)
@@ -3818,6 +3828,7 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 			kernelForwardTransparentProgramName,
 			kernelForwardFullNATProgramName,
 			kernelForwardEgressNATProgramName,
+			kernelForwardEgressNATNewProgramName,
 			kernelReplyDispatchProgramName,
 			kernelReplyTransparentProgramName,
 			kernelReplyFullNATProgramName,
@@ -3826,8 +3837,10 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 				return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 dispatcher set: missing program %q", name)
 			}
 		}
-		if _, ok := spec.Maps[kernelTCProgramChainMapName]; !ok {
-			return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 dispatcher set: missing map %q", kernelTCProgramChainMapName)
+		for _, name := range []string{kernelTCProgramChainMapName, kernelTCEgressNATNewChainMapName} {
+			if _, ok := spec.Maps[name]; !ok {
+				return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 dispatcher set: missing map %q", name)
+			}
 		}
 		chain := spec.Maps[kernelTCProgramChainMapName]
 		if chain.Type != ebpf.ProgramArray || chain.MaxEntries < tcProgramChainV4MaxEntries {
@@ -4010,6 +4023,8 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		icmpErrorChainV4:            coll.Maps[kernelTCICMPErrorChainMapName],
 		icmpErrorForwardProg:        coll.Programs[kernelICMPErrorForwardProgramName],
 		icmpErrorReplyProg:          coll.Programs[kernelICMPErrorReplyProgramName],
+		egressNATNewChainV4:         coll.Maps[kernelTCEgressNATNewChainMapName],
+		forwardEgressNATNewProg:     coll.Programs[kernelForwardEgressNATNewProgramName],
 		pluginHooksV4:               coll.Maps[kernelTCPluginHooksMapName],
 		pluginConfigV4:              coll.Maps[kernelTCPluginConfigMapName],
 		pluginInterfacesV4:          coll.Maps[kernelTCPluginInterfacesMapName],

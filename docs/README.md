@@ -497,6 +497,8 @@ CGO_ENABLED=0 go test -c -o /tmp/veer-kernel-load.test ./internal/app
 python3 scripts/verify-kernel-load-matrix.py --test-binary /tmp/veer-kernel-load.test
 ```
 
+新建 egress NAT 连接由单独的 tail-call 程序 `forward_ingress_v4_egress_nat_new` 打开。为新连接找空闲 NAT 端口最多试 3×64 次，verifier 会对探测之后的代码按每种探测结果各走一遍，所以探测放在哪个程序，哪个程序就离上限最近。拆出后，5.15.0-25 上 `forward_ingress_v4_egress_nat` 约 8 万条，新程序约 18 万条，拆分前前者约 44 万条。dispatcher 查不到 flow 时直接 tail call 新程序，新连接首包经过的 tail call 次数不变，插件 Hook 的预算也不受影响。
+
 最低兼容版本不代表发行版仍受上游安全维护，生产环境应选择仍在维护的版本。[Debian 11 的官方 LTS 已于 2026-08-31 结束](https://www.debian.org/releases/bullseye/)；其 CI 容器仅使用 archive.debian.org 上 LTS 结束后冻结的归档源验证旧版用户环境，安装脚本不会替用户修改 apt 源。RHEL-compatible 系统会保留已安装的 `curl-minimal` / `coreutils-single`，避免与完整版软件包冲突。
 
 ## WHMCS 插件

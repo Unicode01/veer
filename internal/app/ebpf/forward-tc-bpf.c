@@ -793,6 +793,19 @@ struct bpf_map_def SEC("maps") tc_icmp_error_chain_v4 = {
 	.max_entries = 2,
 };
 
+/*
+ * Opening an egress NAT flow, in a program of its own (see
+ * handle_forward_ingress_v4_egress_nat_new), which gets a chain of its own
+ * for the same reason as the ICMP error translators.
+ */
+#define FORWARD_TC_EGRESS_NAT_NEW_V4 0
+struct bpf_map_def SEC("maps") tc_egress_nat_new_chain_v4 = {
+	.type = BPF_MAP_TYPE_PROG_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = 1,
+};
+
 struct bpf_map_def SEC("maps") tc_plugin_hooks_v4 = {
 	.type = BPF_MAP_TYPE_PROG_ARRAY,
 	.key_size = sizeof(__u32),
@@ -4211,12 +4224,14 @@ static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, 
 		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
 			drop_kernel_nat_occupancy();
 
+		/* Another CPU opened the flow meanwhile: carry on with it there. */
 		front_flow = lookup_flow_v4_copy_active_or_old(front_key, &flow_bank, front_value);
 		if (front_flow && !is_egress_nat_flow(front_value))
 			return TC_ACT_OK;
 		if (!front_flow || !is_fullnat_front_flow(front_value))
 			return TC_ACT_SHOT;
-		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank, 1);
+		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
+		return TC_ACT_SHOT;
 	}
 	created_front = 1;
 	bump_kernel_flow_occupancy();
@@ -4246,6 +4261,94 @@ static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, 
 	return redirect_egress_nat_forward(skb, ctx, rule, front_value, nat_cfg_flags);
 }
 
+/*
+ * Opens a full-cone mapping: a front entry for the client's endpoint, shared
+ * by every destination, and the reply entry of its NAT port, which takes
+ * replies from any remote.
+ */
+static __always_inline int handle_egress_nat_forward_full_cone_new(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_key_v4 *front_key)
+{
+	struct flow_key_v4 reply_key = {};
+	struct nat_port_key_v4 nat_key = {};
+	struct redirect_target_v4 redirect = {};
+	struct flow_value_v4 *front_value = lookup_scratch_flow_v4();
+	struct flow_value_v4 *reply_value = lookup_scratch_flow_aux_v4();
+	struct flow_value_v4 *front_flow;
+	__u64 now = bpf_ktime_get_ns();
+	__u64 session_id = new_flow_session_id();
+	__u16 nat_port = 0;
+	__u8 count_udp_now = 0;
+	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+	__u32 nat_cfg_flags = load_kernel_nat_config_flags();
+
+	if (!front_value || !reply_value || !front_key)
+		return TC_ACT_SHOT;
+	if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
+		return TC_ACT_SHOT;
+	__builtin_memset(front_value, 0, sizeof(*front_value));
+	__builtin_memset(reply_value, 0, sizeof(*reply_value));
+
+	if (reserve_nat_port_fullcone(rule, ctx, &nat_key, &nat_port, session_id) < 0)
+		return TC_ACT_SHOT;
+
+	init_fullnat_front_value(front_value, rule, ctx, (__u32)skb->ifindex, nat_port, session_id);
+	front_value->front_addr = 0;
+	front_value->front_port = 0;
+	front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT | FORWARD_FLOW_FLAG_FULL_CONE;
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
+	if (ctx->closing) {
+		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+		front_value->front_close_seen_ns = now;
+	}
+	front_value->last_seen_ns = now;
+	if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, front_key, front_value, BPF_NOEXIST) < 0) {
+		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+			drop_kernel_nat_occupancy();
+
+		/* Another CPU opened the mapping meanwhile: carry on with it there. */
+		front_flow = lookup_flow_v4_copy_active_or_old(front_key, &flow_bank, front_value);
+		if (front_flow && !is_egress_nat_flow(front_value))
+			return TC_ACT_OK;
+		if (!front_flow || !is_full_cone_front_flow(front_value) || !flow_matches_rule_v4(front_value, rule))
+			return TC_ACT_SHOT;
+		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
+		return TC_ACT_SHOT;
+	}
+	bump_kernel_flow_occupancy();
+
+	build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_key);
+	init_fullnat_reply_value(reply_value, front_value, now);
+	if (is_datagram_proto(ctx->proto)) {
+		reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
+		count_udp_now = 1;
+	}
+	if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_key, reply_value, BPF_NOEXIST) < 0) {
+		if (delete_flow_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, front_key, session_id) == 0)
+			drop_kernel_flow_occupancy();
+		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+			drop_kernel_nat_occupancy();
+		return TC_ACT_SHOT;
+	}
+	bump_kernel_flow_occupancy();
+	bump_rule_total_conns(rule->rule_id);
+	if (count_udp_now)
+		bump_rule_datagram_nat(rule->rule_id, ctx->proto);
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
+	update_reply_l2_cache_v4(skb, &reply_key, nat_cfg_flags);
+
+	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
+		return TC_ACT_SHOT;
+	/* Like the rest of the full-cone path, resolved through the FIB. */
+	redirect.ifindex = rule->out_ifindex;
+	redirect.src_addr = front_value->nat_addr;
+	redirect.src_port = front_value->nat_port;
+	redirect.dst_addr = bpf_ntohl(ctx->dst_addr);
+	redirect.dst_port = ctx->dst_port;
+	return redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
+}
+
 static __always_inline int handle_egress_nat_forward_non_full_cone(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
 {
 	struct flow_key_v4 front_key = {};
@@ -4261,7 +4364,8 @@ static __always_inline int handle_egress_nat_forward_non_full_cone(struct __sk_b
 		return TC_ACT_OK;
 	if (front_flow && is_fullnat_front_flow(front_copy))
 		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank, 1);
-	return handle_egress_nat_forward_new(skb, ctx, rule, &front_key);
+	bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
+	return TC_ACT_SHOT;
 }
 
 static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
@@ -4273,14 +4377,10 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	struct flow_value_v4 *front_flow;
 	struct flow_value_v4 *reply_flow = 0;
 	__u64 now = bpf_ktime_get_ns();
-	__u64 session_id = new_flow_session_id();
-	__u16 nat_port = 0;
-	__u8 created_front = 0;
 	__u8 created_reply = 0;
 	__u8 update_front = 0;
 	__u8 update_reply = 0;
 	__u8 touch_front = 0;
-	__u8 new_session = 0;
 	__u8 count_udp_now = 0;
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 	__u32 nat_cfg_flags = load_kernel_nat_config_flags();
@@ -4320,72 +4420,15 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 			bump_kernel_flow_occupancy();
 		}
 	} else {
+		/* A new mapping, which the egress NAT new-flow program opens. */
 		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
 			return TC_ACT_SHOT;
-		/* The lookup may have left another flow's copy here. */
-		__builtin_memset(front_value, 0, sizeof(*front_value));
-		if (reserve_nat_port_fullcone(rule, ctx, &reply_or_nat.nat, &nat_port, session_id) < 0)
-			return TC_ACT_SHOT;
-
-		init_fullnat_front_value(front_value, rule, ctx, (__u32)skb->ifindex, nat_port, session_id);
-		front_value->front_addr = 0;
-		front_value->front_port = 0;
-		front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT | FORWARD_FLOW_FLAG_FULL_CONE;
-		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
-			front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
-		if (ctx->closing) {
-			front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-			front_value->front_close_seen_ns = now;
-		}
-		front_value->last_seen_ns = now;
-		build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
-		if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.flow, front_value, BPF_NOEXIST) < 0) {
-			build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
-			if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
-				drop_kernel_nat_occupancy();
-
-			build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
-			front_flow = lookup_flow_v4_copy_active_or_old(&reply_or_nat.flow, &flow_bank, front_value);
-			if (front_flow && !is_egress_nat_flow(front_value))
-				return TC_ACT_OK;
-			if (!front_flow || !is_full_cone_front_flow(front_value) || !flow_matches_rule_v4(front_value, rule))
-				return TC_ACT_SHOT;
-			if (front_value->nat_addr == 0)
-				front_value->nat_addr = rule->nat_addr;
-		} else {
-			created_front = 1;
-			new_session = 1;
-			bump_kernel_flow_occupancy();
-		}
-
-		build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_or_nat.flow);
-		reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_or_nat.flow);
-		if (copy_flow_v4_session(reply_flow, front_value->session_id, reply_value) == 0 && is_full_cone_reply_flow(reply_value)) {
-			/* reply_value holds the flow's reply entry. */
-		} else {
-			init_fullnat_reply_value(reply_value, front_value, now);
-			if (is_datagram_proto(ctx->proto)) {
-				reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
-				count_udp_now = 1;
-			}
-			if (update_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, reply_value, BPF_NOEXIST) < 0) {
-				if (created_front) {
-					build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
-					if (delete_flow_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.flow, session_id) == 0)
-						drop_kernel_flow_occupancy();
-					build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
-					if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
-						drop_kernel_nat_occupancy();
-				}
-				return TC_ACT_SHOT;
-			}
-			created_reply = 1;
-			bump_kernel_flow_occupancy();
-		}
+		bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
+		return TC_ACT_SHOT;
 	}
 
 	if (is_datagram_proto(ctx->proto)) {
-		if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS)) {
+		if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
 			front_value->last_seen_ns = now;
 			update_front = 1;
 		}
@@ -4402,10 +4445,10 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 		} else if (close_action == FORWARD_TCP_CLOSE_DELETE) {
 			close_complete = 1;
 		} else {
-			if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+			if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 				front_value->last_seen_ns = now;
 				update_front = 1;
-			} else if (!created_front && (now - front_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+			} else if ((now - front_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
 				/* Reopens the fast-path window now that the pair was checked. */
 				touch_front = 1;
 			}
@@ -4417,7 +4460,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	}
 
 	if (update_front) {
-		if (!created_front && !created_reply && front_flow) {
+		if (!created_reply && front_flow) {
 			write_flow_v4(front_flow, front_value);
 		} else {
 			build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
@@ -4428,7 +4471,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 		touch_flow_v4(front_flow, front_value->session_id, now);
 	}
 	if (update_reply) {
-		if (!created_front && !created_reply && reply_flow) {
+		if (!created_reply && reply_flow) {
 			write_flow_v4(reply_flow, reply_value);
 		} else {
 			build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_or_nat.flow);
@@ -4436,12 +4479,10 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 				return TC_ACT_SHOT;
 		}
 	}
-	if (!created_front && (created_reply || update_front || update_reply)) {
+	if (created_reply || update_front || update_reply) {
 		build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
 		ensure_nat_port_owner_v4(flow_bank, &reply_or_nat.nat, rule->rule_id, front_value->session_id);
 	}
-	if (new_session)
-		bump_rule_total_conns(rule->rule_id);
 	if (count_udp_now)
 		bump_rule_datagram_nat(rule->rule_id, ctx->proto);
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
@@ -5450,6 +5491,8 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 		}
 		if (is_local_ipv4(dispatch->ctx.dst_addr))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+		if (!front_flow)
+			bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return finish_forward_pipeline_v4(skb, TC_ACT_UNSPEC);
 	}
@@ -6210,6 +6253,36 @@ static __always_inline int handle_forward_ingress_v4_egress_nat(struct __sk_buff
 	return handle_egress_nat_forward(skb, &dispatch->ctx, &dispatch->rule_value);
 }
 
+/*
+ * Opens egress NAT flows. Probing for a free NAT port is most of what the
+ * verifier walks on this path, since it walks the code after the probe again
+ * for each of the probe's outcomes; kept out of the egress NAT program, which
+ * handles the flows already open, the probes no longer multiply that program.
+ * The dispatcher comes here straight away when it finds no flow, so a new
+ * flow's first packet takes as many tail calls as before and the plugin
+ * hook budget holds.
+ */
+static __always_inline int handle_forward_ingress_v4_egress_nat_new(struct __sk_buff *skb)
+{
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct flow_key_v4 front_key = {};
+
+	if (!dispatch || !dispatch->have_rule)
+		return TC_ACT_UNSPEC;
+	if (!is_egress_nat_rule(&dispatch->rule_value))
+		return TC_ACT_UNSPEC;
+	if (is_local_ipv4(dispatch->ctx.dst_addr))
+		return TC_ACT_OK;
+	if (egress_nat_dst_mac_mismatch(skb, &dispatch->rule_value))
+		return TC_ACT_OK;
+	if (is_full_cone_egress_nat_rule(&dispatch->rule_value)) {
+		build_full_cone_front_flow_key(skb, &dispatch->ctx, &front_key);
+		return handle_egress_nat_forward_full_cone_new(skb, &dispatch->ctx, &dispatch->rule_value, &front_key);
+	}
+	build_front_flow_key(skb, &dispatch->ctx, &front_key);
+	return handle_egress_nat_forward_new(skb, &dispatch->ctx, &dispatch->rule_value, &front_key);
+}
+
 static __always_inline int handle_forward_ingress_v4_fullnat_existing(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
@@ -6428,6 +6501,12 @@ SEC("classifier/forward_ingress_v4_egress_nat")
 int forward_ingress_v4_egress_nat(struct __sk_buff *skb)
 {
 	return finish_forward_pipeline_v4(skb, handle_forward_ingress_v4_egress_nat(skb));
+}
+
+SEC("classifier/forward_ingress_v4_egress_nat_new")
+int forward_ingress_v4_egress_nat_new(struct __sk_buff *skb)
+{
+	return finish_forward_pipeline_v4(skb, handle_forward_ingress_v4_egress_nat_new(skb));
 }
 
 SEC("classifier/forward_ingress_v6")
