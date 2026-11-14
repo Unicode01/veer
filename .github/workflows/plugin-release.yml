@@ -222,6 +222,34 @@ jobs:
           path: ${{ runner.temp }}/veer-vm-logs
           retention-days: 14
 
+  kernel-load-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install VM and eBPF build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 busybox-static clang llvm linux-libc-dev
+      - name: Build eBPF objects and the test binary
+        run: |
+          sh scripts/build-ebpf.sh
+          CGO_ENABLED=0 go test -c -o /tmp/veer-kernel-load.test ./internal/app
+      - name: Load the embedded eBPF collections on distribution kernels
+        run: |
+          # The runner user cannot normally open /dev/kvm; use the available KVM device.
+          sudo python3 scripts/verify-kernel-load-matrix.py --test-binary /tmp/veer-kernel-load.test \
+            --output "${RUNNER_TEMP}/kernel-load-logs"
+      - name: Preserve kernel load logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-load-matrix
+          path: ${{ runner.temp }}/kernel-load-logs
+          retention-days: 14
+
   optional-kernel-module:
     runs-on: ubuntu-latest
     timeout-minutes: 25

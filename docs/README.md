@@ -487,6 +487,14 @@ python3 scripts/verify-qemu-platform.py alpine --binary /tmp/veer-vm-binary --te
 python3 scripts/verify-qemu-platform.py rocky --binary /tmp/veer-vm-binary --test-binary /tmp/veer-vm.test
 ```
 
+旧内核的 eBPF verifier 比新内核更容易拒绝程序：Ubuntu 22.04 初版内核（5.15.0-25）上，TC 对象里的一次 BPF-to-BPF 调用曾使 `forward_ingress_v4_egress_nat` 超过 100 万条指令的处理上限，整个 TC 数据面因此退回用户态，而新内核照常加载。CI 因此还用 QEMU 依次启动 Debian 11（5.10.0-32）、Ubuntu 22.04 初版（5.15.0-25）、Ubuntu 22.04 更新（5.15.0-203）和 Debian 12（6.1.0-50）的发行版内核，在其中用运行时的加载方式载入嵌入的 TC、TC-stats、XDP、XDP-stats 对象和 XDP 插件 dispatcher，任一程序被拒绝或测试被跳过即失败。内核包固定版本并校验 SHA256，从会长期保留该文件的归档下载（Launchpad、archive.debian.org、snapshot.debian.org）。这项检查只证明能加载，不跑转发流量。本地需要 QEMU、busybox 和 dpkg-deb：
+
+```bash
+sh scripts/build-ebpf.sh
+CGO_ENABLED=0 go test -c -o /tmp/veer-kernel-load.test ./internal/app
+python3 scripts/verify-kernel-load-matrix.py --test-binary /tmp/veer-kernel-load.test
+```
+
 最低兼容版本不代表发行版仍受上游安全维护，生产环境应选择仍在维护的版本。[Debian 11 的官方 LTS 已于 2026-08-31 结束](https://www.debian.org/releases/bullseye/)；其 CI 容器仅使用 archive.debian.org 上 LTS 结束后冻结的归档源验证旧版用户环境，安装脚本不会替用户修改 apt 源。RHEL-compatible 系统会保留已安装的 `curl-minimal` / `coreutils-single`，避免与完整版软件包冲突。
 
 ## WHMCS 插件
