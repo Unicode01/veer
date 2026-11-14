@@ -3206,7 +3206,16 @@ static __always_inline int reserve_nat_port_v6(const struct rule_value_v6 *rule,
 	return -1;
 }
 
-static __attribute__((noinline)) void ensure_nat_port_owner_v4(__u8 bank, const struct nat_port_key_v4 *key, __u32 rule_id, __u64 session_id)
+/*
+ * The NAT port owner helpers are inlined so that the programs make no
+ * BPF-to-BPF call. Before Linux 6.x the verifier's precision tracking gives up
+ * at a call boundary and marks every scalar of the path precise, which defeats
+ * state pruning: on Ubuntu 22.04's 5.15.0-25 kernel, each NAT port probe then
+ * walks the rest of the program again, and forward_ingress_v4_egress_nat
+ * exceeds the 1M-instruction limit. Do not add noinline subprograms to the
+ * forwarding paths.
+ */
+static __always_inline void ensure_nat_port_owner_v4(__u8 bank, const struct nat_port_key_v4 *key, __u32 rule_id, __u64 session_id)
 {
 	struct nat_port_value_v4 value = {
 		.rule_id = rule_id,
@@ -3217,7 +3226,19 @@ static __attribute__((noinline)) void ensure_nat_port_owner_v4(__u8 bank, const 
 		bump_kernel_nat_occupancy();
 }
 
-static __attribute__((noinline)) void ensure_nat_port_owner_v6(__u8 bank, const struct nat_port_key_v6 *key, __u32 rule_id, __u64 session_id)
+/*
+ * The core and plugin-continue programs serve IPv6 too. Clang before 17
+ * emits IPv6 pipelines too large to inline this into: newer kernels then
+ * cannot patch them within the 16-bit jump range. Those builds keep the
+ * call, and on 5.15.0-25 their IPv6 pipelines stay over the limit.
+ */
+#if defined(__clang_major__) && __clang_major__ >= 17
+#define FORWARD_NAT_PORT_OWNER_V6_LINKAGE __always_inline
+#else
+#define FORWARD_NAT_PORT_OWNER_V6_LINKAGE __attribute__((noinline))
+#endif
+
+static FORWARD_NAT_PORT_OWNER_V6_LINKAGE void ensure_nat_port_owner_v6(__u8 bank, const struct nat_port_key_v6 *key, __u32 rule_id, __u64 session_id)
 {
 	struct nat_port_value_v6 value = {
 		.rule_id = rule_id,
