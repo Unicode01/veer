@@ -128,6 +128,47 @@ func TestFlowCacheTargetsFollowRuleIDs(t *testing.T) {
 	}
 }
 
+// An in-place reconcile keeps the core attachments it no longer plans but
+// drops the flow caches it no longer plans, on cls_bpf and tcx alike.
+func TestWithoutUnplannedFlowCacheKeepsOnlyPlannedCaches(t *testing.T) {
+	filterAt := func(ifindex int, priority uint16, minor uint16) kernelAttachment {
+		return kernelAttachment{filter: &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{
+			LinkIndex: ifindex,
+			Parent:    netlink.HANDLE_MIN_INGRESS,
+			Priority:  priority,
+			Handle:    netlink.MakeHandle(0, minor),
+		}}}
+	}
+	tcxAt := func(ifindex int, priority uint16, minor uint16) kernelAttachment {
+		key, _ := filterAt(ifindex, priority, minor).key()
+		key.tcx = true
+		return kernelAttachment{tcx: &kernelTCXAttachment{key: key}}
+	}
+	for _, at := range []func(int, uint16, uint16) kernelAttachment{filterAt, tcxAt} {
+		keptCache := at(3, kernelFlowCacheFilterPrio, kernelFlowCacheFilterHandle)
+		hookedCache := at(4, kernelFlowCacheFilterPrio, kernelFlowCacheFilterHandle)
+		staleCore := at(4, kernelForwardFilterPrio, kernelForwardFilterHandle)
+		planned := []kernelAttachment{keptCache, at(3, kernelForwardFilterPrio, kernelForwardFilterHandle)}
+		old := []kernelAttachment{keptCache, hookedCache, staleCore}
+
+		got := withoutUnplannedFlowCache(mergeKernelAttachments(old, planned), planned)
+		keys := kernelAttachmentKeySet(got)
+		for _, want := range append(planned, staleCore) {
+			key, _ := want.key()
+			if _, ok := keys[key]; !ok {
+				t.Fatalf("attachments %v miss %+v", keys, key)
+			}
+		}
+		hookedKey, _ := hookedCache.key()
+		if _, ok := keys[hookedKey]; ok || len(got) != 3 {
+			t.Fatalf("attachments = %v, want the flow cache at %+v dropped", keys, hookedKey)
+		}
+		if got := kernelAttachmentDeleteCount(old, got); got != 1 {
+			t.Fatalf("delete count = %d, want 1", got)
+		}
+	}
+}
+
 // Ingress hooks mark their interfaces, and a hook without interfaces marks
 // all of them; egress hooks mark nothing.
 func TestKernelPluginPipelineMarksIngressHookedInterfaces(t *testing.T) {

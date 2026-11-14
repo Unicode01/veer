@@ -126,6 +126,31 @@ func appendFlowCacheAttachmentPlans(plans []kernelAttachmentPlan, sets kernelAtt
 	return plans
 }
 
+// isFlowCache reports whether key is the flow cache's position on an
+// ingress hook.
+func (key kernelAttachmentKey) isFlowCache() bool {
+	return key.parent == netlink.HANDLE_MIN_INGRESS && key.priority == kernelFlowCacheFilterPrio
+}
+
+// withoutUnplannedFlowCache drops the flow caches that planned does not hold
+// from attachments. An in-place reconcile keeps the old attachments it no
+// longer plans, but no rule depends on the flow cache, and one kept on an
+// interface that gained an ingress plugin hook would still run ahead of the
+// hook there.
+func withoutUnplannedFlowCache(attachments, planned []kernelAttachment) []kernelAttachment {
+	plannedKeys := kernelAttachmentKeySet(planned)
+	out := make([]kernelAttachment, 0, len(attachments))
+	for _, att := range attachments {
+		if key, ok := att.key(); ok && key.isFlowCache() {
+			if _, ok := plannedKeys[key]; !ok {
+				continue
+			}
+		}
+		out = append(out, att)
+	}
+	return out
+}
+
 // configureKernelTCFlowCache lets the core of a freshly loaded collection
 // record entries. A new collection starts with an empty cache.
 func configureKernelTCFlowCache(m *ebpf.Map, enabled bool) error {

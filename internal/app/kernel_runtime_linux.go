@@ -3196,15 +3196,14 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	}
 
 	oldAttachments := append([]kernelAttachment(nil), rt.attachments...)
-	mergedAttachments := mergeKernelAttachments(oldAttachments, newAttachments)
-	finalAttachments := mergedAttachments
-	detachedAttachments := 0
-	preservedAttachments := len(mergedAttachments) - len(newAttachments)
+	var finalAttachments []kernelAttachment
 	if attachmentReset {
 		finalAttachments = append([]kernelAttachment(nil), newAttachments...)
-		detachedAttachments = kernelAttachmentDeleteCount(oldAttachments, newAttachments)
-		preservedAttachments = 0
+	} else {
+		finalAttachments = withoutUnplannedFlowCache(mergeKernelAttachments(oldAttachments, newAttachments), newAttachments)
 	}
+	detachedAttachments := kernelAttachmentDeleteCount(oldAttachments, finalAttachments)
+	preservedAttachments := len(finalAttachments) - len(newAttachments)
 
 	runningAny := false
 	for _, item := range prepared {
@@ -3302,9 +3301,13 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed after in-place update: %v", err)
 	}
-	if attachmentReset && detachedAttachments > 0 {
-		rt.deleteStaleAttachmentsLocked(oldAttachments, newAttachments)
-		log.Printf("kernel dataplane reconcile: detached %d stale tc attachment(s) after egress attachment reset", detachedAttachments)
+	if detachedAttachments > 0 {
+		rt.deleteStaleAttachmentsLocked(oldAttachments, finalAttachments)
+		if attachmentReset {
+			log.Printf("kernel dataplane reconcile: detached %d stale tc attachment(s) after egress attachment reset", detachedAttachments)
+		} else {
+			log.Printf("kernel dataplane reconcile: detached %d tc flow cache attachment(s) no longer planned", detachedAttachments)
+		}
 	}
 	rt.stateLog.Logf(
 		"kernel dataplane reconcile: updated %d active kernel entry(s) in-place (upsert=%d delete=%d attach=%d detach=%d preserve=%d)",
