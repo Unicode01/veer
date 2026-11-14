@@ -524,4 +524,203 @@ static __always_inline void init_fullnat_reply_value_v6(struct flow_value_v6 *re
 	reply_value->last_seen_ns = now;
 }
 
+/*
+ * The flow maps are preallocated hash maps: the kernel hands a deleted
+ * element to the next insert on the deleting CPU at once, without waiting
+ * for programs that still hold a pointer to it. A packet handled on one CPU
+ * can so find its flow while another CPU closes that flow and opens a
+ * different one in the same memory. Translating with what the pointer then
+ * shows sends the packet as part of a connection it does not belong to: a
+ * closing client's last ACK, sent with the next connection's NAT port, has
+ * the server reset that connection.
+ *
+ * Flows are therefore read through a copy checked to be the flow its key
+ * names, and written back only while the entry still holds the copy's
+ * session. Session ids are random 64-bit values, so recycled memory does not
+ * carry the old one, and reading the session on both sides of the copy
+ * catches memory rewritten while it was being copied.
+ */
+#define FORWARD_COMPILER_BARRIER() asm volatile("" ::: "memory")
+
+static __always_inline __u64 flow_v4_session(const struct flow_value_v4 *flow)
+{
+	return *(const volatile __u64 *)&flow->session_id;
+}
+
+static __always_inline __u64 flow_v6_session(const struct flow_value_v6 *flow)
+{
+	return *(const volatile __u64 *)&flow->session_id;
+}
+
+/* Compares as four words: the IPv6 programs are close to their size limits. */
+static __always_inline int flow_ipv6_addr_equal(const __u8 a[16], const __u8 b[16])
+{
+	const __u32 *x = (const __u32 *)a;
+	const __u32 *y = (const __u32 *)b;
+
+	return ((x[0] ^ y[0]) | (x[1] ^ y[1]) | (x[2] ^ y[2]) | (x[3] ^ y[3])) == 0;
+}
+
+static __always_inline int flow_ipv6_addr_is_zero(const __u8 a[16])
+{
+	const __u32 *x = (const __u32 *)a;
+
+	return (x[0] | x[1] | x[2] | x[3]) == 0;
+}
+
+/* Whether a flow entry describes the flow its key names. */
+static __always_inline int flow_v4_names_key(const struct flow_value_v4 *flow, const struct flow_key_v4 *key)
+{
+	if ((flow->flags & FORWARD_FLOW_FLAG_FULL_NAT) == 0) {
+		/*
+		 * Transparent entries are keyed by the backend and the client.
+		 * Ones recorded before the client was kept carry none.
+		 */
+		if (flow->client_addr == 0 && flow->client_port == 0)
+			return 1;
+		return flow->client_addr == key->dst_addr && flow->client_port == key->dst_port;
+	}
+	if ((flow->flags & FORWARD_FLOW_FLAG_FRONT_ENTRY) != 0) {
+		if (flow->client_addr != key->src_addr || flow->client_port != key->src_port)
+			return 0;
+		/* A full-cone front entry serves every destination of its source. */
+		if ((flow->flags & FORWARD_FLOW_FLAG_FULL_CONE) != 0)
+			return 1;
+		return flow->front_addr == key->dst_addr && flow->front_port == key->dst_port;
+	}
+	/* A reply entry is keyed by the NAT address and port its flow holds. */
+	return flow->nat_port == key->dst_port && (flow->nat_addr == 0 || flow->nat_addr == key->dst_addr);
+}
+
+static __always_inline int flow_v6_names_key(const struct flow_value_v6 *flow, const struct flow_key_v6 *key)
+{
+	if ((flow->flags & FORWARD_FLOW_FLAG_FULL_NAT) == 0)
+		return 1;
+	if ((flow->flags & FORWARD_FLOW_FLAG_FRONT_ENTRY) != 0) {
+		if (flow->client_port != key->src_port || !flow_ipv6_addr_equal(flow->client_addr, key->src_addr))
+			return 0;
+		if ((flow->flags & FORWARD_FLOW_FLAG_FULL_CONE) != 0)
+			return 1;
+		return flow->front_port == key->dst_port && flow_ipv6_addr_equal(flow->front_addr, key->dst_addr);
+	}
+	return flow->nat_port == key->dst_port &&
+		(flow_ipv6_addr_is_zero(flow->nat_addr) || flow_ipv6_addr_equal(flow->nat_addr, key->dst_addr));
+}
+
+/* Copies a looked-up flow entry; fails unless the copy is the key's flow. */
+static __always_inline int copy_flow_v4(const struct flow_value_v4 *live, const struct flow_key_v4 *key, struct flow_value_v4 *copy)
+{
+	__u64 session_id;
+
+	if (!live || !key || !copy)
+		return -1;
+	session_id = flow_v4_session(live);
+	FORWARD_COMPILER_BARRIER();
+	*copy = *live;
+	FORWARD_COMPILER_BARRIER();
+	if (flow_v4_session(live) != session_id || copy->session_id != session_id)
+		return -1;
+	return flow_v4_names_key(copy, key) ? 0 : -1;
+}
+
+static __always_inline int copy_flow_v6(const struct flow_value_v6 *live, const struct flow_key_v6 *key, struct flow_value_v6 *copy)
+{
+	__u64 session_id;
+
+	if (!live || !key || !copy)
+		return -1;
+	session_id = flow_v6_session(live);
+	FORWARD_COMPILER_BARRIER();
+	*copy = *live;
+	FORWARD_COMPILER_BARRIER();
+	if (flow_v6_session(live) != session_id || copy->session_id != session_id)
+		return -1;
+	return flow_v6_names_key(copy, key) ? 0 : -1;
+}
+
+/* Copies the other entry of a flow; fails unless it still holds session_id. */
+static __always_inline int copy_flow_v4_session(const struct flow_value_v4 *live, __u64 session_id, struct flow_value_v4 *copy)
+{
+	if (!live || !copy || flow_v4_session(live) != session_id)
+		return -1;
+	FORWARD_COMPILER_BARRIER();
+	*copy = *live;
+	FORWARD_COMPILER_BARRIER();
+	if (flow_v4_session(live) != session_id || copy->session_id != session_id)
+		return -1;
+	return 0;
+}
+
+static __always_inline int copy_flow_v6_session(const struct flow_value_v6 *live, __u64 session_id, struct flow_value_v6 *copy)
+{
+	if (!live || !copy || flow_v6_session(live) != session_id)
+		return -1;
+	FORWARD_COMPILER_BARRIER();
+	*copy = *live;
+	FORWARD_COMPILER_BARRIER();
+	if (flow_v6_session(live) != session_id || copy->session_id != session_id)
+		return -1;
+	return 0;
+}
+
+/* Looks a flow up into copy; the entry pointer is for write_flow_* only. */
+static __always_inline struct flow_value_v4 *lookup_flow_v4_copy(__u8 bank, const struct flow_key_v4 *key, struct flow_value_v4 *copy)
+{
+	struct flow_value_v4 *live = lookup_flow_v4_in_bank(bank, key);
+
+	return copy_flow_v4(live, key, copy) == 0 ? live : 0;
+}
+
+static __always_inline struct flow_value_v6 *lookup_flow_v6_copy(__u8 bank, const struct flow_key_v6 *key, struct flow_value_v6 *copy)
+{
+	struct flow_value_v6 *live = lookup_flow_v6_in_bank(bank, key);
+
+	return copy_flow_v6(live, key, copy) == 0 ? live : 0;
+}
+
+/* Writes a copy back while the entry it came from still holds its flow. */
+static __always_inline int write_flow_v4(struct flow_value_v4 *live, const struct flow_value_v4 *value)
+{
+	if (!live || flow_v4_session(live) != value->session_id)
+		return -1;
+	*live = *value;
+	return 0;
+}
+
+static __always_inline int write_flow_v6(struct flow_value_v6 *live, const struct flow_value_v6 *value)
+{
+	if (!live || flow_v6_session(live) != value->session_id)
+		return -1;
+	*live = *value;
+	return 0;
+}
+
+/* Only the timestamp, so flag updates made meanwhile on other CPUs stay. */
+static __always_inline void touch_flow_v4(struct flow_value_v4 *live, __u64 session_id, __u64 now)
+{
+	if (live && flow_v4_session(live) == session_id)
+		live->last_seen_ns = now;
+}
+
+static __always_inline void touch_flow_v6(struct flow_value_v6 *live, __u64 session_id, __u64 now)
+{
+	if (live && flow_v6_session(live) == session_id)
+		live->last_seen_ns = now;
+}
+
+/*
+ * Writes a copy back under its key. Unlike an update, it never brings back a
+ * flow that was closed meanwhile, nor overwrites one opened under the key
+ * since.
+ */
+static __always_inline int store_flow_v4_in_bank(__u8 bank, const struct flow_key_v4 *key, const struct flow_value_v4 *value)
+{
+	return write_flow_v4(lookup_flow_v4_in_bank(bank, key), value);
+}
+
+static __always_inline int store_flow_v6_in_bank(__u8 bank, const struct flow_key_v6 *key, const struct flow_value_v6 *value)
+{
+	return write_flow_v6(lookup_flow_v6_in_bank(bank, key), value);
+}
+
 #endif /* FORWARD_COMMON_H */
