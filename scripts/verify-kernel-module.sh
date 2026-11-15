@@ -16,7 +16,7 @@
 # at the job timeout without one.
 set -eu
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-all_phases="build load module packets-loader packets-veer wireguard vpn unload"
+all_phases="build packets-bpf load module packets-kfuncs packets-veer wireguard vpn unload"
 phases=${*:-$all_phases}
 for phase in $phases; do
     case " $all_phases " in
@@ -196,11 +196,17 @@ for phase in $phases; do
             "$work/kfuncs.test" -test.run '^(TestOptionalKernelModule.*|TestPluginControlNetOwnedLinkMACLinuxIntegration)$' \
             -test.count=1 -test.v -test.timeout=3m
         ;;
-    packets-loader)
+    packets-bpf)
+        # Plain BPF needs no module; run before the load phase, a failure
+        # here does not involve veer_kfuncs. The packet script stops its
+        # namespace child after 300 seconds itself.
+        step "packets through the loader, plain BPF" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
+            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --mode bpf
+        ;;
+    packets-kfuncs)
         need_module
-        # The packet script stops its namespace child after 300 seconds itself.
-        step "packets through the loader" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
-            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader"
+        step "packets through the loader, kfuncs" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
+            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --mode kfuncs
         ;;
     packets-veer)
         need_module
