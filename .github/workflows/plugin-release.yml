@@ -255,9 +255,9 @@ jobs:
       fail-fast: false
       matrix:
         # Run both until 26.04 passes. host_checks are the packet checks the
-        # runner itself may run: the non-linear one stops the ubuntu-26.04
-        # runner (7.0.0-1019-azure) from responding, even without the module,
-        # so there it only runs in the guest step.
+        # runner itself may run: the non-linear ones crash the ubuntu-26.04
+        # runner's kernel (7.0.0-1019-azure) or are not yet shown safe there,
+        # so there they only run in the guest steps.
         include:
           - os: ubuntu-24.04
             host_checks: all
@@ -277,14 +277,23 @@ jobs:
       # when the runner stops responding and the job's log is lost.
       - name: Build the module, eBPF objects and test binaries
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh build
-      # Diagnostic: a QEMU guest boots this runner's own kernel and runs the
-      # check that stops 26.04, so the guest hangs instead of the runner and
-      # its console, with the kernel's lockup and stall reports, stays here.
-      - name: Non-linear PPPoE frames, plain BPF, in a guest on this kernel
+      # Diagnostic: QEMU guests boot this runner's own kernel and run the
+      # non-linear PPPoE check, so a kernel crash stops a guest instead of the
+      # runner and its console stays here. 7.0.0-1019-azure (26.04) oopses
+      # when tc_tunnel is called as a function and then tail-calls; attached
+      # and tail-called are how Veer runs it.
+      - name: Install the guest tools
         continue-on-error: true
-        run: |
-          sudo apt-get install -y virtme-ng qemu-system-x86
-          sudo env "PATH=$PATH" VEER_GUEST_TIMEOUT=180 sh scripts/verify-kfuncs-guest.sh "$RUNNER_TEMP/kmod/loader" --mode bpf --checks nonlinear
+        run: sudo apt-get install -y virtme-ng qemu-system-x86
+      - name: Non-linear PPPoE frames, plain BPF, in a guest, tc_tunnel attached
+        continue-on-error: true
+        run: sudo env "PATH=$PATH" VEER_GUEST_TIMEOUT=180 sh scripts/verify-kfuncs-guest.sh "$RUNNER_TEMP/kmod/loader" --mode bpf --checks nonlinear-attached
+      - name: Non-linear PPPoE frames, plain BPF, in a guest, tc_tunnel tail-called
+        continue-on-error: true
+        run: sudo env "PATH=$PATH" VEER_GUEST_TIMEOUT=180 sh scripts/verify-kfuncs-guest.sh "$RUNNER_TEMP/kmod/loader" --mode bpf --checks nonlinear-tailcalled
+      - name: Non-linear PPPoE frames, plain BPF, in a guest, tc_tunnel called as a function
+        continue-on-error: true
+        run: sudo env "PATH=$PATH" VEER_GUEST_TIMEOUT=180 sh scripts/verify-kfuncs-guest.sh "$RUNNER_TEMP/kmod/loader" --mode bpf --checks nonlinear
       # One check per step, each on a fresh topology, with the module not
       # loaded: 26.04 stopped responding in the non-linear one.
       - name: PPPoE plain BPF, module not loaded, setup only
@@ -298,6 +307,9 @@ jobs:
       - name: PPPoE plain BPF, module not loaded, non-linear frames through a NAPI-frags tap
         if: matrix.host_checks == 'all'
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=nonlinear sh scripts/verify-kernel-module.sh packets-bpf
+      - name: PPPoE plain BPF, module not loaded, non-linear frames, tc_tunnel attached and tail-called
+        if: matrix.host_checks == 'all'
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=nonlinear-attached,nonlinear-tailcalled sh scripts/verify-kernel-module.sh packets-bpf
       - name: PPPoE plain BPF, module not loaded, throughput
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=throughput sh scripts/verify-kernel-module.sh packets-bpf
       - name: Load the module

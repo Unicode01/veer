@@ -24,6 +24,12 @@ type settings struct {
 	Entries              []struct{ Key, Value string }
 	// TCX attaches through tcx, as the Veer core does on Linux 6.6+.
 	TCX bool
+	// TailCalls fill program arrays of the object, so a test program can
+	// tail-call another the way the Veer core reaches plugins.
+	TailCalls []struct {
+		Map, Program string
+		Index        uint32
+	}
 }
 
 func main() {
@@ -67,6 +73,15 @@ func run() error {
 			return e
 		}
 		if e = coll.Maps[c.Map].Put(k, val); e != nil {
+			return e
+		}
+	}
+	for _, t := range c.TailCalls {
+		m, p := coll.Maps[t.Map], coll.Programs[t.Program]
+		if m == nil || p == nil {
+			return fmt.Errorf("tail call map %q or program %q missing from object", t.Map, t.Program)
+		}
+		if e = m.Put(t.Index, p); e != nil {
 			return e
 		}
 	}

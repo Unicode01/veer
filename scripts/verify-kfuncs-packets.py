@@ -32,7 +32,7 @@ parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
 # The topology, plugin loaders and iperf3 server always come up; "setup" alone
 # runs nothing else. CI runs one check per step to see which one a runner that
 # stops responding was in.
-CHECKS = ["setup", "ping", "udp", "malformed", "nonlinear", "gro", "throughput"]
+CHECKS = ["setup", "ping", "udp", "malformed", "nonlinear", "nonlinear-attached", "nonlinear-tailcalled", "gro", "throughput"]
 parser.add_argument("--checks", default="all", help="comma-separated subset of " + ",".join(CHECKS) + ", or all")
 args = parser.parse_args()
 if args.direct and args.mode == "bpf":
@@ -190,11 +190,16 @@ def malformed_frames(mode):
     )
 
 
-def nonlinear_frames(mode, clamp=True, linear=False):
+def nonlinear_frames(mode, clamp=True, linear=False, entry="wrapped"):
     # NAPI_FRAGS preserves writev's first iovec as the skb's linear head.
     # Short first iovecs force the real plugin to parse headers in skb frags.
     # Echo the source skb after handoff to verify the kfunc's clone contract.
-    label = mode + ("-linear" if linear else "-frags") + ("" if clamp else "-unclamped")
+    # entry is how tc_tunnel is reached: "wrapped", test_frags calls it as a
+    # function, so its own tail call runs in a subprogram, which the JIT of
+    # 7.0.0-1019-azure crashes on; "attached", tc_tunnel is the TC program;
+    # "tailcalled", test_tail tail-calls it, as the Veer core reaches plugins.
+    wrapped = entry == "wrapped"
+    label = mode + ("-linear" if linear else "-frags") + ("" if clamp else "-unclamped") + ("" if wrapped else "-" + entry)
     source = BASE / (label + ".c")
     obj = BASE / (label + ".o")
     guard = "!= skb->len" if linear else ">= 22"
@@ -208,6 +213,11 @@ def nonlinear_frames(mode, clamp=True, linear=False):
         '  source_echo(skb, skb->ifindex, 0);\n'
         '#endif\n'
         '  return result;\n}\n'
+        'struct bpf_map_def SEC("maps") test_chain = {\n'
+        '  .type = BPF_MAP_TYPE_PROG_ARRAY, .key_size = 4, .value_size = 4, .max_entries = 1 };\n'
+        'SEC("tc/test_tail") int test_tail(struct __sk_buff *skb) {\n'
+        '  veer_bpf_tail_call(skb, &test_chain, 0);\n'
+        '  return TC_ACT_SHOT;\n}\n'
         # Match the next TC NAT parser's direct-access requirements. Capture
         # only packets that actually pass this classifier, after handoff.
         'SEC("tc/test_headers") int test_headers(struct __sk_buff *skb) {\n'
@@ -255,12 +265,14 @@ def nonlinear_frames(mode, clamp=True, linear=False):
         struct.pack_into("<I", value, 8, idx("fragcap0")["ifindex"])
         if not clamp:
             struct.pack_into("<HH", value, 20, 0, 0)
-        for program, interface in [("test_frags", "fragwan"), ("test_headers", "local0")]:
+        entry_program = {"wrapped": "test_frags", "attached": "tc_tunnel", "tailcalled": "test_tail"}[entry]
+        for program, interface in [(entry_program, "fragwan"), ("test_headers", "local0")]:
             config = BASE / (label + "-" + program + ".json")
             config.write_text(json.dumps({
                 "Object": str(obj), "Program": program, "Map": "pppoe_tunnel_config",
                 "Interfaces": [interface],
                 "Entries": [{"Key": "00000000", "Value": value.hex()}],
+                "TailCalls": [{"Map": "test_chain", "Index": 0, "Program": "tc_tunnel"}] if program == "test_tail" else [],
                 "TCX": args.tcx,
             }))
             loaders.append(proc([str(LOADER), str(config)], label + "-" + program))
@@ -283,7 +295,7 @@ def nonlinear_frames(mode, clamp=True, linear=False):
             while select.select([tap], [], [], 0)[0]:
                 os.read(tap, 65536)
             os.writev(tap, [part for part in [frame[:linear], frame[linear:]] if part])
-            if mode == "kfuncs":
+            if mode == "kfuncs" and wrapped:
                 if not select.select([tap], [], [], 1)[0]:
                     raise RuntimeError("source skb echo missing after kfunc handoff")
                 if os.read(tap, 65536) != frame:
@@ -731,6 +743,9 @@ try:
             if mode == "kfuncs":
                 nonlinear_frames(mode, clamp=False)
                 nonlinear_frames(mode, linear=True)
+        for entry in ["attached", "tailcalled"]:
+            if "nonlinear-" + entry in checks:
+                nonlinear_frames(mode, entry=entry)
         if "gro" in checks and mode == "kfuncs":
             gro_paths()
         if "udp" in checks:
