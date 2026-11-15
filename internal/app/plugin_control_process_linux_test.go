@@ -237,18 +237,39 @@ func TestPluginManagedProcessStopKillsDescendants(t *testing.T) {
 		t.Fatal("child did not start")
 	}
 	r.Stop("one", "core")
-	// A descendant can briefly remain as a zombie (Z) until PID 1 reaps it,
-	// or as a dead task (X) whose /proc entry is being removed.
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
-	if err == nil {
-		stat := string(data)
-		state := ""
-		if i := strings.LastIndex(stat, ") "); i >= 0 && i+3 <= len(stat) {
-			state = stat[i+2 : i+3]
+	// Stop returns once the descendant has exited. It can still be a zombie
+	// until PID 1 reaps it, which managedProcessAlive counts as gone.
+	if managedProcessAlive(child) {
+		stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
+		t.Fatal("descendant still alive", string(stat))
+	}
+}
+
+func TestPluginManagedProcessGroupRunningIgnoresZombies(t *testing.T) {
+	cmd := exec.Command("/bin/sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	if !pluginProcessGroupRunning(pgid) {
+		t.Fatal("running group reported as gone")
+	}
+	_ = cmd.Process.Kill()
+	// Not reaped yet: the member stays a zombie of this test.
+	deadline := time.Now().Add(3 * time.Second)
+	for pluginProcessGroupRunning(pgid) {
+		if time.Now().After(deadline) {
+			t.Fatal("killed group still reported as running")
 		}
-		if state != "Z" && state != "X" {
-			t.Fatal("descendant still alive", stat)
-		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := syscall.Kill(-pgid, 0); err != nil {
+		t.Fatal("expected the zombie to keep the group:", err)
+	}
+	_ = cmd.Wait()
+	if pluginProcessGroupRunning(pgid) {
+		t.Fatal("reaped group reported as running")
 	}
 }
 

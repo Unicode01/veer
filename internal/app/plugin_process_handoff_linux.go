@@ -405,11 +405,7 @@ func (r *pluginProcessRegistry) adoptHandedOffProcess(record pluginProcessHandof
 	_, _ = p.stderr.Write(attached.Stderr)
 	go run.read(scanner, &p.stdout, &p.stderr)
 	limitCleanup := adoptPluginManagedProcessLimits(record.KeeperPID, record.LimitOwner, r.cfg)
-	cleanup := func() {
-		run.kill()
-		run.awaitGone(pluginKeeperStopGrace)
-		limitCleanup()
-	}
+	cleanup := func() { run.teardown(limitCleanup) }
 	r.mu.Lock()
 	if r.closed || r.entries[key] != nil {
 		r.mu.Unlock()

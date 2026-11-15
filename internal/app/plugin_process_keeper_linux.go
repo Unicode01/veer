@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -77,11 +78,7 @@ func (p *pluginManagedProcess) launch(req pluginProcessRequest, dir string) (*pl
 		_ = conn.Close()
 		return nil, nil, err
 	}
-	cleanup := func() {
-		run.kill()
-		run.awaitGone(pluginKeeperStopGrace)
-		limitCleanup()
-	}
+	cleanup := func() { run.teardown(limitCleanup) }
 	if err := run.send(pluginKeeperMessage{Op: "start", Command: req.Command, Args: args, Env: pluginExecEnvironment(), Dir: dir, Stdin: req.Stdin}); err != nil {
 		cleanup()
 		return nil, nil, fmt.Errorf("start executable: %w", err)
@@ -113,6 +110,58 @@ func (run *pluginKeeperRun) kill() {
 	if corePID, _ := run.core(); corePID > 0 {
 		_ = syscall.Kill(-corePID, syscall.SIGKILL)
 	}
+}
+
+// teardown kills the keeper and the executable's process group, waits until
+// they have exited, and only then releases their resource limits.
+func (run *pluginKeeperRun) teardown(releaseLimits func()) {
+	run.kill()
+	run.awaitGone(pluginKeeperStopGrace)
+	run.awaitGroupGone(pluginKeeperStopGrace)
+	releaseLimits()
+}
+
+// awaitGroupGone waits until no process in the executable's group is still
+// running. A killed process acts on SIGKILL only when it leaves the kernel, so
+// one in an uninterruptible sleep keeps its sockets and files a while longer.
+func (run *pluginKeeperRun) awaitGroupGone(timeout time.Duration) {
+	corePID, _ := run.core()
+	if corePID <= 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for pluginProcessGroupRunning(corePID) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// pluginProcessGroupRunning reports whether a member of the process group has
+// not exited yet. Zombies have exited: their parent, or init, reaps them.
+func pluginProcessGroupRunning(pgid int) bool {
+	if syscall.Kill(-pgid, 0) == syscall.ESRCH {
+		return false
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	group := strconv.Itoa(pgid)
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		// After the command name: state, ppid, pgrp.
+		stat := string(data)
+		fields := strings.Fields(stat[strings.LastIndexByte(stat, ')')+1:])
+		if len(fields) >= 3 && fields[2] == group && fields[0] != "Z" && fields[0] != "X" {
+			return true
+		}
+	}
+	return false
 }
 
 // awaitGone waits until the keeper no longer exists, so its cgroup can go.
