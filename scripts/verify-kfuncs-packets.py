@@ -226,7 +226,8 @@ def nonlinear_frames(mode, clamp=True, linear=False):
         '  return bpf_redirect(cfg->pipeline_ifindex, 0);\n}\n'
     )
     run(
-        ["clang", "-O2", "-g", "-target", "bpf"]
+        # BPF v1, as the shipped objects are built (scripts/build-ebpf.sh).
+        ["clang", "-O2", "-g", "-target", "bpf", "-mcpu=" + os.environ.get("BPF_CPU", "v1")]
         + (["-DVEER_KFUNCS=1"] if mode == "kfuncs" else [])
         + ["-c", str(source), "-o", str(obj)]
     )

@@ -5,6 +5,9 @@
 set -eu
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 : "${BPF_CLANG:=clang}"
+# BPF v1, as scripts/build-ebpf.sh pins the core objects: newer clang
+# defaults to v3, which old kernels reject.
+: "${BPF_CPU:=v1}"
 for probe in veer-kfuncs-probe-bpf veer-kfuncs-ingress-probe-bpf veer-kfuncs-wan-probe-bpf; do
-	"$BPF_CLANG" -O2 -g -target bpf -c "$ROOT_DIR/internal/app/ebpf/$probe.c" -o "$ROOT_DIR/internal/app/ebpf/$probe.o"
+	"$BPF_CLANG" -O2 -g -target bpf -mcpu="$BPF_CPU" -c "$ROOT_DIR/internal/app/ebpf/$probe.c" -o "$ROOT_DIR/internal/app/ebpf/$probe.o"
 done

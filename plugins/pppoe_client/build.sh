@@ -3,6 +3,9 @@ set -eu
 
 cd "$(dirname "$0")"
 : "${BPF_CLANG:=clang}"
+# BPF v1, as scripts/build-ebpf.sh pins the core objects: newer clang
+# defaults to v3, which old kernels reject.
+: "${BPF_CPU:=v1}"
 : "${BPF_EXTRA_CFLAGS:=}"
 : "${PPPOE_TUNNEL_DIAG:=0}"
 
@@ -24,7 +27,7 @@ fi
 
 # shellcheck disable=SC2086
 # BTF enables independent verification of the bounded MSS/copy subprograms.
-"$BPF_CLANG" -O2 -g -target bpf -D__TARGET_ARCH_"$(target_arch)" $BPF_EXTRA_CFLAGS -c pppoe_tunnel.bpf.c -o pppoe_tunnel.o
+"$BPF_CLANG" -O2 -g -target bpf -mcpu="$BPF_CPU" -D__TARGET_ARCH_"$(target_arch)" $BPF_EXTRA_CFLAGS -c pppoe_tunnel.bpf.c -o pppoe_tunnel.o
 if command -v llvm-strip >/dev/null 2>&1; then
 	llvm-strip -g pppoe_tunnel.o || true
 fi
@@ -32,4 +35,4 @@ echo "built pppoe_tunnel.o"
 
 # Optional host capability selects this object at runtime.
 # shellcheck disable=SC2086
-"$BPF_CLANG" -O2 -g -target bpf $BPF_EXTRA_CFLAGS -DVEER_KFUNCS=1 -c pppoe_tunnel.bpf.c -o pppoe_tunnel-kfuncs.o
+"$BPF_CLANG" -O2 -g -target bpf -mcpu="$BPF_CPU" $BPF_EXTRA_CFLAGS -DVEER_KFUNCS=1 -c pppoe_tunnel.bpf.c -o pppoe_tunnel-kfuncs.o

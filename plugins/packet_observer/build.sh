@@ -3,6 +3,9 @@ set -eu
 
 cd "$(dirname "$0")"
 : "${BPF_CLANG:=clang}"
+# BPF v1, as scripts/build-ebpf.sh pins the core objects: newer clang
+# defaults to v3, which old kernels reject.
+: "${BPF_CPU:=v1}"
 : "${BPF_EXTRA_CFLAGS:=}"
 
 target_arch() {
@@ -18,7 +21,7 @@ target_arch() {
 }
 
 # shellcheck disable=SC2086
-"$BPF_CLANG" -O2 -g -target bpf -D__TARGET_ARCH_"$(target_arch)" $BPF_EXTRA_CFLAGS -c packet_observer.bpf.c -o packet_observer.o
+"$BPF_CLANG" -O2 -g -target bpf -mcpu="$BPF_CPU" -D__TARGET_ARCH_"$(target_arch)" $BPF_EXTRA_CFLAGS -c packet_observer.bpf.c -o packet_observer.o
 if command -v llvm-strip >/dev/null 2>&1; then
 	llvm-strip -g packet_observer.o || true
 fi
