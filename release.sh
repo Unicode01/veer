@@ -108,6 +108,8 @@ EBPF_PLUGIN_XDP_SRC="${EBPF_DIR}/plugin-xdp-dispatcher-bpf.c"
 EBPF_PLUGIN_XDP_OBJ="${EBPF_DIR}/plugin-xdp-dispatcher-bpf.o"
 BPF_CLANG="${BPF_CLANG:-clang}"
 BPF_EXTRA_CFLAGS="${BPF_EXTRA_CFLAGS:-}"
+# BPF v1, as the objects are verified; see scripts/build-ebpf.sh.
+BPF_CPU="${BPF_CPU:-v1}"
 BUILD_PLUGIN_BUNDLE="${VEER_BUILD_PLUGIN_BUNDLE:-1}"
 BUILD_PLUGIN_SDK="${VEER_BUILD_PLUGIN_SDK:-1}"
 BUILD_KERNEL_MODULE="${VEER_BUILD_KERNEL_MODULE:-0}"
@@ -229,6 +231,7 @@ BPF_CFLAGS=(
     "-O${BPF_OLEVEL}"
     -g
     -target bpf
+    -mcpu="${BPF_CPU}"
     -I"${EBPF_INC}"
 )
 

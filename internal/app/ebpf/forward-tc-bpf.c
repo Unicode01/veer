@@ -1934,6 +1934,17 @@ static __always_inline int tc_packet_may_be_icmp_error_v4(struct __sk_buff *skb)
 	return type && is_icmp_error_type(*type);
 }
 
+/*
+ * skb->ifindex for a read that is inlined in many places. Like tc_packet_ptr,
+ * this keeps clang (14 at least) from holding &skb->ifindex in a register and
+ * reusing it, which the verifier rejects as a modified ctx pointer.
+ */
+static __always_inline __u32 tc_skb_ifindex(struct __sk_buff *skb)
+{
+	asm volatile("" : "+r"(skb));
+	return skb->ifindex;
+}
+
 /* An IPv4 fragment other than the first, which has no L4 header to parse. */
 static __always_inline int tc_packet_is_later_fragment_v4(struct __sk_buff *skb)
 {
@@ -2721,7 +2732,7 @@ static __always_inline void remember_ipv4_fragment(struct __sk_buff *skb, const 
 		return;
 	if (bpf_skb_load_bytes(skb, ctx->l3_off + offsetof(struct iphdr, id), &id, sizeof(id)) < 0)
 		return;
-	key.ifindex = skb->ifindex;
+	key.ifindex = tc_skb_ifindex(skb);
 	key.src_addr = ctx->src_addr;
 	key.dst_addr = ctx->dst_addr;
 	key.id = id;
@@ -7214,7 +7225,7 @@ static __always_inline int handle_ipv4_later_fragment(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) == 0)
 		return TC_ACT_UNSPEC;
-	key.ifindex = skb->ifindex;
+	key.ifindex = tc_skb_ifindex(skb);
 	key.src_addr = iph->saddr;
 	key.dst_addr = iph->daddr;
 	key.id = iph->id;
