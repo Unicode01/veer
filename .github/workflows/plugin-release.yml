@@ -254,9 +254,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The ubuntu-26.04 runner stops responding in the plain-BPF PPPoE
-        # packet checks; 24.04 passes. Run both until 26.04 does.
-        os: [ubuntu-24.04, ubuntu-26.04]
+        # Run both until 26.04 passes. host_checks are the packet checks the
+        # runner itself may run: the non-linear one stops the ubuntu-26.04
+        # runner (7.0.0-1019-azure) from responding, even without the module,
+        # so there it only runs in the guest step.
+        include:
+          - os: ubuntu-24.04
+            host_checks: all
+          - os: ubuntu-26.04
+            host_checks: setup,ping,udp,malformed,gro,throughput
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
@@ -271,8 +277,16 @@ jobs:
       # when the runner stops responding and the job's log is lost.
       - name: Build the module, eBPF objects and test binaries
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh build
-      # 26.04 stops responding in these with the module not loaded; one
-      # check per step, each on a fresh topology, shows which one.
+      # Diagnostic: a QEMU guest boots this runner's own kernel and runs the
+      # check that stops 26.04, so the guest hangs instead of the runner and
+      # its console, with the kernel's lockup and stall reports, stays here.
+      - name: Non-linear PPPoE frames, plain BPF, in a guest on this kernel
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y virtme-ng qemu-system-x86 virtiofsd
+          sudo env "PATH=$PATH" VEER_GUEST_TIMEOUT=180 sh scripts/verify-kfuncs-guest.sh "$RUNNER_TEMP/kmod/loader" --mode bpf --checks nonlinear
+      # One check per step, each on a fresh topology, with the module not
+      # loaded: 26.04 stopped responding in the non-linear one.
       - name: PPPoE plain BPF, module not loaded, setup only
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=setup sh scripts/verify-kernel-module.sh packets-bpf
       - name: PPPoE plain BPF, module not loaded, ping
@@ -282,6 +296,7 @@ jobs:
       - name: PPPoE plain BPF, module not loaded, malformed frames
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=malformed sh scripts/verify-kernel-module.sh packets-bpf
       - name: PPPoE plain BPF, module not loaded, non-linear frames through a NAPI-frags tap
+        if: matrix.host_checks == 'all'
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=nonlinear sh scripts/verify-kernel-module.sh packets-bpf
       - name: PPPoE plain BPF, module not loaded, throughput
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=throughput sh scripts/verify-kernel-module.sh packets-bpf
@@ -290,9 +305,9 @@ jobs:
       - name: Module tests
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh module
       - name: PPPoE packets through the plugin loader, kfuncs
-        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh packets-kfuncs
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=${{ matrix.host_checks }} sh scripts/verify-kernel-module.sh packets-kfuncs
       - name: PPPoE packets and TC NAT through Veer
-        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh packets-veer
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=${{ matrix.host_checks }} sh scripts/verify-kernel-module.sh packets-veer
       - name: WireGuard
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh wireguard
       - name: VPN cores on the kfuncs path
