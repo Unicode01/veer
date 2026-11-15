@@ -3,17 +3,20 @@
 package app
 
 import (
+	"encoding/binary"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/Unicode01/veer/internal/netservice"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/net/bpf"
+	"golang.org/x/sys/unix"
 )
 
 // A plugin hook that appears on an interface while its flows are cached
@@ -178,7 +181,11 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 		}
 		return total
 	}
-	hookBefore, rxBefore := hookPackets(), readInterfaceCounter(t, topology.ChildHostIF, "rx_packets")
+	hookBefore := hookPackets()
+	// The counter starts after the hook's count is read, and is read before
+	// the hook's count is read again, so it covers no packet the hook could
+	// not have counted.
+	forwarded := openIPv4TCPFlowCounter(t, topology.ChildHostIF, egressNATClientAddr, egressNATBackendAddr)
 	// Invalidation bumps the generation and leaves old entries in the map;
 	// only entries of the current generation can serve packets.
 	stateMap := rt.coll.Maps[kernelTCFlowCacheStateMapName]
@@ -209,13 +216,12 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	hookSeen, received := hookPackets()-hookBefore, readInterfaceCounter(t, topology.ChildHostIF, "rx_packets")-rxBefore
-	t.Logf("in one second with the hook, %s received %d packets and the hook saw %d IPv4 packets", topology.ChildHostIF, received, hookSeen)
-	// Every forwarded packet entering the interface passes the hook. The
-	// two counters are read a moment apart, and a global hook also sees
-	// the replies entering the uplink.
-	if received < 20 || hookSeen+2 < received {
-		t.Fatalf("hook saw %d IPv4 packets while %s received %d, want the hook to see all of them", hookSeen, topology.ChildHostIF, received)
+	received := forwarded.close(t)
+	hookSeen := hookPackets() - hookBefore
+	t.Logf("in one second with the hook, %s received %d forwarded IPv4 packets and the hook saw %d IPv4 packets", topology.ChildHostIF, received, hookSeen)
+	// Every forwarded packet entering the interface passes the hook.
+	if received < 20 || hookSeen < received {
+		t.Fatalf("hook saw %d IPv4 packets while %s received %d forwarded IPv4 packets, want the hook to see all of them", hookSeen, topology.ChildHostIF, received)
 	}
 
 	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.BridgeIF)
@@ -225,16 +231,70 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 	stream.wait(t)
 }
 
-// readInterfaceCounter reads one of the interface's statistics counters.
-func readInterfaceCounter(t *testing.T, ifName, counter string) uint64 {
+// ipv4TCPFlowCounter counts the frames of one direction of an IPv4 TCP flow
+// entering an interface. The interface's rx_packets would also count ARP
+// and IPv6 neighbour, router and MLD frames, which no IPv4 hook sees.
+type ipv4TCPFlowCounter struct {
+	fd int
+}
+
+// openIPv4TCPFlowCounter starts counting the IPv4 TCP frames from src to dst
+// that enter ifName. It uses a packet socket bound to every protocol: those
+// see each frame before the TC ingress hook, so they also count the frames
+// that TC redirects.
+func openIPv4TCPFlowCounter(t *testing.T, ifName, src, dst string) *ipv4TCPFlowCounter {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("/sys/class/net", ifName, "statistics", counter))
+	iface, err := net.InterfaceByName(ifName)
 	if err != nil {
-		t.Fatalf("read %s %s: %v", ifName, counter, err)
+		t.Fatalf("resolve %s: %v", ifName, err)
 	}
-	value, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	srcIP, dstIP := net.ParseIP(src).To4(), net.ParseIP(dst).To4()
+	if srcIP == nil || dstIP == nil {
+		t.Fatalf("flow %s -> %s is not IPv4", src, dst)
+	}
+	raw, err := bpf.Assemble(netservice.BuildPacketSocketEqualityFilter([]netservice.PacketSocketEqualityCheck{
+		{Offset: 12, Size: 2, Value: unix.ETH_P_IP},
+		{Offset: 14 + 9, Size: 1, Value: unix.IPPROTO_TCP},
+		{Offset: 14 + 12, Size: 4, Value: binary.BigEndian.Uint32(srcIP)},
+		{Offset: 14 + 16, Size: 4, Value: binary.BigEndian.Uint32(dstIP)},
+	}))
 	if err != nil {
-		t.Fatalf("parse %s %s %q: %v", ifName, counter, data, err)
+		t.Fatalf("assemble packet filter: %v", err)
 	}
-	return value
+	filter := make([]unix.SockFilter, len(raw))
+	for i, inst := range raw {
+		filter[i] = unix.SockFilter{Code: inst.Op, Jt: inst.Jt, Jf: inst.Jf, K: inst.K}
+	}
+	// Protocol 0 receives nothing, so no frame is counted before the filter
+	// is attached; the bind below starts the count.
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("open packet socket: %v", err)
+	}
+	counter := &ipv4TCPFlowCounter{fd: fd}
+	t.Cleanup(func() {
+		if counter.fd >= 0 {
+			_ = unix.Close(counter.fd)
+		}
+	})
+	if err := unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}); err != nil {
+		t.Fatalf("attach packet filter: %v", err)
+	}
+	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Ifindex: iface.Index, Protocol: htons(unix.ETH_P_ALL)}); err != nil {
+		t.Fatalf("bind packet socket to %s: %v", ifName, err)
+	}
+	return counter
+}
+
+// close stops the count and returns the number of frames counted.
+func (counter *ipv4TCPFlowCounter) close(t *testing.T) uint64 {
+	t.Helper()
+	// The frames the full receive queue dropped are included.
+	stats, err := unix.GetsockoptTpacketStats(counter.fd, unix.SOL_PACKET, unix.PACKET_STATISTICS)
+	if err != nil {
+		t.Fatalf("read packet socket statistics: %v", err)
+	}
+	_ = unix.Close(counter.fd)
+	counter.fd = -1
+	return uint64(stats.Packets)
 }
