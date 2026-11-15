@@ -251,7 +251,13 @@ jobs:
           retention-days: 14
 
   optional-kernel-module:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # On ubuntu-26.04 the runner has stopped responding during this job
+        # since 82ffc0c; 24.04 passed. Run both until 26.04 passes.
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -261,5 +267,25 @@ jobs:
           cache: true
       - name: Install matching kernel build and network test dependencies
         run: sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential clang llvm pahole kmod iproute2 util-linux iputils-ping ethtool wireguard-tools iperf3 curl tcpdump
-      - name: Verify optional module and both plugin paths
-        run: sudo env "PATH=$PATH" sh scripts/verify-kernel-module.sh
+      # One step per phase: GitHub keeps each step's start and end time even
+      # when the runner stops responding and the job's log is lost.
+      - name: Build the module, eBPF objects and test binaries
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh build
+      - name: Load the module
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh load
+      - name: Module tests
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh module
+      - name: PPPoE packets through the plugin loader
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh packets-loader
+      - name: PPPoE packets and TC NAT through Veer
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh packets-veer
+      - name: WireGuard
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh wireguard
+      - name: VPN cores on the kfuncs path
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh vpn
+      - name: Unload the module
+        if: always()
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh unload
+      - name: Kernel log
+        if: always()
+        run: sudo dmesg | tail -n 200

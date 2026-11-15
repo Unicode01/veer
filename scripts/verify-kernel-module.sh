@@ -1,6 +1,13 @@
 #!/usr/bin/env sh
 # Requires root, matching headers, clang, pahole, kmod and network test tools.
 #
+# usage: verify-kernel-module.sh [PHASE...]
+# Without arguments every phase runs in order. CI runs one phase per workflow
+# step, because GitHub keeps each step's start and end time even when a
+# runner stops responding and its log is lost. VEER_KMOD_WORK then keeps the
+# binaries between the steps, and the module stays loaded from the load
+# phase to the unload phase.
+#
 # Every step has a time limit well inside the CI job's. A step that runs past
 # it is shown with its processes, their kernel stacks and the kernel log, and
 # then stopped; one that cannot be killed (stuck in the kernel) is abandoned.
@@ -9,14 +16,42 @@
 # at the job timeout without one.
 set -eu
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+all_phases="build load module packets-loader packets-veer wireguard vpn unload"
+phases=${*:-$all_phases}
+for phase in $phases; do
+    case " $all_phases " in
+    *" $phase "*) ;;
+    *) echo "unknown phase $phase; phases: $all_phases" >&2; exit 2 ;;
+    esac
+done
 [ "$(id -u)" -eq 0 ] || { echo "kernel module integration requires root" >&2; exit 1; }
-[ ! -d /sys/module/veer_kfuncs ] || { echo "use an isolated test host without an existing veer_kfuncs module" >&2; exit 1; }
-work=$(mktemp -d)
+case " $phases " in
+*" load "*) [ ! -d /sys/module/veer_kfuncs ] || { echo "use an isolated test host without an existing veer_kfuncs module" >&2; exit 1; } ;;
+esac
+# A run that unloads the module owns it: it also unloads it when it fails.
+case " $phases " in
+*" unload "*) keep_module=0 ;;
+*) keep_module=1 ;;
+esac
+if [ -n "${VEER_KMOD_WORK:-}" ]; then
+    work=$VEER_KMOD_WORK
+    keep_work=1
+    mkdir -p "$work"
+else
+    work=$(mktemp -d)
+    keep_work=0
+fi
 loaded=0
 stuck=0
 steps=0
 step_pid=
 tail_pid=
+unload='attempts=0
+while [ -d /sys/module/veer_kfuncs ] && ! rmmod veer_kfuncs; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 50 ] || exit 1
+    sleep 0.2
+done'
 cleanup() {
     if [ -n "$step_pid" ]; then
         # Pass an interrupt on, as Ctrl-C reached the tests before steps had
@@ -32,15 +67,10 @@ cleanup() {
     [ -z "$tail_pid" ] || kill "$tail_pid" 2>/dev/null || true
     if [ "$stuck" = 1 ]; then
         echo "leaving veer_kfuncs loaded: a step is stuck in the kernel" >&2
-    elif [ "$loaded" = 1 ]; then
-        attempts=0
-        while ! rmmod veer_kfuncs; do
-            attempts=$((attempts+1))
-            [ "$attempts" -lt 30 ] || break
-            sleep 0.1
-        done
+    elif [ "$loaded" = 1 ] && [ "$keep_module" = 0 ]; then
+        sh -c "$unload" || true
     fi
-    rm -rf -- "$work"
+    [ "$keep_work" = 1 ] || rm -rf -- "$work"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -139,24 +169,55 @@ step() {
     echo "==> $name passed in ${elapsed}s"
 }
 
+need_module() {
+    [ -d /sys/module/veer_kfuncs ] || { echo "veer_kfuncs is not loaded; run the load phase first" >&2; exit 1; }
+}
+
 cd "$ROOT_DIR"
 tests="$ROOT_DIR/internal/app"
-step "build kernel module" 300 TERM sh scripts/build-kernel-module.sh
-step "build eBPF objects" 420 TERM sh scripts/build-all-ebpf.sh
-step "build daemon" 420 TERM env CGO_ENABLED=0 go build -tags veer_kfuncs -o "$work/veer" .
-step "build loader" 300 TERM env CGO_ENABLED=0 go build -o "$work/loader" ./scripts/kfuncs-test-loader
-step "build tests" 420 TERM go test -c -tags veer_kfuncs -o "$work/kfuncs.test" ./internal/app
-insmod "kernel/$(uname -r)/veer_kfuncs.ko"
-loaded=1
-# The test binary runs in its package directory, as go test runs it.
-step "module tests" 240 QUIT env -C "$tests" VEER_RUN_KFUNCS_TESTS=1 FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 \
-    "$work/kfuncs.test" -test.run '^(TestOptionalKernelModule.*|TestPluginControlNetOwnedLinkMACLinuxIntegration)$' \
-    -test.count=1 -test.v -test.timeout=3m
-# The packet script stops its namespace child after 300 seconds itself.
-step "packets through the loader" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
-    python3 scripts/verify-kfuncs-packets.py --loader "$work/loader"
-step "packets through veer" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
-    python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --direct --veer "$work/veer"
-step "WireGuard" 360 QUIT env -C "$tests" VEER_RUN_KFUNCS_TESTS=1 VEER_RUN_WIREGUARD_TESTS=1 FORWARD_PERF_BINARY="$work/veer" \
-    "$work/kfuncs.test" -test.run '^TestVPNWireGuardLinuxIntegration$' -test.count=1 -test.v -test.timeout=5m
-step "VPN cores" 600 QUIT env FORWARD_PERF_BINARY="$work/veer" VEER_VPN_EXPECT_DIRECT=1 sh scripts/verify-vpn-cores.sh
+for phase in $phases; do
+    case $phase in
+    build)
+        step "build kernel module" 300 TERM sh scripts/build-kernel-module.sh
+        step "build eBPF objects" 420 TERM sh scripts/build-all-ebpf.sh
+        step "build daemon" 420 TERM env CGO_ENABLED=0 go build -tags veer_kfuncs -o "$work/veer" .
+        step "build loader" 300 TERM env CGO_ENABLED=0 go build -o "$work/loader" ./scripts/kfuncs-test-loader
+        step "build tests" 420 TERM go test -c -tags veer_kfuncs -o "$work/kfuncs.test" ./internal/app
+        ;;
+    load)
+        step "load module" 60 TERM insmod "kernel/$(uname -r)/veer_kfuncs.ko"
+        loaded=1
+        ;;
+    module)
+        need_module
+        # The test binary runs in its package directory, as go test runs it.
+        step "module tests" 240 QUIT env -C "$tests" VEER_RUN_KFUNCS_TESTS=1 FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 \
+            "$work/kfuncs.test" -test.run '^(TestOptionalKernelModule.*|TestPluginControlNetOwnedLinkMACLinuxIntegration)$' \
+            -test.count=1 -test.v -test.timeout=3m
+        ;;
+    packets-loader)
+        need_module
+        # The packet script stops its namespace child after 300 seconds itself.
+        step "packets through the loader" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
+            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader"
+        ;;
+    packets-veer)
+        need_module
+        step "packets through veer" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
+            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --direct --veer "$work/veer"
+        ;;
+    wireguard)
+        need_module
+        step "WireGuard" 360 QUIT env -C "$tests" VEER_RUN_KFUNCS_TESTS=1 VEER_RUN_WIREGUARD_TESTS=1 FORWARD_PERF_BINARY="$work/veer" \
+            "$work/kfuncs.test" -test.run '^TestVPNWireGuardLinuxIntegration$' -test.count=1 -test.v -test.timeout=5m
+        ;;
+    vpn)
+        need_module
+        step "VPN cores" 600 QUIT env FORWARD_PERF_BINARY="$work/veer" VEER_VPN_EXPECT_DIRECT=1 sh scripts/verify-vpn-cores.sh
+        ;;
+    unload)
+        step "unload module" 60 TERM sh -c "$unload"
+        loaded=0
+        ;;
+    esac
+done
