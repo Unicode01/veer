@@ -29,9 +29,17 @@ parser.add_argument("--mode", choices=["all", "bpf", "kfuncs"], default="all")
 parser.add_argument("--veer", type=pathlib.Path, help="Also verify real TC NAT through the selected boundary")
 parser.add_argument("--tcx", action="store_true", help="Attach the plugin programs through tcx, as the Veer core does on Linux 6.6+")
 parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+# The topology, plugin loaders and iperf3 server always come up; "setup" alone
+# runs nothing else. CI runs one check per step to see which one a runner that
+# stops responding was in.
+CHECKS = ["setup", "ping", "udp", "malformed", "nonlinear", "gro", "throughput"]
+parser.add_argument("--checks", default="all", help="comma-separated subset of " + ",".join(CHECKS) + ", or all")
 args = parser.parse_args()
 if args.direct and args.mode == "bpf":
     parser.error("--direct requires the kfuncs dataplane")
+checks = set(CHECKS) if args.checks == "all" else set(args.checks.split(","))
+if checks - set(CHECKS):
+    parser.error("unknown checks: " + ",".join(sorted(checks - set(CHECKS))))
 ROOT = args.root.resolve()
 LOADER = args.loader.resolve()
 if not args.child:
@@ -668,15 +676,17 @@ try:
         for p in loaders:
             if p.poll() is not None:
                 raise RuntimeError("loader exited")
-        print(mode, run(["ping", "-n", "-c", "3", "-W", "2", "10.90.0.2"]), flush=True)
-        print(
-            mode, run(["ping", "-6", "-n", "-c", "2", "-W", "2", "fd90::2"]), flush=True
-        )
+        print(mode, "plugin loaders attached; checks:", ",".join(c for c in CHECKS if c in checks), flush=True)
+        if "ping" in checks:
+            print(mode, run(["ping", "-n", "-c", "3", "-W", "2", "10.90.0.2"]), flush=True)
+            print(
+                mode, run(["ping", "-6", "-n", "-c", "2", "-W", "2", "fd90::2"]), flush=True
+            )
         if mode == "kfuncs":
             r = subprocess.run(["rmmod", "veer_kfuncs"], capture_output=True, text=True)
             if r.returncode == 0:
                 raise RuntimeError("unloaded module while BPF programs referenced it")
-        for destination in ["10.90.0.2", "fd90::2"]:
+        for destination in ["10.90.0.2", "fd90::2"] if "udp" in checks else []:
             # UDP echo verifies exact boundaries/checksums, including UDP segmentation.
             echo_code = (
                 "import socket; s=socket.socket(socket.AF_INET6 if ':' in '"
@@ -714,18 +724,22 @@ try:
             )
             if "error" in transfer or transfer["end"]["sum_received"]["bytes"] <= 0:
                 raise RuntimeError("TCP transfer failed")
-        malformed_frames(mode)
-        nonlinear_frames(mode)
-        if mode == "kfuncs":
-            nonlinear_frames(mode, clamp=False)
-            nonlinear_frames(mode, linear=True)
+        if "malformed" in checks:
+            malformed_frames(mode)
+        if "nonlinear" in checks:
+            nonlinear_frames(mode)
+            if mode == "kfuncs":
+                nonlinear_frames(mode, clamp=False)
+                nonlinear_frames(mode, linear=True)
+        if "gro" in checks and mode == "kfuncs":
             gro_paths()
-        print(
-            mode,
-            "IPv4/IPv6 TCP, UDP, UDP GSO and live-reference checks passed",
-            flush=True,
-        )
-        for reverse in [False, True]:
+        if "udp" in checks:
+            print(
+                mode,
+                "IPv4/IPv6 TCP, UDP, UDP GSO and live-reference checks passed",
+                flush=True,
+            )
+        for reverse in [False, True] if "throughput" in checks else []:
             for round in range(3 if args.performance else 1):
                 stat = lambda: list(
                     map(

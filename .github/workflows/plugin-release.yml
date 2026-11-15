@@ -254,8 +254,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The ubuntu-26.04 runner stops responding in the PPPoE packet checks
-        # through the plugin loader; 24.04 passes. Run both until 26.04 does.
+        # The ubuntu-26.04 runner stops responding in the plain-BPF PPPoE
+        # packet checks; 24.04 passes. Run both until 26.04 does.
         os: [ubuntu-24.04, ubuntu-26.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
@@ -271,8 +271,20 @@ jobs:
       # when the runner stops responding and the job's log is lost.
       - name: Build the module, eBPF objects and test binaries
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh build
-      - name: PPPoE packets through the plugin loader, plain BPF, module not loaded
-        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh packets-bpf
+      # 26.04 stops responding in these with the module not loaded; one
+      # check per step, each on a fresh topology, shows which one.
+      - name: PPPoE plain BPF, module not loaded, setup only
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=setup sh scripts/verify-kernel-module.sh packets-bpf
+      - name: PPPoE plain BPF, module not loaded, ping
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=ping sh scripts/verify-kernel-module.sh packets-bpf
+      - name: PPPoE plain BPF, module not loaded, UDP echo and TCP
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=udp sh scripts/verify-kernel-module.sh packets-bpf
+      - name: PPPoE plain BPF, module not loaded, malformed frames
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=malformed sh scripts/verify-kernel-module.sh packets-bpf
+      - name: PPPoE plain BPF, module not loaded, non-linear frames through a NAPI-frags tap
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=nonlinear sh scripts/verify-kernel-module.sh packets-bpf
+      - name: PPPoE plain BPF, module not loaded, throughput
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" VEER_PACKET_CHECKS=throughput sh scripts/verify-kernel-module.sh packets-bpf
       - name: Load the module
         run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh load
       - name: Module tests

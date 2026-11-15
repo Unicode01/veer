@@ -176,6 +176,9 @@ need_module() {
 
 cd "$ROOT_DIR"
 tests="$ROOT_DIR/internal/app"
+# The packet phases run every check unless VEER_PACKET_CHECKS names some
+# (see --checks in verify-kfuncs-packets.py).
+packet_checks=${VEER_PACKET_CHECKS:-all}
 for phase in $phases; do
     case $phase in
     build)
@@ -200,18 +203,18 @@ for phase in $phases; do
         # Plain BPF needs no module; run before the load phase, a failure
         # here does not involve veer_kfuncs. The packet script stops its
         # namespace child after 300 seconds itself.
-        step "packets through the loader, plain BPF" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
-            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --mode bpf
+        step "packets through the loader, plain BPF ($packet_checks)" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
+            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --mode bpf --checks "$packet_checks"
         ;;
     packets-kfuncs)
         need_module
-        step "packets through the loader, kfuncs" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
-            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --mode kfuncs
+        step "packets through the loader, kfuncs ($packet_checks)" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
+            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --mode kfuncs --checks "$packet_checks"
         ;;
     packets-veer)
         need_module
-        step "packets through veer" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
-            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --direct --veer "$work/veer"
+        step "packets through veer ($packet_checks)" 360 ABRT env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
+            python3 scripts/verify-kfuncs-packets.py --loader "$work/loader" --direct --veer "$work/veer" --checks "$packet_checks"
         ;;
     wireguard)
         need_module
