@@ -283,7 +283,7 @@ jobs:
       - name: Non-linear PPPoE frames, plain BPF, in a guest on this kernel
         continue-on-error: true
         run: |
-          sudo apt-get install -y virtme-ng qemu-system-x86 virtiofsd
+          sudo apt-get install -y virtme-ng qemu-system-x86
           sudo env "PATH=$PATH" VEER_GUEST_TIMEOUT=180 sh scripts/verify-kfuncs-guest.sh "$RUNNER_TEMP/kmod/loader" --mode bpf --checks nonlinear
       # One check per step, each on a fresh topology, with the module not
       # loaded: 26.04 stopped responding in the non-linear one.

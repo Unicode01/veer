@@ -35,10 +35,13 @@ trap 'rm -f "$log" "$log.status"' EXIT
 # Soft lockups and stalls are reported sooner than by default, with every
 # CPU's backtrace.
 append="sysctl.kernel.softlockup_all_cpu_backtrace=1 sysctl.kernel.hung_task_timeout_secs=30 rcupdate.rcu_cpu_stall_timeout=15"
+# On the GitHub runners, the microvm machine stalled at ACPI init (24.04,
+# virtme-ng 1.22) and the guest found no virtio-fs root (26.04, 1.40): use a
+# standard machine and share the root over 9p.
 {
     status=0
     timeout --kill-after=15 "$limit" "$vng" --run "/boot/vmlinuz-$release" --cpus 2 --memory "${VEER_GUEST_MEMORY:-2G}" \
-        --verbose --append "$append" --exec "$command" < /dev/null 2>&1 || status=$?
+        --disable-microvm --force-9p --verbose --append "$append" --exec "$command" < /dev/null 2>&1 || status=$?
     echo "$status" > "$log.status"
 } | tee "$log"
 status=$(cat "$log.status" 2>/dev/null || echo unknown)
