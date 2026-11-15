@@ -195,16 +195,26 @@ def nonlinear_frames(mode, clamp=True, linear=False, entry="wrapped"):
     # Short first iovecs force the real plugin to parse headers in skb frags.
     # Echo the source skb after handoff to verify the kfunc's clone contract.
     # entry is how tc_tunnel is reached: "wrapped", test_frags calls it as a
-    # function, so its own tail call runs in a subprogram, which the JIT of
-    # 7.0.0-1019-azure crashes on; "attached", tc_tunnel is the TC program;
-    # "tailcalled", test_tail tail-calls it, as the Veer core reaches plugins.
+    # function to guard the linear length and echo the source skb;
+    # "attached", tc_tunnel is the TC program; "tailcalled", test_tail
+    # tail-calls it, as the Veer core reaches plugins.
     wrapped = entry == "wrapped"
     label = mode + ("-linear" if linear else "-frags") + ("" if clamp else "-unclamped") + ("" if wrapped else "-" + entry)
     source = BASE / (label + ".c")
     obj = BASE / (label + ".o")
     guard = "!= skb->len" if linear else ">= 22"
+    # Called as a function, tc_tunnel's continue tail call would run in a
+    # subprogram, and the x86 JIT of 7.0.0-1019-azure oopses on that (a
+    # garbage tail-call counter pointer). Veer only tail-calls from programs,
+    # so there it becomes a no-op; the other two entries keep the real one.
+    no_continue = (
+        '#include "' + str(ROOT / "plugins/include/veer_plugin_helpers.h") + '"\n'
+        '#undef veer_continue_pre_forward\n'
+        '#define veer_continue_pre_forward(skb) ((void)(skb))\n'
+    ) if wrapped else ""
     source.write_text(
-        '#include "' + str(ROOT / "plugins/pppoe_client/pppoe_tunnel.bpf.c") + '"\n'
+        no_continue
+        + '#include "' + str(ROOT / "plugins/pppoe_client/pppoe_tunnel.bpf.c") + '"\n'
         'static long (*source_echo)(struct __sk_buff *, __u32, __u64) = (void *)13;\n'
         'SEC("tc/test_frags") int test_frags(struct __sk_buff *skb) {\n'
         '  if (skb->data_end - skb->data ' + guard + ') return TC_ACT_SHOT;\n'

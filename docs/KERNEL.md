@@ -106,6 +106,8 @@ sh scripts/verify-kernel-module.sh
 
 该门禁构建模块和两套插件对象，执行实际 ABI probe、生命周期单测、PPPoE IPv4/IPv6/TCP/UDP/UDP GSO/畸形包测试，以及真实 Veer TC NAT + 内核 WG 集成。PPPoE 还检查真实 GRO 聚合、GRO/TSO 不满足条件时的回落、纯 ACK 绕过，以及线性/非线性原始 skb 在 handoff 后逐字节不变（包含 MSS 修改）。WG 测试包含单 socket 长连接跨热更新、异常重启、接口消失、修复和拆除后重新应用。测试结束释放引用和模块；不在业务主机运行。
 
+脚本也可按阶段分步运行（`build packets-bpf load module packets-kfuncs packets-veer wireguard vpn unload`），`VEER_KMOD_WORK` 在步骤之间保留产物，`VEER_PACKET_CHECKS` 对应 `verify-kfuncs-packets.py --checks`。CI 每个阶段一个步骤：runner 因内核崩溃失去响应时日志会丢失，但各步骤的起止时间仍在，能看出停在哪一步。要看崩溃本身，`sh scripts/verify-kfuncs-guest.sh <loader> --mode bpf --checks <check>` 在 QEMU 客户机里启动本机内核运行检查，客户机控制台（Oops、soft lockup 报告）留在输出中。已知 Ubuntu `7.0.0-1019-azure` 的 x86 JIT 在 BPF 子程序内执行 tail call 时会解引用无效的计数指针；Veer 只在程序本身中 tail call，测试也避开了这种写法。
+
 性能复测使用 `scripts/verify-kfuncs-packets.py --loader <loader> --performance --output <json>`；loader 可用 `go build -o loader ./scripts/kfuncs-test-loader` 构建。WG 使用 `python3 scripts/benchmark-wireguard.py --runtime <directory>`，目录内放 `veer` 和 `plugins/{wan_core,vpn_core}`，增强模式另放匹配 `.ko`。分别用当前源码的普通/带标签二进制执行，保存 results.json；脚本使用独立 netns，WG 实际经过核心 NAT 和加解密。
 
 PPPoE 单口使用同一脚本附加 `--direct` 复测，与原 helper + veth 路径使用相同的 IPv4/IPv6、TCP/UDP、UDP GSO、畸形包、原始 skb 不变和真实 GRO 聚合检查。单口本机 TCP 测试同时验证 TC egress 成功交接的发送完成语义。
