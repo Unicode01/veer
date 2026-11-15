@@ -413,7 +413,9 @@ def nat_path():
                 raise RuntimeError("TC NAT did not become ready: " + str(entries))
             time.sleep(0.1)
         for reverse in [False, True]:
-            result = json.loads(run(["ip", "netns", "exec", client_ns, "iperf3", "-c", "10.90.0.2", "-n", "8M", "-J"] + (["-R"] if reverse else [])))
+            # Timed, not "-n 8M": with -n iperf3 reports what the server had
+            # read when the client finished writing, which can be half of it.
+            result = json.loads(run(["ip", "netns", "exec", client_ns, "iperf3", "-c", "10.90.0.2", "-t", "1", "-J"] + (["-R"] if reverse else [])))
             assert "error" not in result and result["end"]["sum_received"]["bytes"] >= 8 * 1024 * 1024, result
         echo_code = "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('10.90.0.2',39989));\nwhile True:\n d,a=s.recvfrom(65536);s.sendto(a[0].encode()+b':'+d,a)"
         echo = proc(["ip", "netns", "exec", remote, "python3", "-u", "-c", echo_code], "nat-udp")
