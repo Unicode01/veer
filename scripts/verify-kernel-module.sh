@@ -46,6 +46,7 @@ stuck=0
 steps=0
 step_pid=
 tail_pid=
+# shellcheck disable=SC2016 # expanded by the sh -c that runs it
 unload='attempts=0
 while [ -d /sys/module/veer_kfuncs ] && ! rmmod veer_kfuncs; do
     attempts=$((attempts + 1))
