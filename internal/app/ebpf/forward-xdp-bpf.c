@@ -213,6 +213,12 @@ struct kernel_diag_value_v4 {
 	__u64 xdp_v4_transparent_forward_rule_hit;
 	__u64 xdp_v4_transparent_no_match_pass;
 	__u64 xdp_v4_transparent_reply_closing_handled;
+	/* Too big for the uplink with DF: left to the stack's ICMP fragmentation needed. */
+	__u64 pmtu_to_stack;
+	/* Too big for the uplink and not DF: cannot be fragmented after the NAT. */
+	__u64 oversize_drop;
+	/* Later fragments translated like their datagram's first fragment. */
+	__u64 fragment_forwarded;
 };
 
 struct kernel_occupancy_value_v4 {

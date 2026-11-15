@@ -1064,7 +1064,8 @@
       ['fib', engine.diag_fib_non_success],
       ['drop', engine.diag_redirect_drop],
       ['nat_fail', engine.diag_nat_reserve_fail],
-      ['recreate', engine.diag_reply_flow_recreated]
+      ['recreate', engine.diag_reply_flow_recreated],
+      ['oversize', engine.diag_oversize_drop]
     ].forEach(([label, value]) => {
       if (!value) return;
       diagParts.push(label + '=' + String(value));
@@ -1078,7 +1079,9 @@
         ['rewrite_fail', engine.diag_rewrite_fail],
         ['probe2', engine.diag_nat_probe_round2_used],
         ['probe3', engine.diag_nat_probe_round3_used],
-        ['tcp_close_del', engine.diag_tcp_close_delete]
+        ['tcp_close_del', engine.diag_tcp_close_delete],
+        ['pmtu', engine.diag_pmtu_to_stack],
+        ['frag', engine.diag_fragment_forwarded]
       ].forEach(([label, value]) => {
         if (!value) return;
         diagParts.push(label + '=' + String(value));

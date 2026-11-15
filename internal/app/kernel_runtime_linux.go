@@ -356,6 +356,9 @@ type kernelCollectionPieces struct {
 	icmpErrorChainV4            *ebpf.Map
 	icmpErrorForwardProg        *ebpf.Program
 	icmpErrorReplyProg          *ebpf.Program
+	fragmentChainV4             *ebpf.Map
+	fragmentForwardProg         *ebpf.Program
+	fragmentReplyProg           *ebpf.Program
 	egressNATNewChainV4         *ebpf.Map
 	forwardEgressNATNewProg     *ebpf.Program
 	pluginHooksV4               *ebpf.Map
@@ -2042,10 +2045,11 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	// Full NAT, egress NAT and its new flows, every plugin stage and the ICMP
-	// error translators are tail calls. Without the pins the kernel empties
-	// tc_prog_chain_v4, tc_egress_nat_new_chain_v4, tc_plugin_hooks_v4 and
-	// tc_icmp_error_chain_v4 when this process exits, and the filters left
+	// Full NAT, egress NAT and its new flows, every plugin stage, the ICMP
+	// error translators and the later-fragment programs are tail calls.
+	// Without the pins the kernel empties tc_prog_chain_v4,
+	// tc_egress_nat_new_chain_v4, tc_plugin_hooks_v4, tc_icmp_error_chain_v4
+	// and tc_fragment_chain_v4 when this process exits, and the filters left
 	// for the successor pass those packets unprocessed.
 	err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCProgramChainMapName, rt.coll.Maps[kernelTCProgramChainMapName])
 	if err == nil {
@@ -2056,6 +2060,9 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	}
 	if err == nil {
 		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCICMPErrorChainMapName, rt.coll.Maps[kernelTCICMPErrorChainMapName])
+	}
+	if err == nil {
+		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCFragmentChainMapName, rt.coll.Maps[kernelTCFragmentChainMapName])
 	}
 	if err != nil {
 		clearKernelHotRestartState(kernelEngineTC)
@@ -3669,7 +3676,10 @@ func configureTCKernelProgramChain(pieces kernelCollectionPieces, pluginPipeline
 			return fmt.Errorf("install tc plugin reply post-apply continue tail-call target: %w", err)
 		}
 	}
-	return configureKernelTCICMPErrorChain(pieces)
+	if err := configureKernelTCICMPErrorChain(pieces); err != nil {
+		return err
+	}
+	return configureKernelTCFragmentChain(pieces)
 }
 
 func configureTCFlowMigrationState(pieces kernelCollectionPieces, flags uint32) error {
@@ -4023,6 +4033,9 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		icmpErrorChainV4:            coll.Maps[kernelTCICMPErrorChainMapName],
 		icmpErrorForwardProg:        coll.Programs[kernelICMPErrorForwardProgramName],
 		icmpErrorReplyProg:          coll.Programs[kernelICMPErrorReplyProgramName],
+		fragmentChainV4:             coll.Maps[kernelTCFragmentChainMapName],
+		fragmentForwardProg:         coll.Programs[kernelFragmentForwardProgramName],
+		fragmentReplyProg:           coll.Programs[kernelFragmentReplyProgramName],
 		egressNATNewChainV4:         coll.Maps[kernelTCEgressNATNewChainMapName],
 		forwardEgressNATNewProg:     coll.Programs[kernelForwardEgressNATNewProgramName],
 		pluginHooksV4:               coll.Maps[kernelTCPluginHooksMapName],

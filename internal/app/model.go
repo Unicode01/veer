@@ -504,6 +504,9 @@ type KernelEngineRuntimeView struct {
 	DiagXDPV4TransparentForwardRuleHit      uint64    `json:"diag_xdp_v4_transparent_forward_rule_hit,omitempty"`
 	DiagXDPV4TransparentNoMatchPass         uint64    `json:"diag_xdp_v4_transparent_no_match_pass,omitempty"`
 	DiagXDPV4TransparentReplyClosingHandled uint64    `json:"diag_xdp_v4_transparent_reply_closing_handled,omitempty"`
+	DiagPMTUToStack                         uint64    `json:"diag_pmtu_to_stack,omitempty"`
+	DiagOversizeDrop                        uint64    `json:"diag_oversize_drop,omitempty"`
+	DiagFragmentForwarded                   uint64    `json:"diag_fragment_forwarded,omitempty"`
 	DiagSnapshotError                       string    `json:"diag_snapshot_error,omitempty"`
 	LastReconcileAt                         time.Time `json:"last_reconcile_at,omitempty"`
 	LastReconcileMs                         int64     `json:"last_reconcile_ms,omitempty"`

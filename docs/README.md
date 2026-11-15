@@ -285,6 +285,8 @@ TC 路径中，Egress NAT（对称和 Full Cone 两种类型）已建立连接�
 
 Egress NAT 的 `protocol` 含 `icmp` 时，ICMP 回显请求和应答以标识符代替端口做转换，30 秒没有流量即回收。不论 `protocol` 是否含 `icmp`，TC 路径都会双向转换关于已有 Egress NAT 连接的 ICMP 差错（目标不可达，含需要分片；超时；参数问题）：上游发往 NAT 地址的差错改回内网主机，包括外层目的地址、差错里引用的原始包的源地址和端口，以及各层校验和，使路径 MTU 发现、traceroute 和 UDP 端口不可达对内网主机生效；内网主机发出的差错改成 NAT 地址后从规则的出口发出。只处理不带 VLAN 标签的以太网帧；经 L3 出口（如 WireGuard）的差错和 Full NAT 端口转发的差错仍交给内核。
 
+出口 MTU 小于 LAN（PPPoE、隧道）时，TC 路径的 Egress NAT 去程在转换之前检查包能否不分片地发出，GSO 包按分段长度算。带 DF 的包原样交还内核协议栈，由协议栈像普通路由器一样回复 ICMP“需要分片”，客户端的路径 MTU 发现因此生效，TCP 不会卡死；不带 DF 的包直接丢弃，因为 TC 无法在 NAT 之后分片，交给协议栈又会不经 NAT 发出。IPv4 数据报分片后只有首片带端口：Egress NAT 双向和 Full NAT 经 FIB 转发的包，首片照常转换并记下去向，同一数据报的后续分片（地址、协议和 IP ID 相同）5 秒内按同样的地址转换发出；首片被丢弃时，后续分片一并丢弃，不会以内网地址出现在外网。后续分片先于首片到达时仍交给协议栈。运行时视图 TC 引擎的 `diag_pmtu_to_stack`、`diag_oversize_drop`、`diag_fragment_forwarded` 分别统计这三种情况。
+
 在 Linux 5.11 及以上内核中，TC 程序用粗粒度单调时钟记录连接时间，精度为一个时钟节拍（通常 1–10 毫秒），省去了虚拟机中每包读取时钟源的开销；更老的内核仍使用精确时钟。
 
 在 Linux 6.6 及以上内核中，TC 核心程序（包括插件 pipeline）通过 tcx 挂载，不再经过 clsact 下的 cls_bpf 过滤器链，每个包少一次分类器遍历。tcx 程序先于网卡上所有 cls_bpf 过滤器执行；插件直接挂载的 TC 过滤器仍是 cls_bpf，执行顺序和以前一样排在核心程序之后。tcx 不支持 `TC_ACT_STOLEN`，插件接管数据包后应返回 `veer_tc_consumed()`，见 [PLUGIN.md](PLUGIN.md)。`experimental_features` 中的 `kernel_tc_legacy_attach` 可强制使用 cls_bpf。运行时视图中 TC 引擎的 `attachment_api` 字段显示当前挂载方式（`tcx` 或 `cls_bpf`）。热重启时新进程接管已挂载的 tcx 程序并原子替换；在两种挂载方式之间切换时，先挂上新程序，再移除旧的挂载。

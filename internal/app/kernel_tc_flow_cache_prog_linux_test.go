@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	tcActShot     = 2
 	tcActRedirect = 7
 	tcActUnspec   = math.MaxUint32 // TC_ACT_UNSPEC (-1)
 )

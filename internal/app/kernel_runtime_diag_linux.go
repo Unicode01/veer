@@ -30,6 +30,9 @@ type kernelDiagValueV4 struct {
 	XDPV4TransparentForwardRuleHit      uint64
 	XDPV4TransparentNoMatchPass         uint64
 	XDPV4TransparentReplyClosingHandled uint64
+	PMTUToStack                         uint64
+	OversizeDrop                        uint64
+	FragmentForwarded                   uint64
 }
 
 type kernelRuntimeDiagSnapshot struct {
@@ -53,6 +56,9 @@ type kernelRuntimeDiagSnapshot struct {
 	XDPV4TransparentForwardRuleHit      uint64
 	XDPV4TransparentNoMatchPass         uint64
 	XDPV4TransparentReplyClosingHandled uint64
+	PMTUToStack                         uint64
+	OversizeDrop                        uint64
+	FragmentForwarded                   uint64
 	LastError                           string
 }
 
@@ -113,6 +119,9 @@ func snapshotKernelRuntimeDiagFromMap(diagMap *ebpf.Map) kernelRuntimeDiagSnapsh
 		XDPV4TransparentForwardRuleHit:      value.XDPV4TransparentForwardRuleHit,
 		XDPV4TransparentNoMatchPass:         value.XDPV4TransparentNoMatchPass,
 		XDPV4TransparentReplyClosingHandled: value.XDPV4TransparentReplyClosingHandled,
+		PMTUToStack:                         value.PMTUToStack,
+		OversizeDrop:                        value.OversizeDrop,
+		FragmentForwarded:                   value.FragmentForwarded,
 	}
 }
 
@@ -140,6 +149,9 @@ func applyKernelRuntimeDiagView(view *KernelEngineRuntimeView, snapshot kernelRu
 	view.DiagXDPV4TransparentForwardRuleHit = snapshot.XDPV4TransparentForwardRuleHit
 	view.DiagXDPV4TransparentNoMatchPass = snapshot.XDPV4TransparentNoMatchPass
 	view.DiagXDPV4TransparentReplyClosingHandled = snapshot.XDPV4TransparentReplyClosingHandled
+	view.DiagPMTUToStack = snapshot.PMTUToStack
+	view.DiagOversizeDrop = snapshot.OversizeDrop
+	view.DiagFragmentForwarded = snapshot.FragmentForwarded
 	view.DiagSnapshotError = snapshot.LastError
 }
 
@@ -166,6 +178,9 @@ func aggregateKernelPerCPUDiag(values []kernelDiagValueV4) kernelDiagValueV4 {
 		out.XDPV4TransparentForwardRuleHit += value.XDPV4TransparentForwardRuleHit
 		out.XDPV4TransparentNoMatchPass += value.XDPV4TransparentNoMatchPass
 		out.XDPV4TransparentReplyClosingHandled += value.XDPV4TransparentReplyClosingHandled
+		out.PMTUToStack += value.PMTUToStack
+		out.OversizeDrop += value.OversizeDrop
+		out.FragmentForwarded += value.FragmentForwarded
 	}
 	return out
 }

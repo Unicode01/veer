@@ -262,6 +262,12 @@ struct kernel_diag_value_v4 {
 	__u64 xdp_v4_transparent_forward_rule_hit;
 	__u64 xdp_v4_transparent_no_match_pass;
 	__u64 xdp_v4_transparent_reply_closing_handled;
+	/* Too big for the uplink with DF: left to the stack's ICMP fragmentation needed. */
+	__u64 pmtu_to_stack;
+	/* Too big for the uplink and not DF: cannot be fragmented after the NAT. */
+	__u64 oversize_drop;
+	/* Later fragments translated like their datagram's first fragment. */
+	__u64 fragment_forwarded;
 };
 
 struct kernel_occupancy_value_v4 {
@@ -330,9 +336,13 @@ struct packet_ctx {
 	__u8 closing;
 	__u8 tos;
 	__u8 rule_wildcard_addr;
+	/* FORWARD_IP_FLAG_*: DF, and whether this is a datagram's first fragment. */
+	__u8 ip_flags;
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 tot_len;
+	/* The L4 header's length, for the segment size of a GSO packet. */
+	__u8 l4_hdr_len;
 	int l3_off;
 	int l4_off;
 	int l4_check_off;
@@ -544,6 +554,23 @@ struct tc_plugin_metric_value {
 #endif
 
 #define FORWARD_IPV4_FRAG_MASK 0x3fff
+#define FORWARD_IPV4_FRAG_OFFSET_MASK 0x1fff
+#define FORWARD_IPV4_DF 0x4000
+#define FORWARD_IPV4_MF 0x2000
+/* packet_ctx.ip_flags */
+#define FORWARD_IP_FLAG_DF 0x1
+#define FORWARD_IP_FLAG_FIRST_FRAGMENT 0x2
+/*
+ * Packets up to this size fit every IPv4 link in practice (every host must
+ * accept 576-byte datagrams), so the path MTU check skips them.
+ */
+#define FORWARD_TC_MIN_PATH_MTU 576
+/* egress_nat_check_mtu_v4: the packet fits; any other value is its action. */
+#define FORWARD_TC_MTU_FITS (-100)
+/* How long the later fragments of a datagram follow its first one. */
+#define FORWARD_TC_FRAGMENT_TTL_NS (5ULL * 1000000000ULL)
+#define FORWARD_TC_FRAGMENT_SEND 0
+#define FORWARD_TC_FRAGMENT_DROP 1
 #define FORWARD_FLOW_FLAG_FRONT_CLOSING 0x1
 #define FORWARD_FLOW_FLAG_REPLY_SEEN 0x2
 #define FORWARD_FLOW_FLAG_FULL_NAT 0x4
@@ -804,6 +831,47 @@ struct bpf_map_def SEC("maps") tc_egress_nat_new_chain_v4 = {
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
 	.max_entries = 1,
+};
+
+/*
+ * Where the first fragment of a datagram went (remember_ipv4_fragment), for
+ * the later fragments, which carry no ports (handle_ipv4_later_fragment).
+ * Keyed as the fragments arrive: ingress interface, addresses, IP ID and
+ * protocol, in network byte order. Addresses in the value are host order,
+ * like a redirect_target_v4.
+ */
+struct tc_fragment_key_v4 {
+	__u32 ifindex;
+	__be32 src_addr;
+	__be32 dst_addr;
+	__be16 id;
+	__u8 proto;
+	__u8 pad;
+};
+
+struct tc_fragment_value_v4 {
+	__u64 expires_ns;
+	__u32 out_ifindex;
+	__u32 src_addr;
+	__u32 dst_addr;
+	__u32 action;
+};
+
+struct bpf_map_def SEC("maps") tc_fragments_v4 = {
+	.type = BPF_MAP_TYPE_LRU_HASH,
+	.key_size = sizeof(struct tc_fragment_key_v4),
+	.value_size = sizeof(struct tc_fragment_value_v4),
+	.max_entries = 4096,
+};
+
+/* The later-fragment programs, in a chain of their own like the ICMP error ones. */
+#define FORWARD_TC_FRAGMENT_FORWARD 0
+#define FORWARD_TC_FRAGMENT_REPLY 1
+struct bpf_map_def SEC("maps") tc_fragment_chain_v4 = {
+	.type = BPF_MAP_TYPE_PROG_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = 2,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_hooks_v4 = {
@@ -1609,6 +1677,30 @@ static __always_inline void tc_diag_redirect_drop(void)
 		diag->redirect_drop += 1;
 }
 
+static __always_inline void tc_diag_pmtu_to_stack(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_tc_diag_v4();
+
+	if (diag)
+		diag->pmtu_to_stack += 1;
+}
+
+static __always_inline void tc_diag_oversize_drop(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_tc_diag_v4();
+
+	if (diag)
+		diag->oversize_drop += 1;
+}
+
+static __always_inline void tc_diag_fragment_forwarded(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_tc_diag_v4();
+
+	if (diag)
+		diag->fragment_forwarded += 1;
+}
+
 static __always_inline __u32 tc_flow_migration_flags(void)
 {
 	__u32 key = 0;
@@ -1842,6 +1934,17 @@ static __always_inline int tc_packet_may_be_icmp_error_v4(struct __sk_buff *skb)
 	return type && is_icmp_error_type(*type);
 }
 
+/* An IPv4 fragment other than the first, which has no L4 header to parse. */
+static __always_inline int tc_packet_is_later_fragment_v4(struct __sk_buff *skb)
+{
+	const struct iphdr *iph;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return 0;
+	iph = tc_packet_ptr(skb, sizeof(struct ethhdr), sizeof(*iph));
+	return iph && (bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0;
+}
+
 static __always_inline int rewrite_eth_addrs(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN])
 {
 	struct ethhdr *eth = tc_packet_ptr(skb, 0, sizeof(*eth));
@@ -2004,10 +2107,19 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		return -1;
 	if (iph->ihl != 5)
 		return -1;
-	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_MASK) != 0)
+	/*
+	 * A first fragment carries the L4 header and is translated like any
+	 * packet; the later ones go to handle_ipv4_later_fragment.
+	 */
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0)
 		return -1;
 	if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP && iph->protocol != IPPROTO_ICMP)
 		return -1;
+	ctx->ip_flags = 0;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_DF) != 0)
+		ctx->ip_flags |= FORWARD_IP_FLAG_DF;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_MF) != 0)
+		ctx->ip_flags |= FORWARD_IP_FLAG_FIRST_FRAGMENT;
 
 	l4_off = l3_off + (int)sizeof(*iph);
 	ctx->src_addr = iph->saddr;
@@ -2028,6 +2140,7 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		ctx->src_port = bpf_ntohs(tcph->source);
 		ctx->dst_port = bpf_ntohs(tcph->dest);
 		ctx->has_l4_checksum = 1;
+		ctx->l4_hdr_len = (__u8)(tcph->doff << 2);
 		ctx->tcp_flags =
 			(tcph->fin ? FORWARD_TCP_FLAG_FIN : 0) |
 			(tcph->syn ? FORWARD_TCP_FLAG_SYN : 0) |
@@ -2051,6 +2164,7 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		ctx->src_port = bpf_ntohs(udph->source);
 		ctx->dst_port = bpf_ntohs(udph->dest);
 		ctx->has_l4_checksum = udph->check != 0;
+		ctx->l4_hdr_len = sizeof(*udph);
 		ctx->closing = 0;
 		FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(__be32);
@@ -2073,6 +2187,7 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 			ctx->dst_port = bpf_ntohs(icmph->un.echo.id);
 		}
 		ctx->has_l4_checksum = 1;
+		ctx->l4_hdr_len = sizeof(*icmph);
 		ctx->closing = 0;
 		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
 		if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
@@ -2110,10 +2225,19 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 		return -1;
 	if (iph->ihl != 5)
 		return -1;
-	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_MASK) != 0)
+	/*
+	 * A first fragment carries the L4 header and is translated like any
+	 * packet; the later ones go to handle_ipv4_later_fragment.
+	 */
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0)
 		return -1;
 	if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP && iph->protocol != IPPROTO_ICMP)
 		return -1;
+	ctx->ip_flags = 0;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_DF) != 0)
+		ctx->ip_flags |= FORWARD_IP_FLAG_DF;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_MF) != 0)
+		ctx->ip_flags |= FORWARD_IP_FLAG_FIRST_FRAGMENT;
 
 	l4_off = (int)sizeof(*iph);
 	ctx->src_addr = iph->saddr;
@@ -2134,6 +2258,7 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 		ctx->src_port = bpf_ntohs(tcph->source);
 		ctx->dst_port = bpf_ntohs(tcph->dest);
 		ctx->has_l4_checksum = 1;
+		ctx->l4_hdr_len = (__u8)(tcph->doff << 2);
 		ctx->tcp_flags =
 			(tcph->fin ? FORWARD_TCP_FLAG_FIN : 0) |
 			(tcph->syn ? FORWARD_TCP_FLAG_SYN : 0) |
@@ -2157,6 +2282,7 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 		ctx->src_port = bpf_ntohs(udph->source);
 		ctx->dst_port = bpf_ntohs(udph->dest);
 		ctx->has_l4_checksum = udph->check != 0;
+		ctx->l4_hdr_len = sizeof(*udph);
 		ctx->closing = 0;
 		FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(__be32);
@@ -2179,6 +2305,7 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 			ctx->dst_port = bpf_ntohs(icmph->un.echo.id);
 		}
 		ctx->has_l4_checksum = 1;
+		ctx->l4_hdr_len = sizeof(*icmph);
 		ctx->closing = 0;
 		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
 		if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
@@ -2565,6 +2692,48 @@ static __always_inline void forget_tc_l2_v4(const struct redirect_target_v4 *tar
 	bpf_map_delete_elem(&tc_l2_cache_v4, &key);
 }
 
+/*
+ * The largest packet this one puts on the wire: a GSO packet goes out as
+ * segments of gso_size behind copies of its headers.
+ */
+static __always_inline __u32 tc_wire_len_v4(struct __sk_buff *skb, const struct packet_ctx *ctx)
+{
+	__u32 gso_size = skb->gso_size;
+
+	if (gso_size == 0)
+		return ctx->tot_len;
+	return (__u32)(ctx->l4_off - ctx->l3_off) + ctx->l4_hdr_len + gso_size;
+}
+
+/*
+ * A first fragment carries the ports the NAT translates by; the later ones of
+ * its datagram (same addresses, protocol and IP ID) carry none. Record where
+ * the first one went, so handle_ipv4_later_fragment sends the rest the same
+ * way, or drops them along with it.
+ */
+static __always_inline void remember_ipv4_fragment(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 out_ifindex, __u32 src_addr, __u32 dst_addr, __u32 action)
+{
+	struct tc_fragment_key_v4 key = {};
+	struct tc_fragment_value_v4 value = {};
+	__be16 id;
+
+	if ((ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) == 0)
+		return;
+	if (bpf_skb_load_bytes(skb, ctx->l3_off + offsetof(struct iphdr, id), &id, sizeof(id)) < 0)
+		return;
+	key.ifindex = skb->ifindex;
+	key.src_addr = ctx->src_addr;
+	key.dst_addr = ctx->dst_addr;
+	key.id = id;
+	key.proto = ctx->proto;
+	value.expires_ns = bpf_ktime_get_ns() + FORWARD_TC_FRAGMENT_TTL_NS;
+	value.out_ifindex = out_ifindex;
+	value.src_addr = src_addr;
+	value.dst_addr = dst_addr;
+	value.action = action;
+	bpf_map_update_elem(&tc_fragments_v4, &key, &value, BPF_ANY);
+}
+
 /* The next hop a slow path resolved for this target, if this packet fits it. */
 static __always_inline const struct tc_l2_value_v4 *lookup_tc_l2_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 ifindex, __u32 src_addr, __u32 dst_addr)
 {
@@ -2577,8 +2746,8 @@ static __always_inline const struct tc_l2_value_v4 *lookup_tc_l2_v4(struct __sk_
 	value = bpf_map_lookup_elem(&tc_l2_cache_v4, &key);
 	if (!value || !value->out_ifindex)
 		return 0;
-	/* Like the FIB lookup, GSO packets are not held to the MTU here. */
-	if (ctx->tot_len > value->max_len && skb->gso_size == 0)
+	/* max_len is the largest wire length the FIB accepted for this path. */
+	if (tc_wire_len_v4(skb, ctx) > value->max_len)
 		return 0;
 	return value;
 }
@@ -2604,6 +2773,9 @@ static __always_inline int redirect_reply_l2_cache_v4(struct __sk_buff *skb, con
 	long act;
 
 	if (!skb || !reply_key || !ifindex || !prefer_reply_l2_cache(nat_cfg_flags))
+		return -1;
+	/* First fragments go through redirect_ifindex_l2, which records them. */
+	if (ctx && (ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
 		return -1;
 	value = bpf_map_lookup_elem(&reply_l2_cache_v4, reply_key);
 	if (!value)
@@ -2633,6 +2805,7 @@ static __always_inline int redirect_ifindex_l2(struct __sk_buff *skb, const stru
 
 	if (!ctx || !target || !target->ifindex)
 		return TC_ACT_SHOT;
+	remember_ipv4_fragment(skb, ctx, target->ifindex, target->src_addr, target->dst_addr, FORWARD_TC_FRAGMENT_SEND);
 	if (prefer_redirect_neigh_fast(nat_cfg_flags)) {
 		tc_diag_redirect_neigh_used();
 		act = bpf_redirect_neigh(target->ifindex, 0, 0, 0);
@@ -2643,7 +2816,7 @@ static __always_inline int redirect_ifindex_l2(struct __sk_buff *skb, const stru
 	}
 	{
 		struct bpf_fib_lookup *fib = lookup_scratch_fib_v4();
-		__u32 gso = skb->gso_size != 0;
+		__u32 wire = tc_wire_len_v4(skb, ctx);
 		__u32 out_ifindex;
 
 		if (!fib)
@@ -2656,11 +2829,10 @@ static __always_inline int redirect_ifindex_l2(struct __sk_buff *skb, const stru
 		fib->sport = bpf_htons(target->src_port);
 		fib->dport = bpf_htons(target->dst_port);
 		/*
-		 * A GSO packet's total length is not a wire length. Without tot_len
-		 * the helper checks it as the stack does (GSO passes) instead of
-		 * failing with FRAG_NEEDED and leaving it to redirect_neigh.
+		 * The wire length: for a GSO packet its segments', which the helper
+		 * would not check itself (it lets any GSO packet pass).
 		 */
-		fib->tot_len = gso ? 0 : ctx->tot_len;
+		fib->tot_len = wire;
 		fib->ipv4_src = bpf_htonl(target->src_addr);
 		fib->ipv4_dst = bpf_htonl(target->dst_addr);
 		fib->ifindex = target->ifindex;
@@ -2669,7 +2841,7 @@ static __always_inline int redirect_ifindex_l2(struct __sk_buff *skb, const stru
 		if (act == BPF_FIB_LKUP_RET_SUCCESS) {
 			out_ifindex = fib->ifindex ? fib->ifindex : target->ifindex;
 			if (remember && ctx->l3_off != 0)
-				remember_tc_l2_v4(target, fib, out_ifindex, gso ? 0 : ctx->tot_len);
+				remember_tc_l2_v4(target, fib, out_ifindex, wire);
 			if (rewrite_eth_addrs(skb, fib->dmac, fib->smac) < 0) {
 				tc_diag_redirect_drop();
 				return TC_ACT_SHOT;
@@ -2695,6 +2867,64 @@ static __always_inline int redirect_ifindex_l2(struct __sk_buff *skb, const stru
 static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct redirect_target_v4 *target, __u32 nat_cfg_flags)
 {
 	return redirect_ifindex_l2(skb, ctx, target, nat_cfg_flags, 0);
+}
+
+/*
+ * An egress NAT packet too big for the uplink cannot go out translated: TC
+ * cannot fragment it, and the uplink drops it without a word, so the
+ * client's path MTU discovery never learns and its connection stalls. This
+ * decides before the NAT touches the packet. One that may not be fragmented
+ * (DF) goes back to the stack untouched, which answers the client with ICMP
+ * fragmentation needed as any router does. One that may be is dropped: the
+ * stack would fragment it, but send it on without the NAT. Packets the FIB
+ * already accepted at this size skip the lookup. Returns FORWARD_TC_MTU_FITS
+ * to go on, or the action for the packet (TC_ACT_OK hands it to the stack).
+ */
+static __always_inline int egress_nat_check_mtu_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, __u32 nat_addr, __u16 nat_port, __u32 dst_addr, __u16 dst_port)
+{
+	struct redirect_target_v4 target = {};
+	struct tc_l2_key_v4 key = {};
+	const struct tc_l2_value_v4 *known;
+	struct bpf_fib_lookup *fib;
+	__u32 wire = tc_wire_len_v4(skb, ctx);
+	long act;
+
+	if (wire <= FORWARD_TC_MIN_PATH_MTU || !rule->out_ifindex)
+		return FORWARD_TC_MTU_FITS;
+	build_tc_l2_key_v4(rule->out_ifindex, nat_addr, dst_addr, &key);
+	known = bpf_map_lookup_elem(&tc_l2_cache_v4, &key);
+	if (known && known->out_ifindex && wire <= known->max_len)
+		return FORWARD_TC_MTU_FITS;
+	fib = lookup_scratch_fib_v4();
+	if (!fib)
+		return FORWARD_TC_MTU_FITS;
+	__builtin_memset(fib, 0, sizeof(*fib));
+	fib->family = AF_INET;
+	fib->tos = ctx->tos;
+	fib->l4_protocol = ctx->proto;
+	fib->sport = bpf_htons(nat_port);
+	fib->dport = bpf_htons(dst_port);
+	fib->tot_len = wire;
+	fib->ipv4_src = bpf_htonl(nat_addr);
+	fib->ipv4_dst = bpf_htonl(dst_addr);
+	fib->ifindex = rule->out_ifindex;
+	act = bpf_fib_lookup(skb, fib, sizeof(*fib), BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
+	if (act == BPF_FIB_LKUP_RET_SUCCESS) {
+		target.ifindex = rule->out_ifindex;
+		target.src_addr = nat_addr;
+		target.dst_addr = dst_addr;
+		remember_tc_l2_v4(&target, fib, fib->ifindex ? fib->ifindex : rule->out_ifindex, wire);
+		return FORWARD_TC_MTU_FITS;
+	}
+	if (act != BPF_FIB_LKUP_RET_FRAG_NEEDED)
+		return FORWARD_TC_MTU_FITS;
+	if ((ctx->ip_flags & FORWARD_IP_FLAG_DF) != 0) {
+		tc_diag_pmtu_to_stack();
+		return TC_ACT_OK;
+	}
+	tc_diag_oversize_drop();
+	remember_ipv4_fragment(skb, ctx, 0, 0, 0, FORWARD_TC_FRAGMENT_DROP);
+	return TC_ACT_SHOT;
 }
 
 static __always_inline int redirect_ifindex_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, const struct redirect_target_v6 *target)
@@ -3820,6 +4050,7 @@ static __always_inline int send_egress_nat_forward(struct __sk_buff *skb, const 
 			tc_diag_redirect_drop();
 			return TC_ACT_SHOT;
 		}
+		remember_ipv4_fragment(skb, ctx, rule->out_ifindex, nat_addr, front_addr, FORWARD_TC_FRAGMENT_SEND);
 		act = bpf_redirect(rule->out_ifindex, 0);
 		if (act == TC_ACT_REDIRECT)
 			return (int)act;
@@ -3839,6 +4070,11 @@ static __always_inline int send_egress_nat_forward(struct __sk_buff *skb, const 
 
 static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value, __u32 nat_cfg_flags)
 {
+	int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+		front_value->front_addr, front_value->front_port);
+
+	if (action != FORWARD_TC_MTU_FITS)
+		return action;
 	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
 		return TC_ACT_SHOT;
 	return send_egress_nat_forward(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
@@ -3994,6 +4230,9 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 
 	if (!front_flow)
 		return FORWARD_TC_SLOW_PATH;
+	/* The slow path records a first fragment for the rest of its datagram. */
+	if ((ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
+		return FORWARD_TC_SLOW_PATH;
 	nat_addr = front_flow->nat_addr ? front_flow->nat_addr : rule->nat_addr;
 	if (tcp_packet_changes_state(ctx)) {
 		struct flow_key_v4 reply_key = {};
@@ -4023,9 +4262,15 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 	}
 	/* The full-cone slow path always resolves through the FIB, so this does too. */
 	if ((full_cone || (rule->flags & FORWARD_RULE_FLAG_PREPARED_L2) == 0) && !prefer_redirect_neigh_fast(nat_cfg_flags)) {
+		/* Holds the packet to the wire length the FIB accepted, too. */
 		l2 = lookup_tc_l2_v4(skb, ctx, rule->out_ifindex, nat_addr, dst_addr);
 		if (!l2)
 			return FORWARD_TC_SLOW_PATH;
+	} else {
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, nat_addr, front_flow->nat_port, dst_addr, dst_port);
+
+		if (action != FORWARD_TC_MTU_FITS)
+			return action;
 	}
 	if (prefer_reply_l2_cache(nat_cfg_flags)) {
 		struct flow_key_v4 reply_key = {};
@@ -4338,6 +4583,13 @@ static __always_inline int handle_egress_nat_forward_full_cone_new(struct __sk_b
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 	update_reply_l2_cache_v4(skb, &reply_key, nat_cfg_flags);
 
+	{
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+			bpf_ntohl(ctx->dst_addr), ctx->dst_port);
+
+		if (action != FORWARD_TC_MTU_FITS)
+			return action;
+	}
 	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
 		return TC_ACT_SHOT;
 	/* Like the rest of the full-cone path, resolved through the FIB. */
@@ -4491,6 +4743,13 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	close_reply_key = reply_or_nat.flow;
 	update_reply_l2_cache_v4(skb, &reply_or_nat.flow, nat_cfg_flags);
 
+	{
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+			bpf_ntohl(ctx->dst_addr), ctx->dst_port);
+
+		if (action != FORWARD_TC_MTU_FITS)
+			return action;
+	}
 	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
 		return TC_ACT_SHOT;
 
@@ -4650,6 +4909,9 @@ static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const s
 	__u32 src_addr;
 	int action;
 
+	/* The slow path records a first fragment for the rest of its datagram. */
+	if ((ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
+		return FORWARD_TC_SLOW_PATH;
 	if (tcp_packet_changes_state(ctx)) {
 		struct flow_key_v4 front_key = {};
 
@@ -5228,6 +5490,8 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 	if (parse_ipv4_l4(skb, ctx) < 0) {
 		if (tc_packet_may_be_icmp_error_v4(skb))
 			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_FORWARD);
+		if (tc_packet_is_later_fragment_v4(skb))
+			bpf_tail_call(skb, &tc_fragment_chain_v4, FORWARD_TC_FRAGMENT_FORWARD);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -5276,6 +5540,8 @@ static __always_inline int handle_reply_ingress_v4(struct __sk_buff *skb)
 	if (parse_ipv4_l4_any(skb, ctx) < 0) {
 		if (tc_packet_may_be_icmp_error_v4(skb))
 			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_REPLY);
+		if (tc_packet_is_later_fragment_v4(skb))
+			bpf_tail_call(skb, &tc_fragment_chain_v4, FORWARD_TC_FRAGMENT_REPLY);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -5412,9 +5678,12 @@ static __always_inline int prepare_dispatch_forward_ingress_v4(struct __sk_buff 
 
 	if (parse_ipv4_l4(skb, &dispatch->ctx) < 0) {
 		/* Apply-stage plugin hooks still expect the packet back. */
-		if ((dispatch->plugin_pipeline_active == 0 || dispatch->plugin_apply_mask == 0) &&
-		    tc_packet_may_be_icmp_error_v4(skb))
-			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_FORWARD);
+		if (dispatch->plugin_pipeline_active == 0 || dispatch->plugin_apply_mask == 0) {
+			if (tc_packet_may_be_icmp_error_v4(skb))
+				bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_FORWARD);
+			if (tc_packet_is_later_fragment_v4(skb))
+				bpf_tail_call(skb, &tc_fragment_chain_v4, FORWARD_TC_FRAGMENT_FORWARD);
+		}
 		return TC_ACT_UNSPEC;
 	}
 
@@ -5666,9 +5935,12 @@ static __always_inline int prepare_dispatch_reply_ingress_v4(struct __sk_buff *s
 
 	if (parse_ipv4_l4_any(skb, &dispatch->ctx) < 0) {
 		/* Apply-stage plugin hooks still expect the packet back. */
-		if ((dispatch->plugin_pipeline_active == 0 || dispatch->plugin_apply_mask == 0) &&
-		    tc_packet_may_be_icmp_error_v4(skb))
-			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_REPLY);
+		if (dispatch->plugin_pipeline_active == 0 || dispatch->plugin_apply_mask == 0) {
+			if (tc_packet_may_be_icmp_error_v4(skb))
+				bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_REPLY);
+			if (tc_packet_is_later_fragment_v4(skb))
+				bpf_tail_call(skb, &tc_fragment_chain_v4, FORWARD_TC_FRAGMENT_REPLY);
+		}
 		return TC_ACT_UNSPEC;
 	}
 
@@ -6597,7 +6869,6 @@ int reply_ingress_v6(struct __sk_buff *skb)
  * error, and send it on like the flow's packets. Only untagged Ethernet frames
  * are translated; anything else continues as before.
  */
-#define FORWARD_IPV4_FRAG_OFFSET_MASK 0x1fff
 #define FORWARD_ICMP_ERROR_OUTER_OFF ((__u32)sizeof(struct ethhdr))
 #define FORWARD_ICMP_ERROR_ICMP_OFF (FORWARD_ICMP_ERROR_OUTER_OFF + (__u32)sizeof(struct iphdr))
 #define FORWARD_ICMP_ERROR_INNER_OFF (FORWARD_ICMP_ERROR_ICMP_OFF + (__u32)sizeof(struct icmphdr))
@@ -6919,6 +7190,80 @@ int icmp_error_forward_v4(struct __sk_buff *skb)
  * Runs before the core on its ingress hooks while the flow cache is enabled.
  * Anything it does not find, or may not handle, continues to the core.
  */
+/*
+ * A later fragment of a datagram whose first fragment the NAT translated:
+ * give it the addresses the first one got and send it the same way. The
+ * fragments of other datagrams pass as before. Only Ethernet ingress, like
+ * the ICMP error translators.
+ */
+static __always_inline int handle_ipv4_later_fragment(struct __sk_buff *skb)
+{
+	struct tc_fragment_key_v4 key = {};
+	struct packet_ctx ctx = {};
+	struct redirect_target_v4 target = {};
+	const struct tc_fragment_value_v4 *frag;
+	const struct iphdr *iph;
+	int l3_off = sizeof(struct ethhdr);
+	int check_off = l3_off + offsetof(struct iphdr, check);
+	__be32 new_addr;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return TC_ACT_UNSPEC;
+	iph = tc_packet_ptr(skb, l3_off, sizeof(*iph));
+	if (!iph || iph->version != 4 || iph->ihl != 5)
+		return TC_ACT_UNSPEC;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) == 0)
+		return TC_ACT_UNSPEC;
+	key.ifindex = skb->ifindex;
+	key.src_addr = iph->saddr;
+	key.dst_addr = iph->daddr;
+	key.id = iph->id;
+	key.proto = iph->protocol;
+	ctx.tos = iph->tos;
+	ctx.proto = iph->protocol;
+	ctx.tot_len = bpf_ntohs(iph->tot_len);
+	ctx.l3_off = l3_off;
+	ctx.l4_off = l3_off + (int)sizeof(*iph);
+
+	frag = bpf_map_lookup_elem(&tc_fragments_v4, &key);
+	if (!frag || bpf_ktime_get_ns() >= frag->expires_ns)
+		return TC_ACT_UNSPEC;
+	if (frag->action == FORWARD_TC_FRAGMENT_DROP) {
+		tc_diag_oversize_drop();
+		return TC_ACT_SHOT;
+	}
+	target.ifindex = frag->out_ifindex;
+	target.src_addr = frag->src_addr;
+	target.dst_addr = frag->dst_addr;
+
+	new_addr = bpf_htonl(target.src_addr);
+	if (new_addr != key.src_addr) {
+		if (bpf_l3_csum_replace(skb, check_off, key.src_addr, new_addr, sizeof(new_addr)) < 0 ||
+		    bpf_skb_store_bytes(skb, l3_off + offsetof(struct iphdr, saddr), &new_addr, sizeof(new_addr), 0) < 0)
+			return TC_ACT_SHOT;
+	}
+	new_addr = bpf_htonl(target.dst_addr);
+	if (new_addr != key.dst_addr) {
+		if (bpf_l3_csum_replace(skb, check_off, key.dst_addr, new_addr, sizeof(new_addr)) < 0 ||
+		    bpf_skb_store_bytes(skb, l3_off + offsetof(struct iphdr, daddr), &new_addr, sizeof(new_addr), 0) < 0)
+			return TC_ACT_SHOT;
+	}
+	tc_diag_fragment_forwarded();
+	return redirect_ifindex_l2(skb, &ctx, &target, load_kernel_nat_config_flags(), 0);
+}
+
+SEC("classifier/fragment_forward_v4")
+int fragment_forward_v4(struct __sk_buff *skb)
+{
+	return handle_ipv4_later_fragment(skb);
+}
+
+SEC("classifier/fragment_reply_v4")
+int fragment_reply_v4(struct __sk_buff *skb)
+{
+	return handle_ipv4_later_fragment(skb);
+}
+
 SEC("classifier/tc_flow_cache")
 int tc_flow_cache(struct __sk_buff *skb)
 {
@@ -6933,6 +7278,9 @@ int tc_flow_cache(struct __sk_buff *skb)
 	if (parse_ipv4_l4(skb, &ctx) < 0)
 		return TC_ACT_UNSPEC;
 	if (ctx.l3_off != (int)sizeof(struct ethhdr) || ctx.proto == IPPROTO_ICMP || tcp_packet_changes_state(&ctx))
+		return TC_ACT_UNSPEC;
+	/* The core records a first fragment for the rest of its datagram. */
+	if ((ctx.ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
 		return TC_ACT_UNSPEC;
 	build_front_flow_key(skb, &ctx, &key);
 	entry = bpf_map_lookup_elem(&tc_flow_cache_v4, &key);
@@ -6961,8 +7309,8 @@ int tc_flow_cache(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	if (bpf_ktime_get_ns() >= entry->expires_ns)
 		return TC_ACT_UNSPEC;
-	/* Like the FIB lookup, GSO packets are not held to the MTU here. */
-	if (ctx.tot_len > entry->max_len && skb->gso_size == 0)
+	/* max_len is the largest wire length the FIB accepted for this path. */
+	if (tc_wire_len_v4(skb, &ctx) > entry->max_len)
 		return TC_ACT_UNSPEC;
 	if (rewrite_l4_snat(skb, &ctx, entry->src_addr, entry->src_port) < 0)
 		return TC_ACT_SHOT;
