@@ -1081,7 +1081,8 @@
         ['probe3', engine.diag_nat_probe_round3_used],
         ['tcp_close_del', engine.diag_tcp_close_delete],
         ['pmtu', engine.diag_pmtu_to_stack],
-        ['frag', engine.diag_fragment_forwarded]
+        ['frag', engine.diag_fragment_forwarded],
+        ['flow_cache', engine.diag_flow_cache_hit]
       ].forEach(([label, value]) => {
         if (!value) return;
         diagParts.push(label + '=' + String(value));

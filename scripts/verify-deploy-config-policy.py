@@ -181,8 +181,10 @@ def main() -> None:
         assert result is not None and result["web_token"] == STRONG_WEB_TOKEN
 
         # kernel_tc_flow_cache left experimental_features: an older config
-        # keeps its choice, and a top-level value already present wins.
+        # keeps its choice, and a top-level value already present wins. One
+        # that never chose gets the default, on.
         for name, current, want in (
+            ("flow-cache-default", {"experimental_features": {"kernel_tc_diag": True}}, True),
             ("flow-cache-legacy-on", {"experimental_features": {"kernel_tc_flow_cache": True, "kernel_tc_diag": True}}, True),
             ("flow-cache-legacy-off", {"experimental_features": {"kernel_tc_flow_cache": False}}, False),
             ("flow-cache-setting-wins", {"kernel_tc_flow_cache": False, "experimental_features": {"kernel_tc_flow_cache": True}}, False),

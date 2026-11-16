@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -65,12 +66,6 @@ func loadTCProgramsForTest(t *testing.T, names ...string) *ebpf.Collection {
 	return coll
 }
 
-// loadFlowCacheProgramForTest loads tc_flow_cache with only the maps it uses.
-func loadFlowCacheProgramForTest(t *testing.T) *ebpf.Collection {
-	t.Helper()
-	return loadTCProgramsForTest(t, kernelFlowCacheProgramName)
-}
-
 // flowCacheTestFrame builds an untagged IPv4 UDP frame.
 func flowCacheTestFrame(dstMAC net.HardwareAddr, src, dst net.IP, srcPort, dstPort uint16) []byte {
 	payload := []byte("veer flow cache test payload....")
@@ -112,81 +107,156 @@ func ipv4ToHostOrderForTest(ip net.IP) uint32 {
 	return binary.BigEndian.Uint32(ip.To4())
 }
 
-// tc_flow_cache serves a packet only like the one the core recorded: same
-// arrival interface and destination MAC, current generation, unexpired. A
-// reply entering a bridge port is found under the port's parent.
-func TestTCFlowCacheProgramServesOnlyMatchingPackets(t *testing.T) {
-	coll := loadFlowCacheProgramForTest(t)
-	prog := coll.Programs[kernelFlowCacheProgramName]
-	cacheMap := coll.Maps[kernelTCFlowCacheMapName]
+// flowFastStampForTest mirrors flow_fast_stamp_v4.
+func flowFastStampForTest(lastSeenNS uint64, generation uint32) uint32 {
+	return (uint32(lastSeenNS) ^ generation*0x9e3779b9) | 1
+}
+
+func monotonicNowNSForTest(t *testing.T) uint64 {
+	t.Helper()
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		t.Fatalf("read the monotonic clock: %v", err)
+	}
+	return uint64(ts.Nano())
+}
+
+func flowCacheHitsForTest(t *testing.T, diagMap *ebpf.Map) uint64 {
+	t.Helper()
+	var values []kernelDiagValueV4
+	if err := diagMap.Lookup(uint32(0), &values); err != nil {
+		t.Fatalf("read diag counters: %v", err)
+	}
+	return aggregateKernelPerCPUDiag(values).FlowCacheHit
+}
+
+// The dispatchers send a packet straight from its flow entry's fast-path
+// record only when the packet arrives like the recorded one did: same port
+// and destination MAC, a current record (window and generation), a length
+// the next hop takes and, for a full-cone front entry, the recorded
+// destination. A reply entering a bridge port finds its entry under the
+// port's parent. Everything else goes on to the full dispatcher.
+func TestTCFlowCacheServesOnlyMatchingPackets(t *testing.T) {
+	coll := loadTCProgramsForTest(t, kernelForwardDispatchProgramName, kernelReplyDispatchProgramName)
+	forwardProg := coll.Programs[kernelForwardDispatchProgramName]
+	replyProg := coll.Programs[kernelReplyDispatchProgramName]
+	flowsMap := coll.Maps[kernelFlowsMapNameV4]
 	stateMap := coll.Maps[kernelTCFlowCacheStateMapName]
 	parentMap := coll.Maps[kernelIfParentMapName]
-	if cacheMap == nil || stateMap == nil || parentMap == nil {
-		t.Fatalf("maps of %s: cache=%v state=%v parent=%v", kernelFlowCacheProgramName, cacheMap, stateMap, parentMap)
+	diagMap := coll.Maps[kernelDiagMapName]
+	hintsMap := coll.Maps[kernelTCIfindexHintsMapName]
+	if flowsMap == nil || stateMap == nil || parentMap == nil || diagMap == nil || hintsMap == nil {
+		t.Fatalf("dispatcher maps: flows=%v state=%v parent=%v diag=%v hints=%v", flowsMap, stateMap, parentMap, diagMap, hintsMap)
 	}
 	// BPF_PROG_TEST_RUN runs on the loopback device unless told otherwise.
 	const arrival = 1
 	const parent = 9
-	if err := stateMap.Put(uint32(0), tcFlowCacheStateV4{Generation: 3, Enabled: 1}); err != nil {
+	const generation = 3
+	if err := stateMap.Put(uint32(0), tcFlowCacheStateV4{Generation: generation, Enabled: 1}); err != nil {
 		t.Fatalf("write cache state: %v", err)
 	}
 	routerMAC := net.HardwareAddr{0x02, 0, 0, 0, 0, 0xaa}
 	otherMAC := net.HardwareAddr{0x02, 0, 0, 0, 0, 0xbb}
 	nextHopMAC := [6]byte{0x02, 0, 0, 0, 0, 0xcc}
-	uplinkMAC := [6]byte{0x02, 0, 0, 0, 0, 0xdd}
+	outMAC := [6]byte{0x02, 0, 0, 0, 0, 0xdd}
 	client := net.IPv4(192, 0, 2, 10)
 	remote := net.IPv4(198, 51, 100, 7)
 	natAddr := net.IPv4(203, 0, 113, 1)
+	const clientPort, remotePort, natPort = 51000, 443, 40000
 
 	type testCase struct {
 		name     string
+		reply    bool
+		fullCone bool
 		dstMAC   net.HardwareAddr
 		keyIf    uint32
 		parentOf map[uint32]uint32
-		mutate   func(*tcFlowCacheValueV4)
-		want     uint32
+		hints    uint32
+		mutate   func(*tcFlowValueV4, uint64)
+		hit      bool
+	}
+	// Entries are stamped a little in the past: the BPF clock can read
+	// behind user space's monotonic clock, and the window check, rightly,
+	// does not trust a last_seen_ns from its future.
+	const recently = 200_000_000
+	restamp := func(generation uint32, ago uint64) func(*tcFlowValueV4, uint64) {
+		return func(v *tcFlowValueV4, now uint64) {
+			v.LastSeenNS = now - ago
+			v.Fast.Stamp = flowFastStampForTest(v.LastSeenNS, generation)
+		}
 	}
 	cases := []testCase{
-		{name: "matching packet", dstMAC: routerMAC, keyIf: arrival, want: tcActRedirect},
-		{name: "other destination MAC", dstMAC: otherMAC, keyIf: arrival, want: tcActUnspec},
-		{name: "other arrival interface", dstMAC: routerMAC, keyIf: arrival, mutate: func(v *tcFlowCacheValueV4) { v.InIfIndex = 5 }, want: tcActUnspec},
-		{name: "stale generation", dstMAC: routerMAC, keyIf: arrival, mutate: func(v *tcFlowCacheValueV4) { v.Generation = 2 }, want: tcActUnspec},
-		{name: "expired", dstMAC: routerMAC, keyIf: arrival, mutate: func(v *tcFlowCacheValueV4) { v.ExpiresNS = 1 }, want: tcActUnspec},
-		{name: "reply under the port's parent", dstMAC: routerMAC, keyIf: parent, parentOf: map[uint32]uint32{arrival: parent}, want: tcActRedirect},
-		{name: "parent entry from another port", dstMAC: routerMAC, keyIf: parent, parentOf: map[uint32]uint32{arrival: parent}, mutate: func(v *tcFlowCacheValueV4) { v.InIfIndex = 4 }, want: tcActUnspec},
-		{name: "parent entry without a parent", dstMAC: routerMAC, keyIf: parent, want: tcActUnspec},
+		{name: "reply", reply: true, keyIf: arrival, hit: true},
+		{name: "reply under the port's parent", reply: true, keyIf: parent, parentOf: map[uint32]uint32{arrival: parent}, hit: true},
+		{name: "reply from another port", reply: true, keyIf: parent, parentOf: map[uint32]uint32{arrival: parent}, mutate: func(v *tcFlowValueV4, _ uint64) { v.Fast.InIfIndex = 4 }},
+		{name: "reply for another MAC", reply: true, keyIf: arrival, dstMAC: otherMAC},
+		{name: "reply after the window", reply: true, keyIf: arrival, mutate: restamp(generation, 2_000_000_000)},
+		{name: "reply under a stale generation", reply: true, keyIf: arrival, mutate: restamp(generation-1, recently)},
+		{name: "reply while the record is written", reply: true, keyIf: arrival, mutate: func(v *tcFlowValueV4, _ uint64) { v.Fast.Stamp = 0 }},
+		{name: "reply of a closing flow", reply: true, keyIf: arrival, mutate: func(v *tcFlowValueV4, _ uint64) { v.Flags |= kernelFlowFlagReplyClosing }},
+		{name: "reply too long for the next hop", reply: true, keyIf: arrival, mutate: func(v *tcFlowValueV4, _ uint64) { v.Fast.MaxLen = 59 }},
+		{name: "forward", keyIf: arrival, hit: true},
+		{name: "forward for another MAC", keyIf: arrival, dstMAC: otherMAC},
+		{name: "forward of another session", keyIf: arrival, mutate: func(v *tcFlowValueV4, _ uint64) { v.ClientPort = clientPort + 1 }},
+		{name: "full-cone forward", fullCone: true, keyIf: arrival, hit: true},
+		{name: "full-cone forward to another destination", fullCone: true, keyIf: arrival, mutate: func(v *tcFlowValueV4, _ uint64) { v.Fast.DstAddr++ }},
+		{name: "full-cone forward on an interface without full-cone rules", fullCone: true, keyIf: arrival,
+			hints: kernelTCIfindexHintKnown | kernelTCIfindexHintRuleAny},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			key := tcFlowKeyV4{
-				IfIndex: tc.keyIf,
-				SrcAddr: ipv4ToHostOrderForTest(remote),
-				DstAddr: ipv4ToHostOrderForTest(natAddr),
-				SrcPort: 443,
-				DstPort: 40000,
-				Proto:   syscall.IPPROTO_UDP,
+			now := monotonicNowNSForTest(t)
+			seen := now - recently
+			var key tcFlowKeyV4
+			value := tcFlowValueV4{
+				ClientAddr: ipv4ToHostOrderForTest(client),
+				ClientPort: clientPort,
+				FrontAddr:  ipv4ToHostOrderForTest(remote),
+				FrontPort:  remotePort,
+				NATAddr:    ipv4ToHostOrderForTest(natAddr),
+				NATPort:    natPort,
+				Flags:      kernelFlowFlagFullNAT | kernelFlowFlagEgressNAT,
+				LastSeenNS: seen,
+				SessionID:  77,
+				Fast: tcFlowFastV4{
+					Stamp:      flowFastStampForTest(seen, generation),
+					OutIfIndex: 42,
+					InIfIndex:  arrival,
+					MaxLen:     1500,
+					DMAC:       nextHopMAC,
+					SMAC:       outMAC,
+				},
 			}
-			value := tcFlowCacheValueV4{
-				ExpiresNS:  math.MaxUint64,
-				Generation: 3,
-				OutIfIndex: 42,
-				MaxLen:     1500,
-				SrcAddr:    ipv4ToHostOrderForTest(remote),
-				DstAddr:    ipv4ToHostOrderForTest(client),
-				SrcPort:    443,
-				DstPort:    51000,
-				DMAC:       nextHopMAC,
-				SMAC:       uplinkMAC,
-				InIfIndex:  arrival,
+			copy(value.Fast.InDMAC[:], routerMAC)
+			var frame []byte
+			dstMAC := routerMAC
+			if tc.dstMAC != nil {
+				dstMAC = tc.dstMAC
 			}
-			copy(value.InDMAC[:], routerMAC)
+			if tc.reply {
+				value.InIfIndex = 7
+				key = tcFlowKeyV4{IfIndex: tc.keyIf, SrcAddr: ipv4ToHostOrderForTest(remote), DstAddr: ipv4ToHostOrderForTest(natAddr),
+					SrcPort: remotePort, DstPort: natPort, Proto: syscall.IPPROTO_UDP}
+				frame = flowCacheTestFrame(dstMAC, remote, natAddr, remotePort, natPort)
+			} else {
+				value.Flags |= kernelFlowFlagFrontEntry
+				value.InIfIndex = arrival
+				key = tcFlowKeyV4{IfIndex: tc.keyIf, SrcAddr: ipv4ToHostOrderForTest(client), DstAddr: ipv4ToHostOrderForTest(remote),
+					SrcPort: clientPort, DstPort: remotePort, Proto: syscall.IPPROTO_UDP}
+				if tc.fullCone {
+					value.Flags |= kernelFlowFlagFullCone
+					value.Fast.DstAddr = ipv4ToHostOrderForTest(remote)
+					key.DstAddr, key.DstPort = 0, 0
+				}
+				frame = flowCacheTestFrame(dstMAC, client, remote, clientPort, remotePort)
+			}
 			if tc.mutate != nil {
-				tc.mutate(&value)
+				tc.mutate(&value, now)
 			}
-			if err := cacheMap.Put(key, value); err != nil {
-				t.Fatalf("write cache entry: %v", err)
+			if err := flowsMap.Put(key, value); err != nil {
+				t.Fatalf("write flow entry: %v", err)
 			}
-			t.Cleanup(func() { _ = cacheMap.Delete(key) })
+			t.Cleanup(func() { _ = flowsMap.Delete(key) })
 			for child, p := range tc.parentOf {
 				if err := parentMap.Put(child, p); err != nil {
 					t.Fatalf("write parent mapping: %v", err)
@@ -194,31 +264,54 @@ func TestTCFlowCacheProgramServesOnlyMatchingPackets(t *testing.T) {
 				child := child
 				t.Cleanup(func() { _ = parentMap.Delete(child) })
 			}
+			if err := hintsMap.Put(uint32(arrival), tc.hints); err != nil {
+				t.Fatalf("write interface hints: %v", err)
+			}
+			t.Cleanup(func() { _ = hintsMap.Put(uint32(arrival), uint32(0)) })
 
-			frame := flowCacheTestFrame(tc.dstMAC, remote, natAddr, 443, 40000)
+			prog := forwardProg
+			if tc.reply {
+				prog = replyProg
+			}
+			before := flowCacheHitsForTest(t, diagMap)
 			out := make([]byte, len(frame)+64)
 			ret, err := prog.Run(&ebpf.RunOptions{Data: frame, DataOut: out})
 			if err != nil {
-				t.Fatalf("run %s: %v", kernelFlowCacheProgramName, err)
+				t.Fatalf("run: %v", err)
 			}
-			if ret != tc.want {
-				t.Fatalf("%s returned %d, want %d", kernelFlowCacheProgramName, int32(ret), int32(tc.want))
-			}
-			out = out[:len(frame)]
-			if tc.want != tcActRedirect {
-				if !bytes.Equal(out, frame) {
-					t.Fatal("a packet the cache declined was changed")
+			hits := flowCacheHitsForTest(t, diagMap) - before
+			if !tc.hit {
+				if hits != 0 {
+					t.Fatalf("flow cache served a packet its record does not describe (returned %d)", int32(ret))
+				}
+				// The forward dispatcher finds no rule for it and passes it on untouched.
+				if !tc.reply && (ret != tcActUnspec || !bytes.Equal(out[:len(frame)], frame)) {
+					t.Fatalf("declined forward packet: returned %d, changed %t", int32(ret), !bytes.Equal(out[:len(frame)], frame))
 				}
 				return
 			}
-			if !bytes.Equal(out[0:6], nextHopMAC[:]) || !bytes.Equal(out[6:12], uplinkMAC[:]) {
-				t.Fatalf("MACs = %x -> %x, want %x -> %x", out[6:12], out[0:6], uplinkMAC, nextHopMAC)
+			if hits != 1 || ret != tcActRedirect {
+				t.Fatalf("returned %d with %d flow cache hits, want a redirect from the record", int32(ret), hits)
 			}
-			if got := net.IP(out[30:34]); !got.Equal(client) {
-				t.Fatalf("destination = %v, want %v", got, client)
+			out = out[:len(frame)]
+			if !bytes.Equal(out[0:6], nextHopMAC[:]) || !bytes.Equal(out[6:12], outMAC[:]) {
+				t.Fatalf("MACs = %x -> %x, want %x -> %x", out[6:12], out[0:6], outMAC, nextHopMAC)
 			}
-			if got := binary.BigEndian.Uint16(out[36:38]); got != 51000 {
-				t.Fatalf("destination port = %d, want 51000", got)
+			wantSrc, wantSrcPort, wantDst, wantDstPort := natAddr, uint16(natPort), remote, uint16(remotePort)
+			if tc.reply {
+				wantSrc, wantSrcPort, wantDst, wantDstPort = remote, remotePort, client, clientPort
+			}
+			if got := net.IP(out[26:30]); !got.Equal(wantSrc) {
+				t.Fatalf("source = %v, want %v", got, wantSrc)
+			}
+			if got := binary.BigEndian.Uint16(out[34:36]); got != wantSrcPort {
+				t.Fatalf("source port = %d, want %d", got, wantSrcPort)
+			}
+			if got := net.IP(out[30:34]); !got.Equal(wantDst) {
+				t.Fatalf("destination = %v, want %v", got, wantDst)
+			}
+			if got := binary.BigEndian.Uint16(out[36:38]); got != wantDstPort {
+				t.Fatalf("destination port = %d, want %d", got, wantDstPort)
 			}
 			if got, want := binary.BigEndian.Uint16(out[24:26]), ipv4HeaderChecksumForTest(out[14:34]); got != want {
 				t.Fatalf("IPv4 checksum = %#04x, want %#04x", got, want)

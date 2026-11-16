@@ -219,6 +219,8 @@ struct kernel_diag_value_v4 {
 	__u64 oversize_drop;
 	/* Later fragments translated like their datagram's first fragment. */
 	__u64 fragment_forwarded;
+	/* Packets sent from a flow entry's fast-path record (the flow cache). */
+	__u64 flow_cache_hit;
 };
 
 struct kernel_occupancy_value_v4 {

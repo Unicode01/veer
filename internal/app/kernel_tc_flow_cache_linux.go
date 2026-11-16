@@ -4,6 +4,7 @@ package app
 
 import (
 	"log"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -11,37 +12,22 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// The flow cache (the kernel_tc_flow_cache setting): tc_flow_cache runs on
-// each ingress hook where the core serves rules and no plugin hook runs,
-// ahead of the core, and sends packets of established egress NAT flows the
-// way the core's fast path last sent them, with one lookup. The core records
-// those entries and never records one for an interface where a plugin hook
-// runs on ingress, so such interfaces keep the full path. An entry expires
-// with its flow's fast-path window.
+// The flow cache (the kernel_tc_flow_cache setting): the core's fast path
+// records in the flow entry of an established egress NAT flow how it sent
+// the packet (tcFlowFastV4), and the dispatcher sends the flow's next packets
+// the same way straight from its flow lookup, before the rule lookup. The
+// core never records for a packet entering an interface where a plugin hook
+// runs on ingress, so such interfaces keep the full path. A record lasts
+// until its entry's fast-path window ends; bumping the generation in
+// tc_flow_cache_state_v4 retires all of them at once.
 const (
-	kernelFlowCacheProgramName    = "tc_flow_cache"
-	kernelTCFlowCacheMapName      = "tc_flow_cache_v4"
 	kernelTCFlowCacheStateMapName = "tc_flow_cache_state_v4"
-	// Ahead of the reply (10) and forward (20) programs on the same hook.
+	// Earlier releases attached a separate tc_flow_cache program here, ahead
+	// of the reply (10) and forward (20) programs. Reconciles drop any such
+	// filter they find (withoutUnplannedFlowCache).
 	kernelFlowCacheFilterPrio   = 5
 	kernelFlowCacheFilterHandle = 5
 )
-
-type tcFlowCacheValueV4 struct {
-	ExpiresNS  uint64
-	Generation uint32
-	OutIfIndex uint32
-	MaxLen     uint32
-	SrcAddr    uint32
-	DstAddr    uint32
-	SrcPort    uint16
-	DstPort    uint16
-	DMAC       [6]byte
-	SMAC       [6]byte
-	InIfIndex  uint32
-	InDMAC     [6]byte
-	Pad        [2]byte
-}
 
 type tcFlowCacheStateV4 struct {
 	Generation uint32
@@ -66,95 +52,23 @@ func kernelTCFlowCacheDisabledBy(trafficStats, replyL2Cache, redirectNeighFast b
 	}
 }
 
-// completeAttachmentPrograms adds what this runtime attaches on every hook
-// besides the core programs: the attach API and the flow cache.
+// completeAttachmentPrograms adds what this runtime decides for every hook
+// besides the core programs: the attach API.
 func (rt *linuxKernelRuleRuntime) completeAttachmentPrograms(programs *kernelAttachmentPrograms, coll *ebpf.Collection) {
 	programs.tcx = rt.useTCX()
-	programs.flowCacheProg = nil
-	if rt.enableFlowCache && coll != nil {
-		programs.flowCacheProg = coll.Programs[kernelFlowCacheProgramName]
-	}
 }
 
-// kernelFlowCacheTargets lists the ingress hooks of the core where rules
-// receive packets and no plugin hook runs. The core also runs on ingress
-// hooks that only plugin hooks need, which carry no rule IDs, and it records
-// no entry for packets entering an interface with an ingress plugin hook, so
-// a cache on either could only miss.
-func kernelFlowCacheTargets(sets kernelAttachmentRuleSets) map[int]struct{} {
-	targets := make(map[int]struct{}, len(sets.ForwardIngress)+len(sets.ReplyIngress))
-	if sets.PluginIngressHookedAll {
-		return targets
-	}
-	for _, rules := range []map[int][]int64{sets.ForwardIngress, sets.ReplyIngress} {
-		for ifindex, ids := range rules {
-			if len(ids) == 0 {
-				continue
-			}
-			if _, hooked := sets.PluginIngressHooked[ifindex]; hooked {
-				continue
-			}
-			targets[ifindex] = struct{}{}
-		}
-	}
-	return targets
-}
-
-// sameFlowCacheTargets reports whether both sets put the flow cache on the
-// same interfaces. sameTargets ignores rule IDs and plugin hooks, so it
-// misses an interface that keeps its plugin hooks after its last rule left
-// and a rule interface that gains or loses an ingress hook.
-func (sets kernelAttachmentRuleSets) sameFlowCacheTargets(other kernelAttachmentRuleSets) bool {
-	a, b := kernelFlowCacheTargets(sets), kernelFlowCacheTargets(other)
-	if len(a) != len(b) {
-		return false
-	}
-	for ifindex := range a {
-		if _, ok := b[ifindex]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-// appendFlowCacheAttachmentPlans puts tc_flow_cache on the ingress hooks of
-// the core where rules receive packets.
-func appendFlowCacheAttachmentPlans(plans []kernelAttachmentPlan, sets kernelAttachmentRuleSets, programs kernelAttachmentPrograms) []kernelAttachmentPlan {
-	if programs.flowCacheProg == nil {
-		return plans
-	}
-	for ifindex := range kernelFlowCacheTargets(sets) {
-		plans = append(plans, kernelAttachmentPlan{
-			key: kernelAttachmentKey{
-				linkIndex: ifindex,
-				parent:    netlink.HANDLE_MIN_INGRESS,
-				priority:  kernelFlowCacheFilterPrio,
-				handle:    netlink.MakeHandle(0, kernelFlowCacheFilterHandle),
-				tcx:       programs.tcx,
-			},
-			ifindex:     ifindex,
-			priority:    kernelFlowCacheFilterPrio,
-			handleMinor: kernelFlowCacheFilterHandle,
-			name:        kernelFlowCacheProgramName,
-			prog:        programs.flowCacheProg,
-			attach:      kernelPluginPipelineAttachIngress,
-			flowCache:   true,
-		})
-	}
-	return plans
-}
-
-// isFlowCache reports whether key is the flow cache's position on an
-// ingress hook.
+// isFlowCache reports whether key is where earlier releases attached the
+// flow cache program on an ingress hook.
 func (key kernelAttachmentKey) isFlowCache() bool {
 	return key.parent == netlink.HANDLE_MIN_INGRESS && key.priority == kernelFlowCacheFilterPrio
 }
 
-// withoutUnplannedFlowCache drops the flow caches that planned does not hold
-// from attachments. An in-place reconcile keeps the old attachments it no
-// longer plans, but no rule depends on the flow cache, and one kept on an
-// interface that gained an ingress plugin hook would still run ahead of the
-// hook there.
+// withoutUnplannedFlowCache drops flow cache programs that planned does not
+// hold from attachments. An in-place reconcile keeps the old attachments it
+// no longer plans, but no rule depends on one, and nothing plans one any more:
+// a program left by an earlier release would keep running ahead of the core,
+// and of any plugin hook added later, with nothing recording its entries.
 func withoutUnplannedFlowCache(attachments, planned []kernelAttachment) []kernelAttachment {
 	plannedKeys := kernelAttachmentKeySet(planned)
 	out := make([]kernelAttachment, 0, len(attachments))
@@ -170,12 +84,14 @@ func withoutUnplannedFlowCache(attachments, planned []kernelAttachment) []kernel
 }
 
 // configureKernelTCFlowCache lets the core of a freshly loaded collection
-// record entries. A new collection starts with an empty cache.
+// record fast-path records. A new collection starts with none usable: flow
+// entries carried over from the previous collection keep their records, so
+// it starts at a random generation, which those records do not carry.
 func configureKernelTCFlowCache(m *ebpf.Map, enabled bool) error {
 	if m == nil {
 		return nil
 	}
-	state := tcFlowCacheStateV4{Generation: 1}
+	state := tcFlowCacheStateV4{Generation: rand.Uint32()}
 	if enabled {
 		state.Enabled = 1
 	}
@@ -188,7 +104,7 @@ func configureKernelTCFlowCache(m *ebpf.Map, enabled bool) error {
 // back past a bump made in between.
 var kernelTCFlowCacheBumpMu sync.Mutex
 
-// invalidateKernelTCFlowCache makes every recorded entry stale and reports
+// invalidateKernelTCFlowCache makes every fast-path record stale and reports
 // whether the cache is enabled.
 func invalidateKernelTCFlowCache(m *ebpf.Map) bool {
 	if m == nil {
@@ -207,8 +123,8 @@ func invalidateKernelTCFlowCache(m *ebpf.Map) bool {
 // settleKernelTCFlowCache invalidates now, after a change, and once more when
 // the packets that were in flight during it have left the BPF programs. The
 // core reads rules, flows and plugin hooks when a packet arrives but the
-// generation only when it records the entry, with no ordering between those
-// loads, so such a packet can record what it saw before the change under the
+// generation only when it records, with no ordering between those loads, so
+// such a packet can record what it saw before the change under the
 // generation the first invalidation set. The second one runs on a timer,
 // against its own handle of the map, so callers do not hold their locks
 // through the grace period and a collection closed meanwhile does not matter.

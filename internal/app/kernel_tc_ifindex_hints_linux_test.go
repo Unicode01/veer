@@ -57,6 +57,37 @@ func TestBuildKernelTCIfindexHintsCoversEveryRuleFormAndParent(t *testing.T) {
 	}
 }
 
+// Only interfaces where a full-cone egress NAT rule receives packets get the
+// full-cone hint, which lets the flow cache try the full-cone key there.
+func TestBuildKernelTCIfindexHintsMarksFullConeEgressNAT(t *testing.T) {
+	v4 := func(id int64, ifindex uint32, flags uint16) preparedKernelRule {
+		return preparedKernelRule{
+			rule:  Rule{ID: id, Protocol: "udp"},
+			spec:  kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+			key:   tcRuleKeyV4{IfIndex: ifindex, Proto: 17},
+			value: tcRuleValueV4{Flags: flags},
+		}
+	}
+	prepared := []preparedKernelRule{
+		v4(1, 3, kernelRuleFlagFullNAT|kernelRuleFlagEgressNAT|kernelRuleFlagFullCone),
+		v4(2, 4, kernelRuleFlagFullNAT|kernelRuleFlagEgressNAT),
+		// Full cone means nothing without egress NAT.
+		v4(3, 5, kernelRuleFlagFullNAT|kernelRuleFlagFullCone),
+	}
+	hints, err := buildKernelTCIfindexHints(prepared, nil)
+	if err != nil {
+		t.Fatalf("buildKernelTCIfindexHints() error = %v", err)
+	}
+	want := kernelTCIfindexHints{
+		3: kernelTCIfindexHintRuleAny | kernelTCIfindexHintFullCone,
+		4: kernelTCIfindexHintRuleAny,
+		5: kernelTCIfindexHintRuleAny,
+	}
+	if !maps.Equal(hints, want) {
+		t.Fatalf("buildKernelTCIfindexHints() = %#v, want %#v", hints, want)
+	}
+}
+
 func TestBuildKernelTCIfindexHintsRejectsUnencodableRule(t *testing.T) {
 	bad := preparedKernelRule{
 		rule: Rule{ID: 0, Protocol: "tcp"},

@@ -108,8 +108,8 @@ func TestLoadConfigAllowsDisablingManagedNetworkAutoRepair(t *testing.T) {
 	}
 }
 
-// The flow cache is off unless the setting turns it on. Configs from before
-// the setting existed still turn it on through experimental_features; the
+// The flow cache is on unless the setting turns it off. Configs from before
+// the setting existed keep the choice they made in experimental_features; the
 // setting wins when both are present.
 func TestLoadConfigKernelTCFlowCacheSetting(t *testing.T) {
 	t.Parallel()
@@ -119,10 +119,12 @@ func TestLoadConfigKernelTCFlowCacheSetting(t *testing.T) {
 		extra string
 		want  bool
 	}{
-		{name: "default"},
+		{name: "default", want: true},
+		{name: "default beside other experimental features", extra: `"experimental_features": {"kernel_tc_diag": true}`, want: true},
 		{name: "enabled", extra: `"kernel_tc_flow_cache": true`, want: true},
 		{name: "disabled", extra: `"kernel_tc_flow_cache": false`},
-		{name: "legacy experimental feature", extra: `"experimental_features": {"kernel_tc_flow_cache": true}`, want: true},
+		{name: "legacy experimental feature on", extra: `"experimental_features": {"kernel_tc_flow_cache": true}`, want: true},
+		{name: "legacy experimental feature off", extra: `"experimental_features": {"kernel_tc_flow_cache": false}`},
 		{name: "setting overrides experimental feature", extra: `"kernel_tc_flow_cache": false, "experimental_features": {"kernel_tc_flow_cache": true}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

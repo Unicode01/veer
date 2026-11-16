@@ -1270,7 +1270,7 @@ hardcoded_defaults = OrderedDict([
     ("kernel_nat_ports_map_limit", 0),
     ("kernel_nat_port_min", 20000),
     ("kernel_nat_port_max", 65535),
-    ("kernel_tc_flow_cache", False),
+    ("kernel_tc_flow_cache", True),
     ("experimental_features", OrderedDict([
         ("bridge_xdp", False),
         ("xdp_generic", False),

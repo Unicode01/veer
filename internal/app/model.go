@@ -507,6 +507,7 @@ type KernelEngineRuntimeView struct {
 	DiagPMTUToStack                         uint64    `json:"diag_pmtu_to_stack,omitempty"`
 	DiagOversizeDrop                        uint64    `json:"diag_oversize_drop,omitempty"`
 	DiagFragmentForwarded                   uint64    `json:"diag_fragment_forwarded,omitempty"`
+	DiagFlowCacheHit                        uint64    `json:"diag_flow_cache_hit,omitempty"`
 	DiagSnapshotError                       string    `json:"diag_snapshot_error,omitempty"`
 	LastReconcileAt                         time.Time `json:"last_reconcile_at,omitempty"`
 	LastReconcileMs                         int64     `json:"last_reconcile_ms,omitempty"`

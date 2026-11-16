@@ -18,12 +18,14 @@ const (
 	kernelTCIfindexHintRuleAny     uint32 = 0x8
 	kernelTCIfindexHintRuleV6Shift        = 4
 	kernelTCIfindexHintHasParent   uint32 = 0x100
+	kernelTCIfindexHintFullCone    uint32 = 0x200
 	kernelTCIfindexHintKnown       uint32 = 0x80000000
 )
 
 // kernelTCIfindexHints tells the TC programs, per ifindex, which rule key
-// forms exist and whether a reply parent is mapped, so they can skip lookups
-// that cannot match. The hints may claim more than the maps hold, never less:
+// forms exist, whether a full-cone egress NAT rule receives packets there and
+// whether a reply parent is mapped, so they can skip lookups that cannot
+// match. The hints may claim more than the maps hold, never less:
 // they are widened before rules or parents are added and narrowed only after
 // the maps have changed.
 type kernelTCIfindexHints map[uint32]uint32
@@ -46,8 +48,11 @@ func (h kernelTCIfindexHints) addPreparedRules(prepared []preparedKernelRule) er
 	if err != nil {
 		return err
 	}
-	for _, key := range batches.v4Keys {
+	for i, key := range batches.v4Keys {
 		h[key.IfIndex] |= kernelTCRuleFormHint(key.DstAddr == 0, key.DstPort == 0)
+		if flags := batches.v4Values[i].Flags; flags&kernelRuleFlagEgressNAT != 0 && flags&kernelRuleFlagFullCone != 0 {
+			h[key.IfIndex] |= kernelTCIfindexHintFullCone
+		}
 	}
 	for _, key := range batches.v6Keys {
 		h[key.IfIndex] |= kernelTCRuleFormHint(key.DstAddr == [16]byte{}, key.DstPort == 0) << kernelTCIfindexHintRuleV6Shift

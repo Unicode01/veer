@@ -233,6 +233,22 @@ type tcFlowValueV4 struct {
 	FrontCloseSeenNS uint64
 	RuleRevision     uint64
 	SessionID        uint64
+	Fast             tcFlowFastV4
+}
+
+// tcFlowFastV4 mirrors struct flow_fast_v4: the flow cache's record of how
+// the core's fast path last sent this direction of the flow. Only the BPF
+// programs read it; user space copies it along with the entry.
+type tcFlowFastV4 struct {
+	Stamp      uint32
+	OutIfIndex uint32
+	InIfIndex  uint32
+	DstAddr    uint32
+	MaxLen     uint16
+	DMAC       [6]byte
+	SMAC       [6]byte
+	InDMAC     [6]byte
+	Pad        [4]byte
 }
 
 type tcNATPortValue struct {
@@ -399,8 +415,6 @@ type kernelAttachmentPrograms struct {
 	mode                kernelTCAttachmentProgramMode
 	// tcx attaches the programs through tcx.
 	tcx bool
-	// flowCacheProg, if set, runs ahead of the core on its ingress hooks.
-	flowCacheProg *ebpf.Program
 }
 
 type kernelAttachmentPlan struct {
@@ -412,8 +426,6 @@ type kernelAttachmentPlan struct {
 	prog        *ebpf.Program
 	reply       bool
 	attach      uint32
-	// flowCache marks the flow cache, which no rule depends on.
-	flowCache bool
 }
 
 type preparedKernelRule struct {
@@ -657,7 +669,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	enableReplyL2Cache := false
 	pluginPipelineEnabled := false
 	forceLegacyAttach := false
-	enableFlowCache := false
+	enableFlowCache := cfg.KernelTCFlowCacheEnabled()
 	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
@@ -673,7 +685,6 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		pluginPipelineEnabled = cfg.PluginsEnabled() && cfg.PluginsDataplaneEnabled()
 		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
 		forceLegacyAttach = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCLegacyAttach)
-		enableFlowCache = cfg.KernelTCFlowCacheEnabled()
 	}
 	if enableDiagVerbose {
 		enableDiagnostics = true
@@ -1384,7 +1395,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	if err := syncKernelOccupancyMapFromCollectionExact(coll, true); err != nil {
 		log.Printf("kernel dataplane reconcile: sync tc occupancy counters failed before attach: %v", err)
 	}
-	if err := configureKernelTCFlowCache(coll.Maps[kernelTCFlowCacheStateMapName], attachmentPrograms.flowCacheProg != nil); err != nil {
+	if err := configureKernelTCFlowCache(coll.Maps[kernelTCFlowCacheStateMapName], rt.enableFlowCache); err != nil {
 		log.Printf("kernel dataplane reconcile: configure tc flow cache failed, leaving it off: %v", err)
 	}
 	if err := syncKernelNATConfigMap(coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax, rt.natConfigFlags()); err != nil {
@@ -1500,7 +1511,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			}
 			break
 		}
-		if plan.attach != kernelPluginPipelineAttachIngress || plan.flowCache {
+		if plan.attach != kernelPluginPipelineAttachIngress {
 			continue
 		}
 		if plan.reply {
@@ -2322,7 +2333,6 @@ func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, prog
 	appendPlans(sets.ReplyIngress, true, kernelPluginPipelineAttachIngress, programs.replyProg, programs.replyProgV6)
 	appendPlans(sets.ForwardEgress, false, kernelPluginPipelineAttachEgress, programs.forwardEgressProg, programs.forwardEgressProgV6)
 	appendPlans(sets.ReplyEgress, true, kernelPluginPipelineAttachEgress, programs.replyEgressProg, programs.replyEgressProgV6)
-	plans = appendFlowCacheAttachmentPlans(plans, sets, programs)
 	sort.Slice(plans, func(i, j int) bool {
 		if plans[i].ifindex != plans[j].ifindex {
 			return plans[i].ifindex < plans[j].ifindex
@@ -3161,7 +3171,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 			}
 			newAttachments = append(newAttachments, createdAttachments[len(createdAttachments)-1])
 		}
-		if plan.attach != kernelPluginPipelineAttachIngress || plan.flowCache {
+		if plan.attach != kernelPluginPipelineAttachIngress {
 			continue
 		}
 		if plan.reply {
@@ -4647,9 +4657,6 @@ func (rt *linuxKernelRuleRuntime) samePreparedRulesLocked(next []preparedKernelR
 	// set; otherwise self-heal keeps reattaching to an ifindex that is gone.
 	current := effectiveKernelAttachmentRuleSets(rt.preparedRules, rt.attachmentRuleSets)
 	if !current.sameTargets(attachmentRuleSets) {
-		return false
-	}
-	if rt.enableFlowCache && !current.sameFlowCacheTargets(attachmentRuleSets) {
 		return false
 	}
 	return rt.attachmentsHealthyLocked(attachmentRuleSets)

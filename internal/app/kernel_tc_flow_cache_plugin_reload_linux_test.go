@@ -12,16 +12,14 @@ import (
 	"time"
 
 	"github.com/Unicode01/veer/internal/netservice"
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
 )
 
 // A plugin hook that appears on an interface while its flows are cached
-// must see every later packet entering it: the reload drops the entries
-// recorded for it and takes the cache program off it. Once the hook goes
+// must see every later packet entering it: the reload retires the records
+// made for it, and none are made while the hook stays. Once the hook goes
 // away again, the cache returns. Covers a hook scoped to the interface and a
 // global one, and cls_bpf filters as well as tcx links.
 func TestEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T) {
@@ -90,73 +88,63 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 		}
 	}
 	reconcile("initial")
-	cacheMap := rt.coll.Maps[kernelTCFlowCacheMapName]
-	if cacheMap == nil {
-		t.Fatal("flow cache map is unavailable")
+	flowsMap := rt.coll.Maps[kernelFlowsMapNameV4]
+	stateMap := rt.coll.Maps[kernelTCFlowCacheStateMapName]
+	if flowsMap == nil || stateMap == nil {
+		t.Fatal("flow map or flow cache state is unavailable")
 	}
 	child, err := netlink.LinkByName(topology.ChildHostIF)
 	if err != nil {
 		t.Fatalf("resolve %s: %v", topology.ChildHostIF, err)
 	}
 	childIndex := child.Attrs().Index
-	cacheInfo, err := rt.coll.Programs[kernelFlowCacheProgramName].Info()
-	if err != nil {
-		t.Fatalf("read flow cache program info: %v", err)
-	}
-	cacheID, ok := cacheInfo.ID()
-	if !ok {
-		t.Fatal("flow cache program has no ID")
-	}
-	// expectCache checks both the runtime's attachments and the kernel's
-	// ingress hook of the child interface, as a cls_bpf filter or a tcx link.
-	expectCache := func(stage string, want bool) {
+	// No reload attaches a program of its own for the cache, on any hook.
+	expectNoCacheProgram := func(stage string) {
 		t.Helper()
-		tracked := false
 		for _, att := range rt.attachments {
-			if key, ok := att.key(); ok && key.isFlowCache() && key.linkIndex == childIndex {
-				tracked = true
+			if key, ok := att.key(); ok && key.isFlowCache() {
+				t.Fatalf("%s: a flow cache program is attached at %+v", stage, key)
 			}
-		}
-		running := false
-		filters, _ := netlink.FilterList(child, netlink.HANDLE_MIN_INGRESS)
-		for _, filter := range filters {
-			if bpf, ok := filter.(*netlink.BpfFilter); ok && bpf.Id == int(cacheID) {
-				running = true
-			}
-		}
-		if result, err := link.QueryPrograms(link.QueryOptions{Target: childIndex, Attach: ebpf.AttachTCXIngress}); err == nil {
-			for _, prog := range result.Programs {
-				if prog.ID == cacheID {
-					running = true
-				}
-			}
-		}
-		if tracked != want || running != want {
-			t.Fatalf("%s: flow cache on %s tracked=%t, in the kernel=%t, want %t", stage, topology.ChildHostIF, tracked, running, want)
 		}
 	}
-	childEntries := func() int {
+	// childRecords counts the child's front entries whose fast-path record
+	// is current: an invalidation only bumps the generation, which leaves
+	// the old records in place but unusable.
+	childRecords := func() int {
 		t.Helper()
-		counts, err := flowCacheTCPEntries(cacheMap)
-		if err != nil {
-			t.Fatalf("read flow cache: %v", err)
+		var state tcFlowCacheStateV4
+		if err := stateMap.Lookup(uint32(0), &state); err != nil {
+			t.Fatalf("read flow cache state: %v", err)
 		}
-		return counts[childIndex]
+		current := 0
+		iter := flowsMap.Iterate()
+		var key tcFlowKeyV4
+		var value tcFlowValueV4
+		for iter.Next(&key, &value) {
+			if int(key.IfIndex) == childIndex && key.Proto == unix.IPPROTO_TCP &&
+				value.Fast.Stamp == flowFastStampForTest(value.LastSeenNS, state.Generation) {
+				current++
+			}
+		}
+		if err := iter.Err(); err != nil {
+			t.Fatalf("read flow entries: %v", err)
+		}
+		return current
 	}
-	waitForChildEntries := func(stage string, stream *egressNATTCStream) {
+	waitForChildRecords := func(stage string, stream *egressNATTCStream) {
 		t.Helper()
 		deadline := time.Now().Add(3 * time.Second)
-		for childEntries() == 0 {
+		for childRecords() == 0 {
 			if time.Now().After(deadline) {
-				t.Fatalf("%s: no flow cache entry for %s\n%s", stage, topology.ChildHostIF, stream.logs())
+				t.Fatalf("%s: no current fast-path record for %s\n%s", stage, topology.ChildHostIF, stream.logs())
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	expectCache("before the hook", true)
+	expectNoCacheProgram("before the hook")
 
 	stream := startEgressNATTCStream(t, topology)
-	waitForChildEntries("before the hook", stream)
+	waitForChildRecords("before the hook", stream)
 
 	if global {
 		setControlScriptInterfacesForPipelineTest(t, pluginDir)
@@ -164,7 +152,7 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 		setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ChildHostIF)
 	}
 	reconcile("adding the hook")
-	expectCache("after adding the hook", false)
+	expectNoCacheProgram("after adding the hook")
 	// The second invalidation runs one grace period after the reload.
 	time.Sleep(2 * kernelPluginPipelineUpdateGrace)
 	hookPackets := func() uint64 {
@@ -186,33 +174,10 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 	// the hook's count is read again, so it covers no packet the hook could
 	// not have counted.
 	forwarded := openIPv4TCPFlowCounter(t, topology.ChildHostIF, egressNATClientAddr, egressNATBackendAddr)
-	// Invalidation bumps the generation and leaves old entries in the map;
-	// only entries of the current generation can serve packets.
-	stateMap := rt.coll.Maps[kernelTCFlowCacheStateMapName]
-	liveChildEntries := func() int {
-		t.Helper()
-		var state tcFlowCacheStateV4
-		if err := stateMap.Lookup(uint32(0), &state); err != nil {
-			t.Fatalf("read flow cache state: %v", err)
-		}
-		live := 0
-		iter := cacheMap.Iterate()
-		var key tcFlowKeyV4
-		var value tcFlowCacheValueV4
-		for iter.Next(&key, &value) {
-			if int(key.IfIndex) == childIndex && value.Generation == state.Generation {
-				live++
-			}
-		}
-		if err := iter.Err(); err != nil {
-			t.Fatalf("read flow cache: %v", err)
-		}
-		return live
-	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if n := liveChildEntries(); n != 0 {
-			t.Fatalf("flow cache holds %d current entries for %s after a hook was added there", n, topology.ChildHostIF)
+		if n := childRecords(); n != 0 {
+			t.Fatalf("flow cache holds %d current records for %s after a hook was added there", n, topology.ChildHostIF)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -226,8 +191,8 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 
 	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.BridgeIF)
 	reconcile("removing the hook")
-	expectCache("after removing the hook", true)
-	waitForChildEntries("after the hook was removed", stream)
+	expectNoCacheProgram("after removing the hook")
+	waitForChildRecords("after the hook was removed", stream)
 	stream.wait(t)
 }
 

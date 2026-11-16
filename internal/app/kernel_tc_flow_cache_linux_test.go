@@ -20,116 +20,31 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestFlowCacheAttachmentPlansRunAheadOfTheCore(t *testing.T) {
+// The flow cache runs inside the dispatchers: no reconcile plans a program
+// of its own on any hook, the place earlier releases used included.
+func TestKernelAttachmentPlansHoldNoFlowCacheProgram(t *testing.T) {
 	prog := &ebpf.Program{}
-	// 6 and 7 carry only plugin hooks and 8 a rule and an ingress hook: the
-	// core runs on all of them, the cache on none.
 	sets := kernelAttachmentRuleSets{
-		ForwardIngress:      map[int][]int64{3: {1}, 6: nil, 8: {3}},
-		ReplyIngress:        map[int][]int64{3: {2}, 4: {1}, 7: nil},
-		ForwardEgress:       map[int][]int64{5: {1}},
-		PluginIngressHooked: map[int]struct{}{6: {}, 7: {}, 8: {}},
+		ForwardIngress: map[int][]int64{3: {1}},
+		ReplyIngress:   map[int][]int64{3: {2}, 4: {1}},
+		ForwardEgress:  map[int][]int64{5: {1}},
 	}
-	programs := kernelAttachmentPrograms{
-		forwardProg:       prog,
-		replyProg:         prog,
-		forwardEgressProg: prog,
-		flowCacheProg:     prog,
-		tcx:               true,
-	}
-	plans := desiredKernelAttachmentPlansForRuleSets(sets, programs)
-	var order []string
-	cached := map[int]bool{}
-	core := map[int]bool{}
-	for _, plan := range plans {
-		order = append(order, strconv.Itoa(plan.ifindex)+"/"+plan.name)
-		if !plan.flowCache {
-			core[plan.ifindex] = true
-			continue
+	for _, tcx := range []bool{false, true} {
+		programs := kernelAttachmentPrograms{forwardProg: prog, replyProg: prog, forwardEgressProg: prog, tcx: tcx}
+		plans := desiredKernelAttachmentPlansForRuleSets(sets, programs)
+		if len(plans) == 0 {
+			t.Fatal("no attachment plans for the rule sets")
 		}
-		if plan.key.parent != netlink.HANDLE_MIN_INGRESS || !plan.key.tcx || plan.attach != kernelPluginPipelineAttachIngress {
-			t.Fatalf("flow cache plan = %+v, want an ingress tcx position", plan)
-		}
-		cached[plan.ifindex] = true
-	}
-	if len(cached) != 2 || !cached[3] || !cached[4] {
-		t.Fatalf("flow cache on ifindexes %v, want the rule ingress hooks 3 and 4", cached)
-	}
-	if !core[6] || !core[7] || !core[8] {
-		t.Fatalf("core on ifindexes %v, want the hooked interfaces 6, 7 and 8 too", core)
-	}
-	want := "3/" + kernelFlowCacheProgramName + " 3/" + kernelReplyProgramName + " 3/" + kernelForwardProgramName
-	if got := strings.Join(order[:3], " "); got != want {
-		t.Fatalf("plan order on ifindex 3 = %q, want %q", got, want)
-	}
-
-	// A global ingress hook keeps the core from recording anything.
-	global := sets.clone()
-	global.PluginIngressHookedAll = true
-	for _, plan := range desiredKernelAttachmentPlansForRuleSets(global, programs) {
-		if plan.flowCache {
-			t.Fatalf("flow cache plan under a global ingress hook: %+v", plan)
-		}
-	}
-
-	programs.flowCacheProg = nil
-	for _, plan := range desiredKernelAttachmentPlansForRuleSets(sets, programs) {
-		if plan.flowCache {
-			t.Fatalf("flow cache plan without the program: %+v", plan)
+		for _, plan := range plans {
+			if plan.key.isFlowCache() {
+				t.Fatalf("plan %+v takes the flow cache position", plan)
+			}
 		}
 	}
 }
 
-// The steady reconcile must notice an interface whose last rule left while
-// its plugin hooks stay, which sameTargets ignores, so the cache leaves it.
-func TestFlowCacheTargetsFollowRuleIDs(t *testing.T) {
-	ruled := kernelAttachmentRuleSets{
-		ForwardIngress: map[int][]int64{3: {1}},
-		ReplyIngress:   map[int][]int64{4: {1, 2}},
-	}
-	pluginOnly := kernelAttachmentRuleSets{
-		ForwardIngress: map[int][]int64{3: {1}},
-		ReplyIngress:   map[int][]int64{4: nil},
-	}
-	if !ruled.sameTargets(pluginOnly) {
-		t.Fatal("sameTargets must keep ignoring rule IDs")
-	}
-	if ruled.sameFlowCacheTargets(pluginOnly) || pluginOnly.sameFlowCacheTargets(ruled) {
-		t.Fatal("sameFlowCacheTargets = true across an interface that lost its last rule")
-	}
-	renumbered := kernelAttachmentRuleSets{
-		ForwardIngress: map[int][]int64{3: {7}},
-		ReplyIngress:   map[int][]int64{4: {8}},
-	}
-	if !ruled.sameFlowCacheTargets(renumbered) {
-		t.Fatal("sameFlowCacheTargets = false for the same ruled interfaces")
-	}
-	// An interface that serves rules in either direction keeps the cache.
-	mixed := kernelAttachmentRuleSets{
-		ForwardIngress: map[int][]int64{3: {1}, 4: {2}},
-		ReplyIngress:   map[int][]int64{4: nil},
-	}
-	if !ruled.sameFlowCacheTargets(mixed) {
-		t.Fatal("sameFlowCacheTargets = false although interface 4 still serves a rule")
-	}
-	// A rule interface that gains an ingress hook leaves the cache.
-	hooked := ruled.clone()
-	hooked.PluginIngressHooked = map[int]struct{}{3: {}}
-	if !ruled.sameTargets(hooked) {
-		t.Fatal("sameTargets must keep ignoring plugin hooks")
-	}
-	if ruled.sameFlowCacheTargets(hooked) || hooked.sameFlowCacheTargets(ruled) {
-		t.Fatal("sameFlowCacheTargets = true across a rule interface that gained an ingress hook")
-	}
-	merged := ruled.clone()
-	mergeKernelPluginPipelineAttachmentRuleSets(&merged, kernelAttachmentRuleSets{PluginIngressHookedAll: true})
-	if !merged.PluginIngressHookedAll || len(kernelFlowCacheTargets(merged)) != 0 {
-		t.Fatalf("merged sets = %+v, want a global ingress hook to clear the cache targets", merged)
-	}
-}
-
-// A configured flow cache stays off beside the options it cannot serve, and
-// the runtime names the option that keeps it off.
+// The flow cache, configured or on by default, stays off beside the options
+// it cannot serve, and the runtime names the option that keeps it off.
 func TestTCRuntimeKeepsFlowCacheOffBesideOptionsItCannotServe(t *testing.T) {
 	enabled := true
 	for _, tc := range []struct {
@@ -153,14 +68,28 @@ func TestTCRuntimeKeepsFlowCacheOffBesideOptionsItCannotServe(t *testing.T) {
 				tc.feature, rt.enableFlowCache, rt.flowCacheDisabledBy, tc.want == "", tc.want)
 		}
 	}
+	// Unconfigured, the cache is on by default and yields the same way.
+	for _, cfg := range []*Config{nil, {}} {
+		if rt := newTCKernelRuleRuntime(cfg); !rt.enableFlowCache || rt.flowCacheDisabledBy != "" {
+			t.Fatalf("unconfigured cache (config %v): enableFlowCache = %t, flowCacheDisabledBy = %q; want on", cfg, rt.enableFlowCache, rt.flowCacheDisabledBy)
+		}
+	}
 	rt := newTCKernelRuleRuntime(&Config{Experimental: map[string]bool{experimentalFeatureKernelTCReplyL2Cache: true}})
+	if rt.enableFlowCache || rt.flowCacheDisabledBy != experimentalFeatureKernelTCReplyL2Cache {
+		t.Fatalf("unconfigured cache beside the reply L2 cache: enableFlowCache = %t, flowCacheDisabledBy = %q; want off for %s",
+			rt.enableFlowCache, rt.flowCacheDisabledBy, experimentalFeatureKernelTCReplyL2Cache)
+	}
+	// Switched off, it stays off without a reason, whatever else is on.
+	disabled := false
+	rt = newTCKernelRuleRuntime(&Config{KernelTCFlowCacheSetting: &disabled, Experimental: map[string]bool{experimentalFeatureKernelTCReplyL2Cache: true}})
 	if rt.enableFlowCache || rt.flowCacheDisabledBy != "" {
-		t.Fatalf("unconfigured cache: enableFlowCache = %t, flowCacheDisabledBy = %q; want off without a reason", rt.enableFlowCache, rt.flowCacheDisabledBy)
+		t.Fatalf("disabled cache: enableFlowCache = %t, flowCacheDisabledBy = %q; want off without a reason", rt.enableFlowCache, rt.flowCacheDisabledBy)
 	}
 }
 
 // An in-place reconcile keeps the core attachments it no longer plans but
-// drops the flow caches it no longer plans, on cls_bpf and tcx alike.
+// drops a flow cache program an earlier release attached, on cls_bpf and tcx
+// alike.
 func TestWithoutUnplannedFlowCacheKeepsOnlyPlannedCaches(t *testing.T) {
 	filterAt := func(ifindex int, priority uint16, minor uint16) kernelAttachment {
 		return kernelAttachment{filter: &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{
@@ -176,11 +105,10 @@ func TestWithoutUnplannedFlowCacheKeepsOnlyPlannedCaches(t *testing.T) {
 		return kernelAttachment{tcx: &kernelTCXAttachment{key: key}}
 	}
 	for _, at := range []func(int, uint16, uint16) kernelAttachment{filterAt, tcxAt} {
-		keptCache := at(3, kernelFlowCacheFilterPrio, kernelFlowCacheFilterHandle)
-		hookedCache := at(4, kernelFlowCacheFilterPrio, kernelFlowCacheFilterHandle)
+		leftover := at(3, kernelFlowCacheFilterPrio, kernelFlowCacheFilterHandle)
 		staleCore := at(4, kernelForwardFilterPrio, kernelForwardFilterHandle)
-		planned := []kernelAttachment{keptCache, at(3, kernelForwardFilterPrio, kernelForwardFilterHandle)}
-		old := []kernelAttachment{keptCache, hookedCache, staleCore}
+		planned := []kernelAttachment{at(3, kernelForwardFilterPrio, kernelForwardFilterHandle)}
+		old := []kernelAttachment{leftover, staleCore}
 
 		got := withoutUnplannedFlowCache(mergeKernelAttachments(old, planned), planned)
 		keys := kernelAttachmentKeySet(got)
@@ -190,9 +118,9 @@ func TestWithoutUnplannedFlowCacheKeepsOnlyPlannedCaches(t *testing.T) {
 				t.Fatalf("attachments %v miss %+v", keys, key)
 			}
 		}
-		hookedKey, _ := hookedCache.key()
-		if _, ok := keys[hookedKey]; ok || len(got) != 3 {
-			t.Fatalf("attachments = %v, want the flow cache at %+v dropped", keys, hookedKey)
+		leftoverKey, _ := leftover.key()
+		if _, ok := keys[leftoverKey]; ok || len(got) != 2 {
+			t.Fatalf("attachments = %v, want the flow cache at %+v dropped", keys, leftoverKey)
 		}
 		if got := kernelAttachmentDeleteCount(old, got); got != 1 {
 			t.Fatalf("delete count = %d, want 1", got)
@@ -317,41 +245,27 @@ func (stream *egressNATTCStream) wait(t *testing.T) {
 	}
 }
 
-// flowCacheTCPArrivals lists the arrival ifindexes of the TCP entries
-// recorded under keyIfIndex.
-func flowCacheTCPArrivals(m *ebpf.Map, keyIfIndex int) ([]int, error) {
-	var arrivals []int
+// flowFastTCPRecords lists, per key ifindex of the TCP flow entries that
+// hold a fast-path record, the arrival ifindex each record was made for.
+// Retired records carry no stamp.
+func flowFastTCPRecords(m *ebpf.Map) (map[int][]int, error) {
+	records := map[int][]int{}
 	iter := m.Iterate()
 	var key tcFlowKeyV4
-	var value tcFlowCacheValueV4
+	var value tcFlowValueV4
 	for iter.Next(&key, &value) {
-		if key.Proto == syscall.IPPROTO_TCP && int(key.IfIndex) == keyIfIndex {
-			arrivals = append(arrivals, int(value.InIfIndex))
+		if key.Proto == syscall.IPPROTO_TCP && value.Fast.Stamp != 0 {
+			records[int(key.IfIndex)] = append(records[int(key.IfIndex)], int(value.Fast.InIfIndex))
 		}
 	}
-	return arrivals, iter.Err()
-}
-
-// flowCacheTCPEntries counts the TCP entries of the flow cache per key
-// ifindex.
-func flowCacheTCPEntries(m *ebpf.Map) (map[int]int, error) {
-	counts := map[int]int{}
-	iter := m.Iterate()
-	var key tcFlowKeyV4
-	var value tcFlowCacheValueV4
-	for iter.Next(&key, &value) {
-		if key.Proto == syscall.IPPROTO_TCP {
-			counts[int(key.IfIndex)]++
-		}
-	}
-	return counts, iter.Err()
+	return records, iter.Err()
 }
 
 // With the flow cache on, established egress NAT packets in both directions
-// leave through tc_flow_cache instead of the core, and a closing connection
-// drops its entries. With the uplink in a bridge, replies enter a port and
-// are recorded under the bridge, the ifindex of the reply flow, so a FIN or
-// RST from the client finds them.
+// leave straight from their flow entries' fast-path records, and a closing
+// connection retires the records. With the uplink in a bridge, replies enter
+// a port and their entry is keyed by the bridge, so the record names the
+// port the packets arrive on.
 func TestEgressNATTCFlowCacheServesEstablishedTCP(t *testing.T) {
 	if os.Getenv(egressNATTestEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
@@ -423,12 +337,12 @@ func testEgressNATTCFlowCacheServesEstablishedTCP(t *testing.T, natType string, 
 	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
 		t.Fatalf("egress NAT result = %+v, want running tc", result)
 	}
-	cacheProg := rt.coll.Programs[kernelFlowCacheProgramName]
-	cacheMap := rt.coll.Maps[kernelTCFlowCacheMapName]
+	flowsMap := rt.coll.Maps[kernelFlowsMapNameV4]
+	diagMap := rt.coll.Maps[kernelDiagMapName]
 	forwardProg := rt.coll.Programs[kernelForwardDispatchProgramName]
 	replyProg := rt.coll.Programs[kernelReplyDispatchProgramName]
-	if cacheProg == nil || cacheMap == nil || forwardProg == nil || replyProg == nil {
-		t.Fatal("flow cache or dispatch programs are unavailable")
+	if flowsMap == nil || diagMap == nil || forwardProg == nil || replyProg == nil {
+		t.Fatal("flow map, diag map or dispatch programs are unavailable")
 	}
 	child, err := netlink.LinkByName(topology.ChildHostIF)
 	if err != nil {
@@ -438,8 +352,8 @@ func testEgressNATTCFlowCacheServesEstablishedTCP(t *testing.T, natType string, 
 	if err != nil {
 		t.Fatalf("resolve %s: %v", topology.UplinkHostIF, err)
 	}
-	// Replies are recorded under the reply flow's ifindex: the rule's out
-	// interface, also when they enter one of its ports.
+	// The reply entry is keyed by the rule's out interface, also when
+	// replies enter one of its ports.
 	out, err := netlink.LinkByName(outInterface)
 	if err != nil {
 		t.Fatalf("resolve %s: %v", outInterface, err)
@@ -454,74 +368,81 @@ func testEgressNATTCFlowCacheServesEstablishedTCP(t *testing.T, natType string, 
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		counts, err := flowCacheTCPEntries(cacheMap)
+		records, err := flowFastTCPRecords(flowsMap)
 		if err != nil {
-			t.Fatalf("read flow cache: %v", err)
+			t.Fatalf("read flow entries: %v", err)
 		}
-		if counts[child.Attrs().Index] > 0 && counts[out.Attrs().Index] > 0 {
+		if len(records[child.Attrs().Index]) > 0 && len(records[out.Attrs().Index]) > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("flow cache entries per ifindex = %v, want both %s and %s\n%s", counts, topology.ChildHostIF, outInterface, stream.logs())
+			t.Fatalf("fast-path records per key ifindex = %v, want both %s and %s\n%s", records, topology.ChildHostIF, outInterface, stream.logs())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	arrivals, err := flowCacheTCPArrivals(cacheMap, out.Attrs().Index)
+	records, err := flowFastTCPRecords(flowsMap)
 	if err != nil {
-		t.Fatalf("read flow cache: %v", err)
+		t.Fatalf("read flow entries: %v", err)
 	}
-	for _, arrival := range arrivals {
+	for _, arrival := range records[out.Attrs().Index] {
 		if arrival != uplink.Attrs().Index {
-			t.Fatalf("reply entries under %s record arrivals %v, want %s=%d", outInterface, arrivals, topology.UplinkHostIF, uplink.Attrs().Index)
+			t.Fatalf("reply records under %s name arrivals %v, want %s=%d", outInterface, records[out.Attrs().Index], topology.UplinkHostIF, uplink.Attrs().Index)
 		}
 	}
 
-	runs := func() (cache uint64, core uint64) {
+	runs := func() (hits, forward, reply uint64) {
 		for _, item := range []struct {
 			prog *ebpf.Program
 			dst  *uint64
-		}{{cacheProg, &cache}, {forwardProg, &core}, {replyProg, &core}} {
+		}{{forwardProg, &forward}, {replyProg, &reply}} {
 			s, err := item.prog.Stats()
 			if err != nil {
 				t.Fatalf("read program statistics: %v", err)
 			}
-			*item.dst += s.RunCount
+			*item.dst = s.RunCount
 		}
-		return cache, core
+		return flowCacheHitsForTest(t, diagMap), forward, reply
 	}
-	cacheBefore, coreBefore := runs()
+	// The stream's packets in both directions, counted where they enter the
+	// router: the client's at the child, the backend's at the uplink port.
+	sent := openIPv4TCPFlowCounter(t, topology.ChildHostIF, egressNATClientAddr, egressNATBackendAddr)
+	replied := openIPv4TCPFlowCounter(t, topology.UplinkHostIF, egressNATBackendAddr, egressNATUplinkAddr)
+	hitsBefore, forwardBefore, replyBefore := runs()
 	time.Sleep(time.Second)
-	cacheAfter, coreAfter := runs()
-	cacheRuns, coreRuns := cacheAfter-cacheBefore, coreAfter-coreBefore
-	// The core still takes each flow's slow path once per window and the
-	// first packet after it; everything else must stay in the cache.
-	if cacheRuns < 50 || coreRuns*2 > cacheRuns {
-		t.Fatalf("within one second tc_flow_cache ran %d times and the core %d times, want the cache to serve most packets", cacheRuns, coreRuns)
+	hitsAfter, forwardAfter, replyAfter := runs()
+	packets := sent.close(t) + replied.close(t)
+	hits := hitsAfter - hitsBefore
+	t.Logf("within one second the stream sent %d packets, %d left from fast-path records; the forward dispatcher ran %d times, the reply dispatcher %d",
+		packets, hits, forwardAfter-forwardBefore, replyAfter-replyBefore)
+	// Each direction still takes the full path for the first packet of a
+	// window and the next one, which records; everything else must leave
+	// from the records.
+	if packets < 50 || hits > packets || hits*3 < packets*2 {
+		t.Fatalf("%d of %d stream packets left from fast-path records, want most of them", hits, packets)
 	}
-	t.Logf("within one second tc_flow_cache ran %d times, the core %d times", cacheRuns, coreRuns)
 
 	stream.wait(t)
 
-	// FIN and RST go through the core, which drops the connection's entries.
+	// FIN and RST go through the full path, which retires both records.
 	deadline = time.Now().Add(3 * time.Second)
 	for {
-		counts, err := flowCacheTCPEntries(cacheMap)
+		records, err := flowFastTCPRecords(flowsMap)
 		if err != nil {
-			t.Fatalf("read flow cache: %v", err)
+			t.Fatalf("read flow entries: %v", err)
 		}
-		if len(counts) == 0 {
+		if len(records) == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("flow cache kept entries after the connection closed: %v", counts)
+			t.Fatalf("fast-path records outlived the connection: %v", records)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 // A plugin hook on an interface's ingress keeps that interface out of the
-// flow cache, so the hook sees every packet: neither the cache program nor
-// entries for it. The other direction, without hooks, is still cached.
+// flow cache, so the hook sees every packet: no record for packets entering
+// it. The other direction, without hooks, is still recorded.
 func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 	if os.Getenv(egressNATTestEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
@@ -568,9 +489,9 @@ func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 	if rt.attachmentMode != kernelTCAttachmentProgramModePipelineV4 {
 		t.Fatalf("attachmentMode = %q, want %q; plugin snapshot = %+v", rt.attachmentMode, kernelTCAttachmentProgramModePipelineV4, rt.PluginSnapshot())
 	}
-	cacheMap := rt.coll.Maps[kernelTCFlowCacheMapName]
-	if cacheMap == nil {
-		t.Fatal("flow cache map is unavailable")
+	flowsMap := rt.coll.Maps[kernelFlowsMapNameV4]
+	if flowsMap == nil {
+		t.Fatal("flow map is unavailable")
 	}
 	child, err := netlink.LinkByName(topology.ChildHostIF)
 	if err != nil {
@@ -584,57 +505,51 @@ func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve %s: %v", topology.BridgeIF, err)
 	}
-	cacheOn := map[int]bool{}
 	coreOn := map[int]bool{}
 	for _, att := range rt.attachments {
 		key, ok := att.key()
 		if !ok || key.parent != netlink.HANDLE_MIN_INGRESS {
 			continue
 		}
-		if key.priority == kernelFlowCacheFilterPrio {
-			cacheOn[key.linkIndex] = true
-		} else {
-			coreOn[key.linkIndex] = true
+		if key.isFlowCache() {
+			t.Fatalf("a flow cache program is attached: %+v", key)
 		}
+		coreOn[key.linkIndex] = true
 	}
-	if !coreOn[bridge.Attrs().Index] || cacheOn[bridge.Attrs().Index] {
-		t.Fatalf("on %s, which only a plugin hook needs: core attached %v, flow cache attached %v; want the core alone", topology.BridgeIF, coreOn[bridge.Attrs().Index], cacheOn[bridge.Attrs().Index])
-	}
-	if !coreOn[child.Attrs().Index] || cacheOn[child.Attrs().Index] {
-		t.Fatalf("on %s, where the rule receives packets behind a plugin hook: core attached %v, flow cache attached %v; want the core alone", topology.ChildHostIF, coreOn[child.Attrs().Index], cacheOn[child.Attrs().Index])
-	}
-	if !cacheOn[uplink.Attrs().Index] {
-		t.Fatalf("flow cache attached on ifindexes %v, want %s, where the rule receives replies without hooks", cacheOn, topology.UplinkHostIF)
+	for _, link := range []netlink.Link{bridge, child, uplink} {
+		if !coreOn[link.Attrs().Index] {
+			t.Fatalf("core attached on ingress of ifindexes %v, want %s too", coreOn, link.Attrs().Name)
+		}
 	}
 
 	stream := startEgressNATTCStream(t, topology)
 	hooked := func() {
 		t.Helper()
-		counts, err := flowCacheTCPEntries(cacheMap)
+		records, err := flowFastTCPRecords(flowsMap)
 		if err != nil {
-			t.Fatalf("read flow cache: %v", err)
+			t.Fatalf("read flow entries: %v", err)
 		}
-		if counts[child.Attrs().Index] != 0 {
-			t.Fatalf("flow cache recorded %d entries for %s, whose ingress runs a plugin hook", counts[child.Attrs().Index], topology.ChildHostIF)
+		if n := len(records[child.Attrs().Index]); n != 0 {
+			t.Fatalf("flow cache recorded %d entries for %s, whose ingress runs a plugin hook", n, topology.ChildHostIF)
 		}
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		hooked()
-		counts, err := flowCacheTCPEntries(cacheMap)
+		records, err := flowFastTCPRecords(flowsMap)
 		if err != nil {
-			t.Fatalf("read flow cache: %v", err)
+			t.Fatalf("read flow entries: %v", err)
 		}
-		if counts[uplink.Attrs().Index] > 0 {
+		if len(records[uplink.Attrs().Index]) > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("flow cache entries per ifindex = %v, want the reply direction on %s cached\n%s", counts, topology.UplinkHostIF, stream.logs())
+			t.Fatalf("fast-path records per key ifindex = %v, want the reply direction on %s recorded\n%s", records, topology.UplinkHostIF, stream.logs())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// Established traffic keeps entering the hooked interface without an
-	// entry appearing for it.
+	// Established traffic keeps entering the hooked interface without a
+	// record appearing for it.
 	time.Sleep(500 * time.Millisecond)
 	hooked()
 	stream.wait(t)

@@ -33,6 +33,7 @@ type kernelDiagValueV4 struct {
 	PMTUToStack                         uint64
 	OversizeDrop                        uint64
 	FragmentForwarded                   uint64
+	FlowCacheHit                        uint64
 }
 
 type kernelRuntimeDiagSnapshot struct {
@@ -59,6 +60,7 @@ type kernelRuntimeDiagSnapshot struct {
 	PMTUToStack                         uint64
 	OversizeDrop                        uint64
 	FragmentForwarded                   uint64
+	FlowCacheHit                        uint64
 	LastError                           string
 }
 
@@ -122,6 +124,7 @@ func snapshotKernelRuntimeDiagFromMap(diagMap *ebpf.Map) kernelRuntimeDiagSnapsh
 		PMTUToStack:                         value.PMTUToStack,
 		OversizeDrop:                        value.OversizeDrop,
 		FragmentForwarded:                   value.FragmentForwarded,
+		FlowCacheHit:                        value.FlowCacheHit,
 	}
 }
 
@@ -152,6 +155,7 @@ func applyKernelRuntimeDiagView(view *KernelEngineRuntimeView, snapshot kernelRu
 	view.DiagPMTUToStack = snapshot.PMTUToStack
 	view.DiagOversizeDrop = snapshot.OversizeDrop
 	view.DiagFragmentForwarded = snapshot.FragmentForwarded
+	view.DiagFlowCacheHit = snapshot.FlowCacheHit
 	view.DiagSnapshotError = snapshot.LastError
 }
 
@@ -181,6 +185,7 @@ func aggregateKernelPerCPUDiag(values []kernelDiagValueV4) kernelDiagValueV4 {
 		out.PMTUToStack += value.PMTUToStack
 		out.OversizeDrop += value.OversizeDrop
 		out.FragmentForwarded += value.FragmentForwarded
+		out.FlowCacheHit += value.FlowCacheHit
 	}
 	return out
 }
