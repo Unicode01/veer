@@ -120,7 +120,7 @@ exports.onTimer = function (ctx) {
 
 exports.onResourceApply = function (ctx) {
   if (!ctx.resource || ctx.resource.id !== 'profiles') return;
-  var records = ctx.records || [];
+  var records = currentProfileRecords(ctx.records || []);
   try {
     applyRecords(records, true);
   } finally {
@@ -241,6 +241,27 @@ function armRepairTimer(records) {
     }
   }
   timer.clear('lan_repair');
+}
+
+// The host reads ctx.records before the event waits for this plugin's queue,
+// so a teardown or an API delete that ran in between may have changed or
+// removed them. Applying the pre-teardown snapshot would rebuild the bridge,
+// re-enslave its ports and re-enable its plans for a LAN that is gone. Use
+// each stored record as it is now and skip deleted ones. Records without a
+// stored revision were supplied by the caller as is.
+function currentProfileRecords(records) {
+  var out = [];
+  for (var i = 0; i < records.length; i++) {
+    var record = records[i];
+    if (!record) continue;
+    if (!(record.revision > 0)) {
+      out.push(record);
+      continue;
+    }
+    var stored = resources.get('profiles', record.key);
+    if (stored) out.push(stored);
+  }
+  return out;
 }
 
 function mergedProfileRecords(records) {
