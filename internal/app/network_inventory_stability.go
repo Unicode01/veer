@@ -19,6 +19,7 @@ type networkInterfaceMissingState struct {
 
 func cloneInterfaceInfo(info InterfaceInfo) InterfaceInfo {
 	info.Addrs = append([]string(nil), info.Addrs...)
+	info.IPv4Networks = append([]string(nil), info.IPv4Networks...)
 	return info
 }
 

@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 )
@@ -413,35 +414,90 @@ func parseEgressNATIPv4Uint32(text string) (uint32, error) {
 	return ipv4BytesToUint32(ip4), nil
 }
 
-func buildKernelEgressNATLocalIPv4Set(rules []Rule) (map[uint32]uint8, error) {
-	return buildKernelEgressNATLocalIPv4SetWithSnapshot(rules, loadEgressNATInterfaceSnapshot())
+// kernelEgressNATLocalInventory is what the kernel egress NAT leaves to the
+// host: packets for its own addresses (Addrs), and packets for the networks
+// directly connected to its interfaces (Networks: true where the kernel
+// routes them untranslated, false for the networks of egress NAT uplinks).
+// The most specific network wins, so an uplink's network inside a larger
+// LAN network is still translated.
+type kernelEgressNATLocalInventory struct {
+	Addrs    map[uint32]uint8
+	Networks map[netip.Prefix]bool
 }
 
-func buildKernelEgressNATLocalIPv4SetWithSnapshot(rules []Rule, snapshot egressNATInterfaceSnapshot) (map[uint32]uint8, error) {
-	hasEgressNAT := false
+func (inv kernelEgressNATLocalInventory) empty() bool {
+	return len(inv.Addrs) == 0 && len(inv.Networks) == 0
+}
+
+func buildKernelEgressNATLocalInventory(rules []Rule) (kernelEgressNATLocalInventory, error) {
+	return buildKernelEgressNATLocalInventoryWithSnapshot(rules, loadEgressNATInterfaceSnapshot())
+}
+
+func buildKernelEgressNATLocalInventoryWithSnapshot(rules []Rule, snapshot egressNATInterfaceSnapshot) (kernelEgressNATLocalInventory, error) {
+	uplinks := make(map[string]struct{})
 	for _, rule := range rules {
 		if isKernelEgressNATRule(rule) {
-			hasEgressNAT = true
-			break
+			uplinks[strings.TrimSpace(rule.OutInterface)] = struct{}{}
 		}
 	}
-	if !hasEgressNAT {
-		return map[uint32]uint8{}, nil
+	if len(uplinks) == 0 {
+		return kernelEgressNATLocalInventory{Addrs: map[uint32]uint8{}, Networks: map[netip.Prefix]bool{}}, nil
 	}
 
 	if snapshot.Err != nil {
-		return nil, snapshot.Err
+		return kernelEgressNATLocalInventory{}, snapshot.Err
 	}
 	addresses := listEgressNATBypassIPv4s(snapshot.Infos)
-	out := make(map[uint32]uint8, len(addresses))
+	inv := kernelEgressNATLocalInventory{
+		Addrs:    make(map[uint32]uint8, len(addresses)),
+		Networks: listEgressNATLocalNetworks(snapshot.Infos, uplinks),
+	}
 	for _, addr := range addresses {
 		value, err := parseEgressNATIPv4Uint32(addr)
 		if err != nil {
-			return nil, fmt.Errorf("parse local IPv4 %q: %w", addr, err)
+			return kernelEgressNATLocalInventory{}, fmt.Errorf("parse local IPv4 %q: %w", addr, err)
 		}
-		out[value] = 1
+		inv.Addrs[value] = 1
 	}
-	return out, nil
+	return inv, nil
+}
+
+// listEgressNATLocalNetworks maps each IPv4 network directly connected to an
+// interface to whether egress NAT leaves it to the kernel: true unless the
+// interface is an egress NAT uplink, or the bridge or parent link of one (an
+// uplink may be a port or VLAN of the device holding the address). A network
+// on both kinds of interface stays translated. Host routes (/32) and
+// loopback networks are left out.
+func listEgressNATLocalNetworks(infos []InterfaceInfo, uplinks map[string]struct{}) map[netip.Prefix]bool {
+	isUplink := make(map[string]bool, len(uplinks))
+	for _, info := range infos {
+		if _, ok := uplinks[info.Name]; !ok {
+			continue
+		}
+		isUplink[info.Name] = true
+		if parent := strings.TrimSpace(info.Parent); parent != "" {
+			isUplink[parent] = true
+		}
+	}
+	out := make(map[netip.Prefix]bool)
+	for _, info := range infos {
+		for _, text := range info.IPv4Networks {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(text))
+			if err != nil || !prefix.Addr().Is4() || prefix.Bits() >= 32 {
+				continue
+			}
+			prefix = prefix.Masked()
+			if prefix.Addr().IsLoopback() {
+				continue
+			}
+			routed := !isUplink[info.Name]
+			if current, ok := out[prefix]; ok {
+				routed = routed && current
+			}
+			out[prefix] = routed
+		}
+	}
+	return out
 }
 
 func buildEgressNATSyntheticRule(item EgressNAT, childInterface string, id int64, proto string) Rule {

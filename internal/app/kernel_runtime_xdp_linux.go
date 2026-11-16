@@ -159,6 +159,7 @@ type xdpCollectionPieces struct {
 	natOldV6             *ebpf.Map
 	flowMigrationState   *ebpf.Map
 	localIPv4s           *ebpf.Map
+	localNets            *ebpf.Map
 	localMACs            *ebpf.Map
 }
 
@@ -363,7 +364,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 
 	requiredIfIndices := collectXDPInterfaces(prepared)
 	samePrepared := rt.samePreparedRulesLocked(prepared, requiredIfIndices)
-	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
+	desiredLocal, localIPv4Err := buildKernelEgressNATLocalInventory(rules)
 	desiredLocalMACs := buildXDPKernelLocalMACMap(prepared)
 	if localIPv4Err != nil && !samePrepared {
 		msg := fmt.Sprintf("build xdp egress nat local IPv4 inventory: %v", localIPv4Err)
@@ -382,10 +383,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		} else if pieces, err := lookupXDPCollectionPieces(rt.coll); err != nil {
 			log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory skipped: %v", err)
 		} else if pieces.localIPv4s == nil {
-			if len(desiredLocalIPv4s) > 0 {
+			if len(desiredLocal.Addrs) > 0 {
 				log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory skipped: embedded xdp eBPF object is missing map %q", kernelLocalIPv4MapName)
 			}
-		} else if err := syncKernelLocalIPv4Map(pieces.localIPv4s, desiredLocalIPv4s); err != nil {
+		} else if err := syncKernelEgressNATLocalMaps(pieces.localIPv4s, pieces.localNets, desiredLocal); err != nil {
 			log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory failed: %v", err)
 		}
 		if pieces, err := lookupXDPCollectionPieces(rt.coll); err != nil {
@@ -828,7 +829,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		return results, nil
 	}
 	if pieces.localIPv4s != nil {
-		if err := syncKernelLocalIPv4Map(pieces.localIPv4s, desiredLocalIPv4s); err != nil {
+		if err := syncKernelEgressNATLocalMaps(pieces.localIPv4s, pieces.localNets, desiredLocal); err != nil {
 			coll.Close()
 			msg := fmt.Sprintf("sync xdp local IPv4 bypass map: %v", err)
 			if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -840,7 +841,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			}
 			return results, nil
 		}
-	} else if len(desiredLocalIPv4s) > 0 {
+	} else if len(desiredLocal.Addrs) > 0 {
 		coll.Close()
 		msg := fmt.Sprintf("embedded xdp eBPF object is missing map %q; rebuild the xdp eBPF object", kernelLocalIPv4MapName)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -1453,7 +1454,7 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 		}
 	}
 	if pieces.localIPv4s != nil {
-		if err := syncKernelLocalIPv4Map(pieces.localIPv4s, nil); err != nil {
+		if err := syncKernelEgressNATLocalMaps(pieces.localIPv4s, pieces.localNets, kernelEgressNATLocalInventory{}); err != nil {
 			return fmt.Errorf("clear xdp local IPv4 bypass map during drain: %w", err)
 		}
 	}
@@ -1801,6 +1802,7 @@ func lookupXDPCollectionPieces(coll *ebpf.Collection) (xdpCollectionPieces, erro
 		natOldV6:             coll.Maps[kernelTCNatPortsOldMapNameV6],
 		flowMigrationState:   coll.Maps[kernelXDPFlowMigrationStateMapName],
 		localIPv4s:           coll.Maps[kernelLocalIPv4MapName],
+		localNets:            coll.Maps[kernelLocalNetsMapName],
 		localMACs:            coll.Maps[kernelLocalMACMapName],
 	}
 	if pieces.prog == nil ||

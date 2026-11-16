@@ -5,6 +5,9 @@ type InterfaceInfo struct {
 	Addrs  []string `json:"addrs"`
 	Parent string   `json:"parent,omitempty"`
 	Kind   string   `json:"kind,omitempty"`
+	// IPv4Networks holds the network of each IPv4 address, such as
+	// "192.168.100.0/24"; it stays internal.
+	IPv4Networks []string `json:"-"`
 }
 
 type HostInterfaceAddress struct {

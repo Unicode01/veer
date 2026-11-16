@@ -55,6 +55,7 @@ const (
 	kernelNatPortsMapName                     = kernelNatPortsMapNameV4
 	kernelIfParentMapName                     = "if_parent_v4"
 	kernelLocalIPv4MapName                    = "local_ipv4s_v4"
+	kernelLocalNetsMapName                    = "local_nets_v4"
 	kernelLocalMACMapName                     = "local_macs"
 	kernelNATConfigMapName                    = "nat_config_v4"
 	kernelStatsMapName                        = "stats_v4"
@@ -929,7 +930,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 	}
 	samePrepared := rt.samePreparedRulesLocked(prepared, attachmentRuleSets)
-	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
+	desiredLocal, localIPv4Err := buildKernelEgressNATLocalInventory(rules)
 	desiredLocalMACs := buildKernelLocalMACMap(prepared)
 	if localIPv4Err != nil && !samePrepared {
 		msg := fmt.Sprintf("build kernel egress nat local IPv4 inventory: %v", localIPv4Err)
@@ -945,7 +946,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	if samePrepared {
 		if localIPv4Err != nil {
 			log.Printf("kernel dataplane reconcile: keep current local IPv4 bypass inventory after refresh failure: %v", localIPv4Err)
-		} else if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], desiredLocalIPv4s); err != nil {
+		} else if err := syncKernelEgressNATLocalMaps(rt.coll.Maps[kernelLocalIPv4MapName], rt.coll.Maps[kernelLocalNetsMapName], desiredLocal); err != nil {
 			log.Printf("kernel dataplane reconcile: refresh local IPv4 bypass inventory failed: %v", err)
 		}
 		if err := syncKernelLocalMACMap(rt.coll.Maps[kernelLocalMACMapName], desiredLocalMACs); err != nil {
@@ -992,7 +993,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		)
 	}
 	if rt.canReconcileInPlaceLocked(desiredCapacities) && !preferFreshMapGrowth {
-		if err := rt.reconcileInPlaceLocked(prepared, attachmentRuleSets, parentIfMap, desiredLocalIPv4s, desiredLocalMACs, pluginCatalog, pluginDesired, pluginStates, pluginOnlyPipeline, flowPurgePlan, results, &reconcileMetrics); err == nil {
+		if err := rt.reconcileInPlaceLocked(prepared, attachmentRuleSets, parentIfMap, desiredLocal, desiredLocalMACs, pluginCatalog, pluginDesired, pluginStates, pluginOnlyPipeline, flowPurgePlan, results, &reconcileMetrics); err == nil {
 			return results, nil
 		} else {
 			log.Printf("kernel dataplane reconcile: in-place update unavailable, falling back to collection rebuild: %v", err)
@@ -1440,7 +1441,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	if err := narrowKernelTCIfindexHints(coll, prepared); err != nil {
 		log.Printf("kernel dataplane reconcile: sync tc ifindex hints failed: %v", err)
 	}
-	if err := syncKernelLocalIPv4Map(coll.Maps[kernelLocalIPv4MapName], desiredLocalIPv4s); err != nil {
+	if err := syncKernelEgressNATLocalMaps(coll.Maps[kernelLocalIPv4MapName], coll.Maps[kernelLocalNetsMapName], desiredLocal); err != nil {
 		coll.Close()
 		msg := fmt.Sprintf("sync kernel local IPv4 bypass map: %v", err)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -3082,7 +3083,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if err := narrowKernelTCIfindexHints(rt.coll, nil); err != nil {
 		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints during drain failed: %v", err)
 	}
-	if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
+	if err := syncKernelEgressNATLocalMaps(rt.coll.Maps[kernelLocalIPv4MapName], rt.coll.Maps[kernelLocalNetsMapName], kernelEgressNATLocalInventory{}); err != nil {
 		return fmt.Errorf("clear kernel local IPv4 bypass map during drain: %w", err)
 	}
 	if err := syncKernelLocalMACMap(rt.coll.Maps[kernelLocalMACMapName], nil); err != nil {
@@ -3113,7 +3114,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	return nil
 }
 
-func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, attachmentRuleSets kernelAttachmentRuleSets, parentIfMap map[uint32]uint32, localIPv4s map[uint32]uint8, localMACs map[uint32]kernelLocalMACValue, pluginCatalog PluginCatalog, pluginDesired []kernelPluginPipelineDesiredPlugin, pluginStates map[string]PluginRuntimeState, pluginOnlyPipeline bool, flowPurgePlan kernelFlowPurgePlan, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
+func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, attachmentRuleSets kernelAttachmentRuleSets, parentIfMap map[uint32]uint32, local kernelEgressNATLocalInventory, localMACs map[uint32]kernelLocalMACValue, pluginCatalog PluginCatalog, pluginDesired []kernelPluginPipelineDesiredPlugin, pluginStates map[string]PluginRuntimeState, pluginOnlyPipeline bool, flowPurgePlan kernelFlowPurgePlan, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
 	if err != nil {
 		return err
@@ -3182,8 +3183,8 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	}
 	attachDuration := time.Since(attachStartedAt)
 
-	if len(localIPv4s) > 0 {
-		if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], localIPv4s); err != nil {
+	if !local.empty() {
+		if err := syncKernelEgressNATLocalMaps(rt.coll.Maps[kernelLocalIPv4MapName], rt.coll.Maps[kernelLocalNetsMapName], local); err != nil {
 			rt.discardAttachmentsLocked(createdAttachments)
 			return fmt.Errorf("sync kernel local IPv4 bypass map: %w", err)
 		}
@@ -3213,8 +3214,8 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err := narrowKernelTCIfindexHints(rt.coll, prepared); err != nil {
 		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints failed: %v", err)
 	}
-	if len(localIPv4s) == 0 {
-		if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
+	if local.empty() {
+		if err := syncKernelEgressNATLocalMaps(rt.coll.Maps[kernelLocalIPv4MapName], rt.coll.Maps[kernelLocalNetsMapName], kernelEgressNATLocalInventory{}); err != nil {
 			rt.discardAttachmentsLocked(createdAttachments)
 			return fmt.Errorf("sync kernel local IPv4 bypass map: %w", err)
 		}

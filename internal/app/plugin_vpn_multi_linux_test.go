@@ -223,6 +223,22 @@ func runVPNMultiTopology(t *testing.T) {
 		ip("-n", exit.ns, "link", "set", peer, "up")
 		ip("-n", exit.ns, "route", "add", "default", "via", "192.168.10.1")
 	}
+	// A guest on a second LAN bridge without egress NAT, which every exit's
+	// guest must keep reaching while its exit is broken.
+	lanPeer := fmt.Sprintf("vml-%d", os.Getpid())
+	ip("netns", "add", lanPeer)
+	t.Cleanup(func() { _ = exec.Command("ip", "netns", "del", lanPeer).Run() })
+	ip("-n", lanPeer, "link", "set", "lo", "up")
+	ip("link", "add", "br-lan2", "type", "bridge")
+	ip("addr", "add", "192.168.30.1/24", "dev", "br-lan2")
+	ip("link", "set", "br-lan2", "up")
+	ip("link", "add", "lanport", "type", "veth", "peer", "name", "lanclient")
+	ip("link", "set", "lanport", "master", "br-lan2")
+	ip("link", "set", "lanport", "up")
+	ip("link", "set", "lanclient", "netns", lanPeer)
+	ip("-n", lanPeer, "addr", "add", "192.168.30.20/24", "dev", "lanclient")
+	ip("-n", lanPeer, "link", "set", "lanclient", "up")
+	ip("-n", lanPeer, "route", "add", "default", "via", "192.168.30.1")
 	createUplink := func(i int) {
 		t.Helper()
 		wan, outside := fmt.Sprintf("wan%d", i), fmt.Sprintf("outside%d", i)
@@ -652,6 +668,22 @@ func runVPNMultiTopology(t *testing.T) {
 			if strings.Contains(line, probe) && !strings.HasPrefix(line, exit.source+"|") {
 				t.Fatalf("unavailable VPN leaked traffic to backend: %s", leaked)
 			}
+		}
+		// A broken exit holds back what would leave by it, not the guest's
+		// traffic to the LAN, on its own bridge or routed to another.
+		lanAddr := ""
+		for i, candidate := range exits {
+			if candidate == exit {
+				lanAddr = fmt.Sprintf("192.168.10.%d", 20+i)
+			}
+		}
+		paths := []lateralPath{{exit.key + "_to_other_bridge", exit.ns, lanPeer, "192.168.30.20", lanAddr, []string{"tcp", "udp", "icmp"}}}
+		if peer := exits[len(exits)-1]; peer != exit {
+			paths = append(paths, lateralPath{exit.key + "_to_same_bridge", exit.ns, peer.ns, fmt.Sprintf("192.168.10.%d", 20+len(exits)-1), lanAddr, []string{"tcp", "udp"}})
+		}
+		runLateralPaths(t, "exit broken", paths)
+		if t.Failed() {
+			t.FailNow()
 		}
 		assertHealthy()
 	}

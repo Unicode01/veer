@@ -480,6 +480,21 @@ struct bpf_map_def SEC("maps") local_ipv4s_v4 = {
 	.max_entries = 4096,
 };
 
+/* addr in network byte order, as an LPM trie compares it. */
+struct local_net_key_v4 {
+	__u32 prefixlen;
+	__u32 addr;
+};
+
+/* The host's directly connected IPv4 networks; see the TC program. */
+struct bpf_map_def SEC("maps") local_nets_v4 = {
+	.type = BPF_MAP_TYPE_LPM_TRIE,
+	.key_size = sizeof(struct local_net_key_v4),
+	.value_size = sizeof(__u8),
+	.max_entries = 1024,
+	.map_flags = BPF_F_NO_PREALLOC,
+};
+
 struct bpf_map_def SEC("maps") local_macs = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u32),
@@ -1364,6 +1379,25 @@ static __always_inline int is_local_ipv4(__u32 addr)
 	__u8 *present = bpf_map_lookup_elem(&local_ipv4s_v4, &key);
 
 	return present && *present != 0;
+}
+
+/*
+ * Whether egress NAT leaves a packet for addr (host byte order) to the
+ * kernel: one for this host, or for a network directly connected to an
+ * interface other than an egress NAT uplink.
+ */
+static __always_inline int egress_nat_dst_is_local_v4(__u32 addr)
+{
+	struct local_net_key_v4 key = {
+		.prefixlen = 32,
+		.addr = bpf_htonl(addr),
+	};
+	__u8 *routed;
+
+	if (is_local_ipv4(addr))
+		return 1;
+	routed = bpf_map_lookup_elem(&local_nets_v4, &key);
+	return routed && *routed != 0;
 }
 
 static __always_inline int is_fullnat_front_flow_v6(const struct flow_value_v6 *flow)
@@ -3632,7 +3666,7 @@ static __always_inline int forward_xdp_v4_impl(struct xdp_md *xdp)
 	dispatch->rule_value = *rule;
 	dispatch->have_rule = 1;
 	if (is_fullnat_rule(rule)) {
-		if (is_egress_nat_rule(rule) && is_local_ipv4(dispatch->ctx.dst_addr))
+		if (is_egress_nat_rule(rule) && egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 			return XDP_PASS;
 		if (egress_nat_dst_mac_mismatch(xdp, rule))
 			return XDP_PASS;
@@ -3697,7 +3731,7 @@ static __always_inline int forward_xdp_v4_fullnat_forward_impl(struct xdp_md *xd
 
 	if (!is_fullnat_rule(rule))
 		return XDP_PASS;
-	if (is_egress_nat_rule(rule) && is_local_ipv4(dispatch->ctx.dst_addr))
+	if (is_egress_nat_rule(rule) && egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 		return XDP_PASS;
 	if (egress_nat_dst_mac_mismatch(xdp, rule))
 		return XDP_PASS;

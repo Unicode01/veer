@@ -2,6 +2,7 @@ package app
 
 import (
 	"net"
+	"net/netip"
 	"testing"
 )
 
@@ -596,14 +597,15 @@ func TestBuildKernelEgressNATLocalIPv4Set(t *testing.T) {
 		loadInterfaceInfosForEgressNATTests = oldLoad
 	}()
 
-	set, err := buildKernelEgressNATLocalIPv4Set([]Rule{{
+	inv, err := buildKernelEgressNATLocalInventory([]Rule{{
 		ID:         1,
 		Protocol:   "tcp",
 		kernelMode: kernelModeEgressNAT,
 	}})
 	if err != nil {
-		t.Fatalf("buildKernelEgressNATLocalIPv4Set() error = %v", err)
+		t.Fatalf("buildKernelEgressNATLocalInventory() error = %v", err)
 	}
+	set := inv.Addrs
 	if len(set) != 2 {
 		t.Fatalf("len(local IPv4 set) = %d, want 2", len(set))
 	}
@@ -621,6 +623,53 @@ func TestBuildKernelEgressNATLocalIPv4Set(t *testing.T) {
 	}
 	if _, ok := set[second]; !ok {
 		t.Fatal("local IPv4 set missing 198.51.100.10")
+	}
+}
+
+func TestBuildKernelEgressNATLocalInventoryNetworks(t *testing.T) {
+	infos := []InterfaceInfo{
+		{Name: "lo", IPv4Networks: []string{"127.0.0.0/8"}},
+		// The uplink is a bridge port; the bridge holds the address.
+		{Name: "eno1", Parent: "vmbr0"},
+		{Name: "vmbr0", Kind: "bridge", IPv4Networks: []string{"203.0.113.0/24", "10.20.0.0/24"}},
+		{Name: "vmbr1", Kind: "bridge", IPv4Networks: []string{"192.168.100.0/24"}},
+		{Name: "vmbr2", Kind: "bridge", IPv4Networks: []string{"192.168.101.0/24", "10.0.0.0/8"}},
+		{Name: "veervpn1", Kind: "dummy", IPv4Networks: []string{"10.78.1.1/32"}},
+		{Name: "wg0", IPv4Networks: []string{"10.77.0.0/24"}},
+		// The same network on a LAN and on an uplink stays translated.
+		{Name: "vmbr3", Kind: "bridge", IPv4Networks: []string{"10.77.0.0/24", "not-a-prefix"}},
+	}
+	rules := []Rule{
+		{ID: 1, Protocol: "tcp", OutInterface: "eno1", kernelMode: kernelModeEgressNAT},
+		{ID: 2, Protocol: "udp", OutInterface: "veervpn1", kernelMode: kernelModeEgressNAT},
+		{ID: 3, Protocol: "tcp", OutInterface: "wg0", kernelMode: kernelModeEgressNAT},
+		// Ordinary forwarding rules do not make an uplink.
+		{ID: 4, Protocol: "tcp", OutInterface: "vmbr1"},
+	}
+	inv, err := buildKernelEgressNATLocalInventoryWithSnapshot(rules, newEgressNATInterfaceSnapshot(infos, nil))
+	if err != nil {
+		t.Fatalf("buildKernelEgressNATLocalInventoryWithSnapshot() error = %v", err)
+	}
+	want := map[netip.Prefix]bool{
+		netip.MustParsePrefix("203.0.113.0/24"):   false,
+		netip.MustParsePrefix("10.20.0.0/24"):     false,
+		netip.MustParsePrefix("192.168.100.0/24"): true,
+		netip.MustParsePrefix("192.168.101.0/24"): true,
+		netip.MustParsePrefix("10.0.0.0/8"):       true,
+		netip.MustParsePrefix("10.77.0.0/24"):     false,
+	}
+	if len(inv.Networks) != len(want) {
+		t.Fatalf("networks = %v, want %v", inv.Networks, want)
+	}
+	for prefix, routed := range want {
+		if got, ok := inv.Networks[prefix]; !ok || got != routed {
+			t.Fatalf("network %s = (%v, %v), want routed %v; all %v", prefix, got, ok, routed, inv.Networks)
+		}
+	}
+
+	none, err := buildKernelEgressNATLocalInventoryWithSnapshot(rules[3:], newEgressNATInterfaceSnapshot(infos, nil))
+	if err != nil || !none.empty() {
+		t.Fatalf("without egress NAT = %+v, %v; want empty", none, err)
 	}
 }
 

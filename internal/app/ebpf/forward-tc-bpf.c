@@ -1055,6 +1055,26 @@ struct bpf_map_def SEC("maps") local_ipv4s_v4 = {
 	.max_entries = 4096,
 };
 
+/* addr in network byte order, as an LPM trie compares it. */
+struct local_net_key_v4 {
+	__u32 prefixlen;
+	__u32 addr;
+};
+
+/*
+ * The IPv4 networks directly connected to this host's interfaces, filled from
+ * userspace. 1 marks a network egress NAT leaves to the kernel's routing (a
+ * guest on another bridge, say); 0 marks a network of an egress NAT uplink,
+ * so that one nested in a LAN network still gets translated.
+ */
+struct bpf_map_def SEC("maps") local_nets_v4 = {
+	.type = BPF_MAP_TYPE_LPM_TRIE,
+	.key_size = sizeof(struct local_net_key_v4),
+	.value_size = sizeof(__u8),
+	.max_entries = 1024,
+	.map_flags = BPF_F_NO_PREALLOC,
+};
+
 struct bpf_map_def SEC("maps") local_macs = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u32),
@@ -3037,6 +3057,25 @@ static __always_inline int is_local_ipv4(__be32 addr)
 	__u8 *present = bpf_map_lookup_elem(&local_ipv4s_v4, &key);
 
 	return present && *present != 0;
+}
+
+/*
+ * Whether egress NAT leaves a packet for addr to the kernel: one for this
+ * host, or for a network directly connected to an interface other than an
+ * egress NAT uplink, which the kernel routes there untranslated.
+ */
+static __always_inline int egress_nat_dst_is_local_v4(__be32 addr)
+{
+	struct local_net_key_v4 key = {
+		.prefixlen = 32,
+		.addr = addr,
+	};
+	__u8 *routed;
+
+	if (is_local_ipv4(addr))
+		return 1;
+	routed = bpf_map_lookup_elem(&local_nets_v4, &key);
+	return routed && *routed != 0;
 }
 
 static __always_inline void build_front_flow_key(struct __sk_buff *skb, const struct packet_ctx *ctx, struct flow_key_v4 *key)
@@ -5561,7 +5600,7 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 
 	if (is_passthrough_rule(rule))
 		return TC_ACT_OK;
-	if (is_egress_nat_rule(rule) && is_local_ipv4(ctx->dst_addr))
+	if (is_egress_nat_rule(rule) && egress_nat_dst_is_local_v4(ctx->dst_addr))
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, rule))
 		return TC_ACT_OK;
@@ -5774,13 +5813,16 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 	if (is_egress_nat_rule(rule)) {
 		if (egress_nat_dst_mac_mismatch(skb, rule))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+		/* An exit that is down holds back what would leave by it, not
+		 * traffic for this host or its other networks. */
 		if (rule->flags & FORWARD_RULE_FLAG_DROP)
-			return finish_forward_pipeline_v4(skb, TC_ACT_SHOT);
+			return finish_forward_pipeline_v4(skb,
+				egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr) ? TC_ACT_OK : TC_ACT_SHOT);
 		/* Keep established egress NAT sessions on the current program across
 		 * hot-restart handoff so they don't depend on a successor-only tail call.
-		 * No flow is created towards a local address, and one whose destination
-		 * became local later leaves the fast path once its window lapses, so the
-		 * local check can come after it.
+		 * No flow is created towards a local address or network, and one whose
+		 * destination became local later leaves the fast path once its window
+		 * lapses, so the local check can come after it.
 		 *
 		 * Each NAT type dereferences its flow only inside its own branch:
 		 * verifiers before 6.10 lose a pointer's null state when the compiler
@@ -5813,13 +5855,13 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 
 					if (fast != FORWARD_TC_SLOW_PATH)
 						return finish_forward_pipeline_v4(skb, fast);
-					if (is_local_ipv4(dispatch->ctx.dst_addr))
+					if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 						return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 					return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank, 0));
 				}
 			}
 		}
-		if (is_local_ipv4(dispatch->ctx.dst_addr))
+		if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 		if (!front_flow)
 			bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
@@ -6793,7 +6835,7 @@ static __always_inline int handle_forward_ingress_v4_egress_nat(struct __sk_buff
 		return TC_ACT_UNSPEC;
 	if (!is_egress_nat_rule(&dispatch->rule_value))
 		return TC_ACT_UNSPEC;
-	if (is_local_ipv4(dispatch->ctx.dst_addr))
+	if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, &dispatch->rule_value))
 		return TC_ACT_OK;
@@ -6818,7 +6860,7 @@ static __always_inline int handle_forward_ingress_v4_egress_nat_new(struct __sk_
 		return TC_ACT_UNSPEC;
 	if (!is_egress_nat_rule(&dispatch->rule_value))
 		return TC_ACT_UNSPEC;
-	if (is_local_ipv4(dispatch->ctx.dst_addr))
+	if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, &dispatch->rule_value))
 		return TC_ACT_OK;
