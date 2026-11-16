@@ -3546,18 +3546,12 @@ static __always_inline void ensure_nat_port_owner_v4(__u8 bank, const struct nat
 }
 
 /*
- * The core and plugin-continue programs serve IPv6 too. Clang before 17
- * emits IPv6 pipelines too large to inline this into: newer kernels then
- * cannot patch them within the 16-bit jump range. Those builds keep the
- * call, and on 5.15.0-25 their IPv6 pipelines stay over the limit.
+ * The core and plugin-continue programs serve IPv6 too. Clang before 17 once
+ * kept this a call: inlined into IPv6 pipelines that carried two copies of
+ * the IPv6 core, it pushed them past the 16-bit jump range of newer kernels.
+ * Those pipelines now inline the core once (dispatch_forward_pipeline_v6).
  */
-#if defined(__clang_major__) && __clang_major__ >= 17
-#define FORWARD_NAT_PORT_OWNER_V6_LINKAGE __always_inline
-#else
-#define FORWARD_NAT_PORT_OWNER_V6_LINKAGE __attribute__((noinline))
-#endif
-
-static FORWARD_NAT_PORT_OWNER_V6_LINKAGE void ensure_nat_port_owner_v6(__u8 bank, const struct nat_port_key_v6 *key, __u32 rule_id, __u64 session_id)
+static __always_inline void ensure_nat_port_owner_v6(__u8 bank, const struct nat_port_key_v6 *key, __u32 rule_id, __u64 session_id)
 {
 	struct nat_port_value_v6 value = {
 		.rule_id = rule_id,
@@ -6551,7 +6545,10 @@ static __always_inline int dispatch_forward_ingress_v6_core_prepared(struct __sk
 	return finish_forward_pipeline_v6(skb, handle_fullnat_forward_v6(skb, &dispatch->ctx, rule));
 }
 
-static __always_inline int dispatch_forward_ingress_v6(struct __sk_buff *skb)
+/* What the IPv6 forward preparations return when the core is to run next. */
+#define FORWARD_TC_RUN_CORE_V6 (-3)
+
+static __always_inline int prepare_forward_ingress_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
 
@@ -6559,10 +6556,10 @@ static __always_inline int dispatch_forward_ingress_v6(struct __sk_buff *skb)
 		dispatch->plugin_pipeline_active = 0;
 	if (prepare_dispatch_forward_ingress_v6(skb, dispatch, 0) != 0)
 		return TC_ACT_UNSPEC;
-	return dispatch_forward_ingress_v6_core_prepared(skb);
+	return FORWARD_TC_RUN_CORE_V6;
 }
 
-static __always_inline int dispatch_forward_ingress_pipeline_core_v6(struct __sk_buff *skb)
+static __always_inline int prepare_forward_ingress_pipeline_core_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
 	struct tc_plugin_ctx_v6 *plugin_ctx = 0;
@@ -6585,13 +6582,30 @@ static __always_inline int dispatch_forward_ingress_pipeline_core_v6(struct __sk
 		dispatch->plugin_chain_index = 0;
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE);
 	}
+	return FORWARD_TC_RUN_CORE_V6;
+}
+
+static __always_inline int dispatch_forward_ingress_pipeline_core_v6(struct __sk_buff *skb)
+{
+	int action = prepare_forward_ingress_pipeline_core_v6(skb);
+
+	if (action != FORWARD_TC_RUN_CORE_V6)
+		return action;
 	return dispatch_forward_ingress_v6_core_prepared(skb);
 }
 
+/*
+ * The plugin and plain paths prepare differently but reach the core through
+ * one call, so the core (handle_fullnat_forward_v6 with its NAT port probes)
+ * is inlined once, not once per path. With two copies, clang 14 emitted about
+ * 27.8k instructions here, which 6.12 could not patch within the 16-bit jump
+ * range; one copy is about 14.9k.
+ */
 static __always_inline int dispatch_forward_pipeline_v6(struct __sk_buff *skb, __u32 attach)
 {
 	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
+	int action;
 
 	if (dispatch)
 		capture_tc_plugin_dispatch_v6(skb, dispatch, config, 0, attach);
@@ -6601,11 +6615,15 @@ static __always_inline int dispatch_forward_pipeline_v6(struct __sk_buff *skb, _
 		if (dispatch->plugin_pre_mask != 0 &&
 		    !try_tail_call_single_pre_plugin_v6(skb, dispatch, FORWARD_TC_PLUGIN_STAGE_PRE_FORWARD))
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE);
-		return dispatch_forward_ingress_pipeline_core_v6(skb);
+		action = prepare_forward_ingress_pipeline_core_v6(skb);
+	} else {
+		if (dispatch && dispatch->plugin_core_enable == 0)
+			return TC_ACT_UNSPEC;
+		action = prepare_forward_ingress_v6(skb);
 	}
-	if (dispatch && dispatch->plugin_core_enable == 0)
-		return TC_ACT_UNSPEC;
-	return dispatch_forward_ingress_v6(skb);
+	if (action != FORWARD_TC_RUN_CORE_V6)
+		return action;
+	return dispatch_forward_ingress_v6_core_prepared(skb);
 }
 
 static __always_inline int dispatch_plugin_pre_forward_continue_v6(struct __sk_buff *skb)
